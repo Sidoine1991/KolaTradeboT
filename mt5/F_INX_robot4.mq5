@@ -4796,6 +4796,28 @@ int AI_GetDecision(double rsi, double atr,
    // Sécurité : si URL vide, on n'appelle pas
    if(StringLen(AI_ServerURL) == 0)
       return 0;
+   
+   // Normaliser l'URL : s'assurer qu'elle se termine par "/decision" si elle ne contient pas de chemin
+   string urlToUse = AI_ServerURL;
+   int pathPos = StringFind(urlToUse, "/", StringFind(urlToUse, "://") + 3);
+   if(pathPos < 0)
+   {
+      // Pas de chemin dans l'URL, ajouter "/decision"
+      if(StringSubstr(urlToUse, StringLen(urlToUse) - 1) != "/")
+         urlToUse += "/decision";
+      else
+         urlToUse += "decision";
+   }
+   else if(StringFind(urlToUse, "/decision") < 0)
+   {
+      // L'URL a un chemin mais ce n'est pas "/decision"
+      // Extraire la base et ajouter "/decision"
+      string baseUrl = StringSubstr(urlToUse, 0, pathPos);
+      if(StringSubstr(baseUrl, StringLen(baseUrl) - 1) != "/")
+         urlToUse = baseUrl + "/decision";
+      else
+         urlToUse = baseUrl + "decision";
+   }
 
    // Validation des valeurs numériques (éviter NaN/Infinity)
    if(!MathIsValidNumber(bid) || !MathIsValidNumber(ask) || 
