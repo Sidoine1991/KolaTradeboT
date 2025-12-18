@@ -4441,7 +4441,7 @@ double CalculateVWAP(int period = 500)
 //+------------------------------------------------------------------+
 //| Calcul SuperTrend simplifié (basé sur ATR + HL2)                |
 //+------------------------------------------------------------------+
-double CalculateSuperTrend(int period = 10, double multiplier = 3.0, int &trendOut)
+double CalculateSuperTrend(int period, double multiplier, int &trendOut)
 {
    trendOut = 0; // 1 = UP, -1 = DOWN
    
@@ -4450,18 +4450,18 @@ double CalculateSuperTrend(int period = 10, double multiplier = 3.0, int &trendO
    int copied = CopyRates(_Symbol, PERIOD_M15, 0, period + 5, rates);
    if(copied < period + 2) return 0.0;
    
-   // Calculer ATR sur M15
-   int atrHandle = iATR(_Symbol, PERIOD_M15, period);
-   if(atrHandle == INVALID_HANDLE) return 0.0;
+   // Calculer ATR sur M15 (utiliser un nom différent pour éviter conflit avec global)
+   int atrHandleST = iATR(_Symbol, PERIOD_M15, period);
+   if(atrHandleST == INVALID_HANDLE) return 0.0;
    
    double atr[];
    ArraySetAsSeries(atr, true);
-   if(CopyBuffer(atrHandle, 0, 0, 2, atr) < 2)
+   if(CopyBuffer(atrHandleST, 0, 0, 2, atr) < 2)
    {
-      IndicatorRelease(atrHandle);
+      IndicatorRelease(atrHandleST);
       return 0.0;
    }
-   IndicatorRelease(atrHandle);
+   IndicatorRelease(atrHandleST);
    
    double hl2 = (rates[0].high + rates[0].low) / 2.0;
    double upperBand = hl2 + (multiplier * atr[0]);
@@ -4539,7 +4539,6 @@ int AI_GetDecision(double rsi, double atr,
    // Calcul régime de volatilité (High/Low/Normal)
    double volatilityRatio = 0.0;
    int volatilityRegime = 0; // 0 = Normal, 1 = High Vol, -1 = Low Vol
-   if(mt5_initialized)
    {
       MqlRates rates[];
       ArraySetAsSeries(rates, true);
