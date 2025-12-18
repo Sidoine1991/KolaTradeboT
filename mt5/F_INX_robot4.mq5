@@ -337,6 +337,12 @@ static double   g_currentVWAP = 0.0;
 static double   g_currentSuperTrendLine = 0.0;
 static int      g_currentSuperTrendDirection = 0; // 1=UP, -1=DOWN, 0=indéterminé
 static datetime g_lastIndicatorsUpdate = 0;
+
+// Analyse fondamentale (sentiment marché via Alpha Vantage / Deriv)
+static double   g_fundamentalSentiment = 0.0;     // Score sentiment (-1 bearish à +1 bullish)
+static string   g_fundamentalBias = "neutral";    // bullish, bearish, neutral
+static datetime g_lastFundamentalUpdate = 0;
+static int      g_fundamentalNewsCount = 0;
 static datetime g_aiLastZoneAlert = 0;
 static datetime g_lastAISummaryTime = 0;
 // Stratégie de rebond sur zones IA : armement quand le prix touche la zone
@@ -501,61 +507,11 @@ struct H1SwingPoint
 //-------------------- SÉCURITÉ AVANCÉE ------------------------------
 
 // Vérifie si l'heure actuelle est dans la plage autorisée
+// NOTE: Restriction horaire désactivée - Trading 24/7 autorisé
 bool IsTradingTimeAllowed()
 {
-   datetime now = TimeCurrent();
-   MqlDateTime ts;
-   TimeToStruct(now, ts);
-   int curHour = ts.hour;
-   int curHM   = ts.hour*100 + ts.min;
-
-   // 1) PRIORITÉ ABSOLUE : Fenêtres horaires IA spécifiques au symbole
-   //    (g_hourPreferred / g_hourForbidden remplis par AI_UpdateTimeWindows).
-   //    Ces fenêtres sont TOUJOURS appliquées, même si UseTimeFilter = false.
-   if(g_timeWindowsSymbol == _Symbol) // Fenêtres valides pour ce symbole
-   {
-      if(curHour >= 0 && curHour < 24)
-      {
-         // Heures explicitement interdites par l'IA -> on bloque TOUJOURS
-         if(g_hourForbidden[curHour])
-         {
-            if(DebugBlocks)
-               Print("🛑 Trading bloqué: heure ", curHour, " interdite par IA pour ", _Symbol);
-            return false;
-         }
-
-         // S'il existe au moins une heure "preferred" pour ce symbole,
-         // on ne trade que dans ces heures-là (les autres sont ignorées).
-         bool hasPreferred = false;
-         for(int h=0; h<24; h++)
-         {
-            if(g_hourPreferred[h]) { hasPreferred = true; break; }
-         }
-         if(hasPreferred && !g_hourPreferred[curHour])
-         {
-            if(DebugBlocks)
-               Print("🛑 Trading bloqué: heure ", curHour, " hors fenêtres préférées IA pour ", _Symbol);
-            return false;
-         }
-      }
-   }
-
-   // 2) Si UseTimeFilter = false, on s'arrête ici (fenêtres IA appliquées)
-   if(!UseTimeFilter) return true;
-
-   // 3) Appliquer ensuite, en complément, la plage horaire manuelle TradingHoursStart/End
-   int sh = (int)StringToInteger(StringSubstr(TradingHoursStart,0,2));
-   int sm = (int)StringToInteger(StringSubstr(TradingHoursStart,3,2));
-   int eh = (int)StringToInteger(StringSubstr(TradingHoursEnd,0,2));
-   int em = (int)StringToInteger(StringSubstr(TradingHoursEnd,3,2));
-   int start = sh*100 + sm;
-   int end   = eh*100 + em;
-
-   // Plage simple dans la même journée
-   bool manualTimeOk = (curHM >= start && curHM <= end);
-   if(!manualTimeOk && DebugBlocks)
-      Print("🛑 Trading bloqué: hors plage manuelle ", TradingHoursStart, "-", TradingHoursEnd);
-   return manualTimeOk;
+   // Trading autorisé à toute heure - pas de restriction
+   return true;
 }
 
 // Stoppe les nouvelles entrées si drawdown global trop élevé
@@ -885,6 +841,7 @@ void OnTick()
 
    // Mise à jour périodique des fenêtres horaires + affichage mini bas-gauche
    AI_UpdateTimeWindows();
+   AI_UpdateFundamentalAnalysis(); // Mise à jour analyse fondamentale
    DrawTimeWindowsPanel();
 
    // Entrées autonomes SMC (optionnel, non bloquant)
@@ -1052,14 +1009,14 @@ void AI_ProcessSignal(string signalType, double confidence, string reason = "")
    if(!AI_AutoExecuteTrades)
       return;
    
-   // Vérifier les heures de trading AVANT d'exécuter (priorité absolue)
-   if(!IsTradingTimeAllowed())
+   // Vérifier le sentiment fondamental AVANT d'exécuter
+   if(!IsFundamentalConfirming(signalType))
    {
-      Print("Signal IA ignoré: hors heures de trading autorisées pour ", _Symbol);
-      g_lastValidationReason = "Hors heures de trading (fenêtres IA ou plage manuelle)";
+      Print("Signal IA ignoré: sentiment fondamental contraire pour ", signalType, " sur ", _Symbol);
+      g_lastValidationReason = "Sentiment fondamental contraire (" + g_fundamentalBias + ")";
       return;
    }
-   
+
    // Récupérer les données du marché
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
@@ -4554,6 +4511,141 @@ void AI_UpdateTimeWindows()
    g_timeWindowsSymbol = _Symbol; // Mémoriser le symbole pour lequel les fenêtres ont été récupérées
 }
 
+//+------------------------------------------------------------------+
+//| Récupère l'analyse fondamentale (sentiment news) via serveur IA  |
+//+------------------------------------------------------------------+
+void AI_UpdateFundamentalAnalysis()
+{
+   // Mise à jour toutes les 10 minutes (limite API)
+   datetime now = TimeCurrent();
+   if(now - g_lastFundamentalUpdate < 600) return; // 10 min
+   
+   // URL pour récupérer les news/sentiment
+   string newsUrl = AI_TimeWindowsURLBase + "/news/" + _Symbol;
+   
+   // Encoder le symbole pour l'URL
+   string encodedSymbol = _Symbol;
+   StringReplace(encodedSymbol, " ", "%20");
+   newsUrl = AI_TimeWindowsURLBase + "/news/" + encodedSymbol;
+   
+   char data[];
+   char result[];
+   string headers = "";
+   string result_headers = "";
+   
+   int res = WebRequest("GET", newsUrl, headers, 5000, data, result, result_headers);
+   
+   if(res < 200 || res >= 300)
+   {
+      // Fallback: essayer avec un topic générique pour Forex/Gold
+      if(StringFind(_Symbol, "USD") >= 0 || StringFind(_Symbol, "EUR") >= 0 || 
+         StringFind(_Symbol, "GBP") >= 0 || StringFind(_Symbol, "JPY") >= 0)
+      {
+         newsUrl = AI_TimeWindowsURLBase + "/news/forex";
+      }
+      else if(StringFind(_Symbol, "XAU") >= 0 || StringFind(_Symbol, "GOLD") >= 0)
+      {
+         newsUrl = AI_TimeWindowsURLBase + "/news/gold";
+      }
+      else
+      {
+         newsUrl = AI_TimeWindowsURLBase + "/news/finance";
+      }
+      
+      res = WebRequest("GET", newsUrl, headers, 5000, data, result, result_headers);
+   }
+   
+   if(res >= 200 && res < 300)
+   {
+      string resp = CharArrayToString(result, 0, -1, CP_UTF8);
+      
+      // Parser le sentiment moyen
+      int sentPos = StringFind(resp, "\"average_sentiment\"");
+      if(sentPos >= 0)
+      {
+         int colon = StringFind(resp, ":", sentPos);
+         int comma = StringFind(resp, ",", colon);
+         if(colon > 0 && comma > colon)
+         {
+            string sentStr = StringSubstr(resp, colon+1, comma-colon-1);
+            StringTrimLeft(sentStr);
+            StringTrimRight(sentStr);
+            g_fundamentalSentiment = StringToDouble(sentStr);
+         }
+      }
+      
+      // Parser le biais marché
+      int biasPos = StringFind(resp, "\"market_bias\"");
+      if(biasPos >= 0)
+      {
+         int colon = StringFind(resp, ":", biasPos);
+         int quote1 = StringFind(resp, "\"", colon+1);
+         int quote2 = StringFind(resp, "\"", quote1+1);
+         if(quote1 > 0 && quote2 > quote1)
+         {
+            g_fundamentalBias = StringSubstr(resp, quote1+1, quote2-quote1-1);
+         }
+      }
+      
+      // Parser le nombre de news
+      int countPos = StringFind(resp, "\"news_count\"");
+      if(countPos >= 0)
+      {
+         int colon = StringFind(resp, ":", countPos);
+         int comma = StringFind(resp, ",", colon);
+         if(colon > 0 && comma > colon)
+         {
+            string countStr = StringSubstr(resp, colon+1, comma-colon-1);
+            StringTrimLeft(countStr);
+            StringTrimRight(countStr);
+            g_fundamentalNewsCount = (int)StringToInteger(countStr);
+         }
+      }
+      
+      g_lastFundamentalUpdate = now;
+      
+      if(DebugBlocks)
+         Print("📰 Analyse fondamentale mise à jour: sentiment=", DoubleToString(g_fundamentalSentiment, 4),
+               " bias=", g_fundamentalBias, " news=", g_fundamentalNewsCount);
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Vérifie si le sentiment fondamental confirme la direction        |
+//+------------------------------------------------------------------+
+bool IsFundamentalConfirming(string direction)
+{
+   // Si pas de données récentes (>30min), on ignore le filtre
+   if(TimeCurrent() - g_lastFundamentalUpdate > 1800) return true;
+   
+   // Seuils de sentiment
+   double bullishThreshold = 0.1;   // Sentiment > 0.1 = bullish
+   double bearishThreshold = -0.1;  // Sentiment < -0.1 = bearish
+   
+   if(direction == "buy")
+   {
+      // Pour un BUY, on veut un sentiment non-bearish (neutre ou bullish OK)
+      if(g_fundamentalSentiment < bearishThreshold)
+      {
+         if(DebugBlocks)
+            Print("⚠️ BUY bloqué par sentiment bearish: ", DoubleToString(g_fundamentalSentiment, 4));
+         return false;
+      }
+   }
+   else if(direction == "sell")
+   {
+      // Pour un SELL, on veut un sentiment non-bullish (neutre ou bearish OK)
+      if(g_fundamentalSentiment > bullishThreshold)
+      {
+         if(DebugBlocks)
+            Print("⚠️ SELL bloqué par sentiment bullish: ", DoubleToString(g_fundamentalSentiment, 4));
+         return false;
+      }
+   }
+   
+   return true;
+}
+
 void DrawTimeWindowsPanel()
 {
    // Marqueur visuel en bas à gauche avec résumé des heures
@@ -4588,18 +4680,24 @@ void DrawTimeWindowsPanel()
       else if(g_hourPreferred[hNow]) status = "PREFERRED";
    }
 
-   // Construire un petit texte compact
-   string txt = "TimeWindows\nNow: " + status + " (h=" + IntegerToString(hNow) + ")\nPref: ";
-   bool first = true;
-   for(int h=0; h<24; h++)
+   // Construire un petit texte compact avec sentiment fondamental
+   string sentimentIcon = "⚪";
+   color sentimentColor = clrWhite;
+   if(g_fundamentalBias == "bullish")
    {
-      if(g_hourPreferred[h])
-      {
-         if(!first) txt += ",";
-         txt += IntegerToString(h);
-         first = false;
-      }
+      sentimentIcon = "🟢";
+      sentimentColor = clrLime;
    }
+   else if(g_fundamentalBias == "bearish")
+   {
+      sentimentIcon = "🔴";
+      sentimentColor = clrRed;
+   }
+   
+   string txt = "📊 ANALYSE\n";
+   txt += "Sentiment: " + sentimentIcon + " " + g_fundamentalBias + " (" + DoubleToString(g_fundamentalSentiment, 3) + ")\n";
+   txt += "News: " + IntegerToString(g_fundamentalNewsCount) + " articles\n";
+   txt += "Trading: 24/7 ACTIF";
 
    if(ObjectFind(0, name) < 0)
    {
@@ -4608,8 +4706,8 @@ void DrawTimeWindowsPanel()
       ObjectSetInteger(0, name, OBJPROP_XDISTANCE, 5);
       ObjectSetInteger(0, name, OBJPROP_YDISTANCE, 5);
       ObjectSetInteger(0, name, OBJPROP_ANCHOR, ANCHOR_LEFT_LOWER);
-      ObjectSetInteger(0, name, OBJPROP_COLOR, clrWhite);
    }
+   ObjectSetInteger(0, name, OBJPROP_COLOR, sentimentColor);
    ObjectSetString(0, name, OBJPROP_TEXT, txt);
 }
 
@@ -4947,7 +5045,7 @@ int AI_GetDecision(double rsi, double atr,
    string headers = "Content-Type: application/json\r\n";
    string result_headers = "";
 
-   int res = WebRequest("POST", AI_ServerURL, headers, AI_Timeout_ms, data, result, result_headers);
+   int res = WebRequest("POST", urlToUse, headers, AI_Timeout_ms, data, result, result_headers);
 
    // WebRequest renvoie directement le code HTTP (200, 404, etc.) ou -1 en cas d'erreur
    if(res < 200 || res >= 300)
