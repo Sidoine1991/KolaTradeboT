@@ -6046,6 +6046,70 @@ void UpdateSpikeAlertDisplay()
       return;
    }
    
+   // Mettre à jour le label de compte à rebours (affiché en gros sur le graphique) - TOUJOURS ACTIF
+   string labelName = "SPIKE_COUNTDOWN_" + _Symbol;
+   if(g_spikeEntryTime > 0 && g_aiSpikePredicted)
+   {
+      int remaining = (int)(g_spikeEntryTime - TimeCurrent());
+      if(remaining < 0) remaining = 0;
+
+      // Calculer les dimensions du graphique
+      int chartWidth  = (int)ChartGetInteger(0, CHART_WIDTH_IN_PIXELS, 0);
+      int chartHeight = (int)ChartGetInteger(0, CHART_HEIGHT_IN_PIXELS, 0);
+      
+      // Créer ou mettre à jour un label centré au milieu du graphique
+      if(ObjectFind(0, labelName) < 0)
+      {
+         if(!ObjectCreate(0, labelName, OBJ_LABEL, 0, 0, 0))
+         {
+            Print("❌ Erreur création label countdown: ", GetLastError());
+         }
+         else
+         {
+            // Configuration initiale du label
+            ObjectSetInteger(0, labelName, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+            ObjectSetInteger(0, labelName, OBJPROP_ANCHOR, ANCHOR_CENTER);
+            ObjectSetInteger(0, labelName, OBJPROP_FONTSIZE, 48); // Taille plus grande pour visibilité
+            ObjectSetString(0, labelName, OBJPROP_FONT, "Arial Black");
+            ObjectSetInteger(0, labelName, OBJPROP_COLOR, clrYellow);
+            ObjectSetInteger(0, labelName, OBJPROP_BACK, false);
+            ObjectSetInteger(0, labelName, OBJPROP_SELECTABLE, false);
+            ObjectSetInteger(0, labelName, OBJPROP_HIDDEN, false);
+            ObjectSetInteger(0, labelName, OBJPROP_TIMEFRAMES, OBJ_ALL_PERIODS);
+         }
+      }
+
+      // Mettre à jour le label à chaque appel (position et texte)
+      if(ObjectFind(0, labelName) >= 0)
+      {
+         // Recalculer les dimensions au cas où la fenêtre a été redimensionnée
+         chartWidth  = (int)ChartGetInteger(0, CHART_WIDTH_IN_PIXELS, 0);
+         chartHeight = (int)ChartGetInteger(0, CHART_HEIGHT_IN_PIXELS, 0);
+         
+         // Positionner au centre du graphique
+         ObjectSetInteger(0, labelName, OBJPROP_XDISTANCE, chartWidth / 2);
+         ObjectSetInteger(0, labelName, OBJPROP_YDISTANCE, chartHeight / 2);
+
+         // Mettre à jour le texte
+         string txt = "SPIKE dans: " + IntegerToString(remaining) + "s";
+         ObjectSetString(0, labelName, OBJPROP_TEXT, txt);
+         
+         // Forcer la visibilité
+         ObjectSetInteger(0, labelName, OBJPROP_HIDDEN, false);
+      }
+      else if(remaining > 0)
+      {
+         // Si le label n'existe pas mais qu'il devrait, essayer de le recréer
+         Print("⚠️ Label countdown introuvable mais spike actif. Tentative de recréation...");
+      }
+   }
+   else
+   {
+      // Si pas de spike prévu, supprimer le label
+      if(ObjectFind(0, labelName) >= 0)
+         ObjectDelete(0, labelName);
+   }
+   
    // Faire clignoter la flèche (changement de visibilité toutes les 1 secondes)
    static datetime lastBlinkTime = 0;
    static bool blinkState = false;
@@ -6067,47 +6131,11 @@ void UpdateSpikeAlertDisplay()
          color arrowColor = isBuySpike ? clrLime : clrRed;
 
          ObjectSetInteger(0, arrowName, OBJPROP_COLOR, arrowColor);
-         ChartRedraw(0);
-      }
-
-      // Mettre à jour le label de compte à rebours (affiché en gros sur le graphique)
-      string labelName = "SPIKE_COUNTDOWN_" + _Symbol;
-      if(g_spikeEntryTime > 0)
-      {
-         int remaining = (int)(g_spikeEntryTime - TimeCurrent());
-         if(remaining < 0) remaining = 0;
-
-         // Créer ou mettre à jour un label centré au milieu du graphique
-         if(ObjectFind(0, labelName) < 0)
-         {
-            if(ObjectCreate(0, labelName, OBJ_LABEL, 0, 0, 0))
-            {
-               // Centrage : on utilise CORNER_LEFT_UPPER et on positionne au milieu
-               int chartWidth  = (int)ChartGetInteger(0, CHART_WIDTH_IN_PIXELS, 0);
-               int chartHeight = (int)ChartGetInteger(0, CHART_HEIGHT_IN_PIXELS, 0);
-               
-               ObjectSetInteger(0, labelName, OBJPROP_CORNER, CORNER_LEFT_UPPER);
-               ObjectSetInteger(0, labelName, OBJPROP_XDISTANCE, chartWidth / 2);
-               ObjectSetInteger(0, labelName, OBJPROP_YDISTANCE, chartHeight / 2);
-               ObjectSetInteger(0, labelName, OBJPROP_ANCHOR, ANCHOR_CENTER);
-               ObjectSetInteger(0, labelName, OBJPROP_FONTSIZE, 32);
-               ObjectSetString(0, labelName, OBJPROP_FONT, "Arial Black");
-               ObjectSetInteger(0, labelName, OBJPROP_COLOR, clrYellow);
-            }
-         }
-
-         if(ObjectFind(0, labelName) >= 0)
-         {
-            int chartWidth  = (int)ChartGetInteger(0, CHART_WIDTH_IN_PIXELS, 0);
-            int chartHeight = (int)ChartGetInteger(0, CHART_HEIGHT_IN_PIXELS, 0);
-            ObjectSetInteger(0, labelName, OBJPROP_XDISTANCE, chartWidth / 2);
-            ObjectSetInteger(0, labelName, OBJPROP_YDISTANCE, chartHeight / 2);
-
-            string txt = "SPIKE dans: " + IntegerToString(remaining) + "s";
-            ObjectSetString(0, labelName, OBJPROP_TEXT, txt);
-         }
       }
    }
+   
+   // Forcer le rafraîchissement du graphique pour voir le label et la flèche
+   ChartRedraw(0);
 }
 
 //+------------------------------------------------------------------+
