@@ -228,7 +228,7 @@ input bool   UseSpikeSpeedFilter = true;  // Activer le filtre de vitesse des sp
 input double SpikeSpeedMin      = 50.0;   // Vitesse minimale (points/minute)
 input bool   UseAdvancedLogging = false;  // Journalisation avancée des erreurs
 input bool   UseInstantProfitClose = false; // CLÔTURE immédiate dès 0.01$ de profit (désactivée par défaut)
-input int    SpikePreEntrySeconds   = 3;   // Nombre de secondes avant le spike estimé pour entrer (compte à rebours)
+input int    SpikePreEntrySeconds   = 30;  // Nombre de secondes AVANT le spike estimé pour déclencher l'alerte et entrer (30s = alerte 30s avant)
 
 input group "--- ENTRY FILTERS ---"
 input ENUM_TIMEFRAMES TF_Trend = PERIOD_H1;
@@ -6079,21 +6079,24 @@ void DisplaySpikeAlert()
          PlaySound("alert.wav");
       }
 
-      // Définir l'heure d'entrée pré-spike (dernière bougie avant le mouvement)
+      // Définir l'heure d'entrée pré-spike (30 secondes AVANT le spike estimé pour déclencher l'alerte)
+      // L'alerte se déclenche immédiatement, le trade s'exécute après le délai
       if(g_spikeEntryTime == 0)
-         g_spikeEntryTime = TimeCurrent() + SpikePreEntrySeconds;
+      {
+         g_spikeEntryTime = TimeCurrent() + SpikePreEntrySeconds; // 30 secondes avant le spike
+         g_aiSpikeDetectedTime = TimeCurrent(); // Marquer le moment de détection pour le countdown
+         Print("🚨 SPIKE DÉTECTÉ: Alerte déclenchée ", SpikePreEntrySeconds, " secondes avant le spike estimé");
+      }
    
       // Exécuter automatiquement le trade uniquement sur spike "fort" (spike_prediction),
       // pas sur simple pré‑alerte early_spike_warning.
       if(!g_aiStrongSpike)
          return;
-
-      // Mettre à jour le moment où le spike a été détecté
-      g_aiSpikeDetectedTime = TimeCurrent();
       
       // Exécuter automatiquement le trade si pas encore fait,
-      // UNIQUEMENT à partir de g_spikeEntryTime (dernière bougie avant spike estimé)
-      if(!g_aiSpikeExecuted && g_spikeEntryTime > 0 && TimeCurrent() >= g_spikeEntryTime)
+      // TOUJOURS après le délai défini (30 secondes après détection = au moment du spike estimé)
+      // Le trade se déclenche immédiatement si le délai est déjà passé (alerte tardive)
+      if(!g_aiSpikeExecuted && g_spikeEntryTime > 0)
       {
          // Récupérer les données nécessaires
          double atr[];
@@ -6127,8 +6130,9 @@ void DisplaySpikeAlert()
                return;
             }
 
-            // Exiger l'accord de l'IA (direction + confiance) si disponible
-            if(UseAI_Agent)
+            // Vérifier l'accord de l'IA si disponible (mais ne pas bloquer si pas de réponse)
+            // Pour les spikes, on privilégie l'exécution automatique
+            if(UseAI_Agent && g_lastAIAction != "")
             {
                string act = g_lastAIAction;
                StringToUpper(act);
@@ -6137,9 +6141,18 @@ void DisplaySpikeAlert()
                   aiAgree = true;
                if(!isBuySpike && (act == "SELL" || act == "VENTE"))
                   aiAgree = true;
-               if(!aiAgree || g_lastAIConfidence < AI_MinConfidence)
+               
+               // Si l'IA est en désaccord total (direction opposée), on peut toujours exécuter
+               // mais on log un avertissement. On bloque seulement si confiance très faible.
+               if(!aiAgree)
                {
-                  Print("Spike ignoré: IA pas d'accord ou confiance trop faible (", g_lastAIAction, " conf=", g_lastAIConfidence, ")");
+                  Print("⚠️ ATTENTION: Spike ", (isBuySpike ? "BUY" : "SELL"), " mais IA suggère ", g_lastAIAction, " - Exécution quand même");
+               }
+               
+               // Bloquer seulement si confiance très faible (< 50%) ET désaccord
+               if(!aiAgree && g_lastAIConfidence < 0.5)
+               {
+                  Print("❌ Spike bloqué: IA fortement en désaccord (", g_lastAIAction, " conf=", g_lastAIConfidence, ")");
                   ClearSpikeSignal();
                   return;
                }
@@ -6645,10 +6658,12 @@ void UpdateSpikeAlertDisplay()
       }
    }
    
-   // Ne pas garder un signal spike trop longtemps : après 20 secondes,
+   // Ne pas garder un signal spike trop longtemps : après 60 secondes (30s avant + 30s après),
    // on le considère comme expiré (sinon risque de trade très en retard).
-   if(TimeCurrent() - g_aiSpikeDetectedTime > 20)
+   if(g_aiSpikeDetectedTime > 0 && (TimeCurrent() - g_aiSpikeDetectedTime) > 60)
    {
+      if(DebugBlocks)
+         Print("⏱️ Signal spike expiré après 60 secondes");
       ClearSpikeSignal();
       return;
    }
