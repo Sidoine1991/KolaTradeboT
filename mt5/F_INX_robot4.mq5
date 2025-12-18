@@ -4412,6 +4412,76 @@ void DrawSpikeArrow(bool isBuySpike, double price)
 // IA : Appel serveur externe via WebRequest
 // -------------------------------------------------------------------
 
+//+------------------------------------------------------------------+
+//| Calcul VWAP (Volume Weighted Average Price) intraday            |
+//+------------------------------------------------------------------+
+double CalculateVWAP(int period = 500)
+{
+   MqlRates rates[];
+   ArraySetAsSeries(rates, true);
+   int copied = CopyRates(_Symbol, PERIOD_M1, 0, period, rates);
+   if(copied < 2) return 0.0;
+   
+   double sumPV = 0.0; // Sum(Price * Volume)
+   double sumV  = 0.0; // Sum(Volume)
+   
+   for(int i = 0; i < copied; i++)
+   {
+      double typicalPrice = (rates[i].high + rates[i].low + rates[i].close) / 3.0;
+      double volume = rates[i].tick_volume > 0 ? rates[i].tick_volume : 1.0;
+      sumPV += typicalPrice * volume;
+      sumV  += volume;
+   }
+   
+   if(sumV > 0.0)
+      return sumPV / sumV;
+   return 0.0;
+}
+
+//+------------------------------------------------------------------+
+//| Calcul SuperTrend simplifié (basé sur ATR + HL2)                |
+//+------------------------------------------------------------------+
+double CalculateSuperTrend(int period = 10, double multiplier = 3.0, int &trendOut)
+{
+   trendOut = 0; // 1 = UP, -1 = DOWN
+   
+   MqlRates rates[];
+   ArraySetAsSeries(rates, true);
+   int copied = CopyRates(_Symbol, PERIOD_M15, 0, period + 5, rates);
+   if(copied < period + 2) return 0.0;
+   
+   // Calculer ATR sur M15
+   int atrHandle = iATR(_Symbol, PERIOD_M15, period);
+   if(atrHandle == INVALID_HANDLE) return 0.0;
+   
+   double atr[];
+   ArraySetAsSeries(atr, true);
+   if(CopyBuffer(atrHandle, 0, 0, 2, atr) < 2)
+   {
+      IndicatorRelease(atrHandle);
+      return 0.0;
+   }
+   IndicatorRelease(atrHandle);
+   
+   double hl2 = (rates[0].high + rates[0].low) / 2.0;
+   double upperBand = hl2 + (multiplier * atr[0]);
+   double lowerBand = hl2 - (multiplier * atr[0]);
+   
+   double prevHL2 = (rates[1].high + rates[1].low) / 2.0;
+   double prevUpper = prevHL2 + (multiplier * atr[1]);
+   double prevLower = prevHL2 - (multiplier * atr[1]);
+   
+   // SuperTrend basic logic
+   if(rates[0].close > prevUpper)
+      trendOut = 1; // UPTREND
+   else if(rates[0].close < prevLower)
+      trendOut = -1; // DOWNTREND
+   else
+      trendOut = (rates[1].close > prevHL2) ? 1 : -1; // Continue previous trend
+   
+   return (trendOut > 0) ? lowerBand : upperBand;
+}
+
 int AI_GetDecision(double rsi, double atr,
                    double emaFastH1, double emaSlowH1,
                    double emaFastM1, double emaSlowM1,
