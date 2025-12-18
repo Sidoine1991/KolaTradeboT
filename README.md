@@ -57,6 +57,48 @@ Dans l'interface (onglet Analyse IA) :
 
 Application professionnelle de trading algorithmique avec gestion avancée du risque, stratégies personnalisables et exécution automatisée via MetaTrader 5. Conçue pour les traders expérimentés cherchant un avantage compétitif sur les marchés financiers.
 
+## 🎯 Robot MT5 - F_INX_robot4.mq5
+
+### 📊 Prédiction de Spike avec Affichage Visuel
+
+Le robot MT5 `F_INX_robot4.mq5` intègre un système avancé de prédiction de spike pour les indices Boom et Crash avec :
+
+#### 🔔 **Flèche Clignotante de Prédiction**
+- **Flèche visuelle** : Une flèche verte (BUY) ou rouge (SELL) clignotante apparaît sur le graphique pour annoncer l'arrivée imminente d'un spike
+- **Position** : La flèche est placée au prix de la zone de spike prédite par l'IA
+- **Mise à jour dynamique** : La flèche se met à jour en temps réel selon les nouvelles prédictions du serveur AI
+
+#### ⏱️ **Décompte Visuel (Countdown)**
+- **Affichage du décompte** : Un label affiche le nombre de secondes restantes avant l'arrivée du spike
+- **Précision** : Le décompte est calculé selon le paramètre `SpikePreEntrySeconds` (par défaut 3 secondes)
+- **Exemple** : "SPIKE dans 3s", "SPIKE dans 2s", "SPIKE dans 1s"
+- **Exécution automatique** : Le trade s'exécute automatiquement à la fin du décompte si les conditions sont toujours réunies
+
+#### 🎯 **Fonctionnement**
+1. Le serveur AI détecte un spike imminent via `/decision`
+2. La flèche clignotante apparaît immédiatement sur le graphique
+3. Le décompte visuel démarre (par exemple : 3 secondes)
+4. Le trade s'exécute automatiquement quand le décompte atteint 0
+5. La flèche et le décompte disparaissent après exécution ou annulation
+
+### ⚙️ Configuration du Robot
+
+Paramètres importants dans `F_INX_robot4.mq5` :
+
+```mql5
+input bool   AI_PredictSpikes   = true;              // Prédire les zones de spike Boom/Crash avec flèches
+input int    SpikePreEntrySeconds = 3;               // Nombre de secondes avant le spike estimé pour entrer
+input bool   UseAI_Agent        = true;              // Activer l'agent IA
+input string AI_ServerURL       = "http://127.0.0.1:8000/decision";
+```
+
+### 📍 Utilisation
+
+1. **Démarrer le serveur AI** : `python ai_server.py`
+2. **Compiler et attacher** `F_INX_robot4.mq5` sur un graphique M1 d'un indice Boom ou Crash
+3. **Surveiller** : La flèche clignotante et le décompte apparaîtront automatiquement lors de la prédiction d'un spike
+4. **Exécution** : Le trade s'exécute automatiquement à la fin du décompte
+
 ## 🤖 Serveur AI (ai_server.py)
 
 Le serveur AI TradBOT fournit une API REST complète pour l'analyse et les décisions de trading en temps réel.
