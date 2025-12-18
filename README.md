@@ -64,15 +64,24 @@ Application professionnelle de trading algorithmique avec gestion avancée du ri
 Le robot MT5 `F_INX_robot4.mq5` intègre un système avancé de prédiction de spike pour les indices Boom et Crash avec :
 
 #### 🔔 **Flèche Clignotante de Prédiction**
-- **Flèche visuelle** : Une flèche verte (BUY) ou rouge (SELL) clignotante apparaît sur le graphique pour annoncer l'arrivée imminente d'un spike
-- **Position** : La flèche est placée au prix de la zone de spike prédite par l'IA
+- **Flèche visuelle** : Une flèche verte (BUY) ou rouge (SELL) **clignotante** apparaît sur le graphique pour annoncer l'arrivée imminente d'un spike
+- **Position** : La flèche est placée au prix de la zone de spike prédite par l'IA (`g_aiSpikeZonePrice`)
+- **Effet clignotant** : La flèche change de visibilité toutes les 1 seconde pour attirer l'attention
+- **Couleurs** : 
+  - 🟢 **Vert (clrLime)** pour les spikes haussiers (BUY sur Boom)
+  - 🔴 **Rouge (clrRed)** pour les spikes baissiers (SELL sur Crash)
 - **Mise à jour dynamique** : La flèche se met à jour en temps réel selon les nouvelles prédictions du serveur AI
 
 #### ⏱️ **Décompte Visuel (Countdown)**
-- **Affichage du décompte** : Un label affiche le nombre de secondes restantes avant l'arrivée du spike
-- **Précision** : Le décompte est calculé selon le paramètre `SpikePreEntrySeconds` (par défaut 3 secondes)
-- **Exemple** : "SPIKE dans 3s", "SPIKE dans 2s", "SPIKE dans 1s"
-- **Exécution automatique** : Le trade s'exécute automatiquement à la fin du décompte si les conditions sont toujours réunies
+- **Affichage du décompte** : Un **label centré** sur le graphique affiche le nombre de secondes restantes avant l'arrivée du spike
+- **Format** : "SPIKE dans: Xs" (exemple : "SPIKE dans: 3s")
+- **Style** : 
+  - Police : Arial Black, taille 32
+  - Couleur : Jaune (clrYellow) pour une visibilité maximale
+  - Position : Centré au milieu du graphique
+- **Calcul** : Le décompte est basé sur `g_spikeEntryTime` qui est calculé comme `TimeCurrent() + SpikePreEntrySeconds`
+- **Mise à jour** : Le décompte se met à jour toutes les secondes, affichant le temps restant
+- **Exécution automatique** : Le trade s'exécute automatiquement quand `TimeCurrent() >= g_spikeEntryTime` (décompte atteint 0) si les conditions sont toujours réunies
 
 #### 🎯 **Fonctionnement**
 1. Le serveur AI détecte un spike imminent via `/decision`
