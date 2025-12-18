@@ -332,6 +332,11 @@ static double   g_aiSellZoneLow  = 0.0;
 static double   g_aiSellZoneHigh = 0.0;
 static bool     g_aiZoneAlertBuy  = false;
 static bool     g_aiZoneAlertSell = false;
+// Indicateurs modernes 2025 (VWAP, SuperTrend)
+static double   g_currentVWAP = 0.0;
+static double   g_currentSuperTrendLine = 0.0;
+static int      g_currentSuperTrendDirection = 0; // 1=UP, -1=DOWN, 0=indéterminé
+static datetime g_lastIndicatorsUpdate = 0;
 static datetime g_aiLastZoneAlert = 0;
 static datetime g_lastAISummaryTime = 0;
 // Stratégie de rebond sur zones IA : armement quand le prix touche la zone
@@ -1232,6 +1237,118 @@ void DrawAIZones()
       }
    }
    // NE PAS supprimer si pas de nouvelle zone - garder l'ancienne visible
+   
+   // Dessiner les indicateurs modernes (VWAP et SuperTrend)
+   DrawModernIndicators();
+}
+
+//+------------------------------------------------------------------+
+//| Dessine les indicateurs modernes 2025 (VWAP et SuperTrend)      |
+//+------------------------------------------------------------------+
+void DrawModernIndicators()
+{
+   // Vérifier si les indicateurs sont valides et récents (mis à jour dans les 5 dernières minutes)
+   datetime now = TimeCurrent();
+   if(g_lastIndicatorsUpdate == 0 || (now - g_lastIndicatorsUpdate) > 300) // 5 minutes
+      return;
+   
+   long chart_id = ChartFirst(); // Commencer par le premier graphique du symbole
+   while(chart_id >= 0)
+   {
+      if(ChartSymbol(chart_id) != _Symbol)
+      {
+         chart_id = ChartNext(chart_id);
+         continue;
+      }
+      
+      // ========== VWAP (Volume Weighted Average Price) ==========
+      if(g_currentVWAP > 0.0)
+      {
+         string vwapName = "VWAP_" + _Symbol;
+         
+         // Supprimer l'ancien VWAP s'il existe
+         ObjectDelete(chart_id, vwapName);
+         
+         // Créer une ligne horizontale pour VWAP
+         if(ObjectCreate(chart_id, vwapName, OBJ_HLINE, 0, 0, g_currentVWAP))
+         {
+            ObjectSetInteger(chart_id, vwapName, OBJPROP_COLOR, clrCyan); // Cyan pour VWAP
+            ObjectSetInteger(chart_id, vwapName, OBJPROP_STYLE, STYLE_DASH);
+            ObjectSetInteger(chart_id, vwapName, OBJPROP_WIDTH, 2);
+            ObjectSetInteger(chart_id, vwapName, OBJPROP_BACK, true);
+            ObjectSetInteger(chart_id, vwapName, OBJPROP_SELECTABLE, false);
+            ObjectSetInteger(chart_id, vwapName, OBJPROP_TIMEFRAMES, OBJ_ALL_PERIODS);
+            ObjectSetString(chart_id, vwapName, OBJPROP_TEXT, "VWAP");
+            
+            // Ajouter un label avec la valeur
+            string vwapLabelName = "VWAP_LABEL_" + _Symbol;
+            ObjectDelete(chart_id, vwapLabelName);
+            
+            datetime labelTime = iTime(_Symbol, PERIOD_CURRENT, 0);
+            if(ObjectCreate(chart_id, vwapLabelName, OBJ_TEXT, 0, labelTime, g_currentVWAP))
+            {
+               ObjectSetString(chart_id, vwapLabelName, OBJPROP_TEXT, "VWAP: " + DoubleToString(g_currentVWAP, _Digits));
+               ObjectSetInteger(chart_id, vwapLabelName, OBJPROP_COLOR, clrCyan);
+               ObjectSetInteger(chart_id, vwapLabelName, OBJPROP_FONTSIZE, 9);
+               ObjectSetString(chart_id, vwapLabelName, OBJPROP_FONT, "Arial");
+               ObjectSetInteger(chart_id, vwapLabelName, OBJPROP_ANCHOR, ANCHOR_RIGHT);
+               ObjectSetInteger(chart_id, vwapLabelName, OBJPROP_BACK, false);
+               ObjectSetInteger(chart_id, vwapLabelName, OBJPROP_SELECTABLE, false);
+               ObjectSetInteger(chart_id, vwapLabelName, OBJPROP_TIMEFRAMES, OBJ_ALL_PERIODS);
+            }
+         }
+      }
+      
+      // ========== SuperTrend ==========
+      if(g_currentSuperTrendLine > 0.0)
+      {
+         string stName = "SUPERTREND_" + _Symbol;
+         
+         // Supprimer l'ancien SuperTrend s'il existe
+         ObjectDelete(chart_id, stName);
+         
+         // Couleur selon la direction (vert = uptrend, rouge = downtrend)
+         color stColor = (g_currentSuperTrendDirection > 0) ? clrLime : clrOrange;
+         if(g_currentSuperTrendDirection == 0) stColor = clrSilver;
+         
+         // Créer une ligne horizontale pour SuperTrend
+         if(ObjectCreate(chart_id, stName, OBJ_HLINE, 0, 0, g_currentSuperTrendLine))
+         {
+            ObjectSetInteger(chart_id, stName, OBJPROP_COLOR, stColor);
+            ObjectSetInteger(chart_id, stName, OBJPROP_STYLE, STYLE_SOLID);
+            ObjectSetInteger(chart_id, stName, OBJPROP_WIDTH, 2);
+            ObjectSetInteger(chart_id, stName, OBJPROP_BACK, true);
+            ObjectSetInteger(chart_id, stName, OBJPROP_SELECTABLE, false);
+            ObjectSetInteger(chart_id, stName, OBJPROP_TIMEFRAMES, OBJ_ALL_PERIODS);
+            
+            string trendText = (g_currentSuperTrendDirection > 0) ? "SuperTrend ↑" : 
+                               (g_currentSuperTrendDirection < 0) ? "SuperTrend ↓" : "SuperTrend";
+            ObjectSetString(chart_id, stName, OBJPROP_TEXT, trendText);
+            
+            // Ajouter un label avec la valeur
+            string stLabelName = "SUPERTREND_LABEL_" + _Symbol;
+            ObjectDelete(chart_id, stLabelName);
+            
+            datetime labelTime = iTime(_Symbol, PERIOD_CURRENT, 0);
+            if(ObjectCreate(chart_id, stLabelName, OBJ_TEXT, 0, labelTime, g_currentSuperTrendLine))
+            {
+               string directionIcon = (g_currentSuperTrendDirection > 0) ? "↑" : 
+                                      (g_currentSuperTrendDirection < 0) ? "↓" : "→";
+               ObjectSetString(chart_id, stLabelName, OBJPROP_TEXT, "ST " + directionIcon + ": " + DoubleToString(g_currentSuperTrendLine, _Digits));
+               ObjectSetInteger(chart_id, stLabelName, OBJPROP_COLOR, stColor);
+               ObjectSetInteger(chart_id, stLabelName, OBJPROP_FONTSIZE, 9);
+               ObjectSetString(chart_id, stLabelName, OBJPROP_FONT, "Arial Bold");
+               ObjectSetInteger(chart_id, stLabelName, OBJPROP_ANCHOR, ANCHOR_LEFT);
+               ObjectSetInteger(chart_id, stLabelName, OBJPROP_BACK, false);
+               ObjectSetInteger(chart_id, stLabelName, OBJPROP_SELECTABLE, false);
+               ObjectSetInteger(chart_id, stLabelName, OBJPROP_TIMEFRAMES, OBJ_ALL_PERIODS);
+            }
+         }
+      }
+      
+      ChartRedraw(chart_id);
+      chart_id = ChartNext(chart_id);
+   }
 }
 
 //+------------------------------------------------------------------+
@@ -4535,6 +4652,12 @@ int AI_GetDecision(double rsi, double atr,
    // Calcul SuperTrend M15 (indicateur de tendance moderne)
    int supertrendTrend = 0; // 1 = UP, -1 = DOWN, 0 = indéterminé
    double supertrendLine = CalculateSuperTrend(10, 3.0, supertrendTrend);
+   
+   // Stocker les valeurs pour affichage graphique
+   g_currentVWAP = vwap;
+   g_currentSuperTrendLine = supertrendLine;
+   g_currentSuperTrendDirection = supertrendTrend;
+   g_lastIndicatorsUpdate = TimeCurrent();
 
    // Calcul régime de volatilité (High/Low/Normal)
    double volatilityRatio = 0.0;
