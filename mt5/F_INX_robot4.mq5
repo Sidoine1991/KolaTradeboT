@@ -3857,9 +3857,164 @@ void ManageTrade()
             curTP = newTP;
       }
 
+      // ========== UTILISATION VWAP ET SUPERTREND POUR AJUSTER LE SL ==========
+      // Utiliser SuperTrend comme niveau de trailing stop dynamique
+      double newSLFromIndicators = curSL;
+      bool useIndicatorSL = false;
+      
+      if(g_currentSuperTrendLine > 0.0 && (TimeCurrent() - g_lastIndicatorsUpdate) < 300) // Indicateurs récents (< 5 min)
+      {
+         // Pour position BUY : SL au niveau SuperTrend (si prix > SuperTrend)
+         if(posType == POSITION_TYPE_BUY)
+         {
+            // Si SuperTrend est haussier (↑) et prix au-dessus, utiliser SuperTrend comme SL
+            if(g_currentSuperTrendDirection > 0 && curPrice > g_currentSuperTrendLine)
+            {
+               double stSL = g_currentSuperTrendLine - (minDist * 2); // Légère marge sous SuperTrend
+               if(stSL > curSL && stSL < curPrice - minDist) // Améliorer le SL sans être trop proche
+               {
+                  newSLFromIndicators = stSL;
+                  useIndicatorSL = true;
+                  if(DebugBlocks)
+                     Print("📊 BUY: SL ajusté à SuperTrend (", DoubleToString(stSL, _Digits), ") pour position ", ticket);
+               }
+            }
+         }
+         // Pour position SELL : SL au niveau SuperTrend (si prix < SuperTrend)
+         else if(posType == POSITION_TYPE_SELL)
+         {
+            // Si SuperTrend est baissier (↓) et prix en-dessous, utiliser SuperTrend comme SL
+            if(g_currentSuperTrendDirection < 0 && curPrice < g_currentSuperTrendLine)
+            {
+               double stSL = g_currentSuperTrendLine + (minDist * 2); // Légère marge au-dessus SuperTrend
+               if((curSL == 0.0 || stSL < curSL) && stSL > curPrice + minDist) // Améliorer le SL
+               {
+                  newSLFromIndicators = stSL;
+                  useIndicatorSL = true;
+                  if(DebugBlocks)
+                     Print("📊 SELL: SL ajusté à SuperTrend (", DoubleToString(stSL, _Digits), ") pour position ", ticket);
+               }
+            }
+         }
+      }
+      
+      // Utiliser VWAP comme niveau de support/résistance pour le SL
+      if(g_currentVWAP > 0.0 && (TimeCurrent() - g_lastIndicatorsUpdate) < 300)
+      {
+         if(posType == POSITION_TYPE_BUY && curPrice > g_currentVWAP)
+         {
+            // En BUY, si prix au-dessus VWAP, placer SL légèrement sous VWAP (support)
+            double vwapSL = g_currentVWAP - (minDist * 3);
+            if(vwapSL > curSL && vwapSL < curPrice - minDist)
+            {
+               // Utiliser VWAP si meilleur que SuperTrend ou si SuperTrend non disponible
+               if(!useIndicatorSL || vwapSL > newSLFromIndicators)
+               {
+                  newSLFromIndicators = vwapSL;
+                  useIndicatorSL = true;
+                  if(DebugBlocks)
+                     Print("📊 BUY: SL ajusté à VWAP (", DoubleToString(vwapSL, _Digits), ") pour position ", ticket);
+               }
+            }
+         }
+         else if(posType == POSITION_TYPE_SELL && curPrice < g_currentVWAP)
+         {
+            // En SELL, si prix en-dessous VWAP, placer SL légèrement au-dessus VWAP (résistance)
+            double vwapSL = g_currentVWAP + (minDist * 3);
+            if((curSL == 0.0 || vwapSL < curSL) && vwapSL > curPrice + minDist)
+            {
+               if(!useIndicatorSL || vwapSL < newSLFromIndicators)
+               {
+                  newSLFromIndicators = vwapSL;
+                  useIndicatorSL = true;
+                  if(DebugBlocks)
+                     Print("📊 SELL: SL ajusté à VWAP (", DoubleToString(vwapSL, _Digits), ") pour position ", ticket);
+               }
+            }
+         }
+      }
+      
+      // Appliquer le SL basé sur les indicateurs si meilleur que le SL actuel
+      if(useIndicatorSL && newSLFromIndicators != curSL)
+      {
+         ENUM_ORDER_TYPE ordTypeST = (posType == POSITION_TYPE_BUY) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+         double execPriceST = curPrice;
+         ValidateAndAdjustStops(psym, ordTypeST, execPriceST, newSLFromIndicators, curTP);
+         
+         // Pour Boom/Crash, vérifier le compteur de modifications
+         bool canModify = true;
+         if(isBoomCrashPos)
+         {
+            int slModifyCount = 0;
+            for(int t = 0; t < g_slModifyTrackerCount; t++)
+            {
+               if(g_slModifyTracker[t].ticket == ticket)
+               {
+                  slModifyCount = g_slModifyTracker[t].modifyCount;
+                  break;
+               }
+            }
+            if(slModifyCount >= 4)
+               canModify = false;
+         }
+         
+         if(canModify && trade.PositionModify(ticket, newSLFromIndicators, curTP))
+         {
+            curSL = newSLFromIndicators;
+            if(isBoomCrashPos)
+            {
+               // Incrémenter le compteur
+               bool found = false;
+               for(int t = 0; t < g_slModifyTrackerCount; t++)
+               {
+                  if(g_slModifyTracker[t].ticket == ticket)
+                  {
+                     g_slModifyTracker[t].modifyCount++;
+                     g_slModifyTracker[t].lastModifyTime = TimeCurrent();
+                     found = true;
+                     break;
+                  }
+               }
+               if(!found && g_slModifyTrackerCount < 100)
+               {
+                  g_slModifyTracker[g_slModifyTrackerCount].ticket = ticket;
+                  g_slModifyTracker[g_slModifyTrackerCount].modifyCount = 1;
+                  g_slModifyTracker[g_slModifyTrackerCount].lastModifyTime = TimeCurrent();
+                  g_slModifyTrackerCount++;
+               }
+            }
+         }
+      }
+      
+      // ========== FERMETURE SI TRAVERSÉE DU SUPERTREND CONTRE LA POSITION ==========
+      // Fermer position BUY si prix traverse SuperTrend vers le bas (retournement baissier)
+      if(posType == POSITION_TYPE_BUY && g_currentSuperTrendDirection < 0 && g_currentSuperTrendLine > 0.0)
+      {
+         if(curPrice < g_currentSuperTrendLine)
+         {
+            // SuperTrend est devenu baissier et prix est passé en-dessous → fermer BUY
+            if(DebugBlocks)
+               Print("🔄 Fermeture BUY: Prix a traversé SuperTrend baissier (", DoubleToString(g_currentSuperTrendLine, _Digits), ")");
+            trade.PositionClose(ticket);
+            continue;
+         }
+      }
+      // Fermer position SELL si prix traverse SuperTrend vers le haut (retournement haussier)
+      else if(posType == POSITION_TYPE_SELL && g_currentSuperTrendDirection > 0 && g_currentSuperTrendLine > 0.0)
+      {
+         if(curPrice > g_currentSuperTrendLine)
+         {
+            // SuperTrend est devenu haussier et prix est passé au-dessus → fermer SELL
+            if(DebugBlocks)
+               Print("🔄 Fermeture SELL: Prix a traversé SuperTrend haussier (", DoubleToString(g_currentSuperTrendLine, _Digits), ")");
+            trade.PositionClose(ticket);
+            continue;
+         }
+      }
+      
       // Si la position principale tolère une perte supérieure au seuil, resserrer le SL
       // LIMITATION: Max 4 modifications SL pour Boom/Crash (sécurisation des gains)
-      if(isMainPosition && lossPriceStep > 0.0 && curSL != 0.0)
+      if(isMainPosition && lossPriceStep > 0.0 && curSL != 0.0 && !useIndicatorSL)
       {
          // Vérifier le compteur de modifications SL pour Boom/Crash
          int slModifyCount = 0;
