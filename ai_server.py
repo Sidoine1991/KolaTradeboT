@@ -179,6 +179,13 @@ class DecisionRequest(BaseModel):
     atr: float
     dir_rule: int
     is_spike_mode: bool
+    vwap: Optional[float] = None  # VWAP (Volume Weighted Average Price)
+    vwap_distance: Optional[float] = None  # Distance au VWAP en %
+    above_vwap: Optional[bool] = None  # Prix au-dessus du VWAP
+    supertrend_trend: Optional[int] = None  # 1 = UP, -1 = DOWN, 0 = indéterminé
+    supertrend_line: Optional[float] = None  # Ligne SuperTrend
+    volatility_regime: Optional[int] = None  # 1 = High Vol, 0 = Normal, -1 = Low Vol
+    volatility_ratio: Optional[float] = None  # Ratio ATR court/long
 
 class DecisionResponse(BaseModel):
     action: str  # "buy", "sell", "hold"
@@ -483,18 +490,53 @@ async def decision(request: DecisionRequest):
         m1_bullish = ema_fast_m1 > ema_slow_m1
         m1_bearish = ema_fast_m1 < ema_slow_m1
         
-        # Décision combinée
-        bullish_signals = sum([rsi_bullish, h1_bullish, m1_bullish])
-        bearish_signals = sum([rsi_bearish, h1_bearish, m1_bearish])
+        # NOUVEAU 2025 : Analyse VWAP (prix d'équilibre)
+        vwap_signal_buy = False
+        vwap_signal_sell = False
+        if request.vwap and request.vwap > 0 and request.above_vwap is not None:
+            # BUY signal renforcé si prix EN-DESSOUS du VWAP (pas cher)
+            # SELL signal renforcé si prix AU-DESSUS du VWAP (cher)
+            if not request.above_vwap:  # Prix en-dessous du VWAP
+                vwap_signal_buy = True
+            else:  # Prix au-dessus du VWAP
+                vwap_signal_sell = True
         
-        if bullish_signals >= 2:
+        # NOUVEAU 2025 : Analyse SuperTrend (tendance moderne)
+        supertrend_bullish = False
+        supertrend_bearish = False
+        if request.supertrend_trend is not None:
+            supertrend_bullish = request.supertrend_trend > 0  # SuperTrend UP
+            supertrend_bearish = request.supertrend_trend < 0  # SuperTrend DOWN
+        
+        # NOUVEAU 2025 : Filtre régime de volatilité
+        # Éviter les trades en régime de faible volatilité (pas d'opportunité)
+        volatility_ok = True
+        if request.volatility_regime is not None:
+            if request.volatility_regime == -1:  # Low Vol
+                volatility_ok = False
+                reason += " | Volatilité trop faible"
+        
+        # Décision combinée (incluant VWAP et SuperTrend)
+        bullish_signals = sum([rsi_bullish, h1_bullish, m1_bullish, vwap_signal_buy, supertrend_bullish])
+        bearish_signals = sum([rsi_bearish, h1_bearish, m1_bearish, vwap_signal_sell, supertrend_bearish])
+        
+        # Appliquer le filtre de volatilité
+        if not volatility_ok:
+            action = "hold"
+            confidence = 0.2
+            reason = "Régime de faible volatilité détecté - Attente"
+        elif bullish_signals >= 2:
             action = "buy"
-            confidence = min(0.5 + (bullish_signals * 0.15), 0.95)
-            reason = f"Signaux haussiers: RSI survente={rsi_bullish}, H1={h1_bullish}, M1={m1_bullish}"
+            confidence = min(0.5 + (bullish_signals * 0.12), 0.95)
+            vwap_note = f", VWAP={'✓' if vwap_signal_buy else '✗'}"
+            st_note = f", SuperTrend={'✓' if supertrend_bullish else '✗'}"
+            reason = f"Signaux haussiers: RSI={rsi_bullish}, H1={h1_bullish}, M1={m1_bullish}{vwap_note}{st_note}"
         elif bearish_signals >= 2:
             action = "sell"
-            confidence = min(0.5 + (bearish_signals * 0.15), 0.95)
-            reason = f"Signaux baissiers: RSI surachat={rsi_bearish}, H1={h1_bearish}, M1={m1_bearish}"
+            confidence = min(0.5 + (bearish_signals * 0.12), 0.95)
+            vwap_note = f", VWAP={'✓' if vwap_signal_sell else '✗'}"
+            st_note = f", SuperTrend={'✓' if supertrend_bearish else '✗'}"
+            reason = f"Signaux baissiers: RSI={rsi_bearish}, H1={h1_bearish}, M1={m1_bearish}{vwap_note}{st_note}"
         else:
             action = "hold"
             confidence = 0.3
@@ -572,20 +614,46 @@ Format: Analyse claire et professionnelle en français.
             except Exception as e:
                 logger.warning(f"Erreur prédicteur spike: {e}")
         
-        # Détection de spike basique si ML non disponible
+        # Détection de spike basique si ML non disponible (Boom / Crash uniquement)
         if not spike_prediction and ("Boom" in request.symbol or "Crash" in request.symbol):
+            is_boom = "Boom" in request.symbol
+            is_crash = "Crash" in request.symbol
+
             volatility = request.atr / mid_price if mid_price > 0 else 0
-            
-            if volatility > 0.01 and (rsi < 20 or rsi > 80):
+
+            # Conditions de base communes
+            strong_vol = volatility >= 0.002   # ~0.2% de range minimum
+            medium_vol = volatility >= 0.001   # ~0.1% pour pré-alerte
+
+            # Spike haussier (Boom / Crash avec retournement haussier)
+            strong_bull_spike = (
+                strong_vol
+                and rsi <= 25                    # RSI très bas (survente marquée)
+                and h1_bullish and m1_bullish    # Alignement H1 + M1
+                and request.dir_rule >= 0        # Règle de direction compatible BUY / neutre
+            )
+
+            # Spike baissier (Crash / Boom avec retournement baissier)
+            strong_bear_spike = (
+                strong_vol
+                and rsi >= 75                    # RSI très haut (surachat marqué)
+                and h1_bearish and m1_bearish    # Alignement H1 + M1
+                and request.dir_rule <= 0        # Règle de direction compatible SELL / neutre
+            )
+
+            if strong_bull_spike or strong_bear_spike:
                 spike_prediction = True
                 spike_zone_price = mid_price
-                spike_direction = rsi < 20
-                reason += " | Spike détecté"
-            elif volatility > 0.005 and (rsi < 30 or rsi > 70):
+                # true = BUY, false = SELL
+                spike_direction = strong_bull_spike
+                reason += " | Spike détecté (conditions strictes)"
+
+            # Pré-alerte plus souple (affichage flèche + countdown, sans exécution auto)
+            elif medium_vol and (rsi <= 30 or rsi >= 70):
                 early_spike_warning = True
                 early_spike_zone_price = mid_price
-                early_spike_direction = rsi < 30
-                reason += " | Pré-alerte spike"
+                early_spike_direction = rsi <= 30
+                reason += " | Pré-alerte spike (conditions modérées)"
         
         # Calcul des zones d'achat/vente
         buy_zone_low = None

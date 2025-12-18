@@ -23,10 +23,22 @@ struct DynamicPositionState {
    datetime lastAdjustmentTime; // Dernier ajustement
    double highestPrice;       // Plus haut prix atteint (pour les positions d'achat)
    double lowestPrice;        // Plus bas prix atteint (pour les positions de vente)
+   int slModifyCount;         // Nombre de modifications SL (limité à 4 pour Boom/Crash)
 };
 
 // Tableau pour suivre l'état des positions dynamiques
 DynamicPositionState g_dynamicPosStates[];
+
+// Structure pour tracker le nombre de modifications SL par position (Boom/Crash)
+struct PositionSLModifyCount {
+   ulong ticket;
+   int modifyCount;  // Nombre de modifications SL effectuées
+   datetime lastModifyTime;
+};
+
+// Tableau pour tracker les modifications SL (max 4 pour Boom/Crash)
+PositionSLModifyCount g_slModifyTracker[100];
+int g_slModifyTrackerCount = 0;
 
 // Variables pour le suivi des positions dynamiques
 double g_lotMultiplier = 1.0;
@@ -1098,6 +1110,48 @@ void DrawAIZones()
    // Objectif : dessiner les zones IA non seulement sur le graphique
    // courant, mais aussi sur les graphiques H1 et H4 du même symbole.
    // ------------------------------------------------------------------
+
+   // ---------------------------
+   // Normalisation de la largeur
+   // ---------------------------
+   // Pour éviter des zones trop fines ou trop larges, on applique
+   // un min / max en POINTS autour du centre de la zone IA.
+   double point = _Point;
+   // Largeurs mini / maxi en points (valeurs raisonnables par défaut)
+   int minWidthPoints = 50;     // ~ 50 points mini
+   int maxWidthPoints = 5000;   // ~ 5000 points maxi
+
+   // Normaliser zone d'achat
+   if(g_aiBuyZoneLow > 0.0 && g_aiBuyZoneHigh > g_aiBuyZoneLow)
+   {
+      double centerBuy   = (g_aiBuyZoneLow + g_aiBuyZoneHigh) / 2.0;
+      double widthBuyPts = (g_aiBuyZoneHigh - g_aiBuyZoneLow) / point;
+
+      if(widthBuyPts < minWidthPoints)
+         widthBuyPts = minWidthPoints;
+      else if(widthBuyPts > maxWidthPoints)
+         widthBuyPts = maxWidthPoints;
+
+      double halfBuy = (widthBuyPts * point) / 2.0;
+      g_aiBuyZoneLow  = centerBuy - halfBuy;
+      g_aiBuyZoneHigh = centerBuy + halfBuy;
+   }
+
+   // Normaliser zone de vente
+   if(g_aiSellZoneLow > 0.0 && g_aiSellZoneHigh > g_aiSellZoneLow)
+   {
+      double centerSell   = (g_aiSellZoneLow + g_aiSellZoneHigh) / 2.0;
+      double widthSellPts = (g_aiSellZoneHigh - g_aiSellZoneLow) / point;
+
+      if(widthSellPts < minWidthPoints)
+         widthSellPts = minWidthPoints;
+      else if(widthSellPts > maxWidthPoints)
+         widthSellPts = maxWidthPoints;
+
+      double halfSell = (widthSellPts * point) / 2.0;
+      g_aiSellZoneLow  = centerSell - halfSell;
+      g_aiSellZoneHigh = centerSell + halfSell;
+   }
 
    // Zone d'achat - Ne supprimer QUE si nouvelle zone reçue
    string buyName = "AI_ZONE_BUY_" + _Symbol;
@@ -3601,6 +3655,10 @@ void ManageTrade()
          double newSL = (posType == POSITION_TYPE_BUY) ? openPrice - lossPriceStep : openPrice + lossPriceStep;
          if(MathAbs(curPrice - newSL) < minDist)
             newSL = (posType == POSITION_TYPE_BUY) ? curPrice - minDist : curPrice + minDist;
+         // Sécuriser la validité broker (StopsLevel / FreezeLevel) avant modification
+         ENUM_ORDER_TYPE ordType = (posType == POSITION_TYPE_BUY) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+         double execPrice = curPrice;
+         ValidateAndAdjustStops(psym, ordType, execPrice, newSL, curTP);
          if(trade.PositionModify(ticket, newSL, curTP))
             curSL = newSL;
       }
@@ -3610,21 +3668,99 @@ void ManageTrade()
          double newTP = (posType == POSITION_TYPE_BUY) ? openPrice + profitPriceStep : openPrice - profitPriceStep;
          if(MathAbs(curPrice - newTP) < minDist)
             newTP = (posType == POSITION_TYPE_BUY) ? curPrice + minDist : curPrice - minDist;
+         // Sécuriser la validité broker avant modification
+         ENUM_ORDER_TYPE ordType2 = (posType == POSITION_TYPE_BUY) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+         double execPrice2 = curPrice;
+         ValidateAndAdjustStops(psym, ordType2, execPrice2, curSL, newTP);
          if(trade.PositionModify(ticket, curSL, newTP))
             curTP = newTP;
       }
 
       // Si la position principale tolère une perte supérieure au seuil, resserrer le SL
+      // LIMITATION: Max 4 modifications SL pour Boom/Crash (sécurisation des gains)
       if(isMainPosition && lossPriceStep > 0.0 && curSL != 0.0)
       {
+         // Vérifier le compteur de modifications SL pour Boom/Crash
+         int slModifyCount = 0;
+         bool isBoomCrashModify = isBoomCrashPos;
+         
+         if(isBoomCrashModify)
+         {
+            // Trouver le compteur existant pour ce ticket
+            for(int t = 0; t < g_slModifyTrackerCount; t++)
+            {
+               if(g_slModifyTracker[t].ticket == ticket)
+               {
+                  slModifyCount = g_slModifyTracker[t].modifyCount;
+                  break;
+               }
+            }
+            
+            // Si déjà 4 modifications, ne plus modifier le SL
+            if(slModifyCount >= 4)
+            {
+               if(DebugBlocks)
+                  Print("🛑 Position ", ticket, " (Boom/Crash): Limite de 4 modifications SL atteinte - SL laissé intact");
+               continue; // Passer à la position suivante
+            }
+         }
+         
          double distanceToSL = (posType == POSITION_TYPE_BUY) ? (openPrice - curSL) : (curSL - openPrice);
          if(distanceToSL > lossPriceStep)
          {
             double tightenSL = (posType == POSITION_TYPE_BUY) ? openPrice - lossPriceStep : openPrice + lossPriceStep;
             if(MathAbs(curPrice - tightenSL) < minDist)
                tightenSL = (posType == POSITION_TYPE_BUY) ? curPrice - minDist : curPrice + minDist;
+            // Sécuriser la validité broker avant modification
+            ENUM_ORDER_TYPE ordType3 = (posType == POSITION_TYPE_BUY) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+            double execPrice3 = curPrice;
+            ValidateAndAdjustStops(psym, ordType3, execPrice3, tightenSL, curTP);
             if(trade.PositionModify(ticket, tightenSL, curTP))
+            {
                curSL = tightenSL;
+               
+               // Incrémenter le compteur pour Boom/Crash
+               if(isBoomCrashModify)
+               {
+                  bool found = false;
+                  for(int t = 0; t < g_slModifyTrackerCount; t++)
+                  {
+                     if(g_slModifyTracker[t].ticket == ticket)
+                     {
+                        g_slModifyTracker[t].modifyCount++;
+                        g_slModifyTracker[t].lastModifyTime = TimeCurrent();
+                        found = true;
+                        if(DebugBlocks)
+                           Print("📍 SL modifié #", g_slModifyTracker[t].modifyCount, "/4 pour position ", ticket, " (Boom/Crash)");
+                        break;
+                     }
+                  }
+                  if(!found && g_slModifyTrackerCount < 100)
+                  {
+                     g_slModifyTracker[g_slModifyTrackerCount].ticket = ticket;
+                     g_slModifyTracker[g_slModifyTrackerCount].modifyCount = 1;
+                     g_slModifyTracker[g_slModifyTrackerCount].lastModifyTime = TimeCurrent();
+                     g_slModifyTrackerCount++;
+                     if(DebugBlocks)
+                        Print("📍 Première modification SL pour position ", ticket, " (Boom/Crash)");
+                  }
+               }
+            }
+         }
+      }
+      
+      // Nettoyer les tickets qui n'existent plus (positions fermées)
+      if(isBoomCrashPos)
+      {
+         for(int t = g_slModifyTrackerCount - 1; t >= 0; t--)
+         {
+            if(!PositionSelectByTicket(g_slModifyTracker[t].ticket))
+            {
+               // Décaler les éléments suivants
+               for(int j = t; j < g_slModifyTrackerCount - 1; j++)
+                  g_slModifyTracker[j] = g_slModifyTracker[j + 1];
+               g_slModifyTrackerCount--;
+            }
          }
       }
    }
@@ -4265,12 +4401,61 @@ int AI_GetDecision(double rsi, double atr,
    // Normalisation des valeurs pour éviter les problèmes de précision
    double safeBid = NormalizeDouble(bid, _Digits);
    double safeAsk = NormalizeDouble(ask, _Digits);
+   double midPrice = (safeBid + safeAsk) / 2.0;
    double safeRsi = NormalizeDouble(rsi, 2);
    double safeAtr = NormalizeDouble(atr, _Digits);
    double safeEmaFastH1 = NormalizeDouble(emaFastH1, _Digits);
    double safeEmaSlowH1 = NormalizeDouble(emaSlowH1, _Digits);
    double safeEmaFastM1 = NormalizeDouble(emaFastM1, _Digits);
    double safeEmaSlowM1 = NormalizeDouble(emaSlowM1, _Digits);
+
+   // Calcul VWAP (Volume Weighted Average Price) - indicateur moderne 2025
+   double vwap = CalculateVWAP(500);
+   double vwapDistance = 0.0;
+   bool aboveVWAP = false;
+   if(vwap > 0.0)
+   {
+      vwapDistance = ((midPrice - vwap) / vwap) * 100.0; // Distance en %
+      aboveVWAP = midPrice > vwap;
+   }
+
+   // Calcul SuperTrend M15 (indicateur de tendance moderne)
+   int supertrendTrend = 0; // 1 = UP, -1 = DOWN, 0 = indéterminé
+   double supertrendLine = CalculateSuperTrend(10, 3.0, supertrendTrend);
+
+   // Calcul régime de volatilité (High/Low/Normal)
+   double volatilityRatio = 0.0;
+   int volatilityRegime = 0; // 0 = Normal, 1 = High Vol, -1 = Low Vol
+   if(mt5_initialized)
+   {
+      MqlRates rates[];
+      ArraySetAsSeries(rates, true);
+      int copied = CopyRates(_Symbol, PERIOD_M1, 0, 200, rates);
+      if(copied >= 100)
+      {
+         // ATR court (10) vs ATR long (50)
+         double atrShort[], atrLong[];
+         ArraySetAsSeries(atrShort, true);
+         ArraySetAsSeries(atrLong, true);
+         int atrShortHandle = iATR(_Symbol, PERIOD_M1, 10);
+         int atrLongHandle = iATR(_Symbol, PERIOD_M1, 50);
+         if(atrShortHandle != INVALID_HANDLE && atrLongHandle != INVALID_HANDLE)
+         {
+            if(CopyBuffer(atrShortHandle, 0, 0, 1, atrShort) > 0 &&
+               CopyBuffer(atrLongHandle, 0, 0, 1, atrLong) > 0 &&
+               atrLong[0] > 0.0)
+            {
+               volatilityRatio = atrShort[0] / atrLong[0];
+               if(volatilityRatio > 1.5)
+                  volatilityRegime = 1; // High Vol
+               else if(volatilityRatio < 0.7)
+                  volatilityRegime = -1; // Low Vol
+            }
+            IndicatorRelease(atrShortHandle);
+            IndicatorRelease(atrLongHandle);
+         }
+      }
+   }
 
    // Construction JSON sécurisée (échappement du symbole)
    string safeSymbol = _Symbol;
@@ -4288,7 +4473,14 @@ int AI_GetDecision(double rsi, double atr,
    payload += "\"ema_slow_m1\":" + DoubleToString(safeEmaSlowM1, _Digits) + ",";
    payload += "\"atr\":" + DoubleToString(safeAtr, _Digits) + ",";
    payload += "\"dir_rule\":" + IntegerToString(dirRule) + ",";
-   payload += "\"is_spike_mode\":" + (spikeMode ? "true" : "false");
+   payload += "\"is_spike_mode\":" + (spikeMode ? "true" : "false") + ",";
+   payload += "\"vwap\":" + DoubleToString(vwap, _Digits) + ",";
+   payload += "\"vwap_distance\":" + DoubleToString(vwapDistance, 4) + ",";
+   payload += "\"above_vwap\":" + (aboveVWAP ? "true" : "false") + ",";
+   payload += "\"supertrend_trend\":" + IntegerToString(supertrendTrend) + ",";
+   payload += "\"supertrend_line\":" + DoubleToString(supertrendLine, _Digits) + ",";
+   payload += "\"volatility_regime\":" + IntegerToString(volatilityRegime) + ",";
+   payload += "\"volatility_ratio\":" + DoubleToString(volatilityRatio, 4);
    payload += "}";
 
    // Conversion en UTF-8 avec dimensionnement correct du tableau
