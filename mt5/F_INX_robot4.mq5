@@ -503,23 +503,26 @@ struct H1SwingPoint
 // Vérifie si l'heure actuelle est dans la plage autorisée
 bool IsTradingTimeAllowed()
 {
-   if(!UseTimeFilter) return true;
-
    datetime now = TimeCurrent();
    MqlDateTime ts;
    TimeToStruct(now, ts);
    int curHour = ts.hour;
    int curHM   = ts.hour*100 + ts.min;
 
-   // 1) Exploiter d'abord les fenêtres horaires IA spécifiques au symbole
+   // 1) PRIORITÉ ABSOLUE : Fenêtres horaires IA spécifiques au symbole
    //    (g_hourPreferred / g_hourForbidden remplis par AI_UpdateTimeWindows).
+   //    Ces fenêtres sont TOUJOURS appliquées, même si UseTimeFilter = false.
    if(g_timeWindowsSymbol == _Symbol) // Fenêtres valides pour ce symbole
    {
       if(curHour >= 0 && curHour < 24)
       {
-         // Heures explicitement interdites par l'IA -> on bloque toujours
+         // Heures explicitement interdites par l'IA -> on bloque TOUJOURS
          if(g_hourForbidden[curHour])
+         {
+            if(DebugBlocks)
+               Print("🛑 Trading bloqué: heure ", curHour, " interdite par IA pour ", _Symbol);
             return false;
+         }
 
          // S'il existe au moins une heure "preferred" pour ce symbole,
          // on ne trade que dans ces heures-là (les autres sont ignorées).
@@ -529,11 +532,18 @@ bool IsTradingTimeAllowed()
             if(g_hourPreferred[h]) { hasPreferred = true; break; }
          }
          if(hasPreferred && !g_hourPreferred[curHour])
+         {
+            if(DebugBlocks)
+               Print("🛑 Trading bloqué: heure ", curHour, " hors fenêtres préférées IA pour ", _Symbol);
             return false;
+         }
       }
    }
 
-   // 2) Appliquer ensuite, en complément, la plage horaire manuelle TradingHoursStart/End
+   // 2) Si UseTimeFilter = false, on s'arrête ici (fenêtres IA appliquées)
+   if(!UseTimeFilter) return true;
+
+   // 3) Appliquer ensuite, en complément, la plage horaire manuelle TradingHoursStart/End
    int sh = (int)StringToInteger(StringSubstr(TradingHoursStart,0,2));
    int sm = (int)StringToInteger(StringSubstr(TradingHoursStart,3,2));
    int eh = (int)StringToInteger(StringSubstr(TradingHoursEnd,0,2));
@@ -542,7 +552,10 @@ bool IsTradingTimeAllowed()
    int end   = eh*100 + em;
 
    // Plage simple dans la même journée
-   return (curHM >= start && curHM <= end);
+   bool manualTimeOk = (curHM >= start && curHM <= end);
+   if(!manualTimeOk && DebugBlocks)
+      Print("🛑 Trading bloqué: hors plage manuelle ", TradingHoursStart, "-", TradingHoursEnd);
+   return manualTimeOk;
 }
 
 // Stoppe les nouvelles entrées si drawdown global trop élevé
