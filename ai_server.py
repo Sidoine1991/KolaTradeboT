@@ -77,6 +77,14 @@ except Exception as e:
     gemini_model = None
     logger.warning(f"Google Gemini AI: Erreur d'initialisation: {e}")
 
+# Alpha Vantage API pour analyse fondamentale
+ALPHAVANTAGE_API_KEY = os.getenv("ALPHAVANTAGE_API_KEY", "IU9I5J595Q5LO61B")
+ALPHAVANTAGE_AVAILABLE = bool(ALPHAVANTAGE_API_KEY)
+if ALPHAVANTAGE_AVAILABLE:
+    logger.info("Alpha Vantage API disponible pour analyse fondamentale")
+else:
+    logger.info("Alpha Vantage API: Non configuré (ALPHAVANTAGE_API_KEY manquant)")
+
 # Tentative d'importation des modules backend (optionnel)
 try:
     sys.path.insert(0, str(Path(__file__).parent / "backend"))
@@ -366,7 +374,11 @@ async def root():
         "gemini_available": GEMINI_AVAILABLE,
         "backend_available": BACKEND_AVAILABLE,
         "ai_indicators_available": AI_INDICATORS_AVAILABLE,
+        "alphavantage_available": ALPHAVANTAGE_AVAILABLE,
         "endpoints": [
+            "/fundamental/{symbol} (GET) - Données fondamentales",
+            "/news/{symbol} (GET) - Actualités marché", 
+            "/economic-calendar (GET) - Calendrier économique",
             "/decision (POST)",
             "/analysis (GET)",
             "/time_windows/{symbol} (GET)",
@@ -380,6 +392,179 @@ async def root():
             "/analyze/gemini (POST)"
         ]
     }
+
+@app.post("/")
+async def root_post():
+    """Endpoint racine POST - Redirige vers /decision pour compatibilité"""
+    logger.warning("POST request received on root endpoint '/'. This should be '/decision'. Returning redirect info.")
+    raise HTTPException(
+        status_code=400,
+        detail="Please use POST /decision endpoint for trading decisions. The root endpoint '/' only accepts GET requests."
+    )
+
+# ==================== ALPHA VANTAGE ENDPOINTS ====================
+
+@app.get("/fundamental/{symbol}")
+async def get_fundamental_data(symbol: str):
+    """Récupère les données fondamentales via Alpha Vantage API"""
+    if not ALPHAVANTAGE_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Alpha Vantage API non configurée")
+    
+    import httpx
+    
+    # Mapping symboles MT5 vers symboles Alpha Vantage
+    symbol_map = {
+        "EURUSD": "EUR/USD",
+        "GBPUSD": "GBP/USD",
+        "USDJPY": "USD/JPY",
+        "XAUUSD": "XAU/USD",
+        "US Oil": "USOIL",
+        "UK 100": "FTSE",
+        "US 30": "DJI",
+        "US 500": "SPX",
+    }
+    av_symbol = symbol_map.get(symbol, symbol.replace(" ", ""))
+    
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            # Pour Forex
+            if "/" in av_symbol or any(c in symbol.upper() for c in ["USD", "EUR", "GBP", "JPY", "CHF", "AUD", "NZD", "CAD"]):
+                from_currency = av_symbol[:3] if len(av_symbol) >= 6 else "USD"
+                to_currency = av_symbol[3:6] if len(av_symbol) >= 6 else av_symbol[:3]
+                url = f"https://www.alphavantage.co/query?function=CURRENCY_EXCHANGE_RATE&from_currency={from_currency}&to_currency={to_currency}&apikey={ALPHAVANTAGE_API_KEY}"
+                resp = await client.get(url)
+                data = resp.json()
+                
+                if "Realtime Currency Exchange Rate" in data:
+                    rate_data = data["Realtime Currency Exchange Rate"]
+                    return {
+                        "symbol": symbol,
+                        "type": "forex",
+                        "exchange_rate": float(rate_data.get("5. Exchange Rate", 0)),
+                        "bid": float(rate_data.get("8. Bid Price", 0)),
+                        "ask": float(rate_data.get("9. Ask Price", 0)),
+                        "last_updated": rate_data.get("6. Last Refreshed", ""),
+                        "timezone": rate_data.get("7. Time Zone", "")
+                    }
+            
+            # Pour actions/indices
+            url = f"https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol={av_symbol}&apikey={ALPHAVANTAGE_API_KEY}"
+            resp = await client.get(url)
+            data = resp.json()
+            
+            if "Global Quote" in data and data["Global Quote"]:
+                quote = data["Global Quote"]
+                return {
+                    "symbol": symbol,
+                    "type": "stock",
+                    "price": float(quote.get("05. price", 0)),
+                    "change": float(quote.get("09. change", 0)),
+                    "change_percent": quote.get("10. change percent", "0%"),
+                    "volume": int(quote.get("06. volume", 0)),
+                    "high": float(quote.get("03. high", 0)),
+                    "low": float(quote.get("04. low", 0)),
+                    "open": float(quote.get("02. open", 0)),
+                    "previous_close": float(quote.get("08. previous close", 0))
+                }
+            
+            return {"symbol": symbol, "error": "No data available", "raw": data}
+            
+    except Exception as e:
+        logger.error(f"Alpha Vantage error for {symbol}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/news/{symbol}")
+async def get_market_news(symbol: str):
+    """Récupère les actualités du marché via Alpha Vantage"""
+    if not ALPHAVANTAGE_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Alpha Vantage API non configurée")
+    
+    import httpx
+    
+    # Mapping pour les tickers de news
+    topics = "financial_markets"
+    if any(c in symbol.upper() for c in ["USD", "EUR", "GBP", "JPY"]):
+        topics = "forex"
+    elif "XAU" in symbol.upper() or "GOLD" in symbol.upper():
+        topics = "finance"
+    elif "OIL" in symbol.upper():
+        topics = "energy_transportation"
+    
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            url = f"https://www.alphavantage.co/query?function=NEWS_SENTIMENT&topics={topics}&apikey={ALPHAVANTAGE_API_KEY}&limit=10"
+            resp = await client.get(url)
+            data = resp.json()
+            
+            if "feed" in data:
+                news_items = []
+                for item in data["feed"][:10]:
+                    news_items.append({
+                        "title": item.get("title", ""),
+                        "summary": item.get("summary", "")[:300] + "..." if len(item.get("summary", "")) > 300 else item.get("summary", ""),
+                        "source": item.get("source", ""),
+                        "sentiment_score": item.get("overall_sentiment_score", 0),
+                        "sentiment_label": item.get("overall_sentiment_label", "Neutral"),
+                        "time_published": item.get("time_published", "")
+                    })
+                
+                # Calcul du sentiment global
+                avg_sentiment = sum(n["sentiment_score"] for n in news_items) / len(news_items) if news_items else 0
+                
+                return {
+                    "symbol": symbol,
+                    "topic": topics,
+                    "news_count": len(news_items),
+                    "average_sentiment": round(avg_sentiment, 4),
+                    "market_bias": "bullish" if avg_sentiment > 0.1 else "bearish" if avg_sentiment < -0.1 else "neutral",
+                    "news": news_items
+                }
+            
+            return {"symbol": symbol, "news": [], "error": "No news available"}
+            
+    except Exception as e:
+        logger.error(f"Alpha Vantage news error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/economic-calendar")
+async def get_economic_calendar():
+    """Récupère le calendrier économique (événements importants)"""
+    if not ALPHAVANTAGE_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Alpha Vantage API non configurée")
+    
+    # Note: Alpha Vantage n'a pas d'endpoint calendrier économique direct
+    # On utilise les news avec filtre économie
+    import httpx
+    
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            url = f"https://www.alphavantage.co/query?function=NEWS_SENTIMENT&topics=economy_fiscal,economy_monetary&apikey={ALPHAVANTAGE_API_KEY}&limit=20"
+            resp = await client.get(url)
+            data = resp.json()
+            
+            events = []
+            if "feed" in data:
+                for item in data["feed"][:20]:
+                    events.append({
+                        "title": item.get("title", ""),
+                        "summary": item.get("summary", "")[:200],
+                        "source": item.get("source", ""),
+                        "impact": "high" if abs(item.get("overall_sentiment_score", 0)) > 0.3 else "medium" if abs(item.get("overall_sentiment_score", 0)) > 0.1 else "low",
+                        "sentiment": item.get("overall_sentiment_label", "Neutral"),
+                        "time": item.get("time_published", "")
+                    })
+            
+            return {
+                "events": events,
+                "count": len(events),
+                "api": "Alpha Vantage"
+            }
+            
+    except Exception as e:
+        logger.error(f"Economic calendar error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ==================== END ALPHA VANTAGE ====================
 
 @app.get("/health")
 async def health_check():
