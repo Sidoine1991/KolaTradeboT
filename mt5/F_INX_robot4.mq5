@@ -3379,6 +3379,7 @@ void ManageDynamicPositionSizing()
          g_dynamicPosStates[i].lastAdjustmentTime = 0;
          g_dynamicPosStates[i].highestPrice = (posType == POSITION_TYPE_BUY) ? currentPrice : 0;
          g_dynamicPosStates[i].lowestPrice = (posType == POSITION_TYPE_SELL) ? currentPrice : 999999;
+         g_dynamicPosStates[i].slModifyCount = 0; // Initialiser le compteur de modifications SL
       }
       
       // Mettre à jour les prix extrêmes
@@ -3650,7 +3651,27 @@ void ManageTrade()
       }
       
       // Placer / ajuster SL/TP s'ils sont manquants pour sécuriser systématiquement la position
-      if(curSL == 0.0 && lossPriceStep > 0.0)
+      // Pour Boom/Crash, vérifier d'abord le compteur de modifications SL (max 4)
+      bool canModifySL = true;
+      if(isBoomCrashPos && curSL != 0.0)
+      {
+         // Chercher le compteur existant
+         for(int t = 0; t < g_slModifyTrackerCount; t++)
+         {
+            if(g_slModifyTracker[t].ticket == ticket)
+            {
+               if(g_slModifyTracker[t].modifyCount >= 4)
+               {
+                  canModifySL = false;
+                  if(DebugBlocks)
+                     Print("🛑 Position ", ticket, ": SL déjà modifié 4 fois (Boom/Crash) - Pas de nouvelle modification");
+               }
+               break;
+            }
+         }
+      }
+      
+      if(curSL == 0.0 && lossPriceStep > 0.0 && canModifySL)
       {
          double newSL = (posType == POSITION_TYPE_BUY) ? openPrice - lossPriceStep : openPrice + lossPriceStep;
          if(MathAbs(curPrice - newSL) < minDist)
@@ -3660,7 +3681,29 @@ void ManageTrade()
          double execPrice = curPrice;
          ValidateAndAdjustStops(psym, ordType, execPrice, newSL, curTP);
          if(trade.PositionModify(ticket, newSL, curTP))
+         {
             curSL = newSL;
+            // Initialiser le compteur pour Boom/Crash si première modification
+            if(isBoomCrashPos && g_slModifyTrackerCount < 100)
+            {
+               bool found = false;
+               for(int t = 0; t < g_slModifyTrackerCount; t++)
+               {
+                  if(g_slModifyTracker[t].ticket == ticket)
+                  {
+                     found = true;
+                     break;
+                  }
+               }
+               if(!found)
+               {
+                  g_slModifyTracker[g_slModifyTrackerCount].ticket = ticket;
+                  g_slModifyTracker[g_slModifyTrackerCount].modifyCount = 0; // Initialisation à 0 car c'est juste la création du SL initial
+                  g_slModifyTracker[g_slModifyTrackerCount].lastModifyTime = TimeCurrent();
+                  g_slModifyTrackerCount++;
+               }
+            }
+         }
       }
 
       if(curTP == 0.0 && profitPriceStep > 0.0)
