@@ -739,7 +739,7 @@ async def analysis(symbol: str):
         logger.error(f"Erreur dans /analysis: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/time_windows/{symbol}", response_model=TimeWindowsResponse)
+@app.get("/time_windows/{symbol:path}", response_model=TimeWindowsResponse)
 async def time_windows(symbol: str):
     """
     Retourne les fenêtres horaires optimales pour trader un symbole

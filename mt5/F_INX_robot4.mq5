@@ -215,7 +215,7 @@ input bool   ExecuteClosestLimitForScalping = true; // Exécuter l'ordre limit l
 
 input group "--- SÉCURITÉ AVANCÉE ---"
 input double MaxDrawdownPercent = 3.0;    // Stop global si perte > X% (utilisé ici comme 3$ max sur petit compte)
-input bool   UseTimeFilter      = false;  // Filtrer par heures de trading
+input bool   UseTimeFilter      = true;   // Filtrer par heures de trading (les fenêtres IA sont TOUJOURS appliquées)
 input string TradingHoursStart  = "00:00";// Heure début (HH:MM, heure serveur)
 input string TradingHoursEnd    = "23:59";// Heure fin   (HH:MM, heure serveur)
 input double MaxLotPerSymbol    = 1.0;    // Lot maximum cumulé par symbole
@@ -1051,6 +1051,14 @@ void AI_ProcessSignal(string signalType, double confidence, string reason = "")
    // Sécurité : si auto-exec est désactivé, on s'arrête (par défaut activé)
    if(!AI_AutoExecuteTrades)
       return;
+   
+   // Vérifier les heures de trading AVANT d'exécuter (priorité absolue)
+   if(!IsTradingTimeAllowed())
+   {
+      Print("Signal IA ignoré: hors heures de trading autorisées pour ", _Symbol);
+      g_lastValidationReason = "Hors heures de trading (fenêtres IA ou plage manuelle)";
+      return;
+   }
    
    // Récupérer les données du marché
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
@@ -4322,7 +4330,11 @@ void AI_UpdateTimeWindows()
    // S'assurer qu'on n'a pas déjà le suffixe
    if(StringSubstr(url, StringLen(url)-1, 1) == "/")
       url = StringSubstr(url, 0, StringLen(url)-1);
-   url += "/time_windows/" + _Symbol;
+   
+   // Encoder le symbole pour l'URL (remplacer les espaces par %20)
+   string encodedSymbol = _Symbol;
+   StringReplace(encodedSymbol, " ", "%20");
+   url += "/time_windows/" + encodedSymbol;
 
    char data[];
    char result[];
