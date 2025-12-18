@@ -85,6 +85,17 @@ if ALPHAVANTAGE_AVAILABLE:
 else:
     logger.info("Alpha Vantage API: Non configuré (ALPHAVANTAGE_API_KEY manquant)")
 
+# Deriv API WebSocket pour données de marché (fallback)
+DERIV_APP_ID = os.getenv("DERIV_APP_ID", "1089")  # 1089 = test app_id
+DERIV_API_TOKEN = os.getenv("DERIV_API_TOKEN", "")
+DERIV_WS_URL = f"wss://ws.derivws.com/websockets/v3?app_id={DERIV_APP_ID}"
+DERIV_AVAILABLE = True
+logger.info(f"Deriv API WebSocket disponible (app_id: {DERIV_APP_ID})")
+
+# Compteur de requêtes Alpha Vantage (limite: 25/jour gratuit)
+alphavantage_request_count = 0
+ALPHAVANTAGE_DAILY_LIMIT = 25
+
 # Tentative d'importation des modules backend (optionnel)
 try:
     sys.path.insert(0, str(Path(__file__).parent / "backend"))
@@ -566,6 +577,215 @@ async def get_economic_calendar():
 
 # ==================== END ALPHA VANTAGE ====================
 
+# ==================== DERIV API ENDPOINTS ====================
+
+import asyncio
+import websockets
+import json as json_lib
+
+async def deriv_ws_request(request_data: dict, timeout: float = 10.0) -> dict:
+    """Effectue une requête WebSocket vers Deriv API"""
+    try:
+        async with websockets.connect(DERIV_WS_URL, close_timeout=5) as ws:
+            await ws.send(json_lib.dumps(request_data))
+            response = await asyncio.wait_for(ws.recv(), timeout=timeout)
+            return json_lib.loads(response)
+    except Exception as e:
+        logger.error(f"Deriv WS error: {e}")
+        return {"error": str(e)}
+
+@app.get("/deriv/ticks/{symbol}")
+async def get_deriv_ticks(symbol: str):
+    """Récupère les ticks en temps réel via Deriv API"""
+    # Mapping symboles MT5 vers Deriv
+    deriv_symbols = {
+        "Volatility 10 Index": "R_10",
+        "Volatility 25 Index": "R_25",
+        "Volatility 50 Index": "R_50",
+        "Volatility 75 Index": "R_75",
+        "Volatility 100 Index": "R_100",
+        "Boom 300 Index": "BOOM300N",
+        "Boom 500 Index": "BOOM500",
+        "Boom 1000 Index": "BOOM1000",
+        "Crash 300 Index": "CRASH300N",
+        "Crash 500 Index": "CRASH500",
+        "Crash 1000 Index": "CRASH1000",
+        "Step Index": "stpRNG",
+    }
+    deriv_symbol = deriv_symbols.get(symbol, symbol)
+    
+    response = await deriv_ws_request({"ticks": deriv_symbol})
+    
+    if "error" in response:
+        raise HTTPException(status_code=500, detail=response["error"])
+    
+    tick = response.get("tick", {})
+    return {
+        "symbol": symbol,
+        "deriv_symbol": deriv_symbol,
+        "quote": tick.get("quote"),
+        "bid": tick.get("bid"),
+        "ask": tick.get("ask"),
+        "epoch": tick.get("epoch"),
+        "api": "Deriv"
+    }
+
+@app.get("/deriv/active-symbols")
+async def get_deriv_active_symbols():
+    """Liste tous les symboles disponibles sur Deriv"""
+    response = await deriv_ws_request({
+        "active_symbols": "brief",
+        "product_type": "basic"
+    })
+    
+    if "error" in response:
+        raise HTTPException(status_code=500, detail=response.get("error", {}).get("message", "Unknown error"))
+    
+    symbols = response.get("active_symbols", [])
+    
+    # Filtrer les indices synthétiques
+    synthetic = [s for s in symbols if s.get("market") == "synthetic_index"]
+    forex = [s for s in symbols if s.get("market") == "forex"]
+    
+    return {
+        "total": len(symbols),
+        "synthetic_indices": len(synthetic),
+        "forex": len(forex),
+        "symbols": [
+            {
+                "symbol": s.get("symbol"),
+                "display_name": s.get("display_name"),
+                "market": s.get("market"),
+                "is_trading_suspended": s.get("is_trading_suspended"),
+                "pip": s.get("pip")
+            }
+            for s in symbols[:50]  # Limiter à 50
+        ],
+        "api": "Deriv"
+    }
+
+@app.get("/deriv/candles/{symbol}")
+async def get_deriv_candles(symbol: str, granularity: int = 60, count: int = 100):
+    """Récupère les chandeliers historiques via Deriv API"""
+    deriv_symbols = {
+        "Volatility 10 Index": "R_10",
+        "Volatility 25 Index": "R_25", 
+        "Volatility 50 Index": "R_50",
+        "Volatility 75 Index": "R_75",
+        "Volatility 100 Index": "R_100",
+        "Boom 300 Index": "BOOM300N",
+        "Boom 500 Index": "BOOM500",
+        "Boom 1000 Index": "BOOM1000",
+        "Crash 300 Index": "CRASH300N",
+        "Crash 500 Index": "CRASH500",
+        "Crash 1000 Index": "CRASH1000",
+    }
+    deriv_symbol = deriv_symbols.get(symbol, symbol)
+    
+    response = await deriv_ws_request({
+        "ticks_history": deriv_symbol,
+        "adjust_start_time": 1,
+        "count": count,
+        "end": "latest",
+        "granularity": granularity,
+        "style": "candles"
+    })
+    
+    if "error" in response:
+        raise HTTPException(status_code=500, detail=response.get("error", {}).get("message", "Unknown error"))
+    
+    candles = response.get("candles", [])
+    
+    return {
+        "symbol": symbol,
+        "deriv_symbol": deriv_symbol,
+        "granularity": granularity,
+        "count": len(candles),
+        "candles": [
+            {
+                "epoch": c.get("epoch"),
+                "open": c.get("open"),
+                "high": c.get("high"),
+                "low": c.get("low"),
+                "close": c.get("close")
+            }
+            for c in candles
+        ],
+        "api": "Deriv"
+    }
+
+@app.get("/market-data/{symbol}")
+async def get_market_data_with_fallback(symbol: str):
+    """Récupère les données de marché avec fallback automatique (Alpha Vantage -> Deriv)"""
+    global alphavantage_request_count
+    
+    # Essayer Alpha Vantage d'abord si pas épuisé
+    if ALPHAVANTAGE_AVAILABLE and alphavantage_request_count < ALPHAVANTAGE_DAILY_LIMIT:
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                # Mapping pour Alpha Vantage
+                if any(c in symbol.upper() for c in ["USD", "EUR", "GBP", "JPY"]):
+                    from_c = symbol[:3].upper()
+                    to_c = symbol[3:6].upper() if len(symbol) >= 6 else "USD"
+                    url = f"https://www.alphavantage.co/query?function=CURRENCY_EXCHANGE_RATE&from_currency={from_c}&to_currency={to_c}&apikey={ALPHAVANTAGE_API_KEY}"
+                    resp = await client.get(url)
+                    alphavantage_request_count += 1
+                    data = resp.json()
+                    
+                    if "Realtime Currency Exchange Rate" in data:
+                        rate_data = data["Realtime Currency Exchange Rate"]
+                        return {
+                            "symbol": symbol,
+                            "price": float(rate_data.get("5. Exchange Rate", 0)),
+                            "bid": float(rate_data.get("8. Bid Price", 0)),
+                            "ask": float(rate_data.get("9. Ask Price", 0)),
+                            "api": "Alpha Vantage",
+                            "requests_remaining": ALPHAVANTAGE_DAILY_LIMIT - alphavantage_request_count
+                        }
+        except Exception as e:
+            logger.warning(f"Alpha Vantage failed, falling back to Deriv: {e}")
+    
+    # Fallback vers Deriv pour indices synthétiques ou si AV épuisé
+    deriv_symbols = {
+        "Volatility 10 Index": "R_10",
+        "Volatility 25 Index": "R_25",
+        "Volatility 50 Index": "R_50", 
+        "Volatility 75 Index": "R_75",
+        "Volatility 100 Index": "R_100",
+        "Boom 300 Index": "BOOM300N",
+        "Boom 500 Index": "BOOM500",
+        "Boom 1000 Index": "BOOM1000",
+        "Crash 300 Index": "CRASH300N",
+        "Crash 500 Index": "CRASH500",
+        "Crash 1000 Index": "CRASH1000",
+        "Step Index": "stpRNG",
+    }
+    
+    deriv_symbol = deriv_symbols.get(symbol)
+    if deriv_symbol:
+        response = await deriv_ws_request({"ticks": deriv_symbol})
+        if "tick" in response:
+            tick = response["tick"]
+            return {
+                "symbol": symbol,
+                "price": tick.get("quote"),
+                "bid": tick.get("bid"),
+                "ask": tick.get("ask"),
+                "epoch": tick.get("epoch"),
+                "api": "Deriv",
+                "alphavantage_exhausted": alphavantage_request_count >= ALPHAVANTAGE_DAILY_LIMIT
+            }
+    
+    return {
+        "symbol": symbol,
+        "error": "Symbol not supported",
+        "supported_deriv": list(deriv_symbols.keys()),
+        "alphavantage_requests_used": alphavantage_request_count
+    }
+
+# ==================== END DERIV API ====================
+
 @app.get("/health")
 async def health_check():
     """Vérification de l'état du serveur"""
@@ -575,7 +795,9 @@ async def health_check():
         "cache_size": len(prediction_cache),
         "mt5_initialized": mt5_initialized,
         "mistral_available": MISTRAL_AVAILABLE,
-        "gemini_available": GEMINI_AVAILABLE
+        "gemini_available": GEMINI_AVAILABLE,
+        "deriv_available": DERIV_AVAILABLE,
+        "alphavantage_requests_remaining": ALPHAVANTAGE_DAILY_LIMIT - alphavantage_request_count
     }
 
 @app.get("/status")
