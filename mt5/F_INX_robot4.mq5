@@ -6096,7 +6096,8 @@ void DisplaySpikeAlert()
       // Exécuter automatiquement le trade si pas encore fait,
       // TOUJOURS après le délai défini (30 secondes après détection = au moment du spike estimé)
       // Le trade se déclenche immédiatement si le délai est déjà passé (alerte tardive)
-      if(!g_aiSpikeExecuted && g_spikeEntryTime > 0)
+      bool timeToExecute = (g_spikeEntryTime > 0 && TimeCurrent() >= g_spikeEntryTime);
+      if(!g_aiSpikeExecuted && timeToExecute)
       {
          // Récupérer les données nécessaires
          double atr[];
