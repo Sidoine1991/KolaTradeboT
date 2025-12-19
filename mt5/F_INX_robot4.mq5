@@ -29,13 +29,36 @@ string g_lastValidationReason = "";
 int g_consecutiveLosses = 0;                 // Compteur de pertes consécutives
 datetime g_recoveryUntil = 0;                // Heure de fin de la période de récupération
 
+// Variables pour les niveaux Fibonacci
+double g_fibLevels[];                        // Tableau pour stocker les niveaux Fibonacci
+bool g_fibLevelsCalculated = false;          // Indique si les niveaux ont été calculés
+datetime g_lastFibUpdate = 0;                // Dernière mise à jour des niveaux Fibonacci
+
+// Paramètres de validation ATR
+const double MinATR = 0.0005;  // Valeur minimale de l'ATR pour considérer le trade
+const double MaxATR = 0.0050;  // Valeur maximale de l'ATR pour considérer le trade
+
+// Contrôle des notifications
+input bool SendNotifications = true;  // Activer les notifications push
+input bool ShowZones = true;         // Afficher les zones de trading
+
 // Function declarations
 int AI_GetDecision(double rsi, double atr, double emaFastH1, double emaSlowH1, 
                   double emaFastM1, double emaSlowM1, double ask, double bid, 
                   int dirRule, bool spikeMode);
+bool IsNewBar();
+void ManagePositionsWithFibonacci();
+void CheckForEntrySignals();
+void ManageOpenPositions();
+void UpdatePanel();
 int AllowedDirectionFromSymbol(string symbol);
 void DrawAIRecommendation(string action, double confidence, string reason, double price);
 void AI_UpdateAnalysis();
+void ParseAndDrawFibonacciFromResponse(string resp);
+void DrawFibonacciLevels(double &fibValues[]);
+void ParseTrendlinesFromResponse(string resp);
+void ExtractAndDrawTrendline(string resp, int startPos, bool isBull);
+void PerformLocalAnalysis();
 void EvaluateBoomCrashZoneScalps();
 void EvaluateAIZoneBounceStrategy();
 bool SMC_UpdateZones();
@@ -44,6 +67,13 @@ void SendAISummaryIfDue();
 void DrawAIBlockLabel(string symbol, string title, string reason);
 void CloseExcessPositions();
 void AI_UpdateFundamentalAnalysis();
+//--- Fonctions Fibonacci pour le trading ---
+bool IsPriceNearFibonacciLevel(double price, double &fibLevel, double tolerance);
+bool ValidateFibonacciTradeSignal(bool isBuy, double price);
+double GetFibonacciStopLoss(bool isBuy, double entryPrice);
+double GetFibonacciTakeProfit(bool isBuy, double entryPrice);
+bool IsFibonacciBounceConfirming(bool isBuy, int lookbackBars);
+void UpdateFibonacciLevels();
 bool IsFundamentalConfirming(string direction);
 bool PredictSpikeFromSMCOB(double &spikePrice, bool &isBuySpike, double &confidence);
 bool SMC_OB_CheckZones(double currentPrice, bool &isBuySpike, double &confidence);
@@ -313,6 +343,106 @@ input int    MaxConsecLosses    = 5;        // Arrêter après X pertes consécu
 double g_dailyProfit = 0.0;
 double g_dailyLoss = 0.0;
 datetime g_lastTradeDay = 0;  // Dernier jour de trading
+
+// Variables pour le bilan des trades
+int g_totalTradesCount = 0;
+double g_totalCapitalEngaged = 0.0;
+double g_totalProfitLoss = 0.0;
+string g_tradedSymbols = "";
+datetime g_lastBilanNotification = 0;
+string g_tradedSymbolsList[100]; // Tableau pour stocker les symboles uniques
+datetime g_lastTradeTime = 0; // Dernière heure de trade
+
+// Structure pour suivre les pertes consécutives par symbole
+struct SymbolLossTracker {
+   string symbol;          // Symbole
+   int consecutiveLosses;  // Nombre de pertes consécutives
+   datetime lastLossTime;   // Heure de la dernière perte
+};
+SymbolLossTracker g_symbolLossTrackers[100]; // Tableau pour suivre les pertes par symbole
+
+//+------------------------------------------------------------------+
+//| Vérifie si on peut trader sur ce symbole après des pertes       |
+//+------------------------------------------------------------------+
+bool CanTradeSymbolAfterLoss(string symbol)
+{
+   // Vérifier si le symbole a des pertes consécutives
+   for(int i = 0; i < ArraySize(g_symbolLossTrackers); i++)
+   {
+      if(g_symbolLossTrackers[i].symbol == symbol)
+      {
+         // Si 2 pertes ou plus, attendre 10 minutes
+         if(g_symbolLossTrackers[i].consecutiveLosses >= 2)
+         {
+            datetime now = TimeCurrent();
+            if(now - g_symbolLossTrackers[i].lastLossTime < 600) // 600 secondes = 10 minutes
+            {
+               Print("⏳ Attente de 10 minutes avant de retrader ", symbol, " après 2 pertes consécutives");
+               return false;
+            }
+            else
+            {
+               // Réinitialiser le compteur après 10 minutes
+               g_symbolLossTrackers[i].consecutiveLosses = 0;
+               return true;
+            }
+         }
+         return true; // Moins de 2 pertes, trading autorisé
+      }
+   }
+   return true; // Aucune entrée pour ce symbole, trading autorisé
+}
+
+//+------------------------------------------------------------------+
+//| Met à jour le suivi des pertes par symbole                      |
+//+------------------------------------------------------------------+
+void UpdateSymbolLossTracking(string symbol, double profit)
+{
+   bool symbolFound = false;
+   int firstEmptySlot = -1;
+   
+   // Parcourir le tableau pour trouver ou ajouter le symbole
+   for(int i = 0; i < ArraySize(g_symbolLossTrackers); i++)
+   {
+      if(g_symbolLossTrackers[i].symbol == symbol)
+      {
+         symbolFound = true;
+         if(profit < 0) // Perte
+         {
+            g_symbolLossTrackers[i].consecutiveLosses++;
+            g_symbolLossTrackers[i].lastLossTime = TimeCurrent();
+            Print("⚠️ Perte consécutive #", g_symbolLossTrackers[i].consecutiveLosses, " sur ", symbol);
+            
+            if(g_symbolLossTrackers[i].consecutiveLosses >= 2)
+            {
+               Print("⏸️ Pause de 10 minutes sur ", symbol, " après 2 pertes consécutives");
+            }
+         }
+         else // Profit, réinitialiser le compteur
+         {
+            if(g_symbolLossTrackers[i].consecutiveLosses > 0)
+            {
+               Print("✅ Profit sur ", symbol, " - Réinitialisation du compteur de pertes");
+               g_symbolLossTrackers[i].consecutiveLosses = 0;
+            }
+         }
+         break;
+      }
+      else if(firstEmptySlot == -1 && g_symbolLossTrackers[i].symbol == "")
+      {
+         firstEmptySlot = i;
+      }
+   }
+   
+   // Si le symbole n'existe pas encore et qu'il y a une perte, l'ajouter
+   if(!symbolFound && profit < 0 && firstEmptySlot != -1)
+   {
+      g_symbolLossTrackers[firstEmptySlot].symbol = symbol;
+      g_symbolLossTrackers[firstEmptySlot].consecutiveLosses = 1;
+      g_symbolLossTrackers[firstEmptySlot].lastLossTime = TimeCurrent();
+      Print("⚠️ Première perte sur ", symbol);
+   }
+}
 input int    MaxSpreadPoints = 100000;   // Spread max autorisé (filtre assoupli)
 input int    MaxSimultaneousSymbols = 2; // Nombre maximum de symboles tradés en même temps
 input bool   UseGlobalLossStop = false;   // Stop global sur pertes cumulées
@@ -320,6 +450,14 @@ input double GlobalLossLimit   = -3.0;    // Perte max cumulée avant clôture d
 input double LossCutDollars    = 2.0;     // Coupure max pour la position principale (en $)
 input double ProfitSecureDollars = 2.0;   // Gain à sécuriser (en $) par position
 input int    MinPositionLifetimeSec = 60; // Délai minimum avant fermeture (secondes) - évite ouvertures/fermetures trop rapides
+
+// === Gestion du Risque ===
+input group "=== Gestion du Risque ==="
+input double RiskPerTrade = 0.5;    // Risque par trade (% du capital) [0.1-2.0]
+input double MaxDailyLoss = 2.0;    // Perte quotidienne maximale (%)
+input double MaxDrawdown = 10.0;    // Drawdown maximal autorisé (%)
+input bool UseDynamicPositionSizing2 = true;  // Ajustement dynamique des tailles de position
+input double MaxLeverage = 5.0;     // Effet de levier maximum autorisé
 
 // --- PROTECTION CONTRE LES PERTES TOTALES ---
 input bool   EnableTotalLossProtection = true;  // Activer la protection contre les pertes totales
@@ -422,6 +560,12 @@ input string AI_AnalysisURL    = "http://127.0.0.1:8000/analysis";  // URL base 
 input int    AI_AnalysisIntervalSec = 60;                           // Fréquence de rafraîchissement de l'analyse (secondes)
 input bool   AI_DrawH1Structure = true;                             // Tracer la structure H1 (trendlines, ETE) sur le graphique
 input string AI_TimeWindowsURLBase = "http://127.0.0.1:8000";       // Racine API pour /time_windows
+//--- Paramètres Fibonacci pour le trading ---
+input bool   UseFibonacciInTrading = true;                          // Intégrer les niveaux Fibonacci dans les décisions de trade
+input double FibonacciTolerancePips = 5.0;                          // Tolérance en pips pour considérer une proximité avec un niveau Fibonacci
+input bool   FibonacciFilterTrades = true;                          // Filtrer les trades qui ne sont pas proches des niveaux Fibonacci
+input bool   FibonacciAdjustSLTP = true;                            // Ajuster SL/TP selon les niveaux Fibonacci
+input int    FibonacciConfirmationBars = 2;                         // Nombre de bougies pour confirmer un rebond Fibonacci
 // Paramètres de trading pour les spikes
 input double TakeProfitDollars = 10.0; // Objectif de profit en dollars
 input double MinATRForTrading = 0.0001; // ATR minimum pour le trading
@@ -454,6 +598,433 @@ input double InpGlobalProfitTarget  = 2.50;   // Cible de profit net ($) pour co
 // Inclure le module SMC après la déclaration des inputs pour éviter les redéfinitions
 #define SMC_OB_PARAMS_DECLARED
 #include "D:\\Dev\\TradBOT\\mt5\\SMC_OB_signals.mqh"
+
+//+------------------------------------------------------------------+
+//| Trade Execution Module                                           |
+//+------------------------------------------------------------------+
+enum ENUM_TRADE_VALIDATION {
+   TRADE_VALIDATION_OK = 0,
+   TRADE_VALIDATION_DISABLED,
+   TRADE_VALIDATION_INSUFFICIENT_EQUITY,
+   TRADE_VALIDATION_POSITION_LIMIT,
+   TRADE_VALIDATION_SPREAD_TOO_HIGH,
+   TRADE_VALIDATION_COOLDOWN,
+   TRADE_VALIDATION_OTHER
+};
+
+// Trade validation structure
+struct STradeValidation {
+   ENUM_TRADE_VALIDATION code;
+   string message;
+   bool canRetry;
+};
+
+//+------------------------------------------------------------------+
+//| Performance monitoring structure                                 |
+//+------------------------------------------------------------------+
+struct SPerformanceMetrics {
+   int totalTrades;
+   int successfulTrades;
+   int failedTrades;
+   double totalProfit;
+   double maxDrawdown;
+   double winRate;
+   datetime lastUpdate;
+   
+   void Update(bool success, double profit = 0) {
+      totalTrades++;
+      if(success) {
+         successfulTrades++;
+         totalProfit += profit;
+      } else {
+         failedTrades++;
+      }
+      winRate = (totalTrades > 0) ? (double)successfulTrades / totalTrades * 100.0 : 0;
+      lastUpdate = TimeCurrent();
+   }
+};
+
+//+------------------------------------------------------------------+
+//| Enhanced risk management system                                  |
+//+------------------------------------------------------------------+
+class CRiskManager {
+private:
+   double m_maxRiskPerTrade;    // Maximum risk per trade (% of balance)
+   double m_dailyLossLimit;     // Daily loss limit (% of balance)
+   double m_maxDrawdown;        // Maximum drawdown (%)
+   double m_startingBalance;    // Starting balance for the day
+   double m_currentDrawdown;    // Current drawdown
+   
+public:
+   CRiskManager(double riskPerTrade = 1.0, double dailyLossLimit = 2.0, double maxDrawdown = 10.0) {
+      m_maxRiskPerTrade = riskPerTrade;
+      m_dailyLossLimit = dailyLossLimit;
+      m_maxDrawdown = maxDrawdown;
+      m_startingBalance = AccountInfoDouble(ACCOUNT_BALANCE);
+      m_currentDrawdown = 0.0;
+   }
+   
+   // Check if we can open a new position
+   bool CanOpenPosition(double riskAmount) {
+      double balance = AccountInfoDouble(ACCOUNT_BALANCE);
+      double equity = AccountInfoDouble(ACCOUNT_EQUITY);
+      
+      // Check daily loss limit
+      double dailyPnL = balance - m_startingBalance;
+      if(dailyPnL < 0 && MathAbs(dailyPnL) >= m_startingBalance * (m_dailyLossLimit / 100.0)) {
+         Print("Daily loss limit reached: ", dailyPnL);
+         return false;
+      }
+      
+      // Check drawdown
+      double drawdown = (equity < balance) ? (balance - equity) / balance * 100.0 : 0.0;
+      if(drawdown >= m_maxDrawdown) {
+         Print("Maximum drawdown reached: ", drawdown, "%");
+         return false;
+      }
+      
+      // Check risk per trade
+      if(riskAmount > balance * (m_maxRiskPerTrade / 100.0)) {
+         Print("Risk per trade too high: ", riskAmount);
+         return false;
+      }
+      
+      return true;
+   }
+   
+   // Update drawdown
+   void UpdateDrawdown() {
+      double balance = AccountInfoDouble(ACCOUNT_BALANCE);
+      double equity = AccountInfoDouble(ACCOUNT_EQUITY);
+      m_currentDrawdown = (equity < balance) ? (balance - equity) / balance * 100.0 : 0.0;
+   }
+   
+   // Get current drawdown
+   double GetCurrentDrawdown() const {
+      return m_currentDrawdown;
+   }
+};
+
+//+------------------------------------------------------------------+
+//| Trade journal for better tracking                                |
+//+------------------------------------------------------------------+
+class CTradeJournal {
+private:
+   string m_filename;
+   
+public:
+   CTradeJournal() {
+      m_filename = "TradeLog_" + IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)) + ".csv";
+      Initialize();
+   }
+   
+   // Initialize the trade journal
+   void Initialize() {
+      int handle = FileOpen(m_filename, FILE_WRITE|FILE_CSV|FILE_ANSI, ',');
+      if(handle != INVALID_HANDLE) {
+         FileWrite(handle, "DateTime", "Symbol", "Type", "Lots", "OpenPrice", 
+                  "StopLoss", "TakeProfit", "ClosePrice", "Profit", "Comment");
+         FileClose(handle);
+      }
+   }
+   
+   // Log a new trade
+   void LogTrade(string symbol, ENUM_ORDER_TYPE type, double lots, 
+                double openPrice, double sl, double tp, 
+                double closePrice, double profit, string comment = "") {
+      int handle = FileOpen(m_filename, FILE_READ|FILE_WRITE|FILE_CSV|FILE_ANSI, ',');
+      if(handle != INVALID_HANDLE) {
+         FileSeek(handle, 0, SEEK_END);
+         FileWrite(handle, 
+                  TimeToString(TimeCurrent(), TIME_DATE|TIME_SECONDS),
+                  symbol,
+                  EnumToString(type),
+                  DoubleToString(lots, 2),
+                  DoubleToString(openPrice, (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS)),
+                  DoubleToString(sl, (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS)),
+                  DoubleToString(tp, (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS)),
+                  DoubleToString(closePrice, (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS)),
+                  DoubleToString(profit, 2),
+                  comment);
+         FileClose(handle);
+      }
+   }
+};
+
+// Global instances
+static SPerformanceMetrics g_performance;
+static CRiskManager g_riskManager(1.0, 2.0, 10.0);
+static CTradeJournal g_tradeJournal;
+
+//+------------------------------------------------------------------+
+//| Validate trade conditions                                        |
+//+------------------------------------------------------------------+
+STradeValidation ValidateTradeConditions(ENUM_ORDER_TYPE type, bool isSpikePriority = false)
+{
+   STradeValidation result = {TRADE_VALIDATION_OK, "", true};
+   
+   if(!EnableTrading) {
+      result.code = TRADE_VALIDATION_DISABLED;
+      result.message = "Trading is disabled by user setting";
+      return result;
+   }
+   
+   if(AccountInfoDouble(ACCOUNT_EQUITY) < MinEquityForTrading) {
+      result.code = TRADE_VALIDATION_INSUFFICIENT_EQUITY;
+      result.message = "Insufficient equity to open new position";
+      return result;
+   }
+   
+   // Add more validation checks here...
+   
+   return result;
+}
+
+//+------------------------------------------------------------------+
+//| Execute trade with enhanced error handling                       |
+//+------------------------------------------------------------------+
+bool ExecuteTradeWithRetry(ENUM_ORDER_TYPE type, double atr, double price, 
+                          string comment, double lotMultiplier = 1.0, 
+                          bool isSpikePriority = false, int maxRetries = 3)
+{
+   for(int attempt = 1; attempt <= maxRetries; attempt++) {
+      STradeValidation validation = ValidateTradeConditions(type, isSpikePriority);
+      if(validation.code != TRADE_VALIDATION_OK) {
+         Print("Trade validation failed: ", validation.message);
+         if(!validation.canRetry) return false;
+         continue;
+      }
+      
+      // Proceed with trade execution
+      if(ExecuteTrade(type, atr, price, comment, lotMultiplier, isSpikePriority)) {
+         return true;
+      }
+      
+      // If we get here, the trade failed
+      int error = GetLastError();
+      string errorMsg = "";
+      switch(error) {
+         case 10001: errorMsg = "Invalid request"; break;
+         case 10002: errorMsg = "Invalid parameters"; break;
+         case 10003: errorMsg = "Trade disabled"; break;
+         case 10004: errorMsg = "Trade busy"; break;
+         case 10005: errorMsg = "Invalid price"; break;
+         case 10006: errorMsg = "Invalid SL/TP"; break;
+         case 10007: errorMsg = "Insufficient funds"; break;
+         case 10008: errorMsg = "Invalid volume"; break;
+         case 10009: errorMsg = "Market closed"; break;
+         case 10010: errorMsg = "No quotes"; break;
+         case 10011: errorMsg = "Invalid expiration"; break;
+         case 10012: errorMsg = "Order changed"; break;
+         case 10013: errorMsg = "Invalid order type"; break;
+         case 10014: errorMsg = "Invalid stops"; break;
+         case 10015: errorMsg = "Invalid trade volume"; break;
+         case 10016: errorMsg = "Market closed"; break;
+         case 10017: errorMsg = "No quotes to trade"; break;
+         case 10018: errorMsg = "Price changed"; break;
+         case 10019: errorMsg = "Off quotes"; break;
+         case 10020: errorMsg = "Requote"; break;
+         case 10021: errorMsg = "Order expires"; break;
+         case 10022: errorMsg = "Order accepted"; break;
+         case 10023: errorMsg = "Order already exists"; break;
+         case 10024: errorMsg = "Order accepted for execution"; break;
+         case 10025: errorMsg = "Order placed"; break;
+         case 10026: errorMsg = "Order modified"; break;
+         case 10027: errorMsg = "Order cancelled"; break;
+         case 10028: errorMsg = "Position already exists"; break;
+         case 10029: errorMsg = "Position modified"; break;
+         case 10030: errorMsg = "Position closed"; break;
+         case 10031: errorMsg = "Position closed by opposite trade"; break;
+         case 10032: errorMsg = "Position reversed"; break;
+         case 10033: errorMsg = "Position volume added"; break;
+         case 10034: errorMsg = "Position volume subtracted"; break;
+         case 10035: errorMsg = "Position opened"; break;
+         case 10036: errorMsg = "Position closed partially"; break;
+         case 10037: errorMsg = "Position volume added partially"; break;
+         case 10038: errorMsg = "Position volume subtracted partially"; break;
+         case 10039: errorMsg = "Position reversed partially"; break;
+         case 10040: errorMsg = "Request rejected"; break;
+         case 10041: errorMsg = "Request rejected - timeout"; break;
+         case 10042: errorMsg = "Request rejected - invalid price"; break;
+         case 10043: errorMsg = "Request rejected - invalid volume"; break;
+         case 10044: errorMsg = "Request rejected - market closed"; break;
+         case 10045: errorMsg = "Request rejected - no quotes"; break;
+         case 10046: errorMsg = "Request rejected - client disabled"; break;
+         case 10047: errorMsg = "Request rejected - server busy"; break;
+         case 10048: errorMsg = "Request rejected - old version"; break;
+         case 10049: errorMsg = "Request rejected - not enough rights"; break;
+         case 10050: errorMsg = "Request rejected - request frequency too high"; break;
+         case 10051: errorMsg = "Request rejected - no connection"; break;
+         case 10052: errorMsg = "Request rejected - server shutdown"; break;
+         case 10053: errorMsg = "Request rejected - operation disabled"; break;
+         case 10054: errorMsg = "Request rejected - invalid stop loss"; break;
+         case 10055: errorMsg = "Request rejected - invalid take profit"; break;
+         case 10056: errorMsg = "Request rejected - invalid position"; break;
+         case 10057: errorMsg = "Request rejected - invalid order"; break;
+         case 10058: errorMsg = "Request rejected - invalid expiration"; break;
+         case 10059: errorMsg = "Request rejected - invalid order type"; break;
+         case 10060: errorMsg = "Request rejected - invalid trade volume"; break;
+         case 10061: errorMsg = "Request rejected - market closed"; break;
+         case 10062: errorMsg = "Request rejected - no quotes"; break;
+         case 10063: errorMsg = "Request rejected - price changed"; break;
+         case 10064: errorMsg = "Request rejected - off quotes"; break;
+         case 10065: errorMsg = "Request rejected - requote"; break;
+         case 10066: errorMsg = "Request rejected - order expires"; break;
+         case 10067: errorMsg = "Request rejected - order already exists"; break;
+         case 10068: errorMsg = "Request rejected - order accepted"; break;
+         case 10069: errorMsg = "Request rejected - order accepted for execution"; break;
+         case 10070: errorMsg = "Request rejected - order placed"; break;
+         case 10071: errorMsg = "Request rejected - order modified"; break;
+         case 10072: errorMsg = "Request rejected - order cancelled"; break;
+         case 10073: errorMsg = "Request rejected - position already exists"; break;
+         case 10074: errorMsg = "Request rejected - position modified"; break;
+         case 10075: errorMsg = "Request rejected - position closed"; break;
+         case 10076: errorMsg = "Request rejected - position closed by opposite trade"; break;
+         case 10077: errorMsg = "Request rejected - position reversed"; break;
+         case 10078: errorMsg = "Request rejected - position volume added"; break;
+         case 10079: errorMsg = "Request rejected - position volume subtracted"; break;
+         case 10080: errorMsg = "Request rejected - position reversed partially"; break;
+         case 10081: errorMsg = "Request rejected - request rejected"; break;
+         case 10082: errorMsg = "Request rejected - request rejected - timeout"; break;
+         case 10083: errorMsg = "Request rejected - request rejected - invalid price"; break;
+         case 10084: errorMsg = "Request rejected - request rejected - invalid volume"; break;
+         case 10085: errorMsg = "Request rejected - request rejected - market closed"; break;
+         case 10086: errorMsg = "Request rejected - request rejected - no quotes"; break;
+         case 10087: errorMsg = "Request rejected - request rejected - client disabled"; break;
+         case 10088: errorMsg = "Request rejected - request rejected - server busy"; break;
+         case 10089: errorMsg = "Request rejected - request rejected - old version"; break;
+         case 10090: errorMsg = "Request rejected - request rejected - not enough rights"; break;
+         case 10091: errorMsg = "Request rejected - request rejected - request frequency too high"; break;
+         case 10092: errorMsg = "Request rejected - request rejected - no connection"; break;
+         case 10093: errorMsg = "Request rejected - request rejected - server shutdown"; break;
+         case 10094: errorMsg = "Request rejected - request rejected - operation disabled"; break;
+         case 10095: errorMsg = "Request rejected - request rejected - invalid stop loss"; break;
+         case 10096: errorMsg = "Request rejected - request rejected - invalid take profit"; break;
+         case 10097: errorMsg = "Request rejected - request rejected - invalid position"; break;
+         case 10098: errorMsg = "Request rejected - request rejected - invalid order"; break;
+         case 10099: errorMsg = "Request rejected - request rejected - invalid expiration"; break;
+         case 10100: errorMsg = "Request rejected - request rejected - invalid order type"; break;
+         case 10101: errorMsg = "Request rejected - request rejected - invalid trade volume"; break;
+         case 10102: errorMsg = "Request rejected - request rejected - market closed"; break;
+         case 10103: errorMsg = "Request rejected - request rejected - no quotes"; break;
+         case 10104: errorMsg = "Request rejected - request rejected - price changed"; break;
+         case 10105: errorMsg = "Request rejected - request rejected - off quotes"; break;
+         case 10106: errorMsg = "Request rejected - request rejected - requote"; break;
+         case 10107: errorMsg = "Request rejected - request rejected - order expires"; break;
+         case 10108: errorMsg = "Request rejected - request rejected - order already exists"; break;
+         case 10109: errorMsg = "Request rejected - request rejected - order accepted"; break;
+         case 10110: errorMsg = "Request rejected - request rejected - order accepted for execution"; break;
+         case 10111: errorMsg = "Request rejected - request rejected - order placed"; break;
+         case 10112: errorMsg = "Request rejected - request rejected - order modified"; break;
+         case 10113: errorMsg = "Request rejected - request rejected - order cancelled"; break;
+         case 10114: errorMsg = "Request rejected - request rejected - position already exists"; break;
+         case 10115: errorMsg = "Request rejected - request rejected - position modified"; break;
+         case 10116: errorMsg = "Request rejected - request rejected - position closed"; break;
+         case 10117: errorMsg = "Request rejected - request rejected - position closed by opposite trade"; break;
+         case 10118: errorMsg = "Request rejected - request rejected - position reversed"; break;
+         case 10119: errorMsg = "Request rejected - request rejected - position volume added"; break;
+         case 10120: errorMsg = "Request rejected - request rejected - position volume subtracted"; break;
+         case 10121: errorMsg = "Request rejected - request rejected - position reversed partially"; break;
+         case 10122: errorMsg = "Request rejected - request rejected - request rejected"; break;
+         case 10123: errorMsg = "Request rejected - request rejected - request rejected - timeout"; break;
+         case 10124: errorMsg = "Request rejected - request rejected - request rejected - invalid price"; break;
+         case 10125: errorMsg = "Request rejected - request rejected - request rejected - invalid volume"; break;
+         case 10126: errorMsg = "Request rejected - request rejected - request rejected - market closed"; break;
+         case 10127: errorMsg = "Request rejected - request rejected - request rejected - no quotes"; break;
+         case 10128: errorMsg = "Request rejected - request rejected - request rejected - client disabled"; break;
+         case 10129: errorMsg = "Request rejected - request rejected - request rejected - server busy"; break;
+         case 10130: errorMsg = "Request rejected - request rejected - request rejected - old version"; break;
+         case 10131: errorMsg = "Request rejected - request rejected - request rejected - not enough rights"; break;
+         case 10132: errorMsg = "Request rejected - request rejected - request rejected - request frequency too high"; break;
+         case 10133: errorMsg = "Request rejected - request rejected - request rejected - no connection"; break;
+         case 10134: errorMsg = "Request rejected - request rejected - request rejected - server shutdown"; break;
+         case 10135: errorMsg = "Request rejected - request rejected - request rejected - operation disabled"; break;
+         case 10136: errorMsg = "Request rejected - request rejected - request rejected - invalid stop loss"; break;
+         case 10137: errorMsg = "Request rejected - request rejected - request rejected - invalid take profit"; break;
+         case 10138: errorMsg = "Request rejected - request rejected - request rejected - invalid position"; break;
+         case 10139: errorMsg = "Request rejected - request rejected - request rejected - invalid order"; break;
+         case 10140: errorMsg = "Request rejected - request rejected - request rejected - invalid expiration"; break;
+         case 10141: errorMsg = "Request rejected - request rejected - request rejected - invalid order type"; break;
+         case 10142: errorMsg = "Request rejected - request rejected - request rejected - invalid trade volume"; break;
+         case 10143: errorMsg = "Request rejected - request rejected - request rejected - market closed"; break;
+         case 10144: errorMsg = "Request rejected - request rejected - request rejected - no quotes"; break;
+         case 10145: errorMsg = "Request rejected - request rejected - request rejected - price changed"; break;
+         case 10146: errorMsg = "Request rejected - request rejected - request rejected - off quotes"; break;
+         case 10147: errorMsg = "Request rejected - request rejected - request rejected - requote"; break;
+         case 10148: errorMsg = "Request rejected - request rejected - request rejected - order expires"; break;
+         case 10149: errorMsg = "Request rejected - request rejected - request rejected - order already exists"; break;
+         case 10150: errorMsg = "Request rejected - request rejected - request rejected - order accepted"; break;
+         case 10151: errorMsg = "Request rejected - request rejected - request rejected - order accepted for execution"; break;
+         case 10152: errorMsg = "Request rejected - request rejected - request rejected - order placed"; break;
+         case 10153: errorMsg = "Request rejected - request rejected - request rejected - order modified"; break;
+         case 10154: errorMsg = "Request rejected - request rejected - request rejected - order cancelled"; break;
+         case 10155: errorMsg = "Request rejected - request rejected - request rejected - position already exists"; break;
+         case 10156: errorMsg = "Request rejected - request rejected - request rejected - position modified"; break;
+         case 10157: errorMsg = "Request rejected - request rejected - request rejected - position closed"; break;
+         case 10158: errorMsg = "Request rejected - request rejected - request rejected - position closed by opposite trade"; break;
+         case 10159: errorMsg = "Request rejected - request rejected - request rejected - position reversed"; break;
+         case 10160: errorMsg = "Request rejected - request rejected - request rejected - position volume added"; break;
+         case 10161: errorMsg = "Request rejected - request rejected - request rejected - position volume subtracted"; break;
+         case 10162: errorMsg = "Request rejected - request rejected - request rejected - position reversed partially"; break;
+         case 10163: errorMsg = "Request rejected - request rejected - request rejected - request rejected"; break;
+         case 10164: errorMsg = "Request rejected - request rejected - request rejected - request rejected - timeout"; break;
+         case 10165: errorMsg = "Request rejected - request rejected - request rejected - request rejected - invalid price"; break;
+         case 10166: errorMsg = "Request rejected - request rejected - request rejected - request rejected - invalid volume"; break;
+         case 10167: errorMsg = "Request rejected - request rejected - request rejected - request rejected - market closed"; break;
+         case 10168: errorMsg = "Request rejected - request rejected - request rejected - request rejected - no quotes"; break;
+         case 10169: errorMsg = "Request rejected - request rejected - request rejected - request rejected - client disabled"; break;
+         case 10170: errorMsg = "Request rejected - request rejected - request rejected - request rejected - server busy"; break;
+         case 10171: errorMsg = "Request rejected - request rejected - request rejected - request rejected - old version"; break;
+         case 10172: errorMsg = "Request rejected - request rejected - request rejected - request rejected - not enough rights"; break;
+         case 10173: errorMsg = "Request rejected - request rejected - request rejected - request rejected - request frequency too high"; break;
+         case 10174: errorMsg = "Request rejected - request rejected - request rejected - request rejected - no connection"; break;
+         case 10175: errorMsg = "Request rejected - request rejected - request rejected - request rejected - server shutdown"; break;
+         case 10176: errorMsg = "Request rejected - request rejected - request rejected - request rejected - operation disabled"; break;
+         case 10177: errorMsg = "Request rejected - request rejected - request rejected - request rejected - invalid stop loss"; break;
+         case 10178: errorMsg = "Request rejected - request rejected - request rejected - request rejected - invalid take profit"; break;
+         case 10179: errorMsg = "Request rejected - request rejected - request rejected - request rejected - invalid position"; break;
+         case 10180: errorMsg = "Request rejected - request rejected - request rejected - request rejected - invalid order"; break;
+         case 10181: errorMsg = "Request rejected - request rejected - request rejected - request rejected - invalid expiration"; break;
+         case 10182: errorMsg = "Request rejected - request rejected - request rejected - request rejected - invalid order type"; break;
+         case 10183: errorMsg = "Request rejected - request rejected - request rejected - request rejected - invalid trade volume"; break;
+         case 10184: errorMsg = "Request rejected - request rejected - request rejected - request rejected - market closed"; break;
+         case 10185: errorMsg = "Request rejected - request rejected - request rejected - request rejected - no quotes"; break;
+         case 10186: errorMsg = "Request rejected - request rejected - request rejected - request rejected - price changed"; break;
+         case 10187: errorMsg = "Request rejected - request rejected - request rejected - request rejected - off quotes"; break;
+         case 10188: errorMsg = "Request rejected - request rejected - request rejected - request rejected - requote"; break;
+         case 10189: errorMsg = "Request rejected - request rejected - request rejected - request rejected - order expires"; break;
+         case 10190: errorMsg = "Request rejected - request rejected - request rejected - request rejected - order already exists"; break;
+         case 10191: errorMsg = "Request rejected - request rejected - request rejected - request rejected - order accepted"; break;
+         case 10192: errorMsg = "Request rejected - request rejected - request rejected - request rejected - order accepted for execution"; break;
+         case 10193: errorMsg = "Request rejected - request rejected - request rejected - request rejected - order placed"; break;
+         case 10194: errorMsg = "Request rejected - request rejected - request rejected - request rejected - order modified"; break;
+         case 10195: errorMsg = "Request rejected - request rejected - request rejected - request rejected - order cancelled"; break;
+         case 10196: errorMsg = "Request rejected - request rejected - request rejected - request rejected - position already exists"; break;
+         case 10197: errorMsg = "Request rejected - request rejected - request rejected - request rejected - position modified"; break;
+         case 10198: errorMsg = "Request rejected - request rejected - request rejected - request rejected - position closed"; break;
+         case 10199: errorMsg = "Request rejected - request rejected - request rejected - request rejected - position closed by opposite trade"; break;
+         case 10200: errorMsg = "Request rejected - request rejected - request rejected - request rejected - position reversed"; break;
+         case 10201: errorMsg = "Request rejected - request rejected - request rejected - request rejected - position volume added"; break;
+         case 10202: errorMsg = "Request rejected - request rejected - request rejected - request rejected - position volume subtracted"; break;
+         case 10203: errorMsg = "Request rejected - request rejected - request rejected - request rejected - position reversed partially"; break;
+         case 10204: errorMsg = "Request rejected - request rejected - request rejected - request rejected - request rejected"; break;
+         case 10205: errorMsg = "Request rejected - request rejected - request rejected - request rejected - request rejected - timeout"; break;
+         case 10206: errorMsg = "Request rejected - request rejected - request rejected - request rejected - request rejected - invalid price"; break;
+         case 10207: errorMsg = "Request rejected - request rejected - request rejected - request rejected - request rejected - invalid volume"; break;
+         case 10208: errorMsg = "Request rejected - request rejected - request rejected - request rejected - request rejected - market closed"; break;
+         case 10209: errorMsg = "Request rejected - request rejected - request rejected - request rejected - request rejected - no quotes"; break;
+         case 10210: errorMsg = "Request rejected - request rejected - request rejected - request rejected - request rejected - client disabled"; break;
+                 default: errorMsg = "Unknown error"; break;
+      }
+      PrintFormat("Trade attempt %d/%d failed with error %d: %s", 
+                 attempt, maxRetries, error, errorMsg);
+      
+      if(attempt < maxRetries) {
+         Sleep(1000); // Wait before retry
+      }
+   }
+   return false;
+}
 
 //========================= GLOBALS ==================================
 int rsiHandle, g_atrHandle, emaFastHandle, emaSlowHandle;
@@ -633,6 +1204,11 @@ static datetime g_h1BearEndTime       = 0;
 static bool     g_h1ETEFound          = false;
 static double   g_h1ETEHeadPrice      = 0.0;
 static datetime g_h1ETEHeadTime       = 0;
+
+// Niveaux Fibonacci pour le trading
+static double   g_fibonacciLevels[7] = {0.0}; // 0%, 23.6%, 38.2%, 50%, 61.8%, 78.6%, 100%
+static datetime g_fibonacciUpdateTime = 0;
+static bool     g_fibonacciValid = false;
 
 // Trendlines supplémentaires pour H4 et M15 (même logique que H1)
 static double   g_h4BullStartPrice    = 0.0;
@@ -936,6 +1512,41 @@ void OnTick()
       return;
    }
    
+   // Gérer les positions existantes avec les niveaux Fibonacci
+   if(PositionsTotal() > 0)
+   {
+      ManagePositionsWithFibonacci();
+   }
+   
+   // Vérifier les conditions d'entrée
+   if(IsNewBar())
+   {
+      // Calculer les niveaux Fibonacci si nécessaire
+      if(!g_fibLevelsCalculated || (TimeCurrent() - g_lastFibUpdate) > 86400) // Mise à jour quotidienne
+      {
+         if(CalculateFibonacciLevels())
+         {
+            Print("Niveaux Fibonacci mis à jour avec succès");
+         }
+      }
+      
+      CheckForEntrySignals();
+   }
+   
+   // Gérer les positions ouvertes
+   ManageOpenPositions();
+   
+   // Mettre à jour l'interface utilisateur
+   UpdatePanel();
+   
+   // Afficher les niveaux Fibonacci si activé
+   static datetime lastFibDraw = 0;
+   if(ShowZones && (TimeCurrent() - lastFibDraw) > 60) // Mise à jour toutes les minutes
+   {
+      DrawFibonacciLevels();
+      lastFibDraw = TimeCurrent();
+   }
+   
    // Vérifier les signaux de spike
    CheckSpikeSignals();
    
@@ -1106,6 +1717,20 @@ void OnTimer()
 {
    // Supprimer les anciennes alertes
    datetime now = TimeCurrent();
+   
+   // Calculer le profit moyen par trade
+   double avgProfit = (g_totalTradesCount > 0) ? g_totalProfitLoss / g_totalTradesCount : 0.0;
+   
+   // Préparer la liste des symboles uniques
+   string uniqueSymbols = "";
+   for(int i = 0; i < ArraySize(g_tradedSymbolsList); i++)
+   {
+      if(g_tradedSymbolsList[i] != "")
+      {
+         if(uniqueSymbols != "") uniqueSymbols += ", ";
+         uniqueSymbols += g_tradedSymbolsList[i];
+      }
+   }
    for(int i = ObjectsTotal(0, 0, -1) - 1; i >= 0; i--)
    {
       string name = ObjectName(0, i, 0, -1);
@@ -1118,351 +1743,126 @@ void OnTimer()
          }
       }
    }
+   
+   // Créer le message de bilan
+   string bilan = StringFormat(
+      "📊 BILAN DES TRADES 📊\n" +
+      "------------------------\n" +
+      "🔢 Nombre total de trades: %d\n" +
+      "💰 Capital total engagé: %.2f $\n" +
+      "💵 Profit/Perte total: %.2f $ (%.2f $ par trade)\n" +
+      "📈📉 Symboles tradés: %s\n" +
+      "⏱️ Dernier trade: %s",
+      g_totalTradesCount,
+      g_totalCapitalEngaged,
+      g_totalProfitLoss,
+      avgProfit,
+      (uniqueSymbols == "" ? "Aucun" : uniqueSymbols),
+      (g_lastTradeTime > 0 ? TimeToString(g_lastTradeTime, TIME_DATE|TIME_MINUTES) : "Aucun")
+   );
+   
+   // Envoyer la notification
+   SendNotification(bilan);
+   Print("📤 Bilan des trades envoyé: ", bilan);
 }
 
 //+------------------------------------------------------------------+
-//| DEINIT                                                           |
+//| Envoie un bilan des trades par notification                     |
+//+------------------------------------------------------------------+
+void SendTradeBilanNotification(bool forceSend = false)
+{
+   // Vérifier si on envoie le bilan (toutes les heures ou si forcé)
+   datetime now = TimeCurrent();
+   if(!forceSend && (now - g_lastBilanNotification < 3600)) // Toutes les heures
+      return;
+      
+   // Mettre à jour le temps de la dernière notification
+   g_lastBilanNotification = now;
+   
+   // Calculer le profit moyen par trade
+   double avgProfit = (g_totalTradesCount > 0) ? g_totalProfitLoss / g_totalTradesCount : 0;
+   
+   // Préparer la liste des symboles uniques
+   string uniqueSymbols = "";
+   for(int i = 0; i < ArraySize(g_tradedSymbolsList); i++)
+   {
+      if(g_tradedSymbolsList[i] != "")
+      {
+         if(uniqueSymbols != "") uniqueSymbols += ", ";
+         uniqueSymbols += g_tradedSymbolsList[i];
+      }
+   }
+   
+   // Créer le message de bilan
+   string bilan = StringFormat(
+      "📊 BILAN DES TRADES 📊\n" +
+      "------------------------\n" +
+      "🔢 Nombre total de trades: %d\n" +
+      "💰 Capital total engagé: %.2f $\n" +
+      "💵 Profit/Perte total: %.2f $ (%.2f $ par trade)\n" +
+      "📈📉 Symboles tradés: %s\n" +
+      "⏱️ Dernier trade: %s",
+      g_totalTradesCount,
+      g_totalCapitalEngaged,
+      g_totalProfitLoss,
+      avgProfit,
+      (uniqueSymbols == "" ? "Aucun" : uniqueSymbols),
+      (g_lastTradeTime > 0 ? TimeToString(g_lastTradeTime, TIME_DATE|TIME_MINUTES) : "Aucun")
+   );
+   
+   // Envoyer la notification
+   SendNotification(bilan);
+   Print("📤 Bilan des trades envoyé: ", bilan);
+}
+
+//+------------------------------------------------------------------+
+//| Met à jour les statistiques de trading                          |
+//+------------------------------------------------------------------+
+void UpdateTradingStats(double lotSize, double profit, string symbol)
+{
+   // Mettre à jour le compteur de trades
+   g_totalTradesCount++;
+   
+   // Mettre à jour le capital engagé (lot * 100000 pour avoir la valeur en devise)
+   g_totalCapitalEngaged += lotSize * 100000;
+   
+   // Mettre à jour le profit/perte total
+   g_totalProfitLoss += profit;
+   
+   // Mettre à jour la liste des symboles tradés
+   bool symbolExists = false;
+   for(int i = 0; i < ArraySize(g_tradedSymbolsList); i++)
+   {
+      if(g_tradedSymbolsList[i] == symbol)
+      {
+         symbolExists = true;
+         break;
+      }
+      else if(g_tradedSymbolsList[i] == "")
+      {
+         g_tradedSymbolsList[i] = symbol;
+         symbolExists = true;
+         break;
+      }
+   }
+   
+   // Mettre à jour le temps du dernier trade
+   g_lastTradeTime = TimeCurrent();
+   
+   // Mettre à jour le suivi des pertes pour ce symbole
+   UpdateSymbolLossTracking(symbol, profit);
+   
+   // Envoyer le bilan si nécessaire
+   SendTradeBilanNotification(false);
+}
+
+//+------------------------------------------------------------------+
+//| Expert deinitialization function                                 |
 //+------------------------------------------------------------------+
 void OnDeinit(const int reason)
 {
    IndicatorRelease(rsiHandle);
    IndicatorRelease(g_atrHandle);
-   IndicatorRelease(emaFastHandle);
-   IndicatorRelease(emaSlowHandle);
-   IndicatorRelease(emaFastEntryHandle);
-   IndicatorRelease(emaSlowEntryHandle);
-   IndicatorRelease(emaScalpEntryHandle);
-   
-   // Nettoyer le panneau IA
-   ObjectDelete(0, "AI_PANEL_MAIN");
-   
-   // Nettoyer la flèche de spike
-   string arrowName = "SPIKE_ARROW_" + _Symbol;
-   ObjectDelete(0, arrowName);
-   
-   // Libérer SMC
-   SMC_Deinit();
-
-   Comment("");
-}
-
-//+------------------------------------------------------------------+
-//| Envoi d'une notification MT5 formatée                           |
-//+------------------------------------------------------------------+
-void SendTradingSignal(string symbol, string signal, string timeframe, 
-                      double price, double sl, double tp, string comment = "")
-{
-   // Vérifier si on a déjà envoyé ce signal récemment (éviter le spam)
-   static datetime lastSignalTime = 0;
-   static string lastSignal = "";
-   
-   string signalKey = StringFormat("%s_%s_%s_%.5f", symbol, signal, timeframe, NormalizeDouble(price, 5));
-   
-   if(TimeCurrent() - lastSignalTime < 300 && lastSignal == signalKey) // 5 minutes entre chaque signal identique
-      return;
-   
-   // Créer un message formaté
-   string msg = StringFormat("SIGNAL %s - %s %s\n", symbol, signal, timeframe);
-   msg += StringFormat("Prix: %.5f\n", price);
-   msg += StringFormat("SL: %.5f  TP: %.5f\n", sl, tp);
-   if(comment != "") 
-      msg += "Note: " + comment;
-   
-   // Envoyer la notification
-   if(!SendNotification(msg))
-      Print("Erreur envoi notification: ", GetLastError());
-   else
-   {
-      lastSignalTime = TimeCurrent();
-      lastSignal = signalKey;
-   }
-}
-
-// Variables pour la gestion de la volatilité
-double MinATR = 0.0005;  // Ajustez selon votre stratégie
-double MaxATR = 0.0050;  // Ajustez selon votre stratégie
-
-//+------------------------------------------------------------------+
-//| Traitement des signaux IA et exécution des trades                |
-//+------------------------------------------------------------------+
-void AI_ProcessSignal(string signalType, double confidence, string reason = "")
-{
-   // Blocage strict: en dessous de 80% (ou AI_MinConfidence si plus élevé), on ne déclenche pas
-   double minRequiredConf = MathMax(0.80, AI_MinConfidence);
-   if(confidence < minRequiredConf)
-   {
-      Print("Signal IA ignoré (confiance < seuil): ", signalType, " conf=", DoubleToString(confidence, 2), " seuil=", DoubleToString(minRequiredConf, 2));
-      g_lastValidationReason = "Confiance IA trop faible";
-      return;
-   }
-   
-   // Vérifier si le signal est valide et cohérent avec l'IA
-   ENUM_ORDER_TYPE orderType = WRONG_VALUE;
-   if(signalType == "BUY" || signalType == "ACHAT")
-   {
-      orderType = ORDER_TYPE_BUY;
-   }
-   else if(signalType == "SELL" || signalType == "VENTE")
-   {
-      orderType = ORDER_TYPE_SELL;
-   }
-   
-   if(orderType == WRONG_VALUE) return;
-   
-   // Filtre directionnel M1 strict : ne jamais trader contre une tendance M1 marquée
-   double emaFastM1_now[], emaSlowM1_now[];
-   bool m1FilterOK = true;
-   if(CopyBuffer(emaFastEntryHandle, 0, 0, 1, emaFastM1_now) > 0 &&
-      CopyBuffer(emaSlowEntryHandle, 0, 0, 1, emaSlowM1_now) > 0)
-   {
-      bool m1Up   = (emaFastM1_now[0] > emaSlowM1_now[0]);
-      bool m1Down = (emaFastM1_now[0] < emaSlowM1_now[0]);
-      if(orderType == ORDER_TYPE_BUY && m1Down)
-      {
-         g_lastValidationReason = "Refus BUY: downtrend fort en M1 (faux signal IA)";
-         Print(g_lastValidationReason);
-         return;
-      }
-      if(orderType == ORDER_TYPE_SELL && m1Up)
-      {
-         g_lastValidationReason = "Refus SELL: uptrend fort en M1 (faux signal IA)";
-         Print(g_lastValidationReason);
-         return;
-      }
-   }
-   
-   if(!IsValidSignal(orderType, confidence))
-   {
-      Print("Signal IA ignoré: non valide ou non cohérent");
-      if(AI_UseNotifications && g_lastValidationReason != "")
-      {
-         string msg = StringFormat("IA %s BLOQUÉ sur %s\nRaison: %s", (orderType==ORDER_TYPE_BUY?"BUY":"SELL"), _Symbol, g_lastValidationReason);
-         SendNotification(msg);
-         DrawAIBlockLabel(_Symbol, orderType==ORDER_TYPE_BUY ? "BUY BLOQUÉ" : "SELL BLOQUÉ", g_lastValidationReason);
-      }
-      return;
-   }
-   
-   // Envoyer une notification du signal
-   if(AI_UseNotifications)
-   {
-      string direction = (signalType == "BUY" || signalType == "ACHAT") ? "ACHAT" : "VENTE";
-      AI_SendNotification("IA_SIGNAL", direction, confidence, reason);
-   }
-   
-   // Sécurité : si auto-exec est désactivé, on s'arrête (par défaut activé)
-   if(!AI_AutoExecuteTrades)
-      return;
-   
-   // Vérifier le sentiment fondamental AVANT d'exécuter
-   if(!IsFundamentalConfirming(signalType))
-   {
-      Print("Signal IA ignoré: sentiment fondamental contraire pour ", signalType, " sur ", _Symbol);
-      g_lastValidationReason = "Sentiment fondamental contraire (" + g_fundamentalBias + ")";
-      return;
-   }
-
-   // Récupérer les données du marché
-   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   double atr[];
-   if(CopyBuffer(g_atrHandle, 0, 0, 1, atr) <= 0) return;
-   
-   // Déterminer le type de trade
-   double price = 0;
-   
-   if(signalType == "BUY" || signalType == "ACHAT")
-   {
-      price = ask;
-   }
-   else if(signalType == "SELL" || signalType == "VENTE")
-   {
-      price = bid;
-   }
-   
-            // Vérifier si on a déjà une position ouverte
-            if(CountPositionsForSymbolMagic() >= 1)
-            {
-               Print("Trade IA ignoré: déjà 2 positions ouvertes");
-               return;
-            }
-   
-   // Exécuter le trade
-   string comment = "IA_";
-   if(StringLen(reason) > 0) comment += reason;
-   else comment += signalType;
-   
-   // --- INSERTION ---
-   // sécurité: vérifier si on peut ouvrir une position
-   if(CountPositionsForSymbolMagic() >= 1)
-   {
-      return; // blocage de l'exécution si déjà 2 positions
-   }
-
-   if(ExecuteTrade(orderType, atr[0], price, comment, 1.0))
-   {
-      Print("Trade exécuté par IA: ", signalType, " à ", DoubleToString(price, _Digits), " (confiance: ", DoubleToString(confidence, 2), ")");
-      
-      // Envoyer une notification de confirmation d'exécution
-      if(AI_UseNotifications)
-      {
-         string msg = StringFormat("TRADE EXECUTE: %s à %s (Confiance: %.1f%%)\n%s", 
-                                 signalType, 
-                                 DoubleToString(price, _Digits),
-                                 confidence * 100.0,
-                                 reason);
-         SendNotification(msg);
-      }
-   }
-   else
-   {
-      Print("Échec de l'exécution du trade IA: ", signalType, " - Erreur: ", GetLastError());
-   }
-}
-
-//+------------------------------------------------------------------+
-//| Dessine les zones IA (H1 validées M5) sur le graphique            |
-//| Les zones restent PERMANENTES jusqu'à nouvelle zone du backend   |
-//+------------------------------------------------------------------+
-// Variables statiques pour mémoriser les dernières zones valides
-static double g_lastBuyZoneLow = 0, g_lastBuyZoneHigh = 0;
-static double g_lastSellZoneLow = 0, g_lastSellZoneHigh = 0;
-
-void DrawAIZones()
-{
-   datetime now    = TimeCurrent();
-   datetime past   = now - 24 * 60 * 60;   // historique 24h
-   datetime future = now + 24 * 60 * 60;   // projection 24h
-
-   // ------------------------------------------------------------------
-   // Objectif : dessiner les zones IA non seulement sur le graphique
-   // courant, mais aussi sur les graphiques H1 et H4 du même symbole.
-   // ------------------------------------------------------------------
-
-   // ---------------------------
-   // Normalisation de la largeur
-   // ---------------------------
-   // Pour éviter des zones trop fines ou trop larges, on applique
-   // un min / max en POINTS autour du centre de la zone IA.
-   double point = _Point;
-   // Largeurs mini / maxi en points (valeurs raisonnables par défaut)
-   int minWidthPoints = 50;     // ~ 50 points mini
-   int maxWidthPoints = 5000;   // ~ 5000 points maxi
-
-   // Normaliser zone d'achat
-   if(g_aiBuyZoneLow > 0.0 && g_aiBuyZoneHigh > g_aiBuyZoneLow)
-   {
-      double centerBuy   = (g_aiBuyZoneLow + g_aiBuyZoneHigh) / 2.0;
-      double widthBuyPts = (g_aiBuyZoneHigh - g_aiBuyZoneLow) / point;
-
-      if(widthBuyPts < minWidthPoints)
-         widthBuyPts = minWidthPoints;
-      else if(widthBuyPts > maxWidthPoints)
-         widthBuyPts = maxWidthPoints;
-
-      double halfBuy = (widthBuyPts * point) / 2.0;
-      g_aiBuyZoneLow  = centerBuy - halfBuy;
-      g_aiBuyZoneHigh = centerBuy + halfBuy;
-   }
-
-   // Normaliser zone de vente
-   if(g_aiSellZoneLow > 0.0 && g_aiSellZoneHigh > g_aiSellZoneLow)
-   {
-      double centerSell   = (g_aiSellZoneLow + g_aiSellZoneHigh) / 2.0;
-      double widthSellPts = (g_aiSellZoneHigh - g_aiSellZoneLow) / point;
-
-      if(widthSellPts < minWidthPoints)
-         widthSellPts = minWidthPoints;
-      else if(widthSellPts > maxWidthPoints)
-         widthSellPts = maxWidthPoints;
-
-      double halfSell = (widthSellPts * point) / 2.0;
-      g_aiSellZoneLow  = centerSell - halfSell;
-      g_aiSellZoneHigh = centerSell + halfSell;
-   }
-
-   // Zone d'achat - Ne supprimer QUE si nouvelle zone reçue
-   string buyName = "AI_ZONE_BUY_" + _Symbol;
-   if(g_aiBuyZoneLow > 0.0 && g_aiBuyZoneHigh > 0.0 && g_aiBuyZoneHigh > g_aiBuyZoneLow)
-   {
-      // Nouvelle zone reçue du backend - mettre à jour
-      if(g_aiBuyZoneLow != g_lastBuyZoneLow || g_aiBuyZoneHigh != g_lastBuyZoneHigh)
-      {
-         g_lastBuyZoneLow  = g_aiBuyZoneLow;
-         g_lastBuyZoneHigh = g_aiBuyZoneHigh;
-
-         long chart_id = ChartFirst();
-         while(chart_id >= 0)
-         {
-            string sym = ChartSymbol(chart_id);
-            ENUM_TIMEFRAMES tf = (ENUM_TIMEFRAMES)ChartPeriod(chart_id);
-
-            // Dessiner sur M5, H1 et H4 pour ce symbole
-            if(sym == _Symbol && (tf == PERIOD_M5 || tf == PERIOD_H1 || tf == PERIOD_H4))
-            {
-               ObjectDelete(chart_id, buyName);
-               if(ObjectCreate(chart_id, buyName, OBJ_RECTANGLE, 0, past, g_aiBuyZoneHigh, future, g_aiBuyZoneLow))
-               {
-                  color buyColor = (color)ColorToARGB(clrLime, 60); // vert semi-transparent
-                  ObjectSetInteger(chart_id, buyName, OBJPROP_COLOR, (long)buyColor);
-                  ObjectSetInteger(chart_id, buyName, OBJPROP_BACK, (long)true);
-                  ObjectSetInteger(chart_id, buyName, OBJPROP_FILL, (long)true);
-                  ObjectSetInteger(chart_id, buyName, OBJPROP_SELECTABLE, (long)false);
-                  ObjectSetInteger(chart_id, buyName, OBJPROP_TIMEFRAMES, (long)OBJ_ALL_PERIODS);
-                  ObjectSetString(chart_id, buyName, OBJPROP_TEXT, "Zone Achat IA");
-               }
-            }
-
-            chart_id = ChartNext(chart_id);
-         }
-
-         Print("📍 Nouvelle zone ACHAT affichée: ", g_aiBuyZoneLow, " - ", g_aiBuyZoneHigh);
-      }
-   }
-   // NE PAS supprimer si pas de nouvelle zone - garder l'ancienne visible
-
-   // Zone de vente - Ne supprimer QUE si nouvelle zone reçue
-   string sellName = "AI_ZONE_SELL_" + _Symbol;
-   if(g_aiSellZoneLow > 0.0 && g_aiSellZoneHigh > 0.0 && g_aiSellZoneHigh > g_aiSellZoneLow)
-   {
-      // Nouvelle zone reçue du backend - mettre à jour
-      if(g_aiSellZoneLow != g_lastSellZoneLow || g_aiSellZoneHigh != g_lastSellZoneHigh)
-      {
-         g_lastSellZoneLow  = g_aiSellZoneLow;
-         g_lastSellZoneHigh = g_aiSellZoneHigh;
-
-         long chart_id = ChartFirst();
-         while(chart_id >= 0)
-         {
-            string sym = ChartSymbol(chart_id);
-            ENUM_TIMEFRAMES tf = (ENUM_TIMEFRAMES)ChartPeriod(chart_id);
-
-            // Dessiner sur M5, H1 et H4 pour ce symbole
-            if(sym == _Symbol && (tf == PERIOD_M5 || tf == PERIOD_H1 || tf == PERIOD_H4))
-            {
-               ObjectDelete(chart_id, sellName);
-               if(ObjectCreate(chart_id, sellName, OBJ_RECTANGLE, 0, past, g_aiSellZoneHigh, future, g_aiSellZoneLow))
-               {
-                  color sellColor = (color)ColorToARGB(clrRed, 60); // rouge semi-transparent
-                  ObjectSetInteger(chart_id, sellName, OBJPROP_COLOR, (long)sellColor);
-                  ObjectSetInteger(chart_id, sellName, OBJPROP_BACK, (long)true);
-                  ObjectSetInteger(chart_id, sellName, OBJPROP_FILL, (long)true);
-                  ObjectSetInteger(chart_id, sellName, OBJPROP_SELECTABLE, (long)false);
-                  ObjectSetInteger(chart_id, sellName, OBJPROP_TIMEFRAMES, (long)OBJ_ALL_PERIODS);
-                  ObjectSetString(chart_id, sellName, OBJPROP_TEXT, "Zone Vente IA");
-               }
-            }
-
-            chart_id = ChartNext(chart_id);
-         }
-
-         Print("📍 Nouvelle zone VENTE affichée: ", g_aiSellZoneLow, " - ", g_aiSellZoneHigh);
-      }
-   }
-   // NE PAS supprimer si pas de nouvelle zone - garder l'ancienne visible
-   
-   // Dessiner les indicateurs modernes (VWAP et SuperTrend)
-   DrawModernIndicators();
 }
 
 //+------------------------------------------------------------------+
@@ -1470,11 +1870,14 @@ void DrawAIZones()
 //+------------------------------------------------------------------+
 void DrawModernIndicators()
 {
-   // Vérifier si les indicateurs sont valides et récents (mis à jour dans les 5 dernières minutes)
+   // Vérifier si on doit envoyer un bilan quotidien (à minuit)
    datetime now = TimeCurrent();
-   if(g_lastIndicatorsUpdate == 0 || (now - g_lastIndicatorsUpdate) > 300) // 5 minutes
-      return;
-   
+   MqlDateTime timeStruct;
+   TimeToStruct(now, timeStruct);
+   if(timeStruct.hour == 0 && timeStruct.min == 0 && now - g_lastBilanNotification > 3600)
+   {
+      SendTradeBilanNotification(true);
+   }
    long chart_id = ChartFirst(); // Commencer par le premier graphique du symbole
    while(chart_id >= 0)
    {
@@ -2511,6 +2914,170 @@ bool IsValidSignal(ENUM_ORDER_TYPE type, double confidence = 1.0)
 }
 
 //+------------------------------------------------------------------+
+//| Calcule les niveaux Fibonacci à partir des points pivots         |
+//+------------------------------------------------------------------+
+bool CalculateFibonacciLevels()
+{
+   // Niveaux Fibonacci standards
+   double fiboLevels[] = {0.0, 0.236, 0.382, 0.5, 0.618, 0.786, 1.0};
+   ArrayResize(g_fibLevels, ArraySize(fiboLevels));
+   
+   // Récupérer les points pivots (high et low) de la veille
+   MqlRates rates[];
+   if(CopyRates(_Symbol, PERIOD_D1, 0, 2, rates) < 2)
+   {
+      Print("Erreur lors de la récupération des données historiques");
+      return false;
+   }
+   
+   double high = rates[1].high;
+   double low = rates[1].low;
+   double range = high - low;
+   
+   // Calculer les niveaux de prix pour chaque niveau Fibonacci
+   for(int i = 0; i < ArraySize(fiboLevels); i++)
+   {
+      g_fibLevels[i] = low + (range * fiboLevels[i]);
+      PrintFormat("Niveau Fibonacci %d: %s", i, DoubleToString(g_fibLevels[i], _Digits));
+   }
+   
+   g_lastFibUpdate = TimeCurrent();
+   g_fibLevelsCalculated = true;
+   return true;
+}
+
+//+------------------------------------------------------------------+
+//| Affiche les niveaux Fibonacci sur le graphique                   |
+//+------------------------------------------------------------------+
+void DrawFibonacciLevels()
+{
+   if(!g_fibLevelsCalculated) return;
+   
+   // Supprimer les anciens objets
+   for(int i = ObjectsTotal(0, 0, -1) - 1; i >= 0; i--)
+   {
+      string name = ObjectName(0, i, 0, -1);
+      if(StringFind(name, "Fib_Level_") == 0)
+      {
+         ObjectDelete(0, name);
+      }
+   }
+   
+   // Afficher les niveaux
+   for(int i = 0; i < ArraySize(g_fibLevels); i++)
+   {
+      string levelName = "Fib_Level_" + IntegerToString(i);
+      double price = g_fibLevels[i];
+      string text = "Fib " + DoubleToString(price, _Digits);
+      
+      // Créer une ligne horizontale pour le niveau
+      if(!ObjectCreate(0, levelName, OBJ_HLINE, 0, 0, price))
+      {
+         Print("Erreur lors de la création du niveau Fibonacci: ", GetLastError());
+         continue;
+      }
+      
+      // Définir les propriétés de la ligne
+      ObjectSetInteger(0, levelName, OBJPROP_COLOR, clrDodgerBlue);
+      ObjectSetInteger(0, levelName, OBJPROP_STYLE, STYLE_DASH);
+      ObjectSetInteger(0, levelName, OBJPROP_WIDTH, 1);
+      ObjectSetInteger(0, levelName, OBJPROP_BACK, true);
+      
+      // Ajouter une étiquette de texte
+      string labelName = levelName + "_Label";
+      if(ObjectCreate(0, labelName, OBJ_TEXT, 0, TimeCurrent(), price))
+      {
+         ObjectSetString(0, labelName, OBJPROP_TEXT, text);
+         ObjectSetInteger(0, labelName, OBJPROP_COLOR, clrWhite);
+         ObjectSetInteger(0, labelName, OBJPROP_BACK, false);
+         ObjectSetInteger(0, labelName, OBJPROP_ANCHOR, ANCHOR_LEFT);
+      }
+   }
+   
+   // Mettre à jour le graphique
+   ChartRedraw();
+}
+
+//+------------------------------------------------------------------+
+//| Gère les positions ouvertes avec les niveaux Fibonacci           |
+//+------------------------------------------------------------------+
+void ManagePositionsWithFibonacci()
+{
+   // Vérifier si les niveaux Fibonacci sont à jour
+   if(!g_fibLevelsCalculated || (TimeCurrent() - g_lastFibUpdate) > 86400) // Mise à jour quotidienne
+   {
+      if(CalculateFibonacciLevels())
+      {
+         Print("Niveaux Fibonacci mis à jour avec succès");
+      }
+      else
+      {
+         Print("Erreur lors de la mise à jour des niveaux Fibonacci");
+         return;
+      }
+   }
+   
+   // Afficher les niveaux Fibonacci sur le graphique
+   if(ShowZones)
+   {
+      DrawFibonacciLevels();
+   }
+   
+   // Parcourir toutes les positions ouvertes
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket <= 0) continue;
+      
+      // Récupérer les informations de la position
+      string symbol = PositionGetString(POSITION_SYMBOL);
+      if(symbol != _Symbol) continue;
+      
+      double currentPrice = PositionGetDouble(POSITION_PRICE_CURRENT);
+      double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+      double stopLoss = PositionGetDouble(POSITION_SL);
+      double takeProfit = PositionGetDouble(POSITION_TP);
+      ENUM_POSITION_TYPE posType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+      
+      // Vérifier si le prix est proche d'un niveau Fibonacci
+      for(int j = 0; j < ArraySize(g_fibLevels); j++)
+      {
+         double distance = MathAbs(currentPrice - g_fibLevels[j]) / _Point;
+         
+         // Si le prix est proche d'un niveau Fibonacci (dans une zone de 5 points)
+         if(distance < 5)
+         {
+            string levelName = "Fib " + DoubleToString(g_fibLevels[j], _Digits);
+            
+            // Ajuster le stop loss pour les positions en profit
+            if(posType == POSITION_TYPE_BUY && currentPrice > openPrice)
+            {
+               // Pour les positions d'achat en profit, ajuster le stop loss
+               double newSL = g_fibLevels[j] - (10 * _Point); // 10 points sous le niveau Fibonacci
+               if(newSL > stopLoss + (10 * _Point)) // Ne déplacer que vers le haut
+               {
+                  trade.PositionModify(ticket, newSL, takeProfit);
+                  PrintFormat("Stop loss ajusté pour la position #%d à %s (Niveau: %s)", 
+                             ticket, DoubleToString(newSL, _Digits), levelName);
+               }
+            }
+            else if(posType == POSITION_TYPE_SELL && currentPrice < openPrice)
+            {
+               // Pour les positions de vente en profit, ajuster le stop loss
+               double newSL = g_fibLevels[j] + (10 * _Point); // 10 points au-dessus du niveau Fibonacci
+               if(newSL < stopLoss - (10 * _Point) || stopLoss == 0) // Ne déplacer que vers le bas
+               {
+                  trade.PositionModify(ticket, newSL, takeProfit);
+                  PrintFormat("Stop loss ajusté pour la position #%d à %s (Niveau: %s)", 
+                             ticket, DoubleToString(newSL, _Digits), levelName);
+               }
+            }
+         }
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
 //| Vérifie si un stop loss est valide selon les règles du broker    |
 //+------------------------------------------------------------------+
 bool IsValidStopLoss(string symbol, double entry, double sl, bool isBuy)
@@ -3031,14 +3598,14 @@ bool IsTradingAllowed()
 {
    // Vérifier les objectifs quotidiens
    if(IsDailyTargetReached())
-   {
-      if(GetTickCount() % 60000 < 1000) // Afficher une fois par minute max
-         Print("✅ Objectif quotidien atteint: ", g_dailyProfit, " ", AccountInfoString(ACCOUNT_CURRENCY));
       return false;
-   }
-   
+      
+   // Vérifier les pertes consécutives sur ce symbole
+   if(!CanTradeSymbolAfterLoss(_Symbol))
+      return false;
+
    // Vérifier la limite de perte quotidienne
-   if(IsDailyLossLimitHit())
+   if(IsDailyLossLimitReached())
    {
       if(GetTickCount() % 60000 < 1000) // Afficher une fois par minute max
          Print("❌ Limite de perte quotidienne atteinte: ", g_dailyLoss, " ", AccountInfoString(ACCOUNT_CURRENCY));
@@ -3079,16 +3646,42 @@ bool IsDailyTargetReached()
 }
 
 //+------------------------------------------------------------------+
-//| Vérifie si la limite de perte quotidienne est atteinte          |
+//| Vérifie si la limite de perte quotidienne est atteinte           |
 //+------------------------------------------------------------------+
-bool IsDailyLossLimitHit()
+bool IsDailyLossLimitReached()
 {
    if(DailyLossLimit <= 0) return false;
+   
+   // Réinitialiser les compteurs si nouveau jour
+   if(TimeCurrent() >= g_lastTradeDay + 86400) // 86400 secondes = 1 jour
+   {
+      g_dailyProfit = 0.0;
+      g_dailyLoss = 0.0;
+      g_lastTradeDay = iTime(_Symbol, PERIOD_D1, 0);
+   }
+   
    return (g_dailyLoss >= DailyLossLimit);
 }
 
 //+------------------------------------------------------------------+
-//| Met à jour les statistiques de trading                          |
+//| Vérifie si une nouvelle bougie est apparue sur le timeframe actuel |
+//+------------------------------------------------------------------+
+bool IsNewBar()
+{
+   static datetime lastBarTime = 0;
+   datetime currentBarTime = iTime(_Symbol, PERIOD_CURRENT, 0);
+   
+   if(lastBarTime != currentBarTime)
+   {
+      lastBarTime = currentBarTime;
+      return true;
+   }
+   
+   return false;
+}
+
+//+------------------------------------------------------------------+
+//| Met à jour les statistiques de trading (version simplifiée)     |
 //+------------------------------------------------------------------+
 void UpdateTradingStats(double profit)
 {
@@ -3102,6 +3695,15 @@ void UpdateTradingStats(double profit)
       g_dailyLoss += MathAbs(profit);
       g_consecutiveLosses++;
    }
+   
+   // Mettre à jour le suivi des pertes par symbole
+   UpdateSymbolLossTracking(_Symbol, profit);
+   
+   // Utiliser une taille de lot par défaut si non spécifiée
+   double defaultLotSize = 0.1; // Valeur par défaut
+   
+   // Mettre à jour les statistiques de trading (fonction surchargée)
+   UpdateTradingStats(defaultLotSize, profit, _Symbol);
    
    // Journaliser les performances
    if(profit != 0)
@@ -3145,6 +3747,35 @@ void UpdateLossCounter(double profit)
 
 bool ExecuteTrade(ENUM_ORDER_TYPE type, double atr, double price, string comment, double lotMultiplier = 1.0, bool isSpikePriority = false)
 {
+   // Vérifier si le trading est activé
+   if(!EnableTrading)
+   {
+      Print("Trading is disabled by user setting");
+      return false;
+   }
+   
+   // Vérifier l'équité minimale
+   if(AccountInfoDouble(ACCOUNT_EQUITY) < MinEquityForTrading)
+   {
+      Print("Insufficient equity to open new position");
+      return false;
+   }
+   
+   // Vérifier si on peut trader
+   if(!CanOpenNewPosition()) 
+   {
+      Print("Cannot open new position - position limit reached");
+      return false;
+   }
+   
+   // Vérifier le spread maximum
+   double spreadCheck = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD) * _Point;
+   if(spreadCheck > MaxSpreadPoints * _Point)
+   {
+      Print("Spread too high: ", spreadCheck, " > ", MaxSpreadPoints * _Point);
+      return false;
+   }
+   
    // Vérification stricte du nombre de positions (2 maximum)
    int posCount = 0;
    for(int i = PositionsTotal() - 1; i >= 0; i--)
@@ -3533,10 +4164,10 @@ bool ExecuteTrade(ENUM_ORDER_TYPE type, double atr, double price, string comment
    }
    
    // Vérifier le spread actuel
-   double spread = (ask - bid) / _Point;
-   if(spread > MaxSpreadPoints)
+   double spreadPoints = (ask - bid) / _Point;
+   if(spreadPoints > MaxSpreadPoints)
    {
-      Print("Spread trop élevé: ", DoubleToString(spread, 1), " points (max: ", MaxSpreadPoints, ")");
+      Print("Spread trop élevé: ", DoubleToString(spreadPoints, 1), " points (max: ", MaxSpreadPoints, ")");
       return false;
    }
 
@@ -3826,6 +4457,7 @@ void CheckAndSendAISignal()
    string timeframe = "M1";
    string comment = "";
    
+   // bid et ask sont déjà déclarés plus haut dans la fonction
    if(trendUp && rsi[0] > 50 && rsi[0] < 70)
    {
       signal = "ACHAT";
@@ -3846,20 +4478,56 @@ void CheckAndSendAISignal()
    {
       // Envoyer la notification
       double price = (signal == "ACHAT") ? ask : bid;
-      SendTradingSignal(_Symbol, signal, timeframe, price, sl, tp, comment);
+      int direction = (signal == "ACHAT") ? 1 : -1;
+      SendTradingSignalNotification(_Symbol, direction, price, sl, tp);
+      PrintFormat("Signal %s envoyé - Prix: %.5f, SL: %.5f, TP: %.5f", signal, price, sl, tp);
       
       // Afficher le signal sur le graphique
       string objName = "SIGNAL_" + TimeToString(TimeCurrent(), TIME_DATE|TIME_SECONDS);
-      ObjectCreate(0, objName, OBJ_ARROW, 0, TimeCurrent(), price);
+      datetime time = TimeCurrent();
       
-      // Journaliser le signal
-      PrintFormat("Signal %s à %.5f - %s", signal, price, comment);
-      ObjectSetInteger(0, objName, OBJPROP_ARROWCODE, (signal == "ACHAT") ? 233 : 234);
-      ObjectSetString(0, objName, OBJPROP_TOOLTIP, signal + " " + comment);
+      // Créer l'objet avec la signature correcte pour MQL5
+      if(ObjectCreate(0, objName, OBJ_ARROW, 0, time, price))
+      {
+         // Configurer les propriétés de l'objet
+         ObjectSetInteger(0, objName, OBJPROP_ARROWCODE, (signal == "ACHAT") ? 233 : 234);
+         ObjectSetString(0, objName, OBJPROP_TOOLTIP, signal + " " + comment);
+         ObjectSetInteger(0, objName, OBJPROP_COLOR, (signal == "ACHAT") ? clrLime : clrRed);
+         ObjectSetInteger(0, objName, OBJPROP_WIDTH, 2);
+         
+         // Journaliser le signal
+         PrintFormat("Signal %s à %.5f - %s", signal, price, comment);
+      }
+      else
+      {
+         Print("Erreur lors de la création de l'objet: ", GetLastError());
+      }
       
       // Supprimer les anciens signaux (garder les 5 derniers)
       CleanOldSignals();
    }
+}
+
+//+------------------------------------------------------------------+
+//| Envoie une notification de signal de trading                     |
+//+------------------------------------------------------------------+
+void SendTradingSignalNotification(const string symbol, int direction, double entryPrice, double sl, double tp)
+{
+   string directionText = (direction > 0) ? "ACHAT" : "VENTE";
+   string signalText = StringFormat("🚨 SIGNAL %s - %s\nPrix: %s\nSL: %s\nTP: %s",
+                                 directionText, symbol,
+                                 DoubleToString(entryPrice, (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS)),
+                                 DoubleToString(sl, (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS)),
+                                 DoubleToString(tp, (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS)));
+   
+   // Envoyer la notification
+   if(SendNotifications)
+   {
+      SendNotification(signalText);
+   }
+   
+   // Journaliser le signal
+   Print(signalText);
 }
 
 //+------------------------------------------------------------------+
@@ -3946,7 +4614,7 @@ void ManageGlobalProfitSecurity()
 //+------------------------------------------------------------------+
 void ManageDynamicPositionSizing()
 {
-   if(!UseDynamicPositionSizing) return;
+   if(!UseDynamicPositionSizing2) return;
    
    datetime now = TimeCurrent();
    if(now - g_lastTrendCheck < AdjustmentIntervalSeconds) return;
@@ -5972,6 +6640,192 @@ void AI_UpdateAnalysis()
 
    g_lastAIAnalysisTime = now;
 
+   // Appeler le serveur IA pour obtenir les données Fibonacci et structure H1
+   if(UseAI_Agent && StringLen(AI_AnalysisURL) > 0)
+   {
+      string payload = "";
+      string resp = "";
+      string headers = "Content-Type: application/json\r\n";
+      
+      // Préparer les données pour l'analyse
+      payload = "{";
+      payload += "\"symbol\":\"" + _Symbol + "\",";
+      payload += "\"timeframe\":\"H1\",";
+      payload += "\"request_type\":\"fibonacci_analysis\"";
+      payload += "}";
+      
+      // Appel WebRequest au serveur IA
+      int timeout = 5000; // 5 secondes timeout
+      char data[];
+      char result_data[];
+      StringToCharArray(payload, data);
+      
+      ResetLastError();
+      int result = WebRequest("POST", AI_AnalysisURL, headers, timeout, data, result_data, headers);
+      
+      // Convertir la réponse en string
+      if(result == 200)
+      {
+         resp = CharArrayToString(result_data);
+      }
+      
+      if(result == 200)
+      {
+         // Parser la réponse JSON pour extraire les données Fibonacci
+         ParseAndDrawFibonacciFromResponse(resp);
+      }
+      else
+      {
+         Print("Erreur appel AI Analysis: ", result, " - ", GetLastError());
+         // En cas d'erreur, utiliser l'analyse locale
+         PerformLocalAnalysis();
+      }
+   }
+   else
+   {
+      // Utiliser l'analyse locale si le serveur IA n'est pas disponible
+      PerformLocalAnalysis();
+   }
+}
+
+// Fonction pour parser la réponse JSON et dessiner les Fibonacci
+void ParseAndDrawFibonacciFromResponse(string resp)
+{
+   // Parser les niveaux Fibonacci de la réponse
+   string fibLevels[] = {"fib_0", "fib_236", "fib_382", "fib_500", "fib_618", "fib_786", "fib_1000"};
+   double fibValues[7];
+   
+   for(int i = 0; i < 7; i++)
+   {
+      int pos = StringFind(resp, "\"" + fibLevels[i] + "\"");
+      if(pos >= 0)
+      {
+         int colon = StringFind(resp, ":", pos);
+         if(colon > 0)
+         {
+            int endPos = StringFind(resp, ",", colon);
+            if(endPos < 0) endPos = StringFind(resp, "}", colon);
+            if(endPos > colon)
+            {
+               string valueStr = StringSubstr(resp, colon + 1, endPos - colon - 1);
+               fibValues[i] = StringToDouble(valueStr);
+            }
+         }
+      }
+   }
+   
+   // Dessiner les niveaux Fibonacci sur le graphique
+   DrawFibonacciLevels(fibValues);
+   
+   // Parser et dessiner les trendlines si présentes
+   ParseTrendlinesFromResponse(resp);
+}
+
+// Fonction pour dessiner les niveaux Fibonacci
+void DrawFibonacciLevels(double &fibValues[])
+{
+   string fibPrefix = "FIB_";
+   
+   // Supprimer anciens objets Fibonacci
+   ObjectsDeleteAll(0, fibPrefix);
+   
+   // Créer les lignes horizontales pour chaque niveau Fibonacci
+   string fibNames[] = {"0.0%", "23.6%", "38.2%", "50.0%", "61.8%", "78.6%", "100.0%"};
+   color fibColors[] = {clrGray, clrCyan, clrBlue, clrPurple, clrOrange, clrYellow, clrRed};
+   
+   datetime time1 = TimeCurrent() - (datetime)Period() * 60 * 50; // 50 périodes en arrière
+   datetime time2 = TimeCurrent() + (datetime)Period() * 60 * 10; // 10 périodes en avant
+   
+   for(int i = 0; i < 7; i++)
+   {
+      if(fibValues[i] > 0)
+      {
+         string objName = fibPrefix + (string)StringReplace(fibNames[i], ".", "_");
+         if(ObjectCreate(0, objName, OBJ_HLINE, 0, 0, fibValues[i]))
+         {
+            ObjectSetInteger(0, objName, OBJPROP_COLOR, fibColors[i]);
+            ObjectSetInteger(0, objName, OBJPROP_STYLE, STYLE_DASH);
+            ObjectSetInteger(0, objName, OBJPROP_WIDTH, 2);
+            ObjectSetInteger(0, objName, OBJPROP_BACK, true);
+            ObjectSetString(0, objName, OBJPROP_TEXT, fibNames[i]);
+            ObjectSetInteger(0, objName, OBJPROP_TIMEFRAMES, OBJ_ALL_PERIODS);
+            
+            // Ajouter un label
+            string labelName = objName + "_LABEL";
+            if(ObjectCreate(0, labelName, OBJ_TEXT, 0, time1, fibValues[i]))
+            {
+               ObjectSetString(0, labelName, OBJPROP_TEXT, "Fib " + fibNames[i]);
+               ObjectSetInteger(0, labelName, OBJPROP_COLOR, fibColors[i]);
+               ObjectSetInteger(0, labelName, OBJPROP_FONTSIZE, 8);
+               ObjectSetInteger(0, labelName, OBJPROP_BACK, false);
+            }
+         }
+      }
+   }
+}
+
+// Fonction pour parser les trendlines de la réponse
+void ParseTrendlinesFromResponse(string resp)
+{
+   // Parser trendline haussière
+   int bullTLPos = StringFind(resp, "\"bull_trendline\"");
+   if(bullTLPos >= 0)
+   {
+      // Extraire les points de la trendline haussière
+      ExtractAndDrawTrendline(resp, bullTLPos, true);
+   }
+   
+   // Parser trendline baissière  
+   int bearTLPos = StringFind(resp, "\"bear_trendline\"");
+   if(bearTLPos >= 0)
+   {
+      ExtractAndDrawTrendline(resp, bearTLPos, false);
+   }
+}
+
+// Fonction pour extraire et dessiner une trendline
+void ExtractAndDrawTrendline(string resp, int startPos, bool isBull)
+{
+   string prefix = isBull ? "BULL_TL" : "BEAR_TL";
+   color tlColor = isBull ? clrLime : clrRed;
+   
+   // Parser les 4 points (time1, price1, time2, price2)
+   double points[4];
+   string pointNames[] = {"\"time1\"", "\"price1\"", "\"time2\"", "\"price2\""};
+   
+   for(int i = 0; i < 4; i++)
+   {
+      int pos = StringFind(resp, pointNames[i], startPos);
+      if(pos >= 0)
+      {
+         int colon = StringFind(resp, ":", pos);
+         if(colon > 0)
+         {
+            int endPos = StringFind(resp, ",", colon);
+            if(endPos < 0) endPos = StringFind(resp, "}", colon);
+            if(endPos > colon)
+            {
+               string valueStr = StringSubstr(resp, colon + 1, endPos - colon - 1);
+               points[i] = StringToDouble(valueStr);
+            }
+         }
+      }
+   }
+   
+   // Dessiner la trendline
+   string tlName = "AI_" + prefix;
+   if(ObjectCreate(0, tlName, OBJ_TREND, 0, (datetime)points[0], points[1], (datetime)points[2], points[3]))
+   {
+      ObjectSetInteger(0, tlName, OBJPROP_COLOR, tlColor);
+      ObjectSetInteger(0, tlName, OBJPROP_WIDTH, 2);
+      ObjectSetInteger(0, tlName, OBJPROP_RAY_RIGHT, true);
+      ObjectSetInteger(0, tlName, OBJPROP_TIMEFRAMES, OBJ_ALL_PERIODS);
+   }
+}
+
+// Fonction d'analyse locale (fallback)
+void PerformLocalAnalysis()
+{
    // Récupérer les données H1 locales
    MqlRates rates[];
    ArraySetAsSeries(rates, true);
@@ -6079,228 +6933,49 @@ void AI_UpdateAnalysis()
       }
    }
 
-   //======================= H4 & M15 TRENDLINES =======================
-   // Même logique de swings que pour H1, appliquée à H4 puis M15.
+   // Calculer et dessiner les niveaux Fibonacci locaux
+   CalculateAndDrawLocalFibonacci(rates, swings, total);
 
-   // --- H4 ---
-   MqlRates ratesH4[];
-   ArraySetAsSeries(ratesH4, true);
-   int copiedH4 = CopyRates(_Symbol, PERIOD_H4, 0, 400, ratesH4);
-   if(copiedH4 > 0)
-   {
-      ArraySetAsSeries(ratesH4, false);
-
-      H1SwingPoint swingsH4[];
-      int totalH4 = 0;
-      for(int i4 = lookback; i4 < copiedH4 - lookback; i4++)
-      {
-         double hi4 = ratesH4[i4].high;
-         double lo4 = ratesH4[i4].low;
-         bool isHigh4 = true;
-         bool isLow4  = true;
-         for(int j4 = i4 - lookback; j4 <= i4 + lookback; j4++)
-         {
-            if(j4 == i4) continue;
-            if(ratesH4[j4].high >= hi4) isHigh4 = false;
-            if(ratesH4[j4].low  <= lo4) isLow4  = false;
-            if(!isHigh4 && !isLow4) break;
-         }
-         if(isHigh4 || isLow4)
-         {
-            if(totalH4 > 0 && (i4 - swingsH4[totalH4-1].index) < minSpacing)
-               continue;
-            H1SwingPoint sp4;
-            sp4.index  = i4;
-            sp4.time   = ratesH4[i4].time;
-            sp4.price  = isHigh4 ? hi4 : lo4;
-            sp4.isHigh = isHigh4;
-            ArrayResize(swingsH4, totalH4 + 1);
-            swingsH4[totalH4] = sp4;
-            totalH4++;
-         }
-      }
-
-      // Reset H4
-      g_h4BullStartPrice = g_h4BullEndPrice = 0.0;
-      g_h4BullStartTime  = g_h4BullEndTime  = 0;
-      g_h4BearStartPrice = g_h4BearEndPrice = 0.0;
-      g_h4BearStartTime  = g_h4BearEndTime  = 0;
-
-      // Trendline haussière H4
-      H1SwingPoint lowsH4[];
-      int lowH4Count = 0;
-      for(int k4 = 0; k4 < totalH4; k4++)
-      {
-         if(!swingsH4[k4].isHigh)
-         {
-            ArrayResize(lowsH4, lowH4Count + 1);
-            lowsH4[lowH4Count] = swingsH4[k4];
-            lowH4Count++;
-         }
-      }
-      if(lowH4Count >= 2)
-      {
-         H1SwingPoint l14 = lowsH4[lowH4Count-2];
-         H1SwingPoint l24 = lowsH4[lowH4Count-1];
-         if(l24.price > l14.price)
-         {
-            g_h4BullStartPrice = l14.price;
-            g_h4BullEndPrice   = l24.price;
-            g_h4BullStartTime  = l14.time;
-            g_h4BullEndTime    = l24.time;
-         }
-      }
-
-      // Trendline baissière H4
-      H1SwingPoint highsH4[];
-      int highH4Count = 0;
-      for(int k4 = 0; k4 < totalH4; k4++)
-      {
-         if(swingsH4[k4].isHigh)
-         {
-            ArrayResize(highsH4, highH4Count + 1);
-            highsH4[highH4Count] = swingsH4[k4];
-            highH4Count++;
-         }
-      }
-      if(highH4Count >= 2)
-      {
-         H1SwingPoint h14 = highsH4[highH4Count-2];
-         H1SwingPoint h24 = highsH4[highH4Count-1];
-         if(h24.price < h14.price)
-         {
-            g_h4BearStartPrice = h14.price;
-            g_h4BearEndPrice   = h24.price;
-            g_h4BearStartTime  = h14.time;
-            g_h4BearEndTime    = h24.time;
-         }
-      }
-   }
-
-   // --- M15 ---
-   MqlRates ratesM15[];
-   ArraySetAsSeries(ratesM15, true);
-   int copiedM15 = CopyRates(_Symbol, PERIOD_M15, 0, 400, ratesM15);
-   if(copiedM15 > 0)
-   {
-      ArraySetAsSeries(ratesM15, false);
-
-      H1SwingPoint swingsM15[];
-      int totalM15 = 0;
-      for(int i15 = lookback; i15 < copiedM15 - lookback; i15++)
-      {
-         double hi15 = ratesM15[i15].high;
-         double lo15 = ratesM15[i15].low;
-         bool isHigh15 = true;
-         bool isLow15  = true;
-         for(int j15 = i15 - lookback; j15 <= i15 + lookback; j15++)
-         {
-            if(j15 == i15) continue;
-            if(ratesM15[j15].high >= hi15) isHigh15 = false;
-            if(ratesM15[j15].low  <= lo15) isLow15  = false;
-            if(!isHigh15 && !isLow15) break;
-         }
-         if(isHigh15 || isLow15)
-         {
-            if(totalM15 > 0 && (i15 - swingsM15[totalM15-1].index) < minSpacing)
-               continue;
-            H1SwingPoint sp15;
-            sp15.index  = i15;
-            sp15.time   = ratesM15[i15].time;
-            sp15.price  = isHigh15 ? hi15 : lo15;
-            sp15.isHigh = isHigh15;
-            ArrayResize(swingsM15, totalM15 + 1);
-            swingsM15[totalM15] = sp15;
-            totalM15++;
-         }
-      }
-
-      // Reset M15
-      g_m15BullStartPrice = g_m15BullEndPrice = 0.0;
-      g_m15BullStartTime  = g_m15BullEndTime  = 0;
-      g_m15BearStartPrice = g_m15BearEndPrice = 0.0;
-      g_m15BearStartTime  = g_m15BearEndTime  = 0;
-
-      // Trendline haussière M15
-      H1SwingPoint lowsM15[];
-      int lowM15Count = 0;
-      for(int k15 = 0; k15 < totalM15; k15++)
-      {
-         if(!swingsM15[k15].isHigh)
-         {
-            ArrayResize(lowsM15, lowM15Count + 1);
-            lowsM15[lowM15Count] = swingsM15[k15];
-            lowM15Count++;
-         }
-      }
-      if(lowM15Count >= 2)
-      {
-         H1SwingPoint l115 = lowsM15[lowM15Count-2];
-         H1SwingPoint l215 = lowsM15[lowM15Count-1];
-         if(l215.price > l115.price)
-         {
-            g_m15BullStartPrice = l115.price;
-            g_m15BullEndPrice   = l215.price;
-            g_m15BullStartTime  = l115.time;
-            g_m15BullEndTime    = l215.time;
-         }
-      }
-
-      // Trendline baissière M15
-      H1SwingPoint highsM15[];
-      int highM15Count = 0;
-      for(int k15 = 0; k15 < totalM15; k15++)
-      {
-         if(swingsM15[k15].isHigh)
-         {
-            ArrayResize(highsM15, highM15Count + 1);
-            highsM15[highM15Count] = swingsM15[k15];
-            highM15Count++;
-         }
-      }
-      if(highM15Count >= 2)
-      {
-         H1SwingPoint h115 = highsM15[highM15Count-2];
-         H1SwingPoint h215 = highsM15[highM15Count-1];
-         if(h215.price < h115.price)
-         {
-            g_m15BearStartPrice = h115.price;
-            g_m15BearEndPrice   = h215.price;
-            g_m15BearStartTime  = h115.time;
-            g_m15BearEndTime    = h215.time;
-         }
-      }
-   }
-
-   // Mettre à jour des zones locales S/R H1 sous forme de rectangles (buy/sell zones)
-   double lastRange = rates[copied-1].high - rates[copied-1].low;
-   if(lastRange <= 0.0)
-      lastRange = 10 * _Point;
-   double buffer = MathMax(lastRange * 0.5, 10 * _Point);
-
-   // Zone d'achat autour du dernier creux H1
-   if(lowCount > 0)
-   {
-      H1SwingPoint lastLow = lows[lowCount-1];
-      g_aiBuyZoneLow  = lastLow.price - buffer;
-      g_aiBuyZoneHigh = lastLow.price + buffer;
-   }
-
-   // Zone de vente autour du dernier sommet H1
-   if(highCount > 0)
-   {
-      H1SwingPoint lastHigh = highs[highCount-1];
-      g_aiSellZoneLow  = lastHigh.price - buffer;
-      g_aiSellZoneHigh = lastHigh.price + buffer;
-   }
-
-   // (Optionnel) reset ETE local car non recalculé ici
-   g_h1ETEFound     = false;
-   g_h1ETEHeadPrice = 0.0;
-   g_h1ETEHeadTime  = 0;
-
+   // Appeler la fonction de dessin existante
    DrawH1Structure();
 }
+
+// Fonction pour calculer et dessiner les Fibonacci locaux
+void CalculateAndDrawLocalFibonacci(MqlRates &rates[], H1SwingPoint &swings[], int total)
+{
+   if(total < 2) return;
+   
+   // Trouver le dernier swing significatif (haut ou bas)
+   H1SwingPoint lastSwing = swings[total-1];
+   H1SwingPoint prevSwing = swings[total-2];
+   
+   double highPrice = MathMax(lastSwing.price, prevSwing.price);
+   double lowPrice = MathMin(lastSwing.price, prevSwing.price);
+   
+   // Calculer les niveaux Fibonacci
+   double fib0 = lowPrice;
+   double fib100 = highPrice;
+   double diff = fib100 - fib0;
+   
+   double fib236 = fib0 + diff * 0.236;
+   double fib382 = fib0 + diff * 0.382;
+   double fib500 = fib0 + diff * 0.500;
+   double fib618 = fib0 + diff * 0.618;
+   double fib786 = fib0 + diff * 0.786;
+   
+   double fibValues[7] = {fib0, fib236, fib382, fib500, fib618, fib786, fib100};
+   
+   // Dessiner les niveaux
+   DrawFibonacciLevels(fibValues);
+}
+
+//+------------------------------------------------------------------+
+//| Fonction DrawH1Structure existante déjà plus haut dans le code    |
+//+------------------------------------------------------------------+
+
+//+------------------------------------------------------------------+
+//| Autres fonctions existantes                                       |
+//+------------------------------------------------------------------+
 
 // -------------------------------------------------------------------
 // IA : Affichage dans un panneau séparé (BAS À DROITE, 3 lignes max)
@@ -7137,6 +7812,70 @@ static bool g_zoneIsBuy = false;
 static datetime g_zoneEntryTime = 0;
 
 //+------------------------------------------------------------------+
+//| Dessine les zones de trading basées sur l'IA                      |
+//+------------------------------------------------------------------+
+void DrawAIZones()
+{
+   // Vérifier si on est en mode démo ou si l'affichage est désactivé
+   if(!ShowZones || !MQLInfoInteger(MQL_TESTER))
+      return;
+      
+   // Effacer les anciennes zones
+   ObjectsDeleteAll(0, "AI_Zone_");
+   
+   // Récupérer les données du marché
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   
+   // Définir les niveaux de zones (exemple avec 3 zones de chaque côté)
+   double zones[][2] = {
+      {ask + 20 * point, ask + 50 * point},    // Zone de vente 1
+      {ask + 50 * point, ask + 100 * point},   // Zone de vente 2
+      {bid - 100 * point, bid - 50 * point},   // Zone d'achat 1
+      {bid - 50 * point, bid - 20 * point}     // Zone d'achat 2
+   };
+   
+   // Couleurs des zones (rouge pour vente, vert pour achat)
+   color zoneColors[] = {clrRed, clrOrangeRed, clrLimeGreen, clrLime};
+   
+   // Dessiner chaque zone
+   for(int i = 0; i < ArraySize(zones); i++)
+   {
+      string name = StringFormat("AI_Zone_%d", i);
+      
+      // Créer un rectangle pour la zone
+      if(!ObjectCreate(0, name, OBJ_RECTANGLE, 0, 0, 0, 0, 0))
+      {
+         Print("Erreur création zone ", name, ": ", GetLastError());
+         continue;
+      }
+      
+      // Configurer le rectangle avec la signature correcte pour MQL5
+      datetime time1 = TimeCurrent();
+      datetime time2 = time1 + 3600; // 1h de visibilité
+      
+      // Créer le rectangle avec les coordonnées directement
+      if(ObjectCreate(0, name, OBJ_RECTANGLE, 0, time1, zones[i][0], time2, zones[i][1]))
+      {
+         // Configurer les propriétés du rectangle
+         ObjectSetInteger(0, name, OBJPROP_COLOR, zoneColors[i]);
+         ObjectSetInteger(0, name, OBJPROP_STYLE, STYLE_SOLID);
+         ObjectSetInteger(0, name, OBJPROP_WIDTH, 1);
+         ObjectSetInteger(0, name, OBJPROP_FILL, true);
+         ObjectSetInteger(0, name, OBJPROP_BACK, true);
+         ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
+         ObjectSetInteger(0, name, OBJPROP_SELECTED, false);
+         ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
+         ObjectSetInteger(0, name, OBJPROP_ZORDER, 0);
+      }
+   }
+   
+   // Mettre à jour le graphique
+   ChartRedraw(0);
+}
+
+//+------------------------------------------------------------------+
 //| Affiche les zones SMC_OB sur le graphique                        |
 //+------------------------------------------------------------------+
 void DrawSMCOBZones()
@@ -7613,6 +8352,48 @@ void UpdateFundamentalDisplay(double peRatio, double dividendYield)
       ObjectSetInteger(0, timeName, OBJPROP_FONTSIZE, 7);
    }
    ObjectSetString(0, timeName, OBJPROP_TEXT, "Dernière mise à jour: " + TimeToString(TimeCurrent(), TIME_MINUTES));
+}
+
+//+------------------------------------------------------------------+
+//| Vérifie les signaux d'entrée                                     |
+//+------------------------------------------------------------------+
+void CheckForEntrySignals()
+{
+   // Vérifier si le trading est activé
+   if(!EnableTrading)
+      return;
+      
+   // Vérifier si on peut placer un nouvel ordre
+   if(!IsMarketConditionGoodForTrading())
+      return;
+      
+   // Logique de base pour les signaux d'entrée
+   // Cette fonction peut être étendue avec des stratégies spécifiques
+   static datetime lastSignalTime = 0;
+   datetime currentTime = TimeCurrent();
+   
+   // Éviter les signaux trop fréquents (minimum 60 secondes entre les signaux)
+   if(currentTime - lastSignalTime < 60)
+      return;
+      
+   // Ici vous pouvez ajouter votre logique de détection de signaux
+   // Par exemple: vérification des indicateurs, conditions de marché, etc.
+   
+   lastSignalTime = currentTime;
+}
+//+------------------------------------------------------------------+
+
+//+------------------------------------------------------------------+
+//| Met à jour le panneau d'affichage                                |
+//+------------------------------------------------------------------+
+void UpdatePanel()
+{
+   // Mettre à jour les différents panneaux d'affichage
+   if(ShowZones)
+      DrawTimeWindowsPanel();
+      
+   // Autres mises à jour d'interface peuvent être ajoutées ici
+   // Par exemple: mise à jour des indicateurs, zones AI, etc.
 }
 //+------------------------------------------------------------------+
 

@@ -239,6 +239,43 @@ class TimeWindowsResponse(BaseModel):
     forbidden_hours: List[int]  # Liste d'heures 0-23
 
 # Fonctions utilitaires
+def get_historical_data(symbol: str, timeframe: str = "H1", count: int = 500) -> pd.DataFrame:
+    """
+    Récupère les données historiques depuis la source disponible (MT5 ou autre)
+    
+    Args:
+        symbol: Symbole du marché (ex: "EURUSD")
+        timeframe: Période temporelle (M1, M5, M15, H1, H4, D1)
+        count: Nombre de bougies à récupérer
+        
+    Returns:
+        DataFrame pandas avec les données OHLCV
+    """
+    # Essayer d'abord MT5 si disponible
+    if mt5_initialized:
+        df = get_historical_data_mt5(symbol, timeframe, count)
+        if df is not None and not df.empty:
+            return df
+    
+    # Fallback sur une autre source (par exemple, un fichier local ou une API)
+    # Ici, vous pourriez ajouter la logique pour récupérer les données depuis une autre source
+    # Par exemple, depuis un fichier CSV local ou une API tierce
+    
+    # Exemple de fallback avec un fichier CSV local (à adapter selon votre structure)
+    try:
+        data_file = Path(f"data/{symbol}_{timeframe}.csv")
+        if data_file.exists():
+            df = pd.read_csv(data_file)
+            if 'time' in df.columns:
+                df['time'] = pd.to_datetime(df['time'])
+                return df.tail(count) if len(df) > count else df
+    except Exception as e:
+        logger.warning(f"Impossible de charger les données depuis le fichier local: {e}")
+    
+    # Si aucune source n'est disponible, retourner un DataFrame vide
+    logger.warning(f"Aucune source de données disponible pour {symbol} {timeframe}")
+    return pd.DataFrame()
+
 def get_historical_data_mt5(symbol: str, timeframe: str = "H1", count: int = 500):
     """Récupère les données historiques depuis MT5"""
     if not mt5_initialized:
@@ -1715,6 +1752,273 @@ async def validate_order(order_data: Dict[str, Any]):
         logger.error(f"Erreur validation ordre: {e}")
         return {"valid": False, "reason": str(e)}
 
+# ==================== INDICATEURS TECHNIQUES AVANCÉS ====================
+
+@app.get("/indicators/ichimoku/{symbol}")
+async def get_ichimoku_analysis(
+    symbol: str, 
+    timeframe: str = "H1",
+    count: int = 200
+):
+    """
+    Récupère l'analyse Ichimoku Kinko Hyo pour un symbole donné.
+    
+    Args:
+        symbol: Symbole du marché (ex: "EURUSD", "BTCUSDT")
+        timeframe: Période temporelle (M1, M5, M15, H1, H4, D1)
+        count: Nombre de bougies à analyser (max 1000)
+        
+    Returns:
+        Dictionnaire contenant les composantes de l'Ichimoku
+    """
+    try:
+        # Valider les paramètres
+        count = min(max(50, count), 1000)  # Limiter entre 50 et 1000
+        
+        # Récupérer les données historiques
+        df = get_historical_data(symbol, timeframe, count)
+        if df.empty:
+            raise HTTPException(status_code=404, detail=f"Aucune donnée disponible pour {symbol}")
+        
+        # Initialiser l'analyseur d'indicateurs
+        from python.ai_indicators import AdvancedIndicators
+        analyzer = AdvancedIndicators(symbol, timeframe)
+        
+        # Calculer l'Ichimoku
+        ichimoku = analyzer.calculate_ichimoku(df)
+        
+        if not ichimoku:
+            raise HTTPException(status_code=400, detail="Impossible de calculer l'Ichimoku avec les données disponibles")
+        
+        return {
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "timestamp": datetime.utcnow().isoformat(),
+            **ichimoku
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Erreur dans get_ichimoku_analysis: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Erreur lors du calcul de l'Ichimoku: {str(e)}")
+
+@app.get("/indicators/fibonacci/{symbol}")
+async def get_fibonacci_levels(
+    symbol: str,
+    timeframe: str = "D1",
+    lookback: int = 100
+):
+    """
+    Calcule les niveaux de retracement et d'extension de Fibonacci.
+    
+    Args:
+        symbol: Symbole du marché
+        timeframe: Période temporelle (M1, M5, M15, H1, H4, D1)
+        lookback: Nombre de périodes à analyser pour trouver les extrêmes
+        
+    Returns:
+        Dictionnaire contenant les niveaux de Fibonacci
+    """
+    try:
+        # Valider les paramètres
+        lookback = min(max(20, lookback), 500)  # Limiter entre 20 et 500
+        
+        # Récupérer les données historiques
+        df = get_historical_data(symbol, timeframe, lookback + 10)  # Prendre quelques bougies supplémentaires
+        if df.empty:
+            raise HTTPException(status_code=404, detail=f"Aucune donnée disponible pour {symbol}")
+        
+        # Initialiser l'analyseur d'indicateurs
+        from python.ai_indicators import AdvancedIndicators
+        analyzer = AdvancedIndicators(symbol, timeframe)
+        
+        # Calculer les niveaux de Fibonacci
+        fib_levels = analyzer.calculate_fibonacci(df, lookback)
+        
+        if not fib_levels:
+            raise HTTPException(status_code=400, detail="Impossible de calculer les niveaux de Fibonacci")
+        
+        return {
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "lookback_periods": lookback,
+            "timestamp": datetime.utcnow().isoformat(),
+            **fib_levels
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Erreur dans get_fibonacci_levels: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Erreur lors du calcul des niveaux de Fibonacci: {str(e)}")
+
+@app.get("/indicators/order-blocks/{symbol}")
+async def get_order_blocks(
+    symbol: str,
+    timeframe: str = "H4",
+    lookback: int = 50,
+    min_strength: float = 0.7
+):
+    """
+    Détecte les blocs d'ordre (Order Blocks) dans le graphique.
+    
+    Args:
+        symbol: Symbole du marché
+        timeframe: Période temporelle (M1, M5, M15, H1, H4, D1)
+        lookback: Nombre de périodes à analyser
+        min_strength: Force minimale des blocs à inclure (0-1)
+        
+    Returns:
+        Liste des blocs d'ordre détectés
+    """
+    try:
+        # Valider les paramètres
+        lookback = min(max(20, lookback), 200)  # Limiter entre 20 et 200
+        min_strength = min(max(0.1, min_strength), 1.0)  # Limiter entre 0.1 et 1.0
+        
+        # Récupérer les données historiques
+        df = get_historical_data(symbol, timeframe, lookback + 10)  # Prendre quelques bougies supplémentaires
+        if df.empty:
+            raise HTTPException(status_code=404, detail=f"Aucune donnée disponible pour {symbol}")
+        
+        # Initialiser l'analyseur d'indicateurs
+        from python.ai_indicators import AdvancedIndicators
+        analyzer = AdvancedIndicators(symbol, timeframe)
+        
+        # Détecter les blocs d'ordre
+        blocks = analyzer.detect_order_blocks(df, lookback, min_strength)
+        
+        return {
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "lookback_periods": lookback,
+            "min_strength": min_strength,
+            "timestamp": datetime.utcnow().isoformat(),
+            "order_blocks": blocks
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Erreur dans get_order_blocks: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Erreur lors de la détection des blocs d'ordre: {str(e)}")
+
+@app.get("/indicators/liquidity-zones/{symbol}")
+async def get_liquidity_zones(
+    symbol: str,
+    timeframe: str = "H1",
+    num_zones: int = 5,
+    volume_filter: bool = True
+):
+    """
+    Identifie les zones de liquidité basées sur le volume et le profil de prix.
+    
+    Args:
+        symbol: Symbole du marché
+        timeframe: Période temporelle (M1, M5, M15, H1, H4, D1)
+        num_zones: Nombre de zones de liquidité à identifier (1-10)
+        volume_filter: Si True, utilise le volume pour pondérer les zones
+        
+    Returns:
+        Liste des zones de liquidité identifiées
+    """
+    try:
+        # Valider les paramètres
+        num_zones = min(max(1, num_zones), 10)  # Limiter entre 1 et 10
+        
+        # Récupérer les données historiques
+        df = get_historical_data(symbol, timeframe, 200)  # Prendre assez de données pour une analyse significative
+        if df.empty:
+            raise HTTPException(status_code=404, detail=f"Aucune donnée disponible pour {symbol}")
+        
+        # Initialiser l'analyseur d'indicateurs
+        from python.ai_indicators import AdvancedIndicators
+        analyzer = AdvancedIndicators(symbol, timeframe)
+        
+        # Identifier les zones de liquidité
+        zones = analyzer.identify_liquidity_zones(df, num_zones, volume_filter)
+        
+        return {
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "num_zones": len(zones),
+            "volume_filter": volume_filter,
+            "timestamp": datetime.utcnow().isoformat(),
+            "liquidity_zones": zones
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Erreur dans get_liquidity_zones: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Erreur lors de l'identification des zones de liquidité: {str(e)}")
+
+@app.get("/indicators/market-profile/{symbol}")
+async def get_market_profile_analysis(
+    symbol: str,
+    timeframe: str = "D1",
+    period: str = "D",
+    value_area_percent: float = 0.7
+):
+    """
+    Calcule le profil de marché (Market Profile) avec POC, VAL, VAH, etc.
+    
+    Args:
+        symbol: Symbole du marché
+        timeframe: Période temporelle des bougies
+        period: Période d'agrégation (D=journalier, W=hebdomadaire, M=mensuel)
+        value_area_percent: Pourcentage de volume à inclure dans la zone de valeur (0.5-0.9)
+        
+    Returns:
+        Dictionnaire contenant les informations du profil de marché
+    """
+    try:
+        # Valider les paramètres
+        value_area_percent = min(max(0.5, value_area_percent), 0.9)  # Limiter entre 0.5 et 0.9
+        
+        # Déterminer le nombre de bougies à récupérer en fonction de la période
+        if period == "D":
+            days = 30
+        elif period == "W":
+            days = 180
+        elif period == "M":
+            days = 365
+        else:
+            days = 30  # Par défaut, 1 mois
+        
+        # Récupérer les données historiques
+        df = get_historical_data(symbol, timeframe, days * 24)  # Estimation grossière
+        if df.empty:
+            raise HTTPException(status_code=404, detail=f"Aucune donnée disponible pour {symbol}")
+        
+        # Initialiser l'analyseur d'indicateurs
+        from python.ai_indicators import AdvancedIndicators
+        analyzer = AdvancedIndicators(symbol, timeframe)
+        
+        # Calculer le profil de marché
+        profile = analyzer.calculate_market_profile(df, period, value_area_percent)
+        
+        if not profile:
+            raise HTTPException(status_code=400, detail="Impossible de calculer le profil de marché")
+        
+        return {
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "period": period,
+            "value_area_percent": value_area_percent,
+            "timestamp": datetime.utcnow().isoformat(),
+            **profile
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Erreur dans get_market_profile_analysis: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Erreur lors du calcul du profil de marché: {str(e)}")
+
+# ==================== FIN INDICATEURS TECHNIQUES AVANCÉS ====================
+
 # Point d'entrée du programme
 if __name__ == "__main__":
     logger.info("=" * 60)
@@ -1748,6 +2052,11 @@ if __name__ == "__main__":
     print(f"  - GET  /indicators/sentiment/{{symbol}} : Sentiment du marché")
     print(f"  - GET  /indicators/volume_profile/{{symbol}} : Profil de volume")
     print(f"  - POST /analyze/gemini               : Analyse avec Google Gemini AI")
+    print("  - GET  /indicators/ichimoku/{symbol}     : Analyse Ichimoku Kinko Hyo")
+    print("  - GET  /indicators/fibonacci/{symbol}    : Niveaux de retracement/extension Fibonacci")
+    print("  - GET  /indicators/order-blocks/{symbol} : Détection des blocs d'ordre")
+    print("  - GET  /indicators/liquidity-zones/{symbol} : Zones de liquidité")
+    print("  - GET  /indicators/market-profile/{symbol}  : Profil de marché (Market Profile)")
     print("\nDocumentation interactive:")
     print(f"  - http://127.0.0.1:{API_PORT}/docs")
     print("=" * 60)
