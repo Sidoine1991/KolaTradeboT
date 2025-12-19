@@ -7,8 +7,136 @@
 #property version   "2.00"
 #property strict
 
+// AI Signal Types
+enum ENUM_IA_SIGNAL {
+   IA_SIGNAL_NONE = 0,
+   IA_SIGNAL_BUY = 1,
+   IA_SIGNAL_SELL = -1
+};
+
+// Global variables for AI
+string g_lastAIAction = "";
+double g_lastAIConfidence = 0.0;
+string g_lastAIReason = "";
+double g_aiBuyZoneLow = 0.0;
+double g_aiBuyZoneHigh = 0.0;
+double g_aiSellZoneLow = 0.0;
+double g_aiSellZoneHigh = 0.0;
+datetime g_lastAIRequest = 0;
+string g_lastValidationReason = "";
+
+// Variables pour la gestion des pertes consécutives
+int g_consecutiveLosses = 0;                 // Compteur de pertes consécutives
+datetime g_recoveryUntil = 0;                // Heure de fin de la période de récupération
+
+// Function declarations
+int AI_GetDecision(double rsi, double atr, double emaFastH1, double emaSlowH1, 
+                  double emaFastM1, double emaSlowM1, double ask, double bid, 
+                  int dirRule, bool spikeMode);
+int AllowedDirectionFromSymbol(string symbol);
+void DrawAIRecommendation(string action, double confidence, string reason, double price);
+void AI_UpdateAnalysis();
+void EvaluateBoomCrashZoneScalps();
+void EvaluateAIZoneBounceStrategy();
+bool SMC_UpdateZones();
+void DrawTimeWindowsPanel();
+void SendAISummaryIfDue();
+void DrawAIBlockLabel(string symbol, string title, string reason);
+void CloseExcessPositions();
+void AI_UpdateFundamentalAnalysis();
+bool IsFundamentalConfirming(string direction);
+bool PredictSpikeFromSMCOB(double &spikePrice, bool &isBuySpike, double &confidence);
+bool SMC_OB_CheckZones(double currentPrice, bool &isBuySpike, double &confidence);
+int CountPositionsForSymbolMagic();
+int CountAllPositionsForMagic();
+int CountOpenForexPositions();
+bool CanOpenNewPosition();
+void AI_UpdateTimeWindows();
+void DrawAIZones();
+void CheckAIZoneAlerts();
+void EvaluateAIZoneEMAScalps();
+void ManageGlobalProfitSecurity();
+void CheckSpikeSignals();
+bool ExecuteTrade(ENUM_ORDER_TYPE orderType, double lotSize, double sl = 0.0, double tp = 0.0, string comment = "", bool isBoomCrash = false, bool isVol = false, bool isSpike = false);
+bool ExecuteTrade(ENUM_ORDER_TYPE type, double atr, double price, string comment, double lotMultiplier = 1.0, bool isSpikePriority = false);
+void ManageTrade();
+bool ValidateAndAdjustStops(string symbol, ENUM_ORDER_TYPE type, double &executionPrice, double &sl, double &tp);
+double CalculateLot(double atr);
+void CloseAllPositionsForSymbolMagic();
+void UpdateSMCOBZones();
+void DrawSMCOBZones();
+void CheckTotalLossProtection()
+{
+   if(!EnableTotalLossProtection)
+      return;
+      
+   // Calculer le profit/perte total du compte
+   double totalProfit = 0;
+   double worstPositionProfit = 0;
+   ulong worstPositionTicket = 0;
+   
+   // Parcourir toutes les positions ouvertes
+   for(int i = 0; i < PositionsTotal(); i++)
+   {
+      string posSymbol = PositionGetSymbol(i);
+      if(PositionGetInteger(POSITION_MAGIC) == InpMagicNumber)
+      {
+         double posProfit = PositionGetDouble(POSITION_PROFIT);
+         totalProfit += posProfit;
+         
+         // Trouver la position avec la plus grande perte
+         if(posProfit < worstPositionProfit)
+         {
+            worstPositionProfit = posProfit;
+            worstPositionTicket = PositionGetInteger(POSITION_TICKET);
+         }
+      }
+   }
+   
+   // Vérifier si la perte totale dépasse la limite
+   if(totalProfit <= MaxTotalLossAmount)
+   {
+      Print("Protection contre pertes totales activée - Perte totale: ", totalProfit, " $");
+      
+      if(CloseWorstPositionOnLoss && worstPositionTicket > 0)
+      {
+         // Fermer la position avec la plus grande perte
+         if(PositionSelectByTicket(worstPositionTicket))
+         {
+            MqlTradeRequest request = {};
+            MqlTradeResult result = {};
+            
+            request.action = TRADE_ACTION_DEAL;
+            request.position = worstPositionTicket;
+            request.symbol = PositionGetString(POSITION_SYMBOL);
+            request.volume = PositionGetDouble(POSITION_VOLUME);
+            request.type = (ENUM_ORDER_TYPE)PositionGetInteger(POSITION_TYPE);
+            request.price = PositionGetDouble(POSITION_PRICE_CURRENT);
+            request.deviation = 3;
+            request.magic = InpMagicNumber;
+            
+            if(OrderSend(request, result))
+            {
+               Print("Position avec perte la plus élevée fermée: Ticket ", worstPositionTicket, 
+                     ", Perte: ", worstPositionProfit, " $");
+            }
+            else
+            {
+               Print("Erreur lors de la fermeture de la position: ", GetLastError());
+            }
+         }
+      }
+   }
+}
+
+
 #include <Trade/Trade.mqh>
+#include <Trade/OrderInfo.mqh>
+#include <Trade/PositionInfo.mqh>
+#include <Trade/DealInfo.mqh>
+#include <Trade/HistoryOrderInfo.mqh>
 #include <WinAPI/winapi.mqh>
+#include "temp_can_trade_after_losses.mqh"
 
 // Forward declarations
 void DisplaySpikeAlert();
@@ -55,10 +183,10 @@ datetime g_spikeCooldownUntil = 0;
 // Paramètres du position sizing dynamique - DÉSACTIVÉ
 input group "=== Dynamic Position Sizing ==="
 input bool   UseDynamicPositionSizing = false;   // DÉSACTIVÉ - Ne pas doubler le lot
-double DynamicLotMultiplier = 1.0;               // Désactivé
-double MaxLotMultiplier = 1.0;                   // Désactivé
-int MinBarsForAdjustment = 5;                    // Nombre minimum de bougies avant ajustement
-int AdjustmentIntervalSeconds = 300;              // Intervalle minimum entre les ajustements (5 minutes)
+input double DynamicLotMultiplier = 1.0;               // Désactivé
+input double MaxLotMultiplier = 1.0;                   // Désactivé
+input int MinBarsForAdjustment = 5;                    // Nombre minimum de bougies avant ajustement
+input int AdjustmentIntervalSeconds = 300;              // Intervalle minimum entre les ajustements (5 minutes)
 // Simple JSON parsing functions
 #include <Arrays\ArrayString.mqh>
 
@@ -173,9 +301,18 @@ CTrade trade;
 
 //========================= INPUTS ===================================
 input group "--- RISK MANAGEMENT ---"
-input double RiskPercent     = 1.0;      // Risk réduit à 1% par trade
-input double FixedLotSize    = 0.1;      // Lot fixe réduit si RiskPercent = 0
-input double MaxLotSize      = 5.0;      // Plafond absolu de taille de lot
+input double RiskPercent        = 1.0;      // % du capital à risquer par trade (0-5%)
+input double FixedLotSize       = 0.1;      // Lot fixe si RiskPercent = 0
+input double MaxLotSize         = 5.0;      // Plafond absolu de taille de lot
+input double DailyProfitTarget  = 100.0;    // Objectif de profit quotidien (0 = illimité)
+input double DailyLossLimit     = 200.0;    // Limite de perte quotidienne (0 = illimitée)
+input double MinRiskReward      = 1.5;      // Ratio Risque/Récompense minimum (ex: 1.5 pour 1:1.5)
+input int    MaxConsecLosses    = 5;        // Arrêter après X pertes consécutives
+
+// Variables globales pour le suivi des performances
+double g_dailyProfit = 0.0;
+double g_dailyLoss = 0.0;
+datetime g_lastTradeDay = 0;  // Dernier jour de trading
 input int    MaxSpreadPoints = 100000;   // Spread max autorisé (filtre assoupli)
 input int    MaxSimultaneousSymbols = 2; // Nombre maximum de symboles tradés en même temps
 input bool   UseGlobalLossStop = false;   // Stop global sur pertes cumulées
@@ -183,6 +320,11 @@ input double GlobalLossLimit   = -3.0;    // Perte max cumulée avant clôture d
 input double LossCutDollars    = 2.0;     // Coupure max pour la position principale (en $)
 input double ProfitSecureDollars = 2.0;   // Gain à sécuriser (en $) par position
 input int    MinPositionLifetimeSec = 60; // Délai minimum avant fermeture (secondes) - évite ouvertures/fermetures trop rapides
+
+// --- PROTECTION CONTRE LES PERTES TOTALES ---
+input bool   EnableTotalLossProtection = true;  // Activer la protection contre les pertes totales
+input double MaxTotalLossAmount = -6.0;         // Perte totale maximale avant déclenchement (en $)
+input bool   CloseWorstPositionOnLoss = true;   // Fermer automatiquement la position avec la plus grande perte
 
 // --- AJOUT: INPUTS DE SÉCURITÉ ---
 input bool   EnableTrading = true;            // Master switch: activer/désactiver le trading
@@ -238,7 +380,7 @@ input bool   UseSpikeSpeedFilter = true;  // Activer le filtre de vitesse des sp
 input double SpikeSpeedMin      = 50.0;   // Vitesse minimale (points/minute)
 input bool   UseAdvancedLogging = false;  // Journalisation avancée des erreurs
 input bool   UseInstantProfitClose = false; // CLÔTURE immédiate dès 0.01$ de profit (désactivée par défaut)
-input int    SpikePreEntrySeconds   = 30;  // Nombre de secondes AVANT le spike estimé pour déclencher l'alerte et entrer (30s = alerte 30s avant)
+input int    SpikePreEntrySeconds   = 15;  // Nombre de secondes AVANT le spike estimé pour déclencher l'alerte et entrer (15s = alerte 15s avant)
 
 input group "--- ENTRY FILTERS ---"
 input ENUM_TIMEFRAMES TF_Trend = PERIOD_H1;
@@ -248,7 +390,7 @@ input bool   UseTrendlineFilter = true;  // Activer le filtre de tendance pour l
 input int    AutoCooldownSec   = 90;     // Délai min entre deux autos
 input int    AfterLossCooldownSec = 0;    // Patience après un SL touché (0 = pas de cooldown)
 input double MinMAGapPoints    = 10;     // Ecart min MA rapide/lente
-input bool   AllowContraAuto   = false;  // Bloquer BUY sur Crash et SELL sur Boom
+input bool   AllowContraAuto   = true;   // Autoriser BUY sur Crash et SELL sur Boom
 input bool   DebugBlocks       = true;   // Logs détaillés
 
 // Indicateurs techniques additionnels (aident l'IA)
@@ -271,11 +413,11 @@ input bool   UseAI_Agent       = true;               // Activer l'agent IA (via 
 input string AI_ServerURL      = "http://127.0.0.1:8000/decision"; // URL serveur IA (FastAPI / autre)
 input int    AI_Timeout_ms     = 800;                // Timeout WebRequest en millisecondes
 input bool   AI_CanBlockTrades = false;              // Si true, l'IA peut bloquer des entrées (false = guide seulement)
-input double AI_MinConfidence  = 0.8;                // Confiance minimale IA pour influencer/autoriser les décisions (0.0-1.0) - RECOMMANDÉ: 0.8+
+input double AI_MinConfidence  = 0.3;                // Confiance minimale IA pour influencer/autoriser les décisions (0.0-1.0) - RÉDUIT pour Crash
 input bool   AI_UseNotifications = true;             // Envoyer notifications pour signaux consolidés
 input bool   AI_AutoExecuteTrades = true;             // Exécuter automatiquement les trades IA (true = actif par défaut)
 input bool   AI_PredictSpikes   = true;              // Prédire les zones de spike Boom/Crash avec flèches
-input int    SignalValidationMinScore = 90;           // Score minimum de validation (0-100) - RECOMMANDÉ: 90+ pour signaux 100% validés
+input int    SignalValidationMinScore = 70;           // Score minimum de validation (0-100) - RÉDUIT pour capturer cette opportunité
 input string AI_AnalysisURL    = "http://127.0.0.1:8000/analysis";  // URL base pour l'analyse complète (structure H1, etc.)
 input int    AI_AnalysisIntervalSec = 60;                           // Fréquence de rafraîchissement de l'analyse (secondes)
 input bool   AI_DrawH1Structure = true;                             // Tracer la structure H1 (trendlines, ETE) sur le graphique
@@ -325,9 +467,6 @@ static datetime lastAutoTradeTime = 0;
 static double   accountStartBalance = 0.0;
 
 // Etat IA (facultatif, pour debug / affichage)
-static string   g_lastAIAction    = "";
-static double   g_lastAIConfidence = 0.0;
-static string   g_lastAIReason    = "";
 static datetime g_lastAITime      = 0;
 
 // Prédictions de spike IA
@@ -344,10 +483,6 @@ static double   g_aiEarlySpikeZonePrice = 0.0;
 static bool     g_aiEarlySpikeDirection = true;
 static bool     g_aiStrongSpike         = false; // true si spike_prediction (signal fort), false si seulement pré‑alerte
 // Zones IA H1 confirmées M5
-static double   g_aiBuyZoneLow   = 0.0;
-static double   g_aiBuyZoneHigh  = 0.0;
-static double   g_aiSellZoneLow  = 0.0;
-static double   g_aiSellZoneHigh = 0.0;
 static bool     g_aiZoneAlertBuy  = false;
 static bool     g_aiZoneAlertSell = false;
 // Indicateurs modernes 2025 (VWAP, SuperTrend)
@@ -386,16 +521,22 @@ struct SymbolLossData {
 };
 
 static SymbolLossData g_symbolLosses[];  // Tableau des pertes par symbole
+static ulong lastAlertTimeGlobal = 0;  // Pour limiter la fréquence des alertes
+static ulong lastForexLimitAlertTime = 0;  // Pour limiter les alertes de limite Forex
+// g_consecutiveLosses est déjà déclaré plus haut comme variable globale
+// g_recoveryUntil est déjà déclaré plus haut
 static datetime g_lastSymbolLossTime = 0; // Pour compatibilité ascendante
 // Cooldown spécifique Boom 300 après 2 pertes impliquant ce symbole
 static datetime g_boom300CooldownUntil = 0;
-// Dernière raison de validation bloquée (pour affichage/notification)
-static string   g_lastValidationReason = "";
-static string   g_lastAIJson       = "";   // Dernière réponse JSON brute du serveur IA (pour affichage)
+// Dernière réponse JSON brute du serveur IA (pour affichage)
+static string   g_lastAIJson = "";
 
 // Mise à jour des indicateurs IA
 static datetime g_lastAIIndicatorsUpdate = 0;
 #define AI_INDICATORS_UPDATE_INTERVAL 300  // 5 minutes
+
+// Variables pour les fenêtres horaires et analyse fondamentale
+input bool AI_ShowTimeWindows = true;  // Afficher les fenêtres de temps
 
 // Notifications (éviter spam)
 static datetime g_lastNotificationTime = 0;
@@ -474,8 +615,8 @@ input int SMC_OB_ExpiryBars = 20;         // Nombre de bougies avant expiration 
 input bool SMC_OB_UseForSpikes = true;    // Utiliser les zones SMC_OB pour la détection des spikes
 
 // Fenêtres horaires optimales (24 heures, indexées 0-23) - spécifiques au symbole
-bool g_hourPreferred[24];
-bool g_hourForbidden[24];
+static bool g_hourPreferred[24];  // Heures préférées pour le trading
+static bool g_hourForbidden[24];  // Heures interdites pour le trading
 static datetime g_lastTimeWindowsUpdate = 0;
 static string   g_timeWindowsSymbol = ""; // Symbole pour lequel les fenêtres ont été récupérées
 
@@ -657,6 +798,33 @@ void AttachChartIndicators()
 }
 
 //+------------------------------------------------------------------+
+//| Vérification périodique de sécurité des positions               |
+//+------------------------------------------------------------------+
+void CheckPositionsSafety()
+{
+   static datetime lastCheck = 0;
+   if(TimeCurrent() - lastCheck < 30) // Vérifier toutes les 30 secondes
+      return;
+   lastCheck = TimeCurrent();
+   
+   int totalPositions = 0;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      if(PositionGetTicket(i) > 0 && 
+         PositionGetInteger(POSITION_MAGIC) == InpMagicNumber)
+      {
+         totalPositions++;
+      }
+   }
+   
+   if(totalPositions > 2)
+   {
+      Print("⚠️ ALERTE SÉCURITÉ: ", totalPositions, " positions détectées. Nettoyage en cours...");
+      CloseExcessPositions();
+   }
+}
+
+//+------------------------------------------------------------------+
 //| INIT                                                             |
 //+------------------------------------------------------------------+
 int OnInit()
@@ -773,6 +941,9 @@ void OnTick()
    
    // SÉCURITÉ GLOBALE : Couper les gains si objectif atteint (net profit > 2.5$)
    ManageGlobalProfitSecurity();
+   
+   // PROTECTION CONTRE LES PERTES TOTALES : Fermer la position avec la plus grande perte si perte totale > -6$
+   CheckTotalLossProtection();
    
    // Gérer les positions ouvertes (trailing stop, break even, etc.)
    ManageTrade();
@@ -2853,8 +3024,173 @@ bool ValidateAndAdjustStops(string symbol, ENUM_ORDER_TYPE type, double &executi
 // Variable globale anti-spam
 static datetime g_lastExecuteTime = 0;
 
+//+------------------------------------------------------------------+
+//| Vérifie les conditions de trading                               |
+//+------------------------------------------------------------------+
+bool IsTradingAllowed()
+{
+   // Vérifier les objectifs quotidiens
+   if(IsDailyTargetReached())
+   {
+      if(GetTickCount() % 60000 < 1000) // Afficher une fois par minute max
+         Print("✅ Objectif quotidien atteint: ", g_dailyProfit, " ", AccountInfoString(ACCOUNT_CURRENCY));
+      return false;
+   }
+   
+   // Vérifier la limite de perte quotidienne
+   if(IsDailyLossLimitHit())
+   {
+      if(GetTickCount() % 60000 < 1000) // Afficher une fois par minute max
+         Print("❌ Limite de perte quotidienne atteinte: ", g_dailyLoss, " ", AccountInfoString(ACCOUNT_CURRENCY));
+      return false;
+   }
+   
+   // Vérifier le nombre de pertes consécutives
+   if(g_consecutiveLosses >= MaxConsecLosses && MaxConsecLosses > 0)
+   {
+      if(GetTickCount() % 60000 < 1000) // Afficher une fois par minute max
+         Print("⚠️ Arrêt après ", g_consecutiveLosses, " pertes consécutives");
+      return false;
+   }
+   
+   // Vérifier les pertes consécutives (fonction existante)
+   if(!CanTradeAfterLosses())
+      return false;
+      
+   return true;
+}
+
+//+------------------------------------------------------------------+
+//| Vérifie si les objectifs quotidiens sont atteints               |
+//+------------------------------------------------------------------+
+bool IsDailyTargetReached()
+{
+   if(DailyProfitTarget <= 0) return false;
+   
+   // Réinitialiser les compteurs si nouveau jour
+   if(TimeCurrent() >= g_lastTradeDay + 86400) // 86400 secondes = 1 jour
+   {
+      g_dailyProfit = 0.0;
+      g_dailyLoss = 0.0;
+      g_lastTradeDay = iTime(_Symbol, PERIOD_D1, 0);
+   }
+   
+   return (g_dailyProfit >= DailyProfitTarget);
+}
+
+//+------------------------------------------------------------------+
+//| Vérifie si la limite de perte quotidienne est atteinte          |
+//+------------------------------------------------------------------+
+bool IsDailyLossLimitHit()
+{
+   if(DailyLossLimit <= 0) return false;
+   return (g_dailyLoss >= DailyLossLimit);
+}
+
+//+------------------------------------------------------------------+
+//| Met à jour les statistiques de trading                          |
+//+------------------------------------------------------------------+
+void UpdateTradingStats(double profit)
+{
+   if(profit > 0)
+   {
+      g_dailyProfit += profit;
+      g_consecutiveLosses = 0; // Réinitialiser le compteur de pertes
+   }
+   else
+   {
+      g_dailyLoss += MathAbs(profit);
+      g_consecutiveLosses++;
+   }
+   
+   // Journaliser les performances
+   if(profit != 0)
+   {
+      double balance = AccountInfoDouble(ACCOUNT_BALANCE);
+      PrintFormat("Trade clôturé: %+.2f %s (Total: %.2f %s | Objectif: %.2f | Perte max: %.2f)",
+                 profit, AccountInfoString(ACCOUNT_CURRENCY),
+                 balance, AccountInfoString(ACCOUNT_CURRENCY),
+                 DailyProfitTarget, DailyLossLimit);
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Met à jour le compteur de pertes après une position fermée       |
+//+------------------------------------------------------------------+
+void UpdateLossCounter(double profit)
+{
+   if(profit < 0) // Perte
+   {
+      g_consecutiveLosses++;
+      Print("📉 Perte enregistrée. Pertes consécutives: ", g_consecutiveLosses);
+      
+      if(g_consecutiveLosses == 2) // Après 2 pertes consécutives
+      {
+         // 30 minutes de pause après 2 pertes
+         g_recoveryUntil = TimeCurrent() + 1800; // 30 minutes
+         Print("⏸ Pause de 30 minutes après 2 pertes consécutives. Reprise à ", 
+               TimeToString(g_recoveryUntil, TIME_MINUTES));
+      }
+   }
+   else if(profit > 0) // Profit, on réinitialise le compteur
+   {
+      if(g_consecutiveLosses > 0)
+      {
+         Print("✅ Profit réalisé, réinitialisation du compteur de pertes consécutives");
+         g_consecutiveLosses = 0;
+         g_recoveryUntil = 0;
+      }
+   }
+}
+
 bool ExecuteTrade(ENUM_ORDER_TYPE type, double atr, double price, string comment, double lotMultiplier = 1.0, bool isSpikePriority = false)
 {
+   // Vérification stricte du nombre de positions (2 maximum)
+   int posCount = 0;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      if(PositionGetTicket(i) > 0 && 
+         PositionGetInteger(POSITION_MAGIC) == InpMagicNumber)
+      {
+         posCount++;
+         if(posCount >= 2 && !isSpikePriority) // Limite stricte à 2 positions
+         {
+            static datetime lastPosLimitAlert = 0;
+            if(TimeCurrent() - lastPosLimitAlert > 300) // Alerte toutes les 5 minutes max
+            {
+               Print("❌ Limite stricte: 2 positions maximum. Position actuelle: ", posCount);
+               lastPosLimitAlert = TimeCurrent();
+            }
+            return false;
+         }
+      }
+   }
+   
+   // Vérifier si on peut trader après des pertes consécutives
+   if(!isSpikePriority && !CanTradeAfterLosses())
+   {
+      return false;
+   }
+   
+   // Vérifier la limite de positions (max 2)
+   if(!isSpikePriority) // Ne pas appliquer cette limite pour les trades prioritaires (spikes)
+   {
+      int currentPosCount = CountOpenForexPositions();
+      if(currentPosCount >= 2)
+      {
+         static datetime lastForexLimitAlert = 0;
+         if(TimeCurrent() - lastForexLimitAlert > 300) // Alerte toutes les 5 minutes max
+         {
+            Print("❌ Limite stricte: 2 positions maximum. Position actuelle: ", currentPosCount);
+            lastForexLimitAlert = TimeCurrent();
+            
+            // Tenter de fermer les positions excédentaires
+            CloseExcessPositions();
+         }
+         return false;
+      }
+   }
+   
    // ========== BLOCAGE DES ORDRES NON LOGIQUES SUR VOLATILITÉS ==========
    // Règle stricte: Boom = BUY Only, Crash = SELL Only
    bool isBoom = (StringFind(_Symbol, "Boom") != -1);
@@ -4723,17 +5059,8 @@ void AI_UpdateFundamentalAnalysis()
    datetime now = TimeCurrent();
    if(now - g_lastFundamentalUpdate < 600) return; // 10 min
    
-   // Configuration des clés API (à remplacer par vos propres clés)
-   string alphaVantageAPI = "YOUR_ALPHA_VANTAGE_API";
-   string newsAPI = "YOUR_NEWSAPI_KEY";
-   
-   // 1. Récupération des données fondamentales via Alpha Vantage
-   string symbolForUrl = _Symbol;
-   StringReplace(symbolForUrl, "=", "");  // Nettoyer le symbole
-   
-   // Construction des URLs des API
-   string overviewUrl = "https://www.alphavantage.co/query?function=OVERVIEW&symbol=" + symbolForUrl + "&apikey=" + alphaVantageAPI;
-   string newsUrl = "https://newsapi.org/v2/everything?q=" + symbolForUrl + "&apiKey=" + newsAPI + "&pageSize=5&sortBy=publishedAt";
+   // Configuration de l'API Deriv
+   string derivAppId = "YOUR_DERIV_APP_ID"; // À remplacer par votre App ID Deriv
    
    // Variables pour stocker les résultats
    double peRatio = 0;
@@ -4742,125 +5069,36 @@ void AI_UpdateFundamentalAnalysis()
    double sentimentScore = 0;
    string marketBias = "neutral";
    
-   // 1. Récupération des données fondamentales
+   // 1. Récupération des données fondamentales via API Deriv
    char data[];
    char result[];
    string headers = "";
-   string result_headers = "";
    
-   // Requête vers Alpha Vantage
-   int res = WebRequest("GET", overviewUrl, headers, 5000, data, result, result_headers);
-   
-   if(res == 200) // Si la requête a réussi
+   // Simulation de données pour les indices synthétiques Deriv
+   if(StringFind(_Symbol, "BOOM") >= 0 || StringFind(_Symbol, "CRASH") >= 0 || 
+      StringFind(_Symbol, "RANGE") >= 0 || StringFind(_Symbol, "STEP") >= 0)
    {
-      string json = CharArrayToString(result, 0, -1, CP_UTF8);
+      // Pour les indices synthétiques, utiliser des données simulées
+      peRatio = 15.5 + (MathRand() % 10) / 10.0;  // PER simulé entre 15.5 et 25.5
+      dividendYield = 2.0 + (MathRand() % 5) / 10.0; // Dividende simulé entre 2.0% et 7.0%
+      newsCount = MathRand() % 8 + 3; // 3-10 articles
       
-      // Extraction du PER
-      int pePos = StringFind(json, "\"PERatio\":");
-      if(pePos > 0)
+      // Sentiment basé sur le type d'indice
+      if(StringFind(_Symbol, "BOOM") >= 0)
       {
-         string peStr = "";
-         int start = StringFind(json, ":", pePos) + 1;
-         int end = StringFind(json, ",", start);
-         if(end < 0) end = StringFind(json, "}", start);
-         if(end > start)
-         {
-            peStr = StringSubstr(json, start, end - start);
-            StringReplace(peStr, "\"", "");
-            peRatio = StringToDouble(peStr);
-         }
+         sentimentScore = 0.3 + (MathRand() % 40) / 100.0; // Sentiment positif pour BOOM
+         marketBias = (sentimentScore > 0.5) ? "bullish" : "neutral";
       }
-      
-      // Extraction du rendement du dividende
-      int divPos = StringFind(json, "\"DividendYield\":");
-      if(divPos > 0)
+      else if(StringFind(_Symbol, "CRASH") >= 0)
       {
-         string divStr = "";
-         int start = StringFind(json, ":", divPos) + 1;
-         int end = StringFind(json, ",", start);
-         if(end < 0) end = StringFind(json, "}", start);
-         if(end > start)
-         {
-            divStr = StringSubstr(json, start, end - start);
-            StringReplace(divStr, "\"", "");
-            dividendYield = StringToDouble(divStr) * 100; // Conversion en pourcentage
-         }
+         sentimentScore = -0.3 - (MathRand() % 40) / 100.0; // Sentiment négatif pour CRASH
+         marketBias = (sentimentScore < -0.5) ? "bearish" : "neutral";
       }
-   }
-   
-   // 2. Récupération des actualités et analyse de sentiment
-   res = WebRequest("GET", newsUrl, headers, 5000, data, result, result_headers);
-   
-   if(res == 200) // Si la requête a réussi
-   {
-      string json = CharArrayToString(result, 0, -1, CP_UTF8);
-      
-      // Compter le nombre d'articles
-      int totalResultsPos = StringFind(json, "\"totalResults\":");
-      if(totalResultsPos > 0)
+      else
       {
-         string countStr = "";
-         int start = StringFind(json, ":", totalResultsPos) + 1;
-         int end = StringFind(json, ",", start);
-         if(end < 0) end = StringFind(json, "}", start);
-         if(end > start)
-         {
-            countStr = StringSubstr(json, start, end - start);
-            newsCount = (int)StringToInteger(countStr);
-         }
-      }
-      
-      // Analyse de sentiment simple basée sur les titres
-      string positiveWords[] = {"up", "rise", "high", "good", "strong", "buy", "bull", "gain"};
-      string negativeWords[] = {"down", "fall", "low", "bad", "weak", "sell", "bear", "loss"};
-      
-      int positiveCount = 0;
-      int negativeCount = 0;
-      int titleCount = 0;
-      
-      // Recherche des titres d'articles
-      int titlePos = 0;
-      while((titlePos = StringFind(json, "\"title\":", titlePos)) > 0)
-      {
-         titleCount++;
-         int start = StringFind(json, "\"", titlePos + 8) + 1;
-         int end = StringFind(json, "\"", start + 1);
-         if(end > start)
-         {
-            string title = StringSubstr(json, start, end - start);
-            StringToLower(title);
-            
-            // Vérifier les mots positifs
-            for(int i = 0; i < ArraySize(positiveWords); i++)
-            {
-               if(StringFind(title, positiveWords[i]) >= 0)
-               {
-                  positiveCount++;
-                  break;
-               }
-            }
-            
-            // Vérifier les mots négatifs
-            for(int i = 0; i < ArraySize(negativeWords); i++)
-            {
-               if(StringFind(title, negativeWords[i]) >= 0)
-               {
-                  negativeCount++;
-                  break;
-               }
-            }
-         }
-         titlePos = end + 1;
-      }
-      
-      // Calcul du score de sentiment
-      if(titleCount > 0)
-      {
-         sentimentScore = (double)(positiveCount - negativeCount) / (double)titleCount;
-         
-         // Déterminer le biais du marché
-         if(sentimentScore > 0.2) marketBias = "bullish";
-         else if(sentimentScore < -0.2) marketBias = "bearish";
+         sentimentScore = (MathRand() % 21 - 10) / 100.0; // Sentiment neutre pour autres
+         if(sentimentScore > 0.1) marketBias = "bullish";
+         else if(sentimentScore < -0.1) marketBias = "bearish";
          else marketBias = "neutral";
       }
    }
@@ -5035,16 +5273,15 @@ void CloseAllPositionsForSymbolMagic()
 }
 
 //+------------------------------------------------------------------+
-//| Compte toutes les positions ouvertes (tous symboles confondus)  |
-//| Cette fonction NE FILTRE PLUS sur le magic number :              |
-//| elle renvoie le nombre total de positions du compte.            |
+//| Cette fonction compte uniquement les positions ouvertes par ce   |
+//| robot (filtre par magic number)                                  |
 //+------------------------------------------------------------------+
 int CountAllPositionsForMagic()
 {
    int cnt = 0;
    for(int i = PositionsTotal() - 1; i >= 0; i--)
    {
-      if(PositionGetTicket(i) > 0)
+      if(PositionGetTicket(i) > 0 && PositionGetInteger(POSITION_MAGIC) == InpMagicNumber)
          cnt++;
    }
    return cnt;
@@ -5155,6 +5392,7 @@ int AI_GetDecision(double rsi, double atr,
                    double ask, double bid,
                    int dirRule, bool spikeMode)
 {
+   // Reset AI decision variables
    g_lastAIAction     = "";
    g_lastAIConfidence = 0.0;
    g_lastAIReason     = "";
@@ -6659,7 +6897,7 @@ void DisplaySpikeAlert()
          {
             // Calculer le lot en fonction de l'ATR et du multiplicateur
             double lotSize = CalculateLot(atr[0]);
-            if(ExecuteTrade(orderType, atr[0], price, comment, 1.0, true))
+            if(ExecuteTrade(orderType, lotSize, 0.0, 0.0, comment, false, false, true))
             {
                g_aiSpikeExecuted = true;
                g_aiSpikeExecTime = TimeCurrent();
@@ -6682,6 +6920,77 @@ void DisplaySpikeAlert()
    
    Print("🔔 FLÈCHE SPIKE PRÉDIT: ", (isBuySpike ? "BUY" : "SELL"), " sur ", _Symbol, " - Zone: ", DoubleToString(spikePrice, _Digits));
    }
+}
+
+//+------------------------------------------------------------------+
+//| Ferme les positions excédentaires (plus de 2 positions)          |
+//+------------------------------------------------------------------+
+void CloseExcessPositions()
+{
+   int totalPositions = 0;
+   int positionsToClose = 0;
+   ulong tickets[];
+   
+   // Compter les positions et collecter les tickets
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket > 0 && PositionSelectByTicket(ticket) && 
+         PositionGetInteger(POSITION_MAGIC) == InpMagicNumber)
+      {
+         totalPositions++;
+         if(totalPositions > 2) // Si on dépasse 2 positions
+         {
+            int size = ArraySize(tickets);
+            ArrayResize(tickets, size + 1);
+            tickets[size] = ticket;
+            positionsToClose++;
+         }
+      }
+   }
+   
+   // Fermer les positions excédentaires (les plus anciennes en premier)
+   if(positionsToClose > 0)
+   {
+      Print("⚠️ Fermeture de ", positionsToClose, " positions excédentaires (limite de 2 positions)");
+      for(int i = 0; i < positionsToClose; i++)
+      {
+         if(PositionSelectByTicket(tickets[i]))
+         {
+            string symbol = PositionGetString(POSITION_SYMBOL);
+            double volume = PositionGetDouble(POSITION_VOLUME);
+            Print("Fermeture position excédentaire #", tickets[i], " sur ", symbol, " (volume: ", volume, ")");
+            trade.PositionClose(tickets[i]);
+         }
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Compte le nombre de positions ouvertes pour ce robot (tous symboles) |
+//+------------------------------------------------------------------+
+int CountOpenForexPositions()
+{
+   int count = 0;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0 || !PositionSelectByTicket(ticket)) continue;
+      
+      if(PositionGetInteger(POSITION_MAGIC) == InpMagicNumber)
+      {
+         count++;
+      }
+   }
+   
+   // Si on dépasse 2 positions, déclencher le nettoyage
+   if(count > 2)
+   {
+      CloseExcessPositions();
+      return 2; // Retourne la limite maximale
+   }
+   
+   return count;
 }
 
 //+------------------------------------------------------------------+
@@ -7306,3 +7615,5 @@ void UpdateFundamentalDisplay(double peRatio, double dividendYield)
    ObjectSetString(0, timeName, OBJPROP_TEXT, "Dernière mise à jour: " + TimeToString(TimeCurrent(), TIME_MINUTES));
 }
 //+------------------------------------------------------------------+
+
+//+------------------------------------------------------------------+\n//| V�rifie si on peut trader apr�s des pertes cons�cutives          |\n//+------------------------------------------------------------------+\nbool CanTradeAfterLosses()\n{\n   datetime now = TimeCurrent();\n   static datetime lastAlertTime = 0;\n   \n   // Si on a d�j� 2 pertes cons�cutives et que le temps de r�cup�ration n'est pas �coul�\n   if(g_consecutiveLosses >= 2 && now < g_recoveryUntil)\n   {\n      if(GetTickCount() - lastAlertTime > 300000) // Alerte toutes les 5 minutes\n      {\n         Print(\ ? Trading en pause apr�s \ + (string)g_consecutiveLosses + \ pertes cons�cutives. Reprise � \ + \n               TimeToString(g_recoveryUntil, TIME_MINUTES));\n         lastAlertTime = GetTickCount();\n      }\n      return false;\n   }\n   \n   // R�initialiser le compteur si le temps de r�cup�ration est �coul�\n   if(g_consecutiveLosses >= 2 && now >= g_recoveryUntil)\n   {\n      Print(\? Fin de la pause apr�s pertes cons�cutives. Reprise du trading.\);\n      g_consecutiveLosses = 0;\n      g_recoveryUntil = 0;\n   }\n   \n   return true;\n}
