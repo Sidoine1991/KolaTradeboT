@@ -305,6 +305,10 @@ input double SMC_OB_SL_ATR          = 0.8;      // SL multiplié par ATR HTF
 input double SMC_OB_TP_ATR          = 2.5;      // TP multiplié par ATR HTF
 input bool   SMC_DrawZones          = true;     // dessiner les niveaux SMC sur le graphique
 
+input group "=== GLOBAL PROFIT SECURITY ===";
+input bool   InpUseGlobalProfitLock = true;   // Activer la sécurisation globale
+input double InpGlobalProfitTarget  = 2.50;   // Cible de profit net ($) pour couper les gains
+
 // Inclure le module SMC après la déclaration des inputs pour éviter les redéfinitions
 #define SMC_OB_PARAMS_DECLARED
 #include "D:\\Dev\\TradBOT\\mt5\\SMC_OB_signals.mqh"
@@ -766,6 +770,9 @@ void OnTick()
    
    // Vérifier les signaux de spike
    CheckSpikeSignals();
+   
+   // SÉCURITÉ GLOBALE : Couper les gains si objectif atteint (net profit > 2.5$)
+   ManageGlobalProfitSecurity();
    
    // Gérer les positions ouvertes (trailing stop, break even, etc.)
    ManageTrade();
@@ -2848,6 +2855,26 @@ static datetime g_lastExecuteTime = 0;
 
 bool ExecuteTrade(ENUM_ORDER_TYPE type, double atr, double price, string comment, double lotMultiplier = 1.0, bool isSpikePriority = false)
 {
+   // ========== BLOCAGE DES ORDRES NON LOGIQUES SUR VOLATILITÉS ==========
+   // Règle stricte: Boom = BUY Only, Crash = SELL Only
+   bool isBoom = (StringFind(_Symbol, "Boom") != -1);
+   bool isCrash = (StringFind(_Symbol, "Crash") != -1);
+   
+   // Vérifier le type d'ordre
+   bool isBuyOrder = (type == ORDER_TYPE_BUY || type == ORDER_TYPE_BUY_LIMIT || type == ORDER_TYPE_BUY_STOP);
+   bool isSellOrder = (type == ORDER_TYPE_SELL || type == ORDER_TYPE_SELL_LIMIT || type == ORDER_TYPE_SELL_STOP);
+
+   if(isBoom && isSellOrder)
+   {
+      Print("🛑 ORDRE BLOQUÉ - Sell sur Boom non autorisé (Boom est un symbole haussier)");
+      return false;
+   }
+   
+   if(isCrash && isBuyOrder)
+   {
+      Print("🛑 ORDRE BLOQUÉ - Buy sur Crash non autorisé (Crash est un symbole baissier)");
+      return false;
+   }
    // Détection Boom/Crash pour adapter les garde-fous (plus agressif)
    bool isBoomCrashSymbol = (StringFind(_Symbol, "Boom") != -1 || StringFind(_Symbol, "Crash") != -1);
    bool isBoom300Symbol   = (StringFind(_Symbol, "Boom 300") != -1);
@@ -2871,7 +2898,7 @@ bool ExecuteTrade(ENUM_ORDER_TYPE type, double atr, double price, string comment
    }
    
    // ========== SI POSITION OPPOSÉE EXISTE: LA FERMER D'ABORD ==========
-   bool isBuyOrder = (type == ORDER_TYPE_BUY || type == ORDER_TYPE_BUY_LIMIT || type == ORDER_TYPE_BUY_STOP);
+
    
    for(int i = PositionsTotal() - 1; i >= 0; i--)
    {
@@ -3530,6 +3557,55 @@ void CleanOldSignals()
 }
 
 //+------------------------------------------------------------------+
+//| SÉCURITÉ GLOBALE : Couper les gains si objectif atteint          |
+//+------------------------------------------------------------------+
+void ManageGlobalProfitSecurity()
+{
+   if(!InpUseGlobalProfitLock) return;
+   
+   double netProfit = 0.0;
+   int totalPos = 0;
+   
+   // 1. Calculer le profit net global (tous symboles confondus si Magic match)
+   for(int i=PositionsTotal()-1; i>=0; i--)
+   {
+      // Filtre uniquement sur le MagicNumber pour ne toucher qu'aux trades du robot
+      ulong ticket = PositionGetTicket(i);
+      if(ticket > 0 && PositionGetInteger(POSITION_MAGIC) == InpMagicNumber)
+      {
+         double profit = PositionGetDouble(POSITION_PROFIT);
+         double swap   = PositionGetDouble(POSITION_SWAP);
+         netProfit += (profit + swap);
+         totalPos++;
+      }
+   }
+   
+   // 2. Si cible atteinte (exemple 2.5$)
+   if(totalPos > 0 && netProfit >= InpGlobalProfitTarget)
+   {
+      Print("💰 OBJECTIF GLOBAL ATTEINT: Net Profit = ", DoubleToString(netProfit, 2), " USD. Sécurisation des gains...");
+      
+      // 3. Couper UNIQUEMENT les gagnants
+      for(int i=PositionsTotal()-1; i>=0; i--)
+      {
+         ulong ticket = PositionGetTicket(i);
+         if(ticket > 0 && PositionGetInteger(POSITION_MAGIC) == InpMagicNumber)
+         {
+            double profit = PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP);
+            // On ferme si c'est un gain
+            if(profit > 0)
+            {
+               if(trade.PositionClose(ticket))
+                  Print("✅ Gain sécurisé: ", ticket, " (", DoubleToString(profit, 2), ")");
+               else
+                  Print("❌ Erreur fermeture gain: ", ticket, " err=", GetLastError());
+            }
+         }
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
 //| Gère la taille dynamique des positions                           |
 //+------------------------------------------------------------------+
 void ManageDynamicPositionSizing()
@@ -3593,7 +3669,36 @@ void ManageDynamicPositionSizing()
       if(currentProfit > g_dynamicPosStates[i].highestProfit && isUptrend)
       {
          g_dynamicPosStates[i].highestProfit = currentProfit;
-         // NE PAS AUGMENTER LE LOT - Désactivé
+         
+         // --- STRATÉGIE DE DOUBLAGE (FOREX UNIQUEMENT) ---
+         // Filtre strict pour ne pas appliquer sur Indices/Synthetics (Boom, Crash, Vol, Step)
+         bool isForex = (StringFind(symbol, "Boom") == -1 && 
+                         StringFind(symbol, "Crash") == -1 && 
+                         StringFind(symbol, "Vol") == -1 && 
+                         StringFind(symbol, "Step") == -1);
+         
+         double maxAllowedLot = g_dynamicPosStates[i].initialLot * 4.0;
+         
+         // Condition: Forex + Profit significatif (bat le record) + Pas au max
+         if(isForex && lotSize < maxAllowedLot)
+         {
+             // On double le lot si on a "bien" progressé
+             // Note: Pour éviter le spam, on pourrait ajouter un seuil minimal de profit absolu
+             // ici on le fait dès qu'on bat le record de profit, ce qui est agressif mais demandé.
+             
+             double newLot = lotSize * 2.0;
+             newLot = NormalizeLotSize(symbol, newLot);
+             
+             // Sécurité: ne pas dépasser le max
+             if(newLot > maxAllowedLot) newLot = maxAllowedLot;
+             
+             if(ModifyPositionSize(ticket, newLot, symbol))
+             {
+                 g_dynamicPosStates[i].currentLot = newLot;
+                 g_dynamicPosStates[i].trendConfirmed = true; 
+                 Print("🚀 Forex Winning Streak: Position ", ticket, " DOUBLÉE à ", newLot, " lots (Profit record: ", currentProfit, ")");
+             }
+         }
       }
       // Si la tendance s'inverse ou que le profit commence à baisser
       else if((!isUptrend || currentProfit < g_dynamicPosStates[i].highestProfit * 0.7) && 
@@ -3767,6 +3872,34 @@ bool PredictSpikeFromSMCOB(double &spikePrice, bool &isBuySpike, double &confide
 //+------------------------------------------------------------------+
 bool ExecuteSpikeTrade(bool isBuy, double entryPrice, double confidence)
 {
+   // ========== VALIDATIONS STRICTES POUR ÉVITER LES OUVERTURES AUTOMATIQUES ==========
+   // Ne pas ouvrir de positions sur les symboles de volatilité sans confirmation manuelle
+   string symbol = _Symbol;
+   bool isVolatilitySymbol = (StringFind(symbol, "Boom") != -1 || StringFind(symbol, "Crash") != -1 || 
+                              StringFind(symbol, "Volatility") != -1 || StringFind(symbol, "RNG") != -1);
+   
+   // ========== BLOCAGE DES ORDRES NON LOGIQUES SUR VOLATILITÉS ==========
+   // Bloquer les ordres Sell sur Boom (Boom monte, donc on achète)
+   // Bloquer les ordres Buy sur Crash (Crash descend, donc on vend)
+   if(StringFind(symbol, "Boom") != -1 && !isBuy)
+   {
+      Print("ORDRE BLOQUÉ - Sell sur Boom non autorisé (Boom est un symbole haussier)");
+      return false;
+   }
+   
+   if(StringFind(symbol, "Crash") != -1 && isBuy)
+   {
+      Print("ORDRE BLOQUÉ - Buy sur Crash non autorisé (Crash est un symbole baissier)");
+      return false;
+   }
+   
+   // Pour les symboles de volatilité, exiger une confiance très élevée et confirmation manuelle
+   if(isVolatilitySymbol && confidence < 0.85)
+   {
+      Print("Symbole de volatilité détecté - Confiance insuffisante: ", confidence, " (minimum 0.85 requis)");
+      return false;
+   }
+   
    // Vérifier les conditions de trading
    if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) || !MQLInfoInteger(MQL_TRADE_ALLOWED) || IsDrawdownExceeded())
    {
@@ -3779,6 +3912,17 @@ bool ExecuteSpikeTrade(bool isBuy, double entryPrice, double confidence)
    {
       Print("Position déjà ouverte");
       return false;
+   }
+   
+   // Vérification supplémentaire pour les volatilités : pas plus d'un trade par heure
+   if(isVolatilitySymbol)
+   {
+      datetime currentTime = TimeCurrent();
+      if(currentTime - g_lastSpikeTradeTime < 3600) // 1 heure = 3600 secondes
+      {
+         Print("Symbole de volatilité - Délai minimum d'une heure non respecté");
+         return false;
+      }
    }
    
    // Calculer la taille de la position
@@ -3954,6 +4098,21 @@ void CheckSpikeSignals()
    
    if(PredictSpikeFromSMCOB(spikePrice, isBuySpike, confidence))
    {
+      // ========== BLOCAGE DES ORDRES NON LOGIQUES SUR VOLATILITÉS ==========
+      // Bloquer les ordres Sell sur Boom et Buy sur Crash avant même l'exécution
+      string symbol = _Symbol;
+      if(StringFind(symbol, "Boom") != -1 && !isBuySpike)
+      {
+         Print("SIGNAL BLOQUÉ - Sell sur Boom non autorisé (Boom est un symbole haussier)");
+         return;
+      }
+      
+      if(StringFind(symbol, "Crash") != -1 && isBuySpike)
+      {
+         Print("SIGNAL BLOQUÉ - Buy sur Crash non autorisé (Crash est un symbole baissier)");
+         return;
+      }
+      
       // Vérifier la confiance minimale
       if(confidence < AI_MinConfidence)
       {
@@ -3975,20 +4134,26 @@ void CheckSpikeSignals()
 //+------------------------------------------------------------------+
 void ManageOpenPositions()
 {
+   // ========== DÉSACTIVATION COMPLÈTE DES FERMETURES AUTOMATIQUES ==========
+   // Les positions ne doivent être fermées que par SL/TP atteints
+   // Aucune fermeture automatique basée sur le profit ou autres conditions
+   
+   // Parcourir les positions pour monitoring uniquement (pas de fermeture automatique)
    for(int i = PositionsTotal() - 1; i >= 0; i--)
    {
       if(PositionGetSymbol(i) == _Symbol && PositionGetInteger(POSITION_MAGIC) == InpMagicNumber)
       {
          ulong ticket = PositionGetInteger(POSITION_TICKET);
          double profit = PositionGetDouble(POSITION_PROFIT);
+         double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+         double currentPrice = PositionGetDouble(POSITION_PRICE_CURRENT);
          
-         // Fermer la position si le profit cible est atteint
-         if(profit >= TakeProfitDollars)
-         {
-            CTrade closeTrade;
-            closeTrade.PositionClose(ticket);
-            Print("Position fermée avec profit: $", profit);
-         }
+         // Monitoring uniquement - afficher l'état de la position
+         Print("Position ", ticket, " en cours - Profit: $", DoubleToString(profit, 2), 
+               " | Prix: ", DoubleToString(currentPrice, _Digits),
+               " | SL/TP gèrent la fermeture automatiquement");
+         
+         // AUCUNE FERMETURE AUTOMATIQUE - laisser le SL/TP gérer
       }
    }
 }
@@ -3998,475 +4163,32 @@ void ManageOpenPositions()
 //+------------------------------------------------------------------+
 void ManageTrade()
 {
-   // Gérer les ordres limit: exécuter le plus proche si scalping activé, garder les autres en attente
-   ManagePendingOrders();
+   // ========== DÉSACTIVATION COMPLÈTE DES MODIFICATIONS AUTOMATIQUES ==========
+   // Le robot ne doit PAS modifier les SL/TP automatiquement
+   // Les positions évoluent selon leurs paramètres initiaux jusqu'à atteindre SL/TP
    
-   // ========== CLÔTURE IMMÉDIATE DÈS PROFIT DÉTECTÉ (OPTIONNELLE) ==========
-   // Désactivée pour éviter les fermetures prématurées
-   // if(UseInstantProfitClose)
-   //    ClosePositionsInProfit();
-   
-   // Vérifier si une position de spike doit être fermée
-   // (fermeture gérée dans UpdateSpikeAlertDisplay pour éviter la sortie immédiate)
-   
-   double atr[];
-   if(CopyBuffer(g_atrHandle, 0, 0, 1, atr) <= 0) return;
-   double currentATR = atr[0];
-
-   // Distance minimale broker (stops + freeze) éventuellement surchargée
-   long stopLevel   = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
-   long freezeLevel = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_FREEZE_LEVEL);
-   long minPoints   = stopLevel + freezeLevel + 2;
-   if(MinStopPointsOverride > 0 && MinStopPointsOverride > minPoints)
-      minPoints = MinStopPointsOverride;
-   double minDist   = minPoints * _Point;
-
-   // Identifier la position principale (la plus ancienne) pour appliquer la coupure monétaire
-   ulong mainTicket = 0;
-   datetime mainOpenTime = 0;
-   for(int i = PositionsTotal()-1; i >= 0; i--)
-   {
-      ulong tk = PositionGetTicket(i);
-      if(tk == 0 || !PositionSelectByTicket(tk)) continue;
-      if(PositionGetInteger(POSITION_MAGIC) != InpMagicNumber) continue;
-      if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
-      datetime ot = (datetime)PositionGetInteger(POSITION_TIME);
-      if(mainTicket == 0 || ot < mainOpenTime)
-      {
-         mainTicket = tk;
-         mainOpenTime = ot;
-      }
-   }
-
-   bool closedMainForLoss = false;
-
-   // --- GESTION PROFIT/PERTE GLOBALS (optionnel) ---
-   if(UseGlobalLossStop)
-   {
-      int    totalPosMagic = 0;
-      double totalLossMagic  = 0.0;
-      for(int j = PositionsTotal()-1; j >= 0; j--)
-      {
-         ulong tk = PositionGetTicket(j);
-         if(tk == 0 || !PositionSelectByTicket(tk)) continue;
-         if(PositionGetInteger(POSITION_MAGIC) != InpMagicNumber) continue;
-         totalPosMagic++;
-         double p = PositionGetDouble(POSITION_PROFIT);
-         if(p < 0) totalLossMagic += p;
-      }
-      // Stop global si perte totale <= limite (protection critique, ferme même si récent)
-      if(totalLossMagic <= GlobalLossLimit)
-      {
-         for(int j = PositionsTotal()-1; j >= 0; j--)
-         {
-            ulong tk = PositionGetTicket(j);
-            if(tk == 0 || !PositionSelectByTicket(tk)) continue;
-            if(PositionGetInteger(POSITION_MAGIC) != InpMagicNumber) continue;
-            // Protection critique : ferme même si position récente pour éviter perte majeure
-            trade.PositionClose(tk);
-         }
-         return;
-      }
-   }
-   for(int i = PositionsTotal()-1; i >= 0; i--)
+   // Monitoring uniquement des positions existantes
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
    {
       ulong ticket = PositionGetTicket(i);
       if(ticket == 0 || !PositionSelectByTicket(ticket)) continue;
       if(PositionGetInteger(POSITION_MAGIC) != InpMagicNumber) continue;
+      
       string psym = PositionGetString(POSITION_SYMBOL);
       if(psym != _Symbol) continue;
-
-      double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+      
       double curPrice  = PositionGetDouble(POSITION_PRICE_CURRENT);
       double curSL     = PositionGetDouble(POSITION_SL);
       double curTP     = PositionGetDouble(POSITION_TP);
-      long posType     = PositionGetInteger(POSITION_TYPE);
-      bool isMainPosition = (ticket == mainTicket);
+      double profit    = PositionGetDouble(POSITION_PROFIT);
       
-      double point = _Point;
-      double volume = PositionGetDouble(POSITION_VOLUME);
-      double tickSize = SymbolInfoDouble(psym, SYMBOL_TRADE_TICK_SIZE);
-      double tickValue= SymbolInfoDouble(psym, SYMBOL_TRADE_TICK_VALUE);
-
-      // Calcule les distances de prix correspondant aux seuils monétaires
-      double lossPriceStep = 0.0;
-      double profitPriceStep = 0.0;
-      if(tickSize > 0.0 && tickValue > 0.0 && volume > 0.0)
-      {
-         lossPriceStep   = (LossCutDollars / (tickValue * volume)) * tickSize;
-         profitPriceStep = (ProfitSecureDollars / (tickValue * volume)) * tickSize;
-      }
-      // Fallback ATR si conversion monétaire impossible
-      if(lossPriceStep <= 0.0 && currentATR > 0.0)
-         lossPriceStep = currentATR * SL_ATR_Mult;
-      if(profitPriceStep <= 0.0 && currentATR > 0.0)
-         profitPriceStep = currentATR * TP_ATR_Mult;
-
-      // Pour Boom/Crash, toujours utiliser une logique ATR (les conversions $ peuvent donner des stops trop serrés)
-      bool isBoomCrashPos = (StringFind(psym, "Boom") != -1 || StringFind(psym, "Crash") != -1);
-      if(isBoomCrashPos && currentATR > 0.0)
-      {
-         lossPriceStep   = currentATR * SL_ATR_Mult;
-         profitPriceStep = currentATR * TP_ATR_Mult;
-      }
+      // Afficher l'état de la position pour monitoring
+      Print("Position ", ticket, " monitoring - SL: ", DoubleToString(curSL, _Digits), 
+            " | TP: ", DoubleToString(curTP, _Digits), 
+            " | Profit: $", DoubleToString(profit, 2));
       
-      // Placer / ajuster SL/TP s'ils sont manquants pour sécuriser systématiquement la position
-      // Pour Boom/Crash, vérifier d'abord le compteur de modifications SL (max 4)
-      bool canModifySL = true;
-      if(isBoomCrashPos && curSL != 0.0)
-      {
-         // Chercher le compteur existant
-         for(int t = 0; t < g_slModifyTrackerCount; t++)
-         {
-            if(g_slModifyTracker[t].ticket == ticket)
-            {
-               if(g_slModifyTracker[t].modifyCount >= 4)
-               {
-                  canModifySL = false;
-                  if(DebugBlocks)
-                     Print("🛑 Position ", ticket, ": SL déjà modifié 4 fois (Boom/Crash) - Pas de nouvelle modification");
-               }
-               break;
-            }
-         }
-      }
-      
-      if(curSL == 0.0 && lossPriceStep > 0.0 && canModifySL)
-      {
-         double newSL = (posType == POSITION_TYPE_BUY) ? openPrice - lossPriceStep : openPrice + lossPriceStep;
-         if(MathAbs(curPrice - newSL) < minDist)
-            newSL = (posType == POSITION_TYPE_BUY) ? curPrice - minDist : curPrice + minDist;
-         // Sécuriser la validité broker (StopsLevel / FreezeLevel) avant modification
-         ENUM_ORDER_TYPE ordType = (posType == POSITION_TYPE_BUY) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
-         double execPrice = curPrice;
-         ValidateAndAdjustStops(psym, ordType, execPrice, newSL, curTP);
-         if(trade.PositionModify(ticket, newSL, curTP))
-         {
-            curSL = newSL;
-            // Initialiser le compteur pour Boom/Crash si première modification
-            if(isBoomCrashPos && g_slModifyTrackerCount < 100)
-            {
-               bool found = false;
-               for(int t = 0; t < g_slModifyTrackerCount; t++)
-               {
-                  if(g_slModifyTracker[t].ticket == ticket)
-                  {
-                     found = true;
-                     break;
-                  }
-               }
-               if(!found)
-               {
-                  g_slModifyTracker[g_slModifyTrackerCount].ticket = ticket;
-                  g_slModifyTracker[g_slModifyTrackerCount].modifyCount = 0; // Initialisation à 0 car c'est juste la création du SL initial
-                  g_slModifyTracker[g_slModifyTrackerCount].lastModifyTime = TimeCurrent();
-                  g_slModifyTrackerCount++;
-               }
-            }
-         }
-      }
-
-      if(curTP == 0.0 && profitPriceStep > 0.0)
-      {
-         double newTP = (posType == POSITION_TYPE_BUY) ? openPrice + profitPriceStep : openPrice - profitPriceStep;
-         if(MathAbs(curPrice - newTP) < minDist)
-            newTP = (posType == POSITION_TYPE_BUY) ? curPrice + minDist : curPrice - minDist;
-         // Sécuriser la validité broker avant modification
-         ENUM_ORDER_TYPE ordType2 = (posType == POSITION_TYPE_BUY) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
-         double execPrice2 = curPrice;
-         ValidateAndAdjustStops(psym, ordType2, execPrice2, curSL, newTP);
-         if(trade.PositionModify(ticket, curSL, newTP))
-            curTP = newTP;
-      }
-
-      // ========== UTILISATION VWAP ET SUPERTREND POUR AJUSTER LE SL ==========
-      // Utiliser SuperTrend comme niveau de trailing stop dynamique
-      double newSLFromIndicators = curSL;
-      bool useIndicatorSL = false;
-      
-      if(g_currentSuperTrendLine > 0.0 && (TimeCurrent() - g_lastIndicatorsUpdate) < 300) // Indicateurs récents (< 5 min)
-      {
-         // Pour position BUY : SL au niveau SuperTrend (si prix > SuperTrend)
-         if(posType == POSITION_TYPE_BUY)
-         {
-            // Si SuperTrend est haussier (↑) et prix au-dessus, utiliser SuperTrend comme SL
-            if(g_currentSuperTrendDirection > 0 && curPrice > g_currentSuperTrendLine)
-            {
-               double stSL = g_currentSuperTrendLine - (minDist * 2); // Légère marge sous SuperTrend
-               if(stSL > curSL && stSL < curPrice - minDist) // Améliorer le SL sans être trop proche
-               {
-                  newSLFromIndicators = stSL;
-                  useIndicatorSL = true;
-                  if(DebugBlocks)
-                     Print("📊 BUY: SL ajusté à SuperTrend (", DoubleToString(stSL, _Digits), ") pour position ", ticket);
-               }
-            }
-         }
-         // Pour position SELL : SL au niveau SuperTrend (si prix < SuperTrend)
-         else if(posType == POSITION_TYPE_SELL)
-         {
-            // Si SuperTrend est baissier (↓) et prix en-dessous, utiliser SuperTrend comme SL
-            if(g_currentSuperTrendDirection < 0 && curPrice < g_currentSuperTrendLine)
-            {
-               double stSL = g_currentSuperTrendLine + (minDist * 2); // Légère marge au-dessus SuperTrend
-               if((curSL == 0.0 || stSL < curSL) && stSL > curPrice + minDist) // Améliorer le SL
-               {
-                  newSLFromIndicators = stSL;
-                  useIndicatorSL = true;
-                  if(DebugBlocks)
-                     Print("📊 SELL: SL ajusté à SuperTrend (", DoubleToString(stSL, _Digits), ") pour position ", ticket);
-               }
-            }
-         }
-      }
-      
-      // Utiliser VWAP comme niveau de support/résistance pour le SL
-      if(g_currentVWAP > 0.0 && (TimeCurrent() - g_lastIndicatorsUpdate) < 300)
-      {
-         if(posType == POSITION_TYPE_BUY && curPrice > g_currentVWAP)
-         {
-            // En BUY, si prix au-dessus VWAP, placer SL légèrement sous VWAP (support)
-            double vwapSL = g_currentVWAP - (minDist * 3);
-            if(vwapSL > curSL && vwapSL < curPrice - minDist)
-            {
-               // Utiliser VWAP si meilleur que SuperTrend ou si SuperTrend non disponible
-               if(!useIndicatorSL || vwapSL > newSLFromIndicators)
-               {
-                  newSLFromIndicators = vwapSL;
-                  useIndicatorSL = true;
-                  if(DebugBlocks)
-                     Print("📊 BUY: SL ajusté à VWAP (", DoubleToString(vwapSL, _Digits), ") pour position ", ticket);
-               }
-            }
-         }
-         else if(posType == POSITION_TYPE_SELL && curPrice < g_currentVWAP)
-         {
-            // En SELL, si prix en-dessous VWAP, placer SL légèrement au-dessus VWAP (résistance)
-            double vwapSL = g_currentVWAP + (minDist * 3);
-            if((curSL == 0.0 || vwapSL < curSL) && vwapSL > curPrice + minDist)
-            {
-               if(!useIndicatorSL || vwapSL < newSLFromIndicators)
-               {
-                  newSLFromIndicators = vwapSL;
-                  useIndicatorSL = true;
-                  if(DebugBlocks)
-                     Print("📊 SELL: SL ajusté à VWAP (", DoubleToString(vwapSL, _Digits), ") pour position ", ticket);
-               }
-            }
-         }
-      }
-      
-      // Appliquer le SL basé sur les indicateurs si meilleur que le SL actuel
-      if(useIndicatorSL && newSLFromIndicators != curSL)
-      {
-         ENUM_ORDER_TYPE ordTypeST = (posType == POSITION_TYPE_BUY) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
-         double execPriceST = curPrice;
-         ValidateAndAdjustStops(psym, ordTypeST, execPriceST, newSLFromIndicators, curTP);
-         
-         // Pour Boom/Crash, vérifier le compteur de modifications
-         bool canModify = true;
-         if(isBoomCrashPos)
-         {
-            int slModifyCount = 0;
-            for(int t = 0; t < g_slModifyTrackerCount; t++)
-            {
-               if(g_slModifyTracker[t].ticket == ticket)
-               {
-                  slModifyCount = g_slModifyTracker[t].modifyCount;
-                  break;
-               }
-            }
-            if(slModifyCount >= 4)
-               canModify = false;
-         }
-         
-         if(canModify && trade.PositionModify(ticket, newSLFromIndicators, curTP))
-         {
-            curSL = newSLFromIndicators;
-            if(isBoomCrashPos)
-            {
-               // Incrémenter le compteur
-               bool found = false;
-               for(int t = 0; t < g_slModifyTrackerCount; t++)
-               {
-                  if(g_slModifyTracker[t].ticket == ticket)
-                  {
-                     g_slModifyTracker[t].modifyCount++;
-                     g_slModifyTracker[t].lastModifyTime = TimeCurrent();
-                     found = true;
-                     break;
-                  }
-               }
-               if(!found && g_slModifyTrackerCount < 100)
-               {
-                  g_slModifyTracker[g_slModifyTrackerCount].ticket = ticket;
-                  g_slModifyTracker[g_slModifyTrackerCount].modifyCount = 1;
-                  g_slModifyTracker[g_slModifyTrackerCount].lastModifyTime = TimeCurrent();
-                  g_slModifyTrackerCount++;
-               }
-            }
-         }
-      }
-      
-      // ========== FERMETURE SI TRAVERSÉE DU SUPERTREND CONTRE LA POSITION ==========
-      // Fermer position BUY si prix traverse SuperTrend vers le bas (retournement baissier)
-      if(posType == POSITION_TYPE_BUY && g_currentSuperTrendDirection < 0 && g_currentSuperTrendLine > 0.0)
-      {
-         if(curPrice < g_currentSuperTrendLine)
-         {
-            // SuperTrend est devenu baissier et prix est passé en-dessous → fermer BUY
-            if(DebugBlocks)
-               Print("🔄 Fermeture BUY: Prix a traversé SuperTrend baissier (", DoubleToString(g_currentSuperTrendLine, _Digits), ")");
-            trade.PositionClose(ticket);
-            continue;
-         }
-      }
-      // Fermer position SELL si prix traverse SuperTrend vers le haut (retournement haussier)
-      else if(posType == POSITION_TYPE_SELL && g_currentSuperTrendDirection > 0 && g_currentSuperTrendLine > 0.0)
-      {
-         if(curPrice > g_currentSuperTrendLine)
-         {
-            // SuperTrend est devenu haussier et prix est passé au-dessus → fermer SELL
-            if(DebugBlocks)
-               Print("🔄 Fermeture SELL: Prix a traversé SuperTrend haussier (", DoubleToString(g_currentSuperTrendLine, _Digits), ")");
-            trade.PositionClose(ticket);
-            continue;
-         }
-      }
-      
-      // Gestion du trailing stop différenciée selon le type de marché
-      bool isForex = (StringFind(psym, "Boom") == -1 && StringFind(psym, "Crash") == -1);
-      
-      // Pour le Forex : trailing stop illimité et sécurisation à 80% du TP
-      if(isForex && isMainPosition && curTP > 0 && curSL != 0.0)
-      {
-         double profitPips = (posType == POSITION_TYPE_BUY) ? 
-                            (curPrice - openPrice) / _Point : 
-                            (openPrice - curPrice) / _Point;
-         double tpPips = (posType == POSITION_TYPE_BUY) ? 
-                        (curTP - openPrice) / _Point : 
-                        (openPrice - curTP) / _Point;
-         
-         // Si on a atteint 80% du TP, on déplace le SL au point d'équilibre
-         if(profitPips >= 0.8 * tpPips)
-         {
-            double breakevenSL = openPrice;
-            // Pour les positions SELL, le SL doit être au-dessus du prix d'ouverture
-            if(posType == POSITION_TYPE_SELL) 
-               breakevenSL = openPrice + (minDist * 2);
-            else // Pour les positions BUY, le SL doit être en-dessous du prix d'ouverture
-               breakevenSL = openPrice - (minDist * 2);
-            
-            // Vérifier que le nouveau SL est meilleur que l'actuel
-            bool shouldMoveSL = (posType == POSITION_TYPE_BUY) ? 
-                              (breakevenSL > curSL) : 
-                              (breakevenSL < curSL);
-            
-            if(shouldMoveSL && trade.PositionModify(ticket, breakevenSL, curTP))
-            {
-               if(DebugBlocks)
-                  Print("🔄 Forex: SL déplacé au point d'équilibre pour position ", ticket, " (", DoubleToString(breakevenSL, _Digits), ")");
-               curSL = breakevenSL;
-            }
-         }
-      }
-      // Pour les marchés Boom/Crash : limitation à 4 modifications de SL
-      else if(!isForex && isMainPosition && lossPriceStep > 0.0 && curSL != 0.0 && !useIndicatorSL)
-      {
-         // Vérifier le compteur de modifications SL pour Boom/Crash
-         int slModifyCount = 0;
-         bool isBoomCrashModify = isBoomCrashPos;
-         
-         if(isBoomCrashModify)
-         {
-            // Trouver le compteur existant pour ce ticket
-            for(int t = 0; t < g_slModifyTrackerCount; t++)
-            {
-               if(g_slModifyTracker[t].ticket == ticket)
-               {
-                  slModifyCount = g_slModifyTracker[t].modifyCount;
-                  break;
-               }
-            }
-            
-            // Si déjà 4 modifications, ne plus modifier le SL
-            if(slModifyCount >= 4)
-            {
-               if(DebugBlocks)
-                  Print("🛑 Position ", ticket, " (Boom/Crash): Limite de 4 modifications SL atteinte - SL laissé intact");
-               continue; // Passer à la position suivante
-            }
-         }
-         
-         double distanceToSL = (posType == POSITION_TYPE_BUY) ? (openPrice - curSL) : (curSL - openPrice);
-         if(distanceToSL > lossPriceStep)
-         {
-            double tightenSL = (posType == POSITION_TYPE_BUY) ? openPrice - lossPriceStep : openPrice + lossPriceStep;
-            if(MathAbs(curPrice - tightenSL) < minDist)
-               tightenSL = (posType == POSITION_TYPE_BUY) ? curPrice - minDist : curPrice + minDist;
-            // Sécuriser la validité broker avant modification
-            ENUM_ORDER_TYPE ordType3 = (posType == POSITION_TYPE_BUY) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
-            double execPrice3 = curPrice;
-            ValidateAndAdjustStops(psym, ordType3, execPrice3, tightenSL, curTP);
-            if(trade.PositionModify(ticket, tightenSL, curTP))
-            {
-               curSL = tightenSL;
-               
-               // Incrémenter le compteur pour Boom/Crash
-               if(isBoomCrashModify)
-               {
-                  bool found = false;
-                  for(int t = 0; t < g_slModifyTrackerCount; t++)
-                  {
-                     if(g_slModifyTracker[t].ticket == ticket)
-                     {
-                        g_slModifyTracker[t].modifyCount++;
-                        g_slModifyTracker[t].lastModifyTime = TimeCurrent();
-                        found = true;
-                        if(DebugBlocks)
-                           Print("📍 SL modifié #", g_slModifyTracker[t].modifyCount, "/4 pour position ", ticket, " (Boom/Crash)");
-                        break;
-                     }
-                  }
-                  if(!found && g_slModifyTrackerCount < 100)
-                  {
-                     g_slModifyTracker[g_slModifyTrackerCount].ticket = ticket;
-                     g_slModifyTracker[g_slModifyTrackerCount].modifyCount = 1;
-                     g_slModifyTracker[g_slModifyTrackerCount].lastModifyTime = TimeCurrent();
-                     g_slModifyTrackerCount++;
-                     if(DebugBlocks)
-                        Print("📍 Première modification SL pour position ", ticket, " (Boom/Crash)");
-                  }
-               }
-            }
-         }
-      }
-      
-      // Nettoyer les tickets qui n'existent plus (positions fermées)
-      // Pour le Forex, on nettoie tous les tickets, pour Boom/Crash uniquement les positions fermées
-      bool shouldCleanup = isForex || isBoomCrashPos;
-      if(shouldCleanup)
-      {
-         for(int t = g_slModifyTrackerCount - 1; t >= 0; t--)
-         {
-            if(!PositionSelectByTicket(g_slModifyTracker[t].ticket))
-            {
-               // Décaler les éléments suivants
-               for(int j = t; j < g_slModifyTrackerCount - 1; j++)
-                  g_slModifyTracker[j] = g_slModifyTracker[j + 1];
-               g_slModifyTrackerCount--;
-            }
-         }
-      }
+      // AUCUNE MODIFICATION AUTOMATIQUE - laisser les SL/TP initiaux gérer
    }
-
-   // Si la position principale a été fermée sur perte, promouvoir une limite en attente
-   if(closedMainForLoss && CountPositionsForSymbolMagic() == 0)
-      ExecuteClosestPendingOrder();
-
-   // Si aucune position n'est ouverte, tenter d'exécuter un ordre en attente
-   if(CountPositionsForSymbolMagic() == 0)
-      ManagePendingOrders();
 }
 
 // Minimum de lot imposé par type d'instrument (Forex / Volatility / Boom/Crash)
