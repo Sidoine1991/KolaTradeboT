@@ -334,7 +334,7 @@ input group "--- RISK MANAGEMENT ---"
 input double RiskPercent        = 1.0;      // % du capital à risquer par trade (0-5%)
 input double FixedLotSize       = 0.1;      // Lot fixe si RiskPercent = 0
 input double MaxLotSize         = 5.0;      // Plafond absolu de taille de lot
-input double DailyProfitTarget  = 100.0;    // Objectif de profit quotidien (0 = illimité)
+input double DailyProfitTarget  = 50.0;     // Objectif de profit quotidien (0 = illimité) - LIMITÉ À 50$
 input double DailyLossLimit     = 200.0;    // Limite de perte quotidienne (0 = illimitée)
 input double MinRiskReward      = 1.5;      // Ratio Risque/Récompense minimum (ex: 1.5 pour 1:1.5)
 input int    MaxConsecLosses    = 5;        // Arrêter après X pertes consécutives
@@ -343,6 +343,27 @@ input int    MaxConsecLosses    = 5;        // Arrêter après X pertes consécu
 double g_dailyProfit = 0.0;
 double g_dailyLoss = 0.0;
 datetime g_lastTradeDay = 0;  // Dernier jour de trading
+
+// Variables pour la gestion des gains successifs
+int g_consecutiveWins = 0;           // Nombre de gains successifs
+datetime g_lastWinTime = 0;          // Heure du dernier gain
+datetime g_tradingPauseUntil = 0;    // Heure de fin de pause de trading
+bool g_dailyTargetReached = false;  // Indicateur si l'objectif quotidien est atteint
+
+// Variables pour le cooldown après gains consécutifs
+datetime g_winCooldownUntil = 0;            // Fin du cooldown après gains
+int g_requiredWinsForCooldown = 2;         // Nombre de gains requis pour déclencher le cooldown
+int g_winCooldownMinutes = 5;               // Durée du cooldown en minutes
+
+// Variables pour la gestion spéciale Boom 300
+int g_boom300ConsecutiveWins = 0;    // Gains successifs spécifiques à Boom 300
+bool g_boom300ShouldExit = false;    // Doit quitter Boom 300 après 2 gains
+
+// Variables pour le suivi des spikes et compte à rebours
+bool g_spikeDetected = false;        // Indicateur de spike détecté
+bool g_spikeDirection = false;       // true = achat, false = vente
+int g_spikeCountdown = 0;            // Compte à rebours en secondes
+datetime g_spikeDetectedTime = 0;    // Heure de détection du spike
 
 // Variables pour le bilan des trades
 int g_totalTradesCount = 0;
@@ -1505,12 +1526,18 @@ bool UpdateIndicators()
 //+------------------------------------------------------------------+
 void OnTick()
 {
+   // Mettre à jour le compte à rebours du spike
+   UpdateSpikeCountdown();
+   
    // Mettre à jour les indicateurs
    if(!UpdateIndicators())
    {
       Print("Erreur lors de la mise à jour des indicateurs");
       return;
    }
+   
+   // Afficher les indicateurs avancés sur le graphique
+   DrawAdvancedIndicators();
    
    // Gérer les positions existantes avec les niveaux Fibonacci
    if(PositionsTotal() > 0)
@@ -2947,6 +2974,63 @@ bool CalculateFibonacciLevels()
 }
 
 //+------------------------------------------------------------------+
+//| Affiche les indicateurs avancés sur le graphique                  |
+//+------------------------------------------------------------------+
+void DrawAdvancedIndicators()
+{
+   // Nom unique pour le panneau d'indicateurs
+   string panelName = "ADVANCED_INDICATORS_PANEL";
+   
+   // Supprimer l'ancien panneau s'il existe
+   ObjectDelete(0, panelName);
+   
+   // Créer le panneau d'indicateurs
+   if(!ObjectCreate(0, panelName, OBJ_LABEL, 0, 0, 0))
+      return;
+   
+   // Récupérer les valeurs des indicateurs
+   double rsi[], atr[], emaFast[], emaSlow[];
+   if(CopyBuffer(rsiHandle, 0, 0, 1, rsi) <= 0 ||
+      CopyBuffer(g_atrHandle, 0, 0, 1, atr) <= 0 ||
+      CopyBuffer(emaFastHandle, 0, 0, 1, emaFast) <= 0 ||
+      CopyBuffer(emaSlowHandle, 0, 0, 1, emaSlow) <= 0)
+      return;
+   
+   // Préparer le texte d'affichage
+   string indicatorsText = "INDICATEURS AVANCÉS\n";
+   indicatorsText += "─────────────────────\n";
+   indicatorsText += "RSI: " + DoubleToString(rsi[0], 2) + "\n";
+   indicatorsText += "ATR: " + DoubleToString(atr[0], _Digits) + "\n";
+   indicatorsText += "EMA Fast: " + DoubleToString(emaFast[0], _Digits) + "\n";
+   indicatorsText += "EMA Slow: " + DoubleToString(emaSlow[0], _Digits) + "\n";
+   
+   // Ajouter le spread
+   double spread = (SymbolInfoDouble(_Symbol, SYMBOL_ASK) - SymbolInfoDouble(_Symbol, SYMBOL_BID)) / _Point;
+   indicatorsText += "Spread: " + DoubleToString(spread, 1) + " pts\n";
+   
+   // Ajouter le volume si disponible
+   long volume[];
+   if(CopyTickVolume(_Symbol, PERIOD_CURRENT, 0, 1, volume) > 0)
+   {
+      indicatorsText += "Volume: " + IntegerToString(volume[0]) + "\n";
+   }
+   
+   // Configurer l'apparence du panneau
+   ObjectSetInteger(0, panelName, OBJPROP_CORNER, CORNER_LEFT_LOWER);
+   ObjectSetInteger(0, panelName, OBJPROP_XDISTANCE, 10);
+   ObjectSetInteger(0, panelName, OBJPROP_YDISTANCE, 150);
+   ObjectSetInteger(0, panelName, OBJPROP_FONTSIZE, 9);
+   ObjectSetString(0, panelName, OBJPROP_FONT, "Courier New");
+   ObjectSetInteger(0, panelName, OBJPROP_COLOR, clrWhite);
+   ObjectSetInteger(0, panelName, OBJPROP_BACK, true);
+   ObjectSetInteger(0, panelName, OBJPROP_BGCOLOR, C'20,20,20');
+   ObjectSetInteger(0, panelName, OBJPROP_BORDER_COLOR, C'60,60,60');
+   
+   // Définir le texte
+   ObjectSetString(0, panelName, OBJPROP_TEXT, indicatorsText);
+}
+
+//+------------------------------------------------------------------+
 //| Affiche les niveaux Fibonacci sur le graphique                   |
 //+------------------------------------------------------------------+
 void DrawFibonacciLevels()
@@ -3628,6 +3712,63 @@ bool IsTradingAllowed()
 }
 
 //+------------------------------------------------------------------+
+//| Vérifie si on est en période de cooldown après des gains        |
+//+------------------------------------------------------------------+
+bool IsInWinCooldown()
+{
+   datetime now = TimeCurrent();
+   
+   // Vérifier si on est en cooldown
+   if(now < g_winCooldownUntil)
+   {
+      int remaining = (int)(g_winCooldownUntil - now) / 60;
+      Print("⏳ Cooldown actif après ", g_consecutiveWins, " gains consécutifs. Attente: ", 
+            remaining, " minutes avant de pouvoir trader à nouveau.");
+      return true;
+   }
+   
+   // Réinitialiser le compteur si le cooldown est terminé
+   if(g_winCooldownUntil > 0)
+   {
+      Print("✅ Fin du cooldown. Prêt pour de nouveaux trades.");
+      g_consecutiveWins = 0;
+      g_winCooldownUntil = 0;
+   }
+   
+   return false;
+}
+
+//+------------------------------------------------------------------+
+//| Met à jour le compteur de gains et gère le cooldown             |
+//+------------------------------------------------------------------+
+void UpdateWinCounter(double profit)
+{
+   if(profit > 0)
+   {
+      g_consecutiveWins++;
+      g_lastWinTime = TimeCurrent();
+      Print("🎯 Gain enregistré. Série de gains: ", g_consecutiveWins);
+      
+      // Démarrer le cooldown après 2 gains consécutifs
+      if(g_consecutiveWins >= g_requiredWinsForCooldown)
+      {
+         g_winCooldownUntil = TimeCurrent() + (g_winCooldownMinutes * 60);
+         Print("⏸️ Cooldown de ", g_winCooldownMinutes, 
+               " minutes après ", g_consecutiveWins, " gains consécutifs.");
+      }
+   }
+   else if(profit < 0)
+   {
+      // Réinitialiser le compteur en cas de perte
+      if(g_consecutiveWins > 0)
+      {
+         Print("🔄 Réinitialisation du compteur de gains après une perte");
+         g_consecutiveWins = 0;
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
 //| Vérifie si les objectifs quotidiens sont atteints               |
 //+------------------------------------------------------------------+
 bool IsDailyTargetReached()
@@ -3689,11 +3830,17 @@ void UpdateTradingStats(double profit)
    {
       g_dailyProfit += profit;
       g_consecutiveLosses = 0; // Réinitialiser le compteur de pertes
+      
+      // Mettre à jour le compteur de gains
+      UpdateWinCounter(profit);
    }
    else
    {
       g_dailyLoss += MathAbs(profit);
       g_consecutiveLosses++;
+      
+      // Mettre à jour le compteur de gains (va réinitialiser en cas de perte)
+      UpdateWinCounter(profit);
    }
    
    // Mettre à jour le suivi des pertes par symbole
@@ -3772,7 +3919,13 @@ bool ExecuteTrade(ENUM_ORDER_TYPE type, double atr, double price, string comment
    double spreadCheck = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD) * _Point;
    if(spreadCheck > MaxSpreadPoints * _Point)
    {
-      Print("Spread too high: ", spreadCheck, " > ", MaxSpreadPoints * _Point);
+      Print("Spread trop élevé: ", spreadCheck, " > ", MaxSpreadPoints * _Point);
+      return false;
+   }
+   
+   // Vérifier le cooldown après gains (sauf pour les signaux prioritaires comme les spikes)
+   if(!isSpikePriority && IsInWinCooldown())
+   {
       return false;
    }
    
@@ -5068,8 +5221,74 @@ void UpdateSpikeUI(bool isBuy, double price, double confidence)
    ObjectSetString(0, objName, OBJPROP_TEXT, text);
    ObjectSetInteger(0, objName, OBJPROP_COLOR, clr);
    
+   // Dessiner une flèche sur le graphique
+   string arrowName = "SpikeArrow_" + IntegerToString(TimeCurrent());
+   datetime arrowTime = TimeCurrent();
+   double arrowPrice = isBuy ? iLow(_Symbol, PERIOD_CURRENT, 0) - 10 * _Point : iHigh(_Symbol, PERIOD_CURRENT, 0) + 10 * _Point;
+   
+   if(ObjectFind(0, arrowName) < 0)
+   {
+      ObjectCreate(0, arrowName, OBJ_ARROW, 0, arrowTime, arrowPrice);
+      ObjectSetInteger(0, arrowName, OBJPROP_COLOR, clr);
+      ObjectSetInteger(0, arrowName, OBJPROP_WIDTH, 3);
+      ObjectSetInteger(0, arrowName, OBJPROP_ARROWCODE, isBuy ? 233 : 234); // 233 = flèche haut, 234 = flèche bas
+      ObjectSetInteger(0, arrowName, OBJPROP_BACK, false);
+   }
+   
+   // Démarrer le compte à rebours
+   g_spikeCountdown = 60; // 60 secondes
+   g_spikeDirection = isBuy;
+   g_spikeDetected = true;
+   g_spikeDetectedTime = TimeCurrent();
+   
    // Supprimer l'objet après 30 secondes
    EventSetTimer(30);
+}
+
+//+------------------------------------------------------------------+
+//| Met à jour l'affichage du compte à rebours du spike              |
+//+------------------------------------------------------------------+
+void UpdateSpikeCountdown()
+{
+   if(!g_spikeDetected || g_spikeCountdown <= 0)
+   {
+      // Supprimer l'objet de compte à rebours s'il existe
+      if(ObjectFind(0, "SpikeCountdown") >= 0)
+         ObjectDelete(0, "SpikeCountdown");
+      return;
+   }
+   
+   // Calculer le temps restant
+   int elapsed = (int)(TimeCurrent() - g_spikeDetectedTime);
+   g_spikeCountdown = 60 - elapsed;
+   
+   if(g_spikeCountdown > 0)
+   {
+      string countdownText = "SPIKE DANS " + IntegerToString(g_spikeCountdown) + "s";
+      string direction = g_spikeDirection ? "ACHAT" : "VENTE";
+      
+      // Mettre à jour ou créer l'objet de compte à rebours
+      if(ObjectFind(0, "SpikeCountdown") < 0)
+      {
+         ObjectCreate(0, "SpikeCountdown", OBJ_LABEL, 0, 0, 0);
+         ObjectSetInteger(0, "SpikeCountdown", OBJPROP_CORNER, (long)CORNER_RIGHT_UPPER);
+         ObjectSetInteger(0, "SpikeCountdown", OBJPROP_XDISTANCE, 20);
+         ObjectSetInteger(0, "SpikeCountdown", OBJPROP_YDISTANCE, 20);
+         ObjectSetInteger(0, "SpikeCountdown", OBJPROP_FONTSIZE, 12);
+         ObjectSetString(0, "SpikeCountdown", OBJPROP_FONT, "Arial Bold");
+         ObjectSetInteger(0, "SpikeCountdown", OBJPROP_BACK, false);
+      }
+      
+      ObjectSetString(0, "SpikeCountdown", OBJPROP_TEXT, countdownText + "\n" + direction);
+      ObjectSetInteger(0, "SpikeCountdown", OBJPROP_COLOR, g_spikeDirection ? clrLime : clrRed);
+   }
+   else
+   {
+      // Fin du compte à rebours
+      g_spikeDetected = false;
+      if(ObjectFind(0, "SpikeCountdown") >= 0)
+         ObjectDelete(0, "SpikeCountdown");
+   }
 }
 
 //+------------------------------------------------------------------+
