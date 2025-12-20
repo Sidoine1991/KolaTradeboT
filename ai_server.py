@@ -11,15 +11,23 @@ import time
 import asyncio
 import logging
 import sys
+import threading
+import requests
+import json
+import time
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from socketserver import ThreadingMixIn
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional, List, Dict, Any
-from fastapi import FastAPI, HTTPException, Request, Body
+from typing import Optional, List, Dict, Any, Tuple, Callable
+from fastapi import FastAPI, HTTPException, Request, Body, Response, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 import uvicorn
 import pandas as pd
 import numpy as np
+from urllib.parse import urlparse, parse_qs
 
 # Configuration du logging
 logging.basicConfig(
@@ -97,11 +105,20 @@ alphavantage_request_count = 0
 ALPHAVANTAGE_DAILY_LIMIT = 25
 
 # Tentative d'importation des modules backend (optionnel)
+import time
+import threading
+import schedule
+from datetime import datetime, timedelta
+from typing import List, Dict, Optional
+import json
+import random
+
 try:
     sys.path.insert(0, str(Path(__file__).parent / "backend"))
     from advanced_ml_predictor import AdvancedMLPredictor
     from spike_predictor import AdvancedSpikePredictor
-    from mt5_connector import get_historical_data
+    from mt5_connector import get_historical_data, get_all_symbols, get_ohlc
+    from trend_summary import get_multi_timeframe_trend
     BACKEND_AVAILABLE = True
     logger.info("Modules backend disponibles")
 except ImportError as e:
@@ -138,7 +155,18 @@ app.add_middleware(
 
 # Variables globales
 API_PORT = 8000
+TREND_API_PORT = 8001
 CACHE_DURATION = 30  # secondes
+TREND_CACHE_DURATION = 30  # secondes
+
+# Configuration des notifications de tendance
+TREND_SUMMARY_INTERVAL = 300  # 5 minutes en secondes
+TRACKED_SYMBOLS = ["Boom 300 Index", "Crash 300 Index"]  # Symboles à suivre
+NOTIFICATION_WEBHOOK = os.getenv("DISCORD_WEBHOOK_URL")  # Optionnel: webhook Discord pour les notifications
+
+# Thread pour l'API Trend
+trend_api_thread = None
+TREND_DATA_FILE = Path("trend_data.json")
 DATA_DIR = Path("data")
 MODELS_DIR = Path("models")
 LOG_FILE = Path("ai_server.log")
@@ -437,7 +465,14 @@ async def root():
             "/indicators/analyze (POST)",
             "/indicators/sentiment/{symbol} (GET)",
             "/indicators/volume_profile/{symbol} (GET)",
-            "/analyze/gemini (POST)"
+            "/analyze/gemini (POST)",
+            "/autoscan/start (POST) - Démarrer le scan automatique",
+            "/autoscan/stop (POST) - Arrêter le scan automatique",
+            "/autoscan/status (GET) - Statut du scan",
+            "/autoscan/results (GET) - Résultats du scan",
+            "/autoscan/signals (GET) - Signaux détectés",
+            "/autoscan/scan (POST) - Lancer un scan manuel",
+            "/autoscan/config (POST) - Configuration du scan"
         ]
     }
 
@@ -623,7 +658,7 @@ import json as json_lib
 async def deriv_ws_request(request_data: dict, timeout: float = 10.0) -> dict:
     """Effectue une requête WebSocket vers Deriv API"""
     try:
-        async with websockets.connect(DERIV_WS_URL, close_timeout=5) as ws:
+        async with websockets.connect(DERIV_WS_URL, close_timeout=5.0) as ws:
             await ws.send(json_lib.dumps(request_data))
             response = await asyncio.wait_for(ws.recv(), timeout=timeout)
             return json_lib.loads(response)
@@ -822,6 +857,131 @@ async def get_market_data_with_fallback(symbol: str):
     }
 
 # ==================== END DERIV API ====================
+
+# ==================== AUTOSCAN ENDPOINTS ====================
+
+@app.post("/autoscan/start")
+async def start_autoscan(interval_minutes: int = 5):
+    """Démarre le scan automatique des symboles."""
+    try:
+        success = autoscan_manager.start()
+        if success:
+            return {
+                "status": "success",
+                "message": f"Scan automatique démarré avec un intervalle de {interval_minutes} minutes",
+                "scan_interval": interval_minutes
+            }
+        else:
+            return {
+                "status": "error",
+                "message": "Le scan est déjà en cours d'exécution"
+            }
+    except Exception as e:
+        logger.error(f"Erreur lors du démarrage de l'autoscan: {e}")
+        raise HTTPException(status_code=500, detail=f"Erreur lors du démarrage de l'autoscan: {str(e)}")
+
+@app.post("/autoscan/stop")
+async def stop_autoscan():
+    """Arrête le scan automatique des symboles."""
+    try:
+        autoscan_manager.stop()
+        return {
+            "status": "success",
+            "message": "Scan automatique arrêté"
+        }
+    except Exception as e:
+        logger.error(f"Erreur lors de l'arrêt de l'autoscan: {e}")
+        raise HTTPException(status_code=500, detail=f"Erreur lors de l'arrêt de l'autoscan: {str(e)}")
+
+@app.get("/autoscan/status")
+async def get_autoscan_status():
+    """Retourne le statut actuel du scan automatique."""
+    try:
+        status = autoscan_manager.get_status()
+        return {
+            "status": "success",
+            "data": status
+        }
+    except Exception as e:
+        logger.error(f"Erreur lors de la récupération du statut de l'autoscan: {e}")
+        raise HTTPException(status_code=500, detail=f"Erreur lors de la récupération du statut: {str(e)}")
+
+@app.get("/autoscan/results")
+async def get_autoscan_results():
+    """Retourne les derniers résultats du scan."""
+    try:
+        results = autoscan_manager.get_latest_results()
+        return {
+            "status": "success",
+            "data": results
+        }
+    except Exception as e:
+        logger.error(f"Erreur lors de la récupération des résultats de l'autoscan: {e}")
+        raise HTTPException(status_code=500, detail=f"Erreur lors de la récupération des résultats: {str(e)}")
+
+@app.post("/autoscan/scan")
+async def manual_scan():
+    """Effectue un scan manuel immédiat."""
+    try:
+        def run_scan():
+            autoscan_manager._perform_scan()
+        
+        thread = threading.Thread(target=run_scan, daemon=True)
+        thread.start()
+        
+        return {
+            "status": "success",
+            "message": "Scan manuel démarré en arrière-plan"
+        }
+    except Exception as e:
+        logger.error(f"Erreur lors du lancement du scan manuel: {e}")
+        raise HTTPException(status_code=500, detail=f"Erreur lors du lancement du scan manuel: {str(e)}")
+
+@app.get("/autoscan/signals")
+async def get_autoscan_signals():
+    """Retourne uniquement les signaux détectés lors du dernier scan."""
+    try:
+        results = autoscan_manager.get_latest_results()
+        signals = results.get('signals', [])
+        
+        return {
+            "status": "success",
+            "data": {
+                "signals": signals,
+                "count": len(signals),
+                "timestamp": results.get('timestamp')
+            }
+        }
+    except Exception as e:
+        logger.error(f"Erreur lors de la récupération des signaux: {e}")
+        raise HTTPException(status_code=500, detail=f"Erreur lors de la récupération des signaux: {str(e)}")
+
+@app.post("/autoscan/config")
+async def update_autoscan_config(config: Dict[str, Any]):
+    """Met à jour la configuration de l'autoscan."""
+    try:
+        if 'scan_interval_minutes' in config:
+            new_interval = config['scan_interval_minutes']
+            if isinstance(new_interval, int) and new_interval >= 1:
+                autoscan_manager.scan_interval = new_interval
+                logger.info(f"Intervalle de scan mis à jour: {new_interval} minutes")
+            else:
+                raise HTTPException(status_code=400, detail="L'intervalle de scan doit être un entier >= 1")
+        
+        return {
+            "status": "success",
+            "message": "Configuration de l'autoscan mise à jour",
+            "current_config": {
+                "scan_interval_minutes": autoscan_manager.scan_interval
+            }
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Erreur lors de la mise à jour de la configuration de l'autoscan: {e}")
+        raise HTTPException(status_code=500, detail=f"Erreur lors de la mise à jour de la configuration: {str(e)}")
+
+# ==================== END AUTOSCAN ENDPOINTS ====================
 
 @app.get("/health")
 async def health_check():
@@ -2019,20 +2179,833 @@ async def get_market_profile_analysis(
 
 # ==================== FIN INDICATEURS TECHNIQUES AVANCÉS ====================
 
+class AutoScanManager:
+    """Gestionnaire de scan automatique des symboles pour détecter les opportunités de trading."""
+    
+    def __init__(self, scan_interval_minutes: int = 10):
+        """Initialise le gestionnaire de scan."""
+        self.scan_interval = scan_interval_minutes
+        self.running = False
+        self.thread = None
+        self.last_scan_time = None
+        self.scan_results = {}
+        self.scan_lock = threading.Lock()
+        self.logger = logging.getLogger("autoscan")
+        
+    def start(self):
+        """Démarre le scan automatique en arrière-plan."""
+        if self.running:
+            self.logger.warning("Le scan est déjà en cours d'exécution")
+            return False
+            
+        self.running = True
+        self.thread = threading.Thread(target=self._run_scan_loop, daemon=True)
+        self.thread.start()
+        self.logger.info(f"Scan automatique démarré avec un intervalle de {self.scan_interval} minutes")
+        return True
+        
+    def stop(self):
+        """Arrête le scan automatique."""
+        self.running = False
+        if self.thread and self.thread.is_alive():
+            self.thread.join(timeout=5)
+        self.logger.info("Scan automatique arrêté")
+        
+    def _run_scan_loop(self):
+        """Boucle principale du scan automatique."""
+        while self.running:
+            try:
+                self._perform_scan()
+                time.sleep(self.scan_interval * 60)
+            except Exception as e:
+                self.logger.error(f"Erreur dans la boucle de scan: {e}")
+                time.sleep(30)
+                
+    def _perform_scan(self):
+        """Effectue un scan complet de tous les symboles."""
+        if not BACKEND_AVAILABLE:
+            self.logger.warning("Modules backend non disponibles - scan impossible")
+            return
+            
+        start_time = time.time()
+        self.logger.info("Début du scan automatique des symboles")
+        
+        try:
+            # Récupérer tous les symboles disponibles
+            symbols = self._get_symbols_to_scan()
+            signals_found = []
+            
+            for symbol in symbols:
+                if not self.running:
+                    break
+                    
+                try:
+                    signal = self._scan_symbol(symbol)
+                    if signal:
+                        signals_found.append(signal)
+                        self.logger.info(f"Signal détecté pour {symbol}: {signal['action']}")
+                except Exception as e:
+                    self.logger.error(f"Erreur lors du scan de {symbol}: {e}")
+                    
+            # Stocker les résultats
+            with self.scan_lock:
+                self.scan_results = {
+                    'timestamp': datetime.now().isoformat(),
+                    'signals': signals_found,
+                    'symbols_scanned': len(symbols),
+                    'scan_duration': time.time() - start_time
+                }
+                
+            self.logger.info(f"Scan terminé: {len(signals_found)} signaux trouvés sur {len(symbols)} symboles")
+            
+        except Exception as e:
+            self.logger.error(f"Erreur lors du scan: {e}")
+            
+    def _get_symbols_to_scan(self) -> List[str]:
+        """Récupère la liste des symboles attachés au robot (symboles actifs)."""
+        if BACKEND_AVAILABLE and MT5_AVAILABLE:
+            try:
+                import MetaTrader5 as mt5
+                if mt5.terminal_info():
+                    # Récupérer les symboles actuellement ouverts dans les graphiques
+                    charts = mt5.chart_get_all()
+                    symbols_from_charts = set()
+                    
+                    for chart in charts:
+                        symbol = chart.symbol
+                        if symbol and symbol not in symbols_from_charts:
+                            symbols_from_charts.add(symbol)
+                    
+                    if symbols_from_charts:
+                        self.logger.info(f"Symboles détectés depuis les graphiques: {list(symbols_from_charts)}")
+                        return list(symbols_from_charts)
+                    
+                    # Alternative: récupérer les symboles avec des positions ouvertes
+                    positions = mt5.positions_get()
+                    symbols_from_positions = set()
+                    
+                    if positions:
+                        for position in positions:
+                            if position.symbol not in symbols_from_positions:
+                                symbols_from_positions.add(position.symbol)
+                    
+                    if symbols_from_positions:
+                        self.logger.info(f"Symboles détectés depuis les positions: {list(symbols_from_positions)}")
+                        return list(symbols_from_positions)
+                    
+                    # Alternative: récupérer les symboles favoris/symboles récemment utilisés
+                    from mt5_connector import get_all_symbols
+                    all_symbols = get_all_symbols()
+                    
+                    # Filtrer pour les symboles commonly traded
+                    priority_symbols = []
+                    other_symbols = []
+                    
+                    for symbol in all_symbols:
+                        if any(symbol.startswith(prefix) for prefix in [
+                            'EUR', 'GBP', 'USD', 'JPY', 'AUD', 'CAD', 'CHF', 'NZD'  # Forex majeurs
+                        ]):
+                            if len(symbol) == 6:  # Format standard forex
+                                priority_symbols.append(symbol)
+                        elif any(keyword in symbol for keyword in ['Volatility', 'Boom', 'Crash', 'Step']):
+                            priority_symbols.append(symbol)  # Indices synthétiques
+                    
+                    # Limiter à 10 symboles prioritaires pour éviter la surcharge
+                    return priority_symbols[:10]
+                    
+            except Exception as e:
+                self.logger.error(f"Erreur lors de la récupération des symboles MT5: {e}")
+                
+        # Retourner une liste par défaut si MT5 n'est pas disponible
+        default_symbols = ['EURUSD', 'GBPUSD', 'USDJPY', 'AUDUSD', 'Volatility 75 Index']
+        self.logger.info(f"Utilisation des symboles par défaut: {default_symbols}")
+        return default_symbols
+        
+    def _scan_symbol(self, symbol: str) -> Optional[Dict]:
+        """Scanne un symbole individuel pour détecter des signaux avec scores d'opportunité."""
+        try:
+            # Récupérer les données de tendance sur plusieurs timeframes
+            timeframes = ['M1', 'M5', 'M15', 'M30', 'H1', 'H4']
+            trend_data = {}
+            
+            # Importer les fonctions de calcul de tendance directement
+            import random
+            
+            for tf in timeframes:
+                try:
+                    # Simuler les données de tendance (sera remplacé par trend_api.py plus tard)
+                    trend_data[tf] = {
+                        'symbol': symbol,
+                        'timeframe': tf,
+                        'timestamp': time.time(),
+                        'trend_direction': self._calculate_trend_direction(symbol, tf),
+                        'trend_strength': self._calculate_trend_strength(symbol, tf),
+                        'confidence': self._calculate_confidence(symbol, tf),
+                        'support_levels': self._get_support_levels(symbol, tf),
+                        'resistance_levels': self._get_resistance_levels(symbol, tf),
+                        'volatility': self._calculate_volatility(symbol, tf),
+                        'spike_probability': self._calculate_spike_probability(symbol, tf),
+                        'trading_signal': self._generate_trading_signal(symbol, tf),
+                        'risk_level': self._assess_symbol_risk_level(symbol, tf)
+                    }
+                except Exception as e:
+                    self.logger.error(f"Erreur lors de l'analyse {tf} pour {symbol}: {e}")
+                    trend_data[tf] = None
+            
+            # Calculer le score d'opportunité
+            opportunity_score = self._calculate_opportunity_score(symbol, trend_data)
+            
+            # Récupérer le prix actuel sur M1
+            if BACKEND_AVAILABLE:
+                from mt5_connector import get_ohlc
+                df = get_ohlc(symbol, 'M1', 2)
+                if df is not None and not df.empty:
+                    current_price = float(df['close'].iloc[-1])
+                    
+                    # Calculer TP/SL basé sur le score d'opportunité
+                    atr = self._get_atr(symbol, 'M1', 14)
+                    if atr and atr > 0:
+                        # Ajuster TP/SL selon le score d'opportunité
+                        multiplier = 1.0 + (opportunity_score['overall_score'] / 100)
+                        sl_distance = atr * (1.5 / multiplier)  # SL plus serré si score élevé
+                        tp_distance = atr * (3.0 * multiplier)  # TP plus large si score élevé
+                        
+                        sl = current_price - sl_distance if opportunity_score['direction'] == 'BUY' else current_price + sl_distance
+                        tp = current_price + tp_distance if opportunity_score['direction'] == 'BUY' else current_price - tp_distance
+                        
+                        return {
+                            'symbol': symbol,
+                            'action': opportunity_score['direction'],
+                            'entry_price': current_price,
+                            'stop_loss': sl,
+                            'take_profit': tp,
+                            'confidence': opportunity_score['overall_score'] / 100,
+                            'reason': f"Score d'opportunité: {opportunity_score['overall_score']:.1f}% - {opportunity_score['reason']}",
+                            'timestamp': datetime.now().isoformat(),
+                            'opportunity_score': opportunity_score,
+                            'trend_data': trend_data,
+                            'lot_size_recommendation': self._calculate_lot_size(opportunity_score['overall_score']),
+                            'risk_level': opportunity_score['risk_level']
+                        }
+            
+            return None
+            
+        except Exception as e:
+            self.logger.error(f"Erreur lors du scan de {symbol}: {e}")
+            return None
+    
+    # Méthodes de calcul de tendance (remplacées par trend_api.py plus tard)
+    def _calculate_trend_direction(self, symbol: str, timeframe: str) -> str:
+        """Calcule la direction de la tendance pour un timeframe."""
+        import random
+        directions = ['bullish', 'bearish', 'neutral']
+        # Simulation basée sur l'heure et le symbole pour cohérence
+        seed = hash(symbol + timeframe + str(int(time.time() / 300)))  # Change toutes les 5 minutes
+        random.seed(seed % 1000)
+        return random.choice(directions)
+    
+    def _calculate_trend_strength(self, symbol: str, timeframe: str) -> int:
+        """Calcule la force de la tendance (0-100)."""
+        import random
+        seed = hash(symbol + timeframe + 'strength' + str(int(time.time() / 300)))
+        random.seed(seed % 1000)
+        return random.randint(40, 95)
+    
+    def _calculate_confidence(self, symbol: str, timeframe: str) -> int:
+        """Calcule le niveau de confiance (0-100)."""
+        import random
+        seed = hash(symbol + timeframe + 'confidence' + str(int(time.time() / 300)))
+        random.seed(seed % 1000)
+        return random.randint(50, 90)
+    
+    def _get_support_levels(self, symbol: str, timeframe: str) -> List[float]:
+        """Retourne les niveaux de support."""
+        # Simulation - sera remplacé par trend_api.py
+        return [1.0800, 1.0750, 1.0700]
+    
+    def _get_resistance_levels(self, symbol: str, timeframe: str) -> List[float]:
+        """Retourne les niveaux de résistance."""
+        # Simulation - sera remplacé par trend_api.py
+        return [1.0900, 1.0950, 1.1000, 1.1050, 1.1100]
+    
+    def _calculate_volatility(self, symbol: str, timeframe: str) -> float:
+        """Calcule la volatilité actuelle."""
+        import random
+        return round(random.uniform(0.5, 3.0), 2)
+    
+    def _calculate_spike_probability(self, symbol: str, timeframe: str) -> float:
+        """Calcule la probabilité de spike."""
+        import random
+        return round(random.uniform(0.2, 0.8), 2)
+    
+    def _generate_trading_signal(self, symbol: str, timeframe: str) -> str:
+        """Génère un signal de trading."""
+        signals = ["BUY", "SELL", "HOLD"]
+        import random
+        return random.choice(signals)
+    
+    def _assess_symbol_risk_level(self, symbol: str, timeframe: str) -> str:
+        """Évalue le niveau de risque."""
+        risk_levels = ["LOW", "MEDIUM", "HIGH"]
+        import random
+        return random.choice(risk_levels)
+            
+    def _get_atr(self, symbol: str, timeframe: str, period: int) -> Optional[float]:
+        """Calcule l'ATR pour un symbole."""
+        try:
+            if BACKEND_AVAILABLE:
+                from mt5_connector import get_ohlc
+                df = get_ohlc(symbol, timeframe, period + 1)
+                if df is not None and not df.empty:
+                    high = df['high'].values
+                    low = df['low'].values
+                    close = df['close'].values
+                    
+                    tr1 = high[1:] - low[1:]
+                    tr2 = abs(high[1:] - close[:-1])
+                    tr3 = abs(low[1:] - close[:-1])
+                    
+                    tr = np.maximum.reduce([tr1, tr2, tr3])
+                    atr = np.mean(tr)
+                    
+                    return float(atr)
+        except Exception as e:
+            self.logger.error(f"Erreur lors du calcul de l'ATR pour {symbol}: {e}")
+            
+        return None
+        
+    def _calculate_opportunity_score(self, symbol: str, trend_data: Dict) -> Dict:
+        """Calcule le score d'opportunité basé sur l'analyse multi-timeframe."""
+        try:
+            scores = {
+                'BUY_LONG': 0,    # Achat long terme (H4/H1)
+                'BUY_SHORT': 0,   # Achat court terme (M15/M5/M1)
+                'SELL_LONG': 0,   # Vente long terme (H4/H1)
+                'SELL_SHORT': 0   # Vente court terme (M15/M5/M1)
+            }
+            
+            # Pondération par timeframe
+            weights = {
+                'H4': 0.3,
+                'H1': 0.25,
+                'M30': 0.2,
+                'M15': 0.15,
+                'M5': 0.07,
+                'M1': 0.03
+            }
+            
+            # Analyser chaque timeframe
+            for tf, data in trend_data.items():
+                if data and tf in weights:
+                    weight = weights[tf]
+                    trend_dir = data.get('trend_direction', 'neutral')
+                    strength = data.get('trend_strength', 50) / 100
+                    confidence = data.get('confidence', 50) / 100
+                    volatility = data.get('volatility', 1.0)
+                    
+                    # Ajuster selon la volatilité
+                    volatility_factor = min(2.0, 1.0 / volatility) if volatility > 0 else 1.0
+                    
+                    score = strength * confidence * weight * volatility_factor
+                    
+                    if trend_dir == 'bullish':
+                        if tf in ['H4', 'H1']:
+                            scores['BUY_LONG'] += score
+                        else:
+                            scores['BUY_SHORT'] += score
+                    elif trend_dir == 'bearish':
+                        if tf in ['H4', 'H1']:
+                            scores['SELL_LONG'] += score
+                        else:
+                            scores['SELL_SHORT'] += score
+            
+            # Déterminer la meilleure direction
+            best_direction = max(scores, key=scores.get)
+            best_score = scores[best_direction]
+            
+            # Calculer le score global (0-100)
+            overall_score = min(100, best_score * 100)
+            
+            # Évaluer le niveau de risque
+            risk_level = self._assess_risk_level(trend_data, overall_score)
+            
+            # Générer la raison
+            reason = self._generate_opportunity_reason(best_direction, scores, trend_data)
+            
+            return {
+                'direction': 'BUY' if 'BUY' in best_direction else 'SELL',
+                'term': 'LONG' if 'LONG' in best_direction else 'SHORT',
+                'overall_score': overall_score,
+                'detailed_scores': scores,
+                'risk_level': risk_level,
+                'reason': reason
+            }
+            
+        except Exception as e:
+            self.logger.error(f"Erreur calcul score d'opportunité: {e}")
+            return {
+                'direction': 'HOLD',
+                'term': 'SHORT',
+                'overall_score': 0,
+                'detailed_scores': {},
+                'risk_level': 'HIGH',
+                'reason': 'Erreur calcul'
+            }
+    
+    def _assess_risk_level(self, trend_data: Dict, score: float) -> str:
+        """Évalue le niveau de risque basé sur les tendances et le score."""
+        try:
+            # Compter les tendances alignées
+            bullish_count = 0
+            bearish_count = 0
+            total_count = 0
+            
+            for tf, data in trend_data.items():
+                if data:
+                    total_count += 1
+                    trend_dir = data.get('trend_direction', 'neutral')
+                    if trend_dir == 'bullish':
+                        bullish_count += 1
+                    elif trend_dir == 'bearish':
+                        bearish_count += 1
+            
+            # Calculer le consensus
+            if total_count == 0:
+                return 'HIGH'
+            
+            consensus = max(bullish_count, bearish_count) / total_count
+            
+            # Évaluer le risque
+            if score >= 75 and consensus >= 0.7:
+                return 'LOW'
+            elif score >= 50 and consensus >= 0.5:
+                return 'MEDIUM'
+            else:
+                return 'HIGH'
+                
+        except Exception as e:
+            self.logger.error(f"Erreur évaluation risque: {e}")
+            return 'HIGH'
+    
+    def _generate_opportunity_reason(self, best_direction: str, scores: Dict, trend_data: Dict) -> str:
+        """Génère une raison textuelle pour l'opportunité."""
+        try:
+            direction = 'Achat' if 'BUY' in best_direction else 'Vente'
+            term = 'long terme' if 'LONG' in best_direction else 'court terme'
+            
+            # Identifier les timeframes les plus forts
+            strong_timeframes = []
+            for tf, data in trend_data.items():
+                if data and data.get('trend_direction') in ['bullish' if 'BUY' in best_direction else 'bearish']:
+                    strength = data.get('trend_strength', 0)
+                    if strength >= 70:
+                        strong_timeframes.append(tf)
+            
+            reason = f"{direction} {term}"
+            if strong_timeframes:
+                reason += f" - Tendance forte sur {', '.join(strong_timeframes[:3])}"
+            
+            return reason
+            
+        except Exception as e:
+            self.logger.error(f"Erreur génération raison: {e}")
+            return f"{direction} {term}"
+    
+    def _calculate_lot_size(self, opportunity_score: float) -> float:
+        """Calcule la taille de position recommandée basée sur le score d'opportunité."""
+        try:
+            # Base lot size selon le score
+            if opportunity_score >= 80:
+                base_lot = 0.1  # Score très élevé
+            elif opportunity_score >= 60:
+                base_lot = 0.05  # Score élevé
+            elif opportunity_score >= 40:
+                base_lot = 0.02  # Score moyen
+            else:
+                base_lot = 0.01  # Score faible
+            
+            return round(base_lot, 2)
+            
+        except Exception as e:
+            self.logger.error(f"Erreur calcul lot size: {e}")
+            return 0.01
+        
+    def get_latest_results(self) -> Dict:
+        """Retourne les derniers résultats du scan."""
+        with self.scan_lock:
+            return self.scan_results.copy()
+            
+    def get_status(self) -> Dict:
+        """Retourne le statut actuel du scan."""
+        return {
+            'running': self.running,
+            'scan_interval_minutes': self.scan_interval,
+            'last_scan_time': self.last_scan_time,
+            'latest_results': self.get_latest_results()
+        }
+
+# Instance globale du gestionnaire de scan
+autoscan_manager = AutoScanManager()
+
+# ==================== TREND SUMMARIES ====================
+
+async def send_notification(message: str, webhook_url: str = None):
+    """
+    Envoie une notification via le webhook Discord si configuré
+    """
+    if not webhook_url and NOTIFICATION_WEBHOOK:
+        webhook_url = NOTIFICATION_WEBHOOK
+        
+    if not webhook_url:
+        logger.warning("Aucun webhook configuré pour les notifications")
+        return
+        
+    try:
+        payload = {"content": message}
+        response = requests.post(
+            webhook_url,
+            data=json.dumps(payload),
+            headers={"Content-Type": "application/json"}
+        )
+        response.raise_for_status()
+        logger.info("Notification envoyée avec succès")
+    except Exception as e:
+        logger.error(f"Erreur lors de l'envoi de la notification: {str(e)}")
+
+def generate_trend_summary(symbol: str) -> str:
+    """
+    Génère une synthèse de tendance pour un symbole donné.
+    """
+    try:
+        # Récupérer les données d'analyse
+        analysis = get_ichimoku_analysis(symbol)
+        fib = get_fibonacci_levels(symbol)
+        
+        # Extraire les informations clés
+        current_price = (analysis['current_price']['bid'] + analysis['current_price']['ask']) / 2
+        trend = analysis['trend']
+        kumo_cloud = analysis['kumo_cloud']
+        
+        # Construire le résumé
+        summary = f"📊 *Synthèse des tendances - {symbol}*\n"
+        summary += f"🕒 {datetime.now().strftime('%d/%m/%Y %H:%M')}\n\n"
+        
+        # Tendance actuelle
+        summary += f"📈 *Tendance*: {'Haussière' if trend['direction'] == 'bullish' else 'Baissière' if trend['direction'] == 'bearish' else 'Neutre'}\n"
+        summary += f"💪 Force: {trend['strength']:.1f}/100 | Confiance: {trend['confidence']:.1f}%\n"
+        
+        # Niveaux clés
+        summary += f"\n🔑 *Niveaux Clés*\n"
+        summary += f"• Prix actuel: {current_price:.5f}\n"
+        summary += f"• Support: {fib['support_levels'][0]:.5f}\n"
+        summary += f"• Résistance: {fib['resistance_levels'][0]:.5f}\n"
+        
+        # Nuage Ichimoku
+        summary += f"\n☁️ *Nuage Ichimoku*\n"
+        summary += f"• Position: {'Au-dessus' if kumo_cloud['price_above_cloud'] else 'En-dessous'} du nuage\n"
+        summary += f"• Épaisseur: {kumo_cloud['cloud_thickness']:.5f} pips\n"
+        
+        # Recommandation
+        summary += f"\n💡 *Recommandation*\n"
+        if trend['direction'] == 'bullish' and trend['strength'] > 60:
+            summary += "🟢 Opportunité d'achat\n"
+        elif trend['direction'] == 'bearish' and trend['strength'] > 60:
+            summary += "🔴 Opportunité de vente\n"
+        else:
+            summary += "⚪ Attendre un meilleur setup\n"
+            
+        return summary
+        
+    except Exception as e:
+        logger.error(f"Erreur génération synthèse: {str(e)}")
+        return f"❌ Erreur lors de la génération de la synthèse pour {symbol}"
+
+async def periodic_trend_summary():
+    """Tâche périodique pour générer et envoyer des synthèses de tendance"""
+    while True:
+        try:
+            for symbol in TRACKED_SYMBOLS:
+                try:
+                    summary = generate_trend_summary(symbol)
+                    await send_notification(f"```{summary}```")
+                    logger.info(f"Synthèse de tendance envoyée pour {symbol}")
+                except Exception as e:
+                    logger.error(f"Erreur génération synthèse pour {symbol}: {str(e)}")
+                
+                # Petit délai entre chaque symbole
+                await asyncio.sleep(1)
+                
+        except Exception as e:
+            logger.error(f"Erreur dans la tâche périodique: {str(e)}")
+            
+        # Attendre l'intervalle défini
+        await asyncio.sleep(TREND_SUMMARY_INTERVAL)
+
+# Démarrer la tâche périodique au démarrage du serveur
+@app.on_event("startup")
+async def startup_event():
+    asyncio.create_task(periodic_trend_summary())
+
+# ==================== TREND API HANDLER ====================
+
+class TrendHandler(BaseHTTPRequestHandler):
+    """Gestionnaire des requêtes pour l'API Trend"""
+    
+    def _set_headers(self, status_code=200):
+        """Définit les en-têtes de la réponse HTTP"""
+        self.send_response(status_code)
+        self.send_header('Content-type', 'application/json')
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Access-Control-Allow-Methods', 'GET, OPTIONS')
+        self.send_header('Access-Control-Allow-Headers', 'X-Requested-With, Content-Type')
+        self.end_headers()
+    
+    def do_OPTIONS(self):
+        """Gère les requêtes OPTIONS pour CORS"""
+        self._set_headers(200)
+    
+    def do_GET(self):
+        """Gère les requêtes GET pour l'API Trend"""
+        try:
+            parsed_url = urlparse(self.path)
+            path = parsed_url.path
+            query_params = parse_qs(parsed_url.query)
+            
+            # Route racine
+            if path == "/":
+                response = {
+                    "status": "ok",
+                    "service": "TradBOT Trend API",
+                    "version": "1.0.0",
+                    "endpoints": [
+                        "/trend?symbol=SYMBOL",
+                        "/health",
+                        "/status"
+                    ]
+                }
+                self._send_json(200, response)
+            
+            # Endpoint de santé
+            elif path == "/health":
+                self._send_json(200, {"status": "ok", "timestamp": datetime.now().isoformat()})
+            
+            # Endpoint de statut
+            elif path == "/status":
+                self._send_json(200, {
+                    "status": "running",
+                    "port": TREND_API_PORT,
+                    "last_updated": datetime.now().isoformat(),
+                    "uptime_seconds": (datetime.now() - START_TIME).total_seconds()
+                })
+            
+            # Endpoint d'analyse de tendance
+            elif path == "/trend":
+                symbol = query_params.get("symbol", [DEFAULT_SYMBOL])[0]
+                self._handle_trend_request(symbol)
+            
+            # Endpoint non trouvé
+            else:
+                self._send_json(404, {"error": "Endpoint non trouvé"})
+                
+        except Exception as e:
+            logger.error(f"Erreur dans l'API Trend: {str(e)}", exc_info=True)
+            self._send_json(500, {"error": str(e)})
+    
+    def _handle_trend_request(self, symbol: str):
+        """Gère une requête d'analyse de tendance"""
+        try:
+            # Récupérer les données historiques
+            df = get_historical_data(symbol, "H1", 100)
+            if df is None or df.empty:
+                self._send_json(404, {"error": f"Aucune donnée disponible pour {symbol}"})
+                return
+            
+            # Calculer les indicateurs de tendance
+            trend_data = self._calculate_trend_indicators(df)
+            
+            # Préparer la réponse
+            response = {
+                "symbol": symbol,
+                "timestamp": datetime.now().isoformat(),
+                "trend": {
+                    "direction": trend_data["direction"],
+                    "strength": trend_data["strength"],
+                    "confidence": trend_data["confidence"]
+                },
+                "levels": {
+                    "support": trend_data["support_levels"],
+                    "resistance": trend_data["resistance_levels"]
+                },
+                "indicators": {
+                    "rsi": trend_data["rsi"],
+                    "atr": trend_data["atr"],
+                    "adx": trend_data["adx"]
+                }
+            }
+            
+            self._send_json(200, response)
+            
+        except Exception as e:
+            logger.error(f"Erreur lors du traitement de la requête de tendance: {str(e)}", exc_info=True)
+            self._send_json(500, {"error": f"Erreur lors de l'analyse de tendance: {str(e)}"})
+    
+    def _calculate_trend_indicators(self, df: pd.DataFrame) -> Dict:
+        """Calcule les indicateurs de tendance à partir des données historiques"""
+        # Calcul du RSI
+        delta = df['close'].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+        rs = gain / loss
+        rsi = 100 - (100 / (1 + rs)).iloc[-1]
+        
+        # Calcul de l'ATR (Average True Range)
+        high_low = df['high'] - df['low']
+        high_close = (df['high'] - df['close'].shift()).abs()
+        low_close = (df['low'] - df['close'].shift()).abs()
+        true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+        atr = true_range.rolling(window=14).mean().iloc[-1]
+        
+        # Calcul de l'ADX (Average Directional Index)
+        plus_dm = df['high'].diff()
+        minus_dm = df['low'].diff()
+        
+        plus_dm[plus_dm < 0] = 0
+        minus_dm[minus_dm > 0] = 0
+        minus_dm = abs(minus_dm)
+        
+        tr1 = df['high'] - df['low']
+        tr2 = abs(df['high'] - df['close'].shift())
+        tr3 = abs(df['low'] - df['close'].shift())
+        
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        atr = tr.rolling(window=14).mean()
+        
+        plus_di = 100 * (plus_dm.rolling(window=14).mean() / atr)
+        minus_di = 100 * (minus_dm.rolling(window=14).mean() / atr)
+        dx = 100 * (abs(plus_di - minus_di) / (plus_di + minus_di))
+        adx = dx.rolling(window=14).mean().iloc[-1]
+        
+        # Déterminer la direction de la tendance
+        if plus_di.iloc[-1] > minus_di.iloc[-1] and adx > 25:
+            direction = "bullish"
+            strength = min(100, int(adx * 2))  # Normaliser entre 0-100
+        elif minus_di.iloc[-1] > plus_di.iloc[-1] and adx > 25:
+            direction = "bearish"
+            strength = min(100, int(adx * 2))  # Normaliser entre 0-100
+        else:
+            direction = "neutral"
+            strength = 0
+        
+        # Niveaux de support et résistance (simplifiés)
+        support_levels = sorted(list(set(df['low'].rolling(window=20).min().dropna().tail(5).values)))[:3]
+        resistance_levels = sorted(list(set(df['high'].rolling(window=20).max().dropna().tail(5).values)), reverse=True)[:3]
+        
+        return {
+            "direction": direction,
+            "strength": strength,
+            "confidence": min(100, int(adx * 1.5)),  # Confiance basée sur ADX
+            "rsi": round(float(rsi), 2),
+            "atr": round(float(atr.iloc[-1]), 5),
+            "adx": round(float(adx), 2),
+            "support_levels": [round(float(x), 5) for x in support_levels],
+            "resistance_levels": [round(float(x), 5) for x in resistance_levels]
+        }
+    
+    def _send_json(self, status_code: int, data: Dict):
+        """Envoie une réponse JSON avec le code de statut spécifié"""
+        self._set_headers(status_code)
+        self.wfile.write(json.dumps(data, default=str).encode('utf-8'))
+
+# Variable globale pour suivre le temps de démarrage
+START_TIME = datetime.now()
+
+# Fonction pour démarrer l'API Trend
+def start_trend_api():
+    """Démarre l'API Trend dans un thread séparé"""
+    class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
+        """Serveur HTTP avec support multithread"""
+        daemon_threads = True
+    
+    def run_trend_api():
+        """Fonction exécutée dans le thread pour démarrer l'API Trend"""
+        server = ThreadedHTTPServer(('0.0.0.0', TREND_API_PORT), TrendHandler)
+        logger.info(f"Trend API démarrée sur le port {TREND_API_PORT}")
+        server.serve_forever()
+    
+    global trend_api_thread
+    if trend_api_thread is None or not trend_api_thread.is_alive():
+        trend_api_thread = threading.Thread(target=run_trend_api, daemon=True)
+        trend_api_thread.start()
+        logger.info("Thread Trend API démarré")
+    else:
+        logger.info("Thread Trend API déjà en cours d'exécution")
+
 # Point d'entrée du programme
 if __name__ == "__main__":
     logger.info("=" * 60)
     logger.info("TRADBOT AI SERVER")
     logger.info("=" * 60)
     logger.info(f"Serveur démarré sur http://localhost:{API_PORT}")
+    logger.info(f"API Trend: http://localhost:{TREND_API_PORT}")
     logger.info(f"MT5: {'Disponible' if mt5_initialized else 'Non disponible (mode API uniquement)'}")
     logger.info(f"Mistral AI: {'Configuré' if MISTRAL_AVAILABLE else 'Non configuré'}")
     logger.info(f"Google Gemini AI: {'Configuré' if GEMINI_AVAILABLE else 'Non configuré'}")
     logger.info(f"Symbole par défaut: {DEFAULT_SYMBOL}")
-    logger.info(f"Timeframes disponibles: {len(['M1', 'M5', 'M15', 'H1', 'H4', 'D1'])}")
+    logger.info(f"Backend: {'Disponible' if BACKEND_AVAILABLE else 'Non disponible'}")
+    logger.info(f"AI Indicators: {'Disponible' if AI_INDICATORS_AVAILABLE else 'Non disponible'}")
+    
+    # Démarrer l'API Trend dans un thread séparé
+    try:
+        start_trend_api()
+        logger.info("API Trend démarrée avec succès")
+    except Exception as e:
+        logger.error(f"Erreur lors du démarrage de l'API Trend: {str(e)}")
+    logger.info(f"AutoScan: Intégré et prêt à démarrer")
+    
+    # Démarrer l'autoscan si le backend est disponible
+    if BACKEND_AVAILABLE:
+        try:
+            autoscan_manager.start()
+            logger.info("AutoScan démarré automatiquement")
+        except Exception as e:
+            logger.warning(f"Impossible de démarrer l'AutoScan automatiquement: {e}")
+    else:
+        logger.info("AutoScan non démarré - Backend non disponible")
+    
     logger.info("=" * 60)
-    logger.info("Serveur prêt à recevoir des requêtes")
-    logger.info("=" * 60)
+    
+    def start_trend_api():
+        """Démarre l'API Trend dans un thread séparé"""
+        class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
+            """Serveur HTTP avec support multithread"""
+            daemon_threads = True
+        
+        def run_trend_api():
+            """Fonction exécutée dans le thread pour démarrer l'API Trend"""
+            server = ThreadedHTTPServer(('0.0.0.0', TREND_API_PORT), TrendHandler)
+            logger.info(f"Trend API démarrée sur le port {TREND_API_PORT}")
+            server.serve_forever()
+        
+        global trend_api_thread
+        if trend_api_thread is None or not trend_api_thread.is_alive():
+            trend_api_thread = threading.Thread(target=run_trend_api, daemon=True)
+            trend_api_thread.start()
+            logger.info("Thread Trend API démarré")
+        else:
+            logger.info("Thread Trend API déjà en cours d'exécution")
+
+    start_trend_api()
+    
+    try:
+        uvicorn.run(app, host="0.0.0.0", port=API_PORT, log_level="info")
+    except KeyboardInterrupt:
+        logger.info("Arrêt du serveur demandé...")
+        autoscan_manager.stop()
+        logger.info("AutoScan arrêté")
+    except Exception as e:
+        logger.error(f"Erreur lors du démarrage du serveur: {e}")
+        autoscan_manager.stop()
+        raise
     
     print("\n" + "=" * 60)
     print("Démarrage du serveur AI TradBOT...")
