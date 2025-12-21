@@ -26,9 +26,11 @@ double g_aiSellZoneHigh = 0.0;
 datetime g_lastAIRequest = 0;
 string g_lastValidationReason = "";
 
-// Variables pour la gestion des pertes consécutives
+// Variables pour la gestion des pertes et gains consécutifs
 int g_consecutiveLosses = 0;                 // Compteur de pertes consécutives
+int g_consecutiveWins = 0;                   // Compteur de gains consécutifs
 datetime g_recoveryUntil = 0;                // Heure de fin de la période de récupération
+int g_winStreakPauseUntil = 0;               // Heure de fin de la pause après gains consécutifs
 
 // Variables pour la modification dynamique du SL (jusqu'à 4 fois)
 struct SLModifyTracker {
@@ -386,7 +388,6 @@ double g_dailyLoss = 0.0;
 datetime g_lastTradeDay = 0;  // Dernier jour de trading
 
 // Variables pour la gestion des gains successifs
-int g_consecutiveWins = 0;           // Nombre de gains successifs
 datetime g_lastWinTime = 0;          // Heure du dernier gain
 datetime g_tradingPauseUntil = 0;    // Heure de fin de pause de trading
 bool g_dailyTargetReached = false;  // Indicateur si l'objectif quotidien est atteint
@@ -9175,52 +9176,132 @@ void DrawAIZones()
 void DrawSMCOBZones()
 {
    static datetime lastDraw = 0;
-   if(TimeCurrent() - lastDraw < 10) // Mettre à jour toutes les 10 secondes
+   if(TimeCurrent() - lastDraw < 5) // Mettre à jour toutes les 5 secondes
       return;
       
    lastDraw = TimeCurrent();
    
    // Supprimer les anciens objets
-   for(int i = 0; i < g_smcZonesCount; i++)
+   for(int i = ObjectsTotal(0, 0, -1) - 1; i >= 0; i--)
    {
-      string objName = "SMC_OB_" + IntegerToString(i);
-      ObjectDelete(0, objName);
+      string name = ObjectName(0, i, 0, -1);
+      if(StringFind(name, "SMC_OB_") == 0 || StringFind(name, "SR_LEVEL_") == 0 || StringFind(name, "SR_LABEL_") == 0)
+         ObjectDelete(0, name);
+   }
+   
+   // Trier les zones par force (les plus fortes en premier)
+   SMC_OB_Zone sortedZones[];
+   ArrayResize(sortedZones, g_smcZonesCount);
+   for(int i = 0; i < g_smcZonesCount; i++)
+      sortedZones[i] = g_smcZones[i];
+   
+   // Trier par force (les plus fortes en premier)
+   for(int i = 0; i < g_smcZonesCount - 1; i++)
+   {
+      for(int j = i + 1; j < g_smcZonesCount; j++)
+      {
+         if(sortedZones[i].strength < sortedZones[j].strength)
+         {
+            SMC_OB_Zone temp = sortedZones[i];
+            sortedZones[i] = sortedZones[j];
+            sortedZones[j] = temp;
+         }
+      }
    }
    
    // Afficher les zones actives
    for(int i = 0; i < g_smcZonesCount; i++)
    {
-      if(!g_smcZones[i].isActive) continue;
+      if(!sortedZones[i].isActive) continue;
       
-      string objName = "SMC_OB_" + IntegerToString(i);
-      color zoneColor = g_smcZones[i].isBuyZone ? clrLime : clrRed;
+      string zoneName = "SMC_OB_" + IntegerToString(i);
+      bool isBuyZone = sortedZones[i].isBuyZone;
       
-      double zoneHigh = g_smcZones[i].price * (1 + g_smcZones[i].width);
-      double zoneLow = g_smcZones[i].price * (1 - g_smcZones[i].width);
+      // Couleurs plus douces avec transparence
+      color zoneColor = isBuyZone ? C'0,100,0' : C'100,0,0';
+      color lineColor = isBuyZone ? clrDarkGreen : clrDarkRed;
+      
+      double zoneHigh = sortedZones[i].price * (1 + sortedZones[i].width);
+      double zoneLow = sortedZones[i].price * (1 - sortedZones[i].width);
+      double zoneMid = (zoneHigh + zoneLow) / 2.0;
       
       // Créer un rectangle pour la zone
-      if(!ObjectCreate(0, objName, OBJ_RECTANGLE, 0, 0, 0, 0, 0))
-         continue;
+      if(ObjectCreate(0, zoneName, OBJ_RECTANGLE, 0, 0, 0, 0, 0))
+      {
+         // Définir les points du rectangle
+         datetime time1 = iTime(_Symbol, PERIOD_CURRENT, 0);
+         datetime time2 = TimeCurrent() + 3600*24*30; // 30 jours dans le futur
          
-      // Définir les propriétés du rectangle avec les bonnes énumérations
-      datetime time1 = TimeCurrent() - 3600*24*30; // Début (il y a 30 jours)
-      datetime time2 = TimeCurrent() + 3600*24;    // Fin (dans 1 jour)
-      
-      // Définir les points du rectangle avec ObjectCreate
-      ObjectCreate(0, objName, OBJ_RECTANGLE, 0, time1, zoneHigh, time2, zoneLow);
-      
-      // Définir les propriétés du rectangle
-      ObjectSetInteger(0, objName, OBJPROP_COLOR, zoneColor);
-      ObjectSetInteger(0, objName, OBJPROP_STYLE, STYLE_SOLID);
-      ObjectSetInteger(0, objName, OBJPROP_WIDTH, 1);
-      ObjectSetInteger(0, objName, OBJPROP_FILL, true);
-      ObjectSetInteger(0, objName, OBJPROP_BACK, true);
-      ObjectSetInteger(0, objName, OBJPROP_SELECTABLE, false);
-      ObjectSetInteger(0, objName, OBJPROP_SELECTED, false);
-      ObjectSetInteger(0, objName, OBJPROP_HIDDEN, true);
-      ObjectSetInteger(0, objName, OBJPROP_ZORDER, 0);
+         // Ajuster la hauteur du rectangle en fonction de la force de la zone
+         double height = (zoneHigh - zoneLow) * 0.7 + (zoneHigh - zoneLow) * 0.3 * sortedZones[i].strength;
+         double midPoint = (zoneHigh + zoneLow) / 2.0;
+         
+         // Créer le rectangle avec les coordonnées directement
+         if(ObjectCreate(0, zoneName, OBJ_RECTANGLE, 0, time1, midPoint + height/2, time2, midPoint - height/2))
+         {
+            // Propriétés visuelles
+            ObjectSetInteger(0, zoneName, OBJPROP_COLOR, 0, lineColor);
+            ObjectSetInteger(0, zoneName, OBJPROP_STYLE, 0, STYLE_SOLID);
+            ObjectSetInteger(0, zoneName, OBJPROP_WIDTH, 0, 1);
+            ObjectSetInteger(0, zoneName, OBJPROP_FILL, 0, true);
+            ObjectSetInteger(0, zoneName, OBJPROP_BACK, 0, true);
+            ObjectSetInteger(0, zoneName, OBJPROP_SELECTABLE, 0, false);
+            ObjectSetInteger(0, zoneName, OBJPROP_HIDDEN, 0, true);
+            ObjectSetInteger(0, zoneName, OBJPROP_ZORDER, 0, 0);
+         }
+         
+         // Ajouter un fond semi-transparent
+         string fillName = zoneName + "_FILL";
+         if(ObjectCreate(0, fillName, OBJ_RECTANGLE, 0, time1, zoneHigh, time2, zoneLow))
+         {
+            ObjectSetInteger(0, fillName, OBJPROP_COLOR, 0, zoneColor);
+            ObjectSetInteger(0, fillName, OBJPROP_BGCOLOR, 0, zoneColor);
+            ObjectSetInteger(0, fillName, OBJPROP_STYLE, 0, STYLE_SOLID);
+            ObjectSetInteger(0, fillName, OBJPROP_BACK, 0, true);
+            ObjectSetInteger(0, fillName, OBJPROP_SELECTABLE, 0, false);
+            ObjectSetInteger(0, fillName, OBJPROP_HIDDEN, 0, true);
+            ObjectSetInteger(0, fillName, OBJPROP_ZORDER, 0, 1);
+            ObjectSetInteger(0, fillName, OBJPROP_FILL, 0, true);
+            ObjectSetInteger(0, fillName, OBJPROP_WIDTH, 0, 1);
+         }
+         
+         // Ajouter des étiquettes de prix
+         string labelName = "SR_LABEL_" + IntegerToString(i);
+         double labelPrice = isBuyZone ? zoneLow : zoneHigh;
+         string labelText = DoubleToString(zoneMid, _Digits);
+         if(isBuyZone)
+            labelText = "S " + labelText;
+         else
+            labelText = "R " + labelText;
+            
+         // Créer l'étiquette de texte
+         if(ObjectCreate(0, labelName, OBJ_TEXT, 0, time1, labelPrice))
+         {
+            ObjectSetString(0, labelName, OBJPROP_TEXT, labelText);
+            ObjectSetInteger(0, labelName, OBJPROP_COLOR, clrWhite);
+            ObjectSetInteger(0, labelName, OBJPROP_FONTSIZE, 8);
+            ObjectSetInteger(0, labelName, OBJPROP_BACK, true);
+            ObjectSetInteger(0, labelName, OBJPROP_SELECTABLE, false);
+            ObjectSetInteger(0, labelName, OBJPROP_HIDDEN, true);
+            ObjectSetInteger(0, labelName, OBJPROP_ZORDER, 2);
+         }
+         
+         // Ajouter une ligne de prix au milieu de la zone
+         string lineName = "SR_LEVEL_" + IntegerToString(i);
+         if(ObjectCreate(0, lineName, OBJ_HLINE, 0, 0, zoneMid))
+         {
+            ObjectSetInteger(0, lineName, OBJPROP_COLOR, isBuyZone ? clrLime : clrRed);
+            ObjectSetInteger(0, lineName, OBJPROP_STYLE, STYLE_DOT);
+            ObjectSetInteger(0, lineName, OBJPROP_WIDTH, 1);
+            ObjectSetInteger(0, lineName, OBJPROP_BACK, true);
+            ObjectSetInteger(0, lineName, OBJPROP_SELECTABLE, false);
+            ObjectSetInteger(0, lineName, OBJPROP_HIDDEN, true);
+            ObjectSetInteger(0, lineName, OBJPROP_ZORDER, 1);
+         }
+      }
    }
    
+   // Mettre à jour l'affichage
    ChartRedraw(0);
 }
 
