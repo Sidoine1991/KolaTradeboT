@@ -3520,34 +3520,42 @@ void DrawPricePredictions()
 }
 
 //+------------------------------------------------------------------+
-//| Dessine les lignes de prédiction sur le graphique                 |
+//| Dessine les points d'entrée prédits par l'IA sur le graphique     |
 //+------------------------------------------------------------------+
 void DrawPredictionLines(double buyTarget, double sellTarget, double support, double resistance)
 {
-   // Ligne de cible d'achat - Vert
-   string buyLineName = "PREDICTION_BUY_LINE";
-   ObjectDelete(0, buyLineName);
+   // Point d'entrée BUY - Triangle vert vers le haut
+   string buyPointName = "AI_ENTRY_BUY_POINT";
+   ObjectDelete(0, buyPointName);
    
-   if(ObjectCreate(0, buyLineName, OBJ_HLINE, 0, 0, buyTarget))
+   if(buyTarget > 0 && g_lastAIAction == "buy")
    {
-      ObjectSetInteger(0, buyLineName, OBJPROP_COLOR, clrGreen);
-      ObjectSetInteger(0, buyLineName, OBJPROP_STYLE, STYLE_DASH);
-      ObjectSetInteger(0, buyLineName, OBJPROP_WIDTH, 2);
-      ObjectSetString(0, buyLineName, OBJPROP_TEXT, "Cible Achat");
-      ObjectSetInteger(0, buyLineName, OBJPROP_BACK, true);
+      datetime entryTime = TimeCurrent();
+      if(ObjectCreate(0, buyPointName, OBJ_ARROW, 0, entryTime, buyTarget))
+      {
+         ObjectSetInteger(0, buyPointName, OBJPROP_COLOR, clrLimeGreen);
+         ObjectSetInteger(0, buyPointName, OBJPROP_ARROWCODE, 233); // Triangle vers le haut
+         ObjectSetInteger(0, buyPointName, OBJPROP_WIDTH, 4);
+         ObjectSetString(0, buyPointName, OBJPROP_TEXT, "Point Entrée BUY");
+         ObjectSetInteger(0, buyPointName, OBJPROP_BACK, false);
+      }
    }
    
-   // Ligne de cible de vente - Rouge
-   string sellLineName = "PREDICTION_SELL_LINE";
-   ObjectDelete(0, sellLineName);
+   // Point d'entrée SELL - Triangle rouge vers le bas
+   string sellPointName = "AI_ENTRY_SELL_POINT";
+   ObjectDelete(0, sellPointName);
    
-   if(ObjectCreate(0, sellLineName, OBJ_HLINE, 0, 0, sellTarget))
+   if(sellTarget > 0 && g_lastAIAction == "sell")
    {
-      ObjectSetInteger(0, sellLineName, OBJPROP_COLOR, clrRed);
-      ObjectSetInteger(0, sellLineName, OBJPROP_STYLE, STYLE_DASH);
-      ObjectSetInteger(0, sellLineName, OBJPROP_WIDTH, 2);
-      ObjectSetString(0, sellLineName, OBJPROP_TEXT, "Cible Vente");
-      ObjectSetInteger(0, sellLineName, OBJPROP_BACK, true);
+      datetime entryTime = TimeCurrent();
+      if(ObjectCreate(0, sellPointName, OBJ_ARROW, 0, entryTime, sellTarget))
+      {
+         ObjectSetInteger(0, sellPointName, OBJPROP_COLOR, clrRed);
+         ObjectSetInteger(0, sellPointName, OBJPROP_ARROWCODE, 234); // Triangle vers le bas
+         ObjectSetInteger(0, sellPointName, OBJPROP_WIDTH, 4);
+         ObjectSetString(0, sellPointName, OBJPROP_TEXT, "Point Entrée SELL");
+         ObjectSetInteger(0, sellPointName, OBJPROP_BACK, false);
+      }
    }
    
    // Ligne de support - Bleu
