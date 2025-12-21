@@ -438,9 +438,9 @@ bool CanTradeSymbolAfterLoss(string symbol)
          if(g_symbolLossTrackers[i].consecutiveLosses >= 2)
          {
             datetime now = TimeCurrent();
-            if(now - g_symbolLossTrackers[i].lastLossTime < 600) // 600 secondes = 10 minutes
+            if(now - g_symbolLossTrackers[i].lastLossTime < 300) // 300 secondes = 5 minutes
             {
-               Print("⏳ Attente de 10 minutes avant de retrader ", symbol, " après 2 pertes consécutives");
+               Print("⏳ Attente de 5 minutes avant de retrader ", symbol, " après 2 pertes consécutives");
                return false;
             }
             else
@@ -594,7 +594,7 @@ input bool   UseSpikeSpeedFilter = true;  // Activer le filtre de vitesse des sp
 input double SpikeSpeedMin      = 50.0;   // Vitesse minimale (points/minute)
 input bool   UseAdvancedLogging = false;  // Journalisation avancée des erreurs
 input bool   UseInstantProfitClose = false; // CLÔTURE immédiate dès 0.01$ de profit (désactivée par défaut)
-input int    SpikePreEntrySeconds   = 15;  // Nombre de secondes AVANT le spike estimé pour déclencher l'alerte et entrer (15s = alerte 15s avant)
+input int    SpikePreEntrySeconds   = 5;   // Nombre de secondes AVANT le spike estimé pour déclencher l'alerte et entrer (5s = entrée ultra anticipée)
 input double MaxSpreadPoints    = 5.0;  // Spread maximum autorisé en points
 
 input group "--- ENTRY FILTERS ---"
@@ -662,7 +662,7 @@ input double AIZoneScalpEMAToleranceP  = 5.0;        // Tolérance en points aut
 input group "--- BOOM/CRASH ZONE SCALPS ---"
 input bool   UseBoomCrashZoneScalps    = true;       // Boom/Crash: rebond simple dans zone = scalp agressif
 input int    BC_TP_Points              = 300;        // TP fixe en points (par défaut ~300 points)
-input int    BC_SL_Points              = 500;        // SL fixe en points (augmenté à 500 points pour Boom/Crash)
+input int    BC_SL_Points              = 800;        // SL fixe en points (augmenté à 800 points pour Boom/Crash - plus de marge)
 input ENUM_TIMEFRAMES BC_ConfirmTF     = PERIOD_M15; // TF de confirmation du rebond (ex: M15 sur Boom 1000)
 input int    BC_ConfirmBars            = 1;          // Nombre de bougies de confirmation dans le sens du rebond
 input group "--- SMC / OrderBlock ---"
