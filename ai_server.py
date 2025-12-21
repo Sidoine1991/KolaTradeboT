@@ -253,6 +253,9 @@ class TrendlineData(BaseModel):
     start: Dict[str, Any]  # {"time": timestamp, "price": float}
     end: Dict[str, Any]    # {"time": timestamp, "price": float}
 
+class AnalysisRequest(BaseModel):
+    symbol: str
+
 class AnalysisResponse(BaseModel):
     symbol: str
     timestamp: str
@@ -1303,12 +1306,19 @@ Format: Analyse claire et professionnelle en français.
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/analysis", response_model=AnalysisResponse)
-async def analysis(symbol: str):
+@app.post("/analysis", response_model=AnalysisResponse)
+async def analysis(symbol: str = None, request: AnalysisRequest = None):
     """
     Analyse complète de la structure de marché (H1, H4, M15)
     Inclut les trendlines et figures chartistes (ETE, etc.)
     """
     try:
+        # Gérer les requêtes GET et POST
+        if request is not None:
+            symbol = request.symbol
+        elif symbol is None:
+            raise HTTPException(status_code=400, detail="Symbol parameter is required")
+            
         logger.info(f"Requête /analysis pour {symbol}")
         
         response = {
