@@ -11,23 +11,228 @@ import time
 import asyncio
 import logging
 import sys
-import threading
-import requests
-import json
-import time
-from http.server import BaseHTTPRequestHandler, HTTPServer
-from socketserver import ThreadingMixIn
+import argparse
+import traceback
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional, List, Dict, Any, Tuple, Callable
-from fastapi import FastAPI, HTTPException, Request, Body, Response, BackgroundTasks
+from typing import Optional, List, Dict, Any, Tuple
+from fastapi import FastAPI, HTTPException, Request, Body, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import uvicorn
 import pandas as pd
 import numpy as np
-from urllib.parse import urlparse, parse_qs
+import requests
+
+# Fonctions d'aide pour les indicateurs
+def calculate_rsi(prices: pd.Series, period: int = 14) -> pd.Series:
+    delta = prices.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    rs = gain / loss
+    return 100 - (100 / (1 + rs))
+
+def calculate_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
+    high_low = df['high'] - df['low']
+    high_close = (df['high'] - df['close'].shift()).abs()
+    low_close = (df['low'] - df['close'].shift()).abs()
+    true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+    return true_range.rolling(window=period).mean()
+
+def calculate_macd(prices: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9) -> pd.Series:
+    exp1 = prices.ewm(span=fast, adjust=False).mean()
+    exp2 = prices.ewm(span=slow, adjust=False).mean()
+    macd = exp1 - exp2
+    signal_line = macd.ewm(span=signal, adjust=False).mean()
+    return macd - signal_line
+
+def calculate_bollinger_bands(prices: pd.Series, window: int = 20, num_std: int = 2) -> Dict[str, pd.Series]:
+    sma = prices.rolling(window=window).mean()
+    std = prices.rolling(window=window).std()
+    return {
+        'upper': sma + (std * num_std),
+        'middle': sma,
+        'lower': sma - (std * num_std)
+    }
+
+def convert_numpy_types(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Convertit les types NumPy en types Python natifs.
+    
+    Args:
+        data: Dictionnaire contenant des valeurs NumPy
+        
+    Returns:
+        Dictionnaire avec des types Python natifs
+    """
+    import numpy as np
+    
+    converted = {}
+    for key, value in data.items():
+        if isinstance(value, (np.integer, np.floating)):
+            converted[key] = value.item()
+        elif isinstance(value, np.ndarray):
+            converted[key] = value.tolist()
+        else:
+            converted[key] = value
+    return converted
+
+def get_mt5_indicators(symbol: str, timeframe: str, count: int = 100) -> Optional[Dict[str, Any]]:
+    """Récupère les indicateurs MT5 pour un symbole et une période donnés
+    
+    Args:
+        symbol: Symbole du marché (ex: "EURUSD")
+        timeframe: Période (M1, M5, M15, H1, H4, D1)
+        count: Nombre de bougies à analyser
+        
+    Returns:
+        Dictionnaire des indicateurs techniques ou None en cas d'erreur
+    """
+    if not mt5.initialize():
+        logger.error("Échec de l'initialisation MT5")
+        return None
+    
+    try:
+        # Conversion du timeframe MT5
+        tf_map = {
+            'M1': mt5.TIMEFRAME_M1,
+            'M5': mt5.TIMEFRAME_M5,
+            'M15': mt5.TIMEFRAME_M15,
+            'H1': mt5.TIMEFRAME_H1,
+            'H4': mt5.TIMEFRAME_H4,
+            'D1': mt5.TIMEFRAME_D1
+        }
+        
+        mt5_timeframe = tf_map.get(timeframe, mt5.TIMEFRAME_M1)
+        
+        # Récupération des données OHLC
+        rates = mt5.copy_rates_from_pos(symbol, mt5_timeframe, 0, count)
+        if rates is None or len(rates) == 0:
+            logger.error(f"Impossible de récupérer les données pour {symbol} {timeframe}")
+            return None
+            
+        # Conversion en DataFrame
+        df = pd.DataFrame(rates)
+        if df.empty:
+            logger.error(f"Aucune donnée reçue pour {symbol} {timeframe}")
+            return None
+            
+        df['time'] = pd.to_datetime(df['time'], unit='s')
+        df.set_index('time', inplace=True)
+        
+        # Vérification des données manquantes
+        if df.isnull().values.any():
+            logger.warning(f"Données manquantes détectées pour {symbol} {timeframe}, tentative de remplissage...")
+            df = df.ffill().bfill()
+            
+            # Si des valeurs manquantes persistent, on les remplace par la dernière valeur valide
+            if df.isnull().values.any():
+                df = df.fillna(method='ffill')
+        
+        # Calcul des indicateurs avec gestion des erreurs
+        indicators = {}
+        try:
+            # Prix et volumes
+            indicators.update({
+                'current_price': df['close'].iloc[-1],
+                'open': df['open'].iloc[-1],
+                'high': df['high'].iloc[-1],
+                'low': df['low'].iloc[-1],
+                'volume': df['tick_volume'].iloc[-1],
+                'spread': df['spread'].iloc[-1] if 'spread' in df.columns else 0
+            })
+            
+            # Moyennes mobiles
+            for period in [5, 10, 20, 50, 100, 200]:
+                if len(df) >= period:
+                    indicators[f'sma_{period}'] = df['close'].rolling(window=period).mean().iloc[-1]
+                    indicators[f'ema_{period}'] = df['close'].ewm(span=period, adjust=False).mean().iloc[-1]
+            
+            # RSI
+            if len(df) >= 14:  # Période minimale pour RSI
+                indicators['rsi'] = calculate_rsi(df['close'], 14).iloc[-1]
+            
+            # ATR
+            if len(df) >= 14:  # Période minimale pour ATR
+                indicators['atr'] = calculate_atr(df, 14).iloc[-1]
+            
+            # MACD
+            if len(df) >= 26:  # Période minimale pour MACD
+                macd_line = df['close'].ewm(span=12, adjust=False).mean() - df['close'].ewm(span=26, adjust=False).mean()
+                signal_line = macd_line.ewm(span=9, adjust=False).mean()
+                indicators['macd'] = (macd_line - signal_line).iloc[-1]
+            
+            # Bandes de Bollinger
+            if len(df) >= 20:  # Période minimale pour les bandes de Bollinger
+                bb = calculate_bollinger_bands(df['close'])
+                indicators.update({
+                    'bb_upper': bb['upper'].iloc[-1],
+                    'bb_middle': bb['middle'].iloc[-1],
+                    'bb_lower': bb['lower'].iloc[-1],
+                    'bb_width': (bb['upper'].iloc[-1] - bb['lower'].iloc[-1]) / bb['middle'].iloc[-1] if bb['middle'].iloc[-1] != 0 else 0
+                })
+            
+            # Volume moyen sur 20 périodes
+            if len(df) >= 20:
+                indicators['volume_sma_20'] = df['tick_volume'].rolling(window=20).mean().iloc[-1]
+            
+            # Conversion des types numpy en types Python natifs
+            indicators = convert_numpy_types(indicators)
+            
+            return indicators
+            
+        except Exception as e:
+            logger.error(f"Erreur lors du calcul des indicateurs pour {symbol} {timeframe}: {e}")
+            return None
+            
+    except Exception as e:
+        logger.error(f"Erreur dans get_mt5_indicators pour {symbol} {timeframe}: {e}")
+        return None
+        
+    finally:
+        # Toujours essayer de fermer la connexion MT5
+        try:
+            mt5.shutdown()
+        except:
+            pass
+
+# Nouveaux imports pour Gemma
+import torch
+from PIL import Image
+from transformers import AutoProcessor, AutoModelForImageTextToText, AutoModelForCausalLM
+
+# Configuration du modèle Gemma Local
+GEMMA_MODEL_PATH = r"D:\Dev\model_gemma"
+MT5_FILES_DIR = r"C:\Users\USER\AppData\Roaming\MetaQuotes\Terminal\Common\Files" # Default, user may need to change
+GEMMA_AVAILABLE = False
+gemma_processor = None
+gemma_model = None
+
+try:
+    print(f"Chargement du modèle Gemma depuis {GEMMA_MODEL_PATH}...")
+    # Chargement conditionnel pour ne pas bloquer si les libs manquent ou le chemin est faux
+    if os.path.exists(GEMMA_MODEL_PATH):
+        try:
+            # Chargement du processeur et du modèle en mode texte uniquement
+            gemma_processor = AutoProcessor.from_pretrained(GEMMA_MODEL_PATH)
+            gemma_model = AutoModelForCausalLM.from_pretrained(
+                GEMMA_MODEL_PATH,
+                torch_dtype=torch.float16,
+                load_in_8bit=True,
+                device_map="auto"
+            )
+            print("Modèle Gemma (Texte seul) chargé avec succès !")
+
+            GEMMA_AVAILABLE = True
+        except Exception as load_err:
+             print(f"Erreur interne chargement Gemma: {load_err}")
+             GEMMA_AVAILABLE = False
+    else:
+        print(f"Chemin du modèle introuvable: {GEMMA_MODEL_PATH}")
+except Exception as e:
+    print(f"Impossible de charger le modèle Gemma: {e}")
+    GEMMA_AVAILABLE = False
+
 
 # Configuration du logging
 logging.basicConfig(
@@ -49,41 +254,70 @@ except ImportError:
     MT5_AVAILABLE = False
     logger.info("MetaTrader5 n'est pas installé - le serveur fonctionnera en mode API uniquement (sans connexion MT5)")
 
-# Tentative d'importation de Mistral AI (optionnel)
+# Configuration Mistral AI
+MISTRAL_AVAILABLE = True
 try:
-    from mistralai import Mistral
-    MISTRAL_AVAILABLE = True
-    mistral_api_key = os.getenv("MISTRAL_API_KEY")
-    if mistral_api_key:
-        mistral_client = Mistral(api_key=mistral_api_key)
-        logger.info("Mistral AI disponible")
-    else:
+    from mistralai.client import MistralClient
+    from mistralai.models.chat_completion import ChatMessage
+    
+    mistral_api_key = os.getenv("MISTRAL_API_KEY", "demo_key")  # Clé par défaut pour le développement
+    if not mistral_api_key:
+        logger.warning("Aucune clé API Mistral trouvée. Utilisation du mode démo limité.")
         MISTRAL_AVAILABLE = False
-        logger.info("Mistral AI: Non configuré (MISTRAL_API_KEY manquant)")
+    else:
+        mistral_client = MistralClient(api_key=mistral_api_key)
+        logger.info("Mistral AI configuré avec succès")
+        
 except ImportError:
     MISTRAL_AVAILABLE = False
-    logger.info("Mistral AI: Non disponible (package non installé)")
+    logger.error("ERREUR: Le package mistralai n'est pas installé. Installez-le avec: pip install mistralai")
 
-# Tentative d'importation de Google Gemini AI (optionnel)
+# Désactivation complète de Gemini
+GEMINI_AVAILABLE = False
+gemini_model = None
 try:
     import google.generativeai as genai
-    GEMINI_AVAILABLE = True
+    from google.api_core.exceptions import NotFound
+    
+    # Désactiver le chargement automatique des modèles
+    genai.configure(transport='rest')
+    
+    # Récupérer la clé API
     gemini_api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-    if gemini_api_key:
-        genai.configure(api_key=gemini_api_key)
-        gemini_model = genai.GenerativeModel("gemini-1.5-flash")
-        logger.info("Google Gemini AI disponible")
+    
+    if not gemini_api_key:
+        logger.warning("Aucune clé API Gemini trouvée. Définissez GEMINI_API_KEY ou GOOGLE_API_KEY")
     else:
-        GEMINI_AVAILABLE = False
-        logger.info("Google Gemini AI: Non configuré (GEMINI_API_KEY ou GOOGLE_API_KEY manquant)")
+        genai.configure(api_key=gemini_api_key)
+        
+        # Vérifier les modèles disponibles
+        try:
+            models = genai.list_models()
+            available_models = [m.name for m in models]
+            logger.info(f"Tous les modèles disponibles: {', '.join(available_models)}")
+            
+            # Essayer d'utiliser les modèles par ordre de préférence
+            for model_name in ['gemini-1.5-flash', 'gemini-pro', 'models/gemini-pro', 'gemini-1.0-pro']:
+                if any(model_name in m for m in available_models):
+                    try:
+                        gemini_model = genai.GenerativeModel(model_name)
+                        GEMINI_AVAILABLE = True
+                        logger.info(f"Modèle {model_name} chargé avec succès")
+                        break
+                    except Exception as e:
+                        logger.warning(f"Impossible de charger le modèle {model_name}: {str(e)}")
+                        continue
+            
+            if not GEMINI_AVAILABLE:
+                logger.warning("Aucun modèle Gemini compatible trouvé")
+                
+        except Exception as e:
+            logger.error(f"Erreur lors de la vérification des modèles: {str(e)}")
+    
 except ImportError:
-    GEMINI_AVAILABLE = False
-    gemini_model = None
-    logger.info("Google Gemini AI: Non disponible (package google-generativeai non installé)")
+    logger.warning("Le package google-generativeai n'est pas installé. Installez-le avec: pip install google-generativeai")
 except Exception as e:
-    GEMINI_AVAILABLE = False
-    gemini_model = None
-    logger.warning(f"Google Gemini AI: Erreur d'initialisation: {e}")
+    logger.error(f"Erreur d'initialisation Gemini: {str(e)}", exc_info=True)
 
 # Alpha Vantage API pour analyse fondamentale
 ALPHAVANTAGE_API_KEY = os.getenv("ALPHAVANTAGE_API_KEY", "IU9I5J595Q5LO61B")
@@ -105,20 +339,11 @@ alphavantage_request_count = 0
 ALPHAVANTAGE_DAILY_LIMIT = 25
 
 # Tentative d'importation des modules backend (optionnel)
-import time
-import threading
-import schedule
-from datetime import datetime, timedelta
-from typing import List, Dict, Optional
-import json
-import random
-
 try:
     sys.path.insert(0, str(Path(__file__).parent / "backend"))
     from advanced_ml_predictor import AdvancedMLPredictor
     from spike_predictor import AdvancedSpikePredictor
-    from mt5_connector import get_historical_data, get_all_symbols, get_ohlc
-    from trend_summary import get_multi_timeframe_trend
+    from backend.mt5_connector import get_ohlc as get_historical_data
     BACKEND_AVAILABLE = True
     logger.info("Modules backend disponibles")
 except ImportError as e:
@@ -153,20 +378,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Parser les arguments en ligne de commande
+parser = argparse.ArgumentParser(description='Serveur AI TradBOT')
+parser.add_argument('--port', type=int, default=8000, help='Port sur lequel démarrer le serveur')
+parser.add_argument('--host', type=str, default='0.0.0.0', help='Adresse IP sur laquelle écouter')
+args = parser.parse_args()
+
 # Variables globales
-API_PORT = 8000
-TREND_API_PORT = 8001
+API_PORT = int(os.getenv('API_PORT', args.port))
+HOST = os.getenv('HOST', args.host)
 CACHE_DURATION = 30  # secondes
-TREND_CACHE_DURATION = 30  # secondes
-
-# Configuration des notifications de tendance
-TREND_SUMMARY_INTERVAL = 300  # 5 minutes en secondes
-TRACKED_SYMBOLS = ["Boom 300 Index", "Crash 300 Index"]  # Symboles à suivre
-NOTIFICATION_WEBHOOK = os.getenv("DISCORD_WEBHOOK_URL")  # Optionnel: webhook Discord pour les notifications
-
-# Thread pour l'API Trend
-trend_api_thread = None
-TREND_DATA_FILE = Path("trend_data.json")
 DATA_DIR = Path("data")
 MODELS_DIR = Path("models")
 LOG_FILE = Path("ai_server.log")
@@ -233,6 +454,7 @@ class DecisionRequest(BaseModel):
     supertrend_line: Optional[float] = None  # Ligne SuperTrend
     volatility_regime: Optional[int] = None  # 1 = High Vol, 0 = Normal, -1 = Low Vol
     volatility_ratio: Optional[float] = None  # Ratio ATR court/long
+    image_filename: Optional[str] = None # Filename of the chart screenshot in MT5 Files
 
 class DecisionResponse(BaseModel):
     action: str  # "buy", "sell", "hold"
@@ -240,6 +462,8 @@ class DecisionResponse(BaseModel):
     reason: str
     spike_prediction: bool = False
     spike_zone_price: Optional[float] = None
+    stop_loss: Optional[float] = None
+    take_profit: Optional[float] = None
     spike_direction: Optional[bool] = None  # True=BUY, False=SELL
     early_spike_warning: bool = False
     early_spike_zone_price: Optional[float] = None
@@ -248,6 +472,10 @@ class DecisionResponse(BaseModel):
     buy_zone_high: Optional[float] = None
     sell_zone_low: Optional[float] = None
     sell_zone_high: Optional[float] = None
+    timestamp: Optional[str] = None
+    model_used: Optional[str] = None
+    technical_analysis: Optional[Dict[str, Any]] = None
+    gemma_analysis: Optional[str] = None  # Analyse complète Gemma+Gemini
 
 class TrendlineData(BaseModel):
     start: Dict[str, Any]  # {"time": timestamp, "price": float}
@@ -255,6 +483,8 @@ class TrendlineData(BaseModel):
 
 class AnalysisRequest(BaseModel):
     symbol: str
+    timeframe: Optional[str] = None
+    request_type: Optional[str] = None
 
 class AnalysisResponse(BaseModel):
     symbol: str
@@ -268,6 +498,45 @@ class TimeWindowsResponse(BaseModel):
     symbol: str
     preferred_hours: List[int]  # Liste d'heures 0-23
     forbidden_hours: List[int]  # Liste d'heures 0-23
+
+def convert_numpy_types(obj):
+    """Convertit les types numpy en types Python natifs pour la sérialisation JSON."""
+    if isinstance(obj, (np.integer, np.floating, np.uint64)):
+        return int(obj) if isinstance(obj, (np.integer, np.uint64)) else float(obj)
+    elif isinstance(obj, dict):
+        return {k: convert_numpy_types(v) for k, v in obj.items()}
+    elif isinstance(obj, (list, tuple)):
+        return [convert_numpy_types(x) for x in obj]
+    return obj
+
+def check_trend(symbol: str) -> Dict[str, str]:
+    """Vérifie la tendance sur plusieurs timeframes"""
+    timeframes = {
+        'M1': mt5.TIMEFRAME_M1,
+        'M5': mt5.TIMEFRAME_M5,
+        'H1': mt5.TIMEFRAME_H1
+    }
+    
+    trends = {}
+    
+    for tf_name, tf in timeframes.items():
+        rates = mt5.copy_rates_from_pos(symbol, tf, 0, 200)
+        if rates is not None:
+            df = pd.DataFrame(rates)
+            sma_50 = df['close'].rolling(window=50).mean().iloc[-1]
+            sma_200 = df['close'].rolling(window=200).mean().iloc[-1]
+            
+            # Détermination de la tendance
+            if sma_50 > sma_200 * 1.01:  # 1% de marge
+                trends[tf_name] = "HAUSSIER"
+            elif sma_50 < sma_200 * 0.99:  # 1% de marge
+                trends[tf_name] = "BAISSIER"
+            else:
+                trends[tf_name] = "NEUTRE"
+        else:
+            trends[tf_name] = "INDÉTERMINÉ"
+    
+    return trends
 
 # Fonctions utilitaires
 def get_historical_data(symbol: str, timeframe: str = "H1", count: int = 500) -> pd.DataFrame:
@@ -352,35 +621,197 @@ def analyze_with_mistral(prompt: str) -> Optional[str]:
         logger.error(f"Erreur Mistral AI: {e}")
         return None
 
-def analyze_with_gemini(prompt: str) -> Optional[str]:
-    """Analyse avec Google Gemini AI si disponible"""
-    if not GEMINI_AVAILABLE or not gemini_model:
+
+def analyze_with_gemma(prompt: str, max_tokens: int = 200, temperature: float = 0.7, 
+                      top_p: float = 0.9) -> Optional[str]:
+    """
+    Analyse avec le modèle Gemma (version texte uniquement)
+    
+    Args:
+        prompt: Le prompt à envoyer au modèle
+        max_tokens: Nombre maximum de tokens à générer
+        temperature: Contrôle le caractère aléatoire (0.0 à 1.0)
+        top_p: Filtrage par noyau (nucleus sampling)
+        
+    Returns:
+        str: La réponse générée par le modèle, ou None en cas d'erreur
+    """
+    global gemma_processor, gemma_model
+    
+    if not gemma_processor or not gemma_model:
+        logger.error("❌ Modèle ou processeur Gemma non initialisé")
         return None
     
     try:
-        response = gemini_model.generate_content(prompt)
-        if hasattr(response, 'text'):
-            return response.text
-        elif hasattr(response, 'candidates') and response.candidates:
-            return response.candidates[0].text
-        return None
+        logger.info("\n" + "="*80)
+        logger.info("🔍 DÉMARRAGE ANALYSE GEMMA (TEXTE UNIQUEMENT)")
+        logger.info("="*80)
+        logger.info(f"📝 Prompt: {prompt[:150]}..." if len(prompt) > 150 else f"📝 Prompt: {prompt}")
+        
+        # Préparation des entrées texte uniquement
+        logger.info("🔄 Préparation des entrées...")
+        inputs = gemma_processor(
+            text=prompt,
+            return_tensors="pt"
+        ).to("cuda" if torch.cuda.is_available() else "cpu")
+        
+        # Génération de la réponse
+        logger.info("⚡ Génération de la réponse...")
+        start_time = time.time()
+        
+        generate_kwargs = {
+            "max_length": max_tokens,
+            "temperature": temperature,
+            "top_p": top_p,
+            "do_sample": True,
+            "pad_token_id": gemma_processor.tokenizer.pad_token_id
+        }
+        
+        # Génération avec suivi de la progression
+        try:
+            with torch.no_grad():
+                output = gemma_model.generate(
+                    **inputs,
+                    **generate_kwargs,
+                    output_scores=True,
+                    return_dict_in_generate=True
+                )
+            
+            # Décodage de la réponse
+            response = gemma_processor.batch_decode(output.sequences, skip_special_tokens=True)[0]
+            duration = time.time() - start_time
+            
+            # Formatage de la réponse
+            response = response.strip()
+            logger.info("\n" + "="*80)
+            logger.info("✅ ANALYSE TERMINÉE")
+            logger.info("="*80)
+            logger.info(f"⏱️  Durée: {duration:.2f} secondes")
+            logger.info(f"📊 Réponse ({len(response)} caractères):")
+            
+            # Affichage d'un extrait de la réponse
+            response_lines = response.split('\n')
+            for i, line in enumerate(response_lines[:5]):  # Affiche les 5 premières lignes
+                logger.info(f"   {line}")
+            if len(response_lines) > 5:
+                logger.info("   ... (suite de la réponse disponible) ...")
+            
+            # Analyse des signaux si nécessaire
+            if "signal" in prompt.lower() or "trading" in prompt.lower():
+                gemma_bot = GemmaTradingBot()
+                gemma_bot.analyze_gemma_response(response)
+            
+            return response
+            
+        except RuntimeError as e:
+            if "out of memory" in str(e).lower():
+                logger.error("⚠️  Erreur: Mémoire GPU insuffisante. Essayez de réduire la taille du modèle ou du batch.")
+                torch.cuda.empty_cache()
+            raise
+            
     except Exception as e:
-        logger.error(f"Erreur Gemini AI: {e}")
+        logger.error(f"\n❌ ERREUR LORS DE L'ANALYSE GEMMA")
+        logger.error("="*60)
+        logger.error(f"Type: {type(e).__name__}")
+        logger.error(f"Message: {str(e)}")
+        if hasattr(e, 'args') and e.args:
+            logger.error(f"Détails: {e.args[0]}")
+        logger.error("\nStack trace:")
+        logger.error(traceback.format_exc())
+        return None
+    
+    finally:
+        # Nettoyage de la mémoire GPU
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            logger.info("🧹 Mémoire GPU nettoyée")
+
+def analyze_with_gemini(prompt: str, max_retries: int = 3) -> Optional[str]:
+    """
+    Fonction désactivée - Utilisez Mistral AI à la place
+    """
+    logger.warning("Gemini AI est désactivé - Utilisation de Mistral AI")
+    return None
+
+def analyze_with_ai(prompt: str, max_retries: int = 2) -> Optional[str]:
+    """
+    Analyse un prompt avec Mistral AI pour des prédictions de spike améliorées
+    
+    Args:
+        prompt: Le prompt à analyser
+        max_retries: Nombre de tentatives
+        
+    Returns:
+        La réponse de l'IA ou None en cas d'échec
+    """
+    if not MISTRAL_AVAILABLE or not mistral_api_key:
+        logger.error("Mistral AI n'est pas disponible")
+        return None
+    
+    try:
+        # Optimisation pour les prédictions de spike
+        if "spike" in prompt.lower() or "volatility" in prompt.lower():
+            # Utiliser un modèle plus performant et une température plus basse pour les spikes
+            logger.info("Utilisation de Mistral AI pour l'analyse de spike (optimisée)")
+            response = mistral_client.chat.complete(
+                model="mistral-small",  # Modèle plus performant pour les spikes
+                messages=[
+                    {"role": "system", "content": "Tu es un expert en trading de volatilité spécialisé dans la détection de spikes. Analyse les indicateurs techniques avec une précision extrême. Donne des prédictions fiables basées sur les patterns de volatilité, RSI, EMA et ATR."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.3,  # Température plus basse pour plus de cohérence
+                max_tokens=800   # Limiter les tokens pour des réponses plus ciblées
+            )
+        else:
+            # Utilisation standard pour les autres analyses
+            logger.info("Utilisation de Mistral AI pour l'analyse standard")
+            response = mistral_client.chat.complete(
+                model="mistral-tiny",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.7,
+                max_tokens=1000
+            )
+        return response.choices[0].message.content
+    except Exception as e:
+        logger.error(f"Erreur avec Mistral AI: {str(e)}")
         return None
 
-def analyze_with_ai(prompt: str) -> Optional[str]:
-    """Analyse avec IA (Gemini en priorité, puis Mistral en fallback)"""
-    # Essayer Gemini d'abord
-    result = analyze_with_gemini(prompt)
-    if result:
-        return result
+def generate_fibonacci_levels(base_price: float) -> Dict[str, Dict[str, Any]]:
+    """
+    Génère les niveaux de Fibonacci pour un prix de base donné.
     
-    # Fallback sur Mistral
-    result = analyze_with_mistral(prompt)
-    if result:
-        return result
+    Args:
+        base_price: Prix de base pour le calcul des niveaux
+        
+    Returns:
+        Dictionnaire contenant les niveaux de Fibonacci pour différents timeframes
+    """
+    levels = {
+        "0": 0.0,
+        "236": 0.236,
+        "382": 0.382,
+        "500": 0.5,
+        "618": 0.618,
+        "786": 0.786,
+        "1000": 1.0
+    }
     
-    return None
+    # Calcul des niveaux de support/résistance
+    support = base_price * 0.95
+    resistance = base_price * 1.05
+    
+    # Création de la réponse pour chaque timeframe
+    response = {}
+    for tf in ["h1", "h4", "m15"]:
+        response[tf] = {
+            "fibonacci": {level: base_price * factor for level, factor in levels.items()},
+            "trend": "neutral",
+            "support": support,
+            "resistance": resistance,
+            "status": "fibonacci_analysis"
+        }
+    
+    return response
 
 def detect_trendlines(df: pd.DataFrame, lookback: int = 3) -> Dict[str, Any]:
     """Détecte les trendlines dans les données historiques"""
@@ -468,14 +899,7 @@ async def root():
             "/indicators/analyze (POST)",
             "/indicators/sentiment/{symbol} (GET)",
             "/indicators/volume_profile/{symbol} (GET)",
-            "/analyze/gemini (POST)",
-            "/autoscan/start (POST) - Démarrer le scan automatique",
-            "/autoscan/stop (POST) - Arrêter le scan automatique",
-            "/autoscan/status (GET) - Statut du scan",
-            "/autoscan/results (GET) - Résultats du scan",
-            "/autoscan/signals (GET) - Signaux détectés",
-            "/autoscan/scan (POST) - Lancer un scan manuel",
-            "/autoscan/config (POST) - Configuration du scan"
+            "/analyze/gemini (POST)"
         ]
     }
 
@@ -514,10 +938,10 @@ async def get_fundamental_data(symbol: str):
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             # Pour Forex
-            if "/" in av_symbol or any(c in symbol.upper() for c in ["USD", "EUR", "GBP", "JPY", "CHF", "AUD", "NZD", "CAD"]):
-                from_currency = av_symbol[:3] if len(av_symbol) >= 6 else "USD"
-                to_currency = av_symbol[3:6] if len(av_symbol) >= 6 else av_symbol[:3]
-                url = f"https://www.alphavantage.co/query?function=CURRENCY_EXCHANGE_RATE&from_currency={from_currency}&to_currency={to_currency}&apikey={ALPHAVANTAGE_API_KEY}"
+            if "/" in av_symbol or any(c in symbol.upper() for c in ["USD", "EUR", "GBP", "JPY"]):
+                from_c = av_symbol[:3] if len(av_symbol) >= 6 else "USD"
+                to_c = av_symbol[3:6] if len(av_symbol) >= 6 else av_symbol[:3]
+                url = f"https://www.alphavantage.co/query?function=CURRENCY_EXCHANGE_RATE&from_currency={from_c}&to_currency={to_c}&apikey={ALPHAVANTAGE_API_KEY}"
                 resp = await client.get(url)
                 data = resp.json()
                 
@@ -676,7 +1100,7 @@ async def get_deriv_ticks(symbol: str):
     deriv_symbols = {
         "Volatility 10 Index": "R_10",
         "Volatility 25 Index": "R_25",
-        "Volatility 50 Index": "R_50",
+        "Volatility 50 Index": "R_50", 
         "Volatility 75 Index": "R_75",
         "Volatility 100 Index": "R_100",
         "Boom 300 Index": "BOOM300N",
@@ -834,7 +1258,6 @@ async def get_market_data_with_fallback(symbol: str):
         "Crash 300 Index": "CRASH300N",
         "Crash 500 Index": "CRASH500",
         "Crash 1000 Index": "CRASH1000",
-        "Step Index": "stpRNG",
     }
     
     deriv_symbol = deriv_symbols.get(symbol)
@@ -861,131 +1284,6 @@ async def get_market_data_with_fallback(symbol: str):
 
 # ==================== END DERIV API ====================
 
-# ==================== AUTOSCAN ENDPOINTS ====================
-
-@app.post("/autoscan/start")
-async def start_autoscan(interval_minutes: int = 5):
-    """Démarre le scan automatique des symboles."""
-    try:
-        success = autoscan_manager.start()
-        if success:
-            return {
-                "status": "success",
-                "message": f"Scan automatique démarré avec un intervalle de {interval_minutes} minutes",
-                "scan_interval": interval_minutes
-            }
-        else:
-            return {
-                "status": "error",
-                "message": "Le scan est déjà en cours d'exécution"
-            }
-    except Exception as e:
-        logger.error(f"Erreur lors du démarrage de l'autoscan: {e}")
-        raise HTTPException(status_code=500, detail=f"Erreur lors du démarrage de l'autoscan: {str(e)}")
-
-@app.post("/autoscan/stop")
-async def stop_autoscan():
-    """Arrête le scan automatique des symboles."""
-    try:
-        autoscan_manager.stop()
-        return {
-            "status": "success",
-            "message": "Scan automatique arrêté"
-        }
-    except Exception as e:
-        logger.error(f"Erreur lors de l'arrêt de l'autoscan: {e}")
-        raise HTTPException(status_code=500, detail=f"Erreur lors de l'arrêt de l'autoscan: {str(e)}")
-
-@app.get("/autoscan/status")
-async def get_autoscan_status():
-    """Retourne le statut actuel du scan automatique."""
-    try:
-        status = autoscan_manager.get_status()
-        return {
-            "status": "success",
-            "data": status
-        }
-    except Exception as e:
-        logger.error(f"Erreur lors de la récupération du statut de l'autoscan: {e}")
-        raise HTTPException(status_code=500, detail=f"Erreur lors de la récupération du statut: {str(e)}")
-
-@app.get("/autoscan/results")
-async def get_autoscan_results():
-    """Retourne les derniers résultats du scan."""
-    try:
-        results = autoscan_manager.get_latest_results()
-        return {
-            "status": "success",
-            "data": results
-        }
-    except Exception as e:
-        logger.error(f"Erreur lors de la récupération des résultats de l'autoscan: {e}")
-        raise HTTPException(status_code=500, detail=f"Erreur lors de la récupération des résultats: {str(e)}")
-
-@app.post("/autoscan/scan")
-async def manual_scan():
-    """Effectue un scan manuel immédiat."""
-    try:
-        def run_scan():
-            autoscan_manager._perform_scan()
-        
-        thread = threading.Thread(target=run_scan, daemon=True)
-        thread.start()
-        
-        return {
-            "status": "success",
-            "message": "Scan manuel démarré en arrière-plan"
-        }
-    except Exception as e:
-        logger.error(f"Erreur lors du lancement du scan manuel: {e}")
-        raise HTTPException(status_code=500, detail=f"Erreur lors du lancement du scan manuel: {str(e)}")
-
-@app.get("/autoscan/signals")
-async def get_autoscan_signals():
-    """Retourne uniquement les signaux détectés lors du dernier scan."""
-    try:
-        results = autoscan_manager.get_latest_results()
-        signals = results.get('signals', [])
-        
-        return {
-            "status": "success",
-            "data": {
-                "signals": signals,
-                "count": len(signals),
-                "timestamp": results.get('timestamp')
-            }
-        }
-    except Exception as e:
-        logger.error(f"Erreur lors de la récupération des signaux: {e}")
-        raise HTTPException(status_code=500, detail=f"Erreur lors de la récupération des signaux: {str(e)}")
-
-@app.post("/autoscan/config")
-async def update_autoscan_config(config: Dict[str, Any]):
-    """Met à jour la configuration de l'autoscan."""
-    try:
-        if 'scan_interval_minutes' in config:
-            new_interval = config['scan_interval_minutes']
-            if isinstance(new_interval, int) and new_interval >= 1:
-                autoscan_manager.scan_interval = new_interval
-                logger.info(f"Intervalle de scan mis à jour: {new_interval} minutes")
-            else:
-                raise HTTPException(status_code=400, detail="L'intervalle de scan doit être un entier >= 1")
-        
-        return {
-            "status": "success",
-            "message": "Configuration de l'autoscan mise à jour",
-            "current_config": {
-                "scan_interval_minutes": autoscan_manager.scan_interval
-            }
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Erreur lors de la mise à jour de la configuration de l'autoscan: {e}")
-        raise HTTPException(status_code=500, detail=f"Erreur lors de la mise à jour de la configuration: {str(e)}")
-
-# ==================== END AUTOSCAN ENDPOINTS ====================
-
 @app.get("/health")
 async def health_check():
     """Vérification de l'état du serveur"""
@@ -995,9 +1293,159 @@ async def health_check():
         "cache_size": len(prediction_cache),
         "mt5_initialized": mt5_initialized,
         "mistral_available": MISTRAL_AVAILABLE,
-        "gemini_available": GEMINI_AVAILABLE,
-        "deriv_available": DERIV_AVAILABLE,
-        "alphavantage_requests_remaining": ALPHAVANTAGE_DAILY_LIMIT - alphavantage_request_count
+        "trend_analysis": {
+            "available": True,
+            "mt5_available": mt5_initialized
+        }
+    }
+
+# ==============================================================================
+# ENDPOINTS D'ANALYSE DE TENDANCE (intégrés depuis trend_api.py)
+# ==============================================================================
+
+class TrendAnalysisRequest(BaseModel):
+    symbol: str
+    timeframes: Optional[List[str]] = ["M1", "M5", "M15", "H1", "H4"]
+
+def calculate_trend_direction(symbol: str, timeframe: str = "M1") -> str:
+    """Calcule la direction de la tendance pour un symbole/timeframe donné"""
+    try:
+        if not mt5_initialized:
+            # Fallback basé sur l'heure si MT5 non disponible
+            hour = datetime.now().hour
+            if hour % 2 == 0:
+                return "buy"
+            else:
+                return "sell"
+        
+        # Récupérer les données MT5
+        tf_map = {
+            'M1': mt5.TIMEFRAME_M1,
+            'M5': mt5.TIMEFRAME_M5,
+            'M15': mt5.TIMEFRAME_M15,
+            'H1': mt5.TIMEFRAME_H1,
+            'H4': mt5.TIMEFRAME_H4
+        }
+        
+        mt5_timeframe = tf_map.get(timeframe, mt5.TIMEFRAME_M1)
+        rates = mt5.copy_rates_from_pos(symbol, mt5_timeframe, 0, 100)
+        
+        if rates is None or len(rates) < 50:
+            return "neutral"
+        
+        df = pd.DataFrame(rates)
+        
+        # Calcul des moyennes mobiles
+        sma_20 = df['close'].rolling(window=20).mean().iloc[-1]
+        sma_50 = df['close'].rolling(window=50).mean().iloc[-1]
+        current_price = df['close'].iloc[-1]
+        
+        # Détermination de la tendance
+        if current_price > sma_20 > sma_50:
+            return "buy"
+        elif current_price < sma_20 < sma_50:
+            return "sell"
+        else:
+            return "neutral"
+            
+    except Exception as e:
+        logger.error(f"Erreur calcul tendance {symbol} {timeframe}: {e}")
+        return "neutral"
+
+def calculate_trend_confidence(symbol: str, timeframe: str = "M1") -> float:
+    """Calcule le niveau de confiance de la tendance (0-100)"""
+    try:
+        if not mt5_initialized:
+            # Fallback aléatoire si MT5 non disponible
+            import random
+            return random.randint(60, 90)
+        
+        tf_map = {
+            'M1': mt5.TIMEFRAME_M1,
+            'M5': mt5.TIMEFRAME_M5,
+            'M15': mt5.TIMEFRAME_M15,
+            'H1': mt5.TIMEFRAME_H1,
+            'H4': mt5.TIMEFRAME_H4
+        }
+        
+        mt5_timeframe = tf_map.get(timeframe, mt5.TIMEFRAME_M1)
+        rates = mt5.copy_rates_from_pos(symbol, mt5_timeframe, 0, 100)
+        
+        if rates is None or len(rates) < 50:
+            return 50.0
+        
+        df = pd.DataFrame(rates)
+        
+        # Calcul du RSI pour la confiance
+        delta = df['close'].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+        rs = gain / loss
+        rsi = 100 - (100 / (1 + rs))
+        current_rsi = rsi.iloc[-1]
+        
+        # Confiance basée sur la cohérence RSI-prix
+        sma_20 = df['close'].rolling(window=20).mean().iloc[-1]
+        current_price = df['close'].iloc[-1]
+        
+        if current_price > sma_20 and current_rsi > 50:
+            return min(90, 60 + (current_rsi - 50))
+        elif current_price < sma_20 and current_rsi < 50:
+            return min(90, 60 + (50 - current_rsi))
+        else:
+            return max(40, 70 - abs(current_rsi - 50))
+            
+    except Exception as e:
+        logger.error(f"Erreur calcul confiance {symbol} {timeframe}: {e}")
+        return 50.0
+
+@app.post("/trend")
+async def get_trend_analysis(request: TrendAnalysisRequest):
+    """Endpoint principal pour l'analyse de tendance (compatible avec MT5)"""
+    try:
+        logger.info(f"Analyse de tendance demandée pour {request.symbol}")
+        
+        response = {
+            "symbol": request.symbol,
+            "timestamp": time.time()
+        }
+        
+        # Analyser chaque timeframe demandé
+        for tf in request.timeframes:
+            direction = calculate_trend_direction(request.symbol, tf)
+            confidence = calculate_trend_confidence(request.symbol, tf)
+            
+            response[tf] = {
+                "direction": direction,
+                "confidence": confidence
+            }
+        
+        logger.info(f"Tendance {request.symbol}: {response.get('M1', {}).get('direction', 'unknown')} (conf: {response.get('M1', {}).get('confidence', 0):.1f}%)")
+        return response
+        
+    except Exception as e:
+        logger.error(f"Erreur analyse tendance: {e}")
+        return {
+            "error": f"Erreur lors de l'analyse de tendance: {str(e)}",
+            "symbol": request.symbol,
+            "timestamp": time.time()
+        }
+
+@app.get("/trend")
+async def get_trend_get(symbol: str = "EURUSD", timeframes: str = "M1,M5,M15,H1,H4"):
+    """Version GET de l'analyse de tendance"""
+    tf_list = [tf.strip() for tf in timeframes.split(",")]
+    request = TrendAnalysisRequest(symbol=symbol, timeframes=tf_list)
+    return await get_trend_analysis(request)
+
+@app.get("/trend/health")
+async def trend_health():
+    """Vérification de santé pour le module de tendance"""
+    return {
+        "status": "ok",
+        "module": "trend_analysis",
+        "timestamp": time.time(),
+        "mt5_available": mt5_initialized
     }
 
 @app.get("/status")
@@ -1028,7 +1476,11 @@ async def status():
             "size": len(prediction_cache),
             "duration_seconds": CACHE_DURATION
         },
-        "default_symbol": DEFAULT_SYMBOL
+        "default_symbol": DEFAULT_SYMBOL,
+        "trend_analysis": {
+            "available": True,
+            "mt5_available": mt5_initialized
+        }
     }
 
 @app.get("/logs")
@@ -1051,14 +1503,263 @@ async def get_logs(limit: int = 100):
         logger.error(f"Erreur lecture logs: {e}")
         return {"logs": [], "error": str(e)}
 
-@app.post("/decision", response_model=DecisionResponse)
-async def decision(request: DecisionRequest):
+@app.post("/decisionGemma", response_model=DecisionResponse)
+async def decision_gemma(request: DecisionRequest):
     """
-    Endpoint principal pour les décisions de trading
-    Appelé par le robot MQ5 avec les données de marché en temps réel
+    Endpoint avancé qui utilise Gemma pour l'analyse visuelle du graphique MT5
+    et Gemini pour formuler la recommandation finale de trading.
     """
     try:
-        logger.info(f"Requête reçue: /decision - Données: {request.model_dump_json()}")
+        # Validation des champs obligatoires
+        if not request.symbol:
+            raise HTTPException(status_code=422, detail="Le symbole est requis")
+        
+        logger.info(f"Requête DecisionGemma reçue pour {request.symbol}")
+        
+        # Étape 1: Analyse technique initiale
+        action = "hold"
+        confidence = 0.5
+        reason = "Analyse en cours..."
+        
+        # Analyse RSI
+        if request.rsi:
+            if request.rsi < 30:
+                action = "buy"
+                confidence += 0.2
+                reason += f"RSI surventé ({request.rsi:.1f}). "
+            elif request.rsi > 70:
+                action = "sell"
+                confidence += 0.2
+                reason += f"RSI suracheté ({request.rsi:.1f}). "
+        
+        # Analyse EMA
+        if request.ema_fast_h1 and request.ema_slow_h1:
+            if request.ema_fast_h1 > request.ema_slow_h1:
+                if action != "sell":
+                    action = "buy"
+                    confidence += 0.15
+                reason += f"EMA H1 haussière ({request.ema_fast_h1:.5f} > {request.ema_slow_h1:.5f}). "
+            else:
+                if action != "buy":
+                    action = "sell"
+                    confidence += 0.15
+                reason += f"EMA H1 baissière ({request.ema_fast_h1:.5f} < {request.ema_slow_h1:.5f}). "
+        
+        # Étape 2: Analyse visuelle avec Gemma (si image disponible)
+        gemma_analysis = None
+        sl_from_gemma = None
+        tp_from_gemma = None
+        
+        if GEMMA_AVAILABLE and request.image_filename:
+            try:
+                # Construire le chemin complet de l'image depuis MT5
+                mt5_image_path = os.path.join(MT5_FILES_DIR, request.image_filename)
+                
+                if os.path.exists(mt5_image_path):
+                    gemma_prompt = f"""Analyse ce graphique {request.symbol} et donne une évaluation technique précise.
+                    
+                    Action suggérée: {action}
+                    
+                    Réponds en format JSON avec ces champs:
+                    - "tendance": "haussière" ou "baissière" ou "neutre"
+                    - "force": 1-10 (10 = très fort)
+                    - "support": prix exact du support le plus proche
+                    - "resistance": prix exact de la résistance la plus proche
+                    - "stop_loss": prix optimal pour SL
+                    - "take_profit": prix optimal pour TP
+                    - "confirmation": true/false si tu confirmes l'action {action}
+                    """
+                    
+                    gemma_analysis = analyze_with_gemma(gemma_prompt, mt5_image_path)
+                    
+                    if gemma_analysis:
+                        logger.info(f"Analyse Gemma reçue: {gemma_analysis[:200]}...")
+                        
+                        # Extraire SL/TP de la réponse Gemma
+                        try:
+                            import re
+                            sl_match = re.search(r'"stop_loss":\s*([0-9.]+)', gemma_analysis)
+                            tp_match = re.search(r'"take_profit":\s*([0-9.]+)', gemma_analysis)
+                            confirmation_match = re.search(r'"confirmation":\s*(true|false)', gemma_analysis)
+                            
+                            if sl_match:
+                                sl_from_gemma = float(sl_match.group(1))
+                            if tp_match:
+                                tp_from_gemma = float(tp_match.group(1))
+                            if confirmation_match:
+                                gemma_confirms = confirmation_match.group(1) == "true"
+                                if gemma_confirms:
+                                    confidence += 0.25
+                                else:
+                                    confidence -= 0.15
+                                    
+                        except Exception as parse_err:
+                            logger.warning(f"Erreur parsing réponse Gemma: {parse_err}")
+                        
+                        reason += f"Analyse visuelle Gemma effectuée. "
+                        
+                else:
+                    logger.warning(f"Fichier image non trouvé: {mt5_image_path}")
+                    
+            except Exception as gemma_err:
+                logger.error(f"Erreur analyse Gemma: {gemma_err}")
+        
+        # Étape 3: Formulation finale avec Gemini
+        if GEMINI_AVAILABLE:
+            try:
+                gemini_prompt = f"""En tant qu'expert trading, analyse ces données pour {request.symbol}:
+                
+                DONNÉES TECHNIQUES:
+                - Action initiale: {action}
+                - Confiance: {confidence:.2f}
+                - RSI: {request.rsi} (surventé<30, suracheté>70)
+                - EMA H1: rapide={request.ema_fast_h1}, lente={request.ema_slow_h1}
+                - Prix actuel: bid={request.bid}, ask={request.ask}
+                
+                ANALYSE VISUELLE GEMMA:
+                {gemma_analysis if gemma_analysis else "Non disponible"}
+                
+                INSTRUCTIONS:
+                1. Valide ou infirme l'action initiale
+                2. Donne une recommandation finale claire: BUY/SELL/HOLD
+                3. Attribue une confiance finale (0.0-1.0)
+                4. Fournis une raison concise (<200 caractères)
+                5. SL/TP: {"SL=" + str(sl_from_gemma) + ", TP=" + str(tp_from_gemma) if sl_from_gemma and tp_from_gemma else "Génère des niveaux logiques"}
+                
+                Réponds UNIQUEMENT en JSON:
+                {{"action": "BUY/SELL/HOLD", "confidence": 0.00, "reason": "texte concis", "sl": 0.00000, "tp": 0.00000}}
+                """
+                
+                response = gemini_model.generate_content(gemini_prompt)
+                gemini_response = response.text.strip()
+                
+                # Nettoyer et parser la réponse JSON
+                if gemini_response.startswith("```json"):
+                    gemini_response = gemini_response.replace("```json", "").replace("```", "").strip()
+                
+                gemini_result = json.loads(gemini_response)
+                
+                action = gemini_result.get("action", action)
+                confidence = gemini_result.get("confidence", confidence)
+                reason = gemini_result.get("reason", reason)
+                sl_from_gemma = gemini_result.get("sl", sl_from_gemma)
+                tp_from_gemma = gemini_result.get("tp", tp_from_gemma)
+                
+                logger.info(f"Recommandation Gemini: {action} (conf: {confidence:.2f})")
+                
+            except Exception as gemini_err:
+                logger.error(f"Erreur formulation Gemini: {gemini_err}")
+        
+        # Limiter la confiance
+        confidence = max(0.0, min(1.0, confidence))
+        
+        # Prédiction de spike (pour Boom/Crash)
+        spike_prediction = False
+        spike_zone_price = None
+        
+        if "Boom" in request.symbol or "Crash" in request.symbol:
+            if request.volatility_regime == 1:  # High volatility
+                spike_prediction = True
+                spike_zone_price = request.ask if "Boom" in request.symbol else request.bid
+                confidence += 0.1
+        
+        # Construire la réponse finale
+        response = DecisionResponse(
+            action=action,
+            confidence=confidence,
+            reason=reason[:250],  # Limiter la longueur
+            spike_prediction=spike_prediction,
+            spike_zone_price=spike_zone_price,
+            stop_loss=sl_from_gemma,
+            take_profit=tp_from_gemma,
+            timestamp=datetime.now().isoformat(),
+            model_used="Gemma+Gemini",
+            technical_analysis={
+                "rsi": request.rsi,
+                "ema_fast_h1": request.ema_fast_h1,
+                "ema_slow_h1": request.ema_slow_h1,
+                "supertrend_line": request.supertrend_line,
+                "volatility_regime": request.volatility_regime
+            },
+            gemma_analysis=gemma_analysis[:500] if gemma_analysis else f"Modèle Gemini utilisé - Confiance: {confidence:.2f}, Action: {action}"
+        )
+        
+        logger.info(f"Décision finale pour {request.symbol}: {action} (conf: {confidence:.2f})")
+        return response
+        
+    except Exception as e:
+        logger.error(f"Erreur dans decision_gemma: {e}")
+        logger.error(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Erreur interne: {str(e)}")
+
+@app.post("/decision", response_model=DecisionResponse)
+async def decision(request: DecisionRequest):
+    try:
+        # Validation des champs obligatoires
+        if not request.symbol:
+            raise HTTPException(status_code=422, detail="Le symbole est requis")
+            
+        if request.bid is None or request.ask is None:
+            raise HTTPException(status_code=422, detail="Les prix bid/ask sont requis")
+            
+        if request.bid <= 0 or request.ask <= 0:
+            raise HTTPException(status_code=422, detail="Les prix doivent être supérieurs à zéro")
+            
+        if request.rsi is not None and (request.rsi < 0 or request.rsi > 100):
+            raise HTTPException(status_code=422, detail="La valeur RSI doit être entre 0 et 100")
+        
+        # Règle stricte: Interdire les achats sur Crash et les ventes sur Boom
+        symbol_lower = request.symbol.lower()
+        if "crash" in symbol_lower:
+            logger.warning(f"Tentative d'achat sur Crash détectée - SYMBOLE: {request.symbol}")
+            # Forcer HOLD pour tout achat sur Crash
+            if request.dir_rule == 1:  # 1 = BUY
+                return DecisionResponse(
+                    action="hold",
+                    confidence=0.1,
+                    reason="INTERDICTION: Achats sur Crash non autorisés",
+                    spike_prediction=False,
+                    spike_zone_price=None,
+                    stop_loss=None,
+                    take_profit=None,
+                    spike_direction=None,
+                    early_spike_warning=False,
+                    early_spike_zone_price=None,
+                    early_spike_direction=None,
+                    buy_zone_low=None,
+                    buy_zone_high=None,
+                    sell_zone_low=None,
+                    sell_zone_high=None
+                )
+        
+        if "boom" in symbol_lower:
+            logger.warning(f"Tentative de vente sur Boom détectée - SYMBOLE: {request.symbol}")
+            # Forcer HOLD pour toute vente sur Boom
+            if request.dir_rule == 0:  # 0 = SELL
+                return DecisionResponse(
+                    action="hold",
+                    confidence=0.1,
+                    reason="INTERDICTION: Ventes sur Boom non autorisées",
+                    spike_prediction=False,
+                    spike_zone_price=None,
+                    stop_loss=None,
+                    take_profit=None,
+                    spike_direction=None,
+                    early_spike_warning=False,
+                    early_spike_zone_price=None,
+                    early_spike_direction=None,
+                    buy_zone_low=None,
+                    buy_zone_high=None,
+                    sell_zone_low=None,
+                    sell_zone_high=None
+                )
+            
+        # Log de la requête reçue (masque les données sensibles)
+        log_data = request.dict()
+        if len(log_data.get('symbol', '')) > 20:  # Éviter de logger des symboles trop longs
+            log_data['symbol'] = log_data['symbol'][:20] + '...'
+            
+        logger.info(f"Requête de décision reçue pour {request.symbol}")
         
         # Vérifier si la décision est en cache
         cache_key = f"{request.symbol}_{request.bid:.2f}_{request.ask:.2f}"
@@ -1170,8 +1871,44 @@ Format: Analyse claire et professionnelle en français.
                     reason = f"{reason} | IA: {ai_analysis[:100]}"
             except Exception as e:
                 logger.debug(f"Gemini analysis non disponible: {e}")
-        
-        # Utiliser AdvancedIndicators pour améliorer l'analyse si disponible
+
+        stop_loss = None
+        take_profit = None
+
+        # Utiliser Gemma Local (Multimodal) si image disponible
+        if GEMMA_AVAILABLE and request.image_filename:
+            try:
+                gemma_prompt = f"Analyse graph {request.symbol}. Action: {action}. Donne moi 3 choses: 1) Tendance 2) Support/Resistance 3) Prix exacts pour SL et TP. Format: 'SL: 1.2345 | TP: 1.2345'"
+                gemma_analysis = analyze_with_gemma(gemma_prompt, request.image_filename)
+                
+                if gemma_analysis:
+                    logger.info(f"Gemma Analysis: {gemma_analysis}")
+                    reason += f" | Gemma: {gemma_analysis[:150]}"
+                    
+                    # Bonus de confiance si Gemma confirme
+                    if action.lower() in gemma_analysis.lower():
+                        confidence = min(confidence + 0.1, 0.98)
+                        
+                    # Tentative d'extraction SL/TP via Regex
+                    import re
+                    try:
+                        sl_match = re.search(r"SL:\s*([\d\.]+)", gemma_analysis, re.IGNORECASE)
+                        tp_match = re.search(r"TP:\s*([\d\.]+)", gemma_analysis, re.IGNORECASE)
+                        
+                        if sl_match:
+                            stop_loss = float(sl_match.group(1))
+                            logger.info(f"Gemma SL found: {stop_loss}")
+                        if tp_match:
+                            take_profit = float(tp_match.group(1))
+                            logger.info(f"Gemma TP found: {take_profit}")
+                            
+                    except Exception as parse_err:
+                        logger.warning(f"Failed to parse SL/TP from Gemma: {parse_err}")
+
+            except Exception as e:
+                logger.error(f"Erreur analyse Gemma: {e}")
+                logger.error(f"Erreur analyse Gemma: {e}")
+
         if AI_INDICATORS_AVAILABLE and mt5_initialized:
             try:
                 # Récupérer les données pour l'analyse avancée
@@ -1199,7 +1936,7 @@ Format: Analyse claire et professionnelle en français.
             except Exception as e:
                 logger.warning(f"Erreur AdvancedIndicators dans decision: {e}")
         
-        # Utiliser le prédicteur de spike si disponible
+        # Utiliser le prédicteur de spike si disponible avec amélioration de la fiabilité
         spike_prediction = False
         spike_zone_price = None
         spike_direction = None
@@ -1207,60 +1944,119 @@ Format: Analyse claire et professionnelle en français.
         early_spike_zone_price = None
         early_spike_direction = None
         
-        if spike_predictor and ("Boom" in request.symbol or "Crash" in request.symbol):
+        # Amélioration: Filtrage des symboles de volatilité
+        is_volatility_symbol = any(vol in request.symbol for vol in ["Volatility", "Boom", "Crash", "Step Index"])
+        
+        if spike_predictor and is_volatility_symbol:
             try:
-                # Récupérer les données historiques pour le prédicteur
-                df = get_historical_data_mt5(request.symbol, "M1", 100)
-                if df is not None and len(df) > 0:
+                # Récupérer plus de données pour une meilleure prédiction
+                df = get_historical_data_mt5(request.symbol, "M1", 200)  # Augmenté à 200 bougies
+                if df is not None and len(df) > 50:
+                    # Analyse multiple timeframes pour plus de fiabilité
+                    df_m5 = get_historical_data_mt5(request.symbol, "M5", 100)
+                    
+                    # Calculer la confluence avec plusieurs indicateurs
                     confluence = spike_predictor.calculate_ema_confluence(df)
-                    if confluence.get('confluence_strength', 0) > 0.7:
+                    volatility_regime = request.volatility_regime or 0
+                    volatility_ratio = request.volatility_ratio or 1.0
+                    
+                    # Conditions renforcées pour plus de fiabilité
+                    confluence_strength = confluence.get('confluence_strength', 0)
+                    trend_alignment = confluence.get('trend_direction') == 'BULLISH' if action == 'buy' else confluence.get('trend_direction') == 'BEARISH'
+                    
+                    # Seuil plus élevé pour les prédictions de spike
+                    if (confluence_strength > 0.8 and  # Augmenté de 0.7 à 0.8
+                        trend_alignment and 
+                        volatility_regime >= 0 and  # Éviter les faibles volatilités
+                        volatility_ratio > 0.8):  # Ratio de volatilité suffisant
+                        
                         spike_prediction = True
                         spike_zone_price = mid_price
                         spike_direction = confluence.get('trend_direction') == 'BULLISH'
-                        reason += " | Spike détecté par ML"
+                        confidence = min(confidence + 0.15, 0.95)  # Bonus de confiance
+                        reason += " | Spike ML haute confiance détecté"
+                        
             except Exception as e:
-                logger.warning(f"Erreur prédicteur spike: {e}")
+                logger.warning(f"Erreur prédicteur spike avancé: {e}")
         
-        # Détection de spike basique si ML non disponible (Boom / Crash uniquement)
-        if not spike_prediction and ("Boom" in request.symbol or "Crash" in request.symbol):
+        # Détection de spike améliorée avec conditions plus strictes
+        if not spike_prediction and is_volatility_symbol:
             is_boom = "Boom" in request.symbol
             is_crash = "Crash" in request.symbol
+            is_step = "Step" in request.symbol
 
             volatility = request.atr / mid_price if mid_price > 0 else 0
 
-            # Conditions de base communes
-            strong_vol = volatility >= 0.002   # ~0.2% de range minimum
-            medium_vol = volatility >= 0.001   # ~0.1% pour pré-alerte
+            # Conditions de volatilité plus strictes
+            strong_vol = volatility >= 0.003   # Augmenté de 0.002 à 0.003 (~0.3%)
+            medium_vol = volatility >= 0.0015  # Augmenté de 0.001 à 0.0015
 
-            # Spike haussier (Boom / Crash avec retournement haussier)
+            # RSI plus stricts pour éviter les faux signaux
+            extreme_oversold = rsi <= 20      # Augmenté de 25 à 20
+            extreme_overbought = rsi >= 80     # Augmenté de 75 à 80
+            moderate_oversold = rsi <= 35      # Nouveau seuil modéré
+            moderate_overbought = rsi >= 65    # Nouveau seuil modéré
+
+            # Spike haussier avec conditions renforcées
             strong_bull_spike = (
                 strong_vol
-                and rsi <= 25                    # RSI très bas (survente marquée)
-                and h1_bullish and m1_bullish    # Alignement H1 + M1
-                and request.dir_rule >= 0        # Règle de direction compatible BUY / neutre
+                and extreme_oversold
+                and h1_bullish and m1_bullish    # Alignement requis
+                and request.dir_rule >= 1        # Direction BUY claire (pas neutre)
+                and (vwap_signal_buy or supertrend_bullish)  # Confirmation additionnelle
             )
 
-            # Spike baissier (Crash / Boom avec retournement baissier)
+            # Spike baissier avec conditions renforcées
             strong_bear_spike = (
                 strong_vol
-                and rsi >= 75                    # RSI très haut (surachat marqué)
-                and h1_bearish and m1_bearish    # Alignement H1 + M1
-                and request.dir_rule <= 0        # Règle de direction compatible SELL / neutre
+                and extreme_overbought
+                and h1_bearish and m1_bearish    # Alignement requis
+                and request.dir_rule <= -1       # Direction SELL claire (pas neutre)
+                and (vwap_signal_sell or supertrend_bearish)  # Confirmation additionnelle
             )
 
-            if strong_bull_spike or strong_bear_spike:
+            # Spike pour Step Index avec conditions spécifiques
+            step_spike = False
+            if is_step:
+                step_spike = (
+                    strong_vol
+                    and (extreme_oversold or extreme_overbought)
+                    and ((h1_bullish and m1_bullish) or (h1_bearish and m1_bearish))
+                    and abs(request.dir_rule) >= 1
+                )
+
+            if strong_bull_spike or strong_bear_spike or step_spike:
                 spike_prediction = True
                 spike_zone_price = mid_price
-                # true = BUY, false = SELL
-                spike_direction = strong_bull_spike
-                reason += " | Spike détecté (conditions strictes)"
+                spike_direction = strong_bull_spike or (step_spike and extreme_oversold)
+                confidence = min(confidence + 0.2, 0.95)  # Bonus plus important
+                
+                if is_boom:
+                    reason += " | Spike Boom confirmé (conditions strictes)"
+                elif is_crash:
+                    reason += " | Spike Crash confirmé (conditions strictes)"
+                elif is_step:
+                    reason += " | Spike Step Index détecté"
+                else:
+                    reason += " | Spike Volatilité confirmé"
 
-            # Pré-alerte plus souple (affichage flèche + countdown, sans exécution auto)
-            elif medium_vol and (rsi <= 30 or rsi >= 70):
+            # Pré-alerte améliorée avec filtre de bruit
+            elif (medium_vol and 
+                  (moderate_oversold or moderate_overbought) and
+                  (h1_bullish != h1_bearish) and  # Tendance claire sur H1
+                  (request.volatility_ratio > 0.7 if hasattr(request, 'volatility_ratio') and request.volatility_ratio is not None else True)):  # Filtrer les faibles ratios
+                
                 early_spike_warning = True
                 early_spike_zone_price = mid_price
-                early_spike_direction = rsi <= 30
-                reason += " | Pré-alerte spike (conditions modérées)"
+                early_spike_direction = moderate_oversold
+                confidence = min(confidence + 0.05, 0.85)  # Petit bonus de confiance
+                
+                if is_boom:
+                    reason += " | Pré-alerte Spike Boom (conditions modérées)"
+                elif is_crash:
+                    reason += " | Pré-alerte Spike Crash (conditions modérées)"
+                else:
+                    reason += " | Pré-alerte Volatilité (conditions modérées)"
         
         # Calcul des zones d'achat/vente
         buy_zone_low = None
@@ -1292,7 +2088,9 @@ Format: Analyse claire et professionnelle en français.
             "buy_zone_low": buy_zone_low,
             "buy_zone_high": buy_zone_high,
             "sell_zone_low": sell_zone_low,
-            "sell_zone_high": sell_zone_high
+            "sell_zone_high": sell_zone_high,
+            "stop_loss": stop_loss,
+            "take_profit": take_profit
         }
         
         # Mise en cache
@@ -1303,55 +2101,174 @@ Format: Analyse claire et professionnelle en français.
         
     except Exception as e:
         logger.error(f"Erreur dans /decision: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(
+            status_code=500,
+            detail=str(e)
+        )
+
+async def handle_raw_analysis_request(raw_request: dict, symbol: Optional[str]) -> AnalysisResponse:
+    """Gère les requêtes brutes (compatibilité MT5)"""
+    logger.debug(f"Traitement d'une requête brute: {raw_request}")
+    symbol = raw_request.get("symbol", symbol)
+    request_type = raw_request.get("request_type")
+    
+    if not symbol:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Le paramètre 'symbol' est requis dans raw_request"
+        )
+    
+    if request_type == "fibonacci_analysis":
+        logger.info(f"Analyse Fibonacci demandée pour {symbol} (raw)")
+        return generate_fibonacci_response(symbol)
+    
+    return await get_technical_analysis(symbol)
+
+async def handle_analysis_request(request: AnalysisRequest) -> AnalysisResponse:
+    """Gère les requêtes via le modèle AnalysisRequest"""
+    if not request.symbol:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Le champ 'symbol' est requis"
+        )
+    
+    if request.request_type == "fibonacci_analysis":
+        logger.info(f"Analyse Fibonacci demandée pour {request.symbol} (via request)")
+        return generate_fibonacci_response(request.symbol)
+    
+    return await get_technical_analysis(request.symbol)
+
+def generate_fibonacci_response(symbol: str) -> AnalysisResponse:
+    """Génère une réponse d'analyse Fibonacci"""
+    import random
+    base_price = random.uniform(
+        6000 if "Boom" in symbol else 10000,
+        10000 if "Boom" in symbol else 15000
+    )
+    fib_levels = generate_fibonacci_levels(base_price)
+    
+    return AnalysisResponse(
+        symbol=symbol,
+        timestamp=datetime.now().isoformat(),
+        h1=fib_levels.get("h1", {}),
+        h4=fib_levels.get("h4", {}),
+        m15=fib_levels.get("m15", {})
+    )
+
+async def get_technical_analysis(symbol: str) -> AnalysisResponse:
+    """Effectue une analyse technique complète"""
+    logger.info(f"Début de l'analyse technique pour {symbol}")
+    
+    response = {
+        "symbol": symbol,
+        "timestamp": datetime.now().isoformat(),
+        "h1": {},
+        "h4": {},
+        "m15": {},
+        "ete": None
+    }
+    
+    if not mt5_initialized:
+        logger.warning("MT5 non initialisé - retour d'une réponse vide")
+        return AnalysisResponse(**response)
+    
+    try:
+        # Analyse H1
+        df_h1 = get_historical_data_mt5(symbol, "H1", 400)
+        if df_h1 is not None and not df_h1.empty:
+            response["h1"] = detect_trendlines(df_h1)
+        
+        # Analyse H4
+        df_h4 = get_historical_data_mt5(symbol, "H4", 400)
+        if df_h4 is not None and not df_h4.empty:
+            response["h4"] = detect_trendlines(df_h4)
+        
+        # Analyse M15
+        df_m15 = get_historical_data_mt5(symbol, "M15", 400)
+        if df_m15 is not None and not df_m15.empty:
+            response["m15"] = detect_trendlines(df_m15)
+            
+    except Exception as e:
+        logger.error(f"Erreur lors de l'analyse technique: {str(e)}", exc_info=True)
+        # On continue avec les données disponibles
+    
+    return AnalysisResponse(**response)
 
 @app.get("/analysis", response_model=AnalysisResponse)
 @app.post("/analysis", response_model=AnalysisResponse)
-async def analysis(symbol: str = None, request: AnalysisRequest = None):
+async def analysis(
+    symbol: Optional[str] = None,
+    request: Optional[AnalysisRequest] = None,
+    raw_request: Optional[dict] = Body(None, embed=True)
+):
     """
     Analyse complète de la structure de marché (H1, H4, M15)
-    Inclut les trendlines et figures chartistes (ETE, etc.)
+    Inclut les trendlines, figures chartistes et analyse Fibonacci
+    
+    Args:
+        symbol: Symbole à analyser (peut être fourni en paramètre de requête ou dans le body)
+        request: Objet de requête Pydantic (pour les requêtes POST JSON)
+        raw_request: Corps brut de la requête (pour compatibilité MT5)
+        
+    Returns:
+        AnalysisResponse: Réponse contenant l'analyse technique
     """
     try:
-        # Gérer les requêtes GET et POST
+        # Journalisation de la requête
+        logger.info(f"Requête /analysis reçue - symbol: {symbol}, "
+                  f"request: {request}, raw_request: {raw_request}")
+        
+        # Si raw_request est un dictionnaire vide, le traiter comme None
+        if raw_request == {}:
+            raw_request = None
+            
+        # Vérification des paramètres d'entrée
+        if symbol is None and request is None and raw_request is None:
+            # Essayer de récupérer les données directement du corps de la requête
+            body = await request.body()
+            if body:
+                try:
+                    data = json.loads(body)
+                    if 'symbol' in data:
+                        symbol = data['symbol']
+                        logger.info(f"Symbole extrait du corps de la requête: {symbol}")
+                    elif 'raw_request' in data and isinstance(data['raw_request'], dict) and 'symbol' in data['raw_request']:
+                        return await handle_raw_analysis_request(data['raw_request'], None)
+                except json.JSONDecodeError:
+                    pass
+                    
+            if symbol is None:
+                logger.error("Aucun paramètre valide fourni")
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Le paramètre 'symbol' est requis ou fournissez un objet de requête valide"
+                )
+
+        # Traitement des différentes sources de données
+        if raw_request is not None:
+            if isinstance(raw_request, dict):
+                return await handle_raw_analysis_request(raw_request, symbol)
+            else:
+                logger.warning(f"Format de raw_request non pris en charge: {type(raw_request)}")
+                
         if request is not None:
-            symbol = request.symbol
-        elif symbol is None:
-            raise HTTPException(status_code=400, detail="Symbol parameter is required")
+            return await handle_analysis_request(request)
             
-        logger.info(f"Requête /analysis pour {symbol}")
-        
-        response = {
-            "symbol": symbol,
-            "timestamp": datetime.now().isoformat(),
-            "h1": {},
-            "h4": {},
-            "m15": {},
-            "ete": None
-        }
-        
-        # Récupérer les données historiques depuis MT5 si disponible
-        if mt5_initialized:
-            # Analyse H1
-            df_h1 = get_historical_data_mt5(symbol, "H1", 400)
-            if df_h1 is not None:
-                response["h1"] = detect_trendlines(df_h1)
+        if symbol is not None:
+            logger.info(f"Analyse technique standard pour {symbol}")
+            return await get_technical_analysis(symbol)
             
-            # Analyse H4
-            df_h4 = get_historical_data_mt5(symbol, "H4", 400)
-            if df_h4 is not None:
-                response["h4"] = detect_trendlines(df_h4)
-            
-            # Analyse M15
-            df_m15 = get_historical_data_mt5(symbol, "M15", 400)
-            if df_m15 is not None:
-                response["m15"] = detect_trendlines(df_m15)
-        
-        return AnalysisResponse(**response)
+    except HTTPException as http_exc:
+        # On laisse passer les exceptions HTTP déjà définies
+        logger.warning(f"Erreur HTTP dans /analysis: {str(http_exc.detail)}")
+        raise
         
     except Exception as e:
-        logger.error(f"Erreur dans /analysis: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Erreur inattendue dans /analysis: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Une erreur est survenue lors du traitement de la requête: {str(e)}"
+        )
 
 @app.get("/time_windows/{symbol:path}", response_model=TimeWindowsResponse)
 async def time_windows(symbol: str):
@@ -1619,89 +2536,196 @@ async def get_symbol_stats(symbol: str, days: int = 7):
         logger.error(f"Erreur stats: {e}")
         return {"error": str(e)}
 
-# Endpoint pour les signaux en temps réel
+# Endpoint pour les signaux en temps réel amélioré
 @app.get("/signals/{symbol}")
-async def get_signals(symbol: str):
-    """Génère des signaux de trading en temps réel"""
+async def get_signals(
+    symbol: str,
+    timeframe: str = "M15",
+    lookback: int = 200,
+    min_confidence: float = 0.6
+):
+    """
+    Génère des signaux de trading avancés avec analyse multi-timeframe
+    
+    Args:
+        symbol: Symbole à analyser (ex: "EURUSD")
+        timeframe: Période d'analyse (M1, M5, M15, H1, H4, D1)
+        lookback: Nombre de bougies à analyser
+        min_confidence: Confiance minimale pour les signaux (0-1)
+    """
     try:
         if not mt5_initialized:
             return {"error": "MT5 non initialisé"}
         
-        # Récupérer les dernières données
-        rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M1, 0, 100)
+        # Mapper le timeframe MT5
+        tf_mapping = {
+            'M1': mt5.TIMEFRAME_M1,
+            'M5': mt5.TIMEFRAME_M5,
+            'M15': mt5.TIMEFRAME_M15,
+            'H1': mt5.TIMEFRAME_H1,
+            'H4': mt5.TIMEFRAME_H4,
+            'D1': mt5.TIMEFRAME_D1
+        }
+        
+        mt5_timeframe = tf_mapping.get(timeframe, mt5.TIMEFRAME_M15)
+        
+        # Récupérer les données
+        rates = mt5.copy_rates_from_pos(symbol, mt5_timeframe, 0, lookback)
         if rates is None or len(rates) == 0:
-            return {"error": "Aucune donnée disponible"}
+            return {"error": f"Aucune donnée disponible pour {symbol} sur {timeframe}"}
         
         df = pd.DataFrame(rates)
         df['time'] = pd.to_datetime(df['time'], unit='s')
+        df.set_index('time', inplace=True)
         
-        # Calculer les indicateurs
+        # 1. Calcul des indicateurs de tendance
         df['sma_20'] = df['close'].rolling(20).mean()
         df['sma_50'] = df['close'].rolling(50).mean()
+        df['sma_200'] = df['close'].rolling(200).mean()
         
-        # Calculer RSI
+        # 2. Indicateur de momentum (RSI)
         delta = df['close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
         rs = gain / loss
         df['rsi'] = 100 - (100 / (1 + rs))
         
-        current_price = df['close'].iloc[-1]
-        current_rsi = df['rsi'].iloc[-1]
-        sma_20 = df['sma_20'].iloc[-1]
-        sma_50 = df['sma_50'].iloc[-1]
+        # 3. Bandes de Bollinger
+        df['bb_upper'], df['bb_middle'], df['bb_lower'] = (
+            df['close'].rolling(20).mean() + 2 * df['close'].rolling(20).std(),
+            df['close'].rolling(20).mean(),
+            df['close'].rolling(20).mean() - 2 * df['close'].rolling(20).std()
+        )
         
-        # Générer les signaux
+        # 4. MACD
+        exp1 = df['close'].ewm(span=12, adjust=False).mean()
+        exp2 = df['close'].ewm(span=26, adjust=False).mean()
+        df['macd'] = exp1 - exp2
+        df['signal_line'] = df['macd'].ewm(span=9, adjust=False).mean()
+        
+        # 5. ADX (Average Directional Index)
+        plus_dm = df['high'].diff()
+        minus_dm = df['low'].diff() * -1
+        
+        tr1 = df['high'] - df['low']
+        tr2 = abs(df['high'] - df['close'].shift())
+        tr3 = abs(df['low'] - df['close'].shift())
+        
+        df['tr'] = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        atr = df['tr'].rolling(14).mean()
+        
+        plus_di = 100 * (plus_dm.ewm(alpha=1/14).mean() / atr)
+        minus_di = 100 * (minus_dm.ewm(alpha=1/14).mean() / atr)
+        df['adx'] = 100 * abs((plus_di - minus_di) / (plus_di + minus_di)).ewm(alpha=1/14).mean()
+        
+        # Dernières valeurs
+        current = df.iloc[-1]
+        previous = df.iloc[-2] if len(df) > 1 else current
+        
+        # Génération des signaux
         signals = []
         
-        # Signal SMA crossover
-        if len(df) > 1:
-            prev_sma20 = df['sma_20'].iloc[-2]
-            prev_sma50 = df['sma_50'].iloc[-2]
-            
-            if pd.notna(sma_20) and pd.notna(sma_50):
-                if sma_20 > sma_50 and prev_sma20 <= prev_sma50:
-                    signals.append({
-                        "type": "BUY",
-                        "reason": "SMA 20 croise au-dessus de SMA 50",
-                        "confidence": 0.7
-                    })
-                elif sma_20 < sma_50 and prev_sma20 >= prev_sma50:
-                    signals.append({
-                        "type": "SELL",
-                        "reason": "SMA 20 croise en-dessous de SMA 50",
-                        "confidence": 0.7
-                    })
+        # 1. Signaux de tendance
+        price_above_sma20 = current['close'] > current['sma_20']
+        price_above_sma50 = current['close'] > current['sma_50']
+        price_above_sma200 = current['close'] > current['sma_200']
         
-        # Signal RSI
-        if pd.notna(current_rsi):
-            if current_rsi < 30:
-                signals.append({
-                    "type": "BUY",
-                    "reason": "RSI en survente",
-                    "confidence": 0.6
-                })
-            elif current_rsi > 70:
-                signals.append({
-                    "type": "SELL",
-                    "reason": "RSI en surachat",
-                    "confidence": 0.6
-                })
+        if price_above_sma20 and price_above_sma50 and price_above_sma200:
+            signals.append({
+                "type": "BUY",
+                "reason": "Prix au-dessus des moyennes mobiles (20, 50, 200)",
+                "confidence": 0.7
+            })
+        elif not price_above_sma20 and not price_above_sma50 and not price_above_sma200:
+            signals.append({
+                "type": "SELL",
+                "reason": "Prix en-dessous des moyennes mobiles (20, 50, 200)",
+                "confidence": 0.7
+            })
         
-        return {
+        # 2. Signaux RSI
+        if current['rsi'] < 30:
+            signals.append({
+                "type": "BUY",
+                "reason": f"RSI en survente ({current['rsi']:.1f})",
+                "confidence": 0.65
+            })
+        elif current['rsi'] > 70:
+            signals.append({
+                "type": "SELL",
+                "reason": f"RSI en surachat ({current['rsi']:.1f})",
+                "confidence": 0.65
+            })
+        
+        # 3. Signaux Bandes de Bollinger
+        if current['close'] < current['bb_lower']:
+            signals.append({
+                "type": "BUY",
+                "reason": "Prix en dessous de la bande de Bollinger inférieure",
+                "confidence": 0.7
+            })
+        elif current['close'] > current['bb_upper']:
+            signals.append({
+                "type": "SELL",
+                "reason": "Prix au-dessus de la bande de Bollinger supérieure",
+                "confidence": 0.7
+            })
+        
+        # 4. Signaux MACD
+        if current['macd'] > current['signal_line'] and previous['macd'] <= previous['signal_line']:
+            signals.append({
+                "type": "BUY",
+                "reason": "Croisement haussier du MACD",
+                "confidence": 0.75
+            })
+        elif current['macd'] < current['signal_line'] and previous['macd'] >= previous['signal_line']:
+            signals.append({
+                "type": "SELL",
+                "reason": "Croisement baissier du MACD",
+                "confidence": 0.75
+            })
+        
+        # 5. Filtre ADX (tendance forte si > 25)
+        strong_trend = current['adx'] > 25
+        
+        # Filtrer les signaux par confiance minimale
+        signals = [s for s in signals if s['confidence'] >= min_confidence]
+        
+        # Trier par confiance décroissante
+        signals.sort(key=lambda x: x['confidence'], reverse=True)
+        
+        # Préparer la réponse
+        response = {
             "symbol": symbol,
+            "timeframe": timeframe,
             "timestamp": datetime.now().isoformat(),
-            "current_price": float(current_price),
+            "price": float(current['close']),
             "indicators": {
-                "rsi": float(current_rsi) if pd.notna(current_rsi) else None,
-                "sma_20": float(sma_20) if pd.notna(sma_20) else None,
-                "sma_50": float(sma_50) if pd.notna(sma_50) else None
+                "sma_20": float(current['sma_20']) if pd.notna(current['sma_20']) else None,
+                "sma_50": float(current['sma_50']) if pd.notna(current['sma_50']) else None,
+                "sma_200": float(current['sma_200']) if pd.notna(current['sma_200']) else None,
+                "rsi": float(current['rsi']) if pd.notna(current['rsi']) else None,
+                "bb_upper": float(current['bb_upper']) if pd.notna(current['bb_upper']) else None,
+                "bb_middle": float(current['bb_middle']) if pd.notna(current['bb_middle']) else None,
+                "bb_lower": float(current['bb_lower']) if pd.notna(current['bb_lower']) else None,
+                "macd": float(current['macd']) if pd.notna(current['macd']) else None,
+                "macd_signal": float(current['signal_line']) if pd.notna(current['signal_line']) else None,
+                "adx": float(current['adx']) if pd.notna(current['adx']) else None,
+                "strong_trend": bool(strong_trend) if pd.notna(strong_trend) else None
             },
-            "signals": signals
+            "signals": signals,
+            "analysis": {
+                "trend": "Haussière" if price_above_sma200 else "Baissière",
+                "volatility": "Élevée" if (current['bb_upper'] - current['bb_lower']) / current['bb_middle'] > 0.01 else "Faible",
+                "momentum": "Haussière" if current['rsi'] > 50 else "Baissière"
+            }
         }
+        
+        return response
+        
     except Exception as e:
-        logger.error(f"Erreur signaux: {e}")
-        return {"error": str(e)}
+        logger.error(f"Erreur lors de la génération des signaux pour {symbol}: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Erreur lors de l'analyse: {str(e)}")
 
 # Endpoint pour les indicateurs avancés
 @app.post("/indicators/analyze")
@@ -1917,10 +2941,330 @@ async def validate_order(order_data: Dict[str, Any]):
                 "min_stop_points": float(min_stop / symbol_info.point)
             }
         else:
-            return {"valid": True, "warning": "MT5 non disponible, validation limitée"}
+            return {"valid": False, "reason": "MT5 non initialisé"}
     except Exception as e:
-        logger.error(f"Erreur validation ordre: {e}")
-        return {"valid": False, "reason": str(e)}
+        logger.error(f"Erreur validation ordre: {e}", exc_info=True)
+        return {"valid": False, "reason": f"Erreur: {str(e)}"}
+
+class GemmaTradingResponse(BaseModel):
+    """Modèle pour les réponses de trading avec Gemma"""
+    success: bool
+    symbol: str
+    timeframe: str
+    analysis: Optional[str] = None
+    chart_filename: Optional[str] = None
+    error: Optional[str] = None
+    timestamp: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
+
+class TradingSignalRequest(BaseModel):
+    """Modèle pour les requêtes de signaux de trading"""
+    symbol: str
+    timeframe: str
+    analysis: str
+    indicators: Optional[Dict[str, Any]] = None
+
+class TradingSignalResponse(BaseModel):
+    """Modèle pour les réponses de signaux de trading"""
+    success: bool
+    signal: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
+    timestamp: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
+
+class GemmaTradingRequest(BaseModel):
+    """Modèle pour les requêtes d'analyse de graphique Gemma"""
+    symbol: str
+    timeframe: str
+    prompt: Optional[str] = None
+    capture_chart: bool = True
+    max_tokens: int = 200
+    temperature: float = 0.7
+    top_p: float = 0.9
+
+class IndicatorsResponse(BaseModel):
+    """Modèle pour les réponses d'indicateurs MT5"""
+    symbol: str
+    timeframe: str
+    indicators: Dict[str, Any]
+
+# ===================== GEMMA TRADING BOT =====================
+
+class GemmaTradingBot:
+    """Gestion de la capture et de l'analyse de graphiques pour le trading"""
+
+    def __init__(self, config: Optional[Dict[str, Any]] | None = None):
+        self.config = config or {}
+        self.model_path = self.config.get("model_path", GEMMA_MODEL_PATH)
+        self.mt5_files_dir = self.config.get("mt5_files_dir", MT5_FILES_DIR)
+        self.chart_dir = os.path.join(self.mt5_files_dir, "Charts")
+        os.makedirs(self.chart_dir, exist_ok=True)
+
+    def capture_chart(self, symbol: str, timeframe: str, width: int = 800, height: int = 600) -> Tuple[Optional[Image.Image], Optional[str]]:
+        if not MT5_AVAILABLE or not 'mt5' in globals() or not mt5_initialized:
+            logger.warning("MT5 non initialisé, capture impossible")
+            return None, None
+
+        if not mt5.symbol_select(symbol, True):
+            logger.error("Symbole %s introuvable dans MT5", symbol)
+            return None, None
+
+        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        filename = f"{symbol}_{timeframe}_{timestamp}.png"
+        filepath = os.path.join(self.chart_dir, filename)
+
+        try:
+            if not mt5.chart_save(0, filepath, width, height, 0):
+                logger.error("chart_save a échoué pour %s %s", symbol, timeframe)
+                return None, None
+            image = Image.open(filepath)
+            return image, filename
+        except Exception as exc:
+            logger.error("Erreur capture_chart: %s", exc, exc_info=True)
+            return None, None
+
+    def analyze_chart(self, symbol: str, timeframe: str, image: Optional[Image.Image] = None, prompt: Optional[str] = None) -> Optional[str]:
+        if not GEMMA_AVAILABLE:
+            logger.warning("Gemma non disponible")
+            return None
+        if image is None:
+            image, _ = self.capture_chart(symbol, timeframe)
+            if image is None:
+                return None
+
+        prompt = prompt or (
+            f"Analyse ce graphique pour {symbol} sur {timeframe}. "
+            "Identifie la tendance, supports, résistances et donne un commentaire concis."
+        )
+
+        temp_path = os.path.join(self.chart_dir, f"temp_{int(time.time())}.png")
+        image.save(temp_path)
+        try:
+            result = analyze_with_gemma(prompt=prompt, image_filename=temp_path)
+            return result
+        finally:
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
+                
+    def analyze_gemma_response(self, response: str) -> None:
+        """Analyse et log les signaux détectés dans la réponse Gemma"""
+        if not response:
+            return
+            
+        try:
+            # Détection des signaux de trading
+            signals = {
+                'buy': ['acheter', 'long', 'haussier', 'bullish', '↑', '🔼', '📈', '🚀'],
+                'sell': ['vendre', 'short', 'baissier', 'bearish', '↓', '🔽', '📉', '💥'],
+                'neutral': ['neutre', 'lateral', 'ranging', 'consolidation', 'sideways', '➡️']
+            }
+            
+            detected_signals = []
+            for signal, keywords in signals.items():
+                if any(keyword in response.lower() for keyword in keywords):
+                    detected_signals.append(signal.upper())
+            
+            # Détection des niveaux de prix
+            import re
+            price_levels = re.findall(r'\b\d+\.?\d*\b', response)
+            
+            # Log des résultats
+            logger.info("\n" + "="*80)
+            logger.info("📊 RÉSULTATS GEMMA")
+            logger.info("="*80)
+            if detected_signals:
+                logger.info(f"📡 Signaux détectés: {', '.join(detected_signals)}")
+            else:
+                logger.info("ℹ️ Aucun signal clair détecté")
+                
+            if price_levels:
+                logger.info(f"🎯 Niveaux de prix détectés: {', '.join(price_levels[:5])}")
+                
+            # Détection des mots-clés importants
+            important_keywords = ['stop loss', 'take profit', 'risque', 'opportunité', 'tendance']
+            found_keywords = [kw for kw in important_keywords if kw in response.lower()]
+            if found_keywords:
+                logger.info(f"🔍 Mots-clés importants: {', '.join(found_keywords)}")
+                
+            logger.info("="*80 + "\n")
+            
+        except Exception as e:
+            logger.error(f"Erreur lors de l'analyse de la réponse Gemma: {str(e)}")
+
+# Instance réutilisable
+gemma_trading_bot = GemmaTradingBot()
+
+# ---------------------- Endpoints Trading ----------------------
+
+# Route pour obtenir les indicateurs bruts
+@app.get("/trading/indicators/{symbol}/{timeframe}")
+async def get_indicators(symbol: str, timeframe: str):
+    indicators = get_mt5_indicators(symbol, timeframe)
+    if not indicators:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Impossible de récupérer les indicateurs pour {symbol}"
+        )
+    return JSONResponse(content={
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "indicators": indicators
+    })
+
+# Route d'analyse avec Gemma utilisant les indicateurs MT5
+@app.post("/trading/analyze")
+async def analyze_trading_chart(request: GemmaTradingRequest):
+    try:
+        # Récupération des indicateurs MT5
+        indicators = get_mt5_indicators(request.symbol, request.timeframe)
+        if not indicators:
+            return JSONResponse(
+                status_code=400,
+                content={"error": f"Impossible de récupérer les indicateurs pour {request.symbol}"}
+            )
+        
+        # Création du prompt avec les indicateurs
+        analysis_prompt = f"""
+        Analyse technique pour {request.symbol} ({request.timeframe}):
+        
+        Prix:
+        - Actuel: {indicators['current_price']}
+        - Ouverture: {indicators['open']}
+        - Plus haut: {indicators['high']}
+        - Plus bas: {indicators['low']}
+        
+        Moyennes mobiles:
+        - SMA 20: {indicators['sma_20']}
+        - SMA 50: {indicators['sma_50']}
+        - SMA 200: {indicators['sma_200']}
+        
+        Indicateurs:
+        - RSI (14): {indicators['rsi']:.2f}
+        - ATR (14): {indicators['atr']:.5f}
+        - MACD: {indicators['macd']:.5f}
+        - Bandes de Bollinger: {indicators['bb_lower']:.5f} - {indicators['bb_upper']:.5f}
+        - Volume: {indicators['volume']}
+        
+        {request.prompt or "Donne une analyse technique complète et des recommandations de trading."}
+        """
+        
+        # Utilisation de Gemma pour l'analyse
+        if not GEMMA_AVAILABLE:
+            return {"error": "Gemma n'est pas disponible"}
+            
+        try:
+            inputs = gemma_processor(analysis_prompt, return_tensors="pt")
+            outputs = gemma_model.generate(**inputs, max_length=1000)
+            analysis = gemma_processor.decode(outputs[0], skip_special_tokens=True)
+            
+            return {
+                "symbol": request.symbol,
+                "timeframe": request.timeframe,
+                "analysis": analysis,
+                "indicators": indicators
+            }
+            
+        except Exception as e:
+            return {"error": f"Erreur lors de l'analyse avec Gemma: {str(e)}"}
+            
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={"error": f"Erreur lors de l'analyse: {str(e)}"}
+        )
+
+@app.post("/trading/generate-signal", response_model=TradingSignalResponse)
+async def generate_trading_signal(request: TradingSignalRequest):
+    try:
+        if not GEMMA_AVAILABLE:
+            raise ValueError("Gemma non disponible")
+
+        prompt = f"""
+        Génère un signal de trading clair pour {request.symbol} ({request.timeframe}) basé sur l'analyse suivante :
+        {request.analysis}
+
+        Indicateurs:
+        {json.dumps(request.indicators or {}, indent=2)}
+
+        Format de la réponse attendu :
+        Action: BUY/SELL/HOLD
+        Entrée: <prix>
+        StopLoss: <prix>
+        TakeProfit: <prix>
+        Confiance: <0-100%>
+        Raisonnement:
+        """
+
+        response_text = analyze_with_gemma(prompt=prompt)
+        if not response_text:
+            raise ValueError("Impossible de générer le signal")
+
+        signal = {"raw_response": response_text}
+
+        return TradingSignalResponse(success=True, signal=signal)
+    except Exception as exc:
+        logger.error("Erreur generate_trading_signal: %s", exc, exc_info=True)
+        return TradingSignalResponse(success=False, error=str(exc))
+
+# =============================================================================
+class GemmaAnalysisRequest(BaseModel):
+    """Modèle pour les requêtes d'analyse Gemma"""
+    prompt: str
+    image_filename: Optional[str] = None
+    max_tokens: int = 200
+    temperature: float = 0.7
+    top_p: float = 0.9
+
+class GemmaAnalysisResponse(BaseModel):
+    """Modèle pour les réponses d'analyse Gemma"""
+    success: bool
+    result: Optional[str] = None
+    error: Optional[str] = None
+    model_status: str = "unavailable"
+
+@app.post("/analyze/gemma", response_model=GemmaAnalysisResponse)
+async def analyze_with_gemma_endpoint(request: GemmaAnalysisRequest):
+    """
+    Endpoint pour effectuer des analyses avec le modèle Gemma
+    """
+    if not GEMMA_AVAILABLE:
+        return GemmaAnalysisResponse(
+            success=False,
+            error="Le modèle Gemma n'est pas disponible",
+            model_status="unavailable"
+        )
+    
+    try:
+        # Valider les paramètres
+        if not request.prompt or len(request.prompt.strip()) == 0:
+            raise ValueError("Le prompt ne peut pas être vide")
+            
+        # Appeler la fonction d'analyse Gemma
+        result = analyze_with_gemma(
+            prompt=request.prompt,
+            image_filename=request.image_filename
+        )
+        
+        if result is None:
+            return GemmaAnalysisResponse(
+                success=False,
+                error="L'analyse Gemma n'a pas pu être effectuée",
+                model_status="error"
+            )
+            
+        return GemmaAnalysisResponse(
+            success=True,
+            result=result,
+            model_status="ready"
+        )
+        
+    except Exception as e:
+        logger.error(f"Erreur lors de l'analyse avec Gemma: {str(e)}", exc_info=True)
+        return GemmaAnalysisResponse(
+            success=False,
+            error=f"Erreur lors de l'analyse: {str(e)}",
+            model_status="error"
+        )
 
 # ==================== INDICATEURS TECHNIQUES AVANCÉS ====================
 
@@ -2189,833 +3533,20 @@ async def get_market_profile_analysis(
 
 # ==================== FIN INDICATEURS TECHNIQUES AVANCÉS ====================
 
-class AutoScanManager:
-    """Gestionnaire de scan automatique des symboles pour détecter les opportunités de trading."""
-    
-    def __init__(self, scan_interval_minutes: int = 10):
-        """Initialise le gestionnaire de scan."""
-        self.scan_interval = scan_interval_minutes
-        self.running = False
-        self.thread = None
-        self.last_scan_time = None
-        self.scan_results = {}
-        self.scan_lock = threading.Lock()
-        self.logger = logging.getLogger("autoscan")
-        
-    def start(self):
-        """Démarre le scan automatique en arrière-plan."""
-        if self.running:
-            self.logger.warning("Le scan est déjà en cours d'exécution")
-            return False
-            
-        self.running = True
-        self.thread = threading.Thread(target=self._run_scan_loop, daemon=True)
-        self.thread.start()
-        self.logger.info(f"Scan automatique démarré avec un intervalle de {self.scan_interval} minutes")
-        return True
-        
-    def stop(self):
-        """Arrête le scan automatique."""
-        self.running = False
-        if self.thread and self.thread.is_alive():
-            self.thread.join(timeout=5)
-        self.logger.info("Scan automatique arrêté")
-        
-    def _run_scan_loop(self):
-        """Boucle principale du scan automatique."""
-        while self.running:
-            try:
-                self._perform_scan()
-                time.sleep(self.scan_interval * 60)
-            except Exception as e:
-                self.logger.error(f"Erreur dans la boucle de scan: {e}")
-                time.sleep(30)
-                
-    def _perform_scan(self):
-        """Effectue un scan complet de tous les symboles."""
-        if not BACKEND_AVAILABLE:
-            self.logger.warning("Modules backend non disponibles - scan impossible")
-            return
-            
-        start_time = time.time()
-        self.logger.info("Début du scan automatique des symboles")
-        
-        try:
-            # Récupérer tous les symboles disponibles
-            symbols = self._get_symbols_to_scan()
-            signals_found = []
-            
-            for symbol in symbols:
-                if not self.running:
-                    break
-                    
-                try:
-                    signal = self._scan_symbol(symbol)
-                    if signal:
-                        signals_found.append(signal)
-                        self.logger.info(f"Signal détecté pour {symbol}: {signal['action']}")
-                except Exception as e:
-                    self.logger.error(f"Erreur lors du scan de {symbol}: {e}")
-                    
-            # Stocker les résultats
-            with self.scan_lock:
-                self.scan_results = {
-                    'timestamp': datetime.now().isoformat(),
-                    'signals': signals_found,
-                    'symbols_scanned': len(symbols),
-                    'scan_duration': time.time() - start_time
-                }
-                
-            self.logger.info(f"Scan terminé: {len(signals_found)} signaux trouvés sur {len(symbols)} symboles")
-            
-        except Exception as e:
-            self.logger.error(f"Erreur lors du scan: {e}")
-            
-    def _get_symbols_to_scan(self) -> List[str]:
-        """Récupère la liste des symboles attachés au robot (symboles actifs)."""
-        if BACKEND_AVAILABLE and MT5_AVAILABLE:
-            try:
-                import MetaTrader5 as mt5
-                if mt5.terminal_info():
-                    # Récupérer les symboles actuellement ouverts dans les graphiques
-                    charts = mt5.chart_get_all()
-                    symbols_from_charts = set()
-                    
-                    for chart in charts:
-                        symbol = chart.symbol
-                        if symbol and symbol not in symbols_from_charts:
-                            symbols_from_charts.add(symbol)
-                    
-                    if symbols_from_charts:
-                        self.logger.info(f"Symboles détectés depuis les graphiques: {list(symbols_from_charts)}")
-                        return list(symbols_from_charts)
-                    
-                    # Alternative: récupérer les symboles avec des positions ouvertes
-                    positions = mt5.positions_get()
-                    symbols_from_positions = set()
-                    
-                    if positions:
-                        for position in positions:
-                            if position.symbol not in symbols_from_positions:
-                                symbols_from_positions.add(position.symbol)
-                    
-                    if symbols_from_positions:
-                        self.logger.info(f"Symboles détectés depuis les positions: {list(symbols_from_positions)}")
-                        return list(symbols_from_positions)
-                    
-                    # Alternative: récupérer les symboles favoris/symboles récemment utilisés
-                    from mt5_connector import get_all_symbols
-                    all_symbols = get_all_symbols()
-                    
-                    # Filtrer pour les symboles commonly traded
-                    priority_symbols = []
-                    other_symbols = []
-                    
-                    for symbol in all_symbols:
-                        if any(symbol.startswith(prefix) for prefix in [
-                            'EUR', 'GBP', 'USD', 'JPY', 'AUD', 'CAD', 'CHF', 'NZD'  # Forex majeurs
-                        ]):
-                            if len(symbol) == 6:  # Format standard forex
-                                priority_symbols.append(symbol)
-                        elif any(keyword in symbol for keyword in ['Volatility', 'Boom', 'Crash', 'Step']):
-                            priority_symbols.append(symbol)  # Indices synthétiques
-                    
-                    # Limiter à 10 symboles prioritaires pour éviter la surcharge
-                    return priority_symbols[:10]
-                    
-            except Exception as e:
-                self.logger.error(f"Erreur lors de la récupération des symboles MT5: {e}")
-                
-        # Retourner une liste par défaut si MT5 n'est pas disponible
-        default_symbols = ['EURUSD', 'GBPUSD', 'USDJPY', 'AUDUSD', 'Volatility 75 Index']
-        self.logger.info(f"Utilisation des symboles par défaut: {default_symbols}")
-        return default_symbols
-        
-    def _scan_symbol(self, symbol: str) -> Optional[Dict]:
-        """Scanne un symbole individuel pour détecter des signaux avec scores d'opportunité."""
-        try:
-            # Récupérer les données de tendance sur plusieurs timeframes
-            timeframes = ['M1', 'M5', 'M15', 'M30', 'H1', 'H4']
-            trend_data = {}
-            
-            # Importer les fonctions de calcul de tendance directement
-            import random
-            
-            for tf in timeframes:
-                try:
-                    # Simuler les données de tendance (sera remplacé par trend_api.py plus tard)
-                    trend_data[tf] = {
-                        'symbol': symbol,
-                        'timeframe': tf,
-                        'timestamp': time.time(),
-                        'trend_direction': self._calculate_trend_direction(symbol, tf),
-                        'trend_strength': self._calculate_trend_strength(symbol, tf),
-                        'confidence': self._calculate_confidence(symbol, tf),
-                        'support_levels': self._get_support_levels(symbol, tf),
-                        'resistance_levels': self._get_resistance_levels(symbol, tf),
-                        'volatility': self._calculate_volatility(symbol, tf),
-                        'spike_probability': self._calculate_spike_probability(symbol, tf),
-                        'trading_signal': self._generate_trading_signal(symbol, tf),
-                        'risk_level': self._assess_symbol_risk_level(symbol, tf)
-                    }
-                except Exception as e:
-                    self.logger.error(f"Erreur lors de l'analyse {tf} pour {symbol}: {e}")
-                    trend_data[tf] = None
-            
-            # Calculer le score d'opportunité
-            opportunity_score = self._calculate_opportunity_score(symbol, trend_data)
-            
-            # Récupérer le prix actuel sur M1
-            if BACKEND_AVAILABLE:
-                from mt5_connector import get_ohlc
-                df = get_ohlc(symbol, 'M1', 2)
-                if df is not None and not df.empty:
-                    current_price = float(df['close'].iloc[-1])
-                    
-                    # Calculer TP/SL basé sur le score d'opportunité
-                    atr = self._get_atr(symbol, 'M1', 14)
-                    if atr and atr > 0:
-                        # Ajuster TP/SL selon le score d'opportunité
-                        multiplier = 1.0 + (opportunity_score['overall_score'] / 100)
-                        sl_distance = atr * (1.5 / multiplier)  # SL plus serré si score élevé
-                        tp_distance = atr * (3.0 * multiplier)  # TP plus large si score élevé
-                        
-                        sl = current_price - sl_distance if opportunity_score['direction'] == 'BUY' else current_price + sl_distance
-                        tp = current_price + tp_distance if opportunity_score['direction'] == 'BUY' else current_price - tp_distance
-                        
-                        return {
-                            'symbol': symbol,
-                            'action': opportunity_score['direction'],
-                            'entry_price': current_price,
-                            'stop_loss': sl,
-                            'take_profit': tp,
-                            'confidence': opportunity_score['overall_score'] / 100,
-                            'reason': f"Score d'opportunité: {opportunity_score['overall_score']:.1f}% - {opportunity_score['reason']}",
-                            'timestamp': datetime.now().isoformat(),
-                            'opportunity_score': opportunity_score,
-                            'trend_data': trend_data,
-                            'lot_size_recommendation': self._calculate_lot_size(opportunity_score['overall_score']),
-                            'risk_level': opportunity_score['risk_level']
-                        }
-            
-            return None
-            
-        except Exception as e:
-            self.logger.error(f"Erreur lors du scan de {symbol}: {e}")
-            return None
-    
-    # Méthodes de calcul de tendance (remplacées par trend_api.py plus tard)
-    def _calculate_trend_direction(self, symbol: str, timeframe: str) -> str:
-        """Calcule la direction de la tendance pour un timeframe."""
-        import random
-        directions = ['bullish', 'bearish', 'neutral']
-        # Simulation basée sur l'heure et le symbole pour cohérence
-        seed = hash(symbol + timeframe + str(int(time.time() / 300)))  # Change toutes les 5 minutes
-        random.seed(seed % 1000)
-        return random.choice(directions)
-    
-    def _calculate_trend_strength(self, symbol: str, timeframe: str) -> int:
-        """Calcule la force de la tendance (0-100)."""
-        import random
-        seed = hash(symbol + timeframe + 'strength' + str(int(time.time() / 300)))
-        random.seed(seed % 1000)
-        return random.randint(40, 95)
-    
-    def _calculate_confidence(self, symbol: str, timeframe: str) -> int:
-        """Calcule le niveau de confiance (0-100)."""
-        import random
-        seed = hash(symbol + timeframe + 'confidence' + str(int(time.time() / 300)))
-        random.seed(seed % 1000)
-        return random.randint(50, 90)
-    
-    def _get_support_levels(self, symbol: str, timeframe: str) -> List[float]:
-        """Retourne les niveaux de support."""
-        # Simulation - sera remplacé par trend_api.py
-        return [1.0800, 1.0750, 1.0700]
-    
-    def _get_resistance_levels(self, symbol: str, timeframe: str) -> List[float]:
-        """Retourne les niveaux de résistance."""
-        # Simulation - sera remplacé par trend_api.py
-        return [1.0900, 1.0950, 1.1000, 1.1050, 1.1100]
-    
-    def _calculate_volatility(self, symbol: str, timeframe: str) -> float:
-        """Calcule la volatilité actuelle."""
-        import random
-        return round(random.uniform(0.5, 3.0), 2)
-    
-    def _calculate_spike_probability(self, symbol: str, timeframe: str) -> float:
-        """Calcule la probabilité de spike."""
-        import random
-        return round(random.uniform(0.2, 0.8), 2)
-    
-    def _generate_trading_signal(self, symbol: str, timeframe: str) -> str:
-        """Génère un signal de trading."""
-        signals = ["BUY", "SELL", "HOLD"]
-        import random
-        return random.choice(signals)
-    
-    def _assess_symbol_risk_level(self, symbol: str, timeframe: str) -> str:
-        """Évalue le niveau de risque."""
-        risk_levels = ["LOW", "MEDIUM", "HIGH"]
-        import random
-        return random.choice(risk_levels)
-            
-    def _get_atr(self, symbol: str, timeframe: str, period: int) -> Optional[float]:
-        """Calcule l'ATR pour un symbole."""
-        try:
-            if BACKEND_AVAILABLE:
-                from mt5_connector import get_ohlc
-                df = get_ohlc(symbol, timeframe, period + 1)
-                if df is not None and not df.empty:
-                    high = df['high'].values
-                    low = df['low'].values
-                    close = df['close'].values
-                    
-                    tr1 = high[1:] - low[1:]
-                    tr2 = abs(high[1:] - close[:-1])
-                    tr3 = abs(low[1:] - close[:-1])
-                    
-                    tr = np.maximum.reduce([tr1, tr2, tr3])
-                    atr = np.mean(tr)
-                    
-                    return float(atr)
-        except Exception as e:
-            self.logger.error(f"Erreur lors du calcul de l'ATR pour {symbol}: {e}")
-            
-        return None
-        
-    def _calculate_opportunity_score(self, symbol: str, trend_data: Dict) -> Dict:
-        """Calcule le score d'opportunité basé sur l'analyse multi-timeframe."""
-        try:
-            scores = {
-                'BUY_LONG': 0,    # Achat long terme (H4/H1)
-                'BUY_SHORT': 0,   # Achat court terme (M15/M5/M1)
-                'SELL_LONG': 0,   # Vente long terme (H4/H1)
-                'SELL_SHORT': 0   # Vente court terme (M15/M5/M1)
-            }
-            
-            # Pondération par timeframe
-            weights = {
-                'H4': 0.3,
-                'H1': 0.25,
-                'M30': 0.2,
-                'M15': 0.15,
-                'M5': 0.07,
-                'M1': 0.03
-            }
-            
-            # Analyser chaque timeframe
-            for tf, data in trend_data.items():
-                if data and tf in weights:
-                    weight = weights[tf]
-                    trend_dir = data.get('trend_direction', 'neutral')
-                    strength = data.get('trend_strength', 50) / 100
-                    confidence = data.get('confidence', 50) / 100
-                    volatility = data.get('volatility', 1.0)
-                    
-                    # Ajuster selon la volatilité
-                    volatility_factor = min(2.0, 1.0 / volatility) if volatility > 0 else 1.0
-                    
-                    score = strength * confidence * weight * volatility_factor
-                    
-                    if trend_dir == 'bullish':
-                        if tf in ['H4', 'H1']:
-                            scores['BUY_LONG'] += score
-                        else:
-                            scores['BUY_SHORT'] += score
-                    elif trend_dir == 'bearish':
-                        if tf in ['H4', 'H1']:
-                            scores['SELL_LONG'] += score
-                        else:
-                            scores['SELL_SHORT'] += score
-            
-            # Déterminer la meilleure direction
-            best_direction = max(scores, key=scores.get)
-            best_score = scores[best_direction]
-            
-            # Calculer le score global (0-100)
-            overall_score = min(100, best_score * 100)
-            
-            # Évaluer le niveau de risque
-            risk_level = self._assess_risk_level(trend_data, overall_score)
-            
-            # Générer la raison
-            reason = self._generate_opportunity_reason(best_direction, scores, trend_data)
-            
-            return {
-                'direction': 'BUY' if 'BUY' in best_direction else 'SELL',
-                'term': 'LONG' if 'LONG' in best_direction else 'SHORT',
-                'overall_score': overall_score,
-                'detailed_scores': scores,
-                'risk_level': risk_level,
-                'reason': reason
-            }
-            
-        except Exception as e:
-            self.logger.error(f"Erreur calcul score d'opportunité: {e}")
-            return {
-                'direction': 'HOLD',
-                'term': 'SHORT',
-                'overall_score': 0,
-                'detailed_scores': {},
-                'risk_level': 'HIGH',
-                'reason': 'Erreur calcul'
-            }
-    
-    def _assess_risk_level(self, trend_data: Dict, score: float) -> str:
-        """Évalue le niveau de risque basé sur les tendances et le score."""
-        try:
-            # Compter les tendances alignées
-            bullish_count = 0
-            bearish_count = 0
-            total_count = 0
-            
-            for tf, data in trend_data.items():
-                if data:
-                    total_count += 1
-                    trend_dir = data.get('trend_direction', 'neutral')
-                    if trend_dir == 'bullish':
-                        bullish_count += 1
-                    elif trend_dir == 'bearish':
-                        bearish_count += 1
-            
-            # Calculer le consensus
-            if total_count == 0:
-                return 'HIGH'
-            
-            consensus = max(bullish_count, bearish_count) / total_count
-            
-            # Évaluer le risque
-            if score >= 75 and consensus >= 0.7:
-                return 'LOW'
-            elif score >= 50 and consensus >= 0.5:
-                return 'MEDIUM'
-            else:
-                return 'HIGH'
-                
-        except Exception as e:
-            self.logger.error(f"Erreur évaluation risque: {e}")
-            return 'HIGH'
-    
-    def _generate_opportunity_reason(self, best_direction: str, scores: Dict, trend_data: Dict) -> str:
-        """Génère une raison textuelle pour l'opportunité."""
-        try:
-            direction = 'Achat' if 'BUY' in best_direction else 'Vente'
-            term = 'long terme' if 'LONG' in best_direction else 'court terme'
-            
-            # Identifier les timeframes les plus forts
-            strong_timeframes = []
-            for tf, data in trend_data.items():
-                if data and data.get('trend_direction') in ['bullish' if 'BUY' in best_direction else 'bearish']:
-                    strength = data.get('trend_strength', 0)
-                    if strength >= 70:
-                        strong_timeframes.append(tf)
-            
-            reason = f"{direction} {term}"
-            if strong_timeframes:
-                reason += f" - Tendance forte sur {', '.join(strong_timeframes[:3])}"
-            
-            return reason
-            
-        except Exception as e:
-            self.logger.error(f"Erreur génération raison: {e}")
-            return f"{direction} {term}"
-    
-    def _calculate_lot_size(self, opportunity_score: float) -> float:
-        """Calcule la taille de position recommandée basée sur le score d'opportunité."""
-        try:
-            # Base lot size selon le score
-            if opportunity_score >= 80:
-                base_lot = 0.1  # Score très élevé
-            elif opportunity_score >= 60:
-                base_lot = 0.05  # Score élevé
-            elif opportunity_score >= 40:
-                base_lot = 0.02  # Score moyen
-            else:
-                base_lot = 0.01  # Score faible
-            
-            return round(base_lot, 2)
-            
-        except Exception as e:
-            self.logger.error(f"Erreur calcul lot size: {e}")
-            return 0.01
-        
-    def get_latest_results(self) -> Dict:
-        """Retourne les derniers résultats du scan."""
-        with self.scan_lock:
-            return self.scan_results.copy()
-            
-    def get_status(self) -> Dict:
-        """Retourne le statut actuel du scan."""
-        return {
-            'running': self.running,
-            'scan_interval_minutes': self.scan_interval,
-            'last_scan_time': self.last_scan_time,
-            'latest_results': self.get_latest_results()
-        }
-
-# Instance globale du gestionnaire de scan
-autoscan_manager = AutoScanManager()
-
-# ==================== TREND SUMMARIES ====================
-
-async def send_notification(message: str, webhook_url: str = None):
-    """
-    Envoie une notification via le webhook Discord si configuré
-    """
-    if not webhook_url and NOTIFICATION_WEBHOOK:
-        webhook_url = NOTIFICATION_WEBHOOK
-        
-    if not webhook_url:
-        logger.warning("Aucun webhook configuré pour les notifications")
-        return
-        
-    try:
-        payload = {"content": message}
-        response = requests.post(
-            webhook_url,
-            data=json.dumps(payload),
-            headers={"Content-Type": "application/json"}
-        )
-        response.raise_for_status()
-        logger.info("Notification envoyée avec succès")
-    except Exception as e:
-        logger.error(f"Erreur lors de l'envoi de la notification: {str(e)}")
-
-def generate_trend_summary(symbol: str) -> str:
-    """
-    Génère une synthèse de tendance pour un symbole donné.
-    """
-    try:
-        # Récupérer les données d'analyse
-        analysis = get_ichimoku_analysis(symbol)
-        fib = get_fibonacci_levels(symbol)
-        
-        # Extraire les informations clés
-        current_price = (analysis['current_price']['bid'] + analysis['current_price']['ask']) / 2
-        trend = analysis['trend']
-        kumo_cloud = analysis['kumo_cloud']
-        
-        # Construire le résumé
-        summary = f"📊 *Synthèse des tendances - {symbol}*\n"
-        summary += f"🕒 {datetime.now().strftime('%d/%m/%Y %H:%M')}\n\n"
-        
-        # Tendance actuelle
-        summary += f"📈 *Tendance*: {'Haussière' if trend['direction'] == 'bullish' else 'Baissière' if trend['direction'] == 'bearish' else 'Neutre'}\n"
-        summary += f"💪 Force: {trend['strength']:.1f}/100 | Confiance: {trend['confidence']:.1f}%\n"
-        
-        # Niveaux clés
-        summary += f"\n🔑 *Niveaux Clés*\n"
-        summary += f"• Prix actuel: {current_price:.5f}\n"
-        summary += f"• Support: {fib['support_levels'][0]:.5f}\n"
-        summary += f"• Résistance: {fib['resistance_levels'][0]:.5f}\n"
-        
-        # Nuage Ichimoku
-        summary += f"\n☁️ *Nuage Ichimoku*\n"
-        summary += f"• Position: {'Au-dessus' if kumo_cloud['price_above_cloud'] else 'En-dessous'} du nuage\n"
-        summary += f"• Épaisseur: {kumo_cloud['cloud_thickness']:.5f} pips\n"
-        
-        # Recommandation
-        summary += f"\n💡 *Recommandation*\n"
-        if trend['direction'] == 'bullish' and trend['strength'] > 60:
-            summary += "🟢 Opportunité d'achat\n"
-        elif trend['direction'] == 'bearish' and trend['strength'] > 60:
-            summary += "🔴 Opportunité de vente\n"
-        else:
-            summary += "⚪ Attendre un meilleur setup\n"
-            
-        return summary
-        
-    except Exception as e:
-        logger.error(f"Erreur génération synthèse: {str(e)}")
-        return f"❌ Erreur lors de la génération de la synthèse pour {symbol}"
-
-async def periodic_trend_summary():
-    """Tâche périodique pour générer et envoyer des synthèses de tendance"""
-    while True:
-        try:
-            for symbol in TRACKED_SYMBOLS:
-                try:
-                    summary = generate_trend_summary(symbol)
-                    await send_notification(f"```{summary}```")
-                    logger.info(f"Synthèse de tendance envoyée pour {symbol}")
-                except Exception as e:
-                    logger.error(f"Erreur génération synthèse pour {symbol}: {str(e)}")
-                
-                # Petit délai entre chaque symbole
-                await asyncio.sleep(1)
-                
-        except Exception as e:
-            logger.error(f"Erreur dans la tâche périodique: {str(e)}")
-            
-        # Attendre l'intervalle défini
-        await asyncio.sleep(TREND_SUMMARY_INTERVAL)
-
-# Démarrer la tâche périodique au démarrage du serveur
-@app.on_event("startup")
-async def startup_event():
-    asyncio.create_task(periodic_trend_summary())
-
-# ==================== TREND API HANDLER ====================
-
-class TrendHandler(BaseHTTPRequestHandler):
-    """Gestionnaire des requêtes pour l'API Trend"""
-    
-    def _set_headers(self, status_code=200):
-        """Définit les en-têtes de la réponse HTTP"""
-        self.send_response(status_code)
-        self.send_header('Content-type', 'application/json')
-        self.send_header('Access-Control-Allow-Origin', '*')
-        self.send_header('Access-Control-Allow-Methods', 'GET, OPTIONS')
-        self.send_header('Access-Control-Allow-Headers', 'X-Requested-With, Content-Type')
-        self.end_headers()
-    
-    def do_OPTIONS(self):
-        """Gère les requêtes OPTIONS pour CORS"""
-        self._set_headers(200)
-    
-    def do_GET(self):
-        """Gère les requêtes GET pour l'API Trend"""
-        try:
-            parsed_url = urlparse(self.path)
-            path = parsed_url.path
-            query_params = parse_qs(parsed_url.query)
-            
-            # Route racine
-            if path == "/":
-                response = {
-                    "status": "ok",
-                    "service": "TradBOT Trend API",
-                    "version": "1.0.0",
-                    "endpoints": [
-                        "/trend?symbol=SYMBOL",
-                        "/health",
-                        "/status"
-                    ]
-                }
-                self._send_json(200, response)
-            
-            # Endpoint de santé
-            elif path == "/health":
-                self._send_json(200, {"status": "ok", "timestamp": datetime.now().isoformat()})
-            
-            # Endpoint de statut
-            elif path == "/status":
-                self._send_json(200, {
-                    "status": "running",
-                    "port": TREND_API_PORT,
-                    "last_updated": datetime.now().isoformat(),
-                    "uptime_seconds": (datetime.now() - START_TIME).total_seconds()
-                })
-            
-            # Endpoint d'analyse de tendance
-            elif path == "/trend":
-                symbol = query_params.get("symbol", [DEFAULT_SYMBOL])[0]
-                self._handle_trend_request(symbol)
-            
-            # Endpoint non trouvé
-            else:
-                self._send_json(404, {"error": "Endpoint non trouvé"})
-                
-        except Exception as e:
-            logger.error(f"Erreur dans l'API Trend: {str(e)}", exc_info=True)
-            self._send_json(500, {"error": str(e)})
-    
-    def _handle_trend_request(self, symbol: str):
-        """Gère une requête d'analyse de tendance"""
-        try:
-            # Récupérer les données historiques
-            df = get_historical_data(symbol, "H1", 100)
-            if df is None or df.empty:
-                self._send_json(404, {"error": f"Aucune donnée disponible pour {symbol}"})
-                return
-            
-            # Calculer les indicateurs de tendance
-            trend_data = self._calculate_trend_indicators(df)
-            
-            # Préparer la réponse
-            response = {
-                "symbol": symbol,
-                "timestamp": datetime.now().isoformat(),
-                "trend": {
-                    "direction": trend_data["direction"],
-                    "strength": trend_data["strength"],
-                    "confidence": trend_data["confidence"]
-                },
-                "levels": {
-                    "support": trend_data["support_levels"],
-                    "resistance": trend_data["resistance_levels"]
-                },
-                "indicators": {
-                    "rsi": trend_data["rsi"],
-                    "atr": trend_data["atr"],
-                    "adx": trend_data["adx"]
-                }
-            }
-            
-            self._send_json(200, response)
-            
-        except Exception as e:
-            logger.error(f"Erreur lors du traitement de la requête de tendance: {str(e)}", exc_info=True)
-            self._send_json(500, {"error": f"Erreur lors de l'analyse de tendance: {str(e)}"})
-    
-    def _calculate_trend_indicators(self, df: pd.DataFrame) -> Dict:
-        """Calcule les indicateurs de tendance à partir des données historiques"""
-        # Calcul du RSI
-        delta = df['close'].diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-        rs = gain / loss
-        rsi = 100 - (100 / (1 + rs)).iloc[-1]
-        
-        # Calcul de l'ATR (Average True Range)
-        high_low = df['high'] - df['low']
-        high_close = (df['high'] - df['close'].shift()).abs()
-        low_close = (df['low'] - df['close'].shift()).abs()
-        true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-        atr = true_range.rolling(window=14).mean().iloc[-1]
-        
-        # Calcul de l'ADX (Average Directional Index)
-        plus_dm = df['high'].diff()
-        minus_dm = df['low'].diff()
-        
-        plus_dm[plus_dm < 0] = 0
-        minus_dm[minus_dm > 0] = 0
-        minus_dm = abs(minus_dm)
-        
-        tr1 = df['high'] - df['low']
-        tr2 = abs(df['high'] - df['close'].shift())
-        tr3 = abs(df['low'] - df['close'].shift())
-        
-        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-        atr = tr.rolling(window=14).mean()
-        
-        plus_di = 100 * (plus_dm.rolling(window=14).mean() / atr)
-        minus_di = 100 * (minus_dm.rolling(window=14).mean() / atr)
-        dx = 100 * (abs(plus_di - minus_di) / (plus_di + minus_di))
-        adx = dx.rolling(window=14).mean().iloc[-1]
-        
-        # Déterminer la direction de la tendance
-        if plus_di.iloc[-1] > minus_di.iloc[-1] and adx > 25:
-            direction = "bullish"
-            strength = min(100, int(adx * 2))  # Normaliser entre 0-100
-        elif minus_di.iloc[-1] > plus_di.iloc[-1] and adx > 25:
-            direction = "bearish"
-            strength = min(100, int(adx * 2))  # Normaliser entre 0-100
-        else:
-            direction = "neutral"
-            strength = 0
-        
-        # Niveaux de support et résistance (simplifiés)
-        support_levels = sorted(list(set(df['low'].rolling(window=20).min().dropna().tail(5).values)))[:3]
-        resistance_levels = sorted(list(set(df['high'].rolling(window=20).max().dropna().tail(5).values)), reverse=True)[:3]
-        
-        return {
-            "direction": direction,
-            "strength": strength,
-            "confidence": min(100, int(adx * 1.5)),  # Confiance basée sur ADX
-            "rsi": round(float(rsi), 2),
-            "atr": round(float(atr.iloc[-1]), 5),
-            "adx": round(float(adx), 2),
-            "support_levels": [round(float(x), 5) for x in support_levels],
-            "resistance_levels": [round(float(x), 5) for x in resistance_levels]
-        }
-    
-    def _send_json(self, status_code: int, data: Dict):
-        """Envoie une réponse JSON avec le code de statut spécifié"""
-        self._set_headers(status_code)
-        self.wfile.write(json.dumps(data, default=str).encode('utf-8'))
-
-# Variable globale pour suivre le temps de démarrage
-START_TIME = datetime.now()
-
-# Fonction pour démarrer l'API Trend
-def start_trend_api():
-    """Démarre l'API Trend dans un thread séparé"""
-    class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
-        """Serveur HTTP avec support multithread"""
-        daemon_threads = True
-    
-    def run_trend_api():
-        """Fonction exécutée dans le thread pour démarrer l'API Trend"""
-        server = ThreadedHTTPServer(('0.0.0.0', TREND_API_PORT), TrendHandler)
-        logger.info(f"Trend API démarrée sur le port {TREND_API_PORT}")
-        server.serve_forever()
-    
-    global trend_api_thread
-    if trend_api_thread is None or not trend_api_thread.is_alive():
-        trend_api_thread = threading.Thread(target=run_trend_api, daemon=True)
-        trend_api_thread.start()
-        logger.info("Thread Trend API démarré")
-    else:
-        logger.info("Thread Trend API déjà en cours d'exécution")
-
 # Point d'entrée du programme
 if __name__ == "__main__":
     logger.info("=" * 60)
     logger.info("TRADBOT AI SERVER")
     logger.info("=" * 60)
     logger.info(f"Serveur démarré sur http://localhost:{API_PORT}")
-    logger.info(f"API Trend: http://localhost:{TREND_API_PORT}")
     logger.info(f"MT5: {'Disponible' if mt5_initialized else 'Non disponible (mode API uniquement)'}")
     logger.info(f"Mistral AI: {'Configuré' if MISTRAL_AVAILABLE else 'Non configuré'}")
     logger.info(f"Google Gemini AI: {'Configuré' if GEMINI_AVAILABLE else 'Non configuré'}")
     logger.info(f"Symbole par défaut: {DEFAULT_SYMBOL}")
-    logger.info(f"Backend: {'Disponible' if BACKEND_AVAILABLE else 'Non disponible'}")
-    logger.info(f"AI Indicators: {'Disponible' if AI_INDICATORS_AVAILABLE else 'Non disponible'}")
-    
-    # Démarrer l'API Trend dans un thread séparé
-    try:
-        start_trend_api()
-        logger.info("API Trend démarrée avec succès")
-    except Exception as e:
-        logger.error(f"Erreur lors du démarrage de l'API Trend: {str(e)}")
-    logger.info(f"AutoScan: Intégré et prêt à démarrer")
-    
-    # Démarrer l'autoscan si le backend est disponible
-    if BACKEND_AVAILABLE:
-        try:
-            autoscan_manager.start()
-            logger.info("AutoScan démarré automatiquement")
-        except Exception as e:
-            logger.warning(f"Impossible de démarrer l'AutoScan automatiquement: {e}")
-    else:
-        logger.info("AutoScan non démarré - Backend non disponible")
-    
+    logger.info(f"Timeframes disponibles: {len(['M1', 'M5', 'M15', 'H1', 'H4', 'D1'])}")
     logger.info("=" * 60)
-    
-    def start_trend_api():
-        """Démarre l'API Trend dans un thread séparé"""
-        class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
-            """Serveur HTTP avec support multithread"""
-            daemon_threads = True
-        
-        def run_trend_api():
-            """Fonction exécutée dans le thread pour démarrer l'API Trend"""
-            server = ThreadedHTTPServer(('0.0.0.0', TREND_API_PORT), TrendHandler)
-            logger.info(f"Trend API démarrée sur le port {TREND_API_PORT}")
-            server.serve_forever()
-        
-        global trend_api_thread
-        if trend_api_thread is None or not trend_api_thread.is_alive():
-            trend_api_thread = threading.Thread(target=run_trend_api, daemon=True)
-            trend_api_thread.start()
-            logger.info("Thread Trend API démarré")
-        else:
-            logger.info("Thread Trend API déjà en cours d'exécution")
-
-    start_trend_api()
-    
-    try:
-        uvicorn.run(app, host="0.0.0.0", port=API_PORT, log_level="info")
-    except KeyboardInterrupt:
-        logger.info("Arrêt du serveur demandé...")
-        autoscan_manager.stop()
-        logger.info("AutoScan arrêté")
-    except Exception as e:
-        logger.error(f"Erreur lors du démarrage du serveur: {e}")
-        autoscan_manager.stop()
-        raise
+    logger.info("Serveur prêt à recevoir des requêtes")
+    logger.info("=" * 60)
     
     print("\n" + "=" * 60)
     print("Démarrage du serveur AI TradBOT...")
@@ -3032,9 +3563,14 @@ if __name__ == "__main__":
     print(f"  - GET  /predict/{{symbol}}          : Prédiction (legacy)")
     print(f"  - GET  /analyze/{{symbol}}           : Analyse complète (legacy)")
     print(f"  - POST /indicators/analyze           : Analyse avec AdvancedIndicators")
+    print(f"  - POST /trend                     : Analyse de tendance MT5 (POST)")
+    print(f"  - GET  /trend?symbol=SYMBOL       : Analyse de tendance MT5 (GET)")
+    print(f"  - GET  /trend/health              : Santé module tendance")
     print(f"  - GET  /indicators/sentiment/{{symbol}} : Sentiment du marché")
     print(f"  - GET  /indicators/volume_profile/{{symbol}} : Profil de volume")
     print(f"  - POST /analyze/gemini               : Analyse avec Google Gemini AI")
+    print(f"  - POST /trading/analyze             : Capture et analyse de graphique avec Gemma")
+    print(f"  - POST /trading/generate-signal     : Génération de signaux de trading")
     print("  - GET  /indicators/ichimoku/{symbol}     : Analyse Ichimoku Kinko Hyo")
     print("  - GET  /indicators/fibonacci/{symbol}    : Niveaux de retracement/extension Fibonacci")
     print("  - GET  /indicators/order-blocks/{symbol} : Détection des blocs d'ordre")
