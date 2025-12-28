@@ -17,6 +17,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Tuple
 from fastapi import FastAPI, HTTPException, Request, Body, status
+from starlette.requests import Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
@@ -378,10 +379,30 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Middleware pour logger toutes les requêtes entrantes
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    """Log toutes les requêtes entrantes pour debugging"""
+    start_time = time.time()
+    
+    # Logger seulement le path et la méthode (pas le body pour éviter spam)
+    logger.debug(f"📥 {request.method} {request.url.path}")
+    
+    response = await call_next(request)
+    
+    process_time = time.time() - start_time
+    # Logger seulement si le temps de traitement est anormalement long (>1s) ou erreur
+    if process_time > 1.0 or response.status_code >= 400:
+        logger.warning(f"⚠️ {request.method} {request.url.path} - {response.status_code} - Temps: {process_time:.3f}s")
+    else:
+        logger.debug(f"📤 {request.method} {request.url.path} - {response.status_code} - {process_time:.3f}s")
+    
+    return response
+
 # Parser les arguments en ligne de commande
 parser = argparse.ArgumentParser(description='Serveur AI TradBOT')
 parser.add_argument('--port', type=int, default=8000, help='Port sur lequel démarrer le serveur')
-parser.add_argument('--host', type=str, default='0.0.0.0', help='Adresse IP sur laquelle écouter')
+parser.add_argument('--host', type=str, default='127.0.0.1', help='Adresse IP sur laquelle écouter')
 args = parser.parse_args()
 
 # Variables globales
@@ -730,7 +751,7 @@ def analyze_with_gemini(prompt: str, max_retries: int = 3) -> Optional[str]:
     """
     Fonction désactivée - Utilisez Mistral AI à la place
     """
-    logger.warning("Gemini AI est désactivé - Utilisation de Mistral AI")
+    # Ne logger qu'une seule fois au démarrage, pas à chaque appel
     return None
 
 def analyze_with_ai(prompt: str, max_retries: int = 2) -> Optional[str]:
@@ -1694,6 +1715,8 @@ async def decision_gemma(request: DecisionRequest):
 
 @app.post("/decision", response_model=DecisionResponse)
 async def decision(request: DecisionRequest):
+    # Logging détaillé seulement en mode debug, sinon juste les logs du middleware suffisent
+    logger.debug(f"🎯 Décision IA demandée pour {request.symbol} (bid={request.bid}, ask={request.ask})")
     try:
         # Validation des champs obligatoires
         if not request.symbol:
@@ -1711,9 +1734,9 @@ async def decision(request: DecisionRequest):
         # Règle stricte: Interdire les achats sur Crash et les ventes sur Boom
         symbol_lower = request.symbol.lower()
         if "crash" in symbol_lower:
-            logger.warning(f"Tentative d'achat sur Crash détectée - SYMBOLE: {request.symbol}")
-            # Forcer HOLD pour tout achat sur Crash
+            # Forcer HOLD pour tout achat sur Crash (règle de sécurité)
             if request.dir_rule == 1:  # 1 = BUY
+                logger.debug(f"🔒 Achat sur Crash bloqué (règle sécurité): {request.symbol}")
                 return DecisionResponse(
                     action="hold",
                     confidence=0.1,
@@ -1733,9 +1756,9 @@ async def decision(request: DecisionRequest):
                 )
         
         if "boom" in symbol_lower:
-            logger.warning(f"Tentative de vente sur Boom détectée - SYMBOLE: {request.symbol}")
-            # Forcer HOLD pour toute vente sur Boom
+            # Forcer HOLD pour toute vente sur Boom (règle de sécurité)
             if request.dir_rule == 0:  # 0 = SELL
+                logger.debug(f"🔒 Vente sur Boom bloquée (règle sécurité): {request.symbol}")
                 return DecisionResponse(
                     action="hold",
                     confidence=0.1,
@@ -1754,12 +1777,8 @@ async def decision(request: DecisionRequest):
                     sell_zone_high=None
                 )
             
-        # Log de la requête reçue (masque les données sensibles)
-        log_data = request.dict()
-        if len(log_data.get('symbol', '')) > 20:  # Éviter de logger des symboles trop longs
-            log_data['symbol'] = log_data['symbol'][:20] + '...'
-            
-        logger.info(f"Requête de décision reçue pour {request.symbol}")
+        # Log de la requête reçue (déjà loggé par le middleware, pas besoin de répéter)
+        # logger.info(f"Requête de décision reçue pour {request.symbol}")  # Supprimé pour éviter duplication
         
         # Vérifier si la décision est en cache
         cache_key = f"{request.symbol}_{request.bid:.2f}_{request.ask:.2f}"
@@ -1851,6 +1870,7 @@ async def decision(request: DecisionRequest):
             reason = "Signaux mixtes, attente de confirmation"
         
         # Utiliser Gemini AI pour améliorer la raison si disponible
+        # Note: Gemini est désactivé par défaut, on utilise Mistral si disponible
         if GEMINI_AVAILABLE and reason:
             try:
                 ai_prompt = f"""
@@ -1871,6 +1891,16 @@ Format: Analyse claire et professionnelle en français.
                     reason = f"{reason} | IA: {ai_analysis[:100]}"
             except Exception as e:
                 logger.debug(f"Gemini analysis non disponible: {e}")
+        
+        # Alternative: Utiliser Mistral AI si disponible et Gemini non disponible
+        elif MISTRAL_AVAILABLE and reason and not GEMINI_AVAILABLE:
+            try:
+                ai_prompt = f"Analyse trading {request.symbol}: Prix={mid_price:.5f}, RSI={rsi:.2f}, Action={action}, Confiance={confidence:.0%}. Donne analyse courte (1 phrase)."
+                ai_analysis = analyze_with_ai(ai_prompt)
+                if ai_analysis:
+                    reason = f"{reason} | Mistral: {ai_analysis[:80]}"
+            except Exception as e:
+                logger.debug(f"Mistral analysis non disponible: {e}")
 
         stop_loss = None
         take_profit = None
@@ -3533,6 +3563,171 @@ async def get_market_profile_analysis(
 
 # ==================== FIN INDICATEURS TECHNIQUES AVANCÉS ====================
 
+# ==================== AUTOSCAN ENDPOINTS ====================
+
+@app.get("/autoscan/signals")
+async def get_autoscan_signals(symbol: Optional[str] = None):
+    """
+    Endpoint pour récupérer les signaux AutoScan (compatible avec MT5)
+    
+    Format attendu par MT5:
+    {
+        "status": "success",
+        "data": {
+            "signals": [
+                {
+                    "symbol": "...",
+                    "action": "BUY" | "SELL",
+                    "entry_price": float,
+                    "stop_loss": float,
+                    "take_profit": float,
+                    "confidence": float (0.0-1.0),
+                    "reason": "..."
+                }
+            ]
+        }
+    }
+    """
+    try:
+        signals = []
+        
+        # Si MT5 n'est pas disponible, retourner une liste vide
+        if not mt5_initialized:
+            logger.warning("MT5 non initialisé, retour de liste de signaux vide pour AutoScan")
+            return {
+                "status": "success",
+                "data": {
+                    "signals": []
+                },
+                "timestamp": datetime.utcnow().isoformat(),
+                "count": 0,
+                "message": "MT5 non disponible"
+            }
+        
+        # Si un symbole est spécifié, analyser uniquement ce symbole
+        symbols_to_scan = [symbol] if symbol else []
+        
+        # Si aucun symbole n'est spécifié, utiliser les symboles courants
+        if not symbols_to_scan:
+            # Symboles par défaut pour Boom/Crash
+            symbols_to_scan = ["Boom 1000 Index", "Crash 1000 Index"]
+        
+        for sym in symbols_to_scan:
+            try:
+                # Récupérer les données OHLC récentes
+                df = get_historical_data(sym, "M1", 100)
+                if df.empty:
+                    logger.warning(f"Aucune donnée disponible pour {sym}")
+                    continue
+                
+                current_price = float(df['close'].iloc[-1])
+                
+                # Calculer les indicateurs techniques
+                rsi_values = calculate_rsi(df['close'], period=14)
+                rsi = float(rsi_values.iloc[-1]) if not rsi_values.empty else 50.0
+                
+                # Calculer ATR pour stop loss/take profit
+                atr_values = calculate_atr(df, period=14)
+                atr = float(atr_values.iloc[-1]) if not atr_values.empty else current_price * 0.001
+                
+                # Calculer les moyennes mobiles
+                ema_fast = df['close'].ewm(span=12, adjust=False).mean()
+                ema_slow = df['close'].ewm(span=26, adjust=False).mean()
+                ema_fast_val = float(ema_fast.iloc[-1]) if not ema_fast.empty else current_price
+                ema_slow_val = float(ema_slow.iloc[-1]) if not ema_slow.empty else current_price
+                
+                # Détecter les signaux basés sur RSI et MA
+                action = None
+                confidence = 0.0
+                reason = ""
+                
+                # Condition 1: RSI en survente (< 30) -> Signal BUY
+                if rsi < 30:
+                    action = "BUY"
+                    confidence = 0.75
+                    reason = "RSI Survente"
+                # Condition 2: RSI en surachat (> 70) -> Signal SELL
+                elif rsi > 70:
+                    action = "SELL"
+                    confidence = 0.75
+                    reason = "RSI Surachat"
+                # Condition 3: Croisement de MA haussier
+                elif len(ema_fast) >= 3 and len(ema_slow) >= 3:
+                    ema_fast_prev = float(ema_fast.iloc[-2])
+                    ema_slow_prev = float(ema_slow.iloc[-2])
+                    if ema_fast_val > ema_slow_val and ema_fast_prev <= ema_slow_prev:
+                        action = "BUY"
+                        confidence = 0.70
+                        reason = "MA Croisement Haussier"
+                    # Condition 4: Croisement de MA baissier
+                    elif ema_fast_val < ema_slow_val and ema_fast_prev >= ema_slow_prev:
+                        action = "SELL"
+                        confidence = 0.70
+                        reason = "MA Croisement Baissier"
+                # Condition 5: Volatilité élevée
+                if action is None:
+                    volatility = abs(current_price - ema_slow_val) / ema_slow_val if ema_slow_val > 0 else 0
+                    if volatility > 0.002:  # 0.2%
+                        if current_price > ema_slow_val:
+                            action = "BUY"
+                            confidence = 0.65
+                            reason = "Volatilité Haussier"
+                        else:
+                            action = "SELL"
+                            confidence = 0.65
+                            reason = "Volatilité Baissier"
+                
+                # Si un signal a été détecté, créer l'entrée
+                if action and confidence >= 0.60:  # Seuil minimum de confiance
+                    # Calculer stop loss et take profit basés sur ATR
+                    if action == "BUY":
+                        entry_price = current_price
+                        stop_loss = entry_price - (atr * 2)
+                        take_profit = entry_price + (atr * 3)
+                    else:  # SELL
+                        entry_price = current_price
+                        stop_loss = entry_price + (atr * 2)
+                        take_profit = entry_price - (atr * 3)
+                    
+                    signal = {
+                        "symbol": sym,
+                        "action": action,
+                        "entry_price": round(entry_price, 5),
+                        "stop_loss": round(stop_loss, 5),
+                        "take_profit": round(take_profit, 5),
+                        "confidence": round(confidence, 2),
+                        "reason": reason
+                    }
+                    signals.append(signal)
+                    logger.info(f"AutoScan: Signal détecté pour {sym} - {action} (confiance: {confidence*100:.0f}%)")
+                    
+            except Exception as e:
+                logger.error(f"Erreur lors de l'analyse de {sym} pour AutoScan: {e}", exc_info=True)
+                continue
+        
+        # Retourner la réponse dans le format attendu par MT5
+        return {
+            "status": "success",
+            "data": {
+                "signals": signals
+            },
+            "timestamp": datetime.utcnow().isoformat(),
+            "count": len(signals)
+        }
+        
+    except Exception as e:
+        logger.error(f"Erreur dans get_autoscan_signals: {e}", exc_info=True)
+        return {
+            "status": "error",
+            "data": {
+                "signals": []
+            },
+            "error": str(e),
+            "timestamp": datetime.utcnow().isoformat()
+        }
+
+# ==================== FIN AUTOSCAN ENDPOINTS ====================
+
 # Point d'entrée du programme
 if __name__ == "__main__":
     logger.info("=" * 60)
@@ -3576,6 +3771,7 @@ if __name__ == "__main__":
     print("  - GET  /indicators/order-blocks/{symbol} : Détection des blocs d'ordre")
     print("  - GET  /indicators/liquidity-zones/{symbol} : Zones de liquidité")
     print("  - GET  /indicators/market-profile/{symbol}  : Profil de marché (Market Profile)")
+    print(f"  - GET  /autoscan/signals?symbol=SYMBOL    : Signaux AutoScan (compatible MT5)")
     print("\nDocumentation interactive:")
     print(f"  - http://127.0.0.1:{API_PORT}/docs")
     print("=" * 60)
@@ -3589,7 +3785,7 @@ if __name__ == "__main__":
         # Mode reload (développement) - utiliser la chaîne d'import
         uvicorn.run(
             "ai_server:app",
-            host="0.0.0.0",
+            host=HOST,
             port=API_PORT,
             log_level="info",
             reload=True
@@ -3598,7 +3794,7 @@ if __name__ == "__main__":
         # Mode production (sans reload) - passer l'app directement
         uvicorn.run(
             app,
-            host="0.0.0.0",
+            host=HOST,
             port=API_PORT,
             log_level="info"
         )
