@@ -15,7 +15,7 @@ import argparse
 import traceback
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional, List, Dict, Any, Tuple
+from typing import Optional, List, Dict, Any, Tuple, Set
 from fastapi import FastAPI, HTTPException, Request, Body, status
 from starlette.requests import Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -384,6 +384,142 @@ except ImportError as e:
     logger.warning(f"Module ai_indicators non disponible: {e}")
     AdvancedIndicators = None
     analyze_market_data = None
+
+# Tentative d'importation des outils de règles d'association (optionnel)
+try:
+    sys.path.insert(0, str(Path(__file__).parent / "python"))
+    from association_mining import mine_rules_for_symbol  # type: ignore
+    ASSOCIATION_MINING_AVAILABLE = True
+except Exception as e:
+    ASSOCIATION_MINING_AVAILABLE = False
+    logger.warning(f"association_mining non disponible (facultatif) : {e}")
+
+# Règles d'association pré-calculées (chargées depuis JSON si dispo)
+ASSOCIATION_RULES: Dict[str, List[Dict[str, Any]]] = {}
+ASSOCIATION_RULES_PATH = Path(__file__).parent / "association_rules.json"
+
+
+def load_association_rules() -> None:
+    """Charge des règles d'association pré-calculées depuis un JSON (facultatif)."""
+    global ASSOCIATION_RULES
+    if not ASSOCIATION_RULES_PATH.exists():
+        logger.info("Aucune règle d'association trouvée (association_rules.json manquant)")
+        ASSOCIATION_RULES = {}
+        return
+
+    try:
+        with ASSOCIATION_RULES_PATH.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            ASSOCIATION_RULES = data
+            logger.info(
+                "Règles d'association chargées pour symboles: %s",
+                ", ".join(ASSOCIATION_RULES.keys()),
+            )
+        else:
+            logger.warning("Format de association_rules.json invalide (dict attendu)")
+            ASSOCIATION_RULES = {}
+    except Exception as e:
+        logger.error(f"Erreur chargement association_rules.json: {e}", exc_info=True)
+        ASSOCIATION_RULES = {}
+
+
+def build_items_from_request(req: "DecisionRequest") -> Set[str]:
+    """
+    Construit un ensemble d'items (booléens) à partir de la requête courante.
+    Doit rester cohérent avec la logique utilisée pour miner les règles.
+    """
+    items: Set[str] = set()
+
+    # Type de symbole (Boom/Crash/Volatility/Forex)
+    sym = req.symbol or ""
+    s_low = sym.lower()
+    if "boom" in s_low:
+        items.add("sym_boom")
+    if "crash" in s_low:
+        items.add("sym_crash")
+    if "volatility" in s_low:
+        items.add("sym_volatility")
+
+    # RSI
+    if req.rsi is not None:
+        if req.rsi < 30:
+            items.add("rsi_low")
+        elif req.rsi > 70:
+            items.add("rsi_high")
+
+    # EMA H1
+    if req.ema_fast_h1 is not None and req.ema_slow_h1 is not None:
+        if req.ema_fast_h1 > req.ema_slow_h1:
+            items.add("trend_up_H1")
+        elif req.ema_fast_h1 < req.ema_slow_h1:
+            items.add("trend_down_H1")
+
+    # EMA M1 (via dir_rule si disponible)
+    # dir_rule: 1=BUY, -1=SELL, 0=neutre (défini côté EA)
+    if req.dir_rule == 1:
+        items.add("trend_up_M1_rule")
+    elif req.dir_rule == 0:
+        items.add("trend_down_M1_rule")
+
+    return items
+
+
+def adjust_decision_with_rules(
+    symbol: str,
+    action: str,
+    confidence: float,
+    base_reason: str,
+    items: Set[str],
+) -> Tuple[str, float, str]:
+    """
+    Ajuste (légèrement) l'action / la confiance en fonction des règles d'association pré-calculées.
+
+    - Si une règle pour ce symbole (ou '*') avec consequent 'trade_win' a ses items inclus dans
+      l'état courant, et que cette règle est cohérente avec l'action (BUY/SELL),
+      la confiance est augmentée légèrement.
+    - L'impact est volontairement modéré pour ne pas casser la logique principale.
+    """
+    if not ASSOCIATION_RULES:
+        return action, confidence, base_reason
+
+    rules_for_symbol: List[Dict[str, Any]] = []
+    if symbol in ASSOCIATION_RULES:
+        rules_for_symbol.extend(ASSOCIATION_RULES[symbol])
+    if "*" in ASSOCIATION_RULES:
+        rules_for_symbol.extend(ASSOCIATION_RULES["*"])
+
+    if not rules_for_symbol:
+        return action, confidence, base_reason
+
+    bonus = 0.0
+    applied_rules: List[str] = []
+
+    for r in rules_for_symbol:
+        antecedent = set(r.get("antecedent", []))
+        if not antecedent:
+            continue
+        if not antecedent.issubset(items):
+            continue
+
+        conf = float(r.get("confidence", 0.0))
+        lift = float(r.get("lift", 1.0) or 1.0)
+
+        if action != "hold" and conf >= 0.7 and lift >= 1.0:
+            bonus += min((conf - 0.5) * 0.1, 0.05)  # max +0.05 par règle
+            applied_rules.append(f"{','.join(sorted(antecedent))} (conf={conf:.2f},lift={lift:.2f})")
+
+    if bonus != 0.0:
+        new_conf = max(0.0, min(1.0, confidence + bonus))
+        reason = base_reason
+        if applied_rules:
+            reason = f"{base_reason} | RèglesAssoc:+{bonus:.2f} via {len(applied_rules)} règle(s)"
+        return action, new_conf, reason
+
+    return action, confidence, base_reason
+
+# Charger les éventuelles règles d'association au démarrage
+load_association_rules()
 
 # Configuration de l'application
 app = FastAPI(
@@ -2652,6 +2788,15 @@ Format: Analyse claire et professionnelle en français.
                     reason = f"{reason} | Mistral: {ai_analysis[:80]}"
             except Exception as e:
                 logger.debug(f"Mistral analysis non disponible: {e}")
+
+        # Ajustement final via règles d'association (facultatif)
+        try:
+            items = build_items_from_request(request)
+            action, confidence, reason = adjust_decision_with_rules(
+                request.symbol, action, confidence, reason, items
+            )
+        except Exception as e:
+            logger.warning(f"Erreur ajustement règles d'association: {e}")
 
         # Si pas de raison construite, utiliser les composants de score
         if reason_parts:
