@@ -297,9 +297,11 @@ try:
             available_models = [m.name for m in models]
             logger.info(f"Tous les modèles disponibles: {', '.join(available_models)}")
             
-            # Essayer d'utiliser les modèles par ordre de préférence
-            for model_name in ['gemini-1.5-flash', 'gemini-pro', 'models/gemini-pro', 'gemini-1.0-pro']:
-                if any(model_name in m for m in available_models):
+            # Essayer d'utiliser les modèles par ordre de préférence (gemini-pro est obsolète)
+            for model_name in ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-1.0-pro']:
+                # Vérifier que le modèle est vraiment disponible (enlever le préfixe models/ si présent)
+                model_check = model_name.replace('models/', '')
+                if any(model_check in m or m.endswith(model_check) for m in available_models):
                     try:
                         gemini_model = genai.GenerativeModel(model_name)
                         GEMINI_AVAILABLE = True
@@ -345,11 +347,31 @@ try:
     from advanced_ml_predictor import AdvancedMLPredictor
     from spike_predictor import AdvancedSpikePredictor
     from backend.mt5_connector import get_ohlc as get_historical_data
+    # Import du détecteur de spikes amélioré
+    try:
+        from backend.spike_detector import predict_spike_ml, detect_spikes, get_realtime_spike_analysis
+        SPIKE_DETECTOR_AVAILABLE = True
+        logger.info("Module spike_detector disponible")
+    except ImportError:
+        SPIKE_DETECTOR_AVAILABLE = False
+        logger.warning("Module spike_detector non disponible")
     BACKEND_AVAILABLE = True
     logger.info("Modules backend disponibles")
 except ImportError as e:
     BACKEND_AVAILABLE = False
+    SPIKE_DETECTOR_AVAILABLE = False
     logger.warning(f"Modules backend non disponibles: {e}")
+
+# Import du détecteur avancé depuis ai_server_improvements
+try:
+    from ai_server_improvements import AdvancedSpikeDetector
+    ADVANCED_SPIKE_DETECTOR_AVAILABLE = True
+    advanced_spike_detector = AdvancedSpikeDetector()
+    logger.info("AdvancedSpikeDetector initialisé")
+except ImportError as e:
+    ADVANCED_SPIKE_DETECTOR_AVAILABLE = False
+    advanced_spike_detector = None
+    logger.warning(f"AdvancedSpikeDetector non disponible: {e}")
 
 # Tentative d'importation de ai_indicators
 try:
@@ -476,6 +498,10 @@ class DecisionRequest(BaseModel):
     volatility_regime: Optional[int] = None  # 1 = High Vol, 0 = Normal, -1 = Low Vol
     volatility_ratio: Optional[float] = None  # Ratio ATR court/long
     image_filename: Optional[str] = None # Filename of the chart screenshot in MT5 Files
+    deriv_patterns: Optional[str] = None  # Résumé des patterns Deriv détectés
+    deriv_patterns_bullish: Optional[int] = None  # Nombre de patterns bullish
+    deriv_patterns_bearish: Optional[int] = None  # Nombre de patterns bearish
+    deriv_patterns_confidence: Optional[float] = None  # Confiance moyenne des patterns
 
 class DecisionResponse(BaseModel):
     action: str  # "buy", "sell", "hold"
@@ -1303,6 +1329,628 @@ async def get_market_data_with_fallback(symbol: str):
         "alphavantage_requests_used": alphavantage_request_count
     }
 
+# ==================== DERIV PATTERNS DETECTION ====================
+
+def detect_xabcd_pattern(df: pd.DataFrame, tolerance: float = 0.05) -> List[Dict]:
+    """
+    Détecte les patterns XABCD (Harmonic Pattern)
+    Pattern: X -> A -> B -> C -> D avec ratios Fibonacci spécifiques
+    """
+    patterns = []
+    if len(df) < 5:
+        return patterns
+    
+    highs = df['high'].values
+    lows = df['low'].values
+    closes = df['close'].values
+    
+    # Rechercher les points pivots
+    for i in range(4, len(df)):
+        # XABCD: X=point de départ, A=premier pivot, B=retour, C=retour, D=projection
+        try:
+            # Simplification: chercher 5 points pivots consécutifs
+            x_idx = i - 4
+            a_idx = i - 3
+            b_idx = i - 2
+            c_idx = i - 1
+            d_idx = i
+            
+            # Calculer les ratios
+            xa = abs(highs[a_idx] - lows[x_idx]) if highs[a_idx] > lows[x_idx] else abs(lows[a_idx] - highs[x_idx])
+            ab = abs(highs[b_idx] - lows[a_idx]) if highs[b_idx] > lows[a_idx] else abs(lows[b_idx] - highs[a_idx])
+            bc = abs(highs[c_idx] - lows[b_idx]) if highs[c_idx] > lows[b_idx] else abs(lows[c_idx] - highs[b_idx])
+            cd = abs(highs[d_idx] - lows[c_idx]) if highs[d_idx] > lows[c_idx] else abs(lows[d_idx] - highs[c_idx])
+            
+            if xa == 0 or ab == 0 or bc == 0:
+                continue
+            
+            # Ratios Fibonacci typiques pour XABCD
+            ab_ratio = ab / xa
+            bc_ratio = bc / ab
+            cd_ratio = cd / bc
+            
+            # Vérifier si les ratios correspondent à un pattern XABCD
+            # Pattern haussier: AB ≈ 0.382-0.618 de XA, BC ≈ 0.382-0.886 de AB, CD ≈ 1.272-1.618 de BC
+            is_bullish = (0.3 <= ab_ratio <= 0.7 and 0.3 <= bc_ratio <= 0.9 and 1.2 <= cd_ratio <= 1.7)
+            # Pattern baissier: ratios inversés
+            is_bearish = (0.3 <= ab_ratio <= 0.7 and 0.3 <= bc_ratio <= 0.9 and 1.2 <= cd_ratio <= 1.7)
+            
+            if is_bullish or is_bearish:
+                patterns.append({
+                    "type": "XABCD",
+                    "direction": "bullish" if is_bullish else "bearish",
+                    "confidence": 0.7,
+                    "points": {
+                        "X": {"index": x_idx, "price": lows[x_idx] if is_bullish else highs[x_idx]},
+                        "A": {"index": a_idx, "price": highs[a_idx] if is_bullish else lows[a_idx]},
+                        "B": {"index": b_idx, "price": lows[b_idx] if is_bullish else highs[b_idx]},
+                        "C": {"index": c_idx, "price": highs[c_idx] if is_bullish else lows[c_idx]},
+                        "D": {"index": d_idx, "price": closes[d_idx]}
+                    },
+                    "ratios": {
+                        "AB/XA": round(ab_ratio, 3),
+                        "BC/AB": round(bc_ratio, 3),
+                        "CD/BC": round(cd_ratio, 3)
+                    }
+                })
+        except Exception as e:
+            continue
+    
+    return patterns
+
+def detect_cypher_pattern(df: pd.DataFrame) -> List[Dict]:
+    """
+    Détecte les patterns Cypher (Harmonic Pattern)
+    Pattern: X -> A -> B -> C avec ratios spécifiques
+    """
+    patterns = []
+    if len(df) < 4:
+        return patterns
+    
+    highs = df['high'].values
+    lows = df['low'].values
+    closes = df['close'].values
+    
+    for i in range(3, len(df)):
+        try:
+            x_idx = i - 3
+            a_idx = i - 2
+            b_idx = i - 1
+            c_idx = i
+            
+            xa = abs(highs[a_idx] - lows[x_idx]) if highs[a_idx] > lows[x_idx] else abs(lows[a_idx] - highs[x_idx])
+            ab = abs(highs[b_idx] - lows[a_idx]) if highs[b_idx] > lows[a_idx] else abs(lows[b_idx] - highs[a_idx])
+            bc = abs(highs[c_idx] - lows[b_idx]) if highs[c_idx] > lows[b_idx] else abs(lows[c_idx] - highs[b_idx])
+            
+            if xa == 0 or ab == 0:
+                continue
+            
+            ab_ratio = ab / xa
+            bc_ratio = bc / ab
+            
+            # Cypher: AB ≈ 0.382-0.618 de XA, BC ≈ 1.13-1.414 de AB
+            is_valid = (0.35 <= ab_ratio <= 0.65 and 1.1 <= bc_ratio <= 1.45)
+            
+            if is_valid:
+                patterns.append({
+                    "type": "Cypher",
+                    "confidence": 0.65,
+                    "points": {
+                        "X": {"index": x_idx, "price": lows[x_idx]},
+                        "A": {"index": a_idx, "price": highs[a_idx]},
+                        "B": {"index": b_idx, "price": lows[b_idx]},
+                        "C": {"index": c_idx, "price": closes[c_idx]}
+                    }
+                })
+        except:
+            continue
+    
+    return patterns
+
+def detect_head_and_shoulders(df: pd.DataFrame) -> List[Dict]:
+    """
+    Détecte les patterns Head and Shoulders
+    Pattern: 3 pics avec le pic central le plus haut
+    """
+    patterns = []
+    if len(df) < 10:
+        return patterns
+    
+    highs = df['high'].values
+    
+    # Chercher 3 pics consécutifs
+    for i in range(5, len(df) - 5):
+        try:
+            # Pic gauche (shoulder)
+            left_peak = max(highs[i-5:i])
+            left_idx = i - 5 + np.argmax(highs[i-5:i])
+            
+            # Pic central (head) - doit être le plus haut
+            head_peak = max(highs[i-2:i+3])
+            head_idx = i - 2 + np.argmax(highs[i-2:i+3])
+            
+            # Pic droit (shoulder)
+            right_peak = max(highs[i+3:i+8])
+            right_idx = i + 3 + np.argmax(highs[i+3:i+8])
+            
+            # Vérifier que le head est plus haut que les deux shoulders
+            if head_peak > left_peak and head_peak > right_peak:
+                # Les shoulders doivent être similaires en hauteur
+                shoulder_diff = abs(left_peak - right_peak) / head_peak
+                if shoulder_diff < 0.1:  # Moins de 10% de différence
+                    patterns.append({
+                        "type": "Head and Shoulders",
+                        "direction": "bearish",
+                        "confidence": 0.75,
+                        "points": {
+                            "left_shoulder": {"index": left_idx, "price": left_peak},
+                            "head": {"index": head_idx, "price": head_peak},
+                            "right_shoulder": {"index": right_idx, "price": right_peak}
+                        },
+                        "neckline": (left_peak + right_peak) / 2
+                    })
+        except:
+            continue
+    
+    return patterns
+
+def detect_abcd_pattern(df: pd.DataFrame) -> List[Dict]:
+    """
+    Détecte les patterns ABCD (Harmonic Pattern simple)
+    Pattern: A -> B -> C -> D avec ratios Fibonacci
+    """
+    patterns = []
+    if len(df) < 4:
+        return patterns
+    
+    highs = df['high'].values
+    lows = df['low'].values
+    closes = df['close'].values
+    
+    for i in range(3, len(df)):
+        try:
+            a_idx = i - 3
+            b_idx = i - 2
+            c_idx = i - 1
+            d_idx = i
+            
+            ab = abs(highs[b_idx] - lows[a_idx]) if highs[b_idx] > lows[a_idx] else abs(lows[b_idx] - highs[a_idx])
+            bc = abs(highs[c_idx] - lows[b_idx]) if highs[c_idx] > lows[b_idx] else abs(lows[c_idx] - highs[b_idx])
+            cd = abs(highs[d_idx] - lows[c_idx]) if highs[d_idx] > lows[c_idx] else abs(lows[d_idx] - highs[c_idx])
+            
+            if ab == 0:
+                continue
+            
+            bc_ratio = bc / ab
+            cd_ratio = cd / bc
+            
+            # ABCD: BC ≈ 0.382-0.886 de AB, CD ≈ 1.272-1.618 de BC
+            is_valid = (0.35 <= bc_ratio <= 0.9 and 1.2 <= cd_ratio <= 1.7)
+            
+            if is_valid:
+                patterns.append({
+                    "type": "ABCD",
+                    "confidence": 0.7,
+                    "points": {
+                        "A": {"index": a_idx, "price": lows[a_idx]},
+                        "B": {"index": b_idx, "price": highs[b_idx]},
+                        "C": {"index": c_idx, "price": lows[c_idx]},
+                        "D": {"index": d_idx, "price": closes[d_idx]}
+                    }
+                })
+        except:
+            continue
+    
+    return patterns
+
+def detect_triangle_pattern(df: pd.DataFrame) -> List[Dict]:
+    """
+    Détecte les patterns Triangle (ascendant, descendant, symétrique)
+    """
+    patterns = []
+    if len(df) < 10:
+        return patterns
+    
+    highs = df['high'].values
+    lows = df['low'].values
+    
+    # Chercher convergence des hauts et bas
+    for i in range(10, len(df)):
+        try:
+            recent_highs = highs[i-10:i]
+            recent_lows = lows[i-10:i]
+            
+            # Calculer les lignes de tendance
+            high_trend = np.polyfit(range(len(recent_highs)), recent_highs, 1)[0]
+            low_trend = np.polyfit(range(len(recent_lows)), recent_lows, 1)[0]
+            
+            # Triangle ascendant: ligne de support montante, résistance horizontale
+            ascending = low_trend > 0 and abs(high_trend) < 0.0001
+            
+            # Triangle descendant: ligne de support horizontale, résistance descendante
+            descending = abs(low_trend) < 0.0001 and high_trend < 0
+            
+            # Triangle symétrique: les deux lignes convergent
+            symmetrical = (low_trend > 0 and high_trend < 0) or (abs(low_trend) < 0.0001 and abs(high_trend) < 0.0001)
+            
+            if ascending or descending or symmetrical:
+                patterns.append({
+                    "type": "Triangle",
+                    "subtype": "ascending" if ascending else "descending" if descending else "symmetrical",
+                    "confidence": 0.65,
+                    "points": {
+                        "start": {"index": i-10, "high": recent_highs[0], "low": recent_lows[0]},
+                        "end": {"index": i, "high": recent_highs[-1], "low": recent_lows[-1]}
+                    },
+                    "trends": {
+                        "high_trend": round(high_trend, 6),
+                        "low_trend": round(low_trend, 6)
+                    }
+                })
+        except:
+            continue
+    
+    return patterns
+
+def detect_three_drives_pattern(df: pd.DataFrame) -> List[Dict]:
+    """
+    Détecte les patterns Three Drives
+    Pattern: 3 mouvements similaires avec ratios Fibonacci
+    """
+    patterns = []
+    if len(df) < 9:
+        return patterns
+    
+    highs = df['high'].values
+    lows = df['low'].values
+    
+    for i in range(8, len(df)):
+        try:
+            # 3 drives: 3 vagues similaires
+            drive1 = abs(highs[i-8] - lows[i-6]) if highs[i-8] > lows[i-6] else abs(lows[i-8] - highs[i-6])
+            drive2 = abs(highs[i-5] - lows[i-3]) if highs[i-5] > lows[i-3] else abs(lows[i-5] - highs[i-3])
+            drive3 = abs(highs[i-2] - lows[i]) if highs[i-2] > lows[i] else abs(lows[i-2] - highs[i])
+            
+            if drive1 == 0:
+                continue
+            
+            ratio2 = drive2 / drive1
+            ratio3 = drive3 / drive2
+            
+            # Three Drives: ratios similaires entre les drives (0.8-1.2)
+            is_valid = (0.8 <= ratio2 <= 1.2 and 0.8 <= ratio3 <= 1.2)
+            
+            if is_valid:
+                patterns.append({
+                    "type": "Three Drives",
+                    "confidence": 0.7,
+                    "points": {
+                        "drive1": {"start": i-8, "end": i-6, "magnitude": drive1},
+                        "drive2": {"start": i-5, "end": i-3, "magnitude": drive2},
+                        "drive3": {"start": i-2, "end": i, "magnitude": drive3}
+                    },
+                    "ratios": {
+                        "drive2/drive1": round(ratio2, 3),
+                        "drive3/drive2": round(ratio3, 3)
+                    }
+                })
+        except:
+            continue
+    
+    return patterns
+
+def detect_elliott_impulse(df: pd.DataFrame) -> List[Dict]:
+    """
+    Détecte les patterns Elliott Impulse Wave (12345)
+    5 vagues: 3 impulsives (1,3,5) et 2 correctives (2,4)
+    """
+    patterns = []
+    if len(df) < 20:
+        return patterns
+    
+    closes = df['close'].values
+    
+    # Chercher 5 vagues
+    for i in range(20, len(df)):
+        try:
+            # Simplification: chercher 5 mouvements alternés
+            wave1 = closes[i-19] - closes[i-15]  # Vague 1
+            wave2 = closes[i-15] - closes[i-11]  # Vague 2 (correction)
+            wave3 = closes[i-11] - closes[i-7]    # Vague 3 (impulsive)
+            wave4 = closes[i-7] - closes[i-3]    # Vague 4 (correction)
+            wave5 = closes[i-3] - closes[i]      # Vague 5 (impulsive)
+            
+            # Vague 3 doit être la plus forte
+            if abs(wave3) > abs(wave1) and abs(wave3) > abs(wave5):
+                # Vagues 2 et 4 doivent être des corrections (direction opposée)
+                is_valid = (wave1 * wave2 < 0 and wave2 * wave3 < 0 and wave3 * wave4 < 0 and wave4 * wave5 < 0)
+                
+                if is_valid:
+                    patterns.append({
+                        "type": "Elliott Impulse Wave",
+                        "direction": "bullish" if wave1 > 0 else "bearish",
+                        "confidence": 0.7,
+                        "waves": {
+                            "1": {"start": i-19, "end": i-15, "magnitude": wave1},
+                            "2": {"start": i-15, "end": i-11, "magnitude": wave2},
+                            "3": {"start": i-11, "end": i-7, "magnitude": wave3},
+                            "4": {"start": i-7, "end": i-3, "magnitude": wave4},
+                            "5": {"start": i-3, "end": i, "magnitude": wave5}
+                        }
+                    })
+        except:
+            continue
+    
+    return patterns
+
+def detect_elliott_abc(df: pd.DataFrame) -> List[Dict]:
+    """
+    Détecte les patterns Elliott Correction Wave (ABC)
+    3 vagues correctives
+    """
+    patterns = []
+    if len(df) < 9:
+        return patterns
+    
+    closes = df['close'].values
+    
+    for i in range(9, len(df)):
+        try:
+            wave_a = closes[i-9] - closes[i-6]
+            wave_b = closes[i-6] - closes[i-3]
+            wave_c = closes[i-3] - closes[i]
+            
+            # ABC: A et C dans la même direction, B en correction
+            is_valid = (wave_a * wave_c > 0 and wave_a * wave_b < 0)
+            
+            if is_valid:
+                patterns.append({
+                    "type": "Elliott Correction Wave (ABC)",
+                    "confidence": 0.65,
+                    "waves": {
+                        "A": {"start": i-9, "end": i-6, "magnitude": wave_a},
+                        "B": {"start": i-6, "end": i-3, "magnitude": wave_b},
+                        "C": {"start": i-3, "end": i, "magnitude": wave_c}
+                    }
+                })
+        except:
+            continue
+    
+    return patterns
+
+@app.get("/deriv/patterns/{symbol}")
+async def get_deriv_patterns(symbol: str, timeframe: str = "M15", count: int = 100):
+    """
+    Détecte tous les patterns Deriv sur un symbole
+    Retourne: XABCD, Cypher, Head and Shoulders, ABCD, Triangle, Three Drives
+    """
+    global mt5_initialized  # Déclarer global AVANT toute utilisation
+    try:
+        # Récupérer les données
+        if MT5_AVAILABLE and mt5_initialized:
+            tf_map = {'M1': mt5.TIMEFRAME_M1, 'M5': mt5.TIMEFRAME_M5, 'M15': mt5.TIMEFRAME_M15,
+                     'H1': mt5.TIMEFRAME_H1, 'H4': mt5.TIMEFRAME_H4, 'D1': mt5.TIMEFRAME_D1}
+            tf = tf_map.get(timeframe.upper(), mt5.TIMEFRAME_M15)
+            
+            rates = mt5.copy_rates_from_pos(symbol, tf, 0, count)
+            if rates is None or len(rates) == 0:
+                raise HTTPException(status_code=404, detail=f"Aucune donnée pour {symbol}")
+            
+            df = pd.DataFrame(rates)
+            df['time'] = pd.to_datetime(df['time'], unit='s')
+        else:
+            # Fallback: utiliser les données MT5 si disponible, sinon erreur
+            if not MT5_AVAILABLE:
+                raise HTTPException(status_code=503, detail="MT5 non disponible - impossible de récupérer les données")
+            
+            # Essayer avec MT5 même si pas initialisé
+            try:
+                if not mt5_initialized:
+                    if not mt5.initialize():
+                        raise HTTPException(status_code=503, detail="Impossible d'initialiser MT5")
+                    mt5_initialized = True
+                
+                tf_map = {'M1': mt5.TIMEFRAME_M1, 'M5': mt5.TIMEFRAME_M5, 'M15': mt5.TIMEFRAME_M15,
+                         'H1': mt5.TIMEFRAME_H1, 'H4': mt5.TIMEFRAME_H4, 'D1': mt5.TIMEFRAME_D1}
+                tf = tf_map.get(timeframe.upper(), mt5.TIMEFRAME_M15)
+                
+                rates = mt5.copy_rates_from_pos(symbol, tf, 0, count)
+                if rates is None or len(rates) == 0:
+                    raise HTTPException(status_code=404, detail=f"Aucune donnée pour {symbol}")
+                
+                df = pd.DataFrame(rates)
+                df['time'] = pd.to_datetime(df['time'], unit='s')
+            except Exception as e:
+                logger.error(f"Erreur MT5 dans get_deriv_patterns: {type(e).__name__}: {str(e)}", exc_info=True)
+                raise HTTPException(status_code=500, detail=f"Erreur lors de la récupération des données: {str(e)}")
+        
+        # Vérifier que le DataFrame a les colonnes nécessaires
+        required_columns = ['open', 'high', 'low', 'close']
+        if not all(col in df.columns for col in required_columns):
+            raise HTTPException(status_code=500, detail=f"Données incomplètes. Colonnes requises: {required_columns}, trouvées: {list(df.columns)}")
+        
+        # S'assurer que les colonnes sont numériques
+        for col in required_columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+        
+        # Supprimer les lignes avec NaN
+        df = df.dropna(subset=required_columns)
+        
+        if len(df) < 5:
+            raise HTTPException(status_code=400, detail=f"Pas assez de données pour détecter des patterns. Minimum 5 bougies requis, trouvé: {len(df)}")
+        
+        # Détecter tous les patterns
+        try:
+            all_patterns = {
+                "xabcd": detect_xabcd_pattern(df),
+                "cypher": detect_cypher_pattern(df),
+                "head_and_shoulders": detect_head_and_shoulders(df),
+                "abcd": detect_abcd_pattern(df),
+                "triangle": detect_triangle_pattern(df),
+                "three_drives": detect_three_drives_pattern(df),
+                "elliott_impulse": detect_elliott_impulse(df),
+                "elliott_abc": detect_elliott_abc(df)
+            }
+        except Exception as pattern_error:
+            logger.error(f"Erreur lors de la détection des patterns: {pattern_error}", exc_info=True)
+            raise HTTPException(status_code=500, detail=f"Erreur détection patterns: {str(pattern_error)}")
+        
+        # Compter les patterns détectés
+        total_patterns = sum(len(patterns) for patterns in all_patterns.values())
+        
+        # Convertir les types NumPy en types Python natifs pour la sérialisation JSON
+        import numpy as np
+        import json
+        
+        def convert_to_native(obj):
+            """Convertit récursivement les types NumPy en types Python natifs"""
+            if isinstance(obj, (np.integer, np.int64, np.int32)):
+                return int(obj)
+            elif isinstance(obj, (np.floating, np.float64, np.float32)):
+                return float(obj)
+            elif isinstance(obj, np.ndarray):
+                return obj.tolist()
+            elif isinstance(obj, dict):
+                return {k: convert_to_native(v) for k, v in obj.items()}
+            elif isinstance(obj, list):
+                return [convert_to_native(item) for item in obj]
+            elif isinstance(obj, (pd.Timestamp, datetime)):
+                return obj.isoformat() if hasattr(obj, 'isoformat') else str(obj)
+            else:
+                return obj
+        
+        # Convertir tous les patterns
+        converted_patterns = {}
+        for pattern_type, patterns_list in all_patterns.items():
+            converted_patterns[pattern_type] = [convert_to_native(p) for p in patterns_list]
+        
+        return {
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "total_patterns": int(total_patterns),
+            "patterns": converted_patterns,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+        
+    except Exception as e:
+        logger.error(f"Erreur détection patterns pour {symbol}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/deriv/tools/vwap/{symbol}")
+async def get_anchored_vwap(symbol: str, anchor_date: Optional[str] = None, timeframe: str = "M15"):
+    """
+    Calcule l'Anchored VWAP (Volume Weighted Average Price) depuis une date d'ancrage
+    """
+    try:
+        if MT5_AVAILABLE and mt5_initialized:
+            tf_map = {'M1': mt5.TIMEFRAME_M1, 'M5': mt5.TIMEFRAME_M5, 'M15': mt5.TIMEFRAME_M15,
+                     'H1': mt5.TIMEFRAME_H1, 'H4': mt5.TIMEFRAME_H4, 'D1': mt5.TIMEFRAME_D1}
+            tf = tf_map.get(timeframe.upper(), mt5.TIMEFRAME_M15)
+            
+            # Si anchor_date fourni, calculer depuis cette date
+            if anchor_date:
+                anchor = datetime.fromisoformat(anchor_date.replace('Z', '+00:00'))
+                rates = mt5.copy_rates_from(symbol, tf, anchor, 1000)
+            else:
+                # Par défaut: depuis le début de la journée
+                today = datetime.now().replace(hour=0, minute=0, second=0)
+                rates = mt5.copy_rates_from(symbol, tf, today, 1000)
+            
+            if rates is None or len(rates) == 0:
+                raise HTTPException(status_code=404, detail="Aucune donnée")
+            
+            df = pd.DataFrame(rates)
+            df['time'] = pd.to_datetime(df['time'], unit='s')
+        else:
+            raise HTTPException(status_code=503, detail="MT5 non disponible ou non initialisé")
+        
+        # Calculer VWAP
+        df['typical_price'] = (df['high'] + df['low'] + df['close']) / 3
+        df['pv'] = df['typical_price'] * df['tick_volume']
+        df['cumulative_pv'] = df['pv'].cumsum()
+        df['cumulative_volume'] = df['tick_volume'].cumsum()
+        df['vwap'] = df['cumulative_pv'] / df['cumulative_volume']
+        
+        current_vwap = df['vwap'].iloc[-1]
+        
+        return {
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "anchor_date": anchor_date or "today",
+            "current_vwap": round(current_vwap, 5),
+            "price_vs_vwap": round(df['close'].iloc[-1] - current_vwap, 5),
+            "bias": "above" if df['close'].iloc[-1] > current_vwap else "below",
+            "data_points": len(df)
+        }
+        
+    except Exception as e:
+        logger.error(f"Erreur VWAP pour {symbol}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/deriv/tools/volume-profile/{symbol}")
+async def get_volume_profile(symbol: str, timeframe: str = "H1", bins: int = 20):
+    """
+    Calcule le Volume Profile (Fixed Range) - distribution du volume par niveau de prix
+    """
+    try:
+        if MT5_AVAILABLE and mt5_initialized:
+            tf_map = {'M1': mt5.TIMEFRAME_M1, 'M5': mt5.TIMEFRAME_M5, 'M15': mt5.TIMEFRAME_M15,
+                     'H1': mt5.TIMEFRAME_H1, 'H4': mt5.TIMEFRAME_H4, 'D1': mt5.TIMEFRAME_D1}
+            tf = tf_map.get(timeframe.upper(), mt5.TIMEFRAME_H1)
+            
+            rates = mt5.copy_rates_from_pos(symbol, tf, 0, 500)
+            if rates is None or len(rates) == 0:
+                raise HTTPException(status_code=404, detail="Aucune donnée")
+            
+            df = pd.DataFrame(rates)
+        else:
+            raise HTTPException(status_code=503, detail="MT5 non disponible ou non initialisé")
+        
+        # Calculer le range de prix
+        price_min = df['low'].min()
+        price_max = df['high'].max()
+        price_range = price_max - price_min
+        
+        # Créer des bins de prix
+        bin_size = price_range / bins
+        price_bins = [price_min + i * bin_size for i in range(bins + 1)]
+        
+        # Distribuer le volume par bin
+        volume_profile = []
+        for i in range(bins):
+            bin_low = price_bins[i]
+            bin_high = price_bins[i + 1]
+            
+            # Volume dans ce bin (basé sur les bougies qui touchent ce range)
+            volume = df[(df['high'] >= bin_low) & (df['low'] <= bin_high)]['tick_volume'].sum()
+            
+            volume_profile.append({
+                "price_level": round((bin_low + bin_high) / 2, 5),
+                "volume": int(volume),
+                "range": {"low": round(bin_low, 5), "high": round(bin_high, 5)}
+            })
+        
+        # Trouver le POC (Point of Control) - niveau avec le plus de volume
+        max_volume_bin = max(volume_profile, key=lambda x: x['volume'])
+        
+        return {
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "price_range": {"min": round(price_min, 5), "max": round(price_max, 5)},
+            "poc": {
+                "price": max_volume_bin["price_level"],
+                "volume": max_volume_bin["volume"]
+            },
+            "profile": volume_profile,
+            "bins": bins
+        }
+        
+    except Exception as e:
+        logger.error(f"Erreur Volume Profile pour {symbol}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ==================== END DERIV PATTERNS ====================
+
 # ==================== END DERIV API ====================
 
 @app.get("/health")
@@ -1577,9 +2225,14 @@ async def decision_gemma(request: DecisionRequest):
                 mt5_image_path = os.path.join(MT5_FILES_DIR, request.image_filename)
                 
                 if os.path.exists(mt5_image_path):
-                    gemma_prompt = f"""Analyse ce graphique {request.symbol} et donne une évaluation technique précise.
+                    gemma_prompt = f"""Analyse ce graphique {request.symbol} et identifie TOUS les objets graphiques visibles (lignes, zones, flèches, labels, patterns).
                     
                     Action suggérée: {action}
+                    
+                    Analyse DÉTAILLÉE demandée:
+                    1. Identifie tous les objets graphiques visibles sur le graphique (support/résistance, zones, flèches de signal, patterns, etc.)
+                    2. Interprète leur signification pour le trading
+                    3. Évalue si ces objets confirment ou infirment l'action suggérée {action}
                     
                     Réponds en format JSON avec ces champs:
                     - "tendance": "haussière" ou "baissière" ou "neutre"
@@ -1589,6 +2242,8 @@ async def decision_gemma(request: DecisionRequest):
                     - "stop_loss": prix optimal pour SL
                     - "take_profit": prix optimal pour TP
                     - "confirmation": true/false si tu confirmes l'action {action}
+                    - "objets_graphiques": liste des objets identifiés (zones, lignes, patterns, etc.)
+                    - "interpretation_objets": explication de comment les objets graphiques influencent la décision
                     """
                     
                     gemma_analysis = analyze_with_gemma(gemma_prompt, mt5_image_path)
@@ -1623,10 +2278,11 @@ async def decision_gemma(request: DecisionRequest):
                     logger.warning(f"Fichier image non trouvé: {mt5_image_path}")
                     
             except Exception as gemma_err:
-                logger.error(f"Erreur analyse Gemma: {gemma_err}")
+                logger.error(f"Erreur analyse Gemma: {type(gemma_err).__name__}: {str(gemma_err)}", exc_info=True)
         
         # Étape 3: Formulation finale avec Gemini
-        if GEMINI_AVAILABLE:
+        global GEMINI_AVAILABLE, gemini_model  # Déclarer global AVANT toute utilisation
+        if GEMINI_AVAILABLE and gemini_model is not None:
             try:
                 gemini_prompt = f"""En tant qu'expert trading, analyse ces données pour {request.symbol}:
                 
@@ -1669,7 +2325,12 @@ async def decision_gemma(request: DecisionRequest):
                 logger.info(f"Recommandation Gemini: {action} (conf: {confidence:.2f})")
                 
             except Exception as gemini_err:
-                logger.error(f"Erreur formulation Gemini: {gemini_err}")
+                logger.error(f"Erreur formulation Gemini: {type(gemini_err).__name__}: {str(gemini_err)}", exc_info=True)
+                # Si le modèle est obsolète, désactiver Gemini pour cette session
+                if "NotFound" in str(gemini_err) or "404" in str(gemini_err) or "not found" in str(gemini_err).lower():
+                    logger.warning("Modèle Gemini obsolète détecté. Désactivation de Gemini pour cette requête.")
+                    GEMINI_AVAILABLE = False
+                    gemini_model = None
         
         # Limiter la confiance
         confidence = max(0.0, min(1.0, confidence))
@@ -1709,9 +2370,8 @@ async def decision_gemma(request: DecisionRequest):
         return response
         
     except Exception as e:
-        logger.error(f"Erreur dans decision_gemma: {e}")
-        logger.error(traceback.format_exc())
-        raise HTTPException(status_code=500, detail=f"Erreur interne: {str(e)}")
+        logger.error(f"Erreur dans decision_gemma: {type(e).__name__}: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Erreur interne: {type(e).__name__}: {str(e)}")
 
 @app.post("/decision", response_model=DecisionResponse)
 async def decision(request: DecisionRequest):
@@ -1843,32 +2503,123 @@ async def decision(request: DecisionRequest):
                 volatility_ok = False
                 reason += " | Volatilité trop faible"
         
-        # Décision combinée (incluant VWAP et SuperTrend)
-        bullish_signals = sum([rsi_bullish, h1_bullish, m1_bullish, vwap_signal_buy, supertrend_bullish])
-        bearish_signals = sum([rsi_bearish, h1_bearish, m1_bearish, vwap_signal_sell, supertrend_bearish])
+        # NOUVEAU 2025 : Analyse des patterns Deriv
+        deriv_patterns_bullish = 0
+        deriv_patterns_bearish = 0
+        deriv_patterns_confidence = 0.0
         
-        # Appliquer le filtre de volatilité
+        if hasattr(request, 'deriv_patterns_bullish') and request.deriv_patterns_bullish is not None:
+            deriv_patterns_bullish = request.deriv_patterns_bullish
+        if hasattr(request, 'deriv_patterns_bearish') and request.deriv_patterns_bearish is not None:
+            deriv_patterns_bearish = request.deriv_patterns_bearish
+        if hasattr(request, 'deriv_patterns_confidence') and request.deriv_patterns_confidence is not None:
+            deriv_patterns_confidence = request.deriv_patterns_confidence
+        
+        # Initialiser les signaux avant les conditions pour éviter UnboundLocalError
+        bullish_signals_base = sum([rsi_bullish, h1_bullish, m1_bullish, vwap_signal_buy, supertrend_bullish])
+        bearish_signals_base = sum([rsi_bearish, h1_bearish, m1_bearish, vwap_signal_sell, supertrend_bearish])
+        bullish_signals = bullish_signals_base
+        bearish_signals = bearish_signals_base
+
+        # Poids par signal (pondération explicite)
+        WEIGHTS = {
+            "h1": 0.25,
+            "m1": 0.18,
+            "rsi": 0.12,
+            "vwap": 0.08,
+            "supertrend": 0.08,
+            "patterns": 0.12,
+            "sentiment": 0.07,
+        }
+        ALIGN_BONUS = 0.10     # Alignement multi‑TF
+        DIVERGENCE_MALUS = -0.10
+        VOL_LOW_MALUS = -0.15
+        VOL_OK_BONUS = 0.03
+        BASE_CONF = 0.40
+        MAX_CONF = 0.95
+        MIN_CONF = 0.20
+        HOLD_THRESHOLD = 0.05  # Score trop faible => hold
+
+        # Score directionnel pondéré
+        score = 0.0
+        components = []
+
+        if h1_bullish:
+            score += WEIGHTS["h1"]; components.append("H1:+")
+        if h1_bearish:
+            score -= WEIGHTS["h1"]; components.append("H1:-")
+
+        if m1_bullish:
+            score += WEIGHTS["m1"]; components.append("M1:+")
+        if m1_bearish:
+            score -= WEIGHTS["m1"]; components.append("M1:-")
+
+        if rsi_bullish:
+            score += WEIGHTS["rsi"]; components.append("RSI:+")
+        if rsi_bearish:
+            score -= WEIGHTS["rsi"]; components.append("RSI:-")
+
+        if vwap_signal_buy:
+            score += WEIGHTS["vwap"]; components.append("VWAP:+")
+        if vwap_signal_sell:
+            score -= WEIGHTS["vwap"]; components.append("VWAP:-")
+
+        if supertrend_bullish:
+            score += WEIGHTS["supertrend"]; components.append("ST:+")
+        if supertrend_bearish:
+            score -= WEIGHTS["supertrend"]; components.append("ST:-")
+
+        # Patterns Deriv pondérés par leur confiance
+        pattern_bonus = 0.0
+        if deriv_patterns_confidence and deriv_patterns_confidence > 0.6:
+            if deriv_patterns_bullish > deriv_patterns_bearish:
+                pattern_bonus = WEIGHTS["patterns"] * min(deriv_patterns_bullish, 2)
+                score += pattern_bonus; components.append(f"Patterns:+{pattern_bonus:.2f}")
+            elif deriv_patterns_bearish > deriv_patterns_bullish:
+                pattern_bonus = WEIGHTS["patterns"] * min(deriv_patterns_bearish, 2)
+                score -= pattern_bonus; components.append(f"Patterns:-{pattern_bonus:.2f}")
+
+        # Alignement / divergence multi‑timeframe
+        if (h1_bullish and m1_bullish) or (h1_bearish and m1_bearish):
+            score += ALIGN_BONUS; components.append("Align:+")
+        if (h1_bullish and m1_bearish) or (h1_bearish and m1_bullish):
+            score += DIVERGENCE_MALUS; components.append("Div:-")
+
+        # Filtre de volatilité (ATR / régime)
         if not volatility_ok:
-            action = "hold"
-            confidence = 0.2
-            reason = "Régime de faible volatilité détecté - Attente"
-        elif bullish_signals >= 2:
+            score += VOL_LOW_MALUS; components.append("VolLow:-")
+        elif request.volatility_regime == 1:
+            score += VOL_OK_BONUS; components.append("VolHigh:+")
+
+        # Sentiment avancé (sera ajouté plus bas si dispo)
+        sentiment_bonus = 0.0
+
+        # Décision basée sur le score directionnel
+        action = "hold"
+        direction_score = score
+        if direction_score > HOLD_THRESHOLD:
             action = "buy"
-            confidence = min(0.5 + (bullish_signals * 0.12), 0.95)
-            vwap_note = f", VWAP={'✓' if vwap_signal_buy else '✗'}"
-            st_note = f", SuperTrend={'✓' if supertrend_bullish else '✗'}"
-            reason = f"Signaux haussiers: RSI={rsi_bullish}, H1={h1_bullish}, M1={m1_bullish}{vwap_note}{st_note}"
-        elif bearish_signals >= 2:
+        elif direction_score < -HOLD_THRESHOLD:
             action = "sell"
-            confidence = min(0.5 + (bearish_signals * 0.12), 0.95)
-            vwap_note = f", VWAP={'✓' if vwap_signal_sell else '✗'}"
-            st_note = f", SuperTrend={'✓' if supertrend_bearish else '✗'}"
-            reason = f"Signaux baissiers: RSI={rsi_bearish}, H1={h1_bearish}, M1={m1_bearish}{vwap_note}{st_note}"
+
+        confidence = BASE_CONF + abs(direction_score)
+        confidence = max(MIN_CONF, min(MAX_CONF, confidence))
+
+        # Raison initiale structurée
+        reason_parts = [f"Score={direction_score:+.2f}", f"Comp={','.join(components)}"]
+        
+        # Recalibrer direction/action après ajustements (score peut évoluer)
+        direction_score = score
+        if direction_score > HOLD_THRESHOLD:
+            action = "buy"
+        elif direction_score < -HOLD_THRESHOLD:
+            action = "sell"
         else:
             action = "hold"
-            confidence = 0.3
-            reason = "Signaux mixtes, attente de confirmation"
-        
+
+        confidence = BASE_CONF + abs(direction_score)
+        confidence = max(MIN_CONF, min(MAX_CONF, confidence))
+
         # Utiliser Gemini AI pour améliorer la raison si disponible
         # Note: Gemini est désactivé par défaut, on utilise Mistral si disponible
         if GEMINI_AVAILABLE and reason:
@@ -1902,6 +2653,14 @@ Format: Analyse claire et professionnelle en français.
             except Exception as e:
                 logger.debug(f"Mistral analysis non disponible: {e}")
 
+        # Si pas de raison construite, utiliser les composants de score
+        if reason_parts:
+            reason_from_parts = " | ".join(reason_parts)
+            if reason:
+                reason = f"{reason_from_parts} | {reason}"
+            else:
+                reason = reason_from_parts
+
         stop_loss = None
         take_profit = None
 
@@ -1917,7 +2676,8 @@ Format: Analyse claire et professionnelle en français.
                     
                     # Bonus de confiance si Gemma confirme
                     if action.lower() in gemma_analysis.lower():
-                        confidence = min(confidence + 0.1, 0.98)
+                        confidence = min(confidence + 0.05, MAX_CONF)
+                        reason_parts.append("Gemma:+")
                         
                     # Tentative d'extraction SL/TP via Regex
                     import re
@@ -1936,8 +2696,7 @@ Format: Analyse claire et professionnelle en français.
                         logger.warning(f"Failed to parse SL/TP from Gemma: {parse_err}")
 
             except Exception as e:
-                logger.error(f"Erreur analyse Gemma: {e}")
-                logger.error(f"Erreur analyse Gemma: {e}")
+                logger.error(f"Erreur analyse Gemma: {type(e).__name__}: {str(e)}", exc_info=True)
 
         if AI_INDICATORS_AVAILABLE and mt5_initialized:
             try:
@@ -1953,20 +2712,24 @@ Format: Analyse claire et professionnelle en français.
                     
                     # Améliorer la décision avec le sentiment
                     if sentiment.get('sentiment', 0) > 0.3:
-                        bullish_signals += 1
+                        sentiment_bonus = WEIGHTS.get("sentiment", 0.07)
+                        score += sentiment_bonus
+                        reason_parts.append("Sentiment:+")
                         reason += f" | Sentiment: {sentiment.get('trend', 'neutral')}"
                     elif sentiment.get('sentiment', 0) < -0.3:
-                        bearish_signals += 1
+                        sentiment_bonus = WEIGHTS.get("sentiment", 0.07)
+                        score -= sentiment_bonus
+                        reason_parts.append("Sentiment:-")
                         reason += f" | Sentiment: {sentiment.get('trend', 'neutral')}"
                     
                     # Ajuster la confiance selon le sentiment
                     sentiment_strength = abs(sentiment.get('sentiment', 0))
                     if sentiment_strength > 0.5:
-                        confidence = min(confidence + 0.1, 0.95)
+                        confidence = min(confidence + 0.05, MAX_CONF)
             except Exception as e:
                 logger.warning(f"Erreur AdvancedIndicators dans decision: {e}")
         
-        # Utiliser le prédicteur de spike si disponible avec amélioration de la fiabilité
+        # ========== DÉTECTION DE SPIKE RENFORCÉE MULTI-SYSTÈME ==========
         spike_prediction = False
         spike_zone_price = None
         spike_direction = None
@@ -1974,43 +2737,227 @@ Format: Analyse claire et professionnelle en français.
         early_spike_zone_price = None
         early_spike_direction = None
         
-        # Amélioration: Filtrage des symboles de volatilité
+        # Filtrage des symboles de volatilité
         is_volatility_symbol = any(vol in request.symbol for vol in ["Volatility", "Boom", "Crash", "Step Index"])
+        is_boom = "Boom" in request.symbol
+        is_crash = "Crash" in request.symbol
+        is_step = "Step" in request.symbol
         
-        if spike_predictor and is_volatility_symbol:
+        if is_volatility_symbol:
             try:
-                # Récupérer plus de données pour une meilleure prédiction
-                df = get_historical_data_mt5(request.symbol, "M1", 200)  # Augmenté à 200 bougies
-                if df is not None and len(df) > 50:
-                    # Analyse multiple timeframes pour plus de fiabilité
-                    df_m5 = get_historical_data_mt5(request.symbol, "M5", 100)
-                    
-                    # Calculer la confluence avec plusieurs indicateurs
-                    confluence = spike_predictor.calculate_ema_confluence(df)
-                    volatility_regime = request.volatility_regime or 0
-                    volatility_ratio = request.volatility_ratio or 1.0
-                    
-                    # Conditions renforcées pour plus de fiabilité
-                    confluence_strength = confluence.get('confluence_strength', 0)
-                    trend_alignment = confluence.get('trend_direction') == 'BULLISH' if action == 'buy' else confluence.get('trend_direction') == 'BEARISH'
-                    
-                    # Seuil plus élevé pour les prédictions de spike
-                    if (confluence_strength > 0.8 and  # Augmenté de 0.7 à 0.8
-                        trend_alignment and 
-                        volatility_regime >= 0 and  # Éviter les faibles volatilités
-                        volatility_ratio > 0.8):  # Ratio de volatilité suffisant
+                # 1. DÉTECTION ML AVANCÉE (si disponible)
+                ml_spike_score = 0.0
+                ml_spike_direction = None
+                if SPIKE_DETECTOR_AVAILABLE:
+                    try:
+                        df_m1 = get_historical_data_mt5(request.symbol, "M1", 200)
+                        if df_m1 is not None and len(df_m1) > 50:
+                            # Prédiction ML
+                            ml_result = predict_spike_ml(df_m1)
+                            if ml_result and isinstance(ml_result, float):
+                                ml_spike_score = ml_result
+                                if ml_spike_score > 0.75:  # Seuil élevé pour ML
+                                    ml_spike_direction = is_boom  # BUY pour Boom, SELL pour Crash
+                                    logger.info(f"🚀 ML Spike détecté: {ml_spike_score:.2%} pour {request.symbol}")
+                    except Exception as e:
+                        logger.debug(f"Erreur détection ML spike: {e}")
+                
+                # 2. DÉTECTION AVANCÉE MULTI-INDICATEURS (AdvancedSpikeDetector)
+                advanced_score = 0.0
+                advanced_direction = None
+                if ADVANCED_SPIKE_DETECTOR_AVAILABLE and advanced_spike_detector:
+                    try:
+                        df_m1 = get_historical_data_mt5(request.symbol, "M1", 100)
+                        df_m5 = get_historical_data_mt5(request.symbol, "M5", 50) if df_m1 is not None else None
+                        df_m15 = get_historical_data_mt5(request.symbol, "M15", 30) if df_m1 is not None else None
                         
-                        spike_prediction = True
-                        spike_zone_price = mid_price
-                        spike_direction = confluence.get('trend_direction') == 'BULLISH'
-                        confidence = min(confidence + 0.15, 0.95)  # Bonus de confiance
-                        reason += " | Spike ML haute confiance détecté"
-                        
+                        if df_m1 is not None and len(df_m1) > 20:
+                            score_result = advanced_spike_detector.calculate_spike_score(
+                                symbol=request.symbol,
+                                rsi=rsi,
+                                atr=request.atr,
+                                mid_price=mid_price,
+                                ema_fast_h1=request.ema_fast_h1,
+                                ema_slow_h1=request.ema_slow_h1,
+                                ema_fast_m1=request.ema_fast_m1,
+                                ema_slow_m1=request.ema_slow_m1,
+                                vwap=request.vwap if hasattr(request, 'vwap') else None,
+                                supertrend_trend=1 if supertrend_bullish else (-1 if supertrend_bearish else 0),
+                                volatility_ratio=request.volatility_ratio if hasattr(request, 'volatility_ratio') else None,
+                                df_m1=df_m1,
+                                df_m5=df_m5,
+                                df_m15=df_m15
+                            )
+                            advanced_score = score_result.get('score', 0.0)
+                            advanced_direction = score_result.get('is_buy', False)
+                            if advanced_score > 0.75:
+                                logger.info(f"📊 Advanced Spike Score: {advanced_score:.2%} - {score_result.get('reasons', '')}")
+                    except Exception as e:
+                        logger.debug(f"Erreur AdvancedSpikeDetector: {e}")
+                
+                # 3. DÉTECTION TRADITIONNELLE RENFORCÉE
+                volatility = request.atr / mid_price if mid_price > 0 else 0
+                strong_vol = volatility >= 0.003
+                medium_vol = volatility >= 0.0015
+                extreme_oversold = rsi <= 20
+                extreme_overbought = rsi >= 80
+                moderate_oversold = rsi <= 35
+                moderate_overbought = rsi >= 65
+                
+                # Score de détection traditionnelle (0-1)
+                traditional_score = 0.0
+                traditional_direction = None
+                
+                # Conditions haussières
+                bull_conditions = 0
+                if strong_vol: bull_conditions += 1
+                if extreme_oversold: bull_conditions += 1
+                if h1_bullish and m1_bullish: bull_conditions += 1
+                if request.dir_rule >= 1: bull_conditions += 1
+                if vwap_signal_buy or supertrend_bullish: bull_conditions += 1
+                
+                # Conditions baissières
+                bear_conditions = 0
+                if strong_vol: bear_conditions += 1
+                if extreme_overbought: bear_conditions += 1
+                if h1_bearish and m1_bearish: bear_conditions += 1
+                if request.dir_rule <= -1: bear_conditions += 1
+                if vwap_signal_sell or supertrend_bearish: bear_conditions += 1
+                
+                if bull_conditions >= 4:  # Au moins 4/5 conditions
+                    traditional_score = 0.8 + (bull_conditions - 4) * 0.05
+                    traditional_direction = True  # BUY
+                elif bear_conditions >= 4:
+                    traditional_score = 0.8 + (bear_conditions - 4) * 0.05
+                    traditional_direction = False  # SELL
+                elif bull_conditions >= 3:
+                    traditional_score = 0.6
+                    traditional_direction = True
+                elif bear_conditions >= 3:
+                    traditional_score = 0.6
+                    traditional_direction = False
+                
+                # 4. FUSION DES SCORES (Pondération intelligente)
+                final_spike_score = 0.0
+                final_direction = None
+                score_weights = []
+                
+                # ML a le plus de poids si disponible et fiable
+                if ml_spike_score > 0.7:
+                    final_spike_score += ml_spike_score * 0.4
+                    score_weights.append(f"ML:{ml_spike_score:.2%}")
+                    if final_direction is None:
+                        final_direction = ml_spike_direction
+                
+                # Advanced detector a un poids moyen
+                if advanced_score > 0.7:
+                    final_spike_score += advanced_score * 0.35
+                    score_weights.append(f"Advanced:{advanced_score:.2%}")
+                    if final_direction is None:
+                        final_direction = advanced_direction
+                
+                # Détection traditionnelle comme confirmation
+                if traditional_score > 0.6:
+                    final_spike_score += traditional_score * 0.25
+                    score_weights.append(f"Traditional:{traditional_score:.2%}")
+                    if final_direction is None:
+                        final_direction = traditional_direction
+                
+                # Normaliser le score final
+                final_spike_score = min(final_spike_score, 1.0)
+                
+                # 5. DÉCISION FINALE
+                if final_spike_score >= 0.75:  # Seuil élevé pour spike confirmé
+                    spike_prediction = True
+                    spike_zone_price = mid_price
+                    spike_direction = final_direction if final_direction is not None else (is_boom)
+                    confidence = min(confidence + 0.2, 0.95)
+                    reason += f" | 🚀 SPIKE CONFIRMÉ (Score: {final_spike_score:.2%}, Sources: {', '.join(score_weights)})"
+                    logger.info(f"✅ SPIKE DÉTECTÉ pour {request.symbol}: Score={final_spike_score:.2%}, Direction={'BUY' if spike_direction else 'SELL'}")
+                    
+                elif final_spike_score >= 0.60:  # Pré-alerte
+                    early_spike_warning = True
+                    early_spike_zone_price = mid_price
+                    early_spike_direction = final_direction if final_direction is not None else (moderate_oversold)
+                    confidence = min(confidence + 0.08, 0.85)
+                    reason += f" | ⚠️ Pré-alerte Spike (Score: {final_spike_score:.2%})"
+                    logger.info(f"⚠️ Pré-alerte SPIKE pour {request.symbol}: Score={final_spike_score:.2%}")
+                
             except Exception as e:
-                logger.warning(f"Erreur prédicteur spike avancé: {e}")
+                logger.warning(f"Erreur détection spike renforcée: {e}")
+                logger.debug(traceback.format_exc())
         
-        # Détection de spike améliorée avec conditions plus strictes
-        if not spike_prediction and is_volatility_symbol:
+        # Fallback: Détection basique si les systèmes avancés ne sont pas disponibles
+        if not spike_prediction and not early_spike_warning and is_volatility_symbol:
+            # Détection traditionnelle simplifiée comme fallback
+            volatility = request.atr / mid_price if mid_price > 0 else 0
+            strong_vol = volatility >= 0.003
+            medium_vol = volatility >= 0.0015
+            extreme_oversold = rsi <= 20
+            extreme_overbought = rsi >= 80
+            moderate_oversold = rsi <= 35
+            moderate_overbought = rsi >= 65
+            
+            # Spike haussier avec conditions renforcées
+            strong_bull_spike = (
+                strong_vol
+                and extreme_oversold
+                and h1_bullish and m1_bullish
+                and request.dir_rule >= 1
+                and (vwap_signal_buy or supertrend_bullish)
+            )
+            
+            # Spike baissier avec conditions renforcées
+            strong_bear_spike = (
+                strong_vol
+                and extreme_overbought
+                and h1_bearish and m1_bearish
+                and request.dir_rule <= -1
+                and (vwap_signal_sell or supertrend_bearish)
+            )
+            
+            # Spike pour Step Index
+            step_spike = False
+            if is_step:
+                step_spike = (
+                    strong_vol
+                    and (extreme_oversold or extreme_overbought)
+                    and ((h1_bullish and m1_bullish) or (h1_bearish and m1_bearish))
+                    and abs(request.dir_rule) >= 1
+                )
+            
+            if strong_bull_spike or strong_bear_spike or step_spike:
+                spike_prediction = True
+                spike_zone_price = mid_price
+                spike_direction = strong_bull_spike or (step_spike and extreme_oversold)
+                confidence = min(confidence + 0.2, 0.95)
+                
+                if is_boom:
+                    reason += " | Spike Boom confirmé (fallback)"
+                elif is_crash:
+                    reason += " | Spike Crash confirmé (fallback)"
+                elif is_step:
+                    reason += " | Spike Step Index détecté (fallback)"
+                else:
+                    reason += " | Spike Volatilité confirmé (fallback)"
+            
+            # Pré-alerte améliorée avec filtre de bruit
+            elif (medium_vol and 
+                  (moderate_oversold or moderate_overbought) and
+                  (h1_bullish != h1_bearish) and
+                  (request.volatility_ratio > 0.7 if hasattr(request, 'volatility_ratio') and request.volatility_ratio is not None else True)):
+                
+                early_spike_warning = True
+                early_spike_zone_price = mid_price
+                early_spike_direction = moderate_oversold
+                confidence = min(confidence + 0.05, 0.85)
+                
+                if is_boom:
+                    reason += " | Pré-alerte Spike Boom (fallback)"
+                elif is_crash:
+                    reason += " | Pré-alerte Spike Crash (fallback)"
+                else:
+                    reason += " | Pré-alerte Volatilité (fallback)"
             is_boom = "Boom" in request.symbol
             is_crash = "Crash" in request.symbol
             is_step = "Step" in request.symbol
@@ -3683,11 +4630,11 @@ async def get_autoscan_signals(symbol: Optional[str] = None):
                     if action == "BUY":
                         entry_price = current_price
                         stop_loss = entry_price - (atr * 2)
-                        take_profit = entry_price + (atr * 3)
+                        take_profit = entry_price + (atr * 4.5)  # Augmenté de 3.0 à 4.5 (+50%)
                     else:  # SELL
                         entry_price = current_price
                         stop_loss = entry_price + (atr * 2)
-                        take_profit = entry_price - (atr * 3)
+                        take_profit = entry_price - (atr * 4.5)  # Augmenté de 3.0 à 4.5 (+50%)
                     
                     signal = {
                         "symbol": sym,
@@ -3772,6 +4719,9 @@ if __name__ == "__main__":
     print("  - GET  /indicators/liquidity-zones/{symbol} : Zones de liquidité")
     print("  - GET  /indicators/market-profile/{symbol}  : Profil de marché (Market Profile)")
     print(f"  - GET  /autoscan/signals?symbol=SYMBOL    : Signaux AutoScan (compatible MT5)")
+    print(f"  - GET  /deriv/patterns/{{symbol}}            : Détection patterns Deriv (XABCD, Cypher, H&S, etc.)")
+    print(f"  - GET  /deriv/tools/vwap/{{symbol}}          : Anchored VWAP")
+    print(f"  - GET  /deriv/tools/volume-profile/{{symbol}}: Volume Profile")
     print("\nDocumentation interactive:")
     print(f"  - http://127.0.0.1:{API_PORT}/docs")
     print("=" * 60)
