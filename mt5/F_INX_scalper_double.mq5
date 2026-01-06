@@ -67,6 +67,9 @@ input bool   UseTrailingStop     = false;   // Utiliser trailing stop (désactiv
 input group "--- SORTIES VOLATILITY ---"
 input double VolatilityQuickTP   = 2.0;     // Fermer rapidement les indices Volatility à +2$ de profit
 
+input group "--- SORTIES BOOM/CRASH ---"
+input double BoomCrashSpikeTP    = 0.01;    // Fermer Boom/Crash dès que le spike donne au moins ce profit (0.01 = quasi immédiat)
+
 input group "--- INDICATEURS ---"
 input int    EMA_Fast_Period     = 9;       // Période EMA rapide
 input int    EMA_Slow_Period     = 21;      // Période EMA lente
@@ -121,6 +124,7 @@ struct PositionTracker {
    datetime openTime;
    double maxProfitReached;  // Profit maximum atteint pour cette position
    bool profitSecured;       // Indique si le profit a été sécurisé
+   double profitAtDuplication; // Profit au moment de la duplication (pour détecter drawdown 50%)
 };
 
 static PositionTracker g_positionTracker;
@@ -148,6 +152,80 @@ static datetime g_lastDayReset = 0;
 
 // Suivi pour fermeture après spike (Boom/Crash)
 static double g_lastBoomCrashPrice = 0.0;  // Prix de référence pour détecter le spike
+
+// Suivi des tentatives de spike et cooldown (Boom/Crash)
+static string   g_spikeSymbols[];
+static int      g_spikeFailCount[];
+static datetime g_spikeCooldown[];
+
+int GetSpikeIndex(const string sym)
+{
+   for(int i = 0; i < ArraySize(g_spikeSymbols); i++)
+   {
+      if(g_spikeSymbols[i] == sym)
+         return i;
+   }
+   int idx = ArraySize(g_spikeSymbols);
+   ArrayResize(g_spikeSymbols, idx + 1);
+   ArrayResize(g_spikeFailCount, idx + 1);
+   ArrayResize(g_spikeCooldown, idx + 1);
+   g_spikeSymbols[idx] = sym;
+   g_spikeFailCount[idx] = 0;
+   g_spikeCooldown[idx] = 0;
+   return idx;
+}
+
+bool IsBoomCrashSymbol(const string sym)
+{
+   return (StringFind(sym, "Boom") != -1 || StringFind(sym, "Crash") != -1);
+}
+
+// Fermer toutes les positions Volatility si la perte totale dépasse un seuil
+void CloseVolatilityIfLossExceeded(double lossLimit)
+{
+   double totalProfitVol = 0.0;
+   // Calculer le PnL cumulé des positions Volatility (tous symboles) pour ce Magic
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket > 0 && positionInfo.SelectByTicket(ticket))
+      {
+         string sym = positionInfo.Symbol();
+         if(IsVolatilitySymbol(sym) && positionInfo.Magic() == InpMagicNumber)
+         {
+            totalProfitVol += positionInfo.Profit();
+         }
+      }
+   }
+
+   // Si perte cumulée dépasse le seuil, fermer toutes les positions Volatility
+   if(totalProfitVol <= -MathAbs(lossLimit))
+   {
+      for(int i = PositionsTotal() - 1; i >= 0; i--)
+      {
+         ulong ticket = PositionGetTicket(i);
+         if(ticket > 0 && positionInfo.SelectByTicket(ticket))
+         {
+            string sym = positionInfo.Symbol();
+            if(IsVolatilitySymbol(sym) && positionInfo.Magic() == InpMagicNumber)
+            {
+               double p = positionInfo.Profit();
+               if(trade.PositionClose(ticket))
+               {
+                  Print("🛑 Volatility perte cumulée dépassée (", DoubleToString(totalProfitVol, 2),
+                        "$ <= ", DoubleToString(-MathAbs(lossLimit), 2), "$) - Fermeture ticket=", ticket,
+                        " sym=", sym, " profit=", DoubleToString(p, 2), "$");
+               }
+               else if(DebugMode)
+               {
+                  Print("❌ Erreur fermeture Volatility ticket=", ticket, " code=", trade.ResultRetcode(),
+                        " desc=", trade.ResultRetcodeDescription());
+               }
+            }
+         }
+      }
+   }
+}
 
 // Variables US Session Break & Retest (STRATÉGIE PRIORITAIRE)
 static double g_US_High = 0.0;              // Haut du range US (bougie M5 15h30)
@@ -333,13 +411,14 @@ void ResetDailyCounters()
    g_dailyProfit = 0.0;
    g_dailyLoss = 0.0;
    
-   // Calculer le profit/perte actuel depuis l'historique
+   // Calculer le profit/perte actuel depuis l'historique (net: profit + commission + swap)
    datetime startOfDay = StringToTime(TimeToString(TimeCurrent(), TIME_DATE));
    datetime endOfDay = startOfDay + 86400;
    
    if(HistorySelect(startOfDay, endOfDay))
    {
       int totalDeals = HistoryDealsTotal();
+      double netPnL = 0.0;
       for(int i = 0; i < totalDeals; i++)
       {
          ulong ticket = HistoryDealGetTicket(i);
@@ -353,13 +432,20 @@ void ResetDailyCounters()
          if(HistoryDealGetInteger(ticket, DEAL_MAGIC) != InpMagicNumber)
             continue;
          
-         // Récupérer le profit
-         double profit = HistoryDealGetDouble(ticket, DEAL_PROFIT);
-         if(profit > 0)
-            g_dailyProfit += profit;
-         else
-            g_dailyLoss += MathAbs(profit);
+         // Récupérer le profit net (profit + commission + swap)
+         double profit   = HistoryDealGetDouble(ticket, DEAL_PROFIT);
+         double comm     = HistoryDealGetDouble(ticket, DEAL_COMMISSION);
+         double swap     = HistoryDealGetDouble(ticket, DEAL_SWAP);
+         double dealPnL  = profit + comm + swap;
+         
+         netPnL += dealPnL;
       }
+      
+      // Séparer en profit et perte nets pour la journée
+      if(netPnL > 0)
+         g_dailyProfit = netPnL;
+      else
+         g_dailyLoss = -netPnL; // stocker la perte comme valeur positive
    }
 }
 
@@ -476,6 +562,9 @@ void UpdateAIDecision()
          Print("✅ MODE DÉGRADÉ DÉSACTIVÉ: Serveur IA disponible");
    }
    
+   // Sauvegarder l'action précédente avant d'analyser la nouvelle réponse
+   string previousAction = g_lastAIAction;
+   
    string resp = CharArrayToString(result, 0, -1, CP_UTF8);
    
    if(DebugMode)
@@ -576,6 +665,16 @@ void UpdateAIDecision()
    
    g_lastAITime = TimeCurrent();
    
+   // Si l'IA vient de passer en HOLD/ATTENTE alors qu'elle était en BUY ou SELL,
+   // fermer les positions ouvertes sur ce symbole pour attendre une nouvelle opportunité propre.
+   if((previousAction == "buy" || previousAction == "sell") &&
+      g_lastAIAction == "hold")
+   {
+      if(DebugMode)
+         Print("🔁 IA change vers ATTENTE (HOLD) après ", previousAction, " - Fermeture des positions en cours sur ", _Symbol);
+      CloseAllPositionsForCurrentSymbol();
+   }
+   
    if(DebugMode)
       Print("🤖 IA: ", g_lastAIAction, " (confiance: ", DoubleToString(g_lastAIConfidence, 2), ") - ", g_lastAIReason);
 }
@@ -672,59 +771,12 @@ void ExtractAIZonesFromResponse(string resp)
 //+------------------------------------------------------------------+
 //| Vérifier et gérer les positions existantes                       |
 //+------------------------------------------------------------------+
-// Ferme les doublons gagnants si le gain cumulé atteint un seuil
-void CloseDuplicateProfitsIfNeeded()
-{
-   const double DUP_PROFIT_THRESHOLD = 5.0; // seuil de gain cumulé
-   ulong tickets[];
-   double profits[];
-   int count = 0;
-   double totalPositive = 0.0;
-
-   for(int i = PositionsTotal() - 1; i >= 0; i--)
-   {
-      ulong ticket = PositionGetTicket(i);
-      if(ticket > 0 && positionInfo.SelectByTicket(ticket))
-      {
-         if(positionInfo.Symbol() == _Symbol && positionInfo.Magic() == InpMagicNumber)
-         {
-            ArrayResize(tickets, count + 1);
-            ArrayResize(profits, count + 1);
-            tickets[count] = ticket;
-            profits[count] = positionInfo.Profit();
-            if(profits[count] > 0) totalPositive += profits[count];
-            count++;
-         }
-      }
-   }
-
-   // Si au moins 2 positions pour ce symbole/magic et gain cumulé >= seuil, fermer celles en gain
-   if(count >= 2 && totalPositive >= DUP_PROFIT_THRESHOLD)
-   {
-      for(int k = 0; k < count; k++)
-      {
-         if(profits[k] > 0)
-         {
-            if(trade.PositionClose(tickets[k]))
-            {
-               Print("💰 Fermeture doublon (gain cumulé >= ", DUP_PROFIT_THRESHOLD, "$) : ticket=", tickets[k],
-                     " profit=", DoubleToString(profits[k], 2), "$");
-            }
-            else if(DebugMode)
-            {
-               Print("❌ Erreur fermeture doublon ticket=", tickets[k], " code=", trade.ResultRetcode(),
-                     " desc=", trade.ResultRetcodeDescription());
-            }
-         }
-      }
-   }
-}
-
 void CheckAndManagePositions()
 {
    g_hasPosition = false;
-   // Exécuter la vérification des doublons en gain (même symbole/magic)
-   CloseDuplicateProfitsIfNeeded();
+
+   // Fermeture globale Volatility si perte cumulée dépasse 7$
+   CloseVolatilityIfLossExceeded(7.0);
    
    for(int i = PositionsTotal() - 1; i >= 0; i--)
    {
@@ -746,6 +798,7 @@ void CheckAndManagePositions()
                g_positionTracker.openTime = (datetime)positionInfo.Time();
                g_positionTracker.maxProfitReached = 0.0;
                g_positionTracker.profitSecured = false;
+               g_positionTracker.profitAtDuplication = 0.0;
             }
             
             // Vérifier le profit actuel et mettre à jour le profit maximum
@@ -757,15 +810,62 @@ void CheckAndManagePositions()
             if(currentProfit > g_positionTracker.maxProfitReached)
                g_positionTracker.maxProfitReached = currentProfit;
             
-            // Vérifier si on doit doubler le lot
+            // Vérifier si on doit dupliquer le trade (avec lot 2x le lot initial)
             datetime now = TimeCurrent();
             int positionAge = (int)(now - g_positionTracker.openTime);
             
-            if(!g_positionTracker.lotDoubled && 
-               currentProfit >= ProfitThresholdForDouble &&
+            // Conditions pour duplication :
+            // 1. Nombre de duplications < 4 (limite autorisée)
+            // 2. Profit positif (robot en gain proprement)
+            // 3. Signal IA fort dans le sens voulu (confiance >= 85% et action correspond au sens de la position)
+            // 4. Position âgée d'au moins MinPositionLifetimeSec secondes
+            bool shouldDuplicate = false;
+            
+            // Compter le nombre de positions dupliquées existantes pour ce symbole
+            int duplicateCount = CountDuplicatePositions(_Symbol);
+            const int MAX_DUPLICATIONS = 4;
+            
+            if(duplicateCount < MAX_DUPLICATIONS &&
+               currentProfit > 0.0 && // Robot en gain proprement
                positionAge >= MinPositionLifetimeSec)
             {
-               DoublePositionLot(ticket);
+               // Vérifier que le signal IA est fort et correspond au sens de la position
+               ENUM_POSITION_TYPE posType = positionInfo.PositionType();
+               bool aiSignalMatches = false;
+               double minConfidenceForDuplicate = 0.85; // 85% de confiance minimum pour duplication
+               
+               if(UseAI_Agent && g_lastAIConfidence >= minConfidenceForDuplicate)
+               {
+                  if((posType == POSITION_TYPE_BUY && g_lastAIAction == "buy") ||
+                     (posType == POSITION_TYPE_SELL && g_lastAIAction == "sell"))
+                  {
+                     aiSignalMatches = true;
+                  }
+               }
+               
+               if(aiSignalMatches)
+               {
+                  shouldDuplicate = true;
+                  if(DebugMode)
+                     Print("✅ Conditions de duplication remplies: Profit=", DoubleToString(currentProfit, 2), 
+                           "$ | Confiance IA=", DoubleToString(g_lastAIConfidence * 100, 1), 
+                           "% | Signal=", g_lastAIAction, " | Duplications actuelles=", duplicateCount, "/", MAX_DUPLICATIONS);
+               }
+               else if(DebugMode && currentProfit > 0)
+               {
+                  Print("⏸️ Duplication bloquée: Profit OK mais signal IA insuffisant (confiance=", 
+                        DoubleToString(g_lastAIConfidence * 100, 1), "% | action=", g_lastAIAction, 
+                        " | position=", EnumToString(posType), ")");
+               }
+            }
+            else if(duplicateCount >= MAX_DUPLICATIONS && DebugMode)
+            {
+               Print("⏸️ Duplication bloquée: Limite atteinte (", duplicateCount, " duplications, max ", MAX_DUPLICATIONS, ")");
+            }
+            
+            if(shouldDuplicate)
+            {
+               DuplicateTradeWithDoubleLot(ticket);
             }
             
             // Vérifier les SL/TP (gérés par le broker, mais on peut vérifier)
@@ -785,37 +885,6 @@ void CheckAndManagePositions()
                CloseBoomCrashAfterSpike(ticket, currentProfit);
             }
             
-            // NOUVELLES RÈGLES DE COUPE RAPIDE
-            bool isVolatility = IsVolatilitySymbol(_Symbol);
-
-            // 1) Fermer si perte atteint -4$ pour les symboles de volatilité
-            if(isVolatility && currentProfit <= -4.0)
-            {
-               if(trade.PositionClose(ticket))
-               {
-                  Print("🛑 Position ", _Symbol, " fermée: perte >= 4$ (", DoubleToString(currentProfit, 2), "$)");
-               }
-               else if(DebugMode)
-               {
-                  Print("❌ Erreur fermeture perte 4$: ", trade.ResultRetcode(), " - ", trade.ResultRetcodeDescription());
-               }
-               break; // position fermée, sortir
-            }
-
-            // 2) Fermer si la position est en perte depuis plus de 60 secondes (tous symboles)
-            if(currentProfit < 0 && positionAge >= 60)
-            {
-               if(trade.PositionClose(ticket))
-               {
-                  Print("⏳ Position ", _Symbol, " fermée: perte > 60s (", DoubleToString(currentProfit, 2), "$)");
-               }
-               else if(DebugMode)
-               {
-                  Print("❌ Erreur fermeture perte 60s: ", trade.ResultRetcode(), " - ", trade.ResultRetcodeDescription());
-               }
-               break; // position fermée, sortir
-            }
-
             // NOUVELLE LOGIQUE: Fermer les positions si le prix sort de la zone IA et entre en correction
             // Évite de garder des positions pendant les corrections
             ENUM_POSITION_TYPE posType = positionInfo.PositionType();
@@ -843,6 +912,7 @@ void CheckAndManagePositions()
       g_positionTracker.lotDoubled = false;
       g_positionTracker.maxProfitReached = 0.0;
       g_positionTracker.profitSecured = false;
+      g_positionTracker.profitAtDuplication = 0.0;
       g_globalMaxProfit = 0.0; // Réinitialiser le profit global max
    }
 }
@@ -980,16 +1050,14 @@ void CloseBoomCrashAfterSpike(ulong ticket, double currentProfit)
    if(!positionInfo.SelectByTicket(ticket))
       return;
    
-   // Minimum 0.2$ de profit pour fermer après spike
-   const double MIN_PROFIT_TO_CLOSE = 0.2;
-   
-   // Pour Boom/Crash: fermer immédiatement dès qu'on atteint 0.2$ de profit
+   // Pour Boom/Crash: fermer immédiatement dès qu'on atteint le profit minimal configuré
    // (le spike est implicite dans l'ouverture de position)
-   if(currentProfit >= MIN_PROFIT_TO_CLOSE)
+   if(currentProfit >= BoomCrashSpikeTP)
    {
       if(trade.PositionClose(ticket))
       {
-         Print("✅ Position Boom/Crash fermée après spike: Profit=", DoubleToString(currentProfit, 2), "$");
+         Print("✅ Position Boom/Crash fermée après spike: Profit=", DoubleToString(currentProfit, 2),
+               "$ (seuil BoomCrashSpikeTP=", DoubleToString(BoomCrashSpikeTP, 2), "$)");
       }
       else
       {
@@ -1000,21 +1068,25 @@ void CloseBoomCrashAfterSpike(ulong ticket, double currentProfit)
 }
 
 //+------------------------------------------------------------------+
-//| Doubler le lot de la position                                    |
+//| Dupliquer le trade avec un lot égal à 2x le lot initial         |
+//| Le lot dupliqué = 2 * lot initial (ex: 0.01 -> 0.02)            |
 //+------------------------------------------------------------------+
-void DoublePositionLot(ulong ticket)
+void DuplicateTradeWithDoubleLot(ulong ticket)
 {
    if(!positionInfo.SelectByTicket(ticket))
       return;
    
    double currentLot = positionInfo.Volume();
-   double newLot = currentLot * 2.0;
+   double initialLot = g_positionTracker.initialLot;
    
-   // Vérifier la limite maximale
-   if(newLot > MaxLotSize)
+   // Le lot dupliqué doit être égal à 2 fois le lot initial
+   double duplicateLot = initialLot * 2.0;
+   
+   // Vérifier la limite maximale (lot actuel + lot dupliqué)
+   if((currentLot + duplicateLot) > MaxLotSize)
    {
       if(DebugMode)
-         Print("⚠️ Lot maximum atteint: ", MaxLotSize);
+         Print("⚠️ Lot maximum atteint: ", MaxLotSize, " (actuel=", currentLot, " + dupliqué=", duplicateLot, ")");
       return;
    }
    
@@ -1023,27 +1095,28 @@ void DoublePositionLot(ulong ticket)
    double maxLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
    double lotStep = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
    
-   // Normaliser le lot
-   newLot = MathFloor(newLot / lotStep) * lotStep;
-   newLot = MathMax(minLot, MathMin(maxLot, newLot));
+   // Normaliser le lot dupliqué
+   duplicateLot = MathFloor(duplicateLot / lotStep) * lotStep;
+   duplicateLot = MathMax(minLot, MathMin(maxLot, duplicateLot));
    
-   // Calculer le volume à ajouter
-   double volumeToAdd = newLot - currentLot;
-   
-   if(volumeToAdd <= 0)
-      return;
-   
-   // Normaliser le volume à ajouter
-   volumeToAdd = NormalizeLotSize(volumeToAdd);
-   
-   if(volumeToAdd < SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN))
+   if(duplicateLot <= 0)
    {
       if(DebugMode)
-         Print("⚠️ Volume à ajouter trop petit: ", volumeToAdd);
+         Print("⚠️ Lot dupliqué invalide après normalisation: ", duplicateLot);
       return;
    }
    
-   // Ouvrir une nouvelle position dans le même sens
+   // Normaliser le volume dupliqué
+   duplicateLot = NormalizeLotSize(duplicateLot);
+   
+   if(duplicateLot < SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN))
+   {
+      if(DebugMode)
+         Print("⚠️ Volume dupliqué trop petit: ", duplicateLot);
+      return;
+   }
+   
+   // Ouvrir une nouvelle position dans le même sens avec le lot dupliqué
    ENUM_ORDER_TYPE orderType = (positionInfo.PositionType() == POSITION_TYPE_BUY) ? 
                               ORDER_TYPE_BUY : ORDER_TYPE_SELL;
    
@@ -1056,16 +1129,24 @@ void DoublePositionLot(ulong ticket)
    ENUM_POSITION_TYPE posType = positionInfo.PositionType();
    CalculateSLTPInPoints(posType, price, sl, tp);
    
-   if(trade.PositionOpen(_Symbol, orderType, volumeToAdd, price, sl, tp, "DOUBLE_LOT"))
+   if(trade.PositionOpen(_Symbol, orderType, duplicateLot, price, sl, tp, "DUPLICATE_2X_LOT"))
    {
-      g_positionTracker.currentLot = newLot;
+      // Mettre à jour le tracker : le lot total devient initial + dupliqué
+      g_positionTracker.currentLot = currentLot + duplicateLot;
       g_positionTracker.lotDoubled = true;
       
-      Print("✅ Lot doublé: ", currentLot, " -> ", newLot, " (ajout: ", volumeToAdd, ")");
+      // Stocker le profit au moment de la duplication (profit de la position initiale)
+      double profitAtDuplication = positionInfo.Profit();
+      g_positionTracker.profitAtDuplication = profitAtDuplication;
+      
+      Print("✅ Trade dupliqué avec lot 2x: Lot initial=", initialLot, 
+            " | Lot dupliqué=", duplicateLot, 
+            " | Lot total=", DoubleToString(g_positionTracker.currentLot, 2),
+            " | Profit au moment duplication=", DoubleToString(profitAtDuplication, 2), "$");
    }
    else
    {
-      Print("❌ Erreur doublement lot: ", trade.ResultRetcode(), " - ", trade.ResultRetcodeDescription());
+      Print("❌ Erreur duplication trade: ", trade.ResultRetcode(), " - ", trade.ResultRetcodeDescription());
    }
 }
 
@@ -1578,6 +1659,13 @@ void LookForTradingOpportunity()
                   
                   if(DebugMode)
                      Print("🤖 Signal ", EnumToString(signalType), " basé sur recommandation IA (confiance: ", DoubleToString(g_lastAIConfidence * 100, 1), "%) - Prix dans zone IA + EMA M5 confirmé + Pas de correction", cautiousMode ? " [MODE PRUDENT]" : "");
+
+                  // SPIKE Boom/Crash : si confiance élevée et conditions EMA M5, tenter entrée rapide
+                  if(IsBoomCrashSymbol(_Symbol) && g_lastAIConfidence >= 0.80)
+                  {
+                     if(TrySpikeEntry(signalType))
+                        return; // spike tenté, ne pas poursuivre
+                  }
                }
                else
                {
@@ -1747,6 +1835,31 @@ int CountPositionsForSymbolMagic()
 }
 
 //+------------------------------------------------------------------+
+//| Compte le nombre de positions dupliquées pour un symbole donné  |
+//+------------------------------------------------------------------+
+int CountDuplicatePositions(const string symbol)
+{
+   int duplicateCount = 0;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket > 0 && positionInfo.SelectByTicket(ticket))
+      {
+         if(positionInfo.Magic() == InpMagicNumber && positionInfo.Symbol() == symbol)
+         {
+            string comment = positionInfo.Comment();
+            // Compter les positions avec le commentaire "DUPLICATE_2X_LOT"
+            if(StringFind(comment, "DUPLICATE_2X_LOT") >= 0)
+            {
+               duplicateCount++;
+            }
+         }
+      }
+   }
+   return duplicateCount;
+}
+
+//+------------------------------------------------------------------+
 //| Vérifie si une position du même type existe déjà                 |
 //| NOTE: La duplication ne concerne PAS les Boom/Crash              |
 //|       Elle s'applique uniquement aux indices volatility, step index et forex |
@@ -1767,6 +1880,9 @@ bool HasDuplicatePosition(ENUM_ORDER_TYPE orderType)
    if(!isVolatility && !isStepIndex && !isForex)
       return false; // Pas de vérification pour les autres types
    
+   int duplicateCount = 0; // Compteur de positions dupliquées
+   bool hasInitialPosition = false; // Indique si une position initiale existe (sans commentaire DUPLICATE)
+   
    for(int i = PositionsTotal() - 1; i >= 0; i--)
    {
       ulong ticket = PositionGetTicket(i);
@@ -1778,12 +1894,34 @@ bool HasDuplicatePosition(ENUM_ORDER_TYPE orderType)
             if((orderType == ORDER_TYPE_BUY && posType == POSITION_TYPE_BUY) ||
                (orderType == ORDER_TYPE_SELL && posType == POSITION_TYPE_SELL))
             {
-               return true; // Position du même type déjà ouverte
+               string comment = positionInfo.Comment();
+               // Vérifier si c'est une position dupliquée
+               if(StringFind(comment, "DUPLICATE_2X_LOT") >= 0)
+               {
+                  duplicateCount++; // Compter les positions dupliquées
+               }
+               else
+               {
+                  hasInitialPosition = true; // Position initiale (sans commentaire DUPLICATE)
+               }
             }
          }
       }
    }
-   return false;
+   
+   // Si on a déjà atteint la limite de 4 duplications, bloquer
+   const int MAX_DUPLICATIONS = 4;
+   if(duplicateCount >= MAX_DUPLICATIONS)
+   {
+      if(DebugMode)
+         Print("🚫 Limite de duplications atteinte: ", duplicateCount, " duplications (max ", MAX_DUPLICATIONS, ")");
+      return true; // Bloquer car limite atteinte
+   }
+   
+   // Autoriser l'ouverture de nouvelles positions (initiales ou dupliquées)
+   // tant qu'on n'a pas atteint la limite de 4 duplications
+   // Les duplications seront gérées automatiquement par DuplicateTradeWithDoubleLot
+   return false; // Autoriser
 }
 
 //+------------------------------------------------------------------+
@@ -1811,6 +1949,79 @@ double GetTotalLoss()
 }
 
 //+------------------------------------------------------------------+
+//| Fermer toutes les positions du symbole courant (magic actuel)    |
+//+------------------------------------------------------------------+
+void CloseAllPositionsForCurrentSymbol()
+{
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket > 0 && positionInfo.SelectByTicket(ticket))
+      {
+         if(positionInfo.Magic() == InpMagicNumber && positionInfo.Symbol() == _Symbol)
+         {
+            double p = positionInfo.Profit();
+            ENUM_POSITION_TYPE posType = (ENUM_POSITION_TYPE)positionInfo.PositionType();
+            if(trade.PositionClose(ticket))
+            {
+               Print("🔁 IA passe en ATTENTE - Fermeture position ",
+                     EnumToString((ENUM_ORDER_TYPE)((posType == POSITION_TYPE_BUY) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL)),
+                     " sur ", _Symbol, " profit=", DoubleToString(p, 2), "$");
+            }
+            else
+            {
+               Print("❌ Erreur fermeture position (IA HOLD) ticket=", ticket,
+                     " code=", trade.ResultRetcode(), " - ", trade.ResultRetcodeDescription());
+            }
+         }
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Fermer la position ayant la plus grande perte (toutes positions) |
+//+------------------------------------------------------------------+
+void CloseWorstLosingPosition()
+{
+   double worstProfit = 0.0;       // profit le plus négatif
+   ulong  worstTicket = 0;
+   string worstSymbol = "";
+   
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket > 0 && positionInfo.SelectByTicket(ticket))
+      {
+         if(positionInfo.Magic() == InpMagicNumber)
+         {
+            double p = positionInfo.Profit();
+            if(p < worstProfit) // plus grande perte (valeur la plus négative)
+            {
+               worstProfit = p;
+               worstTicket = ticket;
+               worstSymbol = positionInfo.Symbol();
+            }
+         }
+      }
+   }
+   
+   if(worstTicket != 0)
+   {
+      if(trade.PositionClose(worstTicket))
+      {
+         Print("🛑 Perte maximale atteinte - Fermeture de la pire position: ticket=",
+               worstTicket, " symbole=", worstSymbol,
+               " profit=", DoubleToString(worstProfit, 2), "$");
+      }
+      else
+      {
+         Print("❌ Erreur fermeture pire position (perte max): ticket=", worstTicket,
+               " code=", trade.ResultRetcode(), " - ", trade.ResultRetcodeDescription());
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
 //| Exécuter un trade                                                |
 //+------------------------------------------------------------------+
 void ExecuteTrade(ENUM_ORDER_TYPE orderType)
@@ -1820,6 +2031,9 @@ void ExecuteTrade(ENUM_ORDER_TYPE orderType)
    if(totalLoss >= MaxTotalLoss)
    {
       Print("🚫 TRADE BLOQUÉ: Perte totale maximale atteinte (", DoubleToString(totalLoss, 2), "$ >= ", DoubleToString(MaxTotalLoss, 2), "$) - Éviter trades perdants");
+      
+      // FERME LA POSITION QUI A LA PLUS GROSSE PERTE POUR LIBÉRER LE ROBOT
+      CloseWorstLosingPosition();
       return;
    }
    
@@ -1891,6 +2105,7 @@ void ExecuteTrade(ENUM_ORDER_TYPE orderType)
       g_positionTracker.highestProfit = 0.0;
       g_positionTracker.lotDoubled = false;
       g_positionTracker.openTime = TimeCurrent();
+      g_positionTracker.profitAtDuplication = 0.0;
    }
    else
    {
@@ -2564,7 +2779,51 @@ void CleanupProfitTrackers()
 //+------------------------------------------------------------------+
 void SecureDynamicProfits()
 {
-   // 0. SORTIE RAPIDE POUR INDICES VOLATILITY
+   // 0. VÉRIFICATION PROFIT GLOBAL TOUS SYMBOLES : Fermer toutes les positions gagnantes si profit global >= 6$
+   double globalProfitAllSymbols = 0.0;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket > 0 && positionInfo.SelectByTicket(ticket))
+      {
+         if(positionInfo.Magic() == InpMagicNumber) // Tous les symboles avec ce Magic
+         {
+            double profit = positionInfo.Profit();
+            globalProfitAllSymbols += profit;
+         }
+      }
+   }
+   
+   // Si le profit global (tous symboles) atteint ou dépasse 6$, fermer toutes les positions gagnantes
+   if(globalProfitAllSymbols >= 6.0)
+   {
+      Print("🎯 PROFIT GLOBAL TOUS SYMBOLES ATTEINT: ", DoubleToString(globalProfitAllSymbols, 2), 
+            "$ >= 6.00$ - Fermeture de toutes les positions gagnantes");
+      
+      for(int i = PositionsTotal() - 1; i >= 0; i--)
+      {
+         ulong ticket = PositionGetTicket(i);
+         if(ticket > 0 && positionInfo.SelectByTicket(ticket))
+         {
+            if(positionInfo.Magic() == InpMagicNumber)
+            {
+               double profit = positionInfo.Profit();
+               // Fermer uniquement les positions gagnantes
+               if(profit > 0)
+               {
+                  string symbol = positionInfo.Symbol();
+                  if(trade.PositionClose(ticket))
+                  {
+                     Print("✅ Position gagnante fermée (profit global >= 6$): Symbol=", symbol,
+                           " | Ticket=", ticket, " | Profit=", DoubleToString(profit, 2), "$");
+                  }
+               }
+            }
+         }
+      }
+   }
+   
+   // 1. SORTIE RAPIDE POUR INDICES VOLATILITY
    // Fermer chaque position Volatility dès que le profit atteint VolatilityQuickTP (ex: 2$)
    bool isVolatilitySymbol = IsVolatilitySymbol(_Symbol);
    if(isVolatilitySymbol && VolatilityQuickTP > 0.0)
@@ -2626,6 +2885,79 @@ void SecureDynamicProfits()
             
             if(profit > 0)
                profitablePositions++;
+         }
+      }
+   }
+   
+   // VÉRIFICATION TP PROFIT GLOBAL : Fermer toutes les positions si TP global atteint
+   if(totalProfit >= TakeProfitUSD)
+   {
+      Print("🎯 TP PROFIT GLOBAL ATTEINT: ", DoubleToString(totalProfit, 2), "$ >= ", 
+            DoubleToString(TakeProfitUSD, 2), "$ - Fermeture de toutes les positions");
+      
+      for(int i = PositionsTotal() - 1; i >= 0; i--)
+      {
+         ulong ticket = PositionGetTicket(i);
+         if(ticket > 0 && positionInfo.SelectByTicket(ticket))
+         {
+            if(positionInfo.Symbol() == _Symbol && positionInfo.Magic() == InpMagicNumber)
+            {
+               double profit = positionInfo.Profit();
+               if(trade.PositionClose(ticket))
+               {
+                  Print("✅ Position fermée (TP global atteint): Ticket=", ticket, 
+                        " | Profit=", DoubleToString(profit, 2), "$");
+               }
+            }
+         }
+      }
+      
+      // Réinitialiser le tracker après fermeture
+      g_positionTracker.ticket = 0;
+      g_positionTracker.lotDoubled = false;
+      g_globalMaxProfit = 0.0;
+      return; // Sortir de la fonction après fermeture
+   }
+   
+   // VÉRIFICATION DRAWDOWN 50% APRÈS DUPLICATION : Fermer positions dupliquées en perte
+   // Si le profit actuel est <= 50% du profit au moment de la duplication, fermer les positions dupliquées en perte
+   if(g_positionTracker.lotDoubled && g_positionTracker.profitAtDuplication > 0.0)
+   {
+      double currentTotalProfit = totalProfit;
+      double profitThreshold = g_positionTracker.profitAtDuplication * 0.5; // 50% du profit initial
+      
+      if(currentTotalProfit <= profitThreshold)
+      {
+         if(DebugMode)
+            Print("⚠️ Drawdown 50% détecté après duplication: Profit actuel=", DoubleToString(currentTotalProfit, 2),
+                  "$ | Profit initial=", DoubleToString(g_positionTracker.profitAtDuplication, 2),
+                  "$ | Seuil=", DoubleToString(profitThreshold, 2), "$");
+         
+         // Fermer les positions dupliquées qui sont en perte
+         for(int i = PositionsTotal() - 1; i >= 0; i--)
+         {
+            ulong ticket = PositionGetTicket(i);
+            if(ticket > 0 && positionInfo.SelectByTicket(ticket))
+            {
+               if(positionInfo.Symbol() == _Symbol && positionInfo.Magic() == InpMagicNumber)
+               {
+                  // Vérifier si c'est une position dupliquée (commentaire "DUPLICATE_2X_LOT")
+                  string comment = positionInfo.Comment();
+                  if(StringFind(comment, "DUPLICATE_2X_LOT") >= 0)
+                  {
+                     double profit = positionInfo.Profit();
+                     // Fermer uniquement si la position dupliquée est en perte
+                     if(profit < 0)
+                     {
+                        if(trade.PositionClose(ticket))
+                        {
+                           Print("🔒 Position dupliquée en perte fermée (drawdown 50%): Ticket=", ticket,
+                                 " | Profit=", DoubleToString(profit, 2), "$");
+                        }
+                     }
+                  }
+               }
+            }
          }
       }
    }
@@ -2934,6 +3266,75 @@ bool AnalyzeMomentumPressureZone(ENUM_ORDER_TYPE orderType, double price, double
    return true;
 }
 
+// Tentative d'entrée spike sur Boom/Crash avec confiance IA élevée et timing EMA M5
+bool TrySpikeEntry(ENUM_ORDER_TYPE orderType)
+{
+   if(!IsBoomCrashSymbol(_Symbol))
+      return false;
+
+   // Confiance IA minimale 80%
+   if(g_lastAIConfidence < 0.80)
+      return false;
+
+   int idx = GetSpikeIndex(_Symbol);
+   datetime now = TimeCurrent();
+   if(now < g_spikeCooldown[idx])
+   {
+      if(DebugMode)
+         Print("⏸️ Spike cooldown actif pour ", _Symbol, " jusqu'à ", TimeToString(g_spikeCooldown[idx]));
+      return false;
+   }
+
+   // Récupérer EMA M5
+   double emaFastM5[], emaSlowM5[];
+   ArraySetAsSeries(emaFastM5, true);
+   ArraySetAsSeries(emaSlowM5, true);
+   if(CopyBuffer(emaFastM5Handle, 0, 0, 1, emaFastM5) <= 0 ||
+      CopyBuffer(emaSlowM5Handle, 0, 0, 1, emaSlowM5) <= 0)
+   {
+      if(DebugMode)
+         Print("⚠️ Spike: erreur récupération EMA M5");
+      return false;
+   }
+
+   double price = (orderType == ORDER_TYPE_BUY) ? SymbolInfoDouble(_Symbol, SYMBOL_ASK)
+                                                : SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double emaFast = emaFastM5[0];
+   double emaSlow = emaSlowM5[0];
+   double proximity = MathAbs(price - emaFast);
+
+   // Conditions de tendance et proximité EMA
+   bool ok = false;
+   if(orderType == ORDER_TYPE_BUY)
+   {
+      if(emaFast > emaSlow && price <= emaFast + 5 * _Point)
+         ok = true;
+   }
+   else // SELL
+   {
+      if(emaFast < emaSlow && price >= emaFast - 5 * _Point)
+         ok = true;
+   }
+
+   if(!ok)
+      return false;
+
+   // Tentative d'entrée via logique standard
+   ExecuteTrade(orderType);
+
+   // Incrémenter les tentatives; si 2 sans spike, cooldown 5 minutes
+   g_spikeFailCount[idx]++;
+   if(g_spikeFailCount[idx] >= 2)
+   {
+      g_spikeCooldown[idx] = now + 300; // 5 minutes
+      g_spikeFailCount[idx] = 0;
+      if(DebugMode)
+         Print("🕒 Cooldown 5 min pour ", _Symbol, " après 2 tentatives spike");
+   }
+
+   return true;
+}
+
 //+------------------------------------------------------------------+
 //| Vérifier si le prix est dans la zone IA et si les EMA confirment |
 //| Évite de trader les corrections - Amélioration des entrées       |
@@ -3160,30 +3561,8 @@ bool CheckAIZoneEntryWithEMA(ENUM_ORDER_TYPE orderType, bool &isInZone, bool &em
          Print("⏸️ Trade ", EnumToString(orderType), " rejeté: Correction détectée - Attendre entrée dans zone sans correction");
       return false;
    }
-
-   // 5. Vérifier que le prix a repris la tendance (sortie de correction) avant d'entrer
-   // BUY: le prix doit repasser au-dessus de l'EMA rapide M1
-   // SELL: le prix doit repasser en-dessous de l'EMA rapide M1
-   if(orderType == ORDER_TYPE_BUY)
-   {
-      if(currentPrice < emaFastM1[0])
-      {
-         if(DebugMode)
-            Print("⏸️ BUY en attente: prix sous EMA rapide M1 - attendre reprise haussière");
-         return false;
-      }
-   }
-   else // SELL
-   {
-      if(currentPrice > emaFastM1[0])
-      {
-         if(DebugMode)
-            Print("⏸️ SELL en attente: prix au-dessus EMA rapide M1 - attendre reprise baissière");
-         return false;
-      }
-   }
    
-   // 6. Vérification supplémentaire: le prix doit être proche du bord de la zone (meilleure entrée)
+   // 5. Vérification supplémentaire: le prix doit être proche du bord de la zone (meilleure entrée)
    // Pour BUY: préférer entrer près du bas de la zone
    // Pour SELL: préférer entrer près du haut de la zone
    if(orderType == ORDER_TYPE_BUY && g_aiBuyZoneLow > 0 && g_aiBuyZoneHigh > 0)
