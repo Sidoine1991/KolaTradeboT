@@ -99,9 +99,11 @@ def get_mt5_indicators(symbol: str, timeframe: str, count: int = 100) -> Optiona
             'M1': mt5.TIMEFRAME_M1,
             'M5': mt5.TIMEFRAME_M5,
             'M15': mt5.TIMEFRAME_M15,
+            'M30': mt5.TIMEFRAME_M30,
             'H1': mt5.TIMEFRAME_H1,
             'H4': mt5.TIMEFRAME_H4,
-            'D1': mt5.TIMEFRAME_D1
+            'D1': mt5.TIMEFRAME_D1,
+            'W1': mt5.TIMEFRAME_W1
         }
         
         mt5_timeframe = tf_map.get(timeframe, mt5.TIMEFRAME_M1)
@@ -2613,6 +2615,55 @@ async def decision(request: DecisionRequest):
         m1_bullish = ema_fast_m1 > ema_slow_m1
         m1_bearish = ema_fast_m1 < ema_slow_m1
         
+        # NOUVEAU: Analyse Multi-Time frames via trend_api (ULTRA-RAPIDE avec cache)
+        # Interroger le service trend_api sur port 8001 pour obtenir les tendances cachées
+        m5_bullish = False
+        m5_bearish = False
+        m30_bullish = False
+        m30_bearish = False
+        h4_bullish = False
+        h4_bearish = False
+        d1_bullish = False
+        d1_bearish = False
+        w1_bullish = False
+        w1_bearish = False
+        
+        # Tentative de récupération depuis trend_api (rapide, caché)
+        try:
+            trend_api_url = f"http://127.0.0.1:8001/multi_timeframe?symbol={request.symbol}"
+            trend_response = requests.get(trend_api_url, timeout=2)
+            
+            if trend_response.status_code == 200:
+                trend_data = trend_response.json()
+                trends = trend_data.get('trends', {})
+                
+                # Extraire les tendances de chaque timeframe
+                if 'M5' in trends:
+                    m5_bullish = trends['M5'].get('bullish', False)
+                    m5_bearish = trends['M5'].get('bearish', False)
+                
+                if 'M30' in trends:
+                    m30_bullish = trends['M30'].get('bullish', False)
+                    m30_bearish = trends['M30'].get('bearish', False)
+                
+                if 'H4' in trends:
+                    h4_bullish = trends['H4'].get('bullish', False)
+                    h4_bearish = trends['H4'].get('bearish', False)
+                
+                if 'D1' in trends:
+                    d1_bullish = trends['D1'].get('bullish', False)
+                    d1_bearish = trends['D1'].get('bearish', False)
+                
+                if 'W1' in trends:
+                    w1_bullish = trends['W1'].get('bullish', False)
+                    w1_bearish = trends['W1'].get('bearish', False)
+                
+                logger.debug(f"✅ Tendances multi-TF récupérées depuis trend_api")
+            else:
+                logger.warning(f"trend_api réponse {trend_response.status_code}")
+        except Exception as e:
+            logger.warning(f"⚠️ trend_api indisponible: {e}")
+        
         # NOUVEAU 2025 : Analyse VWAP (prix d'équilibre)
         vwap_signal_buy = False
         vwap_signal_sell = False
@@ -2657,38 +2708,69 @@ async def decision(request: DecisionRequest):
         bullish_signals = bullish_signals_base
         bearish_signals = bearish_signals_base
 
-        # Poids par signal (pondération explicite)
+        # Poids par signal (pondération multi-timeframe améliorée)
         WEIGHTS = {
-            "h1": 0.25,
-            "m1": 0.18,
-            "rsi": 0.12,
-            "vwap": 0.08,
-            "supertrend": 0.08,
-            "patterns": 0.12,
-            "sentiment": 0.07,
+            "m1": 0.10,    # M1: 10% - Court terme
+            "m5": 0.15,    # M5: 15% - Court terme
+            "h1": 0.20,    # H1: 20% - Moyen terme
+            "m30": 0.15,   # M30: 15% - Moyen terme
+            "h4": 0.20,    # H4: 20% - Long terme (haute importance)
+            "d1": 0.15,    # Daily: 15% - Long terme
+            "w1": 0.05,    # Weekly: 5% - Tendance globale
+            "rsi": 0.08,   # Réduit car moins fiable en trending
+            "vwap": 0.06,
+            "supertrend": 0.06,
+            "patterns": 0.10,
+            "sentiment": 0.05,
         }
-        ALIGN_BONUS = 0.10     # Alignement multi‑TF
-        DIVERGENCE_MALUS = -0.10
+        ALIGN_BONUS = 0.15     # Bonus si tous les timeframes alignés
+        DIVERGENCE_MALUS = -0.12
         VOL_LOW_MALUS = -0.15
         VOL_OK_BONUS = 0.03
-        BASE_CONF = 0.40
-        MAX_CONF = 0.95
-        MIN_CONF = 0.20
-        HOLD_THRESHOLD = 0.05  # Score trop faible => hold
+        BASE_CONF = 0.35       # Base réduite car plus de timeframes
+        MAX_CONF = 0.98        # Augmenté pour signaux ultra-forts
+        MIN_CONF = 0.15
+        HOLD_THRESHOLD = 0.08  # Seuil légèrement augmenté
 
         # Score directionnel pondéré
         score = 0.0
         components = []
 
-        if h1_bullish:
-            score += WEIGHTS["h1"]; components.append("H1:+")
-        if h1_bearish:
-            score -= WEIGHTS["h1"]; components.append("H1:-")
-
+        # Timeframes - pondération multi-niveaux
         if m1_bullish:
             score += WEIGHTS["m1"]; components.append("M1:+")
         if m1_bearish:
             score -= WEIGHTS["m1"]; components.append("M1:-")
+        
+        if m5_bullish:
+            score += WEIGHTS["m5"]; components.append("M5:+")
+        if m5_bearish:
+            score -= WEIGHTS["m5"]; components.append("M5:-")
+        
+        if m30_bullish:
+            score += WEIGHTS["m30"]; components.append("M30:+")
+        if m30_bearish:
+            score -= WEIGHTS["m30"]; components.append("M30:-")
+        
+        if h1_bullish:
+            score += WEIGHTS["h1"]; components.append("H1:+")
+        if h1_bearish:
+            score -= WEIGHTS["h1"]; components.append("H1:-")
+        
+        if h4_bullish:
+            score += WEIGHTS["h4"]; components.append("H4:+")
+        if h4_bearish:
+            score -= WEIGHTS["h4"]; components.append("H4:-")
+        
+        if d1_bullish:
+            score += WEIGHTS["d1"]; components.append("D1:+")
+        if d1_bearish:
+            score -= WEIGHTS["d1"]; components.append("D1:-")
+        
+        if w1_bullish:
+            score += WEIGHTS["w1"]; components.append("W1:+")
+        if w1_bearish:
+            score -= WEIGHTS["w1"]; components.append("W1:-")
 
         if rsi_bullish:
             score += WEIGHTS["rsi"]; components.append("RSI:+")
@@ -2715,11 +2797,21 @@ async def decision(request: DecisionRequest):
                 pattern_bonus = WEIGHTS["patterns"] * min(deriv_patterns_bearish, 2)
                 score -= pattern_bonus; components.append(f"Patterns:-{pattern_bonus:.2f}")
 
-        # Alignement / divergence multi‑timeframe
-        if (h1_bullish and m1_bullish) or (h1_bearish and m1_bearish):
-            score += ALIGN_BONUS; components.append("Align:+")
-        if (h1_bullish and m1_bearish) or (h1_bearish and m1_bullish):
-            score += DIVERGENCE_MALUS; components.append("Div:-")
+        # Alignement / divergence multi‑timeframe amélioré
+        # Compter le nombre de timeframes alignés
+        bullish_tfs = sum([m1_bullish, m5_bullish, m30_bullish, h1_bullish, h4_bullish, d1_bullish, w1_bullish])
+        bearish_tfs = sum([m1_bearish, m5_bearish, m30_bearish, h1_bearish, h4_bearish, d1_bearish, w1_bearish])
+        total_tfs = 7  # M1, M5, M30, H1, H4, D1, W1
+        
+        # Si >= 5 timeframes alignés dans la même direction = très fort
+        if bullish_tfs >= 5:
+            score += ALIGN_BONUS; components.append(f"AlignBull:{bullish_tfs}/7")
+        elif bearish_tfs >= 5:
+            score -= ALIGN_BONUS; components.append(f"AlignBear:{bearish_tfs}/7")
+        
+        # Divergence forte (plus de 4 TFs en opposition)
+        if abs(bullish_tfs - bearish_tfs) <= 1 and bullish_tfs + bearish_tfs >= 5:
+            score += DIVERGENCE_MALUS; components.append("DivHigh")
 
         # Filtre de volatilité (ATR / régime)
         if not volatility_ok:

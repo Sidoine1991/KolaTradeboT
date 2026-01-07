@@ -1,6 +1,19 @@
-# 🚀 TradBOT - Plateforme de Trading Algorithmique Avancée
+# 🚀 TradBOT - Plateforme de Trading Algorithmique Avanc\u00e9e
 
-## 🆕 Nouveautés 2024
+## \ud83d\udd10 Nouveaut\u00e9s 2026
+
+- **\u26a1 Strat\u00e9gie EMA Touch (Scalping)** : 
+  - Entr\u00e9es ultra-pr\u00e9cises sur rebond EMA rapide avec confirmation de bougie M5 et tendance M5 align\u00e9e.
+- **\ud83d\udd12 S\u00e9curisation Progressive du Profit** :
+  - Verrouillage automatique de **50% du profit maximum atteint** d\u00e8s que le prix retrace. Prot\u00e8ge vos gains contre les retournements brusques.
+- **\ud83e\udde0 IA Multi-Timeframe (7 Niveaux)** :
+  - Analyse simultan\u00e9e de **M1, M5, M30, H1, H4, D1 et Weekly**. 
+  - Score de confiance IA revu pour n\u00e9cessiter un alignement fort (>80%) avant d'entrer en position.
+- **\ud83c\udfce\ufe0f Mode High-Performance (Trend API)** :
+  - Architecture distribu\u00e9e avec un cache intelligent sur le port 8001. 
+  - R\u00e9duction du temps de d\u00e9cision de 4s \u00e0 ~200ms pour un trading haute fr\u00e9quence sans latence.
+
+## \ud83d\udd11 Nouveaut\u00e9s 2024
 
 - **Notifications WhatsApp avec fallback automatique Vonage** :
   - Les notifications sont envoyées via Twilio, et basculent automatiquement sur Vonage si Twilio est en quota ou en erreur.
