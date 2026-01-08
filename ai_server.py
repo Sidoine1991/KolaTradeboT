@@ -620,21 +620,21 @@ class DecisionRequest(BaseModel):
     symbol: str
     bid: float
     ask: float
-    rsi: float
-    ema_fast_h1: float
-    ema_slow_h1: float
-    ema_fast_m1: float
-    ema_slow_m1: float
-    atr: float
-    dir_rule: int
-    is_spike_mode: bool
-    vwap: Optional[float] = None  # VWAP (Volume Weighted Average Price)
-    vwap_distance: Optional[float] = None  # Distance au VWAP en %
-    above_vwap: Optional[bool] = None  # Prix au-dessus du VWAP
-    supertrend_trend: Optional[int] = None  # 1 = UP, -1 = DOWN, 0 = indéterminé
-    supertrend_line: Optional[float] = None  # Ligne SuperTrend
-    volatility_regime: Optional[int] = None  # 1 = High Vol, 0 = Normal, -1 = Low Vol
-    volatility_ratio: Optional[float] = None  # Ratio ATR court/long
+    rsi: Optional[float] = 50.0  # Valeur neutre par défaut
+    ema_fast_h1: Optional[float] = None
+    ema_slow_h1: Optional[float] = None
+    ema_fast_m1: Optional[float] = None
+    ema_slow_m1: Optional[float] = None
+    atr: Optional[float] = 0.0
+    dir_rule: int = 0  # 0 = neutre par défaut
+    is_spike_mode: bool = False
+    vwap: Optional[float] = None
+    vwap_distance: Optional[float] = None
+    above_vwap: Optional[bool] = None
+    supertrend_trend: Optional[int] = 0  # 0 = neutre par défaut
+    supertrend_line: Optional[float] = None
+    volatility_regime: Optional[int] = 0  # 0 = neutre par défaut
+    volatility_ratio: Optional[float] = 1.0  # 1.0 = neutre par défaut
     image_filename: Optional[str] = None # Filename of the chart screenshot in MT5 Files
     deriv_patterns: Optional[str] = None  # Résumé des patterns Deriv détectés
     deriv_patterns_bullish: Optional[int] = None  # Nombre de patterns bullish
@@ -2510,6 +2510,29 @@ async def decision_gemma(request: DecisionRequest):
     except Exception as e:
         logger.error(f"Erreur dans decision_gemma: {type(e).__name__}: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Erreur interne: {type(e).__name__}: {str(e)}")
+
+# Fonction pour récupérer les données de tendance avec gestion d'erreur robuste
+async def get_trend_data(symbol: str):
+    """Récupère les données de tendance avec timeout et gestion d'erreur"""
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=2.0) as client:
+            response = await client.get(f"http://127.0.0.1:8001/multi_timeframe?symbol={symbol}")
+            if response.status_code == 200:
+                logger.debug(f"Données de tendance récupérées pour {symbol}")
+                return response.json()
+            else:
+                logger.warning(f"API tendance retourne status {response.status_code} pour {symbol}")
+                return None
+    except httpx.TimeoutException:
+        logger.warning("⚠️ Timeout de l'API de tendance - Mode dégradé activé")
+        return None
+    except httpx.ConnectError:
+        logger.warning("⚠️ API de tendance indisponible - Mode dégradé activé")
+        return None
+    except Exception as e:
+        logger.error(f"Erreur lors de la récupération des données de tendance: {str(e)}")
+        return None
 
 @app.post("/decision", response_model=DecisionResponse)
 async def decision(request: DecisionRequest):
