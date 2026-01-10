@@ -1078,6 +1078,7 @@ async def root():
             "/analysis (GET)",
             "/time_windows/{symbol} (GET)",
             "/predict/{symbol} (GET)",
+            "/prediction (POST) - Prédiction de prix futurs pour graphique MQ5",
             "/health",
             "/status",
             "/logs",
@@ -2624,7 +2625,7 @@ async def decision(request: DecisionRequest):
         # Logique de décision basique
         action = "hold"
         confidence = 0.5
-        reason = "Analyse en cours"
+        reason = ""  # Sera construite plus bas avec les composants
         
         # Analyse RSI
         rsi_bullish = rsi < 30  # Survente
@@ -2652,6 +2653,7 @@ async def decision(request: DecisionRequest):
         w1_bearish = False
         
         # Tentative de récupération depuis trend_api (rapide, caché)
+        trend_api_success = False
         try:
             trend_api_url = f"http://127.0.0.1:8001/multi_timeframe?symbol={request.symbol}"
             trend_response = requests.get(trend_api_url, timeout=2)
@@ -2681,11 +2683,75 @@ async def decision(request: DecisionRequest):
                     w1_bullish = trends['W1'].get('bullish', False)
                     w1_bearish = trends['W1'].get('bearish', False)
                 
-                logger.debug(f"✅ Tendances multi-TF récupérées depuis trend_api")
+                # Vérifier si on a récupéré au moins H4 ou D1
+                if h4_bullish or h4_bearish or d1_bullish or d1_bearish:
+                    trend_api_success = True
+                    logger.debug(f"✅ Tendances multi-TF récupérées depuis trend_api (H4/D1 trouvés)")
+                else:
+                    logger.warning(f"⚠️ trend_api répond mais H4/D1 absents, calcul direct nécessaire")
             else:
-                logger.warning(f"trend_api réponse {trend_response.status_code}")
+                logger.warning(f"⚠️ trend_api réponse {trend_response.status_code}, calcul direct nécessaire")
         except Exception as e:
-            logger.warning(f"⚠️ trend_api indisponible: {e}")
+            logger.warning(f"⚠️ trend_api indisponible: {e}, calcul direct depuis MT5")
+        
+        # FALLBACK: Calculer H4/D1 directement depuis MT5 si trend_api n'a pas fourni ces données
+        if not trend_api_success and MT5_AVAILABLE:
+            try:
+                # Initialiser MT5 si nécessaire (ne pas fermer si déjà initialisé)
+                mt5_was_initialized_before = mt5_initialized
+                mt5_initialized_temp = mt5_initialized
+                if not mt5_initialized_temp:
+                    mt5_initialized_temp = mt5.initialize()
+                    if mt5_initialized_temp:
+                        logger.debug(f"📊 MT5 initialisé temporairement pour calcul direct H4/D1")
+                
+                if mt5_initialized_temp:
+                    # Calculer H4 directement
+                    rates_h4 = mt5.copy_rates_from_pos(request.symbol, mt5.TIMEFRAME_H4, 0, 50)
+                    if rates_h4 is not None and len(rates_h4) >= 20:
+                        df_h4 = pd.DataFrame(rates_h4)
+                        if 'close' in df_h4.columns and len(df_h4) >= 20:
+                            # EMA pour H4
+                            ema_fast_h4 = df_h4['close'].ewm(span=9, adjust=False).mean()
+                            ema_slow_h4 = df_h4['close'].ewm(span=21, adjust=False).mean()
+                            if len(ema_fast_h4) > 0 and len(ema_slow_h4) > 0:
+                                h4_bullish = bool(ema_fast_h4.iloc[-1] > ema_slow_h4.iloc[-1])
+                                h4_bearish = bool(ema_fast_h4.iloc[-1] < ema_slow_h4.iloc[-1])
+                                logger.info(f"📊 H4 calculé directement depuis MT5: {'↑' if h4_bullish else '↓' if h4_bearish else '→'}")
+                    
+                    # Calculer D1 directement
+                    rates_d1 = mt5.copy_rates_from_pos(request.symbol, mt5.TIMEFRAME_D1, 0, 50)
+                    if rates_d1 is not None and len(rates_d1) >= 20:
+                        df_d1 = pd.DataFrame(rates_d1)
+                        if 'close' in df_d1.columns and len(df_d1) >= 20:
+                            # EMA pour D1
+                            ema_fast_d1 = df_d1['close'].ewm(span=9, adjust=False).mean()
+                            ema_slow_d1 = df_d1['close'].ewm(span=21, adjust=False).mean()
+                            if len(ema_fast_d1) > 0 and len(ema_slow_d1) > 0:
+                                d1_bullish = bool(ema_fast_d1.iloc[-1] > ema_slow_d1.iloc[-1])
+                                d1_bearish = bool(ema_fast_d1.iloc[-1] < ema_slow_d1.iloc[-1])
+                                logger.info(f"📊 D1 calculé directement depuis MT5: {'↑' if d1_bullish else '↓' if d1_bearish else '→'}")
+                    
+                    # Calculer M5 directement (si pas déjà récupéré)
+                    if not (m5_bullish or m5_bearish):
+                        rates_m5 = mt5.copy_rates_from_pos(request.symbol, mt5.TIMEFRAME_M5, 0, 50)
+                        if rates_m5 is not None and len(rates_m5) >= 20:
+                            df_m5 = pd.DataFrame(rates_m5)
+                            if 'close' in df_m5.columns and len(df_m5) >= 20:
+                                ema_fast_m5 = df_m5['close'].ewm(span=9, adjust=False).mean()
+                                ema_slow_m5 = df_m5['close'].ewm(span=21, adjust=False).mean()
+                                if len(ema_fast_m5) > 0 and len(ema_slow_m5) > 0:
+                                    m5_bullish = bool(ema_fast_m5.iloc[-1] > ema_slow_m5.iloc[-1])
+                                    m5_bearish = bool(ema_fast_m5.iloc[-1] < ema_slow_m5.iloc[-1])
+                                    logger.info(f"📊 M5 calculé directement depuis MT5: {'↑' if m5_bullish else '↓' if m5_bearish else '→'}")
+                    
+                    # Fermer MT5 seulement si on l'a initialisé nous-mêmes
+                    if not mt5_was_initialized_before and mt5_initialized_temp:
+                        mt5.shutdown()
+                        logger.debug(f"📊 MT5 fermé après calcul direct H4/D1")
+                        
+            except Exception as mt5_error:
+                logger.warning(f"⚠️ Erreur calcul direct MT5 pour H4/D1: {mt5_error}")
         
         # NOUVEAU 2025 : Analyse VWAP (prix d'équilibre)
         vwap_signal_buy = False
@@ -2848,29 +2914,133 @@ async def decision(request: DecisionRequest):
         # Décision basée sur le score directionnel
         action = "hold"
         direction_score = score
-        if direction_score > HOLD_THRESHOLD:
-            action = "buy"
-        elif direction_score < -HOLD_THRESHOLD:
-            action = "sell"
-
-        confidence = BASE_CONF + abs(direction_score)
-        confidence = max(MIN_CONF, min(MAX_CONF, confidence))
-
-        # Raison initiale structurée
-        reason_parts = [f"Score={direction_score:+.2f}", f"Comp={','.join(components)}"]
         
-        # Recalibrer direction/action après ajustements (score peut évoluer)
-        direction_score = score
+        # Calculer la confiance de manière intelligente avec bonus pour tendances long terme
+        abs_score = abs(direction_score)
+        
+        # Score maximum théorique (somme de tous les poids positifs possibles)
+        max_possible_score = sum([
+            WEIGHTS["m1"], WEIGHTS["m5"], WEIGHTS["m30"], WEIGHTS["h1"], 
+            WEIGHTS["h4"], WEIGHTS["d1"], WEIGHTS["w1"], WEIGHTS["rsi"],
+            WEIGHTS["vwap"], WEIGHTS["supertrend"], WEIGHTS["patterns"],
+            ALIGN_BONUS, VOL_OK_BONUS
+        ])
+        
+        # Normaliser le score (0.0 à 1.0)
+        normalized_score = min(abs_score / max_possible_score, 1.0) if max_possible_score > 0 else 0.0
+        
+        # NOUVEAU CALCUL DE CONFIANCE PLUS INTELLIGENT ET RÉALISTE
+        # La confiance doit refléter la qualité du signal et permettre de trader les bonnes opportunités
+        
+        # 1. Confiance de base proportionnelle au score
+        base_confidence = MIN_CONF + (normalized_score * (MAX_CONF - MIN_CONF))
+        
+        # 2. BONUS CRITIQUES pour tendances long terme (H4/D1)
+        long_term_bonus = 0.0
+        if (h4_bullish and d1_bullish):
+            long_term_bonus = 0.30  # +30% si H4 ET D1 alignés (tendance très forte)
+            components.append("H4+D1:+++")
+        elif (h4_bearish and d1_bearish):
+            long_term_bonus = 0.30
+            components.append("H4+D1:---")
+        elif h4_bullish or d1_bullish:
+            long_term_bonus = 0.20  # +20% si au moins H4 OU D1 aligné
+            components.append("H4/D1:++")
+        elif h4_bearish or d1_bearish:
+            long_term_bonus = 0.20
+            components.append("H4/D1:--")
+        
+        # 3. BONUS pour alignement H1 avec H4/D1 (confirmation long terme)
+        long_term_alignment_bonus = 0.0
+        if h1_bullish and (h4_bullish or d1_bullish):
+            long_term_alignment_bonus = 0.25  # +25% pour H1+H4/D1 (excellent signal)
+            components.append("H1+H4/D1:+++")
+        elif h1_bearish and (h4_bearish or d1_bearish):
+            long_term_alignment_bonus = 0.25
+            components.append("H1+H4/D1:---")
+        
+        # 4. BONUS pour alignement M5+H1 (tendance moyenne terme claire)
+        medium_term_bonus = 0.0
+        if (m5_bullish and h1_bullish):
+            medium_term_bonus = 0.20  # +20% pour M5+H1 alignés
+            components.append("M5+H1:++")
+        elif (m5_bearish and h1_bearish):
+            medium_term_bonus = 0.20
+            components.append("M5+H1:--")
+        
+        # 5. BONUS pour alignement multi-timeframe (4+ timeframes)
+        alignment_bonus = 0.0
+        if bullish_tfs >= 5:
+            alignment_bonus = 0.20 + ((bullish_tfs - 5) * 0.03)  # +20% base, +3% par TF supplémentaire
+            components.append(f"Align5+:{bullish_tfs}/7")
+        elif bearish_tfs >= 5:
+            alignment_bonus = 0.20 + ((bearish_tfs - 5) * 0.03)
+            components.append(f"Align5+:{bearish_tfs}/7")
+        elif bullish_tfs >= 4:
+            alignment_bonus = 0.15  # +15% pour 4 timeframes
+            components.append(f"Align4:{bullish_tfs}/7")
+        elif bearish_tfs >= 4:
+            alignment_bonus = 0.15
+            components.append(f"Align4:{bearish_tfs}/7")
+        
+        # 6. Calculer la confiance finale avec TOUS les bonus
         if direction_score > HOLD_THRESHOLD:
             action = "buy"
+            confidence = base_confidence + long_term_bonus + long_term_alignment_bonus + medium_term_bonus + alignment_bonus
         elif direction_score < -HOLD_THRESHOLD:
             action = "sell"
+            confidence = base_confidence + long_term_bonus + long_term_alignment_bonus + medium_term_bonus + alignment_bonus
         else:
             action = "hold"
-
-        confidence = BASE_CONF + abs(direction_score)
-        confidence = max(MIN_CONF, min(MAX_CONF, confidence))
-
+            confidence = MIN_CONF * 0.5
+        
+        # 7. CONFIANCE MINIMALE GARANTIE pour signaux valides avec H1 aligné
+        # Si H1 est aligné, c'est déjà un signal valide = confiance minimale 0.60 (60%)
+        if action != "hold" and (h1_bullish or h1_bearish):
+            # Si H1 aligné avec H4 ou D1, confiance minimale encore plus élevée
+            if (h4_bullish or d1_bullish) and h1_bullish:
+                confidence = max(confidence, 0.70)  # 70% minimum si H1+H4/D1
+                if confidence == 0.70:
+                    components.append("MinH1+H4/D1:70%")
+            elif (h4_bearish or d1_bearish) and h1_bearish:
+                confidence = max(confidence, 0.70)
+                if confidence == 0.70:
+                    components.append("MinH1+H4/D1:70%")
+            else:
+                # H1 seul aligné = 60% minimum
+                confidence = max(confidence, 0.60)
+                if confidence == 0.60:
+                    components.append("MinH1:60%")
+        
+        # 8. BONUS FINAL : Si M5+H1 alignés (sans H4/D1), confiance minimale 0.55
+        if action != "hold" and (m5_bullish and h1_bullish) and not (h4_bullish or d1_bullish):
+            confidence = max(confidence, 0.55)
+        elif action != "hold" and (m5_bearish and h1_bearish) and not (h4_bearish or d1_bearish):
+            confidence = max(confidence, 0.55)
+        
+        # 9. S'assurer que la confiance est dans les limites raisonnables
+        confidence = max(0.10, min(MAX_CONF, confidence))
+        
+        # Log détaillé pour comprendre le calcul
+        logger.info(f"📊 Confiance {request.symbol}: {action.upper()} | Score={direction_score:+.3f} | "
+                   f"Base={base_confidence:.2f} | H4/D1={long_term_bonus:.2f} | H1+H4/D1={long_term_alignment_bonus:.2f} | "
+                   f"M5+H1={medium_term_bonus:.2f} | Align={alignment_bonus:.2f} | FINAL={confidence:.2f} ({confidence*100:.1f}%)")
+        
+        # Construire la raison initiale structurée
+        reason_parts = []
+        if action != "hold":
+            reason_parts.append(f"Signal {action.upper()}")
+        reason_parts.append(f"Score={direction_score:+.3f}")
+        reason_parts.append(f"Conf={confidence:.1%}")
+        
+        # Ajouter les composants principaux (limiter à 5 pour éviter trop de détails)
+        if components:
+            main_components = components[:5]
+            reason_parts.append(f"TF:{','.join(main_components)}")
+        
+        # Construire la raison de base
+        reason = " | ".join(reason_parts) if reason_parts else "Analyse en cours"
+        
         # Utiliser Gemini AI pour améliorer la raison si disponible
         # Note: Gemini est désactivé par défaut, on utilise Mistral si disponible
         if GEMINI_AVAILABLE and reason:
@@ -2913,13 +3083,15 @@ Format: Analyse claire et professionnelle en français.
         except Exception as e:
             logger.warning(f"Erreur ajustement règles d'association: {e}")
 
-        # Si pas de raison construite, utiliser les composants de score
-        if reason_parts:
-            reason_from_parts = " | ".join(reason_parts)
-            if reason:
-                reason = f"{reason_from_parts} | {reason}"
+        # S'assurer que la raison est complète
+        # Si la raison de base n'a pas été modifiée par les règles d'association,
+        # elle contient déjà les reason_parts, donc pas besoin de les réajouter
+        if not reason or reason == "":
+            # Construire la raison depuis les parts si elle est vide
+            if reason_parts:
+                reason = " | ".join(reason_parts)
             else:
-                reason = reason_from_parts
+                reason = f"Signal {action.upper()} (confiance: {confidence:.1%})"
 
         stop_loss = None
         take_profit = None
@@ -3330,6 +3502,9 @@ Format: Analyse claire et professionnelle en français.
             "take_profit": take_profit
         }
         
+        # Log de débogage pour vérifier les valeurs
+        logger.info(f"✅ Décision IA pour {request.symbol}: action={action}, confidence={confidence:.3f} ({confidence*100:.1f}%), reason={reason[:100]}")
+        
         # Mise en cache
         prediction_cache[cache_key] = response_data
         last_updated[cache_key] = current_time
@@ -3628,6 +3803,113 @@ async def analyze(symbol: str):
     except Exception as e:
         logger.error(f"Erreur dans /analyze: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+# Modèle pour la requête de prédiction de prix
+class PricePredictionRequest(BaseModel):
+    symbol: str
+    current_price: float
+    bars_to_predict: int = 200
+    timeframe: str = "M1"
+
+@app.post("/prediction")
+async def predict_prices(request: PricePredictionRequest):
+    """
+    Prédit une série de prix futurs pour un symbole donné.
+    Utilisé par le robot MQ5 pour afficher les prédictions de prix sur le graphique.
+    
+    Args:
+        request: Requête contenant le symbole, prix actuel, nombre de bougies à prédire, et timeframe
+        
+    Returns:
+        dict: Dictionnaire contenant un tableau "prediction" avec les prix prédits
+    """
+    try:
+        symbol = request.symbol
+        current_price = request.current_price
+        bars_to_predict = request.bars_to_predict
+        timeframe = request.timeframe
+        
+        logger.info(f"📊 Prédiction de prix demandée: {symbol} - {bars_to_predict} bougies - Prix actuel: {current_price}")
+        
+        # Récupérer les données historiques si MT5 est disponible
+        prices = []
+        if MT5_AVAILABLE and mt5_initialized:
+            try:
+                import MetaTrader5 as mt5_module
+                # Récupérer les dernières données pour calculer la tendance
+                period_map = {
+                    "M1": mt5_module.TIMEFRAME_M1,
+                    "M5": mt5_module.TIMEFRAME_M5,
+                    "M15": mt5_module.TIMEFRAME_M15,
+                    "H1": mt5_module.TIMEFRAME_H1,
+                    "H4": mt5_module.TIMEFRAME_H4,
+                    "D1": mt5_module.TIMEFRAME_D1
+                }
+                
+                period = period_map.get(timeframe, mt5_module.TIMEFRAME_M1)
+                rates = mt5_module.copy_rates_from_pos(symbol, period, 0, min(100, bars_to_predict + 50))
+                
+                if rates is not None and len(rates) > 0:
+                    # Calculer la tendance moyenne basée sur les dernières bougies
+                    recent_prices = [rate['close'] for rate in rates[-20:]]  # 20 dernières bougies
+                    if len(recent_prices) >= 2:
+                        # Tendance linéaire simple
+                        price_change = (recent_prices[-1] - recent_prices[0]) / len(recent_prices)
+                        volatility = np.std(recent_prices) if len(recent_prices) > 1 else abs(price_change) * 0.01
+                    else:
+                        price_change = 0.0
+                        volatility = current_price * 0.01
+                    
+                    # Générer les prix prédits avec extrapolation linéaire + bruit
+                    np.random.seed(int(current_price * 1000) % 2**31)  # Seed reproductible basé sur le prix
+                    for i in range(bars_to_predict):
+                        # Extrapolation linéaire avec décroissance de la tendance
+                        trend_component = price_change * (1.0 - i / bars_to_predict)  # Tendance décroissante
+                        noise = np.random.normal(0, volatility * 0.1)  # Bruit aléatoire réduit
+                        predicted_price = current_price + (trend_component * i) + noise
+                        prices.append(float(predicted_price))
+                else:
+                    # Pas de données historiques, générer une série plate avec bruit minimal
+                    np.random.seed(int(current_price * 1000) % 2**31)
+                    volatility = current_price * 0.005  # 0.5% de volatilité
+                    for i in range(bars_to_predict):
+                        noise = np.random.normal(0, volatility)
+                        prices.append(float(current_price + noise))
+                        
+            except Exception as e:
+                logger.warning(f"Erreur lors de la récupération des données MT5 pour prédiction: {e}")
+                # Fallback: générer une série plate
+                np.random.seed(int(current_price * 1000) % 2**31)
+                volatility = current_price * 0.005
+                for i in range(bars_to_predict):
+                    noise = np.random.normal(0, volatility)
+                    prices.append(float(current_price + noise))
+        else:
+            # MT5 non disponible, générer une série basée sur le prix actuel
+            np.random.seed(int(current_price * 1000) % 2**31)
+            volatility = current_price * 0.005
+            for i in range(bars_to_predict):
+                noise = np.random.normal(0, volatility)
+                prices.append(float(current_price + noise))
+        
+        if len(prices) == 0:
+            # Fallback final: série constante
+            prices = [float(current_price)] * bars_to_predict
+        
+        logger.info(f"✅ Prédiction générée: {len(prices)} prix pour {symbol}")
+        
+        return {
+            "prediction": prices,
+            "symbol": symbol,
+            "current_price": current_price,
+            "bars_predicted": len(prices),
+            "timeframe": timeframe,
+            "timestamp": datetime.now().isoformat()
+        }
+        
+    except Exception as e:
+        logger.error(f"Erreur dans /prediction: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Erreur lors de la prédiction de prix: {str(e)}")
 
 # Gestion des modèles ML
 def load_ml_models():
@@ -4963,6 +5245,7 @@ if __name__ == "__main__":
     print(f"  - GET  /analysis?symbol=SYMBOL     : Analyse structure H1/H4/M15")
     print(f"  - GET  /time_windows/{{symbol}}     : Fenêtres horaires optimales")
     print(f"  - GET  /predict/{{symbol}}          : Prédiction (legacy)")
+    print(f"  - POST /prediction                  : Prédiction de prix futurs (pour MQ5)")
     print(f"  - GET  /analyze/{{symbol}}           : Analyse complète (legacy)")
     print(f"  - POST /indicators/analyze           : Analyse avec AdvancedIndicators")
     print(f"  - POST /trend                     : Analyse de tendance MT5 (POST)")

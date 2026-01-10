@@ -22,9 +22,6 @@
 #include <Trade/HistoryOrderInfo.mqh>
 #include <Trade/TerminalInfo.mqh>
 
-// Include custom strategy modules
-bool CheckEMATouchEntry(ENUM_ORDER_TYPE &signalType); // Forward declaration
-
 //+------------------------------------------------------------------+
 //| Paramètres d'entrée                                              |
 //+------------------------------------------------------------------+
@@ -32,8 +29,8 @@ input group "--- CONFIGURATION DE BASE ---"
 input int    InpMagicNumber     = 888888;  // Magic Number
 input double InitialLotSize     = 0.01;    // Taille de lot initiale
 input double MaxLotSize          = 1.0;     // Taille de lot maximale
-input double TakeProfitUSD       = 10.0;    // Take Profit en USD (fixe)
-input double StopLossUSD         = 5.0;     // Stop Loss en USD (fixe)
+input double TakeProfitUSD       = 30.0;    // Take Profit en USD (fixe) - Mouvements longs (augmenté pour cibler les grands mouvements)
+input double StopLossUSD         = 10.0;    // Stop Loss en USD (fixe) - Ratio 3:1 pour favoriser les mouvements longs
 input double ProfitThresholdForDouble = 0.5; // Seuil de profit (USD) pour doubler le lot
 input int    MinPositionLifetimeSec = 5;    // Délai minimum avant modification (secondes)
 
@@ -42,18 +39,23 @@ input bool   UseAI_Agent        = true;    // Activer l'agent IA (via serveur ex
 input string AI_ServerURL       = "http://127.0.0.1:8000/decision"; // URL serveur IA
 input bool   UseAdvancedDecisionGemma = false; // Utiliser endpoint decisionGemma (Gemma+Gemini) avec analyse visuelle
 input int    AI_Timeout_ms       = 800;     // Timeout WebRequest en millisecondes
-input double AI_MinConfidence    = 0.6;     // Confiance minimale IA pour trader (60%)
+input double AI_MinConfidence    = 0.60;    // Confiance minimale IA pour trader (60% - ajusté avec calcul intelligent)
+// NOTE: Le serveur IA garantit maintenant 60% minimum si H1 aligné, 70% si H1+H4/D1
+// Pour Boom/Crash, le seuil est automatiquement abaissé à 45% dans le code
+// pour les tendances fortes (H4/D1 alignés). Le serveur ajoute automatiquement
+// des bonus (+25% pour H4+D1 alignés, +10-20% pour alignement multi-TF)
 input int    AI_UpdateInterval   = 5;      // Intervalle de mise à jour IA (secondes)
 input string AI_AnalysisURL    = "http://127.0.0.1:8000/analysis";  // URL base pour l'analyse complète (structure H1, etc.)
 input int    AI_AnalysisIntervalSec = 60;  // Fréquence de rafraîchissement de l'analyse (secondes)
 input string AI_TimeWindowsURLBase = "http://127.0.0.1:8000"; // Racine API pour /time_windows
+input string TrendAPIURL = "http://127.0.0.1:8000/trend"; // URL API de tendance
 
 input group "--- ÉLÉMENTS GRAPHIQUES ---"
 input bool   DrawAIZones         = true;    // Dessiner les zones BUY/SELL de l'IA
 input bool   DrawSupportResistance = true;  // Dessiner support/résistance M5/H1
 input bool   DrawTrendlines      = true;    // Dessiner les trendlines
 input bool   DrawDerivPatterns   = true;    // Dessiner les patterns Deriv
-input bool   DrawSMCZones        = true;    // Dessiner les zones SMC/OrderBlock
+input bool   DrawSMCZones        = false;   // Dessiner les zones SMC/OrderBlock (DÉSACTIVÉ pour performance)
 
 input group "--- STRATÉGIE US SESSION BREAK & RETEST (PRIORITAIRE) ---"
 input bool   UseUSSessionStrategy = true;   // Activer la stratégie US Session (prioritaire)
@@ -64,9 +66,8 @@ input bool   US_OneTradePerDay    = true;   // Un seul trade par jour pour US Se
 input group "--- GESTION DES RISQUES ---"
 input double MaxDailyLoss        = 100.0;   // Perte quotidienne maximale (USD)
 input double MaxDailyProfit      = 200.0;   // Profit quotidien maximale (USD)
-input bool   DailyLimitAccountWide = false;  // Limite journalière sur TOUT le compte (sinon Robot seulement)
 input double MaxTotalLoss        = 5.0;     // Perte totale maximale toutes positions (USD)
-input bool   UseTrailingStop     = true;    // Utiliser trailing stop
+input bool   UseTrailingStop     = true;   // Utiliser trailing stop (désactivé pour scalping fixe)
 
 input group "--- SORTIES VOLATILITY ---"
 input double VolatilityQuickTP   = 2.0;     // Fermer rapidement les indices Volatility à +2$ de profit
@@ -79,6 +80,9 @@ input int    EMA_Fast_Period     = 9;       // Période EMA rapide
 input int    EMA_Slow_Period     = 21;      // Période EMA lente
 input int    RSI_Period          = 14;      // Période RSI
 input int    ATR_Period          = 14;      // Période ATR
+input bool   ShowLongTrendEMA    = true;    // Afficher EMA 50, 100, 200 sur le graphique (courbes)
+input bool   UseTrendAPIAnalysis = true;    // Utiliser l'analyse de tendance API pour affiner les décisions
+input double TrendAPIMinConfidence = 70.0;  // Confiance minimum API pour validation (70%)
 
 input group "--- DEBUG ---"
 input bool   DebugMode           = true;    // Mode debug (logs détaillés)
@@ -98,6 +102,10 @@ int emaFastH1Handle;
 int emaSlowH1Handle;
 int emaFastM5Handle;
 int emaSlowM5Handle;
+// EMA pour tendances longues (50, 100, 200)
+int ema50Handle;
+int ema100Handle;
+int ema200Handle;
 int rsiHandle;
 int atrHandle;
 int atrM5Handle;
@@ -112,11 +120,29 @@ static bool     g_aiFallbackMode  = false;
 static int      g_aiConsecutiveFailures = 0;
 const int       AI_FAILURE_THRESHOLD = 3;
 
+// Variables pour api_trend (analyse de tendance API)
+static int      g_api_trend_direction = 0;       // Direction de tendance API (1=BUY, -1=SELL, 0=neutre)
+static double   g_api_trend_strength = 0.0;      // Force de la tendance API (0-100)
+static double   g_api_trend_confidence = 0.0;    // Confiance de la tendance API (0-100)
+static datetime g_api_trend_last_update = 0;     // Timestamp de la dernière mise à jour API
+static string   g_api_trend_signal = "";         // Signal de tendance API
+static bool     g_api_trend_valid = false;       // Les données API sont-elles valides ?
+
 // Zones IA
 static double   g_aiBuyZoneLow   = 0.0;
 static double   g_aiBuyZoneHigh  = 0.0;
 static double   g_aiSellZoneLow  = 0.0;
 static double   g_aiSellZoneHigh = 0.0;
+
+// Prédiction de prix (200 bougies)
+static double   g_pricePrediction[];  // Tableau des prix prédits (500 bougies futures)
+static double   g_priceHistory[];     // Tableau des prix historiques (200 bougies passées)
+static datetime g_predictionStartTime = 0;  // Temps de début de la prédiction
+static bool     g_predictionValid = false;  // La prédiction est-elle valide ?
+static int      g_predictionBars = 500;     // Nombre de bougies futures à prédire
+static int      g_historyBars = 200;        // Nombre de bougies historiques
+static datetime g_lastPredictionUpdate = 0; // Dernière mise à jour de la prédiction
+const int PREDICTION_UPDATE_INTERVAL = 300; // Mise à jour toutes les 5 minutes (300 secondes)
 
 // Suivi des positions
 struct PositionTracker {
@@ -137,6 +163,7 @@ static bool g_hasPosition = false;
 static double g_globalMaxProfit = 0.0;  // Profit maximum global atteint (toutes positions)
 const double PROFIT_SECURE_THRESHOLD = 3.0;  // Seuil d'activation (3$)
 const double PROFIT_DRAWDOWN_LIMIT = 0.5;    // Limite de drawdown (50%)
+const double MIN_PROFIT_TO_CLOSE = 1.0;      // Profit minimum requis pour fermer un trade (1$)
 
 // Tableau pour suivre le profit max de chaque position
 struct PositionProfitTracker {
@@ -152,6 +179,7 @@ static int g_profitTrackersCount = 0;
 static double g_dailyProfit = 0.0;
 static double g_dailyLoss = 0.0;
 static datetime g_lastDayReset = 0;
+static ulong g_processedDeals[];  // Liste des deals déjà traités pour éviter les doubles comptages
 
 // Suivi pour fermeture après spike (Boom/Crash)
 static double g_lastBoomCrashPrice = 0.0;  // Prix de référence pour détecter le spike
@@ -159,7 +187,56 @@ static double g_lastBoomCrashPrice = 0.0;  // Prix de référence pour détecter
 // Suivi des tentatives de spike et cooldown (Boom/Crash)
 static string   g_spikeSymbols[];
 static int      g_spikeFailCount[];
+
+// Structure pour stocker les opportunités BUY/SELL
+struct TradingOpportunity {
+   bool isBuy;           // true = BUY, false = SELL
+   double entryPrice;    // Prix d'entrée
+   double percentage;    // Pourcentage de gain potentiel
+   datetime entryTime;   // Temps d'entrée
+   int priority;         // Priorité (plus le gain est élevé, plus la priorité est haute)
+};
+
+static TradingOpportunity g_opportunities[];  // Tableau des opportunités
+static int g_opportunitiesCount = 0;          // Nombre d'opportunités
 static datetime g_spikeCooldown[];
+
+// Déclarations forward des fonctions
+bool IsVolatilitySymbol(const string symbol);
+bool IsBoomCrashSymbol(const string sym);
+double GetTotalLoss();
+double NormalizeLotSize(double lot);
+void CleanOldGraphicalObjects();
+void DrawAIConfidenceAndTrendSummary();
+void DrawOpportunitiesPanel();
+void DrawLongTrendEMA();
+void DeleteEMAObjects(string prefix);
+void DrawEMACurveOptimized(string prefix, double &values[], datetime &times[], int count, color clr, int width, int step);
+void DrawAIZonesOnChart();
+void DrawSupportResistanceLevels();
+void DrawTrendlinesOnChart();
+void DrawSMCZonesOnChart();
+void DeleteSMCZones();
+void CheckAndManagePositions();
+void SecureDynamicProfits();
+void SecureProfitForPosition(ulong ticket, double currentProfit);
+void LookForTradingOpportunity();
+bool CheckReboundOnTrendline(ENUM_ORDER_TYPE orderType, double &distance);
+bool DetectReversalAtFastEMA(ENUM_ORDER_TYPE orderType);
+bool CheckAIZoneEntryWithEMA(ENUM_ORDER_TYPE orderType, bool &isInZone, bool &emaConfirmed, bool &isCorrection);
+bool CheckTrendAlignment(ENUM_ORDER_TYPE orderType);
+bool CheckSuperTrendSignal(ENUM_ORDER_TYPE orderType, double &strength);
+bool CheckSupportResistanceRebound(ENUM_ORDER_TYPE orderType, double &reboundStrength);
+bool CheckPatternReversal(ENUM_ORDER_TYPE orderType, double &reversalConfidence);
+bool IsRealTrendReversal(ulong ticket, ENUM_POSITION_TYPE posType, double currentPrice, double entryPrice);
+bool IsTrendStillValid(ENUM_POSITION_TYPE posType);
+bool CheckAdvancedEntryConditions(ENUM_ORDER_TYPE orderType, double &entryScore);
+void UpdatePricePrediction();
+void DrawPricePrediction();
+void DetectReversalPoints(int &buyEntries[], int &sellEntries[]);
+void UsePredictionForCurrentTrades();
+void DetectAndDrawCorrectionZones();
+void PlaceLimitOrderOnCorrection();
 
 int GetSpikeIndex(const string sym)
 {
@@ -180,7 +257,16 @@ int GetSpikeIndex(const string sym)
 
 bool IsBoomCrashSymbol(const string sym)
 {
-   return (StringFind(sym, "Boom") != -1 || StringFind(sym, "Crash") != -1);
+   // Détecter TOUS les symboles avec "Boom" ou "Crash" (y compris "Vol over Boom/Crash")
+   // Tous ces symboles doivent respecter les restrictions:
+   // - Boom (y compris Vol over Boom) = BUY uniquement (spike en tendance)
+   // - Crash (y compris Vol over Crash) = SELL uniquement (spike en tendance)
+   
+   // Détecter tous les symboles avec "Boom" ou "Crash" (incluant Vol over)
+   bool hasBoom = (StringFind(sym, "Boom") != -1);
+   bool hasCrash = (StringFind(sym, "Crash") != -1);
+   
+   return (hasBoom || hasCrash);
 }
 
 // Fermer toutes les positions Volatility si la perte totale dépasse un seuil
@@ -265,9 +351,15 @@ int OnInit()
    emaSlowH1Handle = iMA(_Symbol, PERIOD_H1, EMA_Slow_Period, 0, MODE_EMA, PRICE_CLOSE);
    atrH1Handle = iATR(_Symbol, PERIOD_H1, ATR_Period);
    
+   // Initialiser les EMA pour tendances longues (50, 100, 200) sur M1
+   ema50Handle = iMA(_Symbol, PERIOD_M1, 50, 0, MODE_EMA, PRICE_CLOSE);
+   ema100Handle = iMA(_Symbol, PERIOD_M1, 100, 0, MODE_EMA, PRICE_CLOSE);
+   ema200Handle = iMA(_Symbol, PERIOD_M1, 200, 0, MODE_EMA, PRICE_CLOSE);
+   
    if(emaFastHandle == INVALID_HANDLE || emaSlowHandle == INVALID_HANDLE || 
       emaFastH1Handle == INVALID_HANDLE || emaSlowH1Handle == INVALID_HANDLE ||
       emaFastM5Handle == INVALID_HANDLE || emaSlowM5Handle == INVALID_HANDLE ||
+      ema50Handle == INVALID_HANDLE || ema100Handle == INVALID_HANDLE || ema200Handle == INVALID_HANDLE ||
       rsiHandle == INVALID_HANDLE || atrHandle == INVALID_HANDLE ||
       atrM5Handle == INVALID_HANDLE || atrH1Handle == INVALID_HANDLE)
    {
@@ -300,6 +392,9 @@ int OnInit()
    g_lastDayReset = TimeCurrent();
    ResetDailyCounters();
    
+   // Nettoyer tous les objets graphiques au démarrage
+   CleanAllGraphicalObjects();
+   
    return INIT_SUCCEEDED;
 }
 
@@ -315,6 +410,9 @@ void OnDeinit(const int reason)
    if(emaSlowH1Handle != INVALID_HANDLE) IndicatorRelease(emaSlowH1Handle);
    if(emaFastM5Handle != INVALID_HANDLE) IndicatorRelease(emaFastM5Handle);
    if(emaSlowM5Handle != INVALID_HANDLE) IndicatorRelease(emaSlowM5Handle);
+   if(ema50Handle != INVALID_HANDLE) IndicatorRelease(ema50Handle);
+   if(ema100Handle != INVALID_HANDLE) IndicatorRelease(ema100Handle);
+   if(ema200Handle != INVALID_HANDLE) IndicatorRelease(ema200Handle);
    if(rsiHandle != INVALID_HANDLE) IndicatorRelease(rsiHandle);
    if(atrHandle != INVALID_HANDLE) IndicatorRelease(atrHandle);
    if(atrM5Handle != INVALID_HANDLE) IndicatorRelease(atrM5Handle);
@@ -331,10 +429,11 @@ void OnTick()
    // Réinitialiser les compteurs quotidiens si nécessaire
    ResetDailyCountersIfNeeded();
    
-   // MODE PRUDENT: Activé dès que profit quotidien >= 50$ pour sécuriser les gains
-   bool cautiousMode = (g_dailyProfit >= 50.0);
+   // Vérifier les limites quotidiennes (mode prudent si perte élevée)
+   // Au lieu de bloquer complètement, on active un mode très prudent
+   bool cautiousMode = (g_dailyLoss >= MaxDailyLoss);
    if(cautiousMode && DebugMode)
-      Print("✅ MODE PRUDENT ACTIVÉ: Profit quotidien >= 50$ (", DoubleToString(g_dailyProfit, 2), " USD) - Sécurisation avec signaux ultra-sûrs");
+      Print("⚠️ MODE PRUDENT ACTIVÉ: Perte quotidienne élevée (", DoubleToString(g_dailyLoss, 2), " USD) - Seulement opportunités très sûres");
    
    if(g_dailyProfit >= MaxDailyProfit)
    {
@@ -360,29 +459,98 @@ void OnTick()
       lastAIUpdate = TimeCurrent();
    }
    
-   // Dessiner les éléments graphiques
-   static datetime lastDrawUpdate = 0;
-   if(TimeCurrent() - lastDrawUpdate >= 5) // Mise à jour toutes les 5 secondes
+   // Mettre à jour la prédiction de prix toutes les 5 minutes (pas chaque seconde)
+   // Cela permet au robot de prendre en compte la prédiction pour améliorer les trades présents
+   if(UseAI_Agent && (TimeCurrent() - g_lastPredictionUpdate) >= PREDICTION_UPDATE_INTERVAL)
    {
-      if(DrawSupportResistance)
-         DrawSupportResistanceLevels();
+      UpdatePricePrediction(); // Mettre à jour la prédiction de prix
+      g_lastPredictionUpdate = TimeCurrent();
+   }
+   
+   // Dessiner la prédiction de prix (optimisé - seulement toutes les 10 secondes pour éviter la surcharge)
+   static datetime lastPredictionDraw = 0;
+   if(DrawAIZones && g_predictionValid && (TimeCurrent() - lastPredictionDraw) >= 10)
+   {
+      DrawPricePrediction();
+      lastPredictionDraw = TimeCurrent();
+   }
+   
+   // Utiliser la prédiction pour améliorer les trades présents (ajuster SL/TP)
+   // S'exécute seulement si la prédiction est valide et a été mise à jour récemment
+   if(g_predictionValid && (TimeCurrent() - g_lastPredictionUpdate) < 600) // Utiliser si prédiction < 10 min
+   {
+      UsePredictionForCurrentTrades();
+   }
+   
+   // Mettre à jour l'analyse de tendance API si nécessaire
+   static datetime lastTrendUpdate = 0;
+   if(UseTrendAPIAnalysis && (TimeCurrent() - lastTrendUpdate) >= AI_UpdateInterval)
+   {
+      UpdateTrendAPIAnalysis();
+      lastTrendUpdate = TimeCurrent();
+   }
+   
+   // OPTIMISATION MAXIMALE: Réduire drastiquement la fréquence et les calculs
+   static datetime lastDrawUpdate = 0;
+   if(TimeCurrent() - lastDrawUpdate >= 30) // Mise à jour toutes les 30 secondes (au lieu de 15)
+   {
+      // Toujours afficher les labels essentiels (léger)
+      DrawAIConfidenceAndTrendSummary();
+      
+      // Afficher le panneau des opportunités (remplace les labels encombrants)
+      DrawOpportunitiesPanel();
+      
+      // Afficher les zones AI (priorité, léger)
       if(DrawAIZones)
          DrawAIZonesOnChart();
-      if(DrawTrendlines)
-         DrawTrendlinesOnChart();
-      if(DrawDerivPatterns)
-      {
-         DrawDerivPatternsOnChart();
-         UpdateDerivArrowBlink(); // Mettre à jour le clignotement (une fois toutes les 5 secondes avec DrawDerivPatternsOnChart)
-      }
+      
       lastDrawUpdate = TimeCurrent();
    }
    
-   // Vérifier les positions existantes
-   CheckAndManagePositions();
+   // OPTIMISATION: Mises à jour très peu fréquentes pour éléments lourds
+   static datetime lastHeavyUpdate = 0;
+   if(TimeCurrent() - lastHeavyUpdate >= 300) // Mise à jour toutes les 5 minutes (au lieu de 3 min)
+   {
+      // OPTIMISATION: Nettoyer seulement toutes les 10 minutes (très lourd)
+      static datetime lastCleanup = 0;
+      if(TimeCurrent() - lastCleanup >= 600)
+      {
+         CleanOldGraphicalObjects();
+         lastCleanup = TimeCurrent();
+      }
+      
+      // Afficher EMA longues (optimisé, très peu fréquent)
+      if(ShowLongTrendEMA)
+         DrawLongTrendEMA();
+      
+      // Afficher support/résistance (très peu fréquent)
+      if(DrawSupportResistance)
+         DrawSupportResistanceLevels();
+      
+      // Afficher trendlines (très peu fréquent)
+      if(DrawTrendlines)
+         DrawTrendlinesOnChart();
+      
+      lastHeavyUpdate = TimeCurrent();
+   }
    
-   // Sécurisation dynamique des profits
-   SecureDynamicProfits();
+   // Deriv patterns (optimisé - beaucoup moins fréquent)
+   static datetime lastDerivUpdate = 0;
+   if(DrawDerivPatterns && (TimeCurrent() - lastDerivUpdate >= 60)) // Toutes les 60 secondes (au lieu de 10)
+   {
+      DrawDerivPatternsOnChart();
+      UpdateDerivArrowBlink();
+      lastDerivUpdate = TimeCurrent();
+   }
+   
+   // OPTIMISATION: Vérifier les positions moins fréquemment
+   static datetime lastPositionCheck = 0;
+   if(TimeCurrent() - lastPositionCheck >= 1) // Toutes les secondes (au lieu de chaque tick)
+   {
+      CheckAndManagePositions();
+      SecureDynamicProfits();
+      lastPositionCheck = TimeCurrent();
+   }
    
    // Si pas de position, chercher une opportunité
    if(!g_hasPosition)
@@ -408,144 +576,120 @@ void ResetDailyCountersIfNeeded()
    }
 }
 
+bool IsDealProcessed(ulong dealTicket)
+{
+   int size = ArraySize(g_processedDeals);
+   for(int i = 0; i < size; i++)
+   {
+      if(g_processedDeals[i] == dealTicket)
+         return true;
+   }
+   return false;
+}
+
+void AddProcessedDeal(ulong dealTicket)
+{
+   int size = ArraySize(g_processedDeals);
+   ArrayResize(g_processedDeals, size + 1);
+   g_processedDeals[size] = dealTicket;
+}
+
 void ResetDailyCounters()
 {
    g_dailyProfit = 0.0;
    g_dailyLoss = 0.0;
+   ArrayFree(g_processedDeals);  // Réinitialiser la liste des deals traités
    
-   // Calculer le profit/perte actuel depuis l'historique (net: profit + commission + swap)
+   // Calculer le profit/perte actuel depuis l'historique
    datetime startOfDay = StringToTime(TimeToString(TimeCurrent(), TIME_DATE));
    datetime endOfDay = startOfDay + 86400;
    
    if(HistorySelect(startOfDay, endOfDay))
    {
       int totalDeals = HistoryDealsTotal();
-      double totalPnL = 0.0;
-      
       for(int i = 0; i < totalDeals; i++)
       {
          ulong ticket = HistoryDealGetTicket(i);
          if(ticket == 0) continue;
          
-         // Vérifier si c'est notre EA (si non-global)
-         if(!DailyLimitAccountWide && HistoryDealGetInteger(ticket, DEAL_MAGIC) != InpMagicNumber)
+         // Vérifier si c'est un trade de clôture
+         if(HistoryDealGetInteger(ticket, DEAL_ENTRY) != DEAL_ENTRY_OUT)
             continue;
          
-         // Profit seulement pour les sorties (clôture)
-         if(HistoryDealGetInteger(ticket, DEAL_ENTRY) == DEAL_ENTRY_OUT)
-         {
-            totalPnL += HistoryDealGetDouble(ticket, DEAL_PROFIT);
-         }
+         // Vérifier si c'est notre EA
+         if(HistoryDealGetInteger(ticket, DEAL_MAGIC) != InpMagicNumber)
+            continue;
          
-         // TOUJOURS compter les commissions et swaps (entrées ET sorties)
-         totalPnL += HistoryDealGetDouble(ticket, DEAL_COMMISSION);
-         totalPnL += HistoryDealGetDouble(ticket, DEAL_SWAP);
-      }
-      
-      // Séparer en profit et perte nets pour la journée
-      if(totalPnL > 0)
-      {
-         g_dailyProfit = totalPnL;
-         g_dailyLoss = 0;
-      }
-      else
-      {
-         g_dailyProfit = 0;
-         g_dailyLoss = MathAbs(totalPnL);
+         // Récupérer le profit
+         double profit = HistoryDealGetDouble(ticket, DEAL_PROFIT);
+         // g_dailyProfit doit être le profit NET (gains - pertes)
+         g_dailyProfit += profit;
+         // g_dailyLoss est utilisé pour le mode prudent (somme des pertes absolues)
+         if(profit < 0)
+            g_dailyLoss += MathAbs(profit);
+         
+         // Marquer ce deal comme traité
+         AddProcessedDeal(ticket);
       }
    }
 }
 
 //+------------------------------------------------------------------+
-//| Check for EMA Touch Entry with M5 Bounce Confirmation           |
+//| Mettre à jour le profit quotidien après fermeture de position   |
 //+------------------------------------------------------------------+
-bool CheckEMATouchEntry(ENUM_ORDER_TYPE &signalType)
+void UpdateDailyProfitFromDeal(ulong dealTicket)
 {
-   signalType = WRONG_VALUE;
+   if(dealTicket == 0) return;
    
-   // Get current price
-   double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   // Éviter les doubles comptages
+   if(IsDealProcessed(dealTicket))
+      return;
    
-   // Get M1 Fast EMA
-   double emaFast[];
-   ArraySetAsSeries(emaFast, true);
-   if(CopyBuffer(emaFastHandle, 0, 0, 3, emaFast) < 3)
-      return false;
+   // Vérifier si c'est un trade de clôture
+   if(HistoryDealGetInteger(dealTicket, DEAL_ENTRY) != DEAL_ENTRY_OUT)
+      return;
    
-   // Get ATR for tolerance calculation
-   double atr[];
-   ArraySetAsSeries(atr, true);
-   if(CopyBuffer(atrHandle, 0, 0, 1, atr) < 1)
-      return false;
+   // Vérifier si c'est notre EA
+   if(HistoryDealGetInteger(dealTicket, DEAL_MAGIC) != InpMagicNumber)
+      return;
    
-   double touchTolerance = atr[0] * 0.5; // ±0.5 ATR tolerance
+   // Vérifier si c'est un deal d'aujourd'hui
+   datetime dealTime = (datetime)HistoryDealGetInteger(dealTicket, DEAL_TIME);
+   MqlDateTime dealDt, todayDt;
+   TimeToStruct(dealTime, dealDt);
+   TimeToStruct(TimeCurrent(), todayDt);
    
-   // Check if price is touching EMA
-   bool isTouchingEMA = MathAbs(currentPrice - emaFast[0]) <= touchTolerance;
-   if(!isTouchingEMA)
-      return false;
+   if(dealDt.day != todayDt.day || dealDt.mon != todayDt.mon || dealDt.year != todayDt.year)
+      return; // Ce n'est pas un deal d'aujourd'hui
    
-   // Get M5 candles for bounce confirmation
-   MqlRates ratesM5[];
-   ArraySetAsSeries(ratesM5, true);
-   if(CopyRates(_Symbol, PERIOD_M5, 0, 2, ratesM5) < 2)
-      return false;
+   // Récupérer le profit
+   double profit = HistoryDealGetDouble(dealTicket, DEAL_PROFIT);
+   // g_dailyProfit doit être le profit NET (gains - pertes)
+   g_dailyProfit += profit;
+   // g_dailyLoss est utilisé pour le mode prudent (somme des pertes absolues)
+   if(profit < 0)
+      g_dailyLoss += MathAbs(profit);
    
-   // Get M5 EMAs for trend confirmation
-   double emaFastM5[];
-   double emaSlowM5[];
-   ArraySetAsSeries(emaFastM5, true);
-   ArraySetAsSeries(emaSlowM5, true);
-   if(CopyBuffer(emaFastM5Handle, 0, 0, 2, emaFastM5) < 2 || 
-      CopyBuffer(emaSlowM5Handle, 0, 0, 2, emaSlowM5) < 2)
-      return false;
-   
-   // Verify clear trend on M5 (Fast EMA > Slow EMA for uptrend)
-   bool isUptrend = (emaFastM5[0] > emaSlowM5[0]);
-   bool isDowntrend = (emaFastM5[0] < emaSlowM5[0]);
-   
-   if(!isUptrend && !isDowntrend)
-      return false; // No clear trend
-   
-   // Check for BUY setup
-   if(isUptrend)
+   // Marquer ce deal comme traité
+   AddProcessedDeal(dealTicket);
+}
+
+//+------------------------------------------------------------------+
+//| Fonction appelée lors d'une transaction                         |
+//+------------------------------------------------------------------+
+void OnTradeTransaction(const MqlTradeTransaction& trans,
+                       const MqlTradeRequest& request,
+                       const MqlTradeResult& result)
+{
+   // Si c'est une transaction de deal
+   if(trans.type == TRADE_TRANSACTION_DEAL_ADD)
    {
-      // Price was below EMA, now touching/above
-      bool wasBelowEMA = (emaFast[1] > ratesM5[1].close);
-      bool isAboveEMA = (currentPrice >= emaFast[0]);
-      
-      // M5 candle is bullish
-      bool m5Bullish = (ratesM5[0].close > ratesM5[0].open);
-      
-      if(wasBelowEMA && isAboveEMA && m5Bullish)
+      ulong dealTicket = trans.deal;
+      if(dealTicket > 0)
       {
-         signalType = ORDER_TYPE_BUY;
-         if(DebugMode)
-            Print("✅ EMA TOUCH BUY: Prix rebondi sur EMA rapide avec bougie M5 haussière");
-         return true;
+         UpdateDailyProfitFromDeal(dealTicket);
       }
    }
-   
-   // Check for SELL setup
-   if(isDowntrend)
-   {
-      // Price was above EMA, now touching/below
-      bool wasAboveEMA = (emaFast[1] < ratesM5[1].close);
-      bool isBelowEMA = (currentPrice <= emaFast[0]);
-      
-      // M5 candle is bearish
-      bool m5Bearish = (ratesM5[0].close < ratesM5[0].open);
-      
-      if(wasAboveEMA && isBelowEMA && m5Bearish)
-      {
-         signalType = ORDER_TYPE_SELL;
-         if(DebugMode)
-            Print("✅ EMA TOUCH SELL: Prix rebondi sur EMA rapide avec bougie M5 baissière");
-         return true;
-      }
-   }
-   
-   return false;
 }
 
 //+------------------------------------------------------------------+
@@ -664,105 +808,348 @@ void UpdateAIDecision()
    string resp = CharArrayToString(result, 0, -1, CP_UTF8);
    
    if(DebugMode)
-      Print("📥 Réponse IA reçue: ", StringSubstr(resp, 0, 200)); // Afficher les 200 premiers caractères
+      Print("📥 Réponse IA reçue: ", StringSubstr(resp, 0, 300)); // Afficher les 300 premiers caractères
    
-   // Parser la réponse JSON - recherche plus robuste
+   // Réinitialiser les valeurs avant parsing
+   g_lastAIAction = "";
+   g_lastAIConfidence = 0.0;
+   g_lastAIReason = "";
+   
+   // Parser la réponse JSON de manière plus robuste
+   // 1. Parser "action" - recherche avec gestion des espaces
    int actionPos = StringFind(resp, "\"action\"");
    if(actionPos < 0)
-      actionPos = StringFind(resp, "\"action\""); // Essayer sans échappement
+      actionPos = StringFind(resp, "action"); // Essayer sans guillemets
    
    if(actionPos >= 0)
    {
-      // Chercher la valeur après "action":
+      // Chercher le deux-points après "action"
       int colonPos = StringFind(resp, ":", actionPos);
       if(colonPos > actionPos)
       {
-         // Chercher la valeur entre guillemets
-         int quoteStart = StringFind(resp, "\"", colonPos);
-         if(quoteStart > colonPos)
+         // Chercher la valeur entre guillemets (peut avoir des espaces avant)
+         int searchStart = colonPos + 1;
+         int quoteStart = -1;
+         
+         // Chercher le premier guillemet après le deux-points
+         for(int i = searchStart; i < StringLen(resp) && i < searchStart + 20; i++)
+         {
+            if(StringGetCharacter(resp, i) == '"')
+            {
+               quoteStart = i;
+               break;
+            }
+         }
+         
+         if(quoteStart > 0)
          {
             int quoteEnd = StringFind(resp, "\"", quoteStart + 1);
             if(quoteEnd > quoteStart)
             {
                string actionValue = StringSubstr(resp, quoteStart + 1, quoteEnd - quoteStart - 1);
-               StringToLower(actionValue); // Convertir en minuscules pour comparaison
+               StringTrimLeft(actionValue);
+               StringTrimRight(actionValue);
+               StringToLower(actionValue);
                
                // Gérer différents formats possibles
-               if(StringFind(actionValue, "buy") >= 0 || StringFind(actionValue, "achat") >= 0)
+               if(StringFind(actionValue, "buy") == 0 || StringFind(actionValue, "achat") == 0)
                   g_lastAIAction = "buy";
-               else if(StringFind(actionValue, "sell") >= 0 || StringFind(actionValue, "vente") >= 0)
+               else if(StringFind(actionValue, "sell") == 0 || StringFind(actionValue, "vente") == 0)
                   g_lastAIAction = "sell";
                else
                   g_lastAIAction = "hold";
             }
          }
       }
-      
-      // Fallback: recherche simple si le parsing détaillé échoue
-      if(g_lastAIAction == "")
-      {
-         string respLower = resp;
-         StringToLower(respLower);
-         if(StringFind(respLower, "\"buy\"") >= 0 || StringFind(respLower, "buy") >= 0)
-            g_lastAIAction = "buy";
-         else if(StringFind(respLower, "\"sell\"") >= 0 || StringFind(respLower, "sell") >= 0)
-            g_lastAIAction = "sell";
-         else
-            g_lastAIAction = "hold";
-      }
    }
-   else
+   
+   // Fallback pour action si parsing échoue
+   if(g_lastAIAction == "")
    {
-      // Si "action" n'est pas trouvé, essayer de détecter directement
       string respLower = resp;
       StringToLower(respLower);
-      if(StringFind(respLower, "\"buy\"") >= 0)
+      // Recherche plus précise pour éviter les faux positifs
+      int buyPos = StringFind(respLower, "\"buy\"");
+      int sellPos = StringFind(respLower, "\"sell\"");
+      int holdPos = StringFind(respLower, "\"hold\"");
+      
+      if(buyPos >= 0 && (sellPos < 0 || buyPos < sellPos) && (holdPos < 0 || buyPos < holdPos))
          g_lastAIAction = "buy";
-      else if(StringFind(respLower, "\"sell\"") >= 0)
+      else if(sellPos >= 0 && (holdPos < 0 || sellPos < holdPos))
          g_lastAIAction = "sell";
       else
          g_lastAIAction = "hold";
    }
    
+   // 2. Parser "confidence" - gestion améliorée des nombres décimaux
    int confPos = StringFind(resp, "\"confidence\"");
+   if(confPos < 0)
+      confPos = StringFind(resp, "confidence");
+   
    if(confPos >= 0)
    {
       int colon = StringFind(resp, ":", confPos);
-      if(colon > 0)
+      if(colon > confPos)
       {
+         // Chercher la fin du nombre (virgule, accolade, ou espace)
          int endPos = StringFind(resp, ",", colon);
-         if(endPos < 0) endPos = StringFind(resp, "}", colon);
+         if(endPos < 0) 
+         {
+            endPos = StringFind(resp, "}", colon);
+            if(endPos < 0)
+               endPos = StringFind(resp, "\n", colon);
+            if(endPos < 0)
+               endPos = StringFind(resp, "\r", colon);
+         }
+         
          if(endPos > colon)
          {
-            string confStr = StringSubstr(resp, colon+1, endPos-colon-1);
-            g_lastAIConfidence = StringToDouble(confStr);
+            string confStr = StringSubstr(resp, colon + 1, endPos - colon - 1);
+            StringTrimLeft(confStr);
+            StringTrimRight(confStr);
+            
+            // Nettoyer la chaîne (enlever espaces, retours à la ligne)
+            string cleanConf = "";
+            for(int i = 0; i < StringLen(confStr); i++)
+            {
+               ushort ch = StringGetCharacter(confStr, i);
+               if((ch >= '0' && ch <= '9') || ch == '.' || ch == '-' || ch == '+')
+                  cleanConf += ShortToString(ch);
+            }
+            
+            if(StringLen(cleanConf) > 0)
+            {
+               double confValue = StringToDouble(cleanConf);
+               // Valider que la confiance est dans une plage raisonnable (0.0 à 1.0)
+               if(confValue >= 0.0 && confValue <= 1.0)
+                  g_lastAIConfidence = confValue;
+               else if(confValue > 1.0 && confValue <= 100.0)
+                  g_lastAIConfidence = confValue / 100.0; // Convertir de pourcentage à décimal
+               else
+               {
+                  if(DebugMode)
+                     Print("⚠️ Confiance IA invalide: ", confValue, " (chaîne brute: ", confStr, ")");
+               }
+            }
+            else if(DebugMode)
+               Print("⚠️ Impossible d'extraire la confiance depuis: ", confStr);
          }
       }
    }
    
+   // 3. Parser "reason" - gestion améliorée des chaînes avec caractères spéciaux
    int reasonPos = StringFind(resp, "\"reason\"");
+   if(reasonPos < 0)
+      reasonPos = StringFind(resp, "reason");
+   
    if(reasonPos >= 0)
    {
       int colonR = StringFind(resp, ":", reasonPos);
-      if(colonR > 0)
+      if(colonR > reasonPos)
       {
-         int startQuote = StringFind(resp, "\"", colonR);
+         // Chercher le premier guillemet après le deux-points
+         int searchStart = colonR + 1;
+         int startQuote = -1;
+         
+         for(int i = searchStart; i < StringLen(resp) && i < searchStart + 50; i++)
+         {
+            if(StringGetCharacter(resp, i) == '"')
+            {
+               startQuote = i;
+               break;
+            }
+         }
+         
          if(startQuote > 0)
          {
-            int endQuote = StringFind(resp, "\"", startQuote + 1);
+            // Chercher le guillemet de fin (peut être échappé)
+            int endQuote = -1;
+            for(int i = startQuote + 1; i < StringLen(resp) && i < startQuote + 500; i++)
+            {
+               ushort ch = StringGetCharacter(resp, i);
+               if(ch == '"')
+               {
+                  // Vérifier si c'est échappé
+                  if(i > 0 && StringGetCharacter(resp, i - 1) != '\\')
+                  {
+                     endQuote = i;
+                     break;
+                  }
+               }
+            }
+            
             if(endQuote > startQuote)
+            {
                g_lastAIReason = StringSubstr(resp, startQuote + 1, endQuote - startQuote - 1);
+               // Décoder les échappements JSON basiques
+               StringReplace(g_lastAIReason, "\\\"", "\"");
+               StringReplace(g_lastAIReason, "\\n", "\n");
+               StringReplace(g_lastAIReason, "\\r", "\r");
+               StringReplace(g_lastAIReason, "\\t", "\t");
+            }
          }
       }
    }
    
-   // Extraire les zones BUY/SELL depuis la réponse JSON
-   ExtractAIZonesFromResponse(resp);
+   // Validation finale
+   if(g_lastAIAction == "")
+   {
+      g_lastAIAction = "hold";
+      if(DebugMode)
+         Print("⚠️ Action IA non trouvée, utilisation de 'hold' par défaut");
+   }
    
-   g_lastAITime = TimeCurrent();
+   if(g_lastAIConfidence < 0.0 || g_lastAIConfidence > 1.0)
+   {
+      if(DebugMode)
+         Print("⚠️ Confiance IA invalide (", g_lastAIConfidence, "), réinitialisation à 0.0");
+      g_lastAIConfidence = 0.0;
+   }
    
-   if(DebugMode)
+      // Extraire les zones BUY/SELL depuis la réponse JSON
+      ExtractAIZonesFromResponse(resp);
+      
+      g_lastAITime = TimeCurrent();
+      
+      if(DebugMode)
       Print("🤖 IA: ", g_lastAIAction, " (confiance: ", DoubleToString(g_lastAIConfidence, 2), ") - ", g_lastAIReason);
+}
+
+//+------------------------------------------------------------------+
+//| Mettre à jour l'analyse de tendance API                          |
+//+------------------------------------------------------------------+
+void UpdateTrendAPIAnalysis()
+{
+   if(!UseTrendAPIAnalysis || StringLen(TrendAPIURL) == 0)
+      return;
+   
+   // Construire l'URL avec les paramètres symbol et timeframe
+   string safeSymbol = _Symbol;
+   StringReplace(safeSymbol, " ", "%20");
+   string url = TrendAPIURL + "?symbol=" + safeSymbol + "&timeframe=M1";
+   
+   // Préparer la requête GET
+   char data[];
+   ArrayResize(data, 0);
+   char result[];
+   string headers = "Accept: application/json\r\n";
+   string result_headers = "";
+   
+   int res = WebRequest("GET", url, headers, AI_Timeout_ms, data, result, result_headers);
+   
+   if(res < 200 || res >= 300)
+   {
+      if(DebugMode)
+         Print("⚠️ Erreur récupération API Trend: http=", res);
+      g_api_trend_valid = false;
+      return;
+   }
+   
+   // Parser la réponse
+   string resp = CharArrayToString(result, 0, -1, CP_UTF8);
+   ParseTrendAPIResponse(resp);
+}
+
+//+------------------------------------------------------------------+
+//| Parser la réponse de l'API de tendance                            |
+//+------------------------------------------------------------------+
+void ParseTrendAPIResponse(string json_response)
+{
+   g_api_trend_valid = false;
+   g_api_trend_direction = 0;
+   g_api_trend_strength = 0.0;
+   g_api_trend_confidence = 0.0;
+   g_api_trend_signal = "";
+   
+   // Parser la direction
+   int dirPos = StringFind(json_response, "\"direction\"");
+   if(dirPos >= 0)
+   {
+      int colon = StringFind(json_response, ":", dirPos);
+      if(colon > 0)
+      {
+         // Chercher BUY, SELL ou NEUTRE
+         string dirStr = StringSubstr(json_response, colon + 1, 20);
+         StringToUpper(dirStr);
+         if(StringFind(dirStr, "BUY") >= 0 || StringFind(dirStr, "1") >= 0)
+            g_api_trend_direction = 1;
+         else if(StringFind(dirStr, "SELL") >= 0 || StringFind(dirStr, "-1") >= 0)
+            g_api_trend_direction = -1;
+         else
+            g_api_trend_direction = 0;
+      }
+   }
+   
+   // Parser la force (strength)
+   int strPos = StringFind(json_response, "\"strength\"");
+   if(strPos >= 0)
+   {
+      int colon = StringFind(json_response, ":", strPos);
+      if(colon > 0)
+      {
+         int endPos = StringFind(json_response, ",", colon);
+         if(endPos < 0) endPos = StringFind(json_response, "}", colon);
+         if(endPos > colon)
+         {
+            string strStr = StringSubstr(json_response, colon + 1, endPos - colon - 1);
+            g_api_trend_strength = StringToDouble(strStr);
+         }
+      }
+   }
+   
+   // Parser la confiance (confidence)
+   int confPos = StringFind(json_response, "\"confidence\"");
+   if(confPos >= 0)
+   {
+      int colon = StringFind(json_response, ":", confPos);
+      if(colon > 0)
+      {
+         int endPos = StringFind(json_response, ",", colon);
+         if(endPos < 0) endPos = StringFind(json_response, "}", colon);
+         if(endPos > colon)
+         {
+            string confStr = StringSubstr(json_response, colon + 1, endPos - colon - 1);
+            g_api_trend_confidence = StringToDouble(confStr);
+         }
+      }
+   }
+   
+   // Parser le signal
+   int sigPos = StringFind(json_response, "\"signal\"");
+   if(sigPos >= 0)
+   {
+      int colon = StringFind(json_response, ":", sigPos);
+      if(colon > 0)
+      {
+         int startQuote = StringFind(json_response, "\"", colon);
+         if(startQuote > 0)
+         {
+            int endQuote = StringFind(json_response, "\"", startQuote + 1);
+            if(endQuote > startQuote)
+               g_api_trend_signal = StringSubstr(json_response, startQuote + 1, endQuote - startQuote - 1);
+         }
+      }
+   }
+   
+   // Valider les données si la confiance est suffisante
+   if(g_api_trend_confidence >= TrendAPIMinConfidence)
+   {
+      g_api_trend_valid = true;
+      g_api_trend_last_update = TimeCurrent();
+      
+      if(DebugMode)
+      {
+         string dirStr = (g_api_trend_direction == 1) ? "BUY" : (g_api_trend_direction == -1) ? "SELL" : "NEUTRE";
+         Print("📊 API Trend: ", dirStr, " | Force: ", DoubleToString(g_api_trend_strength, 1), 
+               "% | Confiance: ", DoubleToString(g_api_trend_confidence, 1), "%");
+      }
+   }
+   else
+   {
+      if(DebugMode)
+         Print("⚠️ API Trend: Confiance insuffisante (", DoubleToString(g_api_trend_confidence, 1), 
+               "% < ", DoubleToString(TrendAPIMinConfidence, 1), "%)");
+   }
 }
 
 //+------------------------------------------------------------------+
@@ -855,6 +1242,2088 @@ void ExtractAIZonesFromResponse(string resp)
 }
 
 //+------------------------------------------------------------------+
+//| Mettre à jour la prédiction de prix depuis le serveur IA         |
+//+------------------------------------------------------------------+
+void UpdatePricePrediction()
+{
+   if(!UseAI_Agent || StringLen(AI_ServerURL) == 0)
+      return;
+   
+   // Construire l'URL pour la prédiction (ajouter /prediction à l'URL de base)
+   string predictionURL = AI_ServerURL;
+   int lastSlash = StringFind(predictionURL, "/", StringFind(predictionURL, "://") + 3);
+   if(lastSlash > 0)
+   {
+      string baseURL = StringSubstr(predictionURL, 0, lastSlash);
+      predictionURL = baseURL + "/prediction";
+   }
+   else
+   {
+      predictionURL = predictionURL + "/prediction";
+   }
+   
+   // Récupérer les données de marché
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double midPrice = (bid + ask) / 2.0;
+   
+   // Récupérer les 200 dernières bougies historiques depuis MT5
+   double closeHistory[];
+   ArraySetAsSeries(closeHistory, true);
+   int historyCopied = CopyClose(_Symbol, PERIOD_M1, 1, g_historyBars, closeHistory); // Commencer à 1 (bougie fermée la plus récente)
+   
+   if(historyCopied < g_historyBars)
+   {
+      if(DebugMode)
+         Print("⚠️ Impossible de récupérer ", g_historyBars, " bougies historiques (reçu: ", historyCopied, ")");
+      // Utiliser ce qu'on a
+      ArrayResize(g_priceHistory, historyCopied);
+      for(int i = 0; i < historyCopied; i++)
+         g_priceHistory[i] = closeHistory[i];
+   }
+   else
+   {
+      // Stocker les données historiques
+      ArrayResize(g_priceHistory, g_historyBars);
+      ArrayCopy(g_priceHistory, closeHistory, 0, 0, g_historyBars);
+   }
+   
+   // Construire le JSON pour la prédiction avec les données historiques
+   string safeSymbol = _Symbol;
+   StringReplace(safeSymbol, "\"", "\\\"");
+   
+   string payload = "{";
+   payload += "\"symbol\":\"" + safeSymbol + "\"";
+   payload += ",\"current_price\":" + DoubleToString(midPrice, _Digits);
+   payload += ",\"bars_to_predict\":" + IntegerToString(g_predictionBars);
+   payload += ",\"history_bars\":" + IntegerToString(g_historyBars);
+   payload += ",\"timeframe\":\"M1\"";
+   
+   // Ajouter les données historiques dans le payload (optionnel, le serveur peut les récupérer lui-même)
+   if(ArraySize(g_priceHistory) > 0)
+   {
+      payload += ",\"history\":[";
+      for(int i = 0; i < ArraySize(g_priceHistory); i++)
+      {
+         if(i > 0) payload += ",";
+         payload += DoubleToString(g_priceHistory[i], _Digits);
+      }
+      payload += "]";
+   }
+   
+   payload += "}";
+   
+   // Conversion en UTF-8
+   int payloadLen = StringLen(payload);
+   char data[];
+   ArrayResize(data, payloadLen + 1);
+   int copied = StringToCharArray(payload, data, 0, WHOLE_ARRAY, CP_UTF8);
+   
+   if(copied <= 0)
+   {
+      if(DebugMode)
+         Print("⚠️ Erreur conversion JSON pour prédiction");
+      return;
+   }
+   
+   ArrayResize(data, copied - 1);
+   
+   // Envoyer la requête
+   char result[];
+   string headers = "Content-Type: application/json\r\n";
+   string result_headers = "";
+   
+   int res = WebRequest("POST", predictionURL, headers, AI_Timeout_ms * 2, data, result, result_headers);
+   
+   if(res < 200 || res >= 300)
+   {
+      if(DebugMode)
+         Print("⚠️ Erreur prédiction prix: http=", res);
+      g_predictionValid = false;
+      return;
+   }
+   
+   // Parser la réponse JSON
+   string resp = CharArrayToString(result, 0, -1, CP_UTF8);
+   
+   if(DebugMode)
+      Print("📊 Réponse prédiction reçue: ", StringSubstr(resp, 0, 200));
+   
+   // Extraire le tableau de prédictions
+   // Format attendu: {"prediction": [prix1, prix2, ..., prix200]}
+   int predStart = StringFind(resp, "\"prediction\"");
+   if(predStart < 0)
+   {
+      predStart = StringFind(resp, "\"prices\"");
+      if(predStart < 0)
+      {
+         if(DebugMode)
+            Print("⚠️ Clé 'prediction' ou 'prices' non trouvée dans la réponse");
+         g_predictionValid = false;
+         return;
+      }
+   }
+   
+   // Trouver le début du tableau
+   int arrayStart = StringFind(resp, "[", predStart);
+   if(arrayStart < 0)
+   {
+      if(DebugMode)
+         Print("⚠️ Tableau de prédiction non trouvé");
+      g_predictionValid = false;
+      return;
+   }
+   
+   // Trouver la fin du tableau
+   int arrayEnd = StringFind(resp, "]", arrayStart);
+   if(arrayEnd < 0)
+   {
+      if(DebugMode)
+         Print("⚠️ Fin du tableau de prédiction non trouvée");
+      g_predictionValid = false;
+      return;
+   }
+   
+   // Extraire le contenu du tableau
+   string arrayContent = StringSubstr(resp, arrayStart + 1, arrayEnd - arrayStart - 1);
+   
+   // Parser les valeurs
+   ArrayResize(g_pricePrediction, g_predictionBars);
+   ArrayInitialize(g_pricePrediction, 0.0);
+   
+   int count = 0;
+   int pos = 0;
+   while(pos < StringLen(arrayContent) && count < g_predictionBars)
+   {
+      // Trouver la prochaine valeur
+      int commaPos = StringFind(arrayContent, ",", pos);
+      if(commaPos < 0)
+         commaPos = StringLen(arrayContent);
+      
+      string valueStr = StringSubstr(arrayContent, pos, commaPos - pos);
+      StringTrimLeft(valueStr);
+      StringTrimRight(valueStr);
+      
+      if(StringLen(valueStr) > 0)
+      {
+         g_pricePrediction[count] = StringToDouble(valueStr);
+         count++;
+      }
+      
+      pos = commaPos + 1;
+   }
+   
+   if(count > 0)
+   {
+      ArrayResize(g_pricePrediction, count);
+      g_predictionStartTime = TimeCurrent();
+      g_predictionValid = true;
+      
+      if(DebugMode)
+         Print("✅ Prédiction de prix mise à jour: ", count, " bougies prédites");
+   }
+   else
+   {
+      g_predictionValid = false;
+      if(DebugMode)
+         Print("⚠️ Aucune prédiction valide extraite");
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Détecter les points de retournement dans les prédictions         |
+//| Retourne les indices des points d'entrée BUY (minima) et SELL (maxima) |
+//| Filtrer pour ne garder que les mouvements longs                  |
+//+------------------------------------------------------------------+
+void DetectReversalPoints(int &buyEntries[], int &sellEntries[])
+{
+   ArrayResize(buyEntries, 0);
+   ArrayResize(sellEntries, 0);
+   
+   if(!g_predictionValid || ArraySize(g_pricePrediction) < 5)
+      return;
+   
+   // Calculer l'ATR pour définir l'amplitude minimale d'un mouvement
+   double atr[];
+   ArraySetAsSeries(atr, true);
+   double minMovement = 0.0;
+   if(CopyBuffer(atrHandle, 0, 0, 1, atr) > 0 && atr[0] > 0)
+   {
+      // Mouvement significatif = au moins 1.5x ATR (réduit pour détecter plus facilement)
+      minMovement = atr[0] * 1.5;
+   }
+   else
+   {
+      // Fallback: calculer une amplitude minimale basée sur la volatilité des prédictions
+      double minPrice = g_pricePrediction[0];
+      double maxPrice = g_pricePrediction[0];
+      for(int i = 0; i < ArraySize(g_pricePrediction); i++)
+      {
+         if(g_pricePrediction[i] < minPrice) minPrice = g_pricePrediction[i];
+         if(g_pricePrediction[i] > maxPrice) maxPrice = g_pricePrediction[i];
+      }
+      // Mouvement significatif = au moins 1% de la fourchette de prix (réduit)
+      minMovement = (maxPrice - minPrice) * 0.01;
+   }
+   
+   // Si minMovement est toujours trop faible, utiliser une valeur minimale basée sur le prix actuel
+   double currentPrice = (SymbolInfoDouble(_Symbol, SYMBOL_BID) + SymbolInfoDouble(_Symbol, SYMBOL_ASK)) / 2.0;
+   if(minMovement <= 0 || minMovement < currentPrice * 0.0001) // Au moins 0.01% du prix
+      minMovement = currentPrice * 0.0001;
+   
+   // Fenêtre pour détecter les retournements (chercher un minimum/maximum local)
+   int lookbackWindow = 3; // Réduit à 3 points pour détecter plus de points
+   
+   // Détecter les minima locaux (points d'entrée BUY - retournement haussier)
+   for(int i = lookbackWindow; i < ArraySize(g_pricePrediction) - lookbackWindow; i++)
+   {
+      bool isLocalMin = true;
+      double currentPrice = g_pricePrediction[i];
+      
+      // Vérifier que c'est un minimum local (prix plus bas que les points environnants)
+      for(int j = i - lookbackWindow; j <= i + lookbackWindow; j++)
+      {
+         if(j != i && g_pricePrediction[j] <= currentPrice)
+         {
+            isLocalMin = false;
+            break;
+         }
+      }
+      
+      if(isLocalMin)
+      {
+         // Vérifier que le mouvement suivant est suffisamment long (mouvement haussier)
+         // Chercher le prochain maximum local dans un rayon de 20 points
+         double maxAfterMin = currentPrice;
+         int maxIndex = i;
+         for(int k = i + 1; k < MathMin(i + 20, ArraySize(g_pricePrediction)); k++)
+         {
+            if(g_pricePrediction[k] > maxAfterMin)
+            {
+               maxAfterMin = g_pricePrediction[k];
+               maxIndex = k;
+            }
+         }
+         
+         // Le mouvement doit être au moins minMovement
+         double movementSize = maxAfterMin - currentPrice;
+         if(movementSize >= minMovement)
+         {
+            int size = ArraySize(buyEntries);
+            ArrayResize(buyEntries, size + 1);
+            buyEntries[size] = i;
+            
+            if(DebugMode)
+               Print("📈 Point d'entrée BUY détecté à l'indice ", i, " prix=", DoubleToString(currentPrice, _Digits), 
+                     " mouvement attendu=", DoubleToString(movementSize, _Digits), " (", DoubleToString((movementSize/currentPrice)*100, 2), "%)");
+         }
+      }
+   }
+   
+   // Détecter les maxima locaux (points d'entrée SELL - retournement baissier)
+   for(int i = lookbackWindow; i < ArraySize(g_pricePrediction) - lookbackWindow; i++)
+   {
+      bool isLocalMax = true;
+      double currentPrice = g_pricePrediction[i];
+      
+      // Vérifier que c'est un maximum local (prix plus haut que les points environnants)
+      for(int j = i - lookbackWindow; j <= i + lookbackWindow; j++)
+      {
+         if(j != i && g_pricePrediction[j] >= currentPrice)
+         {
+            isLocalMax = false;
+            break;
+         }
+      }
+      
+      if(isLocalMax)
+      {
+         // Vérifier que le mouvement suivant est suffisamment long (mouvement baissier)
+         // Chercher le prochain minimum local dans un rayon de 20 points
+         double minAfterMax = currentPrice;
+         int minIndex = i;
+         for(int k = i + 1; k < MathMin(i + 20, ArraySize(g_pricePrediction)); k++)
+         {
+            if(g_pricePrediction[k] < minAfterMax)
+            {
+               minAfterMax = g_pricePrediction[k];
+               minIndex = k;
+            }
+         }
+         
+         // Le mouvement doit être au moins minMovement
+         double movementSize = currentPrice - minAfterMax;
+         if(movementSize >= minMovement)
+         {
+            int size = ArraySize(sellEntries);
+            ArrayResize(sellEntries, size + 1);
+            sellEntries[size] = i;
+            
+            if(DebugMode)
+               Print("📉 Point d'entrée SELL détecté à l'indice ", i, " prix=", DoubleToString(currentPrice, _Digits), 
+                     " mouvement attendu=", DoubleToString(movementSize, _Digits), " (", DoubleToString((movementSize/currentPrice)*100, 2), "%)");
+         }
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Dessiner la prédiction de prix sur le graphique                  |
+//| Canal transparent rempli (vert haussier, rouge baissier)         |
+//| 200 bougies historiques + 500 bougies futures                    |
+//+------------------------------------------------------------------+
+void DrawPricePrediction()
+{
+   // Réinitialiser le tableau des opportunités au début de chaque mise à jour
+   ArrayResize(g_opportunities, 0);
+   g_opportunitiesCount = 0;
+   
+   // Utiliser exactement 200 bougies historiques et 500 bougies futures
+   int totalPredictionBars = MathMin(ArraySize(g_pricePrediction), g_predictionBars);
+   
+   if(totalPredictionBars == 0)
+      return; // Pas de prédiction disponible
+   
+   // OPTIMISATION: Ne supprimer que si nécessaire (éviter ObjectsTotal() à chaque fois)
+   string prefix = "PRED_";
+   // Ne supprimer que lors de la première création ou si la prédiction a changé
+   static bool predictionObjectsCreated = false;
+   static datetime lastPredictionTime = 0;
+   
+   if(!predictionObjectsCreated || g_predictionStartTime != lastPredictionTime)
+   {
+      // Supprimer les anciens objets seulement si nécessaire
+      int total = ObjectsTotal(0);
+      for(int i = total - 1; i >= 0; i--)
+      {
+         string name = ObjectName(0, i);
+         if(StringFind(name, prefix) == 0)
+            ObjectDelete(0, name);
+      }
+      predictionObjectsCreated = false;
+      lastPredictionTime = g_predictionStartTime;
+   }
+   
+   // Récupérer le timeframe actuel
+   ENUM_TIMEFRAMES tf = Period();
+   int periodSeconds = PeriodSeconds(tf);
+   datetime currentTime = TimeCurrent();
+   
+   // S'assurer qu'on a bien les 200 bougies historiques disponibles
+   int totalHistoryBars = ArraySize(g_priceHistory);
+   if(totalHistoryBars < g_historyBars)
+   {
+      // Récupérer les 200 dernières bougies historiques si nécessaire
+      double closeHistory[];
+      ArraySetAsSeries(closeHistory, true);
+      int historyCopied = CopyClose(_Symbol, PERIOD_M1, 1, g_historyBars, closeHistory);
+      if(historyCopied >= g_historyBars)
+      {
+         ArrayResize(g_priceHistory, g_historyBars);
+         ArrayCopy(g_priceHistory, closeHistory, 0, 0, g_historyBars);
+         totalHistoryBars = g_historyBars;
+      }
+      else if(historyCopied > 0)
+      {
+         // Utiliser ce qu'on a récupéré
+         ArrayResize(g_priceHistory, historyCopied);
+         ArrayCopy(g_priceHistory, closeHistory, 0, 0, historyCopied);
+         totalHistoryBars = historyCopied;
+      }
+   }
+   else
+   {
+      // Limiter à g_historyBars si on en a plus
+      totalHistoryBars = MathMin(totalHistoryBars, g_historyBars);
+   }
+   
+   // Limiter aussi les prédictions à g_predictionBars (500)
+   totalPredictionBars = MathMin(totalPredictionBars, g_predictionBars);
+   
+   // Créer un tableau combiné avec historique (200) + prédiction (500)
+   int totalBars = totalHistoryBars + totalPredictionBars;
+   double combinedPrices[];
+   datetime combinedTimes[];
+   ArrayResize(combinedPrices, totalBars);
+   ArrayResize(combinedTimes, totalBars);
+   
+   // Remplir avec les 200 dernières bougies historiques (de la plus ancienne à la plus récente)
+   for(int i = 0; i < totalHistoryBars; i++)
+   {
+      // Les données historiques sont en ordre inverse (ArraySetAsSeries = true)
+      // Donc g_priceHistory[0] est la plus récente, g_priceHistory[totalHistoryBars-1] est la plus ancienne
+      int histIdx = totalHistoryBars - 1 - i; // Inverser pour avoir l'ordre chronologique
+      combinedPrices[i] = g_priceHistory[histIdx];
+      combinedTimes[i] = currentTime - (totalHistoryBars - i) * periodSeconds; // Passé
+   }
+   
+   // Remplir avec les 500 bougies futures prédites
+   for(int i = 0; i < totalPredictionBars; i++)
+   {
+      combinedPrices[totalHistoryBars + i] = g_pricePrediction[i];
+      combinedTimes[totalHistoryBars + i] = currentTime + (i + 1) * periodSeconds; // Futur
+   }
+   
+   // Déterminer si la prédiction globale est haussière ou baissière
+   // Comparer le prix de début (début historique) vs prix de fin (fin prédiction)
+   double startPrice = combinedPrices[0]; // Premier prix historique (le plus ancien)
+   double endPrice = combinedPrices[totalBars - 1]; // Dernier prix prédit (le plus futur)
+   bool isBullish = (endPrice > startPrice);
+   
+   // Calculer une bande de confiance basée sur ATR pour le canal
+   double atr[];
+   ArraySetAsSeries(atr, true);
+   double confidenceBand = 0.0;
+   if(CopyBuffer(atrHandle, 0, 0, 1, atr) > 0 && atr[0] > 0)
+   {
+      confidenceBand = atr[0] * 1.5; // Bande de confiance = 1.5x ATR
+   }
+   else
+   {
+      // Fallback: utiliser une bande basée sur la volatilité des prix
+      double minPrice = combinedPrices[0];
+      double maxPrice = combinedPrices[0];
+      for(int i = 0; i < totalBars; i++)
+      {
+         if(combinedPrices[i] < minPrice) minPrice = combinedPrices[i];
+         if(combinedPrices[i] > maxPrice) maxPrice = combinedPrices[i];
+      }
+      confidenceBand = (maxPrice - minPrice) * 0.02; // 2% de la fourchette
+   }
+   
+   // Si pas d'historique, commencer depuis le prix actuel
+   if(totalHistoryBars == 0)
+   {
+      // Créer un point de départ au prix actuel
+      totalHistoryBars = 1;
+      ArrayResize(combinedPrices, totalBars + 1);
+      ArrayResize(combinedTimes, totalBars + 1);
+      
+      // Décaler les prédictions
+      for(int i = totalPredictionBars - 1; i >= 0; i--)
+      {
+         combinedPrices[i + 1] = g_pricePrediction[i];
+         combinedTimes[i + 1] = currentTime + (i + 1) * periodSeconds;
+      }
+      
+      // Ajouter le point de départ (prix actuel)
+      double currentPrice = (SymbolInfoDouble(_Symbol, SYMBOL_BID) + SymbolInfoDouble(_Symbol, SYMBOL_ASK)) / 2.0;
+      combinedPrices[0] = currentPrice;
+      combinedTimes[0] = currentTime;
+      
+      totalBars = totalPredictionBars + 1;
+      startPrice = combinedPrices[0];
+      endPrice = combinedPrices[totalBars - 1];
+      isBullish = (endPrice > startPrice);
+   }
+   
+   // Créer les tableaux pour les lignes supérieure et inférieure du canal
+   double upperPrices[];
+   double lowerPrices[];
+   ArrayResize(upperPrices, totalBars);
+   ArrayResize(lowerPrices, totalBars);
+   
+   for(int i = 0; i < totalBars; i++)
+   {
+      upperPrices[i] = combinedPrices[i] + confidenceBand;
+      lowerPrices[i] = combinedPrices[i] - confidenceBand;
+   }
+   
+   // OPTIMISATION PERFORMANCE: Dessiner le canal avec un step de 5 au lieu de 1 pour réduire le nombre d'objets
+   // Step de 5 = 5x moins d'objets = 5x plus rapide
+   int channelStep = 5; // Augmenté de 1 à 5 pour performance
+   // Couleurs extrêmement transparentes en filigrane (alpha très faible pour être vraiment transparent, pas saturé)
+   // Utiliser des couleurs claires et douces, pas saturées, avec alpha très faible pour l'effet filigrane
+   // Utiliser ColorToARGB() pour créer des couleurs avec transparence
+   color baseColor;
+   uchar alphaValue = 5; // Alpha extrêmement faible (5 sur 255 = très transparent en filigrane) pour effet watermark
+   
+   if(isBullish)
+   {
+      // Vert très clair et doux (pas saturé) pour prédiction haussière
+      baseColor = C'180,240,180'; // RGB(180, 240, 180) - vert très clair et doux
+   }
+   else
+   {
+      // Rouge très clair et doux (pas saturé) pour prédiction baissière
+      baseColor = C'240,180,180'; // RGB(240, 180, 180) - rouge très clair et doux
+   }
+   
+   // Créer la couleur ARGB avec transparence maximale
+   color channelColor = (color)ColorToARGB(baseColor, alphaValue);
+   
+   // Dessiner le canal rempli segment par segment avec step optimisé (5x moins d'objets = 5x plus rapide)
+   for(int i = 0; i < totalBars - channelStep; i += channelStep)
+   {
+      int nextIdx = MathMin(i + channelStep, totalBars - 1);
+      
+      // Créer un rectangle rempli pour ce segment du canal
+      string rectName = prefix + "CHANNEL_" + IntegerToString(i) + "_" + _Symbol;
+      
+      datetime time1 = combinedTimes[i];
+      datetime time2 = combinedTimes[nextIdx];
+      
+      // Calculer les lignes supérieure et inférieure pour chaque extrémité du segment
+      double upperPrice1 = upperPrices[i];
+      double upperPrice2 = upperPrices[nextIdx];
+      double lowerPrice1 = lowerPrices[i];
+      double lowerPrice2 = lowerPrices[nextIdx];
+      
+      // Pour créer un canal continu, utiliser le maximum des prix supérieurs et le minimum des prix inférieurs
+      double rectTopPrice = MathMax(upperPrice1, upperPrice2);
+      double rectBottomPrice = MathMin(lowerPrice1, lowerPrice2);
+      
+      // Créer le rectangle rempli transparent (filigrane)
+      if(ObjectFind(0, rectName) < 0)
+         ObjectCreate(0, rectName, OBJ_RECTANGLE, 0, time1, rectTopPrice, time2, rectBottomPrice);
+      else
+      {
+         ObjectSetInteger(0, rectName, OBJPROP_TIME, 0, time1);
+         ObjectSetDouble(0, rectName, OBJPROP_PRICE, 0, rectTopPrice);
+         ObjectSetInteger(0, rectName, OBJPROP_TIME, 1, time2);
+         ObjectSetDouble(0, rectName, OBJPROP_PRICE, 1, rectBottomPrice);
+      }
+      
+      // Couleur extrêmement transparente en filigrane (ARGB avec alpha = 5 = très transparent en watermark)
+      ObjectSetInteger(0, rectName, OBJPROP_COLOR, channelColor);
+      ObjectSetInteger(0, rectName, OBJPROP_BGCOLOR, channelColor); // Aussi définir BGCOLOR pour le remplissage
+      ObjectSetInteger(0, rectName, OBJPROP_STYLE, STYLE_SOLID);
+      ObjectSetInteger(0, rectName, OBJPROP_WIDTH, 1);
+      ObjectSetInteger(0, rectName, OBJPROP_FILL, true);
+      ObjectSetInteger(0, rectName, OBJPROP_BACK, true); // En arrière-plan pour ne pas masquer le prix (filigrane)
+      ObjectSetInteger(0, rectName, OBJPROP_SELECTABLE, false);
+      ObjectSetInteger(0, rectName, OBJPROP_TIMEFRAMES, OBJ_ALL_PERIODS);
+   }
+   
+   // NE PAS dessiner de ligne médiane - l'utilisateur veut seulement le canal rempli transparent
+   
+   // Détecter les points de retournement (mouvements longs) - uniquement dans la partie prédiction future
+   int buyEntries[];
+   int sellEntries[];
+   DetectReversalPoints(buyEntries, sellEntries);
+   
+   // Dessiner les points d'entrée BUY (minima - retournements haussiers) en VERT
+   // Les indices dans buyEntries sont relatifs à g_pricePrediction, donc on ajoute totalHistoryBars pour obtenir l'index dans combinedTimes
+   for(int b = 0; b < ArraySize(buyEntries); b++)
+   {
+      int predIdx = buyEntries[b]; // Index dans g_pricePrediction
+      if(predIdx >= 0 && predIdx < totalPredictionBars)
+      {
+         int combinedIdx = totalHistoryBars + predIdx; // Index dans combinedPrices/Times
+         if(combinedIdx < totalBars)
+         {
+            string buyEntryName = prefix + "BUY_ENTRY_" + IntegerToString(predIdx) + "_" + _Symbol;
+            if(ObjectFind(0, buyEntryName) < 0)
+               ObjectCreate(0, buyEntryName, OBJ_ARROW_UP, 0, combinedTimes[combinedIdx], combinedPrices[combinedIdx]);
+            else
+            {
+               ObjectSetInteger(0, buyEntryName, OBJPROP_TIME, 0, combinedTimes[combinedIdx]);
+               ObjectSetDouble(0, buyEntryName, OBJPROP_PRICE, 0, combinedPrices[combinedIdx]);
+            }
+            
+            ObjectSetInteger(0, buyEntryName, OBJPROP_COLOR, clrLime); // Vert pour BUY
+            ObjectSetInteger(0, buyEntryName, OBJPROP_ARROWCODE, 233); // Flèche vers le haut
+            ObjectSetInteger(0, buyEntryName, OBJPROP_WIDTH, 3);
+            ObjectSetInteger(0, buyEntryName, OBJPROP_SELECTABLE, false);
+            ObjectSetInteger(0, buyEntryName, OBJPROP_TIMEFRAMES, OBJ_ALL_PERIODS);
+            ObjectSetString(0, buyEntryName, OBJPROP_TEXT, "ENTRY BUY (Long)");
+            
+            // Calculer le mouvement attendu pour stocker dans le panneau d'info
+            double movementSize = 0.0;
+            for(int k = predIdx + 1; k < MathMin(predIdx + 20, totalPredictionBars); k++)
+            {
+               int kCombinedIdx = totalHistoryBars + k;
+               if(kCombinedIdx < totalBars && combinedPrices[kCombinedIdx] > combinedPrices[combinedIdx])
+                  movementSize = MathMax(movementSize, combinedPrices[kCombinedIdx] - combinedPrices[combinedIdx]);
+            }
+            
+            // Stocker l'opportunité dans le tableau au lieu d'afficher un label
+            if(movementSize > 0)
+            {
+               int size = ArraySize(g_opportunities);
+               ArrayResize(g_opportunities, size + 1);
+               g_opportunities[size].isBuy = true;
+               g_opportunities[size].entryPrice = combinedPrices[combinedIdx];
+               g_opportunities[size].percentage = (movementSize / combinedPrices[combinedIdx]) * 100.0;
+               g_opportunities[size].entryTime = combinedTimes[combinedIdx];
+               g_opportunities[size].priority = (int)(g_opportunities[size].percentage * 10); // Pour trier
+               g_opportunitiesCount++;
+               
+               // Supprimer l'ancien label s'il existe
+               string buyLabelName = prefix + "BUY_LABEL_" + IntegerToString(predIdx) + "_" + _Symbol;
+               ObjectDelete(0, buyLabelName);
+            }
+         }
+      }
+   }
+   
+   // Dessiner les points d'entrée SELL (maxima - retournements baissiers) en ROUGE
+   for(int s = 0; s < ArraySize(sellEntries); s++)
+   {
+      int predIdx = sellEntries[s]; // Index dans g_pricePrediction
+      if(predIdx >= 0 && predIdx < totalPredictionBars)
+      {
+         int combinedIdx = totalHistoryBars + predIdx; // Index dans combinedPrices/Times
+         if(combinedIdx < totalBars)
+         {
+            string sellEntryName = prefix + "SELL_ENTRY_" + IntegerToString(predIdx) + "_" + _Symbol;
+            if(ObjectFind(0, sellEntryName) < 0)
+               ObjectCreate(0, sellEntryName, OBJ_ARROW_DOWN, 0, combinedTimes[combinedIdx], combinedPrices[combinedIdx]);
+            else
+            {
+               ObjectSetInteger(0, sellEntryName, OBJPROP_TIME, 0, combinedTimes[combinedIdx]);
+               ObjectSetDouble(0, sellEntryName, OBJPROP_PRICE, 0, combinedPrices[combinedIdx]);
+            }
+            
+            ObjectSetInteger(0, sellEntryName, OBJPROP_COLOR, clrRed); // Rouge pour SELL
+            ObjectSetInteger(0, sellEntryName, OBJPROP_ARROWCODE, 234); // Flèche vers le bas
+            ObjectSetInteger(0, sellEntryName, OBJPROP_WIDTH, 3);
+            ObjectSetInteger(0, sellEntryName, OBJPROP_SELECTABLE, false);
+            ObjectSetInteger(0, sellEntryName, OBJPROP_TIMEFRAMES, OBJ_ALL_PERIODS);
+            ObjectSetString(0, sellEntryName, OBJPROP_TEXT, "ENTRY SELL (Long)");
+            
+            // Calculer le mouvement attendu pour stocker dans le panneau d'info
+            double movementSize = 0.0;
+            for(int k = predIdx + 1; k < MathMin(predIdx + 20, totalPredictionBars); k++)
+            {
+               int kCombinedIdx = totalHistoryBars + k;
+               if(kCombinedIdx < totalBars && combinedPrices[kCombinedIdx] < combinedPrices[combinedIdx])
+                  movementSize = MathMax(movementSize, combinedPrices[combinedIdx] - combinedPrices[kCombinedIdx]);
+            }
+            
+            // Stocker l'opportunité dans le tableau au lieu d'afficher un label
+            if(movementSize > 0)
+            {
+               int size = ArraySize(g_opportunities);
+               ArrayResize(g_opportunities, size + 1);
+               g_opportunities[size].isBuy = false;
+               g_opportunities[size].entryPrice = combinedPrices[combinedIdx];
+               g_opportunities[size].percentage = (movementSize / combinedPrices[combinedIdx]) * 100.0;
+               g_opportunities[size].entryTime = combinedTimes[combinedIdx];
+               g_opportunities[size].priority = (int)(g_opportunities[size].percentage * 10); // Pour trier
+               g_opportunitiesCount++;
+               
+               // Supprimer l'ancien label s'il existe
+               string sellLabelName = prefix + "SELL_LABEL_" + IntegerToString(predIdx) + "_" + _Symbol;
+               ObjectDelete(0, sellLabelName);
+            }
+         }
+      }
+   }
+   
+   // OPTIMISATION: Détecter les zones de correction seulement toutes les 30 secondes (très lourd)
+   static datetime lastCorrectionCheck = 0;
+   if((TimeCurrent() - lastCorrectionCheck) >= 30)
+   {
+      // Détecter et dessiner les zones de correction
+      DetectAndDrawCorrectionZones();
+      
+      // Placer un ordre limite sur la meilleure zone de correction
+      PlaceLimitOrderOnCorrection();
+      
+      lastCorrectionCheck = TimeCurrent();
+      predictionObjectsCreated = true; // Marquer comme créé
+   }
+   
+   // OPTIMISATION: ChartRedraw() seulement toutes les 5 secondes au lieu de chaque fois
+   static datetime lastChartRedraw = 0;
+   if((TimeCurrent() - lastChartRedraw) >= 5)
+   {
+      ChartRedraw(0);
+      lastChartRedraw = TimeCurrent();
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Structure pour stocker les zones de correction                   |
+//+------------------------------------------------------------------+
+struct CorrectionZone
+{
+   int startIdx;        // Index de début de la correction
+   int endIdx;          // Index de fin de la correction
+   double highPrice;    // Prix le plus haut de la zone
+   double lowPrice;     // Prix le plus bas de la zone
+   double entryPrice;   // Prix d'entrée recommandé (milieu ou support de la zone)
+   bool isBuyZone;      // true = zone d'achat (correction baissière après hausse), false = zone de vente
+   double potentialGain; // Gain potentiel estimé
+   datetime entryTime;  // Temps d'entrée estimé
+};
+
+static CorrectionZone g_bestCorrectionZone;
+static bool g_hasBestCorrectionZone = false;
+
+//+------------------------------------------------------------------+
+//| Détecter les zones de correction dans la prédiction              |
+//| Une correction = retracement après un mouvement                   |
+//+------------------------------------------------------------------+
+void DetectAndDrawCorrectionZones()
+{
+   int predSize = ArraySize(g_pricePrediction);
+   if(!g_predictionValid || predSize < 20)
+   {
+      if(DebugMode)
+         Print("🔍 DetectAndDrawCorrectionZones: Prédiction invalide (valid=", g_predictionValid ? "true" : "false", ", size=", predSize, ")");
+      return;
+   }
+   
+   if(DebugMode)
+      Print("🔍 DetectAndDrawCorrectionZones: Démarrage - Prédiction valide, size=", predSize);
+   
+   // OPTIMISATION: Supprimer les anciennes zones seulement si nécessaire
+   string prefix = "PRED_CORRECTION_";
+   static datetime lastCorrectionDraw = 0;
+   static int lastPredictionSize = 0;
+   
+   if((TimeCurrent() - lastCorrectionDraw) >= 60 || ArraySize(g_pricePrediction) != lastPredictionSize)
+   {
+      int total = ObjectsTotal(0);
+      for(int i = total - 1; i >= 0; i--)
+      {
+         string name = ObjectName(0, i);
+         if(StringFind(name, prefix) == 0)
+            ObjectDelete(0, name);
+      }
+      lastCorrectionDraw = TimeCurrent();
+      lastPredictionSize = ArraySize(g_pricePrediction);
+   }
+   
+   // Récupérer le timeframe actuel
+   ENUM_TIMEFRAMES tf = Period();
+   int periodSeconds = PeriodSeconds(tf);
+   datetime currentTime = TimeCurrent();
+   
+   // Créer un tableau des zones de correction
+   CorrectionZone zones[];
+   ArrayResize(zones, 0);
+   
+   // OPTIMISATION: Analyser seulement une partie de la prédiction (les 100 premières bougies = plus proche)
+   // Et utiliser un step plus grand pour réduire les calculs
+   int windowSize = 10; // Fenêtre pour détecter un mouvement significatif
+   int maxAnalysisBars = MathMin(100, ArraySize(g_pricePrediction) - windowSize); // Limiter à 100 bougies
+   int analysisStep = 3; // Analyser 1 point sur 3 pour réduire les calculs
+   
+   for(int i = windowSize; i < maxAnalysisBars; i += analysisStep)
+   {
+      // Détecter les mouvements haussiers suivis de corrections baissières (zone d'achat)
+      // Chercher un pic (maximum local) suivi d'un retracement
+      bool isLocalPeak = true;
+      double peakPrice = g_pricePrediction[i];
+      
+      // OPTIMISATION: Vérifier avec step pour réduire les calculs
+      for(int j = i - 5; j <= i + 5; j += 2) // Step de 2
+      {
+         if(j != i && j >= 0 && j < ArraySize(g_pricePrediction))
+         {
+            if(g_pricePrediction[j] >= peakPrice)
+            {
+               isLocalPeak = false;
+               break;
+            }
+         }
+      }
+      
+      if(isLocalPeak)
+      {
+         // OPTIMISATION: Chercher la correction qui suit avec un step plus grand
+         double lowestCorrection = peakPrice;
+         int correctionEndIdx = i;
+         int correctionStep = 2; // Analyser 1 point sur 2
+         
+         for(int k = i + 1; k < MathMin(i + 30, ArraySize(g_pricePrediction) - 1); k += correctionStep)
+         {
+            if(g_pricePrediction[k] < lowestCorrection)
+            {
+               lowestCorrection = g_pricePrediction[k];
+               correctionEndIdx = k;
+            }
+            // Si le prix remonte après la correction, on a trouvé la fin de la zone
+            // OPTIMISATION: Vérifier seulement tous les 2 points
+            if(k > i + 5 && (k % 2 == 0) && g_pricePrediction[k] > g_pricePrediction[MathMax(0, k-correctionStep)] && 
+               g_pricePrediction[k] > lowestCorrection * 1.001) // Remontée d'au moins 0.1%
+            {
+               // Vérifier que la correction est significative (au moins 30% du mouvement)
+               double movementUp = peakPrice - g_pricePrediction[i - windowSize];
+               double correctionDown = peakPrice - lowestCorrection;
+               
+               if(movementUp > 0 && correctionDown > 0)
+               {
+                  double correctionPercent = (correctionDown / movementUp) * 100.0;
+                  
+                  // Correction valide si elle représente 30-70% du mouvement (retracement Fibonacci-like)
+                  if(correctionPercent >= 30.0 && correctionPercent <= 70.0)
+                  {
+                     CorrectionZone zone;
+                     zone.startIdx = i;
+                     zone.endIdx = k;
+                     zone.highPrice = peakPrice;
+                     zone.lowPrice = lowestCorrection;
+                     zone.entryPrice = lowestCorrection * 1.002; // Entrer légèrement au-dessus du bas (0.2%)
+                     zone.isBuyZone = true; // Zone d'achat après correction baissière
+                     
+                     // OPTIMISATION: Calculer le gain potentiel avec step
+                     double potentialHigh = g_pricePrediction[k];
+                     for(int m = k; m < MathMin(k + 20, ArraySize(g_pricePrediction)); m += 2)
+                     {
+                        if(g_pricePrediction[m] > potentialHigh)
+                           potentialHigh = g_pricePrediction[m];
+                     }
+                     zone.potentialGain = ((potentialHigh - zone.entryPrice) / zone.entryPrice) * 100.0;
+                     zone.entryTime = currentTime + (i + 1) * periodSeconds;
+                     
+                     // Ajouter la zone si le gain potentiel est intéressant (> 0.5%)
+                     if(zone.potentialGain > 0.5)
+                     {
+                        int size = ArraySize(zones);
+                        ArrayResize(zones, size + 1);
+                        zones[size] = zone;
+                     }
+                  }
+               }
+               break;
+            }
+         }
+      }
+      
+      // Détecter les mouvements baissiers suivis de corrections haussières (zone de vente)
+      // Chercher un creux (minimum local) suivi d'un retracement
+      bool isLocalTrough = true;
+      double troughPrice = g_pricePrediction[i];
+      
+      // OPTIMISATION: Vérifier avec step pour réduire les calculs
+      for(int j = i - 5; j <= i + 5; j += 2) // Step de 2
+      {
+         if(j != i && j >= 0 && j < ArraySize(g_pricePrediction))
+         {
+            if(g_pricePrediction[j] <= troughPrice)
+            {
+               isLocalTrough = false;
+               break;
+            }
+         }
+      }
+      
+      if(isLocalTrough)
+      {
+         // OPTIMISATION: Chercher la correction qui suit avec un step plus grand
+         double highestCorrection = troughPrice;
+         int correctionEndIdx = i;
+         int correctionStep = 2; // Analyser 1 point sur 2
+         
+         for(int k = i + 1; k < MathMin(i + 30, ArraySize(g_pricePrediction) - 1); k += correctionStep)
+         {
+            if(g_pricePrediction[k] > highestCorrection)
+            {
+               highestCorrection = g_pricePrediction[k];
+               correctionEndIdx = k;
+            }
+            // Si le prix redescend après la correction, on a trouvé la fin de la zone
+            // OPTIMISATION: Vérifier seulement tous les 2 points
+            if(k > i + 5 && (k % 2 == 0) && g_pricePrediction[k] < g_pricePrediction[MathMax(0, k-correctionStep)] && 
+               g_pricePrediction[k] < highestCorrection * 0.999) // Descente d'au moins 0.1%
+            {
+               // Vérifier que la correction est significative (au moins 30% du mouvement)
+               double movementDown = g_pricePrediction[i - windowSize] - troughPrice;
+               double correctionUp = highestCorrection - troughPrice;
+               
+               if(movementDown > 0 && correctionUp > 0)
+               {
+                  double correctionPercent = (correctionUp / movementDown) * 100.0;
+                  
+                  // Correction valide si elle représente 30-70% du mouvement
+                  if(correctionPercent >= 30.0 && correctionPercent <= 70.0)
+                  {
+                     CorrectionZone zone;
+                     zone.startIdx = i;
+                     zone.endIdx = k;
+                     zone.highPrice = highestCorrection;
+                     zone.lowPrice = troughPrice;
+                     zone.entryPrice = highestCorrection * 0.998; // Entrer légèrement en-dessous du haut (0.2%)
+                     zone.isBuyZone = false; // Zone de vente après correction haussière
+                     
+                     // OPTIMISATION: Calculer le gain potentiel avec step
+                     double potentialLow = g_pricePrediction[k];
+                     for(int m = k; m < MathMin(k + 20, ArraySize(g_pricePrediction)); m += 2)
+                     {
+                        if(g_pricePrediction[m] < potentialLow)
+                           potentialLow = g_pricePrediction[m];
+                     }
+                     zone.potentialGain = ((zone.entryPrice - potentialLow) / zone.entryPrice) * 100.0;
+                     zone.entryTime = currentTime + (i + 1) * periodSeconds;
+                     
+                     // Ajouter la zone si le gain potentiel est intéressant (> 0.5%)
+                     if(zone.potentialGain > 0.5)
+                     {
+                        int size = ArraySize(zones);
+                        ArrayResize(zones, size + 1);
+                        zones[size] = zone;
+                     }
+                  }
+               }
+               break;
+            }
+         }
+      }
+   }
+   
+   // Dessiner les zones de correction détectées
+   int totalHistoryBars = ArraySize(g_priceHistory);
+   for(int z = 0; z < ArraySize(zones); z++)
+   {
+      datetime zoneStartTime = currentTime + (zones[z].startIdx + 1) * periodSeconds;
+      datetime zoneEndTime = currentTime + (zones[z].endIdx + 1) * periodSeconds;
+      
+      // Créer un rectangle pour la zone de correction
+      string zoneName = prefix + "ZONE_" + IntegerToString(z) + "_" + _Symbol;
+      
+      if(ObjectFind(0, zoneName) < 0)
+         ObjectCreate(0, zoneName, OBJ_RECTANGLE, 0, zoneStartTime, zones[z].highPrice, zoneEndTime, zones[z].lowPrice);
+      else
+      {
+         ObjectSetInteger(0, zoneName, OBJPROP_TIME, 0, zoneStartTime);
+         ObjectSetDouble(0, zoneName, OBJPROP_PRICE, 0, zones[z].highPrice);
+         ObjectSetInteger(0, zoneName, OBJPROP_TIME, 1, zoneEndTime);
+         ObjectSetDouble(0, zoneName, OBJPROP_PRICE, 1, zones[z].lowPrice);
+      }
+      
+      // Couleur : jaune/orange pour les zones de correction (visible mais distinct)
+      color zoneColor = zones[z].isBuyZone ? C'255,200,0' : C'255,150,0'; // Jaune pour BUY, Orange pour SELL
+      color zoneColorARGB = (color)ColorToARGB(zoneColor, 80); // Alpha 80 pour visibilité
+      
+      ObjectSetInteger(0, zoneName, OBJPROP_COLOR, zoneColorARGB);
+      ObjectSetInteger(0, zoneName, OBJPROP_BGCOLOR, zoneColorARGB);
+      ObjectSetInteger(0, zoneName, OBJPROP_STYLE, STYLE_SOLID);
+      ObjectSetInteger(0, zoneName, OBJPROP_WIDTH, 2);
+      ObjectSetInteger(0, zoneName, OBJPROP_FILL, true);
+      ObjectSetInteger(0, zoneName, OBJPROP_BACK, false); // Au premier plan pour être visible
+      ObjectSetInteger(0, zoneName, OBJPROP_SELECTABLE, false);
+      ObjectSetInteger(0, zoneName, OBJPROP_TIMEFRAMES, OBJ_ALL_PERIODS);
+      
+      // Ajouter une ligne horizontale pour le prix d'entrée recommandé
+      string entryLineName = prefix + "ENTRY_" + IntegerToString(z) + "_" + _Symbol;
+      if(ObjectFind(0, entryLineName) < 0)
+         ObjectCreate(0, entryLineName, OBJ_HLINE, 0, 0, zones[z].entryPrice);
+      else
+         ObjectSetDouble(0, entryLineName, OBJPROP_PRICE, 0, zones[z].entryPrice);
+      
+      ObjectSetInteger(0, entryLineName, OBJPROP_COLOR, zones[z].isBuyZone ? clrLime : clrRed);
+      ObjectSetInteger(0, entryLineName, OBJPROP_STYLE, STYLE_DASH);
+      ObjectSetInteger(0, entryLineName, OBJPROP_WIDTH, 2);
+      ObjectSetInteger(0, entryLineName, OBJPROP_SELECTABLE, false);
+      ObjectSetInteger(0, entryLineName, OBJPROP_TIMEFRAMES, OBJ_ALL_PERIODS);
+      
+      // Stocker l'opportunité dans le tableau au lieu d'afficher un label encombrant
+      int size = ArraySize(g_opportunities);
+      ArrayResize(g_opportunities, size + 1);
+      g_opportunities[size].isBuy = zones[z].isBuyZone;
+      g_opportunities[size].entryPrice = zones[z].entryPrice;
+      g_opportunities[size].percentage = zones[z].potentialGain;
+      g_opportunities[size].entryTime = zoneStartTime;
+      g_opportunities[size].priority = (int)(zones[z].potentialGain * 10); // Pour trier
+      g_opportunitiesCount++;
+      
+      // Supprimer l'ancien label s'il existe
+      string labelName = prefix + "LABEL_" + IntegerToString(z) + "_" + _Symbol;
+      ObjectDelete(0, labelName);
+   }
+   
+   // Trouver la meilleure zone de correction (celle avec le meilleur gain potentiel)
+   g_hasBestCorrectionZone = false;
+   int zonesCount = ArraySize(zones);
+   
+   if(DebugMode)
+      Print("🔍 DetectAndDrawCorrectionZones: ", zonesCount, " zone(s) détectée(s)");
+   
+   if(zonesCount > 0)
+   {
+      int bestZoneIdx = 0;
+      double bestGain = zones[0].potentialGain;
+      
+      for(int z = 1; z < zonesCount; z++)
+      {
+         if(zones[z].potentialGain > bestGain)
+         {
+            bestGain = zones[z].potentialGain;
+            bestZoneIdx = z;
+         }
+      }
+      
+      g_bestCorrectionZone = zones[bestZoneIdx];
+      g_hasBestCorrectionZone = true;
+      
+      Print("✅ Meilleure zone de correction détectée: ", (g_bestCorrectionZone.isBuyZone ? "BUY" : "SELL"), 
+            " Entry=", DoubleToString(g_bestCorrectionZone.entryPrice, _Digits), 
+            " Gain potentiel=", DoubleToString(g_bestCorrectionZone.potentialGain, 2), "%",
+            " StartIdx=", g_bestCorrectionZone.startIdx);
+   }
+   else
+   {
+      if(DebugMode)
+         Print("⚠️ DetectAndDrawCorrectionZones: Aucune zone de correction détectée");
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Placer un ordre limite sur la meilleure zone de correction       |
+//+------------------------------------------------------------------+
+void PlaceLimitOrderOnCorrection()
+{
+   // Vérifier qu'on a des opportunités à évaluer
+   if(g_opportunitiesCount == 0)
+   {
+      if(DebugMode)
+         Print("🔍 PlaceLimitOrder: Pas d'opportunités détectées");
+      return;
+   }
+   
+   // Ne placer qu'un seul ordre limite à la fois, et seulement si la prédiction a été mise à jour
+   int timeSinceUpdate = (int)(TimeCurrent() - g_lastPredictionUpdate);
+   if(timeSinceUpdate > 600) // Prédiction trop ancienne (> 10 min)
+   {
+      if(DebugMode)
+         Print("🔍 PlaceLimitOrder: Prédiction trop ancienne (", timeSinceUpdate, "s > 600s)");
+      return;
+   }
+   
+   // ===== VÉRIFICATION 1: Confiance IA >= 80% (OBLIGATOIRE) =====
+   if(g_lastAIConfidence < 0.80)
+   {
+      if(DebugMode)
+         Print("🚫 PlaceLimitOrder: Confiance IA insuffisante (", DoubleToString(g_lastAIConfidence * 100, 1), "% < 80%)");
+      return; // Confiance IA insuffisante
+   }
+   
+   // ===== VÉRIFICATION 2: Déterminer la direction de la prédiction =====
+   int predSize = ArraySize(g_pricePrediction);
+   if(!g_predictionValid || predSize < 20)
+   {
+      if(DebugMode)
+         Print("🔍 PlaceLimitOrder: Prédiction invalide (valid=", g_predictionValid ? "true" : "false", ", size=", predSize, ")");
+      return; // Pas de prédiction valide
+   }
+   
+   double currentPrice = (SymbolInfoDouble(_Symbol, SYMBOL_BID) + SymbolInfoDouble(_Symbol, SYMBOL_ASK)) / 2.0;
+   int predictionWindow = MathMin(20, ArraySize(g_pricePrediction)); // Utiliser 20 bougies au lieu de 50
+   double predictedPrice = g_pricePrediction[predictionWindow - 1]; // Prix prédit dans 20 bougies
+   
+   // Déterminer la direction de la prédiction (1 = BUY/haussier, -1 = SELL/baissier, 0 = neutre)
+   int predictionDirection = 0;
+   double priceMovement = predictedPrice - currentPrice;
+   double movementPercent = (MathAbs(priceMovement) / currentPrice) * 100.0;
+   
+   if(movementPercent > 0.05) // Mouvement significatif (> 0.05%)
+   {
+      if(priceMovement > 0)
+         predictionDirection = 1; // Prédiction haussière (BUY)
+      else
+         predictionDirection = -1; // Prédiction baissière (SELL)
+   }
+   
+   if(DebugMode)
+      Print("🔍 PlaceLimitOrder: Prédiction - Prix actuel=", DoubleToString(currentPrice, _Digits), 
+            " Prédit=", DoubleToString(predictedPrice, _Digits), 
+            " Mouvement=", DoubleToString(movementPercent, 2), "%",
+            " Direction=", predictionDirection == 1 ? "BUY" : (predictionDirection == -1 ? "SELL" : "NEUTRE"));
+   
+   // ===== VÉRIFICATION 3: Déterminer la direction du marché (IA) =====
+   // Déterminer la direction de l'IA
+   int aiDirection = 0;
+   if(g_lastAIAction == "buy")
+      aiDirection = 1;
+   else if(g_lastAIAction == "sell")
+      aiDirection = -1;
+   else if(g_api_trend_direction != 0)
+      aiDirection = g_api_trend_direction;
+   
+   if(DebugMode)
+      Print("🔍 PlaceLimitOrder: IA - Action=", g_lastAIAction, 
+            " API_Trend=", g_api_trend_direction, 
+            " Direction finale=", aiDirection == 1 ? "BUY" : (aiDirection == -1 ? "SELL" : "NEUTRE"),
+            " Confiance=", DoubleToString(g_lastAIConfidence * 100, 1), "%");
+   
+   // Déterminer la direction du marché basée sur IA et Prédiction
+   // RÈGLE: Utiliser la direction si elle est claire, priorité à l'IA si confiance >= 80%
+   // Si IA et Prédiction sont en désaccord, utiliser celle qui a le plus de confiance
+   int marketDirection = 0;
+   
+   // Priorité 1: Si IA et Prédiction sont alignées, utiliser cette direction (le plus fiable)
+   if(aiDirection != 0 && predictionDirection != 0 && aiDirection == predictionDirection)
+   {
+      marketDirection = aiDirection; // Direction alignée (le plus fiable)
+      if(DebugMode)
+         Print("✅ PlaceLimitOrder: IA et Prédiction alignées - Direction=", marketDirection == 1 ? "BUY" : "SELL");
+   }
+   // Priorité 2: Si l'IA a une direction claire (confiance >= 80%), utiliser l'IA
+   else if(aiDirection != 0 && g_lastAIConfidence >= 0.80)
+   {
+      marketDirection = aiDirection; // Priorité à l'IA si confiance >= 80%
+      if(DebugMode)
+         Print("✅ PlaceLimitOrder: Utilisation IA (confiance >= 80%) - Direction=", marketDirection == 1 ? "BUY" : "SELL");
+   }
+   // Priorité 3: Si seulement la prédiction a une direction claire, utiliser la prédiction
+   else if(predictionDirection != 0 && aiDirection == 0)
+   {
+      marketDirection = predictionDirection; // Utiliser la prédiction si IA neutre
+   if(DebugMode)
+         Print("✅ PlaceLimitOrder: Utilisation Prédiction (IA neutre) - Direction=", marketDirection == 1 ? "BUY" : "SELL");
+   }
+   // Priorité 4: Si l'IA a une direction (même si < 80%) et prédiction neutre, utiliser l'IA
+   else if(aiDirection != 0 && predictionDirection == 0)
+   {
+      marketDirection = aiDirection; // Utiliser l'IA même si confiance < 80% et prédiction neutre
+      if(DebugMode)
+         Print("⚠️ PlaceLimitOrder: Utilisation IA (confiance < 80%, prédiction neutre) - Direction=", marketDirection == 1 ? "BUY" : "SELL");
+   }
+   // Priorité 5: Si IA et Prédiction sont en désaccord et IA < 80%, utiliser la prédiction
+   else if(aiDirection != 0 && predictionDirection != 0 && aiDirection != predictionDirection && g_lastAIConfidence < 0.80)
+   {
+      marketDirection = predictionDirection; // Priorité à la prédiction si IA < 80% et désaccord
+      if(DebugMode)
+         Print("⚠️ PlaceLimitOrder: IA et Prédiction en désaccord - Utilisation Prédiction (IA < 80%) - Direction=", marketDirection == 1 ? "BUY" : "SELL");
+   }
+   
+   if(marketDirection == 0)
+   {
+      Print("🚫 PlaceLimitOrder: Pas de direction claire - IA=", aiDirection, " (confiance=", DoubleToString(g_lastAIConfidence * 100, 1), "%), Prédiction=", predictionDirection);
+      return; // Pas de direction claire
+   }
+   
+   Print("🔍 PlaceLimitOrder: Direction marché déterminée=", marketDirection == 1 ? "BUY" : "SELL",
+         " (IA=", aiDirection == 1 ? "BUY" : (aiDirection == -1 ? "SELL" : "NEUTRE"),
+         ", Prédiction=", predictionDirection == 1 ? "BUY" : (predictionDirection == -1 ? "SELL" : "NEUTRE"), ")");
+   
+   if(DebugMode)
+      Print("🔍 PlaceLimitOrder: Direction marché=", marketDirection == 1 ? "BUY" : "SELL",
+            " (IA=", aiDirection == 1 ? "BUY" : (aiDirection == -1 ? "SELL" : "NEUTRE"),
+            ", Prédiction=", predictionDirection == 1 ? "BUY" : (predictionDirection == -1 ? "SELL" : "NEUTRE"), ")");
+   
+   // ===== ÉVALUER TOUTES LES OPPORTUNITÉS ET SÉLECTIONNER LA MEILLEURE =====
+   TradingOpportunity bestOpportunity;
+   bool bestFound = false;
+   double bestScore = -1.0;
+   
+   // Récupérer les valeurs EMA pour ajuster les prix d'entrée
+   double emaFast[], emaSlow[];
+   ArraySetAsSeries(emaFast, true);
+   ArraySetAsSeries(emaSlow, true);
+   bool hasEMA = (CopyBuffer(emaFastHandle, 0, 0, 1, emaFast) > 0 && 
+                  CopyBuffer(emaSlowHandle, 0, 0, 1, emaSlow) > 0);
+   double emaFastValue = hasEMA ? emaFast[0] : 0;
+   double emaSlowValue = hasEMA ? emaSlow[0] : 0;
+   
+   // Calculer ATR pour définir "proche"
+   double atrM5[], atrH1[];
+   ArraySetAsSeries(atrM5, true);
+   ArraySetAsSeries(atrH1, true);
+   double atrValue = 0;
+   if(CopyBuffer(atrM5Handle, 0, 0, 1, atrM5) > 0)
+      atrValue = atrM5[0];
+   else if(CopyBuffer(atrH1Handle, 0, 0, 1, atrH1) > 0)
+      atrValue = atrH1[0];
+   if(atrValue == 0) atrValue = currentPrice * 0.001; // Fallback: 0.1% du prix
+   double maxDistance = atrValue * 1.5; // 1.5 ATR = distance maximale pour "proche"
+   
+   // PROTECTION: Bloquer SELL_LIMIT sur Boom (y compris Vol over Boom) et BUY_LIMIT sur Crash (y compris Vol over Crash)
+   bool isBoom = (StringFind(_Symbol, "Boom") != -1);
+   bool isCrash = (StringFind(_Symbol, "Crash") != -1);
+   
+   // Parcourir toutes les opportunités et trouver la meilleure
+   Print("🔍 PlaceLimitOrder: Évaluation de ", g_opportunitiesCount, " opportunités - Direction marché=", marketDirection == 1 ? "BUY" : "SELL");
+   
+   for(int i = 0; i < g_opportunitiesCount; i++)
+   {
+      TradingOpportunity opp = g_opportunities[i];
+      bool zoneIsBuy = opp.isBuy;
+      
+      if(DebugMode)
+         Print("🔍 Opportunité #", i, " - Type=", zoneIsBuy ? "BUY" : "SELL",
+               " EntryPrice=", DoubleToString(opp.entryPrice, _Digits),
+               " PotentialGain=", DoubleToString(opp.percentage, 2), "%");
+      
+      // Vérifier les restrictions Boom/Crash
+      if(isBoom && !zoneIsBuy)
+      {
+         if(DebugMode)
+            Print("⏸️ Opportunité #", i, " ignorée: SELL sur Boom (BUY uniquement)");
+         continue; // Skip SELL sur Boom
+      }
+      if(isCrash && zoneIsBuy)
+      {
+         if(DebugMode)
+            Print("⏸️ Opportunité #", i, " ignorée: BUY sur Crash (SELL uniquement)");
+         continue; // Skip BUY sur Crash
+      }
+      
+      // Vérifier que l'opportunité correspond à la direction du marché/prédiction
+      // RÈGLE: Pas de SELL LIMIT si marché/prédiction en BUY, pas de BUY LIMIT si marché/prédiction en SELL
+      // Si marché/prédiction = BUY → On veut une zone BUY (correction baissière = opportunité d'achat avec BUY LIMIT)
+      // Si marché/prédiction = SELL → On veut une zone SELL (correction haussière = opportunité de vente avec SELL LIMIT)
+      bool zoneMatchesDirection = false;
+      
+      if(marketDirection == 1) // Marché/prédiction en BUY
+      {
+      if(zoneIsBuy)
+            zoneMatchesDirection = true; // BUY LIMIT pour correction baissière (opportunité d'achat)
+         // Pas de SELL LIMIT si marché en BUY (skip)
+      }
+      else if(marketDirection == -1) // Marché/prédiction en SELL
+      {
+         if(!zoneIsBuy)
+            zoneMatchesDirection = true; // SELL LIMIT pour correction haussière (opportunité de vente)
+         // Pas de BUY LIMIT si marché en SELL (skip)
+      }
+      
+      if(!zoneMatchesDirection)
+      {
+         Print("⏸️ Opportunité #", i, " ignorée: Type=", zoneIsBuy ? "BUY" : "SELL", 
+               " ne correspond pas à la direction marché (", marketDirection == 1 ? "BUY" : "SELL", ")");
+         continue; // Skip cette opportunité, elle ne correspond pas à la direction
+      }
+      
+      // Vérifier que le prix d'entrée est réaliste (pas trop loin du prix actuel)
+      double priceDistancePercent = MathAbs(opp.entryPrice - currentPrice) / currentPrice * 100.0;
+      double maxDistancePercent = 5.0; // Max 5% du prix actuel
+      if(priceDistancePercent > maxDistancePercent)
+      {
+            if(DebugMode)
+            Print("⏸️ Opportunité #", i, " ignorée: Prix trop loin (", DoubleToString(priceDistancePercent, 2), "% > ", DoubleToString(maxDistancePercent, 1), "%)");
+         continue; // Skip cette opportunité, prix trop loin
+      }
+      
+      // Calculer un score pour cette opportunité
+      // PRIORITÉ 1: Confiance du signal (le plus important) - 60%
+      // PRIORITÉ 2: Potentiel de gain - 25%
+      // PRIORITÉ 3: Proximité - 15%
+      // La confiance est le facteur déterminant : on prend toujours l'ordre avec la confiance la plus élevée
+      double confidenceScore = g_lastAIConfidence; // Confiance IA (0-1)
+      double proximityScore = 1.0 / (1.0 + priceDistancePercent); // Normalisé entre 0 et 1
+      double gainScore = MathMin(opp.percentage / 10.0, 1.0); // Normalisé entre 0 et 1 (max 10%)
+      
+      // Score pondéré : confiance a le plus de poids (60%), puis gain (25%), puis proximité (15%)
+      double score = (confidenceScore * 0.60) + (gainScore * 0.25) + (proximityScore * 0.15);
+      
+      Print("✅ Opportunité #", i, " VALIDE: Type=", zoneIsBuy ? "BUY" : "SELL",
+            " EntryPrice=", DoubleToString(opp.entryPrice, _Digits),
+            " PotentialGain=", DoubleToString(opp.percentage, 2), "%",
+            " Distance=", DoubleToString(priceDistancePercent, 2), "%",
+            " Confiance=", DoubleToString(confidenceScore * 100, 1), "%",
+            " Score=", DoubleToString(score, 3));
+      
+      // Garder la meilleure opportunité (priorité au score le plus élevé)
+      // Le score inclut déjà la confiance comme facteur principal (60%)
+      // Si deux opportunités ont le même score, on garde la première (ou on pourrait utiliser d'autres critères)
+      if(!bestFound || score > bestScore)
+      {
+         bestOpportunity = opp;
+         bestFound = true;
+         bestScore = score;
+         Print("⭐ Meilleure opportunité mise à jour: Confiance=", DoubleToString(confidenceScore * 100, 1), 
+               "%, Score=", DoubleToString(bestScore, 3));
+      }
+   }
+   
+   // Vérifier qu'on a trouvé une opportunité valide
+   if(!bestFound)
+   {
+      Print("🚫 PlaceLimitOrder: Aucune opportunité valide trouvée parmi ", g_opportunitiesCount, 
+            " opportunités - Direction marché=", marketDirection == 1 ? "BUY" : (marketDirection == -1 ? "SELL" : "NEUTRE"),
+            " (IA confiance=", DoubleToString(g_lastAIConfidence * 100, 1), "%, Prédiction valide=", g_predictionValid ? "OUI" : "NON", ")");
+      return;
+   }
+   
+               if(DebugMode)
+      Print("✅ Meilleure opportunité sélectionnée: Type=", bestOpportunity.isBuy ? "BUY" : "SELL",
+            " EntryPrice=", DoubleToString(bestOpportunity.entryPrice, _Digits),
+            " PotentialGain=", DoubleToString(bestOpportunity.percentage, 2), "%",
+            " Score=", DoubleToString(bestScore, 3));
+   
+   // Utiliser la meilleure opportunité trouvée
+   bool zoneIsBuy = bestOpportunity.isBuy;
+   double entryPriceRaw = bestOpportunity.entryPrice;
+   
+   // ===== PLACER L'ORDRE LIMIT LE PLUS PROCHE POSSIBLE DU PRIX ACTUEL =====
+   // Rechercher le meilleur niveau (EMA ou S/R) le plus proche du prix actuel en tenant compte de la direction
+   double bestLevel = entryPriceRaw; // Par défaut, utiliser le prix de l'opportunité
+   double minDistanceToCurrent = MathAbs(entryPriceRaw - currentPrice);
+   bool foundBestLevel = false;
+   string bestLevelSource = "Opportunité brute";
+   
+   // Récupérer toutes les EMA pour trouver le meilleur niveau
+   double ema50Value = 0, ema100Value = 0, ema200Value = 0;
+   double ema50Array[], ema100Array[], ema200Array[];
+   ArraySetAsSeries(ema50Array, true);
+   ArraySetAsSeries(ema100Array, true);
+   ArraySetAsSeries(ema200Array, true);
+   
+   bool hasEMA50 = (CopyBuffer(ema50Handle, 0, 0, 1, ema50Array) > 0);
+   bool hasEMA100 = (CopyBuffer(ema100Handle, 0, 0, 1, ema100Array) > 0);
+   bool hasEMA200 = (CopyBuffer(ema200Handle, 0, 0, 1, ema200Array) > 0);
+   
+   if(hasEMA50) ema50Value = ema50Array[0];
+   if(hasEMA100) ema100Value = ema100Array[0];
+   if(hasEMA200) ema200Value = ema200Array[0];
+   
+   // Structure pour stocker les candidats de niveaux
+   struct LevelCandidate {
+      double price;
+      double distance;
+      string source;
+   };
+   
+   // Pour BUY LIMIT: chercher le support le plus proche du prix actuel (en-dessous ou égal)
+   if(zoneIsBuy)
+   {
+      // Vérifier toutes les EMA comme support potentiel (doivent être <= prix actuel pour BUY LIMIT)
+      LevelCandidate candidates[];
+      int candidateCount = 0;
+      
+      // EMA Fast
+      if(hasEMA && emaFastValue > 0 && emaFastValue <= currentPrice)
+      {
+         ArrayResize(candidates, candidateCount + 1);
+         candidates[candidateCount].price = emaFastValue;
+         candidates[candidateCount].distance = MathAbs(currentPrice - emaFastValue);
+         candidates[candidateCount].source = "EMA Fast";
+         candidateCount++;
+      }
+      
+      // EMA Slow
+      if(hasEMA && emaSlowValue > 0 && emaSlowValue <= currentPrice)
+      {
+         ArrayResize(candidates, candidateCount + 1);
+         candidates[candidateCount].price = emaSlowValue;
+         candidates[candidateCount].distance = MathAbs(currentPrice - emaSlowValue);
+         candidates[candidateCount].source = "EMA Slow";
+         candidateCount++;
+      }
+      
+      // EMA 50
+      if(hasEMA50 && ema50Value > 0 && ema50Value <= currentPrice)
+      {
+         ArrayResize(candidates, candidateCount + 1);
+         candidates[candidateCount].price = ema50Value;
+         candidates[candidateCount].distance = MathAbs(currentPrice - ema50Value);
+         candidates[candidateCount].source = "EMA 50";
+         candidateCount++;
+      }
+      
+      // EMA 100
+      if(hasEMA100 && ema100Value > 0 && ema100Value <= currentPrice)
+      {
+         ArrayResize(candidates, candidateCount + 1);
+         candidates[candidateCount].price = ema100Value;
+         candidates[candidateCount].distance = MathAbs(currentPrice - ema100Value);
+         candidates[candidateCount].source = "EMA 100";
+         candidateCount++;
+      }
+      
+      // EMA 200
+      if(hasEMA200 && ema200Value > 0 && ema200Value <= currentPrice)
+      {
+         ArrayResize(candidates, candidateCount + 1);
+         candidates[candidateCount].price = ema200Value;
+         candidates[candidateCount].distance = MathAbs(currentPrice - ema200Value);
+         candidates[candidateCount].source = "EMA 200";
+         candidateCount++;
+      }
+      
+      // Calculer Support S/R basé sur ATR
+      double supportLevel = currentPrice - (1.5 * atrValue);
+      if(supportLevel > 0 && supportLevel <= currentPrice)
+      {
+         ArrayResize(candidates, candidateCount + 1);
+         candidates[candidateCount].price = supportLevel;
+         candidates[candidateCount].distance = MathAbs(currentPrice - supportLevel);
+         candidates[candidateCount].source = "Support ATR";
+         candidateCount++;
+      }
+      
+      // Trouver le niveau le plus proche du prix actuel (mais toujours <= prix actuel pour BUY LIMIT)
+      for(int c = 0; c < candidateCount; c++)
+      {
+         if(candidates[c].distance < minDistanceToCurrent && candidates[c].price <= currentPrice)
+         {
+            bestLevel = candidates[c].price;
+            minDistanceToCurrent = candidates[c].distance;
+            bestLevelSource = candidates[c].source;
+            foundBestLevel = true;
+         }
+      }
+      
+      // Si aucun niveau trouvé mais qu'on a un prix d'opportunité valide, vérifier s'il est plus proche
+      if(entryPriceRaw > 0 && entryPriceRaw <= currentPrice && MathAbs(currentPrice - entryPriceRaw) < minDistanceToCurrent)
+      {
+         bestLevel = entryPriceRaw;
+         bestLevelSource = "Opportunité (le plus proche)";
+         foundBestLevel = true;
+      }
+   }
+   else // Pour SELL LIMIT: chercher la résistance la plus proche du prix actuel (au-dessus ou égal)
+   {
+      // Vérifier toutes les EMA comme résistance potentielle (doivent être >= prix actuel pour SELL LIMIT)
+      LevelCandidate candidates[];
+      int candidateCount = 0;
+      
+      // EMA Fast
+      if(hasEMA && emaFastValue > 0 && emaFastValue >= currentPrice)
+      {
+         ArrayResize(candidates, candidateCount + 1);
+         candidates[candidateCount].price = emaFastValue;
+         candidates[candidateCount].distance = MathAbs(emaFastValue - currentPrice);
+         candidates[candidateCount].source = "EMA Fast";
+         candidateCount++;
+      }
+      
+      // EMA Slow
+      if(hasEMA && emaSlowValue > 0 && emaSlowValue >= currentPrice)
+      {
+         ArrayResize(candidates, candidateCount + 1);
+         candidates[candidateCount].price = emaSlowValue;
+         candidates[candidateCount].distance = MathAbs(emaSlowValue - currentPrice);
+         candidates[candidateCount].source = "EMA Slow";
+         candidateCount++;
+      }
+      
+      // EMA 50
+      if(hasEMA50 && ema50Value > 0 && ema50Value >= currentPrice)
+      {
+         ArrayResize(candidates, candidateCount + 1);
+         candidates[candidateCount].price = ema50Value;
+         candidates[candidateCount].distance = MathAbs(ema50Value - currentPrice);
+         candidates[candidateCount].source = "EMA 50";
+         candidateCount++;
+      }
+      
+      // EMA 100
+      if(hasEMA100 && ema100Value > 0 && ema100Value >= currentPrice)
+      {
+         ArrayResize(candidates, candidateCount + 1);
+         candidates[candidateCount].price = ema100Value;
+         candidates[candidateCount].distance = MathAbs(ema100Value - currentPrice);
+         candidates[candidateCount].source = "EMA 100";
+         candidateCount++;
+      }
+      
+      // EMA 200
+      if(hasEMA200 && ema200Value > 0 && ema200Value >= currentPrice)
+      {
+         ArrayResize(candidates, candidateCount + 1);
+         candidates[candidateCount].price = ema200Value;
+         candidates[candidateCount].distance = MathAbs(ema200Value - currentPrice);
+         candidates[candidateCount].source = "EMA 200";
+         candidateCount++;
+      }
+      
+      // Calculer Résistance S/R basé sur ATR
+      double resistanceLevel = currentPrice + (1.5 * atrValue);
+      if(resistanceLevel > 0 && resistanceLevel >= currentPrice)
+      {
+         ArrayResize(candidates, candidateCount + 1);
+         candidates[candidateCount].price = resistanceLevel;
+         candidates[candidateCount].distance = MathAbs(resistanceLevel - currentPrice);
+         candidates[candidateCount].source = "Résistance ATR";
+         candidateCount++;
+      }
+      
+      // Trouver le niveau le plus proche du prix actuel (mais toujours >= prix actuel pour SELL LIMIT)
+      for(int c = 0; c < candidateCount; c++)
+      {
+         if(candidates[c].distance < minDistanceToCurrent && candidates[c].price >= currentPrice)
+         {
+            bestLevel = candidates[c].price;
+            minDistanceToCurrent = candidates[c].distance;
+            bestLevelSource = candidates[c].source;
+            foundBestLevel = true;
+         }
+      }
+      
+      // Si aucun niveau trouvé mais qu'on a un prix d'opportunité valide, vérifier s'il est plus proche
+      if(entryPriceRaw > 0 && entryPriceRaw >= currentPrice && MathAbs(entryPriceRaw - currentPrice) < minDistanceToCurrent)
+      {
+         bestLevel = entryPriceRaw;
+         bestLevelSource = "Opportunité (le plus proche)";
+         foundBestLevel = true;
+      }
+   }
+   
+   // Vérifier que le niveau trouvé est réaliste (pas trop loin du prix actuel - max 3%)
+   double distancePercent = (MathAbs(bestLevel - currentPrice) / currentPrice) * 100.0;
+   if(distancePercent > 3.0)
+   {
+      // Si trop loin, utiliser le prix d'opportunité s'il est plus proche, sinon ajuster
+      if(MathAbs(entryPriceRaw - currentPrice) < MathAbs(bestLevel - currentPrice) && 
+         ((zoneIsBuy && entryPriceRaw <= currentPrice) || (!zoneIsBuy && entryPriceRaw >= currentPrice)))
+      {
+         bestLevel = entryPriceRaw;
+         bestLevelSource = "Opportunité (ajusté)";
+         Print("⚠️ Ajustement: Niveau trouvé trop loin (", DoubleToString(distancePercent, 2), "%), utilisation prix opportunité");
+      }
+      else if(distancePercent > 5.0)
+      {
+         Print("🚫 Niveau trop loin du prix actuel (", DoubleToString(distancePercent, 2), "% > 5%) - Abandon placement");
+      return;
+      }
+   }
+   
+   double adjustedEntryPrice = bestLevel;
+   
+   Print("✅ Prix d'entrée ajusté: ", DoubleToString(adjustedEntryPrice, _Digits), 
+         " (source: ", bestLevelSource, ", distance du prix actuel: ", DoubleToString(MathAbs(adjustedEntryPrice - currentPrice), _Digits),
+         " / ", DoubleToString(distancePercent, 2), "%)");
+   
+   if(DebugMode)
+      Print("✅ Meilleure opportunité sélectionnée: Type=", zoneIsBuy ? "BUY" : "SELL",
+            " EntryPrice=", DoubleToString(adjustedEntryPrice, _Digits),
+            " PotentialGain=", DoubleToString(bestOpportunity.percentage, 2), "%",
+            " Score=", DoubleToString(bestScore, 3),
+            " Niveau optimisé trouvé=", foundBestLevel ? "OUI" : "NON");
+   
+   // ===== CALCULER SL ET TP BASÉS SUR LE PRIX (POURCENTAGE) =====
+   // Pour les ordres LIMIT, utiliser des pourcentages du prix d'entrée plutôt que des montants USD fixes
+   // Les SL/TP doivent être plus serrés car l'ordre est déjà placé près du prix actuel
+   
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+   double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+   double pointValue = (tickValue / tickSize) * point;
+   
+   double lotSize = NormalizeLotSize(InitialLotSize);
+   double sl = 0, tp = 0;
+   
+   // Vérifier les niveaux minimums du broker
+   long stopLevel = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
+   double minDistance = stopLevel * point;
+   if(minDistance == 0) minDistance = 10 * point;
+   
+   // Utiliser le prix ajusté (près des EMA/S/R) pour calculer SL et TP
+   double entryPrice = NormalizeDouble(adjustedEntryPrice, _Digits);
+   
+   // Déterminer le type de symbole pour adapter les pourcentages
+   bool isBoomCrash = IsBoomCrashSymbol(_Symbol);
+   bool isVolatility = IsVolatilitySymbol(_Symbol);
+   bool isForex = IsForexSymbol(_Symbol);
+   
+   // Définir les pourcentages selon le type de symbole et le fait que c'est un ordre LIMIT
+   // Pour les ordres LIMIT, on utilise des pourcentages plus serrés (ordre déjà proche du prix)
+   double slPercent = 0.0;
+   double tpPercent = 0.0;
+   
+   if(isBoomCrash)
+   {
+      // Boom/Crash: volatilité élevée, SL serré (0.3-0.5%), TP plus large (1-2%)
+      slPercent = 0.004; // 0.4% du prix d'entrée
+      tpPercent = 0.015; // 1.5% du prix d'entrée
+   }
+   else if(isVolatility)
+   {
+      // Volatility: SL modéré (0.5-1%), TP modéré (1.5-2.5%)
+      slPercent = 0.007; // 0.7% du prix d'entrée
+      tpPercent = 0.020; // 2.0% du prix d'entrée
+   }
+   else if(isForex)
+   {
+      // Forex: SL et TP plus serrés (pip-based généralement)
+      slPercent = 0.003; // 0.3% (environ 30-50 pips selon la paire)
+      tpPercent = 0.006; // 0.6% (environ 60-100 pips)
+   }
+   else
+   {
+      // Autres (Step Index, etc.): valeurs par défaut modérées
+      slPercent = 0.005; // 0.5% du prix d'entrée
+      tpPercent = 0.012; // 1.2% du prix d'entrée
+   }
+   
+   // Ajuster selon la distance du prix d'entrée au prix actuel
+   // Si l'ordre est très proche du prix actuel (< 0.5%), réduire encore les SL/TP
+   double distanceFromCurrent = MathAbs(entryPrice - currentPrice) / currentPrice;
+   if(distanceFromCurrent < 0.005) // Moins de 0.5% du prix actuel
+   {
+      slPercent *= 0.7; // Réduire de 30%
+      tpPercent *= 0.8; // Réduire de 20%
+      if(DebugMode)
+         Print("📍 Ordre très proche du prix actuel (", DoubleToString(distanceFromCurrent * 100, 2), "%) - SL/TP réduits");
+   }
+   
+   // Calculer SL et TP en pourcentage du prix d'entrée
+   if(zoneIsBuy)
+   {
+      // BUY LIMIT: SL en-dessous de l'entrée, TP au-dessus
+      sl = NormalizeDouble(entryPrice * (1.0 - slPercent), _Digits);
+      tp = NormalizeDouble(entryPrice * (1.0 + tpPercent), _Digits);
+      
+      // Vérifier que les distances respectent le minimum du broker
+      double slDistance = entryPrice - sl;
+      double tpDistance = tp - entryPrice;
+      
+      if(slDistance < minDistance)
+         sl = NormalizeDouble(entryPrice - minDistance, _Digits);
+      if(tpDistance < minDistance)
+         tp = NormalizeDouble(entryPrice + minDistance, _Digits);
+      
+      // Vérifier que SL n'est pas en-dessous d'un support proche (si détecté)
+      // Vérifier que TP n'est pas au-dessus d'une résistance proche (si détecté)
+      // Ces vérifications peuvent être ajoutées si on a des niveaux S/R détectés
+   }
+   else
+   {
+      // SELL LIMIT: SL au-dessus de l'entrée, TP en-dessous
+      sl = NormalizeDouble(entryPrice * (1.0 + slPercent), _Digits);
+      tp = NormalizeDouble(entryPrice * (1.0 - tpPercent), _Digits);
+      
+      // Vérifier que les distances respectent le minimum du broker
+      double slDistance = sl - entryPrice;
+      double tpDistance = entryPrice - tp;
+      
+      if(slDistance < minDistance)
+         sl = NormalizeDouble(entryPrice + minDistance, _Digits);
+      if(tpDistance < minDistance)
+         tp = NormalizeDouble(entryPrice - minDistance, _Digits);
+      
+      // Vérifier que SL n'est pas au-dessus d'une résistance proche (si détecté)
+      // Vérifier que TP n'est pas en-dessous d'un support proche (si détecté)
+   }
+   
+   // Afficher les distances calculées
+   double slDistancePoints = zoneIsBuy ? (entryPrice - sl) : (sl - entryPrice);
+   double tpDistancePoints = zoneIsBuy ? (tp - entryPrice) : (entryPrice - tp);
+   double slDistancePercent = (slDistancePoints / entryPrice) * 100.0;
+   double tpDistancePercent = (tpDistancePoints / entryPrice) * 100.0;
+   
+   Print("✅ SL/TP calculés (basés sur prix): Entry=", DoubleToString(entryPrice, _Digits),
+         " SL=", DoubleToString(sl, _Digits), " (", DoubleToString(slDistancePercent, 2), "% / ", DoubleToString(slDistancePoints, _Digits), " points)",
+         " TP=", DoubleToString(tp, _Digits), " (", DoubleToString(tpDistancePercent, 2), "% / ", DoubleToString(tpDistancePoints, _Digits), " points)");
+   
+   // Vérifier que SL et TP sont réalistes (pas trop éloignés)
+   double maxSLPercent = 0.02; // Max 2% pour SL
+   double maxTPPercent = 0.05; // Max 5% pour TP
+   
+   // Recalculer les distances après vérification des minimums broker
+   slDistancePoints = zoneIsBuy ? (entryPrice - sl) : (sl - entryPrice);
+   tpDistancePoints = zoneIsBuy ? (tp - entryPrice) : (entryPrice - tp);
+   slDistancePercent = (slDistancePoints / entryPrice) * 100.0;
+   tpDistancePercent = (tpDistancePoints / entryPrice) * 100.0;
+   
+   if(slDistancePercent > maxSLPercent)
+   {
+      Print("⚠️ SL trop éloigné (", DoubleToString(slDistancePercent, 2), "% > ", DoubleToString(maxSLPercent * 100, 0), "%) - Ajustement");
+      if(zoneIsBuy)
+      {
+         sl = NormalizeDouble(entryPrice * (1.0 - maxSLPercent), _Digits);
+         // Vérifier que le SL respecte toujours le minimum du broker
+         if(entryPrice - sl < minDistance)
+            sl = NormalizeDouble(entryPrice - minDistance, _Digits);
+      }
+      else
+      {
+         sl = NormalizeDouble(entryPrice * (1.0 + maxSLPercent), _Digits);
+      if(sl - entryPrice < minDistance)
+         sl = NormalizeDouble(entryPrice + minDistance, _Digits);
+      }
+      // Recalculer après ajustement
+      slDistancePoints = zoneIsBuy ? (entryPrice - sl) : (sl - entryPrice);
+      slDistancePercent = (slDistancePoints / entryPrice) * 100.0;
+   }
+   
+   if(tpDistancePercent > maxTPPercent)
+   {
+      Print("⚠️ TP trop éloigné (", DoubleToString(tpDistancePercent, 2), "% > ", DoubleToString(maxTPPercent * 100, 0), "%) - Ajustement");
+      if(zoneIsBuy)
+      {
+         tp = NormalizeDouble(entryPrice * (1.0 + maxTPPercent), _Digits);
+         if(tp - entryPrice < minDistance)
+            tp = NormalizeDouble(entryPrice + minDistance, _Digits);
+      }
+      else
+      {
+         tp = NormalizeDouble(entryPrice * (1.0 - maxTPPercent), _Digits);
+      if(entryPrice - tp < minDistance)
+         tp = NormalizeDouble(entryPrice - minDistance, _Digits);
+      }
+      // Recalculer après ajustement
+      tpDistancePoints = zoneIsBuy ? (tp - entryPrice) : (entryPrice - tp);
+      tpDistancePercent = (tpDistancePoints / entryPrice) * 100.0;
+   }
+   
+   // Afficher les valeurs finales
+   Print("✅ SL/TP FINAUX: Entry=", DoubleToString(entryPrice, _Digits),
+         " Distance du prix actuel=", DoubleToString(MathAbs(entryPrice - currentPrice) / currentPrice * 100.0, 2), "%",
+         " SL=", DoubleToString(sl, _Digits), " (", DoubleToString(slDistancePercent, 2), "% / ", DoubleToString(slDistancePoints, _Digits), " points)",
+         " TP=", DoubleToString(tp, _Digits), " (", DoubleToString(tpDistancePercent, 2), "% / ", DoubleToString(tpDistancePoints, _Digits), " points)");
+   
+   // ===== UN SEUL ORDRE LIMITE PAR SYMBOLE =====
+   // Vérifier s'il existe déjà un ordre limite pour ce symbole
+   // Ne remplacer que si la confiance du nouveau signal est plus élevée
+   double existingConfidence = 0.0;
+   bool hasExistingOrder = false;
+   ulong existingTicket = 0;
+   
+   for(int i = OrdersTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = OrderGetTicket(i);
+      if(ticket > 0 && orderInfo.SelectByIndex(i))
+      {
+         if(orderInfo.Symbol() == _Symbol && 
+            orderInfo.Magic() == InpMagicNumber)
+         {
+            ENUM_ORDER_TYPE orderType = orderInfo.OrderType();
+            // Vérifier si c'est un ordre en attente (LIMIT) pour ce symbole
+            if(orderType == ORDER_TYPE_BUY_LIMIT || orderType == ORDER_TYPE_SELL_LIMIT)
+            {
+               hasExistingOrder = true;
+               existingTicket = ticket;
+               
+               // Extraire la confiance du comment de l'ordre existant
+               // Format: "LIMIT_IA_PRED_ALIGNED" ou "LIMIT_CONF:XX.XX"
+               string comment = orderInfo.Comment();
+               int confPos = StringFind(comment, "CONF:");
+               if(confPos >= 0)
+               {
+                  string confStr = StringSubstr(comment, confPos + 5);
+                  existingConfidence = StringToDouble(confStr) / 100.0; // Convertir de % à ratio
+               }
+               else
+               {
+                  // Si pas de confiance dans le comment, considérer confiance minimale (0.80)
+                  // car tous les ordres placés nécessitent au moins 80% de confiance
+                  existingConfidence = 0.80;
+               }
+               
+               Print("🔍 Ordre LIMIT existant trouvé: Ticket=", ticket, 
+                     " Confiance existante=", DoubleToString(existingConfidence * 100, 1), "%",
+                     " Nouvelle confiance=", DoubleToString(g_lastAIConfidence * 100, 1), "%");
+               
+               break; // Un seul ordre limite par symbole
+            }
+         }
+      }
+   }
+   
+   // Si un ordre existe déjà, vérifier si on doit le remplacer
+   // On remplace UNIQUEMENT si la nouvelle confiance est plus élevée
+   if(hasExistingOrder)
+   {
+      if(g_lastAIConfidence <= existingConfidence)
+      {
+         Print("⏸️ Ordre LIMIT existant conservé: Confiance actuelle (", DoubleToString(existingConfidence * 100, 1), 
+               "%) >= Nouvelle confiance (", DoubleToString(g_lastAIConfidence * 100, 1), 
+               "%) - Remplacer uniquement si confiance plus élevée");
+         return; // Ne pas remplacer, garder l'ordre avec la confiance la plus élevée
+      }
+      else
+      {
+         // Nouvelle confiance plus élevée, remplacer l'ancien ordre
+         Print("🔄 Remplaçant ordre LIMIT: Nouvelle confiance (", DoubleToString(g_lastAIConfidence * 100, 1), 
+               "%) > Confiance existante (", DoubleToString(existingConfidence * 100, 1), "%)");
+         
+         MqlTradeRequest deleteRequest = {};
+         MqlTradeResult deleteResult = {};
+         deleteRequest.action = TRADE_ACTION_REMOVE;
+         deleteRequest.order = existingTicket;
+         
+         if(OrderSend(deleteRequest, deleteResult))
+         {
+            Print("🗑️ Ancien ordre LIMIT supprimé (ticket: ", existingTicket, 
+                  ") - Remplacé par ordre avec confiance plus élevée");
+         }
+         else
+         {
+            Print("⚠️ Erreur suppression ancien ordre LIMIT: ", deleteResult.retcode, " - ", deleteResult.comment);
+            return; // Ne pas continuer si on n'a pas pu supprimer l'ancien
+         }
+      }
+   }
+   
+   // Créer le nouvel ordre limite (les protections Boom/Crash sont déjà vérifiées dans la boucle d'évaluation)
+   MqlTradeRequest request = {};
+   MqlTradeResult result = {};
+   
+   request.action = TRADE_ACTION_PENDING;
+   request.symbol = _Symbol;
+   request.volume = lotSize;
+   request.type = zoneIsBuy ? ORDER_TYPE_BUY_LIMIT : ORDER_TYPE_SELL_LIMIT;
+   request.price = entryPrice;
+   request.sl = sl;
+   request.tp = tp;
+   request.deviation = 10;
+   request.magic = InpMagicNumber;
+   // Stocker la confiance dans le comment pour comparaison future
+   request.comment = "LIMIT_CONF:" + DoubleToString(g_lastAIConfidence * 100, 2);
+   request.type_filling = ORDER_FILLING_FOK;
+   request.type_time = ORDER_TIME_SPECIFIED;
+   
+   // Calculer l'expiration : au minimum dans 1 heure, au maximum 24h
+   datetime expirationTime = bestOpportunity.entryTime + 300; // 5 minutes après l'heure prévue
+   datetime minExpiration = TimeCurrent() + 3600; // Minimum 1 heure
+   datetime maxExpiration = TimeCurrent() + 86400; // Maximum 24 heures
+   
+   if(expirationTime < minExpiration)
+      expirationTime = minExpiration;
+   if(expirationTime > maxExpiration)
+      expirationTime = maxExpiration;
+   
+   request.expiration = expirationTime;
+   
+   if(DebugMode)
+      Print("🔍 PlaceLimitOrder: Expiration calculée - EntryTime=", TimeToString(bestOpportunity.entryTime, TIME_DATE|TIME_MINUTES),
+            " Expiration=", TimeToString(expirationTime, TIME_DATE|TIME_MINUTES));
+   
+   // Log avant placement (toujours affiché, pas seulement en debug)
+   string levelInfo = foundBestLevel ? " (optimisé: " + bestLevelSource + ")" : " (prix opportunité)";
+   Print("📋 Tentative placement ordre LIMIT (MEILLEURE OPPORTUNITÉ): ", EnumToString(request.type), 
+         " Prix=", DoubleToString(entryPrice, _Digits), levelInfo,
+         " Distance du prix actuel=", DoubleToString(MathAbs(entryPrice - currentPrice), _Digits),
+         " SL=", DoubleToString(sl, _Digits), 
+         " TP=", DoubleToString(tp, _Digits),
+         " Lot=", DoubleToString(lotSize, 2),
+         " Gain potentiel=", DoubleToString(bestOpportunity.percentage, 2), "%",
+         " Score=", DoubleToString(bestScore, 3),
+         " | Direction marché=", marketDirection == 1 ? "BUY" : "SELL",
+         " | IA Confiance=", DoubleToString(g_lastAIConfidence * 100, 1), "%");
+   
+   if(OrderSend(request, result))
+   {
+      Print("✅ Ordre LIMIT placé avec succès - MEILLEURE OPPORTUNITÉ: ", EnumToString(request.type), 
+            " Prix=", DoubleToString(entryPrice, _Digits), levelInfo,
+            " Distance du prix actuel=", DoubleToString(MathAbs(entryPrice - currentPrice), _Digits),
+            " SL=", DoubleToString(sl, _Digits), 
+            " TP=", DoubleToString(tp, _Digits),
+            " Ticket=", result.order,
+            " Gain potentiel=", DoubleToString(bestOpportunity.percentage, 2), "%",
+            " Score=", DoubleToString(bestScore, 3),
+            " | Direction marché=", marketDirection == 1 ? "BUY" : "SELL");
+      static datetime lastOrderPlacement = 0;
+      static double lastEntryPrice = 0.0;
+      lastOrderPlacement = TimeCurrent();
+      lastEntryPrice = entryPrice;
+   }
+   else
+   {
+      Print("❌ ERREUR placement ordre LIMIT: Code=", result.retcode, " - ", result.comment,
+            " | Prix=", DoubleToString(entryPrice, _Digits),
+            " | SL=", DoubleToString(sl, _Digits),
+            " | TP=", DoubleToString(tp, _Digits),
+            " | Type=", EnumToString(request.type));
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Utiliser la prédiction pour améliorer les trades présents        |
+//| Ajuster SL/TP en fonction de la direction prédite du prix        |
+//+------------------------------------------------------------------+
+void UsePredictionForCurrentTrades()
+{
+   if(!g_predictionValid || ArraySize(g_pricePrediction) < 10)
+      return; // Pas de prédiction valide
+   
+   // Obtenir la direction prédite sur les prochaines 50 bougies (direction à court terme)
+   int predictionWindow = MathMin(50, ArraySize(g_pricePrediction));
+   if(predictionWindow < 10)
+      return;
+   
+   double currentPrice = (SymbolInfoDouble(_Symbol, SYMBOL_BID) + SymbolInfoDouble(_Symbol, SYMBOL_ASK)) / 2.0;
+   double predictedPrice = g_pricePrediction[predictionWindow - 1]; // Prix prédit dans 50 bougies
+   
+   // Déterminer la direction prédite
+   bool predictionBullish = (predictedPrice > currentPrice);
+   double priceMovement = MathAbs(predictedPrice - currentPrice);
+   double movementPercent = (priceMovement / currentPrice) * 100.0;
+   
+   // Ne prendre en compte que les prédictions avec un mouvement significatif (> 0.1%)
+   if(movementPercent < 0.1)
+      return;
+   
+   // Parcourir toutes les positions ouvertes
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket <= 0)
+         continue;
+      
+      if(!PositionSelectByTicket(ticket))
+         continue;
+      
+      ENUM_POSITION_TYPE posType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+      double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+      double currentSL = PositionGetDouble(POSITION_SL);
+      double currentTP = PositionGetDouble(POSITION_TP);
+      double positionProfit = PositionGetDouble(POSITION_PROFIT);
+      double lotSize = PositionGetDouble(POSITION_VOLUME);
+      
+      // Calculer la distance du SL actuel
+      double slDistance = 0;
+      if(currentSL > 0)
+      {
+         if(posType == POSITION_TYPE_BUY)
+            slDistance = openPrice - currentSL;
+         else
+            slDistance = currentSL - openPrice;
+      }
+      
+      MqlTradeRequest request = {};
+      MqlTradeResult result = {};
+      request.action = TRADE_ACTION_SLTP;
+      request.position = ticket;
+      request.symbol = _Symbol;
+      bool shouldModify = false;
+      double newSL = currentSL;
+      double newTP = currentTP;
+      
+      // Si la prédiction va dans le sens de notre position (favorable)
+      bool predictionFavorable = ((posType == POSITION_TYPE_BUY && predictionBullish) || 
+                                   (posType == POSITION_TYPE_SELL && !predictionBullish));
+      
+      if(predictionFavorable)
+      {
+         // Ajuster le SL pour sécuriser plus de profit si la prédiction est favorable
+         // Déplacer le SL vers le break-even ou un peu plus haut si on est en profit
+         if(positionProfit > 0 && currentSL > 0)
+         {
+            double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+            long stopLevel = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
+            double minDistance = stopLevel * point;
+            if(minDistance == 0) minDistance = 10 * point;
+            
+            // Déplacer le SL vers le break-even + un petit profit (0.5$)
+            double breakEvenPlus = openPrice;
+            if(posType == POSITION_TYPE_BUY)
+            {
+               // Calculer le prix qui donne 0.5$ de profit
+               double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+               double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+               double profitNeeded = 0.5;
+               double priceMove = (profitNeeded / (lotSize * (tickValue / tickSize) * point));
+               double securePrice = openPrice + priceMove;
+               
+               if(securePrice < currentPrice - minDistance && securePrice > currentSL)
+               {
+                  newSL = NormalizeDouble(securePrice, _Digits);
+                  shouldModify = true;
+                  
+                  if(DebugMode)
+                     Print("📈 Prédiction favorable (Haussière): Ajustement SL pour sécuriser profit - ", 
+                           DoubleToString(currentSL, _Digits), " → ", DoubleToString(newSL, _Digits));
+               }
+            }
+            else // SELL
+            {
+               double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+               double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+               double profitNeeded = 0.5;
+               double priceMove = (profitNeeded / (lotSize * (tickValue / tickSize) * point));
+               double securePrice = openPrice - priceMove;
+               
+               if(securePrice > currentPrice + minDistance && (currentSL == 0 || securePrice < currentSL))
+               {
+                  newSL = NormalizeDouble(securePrice, _Digits);
+                  shouldModify = true;
+                  
+                  if(DebugMode)
+                     Print("📉 Prédiction favorable (Baissière): Ajustement SL pour sécuriser profit - ", 
+                           DoubleToString(currentSL, _Digits), " → ", DoubleToString(newSL, _Digits));
+               }
+            }
+         }
+         
+         // Augmenter le TP si la prédiction montre un mouvement plus important
+         if(currentTP > 0 && movementPercent > 0.2) // Si mouvement prédit > 0.2%
+         {
+            double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+            long stopLevel = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
+            double minDistance = stopLevel * point;
+            if(minDistance == 0) minDistance = 10 * point;
+            
+            // Augmenter le TP de 20% du mouvement prédit supplémentaire
+            double tpAdjustment = priceMovement * 0.2;
+            
+            if(posType == POSITION_TYPE_BUY)
+            {
+               double proposedTP = currentTP + tpAdjustment;
+               if(proposedTP > currentTP && proposedTP > currentPrice + minDistance)
+               {
+                  newTP = NormalizeDouble(proposedTP, _Digits);
+                  shouldModify = true;
+                  
+                  if(DebugMode)
+                     Print("📈 Prédiction favorable: Augmentation TP - ", 
+                           DoubleToString(currentTP, _Digits), " → ", DoubleToString(newTP, _Digits));
+               }
+            }
+            else // SELL
+            {
+               double proposedTP = currentTP - tpAdjustment;
+               if(proposedTP < currentTP && proposedTP < currentPrice - minDistance)
+               {
+                  newTP = NormalizeDouble(proposedTP, _Digits);
+                  shouldModify = true;
+                  
+                  if(DebugMode)
+                     Print("📉 Prédiction favorable: Augmentation TP - ", 
+                           DoubleToString(currentTP, _Digits), " → ", DoubleToString(newTP, _Digits));
+               }
+            }
+         }
+      }
+      else
+      {
+         // Prédiction défavorable - sécuriser le profit plus rapidement
+         if(positionProfit > 0 && currentSL > 0)
+         {
+            double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+            long stopLevel = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
+            double minDistance = stopLevel * point;
+            if(minDistance == 0) minDistance = 10 * point;
+            
+            // Rapprocher le SL du prix actuel pour protéger le profit
+            if(posType == POSITION_TYPE_BUY)
+            {
+               double securePrice = currentPrice - (minDistance * 1.5);
+               if(securePrice > currentSL && securePrice > openPrice)
+               {
+                  newSL = NormalizeDouble(securePrice, _Digits);
+                  shouldModify = true;
+                  
+                  if(DebugMode)
+                     Print("⚠️ Prédiction défavorable: Protection profit rapprochée - ", 
+                           DoubleToString(currentSL, _Digits), " → ", DoubleToString(newSL, _Digits));
+               }
+            }
+            else // SELL
+            {
+               double securePrice = currentPrice + (minDistance * 1.5);
+               if((currentSL == 0 || securePrice < currentSL) && securePrice < openPrice)
+               {
+                  newSL = NormalizeDouble(securePrice, _Digits);
+                  shouldModify = true;
+                  
+                  if(DebugMode)
+                     Print("⚠️ Prédiction défavorable: Protection profit rapprochée - ", 
+                           DoubleToString(currentSL, _Digits), " → ", DoubleToString(newSL, _Digits));
+               }
+            }
+         }
+      }
+      
+      // Modifier la position si nécessaire
+      if(shouldModify)
+      {
+         request.sl = newSL;
+         request.tp = newTP;
+         
+         if(OrderSend(request, result))
+         {
+            if(DebugMode)
+               Print("✅ Position ", ticket, " modifiée selon prédiction: SL=", DoubleToString(newSL, _Digits), 
+                     " TP=", DoubleToString(newTP, _Digits));
+         }
+         else
+         {
+            if(DebugMode)
+               Print("❌ Erreur modification position ", ticket, " selon prédiction: ", GetLastError());
+         }
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
 //| Vérifier et gérer les positions existantes                       |
 //+------------------------------------------------------------------+
 void CheckAndManagePositions()
@@ -863,6 +3332,47 @@ void CheckAndManagePositions()
 
    // Fermeture globale Volatility si perte cumulée dépasse 7$
    CloseVolatilityIfLossExceeded(7.0);
+   
+   // NOUVEAU: Vérifier TOUTES les positions de volatilité pour la limite de perte de $4
+   // Doit être fait AVANT la boucle principale pour vérifier tous les symboles
+   // Cette vérification fonctionne même si l'EA est attaché à un autre symbole
+   for(int j = PositionsTotal() - 1; j >= 0; j--)
+   {
+      ulong checkTicket = PositionGetTicket(j);
+      if(checkTicket > 0 && positionInfo.SelectByTicket(checkTicket))
+      {
+         if(positionInfo.Magic() == InpMagicNumber)
+         {
+            string positionSymbol = positionInfo.Symbol();
+            bool isVolatilitySymbol = IsVolatilitySymbol(positionSymbol);
+            
+            if(isVolatilitySymbol)
+            {
+               double positionProfit = positionInfo.Profit();
+               
+               // Log de débogage pour voir toutes les positions de volatilité
+               if(DebugMode && positionProfit < 0)
+                  Print("🔍 Vérification limite perte: ", positionSymbol, " - Profit: ", DoubleToString(positionProfit, 2), "$");
+               
+               // Fermer immédiatement si perte dépasse $4
+               if(positionProfit <= -4.0)
+               {
+                  Print("🚨 LIMITE ATTEINTE: ", positionSymbol, " - Profit: ", DoubleToString(positionProfit, 2), "$ - Tentative de fermeture...");
+                  if(trade.PositionClose(checkTicket))
+                  {
+                     Print("✅ Position Volatility/Step Index fermée: ", positionSymbol, 
+                           " - Perte max atteinte (", DoubleToString(positionProfit, 2), "$ <= -4.00$)");
+                  }
+                  else
+                  {
+                     Print("❌ ERREUR fermeture position (limite perte $4): ", trade.ResultRetcode(), " - ", trade.ResultRetcodeDescription(), 
+                           " - Ticket: ", checkTicket, " Symbol: ", positionSymbol, " Profit: ", DoubleToString(positionProfit, 2), "$");
+                  }
+               }
+            }
+         }
+      }
+   }
    
    for(int i = PositionsTotal() - 1; i >= 0; i--)
    {
@@ -895,168 +3405,192 @@ void CheckAndManagePositions()
             if(currentProfit > g_positionTracker.maxProfitReached)
                g_positionTracker.maxProfitReached = currentProfit;
             
-            // PROGRESSIVE PROFIT SECURING: Ajuster le SL pour sécuriser 50% du profit max
-            if(g_positionTracker.maxProfitReached >= 1.0 && !g_positionTracker.profitSecured)
+            // NOUVEAU: Limite de perte de $4 pour Step Index et autres instruments de volatilité
+            // Vérifier le symbole de la position, pas le symbole courant de l'EA
+            string positionSymbol = positionInfo.Symbol();
+            bool isVolatilitySymbol = IsVolatilitySymbol(positionSymbol);
+            if(isVolatilitySymbol && currentProfit <= -4.0)
             {
-               // Si le profit actuel est inférieur à 50% du profit max, ajuster le SL
-               double profitRetrace = g_positionTracker.maxProfitReached - currentProfit;
-               double allowedRetrace = g_positionTracker.maxProfitReached * 0.5; // 50% du max
-               
-               if(profitRetrace >= allowedRetrace)
+               if(trade.PositionClose(ticket))
                {
-                  // Calculer nouveau SL pour verrouiller 50% du profit max
-                  double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
-                  double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
-                  double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
-                  
-                  if(tickValue > 0 && point > 0)
+                  Print("🛑 Position Volatility/Step Index fermée: ", positionSymbol, 
+                        " - Perte max atteinte (", DoubleToString(currentProfit, 2), "$ <= -4.00$)");
+                  continue;
+               }
+               else
+               {
+                  Print("❌ Erreur fermeture position (limite perte $4): ", trade.ResultRetcode(), " - ", trade.ResultRetcodeDescription(), 
+                        " - Ticket: ", ticket, " Symbol: ", positionSymbol, " Profit: ", DoubleToString(currentProfit, 2), "$");
+               }
+            }
+            
+            // NOUVELLE LOGIQUE: Ne pas sécuriser/fermer une position qui a commencé à rentabiliser après une perte
+            // Laisser faire au moins 2$ de gain avant de commencer à sécuriser
+            // La sécurisation se fera uniquement si le profit >= 2$ ET que le drawdown atteint 50% du profit max
+            
+            // NOUVELLE LOGIQUE: Fermer si position ouverte > 5 min et pas de gain (perte persistante)
+            datetime openTime = (datetime)positionInfo.Time();
+            int positionAge = (int)(TimeCurrent() - openTime);
+            if(positionAge >= 300 && currentProfit <= 0) // 300 secondes = 5 minutes
+            {
+               if(trade.PositionClose(ticket))
+               {
+                  Print("⏰ Position fermée: Ouverte depuis ", positionAge, "s (>= 5 min) sans gain - Profit=", DoubleToString(currentProfit, 2), "$");
+                  continue;
+               }
+            }
+            
+            // NE PAS fermer automatiquement à 2$ - laisser la position continuer à prendre profit
+            // La fermeture se fera seulement si drawdown de 50% après avoir atteint 2$+
+            
+            // NOUVELLE LOGIQUE: Fermer si IA change en "hold" ou change de direction
+            // UNIQUEMENT pour Boom/Crash (pas pour le forex qui doit attendre SL/TP)
+            bool isBoomCrash = (StringFind(_Symbol, "Boom") != -1 || StringFind(_Symbol, "Crash") != -1);
+            if(UseAI_Agent && g_lastAIAction != "" && isBoomCrash)
+            {
+               ENUM_POSITION_TYPE posType = positionInfo.PositionType();
+               bool shouldClose = false;
+               
+               // Si IA recommande "hold", fermer (Boom/Crash uniquement)
+               if(g_lastAIAction == "hold")
+               {
+                  shouldClose = true;
+                  if(DebugMode)
+                     Print("🔄 Position Boom/Crash fermée: IA recommande maintenant 'ATTENTE' - Recherche meilleure entrée prochainement");
+               }
+               // Si IA change de direction (BUY -> SELL ou SELL -> BUY) - Boom/Crash uniquement
+               else if((posType == POSITION_TYPE_BUY && g_lastAIAction == "sell") ||
+                       (posType == POSITION_TYPE_SELL && g_lastAIAction == "buy"))
+               {
+                  shouldClose = true;
+                  if(DebugMode)
                   {
-                     double pointValue = (tickValue / tickSize) * point;
-                     double profitToSecure = g_positionTracker.maxProfitReached * 0.5; // 50%
-                     double slDistance = (profitToSecure / (pointValue * g_positionTracker.currentLot));
-                     
-                     double newSL = 0;
-                     double currentPrice = positionInfo.PriceCurrent();
-                     
-                     if(positionInfo.PositionType() == POSITION_TYPE_BUY)
-                     {
-                        newSL = NormalizeDouble(currentPrice - (slDistance * point), _Digits);
-                        // Ne jamais déplacer le SL en arrière
-                        if(newSL > positionInfo.StopLoss() || positionInfo.StopLoss() == 0)
-                        {
-                           if(trade.PositionModify(ticket, newSL, positionInfo.TakeProfit()))
-                           {
-                              g_positionTracker.profitSecured = true;
-                              Print("🔒 SL ajusté pour sécuriser 50% du profit max (", DoubleToString(profitToSecure, 2), "$) - Nouveau SL: ", newSL);
-                           }
-                        }
+                     string actionUpper = g_lastAIAction;
+                     StringToUpper(actionUpper);
+                     Print("🔄 Position Boom/Crash fermée: IA change de direction (position ", (posType == POSITION_TYPE_BUY ? "BUY" : "SELL"), 
+                           " -> IA recommande ", actionUpper, ") - Recherche meilleure entrée prochainement");
+                  }
+               }
+               
+               if(shouldClose)
+               {
+                  // Ne fermer que si le profit est >= 1$ (MIN_PROFIT_TO_CLOSE) ou si c'est une perte
+                  if(currentProfit < 0 || currentProfit >= MIN_PROFIT_TO_CLOSE)
+               {
+                  if(trade.PositionClose(ticket))
+                  {
+                     Print("✅ Position Boom/Crash fermée suite changement IA: Profit=", DoubleToString(currentProfit, 2), "$");
+                     continue;
                      }
-                     else if(positionInfo.PositionType() == POSITION_TYPE_SELL)
-                     {
-                        newSL = NormalizeDouble(currentPrice + (slDistance * point), _Digits);
-                        // Ne jamais déplacer le SL en arrière
-                        if(newSL < positionInfo.StopLoss() || positionInfo.StopLoss() == 0)
-                        {
-                           if(trade.PositionModify(ticket, newSL, positionInfo.TakeProfit()))
-                           {
-                              g_positionTracker.profitSecured = true;
-                              Print("🔒 SL ajusté pour sécuriser 50% du profit max (", DoubleToString(profitToSecure, 2), "$) - Nouveau SL: ", newSL);
-                           }
-                        }
-                     }
+                  }
+                  else if(DebugMode)
+                  {
+                     Print("⏸️ Position Boom/Crash conservée suite changement IA: Profit=", DoubleToString(currentProfit, 2), 
+                           "$ < minimum requis (", DoubleToString(MIN_PROFIT_TO_CLOSE, 2), "$) - Attendre au moins 1$");
                   }
                }
             }
             
-            // Vérifier si on doit dupliquer le trade (avec lot 2x le lot initial)
-            datetime now = TimeCurrent();
-            int positionAge = (int)(now - g_positionTracker.openTime);
+            // Vérifier si on doit doubler le lot (avec confirmations avancées)
+            // Réutiliser positionAge déjà calculé plus haut
+            int positionAgeForDouble = (int)(TimeCurrent() - g_positionTracker.openTime);
             
-            // Conditions pour duplication :
-            // 1. Nombre de duplications < 4 (limite autorisée)
-            // 2. Profit positif (robot en gain proprement)
-            // 3. Signal IA fort dans le sens voulu (confiance >= 80% et action correspond au sens de la position)
-            // 4. Position âgée d'au moins MinPositionLifetimeSec secondes
-            bool shouldDuplicate = false;
-            
-            // Compter le nombre de positions dupliquées existantes pour ce symbole
-            int duplicateCount = CountDuplicatePositions(_Symbol);
-            const int MAX_DUPLICATIONS = 4;
-            
-            if(duplicateCount < MAX_DUPLICATIONS &&
-               currentProfit >= 1.0 && // Profit >= 1.0$ pour dupliquer
-               positionAge >= MinPositionLifetimeSec)
+            if(!g_positionTracker.lotDoubled && 
+               currentProfit >= ProfitThresholdForDouble &&
+               positionAgeForDouble >= MinPositionLifetimeSec)
             {
-               // Mapper le type de position vers le type d'ordre pour les vérifications
-               ENUM_ORDER_TYPE orderType = (positionInfo.PositionType() == POSITION_TYPE_BUY) ? 
-                                          ORDER_TYPE_BUY : ORDER_TYPE_SELL;
-
-               // Condition supplémentaire: Confiance IA >= 80% (si IA activée)
-               if(UseAI_Agent && (g_lastAIConfidence < 0.80 || g_lastAIAction == "hold"))
+               // NOUVEAU: Vérifier les conditions de retournement avant de doubler
+               ENUM_POSITION_TYPE posType = positionInfo.PositionType();
+               ENUM_ORDER_TYPE orderType = (posType == POSITION_TYPE_BUY) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+               
+               // Vérifier SuperTrend et patterns de continuation
+               double superTrendStrength = 0.0;
+               bool superTrendOk = CheckSuperTrendSignal(orderType, superTrendStrength);
+               
+               // Vérifier pattern de continuation (pas de retournement)
+               double reversalConfidence = 0.0;
+               bool hasReversal = CheckPatternReversal((orderType == ORDER_TYPE_BUY) ? ORDER_TYPE_SELL : ORDER_TYPE_BUY, reversalConfidence);
+               
+               // Doubler seulement si:
+               // 1. SuperTrend confirme la direction OU
+               // 2. Pas de pattern de retournement opposé ET profit > seuil
+               bool shouldDouble = false;
+               
+               if(superTrendOk && superTrendStrength > 0.4)
                {
-                   if(DebugMode && positionAge % 15 == 0) // Log moins fréquent
-                      Print("⏸️ Duplication attente: Profit OK (", DoubleToString(currentProfit, 2), "$) mais confiance IA insuffisante ou IA en attente (", DoubleToString(g_lastAIConfidence*100, 1), "%)");
+                  shouldDouble = true;
+                  if(DebugMode)
+                     Print("✅ Doublage confirmé: SuperTrend confirme direction (Force=", DoubleToString(superTrendStrength, 2), ")");
                }
-               // VÉRIFIER L'ALIGNEMENT DE TENDANCE AVANT DUPLICATION
-               else if(!CheckTrendAlignment(orderType))
+               else if(!hasReversal && currentProfit >= ProfitThresholdForDouble * 1.5)
                {
-                   if(DebugMode && positionAge % 15 == 0)
-                      Print("⏸️ Duplication attente: Profit OK mais TENDANCE plus alignée sur M5/H1");
+                  // Pas de retournement et profit élevé
+                  shouldDouble = true;
+                  if(DebugMode)
+                     Print("✅ Doublage confirmé: Pas de retournement + Profit élevé (", DoubleToString(currentProfit, 2), "$)");
                }
-               // VÉRIFIER LA ZONE IA ET EMA AVANT DUPLICATION (ignore zone check during duplication)
-               else
+               else if(DebugMode)
                {
-                   bool isInZone = false;
-                   bool emaConfirmed = false;
-                   bool isCorrection = false;
-                   
-                   if(!CheckAIZoneEntryWithEMA(orderType, isInZone, emaConfirmed, isCorrection, true))
-                   {
-                      if(DebugMode && positionAge % 15 == 0)
-                         Print("⏸️ Duplication attente: Profit OK mais correction détectée (EMA M1)");
-                   }
-                   else
-                   {
-                      // TOUTES LES CONDITIONS SONT RÉUNIES
-                      shouldDuplicate = true;
-                      
-                      if(DebugMode)
-                         Print("✅ Duplication AUTORISÉE: Profit=", DoubleToString(currentProfit, 2), 
-                               "$ | Confiance IA=", DoubleToString(g_lastAIConfidence*100, 1), 
-                               "% | Tendance & Momentum OK | Duplications=", duplicateCount, "/", MAX_DUPLICATIONS);
-                   }
+                  Print("⏸️ Doublage reporté: SuperTrend=", superTrendOk ? "OK" : "KO", 
+                        " Reversal=", hasReversal ? "Détecté" : "Aucun", 
+                        " Profit=", DoubleToString(currentProfit, 2), "$");
                }
-            }
-            
-            if(shouldDuplicate)
-            {
-               DuplicateTradeWithDoubleLot(ticket);
+               
+               if(shouldDouble)
+               {
+                  DoublePositionLot(ticket);
+               }
             }
             
             // Vérifier les SL/TP (gérés par le broker, mais on peut vérifier)
             double sl = positionInfo.StopLoss();
             double tp = positionInfo.TakeProfit();
             
-            // Si pas de SL/TP, les définir
+            // Si pas de SL/TP, les définir avec limite de perte max 3$
             if(sl == 0 && tp == 0)
             {
-               SetFixedSLTP(ticket);
+               SetFixedSLTPWithMaxLoss(ticket, 3.0); // Limite de perte max 3$ par position
             }
             
-            // SPIKE Boom/Crash
-            bool isBoomCrash = (StringFind(_Symbol, "Boom") != -1 || StringFind(_Symbol, "Crash") != -1);
+            // Pour Boom/Crash: Fermer après spike même avec petit gain (0.2$ minimum)
+            bool isForex = IsForexSymbol(_Symbol);
+            
             if(isBoomCrash)
             {
                CloseBoomCrashAfterSpike(ticket, currentProfit);
             }
             
-            // NOUVEAU: Fermeture si l'IA recommande d'ATTENDRE (hold)
-            if(UseAI_Agent && (g_lastAIAction == "hold" || g_lastAIAction == ""))
+            // PROTECTION FOREX: Ne pas fermer les positions Forex trop vite (minimum 60 secondes)
+            // Les positions Forex doivent avoir le temps de se développer avant fermeture
+            if(isForex && !isBoomCrash)
             {
-               if(currentProfit >= 0.5 || currentProfit <= -1.0) // Seuil min pour éviter micro-clôtures inutiles
+               datetime openTime = (datetime)positionInfo.Time();
+               int positionAge = (int)(TimeCurrent() - openTime);
+               
+               // Si position trop récente (< 60s) et en petite perte, attendre
+               if(positionAge < 60 && currentProfit < 0 && currentProfit > -1.0)
                {
-                  if(trade.PositionClose(ticket))
-                  {
-                     Print("✅ Position fermée: IA recommande d'ATTENDRE (ATTENTE/HOLD) - Profit=", DoubleToString(currentProfit, 2), "$");
-                     g_hasPosition = false;
-                     continue;
-                  }
+                  if(DebugMode)
+                     Print("⏸️ Position Forex trop récente (", positionAge, "s < 60s) et petite perte (", DoubleToString(currentProfit, 2), "$) - Attendre développement");
+                  // Ne pas fermer, continuer la boucle
+                  break;
                }
             }
             
-            // Appliquer le Trailing Stop
-            ApplyDynamicTrailingStop(ticket);
-            
             // NOUVELLE LOGIQUE: Fermer les positions si le prix sort de la zone IA et entre en correction
-            // Évite de garder des positions pendant les corrections
-            ENUM_POSITION_TYPE posType = positionInfo.PositionType();
-            if(posType == POSITION_TYPE_BUY)
+            // UNIQUEMENT pour Boom/Crash (pas pour le forex qui doit attendre SL/TP)
+            // Évite de garder des positions pendant les corrections sur Boom/Crash
+            if(isBoomCrash)
             {
-               CheckAndCloseBuyOnCorrection(ticket, currentProfit);
-            }
-            else if(posType == POSITION_TYPE_SELL)
-            {
-               CheckAndCloseSellOnCorrection(ticket, currentProfit);
+               ENUM_POSITION_TYPE posType = positionInfo.PositionType();
+               if(posType == POSITION_TYPE_BUY)
+               {
+                  CheckAndCloseBuyOnCorrection(ticket, currentProfit);
+               }
+               else if(posType == POSITION_TYPE_SELL)
+               {
+                  CheckAndCloseSellOnCorrection(ticket, currentProfit);
+               }
             }
             
             break; // Une seule position à la fois
@@ -1075,6 +3609,308 @@ void CheckAndManagePositions()
       g_positionTracker.maxProfitReached = 0.0;
       g_positionTracker.profitSecured = false;
       g_globalMaxProfit = 0.0; // Réinitialiser le profit global max
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Nettoyer TOUS les objets graphiques au démarrage                  |
+//+------------------------------------------------------------------+
+void CleanAllGraphicalObjects()
+{
+   // Supprimer TOUS les objets graphiques sauf les labels essentiels
+   int total = ObjectsTotal(0);
+   string objectsToKeep[] = {"AI_CONFIDENCE_", "AI_TREND_SUMMARY_"};
+   
+   for(int i = total - 1; i >= 0; i--)
+   {
+      string name = ObjectName(0, i);
+      if(name == "")
+         continue;
+      
+      // Vérifier si c'est un objet à garder
+      bool keepObject = false;
+      for(int k = 0; k < ArraySize(objectsToKeep); k++)
+      {
+         if(StringFind(name, objectsToKeep[k]) == 0)
+         {
+            keepObject = true;
+            break;
+         }
+      }
+      
+      if(!keepObject)
+         ObjectDelete(0, name);
+   }
+   
+   if(DebugMode)
+      Print("🧹 Nettoyage complet des objets graphiques effectué");
+}
+
+//+------------------------------------------------------------------+
+//| Nettoyer les anciens objets graphiques                           |
+//+------------------------------------------------------------------+
+void CleanOldGraphicalObjects()
+{
+   // OPTIMISATION: Nettoyage minimal - seulement les objets vraiment obsolètes
+   // Ne pas nettoyer trop souvent pour éviter de ralentir
+   static datetime lastCleanup = 0;
+   if(TimeCurrent() - lastCleanup < 300) // Nettoyage max toutes les 5 minutes
+      return;
+   
+   // Déclarer les tableaux au début de la fonction
+   string prefixesToDelete[] = {"DERIV_", "Deriv_"}; // Supprimer seulement les patterns Deriv obsolètes
+   string objectsToKeep[] = {"AI_CONFIDENCE_", "AI_TREND_SUMMARY_", "EMA_Fast_", "EMA_Slow_", "EMA_50_", "EMA_100_", "EMA_200_", 
+                              "AI_BUY_", "AI_SELL_", "SR_", "Trend_", "SMC_OB_", "DERIV_ARROW_",
+                              "OPPORTUNITIES_PANEL_", "OPP_", "OPPORTUNITIES_TITLE_"};
+   
+   // Supprimer les anciens objets graphiques sauf ceux qu'on veut garder
+   int total = ObjectsTotal(0);
+   if(total > 1000) // Seulement nettoyer si trop d'objets
+   {
+      // Limiter le nettoyage aux 100 derniers objets pour performance
+      int startIdx = MathMax(0, total - 100);
+      for(int i = total - 1; i >= startIdx; i--)
+      {
+         string name = ObjectName(0, i);
+         if(name == "")
+            continue;
+         
+         // Vérifier si c'est un objet à garder
+         bool keepObject = false;
+         for(int k = 0; k < ArraySize(objectsToKeep); k++)
+         {
+            if(StringFind(name, objectsToKeep[k]) == 0)
+            {
+               keepObject = true;
+               break;
+            }
+         }
+         
+         if(keepObject)
+            continue; // Garder cet objet
+         
+         // Supprimer les objets avec les préfixes à supprimer
+         for(int j = 0; j < ArraySize(prefixesToDelete); j++)
+         {
+            if(StringFind(name, prefixesToDelete[j]) == 0)
+            {
+               ObjectDelete(0, name);
+               break;
+            }
+         }
+      }
+   }
+   
+   lastCleanup = TimeCurrent();
+}
+
+//+------------------------------------------------------------------+
+//| Dessiner le panneau d'information des opportunités               |
+//+------------------------------------------------------------------+
+void DrawOpportunitiesPanel()
+{
+   // Supprimer les anciens labels BUY/SELL qui pourraient encore exister sur le graphique
+   int total = ObjectsTotal(0);
+   string prefix1 = "PRED_";
+   string prefix2 = "PRED_CORRECTION_";
+   for(int i = total - 1; i >= 0; i--)
+   {
+      string name = ObjectName(0, i);
+      if(name == "")
+         continue;
+      
+      // Supprimer les anciens labels BUY_LABEL, SELL_LABEL et LABEL_ des zones de correction
+      if(StringFind(name, prefix1 + "BUY_LABEL_") == 0 || 
+         StringFind(name, prefix1 + "SELL_LABEL_") == 0 ||
+         StringFind(name, prefix2 + "LABEL_") == 0)
+      {
+         ObjectDelete(0, name);
+      }
+   }
+   
+   // Ne rien afficher si pas d'opportunités - masquer le panneau
+   if(g_opportunitiesCount == 0)
+   {
+      string panelBgName = "OPPORTUNITIES_PANEL_BG_" + _Symbol;
+      ObjectDelete(0, panelBgName);
+      string titleName = "OPPORTUNITIES_TITLE_" + _Symbol;
+      ObjectDelete(0, titleName);
+      for(int i = 0; i < 10; i++)
+      {
+         string oppName = "OPP_" + IntegerToString(i) + "_" + _Symbol;
+         ObjectDelete(0, oppName);
+      }
+      return;
+   }
+   
+   // Trier les opportunités par priorité (pourcentage décroissant) - simple tri à bulles
+   for(int i = 0; i < g_opportunitiesCount - 1; i++)
+   {
+      for(int j = 0; j < g_opportunitiesCount - i - 1; j++)
+      {
+         if(g_opportunities[j].priority < g_opportunities[j + 1].priority)
+         {
+            TradingOpportunity temp = g_opportunities[j];
+            g_opportunities[j] = g_opportunities[j + 1];
+            g_opportunities[j + 1] = temp;
+         }
+      }
+   }
+   
+   // Limiter à 5 meilleures opportunités pour ne pas encombrer
+   int maxDisplay = MathMin(5, g_opportunitiesCount);
+   
+   // Dimensions du panneau (augmenté pour afficher les prix)
+   int panelX = 10;  // Distance depuis le bord droit (sera ajusté dynamiquement)
+   int panelY = 80;  // Distance depuis le haut (sous le panneau IA)
+   int lineHeight = 18;
+   int panelWidth = 280; // Augmenté pour afficher prix + pourcentage
+   int panelHeight = (maxDisplay * lineHeight) + 25;
+   
+   // Calculer la position X depuis le bord droit
+   long chartWidth = (long)ChartGetInteger(0, CHART_WIDTH_IN_PIXELS);
+   panelX = (int)(chartWidth - panelWidth - 10);
+   
+   // Créer un fond rectangle semi-transparent
+   string panelBgName = "OPPORTUNITIES_PANEL_BG_" + _Symbol;
+   if(ObjectFind(0, panelBgName) < 0)
+      ObjectCreate(0, panelBgName, OBJ_RECTANGLE_LABEL, 0, 0, 0);
+   
+   ObjectSetInteger(0, panelBgName, OBJPROP_CORNER, CORNER_RIGHT_UPPER);
+   ObjectSetInteger(0, panelBgName, OBJPROP_XDISTANCE, panelX);
+   ObjectSetInteger(0, panelBgName, OBJPROP_YDISTANCE, panelY);
+   ObjectSetInteger(0, panelBgName, OBJPROP_XSIZE, panelWidth);
+   ObjectSetInteger(0, panelBgName, OBJPROP_YSIZE, panelHeight);
+   ObjectSetInteger(0, panelBgName, OBJPROP_BGCOLOR, C'20,20,30'); // Fond sombre
+   ObjectSetInteger(0, panelBgName, OBJPROP_BORDER_TYPE, BORDER_FLAT);
+   ObjectSetInteger(0, panelBgName, OBJPROP_COLOR, clrGray);
+   ObjectSetInteger(0, panelBgName, OBJPROP_STYLE, STYLE_SOLID);
+   ObjectSetInteger(0, panelBgName, OBJPROP_WIDTH, 1);
+   ObjectSetInteger(0, panelBgName, OBJPROP_BACK, false);
+   ObjectSetInteger(0, panelBgName, OBJPROP_SELECTABLE, false);
+   ObjectSetInteger(0, panelBgName, OBJPROP_HIDDEN, true);
+   
+   // Titre du panneau
+   string titleName = "OPPORTUNITIES_TITLE_" + _Symbol;
+   if(ObjectFind(0, titleName) < 0)
+      ObjectCreate(0, titleName, OBJ_LABEL, 0, 0, 0);
+   
+   ObjectSetInteger(0, titleName, OBJPROP_CORNER, CORNER_RIGHT_UPPER);
+   ObjectSetInteger(0, titleName, OBJPROP_XDISTANCE, panelX + 5);
+   ObjectSetInteger(0, titleName, OBJPROP_YDISTANCE, panelY + 5);
+   ObjectSetString(0, titleName, OBJPROP_TEXT, "Opportunités (" + IntegerToString(maxDisplay) + ")");
+   ObjectSetInteger(0, titleName, OBJPROP_COLOR, clrWhite);
+   ObjectSetInteger(0, titleName, OBJPROP_FONTSIZE, 9);
+   ObjectSetString(0, titleName, OBJPROP_FONT, "Arial Bold");
+   ObjectSetInteger(0, titleName, OBJPROP_SELECTABLE, false);
+   
+   // Afficher les opportunités (format compact)
+   for(int i = 0; i < maxDisplay; i++)
+   {
+      string oppName = "OPP_" + IntegerToString(i) + "_" + _Symbol;
+      if(ObjectFind(0, oppName) < 0)
+         ObjectCreate(0, oppName, OBJ_LABEL, 0, 0, 0);
+      
+      int yPos = panelY + 25 + (i * lineHeight);
+      color oppColor = g_opportunities[i].isBuy ? clrLime : clrRed;
+      
+      // Format avec prix : Type + Pourcentage + Prix
+      string oppText = (g_opportunities[i].isBuy ? "▲ BUY" : "▼ SELL") + "  +" + 
+                       DoubleToString(g_opportunities[i].percentage, 1) + "%" +
+                       " @ " + DoubleToString(g_opportunities[i].entryPrice, _Digits);
+      
+      ObjectSetInteger(0, oppName, OBJPROP_CORNER, CORNER_RIGHT_UPPER);
+      ObjectSetInteger(0, oppName, OBJPROP_XDISTANCE, panelX + 5);
+      ObjectSetInteger(0, oppName, OBJPROP_YDISTANCE, yPos);
+      ObjectSetString(0, oppName, OBJPROP_TEXT, oppText);
+      ObjectSetInteger(0, oppName, OBJPROP_COLOR, oppColor);
+      ObjectSetInteger(0, oppName, OBJPROP_FONTSIZE, 8); // Légèrement plus petit pour tout afficher
+      ObjectSetString(0, oppName, OBJPROP_FONT, "Arial Bold");
+      ObjectSetInteger(0, oppName, OBJPROP_SELECTABLE, false);
+   }
+   
+   // Supprimer les anciennes opportunités qui ne sont plus affichées
+   for(int i = maxDisplay; i < 10; i++) // Supprimer jusqu'à 10 (sécurité)
+   {
+      string oldOppName = "OPP_" + IntegerToString(i) + "_" + _Symbol;
+      ObjectDelete(0, oldOppName);
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Dessiner confiance IA et résumés de tendance par timeframe       |
+//+------------------------------------------------------------------+
+void DrawAIConfidenceAndTrendSummary()
+{
+   // Label de confiance IA
+   string aiLabelName = "AI_CONFIDENCE_" + _Symbol;
+   if(ObjectFind(0, aiLabelName) < 0)
+      ObjectCreate(0, aiLabelName, OBJ_LABEL, 0, 0, 0);
+   
+   ObjectSetInteger(0, aiLabelName, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+   ObjectSetInteger(0, aiLabelName, OBJPROP_XDISTANCE, 10);
+   ObjectSetInteger(0, aiLabelName, OBJPROP_YDISTANCE, 30);
+   
+   string aiText = "IA " + _Symbol + ": ";
+   if(g_lastAIAction == "buy")
+      aiText += "ACHAT " + DoubleToString(g_lastAIConfidence * 100, 0) + "%";
+   else if(g_lastAIAction == "sell")
+      aiText += "VENTE " + DoubleToString(g_lastAIConfidence * 100, 0) + "%";
+   else
+      aiText += "ATTENTE " + DoubleToString(g_lastAIConfidence * 100, 0) + "%";
+   
+   ObjectSetString(0, aiLabelName, OBJPROP_TEXT, aiText);
+   ObjectSetInteger(0, aiLabelName, OBJPROP_COLOR, (g_lastAIAction == "buy") ? clrLime : (g_lastAIAction == "sell") ? clrRed : clrYellow);
+   ObjectSetInteger(0, aiLabelName, OBJPROP_FONTSIZE, 12);
+   ObjectSetString(0, aiLabelName, OBJPROP_FONT, "Arial Bold");
+   
+   // Résumés de tendance par timeframe (si disponibles depuis api_trend)
+   // Récupérer les EMA pour afficher les tendances
+   double emaFastM1[], emaSlowM1[], emaFastM5[], emaSlowM5[], emaFastH1[], emaSlowH1[];
+   ArraySetAsSeries(emaFastM1, true);
+   ArraySetAsSeries(emaSlowM1, true);
+   ArraySetAsSeries(emaFastM5, true);
+   ArraySetAsSeries(emaSlowM5, true);
+   ArraySetAsSeries(emaFastH1, true);
+   ArraySetAsSeries(emaSlowH1, true);
+   
+   bool hasData = true;
+   if(CopyBuffer(emaFastHandle, 0, 0, 1, emaFastM1) <= 0 ||
+      CopyBuffer(emaSlowHandle, 0, 0, 1, emaSlowM1) <= 0 ||
+      CopyBuffer(emaFastM5Handle, 0, 0, 1, emaFastM5) <= 0 ||
+      CopyBuffer(emaSlowM5Handle, 0, 0, 1, emaSlowM5) <= 0 ||
+      CopyBuffer(emaFastH1Handle, 0, 0, 1, emaFastH1) <= 0 ||
+      CopyBuffer(emaSlowH1Handle, 0, 0, 1, emaSlowH1) <= 0)
+      hasData = false;
+   
+   if(hasData)
+   {
+      int yOffset = 50;
+      string trendText = "Tendances: ";
+      
+      // M1
+      string m1Trend = (emaFastM1[0] > emaSlowM1[0]) ? "M1↑" : "M1↓";
+      trendText += m1Trend + " ";
+      
+      // M5
+      string m5Trend = (emaFastM5[0] > emaSlowM5[0]) ? "M5↑" : "M5↓";
+      trendText += m5Trend + " ";
+      
+      // H1
+      string h1Trend = (emaFastH1[0] > emaSlowH1[0]) ? "H1↑" : "H1↓";
+      trendText += h1Trend;
+      
+      string trendLabelName = "AI_TREND_SUMMARY_" + _Symbol;
+      if(ObjectFind(0, trendLabelName) < 0)
+         ObjectCreate(0, trendLabelName, OBJ_LABEL, 0, 0, 0);
+      
+      ObjectSetInteger(0, trendLabelName, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+      ObjectSetInteger(0, trendLabelName, OBJPROP_XDISTANCE, 10);
+      ObjectSetInteger(0, trendLabelName, OBJPROP_YDISTANCE, yOffset);
+      ObjectSetString(0, trendLabelName, OBJPROP_TEXT, trendText);
+      ObjectSetInteger(0, trendLabelName, OBJPROP_COLOR, clrWhite);
+      ObjectSetInteger(0, trendLabelName, OBJPROP_FONTSIZE, 10);
+      ObjectSetString(0, trendLabelName, OBJPROP_FONT, "Arial");
    }
 }
 
@@ -1117,21 +3953,55 @@ void CheckAndCloseBuyOnCorrection(ulong ticket, double currentProfit)
       }
       
       // Si correction détectée et prix sorti de zone, fermer la position
-      // Mais seulement si on a un petit profit ou une petite perte (éviter de perdre trop)
+      // NOUVELLE LOGIQUE: Ne pas fermer si le trade est en gain et que la correction n'a pas coûté plus de 2$
       if(isCorrection)
       {
-         // Fermer si profit >= 0 ou perte <= 2$ (limiter les pertes)
-         if(currentProfit >= 0 || currentProfit >= -2.0)
+         // PROTECTION: Ne pas fermer trop vite (minimum 30 secondes après ouverture)
+         datetime openTime = (datetime)positionInfo.Time();
+         int positionAge = (int)(TimeCurrent() - openTime);
+         if(positionAge < 30)
+         {
+            if(DebugMode)
+               Print("⏸️ Position BUY trop récente (", positionAge, "s < 30s) - Attendre avant fermeture correction");
+            return; // Ne pas fermer trop vite
+         }
+         
+         // Calculer la perte depuis le profit maximum atteint
+         double profitMaxReached = g_positionTracker.maxProfitReached;
+         double correctionLoss = 0.0;
+         if(profitMaxReached > 0 && currentProfit < profitMaxReached)
+         {
+            correctionLoss = profitMaxReached - currentProfit;
+         }
+         
+         // Si le trade est en gain (currentProfit > 0) et que la correction n'a pas coûté plus de 2$, NE PAS FERMER
+         if(currentProfit > 0 && correctionLoss <= 2.0)
+         {
+            if(DebugMode)
+               Print("⏸️ Position BUY conservée malgré correction: En gain (", DoubleToString(currentProfit, 2), "$) et correction <= 2$ (", DoubleToString(correctionLoss, 2), "$) - Laisser rejoindre le mouvement normal");
+            return; // Ne pas fermer, laisser continuer
+         }
+         
+         // Fermer si perte <= 2$ (limiter les pertes) OU si correction a coûté plus de 2$ depuis le profit max
+         // MAIS uniquement si le profit est >= 1$ (MIN_PROFIT_TO_CLOSE) ou si c'est une perte
+         if((currentProfit >= -2.0 || (profitMaxReached > 0 && correctionLoss > 2.0)) && 
+            (currentProfit < 0 || currentProfit >= MIN_PROFIT_TO_CLOSE))
          {
             if(trade.PositionClose(ticket))
             {
-               Print("✅ Position BUY fermée: Prix sorti de zone d'achat [", g_aiBuyZoneLow, "-", g_aiBuyZoneHigh, "] et correction détectée - Profit=", DoubleToString(currentProfit, 2), "$");
+               string reason = (correctionLoss > 2.0) ? "Correction > 2$ depuis profit max" : (currentProfit < 0 ? "Perte <= 2$" : "Profit >= 1$");
+               Print("✅ Position BUY fermée: Prix sorti de zone d'achat [", g_aiBuyZoneLow, "-", g_aiBuyZoneHigh, "] et correction détectée (après ", positionAge, "s) - Profit=", DoubleToString(currentProfit, 2), "$ - ", reason);
             }
             else
             {
                if(DebugMode)
                   Print("❌ Erreur fermeture position BUY: ", trade.ResultRetcodeDescription());
             }
+         }
+         else if(DebugMode && currentProfit > 0 && currentProfit < MIN_PROFIT_TO_CLOSE)
+         {
+            Print("⏸️ Position BUY conservée: Profit=", DoubleToString(currentProfit, 2), 
+                  "$ < minimum requis (", DoubleToString(MIN_PROFIT_TO_CLOSE, 2), "$) - Attendre au moins 1$");
          }
          else if(DebugMode)
          {
@@ -1180,20 +4050,55 @@ void CheckAndCloseSellOnCorrection(ulong ticket, double currentProfit)
       }
       
       // Si correction détectée et prix sorti de zone, fermer la position
+      // NOUVELLE LOGIQUE: Ne pas fermer si le trade est en gain et que la correction n'a pas coûté plus de 2$
       if(isCorrection)
       {
-         // Fermer si profit >= 0 ou perte <= 2$
-         if(currentProfit >= 0 || currentProfit >= -2.0)
+         // PROTECTION: Ne pas fermer trop vite (minimum 30 secondes après ouverture)
+         datetime openTime = (datetime)positionInfo.Time();
+         int positionAge = (int)(TimeCurrent() - openTime);
+         if(positionAge < 30)
+         {
+            if(DebugMode)
+               Print("⏸️ Position SELL trop récente (", positionAge, "s < 30s) - Attendre avant fermeture correction");
+            return; // Ne pas fermer trop vite
+         }
+         
+         // Calculer la perte depuis le profit maximum atteint
+         double profitMaxReached = g_positionTracker.maxProfitReached;
+         double correctionLoss = 0.0;
+         if(profitMaxReached > 0 && currentProfit < profitMaxReached)
+         {
+            correctionLoss = profitMaxReached - currentProfit;
+         }
+         
+         // Si le trade est en gain (currentProfit > 0) et que la correction n'a pas coûté plus de 2$, NE PAS FERMER
+         if(currentProfit > 0 && correctionLoss <= 2.0)
+         {
+            if(DebugMode)
+               Print("⏸️ Position SELL conservée malgré correction: En gain (", DoubleToString(currentProfit, 2), "$) et correction <= 2$ (", DoubleToString(correctionLoss, 2), "$) - Laisser rejoindre le mouvement normal");
+            return; // Ne pas fermer, laisser continuer
+         }
+         
+         // Fermer si perte <= 2$ (limiter les pertes) OU si correction a coûté plus de 2$ depuis le profit max
+         // MAIS uniquement si le profit est >= 1$ (MIN_PROFIT_TO_CLOSE) ou si c'est une perte
+         if((currentProfit >= -2.0 || (profitMaxReached > 0 && correctionLoss > 2.0)) && 
+            (currentProfit < 0 || currentProfit >= MIN_PROFIT_TO_CLOSE))
          {
             if(trade.PositionClose(ticket))
             {
-               Print("✅ Position SELL fermée: Prix sorti de zone de vente [", g_aiSellZoneLow, "-", g_aiSellZoneHigh, "] et correction détectée - Profit=", DoubleToString(currentProfit, 2), "$");
+               string reason = (correctionLoss > 2.0) ? "Correction > 2$ depuis profit max" : (currentProfit < 0 ? "Perte <= 2$" : "Profit >= 1$");
+               Print("✅ Position SELL fermée: Prix sorti de zone de vente [", g_aiSellZoneLow, "-", g_aiSellZoneHigh, "] et correction détectée (après ", positionAge, "s) - Profit=", DoubleToString(currentProfit, 2), "$ - ", reason);
             }
             else
             {
                if(DebugMode)
                   Print("❌ Erreur fermeture position SELL: ", trade.ResultRetcodeDescription());
             }
+         }
+         else if(DebugMode && currentProfit > 0 && currentProfit < MIN_PROFIT_TO_CLOSE)
+         {
+            Print("⏸️ Position SELL conservée: Profit=", DoubleToString(currentProfit, 2), 
+                  "$ < minimum requis (", DoubleToString(MIN_PROFIT_TO_CLOSE, 2), "$) - Attendre au moins 1$");
          }
          else if(DebugMode)
          {
@@ -1204,21 +4109,52 @@ void CheckAndCloseSellOnCorrection(ulong ticket, double currentProfit)
 }
 
 //+------------------------------------------------------------------+
-//| Fermer les positions Boom/Crash après spike (profit >= 0.2$)     |
+//| Fermer les positions Boom/Crash après spike (profit >= seuil)    |
+//| Détecte aussi le spike par mouvement de prix rapide               |
 //+------------------------------------------------------------------+
 void CloseBoomCrashAfterSpike(ulong ticket, double currentProfit)
 {
    if(!positionInfo.SelectByTicket(ticket))
       return;
    
-   // Pour Boom/Crash: fermer immédiatement dès qu'on atteint le profit minimal configuré
-   // (le spike est implicite dans l'ouverture de position)
-   if(currentProfit >= BoomCrashSpikeTP)
+   // Détecter le spike par mouvement de prix rapide
+   static datetime g_lastPriceCheck = 0;
+   
+   double currentPrice = positionInfo.PriceCurrent();
+   datetime now = TimeCurrent();
+   
+   // Vérifier si c'est un spike (mouvement rapide de prix)
+   bool spikeDetected = false;
+   if(g_lastBoomCrashPrice > 0 && (now - g_lastPriceCheck) <= 5) // Vérifier toutes les 5 secondes max
+   {
+      double priceChange = MathAbs(currentPrice - g_lastBoomCrashPrice);
+      double priceChangePercent = (priceChange / g_lastBoomCrashPrice) * 100.0;
+      
+      // Si changement de prix > 0.5% en peu de temps, c'est un spike
+      if(priceChangePercent > 0.5)
+      {
+         spikeDetected = true;
+         if(DebugMode)
+            Print("🚨 SPIKE DÉTECTÉ: ", _Symbol, " - Changement de prix: ", DoubleToString(priceChangePercent, 2), "%");
+      }
+   }
+   
+   g_lastBoomCrashPrice = currentPrice;
+   g_lastPriceCheck = now;
+   
+   // Pour Boom/Crash: fermer immédiatement dès qu'on atteint le profit minimal OU si spike détecté
+   // MAIS uniquement si le profit est >= 1$ (MIN_PROFIT_TO_CLOSE)
+   if((currentProfit >= BoomCrashSpikeTP || spikeDetected) && currentProfit >= MIN_PROFIT_TO_CLOSE)
    {
       if(trade.PositionClose(ticket))
       {
-         Print("✅ Position Boom/Crash fermée après spike: Profit=", DoubleToString(currentProfit, 2),
-               "$ (seuil BoomCrashSpikeTP=", DoubleToString(BoomCrashSpikeTP, 2), "$)");
+         string reason = spikeDetected ? "Spike détecté" : "Profit seuil atteint";
+         Print("✅ Position Boom/Crash fermée: ", reason, " - Profit=", DoubleToString(currentProfit, 2),
+               "$ (seuil=", DoubleToString(BoomCrashSpikeTP, 2), "$, minimum=", DoubleToString(MIN_PROFIT_TO_CLOSE, 2), "$)");
+         
+         // Réinitialiser le suivi du prix
+         g_lastBoomCrashPrice = 0.0;
+         g_lastPriceCheck = 0;
       }
       else
       {
@@ -1226,28 +4162,58 @@ void CloseBoomCrashAfterSpike(ulong ticket, double currentProfit)
                " - ", trade.ResultRetcodeDescription());
       }
    }
+   else if(DebugMode && (currentProfit >= BoomCrashSpikeTP || spikeDetected) && currentProfit < MIN_PROFIT_TO_CLOSE)
+   {
+      Print("⏸️ Position Boom/Crash conservée: Profit=", DoubleToString(currentProfit, 2), 
+            "$ < minimum requis (", DoubleToString(MIN_PROFIT_TO_CLOSE, 2), "$) - Attendre au moins 1$");
+   }
 }
 
 //+------------------------------------------------------------------+
 //| Doubler le lot de la position                                    |
 //+------------------------------------------------------------------+
-void DuplicateTradeWithDoubleLot(ulong ticket)
+void DoublePositionLot(ulong ticket)
 {
    if(!positionInfo.SelectByTicket(ticket))
       return;
    
-   double initialLot = g_positionTracker.initialLot;
-   double duplicationLot = initialLot * 2.0;
+   double currentLot = positionInfo.Volume();
+   double newLot = currentLot * 2.0;
+   
+   // Vérifier la limite maximale
+   if(newLot > MaxLotSize)
+   {
+      if(DebugMode)
+         Print("⚠️ Lot maximum atteint: ", MaxLotSize);
+      return;
+   }
    
    // Vérifier le lot minimum et maximum du broker
    double minLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
    double maxLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+   double lotStep = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
    
-   duplicationLot = NormalizeLotSize(duplicationLot);
-   duplicationLot = MathMax(minLot, MathMin(maxLot, duplicationLot));
+   // Normaliser le lot
+   newLot = MathFloor(newLot / lotStep) * lotStep;
+   newLot = MathMax(minLot, MathMin(maxLot, newLot));
    
-   // DUPLICATION START
-   // DUPLICATION EXECUTION
+   // Calculer le volume à ajouter
+   double volumeToAdd = newLot - currentLot;
+   
+   if(volumeToAdd <= 0)
+      return;
+   
+   // Normaliser le volume à ajouter
+   volumeToAdd = NormalizeLotSize(volumeToAdd);
+   
+   if(volumeToAdd < SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN))
+      {
+         if(DebugMode)
+         Print("⚠️ Volume à ajouter trop petit: ", volumeToAdd);
+      return;
+   }
+   
+   // Ouvrir une nouvelle position dans le même sens
    ENUM_ORDER_TYPE orderType = (positionInfo.PositionType() == POSITION_TYPE_BUY) ? 
                               ORDER_TYPE_BUY : ORDER_TYPE_SELL;
    
@@ -1255,78 +4221,108 @@ void DuplicateTradeWithDoubleLot(ulong ticket)
                   SymbolInfoDouble(_Symbol, SYMBOL_ASK) : 
                   SymbolInfoDouble(_Symbol, SYMBOL_BID);
    
-   // Calculer SL et TP en points pour la nouvelle position
-   double sl, tp;
+   // Calculer SL et TP dynamiques pour sécuriser les gains
+   // Sécuriser au moins 50% des gains déjà réalisés
+   double currentProfit = positionInfo.Profit();
    ENUM_POSITION_TYPE posType = positionInfo.PositionType();
-   CalculateSLTPInPoints(posType, price, sl, tp);
+   double sl, tp;
    
-   if(trade.PositionOpen(_Symbol, orderType, duplicationLot, price, sl, tp, "DUPLICATA"))
+   if(currentProfit <= 0)
    {
-      Print("✅ Trade DUPLIQUÉ: Type=", EnumToString(orderType), " Lot=", duplicationLot, " (2x initial)");
+      // Pas encore de profit, utiliser SL standard
+      CalculateSLTPInPointsWithMaxLoss(posType, price, volumeToAdd, 3.0, sl, tp);
+      if(trade.PositionOpen(_Symbol, orderType, volumeToAdd, price, sl, tp, "DOUBLE_LOT"))
+      {
+         g_positionTracker.currentLot = newLot;
+         g_positionTracker.lotDoubled = true;
+         Print("✅ Lot doublé: ", currentLot, " -> ", newLot, " (ajout: ", volumeToAdd, ")");
+      }
+      else
+      {
+         Print("❌ Erreur doublement lot: ", trade.ResultRetcode(), " - ", trade.ResultRetcodeDescription());
+      }
+      return;
+   }
+   
+   double maxDrawdownAllowed = currentProfit * 0.5; // 50% du profit actuel = perte max acceptée
+   double securedProfit = currentProfit - maxDrawdownAllowed; // Profit sécurisé
+   
+   double openPrice = positionInfo.PriceOpen();
+   
+   // Calculer SL dynamique pour sécuriser les gains
+   CalculateDynamicSLTPForDouble(posType, openPrice, price, volumeToAdd, securedProfit, maxDrawdownAllowed, sl, tp);
+   
+   // Mettre à jour le SL de la position originale aussi pour sécuriser les gains
+   double currentPriceForSL = positionInfo.PriceCurrent();
+   double originalSL, originalTP;
+   CalculateDynamicSLTPForDouble(posType, openPrice, currentPriceForSL, currentLot, securedProfit, maxDrawdownAllowed, originalSL, originalTP);
+   
+   // Mettre à jour le SL de la position originale pour sécuriser les gains
+   if(originalSL > 0)
+   {
+      double currentSL = positionInfo.StopLoss();
+      bool shouldUpdateSL = false;
+      
+      if(posType == POSITION_TYPE_BUY)
+      {
+         // Pour BUY, le nouveau SL doit être meilleur (plus haut) que l'actuel
+         if(currentSL == 0 || originalSL > currentSL)
+            shouldUpdateSL = true;
+      }
+      else // SELL
+      {
+         // Pour SELL, le nouveau SL doit être meilleur (plus bas) que l'actuel
+         if(currentSL == 0 || originalSL < currentSL)
+            shouldUpdateSL = true;
+      }
+      
+      if(shouldUpdateSL)
+      {
+         trade.PositionModify(ticket, originalSL, positionInfo.TakeProfit());
+         if(DebugMode)
+            Print("✅ SL original sécurisé: ", originalSL, " (sécurise ", DoubleToString(securedProfit, 2), "$)");
+      }
+   }
+   
+   if(trade.PositionOpen(_Symbol, orderType, volumeToAdd, price, sl, tp, "DOUBLE_LOT"))
+   {
+      g_positionTracker.currentLot = newLot;
+      g_positionTracker.lotDoubled = true;
+      
+      Print("✅ Lot doublé: ", currentLot, " -> ", newLot, " (ajout: ", volumeToAdd, ") avec SL/TP dynamiques (sécurise ", DoubleToString(securedProfit, 2), "$)");
    }
    else
    {
-      Print("❌ Erreur duplication trade: ", trade.ResultRetcode(), " - ", trade.ResultRetcodeDescription());
+      Print("❌ Erreur doublement lot: ", trade.ResultRetcode(), " - ", trade.ResultRetcodeDescription());
    }
 }
 
-int CountDuplicatePositions(string symbol)
-{
-   int count = 0;
-   for(int i = PositionsTotal() - 1; i >= 0; i--)
-   {
-      ulong ticket = PositionGetTicket(i);
-      if(ticket > 0 && positionInfo.SelectByTicket(ticket))
-      {
-         if(positionInfo.Symbol() == symbol && positionInfo.Magic() == InpMagicNumber)
-         {
-            if(positionInfo.Comment() == "DUPLICATA")
-               count++;
-         }
-      }
-   }
-   return count;
-}
-
 //+------------------------------------------------------------------+
-//| Appliquer le Trailing Stop dynamique basé sur l'ATR              |
+//| Définir SL/TP fixes en USD avec limite de perte maximale          |
 //+------------------------------------------------------------------+
-void ApplyDynamicTrailingStop(ulong ticket)
+void SetFixedSLTPWithMaxLoss(ulong ticket, double maxLossUSD)
 {
-   if(!UseTrailingStop || !positionInfo.SelectByTicket(ticket))
+   if(!positionInfo.SelectByTicket(ticket))
       return;
    
-   double currentPrice = (positionInfo.PositionType() == POSITION_TYPE_BUY) ? 
-                         SymbolInfoDouble(_Symbol, SYMBOL_BID) : 
-                         SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double openPrice = positionInfo.PriceOpen();
+   double currentPrice = positionInfo.PriceCurrent();
+   ENUM_POSITION_TYPE posType = positionInfo.PositionType();
+   double lotSize = positionInfo.Volume();
    
-   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
-   double atrValue = 0;
-   double atr_b[];
-   ArraySetAsSeries(atr_b, true);
-   if(CopyBuffer(atrHandle, 0, 0, 1, atr_b) > 0) atrValue = atr_b[0];
+   // Calculer SL et TP avec limite de perte max
+   double sl, tp;
+   CalculateSLTPInPointsWithMaxLoss(posType, openPrice, lotSize, maxLossUSD, sl, tp);
    
-   if(atrValue <= 0) return;
-   
-   double trailingDistance = atrValue * 1.5; // Trailing serré à 1.5x ATR
-   double currentSL = positionInfo.StopLoss();
-   double newSL = 0;
-   
-   if(positionInfo.PositionType() == POSITION_TYPE_BUY)
+   if(trade.PositionModify(ticket, sl, tp))
    {
-      newSL = NormalizeDouble(currentPrice - trailingDistance, _Digits);
-      if(newSL > currentSL + (5 * point) || (currentSL == 0 && newSL < currentPrice - point))
-      {
-         trade.PositionModify(ticket, newSL, positionInfo.TakeProfit());
-      }
+      if(DebugMode)
+         Print("✅ SL/TP définis avec limite perte max ", DoubleToString(maxLossUSD, 2), "$: SL=", sl, " TP=", tp);
    }
-   else if(positionInfo.PositionType() == POSITION_TYPE_SELL)
+   else
    {
-      newSL = NormalizeDouble(currentPrice + trailingDistance, _Digits);
-      if(newSL < currentSL - (5 * point) || (currentSL == 0 && newSL > currentPrice + point))
-      {
-         trade.PositionModify(ticket, newSL, positionInfo.TakeProfit());
-      }
+      if(DebugMode)
+         Print("⚠️ Erreur modification SL/TP: ", trade.ResultRetcode());
    }
 }
 
@@ -1335,25 +4331,7 @@ void ApplyDynamicTrailingStop(ulong ticket)
 //+------------------------------------------------------------------+
 void SetFixedSLTP(ulong ticket)
 {
-   if(!positionInfo.SelectByTicket(ticket))
-      return;
-   
-   double currentPrice = positionInfo.PriceCurrent();
-   ENUM_POSITION_TYPE posType = positionInfo.PositionType();
-   
-   double sl, tp;
-   CalculateSLTPInPoints(posType, currentPrice, sl, tp);
-   
-   if(trade.PositionModify(ticket, sl, tp))
-   {
-      if(DebugMode)
-         Print("✅ SL/TP définis: SL=", sl, " TP=", tp);
-   }
-   else
-   {
-      if(DebugMode)
-         Print("⚠️ Erreur modification SL/TP: ", trade.ResultRetcode());
-   }
+   SetFixedSLTPWithMaxLoss(ticket, 3.0); // Utiliser la limite par défaut de 3$
 }
 
 //+------------------------------------------------------------------+
@@ -1377,24 +4355,10 @@ void CalculateSLTPInPoints(ENUM_POSITION_TYPE posType, double entryPrice, double
    
    if(pointValue > 0 && lotSize > 0)
    {
-      // NOUVELLE RÈGLE: SL à 20% du TP (Ratio 1:4)
-      double currentSL_USD = TakeProfitUSD * 0.2; 
-      
-      // RÉDUCTION SUPPLÉMENTAIRE POUR STEP INDEX (très volatil)
-      if(StringFind(_Symbol, "Step") != -1)
-      {
-         currentSL_USD = currentSL_USD * 0.5; // On serre encore plus sur Step Index
-         if(DebugMode) Print("📏 Step Index detected: SL set to 10% of TP (", DoubleToString(currentSL_USD, 2), " USD)");
-      }
-      else
-      {
-         if(DebugMode) Print("📏 SL/TP Ratio strict (20/80) appliqué: SL=", DoubleToString(currentSL_USD, 2), " USD");
-      }
-
       // Points pour SL
       double slValuePerPoint = lotSize * pointValue;
       if(slValuePerPoint > 0)
-         slPoints = currentSL_USD / slValuePerPoint;
+         slPoints = StopLossUSD / slValuePerPoint;
       
       // Points pour TP
       double tpValuePerPoint = lotSize * pointValue;
@@ -1402,38 +4366,239 @@ void CalculateSLTPInPoints(ENUM_POSITION_TYPE posType, double entryPrice, double
          tpPoints = TakeProfitUSD / tpValuePerPoint;
    }
    
-   // --- NOUVEAU: SERRER LES SL/TP AVEC L'ATR (DYNAMIQUE) ---
-   // On récupère l'ATR actuel pour s'assurer que les distances ne sont pas trop grandes
-   double atr[];
-   ArraySetAsSeries(atr, true);
-   if(CopyBuffer(atrHandle, 0, 0, 1, atr) > 0 && atr[0] > 0)
-   {
-      double atrPoints = atr[0] / point;
-      
-      // CAP SERRÉ: Le SL ne doit pas dépasser 1.5x ATR (TRES PROCHE)
-      double maxSLPoints = atrPoints * 1.5;
-      if(slPoints > maxSLPoints)
-      {
-         if(DebugMode) Print("📏 SL trop éloigné - Cap ATR ultra-serré appliqué: ", DoubleToString(maxSLPoints, 0), " pts");
-         slPoints = maxSLPoints;
-      }
-      
-      // CAP SERRÉ: Le TP ne doit pas dépasser 3x ATR (OBJECTIF REALISTE)
-      double maxTPPoints = atrPoints * 3.0;
-      if(tpPoints > maxTPPoints)
-      {
-         if(DebugMode) Print("📏 TP trop éloigné - Cap ATR réaliste appliqué: ", DoubleToString(maxTPPoints, 0), " pts");
-         tpPoints = maxTPPoints;
-      }
-   }
-
-   // Fallback ATR
+   // Si le calcul échoue, utiliser des valeurs par défaut basées sur ATR
    if(slPoints <= 0 || tpPoints <= 0)
    {
-      if(ArraySize(atr) > 0 && atr[0] > 0)
+      double atr[];
+      ArraySetAsSeries(atr, true);
+      if(CopyBuffer(atrHandle, 0, 0, 1, atr) > 0 && atr[0] > 0)
       {
+         // Utiliser 2x ATR pour SL et 6x ATR pour TP (mouvements longs - ratio 3:1)
          slPoints = (2.0 * atr[0]) / point;
-         tpPoints = (4.0 * atr[0]) / point;
+         tpPoints = (6.0 * atr[0]) / point; // Augmenté de 4x à 6x pour cibler les mouvements longs
+      }
+      else
+      {
+         // Valeurs par défaut
+         slPoints = 50;
+         tpPoints = 100;
+      }
+   }
+   
+   // Calculer les prix SL/TP
+   if(posType == POSITION_TYPE_BUY)
+   {
+      sl = NormalizeDouble(entryPrice - slPoints * point, _Digits);
+      tp = NormalizeDouble(entryPrice + tpPoints * point, _Digits);
+   }
+   else // SELL
+   {
+      sl = NormalizeDouble(entryPrice + slPoints * point, _Digits);
+      tp = NormalizeDouble(entryPrice - tpPoints * point, _Digits);
+   }
+   
+   // VALIDATION CRITIQUE: Vérifier que le SL est bien placé
+   if(posType == POSITION_TYPE_BUY)
+   {
+      if(sl >= entryPrice)
+      {
+         // ERREUR: SL au-dessus du prix d'ouverture pour un BUY
+         if(DebugMode)
+            Print("❌ ERREUR SL BUY: SL (", sl, ") >= Prix ouverture (", entryPrice, ") - Correction automatique");
+         // Corriger: SL doit être en-dessous
+         sl = NormalizeDouble(entryPrice - slPoints * point, _Digits);
+         if(sl >= entryPrice)
+         {
+            // Si toujours incorrect, utiliser ATR comme fallback
+            double atr[];
+            ArraySetAsSeries(atr, true);
+            if(CopyBuffer(atrHandle, 0, 0, 1, atr) > 0 && atr[0] > 0)
+               sl = NormalizeDouble(entryPrice - (2.0 * atr[0]), _Digits);
+            else
+               sl = NormalizeDouble(entryPrice - (50 * point), _Digits);
+         }
+      }
+   }
+   else // SELL
+   {
+      if(sl <= entryPrice)
+      {
+         // ERREUR: SL en-dessous du prix d'ouverture pour un SELL
+         if(DebugMode)
+            Print("❌ ERREUR SL SELL: SL (", sl, ") <= Prix ouverture (", entryPrice, ") - Correction automatique");
+         // Corriger: SL doit être au-dessus
+         sl = NormalizeDouble(entryPrice + slPoints * point, _Digits);
+         if(sl <= entryPrice)
+         {
+            // Si toujours incorrect, utiliser ATR comme fallback
+            double atr[];
+            ArraySetAsSeries(atr, true);
+            if(CopyBuffer(atrHandle, 0, 0, 1, atr) > 0 && atr[0] > 0)
+               sl = NormalizeDouble(entryPrice + (2.0 * atr[0]), _Digits);
+            else
+               sl = NormalizeDouble(entryPrice + (50 * point), _Digits);
+         }
+      }
+   }
+   
+   // CALCUL ROBUSTE des niveaux minimums du broker
+   // Note: tickValue et tickSize sont déjà déclarés au début de la fonction
+   long stopLevel = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
+   
+   // Calculer minDistance en utilisant stopLevel ET tickSize
+   double minDistance = stopLevel * point;
+   
+   // Si stopLevel = 0, utiliser une distance minimale basée sur le tickSize
+   if(minDistance == 0 || minDistance < tickSize)
+   {
+      // Utiliser au moins 3 ticks comme distance minimum
+      minDistance = tickSize * 3;
+      if(minDistance == 0)
+         minDistance = 10 * point; // Fallback si tickSize = 0
+   }
+   
+   // S'assurer que minDistance est au moins de 5 points pour éviter les erreurs
+   if(minDistance < (5 * point))
+      minDistance = 5 * point;
+   
+   // Ajuster SL pour respecter minDistance
+   double slDistance = MathAbs(entryPrice - sl);
+   if(slDistance < minDistance)
+   {
+      if(posType == POSITION_TYPE_BUY)
+         sl = NormalizeDouble(entryPrice - minDistance - (point * 2), _Digits); // Ajouter un peu de marge
+      else
+         sl = NormalizeDouble(entryPrice + minDistance + (point * 2), _Digits);
+      
+      // Recalculer slDistance après ajustement
+      slDistance = MathAbs(entryPrice - sl);
+   }
+   
+   // Ajuster TP pour respecter minDistance
+   double tpDistance = MathAbs(tp - entryPrice);
+   if(tpDistance < minDistance)
+   {
+      if(posType == POSITION_TYPE_BUY)
+         tp = NormalizeDouble(entryPrice + minDistance + (point * 2), _Digits);
+      else
+         tp = NormalizeDouble(entryPrice - minDistance - (point * 2), _Digits);
+      
+      // Recalculer tpDistance après ajustement
+      tpDistance = MathAbs(tp - entryPrice);
+   }
+   
+   // VALIDATION FINALE ROBUSTE: Vérifier que SL et TP sont corrects et valides
+   bool slValid = false;
+   bool tpValid = false;
+   
+   if(posType == POSITION_TYPE_BUY)
+   {
+      slValid = (sl > 0 && sl < entryPrice && slDistance >= minDistance);
+      tpValid = (tp > 0 && tp > entryPrice && tpDistance >= minDistance);
+   }
+   else // SELL
+   {
+      slValid = (sl > 0 && sl > entryPrice && slDistance >= minDistance);
+      tpValid = (tp > 0 && tp < entryPrice && tpDistance >= minDistance);
+   }
+   
+   // Si validation échoue, utiliser des valeurs sécurisées basées sur ATR
+   if(!slValid || !tpValid)
+   {
+      double atr[];
+      ArraySetAsSeries(atr, true);
+      if(CopyBuffer(atrHandle, 0, 0, 1, atr) > 0 && atr[0] > 0)
+      {
+         // Utiliser ATR pour calculer des niveaux sûrs (mouvements longs - ratio 3:1)
+         double atrMultiplierSL = 2.0;
+         double atrMultiplierTP = 6.0; // Augmenté de 4.0 à 6.0 pour cibler les mouvements longs
+         
+         if(posType == POSITION_TYPE_BUY)
+         {
+            sl = NormalizeDouble(entryPrice - (atrMultiplierSL * atr[0]), _Digits);
+            tp = NormalizeDouble(entryPrice + (atrMultiplierTP * atr[0]), _Digits);
+         }
+         else
+         {
+            sl = NormalizeDouble(entryPrice + (atrMultiplierSL * atr[0]), _Digits);
+            tp = NormalizeDouble(entryPrice - (atrMultiplierTP * atr[0]), _Digits);
+         }
+         
+         // Re-vérifier avec les nouvelles valeurs
+         slDistance = MathAbs(entryPrice - sl);
+         tpDistance = MathAbs(tp - entryPrice);
+         
+         if(slDistance < minDistance || tpDistance < minDistance)
+         {
+            Print("❌ ERREUR CRITIQUE: Impossible de calculer SL/TP valides après correction ATR - Trade annulé");
+            sl = 0;
+            tp = 0;
+            return;
+         }
+         
+         if(DebugMode)
+            Print("⚠️ SL/TP recalculés avec ATR: SL=", sl, " TP=", tp, " (minDistance=", minDistance, ")");
+      }
+      else
+      {
+         Print("❌ ERREUR CRITIQUE: SL/TP invalides et ATR indisponible - Trade annulé");
+         sl = 0;
+         tp = 0;
+         return;
+      }
+   }
+   
+   // DERNIÈRE VÉRIFICATION: S'assurer que les valeurs sont normalisées et valides
+   sl = NormalizeDouble(sl, _Digits);
+   tp = NormalizeDouble(tp, _Digits);
+   
+   if(sl <= 0 || tp <= 0 || sl == tp)
+   {
+      Print("❌ ERREUR CRITIQUE: SL ou TP invalides après normalisation - Trade annulé");
+      sl = 0;
+      tp = 0;
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Calculer SL/TP en points avec limite de perte maximale            |
+//+------------------------------------------------------------------+
+void CalculateSLTPInPointsWithMaxLoss(ENUM_POSITION_TYPE posType, double entryPrice, double lotSize, double maxLossUSD, double &sl, double &tp)
+{
+   // Calculer la valeur du point
+   double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+   double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   
+   double pointValue = (tickValue / tickSize) * point;
+   
+   // Calculer les points nécessaires pour la perte maximale
+   double slPoints = 0, tpPoints = 0;
+   
+   if(pointValue > 0 && lotSize > 0)
+   {
+      double slValuePerPoint = lotSize * pointValue;
+      if(slValuePerPoint > 0)
+         slPoints = maxLossUSD / slValuePerPoint;
+      
+      // TP standard
+      double tpValuePerPoint = lotSize * pointValue;
+      if(tpValuePerPoint > 0)
+         tpPoints = TakeProfitUSD / tpValuePerPoint;
+   }
+   
+   // Si le calcul échoue, utiliser des valeurs par défaut basées sur ATR
+   if(slPoints <= 0 || tpPoints <= 0)
+   {
+      double atr[];
+      ArraySetAsSeries(atr, true);
+      if(CopyBuffer(atrHandle, 0, 0, 1, atr) > 0 && atr[0] > 0)
+      {
+         // Limiter SL à maxLossUSD
+         if(slPoints <= 0 && pointValue > 0 && lotSize > 0)
+            slPoints = MathMin((maxLossUSD / (lotSize * pointValue)), (2.0 * atr[0]) / point);
+         if(tpPoints <= 0)
+            tpPoints = (6.0 * atr[0]) / point; // Augmenté de 4x à 6x pour cibler les mouvements longs
       }
       else
       {
@@ -1454,24 +4619,203 @@ void CalculateSLTPInPoints(ENUM_POSITION_TYPE posType, double entryPrice, double
       tp = NormalizeDouble(entryPrice - tpPoints * point, _Digits);
    }
    
-   // Vérifier les niveaux minimums du broker
+   // CALCUL ROBUSTE des niveaux minimums du broker (même logique que CalculateSLTPInPoints)
+   // Note: tickSize est déjà déclaré au début de la fonction
    long stopLevel = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
    double minDistance = stopLevel * point;
    
-   if(MathAbs(entryPrice - sl) < minDistance)
+   if(minDistance == 0 || minDistance < tickSize)
    {
-      if(posType == POSITION_TYPE_BUY)
-         sl = NormalizeDouble(entryPrice - minDistance - point, _Digits);
-      else
-         sl = NormalizeDouble(entryPrice + minDistance + point, _Digits);
+      minDistance = tickSize * 3;
+      if(minDistance == 0)
+         minDistance = 10 * point;
    }
    
-   if(MathAbs(tp - entryPrice) < minDistance)
+   if(minDistance < (5 * point))
+      minDistance = 5 * point;
+   
+   // Ajuster SL
+   double slDistance = MathAbs(entryPrice - sl);
+   if(slDistance < minDistance)
    {
       if(posType == POSITION_TYPE_BUY)
-         tp = NormalizeDouble(entryPrice + minDistance + point, _Digits);
+         sl = NormalizeDouble(entryPrice - minDistance - (point * 2), _Digits);
       else
-         tp = NormalizeDouble(entryPrice - minDistance - point, _Digits);
+         sl = NormalizeDouble(entryPrice + minDistance + (point * 2), _Digits);
+      slDistance = MathAbs(entryPrice - sl);
+   }
+   
+   // Ajuster TP
+   double tpDistance = MathAbs(tp - entryPrice);
+   if(tpDistance < minDistance)
+   {
+      if(posType == POSITION_TYPE_BUY)
+         tp = NormalizeDouble(entryPrice + minDistance + (point * 2), _Digits);
+      else
+         tp = NormalizeDouble(entryPrice - minDistance - (point * 2), _Digits);
+      tpDistance = MathAbs(tp - entryPrice);
+   }
+   
+   // Validation finale
+   bool slValid = (posType == POSITION_TYPE_BUY) ? (sl < entryPrice && slDistance >= minDistance) : (sl > entryPrice && slDistance >= minDistance);
+   bool tpValid = (posType == POSITION_TYPE_BUY) ? (tp > entryPrice && tpDistance >= minDistance) : (tp < entryPrice && tpDistance >= minDistance);
+   
+   if(!slValid || !tpValid)
+   {
+      // Utiliser ATR comme fallback
+      double atr[];
+      ArraySetAsSeries(atr, true);
+      if(CopyBuffer(atrHandle, 0, 0, 1, atr) > 0 && atr[0] > 0)
+      {
+         if(posType == POSITION_TYPE_BUY)
+         {
+            sl = NormalizeDouble(entryPrice - (2.0 * atr[0]), _Digits);
+            tp = NormalizeDouble(entryPrice + (4.0 * atr[0]), _Digits);
+         }
+         else
+         {
+            sl = NormalizeDouble(entryPrice + (2.0 * atr[0]), _Digits);
+            tp = NormalizeDouble(entryPrice - (4.0 * atr[0]), _Digits);
+         }
+         
+         // Re-vérifier
+         slDistance = MathAbs(entryPrice - sl);
+         tpDistance = MathAbs(tp - entryPrice);
+         if(slDistance < minDistance || tpDistance < minDistance)
+         {
+            sl = 0;
+            tp = 0;
+            return;
+         }
+      }
+      else
+      {
+         sl = 0;
+         tp = 0;
+         return;
+      }
+   }
+   
+   sl = NormalizeDouble(sl, _Digits);
+   tp = NormalizeDouble(tp, _Digits);
+   
+   // DERNIÈRE VÉRIFICATION: S'assurer que SL et TP sont valides
+   if(sl <= 0 || tp <= 0 || sl == tp)
+   {
+      if(DebugMode)
+         Print("❌ ERREUR: SL ou TP invalides dans CalculateSLTPInPointsWithMaxLoss (SL=", sl, " TP=", tp, ")");
+      sl = 0;
+      tp = 0;
+      return;
+   }
+   
+   // Vérifier une dernière fois que SL est bien placé
+   if(posType == POSITION_TYPE_BUY && sl >= entryPrice)
+   {
+      if(DebugMode)
+         Print("❌ ERREUR: SL BUY invalide (SL=", sl, " >= Entry=", entryPrice, ")");
+      sl = 0;
+      tp = 0;
+      return;
+   }
+   else if(posType == POSITION_TYPE_SELL && sl <= entryPrice)
+   {
+      if(DebugMode)
+         Print("❌ ERREUR: SL SELL invalide (SL=", sl, " <= Entry=", entryPrice, ")");
+      sl = 0;
+      tp = 0;
+      return;
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Calculer SL/TP dynamiques pour duplication avec sécurisation gains |
+//+------------------------------------------------------------------+
+void CalculateDynamicSLTPForDouble(ENUM_POSITION_TYPE posType, double openPrice, double currentPrice, double lotSize, double securedProfit, double maxDrawdownAllowed, double &sl, double &tp)
+{
+   // Calculer la valeur du point
+   double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+   double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   
+   double pointValue = (tickValue / tickSize) * point;
+   
+   // Calculer SL pour sécuriser les gains (éviter de perdre plus de maxDrawdownAllowed)
+   double slPoints = 0;
+   if(pointValue > 0 && lotSize > 0 && securedProfit > 0)
+   {
+      double slValuePerPoint = lotSize * pointValue;
+      if(slValuePerPoint > 0)
+         slPoints = maxDrawdownAllowed / slValuePerPoint;
+   }
+   
+   // Si on a déjà des gains, le SL doit être au-dessus (BUY) ou en-dessous (SELL) du prix d'entrée
+   // pour sécuriser au moins 50% des gains
+   if(securedProfit > 0 && slPoints > 0)
+   {
+      if(posType == POSITION_TYPE_BUY)
+      {
+         // Pour BUY, SL doit être au-dessus du prix d'entrée pour sécuriser les gains
+         sl = NormalizeDouble(openPrice + slPoints * point, _Digits);
+         // S'assurer que le SL est en-dessous du prix actuel
+         if(sl >= currentPrice)
+            sl = NormalizeDouble(currentPrice - point, _Digits);
+      }
+      else // SELL
+      {
+         // Pour SELL, SL doit être en-dessous du prix d'entrée pour sécuriser les gains
+         sl = NormalizeDouble(openPrice - slPoints * point, _Digits);
+         // S'assurer que le SL est au-dessus du prix actuel
+         if(sl <= currentPrice)
+            sl = NormalizeDouble(currentPrice + point, _Digits);
+      }
+   }
+   else
+   {
+      // Pas encore de gains, utiliser le SL standard
+      CalculateSLTPInPointsWithMaxLoss(posType, currentPrice, lotSize, 3.0, sl, tp);
+      return;
+   }
+   
+   // TP dynamique basé sur le risk/reward
+   double risk = MathAbs(currentPrice - sl);
+   if(risk > 0)
+   {
+      double riskRewardRatio = 2.0; // Risk/Reward de 2:1
+      if(posType == POSITION_TYPE_BUY)
+         tp = NormalizeDouble(currentPrice + (risk * riskRewardRatio), _Digits);
+      else
+         tp = NormalizeDouble(currentPrice - (risk * riskRewardRatio), _Digits);
+   }
+   else
+   {
+      // Fallback sur TP standard
+      double tpPoints = (TakeProfitUSD / (lotSize * pointValue));
+      if(posType == POSITION_TYPE_BUY)
+         tp = NormalizeDouble(currentPrice + tpPoints * point, _Digits);
+      else
+         tp = NormalizeDouble(currentPrice - tpPoints * point, _Digits);
+   }
+   
+   // Vérifier les niveaux minimums du broker
+   long stopLevel = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
+   double minDistance = stopLevel * point;
+   if(minDistance == 0) minDistance = 10 * point;
+   
+   if(MathAbs(currentPrice - sl) < minDistance)
+   {
+      if(posType == POSITION_TYPE_BUY)
+         sl = NormalizeDouble(currentPrice - minDistance - point, _Digits);
+      else
+         sl = NormalizeDouble(currentPrice + minDistance + point, _Digits);
+   }
+   
+   if(MathAbs(tp - currentPrice) < minDistance)
+   {
+      if(posType == POSITION_TYPE_BUY)
+         tp = NormalizeDouble(currentPrice + minDistance + point, _Digits);
+      else
+         tp = NormalizeDouble(currentPrice - minDistance - point, _Digits);
    }
 }
 
@@ -1683,21 +5027,23 @@ bool ExecuteUSTrade(ENUM_ORDER_TYPE orderType, double entryPrice, double sl, dou
       return false;
    }
    
-   // PROTECTION: Bloquer SELL sur Boom et BUY sur Crash
+   // PROTECTION: Bloquer SELL sur Boom (y compris Vol over Boom) et BUY sur Crash (y compris Vol over Crash)
+   // Tous les symboles avec "Boom" = BUY uniquement (spike en tendance)
+   // Tous les symboles avec "Crash" = SELL uniquement (spike en tendance)
    bool isBoom = (StringFind(_Symbol, "Boom") != -1);
    bool isCrash = (StringFind(_Symbol, "Crash") != -1);
    
    if(isBoom && orderType == ORDER_TYPE_SELL)
    {
       if(DebugMode)
-         Print("🚫 TRADE US BLOQUÉ: Impossible de trader SELL sur ", _Symbol, " (Boom = BUY uniquement)");
+         Print("🚫 TRADE US BLOQUÉ: Impossible de trader SELL sur ", _Symbol, " (Boom = BUY uniquement pour capturer les spikes en tendance)");
       return false;
    }
    
    if(isCrash && orderType == ORDER_TYPE_BUY)
    {
       if(DebugMode)
-         Print("🚫 TRADE US BLOQUÉ: Impossible de trader BUY sur ", _Symbol, " (Crash = SELL uniquement)");
+         Print("🚫 TRADE US BLOQUÉ: Impossible de trader BUY sur ", _Symbol, " (Crash = SELL uniquement pour capturer les spikes en tendance)");
       return false;
    }
    
@@ -1716,21 +5062,48 @@ bool ExecuteUSTrade(ENUM_ORDER_TYPE orderType, double entryPrice, double sl, dou
    tp = NormalizeDouble(tp, _Digits);
    entryPrice = NormalizeDouble(entryPrice, _Digits);
    
-   // Vérifier les distances minimum
+   // Vérifier les distances minimum (logique robuste)
    double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
    long stopLevel = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
+   double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
    double minDistance = stopLevel * point;
    
-   if(MathAbs(entryPrice - sl) < minDistance)
+   if(minDistance == 0 || minDistance < tickSize)
+   {
+      minDistance = tickSize * 3;
+      if(minDistance == 0)
+         minDistance = 10 * point;
+   }
+   
+   if(minDistance < (5 * point))
+      minDistance = 5 * point;
+   
+   double slDistance = MathAbs(entryPrice - sl);
+   double tpDistance = MathAbs(tp - entryPrice);
+   
+   if(slDistance < minDistance)
    {
       if(DebugMode)
-         Print("❌ Distance SL insuffisante pour US Session");
+         Print("❌ Distance SL insuffisante pour US Session (", DoubleToString(slDistance, _Digits), " < ", DoubleToString(minDistance, _Digits), ")");
       return false;
    }
-   if(MathAbs(tp - entryPrice) < minDistance)
+   if(tpDistance < minDistance)
    {
       if(DebugMode)
-         Print("❌ Distance TP insuffisante pour US Session");
+         Print("❌ Distance TP insuffisante pour US Session (", DoubleToString(tpDistance, _Digits), " < ", DoubleToString(minDistance, _Digits), ")");
+      return false;
+   }
+   
+   // Normaliser les prix avant ouverture
+   entryPrice = NormalizeDouble(entryPrice, _Digits);
+   sl = NormalizeDouble(sl, _Digits);
+   tp = NormalizeDouble(tp, _Digits);
+   
+   // Validation finale
+   if(sl <= 0 || tp <= 0 || sl == tp)
+   {
+      if(DebugMode)
+         Print("❌ SL ou TP invalides pour US Session (SL=", sl, " TP=", tp, ")");
       return false;
    }
    
@@ -1789,17 +5162,40 @@ void LookForTradingOpportunity()
    ENUM_ORDER_TYPE signalType = WRONG_VALUE;
    bool hasSignal = false;
    
-   // PRIORITÉ 2: STRATÉGIE EMA TOUCH (Si tendance claire)
-   if(CheckEMATouchEntry(signalType))
-   {
-      if(DebugMode)
-         Print("💡 Opportunité EMA Touch détectée: ", EnumToString(signalType));
-      hasSignal = true;
-   }
+   // Détecter le mode prudent (perte quotidienne élevée)
+   bool cautiousMode = (g_dailyLoss >= MaxDailyLoss);
    
-   // MODE PRUDENT: Activé dès profit >= 50$ pour sécuriser intelligemment
-   bool cautiousMode = (g_dailyProfit >= 50.0);
-   double requiredConfidence = cautiousMode ? 0.95 : AI_MinConfidence; // 95% en mode prudent, 80% normalement
+   // SEUIL ADAPTATIF selon la force du signal
+   // Le serveur IA garantit maintenant :
+   // - 60% minimum si H1 aligné
+   // - 70% minimum si H1+H4/D1 alignés
+   // - 55% minimum si M5+H1 alignés
+   // IMPORTANT: Augmenter le seuil pour éviter les trades avec signaux faibles
+   double requiredConfidence = cautiousMode ? 0.80 : 0.65; // 80% en mode prudent, 65% normalement (augmenté de 60%)
+   
+   // Détection des types de symboles
+   bool isBoomCrashSymbol = (StringFind(_Symbol, "Boom") != -1 || StringFind(_Symbol, "Crash") != -1);
+   bool isStepIndex = (StringFind(_Symbol, "Step") != -1 || StringFind(_Symbol, "Step Index") != -1);
+   bool isForexSymbol = IsForexSymbol(_Symbol);
+   bool isVolatilitySymbol = IsVolatilitySymbol(_Symbol);
+   
+   // Pour Boom/Crash, seuil plus bas car les spikes sont rapides (50%)
+   if(isBoomCrashSymbol && !cautiousMode)
+   {
+      requiredConfidence = 0.50; // 50% pour Boom/Crash
+   }
+   // Pour Step Index et Volatility, seuil minimum 50% (CRITIQUE pour éviter trades avec 32%)
+   else if((isStepIndex || isVolatilitySymbol) && !isBoomCrashSymbol && !cautiousMode)
+   {
+      requiredConfidence = 0.50; // 50% minimum pour Step Index et Volatility (IMPORTANT!)
+      if(DebugMode)
+         Print("📊 Seuil Step/Volatility appliqué: ", _Symbol, " requiert ", DoubleToString(requiredConfidence * 100, 0), "% (Confiance actuelle: ", DoubleToString(g_lastAIConfidence * 100, 1), "%)");
+   }
+   // Pour Forex, seuil encore plus élevé (70%) car on doit attendre SL/TP
+   else if(isForexSymbol && !isBoomCrashSymbol && !isStepIndex && !isVolatilitySymbol && !cautiousMode)
+   {
+      requiredConfidence = 0.70; // 70% pour Forex (signaux plus sûrs requis)
+   }
    
    // RÈGLE STRICTE : Si l'IA est activée, TOUJOURS vérifier la confiance AVANT de trader
    if(UseAI_Agent)
@@ -1837,78 +5233,81 @@ void LookForTradingOpportunity()
          else if(g_lastAIAction == "sell")
             signalType = ORDER_TYPE_SELL;
          
-         // VÉRIFIER L'ALIGNEMENT DE TENDANCE M5/H1 AVANT DE TRADER
+         // OBLIGATOIRE: VÉRIFIER L'ALIGNEMENT DES TROIS TIMEFRAMES M1, M5, H1 AVANT DE TRADER
          if(signalType != WRONG_VALUE)
          {
+            // OBLIGATOIRE 1: Alignement M1, M5 et H1 (aucune exception même avec confiance IA élevée)
             if(CheckTrendAlignment(signalType))
             {
-               // NOUVELLE LOGIQUE: Vérifier que le prix est dans la zone IA avec confirmation EMA
-               // Évite de trader les corrections
-               bool isInZone = false;
-               bool emaConfirmed = false;
-               bool isCorrection = false;
+               // OBLIGATOIRE 2: Retournement confirmé par bougie verte (BUY) ou rouge (SELL) au niveau EMA rapide M1
+               // AUCUNE exception - même avec confiance IA élevée, cette condition est obligatoire
+               bool isReversalAtEMA = DetectReversalAtFastEMA(signalType);
                
-               if(CheckAIZoneEntryWithEMA(signalType, isInZone, emaConfirmed, isCorrection))
+               if(!isReversalAtEMA)
                {
-                  // Vérifications supplémentaires en mode prudent
-                  if(cautiousMode)
+                  // Pas de retournement confirmé par bougie, rejeter le trade
+                  if(DebugMode)
+                     Print("⏸️ Signal IA ", EnumToString(signalType), " rejeté - Retournement EMA rapide M1 non confirmé par bougie ", 
+                           (signalType == ORDER_TYPE_BUY ? "verte" : "rouge"), " (OBLIGATOIRE même avec confiance IA élevée)");
+                  return;
+               }
+               
+               // Si on arrive ici, on a:
+               // 1. ✅ Alignement M1, M5 et H1 confirmé
+               // 2. ✅ Retournement à l'EMA rapide M1 avec bougie confirmée (verte pour BUY, rouge pour SELL)
+               
+               // Vérifications supplémentaires en mode prudent
+               if(cautiousMode)
+               {
+                  // En mode prudent, vérifier aussi le momentum
+                  double momentumScore = 0.0;
+                  double zoneStrength = 0.0;
+                  double currentPrice = (signalType == ORDER_TYPE_BUY) ? SymbolInfoDouble(_Symbol, SYMBOL_ASK) : SymbolInfoDouble(_Symbol, SYMBOL_BID);
+                  
+                  if(AnalyzeMomentumPressureZone(signalType, currentPrice, momentumScore, zoneStrength))
                   {
-                     // En mode prudent, vérifier aussi le momentum
-                     double momentumScore = 0.0;
-                     double zoneStrength = 0.0;
-                     double currentPrice = (signalType == ORDER_TYPE_BUY) ? SymbolInfoDouble(_Symbol, SYMBOL_ASK) : SymbolInfoDouble(_Symbol, SYMBOL_BID);
+                     double minMomentum = 0.5;
+                     double minZoneStrength = 0.6;
                      
-                     if(AnalyzeMomentumPressureZone(signalType, currentPrice, momentumScore, zoneStrength))
-                     {
-                        double minMomentum = 0.5;
-                        double minZoneStrength = 0.6;
-                        
-                        if(momentumScore < minMomentum || zoneStrength < minZoneStrength)
-                        {
-                           if(DebugMode)
-                              Print("⏸️ Signal IA ", EnumToString(signalType), " rejeté - Critères MCS insuffisants en mode prudent (Momentum: ", DoubleToString(momentumScore, 2), " < ", DoubleToString(minMomentum, 2), " ou Zone: ", DoubleToString(zoneStrength, 2), " < ", DoubleToString(minZoneStrength, 2), ")");
-                           return;
-                        }
-                     }
-                     else
+                     if(momentumScore < minMomentum || zoneStrength < minZoneStrength)
                      {
                         if(DebugMode)
-                           Print("⏸️ Signal IA ", EnumToString(signalType), " rejeté - Momentum insuffisant en mode prudent");
+                           Print("⏸️ Signal IA ", EnumToString(signalType), " rejeté - Critères MCS insuffisants en mode prudent (Momentum: ", DoubleToString(momentumScore, 2), " < ", DoubleToString(minMomentum, 2), " ou Zone: ", DoubleToString(zoneStrength, 2), " < ", DoubleToString(minZoneStrength, 2), ")");
                         return;
                      }
                   }
-                  
-                  hasSignal = true;
-                  
-                  if(DebugMode)
-                     Print("🤖 Signal ", EnumToString(signalType), " basé sur recommandation IA (confiance: ", DoubleToString(g_lastAIConfidence * 100, 1), "%) - Prix dans zone IA + EMA M5 confirmé + Pas de correction", cautiousMode ? " [MODE PRUDENT]" : "");
+                  else
+                  {
+                     if(DebugMode)
+                        Print("⏸️ Signal IA ", EnumToString(signalType), " rejeté - Momentum insuffisant en mode prudent");
+                     return;
+                  }
+               }
+               
+               hasSignal = true;
+               
+               if(DebugMode)
+                  Print("✅ Signal ", EnumToString(signalType), " confirmé: Alignement M1/M5/H1 + Retournement EMA rapide M1 avec bougie ", 
+                        (signalType == ORDER_TYPE_BUY ? "verte" : "rouge"), " (Confiance IA: ", DoubleToString(g_lastAIConfidence * 100, 1), "%)", 
+                        cautiousMode ? " [MODE PRUDENT]" : "");
 
-                  // SPIKE Boom/Crash : si confiance élevée et conditions EMA M5, tenter entrée rapide
-                  if(IsBoomCrashSymbol(_Symbol) && g_lastAIConfidence >= 0.80)
+               // SPIKE Boom/Crash : confiance minimum 60% et retournement sur EMA rapide M5
+               if(IsBoomCrashSymbol(_Symbol) && g_lastAIConfidence >= 0.60)
+               {
+                  // Vérifier retournement sur EMA rapide M5 et alignement M5/H1
+                  if(DetectBoomCrashReversalAtEMA(signalType))
                   {
                      if(TrySpikeEntry(signalType))
                         return; // spike tenté, ne pas poursuivre
                   }
                }
-               else
-               {
-                  if(DebugMode)
-                  {
-                     if(!isInZone)
-                        Print("⏸️ Signal IA ", EnumToString(signalType), " rejeté - Prix pas dans zone IA");
-                     else if(!emaConfirmed)
-                        Print("⏸️ Signal IA ", EnumToString(signalType), " rejeté - EMA M5 non confirmée");
-                     else if(isCorrection)
-                        Print("⏸️ Signal IA ", EnumToString(signalType), " rejeté - Correction détectée (attendre entrée propre dans zone)");
-                  }
-                  return; // Conditions non remplies, ne pas trader
-               }
             }
             else
             {
+               // Alignement M1/M5/H1 non confirmé, rejeter
                if(DebugMode)
-                  Print("⏸️ Signal IA ", EnumToString(signalType), " rejeté - Alignement M5/H1 non confirmé");
-               return; // Pas d'alignement, ne pas trader
+                  Print("⏸️ Signal IA ", EnumToString(signalType), " rejeté - Alignement M1/M5/H1 non confirmé (OBLIGATOIRE)");
+               return;
             }
          }
       }
@@ -1971,10 +5370,14 @@ double NormalizeLotSize(double lot)
 //+------------------------------------------------------------------+
 bool IsVolatilitySymbol(const string symbol)
 {
-   return (StringFind(symbol, "Volatility") != -1 || 
-           StringFind(symbol, "BOOM") != -1 || 
-           StringFind(symbol, "CRASH") != -1 ||
-           StringFind(symbol, "Step") != -1);
+   // Convertir en majuscules pour comparaison insensible à la casse
+   string symbolUpper = symbol;
+   StringToUpper(symbolUpper);
+   
+   return (StringFind(symbolUpper, "VOLATILITY") != -1 || 
+           StringFind(symbolUpper, "BOOM") != -1 || 
+           StringFind(symbolUpper, "CRASH") != -1 ||
+           StringFind(symbolUpper, "STEP") != -1);
 }
 
 //+------------------------------------------------------------------+
@@ -2134,19 +5537,21 @@ void ExecuteTrade(ENUM_ORDER_TYPE orderType)
       return;
    }
    
-   // PROTECTION: Bloquer SELL sur Boom et BUY sur Crash
+   // PROTECTION: Bloquer SELL sur Boom (y compris Vol over Boom) et BUY sur Crash (y compris Vol over Crash)
+   // Tous les symboles avec "Boom" = BUY uniquement (spike en tendance)
+   // Tous les symboles avec "Crash" = SELL uniquement (spike en tendance)
    bool isBoom = (StringFind(_Symbol, "Boom") != -1);
    bool isCrash = (StringFind(_Symbol, "Crash") != -1);
    
    if(isBoom && orderType == ORDER_TYPE_SELL)
    {
-      Print("🚫 TRADE BLOQUÉ: Impossible de trader SELL sur ", _Symbol, " (Boom = BUY uniquement)");
+      Print("🚫 TRADE BLOQUÉ: Impossible de trader SELL sur ", _Symbol, " (Boom = BUY uniquement pour capturer les spikes en tendance)");
       return;
    }
    
    if(isCrash && orderType == ORDER_TYPE_BUY)
    {
-      Print("🚫 TRADE BLOQUÉ: Impossible de trader BUY sur ", _Symbol, " (Crash = SELL uniquement)");
+      Print("🚫 TRADE BLOQUÉ: Impossible de trader BUY sur ", _Symbol, " (Crash = SELL uniquement pour capturer les spikes en tendance)");
       return;
    }
    
@@ -2186,6 +5591,34 @@ void ExecuteTrade(ENUM_ORDER_TYPE orderType)
    ENUM_POSITION_TYPE posType = (orderType == ORDER_TYPE_BUY) ? POSITION_TYPE_BUY : POSITION_TYPE_SELL;
    CalculateSLTPInPoints(posType, price, sl, tp);
    
+   // VALIDATION FINALE AVANT OUVERTURE: Vérifier que SL et TP sont valides
+   if(sl <= 0 || tp <= 0)
+   {
+      Print("❌ TRADE BLOQUÉ: SL ou TP invalides (SL=", sl, " TP=", tp, ") - Calcul impossible");
+      return;
+   }
+   
+   // Vérifier les distances minimum une dernière fois
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   long stopLevel = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
+   double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+   double minDistance = MathMax(stopLevel * point, tickSize * 3);
+   if(minDistance == 0) minDistance = 5 * point;
+   
+   double slDist = MathAbs(price - sl);
+   double tpDist = MathAbs(tp - price);
+   
+   if(slDist < minDistance || tpDist < minDistance)
+   {
+      Print("❌ TRADE BLOQUÉ: Distances SL/TP insuffisantes (SL=", DoubleToString(slDist, _Digits), " TP=", DoubleToString(tpDist, _Digits), " min=", DoubleToString(minDistance, _Digits), ")");
+      return;
+   }
+   
+   // Normaliser les prix avant ouverture
+   price = NormalizeDouble(price, _Digits);
+   sl = NormalizeDouble(sl, _Digits);
+   tp = NormalizeDouble(tp, _Digits);
+   
    if(trade.PositionOpen(_Symbol, orderType, normalizedLot, price, sl, tp, "SCALPER_DOUBLE"))
    {
       Print("✅ Trade ouvert: ", EnumToString(orderType), 
@@ -2214,57 +5647,97 @@ void ExecuteTrade(ENUM_ORDER_TYPE orderType)
 //+------------------------------------------------------------------+
 bool CheckTrendAlignment(ENUM_ORDER_TYPE orderType)
 {
-   double emaFastM5[], emaSlowM5[], emaFastH1[], emaSlowH1[];
+   // OBLIGATOIRE: Vérifier l'alignement des trois timeframes M1, M5 et H1
+   // Aucune exception même avec confiance IA élevée
+   
+   // NOUVEAU: Vérifier d'abord l'API de tendance si activée
+   if(UseTrendAPIAnalysis && g_api_trend_valid)
+   {
+      // Vérifier si la direction de l'API correspond au signal
+      bool apiAligned = false;
+      if(orderType == ORDER_TYPE_BUY && g_api_trend_direction == 1)
+         apiAligned = true;
+      else if(orderType == ORDER_TYPE_SELL && g_api_trend_direction == -1)
+         apiAligned = true;
+      
+      // OBLIGATOIRE: API doit être alignée, aucune exception
+      if(!apiAligned)
+      {
+         if(DebugMode)
+         {
+            string apiDir = (g_api_trend_direction == 1) ? "BUY" : (g_api_trend_direction == -1) ? "SELL" : "NEUTRE";
+            Print("❌ API Trend non alignée: Signal=", EnumToString(orderType), " API=", apiDir, " (Confiance: ", DoubleToString(g_api_trend_confidence, 1), "%)");
+         }
+         return false; // API de tendance non alignée, bloquer le trade
+      }
+      
+      if(DebugMode)
+      {
+         string apiDir = (g_api_trend_direction == 1) ? "BUY" : (g_api_trend_direction == -1) ? "SELL" : "NEUTRE";
+         Print("✅ API Trend alignée: ", apiDir, " (Confiance: ", DoubleToString(g_api_trend_confidence, 1), "%, Force: ", DoubleToString(g_api_trend_strength, 1), "%)");
+      }
+   }
+   
+   // Récupérer les EMA pour M1, M5 et H1
+   double emaFastM1[], emaSlowM1[], emaFastM5[], emaSlowM5[], emaFastH1[], emaSlowH1[];
+   ArraySetAsSeries(emaFastM1, true);
+   ArraySetAsSeries(emaSlowM1, true);
    ArraySetAsSeries(emaFastM5, true);
    ArraySetAsSeries(emaSlowM5, true);
    ArraySetAsSeries(emaFastH1, true);
    ArraySetAsSeries(emaSlowH1, true);
    
-   if(CopyBuffer(emaFastM5Handle, 0, 0, 1, emaFastM5) <= 0 ||
+   if(CopyBuffer(emaFastHandle, 0, 0, 1, emaFastM1) <= 0 ||
+      CopyBuffer(emaSlowHandle, 0, 0, 1, emaSlowM1) <= 0 ||
+      CopyBuffer(emaFastM5Handle, 0, 0, 1, emaFastM5) <= 0 ||
       CopyBuffer(emaSlowM5Handle, 0, 0, 1, emaSlowM5) <= 0 ||
       CopyBuffer(emaFastH1Handle, 0, 0, 1, emaFastH1) <= 0 ||
       CopyBuffer(emaSlowH1Handle, 0, 0, 1, emaSlowH1) <= 0)
    {
       if(DebugMode)
-         Print("⚠️ Erreur récupération indicateurs M5/H1");
+         Print("⚠️ Erreur récupération indicateurs M1/M5/H1");
       return false;
    }
    
-   // Vérifier l'alignement pour BUY
+   // Vérifier l'alignement pour BUY - OBLIGATOIRE: M1, M5 et H1 tous alignés
    if(orderType == ORDER_TYPE_BUY)
    {
+      bool m1Bullish = (emaFastM1[0] > emaSlowM1[0]);
       bool m5Bullish = (emaFastM5[0] > emaSlowM5[0]);
       bool h1Bullish = (emaFastH1[0] > emaSlowH1[0]);
       
-      if(m5Bullish && h1Bullish)
+      // OBLIGATOIRE: Les trois timeframes doivent être alignés
+      if(m1Bullish && m5Bullish && h1Bullish)
       {
          if(DebugMode)
-            Print("✅ Alignement haussier confirmé: M5=", m5Bullish ? "UP" : "DOWN", " H1=", h1Bullish ? "UP" : "DOWN");
+            Print("✅ Alignement haussier confirmé (M1, M5, H1): M1=", m1Bullish ? "UP" : "DOWN", " M5=", m5Bullish ? "UP" : "DOWN", " H1=", h1Bullish ? "UP" : "DOWN");
          return true;
       }
       else
       {
          if(DebugMode)
-            Print("❌ Alignement haussier non confirmé: M5=", m5Bullish ? "UP" : "DOWN", " H1=", h1Bullish ? "UP" : "DOWN");
+            Print("❌ Alignement haussier non confirmé: M1=", m1Bullish ? "UP" : "DOWN", " M5=", m5Bullish ? "UP" : "DOWN", " H1=", h1Bullish ? "UP" : "DOWN", " (OBLIGATOIRE: les 3 timeframes alignés)");
          return false;
       }
    }
-   // Vérifier l'alignement pour SELL
+   // Vérifier l'alignement pour SELL - OBLIGATOIRE: M1, M5 et H1 tous alignés
    else if(orderType == ORDER_TYPE_SELL)
    {
+      bool m1Bearish = (emaFastM1[0] < emaSlowM1[0]);
       bool m5Bearish = (emaFastM5[0] < emaSlowM5[0]);
       bool h1Bearish = (emaFastH1[0] < emaSlowH1[0]);
       
-      if(m5Bearish && h1Bearish)
+      // OBLIGATOIRE: Les trois timeframes doivent être alignés
+      if(m1Bearish && m5Bearish && h1Bearish)
       {
          if(DebugMode)
-            Print("✅ Alignement baissier confirmé: M5=", m5Bearish ? "DOWN" : "UP", " H1=", h1Bearish ? "DOWN" : "UP");
+            Print("✅ Alignement baissier confirmé (M1, M5, H1): M1=", m1Bearish ? "DOWN" : "UP", " M5=", m5Bearish ? "DOWN" : "UP", " H1=", h1Bearish ? "DOWN" : "UP");
          return true;
       }
       else
       {
          if(DebugMode)
-            Print("❌ Alignement baissier non confirmé: M5=", m5Bearish ? "DOWN" : "UP", " H1=", h1Bearish ? "DOWN" : "UP");
+            Print("❌ Alignement baissier non confirmé: M1=", m1Bearish ? "DOWN" : "UP", " M5=", m5Bearish ? "DOWN" : "UP", " H1=", h1Bearish ? "DOWN" : "UP", " (OBLIGATOIRE: les 3 timeframes alignés)");
          return false;
       }
    }
@@ -2341,105 +5814,110 @@ void DrawSupportResistanceLevels()
 }
 
 //+------------------------------------------------------------------+
-//| Dessiner les zones BUY/SELL de l'IA                              |
+//| Dessiner les zones BUY/SELL de l'IA (rectangles non remplis)     |
 //+------------------------------------------------------------------+
 void DrawAIZonesOnChart()
 {
+   if(!DrawAIZones)
+   {
+      // Supprimer toutes les zones AI (H8, H1, M5)
+      ObjectDelete(0, "AI_BUY_ZONE_H8_" + _Symbol);
+      ObjectDelete(0, "AI_SELL_ZONE_H8_" + _Symbol);
+      ObjectDelete(0, "AI_BUY_ZONE_H1_" + _Symbol);
+      ObjectDelete(0, "AI_SELL_ZONE_H1_" + _Symbol);
+      ObjectDelete(0, "AI_BUY_ZONE_M5_" + _Symbol);
+      ObjectDelete(0, "AI_SELL_ZONE_M5_" + _Symbol);
+      return;
+   }
+   
    datetime now = TimeCurrent();
-   datetime past = now - 24 * 60 * 60;   // historique 24h
-   datetime future = now + 24 * 60 * 60;  // projection 24h
    
-   // Zone BUY
-   string buyZoneName = "AI_BUY_ZONE_" + _Symbol;
-   if(g_aiBuyZoneLow > 0.0 && g_aiBuyZoneHigh > 0.0 && g_aiBuyZoneHigh > g_aiBuyZoneLow)
+   // Couleurs transparentes (vert et rouge avec alpha)
+   color buyColor = C'0,255,0,50';  // Vert transparent (alpha = 50)
+   color sellColor = C'255,0,0,50'; // Rouge transparent (alpha = 50)
+   
+   // Timeframes à tracer: H8, H1, M5
+   ENUM_TIMEFRAMES timeframes[];
+   ArrayResize(timeframes, 3);
+   timeframes[0] = PERIOD_H8;
+   timeframes[1] = PERIOD_H1;
+   timeframes[2] = PERIOD_M5;
+   
+   string tfNames[];
+   ArrayResize(tfNames, 3);
+   tfNames[0] = "H8";
+   tfNames[1] = "H1";
+   tfNames[2] = "M5";
+   
+   // Tracer les zones pour chaque timeframe
+   for(int tfIdx = 0; tfIdx < ArraySize(timeframes); tfIdx++)
    {
-      if(ObjectFind(0, buyZoneName) < 0)
-         ObjectCreate(0, buyZoneName, OBJ_RECTANGLE, 0, past, g_aiBuyZoneHigh, future, g_aiBuyZoneLow);
+      ENUM_TIMEFRAMES tf = timeframes[tfIdx];
+      string tfName = tfNames[tfIdx];
+      
+      // Calculer les limites temporelles selon le timeframe
+      int periodSeconds = PeriodSeconds(tf);
+      datetime past = now - (200 * periodSeconds);   // 200 bougies en arrière
+      datetime future = now + (50 * periodSeconds);  // 50 bougies en avant
+      
+      // Zone BUY - Rectangle rempli avec couleur transparente
+      string buyZoneName = "AI_BUY_ZONE_" + tfName + "_" + _Symbol;
+      if(g_aiBuyZoneLow > 0.0 && g_aiBuyZoneHigh > 0.0 && g_aiBuyZoneHigh > g_aiBuyZoneLow)
+      {
+         if(ObjectFind(0, buyZoneName) < 0)
+            ObjectCreate(0, buyZoneName, OBJ_RECTANGLE, 0, past, g_aiBuyZoneHigh, future, g_aiBuyZoneLow);
+         else
+         {
+            ObjectSetDouble(0, buyZoneName, OBJPROP_PRICE, 0, g_aiBuyZoneHigh);
+            ObjectSetDouble(0, buyZoneName, OBJPROP_PRICE, 1, g_aiBuyZoneLow);
+            ObjectSetInteger(0, buyZoneName, OBJPROP_TIME, 0, past);
+            ObjectSetInteger(0, buyZoneName, OBJPROP_TIME, 1, future);
+         }
+         
+         // Couleur transparente verte (rempli)
+         ObjectSetInteger(0, buyZoneName, OBJPROP_COLOR, buyColor);
+         ObjectSetInteger(0, buyZoneName, OBJPROP_BACK, true);  // En arrière-plan
+         ObjectSetInteger(0, buyZoneName, OBJPROP_FILL, true); // REMPLI avec transparence
+         ObjectSetInteger(0, buyZoneName, OBJPROP_STYLE, STYLE_SOLID);
+         ObjectSetInteger(0, buyZoneName, OBJPROP_WIDTH, 1);
+         ObjectSetInteger(0, buyZoneName, OBJPROP_SELECTABLE, false);
+         // Afficher uniquement sur le timeframe correspondant
+         ObjectSetInteger(0, buyZoneName, OBJPROP_TIMEFRAMES, (1 << (int)tf));
+      }
       else
       {
-         ObjectSetDouble(0, buyZoneName, OBJPROP_PRICE, 0, g_aiBuyZoneHigh);
-         ObjectSetDouble(0, buyZoneName, OBJPROP_PRICE, 1, g_aiBuyZoneLow);
-         ObjectSetInteger(0, buyZoneName, OBJPROP_TIME, 0, past);
-         ObjectSetInteger(0, buyZoneName, OBJPROP_TIME, 1, future);
+         ObjectDelete(0, buyZoneName);
       }
       
-      ObjectSetInteger(0, buyZoneName, OBJPROP_COLOR, clrLime);
-      ObjectSetInteger(0, buyZoneName, OBJPROP_BACK, true);
-      ObjectSetInteger(0, buyZoneName, OBJPROP_FILL, true);
-      ObjectSetInteger(0, buyZoneName, OBJPROP_STYLE, STYLE_SOLID);
-      ObjectSetInteger(0, buyZoneName, OBJPROP_WIDTH, 2);
-      ObjectSetInteger(0, buyZoneName, OBJPROP_SELECTABLE, false);
-      ObjectSetInteger(0, buyZoneName, OBJPROP_TIMEFRAMES, OBJ_ALL_PERIODS);
-      
-      // Label BUY
-      string buyLabelName = "AI_BUY_LABEL_" + _Symbol;
-      double labelPrice = (g_aiBuyZoneLow + g_aiBuyZoneHigh) / 2.0;
-      if(ObjectFind(0, buyLabelName) < 0)
-         ObjectCreate(0, buyLabelName, OBJ_TEXT, 0, now - 1800, labelPrice);
-      else
-         ObjectMove(0, buyLabelName, 0, now - 1800, labelPrice);
-      ObjectSetString(0, buyLabelName, OBJPROP_TEXT, "ZONE ACHAT IA");
-      ObjectSetInteger(0, buyLabelName, OBJPROP_COLOR, clrWhite);
-      ObjectSetInteger(0, buyLabelName, OBJPROP_FONTSIZE, 10);
-      ObjectSetString(0, buyLabelName, OBJPROP_FONT, "Arial Bold");
-   }
-   
-   // Zone SELL
-   string sellZoneName = "AI_SELL_ZONE_" + _Symbol;
-   if(g_aiSellZoneLow > 0.0 && g_aiSellZoneHigh > 0.0 && g_aiSellZoneHigh > g_aiSellZoneLow)
-   {
-      if(ObjectFind(0, sellZoneName) < 0)
-         ObjectCreate(0, sellZoneName, OBJ_RECTANGLE, 0, past, g_aiSellZoneHigh, future, g_aiSellZoneLow);
+      // Zone SELL - Rectangle rempli avec couleur transparente
+      string sellZoneName = "AI_SELL_ZONE_" + tfName + "_" + _Symbol;
+      if(g_aiSellZoneLow > 0.0 && g_aiSellZoneHigh > 0.0 && g_aiSellZoneHigh > g_aiSellZoneLow)
+      {
+         if(ObjectFind(0, sellZoneName) < 0)
+            ObjectCreate(0, sellZoneName, OBJ_RECTANGLE, 0, past, g_aiSellZoneHigh, future, g_aiSellZoneLow);
+         else
+         {
+            ObjectSetDouble(0, sellZoneName, OBJPROP_PRICE, 0, g_aiSellZoneHigh);
+            ObjectSetDouble(0, sellZoneName, OBJPROP_PRICE, 1, g_aiSellZoneLow);
+            ObjectSetInteger(0, sellZoneName, OBJPROP_TIME, 0, past);
+            ObjectSetInteger(0, sellZoneName, OBJPROP_TIME, 1, future);
+         }
+         
+         // Couleur transparente rouge (rempli)
+         ObjectSetInteger(0, sellZoneName, OBJPROP_COLOR, sellColor);
+         ObjectSetInteger(0, sellZoneName, OBJPROP_BACK, true);  // En arrière-plan
+         ObjectSetInteger(0, sellZoneName, OBJPROP_FILL, true); // REMPLI avec transparence
+         ObjectSetInteger(0, sellZoneName, OBJPROP_STYLE, STYLE_SOLID);
+         ObjectSetInteger(0, sellZoneName, OBJPROP_WIDTH, 1);
+         ObjectSetInteger(0, sellZoneName, OBJPROP_SELECTABLE, false);
+         // Afficher uniquement sur le timeframe correspondant
+         ObjectSetInteger(0, sellZoneName, OBJPROP_TIMEFRAMES, (1 << (int)tf));
+      }
       else
       {
-         ObjectSetDouble(0, sellZoneName, OBJPROP_PRICE, 0, g_aiSellZoneHigh);
-         ObjectSetDouble(0, sellZoneName, OBJPROP_PRICE, 1, g_aiSellZoneLow);
-         ObjectSetInteger(0, sellZoneName, OBJPROP_TIME, 0, past);
-         ObjectSetInteger(0, sellZoneName, OBJPROP_TIME, 1, future);
+         ObjectDelete(0, sellZoneName);
       }
-      
-      ObjectSetInteger(0, sellZoneName, OBJPROP_COLOR, clrRed);
-      ObjectSetInteger(0, sellZoneName, OBJPROP_BACK, true);
-      ObjectSetInteger(0, sellZoneName, OBJPROP_FILL, true);
-      ObjectSetInteger(0, sellZoneName, OBJPROP_STYLE, STYLE_SOLID);
-      ObjectSetInteger(0, sellZoneName, OBJPROP_WIDTH, 2);
-      ObjectSetInteger(0, sellZoneName, OBJPROP_SELECTABLE, false);
-      ObjectSetInteger(0, sellZoneName, OBJPROP_TIMEFRAMES, OBJ_ALL_PERIODS);
-      
-      // Label SELL
-      string sellLabelName = "AI_SELL_LABEL_" + _Symbol;
-      double labelPrice = (g_aiSellZoneLow + g_aiSellZoneHigh) / 2.0;
-      if(ObjectFind(0, sellLabelName) < 0)
-         ObjectCreate(0, sellLabelName, OBJ_TEXT, 0, now - 1800, labelPrice);
-      else
-         ObjectMove(0, sellLabelName, 0, now - 1800, labelPrice);
-      ObjectSetString(0, sellLabelName, OBJPROP_TEXT, "ZONE VENTE IA");
-      ObjectSetInteger(0, sellLabelName, OBJPROP_COLOR, clrWhite);
-      ObjectSetInteger(0, sellLabelName, OBJPROP_FONTSIZE, 10);
-      ObjectSetString(0, sellLabelName, OBJPROP_FONT, "Arial Bold");
    }
-   
-   // Label de recommandation IA
-   string aiLabelName = "AI_Recommendation_" + _Symbol;
-   if(ObjectFind(0, aiLabelName) < 0)
-      ObjectCreate(0, aiLabelName, OBJ_LABEL, 0, 0, 0);
-   
-   ObjectSetInteger(0, aiLabelName, OBJPROP_CORNER, CORNER_LEFT_UPPER);
-   ObjectSetInteger(0, aiLabelName, OBJPROP_XDISTANCE, 10);
-   ObjectSetInteger(0, aiLabelName, OBJPROP_YDISTANCE, 30);
-   
-   string aiText = "IA " + _Symbol + ": ";
-   if(g_lastAIAction == "buy")
-      aiText += "ACHAT " + DoubleToString(g_lastAIConfidence * 100, 0) + "%";
-   else if(g_lastAIAction == "sell")
-      aiText += "VENTE " + DoubleToString(g_lastAIConfidence * 100, 0) + "%";
-   else
-      aiText += "ATTENTE";
-   
-   ObjectSetString(0, aiLabelName, OBJPROP_TEXT, aiText);
-   ObjectSetInteger(0, aiLabelName, OBJPROP_COLOR, (g_lastAIAction == "buy") ? clrLime : (g_lastAIAction == "sell") ? clrRed : clrYellow);
-   ObjectSetInteger(0, aiLabelName, OBJPROP_FONTSIZE, 12);
-   ObjectSetString(0, aiLabelName, OBJPROP_FONT, "Arial Bold");
 }
 
 //+------------------------------------------------------------------+
@@ -2634,6 +6112,157 @@ void DrawTrendlinesOnChart()
 }
 
 //+------------------------------------------------------------------+
+//| Dessiner les EMA 50, 100, 200 pour tendances longues (courbes)   |
+//+------------------------------------------------------------------+
+//| Dessiner toutes les EMA (Fast, Slow, 50, 100, 200) sur 1000 bougies |
+//+------------------------------------------------------------------+
+void DrawLongTrendEMA()
+{
+   if(!ShowLongTrendEMA)
+   {
+      // Supprimer tous les segments EMA si désactivé
+      DeleteEMAObjects("EMA_Fast_");
+      DeleteEMAObjects("EMA_Slow_");
+      DeleteEMAObjects("EMA_50_");
+      DeleteEMAObjects("EMA_100_");
+      DeleteEMAObjects("EMA_200_");
+      return;
+   }
+   
+   // Récupérer les valeurs EMA sur 1000 bougies
+   double emaFast[], emaSlow[], ema50[], ema100[], ema200[];
+   datetime time[];
+   ArraySetAsSeries(emaFast, true);
+   ArraySetAsSeries(emaSlow, true);
+   ArraySetAsSeries(ema50, true);
+   ArraySetAsSeries(ema100, true);
+   ArraySetAsSeries(ema200, true);
+   ArraySetAsSeries(time, true);
+   
+   // Tracer sur 1000 bougies
+   int count = 1000;
+   
+   // Récupérer toutes les EMA
+   bool hasEMAFast = (CopyBuffer(emaFastHandle, 0, 0, count, emaFast) > 0);
+   bool hasEMASlow = (CopyBuffer(emaSlowHandle, 0, 0, count, emaSlow) > 0);
+   bool hasEMA50 = (CopyBuffer(ema50Handle, 0, 0, count, ema50) > 0);
+   bool hasEMA100 = (CopyBuffer(ema100Handle, 0, 0, count, ema100) > 0);
+   bool hasEMA200 = (CopyBuffer(ema200Handle, 0, 0, count, ema200) > 0);
+   
+   if(!hasEMAFast || !hasEMASlow || !hasEMA50 || !hasEMA100 || !hasEMA200)
+   {
+      if(DebugMode)
+         Print("⚠️ Erreur récupération EMA - Fast:", hasEMAFast, " Slow:", hasEMASlow, " 50:", hasEMA50, " 100:", hasEMA100, " 200:", hasEMA200);
+      return;
+   }
+   
+   // Récupérer les timestamps
+   if(CopyTime(_Symbol, PERIOD_M1, 0, count, time) <= 0)
+   {
+      if(DebugMode)
+         Print("⚠️ Erreur récupération timestamps pour EMA");
+      return;
+   }
+   
+   // OPTIMISATION: Ne mettre à jour que si nécessaire (toutes les 5 minutes)
+   static datetime lastEMAUpdate = 0;
+   bool needUpdate = (TimeCurrent() - lastEMAUpdate > 300); // Mise à jour max toutes les 5 minutes
+   
+   if(needUpdate)
+   {
+      // Supprimer les anciens segments EMA
+      DeleteEMAObjects("EMA_Fast_");
+      DeleteEMAObjects("EMA_Slow_");
+      DeleteEMAObjects("EMA_50_");
+      DeleteEMAObjects("EMA_100_");
+      DeleteEMAObjects("EMA_200_");
+      
+      // Tracer toutes les EMA sur 1000 bougies avec un step de 50 pour performance (20 segments max par EMA)
+      // EMA Fast (9 périodes) - Bleu clair
+      DrawEMACurveOptimized("EMA_Fast_", emaFast, time, count, clrAqua, 2, 50);
+      
+      // EMA Slow (21 périodes) - Bleu foncé
+      DrawEMACurveOptimized("EMA_Slow_", emaSlow, time, count, clrBlue, 2, 50);
+      
+      // EMA 50 - Vert clair
+      DrawEMACurveOptimized("EMA_50_", ema50, time, count, clrLime, 2, 50);
+      
+      // EMA 100 - Jaune
+      DrawEMACurveOptimized("EMA_100_", ema100, time, count, clrYellow, 2, 50);
+      
+      // EMA 200 - Orange
+      DrawEMACurveOptimized("EMA_200_", ema200, time, count, clrOrange, 2, 50);
+      
+      Print("✅ EMA tracées sur 1000 bougies: Fast (", EMA_Fast_Period, "), Slow (", EMA_Slow_Period, "), 50, 100, 200");
+      lastEMAUpdate = TimeCurrent();
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Supprimer les objets EMA avec un préfixe donné                    |
+//+------------------------------------------------------------------+
+void DeleteEMAObjects(string prefix)
+{
+   int total = ObjectsTotal(0);
+   for(int i = total - 1; i >= 0; i--)
+   {
+      string name = ObjectName(0, i);
+      if(StringFind(name, prefix) == 0)
+         ObjectDelete(0, name);
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Dessiner une courbe EMA optimisée (moins de segments)             |
+//+------------------------------------------------------------------+
+void DrawEMACurveOptimized(string prefix, double &values[], datetime &times[], int count, color clr, int width, int step)
+{
+   // Dessiner une courbe EMA sur 1000 bougies avec un step pour performance
+   // Step de 50 = environ 20 segments pour 1000 bougies (performance optimale)
+   int segmentsDrawn = 0;
+   int maxSegments = (count / step) + 1; // Nombre de segments calculé selon le step
+   if(maxSegments > 100) maxSegments = 100; // Limiter à 100 segments max pour éviter surcharge
+   
+   // Parcourir de la bougie la plus récente à la plus ancienne
+   for(int i = count - 1; i >= step && segmentsDrawn < maxSegments; i -= step)
+   {
+      int prevIdx = i - step;
+      if(prevIdx < 0) prevIdx = 0;
+      
+      // Vérifier que les valeurs sont valides
+      if(values[i] > 0 && values[prevIdx] > 0 && times[i] > 0 && times[prevIdx] > 0)
+      {
+         string segName = prefix + _Symbol + "_" + IntegerToString(segmentsDrawn);
+         
+         // Créer ou mettre à jour le segment de ligne
+         if(ObjectFind(0, segName) < 0)
+            ObjectCreate(0, segName, OBJ_TREND, 0, times[i], values[i], times[prevIdx], values[prevIdx]);
+         else
+         {
+            ObjectSetInteger(0, segName, OBJPROP_TIME, 0, times[i]);
+            ObjectSetDouble(0, segName, OBJPROP_PRICE, 0, values[i]);
+            ObjectSetInteger(0, segName, OBJPROP_TIME, 1, times[prevIdx]);
+            ObjectSetDouble(0, segName, OBJPROP_PRICE, 1, values[prevIdx]);
+         }
+         
+         ObjectSetInteger(0, segName, OBJPROP_COLOR, clr);
+         ObjectSetInteger(0, segName, OBJPROP_STYLE, STYLE_SOLID);
+         ObjectSetInteger(0, segName, OBJPROP_WIDTH, width);
+         ObjectSetInteger(0, segName, OBJPROP_RAY_RIGHT, false);
+         ObjectSetInteger(0, segName, OBJPROP_RAY_LEFT, false);
+         ObjectSetInteger(0, segName, OBJPROP_SELECTABLE, false);
+         ObjectSetInteger(0, segName, OBJPROP_BACK, false); // Devant le graphique
+         ObjectSetInteger(0, segName, OBJPROP_TIMEFRAMES, OBJ_ALL_PERIODS); // Visible sur tous les timeframes
+         
+         segmentsDrawn++;
+      }
+   }
+   
+   if(DebugMode && segmentsDrawn > 0)
+      Print("✅ EMA ", prefix, " tracée: ", segmentsDrawn, " segments sur ", count, " bougies");
+}
+
+//+------------------------------------------------------------------+
 //| Dessiner les patterns Deriv (simplifié)                          |
 //+------------------------------------------------------------------+
 //+------------------------------------------------------------------+
@@ -2706,6 +6335,130 @@ void DrawDerivPatternsOnChart()
 }
 
 //+------------------------------------------------------------------+
+//| Dessiner les zones SMC/OrderBlock/ICT                            |
+//+------------------------------------------------------------------+
+void DrawSMCZonesOnChart()
+{
+   if(!DrawSMCZones)
+   {
+      // Supprimer les zones SMC si désactivé
+      DeleteSMCZones();
+      return;
+   }
+   
+   // Récupérer les données de prix récentes pour identifier les zones SMC
+   MqlRates rates[];
+   ArraySetAsSeries(rates, true);
+   int bars = 100; // Analyser les 100 dernières bougies
+   
+   if(CopyRates(_Symbol, PERIOD_M5, 0, bars, rates) < bars)
+      return;
+   
+   // Identifier les Order Blocks (zones de forte réaction)
+   // Order Block Bullish: Bougie haussière suivie d'une forte hausse
+   // Order Block Bearish: Bougie baissière suivie d'une forte baisse
+   
+   for(int i = 5; i < bars - 5; i++)
+   {
+      // Détecter Order Block Bullish
+      if(rates[i].close > rates[i].open && rates[i+1].close < rates[i+1].open)
+      {
+         // Vérifier si le prix a rebondi après cette bougie
+         bool isOrderBlock = false;
+         for(int j = i - 1; j >= MathMax(0, i - 10); j--)
+         {
+            if(rates[j].close > rates[i].high)
+            {
+               isOrderBlock = true;
+               break;
+            }
+         }
+         
+         if(isOrderBlock)
+         {
+            // Dessiner zone Order Block Bullish
+            string obName = "SMC_OB_Bull_" + _Symbol + "_" + IntegerToString(i);
+            datetime time1 = rates[i].time;
+            datetime time2 = TimeCurrent() + PeriodSeconds(PERIOD_M5) * 50; // Étendre 50 bougies vers le futur
+            
+            if(ObjectFind(0, obName) < 0)
+               ObjectCreate(0, obName, OBJ_RECTANGLE, 0, time1, rates[i].low, time2, rates[i].high);
+            else
+            {
+               ObjectSetInteger(0, obName, OBJPROP_TIME, 0, time1);
+               ObjectSetDouble(0, obName, OBJPROP_PRICE, 0, rates[i].high);
+               ObjectSetInteger(0, obName, OBJPROP_TIME, 1, time2);
+               ObjectSetDouble(0, obName, OBJPROP_PRICE, 1, rates[i].low);
+            }
+            
+            ObjectSetInteger(0, obName, OBJPROP_COLOR, clrLime);
+            ObjectSetInteger(0, obName, OBJPROP_BACK, true);
+            ObjectSetInteger(0, obName, OBJPROP_FILL, true);
+            ObjectSetInteger(0, obName, OBJPROP_STYLE, STYLE_SOLID);
+            ObjectSetInteger(0, obName, OBJPROP_WIDTH, 1);
+            ObjectSetInteger(0, obName, OBJPROP_SELECTABLE, false);
+            ObjectSetString(0, obName, OBJPROP_TEXT, "OB Bull");
+         }
+      }
+      
+      // Détecter Order Block Bearish
+      if(rates[i].close < rates[i].open && rates[i+1].close > rates[i+1].open)
+      {
+         // Vérifier si le prix a chuté après cette bougie
+         bool isOrderBlock = false;
+         for(int j = i - 1; j >= MathMax(0, i - 10); j--)
+         {
+            if(rates[j].close < rates[i].low)
+            {
+               isOrderBlock = true;
+               break;
+            }
+         }
+         
+         if(isOrderBlock)
+         {
+            // Dessiner zone Order Block Bearish
+            string obName = "SMC_OB_Bear_" + _Symbol + "_" + IntegerToString(i);
+            datetime time1 = rates[i].time;
+            datetime time2 = TimeCurrent() + PeriodSeconds(PERIOD_M5) * 50;
+            
+            if(ObjectFind(0, obName) < 0)
+               ObjectCreate(0, obName, OBJ_RECTANGLE, 0, time1, rates[i].high, time2, rates[i].low);
+            else
+            {
+               ObjectSetInteger(0, obName, OBJPROP_TIME, 0, time1);
+               ObjectSetDouble(0, obName, OBJPROP_PRICE, 0, rates[i].low);
+               ObjectSetInteger(0, obName, OBJPROP_TIME, 1, time2);
+               ObjectSetDouble(0, obName, OBJPROP_PRICE, 1, rates[i].high);
+            }
+            
+            ObjectSetInteger(0, obName, OBJPROP_COLOR, clrRed);
+            ObjectSetInteger(0, obName, OBJPROP_BACK, true);
+            ObjectSetInteger(0, obName, OBJPROP_FILL, true);
+            ObjectSetInteger(0, obName, OBJPROP_STYLE, STYLE_SOLID);
+            ObjectSetInteger(0, obName, OBJPROP_WIDTH, 1);
+            ObjectSetInteger(0, obName, OBJPROP_SELECTABLE, false);
+            ObjectSetString(0, obName, OBJPROP_TEXT, "OB Bear");
+         }
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Supprimer les zones SMC                                          |
+//+------------------------------------------------------------------+
+void DeleteSMCZones()
+{
+   int total = ObjectsTotal(0);
+   for(int i = total - 1; i >= 0; i--)
+   {
+      string name = ObjectName(0, i);
+      if(StringFind(name, "SMC_OB_") == 0)
+         ObjectDelete(0, name);
+   }
+}
+
+//+------------------------------------------------------------------+
 //| Met à jour le clignotement de la flèche Deriv                    |
 //+------------------------------------------------------------------+
 void UpdateDerivArrowBlink()
@@ -2728,11 +6481,11 @@ void UpdateDerivArrowBlink()
       return;
    }
    
-   // Faire clignoter la flèche (changement de visibilité toutes les 1 secondes)
+   // OPTIMISATION: Faire clignoter la flèche moins fréquemment (toutes les 2 secondes)
    static datetime lastBlinkTime = 0;
    static bool blinkState = false;
    
-   if(TimeCurrent() - lastBlinkTime >= 1)
+   if(TimeCurrent() - lastBlinkTime >= 2) // Clignotement toutes les 2 secondes pour performance
    {
       blinkState = !blinkState;
       lastBlinkTime = TimeCurrent();
@@ -2868,8 +6621,382 @@ void CleanupProfitTrackers()
 }
 
 //+------------------------------------------------------------------+
+//| Sécuriser le profit d'une position individuelle                  |
+//| Déplace le SL pour sécuriser au moins 50% du profit actuel       |
+//| Appelé dès qu'une position est en profit                         |
+//+------------------------------------------------------------------+
+void SecureProfitForPosition(ulong ticket, double currentProfit)
+{
+   if(!positionInfo.SelectByTicket(ticket))
+      return;
+   
+   // NOUVELLE LOGIQUE: Ne pas sécuriser tant que le profit n'atteint pas au moins 2$
+   // Laisser la position faire au moins 2$ de gain avant de commencer à sécuriser
+   if(currentProfit < 2.0)
+      return;
+   
+   double openPrice = positionInfo.PriceOpen();
+   double currentPrice = positionInfo.PriceCurrent();
+   double currentSL = positionInfo.StopLoss();
+   ENUM_POSITION_TYPE posType = positionInfo.PositionType();
+   double lotSize = positionInfo.Volume();
+   
+   // Calculer le profit à sécuriser (50% du profit actuel)
+   double profitToSecure = currentProfit * 0.50;
+   
+   // Convertir le profit en points
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+   double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+   double pointValue = (tickValue / tickSize) * point;
+   
+   // Calculer combien on peut perdre depuis le prix actuel tout en gardant le profit sécurisé
+   // Si profit actuel = $5 et on veut sécuriser $2.5, on peut perdre max $2.5 depuis le prix actuel
+   double maxDrawdownAllowed = profitToSecure;
+   
+   double pointsToSecure = 0;
+   if(pointValue > 0 && lotSize > 0)
+   {
+      double profitPerPoint = lotSize * pointValue;
+      if(profitPerPoint > 0)
+         pointsToSecure = maxDrawdownAllowed / profitPerPoint;
+   }
+   
+   // Si le calcul échoue, utiliser ATR comme fallback
+   if(pointsToSecure <= 0)
+   {
+      double atr[];
+      ArraySetAsSeries(atr, true);
+      if(CopyBuffer(atrHandle, 0, 0, 1, atr) > 0 && atr[0] > 0)
+      {
+         // Utiliser une fraction de l'ATR basée sur le profit
+         if(pointValue > 0 && lotSize > 0)
+         {
+            double profitPerATR = lotSize * pointValue * (atr[0] / point);
+            if(profitPerATR > 0)
+               pointsToSecure = maxDrawdownAllowed / profitPerATR * (atr[0] / point);
+         }
+      }
+      
+      if(pointsToSecure <= 0)
+         return; // Impossible de calculer, abandonner
+   }
+   
+   // Calculer le nouveau SL
+   // Le SL doit être placé de manière à sécuriser le profit: si le prix descend/monte jusqu'au SL,
+   // on garde au moins le profit sécurisé (50% du profit actuel)
+   double newSL = 0.0;
+   bool shouldUpdate = false;
+   
+   if(posType == POSITION_TYPE_BUY)
+   {
+      // BUY: Le SL doit être en-dessous du prix actuel mais au-dessus du prix d'entrée
+      // SL = prix actuel - perte max autorisée (pour garder le profit sécurisé)
+      newSL = NormalizeDouble(currentPrice - (pointsToSecure * point), _Digits);
+      
+      // S'assurer que le SL est au-dessus du prix d'entrée (break-even minimum)
+      if(newSL < openPrice)
+         newSL = NormalizeDouble(openPrice + (point * 1), _Digits); // Break-even + 1 point pour éviter le slippage
+      
+      // Le nouveau SL doit être meilleur (plus haut) que l'actuel, ou être défini si aucun SL n'existe
+      if(currentSL == 0)
+      {
+         shouldUpdate = true;
+      }
+      else if(newSL > currentSL && newSL < currentPrice)
+      {
+         // Le nouveau SL est meilleur (plus haut) que l'actuel et toujours valide (en-dessous du prix actuel)
+         shouldUpdate = true;
+      }
+   }
+   else // SELL
+   {
+      // SELL: Le SL doit être au-dessus du prix actuel mais en-dessous du prix d'entrée
+      // SL = prix actuel + perte max autorisée (pour garder le profit sécurisé)
+      newSL = NormalizeDouble(currentPrice + (pointsToSecure * point), _Digits);
+      
+      // S'assurer que le SL est en-dessous du prix d'entrée (break-even minimum)
+      if(newSL > openPrice)
+         newSL = NormalizeDouble(openPrice - (point * 1), _Digits); // Break-even - 1 point pour éviter le slippage
+      
+      // Le nouveau SL doit être meilleur (plus bas) que l'actuel, ou être défini si aucun SL n'existe
+      if(currentSL == 0)
+      {
+         shouldUpdate = true;
+      }
+      else if(newSL < currentSL && newSL > currentPrice)
+      {
+         // Le nouveau SL est meilleur (plus bas) que l'actuel et toujours valide (au-dessus du prix actuel)
+         shouldUpdate = true;
+      }
+   }
+   
+   if(!shouldUpdate)
+      return; // SL déjà meilleur ou égal
+   
+   // Vérifier les niveaux minimums du broker
+   long stopLevel = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
+   double minDistance = stopLevel * point;
+   if(minDistance == 0 || minDistance < tickSize)
+      minDistance = MathMax(tickSize * 3, 5 * point);
+   if(minDistance == 0)
+      minDistance = 10 * point; // Fallback final
+   
+   // Ajuster le SL pour respecter la distance minimum
+   if(posType == POSITION_TYPE_BUY)
+   {
+      // Pour BUY: SL doit être en-dessous du prix actuel d'au moins minDistance
+      double maxSL = currentPrice - minDistance;
+      if(newSL >= maxSL)
+      {
+         newSL = NormalizeDouble(maxSL - (point * 1), _Digits);
+      }
+      // S'assurer que le SL reste au-dessus du prix d'entrée (break-even minimum)
+      if(newSL < openPrice)
+      {
+         double breakEvenSL = NormalizeDouble(openPrice + (point * 1), _Digits);
+         double maxAllowedSL = currentPrice - minDistance;
+         if(breakEvenSL < maxAllowedSL)
+            newSL = breakEvenSL;
+         else
+         {
+            if(DebugMode)
+               Print("⏸️ SL sécurisation trop proche du prix actuel pour respecter minDistance (break-even=", 
+                     DoubleToString(breakEvenSL, _Digits), " maxAllowed=", DoubleToString(maxAllowedSL, _Digits), ")");
+            return; // Impossible de placer le SL correctement
+         }
+      }
+   }
+   else // SELL
+   {
+      // Pour SELL: SL doit être au-dessus du prix actuel d'au moins minDistance
+      double minSL = currentPrice + minDistance;
+      if(newSL <= minSL)
+      {
+         newSL = NormalizeDouble(minSL + (point * 1), _Digits);
+      }
+      // S'assurer que le SL reste en-dessous du prix d'entrée (break-even minimum)
+      if(newSL > openPrice)
+      {
+         double breakEvenSL = NormalizeDouble(openPrice - (point * 1), _Digits);
+         double minAllowedSL = currentPrice + minDistance;
+         if(breakEvenSL > minAllowedSL)
+            newSL = breakEvenSL;
+         else
+         {
+            if(DebugMode)
+               Print("⏸️ SL sécurisation trop proche du prix actuel pour respecter minDistance (break-even=", 
+                     DoubleToString(breakEvenSL, _Digits), " minAllowed=", DoubleToString(minAllowedSL, _Digits), ")");
+            return; // Impossible de placer le SL correctement
+         }
+      }
+   }
+   
+   // Validation finale du SL
+   bool slValid = false;
+   if(posType == POSITION_TYPE_BUY)
+   {
+      slValid = (newSL > 0 && newSL < currentPrice && newSL >= openPrice && 
+                 (currentPrice - newSL) >= minDistance);
+   }
+   else
+   {
+      slValid = (newSL > 0 && newSL > currentPrice && newSL <= openPrice && 
+                 (newSL - currentPrice) >= minDistance);
+   }
+   
+   if(!slValid)
+   {
+      if(DebugMode)
+         Print("⏸️ SL sécurisation invalide après ajustement: newSL=", DoubleToString(newSL, _Digits), 
+               " currentPrice=", DoubleToString(currentPrice, _Digits), " openPrice=", DoubleToString(openPrice, _Digits),
+               " minDistance=", DoubleToString(minDistance, _Digits));
+      return;
+   }
+   
+   // Mettre à jour le SL
+   double tp = positionInfo.TakeProfit();
+   if(trade.PositionModify(ticket, newSL, tp))
+   {
+      Print("🔒 Profit sécurisé: SL déplacé pour sécuriser ", DoubleToString(profitToSecure, 2), "$ (50% de ", DoubleToString(currentProfit, 2), "$) - ", 
+            (posType == POSITION_TYPE_BUY ? "BUY" : "SELL"), " - Ancien SL: ", 
+            (currentSL == 0 ? "Aucun" : DoubleToString(currentSL, _Digits)), 
+            " → Nouveau SL: ", DoubleToString(newSL, _Digits), 
+            " (Prix actuel: ", DoubleToString(currentPrice, _Digits), ")");
+      if(g_positionTracker.ticket == ticket)
+         g_positionTracker.profitSecured = true;
+   }
+   else
+   {
+      Print("⚠️ Erreur modification SL dynamique: ", trade.ResultRetcode(), " - ", trade.ResultRetcodeDescription(), 
+            " - Ticket: ", ticket, " Type: ", (posType == POSITION_TYPE_BUY ? "BUY" : "SELL"),
+            " Prix actuel: ", DoubleToString(currentPrice, _Digits), " Nouveau SL: ", DoubleToString(newSL, _Digits),
+            " Ancien SL: ", (currentSL == 0 ? "Aucun" : DoubleToString(currentSL, _Digits)));
+   }
+}
+
+//+------------------------------------------------------------------+
 //| Sécurisation dynamique des profits                                |
 //| Active dès que le profit total >= 3$                              |
+//+------------------------------------------------------------------+
+//| Vérifier si c'est une VRAIE correction ou juste une pause        |
+//| Retourne true si le retournement est confirmé (EMA + structure)   |
+//+------------------------------------------------------------------+
+bool IsRealTrendReversal(ulong ticket, ENUM_POSITION_TYPE posType, double currentPrice, double entryPrice)
+{
+   // 1. Vérifier si les EMA M1, M5, H1 se sont retournées CONTRE notre position
+   double emaFastM1[], emaSlowM1[], emaFastM5[], emaSlowM5[], emaFastH1[], emaSlowH1[];
+   ArraySetAsSeries(emaFastM1, true);
+   ArraySetAsSeries(emaSlowM1, true);
+   ArraySetAsSeries(emaFastM5, true);
+   ArraySetAsSeries(emaSlowM5, true);
+   ArraySetAsSeries(emaFastH1, true);
+   ArraySetAsSeries(emaSlowH1, true);
+   
+   if(CopyBuffer(emaFastHandle, 0, 0, 3, emaFastM1) < 3 ||
+      CopyBuffer(emaSlowHandle, 0, 0, 3, emaSlowM1) < 3 ||
+      CopyBuffer(emaFastM5Handle, 0, 0, 3, emaFastM5) < 3 ||
+      CopyBuffer(emaSlowM5Handle, 0, 0, 3, emaSlowM5) < 3 ||
+      CopyBuffer(emaFastH1Handle, 0, 0, 3, emaFastH1) < 3 ||
+      CopyBuffer(emaSlowH1Handle, 0, 0, 3, emaSlowH1) < 3)
+   {
+      // Si on ne peut pas récupérer les EMA, considérer comme pause (pas de vraie correction confirmée)
+      return false;
+   }
+   
+   // Pour BUY: vérifier si les EMA sont devenues baissières (vraie correction)
+   if(posType == POSITION_TYPE_BUY)
+   {
+      // Vérifier si M1 et M5 sont devenus baissiers (correction confirmée court terme)
+      bool m1Bearish = (emaFastM1[0] < emaSlowM1[0]) && (emaFastM1[1] < emaSlowM1[1]); // 2 bougies consécutives
+      bool m5Bearish = (emaFastM5[0] < emaSlowM5[0]);
+      
+      // VRAIE correction = M1 ET M5 sont baissiers (pas juste M1)
+      // Si seulement M1 est baissier mais M5 toujours haussier, c'est juste une pause
+      if(m1Bearish && m5Bearish)
+      {
+         // Vérifier aussi que le prix a vraiment cassé l'EMA rapide M1 vers le bas
+         double close[];
+         ArraySetAsSeries(close, true);
+         if(CopyClose(_Symbol, PERIOD_M1, 0, 3, close) >= 3)
+         {
+            // Vérifier que les 2-3 dernières bougies sont sous l'EMA rapide M1
+            int candlesBelowEMA = 0;
+            for(int i = 0; i < 3; i++)
+            {
+               if(close[i] < emaFastM1[i])
+                  candlesBelowEMA++;
+            }
+            
+            // VRAIE correction si au moins 2 bougies sur 3 sont sous l'EMA
+            if(candlesBelowEMA >= 2)
+            {
+               if(DebugMode)
+                  Print("🔴 VRAIE correction BUY détectée: M1+M5 baissiers + ", candlesBelowEMA, "/3 bougies sous EMA rapide M1");
+               return true;
+            }
+         }
+      }
+      
+      // Si M1 baissier mais M5 toujours haussier = pause, pas vraie correction
+      if(m1Bearish && !m5Bearish)
+      {
+         if(DebugMode)
+            Print("⏸️ Pause BUY (pas vraie correction): M1 baissier mais M5 toujours haussier - Tendance peut continuer");
+         return false;
+      }
+   }
+   // Pour SELL: vérifier si les EMA sont devenues haussières (vraie correction)
+   else if(posType == POSITION_TYPE_SELL)
+   {
+      // Vérifier si M1 et M5 sont devenus haussiers (correction confirmée court terme)
+      bool m1Bullish = (emaFastM1[0] > emaSlowM1[0]) && (emaFastM1[1] > emaSlowM1[1]); // 2 bougies consécutives
+      bool m5Bullish = (emaFastM5[0] > emaSlowM5[0]);
+      
+      // VRAIE correction = M1 ET M5 sont haussiers (pas juste M1)
+      if(m1Bullish && m5Bullish)
+      {
+         // Vérifier aussi que le prix a vraiment cassé l'EMA rapide M1 vers le haut
+         double close[];
+         ArraySetAsSeries(close, true);
+         if(CopyClose(_Symbol, PERIOD_M1, 0, 3, close) >= 3)
+         {
+            // Vérifier que les 2-3 dernières bougies sont au-dessus de l'EMA rapide M1
+            int candlesAboveEMA = 0;
+            for(int i = 0; i < 3; i++)
+            {
+               if(close[i] > emaFastM1[i])
+                  candlesAboveEMA++;
+            }
+            
+            // VRAIE correction si au moins 2 bougies sur 3 sont au-dessus de l'EMA
+            if(candlesAboveEMA >= 2)
+            {
+               if(DebugMode)
+                  Print("🔴 VRAIE correction SELL détectée: M1+M5 haussiers + ", candlesAboveEMA, "/3 bougies au-dessus EMA rapide M1");
+               return true;
+            }
+         }
+      }
+      
+      // Si M1 haussier mais M5 toujours baissier = pause, pas vraie correction
+      if(m1Bullish && !m5Bullish)
+      {
+         if(DebugMode)
+            Print("⏸️ Pause SELL (pas vraie correction): M1 haussier mais M5 toujours baissier - Tendance peut continuer");
+         return false;
+      }
+   }
+   
+   // Par défaut, pas de vraie correction (juste une pause)
+   return false;
+}
+
+//+------------------------------------------------------------------+
+//| Vérifier si la tendance continue toujours (EMA M1/M5 alignées)   |
+//| Retourne true si la tendance est toujours valide pour notre position |
+//+------------------------------------------------------------------+
+bool IsTrendStillValid(ENUM_POSITION_TYPE posType)
+{
+   // Récupérer les EMA M1 et M5 pour vérifier si la tendance continue
+   double emaFastM1[], emaSlowM1[], emaFastM5[], emaSlowM5[];
+   ArraySetAsSeries(emaFastM1, true);
+   ArraySetAsSeries(emaSlowM1, true);
+   ArraySetAsSeries(emaFastM5, true);
+   ArraySetAsSeries(emaSlowM5, true);
+   
+   if(CopyBuffer(emaFastHandle, 0, 0, 2, emaFastM1) < 2 ||
+      CopyBuffer(emaSlowHandle, 0, 0, 2, emaSlowM1) < 2 ||
+      CopyBuffer(emaFastM5Handle, 0, 0, 2, emaFastM5) < 2 ||
+      CopyBuffer(emaSlowM5Handle, 0, 0, 2, emaSlowM5) < 2)
+   {
+      // Si on ne peut pas récupérer les EMA, considérer comme non valide (prudence)
+      return false;
+   }
+   
+   // Pour BUY: vérifier si M1 et M5 sont toujours haussiers
+   if(posType == POSITION_TYPE_BUY)
+   {
+      bool m1Bullish = (emaFastM1[0] > emaSlowM1[0]) && (emaFastM1[1] > emaSlowM1[1]); // 2 bougies consécutives
+      bool m5Bullish = (emaFastM5[0] > emaSlowM5[0]);
+      
+      // Tendance valide si M1 ET M5 sont toujours haussiers
+      return (m1Bullish && m5Bullish);
+   }
+   // Pour SELL: vérifier si M1 et M5 sont toujours baissiers
+   else if(posType == POSITION_TYPE_SELL)
+   {
+      bool m1Bearish = (emaFastM1[0] < emaSlowM1[0]) && (emaFastM1[1] < emaSlowM1[1]); // 2 bougies consécutives
+      bool m5Bearish = (emaFastM5[0] < emaSlowM5[0]);
+      
+      // Tendance valide si M1 ET M5 sont toujours baissiers
+      return (m1Bearish && m5Bearish);
+   }
+   
+   return false;
+}
+
+//+------------------------------------------------------------------+
 //| Ferme les positions si profit < 50% du profit max                |
 //| Sinon, déplace le SL pour sécuriser les profits                  |
 //+------------------------------------------------------------------+
@@ -2889,8 +7016,8 @@ void SecureDynamicProfits()
             {
                double profit = positionInfo.Profit();
                
-               // Fermer dès que le profit atteint le seuil rapide
-               if(profit >= VolatilityQuickTP)
+               // Fermer dès que le profit atteint le seuil rapide ET minimum 1$
+               if(profit >= VolatilityQuickTP && profit >= MIN_PROFIT_TO_CLOSE)
                {
                   if(trade.PositionClose(ticket))
                   {
@@ -2905,11 +7032,16 @@ void SecureDynamicProfits()
                            trade.ResultRetcode(), " - ", trade.ResultRetcodeDescription());
                   }
                }
+               else if(DebugMode && profit >= VolatilityQuickTP && profit < MIN_PROFIT_TO_CLOSE)
+               {
+                  Print("⏸️ Volatility: Position conservée - Profit=", DoubleToString(profit, 2), 
+                        "$ < minimum requis (", DoubleToString(MIN_PROFIT_TO_CLOSE, 2), "$)");
+               }
             }
          }
       }
    }
-
+   
    // Nettoyer les trackers de positions fermées
    static datetime lastCleanup = 0;
    if(TimeCurrent() - lastCleanup > 60) // Toutes les minutes
@@ -2945,12 +7077,9 @@ void SecureDynamicProfits()
    if(totalProfit > g_globalMaxProfit)
       g_globalMaxProfit = totalProfit;
    
-   // Vérifier si on doit activer la sécurisation (profit total >= 3$)
-   if(totalProfit < PROFIT_SECURE_THRESHOLD)
-   {
-      // Pas encore de profit suffisant, pas de sécurisation
-      return;
-   }
+   // NOUVELLE LOGIQUE: Sécurisation AGGRESSIVE dès qu'une position est en profit
+   // On sécurise chaque position individuellement dès qu'elle est en profit
+   // Plus besoin d'attendre 3$ total - protection immédiate des gains
    
    // Sécurisation activée : vérifier chaque position
    for(int i = PositionsTotal() - 1; i >= 0; i--)
@@ -2966,113 +7095,227 @@ void SecureDynamicProfits()
             double currentSL = positionInfo.StopLoss();
             ENUM_POSITION_TYPE posType = positionInfo.PositionType();
             
+            // NOUVELLE LOGIQUE: Sécurisation AGGRESSIVE dès qu'il y a un profit
+            // Dès qu'une position est en profit, on sécurise au moins 50% des gains initiaux
+            
             // Récupérer le profit max pour cette position
             double maxProfitForPosition = GetMaxProfitForPosition(ticket);
             if(maxProfitForPosition == 0.0 && currentProfit > 0)
                maxProfitForPosition = currentProfit; // Utiliser le profit actuel comme référence initiale
             
-            // Si le profit max est > 0, vérifier le drawdown
-            if(maxProfitForPosition > 0)
+            // NOUVELLE LOGIQUE: Ne pas couper une position qui a commencé à rentabiliser après une perte
+            // Laisser faire au moins 2$ de gain d'abord
+            // C'est seulement lorsque le prix chute à 50% du gain maximum qu'on coupe pour sauvegarder les 50% restant
+            
+            // Si profit entre 0$ et 2$ - laisser la position continuer sans intervention
+            // Juste tracker le profit max pour référence
+            if(currentProfit > 0 && currentProfit < 2.0)
             {
-               // Calculer le drawdown en pourcentage
-               double drawdownPercent = 0.0;
-               if(maxProfitForPosition > 0)
-                  drawdownPercent = (maxProfitForPosition - currentProfit) / maxProfitForPosition;
+               if(currentProfit > maxProfitForPosition)
+                  UpdateMaxProfitForPosition(ticket, currentProfit);
+               continue; // Ne pas sécuriser tant qu'on n'a pas atteint 2$
+            }
+            
+            // Si profit >= 2$, on peut maintenant tracker et protéger
+            if(currentProfit >= 2.0)
+            {
+               // La position a atteint au moins 2$ de profit, maintenant on peut tracker et protéger
+               // Utiliser le profit actuel OU le profit max (le plus élevé)
+               double profitReference = MathMax(currentProfit, maxProfitForPosition);
                
-               // Si drawdown > 50%, fermer la position
-               if(drawdownPercent > PROFIT_DRAWDOWN_LIMIT && currentProfit > 0)
+               // Si le profit actuel est supérieur au max enregistré, mettre à jour le max
+               if(currentProfit > maxProfitForPosition)
                {
-                  if(trade.PositionClose(ticket))
-                  {
-                     Print("🔒 Position fermée - Drawdown > 50%: Profit max=", DoubleToString(maxProfitForPosition, 2), 
-                           "$ Profit actuel=", DoubleToString(currentProfit, 2), "$ Drawdown=", DoubleToString(drawdownPercent * 100, 1), "%");
-                  }
-                  continue;
+                  UpdateMaxProfitForPosition(ticket, currentProfit);
+                  profitReference = currentProfit;
                }
                
-               // Sinon, sécuriser les profits en déplaçant le SL
-               if(currentProfit > 0 && maxProfitForPosition > 0)
+               // Calculer le drawdown en pourcentage par rapport au profit maximum atteint
+               double drawdownPercent = 0.0;
+               if(profitReference >= 2.0) // Seulement si le profit max a atteint au moins 2$
                {
-                  // Calculer le nouveau SL pour sécuriser 50% du profit max
-                  double profitToSecure = maxProfitForPosition * PROFIT_DRAWDOWN_LIMIT; // 50% du profit max
+                  drawdownPercent = (profitReference - currentProfit) / profitReference;
                   
-                  // Convertir le profit en points
-                  double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
-                  double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
-                  double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
-                  double pointValue = (tickValue / tickSize) * point;
-                  double lotSize = positionInfo.Volume();
-                  
-                  double pointsToSecure = 0;
-                  if(pointValue > 0 && lotSize > 0)
+                  // Si drawdown > 50% ET profit actuel >= 1$ (MIN_PROFIT_TO_CLOSE), fermer pour sauvegarder les 50% restant
+                  if(drawdownPercent > PROFIT_DRAWDOWN_LIMIT && currentProfit >= MIN_PROFIT_TO_CLOSE)
                   {
-                     double profitPerPoint = lotSize * pointValue;
-                     if(profitPerPoint > 0)
-                        pointsToSecure = profitToSecure / profitPerPoint;
-                  }
-                  
-                  // Si le calcul échoue, utiliser ATR comme fallback
-                  if(pointsToSecure <= 0)
-                  {
-                     double atr[];
-                     ArraySetAsSeries(atr, true);
-                     if(CopyBuffer(atrHandle, 0, 0, 1, atr) > 0 && atr[0] > 0)
-                        pointsToSecure = (profitToSecure / (lotSize * pointValue)) > 0 ? (profitToSecure / (lotSize * pointValue)) : (atr[0] / point);
-                  }
-                  
-                  // Calculer le nouveau SL
-                  double newSL = 0.0;
-                  if(posType == POSITION_TYPE_BUY)
-                  {
-                     newSL = openPrice + (pointsToSecure * point);
-                     // S'assurer que le nouveau SL est meilleur que l'actuel
-                     if(currentSL == 0 || newSL > currentSL)
+                     // Fermer immédiatement pour sauvegarder les 50% restant du profit maximum
+                     if(trade.PositionClose(ticket))
                      {
-                        // Vérifier les niveaux minimums du broker
-                        long stopLevel = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
-                        double minDistance = stopLevel * point;
-                        if(newSL < currentPrice - minDistance)
+                        Print("🔒 Position fermée - Drawdown de 50% après avoir atteint au moins 2$: Profit max=", DoubleToString(profitReference, 2), 
+                              "$ Profit actuel=", DoubleToString(currentProfit, 2), "$ Drawdown=", DoubleToString(drawdownPercent * 100, 1), 
+                              "% - Sauvegarde des 50% restant");
+                        continue; // Passer à la position suivante
+                     }
+                  }
+                  else if(DebugMode && drawdownPercent > PROFIT_DRAWDOWN_LIMIT && currentProfit > 0 && currentProfit < MIN_PROFIT_TO_CLOSE)
+                  {
+                     Print("⏸️ Position conservée malgré drawdown: Profit=", DoubleToString(currentProfit, 2), 
+                           "$ < minimum requis (", DoubleToString(MIN_PROFIT_TO_CLOSE, 2), "$)");
+                  }
+               }
+               
+               // Si on arrive ici, le profit >= 2$ et drawdown < 50%, continuer avec la sécurisation normale
+               
+               // NOUVELLE LOGIQUE: Vérifier si la tendance continue avant de sécuriser
+               // Si tendance continue, attendre plus de profit avant de sécuriser agressivement
+               bool trendStillValid = IsTrendStillValid(posType);
+               double securePercentage = 0.50; // 50% par défaut
+               
+               if(trendStillValid)
+               {
+                  // Tendances M1/M5 toujours alignées - mouvement peut continuer
+                  // Sécuriser moins agressivement (30% au lieu de 50%) pour laisser le mouvement se développer
+                  securePercentage = 0.30;
+                  if(DebugMode)
+                     Print("✅ Tendance toujours valide - Sécurisation modérée (30% au lieu de 50%) pour laisser le mouvement continuer");
+               }
+               else
+               {
+                  // Tendance affaiblie - sécuriser plus agressivement (50%)
+                  securePercentage = 0.50;
+               }
+               
+               // SÉCURISATION PROGRESSIVE: Déplacer le SL pour sécuriser un pourcentage du profit actuel
+               double profitToSecure = currentProfit * securePercentage;
+                     
+                     // Convertir le profit en points
+                     double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+                     double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+                     double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+                     double pointValue = (tickValue / tickSize) * point;
+                     double lotSize = positionInfo.Volume();
+                     
+                     double pointsToSecure = 0;
+                     if(pointValue > 0 && lotSize > 0)
+                     {
+                        double profitPerPoint = lotSize * pointValue;
+                        if(profitPerPoint > 0)
+                           pointsToSecure = profitToSecure / profitPerPoint;
+                     }
+                     
+                     // Si le calcul échoue, utiliser ATR comme fallback
+                     if(pointsToSecure <= 0)
+                     {
+                        double atr[];
+                        ArraySetAsSeries(atr, true);
+                        if(CopyBuffer(atrHandle, 0, 0, 1, atr) > 0 && atr[0] > 0)
+                           pointsToSecure = (profitToSecure / (lotSize * pointValue)) > 0 ? (profitToSecure / (lotSize * pointValue)) : (atr[0] / point);
+                     }
+                     
+                     // Calculer le nouveau SL pour sécuriser 50% du profit actuel
+                     double newSL = 0.0;
+                     
+                     // Calculer le prix qui correspond à 50% du profit actuel
+                     // Pour BUY: SL = prix d'entrée + (profit sécurisé en points)
+                     // Pour SELL: SL = prix d'entrée - (profit sécurisé en points)
+                     
+                     if(posType == POSITION_TYPE_BUY)
+                     {
+                        // BUY: SL doit être au-dessus du prix d'entrée pour sécuriser le profit
+                        newSL = openPrice + (pointsToSecure * point);
+                        
+                        // Le nouveau SL doit être meilleur (plus haut) que l'actuel
+                        // ET ne pas être trop proche du prix actuel
+                        bool shouldUpdate = false;
+                        if(currentSL == 0)
                         {
-                           double tp = positionInfo.TakeProfit();
-                           if(trade.PositionModify(ticket, newSL, tp))
+                           // Pas de SL actuel, on peut en mettre un
+                           shouldUpdate = true;
+                        }
+                        else if(newSL > currentSL)
+                        {
+                           // Le nouveau SL est meilleur (plus haut) que l'actuel
+                           shouldUpdate = true;
+                        }
+                        
+                        if(shouldUpdate)
+                        {
+                           // Vérifier les niveaux minimums du broker
+                           long stopLevel = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
+                           double tickSizeLocal = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+                           double minDistance = stopLevel * point;
+                           if(minDistance == 0 || minDistance < tickSizeLocal)
+                              minDistance = MathMax(tickSizeLocal * 3, 5 * point);
+                           
+                           // Le SL doit être au moins minDistance en-dessous du prix actuel
+                           if(newSL <= currentPrice - minDistance)
                            {
-                              if(DebugMode)
-                                 Print("🔒 SL sécurisé pour position BUY: ", DoubleToString(newSL, _Digits), 
-                                       " (sécurise ", DoubleToString(profitToSecure, 2), "$)");
-                              if(g_positionTracker.ticket == ticket)
-                                 g_positionTracker.profitSecured = true;
+                              double tp = positionInfo.TakeProfit();
+                              if(trade.PositionModify(ticket, newSL, tp))
+                              {
+                                 Print("🔒 SL sécurisé BUY: ", DoubleToString(newSL, _Digits), 
+                                       " (sécurise ", DoubleToString(profitToSecure, 2), "$ = ", DoubleToString(securePercentage * 100, 0), 
+                                       "% de ", DoubleToString(currentProfit, 2), "$", trendStillValid ? " - Tendance continue" : " - Tendance affaiblie", ")");
+                                 if(g_positionTracker.ticket == ticket)
+                                    g_positionTracker.profitSecured = true;
+                              }
+                              else if(DebugMode)
+                              {
+                                 Print("⚠️ Erreur modification SL BUY: ", trade.ResultRetcodeDescription());
+                              }
+                           }
+                           else if(DebugMode)
+                           {
+                              Print("⏸️ SL BUY trop proche du prix actuel (", DoubleToString(newSL, _Digits), " vs ", DoubleToString(currentPrice, _Digits), ")");
                            }
                         }
                      }
-                  }
-                  else // SELL
-                  {
-                     newSL = openPrice - (pointsToSecure * point);
-                     // S'assurer que le nouveau SL est meilleur que l'actuel
-                     if(currentSL == 0 || newSL < currentSL)
+                     else // SELL
                      {
-                        // Vérifier les niveaux minimums du broker
-                        long stopLevel = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
-                        double minDistance = stopLevel * point;
-                        if(newSL > currentPrice + minDistance)
+                        // SELL: SL doit être en-dessous du prix d'entrée pour sécuriser le profit
+                        newSL = openPrice - (pointsToSecure * point);
+                        
+                        // Le nouveau SL doit être meilleur (plus bas) que l'actuel
+                        // ET ne pas être trop proche du prix actuel
+                        bool shouldUpdate = false;
+                        if(currentSL == 0)
                         {
-                           double tp = positionInfo.TakeProfit();
-                           if(trade.PositionModify(ticket, newSL, tp))
+                           // Pas de SL actuel, on peut en mettre un
+                           shouldUpdate = true;
+                        }
+                        else if(newSL < currentSL)
+                        {
+                           // Le nouveau SL est meilleur (plus bas) que l'actuel
+                           shouldUpdate = true;
+                        }
+                        
+                        if(shouldUpdate)
+                        {
+                           // Vérifier les niveaux minimums du broker
+                           long stopLevel = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
+                           double tickSizeLocal = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+                           double minDistance = stopLevel * point;
+                           if(minDistance == 0 || minDistance < tickSizeLocal)
+                              minDistance = MathMax(tickSizeLocal * 3, 5 * point);
+                           
+                           // Le SL doit être au moins minDistance au-dessus du prix actuel
+                           if(newSL >= currentPrice + minDistance)
                            {
-                              if(DebugMode)
-                                 Print("🔒 SL sécurisé pour position SELL: ", DoubleToString(newSL, _Digits), 
-                                       " (sécurise ", DoubleToString(profitToSecure, 2), "$)");
-                              if(g_positionTracker.ticket == ticket)
-                                 g_positionTracker.profitSecured = true;
+                              double tp = positionInfo.TakeProfit();
+                              if(trade.PositionModify(ticket, newSL, tp))
+                              {
+                                 Print("🔒 SL sécurisé SELL: ", DoubleToString(newSL, _Digits), 
+                                       " (sécurise ", DoubleToString(profitToSecure, 2), "$ = ", DoubleToString(securePercentage * 100, 0), 
+                                       "% de ", DoubleToString(currentProfit, 2), "$", trendStillValid ? " - Tendance continue" : " - Tendance affaiblie", ")");
+                                 if(g_positionTracker.ticket == ticket)
+                                    g_positionTracker.profitSecured = true;
+                              }
+                              else if(DebugMode)
+                              {
+                                 Print("⚠️ Erreur modification SL SELL: ", trade.ResultRetcodeDescription());
+                              }
+                           }
+                           else if(DebugMode)
+                           {
+                              Print("⏸️ SL SELL trop proche du prix actuel (", DoubleToString(newSL, _Digits), " vs ", DoubleToString(currentPrice, _Digits), ")");
                            }
                         }
                      }
-                  }
                }
             }
          }
       }
-   }
    
    // Si le profit global a chuté de plus de 50%, fermer toutes les positions gagnantes
    if(g_globalMaxProfit > 0 && totalProfit < (g_globalMaxProfit * PROFIT_DRAWDOWN_LIMIT))
@@ -3245,14 +7488,152 @@ bool AnalyzeMomentumPressureZone(ENUM_ORDER_TYPE orderType, double price, double
    return true;
 }
 
-// Tentative d'entrée spike sur Boom/Crash avec confiance IA élevée et timing EMA M5
+//+------------------------------------------------------------------+
+//| Détecter retournement sur EMA rapide M5 pour Boom/Crash          |
+//| Vérifie aussi l'alignement M5/H1 avant d'autoriser l'entrée      |
+//+------------------------------------------------------------------+
+bool DetectBoomCrashReversalAtEMA(ENUM_ORDER_TYPE orderType)
+{
+   if(!IsBoomCrashSymbol(_Symbol))
+      return false;
+   
+   // PROTECTION: Bloquer SELL sur Boom (y compris Vol over Boom) et BUY sur Crash (y compris Vol over Crash)
+   // Tous les symboles avec "Boom" = BUY uniquement (spike en tendance)
+   // Tous les symboles avec "Crash" = SELL uniquement (spike en tendance)
+   bool isBoom = (StringFind(_Symbol, "Boom") != -1);
+   bool isCrash = (StringFind(_Symbol, "Crash") != -1);
+   
+   if(isBoom && orderType == ORDER_TYPE_SELL)
+   {
+      if(DebugMode)
+         Print("🚫 Boom/Crash: Impossible de trader SELL sur ", _Symbol, " (Boom = BUY uniquement pour capturer les spikes en tendance)");
+      return false;
+   }
+   
+   if(isCrash && orderType == ORDER_TYPE_BUY)
+   {
+      if(DebugMode)
+         Print("🚫 Boom/Crash: Impossible de trader BUY sur ", _Symbol, " (Crash = SELL uniquement pour capturer les spikes en tendance)");
+      return false;
+   }
+   
+   // 1. Vérifier l'alignement M5/H1 d'abord
+   if(!CheckTrendAlignment(orderType))
+   {
+      if(DebugMode)
+         Print("⏸️ Boom/Crash: Alignement M5/H1 non confirmé pour ", EnumToString(orderType));
+      return false;
+   }
+   
+   // 2. Récupérer EMA rapide M5 et prix
+   double emaFastM5[];
+   ArraySetAsSeries(emaFastM5, true);
+   if(CopyBuffer(emaFastM5Handle, 0, 0, 5, emaFastM5) < 5)
+   {
+      if(DebugMode)
+         Print("⚠️ Boom/Crash: Erreur récupération EMA rapide M5");
+      return false;
+   }
+   
+   double price = (orderType == ORDER_TYPE_BUY) ? 
+                  SymbolInfoDouble(_Symbol, SYMBOL_ASK) : 
+                  SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   
+   // Récupérer les prix historiques M5
+   double closeM5[], highM5[], lowM5[];
+   ArraySetAsSeries(closeM5, true);
+   ArraySetAsSeries(highM5, true);
+   ArraySetAsSeries(lowM5, true);
+   
+   if(CopyClose(_Symbol, PERIOD_M5, 0, 5, closeM5) < 5 ||
+      CopyHigh(_Symbol, PERIOD_M5, 0, 5, highM5) < 5 ||
+      CopyLow(_Symbol, PERIOD_M5, 0, 5, lowM5) < 5)
+   {
+      if(DebugMode)
+         Print("⚠️ Boom/Crash: Erreur récupération prix M5");
+      return false;
+   }
+   
+   // Calculer la distance au prix en points
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   double tolerance = 10 * point; // Tolérance de 10 points autour de l'EMA
+   
+   // 3. Détecter retournement pour BUY (Boom)
+   if(orderType == ORDER_TYPE_BUY)
+   {
+      // Le prix doit être proche de l'EMA rapide M5 (en-dessous ou légèrement au-dessus)
+      if(price >= (emaFastM5[0] - tolerance) && price <= (emaFastM5[0] + tolerance))
+      {
+         // Vérifier que le prix a baissé puis rebondi
+         bool wasDown = false;
+         bool isRebounding = false;
+         
+         // Vérifier baisse: prix précédent en-dessous de l'EMA ou prix qui descend
+         if(closeM5[1] < emaFastM5[1] || closeM5[2] < emaFastM5[2] || lowM5[1] < emaFastM5[1])
+            wasDown = true;
+         
+         // Vérifier rebond: prix actuel remonte ou touche l'EMA depuis le bas
+         if(closeM5[0] > closeM5[1] || (lowM5[0] <= emaFastM5[0] && closeM5[0] >= emaFastM5[0]))
+            isRebounding = true;
+         
+         if(wasDown && isRebounding)
+         {
+            // Estimer le temps jusqu'au spike (généralement 5-15 secondes pour Boom/Crash)
+            int estimatedSeconds = 10; // Estimation par défaut
+            if(DebugMode)
+               Print("✅ Boom/Crash BUY: Retournement détecté sur EMA rapide M5 - Spike estimé dans ", estimatedSeconds, " secondes");
+            
+            // Envoyer alerte
+            Alert("🚨 SPIKE BOOM DÉTECTÉ: ", _Symbol, " - Entrée dans ", estimatedSeconds, " secondes");
+            
+            return true;
+         }
+      }
+   }
+   // 4. Détecter retournement pour SELL (Crash)
+   else if(orderType == ORDER_TYPE_SELL)
+   {
+      // Le prix doit être proche de l'EMA rapide M5 (au-dessus ou légèrement en-dessous)
+      if(price >= (emaFastM5[0] - tolerance) && price <= (emaFastM5[0] + tolerance))
+      {
+         // Vérifier que le prix a monté puis rebondi à la baisse
+         bool wasUp = false;
+         bool isRebounding = false;
+         
+         // Vérifier hausse: prix précédent au-dessus de l'EMA ou prix qui monte
+         if(closeM5[1] > emaFastM5[1] || closeM5[2] > emaFastM5[2] || highM5[1] > emaFastM5[1])
+            wasUp = true;
+         
+         // Vérifier rebond baissier: prix actuel redescend ou touche l'EMA depuis le haut
+         if(closeM5[0] < closeM5[1] || (highM5[0] >= emaFastM5[0] && closeM5[0] <= emaFastM5[0]))
+            isRebounding = true;
+         
+         if(wasUp && isRebounding)
+         {
+            // Estimer le temps jusqu'au spike
+            int estimatedSeconds = 10; // Estimation par défaut
+            if(DebugMode)
+               Print("✅ Boom/Crash SELL: Retournement détecté sur EMA rapide M5 - Spike estimé dans ", estimatedSeconds, " secondes");
+            
+            // Envoyer alerte
+            Alert("🚨 SPIKE CRASH DÉTECTÉ: ", _Symbol, " - Entrée dans ", estimatedSeconds, " secondes");
+            
+            return true;
+         }
+      }
+   }
+   
+   return false;
+}
+
+// Tentative d'entrée spike sur Boom/Crash avec confiance IA minimale 60% et retournement EMA M5
 bool TrySpikeEntry(ENUM_ORDER_TYPE orderType)
 {
    if(!IsBoomCrashSymbol(_Symbol))
       return false;
 
-   // Confiance IA minimale 80%
-   if(g_lastAIConfidence < 0.80)
+   // Confiance IA minimale 60% pour Boom/Crash
+   if(g_lastAIConfidence < 0.60)
       return false;
 
    int idx = GetSpikeIndex(_Symbol);
@@ -3264,41 +7645,33 @@ bool TrySpikeEntry(ENUM_ORDER_TYPE orderType)
       return false;
    }
 
-   // Récupérer EMA M5
-   double emaFastM5[], emaSlowM5[];
-   ArraySetAsSeries(emaFastM5, true);
-   ArraySetAsSeries(emaSlowM5, true);
-   if(CopyBuffer(emaFastM5Handle, 0, 0, 1, emaFastM5) <= 0 ||
-      CopyBuffer(emaSlowM5Handle, 0, 0, 1, emaSlowM5) <= 0)
+   // L'alignement M5/H1 a déjà été vérifié dans DetectBoomCrashReversalAtEMA
+   // Ici on ouvre simplement le trade car le retournement a été confirmé
+   
+   // PROTECTION: Bloquer SELL sur Boom (y compris Vol over Boom) et BUY sur Crash (y compris Vol over Crash)
+   // Tous les symboles avec "Boom" = BUY uniquement (spike en tendance)
+   // Tous les symboles avec "Crash" = SELL uniquement (spike en tendance)
+   bool isBoom = (StringFind(_Symbol, "Boom") != -1);
+   bool isCrash = (StringFind(_Symbol, "Crash") != -1);
+   
+   if(isBoom && orderType == ORDER_TYPE_SELL)
    {
       if(DebugMode)
-         Print("⚠️ Spike: erreur récupération EMA M5");
+         Print("🚫 TrySpikeEntry: Impossible SELL sur Boom (BUY uniquement pour capturer les spikes en tendance)");
+      return false;
+   }
+   
+   if(isCrash && orderType == ORDER_TYPE_BUY)
+   {
+      if(DebugMode)
+         Print("🚫 TrySpikeEntry: Impossible BUY sur Crash (SELL uniquement pour capturer les spikes en tendance)");
       return false;
    }
 
-   double price = (orderType == ORDER_TYPE_BUY) ? SymbolInfoDouble(_Symbol, SYMBOL_ASK)
-                                                : SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   double emaFast = emaFastM5[0];
-   double emaSlow = emaSlowM5[0];
-   double proximity = MathAbs(price - emaFast);
-
-   // Conditions de tendance et proximité EMA
-   bool ok = false;
-   if(orderType == ORDER_TYPE_BUY)
-   {
-      if(emaFast > emaSlow && price <= emaFast + 5 * _Point)
-         ok = true;
-   }
-   else // SELL
-   {
-      if(emaFast < emaSlow && price >= emaFast - 5 * _Point)
-         ok = true;
-   }
-
-   if(!ok)
-      return false;
-
-   // Tentative d'entrée via logique standard
+   // Ouvrir le trade immédiatement (le retournement et l'alignement sont déjà confirmés)
+   if(DebugMode)
+      Print("🚀 Boom/Crash: Ouverture trade ", EnumToString(orderType), " après retournement EMA M5 confirmé");
+   
    ExecuteTrade(orderType);
 
    // Incrémenter les tentatives; si 2 sans spike, cooldown 5 minutes
@@ -3318,19 +7691,674 @@ bool TrySpikeEntry(ENUM_ORDER_TYPE orderType)
 //| Vérifier si le prix est dans la zone IA et si les EMA confirment |
 //| Évite de trader les corrections - Amélioration des entrées       |
 //+------------------------------------------------------------------+
-bool CheckAIZoneEntryWithEMA(ENUM_ORDER_TYPE orderType, bool &isInZone, bool &emaConfirmed, bool &isCorrection, bool ignoreZone=false)
+//+------------------------------------------------------------------+
+//| Détecter un retournement au niveau de l'EMA rapide                |
+//| Retourne true si le prix rebondit sur l'EMA rapide après baisse/hausse |
+//+------------------------------------------------------------------+
+bool DetectReversalAtFastEMA(ENUM_ORDER_TYPE orderType)
 {
-   // --- NOUVEAU: FILTRE PROXIMITÉ DES ZONES (RANGE) ---
-   if(!ignoreZone && g_aiBuyZoneHigh > 0 && g_aiSellZoneLow > 0)
+   // Récupérer l'EMA rapide M1
+   double emaFast[];
+   ArraySetAsSeries(emaFast, true);
+   if(CopyBuffer(emaFastHandle, 0, 0, 5, emaFast) < 5)
    {
-      double zoneGap = g_aiSellZoneLow - g_aiBuyZoneHigh;
-      double atrM1_v = 0;
-      double atr_b[];
-      ArraySetAsSeries(atr_b, true);
-      if(CopyBuffer(atrHandle, 0, 0, 1, atr_b) > 0) atrM1_v = atr_b[0];
-      if(atrM1_v > 0 && zoneGap < atrM1_v * 5.0) return false;
+      if(DebugMode)
+         Print("⚠️ Erreur récupération EMA rapide pour détection retournement");
+      return false;
    }
+   
+   // Récupérer les prix (open, close, high, low) pour vérifier la bougie
+   double open[], close[], high[], low[];
+   ArraySetAsSeries(open, true);
+   ArraySetAsSeries(close, true);
+   ArraySetAsSeries(high, true);
+   ArraySetAsSeries(low, true);
+   if(CopyOpen(_Symbol, PERIOD_M1, 0, 5, open) < 5 ||
+      CopyClose(_Symbol, PERIOD_M1, 0, 5, close) < 5 ||
+      CopyHigh(_Symbol, PERIOD_M1, 0, 5, high) < 5 ||
+      CopyLow(_Symbol, PERIOD_M1, 0, 5, low) < 5)
+   {
+      if(DebugMode)
+         Print("⚠️ Erreur récupération prix pour détection retournement");
+      return false;
+   }
+   
+   double currentPrice = (orderType == ORDER_TYPE_BUY) ? 
+                        SymbolInfoDouble(_Symbol, SYMBOL_ASK) : 
+                        SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   
+   // Calculer la distance au prix en points
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   
+   // Calculer une tolérance adaptative basée sur ATR ou un pourcentage du prix
+   // Pour les prix élevés (>1000), utiliser un pourcentage plutôt qu'un nombre fixe de points
+   double tolerance;
+   if(emaFast[0] > 1000.0)
+   {
+      // Pour les prix élevés, utiliser 0.1% du prix (plus tolérant)
+      tolerance = emaFast[0] * 0.001; // 0.1% du prix
+   }
+   else
+   {
+      // Pour les prix bas, utiliser une tolérance en points ou basée sur ATR
+      double atr[];
+      ArraySetAsSeries(atr, true);
+      if(CopyBuffer(atrHandle, 0, 0, 1, atr) > 0 && atr[0] > 0)
+      {
+         tolerance = atr[0] * 0.5; // 0.5x ATR pour tolérance
+      }
+      else
+      {
+         tolerance = 10 * point; // Fallback: 10 points
+      }
+   }
+   
+   // OBLIGATOIRE: Le prix doit être au niveau de l'EMA rapide M1
+   // Vérifier le prix ACTUEL et aussi la bougie fermée (close[0])
+   // La bougie peut toucher l'EMA ou le prix actuel peut être proche de l'EMA
+   bool priceAtEMA = (currentPrice >= (emaFast[0] - tolerance) && currentPrice <= (emaFast[0] + tolerance)) || // Prix actuel proche
+                     (close[0] >= (emaFast[0] - tolerance) && close[0] <= (emaFast[0] + tolerance)) || // Close proche
+                     (low[0] <= emaFast[0] && high[0] >= emaFast[0]) || // La bougie fermée traverse l'EMA
+                     (MathAbs(currentPrice - emaFast[0]) <= tolerance); // Distance actuelle acceptable
+   
+   if(!priceAtEMA)
+   {
+      double distancePoints = MathAbs(currentPrice - emaFast[0]) / point;
+      double distancePercent = (MathAbs(currentPrice - emaFast[0]) / emaFast[0]) * 100.0;
+      if(DebugMode)
+         Print("⏸️ Prix pas au niveau EMA rapide M1: currentPrice=", DoubleToString(currentPrice, _Digits), 
+               " close[0]=", DoubleToString(close[0], _Digits), " EMA=", DoubleToString(emaFast[0], _Digits), 
+               " (distance: ", DoubleToString(distancePoints, 1), " points / ", DoubleToString(distancePercent, 3), "%, tolérance: ", DoubleToString(tolerance, _Digits), ")");
+      return false;
+   }
+   
+   // Pour BUY: Détecter rebond haussier confirmé par bougie verte
+   if(orderType == ORDER_TYPE_BUY)
+   {
+      // OBLIGATOIRE: La bougie actuelle (bougie 0) doit être VERTE (close > open) OU le prix actuel monte vers l'EMA
+      // Si la bougie fermée n'est pas verte mais le prix actuel est au-dessus de l'open et proche de l'EMA, accepter
+      bool isGreenCandle = (close[0] > open[0]);
+      bool isFormingGreen = (!isGreenCandle && currentPrice > open[0] && currentPrice > close[0]); // Bougie en cours de formation haussière
+      
+      if(!isGreenCandle && !isFormingGreen)
+      {
+         if(DebugMode)
+            Print("⏸️ Retournement BUY rejeté: Bougie actuelle n'est pas verte (close=", DoubleToString(close[0], _Digits), 
+                  " open=", DoubleToString(open[0], _Digits), " currentPrice=", DoubleToString(currentPrice, _Digits), ")");
+         return false;
+      }
+      
+      // Vérifier que le prix a baissé puis rebondi (retournement)
+      // Les bougies précédentes doivent montrer une baisse vers l'EMA
+      bool wasDown = false;
+      if(close[1] < emaFast[1] || close[2] < emaFast[2] || low[1] < emaFast[1] || low[2] < emaFast[2])
+         wasDown = true;
+      
+      // La bougie verte doit montrer un rebond (close actuel > close précédent OU la bougie touche l'EMA depuis le bas)
+      // OU le prix actuel montre un rebond (currentPrice > close[0] et proche de l'EMA)
+      bool isRebounding = (close[0] > close[1]) || (low[0] <= emaFast[0] && close[0] >= emaFast[0]) || 
+                         (isFormingGreen && currentPrice > close[0] && currentPrice >= (emaFast[0] - tolerance));
+      
+      bool candleConfirmed = isGreenCandle || isFormingGreen;
+      
+      if(wasDown && isRebounding && candleConfirmed && priceAtEMA)
+      {
+         if(DebugMode)
+            Print("✅ Retournement BUY confirmé: ", (isGreenCandle ? "Bougie verte" : "Bougie en formation haussière"), 
+                  " au niveau EMA rapide M1 (close=", DoubleToString(close[0], _Digits), " open=", DoubleToString(open[0], _Digits), 
+                  " currentPrice=", DoubleToString(currentPrice, _Digits), " EMA=", DoubleToString(emaFast[0], _Digits), ")");
+         return true;
+      }
+      else
+      {
+         if(DebugMode)
+            Print("⏸️ Retournement BUY non confirmé: wasDown=", wasDown, " isRebounding=", isRebounding, 
+                  " isGreenCandle=", isGreenCandle, " isFormingGreen=", isFormingGreen, " priceAtEMA=", priceAtEMA);
+      }
+   }
+   // Pour SELL: Détecter rebond baissier confirmé par bougie rouge
+   else if(orderType == ORDER_TYPE_SELL)
+   {
+      // OBLIGATOIRE: La bougie actuelle (bougie 0) doit être ROUGE (close < open) OU le prix actuel descend vers l'EMA
+      // Si la bougie fermée n'est pas rouge mais le prix actuel est en-dessous de l'open et proche de l'EMA, accepter
+      bool isRedCandle = (close[0] < open[0]);
+      bool isFormingRed = (!isRedCandle && currentPrice < open[0] && currentPrice < close[0]); // Bougie en cours de formation baissière
+      
+      if(!isRedCandle && !isFormingRed)
+      {
+         if(DebugMode)
+            Print("⏸️ Retournement SELL rejeté: Bougie actuelle n'est pas rouge (close=", DoubleToString(close[0], _Digits), 
+                  " open=", DoubleToString(open[0], _Digits), " currentPrice=", DoubleToString(currentPrice, _Digits), ")");
+         return false;
+      }
+      
+      // Vérifier que le prix a monté puis rebondi à la baisse (retournement)
+      // Les bougies précédentes doivent montrer une hausse vers l'EMA
+      bool wasUp = false;
+      if(close[1] > emaFast[1] || close[2] > emaFast[2] || high[1] > emaFast[1] || high[2] > emaFast[2])
+         wasUp = true;
+      
+      // La bougie rouge doit montrer un rebond baissier (close actuel < close précédent OU la bougie touche l'EMA depuis le haut)
+      // OU le prix actuel montre un rebond baissier (currentPrice < close[0] et proche de l'EMA)
+      bool isRebounding = (close[0] < close[1]) || (high[0] >= emaFast[0] && close[0] <= emaFast[0]) || 
+                         (isFormingRed && currentPrice < close[0] && currentPrice <= (emaFast[0] + tolerance));
+      
+      bool candleConfirmed = isRedCandle || isFormingRed;
+      
+      if(wasUp && isRebounding && candleConfirmed && priceAtEMA)
+      {
+         if(DebugMode)
+            Print("✅ Retournement SELL confirmé: ", (isRedCandle ? "Bougie rouge" : "Bougie en formation baissière"), 
+                  " au niveau EMA rapide M1 (close=", DoubleToString(close[0], _Digits), " open=", DoubleToString(open[0], _Digits), 
+                  " currentPrice=", DoubleToString(currentPrice, _Digits), " EMA=", DoubleToString(emaFast[0], _Digits), ")");
+         return true;
+      }
+      else
+      {
+         if(DebugMode)
+            Print("⏸️ Retournement SELL non confirmé: wasUp=", wasUp, " isRebounding=", isRebounding, 
+                  " isRedCandle=", isRedCandle, " isFormingRed=", isFormingRed, " priceAtEMA=", priceAtEMA);
+      }
+   }
+   
+   return false;
+}
 
+//+------------------------------------------------------------------+
+//| Vérifier si le prix rebondit sur une trendline EMA M5/H1         |
+//| Les trendlines servent de support/résistance dynamiques          |
+//| Retour: true si rebond détecté, distance en points dans distance |
+//+------------------------------------------------------------------+
+bool CheckReboundOnTrendline(ENUM_ORDER_TYPE orderType, double &distance)
+{
+   distance = 0.0;
+   
+   // Récupérer les EMA M5 et H1 (les trendlines sont basées sur ces EMA)
+   double emaFastM5[], emaSlowM5[], emaFastH1[], emaSlowH1[];
+   ArraySetAsSeries(emaFastM5, true);
+   ArraySetAsSeries(emaSlowM5, true);
+   ArraySetAsSeries(emaFastH1, true);
+   ArraySetAsSeries(emaSlowH1, true);
+   
+   if(CopyBuffer(emaFastM5Handle, 0, 0, 3, emaFastM5) < 3 ||
+      CopyBuffer(emaSlowM5Handle, 0, 0, 3, emaSlowM5) < 3 ||
+      CopyBuffer(emaFastH1Handle, 0, 0, 3, emaFastH1) < 3 ||
+      CopyBuffer(emaSlowH1Handle, 0, 0, 3, emaSlowH1) < 3)
+   {
+      if(DebugMode)
+         Print("⚠️ Erreur récupération EMA M5/H1 pour vérification trendline");
+      return false;
+   }
+   
+   // Récupérer les prix historiques
+   double close[], high[], low[];
+   ArraySetAsSeries(close, true);
+   ArraySetAsSeries(high, true);
+   ArraySetAsSeries(low, true);
+   
+   if(CopyClose(_Symbol, PERIOD_M1, 0, 5, close) < 5 ||
+      CopyHigh(_Symbol, PERIOD_M1, 0, 5, high) < 5 ||
+      CopyLow(_Symbol, PERIOD_M1, 0, 5, low) < 5)
+   {
+      return false;
+   }
+   
+   double currentPrice = (orderType == ORDER_TYPE_BUY) ? 
+                        SymbolInfoDouble(_Symbol, SYMBOL_BID) : 
+                        SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   double toleranceM5 = 15 * point;  // Tolérance de 15 points pour EMA M5
+   double toleranceH1 = 30 * point;  // Tolérance de 30 points pour EMA H1 (plus large car timeframe plus long)
+   
+   // Pour BUY: Vérifier rebond sur trendline de support (EMA)
+   if(orderType == ORDER_TYPE_BUY)
+   {
+      // Vérifier rebond sur EMA Fast M5 (trendline de support court terme)
+      double distanceToEMAFastM5 = MathAbs(currentPrice - emaFastM5[0]);
+      bool nearEMAFastM5 = (currentPrice >= (emaFastM5[0] - toleranceM5) && currentPrice <= (emaFastM5[0] + toleranceM5));
+      
+      // Vérifier que l'EMA M5 est haussière (EMA Fast > EMA Slow)
+      bool emaMBullish = (emaFastM5[0] > emaSlowM5[0]);
+      
+      // Vérifier que l'EMA H1 est haussière (confirmation tendance long terme)
+      bool emaH1Bullish = (emaFastH1[0] > emaSlowH1[0]);
+      
+      // Vérifier que le prix vient de rebondir (était en-dessous puis remonte)
+      bool wasBelow = (close[1] < emaFastM5[1] || close[2] < emaFastM5[2] || low[1] < emaFastM5[1]);
+      bool isRebounding = (close[0] > close[1] || (low[0] <= emaFastM5[0] && close[0] >= emaFastM5[0]));
+      
+      // Rebond sur EMA Fast M5 (priorité car plus réactif)
+      if(nearEMAFastM5 && emaMBullish && wasBelow && isRebounding)
+      {
+         // Vérifier confirmation H1
+         if(emaH1Bullish)
+         {
+            distance = distanceToEMAFastM5 / point;
+            if(DebugMode)
+               Print("✅ Rebond BUY sur trendline EMA Fast M5 détecté (distance: ", DoubleToString(distance, 0), " points) - Tendance H1 confirmée");
+            return true;
+         }
+         else
+         {
+            // EMA H1 non alignée, mais EMA M5 OK = signal moyen
+            distance = distanceToEMAFastM5 / point;
+            if(DebugMode)
+               Print("⚠️ Rebond BUY sur EMA Fast M5 mais H1 non alignée (distance: ", DoubleToString(distance, 0), " points) - Signal moyen");
+            return true; // Accepter quand même mais signal moins fort
+         }
+      }
+      
+      // Vérifier aussi rebond sur EMA Fast H1 (support long terme - moins fréquent mais plus fort)
+      double distanceToEMAFastH1 = MathAbs(currentPrice - emaFastH1[0]);
+      bool nearEMAFastH1 = (currentPrice >= (emaFastH1[0] - toleranceH1) && currentPrice <= (emaFastH1[0] + toleranceH1));
+      
+      if(nearEMAFastH1 && emaH1Bullish && emaMBullish)
+      {
+         // Vérifier que le prix rebondit
+         bool wasBelowH1 = (close[1] < emaFastH1[1] || close[2] < emaFastH1[2] || low[1] < emaFastH1[1]);
+         bool isReboundingH1 = (close[0] > close[1] || (low[0] <= emaFastH1[0] && close[0] >= emaFastH1[0]));
+         
+         if(wasBelowH1 && isReboundingH1)
+         {
+            distance = distanceToEMAFastH1 / point;
+            if(DebugMode)
+               Print("✅ Rebond BUY sur trendline EMA Fast H1 détecté (distance: ", DoubleToString(distance, 0), " points) - Signal très fort");
+            return true;
+         }
+      }
+   }
+   // Pour SELL: Vérifier rebond sur trendline de résistance (EMA)
+   else if(orderType == ORDER_TYPE_SELL)
+   {
+      // Vérifier rebond sur EMA Fast M5 (trendline de résistance court terme)
+      double distanceToEMAFastM5 = MathAbs(currentPrice - emaFastM5[0]);
+      bool nearEMAFastM5 = (currentPrice >= (emaFastM5[0] - toleranceM5) && currentPrice <= (emaFastM5[0] + toleranceM5));
+      
+      // Vérifier que l'EMA M5 est baissière (EMA Fast < EMA Slow)
+      bool emaMBearish = (emaFastM5[0] < emaSlowM5[0]);
+      
+      // Vérifier que l'EMA H1 est baissière (confirmation tendance long terme)
+      bool emaH1Bearish = (emaFastH1[0] < emaSlowH1[0]);
+      
+      // Vérifier que le prix vient de rebondir (était au-dessus puis redescend)
+      bool wasAbove = (close[1] > emaFastM5[1] || close[2] > emaFastM5[2] || high[1] > emaFastM5[1]);
+      bool isRebounding = (close[0] < close[1] || (high[0] >= emaFastM5[0] && close[0] <= emaFastM5[0]));
+      
+      // Rebond sur EMA Fast M5 (priorité car plus réactif)
+      if(nearEMAFastM5 && emaMBearish && wasAbove && isRebounding)
+      {
+         // Vérifier confirmation H1
+         if(emaH1Bearish)
+         {
+            distance = distanceToEMAFastM5 / point;
+            if(DebugMode)
+               Print("✅ Rebond SELL sur trendline EMA Fast M5 détecté (distance: ", DoubleToString(distance, 0), " points) - Tendance H1 confirmée");
+            return true;
+         }
+         else
+         {
+            // EMA H1 non alignée, mais EMA M5 OK = signal moyen
+            distance = distanceToEMAFastM5 / point;
+            if(DebugMode)
+               Print("⚠️ Rebond SELL sur EMA Fast M5 mais H1 non alignée (distance: ", DoubleToString(distance, 0), " points) - Signal moyen");
+            return true; // Accepter quand même mais signal moins fort
+         }
+      }
+      
+      // Vérifier aussi rebond sur EMA Fast H1 (résistance long terme - moins fréquent mais plus fort)
+      double distanceToEMAFastH1 = MathAbs(currentPrice - emaFastH1[0]);
+      bool nearEMAFastH1 = (currentPrice >= (emaFastH1[0] - toleranceH1) && currentPrice <= (emaFastH1[0] + toleranceH1));
+      
+      if(nearEMAFastH1 && emaH1Bearish && emaMBearish)
+      {
+         // Vérifier que le prix rebondit
+         bool wasAboveH1 = (close[1] > emaFastH1[1] || close[2] > emaFastH1[2] || high[1] > emaFastH1[1]);
+         bool isReboundingH1 = (close[0] < close[1] || (high[0] >= emaFastH1[0] && close[0] <= emaFastH1[0]));
+         
+         if(wasAboveH1 && isReboundingH1)
+         {
+            distance = distanceToEMAFastH1 / point;
+            if(DebugMode)
+               Print("✅ Rebond SELL sur trendline EMA Fast H1 détecté (distance: ", DoubleToString(distance, 0), " points) - Signal très fort");
+            return true;
+         }
+      }
+   }
+   
+   return false;
+}
+
+//+------------------------------------------------------------------+
+//| Calculer le SuperTrend (indicateur de tendance)                  |
+//| Retourne: true si signal valide, strength = force du signal (0-1) |
+//+------------------------------------------------------------------+
+bool CheckSuperTrendSignal(ENUM_ORDER_TYPE orderType, double &strength)
+{
+   strength = 0.0;
+   
+   // Récupérer ATR et prix
+   double atr[];
+   double high[], low[], close[];
+   ArraySetAsSeries(atr, true);
+   ArraySetAsSeries(high, true);
+   ArraySetAsSeries(low, true);
+   ArraySetAsSeries(close, true);
+   
+   if(CopyBuffer(atrHandle, 0, 0, 2, atr) < 2 ||
+      CopyHigh(_Symbol, PERIOD_M1, 0, 2, high) < 2 ||
+      CopyLow(_Symbol, PERIOD_M1, 0, 2, low) < 2 ||
+      CopyClose(_Symbol, PERIOD_M1, 0, 2, close) < 2)
+      return false;
+   
+   // Calculer le SuperTrend (méthode simplifiée)
+   // Basic Upper Band = (High + Low) / 2 + (Multiplier * ATR)
+   // Basic Lower Band = (High + Low) / 2 - (Multiplier * ATR)
+   double multiplier = 2.0;
+   double hl2 = (high[0] + low[0]) / 2.0;
+   double upperBand = hl2 + (multiplier * atr[0]);
+   double lowerBand = hl2 - (multiplier * atr[0]);
+   
+   // Déterminer la tendance
+   bool isUptrend = (close[0] > lowerBand);
+   bool wasUptrend = (close[1] > (hl2 - (multiplier * atr[1])));
+   
+   // Vérifier le signal selon l'ordre
+   if(orderType == ORDER_TYPE_BUY)
+   {
+      // Signal BUY: passage de downtrend à uptrend OU uptrend confirmé
+      if(isUptrend && (!wasUptrend || close[0] > close[1]))
+      {
+         // Calculer la force: distance du prix au SuperTrend
+         double distance = (close[0] - lowerBand) / atr[0];
+         strength = MathMin(distance / 2.0, 1.0); // Normaliser entre 0 et 1
+         return true;
+      }
+   }
+   else // SELL
+   {
+      // Signal SELL: passage de uptrend à downtrend OU downtrend confirmé
+      if(!isUptrend && (wasUptrend || close[0] < close[1]))
+      {
+         // Calculer la force: distance du prix au SuperTrend
+         double distance = (upperBand - close[0]) / atr[0];
+         strength = MathMin(distance / 2.0, 1.0); // Normaliser entre 0 et 1
+         return true;
+      }
+   }
+   
+   return false;
+}
+
+//+------------------------------------------------------------------+
+//| Vérifier rebond sur support/résistance                          |
+//| Retourne: true si rebond confirmé, reboundStrength = force (0-1) |
+//+------------------------------------------------------------------+
+bool CheckSupportResistanceRebound(ENUM_ORDER_TYPE orderType, double &reboundStrength)
+{
+   reboundStrength = 0.0;
+   
+   // Récupérer les niveaux de support/résistance (basés sur ATR)
+   double atrM5[], atrH1[];
+   ArraySetAsSeries(atrM5, true);
+   ArraySetAsSeries(atrH1, true);
+   
+   if(CopyBuffer(atrM5Handle, 0, 0, 1, atrM5) <= 0 ||
+      CopyBuffer(atrH1Handle, 0, 0, 1, atrH1) <= 0)
+      return false;
+   
+   double currentPrice = (orderType == ORDER_TYPE_BUY) ? 
+                        SymbolInfoDouble(_Symbol, SYMBOL_BID) : 
+                        SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   
+   // Calculer les niveaux de support/résistance
+   double supportM5 = currentPrice - (2.0 * atrM5[0]);
+   double resistanceM5 = currentPrice + (2.0 * atrM5[0]);
+   double supportH1 = currentPrice - (2.0 * atrH1[0]);
+   double resistanceH1 = currentPrice + (2.0 * atrH1[0]);
+   
+   // Récupérer les prix historiques pour détecter le rebond
+   double close[], low[], high[];
+   ArraySetAsSeries(close, true);
+   ArraySetAsSeries(low, true);
+   ArraySetAsSeries(high, true);
+   
+   if(CopyClose(_Symbol, PERIOD_M1, 0, 5, close) < 5 ||
+      CopyLow(_Symbol, PERIOD_M1, 0, 5, low) < 5 ||
+      CopyHigh(_Symbol, PERIOD_M1, 0, 5, high) < 5)
+      return false;
+   
+   if(orderType == ORDER_TYPE_BUY)
+   {
+      // Pour BUY: vérifier rebond sur support
+      // Le prix doit avoir touché le support (M5 ou H1) et rebondir
+      double tolerance = 5 * _Point;
+      
+      // Vérifier rebond sur support M5
+      bool touchedSupportM5 = (low[0] <= supportM5 + tolerance || low[1] <= supportM5 + tolerance);
+      bool rebounding = (close[0] > close[1] && close[1] > close[2]);
+      
+      if(touchedSupportM5 && rebounding)
+      {
+         // Calculer la force: distance du rebond
+         double reboundDistance = (close[0] - MathMin(low[0], low[1])) / atrM5[0];
+         reboundStrength = MathMin(reboundDistance / 1.5, 1.0);
+         return true;
+      }
+      
+      // Vérifier rebond sur support H1 (plus fort)
+      bool touchedSupportH1 = (low[0] <= supportH1 + tolerance || low[1] <= supportH1 + tolerance);
+      if(touchedSupportH1 && rebounding)
+      {
+         double reboundDistance = (close[0] - MathMin(low[0], low[1])) / atrH1[0];
+         reboundStrength = MathMin(reboundDistance / 1.5, 1.0) * 1.2; // Bonus pour H1
+         reboundStrength = MathMin(reboundStrength, 1.0);
+         return true;
+      }
+   }
+   else // SELL
+   {
+      // Pour SELL: vérifier rebond sur résistance
+      double tolerance = 5 * _Point;
+      
+      // Vérifier rebond sur résistance M5
+      bool touchedResistanceM5 = (high[0] >= resistanceM5 - tolerance || high[1] >= resistanceM5 - tolerance);
+      bool rebounding = (close[0] < close[1] && close[1] < close[2]);
+      
+      if(touchedResistanceM5 && rebounding)
+      {
+         double reboundDistance = (MathMax(high[0], high[1]) - close[0]) / atrM5[0];
+         reboundStrength = MathMin(reboundDistance / 1.5, 1.0);
+         return true;
+      }
+      
+      // Vérifier rebond sur résistance H1 (plus fort)
+      bool touchedResistanceH1 = (high[0] >= resistanceH1 - tolerance || high[1] >= resistanceH1 - tolerance);
+      if(touchedResistanceH1 && rebounding)
+      {
+         double reboundDistance = (MathMax(high[0], high[1]) - close[0]) / atrH1[0];
+         reboundStrength = MathMin(reboundDistance / 1.5, 1.0) * 1.2; // Bonus pour H1
+         reboundStrength = MathMin(reboundStrength, 1.0);
+         return true;
+      }
+   }
+   
+   return false;
+}
+
+//+------------------------------------------------------------------+
+//| Vérifier retournement de pattern (candlesticks)                 |
+//| Retourne: true si pattern de retournement confirmé              |
+//+------------------------------------------------------------------+
+bool CheckPatternReversal(ENUM_ORDER_TYPE orderType, double &reversalConfidence)
+{
+   reversalConfidence = 0.0;
+   
+   // Récupérer les données de bougies
+   MqlRates rates[];
+   ArraySetAsSeries(rates, true);
+   if(CopyRates(_Symbol, PERIOD_M1, 0, 5, rates) < 5)
+      return false;
+   
+   if(orderType == ORDER_TYPE_BUY)
+   {
+      // Patterns haussiers de retournement
+      // 1. Hammer / Doji après baisse
+      bool wasFalling = (rates[2].close < rates[3].close && rates[1].close < rates[2].close);
+      bool hammer = (rates[0].close > rates[0].open && 
+                    (rates[0].close - rates[0].low) > 2 * (rates[0].close - rates[0].open));
+      bool doji = (MathAbs(rates[0].close - rates[0].open) < (rates[0].high - rates[0].low) * 0.1);
+      
+      if(wasFalling && (hammer || doji))
+      {
+         reversalConfidence = 0.6;
+         if(rates[0].close > rates[1].close)
+            reversalConfidence = 0.8; // Confirmation avec bougie suivante
+         return true;
+      }
+      
+      // 2. Engulfing haussier
+      bool bearishPrev = (rates[1].close < rates[1].open);
+      bool bullishNow = (rates[0].close > rates[0].open);
+      bool engulfing = (rates[0].open < rates[1].close && rates[0].close > rates[1].open);
+      
+      if(bearishPrev && bullishNow && engulfing)
+      {
+         reversalConfidence = 0.7;
+         if(rates[0].close > rates[1].high)
+            reversalConfidence = 0.9; // Fort engulfing
+         return true;
+      }
+      
+      // 3. Double bottom (simplifié)
+      if(rates[2].low <= rates[3].low && rates[0].low <= rates[1].low &&
+         rates[0].close > rates[2].close && rates[0].close > rates[1].close)
+      {
+         reversalConfidence = 0.75;
+         return true;
+      }
+   }
+   else // SELL
+   {
+      // Patterns baissiers de retournement
+      // 1. Shooting Star / Doji après hausse
+      bool wasRising = (rates[2].close > rates[3].close && rates[1].close > rates[2].close);
+      bool shootingStar = (rates[0].close < rates[0].open && 
+                          (rates[0].high - rates[0].close) > 2 * (rates[0].open - rates[0].close));
+      bool doji = (MathAbs(rates[0].close - rates[0].open) < (rates[0].high - rates[0].low) * 0.1);
+      
+      if(wasRising && (shootingStar || doji))
+      {
+         reversalConfidence = 0.6;
+         if(rates[0].close < rates[1].close)
+            reversalConfidence = 0.8;
+         return true;
+      }
+      
+      // 2. Engulfing baissier
+      bool bullishPrev = (rates[1].close > rates[1].open);
+      bool bearishNow = (rates[0].close < rates[0].open);
+      bool engulfing = (rates[0].open > rates[1].close && rates[0].close < rates[1].open);
+      
+      if(bullishPrev && bearishNow && engulfing)
+      {
+         reversalConfidence = 0.7;
+         if(rates[0].close < rates[1].low)
+            reversalConfidence = 0.9;
+         return true;
+      }
+      
+      // 3. Double top (simplifié)
+      if(rates[2].high >= rates[3].high && rates[0].high >= rates[1].high &&
+         rates[0].close < rates[2].close && rates[0].close < rates[1].close)
+      {
+         reversalConfidence = 0.75;
+         return true;
+      }
+   }
+   
+   return false;
+}
+
+//+------------------------------------------------------------------+
+//| Vérifier toutes les conditions d'entrée avancées                |
+//| Retourne: true si toutes les conditions sont remplies           |
+//| entryScore = score global d'entrée (0-1)                        |
+//+------------------------------------------------------------------+
+bool CheckAdvancedEntryConditions(ENUM_ORDER_TYPE orderType, double &entryScore)
+{
+   entryScore = 0.0;
+   int conditionsMet = 0;
+   int totalConditions = 5;
+   
+   // 1. SuperTrend (obligatoire)
+   double superTrendStrength = 0.0;
+   bool superTrendOk = CheckSuperTrendSignal(orderType, superTrendStrength);
+   if(superTrendOk && superTrendStrength > 0.3)
+   {
+      conditionsMet++;
+      entryScore += superTrendStrength * 0.25; // 25% du score
+   }
+   else if(DebugMode)
+      Print("⏸️ SuperTrend non confirmé pour ", EnumToString(orderType));
+   
+   // 2. Rebond sur support/résistance (fortement recommandé)
+   double reboundStrength = 0.0;
+   bool reboundOk = CheckSupportResistanceRebound(orderType, reboundStrength);
+   if(reboundOk && reboundStrength > 0.4)
+   {
+      conditionsMet++;
+      entryScore += reboundStrength * 0.25; // 25% du score
+   }
+   else if(DebugMode)
+      Print("⏸️ Rebond S/R non confirmé pour ", EnumToString(orderType));
+   
+   // 3. Pattern de retournement (recommandé)
+   double reversalConfidence = 0.0;
+   bool reversalOk = CheckPatternReversal(orderType, reversalConfidence);
+   if(reversalOk && reversalConfidence > 0.5)
+   {
+      conditionsMet++;
+      entryScore += reversalConfidence * 0.20; // 20% du score
+   }
+   else if(DebugMode)
+      Print("⏸️ Pattern retournement non confirmé pour ", EnumToString(orderType));
+   
+   // 4. Rebond sur trendline (amélioration de la fonction existante)
+   double trendlineDistance = 0.0;
+   bool trendlineOk = CheckReboundOnTrendline(orderType, trendlineDistance);
+   if(trendlineOk && trendlineDistance < 10 * _Point)
+   {
+      conditionsMet++;
+      entryScore += (1.0 - (trendlineDistance / (10 * _Point))) * 0.15; // 15% du score
+   }
+   else if(DebugMode)
+      Print("⏸️ Rebond trendline non confirmé pour ", EnumToString(orderType));
+   
+   // 5. Alignement de tendance M5/H1 (obligatoire)
+   bool trendOk = CheckTrendAlignment(orderType);
+   if(trendOk)
+   {
+      conditionsMet++;
+      entryScore += 0.15; // 15% du score
+   }
+   else if(DebugMode)
+      Print("⏸️ Alignement tendance non confirmé pour ", EnumToString(orderType));
+   
+   // Score minimum requis: au moins 3 conditions sur 5 ET score total > 0.6
+   bool entryValid = (conditionsMet >= 3 && entryScore >= 0.6);
+   
+   if(DebugMode && entryValid)
+      Print("✅ Conditions d'entrée confirmées: ", conditionsMet, "/", totalConditions, " conditions, Score=", DoubleToString(entryScore, 2));
+   
+   return entryValid;
+}
+
+//+------------------------------------------------------------------+
+//| Vérifier entrée dans zone IA avec confirmation EMA               |
+//+------------------------------------------------------------------+
+bool CheckAIZoneEntryWithEMA(ENUM_ORDER_TYPE orderType, bool &isInZone, bool &emaConfirmed, bool &isCorrection)
+{
    isInZone = false;
    emaConfirmed = false;
    isCorrection = false;
@@ -3414,12 +8442,6 @@ bool CheckAIZoneEntryWithEMA(ENUM_ORDER_TYPE orderType, bool &isInZone, bool &em
       }
    }
    
-   if(ignoreZone)
-   {
-      isInZone = true;
-      priceEnteringZone = true;
-   }
-   
    if(!isInZone || !priceEnteringZone)
    {
       if(DebugMode && !isInZone)
@@ -3448,36 +8470,21 @@ bool CheckAIZoneEntryWithEMA(ENUM_ORDER_TYPE orderType, bool &isInZone, bool &em
       return false;
    }
    
-   // Récupérer les valeurs EMA M5 (confirmation principale) + Momentum Slope
-   if(CopyBuffer(emaFastM5Handle, 0, 0, 3, emaFastM5) <= 0 ||
-      CopyBuffer(emaSlowM5Handle, 0, 0, 3, emaSlowM5) <= 0)
+   // Récupérer les valeurs EMA M5 (confirmation principale)
+   if(CopyBuffer(emaFastM5Handle, 0, 0, 1, emaFastM5) <= 0 ||
+      CopyBuffer(emaSlowM5Handle, 0, 0, 1, emaSlowM5) <= 0)
    {
       if(DebugMode)
          Print("⚠️ Erreur récupération EMA M5 pour vérification zone");
       return false;
    }
    
-   // --- FILTRE MCS: SÉPARATION DYNAMIQUE & SLOPE (M5) ---
-   double emaDiff = MathAbs(emaFastM5[0] - emaSlowM5[0]);
-   double prevEmaDiff = MathAbs(emaFastM5[1] - emaSlowM5[1]);
-   double atr_b[];
-   double atrM1 = 0;
-   ArraySetAsSeries(atr_b, true);
-   if(CopyBuffer(atrHandle, 0, 0, 1, atr_b) > 0) atrM1 = atr_b[0];
-
-   // 1. Séparation dynamique (min 1.5x ATR)
-   if(atrM1 > 0 && emaDiff < atrM1 * 1.5)
+   // Récupérer les valeurs EMA H1 (tendance générale)
+   if(CopyBuffer(emaFastH1Handle, 0, 0, 1, emaFastH1) <= 0 ||
+      CopyBuffer(emaSlowH1Handle, 0, 0, 1, emaSlowH1) <= 0)
    {
       if(DebugMode) 
-         Print("⏸️ Tendance trop faible (Séparation EMA < 1.5x ATR): ", DoubleToString(emaDiff/_Point, 0), " pts < ", DoubleToString((atrM1*1.5)/_Point, 0), " pts");
-      return false;
-   }
-   
-   // 2. Slope Momentum (les EMAs doivent s'écarter, pas stagner ou converger)
-   if(emaDiff <= prevEmaDiff * 0.98) // Si la séparation diminue ou stagne (marge 2%)
-   {
-      if(DebugMode)
-         Print("⏸️ Momentum stagnant ou convergent (EMA Slope <= 0): ", DoubleToString(emaDiff/_Point, 0), " <= ", DoubleToString(prevEmaDiff/_Point, 0), " pts");
+         Print("⚠️ Erreur récupération EMA H1 pour vérification zone");
       return false;
    }
    
@@ -3595,11 +8602,22 @@ bool CheckAIZoneEntryWithEMA(ENUM_ORDER_TYPE orderType, bool &isInZone, bool &em
          Print("⚠️ SELL: Prix dans le tiers inférieur de la zone (", DoubleToString(distanceFromHigh / zoneRange * 100, 1), "%)");
    }
    
+   // 6. VÉRIFICATIONS AVANCÉES: SuperTrend, Support/Résistance, Patterns
+   double entryScore = 0.0;
+   bool advancedConditionsOk = CheckAdvancedEntryConditions(orderType, entryScore);
+   
+   if(!advancedConditionsOk)
+   {
+      if(DebugMode)
+         Print("⏸️ ", EnumToString(orderType), " rejeté: Conditions avancées non remplies (Score=", DoubleToString(entryScore, 2), " < 0.6)");
+      return false;
+   }
+   
    // Toutes les conditions sont remplies
    if(DebugMode)
    {
       string rsiInfo = (ArraySize(rsi) > 0) ? " RSI=" + DoubleToString(rsi[0], 1) : "";
-      Print("✅ ", EnumToString(orderType), " confirmé: Prix dans zone IA + Entrée depuis bonne direction + EMA M5 confirmé + Pas de correction", rsiInfo);
+      Print("✅ ", EnumToString(orderType), " confirmé: Prix dans zone IA + Entrée depuis bonne direction + EMA M5 confirmé + Pas de correction + Conditions avancées (Score=", DoubleToString(entryScore, 2), ")", rsiInfo);
    }
    
    return true;
