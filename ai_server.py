@@ -366,14 +366,26 @@ except ImportError as e:
 
 # Import du détecteur avancé depuis ai_server_improvements
 try:
-    from ai_server_improvements import AdvancedSpikeDetector
+    from ai_server_improvements import (
+        AdvancedSpikeDetector,
+        calculate_advanced_entry_score,
+        calculate_momentum_score,
+        detect_divergence,
+        detect_candle_patterns
+    )
     ADVANCED_SPIKE_DETECTOR_AVAILABLE = True
+    ADVANCED_ENTRY_SCORING_AVAILABLE = True
     advanced_spike_detector = AdvancedSpikeDetector()
-    logger.info("AdvancedSpikeDetector initialisé")
+    logger.info("AdvancedSpikeDetector et système de scoring avancé initialisés")
 except ImportError as e:
     ADVANCED_SPIKE_DETECTOR_AVAILABLE = False
+    ADVANCED_ENTRY_SCORING_AVAILABLE = False
     advanced_spike_detector = None
-    logger.warning(f"AdvancedSpikeDetector non disponible: {e}")
+    calculate_advanced_entry_score = None
+    calculate_momentum_score = None
+    detect_divergence = None
+    detect_candle_patterns = None
+    logger.warning(f"AdvancedSpikeDetector et scoring avancé non disponibles: {e}")
 
 # Tentative d'importation de ai_indicators
 try:
@@ -2612,6 +2624,73 @@ async def decision(request: DecisionRequest):
             logger.debug(f"Retour depuis cache pour {request.symbol}")
             return DecisionResponse(**cached)
         
+        # NOUVEAU: Utiliser le système de scoring avancé si disponible et données historiques accessibles
+        use_advanced_scoring = False
+        if ADVANCED_ENTRY_SCORING_AVAILABLE and calculate_advanced_entry_score and MT5_AVAILABLE:
+            try:
+                # Récupérer les données historiques pour le scoring avancé
+                df_m1 = get_historical_data_mt5(request.symbol, "M1", 100)
+                if df_m1 is not None and len(df_m1) >= 50:
+                    entry_data = calculate_advanced_entry_score(df_m1, request.symbol, "M1")
+                    
+                    # Utiliser le scoring avancé si le score est suffisant
+                    if entry_data['entry_score'] >= 0.65 and entry_data['recommendation'] != 'HOLD':
+                        use_advanced_scoring = True
+                        action = entry_data['recommendation'].lower()
+                        confidence = entry_data['entry_score']
+                        
+                        # Construire la raison avec les détails
+                        reason_parts = [
+                            f"Score avancé: {entry_data['entry_score']:.1%}",
+                            f"Consensus: {entry_data['consensus']:.0%}",
+                        ]
+                        
+                        # Ajouter les facteurs principaux
+                        factors_detail = []
+                        for factor_name, factor_value in entry_data['factors'].items():
+                            if factor_value > 0.6:
+                                factors_detail.append(f"{factor_name}: {factor_value:.0%}")
+                        
+                        if factors_detail:
+                            reason_parts.append(f"Facteurs: {', '.join(factors_detail)}")
+                        
+                        reason = " | ".join(reason_parts)
+                        
+                        logger.info(f"✅ Scoring avancé utilisé pour {request.symbol}: {action.upper()} "
+                                  f"({confidence:.1%}) - {entry_data['reason']}")
+                        
+                        # Construire la réponse et la mettre en cache
+                        response_data = {
+                            "action": action,
+                            "confidence": confidence,
+                            "reason": reason,
+                            "spike_prediction": False,
+                            "spike_zone_price": None,
+                            "stop_loss": None,
+                            "take_profit": None,
+                            "spike_direction": None,
+                            "early_spike_warning": False,
+                            "early_spike_zone_price": None,
+                            "early_spike_direction": None,
+                            "buy_zone_low": None,
+                            "buy_zone_high": None,
+                            "sell_zone_low": None,
+                            "sell_zone_high": None,
+                            "timestamp": datetime.now().isoformat(),
+                            "model_used": "AdvancedEntryScoring",
+                            "technical_analysis": entry_data.get('factors', {})
+                        }
+                        
+                        # Mettre en cache
+                        prediction_cache[cache_key] = response_data
+                        last_updated[cache_key] = current_time
+                        
+                        # Retourner la réponse directement
+                        return DecisionResponse(**response_data)
+            except Exception as e:
+                logger.warning(f"⚠️ Erreur scoring avancé, utilisation méthode standard: {e}")
+                use_advanced_scoring = False
+        
         # Analyse des indicateurs techniques
         rsi = request.rsi
         ema_fast_h1 = request.ema_fast_h1
@@ -2622,10 +2701,12 @@ async def decision(request: DecisionRequest):
         ask = request.ask
         mid_price = (bid + ask) / 2
         
-        # Logique de décision basique
-        action = "hold"
-        confidence = 0.5
-        reason = ""  # Sera construite plus bas avec les composants
+        # Si le scoring avancé n'a pas été utilisé, utiliser la logique standard
+        if not use_advanced_scoring:
+            # Logique de décision basique
+            action = "hold"
+            confidence = 0.5
+            reason = ""  # Sera construite plus bas avec les composants
         
         # Analyse RSI
         rsi_bullish = rsi < 30  # Survente
