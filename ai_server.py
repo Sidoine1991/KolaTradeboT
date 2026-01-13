@@ -349,6 +349,16 @@ try:
     from advanced_ml_predictor import AdvancedMLPredictor
     from spike_predictor import AdvancedSpikePredictor
     from backend.mt5_connector import get_ohlc as get_historical_data
+    # Router adaptatif multi-actifs (XGBoost par catégorie)
+    try:
+        from adaptive_predict import predict_adaptive, get_symbol_category
+        ADAPTIVE_PREDICT_AVAILABLE = True
+        logger.info("Module adaptive_predict disponible (modèles multi-actifs)")
+    except ImportError:
+        predict_adaptive = None  # type: ignore
+        get_symbol_category = None  # type: ignore
+        ADAPTIVE_PREDICT_AVAILABLE = False
+        logger.warning("Module adaptive_predict non disponible")
     # Import du détecteur de spikes amélioré
     try:
         from backend.spike_detector import predict_spike_ml, detect_spikes, get_realtime_spike_analysis
@@ -362,6 +372,9 @@ try:
 except ImportError as e:
     BACKEND_AVAILABLE = False
     SPIKE_DETECTOR_AVAILABLE = False
+    ADAPTIVE_PREDICT_AVAILABLE = False
+    predict_adaptive = None  # type: ignore
+    get_symbol_category = None  # type: ignore
     logger.warning(f"Modules backend non disponibles: {e}")
 
 # Import du détecteur avancé depuis ai_server_improvements
@@ -584,6 +597,20 @@ CACHE_DURATION = 30  # secondes
 DATA_DIR = Path("data")
 MODELS_DIR = Path("models")
 LOG_FILE = Path("ai_server.log")
+
+# Dossier commun MT5 pour stocker les historiques/prédictions utilisables par l'EA
+# Exemple fourni par l'utilisateur :
+# C:\Users\USER\AppData\Roaming\MetaQuotes\Terminal\Common\Files\Predictions
+MT5_PREDICTIONS_DIR = Path(
+    r"C:\Users\USER\AppData\Roaming\MetaQuotes\Terminal\Common\Files\Predictions"
+)
+try:
+    MT5_PREDICTIONS_DIR.mkdir(parents=True, exist_ok=True)
+except Exception as _e:
+    # On log uniquement en warning, le serveur peut continuer sans ce stockage
+    logging.getLogger("tradbot_ai").warning(
+        f"Impossible de créer le dossier de prédictions MT5: {MT5_PREDICTIONS_DIR} ({_e})"
+    )
 DEFAULT_SYMBOL = "Volatility 75 Index"
 
 # Création des répertoires si nécessaire
@@ -593,6 +620,183 @@ for directory in [DATA_DIR, MODELS_DIR]:
 # Cache pour les prédictions
 prediction_cache = {}
 last_updated = {}
+
+# ===== SYSTÈME DE VALIDATION ET CALIBRATION DES PRÉDICTIONS =====
+# Stockage des prédictions historiques pour validation
+prediction_history: Dict[str, List[Dict[str, Any]]] = {}  # {symbol: [predictions]}
+PREDICTION_VALIDATION_FILE = DATA_DIR / "prediction_validation.json"
+MIN_VALIDATION_BARS = 10  # Minimum 10 bougies pour valider
+MIN_ACCURACY_THRESHOLD = 0.60  # Seuil minimum de précision (60%)
+MAX_HISTORICAL_PREDICTIONS = 100  # Maximum 100 prédictions par symbole
+
+def load_prediction_history():
+    """Charge l'historique des prédictions depuis le fichier"""
+    global prediction_history
+    if PREDICTION_VALIDATION_FILE.exists():
+        try:
+            with open(PREDICTION_VALIDATION_FILE, 'r', encoding='utf-8') as f:
+                prediction_history = json.load(f)
+            logger.info(f"✅ Historique des prédictions chargé: {sum(len(v) for v in prediction_history.values())} prédictions")
+        except Exception as e:
+            logger.warning(f"Erreur chargement historique prédictions: {e}")
+            prediction_history = {}
+
+def save_prediction_history():
+    """Sauvegarde l'historique des prédictions dans le fichier"""
+    try:
+        with open(PREDICTION_VALIDATION_FILE, 'w', encoding='utf-8') as f:
+            json.dump(prediction_history, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        logger.error(f"Erreur sauvegarde historique prédictions: {e}")
+
+def store_prediction(symbol: str, predicted_prices: List[float], current_price: float, timeframe: str):
+    """Stocke une prédiction pour validation future"""
+    if symbol not in prediction_history:
+        prediction_history[symbol] = []
+    
+    prediction = {
+        "timestamp": datetime.now().isoformat(),
+        "predicted_prices": predicted_prices,
+        "current_price": current_price,
+        "timeframe": timeframe,
+        "bars_predicted": len(predicted_prices),
+        "accuracy_score": None,
+        "is_validated": False,
+        "validation_timestamp": None
+    }
+    
+    prediction_history[symbol].append(prediction)
+    
+    # Limiter le nombre de prédictions stockées
+    if len(prediction_history[symbol]) > MAX_HISTORICAL_PREDICTIONS:
+        prediction_history[symbol] = prediction_history[symbol][-MAX_HISTORICAL_PREDICTIONS:]
+    
+    save_prediction_history()
+
+def calculate_prediction_accuracy(predicted_prices: List[float], real_prices: List[float]) -> float:
+    """Calcule la précision d'une prédiction en comparant avec les prix réels"""
+    if len(predicted_prices) == 0 or len(real_prices) == 0:
+        return 0.0
+    
+    min_len = min(len(predicted_prices), len(real_prices))
+    if min_len < MIN_VALIDATION_BARS:
+        return 0.0
+    
+    total_error = 0.0
+    valid_comparisons = 0
+    
+    for i in range(min_len):
+        if predicted_prices[i] > 0 and real_prices[i] > 0:
+            # Calculer l'erreur relative en pourcentage
+            error_percent = abs(predicted_prices[i] - real_prices[i]) / real_prices[i]
+            total_error += error_percent
+            valid_comparisons += 1
+    
+    if valid_comparisons < MIN_VALIDATION_BARS:
+        return 0.0
+    
+    # Calculer l'erreur moyenne
+    avg_error = total_error / valid_comparisons
+    
+    # Convertir en score de précision (0.0 = 0% précision, 1.0 = 100% précision)
+    # Erreur de 10% = précision 0%
+    accuracy = 1.0 - min(avg_error * 10.0, 1.0)
+    
+    return max(0.0, min(1.0, accuracy))
+
+def validate_predictions(symbol: str, timeframe: str = "M1"):
+    """Valide les prédictions passées en comparant avec les prix réels"""
+    if symbol not in prediction_history:
+        return
+    
+    if not MT5_AVAILABLE or not mt5_initialized:
+        return
+    
+    try:
+        import MetaTrader5 as mt5_module
+        period_map = {
+            "M1": mt5_module.TIMEFRAME_M1,
+            "M5": mt5_module.TIMEFRAME_M5,
+            "M15": mt5_module.TIMEFRAME_M15,
+            "H1": mt5_module.TIMEFRAME_H1,
+            "H4": mt5_module.TIMEFRAME_H4,
+            "D1": mt5_module.TIMEFRAME_D1
+        }
+        period = period_map.get(timeframe, mt5_module.TIMEFRAME_M1)
+        
+        validated_count = 0
+        total_accuracy = 0.0
+        
+        for pred in prediction_history[symbol]:
+            if pred["is_validated"]:
+                continue
+            
+            # Calculer combien de bougies se sont écoulées
+            pred_time = datetime.fromisoformat(pred["timestamp"])
+            elapsed_minutes = (datetime.now() - pred_time).total_seconds() / 60
+            
+            if elapsed_minutes < MIN_VALIDATION_BARS:
+                continue  # Pas assez de temps écoulé
+            
+            # Récupérer les prix réels
+            bars_to_get = min(int(elapsed_minutes), pred["bars_predicted"])
+            rates = mt5_module.copy_rates_from_pos(symbol, period, 0, bars_to_get)
+            
+            if rates is None or len(rates) < MIN_VALIDATION_BARS:
+                continue
+            
+            # Extraire les prix réels (en ordre chronologique)
+            real_prices = [rate['close'] for rate in reversed(rates[:bars_to_get])]
+            predicted_prices = pred["predicted_prices"][:len(real_prices)]
+            
+            # Calculer la précision
+            accuracy = calculate_prediction_accuracy(predicted_prices, real_prices)
+            
+            if accuracy > 0.0:
+                pred["accuracy_score"] = accuracy
+                pred["is_validated"] = True
+                pred["validation_timestamp"] = datetime.now().isoformat()
+                total_accuracy += accuracy
+                validated_count += 1
+                
+                logger.info(f"✅ Prédiction validée pour {symbol}: Précision = {accuracy*100:.1f}%")
+        
+        if validated_count > 0:
+            save_prediction_history()
+            avg_accuracy = total_accuracy / validated_count
+            logger.info(f"📊 Précision moyenne pour {symbol}: {avg_accuracy*100:.1f}% ({validated_count} validations)")
+            
+    except Exception as e:
+        logger.error(f"Erreur validation prédictions pour {symbol}: {e}")
+
+def get_prediction_accuracy_score(symbol: str) -> float:
+    """Retourne le score de précision moyen pour un symbole"""
+    if symbol not in prediction_history:
+        return 0.5  # Score neutre si pas de données
+    
+    validated = [p for p in prediction_history[symbol] if p.get("is_validated", False) and p.get("accuracy_score") is not None]
+    
+    if len(validated) == 0:
+        return 0.5  # Score neutre si pas de validations
+    
+    total_accuracy = sum(p["accuracy_score"] for p in validated)
+    return total_accuracy / len(validated)
+
+def get_prediction_confidence_multiplier(symbol: str) -> float:
+    """Retourne un multiplicateur de confiance basé sur la précision historique"""
+    accuracy = get_prediction_accuracy_score(symbol)
+    
+    if accuracy >= 0.80:
+        return 1.0  # Confiance normale
+    elif accuracy >= 0.60:
+        return 0.8  # Réduire confiance de 20%
+    elif accuracy >= 0.40:
+        return 0.5  # Réduire confiance de 50%
+    else:
+        return 0.3  # Très faible précision
+
+# Charger l'historique au démarrage
+load_prediction_history()
 
 # Initialisation MT5 si disponible
 mt5_initialized = False
@@ -800,6 +1004,188 @@ def get_historical_data_mt5(symbol: str, timeframe: str = "H1", count: int = 500
     except Exception as e:
         logger.error(f"Erreur lors de la récupération des données MT5: {e}")
         return None
+
+
+# =========================
+#   ROUTAGE ML MULTI-MODÈLES
+#   (Boom/Crash, Forex, Commodities, Volatility)
+# =========================
+
+def _map_symbol_to_trading_category(symbol: str) -> str:
+    """
+    Catégorie de trading « humaine » utilisée pour le reporting et la logique de style.
+    
+    - BOOM_CRASH     : indices Boom/Crash et assimilés (SYNTHETIC_SPECIAL)
+    - VOLATILITY     : indices de volatilité / synthétiques généraux
+    - FOREX          : paires de devises
+    - COMMODITIES    : métaux / énergies / assimilés (mappés sur modèle actions au départ)
+    """
+    if not ADAPTIVE_PREDICT_AVAILABLE or get_symbol_category is None:  # type: ignore
+        # Fallback simple si le router adaptatif n'est pas dispo
+        s = symbol.upper()
+        if "BOOM" in s or "CRASH" in s:
+            return "BOOM_CRASH"
+        if "VOLATILITY" in s or "RANGE BREAK" in s or "STEP" in s:
+            return "VOLATILITY"
+        if any(k in s for k in ["USD", "EUR", "GBP", "JPY", "AUD", "CAD", "CHF", "NZD"]):
+            return "FOREX"
+        return "VOLATILITY"
+    
+    base_cat = get_symbol_category(symbol)  # type: ignore
+    if base_cat == "SYNTHETIC_SPECIAL":
+        return "BOOM_CRASH"
+    if base_cat == "SYNTHETIC_GENERAL":
+        return "VOLATILITY"
+    if base_cat == "FOREX":
+        return "FOREX"
+    if base_cat == "STOCKS":
+        return "COMMODITIES"
+    # CRYPTO / UNIVERSAL -> on mappe par défaut sur VOLATILITY pour la dynamique de risque
+    return "VOLATILITY"
+
+
+def get_multi_model_ml_decision(symbol: str, df_ohlc: pd.DataFrame) -> Optional[Dict[str, Any]]:
+    """
+    Utilise les modèles adaptatifs XGBoost par catégorie (adaptive_predict)
+    pour produire une décision ML consolidée pour le symbole donné.
+    
+    Retourne un dict avec:
+      - status: "ok" ou "error"
+      - action: "buy" / "sell" / "hold"
+      - confidence: float 0-1
+      - style: "scalp" / "swing"
+      - trading_category: catégorie humaine (BOOM_CRASH, FOREX, COMMODITIES, VOLATILITY)
+      - model_name, underlying_category, raw (résultat brut)
+    """
+    if not ADAPTIVE_PREDICT_AVAILABLE or predict_adaptive is None:  # type: ignore
+        return None
+    if df_ohlc is None or df_ohlc.empty:
+        return None
+
+    try:
+        result = predict_adaptive(symbol, df_ohlc)  # type: ignore
+    except Exception as e:
+        logger.warning(f"Erreur predict_adaptive pour {symbol}: {e}")
+        return {"status": "error", "error": str(e)}
+
+    if not isinstance(result, dict):
+        return {"status": "error", "error": "Résultat inattendu de predict_adaptive"}
+
+    if "error" in result:
+        return {
+            "status": "error",
+            "error": result.get("error"),
+            "category": result.get("category"),
+            "model_name": result.get("model_name"),
+        }
+
+    proba = float(result.get("probability", 0.0))
+    pred = int(result.get("prediction", 0))
+    model_name = result.get("model_name", "adaptive_xgb")
+    underlying_cat = result.get("category", "UNIVERSAL")
+
+    trading_cat = _map_symbol_to_trading_category(symbol)
+
+    # Direction binaire: 1 = hausse, 0 = baisse (convention interne)
+    direction_up = pred == 1
+
+    # Respecter les règles Boom/Crash (buy-only / sell-only)
+    symbol_upper = symbol.upper()
+    action: str
+    if "CRASH" in symbol_upper:
+        # Crash = SELL only
+        if direction_up:
+            action = "hold"  # modèle en désaccord avec la règle dure -> on ne trade pas
+        else:
+            action = "sell"
+    elif "BOOM" in symbol_upper:
+        # Boom = BUY only
+        if direction_up:
+            action = "buy"
+        else:
+            action = "hold"
+    else:
+        action = "buy" if direction_up else "sell"
+
+    # Style par catégorie
+    if trading_cat in ("BOOM_CRASH", "VOLATILITY"):
+        style = "scalp"
+    else:
+        style = "swing"
+
+    confidence = max(0.0, min(1.0, proba))
+
+    return {
+        "status": "ok",
+        "action": action,
+        "confidence": confidence,
+        "style": style,
+        "trading_category": trading_cat,
+        "underlying_category": underlying_cat,
+        "model_name": model_name,
+        "raw": result,
+    }
+
+
+def save_prediction_to_mt5_files(
+    symbol: str,
+    timeframe: str,
+    decision: Dict[str, Any],
+    ml_decision: Optional[Dict[str, Any]] = None,
+) -> None:
+    """
+    Sauvegarde la décision et les infos ML dans un fichier CSV par symbole/timeframe
+    dans le dossier MT5 commun (Predictions).
+
+    Format: une ligne par décision, séparateur ';'
+    Colonnes principales:
+      time;symbol;timeframe;action;confidence;style;category;model_name;details_json
+    """
+    try:
+        if not MT5_PREDICTIONS_DIR.exists():
+            return
+
+        ts = datetime.now().isoformat()
+        action = decision.get("action", "")
+        conf = decision.get("confidence", 0.0)
+        style = ""
+        category = ""
+        model_name = ""
+
+        if isinstance(ml_decision, dict) and ml_decision.get("status") == "ok":
+            style = ml_decision.get("style", "") or ""
+            category = ml_decision.get("trading_category", "") or ""
+            model_name = ml_decision.get("model_name", "") or ""
+
+        # Détails bruts en JSON compact (pour ré-entraînement éventuel)
+        details = {
+            "decision": decision,
+            "ml_decision": ml_decision,
+        }
+        details_str = json.dumps(details, separators=(",", ":"), ensure_ascii=False)
+
+        # Nom de fichier: SYMBOL_TIMEFRAME_predictions.csv (remplacer caractères spéciaux)
+        safe_symbol = symbol.replace(" ", "_").replace("/", "_")
+        safe_tf = timeframe.replace(" ", "_")
+        filename = MT5_PREDICTIONS_DIR / f"{safe_symbol}_{safe_tf}_predictions.csv"
+
+        header = (
+            "time;symbol;timeframe;action;confidence;style;category;model_name;details_json\n"
+        )
+        line = (
+            f"{ts};{symbol};{timeframe};{action};{conf:.4f};"
+            f"{style};{category};{model_name};{details_str}\n"
+        )
+
+        # Append avec création automatique de l'en-tête si fichier nouveau
+        file_exists = filename.exists()
+        with open(filename, "a", encoding="utf-8") as f:
+            if not file_exists:
+                f.write(header)
+            f.write(line)
+
+    except Exception as e:
+        logger.warning(f"Erreur sauvegarde prédiction MT5 pour {symbol}: {e}")
 
 def analyze_with_mistral(prompt: str) -> Optional[str]:
     """Analyse avec Mistral AI si disponible"""
@@ -2104,6 +2490,37 @@ async def get_volume_profile(symbol: str, timeframe: str = "H1", bins: int = 20)
 
 # ==================== END DERIV API ====================
 
+# Import du module dashboard_stats
+try:
+    from backend.dashboard_stats import DashboardStats
+    DASHBOARD_STATS_AVAILABLE = True
+except ImportError:
+    DASHBOARD_STATS_AVAILABLE = False
+    logger.warning("Module dashboard_stats non disponible")
+
+@app.get("/dashboard/stats")
+async def get_dashboard_stats():
+    """
+    Endpoint pour récupérer toutes les statistiques du dashboard
+    Retourne: performance modèles ML, statistiques trading, performance robot
+    """
+    if not DASHBOARD_STATS_AVAILABLE:
+        return {
+            "error": "Module dashboard_stats non disponible",
+            "timestamp": datetime.now().isoformat()
+        }
+    
+    try:
+        stats_collector = DashboardStats()
+        stats = stats_collector.get_all_stats()
+        return stats
+    except Exception as e:
+        logger.error(f"Erreur récupération stats dashboard: {e}", exc_info=True)
+        return {
+            "error": str(e),
+            "timestamp": datetime.now().isoformat()
+        }
+
 @app.get("/health")
 async def health_check():
     """Vérification de l'état du serveur"""
@@ -2167,10 +2584,185 @@ def calculate_trend_direction(symbol: str, timeframe: str = "M1") -> str:
             return "sell"
         else:
             return "neutral"
-            
     except Exception as e:
-        logger.error(f"Erreur calcul tendance {symbol} {timeframe}: {e}")
+        logger.error(f"Erreur lors du calcul de la tendance pour {symbol} ({timeframe}): {e}")
         return "neutral"
+
+def calculate_market_state(symbol: str, timeframe: str = "M1") -> Dict[str, str]:
+    """Calcule l'état du marché GLOBAL basé sur la moyenne de tous les timeframes
+    
+    Args:
+        symbol: Symbole du marché
+        timeframe: Timeframe d'analyse (ignoré, utilise tous les TF)
+        
+    Returns:
+        Dictionnaire avec market_state et market_trend (global)
+    """
+    try:
+        # Timeframes à analyser par ordre d'importance (plus long = plus important)
+        timeframes = [
+            ('W1', mt5.TIMEFRAME_W1, 3.0),    # Weekly = poids le plus élevé
+            ('D1', mt5.TIMEFRAME_D1, 2.5),    # Daily
+            ('H4', mt5.TIMEFRAME_H4, 2.0),     # 4 heures
+            ('H1', mt5.TIMEFRAME_H1, 1.5),     # 1 heure
+            ('M15', mt5.TIMEFRAME_M15, 1.2),   # 15 minutes
+            ('M5', mt5.TIMEFRAME_M5, 1.0),      # 5 minutes
+            ('M1', mt5.TIMEFRAME_M1, 0.8)      # 1 minute = poids le plus faible
+        ]
+        
+        all_states = []
+        all_trends = []
+        valid_timeframes = 0
+        
+        logger.info(f"🔍 Analyse état du marché global pour {symbol}")
+        
+        for tf_name, mt5_tf, weight in timeframes:
+            try:
+                # Récupérer les données pour ce timeframe
+                rates = mt5.copy_rates_from_pos(symbol, mt5_tf, 0, 50)
+                
+                if rates is None or len(rates) < 20:
+                    logger.warning(f"   ⚠️ {tf_name}: Données insuffisantes")
+                    continue
+                
+                # Extraire les prix de clôture
+                prices = [rate['close'] for rate in rates]
+                recent_prices = prices[-20:]  # 20 dernières bougies
+                
+                # Calculer la tendance pour ce timeframe
+                if len(recent_prices) >= 10:
+                    first_half = recent_prices[:10]
+                    second_half = recent_prices[10:]
+                    
+                    avg_first = np.mean(first_half)
+                    avg_second = np.mean(second_half)
+                    
+                    trend_change = (avg_second - avg_first) / avg_first
+                    
+                    volatility = np.std(recent_prices) / np.mean(recent_prices)
+                    
+                    # Déterminer l'état pour ce timeframe
+                    if abs(trend_change) < 0.001:  # Moins de 0.1% de changement
+                        market_state = "RANGE"
+                    elif trend_change > 0.002:  # Plus de 0.2% de hausse
+                        market_state = "TENDANCE_HAUSSIERE"
+                    elif trend_change < -0.002:  # Plus de 0.2% de baisse
+                        market_state = "TENDANCE_BAISSIERE"
+                    else:
+                        market_state = "CORRECTION"
+                    
+                    # Déterminer la tendance pour ce timeframe
+                    if volatility > 0.01:  # Haute volatilité
+                        if trend_change > 0:
+                            market_trend = "VOLATILE_HAUSSIER"
+                        else:
+                            market_trend = "VOLATILE_BAISSIER"
+                    else:
+                        if trend_change > 0.001:
+                            market_trend = "HAUSSIER_MODERE"
+                        elif trend_change < -0.001:
+                            market_trend = "BAISSIER_MODERE"
+                        else:
+                            market_trend = "STABLE"
+                    
+                    # Ajouter aux listes avec pondération
+                    for _ in range(int(weight * 10)):  # Multiplier par 10 pour éviter les décimales
+                        all_states.append(market_state)
+                        all_trends.append(market_trend)
+                    
+                    valid_timeframes += 1
+                    logger.info(f"   ✅ {tf_name}: {market_state} / {market_trend} (poids: {weight})")
+                
+            except Exception as e:
+                logger.error(f"   ❌ {tf_name}: Erreur {e}")
+                continue
+        
+        if not all_states:
+            logger.warning(f"Pas de données valides pour {symbol}, utilisation fallback")
+            return {"market_state": "DONNEES_INSUFFISANTES", "market_trend": "NEUTRE"}
+        
+        # Calculer l'état majoritaire (moyenne pondérée)
+        from collections import Counter
+        state_counts = Counter(all_states)
+        trend_counts = Counter(all_trends)
+        
+        # État le plus fréquent = état global
+        global_state = state_counts.most_common(1)[0][0]
+        global_trend = trend_counts.most_common(1)[0][0]
+        
+        # Log des résultats
+        logger.info(f"📊 Résultats globaux pour {symbol}:")
+        logger.info(f"   Timeframes analysés: {valid_timeframes}")
+        logger.info(f"   États détectés: {dict(state_counts)}")
+        logger.info(f"   🎯 ÉTAT GLOBAL: {global_state}")
+        logger.info(f"   📈 TENDANCE GLOBALE: {global_trend}")
+        
+        # Logique spécifique pour certains types de symboles
+        symbol_lower = symbol.lower()
+        if "boom" in symbol_lower:
+            # Pour Boom, pas d'opportunité si tout est en SELL
+            if global_trend in ["BAISSIER_MODERE", "VOLATILE_BAISSIER"]:
+                global_trend += "_SANS_OPPORTUNITE"
+        elif "crash" in symbol_lower:
+            # Pour Crash, pas d'opportunité si tout est en BUY
+            if global_trend in ["HAUSSIER_MODERE", "VOLATILE_HAUSSIER"]:
+                global_trend += "_SANS_OPPORTUNITE"
+        elif "volatility" in symbol_lower:
+            # Pour Volatility Index, alertes extrêmes
+            # Calculer volatilité moyenne sur tous les TF
+            if valid_timeframes > 0:
+                avg_volatility = np.std([rate['close'] for rate in mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M1, 0, 50)[-20:]]) / np.mean([rate['close'] for rate in mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M1, 0, 50)[-20:]])
+                if avg_volatility > 0.015:
+                    global_trend += "_EXTREME"
+        
+        return {
+            "market_state": global_state,
+            "market_trend": global_trend
+        }
+        
+    except Exception as e:
+        logger.error(f"Erreur calcul état global marché {symbol}: {e}")
+        return {"market_state": "ERREUR", "market_trend": "INCONNU"}
+        
+def _generate_simulated_prices(symbol: str, count: int = 50) -> List[float]:
+    """Génère des données simulées basées sur le type de symbole"""
+    import random
+    
+    base_price = 10000.0  # Prix de base
+    symbol_lower = symbol.lower()
+    
+    # Ajuster le comportement selon le type de symbole
+    if "boom" in symbol_lower:
+        # Boom: tendance générale haussière avec des spikes
+        trend_factor = 0.1
+        volatility = 0.008
+    elif "crash" in symbol_lower:
+        # Crash: tendance générale baissière avec des spikes
+        trend_factor = -0.08
+        volatility = 0.008
+    elif "volatility" in symbol_lower:
+        # Volatility Index: comportement erratique
+        trend_factor = 0.0
+        volatility = 0.012
+    else:
+        # Forex/autres: tendance modérée
+        trend_factor = random.choice([-0.02, 0.0, 0.02])
+        volatility = 0.005
+    
+    prices = []
+    current_price = base_price
+    
+    for i in range(count):
+        # Appliquer la tendance
+        current_price += trend_factor
+        # Ajouter la volatilité
+        noise = random.gauss(0, volatility * current_price)
+        current_price += noise
+        # Éviter les prix négatifs
+        current_price = max(current_price, base_price * 0.8)
+        prices.append(current_price)
+    
+    return prices
 
 def calculate_trend_confidence(symbol: str, timeframe: str = "M1") -> float:
     """Calcule le niveau de confiance de la tendance (0-100)"""
@@ -2235,12 +2827,17 @@ async def get_trend_analysis(request: TrendAnalysisRequest):
             direction = calculate_trend_direction(request.symbol, tf)
             confidence = calculate_trend_confidence(request.symbol, tf)
             
+            # Ajouter l'état du marché
+            market_state_info = calculate_market_state(request.symbol, tf)
+            
             response[tf] = {
                 "direction": direction,
-                "confidence": confidence
+                "confidence": confidence,
+                "market_state": market_state_info["market_state"],
+                "market_trend": market_state_info["market_trend"]
             }
         
-        logger.info(f"Tendance {request.symbol}: {response.get('M1', {}).get('direction', 'unknown')} (conf: {response.get('M1', {}).get('confidence', 0):.1f}%)")
+        logger.info(f"Tendance {request.symbol}: {response.get('M1', {}).get('direction', 'unknown')} (conf: {response.get('M1', {}).get('confidence', 0):.1f}%) - État: {response.get('M1', {}).get('market_state', 'unknown')}")
         return response
         
     except Exception as e:
@@ -2257,6 +2854,65 @@ async def get_trend_get(symbol: str = "EURUSD", timeframes: str = "M1,M5,M15,H1,
     tf_list = [tf.strip() for tf in timeframes.split(",")]
     request = TrendAnalysisRequest(symbol=symbol, timeframes=tf_list)
     return await get_trend_analysis(request)
+
+@app.get("/market-state")
+async def get_market_state_endpoint(symbol: str = "EURUSD", timeframe: str = "M1"):
+    """Endpoint dédié pour l'état du marché (compatible avec tous les robots)"""
+    try:
+        market_info = calculate_market_state(symbol, timeframe)
+        
+        response = {
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "timestamp": time.time(),
+            "market_state": market_info["market_state"],
+            "market_trend": market_info["market_trend"]
+        }
+        
+        logger.info(f"État marché {symbol} {timeframe}: {market_info['market_state']} - {market_info['market_trend']}")
+        return response
+        
+    except Exception as e:
+        logger.error(f"Erreur état marché: {e}")
+        return {
+            "error": f"Erreur lors de l'analyse de l'état du marché: {str(e)}",
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "timestamp": time.time()
+        }
+
+@app.get("/angelofspike/trend")
+async def get_angelofspike_trend(symbol: str = "Boom 1000 Index", timeframe: str = "M1"):
+    """Endpoint spécifique pour AngelOfSpike avec état du marché inclus"""
+    try:
+        # Analyse de tendance standard
+        direction = calculate_trend_direction(symbol, timeframe)
+        confidence = calculate_trend_confidence(symbol, timeframe)
+        
+        # État du marché
+        market_info = calculate_market_state(symbol, timeframe)
+        
+        response = {
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "timestamp": time.time(),
+            "direction": direction,
+            "confidence": confidence,
+            "market_state": market_info["market_state"],
+            "market_trend": market_info["market_trend"],
+            "signal": "BUY" if direction == "buy" else "SELL" if direction == "sell" else "HOLD"
+        }
+        
+        logger.info(f"AngelOfSpike {symbol}: {direction} (conf: {confidence:.1f}%) - État: {market_info['market_state']}")
+        return response
+        
+    except Exception as e:
+        logger.error(f"Erreur AngelOfSpike trend: {e}")
+        return {
+            "error": f"Erreur lors de l'analyse AngelOfSpike: {str(e)}",
+            "symbol": symbol,
+            "timestamp": time.time()
+        }
 
 @app.get("/trend/health")
 async def trend_health():
@@ -2546,6 +3202,111 @@ async def get_trend_data(symbol: str):
     except Exception as e:
         logger.error(f"Erreur lors de la récupération des données de tendance: {str(e)}")
         return None
+
+def calculate_fractals(df: pd.DataFrame, period: int = 5) -> Dict[str, float]:
+    """
+    Calcule les fractals supérieurs et inférieurs pour identifier les zones de mouvement de prix.
+    
+    Args:
+        df: DataFrame avec colonnes high, low, close
+        period: Période pour détecter les fractals (défaut: 5)
+        
+    Returns:
+        Dict avec 'upper_fractal' et 'lower_fractal' (0 si non trouvé)
+    """
+    if len(df) < period * 2 + 1:
+        return {'upper_fractal': 0.0, 'lower_fractal': 0.0}
+    
+    upper_fractal = 0.0
+    lower_fractal = 0.0
+    
+    # Chercher le dernier fractal supérieur (high plus élevé que les périodes adjacentes)
+    for i in range(period, len(df) - period):
+        high = df.iloc[i]['high']
+        is_upper = True
+        is_lower = True
+        
+        # Vérifier si c'est un fractal supérieur
+        for j in range(i - period, i + period + 1):
+            if j != i:
+                if df.iloc[j]['high'] >= high:
+                    is_upper = False
+                    break
+        
+        # Vérifier si c'est un fractal inférieur
+        low = df.iloc[i]['low']
+        for j in range(i - period, i + period + 1):
+            if j != i:
+                if df.iloc[j]['low'] <= low:
+                    is_lower = False
+                    break
+        
+        if is_upper and upper_fractal == 0.0:
+            upper_fractal = high
+        if is_lower and lower_fractal == 0.0:
+            lower_fractal = low
+        
+        # Si on a trouvé les deux, on peut s'arrêter
+        if upper_fractal > 0 and lower_fractal > 0:
+            break
+    
+    return {'upper_fractal': upper_fractal, 'lower_fractal': lower_fractal}
+
+def enhance_spike_prediction_with_history(df: pd.DataFrame, symbol: str) -> Dict[str, Any]:
+    """
+    Améliore la prédiction de spike en analysant les patterns historiques.
+    
+    Args:
+        df: DataFrame avec données historiques
+        symbol: Symbole du marché
+        
+    Returns:
+        Dict avec 'spike_probability', 'spike_direction', 'historical_pattern'
+    """
+    if len(df) < 50:
+        return {'spike_probability': 0.0, 'spike_direction': None, 'historical_pattern': 'insufficient_data'}
+    
+    # Analyser les mouvements historiques pour détecter des patterns de spike
+    df['price_change'] = df['close'].pct_change()
+    df['volatility'] = df['high'] - df['low']
+    df['volatility_pct'] = df['volatility'] / df['close']
+    
+    # Calculer la moyenne et l'écart-type des mouvements
+    avg_change = df['price_change'].abs().rolling(window=20).mean().iloc[-1]
+    std_change = df['price_change'].abs().rolling(window=20).std().iloc[-1]
+    
+    # Mouvement récent
+    recent_change = abs(df['price_change'].iloc[-1])
+    recent_volatility = df['volatility_pct'].iloc[-1]
+    
+    # Détecter si le mouvement récent est anormalement élevé
+    z_score = (recent_change - avg_change) / (std_change + 1e-10)
+    
+    # Probabilité de spike basée sur l'anomalie statistique
+    spike_probability = min(1.0, max(0.0, (z_score - 1.0) / 2.0))  # Normaliser entre 0 et 1
+    
+    # Direction du spike
+    spike_direction = None
+    if recent_change > avg_change * 2:
+        if df['price_change'].iloc[-1] > 0:
+            spike_direction = 'up'
+        else:
+            spike_direction = 'down'
+    
+    # Pattern historique
+    pattern = 'normal'
+    if z_score > 2.5:
+        pattern = 'strong_spike'
+    elif z_score > 1.5:
+        pattern = 'moderate_spike'
+    
+    return {
+        'spike_probability': spike_probability,
+        'spike_direction': spike_direction,
+        'historical_pattern': pattern,
+        'z_score': z_score,
+        'recent_volatility': recent_volatility
+    }
 
 @app.post("/decision", response_model=DecisionResponse)
 async def decision(request: DecisionRequest):
@@ -3099,7 +3860,131 @@ async def decision(request: DecisionRequest):
         elif action != "hold" and (m5_bearish and h1_bearish) and not (h4_bearish or d1_bearish):
             confidence = max(confidence, 0.55)
         
-        # 9. S'assurer que la confiance est dans les limites raisonnables
+        # 9. Intégration de la décision ML multi-modèles (Boom/Crash, Forex, Commodities, Volatility)
+        ml_decision = None
+        separator = "=" * 80  # Séparateur pour les logs ML
+        if BACKEND_AVAILABLE and ADAPTIVE_PREDICT_AVAILABLE and MT5_AVAILABLE:
+            try:
+                logger.info(separator)
+                logger.info(f"🤖 SYSTÈME ML ACTIVÉ pour {request.symbol}")
+                logger.info(separator)
+                logger.info(f"📊 Récupération données historiques (2000 bougies M1)...")
+                
+                # Utiliser un historique plus profond pour la ML (jusqu'à 2000 bougies M1)
+                df_ml = get_historical_data_mt5(request.symbol, "M1", 2000)
+                if df_ml is not None and len(df_ml) > 200:
+                    logger.info(f"✅ Données ML récupérées: {len(df_ml)} bougies pour {request.symbol}")
+                    logger.info(f"   └─ Période: {df_ml['time'].min()} → {df_ml['time'].max()}")
+                    
+                    ml_decision = get_multi_model_ml_decision(request.symbol, df_ml)
+                    if ml_decision and ml_decision.get("status") == "ok":
+                        ml_action = ml_decision.get("action", "N/A")
+                        ml_conf = ml_decision.get("confidence", 0)
+                        ml_cat = ml_decision.get("trading_category", "N/A")
+                        ml_model = ml_decision.get("model_name", "N/A")
+                        ml_style = ml_decision.get("style", "N/A")
+                        
+                        logger.info(separator)
+                        logger.info(f"🎯 DÉCISION ML FINALE pour {request.symbol}:")
+                        logger.info(f"   ├─ Action: {ml_action.upper()}")
+                        logger.info(f"   ├─ Confiance: {ml_conf:.1%}")
+                        logger.info(f"   ├─ Catégorie: {ml_cat}")
+                        logger.info(f"   ├─ Modèle: {ml_model}")
+                        logger.info(f"   └─ Style: {ml_style.upper()}")
+                        logger.info(separator)
+                    elif ml_decision and ml_decision.get("status") == "error":
+                        logger.warning(f"⚠️ ML erreur pour {request.symbol}: {ml_decision.get('error', 'Erreur inconnue')}")
+                    else:
+                        logger.warning(f"⚠️ ML retourné None pour {request.symbol}")
+                else:
+                    logger.warning(f"⚠️ Données ML insuffisantes pour {request.symbol}: {len(df_ml) if df_ml is not None else 0} bougies (minimum: 200)")
+            except Exception as e:
+                logger.error(separator)
+                logger.error(f"❌ ERREUR SYSTÈME ML pour {request.symbol}")
+                logger.error(f"   └─ {str(e)}")
+                logger.error(separator, exc_info=True)
+                ml_decision = None
+        else:
+            logger.warning(separator)
+            logger.warning(f"⚠️ SYSTÈME ML NON DISPONIBLE pour {request.symbol}")
+            logger.warning(f"   ├─ BACKEND: {BACKEND_AVAILABLE}")
+            logger.warning(f"   ├─ ADAPTIVE_PREDICT: {ADAPTIVE_PREDICT_AVAILABLE}")
+            logger.warning(f"   └─ MT5: {MT5_AVAILABLE}")
+            logger.warning(separator)
+
+        # Intégration ML améliorée - Le ML peut maintenant surcharger les indicateurs classiques
+        ml_style = None
+        if isinstance(ml_decision, dict) and ml_decision.get("status") == "ok":
+            ml_action = ml_decision.get("action", "hold")
+            ml_conf = float(ml_decision.get("confidence", 0.0))
+            ml_style = ml_decision.get("style", None)
+            ml_cat = ml_decision.get("trading_category", "")
+            ml_model_name = ml_decision.get("model_name", "")
+            
+            # Seuil réduit à 0.50 pour permettre plus d'interventions ML
+            if ml_conf >= 0.50 and ml_action in ("buy", "sell"):
+                separator_dash = "─" * 80
+                logger.info(separator_dash)
+                logger.info(f"🔄 INTÉGRATION ML dans décision finale:")
+                logger.info(f"   ├─ Décision classique: {action.upper()} @ {confidence:.1%}")
+                logger.info(f"   └─ Décision ML: {ml_action.upper()} @ {ml_conf:.1%}")
+                
+                if action == "hold":
+                    # Pas de décision forte côté indicateurs -> ML prend le contrôle
+                    action = ml_action
+                    confidence = ml_conf  # Utiliser directement la confiance ML
+                    components.append(f"ML_PILOTE:{ml_cat}:{ml_conf:.0%}")
+                    logger.info(separator)
+                    logger.info(f"✅ ML PREND LE CONTRÔLE - {ml_action.upper()} @ {ml_conf:.1%}")
+                    logger.info(separator)
+                elif action == ml_action:
+                    # Même direction -> renforcer significativement
+                    old_conf = confidence
+                    confidence = max(confidence, min(MAX_CONF, (confidence * 0.4 + ml_conf * 0.6)))
+                    components.append(f"ML_RENFORCE:{ml_cat}:{ml_conf:.0%}")
+                    logger.info(separator)
+                    logger.info(f"✅ ML RENFORCE LA DÉCISION")
+                    logger.info(f"   ├─ Confiance avant: {old_conf:.1%}")
+                    logger.info(f"   └─ Confiance après: {confidence:.1%}")
+                    logger.info(separator)
+                else:
+                    # Conflit: ML peut surcharger si confiance élevée
+                    if ml_conf >= 0.70:
+                        # ML très confiant -> surcharger les indicateurs classiques
+                        old_action = action
+                        old_conf = confidence
+                        action = ml_action
+                        confidence = ml_conf * 0.9  # Légèrement réduite pour prudence
+                        components.append(f"ML_SURCHARGE:{ml_cat}:{ml_conf:.0%}")
+                        logger.info(separator)
+                        logger.info(f"⚠️ ML SURCHARGE LES INDICATEURS CLASSIQUES")
+                        logger.info(f"   ├─ Avant: {old_action.upper()} @ {old_conf:.1%}")
+                        logger.info(f"   └─ Après: {action.upper()} @ {confidence:.1%}")
+                        logger.info(separator)
+                    elif ml_conf >= 0.60 and confidence < 0.60:
+                        # ML modérément confiant mais meilleur que les indicateurs
+                        old_action = action
+                        old_conf = confidence
+                        action = ml_action
+                        confidence = ml_conf * 0.85
+                        components.append(f"ML_PREFERE:{ml_cat}:{ml_conf:.0%}")
+                        logger.info(separator)
+                        logger.info(f"✅ ML PRÉFÉRÉ AUX INDICATEURS")
+                        logger.info(f"   ├─ Avant: {old_action.upper()} @ {old_conf:.1%}")
+                        logger.info(f"   └─ Après: {action.upper()} @ {confidence:.1%}")
+                        logger.info(separator)
+                    else:
+                        # Conflit mais indicateurs classiques plus forts
+                        components.append(f"ML_IGNORE:{ml_cat}:{ml_conf:.0%}")
+                        logger.info(f"⏸️ ML ignoré (conflit, conf ML={ml_conf:.1%} < conf classique={confidence:.1%})")
+
+                # Ajouter le nom du modèle dans les composants pour la raison finale
+                if ml_model_name:
+                    components.append(f"Model:{ml_model_name}")
+            else:
+                logger.info(f"⏸️ ML ignoré: confiance trop faible ({ml_conf:.1%} < 0.50) ou action=hold")
+
+        # 10. S'assurer que la confiance est dans les limites raisonnables
         confidence = max(0.10, min(MAX_CONF, confidence))
         
         # Log détaillé pour comprendre le calcul
@@ -3113,6 +3998,9 @@ async def decision(request: DecisionRequest):
             reason_parts.append(f"Signal {action.upper()}")
         reason_parts.append(f"Score={direction_score:+.3f}")
         reason_parts.append(f"Conf={confidence:.1%}")
+        # Ajouter le style de trading proposé par la ML (scalp / swing) si disponible
+        if ml_style and action != "hold":
+            reason_parts.append(f"Style={ml_style}")
         
         # Ajouter les composants principaux (limiter à 5 pour éviter trop de détails)
         if components:
@@ -3308,7 +4196,41 @@ Format: Analyse claire et professionnelle en français.
                     except Exception as e:
                         logger.debug(f"Erreur AdvancedSpikeDetector: {e}")
                 
-                # 3. DÉTECTION TRADITIONNELLE RENFORCÉE
+                # 3. DÉTECTION AVEC FRACTALS (NOUVEAU)
+                fractal_upper = 0.0
+                fractal_lower = 0.0
+                fractal_signal = False
+                if MT5_AVAILABLE:
+                    try:
+                        df_fractal = get_historical_data_mt5(request.symbol, "M1", 50)
+                        if df_fractal is not None and len(df_fractal) > 20:
+                            fractals = calculate_fractals(df_fractal, period=5)
+                            fractal_upper = fractals.get('upper_fractal', 0.0)
+                            fractal_lower = fractals.get('lower_fractal', 0.0)
+                            
+                            # Vérifier si le prix est proche d'une zone fractal (signal de mouvement)
+                            if fractal_upper > 0 and mid_price >= fractal_upper * 0.99:
+                                fractal_signal = True
+                                logger.info(f"📊 Fractal supérieur détecté: {fractal_upper:.5f} - Prix proche")
+                            elif fractal_lower > 0 and mid_price <= fractal_lower * 1.01:
+                                fractal_signal = True
+                                logger.info(f"📊 Fractal inférieur détecté: {fractal_lower:.5f} - Prix proche")
+                    except Exception as e:
+                        logger.debug(f"Erreur calcul fractals: {e}")
+                
+                # 4. AMÉLIORATION PRÉDICTION SPIKE AVEC HISTORIQUE (NOUVEAU)
+                historical_spike_data = None
+                if MT5_AVAILABLE:
+                    try:
+                        df_history = get_historical_data_mt5(request.symbol, "M1", 200)
+                        if df_history is not None and len(df_history) > 50:
+                            historical_spike_data = enhance_spike_prediction_with_history(df_history, request.symbol)
+                            if historical_spike_data.get('spike_probability', 0) > 0.6:
+                                logger.info(f"🔮 Prédiction spike historique: {historical_spike_data.get('spike_probability', 0):.2%} - Pattern: {historical_spike_data.get('historical_pattern', 'normal')}")
+                    except Exception as e:
+                        logger.debug(f"Erreur prédiction historique: {e}")
+                
+                # 5. DÉTECTION TRADITIONNELLE RENFORCÉE
                 volatility = request.atr / mid_price if mid_price > 0 else 0
                 strong_vol = volatility >= 0.003
                 medium_vol = volatility >= 0.0015
@@ -3321,21 +4243,25 @@ Format: Analyse claire et professionnelle en français.
                 traditional_score = 0.0
                 traditional_direction = None
                 
-                # Conditions haussières
+                # Conditions haussières (avec fractals et historique)
                 bull_conditions = 0
                 if strong_vol: bull_conditions += 1
                 if extreme_oversold: bull_conditions += 1
                 if h1_bullish and m1_bullish: bull_conditions += 1
                 if request.dir_rule >= 1: bull_conditions += 1
                 if vwap_signal_buy or supertrend_bullish: bull_conditions += 1
+                if fractal_signal and fractal_lower > 0: bull_conditions += 1  # Prix proche fractal inférieur
+                if historical_spike_data and historical_spike_data.get('spike_direction') == 'up': bull_conditions += 1
                 
-                # Conditions baissières
+                # Conditions baissières (avec fractals et historique)
                 bear_conditions = 0
                 if strong_vol: bear_conditions += 1
                 if extreme_overbought: bear_conditions += 1
                 if h1_bearish and m1_bearish: bear_conditions += 1
                 if request.dir_rule <= -1: bear_conditions += 1
                 if vwap_signal_sell or supertrend_bearish: bear_conditions += 1
+                if fractal_signal and fractal_upper > 0: bear_conditions += 1  # Prix proche fractal supérieur
+                if historical_spike_data and historical_spike_data.get('spike_direction') == 'down': bear_conditions += 1
                 
                 if bull_conditions >= 4:  # Au moins 4/5 conditions
                     traditional_score = 0.8 + (bull_conditions - 4) * 0.05
@@ -3589,6 +4515,20 @@ Format: Analyse claire et professionnelle en français.
         # Mise en cache
         prediction_cache[cache_key] = response_data
         last_updated[cache_key] = current_time
+        
+        # Sauvegarder la prédiction dans le dossier MT5 Predictions pour analyse/entraînement futur
+        try:
+            # Déterminer le timeframe (par défaut M1, mais on peut le déduire du contexte si nécessaire)
+            timeframe = "M1"  # Par défaut, le robot utilise M1 pour la plupart des décisions
+            save_prediction_to_mt5_files(
+                symbol=request.symbol,
+                timeframe=timeframe,
+                decision=response_data,
+                ml_decision=ml_decision
+            )
+        except Exception as save_err:
+            # Ne pas bloquer la réponse si la sauvegarde échoue
+            logger.warning(f"⚠️ Erreur sauvegarde prédiction pour {request.symbol}: {save_err}")
         
         return DecisionResponse(**response_data)
         
@@ -3910,74 +4850,57 @@ async def predict_prices(request: PricePredictionRequest):
         bars_to_predict = request.bars_to_predict
         timeframe = request.timeframe
         
-        logger.info(f"📊 Prédiction de prix demandée: {symbol} - {bars_to_predict} bougies - Prix actuel: {current_price}")
+        logger.info(f" Prédiction rapide: {symbol} - {bars_to_predict} bougies")
         
-        # Récupérer les données historiques si MT5 est disponible
+        # OPTIMISATION: Génération rapide sans appels MT5 pour éviter les lenteurs
         prices = []
-        if MT5_AVAILABLE and mt5_initialized:
-            try:
-                import MetaTrader5 as mt5_module
-                # Récupérer les dernières données pour calculer la tendance
-                period_map = {
-                    "M1": mt5_module.TIMEFRAME_M1,
-                    "M5": mt5_module.TIMEFRAME_M5,
-                    "M15": mt5_module.TIMEFRAME_M15,
-                    "H1": mt5_module.TIMEFRAME_H1,
-                    "H4": mt5_module.TIMEFRAME_H4,
-                    "D1": mt5_module.TIMEFRAME_D1
-                }
-                
-                period = period_map.get(timeframe, mt5_module.TIMEFRAME_M1)
-                rates = mt5_module.copy_rates_from_pos(symbol, period, 0, min(100, bars_to_predict + 50))
-                
-                if rates is not None and len(rates) > 0:
-                    # Calculer la tendance moyenne basée sur les dernières bougies
-                    recent_prices = [rate['close'] for rate in rates[-20:]]  # 20 dernières bougies
-                    if len(recent_prices) >= 2:
-                        # Tendance linéaire simple
-                        price_change = (recent_prices[-1] - recent_prices[0]) / len(recent_prices)
-                        volatility = np.std(recent_prices) if len(recent_prices) > 1 else abs(price_change) * 0.01
-                    else:
-                        price_change = 0.0
-                        volatility = current_price * 0.01
-                    
-                    # Générer les prix prédits avec extrapolation linéaire + bruit
-                    np.random.seed(int(current_price * 1000) % 2**31)  # Seed reproductible basé sur le prix
-                    for i in range(bars_to_predict):
-                        # Extrapolation linéaire avec décroissance de la tendance
-                        trend_component = price_change * (1.0 - i / bars_to_predict)  # Tendance décroissante
-                        noise = np.random.normal(0, volatility * 0.1)  # Bruit aléatoire réduit
-                        predicted_price = current_price + (trend_component * i) + noise
-                        prices.append(float(predicted_price))
-                else:
-                    # Pas de données historiques, générer une série plate avec bruit minimal
-                    np.random.seed(int(current_price * 1000) % 2**31)
-                    volatility = current_price * 0.005  # 0.5% de volatilité
-                    for i in range(bars_to_predict):
-                        noise = np.random.normal(0, volatility)
-                        prices.append(float(current_price + noise))
-                        
-            except Exception as e:
-                logger.warning(f"Erreur lors de la récupération des données MT5 pour prédiction: {e}")
-                # Fallback: générer une série plate
-                np.random.seed(int(current_price * 1000) % 2**31)
-                volatility = current_price * 0.005
-                for i in range(bars_to_predict):
-                    noise = np.random.normal(0, volatility)
-                    prices.append(float(current_price + noise))
+        
+        # Utiliser une prédiction simple basée sur le prix actuel
+        # Seed reproductible pour la cohérence - nettoyer le symbole des caractères spéciaux
+        clean_symbol = symbol.replace(" ", "").replace("(", "").replace(")", "").replace("%", "")
+        # Créer un seed unique et reproductible
+        seed_string = f"{clean_symbol}_{int(current_price * 1000)}"
+        seed_value = hash(seed_string) % (2**31)
+        np.random.seed(seed_value)
+        
+        # Calcul de volatilité basique selon le type de symbole
+        if "Boom" in symbol or "Crash" in symbol:
+            volatility = current_price * 0.002  # 0.2% pour Boom/Crash
+            trend_strength = 0.001  # Tendance forte
+        elif "Volatility" in symbol:
+            volatility = current_price * 0.001  # 0.1% pour Volatility
+            trend_strength = 0.0005
         else:
-            # MT5 non disponible, générer une série basée sur le prix actuel
-            np.random.seed(int(current_price * 1000) % 2**31)
-            volatility = current_price * 0.005
-            for i in range(bars_to_predict):
-                noise = np.random.normal(0, volatility)
-                prices.append(float(current_price + noise))
+            volatility = current_price * 0.0005  # 0.05% pour Forex/Crypto
+            trend_strength = 0.0002
         
-        if len(prices) == 0:
-            # Fallback final: série constante
-            prices = [float(current_price)] * bars_to_predict
+        # Générer rapidement les prix prédits
+        for i in range(bars_to_predict):
+            # Tendance linéaire simple avec décroissance
+            trend = trend_strength * current_price * (1.0 - i / bars_to_predict)
+            
+            # Bruit aléatoire minimal
+            noise = np.random.normal(0, volatility * 0.3)
+            
+            predicted_price = current_price + trend + noise
+            prices.append(float(predicted_price))
         
-        logger.info(f"✅ Prédiction générée: {len(prices)} prix pour {symbol}")
+        logger.info(f"✅ Prédiction générée rapidement: {len(prices)} prix pour {symbol}")
+        
+        # ===== NOUVEAU: Stocker la prédiction pour validation future =====
+        store_prediction(symbol, prices, current_price, timeframe)
+        
+        # ===== NOUVEAU: Valider les prédictions passées =====
+        validate_predictions(symbol, timeframe)
+        
+        # ===== NOUVEAU: Calculer le score de fiabilité =====
+        accuracy_score = get_prediction_accuracy_score(symbol)
+        confidence_multiplier = get_prediction_confidence_multiplier(symbol)
+        validation_count = sum(1 for p in prediction_history.get(symbol, []) if p.get("is_validated", False))
+        
+        # Avertir si précision faible
+        if accuracy_score < MIN_ACCURACY_THRESHOLD and validation_count >= 5:
+            logger.warning(f"⚠️ ATTENTION: Précision des prédictions faible pour {symbol}: {accuracy_score*100:.1f}% < {MIN_ACCURACY_THRESHOLD*100:.0f}%")
         
         return {
             "prediction": prices,
@@ -3985,12 +4908,66 @@ async def predict_prices(request: PricePredictionRequest):
             "current_price": current_price,
             "bars_predicted": len(prices),
             "timeframe": timeframe,
-            "timestamp": datetime.now().isoformat()
+            "timestamp": datetime.now().isoformat(),
+            "accuracy_score": round(accuracy_score, 3),  # Score de précision historique (0.0 - 1.0)
+            "confidence_multiplier": round(confidence_multiplier, 2),  # Multiplicateur de confiance
+            "validation_count": validation_count,  # Nombre de validations effectuées
+            "reliability": "HIGH" if accuracy_score >= 0.80 else "MEDIUM" if accuracy_score >= 0.60 else "LOW"  # Niveau de fiabilité
         }
         
     except Exception as e:
         logger.error(f"Erreur dans /prediction: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Erreur lors de la prédiction de prix: {str(e)}")
+
+@app.get("/prediction/accuracy/{symbol}")
+async def get_prediction_accuracy(symbol: str):
+    """
+    Retourne les statistiques de précision des prédictions pour un symbole donné.
+    
+    Args:
+        symbol: Symbole du marché
+        
+    Returns:
+        dict: Statistiques de précision (score moyen, nombre de validations, etc.)
+    """
+    try:
+        accuracy_score = get_prediction_accuracy_score(symbol)
+        confidence_multiplier = get_prediction_confidence_multiplier(symbol)
+        
+        if symbol not in prediction_history:
+            return {
+                "symbol": symbol,
+                "accuracy_score": 0.5,
+                "confidence_multiplier": 0.8,
+                "validation_count": 0,
+                "total_predictions": 0,
+                "reliability": "UNKNOWN",
+                "message": "Aucune prédiction enregistrée pour ce symbole"
+            }
+        
+        validated = [p for p in prediction_history[symbol] if p.get("is_validated", False)]
+        total = len(prediction_history[symbol])
+        
+        return {
+            "symbol": symbol,
+            "accuracy_score": round(accuracy_score, 3),
+            "confidence_multiplier": round(confidence_multiplier, 2),
+            "validation_count": len(validated),
+            "total_predictions": total,
+            "reliability": "HIGH" if accuracy_score >= 0.80 else "MEDIUM" if accuracy_score >= 0.60 else "LOW",
+            "is_reliable": accuracy_score >= MIN_ACCURACY_THRESHOLD,
+            "recent_validations": [
+                {
+                    "timestamp": p["validation_timestamp"],
+                    "accuracy": round(p["accuracy_score"], 3)
+                }
+                for p in validated[-10:]  # 10 dernières validations
+            ]
+        }
+        
+    except Exception as e:
+        logger.error(f"Erreur dans /prediction/accuracy: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Erreur lors de la récupération de la précision: {str(e)}")
 
 # Gestion des modèles ML
 def load_ml_models():
