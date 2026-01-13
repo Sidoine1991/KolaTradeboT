@@ -900,6 +900,31 @@ class TimeWindowsResponse(BaseModel):
     preferred_hours: List[int]  # Liste d'heures 0-23
     forbidden_hours: List[int]  # Liste d'heures 0-23
 
+class CoherentAnalysisRequest(BaseModel):
+    symbol: str
+    timeframes: Optional[List[str]] = ["D1", "H4", "H1", "M30", "M15", "M5", "M1"]
+
+class CoherentAnalysisResponse(BaseModel):
+    status: str
+    symbol: str
+    decision: str
+    decision_type: str
+    confidence: float
+    stability: str
+    bullish_pct: float
+    bearish_pct: float
+    neutral_pct: float
+    trends: Dict[str, Any]
+    timestamp: str
+    message: Optional[str] = None
+
+class DashboardStatsResponse(BaseModel):
+    timestamp: str
+    model_performance: Dict[str, Any]
+    trading_stats: Dict[str, Any]
+    robot_performance: Dict[str, Any]
+    coherent_analysis: Optional[CoherentAnalysisResponse] = None
+
 def convert_numpy_types(obj):
     """Convertit les types numpy en types Python natifs pour la sérialisation JSON."""
     if isinstance(obj, (np.integer, np.floating, np.uint64)):
@@ -1527,6 +1552,7 @@ async def get_fundamental_data(symbol: str):
                 to_c = av_symbol[3:6] if len(av_symbol) >= 6 else av_symbol[:3]
                 url = f"https://www.alphavantage.co/query?function=CURRENCY_EXCHANGE_RATE&from_currency={from_c}&to_currency={to_c}&apikey={ALPHAVANTAGE_API_KEY}"
                 resp = await client.get(url)
+                alphavantage_request_count += 1
                 data = resp.json()
                 
                 if "Realtime Currency Exchange Rate" in data:
@@ -1544,6 +1570,7 @@ async def get_fundamental_data(symbol: str):
             # Pour actions/indices
             url = f"https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol={av_symbol}&apikey={ALPHAVANTAGE_API_KEY}"
             resp = await client.get(url)
+            alphavantage_request_count += 1
             data = resp.json()
             
             if "Global Quote" in data and data["Global Quote"]:
@@ -1588,6 +1615,7 @@ async def get_market_news(symbol: str):
         async with httpx.AsyncClient(timeout=15.0) as client:
             url = f"https://www.alphavantage.co/query?function=NEWS_SENTIMENT&topics={topics}&apikey={ALPHAVANTAGE_API_KEY}&limit=10"
             resp = await client.get(url)
+            alphavantage_request_count += 1
             data = resp.json()
             
             if "feed" in data:
@@ -1634,6 +1662,7 @@ async def get_economic_calendar():
         async with httpx.AsyncClient(timeout=15.0) as client:
             url = f"https://www.alphavantage.co/query?function=NEWS_SENTIMENT&topics=economy_fiscal,economy_monetary&apikey={ALPHAVANTAGE_API_KEY}&limit=20"
             resp = await client.get(url)
+            alphavantage_request_count += 1
             data = resp.json()
             
             events = []
@@ -1693,7 +1722,6 @@ async def get_deriv_ticks(symbol: str):
         "Crash 300 Index": "CRASH300N",
         "Crash 500 Index": "CRASH500",
         "Crash 1000 Index": "CRASH1000",
-        "Step Index": "stpRNG",
     }
     deriv_symbol = deriv_symbols.get(symbol, symbol)
     
@@ -2499,7 +2527,7 @@ except ImportError:
     logger.warning("Module dashboard_stats non disponible")
 
 @app.get("/dashboard/stats")
-async def get_dashboard_stats():
+async def get_dashboard_stats(symbol: Optional[str] = None):
     """
     Endpoint pour récupérer toutes les statistiques du dashboard
     Retourne: performance modèles ML, statistiques trading, performance robot
@@ -2513,6 +2541,12 @@ async def get_dashboard_stats():
     try:
         stats_collector = DashboardStats()
         stats = stats_collector.get_all_stats()
+        
+        # Ajouter l'analyse cohérente si un symbole est fourni
+        if symbol:
+            coherent_analysis = await calculate_coherent_analysis(symbol)
+            stats["coherent_analysis"] = coherent_analysis
+        
         return stats
     except Exception as e:
         logger.error(f"Erreur récupération stats dashboard: {e}", exc_info=True)
@@ -2811,11 +2845,310 @@ def calculate_trend_confidence(symbol: str, timeframe: str = "M1") -> float:
         logger.error(f"Erreur calcul confiance {symbol} {timeframe}: {e}")
         return 50.0
 
+async def calculate_coherent_analysis(symbol: str, timeframes: Optional[List[str]] = None) -> Dict[str, Any]:
+    """Calcule une analyse cohérente multi-timeframes
+    
+    Args:
+        symbol: Symbole du marché
+        timeframes: Liste des timeframes à analyser
+        
+    Returns:
+        Dictionnaire avec l'analyse cohérente
+    """
+    if timeframes is None:
+        timeframes = ["D1", "H4", "H1", "M30", "M15", "M5", "M1"]
+    
+    try:
+        # Récupérer les données de tendance pour tous les timeframes
+        trends = {}
+        
+        for tf in timeframes:
+            try:
+                # Utiliser la fonction existante de calcul de tendance
+                trend_data = {
+                    "direction": "neutral",
+                    "strength": 50.0,
+                    "ema9": 0.0,
+                    "ema21": 0.0,
+                    "bullish": False,
+                    "bearish": False
+                }
+                
+                # Calculer la direction de la tendance
+                direction = calculate_trend_direction(symbol, tf)
+                trend_data["direction"] = direction
+                trend_data["bullish"] = direction == "buy"
+                trend_data["bearish"] = direction == "sell"
+                
+                # Calculer la force (basée sur la cohérence des signaux)
+                confidence = calculate_trend_confidence(symbol, tf)
+                trend_data["strength"] = confidence
+                
+                trends[tf.lower()] = trend_data
+                
+            except Exception as e:
+                logger.warning(f"Erreur tendance {tf} pour {symbol}: {e}")
+                trends[tf.lower()] = {
+                    "direction": "neutral",
+                    "strength": 0.0,
+                    "ema9": 0.0,
+                    "ema21": 0.0,
+                    "bullish": False,
+                    "bearish": False
+                }
+        
+        # Pondération des timeframes
+        timeframe_weights = {
+            'd1': 0.30, 'h4': 0.25, 'h1': 0.20,
+            'm30': 0.10, 'm15': 0.08, 'm5': 0.05, 'm1': 0.02
+        }
+        
+        # Calcul de la cohérence des tendances
+        bullish_count = 0.0
+        bearish_count = 0.0
+        neutral_count = 0.0
+        total_strength = 0.0
+        valid_timeframes = 0.0
+        
+        for tf, weight in timeframe_weights.items():
+            if tf in trends:
+                trend_data = trends[tf]
+                direction = trend_data.get('direction', 'neutral')
+                strength = trend_data.get('strength', 0)
+                
+                if direction == 'buy':
+                    bullish_count += weight
+                elif direction == 'sell':
+                    bearish_count += weight
+                else:
+                    neutral_count += weight
+                
+                total_strength += strength * weight
+                valid_timeframes += weight
+        
+        # Détermination de la décision finale
+        total_weight = bullish_count + bearish_count + neutral_count
+        if total_weight == 0:
+            return {
+                "status": "error",
+                "message": "Aucune donnée valide",
+                "decision": "EN ATTENTE",
+                "confidence": 0,
+                "stability": "EN ATTENTE"
+            }
+        
+        bullish_pct = (bullish_count / total_weight) * 100
+        bearish_pct = (bearish_count / total_weight) * 100
+        neutral_pct = (neutral_count / total_weight) * 100
+        
+        # Calcul de la confiance
+        confidence = min(95, (total_strength / valid_timeframes) if valid_timeframes > 0 else 0)
+        
+        # Calcul de la stabilité
+        max_diff = max(bullish_pct, bearish_pct, neutral_pct)
+        stability = "ÉLEVÉE" if max_diff >= 60 else "MOYENNE" if max_diff >= 40 else "FAIBLE"
+        
+        # Décision finale
+        if bullish_pct >= 60:
+            decision = "ACHAT FORT"
+            decision_type = "BUY"
+        elif bearish_pct >= 60:
+            decision = "VENTE FORTE"
+            decision_type = "SELL"
+        elif bullish_pct >= 45:
+            decision = "ACHAT MODÉRÉ"
+            decision_type = "BUY"
+        elif bearish_pct >= 45:
+            decision = "VENTE MODÉRÉE"
+            decision_type = "SELL"
+        else:
+            decision = "ATTENTE"
+            decision_type = "HOLD"
+        
+        return {
+            "status": "success",
+            "symbol": symbol,
+            "decision": decision,
+            "decision_type": decision_type,
+            "confidence": round(confidence, 1),
+            "stability": stability,
+            "bullish_pct": round(bullish_pct, 1),
+            "bearish_pct": round(bearish_pct, 1),
+            "neutral_pct": round(neutral_pct, 1),
+            "trends": trends,
+            "timestamp": datetime.now().isoformat()
+        }
+        
+    except Exception as e:
+        logger.error(f"Erreur analyse cohérente {symbol}: {e}")
+        return {
+            "status": "error",
+            "message": str(e),
+            "decision": "EN ATTENTE",
+            "confidence": 0,
+            "stability": "EN ATTENTE"
+        }
+
+@app.post("/coherent-analysis")
+async def get_coherent_analysis(request: CoherentAnalysisRequest):
+    """Endpoint pour l'analyse cohérente multi-timeframes"""
+    try:
+        analysis = await calculate_coherent_analysis(request.symbol, request.timeframes)
+        return analysis
+    except Exception as e:
+        logger.error(f"Erreur endpoint analyse cohérente: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/coherent-analysis")
+async def get_coherent_analysis_get(symbol: str = "EURUSD"):
+    """Version GET de l'analyse cohérente"""
+    try:
+        analysis = await calculate_coherent_analysis(symbol)
+        return analysis
+    except Exception as e:
+        logger.error(f"Erreur endpoint GET analyse cohérente: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/dashboard/graphs")
+async def get_dashboard_graphs(symbol: str = "EURUSD"):
+    """Endpoint pour les graphiques et statistiques du dashboard"""
+    try:
+        # Récupérer les statistiques du dashboard
+        stats_response = await get_dashboard_stats(symbol)
+        
+        # Ajouter les graphiques
+        graphs = {}
+        
+        # Graphique de confiance par timeframe
+        if "coherent_analysis" in stats_response and "trends" in stats_response["coherent_analysis"]:
+            trends = stats_response["coherent_analysis"]["trends"]
+            confidence_data = []
+            
+            tf_order = ["d1", "h4", "h1", "m30", "m15", "m5", "m1"]
+            tf_labels = ["1J", "4H", "1H", "30M", "15M", "5M", "1M"]
+            
+            for tf, label in zip(tf_order, tf_labels):
+                if tf in trends:
+                    confidence_data.append({
+                        "timeframe": label,
+                        "confidence": trends[tf].get("strength", 0),
+                        "direction": trends[tf].get("direction", "neutral")
+                    })
+            
+            graphs["confidence_by_timeframe"] = confidence_data
+        
+        # Graphique de distribution des décisions
+        if "coherent_analysis" in stats_response:
+            analysis = stats_response["coherent_analysis"]
+            distribution = {
+                "bullish": analysis.get("bullish_pct", 0),
+                "bearish": analysis.get("bearish_pct", 0),
+                "neutral": analysis.get("neutral_pct", 0)
+            }
+            graphs["decision_distribution"] = distribution
+        
+        # Statistiques de performance
+        if "model_performance" in stats_response:
+            model_perf = stats_response["model_performance"]
+            if "models" in model_perf:
+                models_data = []
+                for model_name, model_stats in model_perf["models"].items():
+                    models_data.append({
+                        "model": model_name,
+                        "total_predictions": model_stats.get("total_predictions", 0),
+                        "avg_confidence": model_stats.get("avg_confidence", 0),
+                        "buy_count": model_stats.get("buy_count", 0),
+                        "sell_count": model_stats.get("sell_count", 0)
+                    })
+                graphs["model_performance"] = models_data
+        
+        # Statistiques de trading
+        if "trading_stats" in stats_response:
+            trading_stats = stats_response["trading_stats"]
+            trading_graphs = {
+                "total_trades": trading_stats.get("total_trades", 0),
+                "buy_trades": trading_stats.get("buy_trades", 0),
+                "sell_trades": trading_stats.get("sell_trades", 0),
+                "avg_confidence": trading_stats.get("avg_confidence", 0),
+                "high_confidence_trades": trading_stats.get("high_confidence_trades", 0),
+                "confidence_distribution": trading_stats.get("confidence_distribution", {}),
+                "action_distribution": trading_stats.get("action_distribution", {})
+            }
+            graphs["trading_statistics"] = trading_graphs
+        
+        return {
+            "status": "success",
+            "symbol": symbol,
+            "timestamp": datetime.now().isoformat(),
+            "graphs": graphs,
+            "stats": stats_response
+        }
+        
+    except Exception as e:
+        logger.error(f"Erreur graphs dashboard: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/trend")
+async def get_trend_analysis_get(symbol: str = "EURUSD", timeframe: str = "M1"):
+    """Endpoint GET pour l'analyse de tendance (compatible avec MT5)"""
+    try:
+        logger.info(f"Analyse de tendance GET demandée pour {symbol} ({timeframe})")
+        
+        # Calculer la direction et la confiance
+        direction_str_result = calculate_trend_direction(symbol, timeframe)
+        confidence = calculate_trend_confidence(symbol, timeframe)
+        
+        # Convertir la direction en nombre pour les calculs
+        # calculate_trend_direction retourne une chaîne comme "UP", "DOWN", "NEUTRAL"
+        direction_str_upper = str(direction_str_result).upper()
+        if "UP" in direction_str_upper or "BULL" in direction_str_upper or "BUY" in direction_str_upper:
+            direction_num = 1
+            direction_str = "BUY"
+            signal = "bullish"
+        elif "DOWN" in direction_str_upper or "BEAR" in direction_str_upper or "SELL" in direction_str_upper:
+            direction_num = -1
+            direction_str = "SELL"
+            signal = "bearish"
+        else:
+            direction_num = 0
+            direction_str = "NEUTRE"
+            signal = "neutral"
+        
+        # Ajouter l'état du marché
+        market_state_info = calculate_market_state(symbol, timeframe)
+        
+        # Calculer la force de la tendance (0-100)
+        strength = abs(direction_num) * confidence * 100
+        
+        response = {
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "timestamp": time.time(),
+            "direction": direction_str,
+            "confidence": confidence,
+            "strength": strength,  # Force de la tendance (0-100)
+            "market_state": market_state_info["market_state"],
+            "market_trend": market_state_info["market_trend"],
+            "signal": signal
+        }
+        
+        logger.info(f"Tendance GET {symbol}: {direction_str} (conf: {confidence:.1f}%, strength: {strength:.1f}%) - État: {market_state_info['market_state']}")
+        return response
+        
+    except Exception as e:
+        logger.error(f"Erreur analyse tendance GET: {e}", exc_info=True)
+        return {
+            "error": f"Erreur lors de l'analyse de tendance: {str(e)}",
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "timestamp": time.time()
+        }
+
 @app.post("/trend")
 async def get_trend_analysis(request: TrendAnalysisRequest):
-    """Endpoint principal pour l'analyse de tendance (compatible avec MT5)"""
+    """Endpoint POST pour l'analyse de tendance (compatible avec MT5)"""
     try:
-        logger.info(f"Analyse de tendance demandée pour {request.symbol}")
+        logger.info(f"Analyse de tendance POST demandée pour {request.symbol}")
         
         response = {
             "symbol": request.symbol,
@@ -2837,23 +3170,16 @@ async def get_trend_analysis(request: TrendAnalysisRequest):
                 "market_trend": market_state_info["market_trend"]
             }
         
-        logger.info(f"Tendance {request.symbol}: {response.get('M1', {}).get('direction', 'unknown')} (conf: {response.get('M1', {}).get('confidence', 0):.1f}%) - État: {response.get('M1', {}).get('market_state', 'unknown')}")
+        logger.info(f"Tendance POST {request.symbol}: {response.get('M1', {}).get('direction', 'unknown')} (conf: {response.get('M1', {}).get('confidence', 0):.1f}%) - État: {response.get('M1', {}).get('market_state', 'unknown')}")
         return response
         
     except Exception as e:
-        logger.error(f"Erreur analyse tendance: {e}")
+        logger.error(f"Erreur analyse tendance POST: {e}")
         return {
             "error": f"Erreur lors de l'analyse de tendance: {str(e)}",
             "symbol": request.symbol,
             "timestamp": time.time()
         }
-
-@app.get("/trend")
-async def get_trend_get(symbol: str = "EURUSD", timeframes: str = "M1,M5,M15,H1,H4"):
-    """Version GET de l'analyse de tendance"""
-    tf_list = [tf.strip() for tf in timeframes.split(",")]
-    request = TrendAnalysisRequest(symbol=symbol, timeframes=tf_list)
-    return await get_trend_analysis(request)
 
 @app.get("/market-state")
 async def get_market_state_endpoint(symbol: str = "EURUSD", timeframe: str = "M1"):
