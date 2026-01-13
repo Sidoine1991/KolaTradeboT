@@ -51,6 +51,12 @@ input string AI_TimeWindowsURLBase = "http://127.0.0.1:8000"; // Racine API pour
 input string TrendAPIURL = "http://127.0.0.1:8000/trend"; // URL API de tendance
 input int    MinStabilitySeconds = 3;   // Délai minimum de stabilité avant exécution (secondes) - RÉDUIT pour exécution immédiate
 
+input group "--- DASHBOARD ET ANALYSE COHÉRENTE ---"
+input string AI_CoherentAnalysisURL = "http://127.0.0.1:8000/coherent-analysis"; // URL pour l'analyse cohérente
+input string AI_DashboardGraphsURL = "http://127.0.0.1:8000/dashboard/graphs";    // URL pour les graphiques du dashboard
+input int    AI_CoherentAnalysisInterval = 300; // Intervalle de mise à jour de l'analyse cohérente (secondes)
+input bool   ShowCoherentAnalysis = true; // Afficher l'analyse cohérente sur le graphique
+
 input group "--- ÉLÉMENTS GRAPHIQUES ---"
 input bool   DrawAIZones         = true;    // Dessiner les zones BUY/SELL de l'IA
 input bool   DrawSupportResistance = true;  // Dessiner support/résistance M5/H1
@@ -132,6 +138,24 @@ static double   g_api_trend_confidence = 0.0;    // Confiance de la tendance API
 static datetime g_api_trend_last_update = 0;     // Timestamp de la dernière mise à jour API
 static string   g_api_trend_signal = "";         // Signal de tendance API
 static bool     g_api_trend_valid = false;       // Les données API sont-elles valides ?
+
+// Variables pour l'analyse cohérente
+struct TimeframeAnalysis {
+   string timeframe;          // Période (M1, M5, H1, etc.)
+   string direction;          // Direction (buy/sell/neutral)
+   double strength;           // Force du signal (0-1)
+};
+
+struct CoherentAnalysisData {
+   string symbol;                // Symbole analysé
+   string decision;              // Décision (buy/sell/neutral)
+   double confidence;            // Niveau de confiance (0-1)
+   double stability;             // Stabilité de la décision
+   datetime lastUpdate;          // Dernière mise à jour
+   TimeframeAnalysis timeframes[]; // Analyse par timeframe
+};
+
+static CoherentAnalysisData g_coherentAnalysis; // Données d'analyse cohérente
 
 // Zones IA
 static double   g_aiBuyZoneLow   = 0.0;
@@ -269,6 +293,10 @@ bool CheckPatternReversal(ENUM_ORDER_TYPE orderType, double &reversalConfidence)
 bool IsRealTrendReversal(ulong ticket, ENUM_POSITION_TYPE posType, double currentPrice, double entryPrice);
 bool IsTrendStillValid(ENUM_POSITION_TYPE posType);
 bool CheckAdvancedEntryConditions(ENUM_ORDER_TYPE orderType, double &entryScore);
+bool AreAllConditionsAlignedForNewPosition(ENUM_ORDER_TYPE orderType);
+bool IsValidTrendFollowingEntry(ENUM_ORDER_TYPE orderType, double &entryConfidence, string &entryReason);
+bool CheckEMARebound(ENUM_ORDER_TYPE orderType, double &reboundStrength);
+bool CheckFractalRebound(ENUM_ORDER_TYPE orderType, double &reboundStrength);
 void UpdatePricePrediction();
 void DrawPricePrediction();
 void DetectReversalPoints(int &buyEntries[], int &sellEntries[]);
@@ -511,8 +539,30 @@ int OnInit()
             urlDomain = StringSubstr(urlDomain, 0, pathPos);
       }
       
+      // Ajouter aussi l'URL de l'analyse cohérente si différente
+      if(StringLen(AI_CoherentAnalysisURL) > 0)
+      {
+         string coherentDomain = AI_CoherentAnalysisURL;
+         int coherentProtocolPos = StringFind(coherentDomain, "://");
+         if(coherentProtocolPos >= 0)
+         {
+            coherentDomain = StringSubstr(coherentDomain, coherentProtocolPos + 3);
+            int coherentPathPos = StringFind(coherentDomain, "/");
+            if(coherentPathPos > 0)
+               coherentDomain = StringSubstr(coherentDomain, 0, coherentPathPos);
+         }
+         
+         // Si le domaine est différent, l'ajouter aussi
+         if(coherentDomain != urlDomain)
+         {
+            // Ajouter le deuxième domaine à la liste autorisée
+            // Note: MT5 permet plusieurs domaines dans la liste autorisée
+         }
+      }
+      
       Print("✅ Robot Scalper Double initialisé");
       Print("   URL Serveur IA: ", AI_ServerURL);
+      Print("   URL Analyse Cohérente: ", AI_CoherentAnalysisURL);
       Print("   Lot initial: ", InitialLotSize);
       Print("   TP: ", TakeProfitUSD, " USD");
       Print("   SL: ", StopLossUSD, " USD");
@@ -557,6 +607,16 @@ void OnDeinit(const int reason)
    if(atrM5Handle != INVALID_HANDLE) IndicatorRelease(atrM5Handle);
    if(atrH1Handle != INVALID_HANDLE) IndicatorRelease(atrH1Handle);
    if(fractalHandle != INVALID_HANDLE) IndicatorRelease(fractalHandle);
+   
+   // Nettoyer les objets graphiques de l'analyse cohérente
+   ObjectDelete(0, "CoherentAnalysisPanel");
+   ObjectDelete(0, "CoherentAnalysisTitle");
+   ObjectDelete(0, "CoherentAnalysisDecision");
+   ObjectDelete(0, "CoherentAnalysisStability");
+   for(int i = 0; i < 10; i++) // Nettoyer jusqu'à 10 timeframes
+   {
+      ObjectDelete(0, "CoherentAnalysisTF" + IntegerToString(i));
+   }
    
    Print("Robot Scalper Double arrêté");
 }
@@ -619,6 +679,17 @@ void OnTick()
    {
       UpdateTrendAPIAnalysis();
       lastTrendUpdate = TimeCurrent();
+   }
+   
+   // Mettre à jour l'analyse cohérente si nécessaire
+   UpdateCoherentAnalysis(_Symbol);
+   
+   // Afficher l'analyse cohérente sur le graphique
+   static datetime lastCoherentDisplay = 0;
+   if(ShowCoherentAnalysis && (TimeCurrent() - lastCoherentDisplay) >= 30)
+   {
+      DisplayCoherentAnalysis();
+      lastCoherentDisplay = TimeCurrent();
    }
    
    // OPTIMISATION MAXIMALE: Réduire drastiquement la fréquence et les calculs
@@ -4606,6 +4677,15 @@ void DoublePositionLot(ulong ticket)
    {
       // Pas encore de profit, utiliser SL standard
       CalculateSLTPInPointsWithMaxLoss(posType, price, volumeToAdd, 3.0, sl, tp);
+      
+      // Vérifier que toutes les conditions sont alignées avant d'ouvrir une nouvelle position
+      if(!AreAllConditionsAlignedForNewPosition(orderType))
+      {
+         if(DebugMode)
+            Print("🚫 DOUBLON BLOQUÉ: Conditions non alignées pour DOUBLE_LOT");
+         return;
+      }
+      
       if(trade.PositionOpen(_Symbol, orderType, volumeToAdd, price, sl, tp, "DOUBLE_LOT"))
       {
          g_positionTracker.currentLot = newLot;
@@ -4657,6 +4737,14 @@ void DoublePositionLot(ulong ticket)
          if(DebugMode)
             Print("✅ SL original sécurisé: ", originalSL, " (sécurise ", DoubleToString(securedProfit, 2), "$)");
       }
+   }
+   
+   // Vérifier que toutes les conditions sont alignées avant d'ouvrir une nouvelle position
+   if(!AreAllConditionsAlignedForNewPosition(orderType))
+   {
+      if(DebugMode)
+         Print("🚫 DOUBLON BLOQUÉ: Conditions non alignées pour DOUBLE_LOT (avec profit)");
+      return;
    }
    
    if(trade.PositionOpen(_Symbol, orderType, volumeToAdd, price, sl, tp, "DOUBLE_LOT"))
@@ -4725,6 +4813,11 @@ void CalculateSLTPInPoints(ENUM_POSITION_TYPE posType, double entryPrice, double
    double contractSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_CONTRACT_SIZE);
    double pointValue = (tickValue / tickSize) * point;
    
+   // Détecter si c'est un marché Forex pour utiliser des valeurs spécifiques
+   bool isForex = IsForexSymbol(_Symbol);
+   double slUSD = isForex ? 3.0 : StopLossUSD;  // SL = 3$ pour Forex, sinon valeur par défaut
+   double tpUSD = isForex ? 5.0 : TakeProfitUSD; // TP = 5$ pour Forex, sinon valeur par défaut
+   
    // Calculer les points nécessaires pour atteindre les valeurs USD
    double slPoints = 0, tpPoints = 0;
    
@@ -4733,22 +4826,32 @@ void CalculateSLTPInPoints(ENUM_POSITION_TYPE posType, double entryPrice, double
       // Points pour SL
       double slValuePerPoint = lotSize * pointValue;
       if(slValuePerPoint > 0)
-         slPoints = StopLossUSD / slValuePerPoint;
+         slPoints = slUSD / slValuePerPoint;
       
       // Points pour TP
       double tpValuePerPoint = lotSize * pointValue;
       if(tpValuePerPoint > 0)
       {
-         double baseTpPoints = TakeProfitUSD / tpValuePerPoint;
-         // Ajuster TP selon le style IA si disponible:
-         //  - scalp : TP plus court
-         //  - swing : TP plus large
-         if(g_lastAIStyle == "scalp")
-            tpPoints = baseTpPoints * 0.6;
-         else if(g_lastAIStyle == "swing")
-            tpPoints = baseTpPoints * 1.8;
+         double baseTpPoints = tpUSD / tpValuePerPoint;
+         // Pour Forex, ne pas ajuster selon le style IA (TP fixe à 5$)
+         // Pour les autres marchés, ajuster selon le style IA
+         if(!isForex)
+         {
+            // Ajuster TP selon le style IA si disponible:
+            //  - scalp : TP plus court
+            //  - swing : TP plus large
+            if(g_lastAIStyle == "scalp")
+               tpPoints = baseTpPoints * 0.6;
+            else if(g_lastAIStyle == "swing")
+               tpPoints = baseTpPoints * 1.8;
+            else
+               tpPoints = baseTpPoints;
+         }
          else
+         {
+            // Forex: TP fixe à 5$
             tpPoints = baseTpPoints;
+         }
       }
    }
    
@@ -5505,6 +5608,14 @@ bool ExecuteUSTrade(ENUM_ORDER_TYPE orderType, double entryPrice, double sl, dou
       return false;
    }
    
+   // Vérifier que toutes les conditions sont alignées avant d'ouvrir une nouvelle position
+   if(!AreAllConditionsAlignedForNewPosition(orderType))
+   {
+      if(DebugMode)
+         Print("🚫 DOUBLON BLOQUÉ: Conditions non alignées pour US_SESSION_BREAK_RETEST");
+      return false;
+   }
+   
    if(trade.PositionOpen(_Symbol, orderType, normalizedLot, entryPrice, sl, tp, "US_SESSION_BREAK_RETEST"))
    {
       if(DebugMode)
@@ -5759,6 +5870,24 @@ void LookForTradingOpportunity()
    else if(isForexSymbol && !isBoomCrashSymbol && !isStepIndex && !isVolatilitySymbol)
    {
       requiredConfidence = 0.70; // 70% pour Forex (signaux plus sûrs requis)
+   }
+   
+   // NOUVEAU: Éviter de trader entre les prédictions (attendre la prochaine prédiction)
+   if(UseAI_Agent && g_predictionValid)
+   {
+      // Vérifier si la prédiction est trop ancienne (plus de 5 minutes)
+      if(TimeCurrent() - g_lastPredictionUpdate > 300)
+      {
+         if(DebugMode)
+            Print("⏸️ Prédiction trop ancienne (", TimeCurrent() - g_lastPredictionUpdate, "s) - Attendre nouvelle prédiction");
+         return; // Ne pas trader entre les prédictions
+      }
+   }
+   else if(UseAI_Agent && !g_predictionValid)
+   {
+      if(DebugMode)
+         Print("⏸️ Aucune prédiction valide - Attendre prédiction ML");
+      return; // Ne pas trader sans prédiction
    }
    
    // RÈGLE STRICTE : Si l'IA est activée, TOUJOURS vérifier la confiance AVANT de trader
@@ -6164,6 +6293,19 @@ void ExecuteTrade(ENUM_ORDER_TYPE orderType)
       return;
    }
    
+   // NOUVEAU: Vérifier entrée en suivant la tendance avec rebond confirmé (réduit les faux signaux)
+   double entryConfidence = 0.0;
+   string entryReason = "";
+   if(!IsValidTrendFollowingEntry(orderType, entryConfidence, entryReason))
+   {
+      if(DebugMode)
+         Print("🚫 TRADE BLOQUÉ: ", entryReason);
+      return;
+   }
+   
+   if(DebugMode)
+      Print("✅ ENTRÉE VALIDÉE: ", entryReason);
+   
    // NOUVEAU: Vérifier que le marché est en tendance claire (si TradeOnlyInTrend est activé)
    if(TradeOnlyInTrend && !IsInClearTrend(orderType))
    {
@@ -6223,6 +6365,14 @@ void ExecuteTrade(ENUM_ORDER_TYPE orderType)
    price = NormalizeDouble(price, _Digits);
    sl = NormalizeDouble(sl, _Digits);
    tp = NormalizeDouble(tp, _Digits);
+   
+   // Vérifier que toutes les conditions sont alignées avant d'ouvrir une nouvelle position
+   if(!AreAllConditionsAlignedForNewPosition(orderType))
+   {
+      if(DebugMode)
+         Print("🚫 DOUBLON BLOQUÉ: Conditions non alignées pour SCALPER_DOUBLE");
+      return;
+   }
    
    if(trade.PositionOpen(_Symbol, orderType, normalizedLot, price, sl, tp, "SCALPER_DOUBLE"))
    {
@@ -7302,9 +7452,15 @@ void SecureProfitForPosition(ulong ticket, double currentProfit)
    if(!positionInfo.SelectByTicket(ticket))
       return;
    
-   // NOUVELLE LOGIQUE: Ne pas sécuriser tant que le profit n'atteint pas au moins 2$
-   // Laisser la position faire au moins 2$ de gain avant de commencer à sécuriser
-   if(currentProfit < 2.0)
+   // Vérifier si c'est un marché Forex
+   string positionSymbol = positionInfo.Symbol();
+   bool isForex = IsForexSymbol(positionSymbol);
+   
+   // Pour Forex: Sécuriser dès qu'il y a un profit (même petit) pour éviter les pertes inutiles
+   // Pour les autres marchés: Ne pas sécuriser tant que le profit n'atteint pas au moins 2$
+   double minProfitToSecure = isForex ? 0.5 : 2.0; // Forex: dès 0.5$, autres: dès 2$
+   
+   if(currentProfit < minProfitToSecure)
       return;
    
    double openPrice = positionInfo.PriceOpen();
@@ -7313,8 +7469,24 @@ void SecureProfitForPosition(ulong ticket, double currentProfit)
    ENUM_POSITION_TYPE posType = positionInfo.PositionType();
    double lotSize = positionInfo.Volume();
    
-   // Calculer le profit à sécuriser (50% du profit actuel)
-   double profitToSecure = currentProfit * 0.50;
+   // Pour Forex: Système intelligent de sécurisation progressive
+   // - Si profit < 1$: Sécuriser 30% (SL au break-even)
+   // - Si profit >= 1$ et < 2$: Sécuriser 50% 
+   // - Si profit >= 2$: Sécuriser 60% (plus agressif pour protéger les gains)
+   // Pour les autres marchés: Sécuriser 50% du profit actuel
+   double profitToSecureRatio = 0.50; // Par défaut
+   if(isForex)
+   {
+      if(currentProfit < 1.0)
+         profitToSecureRatio = 0.30; // Sécuriser 30% si profit < 1$
+      else if(currentProfit < 2.0)
+         profitToSecureRatio = 0.50; // Sécuriser 50% si profit entre 1$ et 2$
+      else
+         profitToSecureRatio = 0.60; // Sécuriser 60% si profit >= 2$ (plus agressif)
+   }
+   
+   // Calculer le profit à sécuriser
+   double profitToSecure = currentProfit * profitToSecureRatio;
    
    // Convertir le profit en points
    double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
@@ -7490,7 +7662,9 @@ void SecureProfitForPosition(ulong ticket, double currentProfit)
    double tp = positionInfo.TakeProfit();
    if(trade.PositionModify(ticket, newSL, tp))
    {
-      Print("🔒 Profit sécurisé: SL déplacé pour sécuriser ", DoubleToString(profitToSecure, 2), "$ (50% de ", DoubleToString(currentProfit, 2), "$) - ", 
+      string marketType = isForex ? "Forex" : "Autre";
+      string secureRatioStr = DoubleToString(profitToSecureRatio * 100, 0) + "%";
+      Print("🔒 Profit sécurisé (", marketType, "): SL déplacé pour sécuriser ", DoubleToString(profitToSecure, 2), "$ (", secureRatioStr, " de ", DoubleToString(currentProfit, 2), "$) - ", 
             (posType == POSITION_TYPE_BUY ? "BUY" : "SELL"), " - Ancien SL: ", 
             (currentSL == 0 ? "Aucun" : DoubleToString(currentSL, _Digits)), 
             " → Nouveau SL: ", DoubleToString(newSL, _Digits), 
@@ -7766,6 +7940,18 @@ void SecureDynamicProfits()
             double currentPrice = positionInfo.PriceCurrent();
             double currentSL = positionInfo.StopLoss();
             ENUM_POSITION_TYPE posType = positionInfo.PositionType();
+            
+            // Vérifier si c'est un marché Forex pour utiliser le système intelligent de trailing stop
+            string positionSymbol = positionInfo.Symbol();
+            bool isForex = IsForexSymbol(positionSymbol);
+            
+            // Pour Forex: Utiliser le système intelligent de trailing stop dès qu'il y a un profit
+            // Ce système sécurise progressivement: 30% si profit < 1$, 50% si 1-2$, 60% si >= 2$
+            if(isForex && currentProfit > 0)
+            {
+               SecureProfitForPosition(ticket, currentProfit);
+               continue; // Le trailing stop intelligent gère la sécurisation pour Forex
+            }
             
             // NOUVELLE LOGIQUE: Sécurisation AGGRESSIVE dès qu'il y a un profit
             // Dès qu'une position est en profit, on sécurise au moins 50% des gains initiaux
@@ -9774,5 +9960,879 @@ void SendMT5Notification(string message, bool isAlert = true)
    // Afficher aussi dans le journal
    Print("📢 NOTIFICATION: ", message);
 }
+
+//+------------------------------------------------------------------+
+//| FONCTIONS UTILITAIRES POUR L'ANALYSE COHÉRENTE                   |
+//+------------------------------------------------------------------+
+
+//+------------------------------------------------------------------+
+//| Extraire un champ d'un objet JSON                                |
+//+------------------------------------------------------------------+
+bool ExtractJsonField(const string &json, const string &field, string &value, int &pos)
+{
+   string searchPattern = "\"" + field + "\":";
+   int startPos = StringFind(json, searchPattern, pos);
+   if(startPos < 0)
+      return false;
+   
+   startPos += StringLen(searchPattern);
+   int endPos = StringFind(json, ",", startPos);
+   int endBrace = StringFind(json, "}", startPos);
+   
+   if(endPos < 0 || (endBrace > 0 && endBrace < endPos))
+      endPos = endBrace;
+   
+   if(endPos < 0)
+      endPos = StringLen(json) - 1;
+   
+   value = StringSubstr(json, startPos, endPos - startPos);
+   StringTrimLeft(value);
+   StringTrimRight(value);
+   
+   // Supprimer les guillemets si présents
+   if(StringLen(value) > 1 && (StringSubstr(value, 0, 1) == "\""))
+      value = StringSubstr(value, 1, StringLen(value) - 2);
+   
+   pos = endPos;
+   return true;
+}
+
+//+------------------------------------------------------------------+
+//| Extraire un tableau d'un objet JSON                              |
+//+------------------------------------------------------------------+
+bool ExtractJsonArray(const string &json, const string &field, string &arrayStr, int &pos)
+{
+   string searchPattern = "\"" + field + "\":";
+   int startPos = StringFind(json, searchPattern, pos);
+   if(startPos < 0)
+      return false;
+   
+   startPos = StringFind(json, "[", startPos);
+   if(startPos < 0)
+      return false;
+   
+   int bracketCount = 1;
+   int currentPos = startPos + 1;
+   
+   while(currentPos < StringLen(json) && bracketCount > 0)
+   {
+      string ch = StringSubstr(json, currentPos, 1);
+      if(ch == "[")
+         bracketCount++;
+      else if(ch == "]")
+         bracketCount--;
+      
+      currentPos++;
+   }
+   
+   if(bracketCount > 0)
+      return false; // Crochet non fermé
+   
+   arrayStr = StringSubstr(json, startPos, currentPos - startPos);
+   pos = currentPos;
+   return true;
+}
+
+//+------------------------------------------------------------------+
+//| Extraire un élément d'un tableau JSON                            |
+//+------------------------------------------------------------------+
+bool ExtractJsonArrayElement(const string &jsonArray, int index, string &element, int &pos)
+{
+   if(index < 0)
+      return false;
+   
+   int currentIndex = 0;
+   int bracketCount = 0;
+   int startPos = 1; // Sauter le premier '['
+   int currentPos = startPos;
+   
+   while(currentPos < StringLen(jsonArray) - 1 && currentIndex <= index)
+   {
+      string ch = StringSubstr(jsonArray, currentPos, 1);
+      
+      if(ch == "{" || ch == "[")
+         bracketCount++;
+      else if(ch == "}" || ch == "]")
+         bracketCount--;
+      else if(ch == "," && bracketCount == 0)
+      {
+         if(currentIndex == index)
+         {
+            element = StringSubstr(jsonArray, startPos, currentPos - startPos);
+            StringTrimLeft(element);
+            StringTrimRight(element);
+            pos = currentPos + 1;
+            return true;
+         }
+         startPos = currentPos + 1;
+         currentIndex++;
+      }
+      
+      currentPos++;
+   }
+   
+   // Dernier élément du tableau
+   if(currentIndex == index)
+   {
+      element = StringSubstr(jsonArray, startPos, currentPos - startPos - 1); // -1 pour le ']' final
+      StringTrimLeft(element);
+      StringTrimRight(element);
+      pos = currentPos;
+      return element != "";
+   }
+   
+   return false;
+}
+
+//+------------------------------------------------------------------+
+//| Parser la réponse JSON de l'analyse cohérente                    |
+//+------------------------------------------------------------------+
+bool ParseCoherentAnalysisResponse(const string &jsonStr, CoherentAnalysisData &analysis)
+{
+   // Vider les tableaux existants
+   ArrayFree(analysis.timeframes);
+   
+   // Exemple de réponse attendue :
+   // {
+   //   "symbol": "EURUSD",
+   //   "decision": "buy",
+   //   "confidence": 0.85,
+   //   "stability": 0.9,
+   //   "timeframes": [
+   //     {"timeframe": "M1", "direction": "buy", "strength": 0.7},
+   //     {"timeframe": "M5", "direction": "buy", "strength": 0.8},
+   //     ...
+   //   ]
+   // }
+   
+   // Extraction des données avec StringFind et StringSubstr
+   int pos = 0;
+   string key, value;
+   
+   // Extraire la décision
+   if(!ExtractJsonField(jsonStr, "decision", analysis.decision, pos))
+      return false;
+   
+   // Extraire la confiance
+   string confidenceStr;
+   if(!ExtractJsonField(jsonStr, "confidence", confidenceStr, pos))
+      return false;
+   analysis.confidence = StringToDouble(confidenceStr);
+   
+   // Extraire la stabilité
+   string stabilityStr;
+   if(ExtractJsonField(jsonStr, "stability", stabilityStr, pos))
+      analysis.stability = StringToDouble(stabilityStr);
+   else
+      analysis.stability = 0.0;
+   
+   // Extraire les timeframes
+   string timeframesArray;
+   if(ExtractJsonArray(jsonStr, "timeframes", timeframesArray, pos))
+   {
+      // Compter le nombre d'éléments dans le tableau
+      int count = 0;
+      int arrayPos = 0;
+      string element;
+      while(ExtractJsonArrayElement(timeframesArray, count, element, arrayPos))
+         count++;
+      
+      // Redimensionner le tableau
+      ArrayResize(analysis.timeframes, count);
+      
+      // Extraire chaque élément
+      arrayPos = 0;
+      for(int i = 0; i < count; i++)
+      {
+         if(ExtractJsonArrayElement(timeframesArray, i, element, arrayPos))
+         {
+            int elemPos = 0;
+            string tf, dir, strengthStr;
+            
+            if(ExtractJsonField(element, "timeframe", tf, elemPos) &&
+               ExtractJsonField(element, "direction", dir, elemPos) &&
+               ExtractJsonField(element, "strength", strengthStr, elemPos))
+            {
+               analysis.timeframes[i].timeframe = tf;
+               analysis.timeframes[i].direction = dir;
+               analysis.timeframes[i].strength = StringToDouble(strengthStr);
+            }
+         }
+      }
+   }
+   
+   return true;
+}
+
+//+------------------------------------------------------------------+
+//| Vérifier rebond sur EMA (moyennes mobiles)                       |
+//+------------------------------------------------------------------+
+bool CheckEMARebound(ENUM_ORDER_TYPE orderType, double &reboundStrength)
+{
+   reboundStrength = 0.0;
+   
+   // Récupérer les EMA M1, M5, H1
+   double emaFastM1[], emaSlowM1[], emaFastM5[], emaSlowM5[], emaFastH1[], emaSlowH1[];
+   ArraySetAsSeries(emaFastM1, true);
+   ArraySetAsSeries(emaSlowM1, true);
+   ArraySetAsSeries(emaFastM5, true);
+   ArraySetAsSeries(emaSlowM5, true);
+   ArraySetAsSeries(emaFastH1, true);
+   ArraySetAsSeries(emaSlowH1, true);
+   
+   if(CopyBuffer(emaFastHandle, 0, 0, 3, emaFastM1) < 3 ||
+      CopyBuffer(emaSlowHandle, 0, 0, 3, emaSlowM1) < 3 ||
+      CopyBuffer(emaFastM5Handle, 0, 0, 3, emaFastM5) < 3 ||
+      CopyBuffer(emaSlowM5Handle, 0, 0, 3, emaSlowM5) < 3 ||
+      CopyBuffer(emaFastH1Handle, 0, 0, 3, emaFastH1) < 3 ||
+      CopyBuffer(emaSlowH1Handle, 0, 0, 3, emaSlowH1) < 3)
+      return false;
+   
+   double close[], low[], high[];
+   ArraySetAsSeries(close, true);
+   ArraySetAsSeries(low, true);
+   ArraySetAsSeries(high, true);
+   
+   if(CopyClose(_Symbol, PERIOD_M1, 0, 5, close) < 5 ||
+      CopyLow(_Symbol, PERIOD_M1, 0, 5, low) < 5 ||
+      CopyHigh(_Symbol, PERIOD_M1, 0, 5, high) < 5)
+      return false;
+   
+   double currentPrice = (orderType == ORDER_TYPE_BUY) ? 
+                        SymbolInfoDouble(_Symbol, SYMBOL_BID) : 
+                        SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   double tolerance = 10 * point;
+   
+   if(orderType == ORDER_TYPE_BUY)
+   {
+      // Pour BUY: vérifier rebond sur EMA depuis le bas
+      // Priorité: EMA H1 > EMA M5 > EMA M1
+      
+      // Vérifier rebond sur EMA H1 (le plus fort)
+      if(MathAbs(currentPrice - emaFastH1[0]) < tolerance || 
+         MathAbs(low[0] - emaFastH1[0]) < tolerance ||
+         MathAbs(low[1] - emaFastH1[0]) < tolerance)
+      {
+         // Vérifier que le prix a touché l'EMA et rebondit
+         bool touchedEMA = (low[0] <= emaFastH1[0] + tolerance || low[1] <= emaFastH1[0] + tolerance);
+         bool rebounding = (close[0] > close[1] && close[1] > emaFastH1[0]);
+         
+         if(touchedEMA && rebounding)
+         {
+            double reboundDist = (close[0] - MathMin(low[0], low[1])) / (emaFastH1[0] * 0.001);
+            reboundStrength = MathMin(reboundDist / 5.0, 1.0) * 1.5; // Bonus pour H1
+            reboundStrength = MathMin(reboundStrength, 1.0);
+            return true;
+         }
+      }
+      
+      // Vérifier rebond sur EMA M5
+      if(MathAbs(currentPrice - emaFastM5[0]) < tolerance || 
+         MathAbs(low[0] - emaFastM5[0]) < tolerance ||
+         MathAbs(low[1] - emaFastM5[0]) < tolerance)
+      {
+         bool touchedEMA = (low[0] <= emaFastM5[0] + tolerance || low[1] <= emaFastM5[0] + tolerance);
+         bool rebounding = (close[0] > close[1] && close[1] > emaFastM5[0]);
+         
+         if(touchedEMA && rebounding)
+         {
+            double reboundDist = (close[0] - MathMin(low[0], low[1])) / (emaFastM5[0] * 0.001);
+            reboundStrength = MathMin(reboundDist / 5.0, 1.0) * 1.2; // Bonus pour M5
+            reboundStrength = MathMin(reboundStrength, 1.0);
+            return true;
+         }
+      }
+      
+      // Vérifier rebond sur EMA M1
+      if(MathAbs(currentPrice - emaFastM1[0]) < tolerance || 
+         MathAbs(low[0] - emaFastM1[0]) < tolerance ||
+         MathAbs(low[1] - emaFastM1[0]) < tolerance)
+      {
+         bool touchedEMA = (low[0] <= emaFastM1[0] + tolerance || low[1] <= emaFastM1[0] + tolerance);
+         bool rebounding = (close[0] > close[1] && close[1] > emaFastM1[0]);
+         
+         if(touchedEMA && rebounding)
+         {
+            double reboundDist = (close[0] - MathMin(low[0], low[1])) / (emaFastM1[0] * 0.001);
+            reboundStrength = MathMin(reboundDist / 5.0, 1.0);
+            return true;
+         }
+      }
+   }
+   else // SELL
+   {
+      // Pour SELL: vérifier rebond sur EMA depuis le haut
+      
+      // Vérifier rebond sur EMA H1
+      if(MathAbs(currentPrice - emaFastH1[0]) < tolerance || 
+         MathAbs(high[0] - emaFastH1[0]) < tolerance ||
+         MathAbs(high[1] - emaFastH1[0]) < tolerance)
+      {
+         bool touchedEMA = (high[0] >= emaFastH1[0] - tolerance || high[1] >= emaFastH1[0] - tolerance);
+         bool rebounding = (close[0] < close[1] && close[1] < emaFastH1[0]);
+         
+         if(touchedEMA && rebounding)
+         {
+            double reboundDist = (MathMax(high[0], high[1]) - close[0]) / (emaFastH1[0] * 0.001);
+            reboundStrength = MathMin(reboundDist / 5.0, 1.0) * 1.5;
+            reboundStrength = MathMin(reboundStrength, 1.0);
+            return true;
+         }
+      }
+      
+      // Vérifier rebond sur EMA M5
+      if(MathAbs(currentPrice - emaFastM5[0]) < tolerance || 
+         MathAbs(high[0] - emaFastM5[0]) < tolerance ||
+         MathAbs(high[1] - emaFastM5[0]) < tolerance)
+      {
+         bool touchedEMA = (high[0] >= emaFastM5[0] - tolerance || high[1] >= emaFastM5[0] - tolerance);
+         bool rebounding = (close[0] < close[1] && close[1] < emaFastM5[0]);
+         
+         if(touchedEMA && rebounding)
+         {
+            double reboundDist = (MathMax(high[0], high[1]) - close[0]) / (emaFastM5[0] * 0.001);
+            reboundStrength = MathMin(reboundDist / 5.0, 1.0) * 1.2;
+            reboundStrength = MathMin(reboundStrength, 1.0);
+            return true;
+         }
+      }
+      
+      // Vérifier rebond sur EMA M1
+      if(MathAbs(currentPrice - emaFastM1[0]) < tolerance || 
+         MathAbs(high[0] - emaFastM1[0]) < tolerance ||
+         MathAbs(high[1] - emaFastM1[0]) < tolerance)
+      {
+         bool touchedEMA = (high[0] >= emaFastM1[0] - tolerance || high[1] >= emaFastM1[0] - tolerance);
+         bool rebounding = (close[0] < close[1] && close[1] < emaFastM1[0]);
+         
+         if(touchedEMA && rebounding)
+         {
+            double reboundDist = (MathMax(high[0], high[1]) - close[0]) / (emaFastM1[0] * 0.001);
+            reboundStrength = MathMin(reboundDist / 5.0, 1.0);
+            return true;
+         }
+      }
+   }
+   
+   return false;
+}
+
+//+------------------------------------------------------------------+
+//| Vérifier rebond sur fractal                                      |
+//+------------------------------------------------------------------+
+bool CheckFractalRebound(ENUM_ORDER_TYPE orderType, double &reboundStrength)
+{
+   reboundStrength = 0.0;
+   
+   double currentPrice = (orderType == ORDER_TYPE_BUY) ? 
+                        SymbolInfoDouble(_Symbol, SYMBOL_BID) : 
+                        SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   
+   double fractalZone = 0.0;
+   if(!IsPriceNearFractalZone(currentPrice, fractalZone))
+      return false;
+   
+   double close[], low[], high[];
+   ArraySetAsSeries(close, true);
+   ArraySetAsSeries(low, true);
+   ArraySetAsSeries(high, true);
+   
+   if(CopyClose(_Symbol, PERIOD_M1, 0, 5, close) < 5 ||
+      CopyLow(_Symbol, PERIOD_M1, 0, 5, low) < 5 ||
+      CopyHigh(_Symbol, PERIOD_M1, 0, 5, high) < 5)
+      return false;
+   
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   double tolerance = 10 * point;
+   
+   if(orderType == ORDER_TYPE_BUY)
+   {
+      // Pour BUY: rebond sur fractal inférieur
+      double lowerFractal = GetFractalLowerZone();
+      if(lowerFractal > 0 && MathAbs(currentPrice - lowerFractal) < tolerance)
+      {
+         bool touchedFractal = (low[0] <= lowerFractal + tolerance || low[1] <= lowerFractal + tolerance);
+         bool rebounding = (close[0] > close[1] && close[0] > lowerFractal);
+         
+         if(touchedFractal && rebounding)
+         {
+            double reboundDist = (close[0] - MathMin(low[0], low[1])) / (lowerFractal * 0.001);
+            reboundStrength = MathMin(reboundDist / 5.0, 1.0);
+            return true;
+         }
+      }
+   }
+   else // SELL
+   {
+      // Pour SELL: rebond sur fractal supérieur
+      double upperFractal = GetFractalUpperZone();
+      if(upperFractal > 0 && MathAbs(currentPrice - upperFractal) < tolerance)
+      {
+         bool touchedFractal = (high[0] >= upperFractal - tolerance || high[1] >= upperFractal - tolerance);
+         bool rebounding = (close[0] < close[1] && close[0] < upperFractal);
+         
+         if(touchedFractal && rebounding)
+         {
+            double reboundDist = (MathMax(high[0], high[1]) - close[0]) / (upperFractal * 0.001);
+            reboundStrength = MathMin(reboundDist / 5.0, 1.0);
+            return true;
+         }
+      }
+   }
+   
+   return false;
+}
+
+//+------------------------------------------------------------------+
+//| Vérifier entrée en suivant la tendance avec rebond confirmé      |
+//| Cette fonction réduit les faux signaux en vérifiant:            |
+//| 1. Tendance forte et claire                                      |
+//| 2. Rebond sur EMA/support/résistance/fractal                     |
+//| 3. Prédiction ML valide et alignée                               |
+//| 4. Ne pas trader entre les prédictions                          |
+//+------------------------------------------------------------------+
+bool IsValidTrendFollowingEntry(ENUM_ORDER_TYPE orderType, double &entryConfidence, string &entryReason)
+{
+   entryConfidence = 0.0;
+   entryReason = "";
+   
+   // 1. VÉRIFIER TENDANCE FORTE ET CLAIRE (OBLIGATOIRE)
+   if(!CheckTrendAlignment(orderType))
+   {
+      entryReason = "Tendance non alignée";
+      return false;
+   }
+   
+   // Vérifier aussi que le marché est en tendance claire (pas en correction/range)
+   if(!IsInClearTrend(orderType))
+   {
+      entryReason = "Marché en correction/range";
+      return false;
+   }
+   
+   // 2. VÉRIFIER PRÉDICTION ML VALIDE ET ALIGNÉE (OBLIGATOIRE)
+   if(!g_predictionValid)
+   {
+      entryReason = "Prédiction non valide";
+      return false;
+   }
+   
+   // Vérifier que la prédiction est récente (moins de 10 minutes)
+   if(TimeCurrent() - g_lastPredictionUpdate > 600)
+   {
+      entryReason = "Prédiction trop ancienne";
+      return false;
+   }
+   
+   // Vérifier l'alignement de la prédiction avec la direction
+   if(ArraySize(g_pricePrediction) >= 10)
+   {
+      double firstPrice = g_pricePrediction[0];
+      double lastPrice = g_pricePrediction[ArraySize(g_pricePrediction)-1];
+      double predictionDirection = (lastPrice > firstPrice) ? 1 : -1;
+      
+      if(orderType == ORDER_TYPE_BUY && predictionDirection < 0)
+      {
+         entryReason = "Prédiction opposée (baissière)";
+         return false;
+      }
+      if(orderType == ORDER_TYPE_SELL && predictionDirection > 0)
+      {
+         entryReason = "Prédiction opposée (haussière)";
+         return false;
+      }
+   }
+   
+   // 3. VÉRIFIER REBOND SUR EMA/SUPPORT/RÉSISTANCE/FRACTAL (OBLIGATOIRE)
+   // Au moins un de ces rebonds doit être confirmé
+   bool hasRebound = false;
+   double totalReboundStrength = 0.0;
+   int reboundCount = 0;
+   
+   // Vérifier rebond sur EMA
+   double emaReboundStrength = 0.0;
+   if(CheckEMARebound(orderType, emaReboundStrength))
+   {
+      hasRebound = true;
+      totalReboundStrength += emaReboundStrength * 1.5; // Bonus pour EMA
+      reboundCount++;
+      entryReason += "EMA_REBOUND ";
+   }
+   
+   // Vérifier rebond sur support/résistance
+   double srReboundStrength = 0.0;
+   if(CheckSupportResistanceRebound(orderType, srReboundStrength))
+   {
+      hasRebound = true;
+      totalReboundStrength += srReboundStrength * 1.3; // Bonus pour S/R
+      reboundCount++;
+      entryReason += "SR_REBOUND ";
+   }
+   
+   // Vérifier rebond sur fractal
+   double fractalReboundStrength = 0.0;
+   if(CheckFractalRebound(orderType, fractalReboundStrength))
+   {
+      hasRebound = true;
+      totalReboundStrength += fractalReboundStrength * 1.2; // Bonus pour fractal
+      reboundCount++;
+      entryReason += "FRACTAL_REBOUND ";
+   }
+   
+   // Vérifier rebond sur trendline
+   double trendlineDistance = 0.0;
+   if(CheckReboundOnTrendline(orderType, trendlineDistance))
+   {
+      hasRebound = true;
+      double trendlineStrength = MathMax(0.0, 1.0 - (trendlineDistance / (50 * _Point)));
+      totalReboundStrength += trendlineStrength * 1.1;
+      reboundCount++;
+      entryReason += "TRENDLINE_REBOUND ";
+   }
+   
+   if(!hasRebound)
+   {
+      entryReason = "Aucun rebond confirmé";
+      return false;
+   }
+   
+   // Calculer la confiance moyenne des rebonds
+   double avgReboundStrength = (reboundCount > 0) ? (totalReboundStrength / reboundCount) : 0.0;
+   
+   // 4. VÉRIFIER DÉCISION IA (si activée)
+   double aiConfidence = 0.0;
+   bool aiAligned = false;
+   
+   if(UseAI_Agent)
+   {
+      // Vérifier analyse cohérente
+      if(StringLen(g_coherentAnalysis.decision) > 0)
+      {
+         string decision = g_coherentAnalysis.decision;
+         StringToLower(decision);
+         
+         if(orderType == ORDER_TYPE_BUY && (decision == "buy" || decision == "achat" || decision == "long"))
+            aiAligned = true;
+         else if(orderType == ORDER_TYPE_SELL && (decision == "sell" || decision == "vente" || decision == "short"))
+            aiAligned = true;
+         
+         aiConfidence = g_coherentAnalysis.confidence;
+      }
+      
+      // Vérifier aussi la décision IA standard
+      if(!aiAligned && StringLen(g_lastAIAction) > 0)
+      {
+         string aiAction = g_lastAIAction;
+         StringToLower(aiAction);
+         
+         if(orderType == ORDER_TYPE_BUY && (aiAction == "buy" || aiAction == "achat" || aiAction == "long"))
+            aiAligned = true;
+         else if(orderType == ORDER_TYPE_SELL && (aiAction == "sell" || aiAction == "vente" || aiAction == "short"))
+            aiAligned = true;
+         
+         if(aiConfidence == 0.0)
+            aiConfidence = g_lastAIConfidence;
+      }
+      
+      // Si IA activée mais pas alignée, réduire la confiance
+      if(!aiAligned && aiConfidence > 0)
+      {
+         entryReason += "IA_NON_ALIGNEE ";
+         // Ne pas bloquer complètement mais réduire la confiance
+         aiConfidence *= 0.5;
+      }
+   }
+   
+   // Calculer la confiance finale
+   // Base: 50% pour rebond confirmé
+   // Bonus: +30% pour rebond fort, +20% pour IA alignée
+   entryConfidence = 0.5; // Base
+   
+   if(avgReboundStrength > 0.7)
+      entryConfidence += 0.3; // Rebond fort
+   else if(avgReboundStrength > 0.4)
+      entryConfidence += 0.15; // Rebond moyen
+   
+   if(aiAligned && aiConfidence >= 0.70)
+      entryConfidence += 0.20; // IA alignée avec bonne confiance
+   else if(aiAligned && aiConfidence >= 0.50)
+      entryConfidence += 0.10; // IA alignée avec confiance moyenne
+   
+   // Pénalité si trop de rebonds (peut indiquer un marché hésitant)
+   if(reboundCount > 3)
+      entryConfidence *= 0.9;
+   
+   entryConfidence = MathMin(entryConfidence, 1.0);
+   
+   // Seuil minimum de confiance: 60%
+   if(entryConfidence < 0.60)
+   {
+      entryReason += StringFormat("Confiance insuffisante (%.1f%%)", entryConfidence * 100);
+      return false;
+   }
+   
+   entryReason = StringFormat("ENTRY_OK: %s (Conf: %.1f%%, Rebonds: %d)", 
+                             entryReason, entryConfidence * 100, reboundCount);
+   
+   return true;
+}
+
+//+------------------------------------------------------------------+
+//| Vérifier que toutes les conditions sont alignées avant d'ouvrir  |
+//| une nouvelle position (tendance forte, IA confiance >80%, prédiction) |
+//| NE PAS DUPLIQUER de position tant que ces conditions ne sont pas alignées |
+//+------------------------------------------------------------------+
+bool AreAllConditionsAlignedForNewPosition(ENUM_ORDER_TYPE orderType)
+{
+   // Vérifier s'il y a déjà une position ouverte pour ce symbole
+   bool hasExistingPosition = false;
+   for(int i = 0; i < PositionsTotal(); i++)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0) continue;
+      
+      if(PositionSelectByTicket(ticket))
+      {
+         if(PositionGetString(POSITION_SYMBOL) == _Symbol && 
+            PositionGetInteger(POSITION_MAGIC) == InpMagicNumber)
+         {
+            hasExistingPosition = true;
+            break;
+         }
+      }
+   }
+   
+   // Si une position existe déjà, vérifier que TOUTES les conditions sont alignées
+   if(hasExistingPosition)
+   {
+      // 1. VÉRIFIER TENDANCE FORTE
+      bool strongTrend = CheckTrendAlignment(orderType);
+      if(!strongTrend)
+      {
+         if(DebugMode)
+            Print("🚫 DOUBLON BLOQUÉ: Tendance forte non alignée pour ", EnumToString(orderType));
+         return false;
+      }
+      
+      // 2. VÉRIFIER DÉCISION IA AVEC CONFiance > 80%
+      bool aiDecisionOk = false;
+      if(UseAI_Agent && StringLen(g_coherentAnalysis.decision) > 0)
+      {
+         string decision = g_coherentAnalysis.decision;
+         StringToLower(decision);
+         
+         // Vérifier la confiance >= 80%
+         if(g_coherentAnalysis.confidence >= 0.80)
+         {
+            // Vérifier que la décision correspond à la direction
+            if(orderType == ORDER_TYPE_BUY && (decision == "buy" || decision == "achat" || decision == "long"))
+               aiDecisionOk = true;
+            else if(orderType == ORDER_TYPE_SELL && (decision == "sell" || decision == "vente" || decision == "short"))
+               aiDecisionOk = true;
+         }
+      }
+      
+      if(!aiDecisionOk)
+      {
+         if(DebugMode)
+         {
+            string decisionStr = StringLen(g_coherentAnalysis.decision) > 0 ? g_coherentAnalysis.decision : "N/A";
+            double confStr = StringLen(g_coherentAnalysis.decision) > 0 ? g_coherentAnalysis.confidence * 100 : 0.0;
+            Print("🚫 DOUBLON BLOQUÉ: Décision IA non alignée ou confiance insuffisante - Direction=", 
+                  EnumToString(orderType), " IA=", decisionStr, " (Confiance: ", DoubleToString(confStr, 1), "%)");
+         }
+         return false;
+      }
+      
+      // 3. VÉRIFIER PRÉDICTION VALIDE
+      if(!g_predictionValid)
+      {
+         if(DebugMode)
+            Print("🚫 DOUBLON BLOQUÉ: Prédiction non valide");
+         return false;
+      }
+      
+      // Toutes les conditions sont remplies - autoriser le doublon
+      if(DebugMode)
+         Print("✅ DOUBLON AUTORISÉ: Toutes les conditions alignées - Tendance=", strongTrend ? "OK" : "KO",
+               " IA=", g_coherentAnalysis.decision, " (", DoubleToString(g_coherentAnalysis.confidence * 100, 1), "%)",
+               " Prédiction=", g_predictionValid ? "OK" : "KO");
+      return true;
+   }
+   
+   // Pas de position existante, autoriser l'ouverture normale
+   return true;
+}
+
+//+------------------------------------------------------------------+
+//| Mettre à jour l'analyse cohérente depuis le serveur              |
+//+------------------------------------------------------------------+
+void UpdateCoherentAnalysis(string symbol)
+{
+   if(!UseAI_Agent || StringLen(AI_CoherentAnalysisURL) == 0)
+      return;
+   
+   // Vérifier le délai entre les mises à jour
+   static datetime lastUpdate = 0;
+   if(TimeCurrent() - lastUpdate < AI_CoherentAnalysisInterval)
+      return;
+   
+   // Préparer la requête
+   string url = StringFormat("%s?symbol=%s", AI_CoherentAnalysisURL, symbol);
+   string headers = "Accept: application/json\r\n";
+   string result_headers = "";
+   uchar data[];           // Tableau vide pour les données GET
+   uchar result[];         // Tableau pour la réponse
+   ArrayResize(data, 0); // S'assurer que le tableau est vide
+   
+   // Envoyer la requête (signature complète avec tableau vide)
+   int res = WebRequest("GET", url, headers, AI_Timeout_ms, data, result, result_headers);
+   
+   if(res < 200 || res >= 300)
+   {
+      if(DebugMode)
+         Print("❌ Échec de la requête d'analyse cohérente: ", res);
+      return;
+   }
+   
+   // Convertir la réponse uchar[] en string
+   string result_string = CharArrayToString(result);
+   
+   // Parser la réponse JSON
+   if(!ParseCoherentAnalysisResponse(result_string, g_coherentAnalysis))
+   {
+      if(DebugMode)
+         Print("❌ Erreur lors de l'analyse de la réponse cohérente");
+      return;
+   }
+   
+   g_coherentAnalysis.lastUpdate = TimeCurrent();
+   g_coherentAnalysis.symbol = symbol;
+   lastUpdate = TimeCurrent();
+   
+   if(DebugMode)
+      Print("✅ Analyse cohérente mise à jour: ", g_coherentAnalysis.decision, 
+            " (Confiance: ", DoubleToString(g_coherentAnalysis.confidence * 100, 1), "%)");
+}
+
+//+------------------------------------------------------------------+
+//| Afficher l'analyse cohérente sur le graphique                    |
+//+------------------------------------------------------------------+
+void DisplayCoherentAnalysis()
+{
+   if(!ShowCoherentAnalysis || !UseAI_Agent || StringLen(AI_CoherentAnalysisURL) == 0 || g_coherentAnalysis.lastUpdate == 0)
+      return;
+   
+   // Position Y de départ
+   int y = 20;
+   int x = 20;
+   int lineHeight = 20;
+   color textColor = clrWhite;
+   
+   // Créer un panneau de fond
+   string panelName = "CoherentAnalysisPanel";
+   if(ObjectFind(0, panelName) < 0)
+   {
+      ObjectCreate(0, panelName, OBJ_RECTANGLE_LABEL, 0, 0, 0);
+      ObjectSetInteger(0, panelName, OBJPROP_XDISTANCE, x - 5);
+      ObjectSetInteger(0, panelName, OBJPROP_YDISTANCE, y - 5);
+      ObjectSetInteger(0, panelName, OBJPROP_XSIZE, 250);
+      ObjectSetInteger(0, panelName, OBJPROP_YSIZE, 150);
+      ObjectSetInteger(0, panelName, OBJPROP_BGCOLOR, C'20,20,30');
+      ObjectSetInteger(0, panelName, OBJPROP_BORDER_TYPE, BORDER_FLAT);
+      ObjectSetInteger(0, panelName, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+      ObjectSetInteger(0, panelName, OBJPROP_COLOR, clrGray);
+      ObjectSetInteger(0, panelName, OBJPROP_BACK, false);
+      ObjectSetInteger(0, panelName, OBJPROP_SELECTABLE, false);
+      ObjectSetInteger(0, panelName, OBJPROP_SELECTED, false);
+      ObjectSetInteger(0, panelName, OBJPROP_HIDDEN, true);
+      ObjectSetInteger(0, panelName, OBJPROP_ZORDER, 0);
+   }
+   
+   // Afficher le titre
+   string titleName = "CoherentAnalysisTitle";
+   if(ObjectFind(0, titleName) < 0)
+      ObjectCreate(0, titleName, OBJ_LABEL, 0, 0, 0);
+   
+   ObjectSetString(0, titleName, OBJPROP_TEXT, "ANALYSE COHÉRENTE");
+   ObjectSetInteger(0, titleName, OBJPROP_XDISTANCE, x);
+   ObjectSetInteger(0, titleName, OBJPROP_YDISTANCE, y);
+   ObjectSetInteger(0, titleName, OBJPROP_COLOR, clrGold);
+   ObjectSetInteger(0, titleName, OBJPROP_FONTSIZE, 10);
+   ObjectSetInteger(0, titleName, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+   y += lineHeight;
+   
+   // Afficher la décision
+   string decisionName = "CoherentAnalysisDecision";
+   if(ObjectFind(0, decisionName) < 0)
+      ObjectCreate(0, decisionName, OBJ_LABEL, 0, 0, 0);
+   
+   color decisionColor = (g_coherentAnalysis.decision == "buy") ? clrLime : 
+                        (g_coherentAnalysis.decision == "sell") ? clrRed : clrGray;
+   
+   // Convertir la décision en majuscules manuellement
+   string upperDecision = g_coherentAnalysis.decision;
+   StringToUpper(upperDecision);
+   
+   ObjectSetString(0, decisionName, OBJPROP_TEXT, "Décision: " + 
+                  upperDecision + 
+                  " (" + DoubleToString(g_coherentAnalysis.confidence * 100, 1) + "%)");
+   ObjectSetInteger(0, decisionName, OBJPROP_XDISTANCE, x);
+   ObjectSetInteger(0, decisionName, OBJPROP_YDISTANCE, y);
+   ObjectSetInteger(0, decisionName, OBJPROP_COLOR, decisionColor);
+   ObjectSetInteger(0, decisionName, OBJPROP_FONTSIZE, 9);
+   ObjectSetInteger(0, decisionName, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+   y += lineHeight;
+   
+   // Afficher la stabilité
+   if(g_coherentAnalysis.stability > 0)
+   {
+      string stabilityName = "CoherentAnalysisStability";
+      if(ObjectFind(0, stabilityName) < 0)
+         ObjectCreate(0, stabilityName, OBJ_LABEL, 0, 0, 0);
+      
+      color stabilityColor = (g_coherentAnalysis.stability > 0.7) ? clrLime : 
+                           (g_coherentAnalysis.stability > 0.4) ? clrOrange : clrRed;
+      
+      ObjectSetString(0, stabilityName, OBJPROP_TEXT, "Stabilité: " + 
+                     DoubleToString(g_coherentAnalysis.stability * 100, 1) + "%");
+      ObjectSetInteger(0, stabilityName, OBJPROP_XDISTANCE, x);
+      ObjectSetInteger(0, stabilityName, OBJPROP_YDISTANCE, y);
+      ObjectSetInteger(0, stabilityName, OBJPROP_COLOR, stabilityColor);
+      ObjectSetInteger(0, stabilityName, OBJPROP_FONTSIZE, 8);
+      ObjectSetInteger(0, stabilityName, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+      y += lineHeight;
+   }
+   
+   // Afficher les timeframes
+   for(int i = 0; i < ArraySize(g_coherentAnalysis.timeframes); i++)
+   {
+      string tfName = "CoherentAnalysisTF" + IntegerToString(i);
+      if(ObjectFind(0, tfName) < 0)
+         ObjectCreate(0, tfName, OBJ_LABEL, 0, 0, 0);
+      
+      color tfColor = (g_coherentAnalysis.timeframes[i].direction == "buy") ? clrLime : 
+                     (g_coherentAnalysis.timeframes[i].direction == "sell") ? clrRed : clrGray;
+      
+      // Convertir la direction en majuscules
+      string upperDirection = g_coherentAnalysis.timeframes[i].direction;
+      StringToUpper(upperDirection);
+      
+      string tfText = StringFormat("%-4s: %-5s (%.1f%%)", 
+                                 g_coherentAnalysis.timeframes[i].timeframe,
+                                 upperDirection,
+                                 g_coherentAnalysis.timeframes[i].strength * 100);
+      
+      ObjectSetString(0, tfName, OBJPROP_TEXT, tfText);
+      ObjectSetInteger(0, tfName, OBJPROP_XDISTANCE, x + (i % 2) * 120);
+      ObjectSetInteger(0, tfName, OBJPROP_YDISTANCE, y + (i / 2) * lineHeight);
+      ObjectSetInteger(0, tfName, OBJPROP_COLOR, tfColor);
+      ObjectSetInteger(0, tfName, OBJPROP_FONTSIZE, 8);
+      ObjectSetInteger(0, tfName, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+   }
+}
+
 //+------------------------------------------------------------------+
 
