@@ -580,16 +580,26 @@ DATA_DIR = Path("data")
 MODELS_DIR = Path("models")
 LOG_FILE = Path("ai_server.log")
 
-# Dossier commun MT5 pour stocker les historiques/prédictions utilisables par l'EA
-# Exemple fourni par l'utilisateur :
-# C:\Users\USER\AppData\Roaming\MetaQuotes\Terminal\Common\Files\Predictions
-MT5_PREDICTIONS_DIR = Path(
-    r"C:\Users\USER\AppData\Roaming\MetaQuotes\Terminal\Common\Files\Predictions"
-)
-# Dossier pour sauvegarder les métriques de prédiction
-MT5_RESULTS_DIR = Path(
-    r"C:\Users\USER\AppData\Roaming\MetaQuotes\Terminal\Common\Files\Results"
-)
+# Dossiers de prédictions / métriques MT5
+# - En local Windows: dossiers partagés avec le terminal MT5
+# - Sur Render / cloud: dossiers internes au conteneur (DATA_DIR)
+RUNNING_ON_RENDER = bool(os.getenv("RENDER") or os.getenv("RENDER_SERVICE_ID"))
+
+if RUNNING_ON_RENDER:
+    # Mode cloud: tout est stocké dans le répertoire data/ du serveur
+    MT5_PREDICTIONS_DIR = DATA_DIR / "Predictions"
+    MT5_RESULTS_DIR = DATA_DIR / "Results"
+else:
+    # Mode local: utiliser les chemins Windows partagés avec MT5
+    # Exemple fourni par l'utilisateur :
+    # C:\Users\USER\AppData\Roaming\MetaQuotes\Terminal\Common\Files\Predictions
+    MT5_PREDICTIONS_DIR = Path(
+        r"C:\Users\USER\AppData\Roaming\MetaQuotes\Terminal\Common\Files\Predictions"
+    )
+    # Dossier pour sauvegarder les métriques de prédiction
+    MT5_RESULTS_DIR = Path(
+        r"C:\Users\USER\AppData\Roaming\MetaQuotes\Terminal\Common\Files\Results"
+    )
 try:
     MT5_PREDICTIONS_DIR.mkdir(parents=True, exist_ok=True)
     MT5_RESULTS_DIR.mkdir(parents=True, exist_ok=True)
