@@ -1,0 +1,41 @@
+RÉSUMÉ ENTRAÎNEMENT MODÈLES ADAPTATIFS
+==================================================
+Date: 2025-07-10 02:59:09
+Modèles entraînés: 6
+
+📊 SYNTHETIC_SPECIAL:
+  - Features: 32
+  - Symboles: Boom 1000 Index, Boom 500 Index, Crash 1000 Index, Crash 500 Index, Boom 300 Index
+  - Modèle: D:\Dev\TradBOT\backend\synthetic_special_xgb_model.pkl
+  - Scaler: D:\Dev\TradBOT\backend\synthetic_special_xgb_model_scaler.pkl
+
+📊 SYNTHETIC_GENERAL:
+  - Features: 32
+  - Symboles: Volatility 10 Index, Volatility 25 Index, Volatility 50 Index, Volatility 75 Index, Volatility 100 Index
+  - Modèle: D:\Dev\TradBOT\backend\synthetic_general_xgb_model.pkl
+  - Scaler: D:\Dev\TradBOT\backend\synthetic_general_xgb_model_scaler.pkl
+
+📊 CRYPTO:
+  - Features: 32
+  - Symboles: ADAUSD, BCHUSD, BTCETH, BTCLTC, BTCUSD
+  - Modèle: D:\Dev\TradBOT\backend\crypto_xgb_model.pkl
+  - Scaler: D:\Dev\TradBOT\backend\crypto_xgb_model_scaler.pkl
+
+📊 FOREX:
+  - Features: 32
+  - Symboles: AUDCAD, AUDCHF, AUDNZD, AUDJPY, AUDUSD
+  - Modèle: D:\Dev\TradBOT\backend\forex_xgb_model.pkl
+  - Scaler: D:\Dev\TradBOT\backend\forex_xgb_model_scaler.pkl
+
+📊 STOCKS:
+  - Features: 32
+  - Symboles: AAL, AAPL, ADS, ABNB, AIG
+  - Modèle: D:\Dev\TradBOT\backend\stocks_xgb_model.pkl
+  - Scaler: D:\Dev\TradBOT\backend\stocks_xgb_model_scaler.pkl
+
+📊 UNIVERSAL:
+  - Features: 30
+  - Symboles: MRNA, PEP, AGG.US, ARKK.US, DIA.US
+  - Modèle: D:\Dev\TradBOT\backend\universal_xgb_model.pkl
+  - Scaler: D:\Dev\TradBOT\backend\universal_xgb_model_scaler.pkl
+
