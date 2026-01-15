@@ -1,3 +1,5 @@
+# Requirements for cloud deployment - Python 3.11.7 compatible
+# Updated: 2026-01-16 - Removed streamlit-autorefresh for compatibility
 streamlit>=1.28.0,<2.0.0
 pandas>=2.0.0,<3.0.0
 numpy>=1.24.0,<2.0.0
