@@ -618,6 +618,12 @@ for directory in [DATA_DIR, MODELS_DIR]:
 prediction_cache = {}
 last_updated = {}
 
+# ===== CACHE POUR DONNÉES HISTORIQUES UPLOADÉES DEPUIS MT5 =====
+# Stockage des données historiques envoyées par MT5 via le bridge
+# Format: {f"{symbol}_{timeframe}": {"data": DataFrame, "timestamp": datetime}}
+mt5_uploaded_history_cache: Dict[str, Dict[str, Any]] = {}
+MT5_HISTORY_CACHE_TTL = 300  # TTL de 5 minutes (les données sont rafraîchies régulièrement)
+
 # ===== SYSTÈME DE VALIDATION ET CALIBRATION DES PRÉDICTIONS =====
 # Stockage des prédictions historiques pour validation
 prediction_history: Dict[str, List[Dict[str, Any]]] = {}  # {symbol: [predictions]}
@@ -1147,7 +1153,23 @@ def get_historical_data(symbol: str, timeframe: str = "H1", count: int = 500) ->
     Returns:
         DataFrame pandas avec les données OHLCV
     """
-    # Essayer d'abord MT5 si disponible (avec tentative de connexion automatique)
+    # PRIORITÉ 1: Vérifier le cache des données uploadées depuis MT5 (bridge)
+    cache_key = f"{symbol}_{timeframe}"
+    if cache_key in mt5_uploaded_history_cache:
+        cached_data = mt5_uploaded_history_cache[cache_key]
+        cache_age = (datetime.now() - cached_data["timestamp"]).total_seconds()
+        
+        if cache_age < MT5_HISTORY_CACHE_TTL:
+            df_cached = cached_data["data"]
+            if df_cached is not None and not df_cached.empty:
+                logger.info(f"✅ Données récupérées depuis cache MT5 uploadé: {len(df_cached)} bougies pour {symbol} {timeframe}")
+                return df_cached.tail(count) if len(df_cached) > count else df_cached
+        else:
+            # Cache expiré, le retirer
+            del mt5_uploaded_history_cache[cache_key]
+            logger.debug(f"Cache expiré pour {cache_key}, retiré")
+    
+    # PRIORITÉ 2: Essayer MT5 si disponible (avec tentative de connexion automatique)
     df = get_historical_data_mt5(symbol, timeframe, count)
     if df is not None and not df.empty:
         return df
@@ -1719,7 +1741,8 @@ async def root():
             "/indicators/analyze (POST)",
             "/indicators/sentiment/{symbol} (GET)",
             "/indicators/volume_profile/{symbol} (GET)",
-            "/analyze/gemini (POST)"
+            "/analyze/gemini (POST)",
+            "/mt5/history-upload (POST) - Upload données historiques MT5 vers Render (bridge)"
         ]
     }
 
@@ -5954,6 +5977,90 @@ class PredictionValidationRequest(BaseModel):
     real_prices: List[float] = Field(..., description="Liste des prix réels observés")
     prediction_id: Optional[str] = None
     timeframe: str = "M1"
+
+class MT5HistoryUploadRequest(BaseModel):
+    """Requête pour uploader des données historiques depuis MT5 vers Render"""
+    symbol: str
+    timeframe: str = Field(..., description="Timeframe (M1, M5, M15, H1, H4, D1)")
+    data: List[Dict[str, Any]] = Field(..., description="Liste des bougies OHLCV au format: [{'time': timestamp, 'open': float, 'high': float, 'low': float, 'close': float, 'tick_volume': int}, ...]")
+
+@app.post("/mt5/history-upload")
+async def upload_mt5_history(request: MT5HistoryUploadRequest):
+    """
+    Endpoint pour recevoir les données historiques depuis MT5 (bridge).
+    Les données sont stockées en cache et utilisées par le système ML avancé.
+    
+    Args:
+        request: Requête contenant le symbole, timeframe et les données OHLCV
+        
+    Returns:
+        dict: Confirmation de réception avec nombre de bougies stockées
+    """
+    try:
+        if not request.symbol or not isinstance(request.symbol, str):
+            raise HTTPException(status_code=400, detail="Le symbole est requis et doit être une chaîne de caractères")
+        
+        if not request.data or not isinstance(request.data, list):
+            raise HTTPException(status_code=400, detail="La liste de données est requise")
+        
+        if len(request.data) == 0:
+            raise HTTPException(status_code=400, detail="La liste de données ne peut pas être vide")
+        
+        # Valider le timeframe
+        valid_timeframes = ["M1", "M5", "M15", "M30", "H1", "H4", "D1"]
+        if request.timeframe not in valid_timeframes:
+            raise HTTPException(status_code=400, detail=f"Timeframe invalide. Valeurs acceptées: {', '.join(valid_timeframes)}")
+        
+        # Convertir les données en DataFrame
+        try:
+            df = pd.DataFrame(request.data)
+            
+            # Vérifier les colonnes requises
+            required_cols = ['time', 'open', 'high', 'low', 'close']
+            missing_cols = [col for col in required_cols if col not in df.columns]
+            if missing_cols:
+                raise HTTPException(status_code=400, detail=f"Colonnes manquantes: {', '.join(missing_cols)}")
+            
+            # Convertir le timestamp en datetime
+            if df['time'].dtype == 'int64' or df['time'].dtype == 'float64':
+                # Timestamp Unix (secondes)
+                df['time'] = pd.to_datetime(df['time'], unit='s')
+            else:
+                df['time'] = pd.to_datetime(df['time'])
+            
+            # Trier par temps (plus ancien au plus récent)
+            df = df.sort_values('time').reset_index(drop=True)
+            
+            # Stocker dans le cache
+            cache_key = f"{request.symbol}_{request.timeframe}"
+            mt5_uploaded_history_cache[cache_key] = {
+                "data": df,
+                "timestamp": datetime.now(),
+                "symbol": request.symbol,
+                "timeframe": request.timeframe,
+                "count": len(df)
+            }
+            
+            logger.info(f"✅ Données historiques uploadées depuis MT5: {len(df)} bougies pour {request.symbol} {request.timeframe}")
+            
+            return {
+                "status": "success",
+                "symbol": request.symbol,
+                "timeframe": request.timeframe,
+                "bars_received": len(df),
+                "cache_key": cache_key,
+                "message": f"{len(df)} bougies stockées en cache pour {request.symbol} {request.timeframe}"
+            }
+            
+        except Exception as e:
+            logger.error(f"Erreur lors du traitement des données uploadées: {e}", exc_info=True)
+            raise HTTPException(status_code=400, detail=f"Erreur lors du traitement des données: {str(e)}")
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Erreur dans /mt5/history-upload: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Erreur lors de l'upload des données historiques: {str(e)}")
 
 @app.post("/predictions/validate")
 async def validate_prediction(request: PredictionValidationRequest):
