@@ -304,49 +304,60 @@ logger.info(f"Deriv API WebSocket disponible (app_id: {DERIV_APP_ID})")
 alphavantage_request_count = 0
 ALPHAVANTAGE_DAILY_LIMIT = 25
 
-# Tentative d'importation des modules backend (optionnel)
+# Indicateur global de disponibilité du backend ML
+BACKEND_AVAILABLE = False
+
+# Tentative d'importation des modules backend (optionnel, mais non bloquant pour l'API)
+sys.path.insert(0, str(Path(__file__).parent / "backend"))
+
+# 1) Prédicteurs avancés (RandomForest, etc.) - facultatifs pour Render
 try:
-    sys.path.insert(0, str(Path(__file__).parent / "backend"))
     from advanced_ml_predictor import AdvancedMLPredictor
     from spike_predictor import AdvancedSpikePredictor
     from backend.mt5_connector import get_ohlc as get_historical_data
-    # Router adaptatif multi-actifs (XGBoost par catégorie)
-    try:
-        # Importer directement depuis le fichier pour éviter le chargement de backend.__init__.py
-        import importlib.util
-        adaptive_predict_path = Path(__file__).parent / "backend" / "adaptive_predict.py"
-        if adaptive_predict_path.exists():
-            spec = importlib.util.spec_from_file_location("adaptive_predict", adaptive_predict_path)
-            adaptive_predict_module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(adaptive_predict_module)  # type: ignore
-            predict_adaptive = adaptive_predict_module.predict_adaptive
-            get_symbol_category = adaptive_predict_module.get_symbol_category
-            ADAPTIVE_PREDICT_AVAILABLE = True
-            logger.info("Module adaptive_predict chargé directement (modèles multi-actifs)")
-        else:
-            raise ImportError(f"Fichier adaptive_predict.py non trouvé: {adaptive_predict_path}")
-    except Exception as e:
-        predict_adaptive = None  # type: ignore
-        get_symbol_category = None  # type: ignore
-        ADAPTIVE_PREDICT_AVAILABLE = False
-        logger.warning(f"Module adaptive_predict non disponible: {e}")
-    # Import du détecteur de spikes amélioré
-    try:
-        from backend.spike_detector import predict_spike_ml, detect_spikes, get_realtime_spike_analysis
-        SPIKE_DETECTOR_AVAILABLE = True
-        logger.info("Module spike_detector disponible")
-    except ImportError:
-        SPIKE_DETECTOR_AVAILABLE = False
-        logger.warning("Module spike_detector non disponible")
-    BACKEND_AVAILABLE = True
-    logger.info("Modules backend disponibles")
+    logger.info("Prédicteurs avancés backend importés avec succès")
 except ImportError as e:
-    BACKEND_AVAILABLE = False
-    SPIKE_DETECTOR_AVAILABLE = False
-    ADAPTIVE_PREDICT_AVAILABLE = False
+    AdvancedMLPredictor = None  # type: ignore
+    AdvancedSpikePredictor = None  # type: ignore
+    get_historical_data = None  # type: ignore
+    logger.warning(f"Prédicteurs avancés non disponibles (ceci est non bloquant pour Render): {e}")
+
+# 2) Router adaptatif multi‑actifs (XGBoost) chargé directement depuis backend/adaptive_predict.py
+try:
+    import importlib.util
+    adaptive_predict_path = Path(__file__).parent / "backend" / "adaptive_predict.py"
+    if adaptive_predict_path.exists():
+        spec = importlib.util.spec_from_file_location("adaptive_predict", adaptive_predict_path)
+        adaptive_predict_module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(adaptive_predict_module)  # type: ignore
+        predict_adaptive = adaptive_predict_module.predict_adaptive
+        get_symbol_category = adaptive_predict_module.get_symbol_category
+        ADAPTIVE_PREDICT_AVAILABLE = True
+        logger.info("Module adaptive_predict chargé directement (modèles multi-actifs)")
+    else:
+        raise ImportError(f"Fichier adaptive_predict.py non trouvé: {adaptive_predict_path}")
+except Exception as e:
     predict_adaptive = None  # type: ignore
     get_symbol_category = None  # type: ignore
-    logger.warning(f"Modules backend non disponibles: {e}")
+    ADAPTIVE_PREDICT_AVAILABLE = False
+    logger.warning(f"Module adaptive_predict non disponible: {e}")
+
+# 3) Détecteur de spikes ML (facultatif)
+try:
+    from backend.spike_detector import predict_spike_ml, detect_spikes, get_realtime_spike_analysis
+    SPIKE_DETECTOR_AVAILABLE = True
+    logger.info("Module spike_detector disponible")
+except ImportError as e:
+    SPIKE_DETECTOR_AVAILABLE = False
+    logger.warning(f"Module spike_detector non disponible: {e}")
+
+# Le backend ML est considéré comme disponible si au moins l'un des modules clés est prêt
+if ADAPTIVE_PREDICT_AVAILABLE or SPIKE_DETECTOR_AVAILABLE:
+    BACKEND_AVAILABLE = True
+    logger.info("Modules backend disponibles (BACKEND_AVAILABLE = True)")
+else:
+    BACKEND_AVAILABLE = False
+    logger.warning("Aucun module backend ML disponible (BACKEND_AVAILABLE = False)")
 
 # Import du détecteur avancé depuis ai_server_improvements
 try:
