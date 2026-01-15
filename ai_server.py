@@ -618,6 +618,102 @@ for directory in [DATA_DIR, MODELS_DIR]:
 prediction_cache = {}
 last_updated = {}
 
+# ===== SYSTÈME DE DÉTECTION DE MOUVEMENT EN TEMPS RÉEL =====
+# Suivi des prix pour détecter les mouvements haussiers/baissiers en temps réel
+realtime_price_history: Dict[str, List[Dict[str, float]]] = {}  # {symbol: [{"price": float, "timestamp": float}]}
+MAX_PRICE_HISTORY = 10  # Garder les 10 derniers prix
+MIN_PRICE_CHANGE_PERCENT = 0.05  # 0.05% de changement minimum pour détecter un mouvement
+REALTIME_MOVEMENT_WINDOW = 30  # Fenêtre de 30 secondes pour détecter un mouvement
+
+def detect_realtime_movement(symbol: str, current_price: float) -> Dict[str, Any]:
+    """
+    Détecte les mouvements de prix en temps réel (haussier/baissier)
+    
+    Args:
+        symbol: Symbole du marché
+        current_price: Prix actuel (mid_price)
+        
+    Returns:
+        Dict avec 'direction' ('up', 'down', 'neutral'), 'strength' (0-1), 'price_change_percent'
+    """
+    current_time = time.time()
+    
+    # Initialiser l'historique si nécessaire
+    if symbol not in realtime_price_history:
+        realtime_price_history[symbol] = []
+    
+    # Ajouter le prix actuel
+    realtime_price_history[symbol].append({
+        "price": current_price,
+        "timestamp": current_time
+    })
+    
+    # Garder seulement les prix récents (dernières 30 secondes)
+    cutoff_time = current_time - REALTIME_MOVEMENT_WINDOW
+    realtime_price_history[symbol] = [
+        p for p in realtime_price_history[symbol] 
+        if p["timestamp"] >= cutoff_time
+    ]
+    
+    # Limiter le nombre d'entrées
+    if len(realtime_price_history[symbol]) > MAX_PRICE_HISTORY:
+        realtime_price_history[symbol] = realtime_price_history[symbol][-MAX_PRICE_HISTORY:]
+    
+    history = realtime_price_history[symbol]
+    
+    # Besoin d'au moins 2 prix pour détecter un mouvement
+    if len(history) < 2:
+        return {
+            "direction": "neutral",
+            "strength": 0.0,
+            "price_change_percent": 0.0,
+            "trend_consistent": False
+        }
+    
+    # Calculer le changement de prix depuis le premier prix de la fenêtre
+    first_price = history[0]["price"]
+    price_change = current_price - first_price
+    price_change_percent = (price_change / first_price * 100) if first_price > 0 else 0.0
+    
+    # Calculer la tendance (combien de mouvements sont dans la même direction)
+    up_moves = 0
+    down_moves = 0
+    for i in range(1, len(history)):
+        if history[i]["price"] > history[i-1]["price"]:
+            up_moves += 1
+        elif history[i]["price"] < history[i-1]["price"]:
+            down_moves += 1
+    
+    # Déterminer la direction
+    if abs(price_change_percent) >= MIN_PRICE_CHANGE_PERCENT:
+        if price_change_percent > 0:
+            direction = "up"
+            strength = min(abs(price_change_percent) / (MIN_PRICE_CHANGE_PERCENT * 2), 1.0)
+        else:
+            direction = "down"
+            strength = min(abs(price_change_percent) / (MIN_PRICE_CHANGE_PERCENT * 2), 1.0)
+    else:
+        direction = "neutral"
+        strength = 0.0
+    
+    # Vérifier la cohérence de la tendance (au moins 60% des mouvements dans la même direction)
+    total_moves = up_moves + down_moves
+    trend_consistent = False
+    if total_moves > 0:
+        if direction == "up" and up_moves / total_moves >= 0.6:
+            trend_consistent = True
+        elif direction == "down" and down_moves / total_moves >= 0.6:
+            trend_consistent = True
+    
+    return {
+        "direction": direction,
+        "strength": strength,
+        "price_change_percent": price_change_percent,
+        "trend_consistent": trend_consistent,
+        "up_moves": up_moves,
+        "down_moves": down_moves
+    }
+
 # ===== CACHE POUR DONNÉES HISTORIQUES UPLOADÉES DEPUIS MT5 =====
 # Stockage des données historiques envoyées par MT5 via le bridge
 # Format: {f"{symbol}_{timeframe}": {"data": DataFrame, "timestamp": datetime}}
@@ -3941,15 +4037,37 @@ async def decision(request: DecisionRequest):
         cache_key = f"{request.symbol}"
         current_time = time.time()
         
+        # Détection de mouvement en temps réel AVANT de vérifier le cache
+        mid_price = (request.bid + request.ask) / 2
+        realtime_movement = detect_realtime_movement(request.symbol, mid_price)
+        
         # Vérifier le cache mais avec une durée réduite (5 secondes) pour permettre des mises à jour fréquentes
         CACHE_DURATION_SHORT = 5  # 5 secondes de cache pour permettre des mises à jour rapides
+        CACHE_DURATION_VERY_SHORT = 1  # 1 seconde si mouvement détecté
+        
+        # Si mouvement haussier détecté, réduire drastiquement le cache pour être plus réactif
+        cache_duration = CACHE_DURATION_VERY_SHORT if (
+            realtime_movement["direction"] == "up" and 
+            realtime_movement["strength"] > 0.3 and
+            realtime_movement["trend_consistent"]
+        ) else CACHE_DURATION_SHORT
         
         if cache_key in prediction_cache and \
-           (current_time - last_updated.get(cache_key, 0)) < CACHE_DURATION_SHORT:
+           (current_time - last_updated.get(cache_key, 0)) < cache_duration:
             cached = prediction_cache[cache_key]
-            logger.debug(f"Retour depuis cache pour {request.symbol} (cache: {current_time - last_updated.get(cache_key, 0):.1f}s)")
-            # Vérifier que la décision en cache n'est pas "hold" par défaut
-            if cached.get("action") != "hold" or cached.get("confidence", 0) > 0.5:
+            cache_age = current_time - last_updated.get(cache_key, 0)
+            logger.debug(f"Retour depuis cache pour {request.symbol} (cache: {cache_age:.1f}s)")
+            
+            # Si mouvement haussier détecté et cache = "hold", ignorer le cache immédiatement
+            if realtime_movement["direction"] == "up" and realtime_movement["strength"] > 0.3:
+                if cached.get("action") == "hold":
+                    logger.info(f"🚀 Mouvement haussier détecté ({realtime_movement['price_change_percent']:+.3f}%) - Ignorer cache HOLD et recalculer")
+                    # Ne pas retourner le cache, continuer le calcul
+                elif cached.get("action") != "hold" and cached.get("confidence", 0) > 0.5:
+                    # Cache valide avec action non-hold, retourner
+                    return DecisionResponse(**cached)
+            elif cached.get("action") != "hold" or cached.get("confidence", 0) > 0.5:
+                # Cache valide normalement
                 return DecisionResponse(**cached)
             else:
                 # Si cache = "hold" avec faible confiance, recalculer
@@ -3986,6 +4104,18 @@ async def decision(request: DecisionRequest):
                             reason_parts.append(f"Facteurs: {', '.join(factors_detail)}")
                         
                         reason = " | ".join(reason_parts)
+                        
+                        # BONUS TEMPS RÉEL: Ajuster la confiance si mouvement haussier détecté
+                        if realtime_movement["direction"] == "up" and realtime_movement["strength"] > 0.3:
+                            if action == "buy":
+                                confidence = min(confidence + 0.10, 0.98)  # +10% si BUY et mouvement haussier
+                                reason_parts.append(f"RealtimeUp:+{realtime_movement['price_change_percent']:+.2f}%")
+                            elif action == "hold" and realtime_movement["trend_consistent"]:
+                                # Forcer BUY si mouvement haussier fort et scoring avancé = HOLD
+                                action = "buy"
+                                confidence = 0.60 + realtime_movement["strength"] * 0.20
+                                reason_parts.append(f"RealtimeForceBUY:{realtime_movement['price_change_percent']:+.2f}%")
+                                logger.info(f"🚀 Scoring avancé: HOLD → BUY (mouvement haussier temps réel fort)")
                         
                         logger.info(f"✅ Scoring avancé utilisé pour {request.symbol}: {action.upper()} "
                                   f"({confidence:.1%}) - {entry_data['reason']}")
@@ -4030,7 +4160,7 @@ async def decision(request: DecisionRequest):
         ema_slow_m1 = request.ema_slow_m1
         bid = request.bid
         ask = request.ask
-        mid_price = (bid + ask) / 2
+        # mid_price déjà calculé plus haut pour la détection temps réel
         
         # Si le scoring avancé n'a pas été utilisé, utiliser la logique standard
         if not use_advanced_scoring:
@@ -4398,29 +4528,52 @@ async def decision(request: DecisionRequest):
         # 6. Calculer la confiance finale avec TOUS les bonus
         # NOUVEAU: Si au moins 3 timeframes sont alignés, permettre une action même avec score faible
         min_tfs_for_signal = 3
+        
+        # BONUS TEMPS RÉEL: Si mouvement haussier détecté en temps réel, favoriser BUY
+        realtime_bonus = 0.0
+        if realtime_movement["direction"] == "up" and realtime_movement["strength"] > 0.3:
+            if realtime_movement["trend_consistent"]:
+                realtime_bonus = 0.15  # +15% si mouvement haussier cohérent
+                components.append(f"RealtimeUp:{realtime_movement['price_change_percent']:+.2f}%")
+                logger.info(f"📈 Mouvement haussier temps réel détecté: {realtime_movement['price_change_percent']:+.3f}% (force: {realtime_movement['strength']:.1%})")
+            else:
+                realtime_bonus = 0.08  # +8% si mouvement moins cohérent
+                components.append(f"RealtimeUpWeak:{realtime_movement['price_change_percent']:+.2f}%")
+        elif realtime_movement["direction"] == "down" and realtime_movement["strength"] > 0.3:
+            if realtime_movement["trend_consistent"]:
+                realtime_bonus = -0.10  # -10% si mouvement baissier cohérent
+                components.append(f"RealtimeDown:{realtime_movement['price_change_percent']:+.2f}%")
+        
         if bullish_tfs >= min_tfs_for_signal and direction_score > -HOLD_THRESHOLD:
             # Au moins 3 TFs haussiers -> signal BUY même si score faible
             action = "buy"
-            confidence = base_confidence + long_term_bonus + long_term_alignment_bonus + medium_term_bonus + alignment_bonus
+            confidence = base_confidence + long_term_bonus + long_term_alignment_bonus + medium_term_bonus + alignment_bonus + realtime_bonus
             # Confiance minimale si au moins 3 TFs alignés
             if bullish_tfs >= 3:
                 confidence = max(confidence, 0.50)  # Minimum 50% si 3+ TFs alignés
         elif bearish_tfs >= min_tfs_for_signal and direction_score < HOLD_THRESHOLD:
             # Au moins 3 TFs baissiers -> signal SELL même si score faible
             action = "sell"
-            confidence = base_confidence + long_term_bonus + long_term_alignment_bonus + medium_term_bonus + alignment_bonus
+            confidence = base_confidence + long_term_bonus + long_term_alignment_bonus + medium_term_bonus + alignment_bonus + realtime_bonus
             # Confiance minimale si au moins 3 TFs alignés
             if bearish_tfs >= 3:
                 confidence = max(confidence, 0.50)  # Minimum 50% si 3+ TFs alignés
         elif direction_score > HOLD_THRESHOLD:
             action = "buy"
-            confidence = base_confidence + long_term_bonus + long_term_alignment_bonus + medium_term_bonus + alignment_bonus
+            confidence = base_confidence + long_term_bonus + long_term_alignment_bonus + medium_term_bonus + alignment_bonus + realtime_bonus
         elif direction_score < -HOLD_THRESHOLD:
             action = "sell"
-            confidence = base_confidence + long_term_bonus + long_term_alignment_bonus + medium_term_bonus + alignment_bonus
+            confidence = base_confidence + long_term_bonus + long_term_alignment_bonus + medium_term_bonus + alignment_bonus + realtime_bonus
         else:
-            action = "hold"
-            confidence = MIN_CONF * 0.5
+            # NOUVEAU: Si mouvement haussier temps réel fort détecté, forcer BUY même si score faible
+            if realtime_movement["direction"] == "up" and realtime_movement["strength"] > 0.5 and realtime_movement["trend_consistent"]:
+                action = "buy"
+                confidence = 0.55 + realtime_bonus  # Confiance minimale de 55% pour mouvement temps réel fort
+                components.append("RealtimeForceBUY")
+                logger.info(f"🚀 FORCE BUY: Mouvement haussier temps réel fort détecté ({realtime_movement['price_change_percent']:+.3f}%)")
+            else:
+                action = "hold"
+                confidence = MIN_CONF * 0.5
         
         # 7. CONFIANCE MINIMALE GARANTIE pour signaux valides avec H1 aligné
         # Si H1 est aligné, c'est déjà un signal valide = confiance minimale 0.60 (60%)
