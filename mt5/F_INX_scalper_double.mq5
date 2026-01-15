@@ -36,26 +36,40 @@ input int    MinPositionLifetimeSec = 5;    // Délai minimum avant modification
 
 input group "--- AI AGENT ---"
 input bool   UseAI_Agent        = true;    // Activer l'agent IA (via serveur externe)
-input string AI_ServerURL       = "http://127.0.0.1:8000/decision"; // URL serveur IA
+input string AI_ServerURL       = "https://kolatradebot.onrender.com/decision"; // URL serveur IA
 input bool   UseAdvancedDecisionGemma = false; // Utiliser endpoint decisionGemma (Gemma+Gemini) avec analyse visuelle
-input int    AI_Timeout_ms       = 800;     // Timeout WebRequest en millisecondes
+input int    AI_Timeout_ms       = 3000;     // Timeout WebRequest en millisecondes (augmenté pour API distante)
 input double AI_MinConfidence    = 0.60;    // Confiance minimale IA pour trader (60% - ajusté avec calcul intelligent)
 // NOTE: Le serveur IA garantit maintenant 60% minimum si H1 aligné, 70% si H1+H4/D1
 // Pour Boom/Crash, le seuil est automatiquement abaissé à 45% dans le code
 // pour les tendances fortes (H4/D1 alignés). Le serveur ajoute automatiquement
 // des bonus (+25% pour H4+D1 alignés, +10-20% pour alignement multi-TF)
-input int    AI_UpdateInterval   = 5;      // Intervalle de mise à jour IA (secondes)
-input string AI_AnalysisURL    = "http://127.0.0.1:8000/analysis";  // URL base pour l'analyse complète (structure H1, etc.)
+input int    AI_UpdateInterval   = 3;      // Intervalle de mise à jour IA (secondes) - plus réactif
+input string AI_AnalysisURL    = "https://kolatradebot.onrender.com/analysis";  // URL base pour l'analyse complète (structure H1, etc.)
 input int    AI_AnalysisIntervalSec = 60;  // Fréquence de rafraîchissement de l'analyse (secondes)
-input string AI_TimeWindowsURLBase = "http://127.0.0.1:8000"; // Racine API pour /time_windows
-input string TrendAPIURL = "http://127.0.0.1:8000/trend"; // URL API de tendance
+input string AI_TimeWindowsURLBase = "https://kolatradebot.onrender.com"; // Racine API pour /time_windows
+input string TrendAPIURL = "https://kolatradebot.onrender.com/trend"; // URL API de tendance
 input int    MinStabilitySeconds = 3;   // Délai minimum de stabilité avant exécution (secondes) - RÉDUIT pour exécution immédiate
 
 input group "--- DASHBOARD ET ANALYSE COHÉRENTE ---"
-input string AI_CoherentAnalysisURL = "http://127.0.0.1:8000/coherent-analysis"; // URL pour l'analyse cohérente
-input string AI_DashboardGraphsURL = "http://127.0.0.1:8000/dashboard/graphs";    // URL pour les graphiques du dashboard
-input int    AI_CoherentAnalysisInterval = 300; // Intervalle de mise à jour de l'analyse cohérente (secondes)
+input string AI_CoherentAnalysisURL = "https://kolatradebot.onrender.com/coherent-analysis"; // URL pour l'analyse cohérente
+input string AI_DashboardGraphsURL = "https://kolatradebot.onrender.com/dashboard/graphs";    // URL pour les graphiques du dashboard
+input int    AI_CoherentAnalysisInterval = 600; // Intervalle de mise à jour de l'analyse cohérente (secondes, allégé)
 input bool   ShowCoherentAnalysis = true; // Afficher l'analyse cohérente sur le graphique
+
+input group "--- PRÉDICTIONS TEMPS RÉEL ---"
+input bool   ShowPredictionsPanel = true;     // Afficher les prédictions dans le cadran d'information
+input string PredictionsRealtimeURL = "https://kolatradebot.onrender.com/predictions/realtime"; // Endpoint prédictions temps réel
+input string PredictionsValidateURL = "https://kolatradebot.onrender.com/predictions/validate"; // Endpoint validation prédictions
+input int    PredictionsUpdateInterval = 20;  // Fréquence mise à jour prédictions (secondes, pour alléger la charge)
+input bool   ValidatePredictions = true;      // Envoyer données réelles pour validation
+
+input group "--- NOTIFICATIONS VONAGE ---"
+input bool   EnableVonageNotifications = true; // Activer notifications Vonage SMS
+input string NotificationAPIURL = "https://kolatradebot.onrender.com/notifications/send"; // Endpoint notifications
+input bool   SendTradeSignals = true;         // Envoyer signaux de trade par SMS
+input bool   SendPredictionSummary = true;   // Envoyer résumé prédictions (toutes les heures)
+input int    PredictionSummaryInterval = 3600; // Intervalle résumé prédictions (secondes)
 
 input group "--- ÉLÉMENTS GRAPHIQUES ---"
 input bool   DrawAIZones         = true;    // Dessiner les zones BUY/SELL de l'IA
@@ -89,7 +103,7 @@ input int    RSI_Period          = 14;      // Période RSI
 input int    ATR_Period          = 14;      // Période ATR
 input int    Fractal_Period      = 5;       // Période Fractal (pour zones de mouvement)
 input bool   ShowLongTrendEMA    = true;    // Afficher EMA 50, 100, 200 sur le graphique (courbes)
-input bool   UseTrendAPIAnalysis = true;    // Utiliser l'analyse de tendance API pour affiner les décisions
+input bool   UseTrendAPIAnalysis = false;   // (DÉSACTIVÉ PAR DÉFAUT) Ne plus utiliser le serveur trend_api
 input double TrendAPIMinConfidence = 70.0;  // Confiance minimum API pour validation (70%)
 input bool   TradeOnlyInTrend    = true;    // Trader uniquement en tendance (éviter corrections et ranges)
 
@@ -157,6 +171,19 @@ struct CoherentAnalysisData {
 
 static CoherentAnalysisData g_coherentAnalysis; // Données d'analyse cohérente
 
+// Prédictions temps réel
+struct PredictionData {
+   double predictedPrices[];  // Prix prédits
+   double accuracyScore;      // Score de précision (0-1)
+   int validationCount;       // Nombre de validations
+   string reliability;        // "HIGH", "MEDIUM", "LOW"
+   datetime lastUpdate;       // Dernière mise à jour
+   bool isValid;              // Données valides
+   double currentPrice;       // Prix actuel au moment de la prédiction
+};
+
+static PredictionData g_predictionData; // Données de prédiction temps réel
+
 // Zones IA
 static double   g_aiBuyZoneLow   = 0.0;
 static double   g_aiBuyZoneHigh  = 0.0;
@@ -164,7 +191,7 @@ static double   g_aiSellZoneLow  = 0.0;
 static double   g_aiSellZoneHigh = 0.0;
 
 // Prédiction de prix (200 bougies)
-static double   g_pricePrediction[];  // Tableau des prix prédits (500 bougies futures)
+static double   g_pricePrediction[];  // Tableau des prix prédits (500 bougies futures) - MOYENNE MULTI-TIMEFRAME
 static double   g_priceHistory[];     // Tableau des prix historiques (200 bougies passées)
 static datetime g_predictionStartTime = 0;  // Temps de début de la prédiction
 static bool     g_predictionValid = false;  // La prédiction est-elle valide ?
@@ -172,6 +199,21 @@ static int      g_predictionBars = 500;     // Nombre de bougies futures à pré
 static int      g_historyBars = 200;        // Nombre de bougies historiques
 static datetime g_lastPredictionUpdate = 0; // Dernière mise à jour de la prédiction
 const int PREDICTION_UPDATE_INTERVAL = 300; // Mise à jour toutes les 5 minutes (300 secondes)
+
+// Prédictions multi-timeframes pour calcul de moyenne
+static double   g_predictionM1[];     // Prédiction M1
+static double   g_predictionM15[];    // Prédiction M15
+static double   g_predictionM30[];    // Prédiction M30
+static double   g_predictionH1[];     // Prédiction H1
+static bool     g_predictionM1Valid = false;
+static bool     g_predictionM15Valid = false;
+static bool     g_predictionM30Valid = false;
+static bool     g_predictionH1Valid = false;
+
+// Prédiction accuracy pour auto-exécution avec lettres
+static double   g_predictionAccuracy = 0.0;  // Score de précision de la prédiction (0-1)
+static datetime g_lastPredictionAccuracyUpdate = 0; // Dernière mise à jour de l'accuracy
+const int PREDICTION_ACCURACY_UPDATE_INTERVAL = 60; // Mise à jour toutes les 60 secondes
 
 // Suivi des positions
 struct PositionTracker {
@@ -298,11 +340,21 @@ bool IsValidTrendFollowingEntry(ENUM_ORDER_TYPE orderType, double &entryConfiden
 bool CheckEMARebound(ENUM_ORDER_TYPE orderType, double &reboundStrength);
 bool CheckFractalRebound(ENUM_ORDER_TYPE orderType, double &reboundStrength);
 void UpdatePricePrediction();
+bool GetPredictionForTimeframe(string timeframe, double &prediction[]); // NOUVEAU: Obtenir prédiction pour un timeframe
 void DrawPricePrediction();
 void DetectReversalPoints(int &buyEntries[], int &sellEntries[]);
 void UsePredictionForCurrentTrades();
+void UpdatePredictionAccuracy(); // NOUVEAU: Mettre à jour l'accuracy de la prédiction
+double GetPredictionAccuracy(); // NOUVEAU: Obtenir l'accuracy de la prédiction
 void DetectAndDrawCorrectionZones();
 void PlaceLimitOrderOnCorrection();
+
+// Dashboard / Analyse cohérente / Prédictions temps réel (définies plus bas)
+void UpdateCoherentAnalysis(string symbol);
+void DisplayCoherentAnalysis();
+void UpdateRealtimePredictions();
+void DisplayPredictionsPanel();
+void ValidatePredictionWithRealtimeData();
 
 // Nouvelles fonctions pour amélioration du robot
 enum MARKET_STATE
@@ -325,6 +377,8 @@ void DrawEnhancedPredictionTrajectory();
 bool DetectBoomCrashSpikeOpportunity(ENUM_ORDER_TYPE &orderType, double &confidence);
 bool CheckSpikeEntryWithEMAsAndFractals(ENUM_ORDER_TYPE orderType, double &entryConfidence);
 void SendMT5Notification(string message, bool isAlert = true);
+void SendPredictionSummaryViaAPI();
+void SendTradingSignalViaVonage(ENUM_ORDER_TYPE orderType, double price, double confidence);
 
 int GetSpikeIndex(const string sym)
 {
@@ -658,6 +712,13 @@ void OnTick()
       g_lastPredictionUpdate = TimeCurrent();
    }
    
+   // NOUVEAU: Mettre à jour l'accuracy de la prédiction pour auto-exécution avec lettres
+   if(UseAI_Agent && (TimeCurrent() - g_lastPredictionAccuracyUpdate) >= PREDICTION_ACCURACY_UPDATE_INTERVAL)
+   {
+      UpdatePredictionAccuracy();
+      g_lastPredictionAccuracyUpdate = TimeCurrent();
+   }
+   
    // Dessiner la prédiction de prix (optimisé - seulement toutes les 10 secondes pour éviter la surcharge)
    static datetime lastPredictionDraw = 0;
    if(DrawAIZones && g_predictionValid && (TimeCurrent() - lastPredictionDraw) >= 10)
@@ -691,6 +752,29 @@ void OnTick()
       DisplayCoherentAnalysis();
       lastCoherentDisplay = TimeCurrent();
    }
+   
+   // Envoyer résumé des prédictions via Vonage (toutes les heures)
+   static datetime lastPredictionSummary = 0;
+   if(SendPredictionSummary && EnableVonageNotifications && 
+      (TimeCurrent() - lastPredictionSummary) >= PredictionSummaryInterval)
+   {
+      SendPredictionSummaryViaAPI();
+      lastPredictionSummary = TimeCurrent();
+   }
+   
+   // Mettre à jour les prédictions en temps réel
+   UpdateRealtimePredictions();
+   
+   // Afficher les prédictions dans le cadran d'information
+   static datetime lastPredictionsDisplay = 0;
+   if(ShowPredictionsPanel && (TimeCurrent() - lastPredictionsDisplay) >= 10)
+   {
+      DisplayPredictionsPanel();
+      lastPredictionsDisplay = TimeCurrent();
+   }
+   
+   // Valider les prédictions avec les données réelles
+   ValidatePredictionWithRealtimeData();
    
    // OPTIMISATION MAXIMALE: Réduire drastiquement la fréquence et les calculs
    static datetime lastDrawUpdate = 0;
@@ -1473,14 +1557,14 @@ void ExtractAIZonesFromResponse(string resp)
 }
 
 //+------------------------------------------------------------------+
-//| Mettre à jour la prédiction de prix depuis le serveur IA         |
+//| Fonction helper pour obtenir une prédiction sur un timeframe    |
 //+------------------------------------------------------------------+
-void UpdatePricePrediction()
+bool GetPredictionForTimeframe(string timeframe, double &prediction[])
 {
    if(!UseAI_Agent || StringLen(AI_ServerURL) == 0)
-      return;
+      return false;
    
-   // Construire l'URL pour la prédiction (ajouter /prediction à l'URL de base)
+   // Construire l'URL pour la prédiction
    string predictionURL = AI_ServerURL;
    int lastSlash = StringFind(predictionURL, "/", StringFind(predictionURL, "://") + 3);
    if(lastSlash > 0)
@@ -1498,28 +1582,25 @@ void UpdatePricePrediction()
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double midPrice = (bid + ask) / 2.0;
    
-   // Récupérer les 200 dernières bougies historiques depuis MT5
+   // Déterminer la période MT5 selon le timeframe
+   ENUM_TIMEFRAMES period = PERIOD_M1;
+   if(timeframe == "M15") period = PERIOD_M15;
+   else if(timeframe == "M30") period = PERIOD_M30;
+   else if(timeframe == "H1") period = PERIOD_H1;
+   
+   // Récupérer les bougies historiques selon le timeframe
    double closeHistory[];
    ArraySetAsSeries(closeHistory, true);
-   int historyCopied = CopyClose(_Symbol, PERIOD_M1, 1, g_historyBars, closeHistory); // Commencer à 1 (bougie fermée la plus récente)
+   int historyCopied = CopyClose(_Symbol, period, 1, g_historyBars, closeHistory);
    
-   if(historyCopied < g_historyBars)
+   if(historyCopied < 10)
    {
       if(DebugMode)
-         Print("⚠️ Impossible de récupérer ", g_historyBars, " bougies historiques (reçu: ", historyCopied, ")");
-      // Utiliser ce qu'on a
-      ArrayResize(g_priceHistory, historyCopied);
-      for(int i = 0; i < historyCopied; i++)
-         g_priceHistory[i] = closeHistory[i];
-   }
-   else
-   {
-      // Stocker les données historiques
-      ArrayResize(g_priceHistory, g_historyBars);
-      ArrayCopy(g_priceHistory, closeHistory, 0, 0, g_historyBars);
+         Print("⚠️ Impossible de récupérer assez de bougies historiques pour ", timeframe, " (reçu: ", historyCopied, ")");
+      return false;
    }
    
-   // Construire le JSON pour la prédiction avec les données historiques
+   // Construire le JSON pour la prédiction
    string safeSymbol = _Symbol;
    StringReplace(safeSymbol, "\"", "\\\"");
    
@@ -1527,17 +1608,17 @@ void UpdatePricePrediction()
    payload += "\"symbol\":\"" + safeSymbol + "\"";
    payload += ",\"current_price\":" + DoubleToString(midPrice, _Digits);
    payload += ",\"bars_to_predict\":" + IntegerToString(g_predictionBars);
-   payload += ",\"history_bars\":" + IntegerToString(g_historyBars);
-   payload += ",\"timeframe\":\"M1\"";
+   payload += ",\"history_bars\":" + IntegerToString(historyCopied);
+   payload += ",\"timeframe\":\"" + timeframe + "\"";
    
-   // Ajouter les données historiques dans le payload (optionnel, le serveur peut les récupérer lui-même)
-   if(ArraySize(g_priceHistory) > 0)
+   // Ajouter les données historiques
+   if(historyCopied > 0)
    {
       payload += ",\"history\":[";
-      for(int i = 0; i < ArraySize(g_priceHistory); i++)
+      for(int i = 0; i < historyCopied; i++)
       {
          if(i > 0) payload += ",";
-         payload += DoubleToString(g_priceHistory[i], _Digits);
+         payload += DoubleToString(closeHistory[i], _Digits);
       }
       payload += "]";
    }
@@ -1553,8 +1634,8 @@ void UpdatePricePrediction()
    if(copied <= 0)
    {
       if(DebugMode)
-         Print("⚠️ Erreur conversion JSON pour prédiction");
-      return;
+         Print("⚠️ Erreur conversion JSON pour prédiction ", timeframe);
+      return false;
    }
    
    ArrayResize(data, copied - 1);
@@ -1564,24 +1645,20 @@ void UpdatePricePrediction()
    string headers = "Content-Type: application/json\r\n";
    string result_headers = "";
    
-   int res = WebRequest("POST", predictionURL, headers, AI_Timeout_ms * 2, data, result, result_headers);
+   // Limiter le temps d'attente pour ne pas bloquer MT5 trop longtemps
+   int res = WebRequest("POST", predictionURL, headers, AI_Timeout_ms, data, result, result_headers);
    
    if(res < 200 || res >= 300)
    {
       if(DebugMode)
-         Print("⚠️ Erreur prédiction prix: http=", res);
-      g_predictionValid = false;
-      return;
+         Print("⚠️ Erreur prédiction ", timeframe, ": http=", res);
+      return false;
    }
    
    // Parser la réponse JSON
    string resp = CharArrayToString(result, 0, -1, CP_UTF8);
    
-   if(DebugMode)
-      Print("📊 Réponse prédiction reçue: ", StringSubstr(resp, 0, 200));
-   
    // Extraire le tableau de prédictions
-   // Format attendu: {"prediction": [prix1, prix2, ..., prix200]}
    int predStart = StringFind(resp, "\"prediction\"");
    if(predStart < 0)
    {
@@ -1589,44 +1666,30 @@ void UpdatePricePrediction()
       if(predStart < 0)
       {
          if(DebugMode)
-            Print("⚠️ Clé 'prediction' ou 'prices' non trouvée dans la réponse");
-         g_predictionValid = false;
-         return;
+            Print("⚠️ Clé 'prediction' ou 'prices' non trouvée pour ", timeframe);
+         return false;
       }
    }
    
-   // Trouver le début du tableau
+   // Trouver le début et la fin du tableau
    int arrayStart = StringFind(resp, "[", predStart);
-   if(arrayStart < 0)
-   {
-      if(DebugMode)
-         Print("⚠️ Tableau de prédiction non trouvé");
-      g_predictionValid = false;
-      return;
-   }
-   
-   // Trouver la fin du tableau
    int arrayEnd = StringFind(resp, "]", arrayStart);
-   if(arrayEnd < 0)
+   if(arrayStart < 0 || arrayEnd < 0)
    {
       if(DebugMode)
-         Print("⚠️ Fin du tableau de prédiction non trouvée");
-      g_predictionValid = false;
-      return;
+         Print("⚠️ Tableau de prédiction non trouvé pour ", timeframe);
+      return false;
    }
    
-   // Extraire le contenu du tableau
+   // Extraire et parser les valeurs
    string arrayContent = StringSubstr(resp, arrayStart + 1, arrayEnd - arrayStart - 1);
-   
-   // Parser les valeurs
-   ArrayResize(g_pricePrediction, g_predictionBars);
-   ArrayInitialize(g_pricePrediction, 0.0);
+   ArrayResize(prediction, g_predictionBars);
+   ArrayInitialize(prediction, 0.0);
    
    int count = 0;
    int pos = 0;
    while(pos < StringLen(arrayContent) && count < g_predictionBars)
    {
-      // Trouver la prochaine valeur
       int commaPos = StringFind(arrayContent, ",", pos);
       if(commaPos < 0)
          commaPos = StringLen(arrayContent);
@@ -1637,7 +1700,7 @@ void UpdatePricePrediction()
       
       if(StringLen(valueStr) > 0)
       {
-         g_pricePrediction[count] = StringToDouble(valueStr);
+         prediction[count] = StringToDouble(valueStr);
          count++;
       }
       
@@ -1646,19 +1709,213 @@ void UpdatePricePrediction()
    
    if(count > 0)
    {
-      ArrayResize(g_pricePrediction, count);
+      ArrayResize(prediction, count);
+      return true;
+   }
+   
+   return false;
+}
+
+//+------------------------------------------------------------------+
+//| Mettre à jour la prédiction de prix depuis le serveur IA         |
+//| NOUVEAU: Prédictions multi-timeframes (M1, M15, M30, H1) avec moyenne
+//+------------------------------------------------------------------+
+void UpdatePricePrediction()
+{
+   if(!UseAI_Agent || StringLen(AI_ServerURL) == 0)
+      return;
+   
+   // Réinitialiser les flags
+   g_predictionM1Valid = false;
+   g_predictionM15Valid = false;
+   g_predictionM30Valid = false;
+   g_predictionH1Valid = false;
+   
+   // Obtenir les prédictions pour chaque timeframe
+   if(DebugMode)
+      Print("🔄 Début prédictions multi-timeframes...");
+   
+   // M1
+   if(GetPredictionForTimeframe("M1", g_predictionM1))
+   {
+      g_predictionM1Valid = true;
+      if(DebugMode)
+         Print("✅ Prédiction M1 obtenue: ", ArraySize(g_predictionM1), " bougies");
+   }
+   
+   // M15
+   if(GetPredictionForTimeframe("M15", g_predictionM15))
+   {
+      g_predictionM15Valid = true;
+      if(DebugMode)
+         Print("✅ Prédiction M15 obtenue: ", ArraySize(g_predictionM15), " bougies");
+   }
+   
+   // M30
+   if(GetPredictionForTimeframe("M30", g_predictionM30))
+   {
+      g_predictionM30Valid = true;
+      if(DebugMode)
+         Print("✅ Prédiction M30 obtenue: ", ArraySize(g_predictionM30), " bougies");
+   }
+   
+   // H1
+   if(GetPredictionForTimeframe("H1", g_predictionH1))
+   {
+      g_predictionH1Valid = true;
+      if(DebugMode)
+         Print("✅ Prédiction H1 obtenue: ", ArraySize(g_predictionH1), " bougies");
+   }
+   
+   // Calculer la moyenne des prédictions valides
+   int validCount = 0;
+   if(g_predictionM1Valid) validCount++;
+   if(g_predictionM15Valid) validCount++;
+   if(g_predictionM30Valid) validCount++;
+   if(g_predictionH1Valid) validCount++;
+   
+   if(validCount == 0)
+   {
+      if(DebugMode)
+         Print("⚠️ Aucune prédiction valide obtenue");
+      g_predictionValid = false;
+      return;
+   }
+   
+   // Trouver la longueur minimale parmi toutes les prédictions valides
+   int minLength = g_predictionBars;
+   if(g_predictionM1Valid && ArraySize(g_predictionM1) < minLength)
+      minLength = ArraySize(g_predictionM1);
+   if(g_predictionM15Valid && ArraySize(g_predictionM15) < minLength)
+      minLength = ArraySize(g_predictionM15);
+   if(g_predictionM30Valid && ArraySize(g_predictionM30) < minLength)
+      minLength = ArraySize(g_predictionM30);
+   if(g_predictionH1Valid && ArraySize(g_predictionH1) < minLength)
+      minLength = ArraySize(g_predictionH1);
+   
+   // Calculer la moyenne
+   ArrayResize(g_pricePrediction, minLength);
+   ArrayInitialize(g_pricePrediction, 0.0);
+   
+   for(int i = 0; i < minLength; i++)
+   {
+      double sum = 0.0;
+      int count = 0;
+      
+      if(g_predictionM1Valid && i < ArraySize(g_predictionM1))
+      {
+         sum += g_predictionM1[i];
+         count++;
+      }
+      if(g_predictionM15Valid && i < ArraySize(g_predictionM15))
+      {
+         sum += g_predictionM15[i];
+         count++;
+      }
+      if(g_predictionM30Valid && i < ArraySize(g_predictionM30))
+      {
+         sum += g_predictionM30[i];
+         count++;
+      }
+      if(g_predictionH1Valid && i < ArraySize(g_predictionH1))
+      {
+         sum += g_predictionH1[i];
+         count++;
+      }
+      
+      if(count > 0)
+         g_pricePrediction[i] = sum / count;
+   }
+   
+   if(minLength > 0)
+   {
       g_predictionStartTime = TimeCurrent();
       g_predictionValid = true;
       
       if(DebugMode)
-         Print("✅ Prédiction de prix mise à jour: ", count, " bougies prédites");
+         Print("✅ Prédiction finale (moyenne multi-timeframes) calculée: ", minLength, " bougies (M1:", (g_predictionM1Valid ? "✓" : "✗"), 
+               " M15:", (g_predictionM15Valid ? "✓" : "✗"), " M30:", (g_predictionM30Valid ? "✓" : "✗"), " H1:", (g_predictionH1Valid ? "✓" : "✗"), ")");
    }
    else
    {
       g_predictionValid = false;
       if(DebugMode)
-         Print("⚠️ Aucune prédiction valide extraite");
+         Print("⚠️ Aucune prédiction valide après calcul de moyenne");
    }
+}
+
+//+------------------------------------------------------------------+
+//| Mettre à jour l'accuracy de la prédiction depuis le serveur IA   |
+//| Utilisé pour auto-exécution quand lettre reçue + prediction >= 80%
+//+------------------------------------------------------------------+
+void UpdatePredictionAccuracy()
+{
+   if(!UseAI_Agent || StringLen(AI_ServerURL) == 0)
+      return;
+   
+   // Construire l'URL pour l'accuracy (ajouter /prediction/accuracy/{symbol} à l'URL de base)
+   string baseURL = AI_ServerURL;
+   int lastSlash = StringFind(baseURL, "/", StringFind(baseURL, "://") + 3);
+   if(lastSlash > 0)
+   {
+      baseURL = StringSubstr(baseURL, 0, lastSlash);
+   }
+   
+   string accuracyURL = baseURL + "/prediction/accuracy/" + _Symbol;
+   
+   // Envoyer la requête GET
+   char data[];
+   ArrayResize(data, 0); // Tableau vide pour GET
+   char result[];
+   string headers = "Accept: application/json\r\n";
+   string result_headers = "";
+   
+   int res = WebRequest("GET", accuracyURL, headers, AI_Timeout_ms, data, result, result_headers);
+   
+   if(res < 200 || res >= 300)
+   {
+      if(DebugMode)
+         Print("⚠️ Erreur récupération accuracy prédiction: http=", res);
+      return;
+   }
+   
+   // Parser la réponse JSON
+   string resp = CharArrayToString(result, 0, -1, CP_UTF8);
+   
+   if(DebugMode)
+      Print("📊 Réponse accuracy reçue: ", StringSubstr(resp, 0, 200));
+   
+   // Extraire accuracy_score
+   int accuracyPos = StringFind(resp, "\"accuracy_score\"");
+   if(accuracyPos >= 0)
+   {
+      int colon = StringFind(resp, ":", accuracyPos);
+      if(colon > 0)
+      {
+         int endPos = StringFind(resp, ",", colon);
+         if(endPos < 0) endPos = StringFind(resp, "}", colon);
+         if(endPos > colon)
+         {
+            string accuracyStr = StringSubstr(resp, colon+1, endPos-colon-1);
+            StringTrimLeft(accuracyStr);
+            StringTrimRight(accuracyStr);
+            if(accuracyStr != "null" && accuracyStr != "" && StringLen(accuracyStr) > 0)
+            {
+               g_predictionAccuracy = StringToDouble(accuracyStr);
+               if(DebugMode)
+                  Print("✅ Accuracy prédiction mise à jour: ", DoubleToString(g_predictionAccuracy * 100, 1), "%");
+            }
+         }
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Obtenir l'accuracy de la prédiction                             |
+//+------------------------------------------------------------------+
+double GetPredictionAccuracy()
+{
+   return g_predictionAccuracy;
 }
 
 //+------------------------------------------------------------------+
@@ -4134,16 +4391,30 @@ void DrawAIConfidenceAndTrendSummary()
    ObjectSetInteger(0, aiLabelName, OBJPROP_XDISTANCE, 10);
    ObjectSetInteger(0, aiLabelName, OBJPROP_YDISTANCE, 30);
    
+   // Appliquer la règle Boom/Crash pour l'AFFICHAGE:
+   // - Boom*: jamais de VENTE affichée (SELL interdit) -> afficher ATTENTE à la place
+   // - Crash*: jamais d'ACHAT affiché (BUY interdit) -> afficher ATTENTE à la place
+   bool isBoom  = (StringFind(_Symbol, "Boom")  != -1);
+   bool isCrash = (StringFind(_Symbol, "Crash") != -1);
+   
+   string displayAction = g_lastAIAction;
+   if(isBoom && displayAction == "sell")
+      displayAction = "hold";
+   if(isCrash && displayAction == "buy")
+      displayAction = "hold";
+   
    string aiText = "IA " + _Symbol + ": ";
-   if(g_lastAIAction == "buy")
+   if(displayAction == "buy")
       aiText += "ACHAT " + DoubleToString(g_lastAIConfidence * 100, 0) + "%";
-   else if(g_lastAIAction == "sell")
+   else if(displayAction == "sell")
       aiText += "VENTE " + DoubleToString(g_lastAIConfidence * 100, 0) + "%";
    else
       aiText += "ATTENTE " + DoubleToString(g_lastAIConfidence * 100, 0) + "%";
    
    ObjectSetString(0, aiLabelName, OBJPROP_TEXT, aiText);
-   ObjectSetInteger(0, aiLabelName, OBJPROP_COLOR, (g_lastAIAction == "buy") ? clrLime : (g_lastAIAction == "sell") ? clrRed : clrYellow);
+   ObjectSetInteger(0, aiLabelName, OBJPROP_COLOR,
+                    (displayAction == "buy") ? clrLime :
+                    (displayAction == "sell") ? clrRed : clrYellow);
    ObjectSetInteger(0, aiLabelName, OBJPROP_FONTSIZE, 12);
    ObjectSetString(0, aiLabelName, OBJPROP_FONT, "Arial Bold");
    
@@ -4202,19 +4473,21 @@ void DrawAIConfidenceAndTrendSummary()
    bool hasDecision = GetFinalDecision(finalDecision);
    
    // --- PANNEAU DE COHÉRENCE DÉTAILLÉE ---
+   // Déplacer en bas à droite pour éviter la superposition avec le panneau du milieu
+   
    string coherenceTitleName = "COHERENCE_TITLE_" + _Symbol;
    if(ObjectFind(0, coherenceTitleName) < 0)
       ObjectCreate(0, coherenceTitleName, OBJ_LABEL, 0, 0, 0);
    
-   ObjectSetInteger(0, coherenceTitleName, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+   ObjectSetInteger(0, coherenceTitleName, OBJPROP_CORNER, CORNER_RIGHT_LOWER);
    ObjectSetInteger(0, coherenceTitleName, OBJPROP_XDISTANCE, 10);
-   ObjectSetInteger(0, coherenceTitleName, OBJPROP_YDISTANCE, 160);
+   ObjectSetInteger(0, coherenceTitleName, OBJPROP_YDISTANCE, 120);
    ObjectSetString(0, coherenceTitleName, OBJPROP_TEXT, "📊 ANALYSE COHÉRENTE - DÉCISION FINALE");
    ObjectSetInteger(0, coherenceTitleName, OBJPROP_COLOR, clrGold);
    ObjectSetInteger(0, coherenceTitleName, OBJPROP_FONTSIZE, 11);
    ObjectSetString(0, coherenceTitleName, OBJPROP_FONT, "Arial Bold");
    
-   yOffset = 180;
+   yOffset = 100;  // Position relative depuis le bas (en bas à droite)
    
    // --- DÉCISION FINALE AVEC SCORE DE COHÉRENCE ---
    string finalDecisionName = "FINAL_DECISION_" + _Symbol;
@@ -4237,7 +4510,7 @@ void DrawAIConfidenceAndTrendSummary()
       finalColor = clrGray;
    }
    
-   ObjectSetInteger(0, finalDecisionName, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+   ObjectSetInteger(0, finalDecisionName, OBJPROP_CORNER, CORNER_RIGHT_LOWER);
    ObjectSetInteger(0, finalDecisionName, OBJPROP_XDISTANCE, 10);
    ObjectSetInteger(0, finalDecisionName, OBJPROP_YDISTANCE, yOffset);
    ObjectSetString(0, finalDecisionName, OBJPROP_TEXT, finalText);
@@ -4277,7 +4550,7 @@ void DrawAIConfidenceAndTrendSummary()
       stabilityColor = clrGray;
    }
    
-   ObjectSetInteger(0, stabilityName, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+   ObjectSetInteger(0, stabilityName, OBJPROP_CORNER, CORNER_RIGHT_LOWER);
    ObjectSetInteger(0, stabilityName, OBJPROP_XDISTANCE, 10);
    ObjectSetInteger(0, stabilityName, OBJPROP_YDISTANCE, yOffset);
    ObjectSetString(0, stabilityName, OBJPROP_TEXT, stabilityText);
@@ -4292,7 +4565,7 @@ void DrawAIConfidenceAndTrendSummary()
    if(ObjectFind(0, detailsName) < 0)
       ObjectCreate(0, detailsName, OBJ_LABEL, 0, 0, 0);
    
-   ObjectSetInteger(0, detailsName, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+   ObjectSetInteger(0, detailsName, OBJPROP_CORNER, CORNER_RIGHT_LOWER);
    ObjectSetInteger(0, detailsName, OBJPROP_XDISTANCE, 10);
    ObjectSetInteger(0, detailsName, OBJPROP_YDISTANCE, yOffset);
    ObjectSetString(0, detailsName, OBJPROP_TEXT, finalDecision.details);
@@ -5692,7 +5965,7 @@ void LookForTradingOpportunity()
             SendMT5Notification(notificationMsg, true);
             
             // Exécuter le trade immédiatement
-            ExecuteTrade(spikeOrderType);
+            ExecuteTrade(spikeOrderType, false);
             return; // Sortie immédiate - stratégie prioritaire
          }
       }
@@ -5774,7 +6047,7 @@ void LookForTradingOpportunity()
                                               finalDecision.confidence * 100);
             SendMT5Notification(decisionMsg, true);
             
-            ExecuteTrade(decisionOrderType);
+            ExecuteTrade(decisionOrderType, false);
             
             // Réinitialiser le suivi après exécution pour éviter les doublons
             g_currentDecisionStability.direction = 0;
@@ -5915,6 +6188,45 @@ void LookForTradingOpportunity()
          if(DebugMode)
             Print("⚠️ IA en mode fallback - Pas de trade (attente récupération)");
          return;
+      }
+      
+      // NOUVEAU: AUTO-EXÉCUTION QUAND LETTRE REÇUE + PRÉDICTION >= 80%
+      // Si une lettre (signal) est reçue et que la prédiction a une accuracy >= 80%, exécuter immédiatement
+      if((g_lastAIAction == "buy" || g_lastAIAction == "sell") && g_predictionAccuracy >= 0.80)
+      {
+         // Vérifier le nombre maximum de positions (5 maximum, y compris les dupliquées)
+         int totalPositions = CountAllPositionsWithMagic();
+         if(totalPositions >= 5)
+         {
+            Print("🚫 AUTO-EXÉCUTION BLOQUÉE: ", totalPositions, " positions actives (max 5) - Impossible d'ouvrir une nouvelle position");
+            return;
+         }
+         
+         ENUM_ORDER_TYPE letterOrderType = (g_lastAIAction == "buy") ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+         
+         Print("📨 LETTRE REÇUE + PRÉDICTION HAUTE: ", _Symbol, " - Direction: ", (letterOrderType == ORDER_TYPE_BUY ? "BUY" : "SELL"),
+               " | Accuracy prédiction: ", DoubleToString(g_predictionAccuracy * 100, 1), "% >= 80%",
+               " | Confiance IA: ", DoubleToString(g_lastAIConfidence * 100, 1), "%",
+               " | Positions actives: ", totalPositions, "/5");
+         
+         // Exécuter le trade immédiatement (AVANT l'alerte pour éviter les alertes non suivies)
+         bool tradeExecuted = ExecuteTradeWithLogging(letterOrderType, true); // true = mode haute confiance
+         
+         // Envoyer notification MT5 seulement si le trade a été exécuté ou tenté
+         if(tradeExecuted)
+         {
+         string letterMsg = StringFormat("📨 AUTO-EXÉCUTION: %s %s (Lettre + Prédiction %.1f%%)", 
+                                        _Symbol, (letterOrderType == ORDER_TYPE_BUY ? "BUY" : "SELL"),
+                                        g_predictionAccuracy * 100);
+         SendMT5Notification(letterMsg, true);
+         }
+         else
+         {
+            // Trade bloqué malgré les conditions - logger les raisons
+            Print("⚠️ AUTO-EXÉCUTION BLOQUÉE malgré conditions remplies - Vérifier les logs ci-dessus pour les raisons");
+         }
+         
+         return; // Sortie immédiate - auto-exécution prioritaire
       }
       
       // Si on arrive ici, l'IA a une recommandation valide avec confiance suffisante
@@ -6069,7 +6381,7 @@ void LookForTradingOpportunity()
    
    if(hasSignal)
    {
-      ExecuteTrade(signalType);
+      ExecuteTrade(signalType, false); // false = mode normal
    }
 }
 
@@ -6187,6 +6499,24 @@ int CountPositionsForSymbolMagic()
 }
 
 //+------------------------------------------------------------------+
+//| Compter toutes les positions avec le magic number (y compris dupliquées) |
+//+------------------------------------------------------------------+
+int CountAllPositionsWithMagic()
+{
+   int cnt = 0;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket > 0 && positionInfo.SelectByTicket(ticket))
+      {
+         if(positionInfo.Magic() == InpMagicNumber)
+            cnt++;
+      }
+   }
+   return cnt;
+}
+
+//+------------------------------------------------------------------+
 //| Vérifie si une position du même type existe déjà                 |
 //| NOTE: La duplication ne concerne PAS les Boom/Crash              |
 //|       Elle s'applique uniquement aux indices volatility, step index et forex |
@@ -6253,14 +6583,44 @@ double GetTotalLoss()
 //+------------------------------------------------------------------+
 //| Exécuter un trade                                                |
 //+------------------------------------------------------------------+
-void ExecuteTrade(ENUM_ORDER_TYPE orderType)
+//+------------------------------------------------------------------+
+//| Exécuter un trade avec logging détaillé                         |
+//| Retourne true si le trade a été exécuté, false sinon            |
+//+------------------------------------------------------------------+
+bool ExecuteTradeWithLogging(ENUM_ORDER_TYPE orderType, bool isHighConfidenceMode = false)
 {
+   // PROTECTION: Vérifier le nombre maximum de positions (5 maximum, y compris les dupliquées)
+   int totalPositions = CountAllPositionsWithMagic();
+   if(totalPositions >= 5)
+   {
+      Print("🚫 TRADE BLOQUÉ: ", totalPositions, " positions actives (max 5, y compris les dupliquées) - Impossible d'ouvrir une nouvelle position");
+      return false;
+   }
+   
+   // En mode haute confiance, appeler ExecuteTrade et vérifier le résultat
+   return ExecuteTrade(orderType, isHighConfidenceMode);
+}
+
+//+------------------------------------------------------------------+
+//| Exécuter un trade                                                |
+//| Retourne true si le trade a été exécuté avec succès             |
+//+------------------------------------------------------------------+
+bool ExecuteTrade(ENUM_ORDER_TYPE orderType, bool isHighConfidenceMode = false)
+{
+   // PROTECTION: Vérifier le nombre maximum de positions (5 maximum, y compris les dupliquées)
+   int totalPositions = CountAllPositionsWithMagic();
+   if(totalPositions >= 5)
+   {
+      Print("🚫 TRADE BLOQUÉ [MaxPositions]: ", totalPositions, " positions actives (max 5, y compris les dupliquées) - Impossible d'ouvrir une nouvelle position");
+      return false;
+   }
+   
    // PROTECTION: Vérifier la perte totale maximale (5$ toutes positions)
    double totalLoss = GetTotalLoss();
    if(totalLoss >= MaxTotalLoss)
    {
-      Print("🚫 TRADE BLOQUÉ: Perte totale maximale atteinte (", DoubleToString(totalLoss, 2), "$ >= ", DoubleToString(MaxTotalLoss, 2), "$) - Éviter trades perdants");
-      return;
+      Print("🚫 TRADE BLOQUÉ [MaxTotalLoss]: Perte totale maximale atteinte (", DoubleToString(totalLoss, 2), "$ >= ", DoubleToString(MaxTotalLoss, 2), "$) - Éviter trades perdants");
+      return false;
    }
    
    // PROTECTION: Bloquer SELL sur Boom (y compris Vol over Boom) et BUY sur Crash (y compris Vol over Crash)
@@ -6271,14 +6631,14 @@ void ExecuteTrade(ENUM_ORDER_TYPE orderType)
    
    if(isBoom && orderType == ORDER_TYPE_SELL)
    {
-      Print("🚫 TRADE BLOQUÉ: Impossible de trader SELL sur ", _Symbol, " (Boom = BUY uniquement pour capturer les spikes en tendance)");
-      return;
+      Print("🚫 TRADE BLOQUÉ [Boom/Crash]: Impossible de trader SELL sur ", _Symbol, " (Boom = BUY uniquement pour capturer les spikes en tendance)");
+      return false;
    }
    
    if(isCrash && orderType == ORDER_TYPE_BUY)
    {
-      Print("🚫 TRADE BLOQUÉ: Impossible de trader BUY sur ", _Symbol, " (Crash = SELL uniquement pour capturer les spikes en tendance)");
-      return;
+      Print("🚫 TRADE BLOQUÉ [Boom/Crash]: Impossible de trader BUY sur ", _Symbol, " (Crash = SELL uniquement pour capturer les spikes en tendance)");
+      return false;
    }
    
    // Vérifier le nombre maximum de symboles actifs (3 maximum)
@@ -6287,38 +6647,65 @@ void ExecuteTrade(ENUM_ORDER_TYPE orderType)
    bool isCurrentSymbolActive = (currentSymbolPositions > 0);
    
    // Si on a déjà 3 symboles actifs et que le symbole actuel n'a pas de position, bloquer
+   // En mode haute confiance, on peut permettre un 4ème symbole si la confiance est très élevée
    if(activeSymbols >= 3 && !isCurrentSymbolActive)
    {
-      Print("🚫 LIMITE SYMBOLES: ", activeSymbols, " symboles actifs (max 3) - Impossible d'ajouter ", _Symbol);
-      return;
+      if(isHighConfidenceMode && g_lastAIConfidence >= 0.95)
+      {
+         Print("⚠️ Limite symboles assouplie - Mode très haute confiance (", DoubleToString(g_lastAIConfidence * 100, 1), "%)");
+      }
+      else
+      {
+         Print("🚫 TRADE BLOQUÉ [MaxSymbols]: ", activeSymbols, " symboles actifs (max 3) - Impossible d'ajouter ", _Symbol);
+         return false;
+      }
    }
    
    // NOUVEAU: Vérifier entrée en suivant la tendance avec rebond confirmé (réduit les faux signaux)
+   // NOTE: En mode haute confiance (alerte envoyée), cette vérification peut être assouplie
    double entryConfidence = 0.0;
    string entryReason = "";
    if(!IsValidTrendFollowingEntry(orderType, entryConfidence, entryReason))
    {
-      if(DebugMode)
-         Print("🚫 TRADE BLOQUÉ: ", entryReason);
-      return;
+      Print("🚫 TRADE BLOQUÉ [IsValidTrendFollowingEntry]: ", entryReason, " | Confiance entrée: ", DoubleToString(entryConfidence * 100, 1), "%");
+      
+      // En mode haute confiance (IA >= 80% + Prédiction >= 80%), assouplir cette vérification
+      // Si l'alerte a été envoyée, c'est qu'on a une très haute confiance - permettre le trade
+      if(entryConfidence >= 0.5) // Seuil minimum acceptable même en mode haute confiance
+      {
+         Print("⚠️ Vérification assouplie en mode haute confiance - Confiance minimale acceptable (", DoubleToString(entryConfidence * 100, 1), "%)");
+      }
+      else
+      {
+         return false; // Confiance trop faible même en mode haute confiance
+      }
    }
    
    if(DebugMode)
-      Print("✅ ENTRÉE VALIDÉE: ", entryReason);
+      Print("✅ ENTRÉE VALIDÉE: ", entryReason, " | Confiance: ", DoubleToString(entryConfidence * 100, 1), "%");
    
    // NOUVEAU: Vérifier que le marché est en tendance claire (si TradeOnlyInTrend est activé)
+   // En mode haute confiance, cette vérification peut être bypassée si confiance IA très élevée
    if(TradeOnlyInTrend && !IsInClearTrend(orderType))
    {
-      if(DebugMode)
-         Print("🚫 TRADE BLOQUÉ: Marché en correction ou range (TradeOnlyInTrend activé) - Attendre tendance claire");
-      return;
+      // Si on a une très haute confiance IA (>= 90%), bypasser cette vérification
+      if(g_lastAIConfidence < 0.90)
+      {
+         Print("🚫 TRADE BLOQUÉ [TradeOnlyInTrend]: Marché en correction ou range - Attendre tendance claire | Confiance IA: ", DoubleToString(g_lastAIConfidence * 100, 1), "%");
+         return false;
+      }
+      else
+      {
+         Print("⚠️ Vérification TradeOnlyInTrend bypassée - Confiance IA très élevée (", DoubleToString(g_lastAIConfidence * 100, 1), "%)");
+      }
    }
    
    // Éviter la duplication de la même position (uniquement pour volatility, step index et forex)
+   // En mode haute confiance, on peut permettre la duplication sur des symboles différents
    if(HasDuplicatePosition(orderType))
    {
-      Print("🚫 Trade ignoré - Position ", EnumToString(orderType), " déjà ouverte sur ", _Symbol, " - Évite la duplication");
-      return;
+      Print("🚫 TRADE BLOQUÉ [HasDuplicatePosition]: Position ", EnumToString(orderType), " déjà ouverte sur ", _Symbol, " - Évite la duplication");
+      return false;
    }
    
    double price = (orderType == ORDER_TYPE_BUY) ? 
@@ -6330,8 +6717,8 @@ void ExecuteTrade(ENUM_ORDER_TYPE orderType)
    
    if(normalizedLot < SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN))
    {
-      Print("❌ Lot trop petit: ", normalizedLot, " (minimum: ", SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN), ")");
-      return;
+      Print("❌ TRADE BLOQUÉ [LotSize]: Lot trop petit: ", normalizedLot, " (minimum: ", SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN), ")");
+      return false;
    }
    
    double sl, tp;
@@ -6341,8 +6728,8 @@ void ExecuteTrade(ENUM_ORDER_TYPE orderType)
    // VALIDATION FINALE AVANT OUVERTURE: Vérifier que SL et TP sont valides
    if(sl <= 0 || tp <= 0)
    {
-      Print("❌ TRADE BLOQUÉ: SL ou TP invalides (SL=", sl, " TP=", tp, ") - Calcul impossible");
-      return;
+      Print("❌ TRADE BLOQUÉ [SL/TP]: SL ou TP invalides (SL=", sl, " TP=", tp, ") - Calcul impossible");
+      return false;
    }
    
    // Vérifier les distances minimum une dernière fois
@@ -6357,8 +6744,8 @@ void ExecuteTrade(ENUM_ORDER_TYPE orderType)
    
    if(slDist < minDistance || tpDist < minDistance)
    {
-      Print("❌ TRADE BLOQUÉ: Distances SL/TP insuffisantes (SL=", DoubleToString(slDist, _Digits), " TP=", DoubleToString(tpDist, _Digits), " min=", DoubleToString(minDistance, _Digits), ")");
-      return;
+      Print("❌ TRADE BLOQUÉ [MinDistance]: Distances SL/TP insuffisantes (SL=", DoubleToString(slDist, _Digits), " TP=", DoubleToString(tpDist, _Digits), " min=", DoubleToString(minDistance, _Digits), ")");
+      return false;
    }
    
    // Normaliser les prix avant ouverture
@@ -6367,20 +6754,35 @@ void ExecuteTrade(ENUM_ORDER_TYPE orderType)
    tp = NormalizeDouble(tp, _Digits);
    
    // Vérifier que toutes les conditions sont alignées avant d'ouvrir une nouvelle position
+   // En mode haute confiance, cette vérification peut être bypassée
    if(!AreAllConditionsAlignedForNewPosition(orderType))
+   {
+      if(isHighConfidenceMode)
+      {
+         Print("⚠️ Vérification AreAllConditionsAlignedForNewPosition bypassée - Mode haute confiance");
+      }
+      else
    {
       if(DebugMode)
          Print("🚫 DOUBLON BLOQUÉ: Conditions non alignées pour SCALPER_DOUBLE");
-      return;
+         return false;
+      }
    }
    
    if(trade.PositionOpen(_Symbol, orderType, normalizedLot, price, sl, tp, "SCALPER_DOUBLE"))
    {
-      Print("✅ Trade ouvert: ", EnumToString(orderType), 
+      Print("✅ Trade ouvert avec succès: ", EnumToString(orderType), 
             " Lot: ", normalizedLot, 
             " Prix: ", price,
             " SL: ", sl, 
             " TP: ", tp);
+      
+      // Envoyer signal de trading via Vonage si activé
+      if(SendTradeSignals && EnableVonageNotifications)
+      {
+         double confidence = (UseAI_Agent && g_lastAIConfidence > 0) ? g_lastAIConfidence : entryConfidence;
+         SendTradingSignalViaVonage(orderType, price, confidence);
+      }
       
       // Mettre à jour le tracker
       g_hasPosition = true;
@@ -6390,10 +6792,13 @@ void ExecuteTrade(ENUM_ORDER_TYPE orderType)
       g_positionTracker.highestProfit = 0.0;
       g_positionTracker.lotDoubled = false;
       g_positionTracker.openTime = TimeCurrent();
+      
+      return true; // Trade exécuté avec succès
    }
    else
    {
-      Print("❌ Erreur ouverture trade: ", trade.ResultRetcode(), " - ", trade.ResultRetcodeDescription());
+      Print("❌ Erreur ouverture trade: Code=", trade.ResultRetcode(), " - ", trade.ResultRetcodeDescription());
+      return false; // Trade non exécuté
    }
 }
 
@@ -7456,9 +7861,9 @@ void SecureProfitForPosition(ulong ticket, double currentProfit)
    string positionSymbol = positionInfo.Symbol();
    bool isForex = IsForexSymbol(positionSymbol);
    
-   // Pour Forex: Sécuriser dès qu'il y a un profit (même petit) pour éviter les pertes inutiles
-   // Pour les autres marchés: Ne pas sécuriser tant que le profit n'atteint pas au moins 2$
-   double minProfitToSecure = isForex ? 0.5 : 2.0; // Forex: dès 0.5$, autres: dès 2$
+   // Règle (user): dès 1$ de gain, commencer à déplacer le SL pour éviter de reperdre > 50% des gains.
+   // Forex reste plus agressif (dès 0.5$) car les moves sont souvent plus petits.
+   double minProfitToSecure = isForex ? 0.5 : 1.0; // Forex: dès 0.5$, autres: dès 1$
    
    if(currentProfit < minProfitToSecure)
       return;
@@ -7953,89 +8358,31 @@ void SecureDynamicProfits()
                continue; // Le trailing stop intelligent gère la sécurisation pour Forex
             }
             
-            // NOUVELLE LOGIQUE: Sécurisation AGGRESSIVE dès qu'il y a un profit
-            // Dès qu'une position est en profit, on sécurise au moins 50% des gains initiaux
+            // NOUVELLE LOGIQUE (USER): dès que la position est en gain >= 1$, commencer à déplacer
+            // dynamiquement le SL pour éviter de reperdre plus de la moitié des gains.
+            // Implémentation: on sécurise AU MOINS 50% du PROFIT MAX atteint (peak), pas seulement du profit courant.
             
-            // Récupérer le profit max pour cette position
+            // Récupérer le profit max (peak) pour cette position
             double maxProfitForPosition = GetMaxProfitForPosition(ticket);
             if(maxProfitForPosition == 0.0 && currentProfit > 0)
                maxProfitForPosition = currentProfit; // Utiliser le profit actuel comme référence initiale
             
-            // NOUVELLE LOGIQUE: Ne pas couper une position qui a commencé à rentabiliser après une perte
-            // Laisser faire au moins 2$ de gain d'abord
-            // C'est seulement lorsque le prix chute à 50% du gain maximum qu'on coupe pour sauvegarder les 50% restant
-            
-            // Si profit entre 0$ et 2$ - laisser la position continuer sans intervention
-            // Juste tracker le profit max pour référence
-            if(currentProfit > 0 && currentProfit < 2.0)
-            {
+            // Tracker le peak en continu (dès qu'on est positif)
                if(currentProfit > maxProfitForPosition)
+            {
                   UpdateMaxProfitForPosition(ticket, currentProfit);
-               continue; // Ne pas sécuriser tant qu'on n'a pas atteint 2$
+               maxProfitForPosition = currentProfit;
             }
             
-            // Si profit >= 2$, on peut maintenant tracker et protéger
-            if(currentProfit >= 2.0)
+            // Dès que profit >= 1$, on commence à sécuriser via SL dynamique
+            if(currentProfit >= 1.0)
             {
-               // La position a atteint au moins 2$ de profit, maintenant on peut tracker et protéger
-               // Utiliser le profit actuel OU le profit max (le plus élevé)
+               // Utiliser le profit max (peak) comme référence pour garantir "ne pas reperdre plus de la moitié"
                double profitReference = MathMax(currentProfit, maxProfitForPosition);
                
-               // Si le profit actuel est supérieur au max enregistré, mettre à jour le max
-               if(currentProfit > maxProfitForPosition)
-               {
-                  UpdateMaxProfitForPosition(ticket, currentProfit);
-                  profitReference = currentProfit;
-               }
-               
-               // Calculer le drawdown en pourcentage par rapport au profit maximum atteint
-               double drawdownPercent = 0.0;
-               if(profitReference >= 2.0) // Seulement si le profit max a atteint au moins 2$
-               {
-                  drawdownPercent = (profitReference - currentProfit) / profitReference;
-                  
-                  // Si drawdown > 50% ET profit actuel >= 1$ (MIN_PROFIT_TO_CLOSE), fermer pour sauvegarder les 50% restant
-                  if(drawdownPercent > PROFIT_DRAWDOWN_LIMIT && currentProfit >= MIN_PROFIT_TO_CLOSE)
-                  {
-                     // Fermer immédiatement pour sauvegarder les 50% restant du profit maximum
-                     if(trade.PositionClose(ticket))
-                     {
-                        Print("🔒 Position fermée - Drawdown de 50% après avoir atteint au moins 2$: Profit max=", DoubleToString(profitReference, 2), 
-                              "$ Profit actuel=", DoubleToString(currentProfit, 2), "$ Drawdown=", DoubleToString(drawdownPercent * 100, 1), 
-                              "% - Sauvegarde des 50% restant");
-                        continue; // Passer à la position suivante
-                     }
-                  }
-                  else if(DebugMode && drawdownPercent > PROFIT_DRAWDOWN_LIMIT && currentProfit > 0 && currentProfit < MIN_PROFIT_TO_CLOSE)
-                  {
-                     Print("⏸️ Position conservée malgré drawdown: Profit=", DoubleToString(currentProfit, 2), 
-                           "$ < minimum requis (", DoubleToString(MIN_PROFIT_TO_CLOSE, 2), "$)");
-                  }
-               }
-               
-               // Si on arrive ici, le profit >= 2$ et drawdown < 50%, continuer avec la sécurisation normale
-               
-               // NOUVELLE LOGIQUE: Vérifier si la tendance continue avant de sécuriser
-               // Si tendance continue, attendre plus de profit avant de sécuriser agressivement
-               bool trendStillValid = IsTrendStillValid(posType);
-               double securePercentage = 0.50; // 50% par défaut
-               
-               if(trendStillValid)
-               {
-                  // Tendances M1/M5 toujours alignées - mouvement peut continuer
-                  // Sécuriser moins agressivement (30% au lieu de 50%) pour laisser le mouvement se développer
-                  securePercentage = 0.30;
-                  if(DebugMode)
-                     Print("✅ Tendance toujours valide - Sécurisation modérée (30% au lieu de 50%) pour laisser le mouvement continuer");
-               }
-               else
-               {
-                  // Tendance affaiblie - sécuriser plus agressivement (50%)
-                  securePercentage = 0.50;
-               }
-               
-               // SÉCURISATION PROGRESSIVE: Déplacer le SL pour sécuriser un pourcentage du profit actuel
-               double profitToSecure = currentProfit * securePercentage;
+               // Sécuriser au moins 50% du peak
+               double securePercentage = 0.50;
+               double profitToSecure = profitReference * securePercentage;
                      
                      // Convertir le profit en points
                      double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
@@ -8061,7 +8408,7 @@ void SecureDynamicProfits()
                            pointsToSecure = (profitToSecure / (lotSize * pointValue)) > 0 ? (profitToSecure / (lotSize * pointValue)) : (atr[0] / point);
                      }
                      
-                     // Calculer le nouveau SL pour sécuriser 50% du profit actuel
+                     // Calculer le nouveau SL pour sécuriser 50% du profit de référence (peak)
                      double newSL = 0.0;
                      
                      // Calculer le prix qui correspond à 50% du profit actuel
@@ -8104,7 +8451,7 @@ void SecureDynamicProfits()
                               {
                                  Print("🔒 SL sécurisé BUY: ", DoubleToString(newSL, _Digits), 
                                        " (sécurise ", DoubleToString(profitToSecure, 2), "$ = ", DoubleToString(securePercentage * 100, 0), 
-                                       "% de ", DoubleToString(currentProfit, 2), "$", trendStillValid ? " - Tendance continue" : " - Tendance affaiblie", ")");
+                                       "% du profit max=", DoubleToString(profitReference, 2), "$ ; profit actuel=", DoubleToString(currentProfit, 2), "$)");
                                  if(g_positionTracker.ticket == ticket)
                                     g_positionTracker.profitSecured = true;
                               }
@@ -8155,7 +8502,7 @@ void SecureDynamicProfits()
                               {
                                  Print("🔒 SL sécurisé SELL: ", DoubleToString(newSL, _Digits), 
                                        " (sécurise ", DoubleToString(profitToSecure, 2), "$ = ", DoubleToString(securePercentage * 100, 0), 
-                                       "% de ", DoubleToString(currentProfit, 2), "$", trendStillValid ? " - Tendance continue" : " - Tendance affaiblie", ")");
+                                       "% du profit max=", DoubleToString(profitReference, 2), "$ ; profit actuel=", DoubleToString(currentProfit, 2), "$)");
                                  if(g_positionTracker.ticket == ticket)
                                     g_positionTracker.profitSecured = true;
                               }
@@ -8167,7 +8514,6 @@ void SecureDynamicProfits()
                            else if(DebugMode)
                            {
                               Print("⏸️ SL SELL trop proche du prix actuel (", DoubleToString(newSL, _Digits), " vs ", DoubleToString(currentPrice, _Digits), ")");
-                           }
                         }
                      }
                }
@@ -8530,7 +8876,7 @@ bool TrySpikeEntry(ENUM_ORDER_TYPE orderType)
    if(DebugMode)
       Print("🚀 Boom/Crash: Ouverture trade ", EnumToString(orderType), " après retournement EMA M5 confirmé");
    
-   ExecuteTrade(orderType);
+   ExecuteTrade(orderType, false);
 
    // Incrémenter les tentatives; si 2 sans spike, cooldown 5 minutes
    g_spikeFailCount[idx]++;
@@ -9944,21 +10290,162 @@ bool CheckSpikeEntryWithEMAsAndFractals(ENUM_ORDER_TYPE orderType, double &entry
 }
 
 //+------------------------------------------------------------------+
-//| Envoyer notification MT5 (Alert + SendNotification)            |
+//| Envoyer notification MT5 (Alert + SendNotification + Vonage)    |
 //+------------------------------------------------------------------+
 void SendMT5Notification(string message, bool isAlert = true)
 {
-   // Envoyer Alert (popup + son)
+   // 1. Envoyer Alert (popup + son) - Amélioré pour MT5 mobile
    if(isAlert)
    {
       Alert(message);
    }
    
-   // Envoyer SendNotification (notification push si activée dans MT5)
-   SendNotification(message);
+   // 2. Envoyer SendNotification (notification push MT5 mobile) - Amélioré
+   // Utiliser un message court pour MT5 mobile (limite de caractères)
+   string mobileMessage = message;
+   if(StringLen(mobileMessage) > 100)
+   {
+      mobileMessage = StringSubstr(mobileMessage, 0, 97) + "...";
+   }
+   SendNotification(mobileMessage);
    
-   // Afficher aussi dans le journal
+   // 3. Envoyer aussi via API Python vers Vonage si activé
+   if(EnableVonageNotifications && StringLen(NotificationAPIURL) > 0)
+   {
+      // Préparer la requête JSON
+      string jsonPayload = StringFormat("{\"message\":\"%s\"}", message);
+      
+      // Nettoyer les caractères spéciaux pour JSON
+      StringReplace(jsonPayload, "\"", "\\\"");
+      StringReplace(jsonPayload, "\n", "\\n");
+      StringReplace(jsonPayload, "\r", "\\r");
+      
+      // Convertir en UTF-8
+      char data[];
+      string headers = "Content-Type: application/json\r\n";
+      string result_headers = "";
+      char result[];
+      
+      int payloadLen = StringLen(jsonPayload);
+      ArrayResize(data, payloadLen + 1);
+      int copied = StringToCharArray(jsonPayload, data, 0, WHOLE_ARRAY, CP_UTF8);
+      
+      if(copied > 0)
+      {
+         ArrayResize(data, copied - 1);
+         
+         // Envoyer la requête HTTP POST
+         ResetLastError();
+         int res = WebRequest("POST", NotificationAPIURL, headers, 5000, data, result, result_headers);
+         
+         if(res == 200)
+         {
+            if(DebugMode)
+               Print("✅ Notification Vonage envoyée: ", StringSubstr(message, 0, 50));
+         }
+         else if(res > 0)
+         {
+            if(DebugMode)
+               Print("⚠️ Erreur notification Vonage HTTP: ", res);
+         }
+         else
+         {
+            if(DebugMode)
+               Print("⚠️ Erreur notification Vonage: ", GetLastError());
+         }
+      }
+   }
+   
+   // 4. Afficher aussi dans le journal
    Print("📢 NOTIFICATION: ", message);
+}
+
+//+------------------------------------------------------------------+
+//| Envoyer signal de trading via Vonage                            |
+//+------------------------------------------------------------------+
+void SendTradingSignalViaVonage(ENUM_ORDER_TYPE orderType, double price, double confidence)
+{
+   if(!SendTradeSignals || !EnableVonageNotifications || StringLen(NotificationAPIURL) == 0)
+      return;
+   
+   string direction = (orderType == ORDER_TYPE_BUY) ? "BUY" : "SELL";
+   string signalURL = "https://kolatradebot.onrender.com/notifications/trading-signal";
+   
+   // Préparer la requête JSON
+   string jsonPayload = StringFormat(
+      "{\"symbol\":\"%s\",\"action\":\"%s\",\"price\":%.5f,\"confidence\":%.2f,\"timeframe\":\"M1\"}",
+      _Symbol, direction, price, confidence
+   );
+   
+   // Convertir en UTF-8
+   char data[];
+   string headers = "Content-Type: application/json\r\n";
+   string result_headers = "";
+   char result[];
+   
+   int payloadLen = StringLen(jsonPayload);
+   ArrayResize(data, payloadLen + 1);
+   int copied = StringToCharArray(jsonPayload, data, 0, WHOLE_ARRAY, CP_UTF8);
+   
+   if(copied > 0)
+   {
+      ArrayResize(data, copied - 1);
+      
+      // Envoyer la requête HTTP POST
+      ResetLastError();
+      int res = WebRequest("POST", signalURL, headers, 5000, data, result, result_headers);
+      
+      if(res == 200)
+      {
+         if(DebugMode)
+            Print("✅ Signal trading Vonage envoyé: ", direction, " ", _Symbol);
+      }
+      else if(res > 0)
+      {
+         if(DebugMode)
+            Print("⚠️ Erreur signal trading Vonage HTTP: ", res);
+      }
+      else
+      {
+         if(DebugMode)
+            Print("⚠️ Erreur signal trading Vonage: ", GetLastError());
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Envoyer résumé des prédictions via API                          |
+//+------------------------------------------------------------------+
+void SendPredictionSummaryViaAPI()
+{
+   if(!SendPredictionSummary || !EnableVonageNotifications)
+      return;
+   
+   string summaryURL = "https://kolatradebot.onrender.com/notifications/predictions-summary";
+   
+   // Envoyer une requête GET simple
+   char data[];
+   string headers = "";
+   string result_headers = "";
+   char result[];
+   
+   ResetLastError();
+   int res = WebRequest("GET", summaryURL, headers, 5000, data, result, result_headers);
+   
+   if(res == 200)
+   {
+      Print("✅ Résumé prédictions Vonage envoyé");
+   }
+   else if(res > 0)
+   {
+      if(DebugMode)
+         Print("⚠️ Erreur résumé prédictions Vonage HTTP: ", res);
+   }
+   else
+   {
+      if(DebugMode)
+         Print("⚠️ Erreur résumé prédictions Vonage: ", GetLastError());
+   }
 }
 
 //+------------------------------------------------------------------+
@@ -10725,9 +11212,9 @@ void DisplayCoherentAnalysis()
    if(!ShowCoherentAnalysis || !UseAI_Agent || StringLen(AI_CoherentAnalysisURL) == 0 || g_coherentAnalysis.lastUpdate == 0)
       return;
    
-   // Position Y de départ
-   int y = 20;
+   // Position Y de départ - COMPLÈTEMENT EN BAS À GAUCHE
    int x = 20;
+   int yFromBottom = 10; // Distance depuis le bas en pixels
    int lineHeight = 20;
    color textColor = clrWhite;
    
@@ -10737,12 +11224,12 @@ void DisplayCoherentAnalysis()
    {
       ObjectCreate(0, panelName, OBJ_RECTANGLE_LABEL, 0, 0, 0);
       ObjectSetInteger(0, panelName, OBJPROP_XDISTANCE, x - 5);
-      ObjectSetInteger(0, panelName, OBJPROP_YDISTANCE, y - 5);
+      ObjectSetInteger(0, panelName, OBJPROP_YDISTANCE, yFromBottom + 150); // Hauteur du panneau depuis le bas
       ObjectSetInteger(0, panelName, OBJPROP_XSIZE, 250);
       ObjectSetInteger(0, panelName, OBJPROP_YSIZE, 150);
       ObjectSetInteger(0, panelName, OBJPROP_BGCOLOR, C'20,20,30');
       ObjectSetInteger(0, panelName, OBJPROP_BORDER_TYPE, BORDER_FLAT);
-      ObjectSetInteger(0, panelName, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+      ObjectSetInteger(0, panelName, OBJPROP_CORNER, CORNER_LEFT_LOWER);
       ObjectSetInteger(0, panelName, OBJPROP_COLOR, clrGray);
       ObjectSetInteger(0, panelName, OBJPROP_BACK, false);
       ObjectSetInteger(0, panelName, OBJPROP_SELECTABLE, false);
@@ -10756,13 +11243,14 @@ void DisplayCoherentAnalysis()
    if(ObjectFind(0, titleName) < 0)
       ObjectCreate(0, titleName, OBJ_LABEL, 0, 0, 0);
    
+   int currentY = yFromBottom + 130; // Position depuis le bas (150 - 20 pour le titre)
    ObjectSetString(0, titleName, OBJPROP_TEXT, "ANALYSE COHÉRENTE");
    ObjectSetInteger(0, titleName, OBJPROP_XDISTANCE, x);
-   ObjectSetInteger(0, titleName, OBJPROP_YDISTANCE, y);
+   ObjectSetInteger(0, titleName, OBJPROP_YDISTANCE, currentY);
    ObjectSetInteger(0, titleName, OBJPROP_COLOR, clrGold);
    ObjectSetInteger(0, titleName, OBJPROP_FONTSIZE, 10);
-   ObjectSetInteger(0, titleName, OBJPROP_CORNER, CORNER_LEFT_UPPER);
-   y += lineHeight;
+   ObjectSetInteger(0, titleName, OBJPROP_CORNER, CORNER_LEFT_LOWER);
+   currentY -= lineHeight;
    
    // Afficher la décision
    string decisionName = "CoherentAnalysisDecision";
@@ -10776,15 +11264,24 @@ void DisplayCoherentAnalysis()
    string upperDecision = g_coherentAnalysis.decision;
    StringToUpper(upperDecision);
    
+   // Vérifier si la confiance est déjà en pourcentage (> 1) ou en décimal (0-1)
+   double confidencePercent = g_coherentAnalysis.confidence;
+   if(confidencePercent <= 1.0)
+   {
+      // Valeur décimale (0-1), convertir en pourcentage
+      confidencePercent = confidencePercent * 100.0;
+   }
+   // Sinon, la valeur est déjà en pourcentage, l'utiliser directement
+   
    ObjectSetString(0, decisionName, OBJPROP_TEXT, "Décision: " + 
                   upperDecision + 
-                  " (" + DoubleToString(g_coherentAnalysis.confidence * 100, 1) + "%)");
+                  " (" + DoubleToString(confidencePercent, 1) + "%)");
    ObjectSetInteger(0, decisionName, OBJPROP_XDISTANCE, x);
-   ObjectSetInteger(0, decisionName, OBJPROP_YDISTANCE, y);
+   ObjectSetInteger(0, decisionName, OBJPROP_YDISTANCE, currentY);
    ObjectSetInteger(0, decisionName, OBJPROP_COLOR, decisionColor);
    ObjectSetInteger(0, decisionName, OBJPROP_FONTSIZE, 9);
-   ObjectSetInteger(0, decisionName, OBJPROP_CORNER, CORNER_LEFT_UPPER);
-   y += lineHeight;
+   ObjectSetInteger(0, decisionName, OBJPROP_CORNER, CORNER_LEFT_LOWER);
+   currentY -= lineHeight;
    
    // Afficher la stabilité
    if(g_coherentAnalysis.stability > 0)
@@ -10796,14 +11293,23 @@ void DisplayCoherentAnalysis()
       color stabilityColor = (g_coherentAnalysis.stability > 0.7) ? clrLime : 
                            (g_coherentAnalysis.stability > 0.4) ? clrOrange : clrRed;
       
+      // Vérifier si la stabilité est déjà en pourcentage (> 1) ou en décimal (0-1)
+      double stabilityPercent = g_coherentAnalysis.stability;
+      if(stabilityPercent <= 1.0)
+      {
+         // Valeur décimale (0-1), convertir en pourcentage
+         stabilityPercent = stabilityPercent * 100.0;
+      }
+      // Sinon, la valeur est déjà en pourcentage, l'utiliser directement
+      
       ObjectSetString(0, stabilityName, OBJPROP_TEXT, "Stabilité: " + 
-                     DoubleToString(g_coherentAnalysis.stability * 100, 1) + "%");
+                     DoubleToString(stabilityPercent, 1) + "%");
       ObjectSetInteger(0, stabilityName, OBJPROP_XDISTANCE, x);
-      ObjectSetInteger(0, stabilityName, OBJPROP_YDISTANCE, y);
+      ObjectSetInteger(0, stabilityName, OBJPROP_YDISTANCE, currentY);
       ObjectSetInteger(0, stabilityName, OBJPROP_COLOR, stabilityColor);
       ObjectSetInteger(0, stabilityName, OBJPROP_FONTSIZE, 8);
-      ObjectSetInteger(0, stabilityName, OBJPROP_CORNER, CORNER_LEFT_UPPER);
-      y += lineHeight;
+      ObjectSetInteger(0, stabilityName, OBJPROP_CORNER, CORNER_LEFT_LOWER);
+      currentY -= lineHeight;
    }
    
    // Afficher les timeframes
@@ -10827,11 +11333,241 @@ void DisplayCoherentAnalysis()
       
       ObjectSetString(0, tfName, OBJPROP_TEXT, tfText);
       ObjectSetInteger(0, tfName, OBJPROP_XDISTANCE, x + (i % 2) * 120);
-      ObjectSetInteger(0, tfName, OBJPROP_YDISTANCE, y + (i / 2) * lineHeight);
+      ObjectSetInteger(0, tfName, OBJPROP_YDISTANCE, currentY - (i / 2) * lineHeight);
       ObjectSetInteger(0, tfName, OBJPROP_COLOR, tfColor);
       ObjectSetInteger(0, tfName, OBJPROP_FONTSIZE, 8);
-      ObjectSetInteger(0, tfName, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+      ObjectSetInteger(0, tfName, OBJPROP_CORNER, CORNER_LEFT_LOWER);
    }
+}
+
+//+------------------------------------------------------------------+
+//| Mettre à jour les prédictions en temps réel depuis l'API         |
+//+------------------------------------------------------------------+
+void UpdateRealtimePredictions()
+{
+   if(!ShowPredictionsPanel || StringLen(PredictionsRealtimeURL) == 0)
+      return;
+   
+   // Vérifier le délai entre les mises à jour
+   static datetime lastUpdate = 0;
+   if(TimeCurrent() - lastUpdate < PredictionsUpdateInterval)
+      return;
+   
+   // Préparer la requête
+   string url = StringFormat("%s/%s?timeframe=M1", PredictionsRealtimeURL, _Symbol);
+   string headers = "Accept: application/json\r\n";
+   string result_headers = "";
+   uchar data[];
+   uchar result[];
+   ArrayResize(data, 0);
+   
+   // Envoyer la requête GET
+   int res = WebRequest("GET", url, headers, AI_Timeout_ms, data, result, result_headers);
+   
+   if(res < 200 || res >= 300)
+   {
+      if(DebugMode)
+         Print("❌ Échec de la requête de prédictions temps réel: ", res);
+      g_predictionData.isValid = false;
+      return;
+   }
+   
+   // Convertir la réponse
+   string result_string = CharArrayToString(result);
+   
+   // Parser la réponse JSON (format simplifié)
+   g_predictionData.isValid = false;
+   ArrayFree(g_predictionData.predictedPrices);
+   
+   // Extraire accuracy_score
+   int accPos = StringFind(result_string, "\"accuracy_score\"");
+   if(accPos >= 0)
+   {
+      int colonPos = StringFind(result_string, ":", accPos);
+      int commaPos = StringFind(result_string, ",", colonPos);
+      if(commaPos < 0) commaPos = StringFind(result_string, "}", colonPos);
+      if(colonPos >= 0 && commaPos > colonPos)
+      {
+         string accStr = StringSubstr(result_string, colonPos + 1, commaPos - colonPos - 1);
+         StringTrimLeft(accStr);
+         StringTrimRight(accStr);
+         g_predictionData.accuracyScore = StringToDouble(accStr);
+      }
+   }
+   
+   // Extraire validation_count
+   int valPos = StringFind(result_string, "\"validation_count\"");
+   if(valPos >= 0)
+   {
+      int colonPos = StringFind(result_string, ":", valPos);
+      int commaPos = StringFind(result_string, ",", colonPos);
+      if(commaPos < 0) commaPos = StringFind(result_string, "}", colonPos);
+      if(colonPos >= 0 && commaPos > colonPos)
+      {
+         string valStr = StringSubstr(result_string, colonPos + 1, commaPos - colonPos - 1);
+         StringTrimLeft(valStr);
+         StringTrimRight(valStr);
+         g_predictionData.validationCount = (int)StringToInteger(valStr);
+      }
+   }
+   
+   // Extraire reliability
+   int relPos = StringFind(result_string, "\"reliability\"");
+   if(relPos >= 0)
+   {
+      int quoteStart = StringFind(result_string, "\"", relPos + 12);
+      int quoteEnd = StringFind(result_string, "\"", quoteStart + 1);
+      if(quoteStart >= 0 && quoteEnd > quoteStart)
+      {
+         g_predictionData.reliability = StringSubstr(result_string, quoteStart + 1, quoteEnd - quoteStart - 1);
+      }
+   }
+   
+   g_predictionData.lastUpdate = TimeCurrent();
+   g_predictionData.isValid = true;
+   
+   if(DebugMode)
+      Print("✅ Prédictions temps réel mises à jour: Précision=", DoubleToString(g_predictionData.accuracyScore * 100, 1), 
+            "%, Validations=", g_predictionData.validationCount);
+   
+   lastUpdate = TimeCurrent();
+}
+
+//+------------------------------------------------------------------+
+//| Afficher les prédictions dans le cadran d'information            |
+//+------------------------------------------------------------------+
+void DisplayPredictionsPanel()
+{
+   if(!ShowPredictionsPanel || !g_predictionData.isValid)
+      return;
+   
+   // Position du panneau (sous le panneau d'analyse cohérente)
+   int x = 20;
+   int y = 180; // Sous DisplayCoherentAnalysis
+   int lineHeight = 18;
+   
+   // Créer un panneau de fond
+   string panelName = "PredictionsPanel";
+   if(ObjectFind(0, panelName) < 0)
+   {
+      ObjectCreate(0, panelName, OBJ_RECTANGLE_LABEL, 0, 0, 0);
+      ObjectSetInteger(0, panelName, OBJPROP_XDISTANCE, x - 5);
+      ObjectSetInteger(0, panelName, OBJPROP_YDISTANCE, y - 5);
+      ObjectSetInteger(0, panelName, OBJPROP_XSIZE, 280);
+      ObjectSetInteger(0, panelName, OBJPROP_YSIZE, 100);
+      ObjectSetInteger(0, panelName, OBJPROP_BGCOLOR, C'20,30,20');
+      ObjectSetInteger(0, panelName, OBJPROP_BORDER_TYPE, BORDER_FLAT);
+      ObjectSetInteger(0, panelName, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+      ObjectSetInteger(0, panelName, OBJPROP_COLOR, clrGray);
+      ObjectSetInteger(0, panelName, OBJPROP_BACK, false);
+      ObjectSetInteger(0, panelName, OBJPROP_SELECTABLE, false);
+      ObjectSetInteger(0, panelName, OBJPROP_HIDDEN, true);
+      ObjectSetInteger(0, panelName, OBJPROP_ZORDER, 0);
+   }
+   
+   // Titre
+   string titleName = "PredictionsTitle";
+   if(ObjectFind(0, titleName) < 0)
+      ObjectCreate(0, titleName, OBJ_LABEL, 0, 0, 0);
+   
+   ObjectSetString(0, titleName, OBJPROP_TEXT, "PRÉDICTIONS TEMPS RÉEL");
+   ObjectSetInteger(0, titleName, OBJPROP_XDISTANCE, x);
+   ObjectSetInteger(0, titleName, OBJPROP_YDISTANCE, y);
+   ObjectSetInteger(0, titleName, OBJPROP_COLOR, clrAqua);
+   ObjectSetInteger(0, titleName, OBJPROP_FONTSIZE, 10);
+   ObjectSetInteger(0, titleName, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+   y += lineHeight;
+   
+   // Précision
+   color accColor = (g_predictionData.accuracyScore >= 0.80) ? clrLime : 
+                    (g_predictionData.accuracyScore >= 0.60) ? clrOrange : clrRed;
+   
+   string accName = "PredictionsAccuracy";
+   if(ObjectFind(0, accName) < 0)
+      ObjectCreate(0, accName, OBJ_LABEL, 0, 0, 0);
+   
+   ObjectSetString(0, accName, OBJPROP_TEXT, "Précision: " + DoubleToString(g_predictionData.accuracyScore * 100, 1) + "%");
+   ObjectSetInteger(0, accName, OBJPROP_XDISTANCE, x);
+   ObjectSetInteger(0, accName, OBJPROP_YDISTANCE, y);
+   ObjectSetInteger(0, accName, OBJPROP_COLOR, accColor);
+   ObjectSetInteger(0, accName, OBJPROP_FONTSIZE, 9);
+   ObjectSetInteger(0, accName, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+   y += lineHeight;
+   
+   // Fiabilité
+   color relColor = (g_predictionData.reliability == "HIGH") ? clrLime : 
+                    (g_predictionData.reliability == "MEDIUM") ? clrOrange : clrRed;
+   
+   string relName = "PredictionsReliability";
+   if(ObjectFind(0, relName) < 0)
+      ObjectCreate(0, relName, OBJ_LABEL, 0, 0, 0);
+   
+   ObjectSetString(0, relName, OBJPROP_TEXT, "Fiabilité: " + g_predictionData.reliability + " (" + 
+                   IntegerToString(g_predictionData.validationCount) + " validations)");
+   ObjectSetInteger(0, relName, OBJPROP_XDISTANCE, x);
+   ObjectSetInteger(0, relName, OBJPROP_YDISTANCE, y);
+   ObjectSetInteger(0, relName, OBJPROP_COLOR, relColor);
+   ObjectSetInteger(0, relName, OBJPROP_FONTSIZE, 9);
+   ObjectSetInteger(0, relName, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+}
+
+//+------------------------------------------------------------------+
+//| Valider les prédictions avec les données réelles                 |
+//+------------------------------------------------------------------+
+void ValidatePredictionWithRealtimeData()
+{
+   if(!ValidatePredictions || StringLen(PredictionsValidateURL) == 0)
+      return;
+   
+   // Vérifier le délai (valider toutes les 60 secondes)
+   static datetime lastValidation = 0;
+   if(TimeCurrent() - lastValidation < 60)
+      return;
+   
+   // Récupérer les prix réels des 10 dernières bougies
+   MqlRates rates[];
+   if(CopyRates(_Symbol, PERIOD_M1, 0, 10, rates) < 10)
+      return;
+   
+   // Préparer les prix réels
+   double realPrices[];
+   ArrayResize(realPrices, 10);
+   for(int i = 0; i < 10; i++)
+      realPrices[i] = rates[9-i].close; // Inverser pour avoir l'ordre chronologique
+   
+   // Préparer la requête POST
+   string json = "{";
+   json += "\"symbol\":\"" + _Symbol + "\",";
+   json += "\"timeframe\":\"M1\",";
+   json += "\"real_prices\":[";
+   for(int i = 0; i < ArraySize(realPrices); i++)
+   {
+      if(i > 0) json += ",";
+      json += DoubleToString(realPrices[i], _Digits);
+   }
+   json += "]}";
+   
+   string headers = "Content-Type: application/json\r\nAccept: application/json\r\n";
+   string result_headers = "";
+   uchar data[];
+   uchar result[];
+   StringToCharArray(json, data, 0, StringLen(json), CP_UTF8);
+   
+   // Envoyer la requête POST
+   int res = WebRequest("POST", PredictionsValidateURL, headers, AI_Timeout_ms, data, result, result_headers);
+   
+   if(res >= 200 && res < 300)
+   {
+      if(DebugMode)
+         Print("✅ Validation des prédictions envoyée avec succès");
+   }
+   else
+   {
+      if(DebugMode)
+         Print("❌ Échec de la validation des prédictions: ", res);
+   }
+   
+   lastValidation = TimeCurrent();
 }
 
 //+------------------------------------------------------------------+
