@@ -605,6 +605,10 @@ bool HasStrongSignal(string &signalType)
 {
    signalType = "";
    
+   // Déclarer les variables locales pour éviter les erreurs de compilation
+   double minConfidence = 0.70; // 70% par défaut
+   double minAIConfidence = 0.72; // 72% par défaut
+   
    if(DebugMode)
       Print("🔍 Recherche signal fort sur ", _Symbol, "...");
    
@@ -877,8 +881,8 @@ bool ExecuteBoomCrashSpikeTrade(ENUM_ORDER_TYPE orderType)
    
    // AMÉLIORATION: Vérification de la volatilité actuelle
    double atr = iATR(_Symbol, PERIOD_M1, 14);
-   double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   double atrPercentage = (atr / currentPrice) * 100;
+   double volatilityPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double atrPercentage = (atr / volatilityPrice) * 100;
    
    double maxAtrPercentage = 2.0; // 2% par défaut
    if(StringFind(_Symbol, "Boom") != -1 || StringFind(_Symbol, "Crash") != -1)
