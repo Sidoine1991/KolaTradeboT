@@ -552,17 +552,17 @@ async def log_requests(request: Request, call_next):
     """Log toutes les requêtes entrantes pour debugging"""
     start_time = time.time()
     
-    # Logger seulement le path et la méthode (pas le body pour éviter spam)
-    logger.debug(f"📥 {request.method} {request.url.path}")
+    # Logger le path et la méthode avec INFO pour être visible dans les logs Render
+    logger.info(f"📥 {request.method} {request.url.path}")
     
     response = await call_next(request)
     
     process_time = time.time() - start_time
-    # Logger seulement si le temps de traitement est anormalement long (>1s) ou erreur
+    # Logger toutes les réponses avec INFO pour être visible dans les logs Render
     if process_time > 1.0 or response.status_code >= 400:
         logger.warning(f"⚠️ {request.method} {request.url.path} - {response.status_code} - Temps: {process_time:.3f}s")
     else:
-        logger.debug(f"📤 {request.method} {request.url.path} - {response.status_code} - {process_time:.3f}s")
+        logger.info(f"📤 {request.method} {request.url.path} - {response.status_code} - Temps: {process_time:.3f}s")
     
     return response
 
@@ -2908,16 +2908,16 @@ class TrendAnalysisRequest(BaseModel):
     symbol: str
     timeframes: Optional[List[str]] = ["M1", "M5", "M15", "H1", "H4"]
 
-def calculate_trend_direction(symbol: str, timeframe: str = "M1") -> str:
-    """Calcule la direction de la tendance pour un symbole/timeframe donné"""
+def calculate_enhanced_trend_direction(symbol: str, timeframe: str = "M1") -> Dict[str, Any]:
+    """Calcule la direction de tendance avec analyse multi-indicateurs avancés"""
     try:
         if not mt5_initialized:
             # Fallback basé sur l'heure si MT5 non disponible
             hour = datetime.now().hour
             if hour % 2 == 0:
-                return "buy"
+                return {"direction": "buy", "confidence": 65.0, "signals": ["fallback_hour"]}
             else:
-                return "sell"
+                return {"direction": "sell", "confidence": 65.0, "signals": ["fallback_hour"]}
         
         # Récupérer les données MT5
         tf_map = {
@@ -2932,22 +2932,168 @@ def calculate_trend_direction(symbol: str, timeframe: str = "M1") -> str:
         rates = mt5.copy_rates_from_pos(symbol, mt5_timeframe, 0, 100)
         
         if rates is None or len(rates) < 50:
-            return "neutral"
+            return {"direction": "neutral", "confidence": 50.0, "signals": ["insufficient_data"]}
         
         df = pd.DataFrame(rates)
+        current_price = df['close'].iloc[-1]
+        current_volume = df['volume'].iloc[-1]
         
-        # Calcul des moyennes mobiles
+        # ===== INDICATEURS MULTIPLES =====
+        
+        # 1. Moyennes mobiles multiples
         sma_20 = df['close'].rolling(window=20).mean().iloc[-1]
         sma_50 = df['close'].rolling(window=50).mean().iloc[-1]
-        current_price = df['close'].iloc[-1]
+        ema_9 = df['close'].ewm(span=9).mean().iloc[-1]
+        ema_21 = df['close'].ewm(span=21).mean().iloc[-1]
         
-        # Détermination de la tendance
+        # 2. RSI avec zones optimisées
+        delta = df['close'].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+        rs = gain / loss
+        rsi = 100 - (100 / (1 + rs))
+        current_rsi = rsi.iloc[-1]
+        
+        # 3. MACD
+        ema_12 = df['close'].ewm(span=12).mean()
+        ema_26 = df['close'].ewm(span=26).mean()
+        macd_line = ema_12 - ema_26
+        signal_line = macd_line.ewm(span=9).mean()
+        macd_histogram = macd_line - signal_line
+        current_macd = macd_line.iloc[-1]
+        current_signal = signal_line.iloc[-1]
+        current_histogram = macd_histogram.iloc[-1]
+        
+        # 4. Bandes de Bollinger
+        bb_period = 20
+        bb_std = 2
+        bb_middle = df['close'].rolling(window=bb_period).mean()
+        bb_std = df['close'].rolling(window=bb_period).std()
+        bb_upper = bb_middle + (bb_std * bb_std)
+        bb_lower = bb_middle - (bb_std * bb_std)
+        current_bb_upper = bb_upper.iloc[-1]
+        current_bb_lower = bb_lower.iloc[-1]
+        current_bb_middle = bb_middle.iloc[-1]
+        
+        # 5. Volume analysis
+        volume_sma = df['volume'].rolling(window=20).mean()
+        volume_ratio = current_volume / volume_sma.iloc[-1] if volume_sma.iloc[-1] > 0 else 1.0
+        
+        # 6. ATR pour la volatilité
+        high_low = df['high'] - df['low']
+        high_close = (df['high'] - df['close'].shift()).abs()
+        low_close = (df['low'] - df['close'].shift()).abs()
+        true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+        atr = true_range.rolling(window=14).mean()
+        current_atr = atr.iloc[-1]
+        atr_percentage = (current_atr / current_price) * 100
+        
+        # ===== CALCUL DU SCORE DE TENDANCE =====
+        trend_score = 0.0
+        signals = []
+        
+        # Prix par rapport aux moyennes mobiles (poids: 2.0)
         if current_price > sma_20 > sma_50:
-            return "buy"
+            trend_score += 2.0
+            signals.append("price_above_sma")
         elif current_price < sma_20 < sma_50:
-            return "sell"
+            trend_score -= 2.0
+            signals.append("price_below_sma")
+        
+        # Confirmation EMA (poids: 1.5)
+        if ema_9 > ema_21:
+            trend_score += 1.5
+            signals.append("ema_bullish")
+        elif ema_9 < ema_21:
+            trend_score -= 1.5
+            signals.append("ema_bearish")
+        
+        # RSI confirmation avec zones optimisées (poids: 1.0)
+        if 55 < current_rsi < 75:  # Zone haussière optimisée
+            trend_score += 1.0
+            signals.append("rsi_bullish")
+        elif 25 < current_rsi < 45:  # Zone baissière optimisée
+            trend_score -= 1.0
+            signals.append("rsi_bearish")
+        elif current_rsi >= 75:  # Surachat - pénalité
+            trend_score -= 0.5
+            signals.append("rsi_overbought")
+        elif current_rsi <= 25:  # Survente - pénalité
+            trend_score += 0.5
+            signals.append("rsi_oversold")
+        
+        # MACD confirmation (poids: 1.0)
+        if current_macd > current_signal and current_histogram > 0:
+            trend_score += 1.0
+            signals.append("macd_bullish")
+        elif current_macd < current_signal and current_histogram < 0:
+            trend_score -= 1.0
+            signals.append("macd_bearish")
+        
+        # Position dans les bandes de Bollinger (poids: 0.5)
+        if current_price > current_bb_upper:
+            trend_score -= 0.5  # Surachat potentiel
+            signals.append("above_bb_upper")
+        elif current_price < current_bb_lower:
+            trend_score += 0.5   # Survente potentiel
+            signals.append("below_bb_lower")
+        
+        # Volume confirmation (poids: 0.8)
+        if volume_ratio > 1.2:
+            trend_score *= 1.2  # Renforcer si volume élevé
+            signals.append("high_volume")
+        elif volume_ratio < 0.8:
+            trend_score *= 0.9  # Réduire si volume faible
+            signals.append("low_volume")
+        
+        # ===== DÉCISION FINALE AVEC SEUILS AMÉLIORÉS =====
+        
+        # Calcul de la confiance base
+        base_confidence = 50.0 + abs(trend_score) * 8
+        
+        # Ajustement selon la volatilité
+        if atr_percentage > 2.0:  # Volatilité élevée
+            base_confidence *= 0.85  # Réduire confiance en haute volatilité
+            signals.append("high_volatility")
+        elif atr_percentage < 0.5:  # Volatilité très faible
+            base_confidence *= 0.90  # Réduire si pas de mouvement
+            signals.append("low_volatility")
+        
+        # Confiance finale plafonnée
+        final_confidence = min(95.0, max(40.0, base_confidence))
+        
+        # Détermination de la direction
+        if trend_score >= 3.0:
+            direction = "buy"
+            final_confidence = min(90.0, final_confidence + 5)  # Bonus pour signal fort
+        elif trend_score <= -3.0:
+            direction = "sell"
+            final_confidence = min(90.0, final_confidence + 5)  # Bonus pour signal fort
         else:
-            return "neutral"
+            direction = "neutral"
+            final_confidence = max(45.0, final_confidence - 10)  # Pénalité pour neutral
+        
+        return {
+            "direction": direction,
+            "confidence": round(final_confidence, 1),
+            "trend_score": round(trend_score, 2),
+            "signals": signals,
+            "rsi": round(current_rsi, 1),
+            "macd": round(current_histogram, 4),
+            "volume_ratio": round(volume_ratio, 2),
+            "atr_percentage": round(atr_percentage, 2)
+        }
+        
+    except Exception as e:
+        logger.error(f"Erreur calcul tendance avancée pour {symbol} ({timeframe}): {e}")
+        return {"direction": "neutral", "confidence": 50.0, "signals": ["error"]}
+
+def calculate_trend_direction(symbol: str, timeframe: str = "M1") -> str:
+    """Calcule la direction de la tendance pour un symbole/timeframe donné"""
+    try:
+        # Utiliser la nouvelle fonction avancée
+        enhanced_result = calculate_enhanced_trend_direction(symbol, timeframe)
+        return enhanced_result.get("direction", "neutral")
     except Exception as e:
         logger.error(f"Erreur lors du calcul de la tendance pour {symbol} ({timeframe}): {e}")
         return "neutral"
@@ -2955,6 +3101,7 @@ def calculate_trend_direction(symbol: str, timeframe: str = "M1") -> str:
 def calculate_market_state(symbol: str, timeframe: str = "M1") -> Dict[str, str]:
     """Calcule l'état du marché GLOBAL basé sur la moyenne de tous les timeframes
     
+    # ... (le reste du code reste inchangé)
     Args:
         symbol: Symbole du marché
         timeframe: Timeframe d'analyse (ignoré, utilise tous les TF)
@@ -3074,10 +3221,17 @@ def calculate_market_state(symbol: str, timeframe: str = "M1") -> Dict[str, str]
         elif "volatility" in symbol_lower:
             # Pour Volatility Index, alertes extrêmes
             # Calculer volatilité moyenne sur tous les TF
-            if valid_timeframes > 0:
-                avg_volatility = np.std([rate['close'] for rate in mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M1, 0, 50)[-20:]]) / np.mean([rate['close'] for rate in mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M1, 0, 50)[-20:]])
-                if avg_volatility > 0.015:
-                    global_trend += "_EXTREME"
+            if valid_timeframes > 0 and MT5_AVAILABLE and mt5_initialized:
+                try:
+                    rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M1, 0, 50)
+                    if rates is not None and len(rates) >= 20:
+                        recent_rates = rates[-20:]
+                        closes = [rate['close'] for rate in recent_rates]
+                        avg_volatility = np.std(closes) / np.mean(closes)
+                        if avg_volatility > 0.015:
+                            global_trend += "_EXTREME"
+                except Exception as e:
+                    logger.warning(f"Erreur calcul volatilité pour {symbol}: {e}")
         
         return {
             "market_state": global_state,
@@ -3128,6 +3282,193 @@ def _generate_simulated_prices(symbol: str, count: int = 50) -> List[float]:
     
     return prices
 
+def filter_false_signals(symbol: str, direction: str, confidence: float, timeframe: str = "M1") -> Dict[str, Any]:
+    """Filtre les faux signaux avec multiples validations pour réduire les risques"""
+    try:
+        # 1. Filtrage par heures de marché actives
+        current_hour = datetime.now().hour
+        current_day = datetime.now().weekday()  # 0 = Lundi, 6 = Dimanche
+        
+        # Heures optimisées par type de symbole
+        if "Boom" in symbol or "Crash" in symbol:
+            # Pour Boom/Crash: éviter les heures de faible volatilité
+            active_hours = [8, 9, 10, 11, 14, 15, 16, 17, 20, 21, 22]  # Sessions actives
+            if current_hour not in active_hours:
+                return {
+                    "valid": False, 
+                    "reason": f"Hors heures de marché actives pour {symbol} (heure: {current_hour})",
+                    "filtered_confidence": confidence * 0.3
+                }
+        else:
+            # Pour Forex: éviter le week-end et heures de faible liquidité
+            if current_day >= 5:  # Week-end
+                return {
+                    "valid": False, 
+                    "reason": "Week-end - marché fermé pour Forex",
+                    "filtered_confidence": confidence * 0.1
+                }
+            
+            # Éviter les heures de faible liquidité (session asiatique tardive)
+            if current_hour in [22, 23, 0, 1, 2]:
+                return {
+                    "valid": False, 
+                    "reason": f"Heure de faible liquidité (heure: {current_hour})",
+                    "filtered_confidence": confidence * 0.5
+                }
+        
+        # 2. Filtrage par volatilité anormale
+        if mt5_initialized:
+            try:
+                rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M1, 0, 100)
+                if rates and len(rates) >= 20:
+                    df = pd.DataFrame(rates)
+                    
+                    # Calculer ATR actuel vs ATR moyen
+                    high_low = df['high'] - df['low']
+                    high_close = (df['high'] - df['close'].shift()).abs()
+                    low_close = (df['low'] - df['close'].shift()).abs()
+                    true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+                    atr_current = true_range.rolling(14).mean().iloc[-1]
+                    atr_average = true_range.rolling(14).mean().mean()
+                    
+                    current_price = df['close'].iloc[-1]
+                    atr_percentage = (atr_current / current_price) * 100
+                    
+                    # Filtrer si volatilité extrême (> 3x la moyenne)
+                    if atr_current > atr_average * 3.0:
+                        return {
+                            "valid": False, 
+                            "reason": f"Volatilité extrême détectée (ATR: {atr_percentage:.2f}%)",
+                            "filtered_confidence": confidence * 0.2
+                        }
+                    
+                    # Filtrer si volatilité trop faible (< 0.1%)
+                    if atr_percentage < 0.1:
+                        return {
+                            "valid": False, 
+                            "reason": f"Volatilité trop faible (ATR: {atr_percentage:.2f}%)",
+                            "filtered_confidence": confidence * 0.6
+                        }
+            except Exception as e:
+                logger.warning(f"Erreur filtrage volatilité pour {symbol}: {e}")
+        
+        # 3. Filtrage par spread (si disponible)
+        try:
+            symbol_info = mt5.symbol_info(symbol)
+            if symbol_info:
+                current_spread = symbol_info.ask - symbol_info.bid
+                current_price = symbol_info.bid
+                spread_percentage = (current_spread / current_price) * 100 if current_price > 0 else 0
+                
+                # Filtrer si spread trop élevé
+                if "Boom" in symbol or "Crash" in symbol:
+                    max_spread_pct = 0.5  # 0.5% max pour Boom/Crash
+                else:
+                    max_spread_pct = 0.05  # 0.05% max pour Forex
+                
+                if spread_percentage > max_spread_pct:
+                    return {
+                        "valid": False, 
+                        "reason": f"Spread trop élevé ({spread_percentage:.3f}% > {max_spread_pct}%)",
+                        "filtered_confidence": confidence * 0.3
+                    }
+        except Exception as e:
+            logger.debug(f"Impossible de vérifier le spread pour {symbol}: {e}")
+        
+        # 4. Filtrage par corrélation de positions (pour Boom/Crash)
+        if "Boom" in symbol or "Crash" in symbol:
+            try:
+                # Compter les positions existantes sur des symboles corrélés
+                positions = mt5.positions_get()
+                correlated_count = 0
+                
+                for pos in positions:
+                    if pos.magic == 888888:  # Notre magic number
+                        pos_symbol = pos.symbol
+                        # Vérifier si c'est un symbole Boom/Crash corrélé
+                        if ("Boom" in pos_symbol or "Crash" in pos_symbol) and pos_symbol != symbol:
+                            correlated_count += 1
+                
+                # Limiter le nombre de positions corrélées simultanées
+                if correlated_count >= 3:
+                    return {
+                        "valid": False, 
+                        "reason": f"Trop de positions corrélées ({correlated_count} positions Boom/Crash)",
+                        "filtered_confidence": confidence * 0.1
+                    }
+            except Exception as e:
+                logger.debug(f"Impossible de vérifier les corrélations pour {symbol}: {e}")
+        
+        # 5. Filtrage par momentum excessif
+        try:
+            rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M1, 0, 50)
+            if rates and len(rates) >= 20:
+                df = pd.DataFrame(rates)
+                closes = df['close']
+                
+                # Calculer le momentum sur 10 périodes
+                if len(closes) >= 10:
+                    momentum_10 = (closes.iloc[-1] - closes.iloc[-10]) / closes.iloc[-10]
+                    momentum_5 = (closes.iloc[-1] - closes.iloc[-5]) / closes.iloc[-5]
+                    
+                    # Filtrer si momentum trop élevé (possible manipulation ou news)
+                    if abs(momentum_10) > 0.05:  # Plus de 5% en 10 minutes
+                        return {
+                            "valid": False, 
+                            "reason": f"Momentum excessif détecté ({momentum_10*100:.1f}% en 10 min)",
+                            "filtered_confidence": confidence * 0.2
+                        }
+                    
+                    # Filtrer si momentum change brusquement de direction
+                    if momentum_5 * momentum_10 < 0:  # Changement de direction
+                        return {
+                            "valid": False, 
+                            "reason": "Changement brusque de direction du momentum",
+                            "filtered_confidence": confidence * 0.4
+                        }
+        except Exception as e:
+            logger.debug(f"Erreur filtrage momentum pour {symbol}: {e}")
+        
+        # 6. Ajustement de la confiance selon les filtres
+        filtered_confidence = confidence
+        
+        # Réduire la confiance pour les symboles très volatiles
+        if "Boom" in symbol or "Crash" in symbol:
+            filtered_confidence *= 0.85  # -15% pour Boom/Crash
+        elif "Volatility" in symbol:
+            filtered_confidence *= 0.90  # -10% pour Volatility
+        
+        # Ajustement selon le timeframe
+        timeframe_multipliers = {
+            'M1': 0.8,   # Réduire pour M1 (beaucoup de bruit)
+            'M5': 0.9,   # Légère réduction pour M5
+            'M15': 1.0,  # Neutre pour M15
+            'H1': 1.1,   # Légère augmentation pour H1
+            'H4': 1.2    # Augmentation pour H4 (plus fiable)
+        }
+        multiplier = timeframe_multipliers.get(timeframe, 1.0)
+        filtered_confidence *= multiplier
+        
+        # Plafonner la confiance finale
+        final_confidence = min(95.0, max(40.0, filtered_confidence))
+        
+        return {
+            "valid": True,
+            "reason": "Signal validé après filtrage",
+            "filtered_confidence": round(final_confidence, 1),
+            "original_confidence": confidence,
+            "filters_applied": ["hours", "volatility", "spread", "correlation", "momentum"]
+        }
+        
+    except Exception as e:
+        logger.error(f"Erreur filtrage signaux pour {symbol}: {e}")
+        return {
+            "valid": True, 
+            "reason": "Erreur de filtrage - signal accepté par défaut",
+            "filtered_confidence": confidence * 0.7,  # Réduire en cas d'erreur
+            "filters_applied": ["error_fallback"]
+        }
+
 def calculate_trend_confidence(symbol: str, timeframe: str = "M1") -> float:
     """Calcule le niveau de confiance de la tendance (0-100)"""
     try:
@@ -3152,24 +3493,18 @@ def calculate_trend_confidence(symbol: str, timeframe: str = "M1") -> float:
         
         df = pd.DataFrame(rates)
         
-        # Calcul du RSI pour la confiance
-        delta = df['close'].diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-        rs = gain / loss
-        rsi = 100 - (100 / (1 + rs))
-        current_rsi = rsi.iloc[-1]
+        # Utiliser la nouvelle fonction avancée
+        enhanced_result = calculate_enhanced_trend_direction(symbol, timeframe)
+        base_confidence = enhanced_result.get("confidence", 50.0)
         
-        # Confiance basée sur la cohérence RSI-prix
-        sma_20 = df['close'].rolling(window=20).mean().iloc[-1]
-        current_price = df['close'].iloc[-1]
+        # Appliquer le filtrage anti-faux signaux
+        filter_result = filter_false_signals(symbol, enhanced_result.get("direction", "neutral"), base_confidence, timeframe)
         
-        if current_price > sma_20 and current_rsi > 50:
-            return min(90, 60 + (current_rsi - 50))
-        elif current_price < sma_20 and current_rsi < 50:
-            return min(90, 60 + (50 - current_rsi))
+        if filter_result.get("valid", False):
+            return filter_result.get("filtered_confidence", base_confidence)
         else:
-            return max(40, 70 - abs(current_rsi - 50))
+            logger.info(f"Signal filtré pour {symbol}: {filter_result.get('reason', 'Raison inconnue')}")
+            return 0.0  # Confiance nulle si signal rejeté
             
     except Exception as e:
         logger.error(f"Erreur calcul confiance {symbol} {timeframe}: {e}")
@@ -3227,10 +3562,17 @@ async def calculate_coherent_analysis(symbol: str, timeframes: Optional[List[str
                     "bearish": False
                 }
         
-        # Pondération des timeframes
+        # Pondération des timeframes OPTIMISÉE pour réduire les faux signaux
+        # Donner plus de poids aux timeframes plus longs (plus fiables)
+        # Réduire le poids des timeframes très courts (plus de bruit)
         timeframe_weights = {
-            'd1': 0.30, 'h4': 0.25, 'h1': 0.20,
-            'm30': 0.10, 'm15': 0.08, 'm5': 0.05, 'm1': 0.02
+            'd1': 0.35,    # Augmenté: Daily le plus fiable
+            'h4': 0.30,    # Augmenté: 4h très fiable
+            'h1': 0.20,    # Stable: 1h bon équilibre
+            'm30': 0.08,   # Réduit: 30min bruité
+            'm15': 0.05,   # Réduit: 15min beaucoup de bruit
+            'm5': 0.02,    # Fort réduit: 5min très bruité
+            'm1': 0.00     # Minimisé: 1min trop de bruit
         }
         
         # Calcul de la cohérence des tendances
@@ -3278,17 +3620,18 @@ async def calculate_coherent_analysis(symbol: str, timeframes: Optional[List[str
         max_diff = max(bullish_pct, bearish_pct, neutral_pct)
         stability = "ÉLEVÉE" if max_diff >= 60 else "MOYENNE" if max_diff >= 40 else "FAIBLE"
         
-        # Décision finale
-        if bullish_pct >= 60:
+        # Seuils de décision AMÉLIORÉS pour réduire les faux signaux
+        # Exiger plus de cohérence pour les signaux forts
+        if bullish_pct >= 70:  # Seuil plus élevé
             decision = "ACHAT FORT"
             decision_type = "BUY"
-        elif bearish_pct >= 60:
+        elif bearish_pct >= 70:  # Seuil plus élevé
             decision = "VENTE FORTE"
             decision_type = "SELL"
-        elif bullish_pct >= 45:
+        elif bullish_pct >= 55:  # Seuil modéré augmenté
             decision = "ACHAT MODÉRÉ"
             decision_type = "BUY"
-        elif bearish_pct >= 45:
+        elif bearish_pct >= 55:  # Seuil modéré augmenté
             decision = "VENTE MODÉRÉE"
             decision_type = "SELL"
         else:
@@ -4720,9 +5063,12 @@ async def decision(request: DecisionRequest):
                         logger.info(f"   └─ Après: {action.upper()} @ {confidence:.1%}")
                         logger.info(separator)
                     else:
-                        # Conflit mais indicateurs classiques plus forts
+                        # Conflit mais indicateurs classiques plus forts OU confiance ML insuffisante pour surcharger
                         components.append(f"ML_IGNORE:{ml_cat}:{ml_conf:.0%}")
-                        logger.info(f"⏸️ ML ignoré (conflit, conf ML={ml_conf:.1%} < conf classique={confidence:.1%})")
+                        if ml_conf < confidence:
+                            logger.info(f"⏸️ ML ignoré (conflit, conf ML={ml_conf:.1%} < conf classique={confidence:.1%})")
+                        else:
+                            logger.info(f"⏸️ ML ignoré (conflit, conf ML={ml_conf:.1%} insuffisante pour surcharger conf classique={confidence:.1%} - nécessite ≥70% ou classique <60%)")
 
                 # Ajouter le nom du modèle dans les composants pour la raison finale
                 if ml_model_name:
