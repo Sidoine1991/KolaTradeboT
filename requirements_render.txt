@@ -29,5 +29,5 @@ plotly>=5.15.0
 
 # PyTorch et Transformers pour Gemma (optionnel, mais recommandé)
 # Note: torch est volumineux (~2GB), décommentez seulement si nécessaire
-# torch
-# transformers
+torch
+transformers
