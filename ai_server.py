@@ -206,19 +206,24 @@ def get_mt5_indicators(symbol: str, timeframe: str, count: int = 100) -> Optiona
         except:
             pass
 
-# Nouveaux imports pour Gemma
-import torch
-from PIL import Image
-from transformers import AutoProcessor, AutoModelForImageTextToText, AutoModelForCausalLM
+# Nouveaux imports pour Gemma (optionnel)
+GEMMA_AVAILABLE = False
+gemma_processor = None
+gemma_model = None
+torch = None
+Image = None
+AutoProcessor = None
+AutoModelForImageTextToText = None
+AutoModelForCausalLM = None
 
 # Configuration du modèle Gemma Local
 GEMMA_MODEL_PATH = r"D:\Dev\model_gemma"
 MT5_FILES_DIR = r"C:\Users\USER\AppData\Roaming\MetaQuotes\Terminal\Common\Files" # Default, user may need to change
-GEMMA_AVAILABLE = False
-gemma_processor = None
-gemma_model = None
 
 try:
+    import torch
+    from PIL import Image
+    from transformers import AutoProcessor, AutoModelForImageTextToText, AutoModelForCausalLM
     print(f"Chargement du modèle Gemma depuis {GEMMA_MODEL_PATH}...")
     # Chargement conditionnel pour ne pas bloquer si les libs manquent ou le chemin est faux
     if os.path.exists(GEMMA_MODEL_PATH):
