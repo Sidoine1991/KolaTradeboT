@@ -217,13 +217,20 @@ AutoProcessor = None
 AutoModelForImageTextToText = None
 AutoModelForCausalLM = None
 
+# PIL peut être utilisé indépendamment de torch/transformers (ex: lecture d'images exportées).
+# On l'importe séparément pour éviter que l'échec de torch désactive aussi PIL.
+try:
+    from PIL import Image as _PILImage  # type: ignore
+    Image = _PILImage
+except Exception:
+    Image = None
+
 # Configuration du modèle Gemma Local
 GEMMA_MODEL_PATH = r"D:\Dev\model_gemma"
 MT5_FILES_DIR = r"C:\Users\USER\AppData\Roaming\MetaQuotes\Terminal\Common\Files" # Default, user may need to change
 
 try:
     import torch
-    from PIL import Image
     from transformers import AutoProcessor, AutoModelForImageTextToText, AutoModelForCausalLM
     print(f"Chargement du modèle Gemma depuis {GEMMA_MODEL_PATH}...")
     # Chargement conditionnel pour ne pas bloquer si les libs manquent ou le chemin est faux
@@ -273,20 +280,25 @@ except ImportError:
 # Configuration Mistral AI
 MISTRAL_AVAILABLE = True
 try:
-    from mistralai.client import MistralClient
-    from mistralai.models.chat_completion import ChatMessage
-    
     mistral_api_key = os.getenv("MISTRAL_API_KEY", "demo_key")  # Clé par défaut pour le développement
     if not mistral_api_key:
         logger.warning("Aucune clé API Mistral trouvée. Utilisation du mode démo limité.")
         MISTRAL_AVAILABLE = False
     else:
-        mistral_client = MistralClient(api_key=mistral_api_key)
-        logger.info("Mistral AI configuré avec succès")
+        # Compat SDK: certaines versions exposent `Mistral`, d'autres `MistralClient`.
+        try:
+            from mistralai import Mistral  # type: ignore
+            mistral_client = Mistral(api_key=mistral_api_key)
+            logger.info("Mistral AI configuré avec succès (SDK: mistralai.Mistral)")
+        except Exception:
+            from mistralai.client import MistralClient  # type: ignore
+            from mistralai.models.chat_completion import ChatMessage  # type: ignore
+            mistral_client = MistralClient(api_key=mistral_api_key)
+            logger.info("Mistral AI configuré avec succès (SDK: mistralai.client.MistralClient)")
         
-except ImportError:
+except ImportError as e:
     MISTRAL_AVAILABLE = False
-    logger.error("ERREUR: Le package mistralai n'est pas installé. Installez-le avec: pip install mistralai")
+    logger.error(f"ERREUR: Le package mistralai n'est pas importable ({e}).")
 
 # Désactivation complète de Gemini
 GEMINI_AVAILABLE = False
@@ -6822,7 +6834,9 @@ class GemmaTradingBot:
         self.chart_dir = os.path.join(self.mt5_files_dir, "Charts")
         os.makedirs(self.chart_dir, exist_ok=True)
 
-    def capture_chart(self, symbol: str, timeframe: str, width: int = 800, height: int = 600) -> Tuple[Optional[Image.Image], Optional[str]]:
+    # Note: on évite Optional[Image.Image] car Image peut être None si PIL n'est pas installé,
+    # et les annotations sont évaluées au chargement du module (crash Render sinon).
+    def capture_chart(self, symbol: str, timeframe: str, width: int = 800, height: int = 600) -> Tuple[Optional[Any], Optional[str]]:
         if not MT5_AVAILABLE or not 'mt5' in globals() or not mt5_initialized:
             logger.warning("MT5 non initialisé, capture impossible")
             return None, None
@@ -6839,13 +6853,16 @@ class GemmaTradingBot:
             if not mt5.chart_save(0, filepath, width, height, 0):
                 logger.error("chart_save a échoué pour %s %s", symbol, timeframe)
                 return None, None
+            if Image is None:
+                logger.error("PIL (Pillow) n'est pas installé: impossible d'ouvrir l'image %s", filepath)
+                return None, filename
             image = Image.open(filepath)
             return image, filename
         except Exception as exc:
             logger.error("Erreur capture_chart: %s", exc, exc_info=True)
             return None, None
 
-    def analyze_chart(self, symbol: str, timeframe: str, image: Optional[Image.Image] = None, prompt: Optional[str] = None) -> Optional[str]:
+    def analyze_chart(self, symbol: str, timeframe: str, image: Optional[Any] = None, prompt: Optional[str] = None) -> Optional[str]:
         if not GEMMA_AVAILABLE:
             logger.warning("Gemma non disponible")
             return None
