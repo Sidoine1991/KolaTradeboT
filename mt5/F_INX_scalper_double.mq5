@@ -8530,6 +8530,7 @@ void SecureDynamicProfits()
                            else if(DebugMode)
                            {
                               Print("⏸️ SL SELL trop proche du prix actuel (", DoubleToString(newSL, _Digits), " vs ", DoubleToString(currentPrice, _Digits), ")");
+                           }
                         }
                      }
                }
