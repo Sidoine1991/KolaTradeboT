@@ -10,8 +10,6 @@ scikit-learn>=1.3.0
 scipy>=1.11.0
 python-dotenv>=1.0.0
 requests>=2.31.0
-google-generativeai>=0.3.0
-mistralai>=0.0.11
 joblib>=1.3.0
 ta>=0.10.2
 yfinance>=0.2.18
@@ -24,6 +22,10 @@ plotly>=5.15.0
 # openai
 # firebase-admin>=6.2.0
 # google-cloud-firestore>=2.11.0
+
+# Anciennement utilisés (désactivés dans cette version)
+# google-generativeai>=0.3.0
+# mistralai>=0.0.11
 
 # PyTorch et Transformers pour Gemma (optionnel, mais recommandé)
 # Note: torch est volumineux (~2GB), décommentez seulement si nécessaire
