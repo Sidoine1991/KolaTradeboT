@@ -3,6 +3,15 @@ import joblib
 import numpy as np
 import pandas as pd
 
+# Import xgboost pour que joblib puisse charger les modèles XGBoost sauvegardés
+try:
+    import xgboost as xgb
+    XGBOOST_AVAILABLE = True
+except ImportError as e:
+    XGBOOST_AVAILABLE = False
+    import warnings
+    warnings.warn(f"xgboost n'est pas installé. Les modèles XGBoost ne pourront pas être chargés: {e}")
+
 # Import conditionnel pour éviter la dépendance à MetaTrader5
 try:
     from backend.train_adaptive_models import create_adaptive_features
@@ -206,6 +215,10 @@ MODEL_FEATURES = {
 }
 
 def predict_adaptive(symbol, df_ohlc):
+    # Vérifier que xgboost est disponible avant de charger le modèle
+    if not XGBOOST_AVAILABLE:
+        return {'error': 'xgboost n\'est pas installé. Installez-le avec: pip install xgboost', 'category': 'UNKNOWN', 'model_name': 'N/A'}
+    
     category = get_symbol_category(symbol)
     config = MODEL_CONFIGS.get(category, MODEL_CONFIGS['UNIVERSAL'])
     model_path = config['model_path']
@@ -238,6 +251,10 @@ def predict_multi_horizon(symbol, df_ohlc, horizon_label):
     """
     Prédit la proba de hausse pour un horizon donné (ex: '4h', '1d', '1w') en chargeant le modèle XGBoost correspondant.
     """
+    # Vérifier que xgboost est disponible avant de charger le modèle
+    if not XGBOOST_AVAILABLE:
+        return {'error': 'xgboost n\'est pas installé. Installez-le avec: pip install xgboost', 'horizon': horizon_label}
+    
     model_path = f"backend/xgb_model_{horizon_label}.pkl"
     if not os.path.exists(model_path):
         return {'error': f"Modèle pour l'horizon {horizon_label} non trouvé."}
