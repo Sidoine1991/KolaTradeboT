@@ -13,6 +13,7 @@ import logging
 import sys
 import argparse
 import traceback
+import contextlib
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Tuple, Set
@@ -1500,7 +1501,7 @@ def analyze_with_gemma(prompt: str, max_tokens: int = 200, temperature: float = 
         inputs = gemma_processor(
             text=prompt,
             return_tensors="pt"
-        ).to("cuda" if torch.cuda.is_available() else "cpu")
+        ).to("cuda" if torch and torch.cuda.is_available() else "cpu")
         
         # Génération de la réponse
         logger.info("⚡ Génération de la réponse...")
@@ -1516,7 +1517,8 @@ def analyze_with_gemma(prompt: str, max_tokens: int = 200, temperature: float = 
         
         # Génération avec suivi de la progression
         try:
-            with torch.no_grad():
+            no_grad_context = torch.no_grad() if torch else contextlib.nullcontext()
+            with no_grad_context:
                 output = gemma_model.generate(
                     **inputs,
                     **generate_kwargs,
@@ -1553,7 +1555,8 @@ def analyze_with_gemma(prompt: str, max_tokens: int = 200, temperature: float = 
         except RuntimeError as e:
             if "out of memory" in str(e).lower():
                 logger.error("⚠️  Erreur: Mémoire GPU insuffisante. Essayez de réduire la taille du modèle ou du batch.")
-                torch.cuda.empty_cache()
+                if torch and torch.cuda.is_available():
+                    torch.cuda.empty_cache()
             raise
             
     except Exception as e:
@@ -1569,7 +1572,7 @@ def analyze_with_gemma(prompt: str, max_tokens: int = 200, temperature: float = 
     
     finally:
         # Nettoyage de la mémoire GPU
-        if torch.cuda.is_available():
+        if torch and torch.cuda.is_available():
             torch.cuda.empty_cache()
             logger.info("🧹 Mémoire GPU nettoyée")
 
