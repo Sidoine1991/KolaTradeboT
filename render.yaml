@@ -5,9 +5,20 @@ services:
     plan: free
     buildCommand: pip install -r requirements-cloud.txt
     startCommand: uvicorn ai_server_cloud:app --host 0.0.0.0 --port $PORT
-    pythonVersion: 3.11.7
+    runtime: python
+    pythonVersion: "3.11.7"
     envVars:
       - key: PYTHON_VERSION
-        value: 3.11.7
+        value: "3.11.7"
       - key: PORT
-        value: 10000
+        value: "10000"
+      - key: PYTHONUNBUFFERED
+        value: "1"
+    buildFilter:
+      paths:
+        - ai_server_cloud.py
+        - requirements-cloud.txt
+        - backend/
+    repo: https://github.com/Sidoine1991/KolaTradeboT.git
+    rootDir: .
+    autoDeploy: yes
