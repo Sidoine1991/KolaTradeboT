@@ -616,6 +616,22 @@ bool HasStrongSignal(string &signalType)
       return false;
    }
    
+   // VÉRIFICATION TEMPORELLE: Ignorer les signaux trop récents (< 30 secondes)
+   if(g_lastAITime > 0 && (TimeCurrent() - g_lastAITime) < 30)
+   {
+      if(DebugMode)
+         Print("⏰ Signal IA trop récent - Attendre 30 secondes de plus");
+      return false;
+   }
+   
+   // VÉRIFICATION DE COHÉRENCE: S'assurer que les données IA sont fraîches (< 5 minutes)
+   if(g_lastAITime > 0 && (TimeCurrent() - g_lastAITime) > 300)
+   {
+      if(DebugMode)
+         Print("⚠️ Données IA périmées (> 5 minutes) - Signal ignoré");
+      return false;
+   }
+   
    // Vérifier l'analyse cohérente d'abord
    if(StringLen(g_coherentAnalysis.decision) > 0 && g_coherentAnalysis.lastUpdate > 0)
    {
@@ -630,27 +646,58 @@ bool HasStrongSignal(string &signalType)
          return false;
       }
       
+      // VÉRIFICATION DE FRAÎCHEUR: Données cohérentes < 2 minutes
+      if((TimeCurrent() - g_coherentAnalysis.lastUpdate) > 120)
+      {
+         if(DebugMode)
+            Print("⚠️ Analyse cohérente périmée (> 2 minutes) - Signal ignoré");
+         return false;
+      }
+      
       // Extraire la confiance de l'analyse cohérente
       double cohConf = g_coherentAnalysis.confidence;
       if(cohConf > 1.0) cohConf = cohConf / 100.0; // Convertir en décimal si nécessaire
       
-      if(DebugMode)
-         Print("📊 Analyse cohérente: ", decision, " (confiance: ", DoubleToString(cohConf * 100, 1), "%)");
-      
-      if(cohConf >= 0.70) // 70% minimum pour signal fort
+      // AMÉLIORATION: Seuil de confiance dynamique selon le type de symbole
+      double minConfidence = 0.70; // 70% par défaut
+      if(StringFind(_Symbol, "Boom") != -1 || StringFind(_Symbol, "Crash") != -1)
       {
+         minConfidence = 0.75; // 75% pour Boom/Crash (plus exigeant)
+      }
+      else if(StringFind(_Symbol, "Volatility") != -1)
+      {
+         minConfidence = 0.72; // 72% pour Volatility
+      }
+      
+      if(DebugMode)
+         Print("📊 Analyse cohérente: ", decision, " (confiance: ", DoubleToString(cohConf * 100, 1), "%) - Seuil: ", DoubleToString(minConfidence * 100, 1), "%");
+      
+      if(cohConf >= minConfidence)
+      {
+         // AMÉLIORATION: Validation croisée avec stabilité
+         if(g_coherentAnalysis.stability > 0)
+         {
+            double stability = g_coherentAnalysis.stability;
+            if(stability < 0.60) // Stabilité < 60%
+            {
+               if(DebugMode)
+                  Print("⚠️ Stabilité faible (", DoubleToString(stability * 100, 1), "%) - Signal rejeté");
+               return false;
+            }
+         }
+         
          if(StringFind(decision, "achat") >= 0)
          {
             signalType = "ACHAT FORT";
             if(DebugMode)
-               Print("✅ Signal ACHAT FORT détecté via analyse cohérente");
+               Print("✅ Signal ACHAT FORT détecté via analyse cohérente (conf: ", DoubleToString(cohConf * 100, 1), "%)");
             return true;
          }
          else if(StringFind(decision, "vente") >= 0)
          {
             signalType = "VENTE FORTE";
             if(DebugMode)
-               Print("✅ Signal VENTE FORTE détecté via analyse cohérente");
+               Print("✅ Signal VENTE FORTE détecté via analyse cohérente (conf: ", DoubleToString(cohConf * 100, 1), "%)");
             return true;
          }
          else if(DebugMode)
@@ -660,7 +707,7 @@ bool HasStrongSignal(string &signalType)
       }
       else if(DebugMode)
       {
-         Print("❌ Analyse cohérente présente mais confiance insuffisante: ", DoubleToString(cohConf * 100, 1), "% < 70%");
+         Print("❌ Analyse cohérente présente mais confiance insuffisante: ", DoubleToString(cohConf * 100, 1), "% < ", DoubleToString(minConfidence * 100, 1), "%");
       }
    }
    else
@@ -683,28 +730,38 @@ bool HasStrongSignal(string &signalType)
          return false;
       }
       
-      if(DebugMode)
-         Print("🤖 Signal IA direct: ", action, " (confiance: ", DoubleToString(g_lastAIConfidence * 100, 1), "%)");
-      
-      if(action == "buy")
+      // AMÉLIORATION: Seuil de confiance dynamique pour IA directe
+      double minAIConfidence = 0.72; // 72% par défaut
+      if(StringFind(_Symbol, "Boom") != -1 || StringFind(_Symbol, "Crash") != -1)
       {
-         signalType = "ACHAT FORT";
-         if(DebugMode)
-            Print("✅ Signal ACHAT FORT détecté via IA directe");
-         return true;
+         minAIConfidence = 0.78; // 78% pour Boom/Crash
       }
-      else if(action == "sell")
+      
+      if(DebugMode)
+         Print("🤖 Signal IA direct: ", action, " (confiance: ", DoubleToString(g_lastAIConfidence * 100, 1), "%) - Seuil: ", DoubleToString(minAIConfidence * 100, 1), "%");
+      
+      if(g_lastAIConfidence >= minAIConfidence)
       {
-         signalType = "VENTE FORTE";
-         if(DebugMode)
-            Print("✅ Signal VENTE FORTE détecté via IA directe");
-         return true;
+         if(action == "buy")
+         {
+            signalType = "ACHAT FORT";
+            if(DebugMode)
+               Print("✅ Signal ACHAT FORT détecté via IA directe (conf: ", DoubleToString(g_lastAIConfidence * 100, 1), "%)");
+            return true;
+         }
+         else if(action == "sell")
+         {
+            signalType = "VENTE FORTE";
+            if(DebugMode)
+               Print("✅ Signal VENTE FORTE détecté via IA directe (conf: ", DoubleToString(g_lastAIConfidence * 100, 1), "%)");
+            return true;
+         }
       }
    }
    else
    {
       if(DebugMode)
-         Print("❌ Signal IA direct insuffisant (action='", g_lastAIAction, "' confiance: ", DoubleToString(g_lastAIConfidence * 100, 1), "% < 70%)");
+         Print("❌ Signal IA direct insuffisant (action='", g_lastAIAction, "' confiance: ", DoubleToString(g_lastAIConfidence * 100, 1), "% < ", DoubleToString(minAIConfidence * 100, 1), "%)");
    }
    
    if(DebugMode)
@@ -760,6 +817,19 @@ bool ExecuteBoomCrashSpikeTrade(ENUM_ORDER_TYPE orderType)
       return false;
    }
    
+   // AMÉLIORATION: Vérification de fraîcheur des données IA
+   if(g_lastAITime > 0 && (TimeCurrent() - g_lastAITime) > 120)
+   {
+      Print("🚫 TRADE BLOQUÉ: Données IA périmées (> 2 minutes) - Rafraîchir les données");
+      return false;
+   }
+   
+   if(g_coherentAnalysis.lastUpdate > 0 && (TimeCurrent() - g_coherentAnalysis.lastUpdate) > 60)
+   {
+      Print("🚫 TRADE BLOQUÉ: Analyse cohérente périmée (> 1 minute) - Rafraîchir l'analyse");
+      return false;
+   }
+   
    if(DebugMode)
       Print("✅ Contrôles IA/Analyse OK: IA=", g_lastAIAction, " | Analyse=", g_coherentAnalysis.decision);
    
@@ -771,15 +841,59 @@ bool ExecuteBoomCrashSpikeTrade(ENUM_ORDER_TYPE orderType)
       return false;
    }
    
-   // VÉRIFICATION LIMITE GLOBALE: Maximum 50 positions au total sur tous les symboles différents
-   int totalPositions = CountAllPositionsWithMagic();
-   if(totalPositions >= 50)
+   // AMÉLIORATION: Limite globale adaptative selon le type de symbole
+   int maxGlobalPositions = 50; // Par défaut
+   if(StringFind(_Symbol, "Boom") != -1 || StringFind(_Symbol, "Crash") != -1)
    {
-      Print("🚫 TRADE BLOQUÉ: ", totalPositions, " positions actives (max 50) - Impossible d'ouvrir une nouvelle position");
+      maxGlobalPositions = 10; // Plus strict pour Boom/Crash
+   }
+   else if(StringFind(_Symbol, "Volatility") != -1)
+   {
+      maxGlobalPositions = 15; // Modéré pour Volatility
+   }
+   
+   int totalPositions = CountAllPositionsWithMagic();
+   if(totalPositions >= maxGlobalPositions)
+   {
+      Print("🚫 TRADE BLOQUÉ: ", totalPositions, " positions actives (max ", maxGlobalPositions, ") - Impossible d'ouvrir une nouvelle position");
+      return false;
+   }
+   
+   // AMÉLIORATION: Vérification du spread avant trade
+   double spread = SymbolInfoDouble(_Symbol, SYMBOL_ASK) - SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double spreadPoints = spread / SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   
+   double maxSpreadPoints = 50; // 50 points par défaut
+   if(StringFind(_Symbol, "Boom") != -1 || StringFind(_Symbol, "Crash") != -1)
+   {
+      maxSpreadPoints = 100; // Plus tolérant pour Boom/Crash
+   }
+   
+   if(spreadPoints > maxSpreadPoints)
+   {
+      Print("🚫 TRADE BLOQUÉ: Spread trop élevé: ", DoubleToString(spreadPoints, 1), " points (max: ", maxSpreadPoints, ")");
+      return false;
+   }
+   
+   // AMÉLIORATION: Vérification de la volatilité actuelle
+   double atr = iATR(_Symbol, PERIOD_M1, 14);
+   double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double atrPercentage = (atr / currentPrice) * 100;
+   
+   double maxAtrPercentage = 2.0; // 2% par défaut
+   if(StringFind(_Symbol, "Boom") != -1 || StringFind(_Symbol, "Crash") != -1)
+   {
+      maxAtrPercentage = 5.0; // Plus tolérant pour Boom/Crash
+   }
+   
+   if(atrPercentage > maxAtrPercentage)
+   {
+      Print("🚫 TRADE BLOQUÉ: Volatilité excessive: ", DoubleToString(atrPercentage, 2), "% (max: ", maxAtrPercentage, "%)");
       return false;
    }
    
    if(DebugMode)
+      Print("✅ Contrôles risque OK: Spread=", DoubleToString(spreadPoints, 1), "pts | ATR=", DoubleToString(atrPercentage, 2), "% | Positions=", totalPositions, "/", maxGlobalPositions);
       Print("✅ Contrôles positions OK: ", existingPositions, " position(s) pour ", _Symbol, ", ", totalPositions, " positions totales");
    
    // Exécuter le trade immédiatement au prix du marché

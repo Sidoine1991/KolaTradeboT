@@ -2844,17 +2844,20 @@ async def get_volume_profile(symbol: str, timeframe: str = "H1", bins: int = 20)
         logger.error(f"Erreur Volume Profile pour {symbol}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-# ==================== END DERIV PATTERNS ====================
-
 # ==================== END DERIV API ====================
 
-# Import du module dashboard_stats
+# Import du module ML pour Phase 2
 try:
-    from backend.dashboard_stats import DashboardStats
-    DASHBOARD_STATS_AVAILABLE = True
-except ImportError:
-    DASHBOARD_STATS_AVAILABLE = False
-    logger.warning("Module dashboard_stats non disponible")
+    from backend.ml_trading_models import EnsembleMLModel, MLTradingModel
+    ML_MODELS_AVAILABLE = True
+    logger.info("✅ Module ML Trading (Phase 2) disponible")
+except ImportError as e:
+    ML_MODELS_AVAILABLE = False
+    logger.warning(f"Module ML Trading non disponible: {e}")
+
+# Variables globales pour les modèles ML
+ml_ensemble = None
+ml_models_initialized = False
 
 @app.get("/dashboard/stats")
 async def get_dashboard_stats(symbol: Optional[str] = None):
