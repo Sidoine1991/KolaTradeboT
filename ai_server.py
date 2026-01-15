@@ -277,77 +277,13 @@ except ImportError:
     MT5_AVAILABLE = False
     logger.info("MetaTrader5 n'est pas installé - le serveur fonctionnera en mode API uniquement (sans connexion MT5)")
 
-# Configuration Mistral AI
-MISTRAL_AVAILABLE = True
-try:
-    mistral_api_key = os.getenv("MISTRAL_API_KEY", "demo_key")  # Clé par défaut pour le développement
-    if not mistral_api_key:
-        logger.warning("Aucune clé API Mistral trouvée. Utilisation du mode démo limité.")
-        MISTRAL_AVAILABLE = False
-    else:
-        # Compat SDK: certaines versions exposent `Mistral`, d'autres `MistralClient`.
-        try:
-            from mistralai import Mistral  # type: ignore
-            mistral_client = Mistral(api_key=mistral_api_key)
-            logger.info("Mistral AI configuré avec succès (SDK: mistralai.Mistral)")
-        except Exception:
-            from mistralai.client import MistralClient  # type: ignore
-            from mistralai.models.chat_completion import ChatMessage  # type: ignore
-            mistral_client = MistralClient(api_key=mistral_api_key)
-            logger.info("Mistral AI configuré avec succès (SDK: mistralai.client.MistralClient)")
-        
-except ImportError as e:
-    MISTRAL_AVAILABLE = False
-    logger.error(f"ERREUR: Le package mistralai n'est pas importable ({e}).")
+# Configuration Mistral AI (désactivée dans cette version déployée)
+MISTRAL_AVAILABLE = False
+mistral_client = None
 
-# Désactivation complète de Gemini
+# Gemini totalement désactivé pour le déploiement Render
 GEMINI_AVAILABLE = False
 gemini_model = None
-try:
-    import google.generativeai as genai
-    from google.api_core.exceptions import NotFound
-    
-    # Désactiver le chargement automatique des modèles
-    genai.configure(transport='rest')
-    
-    # Récupérer la clé API
-    gemini_api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-    
-    if not gemini_api_key:
-        logger.warning("Aucune clé API Gemini trouvée. Définissez GEMINI_API_KEY ou GOOGLE_API_KEY")
-    else:
-        genai.configure(api_key=gemini_api_key)
-        
-        # Vérifier les modèles disponibles
-        try:
-            models = genai.list_models()
-            available_models = [m.name for m in models]
-            logger.info(f"Tous les modèles disponibles: {', '.join(available_models)}")
-            
-            # Essayer d'utiliser les modèles par ordre de préférence (gemini-pro est obsolète)
-            for model_name in ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-1.0-pro']:
-                # Vérifier que le modèle est vraiment disponible (enlever le préfixe models/ si présent)
-                model_check = model_name.replace('models/', '')
-                if any(model_check in m or m.endswith(model_check) for m in available_models):
-                    try:
-                        gemini_model = genai.GenerativeModel(model_name)
-                        GEMINI_AVAILABLE = True
-                        logger.info(f"Modèle {model_name} chargé avec succès")
-                        break
-                    except Exception as e:
-                        logger.warning(f"Impossible de charger le modèle {model_name}: {str(e)}")
-                        continue
-            
-            if not GEMINI_AVAILABLE:
-                logger.warning("Aucun modèle Gemini compatible trouvé")
-                
-        except Exception as e:
-            logger.error(f"Erreur lors de la vérification des modèles: {str(e)}")
-    
-except ImportError:
-    logger.warning("Le package google-generativeai n'est pas installé. Installez-le avec: pip install google-generativeai")
-except Exception as e:
-    logger.error(f"Erreur d'initialisation Gemini: {str(e)}", exc_info=True)
 
 # Alpha Vantage API pour analyse fondamentale
 ALPHAVANTAGE_API_KEY = os.getenv("ALPHAVANTAGE_API_KEY", "IU9I5J595Q5LO61B")
