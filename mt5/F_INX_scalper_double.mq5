@@ -355,6 +355,8 @@ bool AnalyzeMomentumPressureZone(ENUM_ORDER_TYPE orderType, double price, double
 
 // Boom/Crash helpers (définies plus bas)
 bool DetectBoomCrashReversalAtEMA(ENUM_ORDER_TYPE orderType);
+bool TrySpikeEntry(ENUM_ORDER_TYPE orderType);
+bool TrySpikeEntry(ENUM_ORDER_TYPE orderType);
 
 // MCS (Momentum Concept Strategy) helpers (définies plus bas)
 double CalculateMomentumStrength(ENUM_ORDER_TYPE orderType, int lookbackBars = 5);
