@@ -349,6 +349,20 @@ double GetPredictionAccuracy(); // NOUVEAU: Obtenir l'accuracy de la prédiction
 void DetectAndDrawCorrectionZones();
 void PlaceLimitOrderOnCorrection();
 
+// MCS (Momentum Concept Strategy) helpers (définies plus bas)
+double CalculateMomentumStrength(ENUM_ORDER_TYPE orderType, int lookbackBars = 5);
+bool AnalyzeMomentumPressureZone(ENUM_ORDER_TYPE orderType, double price, double &momentumScore, double &zoneStrength);
+
+// Boom/Crash helpers (définies plus bas)
+bool DetectBoomCrashReversalAtEMA(ENUM_ORDER_TYPE orderType);
+
+// MCS (Momentum Concept Strategy) helpers (définies plus bas)
+double CalculateMomentumStrength(ENUM_ORDER_TYPE orderType, int lookbackBars = 5);
+bool AnalyzeMomentumPressureZone(ENUM_ORDER_TYPE orderType, double price, double &momentumScore, double &zoneStrength);
+
+// Boom/Crash helpers (définies plus bas)
+bool DetectBoomCrashReversalAtEMA(ENUM_ORDER_TYPE orderType);
+
 // Dashboard / Analyse cohérente / Prédictions temps réel (définies plus bas)
 void UpdateCoherentAnalysis(string symbol);
 void DisplayCoherentAnalysis();
