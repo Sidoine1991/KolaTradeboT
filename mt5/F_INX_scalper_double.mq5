@@ -1173,7 +1173,7 @@ bool ExecuteBoomCrashSpikeTrade(ENUM_ORDER_TYPE orderType)
    double maxSpreadPoints = 50; // 50 points par défaut
    if(StringFind(_Symbol, "Boom") != -1 || StringFind(_Symbol, "Crash") != -1)
    {
-      maxSpreadPoints = 100; // Plus tolérant pour Boom/Crash
+      maxSpreadPoints = 500; // Augmenté à 500 points pour Boom/Crash (très volatils)
    }
    
    if(spreadPoints > maxSpreadPoints)
@@ -1190,7 +1190,7 @@ bool ExecuteBoomCrashSpikeTrade(ENUM_ORDER_TYPE orderType)
    double maxAtrPercentage = 2.0; // 2% par défaut
    if(StringFind(_Symbol, "Boom") != -1 || StringFind(_Symbol, "Crash") != -1)
    {
-      maxAtrPercentage = 5.0; // Plus tolérant pour Boom/Crash
+      maxAtrPercentage = 10.0; // Augmenté à 10% pour Boom/Crash (très volatils)
    }
    
    if(atrPercentage > maxAtrPercentage)
