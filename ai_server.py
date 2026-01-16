@@ -26,6 +26,11 @@ import uvicorn
 import pandas as pd
 import numpy as np
 import requests
+import joblib
+from pathlib import Path
+
+# Machine Learning imports (Phase 2) - seront initialisés après logger
+ML_AVAILABLE = False
 
 # Charger les variables d'environnement
 try:
@@ -267,6 +272,19 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger("tradbot_ai")
+
+# Machine Learning imports (Phase 2)
+try:
+    from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+    from sklearn.neural_network import MLPClassifier
+    from sklearn.model_selection import train_test_split, cross_val_score
+    from sklearn.preprocessing import StandardScaler
+    from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, f1_score
+    ML_AVAILABLE = True
+    logger.info("scikit-learn disponible - Phase 2 ML features activées")
+except ImportError:
+    ML_AVAILABLE = False
+    logger.warning("scikit-learn non disponible - Phase 2 ML features désactivées")
 
 # Tentative d'importation de MetaTrader5 (optionnel)
 try:
@@ -3665,6 +3683,552 @@ async def calculate_coherent_analysis(symbol: str, timeframes: Optional[List[str
             "stability": "EN ATTENTE"
         }
 
+# ==============================================================================
+# PHASE 2: MACHINE LEARNING ET VALIDATION MULTI-TIMEFRAME (Phase 2 Implementation)
+# ==============================================================================
+
+# Répertoire pour sauvegarder les modèles ML
+MODELS_DIR = Path("models")
+MODELS_DIR.mkdir(exist_ok=True)
+
+# Stockage des modèles ML entraînés (par symbole et timeframe)
+ml_models_cache: Dict[str, Dict] = {}
+ml_scalers_cache: Dict[str, Dict] = {}
+
+def collect_historical_data(symbols: List[str], timeframes: List[str], period_days: int = 90) -> Dict[str, Dict[str, pd.DataFrame]]:
+    """Collecte les données historiques pour l'entraînement ML
+    
+    Args:
+        symbols: Liste des symboles à analyser
+        timeframes: Liste des timeframes à collecter
+        period_days: Nombre de jours de données historiques
+        
+    Returns:
+        Dictionnaire {symbol: {timeframe: DataFrame}}
+    """
+    historical_data = {}
+    
+    if not mt5_initialized:
+        logger.warning("MT5 non initialisé - impossible de collecter des données historiques")
+        return historical_data
+    
+    try:
+        tf_map = {
+            'M1': mt5.TIMEFRAME_M1,
+            'M5': mt5.TIMEFRAME_M5,
+            'M15': mt5.TIMEFRAME_M15,
+            'M30': mt5.TIMEFRAME_M30,
+            'H1': mt5.TIMEFRAME_H1,
+            'H4': mt5.TIMEFRAME_H4,
+            'D1': mt5.TIMEFRAME_D1
+        }
+        
+        # Calculer le nombre de barres nécessaires selon le timeframe
+        bars_needed = {
+            'M1': period_days * 24 * 60,
+            'M5': period_days * 24 * 12,
+            'M15': period_days * 24 * 4,
+            'M30': period_days * 24 * 2,
+            'H1': period_days * 24,
+            'H4': period_days * 6,
+            'D1': period_days
+        }
+        
+        for symbol in symbols:
+            historical_data[symbol] = {}
+            
+            for tf in timeframes:
+                try:
+                    mt5_tf = tf_map.get(tf, mt5.TIMEFRAME_M1)
+                    bars = min(bars_needed.get(tf, 1000), 10000)  # Limiter à 10000 barres max
+                    
+                    rates = mt5.copy_rates_from_pos(symbol, mt5_tf, 0, bars)
+                    
+                    if rates is not None and len(rates) > 50:
+                        df = pd.DataFrame(rates)
+                        historical_data[symbol][tf] = df
+                        logger.info(f"Collecté {len(df)} barres pour {symbol} {tf}")
+                    else:
+                        logger.warning(f"Données insuffisantes pour {symbol} {tf}")
+                        
+                except Exception as e:
+                    logger.error(f"Erreur collecte données {symbol} {tf}: {e}")
+                    continue
+                    
+    except Exception as e:
+        logger.error(f"Erreur collecte données historiques: {e}")
+    
+    return historical_data
+
+def extract_advanced_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Extrait des features avancées pour l'entraînement ML
+    
+    Args:
+        df: DataFrame avec colonnes OHLCV
+        
+    Returns:
+        DataFrame avec features supplémentaires
+    """
+    features_df = df.copy()
+    
+    try:
+        # 1. Trend features
+        features_df['sma_20'] = df['close'].rolling(20).mean()
+        features_df['sma_50'] = df['close'].rolling(50).mean()
+        features_df['ema_9'] = df['close'].ewm(span=9).mean()
+        features_df['ema_21'] = df['close'].ewm(span=21).mean()
+        features_df['ema_50'] = df['close'].ewm(span=50).mean()
+        
+        # Pente des moyennes mobiles
+        features_df['sma_20_slope'] = features_df['sma_20'].diff()
+        features_df['ema_9_slope'] = features_df['ema_9'].diff()
+        
+        # Position relative du prix
+        features_df['price_vs_sma20'] = (df['close'] - features_df['sma_20']) / features_df['sma_20']
+        features_df['price_vs_sma50'] = (df['close'] - features_df['sma_50']) / features_df['sma_50']
+        
+        # 2. Momentum features
+        rsi = calculate_rsi(df['close'], 14)
+        features_df['rsi'] = rsi
+        features_df['rsi_normalized'] = (rsi - 50) / 50  # Normaliser entre -1 et 1
+        
+        # MACD
+        ema_12 = df['close'].ewm(span=12).mean()
+        ema_26 = df['close'].ewm(span=26).mean()
+        macd_line = ema_12 - ema_26
+        signal_line = macd_line.ewm(span=9).mean()
+        features_df['macd'] = macd_line
+        features_df['macd_signal'] = signal_line
+        features_df['macd_histogram'] = macd_line - signal_line
+        
+        # 3. Volatility features
+        atr = calculate_atr(df, 14)
+        features_df['atr'] = atr
+        features_df['atr_normalized'] = atr / df['close']  # ATR en pourcentage
+        features_df['atr_ma_ratio'] = atr / atr.rolling(20).mean()
+        
+        # Bollinger Bands
+        bb = calculate_bollinger_bands(df['close'], 20, 2)
+        features_df['bb_upper'] = bb['upper']
+        features_df['bb_middle'] = bb['middle']
+        features_df['bb_lower'] = bb['lower']
+        features_df['bb_width'] = (bb['upper'] - bb['lower']) / bb['middle']
+        features_df['bb_position'] = (df['close'] - bb['lower']) / (bb['upper'] - bb['lower'])
+        
+        # 4. Volume features
+        if 'tick_volume' in df.columns:
+            volume = df['tick_volume']
+        elif 'volume' in df.columns:
+            volume = df['volume']
+        else:
+            volume = pd.Series([0] * len(df))
+            
+        features_df['volume_sma'] = volume.rolling(20).mean()
+        features_df['volume_ratio'] = volume / features_df['volume_sma']
+        features_df['volume_trend'] = volume.rolling(5).mean() / volume.rolling(20).mean()
+        
+        # 5. Price action features
+        features_df['high_low_range'] = (df['high'] - df['low']) / df['close']
+        features_df['open_close_range'] = (df['close'] - df['open']) / df['open']
+        features_df['body_size'] = abs(df['close'] - df['open']) / df['close']
+        features_df['upper_shadow'] = (df['high'] - df[['open', 'close']].max(axis=1)) / df['close']
+        features_df['lower_shadow'] = (df[['open', 'close']].min(axis=1) - df['low']) / df['close']
+        
+        # 6. Momentum indicators
+        features_df['momentum_5'] = df['close'].pct_change(5)
+        features_df['momentum_10'] = df['close'].pct_change(10)
+        features_df['momentum_20'] = df['close'].pct_change(20)
+        
+        # 7. Support/Resistance levels (simplifié)
+        features_df['recent_high'] = df['high'].rolling(20).max()
+        features_df['recent_low'] = df['low'].rolling(20).min()
+        features_df['distance_to_high'] = (features_df['recent_high'] - df['close']) / df['close']
+        features_df['distance_to_low'] = (df['close'] - features_df['recent_low']) / df['close']
+        
+        # Remplacer les NaN et infinis
+        features_df = features_df.replace([np.inf, -np.inf], np.nan)
+        features_df = features_df.fillna(method='ffill').fillna(method='bfill').fillna(0)
+        
+    except Exception as e:
+        logger.error(f"Erreur extraction features: {e}")
+    
+    return features_df
+
+def calculate_trade_outcome(df: pd.DataFrame, lookahead: int = 5, threshold: float = 0.002) -> List[int]:
+    """Calcule le résultat des trades (labels pour ML)
+    
+    Args:
+        df: DataFrame avec prix
+        lookahead: Nombre de périodes à regarder en avant
+        threshold: Seuil de mouvement pour considérer un trade rentable (0.2% par défaut)
+        
+    Returns:
+        Liste de labels: 1 (buy/win), -1 (sell/win), 0 (neutral/loss)
+    """
+    labels = []
+    
+    try:
+        closes = df['close'].values
+        
+        for i in range(len(df) - lookahead):
+            current_price = closes[i]
+            future_price = closes[i + lookahead]
+            
+            price_change = (future_price - current_price) / current_price
+            
+            # Label basé sur le mouvement futur
+            if price_change > threshold:
+                labels.append(1)  # Buy signal gagnant
+            elif price_change < -threshold:
+                labels.append(-1)  # Sell signal gagnant
+            else:
+                labels.append(0)  # Neutre/perdant
+                
+        # Ajouter des zéros pour les dernières lignes
+        labels.extend([0] * lookahead)
+        
+    except Exception as e:
+        logger.error(f"Erreur calcul labels: {e}")
+        labels = [0] * len(df)
+    
+    return labels
+
+def train_ml_models(symbol: str, timeframe: str, historical_data: Optional[pd.DataFrame] = None) -> Dict[str, Any]:
+    """Entraîne les modèles ML (RandomForest, GradientBoosting, MLPClassifier)
+    
+    Args:
+        symbol: Symbole du marché
+        timeframe: Timeframe d'analyse
+        historical_data: Données historiques (optionnel, sera collecté si None)
+        
+    Returns:
+        Dictionnaire avec les modèles entraînés et métriques
+    """
+    if not ML_AVAILABLE:
+        return {"error": "scikit-learn non disponible"}
+    
+    try:
+        model_key = f"{symbol}_{timeframe}"
+        
+        # Collecter les données si non fournies
+        if historical_data is None:
+            data_dict = collect_historical_data([symbol], [timeframe], period_days=90)
+            if symbol not in data_dict or timeframe not in data_dict[symbol]:
+                return {"error": "Impossible de collecter les données historiques"}
+            historical_data = data_dict[symbol][timeframe]
+        
+        if historical_data is None or len(historical_data) < 100:
+            return {"error": "Données historiques insuffisantes"}
+        
+        # Extraire les features
+        logger.info(f"Extraction features pour {symbol} {timeframe}...")
+        features_df = extract_advanced_features(historical_data)
+        
+        # Calculer les labels
+        labels = calculate_trade_outcome(features_df, lookahead=5, threshold=0.002)
+        features_df['label'] = labels
+        
+        # Sélectionner les features pour l'entraînement
+        feature_columns = [
+            'sma_20', 'sma_50', 'ema_9', 'ema_21', 'ema_50',
+            'sma_20_slope', 'ema_9_slope',
+            'price_vs_sma20', 'price_vs_sma50',
+            'rsi', 'rsi_normalized',
+            'macd', 'macd_signal', 'macd_histogram',
+            'atr', 'atr_normalized', 'atr_ma_ratio',
+            'bb_width', 'bb_position',
+            'volume_ratio', 'volume_trend',
+            'high_low_range', 'open_close_range', 'body_size',
+            'momentum_5', 'momentum_10', 'momentum_20',
+            'distance_to_high', 'distance_to_low'
+        ]
+        
+        # Filtrer les colonnes qui existent
+        available_features = [f for f in feature_columns if f in features_df.columns]
+        
+        # Préparer X et y
+        X = features_df[available_features].fillna(0)
+        y = features_df['label'].fillna(0).astype(int)
+        
+        # Supprimer les lignes avec des valeurs infinies
+        X = X.replace([np.inf, -np.inf], 0)
+        
+        # Split train/test
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=0.2, random_state=42, stratify=y if len(y.unique()) > 1 else None
+        )
+        
+        # Normaliser les features
+        scaler = StandardScaler()
+        X_train_scaled = scaler.fit_transform(X_train)
+        X_test_scaled = scaler.transform(X_test)
+        
+        models = {}
+        metrics = {}
+        
+        # 1. Random Forest
+        logger.info(f"Entraînement RandomForest pour {symbol} {timeframe}...")
+        rf_model = RandomForestClassifier(
+            n_estimators=100,
+            max_depth=10,
+            min_samples_split=5,
+            min_samples_leaf=2,
+            random_state=42,
+            n_jobs=-1,
+            class_weight='balanced'
+        )
+        rf_model.fit(X_train_scaled, y_train)
+        rf_pred = rf_model.predict(X_test_scaled)
+        rf_accuracy = accuracy_score(y_test, rf_pred)
+        rf_f1 = f1_score(y_test, rf_pred, average='weighted', zero_division=0)
+        
+        models['random_forest'] = rf_model
+        metrics['random_forest'] = {
+            'accuracy': float(rf_accuracy),
+            'f1_score': float(rf_f1),
+            'feature_importance': dict(zip(available_features, rf_model.feature_importances_))
+        }
+        
+        # 2. Gradient Boosting
+        logger.info(f"Entraînement GradientBoosting pour {symbol} {timeframe}...")
+        gb_model = GradientBoostingClassifier(
+            n_estimators=100,
+            learning_rate=0.1,
+            max_depth=6,
+            random_state=42
+        )
+        gb_model.fit(X_train_scaled, y_train)
+        gb_pred = gb_model.predict(X_test_scaled)
+        gb_accuracy = accuracy_score(y_test, gb_pred)
+        gb_f1 = f1_score(y_test, gb_pred, average='weighted', zero_division=0)
+        
+        models['gradient_boosting'] = gb_model
+        metrics['gradient_boosting'] = {
+            'accuracy': float(gb_accuracy),
+            'f1_score': float(gb_f1),
+            'feature_importance': dict(zip(available_features, gb_model.feature_importances_))
+        }
+        
+        # 3. MLP (Neural Network)
+        logger.info(f"Entraînement MLPClassifier pour {symbol} {timeframe}...")
+        mlp_model = MLPClassifier(
+            hidden_layer_sizes=(50, 25),
+            max_iter=500,
+            random_state=42,
+            early_stopping=True,
+            validation_fraction=0.1
+        )
+        mlp_model.fit(X_train_scaled, y_train)
+        mlp_pred = mlp_model.predict(X_test_scaled)
+        mlp_accuracy = accuracy_score(y_test, mlp_pred)
+        mlp_f1 = f1_score(y_test, mlp_pred, average='weighted', zero_division=0)
+        
+        models['mlp'] = mlp_model
+        metrics['mlp'] = {
+            'accuracy': float(mlp_accuracy),
+            'f1_score': float(mlp_f1)
+        }
+        
+        # Sauvegarder les modèles
+        ml_models_cache[model_key] = models
+        ml_scalers_cache[model_key] = scaler
+        
+        # Sauvegarder sur disque
+        try:
+            model_path = MODELS_DIR / f"{model_key}_rf.joblib"
+            scaler_path = MODELS_DIR / f"{model_key}_scaler.joblib"
+            joblib.dump(rf_model, model_path)
+            joblib.dump(scaler, scaler_path)
+            logger.info(f"Modèles sauvegardés dans {MODELS_DIR}")
+        except Exception as e:
+            logger.warning(f"Impossible de sauvegarder les modèles: {e}")
+        
+        # Choisir le meilleur modèle
+        best_model_name = max(metrics.keys(), key=lambda k: metrics[k]['f1_score'])
+        
+        return {
+            "status": "success",
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "models": list(models.keys()),
+            "metrics": metrics,
+            "best_model": best_model_name,
+            "features_used": available_features,
+            "training_samples": len(X_train),
+            "test_samples": len(X_test)
+        }
+        
+    except Exception as e:
+        logger.error(f"Erreur entraînement ML pour {symbol} {timeframe}: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return {"error": str(e)}
+
+def validate_multi_timeframe_ml(symbol: str, timeframes: List[str]) -> Dict[str, Any]:
+    """Validation croisée multi-timeframe avec ML
+    
+    Args:
+        symbol: Symbole du marché
+        timeframes: Liste des timeframes à valider
+        
+    Returns:
+        Dictionnaire avec consensus et validation
+    """
+    if not ML_AVAILABLE:
+        return {"valid": False, "reason": "ML non disponible"}
+    
+    try:
+        predictions = {}
+        confidences = {}
+        
+        for tf in timeframes:
+            model_key = f"{symbol}_{tf}"
+            
+            # Charger ou entraîner le modèle
+            if model_key not in ml_models_cache:
+                train_result = train_ml_models(symbol, tf)
+                if "error" in train_result:
+                    continue
+            
+            # Récupérer les données actuelles
+            if not mt5_initialized:
+                continue
+                
+            tf_map = {
+                'M1': mt5.TIMEFRAME_M1, 'M5': mt5.TIMEFRAME_M5,
+                'M15': mt5.TIMEFRAME_M15, 'H1': mt5.TIMEFRAME_H1,
+                'H4': mt5.TIMEFRAME_H4, 'D1': mt5.TIMEFRAME_D1
+            }
+            
+            mt5_tf = tf_map.get(tf, mt5.TIMEFRAME_M1)
+            rates = mt5.copy_rates_from_pos(symbol, mt5_tf, 0, 100)
+            
+            if rates is None or len(rates) < 50:
+                continue
+            
+            df = pd.DataFrame(rates)
+            features_df = extract_advanced_features(df)
+            
+            # Sélectionner les features
+            feature_columns = [
+                'sma_20', 'sma_50', 'ema_9', 'ema_21', 'ema_50',
+                'sma_20_slope', 'ema_9_slope',
+                'price_vs_sma20', 'price_vs_sma50',
+                'rsi', 'rsi_normalized',
+                'macd', 'macd_signal', 'macd_histogram',
+                'atr', 'atr_normalized', 'atr_ma_ratio',
+                'bb_width', 'bb_position',
+                'volume_ratio', 'volume_trend',
+                'high_low_range', 'open_close_range', 'body_size',
+                'momentum_5', 'momentum_10', 'momentum_20',
+                'distance_to_high', 'distance_to_low'
+            ]
+            
+            available_features = [f for f in feature_columns if f in features_df.columns]
+            X = features_df[available_features].iloc[-1:].fillna(0)
+            X = X.replace([np.inf, -np.inf], 0)
+            
+            # Prédire avec le meilleur modèle
+            if model_key in ml_models_cache and model_key in ml_scalers_cache:
+                scaler = ml_scalers_cache[model_key]
+                models = ml_models_cache[model_key]
+                
+                # Utiliser RandomForest comme modèle principal
+                if 'random_forest' in models:
+                    X_scaled = scaler.transform(X)
+                    prediction = models['random_forest'].predict(X_scaled)[0]
+                    proba = models['random_forest'].predict_proba(X_scaled)[0]
+                    confidence = max(proba) * 100
+                    
+                    predictions[tf] = prediction  # 1, -1, ou 0
+                    confidences[tf] = confidence
+        
+        if not predictions:
+            return {"valid": False, "reason": "Aucune prédiction disponible"}
+        
+        # Calculer le consensus
+        buy_votes = sum(1 for p in predictions.values() if p == 1)
+        sell_votes = sum(1 for p in predictions.values() if p == -1)
+        neutral_votes = sum(1 for p in predictions.values() if p == 0)
+        
+        total_votes = len(predictions)
+        avg_confidence = np.mean(list(confidences.values())) if confidences else 0
+        
+        consensus = "buy" if buy_votes > sell_votes and buy_votes > neutral_votes else \
+                   "sell" if sell_votes > buy_votes and sell_votes > neutral_votes else "neutral"
+        
+        consensus_strength = max(buy_votes, sell_votes, neutral_votes) / total_votes if total_votes > 0 else 0
+        
+        # Validation: exiger au moins 60% de consensus et 65% de confiance moyenne
+        is_valid = consensus_strength >= 0.60 and avg_confidence >= 65.0
+        
+        return {
+            "valid": is_valid,
+            "consensus": consensus,
+            "consensus_strength": round(consensus_strength * 100, 1),
+            "avg_confidence": round(avg_confidence, 1),
+            "buy_votes": buy_votes,
+            "sell_votes": sell_votes,
+            "neutral_votes": neutral_votes,
+            "predictions": predictions,
+            "confidences": confidences
+        }
+        
+    except Exception as e:
+        logger.error(f"Erreur validation multi-timeframe ML: {e}")
+        return {"valid": False, "reason": str(e)}
+
+def adaptive_timeframe_weights(symbol: str, recent_performance: Optional[Dict] = None) -> Dict[str, float]:
+    """Ajuste les poids des timeframes en fonction des performances récentes
+    
+    Args:
+        symbol: Symbole du marché
+        recent_performance: Dictionnaire avec performances récentes par timeframe
+        
+    Returns:
+        Dictionnaire avec poids ajustés par timeframe
+    """
+    # Poids de base
+    base_weights = {
+        'd1': 0.35,
+        'h4': 0.30,
+        'h1': 0.20,
+        'm30': 0.08,
+        'm15': 0.05,
+        'm5': 0.02,
+        'm1': 0.00
+    }
+    
+    if recent_performance is None:
+        return base_weights
+    
+    adjusted_weights = base_weights.copy()
+    
+    try:
+        # Ajuster les poids selon les performances récentes
+        for tf, perf in recent_performance.items():
+            tf_lower = tf.lower()
+            
+            if tf_lower in adjusted_weights:
+                win_rate = perf.get('win_rate', 0.5)
+                
+                # Augmenter le poids si win_rate > 60%
+                if win_rate > 0.60:
+                    adjusted_weights[tf_lower] *= 1.2
+                # Réduire le poids si win_rate < 40%
+                elif win_rate < 0.40:
+                    adjusted_weights[tf_lower] *= 0.8
+        
+        # Normaliser pour que la somme = 1
+        total = sum(adjusted_weights.values())
+        if total > 0:
+            adjusted_weights = {k: v / total for k, v in adjusted_weights.items()}
+        
+    except Exception as e:
+        logger.warning(f"Erreur ajustement poids timeframes: {e}")
+    
+    return adjusted_weights
+
 @app.post("/coherent-analysis")
 async def get_coherent_analysis(request: CoherentAnalysisRequest):
     """Endpoint pour l'analyse cohérente multi-timeframes"""
@@ -3683,6 +4247,251 @@ async def get_coherent_analysis_get(symbol: str = "EURUSD"):
         return analysis
     except Exception as e:
         logger.error(f"Erreur endpoint GET analyse cohérente: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ==============================================================================
+# ENDPOINTS PHASE 2: MACHINE LEARNING
+# ==============================================================================
+
+class MLTrainRequest(BaseModel):
+    symbol: str
+    timeframe: str = "M1"
+    period_days: int = 90
+
+class MLPredictRequest(BaseModel):
+    symbol: str
+    timeframes: Optional[List[str]] = ["M1", "M5", "M15", "H1", "H4"]
+
+@app.post("/ml/train")
+async def train_ml_models_endpoint(request: MLTrainRequest):
+    """Endpoint pour entraîner les modèles ML
+    
+    Args:
+        request: Requête avec symbol, timeframe et period_days
+        
+    Returns:
+        Résultats de l'entraînement avec métriques
+    """
+    try:
+        if not ML_AVAILABLE:
+            raise HTTPException(status_code=503, detail="scikit-learn non disponible")
+        
+        logger.info(f"Entraînement ML demandé pour {request.symbol} {request.timeframe}")
+        
+        result = train_ml_models(request.symbol, request.timeframe, historical_data=None)
+        
+        if "error" in result:
+            raise HTTPException(status_code=500, detail=result["error"])
+        
+        return result
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Erreur entraînement ML endpoint: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/ml/train")
+async def train_ml_models_get(symbol: str = "EURUSD", timeframe: str = "M1"):
+    """Version GET de l'entraînement ML"""
+    try:
+        if not ML_AVAILABLE:
+            raise HTTPException(status_code=503, detail="scikit-learn non disponible")
+        
+        result = train_ml_models(symbol, timeframe, historical_data=None)
+        
+        if "error" in result:
+            raise HTTPException(status_code=500, detail=result["error"])
+        
+        return result
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Erreur entraînement ML GET: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/ml/predict")
+async def predict_ml_endpoint(request: MLPredictRequest):
+    """Endpoint pour prédictions ML avec validation multi-timeframe
+    
+    Args:
+        request: Requête avec symbol et timeframes
+        
+    Returns:
+        Prédictions ML avec validation croisée
+    """
+    try:
+        if not ML_AVAILABLE:
+            raise HTTPException(status_code=503, detail="scikit-learn non disponible")
+        
+        logger.info(f"Prédiction ML demandée pour {request.symbol}")
+        
+        # Validation multi-timeframe ML
+        validation_result = validate_multi_timeframe_ml(request.symbol, request.timeframes)
+        
+        # Analyse cohérente traditionnelle
+        coherent_analysis = await calculate_coherent_analysis(request.symbol, request.timeframes)
+        
+        return {
+            "symbol": request.symbol,
+            "ml_validation": validation_result,
+            "coherent_analysis": coherent_analysis,
+            "timestamp": datetime.now().isoformat()
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Erreur prédiction ML endpoint: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/ml/predict")
+async def predict_ml_get(symbol: str = "EURUSD", timeframes: str = "M1,M5,M15,H1,H4"):
+    """Version GET des prédictions ML"""
+    try:
+        if not ML_AVAILABLE:
+            raise HTTPException(status_code=503, detail="scikit-learn non disponible")
+        
+        tf_list = [tf.strip() for tf in timeframes.split(",")]
+        validation_result = validate_multi_timeframe_ml(symbol, tf_list)
+        coherent_analysis = await calculate_coherent_analysis(symbol, tf_list)
+        
+        return {
+            "symbol": symbol,
+            "ml_validation": validation_result,
+            "coherent_analysis": coherent_analysis,
+            "timestamp": datetime.now().isoformat()
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Erreur prédiction ML GET: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/ml/models")
+async def list_ml_models():
+    """Liste les modèles ML disponibles dans le cache"""
+    try:
+        models_list = []
+        
+        for model_key in ml_models_cache.keys():
+            symbol, timeframe = model_key.split("_", 1)
+            models_list.append({
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "model_key": model_key
+            })
+        
+        return {
+            "total_models": len(models_list),
+            "models": models_list
+        }
+        
+    except Exception as e:
+        logger.error(f"Erreur liste modèles ML: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/ml/metrics")
+async def get_ml_metrics(symbol: str = "EURUSD", timeframe: str = "M1"):
+    """Récupère les métriques ML après entraînement pour un symbole/timeframe
+    
+    Returns:
+        Métriques détaillées de tous les modèles (RandomForest, GradientBoosting, MLP, XGBoost si disponible)
+    """
+    try:
+        if not ML_AVAILABLE:
+            raise HTTPException(status_code=503, detail="scikit-learn non disponible")
+        
+        model_key = f"{symbol}_{timeframe}"
+        
+        # Si le modèle n'est pas dans le cache, essayer de l'entraîner
+        if model_key not in ml_models_cache:
+            logger.info(f"Modèle {model_key} non trouvé dans le cache, entraînement en cours...")
+            train_result = train_ml_models(symbol, timeframe, historical_data=None)
+            
+            if "error" in train_result:
+                raise HTTPException(status_code=404, detail=f"Modèle non disponible: {train_result['error']}")
+            
+            # Les métriques sont dans train_result
+            return {
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "status": "trained",
+                "metrics": train_result.get("metrics", {}),
+                "best_model": train_result.get("best_model", ""),
+                "features_used": train_result.get("features_used", []),
+                "training_samples": train_result.get("training_samples", 0),
+                "test_samples": train_result.get("test_samples", 0),
+                "timestamp": datetime.now().isoformat()
+            }
+        
+        # Récupérer les métriques depuis le cache
+        # Note: Les métriques complètes ne sont pas stockées dans le cache, 
+        # on doit les recalculer ou les récupérer depuis le disque
+        # Pour l'instant, on retourne les informations disponibles
+        
+        return {
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "status": "cached",
+            "message": "Modèle disponible dans le cache. Utilisez /ml/train pour obtenir les métriques détaillées.",
+            "model_key": model_key,
+            "timestamp": datetime.now().isoformat()
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Erreur récupération métriques ML: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/ml/metrics/detailed")
+async def get_detailed_ml_metrics(symbol: str = "EURUSD", timeframe: str = "M1"):
+    """Récupère les métriques ML détaillées en forçant un ré-entraînement si nécessaire"""
+    try:
+        if not ML_AVAILABLE:
+            raise HTTPException(status_code=503, detail="scikit-learn non disponible")
+        
+        logger.info(f"Récupération métriques détaillées pour {symbol} {timeframe}...")
+        
+        # Forcer l'entraînement pour obtenir les métriques
+        train_result = train_ml_models(symbol, timeframe, historical_data=None)
+        
+        if "error" in train_result:
+            raise HTTPException(status_code=500, detail=train_result["error"])
+        
+        # Formater les métriques pour une meilleure lisibilité
+        formatted_metrics = {}
+        for model_name, metrics in train_result.get("metrics", {}).items():
+            formatted_metrics[model_name] = {
+                "accuracy": round(metrics.get("accuracy", 0) * 100, 2),  # En pourcentage
+                "f1_score": round(metrics.get("f1_score", 0) * 100, 2),  # En pourcentage
+                "feature_importance": metrics.get("feature_importance", {})
+            }
+        
+        return {
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "status": "success",
+            "metrics": formatted_metrics,
+            "best_model": train_result.get("best_model", ""),
+            "features_count": len(train_result.get("features_used", [])),
+            "training_samples": train_result.get("training_samples", 0),
+            "test_samples": train_result.get("test_samples", 0),
+            "recommendations": {
+                "use_model": train_result.get("best_model", ""),
+                "min_confidence": round(max([m.get("accuracy", 0) for m in train_result.get("metrics", {}).values()]) * 0.8, 2),
+                "suggested_threshold": round(max([m.get("f1_score", 0) for m in train_result.get("metrics", {}).values()]) * 0.75, 2)
+            },
+            "timestamp": datetime.now().isoformat()
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Erreur récupération métriques détaillées ML: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/dashboard/graphs")
