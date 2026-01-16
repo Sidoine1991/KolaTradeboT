@@ -57,6 +57,19 @@ input string AI_DashboardGraphsURL = "https://kolatradebot.onrender.com/dashboar
 input int    AI_CoherentAnalysisInterval = 600; // Intervalle de mise à jour de l'analyse cohérente (secondes, allégé)
 input bool   ShowCoherentAnalysis = true; // Afficher l'analyse cohérente sur le graphique
 
+input group "--- PHASE 2: MACHINE LEARNING ---"
+input bool   UseMLPrediction = true; // Activer les prédictions ML (Phase 2)
+input string AI_MLPredictURL = "https://kolatradebot.onrender.com/ml/predict"; // URL pour les prédictions ML
+input string AI_MLTrainURL = "https://kolatradebot.onrender.com/ml/train"; // URL pour l'entraînement ML
+input int    AI_MLUpdateInterval = 300; // Intervalle de mise à jour ML (secondes, 5 min)
+input double ML_MinConfidence = 0.65; // Confiance minimale ML pour validation (65%)
+input double ML_MinConsensusStrength = 0.60; // Force de consensus minimale ML (60%)
+input bool   AutoTrainML = false; // Entraîner automatiquement les modèles ML (désactivé par défaut - coûteux)
+input int    ML_TrainInterval = 86400; // Intervalle d'entraînement ML automatique (secondes, 24h)
+input string AI_MLMetricsURL = "https://kolatradebot.onrender.com/ml/metrics/detailed"; // URL pour récupérer les métriques ML
+input bool   ShowMLMetrics = true; // Afficher les métriques ML dans les logs
+input int    ML_MetricsUpdateInterval = 3600; // Intervalle de mise à jour des métriques ML (secondes, 1h)
+
 input group "--- PRÉDICTIONS TEMPS RÉEL ---"
 input bool   ShowPredictionsPanel = true;     // Afficher les prédictions dans le cadran d'information
 input string PredictionsRealtimeURL = "https://kolatradebot.onrender.com/predictions/realtime"; // Endpoint prédictions temps réel
@@ -170,6 +183,40 @@ struct CoherentAnalysisData {
 };
 
 static CoherentAnalysisData g_coherentAnalysis; // Données d'analyse cohérente
+
+// Phase 2: Machine Learning
+struct MLValidationData {
+   bool valid;                    // Validation ML réussie
+   string consensus;              // Consensus ML (buy/sell/neutral)
+   double consensusStrength;      // Force du consensus (0-100)
+   double avgConfidence;          // Confiance moyenne ML (0-100)
+   int buyVotes;                  // Votes d'achat
+   int sellVotes;                 // Votes de vente
+   int neutralVotes;              // Votes neutres
+   datetime lastUpdate;           // Dernière mise à jour
+   bool isValid;                  // Données valides
+};
+
+static MLValidationData g_mlValidation; // Validation ML Phase 2
+
+// Métriques ML pour amélioration des décisions
+struct MLMetricsData {
+   string symbol;                // Symbole
+   string timeframe;             // Timeframe
+   string bestModel;             // Meilleur modèle (random_forest, gradient_boosting, mlp)
+   double bestAccuracy;          // Meilleure accuracy (0-100)
+   double bestF1Score;           // Meilleur F1 score (0-100)
+   double randomForestAccuracy;  // Accuracy RandomForest
+   double gradientBoostingAccuracy; // Accuracy GradientBoosting
+   double mlpAccuracy;           // Accuracy MLP
+   int trainingSamples;          // Nombre d'échantillons d'entraînement
+   int testSamples;              // Nombre d'échantillons de test
+   double suggestedMinConfidence; // Confiance minimale suggérée
+   datetime lastUpdate;          // Dernière mise à jour
+   bool isValid;                 // Données valides
+};
+
+static MLMetricsData g_mlMetrics; // Métriques ML
 
 // Prédictions temps réel
 struct PredictionData {
@@ -387,6 +434,13 @@ void DisplayCoherentAnalysis();
 void UpdateRealtimePredictions();
 void DisplayPredictionsPanel();
 void ValidatePredictionWithRealtimeData();
+
+// Phase 2: Machine Learning (définies plus bas)
+void UpdateMLPrediction(string symbol);
+bool ParseMLValidationResponse(const string &jsonStr, MLValidationData &mlData);
+bool IsMLValidationValid(ENUM_ORDER_TYPE orderType);
+void UpdateMLMetrics(string symbol, string timeframe = "M1");
+bool ParseMLMetricsResponse(const string &jsonStr, MLMetricsData &metrics);
 
 // Nouvelles fonctions pour amélioration du robot
 enum MARKET_STATE
@@ -609,30 +663,49 @@ bool HasStrongSignal(string &signalType)
    double minConfidence = 0.70; // 70% par défaut
    double minAIConfidence = 0.72; // 72% par défaut
    
+   // Ajustement pour Boom/Crash: plus permissif
+   bool isBoomCrash = (StringFind(_Symbol, "Boom") != -1 || StringFind(_Symbol, "Crash") != -1);
+   if(isBoomCrash)
+   {
+      minConfidence = 0.60; // 60% pour Boom/Crash (plus permissif)
+      minAIConfidence = 0.65; // 65% pour Boom/Crash (plus permissif)
+   }
+   
    if(DebugMode)
       Print("🔍 Recherche signal fort sur ", _Symbol, "...");
    
-   // VÉRIFICATION CRITIQUE: Si l'IA est en attente, aucun signal fort possible
+   // VÉRIFICATION CRITIQUE: Si l'IA est en attente, vérifier quand même pour Boom/Crash
+   
    if(StringLen(g_lastAIAction) > 0 && (g_lastAIAction == "hold" || g_lastAIAction == "attente"))
    {
+      // Pour Boom/Crash, être moins strict si on a des données cohérentes
+      if(!isBoomCrash)
+      {
+         if(DebugMode)
+            Print("❌ Signal IA en attente ('", g_lastAIAction, "') - Aucun signal fort possible");
+         return false;
+      }
+      else
+      {
+         // Pour Boom/Crash, continuer avec vérification cohérente seulement
+         if(DebugMode)
+            Print("⚠️ Signal IA en attente sur Boom/Crash - Vérification analyse cohérente uniquement");
+      }
+   }
+   
+   // VÉRIFICATION TEMPORELLE: Plus flexible pour Boom/Crash
+   if(g_lastAITime > 0 && (TimeCurrent() - g_lastAITime) < (isBoomCrash ? 10 : 30))
+   {
       if(DebugMode)
-         Print("❌ Signal IA en attente ('", g_lastAIAction, "') - Aucun signal fort possible");
+         Print("⏰ Signal IA trop récent - Attendre ", isBoomCrash ? "10" : "30", " secondes de plus");
       return false;
    }
    
-   // VÉRIFICATION TEMPORELLE: Ignorer les signaux trop récents (< 30 secondes)
-   if(g_lastAITime > 0 && (TimeCurrent() - g_lastAITime) < 30)
+   // VÉRIFICATION DE COHÉRENCE: Plus permissif pour Boom/Crash
+   if(g_lastAITime > 0 && (TimeCurrent() - g_lastAITime) > (isBoomCrash ? 600 : 300))
    {
       if(DebugMode)
-         Print("⏰ Signal IA trop récent - Attendre 30 secondes de plus");
-      return false;
-   }
-   
-   // VÉRIFICATION DE COHÉRENCE: S'assurer que les données IA sont fraîches (< 5 minutes)
-   if(g_lastAITime > 0 && (TimeCurrent() - g_lastAITime) > 300)
-   {
-      if(DebugMode)
-         Print("⚠️ Données IA périmées (> 5 minutes) - Signal ignoré");
+         Print("⚠️ Données IA périmées (> ", isBoomCrash ? "10" : "5", " minutes) - Signal ignoré");
       return false;
    }
    
@@ -651,10 +724,10 @@ bool HasStrongSignal(string &signalType)
       }
       
       // VÉRIFICATION DE FRAÎCHEUR: Données cohérentes < 2 minutes
-      if((TimeCurrent() - g_coherentAnalysis.lastUpdate) > 120)
+      if((TimeCurrent() - g_coherentAnalysis.lastUpdate) > (isBoomCrash ? 300 : 120))
       {
          if(DebugMode)
-            Print("⚠️ Analyse cohérente périmée (> 2 minutes) - Signal ignoré");
+            Print("⚠️ Analyse cohérente périmée (> ", isBoomCrash ? "5" : "2", " minutes) - Signal ignoré");
          return false;
       }
       
@@ -682,10 +755,27 @@ bool HasStrongSignal(string &signalType)
          if(g_coherentAnalysis.stability > 0)
          {
             double stability = g_coherentAnalysis.stability;
-            if(stability < 0.60) // Stabilité < 60%
+            if(stability < (isBoomCrash ? 0.50 : 0.60)) // Stabilité plus basse pour Boom/Crash
             {
                if(DebugMode)
                   Print("⚠️ Stabilité faible (", DoubleToString(stability * 100, 1), "%) - Signal rejeté");
+               return false;
+            }
+         }
+         
+         // PHASE 2: Validation ML supplémentaire si activée
+         if(UseMLPrediction && g_mlValidation.isValid)
+         {
+            bool mlValid = false;
+            if(StringFind(decision, "achat") >= 0)
+               mlValid = IsMLValidationValid(ORDER_TYPE_BUY);
+            else if(StringFind(decision, "vente") >= 0)
+               mlValid = IsMLValidationValid(ORDER_TYPE_SELL);
+            
+            if(!mlValid)
+            {
+               if(DebugMode)
+                  Print("⚠️ Signal rejeté: Validation ML non valide");
                return false;
             }
          }
@@ -718,6 +808,49 @@ bool HasStrongSignal(string &signalType)
    {
       if(DebugMode)
          Print("❌ Analyse cohérente non disponible ou vide (decision='", g_coherentAnalysis.decision, "' lastUpdate=", TimeToString(g_coherentAnalysis.lastUpdate), ")");
+   }
+   
+   // FALLBACK pour Boom/Crash: Si pas de signal cohérent, vérifier signal IA direct
+   if(isBoomCrash && StringLen(signalType) == 0)
+   {
+      if(DebugMode)
+         Print("🔄 Fallback Boom/Crash: Vérification signal IA direct...");
+      
+      if(g_lastAIConfidence >= minAIConfidence && StringLen(g_lastAIAction) > 0)
+      {
+         string action = g_lastAIAction;
+         StringToLower(action);
+         
+         // VÉRIFICATION ESSENTIELLE: Si l'IA est en attente, pas de signal fort
+         if(action == "hold" || action == "attente")
+         {
+            if(DebugMode)
+               Print("❌ Signal IA direct en attente ('", g_lastAIAction, "') - Pas de signal fort");
+            return false;
+         }
+         
+         if(DebugMode)
+            Print("🤖 Signal IA direct fallback: ", action, " (confiance: ", DoubleToString(g_lastAIConfidence * 100, 1), "%)");
+         
+         if(action == "buy")
+         {
+            signalType = "ACHAT FORT";
+            if(DebugMode)
+               Print("✅ Signal ACHAT FORT détecté via IA direct fallback (conf: ", DoubleToString(g_lastAIConfidence * 100, 1), "%)");
+            return true;
+         }
+         else if(action == "sell")
+         {
+            signalType = "VENTE FORTE";
+            if(DebugMode)
+               Print("✅ Signal VENTE FORTE détecté via IA direct fallback (conf: ", DoubleToString(g_lastAIConfidence * 100, 1), "%)");
+            return true;
+         }
+      }
+      else if(DebugMode)
+      {
+         Print("❌ Signal IA direct fallback insuffisant (action='", g_lastAIAction, "' confiance: ", DoubleToString(g_lastAIConfidence * 100, 1), "% < ", DoubleToString(minAIConfidence * 100, 1), "%)");
+      }
    }
    
    // Vérifier aussi le signal IA direct
@@ -808,16 +941,42 @@ bool ExecuteBoomCrashSpikeTrade(ENUM_ORDER_TYPE orderType)
       return false;
    }
    
-   // VÉRIFICATION ESSENTIELLE: Ne pas exécuter si IA ou Analyse cohérente sont en attente
+   // VÉRIFICATION ESSENTIELLE: Plus flexible pour Boom/Crash
+   bool isBoomCrash = (StringFind(_Symbol, "Boom") != -1 || StringFind(_Symbol, "Crash") != -1);
+   
    if(StringLen(g_lastAIAction) == 0 || g_lastAIAction == "hold" || g_lastAIAction == "attente")
    {
-      Print("🚫 TRADE BLOQUÉ: IA recommandation en attente ('", g_lastAIAction, "') - Attendre signal clair");
-      return false;
+      // Pour Boom/Crash, autoriser si on a des données cohérentes valides
+      if(isBoomCrash && StringLen(g_coherentAnalysis.decision) > 0 && g_coherentAnalysis.lastUpdate > 0)
+      {
+         string decision = g_coherentAnalysis.decision;
+         StringToLower(decision);
+         
+         // Autoriser pour Boom/Crash si décision claire (achat/vente)
+         if(StringFind(decision, "attente") < 0)
+         {
+            if(DebugMode)
+               Print("✅ Boom/Crash: IA en attente mais analyse cohérente valide - Autorisation");
+         }
+         else
+         {
+            if(DebugMode)
+               Print("🚫 TRADE BLOQUÉ: Boom/Crash - IA et Analyse cohérente en attente");
+            return false;
+         }
+      }
+      else
+      {
+         if(DebugMode)
+            Print("🚫 TRADE BLOQUÉ: IA recommandation en attente ('", g_lastAIAction, "') - Attendre signal clair");
+         return false;
+      }
    }
    
    if(StringLen(g_coherentAnalysis.decision) == 0 || StringFind(g_coherentAnalysis.decision, "attente") >= 0)
    {
-      Print("🚫 TRADE BLOQUÉ: Analyse cohérente en attente ('", g_coherentAnalysis.decision, "') - Attendre décision claire");
+      if(DebugMode)
+         Print("🚫 TRADE BLOQUÉ: Analyse cohérente en attente ('", g_coherentAnalysis.decision, "') - Attendre décision claire");
       return false;
    }
    
@@ -1416,6 +1575,9 @@ int OnInit()
       Print("✅ Robot Scalper Double initialisé");
       Print("   URL Serveur IA: ", AI_ServerURL);
       Print("   URL Analyse Cohérente: ", AI_CoherentAnalysisURL);
+      Print("   Phase 2 ML: ", UseMLPrediction ? "ACTIVÉ" : "DÉSACTIVÉ");
+      if(UseMLPrediction)
+         Print("   URL ML Predict: ", AI_MLPredictURL);
       Print("   Lot initial: ", InitialLotSize);
       Print("   TP: ", TakeProfitUSD, " USD");
       Print("   SL: ", StopLossUSD, " USD");
@@ -1551,6 +1713,28 @@ void OnTick()
    
    // Mettre à jour l'analyse cohérente si nécessaire
    UpdateCoherentAnalysis(_Symbol);
+   
+   // Phase 2: Mettre à jour la validation ML si nécessaire
+   if(UseMLPrediction && UseAI_Agent)
+   {
+      static datetime lastMLUpdate = 0;
+      if((TimeCurrent() - lastMLUpdate) >= AI_MLUpdateInterval)
+      {
+         UpdateMLPrediction(_Symbol);
+         lastMLUpdate = TimeCurrent();
+      }
+   }
+   
+   // Phase 2: Mettre à jour les métriques ML si nécessaire
+   if(ShowMLMetrics && UseAI_Agent)
+   {
+      static datetime lastMLMetricsUpdate = 0;
+      if((TimeCurrent() - lastMLMetricsUpdate) >= ML_MetricsUpdateInterval)
+      {
+         UpdateMLMetrics(_Symbol, "M1");
+         lastMLMetricsUpdate = TimeCurrent();
+      }
+   }
    
    // Afficher l'analyse cohérente sur le graphique
    static datetime lastCoherentDisplay = 0;
@@ -12273,6 +12457,14 @@ bool AreAllConditionsAlignedForNewPosition(ENUM_ORDER_TYPE orderType)
          return false;
       }
       
+      // 2b. PHASE 2: VÉRIFIER VALIDATION ML (si activée)
+      if(UseMLPrediction && !IsMLValidationValid(orderType))
+      {
+         if(DebugMode)
+            Print("🚫 DOUBLON BLOQUÉ: Validation ML non valide pour ", EnumToString(orderType));
+         return false;
+      }
+      
       // 3. VÉRIFIER PRÉDICTION VALIDE
       if(!g_predictionValid)
       {
@@ -12498,6 +12690,485 @@ void DisplayCoherentAnalysis()
       ObjectSetInteger(0, tfName, OBJPROP_FONTSIZE, 8);
       ObjectSetInteger(0, tfName, OBJPROP_CORNER, CORNER_LEFT_LOWER);
    }
+}
+
+//+------------------------------------------------------------------+
+//| Phase 2: Mettre à jour la validation ML depuis le serveur        |
+//+------------------------------------------------------------------+
+void UpdateMLPrediction(string symbol)
+{
+   if(!UseMLPrediction || !UseAI_Agent || StringLen(AI_MLPredictURL) == 0)
+      return;
+   
+   // Vérifier le délai entre les mises à jour
+   static datetime lastUpdate = 0;
+   if(TimeCurrent() - lastUpdate < AI_MLUpdateInterval)
+      return;
+   
+   // Préparer la requête GET
+   string url = StringFormat("%s?symbol=%s&timeframes=M1,M5,M15,H1,H4", AI_MLPredictURL, symbol);
+   string headers = "Accept: application/json\r\n";
+   string result_headers = "";
+   uchar data[];
+   uchar result[];
+   ArrayResize(data, 0);
+   
+   // Envoyer la requête
+   int res = WebRequest("GET", url, headers, AI_Timeout_ms, data, result, result_headers);
+   
+   if(res < 200 || res >= 300)
+   {
+      if(DebugMode)
+         Print("❌ Échec de la requête ML: ", res);
+      g_mlValidation.isValid = false;
+      return;
+   }
+   
+   // Convertir la réponse
+   string result_string = CharArrayToString(result);
+   
+   // Parser la réponse JSON
+   if(!ParseMLValidationResponse(result_string, g_mlValidation))
+   {
+      if(DebugMode)
+         Print("❌ Erreur lors de l'analyse de la réponse ML");
+      g_mlValidation.isValid = false;
+      return;
+   }
+   
+   g_mlValidation.lastUpdate = TimeCurrent();
+   g_mlValidation.isValid = true;
+   lastUpdate = TimeCurrent();
+   
+   if(DebugMode)
+      Print("✅ Validation ML mise à jour: ", g_mlValidation.consensus, 
+            " (Force: ", DoubleToString(g_mlValidation.consensusStrength, 1), 
+            "%, Confiance: ", DoubleToString(g_mlValidation.avgConfidence, 1), "%)");
+}
+
+//+------------------------------------------------------------------+
+//| Phase 2: Parser la réponse JSON de validation ML                 |
+//+------------------------------------------------------------------+
+bool ParseMLValidationResponse(const string &jsonStr, MLValidationData &mlData)
+{
+   // Réinitialiser
+   mlData.valid = false;
+   mlData.consensus = "";
+   mlData.consensusStrength = 0.0;
+   mlData.avgConfidence = 0.0;
+   mlData.buyVotes = 0;
+   mlData.sellVotes = 0;
+   mlData.neutralVotes = 0;
+   
+   // Chercher ml_validation dans la réponse
+   int mlValPos = StringFind(jsonStr, "\"ml_validation\"");
+   if(mlValPos < 0)
+      return false;
+   
+   // Extraire valid
+   int validPos = StringFind(jsonStr, "\"valid\"", mlValPos);
+   if(validPos >= 0)
+   {
+      int colonPos = StringFind(jsonStr, ":", validPos);
+      int commaPos = StringFind(jsonStr, ",", colonPos);
+      if(commaPos < 0) commaPos = StringFind(jsonStr, "}", colonPos);
+      if(colonPos >= 0 && commaPos > colonPos)
+      {
+         string validStr = StringSubstr(jsonStr, colonPos + 1, commaPos - colonPos - 1);
+         StringTrimLeft(validStr);
+         StringTrimRight(validStr);
+         mlData.valid = (StringFind(validStr, "true") >= 0);
+      }
+   }
+   
+   // Extraire consensus
+   int consensusPos = StringFind(jsonStr, "\"consensus\"", mlValPos);
+   if(consensusPos >= 0)
+   {
+      int quoteStart = StringFind(jsonStr, "\"", consensusPos + 11);
+      int quoteEnd = StringFind(jsonStr, "\"", quoteStart + 1);
+      if(quoteStart >= 0 && quoteEnd > quoteStart)
+      {
+         mlData.consensus = StringSubstr(jsonStr, quoteStart + 1, quoteEnd - quoteStart - 1);
+         StringToLower(mlData.consensus);
+      }
+   }
+   
+   // Extraire consensus_strength
+   int strengthPos = StringFind(jsonStr, "\"consensus_strength\"", mlValPos);
+   if(strengthPos >= 0)
+   {
+      int colonPos = StringFind(jsonStr, ":", strengthPos);
+      int commaPos = StringFind(jsonStr, ",", colonPos);
+      if(commaPos < 0) commaPos = StringFind(jsonStr, "}", colonPos);
+      if(colonPos >= 0 && commaPos > colonPos)
+      {
+         string strengthStr = StringSubstr(jsonStr, colonPos + 1, commaPos - colonPos - 1);
+         StringTrimLeft(strengthStr);
+         StringTrimRight(strengthStr);
+         mlData.consensusStrength = StringToDouble(strengthStr);
+      }
+   }
+   
+   // Extraire avg_confidence
+   int confPos = StringFind(jsonStr, "\"avg_confidence\"", mlValPos);
+   if(confPos >= 0)
+   {
+      int colonPos = StringFind(jsonStr, ":", confPos);
+      int commaPos = StringFind(jsonStr, ",", colonPos);
+      if(commaPos < 0) commaPos = StringFind(jsonStr, "}", colonPos);
+      if(colonPos >= 0 && commaPos > colonPos)
+      {
+         string confStr = StringSubstr(jsonStr, colonPos + 1, commaPos - colonPos - 1);
+         StringTrimLeft(confStr);
+         StringTrimRight(confStr);
+         mlData.avgConfidence = StringToDouble(confStr);
+      }
+   }
+   
+   // Extraire buy_votes, sell_votes, neutral_votes
+   int buyVotesPos = StringFind(jsonStr, "\"buy_votes\"", mlValPos);
+   if(buyVotesPos >= 0)
+   {
+      int colonPos = StringFind(jsonStr, ":", buyVotesPos);
+      int commaPos = StringFind(jsonStr, ",", colonPos);
+      if(commaPos < 0) commaPos = StringFind(jsonStr, "}", colonPos);
+      if(colonPos >= 0 && commaPos > colonPos)
+      {
+         string votesStr = StringSubstr(jsonStr, colonPos + 1, commaPos - colonPos - 1);
+         StringTrimLeft(votesStr);
+         StringTrimRight(votesStr);
+         mlData.buyVotes = (int)StringToInteger(votesStr);
+      }
+   }
+   
+   int sellVotesPos = StringFind(jsonStr, "\"sell_votes\"", mlValPos);
+   if(sellVotesPos >= 0)
+   {
+      int colonPos = StringFind(jsonStr, ":", sellVotesPos);
+      int commaPos = StringFind(jsonStr, ",", colonPos);
+      if(commaPos < 0) commaPos = StringFind(jsonStr, "}", colonPos);
+      if(colonPos >= 0 && commaPos > colonPos)
+      {
+         string votesStr = StringSubstr(jsonStr, colonPos + 1, commaPos - colonPos - 1);
+         StringTrimLeft(votesStr);
+         StringTrimRight(votesStr);
+         mlData.sellVotes = (int)StringToInteger(votesStr);
+      }
+   }
+   
+   int neutralVotesPos = StringFind(jsonStr, "\"neutral_votes\"", mlValPos);
+   if(neutralVotesPos >= 0)
+   {
+      int colonPos = StringFind(jsonStr, ":", neutralVotesPos);
+      int commaPos = StringFind(jsonStr, ",", colonPos);
+      if(commaPos < 0) commaPos = StringFind(jsonStr, "}", colonPos);
+      if(colonPos >= 0 && commaPos > colonPos)
+      {
+         string votesStr = StringSubstr(jsonStr, colonPos + 1, commaPos - colonPos - 1);
+         StringTrimLeft(votesStr);
+         StringTrimRight(votesStr);
+         mlData.neutralVotes = (int)StringToInteger(votesStr);
+      }
+   }
+   
+   return true;
+}
+
+//+------------------------------------------------------------------+
+//| Phase 2: Vérifier si la validation ML est valide pour un ordre   |
+//+------------------------------------------------------------------+
+bool IsMLValidationValid(ENUM_ORDER_TYPE orderType)
+{
+   if(!UseMLPrediction || !g_mlValidation.isValid)
+      return true; // Si ML désactivé ou données invalides, autoriser (fallback)
+   
+   // Vérifier que les données sont récentes (< 10 minutes)
+   if((TimeCurrent() - g_mlValidation.lastUpdate) > 600)
+   {
+      if(DebugMode)
+         Print("⚠️ Données ML trop anciennes (", TimeCurrent() - g_mlValidation.lastUpdate, " secondes)");
+      return true; // Autoriser si données trop anciennes (fallback)
+   }
+   
+   // Vérifier que la validation ML est valide
+   if(!g_mlValidation.valid)
+   {
+      if(DebugMode)
+         Print("🚫 Validation ML non valide");
+      return false;
+   }
+   
+   // Vérifier la force du consensus
+   if(g_mlValidation.consensusStrength < ML_MinConsensusStrength * 100.0)
+   {
+      if(DebugMode)
+         Print("🚫 Consensus ML trop faible: ", DoubleToString(g_mlValidation.consensusStrength, 1), 
+               "% (minimum: ", DoubleToString(ML_MinConsensusStrength * 100.0, 1), "%)");
+      return false;
+   }
+   
+   // Vérifier la confiance moyenne
+   if(g_mlValidation.avgConfidence < ML_MinConfidence * 100.0)
+   {
+      if(DebugMode)
+         Print("🚫 Confiance ML trop faible: ", DoubleToString(g_mlValidation.avgConfidence, 1), 
+               "% (minimum: ", DoubleToString(ML_MinConfidence * 100.0, 1), "%)");
+      return false;
+   }
+   
+   // Vérifier que le consensus correspond à la direction de l'ordre
+   string consensus = g_mlValidation.consensus;
+   StringToLower(consensus);
+   
+   bool isBuy = (StringFind(consensus, "buy") >= 0);
+   bool isSell = (StringFind(consensus, "sell") >= 0);
+   bool isNeutral = (StringFind(consensus, "neutral") >= 0);
+   
+   if(orderType == ORDER_TYPE_BUY && !isBuy)
+   {
+      if(DebugMode)
+         Print("🚫 Consensus ML ne correspond pas à BUY: ", g_mlValidation.consensus);
+      return false;
+   }
+   
+   if(orderType == ORDER_TYPE_SELL && !isSell)
+   {
+      if(DebugMode)
+         Print("🚫 Consensus ML ne correspond pas à SELL: ", g_mlValidation.consensus);
+      return false;
+   }
+   
+   // Validation réussie
+   if(DebugMode)
+      Print("✅ Validation ML OK: ", g_mlValidation.consensus, 
+            " (Force: ", DoubleToString(g_mlValidation.consensusStrength, 1), 
+            "%, Confiance: ", DoubleToString(g_mlValidation.avgConfidence, 1), "%)");
+   
+   return true;
+}
+
+//+------------------------------------------------------------------+
+//| Phase 2: Mettre à jour les métriques ML depuis le serveur         |
+//+------------------------------------------------------------------+
+void UpdateMLMetrics(string symbol, string timeframe = "M1")
+{
+   if(!ShowMLMetrics || !UseAI_Agent || StringLen(AI_MLMetricsURL) == 0)
+      return;
+   
+   // Vérifier le délai entre les mises à jour
+   static datetime lastUpdate = 0;
+   if(TimeCurrent() - lastUpdate < ML_MetricsUpdateInterval)
+      return;
+   
+   // Préparer la requête GET
+   string url = StringFormat("%s?symbol=%s&timeframe=%s", AI_MLMetricsURL, symbol, timeframe);
+   string headers = "Accept: application/json\r\n";
+   string result_headers = "";
+   uchar data[];
+   uchar result[];
+   ArrayResize(data, 0);
+   
+   // Envoyer la requête
+   int res = WebRequest("GET", url, headers, AI_Timeout_ms, data, result, result_headers);
+   
+   if(res < 200 || res >= 300)
+   {
+      if(DebugMode)
+         Print("❌ Échec de la requête métriques ML: ", res);
+      g_mlMetrics.isValid = false;
+      return;
+   }
+   
+   // Convertir la réponse
+   string result_string = CharArrayToString(result);
+   
+   // Parser la réponse JSON
+   if(!ParseMLMetricsResponse(result_string, g_mlMetrics))
+   {
+      if(DebugMode)
+         Print("❌ Erreur lors de l'analyse de la réponse métriques ML");
+      g_mlMetrics.isValid = false;
+      return;
+   }
+   
+   g_mlMetrics.lastUpdate = TimeCurrent();
+   g_mlMetrics.isValid = true;
+   lastUpdate = TimeCurrent();
+   
+   // Afficher les métriques
+   if(ShowMLMetrics)
+   {
+      Print("═══════════════════════════════════════════════════════");
+      Print("📊 MÉTRIQUES ML - ", symbol, " (", timeframe, ")");
+      Print("   Meilleur modèle: ", g_mlMetrics.bestModel);
+      Print("   Accuracy: ", DoubleToString(g_mlMetrics.bestAccuracy, 2), "%");
+      Print("   F1 Score: ", DoubleToString(g_mlMetrics.bestF1Score, 2), "%");
+      Print("   RandomForest: ", DoubleToString(g_mlMetrics.randomForestAccuracy, 2), "%");
+      Print("   GradientBoosting: ", DoubleToString(g_mlMetrics.gradientBoostingAccuracy, 2), "%");
+      Print("   MLP: ", DoubleToString(g_mlMetrics.mlpAccuracy, 2), "%");
+      Print("   Échantillons: ", g_mlMetrics.trainingSamples, " train / ", g_mlMetrics.testSamples, " test");
+      Print("   Confiance suggérée: ", DoubleToString(g_mlMetrics.suggestedMinConfidence, 2), "%");
+      Print("═══════════════════════════════════════════════════════");
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Phase 2: Parser la réponse JSON des métriques ML                  |
+//+------------------------------------------------------------------+
+bool ParseMLMetricsResponse(const string &jsonStr, MLMetricsData &metrics)
+{
+   // Réinitialiser
+   metrics.bestModel = "";
+   metrics.bestAccuracy = 0.0;
+   metrics.bestF1Score = 0.0;
+   metrics.randomForestAccuracy = 0.0;
+   metrics.gradientBoostingAccuracy = 0.0;
+   metrics.mlpAccuracy = 0.0;
+   metrics.trainingSamples = 0;
+   metrics.testSamples = 0;
+   metrics.suggestedMinConfidence = 0.0;
+   
+   // Extraire best_model
+   int bestModelPos = StringFind(jsonStr, "\"best_model\"");
+   if(bestModelPos >= 0)
+   {
+      int quoteStart = StringFind(jsonStr, "\"", bestModelPos + 12);
+      int quoteEnd = StringFind(jsonStr, "\"", quoteStart + 1);
+      if(quoteStart >= 0 && quoteEnd > quoteStart)
+      {
+         metrics.bestModel = StringSubstr(jsonStr, quoteStart + 1, quoteEnd - quoteStart - 1);
+      }
+   }
+   
+   // Extraire les métriques de chaque modèle
+   int metricsPos = StringFind(jsonStr, "\"metrics\"");
+   if(metricsPos < 0)
+      return false;
+   
+   // RandomForest
+   int rfPos = StringFind(jsonStr, "\"random_forest\"", metricsPos);
+   if(rfPos >= 0)
+   {
+      int accPos = StringFind(jsonStr, "\"accuracy\"", rfPos);
+      if(accPos >= 0)
+      {
+         int colonPos = StringFind(jsonStr, ":", accPos);
+         int commaPos = StringFind(jsonStr, ",", colonPos);
+         if(commaPos < 0) commaPos = StringFind(jsonStr, "}", colonPos);
+         if(colonPos >= 0 && commaPos > colonPos)
+         {
+            string accStr = StringSubstr(jsonStr, colonPos + 1, commaPos - colonPos - 1);
+            StringTrimLeft(accStr);
+            StringTrimRight(accStr);
+            metrics.randomForestAccuracy = StringToDouble(accStr);
+         }
+      }
+   }
+   
+   // GradientBoosting
+   int gbPos = StringFind(jsonStr, "\"gradient_boosting\"", metricsPos);
+   if(gbPos >= 0)
+   {
+      int accPos = StringFind(jsonStr, "\"accuracy\"", gbPos);
+      if(accPos >= 0)
+      {
+         int colonPos = StringFind(jsonStr, ":", accPos);
+         int commaPos = StringFind(jsonStr, ",", colonPos);
+         if(commaPos < 0) commaPos = StringFind(jsonStr, "}", colonPos);
+         if(colonPos >= 0 && commaPos > colonPos)
+         {
+            string accStr = StringSubstr(jsonStr, colonPos + 1, commaPos - colonPos - 1);
+            StringTrimLeft(accStr);
+            StringTrimRight(accStr);
+            metrics.gradientBoostingAccuracy = StringToDouble(accStr);
+         }
+      }
+   }
+   
+   // MLP
+   int mlpPos = StringFind(jsonStr, "\"mlp\"", metricsPos);
+   if(mlpPos >= 0)
+   {
+      int accPos = StringFind(jsonStr, "\"accuracy\"", mlpPos);
+      if(accPos >= 0)
+      {
+         int colonPos = StringFind(jsonStr, ":", accPos);
+         int commaPos = StringFind(jsonStr, ",", colonPos);
+         if(commaPos < 0) commaPos = StringFind(jsonStr, "}", colonPos);
+         if(colonPos >= 0 && commaPos > colonPos)
+         {
+            string accStr = StringSubstr(jsonStr, colonPos + 1, commaPos - colonPos - 1);
+            StringTrimLeft(accStr);
+            StringTrimRight(accStr);
+            metrics.mlpAccuracy = StringToDouble(accStr);
+         }
+      }
+   }
+   
+   // Déterminer le meilleur modèle
+   double maxAcc = MathMax(MathMax(metrics.randomForestAccuracy, metrics.gradientBoostingAccuracy), metrics.mlpAccuracy);
+   metrics.bestAccuracy = maxAcc;
+   
+   if(metrics.randomForestAccuracy == maxAcc)
+      metrics.bestModel = "random_forest";
+   else if(metrics.gradientBoostingAccuracy == maxAcc)
+      metrics.bestModel = "gradient_boosting";
+   else if(metrics.mlpAccuracy == maxAcc)
+      metrics.bestModel = "mlp";
+   
+   // Extraire training_samples et test_samples
+   int trainSamplesPos = StringFind(jsonStr, "\"training_samples\"");
+   if(trainSamplesPos >= 0)
+   {
+      int colonPos = StringFind(jsonStr, ":", trainSamplesPos);
+      int commaPos = StringFind(jsonStr, ",", colonPos);
+      if(commaPos < 0) commaPos = StringFind(jsonStr, "}", colonPos);
+      if(colonPos >= 0 && commaPos > colonPos)
+      {
+         string samplesStr = StringSubstr(jsonStr, colonPos + 1, commaPos - colonPos - 1);
+         StringTrimLeft(samplesStr);
+         StringTrimRight(samplesStr);
+         metrics.trainingSamples = (int)StringToInteger(samplesStr);
+      }
+   }
+   
+   int testSamplesPos = StringFind(jsonStr, "\"test_samples\"");
+   if(testSamplesPos >= 0)
+   {
+      int colonPos = StringFind(jsonStr, ":", testSamplesPos);
+      int commaPos = StringFind(jsonStr, ",", colonPos);
+      if(commaPos < 0) commaPos = StringFind(jsonStr, "}", colonPos);
+      if(colonPos >= 0 && commaPos > colonPos)
+      {
+         string samplesStr = StringSubstr(jsonStr, colonPos + 1, commaPos - colonPos - 1);
+         StringTrimLeft(samplesStr);
+         StringTrimRight(samplesStr);
+         metrics.testSamples = (int)StringToInteger(samplesStr);
+      }
+   }
+   
+   // Extraire suggestedMinConfidence depuis recommendations
+   int recPos = StringFind(jsonStr, "\"recommendations\"");
+   if(recPos >= 0)
+   {
+      int minConfPos = StringFind(jsonStr, "\"min_confidence\"", recPos);
+      if(minConfPos >= 0)
+      {
+         int colonPos = StringFind(jsonStr, ":", minConfPos);
+         int commaPos = StringFind(jsonStr, ",", colonPos);
+         if(commaPos < 0) commaPos = StringFind(jsonStr, "}", colonPos);
+         if(colonPos >= 0 && commaPos > colonPos)
+         {
+            string confStr = StringSubstr(jsonStr, colonPos + 1, commaPos - colonPos - 1);
+            StringTrimLeft(confStr);
+            StringTrimRight(confStr);
+            metrics.suggestedMinConfidence = StringToDouble(confStr);
+         }
+      }
+   }
+   
+   return true;
 }
 
 //+------------------------------------------------------------------+
