@@ -566,8 +566,8 @@ void DiagnoseBoomCrashTrading()
    }
    // 5. Vérifier les restrictions de direction
    Print("🚦 Restrictions Boom/Crash:");
-   Print("   BUY autorisé sur Crash: ", IsDirectionAllowedForBoomCrash(ORDER_TYPE_BUY) ? "❌ NON" : "✅ OUI");
-   Print("   SELL autorisé sur Boom: ", IsDirectionAllowedForBoomCrash(ORDER_TYPE_SELL) ? "❌ NON" : "✅ OUI");
+   Print("   BUY autorisé sur Crash: ", IsDirectionAllowedForBoomCrash(ORDER_TYPE_BUY) ? "✅ OUI" : "❌ NON");
+   Print("   SELL autorisé sur Boom: ", IsDirectionAllowedForBoomCrash(ORDER_TYPE_SELL) ? "✅ OUI" : "❌ NON");
    
    // 6. Vérifier si une position est déjà ouverte pour CE SYMBOLE
    // 6. Vérifier les paramètres de configuration
@@ -695,19 +695,24 @@ bool HasStrongSignal(string &signalType)
    
    // VÉRIFICATION TEMPORELLE: Plus flexible pour Boom/Crash
    // MODIFIÉ: Si analyse cohérente valide et récente, ignorer cette vérification
+   // Augmenter la fenêtre de validité pour Boom/Crash (5 minutes au lieu de 60 secondes)
+   int coherentAnalysisValidityWindow = isBoomCrash ? 300 : 60; // 5 minutes pour Boom/Crash, 1 minute pour autres
    bool hasValidCoherentAnalysisRecent = (StringLen(g_coherentAnalysis.decision) > 0 && 
                                          g_coherentAnalysis.lastUpdate > 0 &&
-                                         (TimeCurrent() - g_coherentAnalysis.lastUpdate) <= 60);
+                                         (TimeCurrent() - g_coherentAnalysis.lastUpdate) <= coherentAnalysisValidityWindow);
    
-   if(!hasValidCoherentAnalysisRecent && g_lastAITime > 0 && (TimeCurrent() - g_lastAITime) < (isBoomCrash ? 3 : 30))
+   // Si analyse cohérente valide, prioriser sur l'IA même si IA en attente
+   if(hasValidCoherentAnalysisRecent)
+   {
+      if(DebugMode)
+         Print("✅ Analyse cohérente récente disponible (", (TimeCurrent() - g_coherentAnalysis.lastUpdate), "s) - Priorité sur IA");
+      // Continuer avec l'analyse cohérente même si IA en attente
+   }
+   else if(g_lastAITime > 0 && (TimeCurrent() - g_lastAITime) < (isBoomCrash ? 3 : 30))
    {
       if(DebugMode)
          Print("⏰ Signal IA trop récent et analyse cohérente non disponible - Attendre ", isBoomCrash ? "3" : "30", " secondes de plus");
       return false;
-   }
-   else if(hasValidCoherentAnalysisRecent && DebugMode)
-   {
-      Print("✅ Analyse cohérente récente disponible - Ignore vérification temporelle IA");
    }
    
    // VÉRIFICATION DE COHÉRENCE: Plus permissif pour Boom/Crash
@@ -859,6 +864,13 @@ bool HasStrongSignal(string &signalType)
          
          if(StringFind(decision, "achat") >= 0)
          {
+            // Vérifier si BUY est autorisé pour ce symbole (Boom/Crash)
+            if(isBoomCrash && !IsDirectionAllowedForBoomCrash(ORDER_TYPE_BUY))
+            {
+               if(DebugMode)
+                  Print("⚠️ Signal ACHAT FORT détecté mais non autorisé pour ", _Symbol, " (restriction Boom/Crash)");
+               return false;
+            }
             signalType = "ACHAT FORT";
             if(DebugMode)
                Print("✅ Signal ACHAT FORT détecté via analyse cohérente (conf: ", DoubleToString(cohConf * 100, 1), "%)");
@@ -866,6 +878,13 @@ bool HasStrongSignal(string &signalType)
          }
          else if(StringFind(decision, "vente") >= 0)
          {
+            // Vérifier si SELL est autorisé pour ce symbole (Boom/Crash)
+            if(isBoomCrash && !IsDirectionAllowedForBoomCrash(ORDER_TYPE_SELL))
+            {
+               if(DebugMode)
+                  Print("⚠️ Signal VENTE FORTE détecté mais non autorisé pour ", _Symbol, " (restriction Boom/Crash)");
+               return false;
+            }
             signalType = "VENTE FORTE";
             if(DebugMode)
                Print("✅ Signal VENTE FORTE détecté via analyse cohérente (conf: ", DoubleToString(cohConf * 100, 1), "%)");
@@ -1340,23 +1359,49 @@ bool ExecuteBoomCrashSpikeTrade(ENUM_ORDER_TYPE orderType)
    SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL, stopsLevel);
    double minStopDistance = (double)stopsLevel * point;
    
+   // DIAGNOSTIC COMPLET des paramètres du courtier
+   if(DebugMode)
+   {
+      Print("🔍 DIAGNOSTIC STOPS LEVEL:");
+      Print("   Symbol: ", _Symbol);
+      Print("   stopsLevel: ", stopsLevel);
+      Print("   point: ", DoubleToString(point, _Digits));
+      Print("   minStopDistance (brute): ", DoubleToString(minStopDistance, _Digits));
+      Print("   BoomCrashSpikeTP: ", DoubleToString(BoomCrashSpikeTP, _Digits));
+      Print("   CurrentPrice: ", DoubleToString(currentPrice, _Digits));
+   }
+   
+   // CORRECTION ROBUSTE: Si stopsLevel est 0 ou trop faible, utiliser une valeur par défaut sécurisée
+   if(stopsLevel <= 0 || minStopDistance <= 0)
+   {
+      // Valeurs par défaut sécurisées pour Boom/Crash
+      if(StringFind(_Symbol, "Boom") != -1 || StringFind(_Symbol, "Crash") != -1)
+      {
+         stopsLevel = 50; // 50 points minimum pour Boom/Crash
+         if(StringFind(_Symbol, "1000") != -1)
+            stopsLevel = 100; // 100 points pour Crash 1000 (spreads énormes)
+      }
+      else
+      {
+         stopsLevel = 10; // 10 points pour autres symboles
+      }
+      minStopDistance = stopsLevel * point;
+      
+      if(DebugMode)
+         Print("⚠️ stopsLevel invalide (", stopsLevel, ") - Utilisation valeur par défaut: ", stopsLevel, " points");
+   }
+   
    // S'assurer que les distances respectent les minimums du courtier
    double tpDistance = MathAbs(optimalTP - currentPrice);
    double slDistance = MathAbs(optimalSL - currentPrice);
    
-   tpDistance = fmax(tpDistance, minStopDistance);
-   slDistance = fmax(slDistance, minStopDistance);
-   
-   // Limiter les distances pour éviter les ordres trop lointains
-   double maxAllowedDistance = BoomCrashSpikeTP * 2; // Maximum 2x la distance de spike
-   tpDistance = fmin(tpDistance, maxAllowedDistance);
-   slDistance = fmin(slDistance, maxAllowedDistance);
-   
    if(DebugMode)
-      Print("📍 Calcul SL/TP optimisés: Point=", DoubleToString(point, digits), 
-            " MinStopDistance=", DoubleToString(minStopDistance, digits),
-            " TP Distance=", DoubleToString(tpDistance, digits),
-            " SL Distance=", DoubleToString(slDistance, digits));
+   {
+      Print("📍 Distances initiales:");
+      Print("   tpDistance: ", DoubleToString(tpDistance, _Digits), " (", DoubleToString(tpDistance / point, 1), " points)");
+      Print("   slDistance: ", DoubleToString(slDistance, _Digits), " (", DoubleToString(slDistance / point, 1), " points)");
+      Print("   minStopDistance: ", DoubleToString(minStopDistance, _Digits), " (", DoubleToString(minStopDistance / point, 1), " points)");
+   }
    
    // Distance de spike plus réaliste pour Boom/Crash (en points)
    double spikeDistancePoints = BoomCrashSpikeTP / point; // Convertir en points
@@ -1364,18 +1409,60 @@ bool ExecuteBoomCrashSpikeTrade(ENUM_ORDER_TYPE orderType)
    // S'assurer que la distance est au moins le minimum requis + marge de sécurité
    double finalDistance = MathMax(spikeDistancePoints, (stopsLevel * 2)) * point;
    
+   // Limiter les distances pour éviter les ordres trop lointains
+   double maxAllowedDistance = BoomCrashSpikeTP * 2; // Maximum 2x la distance de spike
+   
+   // Ajuster les distances pour respecter les minimums et maximums
+   tpDistance = fmax(tpDistance, minStopDistance);
+   slDistance = fmax(slDistance, minStopDistance);
+   tpDistance = fmin(tpDistance, maxAllowedDistance);
+   slDistance = fmin(slDistance, maxAllowedDistance);
+   
+   if(DebugMode)
+   {
+      Print("📍 Distances ajustées:");
+      Print("   tpDistance finale: ", DoubleToString(tpDistance, _Digits), " (", DoubleToString(tpDistance / point, 1), " points)");
+      Print("   slDistance finale: ", DoubleToString(slDistance, _Digits), " (", DoubleToString(slDistance / point, 1), " points)");
+      Print("   maxAllowedDistance: ", DoubleToString(maxAllowedDistance, _Digits), " (", DoubleToString(maxAllowedDistance / point, 1), " points)");
+   }
+   
+   if(DebugMode)
+      Print("📍 Calcul SL/TP optimisés: Point=", DoubleToString(point, digits), 
+            " MinStopDistance=", DoubleToString(minStopDistance, digits),
+            " TP Distance=", DoubleToString(tpDistance, digits),
+            " SL Distance=", DoubleToString(slDistance, digits));
+   
    if(DebugMode)
       Print("📍 Calcul SL/TP: Point=", DoubleToString(point, digits), 
             " MinStopDistance=", DoubleToString(minStopDistance, digits),
             " SpikeDistancePoints=", DoubleToString(spikeDistancePoints, 2),
             " FinalDistance=", DoubleToString(finalDistance, digits));
    
-   // UTILISER les TP/SL optimisés avec support/resistance
+   // RECALCULER les TP/SL optimisés en utilisant les distances ajustées
    if(orderType == ORDER_TYPE_BUY)
    {
-      // Pour BUY: TP optimisé vers resistance, SL optimisé vers support
-      request.tp = NormalizeDouble(optimalTP, digits);
-      request.sl = NormalizeDouble(optimalSL, digits);
+      // Pour BUY: TP vers le haut, SL vers le bas
+      // Utiliser la distance ajustée tout en respectant les niveaux optimaux si possible
+      double newTP = currentPrice + tpDistance;
+      double newSL = currentPrice - slDistance;
+      
+      // Si les niveaux optimaux sont valides et respectent les distances minimales, les utiliser
+      if(optimalTP > currentPrice && MathAbs(optimalTP - currentPrice) >= minStopDistance)
+         newTP = optimalTP;
+      if(optimalSL < currentPrice && MathAbs(optimalSL - currentPrice) >= minStopDistance)
+         newSL = optimalSL;
+      
+      // S'assurer que les distances finales respectent toujours les minimums
+      double finalTPDistance = MathAbs(newTP - currentPrice);
+      double finalSLDistance = MathAbs(newSL - currentPrice);
+      
+      if(finalTPDistance < minStopDistance)
+         newTP = currentPrice + minStopDistance;
+      if(finalSLDistance < minStopDistance)
+         newSL = currentPrice - minStopDistance;
+      
+      request.tp = NormalizeDouble(newTP, digits);
+      request.sl = NormalizeDouble(newSL, digits);
       
       if(DebugMode)
       {
@@ -1386,9 +1473,28 @@ bool ExecuteBoomCrashSpikeTrade(ENUM_ORDER_TYPE orderType)
    }
    else // SELL
    {
-      // Pour SELL: TP optimisé vers support, SL optimisé vers resistance
-      request.tp = NormalizeDouble(optimalTP, digits);
-      request.sl = NormalizeDouble(optimalSL, digits);
+      // Pour SELL: TP vers le bas, SL vers le haut
+      // Utiliser la distance ajustée tout en respectant les niveaux optimaux si possible
+      double newTP = currentPrice - tpDistance;
+      double newSL = currentPrice + slDistance;
+      
+      // Si les niveaux optimaux sont valides et respectent les distances minimales, les utiliser
+      if(optimalTP < currentPrice && MathAbs(optimalTP - currentPrice) >= minStopDistance)
+         newTP = optimalTP;
+      if(optimalSL > currentPrice && MathAbs(optimalSL - currentPrice) >= minStopDistance)
+         newSL = optimalSL;
+      
+      // S'assurer que les distances finales respectent toujours les minimums
+      double finalTPDistance = MathAbs(newTP - currentPrice);
+      double finalSLDistance = MathAbs(newSL - currentPrice);
+      
+      if(finalTPDistance < minStopDistance)
+         newTP = currentPrice - minStopDistance;
+      if(finalSLDistance < minStopDistance)
+         newSL = currentPrice + minStopDistance;
+      
+      request.tp = NormalizeDouble(newTP, digits);
+      request.sl = NormalizeDouble(newSL, digits);
       
       if(DebugMode)
       {
