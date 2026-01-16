@@ -7330,6 +7330,9 @@ int DetectUSBreakout()
       g_US_BreakoutDone = true;
       if(DebugMode)
          Print("🚀 BREAKOUT US DÉTECTÉ (HAUT): Prix=", DoubleToString(closeM1[0], _Digits), " > High=", DoubleToString(g_US_High, _Digits));
+      
+      // AFFICHAGE GRAPHIQUE du breakout US HAUT
+      DrawUSBreakoutArrow(true, closeM1[0], g_US_High, TimeCurrent());
       return 1;
    }
    
@@ -7340,10 +7343,110 @@ int DetectUSBreakout()
       g_US_BreakoutDone = true;
       if(DebugMode)
          Print("🚀 BREAKOUT US DÉTECTÉ (BAS): Prix=", DoubleToString(closeM1[0], _Digits), " < Low=", DoubleToString(g_US_Low, _Digits));
+      
+      // AFFICHAGE GRAPHIQUE du breakout US BAS
+      DrawUSBreakoutArrow(false, closeM1[0], g_US_Low, TimeCurrent());
       return -1;
    }
    
    return 0;
+}
+
+//+------------------------------------------------------------------+
+//| Dessiner les flèches de breakout US sur le graphique           |
+//+------------------------------------------------------------------+
+void DrawUSBreakoutArrow(bool isBreakoutUp, double price, double level, datetime time)
+{
+   // Nettoyer les anciens objets de breakout US
+   CleanUSBreakoutObjects();
+   
+   string prefix = "US_Breakout_";
+   datetime objTime = time;
+   double arrowPrice = price;
+   
+   // Couleur selon la direction
+   color arrowColor = isBreakoutUp ? clrGreen : clrRed;
+   string arrowSymbol = isBreakoutUp ? "233" : "234"; // Codes Wingdings pour flèches haut/bas
+   string direction = isBreakoutUp ? "HAUT" : "BAS";
+   
+   // 1. Dessiner la flèche de breakout
+   string arrowName = prefix + "Arrow_" + IntegerToString(ChartID()) + "_" + IntegerToString(objTime);
+   if(ObjectCreate(0, arrowName, OBJ_ARROW, 0, objTime, arrowPrice))
+   {
+      ObjectSetInteger(0, arrowName, OBJPROP_COLOR, arrowColor);
+      ObjectSetInteger(0, arrowName, OBJPROP_WIDTH, 3);
+      ObjectSetInteger(0, arrowName, OBJPROP_ARROWCODE, StringToInteger(arrowSymbol));
+      ObjectSetInteger(0, arrowName, OBJPROP_BACK, false);
+      ObjectSetString(0, arrowName, OBJPROP_TOOLTIP, "Breakout US " + direction + " à " + DoubleToString(price, _Digits));
+   }
+   
+   // 2. Dessiner la ligne de niveau cassé
+   string lineName = prefix + "Level_" + IntegerToString(ChartID()) + "_" + IntegerToString(objTime);
+   if(ObjectCreate(0, lineName, OBJ_HLINE, 0, objTime, level))
+   {
+      ObjectSetInteger(0, lineName, OBJPROP_COLOR, clrBlue);
+      ObjectSetInteger(0, lineName, OBJPROP_WIDTH, 2);
+      ObjectSetInteger(0, lineName, OBJPROP_STYLE, STYLE_DASH);
+      ObjectSetInteger(0, lineName, OBJPROP_BACK, true);
+      ObjectSetString(0, lineName, OBJPROP_TOOLTIP, "Niveau US " + direction + " cassé: " + DoubleToString(level, _Digits));
+   }
+   
+   // 3. Ajouter un label avec le prix et la direction
+   string labelName = prefix + "Label_" + IntegerToString(ChartID()) + "_" + IntegerToString(objTime);
+   double labelPrice = isBreakoutUp ? arrowPrice + (20 * _Point) : arrowPrice - (20 * _Point);
+   
+   if(ObjectCreate(0, labelName, OBJ_TEXT, 0, objTime + 60, labelPrice))
+   {
+      ObjectSetString(0, labelName, OBJPROP_TEXT, "🚀 US " + direction + "\n" + DoubleToString(price, _Digits));
+      ObjectSetInteger(0, labelName, OBJPROP_COLOR, arrowColor);
+      ObjectSetInteger(0, labelName, OBJPROP_FONTSIZE, 8);
+      ObjectSetInteger(0, labelName, OBJPROP_ANCHOR, isBreakoutUp ? ANCHOR_LEFT_UPPER : ANCHOR_LEFT_LOWER);
+      ObjectSetInteger(0, labelName, OBJPROP_BACK, false);
+   }
+   
+   // 4. Ajouter un rectangle de zone breakout
+   string rectName = prefix + "Rect_" + IntegerToString(ChartID()) + "_" + IntegerToString(objTime);
+   datetime rectTime1 = objTime - 300; // 5 minutes avant
+   datetime rectTime2 = objTime + 300;  // 5 minutes après
+   double rectPrice1 = isBreakoutUp ? level : price;
+   double rectPrice2 = isBreakoutUp ? price : level;
+   
+   if(ObjectCreate(0, rectName, OBJ_RECTANGLE, 0, rectTime1, rectPrice1, rectTime2, rectPrice2))
+   {
+      ObjectSetInteger(0, rectName, OBJPROP_COLOR, arrowColor);
+      ObjectSetInteger(0, rectName, OBJPROP_WIDTH, 1);
+      ObjectSetInteger(0, rectName, OBJPROP_BACK, true);
+      ObjectSetInteger(0, rectName, OBJPROP_FILL, true);
+      ObjectSetInteger(0, rectName, OBJPROP_BGCOLOR, arrowColor);
+      ObjectSetInteger(0, rectName, OBJPROP_STYLE, STYLE_DOT);
+   }
+   
+   if(DebugMode)
+      Print("📈 Breakout US affiché sur graphique: ", direction, " à ", DoubleToString(price, _Digits));
+}
+
+//+------------------------------------------------------------------+
+//| Nettoyer les anciens objets de breakout US                      |
+//+------------------------------------------------------------------+
+void CleanUSBreakoutObjects()
+{
+   string prefix = "US_Breakout_";
+   
+   // Supprimer les objets plus anciens que 30 minutes
+   datetime cutoffTime = TimeCurrent() - 1800; // 30 minutes
+   
+   for(int i = ObjectsTotal(0, -1, -1) - 1; i >= 0; i--)
+   {
+      string objName = ObjectName(0, i, -1, -1);
+      if(StringFind(objName, prefix) == 0)
+      {
+         datetime objTime = (datetime)ObjectGetInteger(0, objName, OBJPROP_TIME, 0);
+         if(objTime < cutoffTime)
+         {
+            ObjectDelete(0, objName);
+         }
+      }
+   }
 }
 
 //+------------------------------------------------------------------+
@@ -10242,13 +10345,30 @@ void SecureDynamicProfits()
             }
             
             // Dès que profit >= 1$, on commence à sécuriser via SL dynamique
-            if(currentProfit >= 1.0)
+            // Pour Boom/Crash, utiliser un seuil plus bas (0.5$) car les spikes sont rapides
+            double trailingThreshold = 1.0;
+            if(StringFind(positionSymbol, "Boom") != -1 || StringFind(positionSymbol, "Crash") != -1)
             {
+               trailingThreshold = 0.5; // 0.5$ pour Boom/Crash
+            }
+            
+            if(currentProfit >= trailingThreshold)
+            {
+               if(DebugMode)
+                  Print("🔄 Trailing Stop activé pour ", positionSymbol, ": profit=", DoubleToString(currentProfit, 2), "$ >= seuil=", DoubleToString(trailingThreshold, 2), "$");
+               
                // Utiliser le profit max (peak) comme référence pour garantir "ne pas reperdre plus de la moitié"
                double profitReference = MathMax(currentProfit, maxProfitForPosition);
                
                // Sécuriser au moins 50% du peak
                double securePercentage = 0.50;
+               
+               // Pour Boom/Crash, sécuriser plus (75%) car les spikes sont très rapides
+               if(StringFind(positionSymbol, "Boom") != -1 || StringFind(positionSymbol, "Crash") != -1)
+               {
+                  securePercentage = 0.75; // 75% pour Boom/Crash
+               }
+               
                double profitToSecure = profitReference * securePercentage;
                      
                      // Convertir le profit en points - UTILISER LE SYMBOLE DE LA POSITION, PAS _Symbol
