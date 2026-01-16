@@ -1173,7 +1173,19 @@ bool ExecuteBoomCrashSpikeTrade(ENUM_ORDER_TYPE orderType)
    double maxSpreadPoints = 50; // 50 points par défaut
    if(StringFind(_Symbol, "Boom") != -1 || StringFind(_Symbol, "Crash") != -1)
    {
-      maxSpreadPoints = 500; // Augmenté à 500 points pour Boom/Crash (très volatils)
+      // Crash 1000 a des spreads énormes, augmenter spécifiquement
+      if(StringFind(_Symbol, "Crash 1000") != -1)
+      {
+         maxSpreadPoints = 5000; // 5000 points pour Crash 1000 (spreads extrêmes)
+      }
+      else if(StringFind(_Symbol, "Crash 600") != -1 || StringFind(_Symbol, "Crash 500") != -1)
+      {
+         maxSpreadPoints = 2000; // 2000 points pour Crash 600/500
+      }
+      else
+      {
+         maxSpreadPoints = 1000; // 1000 points pour autres Boom/Crash
+      }
    }
    
    if(spreadPoints > maxSpreadPoints)
@@ -13889,7 +13901,19 @@ bool ExecuteSmartLimitOrder(ENUM_ORDER_TYPE orderType, double confidence)
    if(orderType == ORDER_TYPE_BUY)
    {
       // BUY LIMIT: Placer sous le prix actuel près du support
-      if(low10 > currentPrice - (50 * point) && low10 < currentPrice)
+      double buyLimitDistance = 50 * point; // 50 points par défaut
+      
+      // Adapter pour Crash 1000 avec spreads énormes
+      if(StringFind(_Symbol, "Crash 1000") != -1)
+      {
+         buyLimitDistance = 500 * point; // 500 points pour Crash 1000
+      }
+      else if(StringFind(_Symbol, "Crash 600") != -1 || StringFind(_Symbol, "Crash 500") != -1)
+      {
+         buyLimitDistance = 200 * point; // 200 points pour Crash 600/500
+      }
+      
+      if(low10 > currentPrice - buyLimitDistance && low10 < currentPrice)
       {
          limitPrice = low10 + (5 * point); // Juste au-dessus du support
          stopLoss = low10 - (10 * point); // SL sous le support
@@ -13909,7 +13933,19 @@ bool ExecuteSmartLimitOrder(ENUM_ORDER_TYPE orderType, double confidence)
    else // ORDER_TYPE_SELL
    {
       // SELL LIMIT: Placer au-dessus du prix actuel près de la resistance
-      if(high10 < currentPrice + (50 * point) && high10 > currentPrice)
+      double sellLimitDistance = 50 * point; // 50 points par défaut
+      
+      // Adapter pour Crash 1000 avec spreads énormes
+      if(StringFind(_Symbol, "Crash 1000") != -1)
+      {
+         sellLimitDistance = 500 * point; // 500 points pour Crash 1000
+      }
+      else if(StringFind(_Symbol, "Crash 600") != -1 || StringFind(_Symbol, "Crash 500") != -1)
+      {
+         sellLimitDistance = 200 * point; // 200 points pour Crash 600/500
+      }
+      
+      if(high10 < currentPrice + sellLimitDistance && high10 > currentPrice)
       {
          limitPrice = high10 - (5 * point); // Juste en-dessous de la resistance
          stopLoss = high10 + (10 * point); // SL au-dessus de la resistance
@@ -13928,11 +13964,22 @@ bool ExecuteSmartLimitOrder(ENUM_ORDER_TYPE orderType, double confidence)
    }
    
    // Vérifier que le prix limité est raisonnable (pas trop loin du prix actuel)
-   double maxDistance = 100 * point; // Maximum 100 points du prix actuel
+   double maxDistance = 100 * point; // Maximum 100 points par défaut
+   
+   // Adapter la distance pour Crash 1000 qui a des spreads énormes
+   if(StringFind(_Symbol, "Crash 1000") != -1)
+   {
+      maxDistance = 1000 * point; // 1000 points pour Crash 1000
+   }
+   else if(StringFind(_Symbol, "Crash 600") != -1 || StringFind(_Symbol, "Crash 500") != -1)
+   {
+      maxDistance = 500 * point; // 500 points pour Crash 600/500
+   }
+   
    if(MathAbs(limitPrice - currentPrice) > maxDistance)
    {
       if(DebugMode)
-         Print("❌ Prix limité trop loin: ", DoubleToString(MathAbs(limitPrice - currentPrice) / point, 1), " points (max: 100)");
+         Print("❌ Prix limité trop loin: ", DoubleToString(MathAbs(limitPrice - currentPrice) / point, 1), " points (max: ", DoubleToString(maxDistance / point, 0), ")");
       return false;
    }
    
