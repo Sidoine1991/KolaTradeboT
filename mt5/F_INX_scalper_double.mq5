@@ -1391,6 +1391,25 @@ bool ExecuteBoomCrashSpikeTrade(ENUM_ORDER_TYPE orderType)
          Print("⚠️ stopsLevel invalide (", stopsLevel, ") - Utilisation valeur par défaut: ", stopsLevel, " points");
    }
    
+   // FORCAGE: Distances minimales garanties pour Boom/Crash
+   double guaranteedMinDistance = 0.0;
+   if(StringFind(_Symbol, "Boom") != -1 || StringFind(_Symbol, "Crash") != -1)
+   {
+      guaranteedMinDistance = 0.50; // 50 points minimum garanti pour Boom/Crash
+      if(StringFind(_Symbol, "1000") != -1)
+         guaranteedMinDistance = 1.00; // 100 points minimum pour Crash 1000
+   }
+   else
+   {
+      guaranteedMinDistance = 0.10; // 10 points minimum pour autres
+   }
+   
+   // Utiliser le maximum entre stopsLevel et la distance garantie
+   minStopDistance = MathMax(minStopDistance, guaranteedMinDistance);
+   
+   if(DebugMode)
+      Print("🛡️ Distance minimale garantie: ", DoubleToString(minStopDistance, _Digits), " (", DoubleToString(minStopDistance / point, 1), " points)");
+   
    // S'assurer que les distances respectent les minimums du courtier
    double tpDistance = MathAbs(optimalTP - currentPrice);
    double slDistance = MathAbs(optimalSL - currentPrice);
@@ -1415,6 +1434,11 @@ bool ExecuteBoomCrashSpikeTrade(ENUM_ORDER_TYPE orderType)
    // Ajuster les distances pour respecter les minimums et maximums
    tpDistance = fmax(tpDistance, minStopDistance);
    slDistance = fmax(slDistance, minStopDistance);
+   
+   // FORCAGE FINAL: Garantir les distances minimales absolues
+   tpDistance = MathMax(tpDistance, guaranteedMinDistance);
+   slDistance = MathMax(slDistance, guaranteedMinDistance);
+   
    tpDistance = fmin(tpDistance, maxAllowedDistance);
    slDistance = fmin(slDistance, maxAllowedDistance);
    
@@ -1461,8 +1485,28 @@ bool ExecuteBoomCrashSpikeTrade(ENUM_ORDER_TYPE orderType)
       if(finalSLDistance < minStopDistance)
          newSL = currentPrice - minStopDistance;
       
+      // VALIDATION FINALE: Forcer les distances garanties
+      finalTPDistance = MathAbs(newTP - currentPrice);
+      finalSLDistance = MathAbs(newSL - currentPrice);
+      
+      if(finalTPDistance < guaranteedMinDistance)
+         newTP = currentPrice + guaranteedMinDistance;
+      if(finalSLDistance < guaranteedMinDistance)
+         newSL = currentPrice - guaranteedMinDistance;
+      
       request.tp = NormalizeDouble(newTP, digits);
       request.sl = NormalizeDouble(newSL, digits);
+      
+      // VERIFICATION FINALE: Afficher les distances réelles
+      if(DebugMode)
+      {
+         double actualTPDistance = MathAbs(request.tp - currentPrice);
+         double actualSLDistance = MathAbs(request.sl - currentPrice);
+         Print("🔍 VALIDATION FINALE BUY:");
+         Print("   TP final: ", DoubleToString(request.tp, digits), " (distance: ", DoubleToString(actualTPDistance / point, 1), " points)");
+         Print("   SL final: ", DoubleToString(request.sl, digits), " (distance: ", DoubleToString(actualSLDistance / point, 1), " points)");
+         Print("   Distance minimale requise: ", DoubleToString(guaranteedMinDistance / point, 1), " points");
+      }
       
       if(DebugMode)
       {
@@ -1493,8 +1537,28 @@ bool ExecuteBoomCrashSpikeTrade(ENUM_ORDER_TYPE orderType)
       if(finalSLDistance < minStopDistance)
          newSL = currentPrice + minStopDistance;
       
+      // VALIDATION FINALE: Forcer les distances garanties
+      finalTPDistance = MathAbs(newTP - currentPrice);
+      finalSLDistance = MathAbs(newSL - currentPrice);
+      
+      if(finalTPDistance < guaranteedMinDistance)
+         newTP = currentPrice - guaranteedMinDistance;
+      if(finalSLDistance < guaranteedMinDistance)
+         newSL = currentPrice + guaranteedMinDistance;
+      
       request.tp = NormalizeDouble(newTP, digits);
       request.sl = NormalizeDouble(newSL, digits);
+      
+      // VERIFICATION FINALE: Afficher les distances réelles
+      if(DebugMode)
+      {
+         double actualTPDistance = MathAbs(request.tp - currentPrice);
+         double actualSLDistance = MathAbs(request.sl - currentPrice);
+         Print("🔍 VALIDATION FINALE SELL:");
+         Print("   TP final: ", DoubleToString(request.tp, digits), " (distance: ", DoubleToString(actualTPDistance / point, 1), " points)");
+         Print("   SL final: ", DoubleToString(request.sl, digits), " (distance: ", DoubleToString(actualSLDistance / point, 1), " points)");
+         Print("   Distance minimale requise: ", DoubleToString(guaranteedMinDistance / point, 1), " points");
+      }
       
       if(DebugMode)
       {
