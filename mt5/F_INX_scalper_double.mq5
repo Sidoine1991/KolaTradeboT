@@ -1393,22 +1393,32 @@ bool ExecuteBoomCrashSpikeTrade(ENUM_ORDER_TYPE orderType)
    
    // FORCAGE: Distances minimales garanties pour Boom/Crash
    double guaranteedMinDistance = 0.0;
+   double guaranteedMinSL = 0.0; // SL spécifique plus grand pour Boom/Crash
+   
    if(StringFind(_Symbol, "Boom") != -1 || StringFind(_Symbol, "Crash") != -1)
    {
       guaranteedMinDistance = 0.50; // 50 points minimum garanti pour Boom/Crash
+      guaranteedMinSL = 3.00; // 3 dollars (300 points) pour SL sur Boom/Crash
       if(StringFind(_Symbol, "1000") != -1)
+      {
          guaranteedMinDistance = 1.00; // 100 points minimum pour Crash 1000
+         guaranteedMinSL = 3.00; // 3 dollars aussi pour Crash 1000
+      }
    }
    else
    {
       guaranteedMinDistance = 0.10; // 10 points minimum pour autres
+      guaranteedMinSL = 0.10; // SL normal pour autres symboles
    }
    
    // Utiliser le maximum entre stopsLevel et la distance garantie
    minStopDistance = MathMax(minStopDistance, guaranteedMinDistance);
    
    if(DebugMode)
+   {
       Print("🛡️ Distance minimale garantie: ", DoubleToString(minStopDistance, _Digits), " (", DoubleToString(minStopDistance / point, 1), " points)");
+      Print("🛡️ SL minimum garanti: ", DoubleToString(guaranteedMinSL, _Digits), " (", DoubleToString(guaranteedMinSL / point, 1), " points)");
+   }
    
    // S'assurer que les distances respectent les minimums du courtier
    double tpDistance = MathAbs(optimalTP - currentPrice);
@@ -1491,8 +1501,8 @@ bool ExecuteBoomCrashSpikeTrade(ENUM_ORDER_TYPE orderType)
       
       if(finalTPDistance < guaranteedMinDistance)
          newTP = currentPrice + guaranteedMinDistance;
-      if(finalSLDistance < guaranteedMinDistance)
-         newSL = currentPrice - guaranteedMinDistance;
+      if(finalSLDistance < guaranteedMinSL) // SL spécifique plus grand
+         newSL = currentPrice - guaranteedMinSL;
       
       request.tp = NormalizeDouble(newTP, digits);
       request.sl = NormalizeDouble(newSL, digits);
@@ -1543,8 +1553,8 @@ bool ExecuteBoomCrashSpikeTrade(ENUM_ORDER_TYPE orderType)
       
       if(finalTPDistance < guaranteedMinDistance)
          newTP = currentPrice - guaranteedMinDistance;
-      if(finalSLDistance < guaranteedMinDistance)
-         newSL = currentPrice + guaranteedMinDistance;
+      if(finalSLDistance < guaranteedMinSL) // SL spécifique plus grand
+         newSL = currentPrice + guaranteedMinSL;
       
       request.tp = NormalizeDouble(newTP, digits);
       request.sl = NormalizeDouble(newSL, digits);
@@ -1641,6 +1651,98 @@ bool ExecuteBoomCrashSpikeTrade(ENUM_ORDER_TYPE orderType)
       return false;
    }
    
+   // VALIDATION OFFICIELLE MT5: Utiliser OrderCheck pour valider les paramètres
+   MqlTradeCheckResult checkResult = {};
+   if(!OrderCheck(request, checkResult))
+   {
+      Print("❌ Validation OrderCheck échouée: ", checkResult.comment);
+      Print("   Code retour: ", checkResult.retcode);
+      Print("   Prix: ", DoubleToString(currentPrice, digits));
+      Print("   TP: ", DoubleToString(request.tp, digits), " (distance: ", DoubleToString(MathAbs(request.tp - currentPrice) / point, 1), " points)");
+      Print("   SL: ", DoubleToString(request.sl, digits), " (distance: ", DoubleToString(MathAbs(request.sl - currentPrice) / point, 1), " points)");
+      
+      // CORRECTION AUTOMATIQUE: Si les stops sont invalides, les ajuster
+      if(checkResult.retcode == TRADE_RETCODE_INVALID_STOPS)
+      {
+         Print("🔧 Tentative de correction automatique des stops...");
+         
+         // Obtenir les distances minimales réelles du courtier
+         long stopsLevelValue = 0;
+         SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL, stopsLevelValue);
+         double minStopLevel = (double)stopsLevelValue * point;
+         if(minStopLevel <= 0)
+            minStopLevel = guaranteedMinDistance;
+         
+         // Calculer les distances actuelles
+         double currentTPDistance = MathAbs(request.tp - currentPrice);
+         double currentSLDistance = MathAbs(request.sl - currentPrice);
+         
+         // Recalculer les stops avec les distances minimales garanties
+         if(orderType == ORDER_TYPE_BUY)
+         {
+            // BUY: TP au-dessus, SL en-dessous
+            double newTP = currentPrice + MathMax(currentTPDistance, minStopLevel);
+            double newSL = currentPrice - MathMax(currentSLDistance, minStopLevel);
+            
+            // S'assurer que TP > prix et SL < prix
+            if(newTP <= currentPrice)
+               newTP = currentPrice + minStopLevel;
+            if(newSL >= currentPrice)
+               newSL = currentPrice - minStopLevel;
+            
+            request.tp = NormalizeDouble(newTP, digits);
+            request.sl = NormalizeDouble(newSL, digits);
+            
+            if(DebugMode)
+            {
+               Print("🔧 Stops corrigés BUY:");
+               Print("   TP: ", DoubleToString(request.tp, digits), " (distance: ", DoubleToString(MathAbs(request.tp - currentPrice) / point, 1), " points)");
+               Print("   SL: ", DoubleToString(request.sl, digits), " (distance: ", DoubleToString(MathAbs(request.sl - currentPrice) / point, 1), " points)");
+            }
+         }
+         else // SELL
+         {
+            // SELL: TP en-dessous, SL au-dessus
+            double newTP = currentPrice - MathMax(currentTPDistance, minStopLevel);
+            double newSL = currentPrice + MathMax(currentSLDistance, minStopLevel);
+            
+            // S'assurer que TP < prix et SL > prix
+            if(newTP >= currentPrice)
+               newTP = currentPrice - minStopLevel;
+            if(newSL <= currentPrice)
+               newSL = currentPrice + minStopLevel;
+            
+            request.tp = NormalizeDouble(newTP, digits);
+            request.sl = NormalizeDouble(newSL, digits);
+            
+            if(DebugMode)
+            {
+               Print("🔧 Stops corrigés SELL:");
+               Print("   TP: ", DoubleToString(request.tp, digits), " (distance: ", DoubleToString(MathAbs(request.tp - currentPrice) / point, 1), " points)");
+               Print("   SL: ", DoubleToString(request.sl, digits), " (distance: ", DoubleToString(MathAbs(request.sl - currentPrice) / point, 1), " points)");
+            }
+         }
+         
+         // Re-vérifier avec OrderCheck après correction
+         if(!OrderCheck(request, checkResult))
+         {
+            Print("❌ Correction échouée: ", checkResult.comment);
+            Print("   Code retour: ", checkResult.retcode);
+            return false;
+         }
+         else
+         {
+            Print("✅ Stops corrigés et validés avec succès");
+         }
+      }
+      else
+      {
+         // Autre erreur que Invalid Stops
+         return false;
+      }
+   }
+   
+   // Envoyer l'ordre après validation réussie
    if(OrderSend(request, result))
    {
       // Enregistrer le ticket de la position DERIV ARROW
