@@ -1216,15 +1216,135 @@ bool ExecuteBoomCrashSpikeTrade(ENUM_ORDER_TYPE orderType)
    request.magic = InpMagicNumber;
    request.comment = "BoomCrash Spike";
    
-   // SL/TP pour capture de spike - utiliser une approche robuste
+   // SL/TP pour capture de spike - utiliser une approche intelligente avec support/resistance
    double currentPrice = SymbolInfoDouble(_Symbol, orderType == ORDER_TYPE_BUY ? SYMBOL_ASK : SYMBOL_BID);
    double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
    int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+   
+   // NOUVEAU: Calculer les niveaux de support/resistance proches
+   double nearestSupport = 0.0;
+   double nearestResistance = 0.0;
+   double optimalTP = 0.0;
+   double optimalSL = 0.0;
+   
+   // Obtenir les données des 50 dernières bougies pour S/R
+   MqlRates rates[];
+   ArrayResize(rates, 50);
+   if(CopyRates(_Symbol, PERIOD_M1, 0, 50, rates) > 0)
+   {
+      // Calculer les pivots et S/R
+      double high50 = 0, low50 = DBL_MAX;
+      double high20 = 0, low20 = DBL_MAX;
+      double high10 = 0, low10 = DBL_MAX;
+      
+      for(int i = 0; i < 50; i++)
+      {
+         if(rates[i].high > high50) high50 = rates[i].high;
+         if(rates[i].low < low50) low50 = rates[i].low;
+         
+         if(i >= 30) // Dernières 20 bougies
+         {
+            if(rates[i].high > high20) high20 = rates[i].high;
+            if(rates[i].low < low20) low20 = rates[i].low;
+         }
+         
+         if(i >= 40) // Dernières 10 bougies
+         {
+            if(rates[i].high > high10) high10 = rates[i].high;
+            if(rates[i].low < low10) low10 = rates[i].low;
+         }
+      }
+      
+      // Niveaux de support/resistance
+      nearestSupport = MathMax(low10, low20);
+      nearestResistance = fmin(high10, high20);
+      
+      if(DebugMode)
+      {
+         Print("📊 Support/Resistance proches:");
+         Print("   Support 10 bougies: ", DoubleToString(low10, digits));
+         Print("   Support 20 bougies: ", DoubleToString(low20, digits));
+         Print("   Resistance 10 bougies: ", DoubleToString(high10, digits));
+         Print("   Resistance 20 bougies: ", DoubleToString(high20, digits));
+         Print("   Support le plus proche: ", DoubleToString(nearestSupport, digits));
+         Print("   Resistance la plus proche: ", DoubleToString(nearestResistance, digits));
+      }
+   }
+   
+   // Calculer TP/SL optimisés selon S/R
+   if(orderType == ORDER_TYPE_BUY)
+   {
+      // Pour BUY: TP vers la resistance la plus proche, SL vers le support
+      if(nearestResistance > currentPrice && nearestResistance > 0)
+      {
+         optimalTP = nearestResistance - (10 * point); // Juste avant la resistance
+         if(DebugMode)
+            Print("🎯 BUY TP optimisé: Resistance proche à ", DoubleToString(nearestResistance, digits));
+      }
+      else
+      {
+         optimalTP = currentPrice + (BoomCrashSpikeTP); // TP par défaut
+      }
+      
+      if(nearestSupport > 0 && nearestSupport < currentPrice)
+      {
+         optimalSL = fmax(nearestSupport, currentPrice - (BoomCrashSpikeTP * 1.5));
+         if(DebugMode)
+            Print("🛡️ BUY SL optimisé: Support proche à ", DoubleToString(nearestSupport, digits));
+      }
+      else
+      {
+         optimalSL = currentPrice - (BoomCrashSpikeTP * 1.5); // SL par défaut
+      }
+   }
+   else // SELL
+   {
+      // Pour SELL: TP vers le support le plus proche, SL vers la resistance
+      if(nearestSupport > 0 && nearestSupport < currentPrice)
+      {
+         optimalTP = nearestSupport + (10 * point); // Juste avant le support
+         if(DebugMode)
+            Print("🎯 SELL TP optimisé: Support proche à ", DoubleToString(nearestSupport, digits));
+      }
+      else
+      {
+         optimalTP = currentPrice - (BoomCrashSpikeTP); // TP par défaut
+      }
+      
+      if(nearestResistance > currentPrice && nearestResistance > 0)
+      {
+         optimalSL = fmin(nearestResistance, currentPrice + (BoomCrashSpikeTP * 1.5));
+         if(DebugMode)
+            Print("🛡️ SELL SL optimisé: Resistance proche à ", DoubleToString(nearestResistance, digits));
+      }
+      else
+      {
+         optimalSL = currentPrice + (BoomCrashSpikeTP * 1.5); // SL par défaut
+      }
+   }
    
    // Obtenir les distances minimales requises par le courtier
    long stopsLevel = 0;
    SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL, stopsLevel);
    double minStopDistance = (double)stopsLevel * point;
+   
+   // S'assurer que les distances respectent les minimums du courtier
+   double tpDistance = MathAbs(optimalTP - currentPrice);
+   double slDistance = MathAbs(optimalSL - currentPrice);
+   
+   tpDistance = fmax(tpDistance, minStopDistance);
+   slDistance = fmax(slDistance, minStopDistance);
+   
+   // Limiter les distances pour éviter les ordres trop lointains
+   double maxAllowedDistance = BoomCrashSpikeTP * 2; // Maximum 2x la distance de spike
+   tpDistance = fmin(tpDistance, maxAllowedDistance);
+   slDistance = fmin(slDistance, maxAllowedDistance);
+   
+   if(DebugMode)
+      Print("📍 Calcul SL/TP optimisés: Point=", DoubleToString(point, digits), 
+            " MinStopDistance=", DoubleToString(minStopDistance, digits),
+            " TP Distance=", DoubleToString(tpDistance, digits),
+            " SL Distance=", DoubleToString(slDistance, digits));
    
    // Distance de spike plus réaliste pour Boom/Crash (en points)
    double spikeDistancePoints = BoomCrashSpikeTP / point; // Convertir en points
@@ -1238,17 +1358,32 @@ bool ExecuteBoomCrashSpikeTrade(ENUM_ORDER_TYPE orderType)
             " SpikeDistancePoints=", DoubleToString(spikeDistancePoints, 2),
             " FinalDistance=", DoubleToString(finalDistance, digits));
    
+   // UTILISER les TP/SL optimisés avec support/resistance
    if(orderType == ORDER_TYPE_BUY)
    {
-      // Pour BUY: TP au-dessus, SL en-dessous
-      request.tp = NormalizeDouble(currentPrice + finalDistance, digits);
-      request.sl = NormalizeDouble(currentPrice - finalDistance * 1.5, digits);
+      // Pour BUY: TP optimisé vers resistance, SL optimisé vers support
+      request.tp = NormalizeDouble(optimalTP, digits);
+      request.sl = NormalizeDouble(optimalSL, digits);
+      
+      if(DebugMode)
+      {
+         Print("🎯 BUY avec TP/SL optimisés:");
+         Print("   TP: ", DoubleToString(optimalTP, digits), " (vs ", DoubleToString(currentPrice + finalDistance, digits), " par défaut)");
+         Print("   SL: ", DoubleToString(optimalSL, digits), " (vs ", DoubleToString(currentPrice - finalDistance * 1.5, digits), " par défaut)");
+      }
    }
    else // SELL
    {
-      // Pour SELL: TP en-dessous, SL au-dessus
-      request.tp = NormalizeDouble(currentPrice - finalDistance, digits);
-      request.sl = NormalizeDouble(currentPrice + finalDistance * 1.5, digits);
+      // Pour SELL: TP optimisé vers support, SL optimisé vers resistance
+      request.tp = NormalizeDouble(optimalTP, digits);
+      request.sl = NormalizeDouble(optimalSL, digits);
+      
+      if(DebugMode)
+      {
+         Print("🎯 SELL avec TP/SL optimisés:");
+         Print("   TP: ", DoubleToString(optimalTP, digits), " (vs ", DoubleToString(currentPrice - finalDistance, digits), " par défaut)");
+         Print("   SL: ", DoubleToString(optimalSL, digits), " (vs ", DoubleToString(currentPrice + finalDistance * 1.5, digits), " par défaut)");
+      }
    }
    
    // Validation finale des SL/TP
@@ -7215,15 +7350,33 @@ void LookForTradingOpportunity()
                }
                else
                {
-                  Print("❌ Échec d'exécution du trade Spike: ", signalType, " sur ", _Symbol);
-                  Print("   ⚠️ Vérifier les logs ci-dessus pour identifier la raison exacte du blocage");
-                  Print("   Raisons possibles:");
-                  Print("   - Position existante pour ce symbole (une seule position par symbole)");
-                  Print("   - Spread trop élevé");
-                  Print("   - Volatilité excessive (ATR)");
-                  Print("   - Limite globale de positions atteinte");
-                  Print("   - Données IA/analyse périmées");
-                  Print("   - Direction non autorisée (BUY sur Crash ou SELL sur Boom)");
+                  Print("❌ Échec Trade Spike - Tentative ordre limité intelligent...");
+                  
+                  // NOUVEAU: Essayer un ordre limité intelligent si le trade direct échoue
+                  double confidence = 0.0;
+                  if(StringLen(g_coherentAnalysis.decision) > 0)
+                  {
+                     confidence = g_coherentAnalysis.confidence;
+                     if(confidence > 1.0) confidence = confidence / 100.0;
+                  }
+                  else if(g_lastAIConfidence > 0)
+                  {
+                     confidence = g_lastAIConfidence;
+                     if(confidence > 1.0) confidence = confidence / 100.0;
+                  }
+                  
+                  // Essayer un ordre limité si confiance >= 65%
+                  if(confidence >= 0.65)
+                  {
+                     bool limitOrderPlaced = ExecuteSmartLimitOrder(orderType, confidence);
+                     if(limitOrderPlaced)
+                     {
+                        Print("✅ Ordre limité intelligent placé en fallback du trade direct");
+                        return; // Sortie après ordre limité réussi
+                     }
+                  }
+                  
+                  Print("❌ Trade direct ET ordre limité ont échoué - Continuer surveillance...");
                }
                
                return; // Sortie immédiate - stratégie prioritaire absolue
@@ -13671,6 +13824,179 @@ void ValidatePredictionWithRealtimeData()
    
    lastValidation = TimeCurrent();
 }
+
+//+------------------------------------------------------------------+
+//| Détecte et exécute des ordres limités intelligents avec S/R proches |
+//+------------------------------------------------------------------+
+bool ExecuteSmartLimitOrder(ENUM_ORDER_TYPE orderType, double confidence)
+{
+   double currentPrice = SymbolInfoDouble(_Symbol, orderType == ORDER_TYPE_BUY ? SYMBOL_ASK : SYMBOL_BID);
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+   
+   // Règles: Pas de SELL limit sur Boom, pas de BUY limit sur Crash
+   bool isBoom = (StringFind(_Symbol, "Boom") != -1);
+   bool isCrash = (StringFind(_Symbol, "Crash") != -1);
+   
+   if(isBoom && orderType == ORDER_TYPE_SELL)
+   {
+      if(DebugMode)
+         Print("❌ Ordre limité SELL non autorisé sur Boom (règle de sécurité)");
+      return false;
+   }
+   
+   if(isCrash && orderType == ORDER_TYPE_BUY)
+   {
+      if(DebugMode)
+         Print("❌ Ordre limité BUY non autorisé sur Crash (règle de sécurité)");
+      return false;
+   }
+   
+   // Obtenir les niveaux de support/resistance des 20 dernières bougies
+   MqlRates rates[];
+   ArrayResize(rates, 20);
+   if(CopyRates(_Symbol, PERIOD_M1, 0, 20, rates) <= 0)
+   {
+      if(DebugMode)
+         Print("❌ Impossible d'obtenir les données pour ordre limité");
+      return false;
+   }
+   
+   // Calculer les niveaux clés
+   double high20 = 0, low20 = DBL_MAX;
+   double high10 = 0, low10 = DBL_MAX;
+   double currentHigh = rates[0].high;
+   double currentLow = rates[0].low;
+   
+   for(int i = 0; i < 20; i++)
+   {
+      if(rates[i].high > high20) high20 = rates[i].high;
+      if(rates[i].low < low20) low20 = rates[i].low;
+      
+      if(i >= 10) // Dernières 10 bougies
+      {
+         if(rates[i].high > high10) high10 = rates[i].high;
+         if(rates[i].low < low10) low10 = rates[i].low;
+      }
+   }
+   
+   // Calculer le prix optimal pour l'ordre limité
+   double limitPrice = 0.0;
+   double stopLoss = 0.0;
+   double takeProfit = 0.0;
+   string orderTypeStr = "";
+   
+   if(orderType == ORDER_TYPE_BUY)
+   {
+      // BUY LIMIT: Placer sous le prix actuel près du support
+      if(low10 > currentPrice - (50 * point) && low10 < currentPrice)
+      {
+         limitPrice = low10 + (5 * point); // Juste au-dessus du support
+         stopLoss = low10 - (10 * point); // SL sous le support
+         takeProfit = currentPrice + (30 * point); // TP au-dessus du prix actuel
+         orderTypeStr = "BUY LIMIT";
+         
+         if(DebugMode)
+            Print("🎯 Opportunité BUY LIMIT: Support proche à ", DoubleToString(low10, digits));
+      }
+      else
+      {
+         if(DebugMode)
+            Print("❌ Pas d'opportunité BUY LIMIT: Support trop loin");
+         return false;
+      }
+   }
+   else // ORDER_TYPE_SELL
+   {
+      // SELL LIMIT: Placer au-dessus du prix actuel près de la resistance
+      if(high10 < currentPrice + (50 * point) && high10 > currentPrice)
+      {
+         limitPrice = high10 - (5 * point); // Juste en-dessous de la resistance
+         stopLoss = high10 + (10 * point); // SL au-dessus de la resistance
+         takeProfit = currentPrice - (30 * point); // TP en-dessous du prix actuel
+         orderTypeStr = "SELL LIMIT";
+         
+         if(DebugMode)
+            Print("🎯 Opportunité SELL LIMIT: Resistance proche à ", DoubleToString(high10, digits));
+      }
+      else
+      {
+         if(DebugMode)
+            Print("❌ Pas d'opportunité SELL LIMIT: Resistance trop loin");
+         return false;
+      }
+   }
+   
+   // Vérifier que le prix limité est raisonnable (pas trop loin du prix actuel)
+   double maxDistance = 100 * point; // Maximum 100 points du prix actuel
+   if(MathAbs(limitPrice - currentPrice) > maxDistance)
+   {
+      if(DebugMode)
+         Print("❌ Prix limité trop loin: ", DoubleToString(MathAbs(limitPrice - currentPrice) / point, 1), " points (max: 100)");
+      return false;
+   }
+   
+   if(DebugMode)
+   {
+      Print("📊 Ordre limité intelligent:");
+      Print("   Type: ", orderTypeStr);
+      Print("   Prix actuel: ", DoubleToString(currentPrice, digits));
+      Print("   Prix limité: ", DoubleToString(limitPrice, digits));
+      Print("   Stop Loss: ", DoubleToString(stopLoss, digits));
+      Print("   Take Profit: ", DoubleToString(takeProfit, digits));
+      Print("   Distance: ", DoubleToString(MathAbs(limitPrice - currentPrice) / point, 1), " points");
+      Print("   Confiance: ", DoubleToString(confidence * 100, 1), "%");
+   }
+   
+   // Exécuter l'ordre limité
+   MqlTradeRequest request = {};
+   MqlTradeResult result = {};
+   
+   request.action = TRADE_ACTION_PENDING;
+   request.symbol = _Symbol;
+   request.volume = NormalizeLotSize(InitialLotSize);
+   request.type = (orderType == ORDER_TYPE_BUY) ? ORDER_TYPE_BUY_LIMIT : ORDER_TYPE_SELL_LIMIT;
+   request.price = NormalizeDouble(limitPrice, digits);
+   request.sl = NormalizeDouble(stopLoss, digits);
+   request.tp = NormalizeDouble(takeProfit, digits);
+   request.deviation = 10;
+   request.magic = InpMagicNumber;
+   request.comment = "Smart Limit Order";
+   request.expiration = TimeCurrent() + 300; // Expire dans 5 minutes
+   
+   // Validation finale
+   MqlTradeCheckResult checkResult = {};
+   if(!OrderCheck(request, checkResult))
+   {
+      if(DebugMode)
+         Print("❌ Ordre limité invalide: ", checkResult.comment);
+      return false;
+   }
+   
+   bool success = OrderSend(request, result);
+   
+   if(success && result.retcode == TRADE_RETCODE_DONE)
+   {
+      if(DebugMode)
+         Print("✅ Ordre limité placé avec succès: ", orderTypeStr, " à ", DoubleToString(limitPrice, digits));
+      
+      // Notification
+      string notification = StringFormat("🎯 Ordre Limité %s: %s %s à %s (Conf: %.1f%%)", 
+                                   orderTypeStr, _Symbol, EnumToString(orderType), 
+                                   DoubleToString(limitPrice, digits), confidence * 100);
+      SendMT5Notification(notification, true);
+      
+      return true;
+   }
+   else
+   {
+      if(DebugMode)
+         Print("❌ Échec ordre limité: ", result.retcode, " - ", result.comment);
+      return false;
+   }
+}
+
+//+------------------------------------------------------------------+
 
 //+------------------------------------------------------------------+
 
