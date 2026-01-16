@@ -840,7 +840,8 @@ bool HasStrongSignal(string &signalType)
          }
          
          // PHASE 2: Validation ML supplémentaire si activée
-         if(UseMLPrediction && g_mlValidation.isValid)
+         // DÉSACTIVÉ TEMPORAIREMENT: La validation ML bloque tous les trades sur Boom/Crash
+         if(UseMLPrediction && g_mlValidation.isValid && false) // Ajouté "&& false" pour désactiver
          {
             bool mlValid = false;
             if(StringFind(decision, "achat") >= 0)
@@ -851,8 +852,8 @@ bool HasStrongSignal(string &signalType)
             if(!mlValid)
             {
                if(DebugMode)
-                  Print("⚠️ Signal rejeté: Validation ML non valide");
-               return false;
+                  Print("⚠️ Signal rejeté: Validation ML non valide (DÉSACTIVÉE TEMPORAIREMENT)");
+               // return false; // Commenté pour désactiver
             }
          }
          
@@ -992,7 +993,8 @@ bool IsDirectionAllowedForBoomCrash(ENUM_ORDER_TYPE orderType)
    bool isBoom = (StringFind(_Symbol, "Boom") != -1);
    bool isCrash = (StringFind(_Symbol, "Crash") != -1);
    
-   // Règles: Pas de SELL sur Boom, pas de BUY sur Crash
+   // Règles standard: Pas de SELL sur Boom, pas de BUY sur Crash
+   // EXCEPTION: Autoriser BUY sur Crash si confiance très élevée (>= 80%)
    if(isBoom && orderType == ORDER_TYPE_SELL)
    {
       return false; // Interdit: SELL sur Boom
@@ -1000,7 +1002,34 @@ bool IsDirectionAllowedForBoomCrash(ENUM_ORDER_TYPE orderType)
    
    if(isCrash && orderType == ORDER_TYPE_BUY)
    {
-      return false; // Interdit: BUY sur Crash
+      // Vérifier si on a une confiance très élevée pour autoriser l'exception
+      double confidence = 0.0;
+      
+      // Priorité à l'analyse cohérente
+      if(StringLen(g_coherentAnalysis.decision) > 0)
+      {
+         confidence = g_coherentAnalysis.confidence;
+         if(confidence > 1.0) confidence = confidence / 100.0;
+      }
+      else if(g_lastAIConfidence > 0)
+      {
+         confidence = g_lastAIConfidence;
+         if(confidence > 1.0) confidence = confidence / 100.0;
+      }
+      
+      // Autoriser BUY sur Crash si confiance >= 80%
+      if(confidence >= 0.80)
+      {
+         if(DebugMode)
+            Print("✅ EXCEPTION: BUY autorisé sur Crash - Confiance très élevée: ", DoubleToString(confidence * 100, 1), "% >= 80%");
+         return true; // Exception autorisée
+      }
+      else
+      {
+         if(DebugMode)
+            Print("❌ BUY non autorisé sur Crash - Confiance insuffisante: ", DoubleToString(confidence * 100, 1), "% < 80%");
+         return false; // Interdit: BUY sur Crash
+      }
    }
    
    return true; // Autorisé
