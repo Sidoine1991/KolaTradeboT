@@ -5337,15 +5337,15 @@ async def decision(request: DecisionRequest):
         h1_bullish = False
         h1_bearish = False
         if ema_fast_h1 is not None and ema_slow_h1 is not None:
-            h1_bullish = ema_fast_h1 > ema_slow_h1
-            h1_bearish = ema_fast_h1 < ema_slow_h1
+        h1_bullish = ema_fast_h1 > ema_slow_h1
+        h1_bearish = ema_fast_h1 < ema_slow_h1
         
         # Analyse EMA M1 (tendance court terme) - Vérifier que les valeurs ne sont pas None
         m1_bullish = False
         m1_bearish = False
         if ema_fast_m1 is not None and ema_slow_m1 is not None:
-            m1_bullish = ema_fast_m1 > ema_slow_m1
-            m1_bearish = ema_fast_m1 < ema_slow_m1
+        m1_bullish = ema_fast_m1 > ema_slow_m1
+        m1_bearish = ema_fast_m1 < ema_slow_m1
         
         # NOUVEAU: Analyse Multi-Time frames via trend_api (ULTRA-RAPIDE avec cache)
         # Interroger le service trend_api sur port 8001 pour obtenir les tendances cachées
