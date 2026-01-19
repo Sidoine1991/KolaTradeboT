@@ -3131,6 +3131,11 @@ def calculate_market_state(symbol: str, timeframe: str = "M1") -> Dict[str, str]
         Dictionnaire avec market_state et market_trend (global)
     """
     try:
+        # Vérifier si MT5 est disponible et initialisé
+        if not MT5_AVAILABLE or not mt5_initialized:
+            logger.warning(f"MT5 non disponible pour calculer l'état du marché de {symbol}")
+            return {"market_state": "DONNEES_INSUFFISANTES", "market_trend": "NEUTRE"}
+        
         # Timeframes à analyser par ordre d'importance (plus long = plus important)
         timeframes = [
             ('W1', mt5.TIMEFRAME_W1, 3.0),    # Weekly = poids le plus élevé
@@ -5325,16 +5330,22 @@ async def decision(request: DecisionRequest):
             reason = ""  # Sera construite plus bas avec les composants
         
         # Analyse RSI
-        rsi_bullish = rsi < 30  # Survente
-        rsi_bearish = rsi > 70  # Surachat
+        rsi_bullish = rsi is not None and rsi < 30  # Survente
+        rsi_bearish = rsi is not None and rsi > 70  # Surachat
         
-        # Analyse EMA H1 (tendance long terme)
-        h1_bullish = ema_fast_h1 > ema_slow_h1
-        h1_bearish = ema_fast_h1 < ema_slow_h1
+        # Analyse EMA H1 (tendance long terme) - Vérifier que les valeurs ne sont pas None
+        h1_bullish = False
+        h1_bearish = False
+        if ema_fast_h1 is not None and ema_slow_h1 is not None:
+            h1_bullish = ema_fast_h1 > ema_slow_h1
+            h1_bearish = ema_fast_h1 < ema_slow_h1
         
-        # Analyse EMA M1 (tendance court terme)
-        m1_bullish = ema_fast_m1 > ema_slow_m1
-        m1_bearish = ema_fast_m1 < ema_slow_m1
+        # Analyse EMA M1 (tendance court terme) - Vérifier que les valeurs ne sont pas None
+        m1_bullish = False
+        m1_bearish = False
+        if ema_fast_m1 is not None and ema_slow_m1 is not None:
+            m1_bullish = ema_fast_m1 > ema_slow_m1
+            m1_bearish = ema_fast_m1 < ema_slow_m1
         
         # NOUVEAU: Analyse Multi-Time frames via trend_api (ULTRA-RAPIDE avec cache)
         # Interroger le service trend_api sur port 8001 pour obtenir les tendances cachées
@@ -6146,10 +6157,10 @@ Format: Analyse claire et professionnelle en français.
                 volatility = request.atr / mid_price if mid_price > 0 else 0
                 strong_vol = volatility >= 0.003
                 medium_vol = volatility >= 0.0015
-                extreme_oversold = rsi <= 20
-                extreme_overbought = rsi >= 80
-                moderate_oversold = rsi <= 35
-                moderate_overbought = rsi >= 65
+                extreme_oversold = rsi is not None and rsi <= 20
+                extreme_overbought = rsi is not None and rsi >= 80
+                moderate_oversold = rsi is not None and rsi <= 35
+                moderate_overbought = rsi is not None and rsi >= 65
                 
                 # Score de détection traditionnelle (0-1)
                 traditional_score = 0.0
@@ -6244,10 +6255,10 @@ Format: Analyse claire et professionnelle en français.
             volatility = request.atr / mid_price if mid_price > 0 else 0
             strong_vol = volatility >= 0.003
             medium_vol = volatility >= 0.0015
-            extreme_oversold = rsi <= 20
-            extreme_overbought = rsi >= 80
-            moderate_oversold = rsi <= 35
-            moderate_overbought = rsi >= 65
+            extreme_oversold = rsi is not None and rsi <= 20
+            extreme_overbought = rsi is not None and rsi >= 80
+            moderate_oversold = rsi is not None and rsi <= 35
+            moderate_overbought = rsi is not None and rsi >= 65
             
             # Spike haussier avec conditions renforcées
             strong_bull_spike = (
@@ -6320,10 +6331,10 @@ Format: Analyse claire et professionnelle en français.
             medium_vol = volatility >= 0.0015  # Augmenté de 0.001 à 0.0015
 
             # RSI plus stricts pour éviter les faux signaux
-            extreme_oversold = rsi <= 20      # Augmenté de 25 à 20
-            extreme_overbought = rsi >= 80     # Augmenté de 75 à 80
-            moderate_oversold = rsi <= 35      # Nouveau seuil modéré
-            moderate_overbought = rsi >= 65    # Nouveau seuil modéré
+            extreme_oversold = rsi is not None and rsi <= 20      # Augmenté de 25 à 20
+            extreme_overbought = rsi is not None and rsi >= 80     # Augmenté de 75 à 80
+            moderate_oversold = rsi is not None and rsi <= 35      # Nouveau seuil modéré
+            moderate_overbought = rsi is not None and rsi >= 65    # Nouveau seuil modéré
 
             # Spike haussier avec conditions renforcées
             strong_bull_spike = (
