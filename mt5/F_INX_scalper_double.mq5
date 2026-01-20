@@ -15616,10 +15616,36 @@ IntelligentDecision MakeIntelligentDecision()
    
    double score = 0.0;
    
-   // 1. Couche IA (ML/Gemma)
+   // 1. Couche IA (Machine Learning / Gemma / Validation multi-TF)
    double aiScore = 0.0;
-   if(g_lastAIAction == "buy") aiScore = g_lastAIConfidence;
-   else if(g_lastAIAction == "sell") aiScore = -g_lastAIConfidence;
+   
+   // Contribution de la validation ML (Phase 2 améliorée)
+   if(g_mlValidation.isValid && g_mlValidation.valid)
+   {
+      string mlConsensus = g_mlValidation.consensus;
+      StringToLower(mlConsensus);
+      
+      double mlWeight = 0.6; // L'ML pèse pour 60% de la couche IA
+      double gemmaWeight = 0.4; // Gemma pèse pour 40%
+      
+      double mlContribution = 0.0;
+      if(StringFind(mlConsensus, "buy") >= 0) mlContribution = g_mlValidation.avgConfidence / 100.0;
+      else if(StringFind(mlConsensus, "sell") >= 0) mlContribution = -g_mlValidation.avgConfidence / 100.0;
+      
+      double gemmaContribution = 0.0;
+      if(g_lastAIAction == "buy") gemmaContribution = g_lastAIConfidence;
+      else if(g_lastAIAction == "sell") gemmaContribution = -g_lastAIConfidence;
+      
+      aiScore = (mlContribution * mlWeight) + (gemmaContribution * gemmaWeight);
+      decision.reason += StringFormat("[ML=%.2f, Gemma=%.2f] ", mlContribution, gemmaContribution);
+   }
+   else
+   {
+      // Fallback sur Gemma uniquement si ML non disponible
+      if(g_lastAIAction == "buy") aiScore = g_lastAIConfidence;
+      else if(g_lastAIAction == "sell") aiScore = -g_lastAIConfidence;
+      decision.reason += "[Fallback Gemma] ";
+   }
    
    // 2. Couche Technique (EMAs/RSI/SuperTrend)
    double techScore = 0.0;
