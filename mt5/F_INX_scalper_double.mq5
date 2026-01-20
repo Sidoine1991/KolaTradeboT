@@ -14504,7 +14504,7 @@ void DisplayMLMetrics()
       ObjectCreate(0, titleName, OBJ_LABEL, 0, 0, 0);
    
    ObjectSetInteger(0, titleName, OBJPROP_CORNER, CORNER_LEFT_UPPER);
-   ObjectSetInteger(0, titleName, OBJPROP_ANCHOR, ANCHOR_UPPER_HCENTER);
+   ObjectSetInteger(0, titleName, OBJPROP_ANCHOR, ANCHOR_UPPER);
    ObjectSetInteger(0, titleName, OBJPROP_XDISTANCE, x);
    ObjectSetInteger(0, titleName, OBJPROP_YDISTANCE, yStart);
    ObjectSetString(0, titleName, OBJPROP_TEXT, "🤖 MÉTRIQUES MACHINE LEARNING");
@@ -14524,7 +14524,7 @@ void DisplayMLMetrics()
    color modelColor = (g_mlMetrics.bestAccuracy >= 70) ? goodColor : (g_mlMetrics.bestAccuracy >= 60) ? mediumColor : lowColor;
    
    ObjectSetInteger(0, bestModelName, OBJPROP_CORNER, CORNER_LEFT_UPPER);
-   ObjectSetInteger(0, bestModelName, OBJPROP_ANCHOR, ANCHOR_UPPER_HCENTER);
+   ObjectSetInteger(0, bestModelName, OBJPROP_ANCHOR, ANCHOR_UPPER);
    ObjectSetInteger(0, bestModelName, OBJPROP_XDISTANCE, x);
    ObjectSetInteger(0, bestModelName, OBJPROP_YDISTANCE, yOffset);
    ObjectSetString(0, bestModelName, OBJPROP_TEXT, modelText);
@@ -14544,7 +14544,7 @@ void DisplayMLMetrics()
    color accuracyColor = (g_mlMetrics.bestAccuracy >= 70) ? goodColor : (g_mlMetrics.bestAccuracy >= 60) ? mediumColor : lowColor;
    
    ObjectSetInteger(0, accuracyName, OBJPROP_CORNER, CORNER_LEFT_UPPER);
-   ObjectSetInteger(0, accuracyName, OBJPROP_ANCHOR, ANCHOR_UPPER_HCENTER);
+   ObjectSetInteger(0, accuracyName, OBJPROP_ANCHOR, ANCHOR_UPPER);
    ObjectSetInteger(0, accuracyName, OBJPROP_XDISTANCE, x);
    ObjectSetInteger(0, accuracyName, OBJPROP_YDISTANCE, yOffset);
    ObjectSetString(0, accuracyName, OBJPROP_TEXT, accuracyText);
@@ -14564,7 +14564,7 @@ void DisplayMLMetrics()
    color f1Color = (g_mlMetrics.bestF1Score >= 70) ? goodColor : (g_mlMetrics.bestF1Score >= 60) ? mediumColor : lowColor;
    
    ObjectSetInteger(0, f1Name, OBJPROP_CORNER, CORNER_LEFT_UPPER);
-   ObjectSetInteger(0, f1Name, OBJPROP_ANCHOR, ANCHOR_UPPER_HCENTER);
+   ObjectSetInteger(0, f1Name, OBJPROP_ANCHOR, ANCHOR_UPPER);
    ObjectSetInteger(0, f1Name, OBJPROP_XDISTANCE, x);
    ObjectSetInteger(0, f1Name, OBJPROP_YDISTANCE, yOffset);
    ObjectSetString(0, f1Name, OBJPROP_TEXT, f1Text);
@@ -14585,7 +14585,7 @@ void DisplayMLMetrics()
                        "MLP:" + DoubleToString(g_mlMetrics.mlpAccuracy, 1) + "%";
    
    ObjectSetInteger(0, modelsName, OBJPROP_CORNER, CORNER_LEFT_UPPER);
-   ObjectSetInteger(0, modelsName, OBJPROP_ANCHOR, ANCHOR_UPPER_HCENTER);
+   ObjectSetInteger(0, modelsName, OBJPROP_ANCHOR, ANCHOR_UPPER);
    ObjectSetInteger(0, modelsName, OBJPROP_XDISTANCE, x);
    ObjectSetInteger(0, modelsName, OBJPROP_YDISTANCE, yOffset);
    ObjectSetString(0, modelsName, OBJPROP_TEXT, modelsText);
@@ -14605,7 +14605,7 @@ void DisplayMLMetrics()
                         IntegerToString(g_mlMetrics.testSamples) + " test";
    
    ObjectSetInteger(0, samplesName, OBJPROP_CORNER, CORNER_LEFT_UPPER);
-   ObjectSetInteger(0, samplesName, OBJPROP_ANCHOR, ANCHOR_UPPER_HCENTER);
+   ObjectSetInteger(0, samplesName, OBJPROP_ANCHOR, ANCHOR_UPPER);
    ObjectSetInteger(0, samplesName, OBJPROP_XDISTANCE, x);
    ObjectSetInteger(0, samplesName, OBJPROP_YDISTANCE, yOffset);
    ObjectSetString(0, samplesName, OBJPROP_TEXT, samplesText);
@@ -14625,7 +14625,7 @@ void DisplayMLMetrics()
    color confidenceColor = (g_mlMetrics.suggestedMinConfidence >= 65) ? goodColor : mediumColor;
    
    ObjectSetInteger(0, confidenceName, OBJPROP_CORNER, CORNER_LEFT_UPPER);
-   ObjectSetInteger(0, confidenceName, OBJPROP_ANCHOR, ANCHOR_UPPER_HCENTER);
+   ObjectSetInteger(0, confidenceName, OBJPROP_ANCHOR, ANCHOR_UPPER);
    ObjectSetInteger(0, confidenceName, OBJPROP_XDISTANCE, x);
    ObjectSetInteger(0, confidenceName, OBJPROP_YDISTANCE, yOffset);
    ObjectSetString(0, confidenceName, OBJPROP_TEXT, confidenceText);
