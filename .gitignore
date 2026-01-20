@@ -60,6 +60,9 @@ backtest_results/
 
 # Modèles ML volumineux non versionnés
 backend/trend_model.pkl
+models/
+*.joblib
+*.pkl
 
 # Streamlit
 .streamlit/
