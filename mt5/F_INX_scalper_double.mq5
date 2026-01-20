@@ -14487,10 +14487,11 @@ void DisplayMLMetrics()
    if(!ShowMLMetrics || !UseAI_Agent || !g_mlMetrics.isValid)
       return;
    
-   // Position dans le coin inférieur droit (configurable via Inputs)
-   int x = MLPanelXDistance;
-   int yFromBottom = MLPanelYFromBottom;
-   int lineHeight = 12;
+   // Position en haut au centre
+   int chart_width = (int)ChartGetInteger(0, CHART_WIDTH_IN_PIXELS);
+   int x = chart_width / 2;
+   int yStart = 40; // Sous le titre/bouton habituel
+   int lineHeight = 15;
    color titleColor = clrGold;
    color textColor = clrWhite;
    color goodColor = clrLime;
@@ -14502,16 +14503,17 @@ void DisplayMLMetrics()
    if(ObjectFind(0, titleName) < 0)
       ObjectCreate(0, titleName, OBJ_LABEL, 0, 0, 0);
    
-   ObjectSetInteger(0, titleName, OBJPROP_CORNER, CORNER_RIGHT_LOWER);
+   ObjectSetInteger(0, titleName, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+   ObjectSetInteger(0, titleName, OBJPROP_ANCHOR, ANCHOR_UPPER_HCENTER);
    ObjectSetInteger(0, titleName, OBJPROP_XDISTANCE, x);
-   ObjectSetInteger(0, titleName, OBJPROP_YDISTANCE, yFromBottom);
+   ObjectSetInteger(0, titleName, OBJPROP_YDISTANCE, yStart);
    ObjectSetString(0, titleName, OBJPROP_TEXT, "🤖 MÉTRIQUES MACHINE LEARNING");
    ObjectSetInteger(0, titleName, OBJPROP_COLOR, titleColor);
    ObjectSetInteger(0, titleName, OBJPROP_FONTSIZE, 10);
    ObjectSetString(0, titleName, OBJPROP_FONT, "Arial Bold");
    ObjectSetInteger(0, titleName, OBJPROP_SELECTABLE, false);
    
-   int yOffset = yFromBottom - 15;
+   int yOffset = yStart + 18;
    
    // --- MEILLEUR MODÈLE ---
    string bestModelName = "ML_BEST_MODEL_" + _Symbol;
@@ -14521,7 +14523,8 @@ void DisplayMLMetrics()
    string modelText = "Modèle: " + g_mlMetrics.bestModel;
    color modelColor = (g_mlMetrics.bestAccuracy >= 70) ? goodColor : (g_mlMetrics.bestAccuracy >= 60) ? mediumColor : lowColor;
    
-   ObjectSetInteger(0, bestModelName, OBJPROP_CORNER, CORNER_RIGHT_LOWER);
+   ObjectSetInteger(0, bestModelName, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+   ObjectSetInteger(0, bestModelName, OBJPROP_ANCHOR, ANCHOR_UPPER_HCENTER);
    ObjectSetInteger(0, bestModelName, OBJPROP_XDISTANCE, x);
    ObjectSetInteger(0, bestModelName, OBJPROP_YDISTANCE, yOffset);
    ObjectSetString(0, bestModelName, OBJPROP_TEXT, modelText);
@@ -14530,7 +14533,7 @@ void DisplayMLMetrics()
    ObjectSetString(0, bestModelName, OBJPROP_FONT, "Arial");
    ObjectSetInteger(0, bestModelName, OBJPROP_SELECTABLE, false);
    
-   yOffset -= lineHeight;
+   yOffset += lineHeight;
    
    // --- ACCURACY ---
    string accuracyName = "ML_ACCURACY_" + _Symbol;
@@ -14540,7 +14543,8 @@ void DisplayMLMetrics()
    string accuracyText = "Accuracy: " + DoubleToString(g_mlMetrics.bestAccuracy, 2) + "%";
    color accuracyColor = (g_mlMetrics.bestAccuracy >= 70) ? goodColor : (g_mlMetrics.bestAccuracy >= 60) ? mediumColor : lowColor;
    
-   ObjectSetInteger(0, accuracyName, OBJPROP_CORNER, CORNER_RIGHT_LOWER);
+   ObjectSetInteger(0, accuracyName, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+   ObjectSetInteger(0, accuracyName, OBJPROP_ANCHOR, ANCHOR_UPPER_HCENTER);
    ObjectSetInteger(0, accuracyName, OBJPROP_XDISTANCE, x);
    ObjectSetInteger(0, accuracyName, OBJPROP_YDISTANCE, yOffset);
    ObjectSetString(0, accuracyName, OBJPROP_TEXT, accuracyText);
@@ -14549,7 +14553,7 @@ void DisplayMLMetrics()
    ObjectSetString(0, accuracyName, OBJPROP_FONT, "Arial");
    ObjectSetInteger(0, accuracyName, OBJPROP_SELECTABLE, false);
    
-   yOffset -= lineHeight;
+   yOffset += lineHeight;
    
    // --- F1 SCORE ---
    string f1Name = "ML_F1_SCORE_" + _Symbol;
@@ -14559,7 +14563,8 @@ void DisplayMLMetrics()
    string f1Text = "F1 Score: " + DoubleToString(g_mlMetrics.bestF1Score, 2) + "%";
    color f1Color = (g_mlMetrics.bestF1Score >= 70) ? goodColor : (g_mlMetrics.bestF1Score >= 60) ? mediumColor : lowColor;
    
-   ObjectSetInteger(0, f1Name, OBJPROP_CORNER, CORNER_RIGHT_LOWER);
+   ObjectSetInteger(0, f1Name, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+   ObjectSetInteger(0, f1Name, OBJPROP_ANCHOR, ANCHOR_UPPER_HCENTER);
    ObjectSetInteger(0, f1Name, OBJPROP_XDISTANCE, x);
    ObjectSetInteger(0, f1Name, OBJPROP_YDISTANCE, yOffset);
    ObjectSetString(0, f1Name, OBJPROP_TEXT, f1Text);
@@ -14568,7 +14573,7 @@ void DisplayMLMetrics()
    ObjectSetString(0, f1Name, OBJPROP_FONT, "Arial");
    ObjectSetInteger(0, f1Name, OBJPROP_SELECTABLE, false);
    
-   yOffset -= lineHeight;
+   yOffset += lineHeight;
    
    // --- MODÈLES INDIVIDUELS ---
    string modelsName = "ML_MODELS_" + _Symbol;
@@ -14579,7 +14584,8 @@ void DisplayMLMetrics()
                        "GB:" + DoubleToString(g_mlMetrics.gradientBoostingAccuracy, 1) + "% " +
                        "MLP:" + DoubleToString(g_mlMetrics.mlpAccuracy, 1) + "%";
    
-   ObjectSetInteger(0, modelsName, OBJPROP_CORNER, CORNER_RIGHT_LOWER);
+   ObjectSetInteger(0, modelsName, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+   ObjectSetInteger(0, modelsName, OBJPROP_ANCHOR, ANCHOR_UPPER_HCENTER);
    ObjectSetInteger(0, modelsName, OBJPROP_XDISTANCE, x);
    ObjectSetInteger(0, modelsName, OBJPROP_YDISTANCE, yOffset);
    ObjectSetString(0, modelsName, OBJPROP_TEXT, modelsText);
@@ -14588,7 +14594,7 @@ void DisplayMLMetrics()
    ObjectSetString(0, modelsName, OBJPROP_FONT, "Arial");
    ObjectSetInteger(0, modelsName, OBJPROP_SELECTABLE, false);
    
-   yOffset -= lineHeight;
+   yOffset += lineHeight;
    
    // --- ÉCHANTILLONS ---
    string samplesName = "ML_SAMPLES_" + _Symbol;
@@ -14598,7 +14604,8 @@ void DisplayMLMetrics()
    string samplesText = "Échantillons: " + IntegerToString(g_mlMetrics.trainingSamples) + " train / " + 
                         IntegerToString(g_mlMetrics.testSamples) + " test";
    
-   ObjectSetInteger(0, samplesName, OBJPROP_CORNER, CORNER_RIGHT_LOWER);
+   ObjectSetInteger(0, samplesName, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+   ObjectSetInteger(0, samplesName, OBJPROP_ANCHOR, ANCHOR_UPPER_HCENTER);
    ObjectSetInteger(0, samplesName, OBJPROP_XDISTANCE, x);
    ObjectSetInteger(0, samplesName, OBJPROP_YDISTANCE, yOffset);
    ObjectSetString(0, samplesName, OBJPROP_TEXT, samplesText);
@@ -14607,7 +14614,7 @@ void DisplayMLMetrics()
    ObjectSetString(0, samplesName, OBJPROP_FONT, "Arial");
    ObjectSetInteger(0, samplesName, OBJPROP_SELECTABLE, false);
    
-   yOffset -= lineHeight;
+   yOffset += lineHeight;
    
    // --- CONFiance SUGGÉRÉE ---
    string confidenceName = "ML_CONFIDENCE_" + _Symbol;
@@ -14617,7 +14624,8 @@ void DisplayMLMetrics()
    string confidenceText = "Confiance suggérée: " + DoubleToString(g_mlMetrics.suggestedMinConfidence, 1) + "%";
    color confidenceColor = (g_mlMetrics.suggestedMinConfidence >= 65) ? goodColor : mediumColor;
    
-   ObjectSetInteger(0, confidenceName, OBJPROP_CORNER, CORNER_RIGHT_LOWER);
+   ObjectSetInteger(0, confidenceName, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+   ObjectSetInteger(0, confidenceName, OBJPROP_ANCHOR, ANCHOR_UPPER_HCENTER);
    ObjectSetInteger(0, confidenceName, OBJPROP_XDISTANCE, x);
    ObjectSetInteger(0, confidenceName, OBJPROP_YDISTANCE, yOffset);
    ObjectSetString(0, confidenceName, OBJPROP_TEXT, confidenceText);
