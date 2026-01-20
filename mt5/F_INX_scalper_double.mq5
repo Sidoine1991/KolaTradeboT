@@ -68,7 +68,7 @@ input int    MinStabilitySeconds = 3;   // Délai minimum de stabilité avant ex
 input group "--- DASHBOARD ET ANALYSE COHÉRENTE ---"
 input string AI_CoherentAnalysisURL = "https://kolatradebot.onrender.com/coherent-analysis"; // URL pour l'analyse cohérente
 input string AI_DashboardGraphsURL = "https://kolatradebot.onrender.com/dashboard/graphs";    // URL pour les graphiques du dashboard
-input int    AI_CoherentAnalysisInterval = 600; // Intervalle de mise à jour de l'analyse cohérente (secondes, allégé)
+input int    AI_CoherentAnalysisInterval = 120; // Intervalle de mise à jour de l'analyse cohérente (réduit à 2 min pour Phase 2)
 input bool   ShowCoherentAnalysis = true; // Afficher l'analyse cohérente sur le graphique
 
 input group "--- PHASE 2: MACHINE LEARNING ---"
@@ -1609,10 +1609,13 @@ AdaptiveThresholds CalculateAdaptiveThresholds()
    AdaptiveThresholds thresholds;
    
    // BASE: Seuils par défaut
-   thresholds.minAIConfidence = 0.75;
-   thresholds.minCoherentConfidence = 0.65;
+   thresholds.minAIConfidence = 0.70; // Réduit de 0.75 à 0.70 pour plus d'opportunités en Phase 2
+   thresholds.minCoherentConfidence = 0.60;
    thresholds.riskMultiplier = 1.0;
-   thresholds.reason = "Seuils par défaut";
+   thresholds.reason = "Seuils Phase 2";
+   
+   // Détecter si c'est un symbole Boom/Crash
+   bool isBoomCrash = IsBoomCrashSymbol(_Symbol);
    
    // 1. Calculer win rate récent (20 derniers trades)
    double winRate = CalculateRecentWinRate(20);
@@ -1624,56 +1627,45 @@ AdaptiveThresholds CalculateAdaptiveThresholds()
    double maxDailyProfit = DailyProfitTarget;
    double progressRatio = (maxDailyProfit > 0) ? g_dailyProfit / maxDailyProfit : 0.0;
    
-   // 4. Heure de la journée (marchés plus volatils à certaines heures)
+   // 4. Heure de la journée
    double timeFactor = GetTimeVolatilityFactor();
+   
+   // ADAPTATION BOOM/CRASH: Plus agressif sur les spikes
+   if(isBoomCrash)
+   {
+      thresholds.minAIConfidence = 0.60; // Plus bas pour Boom/Crash car on cherche les spikes
+      thresholds.minCoherentConfidence = 0.55;
+      thresholds.reason = "Optimisation Boom/Crash";
+   }
    
    // ADAPTATION 1: Si win rate élevé (>70%), réduire les seuils (plus agressif)
    if(winRate > 0.70)
    {
-      thresholds.minAIConfidence = 0.70;
-      thresholds.minCoherentConfidence = 0.60;
-      thresholds.riskMultiplier = 1.2; // Augmenter légèrement le risque
-      thresholds.reason = "Win rate élevé (" + DoubleToString(winRate*100, 1) + "%)";
+      thresholds.minAIConfidence = MathMin(thresholds.minAIConfidence, 0.65);
+      thresholds.riskMultiplier = 1.2;
+      thresholds.reason += " | Win rate élevé (" + DoubleToString(winRate*100, 1) + "%)";
    }
    // ADAPTATION 2: Si win rate faible (<50%), augmenter les seuils (plus conservateur)
-   else if(winRate < 0.50 && winRate > 0.0) // winRate > 0.0 pour éviter division par zéro
+   else if(winRate < 0.50 && winRate > 0.0)
    {
-      thresholds.minAIConfidence = 0.85;
-      thresholds.minCoherentConfidence = 0.75;
-      thresholds.riskMultiplier = 0.7; // Réduire le risque
-      thresholds.reason = "Win rate faible (" + DoubleToString(winRate*100, 1) + "%)";
+      thresholds.minAIConfidence = MathMax(thresholds.minAIConfidence, 0.80);
+      thresholds.riskMultiplier = 0.7;
+      thresholds.reason += " | Conservateur (Win rate faible)";
    }
    
-   // ADAPTATION 3: Si proche de l'objectif (>80%), être plus conservateur
+   // ADAPTATION 3: Si proche de l'objectif (>80%), être très conservateur
    if(progressRatio > 0.80)
    {
-      thresholds.minAIConfidence = MathMax(thresholds.minAIConfidence, 0.80);
-      thresholds.minCoherentConfidence = MathMax(thresholds.minCoherentConfidence, 0.70);
-      thresholds.riskMultiplier = MathMin(thresholds.riskMultiplier, 0.8);
-      thresholds.reason += " | Proche objectif (" + DoubleToString(progressRatio*100, 0) + "%)";
+      thresholds.minAIConfidence = MathMax(thresholds.minAIConfidence, 0.85);
+      thresholds.riskMultiplier = 0.6;
+      thresholds.reason += " | Sécurisation profit (" + DoubleToString(progressRatio*100, 0) + "%)";
    }
    
-   // ADAPTATION 4: Si volatilité élevée, être plus sélectif
-   if(volatilityRatio > 1.5)
+   // ADAPTATION 4: Volatilité extrême
+   if(volatilityRatio > 2.0)
    {
-      thresholds.minAIConfidence = MathMax(thresholds.minAIConfidence, 0.80);
-      thresholds.reason += " | Volatilité élevée";
-   }
-   
-   // ADAPTATION 5: Ajuster selon l'heure via timeFactor (plus conservateur en heures calmes)
-   if(timeFactor < 1.0)
-   {
-      thresholds.minAIConfidence = MathMax(thresholds.minAIConfidence, 0.80);
-      thresholds.minCoherentConfidence = MathMax(thresholds.minCoherentConfidence, 0.70);
-      thresholds.reason += " | Heures calmes";
-   }
-   
-   if(DebugMode)
-   {
-      Print("📊 Seuils adaptatifs calculés - IA:", DoubleToString(thresholds.minAIConfidence*100, 1), 
-            "% Cohérent:", DoubleToString(thresholds.minCoherentConfidence*100, 1), 
-            "% Risque:", DoubleToString(thresholds.riskMultiplier, 2), 
-            " | ", thresholds.reason);
+      thresholds.minAIConfidence = 0.85;
+      thresholds.reason += " | Volatilité extrême";
    }
    
    return thresholds;
@@ -3339,6 +3331,17 @@ void OnTick()
       {
          UpdateMLMetrics(_Symbol, "M1");
          lastMLMetricsUpdate = TimeCurrent();
+      }
+   }
+   
+   // Phase 2: Entraînement ML automatique (Trigger)
+   if(AutoTrainML && UseAI_Agent)
+   {
+      static datetime lastAutoTrain = 0;
+      if(lastAutoTrain == 0 || (TimeCurrent() - lastAutoTrain) >= ML_TrainInterval)
+      {
+         TriggerMLTrainingIfNeeded();
+         lastAutoTrain = TimeCurrent();
       }
    }
    
@@ -14405,6 +14408,68 @@ void UpdateMLMetrics(string symbol, string timeframe = "M1")
       Print("   Échantillons: ", g_mlMetrics.trainingSamples, " train / ", g_mlMetrics.testSamples, " test");
       Print("   Confiance suggérée: ", DoubleToString(g_mlMetrics.suggestedMinConfidence, 2), "%");
       Print("═══════════════════════════════════════════════════════");
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Phase 2: Déclencher l'entraînement ML sur le serveur (Push Data) |
+//+------------------------------------------------------------------+
+void TriggerMLTrainingIfNeeded()
+{
+   if(!AutoTrainML || StringLen(AI_MLTrainURL) == 0)
+      return;
+   
+   Print("🚀 Déclenchement de l'entraînement ML Cloud pour ", _Symbol, "...");
+   
+   // Récupérer les données historiques (2000 barres pour un bon entraînement)
+   int barsCount = 2000;
+   MqlRates rates[];
+   ArraySetAsSeries(rates, true);
+   
+   if(CopyRates(_Symbol, PERIOD_M1, 0, barsCount, rates) < 100)
+   {
+      Print("⚠️ Pas assez de données pour l'entraînement (", _Symbol, ")");
+      return;
+   }
+   
+   // Construire le JSON manuellement (plus sûr pour les gros volumes en MQL5)
+   string json = "{";
+   json += "\"symbol\":\"" + _Symbol + "\",";
+   json += "\"timeframe\":\"M1\",";
+   json += "\"data\":[";
+   
+   int actualBars = ArraySize(rates);
+   for(int i = 0; i < actualBars; i++)
+   {
+      json += "{";
+      json += "\"time\":" + IntegerToString((long)rates[i].time) + ",";
+      json += "\"open\":" + DoubleToString(rates[i].open, _Digits) + ",";
+      json += "\"high\":" + DoubleToString(rates[i].high, _Digits) + ",";
+      json += "\"low\":" + DoubleToString(rates[i].low, _Digits) + ",";
+      json += "\"close\":" + DoubleToString(rates[i].close, _Digits) + ",";
+      json += "\"tick_volume\":" + IntegerToString(rates[i].tick_volume) + ",";
+      json += "\"spread\":" + IntegerToString(rates[i].spread);
+      json += "}";
+      
+      if(i < actualBars - 1) json += ",";
+   }
+   
+   json += "]}";
+   
+   // Envoyer la requête POST avec les données (Cloud Push-to-Train)
+   string response = "";
+   string headers = "Content-Type: application/json\r\nAccept: application/json\r\n";
+   
+   // Utiliser un timeout plus long car l'entraînement peut prendre du temps
+   int res = WebRequest("POST", AI_MLTrainURL, headers, 30000, json, response);
+   
+   if(res >= 200 && res < 300)
+   {
+      Print("✅ Entraînement ML Cloud réussi pour ", _Symbol, " - Réponse: ", response);
+   }
+   else
+   {
+      Print("❌ Échec entraînement ML Cloud (Code ", res, ") : ", response);
    }
 }
 

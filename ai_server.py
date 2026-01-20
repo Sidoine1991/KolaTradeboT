@@ -29,6 +29,26 @@ import requests
 import joblib
 from pathlib import Path
 
+# Configurer le logger avant les imports d'améliorations
+logger = logging.getLogger("tradbot_ai")
+
+# Importer les fonctions améliorées
+try:
+    from ai_server_improvements import (
+        calculate_advanced_confidence,
+        predict_prices_advanced,
+        validate_multi_timeframe,
+        adapt_prediction_for_symbol,
+        detect_support_resistance_levels,
+        is_boom_crash_symbol,
+        is_volatility_symbol
+    )
+    IMPROVEMENTS_AVAILABLE = True
+    logger.info("✅ Module ai_server_improvements chargé avec succès")
+except ImportError:
+    IMPROVEMENTS_AVAILABLE = False
+    logger.warning("⚠️ Module ai_server_improvements non disponible - utilisation des fonctions de base")
+
 # PostgreSQL async support for feedback loop
 try:
     import asyncpg
@@ -673,15 +693,21 @@ args = parser.parse_args()
 API_PORT = int(os.getenv('API_PORT', args.port))
 HOST = os.getenv('HOST', args.host)
 CACHE_DURATION = 30  # secondes
-DATA_DIR = Path("data")
-MODELS_DIR = Path("models")
+# Dossiers de prédictions / métriques MT5
+RUNNING_ON_RENDER = bool(os.getenv("RENDER") or os.getenv("RENDER_SERVICE_ID"))
+
+if RUNNING_ON_RENDER:
+    DATA_DIR = Path("/data")
+    MODELS_DIR = Path("/models")
+    # S'assurer que les dossiers existent sur le disque persistant
+    os.makedirs(DATA_DIR, exist_ok=True)
+    os.makedirs(MODELS_DIR, exist_ok=True)
+else:
+    DATA_DIR = Path("data")
+    MODELS_DIR = Path("models")
+
 LOG_FILE = Path("ai_server.log")
 FEEDBACK_FILE = DATA_DIR / "trade_feedback.jsonl"
-
-# Dossiers de prédictions / métriques MT5
-# - En local Windows: dossiers partagés avec le terminal MT5
-# - Sur Render / cloud: dossiers internes au conteneur (DATA_DIR)
-RUNNING_ON_RENDER = bool(os.getenv("RENDER") or os.getenv("RENDER_SERVICE_ID"))
 
 if RUNNING_ON_RENDER:
     # Mode cloud: tout est stocké dans le répertoire data/ du serveur
@@ -3591,13 +3617,37 @@ def filter_false_signals(symbol: str, direction: str, confidence: float, timefra
         }
 
 def calculate_trend_confidence(symbol: str, timeframe: str = "M1") -> float:
-    """Calcule le niveau de confiance de la tendance (0-100)"""
+    """Calcule le niveau de confiance de la tendance (0-100) - Version améliorée"""
     try:
         if not mt5_initialized:
             # Fallback aléatoire si MT5 non disponible
             import random
-            return random.randint(60, 90)
+            return float(random.randint(60, 90))
         
+        # Utiliser la fonction améliorée si disponible
+        if IMPROVEMENTS_AVAILABLE:
+            try:
+                tf_map = {
+                    'M1': mt5.TIMEFRAME_M1,
+                    'M5': mt5.TIMEFRAME_M5,
+                    'M15': mt5.TIMEFRAME_M15,
+                    'H1': mt5.TIMEFRAME_H1,
+                    'H4': mt5.TIMEFRAME_H4
+                }
+                
+                mt5_timeframe = tf_map.get(timeframe, mt5.TIMEFRAME_M1)
+                rates = mt5.copy_rates_from_pos(symbol, mt5_timeframe, 0, 100)
+                
+                if rates is not None and len(rates) >= 50:
+                    df = pd.DataFrame(rates)
+                    confidence_data = calculate_advanced_confidence(df, symbol, timeframe)
+                    
+                    # Convertir de 0-1 à 0-100
+                    return float(confidence_data['confidence'] * 100)
+            except Exception as e:
+                logger.warning(f"Erreur calcul confiance améliorée: {e}, fallback vers méthode standard")
+        
+        # Fallback vers méthode standard
         tf_map = {
             'M1': mt5.TIMEFRAME_M1,
             'M5': mt5.TIMEFRAME_M5,
@@ -3612,9 +3662,7 @@ def calculate_trend_confidence(symbol: str, timeframe: str = "M1") -> float:
         if rates is None or len(rates) < 50:
             return 50.0
         
-        df = pd.DataFrame(rates)
-        
-        # Utiliser la nouvelle fonction avancée
+        # Utiliser la nouvelle fonction avancée existante
         enhanced_result = calculate_enhanced_trend_direction(symbol, timeframe)
         base_confidence = enhanced_result.get("confidence", 50.0)
         
@@ -3622,7 +3670,7 @@ def calculate_trend_confidence(symbol: str, timeframe: str = "M1") -> float:
         filter_result = filter_false_signals(symbol, enhanced_result.get("direction", "neutral"), base_confidence, timeframe)
         
         if filter_result.get("valid", False):
-            return filter_result.get("filtered_confidence", base_confidence)
+            return float(filter_result.get("filtered_confidence", base_confidence))
         else:
             logger.info(f"Signal filtré pour {symbol}: {filter_result.get('reason', 'Raison inconnue')}")
             return 0.0  # Confiance nulle si signal rejeté
@@ -4357,6 +4405,7 @@ class MLTrainRequest(BaseModel):
     symbol: str
     timeframe: str = "M1"
     period_days: int = 90
+    data: Optional[List[Dict[str, Any]]] = None  # Données historiques fournies par le client (Phase 2 Cloud)
 
 class MLPredictRequest(BaseModel):
     symbol: str
@@ -4378,7 +4427,15 @@ async def train_ml_models_endpoint(request: MLTrainRequest):
         
         logger.info(f"Entraînement ML demandé pour {request.symbol} {request.timeframe}")
         
-        result = train_ml_models(request.symbol, request.timeframe, historical_data=None)
+        # Si des données sont fournies dans la requête, les utiliser directement (mode Cloud)
+        historical_data = None
+        if request.data and len(request.data) > 0:
+            logger.info(f"Utilisation des données poussées ({len(request.data)} barres) pour l'entraînement cloud")
+            historical_data = pd.DataFrame(request.data)
+            # S'assurer que les noms de colonnes sont corrects pour MT5 (lowercase)
+            # MT5 rates usually have: time, open, high, low, close, tick_volume, spread, real_volume
+        
+        result = train_ml_models(request.symbol, request.timeframe, historical_data=historical_data)
         
         if "error" in result:
             raise HTTPException(status_code=500, detail=result["error"])
@@ -4731,7 +4788,7 @@ async def get_trend_analysis_get(symbol: str = "EURUSD", timeframe: str = "M1"):
 
 @app.post("/trend")
 async def get_trend_analysis(request: TrendAnalysisRequest):
-    """Endpoint POST pour l'analyse de tendance (compatible avec MT5)"""
+    """Endpoint principal pour l'analyse de tendance (compatible avec MT5) - Version améliorée"""
     try:
         logger.info(f"Analyse de tendance POST demandée pour {request.symbol}")
         
@@ -4739,6 +4796,25 @@ async def get_trend_analysis(request: TrendAnalysisRequest):
             "symbol": request.symbol,
             "timestamp": time.time()
         }
+        
+        # Validation multi-timeframe si disponible
+        if IMPROVEMENTS_AVAILABLE and mt5_initialized:
+            try:
+                import MetaTrader5 as mt5_module
+                multi_tf_validation = validate_multi_timeframe(
+                    symbol=request.symbol,
+                    timeframes=request.timeframes,
+                    mt5_module=mt5_module,
+                    mt5_initialized=mt5_initialized
+                )
+                response['multi_timeframe'] = {
+                    'consensus': multi_tf_validation['consensus'],
+                    'is_valid': multi_tf_validation['is_valid'],
+                    'avg_confidence': multi_tf_validation.get('avg_confidence', 0.0),
+                    'reason': multi_tf_validation.get('reason', '')
+                }
+            except Exception as e:
+                logger.warning(f"Erreur validation multi-timeframe: {e}")
         
         # Analyser chaque timeframe demandé
         for tf in request.timeframes:
@@ -4755,7 +4831,8 @@ async def get_trend_analysis(request: TrendAnalysisRequest):
                 "market_trend": market_state_info["market_trend"]
             }
         
-        logger.info(f"Tendance POST {request.symbol}: {response.get('M1', {}).get('direction', 'unknown')} (conf: {response.get('M1', {}).get('confidence', 0):.1f}%) - État: {response.get('M1', {}).get('market_state', 'unknown')}")
+        logger.info(f"Tendance POST {request.symbol}: {response.get('M1', {}).get('direction', 'unknown')} "
+                   f"(conf: {response.get('M1', {}).get('confidence', 0):.1f}%)")
         return response
         
     except Exception as e:
@@ -7032,246 +7109,85 @@ async def predict_prices(request: PricePredictionRequest):
         current_price = request.current_price
         bars_to_predict = request.bars_to_predict
         timeframe = request.timeframe
-        history = request.history or []
-        history_bars = request.history_bars or 200
         
-        logger.info(f"📊 Prédiction multi-timeframe: {symbol} ({timeframe}) - {bars_to_predict} bougies")
+        logger.info(f"📊 Prédiction multi-timeframe améliorée: {symbol} ({timeframe}) - {bars_to_predict} bougies")
         
-        prices = []
-        
-        # Si des données historiques sont fournies, les utiliser pour améliorer la prédiction
-        if history and len(history) >= 20:
+        # Utiliser la fonction améliorée si disponible
+        if IMPROVEMENTS_AVAILABLE and MT5_AVAILABLE and mt5_initialized:
             try:
-                # Essayer de récupérer les données OHLC complètes si disponibles
-                df_history = None
-                if request.history_ohlc and all(key in request.history_ohlc for key in ['open', 'high', 'low', 'close']):
-                    ohlc = request.history_ohlc
-                    df_history = pd.DataFrame({
-                        'open': ohlc['open'][-len(history):],
-                        'high': ohlc['high'][-len(history):],
-                        'low': ohlc['low'][-len(history):],
-                        'close': history
-                    })
-                else:
-                    # Si pas de données OHLC, estimer à partir des closes
-                    df_history = pd.DataFrame({'close': history})
-                    # Estimer open, high, low à partir des closes (approximation)
-                    df_history['open'] = df_history['close'].shift(1).fillna(df_history['close'])
-                    price_range = df_history['close'].pct_change().abs().rolling(5).mean() * df_history['close']
-                    df_history['high'] = df_history[['open', 'close']].max(axis=1) + price_range * 0.3
-                    df_history['low'] = df_history[['open', 'close']].min(axis=1) - price_range * 0.3
+                period_map = {
+                    "M1": mt5.TIMEFRAME_M1,
+                    "M5": mt5.TIMEFRAME_M5,
+                    "M15": mt5.TIMEFRAME_M15,
+                    "H1": mt5.TIMEFRAME_H1,
+                    "H4": mt5.TIMEFRAME_H4,
+                    "D1": mt5.TIMEFRAME_D1
+                }
                 
-                # ===== ANALYSE AVANCÉE DES BOUGIES PASSÉES =====
+                period = period_map.get(timeframe, mt5.TIMEFRAME_M1)
+                rates = mt5.copy_rates_from_pos(symbol, period, 0, min(500, bars_to_predict + 100))
                 
-                # 1. Analyser les patterns de bougies
-                candle_patterns = analyze_candlestick_patterns(df_history)
-                
-                # 2. Analyser la structure du marché (higher highs, lower lows)
-                market_structure = analyze_market_structure(df_history)
-                
-                # 3. Analyser les allures des bougies (taille, ratio corps/mèches)
-                candle_characteristics = analyze_candle_characteristics(df_history)
-                
-                # 4. Calculer les indicateurs techniques
-                df_history['return'] = df_history['close'].pct_change()
-                
-                # Calculer la volatilité réelle (ATR)
-                if len(df_history) >= 14:
-                    # ATR basé sur high-low si disponible
-                    if 'high' in df_history.columns and 'low' in df_history.columns:
-                        true_ranges = []
-                        for i in range(1, len(df_history)):
-                            tr1 = df_history['high'].iloc[i] - df_history['low'].iloc[i]
-                            tr2 = abs(df_history['high'].iloc[i] - df_history['close'].iloc[i-1])
-                            tr3 = abs(df_history['low'].iloc[i] - df_history['close'].iloc[i-1])
-                            true_ranges.append(max(tr1, tr2, tr3))
-                        if true_ranges:
-                            atr_value = pd.Series(true_ranges).rolling(14).mean().iloc[-1] if len(true_ranges) >= 14 else pd.Series(true_ranges).mean()
-                            volatility = float(atr_value) if pd.notna(atr_value) else df_history['return'].std() * current_price
-                        else:
-                            volatility = df_history['return'].std() * current_price
-                    else:
-                        returns = df_history['return'].dropna()
-                        volatility = returns.std() * current_price if len(returns) > 0 else current_price * 0.001
-                else:
-                    volatility = current_price * 0.001
-                
-                # Calculer la tendance (EMA rapide vs lente)
-                if len(df_history) >= 21:
-                    ema_fast = df_history['close'].ewm(span=9, adjust=False).mean().iloc[-1]
-                    ema_slow = df_history['close'].ewm(span=21, adjust=False).mean().iloc[-1]
-                    trend_direction = 1 if ema_fast > ema_slow else -1
-                    trend_strength = abs(ema_fast - ema_slow) / current_price
-                else:
-                    # Tendance basée sur les dernières bougies
-                    if len(df_history) >= 5:
-                        recent_trend = (df_history['close'].iloc[-1] - df_history['close'].iloc[-5]) / df_history['close'].iloc[-5]
-                        trend_direction = 1 if recent_trend > 0 else -1
-                        trend_strength = abs(recent_trend) * 0.5
-                    else:
-                        trend_direction = 0
-                        trend_strength = 0.0002
-                
-                # Ajuster la tendance selon les patterns détectés
-                if candle_patterns['bullish_pattern']:
-                    trend_direction = 1
-                    trend_strength = min(trend_strength * 1.5, 0.01)  # Renforcer tendance haussière
-                elif candle_patterns['bearish_pattern']:
-                    trend_direction = -1
-                    trend_strength = min(trend_strength * 1.5, 0.01)  # Renforcer tendance baissière
-                
-                # Ajuster selon la structure du marché
-                if market_structure['trend'] == 'uptrend':
-                    trend_direction = max(trend_direction, 0)  # Forcer haussier si uptrend
-                    trend_strength = max(trend_strength, market_structure['strength'])
-                elif market_structure['trend'] == 'downtrend':
-                    trend_direction = min(trend_direction, 0)  # Forcer baissier si downtrend
-                    trend_strength = max(trend_strength, market_structure['strength'])
-                
-                # Calculer le momentum
-                if len(df_history) >= 10:
-                    momentum = (df_history['close'].iloc[-1] - df_history['close'].iloc[-10]) / df_history['close'].iloc[-10]
-                else:
-                    momentum = 0.0
-                
-                # Ajuster la volatilité selon le type de symbole
-                if "Boom" in symbol or "Crash" in symbol:
-                    volatility = max(volatility, current_price * 0.002)
-                elif "Volatility" in symbol:
-                    volatility = max(volatility, current_price * 0.001)
-                
-                # Ajuster la volatilité selon les caractéristiques des bougies
-                volatility *= (1 + candle_characteristics['avg_body_ratio'] * 0.5)  # Plus volatil si grandes bougies
-                
-                logger.info(f"✅ Analyse approfondie: {len(history)} bougies | "
-                          f"Pattern: {candle_patterns['pattern_type']} | "
-                          f"Structure: {market_structure['trend']} | "
-                          f"Volatilité: {volatility:.4f} | "
-                          f"Tendance: {trend_direction}")
-                
+                if rates is not None and len(rates) >= 50:
+                    df = pd.DataFrame(rates)
+                    if 'time' in df.columns:
+                        df['time'] = pd.to_datetime(df['time'], unit='s')
+                    
+                    # Utiliser la prédiction améliorée de ai_server_improvements
+                    prediction_data = predict_prices_advanced(
+                        df=df,
+                        current_price=current_price,
+                        bars_to_predict=bars_to_predict,
+                        timeframe=timeframe,
+                        symbol=symbol
+                    )
+                    
+                    # Adapter selon le type de symbole (Boom/Crash/Volatility)
+                    prediction_result = adapt_prediction_for_symbol(
+                        symbol=symbol,
+                        base_prediction=prediction_data,
+                        df=df
+                    )
+                    
+                    prices = prediction_result['prediction']
+                    
+                    logger.info(f"✅ Prédiction améliorée générée: {len(prices)} prix pour {symbol} "
+                              f"(Confiance: {prediction_result.get('confidence', 0.5):.1%}, "
+                              f"Méthode: {prediction_result.get('method', 'advanced')})")
+                    
+                    # Stockage pour validation
+                    store_prediction(symbol, prices, current_price, timeframe)
+                    validate_predictions(symbol, timeframe)
+                    
+                    accuracy_score = get_prediction_accuracy_score(symbol)
+                    confidence_multiplier = get_prediction_confidence_multiplier(symbol)
+                    validation_count = sum(1 for p in prediction_history.get(symbol, []) if p.get("is_validated", False))
+
+                    return {
+                        "prediction": prices,
+                        "symbol": symbol,
+                        "current_price": current_price,
+                        "bars_predicted": len(prices),
+                        "timeframe": timeframe,
+                        "timestamp": datetime.now().isoformat(),
+                        "confidence": prediction_result.get('confidence', 0.5),
+                        "direction": prediction_result.get('direction', 'NEUTRAL'),
+                        "support_levels": prediction_result.get('support_levels', []),
+                        "resistance_levels": prediction_result.get('resistance_levels', []),
+                        "accuracy_score": round(accuracy_score, 3),
+                        "confidence_multiplier": round(confidence_multiplier, 2),
+                        "validation_count": validation_count,
+                        "method": prediction_result.get('method', 'advanced')
+                    }
             except Exception as e:
-                logger.warning(f"⚠️ Erreur lors du traitement de l'historique, utilisation de la méthode par défaut: {e}")
-                import traceback
-                logger.debug(traceback.format_exc())
-                # Fallback vers la méthode simple
-                history = []
+                logger.warning(f"⚠️ Échec prédiction améliorée, repli vers méthode standard: {e}")
         
-        # Si pas d'historique ou erreur, utiliser la méthode simple
-        if not history or len(history) < 20:
-            # Seed reproductible pour la cohérence
-            clean_symbol = symbol.replace(" ", "").replace("(", "").replace(")", "").replace("%", "")
-            seed_string = f"{clean_symbol}_{int(current_price * 1000)}_{timeframe}"
-            seed_value = hash(seed_string) % (2**31)
-            np.random.seed(seed_value)
-            
-            # Calcul de volatilité basique selon le type de symbole
-            if "Boom" in symbol or "Crash" in symbol:
-                volatility = current_price * 0.002
-                trend_strength = 0.001
-                trend_direction = 1
-            elif "Volatility" in symbol:
-                volatility = current_price * 0.001
-                trend_strength = 0.0005
-                trend_direction = 1
-            else:
-                volatility = current_price * 0.0005
-                trend_strength = 0.0002
-                trend_direction = 0
-            
-            momentum = 0.0
-        
-        # Générer les prix prédits avec la tendance et volatilité calculées
-        # Utiliser les caractéristiques des bougies pour générer des prix réalistes
-        last_predicted_price = current_price
-        
+        # Fallback si IMPROVEMENTS_AVAILABLE est False ou erreur
+        prices = [current_price] * bars_to_predict
+        np.random.seed(int(current_price * 100) % 2**31)
+        vol = current_price * 0.001
         for i in range(bars_to_predict):
-            # Composante de tendance avec décroissance progressive
-            decay_factor = 1.0 - (i / bars_to_predict) * 0.7
-            trend_component = trend_direction * trend_strength * last_predicted_price * decay_factor
-            
-            # Composante de momentum avec décroissance
-            momentum_decay = 1.0 - (i / bars_to_predict) * 0.8
-            momentum_component = momentum * last_predicted_price * 0.1 * momentum_decay
-            
-            # Générer des prix réalistes basés sur les caractéristiques des bougies passées
-            # Si on a analysé les bougies, utiliser leurs caractéristiques moyennes
-            if 'history' in locals() and len(history) >= 20 and 'candle_characteristics' in locals():
-                # Utiliser le ratio corps moyen pour générer des mouvements réalistes
-                body_size = volatility * candle_characteristics['avg_body_ratio']
-                
-                # Générer une bougie avec open, high, low, close
-                # Le mouvement suit la tendance avec une variation réaliste
-                price_movement = trend_component + momentum_component
-                
-                # Ajouter une variation aléatoire basée sur la volatilité et les caractéristiques
-                random_component = np.random.normal(0, body_size * 0.5)
-                
-                # Générer open (proche du dernier close)
-                open_price = last_predicted_price + random_component * 0.3
-                
-                # Générer close (selon la tendance)
-                close_price = open_price + price_movement + random_component
-                
-                # Générer high et low basés sur les ratios de mèches moyens
-                if candle_characteristics['avg_upper_shadow_ratio'] > 0:
-                    upper_shadow = abs(random_component) * candle_characteristics['avg_upper_shadow_ratio'] * 2
-                    high_price = max(open_price, close_price) + upper_shadow
-                else:
-                    high_price = max(open_price, close_price) * (1 + abs(random_component) * 0.001)
-                
-                if candle_characteristics['avg_lower_shadow_ratio'] > 0:
-                    lower_shadow = abs(random_component) * candle_characteristics['avg_lower_shadow_ratio'] * 2
-                    low_price = min(open_price, close_price) - lower_shadow
-                else:
-                    low_price = min(open_price, close_price) * (1 - abs(random_component) * 0.001)
-                
-                # Le prix prédit est le close (comme pour les données historiques)
-                predicted_price = close_price
-                
-                # S'assurer que le prix reste positif et cohérent
-                if predicted_price <= 0:
-                    predicted_price = last_predicted_price
-                
-                # Mettre à jour pour la prochaine itération
-                last_predicted_price = predicted_price
-            else:
-                # Méthode simple si pas d'analyse des bougies
-                # Composante de tendance avec décroissance
-                trend_component = trend_direction * trend_strength * last_predicted_price * (1.0 - i / bars_to_predict * 0.7)
-                
-                # Composante de momentum avec décroissance
-                momentum_component = momentum * last_predicted_price * 0.1 * (1.0 - i / bars_to_predict * 0.8)
-                
-                # Bruit aléatoire basé sur la volatilité réelle
-                noise = np.random.normal(0, volatility * 0.3)
-                
-                predicted_price = last_predicted_price + trend_component + momentum_component + noise
-                
-                # S'assurer que le prix reste positif
-                if predicted_price <= 0:
-                    predicted_price = last_predicted_price
-                
-                last_predicted_price = predicted_price
-            
-            prices.append(float(predicted_price))
-        
-        logger.info(f"✅ Prédiction générée rapidement: {len(prices)} prix pour {symbol}")
-        
-        # ===== NOUVEAU: Stocker la prédiction pour validation future =====
-        store_prediction(symbol, prices, current_price, timeframe)
-        
-        # ===== NOUVEAU: Valider les prédictions passées =====
-        validate_predictions(symbol, timeframe)
-        
-        # ===== NOUVEAU: Calculer le score de fiabilité =====
-        accuracy_score = get_prediction_accuracy_score(symbol)
-        confidence_multiplier = get_prediction_confidence_multiplier(symbol)
-        validation_count = sum(1 for p in prediction_history.get(symbol, []) if p.get("is_validated", False))
-        
-        # Avertir si précision faible
-        if accuracy_score < MIN_ACCURACY_THRESHOLD and validation_count >= 5:
-            logger.warning(f"⚠️ ATTENTION: Précision des prédictions faible pour {symbol}: {accuracy_score*100:.1f}% < {MIN_ACCURACY_THRESHOLD*100:.0f}%")
-        
+            prices[i] = float(current_price + np.random.normal(0, vol * (i+1)**0.5))
+
         return {
             "prediction": prices,
             "symbol": symbol,
@@ -7279,14 +7195,11 @@ async def predict_prices(request: PricePredictionRequest):
             "bars_predicted": len(prices),
             "timeframe": timeframe,
             "timestamp": datetime.now().isoformat(),
-            "accuracy_score": round(accuracy_score, 3),  # Score de précision historique (0.0 - 1.0)
-            "confidence_multiplier": round(confidence_multiplier, 2),  # Multiplicateur de confiance
-            "validation_count": validation_count,  # Nombre de validations effectuées
-            "reliability": "HIGH" if accuracy_score >= 0.80 else "MEDIUM" if accuracy_score >= 0.60 else "LOW"  # Niveau de fiabilité
+            "confidence": 0.5,
+            "method": "fallback_basic"
         }
-        
     except Exception as e:
-        logger.error(f"Erreur dans /prediction: {str(e)}", exc_info=True)
+        logger.error(f"Erreur critique dans /prediction: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Erreur lors de la prédiction de prix: {str(e)}")
 
 @app.get("/prediction/accuracy/{symbol}")
