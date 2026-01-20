@@ -29,6 +29,15 @@ import requests
 import joblib
 from pathlib import Path
 
+# PostgreSQL async support for feedback loop
+try:
+    import asyncpg
+    ASYNCPG_AVAILABLE = True
+except ImportError:
+    ASYNCPG_AVAILABLE = False
+    logger_placeholder = logging.getLogger("tradbot_ai")
+    logger_placeholder.warning("asyncpg non disponible - installer avec: pip install asyncpg")
+
 # Machine Learning imports (Phase 2) - seront initialisés après logger
 ML_AVAILABLE = False
 
@@ -38,6 +47,10 @@ try:
     load_dotenv()
 except ImportError:
     pass
+
+# Configuration PostgreSQL pour feedback loop
+DATABASE_URL = os.getenv("DATABASE_URL", "")
+DB_AVAILABLE = bool(DATABASE_URL and ASYNCPG_AVAILABLE)
 
 # Fonctions d'aide pour les indicateurs
 def calculate_rsi(prices: pd.Series, period: int = 14) -> pd.Series:
@@ -584,6 +597,72 @@ async def log_requests(request: Request, call_next):
     
     return response
 
+# ===== POSTGRESQL CONNECTION POOL FOR FEEDBACK LOOP =====
+async def get_db_pool():
+    """Get or create database connection pool"""
+    if not hasattr(app.state, "db_pool"):
+        if not DB_AVAILABLE:
+            logger.warning("PostgreSQL non disponible - DATABASE_URL manquant ou asyncpg non installé")
+            return None
+        try:
+            app.state.db_pool = await asyncpg.create_pool(
+                dsn=DATABASE_URL,
+                min_size=1,
+                max_size=5,
+                command_timeout=60
+            )
+            logger.info("✅ Pool de connexions PostgreSQL créé")
+        except Exception as e:
+            logger.error(f"❌ Erreur création pool PostgreSQL: {e}")
+            app.state.db_pool = None
+            return None
+    return app.state.db_pool
+
+# SQL pour créer la table de feedback
+CREATE_FEEDBACK_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS trade_feedback (
+    id SERIAL PRIMARY KEY,
+    symbol TEXT NOT NULL,
+    open_time TIMESTAMPTZ NOT NULL,
+    close_time TIMESTAMPTZ NOT NULL,
+    entry_price DOUBLE PRECISION NOT NULL,
+    exit_price DOUBLE PRECISION NOT NULL,
+    profit DOUBLE PRECISION NOT NULL,
+    ai_confidence DOUBLE PRECISION,
+    coherent_confidence DOUBLE PRECISION,
+    decision TEXT NOT NULL,
+    is_win BOOLEAN NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_trade_feedback_symbol ON trade_feedback(symbol);
+CREATE INDEX IF NOT EXISTS idx_trade_feedback_created_at ON trade_feedback(created_at DESC);
+"""
+
+@app.on_event("startup")
+async def startup_event():
+    """Initialize database on startup"""
+    if not DB_AVAILABLE:
+        logger.info("📊 Mode sans PostgreSQL - feedback loop désactivé")
+        return
+    
+    try:
+        pool = await get_db_pool()
+        if pool:
+            async with pool.acquire() as conn:
+                await conn.execute(CREATE_FEEDBACK_TABLE_SQL)
+                logger.info("✅ Table trade_feedback créée/vérifiée")
+    except Exception as e:
+        logger.error(f"❌ Erreur initialisation base de données: {e}", exc_info=True)
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Close database pool on shutdown"""
+    if hasattr(app.state, "db_pool") and app.state.db_pool:
+        await app.state.db_pool.close()
+        logger.info("🔒 Pool PostgreSQL fermé")
+
+
 # Parser les arguments en ligne de commande
 parser = argparse.ArgumentParser(description='Serveur AI TradBOT')
 parser.add_argument('--port', type=int, default=8000, help='Port sur lequel démarrer le serveur')
@@ -597,6 +676,7 @@ CACHE_DURATION = 30  # secondes
 DATA_DIR = Path("data")
 MODELS_DIR = Path("models")
 LOG_FILE = Path("ai_server.log")
+FEEDBACK_FILE = DATA_DIR / "trade_feedback.jsonl"
 
 # Dossiers de prédictions / métriques MT5
 # - En local Windows: dossiers partagés avec le terminal MT5
@@ -1146,6 +1226,21 @@ class DecisionRequest(BaseModel):
     deriv_patterns_bullish: Optional[int] = None  # Nombre de patterns bullish
     deriv_patterns_bearish: Optional[int] = None  # Nombre de patterns bearish
     deriv_patterns_confidence: Optional[float] = None  # Confiance moyenne des patterns
+
+# ===== MODÈLES POUR FEEDBACK LOOP =====
+class TradeFeedback(BaseModel):
+    """Modèle pour recevoir les résultats de trade du robot MT5"""
+    symbol: str
+    open_time: str  # ISO format datetime string
+    close_time: str  # ISO format datetime string
+    entry_price: float
+    exit_price: float
+    profit: float
+    ai_confidence: float
+    coherent_confidence: float
+    decision: str  # "BUY" ou "SELL"
+    is_win: bool
+
 
 class DecisionResponse(BaseModel):
     action: str  # "buy", "sell", "hold"
@@ -7946,8 +8041,233 @@ async def get_signals(
         return response
         
     except Exception as e:
-        logger.error(f"Erreur lors de la génération des signaux pour {symbol}: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Erreur lors de l'analyse: {str(e)}")
+        logger.error(f"Erreur lors de la génération du signal de trading: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Erreur serveur: {str(e)}")
+
+# ============================================================================
+# ENDPOINTS: FEEDBACK LOOP & MONITORING (Phase 1)
+# ============================================================================
+
+@app.post("/trades/feedback")
+async def receive_trade_feedback(feedback: TradeFeedback):
+    """
+    Endpoint pour recevoir les résultats de trade depuis le robot MT5
+    Stocke dans PostgreSQL pour analyse et amélioration continue
+    """
+    if not DB_AVAILABLE:
+        raise HTTPException(
+            status_code=503,
+            detail="Service de feedback non disponible - DATABASE_URL non configurée"
+        )
+    
+    try:
+        pool = await get_db_pool()
+        if not pool:
+            raise HTTPException(status_code=503, detail="Connexion base de données impossible")
+        
+        # Valider et parser les timestamps
+        try:
+            open_time_dt = datetime.fromisoformat(feedback.open_time.replace('Z', '+00:00'))
+            close_time_dt = datetime.fromisoformat(feedback.close_time.replace('Z', '+00:00'))
+        except ValueError as e:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Format de date invalide: {str(e)}. Utilisez le format ISO 8601"
+            )
+        
+        # Insérer dans la base de données
+        async with pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO trade_feedback (
+                    symbol, open_time, close_time, entry_price, exit_price,
+                    profit, ai_confidence, coherent_confidence, decision, is_win
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            """,
+                feedback.symbol,
+                open_time_dt,
+                close_time_dt,
+                feedback.entry_price,
+                feedback.exit_price,
+                feedback.profit,
+                feedback.ai_confidence,
+                feedback.coherent_confidence,
+                feedback.decision,
+                feedback.is_win
+            )
+        
+        # Logger pour suivi
+        win_str = "✅ WIN" if feedback.is_win else "❌ LOSS"
+        logger.info(
+            f"📊 Feedback reçu: {feedback.symbol} {feedback.decision} - "
+            f"Profit: ${feedback.profit:.2f} {win_str} "
+            f"(IA: {feedback.ai_confidence:.1%}, Coh: {feedback.coherent_confidence:.1%})"
+        )
+        
+        return {
+            "status": "ok",
+            "message": "Feedback enregistré avec succès",
+            "symbol": feedback.symbol,
+            "profit": feedback.profit
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Erreur enregistrement feedback: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Erreur serveur: {str(e)}")
+
+
+@app.get("/monitoring/dashboard")
+async def monitoring_dashboard(symbols: Optional[str] = None, limit: int = 100):
+    """
+    Dashboard de monitoring en temps réel
+    Retourne les statistiques de performance par symbole et globales
+    
+    Query params:
+        - symbols: Filtre par symboles (séparés par virgules), ex: "Volatility 75 Index,Boom 300 Index"
+        - limit: Nombre maximum de trades récents à analyser (défaut: 100)
+    """
+    if not DB_AVAILABLE:
+        return {
+            "error": "Service de monitoring non disponible - DATABASE_URL non configurée",
+            "win_rate": 0,
+            "pnl_total": 0,
+            "pnl_par_symbole": {},
+            "objectif_progress": 0,
+            "alertes": ["Base de données non disponible"]
+        }
+    
+    try:
+        pool = await get_db_pool()
+        if not pool:
+            raise HTTPException(status_code=503, detail="Connexion base de données impossible")
+        
+        async with pool.acquire() as conn:
+            # Requête de base
+            query = """
+                SELECT symbol, profit, is_win, ai_confidence, coherent_confidence,
+                       decision, created_at
+                FROM trade_feedback
+                ORDER BY created_at DESC
+                LIMIT $1
+            """
+            params = [limit]
+            
+            # Filtrer par symboles si demandé
+            if symbols:
+                symbol_list = [s.strip() for s in symbols.split(',')]
+                query = """
+                    SELECT symbol, profit, is_win, ai_confidence, coherent_confidence,
+                           decision, created_at
+                    FROM trade_feedback
+                    WHERE symbol = ANY($2::text[])
+                    ORDER BY created_at DESC
+                    LIMIT $1
+                """
+                params = [limit, symbol_list]
+            
+            rows = await conn.fetch(query, *params)
+        
+        if not rows:
+            return {
+                "win_rate": 0.0,
+                "pnl_total": 0.0,
+                "total_trades": 0,
+                "pnl_par_symbole": {},
+                "objectif_progress": 0.0,
+                "recent_trades": [],
+                "alertes": ["Aucune donnée de trading disponible"],
+                "timestamp": datetime.now().isoformat()
+            }
+        
+        # Calcul des statistiques
+        total_trades = len(rows)
+        wins = sum(1 for r in rows if r["is_win"])
+        pnl_total = sum(float(r["profit"] or 0) for r in rows)
+        win_rate = wins / total_trades if total_trades > 0 else 0.0
+        
+        # PnL par symbole
+        pnl_by_symbol = {}
+        trades_by_symbol = {}
+        wins_by_symbol = {}
+        
+        for r in rows:
+            sym = r["symbol"] or "UNKNOWN"
+            if sym not in pnl_by_symbol:
+                pnl_by_symbol[sym] = 0.0
+                trades_by_symbol[sym] = 0
+                wins_by_symbol[sym] = 0
+            
+            pnl_by_symbol[sym] += float(r["profit"] or 0)
+            trades_by_symbol[sym] += 1
+            if r["is_win"]:
+                wins_by_symbol[sym] += 1
+        
+        # Compiler stats par symbole
+        symbol_stats = {}
+        for sym in pnl_by_symbol.keys():
+            symbol_stats[sym] = {
+                "pnl": round(pnl_by_symbol[sym], 2),
+                "trades": trades_by_symbol[sym],
+                "win_rate": round(wins_by_symbol[sym] / trades_by_symbol[sym] * 100, 1) if trades_by_symbol[sym] > 0 else 0
+            }
+        
+        # Générer alertes intelligentes
+        alertes = []
+        if total_trades >= 5 and win_rate < 0.40:
+            alertes.append(f"⚠️ Win rate faible: {win_rate*100:.1f}% (seuil critique: 40%)")
+        if pnl_total < -50:
+            alertes.append(f"🔴 Pertes cumulées élevées: ${pnl_total:.2f}")
+        if total_trades >= 10 and win_rate >= 0.70:
+            alertes.append(f"🎉 Performance excellente! Win rate: {win_rate*100:.1f}%")
+        
+        # Analyser les symboles perdants
+        for sym, stats in symbol_stats.items():
+            if stats["trades"] >= 3 and stats["pnl"] < -20:
+                alertes.append(f"⚠️ Symbole perdant: {sym} (${stats['pnl']:.2f} sur {stats['trades']} trades)")
+        
+        if not alertes:
+            alertes.append("✅ Aucune alerte - Performance normale")
+        
+        # Progression vers objectif quotidien (exemple: 30$ par jour)
+        objectif_quotidien = 30.0
+        objectif_progress = min((pnl_total / objectif_quotidien) * 100, 100) if  pnl_total > 0 else 0
+        
+        # Trades récents (les 10 derniers)
+        recent_trades = [
+            {
+                "symbol": r["symbol"],
+                "decision": r["decision"],
+                "profit": round(float(r["profit"]), 2),
+                "is_win": r["is_win"],
+                "ai_confidence": round(float(r["ai_confidence"] or 0), 2),
+                "timestamp": r["created_at"].isoformat() if hasattr(r["created_at"], 'isoformat') else str(r["created_at"])
+            }
+            for r in rows[:10]
+        ]
+        
+        return {
+            "win_rate": round(win_rate, 3),
+            "pnl_total": round(pnl_total, 2),
+            "total_trades": total_trades,
+            "pnl_par_symbole": symbol_stats,
+            "objectif_progress": round(objectif_progress, 1),
+            "objectif_quotidien": objectif_quotidien,
+            "recent_trades": recent_trades,
+            "alertes": alertes,
+            "timestamp": datetime.now().isoformat()
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Erreur monitoring dashboard: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Erreur serveur: {str(e)}")
+
+# ============================================================================
+# MAIN
+# ============================================================================
+
 
 # Endpoint pour les indicateurs avancés
 @app.post("/indicators/analyze")
