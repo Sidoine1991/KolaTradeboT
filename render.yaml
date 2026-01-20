@@ -4,7 +4,7 @@ services:
     env: python
     plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn ai_server_cloud:app --host 0.0.0.0 --port $PORT
+    startCommand: uvicorn ai_server:app --host 0.0.0.0 --port $PORT
     runtime: python
     pythonVersion: "3.11.7"
     envVars:
@@ -22,3 +22,9 @@ services:
     repo: https://github.com/Sidoine1991/KolaTradeboT.git
     rootDir: .
     autoDeploy: yes
+    disk:
+      name: models-disk
+      mountPath: /models
+      sizeGB: 1
+    # Note: Disks require a paid Render plan. 
+    # If on free plan, persistence will not be available.
