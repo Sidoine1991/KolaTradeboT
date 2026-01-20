@@ -14457,11 +14457,17 @@ void TriggerMLTrainingIfNeeded()
    json += "]}";
    
    // Envoyer la requête POST avec les données (Cloud Push-to-Train)
-   string response = "";
+   uchar data[];
+   StringToCharArray(json, data, 0, StringLen(json));
+   
+   uchar result[];
+   string result_headers = "";
    string headers = "Content-Type: application/json\r\nAccept: application/json\r\n";
    
-   // Utiliser un timeout plus long car l'entraînement peut prendre du temps
-   int res = WebRequest("POST", AI_MLTrainURL, headers, 30000, json, response);
+   // Utiliser un timeout plus long car l'entraînement peut prendre du temps (30s)
+   int res = WebRequest("POST", AI_MLTrainURL, headers, 30000, data, result, result_headers);
+   
+   string response = CharArrayToString(result);
    
    if(res >= 200 && res < 300)
    {
