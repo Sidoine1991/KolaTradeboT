@@ -7422,7 +7422,17 @@ async def validate_prediction(request: PredictionValidationRequest):
             raise HTTPException(status_code=500, detail="Erreur interne: format de réponse invalide")
         
         if "error" in result:
-            raise HTTPException(status_code=400, detail=result["error"])
+            # Message d'erreur plus informatif pour les erreurs de validation
+            error_msg = result["error"]
+            # Si c'est une erreur de "pas de prédiction", c'est acceptable (pas nécessairement une erreur)
+            if "aucune prédiction" in error_msg.lower() or "prédiction" in error_msg.lower() and "non trouvée" in error_msg.lower():
+                logger.info(f"Validation ignorée pour {request.symbol}: {error_msg}")
+                return {
+                    "success": False,
+                    "message": error_msg,
+                    "status": "no_prediction_to_validate"
+                }
+            raise HTTPException(status_code=400, detail=error_msg)
         
         return result
         
@@ -7431,6 +7441,48 @@ async def validate_prediction(request: PredictionValidationRequest):
     except Exception as e:
         logger.error(f"Erreur dans /predictions/validate: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Erreur lors de la validation: {str(e)}")
+
+# Modèle pour la requête de précision de décision
+class DecisionAccuracyRequest(BaseModel):
+    symbol: str
+    action: str  # "buy", "sell", "hold"
+    confidence: float
+    result: Optional[str] = None  # "win", "loss", "breakeven"
+    profit: Optional[float] = None
+    timestamp: Optional[str] = None
+
+@app.post("/decision/accuracy")
+async def log_decision_accuracy(request: DecisionAccuracyRequest):
+    """
+    Enregistre la précision d'une décision de trading pour le feedback loop.
+    Permet au système d'apprendre de ses décisions.
+    """
+    try:
+        logger.info(f"📊 Précision décision reçue: {request.symbol} - {request.action} (conf: {request.confidence:.2f})")
+        
+        # Log simple pour l'instant (peut être étendu avec stockage en base de données)
+        accuracy_data = {
+            "symbol": request.symbol,
+            "action": request.action,
+            "confidence": request.confidence,
+            "result": request.result,
+            "profit": request.profit,
+            "timestamp": request.timestamp or datetime.now().isoformat()
+        }
+        
+        # Ici, on pourrait sauvegarder dans une base de données ou un fichier
+        # Pour l'instant, on log juste l'information
+        logger.info(f"✅ Données de précision enregistrées: {accuracy_data}")
+        
+        return {
+            "success": True,
+            "message": "Précision de décision enregistrée",
+            "timestamp": datetime.now().isoformat()
+        }
+        
+    except Exception as e:
+        logger.error(f"Erreur dans /decision/accuracy: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Erreur lors de l'enregistrement de la précision: {str(e)}")
 
 # ===== SYSTÈME DE NOTIFICATIONS VONAGE =====
 # Importer le service de notification unifié
