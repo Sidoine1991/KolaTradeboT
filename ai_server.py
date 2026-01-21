@@ -4204,34 +4204,55 @@ def train_ml_models(symbol: str, timeframe: str, historical_data: Optional[pd.Da
     Returns:
         Dictionnaire avec les modèles entraînés et métriques
     """
+    start_time = time.time()
+    logger.info(f"Début de l'entraînement pour {symbol} {timeframe}")
+    
     if not ML_AVAILABLE:
-        return {"error": "scikit-learn non disponible"}
+        error_msg = "Erreur: scikit-learn n'est pas disponible pour l'entraînement"
+        logger.error(error_msg)
+        return {"status": "error", "message": error_msg, "symbol": symbol, "timeframe": timeframe}
     
     try:
         model_key = f"{symbol}_{timeframe}"
         
         # Collecter les données si non fournies
         if historical_data is None:
+            logger.info(f"Collecte des données historiques pour {symbol} {timeframe}...")
             data_dict = collect_historical_data([symbol], [timeframe], period_days=90)
             if symbol not in data_dict or timeframe not in data_dict[symbol]:
-                return {"error": "Impossible de collecter les données historiques"}
+                error_msg = f"Impossible de collecter les données historiques pour {symbol} {timeframe}"
+                logger.error(error_msg)
+                return {"status": "error", "message": error_msg, "symbol": symbol, "timeframe": timeframe}
             historical_data = data_dict[symbol][timeframe]
         
+        # Vérification des données d'entrée
         if historical_data is None or len(historical_data) < 100:
-            return {"error": "Données historiques insuffisantes"}
+            error_msg = f"Données historiques insuffisantes pour {symbol} {timeframe} (minimum 100 bougies requises)"
+            logger.warning(error_msg)
+            return {"status": "error", "message": error_msg, "symbol": symbol, "timeframe": timeframe}
+        
+        logger.info(f"Données collectées: {len(historical_data)} boucles pour {symbol} {timeframe}")
         
         # Extraire les features
-        logger.info(f"Extraction features pour {symbol} {timeframe}...")
+        logger.info(f"Extraction des features pour {symbol} {timeframe}...")
         features_df = extract_advanced_features(historical_data)
         
-        # Calculer les labels
-        labels = calculate_trade_outcome(features_df, lookahead=5, threshold=0.002)
+        # Vérifier si l'extraction des features a réussi
+        if features_df is None or features_df.empty:
+            error_msg = f"Échec de l'extraction des features pour {symbol} {timeframe}"
+            logger.error(error_msg)
+            return {"status": "error", "message": error_msg, "symbol": symbol, "timeframe": timeframe}
+        
+        # Vérifier la distribution des classes
+        labels = calculate_trade_outcome(features_df)
+        unique_labels, counts = np.unique(labels, return_counts=True)
+        label_dist = dict(zip(unique_labels, counts))
+        logger.info(f"Distribution des classes pour {symbol} {timeframe}: {label_dist}")
+        
         features_df['label'] = labels
         
         # Sélectionner les features pour l'entraînement
         feature_columns = [
-            'sma_20', 'sma_50', 'ema_9', 'ema_21', 'ema_50',
-            'sma_20_slope', 'ema_9_slope',
             'price_vs_sma20', 'price_vs_sma50',
             'rsi', 'rsi_normalized',
             'macd', 'macd_signal', 'macd_histogram',
@@ -4246,8 +4267,33 @@ def train_ml_models(symbol: str, timeframe: str, historical_data: Optional[pd.Da
         # Filtrer les colonnes qui existent
         available_features = [f for f in feature_columns if f in features_df.columns]
         
-        # Préparer X et y
+        # Vérifier qu'il reste des features disponibles
+        if not available_features:
+            error_msg = f"Aucune feature disponible pour l'entraînement de {symbol} {timeframe}"
+            logger.error(error_msg)
+            return {"status": "error", "message": error_msg, "symbol": symbol, "timeframe": timeframe}
+            
+        logger.info(f"{len(available_features)} features disponibles pour l'entraînement")
+        
+        # Préparer X et y avec gestion des valeurs manquantes
         X = features_df[available_features].fillna(0)
+        
+        # Vérifier les valeurs manquantes après remplissage
+        missing_values = X.isna().sum().sum()
+        if missing_values > 0:
+            logger.warning(f"{missing_values} valeurs manquantes détectées après remplissage pour {symbol} {timeframe}")
+            
+        # Vérifier la variance des features
+        from sklearn.feature_selection import VarianceThreshold
+        selector = VarianceThreshold()
+        try:
+            selector.fit(X)
+            n_constant_features = sum(~selector.get_support())
+            if n_constant_features > 0:
+                logger.warning(f"{n_constant_features} caractéristiques constantes détectées pour {symbol} {timeframe}")
+        except Exception as e:
+            logger.warning(f"Erreur lors de la vérification de la variance: {str(e)}")
+            
         y = features_df['label'].fillna(0).astype(int)
         
         # Supprimer les lignes avec des valeurs infinies
@@ -4258,6 +4304,47 @@ def train_ml_models(symbol: str, timeframe: str, historical_data: Optional[pd.Da
             X, y, test_size=0.2, random_state=42, stratify=y if len(y.unique()) > 1 else None
         )
         
+        # Vérifier si nous avons au moins 2 classes dans les données d'entraînement
+        if len(y_train.unique()) < 2:
+            logger.warning(f" Seulement {len(y_train.unique())} classe(s) détectée(s) dans les données d'entraînement pour {symbol} {timeframe}")
+            
+            # Si une seule classe, créer des échantillons synthétiques avec SMOTE-like approach
+            if len(y_train.unique()) == 1:
+                logger.info(f" Création d'échantillons synthétiques pour rééquilibrer les classes...")
+                
+                # Ajouter des échantillons de la classe manquante en inversant les labels
+                minority_class = 1 if y_train.iloc[0] == 0 else 0
+                n_synthetic = len(y_train) // 3  # Créer 1/3 des échantillons existants
+                
+                # Sélectionner aléatoirement des échantillons à modifier
+                synthetic_indices = np.random.choice(len(X_train), n_synthetic, replace=False)
+                X_synthetic = X_train.iloc[synthetic_indices].copy()
+                y_synthetic = pd.Series([minority_class] * n_synthetic)
+                
+                # Ajouter un peu de bruit pour différencier les échantillons
+                noise = np.random.normal(0, 0.01, X_synthetic.shape)
+                X_synthetic = X_synthetic + noise
+                
+                # Combiner avec les données originales
+                X_train = pd.concat([X_train, X_synthetic], ignore_index=True)
+                y_train = pd.concat([y_train, y_synthetic], ignore_index=True)
+                
+                logger.info(f" {n_synthetic} échantillons synthétiques créés. Classes: {dict(y_train.value_counts())}")
+        
+        # Appliquer SMOTE si nous avons au moins 2 classes et assez d'échantillons
+        try:
+            if len(y_train.unique()) >= 2 and len(y_train) >= 10:
+                from imblearn.over_sampling import SMOTE
+                smote = SMOTE(random_state=42, k_neighbors=min(5, len(y_train) // 2 - 1))
+                X_train_resampled, y_train_resampled = smote.fit_resample(X_train, y_train)
+                
+                logger.info(f" Rééquilibrage SMOTE: Avant {dict(y_train.value_counts())} → Après {dict(y_train_resampled.value_counts())}")
+                X_train, y_train = X_train_resampled, y_train_resampled
+        except ImportError:
+            logger.warning(" imbalanced-learn non installé. Utilisation des données originales.")
+        except Exception as e:
+            logger.warning(f" Erreur SMOTE: {str(e)}. Utilisation des données originales.")
+        
         # Normaliser les features
         scaler = StandardScaler()
         X_train_scaled = scaler.fit_transform(X_train)
@@ -4266,6 +4353,7 @@ def train_ml_models(symbol: str, timeframe: str, historical_data: Optional[pd.Da
         models = {}
         metrics = {}
         
+# ... (code après la modification)
         # 1. Random Forest
         logger.info(f"Entraînement RandomForest pour {symbol} {timeframe}...")
         rf_model = RandomForestClassifier(
