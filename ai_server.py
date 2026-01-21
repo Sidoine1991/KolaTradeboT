@@ -263,9 +263,67 @@ try:
 except Exception:
     Image = None
 
-# Configuration du modèle Gemma Local
-GEMMA_MODEL_PATH = r"D:\Dev\model_gemma"
-MT5_FILES_DIR = r"C:\Users\USER\AppData\Roaming\MetaQuotes\Terminal\Common\Files" # Default, user may need to change
+# Configuration des répertoires via variables d'environnement
+# Vérification si on est sur Render
+RUNNING_ON_RENDER = bool(os.getenv("RENDER") or os.getenv("RENDER_SERVICE_ID"))
+
+# Fonction pour créer un répertoire avec gestion des erreurs
+def safe_makedirs(path, mode=0o755):
+    try:
+        os.makedirs(path, mode=mode, exist_ok=True)
+        # Vérification des permissions
+        test_file = os.path.join(path, f".test_{int(time.time())}")
+        with open(test_file, 'w') as f:
+            f.write("test")
+        os.remove(test_file)
+        return True
+    except Exception as e:
+        logger.error(f"Impossible d'écrire dans {path}: {str(e)}")
+        return False
+
+# Configuration des chemins
+try:
+    if RUNNING_ON_RENDER:
+        # Sur Render, on utilise le répertoire temporaire du système
+        import tempfile
+        base_temp_dir = tempfile.gettempdir()
+        app_temp_dir = os.path.join(base_temp_dir, 'tradbot_ai')
+        
+        # Création des chemins de base
+        DEFAULT_DATA_DIR = os.path.join(app_temp_dir, 'data')
+        DEFAULT_MODELS_DIR = os.path.join(app_temp_dir, 'models')
+        
+        # Essayer de créer les répertoires principaux
+        if not safe_makedirs(DEFAULT_DATA_DIR) or not safe_makedirs(DEFAULT_MODELS_DIR):
+            # Fallback vers /tmp direct si échec
+            logger.warning("Utilisation de /tmp direct comme fallback")
+            DEFAULT_DATA_DIR = "/tmp/tradbot_data"
+            DEFAULT_MODELS_DIR = "/tmp/tradbot_models"
+            safe_makedirs(DEFAULT_DATA_DIR)
+            safe_makedirs(DEFAULT_MODELS_DIR)
+    else:
+        # En local, on utilise les dossiers du projet
+        DEFAULT_DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+        DEFAULT_MODELS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
+        safe_makedirs(DEFAULT_DATA_DIR)
+        safe_makedirs(DEFAULT_MODELS_DIR)
+        
+    # Définition des chemins des modèles et fichiers
+    GEMMA_MODEL_PATH = os.path.join(DEFAULT_MODELS_DIR, "gemma")
+    MT5_FILES_DIR = os.path.join(DEFAULT_DATA_DIR, "mt5_files")
+    
+    # Création des sous-répertoires
+    safe_makedirs(GEMMA_MODEL_PATH)
+    safe_makedirs(MT5_FILES_DIR)
+    
+    logger.info(f"Répertoire des données: {DEFAULT_DATA_DIR}")
+    logger.info(f"Répertoire des modèles: {DEFAULT_MODELS_DIR}")
+    logger.info(f"Chemin du modèle Gemma: {GEMMA_MODEL_PATH}")
+    logger.info(f"Répertoire des fichiers MT5: {MT5_FILES_DIR}")
+    
+except Exception as e:
+    logger.error(f"Erreur lors de la configuration des répertoires: {e}")
+    raise
 
 try:
     import torch
@@ -697,12 +755,64 @@ CACHE_DURATION = 30  # secondes
 RUNNING_ON_RENDER = bool(os.getenv("RENDER") or os.getenv("RENDER_SERVICE_ID"))
 
 if RUNNING_ON_RENDER:
-    DATA_DIR = Path("/data")
-    MODELS_DIR = Path("/models")
-    # S'assurer que les dossiers existent sur le disque persistant
+    # Sur Render, on utilise le dossier temporaire par défaut qui est garanti d'être accessible en écriture
+    # On utilise /tmp/ comme racine pour les données et modèles
+    DATA_DIR = Path("/tmp/data")
+    MODELS_DIR = Path("/tmp/models")
+    
+    # Créer les répertoires s'ils n'existent pas
     os.makedirs(DATA_DIR, exist_ok=True)
     os.makedirs(MODELS_DIR, exist_ok=True)
+    
+    logger.info(f"Mode Render activé - Utilisation des dossiers temporaires:")
+    logger.info(f"- Données: {DATA_DIR}")
+    logger.info(f"- Modèles: {MODELS_DIR}")
+    
+    # Liste des dossiers à créer dans DATA_DIR
+    required_dirs = ["mt5_files", "predictions", "metrics"]
+    for dir_name in required_dirs:
+        dir_path = DATA_DIR / dir_name
+        os.makedirs(dir_path, exist_ok=True)
+        logger.info(f"Créé le répertoire: {dir_path}")
+    
+    # Chercher un répertoire accessible en écriture
+    possible_roots = [
+        "/tmp",
+        "/var/tmp",
+        "/opt/render/project/src",
+        str(Path.home()),
+        ".",
+    ]
+    selected_root = "."  # Valeur par défaut
+    for root_dir in possible_roots:
+        test_dir = Path(root_dir)
+        test_file = test_dir / ".write_test"
+        try:
+            test_dir.mkdir(parents=True, exist_ok=True)
+            with open(test_file, 'w') as f:
+                f.write("test")
+            os.remove(test_file)
+            selected_root = root_dir
+            logger.info(f"Répertoire accessible en écriture trouvé: {test_dir}")
+            break
+        except Exception as e:
+            logger.debug(f"Impossible d'écrire dans {test_dir}: {e}")
+    
+    # Définir les chemins des dossiers
+    base_dir = Path(selected_root)
+    DATA_DIR = base_dir / "data"
+    MODELS_DIR = base_dir / "models"
+    
+    # Créer les dossiers avec gestion d'erreur
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        MODELS_DIR.mkdir(parents=True, exist_ok=True)
+        logger.info(f"Dossiers configurés: DATA_DIR={DATA_DIR}, MODELS_DIR={MODELS_DIR}")
+    except Exception as e:
+        logger.error(f"Erreur critique: Impossible de créer les dossiers nécessaires: {e}")
+        raise
 else:
+    # Mode développement local
     DATA_DIR = Path("data")
     MODELS_DIR = Path("models")
 
