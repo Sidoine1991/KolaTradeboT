@@ -8375,8 +8375,35 @@ async def get_feedback_status():
                 WHERE created_at >= NOW() - INTERVAL '30 days'
                 GROUP BY category
                 ORDER BY count DESC
-            """)
-            
+                    """),
+                    timeout=10.0
+                )
+                
+                # Derniers trades
+                last_trades = await asyncio.wait_for(
+                    conn.fetch("""
+                    SELECT symbol, decision, profit, is_win, created_at
+                    FROM trade_feedback
+                    ORDER BY created_at DESC
+                    LIMIT 10
+                """),
+                    timeout=10.0
+                )
+                
+                # Vérifier si on a assez de trades pour le réentraînement
+                min_samples = continuous_learner.min_new_samples if CONTINUOUS_LEARNING_AVAILABLE and continuous_learner else 50
+                ready_for_retraining = {}
+                
+                for row in trades_by_category:
+                    category = row['category']
+                    count = row['count']
+                    ready_for_retraining[category] = {
+                        "count": count,
+                        "ready": count >= min_samples,
+                        "wins": row['wins'],
+                        "total_profit": float(row['total_profit']) if row['total_profit'] else 0.0
+                    }
+                
                 win_rate = (total_win / total_trades * 100) if total_trades > 0 else 0.0
                 
                 return {
