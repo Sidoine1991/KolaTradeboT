@@ -102,9 +102,32 @@ except ImportError:
         
         # Features spécifiques par catégorie
         if symbol_category in ["SYNTHETIC_SPECIAL", "SYNTHETIC_GENERAL"]:
+            # Features pour indices synthétiques
             df_features['spike_detection'] = ((df_features['high'] - df_features['low']) / (df_features['close'] + 1e-8) > 0.05).astype(int)
             df_features['volatility_regime'] = df_features['volatility'].rolling(50).mean()
+        elif symbol_category == "CRYPTO":
+            # Features pour crypto (doivent correspondre à l'entraînement)
+            df_features['crypto_volatility'] = df_features['volatility'] * 100  # Crypto plus volatile
+            df_features['btc_correlation'] = 1.0  # Placeholder pour corrélation BTC
+            # Pour crypto, on ne crée pas spike_detection et volatility_regime
+            df_features['spike_detection'] = 0
+            df_features['volatility_regime'] = 0
+        elif symbol_category == "FOREX":
+            # Features pour forex
+            df_features['pip_movement'] = df_features['return'] * 10000  # Mouvement en pips
+            df_features['spread_impact'] = 0.0001  # Placeholder pour impact du spread
+            # Pour forex, on ne crée pas spike_detection et volatility_regime
+            df_features['spike_detection'] = 0
+            df_features['volatility_regime'] = 0
+        elif symbol_category == "STOCKS":
+            # Features pour actions
+            df_features['stock_volatility'] = df_features['volatility'] * 252  # Volatilité annualisée
+            df_features['market_hours'] = ((df_features['hour'] >= 9) & (df_features['hour'] <= 16)).astype(int)
+            # Pour stocks, on ne crée pas spike_detection et volatility_regime
+            df_features['spike_detection'] = 0
+            df_features['volatility_regime'] = 0
         else:
+            # UNIVERSAL ou autre
             df_features['spike_detection'] = 0
             df_features['volatility_regime'] = df_features['volatility'].rolling(50).mean()
         
@@ -186,7 +209,7 @@ MODEL_FEATURES = {
         'rsi', 'macd', 'macd_signal', 'macd_histogram', 'bb_position', 'atr', 'volume_ratio',
         'price_range', 'body_size', 'upper_shadow', 'lower_shadow', 'hour', 'minute', 'day_of_week',
         'momentum_5', 'momentum_10', 'momentum_20',
-        'spike_detection', 'volatility_regime'
+        'crypto_volatility', 'btc_correlation'
     ],
     "FOREX": [
         'return', 'return_1', 'return_2', 'return_3', 'volatility', 'volatility_5', 'volatility_10',
@@ -194,7 +217,7 @@ MODEL_FEATURES = {
         'rsi', 'macd', 'macd_signal', 'macd_histogram', 'bb_position', 'atr', 'volume_ratio',
         'price_range', 'body_size', 'upper_shadow', 'lower_shadow', 'hour', 'minute', 'day_of_week',
         'momentum_5', 'momentum_10', 'momentum_20',
-        'spike_detection', 'volatility_regime'
+        'pip_movement', 'spread_impact'
     ],
     "STOCKS": [
         'return', 'return_1', 'return_2', 'return_3', 'volatility', 'volatility_5', 'volatility_10',
@@ -202,7 +225,7 @@ MODEL_FEATURES = {
         'rsi', 'macd', 'macd_signal', 'macd_histogram', 'bb_position', 'atr', 'volume_ratio',
         'price_range', 'body_size', 'upper_shadow', 'lower_shadow', 'hour', 'minute', 'day_of_week',
         'momentum_5', 'momentum_10', 'momentum_20',
-        'spike_detection', 'volatility_regime'
+        'stock_volatility', 'market_hours'
     ],
     "UNIVERSAL": [
         'return', 'return_1', 'return_2', 'return_3', 'volatility', 'volatility_5', 'volatility_10',
@@ -226,24 +249,83 @@ def predict_adaptive(symbol, df_ohlc):
     model_name = config['name']
     if not (os.path.exists(model_path) and os.path.exists(scaler_path)):
         return {'error': f"Modèle ou scaler non trouvé pour la catégorie {category}", 'category': category, 'model_name': model_name}
-    features_df = create_adaptive_features(df_ohlc, category)
-    features_df = features_df.fillna(0)
-    features = MODEL_FEATURES.get(category, MODEL_FEATURES['UNIVERSAL'])
-    X_pred = features_df[features].iloc[-1:].fillna(0)
+    
+    # Charger le modèle et le scaler
     import joblib
     model = joblib.load(model_path)
     scaler = joblib.load(scaler_path)
+    
+    # Créer les features
+    features_df = create_adaptive_features(df_ohlc, category)
+    features_df = features_df.fillna(0)
+    
+    # Obtenir la liste des features attendues
+    features = MODEL_FEATURES.get(category, MODEL_FEATURES['UNIVERSAL'])
+    
+    # Si le modèle a des feature_names_in_ (XGBoost >= 1.6), les utiliser pour l'ordre exact
+    expected_features = features
+    if hasattr(model, 'feature_names_in_') and model.feature_names_in_ is not None:
+        # Le modèle a été entraîné avec des noms de features spécifiques
+        expected_features = list(model.feature_names_in_)
+    
+    # Vérifier que toutes les features attendues existent dans features_df
+    missing_features = set(expected_features) - set(features_df.columns)
+    if missing_features:
+        # Pour les features manquantes spécifiques à la catégorie, les créer si nécessaire
+        for feat in missing_features:
+            if feat == 'spike_detection' and category == "CRYPTO":
+                # Ne devrait pas arriver pour CRYPTO, mais au cas où
+                features_df['spike_detection'] = 0
+            elif feat == 'volatility_regime' and category == "CRYPTO":
+                features_df['volatility_regime'] = 0
+            elif feat == 'crypto_volatility' and category == "CRYPTO":
+                features_df['crypto_volatility'] = features_df['volatility'] * 100
+            elif feat == 'btc_correlation' and category == "CRYPTO":
+                features_df['btc_correlation'] = 1.0
+            else:
+                # Feature manquante non gérée, la remplir avec 0
+                features_df[feat] = 0
+    
+    # Sélectionner les features dans le bon ordre
+    X_pred = features_df[expected_features].iloc[-1:].fillna(0)
+    
+    # Vérifier la cohérence du nombre de features
     if hasattr(scaler, 'n_features_in_') and scaler.n_features_in_ != X_pred.shape[1]:
         return {'error': f"Scaler attend {scaler.n_features_in_} features, {X_pred.shape[1]} fournis.", 'category': category, 'model_name': model_name}
+    
+    # Convertir en array numpy pour éviter les problèmes de validation de colonnes XGBoost
+    # Si XGBoost valide les colonnes, il faut utiliser un DataFrame avec les bons noms
+    if hasattr(model, 'feature_names_in_') and model.feature_names_in_ is not None:
+        # XGBoost >= 1.6 avec validation des noms de colonnes
+        # S'assurer que X_pred est un DataFrame avec les colonnes dans le bon ordre
+        X_pred = pd.DataFrame(X_pred.values, columns=expected_features)
+    
+    # Scaling
     X_pred_scaled = scaler.transform(X_pred)
-    proba = model.predict_proba(X_pred_scaled)[0][1]
-    pred = model.predict(X_pred_scaled)[0]
+    
+    # Prédiction
+    try:
+        proba = model.predict_proba(X_pred_scaled)[0][1]
+        pred = model.predict(X_pred_scaled)[0]
+    except Exception as e:
+        # Si erreur de validation des features, retourner une erreur détaillée
+        error_msg = str(e)
+        if "feature names" in error_msg.lower() or "feature_names" in error_msg.lower():
+            return {
+                'error': f"Erreur de validation des features: {error_msg}. Features attendues: {expected_features}, Features fournies: {list(X_pred.columns)}",
+                'category': category,
+                'model_name': model_name,
+                'expected_features': expected_features,
+                'provided_features': list(X_pred.columns)
+            }
+        raise
+    
     return {
         'prediction': int(pred),
         'probability': float(proba),
         'model_name': model_name,
         'category': category,
-        'features_used': features,
+        'features_used': expected_features,
         'input_row': X_pred.iloc[0].to_dict()
     }
 
