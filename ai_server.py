@@ -460,6 +460,23 @@ except ImportError as e:
     SPIKE_DETECTOR_AVAILABLE = False
     logger.warning(f"Module spike_detector non disponible: {e}")
 
+# 4) Système d'apprentissage continu (feedback loop)
+try:
+    from backend.continuous_learning import ContinuousLearning
+    CONTINUOUS_LEARNING_AVAILABLE = True
+    # Initialiser le système d'apprentissage continu
+    continuous_learner = ContinuousLearning(
+        min_new_samples=50,  # Minimum 50 trades pour réentraîner
+        retrain_interval_days=1,  # Réentraîner au moins une fois par jour
+        db_url=DATABASE_URL
+    )
+    logger.info("✅ Module continuous_learning chargé avec succès")
+except ImportError as e:
+    ContinuousLearning = None  # type: ignore
+    continuous_learner = None
+    CONTINUOUS_LEARNING_AVAILABLE = False
+    logger.warning(f"⚠️ Module continuous_learning non disponible: {e}")
+
 # Le backend ML est considéré comme disponible si au moins l'un des modules clés est prêt
 if ADAPTIVE_PREDICT_AVAILABLE or SPIKE_DETECTOR_AVAILABLE:
     BACKEND_AVAILABLE = True
@@ -8123,6 +8140,38 @@ async def get_signals(
 # ENDPOINTS: FEEDBACK LOOP & MONITORING (Phase 1)
 # ============================================================================
 
+async def _trigger_retraining_async(category: str):
+    """Déclenche le réentraînement en arrière-plan de manière asynchrone"""
+    try:
+        if continuous_learner:
+            logger.info(f"🔄 [AUTO-RETRAIN] Début réentraînement pour {category}...")
+            result = continuous_learner.retrain_model_for_category(category)
+            if result.get("status") == "success":
+                improvement = result.get('improvement', 0)
+                old_acc = result.get('old_accuracy', 0)
+                new_acc = result.get('new_accuracy', 0)
+                samples = result.get('samples_used', 0)
+                logger.info(
+                    f"✅ [AUTO-RETRAIN] Réentraînement réussi pour {category}:\n"
+                    f"   - Échantillons utilisés: {samples}\n"
+                    f"   - Précision ancienne: {old_acc:.3f}\n"
+                    f"   - Précision nouvelle: {new_acc:.3f}\n"
+                    f"   - Amélioration: +{improvement:.3f} ({improvement*100:.2f}%)"
+                )
+            elif result.get("status") == "no_improvement":
+                improvement = result.get('improvement', 0)
+                logger.info(
+                    f"⏸️ [AUTO-RETRAIN] Réentraînement pour {category}: "
+                    f"pas d'amélioration suffisante ({improvement:.3f} < 0.02)"
+                )
+            elif result.get("status") == "skipped":
+                reason = result.get('reason', 'unknown')
+                logger.info(f"⏸️ [AUTO-RETRAIN] Réentraînement pour {category} ignoré: {reason}")
+            else:
+                logger.warning(f"⚠️ [AUTO-RETRAIN] Réentraînement pour {category}: {result.get('reason', 'unknown')}")
+    except Exception as e:
+        logger.error(f"❌ [AUTO-RETRAIN] Erreur lors du réentraînement en arrière-plan: {e}", exc_info=True)
+
 @app.post("/trades/feedback")
 async def receive_trade_feedback(feedback: TradeFeedback):
     """
@@ -8178,6 +8227,47 @@ async def receive_trade_feedback(feedback: TradeFeedback):
             f"(IA: {feedback.ai_confidence:.1%}, Coh: {feedback.coherent_confidence:.1%})"
         )
         
+        # Déclencher automatiquement le réentraînement en arrière-plan (non-bloquant)
+        if CONTINUOUS_LEARNING_AVAILABLE and continuous_learner:
+            # Vérifier combien de trades ont été reçus pour cette catégorie
+            try:
+                # Map le symbole vers sa catégorie
+                symbol_upper = feedback.symbol.upper()
+                if "BOOM" in symbol_upper or "CRASH" in symbol_upper:
+                    category = "BOOM_CRASH"
+                elif any(keyword in symbol_upper for keyword in ['VOLATILITY', 'STEP', 'JUMP', 'RANGE BREAK']):
+                    category = "VOLATILITY"
+                elif any(crypto in symbol_upper for crypto in ['BTC', 'ETH', 'ADA', 'DOT']):
+                    category = "CRYPTO"
+                elif any(pair in symbol_upper for pair in ['USD', 'EUR', 'GBP', 'JPY']):
+                    category = "FOREX"
+                else:
+                    category = "COMMODITIES"
+                
+                # Compter les trades récents pour cette catégorie
+                async with pool.acquire() as conn:
+                    count_result = await conn.fetchval("""
+                        SELECT COUNT(*) FROM trade_feedback
+                        WHERE created_at >= NOW() - INTERVAL '7 days'
+                        AND (
+                            CASE
+                                WHEN symbol LIKE '%BOOM%' OR symbol LIKE '%CRASH%' THEN 'BOOM_CRASH'
+                                WHEN symbol LIKE '%VOLATILITY%' OR symbol LIKE '%STEP%' OR symbol LIKE '%JUMP%' THEN 'VOLATILITY'
+                                WHEN symbol LIKE '%BTC%' OR symbol LIKE '%ETH%' THEN 'CRYPTO'
+                                WHEN symbol LIKE '%USD%' OR symbol LIKE '%EUR%' OR symbol LIKE '%GBP%' THEN 'FOREX'
+                                ELSE 'COMMODITIES'
+                            END
+                        ) = $1
+                    """, category)
+                    
+                    # Si on a assez de trades, déclencher le réentraînement en arrière-plan
+                    if count_result and count_result >= continuous_learner.min_new_samples:
+                        logger.info(f"🔄 Assez de trades ({count_result}) pour réentraîner {category} - Déclenchement en arrière-plan...")
+                        # Déclencher le réentraînement de manière asynchrone (non-bloquant)
+                        asyncio.create_task(_trigger_retraining_async(category))
+            except Exception as e:
+                logger.warning(f"⚠️ Erreur lors de la vérification du réentraînement: {e}")
+        
         return {
             "status": "ok",
             "message": "Feedback enregistré avec succès",
@@ -8191,6 +8281,224 @@ async def receive_trade_feedback(feedback: TradeFeedback):
         logger.error(f"Erreur enregistrement feedback: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Erreur serveur: {str(e)}")
 
+
+@app.get("/ml/feedback/status")
+async def get_feedback_status():
+    """
+    Vérifie le statut de la base de données trade_feedback
+    Retourne des statistiques sur les trades enregistrés pour le monitoring
+    """
+    if not DB_AVAILABLE:
+        return {
+            "status": "error",
+            "error": "Base de données non disponible - DATABASE_URL non configurée",
+            "db_available": False
+        }
+    
+    try:
+        pool = await get_db_pool()
+        if not pool:
+            return {
+                "status": "error",
+                "error": "Connexion base de données impossible",
+                "db_available": False
+            }
+        
+        async with pool.acquire() as conn:
+            # Statistiques globales
+            total_trades = await conn.fetchval("SELECT COUNT(*) FROM trade_feedback")
+            total_win = await conn.fetchval("SELECT COUNT(*) FROM trade_feedback WHERE is_win = true")
+            total_loss = await conn.fetchval("SELECT COUNT(*) FROM trade_feedback WHERE is_win = false")
+            total_profit = await conn.fetchval("SELECT SUM(profit) FROM trade_feedback")
+            
+            # Trades récents (7 derniers jours)
+            recent_trades = await conn.fetchval(
+                "SELECT COUNT(*) FROM trade_feedback WHERE created_at >= NOW() - INTERVAL '7 days'"
+            )
+            
+            # Trades par catégorie
+            trades_by_category = await conn.fetch("""
+                SELECT 
+                    CASE
+                        WHEN symbol LIKE '%BOOM%' OR symbol LIKE '%CRASH%' THEN 'BOOM_CRASH'
+                        WHEN symbol LIKE '%VOLATILITY%' OR symbol LIKE '%STEP%' OR symbol LIKE '%JUMP%' THEN 'VOLATILITY'
+                        WHEN symbol LIKE '%BTC%' OR symbol LIKE '%ETH%' OR symbol LIKE '%ADA%' THEN 'CRYPTO'
+                        WHEN symbol LIKE '%USD%' OR symbol LIKE '%EUR%' OR symbol LIKE '%GBP%' OR symbol LIKE '%JPY%' THEN 'FOREX'
+                        ELSE 'COMMODITIES'
+                    END as category,
+                    COUNT(*) as count,
+                    SUM(CASE WHEN is_win THEN 1 ELSE 0 END) as wins,
+                    SUM(profit) as total_profit
+                FROM trade_feedback
+                WHERE created_at >= NOW() - INTERVAL '30 days'
+                GROUP BY category
+                ORDER BY count DESC
+            """)
+            
+            # Derniers trades
+            last_trades = await conn.fetch("""
+                SELECT symbol, decision, profit, is_win, created_at
+                FROM trade_feedback
+                ORDER BY created_at DESC
+                LIMIT 10
+            """)
+            
+            # Vérifier si on a assez de trades pour le réentraînement
+            min_samples = continuous_learner.min_new_samples if CONTINUOUS_LEARNING_AVAILABLE and continuous_learner else 50
+            ready_for_retraining = {}
+            
+            for row in trades_by_category:
+                category = row['category']
+                count = row['count']
+                ready_for_retraining[category] = {
+                    "count": count,
+                    "ready": count >= min_samples,
+                    "wins": row['wins'],
+                    "total_profit": float(row['total_profit']) if row['total_profit'] else 0.0
+                }
+            
+            win_rate = (total_win / total_trades * 100) if total_trades > 0 else 0.0
+            
+            return {
+                "status": "ok",
+                "db_available": True,
+                "statistics": {
+                    "total_trades": total_trades,
+                    "total_wins": total_win,
+                    "total_losses": total_loss,
+                    "win_rate": round(win_rate, 2),
+                    "total_profit": float(total_profit) if total_profit else 0.0,
+                    "recent_trades_7d": recent_trades,
+                    "min_samples_for_retraining": min_samples
+                },
+                "trades_by_category": {
+                    row['category']: {
+                        "count": row['count'],
+                        "wins": row['wins'],
+                        "total_profit": float(row['total_profit']) if row['total_profit'] else 0.0,
+                        "ready_for_retraining": row['count'] >= min_samples
+                    }
+                    for row in trades_by_category
+                },
+                "last_trades": [
+                    {
+                        "symbol": row['symbol'],
+                        "decision": row['decision'],
+                        "profit": float(row['profit']),
+                        "is_win": row['is_win'],
+                        "created_at": row['created_at'].isoformat() if row['created_at'] else None
+                    }
+                    for row in last_trades
+                ],
+                "continuous_learning": {
+                    "available": CONTINUOUS_LEARNING_AVAILABLE,
+                    "min_samples": min_samples,
+                    "retrain_interval_days": continuous_learner.retrain_interval_days if CONTINUOUS_LEARNING_AVAILABLE and continuous_learner else None
+                }
+            }
+            
+    except Exception as e:
+        logger.error(f"Erreur lors de la vérification du statut feedback: {e}", exc_info=True)
+        return {
+            "status": "error",
+            "error": str(e),
+            "db_available": DB_AVAILABLE
+        }
+
+@app.get("/ml/retraining/stats")
+async def get_retraining_stats():
+    """
+    Retourne les statistiques de réentraînement des modèles ML
+    """
+    if not CONTINUOUS_LEARNING_AVAILABLE or not continuous_learner:
+        return {
+            "status": "error",
+            "error": "Système d'apprentissage continu non disponible"
+        }
+    
+    try:
+        # Charger les timestamps de dernier réentraînement
+        last_retrain_times = continuous_learner.last_retrain_times
+        retrain_stats = {}
+        
+        categories = ["BOOM_CRASH", "VOLATILITY", "FOREX", "CRYPTO", "COMMODITIES"]
+        for category in categories:
+            last_time = last_retrain_times.get(category)
+            if last_time:
+                last_dt = datetime.fromisoformat(last_time)
+                days_since = (datetime.now() - last_dt).days
+                hours_since = (datetime.now() - last_dt).total_seconds() / 3600
+                
+                retrain_stats[category] = {
+                    "last_retrained": last_time,
+                    "days_since": days_since,
+                    "hours_since": round(hours_since, 2),
+                    "should_retrain": continuous_learner._should_retrain(category)
+                }
+            else:
+                retrain_stats[category] = {
+                    "last_retrained": None,
+                    "days_since": None,
+                    "hours_since": None,
+                    "should_retrain": True
+                }
+        
+        return {
+            "status": "ok",
+            "config": {
+                "min_new_samples": continuous_learner.min_new_samples,
+                "retrain_interval_days": continuous_learner.retrain_interval_days
+            },
+            "retraining_status": retrain_stats
+        }
+        
+    except Exception as e:
+        logger.error(f"Erreur lors de la récupération des stats de réentraînement: {e}", exc_info=True)
+        return {
+            "status": "error",
+            "error": str(e)
+        }
+
+@app.post("/ml/retraining/trigger")
+async def trigger_retraining(category: Optional[str] = None):
+    """
+    Déclenche manuellement le réentraînement pour une catégorie ou toutes les catégories
+    
+    Body params:
+        - category: Catégorie spécifique à réentraîner (BOOM_CRASH, VOLATILITY, FOREX, CRYPTO, COMMODITIES)
+                   Si non spécifié, réentraîne toutes les catégories disponibles
+    """
+    if not CONTINUOUS_LEARNING_AVAILABLE or not continuous_learner:
+        raise HTTPException(
+            status_code=503,
+            detail="Système d'apprentissage continu non disponible"
+        )
+    
+    try:
+        if category:
+            # Réentraîner une catégorie spécifique
+            logger.info(f"🔄 [MANUAL-RETRAIN] Déclenchement manuel du réentraînement pour {category}")
+            result = continuous_learner.retrain_model_for_category(category)
+            
+            return {
+                "status": "ok",
+                "category": category,
+                "result": result
+            }
+        else:
+            # Réentraîner toutes les catégories
+            logger.info("🔄 [MANUAL-RETRAIN] Déclenchement manuel du réentraînement pour toutes les catégories")
+            results = continuous_learner.retrain_all_categories()
+            
+            return {
+                "status": "ok",
+                "message": "Réentraînement déclenché pour toutes les catégories",
+                "results": results
+            }
+            
+    except Exception as e:
+        logger.error(f"Erreur lors du réentraînement manuel: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Erreur serveur: {str(e)}")
 
 @app.get("/monitoring/dashboard")
 async def monitoring_dashboard(symbols: Optional[str] = None, limit: int = 100):
