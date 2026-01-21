@@ -8457,6 +8457,20 @@ async def get_feedback_status():
                 "error": str(e),
                 "db_available": DB_AVAILABLE
             }
+    except asyncio.TimeoutError:
+        logger.error("Timeout lors de la connexion à la base de données PostgreSQL")
+        return {
+            "status": "error",
+            "error": "Timeout lors de la connexion à la base de données - Vérifiez la connexion réseau ou le serveur PostgreSQL",
+            "db_available": DB_AVAILABLE
+        }
+    except Exception as e:
+        logger.error(f"Erreur lors de la vérification du statut feedback: {e}", exc_info=True)
+        return {
+            "status": "error",
+            "error": str(e),
+            "db_available": DB_AVAILABLE
+        }
 
 @app.get("/ml/retraining/stats")
 async def get_retraining_stats():
