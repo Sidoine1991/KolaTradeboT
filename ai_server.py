@@ -64,9 +64,18 @@ ML_AVAILABLE = False
 # Charger les variables d'environnement
 try:
     from dotenv import load_dotenv
-    load_dotenv()
+    # Charger explicitement depuis le répertoire courant
+    env_path = Path(__file__).parent / '.env'
+    if env_path.exists():
+        load_dotenv(env_path)
+        logger.info(f"✅ Fichier .env chargé depuis: {env_path}")
+    else:
+        load_dotenv()  # Essaie de charger depuis le répertoire courant
+        logger.info("✅ Variables d'environnement chargées (fichier .env non trouvé, utilisation des variables système)")
 except ImportError:
-    pass
+    logger.warning("⚠️ python-dotenv non disponible - utilisation des variables d'environnement système uniquement")
+except Exception as e:
+    logger.warning(f"⚠️ Erreur lors du chargement du .env: {e}")
 
 # Configuration PostgreSQL pour feedback loop
 DATABASE_URL = os.getenv("DATABASE_URL", "")
@@ -700,15 +709,31 @@ async def get_db_pool():
             logger.warning("PostgreSQL non disponible - DATABASE_URL manquant ou asyncpg non installé")
             return None
         try:
+            # Pour Render PostgreSQL, il faut ajouter SSL
+            # Parse la DATABASE_URL pour ajouter sslmode si nécessaire
+            dsn = DATABASE_URL
+            if "render.com" in DATABASE_URL.lower() and "sslmode" not in DATABASE_URL.lower():
+                # Ajouter sslmode=require pour Render PostgreSQL
+                separator = "?" if "?" not in dsn else "&"
+                dsn = f"{dsn}{separator}sslmode=require"
+                logger.info("📝 Ajout de sslmode=require pour Render PostgreSQL")
+            
             app.state.db_pool = await asyncpg.create_pool(
-                dsn=DATABASE_URL,
+                dsn=dsn,
                 min_size=1,
                 max_size=5,
-                command_timeout=60
+                command_timeout=30,  # Timeout réduit à 30s
+                server_settings={
+                    'application_name': 'tradbot_ai_server'
+                }
             )
             logger.info("✅ Pool de connexions PostgreSQL créé")
+        except asyncio.TimeoutError:
+            logger.error("❌ Timeout lors de la création du pool PostgreSQL - Vérifiez la connexion réseau")
+            app.state.db_pool = None
+            return None
         except Exception as e:
-            logger.error(f"❌ Erreur création pool PostgreSQL: {e}")
+            logger.error(f"❌ Erreur création pool PostgreSQL: {e}", exc_info=True)
             app.state.db_pool = None
             return None
     return app.state.db_pool
@@ -8296,28 +8321,45 @@ async def get_feedback_status():
         }
     
     try:
-        pool = await get_db_pool()
+        # Ajouter un timeout explicite pour éviter que la requête bloque indéfiniment
+        pool = await asyncio.wait_for(get_db_pool(), timeout=10.0)
         if not pool:
             return {
                 "status": "error",
-                "error": "Connexion base de données impossible",
+                "error": "Connexion base de données impossible - pool non créé",
                 "db_available": False
             }
         
-        async with pool.acquire() as conn:
-            # Statistiques globales
-            total_trades = await conn.fetchval("SELECT COUNT(*) FROM trade_feedback")
-            total_win = await conn.fetchval("SELECT COUNT(*) FROM trade_feedback WHERE is_win = true")
-            total_loss = await conn.fetchval("SELECT COUNT(*) FROM trade_feedback WHERE is_win = false")
-            total_profit = await conn.fetchval("SELECT SUM(profit) FROM trade_feedback")
+        # Tester la connexion avec un timeout explicite
+        try:
+            async with pool.acquire() as conn:
+                # Statistiques globales (avec timeout explicite)
+                total_trades = await asyncio.wait_for(
+                    conn.fetchval("SELECT COUNT(*) FROM trade_feedback"), 
+                    timeout=10.0
+                )
+                total_win = await asyncio.wait_for(
+                    conn.fetchval("SELECT COUNT(*) FROM trade_feedback WHERE is_win = true"),
+                    timeout=10.0
+                )
+                total_loss = await asyncio.wait_for(
+                    conn.fetchval("SELECT COUNT(*) FROM trade_feedback WHERE is_win = false"),
+                    timeout=10.0
+                )
+                total_profit = await asyncio.wait_for(
+                    conn.fetchval("SELECT SUM(profit) FROM trade_feedback"),
+                    timeout=10.0
+                )
             
-            # Trades récents (7 derniers jours)
-            recent_trades = await conn.fetchval(
-                "SELECT COUNT(*) FROM trade_feedback WHERE created_at >= NOW() - INTERVAL '7 days'"
-            )
-            
-            # Trades par catégorie
-            trades_by_category = await conn.fetch("""
+                # Trades récents (7 derniers jours)
+                recent_trades = await asyncio.wait_for(
+                    conn.fetchval("SELECT COUNT(*) FROM trade_feedback WHERE created_at >= NOW() - INTERVAL '7 days'"),
+                    timeout=10.0
+                )
+                
+                # Trades par catégorie
+                trades_by_category = await asyncio.wait_for(
+                    conn.fetch("""
                 SELECT 
                     CASE
                         WHEN symbol LIKE '%BOOM%' OR symbol LIKE '%CRASH%' THEN 'BOOM_CRASH'
@@ -8335,31 +8377,9 @@ async def get_feedback_status():
                 ORDER BY count DESC
             """)
             
-            # Derniers trades
-            last_trades = await conn.fetch("""
-                SELECT symbol, decision, profit, is_win, created_at
-                FROM trade_feedback
-                ORDER BY created_at DESC
-                LIMIT 10
-            """)
-            
-            # Vérifier si on a assez de trades pour le réentraînement
-            min_samples = continuous_learner.min_new_samples if CONTINUOUS_LEARNING_AVAILABLE and continuous_learner else 50
-            ready_for_retraining = {}
-            
-            for row in trades_by_category:
-                category = row['category']
-                count = row['count']
-                ready_for_retraining[category] = {
-                    "count": count,
-                    "ready": count >= min_samples,
-                    "wins": row['wins'],
-                    "total_profit": float(row['total_profit']) if row['total_profit'] else 0.0
-                }
-            
-            win_rate = (total_win / total_trades * 100) if total_trades > 0 else 0.0
-            
-            return {
+                win_rate = (total_win / total_trades * 100) if total_trades > 0 else 0.0
+                
+                return {
                 "status": "ok",
                 "db_available": True,
                 "statistics": {
@@ -8395,15 +8415,21 @@ async def get_feedback_status():
                     "min_samples": min_samples,
                     "retrain_interval_days": continuous_learner.retrain_interval_days if CONTINUOUS_LEARNING_AVAILABLE and continuous_learner else None
                 }
+                }
+        except asyncio.TimeoutError:
+            logger.error("Timeout lors de la connexion à la base de données PostgreSQL")
+            return {
+                "status": "error",
+                "error": "Timeout lors de la connexion à la base de données - Vérifiez la connexion réseau ou le serveur PostgreSQL",
+                "db_available": DB_AVAILABLE
             }
-            
-    except Exception as e:
-        logger.error(f"Erreur lors de la vérification du statut feedback: {e}", exc_info=True)
-        return {
-            "status": "error",
-            "error": str(e),
-            "db_available": DB_AVAILABLE
-        }
+        except Exception as e:
+            logger.error(f"Erreur lors de la vérification du statut feedback: {e}", exc_info=True)
+            return {
+                "status": "error",
+                "error": str(e),
+                "db_available": DB_AVAILABLE
+            }
 
 @app.get("/ml/retraining/stats")
 async def get_retraining_stats():
