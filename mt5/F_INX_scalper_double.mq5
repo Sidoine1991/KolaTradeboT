@@ -338,6 +338,11 @@ struct MLMetricsData {
    double randomForestAccuracy;  // Accuracy RandomForest
    double gradientBoostingAccuracy; // Accuracy GradientBoosting
    double mlpAccuracy;           // Accuracy MLP
+   double accuracy;              // Accuracy du modèle actuel (0-1)
+   double f1Score;              // F1 Score du modèle actuel (0-1)
+   double precision;             // Précision du modèle actuel (0-1)
+   double recall;                // Rappel du modèle actuel (0-1)
+   int featuresCount;           // Nombre de features utilisées
    int trainingSamples;          // Nombre d'échantillons d'entraînement
    int testSamples;              // Nombre d'échantillons de test
    double suggestedMinConfidence; // Confiance minimale suggérée
