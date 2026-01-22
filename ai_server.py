@@ -4785,6 +4785,10 @@ async def list_ml_models():
             "total_models": len(models_list),
             "models": models_list
         }
+    except Exception as e:
+        logger.error(f"Erreur liste modèles ML: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.get("/ml/metrics")
 async def get_ml_metrics(symbol: str = "EURUSD", timeframe: str = "M1"):
     """Récupère les métriques ML depuis les modèles déjà entraînés"""
