@@ -16,6 +16,7 @@ services:
         value: "1"
     buildFilter:
       paths:
+        - ai_server.py
         - ai_server_cloud.py
         - requirements.txt
         - backend/
