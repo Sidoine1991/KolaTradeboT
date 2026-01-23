@@ -4905,62 +4905,62 @@ async def get_ml_metrics(symbol: str = "EURUSD", timeframe: str = "M1"):
                     rates = mt5.copy_rates_from_pos(symbol, mt5_tf, 0, 200)
                     
                     if rates is not None and len(rates) >= 100:
-                        df = pd.DataFrame(rates)
-                        features_df = extract_advanced_features(df)
-                        
-                        if features_df is not None and not features_df.empty:
-                            labels = calculate_trade_outcome(features_df)
-                            feature_columns = [
-                                'price_vs_sma20', 'price_vs_sma50', 'rsi', 'rsi_normalized',
-                                'macd', 'macd_signal', 'macd_histogram', 'atr', 'atr_normalized',
-                                'atr_ma_ratio', 'bb_width', 'bb_position', 'volume_ratio',
-                                'volume_trend', 'high_low_range', 'open_close_range', 'body_size',
-                                'momentum_5', 'momentum_10', 'momentum_20', 'distance_to_high', 'distance_to_low'
-                            ]
-                            available_features = [f for f in feature_columns if f in features_df.columns]
+                        try:
+                            df = pd.DataFrame(rates)
+                            features_df = extract_advanced_features(df)
                             
-                            if available_features:
-                                X = features_df[available_features].fillna(0).replace([np.inf, -np.inf], 0)
-                                y = labels.fillna(0).astype(int)
+                            if features_df is not None and not features_df.empty:
+                                labels = calculate_trade_outcome(features_df)
+                                feature_columns = [
+                                    'price_vs_sma20', 'price_vs_sma50', 'rsi', 'rsi_normalized',
+                                    'macd', 'macd_signal', 'macd_histogram', 'atr', 'atr_normalized',
+                                    'atr_ma_ratio', 'bb_width', 'bb_position', 'volume_ratio',
+                                    'volume_trend', 'high_low_range', 'open_close_range', 'body_size',
+                                    'momentum_5', 'momentum_10', 'momentum_20', 'distance_to_high', 'distance_to_low'
+                                ]
+                                available_features = [f for f in feature_columns if f in features_df.columns]
                                 
-                                # Split pour test
-                                from sklearn.model_selection import train_test_split
-                                X_train, X_test, y_train, y_test = train_test_split(
-                                    X, y, test_size=0.2, random_state=42
-                                )
-                                
-                                scaler = ml_scalers_cache.get(model_key)
-                                if scaler:
-                                    X_test_scaled = scaler.transform(X_test)
+                                if available_features:
+                                    X = features_df[available_features].fillna(0).replace([np.inf, -np.inf], 0)
+                                    y = labels.fillna(0).astype(int)
                                     
-                                    # Recalculer les métriques pour chaque modèle
-                                    for model_name, model in models.items():
-                                        try:
-                                            pred = model.predict(X_test_scaled)
-                                            from sklearn.metrics import accuracy_score, f1_score
-                                            acc = accuracy_score(y_test, pred)
-                                            f1 = f1_score(y_test, pred, average='weighted', zero_division=0)
-                                            
-                                            metrics_result[model_name] = {
-                                                "accuracy": float(acc * 100.0),  # En pourcentage
-                                                "f1_score": float(f1 * 100.0),  # En pourcentage
-                                                "feature_importance": {}
-                                            }
-                                            
-                                            if hasattr(model, 'feature_importances_'):
-                                                metrics_result[model_name]["feature_importance"] = dict(
-                                                    zip(available_features, model.feature_importances_)
-                                                )
-                                            
-                                            if acc > best_accuracy / 100.0:
-                                                best_accuracy = acc * 100.0
-                                                best_model_name = model_name
+                                    # Split pour test
+                                    from sklearn.model_selection import train_test_split
+                                    X_train, X_test, y_train, y_test = train_test_split(
+                                        X, y, test_size=0.2, random_state=42
+                                    )
+                                    
+                                    scaler = ml_scalers_cache.get(model_key)
+                                    if scaler:
+                                        X_test_scaled = scaler.transform(X_test)
+                                        
+                                        # Recalculer les métriques pour chaque modèle
+                                        for model_name, model in models.items():
+                                            try:
+                                                pred = model.predict(X_test_scaled)
+                                                from sklearn.metrics import accuracy_score, f1_score
+                                                acc = accuracy_score(y_test, pred)
+                                                f1 = f1_score(y_test, pred, average='weighted', zero_division=0)
                                                 
-                                        except Exception as e:
-                                            logger.warning(f"Erreur calcul métriques pour {model_name}: {e}")
-                                            
-                            except Exception as e:
-                                logger.warning(f"Erreur recalcul métriques: {e}")
+                                                metrics_result[model_name] = {
+                                                    "accuracy": float(acc * 100.0),  # En pourcentage
+                                                    "f1_score": float(f1 * 100.0),  # En pourcentage
+                                                    "feature_importance": {}
+                                                }
+                                                
+                                                if hasattr(model, 'feature_importances_'):
+                                                    metrics_result[model_name]["feature_importance"] = dict(
+                                                        zip(available_features, model.feature_importances_)
+                                                    )
+                                                
+                                                if acc > best_accuracy / 100.0:
+                                                    best_accuracy = acc * 100.0
+                                                    best_model_name = model_name
+                                                    
+                                            except Exception as e:
+                                                logger.warning(f"Erreur calcul métriques pour {model_name}: {e}")
+                        except Exception as e:
+                            logger.warning(f"Erreur recalcul métriques: {e}")
             except Exception as e:
                 logger.warning(f"Erreur récupération données pour recalcul: {e}")
         
@@ -5020,15 +5020,9 @@ async def get_ml_metrics(symbol: str = "EURUSD", timeframe: str = "M1"):
             "training_samples": len(X_train) if 'X_train' in locals() else 0,
             "test_samples": len(X_test) if 'X_test' in locals() else 0,
             "recommendations": {
-                "min_confidence": round(max(65.0, best_accuracy - 10.0), 2)
-            }
-            "features_count": 22,
-            "training_samples": 8000,
-            "test_samples": 2000,
-            "recommendations": {
-                "use_model": "random_forest",
-                "min_confidence": 80.0,
-                "suggested_threshold": 75.0
+                "min_confidence": round(max(65.0, best_accuracy - 10.0), 2),
+                "use_model": best_model_name,
+                "suggested_threshold": round(max(75.0, best_accuracy - 15.0), 2)
             },
             "timestamp": datetime.now().isoformat()
         }

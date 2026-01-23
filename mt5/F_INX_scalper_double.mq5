@@ -100,6 +100,8 @@ static double   g_mlPrecision = 0.0;          // Précision du modèle ML (0.0 -
 static double   g_mlRecall = 0.0;             // Rappel du modèle ML (0.0 - 1.0)
 static string   g_mlModelName = "RandomForest"; // Nom du modèle ML actuel
 static datetime g_lastMlUpdate = 0;           // Dernière mise à jour des métriques
+static datetime g_lastNotificationTime = 0;   // Dernière notification envoyée
+static bool g_limitOrderPlacedForSymbol = false; // Ordre limite déjà placé pour ce symbole
 static int      g_mlPredictionCount = 0;      // Nombre total de prédictions
 static double   g_mlAvgConfidence = 0.0;      // Confiance moyenne des prédictions
 
@@ -718,6 +720,9 @@ bool CheckSpikeEntryWithEMAsAndFractals(ENUM_ORDER_TYPE orderType, double &entry
 void SendMT5Notification(string message, bool isAlert = true);
 void SendPredictionSummaryViaAPI();
 void SendTradingSignalViaVonage(ENUM_ORDER_TYPE orderType, double price, double confidence);
+void PlaceLimitOrderAfterNotification(); // NOUVEAU: Placer ordre limite après notification + flèche Deriv Arrow
+ENUM_ORDER_TYPE GetDerivArrowDirection(); // NOUVEAU: Obtenir direction flèche Deriv Arrow
+bool HasLimitOrderForSymbol(); // NOUVEAU: Vérifier si ordre limite existe déjà
 
 // Phase 2: Décision Multi-Couches et Adaptation
 string DetectMarketRegime();
@@ -1033,6 +1038,194 @@ bool IsDerivArrowPresent()
       Print("🔍 Vérification flèche DERIV: ", arrowName, " -> ", isPresent ? "PRÉSENTE" : "ABSENTE");
    
    return isPresent;
+}
+
+//+------------------------------------------------------------------+
+//| Obtenir la direction de la flèche Deriv Arrow                   |
+//+------------------------------------------------------------------+
+ENUM_ORDER_TYPE GetDerivArrowDirection()
+{
+   string arrowName = "DERIV_ARROW_" + _Symbol;
+   if(ObjectFind(0, arrowName) < 0)
+      return WRONG_VALUE;
+   
+   // Récupérer les propriétés de la flèche
+   long arrowCode = ObjectGetInteger(0, arrowName, OBJPROP_ARROWCODE);
+   long arrowColorLong = ObjectGetInteger(0, arrowName, OBJPROP_COLOR);
+   color arrowColor = (color)arrowColorLong;
+   
+   // Flèche vers le haut (BUY) = code 241 ou couleur verte/bleue
+   if(arrowCode == 241 || arrowColor == clrGreen || arrowColor == clrBlue || arrowColor == clrLime)
+      return ORDER_TYPE_BUY;
+   
+   // Flèche vers le bas (SELL) = code 242 ou couleur rouge/orange
+   if(arrowCode == 242 || arrowColor == clrRed || arrowColor == clrOrange)
+      return ORDER_TYPE_SELL;
+   
+   // Par défaut, déterminer par le type d'objet
+   ENUM_OBJECT objType = (ENUM_OBJECT)ObjectGetInteger(0, arrowName, OBJPROP_TYPE);
+   if(objType == OBJ_ARROW_UP)
+      return ORDER_TYPE_BUY;
+   else if(objType == OBJ_ARROW_DOWN)
+      return ORDER_TYPE_SELL;
+   
+   return WRONG_VALUE;
+}
+
+//+------------------------------------------------------------------+
+//| Vérifier si un ordre limite existe déjà pour ce symbole         |
+//+------------------------------------------------------------------+
+bool HasLimitOrderForSymbol()
+{
+   for(int i = OrdersTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = OrderGetTicket(i);
+      if(ticket > 0 && orderInfo.SelectByIndex(i))
+      {
+         if(orderInfo.Symbol() == _Symbol && 
+            orderInfo.Magic() == InpMagicNumber &&
+            (orderInfo.OrderType() == ORDER_TYPE_BUY_LIMIT || orderInfo.OrderType() == ORDER_TYPE_SELL_LIMIT))
+         {
+            return true;
+         }
+      }
+   }
+   return false;
+}
+
+//+------------------------------------------------------------------+
+//| Placer un ordre limite après notification + flèche Deriv Arrow  |
+//| Un seul ordre limite par symbole                                |
+//+------------------------------------------------------------------+
+void PlaceLimitOrderAfterNotification()
+{
+   // Vérifier qu'une notification a été envoyée récemment (dans les 60 dernières secondes)
+   if(g_lastNotificationTime == 0 || (TimeCurrent() - g_lastNotificationTime) > 60)
+   {
+      return; // Pas de notification récente
+   }
+   
+   // Vérifier que la flèche Deriv Arrow est présente
+   if(!IsDerivArrowPresent())
+   {
+      if(DebugMode)
+         Print("⚠️ Notification reçue mais flèche Deriv Arrow absente");
+      return;
+   }
+   
+   // Vérifier qu'il n'y a pas déjà un ordre limite pour ce symbole
+   if(HasLimitOrderForSymbol())
+   {
+      if(DebugMode)
+         Print("⚠️ Ordre limite déjà existant pour ", _Symbol);
+      return;
+   }
+   
+   // Vérifier qu'on n'a pas déjà placé un ordre limite pour ce symbole dans cette session
+   if(g_limitOrderPlacedForSymbol)
+   {
+      if(DebugMode)
+         Print("⚠️ Ordre limite déjà placé pour ", _Symbol, " dans cette session");
+      return;
+   }
+   
+   // Obtenir la direction de la flèche Deriv Arrow
+   ENUM_ORDER_TYPE arrowDirection = GetDerivArrowDirection();
+   if(arrowDirection == WRONG_VALUE)
+   {
+      if(DebugMode)
+         Print("⚠️ Impossible de déterminer la direction de la flèche Deriv Arrow");
+      return;
+   }
+   
+   // Calculer le prix limite basé sur ATR
+   double atr = 0.0;
+   int atrHandle = iATR(_Symbol, PERIOD_CURRENT, 14);
+   if(atrHandle != INVALID_HANDLE)
+   {
+      double atrArray[];
+      ArraySetAsSeries(atrArray, true);
+      if(CopyBuffer(atrHandle, 0, 0, 1, atrArray) > 0)
+         atr = atrArray[0];
+      IndicatorRelease(atrHandle);
+   }
+   
+   // Si pas d'ATR, utiliser une distance fixe
+   if(atr == 0.0)
+   {
+      double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+      long stopLevel = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
+      atr = stopLevel * point * 2.0;
+      if(atr == 0.0) atr = 10 * point;
+   }
+   
+   // Prix actuel
+   double currentPrice = (arrowDirection == ORDER_TYPE_BUY) ? 
+                         SymbolInfoDouble(_Symbol, SYMBOL_ASK) : 
+                         SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   
+   // Prix limite: légèrement en dessous (BUY) ou au-dessus (SELL) du prix actuel
+   double limitPrice = 0.0;
+   if(arrowDirection == ORDER_TYPE_BUY)
+   {
+      limitPrice = currentPrice - (atr * 0.3); // 30% de l'ATR en dessous
+   }
+   else // SELL
+   {
+      limitPrice = currentPrice + (atr * 0.3); // 30% de l'ATR au-dessus
+   }
+   
+   limitPrice = NormalizeDouble(limitPrice, _Digits);
+   
+   // Calculer SL et TP
+   double sl = 0, tp = 0;
+   ENUM_POSITION_TYPE posType = (arrowDirection == ORDER_TYPE_BUY) ? POSITION_TYPE_BUY : POSITION_TYPE_SELL;
+   double entryPrice = limitPrice;
+   CalculateSLTPInPoints(posType, entryPrice, sl, tp);
+   
+   // Normaliser le lot
+   double normalizedLot = NormalizeLotSize(InitialLotSize);
+   if(normalizedLot < SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN))
+   {
+      if(DebugMode)
+         Print("❌ Lot trop petit pour ordre limite: ", normalizedLot);
+      return;
+   }
+   
+   // Créer la requête d'ordre limite
+   MqlTradeRequest request = {};
+   MqlTradeResult result = {};
+   
+   request.action = TRADE_ACTION_PENDING;
+   request.symbol = _Symbol;
+   request.volume = normalizedLot;
+   request.type = (arrowDirection == ORDER_TYPE_BUY) ? ORDER_TYPE_BUY_LIMIT : ORDER_TYPE_SELL_LIMIT;
+   request.price = limitPrice;
+   request.sl = sl;
+   request.tp = tp;
+   request.deviation = 10;
+   request.magic = InpMagicNumber;
+   request.comment = "NOTIF_DERIV_LIMIT";
+   request.type_filling = ORDER_FILLING_FOK;
+   request.type_time = ORDER_TIME_DAY;
+   request.expiration = 0; // Pas d'expiration (ordre valide toute la journée)
+   
+   // Envoyer l'ordre
+   if(OrderSend(request, result))
+   {
+      g_limitOrderPlacedForSymbol = true; // Marquer comme placé
+      Print("✅ Ordre limite placé après notification + flèche Deriv Arrow: ", 
+            EnumToString(request.type), 
+            " Prix=", DoubleToString(limitPrice, _Digits),
+            " SL=", DoubleToString(sl, _Digits),
+            " TP=", DoubleToString(tp, _Digits),
+            " Lot=", normalizedLot);
+   }
+   else
+   {
+      if(DebugMode)
+         Print("❌ Erreur placement ordre limite après notification: ", result.retcode, " - ", result.comment);
+   }
 }
 
 //+------------------------------------------------------------------+
@@ -3177,6 +3370,10 @@ int OnInit()
    g_sessionStartTime = TimeCurrent();
    g_sessionTarget = 0.0;
    
+   // NOUVEAU: Réinitialiser le flag d'ordre limite pour ce symbole
+   g_limitOrderPlacedForSymbol = false;
+   g_lastNotificationTime = 0;
+   
    // Mettre à jour la session en cours
    UpdateTradingSession();
    
@@ -3431,6 +3628,16 @@ void CheckProfitTargets()
 //+------------------------------------------------------------------+
 void OnTick()
 {
+   // NOUVEAU: Réinitialiser le flag d'ordre limite si le symbole a changé
+   static string lastSymbol = "";
+   if(lastSymbol != _Symbol)
+   {
+      g_limitOrderPlacedForSymbol = false;
+      g_lastNotificationTime = 0;
+      lastSymbol = _Symbol;
+      if(DebugMode)
+         Print("🔄 Symbole changé: ", lastSymbol, " -> ", _Symbol, " - Réinitialisation flag ordre limite");
+   }
    // Vérifier et mettre à jour les objectifs de profit et les sessions
    CheckProfitTargets();
    
@@ -3743,6 +3950,14 @@ void OnTick()
       lastDerivArrowCheck = TimeCurrent();
    }
    
+   // NOUVEAU: Placer un ordre limite après notification + flèche Deriv Arrow (un seul par symbole)
+   static datetime lastLimitOrderCheck = 0;
+   if(TimeCurrent() - lastLimitOrderCheck >= 2) // Toutes les 2 secondes
+   {
+      PlaceLimitOrderAfterNotification();
+      lastLimitOrderCheck = TimeCurrent();
+   }
+   
    // Gestion des ordres limites sur les US Breakout
    PlaceLimitOrdersOnLevels();
    
@@ -3760,6 +3975,55 @@ void OnTradeTransaction(const MqlTradeTransaction& trans,
                         const MqlTradeRequest& request,
                         const MqlTradeResult& result)
 {
+   // NOUVEAU: Réinitialiser le flag d'ordre limite si un ordre limite est exécuté ou supprimé
+   if(trans.type == TRADE_TRANSACTION_ORDER_DELETE || trans.type == TRADE_TRANSACTION_DEAL_ADD)
+   {
+      if(HistoryOrderSelect(trans.order))
+      {
+         if(HistoryOrderGetString(trans.order, ORDER_SYMBOL) == _Symbol &&
+            HistoryOrderGetInteger(trans.order, ORDER_MAGIC) == InpMagicNumber)
+         {
+            ENUM_ORDER_TYPE orderType = (ENUM_ORDER_TYPE)HistoryOrderGetInteger(trans.order, ORDER_TYPE);
+            if(orderType == ORDER_TYPE_BUY_LIMIT || orderType == ORDER_TYPE_SELL_LIMIT)
+            {
+               string comment = HistoryOrderGetString(trans.order, ORDER_COMMENT);
+               if(StringFind(comment, "NOTIF_DERIV_LIMIT") >= 0)
+               {
+                  g_limitOrderPlacedForSymbol = false;
+                  if(DebugMode)
+                     Print("🔄 Ordre limite NOTIF_DERIV_LIMIT ", 
+                           (trans.type == TRADE_TRANSACTION_DEAL_ADD ? "exécuté" : "supprimé"), 
+                           " - Flag réinitialisé");
+               }
+            }
+         }
+      }
+      
+      // Vérifier aussi dans les ordres en attente
+      if(OrderSelect(trans.order))
+      {
+         if(OrderGetString(ORDER_SYMBOL) == _Symbol &&
+            OrderGetInteger(ORDER_MAGIC) == InpMagicNumber)
+         {
+            ENUM_ORDER_TYPE orderType = (ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE);
+            if(orderType == ORDER_TYPE_BUY_LIMIT || orderType == ORDER_TYPE_SELL_LIMIT)
+            {
+               string comment = OrderGetString(ORDER_COMMENT);
+               if(StringFind(comment, "NOTIF_DERIV_LIMIT") >= 0)
+               {
+                  // Si l'ordre est supprimé, réinitialiser le flag
+                  if(trans.type == TRADE_TRANSACTION_ORDER_DELETE)
+                  {
+                     g_limitOrderPlacedForSymbol = false;
+                     if(DebugMode)
+                        Print("🔄 Ordre limite NOTIF_DERIV_LIMIT supprimé - Flag réinitialisé");
+                  }
+               }
+            }
+         }
+      }
+   }
+   
    // Si une transaction de type deal (fermeture) a lieu
    if(trans.type == TRADE_TRANSACTION_DEAL_ADD)
    {
@@ -13961,6 +14225,14 @@ void SendMT5Notification(string message, bool isAlert = true)
    
    // 4. Afficher aussi dans le journal
    Print("📢 NOTIFICATION: ", message);
+   
+   // 5. NOUVEAU: Enregistrer le timestamp de la notification pour placement d'ordre limite
+   if(isAlert)
+   {
+      g_lastNotificationTime = TimeCurrent();
+      if(DebugMode)
+         Print("📝 Notification enregistrée - Timestamp: ", TimeToString(g_lastNotificationTime, TIME_DATE|TIME_SECONDS));
+   }
 }
 
 //+------------------------------------------------------------------+
