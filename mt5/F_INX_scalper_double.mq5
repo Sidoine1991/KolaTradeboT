@@ -54,7 +54,7 @@ input int    MinPositionLifetimeSec = 5;    // Délai minimum avant modification
 
 input group "--- AI AGENT ---"
 input bool   UseAI_Agent        = true;    // Activer l'agent IA (via serveur externe)
-input string AI_ServerURL       = "http://127.0.0.1:8000/decision"; // URL serveur IA (ai_server.py)
+input string AI_ServerURL       = "http://127.0.0.1:8000/decision"; // URL serveur IA (ai_decision.py)
 input bool   UseAdvancedDecisionGemma = false; // Utiliser endpoint decisionGemma (Gemma+Gemini) avec analyse visuelle
 input int    AI_Timeout_ms       = 15000;    // Timeout WebRequest en millisecondes (augmenté à 15s pour éviter 5203)
 input int    AI_Accuracy_Timeout_ms = 20000; // Timeout spécifique pour endpoint accuracy (20s)
@@ -186,6 +186,22 @@ struct TradeResult
    string decision;           // Décision (BUY/SELL)
    bool isWin;                // Si le trade est gagnant
 };
+
+//+------------------------------------------------------------------+
+//| Structure pour stocker les niveaux de support/résistance        |
+//+------------------------------------------------------------------+
+struct SLevel
+{
+   double         price;          // Niveau de prix
+   datetime       time;           // Heure de détection
+   string         name;           // Nom de l'objet graphique
+   int            type;           // 1 = Support, 2 = Résistance
+};
+
+// Variables globales pour les niveaux US Breakout
+SLevel g_supports[];              // Tableau des supports
+SLevel g_resistances[];           // Tableau des résistances
+datetime g_lastLevelCheck = 0;     // Dernière vérification des niveaux
 
 // Historique des trades (déclaré plus bas avec static)
 
@@ -562,7 +578,7 @@ static int g_tradeHistoryCount = 0;           // Nombre de trades dans l'histori
 const int MAX_TRADE_HISTORY = 1000;           // Maximum number of trades to keep in history
 
 // URL pour l'endpoint de feedback
-input string AI_FeedbackURL = "http://127.0.0.1:8000/trades/feedback"; // URL endpoint feedback trades (ai_server.py)
+input string AI_FeedbackURL = "http://127.0.0.1:8000/trades/feedback"; // URL endpoint feedback trades (ai_decision.py)
 
 // ===== PROTECTION ANTI-DOUBLON: Un seul trade par symbole par signal =====
 static datetime g_lastTradeExecutionTime = 0;     // Timestamp du dernier trade exécuté
@@ -710,6 +726,14 @@ void CalculateAdaptiveSLTP(ENUM_ORDER_TYPE orderType, double &sl, double &tp);
 // Déclaration de la fonction de déclenchement de l'entraînement ML
 void TriggerMLTrainingIfNeeded();
 bool ExecuteTrade(ENUM_ORDER_TYPE orderType, bool isHighConfidenceMode = false, double manualSL = 0, double manualTP = 0);
+
+// Fonctions pour la gestion des US Breakout
+bool OrderExists(ENUM_ORDER_TYPE type, double price, double tolerance=0.0001);
+void DetectUSBreakoutRectangles();
+void AddSupportLevel(double price, string name);
+void AddResistanceLevel(double price, string name);
+void CleanupOldLevels();
+void PlaceLimitOrdersOnLevels();
 
 int GetSpikeIndex(const string sym)
 {
@@ -3429,7 +3453,7 @@ void OnTick()
    // Réinitialiser les compteurs quotidiens si nécessaire
    ResetDailyCountersIfNeeded();
    
-   // Vérifier et gérer la duplication des positions en gain (maximum 4 positions)
+   // Vérifier et gérer la duplication des positions en gain (maximum 5 positions)
    CheckAndDuplicatePositions();
    
    // RÉACTIVÉ: Gestion stricte des pertes quotidiennes pour éviter les pertes excessives
@@ -3718,6 +3742,9 @@ void OnTick()
       CheckDerivArrowPosition();
       lastDerivArrowCheck = TimeCurrent();
    }
+   
+   // Gestion des ordres limites sur les US Breakout
+   PlaceLimitOrdersOnLevels();
    
    // Si pas de position, chercher une opportunité
    if(!g_hasPosition)
@@ -8239,7 +8266,7 @@ bool IsAfterUSOpening()
 }
 
 //+------------------------------------------------------------------+
-//| Détecter le breakout du range US                                  |
+//| Détecter le breakout du range US et placer ordre limite            |
 //+------------------------------------------------------------------+
 int DetectUSBreakout()
 {
@@ -8261,6 +8288,10 @@ int DetectUSBreakout()
       
       // AFFICHAGE GRAPHIQUE du breakout US HAUT
       DrawUSBreakoutArrow(true, closeM1[0], g_US_High, TimeCurrent());
+      
+      // NOUVEAU: Placer un ordre limite BUY au niveau du breakout US
+      PlaceUSLimitOrder(ORDER_TYPE_BUY_LIMIT, g_US_High);
+      
       return 1;
    }
    
@@ -8274,6 +8305,10 @@ int DetectUSBreakout()
       
       // AFFICHAGE GRAPHIQUE du breakout US BAS
       DrawUSBreakoutArrow(false, closeM1[0], g_US_Low, TimeCurrent());
+      
+      // NOUVEAU: Placer un ordre limite SELL au niveau du breakout US
+      PlaceUSLimitOrder(ORDER_TYPE_SELL_LIMIT, g_US_Low);
+      
       return -1;
    }
    
@@ -8374,6 +8409,124 @@ void CleanUSBreakoutObjects()
             ObjectDelete(0, objName);
          }
       }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Placer un ordre limite au niveau du breakout US                  |
+//+------------------------------------------------------------------+
+bool PlaceUSLimitOrder(ENUM_ORDER_TYPE orderType, double limitPrice)
+{
+   // Vérifier si un ordre limite existe déjà à ce niveau
+   if(OrderExists(orderType, limitPrice))
+   {
+      if(DebugMode)
+         Print("⚠️ Ordre limite US déjà existant au niveau ", DoubleToString(limitPrice, _Digits));
+      return false;
+   }
+   
+   // Vérifier le nombre maximum de positions (5 maximum)
+   int totalPositions = CountAllPositionsWithMagic();
+   if(totalPositions >= 5)
+   {
+      if(DebugMode)
+         Print("🚫 ORDRE LIMITE US BLOQUÉ: ", totalPositions, " positions actives (max 5)");
+      return false;
+   }
+   
+   // Normaliser le lot
+   double normalizedLot = NormalizeLotSize(InitialLotSize);
+   if(normalizedLot < SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN))
+   {
+      if(DebugMode)
+         Print("❌ Lot trop petit pour ordre limite US: ", normalizedLot);
+      return false;
+   }
+   
+   // Normaliser le prix limite
+   limitPrice = NormalizeDouble(limitPrice, _Digits);
+   
+   // Calculer SL et TP
+   double sl, tp;
+   ENUM_POSITION_TYPE posType = (orderType == ORDER_TYPE_BUY_LIMIT) ? POSITION_TYPE_BUY : POSITION_TYPE_SELL;
+   
+   if(orderType == ORDER_TYPE_BUY_LIMIT)
+   {
+      sl = g_US_Low; // SL au bas du range
+      double risk = limitPrice - sl;
+      tp = limitPrice + (risk * US_RiskReward);
+   }
+   else // ORDER_TYPE_SELL_LIMIT
+   {
+      sl = g_US_High; // SL au haut du range
+      double risk = sl - limitPrice;
+      tp = limitPrice - (risk * US_RiskReward);
+   }
+   
+   // Normaliser SL et TP
+   sl = NormalizeDouble(sl, _Digits);
+   tp = NormalizeDouble(tp, _Digits);
+   
+   // Vérifier les distances minimum
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   long stopLevel = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
+   double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+   double minDistance = stopLevel * point;
+   
+   if(minDistance == 0 || minDistance < tickSize)
+   {
+      minDistance = tickSize * 3;
+      if(minDistance == 0)
+         minDistance = 10 * point;
+   }
+   
+   if(minDistance < (5 * point))
+      minDistance = 5 * point;
+   
+   double slDistance = MathAbs(limitPrice - sl);
+   double tpDistance = MathAbs(tp - limitPrice);
+   
+   if(slDistance < minDistance || tpDistance < minDistance)
+   {
+      if(DebugMode)
+         Print("❌ Distances SL/TP insuffisantes pour ordre limite US");
+      return false;
+   }
+   
+   // Créer la requête d'ordre limite
+   MqlTradeRequest request = {};
+   MqlTradeResult result = {};
+   
+   request.action = TRADE_ACTION_PENDING;
+   request.symbol = _Symbol;
+   request.volume = normalizedLot;
+   request.type = orderType;
+   request.price = limitPrice;
+   request.sl = sl;
+   request.tp = tp;
+   request.deviation = 10;
+   request.magic = InpMagicNumber;
+   request.comment = "US_SESSION_BREAK_LIMIT";
+   request.type_filling = ORDER_FILLING_FOK;
+   request.type_time = ORDER_TIME_DAY;
+   request.expiration = 0; // Pas d'expiration (ordre valide toute la journée)
+   
+   // Envoyer l'ordre
+   if(OrderSend(request, result))
+   {
+      if(DebugMode)
+         Print("✅ Ordre limite US placé: ", EnumToString(orderType), 
+               " Prix=", DoubleToString(limitPrice, _Digits),
+               " SL=", DoubleToString(sl, _Digits),
+               " TP=", DoubleToString(tp, _Digits),
+               " Lot=", normalizedLot);
+      return true;
+   }
+   else
+   {
+      if(DebugMode)
+         Print("❌ Erreur placement ordre limite US: ", result.retcode, " - ", result.comment);
+      return false;
    }
 }
 
@@ -8581,8 +8734,277 @@ bool ExecuteUSTrade(ENUM_ORDER_TYPE orderType, double entryPrice, double sl, dou
 }
 
 //+------------------------------------------------------------------+
+//| NOUVELLE LOGIQUE: Trading basé sur ML + IA + Analyse Cohérente   |
+//| Conditions:                                                       |
+//| 1. Précision ML ≥ 80%                                             |
+//| 2. Décision IA = ACHAT/VENTE avec confiance ≥ 56%                 |
+//| 3. Analyse cohérente dans le même sens avec confiance ≥ 70%      |
+//| 4. Exécution au marché dès que flèche Deriv Arrow apparaît       |
+//| 5. Placement d'ordres limites sur les opportunités                |
+//+------------------------------------------------------------------+
+bool CheckMLBasedTradingConditions(ENUM_ORDER_TYPE &orderType, double &confidence)
+{
+   orderType = WRONG_VALUE;
+   confidence = 0.0;
+   
+   // CONDITION 1: Vérifier que les métriques ML sont valides et précision ≥ 80%
+   if(!g_mlMetrics.isValid || g_mlMetrics.symbol != _Symbol)
+   {
+      if(DebugMode)
+         Print("❌ Métriques ML non valides ou symbole différent pour ", _Symbol);
+      return false;
+   }
+   
+   if(g_mlMetrics.bestAccuracy < 80.0)
+   {
+      if(DebugMode)
+         Print("❌ Précision ML insuffisante: ", DoubleToString(g_mlMetrics.bestAccuracy, 2), "% < 80%");
+      return false;
+   }
+   
+   // CONDITION 2: Décision IA = ACHAT ou VENTE avec confiance ≥ 56%
+   string aiAction = g_lastAIAction;
+   StringToLower(aiAction);
+   double aiConfidence = g_lastAIConfidence;
+   
+   bool aiBuy = (StringFind(aiAction, "buy") >= 0 || StringFind(aiAction, "achat") >= 0);
+   bool aiSell = (StringFind(aiAction, "sell") >= 0 || StringFind(aiAction, "vente") >= 0);
+   
+   if(!aiBuy && !aiSell)
+   {
+      if(DebugMode)
+         Print("❌ Décision IA neutre (hold): ", g_lastAIAction);
+      return false;
+   }
+   
+   if(aiConfidence < 0.56)
+   {
+      if(DebugMode)
+         Print("❌ Confiance IA insuffisante: ", DoubleToString(aiConfidence * 100, 1), "% < 56%");
+      return false;
+   }
+   
+   // CONDITION 3: Analyse cohérente dans le même sens avec confiance ≥ 70%
+   if(StringLen(g_coherentAnalysis.decision) == 0)
+   {
+      if(DebugMode)
+         Print("❌ Analyse cohérente non disponible");
+      return false;
+   }
+   
+   string coherentDecision = g_coherentAnalysis.decision;
+   StringToLower(coherentDecision);
+   double coherentConfidence = g_coherentAnalysis.confidence;
+   if(coherentConfidence > 1.0) coherentConfidence = coherentConfidence / 100.0;
+   
+   if(coherentConfidence < 0.70)
+   {
+      if(DebugMode)
+         Print("❌ Confiance analyse cohérente insuffisante: ", DoubleToString(coherentConfidence * 100, 1), "% < 70%");
+      return false;
+   }
+   
+   bool coherentBuy = (StringFind(coherentDecision, "buy") >= 0 || StringFind(coherentDecision, "achat") >= 0);
+   bool coherentSell = (StringFind(coherentDecision, "sell") >= 0 || StringFind(coherentDecision, "vente") >= 0);
+   
+   // Vérifier l'alignement IA + Analyse cohérente
+   if(aiBuy && !coherentBuy)
+   {
+      if(DebugMode)
+         Print("❌ Désalignement: IA=BUY mais Analyse cohérente=", g_coherentAnalysis.decision);
+      return false;
+   }
+   
+   if(aiSell && !coherentSell)
+   {
+      if(DebugMode)
+         Print("❌ Désalignement: IA=SELL mais Analyse cohérente=", g_coherentAnalysis.decision);
+      return false;
+   }
+   
+   // Toutes les conditions sont remplies
+   orderType = aiBuy ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+   confidence = (aiConfidence + coherentConfidence) / 2.0; // Confiance moyenne
+   
+   if(DebugMode)
+   {
+      Print("✅ CONDITIONS ML REMPLIES pour ", _Symbol, ":");
+      Print("   ├─ Précision ML: ", DoubleToString(g_mlMetrics.bestAccuracy, 2), "% (≥80%)");
+      Print("   ├─ Décision IA: ", g_lastAIAction, " @ ", DoubleToString(aiConfidence * 100, 1), "% (≥56%)");
+      Print("   ├─ Analyse cohérente: ", g_coherentAnalysis.decision, " @ ", DoubleToString(coherentConfidence * 100, 1), "% (≥70%)");
+      Print("   └─ Direction: ", EnumToString(orderType), " (Confiance moyenne: ", DoubleToString(confidence * 100, 1), "%)");
+   }
+   
+   return true;
+}
+
+//+------------------------------------------------------------------+
+//| Placer un ordre limite sur une opportunité ML détectée           |
+//+------------------------------------------------------------------+
+bool PlaceLimitOrderOnMLOpportunity(ENUM_ORDER_TYPE orderType, double confidence)
+{
+   if(orderType == WRONG_VALUE)
+      return false;
+   
+   // Vérifier qu'on n'a pas déjà un ordre limite pour ce symbole
+   for(int i = OrdersTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = OrderGetTicket(i);
+      if(ticket > 0 && orderInfo.SelectByIndex(i))
+      {
+         if(orderInfo.Symbol() == _Symbol && 
+            orderInfo.Magic() == InpMagicNumber &&
+            (orderInfo.OrderType() == ORDER_TYPE_BUY_LIMIT || orderInfo.OrderType() == ORDER_TYPE_SELL_LIMIT))
+         {
+            if(DebugMode)
+               Print("⚠️ Ordre limite déjà existant pour ", _Symbol);
+            return false; // Ordre limite déjà présent
+         }
+      }
+   }
+   
+   // Calculer le prix limite basé sur les opportunités détectées
+   double limitPrice = 0.0;
+   double currentPrice = (orderType == ORDER_TYPE_BUY) ? SymbolInfoDouble(_Symbol, SYMBOL_ASK) : SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   
+   // Utiliser ATR pour calculer une distance raisonnable
+   double atr = 0.0;
+   int atrHandle = iATR(_Symbol, PERIOD_CURRENT, 14);
+   if(atrHandle != INVALID_HANDLE)
+   {
+      double atrArray[];
+      ArraySetAsSeries(atrArray, true);
+      if(CopyBuffer(atrHandle, 0, 0, 1, atrArray) > 0)
+         atr = atrArray[0];
+      IndicatorRelease(atrHandle);
+   }
+   
+   // Si pas d'ATR, utiliser une distance fixe
+   if(atr == 0.0)
+   {
+      double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+      long stopLevel = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
+      atr = stopLevel * point * 2.0;
+      if(atr == 0.0) atr = 10 * point;
+   }
+   
+   // Prix limite: légèrement en dessous (BUY) ou au-dessus (SELL) du prix actuel
+   if(orderType == ORDER_TYPE_BUY)
+   {
+      limitPrice = currentPrice - (atr * 0.3); // 30% de l'ATR en dessous
+   }
+   else // SELL
+   {
+      limitPrice = currentPrice + (atr * 0.3); // 30% de l'ATR au-dessus
+   }
+   
+   limitPrice = NormalizeDouble(limitPrice, _Digits);
+   
+   // Calculer SL et TP
+   double sl = 0, tp = 0;
+   ENUM_POSITION_TYPE posType = (orderType == ORDER_TYPE_BUY) ? POSITION_TYPE_BUY : POSITION_TYPE_SELL;
+   double entryPrice = limitPrice;
+   CalculateSLTPInPoints(posType, entryPrice, sl, tp);
+   
+   // Normaliser le lot
+   double normalizedLot = NormalizeLotSize(InitialLotSize);
+   if(normalizedLot < SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN))
+   {
+      if(DebugMode)
+         Print("❌ Lot trop petit pour ordre limite ML: ", normalizedLot);
+      return false;
+   }
+   
+   // Créer la requête d'ordre limite
+   MqlTradeRequest request = {};
+   MqlTradeResult result = {};
+   
+   request.action = TRADE_ACTION_PENDING;
+   request.symbol = _Symbol;
+   request.volume = normalizedLot;
+   request.type = (orderType == ORDER_TYPE_BUY) ? ORDER_TYPE_BUY_LIMIT : ORDER_TYPE_SELL_LIMIT;
+   request.price = limitPrice;
+   request.sl = sl;
+   request.tp = tp;
+   request.deviation = 10;
+   request.magic = InpMagicNumber;
+   request.comment = "ML_OPPORTUNITY_LIMIT";
+   request.type_filling = ORDER_FILLING_FOK;
+   request.type_time = ORDER_TIME_DAY;
+   request.expiration = 0; // Pas d'expiration (ordre valide toute la journée)
+   
+   // Envoyer l'ordre
+   if(OrderSend(request, result))
+   {
+      if(DebugMode)
+         Print("✅ Ordre limite ML placé: ", EnumToString(request.type), 
+               " Prix=", DoubleToString(limitPrice, _Digits),
+               " SL=", DoubleToString(sl, _Digits),
+               " TP=", DoubleToString(tp, _Digits),
+               " Lot=", normalizedLot,
+               " Confiance=", DoubleToString(confidence * 100, 1), "%");
+      return true;
+   }
+   else
+   {
+      if(DebugMode)
+         Print("❌ Erreur placement ordre limite ML: ", result.retcode, " - ", result.comment);
+      return false;
+   }
+}
+
+//+------------------------------------------------------------------+
 void LookForTradingOpportunity()
 {
+   // ===== NOUVELLE PRIORITÉ: Trading basé sur ML + IA + Analyse Cohérente + Deriv Arrow =====
+   ENUM_ORDER_TYPE mlOrderType = WRONG_VALUE;
+   double mlConfidence = 0.0;
+   
+   if(CheckMLBasedTradingConditions(mlOrderType, mlConfidence))
+   {
+      // CONDITION 4: Exécuter l'ordre au marché dès que la flèche Deriv Arrow apparaît
+      bool hasDerivArrow = IsDerivArrowPresent();
+      
+      if(hasDerivArrow)
+      {
+         Print("🚀 CONDITIONS ML REMPLIES + FLÈCHE DERIV ARROW DÉTECTÉE - EXÉCUTION IMMÉDIATE");
+         Print("   └─ ", EnumToString(mlOrderType), " sur ", _Symbol, " (Confiance: ", DoubleToString(mlConfidence * 100, 1), "%)");
+         
+         // Exécuter l'ordre au marché immédiatement
+         double sl = 0, tp = 0;
+         CalculateSLTPInPoints((mlOrderType == ORDER_TYPE_BUY) ? POSITION_TYPE_BUY : POSITION_TYPE_SELL, 
+                              (mlOrderType == ORDER_TYPE_BUY) ? SymbolInfoDouble(_Symbol, SYMBOL_ASK) : SymbolInfoDouble(_Symbol, SYMBOL_BID), 
+                              sl, tp);
+         
+         bool success = ExecuteTrade(mlOrderType, true, sl, tp);
+         
+         if(success)
+         {
+            Print("✅ Ordre au marché exécuté avec succès: ", EnumToString(mlOrderType), " sur ", _Symbol);
+            return; // Priorité absolue
+         }
+         else
+         {
+            Print("❌ Échec exécution ordre au marché - Tentative ordre limite...");
+         }
+      }
+      else
+      {
+         // CONDITION 5: Placer des ordres limites sur les opportunités
+         if(DebugMode)
+            Print("📋 Conditions ML remplies mais flèche Deriv Arrow absente - Placement ordre limite...");
+         
+         // Placer un ordre limite au niveau des opportunités détectées
+         bool limitPlaced = PlaceLimitOrderOnMLOpportunity(mlOrderType, mlConfidence);
+         
+         if(limitPlaced)
+         {
+            Print("✅ Ordre limite placé sur opportunité ML: ", EnumToString(mlOrderType), " sur ", _Symbol);
+            return; // Ordre limite placé
+         }
+      }
+   }
+   
    // ===== NOUVEAU: DÉCISION INTELLIGENTE MULTI-COUCHES (Phase 2) =====
    // Création et initialisation de la décision intelligente
    IntelligentDecision smartDecision = {0};
@@ -8945,6 +9367,29 @@ void LookForTradingOpportunity()
    // PRIORITÉ 1: STRATÉGIE US SESSION BREAK & RETEST (PRIORITAIRE)
    if(UseUSSessionStrategy)
    {
+      // NOUVEAU: Sélectionner la meilleure paire basée sur les métriques ML
+      static datetime lastSymbolSelection = 0;
+      static string selectedSymbol = "";
+      const int SYMBOL_SELECTION_INTERVAL = 300; // Sélectionner une nouvelle paire toutes les 5 minutes
+      
+      if(TimeCurrent() - lastSymbolSelection >= SYMBOL_SELECTION_INTERVAL || selectedSymbol == "")
+      {
+         string bestSymbol = SelectBestSymbolByML();
+         if(bestSymbol != "" && bestSymbol != _Symbol)
+         {
+            if(DebugMode)
+               Print("🔄 Changement de symbole recommandé par ML: ", _Symbol, " -> ", bestSymbol);
+            // Note: Le changement de symbole doit être fait manuellement dans MT5
+            // Le robot continuera avec le symbole actuel mais affichera la recommandation
+            selectedSymbol = bestSymbol;
+         }
+         else if(bestSymbol != "")
+         {
+            selectedSymbol = bestSymbol;
+         }
+         lastSymbolSelection = TimeCurrent();
+      }
+      
       DefineUSSessionRange();
       
       if(g_US_RangeDefined && IsAfterUSOpening())
@@ -8954,23 +9399,35 @@ void LookForTradingOpportunity()
             int breakout = DetectUSBreakout();
             if(breakout != 0)
             {
-               // Breakout détecté, attendre retest - BLOQUER les autres stratégies
+               // Breakout détecté, ordre limite placé - BLOQUER les autres stratégies
+               // L'ordre limite sera exécuté automatiquement quand le prix reviendra au niveau
                return;
             }
          }
          else
          {
-            // Breakout fait, chercher retest
-            if(CheckUSRetestAndEnter())
+            // Breakout fait, ordre limite déjà placé
+            // Vérifier si l'ordre limite a été exécuté (position ouverte)
+            // Si pas encore exécuté, attendre - BLOQUER les autres stratégies
+            if(!g_US_TradeTaken)
             {
-               // Trade pris, sortir
-               return;
+               // Vérifier si une position a été ouverte depuis l'ordre limite
+               int positions = CountPositionsForSymbolMagic();
+               if(positions > 0)
+               {
+                  g_US_TradeTaken = true;
+                  if(DebugMode)
+                     Print("✅ Ordre limite US exécuté - Position ouverte");
+               }
+               else
+               {
+                  // Ordre limite toujours en attente
+                  return;
+               }
             }
-            else
-            {
-               // En attente de retest - BLOQUER les autres stratégies jusqu'au retest
-               return;
-            }
+            
+            // Si trade déjà pris, ne rien faire
+            return;
          }
       }
    }
@@ -9011,48 +9468,141 @@ void LookForTradingOpportunity()
    }
    
    // NOUVEAU: Éviter de trader entre les prédictions (attendre la prochaine prédiction)
+   // ASSOUPLI: Si métriques ML excellentes (≥90%), permettre le trading même sans prédiction valide
+   bool allowTradingWithoutPrediction = (g_mlMetrics.isValid && g_mlMetrics.bestAccuracy >= 90.0);
+   
    if(UseAI_Agent && g_predictionValid)
    {
-      // Vérifier si la prédiction est trop ancienne (plus de 5 minutes)
-      if(TimeCurrent() - g_lastPredictionUpdate > 300)
+      // Vérifier si la prédiction est trop ancienne (plus de 10 minutes, 5 min si métriques excellentes)
+      int maxPredictionAge = allowTradingWithoutPrediction ? 600 : 300;
+      if(TimeCurrent() - g_lastPredictionUpdate > maxPredictionAge)
       {
-         if(DebugMode)
-            Print("⏸️ Prédiction trop ancienne (", TimeCurrent() - g_lastPredictionUpdate, "s) - Attendre nouvelle prédiction");
-         return; // Ne pas trader entre les prédictions
+         if(allowTradingWithoutPrediction)
+         {
+            if(DebugMode)
+               Print("⚠️ Prédiction ancienne (", TimeCurrent() - g_lastPredictionUpdate, "s) mais métriques excellentes - Trading autorisé");
+         }
+         else
+         {
+            if(DebugMode)
+               Print("⏸️ Prédiction trop ancienne (", TimeCurrent() - g_lastPredictionUpdate, "s) - Attendre nouvelle prédiction");
+            return; // Ne pas trader entre les prédictions
+         }
       }
    }
    else if(UseAI_Agent && !g_predictionValid)
    {
-      if(DebugMode)
-         Print("⏸️ Aucune prédiction valide - Attendre prédiction ML");
-      return; // Ne pas trader sans prédiction
+      if(allowTradingWithoutPrediction)
+      {
+         if(DebugMode)
+            Print("⚠️ Aucune prédiction valide mais métriques excellentes (", DoubleToString(g_mlMetrics.bestAccuracy, 1), "%) - Trading autorisé");
+      }
+      else
+      {
+         if(DebugMode)
+            Print("⏸️ Aucune prédiction valide - Attendre prédiction ML");
+         return; // Ne pas trader sans prédiction
+      }
    }
    
    // RÈGLE STRICTE : Si l'IA est activée, TOUJOURS vérifier la confiance AVANT de trader
+   // ASSOUPLI: Si métriques ML excellentes ou analyse cohérente forte, permettre le trading
+   bool allowTradingWithLowConfidence = false;
+   if(g_mlMetrics.isValid && g_mlMetrics.bestAccuracy >= 90.0)
+      allowTradingWithLowConfidence = true;
+   else if(StringLen(g_coherentAnalysis.decision) > 0 && g_coherentAnalysis.confidence >= 0.70)
+      allowTradingWithLowConfidence = true; // Analyse cohérente forte peut compenser
+   
    if(UseAI_Agent)
    {
-      // Si l'IA a une recommandation mais confiance insuffisante, BLOQUER
+      // Si l'IA a une recommandation mais confiance insuffisante
       if(g_lastAIAction != "" && g_lastAIAction != "hold" && g_lastAIConfidence < requiredConfidence)
       {
-         if(DebugMode)
-            Print("🚫 TRADE BLOQUÉ: IA recommande ", g_lastAIAction, " mais confiance insuffisante (", DoubleToString(g_lastAIConfidence * 100, 1), "% < ", DoubleToString(requiredConfidence * 100, 1), "%)");
-         return; // BLOQUER si confiance insuffisante
+         // ASSOUPLI: Si métriques excellentes ou analyse cohérente forte, réduire le seuil requis
+         double adjustedConfidence = requiredConfidence;
+         if(allowTradingWithLowConfidence)
+         {
+            adjustedConfidence = MathMax(0.50, requiredConfidence - 0.15); // Réduire de 15% minimum 50%
+            if(DebugMode)
+               Print("⚠️ Confiance IA faible (", DoubleToString(g_lastAIConfidence * 100, 1), "%) mais conditions assouplies - Seuil réduit à ", DoubleToString(adjustedConfidence * 100, 1), "%");
+         }
+         
+         if(g_lastAIConfidence < adjustedConfidence)
+         {
+            if(DebugMode)
+               Print("🚫 TRADE BLOQUÉ: IA recommande ", g_lastAIAction, " mais confiance insuffisante (", DoubleToString(g_lastAIConfidence * 100, 1), "% < ", DoubleToString(adjustedConfidence * 100, 1), "%)");
+            return; // BLOQUER si confiance insuffisante même après ajustement
+         }
       }
       
-      // Si l'IA recommande hold/vide, BLOQUER
+      // Si l'IA recommande hold/vide, vérifier si on peut utiliser l'analyse cohérente
       if(g_lastAIAction == "hold" || g_lastAIAction == "")
       {
-         if(DebugMode)
-            Print("⏸️ IA recommande HOLD/ATTENTE - Pas de trade");
-         return;
+         // ASSOUPLI: Si analyse cohérente forte (≥70%), permettre le trading même si IA en hold
+         if(allowTradingWithLowConfidence && StringLen(g_coherentAnalysis.decision) > 0 && g_coherentAnalysis.confidence >= 0.70)
+         {
+            string cohDecision = g_coherentAnalysis.decision;
+            StringToLower(cohDecision);
+            bool isBuy = (StringFind(cohDecision, "buy") >= 0 || StringFind(cohDecision, "achat") >= 0);
+            bool isSell = (StringFind(cohDecision, "sell") >= 0 || StringFind(cohDecision, "vente") >= 0);
+            
+            if(isBuy || isSell)
+            {
+               if(DebugMode)
+                  Print("⚠️ IA en HOLD mais analyse cohérente forte (", DoubleToString(g_coherentAnalysis.confidence * 100, 1), "%) - Utilisation analyse cohérente");
+               // Utiliser l'analyse cohérente comme fallback
+               g_lastAIAction = isBuy ? "buy" : "sell";
+               g_lastAIConfidence = g_coherentAnalysis.confidence;
+               if(g_lastAIConfidence > 1.0) g_lastAIConfidence = g_lastAIConfidence / 100.0;
+            }
+            else
+            {
+               if(DebugMode)
+                  Print("⏸️ IA recommande HOLD/ATTENTE et analyse cohérente neutre - Pas de trade");
+               return;
+            }
+         }
+         else
+         {
+            if(DebugMode)
+               Print("⏸️ IA recommande HOLD/ATTENTE - Pas de trade");
+            return;
+         }
       }
       
-      // Si l'IA est en mode fallback, BLOQUER (ne pas utiliser le fallback technique)
+      // Si l'IA est en mode fallback, vérifier si on peut utiliser l'analyse cohérente
       if(g_aiFallbackMode)
       {
-         if(DebugMode)
-            Print("⚠️ IA en mode fallback - Pas de trade (attente récupération)");
-         return;
+         // ASSOUPLI: Si analyse cohérente forte (≥70%), permettre le trading même en mode fallback
+         if(StringLen(g_coherentAnalysis.decision) > 0 && g_coherentAnalysis.confidence >= 0.70)
+         {
+            string cohDecision = g_coherentAnalysis.decision;
+            StringToLower(cohDecision);
+            bool isBuy = (StringFind(cohDecision, "buy") >= 0 || StringFind(cohDecision, "achat") >= 0);
+            bool isSell = (StringFind(cohDecision, "sell") >= 0 || StringFind(cohDecision, "vente") >= 0);
+            
+            if(isBuy || isSell)
+            {
+               if(DebugMode)
+                  Print("⚠️ IA en mode fallback mais analyse cohérente forte (", DoubleToString(g_coherentAnalysis.confidence * 100, 1), "%) - Utilisation analyse cohérente");
+               // Utiliser l'analyse cohérente comme fallback
+               g_lastAIAction = isBuy ? "buy" : "sell";
+               g_lastAIConfidence = g_coherentAnalysis.confidence;
+               if(g_lastAIConfidence > 1.0) g_lastAIConfidence = g_lastAIConfidence / 100.0;
+            }
+            else
+            {
+               if(DebugMode)
+                  Print("⚠️ IA en mode fallback et analyse cohérente neutre - Pas de trade (attente récupération)");
+               return;
+            }
+         }
+         else
+         {
+            if(DebugMode)
+               Print("⚠️ IA en mode fallback - Pas de trade (attente récupération)");
+            return;
+         }
       }
       
       // NOUVEAU: AUTO-EXÉCUTION QUAND LETTRE REÇUE + PRÉDICTION >= 80%
@@ -9094,8 +9644,15 @@ void LookForTradingOpportunity()
          return; // Sortie immédiate - auto-exécution prioritaire
       }
       
-      // Si on arrive ici, l'IA a une recommandation valide avec confiance suffisante
-      if(g_lastAIConfidence >= requiredConfidence)
+      // Calculer le seuil de confiance ajusté (peut être réduit si métriques excellentes)
+      double adjustedRequiredConfidence = requiredConfidence;
+      if(allowTradingWithLowConfidence && g_lastAIConfidence < requiredConfidence)
+      {
+         adjustedRequiredConfidence = MathMax(0.50, requiredConfidence - 0.15); // Réduire de 15% minimum 50%
+      }
+      
+      // Si on arrive ici, l'IA a une recommandation valide avec confiance suffisante (ajustée)
+      if(g_lastAIConfidence >= adjustedRequiredConfidence)
       {
          // Déterminer le type de signal basé sur l'IA
          if(g_lastAIAction == "buy")
@@ -9150,14 +9707,35 @@ void LookForTradingOpportunity()
             
             if(!canProceed)
             {
-               if(DebugMode)
+               // ASSOUPLI: Si analyse cohérente très forte (≥75%), permettre le trading même sans alignement parfait
+               bool useCoherentAnalysisFallback = false;
+               if(StringLen(g_coherentAnalysis.decision) > 0 && g_coherentAnalysis.confidence >= 0.75)
                {
-                  if(isMLHighConfidence)
-                     Print("⏸️ Signal IA ", EnumToString(signalType), " rejeté - Même en mode ML haute confiance, alignement M1/M5 minimum requis");
-                  else
-                     Print("⏸️ Signal IA ", EnumToString(signalType), " rejeté - Alignement M1/M5/H1 non confirmé ou retournement EMA manquant");
+                  string cohDecision = g_coherentAnalysis.decision;
+                  StringToLower(cohDecision);
+                  bool cohIsBuy = (StringFind(cohDecision, "buy") >= 0 || StringFind(cohDecision, "achat") >= 0);
+                  bool cohIsSell = (StringFind(cohDecision, "sell") >= 0 || StringFind(cohDecision, "vente") >= 0);
+                  
+                  if((signalType == ORDER_TYPE_BUY && cohIsBuy) || (signalType == ORDER_TYPE_SELL && cohIsSell))
+                  {
+                     useCoherentAnalysisFallback = true;
+                     if(DebugMode)
+                        Print("⚠️ Alignement timeframes non parfait mais analyse cohérente très forte (", 
+                              DoubleToString(g_coherentAnalysis.confidence * 100, 1), "%) - Trading autorisé");
+                  }
                }
-               return;
+               
+               if(!useCoherentAnalysisFallback)
+               {
+                  if(DebugMode)
+                  {
+                     if(isMLHighConfidence)
+                        Print("⏸️ Signal IA ", EnumToString(signalType), " rejeté - Même en mode ML haute confiance, alignement M1/M5 minimum requis");
+                     else
+                        Print("⏸️ Signal IA ", EnumToString(signalType), " rejeté - Alignement M1/M5/H1 non confirmé ou retournement EMA manquant");
+                  }
+                  return;
+               }
             }
             
             // Vérifications supplémentaires (momentum/zone) - assouplies en mode ML haute confiance
@@ -14871,7 +15449,107 @@ void UpdateMLMetrics(string symbol, string timeframe = "M1")
 }
 
 //+------------------------------------------------------------------+
+//| Sélectionner la meilleure paire basée sur les métriques ML        |
+//+------------------------------------------------------------------+
+string SelectBestSymbolByML()
+{
+   string bestSymbol = "";
+   double bestScore = 0.0;
+   
+   // Liste des symboles à scanner (prioriser les symboles actifs dans Market Watch)
+   string symbolsToScan[];
+   int symbolsCount = 0;
+   
+   // Récupérer les symboles du Market Watch
+   for(int i = 0; i < SymbolsTotal(true); i++)
+   {
+      string symbol = SymbolName(i, true);
+      if(symbol != "" && SymbolInfoInteger(symbol, SYMBOL_SELECT))
+      {
+         ArrayResize(symbolsToScan, symbolsCount + 1);
+         symbolsToScan[symbolsCount] = symbol;
+         symbolsCount++;
+      }
+   }
+   
+   // Si aucun symbole dans Market Watch, utiliser le symbole actuel
+   if(symbolsCount == 0)
+   {
+      ArrayResize(symbolsToScan, 1);
+      symbolsToScan[0] = _Symbol;
+      symbolsCount = 1;
+   }
+   
+   if(DebugMode)
+      Print("🔍 Scan de ", symbolsCount, " symboles pour sélection ML...");
+   
+   // Scanner chaque symbole et calculer un score basé sur les métriques ML
+   for(int i = 0; i < symbolsCount; i++)
+   {
+      string symbol = symbolsToScan[i];
+      
+      // Récupérer les métriques ML pour ce symbole
+      MLMetricsData metrics;
+      metrics.isValid = false;
+      
+      // Appeler l'API pour obtenir les métriques ML
+      string url = StringFormat("%s?symbol=%s&timeframe=M1", AI_MLMetricsURL, symbol);
+      string headers = "Accept: application/json\r\n";
+      string result_headers = "";
+      uchar data[];
+      uchar result[];
+      ArrayResize(data, 0);
+      
+      int res = WebRequest("GET", url, headers, AI_Timeout_ms, data, result, result_headers);
+      
+      if(res >= 200 && res < 300)
+      {
+         string result_string = CharArrayToString(result);
+         if(ParseMLMetricsResponse(result_string, metrics))
+         {
+            metrics.symbol = symbol;
+            metrics.isValid = true;
+         }
+      }
+      
+      // Si pas de métriques disponibles, utiliser des valeurs par défaut
+      if(!metrics.isValid)
+      {
+         metrics.bestAccuracy = 70.0;  // Valeur par défaut conservatrice
+         metrics.bestF1Score = 70.0;
+         metrics.isValid = true;
+      }
+      
+      // Calculer un score composite basé sur les métriques ML
+      // Score = (Accuracy * 0.5) + (F1 Score * 0.5)
+      // Bonus si accuracy >= 90% (+10 points)
+      double score = (metrics.bestAccuracy * 0.5) + (metrics.bestF1Score * 0.5);
+      if(metrics.bestAccuracy >= 90.0)
+         score += 10.0;
+      
+      if(DebugMode)
+         Print("   ", symbol, ": Accuracy=", DoubleToString(metrics.bestAccuracy, 1), 
+               "% F1=", DoubleToString(metrics.bestF1Score, 1), 
+               "% Score=", DoubleToString(score, 2));
+      
+      // Mettre à jour le meilleur symbole
+      if(score > bestScore)
+      {
+         bestScore = score;
+         bestSymbol = symbol;
+      }
+   }
+   
+   if(bestSymbol != "" && DebugMode)
+      Print("✅ Meilleur symbole sélectionné: ", bestSymbol, " (Score ML: ", DoubleToString(bestScore, 2), ")");
+   
+   return bestSymbol;
+}
+
+//+------------------------------------------------------------------+
 //| Mettre à jour les métriques ML locales (fallback)                 |
+//| IMPORTANT: Ne pas utiliser de valeurs par défaut identiques      |
+//|            pour tous les symboles - Marquer comme invalides      |
 //+------------------------------------------------------------------+
 void UpdateLocalMLMetrics(string symbol, string timeframe = "M1")
 {
@@ -14879,52 +15557,70 @@ void UpdateLocalMLMetrics(string symbol, string timeframe = "M1")
    g_mlMetrics.symbol = symbol;
    g_mlMetrics.timeframe = timeframe;
    
-   // Métriques par défaut basées sur nos tests réels
-   g_mlMetrics.accuracy = 0.95;        // 95% de précision
-   g_mlMetrics.f1Score = 0.95;          // 95% F1 Score
-   g_mlMetrics.precision = 0.94;       // 94% de précision
-   g_mlMetrics.recall = 0.96;           // 96% de rappel
-   g_mlMetrics.bestModel = "RandomForest";
-   g_mlMetrics.featuresCount = 22;
-   g_mlMetrics.trainingSamples = 8000;
-   g_mlMetrics.testSamples = 2000;
-   g_mlMetrics.lastUpdate = TimeCurrent();
-   g_mlMetrics.isValid = true;
+   // NOUVEAU: Ne pas utiliser de valeurs par défaut identiques pour tous les symboles
+   // Marquer comme invalides et forcer la récupération depuis le serveur
+   g_mlMetrics.isValid = false;
+   g_mlMetrics.bestAccuracy = 0.0;
+   g_mlMetrics.bestF1Score = 0.0;
+   g_mlMetrics.accuracy = 0.0;
+   g_mlMetrics.f1Score = 0.0;
+   g_mlMetrics.precision = 0.0;
+   g_mlMetrics.recall = 0.0;
+   g_mlMetrics.bestModel = "";
+   g_mlMetrics.featuresCount = 0;
+   g_mlMetrics.trainingSamples = 0;
+   g_mlMetrics.testSamples = 0;
+   g_mlMetrics.lastUpdate = 0;
    
-   // IMPORTANT: Mettre à jour bestAccuracy et bestF1Score pour DisplayMLMetrics
-   g_mlMetrics.bestAccuracy = g_mlMetrics.accuracy * 100.0;  // Convertir en pourcentage
-   g_mlMetrics.bestF1Score = g_mlMetrics.f1Score * 100.0;     // Convertir en pourcentage
+   // Essayer de récupérer les métriques depuis le serveur une dernière fois
+   if(StringLen(AI_MLMetricsURL) > 0)
+   {
+      string url = StringFormat("%s?symbol=%s&timeframe=%s", AI_MLMetricsURL, symbol, timeframe);
+      string headers = "Accept: application/json\r\n";
+      string result_headers = "";
+      uchar data[];
+      uchar result[];
+      ArrayResize(data, 0);
+      
+      int res = WebRequest("GET", url, headers, AI_Timeout_ms, data, result, result_headers);
+      
+      if(res >= 200 && res < 300)
+      {
+         string result_string = CharArrayToString(result);
+         if(ParseMLMetricsResponse(result_string, g_mlMetrics))
+         {
+            g_mlMetrics.symbol = symbol;
+            g_mlMetrics.timeframe = timeframe;
+            g_mlMetrics.lastUpdate = TimeCurrent();
+            g_mlMetrics.isValid = true;
+            
+            if(ShowMLMetrics)
+            {
+               Print("✅ MÉTRIQUES ML RÉCUPÉRÉES depuis serveur pour ", symbol, " (", timeframe, ")");
+               Print("   └─ Best Accuracy: ", DoubleToString(g_mlMetrics.bestAccuracy, 2), "%");
+            }
+            
+            // Mettre à jour les variables globales
+            g_mlAccuracy = g_mlMetrics.accuracy;
+            g_mlPrecision = g_mlMetrics.precision;
+            g_mlRecall = g_mlMetrics.recall;
+            g_mlModelName = g_mlMetrics.bestModel;
+            g_lastMlUpdate = TimeCurrent();
+            return; // Succès - métriques récupérées
+         }
+      }
+   }
    
-   // Mettre à jour les métriques individuelles des modèles (pour l'affichage)
-   g_mlMetrics.randomForestAccuracy = 95.0;      // 95%
-   g_mlMetrics.gradientBoostingAccuracy = 93.0;  // 93%
-   g_mlMetrics.mlpAccuracy = 91.0;               // 91%
-   
-   // Confiance suggérée basée sur la précision
-   g_mlMetrics.suggestedMinConfidence = MathMax(65.0, g_mlMetrics.bestAccuracy - 10.0);
-   
-   // Mettre à jour les variables globales pour l'affichage (ancien système)
-   g_mlAccuracy = g_mlMetrics.accuracy;
-   g_mlPrecision = g_mlMetrics.precision;
-   g_mlRecall = g_mlMetrics.recall;
-   g_mlModelName = g_mlMetrics.bestModel;
-   g_lastMlUpdate = TimeCurrent();  // IMPORTANT: Mettre à jour pour DrawMLMetricsPanel
-   
-   // Toujours afficher les métriques locales (pas seulement en DebugMode)
+   // Si échec, marquer comme invalides et afficher un avertissement
    if(ShowMLMetrics)
    {
-      Print("═══════════════════════════════════════════════════════");
-      Print("📊 MÉTRIQUES ML LOCALES - ", symbol, " (", timeframe, ")");
-      Print("═══════════════════════════════════════════════════════");
-      Print("✅ Modèle: ", g_mlMetrics.bestModel);
-      Print("📈 Précision: ", DoubleToString(g_mlMetrics.accuracy * 100, 1), "%");
-      Print("🎯 F1 Score: ", DoubleToString(g_mlMetrics.f1Score * 100, 1), "%");
-      Print("📊 Best Accuracy: ", DoubleToString(g_mlMetrics.bestAccuracy, 2), "%");
-      Print("🔧 Features: ", IntegerToString(g_mlMetrics.featuresCount));
-      Print("📊 Échantillons: ", IntegerToString(g_mlMetrics.trainingSamples), " train / ", IntegerToString(g_mlMetrics.testSamples), " test");
-      Print("⏰ Mise à jour: ", TimeToString(g_mlMetrics.lastUpdate, TIME_MINUTES));
-      Print("═══════════════════════════════════════════════════════");
+      Print("⚠️ MÉTRIQUES ML NON DISPONIBLES pour ", symbol, " (", timeframe, ")");
+      Print("   └─ Les métriques doivent être récupérées depuis le serveur après entraînement");
+      Print("   └─ Vérifiez que l'entraînement ML a été effectué pour ce symbole");
    }
+   
+   g_mlMetrics.isValid = false;
+   g_lastMlUpdate = TimeCurrent();
 }
 
 //+------------------------------------------------------------------+
@@ -15192,6 +15888,22 @@ bool ParseMLMetricsResponse(const string &jsonStr, MLMetricsData &metrics)
    metrics.trainingSamples = 0;
    metrics.testSamples = 0;
    metrics.suggestedMinConfidence = 0.0;
+   
+   // NOUVEAU: Extraire best_accuracy directement (format amélioré)
+   int bestAccuracyPos = StringFind(jsonStr, "\"best_accuracy\"");
+   if(bestAccuracyPos >= 0)
+   {
+      int colonPos = StringFind(jsonStr, ":", bestAccuracyPos);
+      int commaPos = StringFind(jsonStr, ",", colonPos);
+      if(commaPos < 0) commaPos = StringFind(jsonStr, "}", colonPos);
+      if(colonPos >= 0 && commaPos > colonPos)
+      {
+         string accStr = StringSubstr(jsonStr, colonPos + 1, commaPos - colonPos - 1);
+         StringTrimLeft(accStr);
+         StringTrimRight(accStr);
+         metrics.bestAccuracy = StringToDouble(accStr);
+      }
+   }
    
    // Extraire best_model
    int bestModelPos = StringFind(jsonStr, "\"best_model\"");
@@ -16419,7 +17131,7 @@ void CheckAndDuplicatePositions()
     static datetime lastDuplicationTime = 0;
     
     // Si nous avons déjà atteint le nombre maximum de duplications, on ne fait rien
-    if(CountPositionsForSymbolMagic() >= 4) // Maximum 4 positions
+    if(CountPositionsForSymbolMagic() >= 5) // Maximum 5 positions
         return;
     
     // Vérifier chaque position ouverte
@@ -16479,6 +17191,303 @@ void CheckAndDuplicatePositions()
                 if(SendNotifications)
                     SendNotification(StringFormat("Position dupliquée - Profit: %.2f pips", profitInPips));
             }
+        }
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Vérifier si un ordre existe déjà à ce niveau                    |
+//+------------------------------------------------------------------+
+bool OrderExists(ENUM_ORDER_TYPE type, double price, double tolerance=0.0001)
+{
+   for(int i=0; i<OrdersTotal(); i++)
+   {
+      ulong ticket = OrderGetTicket(i);
+      if(ticket > 0)
+      {
+         if(OrderGetInteger(ORDER_TYPE) == type && 
+            MathAbs(OrderGetDouble(ORDER_PRICE_OPEN) - price) < tolerance)
+            return true;
+      }
+   }
+   return false;
+}
+
+//+------------------------------------------------------------------+
+//| Détecter les rectangles US Breakout                             |
+//+------------------------------------------------------------------+
+void DetectUSBreakoutRectangles()
+{
+    int total = ObjectsTotal(0, 0, -1);
+    
+    if(DebugMode)
+        Print("🔍 Détection US Breakout: ", total, " objets trouvés sur le graphique");
+    
+    for(int i = total-1; i >= 0; i--)
+    {
+        string name = ObjectName(0, i, 0, -1);
+        
+        if(DebugMode && StringFind(name, "US Breakout") >= 0)
+            Print("📦 Objet US Breakout trouvé: ", name);
+        
+        if(StringFind(name, "US Breakout") >= 0 && ObjectGetInteger(0, name, OBJPROP_TYPE) == OBJ_RECTANGLE)
+        {
+            // Récupérer les coordonnées du rectangle
+            datetime time1 = (datetime)ObjectGetInteger(0, name, OBJPROP_TIME, 0);
+            datetime time2 = (datetime)ObjectGetInteger(0, name, OBJPROP_TIME, 1);
+            double price1 = ObjectGetDouble(0, name, OBJPROP_PRICE, 0);
+            double price2 = ObjectGetDouble(0, name, OBJPROP_PRICE, 1);
+            
+            // Déterminer si c'est un support ou une résistance
+            bool isSupport = (price1 < price2);
+            
+            // Afficher les infos pour le débogage
+            PrintFormat("✅ US Breakout détecté: %s - Niveau: %s à %f", 
+                      name, 
+                      isSupport ? "Support" : "Résistance",
+                      isSupport ? MathMin(price1, price2) : MathMax(price1, price2));
+            
+            // Stocker les niveaux pour utilisation ultérieure
+            if(isSupport)
+            {
+                AddSupportLevel(MathMin(price1, price2), "USBreakout_" + name);
+            }
+            else
+            {
+                AddResistanceLevel(MathMax(price1, price2), "USBreakout_" + name);
+            }
+        }
+    }
+    
+    if(DebugMode)
+    {
+        Print("📊 Niveaux de supports: ", ArraySize(g_supports), " | Résistances: ", ArraySize(g_resistances));
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Ajouter un niveau de support                                    |
+//+------------------------------------------------------------------+
+void AddSupportLevel(double price, string name)
+{
+    // Vérifier si le niveau existe déjà
+    for(int i=0; i<ArraySize(g_supports); i++)
+    {
+        if(MathAbs(g_supports[i].price - price) < SymbolInfoDouble(_Symbol, SYMBOL_POINT) * 10) // Tolérance de 10 points
+            return; // Le niveau existe déjà
+    }
+    
+    // Ajouter le nouveau niveau
+    int size = ArraySize(g_supports);
+    ArrayResize(g_supports, size + 1);
+    g_supports[size].price = price;
+    g_supports[size].time = TimeCurrent();
+    g_supports[size].name = name;
+    g_supports[size].type = 1; // Support
+    
+    // Trier les supports par prix croissant
+    for(int i=0; i<ArraySize(g_supports)-1; i++)
+    {
+        for(int j=i+1; j<ArraySize(g_supports); j++)
+        {
+            if(g_supports[i].price > g_supports[j].price)
+            {
+                SLevel temp = g_supports[i];
+                g_supports[i] = g_supports[j];
+                g_supports[j] = temp;
+            }
+        }
+    }
+    
+    if(DebugMode)
+        Print("➕ Support ajouté à ", price, " (", name, ")");
+}
+
+//+------------------------------------------------------------------+
+//| Ajouter un niveau de résistance                                 |
+//+------------------------------------------------------------------+
+void AddResistanceLevel(double price, string name)
+{
+    // Vérifier si le niveau existe déjà
+    for(int i=0; i<ArraySize(g_resistances); i++)
+    {
+        if(MathAbs(g_resistances[i].price - price) < SymbolInfoDouble(_Symbol, SYMBOL_POINT) * 10) // Tolérance de 10 points
+            return; // Le niveau existe déjà
+    }
+    
+    // Ajouter le nouveau niveau
+    int size = ArraySize(g_resistances);
+    ArrayResize(g_resistances, size + 1);
+    g_resistances[size].price = price;
+    g_resistances[size].time = TimeCurrent();
+    g_resistances[size].name = name;
+    g_resistances[size].type = 2; // Résistance
+    
+    // Trier les résistances par prix croissant
+    for(int i=0; i<ArraySize(g_resistances)-1; i++)
+    {
+        for(int j=i+1; j<ArraySize(g_resistances); j++)
+        {
+            if(g_resistances[i].price > g_resistances[j].price)
+            {
+                SLevel temp = g_resistances[i];
+                g_resistances[i] = g_resistances[j];
+                g_resistances[j] = temp;
+            }
+        }
+    }
+    
+    if(DebugMode)
+        Print("➕ Résistance ajoutée à ", price, " (", name, ")");
+}
+
+//+------------------------------------------------------------------+
+//| Nettoyer les anciens niveaux                                    |
+//+------------------------------------------------------------------+
+void CleanupOldLevels()
+{
+    datetime now = TimeCurrent();
+    
+    // Nettoyer les supports
+    for(int i=ArraySize(g_supports)-1; i>=0; i--)
+    {
+        if(now - g_supports[i].time > 86400) // 24 heures
+        {
+            if(DebugMode)
+                Print("🗑️ Support supprimé: ", g_supports[i].price, " (", g_supports[i].name, ")");
+                
+            // Décaler les éléments pour supprimer l'élément i
+            for(int j=i; j<ArraySize(g_supports)-1; j++)
+            {
+                g_supports[j] = g_supports[j+1];
+            }
+            ArrayResize(g_supports, ArraySize(g_supports)-1);
+        }
+    }
+    
+    // Nettoyer les résistances
+    for(int i=ArraySize(g_resistances)-1; i>=0; i--)
+    {
+        if(now - g_resistances[i].time > 86400) // 24 heures
+        {
+            if(DebugMode)
+                Print("🗑️ Résistance supprimée: ", g_resistances[i].price, " (", g_resistances[i].name, ")");
+                
+            // Décaler les éléments pour supprimer l'élément i
+            for(int j=i; j<ArraySize(g_resistances)-1; j++)
+            {
+                g_resistances[j] = g_resistances[j+1];
+            }
+            ArrayResize(g_resistances, ArraySize(g_resistances)-1);
+        }
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Placer des ordres limites sur les niveaux détectés              |
+//+------------------------------------------------------------------+
+void PlaceLimitOrdersOnLevels()
+{
+    if(TimeCurrent() - g_lastLevelCheck < 60) // Vérifier toutes les minutes
+        return;
+        
+    g_lastLevelCheck = TimeCurrent();
+    
+    // Détecter les nouveaux niveaux
+    DetectUSBreakoutRectangles();
+    
+    // Nettoyer les anciens niveaux
+    CleanupOldLevels();
+    
+    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+    double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+    
+    // Placer des ordres d'achat sur les supports
+    for(int i=0; i<ArraySize(g_supports); i++)
+    {
+        double level = g_supports[i].price;
+        
+        // Vérifier si le prix est dans une plage raisonnable
+        if(level < bid * 0.99 || level > ask * 1.01)
+            continue;
+            
+        // Vérifier si un ordre existe déjà à ce niveau
+        if(OrderExists(ORDER_TYPE_BUY_LIMIT, level))
+            continue;
+            
+        // Calculer le stop loss et take profit
+        double sl = NormalizeDouble(level - 10 * point, _Digits);
+        double tp = NormalizeDouble(level + 20 * point, _Digits);
+        
+        // Préparer la requête d'ordre
+        MqlTradeRequest request = {};
+        MqlTradeResult result = {};
+        
+        request.action = TRADE_ACTION_PENDING;
+        request.symbol = _Symbol;
+        request.volume = 0.1;
+        request.type = ORDER_TYPE_BUY_LIMIT;
+        request.price = level;
+        request.sl = sl;
+        request.tp = tp;
+        request.deviation = 3;
+        request.comment = "US Breakout Buy";
+        
+        // Placer l'ordre d'achat limite
+        if(OrderSend(request, result))
+        {
+            if(DebugMode)
+                Print("✅ Ordre d'achat limite placé à ", level, " (SL: ", sl, ", TP: ", tp, ")");
+        }
+        else
+        {
+            if(DebugMode)
+                Print("❌ Erreur lors du placement de l'ordre d'achat: ", result.retcode);
+        }
+    }
+    
+    // Placer des ordres de vente sur les résistances
+    for(int i=0; i<ArraySize(g_resistances); i++)
+    {
+        double level = g_resistances[i].price;
+        
+        // Vérifier si le prix est dans une plage raisonnable
+        if(level < bid * 0.99 || level > ask * 1.01)
+            continue;
+            
+        // Vérifier si un ordre existe déjà à ce niveau
+        if(OrderExists(ORDER_TYPE_SELL_LIMIT, level))
+            continue;
+            
+        // Calculer le stop loss et take profit
+        double sl = NormalizeDouble(level + 10 * point, _Digits);
+        double tp = NormalizeDouble(level - 20 * point, _Digits);
+        
+        // Préparer la requête d'ordre
+        MqlTradeRequest request = {};
+        MqlTradeResult result = {};
+        
+        request.action = TRADE_ACTION_PENDING;
+        request.symbol = _Symbol;
+        request.volume = 0.1;
+        request.type = ORDER_TYPE_SELL_LIMIT;
+        request.price = level;
+        request.sl = sl;
+        request.tp = tp;
+        request.deviation = 3;
+        request.comment = "US Breakout Sell";
+        
+        // Placer l'ordre de vente limite
+        if(OrderSend(request, result))
+        {
+            if(DebugMode)
+                Print("✅ Ordre de vente limite placé à ", level, " (SL: ", sl, ", TP: ", tp, ")");
+        }
+        else
+        {
+            if(DebugMode)
+                Print("❌ Erreur lors du placement de l'ordre de vente: ", result.retcode);
         }
     }
 }
