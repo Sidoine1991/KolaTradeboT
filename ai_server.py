@@ -4431,6 +4431,27 @@ def train_ml_models(symbol: str, timeframe: str, historical_data: Optional[pd.Da
         except Exception as e:
             logger.warning(f"Impossible de sauvegarder les modèles: {e}")
         
+        # NOUVEAU: Sauvegarder les métriques dans un fichier JSON pour récupération ultérieure
+        try:
+            metrics_file = MODELS_DIR / f"{model_key}_metrics.json"
+            metrics_to_save = {
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "training_date": datetime.now().isoformat(),
+                "metrics": metrics,
+                "best_model": max(metrics.keys(), key=lambda k: metrics[k]['f1_score']),
+                "features_used": available_features,
+                "training_samples": len(X_train),
+                "test_samples": len(X_test)
+            }
+            
+            with open(metrics_file, 'w', encoding='utf-8') as f:
+                json.dump(metrics_to_save, f, indent=2, ensure_ascii=False)
+            
+            logger.info(f"✅ Métriques sauvegardées dans {metrics_file}")
+        except Exception as e:
+            logger.warning(f"Impossible de sauvegarder les métriques: {e}")
+        
         # Choisir le meilleur modèle
         best_model_name = max(metrics.keys(), key=lambda k: metrics[k]['f1_score'])
         
@@ -4843,53 +4864,164 @@ async def get_ml_metrics(symbol: str = "EURUSD", timeframe: str = "M1"):
         if not models:
             raise HTTPException(status_code=404, detail=f"Aucun modèle trouvé pour {symbol} {timeframe}")
         
-        # Métriques par défaut basées sur nos tests réels
-        default_metrics = {
-            "accuracy": 95.0,
-            "f1_score": 95.0,
-            "feature_importance": {}
-        }
+        # NOUVEAU: Récupérer les vraies métriques depuis les fichiers sauvegardés ou recalculer
+        metrics_result = {}
+        best_model_name = "random_forest"
+        best_accuracy = 0.0
         
-        # Utiliser le modèle Random Forest comme référence
-        rf_model = models.get('random_forest')
-        if rf_model and hasattr(rf_model, 'feature_importances_'):
-            # Importances réelles si disponibles
+        # Essayer de charger les métriques sauvegardées depuis l'entraînement
+        metrics_file = MODELS_DIR / f"{model_key}_metrics.json"
+        if metrics_file.exists():
             try:
-                feature_names = [
-                    'price_vs_sma20', 'price_vs_sma50', 'rsi', 'rsi_normalized',
-                    'macd', 'macd_signal', 'macd_histogram', 'atr', 'atr_normalized',
-                    'atr_ma_ratio', 'bb_width', 'bb_position', 'volume_ratio',
-                    'volume_trend', 'high_low_range', 'open_close_range', 'body_size',
-                    'momentum_5', 'momentum_10', 'momentum_20', 'distance_to_high', 'distance_to_low'
-                ]
-                
-                if len(rf_model.feature_importances_) == len(feature_names):
-                    default_metrics["feature_importance"] = dict(zip(feature_names, rf_model.feature_importances_))
-                else:
-                    # Valeurs par défaut si la taille ne correspond pas
-                    default_metrics["feature_importance"] = {
-                        "price_vs_sma20": 0.15, "rsi": 0.12, "atr_normalized": 0.10,
-                        "volume_ratio": 0.08, "bb_position": 0.07, "momentum_5": 0.06,
-                        "distance_to_high": 0.05, "distance_to_low": 0.05
+                with open(metrics_file, 'r', encoding='utf-8') as f:
+                    saved_metrics = json.load(f)
+                    if "metrics" in saved_metrics:
+                        metrics_result = saved_metrics["metrics"]
+                        best_model_name = saved_metrics.get("best_model", "random_forest")
+                        # Trouver la meilleure accuracy
+                        for model_name, model_metrics in metrics_result.items():
+                            acc = model_metrics.get("accuracy", 0.0)
+                            if isinstance(acc, float) and acc <= 1.0:
+                                acc = acc * 100.0  # Convertir en pourcentage
+                            if acc > best_accuracy:
+                                best_accuracy = acc
+                        logger.info(f"✅ Métriques chargées depuis fichier pour {symbol} {timeframe}: Best={best_accuracy:.2f}%")
+            except Exception as e:
+                logger.warning(f"⚠️ Erreur chargement métriques depuis fichier: {e}")
+        
+        # Si pas de métriques sauvegardées, recalculer depuis les modèles
+        if not metrics_result:
+            logger.info(f"📊 Recalcul des métriques depuis les modèles pour {symbol} {timeframe}...")
+            
+            # Récupérer les données de test pour recalculer les métriques
+            try:
+                if mt5_initialized:
+                    tf_map = {
+                        'M1': mt5.TIMEFRAME_M1, 'M5': mt5.TIMEFRAME_M5,
+                        'M15': mt5.TIMEFRAME_M15, 'H1': mt5.TIMEFRAME_H1,
+                        'H4': mt5.TIMEFRAME_H4, 'D1': mt5.TIMEFRAME_D1
                     }
-            except Exception:
-                # Valeurs par défaut en cas d'erreur
-                default_metrics["feature_importance"] = {
-                    "price_vs_sma20": 0.15, "rsi": 0.12, "atr_normalized": 0.10,
-                    "volume_ratio": 0.08, "bb_position": 0.07, "momentum_5": 0.06,
-                    "distance_to_high": 0.05, "distance_to_low": 0.05
-                }
+                    mt5_tf = tf_map.get(timeframe, mt5.TIMEFRAME_M1)
+                    rates = mt5.copy_rates_from_pos(symbol, mt5_tf, 0, 200)
+                    
+                    if rates is not None and len(rates) >= 100:
+                        df = pd.DataFrame(rates)
+                        features_df = extract_advanced_features(df)
+                        
+                        if features_df is not None and not features_df.empty:
+                            labels = calculate_trade_outcome(features_df)
+                            feature_columns = [
+                                'price_vs_sma20', 'price_vs_sma50', 'rsi', 'rsi_normalized',
+                                'macd', 'macd_signal', 'macd_histogram', 'atr', 'atr_normalized',
+                                'atr_ma_ratio', 'bb_width', 'bb_position', 'volume_ratio',
+                                'volume_trend', 'high_low_range', 'open_close_range', 'body_size',
+                                'momentum_5', 'momentum_10', 'momentum_20', 'distance_to_high', 'distance_to_low'
+                            ]
+                            available_features = [f for f in feature_columns if f in features_df.columns]
+                            
+                            if available_features:
+                                X = features_df[available_features].fillna(0).replace([np.inf, -np.inf], 0)
+                                y = labels.fillna(0).astype(int)
+                                
+                                # Split pour test
+                                from sklearn.model_selection import train_test_split
+                                X_train, X_test, y_train, y_test = train_test_split(
+                                    X, y, test_size=0.2, random_state=42
+                                )
+                                
+                                scaler = ml_scalers_cache.get(model_key)
+                                if scaler:
+                                    X_test_scaled = scaler.transform(X_test)
+                                    
+                                    # Recalculer les métriques pour chaque modèle
+                                    for model_name, model in models.items():
+                                        try:
+                                            pred = model.predict(X_test_scaled)
+                                            from sklearn.metrics import accuracy_score, f1_score
+                                            acc = accuracy_score(y_test, pred)
+                                            f1 = f1_score(y_test, pred, average='weighted', zero_division=0)
+                                            
+                                            metrics_result[model_name] = {
+                                                "accuracy": float(acc * 100.0),  # En pourcentage
+                                                "f1_score": float(f1 * 100.0),  # En pourcentage
+                                                "feature_importance": {}
+                                            }
+                                            
+                                            if hasattr(model, 'feature_importances_'):
+                                                metrics_result[model_name]["feature_importance"] = dict(
+                                                    zip(available_features, model.feature_importances_)
+                                                )
+                                            
+                                            if acc > best_accuracy / 100.0:
+                                                best_accuracy = acc * 100.0
+                                                best_model_name = model_name
+                                                
+                                        except Exception as e:
+                                            logger.warning(f"Erreur calcul métriques pour {model_name}: {e}")
+                                            
+                            except Exception as e:
+                                logger.warning(f"Erreur recalcul métriques: {e}")
+            except Exception as e:
+                logger.warning(f"Erreur récupération données pour recalcul: {e}")
+        
+        # Si toujours pas de métriques, utiliser des valeurs par défaut mais marquer comme non fiables
+        if not metrics_result:
+            logger.warning(f"⚠️ Aucune métrique disponible pour {symbol} {timeframe} - Utilisation valeurs par défaut (NON FIABLES)")
+            default_metrics = {
+                "accuracy": 0.0,  # 0% pour indiquer que ce n'est pas fiable
+                "f1_score": 0.0,
+                "feature_importance": {}
+            }
+            metrics_result = {
+                "random_forest": default_metrics,
+                "gradient_boosting": default_metrics,
+                "mlp": default_metrics
+            }
+            best_model_name = "random_forest"
+            best_accuracy = 0.0
+        
+        # Formater les métriques pour correspondre au format attendu par MQL5
+        formatted_metrics = {}
+        for model_name, model_metrics in metrics_result.items():
+            acc = model_metrics.get("accuracy", 0.0)
+            f1 = model_metrics.get("f1_score", 0.0)
+            
+            # S'assurer que les valeurs sont en pourcentage (0-100)
+            if isinstance(acc, float) and acc <= 1.0:
+                acc = acc * 100.0
+            if isinstance(f1, float) and f1 <= 1.0:
+                f1 = f1 * 100.0
+                
+            formatted_metrics[model_name] = {
+                "accuracy": round(acc, 2),
+                "f1_score": round(f1, 2),
+                "feature_importance": model_metrics.get("feature_importance", {})
+            }
+        
+        # Calculer best_accuracy et best_f1_score
+        best_accuracy = 0.0
+        best_f1_score = 0.0
+        for model_name, model_metrics in formatted_metrics.items():
+            acc = model_metrics.get("accuracy", 0.0)
+            f1 = model_metrics.get("f1_score", 0.0)
+            if acc > best_accuracy:
+                best_accuracy = acc
+            if f1 > best_f1_score:
+                best_f1_score = f1
         
         return {
             "symbol": symbol,
             "timeframe": timeframe,
             "status": "success",
-            "metrics": {
-                "random_forest": default_metrics,
-                "gradient_boosting": default_metrics,
-                "mlp": default_metrics
-            },
-            "best_model": "random_forest",
+            "metrics": formatted_metrics,
+            "best_model": best_model_name,
+            "best_accuracy": round(best_accuracy, 2),
+            "best_f1_score": round(best_f1_score, 2),
+            "training_samples": len(X_train) if 'X_train' in locals() else 0,
+            "test_samples": len(X_test) if 'X_test' in locals() else 0,
+            "recommendations": {
+                "min_confidence": round(max(65.0, best_accuracy - 10.0), 2)
+            }
             "features_count": 22,
             "training_samples": 8000,
             "test_samples": 2000,
@@ -5616,6 +5748,66 @@ async def decision(request: DecisionRequest):
             
         if request.rsi is not None and (request.rsi < 0 or request.rsi > 100):
             raise HTTPException(status_code=422, detail="La valeur RSI doit être entre 0 et 100")
+        
+        # ========== DÉTECTION MODE INITIALISATION DEPUIS GRAPHIQUE ==========
+        # Détecter si c'est une initialisation (première requête pour ce symbole)
+        initialization_mode = False
+        cache_key_init = f"{request.symbol}_init"
+        current_time = time.time()
+        
+        # Vérifier si c'est la première requête pour ce symbole (dans les 30 dernières secondes)
+        if cache_key_init not in last_updated or (current_time - last_updated.get(cache_key_init, 0)) > 30:
+            initialization_mode = True
+            last_updated[cache_key_init] = current_time
+            logger.info(f"🔄 MODE INITIALISATION détecté pour {request.symbol} - Analyse approfondie activée")
+        
+        # En mode initialisation, utiliser une logique plus conservatrice et approfondie
+        if initialization_mode:
+            logger.info(f"📊 Initialisation: Collecte de données historiques étendues pour {request.symbol}...")
+            
+            # Récupérer plus de données historiques pour une meilleure analyse
+            try:
+                if MT5_AVAILABLE and mt5_initialized:
+                    # Récupérer des données multi-timeframes pour analyse complète
+                    df_m1_init = get_historical_data_mt5(request.symbol, "M1", 500)  # Plus de données
+                    df_m5_init = get_historical_data_mt5(request.symbol, "M5", 200)
+                    df_h1_init = get_historical_data_mt5(request.symbol, "H1", 100)
+                    
+                    if df_m1_init is not None and len(df_m1_init) > 100:
+                        # Analyser la tendance générale sur les dernières heures
+                        price_trend = (df_m1_init['close'].iloc[-1] - df_m1_init['close'].iloc[0]) / df_m1_init['close'].iloc[0]
+                        volatility_init = df_m1_init['close'].pct_change().std() * 100
+                        
+                        logger.info(f"📈 Analyse initialisation {request.symbol}:")
+                        logger.info(f"   ├─ Tendance: {price_trend:+.2%} sur {len(df_m1_init)} bougies M1")
+                        logger.info(f"   ├─ Volatilité: {volatility_init:.3f}%")
+                        logger.info(f"   └─ Données: M1={len(df_m1_init) if df_m1_init is not None else 0}, "
+                                  f"M5={len(df_m5_init) if df_m5_init is not None else 0}, "
+                                  f"H1={len(df_h1_init) if df_h1_init is not None else 0}")
+                        
+                        # En mode initialisation, être plus conservateur
+                        # Ne trader que si la tendance est claire et la volatilité acceptable
+                        if abs(price_trend) < 0.01 and volatility_init < 0.5:
+                            logger.info(f"⚠️ Initialisation: Marché trop calme - Recommandation HOLD conservatrice")
+                            return DecisionResponse(
+                                action="hold",
+                                confidence=0.30,
+                                reason=f"Initialisation: Marché calme (tendance: {price_trend:+.2%}, volatilité: {volatility_init:.3f}%) - Attente signal plus clair",
+                                spike_prediction=False,
+                                spike_zone_price=None,
+                                stop_loss=None,
+                                take_profit=None,
+                                spike_direction=None,
+                                early_spike_warning=False,
+                                early_spike_zone_price=None,
+                                early_spike_direction=None,
+                                buy_zone_low=None,
+                                buy_zone_high=None,
+                                sell_zone_low=None,
+                                sell_zone_high=None
+                            )
+            except Exception as e:
+                logger.warning(f"⚠️ Erreur analyse initialisation: {e}")
         
         # Règle stricte: Interdire les achats sur Crash et les ventes sur Boom
         symbol_lower = request.symbol.lower()
@@ -6888,6 +7080,80 @@ Format: Analyse claire et professionnelle en français.
             sell_zone_low = mid_price - buffer
             sell_zone_high = mid_price + buffer
         
+        # ========== VALIDATION FINALE INTELLIGENCE DES ORDRES ==========
+        # S'assurer que les ordres sont vraiment intelligents avant de les envoyer
+        if action != "hold":
+            # 1. Validation multi-critères pour BUY
+            if action == "buy":
+                buy_validation_score = 0.0
+                buy_validation_reasons = []
+                
+                # Critères techniques
+                if h1_bullish: buy_validation_score += 0.2; buy_validation_reasons.append("H1↑")
+                if m5_bullish: buy_validation_score += 0.15; buy_validation_reasons.append("M5↑")
+                if m1_bullish: buy_validation_score += 0.1; buy_validation_reasons.append("M1↑")
+                if h4_bullish or d1_bullish: buy_validation_score += 0.25; buy_validation_reasons.append("H4/D1↑")
+                if rsi_bullish: buy_validation_score += 0.1; buy_validation_reasons.append("RSI↑")
+                if vwap_signal_buy: buy_validation_score += 0.1; buy_validation_reasons.append("VWAP↑")
+                if supertrend_bullish: buy_validation_score += 0.1; buy_validation_reasons.append("ST↑")
+                
+                # Validation ML si disponible
+                if ml_decision and ml_decision.get("action") == "buy":
+                    ml_conf = float(ml_decision.get("confidence", 0.0))
+                    buy_validation_score += ml_conf * 0.3
+                    buy_validation_reasons.append(f"ML:{ml_conf:.0%}")
+                
+                # Seuil minimum pour valider un BUY intelligent
+                MIN_BUY_INTELLIGENCE = 0.50  # Au moins 50% de validation
+                if buy_validation_score < MIN_BUY_INTELLIGENCE:
+                    logger.warning(f"⚠️ BUY rejeté: Score validation insuffisant ({buy_validation_score:.2f} < {MIN_BUY_INTELLIGENCE})")
+                    logger.warning(f"   Raisons: {', '.join(buy_validation_reasons) if buy_validation_reasons else 'Aucune'}")
+                    action = "hold"
+                    confidence = max(confidence * 0.5, 0.20)  # Réduire la confiance
+                    reason += f" | BUY rejeté (validation: {buy_validation_score:.0%} < {MIN_BUY_INTELLIGENCE:.0%})"
+                else:
+                    logger.info(f"✅ BUY validé: Score={buy_validation_score:.2f} ({', '.join(buy_validation_reasons)})")
+            
+            # 2. Validation multi-critères pour SELL
+            elif action == "sell":
+                sell_validation_score = 0.0
+                sell_validation_reasons = []
+                
+                # Critères techniques
+                if h1_bearish: sell_validation_score += 0.2; sell_validation_reasons.append("H1↓")
+                if m5_bearish: sell_validation_score += 0.15; sell_validation_reasons.append("M5↓")
+                if m1_bearish: sell_validation_score += 0.1; sell_validation_reasons.append("M1↓")
+                if h4_bearish or d1_bearish: sell_validation_score += 0.25; sell_validation_reasons.append("H4/D1↓")
+                if rsi_bearish: sell_validation_score += 0.1; sell_validation_reasons.append("RSI↓")
+                if vwap_signal_sell: sell_validation_score += 0.1; sell_validation_reasons.append("VWAP↓")
+                if supertrend_bearish: sell_validation_score += 0.1; sell_validation_reasons.append("ST↓")
+                
+                # Validation ML si disponible
+                if ml_decision and ml_decision.get("action") == "sell":
+                    ml_conf = float(ml_decision.get("confidence", 0.0))
+                    sell_validation_score += ml_conf * 0.3
+                    sell_validation_reasons.append(f"ML:{ml_conf:.0%}")
+                
+                # Seuil minimum pour valider un SELL intelligent
+                MIN_SELL_INTELLIGENCE = 0.50  # Au moins 50% de validation
+                if sell_validation_score < MIN_SELL_INTELLIGENCE:
+                    logger.warning(f"⚠️ SELL rejeté: Score validation insuffisant ({sell_validation_score:.2f} < {MIN_SELL_INTELLIGENCE})")
+                    logger.warning(f"   Raisons: {', '.join(sell_validation_reasons) if sell_validation_reasons else 'Aucune'}")
+                    action = "hold"
+                    confidence = max(confidence * 0.5, 0.20)  # Réduire la confiance
+                    reason += f" | SELL rejeté (validation: {sell_validation_score:.0%} < {MIN_SELL_INTELLIGENCE:.0%})"
+                else:
+                    logger.info(f"✅ SELL validé: Score={sell_validation_score:.2f} ({', '.join(sell_validation_reasons)})")
+            
+            # 3. Validation spéciale en mode initialisation
+            if initialization_mode and action != "hold":
+                # En mode initialisation, être encore plus strict
+                if confidence < 0.65:  # Seuil plus élevé à l'initialisation
+                    logger.info(f"🔄 Initialisation: {action.upper()} rejeté (confiance {confidence:.1%} < 65% requis)")
+                    action = "hold"
+                    confidence = 0.30
+                    reason += " | Initialisation: Confiance insuffisante pour trader immédiatement"
+        
         # Construire la réponse
         response_data = {
             "action": action,
@@ -6908,7 +7174,8 @@ Format: Analyse claire et professionnelle en français.
         }
         
         # Log de débogage pour vérifier les valeurs
-        logger.info(f"✅ Décision IA pour {request.symbol}: action={action}, confidence={confidence:.3f} ({confidence*100:.1f}%), reason={reason[:100]}")
+        init_marker = "🔄 [INIT]" if initialization_mode else ""
+        logger.info(f"✅ {init_marker} Décision IA pour {request.symbol}: action={action}, confidence={confidence:.3f} ({confidence*100:.1f}%), reason={reason[:100]}")
         
         # Mise en cache
         prediction_cache[cache_key] = response_data
