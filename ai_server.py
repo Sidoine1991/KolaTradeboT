@@ -62,6 +62,167 @@ except ImportError:
 # Machine Learning imports (Phase 2) - seront initialisés après logger
 ML_AVAILABLE = False
 
+# Import yfinance pour les données de marché (compatible cloud)
+try:
+    import yfinance as yf
+    YFINANCE_AVAILABLE = True
+    logger.info("✅ yfinance disponible pour les données de marché")
+except ImportError:
+    YFINANCE_AVAILABLE = False
+    logger.warning("⚠️ yfinance non disponible")
+
+# Cache pour les données historiques (fallback cloud)
+_history_cache: Dict[str, pd.DataFrame] = {}
+
+# =========================
+# Fonctions de récupération de données cloud
+# =========================
+def get_market_data_cloud(symbol: str, period: str = "5d", interval: str = "1m") -> pd.DataFrame:
+    """Récupère les données via yfinance (compatible cloud)"""
+    try:
+        if not YFINANCE_AVAILABLE:
+            return generate_simulated_data(symbol, 100)
+        
+        # Mapping des symboles pour yfinance
+        symbol_map = {
+            "EURUSD": "EURUSD=X",
+            "GBPUSD": "GBPUSD=X", 
+            "USDJPY": "USDJPY=X",
+            "Boom 500 Index": "^GSPC",
+            "Crash 300 Index": "^VIX",
+            "Volatility 75 Index": "^VIX",
+            "Boom 300 Index": "^GSPC",
+            "Boom 600 Index": "^GSPC",
+            "Boom 900 Index": "^GSPC",
+            "Crash 1000 Index": "^VIX"
+        }
+        
+        yf_symbol = symbol_map.get(symbol, symbol)
+        
+        # Récupérer les données
+        ticker = yf.Ticker(yf_symbol)
+        data = ticker.history(period=period, interval=interval)
+        
+        if data.empty:
+            return generate_simulated_data(symbol, 100)
+        
+        # Standardiser les colonnes
+        df = data.reset_index()
+        df = df.rename(columns={
+            'Open': 'open',
+            'High': 'high', 
+            'Low': 'low',
+            'Close': 'close',
+            'Volume': 'volume'
+        })
+        
+        # Ajouter colonne time
+        df['time'] = df['Datetime'].astype(np.int64) // 10**9
+        
+        return df[['time', 'open', 'high', 'low', 'close', 'volume']]
+        
+    except Exception as e:
+        logger.error(f"Erreur récupération données cloud pour {symbol}: {e}")
+        return generate_simulated_data(symbol, 100)
+
+def generate_simulated_data(symbol: str, periods: int = 100) -> pd.DataFrame:
+    """Génère des données de marché simulées"""
+    try:
+        np.random.seed(hash(symbol) % 2**32)
+        
+        base_prices = {
+            "EURUSD": 1.0850,
+            "GBPUSD": 1.2750,
+            "USDJPY": 148.50,
+            "Boom 500 Index": 5000,
+            "Crash 300 Index": 300,
+            "Volatility 75 Index": 75,
+            "Boom 300 Index": 300,
+            "Boom 600 Index": 600,
+            "Boom 900 Index": 900,
+            "Crash 1000 Index": 1000
+        }
+        
+        base_price = base_prices.get(symbol, 100)
+        
+        returns = np.random.normal(0, 0.002, periods)
+        prices = [base_price]
+        
+        for ret in returns:
+            new_price = prices[-1] * (1 + ret)
+            prices.append(new_price)
+        
+        prices = prices[1:]
+        
+        timestamps = pd.date_range(end=datetime.now(), periods=periods, freq='1min')
+        
+        df = pd.DataFrame({
+            'time': timestamps.astype(np.int64) // 10**9,
+            'open': prices,
+            'high': [p * (1 + abs(np.random.normal(0, 0.001))) for p in prices],
+            'low': [p * (1 - abs(np.random.normal(0, 0.001))) for p in prices],
+            'close': prices,
+            'volume': np.random.randint(1000, 10000, periods)
+        })
+        
+        return df
+        
+    except Exception as e:
+        logger.error(f"Erreur génération données simulées: {e}")
+        return pd.DataFrame()
+
+def get_market_data(symbol: str, timeframe: str = "M1", count: int = 1000) -> pd.DataFrame:
+    """Récupère les données en utilisant la meilleure source disponible"""
+    cache_key = f"{symbol}_{timeframe}"
+    
+    # Vérifier le cache en premier
+    if cache_key in _history_cache:
+        cached_data = _history_cache[cache_key]
+        if not cached_data.empty:
+            logger.info(f"Données récupérées depuis cache: {len(cached_data)} bougies pour {symbol}")
+            return cached_data
+    
+    # Essayer MT5 d'abord
+    if MT5_AVAILABLE and mt5_initialized:
+        try:
+            # Mapping des timeframes
+            tf_map = {
+                "M1": mt5.TIMEFRAME_M1,
+                "M5": mt5.TIMEFRAME_M5,
+                "M15": mt5.TIMEFRAME_M15,
+                "M30": mt5.TIMEFRAME_M30,
+                "H1": mt5.TIMEFRAME_H1,
+                "H4": mt5.TIMEFRAME_H4,
+                "D1": mt5.TIMEFRAME_D1,
+            }
+            
+            mt5_tf = tf_map.get(timeframe, mt5.TIMEFRAME_M1)
+            
+            # Récupérer les données
+            rates = mt5.copy_rates_from_pos(symbol, mt5_tf, 0, count)
+            
+            if rates is not None and len(rates) > 0:
+                df = pd.DataFrame(rates)
+                df['time'] = pd.to_datetime(df['time'], unit='s')
+                _history_cache[cache_key] = df
+                logger.info(f"Données récupérées depuis MT5: {len(df)} bougies pour {symbol}")
+                return df
+        except Exception as e:
+            logger.warning(f"Erreur MT5 pour {symbol}: {e}")
+    
+    # Fallback vers yfinance
+    data = get_market_data_cloud(symbol)
+    if not data.empty:
+        _history_cache[cache_key] = data
+        logger.info(f"Données récupérées depuis yfinance: {len(data)} bougies pour {symbol}")
+        return data
+    
+    # Dernier recours: données simulées
+    data = generate_simulated_data(symbol, count)
+    _history_cache[cache_key] = data
+    logger.info(f"Données simulées générées: {len(data)} bougies pour {symbol}")
+    return data
+
 # Charger les variables d'environnement
 try:
     from dotenv import load_dotenv
@@ -3175,10 +3336,6 @@ async def get_dashboard_stats(symbol: Optional[str] = None):
         return stats
     except Exception as e:
         logger.error(f"Erreur récupération stats dashboard: {e}", exc_info=True)
-        return {
-            "error": str(e),
-            "timestamp": datetime.now().isoformat()
-        }
 
 @app.get("/health")
 async def health_check():
@@ -3188,12 +3345,161 @@ async def health_check():
         "timestamp": datetime.now().isoformat(),
         "cache_size": len(prediction_cache),
         "mt5_initialized": mt5_initialized,
+        "yfinance_available": YFINANCE_AVAILABLE,
         "mistral_available": MISTRAL_AVAILABLE,
         "trend_analysis": {
             "available": True,
-            "mt5_available": mt5_initialized
+            "mt5_available": mt5_initialized,
+            "yfinance_available": YFINANCE_AVAILABLE
         }
     }
+
+@app.post("/mt5/initialize")
+async def initialize_mt5_endpoint():
+    """Initialises MT5 avec les identifiants des variables d'environnement"""
+    global mt5_initialized
+    
+    try:
+        if not MT5_AVAILABLE:
+            return {
+                "status": "error",
+                "message": "MetaTrader5 n'est pas installé sur le serveur",
+                "mt5_initialized": False
+            }
+        
+        if mt5_initialized:
+            return {
+                "status": "already_initialized",
+                "message": "MT5 est déjà initialisé",
+                "mt5_initialized": True
+            }
+        
+        # Récupérer les identifiants depuis les variables d'environnement
+        login = os.getenv("MT5_LOGIN")
+        password = os.getenv("MT5_PASSWORD")
+        server = os.getenv("MT5_SERVER")
+        
+        if not login or not password or not server:
+            return {
+                "status": "error",
+                "message": "Variables d'environnement MT5 manquantes (MT5_LOGIN, MT5_PASSWORD, MT5_SERVER)",
+                "mt5_initialized": False
+            }
+        
+        # Initialiser MT5
+        if not mt5.initialize():
+            return {
+                "status": "error",
+                "message": f"Échec de l'initialisation MT5: {mt5.last_error()}",
+                "mt5_initialized": False
+            }
+        
+        # Se connecter
+        authorized = mt5.login(login=int(login), password=password, server=server)
+        if authorized:
+            mt5_initialized = True
+            logger.info(f"✅ MT5 connecté avec succès (login: {login})")
+            return {
+                "status": "success",
+                "message": "MT5 initialisé et connecté avec succès",
+                "mt5_initialized": True,
+                "login": login,
+                "server": server
+            }
+        else:
+            error_msg = f"Échec de connexion MT5: {mt5.last_error()}"
+            mt5.shutdown()
+            return {
+                "status": "error",
+                "message": error_msg,
+                "mt5_initialized": False
+            }
+            
+    except Exception as e:
+        logger.error(f"Erreur lors de l'initialisation MT5: {e}")
+        return {
+            "status": "error",
+            "message": f"Erreur lors de l'initialisation MT5: {str(e)}",
+            "mt5_initialized": False
+        }
+
+class MLModelUploadRequest(BaseModel):
+    """Modèle pour l'upload de modèles ML entraînés"""
+    symbol: str
+    timeframe: str
+    model_data: Dict[str, Any]  # Contient les modèles sérialisés
+    metrics: Dict[str, Any]  # Métriques d'entraînement
+    training_samples: int
+    test_samples: int
+    best_model: str
+    timestamp: str
+
+@app.post("/ml/upload-model")
+async def upload_ml_model(request: MLModelUploadRequest):
+    """
+    Reçoit un modèle ML entraîné depuis un serveur local
+    et le stocke pour utilisation sur le serveur cloud
+    """
+    try:
+        model_key = f"{request.symbol}_{request.timeframe}"
+        
+        # Stocker les modèles dans le cache
+        if model_data := request.model_data:
+            ml_models_cache[model_key] = model_data
+            logger.info(f"✅ Modèle ML reçu pour {model_key}: {request.best_model}")
+        
+        # Stocker les métriques
+        _metrics_cache[model_key] = {
+            "symbol": request.symbol,
+            "timeframe": request.timeframe,
+            "best_model": request.best_model,
+            "metrics": request.metrics,
+            "training_samples": request.training_samples,
+            "test_samples": request.test_samples,
+            "last_update": request.timestamp,
+            "is_valid": True,
+            "source": "local_upload"
+        }
+        
+        return {
+            "status": "success",
+            "message": f"Modèle pour {request.symbol} {request.timeframe} reçu et stocké",
+            "model_key": model_key,
+            "best_model": request.best_model,
+            "metrics": request.metrics
+        }
+        
+    except Exception as e:
+        logger.error(f"Erreur upload modèle ML: {e}")
+        raise HTTPException(status_code=500, detail=f"Erreur lors de l'upload du modèle: {str(e)}")
+
+@app.get("/ml/uploaded-models")
+async def list_uploaded_models():
+    """Liste tous les modèles uploadés"""
+    try:
+        models = []
+        for key, model_data in ml_models_cache.items():
+            symbol, timeframe = key.split('_', 1)
+            metrics = _metrics_cache.get(key, {})
+            models.append({
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "model_key": key,
+                "best_model": metrics.get("best_model", "unknown"),
+                "training_samples": metrics.get("training_samples", 0),
+                "last_update": metrics.get("last_update", "unknown"),
+                "source": metrics.get("source", "unknown")
+            })
+        
+        return {
+            "status": "success",
+            "count": len(models),
+            "models": models
+        }
+        
+    except Exception as e:
+        logger.error(f"Erreur liste modèles uploadés: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 # ==============================================================================
 # ENDPOINTS D'ANALYSE DE TENDANCE (intégrés depuis trend_api.py)
@@ -3206,30 +3512,17 @@ class TrendAnalysisRequest(BaseModel):
 def calculate_enhanced_trend_direction(symbol: str, timeframe: str = "M1") -> Dict[str, Any]:
     """Calcule la direction de tendance avec analyse multi-indicateurs avancés"""
     try:
-        if not mt5_initialized:
-            # Fallback basé sur l'heure si MT5 non disponible
+        # Utiliser la fonction hybride get_market_data
+        df = get_market_data(symbol, timeframe, 100)
+        
+        if df.empty or len(df) < 50:
+            # Fallback basé sur l'heure si pas de données
             hour = datetime.now().hour
             if hour % 2 == 0:
                 return {"direction": "buy", "confidence": 65.0, "signals": ["fallback_hour"]}
             else:
                 return {"direction": "sell", "confidence": 65.0, "signals": ["fallback_hour"]}
         
-        # Récupérer les données MT5
-        tf_map = {
-            'M1': mt5.TIMEFRAME_M1,
-            'M5': mt5.TIMEFRAME_M5,
-            'M15': mt5.TIMEFRAME_M15,
-            'H1': mt5.TIMEFRAME_H1,
-            'H4': mt5.TIMEFRAME_H4
-        }
-        
-        mt5_timeframe = tf_map.get(timeframe, mt5.TIMEFRAME_M1)
-        rates = mt5.copy_rates_from_pos(symbol, mt5_timeframe, 0, 100)
-        
-        if rates is None or len(rates) < 50:
-            return {"direction": "neutral", "confidence": 50.0, "signals": ["insufficient_data"]}
-        
-        df = pd.DataFrame(rates)
         current_price = df['close'].iloc[-1]
         current_volume = df['volume'].iloc[-1]
         
@@ -4009,21 +4302,7 @@ def collect_historical_data(symbols: List[str], timeframes: List[str], period_da
     """
     historical_data = {}
     
-    if not mt5_initialized:
-        logger.warning("MT5 non initialisé - impossible de collecter des données historiques")
-        return historical_data
-    
     try:
-        tf_map = {
-            'M1': mt5.TIMEFRAME_M1,
-            'M5': mt5.TIMEFRAME_M5,
-            'M15': mt5.TIMEFRAME_M15,
-            'M30': mt5.TIMEFRAME_M30,
-            'H1': mt5.TIMEFRAME_H1,
-            'H4': mt5.TIMEFRAME_H4,
-            'D1': mt5.TIMEFRAME_D1
-        }
-        
         # Calculer le nombre de barres nécessaires selon le timeframe
         bars_needed = {
             'M1': period_days * 24 * 60,
@@ -4040,13 +4319,16 @@ def collect_historical_data(symbols: List[str], timeframes: List[str], period_da
             
             for tf in timeframes:
                 try:
-                    mt5_tf = tf_map.get(tf, mt5.TIMEFRAME_M1)
                     bars = min(bars_needed.get(tf, 1000), 10000)  # Limiter à 10000 barres max
                     
-                    rates = mt5.copy_rates_from_pos(symbol, mt5_tf, 0, bars)
+                    # Utiliser la fonction hybride get_market_data
+                    df = get_market_data(symbol, tf, bars)
                     
-                    if rates is not None and len(rates) > 50:
-                        df = pd.DataFrame(rates)
+                    if df is not None and len(df) > 50:
+                        # Standardiser les colonnes pour le ML
+                        if 'tick_volume' not in df.columns and 'volume' in df.columns:
+                            df = df.rename(columns={'volume': 'tick_volume'})
+                        
                         historical_data[symbol][tf] = df
                         logger.info(f"Collecté {len(df)} barres pour {symbol} {tf}")
                     else:
