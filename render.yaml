@@ -14,6 +14,14 @@ services:
         value: "10000"
       - key: PYTHONUNBUFFERED
         value: "1"
+      - key: MT5_LOGIN
+        value: "5775742"
+      - key: MT5_PASSWORD
+        value: "Sahara1991@"
+      - key: MT5_SERVER
+        value: "Deriv-Demo"
+      - key: DATABASE_URL
+        value: "postgresql://koladb_user:wYkUIyTb53vWEygkyia3YZiJNIdonmOt@dpg-d5nje68gjchc739d0dug-a.oregon-postgres.render.com/koladb_rurl"
     buildFilter:
       paths:
         - ai_server.py

@@ -4062,98 +4062,117 @@ def collect_historical_data(symbols: List[str], timeframes: List[str], period_da
     return historical_data
 
 def extract_advanced_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Extrait des features avancées pour l'entraînement ML
+    """Extrait des features avancées pour le ML
     
     Args:
         df: DataFrame avec colonnes OHLCV
         
     Returns:
-        DataFrame avec features supplémentaires
+        DataFrame avec features techniques
     """
-    features_df = df.copy()
+    if df is None or len(df) < 50:
+        return None
     
     try:
-        # 1. Trend features
-        features_df['sma_20'] = df['close'].rolling(20).mean()
-        features_df['sma_50'] = df['close'].rolling(50).mean()
-        features_df['ema_9'] = df['close'].ewm(span=9).mean()
-        features_df['ema_21'] = df['close'].ewm(span=21).mean()
-        features_df['ema_50'] = df['close'].ewm(span=50).mean()
+        # S'assurer que les colonnes nécessaires existent
+        required_cols = ['open', 'high', 'low', 'close', 'tick_volume']
+        for col in required_cols:
+            if col not in df.columns:
+                logger.warning(f"Colonne manquante: {col}")
+                return None
         
-        # Pente des moyennes mobiles
-        features_df['sma_20_slope'] = features_df['sma_20'].diff()
-        features_df['ema_9_slope'] = features_df['ema_9'].diff()
+        # Créer une copie pour éviter les SettingWithCopyWarning
+        features = df.copy()
         
-        # Position relative du prix
-        features_df['price_vs_sma20'] = (df['close'] - features_df['sma_20']) / features_df['sma_20']
-        features_df['price_vs_sma50'] = (df['close'] - features_df['sma_50']) / features_df['sma_50']
+        # Features de base
+        features['sma20'] = features['close'].rolling(window=20).mean()
+        features['sma50'] = features['close'].rolling(window=50).mean()
+        features['price_vs_sma20'] = (features['close'] - features['sma20']) / features['sma20']
+        features['price_vs_sma50'] = (features['close'] - features['sma50']) / features['sma50']
         
-        # 2. Momentum features
-        rsi = calculate_rsi(df['close'], 14)
-        features_df['rsi'] = rsi
-        features_df['rsi_normalized'] = (rsi - 50) / 50  # Normaliser entre -1 et 1
+        # RSI et ses dérivés
+        delta = features['close'].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+        rs = gain / loss
+        features['rsi'] = 100 - (100 / (1 + rs))
+        features['rsi_normalized'] = (features['rsi'] - 50) / 50  # Normalisé entre -1 et 1
         
         # MACD
-        ema_12 = df['close'].ewm(span=12).mean()
-        ema_26 = df['close'].ewm(span=26).mean()
-        macd_line = ema_12 - ema_26
-        signal_line = macd_line.ewm(span=9).mean()
-        features_df['macd'] = macd_line
-        features_df['macd_signal'] = signal_line
-        features_df['macd_histogram'] = macd_line - signal_line
+        exp1 = features['close'].ewm(span=12).mean()
+        exp2 = features['close'].ewm(span=26).mean()
+        features['macd'] = exp1 - exp2
+        features['macd_signal'] = features['macd'].ewm(span=9).mean()
+        features['macd_histogram'] = features['macd'] - features['macd_signal']
         
-        # 3. Volatility features
-        atr = calculate_atr(df, 14)
-        features_df['atr'] = atr
-        features_df['atr_normalized'] = atr / df['close']  # ATR en pourcentage
-        features_df['atr_ma_ratio'] = atr / atr.rolling(20).mean()
+        # ATR et volatilité
+        high_low = features['high'] - features['low']
+        high_close = np.abs(features['high'] - features['close'].shift())
+        low_close = np.abs(features['low'] - features['close'].shift())
+        tr = np.maximum(high_low, np.maximum(high_close, low_close))
+        features['atr'] = tr.rolling(window=14).mean()
+        features['atr_normalized'] = features['atr'] / features['close']
+        features['atr_ma_ratio'] = features['atr'] / features['atr'].rolling(window=50).mean()
         
         # Bollinger Bands
-        bb = calculate_bollinger_bands(df['close'], 20, 2)
-        features_df['bb_upper'] = bb['upper']
-        features_df['bb_middle'] = bb['middle']
-        features_df['bb_lower'] = bb['lower']
-        features_df['bb_width'] = (bb['upper'] - bb['lower']) / bb['middle']
-        features_df['bb_position'] = (df['close'] - bb['lower']) / (bb['upper'] - bb['lower'])
+        bb_period = 20
+        bb_std = 2
+        features['bb_middle'] = features['close'].rolling(window=bb_period).mean()
+        bb_std_dev = features['close'].rolling(window=bb_period).std()
+        features['bb_upper'] = features['bb_middle'] + (bb_std_dev * bb_std)
+        features['bb_lower'] = features['bb_middle'] - (bb_std_dev * bb_std)
+        features['bb_width'] = (features['bb_upper'] - features['bb_lower']) / features['bb_middle']
+        features['bb_position'] = (features['close'] - features['bb_lower']) / (features['bb_upper'] - features['bb_lower'])
         
-        # 4. Volume features
-        if 'tick_volume' in df.columns:
-            volume = df['tick_volume']
-        elif 'volume' in df.columns:
-            volume = df['volume']
-        else:
-            volume = pd.Series([0] * len(df))
+        # Volume analysis
+        features['volume_ma'] = features['tick_volume'].rolling(window=20).mean()
+        features['volume_ratio'] = features['tick_volume'] / features['volume_ma']
+        features['volume_trend'] = features['tick_volume'].rolling(window=5).mean() / features['tick_volume'].rolling(window=20).mean()
+        
+        # Price action features
+        features['high_low_range'] = (features['high'] - features['low']) / features['close']
+        features['open_close_range'] = np.abs(features['close'] - features['open']) / features['close']
+        features['body_size'] = np.abs(features['close'] - features['open']) / features['close']
+        
+        # Momentum indicators
+        for period in [5, 10, 20]:
+            features[f'momentum_{period}'] = features['close'] / features['close'].shift(period) - 1
+        
+        # Distance aux extremums récents
+        for period in [10, 20]:
+            features[f'distance_to_high_{period}'] = (features['high'].rolling(window=period).max() - features['close']) / features['close']
+            features[f'distance_to_low_{period}'] = (features['close'] - features['low'].rolling(window=period).min()) / features['close']
+        
+        # Simplifier les noms de colonnes pour compatibilité
+        features['distance_to_high'] = features['distance_to_high_10']
+        features['distance_to_low'] = features['distance_to_low_10']
+        
+        # Features avancées pour Boom/Crash
+        if 'Boom' in str(df.iloc[0]['symbol']) if 'symbol' in df.columns else False or \
+           'Crash' in str(df.iloc[0]['symbol']) if 'symbol' in df.columns else False:
+            # Spike detection
+            features['price_change'] = features['close'].pct_change()
+            features['spike_threshold'] = features['price_change'].rolling(window=20).std() * 2
+            features['is_spike'] = np.abs(features['price_change']) > features['spike_threshold']
             
-        features_df['volume_sma'] = volume.rolling(20).mean()
-        features_df['volume_ratio'] = volume / features_df['volume_sma']
-        features_df['volume_trend'] = volume.rolling(5).mean() / volume.rolling(20).mean()
+            # Mean reversion indicator
+            features['mean_reversion'] = (features['close'] - features['sma20']) / features['atr']
+            
+            # Volatility regime
+            features['volatility_regime'] = features['atr'] / features['atr'].rolling(window=50).mean()
         
-        # 5. Price action features
-        features_df['high_low_range'] = (df['high'] - df['low']) / df['close']
-        features_df['open_close_range'] = (df['close'] - df['open']) / df['open']
-        features_df['body_size'] = abs(df['close'] - df['open']) / df['close']
-        features_df['upper_shadow'] = (df['high'] - df[['open', 'close']].max(axis=1)) / df['close']
-        features_df['lower_shadow'] = (df[['open', 'close']].min(axis=1) - df['low']) / df['close']
+        # Nettoyer les valeurs infinies et NaN
+        features = features.replace([np.inf, -np.inf], np.nan)
+        features = features.fillna(method='ffill').fillna(method='bfill').fillna(0)
         
-        # 6. Momentum indicators
-        features_df['momentum_5'] = df['close'].pct_change(5)
-        features_df['momentum_10'] = df['close'].pct_change(10)
-        features_df['momentum_20'] = df['close'].pct_change(20)
-        
-        # 7. Support/Resistance levels (simplifié)
-        features_df['recent_high'] = df['high'].rolling(20).max()
-        features_df['recent_low'] = df['low'].rolling(20).min()
-        features_df['distance_to_high'] = (features_df['recent_high'] - df['close']) / df['close']
-        features_df['distance_to_low'] = (df['close'] - features_df['recent_low']) / df['close']
-        
-        # Remplacer les NaN et infinis
-        features_df = features_df.replace([np.inf, -np.inf], np.nan)
-        features_df = features_df.fillna(method='ffill').fillna(method='bfill').fillna(0)
+        logger.info(f"✅ {len(features.columns)} features extraites pour ML")
+        return features
         
     except Exception as e:
         logger.error(f"Erreur extraction features: {e}")
-    
-    return features_df
+        import traceback
+        logger.error(traceback.format_exc())
+        return None
 
 def calculate_trade_outcome(df: pd.DataFrame, lookahead: int = 5, threshold: float = 0.002) -> List[int]:
     """Calcule le résultat des trades (labels pour ML)
