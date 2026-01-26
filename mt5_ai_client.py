@@ -1471,7 +1471,7 @@ class MT5AIClient:
                 "tp": tp,
                 "deviation": 20,
                 "magic": 234000,
-                "comment": f"Ultra AI Signal {signal_data.get('source', 'unknown')} [{category}]",
+                "comment": f"AI-{signal}-{category}",  # shorter comment to comply with MT5 limits
                 "type_time": mt5.ORDER_TIME_GTC,
                 "type_filling": mt5.ORDER_FILLING_RETURN,  # Changed to RETURN for broader compatibility
             }
