@@ -1975,11 +1975,13 @@ def save_prediction_to_mt5_files(
         filename = MT5_PREDICTIONS_DIR / f"{safe_symbol}_{safe_tf}_predictions.csv"
 
         header = (
-            "time;symbol;timeframe;action;confidence;style;category;model_name;details_json\n"
+            "time;symbol;timeframe;action;confidence;style;category;model_name;details_json
+"
         )
         line = (
             f"{ts};{symbol};{timeframe};{action};{conf:.4f};"
-            f"{style};{category};{model_name};{details_str}\n"
+            f"{style};{category};{model_name};{details_str}
+"
         )
 
         # Append avec création automatique de l'en-tête si fichier nouveau
@@ -2031,7 +2033,8 @@ def analyze_with_gemma(prompt: str, max_tokens: int = 200, temperature: float = 
         return None
     
     try:
-        logger.info("\n" + "="*80)
+        logger.info("
+" + "="*80)
         logger.info("🔍 DÉMARRAGE ANALYSE GEMMA (TEXTE UNIQUEMENT)")
         logger.info("="*80)
         logger.info(f"📝 Prompt: {prompt[:150]}..." if len(prompt) > 150 else f"📝 Prompt: {prompt}")
@@ -2072,14 +2075,16 @@ def analyze_with_gemma(prompt: str, max_tokens: int = 200, temperature: float = 
             
             # Formatage de la réponse
             response = response.strip()
-            logger.info("\n" + "="*80)
+            logger.info("
+" + "="*80)
             logger.info("✅ ANALYSE TERMINÉE")
             logger.info("="*80)
             logger.info(f"⏱️  Durée: {duration:.2f} secondes")
             logger.info(f"📊 Réponse ({len(response)} caractères):")
             
             # Affichage d'un extrait de la réponse
-            response_lines = response.split('\n')
+            response_lines = response.split('
+')
             for i, line in enumerate(response_lines[:5]):  # Affiche les 5 premières lignes
                 logger.info(f"   {line}")
             if len(response_lines) > 5:
@@ -2100,13 +2105,15 @@ def analyze_with_gemma(prompt: str, max_tokens: int = 200, temperature: float = 
             raise
             
     except Exception as e:
-        logger.error(f"\n❌ ERREUR LORS DE L'ANALYSE GEMMA")
+        logger.error(f"
+❌ ERREUR LORS DE L'ANALYSE GEMMA")
         logger.error("="*60)
         logger.error(f"Type: {type(e).__name__}")
         logger.error(f"Message: {str(e)}")
         if hasattr(e, 'args') and e.args:
             logger.error(f"Détails: {e.args[0]}")
-        logger.error("\nStack trace:")
+        logger.error("
+Stack trace:")
         logger.error(traceback.format_exc())
         return None
     
@@ -6612,7 +6619,26 @@ async def decision(request: DecisionRequest):
 
         # Score directionnel pondéré
         score = 0.0
-        components = []\n        # Canal de prédiction M5 (pente normalisée)\n        channel_slope = 0.0\n        try:\n            rates_chan = mt5.copy_rates_from_pos(request.symbol, mt5.TIMEFRAME_M5, 0, 80)\n            if rates_chan is not None and len(rates_chan) >= 30:\n                df_chan = pd.DataFrame(rates_chan)\n                closes_chan = df_chan[\'close\'].tail(50)\n                x_idx = np.arange(len(closes_chan))\n                coeff = np.polyfit(x_idx, closes_chan.values, 1)\n                last_price = float(closes_chan.iloc[-1]) if len(closes_chan) > 0 else 0.0\n                if last_price > 0:\n                    channel_slope = float(coeff[0]) / last_price\n                if channel_slope > 0:\n                    components.append(\"ChUp\")\n                elif channel_slope < 0:\n                    components.append(\"ChDown\")\n        except Exception:\n            pass\n
+        components = []
+        # Canal de prédiction M5 (pente normalisée)
+        channel_slope = 0.0
+        try:
+            rates_chan = mt5.copy_rates_from_pos(request.symbol, mt5.TIMEFRAME_M5, 0, 80)
+            if rates_chan is not None and len(rates_chan) >= 30:
+                df_chan = pd.DataFrame(rates_chan)
+                closes_chan = df_chan[\'close\'].tail(50)
+                x_idx = np.arange(len(closes_chan))
+                coeff = np.polyfit(x_idx, closes_chan.values, 1)
+                last_price = float(closes_chan.iloc[-1]) if len(closes_chan) > 0 else 0.0
+                if last_price > 0:
+                    channel_slope = float(coeff[0]) / last_price
+                if channel_slope > 0:
+                    components.append(\"ChUp\")
+                elif channel_slope < 0:
+                    components.append(\"ChDown\")
+        except Exception:
+            pass
+
         # Timeframes - pondération multi-niveaux
         if m1_bullish:
             score += WEIGHTS["m1"]; components.append("M1:+")
@@ -6843,7 +6869,19 @@ async def decision(request: DecisionRequest):
         if action != "hold" and (m5_bullish and h1_bullish) and not (h4_bullish or d1_bullish):
             confidence = max(confidence, 0.55)
         elif action != "hold" and (m5_bearish and h1_bearish) and not (h4_bearish or d1_bearish):
-            confidence = max(confidence, 0.55)\n\n        # 8.b OVERRIDE EMA/CHANNEL: éviter HOLD contre une tendance claire M5/H1 avec canal aligné\n        if action == "hold":\n            if (m5_bullish and (h1_bullish or not h1_bearish)) and channel_slope > 0:\n                action = "buy"\n                confidence = max(confidence, 0.55)\n                components.append("EMA+Channel↑")\n            elif (m5_bearish and (h1_bearish or not h1_bullish)) and channel_slope < 0:\n                action = "sell"\n                confidence = max(confidence, 0.55)\n                components.append("EMA+Channel↓")\n
+            confidence = max(confidence, 0.55)
+
+        # 8.b OVERRIDE EMA/CHANNEL: éviter HOLD contre une tendance claire M5/H1 avec canal aligné
+        if action == "hold":
+            if (m5_bullish and (h1_bullish or not h1_bearish)) and channel_slope > 0:
+                action = "buy"
+                confidence = max(confidence, 0.55)
+                components.append("EMA+Channel↑")
+            elif (m5_bearish and (h1_bearish or not h1_bullish)) and channel_slope < 0:
+                action = "sell"
+                confidence = max(confidence, 0.55)
+                components.append("EMA+Channel↓")
+
         
         # 9. Intégration de la décision ML multi-modèles (Boom/Crash, Forex, Commodities, Volatility)
         ml_decision = None
@@ -8839,7 +8877,8 @@ async def send_predictions_summary():
         if symbol_count == 0:
             summary_lines.append("Aucune prédiction disponible")
         
-        message = "\n".join(summary_lines)
+        message = "
+".join(summary_lines)
         
         # Envoyer le SMS
         success = notification_service._send_sms(message)
@@ -9205,10 +9244,14 @@ async def _trigger_retraining_async(category: str):
                 new_acc = result.get('new_accuracy', 0)
                 samples = result.get('samples_used', 0)
                 logger.info(
-                    f"✅ [AUTO-RETRAIN] Réentraînement réussi pour {category}:\n"
-                    f"   - Échantillons utilisés: {samples}\n"
-                    f"   - Précision ancienne: {old_acc:.3f}\n"
-                    f"   - Précision nouvelle: {new_acc:.3f}\n"
+                    f"✅ [AUTO-RETRAIN] Réentraînement réussi pour {category}:
+"
+                    f"   - Échantillons utilisés: {samples}
+"
+                    f"   - Précision ancienne: {old_acc:.3f}
+"
+                    f"   - Précision nouvelle: {new_acc:.3f}
+"
                     f"   - Amélioration: +{improvement:.3f} ({improvement*100:.2f}%)"
                 )
             elif result.get("status") == "no_improvement":
@@ -10094,7 +10137,8 @@ class GemmaTradingBot:
             price_levels = re.findall(r'\b\d+\.?\d*\b', response)
             
             # Log des résultats
-            logger.info("\n" + "="*80)
+            logger.info("
+" + "="*80)
             logger.info("📊 RÉSULTATS GEMMA")
             logger.info("="*80)
             if detected_signals:
@@ -10111,7 +10155,8 @@ class GemmaTradingBot:
             if found_keywords:
                 logger.info(f"🔍 Mots-clés importants: {', '.join(found_keywords)}")
                 
-            logger.info("="*80 + "\n")
+            logger.info("="*80 + "
+")
             
         except Exception as e:
             logger.error(f"Erreur lors de l'analyse de la réponse Gemma: {str(e)}")
@@ -10738,11 +10783,13 @@ if __name__ == "__main__":
     logger.info("Serveur prêt à recevoir des requêtes")
     logger.info("=" * 60)
     
-    print("\n" + "=" * 60)
+    print("
+" + "=" * 60)
     print("Démarrage du serveur AI TradBOT...")
     print("=" * 60)
     print(f"API disponible sur: http://127.0.0.1:{API_PORT}")
-    print("\nEndpoints disponibles:")
+    print("
+Endpoints disponibles:")
     print(f"  - GET  /                           : Vérification de l'état du serveur")
     print(f"  - GET  /health                     : Vérification de santé")
     print(f"  - GET  /status                     : Statut détaillé")
@@ -10771,7 +10818,8 @@ if __name__ == "__main__":
     print(f"  - GET  /deriv/patterns/{{symbol}}            : Détection patterns Deriv (XABCD, Cypher, H&S, etc.)")
     print(f"  - GET  /deriv/tools/vwap/{{symbol}}          : Anchored VWAP")
     print(f"  - GET  /deriv/tools/volume-profile/{{symbol}}: Volume Profile")
-    print("\nDocumentation interactive:")
+    print("
+Documentation interactive:")
     print(f"  - http://127.0.0.1:{API_PORT}/docs")
     print("=" * 60)
     

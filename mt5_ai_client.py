@@ -15,8 +15,9 @@ import numpy as np
 from datetime import datetime, timedelta
 from pathlib import Path
 
-# Configuration
+# Configuration des URLs de l'API
 RENDER_API_URL = "https://kolatradebot.onrender.com"
+LOCAL_API_URL = "http://localhost:5000"
 TIMEFRAMES = ["M5"]  # Horizon M5 comme demandé
 CHECK_INTERVAL = 60  # Secondes entre chaque vérification
 MIN_CONFIDENCE = 0.70  # Confiance minimale pour prendre un trade (70% = 0.70)
@@ -150,13 +151,6 @@ class DashboardLogger:
                 return None
         except Exception as e:
             return None
-    
-    def get_position_profit(self, ticket):
-        """Récupère le profit actuel d'une position"""
-        position = mt5.positions_get(ticket=ticket)
-        if position:
-            return position[0].profit
-        return 0.0
 
 # Instance globale du dashboard
 dashboard = DashboardLogger()
@@ -909,7 +903,7 @@ class MT5AIClient:
         self.garch_analyzer = GARCHVolatilityAnalyzer()
         self.feature_extractor = AdvancedFeatureExtractor()
         self.model_performance_cache = {}  # Cache pour performance des modèles
-        
+
     def get_position_profit(self, ticket):
         """Récupère le profit actuel d'une position"""
         position = mt5.positions_get(ticket=ticket)
@@ -1053,146 +1047,153 @@ class MT5AIClient:
         except Exception as e:
             logger.error(f"Erreur ML signal {symbol}: {e}")
             return None
-    
+
     def combine_ultra_signals(self, symbol, ml_signal, technical_signal, volatility_signal, advanced_features):
-        """Combine tous les signaux avec pondération ultra-optimisée"""
-        
+        """Combine tous les signaux avec pondération optimisée pour plus de réactivité"""
+
         # Pondération de base selon type d'instrument
         if "Boom" in symbol or "Crash" in symbol:
-            # Indices synthétiques: patterns artificiels → ML plus important
-            weights = {'ml': 0.5, 'technical': 0.3, 'volatility': 0.1, 'features': 0.1}
+            # Pour les indices synthétiques, privilégier les signaux techniques
+            weights = {'ml': 0.4, 'technical': 0.5, 'volatility': 0.05, 'features': 0.05}
         elif any(fx in symbol for fx in ["EUR", "GBP", "USD", "JPY"]):
-            # Forex: volatilité et saisonnalité importantes
-            weights = {'ml': 0.3, 'technical': 0.3, 'volatility': 0.25, 'features': 0.15}
+            # Forex: équilibre entre technique et ML
+            weights = {'ml': 0.4, 'technical': 0.4, 'volatility': 0.1, 'features': 0.1}
         else:
-            # Autres: équilibré
-            weights = {'ml': 0.4, 'technical': 0.3, 'volatility': 0.15, 'features': 0.15}
-        
+            # Autres: équilibré avec plus de poids sur la technique
+            weights = {'ml': 0.35, 'technical': 0.45, 'volatility': 0.1, 'features': 0.1}
+
         # Ajuster les poids selon la performance des modèles
         if ml_signal and 'model_accuracy' in ml_signal:
             accuracy = ml_signal['model_accuracy']
-            if accuracy > 0.85:
-                weights['ml'] = min(weights['ml'] + 0.1, 0.6)
-            elif accuracy < 0.6:
-                weights['ml'] = max(weights['ml'] - 0.1, 0.2)
-                # Répartir le poids retiré
-                weights['technical'] += 0.05
-                weights['volatility'] += 0.05
-        
+            if accuracy > 0.8:  # Seuil abaissé de 0.85 à 0.8
+                weights['ml'] = min(weights['ml'] + 0.15, 0.6)  # Augmentation plus forte
+            elif accuracy < 0.65:  # Seuil augmenté de 0.6 à 0.65
+                weights['ml'] = max(weights['ml'] - 0.05, 0.2)  # Réduction plus faible
+                weights['technical'] += 0.05  # Donner plus de poids à l'analyse technique
+
         # Calculer les votes pondérés
         votes = {'BUY': 0, 'SELL': 0, 'HOLD': 0}
         total_confidence = 0
-        
-        # Signal ML
-        if ml_signal:
+
+        # Signal ML - Meilleure gestion des signaux neutres
+        if ml_signal and ml_signal.get('signal') != 'HOLD':
             vote = ml_signal['signal']
             confidence = ml_signal['confidence'] * weights['ml']
             votes[vote] += confidence
             total_confidence += confidence
-        
-        # Signal technique
+
+        # Signal technique - Augmentation du poids
         if technical_signal:
             vote = technical_signal['signal']
-            confidence = technical_signal['confidence'] * weights['technical']
+            confidence = technical_signal['confidence'] * weights['technical'] * 1.2  # +20% de poids
             votes[vote] += confidence
             total_confidence += confidence
-        
-        # Signal volatilité
+
+        # Signal volatilité - Impact réduit
         if volatility_signal:
             vol_signal = volatility_signal['signal']
-            vol_conf = volatility_signal['confidence'] * weights['volatility']
-            
-            # Convertir les signaux de volatilité en signaux de trading
+            vol_conf = volatility_signal['confidence'] * weights['volatility'] * 0.8  # -20% d'impact
+
+            # Moins de prudence en haute volatilité
             if vol_signal == "HIGH_VOL":
-                # Haute volatilité: utiliser le signal technique comme base
                 if technical_signal:
-                    votes[technical_signal['signal']] += vol_conf * 0.5
-                else:
-                    votes['HOLD'] += vol_conf  # Prudence en haute vol
+                    votes[technical_signal['signal']] += vol_conf * 0.8  # Moins de réduction
             elif vol_signal == "LOW_VOL":
-                votes['HOLD'] += vol_conf  # Éviter le trading en basse vol
-            
-            total_confidence += vol_conf * 0.5
-        
-        # Features avancées
+                votes['HOLD'] += vol_conf * 0.5  # Réduction de l'effet HOLD
+
+            total_confidence += vol_conf  # Pas de division par 2
+
+        # Features avancées - Meilleure intégration
         if advanced_features:
             feature_confidence = weights['features']
-            
-            # RSI Divergence
+
+            # RSI Divergence - Seuils ajustés
             rsi_div = advanced_features.get('rsi_divergence')
             if rsi_div:
-                if rsi_div > 70:
-                    votes['SELL'] += feature_confidence * 0.3
-                elif rsi_div < 30:
-                    votes['BUY'] += feature_confidence * 0.3
-            
-            # Momentum
+                if rsi_div > 75:  # Seuil relevé de 70 à 75
+                    votes['SELL'] += feature_confidence * 0.4  # Poids augmenté
+                elif rsi_div < 25:  # Seuil abaissé de 30 à 25
+                    votes['BUY'] += feature_confidence * 0.4  # Poids augmenté
+
+            # Momentum - Seuil réduit
             momentum = advanced_features.get('price_momentum')
-            if momentum and momentum.get('strength', 0) > 0.01:
+            if momentum and momentum.get('strength', 0) > 0.005:  # Seuil réduit de 0.01 à 0.005
                 if momentum['momentum_trend'] > 0:
-                    votes['BUY'] += feature_confidence * 0.2
+                    votes['BUY'] += feature_confidence * 0.3
                 else:
-                    votes['SELL'] += feature_confidence * 0.2
-            
-            # Market Regime
+                    votes['SELL'] += feature_confidence * 0.3
+
+            # Market Regime - Moins de HOLD en range
             regime = advanced_features.get('market_regime')
             if regime:
                 if regime['regime'] == 'trending':
                     if regime['direction'] == 'bullish':
-                        votes['BUY'] += feature_confidence * 0.3
-                    elif regime['direction'] == 'bearish':
-                        votes['SELL'] += feature_confidence * 0.3
+                        votes['BUY'] += feature_confidence * 0.4  # Poids augmenté
+                    else:
+                        votes['SELL'] += feature_confidence * 0.4  # Poids augmenté
                 elif regime['regime'] == 'ranging':
-                    votes['HOLD'] += feature_confidence * 0.2
-            
+                    votes['HOLD'] += feature_confidence * 0.1  # Poids réduit
+
+            # Volume Profile - Impact accru
+            volume = advanced_features.get('volume_profile')
+            if volume and volume.get('volume_ratio', 1) > 1.3:  # Seuil réduit de 1.5 à 1.3
+                if votes['BUY'] > votes['SELL']:
+                    votes['BUY'] += feature_confidence * 0.3  # Poids augmenté
+                elif votes['SELL'] > votes['BUY']:
+                    votes['SELL'] += feature_confidence * 0.3  # Poids augmenté
+
             total_confidence += feature_confidence
-        
-        # Décider du signal final
-        if total_confidence == 0:
-            return None
-        
-        # Trouver le signal avec le plus de votes
-        best_signal = max(votes, key=votes.get)
-        best_confidence = votes[best_signal] / total_confidence
-        
-        # Seuil minimum de confiance (abaissé à 55 %)
-        if best_confidence < 0.55:
-            return None
-        
-        # Si HOLD gagne, vérifier s'il domine réellement
-        if best_signal == 'HOLD' and votes['HOLD'] > max(votes['BUY'], votes['SELL']):
-            return None
-        
-        # Créer le signal final
-        final_signal = {
-            'signal': best_signal,
-            'confidence': best_confidence,
-            'stop_loss': ml_signal.get('stop_loss') if ml_signal else None,
-            'take_profit': ml_signal.get('take_profit') if ml_signal else None,
-            'source': f'Ultra_Ensemble_ML{weights["ml"]:.1f}_Tech{weights["technical"]:.1f}_Vol{weights["volatility"]:.1f}_Feat{weights["features"]:.1f}',
-            'timeframe': 'M5',
-            'horizon': 'M5',
-            'weights': weights,
-            'votes': votes,
-            'components': {
-                'ml_signal': ml_signal,
-                'technical_signal': technical_signal,
-                'volatility_signal': volatility_signal,
-                'advanced_features': advanced_features
-            }
-        }
-        
+
+        # Décision finale avec seuil réduit
+        if total_confidence > 0:
+            # Normaliser les votes
+            for vote in votes:
+                votes[vote] = votes[vote] / total_confidence
+
+            # Trouver le meilleur signal
+            best_signal = max(votes, key=votes.get)
+            best_confidence = votes[best_signal]
+
+            # Seuil de confiance réduit à 45% (au lieu de 55%)
+            if best_confidence >= 0.45 and best_signal != 'HOLD':  # Éviter HOLD comme meilleur signal
+                # Créer le signal final avec plus d'informations
+                signal_data = {
+                    'signal': best_signal,
+                    'confidence': best_confidence,
+                    'source': 'AI_Ultra_Optimized',
+                    'votes': votes,
+                    'weights': weights  # Ajout des poids pour le débogage
+                }
+
+                # Ajouter SL/TP si disponible avec une marge plus serrée
+                if ml_signal and 'stop_loss' in ml_signal and 'take_profit' in ml_signal:
+                    signal_data['stop_loss'] = ml_signal['stop_loss']
+                    signal_data['take_profit'] = ml_signal['take_profit']
+
+                # Meilleure journalisation pour le débogage
+                logger.info(f"Signal combiné pour {symbol}: {best_signal} ({best_confidence*100:.1f}%)")
+                logger.debug(f"Détails des votes: {votes}")
+
+                return signal_data
+
+        logger.info(f"Aucun signal fort pour {symbol}. Meilleur signal: {best_signal} ({best_confidence*100:.1f}%)")
+        return None
+
         return final_signal
     
+    # pylint: disable=no-member
     def sync_to_web_dashboard(self):
         """Synchronise les données avec le web dashboard"""
         try:
-            # Récupérer les signaux récents pour tous les symboles surveillés
+            # Préparer les données à synchroniser dans le nouveau format
             signals_data = {}
             monitored_symbols = set()
             
             # Récupérer les symboles depuis le détecteur
-            if hasattr(self.symbol_detector, 'all_symbols') and self.symbol_detector.all_symbols:
+            detector = self.symbol_detector
+            has_symbols = (hasattr(detector, 'all_symbols') and
+                         detector.all_symbols)
+            if has_symbols:
                 monitored_symbols = set(self.symbol_detector.all_symbols)
             else:
                 # Fallback: utiliser les symboles avec positions
@@ -1228,73 +1229,68 @@ class MT5AIClient:
             # Préparer les positions avec profit actuel
             positions_data = {}
             total_profit = 0.0
-            for symbol, pos_info in self.positions.items():
-                profit = self.get_position_profit(pos_info["ticket"])
-                total_profit += profit
-                positions_data[symbol] = {
-                    'type': pos_info.get('type', 'NONE'),
-                    'price': pos_info.get('price', 0.0),
-                    'profit': profit,
-                    'ticket': pos_info.get('ticket', 0),
-                    'volume': pos_info.get('volume', 0.0),
-                    'open_time': pos_info.get('open_time', datetime.now()).isoformat() if isinstance(pos_info.get('open_time'), datetime) else str(pos_info.get('open_time', ''))
-                }
             
             # Récupérer les statistiques de trading depuis l'historique MT5
-            trading_stats = self.get_trading_statistics()
-            
-            # Récupérer les métriques ML
-            ml_metrics_data = self.get_ml_metrics()
-            if ml_metrics_data:
-                # Normaliser les métriques ML
-                ml_metrics_normalized = {
-                    'accuracy': ml_metrics_data.get('accuracy', 0.0),
-                    'model_name': ml_metrics_data.get('modelName', 'Unknown'),
-                    'last_update': ml_metrics_data.get('lastUpdate', int(time.time())),
-                    'status': 'Available'
-                }
-            else:
-                ml_metrics_normalized = {
-                    'accuracy': 0.0,
-                    'model_name': 'Unknown',
-                    'last_update': int(time.time()),
-                    'status': 'Not Available'
-                }
-            
-            # Préparer les données à synchroniser
-            sync_data = {
-                'positions': positions_data,
-                'signals': signals_data,
-                'performance': {
-                    'total_profit': total_profit,
-                    'active_positions': len(self.positions),
-                    'active_signals': len([s for s in signals_data.values() if s.get('signal') not in ['WAIT', 'ERROR']]),
-                    'last_update': datetime.now().strftime('%H:%M:%S')
-                },
-                'trading_stats': trading_stats,
-                'ml_metrics': ml_metrics_normalized
-            }
-            
-            # Envoyer au web dashboard
-            response = requests.post(
-                "http://localhost:5000/api/sync",
-                json=sync_data,
-                timeout=5
-            )
-            
-            if response.status_code == 200:
-                logger.debug("✅ Données synchronisées avec le web dashboard")
-            else:
-                logger.warning(f"⚠️ Erreur synchronisation web dashboard: {response.status_code}")
-                
-        except Exception as e:
-            logger.warning(f"⚠️ Erreur synchronisation web dashboard: {e}")
-    
-    def get_trading_statistics(self):
-        """Récupère les statistiques de trading depuis l'historique MT5"""
-        try:
-            if not self.connected:
-                return {
+            trading_stats = {}
+            try:
+                if not self.connected:
+                    trading_stats = {
+                        'total_trades': 0,
+                        'winning_trades': 0,
+                        'losing_trades': 0,
+                        'win_rate': 0.0,
+                        'total_profit': 0.0,
+                        'total_loss': 0.0,
+                        'profit_factor': 0.0
+                    }
+                else:
+                    # Récupérer l'historique des trades
+                    trade_history = []
+                    today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+                    deals = mt5.history_deals_get(today, datetime.now())
+                    if deals:
+                        for deal in deals:
+                            if deal.entry == 1:  # Entrée de position
+                                trade_history.append({
+                                    'ticket': deal.ticket,
+                                    'symbol': deal.symbol,
+                                    'type': 'BUY' if deal.type == mt5.DEAL_TYPE_BUY else 'SELL',
+                                    'price_open': deal.price,
+                                    'price_close': deal.price,  # Sera mis à jour à la sortie
+                                    'profit': 0.0,  # Sera mis à jour à la sortie
+                                    'volume': deal.volume,
+                                    'open_time': datetime.fromtimestamp(deal.time).strftime('%Y-%m-%d %H:%M:%S'),
+                                    'close_time': '',
+                                    'reason': 'TP/SL' if deal.comment and 'TP/SL' in deal.comment else 'Manual'
+                                })
+                            elif deal.entry == 0:  # Sortie de position
+                                # Trouver l'entrée correspondante
+                                for trade in trade_history:
+                                    if trade['ticket'] == deal.position_id and trade['close_time'] == '':
+                                        trade['price_close'] = deal.price
+                                        trade['profit'] = deal.profit
+                                        trade['close_time'] = datetime.fromtimestamp(deal.time).strftime('%Y-%m-%d %H:%M:%S')
+                                        break
+                    
+                    # Calculer les statistiques
+                    winning_trades = sum(1 for t in trade_history if t.get('profit', 0) > 0)
+                    losing_trades = sum(1 for t in trade_history if t.get('profit', 0) < 0)
+                    total_trades = len(trade_history)
+                    total_profit = sum(t.get('profit', 0) for t in trade_history if t.get('profit', 0) > 0)
+                    total_loss = abs(sum(t.get('profit', 0) for t in trade_history if t.get('profit', 0) < 0))
+                    
+                    trading_stats = {
+                        'total_trades': total_trades,
+                        'winning_trades': winning_trades,
+                        'losing_trades': losing_trades,
+                        'win_rate': (winning_trades / total_trades * 100) if total_trades > 0 else 0.0,
+                        'total_profit': total_profit,
+                        'total_loss': total_loss,
+                        'profit_factor': (total_profit / total_loss) if total_loss > 0 else (float('inf') if total_profit > 0 else 0.0)
+                    }
+            except Exception as e:
+                logger.error(f"Erreur lors de la récupération des statistiques: {e}")
+                trading_stats = {
                     'total_trades': 0,
                     'winning_trades': 0,
                     'losing_trades': 0,
@@ -1303,6 +1299,14 @@ class MT5AIClient:
                     'total_loss': 0.0,
                     'profit_factor': 0.0
                 }
+            
+            # Préparer les données à synchroniser dans le nouveau format
+            sync_data = {
+                'positions': positions_data,
+                'signals': signals_data,
+                'trading_stats': trading_stats,
+                'timestamp': datetime.now().isoformat()
+            }
             
             # Récupérer les deals du jour
             today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
@@ -1425,6 +1429,94 @@ class MT5AIClient:
         
         return sl, tp
     
+    def choose_entry_strategy(self, symbol, signal):
+        """Choisit une stratégie d'entrée M5 basée sur S/R et trendlines.
+        - Forex/Metals: tenter un pending à proximité du support (BUY) ou résistance (SELL)
+        - Boom/Crash: toujours marché
+        Retourne un dict: {use_pending: bool, type: mt5.ORDER_TYPE_*, price: float}
+        """
+        try:
+            category = self.symbol_detector.get_category(symbol)
+            if category not in ("Forex", "Metals"):
+                return {"use_pending": False}
+
+            symbol_info = mt5.symbol_info(symbol)
+            if not symbol_info:
+                return {"use_pending": False}
+
+            tick = mt5.symbol_info_tick(symbol)
+            if not tick:
+                return {"use_pending": False}
+
+            current_price = tick.ask if signal == "BUY" else tick.bid
+
+            # Récupérer niveaux S/R et trendlines en M5
+            sr = self.technical_analyzer.get_support_resistance_signals(symbol)
+            tl = self.technical_analyzer.get_trendline_signals(symbol)
+
+            candidates = []
+            if signal == "BUY":
+                if sr and sr.get("support"):
+                    candidates.append(sr["support"])
+                if tl and tl.get("bullish_trendline"):
+                    candidates.append(tl["bullish_trendline"])
+                order_type = mt5.ORDER_TYPE_BUY_LIMIT
+                # Filtrer niveaux sous le prix actuel
+                candidates = [p for p in candidates if p and p < current_price]
+                # Choisir le plus proche sous le prix
+                target = max(candidates) if candidates else None
+            else:
+                if sr and sr.get("resistance"):
+                    candidates.append(sr["resistance"])
+                if tl and tl.get("bearish_trendline"):
+                    candidates.append(tl["bearish_trendline"])
+                order_type = mt5.ORDER_TYPE_SELL_LIMIT
+                # Filtrer niveaux au-dessus du prix
+                candidates = [p for p in candidates if p and p > current_price]
+                # Choisir le plus proche au-dessus du prix
+                target = min(candidates) if candidates else None
+
+            if target is None:
+                return {"use_pending": False}
+
+            # Seuil de distance max (plus strict sur Forex)
+            max_pct = 0.005 if category == "Forex" else 0.01
+            distance_pct = abs(target - current_price) / current_price
+            if distance_pct > max_pct:
+                return {"use_pending": False}
+
+            # Respect du stops_level minimal
+            point = symbol_info.point
+            stops_level = getattr(symbol_info, "trade_stops_level", 0) or getattr(symbol_info, "stops_level", 0) or 0
+            distance_points = abs(target - current_price) / point
+            if distance_points < stops_level:
+                return {"use_pending": False}
+
+            return {"use_pending": True, "type": order_type, "price": round(target, symbol_info.digits)}
+        except Exception as e:
+            logger.debug(f"Entry strategy fallback (market) for {symbol}: {e}")
+            return {"use_pending": False}
+    
+    def get_symbol_filling_mode(self, symbol):
+        """Get the appropriate filling mode for a symbol"""
+        symbol_info = mt5.symbol_info(symbol)
+        if not symbol_info:
+            logger.error(f"Could not get symbol info for {symbol}")
+            return None
+            
+        # Check available filling modes
+        if hasattr(symbol_info, 'filling_mode'):
+            if symbol_info.filling_mode & mt5.ORDER_FILLING_FOK:
+                return mt5.ORDER_FILLING_FOK
+            elif symbol_info.filling_mode & mt5.ORDER_FILLING_IOC:
+                return mt5.ORDER_FILLING_IOC
+            elif symbol_info.filling_mode & mt5.ORDER_FILLING_RETURN:
+                return mt5.ORDER_FILLING_RETURN
+        
+        # Default to FOK if we can't determine the mode
+        logger.warning(f"Could not determine filling mode for {symbol}, defaulting to FOK")
+        return mt5.ORDER_FILLING_FOK
+
     def execute_trade(self, symbol, signal_data):
         """Exécute un trade basé sur le signal de l'IA avec détection automatique"""
         try:
@@ -1461,12 +1553,22 @@ class MT5AIClient:
             point = symbol_info.point
             tick = mt5.symbol_info_tick(symbol)
             
+            # Stratégie d'entrée (pending ou marché)
+            action_type = mt5.TRADE_ACTION_DEAL
             if signal == "BUY":
-                entry_price = tick.ask
+                market_price = tick.ask
                 request_type = mt5.ORDER_TYPE_BUY
             else:  # SELL
-                entry_price = tick.bid
+                market_price = tick.bid
                 request_type = mt5.ORDER_TYPE_SELL
+
+            plan = self.choose_entry_strategy(symbol, signal)
+            if plan.get("use_pending"):
+                entry_price = plan["price"]
+                request_type = plan["type"]
+                action_type = mt5.TRADE_ACTION_PENDING
+            else:
+                entry_price = market_price
             
             # Calculer SL/TP proportionnels
             sl, tp = self.calculate_smart_sltp(symbol, entry_price, request_type)
@@ -1475,9 +1577,15 @@ class MT5AIClient:
                 logger.error(f"Impossible de calculer SL/TP pour {symbol}")
                 return False
             
+            # Get the appropriate filling mode for this symbol
+            filling_mode = self.get_symbol_filling_mode(symbol)
+            if filling_mode is None:
+                logger.error(f"Impossible de déterminer le mode de remplissage pour {symbol}")
+                return False
+                
             # Créer la requête d'ordre avec SL/TP intelligents
             request = {
-                "action": mt5.TRADE_ACTION_DEAL,
+                "action": action_type,
                 "symbol": symbol,
                 "volume": position_size,
                 "type": request_type,
@@ -1486,14 +1594,19 @@ class MT5AIClient:
                 "tp": tp,
                 "deviation": 20,
                 "magic": 234000,
-                "comment": f"AI-{signal}-{category}",  # shorter comment to comply with MT5 limits
+                "comment": f"AI-{signal}-{category}",
                 "type_time": mt5.ORDER_TIME_GTC,
-                "type_filling": mt5.ORDER_FILLING_RETURN,  # Changed to RETURN for broader compatibility
+                "type_filling": filling_mode,
             }
             
             # Logger les détails pour debug
             logger.info(f"Tentative ordre {signal} {symbol} [{category}]:")
             logger.info(f"  Entry: {entry_price}")
+            if action_type == mt5.TRADE_ACTION_PENDING:
+                lim_kind = "BUY_LIMIT" if request_type == mt5.ORDER_TYPE_BUY_LIMIT else "SELL_LIMIT"
+                logger.info(f"  Entry strategy: Pending {lim_kind} basé sur S/R/Trendline")
+            else:
+                logger.info("  Entry strategy: Market")
             perc_sl = abs((entry_price - sl) / entry_price) * 100
             logger.info(f"  SL: {sl} ({perc_sl:.1f}% du prix)")
             perc_tp = abs((tp - entry_price) / entry_price) * 100
@@ -1575,6 +1688,58 @@ class MT5AIClient:
         except Exception as e:
             logger.error(f"Erreur verification positions: {e}")
     
+    def close_position(self, pos):
+        try:
+            symbol = pos.symbol
+            volume = pos.volume
+            position_ticket = pos.ticket
+            symbol_info = mt5.symbol_info(symbol)
+            if not symbol_info:
+                return False
+            tick = mt5.symbol_info_tick(symbol)
+            if not tick:
+                return False
+            if pos.type == mt5.POSITION_TYPE_BUY:
+                price = tick.bid
+                order_type = mt5.ORDER_TYPE_SELL
+            else:
+                price = tick.ask
+                order_type = mt5.ORDER_TYPE_BUY
+            request = {
+                "action": mt5.TRADE_ACTION_DEAL,
+                "symbol": symbol,
+                "volume": volume,
+                "type": order_type,
+                "position": position_ticket,
+                "price": price,
+                "deviation": 20,
+                "magic": 234000,
+                "comment": "AI-Autoclose-1",
+                "type_time": mt5.ORDER_TIME_GTC,
+                "type_filling": mt5.ORDER_FILLING_RETURN,
+            }
+            result = mt5.order_send(request)
+            if result and result.retcode == mt5.TRADE_RETCODE_DONE:
+                logger.info(f"Position fermee {symbol} ticket={position_ticket} profit=${pos.profit:.2f}")
+                return True
+            else:
+                logger.error(f"Echec fermeture {symbol} ticket={position_ticket}: {result.retcode if result else 'None'}")
+                return False
+        except Exception as e:
+            logger.error(f"Erreur fermeture position {pos.symbol}: {e}")
+            return False
+    
+    def auto_close_winners(self, profit_target=1.0):
+        try:
+            positions = mt5.positions_get()
+            if not positions:
+                return
+            for pos in positions:
+                if pos.profit is not None and pos.profit >= profit_target:
+                    self.close_position(pos)
+        except Exception as e:
+            logger.error(f"Erreur auto close: {e}")
+    
     def send_training_data(self):
         """Envoie les données récentes pour l'entraînement avec symboles détectés"""
         try:
@@ -1651,8 +1816,8 @@ class MT5AIClient:
         try:
             feedback = {
                 "symbol": symbol,
-                "signal": signal_data.get('signal'),
-                "confidence": signal_data.get('confidence'),
+                "signal": signal_data.get('signal', 'UNKNOWN'),
+                "confidence": signal_data.get('confidence', 0),
                 "status": status,
                 "timestamp": datetime.now().isoformat(),
                 "source": signal_data.get('source', 'unknown')
@@ -1666,10 +1831,114 @@ class MT5AIClient:
             
             if response.status_code == 200:
                 logger.debug(f"Feedback envoye pour {symbol}")
+                return True
+            return False
             
         except Exception as e:
             logger.warning(f"Erreur feedback {symbol}: {e}")
-    
+            return False
+            
+            positions_data = []
+            signals_data = []
+            trade_history = []
+            trading_stats = {}
+            total_profit = 0
+            
+            for pos in self.positions.values():
+                positions_data.append({
+                    "symbol": pos["symbol"],
+                    "type": pos["type"],
+                    "volume": pos["volume"],
+                    "price": pos["price"],
+                    "sl": pos["sl"],
+                    "tp": pos["tp"],
+                    "open_time": pos["open_time"].isoformat(),
+                    "profit": pos["profit"] if "profit" in pos else 0,
+                    "signal_data": pos["signal_data"],
+                    "category": pos["category"]
+                })
+                
+                total_profit += pos["profit"] if "profit" in pos else 0
+                
+                if pos["symbol"] not in trading_stats:
+                    trading_stats[pos["symbol"]] = {
+                        "win": 0,
+                        "loss": 0,
+                        "total": 0,
+                        "win_rate": 0
+                    }
+                
+                if pos["profit"] > 0:
+                    trading_stats[pos["symbol"]]["win"] += 1
+                    trading_stats[pos["symbol"]]["profit"] += pos["profit"]
+                else:
+                    trading_stats[pos["symbol"]]["loss"] += 1
+                
+                trading_stats[pos["symbol"]]["total"] += 1
+            
+            # Ajouter les données de trading pour les stats
+            for symbol, stats in trading_stats.items():
+                trading_stats[symbol]["win_rate"] = stats["win"] / stats["total"] if stats["total"] > 0 else 0
+            
+            # Préparer les données à synchroniser dans le nouveau format
+            sync_data = {
+                'positions': positions_data,
+                'signals': signals_data,
+                'trade_history': trade_history,
+                'trading_stats': trading_stats,
+                'total_profit': total_profit,
+                'last_updated': datetime.now().isoformat(),
+                'source': 'MT5_Client',
+                'version': '1.0.0'  # Ajout d'un numéro de version pour le suivi
+            }
+            
+            # Liste des URLs à essayer (d'abord local, puis Render)
+            api_urls = [LOCAL_API_URL, RENDER_API_URL]
+            success = False
+            last_error = None
+            
+            for api_url in api_urls:
+                try:
+                    logger.info(f"🔁 Tentative de synchronisation avec {api_url}")
+                    
+                    # Envoyer au web dashboard
+                    response = requests.post(
+                        f"{api_url}/api/sync",
+                        json=sync_data,
+                        timeout=5
+                    )
+                    
+                    if response.status_code == 200:
+                        logger.info(f"✅ Données synchronisées avec succès sur {api_url}")
+                        success = True
+                        break  # Sortir de la boucle si la synchronisation réussit
+                    else:
+                        error_msg = f"⚠️ Erreur synchronisation avec {api_url}: {response.status_code}"
+                        if hasattr(response, 'text'):
+                            error_msg += f" - {response.text}"
+                        logger.warning(error_msg)
+                        last_error = error_msg
+                        
+                except requests.exceptions.RequestException as e:
+                    error_msg = f"⚠️ Impossible de se connecter à {api_url}: {str(e)}"
+                    logger.warning(error_msg)
+                    last_error = error_msg
+                except Exception as e:
+                    error_msg = f"❌ Erreur inattendue avec {api_url}: {str(e)}"
+                    logger.error(error_msg)
+                    last_error = error_msg
+            
+            if not success and last_error:
+                logger.error(f"❌ Échec de la synchronisation avec tous les serveurs. Dernière erreur: {last_error}")
+                
+            return success
+                
+        except Exception as e:
+            error_msg = f"❌ Erreur lors de la préparation des données pour le dashboard: {str(e)}"
+            logger.error(error_msg)
+            import traceback
+            logger.error(f"Détails de l'erreur: {traceback.format_exc()}")
+
     def run(self):
         """Boucle principale du client avec détection automatique des symboles"""
         logger.info("🚀 Demarrage du client MT5 AI Ultra-Optimisé")
@@ -1685,6 +1954,7 @@ class MT5AIClient:
                 try:
                     # Vérifier les positions existantes
                     self.check_positions()
+                    self.auto_close_winners(1.0)
                     
                     # Envoyer les données d'entraînement toutes les heures
                     current_time = time.time()
