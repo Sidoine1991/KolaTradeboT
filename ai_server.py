@@ -1163,7 +1163,7 @@ MT5_HISTORY_CACHE_TTL = 300  # TTL de 5 minutes (les données sont rafraîchies 
 prediction_history: Dict[str, List[Dict[str, Any]]] = {}  # {symbol: [predictions]}
 PREDICTION_VALIDATION_FILE = DATA_DIR / "prediction_validation.json"
 MIN_VALIDATION_BARS = 10  # Minimum 10 bougies pour valider
-MIN_ACCURACY_THRESHOLD = 0.60  # Seuil minimum de précision (60%)
+MIN_ACCURACY_THRESHOLD = 0.55  # lowered from 60% to 55%  # Seuil minimum de précision (60%)
 MAX_HISTORICAL_PREDICTIONS = 100  # Maximum 100 prédictions par symbole
 
 def load_prediction_history():
@@ -6351,7 +6351,7 @@ async def decision(request: DecisionRequest):
                             if action == "buy":
                                 confidence = min(confidence + 0.10, 0.98)  # +10% si BUY et mouvement haussier
                                 reason_parts.append(f"RealtimeUp:+{realtime_movement['price_change_percent']:+.2f}%")
-                            elif action == "hold" and realtime_movement["trend_consistent"]:
+                            elif action == "hold" and realtime_movement["trend_consistent"] and (bullish_tfs >= bearish_tfs):
                                 # Forcer BUY si mouvement haussier fort et scoring avancé = HOLD
                                 action = "buy"
                                 confidence = 0.60 + realtime_movement["strength"] * 0.20
@@ -6608,7 +6608,7 @@ async def decision(request: DecisionRequest):
         BASE_CONF = 0.35       # Base réduite car plus de timeframes
         MAX_CONF = 0.98        # Augmenté pour signaux ultra-forts
         MIN_CONF = 0.15
-        HOLD_THRESHOLD = 0.03  # Seuil réduit pour permettre plus de signaux (était 0.08)
+        HOLD_THRESHOLD = 0.03  # Seuil réduit pour permettre plus de signaux
 
         # Score directionnel pondéré
         score = 0.0
@@ -10648,7 +10648,7 @@ async def get_autoscan_signals(symbol: Optional[str] = None):
                             reason = "Volatilité Baissier"
                 
                 # Si un signal a été détecté, créer l'entrée
-                if action and confidence >= 0.60:  # Seuil minimum de confiance
+                if action and confidence >= 0.55:  # Seuil minimum de confiance
                     # Calculer stop loss et take profit basés sur ATR
                     if action == "BUY":
                         entry_price = current_price
