@@ -6612,8 +6612,7 @@ async def decision(request: DecisionRequest):
 
         # Score directionnel pondéré
         score = 0.0
-        components = []
-
+        components = []\n        # Canal de prédiction M5 (pente normalisée)\n        channel_slope = 0.0\n        try:\n            rates_chan = mt5.copy_rates_from_pos(request.symbol, mt5.TIMEFRAME_M5, 0, 80)\n            if rates_chan is not None and len(rates_chan) >= 30:\n                df_chan = pd.DataFrame(rates_chan)\n                closes_chan = df_chan[\'close\'].tail(50)\n                x_idx = np.arange(len(closes_chan))\n                coeff = np.polyfit(x_idx, closes_chan.values, 1)\n                last_price = float(closes_chan.iloc[-1]) if len(closes_chan) > 0 else 0.0\n                if last_price > 0:\n                    channel_slope = float(coeff[0]) / last_price\n                if channel_slope > 0:\n                    components.append(\"ChUp\")\n                elif channel_slope < 0:\n                    components.append(\"ChDown\")\n        except Exception:\n            pass\n
         # Timeframes - pondération multi-niveaux
         if m1_bullish:
             score += WEIGHTS["m1"]; components.append("M1:+")
@@ -6844,7 +6843,7 @@ async def decision(request: DecisionRequest):
         if action != "hold" and (m5_bullish and h1_bullish) and not (h4_bullish or d1_bullish):
             confidence = max(confidence, 0.55)
         elif action != "hold" and (m5_bearish and h1_bearish) and not (h4_bearish or d1_bearish):
-            confidence = max(confidence, 0.55)
+            confidence = max(confidence, 0.55)\n\n        # 8.b OVERRIDE EMA/CHANNEL: éviter HOLD contre une tendance claire M5/H1 avec canal aligné\n        if action == "hold":\n            if (m5_bullish and (h1_bullish or not h1_bearish)) and channel_slope > 0:\n                action = "buy"\n                confidence = max(confidence, 0.55)\n                components.append("EMA+Channel↑")\n            elif (m5_bearish and (h1_bearish or not h1_bullish)) and channel_slope < 0:\n                action = "sell"\n                confidence = max(confidence, 0.55)\n                components.append("EMA+Channel↓")\n
         
         # 9. Intégration de la décision ML multi-modèles (Boom/Crash, Forex, Commodities, Volatility)
         ml_decision = None
@@ -6988,6 +6987,32 @@ async def decision(request: DecisionRequest):
                 else:
                     logger.info(f"⏸️ ML ignoré: confiance trop faible ({ml_conf:.1%} < 0.50) ou action=hold")
 
+
+        # Harmonisation de la confiance avec l'alignement (M1/M5/H1) et la décision finale
+        try:
+            core_bullish_count = int(m1_bullish) + int(m5_bullish) + int(h1_bullish)
+            core_bearish_count = int(m1_bearish) + int(m5_bearish) + int(h1_bearish)
+            if action in ("buy", "sell"):
+                core_count = core_bullish_count if action == "buy" else core_bearish_count
+                # Carte des seuils cibles selon l'alignement coeur (3 TF)
+                if core_count >= 3:
+                    target_min = 0.90
+                elif core_count == 2:
+                    target_min = 0.75
+                elif core_count == 1:
+                    target_min = 0.60
+                else:
+                    target_min = 0.0
+                # Bonus canal si aligné avec l'action
+                if (action == "buy" and channel_slope > 0) or (action == "sell" and channel_slope < 0):
+                    target_min = min(MAX_CONF, target_min + 0.05)
+                # Bonus fort si mouvement temps réel confirme et alignement 3/3
+                if core_count >= 3 and realtime_movement.get("trend_consistent") and realtime_movement.get("strength", 0.0) > 0.5:
+                    target_min = min(MAX_CONF, max(target_min, 0.90) + 0.03)
+                confidence = max(confidence, target_min)
+                components.append(f"Core{('B' if action=='buy' else 'S')}:{core_count}/3")
+        except Exception as _conf_ex:
+            logger.debug(f"Align/Conf harmonization skipped: {_conf_ex}")
         # 10. S'assurer que la confiance est dans les limites raisonnables
         confidence = max(0.10, min(MAX_CONF, confidence))
         
