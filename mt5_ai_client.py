@@ -1151,12 +1151,12 @@ class MT5AIClient:
         best_signal = max(votes, key=votes.get)
         best_confidence = votes[best_signal] / total_confidence
         
-        # Seuil minimum de confiance
-        if best_confidence < 0.6:
+        # Seuil minimum de confiance (abaissé à 55 %)
+        if best_confidence < 0.55:
             return None
         
-        # Si HOLD gagne, pas de signal
-        if best_signal == 'HOLD':
+        # Si HOLD gagne, vérifier s'il domine réellement
+        if best_signal == 'HOLD' and votes['HOLD'] > max(votes['BUY'], votes['SELL']):
             return None
         
         # Créer le signal final
