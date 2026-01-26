@@ -196,18 +196,18 @@ class SymbolDetector:
                         logger.info(f"   📈 Volatility: {symbol_name}")
                 
                 # Catégorie 3: Forex (paires majeures)
-                elif symbol.visible and symbol.trade_mode in [1, 4]:
+                elif symbol.visible and symbol.trade_mode in [1, 4] and not any(m in symbol_name for m in ["XAU", "XAG", "XPT", "XPD"]):
                     forex_pairs = ["EUR", "GBP", "USD", "JPY", "AUD", "CAD", "CHF", "NZD"]
                     if any(pair in symbol_name for pair in forex_pairs):
                         self.forex_symbols.append(symbol_name)
                         logger.info(f"   💱 Forex: {symbol_name}")
                 
-                # Catégorie 4: Métaux précieux
+                # Catégorie 4: Metals (précieux)
                 elif symbol.visible and symbol.trade_mode in [1, 4]:
                     metals = ["XAU", "XAG", "XPT", "XPD"]  # Or, Argent, Platine, Palladium
                     if any(metal in symbol_name for metal in metals):
                         self.metals_symbols.append(symbol_name)
-                        logger.info(f"   🥇 Métaux: {symbol_name}")
+                        logger.info(f"   🥇 Metals: {symbol_name}")
             
             # Combiner toutes les catégories par ordre de priorité
             self.all_symbols = self.boom_crash_symbols + self.volatility_symbols + self.metals_symbols + self.forex_symbols
@@ -215,7 +215,7 @@ class SymbolDetector:
             logger.info(f"✅ Détection terminée:")
             logger.info(f"   🚀 Boom/Crash: {len(self.boom_crash_symbols)} symboles")
             logger.info(f"   📈 Volatility: {len(self.volatility_symbols)} symboles")
-            logger.info(f"   🥇 Métaux: {len(self.metals_symbols)} symboles")
+            logger.info(f"   🥇 Metals: {len(self.metals_symbols)} symboles")
             logger.info(f"   💱 Forex: {len(self.forex_symbols)} symboles")
             logger.info(f"   📊 Total: {len(self.all_symbols)} symboles")
             
@@ -227,7 +227,7 @@ class SymbolDetector:
     
     def get_symbols_by_priority(self):
         """Retourne les symboles par ordre de priorité"""
-        return self.all_symbols  # Déjà dans l'ordre: Boom/Crash → Volatility → Métaux → Forex
+        return self.all_symbols  # Ordre: Boom/Crash → Volatility → Metals → Forex
     
     def get_category(self, symbol):
         """Retourne la catégorie d'un symbole"""
@@ -236,7 +236,7 @@ class SymbolDetector:
         elif symbol in self.volatility_symbols:
             return "Volatility"
         elif symbol in self.metals_symbols:
-            return "Métaux"
+            return "Metals"
         elif symbol in self.forex_symbols:
             return "Forex"
         else:
@@ -250,7 +250,7 @@ class SymbolDetector:
             return 0.2  # Taille plus grande pour indices synthétiques
         elif category == "Volatility":
             return 0.1  # Taille moyenne pour volatilité
-        elif category == "Métaux":
+        elif category == "Metals":
             return 0.05  # Taille modérée pour métaux
         else:  # Forex
             return 0.01  # Taille standard pour forex
@@ -1569,7 +1569,7 @@ class MT5AIClient:
             categories = [
                 ("Boom/Crash", self.symbol_detector.boom_crash_symbols),
                 ("Volatility", self.symbol_detector.volatility_symbols),
-                ("Métaux", self.symbol_detector.metals_symbols),
+                ("Metals", self.symbol_detector.metals_symbols),
                 ("Forex", self.symbol_detector.forex_symbols)
             ]
             
