@@ -3473,6 +3473,124 @@ async def upload_ml_model(request: MLModelUploadRequest):
         logger.error(f"Erreur upload modèle ML: {e}")
         raise HTTPException(status_code=500, detail=f"Erreur lors de l'upload du modèle: {str(e)}")
 
+@app.post("/ml/predict-signal")
+async def predict_trading_signal(request: Dict[str, Any]):
+    """
+    Endpoint principal pour le robot MT5
+    Retourne un signal de trading complet (direction, confidence, SL, TP)
+    """
+    try:
+        symbol = request.get('symbol')
+        timeframe = request.get('timeframe', 'M1')
+        current_price = request.get('current_price')
+        bid = request.get('bid')
+        ask = request.get('ask')
+        
+        if not symbol:
+            raise HTTPException(status_code=400, detail="Symbol requis")
+        
+        # Vérifier si nous avons un modèle pour ce symbole
+        model_key = f"{symbol}_{timeframe}"
+        
+        if model_key not in ml_models_cache:
+            # Fallback vers l'analyse de tendance
+            logger.warning(f"Pas de modèle ML pour {model_key}, utilisation de l'analyse de tendance")
+            trend_result = calculate_enhanced_trend_direction(symbol, timeframe)
+            
+            return {
+                "signal": trend_result.get("direction", "neutral"),
+                "confidence": trend_result.get("confidence", 50.0),
+                "source": "trend_analysis",
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "stop_loss": None,
+                "take_profit": None,
+                "position_size": 0.01,  # Default
+                "reasoning": trend_result.get("signals", []),
+                "timestamp": datetime.now().isoformat()
+            }
+        
+        # Utiliser le modèle ML
+        model_data = ml_models_cache[model_key]
+        best_model = model_data.get('best_model', 'RandomForest')
+        
+        # Récupérer les données récentes pour la prédiction
+        df = get_market_data(symbol, timeframe, 100)
+        
+        if df.empty or len(df) < 50:
+            raise HTTPException(status_code=400, detail="Données insuffisantes pour la prédiction")
+        
+        # Extraire les features
+        features_df = extract_advanced_features(df)
+        
+        if features_df is None or features_df.empty:
+            raise HTTPException(status_code=400, detail="Erreur extraction features")
+        
+        # Préparer les données pour la prédiction
+        latest_features = features_df.iloc[-1:].dropna()
+        
+        if latest_features.empty:
+            raise HTTPException(status_code=400, detail="Features invalides")
+        
+        # Faire la prédiction
+        prediction = None
+        if best_model in model_data and model_data[best_model]:
+            try:
+                model = model_data[best_model]
+                prediction = model.predict(latest_features)[0]
+                confidence = max(model.predict_proba(latest_features)[0]) * 100
+            except:
+                prediction = 0
+                confidence = 50.0
+        
+        # Convertir la prédiction en signal
+        if prediction == 1:
+            signal = "BUY"
+        elif prediction == -1:
+            signal = "SELL"
+        else:
+            signal = "HOLD"
+        
+        # Calculer SL/TP basés sur l'ATR
+        atr = calculate_atr(df, 14).iloc[-1]
+        current_price = df['close'].iloc[-1]
+        
+        stop_loss = None
+        take_profit = None
+        
+        if signal == "BUY":
+            stop_loss = current_price - (atr * 2)
+            take_profit = current_price + (atr * 3)
+        elif signal == "SELL":
+            stop_loss = current_price + (atr * 2)
+            take_profit = current_price - (atr * 3)
+        
+        return {
+            "signal": signal,
+            "confidence": round(confidence, 1),
+            "source": "ml_model",
+            "model_used": best_model,
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "current_price": current_price,
+            "stop_loss": round(stop_loss, 5) if stop_loss else None,
+            "take_profit": round(take_profit, 5) if take_profit else None,
+            "position_size": 0.01,  # Peut être ajusté selon la confidence
+            "atr": round(atr, 5),
+            "reasoning": [
+                f"Modèle: {best_model}",
+                f"Confiance: {confidence:.1f}%",
+                f"Signal: {signal}"
+            ],
+            "timestamp": datetime.now().isoformat()
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Erreur prédiction signal: {e}")
+        raise HTTPException(status_code=500, detail=f"Erreur lors de la prédiction: {str(e)}")
+
 @app.get("/ml/uploaded-models")
 async def list_uploaded_models():
     """Liste tous les modèles uploadés"""
@@ -4177,17 +4295,17 @@ async def calculate_coherent_analysis(symbol: str, timeframes: Optional[List[str
                     "bearish": False
                 }
         
-        # Pondération des timeframes OPTIMISÉE pour réduire les faux signaux
-        # Donner plus de poids aux timeframes plus longs (plus fiables)
-        # Réduire le poids des timeframes très courts (plus de bruit)
+        # Pondération des timeframes RENFORCÉE pour cohérence maximale
+        # Donner un poids écrasant aux timeframes longs (très fiables)
+        # Éliminer presque complètement l'influence des timeframes courts (bruit)
         timeframe_weights = {
-            'd1': 0.35,    # Augmenté: Daily le plus fiable
-            'h4': 0.30,    # Augmenté: 4h très fiable
-            'h1': 0.20,    # Stable: 1h bon équilibre
-            'm30': 0.08,   # Réduit: 30min bruité
-            'm15': 0.05,   # Réduit: 15min beaucoup de bruit
-            'm5': 0.02,    # Fort réduit: 5min très bruité
-            'm1': 0.00     # Minimisé: 1min trop de bruit
+            'd1': 0.45,    # Augmenté: Daily le plus fiable (45%)
+            'h4': 0.35,    # Augmenté: 4h très fiable (35%)
+            'h1': 0.15,    # Réduit: 1h influence modérée (15%)
+            'm30': 0.03,   # Fort réduit: 30min très bruité (3%)
+            'm15': 0.01,   # Minimisé: 15min bruit extrême (1%)
+            'm5': 0.01,    # Minimisé: 5min bruit extrême (1%)
+            'm1': 0.00     # Éliminé: 1min aucun poids (0%)
         }
         
         # Calcul de la cohérence des tendances
@@ -4235,22 +4353,22 @@ async def calculate_coherent_analysis(symbol: str, timeframes: Optional[List[str
         max_diff = max(bullish_pct, bearish_pct, neutral_pct)
         stability = "ÉLEVÉE" if max_diff >= 60 else "MOYENNE" if max_diff >= 40 else "FAIBLE"
         
-        # Seuils de décision AMÉLIORÉS pour réduire les faux signaux
-        # Exiger plus de cohérence pour les signaux forts
-        if bullish_pct >= 70:  # Seuil plus élevé
+        # Seuils de décision RENFORCÉS pour exiger une VRAIE cohérence
+        # Seulement les signaux avec forte cohérence multi-timeframes seront acceptés
+        if bullish_pct >= 85:  # Seuil très élevé - cohérence forte requise
             decision = "ACHAT FORT"
             decision_type = "BUY"
-        elif bearish_pct >= 70:  # Seuil plus élevé
+        elif bearish_pct >= 85:  # Seuil très élevé - cohérence forte requise
             decision = "VENTE FORTE"
             decision_type = "SELL"
-        elif bullish_pct >= 55:  # Seuil modéré augmenté
+        elif bullish_pct >= 75:  # Seuil élevé - bonne cohérence
             decision = "ACHAT MODÉRÉ"
             decision_type = "BUY"
-        elif bearish_pct >= 55:  # Seuil modéré augmenté
+        elif bearish_pct >= 75:  # Seuil élevé - bonne cohérence
             decision = "VENTE MODÉRÉE"
             decision_type = "SELL"
         else:
-            decision = "ATTENTE"
+            decision = "ATTENTE - COHÉRENCE INSUFFISANTE"
             decision_type = "HOLD"
         
         return {
