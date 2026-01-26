@@ -21,9 +21,13 @@ TIMEFRAMES = ["M5"]  # Horizon M5 comme demandé
 CHECK_INTERVAL = 60  # Secondes entre chaque vérification
 MIN_CONFIDENCE = 0.70  # Confiance minimale pour prendre un trade (70% = 0.70)
 
-# SL/TP proportionnels au prix (plus réalistes)
-SL_PERCENTAGE = 0.02  # 2% du prix pour SL
-TP_PERCENTAGE = 0.04  # 4% du prix pour TP
+# SL/TP par défaut (Boom/Crash, Volatility, Metals)
+SL_PERCENTAGE_DEFAULT = 0.02  # 2%
+TP_PERCENTAGE_DEFAULT = 0.04  # 4%
+
+# SL/TP spécifiques Forex (pips plus larges)
+SL_PERCENTAGE_FOREX = 0.01  # 1%
+TP_PERCENTAGE_FOREX = 0.06  # 6%
 
 # Tailles de position par type de symbole
 POSITION_SIZES = {
@@ -1385,9 +1389,18 @@ class MT5AIClient:
         point = symbol_info.point
         digits = symbol_info.digits
         
-        # Calculer les distances en prix selon le pourcentage
-        sl_distance_price = entry_price * SL_PERCENTAGE
-        tp_distance_price = entry_price * TP_PERCENTAGE
+        # Choisir les pourcentages selon la catégorie
+        category = self.symbol_detector.get_category(symbol)
+        if category == "Forex":
+            sl_pct = SL_PERCENTAGE_FOREX
+            tp_pct = TP_PERCENTAGE_FOREX
+        else:
+            sl_pct = SL_PERCENTAGE_DEFAULT
+            tp_pct = TP_PERCENTAGE_DEFAULT
+
+        # Calculer les distances en prix selon le pourcentage sélectionné
+        sl_distance_price = entry_price * sl_pct
+        tp_distance_price = entry_price * tp_pct
         
         # Convertir en points pour information
         sl_distance_points = sl_distance_price / point
@@ -1406,7 +1419,9 @@ class MT5AIClient:
         sl = round(sl, digits)
         tp = round(tp, digits)
         
-        logger.info(f"SL/TP calculés pour {symbol}: Entry={entry_price}, SL={sl} ({SL_PERCENTAGE*100:.0f}%), TP={tp} ({TP_PERCENTAGE*100:.0f}%)")
+        logger.info(
+            f"SL/TP calculés pour {symbol}: Entry={entry_price}, SL={sl} ({sl_pct*100:.0f}%), TP={tp} ({tp_pct*100:.0f}%)"
+        )
         
         return sl, tp
     
