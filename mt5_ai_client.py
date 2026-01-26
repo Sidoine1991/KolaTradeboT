@@ -1494,10 +1494,13 @@ class MT5AIClient:
             # Logger les détails pour debug
             logger.info(f"Tentative ordre {signal} {symbol} [{category}]:")
             logger.info(f"  Entry: {entry_price}")
-            logger.info(f"  SL: {sl} ({SL_PERCENTAGE*100:.0f}% du prix)")
-            logger.info(f"  TP: {tp} ({TP_PERCENTAGE*100:.0f}% du prix)")
+            perc_sl = abs((entry_price - sl) / entry_price) * 100
+            logger.info(f"  SL: {sl} ({perc_sl:.1f}% du prix)")
+            perc_tp = abs((tp - entry_price) / entry_price) * 100
+            logger.info(f"  TP: {tp} ({perc_tp:.1f}% du prix)")
             logger.info(f"  Volume: {position_size}")
-            logger.info(f"  Risk/Reward: 1:{TP_PERCENTAGE/SL_PERCENTAGE:.1f}")
+            rr = perc_tp / perc_sl if perc_sl != 0 else 0
+            logger.info(f"  Risk/Reward: 1:{rr:.1f}")
             
             # Envoyer l'ordre
             result = mt5.order_send(request)
