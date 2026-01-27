@@ -18,7 +18,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Tuple, Set
 from fastapi import FastAPI, HTTPException, Request, Body, status
-from starlette.requests import Request
+from starlette.requests import Request as StarletteRequest
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
@@ -27,7 +27,6 @@ import pandas as pd
 import numpy as np
 import requests
 import joblib
-from pathlib import Path
 from collections import deque
 
 # Configurer le logger avant les imports d'améliorations
@@ -48,7 +47,10 @@ try:
     logger.info("✅ Module ai_server_improvements chargé avec succès")
 except ImportError:
     IMPROVEMENTS_AVAILABLE = False
-    logger.warning("⚠️ Module ai_server_improvements non disponible - utilisation des fonctions de base")
+    logger.warning(
+        "⚠️ Module ai_server_improvements non disponible - "
+        "utilisation des fonctions de base"
+    )
 
 # PostgreSQL async support for feedback loop
 try:
@@ -179,7 +181,10 @@ def get_market_data(symbol: str, timeframe: str = "M1", count: int = 1000) -> pd
     if cache_key in _history_cache:
         cached_data = _history_cache[cache_key]
         if not cached_data.empty:
-            logger.info(f"Données récupérées depuis cache: {len(cached_data)} bougies pour {symbol}")
+            logger.info(
+                f"Données récupérées depuis cache: "
+                f"{len(cached_data)} bougies pour {symbol}"
+            )
             return cached_data
     
     # Essayer MT5 d'abord
@@ -233,9 +238,15 @@ try:
         logger.info(f"✅ Fichier .env chargé depuis: {env_path}")
     else:
         load_dotenv()  # Essaie de charger depuis le répertoire courant
-        logger.info("✅ Variables d'environnement chargées (fichier .env non trouvé, utilisation des variables système)")
+        logger.info(
+            "✅ Variables d'environnement chargées "
+            "(fichier .env non trouvé, utilisation des variables système)"
+        )
 except ImportError:
-    logger.warning("⚠️ python-dotenv non disponible - utilisation des variables d'environnement système uniquement")
+    logger.warning(
+        "⚠️ python-dotenv non disponible - "
+        "utilisation des variables d'environnement système uniquement"
+    )
 except Exception as e:
     logger.warning(f"⚠️ Erreur lors du chargement du .env: {e}")
 
@@ -258,14 +269,18 @@ def calculate_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
     true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
     return true_range.rolling(window=period).mean()
 
-def calculate_macd(prices: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9) -> pd.Series:
+def calculate_macd(
+    prices: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9
+) -> pd.Series:
     exp1 = prices.ewm(span=fast, adjust=False).mean()
     exp2 = prices.ewm(span=slow, adjust=False).mean()
     macd = exp1 - exp2
     signal_line = macd.ewm(span=signal, adjust=False).mean()
     return macd - signal_line
 
-def calculate_bollinger_bands(prices: pd.Series, window: int = 20, num_std: int = 2) -> Dict[str, pd.Series]:
+def calculate_bollinger_bands(
+    prices: pd.Series, window: int = 20, num_std: int = 2
+) -> Dict[str, pd.Series]:
     sma = prices.rolling(window=window).mean()
     std = prices.rolling(window=window).std()
     return {
@@ -342,7 +357,10 @@ def get_mt5_indicators(symbol: str, timeframe: str, count: int = 100) -> Optiona
         
         # Vérification des données manquantes
         if df.isnull().values.any():
-            logger.warning(f"Données manquantes détectées pour {symbol} {timeframe}, tentative de remplissage...")
+            logger.warning(
+                f"Données manquantes détectées pour {symbol} {timeframe}, "
+                "tentative de remplissage..."
+            )
             df = df.ffill().bfill()
             
             # Si des valeurs manquantes persistent, on les remplace par la dernière valeur valide
@@ -378,7 +396,9 @@ def get_mt5_indicators(symbol: str, timeframe: str, count: int = 100) -> Optiona
             
             # MACD
             if len(df) >= 26:  # Période minimale pour MACD
-                macd_line = df['close'].ewm(span=12, adjust=False).mean() - df['close'].ewm(span=26, adjust=False).mean()
+                ema12 = df['close'].ewm(span=12, adjust=False).mean()
+                ema26 = df['close'].ewm(span=26, adjust=False).mean()
+                macd_line = ema12 - ema26
                 signal_line = macd_line.ewm(span=9, adjust=False).mean()
                 indicators['macd'] = (macd_line - signal_line).iloc[-1]
             
@@ -389,7 +409,10 @@ def get_mt5_indicators(symbol: str, timeframe: str, count: int = 100) -> Optiona
                     'bb_upper': bb['upper'].iloc[-1],
                     'bb_middle': bb['middle'].iloc[-1],
                     'bb_lower': bb['lower'].iloc[-1],
-                    'bb_width': (bb['upper'].iloc[-1] - bb['lower'].iloc[-1]) / bb['middle'].iloc[-1] if bb['middle'].iloc[-1] != 0 else 0
+                    'bb_width': (
+                        (bb['upper'].iloc[-1] - bb['lower'].iloc[-1]) / 
+                        bb['middle'].iloc[-1] if bb['middle'].iloc[-1] != 0 else 0
+                    )
                 })
             
             # Volume moyen sur 20 périodes
@@ -555,7 +578,10 @@ try:
     logger.info("MetaTrader5 disponible")
 except ImportError:
     MT5_AVAILABLE = False
-    logger.info("MetaTrader5 n'est pas installé - le serveur fonctionnera en mode API uniquement (sans connexion MT5)")
+    logger.info(
+        "MetaTrader5 n'est pas installé - "
+        "le serveur fonctionnera en mode API uniquement (sans connexion MT5)"
+    )
 
 # Configuration Mistral AI (désactivée dans cette version déployée)
 MISTRAL_AVAILABLE = False
@@ -813,7 +839,11 @@ def adjust_decision_with_rules(
 
         if action != "hold" and conf >= 0.7 and lift >= 1.0:
             bonus += min((conf - 0.5) * 0.1, 0.05)  # max +0.05 par règle
-            applied_rules.append(f"{','.join(sorted(antecedent))} (conf={conf:.2f},lift={lift:.2f})")
+            rule_str = (
+                f"{','.join(sorted(antecedent))} "
+                f"(conf={conf:.2f},lift={lift:.2f})"
+            )
+            applied_rules.append(rule_str)
 
     if bonus != 0.0:
         new_conf = max(0.0, min(1.0, confidence + bonus))
@@ -868,7 +898,10 @@ async def get_db_pool():
     """Get or create database connection pool"""
     if not hasattr(app.state, "db_pool"):
         if not DB_AVAILABLE:
-            logger.warning("PostgreSQL non disponible - DATABASE_URL manquant ou asyncpg non installé")
+            logger.warning(
+        "PostgreSQL non disponible - "
+        "DATABASE_URL manquant ou asyncpg non installé"
+    )
             return None
         try:
             # Pour Render PostgreSQL, il faut ajouter SSL
@@ -891,7 +924,10 @@ async def get_db_pool():
             )
             logger.info("✅ Pool de connexions PostgreSQL créé")
         except asyncio.TimeoutError:
-            logger.error("❌ Timeout lors de la création du pool PostgreSQL - Vérifiez la connexion réseau")
+            logger.error(
+        "❌ Timeout lors de la création du pool PostgreSQL - "
+        "Vérifiez la connexion réseau"
+    )
             app.state.db_pool = None
             return None
         except Exception as e:
@@ -948,7 +984,12 @@ async def shutdown_event():
 # Parser les arguments en ligne de commande
 parser = argparse.ArgumentParser(description='Serveur AI TradBOT')
 parser.add_argument('--port', type=int, default=8000, help='Port sur lequel démarrer le serveur')
-parser.add_argument('--host', type=str, default='127.0.0.1', help='Adresse IP sur laquelle écouter')
+parser.add_argument(
+    '--host', 
+    type=str, 
+    default='127.0.0.1', 
+    help='Adresse IP sur laquelle écouter'
+)
 args = parser.parse_args()
 
 # Variables globales
@@ -959,7 +1000,8 @@ CACHE_DURATION = 30  # secondes
 RUNNING_ON_RENDER = bool(os.getenv("RENDER") or os.getenv("RENDER_SERVICE_ID"))
 
 if RUNNING_ON_RENDER:
-    # Sur Render, on utilise le dossier temporaire par défaut qui est garanti d'être accessible en écriture
+    # Sur Render, on utilise le dossier temporaire par défaut
+    # qui est garanti d'être accessible en écriture
     # On utilise /tmp/ comme racine pour les données et modèles
     DATA_DIR = Path("/tmp/data")
     MODELS_DIR = Path("/tmp/models")
@@ -1058,7 +1100,8 @@ last_updated = {}
 
 # ===== SYSTÈME DE DÉTECTION DE MOUVEMENT EN TEMPS RÉEL =====
 # Suivi des prix pour détecter les mouvements haussiers/baissiers en temps réel
-realtime_price_history: Dict[str, List[Dict[str, float]]] = {}  # {symbol: [{"price": float, "timestamp": float}]}
+# {symbol: [{"price": float, "timestamp": float}]}
+realtime_price_history: Dict[str, List[Dict[str, float]]] = {}
 MAX_PRICE_HISTORY = 10  # Garder les 10 derniers prix
 MIN_PRICE_CHANGE_PERCENT = 0.05  # 0.05% de changement minimum pour détecter un mouvement
 REALTIME_MOVEMENT_WINDOW = 30  # Fenêtre de 30 secondes pour détecter un mouvement
@@ -1173,7 +1216,8 @@ def load_prediction_history():
         try:
             with open(PREDICTION_VALIDATION_FILE, 'r', encoding='utf-8') as f:
                 prediction_history = json.load(f)
-            logger.info(f"✅ Historique des prédictions chargé: {sum(len(v) for v in prediction_history.values())} prédictions")
+            pred_count = sum(len(v) for v in prediction_history.values())
+            logger.info(f"✅ Historique des prédictions chargé: {pred_count} prédictions")
         except Exception as e:
             logger.warning(f"Erreur chargement historique prédictions: {e}")
             prediction_history = {}
@@ -1186,7 +1230,12 @@ def save_prediction_history():
     except Exception as e:
         logger.error(f"Erreur sauvegarde historique prédictions: {e}")
 
-def store_prediction(symbol: str, predicted_prices: List[float], current_price: float, timeframe: str):
+def store_prediction(
+    symbol: str, 
+    predicted_prices: List[float], 
+    current_price: float, 
+    timeframe: str
+):
     """Stocke une prédiction pour validation future"""
     if symbol not in prediction_history:
         prediction_history[symbol] = []
@@ -1223,10 +1272,17 @@ def store_prediction(symbol: str, predicted_prices: List[float], current_price: 
         "current_price": current_price,
         "accuracy_score": round(accuracy_score, 3),
         "validation_count": sum(1 for p in prediction_history[symbol] if p.get("is_validated", False)),
-        "reliability": "HIGH" if accuracy_score >= 0.80 else "MEDIUM" if accuracy_score >= 0.60 else "LOW"
+        "reliability": (
+            "HIGH" if accuracy_score >= 0.80 
+            else "MEDIUM" if accuracy_score >= 0.60 
+            else "LOW"
+        )
     }
 
-def calculate_prediction_accuracy(predicted_prices: List[float], real_prices: List[float]) -> float:
+def calculate_prediction_accuracy(
+    predicted_prices: List[float], 
+    real_prices: List[float]
+) -> float:
     """Calcule la précision d'une prédiction en comparant avec les prix réels"""
     if len(predicted_prices) == 0 or len(real_prices) == 0:
         return 0.0
@@ -1327,7 +1383,10 @@ def get_prediction_accuracy_score(symbol: str) -> float:
     if symbol not in prediction_history:
         return 0.5  # Score neutre si pas de données
     
-    validated = [p for p in prediction_history[symbol] if p.get("is_validated", False) and p.get("accuracy_score") is not None]
+    validated = [
+        p for p in prediction_history[symbol] 
+        if p.get("is_validated") and p.get("accuracy_score") is not None
+    ]
     
     if len(validated) == 0:
         return 0.5  # Score neutre si pas de validations
@@ -1398,7 +1457,11 @@ def save_prediction_metrics(symbol: str, metrics: Dict[str, Any]):
     except Exception as e:
         logger.error(f"Erreur sauvegarde métriques pour {symbol}: {e}")
 
-def validate_prediction_with_realtime_data(symbol: str, real_prices: List[float], prediction_id: Optional[str] = None) -> Dict[str, Any]:
+def validate_prediction_with_realtime_data(
+    symbol: str, 
+    real_prices: List[float], 
+    prediction_id: Optional[str] = None
+) -> Dict[str, Any]:
     """Valide une prédiction avec les données réelles envoyées"""
     try:
         # Vérifier que prediction_history est initialisé
@@ -1975,13 +2038,11 @@ def save_prediction_to_mt5_files(
         filename = MT5_PREDICTIONS_DIR / f"{safe_symbol}_{safe_tf}_predictions.csv"
 
         header = (
-            "time;symbol;timeframe;action;confidence;style;category;model_name;details_json
-"
+            "time;symbol;timeframe;action;confidence;style;category;model_name;details_json\n"
         )
         line = (
             f"{ts};{symbol};{timeframe};{action};{conf:.4f};"
-            f"{style};{category};{model_name};{details_str}
-"
+            f"{style};{category};{model_name};{details_str}\n"
         )
 
         # Append avec création automatique de l'en-tête si fichier nouveau
@@ -2002,7 +2063,9 @@ def analyze_with_mistral(prompt: str) -> Optional[str]:
     try:
         response = mistral_client.chat.complete(
             model="mistral-small-latest",
-            messages=[{"role": "user", "content": prompt}],
+            messages=[
+                {"role": "user", "content": prompt}
+            ],
             temperature=0.2,
             max_tokens=512
         )
@@ -2012,10 +2075,13 @@ def analyze_with_mistral(prompt: str) -> Optional[str]:
         return None
 
 
-def analyze_with_gemma(prompt: str, max_tokens: int = 200, temperature: float = 0.7, 
-                      top_p: float = 0.9) -> Optional[str]:
-    """
-    Analyse avec le modèle Gemma (version texte uniquement)
+def analyze_with_gemma(
+    prompt: str, 
+    max_tokens: int = 200, 
+    temperature: float = 0.7, 
+    top_p: float = 0.9
+) -> Optional[str]:
+    """Analyse avec le modèle Gemma (version texte uniquement)
     
     Args:
         prompt: Le prompt à envoyer au modèle
@@ -2033,8 +2099,7 @@ def analyze_with_gemma(prompt: str, max_tokens: int = 200, temperature: float = 
         return None
     
     try:
-        logger.info("
-" + "="*80)
+        logger.info("\n" + "="*80)
         logger.info("🔍 DÉMARRAGE ANALYSE GEMMA (TEXTE UNIQUEMENT)")
         logger.info("="*80)
         logger.info(f"📝 Prompt: {prompt[:150]}..." if len(prompt) > 150 else f"📝 Prompt: {prompt}")
@@ -2075,16 +2140,14 @@ def analyze_with_gemma(prompt: str, max_tokens: int = 200, temperature: float = 
             
             # Formatage de la réponse
             response = response.strip()
-            logger.info("
-" + "="*80)
+            logger.info("\n" + "="*80)
             logger.info("✅ ANALYSE TERMINÉE")
             logger.info("="*80)
             logger.info(f"⏱️  Durée: {duration:.2f} secondes")
             logger.info(f"📊 Réponse ({len(response)} caractères):")
             
             # Affichage d'un extrait de la réponse
-            response_lines = response.split('
-')
+            response_lines = response.split('\n')
             for i, line in enumerate(response_lines[:5]):  # Affiche les 5 premières lignes
                 logger.info(f"   {line}")
             if len(response_lines) > 5:
@@ -2105,15 +2168,13 @@ def analyze_with_gemma(prompt: str, max_tokens: int = 200, temperature: float = 
             raise
             
     except Exception as e:
-        logger.error(f"
-❌ ERREUR LORS DE L'ANALYSE GEMMA")
+        logger.error("❌ ERREUR LORS DE L'ANALYSE GEMMA")
         logger.error("="*60)
         logger.error(f"Type: {type(e).__name__}")
         logger.error(f"Message: {str(e)}")
         if hasattr(e, 'args') and e.args:
             logger.error(f"Détails: {e.args[0]}")
-        logger.error("
-Stack trace:")
+        logger.error("Stack trace:")
         logger.error(traceback.format_exc())
         return None
     
@@ -2153,18 +2214,31 @@ def analyze_with_ai(prompt: str, max_retries: int = 2) -> Optional[str]:
             response = mistral_client.chat.complete(
                 model="mistral-small",  # Modèle plus performant pour les spikes
                 messages=[
-                    {"role": "system", "content": "Tu es un expert en trading de volatilité spécialisé dans la détection de spikes. Analyse les indicateurs techniques avec une précision extrême. Donne des prédictions fiables basées sur les patterns de volatilité, RSI, EMA et ATR."},
+                    {
+                        "role": "system", 
+                        "content": (
+                            "Tu es un expert en trading de volatilité spécialisé "
+                            "dans la détection de spikes. Analyse les indicateurs "
+                            "techniques avec une précision extrême. Donne des "
+                            "prédictions fiables basées sur les patterns de "
+                            "volatilité, RSI, EMA et ATR."
+                        )
+                    },
                     {"role": "user", "content": prompt}
                 ],
-                temperature=0.3,  # Température plus basse pour plus de cohérence
-                max_tokens=800   # Limiter les tokens pour des réponses plus ciblées
+                # Température plus basse pour plus de cohérence
+                temperature=0.3,
+                # Limiter les tokens pour des réponses plus ciblées
+                max_tokens=800
             )
         else:
             # Utilisation standard pour les autres analyses
             logger.info("Utilisation de Mistral AI pour l'analyse standard")
             response = mistral_client.chat.complete(
                 model="mistral-tiny",
-                messages=[{"role": "user", "content": prompt}],
+                messages=[
+                    {"role": "user", "content": prompt}
+                ],
                 temperature=0.7,
                 max_tokens=1000
             )
@@ -2222,7 +2296,12 @@ def detect_trendlines(df: pd.DataFrame, lookback: int = 3) -> Dict[str, Any]:
         
         for i in range(lookback, len(df) - lookback):
             # Swing high
-            if all(df.iloc[i]['high'] >= df.iloc[i+j]['high'] for j in range(-lookback, lookback+1) if j != 0):
+            is_high = all(
+                df.iloc[i]['high'] >= df.iloc[i+j]['high'] 
+                for j in range(-lookback, lookback+1) 
+                if j != 0
+            )
+            if is_high:
                 highs.append({
                     'index': i,
                     'time': df.iloc[i]['time'],
@@ -2230,7 +2309,12 @@ def detect_trendlines(df: pd.DataFrame, lookback: int = 3) -> Dict[str, Any]:
                 })
             
             # Swing low
-            if all(df.iloc[i]['low'] <= df.iloc[i+j]['low'] for j in range(-lookback, lookback+1) if j != 0):
+            is_low = all(
+                df.iloc[i]['low'] <= df.iloc[i+j]['low'] 
+                for j in range(-lookback, lookback+1) 
+                if j != 0
+            )
+            if is_low:
                 lows.append({
                     'index': i,
                     'time': df.iloc[i]['time'],
@@ -6626,16 +6710,16 @@ async def decision(request: DecisionRequest):
             rates_chan = mt5.copy_rates_from_pos(request.symbol, mt5.TIMEFRAME_M5, 0, 80)
             if rates_chan is not None and len(rates_chan) >= 30:
                 df_chan = pd.DataFrame(rates_chan)
-                closes_chan = df_chan[\'close\'].tail(50)
+                closes_chan = df_chan['close'].tail(50)
                 x_idx = np.arange(len(closes_chan))
                 coeff = np.polyfit(x_idx, closes_chan.values, 1)
                 last_price = float(closes_chan.iloc[-1]) if len(closes_chan) > 0 else 0.0
                 if last_price > 0:
                     channel_slope = float(coeff[0]) / last_price
                 if channel_slope > 0:
-                    components.append(\"ChUp\")
+                    components.append("ChUp")
                 elif channel_slope < 0:
-                    components.append(\"ChDown\")
+                    components.append("ChDown")
         except Exception:
             pass
 
@@ -8284,7 +8368,11 @@ async def get_prediction_accuracy(symbol: str):
             "confidence_multiplier": round(confidence_multiplier, 2),
             "validation_count": len(validated),
             "total_predictions": total,
-            "reliability": "HIGH" if accuracy_score >= 0.80 else "MEDIUM" if accuracy_score >= 0.60 else "LOW",
+            "reliability": (
+            "HIGH" if accuracy_score >= 0.80 
+            else "MEDIUM" if accuracy_score >= 0.60 
+            else "LOW"
+        ),
             "is_reliable": accuracy_score >= MIN_ACCURACY_THRESHOLD,
             "recent_validations": [
                 {
@@ -8330,7 +8418,11 @@ async def get_realtime_predictions(symbol: str, timeframe: str = "M1"):
                 "current_price": last_pred["current_price"],
                 "accuracy_score": round(accuracy_score, 3),
                 "validation_count": sum(1 for p in prediction_history[symbol] if p.get("is_validated", False)),
-                "reliability": "HIGH" if accuracy_score >= 0.80 else "MEDIUM" if accuracy_score >= 0.60 else "LOW"
+                "reliability": (
+            "HIGH" if accuracy_score >= 0.80 
+            else "MEDIUM" if accuracy_score >= 0.60 
+            else "LOW"
+        )
             }
             
             # Mettre en cache
@@ -8877,8 +8969,7 @@ async def send_predictions_summary():
         if symbol_count == 0:
             summary_lines.append("Aucune prédiction disponible")
         
-        message = "
-".join(summary_lines)
+        message = "\n".join(summary_lines)
         
         # Envoyer le SMS
         success = notification_service._send_sms(message)
@@ -9243,17 +9334,14 @@ async def _trigger_retraining_async(category: str):
                 old_acc = result.get('old_accuracy', 0)
                 new_acc = result.get('new_accuracy', 0)
                 samples = result.get('samples_used', 0)
-                logger.info(
-                    f"✅ [AUTO-RETRAIN] Réentraînement réussi pour {category}:
-"
-                    f"   - Échantillons utilisés: {samples}
-"
-                    f"   - Précision ancienne: {old_acc:.3f}
-"
-                    f"   - Précision nouvelle: {new_acc:.3f}
-"
+                success_msg = (
+                    f"✅ [AUTO-RETRAIN] Réentraînement réussi pour {category}:\n"
+                    f"   - Échantillons utilisés: {samples}\n"
+                    f"   - Précision ancienne: {old_acc:.3f}\n"
+                    f"   - Précision nouvelle: {new_acc:.3f}\n"
                     f"   - Amélioration: +{improvement:.3f} ({improvement*100:.2f}%)"
                 )
+                logger.info(success_msg)
             elif result.get("status") == "no_improvement":
                 improvement = result.get('improvement', 0)
                 logger.info(
@@ -10137,8 +10225,7 @@ class GemmaTradingBot:
             price_levels = re.findall(r'\b\d+\.?\d*\b', response)
             
             # Log des résultats
-            logger.info("
-" + "="*80)
+            logger.info("\n" + "="*80)
             logger.info("📊 RÉSULTATS GEMMA")
             logger.info("="*80)
             if detected_signals:
@@ -10155,8 +10242,7 @@ class GemmaTradingBot:
             if found_keywords:
                 logger.info(f"🔍 Mots-clés importants: {', '.join(found_keywords)}")
                 
-            logger.info("="*80 + "
-")
+            logger.info("="*80 + "\n")
             
         except Exception as e:
             logger.error(f"Erreur lors de l'analyse de la réponse Gemma: {str(e)}")
@@ -10783,13 +10869,11 @@ if __name__ == "__main__":
     logger.info("Serveur prêt à recevoir des requêtes")
     logger.info("=" * 60)
     
-    print("
-" + "=" * 60)
+    print("\n" + "=" * 60)
     print("Démarrage du serveur AI TradBOT...")
     print("=" * 60)
     print(f"API disponible sur: http://127.0.0.1:{API_PORT}")
-    print("
-Endpoints disponibles:")
+    print("\nEndpoints disponibles:")
     print(f"  - GET  /                           : Vérification de l'état du serveur")
     print(f"  - GET  /health                     : Vérification de santé")
     print(f"  - GET  /status                     : Statut détaillé")
@@ -10818,8 +10902,7 @@ Endpoints disponibles:")
     print(f"  - GET  /deriv/patterns/{{symbol}}            : Détection patterns Deriv (XABCD, Cypher, H&S, etc.)")
     print(f"  - GET  /deriv/tools/vwap/{{symbol}}          : Anchored VWAP")
     print(f"  - GET  /deriv/tools/volume-profile/{{symbol}}: Volume Profile")
-    print("
-Documentation interactive:")
+    print("\nDocumentation interactive:")
     print(f"  - http://127.0.0.1:{API_PORT}/docs")
     print("=" * 60)
     
