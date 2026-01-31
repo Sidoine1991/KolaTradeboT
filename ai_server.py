@@ -77,6 +77,212 @@ except ImportError:
 _history_cache: Dict[str, pd.DataFrame] = {}
 
 # =========================
+# Fonctions de détection de spikes Boom/Crash
+# =========================
+def is_boom_crash_symbol(symbol: str) -> bool:
+    """Vérifie si le symbole est un indice Boom ou Crash"""
+    boom_crash_patterns = [
+        "Boom 500 Index", "Boom 300 Index", "Boom 600 Index", "Boom 900 Index",
+        "Crash 300 Index", "Crash 500 Index", "Crash 1000 Index"
+    ]
+    return any(pattern in symbol for pattern in boom_crash_patterns)
+
+def detect_spike_pattern(df: pd.DataFrame, symbol: str) -> Dict[str, Any]:
+    """
+    Détecte les patterns de spikes pour Boom/Crash
+    
+    Args:
+        df: DataFrame avec les données OHLCV
+        symbol: Symbole à analyser
+        
+    Returns:
+        Dict avec informations de spike détecté
+    """
+    if len(df) < 10:
+        return {"has_spike": False, "reason": "Données insuffisantes"}
+    
+    # Debug: vérifier les colonnes disponibles
+    logger.info(f"Colonnes disponibles dans DataFrame: {list(df.columns)}")
+    
+    # S'assurer que les colonnes requises existent
+    required_columns = ['open', 'high', 'low', 'close', 'tick_volume']
+    missing_columns = [col for col in required_columns if col not in df.columns]
+    if missing_columns:
+        logger.error(f"Colonnes manquantes: {missing_columns}")
+        return {"has_spike": False, "reason": f"Colonnes manquantes: {missing_columns}"}
+    
+    # Calculer les indicateurs de volatilité
+    df['price_change'] = df['close'] - df['open']
+    df['price_change_pct'] = (df['price_change'] / df['open']) * 100
+    
+    # Ajouter le changement inter-bougies (plus important pour les spikes)
+    df['close_change'] = df['close'] - df['close'].shift(1)
+    df['close_change_pct'] = (df['close_change'] / df['close'].shift(1)) * 100
+    
+    df['range'] = df['high'] - df['low']
+    df['range_pct'] = (df['range'] / df['open']) * 100
+    df['volume_ma'] = df['tick_volume'].rolling(window=5).mean()
+    df['volume_ratio'] = df['tick_volume'] / df['volume_ma']
+    
+    # Dernières bougies
+    last_candle = df.iloc[-1]
+    prev_candle = df.iloc[-2]
+    
+    # Seuils spécifiques Boom/Crash
+    is_boom = "Boom" in symbol
+    is_crash = "Crash" in symbol
+    
+    # Critères de spike
+    spike_criteria = {
+        "price_spike": abs(last_candle['close_change_pct']) > (0.8 if is_boom else 1.2),  # % de changement inter-bougies
+        "range_spike": last_candle['range_pct'] > (1.0 if is_boom else 1.5),  # Volatilité intraday
+        "volume_spike": last_candle['volume_ratio'] > 2.0,  # Volume 2x la moyenne
+        "momentum_spike": False
+    }
+    
+    # Calculer le momentum
+    rsi_period = 14
+    df['rsi'] = calculate_rsi(df['close'], rsi_period)
+    
+    if len(df) >= rsi_period + 1:
+        rsi_current = df['rsi'].iloc[-1]
+        rsi_prev = df['rsi'].iloc[-2]
+        
+        # Spike de momentum: RSI change brusquement
+        rsi_change = abs(rsi_current - rsi_prev)
+        spike_criteria["momentum_spike"] = rsi_change > 10
+        
+        # RSI extremes pour confirmation
+        if is_boom:
+            spike_criteria["rsi_oversold"] = rsi_current < 30
+        else:  # Crash
+            spike_criteria["rsi_overbought"] = rsi_current > 70
+    
+    # Compter les critères remplis
+    criteria_met = sum(1 for k, v in spike_criteria.items() if v and not k.startswith("rsi_"))
+    has_spike = criteria_met >= 2  # Au moins 2 critères sur 3
+    
+    # Direction du spike
+    spike_direction = None
+    if has_spike:
+        if last_candle['close_change_pct'] > 0:
+            spike_direction = "BUY"
+        else:
+            spike_direction = "SELL"
+        
+        # Validation direction pour Boom/Crash
+        if is_boom and spike_direction == "SELL":
+            has_spike = False  # Pas de SELL sur Boom
+        elif is_crash and spike_direction == "BUY":
+            has_spike = False  # Pas de BUY sur Crash
+    
+    # Calculer la confiance du spike
+    spike_confidence = 0.0
+    if has_spike:
+        base_confidence = min(85.0, criteria_met * 25.0)  # 25% par critère
+        
+        # Bonus pour volume élevé
+        if spike_criteria["volume_spike"]:
+            base_confidence += 10.0
+        
+        # Bonus pour momentum extrême
+        if spike_criteria["momentum_spike"]:
+            base_confidence += 10.0
+        
+        spike_confidence = min(95.0, base_confidence)
+    
+    return {
+        "has_spike": bool(has_spike),
+        "direction": spike_direction,
+        "confidence": float(spike_confidence),
+        "criteria": {k: bool(v) for k, v in spike_criteria.items()},
+        "price_change_pct": float(last_candle['close_change_pct']) if pd.notna(last_candle['close_change_pct']) else 0.0,
+        "range_pct": float(last_candle['range_pct']) if pd.notna(last_candle['range_pct']) else 0.0,
+        "volume_ratio": float(last_candle['volume_ratio']) if pd.notna(last_candle['volume_ratio']) else 0.0,
+        "rsi": float(df['rsi'].iloc[-1]) if len(df) >= rsi_period and pd.notna(df['rsi'].iloc[-1]) else None,
+        "timestamp": int(last_candle['time']) if 'time' in df.columns and pd.notna(last_candle['time']) else None
+    }
+
+def calculate_rsi(prices: pd.Series, period: int = 14) -> pd.Series:
+    """Calcule le RSI"""
+    delta = prices.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    rs = gain / loss
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
+
+def generate_boom_crash_signal(symbol: str, df: pd.DataFrame) -> Dict[str, Any]:
+    """
+    Génère un signal de trading pour Boom/Crash basé sur la détection de spikes
+    
+    Args:
+        symbol: Symbole Boom/Crash
+        df: DataFrame avec données OHLCV
+        
+    Returns:
+        Dict avec signal de trading
+    """
+    if not is_boom_crash_symbol(symbol):
+        return {"has_signal": False, "reason": "Pas un symbole Boom/Crash"}
+    
+    # Détecter le spike
+    spike_info = detect_spike_pattern(df, symbol)
+    
+    if not spike_info["has_spike"]:
+        return {
+            "has_signal": False,
+            "reason": "Aucun spike détecté",
+            "spike_info": spike_info
+        }
+    
+    # Calculer SL/TP pour les spikes
+    last_candle = df.iloc[-1]
+    current_price = last_candle['close']
+    atr = calculate_atr(df, 14)
+    
+    # SL/TP serrés pour les spikes
+    if spike_info["direction"] == "BUY":
+        stop_loss = current_price - (atr * 0.5)  # SL très serré
+        take_profit = current_price + (atr * 1.5)  # TP plus large
+    else:  # SELL
+        stop_loss = current_price + (atr * 0.5)
+        take_profit = current_price - (atr * 1.5)
+    
+    return {
+        "has_signal": bool(spike_info["has_signal"]),
+        "signal": spike_info["direction"],
+        "confidence": float(spike_info["confidence"]),
+        "source": "boom_crash_spike",
+        "stop_loss": round(float(stop_loss), 2) if pd.notna(stop_loss) else None,
+        "take_profit": round(float(take_profit), 2) if pd.notna(take_profit) else None,
+        "position_size": 0.01,  # Taille fixe pour les spikes
+        "reasoning": [
+            f"Spike {spike_info['direction']} détecté",
+            f"Changement prix: {spike_info['price_change_pct']:.2f}%",
+            f"Volume ratio: {spike_info['volume_ratio']:.1f}x",
+            f"Confiance: {spike_info['confidence']:.0f}%"
+        ],
+        "spike_info": {
+            k: (bool(v) if isinstance(v, (bool, np.bool_)) else float(v) if isinstance(v, (int, float, np.number)) else v)
+            for k, v in spike_info.items()
+            if k != 'criteria'
+        },
+        "timestamp": datetime.now().isoformat()
+    }
+
+def calculate_atr(df: pd.DataFrame, period: int = 14) -> float:
+    """Calcule l'Average True Range"""
+    high_low = df['high'] - df['low']
+    high_close = abs(df['high'] - df['close'].shift())
+    low_close = abs(df['low'] - df['close'].shift())
+    
+    true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+    atr = true_range.rolling(window=period).mean()
+    
+    return atr.iloc[-1] if not atr.empty else 0.0
+
+# =========================
 # Fonctions de récupération de données cloud
 # =========================
 def get_market_data_cloud(symbol: str, period: str = "5d", interval: str = "1m") -> pd.DataFrame:
@@ -128,7 +334,7 @@ def get_market_data_cloud(symbol: str, period: str = "5d", interval: str = "1m")
         return generate_simulated_data(symbol, 100)
 
 def generate_simulated_data(symbol: str, periods: int = 100) -> pd.DataFrame:
-    """Génère des données de marché simulées"""
+    """Génère des données de marché simulées avec spikes réalistes pour Boom/Crash"""
     try:
         np.random.seed(hash(symbol) % 2**32)
         
@@ -147,7 +353,29 @@ def generate_simulated_data(symbol: str, periods: int = 100) -> pd.DataFrame:
         
         base_price = base_prices.get(symbol, 100)
         
-        returns = np.random.normal(0, 0.002, periods)
+        # Vérifier si c'est un symbole Boom/Crash pour générer des spikes
+        is_boom_crash = is_boom_crash_symbol(symbol)
+        
+        if is_boom_crash:
+            # Générer des données avec spikes pour Boom/Crash
+            returns = np.random.normal(0, 0.001, periods)  # Volatilité de base plus faible
+            
+            # Ajouter quelques spikes aléatoires (10-15% de chance par bougie)
+            spike_probability = 0.12
+            for i in range(periods):
+                if np.random.random() < spike_probability:
+                    # Générer un spike
+                    spike_direction = 1 if "Boom" in symbol else -1  # Boom monte, Crash descend
+                    spike_magnitude = np.random.uniform(0.008, 0.025)  # 0.8% à 2.5% de spike
+                    returns[i] = spike_direction * spike_magnitude
+            
+            # Ajouter de la volatilité autour des spikes
+            volatility_boost = np.random.normal(0, 0.002, periods)
+            returns += volatility_boost
+        else:
+            # Données normales pour les autres symboles
+            returns = np.random.normal(0, 0.002, periods)
+        
         prices = [base_price]
         
         for ret in returns:
@@ -158,14 +386,24 @@ def generate_simulated_data(symbol: str, periods: int = 100) -> pd.DataFrame:
         
         timestamps = pd.date_range(end=datetime.now(), periods=periods, freq='1min')
         
+        # Générer les OHLC avec des spreads réalistes
+        if is_boom_crash:
+            # Spread plus large pour Boom/Crash pendant les spikes
+            spreads = [abs(np.random.normal(0.002, 0.001)) for _ in range(periods)]
+        else:
+            spreads = [abs(np.random.normal(0.0005, 0.0002)) for _ in range(periods)]
+        
         df = pd.DataFrame({
             'time': timestamps.astype(np.int64) // 10**9,
             'open': prices,
-            'high': [p * (1 + abs(np.random.normal(0, 0.001))) for p in prices],
-            'low': [p * (1 - abs(np.random.normal(0, 0.001))) for p in prices],
+            'high': [p * (1 + spreads[i]) for i, p in enumerate(prices)],
+            'low': [p * (1 - spreads[i]) for i, p in enumerate(prices)],
             'close': prices,
-            'volume': np.random.randint(1000, 10000, periods)
+            'tick_volume': np.random.randint(5000, 50000, periods) if is_boom_crash else np.random.randint(1000, 10000, periods)
         })
+        
+        # Ajouter le volume column pour compatibilité
+        df['volume'] = df['tick_volume']
         
         return df
         
@@ -3564,6 +3802,62 @@ async def upload_ml_model(request: MLModelUploadRequest):
         logger.error(f"Erreur upload modèle ML: {e}")
         raise HTTPException(status_code=500, detail=f"Erreur lors de l'upload du modèle: {str(e)}")
 
+@app.post("/boom-crash/detect-spike")
+async def detect_boom_crash_spike(request: Dict[str, Any]):
+    """
+    Endpoint dédié pour tester la détection de spikes Boom/Crash
+    """
+    try:
+        symbol = request.get('symbol')
+        timeframe = request.get('timeframe', 'M1')
+        
+        if not symbol:
+            raise HTTPException(status_code=400, detail="Symbol requis")
+        
+        if not is_boom_crash_symbol(symbol):
+            raise HTTPException(status_code=400, detail="Le symbole doit être un indice Boom ou Crash")
+        
+        # Récupérer les données
+        df = get_market_data(symbol, timeframe, 100)
+        
+        if df.empty:
+            raise HTTPException(status_code=400, detail="Impossible de récupérer les données")
+        
+        # Détecter les spikes
+        spike_info = detect_spike_pattern(df, symbol)
+        
+        # Analyser les dernières bougies pour contexte
+        analysis = {
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "data_points": len(df),
+            "last_candle": {
+                "time": df['time'].iloc[-1].isoformat() if 'time' in df.columns else None,
+                "open": float(df['open'].iloc[-1]),
+                "high": float(df['high'].iloc[-1]),
+                "low": float(df['low'].iloc[-1]),
+                "close": float(df['close'].iloc[-1]),
+                "volume": int(df['tick_volume'].iloc[-1])
+            },
+            "spike_detection": spike_info,
+            "market_context": {
+                "avg_volume": float(df['tick_volume'].mean()),
+                "price_volatility": float(df['close'].pct_change().std() * 100),
+                "trend_direction": "up" if df['close'].iloc[-1] > df['close'].iloc[-10] else "down"
+            }
+        }
+        
+        return {
+            "status": "success",
+            "analysis": analysis,
+            "recommendation": generate_boom_crash_signal(symbol, df),
+            "timestamp": datetime.now().isoformat()
+        }
+        
+    except Exception as e:
+        logger.error(f"Erreur détection spike Boom/Crash: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.post("/ml/predict-signal")
 async def predict_trading_signal(request: Dict[str, Any]):
     """
@@ -3579,6 +3873,63 @@ async def predict_trading_signal(request: Dict[str, Any]):
         
         if not symbol:
             raise HTTPException(status_code=400, detail="Symbol requis")
+        
+        # ===== PRIORITÉ BOOM/CRASH SPIKE DETECTION =====
+        if is_boom_crash_symbol(symbol):
+            logger.info(f"🚀 Détection de spike pour {symbol}")
+            
+            try:
+                # Récupérer les données pour détection de spike
+                df = get_market_data(symbol, timeframe, 50)  # Plus de données pour les indicateurs
+                
+                if not df.empty and len(df) >= 20:
+                    # Générer le signal Boom/Crash
+                    boom_crash_result = generate_boom_crash_signal(symbol, df)
+                    
+                    if boom_crash_result["has_signal"]:
+                        logger.info(
+                            f"✅ Spike {boom_crash_result['signal']} détecté pour {symbol} - "
+                            f"Confiance: {boom_crash_result['confidence']:.0f}%"
+                        )
+                        
+                        return {
+                            "signal": boom_crash_result["signal"],
+                            "confidence": boom_crash_result["confidence"],
+                            "source": "boom_crash_spike",
+                            "symbol": symbol,
+                            "timeframe": timeframe,
+                            "stop_loss": boom_crash_result["stop_loss"],
+                            "take_profit": boom_crash_result["take_profit"],
+                            "position_size": boom_crash_result["position_size"],
+                            "reasoning": boom_crash_result["reasoning"],
+                            "spike_info": boom_crash_result["spike_info"],
+                            "timestamp": datetime.now().isoformat()
+                        }
+                    else:
+                        logger.info(f"❌ Aucun spike détecté pour {symbol}")
+                        
+                        # Retourner un signal neutre pour Boom/Crash sans spike
+                        return {
+                            "signal": "neutral",
+                            "confidence": 0.0,
+                            "source": "boom_crash_no_spike",
+                            "symbol": symbol,
+                            "timeframe": timeframe,
+                            "stop_loss": None,
+                            "take_profit": None,
+                            "position_size": 0.0,
+                            "reasoning": ["Aucun spike détecté", boom_crash_result.get("reason", "")],
+                            "spike_info": boom_crash_result.get("spike_info", {}),
+                            "timestamp": datetime.now().isoformat()
+                        }
+                else:
+                    logger.warning(f"Données insuffisantes pour détection de spike {symbol}: {len(df)} bougies")
+            except Exception as e:
+                logger.error(f"Erreur dans détection spike Boom/Crash: {e}")
+                logger.error(f"Traceback: {traceback.format_exc()}")
+                # Continuer avec la logique ML standard en cas d'erreur
+        
+        # ===== LOGIQUE ML STANDARD POUR LES AUTRES SYMBOLES =====
         
         # Vérifier si nous avons un modèle pour ce symbole
         model_key = f"{symbol}_{timeframe}"
@@ -6523,16 +6874,10 @@ async def decision(request: DecisionRequest):
         # Interroger le service trend_api sur port 8001 pour obtenir les tendances cachées
         m5_bullish = False
         m5_bearish = False
-        m30_bullish = False
-        m30_bearish = False
-        h4_bullish = False
-        h4_bearish = False
-        d1_bullish = False
-        d1_bearish = False
-        w1_bullish = False
-        w1_bearish = False
+        h1_bullish = False
+        h1_bearish = False
         
-        # Tentative de récupération depuis trend_api (rapide, caché)
+        # Tentative de récupération depuis trend_api (rapide, caché) - H1 et M5 uniquement
         trend_api_success = False
         try:
             trend_api_url = f"http://127.0.0.1:8001/multi_timeframe?symbol={request.symbol}"
@@ -6542,39 +6887,27 @@ async def decision(request: DecisionRequest):
                 trend_data = trend_response.json()
                 trends = trend_data.get('trends', {})
                 
-                # Extraire les tendances de chaque timeframe
+                # Extraire seulement H1 et M5
                 if 'M5' in trends:
                     m5_bullish = trends['M5'].get('bullish', False)
                     m5_bearish = trends['M5'].get('bearish', False)
                 
-                if 'M30' in trends:
-                    m30_bullish = trends['M30'].get('bullish', False)
-                    m30_bearish = trends['M30'].get('bearish', False)
+                if 'H1' in trends:
+                    h1_bullish = trends['H1'].get('bullish', False)
+                    h1_bearish = trends['H1'].get('bearish', False)
                 
-                if 'H4' in trends:
-                    h4_bullish = trends['H4'].get('bullish', False)
-                    h4_bearish = trends['H4'].get('bearish', False)
-                
-                if 'D1' in trends:
-                    d1_bullish = trends['D1'].get('bullish', False)
-                    d1_bearish = trends['D1'].get('bearish', False)
-                
-                if 'W1' in trends:
-                    w1_bullish = trends['W1'].get('bullish', False)
-                    w1_bearish = trends['W1'].get('bearish', False)
-                
-                # Vérifier si on a récupéré au moins H4 ou D1
-                if h4_bullish or h4_bearish or d1_bullish or d1_bearish:
+                # Vérifier si on a récupéré H1 et M5
+                if (h1_bullish or h1_bearish) and (m5_bullish or m5_bearish):
                     trend_api_success = True
-                    logger.debug(f"✅ Tendances multi-TF récupérées depuis trend_api (H4/D1 trouvés)")
+                    logger.debug(f"✅ Tendances H1/M5 récupérées depuis trend_api")
                 else:
-                    logger.warning(f"⚠️ trend_api répond mais H4/D1 absents, calcul direct nécessaire")
+                    logger.warning(f"⚠️ trend_api répond mais H1/M5 incomplets, calcul direct nécessaire")
             else:
                 logger.warning(f"⚠️ trend_api réponse {trend_response.status_code}, calcul direct nécessaire")
         except Exception as e:
             logger.warning(f"⚠️ trend_api indisponible: {e}, calcul direct depuis MT5")
         
-        # FALLBACK: Calculer H4/D1 directement depuis MT5 si trend_api n'a pas fourni ces données
+        # FALLBACK: Calculer H1 et M5 directement depuis MT5 si trend_api n'a pas fourni ces données
         if not trend_api_success and MT5_AVAILABLE:
             try:
                 # Initialiser MT5 si nécessaire (ne pas fermer si déjà initialisé)
@@ -6583,34 +6916,21 @@ async def decision(request: DecisionRequest):
                 if not mt5_initialized_temp:
                     mt5_initialized_temp = mt5.initialize()
                     if mt5_initialized_temp:
-                        logger.debug(f"📊 MT5 initialisé temporairement pour calcul direct H4/D1")
+                        logger.debug(f"📊 MT5 initialisé temporairement pour calcul direct H1/M5")
                 
                 if mt5_initialized_temp:
-                    # Calculer H4 directement
-                    rates_h4 = mt5.copy_rates_from_pos(request.symbol, mt5.TIMEFRAME_H4, 0, 50)
-                    if rates_h4 is not None and len(rates_h4) >= 20:
-                        df_h4 = pd.DataFrame(rates_h4)
-                        if 'close' in df_h4.columns and len(df_h4) >= 20:
-                            # EMA pour H4
-                            ema_fast_h4 = df_h4['close'].ewm(span=9, adjust=False).mean()
-                            ema_slow_h4 = df_h4['close'].ewm(span=21, adjust=False).mean()
-                            if len(ema_fast_h4) > 0 and len(ema_slow_h4) > 0:
-                                h4_bullish = bool(ema_fast_h4.iloc[-1] > ema_slow_h4.iloc[-1])
-                                h4_bearish = bool(ema_fast_h4.iloc[-1] < ema_slow_h4.iloc[-1])
-                                logger.info(f"📊 H4 calculé directement depuis MT5: {'↑' if h4_bullish else '↓' if h4_bearish else '→'}")
-                    
-                    # Calculer D1 directement
-                    rates_d1 = mt5.copy_rates_from_pos(request.symbol, mt5.TIMEFRAME_D1, 0, 50)
-                    if rates_d1 is not None and len(rates_d1) >= 20:
-                        df_d1 = pd.DataFrame(rates_d1)
-                        if 'close' in df_d1.columns and len(df_d1) >= 20:
-                            # EMA pour D1
-                            ema_fast_d1 = df_d1['close'].ewm(span=9, adjust=False).mean()
-                            ema_slow_d1 = df_d1['close'].ewm(span=21, adjust=False).mean()
-                            if len(ema_fast_d1) > 0 and len(ema_slow_d1) > 0:
-                                d1_bullish = bool(ema_fast_d1.iloc[-1] > ema_slow_d1.iloc[-1])
-                                d1_bearish = bool(ema_fast_d1.iloc[-1] < ema_slow_d1.iloc[-1])
-                                logger.info(f"📊 D1 calculé directement depuis MT5: {'↑' if d1_bullish else '↓' if d1_bearish else '→'}")
+                    # Calculer H1 directement
+                    rates_h1 = mt5.copy_rates_from_pos(request.symbol, mt5.TIMEFRAME_H1, 0, 50)
+                    if rates_h1 is not None and len(rates_h1) >= 20:
+                        df_h1 = pd.DataFrame(rates_h1)
+                        if 'close' in df_h1.columns and len(df_h1) >= 20:
+                            # EMA pour H1
+                            ema_fast_h1 = df_h1['close'].ewm(span=9, adjust=False).mean()
+                            ema_slow_h1 = df_h1['close'].ewm(span=21, adjust=False).mean()
+                            if len(ema_fast_h1) > 0 and len(ema_slow_h1) > 0:
+                                h1_bullish = bool(ema_fast_h1.iloc[-1] > ema_slow_h1.iloc[-1])
+                                h1_bearish = bool(ema_fast_h1.iloc[-1] < ema_slow_h1.iloc[-1])
+                                logger.info(f"📊 H1 calculé directement depuis MT5: {'↑' if h1_bullish else '↓' if h1_bearish else '→'}")
                     
                     # Calculer M5 directement (si pas déjà récupéré)
                     if not (m5_bullish or m5_bearish):
@@ -6628,10 +6948,10 @@ async def decision(request: DecisionRequest):
                     # Fermer MT5 seulement si on l'a initialisé nous-mêmes
                     if not mt5_was_initialized_before and mt5_initialized_temp:
                         mt5.shutdown()
-                        logger.debug(f"📊 MT5 fermé après calcul direct H4/D1")
+                        logger.debug(f"📊 MT5 fermé après calcul direct H1/M5")
                         
             except Exception as mt5_error:
-                logger.warning(f"⚠️ Erreur calcul direct MT5 pour H4/D1: {mt5_error}")
+                logger.warning(f"⚠️ Erreur calcul direct MT5 pour H1/M5: {mt5_error}")
         
         # NOUVEAU 2025 : Analyse VWAP (prix d'équilibre)
         vwap_signal_buy = False
@@ -6677,15 +6997,11 @@ async def decision(request: DecisionRequest):
         bullish_signals = bullish_signals_base
         bearish_signals = bearish_signals_base
 
-        # Poids par signal (pondération multi-timeframe améliorée)
+        # Poids par signal (pondération multi-timeframe H1 et M5 uniquement)
         WEIGHTS = {
-            "m1": 0.10,    # M1: 10% - Court terme
-            "m5": 0.15,    # M5: 15% - Court terme
-            "h1": 0.20,    # H1: 20% - Moyen terme
-            "m30": 0.15,   # M30: 15% - Moyen terme
-            "h4": 0.20,    # H4: 20% - Long terme (haute importance)
-            "d1": 0.15,    # Daily: 15% - Long terme
-            "w1": 0.05,    # Weekly: 5% - Tendance globale
+            "m1": 0.10,    # M1: 10% - Court terme (conservé pour réactivité)
+            "m5": 0.35,    # M5: 35% - Court terme (augmenté)
+            "h1": 0.45,    # H1: 45% - Moyen terme (augmenté, plus important)
             "rsi": 0.08,   # Réduit car moins fiable en trending
             "vwap": 0.06,
             "supertrend": 0.06,
@@ -6734,30 +7050,10 @@ async def decision(request: DecisionRequest):
         if m5_bearish:
             score -= WEIGHTS["m5"]; components.append("M5:-")
         
-        if m30_bullish:
-            score += WEIGHTS["m30"]; components.append("M30:+")
-        if m30_bearish:
-            score -= WEIGHTS["m30"]; components.append("M30:-")
-        
         if h1_bullish:
             score += WEIGHTS["h1"]; components.append("H1:+")
         if h1_bearish:
             score -= WEIGHTS["h1"]; components.append("H1:-")
-        
-        if h4_bullish:
-            score += WEIGHTS["h4"]; components.append("H4:+")
-        if h4_bearish:
-            score -= WEIGHTS["h4"]; components.append("H4:-")
-        
-        if d1_bullish:
-            score += WEIGHTS["d1"]; components.append("D1:+")
-        if d1_bearish:
-            score -= WEIGHTS["d1"]; components.append("D1:-")
-        
-        if w1_bullish:
-            score += WEIGHTS["w1"]; components.append("W1:+")
-        if w1_bearish:
-            score -= WEIGHTS["w1"]; components.append("W1:-")
 
         if rsi_bullish:
             score += WEIGHTS["rsi"]; components.append("RSI:+")
@@ -6784,21 +7080,21 @@ async def decision(request: DecisionRequest):
                 pattern_bonus = WEIGHTS["patterns"] * min(deriv_patterns_bearish, 2)
                 score -= pattern_bonus; components.append(f"Patterns:-{pattern_bonus:.2f}")
 
-        # Alignement / divergence multi‑timeframe amélioré
+        # Alignement / divergence multi‑timeframe (H1 et M5 uniquement)
         # Compter le nombre de timeframes alignés
-        bullish_tfs = sum([m1_bullish, m5_bullish, m30_bullish, h1_bullish, h4_bullish, d1_bullish, w1_bullish])
-        bearish_tfs = sum([m1_bearish, m5_bearish, m30_bearish, h1_bearish, h4_bearish, d1_bearish, w1_bearish])
-        total_tfs = 7  # M1, M5, M30, H1, H4, D1, W1
+        bullish_tfs = sum([m1_bullish, m5_bullish, h1_bullish])
+        bearish_tfs = sum([m1_bearish, m5_bearish, h1_bearish])
+        total_tfs = 3  # M1, M5, H1
         
-        # Si >= 5 timeframes alignés dans la même direction = très fort
-        if bullish_tfs >= 5:
-            score += ALIGN_BONUS; components.append(f"AlignBull:{bullish_tfs}/7")
-        elif bearish_tfs >= 5:
-            score -= ALIGN_BONUS; components.append(f"AlignBear:{bearish_tfs}/7")
+        # Si tous les timeframes alignés dans la même direction = très fort
+        if bullish_tfs == 3:
+            score += ALIGN_BONUS; components.append(f"AlignBull:3/3")
+        elif bearish_tfs == 3:
+            score -= ALIGN_BONUS; components.append(f"AlignBear:3/3")
         
-        # Divergence forte (plus de 4 TFs en opposition)
-        if abs(bullish_tfs - bearish_tfs) <= 1 and bullish_tfs + bearish_tfs >= 5:
-            score += DIVERGENCE_MALUS; components.append("DivHigh")
+        # Divergence (1 TF contre 2 autres)
+        if abs(bullish_tfs - bearish_tfs) == 1 and bullish_tfs + bearish_tfs == 3:
+            score += DIVERGENCE_MALUS; components.append("DivMed")
 
         # Filtre de volatilité (ATR / régime)
         if not volatility_ok:
@@ -6818,10 +7114,9 @@ async def decision(request: DecisionRequest):
         
         # Score maximum théorique (somme de tous les poids positifs possibles)
         max_possible_score = sum([
-            WEIGHTS["m1"], WEIGHTS["m5"], WEIGHTS["m30"], WEIGHTS["h1"], 
-            WEIGHTS["h4"], WEIGHTS["d1"], WEIGHTS["w1"], WEIGHTS["rsi"],
+            WEIGHTS["m1"], WEIGHTS["m5"], WEIGHTS["h1"], WEIGHTS["rsi"],
             WEIGHTS["vwap"], WEIGHTS["supertrend"], WEIGHTS["patterns"],
-            ALIGN_BONUS, VOL_OK_BONUS
+            WEIGHTS["sentiment"], ALIGN_BONUS, VOL_OK_BONUS
         ])
         
         # Normaliser le score (0.0 à 1.0)
@@ -6833,29 +7128,20 @@ async def decision(request: DecisionRequest):
         # 1. Confiance de base proportionnelle au score
         base_confidence = MIN_CONF + (normalized_score * (MAX_CONF - MIN_CONF))
         
-        # 2. BONUS CRITIQUES pour tendances long terme (H4/D1)
-        long_term_bonus = 0.0
-        if (h4_bullish and d1_bullish):
-            long_term_bonus = 0.30  # +30% si H4 ET D1 alignés (tendance très forte)
-            components.append("H4+D1:+++")
-        elif (h4_bearish and d1_bearish):
-            long_term_bonus = 0.30
-            components.append("H4+D1:---")
-        elif h4_bullish or d1_bullish:
-            long_term_bonus = 0.20  # +20% si au moins H4 OU D1 aligné
-            components.append("H4/D1:++")
-        elif h4_bearish or d1_bearish:
-            long_term_bonus = 0.20
-            components.append("H4/D1:--")
-        
-        # 3. BONUS pour alignement H1 avec H4/D1 (confirmation long terme)
-        long_term_alignment_bonus = 0.0
-        if h1_bullish and (h4_bullish or d1_bullish):
-            long_term_alignment_bonus = 0.25  # +25% pour H1+H4/D1 (excellent signal)
-            components.append("H1+H4/D1:+++")
-        elif h1_bearish and (h4_bearish or d1_bearish):
-            long_term_alignment_bonus = 0.25
-            components.append("H1+H4/D1:---")
+        # 2. BONUS pour alignement H1 et M5 (confirmation court/moyen terme)
+        alignment_bonus = 0.0
+        if h1_bullish and m5_bullish:
+            alignment_bonus = 0.25  # +25% si H1 ET M5 alignés (signal fort)
+            components.append("H1+M5:+++")
+        elif h1_bearish and m5_bearish:
+            alignment_bonus = 0.25
+            components.append("H1+M5:---")
+        elif h1_bullish or m5_bullish:
+            alignment_bonus = 0.15  # +15% si au moins H1 OU M5 aligné
+            components.append("H1/M5:++")
+        elif h1_bearish or m5_bearish:
+            alignment_bonus = 0.15
+            components.append("H1/M5:--")
         
         # 4. BONUS pour alignement M5+H1 (tendance moyenne terme claire)
         medium_term_bonus = 0.0
@@ -6934,25 +7220,24 @@ async def decision(request: DecisionRequest):
         # 7. CONFIANCE MINIMALE GARANTIE pour signaux valides avec H1 aligné
         # Si H1 est aligné, c'est déjà un signal valide = confiance minimale 0.60 (60%)
         if action != "hold" and (h1_bullish or h1_bearish):
-            # Si H1 aligné avec H4 ou D1, confiance minimale encore plus élevée
-            if (h4_bullish or d1_bullish) and h1_bullish:
-                confidence = max(confidence, 0.70)  # 70% minimum si H1+H4/D1
+            # Si H1 aligné avec M5, confiance minimale encore plus élevée
+            if (m5_bullish) and h1_bullish:
+                confidence = max(confidence, 0.70)  # 70% minimum si H1+M5
                 if confidence == 0.70:
-                    components.append("MinH1+H4/D1:70%")
-            elif (h4_bearish or d1_bearish) and h1_bearish:
+                    components.append("MinH1+M5:70%")
+            elif (m5_bearish) and h1_bearish:
                 confidence = max(confidence, 0.70)
                 if confidence == 0.70:
-                    components.append("MinH1+H4/D1:70%")
+                    components.append("MinH1+M5:70%")
             else:
-                # H1 seul aligné = 60% minimum
-                confidence = max(confidence, 0.60)
+                confidence = max(confidence, 0.60)  # 60% minimum si H1 seul
                 if confidence == 0.60:
                     components.append("MinH1:60%")
         
-        # 8. BONUS FINAL : Si M5+H1 alignés (sans H4/D1), confiance minimale 0.55
-        if action != "hold" and (m5_bullish and h1_bullish) and not (h4_bullish or d1_bullish):
+        # 8. BONUS FINAL : Si M5+H1 alignés, confiance minimale 0.55
+        if action != "hold" and (m5_bullish and h1_bullish):
             confidence = max(confidence, 0.55)
-        elif action != "hold" and (m5_bearish and h1_bearish) and not (h4_bearish or d1_bearish):
+        elif action != "hold" and (m5_bearish and h1_bearish):
             confidence = max(confidence, 0.55)
 
         # 8.b OVERRIDE EMA/CHANNEL: éviter HOLD contre une tendance claire M5/H1 avec canal aligné
@@ -7650,10 +7935,9 @@ Format: Analyse claire et professionnelle en français.
                 buy_validation_reasons = []
                 
                 # Critères techniques
-                if h1_bullish: buy_validation_score += 0.2; buy_validation_reasons.append("H1↑")
-                if m5_bullish: buy_validation_score += 0.15; buy_validation_reasons.append("M5↑")
+                if h1_bullish: buy_validation_score += 0.25; buy_validation_reasons.append("H1↑")
+                if m5_bullish: buy_validation_score += 0.20; buy_validation_reasons.append("M5↑")
                 if m1_bullish: buy_validation_score += 0.1; buy_validation_reasons.append("M1↑")
-                if h4_bullish or d1_bullish: buy_validation_score += 0.25; buy_validation_reasons.append("H4/D1↑")
                 if rsi_bullish: buy_validation_score += 0.1; buy_validation_reasons.append("RSI↑")
                 if vwap_signal_buy: buy_validation_score += 0.1; buy_validation_reasons.append("VWAP↑")
                 if supertrend_bullish: buy_validation_score += 0.1; buy_validation_reasons.append("ST↑")
@@ -7681,10 +7965,9 @@ Format: Analyse claire et professionnelle en français.
                 sell_validation_reasons = []
                 
                 # Critères techniques
-                if h1_bearish: sell_validation_score += 0.2; sell_validation_reasons.append("H1↓")
-                if m5_bearish: sell_validation_score += 0.15; sell_validation_reasons.append("M5↓")
+                if h1_bearish: sell_validation_score += 0.25; sell_validation_reasons.append("H1↓")
+                if m5_bearish: sell_validation_score += 0.20; sell_validation_reasons.append("M5↓")
                 if m1_bearish: sell_validation_score += 0.1; sell_validation_reasons.append("M1↓")
-                if h4_bearish or d1_bearish: sell_validation_score += 0.25; sell_validation_reasons.append("H4/D1↓")
                 if rsi_bearish: sell_validation_score += 0.1; sell_validation_reasons.append("RSI↓")
                 if vwap_signal_sell: sell_validation_score += 0.1; sell_validation_reasons.append("VWAP↓")
                 if supertrend_bearish: sell_validation_score += 0.1; sell_validation_reasons.append("ST↓")
