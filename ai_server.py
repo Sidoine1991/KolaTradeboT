@@ -7128,7 +7128,31 @@ async def decision(request: DecisionRequest):
         # 1. Confiance de base proportionnelle au score
         base_confidence = MIN_CONF + (normalized_score * (MAX_CONF - MIN_CONF))
         
-        # 2. BONUS pour alignement H1 et M5 (confirmation court/moyen terme)
+        # 3. BONUS pour tendance long terme (H4/D1)
+        long_term_bonus = 0.0
+        if h4_bullish and d1_bullish:
+            long_term_bonus = 0.20  # +20% si H4 ET D1 alignés (tendance long terme forte)
+            components.append("H4+D1:++")
+        elif h4_bearish and d1_bearish:
+            long_term_bonus = 0.20
+            components.append("H4+D1:--")
+        elif h4_bullish or d1_bullish:
+            long_term_bonus = 0.10  # +10% si au moins H4 OU D1 aligné
+            components.append("H4/D1:+")
+        elif h4_bearish or d1_bearish:
+            long_term_bonus = 0.10
+            components.append("H4/D1:-")
+        
+        # 4. BONUS pour alignement long terme (H1 avec H4/D1)
+        long_term_alignment_bonus = 0.0
+        if h1_bullish and (h4_bullish or d1_bullish):
+            long_term_alignment_bonus = 0.15  # +15% si H1 aligné avec long terme
+            components.append("H1+LT:++")
+        elif h1_bearish and (h4_bearish or d1_bearish):
+            long_term_alignment_bonus = 0.15
+            components.append("H1+LT:--")
+        
+        # 5. BONUS pour alignement H1 et M5 (confirmation court/moyen terme)
         alignment_bonus = 0.0
         if h1_bullish and m5_bullish:
             alignment_bonus = 0.25  # +25% si H1 ET M5 alignés (signal fort)
@@ -7143,7 +7167,7 @@ async def decision(request: DecisionRequest):
             alignment_bonus = 0.15
             components.append("H1/M5:--")
         
-        # 4. BONUS pour alignement M5+H1 (tendance moyenne terme claire)
+        # 6. BONUS pour alignement M5+H1 (tendance moyenne terme claire)
         medium_term_bonus = 0.0
         if (m5_bullish and h1_bullish):
             medium_term_bonus = 0.20  # +20% pour M5+H1 alignés
@@ -7152,7 +7176,7 @@ async def decision(request: DecisionRequest):
             medium_term_bonus = 0.20
             components.append("M5+H1:--")
         
-        # 5. BONUS pour alignement multi-timeframe (4+ timeframes)
+        # 7. BONUS pour alignement multi-timeframe (4+ timeframes)
         alignment_bonus = 0.0
         if bullish_tfs >= 5:
             alignment_bonus = 0.20 + ((bullish_tfs - 5) * 0.03)  # +20% base, +3% par TF supplémentaire
@@ -7167,7 +7191,7 @@ async def decision(request: DecisionRequest):
             alignment_bonus = 0.15
             components.append(f"Align4:{bearish_tfs}/7")
         
-        # 6. Calculer la confiance finale avec TOUS les bonus
+        # 8. Calculer la confiance finale avec TOUS les bonus
         # NOUVEAU: Si au moins 3 timeframes sont alignés, permettre une action même avec score faible
         min_tfs_for_signal = 3
         
