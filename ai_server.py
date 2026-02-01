@@ -7128,14 +7128,17 @@ async def decision(request: DecisionRequest):
         # 1. Confiance de base proportionnelle au score
         base_confidence = MIN_CONF + (normalized_score * (MAX_CONF - MIN_CONF))
         
-        # 3. BONUS pour tendance long terme (H1/M5)
+        # 2. BONUS UNIQUE pour tendance long terme (H1/M5) - éliminer la redondance
         long_term_bonus = 0.0
         if h1_bullish and m5_bullish:
-            long_term_bonus = 0.20  # +20% si H1 ET M5 alignés (tendance long terme forte)
+            long_term_bonus = 0.25  # +25% si H1 ET M5 alignés (tendance long terme forte)
             components.append("H1+M5:++")
         elif h1_bearish and m5_bearish:
-            long_term_bonus = 0.20
+            long_term_bonus = 0.25
             components.append("H1+M5:--")
+        elif (h1_bullish and m5_bearish) or (h1_bearish and m5_bullish):
+            long_term_bonus = -0.15  # Pénalité si H1 et M5 divergents
+            components.append("H1/M5:DIVERGE")
         elif h1_bullish or m5_bullish:
             long_term_bonus = 0.10  # +10% si au moins H1 OU M5 aligné
             components.append("H1/M5:+")
@@ -7143,57 +7146,51 @@ async def decision(request: DecisionRequest):
             long_term_bonus = 0.10
             components.append("H1/M5:-")
         
-        # 4. BONUS pour alignement long terme (H1 avec M5)
-        long_term_alignment_bonus = 0.0
-        if h1_bullish and m5_bullish:
-            long_term_alignment_bonus = 0.15  # +15% si H1 aligné avec M5
-            components.append("H1+M5:++")
-        elif h1_bearish and m5_bearish:
-            long_term_alignment_bonus = 0.15
-            components.append("H1+M5:--")
+        # 3. BONUS pour alignement multi-timeframe complet (tous les 3 timeframes)
+        multi_tf_bonus = 0.0
+        if bullish_tfs == 3:  # M1, M5, H1 tous haussiers
+            multi_tf_bonus = 0.20  # +20% pour alignement parfait
+            components.append("ALIGN:3/3↑")
+        elif bearish_tfs == 3:  # M1, M5, H1 tous baissiers
+            multi_tf_bonus = 0.20
+            components.append("ALIGN:3/3↓")
+        elif bullish_tfs == 2 or bearish_tfs == 2:  # 2 sur 3 alignés
+            multi_tf_bonus = 0.10
+            components.append("ALIGN:2/3")
         
-        # 5. BONUS pour alignement H1 et M5 (confirmation court/moyen terme)
-        alignment_bonus = 0.0
-        if h1_bullish and m5_bullish:
-            alignment_bonus = 0.25  # +25% si H1 ET M5 alignés (signal fort)
-            components.append("H1+M5:+++")
-        elif h1_bearish and m5_bearish:
-            alignment_bonus = 0.25
-            components.append("H1+M5:---")
-        elif h1_bullish or m5_bullish:
-            alignment_bonus = 0.15  # +15% si au moins H1 OU M5 aligné
-            components.append("H1/M5:++")
-        elif h1_bearish or m5_bearish:
-            alignment_bonus = 0.15
-            components.append("H1/M5:--")
+        # 4. BONUS pour qualité des indicateurs techniques
+        technical_bonus = 0.0
         
-        # 6. BONUS pour alignement M5+H1 (tendance moyenne terme claire)
-        medium_term_bonus = 0.0
-        if (m5_bullish and h1_bullish):
-            medium_term_bonus = 0.20  # +20% pour M5+H1 alignés
-            components.append("M5+H1:++")
-        elif (m5_bearish and h1_bearish):
-            medium_term_bonus = 0.20
-            components.append("M5+H1:--")
+        # RSI dans zones extrêmes (plus fiable)
+        if rsi is not None:
+            if rsi < 20 or rsi > 80:
+                technical_bonus += 0.08  # RSI très fiable
+                components.append("RSI:EXT")
+            elif rsi < 30 or rsi > 70:
+                technical_bonus += 0.05  # RSI fiable
+                components.append("RSI:STR")
         
-        # 7. BONUS pour alignement multi-timeframe (4+ timeframes)
-        alignment_bonus = 0.0
-        if bullish_tfs >= 5:
-            alignment_bonus = 0.20 + ((bullish_tfs - 5) * 0.03)  # +20% base, +3% par TF supplémentaire
-            components.append(f"Align5+:{bullish_tfs}/7")
-        elif bearish_tfs >= 5:
-            alignment_bonus = 0.20 + ((bearish_tfs - 5) * 0.03)
-            components.append(f"Align5+:{bearish_tfs}/7")
-        elif bullish_tfs >= 4:
-            alignment_bonus = 0.15  # +15% pour 4 timeframes
-            components.append(f"Align4:{bullish_tfs}/7")
-        elif bearish_tfs >= 4:
-            alignment_bonus = 0.15
-            components.append(f"Align4:{bearish_tfs}/7")
+        # ATR pour la volatilité (confiance si volatilité adéquate)
+        if request.atr and request.atr > 0:
+            atr_percent = (request.atr / request.bid) * 100 if request.bid > 0 else 0
+            if 0.1 <= atr_percent <= 0.5:  # Volatilité idéale
+                technical_bonus += 0.06
+                components.append("ATR:OK")
+            elif atr_percent > 1.0:  # Volatilité trop élevée
+                technical_bonus -= 0.03
+                components.append("ATR:HIGH")
         
-        # 8. Calculer la confiance finale avec TOUS les bonus
-        # NOUVEAU: Si au moins 3 timeframes sont alignés, permettre une action même avec score faible
-        min_tfs_for_signal = 3
+        # 5. CONFIDANCE FINALE
+        confidence = base_confidence + long_term_bonus + multi_tf_bonus + technical_bonus
+        
+        # Appliquer les bonus/malus de volatilité
+        if not volatility_ok:
+            confidence += VOL_LOW_MALUS
+        elif request.volatility_regime == 1:
+            confidence += VOL_OK_BONUS
+        
+        # Limiter la confiance entre MIN_CONF et MAX_CONF
+        confidence = max(MIN_CONF, min(MAX_CONF, confidence))
         
         # BONUS TEMPS RÉEL: Si mouvement haussier détecté en temps réel, favoriser BUY
         realtime_bonus = 0.0
@@ -7210,26 +7207,28 @@ async def decision(request: DecisionRequest):
                 realtime_bonus = -0.10  # -10% si mouvement baissier cohérent
                 components.append(f"RealtimeDown:{realtime_movement['price_change_percent']:+.2f}%")
         
+        # Appliquer le bonus temps réel à la confiance
+        confidence += realtime_bonus
+        
+        # Décision finale basée sur le score et les alignements de timeframe
+        min_tfs_for_signal = 3
+        
         if bullish_tfs >= min_tfs_for_signal and direction_score > -HOLD_THRESHOLD:
             # Au moins 3 TFs haussiers -> signal BUY même si score faible
             action = "buy"
-            confidence = base_confidence + long_term_bonus + long_term_alignment_bonus + medium_term_bonus + alignment_bonus + realtime_bonus
-            # Confiance minimale si au moins 3 TFs alignés
-            if bullish_tfs >= 3:
-                confidence = max(confidence, 0.50)  # Minimum 50% si 3+ TFs alignés
+            confidence = max(confidence, 0.50)  # Minimum 50% si 3+ TFs alignés
+            components.append("3+TFs:BUY")
         elif bearish_tfs >= min_tfs_for_signal and direction_score < HOLD_THRESHOLD:
             # Au moins 3 TFs baissiers -> signal SELL même si score faible
             action = "sell"
-            confidence = base_confidence + long_term_bonus + long_term_alignment_bonus + medium_term_bonus + alignment_bonus + realtime_bonus
-            # Confiance minimale si au moins 3 TFs alignés
-            if bearish_tfs >= 3:
-                confidence = max(confidence, 0.50)  # Minimum 50% si 3+ TFs alignés
+            confidence = max(confidence, 0.50)  # Minimum 50% si 3+ TFs alignés
+            components.append("3+TFs:SELL")
         elif direction_score > HOLD_THRESHOLD:
             action = "buy"
-            confidence = base_confidence + long_term_bonus + long_term_alignment_bonus + medium_term_bonus + alignment_bonus + realtime_bonus
+            confidence += realtime_bonus
         elif direction_score < -HOLD_THRESHOLD:
             action = "sell"
-            confidence = base_confidence + long_term_bonus + long_term_alignment_bonus + medium_term_bonus + alignment_bonus + realtime_bonus
+            confidence += realtime_bonus
         else:
             # NOUVEAU: Si mouvement haussier temps réel fort détecté, forcer BUY même si score faible
             if realtime_movement["direction"] == "up" and realtime_movement["strength"] > 0.5 and realtime_movement["trend_consistent"]:
