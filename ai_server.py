@@ -6876,10 +6876,6 @@ async def decision(request: DecisionRequest):
         m5_bearish = False
         h1_bullish = False
         h1_bearish = False
-        h4_bullish = False
-        h4_bearish = False
-        d1_bullish = False
-        d1_bearish = False
         
         # Tentative de récupération depuis trend_api (rapide, caché) - H1 et M5 uniquement
         trend_api_success = False
@@ -6899,12 +6895,6 @@ async def decision(request: DecisionRequest):
                 if 'H1' in trends:
                     h1_bullish = trends['H1'].get('bullish', False)
                     h1_bearish = trends['H1'].get('bearish', False)
-                if 'H4' in trends:
-                    h4_bullish = trends['H4'].get('bullish', False)
-                    h4_bearish = trends['H4'].get('bearish', False)
-                if 'D1' in trends:
-                    d1_bullish = trends['D1'].get('bullish', False)
-                    d1_bearish = trends['D1'].get('bearish', False)
                 
                 # Vérifier si on a récupéré H1 et M5
                 if (h1_bullish or h1_bearish) and (m5_bullish or m5_bearish):
@@ -7138,29 +7128,29 @@ async def decision(request: DecisionRequest):
         # 1. Confiance de base proportionnelle au score
         base_confidence = MIN_CONF + (normalized_score * (MAX_CONF - MIN_CONF))
         
-        # 3. BONUS pour tendance long terme (H4/D1)
+        # 3. BONUS pour tendance long terme (H1/M5)
         long_term_bonus = 0.0
-        if h4_bullish and d1_bullish:
-            long_term_bonus = 0.20  # +20% si H4 ET D1 alignés (tendance long terme forte)
-            components.append("H4+D1:++")
-        elif h4_bearish and d1_bearish:
+        if h1_bullish and m5_bullish:
+            long_term_bonus = 0.20  # +20% si H1 ET M5 alignés (tendance long terme forte)
+            components.append("H1+M5:++")
+        elif h1_bearish and m5_bearish:
             long_term_bonus = 0.20
-            components.append("H4+D1:--")
-        elif h4_bullish or d1_bullish:
-            long_term_bonus = 0.10  # +10% si au moins H4 OU D1 aligné
-            components.append("H4/D1:+")
-        elif h4_bearish or d1_bearish:
+            components.append("H1+M5:--")
+        elif h1_bullish or m5_bullish:
+            long_term_bonus = 0.10  # +10% si au moins H1 OU M5 aligné
+            components.append("H1/M5:+")
+        elif h1_bearish or m5_bearish:
             long_term_bonus = 0.10
-            components.append("H4/D1:-")
+            components.append("H1/M5:-")
         
-        # 4. BONUS pour alignement long terme (H1 avec H4/D1)
+        # 4. BONUS pour alignement long terme (H1 avec M5)
         long_term_alignment_bonus = 0.0
-        if h1_bullish and (h4_bullish or d1_bullish):
-            long_term_alignment_bonus = 0.15  # +15% si H1 aligné avec long terme
-            components.append("H1+LT:++")
-        elif h1_bearish and (h4_bearish or d1_bearish):
+        if h1_bullish and m5_bullish:
+            long_term_alignment_bonus = 0.15  # +15% si H1 aligné avec M5
+            components.append("H1+M5:++")
+        elif h1_bearish and m5_bearish:
             long_term_alignment_bonus = 0.15
-            components.append("H1+LT:--")
+            components.append("H1+M5:--")
         
         # 5. BONUS pour alignement H1 et M5 (confirmation court/moyen terme)
         alignment_bonus = 0.0
