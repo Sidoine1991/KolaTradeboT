@@ -12,28 +12,34 @@ import logging
 import requests
 import MetaTrader5 as mt5
 from datetime import datetime, timedelta
-from flask import Flask, render_template_string, jsonify
+from flask import Flask, render_template_string, jsonify, request
 import threading
+from collections import deque
 
 # Configuration
 RENDER_API_URL = "https://kolatradebot.onrender.com"
+# Liste étendue de symboles à surveiller
 SYMBOLS_TO_MONITOR = [
-    "Boom 300 Index",
-    "Boom 600 Index", 
-    "Boom 900 Index",
-    "Crash 1000 Index"
+    "Boom 300 Index", "Boom 500 Index", "Boom 1000 Index",
+    "Crash 300 Index", "Crash 500 Index", "Crash 1000 Index",
+    "Volatility 10 Index", "Volatility 25 Index", "Volatility 50 Index", "Volatility 75 Index", "Volatility 100 Index",
+    "Jump 25 Index", "Jump 50 Index", "Jump 75 Index", "Jump 100 Index",
+    "XAUUSD", "EURUSD"
 ]
 
 app = Flask(__name__)
 
-# Variables globales
-positions = {}
-signals = {}
-performance_data = {
-    'total_profit': 0.0,
-    'active_positions': 0,
-    'active_signals': 0,
-    'last_update': datetime.now().strftime('%H:%M:%S')
+# --- Structures de données en mémoire centralisées ---
+global_data = {
+    "positions": {},
+    "signals": {},
+    "trade_history": deque(maxlen=200),  # Historique des 200 derniers trades
+    "daily_stats": {},
+    "symbol_performance": {},
+    "ml_metrics": {},
+    "performance": {},
+    "last_sync_time": 0,
+    "data_source": "N/A"
 }
 
 # Template HTML
@@ -43,307 +49,320 @@ HTML_TEMPLATE = """
 <head>
     <title>🤖 TradBOT IA Dashboard</title>
     <meta charset="utf-8">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
-        body {
-            font-family: Arial, sans-serif;
-            background: #1e1e1e;
-            color: #ffffff;
-            margin: 0;
-            padding: 20px;
-        }
-        .header {
-            text-align: center;
-            color: #00bfff;
-            font-size: 24px;
-            margin-bottom: 30px;
-        }
-        .container {
-            max-width: 1200px;
-            margin: 0 auto;
-        }
-        .symbols-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-            gap: 20px;
-            margin-bottom: 30px;
-        }
-        .symbol-card {
-            background: #2d2d2d;
-            border: 1px solid #444;
-            border-radius: 8px;
-            padding: 20px;
-            text-align: center;
-        }
-        .symbol-name {
-            font-size: 18px;
-            font-weight: bold;
-            color: #00bfff;
-            margin-bottom: 15px;
-        }
-        .signal {
-            font-size: 16px;
-            margin: 10px 0;
-            padding: 5px;
-            border-radius: 4px;
-        }
-        .signal-buy { background: #006400; color: #00ff00; }
-        .signal-sell { background: #8b0000; color: #ff0000; }
-        .signal-wait { background: #333; color: #808080; }
-        .position {
-            font-size: 14px;
-            margin: 10px 0;
-        }
-        .position-active { color: #00ff00; }
-        .position-none { color: #808080; }
-        .performance {
-            background: #2d2d2d;
-            border: 1px solid #444;
-            border-radius: 8px;
-            padding: 20px;
-            text-align: center;
-            font-size: 18px;
-        }
-        .update-time {
-            text-align: center;
-            color: #808080;
-            margin-top: 20px;
-        }
-        .refresh-btn {
-            background: #00bfff;
-            color: #1e1e1e;
-            border: none;
-            padding: 10px 20px;
-            border-radius: 4px;
-            cursor: pointer;
-            font-size: 14px;
-            margin: 10px;
-        }
-        .refresh-btn:hover { background: #0080ff; }
+        body { font-family: 'Segoe UI', Arial, sans-serif; background: #121212; color: #e0e0e0; margin: 0; padding: 20px; }
+        .header { text-align: center; color: #1e90ff; font-size: 28px; margin-bottom: 20px; font-weight: bold; }
+        .container { max-width: 1600px; margin: 0 auto; }
+        .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(350px, 1fr)); gap: 20px; }
+        .card { background: #1e1e1e; border: 1px solid #333; border-radius: 10px; padding: 20px; box-shadow: 0 4px 8px rgba(0,0,0,0.2); }
+        .card-title { font-size: 20px; font-weight: bold; color: #1e90ff; margin-bottom: 15px; border-bottom: 1px solid #333; padding-bottom: 10px; }
+        .position-card { background: #2a2a2a; border-radius: 8px; padding: 15px; }
+        .profit { color: #32cd32; }
+        .loss { color: #ff4500; }
+        .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 15px; }
+        .stat-item { background: #2a2a2a; padding: 10px; border-radius: 5px; text-align: center; }
+        .stat-label { color: #aaa; font-size: 14px; }
+        .stat-value { font-size: 18px; font-weight: bold; }
+        #trade-history-table { width: 100%; border-collapse: collapse; margin-top: 15px; }
+        #trade-history-table th, #trade-history-table td { padding: 8px 12px; border-bottom: 1px solid #333; text-align: left; font-size: 14px; }
+        #trade-history-table th { background: #2a2a2a; }
+        .pagination { text-align: center; margin-top: 15px; }
+        .pagination button { background: #1e90ff; color: white; border: none; padding: 8px 15px; border-radius: 5px; cursor: pointer; margin: 0 5px; }
+        .pagination button:disabled { background: #555; cursor: not-allowed; }
+        .footer { text-align: center; color: #808080; margin-top: 30px; font-size: 12px; }
     </style>
 </head>
 <body>
-    <div class="header">
-        🤖 TRADING IA DASHBOARD
-    </div>
-    
+    <div class="header">TRADING IA DASHBOARD</div>
     <div class="container">
-        <div class="symbols-grid">
-            {% for symbol in symbols %}
-            <div class="symbol-card">
-                <div class="symbol-name">{{ symbol }}</div>
-                <div id="signal-{{ symbol|replace(' ', '-') }}" class="signal signal-wait">
-                    ⏳ EN ATTENTE
+        <div class="grid">
+            <!-- Colonne de gauche: Positions et Stats -->
+            <div style="display: flex; flex-direction: column; gap: 20px;">
+                <div class="card">
+                    <div class="card-title">Statistiques du Jour</div>
+                    <div id="daily-stats-content" class="stats-grid"></div>
                 </div>
-                <div id="position-{{ symbol|replace(' ', '-') }}" class="position position-none">
-                    📉 PAS DE POSITION
-                </div>
-                <div id="update-{{ symbol|replace(' ', '-') }}" style="color: #808080; font-size: 12px;">
-                    ---
+                <div class="card">
+                    <div class="card-title">Positions Ouvertes</div>
+                    <div id="open-positions-grid" class="grid"></div>
                 </div>
             </div>
-            {% endfor %}
+            <!-- Colonne de droite: Graphiques et Performance -->
+            <div style="display: flex; flex-direction: column; gap: 20px;">
+                <div class="card">
+                    <div class="card-title">Profit Journalier</div>
+                    <canvas id="profit-chart"></canvas>
+                </div>
+                <div class="card">
+                    <div class="card-title">Performance par Symbole</div>
+                    <div style="display: flex; gap: 20px;">
+                        <div style="flex: 1;">
+                            <h4 style="color: #32cd32;">Top 5 Gagnants</h4>
+                            <ul id="best-symbols"></ul>
+                        </div>
+                        <div style="flex: 1;">
+                            <h4 style="color: #ff4500;">Top 5 Perdants</h4>
+                            <ul id="worst-symbols"></ul>
+                        </div>
+                    </div>
+                </div>
+            </div>
         </div>
-        
-        <div class="performance">
-            <div id="performance-text">📊 En attente des données...</div>
+
+        <!-- Historique des Trades -->
+        <div class="card" style="margin-top: 20px;">
+            <div class="card-title">Historique des Trades</div>
+            <table id="trade-history-table">
+                <thead><tr><th>Heure</th><th>Symbole</th><th>Type</th><th>Prix Entrée</th><th>Prix Sortie</th><th>Profit</th><th>Raison</th></tr></thead>
+                <tbody></tbody>
+            </table>
+            <div class="pagination">
+                <button id="prev-page">Précédent</button>
+                <span id="page-info"></span>
+                <button id="next-page">Suivant</button>
+            </div>
         </div>
-        
-        <div style="text-align: center; margin: 20px;">
-            <button class="refresh-btn" onclick="location.reload()">🔄 ACTUALISER</button>
-            <button class="refresh-btn" onclick="toggleAutoRefresh()">🔄 AUTO-REFRESH: <span id="auto-status">OFF</span></button>
-        </div>
-        
-        <div class="update-time">
-            Dernière mise à jour: <span id="last-update">---</span>
+        <div class="footer">
+            Dernière synchro: <span id="last-sync">N/A</span> | Source: <span id="data-source">N/A</span>
         </div>
     </div>
 
     <script>
-        let autoRefresh = null;
-        
-        function updateData() {
-            fetch('/api/data')
-                .then(response => response.json())
-                .then(data => {
-                    // Mettre à jour les signaux
-                    for (let symbol in data.signals) {
-                        const signalId = 'signal-' + symbol.replace(/ /g, '-');
-                        const signalEl = document.getElementById(signalId);
-                        const signal = data.signals[symbol];
-                        
-                        if (signal.signal === 'BUY') {
-                            signalEl.className = 'signal signal-buy';
-                            signalEl.textContent = `📈 BUY ${signal.confidence.toFixed(0)}%`;
-                        } else if (signal.signal === 'SELL') {
-                            signalEl.className = 'signal signal-sell';
-                            signalEl.textContent = `📉 SELL ${signal.confidence.toFixed(0)}%`;
-                        } else {
-                            signalEl.className = 'signal signal-wait';
-                            signalEl.textContent = '⏳ EN ATTENTE';
-                        }
-                    }
-                    
-                    // Mettre à jour les positions
-                    for (let symbol in data.positions) {
-                        const posId = 'position-' + symbol.replace(/ /g, '-');
-                        const posEl = document.getElementById(posId);
-                        const pos = data.positions[symbol];
-                        
-                        if (pos.type !== 'NONE') {
-                            posEl.className = 'position position-active';
-                            const profitColor = pos.profit >= 0 ? '#00ff00' : '#ff0000';
-                            posEl.innerHTML = `💼 ${pos.type} @ ${pos.price}<br>💰 P&L: <span style="color: ${profitColor}">${pos.profit >= 0 ? '+' : ''}${pos.profit.toFixed(2)}</span>`;
-                        } else {
-                            posEl.className = 'position position-none';
-                            posEl.textContent = '📉 PAS DE POSITION';
-                        }
-                    }
-                    
-                    // Mettre à jour la performance
-                    const perfEl = document.getElementById('performance-text');
-                    perfEl.innerHTML = `📊 Positions: ${data.performance.active_positions} | 💰 P&L Total: ${data.performance.total_profit >= 0 ? '+' : ''}${data.performance.total_profit.toFixed(2)} | 🤖 Signaux: ${data.performance.active_signals}`;
-                    
-                    // Mettre à jour l'heure
-                    document.getElementById('last-update').textContent = data.performance.last_update;
-                })
-                .catch(error => {
-                    console.error('Erreur:', error);
-                });
+        let profitChart;
+        let tradeHistory = [];
+        let currentPage = 1;
+        const rowsPerPage = 10;
+
+        function formatCurrency(value) {
+            const color = value >= 0 ? 'profit' : 'loss';
+            return `<span class="${color}">${value.toFixed(2)} $</span>`;
         }
-        
-        function toggleAutoRefresh() {
-            const statusEl = document.getElementById('auto-status');
-            if (autoRefresh) {
-                clearInterval(autoRefresh);
-                autoRefresh = null;
-                statusEl.textContent = 'OFF';
-                statusEl.style.color = '#ff0000';
+
+        function renderDashboard(data) {
+            // Stats du jour
+            const statsEl = document.getElementById('daily-stats-content');
+            if (data.daily_stats) {
+                const stats = data.daily_stats;
+                statsEl.innerHTML = `
+                    <div class="stat-item"><div class="stat-label">Trades</div><div class="stat-value">${stats.total_trades}</div></div>
+                    <div class="stat-item"><div class="stat-label">Taux de Succès</div><div class="stat-value">${stats.win_rate.toFixed(1)}%</div></div>
+                    <div class="stat-item"><div class="stat-label">Profit Total</div><div class="stat-value">${formatCurrency(stats.total_profit)}</div></div>
+                    <div class="stat-item"><div class="stat-label">Profit Factor</div><div class="stat-value">${stats.profit_factor.toFixed(2)}</div></div>
+                `;
+            }
+
+            // Positions ouvertes
+            const posGrid = document.getElementById('open-positions-grid');
+            posGrid.innerHTML = '';
+            if (Object.keys(data.positions).length > 0) {
+                for (const symbol in data.positions) {
+                    const pos = data.positions[symbol];
+                    posGrid.innerHTML += `
+                        <div class="position-card">
+                            <strong>${symbol}</strong> (${pos.type})
+                            <div>Profit: ${formatCurrency(pos.profit)}</div>
+                            <small>@ ${pos.price_open}</small>
+                        </div>
+                    `;
+                }
             } else {
-                autoRefresh = setInterval(updateData, 5000);
-                statusEl.textContent = 'ON';
-                statusEl.style.color = '#00ff00';
+                posGrid.innerHTML = '<p>Aucune position ouverte.</p>';
+            }
+
+            // Performance par symbole
+            const bestSymbolsEl = document.getElementById('best-symbols');
+            const worstSymbolsEl = document.getElementById('worst-symbols');
+            bestSymbolsEl.innerHTML = '';
+            worstSymbolsEl.innerHTML = '';
+            if (data.symbol_performance) {
+                data.symbol_performance.best.forEach(s => { bestSymbolsEl.innerHTML += `<li>${s.symbol}: ${formatCurrency(s.profit)}</li>`; });
+                data.symbol_performance.worst.forEach(s => { worstSymbolsEl.innerHTML += `<li>${s.symbol}: ${formatCurrency(s.profit)}</li>`; });
+            }
+
+            // Historique des trades
+            tradeHistory = data.trade_history || [];
+            renderTradeHistory();
+
+            // Mise à jour du graphique
+            updateProfitChart(data.daily_stats.profit_history || []);
+            
+            // Footer
+            document.getElementById('last-sync').textContent = data.last_sync_time;
+            document.getElementById('data-source').textContent = data.data_source;
+        }
+
+        function renderTradeHistory() {
+            const tableBody = document.querySelector('#trade-history-table tbody');
+            tableBody.innerHTML = '';
+            const start = (currentPage - 1) * rowsPerPage;
+            const end = start + rowsPerPage;
+            const paginatedItems = tradeHistory.slice(start, end);
+
+            for (const trade of paginatedItems) {
+                tableBody.innerHTML += `
+                    <tr>
+                        <td>${trade.close_time}</td>
+                        <td>${trade.symbol}</td>
+                        <td>${trade.type}</td>
+                        <td>${trade.price_open}</td>
+                        <td>${trade.price_close}</td>
+                        <td>${formatCurrency(trade.profit)}</td>
+                        <td>${trade.reason}</td>
+                    </tr>
+                `;
+            }
+            document.getElementById('page-info').textContent = `Page ${currentPage} sur ${Math.ceil(tradeHistory.length / rowsPerPage)}`;
+            document.getElementById('prev-page').disabled = currentPage === 1;
+            document.getElementById('next-page').disabled = currentPage * rowsPerPage >= tradeHistory.length;
+        }
+
+        function updateProfitChart(profitHistory) {
+            const ctx = document.getElementById('profit-chart').getContext('2d');
+            const labels = profitHistory.map(p => p.time);
+            const data = profitHistory.map(p => p.profit);
+
+            if (profitChart) {
+                profitChart.data.labels = labels;
+                profitChart.data.datasets[0].data = data;
+                profitChart.update();
+            } else {
+                profitChart = new Chart(ctx, {
+                    type: 'line',
+                    data: {
+                        labels: labels,
+                        datasets: [{
+                            label: 'Profit Cumulé',
+                            data: data,
+                            borderColor: '#1e90ff',
+                            backgroundColor: 'rgba(30, 144, 255, 0.2)',
+                            fill: true,
+                            tension: 0.3
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        scales: { x: { ticks: { color: '#aaa' } }, y: { ticks: { color: '#aaa' } } },
+                        plugins: { legend: { display: false } }
+                    }
+                });
             }
         }
-        
-        // Charger les données initiales
-        updateData();
-        
-        // Auto-refresh optionnel
-        // toggleAutoRefresh();
+
+        function fetchData() {
+            fetch('/api/data')
+                .then(response => response.json())
+                .then(data => renderDashboard(data))
+                .catch(error => console.error('Erreur de fetch:', error));
+        }
+
+        // Pagination
+        document.getElementById('prev-page').addEventListener('click', () => { if (currentPage > 1) { currentPage--; renderTradeHistory(); } });
+        document.getElementById('next-page').addEventListener('click', () => { if (currentPage * rowsPerPage < tradeHistory.length) { currentPage++; renderTradeHistory(); } });
+
+        // Initial load and refresh
+        fetchData();
+        setInterval(fetchData, 5000); // Refresh toutes les 5 secondes
     </script>
 </body>
 </html>
 """
 
-def get_ai_signals():
-    """Récupérer les signaux IA"""
-    global signals
-    try:
-        for symbol in SYMBOLS_TO_MONITOR:
-            url = f"{RENDER_API_URL}/predict/{symbol}"
-            response = requests.get(url, timeout=10)
-            
-            if response.status_code == 200:
-                signal_data = response.json()
-                prediction = signal_data.get('prediction', {})
-                direction = prediction.get('direction', 'HOLD')
-                confidence = prediction.get('confidence', 0) * 100
-                
-                if direction.upper() == 'UP':
-                    signals[symbol] = {'signal': 'BUY', 'confidence': confidence}
-                elif direction.upper() == 'DOWN':
-                    signals[symbol] = {'signal': 'SELL', 'confidence': confidence}
-                else:
-                    signals[symbol] = {'signal': 'WAIT', 'confidence': 0}
-            else:
-                signals[symbol] = {'signal': 'ERROR', 'confidence': 0}
-                
-    except Exception as e:
-        print(f"Erreur获取信号: {e}")
+def process_data_and_update_stats(data):
+    """Traiter les données reçues et mettre à jour toutes les statistiques."""
+    global global_data
 
-def get_mt5_positions():
-    """Récupérer les positions MT5"""
-    global positions
-    try:
-        if not mt5.initialize():
-            return
-        
-        positions_data = mt5.positions_get()
-        if positions_data:
-            for pos in positions_data:
-                if pos.symbol in SYMBOLS_TO_MONITOR:
-                    positions[pos.symbol] = {
-                        'type': 'BUY' if pos.type == mt5.POSITION_TYPE_BUY else 'SELL',
-                        'price': pos.price_open,
-                        'profit': pos.profit,
-                        'ticket': pos.ticket
-                    }
-        
-        # Nettoyer les positions fermées
-        current_symbols = set()
-        if positions_data:
-            current_symbols = {pos.symbol for pos in positions_data if pos.symbol in SYMBOLS_TO_MONITOR}
-        
-        for symbol in list(positions.keys()):
-            if symbol not in current_symbols:
-                positions[symbol] = {'type': 'NONE', 'price': 0, 'profit': 0, 'ticket': 0}
-                    
-        mt5.shutdown()
-        
-    except Exception as e:
-        print(f"Erreur获取MT5仓位: {e}")
+    # Mettre à jour les données de base
+    global_data['positions'] = data.get('positions', {})
+    global_data['signals'] = data.get('signals', {})
+    global_data['ml_metrics'] = data.get('ml_metrics', {})
+    global_data['performance'] = data.get('performance', {})
+    global_data['last_sync_time'] = datetime.now().strftime('%H:%M:%S')
+    global_data['data_source'] = 'robot'
 
-def update_performance():
-    """Mettre à jour les données de performance"""
-    global performance_data
+    # Mettre à jour l'historique des trades
+    new_history = data.get('trade_history', [])
+    if new_history:
+        # Utiliser un set pour un accès rapide aux tickets existants
+        existing_tickets = {trade['ticket'] for trade in global_data['trade_history']}
+        for trade in new_history:
+            if trade['ticket'] not in existing_tickets:
+                global_data['trade_history'].appendleft(trade) # Ajouter au début
+
+    # Calculer les statistiques journalières
+    today_str = datetime.now().strftime('%Y-%m-%d')
+    today_trades = [t for t in global_data['trade_history'] if t.get('close_time', '').startswith(today_str)]
     
-    total_profit = sum(pos.get('profit', 0) for pos in positions.values())
-    active_positions = len([pos for pos in positions.values() if pos.get('type') != 'NONE'])
-    active_signals = len([sig for sig in signals.values() if sig.get('signal') not in ['WAIT', 'ERROR']])
-    
-    performance_data = {
+    total_trades = len(today_trades)
+    winning_trades = sum(1 for t in today_trades if t['profit'] > 0)
+    losing_trades = total_trades - winning_trades
+    total_profit = sum(t['profit'] for t in today_trades)
+    total_loss = sum(t['profit'] for t in today_trades if t['profit'] < 0)
+    win_rate = (winning_trades / total_trades * 100) if total_trades > 0 else 0
+    profit_factor = abs(total_profit / total_loss) if total_loss != 0 else 0
+
+    # Historique des profits pour le graphique
+    profit_history = []
+    cumulative_profit = 0
+    for trade in reversed(today_trades): # Inverser pour un ordre chronologique
+        cumulative_profit += trade['profit']
+        profit_history.append({'time': trade['close_time'].split(' ')[1], 'profit': cumulative_profit})
+
+    global_data['daily_stats'] = {
+        'total_trades': total_trades,
+        'winning_trades': winning_trades,
+        'losing_trades': losing_trades,
+        'win_rate': win_rate,
         'total_profit': total_profit,
-        'active_positions': active_positions,
-        'active_signals': active_signals,
-        'last_update': datetime.now().strftime('%H:%M:%S')
+        'profit_factor': profit_factor,
+        'profit_history': profit_history
     }
 
-def update_data():
-    """Fonction de mise à jour en arrière-plan"""
-    while True:
-        try:
-            get_ai_signals()
-            get_mt5_positions()
-            update_performance()
-            time.sleep(5)
-        except Exception as e:
-            print(f"Erreur de mise à jour: {e}")
-            time.sleep(10)
+    # Calculer la performance par symbole
+    symbol_perf = {}
+    for trade in global_data['trade_history']:
+        s = trade['symbol']
+        if s not in symbol_perf:
+            symbol_perf[s] = {'profit': 0, 'trades': 0}
+        symbol_perf[s]['profit'] += trade['profit']
+        symbol_perf[s]['trades'] += 1
+    
+    sorted_symbols = sorted(symbol_perf.items(), key=lambda item: item[1]['profit'], reverse=True)
+    global_data['symbol_performance'] = {
+        'best': [{'symbol': s, 'profit': p['profit']} for s, p in sorted_symbols[:5]],
+        'worst': [{'symbol': s, 'profit': p['profit']} for s, p in sorted_symbols[-5:]]
+    }
 
 @app.route('/')
 def index():
     """Page principale du dashboard"""
-    return render_template_string(HTML_TEMPLATE, symbols=SYMBOLS_TO_MONITOR)
+    return render_template_string(HTML_TEMPLATE)
 
 @app.route('/api/data')
 def api_data():
     """API endpoint pour les données du dashboard"""
-    return jsonify({
-        'signals': signals,
-        'positions': positions,
-        'performance': performance_data
-    })
+    # Convertir le deque en liste pour la sérialisation JSON
+    data_copy = global_data.copy()
+    data_copy['trade_history'] = list(global_data['trade_history'])
+    return jsonify(data_copy)
+
+@app.route('/api/sync', methods=['POST'])
+def sync_data():
+    """Endpoint pour synchroniser les données depuis le robot MT5"""
+    try:
+        data = request.json
+        process_data_and_update_stats(data)
+        return jsonify({'status': 'success', 'message': 'Data synchronized'})
+    except Exception as e:
+        logging.error(f"Erreur de synchronisation: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
 
 if __name__ == '__main__':
+    logging.basicConfig(level=logging.INFO)
     print("🚀 Démarrage du Web Dashboard...")
     print("📊 Accès: http://localhost:5000")
-    print("🔄 Mise à jour automatique toutes les 5 secondes")
+    print("🔄 Le dashboard se met à jour automatiquement via JavaScript.")
     print("❌ Ctrl+C pour arrêter")
-    print("")
     
-    # Démarrer le thread de mise à jour
-    update_thread = threading.Thread(target=update_data, daemon=True)
-    update_thread.start()
-    
-    # Démarrer le serveur web
+    # Le thread de mise à jour fallback n'est plus nécessaire
     app.run(host='0.0.0.0', port=5000, debug=False)

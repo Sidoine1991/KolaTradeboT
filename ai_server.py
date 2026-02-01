@@ -6876,6 +6876,10 @@ async def decision(request: DecisionRequest):
         m5_bearish = False
         h1_bullish = False
         h1_bearish = False
+        h4_bullish = False
+        h4_bearish = False
+        d1_bullish = False
+        d1_bearish = False
         
         # Tentative de récupération depuis trend_api (rapide, caché) - H1 et M5 uniquement
         trend_api_success = False
@@ -6895,6 +6899,12 @@ async def decision(request: DecisionRequest):
                 if 'H1' in trends:
                     h1_bullish = trends['H1'].get('bullish', False)
                     h1_bearish = trends['H1'].get('bearish', False)
+                if 'H4' in trends:
+                    h4_bullish = trends['H4'].get('bullish', False)
+                    h4_bearish = trends['H4'].get('bearish', False)
+                if 'D1' in trends:
+                    d1_bullish = trends['D1'].get('bullish', False)
+                    d1_bearish = trends['D1'].get('bearish', False)
                 
                 # Vérifier si on a récupéré H1 et M5
                 if (h1_bullish or h1_bearish) and (m5_bullish or m5_bearish):
