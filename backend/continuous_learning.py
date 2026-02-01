@@ -323,6 +323,38 @@ class ContinuousLearning:
         
         return pd.Series(labels, index=trades.index)
     
+    def create_labels_from_predictions(self, predictions_df: pd.DataFrame) -> Optional[pd.Series]:
+        """
+        Crée les labels depuis les prédictions sauvegardées (fallback sans DB).
+        Aligné avec extract_features_from_predictions : une label par ligne qui a input_row.
+        Label = 1 (BUY) ou 0 (SELL) depuis ml_decision['prediction'] ou decision.
+        """
+        if predictions_df is None or len(predictions_df) == 0:
+            return None
+        labels_list = []
+        for _, row in predictions_df.iterrows():
+            try:
+                details = json.loads(row["details_json"])
+                ml_decision = details.get("ml_decision", {})
+                if "input_row" not in ml_decision:
+                    continue
+                pred = ml_decision.get("prediction", None)
+                if pred is not None:
+                    labels_list.append(1 if int(pred) == 1 else 0)
+                    continue
+                decision = (ml_decision.get("decision") or details.get("decision") or "").upper().strip()
+                if decision == "BUY":
+                    labels_list.append(1)
+                elif decision == "SELL":
+                    labels_list.append(0)
+                else:
+                    labels_list.append(1)
+            except Exception:
+                continue
+        if not labels_list:
+            return None
+        return pd.Series(labels_list)
+    
     def retrain_model_for_category(self, category: str, use_historical_data: bool = True) -> Dict:
         """
         Ré-entraîne le modèle pour une catégorie donnée en utilisant les vrais résultats de trades

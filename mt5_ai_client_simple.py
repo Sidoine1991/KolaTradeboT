@@ -20,6 +20,11 @@ SYMBOLS_TO_MONITOR = [
 ]
 MIN_CONFIDENCE = 70.0
 
+# MONEY MANAGEMENT - RÈGLES STRICTES
+MAX_LOSS_USD = 5.0  # Fermer si perte >= -5$
+PROFIT_TARGET_USD = 10.0  # Fermer si profit >= +10$
+REENTRY_DELAY_SECONDS = 3  # Délai avant ré-entrée après profit
+
 # Tailles de position
 POSITION_SIZES = {
     "Boom 300 Index": 0.5,
@@ -43,6 +48,10 @@ class MT5AIClientSimple:
     def __init__(self):
         self.connected = False
         self.positions = {}
+        # Money management tracking
+        self.last_profit_close_time = {}
+        self.last_profit_close_symbol = {}
+        self.last_profit_close_direction = {}
         
     def connect_mt5(self):
         """Connexion à MT5"""
@@ -99,6 +108,143 @@ class MT5AIClientSimple:
         except Exception as e:
             logger.error(f"Erreur signal {symbol}: {e}")
             return None
+    
+    def check_money_management(self):
+        """Vérifie et ferme les positions selon les règles de money management"""
+        try:
+            positions = mt5.positions_get()
+            if not positions:
+                return
+            
+            for position in positions:
+                # Calculer le profit total (inclut swap + commission)
+                total_profit = position.profit + position.swap + position.commission
+                
+                # RÈGLE 1: FERMER SI PERTE >= -5$
+                if total_profit <= -MAX_LOSS_USD:
+                    logger.warning(f"🚨 PERTE MAX ATTEINTE: {position.symbol} - Perte: {total_profit:.2f}$ (limite: -{MAX_LOSS_USD}$)")
+                    self.close_position(position.ticket, f"Max Loss -{MAX_LOSS_USD}$")
+                    continue
+                
+                # RÈGLE 2: FERMER SI PROFIT >= +10$
+                if total_profit >= PROFIT_TARGET_USD:
+                    logger.info(f"💰 PROFIT CIBLE ATTEINT: {position.symbol} - Profit: {total_profit:.2f}$ (cible: +{PROFIT_TARGET_USD}$)")
+                    
+                    # Enregistrer pour ré-entrée rapide
+                    direction = "BUY" if position.type == mt5.POSITION_TYPE_BUY else "SELL"
+                    self.last_profit_close_time[position.symbol] = datetime.now()
+                    self.last_profit_close_symbol[position.symbol] = position.symbol
+                    self.last_profit_close_direction[position.symbol] = direction
+                    
+                    logger.info(f"🔄 Ré-entrée prévue dans {REENTRY_DELAY_SECONDS}s pour {position.symbol} direction={direction}")
+                    
+                    self.close_position(position.ticket, f"Profit Target +{PROFIT_TARGET_USD}$")
+                    
+        except Exception as e:
+            logger.error(f"Erreur money management: {e}")
+    
+    def close_position(self, ticket, reason):
+        """Ferme une position et enregistre la raison"""
+        try:
+            position = mt5.positions_get(ticket=ticket)
+            if not position:
+                logger.error(f"Position {ticket} non trouvée")
+                return False
+                
+            position = position[0]
+            
+            # Préparer la requête de fermeture
+            if position.type == mt5.POSITION_TYPE_BUY:
+                request = {
+                    "action": mt5.TRADE_ACTION_DEAL,
+                    "symbol": position.symbol,
+                    "volume": position.volume,
+                    "type": mt5.ORDER_TYPE_SELL,
+                    "position": ticket,
+                    "price": mt5.symbol_info_tick(position.symbol).bid,
+                    "deviation": 20,
+                    "magic": 234000,
+                    "comment": f"Close: {reason}",
+                    "type_time": mt5.ORDER_TIME_GTC,
+                    "type_filling": mt5.ORDER_FILLING_FOK,
+                }
+            else:  # SELL
+                request = {
+                    "action": mt5.TRADE_ACTION_DEAL,
+                    "symbol": position.symbol,
+                    "volume": position.volume,
+                    "type": mt5.ORDER_TYPE_BUY,
+                    "position": ticket,
+                    "price": mt5.symbol_info_tick(position.symbol).ask,
+                    "deviation": 20,
+                    "magic": 234000,
+                    "comment": f"Close: {reason}",
+                    "type_time": mt5.ORDER_TIME_GTC,
+                    "type_filling": mt5.ORDER_FILLING_FOK,
+                }
+            
+            # Envoyer la requête de fermeture
+            result = mt5.order_send(request)
+            
+            if result.retcode == mt5.TRADE_RETCODE_DONE:
+                profit = position.profit + position.swap + position.commission
+                logger.info(f"✅ Position fermée: {ticket} - {position.symbol} - Profit: {profit:.2f}$ - Raison: {reason}")
+                
+                # Nettoyer le suivi des positions
+                if position.symbol in self.positions:
+                    del self.positions[position.symbol]
+                
+                return True
+            else:
+                logger.error(f"❌ Échec fermeture position {ticket}: {result.retcode} - {result.comment}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Erreur fermeture position {ticket}: {e}")
+            return False
+    
+    def check_quick_reentry(self):
+        """Vérifie et exécute les ré-entrées rapides après profit"""
+        try:
+            current_time = datetime.now()
+            
+            for symbol in list(self.last_profit_close_time.keys()):
+                # Vérifier le délai
+                close_time = self.last_profit_close_time[symbol]
+                if (current_time - close_time).total_seconds() < REENTRY_DELAY_SECONDS:
+                    continue
+                
+                # Vérifier qu'on n'a pas déjà de position sur ce symbole
+                positions = mt5.positions_get(symbol=symbol)
+                if positions:
+                    # Annuler la ré-entrée si position existe
+                    del self.last_profit_close_time[symbol]
+                    if symbol in self.last_profit_close_symbol:
+                        del self.last_profit_close_symbol[symbol]
+                    if symbol in self.last_profit_close_direction:
+                        del self.last_profit_close_direction[symbol]
+                    continue
+                
+                # Exécuter la ré-entrée
+                direction = self.last_profit_close_direction.get(symbol)
+                if direction:
+                    signal_data = {
+                        'signal': direction,
+                        'confidence': 90.0,  # Haute confiance pour ré-entrée
+                        'source': 'quick_reentry'
+                    }
+                    
+                    logger.info(f"🔄 RÉ-ENTREE RAPIDE: {symbol} direction={direction} après profit de +{PROFIT_TARGET_USD}$")
+                    
+                    if self.execute_trade(symbol, signal_data):
+                        # Nettoyer après ré-entrée réussie
+                        del self.last_profit_close_time[symbol]
+                        del self.last_profit_close_symbol[symbol]
+                        del self.last_profit_close_direction[symbol]
+                    
+        except Exception as e:
+            logger.error(f"Erreur ré-entrée rapide: {e}")
+    
     
     def execute_trade(self, symbol, signal_data):
         """Exécute un trade SANS SL/TP avec restrictions Boom/Crash"""
@@ -234,6 +380,10 @@ class MT5AIClientSimple:
         try:
             while True:
                 try:
+                    # PRIORITÉ ABSOLUE: Money management chaque boucle
+                    self.check_money_management()
+                    self.check_quick_reentry()
+                    
                     self.check_positions()
                     
                     for symbol in SYMBOLS_TO_MONITOR:
@@ -243,7 +393,7 @@ class MT5AIClientSimple:
                             if signal_data:
                                 self.execute_trade(symbol, signal_data)
                     
-                    time.sleep(60)  # Vérifier toutes les minutes
+                    time.sleep(10)  # Vérifier toutes les 10 secondes (plus fréquent pour money management)
                     
                 except KeyboardInterrupt:
                     logger.info("Arret demande par l'utilisateur")

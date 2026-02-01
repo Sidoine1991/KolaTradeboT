@@ -41,302 +41,16 @@ POSITION_SIZES = {
     "USDJPY": 0.01
 }
 
-# Configuration logging améliorée avec rotation et niveaux détaillés
-def setup_logging():
-    """Configure le logging avec rotation et niveaux détaillés"""
-    # Créer le répertoire de logs s'il n'existe pas
-    log_dir = Path("logs")
-    log_dir.mkdir(exist_ok=True)
-    
-    # Formatter détaillé
-    detailed_formatter = logging.Formatter(
-        '%(asctime)s - %(name)s - %(levelname)s - [%(funcName)s:%(lineno)d] - %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S'
-    )
-    
-    # Formatter simple pour la console
-    console_formatter = logging.Formatter(
-        '%(asctime)s - %(levelname)s - %(message)s',
-        datefmt='%H:%M:%S'
-    )
-    
-    # Handlers
-    handlers = []
-    
-    # Fichier de log principal avec rotation quotidienne
-    main_log_file = log_dir / f'mt5_ai_client_{datetime.now().strftime("%Y%m%d")}.log'
-    file_handler = logging.FileHandler(main_log_file, encoding='utf-8')
-    file_handler.setLevel(logging.DEBUG)
-    file_handler.setFormatter(detailed_formatter)
-    handlers.append(file_handler)
-    
-    # Fichier de log pour les erreurs uniquement
-    error_log_file = log_dir / f'mt5_ai_client_errors_{datetime.now().strftime("%Y%m%d")}.log'
-    error_handler = logging.FileHandler(error_log_file, encoding='utf-8')
-    error_handler.setLevel(logging.ERROR)
-    error_handler.setFormatter(detailed_formatter)
-    handlers.append(error_handler)
-    
-    # Fichier de log pour les trades
-    trade_log_file = log_dir / f'mt5_trades_{datetime.now().strftime("%Y%m%d")}.log'
-    trade_handler = logging.FileHandler(trade_log_file, encoding='utf-8')
-    trade_handler.setLevel(logging.INFO)
-    
-    # Formatter spécial pour les trades
-    trade_formatter = logging.Formatter(
-        '%(asctime)s - TRADE - %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S'
-    )
-    trade_handler.setFormatter(trade_formatter)
-    handlers.append(trade_handler)
-    
-    # Console avec niveau INFO
-    console_handler = logging.StreamHandler()
-    console_handler.setLevel(logging.INFO)
-    console_handler.setFormatter(console_formatter)
-    handlers.append(console_handler)
-    
-    # Configuration du logger principal
-    logging.basicConfig(
-        level=logging.DEBUG,
-        handlers=handlers,
-        force=True  # Forcer la reconfiguration
-    )
-    
-    # Créer un logger spécial pour les trades
-    trade_logger = logging.getLogger("mt5_trades")
-    trade_logger.setLevel(logging.INFO)
-    trade_logger.addHandler(trade_handler)
-    trade_logger.propagate = False  # Éviter la duplication dans le logger principal
-    
-    return trade_logger
-
-# Initialiser le logging
-trade_logger = setup_logging()
+# Configuration logging - éviter les emojis pour PowerShell
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler(f'mt5_ai_client_{datetime.now().strftime("%Y%m%d")}.log', encoding='utf-8'),
+        logging.StreamHandler()
+    ]
+)
 logger = logging.getLogger("mt5_ai_client")
-
-# Logger spécialisé pour les filling modes
-filling_mode_logger = logging.getLogger("filling_mode")
-filling_mode_logger.setLevel(logging.DEBUG)
-
-class TradeLogger:
-    """Logger spécialisé pour les trades et erreurs de filling mode"""
-    
-    def __init__(self):
-        self.trade_logger = logging.getLogger("mt5_trades")
-        self.filling_logger = logging.getLogger("filling_mode")
-        
-    def get_filling_mode_name(self, mode_value):
-        """Convertit la valeur numérique du filling mode en nom lisible"""
-        filling_modes = {
-            0: "ORDER_FILLING_FOK",
-            1: "ORDER_FILLING_FOK", 
-            2: "ORDER_FILLING_IOC",
-            3: "ORDER_FILLING_IOC",
-            4: "ORDER_FILLING_RETURN"
-        }
-        return filling_modes.get(mode_value, f"UNKNOWN({mode_value})")
-        
-    def log_trade_attempt(self, symbol, order_type, lot, price, sl, tp, filling_mode):
-        """Log une tentative de trade"""
-        self.trade_logger.info(
-            f"TRADE_ATTEMPT | Symbol: {symbol} | Type: {order_type} | "
-            f"Lot: {lot} | Price: {price} | SL: {sl} | TP: {tp} | "
-            f"Filling: {filling_mode}"
-        )
-        
-    def log_trade_success(self, symbol, order_type, ticket, profit=0):
-        """Log un trade réussi"""
-        self.trade_logger.info(
-            f"TRADE_SUCCESS | Symbol: {symbol} | Type: {order_type} | "
-            f"Ticket: {ticket} | Profit: ${profit:.2f}"
-        )
-        
-    def log_trade_error(self, symbol, order_type, error_code, error_msg, filling_mode):
-        """Log une erreur de trade"""
-        self.trade_logger.error(
-            f"TRADE_ERROR | Symbol: {symbol} | Type: {order_type} | "
-            f"Code: {error_code} | Msg: {error_msg} | Filling: {filling_mode}"
-        )
-        
-    def log_filling_mode_error(self, symbol, error_code, error_msg, attempted_mode, fallback_mode=None):
-        """Log spécifique pour les erreurs de filling mode"""
-        log_msg = (
-            f"FILLING_MODE_ERROR | Symbol: {symbol} | "
-            f"Attempted: {attempted_mode} | Code: {error_code} | Msg: {error_msg}"
-        )
-        
-        if fallback_mode:
-            log_msg += f" | Fallback: {fallback_mode}"
-            
-        self.filling_logger.error(log_msg)
-        
-        # Aussi logger dans le fichier d'erreurs principal
-        logger.error(f"Erreur filling mode {symbol}: {error_msg} (Code: {error_code})")
-        
-    def log_filling_mode_success(self, symbol, successful_mode, was_fallback=False):
-        """Log quand un filling mode fonctionne"""
-        prefix = "FALLBACK_SUCCESS" if was_fallback else "FILLING_MODE_SUCCESS"
-        self.filling_logger.info(
-            f"{prefix} | Symbol: {symbol} | Mode: {successful_mode}"
-        )
-        
-    def log_api_response(self, endpoint, status_code, response_time, data_size=0):
-        """Log les réponses API"""
-        logger.debug(
-            f"API_RESPONSE | Endpoint: {endpoint} | Status: {status_code} | "
-            f"Time: {response_time:.3f}s | Size: {data_size} bytes"
-        )
-        
-    def log_position_update(self, symbol, ticket, action, new_sl=None, new_tp=None, profit=0):
-        """Log les mises à jour de positions"""
-        update_info = f"POSITION_UPDATE | Symbol: {symbol} | Ticket: {ticket} | Action: {action}"
-        if new_sl:
-            update_info += f" | New SL: {new_sl}"
-        if new_tp:
-            update_info += f" | New TP: {new_tp}"
-        if profit != 0:
-            update_info += f" | Profit: ${profit:.2f}"
-            
-        self.trade_logger.info(update_info)
-
-# Instance globale du logger de trades
-trade_logger_instance = TradeLogger()
-
-class FillingModeAnalyzer:
-    """Analyseur des erreurs de filling mode pour identifier les patterns"""
-    
-    def __init__(self):
-        self.error_counts = {}
-        self.success_counts = {}
-        self.symbol_errors = {}
-        
-    def analyze_filling_mode_logs(self, log_file_path, hours=24):
-        """Analyse les logs de filling mode des dernières N heures"""
-        try:
-            if not os.path.exists(log_file_path):
-                logger.warning(f"Fichier de log non trouvé: {log_file_path}")
-                return None
-                
-            cutoff_time = datetime.now() - timedelta(hours=hours)
-            analysis = {
-                'period_hours': hours,
-                'total_errors': 0,
-                'total_successes': 0,
-                'symbols_with_errors': {},
-                'filling_mode_stats': {},
-                'recommendations': []
-            }
-            
-            with open(log_file_path, 'r', encoding='utf-8') as f:
-                for line in f:
-                    try:
-                        # Parser la ligne de log
-                        if 'FILLING_MODE_ERROR' in line:
-                            self._parse_error_line(line, analysis, cutoff_time)
-                        elif 'FILLING_MODE_SUCCESS' in line or 'FALLBACK_SUCCESS' in line:
-                            self._parse_success_line(line, analysis, cutoff_time)
-                    except Exception as e:
-                        logger.debug(f"Erreur parsing ligne log: {e}")
-                        
-            # Générer des recommandations
-            analysis['recommendations'] = self._generate_recommendations(analysis)
-            
-            return analysis
-            
-        except Exception as e:
-            logger.error(f"Erreur analyse logs filling mode: {e}")
-            return None
-            
-    def _parse_error_line(self, line, analysis, cutoff_time):
-        """Parse une ligne d'erreur de filling mode"""
-        try:
-            # Extraire la date et l'heure
-            timestamp_str = line.split(' - ')[0]
-            log_time = datetime.strptime(timestamp_str, '%Y-%m-%d %H:%M:%S')
-            
-            if log_time < cutoff_time:
-                return
-                
-            analysis['total_errors'] += 1
-            
-            # Extraire le symbole
-            if 'Symbol:' in line:
-                symbol = line.split('Symbol: ')[1].split(' |')[0]
-                if symbol not in analysis['symbols_with_errors']:
-                    analysis['symbols_with_errors'][symbol] = 0
-                analysis['symbols_with_errors'][symbol] += 1
-                
-            # Extraire le mode tenté
-            if 'Attempted:' in line:
-                attempted_mode = line.split('Attempted: ')[1].split(' |')[0]
-                if attempted_mode not in analysis['filling_mode_stats']:
-                    analysis['filling_mode_stats'][attempted_mode] = {'errors': 0, 'successes': 0}
-                analysis['filling_mode_stats'][attempted_mode]['errors'] += 1
-                
-        except Exception as e:
-            logger.debug(f"Erreur parsing ligne erreur: {e}")
-            
-    def _parse_success_line(self, line, analysis, cutoff_time):
-        """Parse une ligne de succès de filling mode"""
-        try:
-            # Extraire la date et l'heure
-            timestamp_str = line.split(' - ')[0]
-            log_time = datetime.strptime(timestamp_str, '%Y-%m-%d %H:%M:%S')
-            
-            if log_time < cutoff_time:
-                return
-                
-            analysis['total_successes'] += 1
-            
-            # Extraire le mode utilisé
-            if 'Mode:' in line:
-                mode = line.split('Mode: ')[1].strip()
-                if mode not in analysis['filling_mode_stats']:
-                    analysis['filling_mode_stats'][mode] = {'errors': 0, 'successes': 0}
-                analysis['filling_mode_stats'][mode]['successes'] += 1
-                
-        except Exception as e:
-            logger.debug(f"Erreur parsing ligne succès: {e}")
-            
-    def _generate_recommendations(self, analysis):
-        """Génère des recommandations basées sur l'analyse"""
-        recommendations = []
-        
-        # Recommandation 1: Symboles avec beaucoup d'erreurs
-        if analysis['symbols_with_errors']:
-            worst_symbol = max(analysis['symbols_with_errors'].items(), key=lambda x: x[1])
-            if worst_symbol[1] > 5:  # Plus de 5 erreurs
-                recommendations.append(
-                    f"Le symbole {worst_symbol[0]} a {worst_symbol[1]} erreurs de filling mode. "
-                    f"Considérez utiliser uniquement ORDER_FILLING_RETURN pour ce symbole."
-                )
-                
-        # Recommandation 2: Taux d'erreur élevé
-        total_operations = analysis['total_errors'] + analysis['total_successes']
-        if total_operations > 0:
-            error_rate = analysis['total_errors'] / total_operations
-            if error_rate > 0.3:  # Plus de 30% d'erreurs
-                recommendations.append(
-                    f"Taux d'erreur de filling mode élevé: {error_rate:.1%}. "
-                    f"Vérifiez la configuration des modes de remplissage par symbole."
-                )
-                
-        # Recommandation 3: Modes problématiques
-        for mode, stats in analysis['filling_mode_stats'].items():
-            if stats['errors'] > 0 and stats['successes'] == 0:
-                recommendations.append(
-                    f"Le mode {mode} n'a jamais réussi. "
-                    f"Considérez le retirer des modes tentés ou le mettre en dernier fallback."
-                )
-                
-        if not recommendations:
-            recommendations.append("Aucune recommandation - Les filling modes fonctionnent correctement.")
-            
-        return recommendations
-
-# Instance globale de l'analyseur
-filling_analyzer = FillingModeAnalyzer()
 
 class DashboardLogger:
     """Affichage dashboard structuré dans les logs"""
@@ -1162,11 +876,10 @@ class AdvancedTechnicalAnalyzer:
             return None
         
         # Décider du signal final
-        # Réduire la marge nécessaire à 10% pour plus de réactivité
-        if buy_votes > sell_votes * 1.1:  # Réduit de 1.2 à 1.1 (10% de marge)
+        if buy_votes > sell_votes * 1.2:  # 20% de marge
             final_signal = 'BUY'
             final_confidence = buy_votes / len(signals)
-        elif sell_votes > buy_votes * 1.1:  # Réduit de 1.2 à 1.1 (10% de marge)
+        elif sell_votes > buy_votes * 1.2:
             final_signal = 'SELL'
             final_confidence = sell_votes / len(signals)
         else:
@@ -1181,117 +894,6 @@ class AdvancedTechnicalAnalyzer:
             'current_price': signals[0]['current_price']
         }
 
-
-class HistoryLearningAdapter:
-    """
-    Analyse l'historique des trades et le confronte aux prédictions pour réajuster
-    la décision IA. Prédiction + historique agissent sur la confiance et la qualité des entrées.
-    """
-    def __init__(self, last_n_trades=80, min_trades_for_adjustment=10):
-        self.last_n_trades = last_n_trades
-        self.min_trades_for_adjustment = min_trades_for_adjustment
-        self._cache = {}
-        self._cache_ts = 0
-        self._cache_ttl = 300  # 5 min
-
-    def _get_recent_deals(self, symbol=None):
-        """Récupère les derniers deals MT5 (entrées + sorties) pour statistiques."""
-        try:
-            if not mt5.terminal_info():
-                return []
-            from_date = datetime.now() - timedelta(days=30)
-            deals = mt5.history_deals_get(from_date, datetime.now())
-            if not deals:
-                return []
-            # Grouper par position_id pour avoir entrée + sortie
-            by_pos = {}
-            for d in deals:
-                key = d.position_id
-                if key not in by_pos:
-                    by_pos[key] = []
-                by_pos[key].append(d)
-            # Garder seulement les positions complètes (entrée + sortie)
-            trades = []
-            for pos_id, pos_deals in by_pos.items():
-                entry = [d for d in pos_deals if d.entry == 1]
-                exit_deals = [d for d in pos_deals if d.entry == 0]
-                if not entry or not exit_deals:
-                    continue
-                sym = entry[0].symbol
-                if symbol and sym != symbol:
-                    continue
-                deal_type = "BUY" if entry[0].type == mt5.DEAL_TYPE_BUY else "SELL"
-                profit = sum(d.profit + d.commission + d.swap for d in pos_deals)
-                close_time = max(d.time for d in pos_deals)
-                trades.append({
-                    "symbol": sym,
-                    "type": deal_type,
-                    "profit": profit,
-                    "is_win": profit > 0,
-                    "close_time": close_time,
-                })
-            trades.sort(key=lambda t: t["close_time"])
-            return trades[-self.last_n_trades:] if len(trades) > self.last_n_trades else trades
-        except Exception as e:
-            logger.debug(f"HistoryLearningAdapter: _get_recent_deals {e}")
-            return []
-
-    def get_symbol_stats(self, symbol):
-        """Statistiques par symbole: win rate BUY, win rate SELL, nombre de trades."""
-        now = time.time()
-        if now - self._cache_ts > self._cache_ttl:
-            self._cache = {}
-            self._cache_ts = now
-        if symbol in self._cache:
-            return self._cache[symbol]
-        trades = self._get_recent_deals(symbol)
-        buy_trades = [t for t in trades if t["type"] == "BUY"]
-        sell_trades = [t for t in trades if t["type"] == "SELL"]
-        buy_wins = sum(1 for t in buy_trades if t["is_win"])
-        sell_wins = sum(1 for t in sell_trades if t["is_win"])
-        buy_total = len(buy_trades)
-        sell_total = len(sell_trades)
-        buy_wr = (buy_wins / buy_total) if buy_total else 0.5
-        sell_wr = (sell_wins / sell_total) if sell_total else 0.5
-        total = buy_total + sell_total
-        out = {
-            "buy_win_rate": buy_wr,
-            "sell_win_rate": sell_wr,
-            "buy_trades": buy_total,
-            "sell_trades": sell_total,
-            "total_trades": total,
-        }
-        self._cache[symbol] = out
-        return out
-
-    def adjust_confidence_from_history(self, symbol, signal, confidence):
-        """
-        Réajuste la confiance selon l'historique: si les BUY récents perdent souvent,
-        on baisse la confiance pour un signal BUY (et idem pour SELL).
-        Si l'historique valide la direction, on peut légèrement augmenter la confiance.
-        """
-        stats = self.get_symbol_stats(symbol)
-        if stats["total_trades"] < self.min_trades_for_adjustment:
-            return confidence
-        if signal == "BUY":
-            wr = stats["buy_win_rate"]
-            if wr < 0.35:
-                confidence *= 0.75
-            elif wr < 0.45:
-                confidence *= 0.9
-            elif wr >= 0.6:
-                confidence = min(1.0, confidence * 1.05)
-        elif signal == "SELL":
-            wr = stats["sell_win_rate"]
-            if wr < 0.35:
-                confidence *= 0.75
-            elif wr < 0.45:
-                confidence *= 0.9
-            elif wr >= 0.6:
-                confidence = min(1.0, confidence * 1.05)
-        return round(confidence, 4)
-
-
 class MT5AIClient:
     def __init__(self):
         self.connected = False
@@ -1301,7 +903,6 @@ class MT5AIClient:
         self.garch_analyzer = GARCHVolatilityAnalyzer()
         self.feature_extractor = AdvancedFeatureExtractor()
         self.model_performance_cache = {}  # Cache pour performance des modèles
-        self.history_learning = HistoryLearningAdapter(last_n_trades=80, min_trades_for_adjustment=10)
 
     def get_position_profit(self, ticket):
         """Récupère le profit actuel d'une position"""
@@ -1387,33 +988,11 @@ class MT5AIClient:
             final_signal = self.combine_ultra_signals(symbol, ml_signal, technical_signal, 
                                                     volatility_signal, advanced_features)
             
-            # 6. Réajuster avec l'historique des trades: prédiction + historique → décision IA plus intelligente
-            if final_signal:
-                conf_before = final_signal.get('confidence', 0)
-                conf_after = self.history_learning.adjust_confidence_from_history(
-                    symbol, final_signal['signal'], conf_before
-                )
-                final_signal['confidence'] = conf_after
-                if conf_before != conf_after:
-                    logger.info(f"IA+Historique {symbol}: confiance {conf_before*100:.1f}% → {conf_after*100:.1f}%")
-            
             if final_signal:
                 logger.info(f"Signal {symbol} [{final_signal['source']}]: {final_signal['signal']} ({final_signal['confidence']*100:.1f}%)")
-                # Ajouter des logs détaillés pour le débogage
-                logger.debug(f"Détails du signal {symbol}:")
-                logger.debug(f"- ML Signal: {ml_signal}")
-                logger.debug(f"- Technical Signal: {technical_signal}")
-                logger.debug(f"- Volatility Signal: {volatility_signal}")
-                logger.debug(f"- Advanced Features: {advanced_features}")
                 return final_signal
             else:
-                logger.info(f"Pas de signal valide pour {symbol} (Confiance insuffisante)")
-                # Log détaillé pour comprendre pourquoi aucun signal n'est généré
-                logger.debug(f"Détails pour {symbol}:")
-                logger.debug(f"- ML: {ml_signal}")
-                logger.debug(f"- Technique: {technical_signal}")
-                logger.debug(f"- Volatilité: {volatility_signal}")
-                logger.debug(f"- Features: {advanced_features}")
+                logger.info(f"Pas de signal valide pour {symbol}")
                 return None
                 
         except Exception as e:
@@ -1474,14 +1053,14 @@ class MT5AIClient:
 
         # Pondération de base selon type d'instrument
         if "Boom" in symbol or "Crash" in symbol:
-            # Pour les indices synthétiques, augmenter le poids des signaux techniques
-            weights = {'ml': 0.5, 'technical': 0.6, 'volatility': 0.05, 'features': 0.05}
+            # Pour les indices synthétiques, privilégier les signaux techniques
+            weights = {'ml': 0.4, 'technical': 0.5, 'volatility': 0.05, 'features': 0.05}
         elif any(fx in symbol for fx in ["EUR", "GBP", "USD", "JPY"]):
-            # Forex: plus de poids aux signaux techniques
-            weights = {'ml': 0.45, 'technical': 0.55, 'volatility': 0.1, 'features': 0.1}
+            # Forex: équilibre entre technique et ML
+            weights = {'ml': 0.4, 'technical': 0.4, 'volatility': 0.1, 'features': 0.1}
         else:
-            # Autres: plus de poids aux signaux techniques
-            weights = {'ml': 0.4, 'technical': 0.6, 'volatility': 0.1, 'features': 0.1}
+            # Autres: équilibré avec plus de poids sur la technique
+            weights = {'ml': 0.35, 'technical': 0.45, 'volatility': 0.1, 'features': 0.1}
 
         # Ajuster les poids selon la performance des modèles
         if ml_signal and 'model_accuracy' in ml_signal:
@@ -1575,8 +1154,8 @@ class MT5AIClient:
             best_signal = max(votes, key=votes.get)
             best_confidence = votes[best_signal]
 
-            # Seuil de confiance réduit à 35% pour plus de réactivité
-            if best_confidence >= 0.35 and best_signal != 'HOLD':  # Seuil abaissé de 0.45 à 0.35
+            # Seuil de confiance réduit à 45% (au lieu de 55%)
+            if best_confidence >= 0.45 and best_signal != 'HOLD':  # Éviter HOLD comme meilleur signal
                 # Créer le signal final avec plus d'informations
                 signal_data = {
                     'signal': best_signal,
@@ -1840,30 +1419,10 @@ class MT5AIClient:
             sl = entry_price + sl_distance_price
             tp = entry_price - tp_distance_price
         
-        # Validation: respecter trade_stops_level (éviter "Invalid stops")
-        stops_level = getattr(symbol_info, "trade_stops_level", 0) or getattr(symbol_info, "stops_level", 0) or 0
-        min_dist_points = max(stops_level, 20) if symbol_info.digits >= 4 else max(stops_level, 5)
-        min_dist_price = min_dist_points * point
-
-        sl_dist = abs(entry_price - sl)
-        tp_dist = abs(tp - entry_price)
-        if sl_dist < min_dist_price:
-            if order_type == mt5.ORDER_TYPE_BUY:
-                sl = entry_price - min_dist_price - (2 * point)
-            else:
-                sl = entry_price + min_dist_price + (2 * point)
-            sl = round(sl, digits)
-        if tp_dist < min_dist_price:
-            if order_type == mt5.ORDER_TYPE_BUY:
-                tp = entry_price + min_dist_price + (2 * point)
-            else:
-                tp = entry_price - min_dist_price - (2 * point)
-            tp = round(tp, digits)
-
         # Arrondir correctement selon le nombre de décimales
         sl = round(sl, digits)
         tp = round(tp, digits)
-
+        
         logger.info(
             f"SL/TP calculés pour {symbol}: Entry={entry_price}, SL={sl} ({sl_pct*100:.0f}%), TP={tp} ({tp_pct*100:.0f}%)"
         )
@@ -1938,82 +1497,25 @@ class MT5AIClient:
             logger.debug(f"Entry strategy fallback (market) for {symbol}: {e}")
             return {"use_pending": False}
     
-    def get_filling_mode_name(self, mode_value):
-        """Convertit la valeur numérique du filling mode en nom lisible.
-        
-        Args:
-            mode_value (int): Valeur numérique du mode de remplissage
-            
-        Returns:
-            str: Nom lisible du mode de remplissage
-        """
-        filling_modes = {
-            mt5.ORDER_FILLING_FOK: "FOK (Fill or Kill)",
-            mt5.ORDER_FILLING_IOC: "IOC (Immediate or Cancel)",
-            mt5.ORDER_FILLING_RETURN: "RETURN (Return)",
-            0: "DEFAULT",
-            1: "FOK (Fill or Kill)",
-            2: "IOC (Immediate or Cancel)",
-            3: "IOC (Immediate or Cancel)",
-            4: "RETURN (Return)"
-        }
-        return filling_modes.get(mode_value, f"INVALID({mode_value})")
-
     def get_symbol_filling_mode(self, symbol):
-        """Get the appropriate filling mode for a symbol.
-        On Deriv: DFX indices, crypto pairs, and synthetic symbols (Boom/Crash) require ORDER_FILLING_FOK."""
-        try:
-            symbol_info = mt5.symbol_info(symbol)
-            if not symbol_info:
-                logger.error(f"Could not get symbol info for {symbol}")
-                return mt5.ORDER_FILLING_FOK  # Deriv fallback
-
-            symbol_upper = symbol.upper()
-
-            # === DERIV-SPECIFIC: DFX indices (EURUSD DFX 10 Index, etc.) require FOK ===
-            if "DFX" in symbol_upper:
-                logger.debug(f"DFX index detected: {symbol} -> ORDER_FILLING_FOK")
+        """Get the appropriate filling mode for a symbol"""
+        symbol_info = mt5.symbol_info(symbol)
+        if not symbol_info:
+            logger.error(f"Could not get symbol info for {symbol}")
+            return None
+            
+        # Check available filling modes
+        if hasattr(symbol_info, 'filling_mode'):
+            if symbol_info.filling_mode & mt5.ORDER_FILLING_FOK:
                 return mt5.ORDER_FILLING_FOK
-
-            # === DERIV-SPECIFIC: Crypto pairs require FOK ===
-            crypto_suffixes = ("NERUSD", "APTUSD", "IMXUSD", "SANUSD", "TRUUSD", "MLNUSD",
-                              "BTCUSD", "ETHUSD", "LTCUSD", "XRPUSD", "ADAUSD", "DOTUSD",
-                              "SOLUSD", "AVAUSD", "LINKUSD", "UNIUSD", "XLMUSD", "MATICUSD",
-                              "ATOMUSD", "ALGOUSD", "DOGEUSD", "SHIBUSD", "EOSUSD", "TRXUSD",
-                              "XTZUSD", "FILUSD", "AAVEUSD", "MKRUSD", "COMPUSD", "SNXUSD",
-                              "YFIUSD", "BATUSD", "ZRXUSD", "ENJUSD", "MANAUSD", "SANDUSD", "AXSUSD")
-            if any(suffix in symbol_upper for suffix in crypto_suffixes):
-                logger.debug(f"Crypto detected: {symbol} -> ORDER_FILLING_FOK")
-                return mt5.ORDER_FILLING_FOK
-
-            # === DERIV-SPECIFIC: Boom/Crash/Volatility use FOK (not RETURN) ===
-            if any(x in symbol for x in ["Boom", "Crash", "Volatility", "Vol Over", "Step Index", "Range Break", "Jump"]):
-                logger.debug(f"Synthetic Deriv symbol: {symbol} -> ORDER_FILLING_FOK")
-                return mt5.ORDER_FILLING_FOK
-
-            # === Check symbol filling_mode bitmask ===
-            filling_mode = getattr(symbol_info, 'filling_mode', 0)
-
-            # When filling_mode=0 (broker manages), prefer FOK for Deriv
-            if filling_mode == 0:
-                logger.debug(f"Filling=0 (broker manages): {symbol} -> ORDER_FILLING_FOK")
-                return mt5.ORDER_FILLING_FOK
-
-            if filling_mode:
-                if filling_mode & 1:  # FOK
-                    return mt5.ORDER_FILLING_FOK
-                if filling_mode & 2:  # IOC
-                    return mt5.ORDER_FILLING_IOC
-                if filling_mode & 4:  # RETURN
-                    return mt5.ORDER_FILLING_RETURN
-
-            # Fallback: Deriv and most brokers use FOK for Market Execution
-            logger.warning(f"Could not determine filling mode for {symbol}, defaulting to FOK")
-            return mt5.ORDER_FILLING_FOK
-
-        except Exception as e:
-            logger.error(f"Error getting filling mode for {symbol}: {e}")
-            return mt5.ORDER_FILLING_FOK
+            elif symbol_info.filling_mode & mt5.ORDER_FILLING_IOC:
+                return mt5.ORDER_FILLING_IOC
+            elif symbol_info.filling_mode & mt5.ORDER_FILLING_RETURN:
+                return mt5.ORDER_FILLING_RETURN
+        
+        # Default to FOK if we can't determine the mode
+        logger.warning(f"Could not determine filling mode for {symbol}, defaulting to FOK")
+        return mt5.ORDER_FILLING_FOK
 
     def execute_trade(self, symbol, signal_data):
         """Exécute un trade basé sur le signal de l'IA avec détection automatique"""
@@ -2031,17 +1533,6 @@ class MT5AIClient:
             
             if signal not in ["BUY", "SELL"]:
                 logger.info(f"Pas de signal trade pour {symbol}: {signal}")
-                return False
-            
-            # PROTECTION Boom/Crash: pas de SELL sur Boom, pas de BUY sur Crash
-            # Boom = BUY uniquement (spike haussier) | Crash = SELL uniquement (spike baissier)
-            is_boom = "Boom" in symbol
-            is_crash = "Crash" in symbol
-            if is_boom and signal == "SELL":
-                logger.info(f"Ordre bloqué: pas de SELL sur Boom ({symbol} = BUY uniquement)")
-                return False
-            if is_crash and signal == "BUY":
-                logger.info(f"Ordre bloqué: pas de BUY sur Crash ({symbol} = SELL uniquement)")
                 return False
             
             # Vérifier si nous avons déjà une position sur ce symbole
@@ -2105,11 +1596,13 @@ class MT5AIClient:
                 logger.error(f"Impossible de calculer SL/TP pour {symbol}")
                 return False
             
-            # Créer la requête d'ordre avec SL/TP intelligents
-            # get_symbol_filling_mode gère DFX, crypto, Boom/Crash -> FOK pour Deriv
+            # Get the appropriate filling mode for this symbol
             filling_mode = self.get_symbol_filling_mode(symbol)
-            logger.info(f"Mode de remplissage pour {symbol}: {self.get_filling_mode_name(filling_mode)}")
+            if filling_mode is None:
+                logger.error(f"Impossible de déterminer le mode de remplissage pour {symbol}")
+                return False
                 
+            # Créer la requête d'ordre avec SL/TP intelligents
             request = {
                 "action": action_type,
                 "symbol": symbol,
@@ -2142,74 +1635,7 @@ class MT5AIClient:
             logger.info(f"  Risk/Reward: 1:{rr:.1f}")
             
             # Envoyer l'ordre
-            max_retries = 2
-            retry_count = 0
-            result = None
-            
-            while retry_count < max_retries:
-                try:
-                    # Logger la tentative de trade
-                    filling_mode_name = self.get_filling_mode_name(request.get("type_filling", 0))
-                    trade_logger_instance.log_trade_attempt(
-                        symbol, request.get("type", "UNKNOWN"), 
-                        request.get("volume", 0), request.get("price", 0),
-                        request.get("sl", 0), request.get("tp", 0),
-                        filling_mode_name
-                    )
-                    
-                    result = mt5.order_send(request)
-                    
-                    # Si succès, logger et sortir de la boucle
-                    if result and result.retcode == mt5.TRADE_RETCODE_DONE:
-                        trade_logger_instance.log_trade_success(
-                            symbol, request.get("type", "UNKNOWN"), 
-                            result.order if result else 0
-                        )
-                        break
-                        
-                    # Si erreur de mode de remplissage, essayer tous les modes: FOK, IOC, RETURN
-                    if result and (result.retcode == 10030 or "filling" in (result.comment or "").lower() or "unsupported" in (result.comment or "").lower()):
-                        attempted_mode = self.get_filling_mode_name(request.get("type_filling", 0))
-                        fallback_modes = [mt5.ORDER_FILLING_FOK, mt5.ORDER_FILLING_IOC, mt5.ORDER_FILLING_RETURN]
-                        tried = request.get("type_filling")
-                        success = False
-                        for mode in fallback_modes:
-                            if mode == tried:
-                                continue
-                            fallback_mode = self.get_filling_mode_name(mode)
-                            trade_logger_instance.log_filling_mode_error(
-                                symbol, result.retcode, result.comment or "Invalid fill",
-                                attempted_mode, fallback_mode
-                            )
-                            logger.warning(f"Unsupported filling mode - Essai avec {fallback_mode} pour {symbol}")
-                            request["type_filling"] = mode
-                            result = mt5.order_send(request)
-                            if result and result.retcode == mt5.TRADE_RETCODE_DONE:
-                                trade_logger_instance.log_filling_mode_success(symbol, fallback_mode, was_fallback=True)
-                                trade_logger_instance.log_trade_success(symbol, request.get("type", "UNKNOWN"), result.order if result else 0)
-                                logger.info(f"Ordre réussi avec {fallback_mode} pour {symbol}")
-                                success = True
-                                break
-                        if success:
-                            break
-                        retry_count = max_retries  # sortir de la boucle
-                        continue
-                        
-                    # Autre erreur, logger et sortir de la boucle
-                    error_msg = result.comment if result else "Unknown error"
-                    trade_logger_instance.log_trade_error(
-                        symbol, request.get("type", "UNKNOWN"),
-                        result.retcode if result else -1, error_msg,
-                        filling_mode_name
-                    )
-                    break
-                    
-                except Exception as e:
-                    logger.error(f"Erreur lors de l'envoi de l'ordre pour {symbol}: {e}")
-                    retry_count += 1
-                    if retry_count < max_retries:
-                        logger.info(f"Nouvelle tentative {retry_count}/{max_retries}...")
-                        time.sleep(1)  # Attendre 1 seconde avant de réessayer
+            result = mt5.order_send(request)
             
             # Vérifier si result est None
             if result is None:
@@ -2218,10 +1644,8 @@ class MT5AIClient:
                 logger.error(f"Requête: {request}")
                 return False
             
-            # Vérifier le code de retour
             if result.retcode != mt5.TRADE_RETCODE_DONE:
                 logger.error(f"Echec ordre {symbol}: {result.retcode} - {result.comment}")
-                # Les fallbacks FOK/IOC/RETURN ont déjà été essayés dans la boucle ci-dessus
                 return False
             
             # Enregistrer la position
@@ -2334,30 +1758,6 @@ class MT5AIClient:
                     self.close_position(pos)
         except Exception as e:
             logger.error(f"Erreur auto close: {e}")
-    
-    def _trigger_continuous_learning(self):
-        """Déclenche le ré-entraînement IA sur le serveur (historique + prédictions → modèles)."""
-        try:
-            url = f"{RENDER_API_URL}/ml/retraining/trigger"
-            response = requests.post(url, json={}, timeout=120)
-            if response.status_code == 200:
-                data = response.json()
-                logger.info("🔄 Ré-entraînement IA déclenché (historique + prédictions)")
-                if isinstance(data, dict):
-                    results = data.get("results") or ({"result": data.get("result")} if data.get("category") else {})
-                    if not results and data.get("category"):
-                        res = data.get("result", {})
-                        results = {data["category"]: res}
-                    for cat, res in (results or {}).items():
-                        if res and isinstance(res, dict) and res.get("status") == "success":
-                            acc = res.get("new_accuracy", res.get("accuracy"))
-                            logger.info(f"   ✅ {cat}: accuracy={acc}" if acc is not None else f"   ✅ {cat}: OK")
-            else:
-                logger.debug(f"Trigger ré-entraînement: {response.status_code} (serveur peut être indisponible)")
-        except requests.exceptions.RequestException as e:
-            logger.debug(f"Trigger ré-entraînement: {e}")
-        except Exception as e:
-            logger.debug(f"Trigger ré-entraînement: {e}")
     
     def send_training_data(self):
         """Envoie les données récentes pour l'entraînement avec symboles détectés"""
@@ -2567,8 +1967,6 @@ class MT5AIClient:
             return
         
         last_training_time = 0
-        last_retrain_trigger_time = 0
-        RETRAIN_TRIGGER_INTERVAL = 6 * 3600  # 6 heures: ré-entraînement IA (historique + prédictions)
         
         try:
             while True:
@@ -2577,16 +1975,11 @@ class MT5AIClient:
                     self.check_positions()
                     self.auto_close_winners(1.0)
                     
-                    current_time = time.time()
                     # Envoyer les données d'entraînement toutes les heures
+                    current_time = time.time()
                     if current_time - last_training_time > 3600:  # 1 heure
                         self.send_training_data()
                         last_training_time = current_time
-                    
-                    # Déclencher le ré-entraînement IA sur le serveur (historique + prédictions → modèles)
-                    if current_time - last_retrain_trigger_time > RETRAIN_TRIGGER_INTERVAL:
-                        self._trigger_continuous_learning()
-                        last_retrain_trigger_time = current_time
                     
                     # Demander des signaux pour chaque symbole détecté automatiquement
                     signals_data = {}
