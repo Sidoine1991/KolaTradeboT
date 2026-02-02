@@ -7446,6 +7446,11 @@ async def decision(request: DecisionRequest):
         # 10. S'assurer que la confiance est dans les limites raisonnables
         confidence = max(0.10, min(MAX_CONF, confidence))
         
+        # Initialize any potentially undefined variables to 0 for logging
+        long_term_alignment_bonus = long_term_alignment_bonus if 'long_term_alignment_bonus' in locals() else 0.0
+        medium_term_bonus = medium_term_bonus if 'medium_term_bonus' in locals() else 0.0
+        alignment_bonus = alignment_bonus if 'alignment_bonus' in locals() else 0.0
+        
         # Log détaillé pour comprendre le calcul
         logger.info(f"📊 Confiance {request.symbol}: {action.upper()} | Score={direction_score:+.3f} | "
                    f"Base={base_confidence:.2f} | H4/D1={long_term_bonus:.2f} | H1+H4/D1={long_term_alignment_bonus:.2f} | "
