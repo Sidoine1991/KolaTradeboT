@@ -45,7 +45,7 @@ input int    AI_MaxRetries       = 2;        // Nombre de tentatives en cas d'é
 input int    MinStabilitySeconds = 3;   // Délai minimum de stabilité avant exécution (secondes) - RÉDUIT pour exécution immédiate
 
 input group "--- AI AGENT ---"
-input bool   UseAI_Agent        = true;    // Activer l'agent IA (via serveur externe)
+input bool   UseAI_Agent        = false;    // Activer l'agent IA (via serveur externe) - DÉSACTIVÉ TEMPORAIREMENT (serveur Render en panne)
 input string AI_ServerURL       = "https://kolatradebot.onrender.com/decision"; // URL serveur IA
 input bool   UseAdvancedDecisionGemma = true; // Utiliser endpoint decisionGemma (Gemma+Gemini) avec analyse visuelle
 input int    AI_Timeout_ms       = 10000;    // Timeout réduit à 10s pour des réponses plus rapides
@@ -1067,7 +1067,7 @@ void OnDeinit(const int reason)
 }
 
 // Global variables for live parameters
-bool g_UseAI_Agent_Live = true;        // Live copy of UseAI_Agent
+bool g_UseAI_Agent_Live = false;       // Live copy of UseAI_Agent (initialisé à false car UseAI_Agent=false)
 bool g_TradingEnabled_Live = true;     // Live copy of trading enabled state
 double g_InitialLotSize_Live = 0.1;    // Live copy of InitialLotSize
 
@@ -1128,6 +1128,11 @@ void OnChartEvent(const int id,
 //+------------------------------------------------------------------+
 void OnTick()
 {
+   // Synchroniser les variables live avec les paramètres d'entrée
+   g_UseAI_Agent_Live = UseAI_Agent;
+   g_TradingEnabled_Live = TradingEnabled;
+   g_InitialLotSize_Live = InitialLotSize;
+   
    // PRIORITÉ ABSOLUE: Protection contre les pertes globales - Vérifier chaque tick
    CheckGlobalLossProtection();
    
