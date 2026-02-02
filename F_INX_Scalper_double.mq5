@@ -1130,8 +1130,8 @@ void OnTick()
 {
    // Synchroniser les variables live avec les paramètres d'entrée
    g_UseAI_Agent_Live = UseAI_Agent;
-   g_TradingEnabled_Live = TradingEnabled;
    g_InitialLotSize_Live = InitialLotSize;
+   // Note: g_TradingEnabled_Live est géré manuellement via clavier (Ctrl+T)
    
    // PRIORITÉ ABSOLUE: Protection contre les pertes globales - Vérifier chaque tick
    CheckGlobalLossProtection();
