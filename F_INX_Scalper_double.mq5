@@ -396,6 +396,13 @@ struct CoherentAnalysisData
 // Variables pour l'analyse cohérente
 CoherentAnalysisData g_coherentAnalysis;     // Dernière analyse cohérente reçue
 
+// Initialisation des variables globales pour éviter les bugs d'epoch time
+void InitializeGlobalVariables()
+{
+   g_coherentAnalysis.lastUpdate = TimeCurrent(); // Éviter le epoch time bug
+   g_lastAITime = TimeCurrent(); // Éviter le epoch time bug
+}
+
 // Variables pour les métriques ML
 // g_lastAIConfidence est déjà déclaré plus haut
 
@@ -921,6 +928,9 @@ void ProtectGainsWhenTargetReached()
 //+------------------------------------------------------------------+
 int OnInit()
 {
+   // Initialiser les variables globales pour éviter les bugs d'epoch time
+   InitializeGlobalVariables();
+   
    trade.SetExpertMagicNumber(InpMagicNumber);
    trade.SetDeviationInPoints(10);
    // Détecter automatiquement le mode de remplissage supporté par le symbole
@@ -8940,6 +8950,15 @@ void LookForTradingOpportunity()
    if(UseAI_Agent)
    {
       int age = (int)(TimeCurrent() - g_coherentAnalysis.lastUpdate);
+      
+      // Détection et correction du bug d'epoch time
+      if(age > 86400) // Plus de 24h = epoch time bug
+      {
+         Print("⚠️ CORRECTION: Bug epoch time détecté (age=", age, "s) - Réinitialisation");
+         g_coherentAnalysis.lastUpdate = TimeCurrent() - (AI_CoherentAnalysisInterval * 3); // Marquer comme "trop ancien" mais pas 0
+         age = AI_CoherentAnalysisInterval * 3;
+      }
+      
       // Anti-panne: si l'analyse cohérente n'est pas disponible, on ne trade pas (mode "sûr")
       if(g_coherentAnalysis.lastUpdate == 0 || age > (AI_CoherentAnalysisInterval * 2))
       {
@@ -14211,6 +14230,12 @@ void UpdateCoherentAnalysis(string symbol)
    {
       if(DebugMode)
          Print("❌ Erreur API Analyse cohérente: ", res);
+      
+      // Même en cas d'échec, mettre à jour le temps pour éviter l'epoch time bug
+      // mais utiliser un timestamp spécial pour indiquer l'échec
+      g_coherentAnalysis.lastUpdate = TimeCurrent() - (AI_CoherentAnalysisInterval * 3); // Marquer comme "trop ancien" mais pas 0
+      g_coherentAnalysis.decision = ""; // Vider la décision en cas d'échec
+      g_coherentAnalysis.confidence = 0.0; // Confiance nulle en cas d'échec
    }
 }
 
