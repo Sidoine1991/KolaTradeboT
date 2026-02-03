@@ -1200,7 +1200,6 @@ async def startup_event():
     """Initialize database on startup"""
     if not DB_AVAILABLE:
         logger.info("📊 Mode sans PostgreSQL - feedback loop désactivé")
-        return
     
     try:
         pool = await get_db_pool()
@@ -1210,6 +1209,9 @@ async def startup_event():
                 logger.info("✅ Table trade_feedback créée/vérifiée")
     except Exception as e:
         logger.error(f"❌ Erreur initialisation base de données: {e}", exc_info=True)
+    
+    # Entraîner automatiquement les modèles ML pour les symboles principaux
+    await train_models_on_startup()
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -1217,6 +1219,57 @@ async def shutdown_event():
     if hasattr(app.state, "db_pool") and app.state.db_pool:
         await app.state.db_pool.close()
         logger.info("🔒 Pool PostgreSQL fermé")
+
+
+async def train_models_on_startup():
+    """
+    Entraîne automatiquement les modèles ML pour les symboles principaux au démarrage
+    """
+    logger.info("🚀 Démarrage de l'entraînement automatique des modèles ML...")
+    
+    # Symboles principaux à entraîner automatiquement
+    priority_symbols = [
+        "EURUSD", "GBPUSD", "USDJPY",  # Forex majeurs
+        "XAUUSD",  # Or
+        "Boom 300 Index", "Boom 600 Index", "Boom 900 Index",  # Boom
+        "Crash 1000 Index"  # Crash
+    ]
+    
+    timeframes = ["M1", "M5", "H1"]  # Timeframes principaux
+    
+    if not ML_AVAILABLE:
+        logger.warning("⚠️ scikit-learn non disponible - entraînement ML désactivé")
+        return
+    
+    total_training_tasks = len(priority_symbols) * len(timeframes)
+    completed_tasks = 0
+    
+    for symbol in priority_symbols:
+        for timeframe in timeframes:
+            try:
+                model_key = f"{symbol}_{timeframe}"
+                
+                # Vérifier si le modèle existe déjà
+                if model_key in ml_models_cache:
+                    logger.info(f"✅ Modèle déjà existant pour {model_key}")
+                    completed_tasks += 1
+                    continue
+                
+                logger.info(f"📊 Entraînement du modèle pour {symbol} {timeframe}...")
+                
+                # Entraîner le modèle
+                train_result = train_ml_models(symbol, timeframe, historical_data=None)
+                
+                if "error" not in train_result:
+                    logger.info(f"✅ Modèle entraîné avec succès pour {model_key}")
+                    completed_tasks += 1
+                else:
+                    logger.error(f"❌ Erreur entraînement modèle {model_key}: {train_result['error']}")
+                
+            except Exception as e:
+                logger.error(f"❌ Erreur entraînement modèle {symbol} {timeframe}: {e}")
+    
+    logger.info(f"🎯 Entraînement automatique terminé: {completed_tasks}/{total_training_tasks} modèles entraînés")
 
 
 # Parser les arguments en ligne de commande
@@ -2632,6 +2685,65 @@ async def root_post():
         status_code=400,
         detail="Please use POST /decision endpoint for trading decisions. The root endpoint '/' only accepts GET requests."
     )
+
+@app.post("/decision", response_model=DecisionResponse)
+async def decision_endpoint(request: DecisionRequest):
+    """
+    Endpoint principal pour la prise de décision de trading (appelé par MQ5).
+    Wraps /ml/predict-signal logic.
+    """
+    try:
+        # 1. Convertir la requête Pydantic en dictionnaire pour predict_trading_signal
+        req_dict = request.dict()
+        
+        # Mapping des champs pour assurer la compatibilité
+        if not req_dict.get('current_price') and request.bid:
+            req_dict['current_price'] = request.bid
+            
+        # 2. Appeler la logique de prédiction existante
+        # Note: predict_trading_signal est définie plus bas, mais résolue au runtime
+        result = await predict_trading_signal(req_dict)
+        
+        # 3. Mapper le résultat vers DecisionResponse
+        # Le signal retourné par predict_trading_signal est "BUY", "SELL", "HOLD" ou "neutral"
+        signal_raw = result.get("signal", "neutral").upper()
+        
+        action_map = {
+            "BUY": "buy",
+            "SELL": "sell",
+            "HOLD": "hold",
+            "NEUTRAL": "hold"
+        }
+        
+        action = action_map.get(signal_raw, "hold")
+        
+        # Confiance: predict_trading_signal retourne 0-100, DecisionResponse attend 0.0-1.0
+        conf_raw = float(result.get("confidence", 0.0))
+        confidence = conf_raw / 100.0 if conf_raw > 1.0 else conf_raw
+        
+        # Construire la réponse
+        response = DecisionResponse(
+            action=action,
+            confidence=confidence,
+            reason=str(result.get("reasoning", "AI Analysis")),
+            stop_loss=result.get("stop_loss"),
+            take_profit=result.get("take_profit"),
+            timestamp=result.get("timestamp"),
+            model_used=result.get("model_used"),
+            spike_prediction=result.get("source") == "boom_crash_spike",
+            technical_analysis=None
+        )
+        
+        return response
+        
+    except Exception as e:
+        logger.error(f"Erreur endpoint /decision: {e}")
+        # En cas d'erreur, on ne bloque pas, on retourne hold
+        return DecisionResponse(
+            action="hold",
+            confidence=0.0,
+            reason=f"Error in decision: {str(e)}"
+        )
 
 # ==================== ALPHA VANTAGE ENDPOINTS ====================
 
