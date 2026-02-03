@@ -339,6 +339,17 @@ static double   g_aiBuyZoneHigh  = 0.0;
 static double   g_aiSellZoneLow  = 0.0;
 static double   g_aiSellZoneHigh = 0.0;
 
+// Variables pour le canal prédictif
+static bool     g_predictiveChannelValid = false;
+static double   g_channelUpper = 0.0;
+static double   g_channelLower = 0.0;
+static double   g_channelCenter = 0.0;
+static string   g_channelSignal = "";
+static double   g_channelConfidence = 0.0;
+static datetime g_channelLastUpdate = 0;
+static double   g_channelStopLoss = 0.0;
+static double   g_channelTakeProfit = 0.0;
+
 // Structure pour les métriques ML
 struct MLMetricsData
 {
@@ -791,6 +802,10 @@ void PlaceLimitOrderOnCorrection();
 int GetTrajectoryTrendConfirmation();
 void UpdateLimitOrderOnTrajectoryChange();
 void UpdateAIDecision();
+void UpdatePredictiveChannel();
+void DrawPredictiveChannel();
+void CleanExpiredChannelDrawings();
+void ExecuteTradeBasedOnChannel(string signal, double confidence, double sl, double tp);
 void UpdateTrendAPIAnalysis();
 void UpdateCoherentAnalysis(string symbol);
 bool CheckM5ReversalConfirmation(ENUM_ORDER_TYPE orderType);
@@ -1308,6 +1323,14 @@ void OnTick()
       lastCoherentUpdate = currentTime;
    }
    
+   // OPTIMISATION: Mettre à jour le canal prédictif moins fréquemment
+   static datetime lastChannelUpdate = 0;
+   if(g_UseAI_Agent_Live && (currentTime - lastChannelUpdate) >= MathMax(AI_UpdateInterval, 60)) // Minimum 1 minute
+   {
+      UpdatePredictiveChannel();
+      lastChannelUpdate = currentTime;
+   }
+   
    // OPTIMISATION: Mettre à jour les métriques ML moins fréquemment
    static datetime lastMLMetricsUpdate2 = 0;
    if(UseMLPrediction && (currentTime - lastMLMetricsUpdate2) >= MathMax(AI_UpdateInterval, 180)) // Minimum 3 minutes
@@ -1336,7 +1359,11 @@ void OnTick()
       
       // Afficher les zones AI (priorité, léger)
       if(DrawAIZones)
+      {
          DrawAIZonesOnChart();
+         // Dessiner le canal prédictif
+         DrawPredictiveChannel();
+      }
       
       lastDrawUpdate = TimeCurrent();
    }
@@ -3113,6 +3140,342 @@ void UpdateAIDecision()
       {
          Print("⚠️ ATTENTION: Parsing IA peut avoir échoué - Action=", g_lastAIAction, " Confiance=", g_lastAIConfidence, " | Réponse complète: ", resp);
       }
+}
+
+//+------------------------------------------------------------------+
+//| Mettre à jour le canal prédictif                                 |
+//+------------------------------------------------------------------+
+void UpdatePredictiveChannel()
+{
+   if(!UseAI_Agent || StringLen(AI_ServerURL) == 0)
+      return;
+   
+   // Construire l'URL pour le canal prédictif
+   string safeSymbol = _Symbol;
+   StringReplace(safeSymbol, " ", "%20");
+   string channelURL = AI_ServerURL;
+   StringReplace(channelURL, "/decision", "/channel/predictive");
+   string url = channelURL + "?symbol=" + safeSymbol + "&lookback_period=75";
+   
+   // Préparer la requête GET
+   uchar data[];
+   ArrayResize(data, 0);
+   uchar result[];
+   string headers = "Accept: application/json\r\n";
+   string result_headers = "";
+   
+   int res = WebRequest("GET", url, headers, AI_Timeout_ms, data, result, result_headers);
+   
+   if(res == 200)
+   {
+      string resp = CharArrayToString(result);
+      
+      // Parser la réponse JSON du canal prédictif
+      ParsePredictiveChannelResponse(resp);
+      
+      if(DebugMode)
+         Print("📈 Canal prédictif mis à jour: Signal=", g_channelSignal, " Confiance=", DoubleToString(g_channelConfidence, 1), "%");
+   }
+   else
+   {
+      if(DebugMode)
+         Print("❌ Erreur canal prédictif: http=", res);
+      g_predictiveChannelValid = false;
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Parser la réponse du canal prédictif                            |
+//+------------------------------------------------------------------+
+void ParsePredictiveChannelResponse(string resp)
+{
+   // Parser "signal"
+   int signalPos = StringFind(resp, "\"signal\":");
+   if(signalPos >= 0)
+   {
+      int start = StringFind(resp, "\"", signalPos + 9) + 1;
+      int end = StringFind(resp, "\"", start);
+      if(end > start)
+      {
+         g_channelSignal = StringSubstr(resp, start, end - start);
+         StringToUpper(g_channelSignal);
+      }
+   }
+   
+   // Parser "confidence"
+   int confPos = StringFind(resp, "\"confidence\":");
+   if(confPos >= 0)
+   {
+      int start = StringFind(resp, ":", confPos) + 1;
+      int end = StringFind(resp, ",", start);
+      if(end == -1) end = StringFind(resp, "}", start);
+      if(end > start)
+      {
+         string confStr = StringSubstr(resp, start, end - start);
+         g_channelConfidence = StringToDouble(confStr);
+      }
+   }
+   
+   // Parser "upper_line"
+   int upperPos = StringFind(resp, "\"upper_line\":");
+   if(upperPos >= 0)
+   {
+      int start = StringFind(resp, "\"current\":", upperPos) + 10;
+      int end = StringFind(resp, ",", start);
+      if(end == -1) end = StringFind(resp, "}", start);
+      if(end > start)
+      {
+         string upperStr = StringSubstr(resp, start, end - start);
+         g_channelUpper = StringToDouble(upperStr);
+      }
+   }
+   
+   // Parser "lower_line"
+   int lowerPos = StringFind(resp, "\"lower_line\":");
+   if(lowerPos >= 0)
+   {
+      int start = StringFind(resp, "\"current\":", lowerPos) + 10;
+      int end = StringFind(resp, ",", start);
+      if(end == -1) end = StringFind(resp, "}", start);
+      if(end > start)
+      {
+         string lowerStr = StringSubstr(resp, start, end - start);
+         g_channelLower = StringToDouble(lowerStr);
+      }
+   }
+   
+   // Parser "center_line"
+   int centerPos = StringFind(resp, "\"center_line\":");
+   if(centerPos >= 0)
+   {
+      int start = StringFind(resp, "\"current\":", centerPos) + 10;
+      int end = StringFind(resp, ",", start);
+      if(end == -1) end = StringFind(resp, "}", start);
+      if(end > start)
+      {
+         string centerStr = StringSubstr(resp, start, end - start);
+         g_channelCenter = StringToDouble(centerStr);
+      }
+   }
+   
+   // Parser "stop_loss" et "take_profit"
+   int slPos = StringFind(resp, "\"stop_loss\":");
+   if(slPos >= 0)
+   {
+      int start = slPos + 12;
+      int end = StringFind(resp, ",", start);
+      if(end == -1) end = StringFind(resp, "}", start);
+      if(end > start)
+      {
+         string slStr = StringSubstr(resp, start, end - start);
+         g_channelStopLoss = StringToDouble(slStr);
+      }
+   }
+   
+   int tpPos = StringFind(resp, "\"take_profit\":");
+   if(tpPos >= 0)
+   {
+      int start = tpPos + 14;
+      int end = StringFind(resp, ",", start);
+      if(end == -1) end = StringFind(resp, "}", start);
+      if(end > start)
+      {
+         string tpStr = StringSubstr(resp, start, end - start);
+         g_channelTakeProfit = StringToDouble(tpStr);
+      }
+   }
+   
+   // Valider le canal
+   g_predictiveChannelValid = (g_channelUpper > 0 && g_channelLower > 0 && g_channelSignal != "");
+   g_channelLastUpdate = TimeCurrent();
+   
+   // Exécuter le trade si signal fort
+   if(g_predictiveChannelValid && g_channelConfidence >= MinConfidence)
+   {
+      ExecuteTradeBasedOnChannel(g_channelSignal, g_channelConfidence, g_channelStopLoss, g_channelTakeProfit);
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Dessiner le canal prédictif sur le graphique                     |
+//+------------------------------------------------------------------+
+void DrawPredictiveChannel()
+{
+   if(!g_predictiveChannelValid || !DrawAIZones)
+      return;
+   
+   // Nettoyer les anciens dessins de canal
+   CleanExpiredChannelDrawings();
+   
+   // Récupérer les prix pour le dessin
+   double close[];
+   ArraySetAsSeries(close, true);
+   CopyClose(_Symbol, PERIOD_CURRENT, 0, 100, close);
+   
+   datetime time[];
+   ArraySetAsSeries(time, true);
+   CopyTime(_Symbol, PERIOD_CURRENT, 0, 100, time);
+   
+   // Dessiner les lignes du canal
+   string prefix = "CHANNEL_";
+   
+   // Ligne supérieure
+   string upperName = prefix + "UPPER_" + IntegerToString(g_channelLastUpdate);
+   if(ObjectCreate(0, upperName, OBJ_TREND, 0, time[50], g_channelUpper, time[0], g_channelUpper))
+   {
+      ObjectSetInteger(0, upperName, OBJPROP_COLOR, clrRed);
+      ObjectSetInteger(0, upperName, OBJPROP_STYLE, STYLE_SOLID);
+      ObjectSetInteger(0, upperName, OBJPROP_WIDTH, 2);
+      ObjectSetInteger(0, upperName, OBJPROP_RAY_RIGHT, true);
+   }
+   
+   // Ligne inférieure
+   string lowerName = prefix + "LOWER_" + IntegerToString(g_channelLastUpdate);
+   if(ObjectCreate(0, lowerName, OBJ_TREND, 0, time[50], g_channelLower, time[0], g_channelLower))
+   {
+      ObjectSetInteger(0, lowerName, OBJPROP_COLOR, clrBlue);
+      ObjectSetInteger(0, lowerName, OBJPROP_STYLE, STYLE_SOLID);
+      ObjectSetInteger(0, lowerName, OBJPROP_WIDTH, 2);
+      ObjectSetInteger(0, lowerName, OBJPROP_RAY_RIGHT, true);
+   }
+   
+   // Ligne centrale
+   string centerName = prefix + "CENTER_" + IntegerToString(g_channelLastUpdate);
+   if(ObjectCreate(0, centerName, OBJ_TREND, 0, time[50], g_channelCenter, time[0], g_channelCenter))
+   {
+      ObjectSetInteger(0, centerName, OBJPROP_COLOR, clrGreen);
+      ObjectSetInteger(0, centerName, OBJPROP_STYLE, STYLE_DASH);
+      ObjectSetInteger(0, centerName, OBJPROP_WIDTH, 1);
+      ObjectSetInteger(0, centerName, OBJPROP_RAY_RIGHT, true);
+   }
+   
+   // Afficher le signal
+   string signalName = prefix + "SIGNAL_" + IntegerToString(g_channelLastUpdate);
+   string signalText = "Signal: " + g_channelSignal + " (" + DoubleToString(g_channelConfidence * 100, 1) + "%)";
+   if(ObjectCreate(0, signalName, OBJ_TEXT, 0, time[10], g_channelCenter))
+   {
+      ObjectSetString(0, signalName, OBJPROP_TEXT, signalText);
+      ObjectSetInteger(0, signalName, OBJPROP_COLOR, (g_channelSignal == "BUY") ? clrGreen : clrRed);
+      ObjectSetInteger(0, signalName, OBJPROP_FONTSIZE, 10);
+      ObjectSetInteger(0, signalName, OBJPROP_ANCHOR, ANCHOR_LEFT);
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Nettoyer les dessins de canal expirés                            |
+//+------------------------------------------------------------------+
+void CleanExpiredChannelDrawings()
+{
+   string prefix = "CHANNEL_";
+   datetime currentTime = TimeCurrent();
+   
+   int total = ObjectsTotal(0);
+   for(int i = total - 1; i >= 0; i--)
+   {
+      string name = ObjectName(0, i);
+      if(StringFind(name, prefix) == 0)
+      {
+         // Extraire le timestamp du nom
+         int underscorePos = StringFind(name, "_", StringLen(prefix));
+         if(underscorePos > 0)
+         {
+            string timeStr = StringSubstr(name, underscorePos + 1);
+            datetime objTime = StringToInteger(timeStr);
+            
+            // Supprimer si plus de 5 minutes
+            if(currentTime - objTime > 300)
+            {
+               ObjectDelete(0, name);
+            }
+         }
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Exécuter un trade basé sur le canal prédictif                    |
+//+------------------------------------------------------------------+
+void ExecuteTradeBasedOnChannel(string signal, double confidence, double sl, double tp)
+{
+   if(!g_TradingEnabled_Live || g_hasPosition)
+      return;
+   
+   // Vérifier que le signal est fort
+   if(confidence < MinConfidence)
+      return;
+   
+   // Récupérer les indicateurs pour l'entrée
+   double emaFast[], emaSlow[];
+   ArraySetAsSeries(emaFast, true);
+   ArraySetAsSeries(emaSlow, true);
+   
+   if(CopyBuffer(emaFastHandle, 0, 0, 1, emaFast) <= 0 ||
+      CopyBuffer(emaSlowHandle, 0, 0, 1, emaSlow) <= 0)
+      return;
+   
+   // Vérifier la condition d'entrée basée sur EMA ou SuperTrend
+   bool entryCondition = false;
+   string entryReason = "";
+   
+   if(signal == "BUY")
+   {
+      // Condition BUY : EMA fast > EMA slow OU SuperTrend confirme
+      if(emaFast[0] > emaSlow[0])
+      {
+         entryCondition = true;
+         entryReason = "EMA fast > EMA slow";
+      }
+      else
+      {
+         double superTrendStrength = 0.0;
+         bool superTrendOk = CheckSuperTrendSignal(ORDER_TYPE_BUY, superTrendStrength);
+         if(superTrendOk && superTrendStrength > 0.3)
+         {
+            entryCondition = true;
+            entryReason = "SuperTrend confirme BUY";
+         }
+      }
+   }
+   else if(signal == "SELL")
+   {
+      // Condition SELL : EMA fast < EMA slow OU SuperTrend confirme
+      if(emaFast[0] < emaSlow[0])
+      {
+         entryCondition = true;
+         entryReason = "EMA fast < EMA slow";
+      }
+      else
+      {
+         double superTrendStrength = 0.0;
+         bool superTrendOk = CheckSuperTrendSignal(ORDER_TYPE_SELL, superTrendStrength);
+         if(superTrendOk && superTrendStrength > 0.3)
+         {
+            entryCondition = true;
+            entryReason = "SuperTrend confirme SELL";
+         }
+      }
+   }
+   
+   if(entryCondition)
+   {
+      // Calculer SL/TP si non fournis
+      double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+      double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+      double atr[];
+      ArraySetAsSeries(atr, true);
+      CopyBuffer(atrHandle, 0, 0, 1, atr);
+      
+      double finalSL = (sl > 0) ? sl : ((signal == "BUY") ? ask - 2.0 * atr[0] : bid + 2.0 * atr[0]);
+      double finalTP = (tp > 0) ? tp : ((signal == "BUY") ? ask + 3.0 * atr[0] : bid - 3.0 * atr[0]);
+      
+      // Exécuter le trade
+      ENUM_ORDER_TYPE orderType = (signal == "BUY") ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+      
+      if(ExecuteTrade(orderType, g_InitialLotSize_Live, finalSL, finalTP, "Canal prédictif: " + entryReason))
+      {
+         Print("✅ Trade exécuté via canal prédictif: ", signal, " | Confiance: ", DoubleToString(confidence * 100, 1), "% | Entrée: ", entryReason);
+      }
+   }
 }
 
 //+------------------------------------------------------------------+
