@@ -1211,78 +1211,89 @@ void OnChartEvent(const int id,
    }
 }
 
-//+------------------------------------------------------------------+
 //| Expert tick function                                             |
 //+------------------------------------------------------------------+
 void OnTick()
 {
-   // OPTIMISATION: Éviter les exécutions multiples dans la même seconde
+   // OPTIMISATION MAXIMALE: Éviter les exécutions multiples dans la même seconde
    static datetime lastTickTime = 0;
    datetime currentTime = TimeCurrent();
    if(currentTime == lastTickTime)
       return;
    lastTickTime = currentTime;
    
-   // Synchroniser les variables live avec les paramètres d'entrée
-   g_UseAI_Agent_Live = UseAI_Agent;
-   g_InitialLotSize_Live = InitialLotSize;
-   // Note: g_TradingEnabled_Live est géré manuellement via clavier (Ctrl+T)
+   // SYNCHRONISATION: Une seule fois au démarrage
+   static bool syncDone = false;
+   if(!syncDone)
+   {
+      g_UseAI_Agent_Live = UseAI_Agent;
+      g_InitialLotSize_Live = InitialLotSize;
+      syncDone = true;
+   }
    
-   // OPTIMISATION: Protection contre pertes - seulement toutes les 5 secondes
+   // OPTIMISATION CRITIQUE: Protection contre pertes - seulement toutes les 10 secondes
    static datetime lastProtectionCheck = 0;
-   if(currentTime - lastProtectionCheck >= 5)
+   if(currentTime - lastProtectionCheck >= 10)
    {
       CheckGlobalLossProtection();
       ProtectGainsWhenTargetReached();
       CheckAndUpdatePositions();
-      CheckQuickReentry();
       lastProtectionCheck = currentTime;
    }
    
-   // Réinitialiser les compteurs quotidiens si nécessaire (légère optimisation)
+   // OPTIMISATION: QuickReentry - seulement toutes les 15 secondes
+   static datetime lastQuickReentry = 0;
+   if(currentTime - lastQuickReentry >= 15)
+   {
+      CheckQuickReentry();
+      lastQuickReentry = currentTime;
+   }
+   
+   // OPTIMISATION: Réinitialisation quotidienne - seulement toutes les 6 heures
    static datetime lastDailyReset = 0;
-   if(currentTime - lastDailyReset >= 3600) // Vérifier chaque heure au lieu de chaque tick
+   if(currentTime - lastDailyReset >= 21600) // 6 heures
    {
       ResetDailyCountersIfNeeded();
       lastDailyReset = currentTime;
    }
    
-   // OPTIMISATION: Mettre à jour l'IA moins fréquemment
+   // OPTIMISATION: IA - minimum 60 secondes
    static datetime lastAIUpdate = 0;
-   if(g_UseAI_Agent_Live && (currentTime - lastAIUpdate) >= MathMax(AI_UpdateInterval, 30)) // Minimum 30 secondes
+   if(g_UseAI_Agent_Live && (currentTime - lastAIUpdate) >= MathMax(AI_UpdateInterval, 60))
    {
-      datetime timeBeforeUpdate = g_lastAITime; // Sauvegarder le temps avant l'appel
-      UpdateAIDecision(); // WebRequest est synchrone, donc attend la réponse
-      // Mettre à jour lastAIUpdate seulement si UpdateAIDecision() a réussi
-      // (g_lastAITime sera mis à jour dans UpdateAIDecision() seulement en cas de succès)
+      datetime timeBeforeUpdate = g_lastAITime;
+      UpdateAIDecision();
       if(g_lastAITime > timeBeforeUpdate)
       {
-         // UpdateAIDecision() a réussi (g_lastAITime a été mis à jour)
-      lastAIUpdate = currentTime;
+         lastAIUpdate = currentTime;
       }
-      // Si UpdateAIDecision() a échoué, ne pas mettre à jour lastAIUpdate pour réessayer plus tôt
-      
-      // NOUVEAU: Vérifier et annuler les ordres LIMIT si les conditions ont changé
-      ValidateAndCancelInvalidLimitOrders();
    }
    
-   // OPTIMISATION: Mettre à jour les métriques ML moins fréquemment
+   // OPTIMISATION: Canal prédictif - minimum 2 minutes
+   static datetime lastChannelUpdate = 0;
+   if(g_UseAI_Agent_Live && (currentTime - lastChannelUpdate) >= MathMax(AI_UpdateInterval, 120))
+   {
+      UpdatePredictiveChannel();
+      lastChannelUpdate = currentTime;
+   }
+   
+   // OPTIMISATION: Métriques ML - toutes les 5 minutes
    static datetime lastMLMetricsUpdate = 0;
-   if(currentTime - lastMLMetricsUpdate >= 60) // Toutes les minutes au lieu de chaque tick
+   if(currentTime - lastMLMetricsUpdate >= 300)
    {
       UpdateMLMetricsRealtime();
       lastMLMetricsUpdate = currentTime;
    }
    
-   // OPTIMISATION: Mettre à jour les bougies futures moins fréquemment
+   // OPTIMISATION: Bougies futures - toutes les 2 minutes
    static datetime lastFutureCandlesUpdate = 0;
-   if(currentTime - lastFutureCandlesUpdate >= 30) // Toutes les 30 secondes
+   if(currentTime - lastFutureCandlesUpdate >= 120)
    {
       UpdateFutureCandles();
       lastFutureCandlesUpdate = currentTime;
    }
    
-   // NETTOYAGE: Supprimer tous les anciens objets de prédiction au démarrage
+   // NETTOYAGE: Une seule fois au démarrage
    static bool predictionCleanupDone = false;
    if(!predictionCleanupDone)
    {
@@ -1290,140 +1301,85 @@ void OnTick()
       predictionCleanupDone = true;
    }
    
-   // OPTIMISATION: Mettre à jour la prédiction de prix moins fréquemment
+   // OPTIMISATION: Prédiction de prix - toutes les 10 minutes
    static datetime lastPredictionUpdate = 0;
-   if(g_UseAI_Agent_Live && (currentTime - lastPredictionUpdate) >= MathMax(PREDICTION_UPDATE_INTERVAL, 300)) // Minimum 5 minutes
+   if(g_UseAI_Agent_Live && (currentTime - lastPredictionUpdate) >= MathMax(PREDICTION_UPDATE_INTERVAL, 600))
    {
-      UpdatePricePrediction(); // Mettre à jour la prédiction de prix
+      UpdatePricePrediction();
       lastPredictionUpdate = currentTime;
    }
    
-   // OPTIMISATION: Dessiner la prédiction moins souvent pour éviter la surcharge graphique
-   static datetime lastPredictionDraw = 0;
-   if(DrawAIZones && g_predictionsValid && (currentTime - lastPredictionDraw) >= 30) // 30 secondes au lieu de 10
-   {
-      DrawPricePrediction();
-      lastPredictionDraw = currentTime;
-   }
-   
-   // OPTIMISATION: Analyse de tendance API moins fréquente
+   // OPTIMISATION: Analyse tendance API - toutes les 5 minutes
    static datetime lastTrendUpdate = 0;
-   if(UseTrendAPIAnalysis && (currentTime - lastTrendUpdate) >= MathMax(AI_UpdateInterval, 60)) // Minimum 1 minute
+   if(UseTrendAPIAnalysis && (currentTime - lastTrendUpdate) >= MathMax(AI_UpdateInterval, 300))
    {
       UpdateTrendAPIAnalysis();
       lastTrendUpdate = currentTime;
    }
 
-   // OPTIMISATION: Analyse cohérente moins fréquente
+   // OPTIMISATION: Analyse cohérente - toutes les 5 minutes
    static datetime lastCoherentUpdate = 0;
    if(g_UseAI_Agent_Live && (ShowCoherentAnalysis || RequireCoherentAnalysis) && 
-      (currentTime - lastCoherentUpdate) >= MathMax(AI_CoherentAnalysisInterval, 120)) // Minimum 2 minutes
+      (currentTime - lastCoherentUpdate) >= MathMax(AI_CoherentAnalysisInterval, 300))
    {
       UpdateCoherentAnalysis(_Symbol);
       lastCoherentUpdate = currentTime;
    }
    
-   // OPTIMISATION: Mettre à jour le canal prédictif moins fréquemment
-   static datetime lastChannelUpdate = 0;
-   if(g_UseAI_Agent_Live && (currentTime - lastChannelUpdate) >= MathMax(AI_UpdateInterval, 60)) // Minimum 1 minute
-   {
-      UpdatePredictiveChannel();
-      lastChannelUpdate = currentTime;
-   }
-   
-   // OPTIMISATION: Mettre à jour les métriques ML moins fréquemment
-   static datetime lastMLMetricsUpdate2 = 0;
-   if(UseMLPrediction && (currentTime - lastMLMetricsUpdate2) >= MathMax(AI_UpdateInterval, 180)) // Minimum 3 minutes
-   {
-      UpdateMLMetrics(_Symbol, "M1");
-      lastMLMetricsUpdate2 = currentTime;
-   }
-   
-   // OPTIMISATION MAXIMALE: Réduire drastiquement la fréquence et les calculs
+   // OPTIMISATION EXTREME: Dessins minimisés pour éviter le lag
    static datetime lastDrawUpdate = 0;
-   if(TimeCurrent() - lastDrawUpdate >= 30) // Mise à jour toutes les 30 secondes (au lieu de 15)
+   if(TimeCurrent() - lastDrawUpdate >= 60) // Toutes les minutes (au lieu de 30)
    {
-      // Toujours afficher les labels essentiels (léger)
-      DrawAIConfidenceAndTrendSummary();
-      
-      // Afficher le panneau des opportunités (remplace les labels encombrants)
-      DrawOpportunitiesPanel();
-      
-      // Afficher les métriques ML si disponibles
-      if(ShowMLMetrics)
-         DrawMLMetricsPanel();
-      
-      // Afficher le panneau des prédictions ML si activé
-      if(ShowPredictionsPanel)
-         DrawMLMetricsPanel();
-      
-      // Afficher les zones AI (priorité, léger)
+      // UN SEUL panneau essentiel au lieu de multiples
       if(DrawAIZones)
       {
          DrawAIZonesOnChart();
-         // Dessiner le canal prédictif
-         DrawPredictiveChannel();
+         // Dessiner le canal prédictif seulement si valide
+         if(g_predictiveChannelValid)
+            DrawPredictiveChannel();
       }
       
       lastDrawUpdate = TimeCurrent();
    }
    
-   // OPTIMISATION: Mises à jour très peu fréquentes pour éléments lourds
+   // OPTIMISATION: Éléments lourds complètement désactivés pour performance
    static datetime lastHeavyUpdate = 0;
-   if(TimeCurrent() - lastHeavyUpdate >= 300) // Mise à jour toutes les 5 minutes (au lieu de 3 min)
+   if(TimeCurrent() - lastHeavyUpdate >= 600) // Toutes les 10 minutes (au lieu de 5)
    {
-      // OPTIMISATION: Nettoyer seulement toutes les 10 minutes (très lourd)
-      static datetime lastCleanup = 0;
-      if(TimeCurrent() - lastCleanup >= 600)
-      {
-         CleanOldGraphicalObjects();
-         lastCleanup = TimeCurrent();
-      }
-      
-      // Afficher EMA longues (optimisé, très peu fréquent)
-      if(ShowLongTrendEMA)
-         DrawLongTrendEMA();
-      
-      // Afficher support/résistance (très peu fréquent)
-      if(DrawSupportResistance)
-         DrawSupportResistanceLevels();
-      
-      // Afficher trendlines (très peu fréquent)
-      if(DrawTrendlines)
-         DrawTrendlinesOnChart();
+      // Nettoyage très peu fréquent
+      CleanOldGraphicalObjects();
       
       lastHeavyUpdate = TimeCurrent();
    }
    
-   // Deriv patterns (optimisé - beaucoup moins fréquent)
+   // DÉSACTIVÉ: Deriv patterns - trop lourd pour la performance
+   /*
    static datetime lastDerivUpdate = 0;
-   if(DrawDerivPatterns && (TimeCurrent() - lastDerivUpdate >= 60)) // Toutes les 60 secondes (au lieu de 10)
+   if(DrawDerivPatterns && (TimeCurrent() - lastDerivUpdate >= 60))
    {
       DrawDerivPatternsOnChart();
       UpdateDerivArrowBlink();
       lastDerivUpdate = TimeCurrent();
    }
+   */
    
-   // OPTIMISATION: Vérifier les positions moins fréquemment
+   // OPTIMISATION CRITIQUE: Vérification positions - toutes les 5 secondes
    static datetime lastPositionCheck = 0;
-   if(TimeCurrent() - lastPositionCheck >= 1) // Toutes les secondes (au lieu de chaque tick)
+   if(TimeCurrent() - lastPositionCheck >= 5)
    {
       CheckAndManagePositions();
       SecureDynamicProfits();
-      // Fermeture automatique Boom/Crash si activée
-      // NOUVEAU: Vérifier et fermer les positions Boom/Crash profitables
       CloseProfitableBoomCrashPositions();
-      
-      // NOUVEAU: Fermer automatiquement toutes les positions dès que le profit atteint le seuil OneDollarProfitTarget
       ClosePositionsAtProfitTarget();
-
       lastPositionCheck = TimeCurrent();
    }
    
-   // Si pas de position, chercher une opportunité
-   if(!g_hasPosition)
+   // OPTIMISATION: Recherche d'opportunités - seulement si pas de position et toutes les 10 secondes
+   static datetime lastOpportunityCheck = 0;
+   if(!g_hasPosition && (TimeCurrent() - lastOpportunityCheck) >= 10)
    {
       LookForTradingOpportunity();
+      lastOpportunityCheck = TimeCurrent();
    }
 }
 
@@ -3380,7 +3336,7 @@ void CleanExpiredChannelDrawings()
          if(underscorePos > 0)
          {
             string timeStr = StringSubstr(name, underscorePos + 1);
-            datetime objTime = StringToInteger(timeStr);
+            datetime objTime = (datetime)StringToInteger(timeStr);
             
             // Supprimer si plus de 5 minutes
             if(currentTime - objTime > 300)
@@ -3468,12 +3424,47 @@ void ExecuteTradeBasedOnChannel(string signal, double confidence, double sl, dou
       double finalSL = (sl > 0) ? sl : ((signal == "BUY") ? ask - 2.0 * atr[0] : bid + 2.0 * atr[0]);
       double finalTP = (tp > 0) ? tp : ((signal == "BUY") ? ask + 3.0 * atr[0] : bid - 3.0 * atr[0]);
       
-      // Exécuter le trade
+      // Exécuter le trade directement avec CTrade
       ENUM_ORDER_TYPE orderType = (signal == "BUY") ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+      double price = (orderType == ORDER_TYPE_BUY) ? ask : bid;
       
-      if(ExecuteTrade(orderType, g_InitialLotSize_Live, finalSL, finalTP, "Canal prédictif: " + entryReason))
+      // Configurer le trade
+      trade.SetExpertMagicNumber(InpMagicNumber);
+      trade.SetDeviationInPoints(10);
+      trade.SetAsyncMode(true);
+      
+      // Définir le mode de remplissage
+      ENUM_ORDER_TYPE_FILLING fillingMode = GetSupportedFillingMode(_Symbol);
+      trade.SetTypeFilling(fillingMode);
+      
+      // Exécuter l'ordre
+      bool success = trade.PositionOpen(_Symbol, orderType, g_InitialLotSize_Live, price, finalSL, finalTP, "Canal prédictif: " + entryReason);
+      
+      if(success)
       {
          Print("✅ Trade exécuté via canal prédictif: ", signal, " | Confiance: ", DoubleToString(confidence * 100, 1), "% | Entrée: ", entryReason);
+      }
+      else
+      {
+         // Si échec avec erreur de filling mode, essayer avec ORDER_FILLING_RETURN
+         if(trade.ResultRetcode() == 10030 || trade.ResultRetcode() == 10015)
+         {
+            trade.SetTypeFilling(ORDER_FILLING_RETURN);
+            success = trade.PositionOpen(_Symbol, orderType, g_InitialLotSize_Live, price, finalSL, finalTP, "Canal prédictif: " + entryReason);
+            
+            if(success)
+            {
+               Print("✅ Trade exécuté via canal prédictif (fallback): ", signal, " | Confiance: ", DoubleToString(confidence * 100, 1), "% | Entrée: ", entryReason);
+            }
+            else
+            {
+               Print("❌ Échec trade canal prédictif: ", trade.ResultRetcode(), " - ", trade.ResultRetcodeDescription());
+            }
+         }
+         else
+         {
+            Print("❌ Échec trade canal prédictif: ", trade.ResultRetcode(), " - ", trade.ResultRetcodeDescription());
+         }
       }
    }
 }
