@@ -5303,6 +5303,21 @@ def train_ml_models(symbol: str, timeframe: str, historical_data: Optional[pd.Da
                 
                 logger.info(f"  Rééquilibrage simple: Avant {dict(y_train.value_counts())} → Après {dict(y_train.value_counts())}")
         
+        # Appliquer SMOTE si nous avons au moins 2 classes et assez d'échantillons
+        try:
+            if len(y_train.unique()) >= 2 and len(y_train) >= 10:
+                from imblearn.over_sampling import SMOTE
+                smote = SMOTE(random_state=42, k_neighbors=min(5, len(y_train) // 2 - 1))
+                X_train_resampled, y_train_resampled = smote.fit_resample(X_train, y_train)
+                
+                logger.info(f" Rééquilibrage SMOTE: Avant {dict(y_train.value_counts())} → Après {dict(y_train_resampled.value_counts())}")
+                
+                X_train = X_train_resampled
+                y_train = y_train_resampled
+        except Exception as e:
+            logger.warning(f" Erreur lors du rééquilibrage SMOTE: {e}")
+            # Continuer avec les données originales
+        
         # Utiliser uniquement RandomForest (plus rapide) pour le déploiement
         models = {}
         metrics = {}
@@ -5389,163 +5404,6 @@ def train_ml_models(symbol: str, timeframe: str, historical_data: Optional[pd.Da
             "symbol": symbol, 
             "timeframe": timeframe
         }
-                
-                # Sélectionner aléatoirement des échantillons à modifier
-                synthetic_indices = np.random.choice(len(X_train), n_synthetic, replace=False)
-                X_synthetic = X_train.iloc[synthetic_indices].copy()
-                y_synthetic = pd.Series([minority_class] * n_synthetic)
-                
-                # Ajouter un peu de bruit pour différencier les échantillons
-                noise = np.random.normal(0, 0.01, X_synthetic.shape)
-                X_synthetic = X_synthetic + noise
-                
-                # Combiner avec les données originales
-                X_train = pd.concat([X_train, X_synthetic], ignore_index=True)
-                y_train = pd.concat([y_train, y_synthetic], ignore_index=True)
-                
-                logger.info(f" {n_synthetic} échantillons synthétiques créés. Classes: {dict(y_train.value_counts())}")
-        
-        # Appliquer SMOTE si nous avons au moins 2 classes et assez d'échantillons
-        try:
-            if len(y_train.unique()) >= 2 and len(y_train) >= 10:
-                from imblearn.over_sampling import SMOTE
-                smote = SMOTE(random_state=42, k_neighbors=min(5, len(y_train) // 2 - 1))
-                X_train_resampled, y_train_resampled = smote.fit_resample(X_train, y_train)
-                
-                logger.info(f" Rééquilibrage SMOTE: Avant {dict(y_train.value_counts())} → Après {dict(y_train_resampled.value_counts())}")
-                X_train, y_train = X_train_resampled, y_train_resampled
-        except ImportError:
-            logger.warning(" imbalanced-learn non installé. Utilisation des données originales.")
-        except Exception as e:
-            logger.warning(f" Erreur SMOTE: {str(e)}. Utilisation des données originales.")
-        
-        # Normaliser les features
-        scaler = StandardScaler()
-        X_train_scaled = scaler.fit_transform(X_train)
-        X_test_scaled = scaler.transform(X_test)
-        
-        models = {}
-        metrics = {}
-        
-# ... (code après la modification)
-        # 1. Random Forest
-        logger.info(f"Entraînement RandomForest pour {symbol} {timeframe}...")
-        rf_model = RandomForestClassifier(
-            n_estimators=100,
-            max_depth=10,
-            min_samples_split=5,
-            min_samples_leaf=2,
-            random_state=42,
-            n_jobs=-1,
-            class_weight='balanced'
-        )
-        rf_model.fit(X_train_scaled, y_train)
-        rf_pred = rf_model.predict(X_test_scaled)
-        rf_accuracy = accuracy_score(y_test, rf_pred)
-        rf_f1 = f1_score(y_test, rf_pred, average='weighted', zero_division=0)
-        
-        models['random_forest'] = rf_model
-        metrics['random_forest'] = {
-            'accuracy': float(rf_accuracy),
-            'f1_score': float(rf_f1),
-            'feature_importance': dict(zip(available_features, rf_model.feature_importances_))
-        }
-        
-        # 2. Gradient Boosting
-        logger.info(f"Entraînement GradientBoosting pour {symbol} {timeframe}...")
-        gb_model = GradientBoostingClassifier(
-            n_estimators=100,
-            learning_rate=0.1,
-            max_depth=6,
-            random_state=42
-        )
-        gb_model.fit(X_train_scaled, y_train)
-        gb_pred = gb_model.predict(X_test_scaled)
-        gb_accuracy = accuracy_score(y_test, gb_pred)
-        gb_f1 = f1_score(y_test, gb_pred, average='weighted', zero_division=0)
-        
-        models['gradient_boosting'] = gb_model
-        metrics['gradient_boosting'] = {
-            'accuracy': float(gb_accuracy),
-            'f1_score': float(gb_f1),
-            'feature_importance': dict(zip(available_features, gb_model.feature_importances_))
-        }
-        
-        # 3. MLP (Neural Network)
-        logger.info(f"Entraînement MLPClassifier pour {symbol} {timeframe}...")
-        mlp_model = MLPClassifier(
-            hidden_layer_sizes=(50, 25),
-            max_iter=500,
-            random_state=42,
-            early_stopping=True,
-            validation_fraction=0.1
-        )
-        mlp_model.fit(X_train_scaled, y_train)
-        mlp_pred = mlp_model.predict(X_test_scaled)
-        mlp_accuracy = accuracy_score(y_test, mlp_pred)
-        mlp_f1 = f1_score(y_test, mlp_pred, average='weighted', zero_division=0)
-        
-        models['mlp'] = mlp_model
-        metrics['mlp'] = {
-            'accuracy': float(mlp_accuracy),
-            'f1_score': float(mlp_f1)
-        }
-        
-        # Sauvegarder les modèles
-        ml_models_cache[model_key] = models
-        ml_scalers_cache[model_key] = scaler
-        
-        # Sauvegarder sur disque
-        try:
-            model_path = MODELS_DIR / f"{model_key}_rf.joblib"
-            scaler_path = MODELS_DIR / f"{model_key}_scaler.joblib"
-            joblib.dump(rf_model, model_path)
-            joblib.dump(scaler, scaler_path)
-            logger.info(f"Modèles sauvegardés dans {MODELS_DIR}")
-        except Exception as e:
-            logger.warning(f"Impossible de sauvegarder les modèles: {e}")
-        
-        # NOUVEAU: Sauvegarder les métriques dans un fichier JSON pour récupération ultérieure
-        try:
-            metrics_file = MODELS_DIR / f"{model_key}_metrics.json"
-            metrics_to_save = {
-                "symbol": symbol,
-                "timeframe": timeframe,
-                "training_date": datetime.now().isoformat(),
-                "metrics": metrics,
-                "best_model": max(metrics.keys(), key=lambda k: metrics[k]['f1_score']),
-                "features_used": available_features,
-                "training_samples": len(X_train),
-                "test_samples": len(X_test)
-            }
-            
-            with open(metrics_file, 'w', encoding='utf-8') as f:
-                json.dump(metrics_to_save, f, indent=2, ensure_ascii=False)
-            
-            logger.info(f"✅ Métriques sauvegardées dans {metrics_file}")
-        except Exception as e:
-            logger.warning(f"Impossible de sauvegarder les métriques: {e}")
-        
-        # Choisir le meilleur modèle
-        best_model_name = max(metrics.keys(), key=lambda k: metrics[k]['f1_score'])
-        
-        return {
-            "status": "success",
-            "symbol": symbol,
-            "timeframe": timeframe,
-            "models": list(models.keys()),
-            "metrics": metrics,
-            "best_model": best_model_name,
-            "features_used": available_features,
-            "training_samples": len(X_train),
-            "test_samples": len(X_test)
-        }
-        
-    except Exception as e:
-        logger.error(f"Erreur entraînement ML pour {symbol} {timeframe}: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
-        return {"error": str(e)}
 
 def validate_multi_timeframe_ml(symbol: str, timeframes: List[str]) -> Dict[str, Any]:
     """Validation croisée multi-timeframe avec ML
