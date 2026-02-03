@@ -326,6 +326,11 @@ def draw_predictive_channel(df: pd.DataFrame, symbol: str, lookback_period: int 
         # Calculer la largeur du canal (moyenne des écarts)
         channel_width = np.mean(trend_high - trend_low)
         
+        # Détecter si le canal est trop serré (consolidation)
+        price_range = np.max(highs) - np.min(lows)
+        relative_width = channel_width / np.mean(closes)
+        is_consolidating = relative_width < 0.002  # Moins de 0.2% de largeur relative
+        
         # Projeter le canal dans le futur (5 prochaines périodes)
         future_periods = 5
         x_future = np.arange(len(closes), len(closes) + future_periods)
@@ -339,7 +344,10 @@ def draw_predictive_channel(df: pd.DataFrame, symbol: str, lookback_period: int 
         current_price = closes[-1]
         
         # Déterminer la position actuelle dans le canal
-        current_position = (current_price - trend_low[-1]) / (trend_high[-1] - trend_low[-1])
+        if trend_high[-1] - trend_low[-1] > 0:
+            current_position = (current_price - trend_low[-1]) / (trend_high[-1] - trend_low[-1])
+        else:
+            current_position = 0.5  # Position neutre si canal plat
         current_position = max(0, min(1, current_position))  # Clamp entre 0 et 1
         
         # Calculer les signaux basés sur le canal
@@ -347,16 +355,26 @@ def draw_predictive_channel(df: pd.DataFrame, symbol: str, lookback_period: int 
         confidence = 0.0
         reasoning = []
         
+        # Ajouter détection de consolidation
+        if is_consolidating:
+            reasoning.append("Marché en consolidation (canal très serré)")
+            # En consolidation, utiliser des seuils plus stricts
+            upper_threshold = 0.15
+            lower_threshold = 0.85
+        else:
+            upper_threshold = 0.2
+            lower_threshold = 0.8
+        
         # Si le prix est près de la borne inférieure -> signal BUY
-        if current_position < 0.2:
+        if current_position < upper_threshold:
             signal = "BUY"
-            confidence = (0.2 - current_position) * 100  # Plus on est proche, plus la confiance est haute
+            confidence = (upper_threshold - current_position) * (100 / upper_threshold)
             reasoning.append(f"Prix proche de la borne inférieure du canal ({current_position:.1%})")
         
         # Si le prix est près de la borne supérieure -> signal SELL
-        elif current_position > 0.8:
+        elif current_position > lower_threshold:
             signal = "SELL"
-            confidence = (current_position - 0.8) * 100
+            confidence = (current_position - lower_threshold) * (100 / (1 - lower_threshold))
             reasoning.append(f"Prix proche de la borne supérieure du canal ({current_position:.1%})")
         
         # Si le prix est au centre -> signal NEUTRAL
@@ -367,15 +385,20 @@ def draw_predictive_channel(df: pd.DataFrame, symbol: str, lookback_period: int 
         
         # Ajouter la pente du canal à l'analyse
         slope = coeffs_close[0]
-        if abs(slope) > 0.001:  # Seuil pour considérer la pente significative
+        if abs(slope) > 0.0005:  # Seuil plus élevé pour considérer la pente significative
             if slope > 0:
                 reasoning.append(f"Canal haussier (pente: {slope:.4f})")
                 if signal == "BUY":
-                    confidence += 10  # Bonus pour signal aligné avec la tendance
+                    confidence += 15  # Bonus plus élevé pour signal aligné
             else:
                 reasoning.append(f"Canal baissier (pente: {slope:.4f})")
                 if signal == "SELL":
-                    confidence += 10
+                    confidence += 15
+        else:
+            reasoning.append(f"Canal latéral (pente: {slope:.4f})")
+            # Réduire la confiance en cas de canal latéral
+            if signal != "NEUTRAL":
+                confidence *= 0.7
         
         # Calculer les niveaux de support/résistance projetés
         projected_support = future_low[-1]
@@ -417,7 +440,11 @@ def draw_predictive_channel(df: pd.DataFrame, symbol: str, lookback_period: int 
                     "projected": [float(val) for val in future_close]
                 },
                 "width": float(channel_width),
-                "position_in_channel": float(current_position)
+                "position_in_channel": float(current_position),
+                "is_consolidating": bool(is_consolidating),
+                "relative_width": float(relative_width),
+                "upper_threshold": float(upper_threshold),
+                "lower_threshold": float(lower_threshold)
             },
             "support_resistance": {
                 "support": float(projected_support),
