@@ -282,6 +282,163 @@ def calculate_atr(df: pd.DataFrame, period: int = 14) -> float:
     
     return atr.iloc[-1] if not atr.empty else 0.0
 
+def draw_predictive_channel(df: pd.DataFrame, symbol: str, lookback_period: int = 50) -> Dict[str, Any]:
+    """
+    Dessine un canal prédictif basé sur l'analyse technique des tendances
+    
+    Args:
+        df: DataFrame avec données OHLCV
+        symbol: Symbole à analyser
+        lookback_period: Période de rétrospection pour l'analyse
+        
+    Returns:
+        Dict avec informations du canal prédictif
+    """
+    if len(df) < lookback_period + 10:
+        return {"has_channel": False, "reason": f"Données insuffisantes (besoin de {lookback_period + 10} bougies)"}
+    
+    try:
+        # Extraire les données pertinentes
+        recent_data = df.tail(lookback_period).copy()
+        highs = recent_data['high'].values
+        lows = recent_data['low'].values
+        closes = recent_data['close'].values
+        times = recent_data.index if 'time' not in recent_data.columns else recent_data['time']
+        
+        # Calculer les lignes de tendance supérieure et inférieure
+        # Utiliser régression linéaire pour trouver les tendances
+        
+        # Ligne de tendance supérieure (basée sur les highs)
+        x_high = np.arange(len(highs))
+        coeffs_high = np.polyfit(x_high, highs, 1)  # Régression linéaire degré 1
+        trend_high = np.polyval(coeffs_high, x_high)
+        
+        # Ligne de tendance inférieure (basée sur les lows)
+        x_low = np.arange(len(lows))
+        coeffs_low = np.polyfit(x_low, lows, 1)
+        trend_low = np.polyval(coeffs_low, x_low)
+        
+        # Ligne de tendance centrale (basée sur les closes)
+        x_close = np.arange(len(closes))
+        coeffs_close = np.polyfit(x_close, closes, 1)
+        trend_close = np.polyval(coeffs_close, x_close)
+        
+        # Calculer la largeur du canal (moyenne des écarts)
+        channel_width = np.mean(trend_high - trend_low)
+        
+        # Projeter le canal dans le futur (5 prochaines périodes)
+        future_periods = 5
+        x_future = np.arange(len(closes), len(closes) + future_periods)
+        
+        # Projection des tendances
+        future_high = np.polyval(coeffs_high, x_future)
+        future_low = np.polyval(coeffs_low, x_future)
+        future_close = np.polyval(coeffs_close, x_future)
+        
+        # Prix actuel
+        current_price = closes[-1]
+        
+        # Déterminer la position actuelle dans le canal
+        current_position = (current_price - trend_low[-1]) / (trend_high[-1] - trend_low[-1])
+        current_position = max(0, min(1, current_position))  # Clamp entre 0 et 1
+        
+        # Calculer les signaux basés sur le canal
+        signal = None
+        confidence = 0.0
+        reasoning = []
+        
+        # Si le prix est près de la borne inférieure -> signal BUY
+        if current_position < 0.2:
+            signal = "BUY"
+            confidence = (0.2 - current_position) * 100  # Plus on est proche, plus la confiance est haute
+            reasoning.append(f"Prix proche de la borne inférieure du canal ({current_position:.1%})")
+        
+        # Si le prix est près de la borne supérieure -> signal SELL
+        elif current_position > 0.8:
+            signal = "SELL"
+            confidence = (current_position - 0.8) * 100
+            reasoning.append(f"Prix proche de la borne supérieure du canal ({current_position:.1%})")
+        
+        # Si le prix est au centre -> signal NEUTRAL
+        else:
+            signal = "NEUTRAL"
+            confidence = 50.0
+            reasoning.append(f"Prix au centre du canal ({current_position:.1%})")
+        
+        # Ajouter la pente du canal à l'analyse
+        slope = coeffs_close[0]
+        if abs(slope) > 0.001:  # Seuil pour considérer la pente significative
+            if slope > 0:
+                reasoning.append(f"Canal haussier (pente: {slope:.4f})")
+                if signal == "BUY":
+                    confidence += 10  # Bonus pour signal aligné avec la tendance
+            else:
+                reasoning.append(f"Canal baissier (pente: {slope:.4f})")
+                if signal == "SELL":
+                    confidence += 10
+        
+        # Calculer les niveaux de support/résistance projetés
+        projected_support = future_low[-1]
+        projected_resistance = future_high[-1]
+        
+        # Calculer SL/TP basés sur le canal
+        if signal == "BUY":
+            stop_loss = max(trend_low[-1], current_price - channel_width * 0.5)
+            take_profit = min(trend_high[-1], current_price + channel_width * 1.5)
+        elif signal == "SELL":
+            stop_loss = min(trend_high[-1], current_price + channel_width * 0.5)
+            take_profit = max(trend_low[-1], current_price - channel_width * 1.5)
+        else:
+            stop_loss = None
+            take_profit = None
+        
+        confidence = min(95.0, confidence)  # Limiter la confiance maximale
+        
+        return {
+            "has_channel": True,
+            "symbol": symbol,
+            "current_price": float(current_price),
+            "signal": signal,
+            "confidence": float(confidence),
+            "channel_info": {
+                "upper_line": {
+                    "current": float(trend_high[-1]),
+                    "slope": float(coeffs_high[0]),
+                    "projected": [float(val) for val in future_high]
+                },
+                "lower_line": {
+                    "current": float(trend_low[-1]),
+                    "slope": float(coeffs_low[0]),
+                    "projected": [float(val) for val in future_low]
+                },
+                "center_line": {
+                    "current": float(trend_close[-1]),
+                    "slope": float(coeffs_close[0]),
+                    "projected": [float(val) for val in future_close]
+                },
+                "width": float(channel_width),
+                "position_in_channel": float(current_position)
+            },
+            "support_resistance": {
+                "support": float(projected_support),
+                "resistance": float(projected_resistance)
+            },
+            "stop_loss": float(stop_loss) if stop_loss is not None else None,
+            "take_profit": float(take_profit) if take_profit is not None else None,
+            "reasoning": reasoning,
+            "lookback_period": lookback_period,
+            "future_periods": future_periods,
+            "timestamp": datetime.now().isoformat()
+        }
+        
+    except Exception as e:
+        logger.error(f"Erreur lors du dessin du canal prédictif pour {symbol}: {e}")
+        return {
+            "has_channel": False,
+            "reason": f"Erreur technique: {str(e)}",
+            "symbol": symbol
+        }
+
 # =========================
 # Fonctions de récupération de données cloud
 # =========================
@@ -5788,6 +5945,66 @@ async def predict_ml_get(symbol: str = "EURUSD", timeframes: str = "M1,M5,M15,H1
         raise
     except Exception as e:
         logger.error(f"Erreur prédiction ML GET: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/channel/predictive")
+async def get_predictive_channel(request: Dict[str, Any]):
+    """
+    Endpoint pour dessiner un canal prédictif basé sur l'analyse technique
+    
+    Args:
+        request: Dict avec 'symbol' et 'lookback_period' (optionnel)
+        
+    Returns:
+        Dict avec informations du canal prédictif
+    """
+    try:
+        symbol = request.get("symbol", "EURUSD")
+        lookback_period = request.get("lookback_period", 50)
+        
+        # Récupérer les données historiques
+        df = get_market_data_cloud(symbol, period="5d", interval="1m")
+        
+        if df is None or len(df) < lookback_period + 10:
+            # Générer des données simulées si nécessaire
+            df = generate_simulated_data(symbol, lookback_period + 20)
+        
+        # Dessiner le canal prédictif
+        channel_result = draw_predictive_channel(df, symbol, lookback_period)
+        
+        return channel_result
+        
+    except Exception as e:
+        logger.error(f"Erreur dans /channel/predictive: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/channel/predictive")
+async def get_predictive_channel_get(symbol: str = "EURUSD", lookback_period: int = 50):
+    """
+    Version GET pour dessiner un canal prédictif
+    
+    Args:
+        symbol: Symbole à analyser
+        lookback_period: Période de rétrospection (défaut: 50)
+        
+    Returns:
+        Dict avec informations du canal prédictif
+    """
+    try:
+        # Récupérer les données historiques
+        df = get_market_data_cloud(symbol, period="5d", interval="1m")
+        
+        if df is None or len(df) < lookback_period + 10:
+            # Générer des données simulées si nécessaire
+            df = generate_simulated_data(symbol, lookback_period + 20)
+        
+        # Dessiner le canal prédictif
+        channel_result = draw_predictive_channel(df, symbol, lookback_period)
+        
+        return channel_result
+        
+    except Exception as e:
+        logger.error(f"Erreur dans /channel/predictive GET: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/ml/models")
