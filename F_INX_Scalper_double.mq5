@@ -815,6 +815,35 @@ int GetSpikeIndex(const string sym)
    return idx;
 }
 
+//+------------------------------------------------------------------+
+//| Fonction helper optimisée pour supprimer des objets par préfixe |
+//+------------------------------------------------------------------+
+void DeleteObjectsByPrefix(string prefix)
+{
+   // OPTIMISATION: Utiliser une approche plus efficace
+   int total = ObjectsTotal(0);
+   string namesToDelete[];
+   int deleteCount = 0;
+   
+   // Première passe: collecter les noms à supprimer
+   for(int i = 0; i < total; i++)
+   {
+      string name = ObjectName(0, i);
+      if(StringFind(name, prefix) == 0)
+      {
+         ArrayResize(namesToDelete, deleteCount + 1);
+         namesToDelete[deleteCount] = name;
+         deleteCount++;
+      }
+   }
+   
+   // Deuxième passe: supprimer les objets collectés
+   for(int i = 0; i < deleteCount; i++)
+   {
+      ObjectDelete(0, namesToDelete[i]);
+   }
+}
+
 bool IsBoomCrashSymbol(const string sym)
 {
    // Détecter TOUS les symboles avec "Boom" ou "Crash" (y compris "Vol over Boom/Crash")
@@ -1111,6 +1140,10 @@ void OnChartEvent(const int id,
                   const double &dparam,
                   const string &sparam)
 {
+   // OPTIMISATION: Limiter les ChartRedraw avec une variable statique
+   static datetime lastChartRedraw = 0;
+   static bool needRedraw = false;
+   
    // Handle keyboard shortcuts for live parameter adjustment
    if(id == CHARTEVENT_KEYDOWN)
    {
@@ -1123,7 +1156,7 @@ void OnChartEvent(const int id,
       {
          g_UseAI_Agent_Live = !g_UseAI_Agent_Live;
          Print("Live Update: AI Agent ", g_UseAI_Agent_Live ? "ENABLED" : "DISABLED");
-         ChartRedraw();
+         needRedraw = true;
       }
       
       // Toggle Trading (Ctrl+T or Shift+T)
@@ -1131,7 +1164,7 @@ void OnChartEvent(const int id,
       {
          g_TradingEnabled_Live = !g_TradingEnabled_Live;
          Print("Live Update: Trading ", g_TradingEnabled_Live ? "ENABLED" : "DISABLED");
-         ChartRedraw();
+         needRedraw = true;
       }
       
       // Adjust Lot Size (Ctrl+L to increase, Shift+Ctrl+L to decrease)
@@ -1144,8 +1177,16 @@ void OnChartEvent(const int id,
             
          g_InitialLotSize_Live = NormalizeDouble(g_InitialLotSize_Live, 2);
          Print("Live Update: Initial Lot Size = ", DoubleToString(g_InitialLotSize_Live, 2));
-         ChartRedraw();
+         needRedraw = true;
       }
+   }
+   
+   // OPTIMISATION: ChartRedraw contrôlé et limité
+   if(needRedraw && (TimeCurrent() - lastChartRedraw) >= 1) // Maximum 1 redraw par seconde
+   {
+      ChartRedraw();
+      lastChartRedraw = TimeCurrent();
+      needRedraw = false;
    }
    
    // Handle button clicks or other GUI events
@@ -1160,29 +1201,40 @@ void OnChartEvent(const int id,
 //+------------------------------------------------------------------+
 void OnTick()
 {
+   // OPTIMISATION: Éviter les exécutions multiples dans la même seconde
+   static datetime lastTickTime = 0;
+   datetime currentTime = TimeCurrent();
+   if(currentTime == lastTickTime)
+      return;
+   lastTickTime = currentTime;
+   
    // Synchroniser les variables live avec les paramètres d'entrée
    g_UseAI_Agent_Live = UseAI_Agent;
    g_InitialLotSize_Live = InitialLotSize;
    // Note: g_TradingEnabled_Live est géré manuellement via clavier (Ctrl+T)
    
-   // PRIORITÉ ABSOLUE: Protection contre les pertes globales - Vérifier chaque tick
-   CheckGlobalLossProtection();
+   // OPTIMISATION: Protection contre pertes - seulement toutes les 5 secondes
+   static datetime lastProtectionCheck = 0;
+   if(currentTime - lastProtectionCheck >= 5)
+   {
+      CheckGlobalLossProtection();
+      ProtectGainsWhenTargetReached();
+      CheckAndUpdatePositions();
+      CheckQuickReentry();
+      lastProtectionCheck = currentTime;
+   }
    
-   // PRIORITÉ ABSOLUE: Protection des gains - Vérifier chaque tick
-   ProtectGainsWhenTargetReached();
+   // Réinitialiser les compteurs quotidiens si nécessaire (légère optimisation)
+   static datetime lastDailyReset = 0;
+   if(currentTime - lastDailyReset >= 3600) // Vérifier chaque heure au lieu de chaque tick
+   {
+      ResetDailyCountersIfNeeded();
+      lastDailyReset = currentTime;
+   }
    
-   // NOUVEAU: Gestion dynamique des SL/TP - Vérifier chaque tick
-   CheckAndUpdatePositions();
-   
-   // Vérifier ré-entrée rapide après profit (scalping)
-   CheckQuickReentry();
-   
-   // Réinitialiser les compteurs quotidiens si nécessaire
-   ResetDailyCountersIfNeeded();
-   
-   // Mettre à jour l'IA si nécessaire
+   // OPTIMISATION: Mettre à jour l'IA moins fréquemment
    static datetime lastAIUpdate = 0;
-   if(g_UseAI_Agent_Live && (TimeCurrent() - lastAIUpdate) >= AI_UpdateInterval)
+   if(g_UseAI_Agent_Live && (currentTime - lastAIUpdate) >= MathMax(AI_UpdateInterval, 30)) // Minimum 30 secondes
    {
       datetime timeBeforeUpdate = g_lastAITime; // Sauvegarder le temps avant l'appel
       UpdateAIDecision(); // WebRequest est synchrone, donc attend la réponse
@@ -1191,7 +1243,7 @@ void OnTick()
       if(g_lastAITime > timeBeforeUpdate)
       {
          // UpdateAIDecision() a réussi (g_lastAITime a été mis à jour)
-      lastAIUpdate = TimeCurrent();
+      lastAIUpdate = currentTime;
       }
       // Si UpdateAIDecision() a échoué, ne pas mettre à jour lastAIUpdate pour réessayer plus tôt
       
@@ -1199,11 +1251,21 @@ void OnTick()
       ValidateAndCancelInvalidLimitOrders();
    }
    
-   // NOUVEAU: Mettre à jour les métriques ML en temps réel
-   UpdateMLMetricsRealtime();
+   // OPTIMISATION: Mettre à jour les métriques ML moins fréquemment
+   static datetime lastMLMetricsUpdate = 0;
+   if(currentTime - lastMLMetricsUpdate >= 60) // Toutes les minutes au lieu de chaque tick
+   {
+      UpdateMLMetricsRealtime();
+      lastMLMetricsUpdate = currentTime;
+   }
    
-   // NOUVEAU: Mettre à jour les bougies futures prédites
-   UpdateFutureCandles();
+   // OPTIMISATION: Mettre à jour les bougies futures moins fréquemment
+   static datetime lastFutureCandlesUpdate = 0;
+   if(currentTime - lastFutureCandlesUpdate >= 30) // Toutes les 30 secondes
+   {
+      UpdateFutureCandles();
+      lastFutureCandlesUpdate = currentTime;
+   }
    
    // NETTOYAGE: Supprimer tous les anciens objets de prédiction au démarrage
    static bool predictionCleanupDone = false;
@@ -1213,54 +1275,46 @@ void OnTick()
       predictionCleanupDone = true;
    }
    
-   // Mettre à jour la prédiction de prix toutes les 5 minutes (pas chaque seconde)
-   // Cela permet au robot de prendre en compte la prédiction pour améliorer les trades présents
-   // DÉSACTIVÉ - plus utilisé dans décision finale
-   if(g_UseAI_Agent_Live && (TimeCurrent() - g_lastPredictionUpdate) >= PREDICTION_UPDATE_INTERVAL)
+   // OPTIMISATION: Mettre à jour la prédiction de prix moins fréquemment
+   static datetime lastPredictionUpdate = 0;
+   if(g_UseAI_Agent_Live && (currentTime - lastPredictionUpdate) >= MathMax(PREDICTION_UPDATE_INTERVAL, 300)) // Minimum 5 minutes
    {
       UpdatePricePrediction(); // Mettre à jour la prédiction de prix
-      g_lastPredictionUpdate = TimeCurrent();
+      lastPredictionUpdate = currentTime;
    }
    
-   // Dessiner la prédiction de prix (optimisé - seulement toutes les 10 secondes pour éviter la surcharge)
+   // OPTIMISATION: Dessiner la prédiction moins souvent pour éviter la surcharge graphique
    static datetime lastPredictionDraw = 0;
-   if(DrawAIZones && g_predictionsValid && (TimeCurrent() - lastPredictionDraw) >= 10)
+   if(DrawAIZones && g_predictionsValid && (currentTime - lastPredictionDraw) >= 30) // 30 secondes au lieu de 10
    {
       DrawPricePrediction();
-      lastPredictionDraw = TimeCurrent();
+      lastPredictionDraw = currentTime;
    }
    
-   // Utiliser la prédiction pour améliorer les trades présents (ajuster SL/TP)
-   // S'exécute seulement si la prédiction est valide et a été mise à jour récemment
-   // DÉSACTIVÉ - plus utilisé dans décision finale
-   /*
-   if(g_predictionValid && (TimeCurrent() - g_lastPredictionUpdate) < 600) // Utiliser si prédiction < 10 min
-   {
-      UsePredictionForCurrentTrades();
-   }
-   */
-   
-   // Mettre à jour l'analyse de tendance API si nécessaire
+   // OPTIMISATION: Analyse de tendance API moins fréquente
    static datetime lastTrendUpdate = 0;
-   if(UseTrendAPIAnalysis && (TimeCurrent() - lastTrendUpdate) >= AI_UpdateInterval)
+   if(UseTrendAPIAnalysis && (currentTime - lastTrendUpdate) >= MathMax(AI_UpdateInterval, 60)) // Minimum 1 minute
    {
       UpdateTrendAPIAnalysis();
-      lastTrendUpdate = TimeCurrent();
+      lastTrendUpdate = currentTime;
    }
 
-   // Mettre à jour l'analyse cohérente (utilisée comme filtre anti-hasard)
-   // La fonction est déjà rate-limitée par AI_CoherentAnalysisInterval.
-   if(g_UseAI_Agent_Live && (ShowCoherentAnalysis || RequireCoherentAnalysis))
+   // OPTIMISATION: Analyse cohérente moins fréquente
+   static datetime lastCoherentUpdate = 0;
+   if(g_UseAI_Agent_Live && (ShowCoherentAnalysis || RequireCoherentAnalysis) && 
+      (currentTime - lastCoherentUpdate) >= MathMax(AI_CoherentAnalysisInterval, 120)) // Minimum 2 minutes
    {
       UpdateCoherentAnalysis(_Symbol);
+      lastCoherentUpdate = currentTime;
    }
    
-   // Mettre à jour les métriques ML si nécessaire
+   // OPTIMISATION: Mettre à jour les métriques ML moins fréquemment
    static datetime lastMLMetricsUpdate = 0;
-   if(UseMLPrediction && (TimeCurrent() - lastMLMetricsUpdate) >= AI_UpdateInterval)
+   if(UseMLPrediction && (currentTime - lastMLMetricsUpdate) >= MathMax(AI_UpdateInterval, 180)) // Minimum 3 minutes
    {
       UpdateMLMetrics(_Symbol, "M1");
-      lastMLMetricsUpdate = TimeCurrent();
+      lastMLMetricsUpdate = currentTime;
+   }
    }
    
    // OPTIMISATION MAXIMALE: Réduire drastiquement la fréquence et les calculs
@@ -3631,87 +3685,42 @@ void DetectReversalPoints(int &buyEntries[], int &sellEntries[])
 //+------------------------------------------------------------------+
 void DrawPricePrediction()
 {
-   // Réinitialiser le tableau des opportunités au début de chaque mise à jour
+   // OPTIMISATION: Sortir rapidement si pas de prédiction
+   int totalPredictionBars = MathMin(ArraySize(g_pricePrediction), g_predictionBars);
+   if(totalPredictionBars == 0)
+      return;
+   
+   // OPTIMISATION: Variables statiques pour éviter les recréations
+   static bool predictionObjectsCreated = false;
+   static datetime lastPredictionTime = 0;
+   static string lastCleanupTime = "";
+   
+   // Réinitialiser le tableau des opportunités
    ArrayResize(g_opportunities, 0);
    g_opportunitiesCount = 0;
    
-   // Utiliser exactement 200 bougies historiques et 500 bougies futures
-   int totalPredictionBars = MathMin(ArraySize(g_pricePrediction), g_predictionBars);
-   
-   if(totalPredictionBars == 0)
-      return; // Pas de prédiction disponible
-   
-   // OPTIMISATION: Ne supprimer que si nécessaire (éviter ObjectsTotal() à chaque fois)
+   // OPTIMISATION: Nettoyage intelligent seulement si nécessaire
    string prefix = "PRED_";
+   string currentTimeStr = TimeToString(TimeCurrent(), TIME_DATE|TIME_MINUTES);
    
-   // Si l'utilisateur ne veut pas afficher les prédictions, nettoyer les objets et sortir
    if(!ShowPricePredictions)
    {
-      int total = ObjectsTotal(0);
-      for(int i = total - 1; i >= 0; i--)
+      // Nettoyage seulement si l'option vient d'être désactivée
+      if(lastCleanupTime != "DISABLED")
       {
-         string name = ObjectName(0, i);
-         if(StringFind(name, prefix) == 0)
-            ObjectDelete(0, name);
+         DeleteObjectsByPrefix(prefix);
+         lastCleanupTime = "DISABLED";
       }
       return;
    }
    
-   // Nettoyage ciblé si certaines couches sont désactivées (anti-encombrement)
-   // (utile si l'option est changée en live sans nouvelle prédiction)
+   // OPTIMISATION: Recréer les objets seulement si la prédiction a changé
+   if(!predictionObjectsCreated || g_predictionStartTime != lastPredictionTime || lastCleanupTime != currentTimeStr)
    {
-      int total = ObjectsTotal(0);
-      for(int i = total - 1; i >= 0; i--)
-      {
-         string name = ObjectName(0, i);
-         if(StringFind(name, prefix) != 0)
-            continue;
-         
-         if(!ShowPredictionChannelFill && StringFind(name, prefix + "CHANNEL_") == 0)
-            ObjectDelete(0, name);
-         if(!ShowPredictionCandles && (StringFind(name, prefix + "CANDLE_BODY_") == 0 || StringFind(name, prefix + "CANDLE_WICK_") == 0))
-            ObjectDelete(0, name);
-         if(!ShowPredictionArrows && (StringFind(name, prefix + "BUY_ENTRY_") == 0 || StringFind(name, prefix + "SELL_ENTRY_") == 0))
-            ObjectDelete(0, name);
-         if(!ShowPredictionWicks && StringFind(name, prefix + "CANDLE_WICK_") == 0)
-            ObjectDelete(0, name);
-      }
-   }
-
-   // Nettoyage léger des segments de trajectoire/bandes (peu nombreux) pour éviter toute accumulation
-   // quand l'utilisateur change MaxPredictionCandles/spacing sans nouvelle prédiction.
-   {
-      int total = ObjectsTotal(0);
-      for(int i = total - 1; i >= 0; i--)
-      {
-         string name = ObjectName(0, i);
-         if(StringFind(name, prefix) != 0)
-            continue;
-         
-         if(StringFind(name, prefix + "TRAJ_") == 0 ||
-            StringFind(name, prefix + "BAND_UP_") == 0 ||
-            StringFind(name, prefix + "BAND_DN_") == 0)
-         {
-            ObjectDelete(0, name);
-         }
-      }
-   }
-   // Ne supprimer que lors de la première création ou si la prédiction a changé
-   static bool predictionObjectsCreated = false;
-   static datetime lastPredictionTime = 0;
-   
-   if(!predictionObjectsCreated || g_predictionStartTime != lastPredictionTime)
-   {
-      // Supprimer les anciens objets seulement si nécessaire
-      int total = ObjectsTotal(0);
-      for(int i = total - 1; i >= 0; i--)
-      {
-         string name = ObjectName(0, i);
-         if(StringFind(name, prefix) == 0)
-            ObjectDelete(0, name);
-      }
+      DeleteObjectsByPrefix(prefix);
       predictionObjectsCreated = false;
       lastPredictionTime = g_predictionStartTime;
+      lastCleanupTime = currentTimeStr;
    }
    
    // Récupérer le timeframe actuel
