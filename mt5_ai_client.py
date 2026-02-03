@@ -1794,6 +1794,132 @@ class MT5AIClient:
                 'profit_factor': 0.0
             }
     
+    def calculate_smart_sltp(self, symbol, entry_price, order_type):
+        """
+        Calcule des niveaux de SL/TP plus serrés et dynamiques
+        SL = 1% du prix | TP = 2% du prix
+        """
+        try:
+            # Récupérer les informations du symbole
+            symbol_info = mt5.symbol_info(symbol)
+            if not symbol_info:
+                logger.error(f"Impossible de récupérer les infos pour {symbol}")
+                return None, None
+                
+            point = symbol_info.point
+            digits = symbol_info.digits
+            
+            # Définir les pourcentages initiaux plus serrés
+            sl_percent = 0.01  # 1% de SL initial
+            tp_percent = 0.02  # 2% de TP initial
+            
+            # Calculer les niveaux SL/TP en fonction du type d'ordre
+            if order_type == mt5.ORDER_TYPE_BUY:
+                sl = entry_price * (1 - sl_percent)
+                tp = entry_price * (1 + tp_percent)
+            else:  # SELL
+                sl = entry_price * (1 + sl_percent)
+                tp = entry_price * (1 - tp_percent)
+            
+            # Arrondir selon la précision du symbole
+            sl = round(sl, digits)
+            tp = round(tp, digits)
+            
+            # Vérifier que les niveaux sont valides
+            if sl <= 0 or tp <= 0 or (order_type == mt5.ORDER_TYPE_BUY and sl >= entry_price) or \
+               (order_type == mt5.ORDER_TYPE_SELL and sl <= entry_price):
+                logger.error(f"Niveaux SL/TP invalides pour {symbol}: SL={sl}, TP={tp}")
+                return None, None
+                
+            return sl, tp
+            
+        except Exception as e:
+            logger.error(f"Erreur calcul SL/TP pour {symbol}: {e}")
+            return None, None
+    
+    def update_trailing_stop(self, position):
+        """Met à jour le stop suiveur pour une position"""
+        try:
+            symbol = position.symbol
+            ticket = position.ticket
+            position_type = position.type
+            current_price = position.price_current
+            open_price = position.price_open
+            current_sl = position.sl
+            current_tp = position.tp
+            
+            # Récupérer les informations du symbole
+            symbol_info = mt5.symbol_info(symbol)
+            if not symbol_info:
+                logger.error(f"Impossible de récupérer les infos pour {symbol}")
+                return False
+                
+            point = symbol_info.point
+            digits = symbol_info.digits
+            
+            # Paramètres du trailing stop (en pourcentage)
+            activation_profit = 0.005  # 0.5% de profit pour activer le trailing
+            trailing_distance = 0.003  # 0.3% de distance de suivi
+            
+            # Calculer le profit actuel
+            if position_type == mt5.ORDER_TYPE_BUY:
+                profit_pct = (current_price - open_price) / open_price
+                new_sl = current_price * (1 - trailing_distance)
+                
+                # Vérifier si le profit est suffisant pour activer le trailing
+                if profit_pct >= activation_profit:
+                    # Vérifier si le nouveau SL est plus élevé que l'ancien
+                    if new_sl > current_sl + (point * 10):  # Éviter les mises à jour trop fréquentes
+                        # Mettre à jour le SL
+                        request = {
+                            "action": mt5.TRADE_ACTION_SLTP,
+                            "symbol": symbol,
+                            "position": ticket,
+                            "sl": new_sl,
+                            "tp": current_tp,
+                            "type_time": mt5.ORDER_TIME_GTC
+                        }
+                        
+                        result = mt5.order_send(request)
+                        if result.retcode == mt5.TRADE_RETCODE_DONE:
+                            logger.info(f"Trailing stop mis à jour pour {symbol}: SL={new_sl}")
+                            return True
+                        else:
+                            logger.error(f"Erreur mise à jour trailing stop {symbol}: {result.comment}")
+                            return False
+                            
+            elif position_type == mt5.ORDER_TYPE_SELL:
+                profit_pct = (open_price - current_price) / open_price
+                new_sl = current_price * (1 + trailing_distance)
+                
+                # Vérifier si le profit est suffisant pour activer le trailing
+                if profit_pct >= activation_profit:
+                    # Vérifier si le nouveau SL est plus bas que l'ancien
+                    if new_sl < current_sl - (point * 10) or current_sl == 0:  # Éviter les mises à jour trop fréquentes
+                        # Mettre à jour le SL
+                        request = {
+                            "action": mt5.TRADE_ACTION_SLTP,
+                            "symbol": symbol,
+                            "position": ticket,
+                            "sl": new_sl,
+                            "tp": current_tp,
+                            "type_time": mt5.ORDER_TIME_GTC
+                        }
+                        
+                        result = mt5.order_send(request)
+                        if result.retcode == mt5.TRADE_RETCODE_DONE:
+                            logger.info(f"Trailing stop mis à jour pour {symbol}: SL={new_sl}")
+                            return True
+                        else:
+                            logger.error(f"Erreur mise à jour trailing stop {symbol}: {result.comment}")
+                            return False
+            
+            return False
+            
+        except Exception as e:
+            logger.error(f"Erreur dans update_trailing_stop pour {symbol}: {e}")
+            return False
+    
     def calculate_total_profit(self):
         """Calcule le profit total de toutes les positions"""
         total_profit = 0.0
@@ -2558,6 +2684,77 @@ class MT5AIClient:
             import traceback
             logger.error(f"Détails de l'erreur: {traceback.format_exc()}")
 
+    def check_positions(self):
+        """Vérifie les positions actives et met à jour les stops suiveurs"""
+        try:
+            # Récupérer toutes les positions ouvertes
+            positions = mt5.positions_get()
+            if not positions:
+                return
+                
+            for position in positions:
+                # Mettre à jour le trailing stop pour cette position
+                self.update_trailing_stop(position)
+                
+                # Vérifier si la position a atteint son TP ou SL
+                if position.profit != 0:  # Si le profit est différent de 0, la position a un TP/SL
+                    continue
+                    
+                # Vérifier si le prix actuel est proche du TP pour ajuster le SL
+                current_price = position.price_current
+                entry_price = position.price_open
+                sl = position.sl
+                tp = position.tp
+                
+                # Si le prix est à mi-chemin entre l'entrée et le TP, on peut sécuriser les gains
+                if position.type == mt5.ORDER_TYPE_BUY and current_price > entry_price:
+                    # Calculer la distance en pourcentage entre l'entrée et le TP
+                    distance_to_tp = tp - entry_price
+                    current_profit = current_price - entry_price
+                    
+                    # Si on a atteint 50% du TP, on peut déplacer le SL au point d'entrée
+                    if current_profit >= (distance_to_tp * 0.5) and sl < entry_price:
+                        # Mettre à jour le SL au point d'entrée
+                        request = {
+                            "action": mt5.TRADE_ACTION_SLTP,
+                            "symbol": position.symbol,
+                            "position": position.ticket,
+                            "sl": entry_price,
+                            "tp": tp,
+                            "type_time": mt5.ORDER_TIME_GTC
+                        }
+                        
+                        result = mt5.order_send(request)
+                        if result.retcode == mt5.TRADE_RETCODE_DONE:
+                            logger.info(f"SL déplacé au point d'entrée pour {position.symbol} (Ticket: {position.ticket})")
+                        else:
+                            logger.error(f"Erreur déplacement SL pour {position.symbol}: {result.comment}")
+                            
+                elif position.type == mt5.ORDER_TYPE_SELL and current_price < entry_price:
+                    # Même logique pour les positions de vente
+                    distance_to_tp = entry_price - tp
+                    current_profit = entry_price - current_price
+                    
+                    if current_profit >= (distance_to_tp * 0.5) and (sl > entry_price or sl == 0):
+                        # Mettre à jour le SL au point d'entrée
+                        request = {
+                            "action": mt5.TRADE_ACTION_SLTP,
+                            "symbol": position.symbol,
+                            "position": position.ticket,
+                            "sl": entry_price,
+                            "tp": tp,
+                            "type_time": mt5.ORDER_TIME_GTC
+                        }
+                        
+                        result = mt5.order_send(request)
+                        if result.retcode == mt5.TRADE_RETCODE_DONE:
+                            logger.info(f"SL déplacé au point d'entrée pour {position.symbol} (Ticket: {position.ticket})")
+                        else:
+                            logger.error(f"Erreur déplacement SL pour {position.symbol}: {result.comment}")
+                            
+        except Exception as e:
+            logger.error(f"Erreur vérification positions: {e}")
+            
     def run(self):
         """Boucle principale du client avec détection automatique des symboles"""
         logger.info("🚀 Demarrage du client MT5 AI Ultra-Optimisé")
@@ -2576,6 +2773,9 @@ class MT5AIClient:
                     # Vérifier les positions existantes
                     self.check_positions()
                     self.auto_close_winners(1.0)
+                    
+                    # Surveillance des positions pour protection des gains et limitation des pertes
+                    self.monitor_positions_protection()
                     
                     current_time = time.time()
                     # Envoyer les données d'entraînement toutes les heures
@@ -2620,6 +2820,151 @@ class MT5AIClient:
             if self.connected:
                 mt5.shutdown()
                 logger.info("MT5 deconnecte")
+
+    def monitor_positions_protection(self):
+        """
+        Suivi des positions pour protéger les gains et limiter les pertes
+        - Ferme la position si elle perd plus de 50% du gain maximum déjà acquis
+        - Ferme la position si la perte dépasse 6 dollars
+        """
+        try:
+            positions = mt5.positions_get()
+            if not positions:
+                return
+                
+            for position in positions:
+                ticket = position.ticket
+                symbol = position.symbol
+                current_profit = position.profit
+                open_price = position.open_price
+                current_price = position.price_current
+                position_type = position.type
+                
+                # Récupérer l'historique des profits pour cette position
+                max_profit = self.get_position_max_profit(ticket)
+                
+                if max_profit is None:
+                    max_profit = current_profit
+                    self.save_position_max_profit(ticket, max_profit)
+                
+                # Protection 1: Limiter la perte à 6 dollars
+                if current_profit <= -6.0:
+                    logger.warning(f"🛑 PROTECTION PERTE 6$ - Fermeture position {ticket} ({symbol}) | Perte: ${current_profit:.2f}")
+                    self.close_position_with_protection(ticket, "Loss_6_Dollars")
+                    continue
+                
+                # Protection 2: Protéger 50% des gains max acquis
+                if max_profit > 0:  # Uniquement si la position a été en profit
+                    max_allowed_loss = max_profit * 0.5  # 50% du gain max
+                    current_loss_from_max = max_profit - current_profit
+                    
+                    if current_loss_from_max >= max_allowed_loss:
+                        logger.warning(f"🛡️ PROTECTION GAINS - Fermeture position {ticket} ({symbol}) | Gain max: ${max_profit:.2f} | Actuel: ${current_profit:.2f} | Perte depuis max: ${current_loss_from_max:.2f}")
+                        self.close_position_with_protection(ticket, "Protect_50_Percent_Gains")
+                        continue
+                
+                # Mise à jour du profit maximum si nécessaire
+                if current_profit > max_profit:
+                    self.save_position_max_profit(ticket, current_profit)
+                    logger.info(f"📈 Nouveau gain max position {ticket}: ${current_profit:.2f}")
+                
+        except Exception as e:
+            logger.error(f"Erreur monitoring positions protection: {e}")
+    
+    def get_position_max_profit(self, ticket):
+        """Récupère le profit maximum historique pour une position"""
+        try:
+            # Utiliser un fichier JSON pour stocker les profits max par position
+            import json
+            from pathlib import Path
+            
+            profits_file = Path("position_max_profits.json")
+            if profits_file.exists():
+                with open(profits_file, 'r') as f:
+                    profits_data = json.load(f)
+                    return profits_data.get(str(ticket), None)
+            return None
+        except Exception as e:
+            logger.error(f"Erreur lecture profit max position {ticket}: {e}")
+            return None
+    
+    def save_position_max_profit(self, ticket, profit):
+        """Sauvegarde le profit maximum pour une position"""
+        try:
+            import json
+            from pathlib import Path
+            
+            profits_file = Path("position_max_profits.json")
+            profits_data = {}
+            
+            # Charger les données existantes
+            if profits_file.exists():
+                with open(profits_file, 'r') as f:
+                    profits_data = json.load(f)
+            
+            # Mettre à jour le profit maximum
+            profits_data[str(ticket)] = profit
+            
+            # Sauvegarder
+            with open(profits_file, 'w') as f:
+                json.dump(profits_data, f, indent=2)
+                
+        except Exception as e:
+            logger.error(f"Erreur sauvegarde profit max position {ticket}: {e}")
+    
+    def close_position_with_protection(self, ticket, reason):
+        """Ferme une position avec logging de protection"""
+        try:
+            position = mt5.positions_get(ticket=ticket)
+            if not position:
+                return False
+                
+            position = position[0]
+            symbol = position.symbol
+            profit = position.profit
+            
+            # Fermer la position
+            result = mt5.Close(symbol, ticket)
+            
+            if result.retcode == mt5.TRADE_RETCODE_DONE:
+                logger.info(f"✅ Position fermée avec protection | Ticket: {ticket} | Symbol: {symbol} | Profit: ${profit:.2f} | Raison: {reason}")
+                
+                # Nettoyer l'enregistrement du profit maximum
+                self.cleanup_position_max_profit(ticket)
+                
+                # Logger dans le fichier de trades
+                trade_logger_instance.log_position_update(symbol, ticket, f"CLOSED_PROTECTION_{reason}", profit=profit)
+                
+                return True
+            else:
+                logger.error(f"❌ Erreur fermeture position protection {ticket}: {result.comment}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Erreur fermeture position protection {ticket}: {e}")
+            return False
+    
+    def cleanup_position_max_profit(self, ticket):
+        """Nettoie l'enregistrement du profit maximum pour une position fermée"""
+        try:
+            import json
+            from pathlib import Path
+            
+            profits_file = Path("position_max_profits.json")
+            if profits_file.exists():
+                with open(profits_file, 'r') as f:
+                    profits_data = json.load(f)
+                
+                # Supprimer l'entrée pour cette position
+                if str(ticket) in profits_data:
+                    del profits_data[str(ticket)]
+                    
+                    # Sauvegarder les données mises à jour
+                    with open(profits_file, 'w') as f:
+                        json.dump(profits_data, f, indent=2)
+                        
+        except Exception as e:
+            logger.error(f"Erreur nettoyage profit max position {ticket}: {e}")
 
 if __name__ == "__main__":
     client = MT5AIClient()

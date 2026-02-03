@@ -66,6 +66,14 @@ input double BoomCrashVolumeMultiplier = 1.0; // Multiplicateur de volume pour B
 input bool   UseIntegratedDashboard = true;  // Utiliser le dashboard intégré (alternative au dashboard externe)
 input int    IntegratedDashboardRefresh = 5;   // Rafraîchissement dashboard intégré (secondes)
 
+input group "--- GESTION DYNAMIQUE SL/TP ---"
+input bool   UseDynamicSLTP = true;           // Activer la gestion dynamique des SL/TP
+input double DynamicSLPercent = 1.0;          // SL initial en pourcentage (1.0%)
+input double DynamicTPPercent = 2.0;          // TP initial en pourcentage (2.0%)
+input double TrailingActivation = 0.5;        // Activation trailing stop (0.5% de profit)
+input double TrailingDistance = 0.3;          // Distance trailing stop (0.3%)
+input double SecureGainsThreshold = 0.5;      // Seuil sécurisation gains (50% du TP)
+
 input group "--- INTEGRATION IA AVANCÉE ---"
 input bool   UseAdvancedValidation = true;        // Activer validation multi-couches pour les trades IA
 input bool   RequireAllEndpointsAlignment = true;   // Exiger alignement de TOUS les endpoints IA avant trading
@@ -401,6 +409,22 @@ void InitializeGlobalVariables()
 {
    g_coherentAnalysis.lastUpdate = TimeCurrent(); // Éviter le epoch time bug
    g_lastAITime = TimeCurrent(); // Éviter le epoch time bug
+   
+   // Synchroniser les variables de gestion dynamique SL/TP avec les paramètres d'entrée
+   g_useDynamicSLTP = UseDynamicSLTP;
+   g_initialSLPercent = DynamicSLPercent;
+   g_initialTPPercent = DynamicTPPercent;
+   g_trailingStopActivation = TrailingActivation;
+   g_trailingStopDistance = TrailingDistance;
+   g_secureGainsThreshold = SecureGainsThreshold;
+   
+   Print("🔧 Gestion dynamique SL/TP configurée:");
+   Print("   - Activation: ", g_useDynamicSLTP ? "OUI" : "NON");
+   Print("   - SL initial: ", g_initialSLPercent, "%");
+   Print("   - TP initial: ", g_initialTPPercent, "%");
+   Print("   - Activation trailing: ", g_trailingStopActivation, "%");
+   Print("   - Distance trailing: ", g_trailingStopDistance, "%");
+   Print("   - Seuil sécurisation: ", g_secureGainsThreshold * 100, "% du TP");
 }
 
 // Variables pour les métriques ML
@@ -604,6 +628,14 @@ double g_previous_daily_loss = 0.0; // Perte du jour précédent
 
 // Suivi pour fermeture après spike (Boom/Crash)
 static double g_lastBoomCrashPrice = 0.0;  // Prix de référence pour détecter le spike
+
+// Variables pour gestion dynamique des SL/TP
+static double g_trailingStopActivation = 0.5;  // Activation du trailing stop à 0.5% de profit
+static double g_trailingStopDistance = 0.3;    // Distance du trailing stop à 0.3%
+static double g_secureGainsThreshold = 0.5;    // Seuil pour sécuriser les gains (50% du TP)
+static double g_initialSLPercent = 1.0;        // SL initial à 1%
+static double g_initialTPPercent = 2.0;        // TP initial à 2%
+static bool g_useDynamicSLTP = true;          // Activer la gestion dynamique des SL/TP
 
 // Structure pour les bougies futures prédites
 struct FutureCandle {
@@ -1139,6 +1171,9 @@ void OnTick()
    // PRIORITÉ ABSOLUE: Protection des gains - Vérifier chaque tick
    ProtectGainsWhenTargetReached();
    
+   // NOUVEAU: Gestion dynamique des SL/TP - Vérifier chaque tick
+   CheckAndUpdatePositions();
+   
    // Vérifier ré-entrée rapide après profit (scalping)
    CheckQuickReentry();
    
@@ -1640,6 +1675,256 @@ void SendMT5Notification(string message)
 {
    SendNotification(message);
    Print("📱 NOTIFICATION MT5: ", message);
+}
+
+//+------------------------------------------------------------------+
+//| Calculer SL/TP initiaux plus serrés                               |
+//+------------------------------------------------------------------+
+void CalculateSmartSLTP(const string symbol, double entryPrice, ENUM_ORDER_TYPE orderType, double &sl, double &tp)
+{
+   if(!g_useDynamicSLTP)
+   {
+      // Utiliser les valeurs par défaut si la gestion dynamique est désactivée
+      sl = 0.0;
+      tp = 0.0;
+      return;
+   }
+   
+   // Récupérer les informations du symbole
+   MqlTick tick;
+   if(!SymbolInfoTick(symbol, tick))
+   {
+      Print("Erreur: Impossible de récupérer les informations pour ", symbol);
+      sl = 0.0;
+      tp = 0.0;
+      return;
+   }
+   
+   // Calculer les SL/TP en pourcentage
+   double slPercent = g_initialSLPercent / 100.0;  // Convertir en décimal
+   double tpPercent = g_initialTPPercent / 100.0;  // Convertir en décimal
+   
+   // Calculer les niveaux selon le type d'ordre
+   if(orderType == ORDER_TYPE_BUY)
+   {
+      sl = entryPrice * (1 - slPercent);
+      tp = entryPrice * (1 + tpPercent);
+   }
+   else // SELL
+   {
+      sl = entryPrice * (1 + slPercent);
+      tp = entryPrice * (1 - tpPercent);
+   }
+   
+   // Arrondir selon la précision du symbole
+   int digits = (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS);
+   sl = NormalizeDouble(sl, digits);
+   tp = NormalizeDouble(tp, digits);
+   
+   // Vérifier que les niveaux sont valides
+   if(sl <= 0 || tp <= 0)
+   {
+      Print("Erreur: Niveaux SL/TP invalides pour ", symbol, " SL=", sl, " TP=", tp);
+      sl = 0.0;
+      tp = 0.0;
+   }
+   
+   string orderTypeStr = (orderType == ORDER_TYPE_BUY) ? "BUY" : "SELL";
+   Print("SL/TP calculés pour ", symbol, ": SL=", sl, " TP=", tp, " (", orderTypeStr, ")");
+}
+
+//+------------------------------------------------------------------+
+//| Mettre à jour le trailing stop pour une position                  |
+//+------------------------------------------------------------------+
+bool UpdateTrailingStop(const ulong ticket)
+{
+   if(!g_useDynamicSLTP)
+      return false;
+   
+   // Récupérer les informations de la position
+   CPositionInfo position;
+   if(!position.SelectByTicket(ticket))
+   {
+      Print("Erreur: Impossible de sélectionner la position ", ticket);
+      return false;
+   }
+   
+   string symbol = position.Symbol();
+   double currentPrice = position.PriceCurrent();
+   double openPrice = position.PriceOpen();
+   double currentSL = position.StopLoss();
+   double currentTP = position.TakeProfit();
+   ENUM_POSITION_TYPE positionType = position.PositionType();
+   
+   // Calculer le profit en pourcentage
+   double profitPercent = 0.0;
+   if(positionType == POSITION_TYPE_BUY)
+   {
+      profitPercent = (currentPrice - openPrice) / openPrice;
+   }
+   else // SELL
+   {
+      profitPercent = (openPrice - currentPrice) / openPrice;
+   }
+   
+   // Vérifier si le profit est suffisant pour activer le trailing
+   if(profitPercent < g_trailingStopActivation / 100.0)
+      return false;
+   
+   // Calculer le nouveau SL
+   double newSL = 0.0;
+   double trailingDistance = g_trailingStopDistance / 100.0;
+   
+   if(positionType == POSITION_TYPE_BUY)
+   {
+      newSL = currentPrice * (1 - trailingDistance);
+      
+      // Vérifier si le nouveau SL est plus élevé que l'ancien
+      if(newSL > currentSL + SymbolInfoDouble(symbol, SYMBOL_POINT) * 10)
+      {
+         // Mettre à jour le SL
+         CTrade tradeManager;
+         tradeManager.SetExpertMagicNumber(InpMagicNumber);
+         tradeManager.SetMarginMode();
+         
+         if(tradeManager.PositionModify(ticket, newSL, currentTP))
+         {
+            Print("Trailing stop mis à jour pour ", symbol, ": SL=", newSL, " (Ticket: ", ticket, ")");
+            return true;
+         }
+         else
+         {
+            Print("Erreur mise à jour trailing stop pour ", symbol, ": ", tradeManager.ResultComment());
+         }
+      }
+   }
+   else // SELL
+   {
+      newSL = currentPrice * (1 + trailingDistance);
+      
+      // Vérifier si le nouveau SL est plus bas que l'ancien
+      if(newSL < currentSL - SymbolInfoDouble(symbol, SYMBOL_POINT) * 10 || currentSL == 0)
+      {
+         // Mettre à jour le SL
+         CTrade tradeManager;
+         tradeManager.SetExpertMagicNumber(InpMagicNumber);
+         tradeManager.SetMarginMode();
+         
+         if(tradeManager.PositionModify(ticket, newSL, currentTP))
+         {
+            Print("Trailing stop mis à jour pour ", symbol, ": SL=", newSL, " (Ticket: ", ticket, ")");
+            return true;
+         }
+         else
+         {
+            Print("Erreur mise à jour trailing stop pour ", symbol, ": ", tradeManager.ResultComment());
+         }
+      }
+   }
+   
+   return false;
+}
+
+//+------------------------------------------------------------------+
+//| Sécuriser les gains en déplaçant le SL au point d'entrée         |
+//+------------------------------------------------------------------+
+bool SecureGainsAtBreakeven(const ulong ticket)
+{
+   if(!g_useDynamicSLTP)
+      return false;
+   
+   // Récupérer les informations de la position
+   CPositionInfo position;
+   if(!position.SelectByTicket(ticket))
+   {
+      Print("Erreur: Impossible de sélectionner la position ", ticket);
+      return false;
+   }
+   
+   string symbol = position.Symbol();
+   double currentPrice = position.PriceCurrent();
+   double openPrice = position.PriceOpen();
+   double currentSL = position.StopLoss();
+   double currentTP = position.TakeProfit();
+   ENUM_POSITION_TYPE positionType = position.PositionType();
+   
+   // Calculer la distance vers le TP
+   double distanceToTP = 0.0;
+   double currentProfit = 0.0;
+   
+   if(positionType == POSITION_TYPE_BUY)
+   {
+      distanceToTP = currentTP - openPrice;
+      currentProfit = currentPrice - openPrice;
+      
+      // Si on a atteint 50% du TP, on peut déplacer le SL au point d'entrée
+      if(currentProfit >= (distanceToTP * g_secureGainsThreshold) && currentSL < openPrice)
+      {
+         // Mettre à jour le SL au point d'entrée
+         CTrade tradeManager;
+         tradeManager.SetExpertMagicNumber(InpMagicNumber);
+         tradeManager.SetMarginMode();
+         
+         if(tradeManager.PositionModify(ticket, openPrice, currentTP))
+         {
+            Print("SL déplacé au point d'entrée pour ", symbol, " (Ticket: ", ticket, ")");
+            return true;
+         }
+         else
+         {
+            Print("Erreur déplacement SL pour ", symbol, ": ", tradeManager.ResultComment());
+         }
+      }
+   }
+   else // SELL
+   {
+      distanceToTP = openPrice - currentTP;
+      currentProfit = openPrice - currentPrice;
+      
+      // Si on a atteint 50% du TP, on peut déplacer le SL au point d'entrée
+      if(currentProfit >= (distanceToTP * g_secureGainsThreshold) && (currentSL > openPrice || currentSL == 0))
+      {
+         // Mettre à jour le SL au point d'entrée
+         CTrade tradeManager;
+         tradeManager.SetExpertMagicNumber(InpMagicNumber);
+         tradeManager.SetMarginMode();
+         
+         if(tradeManager.PositionModify(ticket, openPrice, currentTP))
+         {
+            Print("SL déplacé au point d'entrée pour ", symbol, " (Ticket: ", ticket, ")");
+            return true;
+         }
+         else
+         {
+            Print("Erreur déplacement SL pour ", symbol, ": ", tradeManager.ResultComment());
+         }
+      }
+   }
+   
+   return false;
+}
+
+//+------------------------------------------------------------------+
+//| Vérifier et mettre à jour toutes les positions                   |
+//+------------------------------------------------------------------+
+void CheckAndUpdatePositions()
+{
+   if(!g_useDynamicSLTP)
+      return;
+   
+   // Parcourir toutes les positions
+   for(int i = 0; i < PositionsTotal(); i++)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0)
+         continue;
+      
+      // Mettre à jour le trailing stop
+      UpdateTrailingStop(ticket);
+      
+      // Sécuriser les gains si nécessaire
+      SecureGainsAtBreakeven(ticket);
+   }
 }
 
 //+------------------------------------------------------------------+
@@ -9801,40 +10086,51 @@ void ExecuteTrade(ENUM_ORDER_TYPE orderType)
    double sl, tp;
    ENUM_POSITION_TYPE posType = (orderType == ORDER_TYPE_BUY) ? POSITION_TYPE_BUY : POSITION_TYPE_SELL;
    
-   // NOUVEAU: Calculer le TP dynamique au prochain Support/Résistance
-   // Le TP est maintenant calculé selon le prochain niveau Support (pour SELL) ou Résistance (pour BUY)
-   tp = CalculateDynamicTP(orderType, price);
-   
-   // NOUVELLE STRATÉGIE: SL/TP PRUDENTS basés sur l'alignement H1/M5
+   // Déclarer les variables de symbole une seule fois
    double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
    double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
    double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
-   double pointValue = (tickValue / tickSize) * point;
-   double slValuePerPoint = normalizedLot * pointValue;
    
-   // SL prudent: utiliser 1.5x ATR au lieu d'un SL ultra serré
-   double atr[];
-   ArraySetAsSeries(atr, true);
-   double slPoints = 0;
+   // NOUVEAU: Utiliser CalculateSmartSLTP pour des SL/TP plus serrés et dynamiques
+   CalculateSmartSLTP(_Symbol, price, orderType, sl, tp);
    
-   if(CopyBuffer(atrHandle, 0, 0, 1, atr) > 0 && atr[0] > 0)
+   // Si CalculateSmartSLTP échoue, utiliser la méthode par défaut
+   if(sl == 0.0 || tp == 0.0)
    {
-      slPoints = (1.5 * atr[0]) / point; // 1.5x ATR = SL prudent
+      Print("⚠️ CalculateSmartSLTP a échoué, utilisation de la méthode par défaut");
+      
+      // NOUVEAU: Calculer le TP dynamique au prochain Support/Résistance
+      tp = CalculateDynamicTP(orderType, price);
+      
+      // NOUVELLE STRATÉGIE: SL/TP PRUDENTS basés sur l'alignement H1/M5
+      double pointValue = (tickValue / tickSize) * point;
+      double slValuePerPoint = normalizedLot * pointValue;
+      
+      // SL prudent: utiliser 1.5x ATR au lieu d'un SL ultra serré
+      double atr[];
+      ArraySetAsSeries(atr, true);
+      double slPoints = 0;
+      
+      if(CopyBuffer(atrHandle, 0, 0, 1, atr) > 0 && atr[0] > 0)
+      {
+         slPoints = (1.5 * atr[0]) / point; // 1.5x ATR = SL prudent
+      }
+      else
+      {
+         // Fallback: utiliser 0.8% du prix comme SL prudent
+         slPoints = (price * 0.008) / point; // 0.8% du prix = SL prudent
+      }
+      
+      // Calculer SL avec le calcul très serré
+      if(posType == POSITION_TYPE_BUY)
+         sl = NormalizeDouble(price - slPoints * point, _Digits);
+      else
+         sl = NormalizeDouble(price + slPoints * point, _Digits);
    }
    else
    {
-      // Fallback: utiliser 0.8% du prix comme SL prudent
-      double price = (orderType == ORDER_TYPE_BUY) ? 
-                    SymbolInfoDouble(_Symbol, SYMBOL_ASK) : 
-                    SymbolInfoDouble(_Symbol, SYMBOL_BID);
-      slPoints = (price * 0.008) / point; // 0.8% du prix = SL prudent
+      Print("✅ SL/TP dynamiques utilisés: SL=", sl, " TP=", tp);
    }
-   
-   // Calculer SL avec le calcul très serré
-   if(posType == POSITION_TYPE_BUY)
-      sl = NormalizeDouble(price - slPoints * point, _Digits);
-   else
-      sl = NormalizeDouble(price + slPoints * point, _Digits);
    
    // Calculer TP normal pour référence
    double slTemp, tpTemp;
