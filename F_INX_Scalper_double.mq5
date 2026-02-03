@@ -1309,12 +1309,11 @@ void OnTick()
    }
    
    // OPTIMISATION: Mettre à jour les métriques ML moins fréquemment
-   static datetime lastMLMetricsUpdate = 0;
-   if(UseMLPrediction && (currentTime - lastMLMetricsUpdate) >= MathMax(AI_UpdateInterval, 180)) // Minimum 3 minutes
+   static datetime lastMLMetricsUpdate2 = 0;
+   if(UseMLPrediction && (currentTime - lastMLMetricsUpdate2) >= MathMax(AI_UpdateInterval, 180)) // Minimum 3 minutes
    {
       UpdateMLMetrics(_Symbol, "M1");
-      lastMLMetricsUpdate = currentTime;
-   }
+      lastMLMetricsUpdate2 = currentTime;
    }
    
    // OPTIMISATION MAXIMALE: Réduire drastiquement la fréquence et les calculs
