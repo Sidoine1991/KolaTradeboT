@@ -1223,23 +1223,43 @@ async def shutdown_event():
 
 async def train_models_on_startup():
     """
-    Entraîne automatiquement les modèles ML pour les symboles principaux au démarrage
+    Entraîne automatiquement les modèles ML pour les symboles principaux en arrière-plan
+    Version optimisée pour éviter les timeouts de déploiement
     """
-    logger.info("🚀 Démarrage de l'entraînement automatique des modèles ML...")
+    # Vérifier la variable d'environnement pour désactiver l'entraînement
+    disable_training = os.getenv("DISABLE_ML_TRAINING", "false").lower() == "true"
     
-    # Symboles principaux à entraîner automatiquement
-    priority_symbols = [
-        "EURUSD", "GBPUSD", "USDJPY",  # Forex majeurs
-        "XAUUSD",  # Or
-        "Boom 300 Index", "Boom 600 Index", "Boom 900 Index",  # Boom
-        "Crash 1000 Index"  # Crash
-    ]
+    if disable_training:
+        logger.info("⚠️ Entraînement ML désactivé via DISABLE_ML_TRAINING=true")
+        return
     
-    timeframes = ["M1", "M5", "H1"]  # Timeframes principaux
+    logger.info("🚀 Planification de l'entraînement automatique des modèles ML en arrière-plan...")
     
     if not ML_AVAILABLE:
         logger.warning("⚠️ scikit-learn non disponible - entraînement ML désactivé")
         return
+    
+    # Démarrer l'entraînement en arrière-plan pour ne pas bloquer le démarrage
+    asyncio.create_task(train_models_background())
+    
+    logger.info("✅ Entraînement des modèles ML planifié en arrière-plan - Le serveur est prêt")
+
+async def train_models_background():
+    """
+    Entraîne les modèles ML en arrière-plan après le démarrage du serveur
+    """
+    # Attendre que le serveur soit complètement démarré
+    await asyncio.sleep(5)  # Attendre 5 secondes
+    
+    logger.info("🔄 Début de l'entraînement des modèles ML en arrière-plan...")
+    
+    # Symboles principaux à entraîner automatiquement (réduit pour accélérer)
+    priority_symbols = [
+        "EURUSD", "GBPUSD",  # Forex majeurs uniquement
+        "Boom 300 Index", "Boom 600 Index"  # Boom principaux uniquement
+    ]
+    
+    timeframes = ["M1", "M5"]  # Timeframes réduits
     
     total_training_tasks = len(priority_symbols) * len(timeframes)
     completed_tasks = 0
@@ -1250,26 +1270,35 @@ async def train_models_on_startup():
                 model_key = f"{symbol}_{timeframe}"
                 
                 # Vérifier si le modèle existe déjà
-                if model_key in ml_models_cache:
+                model_path = f"models/{model_key}_rf.joblib"
+                if os.path.exists(model_path):
                     logger.info(f"✅ Modèle déjà existant pour {model_key}")
                     completed_tasks += 1
                     continue
                 
                 logger.info(f"📊 Entraînement du modèle pour {symbol} {timeframe}...")
                 
-                # Entraîner le modèle
-                train_result = train_ml_models(symbol, timeframe, historical_data=None)
-                
-                if "error" not in train_result:
-                    logger.info(f"✅ Modèle entraîné avec succès pour {model_key}")
-                    completed_tasks += 1
-                else:
-                    logger.error(f"❌ Erreur entraînement modèle {model_key}: {train_result['error']}")
+                # Entraîner le modèle avec timeout
+                try:
+                    train_result = await asyncio.wait_for(
+                        asyncio.to_thread(train_ml_models, symbol, timeframe, historical_data=None),
+                        timeout=60.0  # Timeout de 60 secondes par modèle
+                    )
+                    
+                    if "error" not in train_result:
+                        logger.info(f"✅ Modèle entraîné avec succès pour {model_key}")
+                        completed_tasks += 1
+                    else:
+                        logger.error(f"❌ Erreur entraînement modèle {model_key}: {train_result['error']}")
+                        
+                except asyncio.TimeoutError:
+                    logger.warning(f"⏰ Timeout entraînement modèle {symbol} {timeframe} - Passage au suivant")
+                    continue
                 
             except Exception as e:
                 logger.error(f"❌ Erreur entraînement modèle {symbol} {timeframe}: {e}")
     
-    logger.info(f"🎯 Entraînement automatique terminé: {completed_tasks}/{total_training_tasks} modèles entraînés")
+    logger.info(f"🎯 Entraînement en arrière-plan terminé: {completed_tasks}/{total_training_tasks} modèles entraînés")
 
 
 # Parser les arguments en ligne de commande
@@ -5168,7 +5197,7 @@ def calculate_trade_outcome(df: pd.DataFrame, lookahead: int = 5, threshold: flo
     return labels
 
 def train_ml_models(symbol: str, timeframe: str, historical_data: Optional[pd.DataFrame] = None) -> Dict[str, Any]:
-    """Entraîne les modèles ML (RandomForest, GradientBoosting, MLPClassifier)
+    """Entraîne les modèles ML (version optimisée pour déploiement rapide)
     
     Args:
         symbol: Symbole du marché
@@ -5189,10 +5218,10 @@ def train_ml_models(symbol: str, timeframe: str, historical_data: Optional[pd.Da
     try:
         model_key = f"{symbol}_{timeframe}"
         
-        # Collecter les données si non fournies
+        # Collecter les données si non fournies (réduire à 30 jours pour accélérer)
         if historical_data is None:
             logger.info(f"Collecte des données historiques pour {symbol} {timeframe}...")
-            data_dict = collect_historical_data([symbol], [timeframe], period_days=90)
+            data_dict = collect_historical_data([symbol], [timeframe], period_days=30)  # Réduit de 90 à 30 jours
             if symbol not in data_dict or timeframe not in data_dict[symbol]:
                 error_msg = f"Impossible de collecter les données historiques pour {symbol} {timeframe}"
                 logger.error(error_msg)
@@ -5225,17 +5254,9 @@ def train_ml_models(symbol: str, timeframe: str, historical_data: Optional[pd.Da
         
         features_df['label'] = labels
         
-        # Sélectionner les features pour l'entraînement
+        # Sélectionner les features essentielles uniquement (réduit pour accélérer)
         feature_columns = [
-            'price_vs_sma20', 'price_vs_sma50',
-            'rsi', 'rsi_normalized',
-            'macd', 'macd_signal', 'macd_histogram',
-            'atr', 'atr_normalized', 'atr_ma_ratio',
-            'bb_width', 'bb_position',
-            'volume_ratio', 'volume_trend',
-            'high_low_range', 'open_close_range', 'body_size',
-            'momentum_5', 'momentum_10', 'momentum_20',
-            'distance_to_high', 'distance_to_low'
+            'price_vs_sma20', 'rsi', 'macd', 'atr', 'volume_ratio', 'momentum_5'
         ]
         
         # Filtrer les colonnes qui existent
@@ -5251,23 +5272,6 @@ def train_ml_models(symbol: str, timeframe: str, historical_data: Optional[pd.Da
         
         # Préparer X et y avec gestion des valeurs manquantes
         X = features_df[available_features].fillna(0)
-        
-        # Vérifier les valeurs manquantes après remplissage
-        missing_values = X.isna().sum().sum()
-        if missing_values > 0:
-            logger.warning(f"{missing_values} valeurs manquantes détectées après remplissage pour {symbol} {timeframe}")
-            
-        # Vérifier la variance des features
-        from sklearn.feature_selection import VarianceThreshold
-        selector = VarianceThreshold()
-        try:
-            selector.fit(X)
-            n_constant_features = sum(~selector.get_support())
-            if n_constant_features > 0:
-                logger.warning(f"{n_constant_features} caractéristiques constantes détectées pour {symbol} {timeframe}")
-        except Exception as e:
-            logger.warning(f"Erreur lors de la vérification de la variance: {str(e)}")
-            
         y = features_df['label'].fillna(0).astype(int)
         
         # Supprimer les lignes avec des valeurs infinies
@@ -5282,13 +5286,109 @@ def train_ml_models(symbol: str, timeframe: str, historical_data: Optional[pd.Da
         if len(y_train.unique()) < 2:
             logger.warning(f" Seulement {len(y_train.unique())} classe(s) détectée(s) dans les données d'entraînement pour {symbol} {timeframe}")
             
-            # Si une seule classe, créer des échantillons synthétiques avec SMOTE-like approach
+            # Si une seule classe, créer des échantillons synthétiques simples
             if len(y_train.unique()) == 1:
                 logger.info(f" Création d'échantillons synthétiques pour rééquilibrer les classes...")
                 
-                # Ajouter des échantillons de la classe manquante en inversant les labels
+                # Ajouter des échantillons de la classe manquante
                 minority_class = 1 if y_train.iloc[0] == 0 else 0
-                n_synthetic = len(y_train) // 3  # Créer 1/3 des échantillons existants
+                n_synthetic = min(50, len(y_train) // 2)  # Limiter à 50 échantillons
+                
+                synthetic_X = X_train.sample(n=n_synthetic, replace=True)
+                synthetic_X *= 1.1  # Légère modification
+                synthetic_y = pd.Series([minority_class] * n_synthetic)
+                
+                X_train = pd.concat([X_train, synthetic_X], ignore_index=True)
+                y_train = pd.concat([y_train, synthetic_y], ignore_index=True)
+                
+                logger.info(f"  Rééquilibrage simple: Avant {dict(y_train.value_counts())} → Après {dict(y_train.value_counts())}")
+        
+        # Utiliser uniquement RandomForest (plus rapide) pour le déploiement
+        models = {}
+        metrics = {}
+        
+        logger.info(f"Entraînement RandomForest pour {symbol} {timeframe}...")
+        
+        # Paramètres optimisés pour la vitesse
+        rf_model = RandomForestClassifier(
+            n_estimators=50,  # Réduit de 100 à 50
+            max_depth=10,     # Ajouté pour limiter la profondeur
+            min_samples_split=5,
+            min_samples_leaf=2,
+            random_state=42,
+            n_jobs=1,         # Un seul job pour éviter la surcharge
+            class_weight='balanced'
+        )
+        
+        rf_model.fit(X_train, y_train)
+        models['random_forest'] = rf_model
+        
+        # Évaluer le modèle
+        y_pred = rf_model.predict(X_test)
+        accuracy = accuracy_score(y_test, y_pred)
+        
+        # Calcul des métriques essentielles uniquement
+        try:
+            f1 = f1_score(y_test, y_pred, average='weighted', zero_division=0)
+            precision = precision_score(y_test, y_pred, average='weighted', zero_division=0)
+            recall = recall_score(y_test, y_pred, average='weighted', zero_division=0)
+        except:
+            f1 = precision = recall = 0.0
+        
+        metrics['random_forest'] = {
+            'accuracy': accuracy,
+            'f1_score': f1,
+            'precision': precision,
+            'recall': recall,
+            'training_samples': len(X_train),
+            'test_samples': len(X_test)
+        }
+        
+        logger.info(f"✅ RandomForest entraîné pour {symbol} {timeframe} - Accuracy: {accuracy:.3f}")
+        
+        # Sauvegarder le modèle
+        os.makedirs("models", exist_ok=True)
+        model_path = f"models/{model_key}_rf.joblib"
+        joblib.dump(rf_model, model_path)
+        
+        # Sauvegarder les métriques
+        metrics_path = f"models/{model_key}_metrics.json"
+        with open(metrics_path, 'w') as f:
+            json.dump(metrics, f, indent=2)
+        
+        # Mettre en cache
+        ml_models_cache[model_key] = {
+            'model': rf_model,
+            'features': available_features,
+            'metrics': metrics['random_forest'],
+            'model_type': 'random_forest'
+        }
+        
+        training_time = time.time() - start_time
+        logger.info(f"✅ Modèle entraîné avec succès pour {symbol} {timeframe} en {training_time:.1f}s")
+        
+        return {
+            "status": "success",
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "models": list(models.keys()),
+            "metrics": metrics,
+            "features_used": available_features,
+            "training_samples": len(X_train),
+            "test_samples": len(X_test),
+            "training_time": training_time,
+            "best_model": "random_forest"
+        }
+        
+    except Exception as e:
+        error_msg = f"Erreur lors de l'entraînement du modèle pour {symbol} {timeframe}: {str(e)}"
+        logger.error(error_msg, exc_info=True)
+        return {
+            "status": "error", 
+            "message": error_msg, 
+            "symbol": symbol, 
+            "timeframe": timeframe
+        }
                 
                 # Sélectionner aléatoirement des échantillons à modifier
                 synthetic_indices = np.random.choice(len(X_train), n_synthetic, replace=False)
@@ -5645,6 +5745,76 @@ class MLTrainRequest(BaseModel):
 class MLPredictRequest(BaseModel):
     symbol: str
     timeframes: Optional[List[str]] = ["M1", "M5", "M15", "H1", "H4"]
+
+@app.post("/ml/train-essential")
+async def train_essential_models():
+    """
+    Endpoint pour entraîner uniquement les modèles essentiels rapidement
+    Utile après un déploiement pour avoir les modèles de base fonctionnels
+    """
+    try:
+        if not ML_AVAILABLE:
+            raise HTTPException(status_code=503, detail="scikit-learn non disponible")
+        
+        logger.info("🚀 Début de l'entraînement des modèles essentiels...")
+        
+        # Symboles essentiels uniquement
+        essential_symbols = ["EURUSD", "GBPUSD"]
+        essential_timeframes = ["M1", "M5"]
+        
+        results = []
+        
+        for symbol in essential_symbols:
+            for timeframe in essential_timeframes:
+                try:
+                    logger.info(f"📊 Entraînement modèle essentiel: {symbol} {timeframe}")
+                    
+                    # Entraîner avec timeout
+                    train_result = await asyncio.wait_for(
+                        asyncio.to_thread(train_ml_models, symbol, timeframe, historical_data=None),
+                        timeout=30.0  # 30 secondes maximum par modèle
+                    )
+                    
+                    results.append({
+                        "symbol": symbol,
+                        "timeframe": timeframe,
+                        "status": "success" if "error" not in train_result else "error",
+                        "result": train_result
+                    })
+                    
+                except asyncio.TimeoutError:
+                    logger.warning(f"⏰ Timeout entraînement {symbol} {timeframe}")
+                    results.append({
+                        "symbol": symbol,
+                        "timeframe": timeframe,
+                        "status": "timeout",
+                        "message": "Entraînement trop long"
+                    })
+                except Exception as e:
+                    logger.error(f"❌ Erreur entraînement {symbol} {timeframe}: {e}")
+                    results.append({
+                        "symbol": symbol,
+                        "timeframe": timeframe,
+                        "status": "error",
+                        "message": str(e)
+                    })
+        
+        successful = sum(1 for r in results if r["status"] == "success")
+        total = len(results)
+        
+        return {
+            "status": "completed",
+            "message": f"Entraînement terminé: {successful}/{total} modèles entraînés avec succès",
+            "results": results,
+            "summary": {
+                "total": total,
+                "successful": successful,
+                "failed": total - successful
+            }
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/ml/train")
 async def train_ml_models_endpoint(request: MLTrainRequest):

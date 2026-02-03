@@ -52,6 +52,8 @@ class MT5AIClientSimple:
         self.last_profit_close_time = {}
         self.last_profit_close_symbol = {}
         self.last_profit_close_direction = {}
+        # Suivi du trailing stop
+        self.best_prices = {}  # Meilleur prix atteint par position
         
     def connect_mt5(self):
         """Connexion à MT5"""
@@ -246,8 +248,21 @@ class MT5AIClientSimple:
             logger.error(f"Erreur ré-entrée rapide: {e}")
     
     
+    def calculate_sl_tp(self, symbol, price, signal):
+        """Calcule les niveaux de SL et TP en fonction du signal et du prix"""
+        point = mt5.symbol_info(symbol).point
+        
+        if signal == "BUY":
+            sl = price - STOP_LOSS_POINTS * point
+            tp = price + TAKE_PROFIT_POINTS * point
+        else:  # SELL
+            sl = price + STOP_LOSS_POINTS * point
+            tp = price - TAKE_PROFIT_POINTS * point
+            
+        return sl, tp
+    
     def execute_trade(self, symbol, signal_data):
-        """Exécute un trade SANS SL/TP avec restrictions Boom/Crash"""
+        """Exécute un trade avec SL/TP et restrictions Boom/Crash"""
         try:
             signal = signal_data.get('signal')
             confidence = signal_data.get('confidence', 0)
@@ -281,42 +296,31 @@ class MT5AIClientSimple:
                 logger.error(f"Pas de tick pour {symbol}")
                 return False
             
-            # Utiliser exactement la même configuration que le test qui fonctionne
-            if signal == "BUY":
-                request = {
-                    "action": mt5.TRADE_ACTION_DEAL,
-                    "symbol": symbol,
-                    "volume": position_size,
-                    "type": mt5.ORDER_TYPE_BUY,
-                    "price": tick.ask,
-                    "sl": 0.0,  # Pas de SL
-                    "tp": 0.0,  # Pas de TP
-                    "deviation": 20,
-                    "magic": 234000,
-                    "comment": f"AI Signal {signal_data.get('source', 'unknown')}",
-                    "type_time": mt5.ORDER_TIME_GTC,
-                    "type_filling": mt5.ORDER_FILLING_FOK,
-                }
-            else:  # SELL
-                request = {
-                    "action": mt5.TRADE_ACTION_DEAL,
-                    "symbol": symbol,
-                    "volume": position_size,
-                    "type": mt5.ORDER_TYPE_SELL,
-                    "price": tick.bid,
-                    "sl": 0.0,  # Pas de SL
-                    "tp": 0.0,  # Pas de TP
-                    "deviation": 20,
-                    "magic": 234000,
-                    "comment": f"AI Signal {signal_data.get('source', 'unknown')}",
-                    "type_time": mt5.ORDER_TIME_GTC,
-                    "type_filling": mt5.ORDER_FILLING_FOK,
-                }
+            # Calculer SL/TP
+            entry_price = tick.ask if signal == "BUY" else tick.bid
+            sl, tp = self.calculate_sl_tp(symbol, entry_price, signal)
+            
+            # Préparer la requête de trading
+            request = {
+                "action": mt5.TRADE_ACTION_DEAL,
+                "symbol": symbol,
+                "volume": position_size,
+                "type": mt5.ORDER_TYPE_BUY if signal == "BUY" else mt5.ORDER_TYPE_SELL,
+                "price": entry_price,
+                "sl": sl,
+                "tp": tp,
+                "deviation": 20,
+                "magic": 234000,
+                "comment": f"AI Signal {signal_data.get('source', 'unknown')}",
+                "type_time": mt5.ORDER_TIME_GTC,
+                "type_filling": mt5.ORDER_FILLING_FOK,
+            }
             
             logger.info(f"Tentative ordre {signal} {symbol}:")
             logger.info(f"  Price: {request['price']}")
             logger.info(f"  Volume: {position_size}")
-            logger.info(f"  Sans SL/TP")
+            logger.info(f"  SL: {sl} ({(sl - entry_price) / point} points)")
+            logger.info(f"  TP: {tp} ({(tp - entry_price) / point} points)")
             logger.info(f"  ✅ Direction valide pour {symbol}")
             
             # Envoyer l'ordre
@@ -339,8 +343,13 @@ class MT5AIClientSimple:
                     "price": result.price,
                     "open_time": datetime.now(),
                     "signal_data": signal_data,
-                    "no_stops": True
+                    "sl": sl,
+                    "tp": tp,
+                    "best_price": result.price  # Initialiser le meilleur prix
                 }
+                
+                # Initialiser le meilleur prix pour le trailing stop
+                self.best_prices[result.order] = result.price
                 
                 return True
             else:
@@ -351,27 +360,120 @@ class MT5AIClientSimple:
             logger.error(f"Erreur execution trade {symbol}: {e}")
             return False
     
+    def manage_trailing_stop(self, position):
+        """Gère le trailing stop pour une position ouverte"""
+        if not USE_TRAILING_STOP or TRAILING_STOP_POINTS <= 0 or TRAILING_STEP <= 0:
+            return False
+            
+        ticket = position.ticket
+        symbol = position.symbol
+        pos_type = position.type
+        current_price = position.price_current
+        current_sl = position.sl
+        point = mt5.symbol_info(symbol).point
+        
+        # Initialiser ou mettre à jour le meilleur prix
+        if ticket not in self.best_prices:
+            self.best_prices[ticket] = current_price
+            
+        best_price = self.best_prices[ticket]
+        
+        # Mettre à jour le meilleur prix si nécessaire
+        if (pos_type == mt5.POSITION_TYPE_BUY and current_price > best_price) or \
+           (pos_type == mt5.POSITION_TYPE_SELL and current_price < best_price):
+            self.best_prices[ticket] = current_price
+            best_price = current_price
+        
+        # Calculer le nouveau stop loss
+        if pos_type == mt5.POSITION_TYPE_BUY:
+            new_sl = best_price - TRAILING_STOP_POINTS * point
+            # Ne déplacer le SL que s'il est plus élevé que le précédent et que le prix a suffisamment évolué
+            if new_sl > current_sl + TRAILING_STEP * point and new_sl > position.price_open:
+                # Vérifier que le nouveau SL est valide (pas trop proche du prix)
+                if new_sl < current_price - 10 * point:  # Au moins 10 points du prix actuel
+                    request = {
+                        "action": mt5.TRADE_ACTION_SLTP,
+                        "symbol": symbol,
+                        "sl": new_sl,
+                        "tp": position.tp,  # Garder le TP inchangé
+                        "position": ticket
+                    }
+                    result = mt5.order_send(request)
+                    if result.retcode == mt5.TRADE_RETCODE_DONE:
+                        logger.info(f"🔄 Trailing Stop mis à jour pour {symbol}: {current_sl} -> {new_sl}")
+                        return True
+        else:  # SELL
+            new_sl = best_price + TRAILING_STOP_POINTS * point
+            # Ne déplacer le SL que s'il est plus bas que le précédent et que le prix a suffisamment évolué
+            if (current_sl == 0 and new_sl < current_price - TRAILING_STEP * point) or \
+               (current_sl > 0 and new_sl < current_sl - TRAILING_STEP * point):
+                # Vérifier que le nouveau SL est valide (pas trop proche du prix)
+                if new_sl > current_price + 10 * point:  # Au moins 10 points du prix actuel
+                    request = {
+                        "action": mt5.TRADE_ACTION_SLTP,
+                        "symbol": symbol,
+                        "sl": new_sl,
+                        "tp": position.tp,  # Garder le TP inchangé
+                        "position": ticket
+                    }
+                    result = mt5.order_send(request)
+                    if result.retcode == mt5.TRADE_RETCODE_DONE:
+                        logger.info(f"🔄 Trailing Stop mis à jour pour {symbol}: {current_sl} -> {new_sl}")
+                        return True
+        
+        return False
+    
     def check_positions(self):
-        """Vérifie les positions ouvertes"""
+        """Vérifie les positions ouvertes et gère le trailing stop"""
         try:
             positions = mt5.positions_get()
             if not positions:
                 self.positions.clear()
+                self.best_prices.clear()
                 return
             
-            current_symbols = {pos.symbol for pos in positions}
+            current_tickets = set()
             
+            for position in positions:
+                current_tickets.add(position.ticket)
+                
+                # Mettre à jour les informations de position
+                if position.symbol in self.positions:
+                    self.positions[position.symbol].update({
+                        'ticket': position.ticket,
+                        'sl': position.sl,
+                        'tp': position.tp,
+                        'price': position.price_open,
+                        'current_price': position.price_current,
+                        'profit': position.profit
+                    })
+                
+                # Gérer le trailing stop si activé
+                if USE_TRAILING_STOP:
+                    self.manage_trailing_stop(position)
+            
+            # Nettoyer les positions fermées
             for symbol in list(self.positions.keys()):
-                if symbol not in current_symbols:
-                    logger.info(f"Position {symbol} fermee")
+                pos = self.positions[symbol]
+                if 'ticket' in pos and pos['ticket'] not in current_tickets:
+                    logger.info(f"Position {symbol} fermée (ticket: {pos['ticket']})")
+                    if pos['ticket'] in self.best_prices:
+                        del self.best_prices[pos['ticket']]
                     del self.positions[symbol]
             
         except Exception as e:
-            logger.error(f"Erreur verification positions: {e}")
+            logger.error(f"Erreur vérification positions: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
     
     def run(self):
         """Boucle principale"""
-        logger.info("Demarrage du client MT5 AI Simple (sans SL/TP)")
+        logger.info("Démarrage du client MT5 AI Simple avec SL/TP et Trailing Stop")
+        logger.info(f"Configuration - SL: {STOP_LOSS_POINTS} points, TP: {TAKE_PROFIT_POINTS} points")
+        logger.info(f"Trailing Stop: {'Activé' if USE_TRAILING_STOP else 'Désactivé'}")
+        if USE_TRAILING_STOP:
+            logger.info(f"  - Distance: {TRAILING_STOP_POINTS} points")
+            logger.info(f"  - Pas: {TRAILING_STEP} points")
         
         if not self.connect_mt5():
             logger.error("Impossible de demarrer sans connexion MT5")
