@@ -368,19 +368,19 @@ def draw_predictive_channel(df: pd.DataFrame, symbol: str, lookback_period: int 
         # Si le prix est près de la borne inférieure -> signal BUY
         if current_position < upper_threshold:
             signal = "BUY"
-            confidence = (upper_threshold - current_position) * (100 / upper_threshold)
+            confidence = (upper_threshold - current_position) / upper_threshold
             reasoning.append(f"Prix proche de la borne inférieure du canal ({current_position:.1%})")
         
         # Si le prix est près de la borne supérieure -> signal SELL
         elif current_position > lower_threshold:
             signal = "SELL"
-            confidence = (current_position - lower_threshold) * (100 / (1 - lower_threshold))
+            confidence = (current_position - lower_threshold) / (1 - lower_threshold)
             reasoning.append(f"Prix proche de la borne supérieure du canal ({current_position:.1%})")
         
         # Si le prix est au centre -> signal NEUTRAL
         else:
             signal = "NEUTRAL"
-            confidence = 50.0
+            confidence = 0.5
             reasoning.append(f"Prix au centre du canal ({current_position:.1%})")
         
         # Ajouter la pente du canal à l'analyse
@@ -389,11 +389,11 @@ def draw_predictive_channel(df: pd.DataFrame, symbol: str, lookback_period: int 
             if slope > 0:
                 reasoning.append(f"Canal haussier (pente: {slope:.4f})")
                 if signal == "BUY":
-                    confidence += 15  # Bonus plus élevé pour signal aligné
+                    confidence += 0.15  # Bonus plus élevé pour signal aligné
             else:
                 reasoning.append(f"Canal baissier (pente: {slope:.4f})")
                 if signal == "SELL":
-                    confidence += 15
+                    confidence += 0.15
         else:
             reasoning.append(f"Canal latéral (pente: {slope:.4f})")
             # Réduire la confiance en cas de canal latéral
@@ -415,7 +415,7 @@ def draw_predictive_channel(df: pd.DataFrame, symbol: str, lookback_period: int 
             stop_loss = None
             take_profit = None
         
-        confidence = min(95.0, confidence)  # Limiter la confiance maximale
+        confidence = min(0.95, confidence)  # Limiter la confiance maximale
         
         return {
             "has_channel": True,
@@ -2899,8 +2899,8 @@ async def root_post():
         detail="Please use POST /decision endpoint for trading decisions. The root endpoint '/' only accepts GET requests."
     )
 
-@app.post("/decision", response_model=DecisionResponse)
-async def decision_endpoint(request: DecisionRequest):
+@app.post("/decision-simple", response_model=DecisionResponse)
+async def decision_endpoint_simple(request: DecisionRequest):
     """
     Endpoint principal pour la prise de décision de trading (appelé par MQ5).
     Wraps /ml/predict-signal logic.
@@ -2930,7 +2930,7 @@ async def decision_endpoint(request: DecisionRequest):
         
         action = action_map.get(signal_raw, "hold")
         
-        # Confiance: predict_trading_signal retourne 0-100, DecisionResponse attend 0.0-1.0
+        # Confiance: predict_trading_signal retourne déjà 0.0-1.0, pas besoin de conversion
         conf_raw = float(result.get("confidence", 0.0))
         confidence = conf_raw / 100.0 if conf_raw > 1.0 else conf_raw
         
@@ -8579,9 +8579,10 @@ async def analysis(
         # Vérification des paramètres d'entrée
         if symbol is None and request is None and raw_request is None:
             # Essayer de récupérer les données directement du corps de la requête
-            body = await request.body()
-            if body:
-                try:
+            if request is not None:
+                body = await request.body()
+                if body:
+                    try:
                     data = json.loads(body)
                     if 'symbol' in data:
                         symbol = data['symbol']
@@ -8620,7 +8621,7 @@ async def analysis(
     except Exception as e:
         logger.error(f"Erreur inattendue dans /analysis: {str(e)}", exc_info=True)
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            status_code=500,
             detail=f"Une erreur est survenue lors du traitement de la requête: {str(e)}"
         )
 
