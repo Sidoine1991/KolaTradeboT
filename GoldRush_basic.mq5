@@ -768,6 +768,11 @@ void UpdateAISignal()
                   "\"volatility_ratio\":1.0" +
                   "}";
 
+   // LOG TRÈS VISIBLE - Afficher le JSON exact envoyé
+   Print("📦 DONNÉES JSON COMPLÈTES: ", data);
+   Print("🆕 FORMAT MIS À JOUR - Compatible avec modèle DecisionRequest");
+   Print("📏 Taille JSON: ", StringLen(data), " caractères");
+
    uchar post_uchar[];
    StringToCharArray(data, post_uchar);
 
