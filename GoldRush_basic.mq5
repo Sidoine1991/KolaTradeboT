@@ -354,6 +354,13 @@ void OnTick()
    double ask = SymbolInfoDouble(_Symbol,SYMBOL_ASK);
    double bid = SymbolInfoDouble(_Symbol,SYMBOL_BID);
 
+   // Vérifier si le symbole est autorisé pour le trading
+   if(!IsSymbolAllowedForTrading())
+   {
+      Print("❌ Trading non autorisé sur ce symbole: ", _Symbol);
+      return;
+   }
+
    bool shouldTrade = false;
    ENUM_ORDER_TYPE tradeType = WRONG_VALUE;
 
@@ -486,13 +493,26 @@ void ManageTrailingStop()
       double tp   = PositionGetDouble(POSITION_TP);
       long type   = PositionGetInteger(POSITION_TYPE);
       double profit = PositionGetDouble(POSITION_PROFIT);
+      string symbol = PositionGetString(POSITION_SYMBOL);
 
-      double bid = SymbolInfoDouble(_Symbol,SYMBOL_BID);
-      double ask = SymbolInfoDouble(_Symbol,SYMBOL_ASK);
-
-      if(UseTrailingForProfit && profit > 0.5)
+      double bid = SymbolInfoDouble(symbol,SYMBOL_BID);
+      double ask = SymbolInfoDouble(symbol,SYMBOL_ASK);
+      
+      // Paramètres de trailing adaptés par type de symbole
+      double minProfitForTrailing = 0.5;  // Par défaut
+      double trailDistance = InpTrailDist * _Point;
+      
+      // Adaptation pour Step Index, Boom & Crash
+      if(StringFind(symbol, "Step") >= 0 || StringFind(symbol, "Boom") >= 0 || StringFind(symbol, "Crash") >= 0)
       {
-         double trailDistance = InpTrailDist * _Point;
+         minProfitForTrailing = 1.0;  // Profit minimum plus élevé
+         trailDistance = MathMax(InpTrailDist * _Point, 20 * _Point);  // Distance minimum
+         Print("🔧 Trailing adapté pour ", symbol, " - MinProfit: ", minProfitForTrailing, " - TrailDist: ", trailDistance/_Point, " points");
+      }
+
+      // Trailing actif si profit suffisant OU si UseTrailingForProfit est désactivé
+      if(!UseTrailingForProfit || profit > minProfitForTrailing)
+      {
          
          if(type==POSITION_TYPE_BUY)
          {
@@ -924,10 +944,49 @@ void GenerateFallbackSignal()
 }
 
 //+------------------------------------------------------------------+
+//| VÉRIFIER SI LE SYMBOLE EST AUTORISÉ POUR LE TRADING       |
+//+------------------------------------------------------------------+
+bool IsSymbolAllowedForTrading()
+{
+   string symbol = _Symbol;
+   
+   // Symboles explicitement autorisés
+   bool isAllowed = (
+      StringFind(symbol, "EUR") >= 0 || StringFind(symbol, "USD") >= 0 ||  // Forex
+      StringFind(symbol, "GBP") >= 0 || StringFind(symbol, "JPY") >= 0 ||
+      StringFind(symbol, "AUD") >= 0 || StringFind(symbol, "CAD") >= 0 ||
+      StringFind(symbol, "CHF") >= 0 || StringFind(symbol, "NZD") >= 0 ||
+      StringFind(symbol, "XAU") >= 0 || StringFind(symbol, "Gold") >= 0 ||  // Or
+      StringFind(symbol, "XAG") >= 0 || StringFind(symbol, "Silver") >= 0 ||  // Argent
+      StringFind(symbol, "Boom") >= 0 || StringFind(symbol, "Crash") >= 0 ||  // Boom/Crash
+      StringFind(symbol, "Step") >= 0 || StringFind(symbol, "Index") >= 0 ||  // Step Index
+      StringFind(symbol, "Volatility") >= 0  // Volatility Indices
+   );
+   
+   if(isAllowed)
+   {
+      Print("✅ Symbole autorisé pour trading: ", symbol);
+   }
+   else
+   {
+      Print("❌ Symbole non autorisé pour trading: ", symbol);
+   }
+   
+   return isAllowed;
+}
+
+//+------------------------------------------------------------------+
 //| VÉRIFIER SI SIGNAL FORT PRÉSENT                             |
 //+------------------------------------------------------------------+
 bool HasStrongSignal()
 {
+   // Vérifier si le symbole est autorisé pour le trading
+   if(!IsSymbolAllowedForTrading())
+   {
+      Print("❌ Trading non autorisé sur ce symbole: ", _Symbol);
+      return false;
+   }
+
    return (g_lastAIConfidence >= AI_MinConfidence &&
            (StringFind(g_lastAIAction, "buy") >= 0 || StringFind(g_lastAIAction, "sell") >= 0));
 }
