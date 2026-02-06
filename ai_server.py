@@ -8583,14 +8583,14 @@ async def analysis(
                 body = await request.body()
                 if body:
                     try:
-                    data = json.loads(body)
-                    if 'symbol' in data:
-                        symbol = data['symbol']
-                        logger.info(f"Symbole extrait du corps de la requête: {symbol}")
-                    elif 'raw_request' in data and isinstance(data['raw_request'], dict) and 'symbol' in data['raw_request']:
-                        return await handle_raw_analysis_request(data['raw_request'], None)
-                except json.JSONDecodeError:
-                    pass
+                        data = json.loads(body)
+                        if 'symbol' in data:
+                            symbol = data['symbol']
+                            logger.info(f"Symbole extrait du corps de la requête: {symbol}")
+                        elif 'raw_request' in data and isinstance(data['raw_request'], dict) and 'symbol' in data['raw_request']:
+                            return await handle_raw_analysis_request(data['raw_request'], None)
+                    except json.JSONDecodeError:
+                        pass
                     
             if symbol is None:
                 logger.error("Aucun paramètre valide fourni")
