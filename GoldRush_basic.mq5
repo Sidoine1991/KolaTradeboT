@@ -623,11 +623,11 @@ void ManageAdvancedProfits()
             double sl = bid - InpStopLoss * _Point;
             double tp = bid + InpTakeProfit * _Point;
 
-            if(trade.Buy(DuplicationLotSize, _Symbol, ask, sl, tp, "GoldRush Duplication"))
+            if(trade.Buy(GetCorrectLotSize(), _Symbol, ask, sl, tp, "GoldRush Duplication"))
             {
                hasDuplicated = true;
                duplicatedPositionTicket = trade.ResultOrder();
-               Print("🚀 Position dupliquée - Lot: ", DuplicationLotSize, " - Ticket: ", duplicatedPositionTicket);
+               Print("🚀 Position dupliquée - Lot: ", GetCorrectLotSize(), " - Ticket: ", duplicatedPositionTicket);
             }
          }
          else if(type == POSITION_TYPE_SELL)
@@ -635,11 +635,11 @@ void ManageAdvancedProfits()
             double sl = ask + InpStopLoss * _Point;
             double tp = ask - InpTakeProfit * _Point;
 
-            if(trade.Sell(DuplicationLotSize, _Symbol, bid, sl, tp, "GoldRush Duplication"))
+            if(trade.Sell(GetCorrectLotSize(), _Symbol, bid, sl, tp, "GoldRush Duplication"))
             {
                hasDuplicated = true;
                duplicatedPositionTicket = trade.ResultOrder();
-               Print("🚀 Position dupliquée - Lot: ", DuplicationLotSize, " - Ticket: ", duplicatedPositionTicket);
+               Print("🚀 Position dupliquée - Lot: ", GetCorrectLotSize(), " - Ticket: ", duplicatedPositionTicket);
             }
          }
       }
