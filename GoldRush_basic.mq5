@@ -415,7 +415,22 @@ void OnTick()
    }
 
    if(shouldTrade && ValidateAdvancedEntry(tradeType))
+   {
+      // Restrictions spécifiques pour Boom/Crash (sécurité)
+      if(StringFind(_Symbol, "Boom") >= 0 && tradeType == ORDER_TYPE_SELL)
+      {
+         Print("🚨 SÉCURITÉ - Positions SELL interdites sur Boom: ", _Symbol);
+         return;
+      }
+      
+      if(StringFind(_Symbol, "Crash") >= 0 && tradeType == ORDER_TYPE_BUY)
+      {
+         Print("🚨 SÉCURITÉ - Positions BUY interdites sur Crash: ", _Symbol);
+         return;
+      }
+      
       ExecuteAdvancedTrade(tradeType, ask, bid);
+   }
 
    DrawMultiTimeframeIndicators();
 
