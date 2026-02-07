@@ -12,15 +12,16 @@ import logging
 import requests
 import MetaTrader5 as mt5
 import numpy as np
+import pandas as pd
 from datetime import datetime, timedelta
 from pathlib import Path
 
 # Configuration des URLs de l'API
 RENDER_API_URL = "https://kolatradebot.onrender.com"
-LOCAL_API_URL = "http://localhost:5000"
+LOCAL_API_URL = "http://localhost:8000"  # Utilisation du port 8000
 TIMEFRAMES = ["M5"]  # Horizon M5 comme demandé
 CHECK_INTERVAL = 60  # Secondes entre chaque vérification
-MIN_CONFIDENCE = 0.70  # Confiance minimale pour prendre un trade (70% = 0.70)
+MIN_CONFIDENCE = 0.80  # Confiance minimale pour prendre un trade (80% = 0.80) - NOUVEAU
 
 # SL/TP par défaut (Boom/Crash, Volatility, Metals)
 SL_PERCENTAGE_DEFAULT = 0.02  # 2%
@@ -632,6 +633,178 @@ class GARCHVolatilityAnalyzer:
         except Exception as e:
             logger.error(f"Erreur volatilité {symbol}: {e}")
             return None
+
+class DERIVArrowDetector:
+    """Détecte les patterns DERIV ARROW sur les graphiques MT5"""
+    
+    def __init__(self):
+        self.last_check_time = 0
+        self.check_interval = 2  # Vérifier toutes les 2 secondes
+        
+    def is_deriv_arrow_present(self, symbol):
+        """Vérifie si un DERIV ARROW est présent sur le graphique"""
+        try:
+            current_time = time.time()
+            if current_time - self.last_check_time < self.check_interval:
+                return False
+                
+            self.last_check_time = current_time
+            
+            # Récupérer tous les objets du graphique
+            objects = mt5.chart_objects_get(symbol)
+            if not objects:
+                return False
+                
+            for obj in objects:
+                obj_name = obj.name.lower()
+                
+                # Vérifier si le nom contient des motifs typiques de flèches DERIV
+                if any(keyword in obj_name for keyword in ["arrow", "deriv", "derivation"]):
+                    # Vérifier si l'objet est de type flèche ou triangle
+                    if obj.type in [mt5.OBJECT_ARROW_UP, mt5.OBJECT_ARROW_DOWN, mt5.OBJECT_TRIANGLE]:
+                        logger.info(f"✅ Flèche DERIV ARROW détectée: {obj.name}")
+                        return True
+                        
+            return False
+            
+        except Exception as e:
+            logger.error(f"Erreur détection DERIV ARROW {symbol}: {e}")
+            return False
+    
+    def get_deriv_arrow_signal_type(self, symbol):
+        """Détermine le type de signal de la flèche DERIV ARROW"""
+        try:
+            objects = mt5.chart_objects_get(symbol)
+            if not objects:
+                return None
+                
+            for obj in objects:
+                obj_name = obj.name.lower()
+                
+                if any(keyword in obj_name for keyword in ["arrow", "deriv", "derivation"]):
+                    if obj.type == mt5.OBJECT_ARROW_UP:
+                        logger.info(f"🔺 Flèche HAUT (BUY) DERIV ARROW détectée: {obj.name}")
+                        return "BUY"
+                    elif obj.type == mt5.OBJECT_ARROW_DOWN:
+                        logger.info(f"🔻 Flèche BAS (SELL) DERIV ARROW détectée: {obj.name}")
+                        return "SELL"
+                    elif obj.type == mt5.OBJECT_TRIANGLE:
+                        # Pour les triangles, déterminer la direction par la couleur
+                        color = obj.color
+                        if color in [0x00FF00, 0x00FF00, 0x7FFF00]:  # Vert/Lime
+                            logger.info(f"🔺 Triangle VERT (BUY) DERIV ARROW détecté: {obj.name}")
+                            return "BUY"
+                        elif color in [0xFF0000, 0x800000]:  # Red/Maroon
+                            logger.info(f"🔻 Triangle ROUGE (SELL) DERIV ARROW détecté: {obj.name}")
+                            return "SELL"
+                            
+            return None
+            
+        except Exception as e:
+            logger.error(f"Erreur type signal DERIV ARROW {symbol}: {e}")
+            return None
+
+class MaxLossManager:
+    """Gestionnaire des pertes maximales avec conservation des positions existantes"""
+    
+    def __init__(self):
+        self.max_total_loss = 5.0  # $5 perte totale maximale
+        self.max_symbol_loss = 5.0  # $5 perte par symbole maximale
+        
+    def get_total_loss(self):
+        """Calcule la perte totale de toutes les positions actives"""
+        try:
+            total_loss = 0.0
+            positions = mt5.positions_get()
+            
+            if positions:
+                for position in positions:
+                    profit = position.profit
+                    if profit < 0:  # Seulement les pertes
+                        total_loss += abs(profit)
+                        
+            return total_loss
+            
+        except Exception as e:
+            logger.error(f"Erreur calcul perte totale: {e}")
+            return 0.0
+    
+    def get_symbol_loss(self, symbol):
+        """Calcule la perte pour un symbole spécifique"""
+        try:
+            symbol_loss = 0.0
+            positions = mt5.positions_get()
+            
+            if positions:
+                for position in positions:
+                    if position.symbol == symbol:
+                        profit = position.profit
+                        if profit < 0:  # Seulement les pertes
+                            symbol_loss += abs(profit)
+                            
+            return symbol_loss
+            
+        except Exception as e:
+            logger.error(f"Erreur calcul perte symbole {symbol}: {e}")
+            return 0.0
+    
+    def can_open_new_trades(self, symbol=None):
+        """Vérifie si de nouveaux trades peuvent être ouverts"""
+        total_loss = self.get_total_loss()
+        
+        if total_loss >= self.max_total_loss:
+            logger.warning(f"🚫 PERTE TOTALE MAX ATTEINTE: ${total_loss:.2f} >= ${self.max_total_loss:.2f} - NOUVEAUX TRADES BLOQUÉS (positions existantes conservées)")
+            return False
+            
+        if symbol:
+            symbol_loss = self.get_symbol_loss(symbol)
+            if symbol_loss >= self.max_symbol_loss:
+                logger.warning(f"🚫 SYMBOLE BLOQUÉ: {symbol} - Perte maximale atteinte (${symbol_loss:.2f} >= ${self.max_symbol_loss:.2f}) - NOUVEAUX TRADES BLOQUÉS (positions existantes conservées)")
+                return False
+                
+        return True
+
+class BoomCrashManager:
+    """Gestionnaire spécialisé pour Boom/Crash avec règles "aller au bout" """
+    
+    def __init__(self):
+        pass
+    
+    def is_boom_crash_symbol(self, symbol):
+        """Vérifie si c'est un symbole Boom/Crash"""
+        return "Boom" in symbol or "Crash" in symbol
+    
+    def is_direction_allowed(self, symbol, signal_type):
+        """Vérifie si la direction est autorisée pour Boom/Crash"""
+        if not self.is_boom_crash_symbol(symbol):
+            return True  # Pas de restriction pour les autres symboles
+            
+        is_boom = "Boom" in symbol
+        is_crash = "Crash" in symbol
+        
+        if is_boom and signal_type == "SELL":
+            logger.warning(f"🚫 SELL interdit sur {symbol} (Boom = BUY uniquement)")
+            return False
+            
+        if is_crash and signal_type == "BUY":
+            logger.warning(f"🚫 BUY interdit sur {symbol} (Crash = SELL uniquement)")
+            return False
+            
+        return True
+    
+    def should_close_automatically(self, symbol, profit):
+        """Détermine si une position doit être fermée automatiquement"""
+        # Pour Boom/Crash: ne jamais fermer automatiquement, laisser aller au bout
+        if self.is_boom_crash_symbol(symbol):
+            return False
+            
+        # Pour les autres symboles (Volatility/Step Index): fermer à $4 de perte
+        return profit <= -4.0
+
+# Instances globales
+deriv_arrow_detector = DERIVArrowDetector()
+max_loss_manager = MaxLossManager()
+boom_crash_manager = BoomCrashManager()
 
 class AdvancedFeatureExtractor:
     """Extraction de features avancées pour le trading"""
@@ -1292,6 +1465,512 @@ class HistoryLearningAdapter:
         return round(confidence, 4)
 
 
+class AggressiveTradingStrategy:
+    """
+    Stratégie de trading agressif avec duplication de positions
+    - Ouvre jusqu'à 4 positions avec des lots croissants
+    - Gestion des profits/pertes agressive
+    - SL/TP serrés
+    """
+    
+    def __init__(self):
+        self.active_strategies = {}  # symbol -> strategy_data
+        self.max_positions = 4       # Nombre maximum de positions par stratégie
+        self.lot_multiplier = 1.5    # Multiplicateur de lot pour chaque position
+        self.profit_target = 10.0    # Objectif de profit en $
+        self.loss_limit = 10.0       # Limite de perte en $
+        self.entry_delay = 5         # Délai entre les entrées en secondes
+        self.position_sizes = {}     # Taille des positions par symbole
+        
+        # Configuration SL/TP agressifs (en pips)
+        self.sl_pips = 20
+        self.tp_pips = 30
+        
+        # NOUVEAU: Sécurisation dynamique dès 1$ de profit
+        self.dynamic_secure_profit = 1.0    # Seuil de déclenchement de la sécurisation
+        self.dynamic_secure_ratio = 0.5     # Sécuriser 50% du profit au-dessus de 1$
+        
+        # NOUVEAU: Gestion des pertes individuelles
+        self.individual_loss_threshold = -1.0  # Seuil de perte individuelle (-1$) avant fermeture manuelle
+        self.avoid_closing_duplicated_losses = True  # Éviter de fermer les positions dupliquées en perte
+    
+    def should_activate(self, symbol, signal_data):
+        """Vérifie si la stratégie doit s'activer pour ce signal"""
+        if symbol in self.active_strategies:
+            return False  # Stratégie déjà active
+        
+        confidence = signal_data.get('confidence', 0)
+        confidence_percent = confidence * 100 if confidence <= 1.0 else confidence
+        
+        # ===== SÉCURITÉ MAXIMALE: VALIDATION 80% CONFIANCE =====
+        # RÈGLE STRICTE: Aucune stratégie agressive sans 80% de confiance minimum
+        if confidence_percent < 80.0:
+            logger.error(f"🛑 SÉCURITÉ AGGRESSIVE: CONFIANCE INSUFFISANTE pour {symbol}: {confidence_percent:.1f}% < 80% REQUIS - STRATÉGIE BLOQUÉE")
+            return False
+            
+        # Vérifier les conditions d'activation
+        if signal_data.get('decision') not in ['ACHAT FORT', 'VENTE FORTE']:
+            logger.error(f"🛑 SÉCURITÉ AGGRESSIVE: PAS DE DÉCISION FORTE pour {symbol}: {signal_data.get('decision')} - REQUIS ACHAT FORT/VENTE FORTE")
+            return False
+            
+        # Double vérification de la confiance (sécurité)
+        if signal_data.get('confidence', 0) < 0.8:  # 80% de confiance minimale
+            logger.error(f"🛑 SÉCURITÉ AGGRESSIVE: CONFIANCE < 0.8 pour {symbol}: {signal_data.get('confidence', 0)}")
+            return False
+            
+        # Ne pas activer sur les symboles Boom/Crash (trop risqué)
+        if 'Boom' in symbol or 'Crash' in symbol:
+            logger.info(f"🚫 Stratégie agressive non autorisée sur {symbol} (Boom/Crash)")
+            return False
+        
+        logger.info(f"✅ SÉCURITÉ AGGRESSIVE VALIDÉE pour {symbol}: {signal_data.get('decision')} | Confiance: {confidence_percent:.1f}% (≥80%)")
+        return True
+    
+    def check_active_strategies(self):
+        """Vérifie et met à jour les stratégies actives"""
+        current_time = time.time()
+        
+        for symbol in list(self.active_strategies.keys()):
+            strategy = self.active_strategies[symbol]
+            
+            # Vérifier si la stratégie est terminée
+            if strategy.get('completed', False):
+                del self.active_strategies[symbol]
+                logger.info(f"🔚 Stratégie agressive terminée pour {symbol}")
+                continue
+                
+            # Calculer le profit total
+            total_profit = self.calculate_strategy_profit(strategy)
+            
+            # ===== NOUVEAU: SÉCURISATION DYNAMIQUE DÈS 1$ DE PROFIT =====
+            if total_profit >= self.dynamic_secure_profit:
+                self.apply_dynamic_secure(symbol, strategy, total_profit)
+            
+            # Vérifier les conditions de sortie
+            if total_profit >= self.profit_target:
+                self.close_strategy(symbol, f"Objectif de profit atteint: ${total_profit:.2f}")
+            elif total_profit <= -self.loss_limit:
+                self.close_strategy(symbol, f"Limite de perte atteinte: ${abs(total_profit):.2f}")
+            else:
+                # Essayer d'ajouter une nouvelle position si nécessaire
+                self.try_add_position(strategy, current_time)
+    
+    def calculate_strategy_profit(self, strategy):
+        """Calcule le profit total d'une stratégie"""
+        total_profit = 0.0
+        for ticket in strategy.get('positions', []):
+            if mt5.positions_get(ticket=ticket):
+                pos = mt5.positions_get(ticket=ticket)[0]
+                total_profit += pos.profit
+        return total_profit
+    
+    def try_add_position(self, strategy, current_time):
+        """Tente d'ajouter une nouvelle position à la stratégie"""
+        symbol = strategy['symbol']
+        
+        # Vérifier le nombre maximum de positions
+        if len(strategy.get('positions', [])) >= self.max_positions:
+            return False
+            
+        # Vérifier le délai depuis la dernière entrée
+        last_entry = strategy.get('last_entry_time', 0)
+        if current_time - last_entry < self.entry_delay:
+            return False
+            
+        # Calculer le lot pour cette position
+        position_count = len(strategy.get('positions', []))
+        base_lot = self.position_sizes.get(symbol, 0.01)
+        position_lot = round(base_lot * (self.lot_multiplier ** position_count), 2)
+        
+        # Exécuter le trade
+        order_type = mt5.ORDER_TYPE_BUY if strategy['signal_type'] == 'ACHAT FORT' else mt5.ORDER_TYPE_SELL
+        
+        # Obtenir le prix actuel
+        symbol_info = mt5.symbol_info_tick(symbol)
+        if symbol_info is None:
+            logger.error(f"Impossible d'obtenir les infos du symbole {symbol}")
+            return False
+            
+        price = symbol_info.ask if order_type == mt5.ORDER_TYPE_BUY else symbol_info.bid
+        
+        # Calculer SL/TP
+        point = mt5.symbol_info(symbol).point
+        if order_type == mt5.ORDER_TYPE_BUY:
+            sl = price - self.sl_pips * 10 * point
+            tp = price + self.tp_pips * 10 * point
+        else:
+            sl = price + self.sl_pips * 10 * point
+            tp = price - self.tp_pips * 10 * point
+            
+        # Exécuter l'ordre
+        request = {
+            "action": mt5.TRADE_ACTION_DEAL,
+            "symbol": symbol,
+            "volume": position_lot,
+            "type": order_type,
+            "price": price,
+            "sl": sl,
+            "tp": tp,
+            "deviation": 10,
+            "magic": 234567,
+            "comment": f"AGGRESSIVE-{position_count+1}",
+            "type_time": mt5.ORDER_TIME_GTC,
+            "type_filling": mt5.ORDER_FILLING_FOK,
+        }
+        
+        result = mt5.order_send(request)
+        if result.retcode == mt5.TRADE_RETCODE_DONE:
+            logger.info(f"🔥 Position agressive #{position_count+1} ouverte sur {symbol} - Lot: {position_lot}")
+            strategy['positions'].append(result.order)
+            strategy['last_entry_time'] = current_time
+            return True
+        else:
+            logger.error(f"Erreur ouverture position agressive: {result.comment}")
+            return False
+    
+    def close_strategy(self, symbol, reason):
+        """Ferme toutes les positions d'une stratégie"""
+        if symbol not in self.active_strategies:
+            return
+            
+        strategy = self.active_strategies[symbol]
+        logger.info(f"🔒 Fermeture stratégie agressive {symbol}: {reason}")
+        
+        # Fermer toutes les positions ouvertes
+        for ticket in strategy.get('positions', []):
+            if mt5.positions_get(ticket=ticket):
+                pos = mt5.positions_get(ticket=ticket)[0]
+                mt5.Close(symbol, ticket=ticket)
+                
+        strategy['completed'] = True
+    
+    def activate_strategy(self, symbol, signal_data):
+        """Active une nouvelle stratégie agressive"""
+        if symbol in self.active_strategies:
+            return False
+            
+        self.active_strategies[symbol] = {
+            'symbol': symbol,
+            'signal_type': signal_data['decision'],
+            'positions': [],
+            'start_time': time.time(),
+            'last_entry_time': 0,
+            'completed': False
+        }
+        
+        # Définir la taille de position par défaut si non définie
+        if symbol not in self.position_sizes:
+            self.position_sizes[symbol] = 0.01  # Taille par défaut
+            
+        logger.info(f"🚀 STRATÉGIE AGRESSIVE ACTIVÉE: {symbol} - {signal_data['decision']}")
+        return True
+
+    def apply_dynamic_secure(self, symbol, strategy, current_profit):
+        """Applique la sécurisation dynamique dès 1$ de profit et gère les pertes individuelles"""
+        # Ne sécuriser que si le profit est au-dessus du seuil
+        if current_profit <= self.dynamic_secure_profit:
+            return
+            
+        # Calculer le profit à sécuriser (50% du profit au-dessus de 1$)
+        excess_profit = current_profit - self.dynamic_secure_profit
+        secure_amount = self.dynamic_secure_profit + (excess_profit * self.dynamic_secure_ratio)
+        
+        # Séparer les positions en profit et en perte
+        profitable_positions = []
+        losing_positions = []
+        positions_to_close = []
+        remaining_profit = 0.0
+        secured_profit = 0.0
+        
+        for ticket in strategy.get('positions', []):
+            if mt5.positions_get(ticket=ticket):
+                pos = mt5.positions_get(ticket=ticket)[0]
+                
+                if pos.profit > 0:
+                    profitable_positions.append(pos)
+                elif pos.profit <= self.individual_loss_threshold and not self.avoid_closing_duplicated_losses:
+                    # Fermer immédiatement les positions qui ont perdu >= 1$ SEULEMENT si l'option est désactivée
+                    positions_to_close.append(ticket)
+                    logger.warning(f"🛑 Position en perte critique fermée: {pos.symbol} Ticket {ticket} - Perte: ${pos.profit:.2f}")
+                else:
+                    # Positions en perte : laisser le SL normal gérer (surtout pour les positions dupliquées)
+                    losing_positions.append(pos)
+        
+        # Fermer les positions en perte critique d'abord
+        for ticket in positions_to_close:
+            try:
+                if mt5.positions_get(ticket=ticket):
+                    pos = mt5.positions_get(ticket=ticket)[0]
+                    result = mt5.Close(pos.symbol, ticket=ticket)
+                    if result.retcode == mt5.TRADE_RETCODE_DONE:
+                        # Retirer de la liste des positions actives
+                        if ticket in strategy['positions']:
+                            strategy['positions'].remove(ticket)
+                    else:
+                        logger.error(f"Erreur fermeture position perte critique: {result.comment}")
+            except Exception as e:
+                logger.error(f"Erreur fermeture position perte critique {ticket}: {e}")
+        
+        # Maintenant sécuriser le profit avec les positions rentables
+        for pos in profitable_positions:
+            if secured_profit < secure_amount:
+                # Fermer cette position pour sécuriser
+                positions_to_close.append(pos.ticket)
+                secured_profit += pos.profit
+            else:
+                remaining_profit += pos.profit
+        
+        # Fermer les positions rentables sélectionnées pour sécurisation
+        for ticket in positions_to_close:
+            try:
+                if mt5.positions_get(ticket=ticket):
+                    pos = mt5.positions_get(ticket=ticket)[0]
+                    result = mt5.Close(pos.symbol, ticket=ticket)
+                    if result.retcode == mt5.TRADE_RETCODE_DONE:
+                        logger.info(f"🔒 Position sécurisée: {pos.symbol} Ticket {ticket} - Profit: ${pos.profit:.2f}")
+                        
+                        # Retirer de la liste des positions actives
+                        if ticket in strategy['positions']:
+                            strategy['positions'].remove(ticket)
+                    else:
+                        logger.error(f"Erreur fermeture position sécurisée: {result.comment}")
+            except Exception as e:
+                logger.error(f"Erreur sécurisation position {ticket}: {e}")
+        
+        # Logger la sécurisation
+        if secured_profit > 0:
+            logger.info(f"💰 SÉCURISATION DYNAMIQUE {symbol}: ${secured_profit:.2f} sécurisés | Restant: ${remaining_profit:.2f} | Total: ${current_profit:.2f}")
+            
+            # Envoyer notification
+            notification = f"💰 Sécurisation {symbol}: ${secured_profit:.2f} sécurisés (${current_profit:.2f} total)"
+            try:
+                # Utiliser le système de notification MT5 si disponible
+                mt5.terminal_notify(notification)
+            except:
+                pass
+        
+        # Logger les positions en perte laissées au SL
+        if losing_positions:
+            total_loss = sum(pos.profit for pos in losing_positions)
+            if self.avoid_closing_duplicated_losses:
+                logger.info(f"⏳ Positions dupliquées en perte laissées au SL normal: {len(losing_positions)} positions | Perte totale: ${total_loss:.2f}")
+            else:
+                logger.info(f"⏳ Positions en perte laissées au SL normal: {len(losing_positions)} positions | Perte totale: ${total_loss:.2f}")
+            
+            for pos in losing_positions:
+                logger.debug(f"   Position {pos.ticket}: ${pos.profit:.2f} (SL: {pos.sl})")
+        elif self.avoid_closing_duplicated_losses:
+            logger.info("🛡️ Protection des positions dupliquées: aucune fermeture manuelle en perte (SL normal uniquement)")
+
+class EMAScalpingStrategy:
+    """
+    Stratégie de scalping automatique sur l'EMA fast M1
+    - S'active quand décision IA est 100%
+    - Cherche des entrées à chaque toucher de l'EMA fast en M1
+    - Scalping rapide avec SL/TP serrés
+    """
+    
+    def __init__(self):
+        self.active_scalping_strategies = {}  # symbol -> strategy_data
+        self.ema_fast_period = 9              # EMA rapide pour M1
+        self.ema_slow_period = 21              # EMA lente pour confirmation
+        self.scalping_sl_pips = 15             # SL très serré pour scalping
+        self.scalping_tp_pips = 25             # TP rapide pour scalping
+        self.max_scalping_positions = 3        # Maximum 3 positions de scalping
+        self.scalping_lot_size = 0.01          # Taille fixe pour scalping
+        self.check_interval = 2                # Vérifier toutes les 2 secondes
+        
+    def activate_ema_scalping(self, symbol, direction):
+        """Active le scalping automatique sur l'EMA fast M1"""
+        if symbol in self.active_scalping_strategies:
+            logger.info(f"🔄 Scalping déjà actif pour {symbol}")
+            return False
+            
+        self.active_scalping_strategies[symbol] = {
+            'symbol': symbol,
+            'direction': direction,  # 'BUY' ou 'SELL'
+            'positions': [],
+            'start_time': time.time(),
+            'last_check_time': 0,
+            'last_ema_touch_time': 0,
+            'completed': False,
+            'total_profit': 0.0
+        }
+        
+        logger.info(f"🚀 SCALPING EMA ACTIVÉ: {symbol} - Direction: {direction}")
+        return True
+    
+    def check_ema_scalping_opportunities(self):
+        """Vérifie les opportunités de scalping sur l'EMA fast M1"""
+        current_time = time.time()
+        
+        for symbol in list(self.active_scalping_strategies.keys()):
+            strategy = self.active_scalping_strategies[symbol]
+            
+            # Vérifier si la stratégie est terminée
+            if strategy.get('completed', False):
+                del self.active_scalping_strategies[symbol]
+                logger.info(f"🔚 Scalping terminé pour {symbol}")
+                continue
+                
+            # Vérifier l'intervalle de temps
+            if current_time - strategy['last_check_time'] < self.check_interval:
+                continue
+                
+            strategy['last_check_time'] = current_time
+            
+            # Calculer les EMAs M1
+            ema_fast = self.calculate_ema(symbol, self.ema_fast_period, mt5.TIMEFRAME_M1)
+            ema_slow = self.calculate_ema(symbol, self.ema_slow_period, mt5.TIMEFRAME_M1)
+            
+            if ema_fast is None or ema_slow is None:
+                continue
+                
+            # Obtenir le prix actuel
+            tick = mt5.symbol_info_tick(symbol)
+            if not tick:
+                continue
+                
+            current_price = tick.bid if strategy['direction'] == 'SELL' else tick.ask
+            
+            # Vérifier si le prix touche l'EMA fast
+            is_touching_ema = self.is_price_touching_ema(current_price, ema_fast)
+            
+            if is_touching_ema:
+                logger.info(f"🎯 EMA TOUCH détecté: {symbol} - Prix: {current_price} - EMA: {ema_fast}")
+                
+                # Vérifier la tendance avec l'EMA slow
+                trend_confirmed = self.confirm_trend_with_slow_ema(current_price, ema_fast, ema_slow, strategy['direction'])
+                
+                if trend_confirmed:
+                    # Exécuter le trade de scalping
+                    self.execute_scalping_trade(symbol, strategy, current_price, ema_fast)
+                    
+            # Calculer le profit total et vérifier les conditions de sortie
+            self.update_scalping_profit(strategy)
+            
+            # Sortie si profit cible atteint ou perte limite
+            if strategy['total_profit'] >= 5.0:  # 5$ profit cible
+                self.close_scalping_strategy(symbol, f"Profit cible atteint: ${strategy['total_profit']:.2f}")
+            elif strategy['total_profit'] <= -3.0:  # 3$ perte limite
+                self.close_scalping_strategy(symbol, f"Perte limite atteinte: ${abs(strategy['total_profit']):.2f}")
+    
+    def calculate_ema(self, symbol, period, timeframe):
+        """Calcule l'EMA pour une période et timeframe donnés"""
+        try:
+            # Récupérer les prix de clôture
+            rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, period + 10)
+            if rates is None or len(rates) < period:
+                return None
+                
+            closes = [rate['close'] for rate in rates]
+            
+            # Calculer l'EMA
+            ema = self.technical_analyzer.calculate_ema(closes, period)
+            return ema[-1] if ema else None
+            
+        except Exception as e:
+            logger.error(f"Erreur calcul EMA {symbol} period {period}: {e}")
+            return None
+    
+    def is_price_touching_ema(self, price, ema, tolerance_pips=5):
+        """Vérifie si le prix touche l'EMA (avec tolérance)"""
+        symbol_info = mt5.symbol_info("EURUSD")  # Utiliser EURUSD comme référence pour les pips
+        if symbol_info:
+            point = symbol_info.point
+            tolerance = tolerance_pips * point * 10
+            return abs(price - ema) <= tolerance
+        return abs(price - ema) <= 0.0005  # Tolérance par défaut
+    
+    def confirm_trend_with_slow_ema(self, price, ema_fast, ema_slow, direction):
+        """Confirme la tendance avec l'EMA slow"""
+        if direction == 'SELL':
+            # Pour VENTE: EMA fast doit être sous EMA slow
+            return ema_fast < ema_slow
+        else:  # BUY
+            # Pour ACHAT: EMA fast doit être au-dessus de EMA slow
+            return ema_fast > ema_slow
+    
+    def execute_scalping_trade(self, symbol, strategy, entry_price, ema_value):
+        """Exécute un trade de scalping"""
+        # Vérifier le nombre maximum de positions
+        if len(strategy['positions']) >= self.max_scalping_positions:
+            logger.info(f"📊 Maximum positions scalping atteint pour {symbol}")
+            return False
+            
+        # Déterminer le type d'ordre
+        order_type = mt5.ORDER_TYPE_SELL if strategy['direction'] == 'SELL' else mt5.ORDER_TYPE_BUY
+        
+        # Calculer SL/TP serrés
+        symbol_info = mt5.symbol_info(symbol)
+        if not symbol_info:
+            return False
+            
+        point = symbol_info.point
+        
+        if order_type == mt5.ORDER_TYPE_BUY:
+            sl = entry_price - (self.scalping_sl_pips * 10 * point)
+            tp = entry_price + (self.scalping_tp_pips * 10 * point)
+        else:  # SELL
+            sl = entry_price + (self.scalping_sl_pips * 10 * point)
+            tp = entry_price - (self.scalping_tp_pips * 10 * point)
+        
+        # Créer la requête d'ordre
+        request = {
+            "action": mt5.TRADE_ACTION_DEAL,
+            "symbol": symbol,
+            "volume": self.scalping_lot_size,
+            "type": order_type,
+            "price": entry_price,
+            "sl": sl,
+            "tp": tp,
+            "deviation": 10,
+            "magic": 345678,  # Magic number différent pour scalping
+            "comment": f"SCALPING-EMA-{strategy['direction']}",
+            "type_time": mt5.ORDER_TIME_GTC,
+            "type_filling": mt5.ORDER_FILLING_FOK,
+        }
+        
+        result = mt5.order_send(request)
+        if result.retcode == mt5.TRADE_RETCODE_DONE:
+            logger.info(f"⚡ Trade scalping exécuté: {symbol} {strategy['direction']} | Entry: {entry_price} | SL: {sl} | TP: {tp}")
+            strategy['positions'].append(result.order)
+            strategy['last_ema_touch_time'] = time.time()
+            return True
+        else:
+            logger.error(f"Erreur trade scalping: {result.comment}")
+            return False
+    
+    def update_scalping_profit(self, strategy):
+        """Met à jour le profit total de la stratégie de scalping"""
+        total_profit = 0.0
+        active_positions = []
+        
+        for ticket in strategy.get('positions', []):
+            if mt5.positions_get(ticket=ticket):
+                pos = mt5.positions_get(ticket=ticket)[0]
+                total_profit += pos.profit
+                active_positions.append(ticket)
+        
+        strategy['positions'] = active_positions  # Garder seulement les positions actives
+        strategy['total_profit'] = total_profit
+    
+    def close_scalping_strategy(self, symbol, reason):
+        """Ferme toutes les positions de scalping"""
+        if symbol not in self.active_scalping_strategies:
+            return
+            
+        strategy = self.active_scalping_strategies[symbol]
+        logger.info(f"🔒 Fermeture scalping {symbol}: {reason}")
+        
+        # Fermer toutes les positions ouvertes
+        for ticket in strategy.get('positions', []):
+            if mt5.positions_get(ticket=ticket):
+                pos = mt5.positions_get(ticket=ticket)[0]
+                mt5.Close(symbol, ticket=ticket)
+                
+        strategy['completed'] = True
+
 class MT5AIClient:
     def __init__(self):
         self.connected = False
@@ -1302,6 +1981,8 @@ class MT5AIClient:
         self.feature_extractor = AdvancedFeatureExtractor()
         self.model_performance_cache = {}  # Cache pour performance des modèles
         self.history_learning = HistoryLearningAdapter(last_n_trades=80, min_trades_for_adjustment=10)
+        self.aggressive_strategy = AggressiveTradingStrategy()  # NOUVEAU: Stratégie agressive
+        self.ema_scalping_strategy = EMAScalpingStrategy()  # NOUVEAU: Stratégie de scalping EMA
 
     def get_position_profit(self, ticket):
         """Récupère le profit actuel d'une position"""
@@ -1340,13 +2021,20 @@ class MT5AIClient:
                 self.connected = True
                 
                 # Détecter automatiquement les symboles par catégories
-                if not self.symbol_detector.detect_symbols():
-                    logger.error("Aucun symbole détecté")
-                    return False
+                logger.info("🔍 Détection automatique des symboles...")
+                self.symbol_detector.detect_symbols()
+                logger.info(f"📊 {len(self.symbol_detector.all_symbols)} symboles trouvés")
+                
+                # Stocker les informations de connexion pour la reconnexion
+                self.mt5_login = account_info.login
+                self.mt5_password = password
+                self.mt5_server = server
                 
                 return True
+            else:
+                logger.error("Impossible de récupérer les infos du compte")
+                return False
                 
-            logger.error("Impossible de se connecter a MT5")
             return False
             
         except Exception as e:
@@ -1367,6 +2055,121 @@ class MT5AIClient:
         except Exception as e:
             logger.error(f"Erreur vérification marché {symbol}: {e}")
             return False
+    
+    def get_historical_data(self, symbol, timeframe, count=100):
+        """Récupère les données historiques avec gestion des colonnes manquantes"""
+        try:
+            # Récupérer les données depuis MT5
+            rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, count)
+            
+            if rates is None:
+                logger.error(f"Impossible de récupérer les données pour {symbol}")
+                return None
+                
+            # Convertir en DataFrame
+            df = pd.DataFrame(rates)
+            
+            # Vérifier et ajouter les colonnes manquantes
+            required_columns = ['time', 'open', 'high', 'low', 'close', 'tick_volume', 'spread', 'real_volume']
+            for col in required_columns:
+                if col not in df.columns:
+                    if col == 'tick_volume':
+                        # Si tick_volume manque, utiliser le volume réel ou une valeur par défaut
+                        df['tick_volume'] = df['real_volume'] if 'real_volume' in df.columns else 1
+                    elif col == 'spread':
+                        # Si spread manque, utiliser une valeur par défaut
+                        df['spread'] = 10  # Valeur par défaut
+                    elif col == 'real_volume':
+                        # Si real_volume manque, utiliser tick_volume ou une valeur par défaut
+                        df['real_volume'] = df['tick_volume'] if 'tick_volume' in df.columns else 1
+            
+            return df
+            
+        except Exception as e:
+            logger.error(f"Erreur lors de la récupération des données pour {symbol}: {str(e)}")
+            return None
+    
+    def prepare_candle_data(self, df):
+        """Prépare les données de bougies avec gestion des colonnes manquantes"""
+        try:
+            # Vérifier les colonnes requises
+            required_columns = ['time', 'open', 'high', 'low', 'close', 'tick_volume']
+            
+            # Créer un nouveau DataFrame avec les colonnes requises
+            result = pd.DataFrame()
+            
+            # Copier les colonnes existantes
+            for col in required_columns:
+                if col in df.columns:
+                    result[col] = df[col]
+                else:
+                    # Valeurs par défaut pour les colonnes manquantes
+                    if col == 'time':
+                        result[col] = pd.date_range(start='2020-01-01', periods=len(df), freq='T')
+                    elif col == 'tick_volume':
+                        result[col] = 1
+                    else:
+                        result[col] = df['close']  # Utiliser 'close' comme valeur par défaut
+            
+            # Assurer que les types de données sont corrects
+            result['time'] = pd.to_datetime(result['time'], unit='s')
+            numeric_cols = ['open', 'high', 'low', 'close', 'tick_volume']
+            result[numeric_cols] = result[numeric_cols].apply(pd.to_numeric, errors='coerce')
+            
+            # Remplir les valeurs manquantes
+            result = result.ffill().bfill()
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Erreur dans prepare_candle_data: {str(e)}")
+            return None
+    
+    def get_market_state(self, symbol, timeframe):
+        """Récupère l'état du marché avec gestion des modèles manquants"""
+        try:
+            # Vérifier d'abord si on a un modèle pour ce symbole et ce timeframe
+            model_key = f"{symbol}_{timeframe}"
+            
+            if not hasattr(self, 'ml_models') or model_key not in self.ml_models:
+                logger.warning(f"Pas de modèle ML pour {model_key}, utilisation de l'analyse de tendance de base")
+                return self.get_basic_trend(symbol, timeframe)
+                
+            # Utiliser le modèle ML si disponible
+            return self.predict_with_ml_model(symbol, timeframe)
+            
+        except Exception as e:
+            logger.error(f"Erreur dans get_market_state pour {symbol}: {str(e)}")
+            return "NEUTRE", 50.0  # Retourner une valeur neutre en cas d'erreur
+    
+    def get_basic_trend(self, symbol, timeframe):
+        """Analyse de tendance de base en cas d'absence de modèle ML"""
+        try:
+            # Récupérer les données historiques
+            df = self.get_historical_data(symbol, timeframe, count=50)
+            if df is None or df.empty:
+                return "NEUTRE", 50.0
+                
+            # Calculer des indicateurs de base
+            df['sma_20'] = df['close'].rolling(window=20).mean()
+            df['sma_50'] = df['close'].rolling(window=50).mean()
+            
+            # Dernière valeur des indicateurs
+            last_close = df['close'].iloc[-1]
+            sma_20 = df['sma_20'].iloc[-1]
+            sma_50 = df['sma_50'].iloc[-1]
+            
+            # Logique de tendance simple
+            if last_close > sma_20 > sma_50:
+                return "ACHAT", 70.0
+            elif last_close < sma_20 < sma_50:
+                return "VENTE", 70.0
+            else:
+                return "NEUTRE", 50.0
+                
+        except Exception as e:
+            logger.error(f"Erreur dans get_basic_trend pour {symbol}: {str(e)}")
+            return "NEUTRE", 50.0
 
     def get_ai_signal(self, symbol, timeframe="M5"):
         """Signal de trading ultra-optimisé avec tous les analyseurs"""
@@ -2142,22 +2945,89 @@ class MT5AIClient:
             return mt5.ORDER_FILLING_FOK
 
     def execute_trade(self, symbol, signal_data):
-        """Exécute un trade basé sur le signal de l'IA avec détection automatique"""
+        """Exécute un trade basé sur le signal de l'IA avec décision finale claire requise"""
         try:
             signal = signal_data.get('signal')
             confidence = signal_data.get('confidence', 0)
+            decision = signal_data.get('decision', '')  # Décision finale (ACHAT FORT, VENTE FORTE, etc.)
             
             # La confiance est en décimal (0-1), convertir en pourcentage pour comparaison
             confidence_percent = confidence * 100 if confidence <= 1.0 else confidence
-            min_confidence_percent = MIN_CONFIDENCE * 100 if MIN_CONFIDENCE <= 1.0 else MIN_CONFIDENCE
             
-            if confidence_percent < min_confidence_percent:
-                logger.info(f"Confiance trop faible pour {symbol}: {confidence_percent:.1f}% < {min_confidence_percent:.1f}%")
-                return False
+            # ===== SÉCURITÉ MAXIMALE: VALIDATION 80% CONFIANCE =====
+            # RÈGLE STRICTE: Aucune position sans 80% de confiance minimum
+            if confidence_percent < 80.0:
+                return False  # Pas de log pour éviter de ramer
+            
+            # ===== NOUVEAU: VÉRIFICATION LISTE NOIRE (SYMBOLES NEUTRES) =====
+            if self.is_symbol_blacklisted(symbol):
+                return False  # Pas de log pour éviter de ramer
+            
+            # ===== OPTIMISATION: UTILISER LE SIGNAL DIRECTEMENT SI DÉCISION VIDE =====
+            # Si la décision finale est vide, utiliser le signal comme décision
+            if not decision or decision.strip() == '':
+                if signal in ['BUY', 'SELL']:
+                    decision = 'ACHAT FORT' if signal == 'BUY' else 'VENTE FORTE'
+                else:
+                    return False  # Pas de signal clair, pas de trade
+            
+            # Vérifier si nous avons une décision finale claire
+            if decision not in ['ACHAT FORT', 'VENTE FORTE', 'ACHAT', 'VENTE']:
+                return False  # Pas de log pour éviter de ramer
+            
+            # Convertir la décision finale en signal
+            if decision in ['ACHAT FORT', 'ACHAT']:
+                signal = 'BUY'
+            elif decision in ['VENTE FORTE', 'VENTE']:
+                signal = 'SELL'
+            else:
+                return False  # Pas de log pour éviter de ramer
+            
+            logger.info(f"✅ SÉCURITÉ VALIDÉE pour {symbol}: {decision} | Confiance: {confidence_percent:.1f}% (≥80%)")
             
             if signal not in ["BUY", "SELL"]:
                 logger.info(f"Pas de signal trade pour {symbol}: {signal}")
                 return False
+            
+            # ===== NOUVEAU: STRATÉGIE AGGRESSIVE =====
+            # Vérifier si la stratégie agressive doit s'activer
+            if self.aggressive_strategy.should_activate(symbol, signal_data):
+                logger.info(f"🔥 CONDITIONS AGRESSIVES RÉUNIES pour {symbol}")
+                if self.aggressive_strategy.activate_strategy(symbol, signal_data):
+                    logger.info(f"🚀 Stratégie agressive activée pour {symbol}")
+                    return True
+                else:
+                    logger.error(f"❌ Erreur activation stratégie agressive pour {symbol}")
+            
+            # Vérifier si une stratégie agressive est déjà active
+            if symbol in self.aggressive_strategy.active_strategies:
+                logger.info(f"🔄 Stratégie agressive déjà active pour {symbol}, pas de nouveau trade normal")
+                return False
+            
+            # ===== NOUVEAU: DÉTECTION DÉCISION 100% + SCALPING AUTOMATIQUE =====
+            # Si la décision est 100% VENTE, exécuter immédiatement et activer le scalping
+            if confidence_percent >= 100.0 and signal == "SELL":
+                logger.info(f"🔥 DÉCISION 100% VENTE DÉTECTÉE pour {symbol} - Exécution immédiate + scalping automatique")
+                
+                # Exécuter le trade initial immédiatement
+                if self.execute_immediate_trade(symbol, signal_data):
+                    # Activer le scalping automatique sur l'EMA fast M1
+                    self.activate_ema_scalping(symbol, signal)
+                    return True
+                else:
+                    logger.error(f"❌ Erreur exécution trade 100% VENTE pour {symbol}")
+            
+            # Si la décision est 100% ACHAT, exécuter immédiatement et activer le scalping
+            elif confidence_percent >= 100.0 and signal == "BUY":
+                logger.info(f"🔥 DÉCISION 100% ACHAT DÉTECTÉE pour {symbol} - Exécution immédiate + scalping automatique")
+                
+                # Exécuter le trade initial immédiatement
+                if self.execute_immediate_trade(symbol, signal_data):
+                    # Activer le scalping automatique sur l'EMA fast M1
+                    self.activate_ema_scalping(symbol, signal)
+                    return True
+                else:
+                    logger.error(f"❌ Erreur exécution trade 100% ACHAT pour {symbol}")
             
             # PROTECTION Boom/Crash: pas de SELL sur Boom, pas de BUY sur Crash
             # Boom = BUY uniquement (spike haussier) | Crash = SELL uniquement (spike baissier)
@@ -2754,217 +3624,714 @@ class MT5AIClient:
                             
         except Exception as e:
             logger.error(f"Erreur vérification positions: {e}")
-            
-    def run(self):
-        """Boucle principale du client avec détection automatique des symboles"""
-        logger.info("🚀 Demarrage du client MT5 AI Ultra-Optimisé")
-        
-        if not self.connect_mt5():
-            logger.error("Impossible de demarrer sans connexion MT5")
-            return
-        
-        last_training_time = 0
-        last_retrain_trigger_time = 0
-        RETRAIN_TRIGGER_INTERVAL = 6 * 3600  # 6 heures: ré-entraînement IA (historique + prédictions)
-        
+    
+    def execute_immediate_trade(self, symbol, signal_data):
+        """Exécute un trade immédiat pour décision 100%"""
         try:
-            while True:
+            signal = signal_data.get('signal')
+            confidence = signal_data.get('confidence', 0)
+            
+            logger.info(f"⚡ EXÉCUTION IMMÉDIATE 100%: {symbol} {signal} (Confiance: {confidence}%)")
+            
+            # Récupérer la taille de position appropriée
+            position_size = self.symbol_detector.get_position_size(symbol)
+            
+            # Obtenir les informations du symbole
+            symbol_info = mt5.symbol_info(symbol)
+            if not symbol_info:
+                logger.error(f"Info symbole non disponible pour {symbol}")
+                return False
+                
+            tick = mt5.symbol_info_tick(symbol)
+            if not tick:
+                logger.error(f"Tick non disponible pour {symbol}")
+                return False
+            
+            # Déterminer le prix et le type d'ordre
+            if signal == "BUY":
+                price = tick.ask
+                order_type = mt5.ORDER_TYPE_BUY
+            else:  # SELL
+                price = tick.bid
+                order_type = mt5.ORDER_TYPE_SELL
+            
+            # Calculer SL/TP pour trade immédiat (plus serrés)
+            sl, tp = self.calculate_smart_sltp(symbol, price, order_type)
+            
+            if sl is None or tp is None:
+                logger.error(f"Impossible de calculer SL/TP pour {symbol}")
+                return False
+            
+            # Créer la requête d'ordre
+            filling_mode = self.get_symbol_filling_mode(symbol)
+            
+            request = {
+                "action": mt5.TRADE_ACTION_DEAL,
+                "symbol": symbol,
+                "volume": position_size,
+                "type": order_type,
+                "price": price,
+                "sl": sl,
+                "tp": tp,
+                "deviation": 10,
+                "magic": 456789,  # Magic number pour trades 100%
+                "comment": f"100%-IMMEDIATE-{signal}",
+                "type_time": mt5.ORDER_TIME_GTC,
+                "type_filling": filling_mode,
+            }
+            
+            result = mt5.order_send(request)
+            if result.retcode == mt5.TRADE_RETCODE_DONE:
+                logger.info(f"✅ Trade 100% exécuté: {symbol} {signal} | Ticket: {result.order} | Lot: {position_size}")
+                return True
+            else:
+                logger.error(f"❌ Erreur trade 100%: {result.comment}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Erreur exécution trade immédiat {symbol}: {e}")
+            return False
+    
+    def activate_ema_scalping(self, symbol, direction):
+        """Active le scalping automatique sur l'EMA fast M1"""
+        try:
+            success = self.ema_scalping_strategy.activate_ema_scalping(symbol, direction)
+            if success:
+                logger.info(f"🚀 Scalping EMA activé pour {symbol} - Direction: {direction}")
+                
+                # Envoyer notification
+                notification = f"🚀 Scalping EMA activé: {symbol} {direction}"
                 try:
-                    # Vérifier les positions existantes
-                    self.check_positions()
-                    self.auto_close_winners(1.0)
-                    
-                    # Surveillance des positions pour protection des gains et limitation des pertes
-                    self.monitor_positions_protection()
-                    
-                    current_time = time.time()
-                    # Envoyer les données d'entraînement toutes les heures
-                    if current_time - last_training_time > 3600:  # 1 heure
-                        self.send_training_data()
-                        last_training_time = current_time
-                    
-                    # Déclencher le ré-entraînement IA sur le serveur (historique + prédictions → modèles)
-                    if current_time - last_retrain_trigger_time > RETRAIN_TRIGGER_INTERVAL:
-                        self._trigger_continuous_learning()
-                        last_retrain_trigger_time = current_time
-                    
-                    # Demander des signaux pour chaque symbole détecté automatiquement
-                    signals_data = {}
-                    symbols_to_monitor = self.symbol_detector.get_symbols_by_priority()
-                    
-                    for symbol in symbols_to_monitor:
-                        if symbol not in self.positions:  # Seulement si pas de position
-                            signal_data = self.get_ai_signal(symbol)
-                            signals_data[symbol] = signal_data
-                            
-                            if signal_data:
-                                self.execute_trade(symbol, signal_data)
-                    
-                    # Afficher le dashboard avec catégories
-                    dashboard.display_dashboard(self.positions, signals_data)
-                    
-                    # Synchroniser avec le web dashboard
-                    self.sync_to_web_dashboard()
-                    
-                    # Attendre avant la prochaine vérification
-                    time.sleep(CHECK_INTERVAL)
-                    
-                except KeyboardInterrupt:
-                    logger.info("Arret demande par l'utilisateur")
-                    break
+                    mt5.terminal_notify(notification)
+                except:
+                    pass
+            return success
+        except Exception as e:
+            logger.error(f"Erreur activation scalping EMA {symbol}: {e}")
+            return False
+    
+    def check_ema_scalping_opportunities(self):
+        """Vérifie les opportunités de scalping EMA (appelé dans la boucle principale)"""
+        try:
+            self.ema_scalping_strategy.check_ema_scalping_opportunities()
+        except Exception as e:
+            logger.error(f"Erreur vérification scalping EMA: {e}")
+    
+    def check_neutral_decision_closure_optimized(self, symbol, decision):
+        """Version optimisée sans logs pour éviter de ramer"""
+        try:
+            # Vérification rapide des décisions neutres
+            neutral_decisions = ['NEUTRE', 'NEUTRAL', 'HOLD', 'WAIT', 'ATTENTE', '', 'UNCERTAIN', 'INCERTAIN', 'SIDEWAYS', 'RANGE', 'CONSO', 'CONSOLIDATION', 'FLAT', 'STABLE', 'NO_SIGNAL', 'NO SIGNAL', 'NONE', 'NULL']
+            
+            decision_upper = str(decision).upper().strip()
+            is_neutral = any(neutral in decision_upper or decision_upper in neutral for neutral in neutral_decisions)
+            
+            if not is_neutral:
+                return False
+            
+            # Récupérer les positions
+            positions = mt5.positions_get(symbol=symbol)
+            if not positions:
+                return False
+            
+            # Log uniquement si fermeture effective
+            logger.warning(f"🚨 DÉCISION NEUTRE DÉTECTÉE pour {symbol}: '{decision}' - FERMETURE IMMÉDIATE de {len(positions)} position(s)")
+            
+            positions_closed = 0
+            total_profit = 0.0
+            
+            for position in positions:
+                # Fermer avec mode adaptatif
+                symbol_info = mt5.symbol_info(position.symbol)
+                filling_mode = symbol_info.filling_mode if symbol_info else mt5.ORDER_FILLING_IOC
+                
+                close_request = {
+                    "action": mt5.TRADE_ACTION_DEAL,
+                    "symbol": position.symbol,
+                    "volume": position.volume,
+                    "type": mt5.ORDER_TYPE_BUY if position.type == mt5.POSITION_TYPE_SELL else mt5.ORDER_TYPE_SELL,
+                    "position": position.ticket,
+                    "price": mt5.symbol_info_tick(position.symbol).bid if position.type == mt5.POSITION_TYPE_BUY else mt5.symbol_info_tick(position.symbol).ask,
+                    "deviation": 20,
+                    "magic": position.magic,
+                    "comment": f"NEUTRAL-DECISION-CLOSE",
+                    "type_time": mt5.ORDER_TIME_GTC,
+                    "type_filling": filling_mode,
+                }
+                
+                result = mt5.order_send(close_request)
+                if result.retcode == mt5.TRADE_RETCODE_DONE:
+                    positions_closed += 1
+                    total_profit += position.profit
+                    logger.info(f"✅ Position fermée (décision neutre): {symbol} Ticket {position.ticket} | Profit: {position.profit:.2f}$")
+                else:
+                    logger.error(f"❌ Erreur fermeture position {position.ticket}: {result.comment}")
+            
+            if positions_closed > 0:
+                logger.warning(f"🔒 FERMETURE COMPLÈTE pour {symbol}: {positions_closed} position(s) fermée(s) | Profit total: {total_profit:.2f}$")
+                
+                # Notification
+                notification = f"🚨 FERMETURE NEUTRE: {symbol} | {positions_closed} positions | Profit: {total_profit:.2f}$"
+                try:
+                    mt5.terminal_notify(notification)
+                except:
+                    pass
+                
+                return True
+            
+            return False
+            
+        except Exception as e:
+            logger.error(f"Erreur fermeture décision neutre {symbol}: {e}")
+            return False
+    def check_neutral_decision_closure(self, symbol, decision):
+        """Ferme immédiatement toutes les positions si la décision devient NEUTRE"""
+        try:
+            # Vérifier si la décision est NEUTRE ou équivalent (liste étendue)
+            neutral_decisions = [
+                'NEUTRE', 'NEUTRAL', 'HOLD', 'WAIT', 'ATTENTE', '',
+                'UNCERTAIN', 'INCERTAIN', 'SIDEWAYS', 'RANGE', 
+                'CONSO', 'CONSOLIDATION', 'FLAT', 'STABLE',
+                'NO_SIGNAL', 'NO SIGNAL', 'NONE', 'NULL'
+            ]
+            
+            decision_upper = str(decision).upper().strip()
+            is_neutral = any(neutral in decision_upper or decision_upper in neutral for neutral in neutral_decisions)
+            
+            # DEBUG: Loguer la détection
+            logger.info(f"🔍 Analyse décision {symbol}: '{decision}' -> NEUTRE: {is_neutral}")
+            
+            if not is_neutral:
+                return False  # Pas une décision neutre, pas de fermeture
+            
+            # Récupérer toutes les positions pour ce symbole
+            positions = mt5.positions_get(symbol=symbol)
+            if not positions:
+                logger.info(f"📊 Aucune position à fermer pour {symbol}")
+                return False  # Pas de positions à fermer
+            
+            logger.warning(f"🚨 DÉCISION NEUTRE DÉTECTÉE pour {symbol}: '{decision}' - FERMETURE IMMÉDIATE de {len(positions)} position(s)")
+            
+            positions_closed = 0
+            total_profit = 0.0
+            
+            for position in positions:
+                # Fermer la position avec mode de remplissage adaptatif
+                symbol_info = mt5.symbol_info(position.symbol)
+                filling_mode = symbol_info.filling_mode if symbol_info else mt5.ORDER_FILLING_IOC
+                
+                close_request = {
+                    "action": mt5.TRADE_ACTION_DEAL,
+                    "symbol": position.symbol,
+                    "volume": position.volume,
+                    "type": mt5.ORDER_TYPE_BUY if position.type == mt5.POSITION_TYPE_SELL else mt5.ORDER_TYPE_SELL,
+                    "position": position.ticket,
+                    "price": mt5.symbol_info_tick(position.symbol).bid if position.type == mt5.POSITION_TYPE_BUY else mt5.symbol_info_tick(position.symbol).ask,
+                    "deviation": 20,
+                    "magic": position.magic,
+                    "comment": f"NEUTRAL-DECISION-CLOSE",
+                    "type_time": mt5.ORDER_TIME_GTC,
+                    "type_filling": filling_mode,
+                }
+                
+                result = mt5.order_send(close_request)
+                if result.retcode == mt5.TRADE_RETCODE_DONE:
+                    positions_closed += 1
+                    total_profit += position.profit
+                    logger.info(f"✅ Position fermée (décision neutre): {symbol} Ticket {position.ticket} | Profit: {position.profit:.2f}$")
+                else:
+                    logger.error(f"❌ Erreur fermeture position {position.ticket}: {result.comment}")
+            
+            # Log de résumé
+            if positions_closed > 0:
+                logger.warning(f"🔒 FERMETURE COMPLÈTE pour {symbol}: {positions_closed} position(s) fermée(s) | Profit total: {total_profit:.2f}$")
+                
+                # Envoyer notification
+                notification = f"🚨 FERMETURE NEUTRE: {symbol} | {positions_closed} positions | Profit: {total_profit:.2f}$"
+                try:
+                    mt5.terminal_notify(notification)
+                except:
+                    pass
+                
+                # Fermer également les stratégies actives pour ce symbole
+                if hasattr(self, 'aggressive_strategy') and symbol in self.aggressive_strategy.active_strategies:
+                    self.aggressive_strategy.close_strategy(symbol, "DÉCISION NEUTRE")
+                
+                if hasattr(self, 'ema_scalping_strategy') and symbol in self.ema_scalping_strategy.active_scalping_strategies:
+                    self.ema_scalping_strategy.close_scalping_strategy(symbol, "DÉCISION NEUTRE")
+                
+                return True
+            
+            return False
+            
+        except Exception as e:
+            logger.error(f"Erreur vérification fermeture décision neutre {symbol}: {e}")
+            return False
+    
+    def add_symbol_to_blacklist(self, symbol, reason):
+        """Ajoute un symbole à la liste noire temporaire pour éviter nouveaux trades"""
+        try:
+            if not hasattr(self, 'symbol_blacklist'):
+                self.symbol_blacklist = {}
+            
+            self.symbol_blacklist[symbol] = {
+                'reason': reason,
+                'timestamp': time.time(),
+                'duration': 300  # 5 minutes de blocage
+            }
+            
+            logger.warning(f"🚫 SYMBOLE BLOQUÉ: {symbol} | Raison: {reason} | Durée: 5 minutes")
+            
+        except Exception as e:
+            logger.error(f"Erreur ajout blacklist {symbol}: {e}")
+    
+    def is_symbol_blacklisted(self, symbol):
+        """Vérifie si un symbole est dans la liste noire"""
+        try:
+            if not hasattr(self, 'symbol_blacklist'):
+                return False
+            
+            if symbol not in self.symbol_blacklist:
+                return False
+            
+            # Vérifier si le blocage est encore valide
+            blacklist_entry = self.symbol_blacklist[symbol]
+            current_time = time.time()
+            
+            if current_time - blacklist_entry['timestamp'] > blacklist_entry['duration']:
+                # Le blocage a expiré, supprimer de la liste
+                del self.symbol_blacklist[symbol]
+                logger.info(f"✅ SYMBOLE DÉBLOQUÉ: {symbol} (blocage expiré)")
+                return False
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"Erreur vérification blacklist {symbol}: {e}")
+            return False
+    
+    def test_api_format(self):
+        """Teste différents formats de requête pour trouver celui qui fonctionne"""
+        test_symbol = "EURUSD"
+        
+        # Formats basés sur les logs Render observés
+        formats_to_test = [
+            ("POST simple", lambda url: requests.post(url, json={})),
+            ("POST avec symbol", lambda url: requests.post(url, json={'symbol': test_symbol})),
+            ("POST vide", lambda url: requests.post(url)),
+            ("POST data vide", lambda url: requests.post(url, data={})),
+        ]
+        
+        for api_url in [LOCAL_API_URL, RENDER_API_URL]:
+            logger.info(f"Test des formats pour {api_url}/decision")
+            for format_name, request_func in formats_to_test:
+                try:
+                    response = request_func(f"{api_url}/decision")
+                    logger.info(f"  {format_name}: HTTP {response.status_code}")
+                    if response.status_code == 200:
+                        logger.info(f"  ✓ Format {format_name} fonctionne!")
+                        return format_name
+                    elif response.status_code == 422:
+                        # Essayer de lire l'erreur pour comprendre ce qui manque
+                        try:
+                            error_detail = response.json()
+                            logger.error(f"  ✗ Erreur 422 détail: {error_detail}")
+                        except:
+                            pass
                 except Exception as e:
-                    logger.error(f"Erreur dans la boucle principale: {e}")
-                    time.sleep(30)  # Attendre 30s avant de réessayer
-                    
-        finally:
-            if self.connected:
-                mt5.shutdown()
-                logger.info("MT5 deconnecte")
+                    logger.error(f"  ✗ {format_name}: {str(e)}")
+        return None
 
-    def monitor_positions_protection(self):
+    def get_latest_signal(self, symbol):
+        """Récupère le dernier signal pour un symbole depuis l'API
+        
+        Args:
+            symbol (str): Le symbole pour lequel récupérer le signal
+            
+        Returns:
+            dict or None: Les données du signal ou None en cas d'erreur
         """
-        Suivi des positions pour protéger les gains et limiter les pertes
-        - Ferme la position si elle perd plus de 50% du gain maximum déjà acquis
-        - Ferme la position si la perte dépasse 6 dollars
-        """
+        if not symbol:
+            logger.warning("⚠️ Aucun symbole fourni pour la récupération du signal")
+            return None
+            
+        try:
+            # Vérifier d'abord si le symbole est disponible
+            symbol_info = mt5.symbol_info(symbol)
+            if not symbol_info:
+                logger.warning(f"⚠️ Symbole non trouvé: {symbol}")
+                return None
+                
+            # Vérifier si le marché est ouvert pour ce symbole
+            if not self.is_market_open(symbol):
+                logger.info(f"🔒 Marché fermé pour {symbol}, pas de signal récupéré")
+                return None
+                
+            # Liste des URLs à essayer (local puis distant)
+            api_urls = [LOCAL_API_URL, RENDER_API_URL]
+            
+            for api_url in api_urls:
+                try:
+                    url = f"{api_url}/decision"
+                    
+                    # Obtenir les prix actuels pour le symbole
+                    symbol_info = mt5.symbol_info(symbol)
+                    if symbol_info is None:
+                        logger.warning(f"⚠️ Impossible d'obtenir les infos pour {symbol}")
+                        continue
+                    
+                    bid = symbol_info.bid
+                    ask = symbol_info.ask
+                    
+                    if bid <= 0 or ask <= 0:
+                        logger.warning(f"⚠️ Prix invalides pour {symbol}: bid={bid}, ask={ask}")
+                        continue
+                    
+                    # Préparer les données complètes comme attendu par le serveur
+                    decision_data = {
+                        "symbol": symbol,
+                        "bid": float(bid),
+                        "ask": float(ask),
+                        "rsi": 50.0,  # Valeur neutre par défaut
+                        "atr": 0.001,  # Valeur par défaut
+                        "ema_fast": float(bid),
+                        "ema_slow": float(ask),
+                        "is_spike_mode": False,
+                        "dir_rule": 0,
+                        "supertrend_trend": 0,
+                        "volatility_regime": 0,
+                        "volatility_ratio": 1.0
+                    }
+                    
+                    # Envoyer les données complètes
+                    response = requests.post(url, json=decision_data, timeout=5)
+                    
+                    if response.status_code == 200:
+                        data = response.json()
+                        if data and isinstance(data, dict):
+                            logger.info(f"✅ Signal reçu depuis {api_url} pour {symbol}: {data.get('action', 'unknown')}")
+                            return data
+                        else:
+                            logger.warning(f"⚠️ Format de réponse invalide depuis {api_url}")
+                    elif response.status_code == 422:
+                        logger.error(f"❌ Erreur 422 détail: {response.text}")
+                    else:
+                        logger.warning(f"⚠️ Erreur API {api_url} pour {symbol}: HTTP {response.status_code}")
+                        
+                except requests.exceptions.Timeout:
+                    logger.warning(f"⌛ Timeout de la requête pour {symbol} sur {api_url}")
+                    continue
+                    
+                except requests.exceptions.RequestException as e:
+                    logger.warning(f"⚠️ Erreur de connexion à {api_url}: {str(e)}")
+                    continue
+                    
+                except Exception as e:
+                    logger.error(f"❌ Erreur inattendue avec {api_url} pour {symbol}: {str(e)}")
+                    continue
+            
+            # Si on arrive ici, toutes les tentatives ont échoué
+            logger.error(f"❌ Impossible de récupérer le signal pour {symbol} après plusieurs tentatives")
+            return None
+            
+        except Exception as e:
+            logger.error(f"❌ Erreur critique dans get_latest_signal pour {symbol}: {str(e)}")
+            return None
+            
+    def update_dynamic_stop_loss(self, position):
+        """Déplace dynamiquement le Stop Loss pour sécuriser les gains à chaque trade"""
+        try:
+            symbol = position.symbol
+            ticket = position.ticket
+            position_type = position.type
+            entry_price = position.price_open
+            current_price = position.price_current
+            current_sl = position.sl
+            current_tp = position.tp
+            current_profit = position.profit
+            
+            # Obtenir les informations du symbole pour calculer les points
+            symbol_info = mt5.symbol_info(symbol)
+            if not symbol_info:
+                return False
+            
+            point = symbol_info.point
+            pip_value = point * 10  # 1 pip = 10 points pour la plupart des paires
+            
+            # Configuration du trailing stop dynamique
+            trail_start_pips = 15  # Commencer le trailing après 15 pips de profit
+            trail_distance_pips = 10  # Distance du trailing stop (10 pips derrière le prix)
+            secure_profit_pips = 20  # Sécuriser le profit après 20 pips
+            
+            # Calculer le profit en pips
+            if position_type == mt5.POSITION_TYPE_BUY:
+                profit_pips = (current_price - entry_price) / pip_value
+            else:  # SELL
+                profit_pips = (entry_price - current_price) / pip_value
+            
+            # ===== STRATÉGIE 1: TRAILING STOP DYNAMIQUE =====
+            if profit_pips >= trail_start_pips:
+                new_sl = self.calculate_trailing_stop(position, current_price, trail_distance_pips, point)
+                if new_sl and self.should_update_sl(current_sl, new_sl, position_type):
+                    success = self.update_position_sl(ticket, symbol, new_sl, current_tp, "DYNAMIC_TRAIL")
+                    if success:
+                        logger.info(f"🔄 SL trailing dynamique: {symbol} | Nouveau SL: {new_sl} | Profit: {profit_pips:.1f} pips")
+                        return True
+            
+            # ===== STRATÉGIE 2: SÉCURISATION PROFIT PARTIEL =====
+            if profit_pips >= secure_profit_pips:
+                new_sl = self.calculate_secure_sl(position, entry_price, current_price, point)
+                if new_sl and self.should_update_sl(current_sl, new_sl, position_type):
+                    success = self.update_position_sl(ticket, symbol, new_sl, current_tp, "PROFIT_SECURE")
+                    if success:
+                        logger.info(f"🔒 SL sécurisé: {symbol} | Nouveau SL: {new_sl} | Profit sécurisé: {profit_pips:.1f} pips")
+                        return True
+            
+            # ===== STRATÉGIE 3: DÉPLACEMENT AU POINT D'ENTRÉE =====
+            if profit_pips >= 10:  # Après 10 pips de profit
+                if position_type == mt5.POSITION_TYPE_BUY and current_sl < entry_price:
+                    success = self.update_position_sl(ticket, symbol, entry_price, current_tp, "BREAK_EVEN")
+                    if success:
+                        logger.info(f"⚖️ SL au point d'entrée: {symbol} | SL: {entry_price} | Profit: {profit_pips:.1f} pips")
+                        return True
+                elif position_type == mt5.POSITION_TYPE_SELL and (current_sl > entry_price or current_sl == 0):
+                    success = self.update_position_sl(ticket, symbol, entry_price, current_tp, "BREAK_EVEN")
+                    if success:
+                        logger.info(f"⚖️ SL au point d'entrée: {symbol} | SL: {entry_price} | Profit: {profit_pips:.1f} pips")
+                        return True
+            
+            return False
+            
+        except Exception as e:
+            logger.error(f"Erreur mise à jour SL dynamique {position.symbol}: {e}")
+            return False
+    
+    def calculate_trailing_stop(self, position, current_price, trail_distance_pips, point):
+        """Calcule le nouveau niveau de trailing stop"""
+        try:
+            if position.type == mt5.POSITION_TYPE_BUY:
+                # Pour BUY: SL suit le prix vers le haut
+                new_sl = current_price - (trail_distance_pips * point * 10)
+                return new_sl
+            else:  # SELL
+                # Pour SELL: SL suit le prix vers le bas
+                new_sl = current_price + (trail_distance_pips * point * 10)
+                return new_sl
+        except Exception as e:
+            logger.error(f"Erreur calcul trailing stop: {e}")
+            return None
+    
+    def calculate_secure_sl(self, position, entry_price, current_price, point):
+        """Calcule un SL sécurisé pour protéger une partie du profit"""
+        try:
+            if position.type == mt5.POSITION_TYPE_BUY:
+                # Pour BUY: Sécuriser 50% du profit actuel
+                profit = current_price - entry_price
+                secure_amount = profit * 0.5
+                new_sl = entry_price + secure_amount
+                return new_sl
+            else:  # SELL
+                # Pour SELL: Sécuriser 50% du profit actuel
+                profit = entry_price - current_price
+                secure_amount = profit * 0.5
+                new_sl = entry_price - secure_amount
+                return new_sl
+        except Exception as e:
+            logger.error(f"Erreur calcul SL sécurisé: {e}")
+            return None
+    
+    def should_update_sl(self, current_sl, new_sl, position_type):
+        """Détermine si le SL doit être mis à jour"""
+        try:
+            if current_sl == 0:
+                return True
+            
+            if position_type == mt5.POSITION_TYPE_BUY:
+                # Pour BUY: le nouveau SL doit être plus élevé (meilleur protection)
+                return new_sl > current_sl
+            else:  # SELL
+                # Pour SELL: le nouveau SL doit être plus bas (meilleur protection)
+                return new_sl < current_sl or (current_sl == 0 and new_sl > 0)
+        except Exception as e:
+            logger.error(f"Erreur vérification mise à jour SL: {e}")
+            return False
+    
+    def update_position_sl(self, ticket, symbol, new_sl, tp, reason):
+        """Met à jour le Stop Loss d'une position"""
+        try:
+            request = {
+                "action": mt5.TRADE_ACTION_SLTP,
+                "symbol": symbol,
+                "position": ticket,
+                "sl": new_sl,
+                "tp": tp,
+                "type_time": mt5.ORDER_TIME_GTC,
+                "comment": f"DYNAMIC_SL_{reason}"
+            }
+            
+            result = mt5.order_send(request)
+            if result.retcode == mt5.TRADE_RETCODE_DONE:
+                return True
+            else:
+                logger.error(f"❌ Erreur mise à jour SL {ticket}: {result.comment}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Erreur mise à jour SL: {e}")
+            return False
+    
+    def monitor_dynamic_sl_all_positions(self):
+        """Surveille et met à jour le SL dynamique pour toutes les positions (OPTIMISÉ)"""
         try:
             positions = mt5.positions_get()
             if not positions:
                 return
-                
-            for position in positions:
-                ticket = position.ticket
-                symbol = position.symbol
-                current_profit = position.profit
-                open_price = position.open_price
-                current_price = position.price_current
-                position_type = position.type
-                
-                # Récupérer l'historique des profits pour cette position
-                max_profit = self.get_position_max_profit(ticket)
-                
-                if max_profit is None:
-                    max_profit = current_profit
-                    self.save_position_max_profit(ticket, max_profit)
-                
-                # Protection 1: Limiter la perte à 6 dollars
-                if current_profit <= -6.0:
-                    logger.warning(f"🛑 PROTECTION PERTE 6$ - Fermeture position {ticket} ({symbol}) | Perte: ${current_profit:.2f}")
-                    self.close_position_with_protection(ticket, "Loss_6_Dollars")
-                    continue
-                
-                # Protection 2: Protéger 50% des gains max acquis
-                if max_profit > 0:  # Uniquement si la position a été en profit
-                    max_allowed_loss = max_profit * 0.5  # 50% du gain max
-                    current_loss_from_max = max_profit - current_profit
+            
+            # Limiter à 5 positions maximum pour éviter de ramer
+            max_positions_check = min(len(positions), 5)
+            
+            for i in range(max_positions_check):
+                position = positions[i]
+                # Uniquement les positions du robot (magic number)
+                if position.magic == 123456:  # Magic number du robot
+                    self.update_dynamic_stop_loss(position)
                     
-                    if current_loss_from_max >= max_allowed_loss:
-                        logger.warning(f"🛡️ PROTECTION GAINS - Fermeture position {ticket} ({symbol}) | Gain max: ${max_profit:.2f} | Actuel: ${current_profit:.2f} | Perte depuis max: ${current_loss_from_max:.2f}")
-                        self.close_position_with_protection(ticket, "Protect_50_Percent_Gains")
-                        continue
-                
-                # Mise à jour du profit maximum si nécessaire
-                if current_profit > max_profit:
-                    self.save_position_max_profit(ticket, current_profit)
-                    logger.info(f"📈 Nouveau gain max position {ticket}: ${current_profit:.2f}")
-                
         except Exception as e:
-            logger.error(f"Erreur monitoring positions protection: {e}")
-    
-    def get_position_max_profit(self, ticket):
-        """Récupère le profit maximum historique pour une position"""
+            logger.error(f"Erreur surveillance SL dynamique: {e}")
+            
+    def check_mt5_connection(self):
+        """Vérifie et rétablit la connexion MT5 si nécessaire"""
         try:
-            # Utiliser un fichier JSON pour stocker les profits max par position
-            import json
-            from pathlib import Path
-            
-            profits_file = Path("position_max_profits.json")
-            if profits_file.exists():
-                with open(profits_file, 'r') as f:
-                    profits_data = json.load(f)
-                    return profits_data.get(str(ticket), None)
-            return None
+            # Vérifier si la connexion est active
+            if not mt5.initialize():
+                logger.warning("🔌 Tentative de reconnexion à MT5...")
+                
+                # Essayer de se reconnecter avec les paramètres actuels
+                if hasattr(self, 'mt5_login') and hasattr(self, 'mt5_password') and hasattr(self, 'mt5_server'):
+                    connected = mt5.login(
+                        login=self.mt5_login,
+                        password=self.mt5_password,
+                        server=self.mt5_server
+                    )
+                    
+                    if connected:
+                        logger.info("✅ Reconnexion à MT5 réussie")
+                        return True
+                    else:
+                        logger.error(f"❌ Échec de la reconnexion à MT5: {mt5.last_error()}")
+                        return False
+                else:
+                    logger.error("❌ Impossible de se reconnecter: informations de connexion manquantes")
+                    return False
+            return True
         except Exception as e:
-            logger.error(f"Erreur lecture profit max position {ticket}: {e}")
-            return None
-    
-    def save_position_max_profit(self, ticket, profit):
-        """Sauvegarde le profit maximum pour une position"""
-        try:
-            import json
-            from pathlib import Path
-            
-            profits_file = Path("position_max_profits.json")
-            profits_data = {}
-            
-            # Charger les données existantes
-            if profits_file.exists():
-                with open(profits_file, 'r') as f:
-                    profits_data = json.load(f)
-            
-            # Mettre à jour le profit maximum
-            profits_data[str(ticket)] = profit
-            
-            # Sauvegarder
-            with open(profits_file, 'w') as f:
-                json.dump(profits_data, f, indent=2)
-                
-        except Exception as e:
-            logger.error(f"Erreur sauvegarde profit max position {ticket}: {e}")
-    
-    def close_position_with_protection(self, ticket, reason):
-        """Ferme une position avec logging de protection"""
-        try:
-            position = mt5.positions_get(ticket=ticket)
-            if not position:
-                return False
-                
-            position = position[0]
-            symbol = position.symbol
-            profit = position.profit
-            
-            # Fermer la position
-            result = mt5.Close(symbol, ticket)
-            
-            if result.retcode == mt5.TRADE_RETCODE_DONE:
-                logger.info(f"✅ Position fermée avec protection | Ticket: {ticket} | Symbol: {symbol} | Profit: ${profit:.2f} | Raison: {reason}")
-                
-                # Nettoyer l'enregistrement du profit maximum
-                self.cleanup_position_max_profit(ticket)
-                
-                # Logger dans le fichier de trades
-                trade_logger_instance.log_position_update(symbol, ticket, f"CLOSED_PROTECTION_{reason}", profit=profit)
-                
-                return True
-            else:
-                logger.error(f"❌ Erreur fermeture position protection {ticket}: {result.comment}")
-                return False
-                
-        except Exception as e:
-            logger.error(f"Erreur fermeture position protection {ticket}: {e}")
+            logger.error(f"❌ Erreur lors de la vérification de la connexion MT5: {str(e)}")
             return False
     
-    def cleanup_position_max_profit(self, ticket):
-        """Nettoie l'enregistrement du profit maximum pour une position fermée"""
+    def run(self):
+        """Boucle principale ultra-optimisée pour trading réactif"""
+        logger.info("🚀 Démarrage du client MT5 AI Ultra-Rapide")
+        
+        # Initialisation de la connexion MT5
+        if not self.connect_mt5():
+            logger.error("❌ Impossible de démarrer sans connexion MT5")
+            return False
+        
+        # Tester le format de l'API pour éviter les erreurs 422
+        logger.info("🔍 Test du format de requête API...")
+        api_format = self.test_api_format()
+        if api_format:
+            logger.info(f"✅ Format API détecté: {api_format}")
+        else:
+            logger.warning("⚠️ Aucun format API fonctionnel détecté")
+        
+        # Initialisation des variables de timing
+        last_aggressive_check = time.time()
+        last_neutral_check = time.time()
+        last_sl_check = time.time()
+        last_connection_check = time.time()
+        last_training_time = 0
+        last_retrain_trigger_time = 0
+        connection_retry_count = 0
+        MAX_RETRIES = 3  # Nombre maximum de tentatives de reconnexion
+        
+        # ===== SYMBOLES PRIORITAIRES SEULEMENT =====
+        priority_symbols = [
+            'EURUSD', 'GBPUSD', 'USDJPY', 'AUDUSD', 'USDCAD',
+            'EURGBP', 'EURJPY', 'GBPJPY', 'XAUUSD', 'XAGUSD',
+            'BTCUSD', 'ETHUSD', 'Boom 500 Index', 'Crash 500 Index'
+        ]
+        
+        self.symbols = []
+        for symbol in priority_symbols:
+            if mt5.symbol_info(symbol):
+                self.symbols.append(symbol)
+        
+        logger.info(f"📊 {len(self.symbols)} symboles prioritaires chargés")
+        
+        last_training_time = 0
+        last_retrain_trigger_time = 0
+        
         try:
-            import json
-            from pathlib import Path
-            
-            profits_file = Path("position_max_profits.json")
-            if profits_file.exists():
-                with open(profits_file, 'r') as f:
-                    profits_data = json.load(f)
-                
-                # Supprimer l'entrée pour cette position
-                if str(ticket) in profits_data:
-                    del profits_data[str(ticket)]
+            while True:
+                try:
+                    current_time = time.time()
                     
-                    # Sauvegarder les données mises à jour
-                    with open(profits_file, 'w') as f:
-                        json.dump(profits_data, f, indent=2)
-                        
-        except Exception as e:
-            logger.error(f"Erreur nettoyage profit max position {ticket}: {e}")
+                    # ===== VÉRIFICATIONS ESSENTIELLES SEULEMENT =====
+                    self.check_positions()
+                    self.auto_close_winners(1.0)
+                    
+                    # ===== TRADING ULTRA-RAPIDE =====
+                    # Vérifier chaque symbole sans délai
+                    for symbol in self.symbols:
+                        try:
+                            # Vérifier rapidement si on peut trader
+                            if symbol not in self.positions:
+                                signal_data = self.get_latest_signal(symbol)
+                                if signal_data:
+                                    # Trade immédiat si signal valide
+                                    if self.execute_trade(symbol, signal_data):
+                                        logger.info(f"⚡ Trade exécuté: {symbol}")
+                        except Exception as e:
+                            logger.debug(f"Erreur traitement {symbol}: {e}")
+                    
+                    # ===== SURVEILLANCE LÉGÈRE (toutes les 60 secondes) =====
+                    if current_time - last_aggressive_check >= 60:
+                        self.aggressive_strategy.check_active_strategies()
+                        last_aggressive_check = current_time
+                    
+                    if current_time - last_neutral_check >= 60:
+                        self.monitor_all_symbols_neutral_decisions()
+                        last_neutral_check = current_time
+                    
+                    if current_time - last_sl_check >= 60:
+                        self.monitor_dynamic_sl_all_positions()
+                        last_sl_check = current_time
+                    
+                    # ===== ENVOI DONNÉES (toutes les heures) =====
+                    if current_time - last_training_time > 3600:
+                        self.send_training_data()
+                        last_training_time = current_time
+                    
+                    if current_time - last_retrain_trigger_time > 6 * 3600:
+                        self._trigger_continuous_learning()
+                        last_retrain_trigger_time = current_time
+                    
+                    # Pause très courte pour réactivité
+                    time.sleep(0.5)  # 500ms seulement
+                    
+                except KeyboardInterrupt:
+                    logger.info("🛑 Arrêt demandé par l'utilisateur")
+                    break
+                except Exception as e:
+                    logger.error(f"Erreur dans la boucle principale: {e}")
+                    time.sleep(5)  # Pause en cas d'erreur
+                    
+        except KeyboardInterrupt:
+            logger.info("🛑 Arrêt demandé par l'utilisateur")
+        finally:
+            self.disconnect_mt5()
+            logger.info("👋 Client MT5 AI arrêté")
 
 if __name__ == "__main__":
     client = MT5AIClient()
