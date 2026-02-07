@@ -33,7 +33,7 @@ CACHE_DURATION = 300  # 5 minutes
 app = FastAPI(
     title="TradBOT AI Server - Cloud Version",
     description="API de trading IA optimisée pour déploiement cloud",
-    version="2.0.0-cloud"
+    version="2.0.2-cloud"
 )
 
 # Configuration CORS
@@ -559,6 +559,51 @@ async def health_check():
         "ml_models_available": ML_MODELS_AVAILABLE,
         "cache_size": len(prediction_cache)
     }
+
+@app.post("/test")
+async def test_endpoint():
+    """Endpoint de test pour vérifier que le serveur accepte les requêtes POST"""
+    return {
+        "message": "Test endpoint fonctionne",
+        "status": "ok",
+        "timestamp": datetime.now().isoformat()
+    }
+
+@app.post("/validate")
+async def validate_format(request: dict):
+    """Endpoint de validation pour tester les formats de requêtes"""
+    required_fields = ["symbol", "bid", "ask"]
+    missing_fields = [field for field in required_fields if field not in request]
+    
+    if missing_fields:
+        return {
+            "valid": False,
+            "missing_fields": missing_fields,
+            "error": f"Champs manquants: {', '.join(missing_fields)}"
+        }
+    
+    # Validation basique des valeurs
+    if request["bid"] <= 0 or request["ask"] <= 0:
+        return {
+            "valid": False,
+            "error": "Les prix bid/ask doivent être positifs"
+        }
+    
+    if request["bid"] >= request["ask"]:
+        return {
+            "valid": False,
+            "error": "Le bid doit être inférieur à l'ask"
+        }
+    
+    return {
+        "valid": True,
+        "message": "Format de requête valide",
+        "symbol": request["symbol"],
+        "bid": request["bid"],
+        "ask": request["ask"]
+    }
+
+
 
 
 @app.post("/decision", response_model=DecisionResponse)
