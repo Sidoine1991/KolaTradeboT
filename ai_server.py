@@ -2862,19 +2862,17 @@ async def root():
     return {
         "status": "running",
         "service": "TradBOT AI Server",
-        "version": "2.0.0",
-        "mt5_available": MT5_AVAILABLE,
+        "version": "2.0.1",
+        "mt5_available": mt5_available,
         "mt5_initialized": mt5_initialized,
-        "mistral_available": MISTRAL_AVAILABLE,
-        "gemini_available": GEMINI_AVAILABLE,
-        "backend_available": BACKEND_AVAILABLE,
-        "ai_indicators_available": AI_INDICATORS_AVAILABLE,
-        "alphavantage_available": ALPHAVANTAGE_AVAILABLE,
+        "mistral_available": mistral_available,
+        "gemini_available": gemini_available,
+        "backend_available": backend_available,
+        "ai_indicators": ai_indicators,
         "endpoints": [
-            "/fundamental/{symbol} (GET) - Données fondamentales",
-            "/news/{symbol} (GET) - Actualités marché", 
-            "/economic-calendar (GET) - Calendrier économique",
             "/decision (POST)",
+            "/test (POST)",
+            "/validate (POST)",
             "/analysis (GET)",
             "/time_windows/{symbol} (GET)",
             "/predict/{symbol} (GET)",
@@ -2889,6 +2887,69 @@ async def root():
             "/mt5/history-upload (POST) - Upload données historiques MT5 vers Render (bridge)"
         ]
     }
+
+@app.post("/test")
+async def test_endpoint():
+    """Endpoint de test pour vérifier que le serveur accepte les requêtes POST"""
+    import time
+    return {
+        "status": "ok",
+        "message": "Test endpoint fonctionne",
+        "timestamp": time.time()
+    }
+
+@app.post("/validate")
+async def validate_format(request: dict):
+    """Endpoint de validation pour tester les formats de requêtes"""
+    try:
+        # Simuler la validation sans exécuter l'IA
+        required_fields = ["symbol", "bid", "ask"]
+        missing_fields = [field for field in required_fields if field not in request]
+        
+        if missing_fields:
+            return {
+                "valid": False,
+                "missing_fields": missing_fields,
+                "message": f"Champs manquants: {', '.join(missing_fields)}"
+            }
+        
+        # Validation basique
+        symbol = request.get("symbol", "")
+        bid = request.get("bid")
+        ask = request.get("ask")
+        
+        if not symbol or not bid or not ask:
+            return {
+                "valid": False,
+                "message": "Les champs symbol, bid, et ask sont requis"
+            }
+        
+        if bid <= 0 or ask <= 0:
+            return {
+                "valid": False,
+                "message": "Les prix bid et ask doivent être positifs"
+            }
+        
+        if bid >= ask:
+            return {
+                "valid": False,
+                "message": "Le prix bid doit être inférieur au prix ask"
+            }
+        
+        return {
+            "valid": True,
+            "message": "Format valide",
+            "symbol": symbol,
+            "bid": bid,
+            "ask": ask
+        }
+        
+    except Exception as e:
+        return {
+            "valid": False,
+            "error": str(e),
+            "message": "Erreur lors de la validation"
+        }
 
 @app.post("/")
 async def root_post():
@@ -6976,18 +7037,47 @@ async def decision(request: DecisionRequest):
     # Logging détaillé seulement en mode debug, sinon juste les logs du middleware suffisent
     logger.debug(f"🎯 Décision IA demandée pour {request.symbol} (bid={request.bid}, ask={request.ask})")
     try:
-        # Validation des champs obligatoires
-        if not request.symbol:
-            raise HTTPException(status_code=422, detail="Le symbole est requis")
+        # Validation améliorée avec messages d'erreur plus clairs
+        validation_errors = []
+        
+        if not request.symbol or request.symbol.strip() == "":
+            validation_errors.append("Le symbole est requis et ne peut être vide")
             
-        if request.bid is None or request.ask is None:
-            raise HTTPException(status_code=422, detail="Les prix bid/ask sont requis")
+        if request.bid is None:
+            validation_errors.append("Le prix bid est requis")
+        elif request.bid <= 0:
+            validation_errors.append("Le prix bid doit être supérieur à zéro")
             
-        if request.bid <= 0 or request.ask <= 0:
-            raise HTTPException(status_code=422, detail="Les prix doivent être supérieurs à zéro")
+        if request.ask is None:
+            validation_errors.append("Le prix ask est requis")
+        elif request.ask <= 0:
+            validation_errors.append("Le prix ask doit être supérieur à zéro")
+            
+        if request.bid is not None and request.ask is not None and request.bid >= request.ask:
+            validation_errors.append("Le prix bid doit être inférieur au prix ask")
             
         if request.rsi is not None and (request.rsi < 0 or request.rsi > 100):
-            raise HTTPException(status_code=422, detail="La valeur RSI doit être entre 0 et 100")
+            validation_errors.append("La valeur RSI doit être entre 0 et 100")
+        
+        # Si erreurs de validation, retourner 422 avec détails
+        if validation_errors:
+            error_detail = {
+                "detail": [
+                    {
+                        "type": "validation_error",
+                        "msg": error,
+                        "input": {
+                            "symbol": request.symbol,
+                            "bid": request.bid,
+                            "ask": request.ask,
+                            "rsi": request.rsi
+                        }
+                    }
+                    for error in validation_errors
+                ]
+            }
+            logger.warning(f"❌ Validation échouée pour {request.symbol}: {validation_errors}")
+            raise HTTPException(status_code=422, detail=error_detail)
         
         # ========== DÉTECTION MODE INITIALISATION DEPUIS GRAPHIQUE ==========
         # Détecter si c'est une initialisation (première requête pour ce symbole)
