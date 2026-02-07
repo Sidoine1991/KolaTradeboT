@@ -2875,17 +2875,29 @@ async def root():
             "/validate (POST)",
             "/analysis (GET)",
             "/time_windows/{symbol} (GET)",
+            "/health (GET)",
+            "/status (GET)",
+            "/logs (GET)",
             "/predict/{symbol} (GET)",
-            "/prediction (POST) - Prédiction de prix futurs pour graphique MQ5",
-            "/health",
-            "/status",
-            "/logs",
+            "/prediction (POST)",
             "/indicators/analyze (POST)",
             "/indicators/sentiment/{symbol} (GET)",
             "/indicators/volume_profile/{symbol} (GET)",
             "/analyze/gemini (POST)",
-            "/mt5/history-upload (POST) - Upload données historiques MT5 vers Render (bridge)"
+            "/mt5/history-upload (POST)"
         ]
+    }
+
+@app.get("/health")
+async def health():
+    """Endpoint de santé pour Render et monitoring"""
+    return {
+        "status": "healthy",
+        "timestamp": datetime.now().isoformat(),
+        "service": "TradBOT AI Server",
+        "version": "2.0.1",
+        "mt5_available": mt5_available,
+        "mt5_initialized": mt5_initialized
     }
 
 @app.post("/test")
