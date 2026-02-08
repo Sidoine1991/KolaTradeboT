@@ -2863,7 +2863,7 @@ async def root():
         "status": "running",
         "service": "TradBOT AI Server",
         "version": "2.0.1",
-        "mt5_available": mt5_available,
+        "mt5_available": MT5_AVAILABLE,
         "mt5_initialized": mt5_initialized,
         "mistral_available": mistral_available,
         "gemini_available": gemini_available,
@@ -2896,7 +2896,7 @@ async def health():
         "timestamp": datetime.now().isoformat(),
         "service": "TradBOT AI Server",
         "version": "2.0.1",
-        "mt5_available": mt5_available,
+        "mt5_available": MT5_AVAILABLE,
         "mt5_initialized": mt5_initialized
     }
 
