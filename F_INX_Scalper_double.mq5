@@ -138,7 +138,7 @@ input group "--- DASHBOARD ET ANALYSE COHÉRENTE ---"
 input string AI_CoherentAnalysisURL = "https://kolatradebot.onrender.com/coherent-analysis"; // URL pour l'analyse cohérente
 input string AI_DashboardGraphsURL = "https://kolatradebot.onrender.com/dashboard/graphs";    // URL pour les graphiques du dashboard
 input int    AI_CoherentAnalysisInterval = 120; // Intervalle de mise à jour de l'analyse cohérente (réduit à 2 min pour Phase 2)
-input bool   ShowCoherentAnalysis = true; // Afficher l'analyse cohérente sur le graphique
+input bool   ShowCoherentAnalysis = false; // Désactivé temporairement - l'endpoint n'existe plus
 input bool   ShowPricePredictions = false; // Afficher les prédictions de prix sur le graphique (DÉSACTIVÉ - plus utilisé dans décision finale)
 input bool   SendNotifications = true; // Envoyer des notifications (désactivé par défaut)
 
@@ -10052,7 +10052,8 @@ void LookForTradingOpportunity()
       }
       
       // Anti-panne: si l'analyse cohérente n'est pas disponible, on ne trade pas (mode "sûr")
-      if(g_coherentAnalysis.lastUpdate == 0 || age > (AI_CoherentAnalysisInterval * 2))
+      // SAUF si l'analyse cohérente est désactivée dans les paramètres
+      if(ShowCoherentAnalysis && (g_coherentAnalysis.lastUpdate == 0 || age > (AI_CoherentAnalysisInterval * 2)))
       {
          Print("🚫 TRADE BLOQUÉ (COHÉRENT): Analyse cohérente absente/trop ancienne (age=", age, "s)");
          return;
@@ -10067,15 +10068,15 @@ void LookForTradingOpportunity()
       bool coherentSell = (StringFind(decision, "SELL") >= 0 || StringFind(decision, "VENTE") >= 0);
       bool coherentAligned = (tradeDirection == 1 ? coherentBuy : coherentSell);
       
-      if(!coherentAligned || coherentConf01 < MinCoherentConfidence)
+      if(ShowCoherentAnalysis && (!coherentAligned || coherentConf01 < MinCoherentConfidence))
       {
          Print("🚫 TRADE BLOQUÉ (COHÉRENT): Décision/Confiance insuffisante | Decision=", g_coherentAnalysis.decision,
                " | Conf=", DoubleToString(coherentConf01 * 100.0, 1), "% < ", DoubleToString(MinCoherentConfidence * 100.0, 0), "%");
          return;
       }
       
-      // VÉRIFICATION PRIORITAIRE: Cohérence de TOUS les endpoints d'analyse
-      if(!CheckCoherenceOfAllAnalyses(tradeDirection))
+      // VÉRIFICATION PRIORITAIRE: Cohérence de TOUS les endpoints d'analyse (seulement si activé)
+      if(ShowCoherentAnalysis && !CheckCoherenceOfAllAnalyses(tradeDirection))
       {
          Print("🚫 TRADE BLOQUÉ: Cohérence insuffisante de tous les endpoints d'analyse - Direction: ", (tradeDirection == 1 ? "BUY" : "SELL"));
          return; // BLOQUER si cohérence insuffisante
