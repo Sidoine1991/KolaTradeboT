@@ -74,6 +74,14 @@ CTrade      trade;
 //+------------------------------------------------------------------+
 void NormalizeSLTP(bool isBuy, double entry, double& sl, double& tp)
 {
+   // Si SL/TP sont désactivés, mettre à 0 directement
+   if(StopLoss_Pips == 0 && TakeProfit_Pips == 0)
+   {
+      sl = 0;
+      tp = 0;
+      return;
+   }
+   
    double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
    int    digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
    long   stopsLevel = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
