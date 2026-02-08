@@ -3470,8 +3470,8 @@ async def decision(request: DecisionRequest):
         cache_key_init = f"{request.symbol}_init"
         current_time = datetime.now().timestamp()
         
-        # Vérifier si c'est la première requête pour ce symbole (dans les 30 dernières secondes)
-        if cache_key_init not in last_updated or (current_time - last_updated.get(cache_key_init, 0)) > 30:
+        # Vérifier si c'est la première requête pour ce symbole (dans les 10 dernières secondes)
+        if cache_key_init not in last_updated or (current_time - last_updated.get(cache_key_init, 0)) > 10:
             initialization_mode = True
             last_updated[cache_key_init] = current_time
             logger.info(f"🔄 MODE INITIALISATION détecté pour {request.symbol} - Analyse approfondie activée")
@@ -3500,14 +3500,14 @@ async def decision(request: DecisionRequest):
                                   f"M5={len(df_m5_init) if df_m5_init is not None else 0}, "
                                   f"H1={len(df_h1_init) if df_h1_init is not None else 0}")
                         
-                        # En mode initialisation, être plus conservateur
-                        # Ne trader que si la tendance est claire et la volatilité acceptable
-                        if abs(price_trend) < 0.01 and volatility_init < 0.5:
-                            logger.info(f"⚠️ Initialisation: Marché trop calme - Recommandation HOLD conservatrice")
+                        # En mode initialisation, être plus flexible mais prudent
+                        # Autoriser plus de situations de trading avec des seuils réalistes
+                        if abs(price_trend) < 0.002 and volatility_init < 0.1:  # Seuils plus réalistes
+                            logger.info(f"⚠️ Initialisation: Marché extrêmement calme - Recommandation HOLD conservatrice")
                             return DecisionResponse(
                                 action="hold",
                                 confidence=0.30,
-                                reason=f"Initialisation: Marché calme (tendance: {price_trend:+.2%}, volatilité: {volatility_init:.3f}%) - Attente signal plus clair",
+                                reason=f"Initialisation: Marché extrêmement calme (tendance: {price_trend:+.2%}, volatilité: {volatility_init:.3f}%) - Attente signal plus clair",
                                 spike_prediction=False,
                                 spike_zone_price=None,
                                 stop_loss=None,
@@ -3521,6 +3521,8 @@ async def decision(request: DecisionRequest):
                                 sell_zone_low=None,
                                 sell_zone_high=None
                             )
+                        else:
+                            logger.info(f"✅ Initialisation: Conditions acceptables pour trading - Analyse continue")
             except Exception as e:
                 logger.warning(f"⚠️ Erreur analyse initialisation: {e}")
         
