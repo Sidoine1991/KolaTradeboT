@@ -547,7 +547,7 @@ def generate_simulated_data(symbol: str, periods: int = 100) -> pd.DataFrame:
             # Ajouter quelques spikes aléatoires (10-15% de chance par bougie)
             spike_probability = 0.12
             for i in range(periods):
-                if np.random.random() < spike_probability:
+if np.random.random() < spike_probability:
                     # Générer un spike
                     spike_direction = 1 if "Boom" in symbol else -1  # Boom monte, Crash descend
                     spike_magnitude = np.random.uniform(0.008, 0.025)  # 0.8% à 2.5% de spike
@@ -804,7 +804,7 @@ def get_mt5_indicators(symbol: str, timeframe: str, count: int = 100) -> Optiona
             
             # Moyennes mobiles
             for period in [5, 10, 20, 50, 100, 200]:
-                if len(df) >= period:
+if len(df) >= period:
                     indicators[f'sma_{period}'] = df['close'].rolling(window=period).mean().iloc[-1]
                     indicators[f'ema_{period}'] = df['close'].ewm(span=period, adjust=False).mean().iloc[-1]
             
@@ -1455,7 +1455,7 @@ async def train_models_background():
                 
                 # Vérifier si le modèle existe déjà
                 model_path = f"models/{model_key}_rf.joblib"
-                if os.path.exists(model_path):
+if os.path.exists(model_path):
                     logger.info(f"✅ Modèle déjà existant pour {model_key}")
                     completed_tasks += 1
                     continue
@@ -1463,19 +1463,19 @@ async def train_models_background():
                 logger.info(f"📊 Entraînement du modèle pour {symbol} {timeframe}...")
                 
                 # Entraîner le modèle avec timeout
-                try:
+try:
                     train_result = await asyncio.wait_for(
                         asyncio.to_thread(train_ml_models, symbol, timeframe, historical_data=None),
                         timeout=60.0  # Timeout de 60 secondes par modèle
                     )
                     
-                    if "error" not in train_result:
+if "error" not in train_result:
                         logger.info(f"✅ Modèle entraîné avec succès pour {model_key}")
                         completed_tasks += 1
-                    else:
+else:
                         logger.error(f"❌ Erreur entraînement modèle {model_key}: {train_result['error']}")
                         
-                except asyncio.TimeoutError:
+except asyncio.TimeoutError:
                     logger.warning(f"⏰ Timeout entraînement modèle {symbol} {timeframe} - Passage au suivant")
                     continue
                 
@@ -1621,7 +1621,7 @@ def detect_realtime_movement(symbol: str, current_price: float) -> Dict[str, Any
     Returns:
         Dict avec 'direction' ('up', 'down', 'neutral'), 'strength' (0-1), 'price_change_percent'
     """
-    current_time = datetime.now().timestamp()
+    current_time = time.time()
     
     # Initialiser l'historique si nécessaire
     if symbol not in realtime_price_history:
@@ -1923,7 +1923,7 @@ def save_prediction_metrics(symbol: str, metrics: Dict[str, Any]):
         # Charger les métriques existantes
         if metrics_file.exists():
             try:
-                with open(metrics_file, 'r', encoding='utf-8') as f:
+with open(metrics_file, 'r', encoding='utf-8') as f:
                     all_metrics = json.load(f)
             except:
                 all_metrics = {"history": [], "summary": {}}
@@ -1986,7 +1986,7 @@ def validate_prediction_with_realtime_data(
             if symbol not in prediction_history:
                 return {"error": f"Aucune prédiction trouvée pour le symbole {symbol}"}
             for p in prediction_history[symbol]:
-                if p.get("id") == prediction_id:
+if p.get("id") == prediction_id:
                     pred = p
                     break
             if not pred:
@@ -2312,9 +2312,9 @@ def get_historical_data(symbol: str, timeframe: str = "H1", count: int = 500) ->
             response = requests.get(f"{api_url}/ohlc", params=params, timeout=5)
             if response.status_code == 200:
                 data = response.json()
-                if data and 'data' in data:
+if data and 'data' in data:
                     df = pd.DataFrame(data['data'])
-                    if 'time' in df.columns:
+if 'time' in df.columns:
                         df['time'] = pd.to_datetime(df['time'])
                         logger.info(f"✅ Données récupérées depuis API: {len(df)} bougies")
                         return df
@@ -2338,10 +2338,10 @@ def get_historical_data_mt5(symbol: str, timeframe: str = "H1", count: int = 500
             
             if mt5_login and mt5_password and mt5_server:
                 logger.info(f"🔄 Tentative de connexion MT5 pour {symbol}...")
-                if mt5.initialize(login=mt5_login, password=mt5_password, server=mt5_server):
+if mt5.initialize(login=mt5_login, password=mt5_password, server=mt5_server):
                     mt5_initialized = True
                     logger.info("✅ Connexion MT5 réussie")
-                else:
+else:
                     error_code = mt5.last_error()
                     logger.warning(f"❌ Échec de connexion MT5: {error_code}")
                     return None
@@ -2667,7 +2667,7 @@ def analyze_with_gemma(
         except RuntimeError as e:
             if "out of memory" in str(e).lower():
                 logger.error("⚠️  Erreur: Mémoire GPU insuffisante. Essayez de réduire la taille du modèle ou du batch.")
-                if torch and torch.cuda.is_available():
+if torch and torch.cuda.is_available():
                     torch.cuda.empty_cache()
             raise
             
@@ -2802,8 +2802,8 @@ def detect_trendlines(df: pd.DataFrame, lookback: int = 3) -> Dict[str, Any]:
             # Swing high
             is_high = all(
                 df.iloc[i]['high'] >= df.iloc[i+j]['high'] 
-                for j in range(-lookback, lookback+1) 
-                if j != 0
+for j in range(-lookback, lookback+1) 
+if j != 0
             )
             if is_high:
                 highs.append({
@@ -2815,8 +2815,8 @@ def detect_trendlines(df: pd.DataFrame, lookback: int = 3) -> Dict[str, Any]:
             # Swing low
             is_low = all(
                 df.iloc[i]['low'] <= df.iloc[i+j]['low'] 
-                for j in range(-lookback, lookback+1) 
-                if j != 0
+for j in range(-lookback, lookback+1) 
+if j != 0
             )
             if is_low:
                 lows.append({
@@ -2862,106 +2862,3707 @@ async def root():
     return {
         "status": "running",
         "service": "TradBOT AI Server",
-        "version": "2.0.1",
+        "version": "2.0.2",
         "mt5_available": MT5_AVAILABLE,
         "mt5_initialized": mt5_initialized,
         "mistral_available": MISTRAL_AVAILABLE,
         "gemini_available": GEMINI_AVAILABLE,
-        "backend_available": backend_available,
-        "ai_indicators": ai_indicators,
+        "backend_available": BACKEND_AVAILABLE,
+        "ai_indicators_available": AI_INDICATORS_AVAILABLE,
+        "alphavantage_available": ALPHAVANTAGE_AVAILABLE,
         "endpoints": [
+            "/fundamental/{symbol} (GET) - Données fondamentales",
+            "/news/{symbol} (GET) - Actualités marché", 
+            "/economic-calendar (GET) - Calendrier économique",
             "/decision (POST)",
-            "/test (POST)",
-            "/validate (POST)",
+            "/test (POST) - Test de connexion",
+            "/validate (POST) - Validation de format",
             "/analysis (GET)",
             "/time_windows/{symbol} (GET)",
-            "/health (GET)",
-            "/status (GET)",
-            "/logs (GET)",
             "/predict/{symbol} (GET)",
-            "/prediction (POST)",
+            "/prediction (POST) - Prédiction de prix futurs pour graphique MQ5",
+            "/health",
+            "/status",
+            "/logs",
             "/indicators/analyze (POST)",
             "/indicators/sentiment/{symbol} (GET)",
             "/indicators/volume_profile/{symbol} (GET)",
             "/analyze/gemini (POST)",
-            "/mt5/history-upload (POST)"
+            "/mt5/history-upload (POST) - Upload données historiques MT5 vers Render (bridge)"
         ]
     }
 
-@app.get("/health")
-async def health():
-    """Endpoint de santé pour Render et monitoring"""
-    return {
-        "status": "healthy",
-        "timestamp": datetime.now().isoformat(),
-        "service": "TradBOT AI Server",
-        "version": "2.0.1",
-        "mt5_available": MT5_AVAILABLE,
-        "mt5_initialized": mt5_initialized
-    }
+@app.post("/")
+async def root_post():
+    """Endpoint racine POST - Redirige vers /decision pour compatibilité"""
+    logger.warning("POST request received on root endpoint '/'. This should be '/decision'. Returning redirect info.")
+    raise HTTPException(
+        status_code=400,
+        detail="Please use POST /decision endpoint for trading decisions. The root endpoint '/' only accepts GET requests."
+    )
+
+@app.post("/decision-simple", response_model=DecisionResponse)
+async def decision_endpoint_simple(request: DecisionRequest):
+    """
+    Endpoint principal pour la prise de décision de trading (appelé par MQ5).
+    Wraps /ml/predict-signal logic.
+    """
+    try:
+        # 1. Convertir la requête Pydantic en dictionnaire pour predict_trading_signal
+        req_dict = request.dict()
+        
+        # Mapping des champs pour assurer la compatibilité
+        if not req_dict.get('current_price') and request.bid:
+            req_dict['current_price'] = request.bid
+            
+        # 2. Appeler la logique de prédiction existante
+        # Note: predict_trading_signal est définie plus bas, mais résolue au runtime
+        result = await predict_trading_signal(req_dict)
+        
+        # 3. Mapper le résultat vers DecisionResponse
+        # Le signal retourné par predict_trading_signal est "BUY", "SELL", "HOLD" ou "neutral"
+        signal_raw = result.get("signal", "neutral").upper()
+        
+        action_map = {
+            "BUY": "buy",
+            "SELL": "sell",
+            "HOLD": "hold",
+            "NEUTRAL": "hold"
+        }
+        
+        action = action_map.get(signal_raw, "hold")
+        
+        # Confiance: predict_trading_signal retourne déjà 0.0-1.0, pas besoin de conversion
+        conf_raw = float(result.get("confidence", 0.0))
+        confidence = conf_raw / 100.0 if conf_raw > 1.0 else conf_raw
+        
+        # Construire la réponse
+        response = DecisionResponse(
+            action=action,
+            confidence=confidence,
+            reason=str(result.get("reasoning", "AI Analysis")),
+            stop_loss=result.get("stop_loss"),
+            take_profit=result.get("take_profit"),
+            timestamp=result.get("timestamp"),
+            model_used=result.get("model_used"),
+            spike_prediction=result.get("source") == "boom_crash_spike",
+            technical_analysis=None
+        )
+        
+        return response
+        
+    except Exception as e:
+        logger.error(f"Erreur endpoint /decision: {e}")
+        # En cas d'erreur, on ne bloque pas, on retourne hold
+        return DecisionResponse(
+            action="hold",
+            confidence=0.0,
+            reason=f"Error in decision: {str(e)}"
+        )
+
+# ==================== ENDPOINTS DE TEST ET VALIDATION ====================
 
 @app.post("/test")
 async def test_endpoint():
     """Endpoint de test pour vérifier que le serveur accepte les requêtes POST"""
-    import time
     return {
-        "status": "ok",
         "message": "Test endpoint fonctionne",
-        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "status": "ok",
+        "timestamp": datetime.now().isoformat()
     }
 
 @app.post("/validate")
 async def validate_format(request: dict):
     """Endpoint de validation pour tester les formats de requêtes"""
+    required_fields = ["symbol", "bid", "ask"]
+    missing_fields = [field for field in required_fields if field not in request]
+    
+    if missing_fields:
+        return {
+            "valid": False,
+            "missing_fields": missing_fields,
+            "error": f"Champs manquants: {', '.join(missing_fields)}"
+        }
+    
+    # Validation basique des valeurs
+    if request["bid"] <= 0 or request["ask"] <= 0:
+        return {
+            "valid": False,
+            "error": "Les prix bid/ask doivent être positifs"
+        }
+    
+    if request["bid"] >= request["ask"]:
+        return {
+            "valid": False,
+            "error": "Le bid doit être inférieur à l'ask"
+        }
+    
+    return {
+        "valid": True,
+        "message": "Format de requête valide",
+        "symbol": request["symbol"],
+        "bid": request["bid"],
+        "ask": request["ask"]
+    }
+
+# ==================== ALPHA VANTAGE ENDPOINTS ====================
+
+@app.get("/fundamental/{symbol}")
+async def get_fundamental_data(symbol: str):
+    """Récupère les données fondamentales via Alpha Vantage API"""
+    if not ALPHAVANTAGE_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Alpha Vantage API non configurée")
+    
+    import httpx
+    
+    # Mapping symboles MT5 vers symboles Alpha Vantage
+    symbol_map = {
+        "EURUSD": "EUR/USD",
+        "GBPUSD": "GBP/USD",
+        "USDJPY": "USD/JPY",
+        "XAUUSD": "XAU/USD",
+        "US Oil": "USOIL",
+        "UK 100": "FTSE",
+        "US 30": "DJI",
+        "US 500": "SPX",
+    }
+    av_symbol = symbol_map.get(symbol, symbol.replace(" ", ""))
+    
     try:
-        # Simuler la validation sans exécuter l'IA
-        required_fields = ["symbol", "bid", "ask"]
-        missing_fields = [field for field in required_fields if field not in request]
-        
-        if missing_fields:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            # Pour Forex
+            if "/" in av_symbol or any(c in symbol.upper() for c in ["USD", "EUR", "GBP", "JPY"]):
+                from_c = av_symbol[:3] if len(av_symbol) >= 6 else "USD"
+                to_c = av_symbol[3:6] if len(av_symbol) >= 6 else av_symbol[:3]
+                url = f"https://www.alphavantage.co/query?function=CURRENCY_EXCHANGE_RATE&from_currency={from_c}&to_currency={to_c}&apikey={ALPHAVANTAGE_API_KEY}"
+                resp = await client.get(url)
+                alphavantage_request_count += 1
+                data = resp.json()
+                
+if "Realtime Currency Exchange Rate" in data:
+                    rate_data = data["Realtime Currency Exchange Rate"]
+                    return {
+                        "symbol": symbol,
+                        "type": "forex",
+                        "exchange_rate": float(rate_data.get("5. Exchange Rate", 0)),
+                        "bid": float(rate_data.get("8. Bid Price", 0)),
+                        "ask": float(rate_data.get("9. Ask Price", 0)),
+                        "last_updated": rate_data.get("6. Last Refreshed", ""),
+                        "timezone": rate_data.get("7. Time Zone", "")
+                    }
+            
+            # Pour actions/indices
+            url = f"https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol={av_symbol}&apikey={ALPHAVANTAGE_API_KEY}"
+            resp = await client.get(url)
+            alphavantage_request_count += 1
+            data = resp.json()
+            
+            if "Global Quote" in data and data["Global Quote"]:
+                quote = data["Global Quote"]
+                return {
+                    "symbol": symbol,
+                    "type": "stock",
+                    "price": float(quote.get("05. price", 0)),
+                    "change": float(quote.get("09. change", 0)),
+                    "change_percent": quote.get("10. change percent", "0%"),
+                    "volume": int(quote.get("06. volume", 0)),
+                    "high": float(quote.get("03. high", 0)),
+                    "low": float(quote.get("04. low", 0)),
+                    "open": float(quote.get("02. open", 0)),
+                    "previous_close": float(quote.get("08. previous close", 0))
+                }
+            
+            return {"symbol": symbol, "error": "No data available", "raw": data}
+            
+    except Exception as e:
+        logger.error(f"Alpha Vantage error for {symbol}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/news/{symbol}")
+async def get_market_news(symbol: str):
+    """Récupère les actualités du marché via Alpha Vantage"""
+    if not ALPHAVANTAGE_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Alpha Vantage API non configurée")
+    
+    import httpx
+    
+    # Mapping pour les tickers de news
+    topics = "financial_markets"
+    if any(c in symbol.upper() for c in ["USD", "EUR", "GBP", "JPY"]):
+        topics = "forex"
+    elif "XAU" in symbol.upper() or "GOLD" in symbol.upper():
+        topics = "finance"
+    elif "OIL" in symbol.upper():
+        topics = "energy_transportation"
+    
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            url = f"https://www.alphavantage.co/query?function=NEWS_SENTIMENT&topics={topics}&apikey={ALPHAVANTAGE_API_KEY}&limit=10"
+            resp = await client.get(url)
+            alphavantage_request_count += 1
+            data = resp.json()
+            
+            if "feed" in data:
+                news_items = []
+for item in data["feed"][:10]:
+                    news_items.append({
+                        "title": item.get("title", ""),
+                        "summary": item.get("summary", "")[:300] + "..." if len(item.get("summary", "")) > 300 else item.get("summary", ""),
+                        "source": item.get("source", ""),
+                        "sentiment_score": item.get("overall_sentiment_score", 0),
+                        "sentiment_label": item.get("overall_sentiment_label", "Neutral"),
+                        "time_published": item.get("time_published", "")
+                    })
+                
+                # Calcul du sentiment global
+                avg_sentiment = sum(n["sentiment_score"] for n in news_items) / len(news_items) if news_items else 0
+                
+                return {
+                    "symbol": symbol,
+                    "topic": topics,
+                    "news_count": len(news_items),
+                    "average_sentiment": round(avg_sentiment, 4),
+                    "market_bias": "bullish" if avg_sentiment > 0.1 else "bearish" if avg_sentiment < -0.1 else "neutral",
+                    "news": news_items
+                }
+            
+            return {"symbol": symbol, "news": [], "error": "No news available"}
+            
+    except Exception as e:
+        logger.error(f"Alpha Vantage news error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/economic-calendar")
+async def get_economic_calendar():
+    """Récupère le calendrier économique (événements importants)"""
+    if not ALPHAVANTAGE_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Alpha Vantage API non configurée")
+    
+    # Note: Alpha Vantage n'a pas d'endpoint calendrier économique direct
+    # On utilise les news avec filtre économie
+    import httpx
+    
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            url = f"https://www.alphavantage.co/query?function=NEWS_SENTIMENT&topics=economy_fiscal,economy_monetary&apikey={ALPHAVANTAGE_API_KEY}&limit=20"
+            resp = await client.get(url)
+            alphavantage_request_count += 1
+            data = resp.json()
+            
+            events = []
+            if "feed" in data:
+for item in data["feed"][:20]:
+                    events.append({
+                        "title": item.get("title", ""),
+                        "summary": item.get("summary", "")[:200],
+                        "source": item.get("source", ""),
+                        "impact": "high" if abs(item.get("overall_sentiment_score", 0)) > 0.3 else "medium" if abs(item.get("overall_sentiment_score", 0)) > 0.1 else "low",
+                        "sentiment": item.get("overall_sentiment_label", "Neutral"),
+                        "time": item.get("time_published", "")
+                    })
+            
             return {
-                "valid": False,
-                "missing_fields": missing_fields,
-                "message": f"Champs manquants: {', '.join(missing_fields)}"
+                "events": events,
+                "count": len(events),
+                "api": "Alpha Vantage"
             }
-        
-        # Validation basique
-        symbol = request.get("symbol", "")
-        bid = request.get("bid")
-        ask = request.get("ask")
-        
-        if not symbol or not bid or not ask:
+            
+    except Exception as e:
+        logger.error(f"Economic calendar error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ==================== END ALPHA VANTAGE ====================
+
+# ==================== DERIV API ENDPOINTS ====================
+
+import asyncio
+import websockets
+import json as json_lib
+
+async def deriv_ws_request(request_data: dict, timeout: float = 10.0) -> dict:
+    """Effectue une requête WebSocket vers Deriv API"""
+    try:
+        async with websockets.connect(DERIV_WS_URL, close_timeout=5.0) as ws:
+            await ws.send(json_lib.dumps(request_data))
+            response = await asyncio.wait_for(ws.recv(), timeout=timeout)
+            return json_lib.loads(response)
+    except Exception as e:
+        logger.error(f"Deriv WS error: {e}")
+        return {"error": str(e)}
+
+@app.get("/deriv/ticks/{symbol}")
+async def get_deriv_ticks(symbol: str):
+    """Récupère les ticks en temps réel via Deriv API"""
+    # Mapping symboles MT5 vers Deriv
+    deriv_symbols = {
+        "Volatility 10 Index": "R_10",
+        "Volatility 25 Index": "R_25",
+        "Volatility 50 Index": "R_50", 
+        "Volatility 75 Index": "R_75",
+        "Volatility 100 Index": "R_100",
+        "Boom 300 Index": "BOOM300N",
+        "Boom 500 Index": "BOOM500",
+        "Boom 1000 Index": "BOOM1000",
+        "Crash 300 Index": "CRASH300N",
+        "Crash 500 Index": "CRASH500",
+        "Crash 1000 Index": "CRASH1000",
+    }
+    deriv_symbol = deriv_symbols.get(symbol, symbol)
+    
+    response = await deriv_ws_request({"ticks": deriv_symbol})
+    
+    if "error" in response:
+        raise HTTPException(status_code=500, detail=response["error"])
+    
+    tick = response.get("tick", {})
+    return {
+        "symbol": symbol,
+        "deriv_symbol": deriv_symbol,
+        "quote": tick.get("quote"),
+        "bid": tick.get("bid"),
+        "ask": tick.get("ask"),
+        "epoch": tick.get("epoch"),
+        "api": "Deriv"
+    }
+
+@app.get("/deriv/active-symbols")
+async def get_deriv_active_symbols():
+    """Liste tous les symboles disponibles sur Deriv"""
+    response = await deriv_ws_request({
+        "active_symbols": "brief",
+        "product_type": "basic"
+    })
+    
+    if "error" in response:
+        raise HTTPException(status_code=500, detail=response.get("error", {}).get("message", "Unknown error"))
+    
+    symbols = response.get("active_symbols", [])
+    
+    # Filtrer les indices synthétiques
+    synthetic = [s for s in symbols if s.get("market") == "synthetic_index"]
+    forex = [s for s in symbols if s.get("market") == "forex"]
+    
+    return {
+        "total": len(symbols),
+        "synthetic_indices": len(synthetic),
+        "forex": len(forex),
+        "symbols": [
+            {
+                "symbol": s.get("symbol"),
+                "display_name": s.get("display_name"),
+                "market": s.get("market"),
+                "is_trading_suspended": s.get("is_trading_suspended"),
+                "pip": s.get("pip")
+            }
+            for s in symbols[:50]  # Limiter à 50
+        ],
+        "api": "Deriv"
+    }
+
+@app.get("/deriv/candles/{symbol}")
+async def get_deriv_candles(symbol: str, granularity: int = 60, count: int = 100):
+    """Récupère les chandeliers historiques via Deriv API"""
+    deriv_symbols = {
+        "Volatility 10 Index": "R_10",
+        "Volatility 25 Index": "R_25", 
+        "Volatility 50 Index": "R_50",
+        "Volatility 75 Index": "R_75",
+        "Volatility 100 Index": "R_100",
+        "Boom 300 Index": "BOOM300N",
+        "Boom 500 Index": "BOOM500",
+        "Boom 1000 Index": "BOOM1000",
+        "Crash 300 Index": "CRASH300N",
+        "Crash 500 Index": "CRASH500",
+        "Crash 1000 Index": "CRASH1000",
+    }
+    deriv_symbol = deriv_symbols.get(symbol, symbol)
+    
+    response = await deriv_ws_request({
+        "ticks_history": deriv_symbol,
+        "adjust_start_time": 1,
+        "count": count,
+        "end": "latest",
+        "granularity": granularity,
+        "style": "candles"
+    })
+    
+    if "error" in response:
+        raise HTTPException(status_code=500, detail=response.get("error", {}).get("message", "Unknown error"))
+    
+    candles = response.get("candles", [])
+    
+    return {
+        "symbol": symbol,
+        "deriv_symbol": deriv_symbol,
+        "granularity": granularity,
+        "count": len(candles),
+        "candles": [
+            {
+                "epoch": c.get("epoch"),
+                "open": c.get("open"),
+                "high": c.get("high"),
+                "low": c.get("low"),
+                "close": c.get("close")
+            }
+            for c in candles
+        ],
+        "api": "Deriv"
+    }
+
+@app.get("/market-data/{symbol}")
+async def get_market_data_with_fallback(symbol: str):
+    """Récupère les données de marché avec fallback automatique (Alpha Vantage -> Deriv)"""
+    global alphavantage_request_count
+    
+    # Essayer Alpha Vantage d'abord si pas épuisé
+    if ALPHAVANTAGE_AVAILABLE and alphavantage_request_count < ALPHAVANTAGE_DAILY_LIMIT:
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                # Mapping pour Alpha Vantage
+if any(c in symbol.upper() for c in ["USD", "EUR", "GBP", "JPY"]):
+                    from_c = symbol[:3].upper()
+                    to_c = symbol[3:6].upper() if len(symbol) >= 6 else "USD"
+                    url = f"https://www.alphavantage.co/query?function=CURRENCY_EXCHANGE_RATE&from_currency={from_c}&to_currency={to_c}&apikey={ALPHAVANTAGE_API_KEY}"
+                    resp = await client.get(url)
+                    alphavantage_request_count += 1
+                    data = resp.json()
+                    
+if "Realtime Currency Exchange Rate" in data:
+                        rate_data = data["Realtime Currency Exchange Rate"]
+                        return {
+                            "symbol": symbol,
+                            "price": float(rate_data.get("5. Exchange Rate", 0)),
+                            "bid": float(rate_data.get("8. Bid Price", 0)),
+                            "ask": float(rate_data.get("9. Ask Price", 0)),
+                            "api": "Alpha Vantage",
+                            "requests_remaining": ALPHAVANTAGE_DAILY_LIMIT - alphavantage_request_count
+                        }
+        except Exception as e:
+            logger.warning(f"Alpha Vantage failed, falling back to Deriv: {e}")
+    
+    # Fallback vers Deriv pour indices synthétiques ou si AV épuisé
+    deriv_symbols = {
+        "Volatility 10 Index": "R_10",
+        "Volatility 25 Index": "R_25",
+        "Volatility 50 Index": "R_50", 
+        "Volatility 75 Index": "R_75",
+        "Volatility 100 Index": "R_100",
+        "Boom 300 Index": "BOOM300N",
+        "Boom 500 Index": "BOOM500",
+        "Boom 1000 Index": "BOOM1000",
+        "Crash 300 Index": "CRASH300N",
+        "Crash 500 Index": "CRASH500",
+        "Crash 1000 Index": "CRASH1000",
+    }
+    
+    deriv_symbol = deriv_symbols.get(symbol)
+    if deriv_symbol:
+        response = await deriv_ws_request({"ticks": deriv_symbol})
+        if "tick" in response:
+            tick = response["tick"]
             return {
-                "valid": False,
-                "message": "Les champs symbol, bid, et ask sont requis"
+                "symbol": symbol,
+                "price": tick.get("quote"),
+                "bid": tick.get("bid"),
+                "ask": tick.get("ask"),
+                "epoch": tick.get("epoch"),
+                "api": "Deriv",
+                "alphavantage_exhausted": alphavantage_request_count >= ALPHAVANTAGE_DAILY_LIMIT
             }
+    
+    return {
+        "symbol": symbol,
+        "error": "Symbol not supported",
+        "supported_deriv": list(deriv_symbols.keys()),
+        "alphavantage_requests_used": alphavantage_request_count
+    }
+
+# ==================== DERIV PATTERNS DETECTION ====================
+
+def detect_xabcd_pattern(df: pd.DataFrame, tolerance: float = 0.05) -> List[Dict]:
+    """
+    Détecte les patterns XABCD (Harmonic Pattern)
+    Pattern: X -> A -> B -> C -> D avec ratios Fibonacci spécifiques
+    """
+    patterns = []
+    if len(df) < 5:
+        return patterns
+    
+    highs = df['high'].values
+    lows = df['low'].values
+    closes = df['close'].values
+    
+    # Rechercher les points pivots
+    for i in range(4, len(df)):
+        # XABCD: X=point de départ, A=premier pivot, B=retour, C=retour, D=projection
+        try:
+            # Simplification: chercher 5 points pivots consécutifs
+            x_idx = i - 4
+            a_idx = i - 3
+            b_idx = i - 2
+            c_idx = i - 1
+            d_idx = i
+            
+            # Calculer les ratios
+            xa = abs(highs[a_idx] - lows[x_idx]) if highs[a_idx] > lows[x_idx] else abs(lows[a_idx] - highs[x_idx])
+            ab = abs(highs[b_idx] - lows[a_idx]) if highs[b_idx] > lows[a_idx] else abs(lows[b_idx] - highs[a_idx])
+            bc = abs(highs[c_idx] - lows[b_idx]) if highs[c_idx] > lows[b_idx] else abs(lows[c_idx] - highs[b_idx])
+            cd = abs(highs[d_idx] - lows[c_idx]) if highs[d_idx] > lows[c_idx] else abs(lows[d_idx] - highs[c_idx])
+            
+            if xa == 0 or ab == 0 or bc == 0:
+                continue
+            
+            # Ratios Fibonacci typiques pour XABCD
+            ab_ratio = ab / xa
+            bc_ratio = bc / ab
+            cd_ratio = cd / bc
+            
+            # Vérifier si les ratios correspondent à un pattern XABCD
+            # Pattern haussier: AB ≈ 0.382-0.618 de XA, BC ≈ 0.382-0.886 de AB, CD ≈ 1.272-1.618 de BC
+            is_bullish = (0.3 <= ab_ratio <= 0.7 and 0.3 <= bc_ratio <= 0.9 and 1.2 <= cd_ratio <= 1.7)
+            # Pattern baissier: ratios inversés
+            is_bearish = (0.3 <= ab_ratio <= 0.7 and 0.3 <= bc_ratio <= 0.9 and 1.2 <= cd_ratio <= 1.7)
+            
+            if is_bullish or is_bearish:
+                patterns.append({
+                    "type": "XABCD",
+                    "direction": "bullish" if is_bullish else "bearish",
+                    "confidence": 0.7,
+                    "points": {
+                        "X": {"index": x_idx, "price": lows[x_idx] if is_bullish else highs[x_idx]},
+                        "A": {"index": a_idx, "price": highs[a_idx] if is_bullish else lows[a_idx]},
+                        "B": {"index": b_idx, "price": lows[b_idx] if is_bullish else highs[b_idx]},
+                        "C": {"index": c_idx, "price": highs[c_idx] if is_bullish else lows[c_idx]},
+                        "D": {"index": d_idx, "price": closes[d_idx]}
+                    },
+                    "ratios": {
+                        "AB/XA": round(ab_ratio, 3),
+                        "BC/AB": round(bc_ratio, 3),
+                        "CD/BC": round(cd_ratio, 3)
+                    }
+                })
+        except Exception as e:
+            continue
+    
+    return patterns
+
+def detect_cypher_pattern(df: pd.DataFrame) -> List[Dict]:
+    """
+    Détecte les patterns Cypher (Harmonic Pattern)
+    Pattern: X -> A -> B -> C avec ratios spécifiques
+    """
+    patterns = []
+    if len(df) < 4:
+        return patterns
+    
+    highs = df['high'].values
+    lows = df['low'].values
+    closes = df['close'].values
+    
+    for i in range(3, len(df)):
+        try:
+            x_idx = i - 3
+            a_idx = i - 2
+            b_idx = i - 1
+            c_idx = i
+            
+            xa = abs(highs[a_idx] - lows[x_idx]) if highs[a_idx] > lows[x_idx] else abs(lows[a_idx] - highs[x_idx])
+            ab = abs(highs[b_idx] - lows[a_idx]) if highs[b_idx] > lows[a_idx] else abs(lows[b_idx] - highs[a_idx])
+            bc = abs(highs[c_idx] - lows[b_idx]) if highs[c_idx] > lows[b_idx] else abs(lows[c_idx] - highs[b_idx])
+            
+            if xa == 0 or ab == 0:
+                continue
+            
+            ab_ratio = ab / xa
+            bc_ratio = bc / ab
+            
+            # Cypher: AB ≈ 0.382-0.618 de XA, BC ≈ 1.13-1.414 de AB
+            is_valid = (0.35 <= ab_ratio <= 0.65 and 1.1 <= bc_ratio <= 1.45)
+            
+            if is_valid:
+                patterns.append({
+                    "type": "Cypher",
+                    "confidence": 0.65,
+                    "points": {
+                        "X": {"index": x_idx, "price": lows[x_idx]},
+                        "A": {"index": a_idx, "price": highs[a_idx]},
+                        "B": {"index": b_idx, "price": lows[b_idx]},
+                        "C": {"index": c_idx, "price": closes[c_idx]}
+                    }
+                })
+        except:
+            continue
+    
+    return patterns
+
+def detect_head_and_shoulders(df: pd.DataFrame) -> List[Dict]:
+    """
+    Détecte les patterns Head and Shoulders
+    Pattern: 3 pics avec le pic central le plus haut
+    """
+    patterns = []
+    if len(df) < 10:
+        return patterns
+    
+    highs = df['high'].values
+    
+    # Chercher 3 pics consécutifs
+    for i in range(5, len(df) - 5):
+        try:
+            # Pic gauche (shoulder)
+            left_peak = max(highs[i-5:i])
+            left_idx = i - 5 + np.argmax(highs[i-5:i])
+            
+            # Pic central (head) - doit être le plus haut
+            head_peak = max(highs[i-2:i+3])
+            head_idx = i - 2 + np.argmax(highs[i-2:i+3])
+            
+            # Pic droit (shoulder)
+            right_peak = max(highs[i+3:i+8])
+            right_idx = i + 3 + np.argmax(highs[i+3:i+8])
+            
+            # Vérifier que le head est plus haut que les deux shoulders
+            if head_peak > left_peak and head_peak > right_peak:
+                # Les shoulders doivent être similaires en hauteur
+                shoulder_diff = abs(left_peak - right_peak) / head_peak
+if shoulder_diff < 0.1:  # Moins de 10% de différence
+                    patterns.append({
+                        "type": "Head and Shoulders",
+                        "direction": "bearish",
+                        "confidence": 0.75,
+                        "points": {
+                            "left_shoulder": {"index": left_idx, "price": left_peak},
+                            "head": {"index": head_idx, "price": head_peak},
+                            "right_shoulder": {"index": right_idx, "price": right_peak}
+                        },
+                        "neckline": (left_peak + right_peak) / 2
+                    })
+        except:
+            continue
+    
+    return patterns
+
+def detect_abcd_pattern(df: pd.DataFrame) -> List[Dict]:
+    """
+    Détecte les patterns ABCD (Harmonic Pattern simple)
+    Pattern: A -> B -> C -> D avec ratios Fibonacci
+    """
+    patterns = []
+    if len(df) < 4:
+        return patterns
+    
+    highs = df['high'].values
+    lows = df['low'].values
+    closes = df['close'].values
+    
+    for i in range(3, len(df)):
+        try:
+            a_idx = i - 3
+            b_idx = i - 2
+            c_idx = i - 1
+            d_idx = i
+            
+            ab = abs(highs[b_idx] - lows[a_idx]) if highs[b_idx] > lows[a_idx] else abs(lows[b_idx] - highs[a_idx])
+            bc = abs(highs[c_idx] - lows[b_idx]) if highs[c_idx] > lows[b_idx] else abs(lows[c_idx] - highs[b_idx])
+            cd = abs(highs[d_idx] - lows[c_idx]) if highs[d_idx] > lows[c_idx] else abs(lows[d_idx] - highs[c_idx])
+            
+            if ab == 0:
+                continue
+            
+            bc_ratio = bc / ab
+            cd_ratio = cd / bc
+            
+            # ABCD: BC ≈ 0.382-0.886 de AB, CD ≈ 1.272-1.618 de BC
+            is_valid = (0.35 <= bc_ratio <= 0.9 and 1.2 <= cd_ratio <= 1.7)
+            
+            if is_valid:
+                patterns.append({
+                    "type": "ABCD",
+                    "confidence": 0.7,
+                    "points": {
+                        "A": {"index": a_idx, "price": lows[a_idx]},
+                        "B": {"index": b_idx, "price": highs[b_idx]},
+                        "C": {"index": c_idx, "price": lows[c_idx]},
+                        "D": {"index": d_idx, "price": closes[d_idx]}
+                    }
+                })
+        except:
+            continue
+    
+    return patterns
+
+def detect_triangle_pattern(df: pd.DataFrame) -> List[Dict]:
+    """
+    Détecte les patterns Triangle (ascendant, descendant, symétrique)
+    """
+    patterns = []
+    if len(df) < 10:
+        return patterns
+    
+    highs = df['high'].values
+    lows = df['low'].values
+    
+    # Chercher convergence des hauts et bas
+    for i in range(10, len(df)):
+        try:
+            recent_highs = highs[i-10:i]
+            recent_lows = lows[i-10:i]
+            
+            # Calculer les lignes de tendance
+            high_trend = np.polyfit(range(len(recent_highs)), recent_highs, 1)[0]
+            low_trend = np.polyfit(range(len(recent_lows)), recent_lows, 1)[0]
+            
+            # Triangle ascendant: ligne de support montante, résistance horizontale
+            ascending = low_trend > 0 and abs(high_trend) < 0.0001
+            
+            # Triangle descendant: ligne de support horizontale, résistance descendante
+            descending = abs(low_trend) < 0.0001 and high_trend < 0
+            
+            # Triangle symétrique: les deux lignes convergent
+            symmetrical = (low_trend > 0 and high_trend < 0) or (abs(low_trend) < 0.0001 and abs(high_trend) < 0.0001)
+            
+            if ascending or descending or symmetrical:
+                patterns.append({
+                    "type": "Triangle",
+                    "subtype": "ascending" if ascending else "descending" if descending else "symmetrical",
+                    "confidence": 0.65,
+                    "points": {
+                        "start": {"index": i-10, "high": recent_highs[0], "low": recent_lows[0]},
+                        "end": {"index": i, "high": recent_highs[-1], "low": recent_lows[-1]}
+                    },
+                    "trends": {
+                        "high_trend": round(high_trend, 6),
+                        "low_trend": round(low_trend, 6)
+                    }
+                })
+        except:
+            continue
+    
+    return patterns
+
+def detect_three_drives_pattern(df: pd.DataFrame) -> List[Dict]:
+    """
+    Détecte les patterns Three Drives
+    Pattern: 3 mouvements similaires avec ratios Fibonacci
+    """
+    patterns = []
+    if len(df) < 9:
+        return patterns
+    
+    highs = df['high'].values
+    lows = df['low'].values
+    
+    for i in range(8, len(df)):
+        try:
+            # 3 drives: 3 vagues similaires
+            drive1 = abs(highs[i-8] - lows[i-6]) if highs[i-8] > lows[i-6] else abs(lows[i-8] - highs[i-6])
+            drive2 = abs(highs[i-5] - lows[i-3]) if highs[i-5] > lows[i-3] else abs(lows[i-5] - highs[i-3])
+            drive3 = abs(highs[i-2] - lows[i]) if highs[i-2] > lows[i] else abs(lows[i-2] - highs[i])
+            
+            if drive1 == 0:
+                continue
+            
+            ratio2 = drive2 / drive1
+            ratio3 = drive3 / drive2
+            
+            # Three Drives: ratios similaires entre les drives (0.8-1.2)
+            is_valid = (0.8 <= ratio2 <= 1.2 and 0.8 <= ratio3 <= 1.2)
+            
+            if is_valid:
+                patterns.append({
+                    "type": "Three Drives",
+                    "confidence": 0.7,
+                    "points": {
+                        "drive1": {"start": i-8, "end": i-6, "magnitude": drive1},
+                        "drive2": {"start": i-5, "end": i-3, "magnitude": drive2},
+                        "drive3": {"start": i-2, "end": i, "magnitude": drive3}
+                    },
+                    "ratios": {
+                        "drive2/drive1": round(ratio2, 3),
+                        "drive3/drive2": round(ratio3, 3)
+                    }
+                })
+        except:
+            continue
+    
+    return patterns
+
+def detect_elliott_impulse(df: pd.DataFrame) -> List[Dict]:
+    """
+    Détecte les patterns Elliott Impulse Wave (12345)
+    5 vagues: 3 impulsives (1,3,5) et 2 correctives (2,4)
+    """
+    patterns = []
+    if len(df) < 20:
+        return patterns
+    
+    closes = df['close'].values
+    
+    # Chercher 5 vagues
+    for i in range(20, len(df)):
+        try:
+            # Simplification: chercher 5 mouvements alternés
+            wave1 = closes[i-19] - closes[i-15]  # Vague 1
+            wave2 = closes[i-15] - closes[i-11]  # Vague 2 (correction)
+            wave3 = closes[i-11] - closes[i-7]    # Vague 3 (impulsive)
+            wave4 = closes[i-7] - closes[i-3]    # Vague 4 (correction)
+            wave5 = closes[i-3] - closes[i]      # Vague 5 (impulsive)
+            
+            # Vague 3 doit être la plus forte
+            if abs(wave3) > abs(wave1) and abs(wave3) > abs(wave5):
+                # Vagues 2 et 4 doivent être des corrections (direction opposée)
+                is_valid = (wave1 * wave2 < 0 and wave2 * wave3 < 0 and wave3 * wave4 < 0 and wave4 * wave5 < 0)
+                
+if is_valid:
+                    patterns.append({
+                        "type": "Elliott Impulse Wave",
+                        "direction": "bullish" if wave1 > 0 else "bearish",
+                        "confidence": 0.7,
+                        "waves": {
+                            "1": {"start": i-19, "end": i-15, "magnitude": wave1},
+                            "2": {"start": i-15, "end": i-11, "magnitude": wave2},
+                            "3": {"start": i-11, "end": i-7, "magnitude": wave3},
+                            "4": {"start": i-7, "end": i-3, "magnitude": wave4},
+                            "5": {"start": i-3, "end": i, "magnitude": wave5}
+                        }
+                    })
+        except:
+            continue
+    
+    return patterns
+
+def detect_elliott_abc(df: pd.DataFrame) -> List[Dict]:
+    """
+    Détecte les patterns Elliott Correction Wave (ABC)
+    3 vagues correctives
+    """
+    patterns = []
+    if len(df) < 9:
+        return patterns
+    
+    closes = df['close'].values
+    
+    for i in range(9, len(df)):
+        try:
+            wave_a = closes[i-9] - closes[i-6]
+            wave_b = closes[i-6] - closes[i-3]
+            wave_c = closes[i-3] - closes[i]
+            
+            # ABC: A et C dans la même direction, B en correction
+            is_valid = (wave_a * wave_c > 0 and wave_a * wave_b < 0)
+            
+            if is_valid:
+                patterns.append({
+                    "type": "Elliott Correction Wave (ABC)",
+                    "confidence": 0.65,
+                    "waves": {
+                        "A": {"start": i-9, "end": i-6, "magnitude": wave_a},
+                        "B": {"start": i-6, "end": i-3, "magnitude": wave_b},
+                        "C": {"start": i-3, "end": i, "magnitude": wave_c}
+                    }
+                })
+        except:
+            continue
+    
+    return patterns
+
+@app.get("/deriv/patterns/{symbol}")
+async def get_deriv_patterns(symbol: str, timeframe: str = "M15", count: int = 100):
+    """
+    Détecte tous les patterns Deriv sur un symbole
+    Retourne: XABCD, Cypher, Head and Shoulders, ABCD, Triangle, Three Drives
+    """
+    global mt5_initialized  # Déclarer global AVANT toute utilisation
+    try:
+        # Récupérer les données
+        if MT5_AVAILABLE and mt5_initialized:
+            tf_map = {'M1': mt5.TIMEFRAME_M1, 'M5': mt5.TIMEFRAME_M5, 'M15': mt5.TIMEFRAME_M15,
+                     'H1': mt5.TIMEFRAME_H1, 'H4': mt5.TIMEFRAME_H4, 'D1': mt5.TIMEFRAME_D1}
+            tf = tf_map.get(timeframe.upper(), mt5.TIMEFRAME_M15)
+            
+            rates = mt5.copy_rates_from_pos(symbol, tf, 0, count)
+            if rates is None or len(rates) == 0:
+                raise HTTPException(status_code=404, detail=f"Aucune donnée pour {symbol}")
+            
+            df = pd.DataFrame(rates)
+            df['time'] = pd.to_datetime(df['time'], unit='s')
+        else:
+            # Fallback: utiliser les données MT5 si disponible, sinon erreur
+            if not MT5_AVAILABLE:
+                raise HTTPException(status_code=503, detail="MT5 non disponible - impossible de récupérer les données")
+            
+            # Essayer avec MT5 même si pas initialisé
+            try:
+if not mt5_initialized:
+if not mt5.initialize():
+                        raise HTTPException(status_code=503, detail="Impossible d'initialiser MT5")
+                    mt5_initialized = True
+                
+                tf_map = {'M1': mt5.TIMEFRAME_M1, 'M5': mt5.TIMEFRAME_M5, 'M15': mt5.TIMEFRAME_M15,
+                         'H1': mt5.TIMEFRAME_H1, 'H4': mt5.TIMEFRAME_H4, 'D1': mt5.TIMEFRAME_D1}
+                tf = tf_map.get(timeframe.upper(), mt5.TIMEFRAME_M15)
+                
+                rates = mt5.copy_rates_from_pos(symbol, tf, 0, count)
+if rates is None or len(rates) == 0:
+                    raise HTTPException(status_code=404, detail=f"Aucune donnée pour {symbol}")
+                
+                df = pd.DataFrame(rates)
+                df['time'] = pd.to_datetime(df['time'], unit='s')
+            except Exception as e:
+                logger.error(f"Erreur MT5 dans get_deriv_patterns: {type(e).__name__}: {str(e)}", exc_info=True)
+                raise HTTPException(status_code=500, detail=f"Erreur lors de la récupération des données: {str(e)}")
         
-        if bid <= 0 or ask <= 0:
-            return {
-                "valid": False,
-                "message": "Les prix bid et ask doivent être positifs"
-            }
+        # Vérifier que le DataFrame a les colonnes nécessaires
+        required_columns = ['open', 'high', 'low', 'close']
+        if not all(col in df.columns for col in required_columns):
+            raise HTTPException(status_code=500, detail=f"Données incomplètes. Colonnes requises: {required_columns}, trouvées: {list(df.columns)}")
         
-        if bid >= ask:
-            return {
-                "valid": False,
-                "message": "Le prix bid doit être inférieur au prix ask"
+        # S'assurer que les colonnes sont numériques
+        for col in required_columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+        
+        # Supprimer les lignes avec NaN
+        df = df.dropna(subset=required_columns)
+        
+        if len(df) < 5:
+            raise HTTPException(status_code=400, detail=f"Pas assez de données pour détecter des patterns. Minimum 5 bougies requis, trouvé: {len(df)}")
+        
+        # Détecter tous les patterns
+        try:
+            all_patterns = {
+                "xabcd": detect_xabcd_pattern(df),
+                "cypher": detect_cypher_pattern(df),
+                "head_and_shoulders": detect_head_and_shoulders(df),
+                "abcd": detect_abcd_pattern(df),
+                "triangle": detect_triangle_pattern(df),
+                "three_drives": detect_three_drives_pattern(df),
+                "elliott_impulse": detect_elliott_impulse(df),
+                "elliott_abc": detect_elliott_abc(df)
             }
+        except Exception as pattern_error:
+            logger.error(f"Erreur lors de la détection des patterns: {pattern_error}", exc_info=True)
+            raise HTTPException(status_code=500, detail=f"Erreur détection patterns: {str(pattern_error)}")
+        
+        # Compter les patterns détectés
+        total_patterns = sum(len(patterns) for patterns in all_patterns.values())
+        
+        # Convertir les types NumPy en types Python natifs pour la sérialisation JSON
+        import numpy as np
+        import json
+        
+        def convert_to_native(obj):
+            """Convertit récursivement les types NumPy en types Python natifs"""
+            if isinstance(obj, (np.integer, np.int64, np.int32)):
+                return int(obj)
+            elif isinstance(obj, (np.floating, np.float64, np.float32)):
+                return float(obj)
+            elif isinstance(obj, np.ndarray):
+                return obj.tolist()
+            elif isinstance(obj, dict):
+                return {k: convert_to_native(v) for k, v in obj.items()}
+            elif isinstance(obj, list):
+                return [convert_to_native(item) for item in obj]
+            elif isinstance(obj, (pd.Timestamp, datetime)):
+                return obj.isoformat() if hasattr(obj, 'isoformat') else str(obj)
+            else:
+                return obj
+        
+        # Convertir tous les patterns
+        converted_patterns = {}
+        for pattern_type, patterns_list in all_patterns.items():
+            converted_patterns[pattern_type] = [convert_to_native(p) for p in patterns_list]
         
         return {
-            "valid": True,
-            "message": "Format valide",
             "symbol": symbol,
-            "bid": bid,
-            "ask": ask
+            "timeframe": timeframe,
+            "total_patterns": int(total_patterns),
+            "patterns": converted_patterns,
+            "timestamp": datetime.utcnow().isoformat()
         }
         
     except Exception as e:
+        logger.error(f"Erreur détection patterns pour {symbol}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/deriv/tools/vwap/{symbol}")
+async def get_anchored_vwap(symbol: str, anchor_date: Optional[str] = None, timeframe: str = "M15"):
+    """
+    Calcule l'Anchored VWAP (Volume Weighted Average Price) depuis une date d'ancrage
+    """
+    try:
+        if MT5_AVAILABLE and mt5_initialized:
+            tf_map = {'M1': mt5.TIMEFRAME_M1, 'M5': mt5.TIMEFRAME_M5, 'M15': mt5.TIMEFRAME_M15,
+                     'H1': mt5.TIMEFRAME_H1, 'H4': mt5.TIMEFRAME_H4, 'D1': mt5.TIMEFRAME_D1}
+            tf = tf_map.get(timeframe.upper(), mt5.TIMEFRAME_M15)
+            
+            # Si anchor_date fourni, calculer depuis cette date
+            if anchor_date:
+                anchor = datetime.fromisoformat(anchor_date.replace('Z', '+00:00'))
+                rates = mt5.copy_rates_from(symbol, tf, anchor, 1000)
+            else:
+                # Par défaut: depuis le début de la journée
+                today = datetime.now().replace(hour=0, minute=0, second=0)
+                rates = mt5.copy_rates_from(symbol, tf, today, 1000)
+            
+            if rates is None or len(rates) == 0:
+                raise HTTPException(status_code=404, detail="Aucune donnée")
+            
+            df = pd.DataFrame(rates)
+            df['time'] = pd.to_datetime(df['time'], unit='s')
+        else:
+            raise HTTPException(status_code=503, detail="MT5 non disponible ou non initialisé")
+        
+        # Calculer VWAP
+        df['typical_price'] = (df['high'] + df['low'] + df['close']) / 3
+        df['pv'] = df['typical_price'] * df['tick_volume']
+        df['cumulative_pv'] = df['pv'].cumsum()
+        df['cumulative_volume'] = df['tick_volume'].cumsum()
+        df['vwap'] = df['cumulative_pv'] / df['cumulative_volume']
+        
+        current_vwap = df['vwap'].iloc[-1]
+        
         return {
-            "valid": False,
-            "error": str(e),
-            "message": "Erreur lors de la validation",
-            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "anchor_date": anchor_date or "today",
+            "current_vwap": round(current_vwap, 5),
+            "price_vs_vwap": round(df['close'].iloc[-1] - current_vwap, 5),
+            "bias": "above" if df['close'].iloc[-1] > current_vwap else "below",
+            "data_points": len(df)
+        }
+        
+    except Exception as e:
+        logger.error(f"Erreur VWAP pour {symbol}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/deriv/tools/volume-profile/{symbol}")
+async def get_volume_profile(symbol: str, timeframe: str = "H1", bins: int = 20):
+    """
+    Calcule le Volume Profile (Fixed Range) - distribution du volume par niveau de prix
+    """
+    try:
+        if MT5_AVAILABLE and mt5_initialized:
+            tf_map = {'M1': mt5.TIMEFRAME_M1, 'M5': mt5.TIMEFRAME_M5, 'M15': mt5.TIMEFRAME_M15,
+                     'H1': mt5.TIMEFRAME_H1, 'H4': mt5.TIMEFRAME_H4, 'D1': mt5.TIMEFRAME_D1}
+            tf = tf_map.get(timeframe.upper(), mt5.TIMEFRAME_H1)
+            
+            rates = mt5.copy_rates_from_pos(symbol, tf, 0, 500)
+            if rates is None or len(rates) == 0:
+                raise HTTPException(status_code=404, detail="Aucune donnée")
+            
+            df = pd.DataFrame(rates)
+        else:
+            raise HTTPException(status_code=503, detail="MT5 non disponible ou non initialisé")
+        
+        # Calculer le range de prix
+        price_min = df['low'].min()
+        price_max = df['high'].max()
+        price_range = price_max - price_min
+        
+        # Créer des bins de prix
+        bin_size = price_range / bins
+        price_bins = [price_min + i * bin_size for i in range(bins + 1)]
+        
+        # Distribuer le volume par bin
+        volume_profile = []
+        for i in range(bins):
+            bin_low = price_bins[i]
+            bin_high = price_bins[i + 1]
+            
+            # Volume dans ce bin (basé sur les bougies qui touchent ce range)
+            volume = df[(df['high'] >= bin_low) & (df['low'] <= bin_high)]['tick_volume'].sum()
+            
+            volume_profile.append({
+                "price_level": round((bin_low + bin_high) / 2, 5),
+                "volume": int(volume),
+                "range": {"low": round(bin_low, 5), "high": round(bin_high, 5)}
+            })
+        
+        # Trouver le POC (Point of Control) - niveau avec le plus de volume
+        max_volume_bin = max(volume_profile, key=lambda x: x['volume'])
+        
+        return {
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "price_range": {"min": round(price_min, 5), "max": round(price_max, 5)},
+            "poc": {
+                "price": max_volume_bin["price_level"],
+                "volume": max_volume_bin["volume"]
+            },
+            "profile": volume_profile,
+            "bins": bins
+        }
+        
+    except Exception as e:
+        logger.error(f"Erreur Volume Profile pour {symbol}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ==================== END DERIV API ====================
+
+# Import du module ML pour Phase 2
+try:
+    from backend.ml_trading_models import EnsembleMLModel, MLTradingModel
+    ML_MODELS_AVAILABLE = True
+    logger.info("✅ Module ML Trading (Phase 2) disponible")
+except ImportError as e:
+    ML_MODELS_AVAILABLE = False
+    logger.warning(f"Module ML Trading non disponible: {e}")
+
+# Variables globales pour les modèles ML
+ml_ensemble = None
+ml_models_initialized = False
+
+@app.get("/dashboard/stats")
+async def get_dashboard_stats(symbol: Optional[str] = None):
+    """
+    Endpoint pour récupérer toutes les statistiques du dashboard
+    Retourne: performance modèles ML, statistiques trading, performance robot
+    """
+    if not DASHBOARD_STATS_AVAILABLE:
+        return {
+            "error": "Module dashboard_stats non disponible",
+            "timestamp": datetime.now().isoformat()
+        }
+    
+    try:
+        stats_collector = DashboardStats()
+        stats = stats_collector.get_all_stats()
+        
+        # Ajouter l'analyse cohérente si un symbole est fourni
+        if symbol:
+            coherent_analysis = await calculate_coherent_analysis(symbol)
+            stats["coherent_analysis"] = coherent_analysis
+        
+        return stats
+    except Exception as e:
+        logger.error(f"Erreur récupération stats dashboard: {e}", exc_info=True)
+
+@app.get("/health")
+async def health_check():
+    """Vérification de l'état du serveur"""
+    return {
+        "status": "healthy",
+        "timestamp": datetime.now().isoformat(),
+        "cache_size": len(prediction_cache),
+        "mt5_initialized": mt5_initialized,
+        "yfinance_available": YFINANCE_AVAILABLE,
+        "mistral_available": MISTRAL_AVAILABLE,
+        "trend_analysis": {
+            "available": True,
+            "mt5_available": mt5_initialized,
+            "yfinance_available": YFINANCE_AVAILABLE
+        }
+    }
+
+@app.post("/mt5/initialize")
+async def initialize_mt5_endpoint():
+    """Initialises MT5 avec les identifiants des variables d'environnement"""
+    global mt5_initialized
+    
+    try:
+        if not MT5_AVAILABLE:
+            return {
+                "status": "error",
+                "message": "MetaTrader5 n'est pas installé sur le serveur",
+                "mt5_initialized": False
+            }
+        
+        if mt5_initialized:
+            return {
+                "status": "already_initialized",
+                "message": "MT5 est déjà initialisé",
+                "mt5_initialized": True
+            }
+        
+        # Récupérer les identifiants depuis les variables d'environnement
+        login = os.getenv("MT5_LOGIN")
+        password = os.getenv("MT5_PASSWORD")
+        server = os.getenv("MT5_SERVER")
+        
+        if not login or not password or not server:
+            return {
+                "status": "error",
+                "message": "Variables d'environnement MT5 manquantes (MT5_LOGIN, MT5_PASSWORD, MT5_SERVER)",
+                "mt5_initialized": False
+            }
+        
+        # Initialiser MT5
+        if not mt5.initialize():
+            return {
+                "status": "error",
+                "message": f"Échec de l'initialisation MT5: {mt5.last_error()}",
+                "mt5_initialized": False
+            }
+        
+        # Se connecter
+        authorized = mt5.login(login=int(login), password=password, server=server)
+        if authorized:
+            mt5_initialized = True
+            logger.info(f"✅ MT5 connecté avec succès (login: {login})")
+            return {
+                "status": "success",
+                "message": "MT5 initialisé et connecté avec succès",
+                "mt5_initialized": True,
+                "login": login,
+                "server": server
+            }
+        else:
+            error_msg = f"Échec de connexion MT5: {mt5.last_error()}"
+            mt5.shutdown()
+            return {
+                "status": "error",
+                "message": error_msg,
+                "mt5_initialized": False
+            }
+            
+    except Exception as e:
+        logger.error(f"Erreur lors de l'initialisation MT5: {e}")
+        return {
+            "status": "error",
+            "message": f"Erreur lors de l'initialisation MT5: {str(e)}",
+            "mt5_initialized": False
+        }
+
+class MLModelUploadRequest(BaseModel):
+    """Modèle pour l'upload de modèles ML entraînés"""
+    symbol: str
+    timeframe: str
+    model_data: Dict[str, Any]  # Contient les modèles sérialisés
+    metrics: Dict[str, Any]  # Métriques d'entraînement
+    training_samples: int
+    test_samples: int
+    best_model: str
+    timestamp: str
+
+@app.post("/ml/upload-model")
+async def upload_ml_model(request: MLModelUploadRequest):
+    """
+    Reçoit un modèle ML entraîné depuis un serveur local
+    et le stocke pour utilisation sur le serveur cloud
+    """
+    try:
+        model_key = f"{request.symbol}_{request.timeframe}"
+        
+        # Stocker les modèles dans le cache
+        if model_data := request.model_data:
+            ml_models_cache[model_key] = model_data
+            logger.info(f"✅ Modèle ML reçu pour {model_key}: {request.best_model}")
+        
+        # Stocker les métriques
+        _metrics_cache[model_key] = {
+            "symbol": request.symbol,
+            "timeframe": request.timeframe,
+            "best_model": request.best_model,
+            "metrics": request.metrics,
+            "training_samples": request.training_samples,
+            "test_samples": request.test_samples,
+            "last_update": request.timestamp,
+            "is_valid": True,
+            "source": "local_upload"
+        }
+        
+        return {
+            "status": "success",
+            "message": f"Modèle pour {request.symbol} {request.timeframe} reçu et stocké",
+            "model_key": model_key,
+            "best_model": request.best_model,
+            "metrics": request.metrics
+        }
+        
+    except Exception as e:
+        logger.error(f"Erreur upload modèle ML: {e}")
+        raise HTTPException(status_code=500, detail=f"Erreur lors de l'upload du modèle: {str(e)}")
+
+@app.post("/boom-crash/detect-spike")
+async def detect_boom_crash_spike(request: Dict[str, Any]):
+    """
+    Endpoint dédié pour tester la détection de spikes Boom/Crash
+    """
+    try:
+        symbol = request.get('symbol')
+        timeframe = request.get('timeframe', 'M1')
+        
+        if not symbol:
+            raise HTTPException(status_code=400, detail="Symbol requis")
+        
+        if not is_boom_crash_symbol(symbol):
+            raise HTTPException(status_code=400, detail="Le symbole doit être un indice Boom ou Crash")
+        
+        # Récupérer les données
+        df = get_market_data(symbol, timeframe, 100)
+        
+        if df.empty:
+            raise HTTPException(status_code=400, detail="Impossible de récupérer les données")
+        
+        # Détecter les spikes
+        spike_info = detect_spike_pattern(df, symbol)
+        
+        # Analyser les dernières bougies pour contexte
+        analysis = {
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "data_points": len(df),
+            "last_candle": {
+                "time": df['time'].iloc[-1].isoformat() if 'time' in df.columns else None,
+                "open": float(df['open'].iloc[-1]),
+                "high": float(df['high'].iloc[-1]),
+                "low": float(df['low'].iloc[-1]),
+                "close": float(df['close'].iloc[-1]),
+                "volume": int(df['tick_volume'].iloc[-1])
+            },
+            "spike_detection": spike_info,
+            "market_context": {
+                "avg_volume": float(df['tick_volume'].mean()),
+                "price_volatility": float(df['close'].pct_change().std() * 100),
+                "trend_direction": "up" if df['close'].iloc[-1] > df['close'].iloc[-10] else "down"
+            }
+        }
+        
+        return {
+            "status": "success",
+            "analysis": analysis,
+            "recommendation": generate_boom_crash_signal(symbol, df),
+            "timestamp": datetime.now().isoformat()
+        }
+        
+    except Exception as e:
+        logger.error(f"Erreur détection spike Boom/Crash: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/ml/predict-signal")
+async def predict_trading_signal(request: Dict[str, Any]):
+    """
+    Endpoint principal pour le robot MT5
+    Retourne un signal de trading complet (direction, confidence, SL, TP)
+    """
+    try:
+        symbol = request.get('symbol')
+        timeframe = request.get('timeframe', 'M1')
+        current_price = request.get('current_price')
+        bid = request.get('bid')
+        ask = request.get('ask')
+        
+        if not symbol:
+            raise HTTPException(status_code=400, detail="Symbol requis")
+        
+        # ===== PRIORITÉ BOOM/CRASH SPIKE DETECTION =====
+        if is_boom_crash_symbol(symbol):
+            logger.info(f"🚀 Détection de spike pour {symbol}")
+            
+            try:
+                # Récupérer les données pour détection de spike
+                df = get_market_data(symbol, timeframe, 50)  # Plus de données pour les indicateurs
+                
+if not df.empty and len(df) >= 20:
+                    # Générer le signal Boom/Crash
+                    boom_crash_result = generate_boom_crash_signal(symbol, df)
+                    
+if boom_crash_result["has_signal"]:
+                        logger.info(
+                            f"✅ Spike {boom_crash_result['signal']} détecté pour {symbol} - "
+                            f"Confiance: {boom_crash_result['confidence']:.0f}%"
+                        )
+                        
+                        return {
+                            "signal": boom_crash_result["signal"],
+                            "confidence": boom_crash_result["confidence"],
+                            "source": "boom_crash_spike",
+                            "symbol": symbol,
+                            "timeframe": timeframe,
+                            "stop_loss": boom_crash_result["stop_loss"],
+                            "take_profit": boom_crash_result["take_profit"],
+                            "position_size": boom_crash_result["position_size"],
+                            "reasoning": boom_crash_result["reasoning"],
+                            "spike_info": boom_crash_result["spike_info"],
+                            "timestamp": datetime.now().isoformat()
+                        }
+else:
+                        logger.info(f"❌ Aucun spike détecté pour {symbol}")
+                        
+                        # Retourner un signal neutre pour Boom/Crash sans spike
+                        return {
+                            "signal": "neutral",
+                            "confidence": 0.0,
+                            "source": "boom_crash_no_spike",
+                            "symbol": symbol,
+                            "timeframe": timeframe,
+                            "stop_loss": None,
+                            "take_profit": None,
+                            "position_size": 0.0,
+                            "reasoning": ["Aucun spike détecté", boom_crash_result.get("reason", "")],
+                            "spike_info": boom_crash_result.get("spike_info", {}),
+                            "timestamp": datetime.now().isoformat()
+                        }
+else:
+                    logger.warning(f"Données insuffisantes pour détection de spike {symbol}: {len(df)} bougies")
+            except Exception as e:
+                logger.error(f"Erreur dans détection spike Boom/Crash: {e}")
+                logger.error(f"Traceback: {traceback.format_exc()}")
+                # Continuer avec la logique ML standard en cas d'erreur
+        
+        # ===== LOGIQUE ML STANDARD POUR LES AUTRES SYMBOLES =====
+        
+        # Vérifier si nous avons un modèle pour ce symbole
+        model_key = f"{symbol}_{timeframe}"
+        
+        if model_key not in ml_models_cache:
+            # Fallback vers l'analyse de tendance
+            logger.warning(f"Pas de modèle ML pour {model_key}, utilisation de l'analyse de tendance")
+            trend_result = calculate_enhanced_trend_direction(symbol, timeframe)
+            
+            return {
+                "signal": trend_result.get("direction", "neutral"),
+                "confidence": trend_result.get("confidence", 50.0),
+                "source": "trend_analysis",
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "stop_loss": None,
+                "take_profit": None,
+                "position_size": 0.01,  # Default
+                "reasoning": trend_result.get("signals", []),
+                "timestamp": datetime.now().isoformat()
+            }
+        
+        # Utiliser le modèle ML
+        model_data = ml_models_cache[model_key]
+        best_model = model_data.get('best_model', 'RandomForest')
+        
+        # Récupérer les données récentes pour la prédiction
+        df = get_market_data(symbol, timeframe, 100)
+        
+        if df.empty or len(df) < 50:
+            raise HTTPException(status_code=400, detail="Données insuffisantes pour la prédiction")
+        
+        # Extraire les features
+        features_df = extract_advanced_features(df)
+        
+        if features_df is None or features_df.empty:
+            raise HTTPException(status_code=400, detail="Erreur extraction features")
+        
+        # Préparer les données pour la prédiction
+        latest_features = features_df.iloc[-1:].dropna()
+        
+        if latest_features.empty:
+            raise HTTPException(status_code=400, detail="Features invalides")
+        
+        # Faire la prédiction
+        prediction = None
+        if best_model in model_data and model_data[best_model]:
+            try:
+                model = model_data[best_model]
+                prediction = model.predict(latest_features)[0]
+                confidence = max(model.predict_proba(latest_features)[0]) * 100
+            except:
+                prediction = 0
+                confidence = 50.0
+        
+        # Convertir la prédiction en signal
+        if prediction == 1:
+            signal = "BUY"
+        elif prediction == -1:
+            signal = "SELL"
+        else:
+            signal = "HOLD"
+        
+        # Calculer SL/TP basés sur l'ATR
+        atr = calculate_atr(df, 14).iloc[-1]
+        current_price = df['close'].iloc[-1]
+        
+        stop_loss = None
+        take_profit = None
+        
+        if signal == "BUY":
+            stop_loss = current_price - (atr * 2)
+            take_profit = current_price + (atr * 3)
+        elif signal == "SELL":
+            stop_loss = current_price + (atr * 2)
+            take_profit = current_price - (atr * 3)
+        
+        return {
+            "signal": signal,
+            "confidence": round(confidence, 1),
+            "source": "ml_model",
+            "model_used": best_model,
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "current_price": current_price,
+            "stop_loss": round(stop_loss, 5) if stop_loss else None,
+            "take_profit": round(take_profit, 5) if take_profit else None,
+            "position_size": 0.01,  # Peut être ajusté selon la confidence
+            "atr": round(atr, 5),
+            "reasoning": [
+                f"Modèle: {best_model}",
+                f"Confiance: {confidence:.1f}%",
+                f"Signal: {signal}"
+            ],
+            "timestamp": datetime.now().isoformat()
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Erreur prédiction signal: {e}")
+        raise HTTPException(status_code=500, detail=f"Erreur lors de la prédiction: {str(e)}")
+
+@app.get("/ml/uploaded-models")
+async def list_uploaded_models():
+    """Liste tous les modèles uploadés"""
+    try:
+        models = []
+        for key, model_data in ml_models_cache.items():
+            symbol, timeframe = key.split('_', 1)
+            metrics = _metrics_cache.get(key, {})
+            models.append({
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "model_key": key,
+                "best_model": metrics.get("best_model", "unknown"),
+                "training_samples": metrics.get("training_samples", 0),
+                "last_update": metrics.get("last_update", "unknown"),
+                "source": metrics.get("source", "unknown")
+            })
+        
+        return {
+            "status": "success",
+            "count": len(models),
+            "models": models
+        }
+        
+    except Exception as e:
+        logger.error(f"Erreur liste modèles uploadés: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ==============================================================================
+# ENDPOINTS D'ANALYSE DE TENDANCE (intégrés depuis trend_api.py)
+# ==============================================================================
+
+class TrendAnalysisRequest(BaseModel):
+    symbol: str
+    timeframes: Optional[List[str]] = ["M1", "M5", "M15", "H1", "H4"]
+
+def calculate_enhanced_trend_direction(symbol: str, timeframe: str = "M1") -> Dict[str, Any]:
+    """Calcule la direction de tendance avec analyse multi-indicateurs avancés"""
+    try:
+        # Utiliser la fonction hybride get_market_data
+        df = get_market_data(symbol, timeframe, 100)
+        
+        if df.empty or len(df) < 50:
+            # Fallback basé sur l'heure si pas de données
+            hour = datetime.now().hour
+            if hour % 2 == 0:
+                return {"direction": "buy", "confidence": 65.0, "signals": ["fallback_hour"]}
+            else:
+                return {"direction": "sell", "confidence": 65.0, "signals": ["fallback_hour"]}
+        
+        current_price = df['close'].iloc[-1]
+        current_volume = df['volume'].iloc[-1]
+        
+        # ===== INDICATEURS MULTIPLES =====
+        
+        # 1. Moyennes mobiles multiples
+        sma_20 = df['close'].rolling(window=20).mean().iloc[-1]
+        sma_50 = df['close'].rolling(window=50).mean().iloc[-1]
+        ema_9 = df['close'].ewm(span=9).mean().iloc[-1]
+        ema_21 = df['close'].ewm(span=21).mean().iloc[-1]
+        
+        # 2. RSI avec zones optimisées
+        delta = df['close'].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+        rs = gain / loss
+        rsi = 100 - (100 / (1 + rs))
+        current_rsi = rsi.iloc[-1]
+        
+        # 3. MACD
+        ema_12 = df['close'].ewm(span=12).mean()
+        ema_26 = df['close'].ewm(span=26).mean()
+        macd_line = ema_12 - ema_26
+        signal_line = macd_line.ewm(span=9).mean()
+        macd_histogram = macd_line - signal_line
+        current_macd = macd_line.iloc[-1]
+        current_signal = signal_line.iloc[-1]
+        current_histogram = macd_histogram.iloc[-1]
+        
+        # 4. Bandes de Bollinger
+        bb_period = 20
+        bb_std = 2
+        bb_middle = df['close'].rolling(window=bb_period).mean()
+        bb_std = df['close'].rolling(window=bb_period).std()
+        bb_upper = bb_middle + (bb_std * bb_std)
+        bb_lower = bb_middle - (bb_std * bb_std)
+        current_bb_upper = bb_upper.iloc[-1]
+        current_bb_lower = bb_lower.iloc[-1]
+        current_bb_middle = bb_middle.iloc[-1]
+        
+        # 5. Volume analysis
+        volume_sma = df['volume'].rolling(window=20).mean()
+        volume_ratio = current_volume / volume_sma.iloc[-1] if volume_sma.iloc[-1] > 0 else 1.0
+        
+        # 6. ATR pour la volatilité
+        high_low = df['high'] - df['low']
+        high_close = (df['high'] - df['close'].shift()).abs()
+        low_close = (df['low'] - df['close'].shift()).abs()
+        true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+        atr = true_range.rolling(window=14).mean()
+        current_atr = atr.iloc[-1]
+        atr_percentage = (current_atr / current_price) * 100
+        
+        # ===== CALCUL DU SCORE DE TENDANCE =====
+        trend_score = 0.0
+        signals = []
+        
+        # Prix par rapport aux moyennes mobiles (poids: 2.0)
+        if current_price > sma_20 > sma_50:
+            trend_score += 2.0
+            signals.append("price_above_sma")
+        elif current_price < sma_20 < sma_50:
+            trend_score -= 2.0
+            signals.append("price_below_sma")
+        
+        # Confirmation EMA (poids: 1.5)
+        if ema_9 > ema_21:
+            trend_score += 1.5
+            signals.append("ema_bullish")
+        elif ema_9 < ema_21:
+            trend_score -= 1.5
+            signals.append("ema_bearish")
+        
+        # RSI confirmation avec zones optimisées (poids: 1.0)
+        if 55 < current_rsi < 75:  # Zone haussière optimisée
+            trend_score += 1.0
+            signals.append("rsi_bullish")
+        elif 25 < current_rsi < 45:  # Zone baissière optimisée
+            trend_score -= 1.0
+            signals.append("rsi_bearish")
+        elif current_rsi >= 75:  # Surachat - pénalité
+            trend_score -= 0.5
+            signals.append("rsi_overbought")
+        elif current_rsi <= 25:  # Survente - pénalité
+            trend_score += 0.5
+            signals.append("rsi_oversold")
+        
+        # MACD confirmation (poids: 1.0)
+        if current_macd > current_signal and current_histogram > 0:
+            trend_score += 1.0
+            signals.append("macd_bullish")
+        elif current_macd < current_signal and current_histogram < 0:
+            trend_score -= 1.0
+            signals.append("macd_bearish")
+        
+        # Position dans les bandes de Bollinger (poids: 0.5)
+        if current_price > current_bb_upper:
+            trend_score -= 0.5  # Surachat potentiel
+            signals.append("above_bb_upper")
+        elif current_price < current_bb_lower:
+            trend_score += 0.5   # Survente potentiel
+            signals.append("below_bb_lower")
+        
+        # Volume confirmation (poids: 0.8)
+        if volume_ratio > 1.2:
+            trend_score *= 1.2  # Renforcer si volume élevé
+            signals.append("high_volume")
+        elif volume_ratio < 0.8:
+            trend_score *= 0.9  # Réduire si volume faible
+            signals.append("low_volume")
+        
+        # ===== DÉCISION FINALE AVEC SEUILS AMÉLIORÉS =====
+        
+        # Calcul de la confiance base
+        base_confidence = 50.0 + abs(trend_score) * 8
+        
+        # Ajustement selon la volatilité
+        if atr_percentage > 2.0:  # Volatilité élevée
+            base_confidence *= 0.85  # Réduire confiance en haute volatilité
+            signals.append("high_volatility")
+        elif atr_percentage < 0.5:  # Volatilité très faible
+            base_confidence *= 0.90  # Réduire si pas de mouvement
+            signals.append("low_volatility")
+        
+        # Confiance finale plafonnée
+        final_confidence = min(95.0, max(40.0, base_confidence))
+        
+        # Détermination de la direction
+        if trend_score >= 3.0:
+            direction = "buy"
+            final_confidence = min(90.0, final_confidence + 5)  # Bonus pour signal fort
+        elif trend_score <= -3.0:
+            direction = "sell"
+            final_confidence = min(90.0, final_confidence + 5)  # Bonus pour signal fort
+        else:
+            direction = "neutral"
+            final_confidence = max(45.0, final_confidence - 10)  # Pénalité pour neutral
+        
+        return {
+            "direction": direction,
+            "confidence": round(final_confidence, 1),
+            "trend_score": round(trend_score, 2),
+            "signals": signals,
+            "rsi": round(current_rsi, 1),
+            "macd": round(current_histogram, 4),
+            "volume_ratio": round(volume_ratio, 2),
+            "atr_percentage": round(atr_percentage, 2)
+        }
+        
+    except Exception as e:
+        logger.error(f"Erreur calcul tendance avancée pour {symbol} ({timeframe}): {e}")
+        return {"direction": "neutral", "confidence": 50.0, "signals": ["error"]}
+
+def calculate_trend_direction(symbol: str, timeframe: str = "M1") -> str:
+    """Calcule la direction de la tendance pour un symbole/timeframe donné"""
+    try:
+        # Utiliser la nouvelle fonction avancée
+        enhanced_result = calculate_enhanced_trend_direction(symbol, timeframe)
+        return enhanced_result.get("direction", "neutral")
+    except Exception as e:
+        logger.error(f"Erreur lors du calcul de la tendance pour {symbol} ({timeframe}): {e}")
+        return "neutral"
+
+def calculate_market_state(symbol: str, timeframe: str = "M1") -> Dict[str, str]:
+    """Calcule l'état du marché GLOBAL basé sur la moyenne de tous les timeframes
+    
+    # ... (le reste du code reste inchangé)
+    Args:
+        symbol: Symbole du marché
+        timeframe: Timeframe d'analyse (ignoré, utilise tous les TF)
+        
+    Returns:
+        Dictionnaire avec market_state et market_trend (global)
+    """
+    try:
+        # Vérifier si MT5 est disponible et initialisé
+        if not MT5_AVAILABLE or not mt5_initialized:
+            logger.warning(f"MT5 non disponible pour calculer l'état du marché de {symbol}")
+            return {"market_state": "DONNEES_INSUFFISANTES", "market_trend": "NEUTRE"}
+        
+        # Timeframes à analyser par ordre d'importance (plus long = plus important)
+        timeframes = [
+            ('W1', mt5.TIMEFRAME_W1, 3.0),    # Weekly = poids le plus élevé
+            ('D1', mt5.TIMEFRAME_D1, 2.5),    # Daily
+            ('H4', mt5.TIMEFRAME_H4, 2.0),     # 4 heures
+            ('H1', mt5.TIMEFRAME_H1, 1.5),     # 1 heure
+            ('M15', mt5.TIMEFRAME_M15, 1.2),   # 15 minutes
+            ('M5', mt5.TIMEFRAME_M5, 1.0),      # 5 minutes
+            ('M1', mt5.TIMEFRAME_M1, 0.8)      # 1 minute = poids le plus faible
+        ]
+        
+        all_states = []
+        all_trends = []
+        valid_timeframes = 0
+        
+        logger.info(f"🔍 Analyse état du marché global pour {symbol}")
+        
+        for tf_name, mt5_tf, weight in timeframes:
+            try:
+                # Récupérer les données pour ce timeframe
+                rates = mt5.copy_rates_from_pos(symbol, mt5_tf, 0, 50)
+                
+if rates is None or len(rates) < 20:
+                    logger.warning(f"   ⚠️ {tf_name}: Données insuffisantes")
+                    continue
+                
+                # Extraire les prix de clôture
+                prices = [rate['close'] for rate in rates]
+                recent_prices = prices[-20:]  # 20 dernières bougies
+                
+                # Calculer la tendance pour ce timeframe
+if len(recent_prices) >= 10:
+                    first_half = recent_prices[:10]
+                    second_half = recent_prices[10:]
+                    
+                    avg_first = np.mean(first_half)
+                    avg_second = np.mean(second_half)
+                    
+                    trend_change = (avg_second - avg_first) / avg_first
+                    
+                    volatility = np.std(recent_prices) / np.mean(recent_prices)
+                    
+                    # Déterminer l'état pour ce timeframe
+if abs(trend_change) < 0.001:  # Moins de 0.1% de changement
+                        market_state = "RANGE"
+elif trend_change > 0.002:  # Plus de 0.2% de hausse
+                        market_state = "TENDANCE_HAUSSIERE"
+elif trend_change < -0.002:  # Plus de 0.2% de baisse
+                        market_state = "TENDANCE_BAISSIERE"
+else:
+                        market_state = "CORRECTION"
+                    
+                    # Déterminer la tendance pour ce timeframe
+if volatility > 0.01:  # Haute volatilité
+if trend_change > 0:
+                            market_trend = "VOLATILE_HAUSSIER"
+else:
+                            market_trend = "VOLATILE_BAISSIER"
+else:
+if trend_change > 0.001:
+                            market_trend = "HAUSSIER_MODERE"
+elif trend_change < -0.001:
+                            market_trend = "BAISSIER_MODERE"
+else:
+                            market_trend = "STABLE"
+                    
+                    # Ajouter aux listes avec pondération
+for _ in range(int(weight * 10)):  # Multiplier par 10 pour éviter les décimales
+                        all_states.append(market_state)
+                        all_trends.append(market_trend)
+                    
+                    valid_timeframes += 1
+                    logger.info(f"   ✅ {tf_name}: {market_state} / {market_trend} (poids: {weight})")
+                
+            except Exception as e:
+                logger.error(f"   ❌ {tf_name}: Erreur {e}")
+                continue
+        
+        if not all_states:
+            logger.warning(f"Pas de données valides pour {symbol}, utilisation fallback")
+            return {"market_state": "DONNEES_INSUFFISANTES", "market_trend": "NEUTRE"}
+        
+        # Calculer l'état majoritaire (moyenne pondérée)
+        from collections import Counter
+        state_counts = Counter(all_states)
+        trend_counts = Counter(all_trends)
+        
+        # État le plus fréquent = état global
+        global_state = state_counts.most_common(1)[0][0]
+        global_trend = trend_counts.most_common(1)[0][0]
+        
+        # Log des résultats
+        logger.info(f"📊 Résultats globaux pour {symbol}:")
+        logger.info(f"   Timeframes analysés: {valid_timeframes}")
+        logger.info(f"   États détectés: {dict(state_counts)}")
+        logger.info(f"   🎯 ÉTAT GLOBAL: {global_state}")
+        logger.info(f"   📈 TENDANCE GLOBALE: {global_trend}")
+        
+        # Logique spécifique pour certains types de symboles
+        symbol_lower = symbol.lower()
+        if "boom" in symbol_lower:
+            # Pour Boom, pas d'opportunité si tout est en SELL
+            if global_trend in ["BAISSIER_MODERE", "VOLATILE_BAISSIER"]:
+                global_trend += "_SANS_OPPORTUNITE"
+        elif "crash" in symbol_lower:
+            # Pour Crash, pas d'opportunité si tout est en BUY
+            if global_trend in ["HAUSSIER_MODERE", "VOLATILE_HAUSSIER"]:
+                global_trend += "_SANS_OPPORTUNITE"
+        elif "volatility" in symbol_lower:
+            # Pour Volatility Index, alertes extrêmes
+            # Calculer volatilité moyenne sur tous les TF
+            if valid_timeframes > 0 and MT5_AVAILABLE and mt5_initialized:
+try:
+                    rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M1, 0, 50)
+if rates is not None and len(rates) >= 20:
+                        recent_rates = rates[-20:]
+                        closes = [rate['close'] for rate in recent_rates]
+                        avg_volatility = np.std(closes) / np.mean(closes)
+if avg_volatility > 0.015:
+                            global_trend += "_EXTREME"
+except Exception as e:
+                    logger.warning(f"Erreur calcul volatilité pour {symbol}: {e}")
+        
+        return {
+            "market_state": global_state,
+            "market_trend": global_trend
+        }
+        
+    except Exception as e:
+        logger.error(f"Erreur calcul état global marché {symbol}: {e}")
+        return {"market_state": "ERREUR", "market_trend": "INCONNU"}
+        
+def _generate_simulated_prices(symbol: str, count: int = 50) -> List[float]:
+    """Génère des données simulées basées sur le type de symbole"""
+    import random
+    
+    base_price = 10000.0  # Prix de base
+    symbol_lower = symbol.lower()
+    
+    # Ajuster le comportement selon le type de symbole
+    if "boom" in symbol_lower:
+        # Boom: tendance générale haussière avec des spikes
+        trend_factor = 0.1
+        volatility = 0.008
+    elif "crash" in symbol_lower:
+        # Crash: tendance générale baissière avec des spikes
+        trend_factor = -0.08
+        volatility = 0.008
+    elif "volatility" in symbol_lower:
+        # Volatility Index: comportement erratique
+        trend_factor = 0.0
+        volatility = 0.012
+    else:
+        # Forex/autres: tendance modérée
+        trend_factor = random.choice([-0.02, 0.0, 0.02])
+        volatility = 0.005
+    
+    prices = []
+    current_price = base_price
+    
+    for i in range(count):
+        # Appliquer la tendance
+        current_price += trend_factor
+        # Ajouter la volatilité
+        noise = random.gauss(0, volatility * current_price)
+        current_price += noise
+        # Éviter les prix négatifs
+        current_price = max(current_price, base_price * 0.8)
+        prices.append(current_price)
+    
+    return prices
+
+def filter_false_signals(symbol: str, direction: str, confidence: float, timeframe: str = "M1") -> Dict[str, Any]:
+    """Filtre les faux signaux avec multiples validations pour réduire les risques"""
+    try:
+        # 1. Filtrage par heures de marché actives
+        current_hour = datetime.now().hour
+        current_day = datetime.now().weekday()  # 0 = Lundi, 6 = Dimanche
+        
+        # Heures optimisées par type de symbole
+        if "Boom" in symbol or "Crash" in symbol:
+            # Pour Boom/Crash: éviter les heures de faible volatilité
+            active_hours = [8, 9, 10, 11, 14, 15, 16, 17, 20, 21, 22]  # Sessions actives
+            if current_hour not in active_hours:
+                return {
+                    "valid": False, 
+                    "reason": f"Hors heures de marché actives pour {symbol} (heure: {current_hour})",
+                    "filtered_confidence": confidence * 0.3
+                }
+        else:
+            # Pour Forex: éviter le week-end et heures de faible liquidité
+            if current_day >= 5:  # Week-end
+                return {
+                    "valid": False, 
+                    "reason": "Week-end - marché fermé pour Forex",
+                    "filtered_confidence": confidence * 0.1
+                }
+            
+            # Éviter les heures de faible liquidité (session asiatique tardive)
+            if current_hour in [22, 23, 0, 1, 2]:
+                return {
+                    "valid": False, 
+                    "reason": f"Heure de faible liquidité (heure: {current_hour})",
+                    "filtered_confidence": confidence * 0.5
+                }
+        
+        # 2. Filtrage par volatilité anormale
+        if mt5_initialized:
+            try:
+                rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M1, 0, 100)
+if rates and len(rates) >= 20:
+                    df = pd.DataFrame(rates)
+                    
+                    # Calculer ATR actuel vs ATR moyen
+                    high_low = df['high'] - df['low']
+                    high_close = (df['high'] - df['close'].shift()).abs()
+                    low_close = (df['low'] - df['close'].shift()).abs()
+                    true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+                    atr_current = true_range.rolling(14).mean().iloc[-1]
+                    atr_average = true_range.rolling(14).mean().mean()
+                    
+                    current_price = df['close'].iloc[-1]
+                    atr_percentage = (atr_current / current_price) * 100
+                    
+                    # Filtrer si volatilité extrême (> 3x la moyenne)
+if atr_current > atr_average * 3.0:
+                        return {
+                            "valid": False, 
+                            "reason": f"Volatilité extrême détectée (ATR: {atr_percentage:.2f}%)",
+                            "filtered_confidence": confidence * 0.2
+                        }
+                    
+                    # Filtrer si volatilité trop faible (< 0.1%)
+if atr_percentage < 0.1:
+                        return {
+                            "valid": False, 
+                            "reason": f"Volatilité trop faible (ATR: {atr_percentage:.2f}%)",
+                            "filtered_confidence": confidence * 0.6
+                        }
+            except Exception as e:
+                logger.warning(f"Erreur filtrage volatilité pour {symbol}: {e}")
+        
+        # 3. Filtrage par spread (si disponible)
+        try:
+            symbol_info = mt5.symbol_info(symbol)
+            if symbol_info:
+                current_spread = symbol_info.ask - symbol_info.bid
+                current_price = symbol_info.bid
+                spread_percentage = (current_spread / current_price) * 100 if current_price > 0 else 0
+                
+                # Filtrer si spread trop élevé
+if "Boom" in symbol or "Crash" in symbol:
+                    max_spread_pct = 0.5  # 0.5% max pour Boom/Crash
+else:
+                    max_spread_pct = 0.05  # 0.05% max pour Forex
+                
+if spread_percentage > max_spread_pct:
+                    return {
+                        "valid": False, 
+                        "reason": f"Spread trop élevé ({spread_percentage:.3f}% > {max_spread_pct}%)",
+                        "filtered_confidence": confidence * 0.3
+                    }
+        except Exception as e:
+            logger.debug(f"Impossible de vérifier le spread pour {symbol}: {e}")
+        
+        # 4. Filtrage par corrélation de positions (pour Boom/Crash)
+        if "Boom" in symbol or "Crash" in symbol:
+            try:
+                # Compter les positions existantes sur des symboles corrélés
+                positions = mt5.positions_get()
+                correlated_count = 0
+                
+for pos in positions:
+if pos.magic == 888888:  # Notre magic number
+                        pos_symbol = pos.symbol
+                        # Vérifier si c'est un symbole Boom/Crash corrélé
+if ("Boom" in pos_symbol or "Crash" in pos_symbol) and pos_symbol != symbol:
+                            correlated_count += 1
+                
+                # Limiter le nombre de positions corrélées simultanées
+if correlated_count >= 3:
+                    return {
+                        "valid": False, 
+                        "reason": f"Trop de positions corrélées ({correlated_count} positions Boom/Crash)",
+                        "filtered_confidence": confidence * 0.1
+                    }
+            except Exception as e:
+                logger.debug(f"Impossible de vérifier les corrélations pour {symbol}: {e}")
+        
+        # 5. Filtrage par momentum excessif
+        try:
+            rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M1, 0, 50)
+            if rates and len(rates) >= 20:
+                df = pd.DataFrame(rates)
+                closes = df['close']
+                
+                # Calculer le momentum sur 10 périodes
+if len(closes) >= 10:
+                    momentum_10 = (closes.iloc[-1] - closes.iloc[-10]) / closes.iloc[-10]
+                    momentum_5 = (closes.iloc[-1] - closes.iloc[-5]) / closes.iloc[-5]
+                    
+                    # Filtrer si momentum trop élevé (possible manipulation ou news)
+if abs(momentum_10) > 0.05:  # Plus de 5% en 10 minutes
+                        return {
+                            "valid": False, 
+                            "reason": f"Momentum excessif détecté ({momentum_10*100:.1f}% en 10 min)",
+                            "filtered_confidence": confidence * 0.2
+                        }
+                    
+                    # Filtrer si momentum change brusquement de direction
+if momentum_5 * momentum_10 < 0:  # Changement de direction
+                        return {
+                            "valid": False, 
+                            "reason": "Changement brusque de direction du momentum",
+                            "filtered_confidence": confidence * 0.4
+                        }
+        except Exception as e:
+            logger.debug(f"Erreur filtrage momentum pour {symbol}: {e}")
+        
+        # 6. Ajustement de la confiance selon les filtres
+        filtered_confidence = confidence
+        
+        # Réduire la confiance pour les symboles très volatiles
+        if "Boom" in symbol or "Crash" in symbol:
+            filtered_confidence *= 0.85  # -15% pour Boom/Crash
+        elif "Volatility" in symbol:
+            filtered_confidence *= 0.90  # -10% pour Volatility
+        
+        # Ajustement selon le timeframe
+        timeframe_multipliers = {
+            'M1': 0.8,   # Réduire pour M1 (beaucoup de bruit)
+            'M5': 0.9,   # Légère réduction pour M5
+            'M15': 1.0,  # Neutre pour M15
+            'H1': 1.1,   # Légère augmentation pour H1
+            'H4': 1.2    # Augmentation pour H4 (plus fiable)
+        }
+        multiplier = timeframe_multipliers.get(timeframe, 1.0)
+        filtered_confidence *= multiplier
+        
+        # Plafonner la confiance finale
+        final_confidence = min(95.0, max(40.0, filtered_confidence))
+        
+        return {
+            "valid": True,
+            "reason": "Signal validé après filtrage",
+            "filtered_confidence": round(final_confidence, 1),
+            "original_confidence": confidence,
+            "filters_applied": ["hours", "volatility", "spread", "correlation", "momentum"]
+        }
+        
+    except Exception as e:
+        logger.error(f"Erreur filtrage signaux pour {symbol}: {e}")
+        return {
+            "valid": True, 
+            "reason": "Erreur de filtrage - signal accepté par défaut",
+            "filtered_confidence": confidence * 0.7,  # Réduire en cas d'erreur
+            "filters_applied": ["error_fallback"]
+        }
+
+def calculate_trend_confidence(symbol: str, timeframe: str = "M1") -> float:
+    """Calcule le niveau de confiance de la tendance (0-100) - Version améliorée"""
+    try:
+        if not mt5_initialized:
+            # Fallback aléatoire si MT5 non disponible
+            import random
+            return float(random.randint(60, 90))
+        
+        # Utiliser la fonction améliorée si disponible
+        if IMPROVEMENTS_AVAILABLE:
+            try:
+                tf_map = {
+                    'M1': mt5.TIMEFRAME_M1,
+                    'M5': mt5.TIMEFRAME_M5,
+                    'M15': mt5.TIMEFRAME_M15,
+                    'H1': mt5.TIMEFRAME_H1,
+                    'H4': mt5.TIMEFRAME_H4
+                }
+                
+                mt5_timeframe = tf_map.get(timeframe, mt5.TIMEFRAME_M1)
+                rates = mt5.copy_rates_from_pos(symbol, mt5_timeframe, 0, 100)
+                
+if rates is not None and len(rates) >= 50:
+                    df = pd.DataFrame(rates)
+                    confidence_data = calculate_advanced_confidence(df, symbol, timeframe)
+                    
+                    # Convertir de 0-1 à 0-100
+                    return float(confidence_data['confidence'] * 100)
+            except Exception as e:
+                logger.warning(f"Erreur calcul confiance améliorée: {e}, fallback vers méthode standard")
+        
+        # Fallback vers méthode standard
+        tf_map = {
+            'M1': mt5.TIMEFRAME_M1,
+            'M5': mt5.TIMEFRAME_M5,
+            'M15': mt5.TIMEFRAME_M15,
+            'H1': mt5.TIMEFRAME_H1,
+            'H4': mt5.TIMEFRAME_H4
+        }
+        
+        mt5_timeframe = tf_map.get(timeframe, mt5.TIMEFRAME_M1)
+        rates = mt5.copy_rates_from_pos(symbol, mt5_timeframe, 0, 100)
+        
+        if rates is None or len(rates) < 50:
+            return 50.0
+        
+        # Utiliser la nouvelle fonction avancée existante
+        enhanced_result = calculate_enhanced_trend_direction(symbol, timeframe)
+        base_confidence = enhanced_result.get("confidence", 50.0)
+        
+        # Appliquer le filtrage anti-faux signaux
+        filter_result = filter_false_signals(symbol, enhanced_result.get("direction", "neutral"), base_confidence, timeframe)
+        
+        if filter_result.get("valid", False):
+            return float(filter_result.get("filtered_confidence", base_confidence))
+        else:
+            logger.info(f"Signal filtré pour {symbol}: {filter_result.get('reason', 'Raison inconnue')}")
+            return 0.0  # Confiance nulle si signal rejeté
+            
+    except Exception as e:
+        logger.error(f"Erreur calcul confiance {symbol} {timeframe}: {e}")
+        return 50.0
+
+async def calculate_coherent_analysis(symbol: str, timeframes: Optional[List[str]] = None) -> Dict[str, Any]:
+    """Calcule une analyse cohérente multi-timeframes
+    
+    Args:
+        symbol: Symbole du marché
+        timeframes: Liste des timeframes à analyser
+        
+    Returns:
+        Dictionnaire avec l'analyse cohérente
+    """
+    if timeframes is None:
+        timeframes = ["D1", "H4", "H1", "M30", "M15", "M5", "M1"]
+    
+    try:
+        # Récupérer les données de tendance pour tous les timeframes
+        trends = {}
+        
+        for tf in timeframes:
+            try:
+                # Utiliser la fonction existante de calcul de tendance
+                trend_data = {
+                    "direction": "neutral",
+                    "strength": 50.0,
+                    "ema9": 0.0,
+                    "ema21": 0.0,
+                    "bullish": False,
+                    "bearish": False
+                }
+                
+                # Calculer la direction de la tendance
+                direction = calculate_trend_direction(symbol, tf)
+                trend_data["direction"] = direction
+                trend_data["bullish"] = direction == "buy"
+                trend_data["bearish"] = direction == "sell"
+                
+                # Calculer la force (basée sur la cohérence des signaux)
+                confidence = calculate_trend_confidence(symbol, tf)
+                trend_data["strength"] = confidence
+                
+                trends[tf.lower()] = trend_data
+                
+            except Exception as e:
+                logger.warning(f"Erreur tendance {tf} pour {symbol}: {e}")
+                trends[tf.lower()] = {
+                    "direction": "neutral",
+                    "strength": 0.0,
+                    "ema9": 0.0,
+                    "ema21": 0.0,
+                    "bullish": False,
+                    "bearish": False
+                }
+        
+        # Pondération des timeframes RENFORCÉE pour cohérence maximale
+        # Donner un poids écrasant aux timeframes longs (très fiables)
+        # Éliminer presque complètement l'influence des timeframes courts (bruit)
+        timeframe_weights = {
+            'd1': 0.45,    # Augmenté: Daily le plus fiable (45%)
+            'h4': 0.35,    # Augmenté: 4h très fiable (35%)
+            'h1': 0.15,    # Réduit: 1h influence modérée (15%)
+            'm30': 0.03,   # Fort réduit: 30min très bruité (3%)
+            'm15': 0.01,   # Minimisé: 15min bruit extrême (1%)
+            'm5': 0.01,    # Minimisé: 5min bruit extrême (1%)
+            'm1': 0.00     # Éliminé: 1min aucun poids (0%)
+        }
+        
+        # Calcul de la cohérence des tendances
+        bullish_count = 0.0
+        bearish_count = 0.0
+        neutral_count = 0.0
+        total_strength = 0.0
+        valid_timeframes = 0.0
+        
+        for tf, weight in timeframe_weights.items():
+            if tf in trends:
+                trend_data = trends[tf]
+                direction = trend_data.get('direction', 'neutral')
+                strength = trend_data.get('strength', 0)
+                
+if direction == 'buy':
+                    bullish_count += weight
+elif direction == 'sell':
+                    bearish_count += weight
+else:
+                    neutral_count += weight
+                
+                total_strength += strength * weight
+                valid_timeframes += weight
+        
+        # Détermination de la décision finale
+        total_weight = bullish_count + bearish_count + neutral_count
+        if total_weight == 0:
+            return {
+                "status": "error",
+                "message": "Aucune donnée valide",
+                "decision": "EN ATTENTE",
+                "confidence": 0,
+                "stability": "EN ATTENTE"
+            }
+        
+        bullish_pct = (bullish_count / total_weight) * 100
+        bearish_pct = (bearish_count / total_weight) * 100
+        neutral_pct = (neutral_count / total_weight) * 100
+        
+        # Calcul de la confiance
+        confidence = min(95, (total_strength / valid_timeframes) if valid_timeframes > 0 else 0)
+        
+        # Calcul de la stabilité
+        max_diff = max(bullish_pct, bearish_pct, neutral_pct)
+        stability = "ÉLEVÉE" if max_diff >= 60 else "MOYENNE" if max_diff >= 40 else "FAIBLE"
+        
+        # Seuils de décision RENFORCÉS pour exiger une VRAIE cohérence
+        # Seulement les signaux avec forte cohérence multi-timeframes seront acceptés
+        if bullish_pct >= 85:  # Seuil très élevé - cohérence forte requise
+            decision = "ACHAT FORT"
+            decision_type = "BUY"
+        elif bearish_pct >= 85:  # Seuil très élevé - cohérence forte requise
+            decision = "VENTE FORTE"
+            decision_type = "SELL"
+        elif bullish_pct >= 75:  # Seuil élevé - bonne cohérence
+            decision = "ACHAT MODÉRÉ"
+            decision_type = "BUY"
+        elif bearish_pct >= 75:  # Seuil élevé - bonne cohérence
+            decision = "VENTE MODÉRÉE"
+            decision_type = "SELL"
+        else:
+            decision = "ATTENTE - COHÉRENCE INSUFFISANTE"
+            decision_type = "HOLD"
+        
+        return {
+            "status": "success",
+            "symbol": symbol,
+            "decision": decision,
+            "decision_type": decision_type,
+            "confidence": round(confidence, 1),
+            "stability": stability,
+            "bullish_pct": round(bullish_pct, 1),
+            "bearish_pct": round(bearish_pct, 1),
+            "neutral_pct": round(neutral_pct, 1),
+            "trends": trends,
+            "timestamp": datetime.now().isoformat()
+        }
+        
+    except Exception as e:
+        logger.error(f"Erreur analyse cohérente {symbol}: {e}")
+        return {
+            "status": "error",
+            "message": str(e),
+            "decision": "EN ATTENTE",
+            "confidence": 0,
+            "stability": "EN ATTENTE"
+        }
+
+# ==============================================================================
+# PHASE 2: MACHINE LEARNING ET VALIDATION MULTI-TIMEFRAME (Phase 2 Implementation)
+# ==============================================================================
+
+# Répertoire pour sauvegarder les modèles ML
+MODELS_DIR = Path("models")
+MODELS_DIR.mkdir(exist_ok=True)
+
+# Stockage des modèles ML entraînés (par symbole et timeframe)
+ml_models_cache: Dict[str, Dict] = {}
+ml_scalers_cache: Dict[str, Dict] = {}
+
+def collect_historical_data(symbols: List[str], timeframes: List[str], period_days: int = 90) -> Dict[str, Dict[str, pd.DataFrame]]:
+    """Collecte les données historiques pour l'entraînement ML
+    
+    Args:
+        symbols: Liste des symboles à analyser
+        timeframes: Liste des timeframes à collecter
+        period_days: Nombre de jours de données historiques
+        
+    Returns:
+        Dictionnaire {symbol: {timeframe: DataFrame}}
+    """
+    historical_data = {}
+    
+    try:
+        # Calculer le nombre de barres nécessaires selon le timeframe
+        bars_needed = {
+            'M1': period_days * 24 * 60,
+            'M5': period_days * 24 * 12,
+            'M15': period_days * 24 * 4,
+            'M30': period_days * 24 * 2,
+            'H1': period_days * 24,
+            'H4': period_days * 6,
+            'D1': period_days
+        }
+        
+        for symbol in symbols:
+            historical_data[symbol] = {}
+            
+            for tf in timeframes:
+try:
+                    bars = min(bars_needed.get(tf, 1000), 10000)  # Limiter à 10000 barres max
+                    
+                    # Utiliser la fonction hybride get_market_data
+                    df = get_market_data(symbol, tf, bars)
+                    
+if df is not None and len(df) > 50:
+                        # Standardiser les colonnes pour le ML
+if 'tick_volume' not in df.columns and 'volume' in df.columns:
+                            df = df.rename(columns={'volume': 'tick_volume'})
+                        
+                        historical_data[symbol][tf] = df
+                        logger.info(f"Collecté {len(df)} barres pour {symbol} {tf}")
+else:
+                        logger.warning(f"Données insuffisantes pour {symbol} {tf}")
+                        
+except Exception as e:
+                    logger.error(f"Erreur collecte données {symbol} {tf}: {e}")
+                    continue
+                    
+    except Exception as e:
+        logger.error(f"Erreur collecte données historiques: {e}")
+    
+    return historical_data
+
+def extract_advanced_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Extrait des features avancées pour le ML
+    
+    Args:
+        df: DataFrame avec colonnes OHLCV
+        
+    Returns:
+        DataFrame avec features techniques
+    """
+    if df is None or len(df) < 50:
+        return None
+    
+    try:
+        # S'assurer que les colonnes nécessaires existent
+        required_cols = ['open', 'high', 'low', 'close', 'tick_volume']
+        for col in required_cols:
+            if col not in df.columns:
+                logger.warning(f"Colonne manquante: {col}")
+                return None
+        
+        # Créer une copie pour éviter les SettingWithCopyWarning
+        features = df.copy()
+        
+        # Features de base
+        features['sma20'] = features['close'].rolling(window=20).mean()
+        features['sma50'] = features['close'].rolling(window=50).mean()
+        features['price_vs_sma20'] = (features['close'] - features['sma20']) / features['sma20']
+        features['price_vs_sma50'] = (features['close'] - features['sma50']) / features['sma50']
+        
+        # RSI et ses dérivés
+        delta = features['close'].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+        rs = gain / loss
+        features['rsi'] = 100 - (100 / (1 + rs))
+        features['rsi_normalized'] = (features['rsi'] - 50) / 50  # Normalisé entre -1 et 1
+        
+        # MACD
+        exp1 = features['close'].ewm(span=12).mean()
+        exp2 = features['close'].ewm(span=26).mean()
+        features['macd'] = exp1 - exp2
+        features['macd_signal'] = features['macd'].ewm(span=9).mean()
+        features['macd_histogram'] = features['macd'] - features['macd_signal']
+        
+        # ATR et volatilité
+        high_low = features['high'] - features['low']
+        high_close = np.abs(features['high'] - features['close'].shift())
+        low_close = np.abs(features['low'] - features['close'].shift())
+        tr = np.maximum(high_low, np.maximum(high_close, low_close))
+        features['atr'] = tr.rolling(window=14).mean()
+        features['atr_normalized'] = features['atr'] / features['close']
+        features['atr_ma_ratio'] = features['atr'] / features['atr'].rolling(window=50).mean()
+        
+        # Bollinger Bands
+        bb_period = 20
+        bb_std = 2
+        features['bb_middle'] = features['close'].rolling(window=bb_period).mean()
+        bb_std_dev = features['close'].rolling(window=bb_period).std()
+        features['bb_upper'] = features['bb_middle'] + (bb_std_dev * bb_std)
+        features['bb_lower'] = features['bb_middle'] - (bb_std_dev * bb_std)
+        features['bb_width'] = (features['bb_upper'] - features['bb_lower']) / features['bb_middle']
+        features['bb_position'] = (features['close'] - features['bb_lower']) / (features['bb_upper'] - features['bb_lower'])
+        
+        # Volume analysis
+        features['volume_ma'] = features['tick_volume'].rolling(window=20).mean()
+        features['volume_ratio'] = features['tick_volume'] / features['volume_ma']
+        features['volume_trend'] = features['tick_volume'].rolling(window=5).mean() / features['tick_volume'].rolling(window=20).mean()
+        
+        # Price action features
+        features['high_low_range'] = (features['high'] - features['low']) / features['close']
+        features['open_close_range'] = np.abs(features['close'] - features['open']) / features['close']
+        features['body_size'] = np.abs(features['close'] - features['open']) / features['close']
+        
+        # Momentum indicators
+        for period in [5, 10, 20]:
+            features[f'momentum_{period}'] = features['close'] / features['close'].shift(period) - 1
+        
+        # Distance aux extremums récents
+        for period in [10, 20]:
+            features[f'distance_to_high_{period}'] = (features['high'].rolling(window=period).max() - features['close']) / features['close']
+            features[f'distance_to_low_{period}'] = (features['close'] - features['low'].rolling(window=period).min()) / features['close']
+        
+        # Simplifier les noms de colonnes pour compatibilité
+        features['distance_to_high'] = features['distance_to_high_10']
+        features['distance_to_low'] = features['distance_to_low_10']
+        
+        # Features avancées pour Boom/Crash
+        if 'Boom' in str(df.iloc[0]['symbol']) if 'symbol' in df.columns else False or \
+           'Crash' in str(df.iloc[0]['symbol']) if 'symbol' in df.columns else False:
+            # Spike detection
+            features['price_change'] = features['close'].pct_change()
+            features['spike_threshold'] = features['price_change'].rolling(window=20).std() * 2
+            features['is_spike'] = np.abs(features['price_change']) > features['spike_threshold']
+            
+            # Mean reversion indicator
+            features['mean_reversion'] = (features['close'] - features['sma20']) / features['atr']
+            
+            # Volatility regime
+            features['volatility_regime'] = features['atr'] / features['atr'].rolling(window=50).mean()
+        
+        # Nettoyer les valeurs infinies et NaN
+        features = features.replace([np.inf, -np.inf], np.nan)
+        features = features.fillna(method='ffill').fillna(method='bfill').fillna(0)
+        
+        logger.info(f"✅ {len(features.columns)} features extraites pour ML")
+        return features
+        
+    except Exception as e:
+        logger.error(f"Erreur extraction features: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return None
+
+def calculate_trade_outcome(df: pd.DataFrame, lookahead: int = 5, threshold: float = 0.002) -> List[int]:
+    """Calcule le résultat des trades (labels pour ML)
+    
+    Args:
+        df: DataFrame avec prix
+        lookahead: Nombre de périodes à regarder en avant
+        threshold: Seuil de mouvement pour considérer un trade rentable (0.2% par défaut)
+        
+    Returns:
+        Liste de labels: 1 (buy/win), -1 (sell/win), 0 (neutral/loss)
+    """
+    labels = []
+    
+    try:
+        closes = df['close'].values
+        
+        for i in range(len(df) - lookahead):
+            current_price = closes[i]
+            future_price = closes[i + lookahead]
+            
+            price_change = (future_price - current_price) / current_price
+            
+            # Label basé sur le mouvement futur
+            if price_change > threshold:
+                labels.append(1)  # Buy signal gagnant
+            elif price_change < -threshold:
+                labels.append(-1)  # Sell signal gagnant
+            else:
+                labels.append(0)  # Neutre/perdant
+                
+        # Ajouter des zéros pour les dernières lignes
+        labels.extend([0] * lookahead)
+        
+    except Exception as e:
+        logger.error(f"Erreur calcul labels: {e}")
+        labels = [0] * len(df)
+    
+    return labels
+
+def train_ml_models(symbol: str, timeframe: str, historical_data: Optional[pd.DataFrame] = None) -> Dict[str, Any]:
+    """Entraîne les modèles ML (version optimisée pour déploiement rapide)
+    
+    Args:
+        symbol: Symbole du marché
+        timeframe: Timeframe d'analyse
+        historical_data: Données historiques (optionnel, sera collecté si None)
+        
+    Returns:
+        Dictionnaire avec les modèles entraînés et métriques
+    """
+    start_time = time.time()
+    logger.info(f"Début de l'entraînement pour {symbol} {timeframe}")
+    
+    if not ML_AVAILABLE:
+        error_msg = "Erreur: scikit-learn n'est pas disponible pour l'entraînement"
+        logger.error(error_msg)
+        return {"status": "error", "message": error_msg, "symbol": symbol, "timeframe": timeframe}
+    
+    try:
+        model_key = f"{symbol}_{timeframe}"
+        
+        # Collecter les données si non fournies (réduire à 30 jours pour accélérer)
+        if historical_data is None:
+            logger.info(f"Collecte des données historiques pour {symbol} {timeframe}...")
+            data_dict = collect_historical_data([symbol], [timeframe], period_days=30)  # Réduit de 90 à 30 jours
+            if symbol not in data_dict or timeframe not in data_dict[symbol]:
+                error_msg = f"Impossible de collecter les données historiques pour {symbol} {timeframe}"
+                logger.error(error_msg)
+                return {"status": "error", "message": error_msg, "symbol": symbol, "timeframe": timeframe}
+            historical_data = data_dict[symbol][timeframe]
+        
+        # Vérification des données d'entrée
+        if historical_data is None or len(historical_data) < 100:
+            error_msg = f"Données historiques insuffisantes pour {symbol} {timeframe} (minimum 100 bougies requises)"
+            logger.warning(error_msg)
+            return {"status": "error", "message": error_msg, "symbol": symbol, "timeframe": timeframe}
+        
+        logger.info(f"Données collectées: {len(historical_data)} boucles pour {symbol} {timeframe}")
+        
+        # Extraire les features
+        logger.info(f"Extraction des features pour {symbol} {timeframe}...")
+        features_df = extract_advanced_features(historical_data)
+        
+        # Vérifier si l'extraction des features a réussi
+        if features_df is None or features_df.empty:
+            error_msg = f"Échec de l'extraction des features pour {symbol} {timeframe}"
+            logger.error(error_msg)
+            return {"status": "error", "message": error_msg, "symbol": symbol, "timeframe": timeframe}
+        
+        # Vérifier la distribution des classes
+        labels = calculate_trade_outcome(features_df)
+        unique_labels, counts = np.unique(labels, return_counts=True)
+        label_dist = dict(zip(unique_labels, counts))
+        logger.info(f"Distribution des classes pour {symbol} {timeframe}: {label_dist}")
+        
+        features_df['label'] = labels
+        
+        # Sélectionner les features essentielles uniquement (réduit pour accélérer)
+        feature_columns = [
+            'price_vs_sma20', 'rsi', 'macd', 'atr', 'volume_ratio', 'momentum_5'
+        ]
+        
+        # Filtrer les colonnes qui existent
+        available_features = [f for f in feature_columns if f in features_df.columns]
+        
+        # Vérifier qu'il reste des features disponibles
+        if not available_features:
+            error_msg = f"Aucune feature disponible pour l'entraînement de {symbol} {timeframe}"
+            logger.error(error_msg)
+            return {"status": "error", "message": error_msg, "symbol": symbol, "timeframe": timeframe}
+            
+        logger.info(f"{len(available_features)} features disponibles pour l'entraînement")
+        
+        # Préparer X et y avec gestion des valeurs manquantes
+        X = features_df[available_features].fillna(0)
+        y = features_df['label'].fillna(0).astype(int)
+        
+        # Supprimer les lignes avec des valeurs infinies
+        X = X.replace([np.inf, -np.inf], 0)
+        
+        # Split train/test
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=0.2, random_state=42, stratify=y if len(y.unique()) > 1 else None
+        )
+        
+        # Vérifier si nous avons au moins 2 classes dans les données d'entraînement
+        if len(y_train.unique()) < 2:
+            logger.warning(f" Seulement {len(y_train.unique())} classe(s) détectée(s) dans les données d'entraînement pour {symbol} {timeframe}")
+            
+            # Si une seule classe, créer des échantillons synthétiques simples
+            if len(y_train.unique()) == 1:
+                logger.info(f" Création d'échantillons synthétiques pour rééquilibrer les classes...")
+                
+                # Ajouter des échantillons de la classe manquante
+                minority_class = 1 if y_train.iloc[0] == 0 else 0
+                n_synthetic = min(50, len(y_train) // 2)  # Limiter à 50 échantillons
+                
+                synthetic_X = X_train.sample(n=n_synthetic, replace=True)
+                synthetic_X *= 1.1  # Légère modification
+                synthetic_y = pd.Series([minority_class] * n_synthetic)
+                
+                X_train = pd.concat([X_train, synthetic_X], ignore_index=True)
+                y_train = pd.concat([y_train, synthetic_y], ignore_index=True)
+                
+                logger.info(f"  Rééquilibrage simple: Avant {dict(y_train.value_counts())} → Après {dict(y_train.value_counts())}")
+        
+        # Appliquer SMOTE si nous avons au moins 2 classes et assez d'échantillons
+        try:
+            if len(y_train.unique()) >= 2 and len(y_train) >= 10:
+                from imblearn.over_sampling import SMOTE
+                smote = SMOTE(random_state=42, k_neighbors=min(5, len(y_train) // 2 - 1))
+                X_train_resampled, y_train_resampled = smote.fit_resample(X_train, y_train)
+                
+                logger.info(f" Rééquilibrage SMOTE: Avant {dict(y_train.value_counts())} → Après {dict(y_train_resampled.value_counts())}")
+                
+                X_train = X_train_resampled
+                y_train = y_train_resampled
+        except Exception as e:
+            logger.warning(f" Erreur lors du rééquilibrage SMOTE: {e}")
+            # Continuer avec les données originales
+        
+        # Utiliser uniquement RandomForest (plus rapide) pour le déploiement
+        models = {}
+        metrics = {}
+        
+        logger.info(f"Entraînement RandomForest pour {symbol} {timeframe}...")
+        
+        # Paramètres optimisés pour la vitesse
+        rf_model = RandomForestClassifier(
+            n_estimators=50,  # Réduit de 100 à 50
+            max_depth=10,     # Ajouté pour limiter la profondeur
+            min_samples_split=5,
+            min_samples_leaf=2,
+            random_state=42,
+            n_jobs=1,         # Un seul job pour éviter la surcharge
+            class_weight='balanced'
+        )
+        
+        rf_model.fit(X_train, y_train)
+        models['random_forest'] = rf_model
+        
+        # Évaluer le modèle
+        y_pred = rf_model.predict(X_test)
+        accuracy = accuracy_score(y_test, y_pred)
+        
+        # Calcul des métriques essentielles uniquement
+        try:
+            f1 = f1_score(y_test, y_pred, average='weighted', zero_division=0)
+            precision = precision_score(y_test, y_pred, average='weighted', zero_division=0)
+            recall = recall_score(y_test, y_pred, average='weighted', zero_division=0)
+        except:
+            f1 = precision = recall = 0.0
+        
+        metrics['random_forest'] = {
+            'accuracy': accuracy,
+            'f1_score': f1,
+            'precision': precision,
+            'recall': recall,
+            'training_samples': len(X_train),
+            'test_samples': len(X_test)
+        }
+        
+        logger.info(f"✅ RandomForest entraîné pour {symbol} {timeframe} - Accuracy: {accuracy:.3f}")
+        
+        # Sauvegarder le modèle
+        os.makedirs("models", exist_ok=True)
+        model_path = f"models/{model_key}_rf.joblib"
+        joblib.dump(rf_model, model_path)
+        
+        # Sauvegarder les métriques
+        metrics_path = f"models/{model_key}_metrics.json"
+        with open(metrics_path, 'w') as f:
+            json.dump(metrics, f, indent=2)
+        
+        # Mettre en cache
+        ml_models_cache[model_key] = {
+            'model': rf_model,
+            'features': available_features,
+            'metrics': metrics['random_forest'],
+            'model_type': 'random_forest'
+        }
+        
+        training_time = time.time() - start_time
+        logger.info(f"✅ Modèle entraîné avec succès pour {symbol} {timeframe} en {training_time:.1f}s")
+        
+        return {
+            "status": "success",
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "models": list(models.keys()),
+            "metrics": metrics,
+            "features_used": available_features,
+            "training_samples": len(X_train),
+            "test_samples": len(X_test),
+            "training_time": training_time,
+            "best_model": "random_forest"
+        }
+        
+    except Exception as e:
+        error_msg = f"Erreur lors de l'entraînement du modèle pour {symbol} {timeframe}: {str(e)}"
+        logger.error(error_msg, exc_info=True)
+        return {
+            "status": "error", 
+            "message": error_msg, 
+            "symbol": symbol, 
+            "timeframe": timeframe
+        }
+
+def validate_multi_timeframe_ml(symbol: str, timeframes: List[str]) -> Dict[str, Any]:
+    """Validation croisée multi-timeframe avec ML
+    
+    Args:
+        symbol: Symbole du marché
+        timeframes: Liste des timeframes à valider
+        
+    Returns:
+        Dictionnaire avec consensus et validation
+    """
+    if not ML_AVAILABLE:
+        return {"valid": False, "reason": "ML non disponible"}
+    
+    try:
+        predictions = {}
+        confidences = {}
+        
+        for tf in timeframes:
+            model_key = f"{symbol}_{tf}"
+            
+            # Charger ou entraîner le modèle
+            if model_key not in ml_models_cache:
+                train_result = train_ml_models(symbol, tf)
+if "error" in train_result:
+                    continue
+            
+            # Récupérer les données actuelles
+            if not mt5_initialized:
+                continue
+                
+            tf_map = {
+                'M1': mt5.TIMEFRAME_M1, 'M5': mt5.TIMEFRAME_M5,
+                'M15': mt5.TIMEFRAME_M15, 'H1': mt5.TIMEFRAME_H1,
+                'H4': mt5.TIMEFRAME_H4, 'D1': mt5.TIMEFRAME_D1
+            }
+            
+            mt5_tf = tf_map.get(tf, mt5.TIMEFRAME_M1)
+            rates = mt5.copy_rates_from_pos(symbol, mt5_tf, 0, 100)
+            
+            if rates is None or len(rates) < 50:
+                continue
+            
+            df = pd.DataFrame(rates)
+            features_df = extract_advanced_features(df)
+            
+            # Sélectionner les features
+            feature_columns = [
+                'sma_20', 'sma_50', 'ema_9', 'ema_21', 'ema_50',
+                'sma_20_slope', 'ema_9_slope',
+                'price_vs_sma20', 'price_vs_sma50',
+                'rsi', 'rsi_normalized',
+                'macd', 'macd_signal', 'macd_histogram',
+                'atr', 'atr_normalized', 'atr_ma_ratio',
+                'bb_width', 'bb_position',
+                'volume_ratio', 'volume_trend',
+                'high_low_range', 'open_close_range', 'body_size',
+                'momentum_5', 'momentum_10', 'momentum_20',
+                'distance_to_high', 'distance_to_low'
+            ]
+            
+            available_features = [f for f in feature_columns if f in features_df.columns]
+            X = features_df[available_features].iloc[-1:].fillna(0)
+            X = X.replace([np.inf, -np.inf], 0)
+            
+            # Prédire avec le meilleur modèle
+            if model_key in ml_models_cache and model_key in ml_scalers_cache:
+                scaler = ml_scalers_cache[model_key]
+                models = ml_models_cache[model_key]
+                
+                # Utiliser RandomForest comme modèle principal
+if 'random_forest' in models:
+                    X_scaled = scaler.transform(X)
+                    prediction = models['random_forest'].predict(X_scaled)[0]
+                    proba = models['random_forest'].predict_proba(X_scaled)[0]
+                    confidence = max(proba) * 100
+                    
+                    predictions[tf] = prediction  # 1, -1, ou 0
+                    confidences[tf] = confidence
+        
+        if not predictions:
+            return {"valid": False, "reason": "Aucune prédiction disponible"}
+        
+        # Calculer le consensus
+        buy_votes = sum(1 for p in predictions.values() if p == 1)
+        sell_votes = sum(1 for p in predictions.values() if p == -1)
+        neutral_votes = sum(1 for p in predictions.values() if p == 0)
+        
+        total_votes = len(predictions)
+        avg_confidence = np.mean(list(confidences.values())) if confidences else 0
+        
+        consensus = "buy" if buy_votes > sell_votes and buy_votes > neutral_votes else \
+                   "sell" if sell_votes > buy_votes and sell_votes > neutral_votes else "neutral"
+        
+        consensus_strength = max(buy_votes, sell_votes, neutral_votes) / total_votes if total_votes > 0 else 0
+        
+        # Validation: exiger au moins 60% de consensus et 65% de confiance moyenne
+        is_valid = consensus_strength >= 0.60 and avg_confidence >= 65.0
+        
+        return {
+            "valid": is_valid,
+            "consensus": consensus,
+            "consensus_strength": round(consensus_strength * 100, 1),
+            "avg_confidence": round(avg_confidence, 1),
+            "buy_votes": buy_votes,
+            "sell_votes": sell_votes,
+            "neutral_votes": neutral_votes,
+            "predictions": predictions,
+            "confidences": confidences
+        }
+        
+    except Exception as e:
+        logger.error(f"Erreur validation multi-timeframe ML: {e}")
+        return {"valid": False, "reason": str(e)}
+
+def adaptive_timeframe_weights(symbol: str, recent_performance: Optional[Dict] = None) -> Dict[str, float]:
+    """Ajuste les poids des timeframes en fonction des performances récentes
+    
+    Args:
+        symbol: Symbole du marché
+        recent_performance: Dictionnaire avec performances récentes par timeframe
+        
+    Returns:
+        Dictionnaire avec poids ajustés par timeframe
+    """
+    # Poids de base
+    base_weights = {
+        'd1': 0.35,
+        'h4': 0.30,
+        'h1': 0.20,
+        'm30': 0.08,
+        'm15': 0.05,
+        'm5': 0.02,
+        'm1': 0.00
+    }
+    
+    if recent_performance is None:
+        return base_weights
+    
+    adjusted_weights = base_weights.copy()
+    
+    try:
+        # Ajuster les poids selon les performances récentes
+        for tf, perf in recent_performance.items():
+            tf_lower = tf.lower()
+            
+            if tf_lower in adjusted_weights:
+                win_rate = perf.get('win_rate', 0.5)
+                
+                # Augmenter le poids si win_rate > 60%
+if win_rate > 0.60:
+                    adjusted_weights[tf_lower] *= 1.2
+                # Réduire le poids si win_rate < 40%
+elif win_rate < 0.40:
+                    adjusted_weights[tf_lower] *= 0.8
+        
+        # Normaliser pour que la somme = 1
+        total = sum(adjusted_weights.values())
+        if total > 0:
+            adjusted_weights = {k: v / total for k, v in adjusted_weights.items()}
+        
+    except Exception as e:
+        logger.warning(f"Erreur ajustement poids timeframes: {e}")
+    
+    return adjusted_weights
+
+@app.post("/coherent-analysis")
+async def get_coherent_analysis(request: CoherentAnalysisRequest):
+    """Endpoint pour l'analyse cohérente multi-timeframes"""
+    try:
+        analysis = await calculate_coherent_analysis(request.symbol, request.timeframes)
+        return analysis
+    except Exception as e:
+        logger.error(f"Erreur endpoint analyse cohérente: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/coherent-analysis")
+async def get_coherent_analysis_get(symbol: str = "EURUSD"):
+    """Version GET de l'analyse cohérente"""
+    try:
+        analysis = await calculate_coherent_analysis(symbol)
+        return analysis
+    except Exception as e:
+        logger.error(f"Erreur endpoint GET analyse cohérente: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ==============================================================================
+# ENDPOINTS PHASE 2: MACHINE LEARNING
+# ==============================================================================
+
+class MLTrainRequest(BaseModel):
+    symbol: str
+    timeframe: str = "M1"
+    period_days: int = 90
+    data: Optional[List[Dict[str, Any]]] = None  # Données historiques fournies par le client (Phase 2 Cloud)
+
+class MLPredictRequest(BaseModel):
+    symbol: str
+    timeframes: Optional[List[str]] = ["M1", "M5", "M15", "H1", "H4"]
+
+@app.post("/ml/train-essential")
+async def train_essential_models():
+    """
+    Endpoint pour entraîner uniquement les modèles essentiels rapidement
+    Utile après un déploiement pour avoir les modèles de base fonctionnels
+    """
+    try:
+        if not ML_AVAILABLE:
+            raise HTTPException(status_code=503, detail="scikit-learn non disponible")
+        
+        logger.info("🚀 Début de l'entraînement des modèles essentiels...")
+        
+        # Symboles essentiels uniquement
+        essential_symbols = ["EURUSD", "GBPUSD"]
+        essential_timeframes = ["M1", "M5"]
+        
+        results = []
+        
+        for symbol in essential_symbols:
+            for timeframe in essential_timeframes:
+try:
+                    logger.info(f"📊 Entraînement modèle essentiel: {symbol} {timeframe}")
+                    
+                    # Entraîner avec timeout
+                    train_result = await asyncio.wait_for(
+                        asyncio.to_thread(train_ml_models, symbol, timeframe, historical_data=None),
+                        timeout=30.0  # 30 secondes maximum par modèle
+                    )
+                    
+                    results.append({
+                        "symbol": symbol,
+                        "timeframe": timeframe,
+                        "status": "success" if "error" not in train_result else "error",
+                        "result": train_result
+                    })
+                    
+except asyncio.TimeoutError:
+                    logger.warning(f"⏰ Timeout entraînement {symbol} {timeframe}")
+                    results.append({
+                        "symbol": symbol,
+                        "timeframe": timeframe,
+                        "status": "timeout",
+                        "message": "Entraînement trop long"
+                    })
+except Exception as e:
+                    logger.error(f"❌ Erreur entraînement {symbol} {timeframe}: {e}")
+                    results.append({
+                        "symbol": symbol,
+                        "timeframe": timeframe,
+                        "status": "error",
+                        "message": str(e)
+                    })
+        
+        successful = sum(1 for r in results if r["status"] == "success")
+        total = len(results)
+        
+        return {
+            "status": "completed",
+            "message": f"Entraînement terminé: {successful}/{total} modèles entraînés avec succès",
+            "results": results,
+            "summary": {
+                "total": total,
+                "successful": successful,
+                "failed": total - successful
+            }
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/ml/train")
+async def train_ml_models_endpoint(request: MLTrainRequest):
+    """Endpoint pour entraîner les modèles ML
+    
+    Args:
+        request: Requête avec symbol, timeframe et period_days
+        
+    Returns:
+        Résultats de l'entraînement avec métriques
+    """
+    try:
+        if not ML_AVAILABLE:
+            raise HTTPException(status_code=503, detail="scikit-learn non disponible")
+        
+        logger.info(f"Entraînement ML demandé pour {request.symbol} {request.timeframe}")
+        
+        # Si des données sont fournies dans la requête, les utiliser directement (mode Cloud)
+        historical_data = None
+        if request.data and len(request.data) > 0:
+            logger.info(f"Utilisation des données poussées ({len(request.data)} barres) pour l'entraînement cloud")
+            historical_data = pd.DataFrame(request.data)
+            # S'assurer que les noms de colonnes sont corrects pour MT5 (lowercase)
+            # MT5 rates usually have: time, open, high, low, close, tick_volume, spread, real_volume
+        
+        result = train_ml_models(request.symbol, request.timeframe, historical_data=historical_data)
+        
+        if "error" in result:
+            raise HTTPException(status_code=500, detail=result["error"])
+        
+        return result
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Erreur entraînement ML endpoint: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/ml/train")
+async def train_ml_models_get(symbol: str = "EURUSD", timeframe: str = "M1"):
+    """Version GET de l'entraînement ML"""
+    try:
+        if not ML_AVAILABLE:
+            raise HTTPException(status_code=503, detail="scikit-learn non disponible")
+        
+        result = train_ml_models(symbol, timeframe, historical_data=None)
+        
+        if "error" in result:
+            raise HTTPException(status_code=500, detail=result["error"])
+        
+        return result
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Erreur entraînement ML GET: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/ml/predict")
+async def predict_ml_endpoint(request: MLPredictRequest):
+    """Endpoint pour prédictions ML avec validation multi-timeframe
+    
+    Args:
+        request: Requête avec symbol et timeframes
+        
+    Returns:
+        Prédictions ML avec validation croisée
+    """
+    try:
+        if not ML_AVAILABLE:
+            raise HTTPException(status_code=503, detail="scikit-learn non disponible")
+        
+        logger.info(f"Prédiction ML demandée pour {request.symbol}")
+        
+        # Validation multi-timeframe ML
+        validation_result = validate_multi_timeframe_ml(request.symbol, request.timeframes)
+        
+        # Analyse cohérente traditionnelle
+        coherent_analysis = await calculate_coherent_analysis(request.symbol, request.timeframes)
+        
+        return {
+            "symbol": request.symbol,
+            "ml_validation": validation_result,
+            "coherent_analysis": coherent_analysis,
+            "timestamp": datetime.now().isoformat()
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Erreur prédiction ML endpoint: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/ml/predict")
+async def predict_ml_get(symbol: str = "EURUSD", timeframes: str = "M1,M5,M15,H1,H4"):
+    """Version GET des prédictions ML"""
+    try:
+        if not ML_AVAILABLE:
+            raise HTTPException(status_code=503, detail="scikit-learn non disponible")
+        
+        tf_list = [tf.strip() for tf in timeframes.split(",")]
+        validation_result = validate_multi_timeframe_ml(symbol, tf_list)
+        coherent_analysis = await calculate_coherent_analysis(symbol, tf_list)
+        
+        return {
+            "symbol": symbol,
+            "ml_validation": validation_result,
+            "coherent_analysis": coherent_analysis,
+            "timestamp": datetime.now().isoformat()
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Erreur prédiction ML GET: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/channel/predictive")
+async def get_predictive_channel(request: Dict[str, Any]):
+    """
+    Endpoint pour dessiner un canal prédictif basé sur l'analyse technique
+    
+    Args:
+        request: Dict avec 'symbol' et 'lookback_period' (optionnel)
+        
+    Returns:
+        Dict avec informations du canal prédictif
+    """
+    try:
+        symbol = request.get("symbol", "EURUSD")
+        lookback_period = request.get("lookback_period", 50)
+        
+        # Récupérer les données historiques
+        df = get_market_data_cloud(symbol, period="5d", interval="1m")
+        
+        if df is None or len(df) < lookback_period + 10:
+            # Générer des données simulées si nécessaire
+            df = generate_simulated_data(symbol, lookback_period + 20)
+        
+        # Dessiner le canal prédictif
+        channel_result = draw_predictive_channel(df, symbol, lookback_period)
+        
+        return channel_result
+        
+    except Exception as e:
+        logger.error(f"Erreur dans /channel/predictive: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/channel/predictive")
+async def get_predictive_channel_get(symbol: str = "EURUSD", lookback_period: int = 50):
+    """
+    Version GET pour dessiner un canal prédictif
+    
+    Args:
+        symbol: Symbole à analyser
+        lookback_period: Période de rétrospection (défaut: 50)
+        
+    Returns:
+        Dict avec informations du canal prédictif
+    """
+    try:
+        # Récupérer les données historiques
+        df = get_market_data_cloud(symbol, period="5d", interval="1m")
+        
+        if df is None or len(df) < lookback_period + 10:
+            # Générer des données simulées si nécessaire
+            df = generate_simulated_data(symbol, lookback_period + 20)
+        
+        # Dessiner le canal prédictif
+        channel_result = draw_predictive_channel(df, symbol, lookback_period)
+        
+        return channel_result
+        
+    except Exception as e:
+        logger.error(f"Erreur dans /channel/predictive GET: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/ml/models")
+async def list_ml_models():
+    """Liste les modèles ML disponibles dans le cache"""
+    try:
+        models_list = []
+        
+        for model_key in ml_models_cache.keys():
+            symbol, timeframe = model_key.split("_", 1)
+            models_list.append({
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "model_key": model_key
+            })
+        
+        return {
+            "total_models": len(models_list),
+            "models": models_list
+        }
+    except Exception as e:
+        logger.error(f"Erreur liste modèles ML: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/ml/metrics")
+async def get_ml_metrics(symbol: str = "EURUSD", timeframe: str = "M1"):
+    """Récupère les métriques ML depuis les modèles déjà entraînés"""
+    try:
+        if not ML_AVAILABLE:
+            raise HTTPException(status_code=503, detail="scikit-learn non disponible")
+        
+        model_key = f"{symbol}_{timeframe}"
+        
+        # Vérifier si les modèles sont en cache
+        if model_key not in ml_models_cache:
+            # Essayer de charger depuis le disque sans MT5
+            try:
+                import joblib
+                model_path = MODELS_DIR / f"{model_key}_rf.joblib"
+                scaler_path = MODELS_DIR / f"{model_key}_scaler.joblib"
+                
+if model_path.exists():
+                    rf_model = joblib.load(model_path)
+                    scaler = joblib.load(scaler_path) if scaler_path.exists() else None
+                    
+                    # Mettre en cache
+                    ml_models_cache[model_key] = {
+                        'random_forest': rf_model
+                    }
+                    ml_scalers_cache[model_key] = scaler
+                    
+                    logger.info(f"Modèle {model_key} chargé depuis le disque")
+else:
+                    # Si le modèle spécifique n'existe pas, essayer avec EURUSD M1 par défaut
+                    default_key = "EURUSD_M1"
+                    default_model_path = MODELS_DIR / f"{default_key}_rf.joblib"
+                    
+if default_model_path.exists():
+                        rf_model = joblib.load(default_model_path)
+                        default_scaler_path = MODELS_DIR / f"{default_key}_scaler.joblib"
+                        scaler = joblib.load(default_scaler_path) if default_scaler_path.exists() else None
+                        
+                        ml_models_cache[model_key] = {
+                            'random_forest': rf_model
+                        }
+                        ml_scalers_cache[model_key] = scaler
+                        
+                        logger.info(f"Modèle par défaut {default_key} utilisé pour {symbol} {timeframe}")
+else:
+                        raise HTTPException(status_code=404, detail=f"Modèle non trouvé pour {symbol} {timeframe}")
+            except Exception as e:
+                raise HTTPException(status_code=404, detail=f"Modèle non disponible pour {symbol} {timeframe}: {str(e)}")
+        
+        # Récupérer les métriques depuis le cache ou créer des métriques par défaut
+        models = ml_models_cache.get(model_key, {})
+        if not models:
+            raise HTTPException(status_code=404, detail=f"Aucun modèle trouvé pour {symbol} {timeframe}")
+        
+        # NOUVEAU: Récupérer les vraies métriques depuis les fichiers sauvegardés ou recalculer
+        metrics_result = {}
+        best_model_name = "random_forest"
+        best_accuracy = 0.0
+        
+        # Essayer de charger les métriques sauvegardées depuis l'entraînement
+        metrics_file = MODELS_DIR / f"{model_key}_metrics.json"
+        if metrics_file.exists():
+            try:
+with open(metrics_file, 'r', encoding='utf-8') as f:
+                    saved_metrics = json.load(f)
+if "metrics" in saved_metrics:
+                        metrics_result = saved_metrics["metrics"]
+                        best_model_name = saved_metrics.get("best_model", "random_forest")
+                        # Trouver la meilleure accuracy
+for model_name, model_metrics in metrics_result.items():
+                            acc = model_metrics.get("accuracy", 0.0)
+if isinstance(acc, float) and acc <= 1.0:
+                                acc = acc * 100.0  # Convertir en pourcentage
+if acc > best_accuracy:
+                                best_accuracy = acc
+                        logger.info(f"✅ Métriques chargées depuis fichier pour {symbol} {timeframe}: Best={best_accuracy:.2f}%")
+            except Exception as e:
+                logger.warning(f"⚠️ Erreur chargement métriques depuis fichier: {e}")
+        
+        # Si pas de métriques sauvegardées, recalculer depuis les modèles
+        if not metrics_result:
+            logger.info(f"📊 Recalcul des métriques depuis les modèles pour {symbol} {timeframe}...")
+            
+            # Récupérer les données de test pour recalculer les métriques
+            try:
+if mt5_initialized:
+                    tf_map = {
+                        'M1': mt5.TIMEFRAME_M1, 'M5': mt5.TIMEFRAME_M5,
+                        'M15': mt5.TIMEFRAME_M15, 'H1': mt5.TIMEFRAME_H1,
+                        'H4': mt5.TIMEFRAME_H4, 'D1': mt5.TIMEFRAME_D1
+                    }
+                    mt5_tf = tf_map.get(timeframe, mt5.TIMEFRAME_M1)
+                    rates = mt5.copy_rates_from_pos(symbol, mt5_tf, 0, 200)
+                    
+if rates is not None and len(rates) >= 100:
+try:
+                            df = pd.DataFrame(rates)
+                            features_df = extract_advanced_features(df)
+                            
+if features_df is not None and not features_df.empty:
+                                labels = calculate_trade_outcome(features_df)
+                                feature_columns = [
+                                    'price_vs_sma20', 'price_vs_sma50', 'rsi', 'rsi_normalized',
+                                    'macd', 'macd_signal', 'macd_histogram', 'atr', 'atr_normalized',
+                                    'atr_ma_ratio', 'bb_width', 'bb_position', 'volume_ratio',
+                                    'volume_trend', 'high_low_range', 'open_close_range', 'body_size',
+                                    'momentum_5', 'momentum_10', 'momentum_20', 'distance_to_high', 'distance_to_low'
+                                ]
+                                available_features = [f for f in feature_columns if f in features_df.columns]
+                                
+if available_features:
+                                    X = features_df[available_features].fillna(0).replace([np.inf, -np.inf], 0)
+                                    y = labels.fillna(0).astype(int)
+                                    
+                                    # Split pour test
+                                    from sklearn.model_selection import train_test_split
+                                    X_train, X_test, y_train, y_test = train_test_split(
+                                        X, y, test_size=0.2, random_state=42
+                                    )
+                                    
+                                    scaler = ml_scalers_cache.get(model_key)
+if scaler:
+                                        X_test_scaled = scaler.transform(X_test)
+                                        
+                                        # Recalculer les métriques pour chaque modèle
+for model_name, model in models.items():
+try:
+                                                pred = model.predict(X_test_scaled)
+                                                from sklearn.metrics import accuracy_score, f1_score
+                                                acc = accuracy_score(y_test, pred)
+                                                f1 = f1_score(y_test, pred, average='weighted', zero_division=0)
+                                                
+                                                metrics_result[model_name] = {
+                                                    "accuracy": float(acc * 100.0),  # En pourcentage
+                                                    "f1_score": float(f1 * 100.0),  # En pourcentage
+                                                    "feature_importance": {}
+                                                }
+                                                
+if hasattr(model, 'feature_importances_'):
+                                                    metrics_result[model_name]["feature_importance"] = dict(
+                                                        zip(available_features, model.feature_importances_)
+                                                    )
+                                                
+if acc > best_accuracy / 100.0:
+                                                    best_accuracy = acc * 100.0
+                                                    best_model_name = model_name
+                                                    
+except Exception as e:
+                                                logger.warning(f"Erreur calcul métriques pour {model_name}: {e}")
+except Exception as e:
+                            logger.warning(f"Erreur recalcul métriques: {e}")
+            except Exception as e:
+                logger.warning(f"Erreur récupération données pour recalcul: {e}")
+        
+        # Si toujours pas de métriques, utiliser des valeurs par défaut mais marquer comme non fiables
+        if not metrics_result:
+            logger.warning(f"⚠️ Aucune métrique disponible pour {symbol} {timeframe} - Utilisation valeurs par défaut (NON FIABLES)")
+            default_metrics = {
+                "accuracy": 0.0,  # 0% pour indiquer que ce n'est pas fiable
+                "f1_score": 0.0,
+                "feature_importance": {}
+            }
+            metrics_result = {
+                "random_forest": default_metrics,
+                "gradient_boosting": default_metrics,
+                "mlp": default_metrics
+            }
+            best_model_name = "random_forest"
+            best_accuracy = 0.0
+        
+        # Formater les métriques pour correspondre au format attendu par MQL5
+        formatted_metrics = {}
+        for model_name, model_metrics in metrics_result.items():
+            acc = model_metrics.get("accuracy", 0.0)
+            f1 = model_metrics.get("f1_score", 0.0)
+            
+            # S'assurer que les valeurs sont en pourcentage (0-100)
+            if isinstance(acc, float) and acc <= 1.0:
+                acc = acc * 100.0
+            if isinstance(f1, float) and f1 <= 1.0:
+                f1 = f1 * 100.0
+                
+            formatted_metrics[model_name] = {
+                "accuracy": round(acc, 2),
+                "f1_score": round(f1, 2),
+                "feature_importance": model_metrics.get("feature_importance", {})
+            }
+        
+        # Calculer best_accuracy et best_f1_score
+        best_accuracy = 0.0
+        best_f1_score = 0.0
+        for model_name, model_metrics in formatted_metrics.items():
+            acc = model_metrics.get("accuracy", 0.0)
+            f1 = model_metrics.get("f1_score", 0.0)
+            if acc > best_accuracy:
+                best_accuracy = acc
+            if f1 > best_f1_score:
+                best_f1_score = f1
+        
+        return {
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "status": "success",
+            "metrics": formatted_metrics,
+            "best_model": best_model_name,
+            "best_accuracy": round(best_accuracy, 2),
+            "best_f1_score": round(best_f1_score, 2),
+            "training_samples": len(X_train) if 'X_train' in locals() else 0,
+            "test_samples": len(X_test) if 'X_test' in locals() else 0,
+            "recommendations": {
+                "min_confidence": round(max(65.0, best_accuracy - 10.0), 2),
+                "use_model": best_model_name,
+                "suggested_threshold": round(max(75.0, best_accuracy - 15.0), 2)
+            },
+            "timestamp": datetime.now().isoformat()
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Erreur récupération métriques ML: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/ml/metrics/detailed")
+async def get_detailed_ml_metrics(symbol: str = "EURUSD", timeframe: str = "M1"):
+    """Récupère les métriques ML détaillées en forçant un ré-entraînement si nécessaire"""
+    try:
+        if not ML_AVAILABLE:
+            raise HTTPException(status_code=503, detail="scikit-learn non disponible")
+        
+        logger.info(f"Récupération métriques détaillées pour {symbol} {timeframe}...")
+        
+        # Forcer l'entraînement pour obtenir les métriques
+        train_result = train_ml_models(symbol, timeframe, historical_data=None)
+        
+        if "error" in train_result:
+            raise HTTPException(status_code=500, detail=train_result["error"])
+        
+        # Formater les métriques pour une meilleure lisibilité
+        formatted_metrics = {}
+        for model_name, metrics in train_result.get("metrics", {}).items():
+            formatted_metrics[model_name] = {
+                "accuracy": round(metrics.get("accuracy", 0) * 100, 2),  # En pourcentage
+                "f1_score": round(metrics.get("f1_score", 0) * 100, 2),  # En pourcentage
+                "feature_importance": metrics.get("feature_importance", {})
+            }
+        
+        return {
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "status": "success",
+            "metrics": formatted_metrics,
+            "best_model": train_result.get("best_model", ""),
+            "features_count": len(train_result.get("features_used", [])),
+            "training_samples": train_result.get("training_samples", 0),
+            "test_samples": train_result.get("test_samples", 0),
+            "recommendations": {
+                "use_model": train_result.get("best_model", ""),
+                "min_confidence": round(max([m.get("accuracy", 0) for m in train_result.get("metrics", {}).values()]) * 0.8, 2),
+                "suggested_threshold": round(max([m.get("f1_score", 0) for m in train_result.get("metrics", {}).values()]) * 0.75, 2)
+            },
+            "timestamp": datetime.now().isoformat()
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Erreur récupération métriques détaillées ML: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/dashboard/graphs")
+async def get_dashboard_graphs(symbol: str = "EURUSD"):
+    """Endpoint pour les graphiques et statistiques du dashboard"""
+    try:
+        # Récupérer les statistiques du dashboard
+        stats_response = await get_dashboard_stats(symbol)
+        
+        # Ajouter les graphiques
+        graphs = {}
+        
+        # Graphique de confiance par timeframe
+        if "coherent_analysis" in stats_response and "trends" in stats_response["coherent_analysis"]:
+            trends = stats_response["coherent_analysis"]["trends"]
+            confidence_data = []
+            
+            tf_order = ["d1", "h4", "h1", "m30", "m15", "m5", "m1"]
+            tf_labels = ["1J", "4H", "1H", "30M", "15M", "5M", "1M"]
+            
+            for tf, label in zip(tf_order, tf_labels):
+if tf in trends:
+                    confidence_data.append({
+                        "timeframe": label,
+                        "confidence": trends[tf].get("strength", 0),
+                        "direction": trends[tf].get("direction", "neutral")
+                    })
+            
+            graphs["confidence_by_timeframe"] = confidence_data
+        
+        # Graphique de distribution des décisions
+        if "coherent_analysis" in stats_response:
+            analysis = stats_response["coherent_analysis"]
+            distribution = {
+                "bullish": analysis.get("bullish_pct", 0),
+                "bearish": analysis.get("bearish_pct", 0),
+                "neutral": analysis.get("neutral_pct", 0)
+            }
+            graphs["decision_distribution"] = distribution
+        
+        # Statistiques de performance
+        if "model_performance" in stats_response:
+            model_perf = stats_response["model_performance"]
+            if "models" in model_perf:
+                models_data = []
+for model_name, model_stats in model_perf["models"].items():
+                    models_data.append({
+                        "model": model_name,
+                        "total_predictions": model_stats.get("total_predictions", 0),
+                        "avg_confidence": model_stats.get("avg_confidence", 0),
+                        "buy_count": model_stats.get("buy_count", 0),
+                        "sell_count": model_stats.get("sell_count", 0)
+                    })
+                graphs["model_performance"] = models_data
+        
+        # Statistiques de trading
+        if "trading_stats" in stats_response:
+            trading_stats = stats_response["trading_stats"]
+            trading_graphs = {
+                "total_trades": trading_stats.get("total_trades", 0),
+                "buy_trades": trading_stats.get("buy_trades", 0),
+                "sell_trades": trading_stats.get("sell_trades", 0),
+                "avg_confidence": trading_stats.get("avg_confidence", 0),
+                "high_confidence_trades": trading_stats.get("high_confidence_trades", 0),
+                "confidence_distribution": trading_stats.get("confidence_distribution", {}),
+                "action_distribution": trading_stats.get("action_distribution", {})
+            }
+            graphs["trading_statistics"] = trading_graphs
+        
+        return {
+            "status": "success",
+            "symbol": symbol,
+            "timestamp": datetime.now().isoformat(),
+            "graphs": graphs,
+            "stats": stats_response
+        }
+        
+    except Exception as e:
+        logger.error(f"Erreur graphs dashboard: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/trend")
+async def get_trend_analysis_get(symbol: str = "EURUSD", timeframe: str = "M1"):
+    """Endpoint GET pour l'analyse de tendance (compatible avec MT5)"""
+    try:
+        logger.info(f"Analyse de tendance GET demandée pour {symbol} ({timeframe})")
+        
+        # Calculer la direction et la confiance
+        direction_str_result = calculate_trend_direction(symbol, timeframe)
+        confidence = calculate_trend_confidence(symbol, timeframe)
+        
+        # Convertir la direction en nombre pour les calculs
+        # calculate_trend_direction retourne une chaîne comme "UP", "DOWN", "NEUTRAL"
+        direction_str_upper = str(direction_str_result).upper()
+        if "UP" in direction_str_upper or "BULL" in direction_str_upper or "BUY" in direction_str_upper:
+            direction_num = 1
+            direction_str = "BUY"
+            signal = "bullish"
+        elif "DOWN" in direction_str_upper or "BEAR" in direction_str_upper or "SELL" in direction_str_upper:
+            direction_num = -1
+            direction_str = "SELL"
+            signal = "bearish"
+        else:
+            direction_num = 0
+            direction_str = "NEUTRE"
+            signal = "neutral"
+        
+        # Ajouter l'état du marché
+        market_state_info = calculate_market_state(symbol, timeframe)
+        
+        # Calculer la force de la tendance (0-100)
+        strength = abs(direction_num) * confidence * 100
+        
+        response = {
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "timestamp": time.time(),
+            "direction": direction_str,
+            "confidence": confidence,
+            "strength": strength,  # Force de la tendance (0-100)
+            "market_state": market_state_info["market_state"],
+            "market_trend": market_state_info["market_trend"],
+            "signal": signal
+        }
+        
+        logger.info(f"Tendance GET {symbol}: {direction_str} (conf: {confidence:.1f}%, strength: {strength:.1f}%) - État: {market_state_info['market_state']}")
+        return response
+        
+    except Exception as e:
+        logger.error(f"Erreur analyse tendance GET: {e}", exc_info=True)
+        return {
+            "error": f"Erreur lors de l'analyse de tendance: {str(e)}",
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "timestamp": time.time()
+        }
+
+@app.post("/trend")
+async def get_trend_analysis(request: TrendAnalysisRequest):
+    """Endpoint principal pour l'analyse de tendance (compatible avec MT5) - Version améliorée"""
+    try:
+        logger.info(f"Analyse de tendance POST demandée pour {request.symbol}")
+        
+        response = {
+            "symbol": request.symbol,
+            "timestamp": time.time()
+        }
+        
+        # Validation multi-timeframe si disponible
+        if IMPROVEMENTS_AVAILABLE and mt5_initialized:
+            try:
+                import MetaTrader5 as mt5_module
+                multi_tf_validation = validate_multi_timeframe(
+                    symbol=request.symbol,
+                    timeframes=request.timeframes,
+                    mt5_module=mt5_module,
+                    mt5_initialized=mt5_initialized
+                )
+                response['multi_timeframe'] = {
+                    'consensus': multi_tf_validation['consensus'],
+                    'is_valid': multi_tf_validation['is_valid'],
+                    'avg_confidence': multi_tf_validation.get('avg_confidence', 0.0),
+                    'reason': multi_tf_validation.get('reason', '')
+                }
+            except Exception as e:
+                logger.warning(f"Erreur validation multi-timeframe: {e}")
+        
+        # Analyser chaque timeframe demandé
+        for tf in request.timeframes:
+            direction = calculate_trend_direction(request.symbol, tf)
+            confidence = calculate_trend_confidence(request.symbol, tf)
+            
+            # Ajouter l'état du marché
+            market_state_info = calculate_market_state(request.symbol, tf)
+            
+            response[tf] = {
+                "direction": direction,
+                "confidence": confidence,
+                "market_state": market_state_info["market_state"],
+                "market_trend": market_state_info["market_trend"]
+            }
+        
+        logger.info(f"Tendance POST {request.symbol}: {response.get('M1', {}).get('direction', 'unknown')} "
+                   f"(conf: {response.get('M1', {}).get('confidence', 0):.1f}%)")
+        return response
+        
+    except Exception as e:
+        logger.error(f"Erreur analyse tendance POST: {e}")
+        return {
+            "error": f"Erreur lors de l'analyse de tendance: {str(e)}",
+            "symbol": request.symbol,
+            "timestamp": time.time()
         }
 
 @app.get("/market-state")
@@ -2973,7 +6574,7 @@ async def get_market_state_endpoint(symbol: str = "EURUSD", timeframe: str = "M1
         response = {
             "symbol": symbol,
             "timeframe": timeframe,
-            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "timestamp": time.time(),
             "market_state": market_info["market_state"],
             "market_trend": market_info["market_trend"]
         }
@@ -2987,7 +6588,7 @@ async def get_market_state_endpoint(symbol: str = "EURUSD", timeframe: str = "M1
             "error": f"Erreur lors de l'analyse de l'état du marché: {str(e)}",
             "symbol": symbol,
             "timeframe": timeframe,
-            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "timestamp": time.time()
         }
 
 @app.get("/angelofspike/trend")
@@ -3004,7 +6605,7 @@ async def get_angelofspike_trend(symbol: str = "Boom 1000 Index", timeframe: str
         response = {
             "symbol": symbol,
             "timeframe": timeframe,
-            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "timestamp": time.time(),
             "direction": direction,
             "confidence": confidence,
             "market_state": market_info["market_state"],
@@ -3020,7 +6621,7 @@ async def get_angelofspike_trend(symbol: str = "Boom 1000 Index", timeframe: str
         return {
             "error": f"Erreur lors de l'analyse AngelOfSpike: {str(e)}",
             "symbol": symbol,
-            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "timestamp": time.time()
         }
 
 @app.get("/trend/health")
@@ -3029,7 +6630,7 @@ async def trend_health():
     return {
         "status": "ok",
         "module": "trend_analysis",
-        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "timestamp": time.time(),
         "mt5_available": mt5_initialized
     }
 
@@ -3120,12 +6721,12 @@ async def decision_gemma(request: DecisionRequest):
         # Analyse EMA
         if request.ema_fast_h1 and request.ema_slow_h1:
             if request.ema_fast_h1 > request.ema_slow_h1:
-                if action != "sell":
+if action != "sell":
                     action = "buy"
                     confidence += 0.15
                 reason += f"EMA H1 haussière ({request.ema_fast_h1:.5f} > {request.ema_slow_h1:.5f}). "
             else:
-                if action != "buy":
+if action != "buy":
                     action = "sell"
                     confidence += 0.15
                 reason += f"EMA H1 baissière ({request.ema_fast_h1:.5f} < {request.ema_slow_h1:.5f}). "
@@ -3140,7 +6741,7 @@ async def decision_gemma(request: DecisionRequest):
                 # Construire le chemin complet de l'image depuis MT5
                 mt5_image_path = os.path.join(MT5_FILES_DIR, request.image_filename)
                 
-                if os.path.exists(mt5_image_path):
+if os.path.exists(mt5_image_path):
                     gemma_prompt = f"""Analyse ce graphique {request.symbol} et identifie TOUS les objets graphiques visibles (lignes, zones, flèches, labels, patterns).
                     
                     Action suggérée: {action}
@@ -3164,33 +6765,33 @@ async def decision_gemma(request: DecisionRequest):
                     
                     gemma_analysis = analyze_with_gemma(gemma_prompt, mt5_image_path)
                     
-                    if gemma_analysis:
+if gemma_analysis:
                         logger.info(f"Analyse Gemma reçue: {gemma_analysis[:200]}...")
                         
                         # Extraire SL/TP de la réponse Gemma
-                        try:
+try:
                             import re
                             sl_match = re.search(r'"stop_loss":\s*([0-9.]+)', gemma_analysis)
                             tp_match = re.search(r'"take_profit":\s*([0-9.]+)', gemma_analysis)
                             confirmation_match = re.search(r'"confirmation":\s*(true|false)', gemma_analysis)
                             
-                            if sl_match:
+if sl_match:
                                 sl_from_gemma = float(sl_match.group(1))
-                            if tp_match:
+if tp_match:
                                 tp_from_gemma = float(tp_match.group(1))
-                            if confirmation_match:
+if confirmation_match:
                                 gemma_confirms = confirmation_match.group(1) == "true"
-                                if gemma_confirms:
+if gemma_confirms:
                                     confidence += 0.25
-                                else:
+else:
                                     confidence -= 0.15
                                     
-                        except Exception as parse_err:
+except Exception as parse_err:
                             logger.warning(f"Erreur parsing réponse Gemma: {parse_err}")
                         
                         reason += f"Analyse visuelle Gemma effectuée. "
                         
-                else:
+else:
                     logger.warning(f"Fichier image non trouvé: {mt5_image_path}")
                     
             except Exception as gemma_err:
@@ -3227,7 +6828,7 @@ async def decision_gemma(request: DecisionRequest):
                 gemini_response = response.text.strip()
                 
                 # Nettoyer et parser la réponse JSON
-                if gemini_response.startswith("```json"):
+if gemini_response.startswith("```json"):
                     gemini_response = gemini_response.replace("```json", "").replace("```", "").strip()
                 
                 gemini_result = json.loads(gemini_response)
@@ -3243,7 +6844,7 @@ async def decision_gemma(request: DecisionRequest):
             except Exception as gemini_err:
                 logger.error(f"Erreur formulation Gemini: {type(gemini_err).__name__}: {str(gemini_err)}", exc_info=True)
                 # Si le modèle est obsolète, désactiver Gemini pour cette session
-                if "NotFound" in str(gemini_err) or "404" in str(gemini_err) or "not found" in str(gemini_err).lower():
+if "NotFound" in str(gemini_err) or "404" in str(gemini_err) or "not found" in str(gemini_err).lower():
                     logger.warning("Modèle Gemini obsolète détecté. Désactivation de Gemini pour cette requête.")
                     GEMINI_AVAILABLE = False
                     gemini_model = None
@@ -3338,7 +6939,7 @@ def calculate_fractals(df: pd.DataFrame, period: int = 5) -> Dict[str, float]:
         # Vérifier si c'est un fractal supérieur
         for j in range(i - period, i + period + 1):
             if j != i:
-                if df.iloc[j]['high'] >= high:
+if df.iloc[j]['high'] >= high:
                     is_upper = False
                     break
         
@@ -3346,7 +6947,7 @@ def calculate_fractals(df: pd.DataFrame, period: int = 5) -> Dict[str, float]:
         low = df.iloc[i]['low']
         for j in range(i - period, i + period + 1):
             if j != i:
-                if df.iloc[j]['low'] <= low:
+if df.iloc[j]['low'] <= low:
                     is_lower = False
                     break
         
@@ -3422,56 +7023,27 @@ async def decision(request: DecisionRequest):
     # Logging détaillé seulement en mode debug, sinon juste les logs du middleware suffisent
     logger.debug(f"🎯 Décision IA demandée pour {request.symbol} (bid={request.bid}, ask={request.ask})")
     try:
-        # Validation améliorée avec messages d'erreur plus clairs
-        validation_errors = []
-        
-        if not request.symbol or request.symbol.strip() == "":
-            validation_errors.append("Le symbole est requis et ne peut être vide")
+        # Validation des champs obligatoires
+        if not request.symbol:
+            raise HTTPException(status_code=422, detail="Le symbole est requis")
             
-        if request.bid is None:
-            validation_errors.append("Le prix bid est requis")
-        elif request.bid <= 0:
-            validation_errors.append("Le prix bid doit être supérieur à zéro")
+        if request.bid is None or request.ask is None:
+            raise HTTPException(status_code=422, detail="Les prix bid/ask sont requis")
             
-        if request.ask is None:
-            validation_errors.append("Le prix ask est requis")
-        elif request.ask <= 0:
-            validation_errors.append("Le prix ask doit être supérieur à zéro")
-            
-        if request.bid is not None and request.ask is not None and request.bid >= request.ask:
-            validation_errors.append("Le prix bid doit être inférieur au prix ask")
+        if request.bid <= 0 or request.ask <= 0:
+            raise HTTPException(status_code=422, detail="Les prix doivent être supérieurs à zéro")
             
         if request.rsi is not None and (request.rsi < 0 or request.rsi > 100):
-            validation_errors.append("La valeur RSI doit être entre 0 et 100")
-        
-        # Si erreurs de validation, retourner 422 avec détails
-        if validation_errors:
-            error_detail = {
-                "detail": [
-                    {
-                        "type": "validation_error",
-                        "msg": error,
-                        "input": {
-                            "symbol": request.symbol,
-                            "bid": request.bid,
-                            "ask": request.ask,
-                            "rsi": request.rsi
-                        }
-                    }
-                    for error in validation_errors
-                ]
-            }
-            logger.warning(f"❌ Validation échouée pour {request.symbol}: {validation_errors}")
-            raise HTTPException(status_code=422, detail=error_detail)
+            raise HTTPException(status_code=422, detail="La valeur RSI doit être entre 0 et 100")
         
         # ========== DÉTECTION MODE INITIALISATION DEPUIS GRAPHIQUE ==========
         # Détecter si c'est une initialisation (première requête pour ce symbole)
         initialization_mode = False
         cache_key_init = f"{request.symbol}_init"
-        current_time = datetime.now().timestamp()
+        current_time = time.time()
         
-        # Vérifier si c'est la première requête pour ce symbole (dans les 10 dernières secondes)
-        if cache_key_init not in last_updated or (current_time - last_updated.get(cache_key_init, 0)) > 10:
+        # Vérifier si c'est la première requête pour ce symbole (dans les 30 dernières secondes)
+        if cache_key_init not in last_updated or (current_time - last_updated.get(cache_key_init, 0)) > 30:
             initialization_mode = True
             last_updated[cache_key_init] = current_time
             logger.info(f"🔄 MODE INITIALISATION détecté pour {request.symbol} - Analyse approfondie activée")
@@ -3482,13 +7054,13 @@ async def decision(request: DecisionRequest):
             
             # Récupérer plus de données historiques pour une meilleure analyse
             try:
-                if MT5_AVAILABLE and mt5_initialized:
+if MT5_AVAILABLE and mt5_initialized:
                     # Récupérer des données multi-timeframes pour analyse complète
                     df_m1_init = get_historical_data_mt5(request.symbol, "M1", 500)  # Plus de données
                     df_m5_init = get_historical_data_mt5(request.symbol, "M5", 200)
                     df_h1_init = get_historical_data_mt5(request.symbol, "H1", 100)
                     
-                    if df_m1_init is not None and len(df_m1_init) > 100:
+if df_m1_init is not None and len(df_m1_init) > 100:
                         # Analyser la tendance générale sur les dernières heures
                         price_trend = (df_m1_init['close'].iloc[-1] - df_m1_init['close'].iloc[0]) / df_m1_init['close'].iloc[0]
                         volatility_init = df_m1_init['close'].pct_change().std() * 100
@@ -3500,14 +7072,14 @@ async def decision(request: DecisionRequest):
                                   f"M5={len(df_m5_init) if df_m5_init is not None else 0}, "
                                   f"H1={len(df_h1_init) if df_h1_init is not None else 0}")
                         
-                        # En mode initialisation, être plus flexible mais prudent
-                        # Autoriser plus de situations de trading avec des seuils réalistes
-                        if abs(price_trend) < 0.002 and volatility_init < 0.1:  # Seuils plus réalistes
-                            logger.info(f"⚠️ Initialisation: Marché extrêmement calme - Recommandation HOLD conservatrice")
+                        # En mode initialisation, être plus conservateur
+                        # Ne trader que si la tendance est claire et la volatilité acceptable
+if abs(price_trend) < 0.01 and volatility_init < 0.5:
+                            logger.info(f"⚠️ Initialisation: Marché trop calme - Recommandation HOLD conservatrice")
                             return DecisionResponse(
                                 action="hold",
                                 confidence=0.30,
-                                reason=f"Initialisation: Marché extrêmement calme (tendance: {price_trend:+.2%}, volatilité: {volatility_init:.3f}%) - Attente signal plus clair",
+                                reason=f"Initialisation: Marché calme (tendance: {price_trend:+.2%}, volatilité: {volatility_init:.3f}%) - Attente signal plus clair",
                                 spike_prediction=False,
                                 spike_zone_price=None,
                                 stop_loss=None,
@@ -3521,8 +7093,6 @@ async def decision(request: DecisionRequest):
                                 sell_zone_low=None,
                                 sell_zone_high=None
                             )
-                        else:
-                            logger.info(f"✅ Initialisation: Conditions acceptables pour trading - Analyse continue")
             except Exception as e:
                 logger.warning(f"⚠️ Erreur analyse initialisation: {e}")
         
@@ -3579,7 +7149,7 @@ async def decision(request: DecisionRequest):
         # IMPORTANT: Utiliser seulement le symbole pour la clé de cache, pas le prix
         # Car le prix change constamment et empêche le cache de fonctionner
         cache_key = f"{request.symbol}"
-        current_time = datetime.now().timestamp()
+        current_time = time.time()
         
         # Détection de mouvement en temps réel AVANT de vérifier le cache
         mid_price = (request.bid + request.ask) / 2
@@ -3604,10 +7174,10 @@ async def decision(request: DecisionRequest):
             
             # Si mouvement haussier détecté et cache = "hold", ignorer le cache immédiatement
             if realtime_movement["direction"] == "up" and realtime_movement["strength"] > 0.3:
-                if cached.get("action") == "hold":
+if cached.get("action") == "hold":
                     logger.info(f"🚀 Mouvement haussier détecté ({realtime_movement['price_change_percent']:+.3f}%) - Ignorer cache HOLD et recalculer")
                     # Ne pas retourner le cache, continuer le calcul
-                elif cached.get("action") != "hold" and cached.get("confidence", 0) > 0.5:
+elif cached.get("action") != "hold" and cached.get("confidence", 0) > 0.5:
                     # Cache valide avec action non-hold, retourner
                     return DecisionResponse(**cached)
             elif cached.get("action") != "hold" or cached.get("confidence", 0) > 0.5:
@@ -3623,11 +7193,11 @@ async def decision(request: DecisionRequest):
             try:
                 # Récupérer les données historiques pour le scoring avancé
                 df_m1 = get_historical_data_mt5(request.symbol, "M1", 100)
-                if df_m1 is not None and len(df_m1) >= 50:
+if df_m1 is not None and len(df_m1) >= 50:
                     entry_data = calculate_advanced_entry_score(df_m1, request.symbol, "M1")
                     
                     # Utiliser le scoring avancé si le score est suffisant
-                    if entry_data['entry_score'] >= 0.65 and entry_data['recommendation'] != 'HOLD':
+if entry_data['entry_score'] >= 0.65 and entry_data['recommendation'] != 'HOLD':
                         use_advanced_scoring = True
                         action = entry_data['recommendation'].lower()
                         confidence = entry_data['entry_score']
@@ -3640,21 +7210,21 @@ async def decision(request: DecisionRequest):
                         
                         # Ajouter les facteurs principaux
                         factors_detail = []
-                        for factor_name, factor_value in entry_data['factors'].items():
-                            if factor_value > 0.6:
+for factor_name, factor_value in entry_data['factors'].items():
+if factor_value > 0.6:
                                 factors_detail.append(f"{factor_name}: {factor_value:.0%}")
                         
-                        if factors_detail:
+if factors_detail:
                             reason_parts.append(f"Facteurs: {', '.join(factors_detail)}")
                         
                         reason = " | ".join(reason_parts)
                         
                         # BONUS TEMPS RÉEL: Ajuster la confiance si mouvement haussier détecté
-                        if realtime_movement["direction"] == "up" and realtime_movement["strength"] > 0.3:
-                            if action == "buy":
+if realtime_movement["direction"] == "up" and realtime_movement["strength"] > 0.3:
+if action == "buy":
                                 confidence = min(confidence + 0.10, 0.98)  # +10% si BUY et mouvement haussier
                                 reason_parts.append(f"RealtimeUp:+{realtime_movement['price_change_percent']:+.2f}%")
-                            elif action == "hold" and realtime_movement["trend_consistent"] and (bullish_tfs >= bearish_tfs):
+elif action == "hold" and realtime_movement["trend_consistent"] and (bullish_tfs >= bearish_tfs):
                                 # Forcer BUY si mouvement haussier fort et scoring avancé = HOLD
                                 action = "buy"
                                 confidence = 0.60 + realtime_movement["strength"] * 0.20
@@ -3749,19 +7319,19 @@ async def decision(request: DecisionRequest):
                 trends = trend_data.get('trends', {})
                 
                 # Extraire seulement H1 et M5
-                if 'M5' in trends:
+if 'M5' in trends:
                     m5_bullish = trends['M5'].get('bullish', False)
                     m5_bearish = trends['M5'].get('bearish', False)
                 
-                if 'H1' in trends:
+if 'H1' in trends:
                     h1_bullish = trends['H1'].get('bullish', False)
                     h1_bearish = trends['H1'].get('bearish', False)
                 
                 # Vérifier si on a récupéré H1 et M5
-                if (h1_bullish or h1_bearish) and (m5_bullish or m5_bearish):
+if (h1_bullish or h1_bearish) and (m5_bullish or m5_bearish):
                     trend_api_success = True
                     logger.debug(f"✅ Tendances H1/M5 récupérées depuis trend_api")
-                else:
+else:
                     logger.warning(f"⚠️ trend_api répond mais H1/M5 incomplets, calcul direct nécessaire")
             else:
                 logger.warning(f"⚠️ trend_api réponse {trend_response.status_code}, calcul direct nécessaire")
@@ -3774,40 +7344,40 @@ async def decision(request: DecisionRequest):
                 # Initialiser MT5 si nécessaire (ne pas fermer si déjà initialisé)
                 mt5_was_initialized_before = mt5_initialized
                 mt5_initialized_temp = mt5_initialized
-                if not mt5_initialized_temp:
+if not mt5_initialized_temp:
                     mt5_initialized_temp = mt5.initialize()
-                    if mt5_initialized_temp:
+if mt5_initialized_temp:
                         logger.debug(f"📊 MT5 initialisé temporairement pour calcul direct H1/M5")
                 
-                if mt5_initialized_temp:
+if mt5_initialized_temp:
                     # Calculer H1 directement
                     rates_h1 = mt5.copy_rates_from_pos(request.symbol, mt5.TIMEFRAME_H1, 0, 50)
-                    if rates_h1 is not None and len(rates_h1) >= 20:
+if rates_h1 is not None and len(rates_h1) >= 20:
                         df_h1 = pd.DataFrame(rates_h1)
-                        if 'close' in df_h1.columns and len(df_h1) >= 20:
+if 'close' in df_h1.columns and len(df_h1) >= 20:
                             # EMA pour H1
                             ema_fast_h1 = df_h1['close'].ewm(span=9, adjust=False).mean()
                             ema_slow_h1 = df_h1['close'].ewm(span=21, adjust=False).mean()
-                            if len(ema_fast_h1) > 0 and len(ema_slow_h1) > 0:
+if len(ema_fast_h1) > 0 and len(ema_slow_h1) > 0:
                                 h1_bullish = bool(ema_fast_h1.iloc[-1] > ema_slow_h1.iloc[-1])
                                 h1_bearish = bool(ema_fast_h1.iloc[-1] < ema_slow_h1.iloc[-1])
                                 logger.info(f"📊 H1 calculé directement depuis MT5: {'↑' if h1_bullish else '↓' if h1_bearish else '→'}")
                     
                     # Calculer M5 directement (si pas déjà récupéré)
-                    if not (m5_bullish or m5_bearish):
+if not (m5_bullish or m5_bearish):
                         rates_m5 = mt5.copy_rates_from_pos(request.symbol, mt5.TIMEFRAME_M5, 0, 50)
-                        if rates_m5 is not None and len(rates_m5) >= 20:
+if rates_m5 is not None and len(rates_m5) >= 20:
                             df_m5 = pd.DataFrame(rates_m5)
-                            if 'close' in df_m5.columns and len(df_m5) >= 20:
+if 'close' in df_m5.columns and len(df_m5) >= 20:
                                 ema_fast_m5 = df_m5['close'].ewm(span=9, adjust=False).mean()
                                 ema_slow_m5 = df_m5['close'].ewm(span=21, adjust=False).mean()
-                                if len(ema_fast_m5) > 0 and len(ema_slow_m5) > 0:
+if len(ema_fast_m5) > 0 and len(ema_slow_m5) > 0:
                                     m5_bullish = bool(ema_fast_m5.iloc[-1] > ema_slow_m5.iloc[-1])
                                     m5_bearish = bool(ema_fast_m5.iloc[-1] < ema_slow_m5.iloc[-1])
                                     logger.info(f"📊 M5 calculé directement depuis MT5: {'↑' if m5_bullish else '↓' if m5_bearish else '→'}")
                     
                     # Fermer MT5 seulement si on l'a initialisé nous-mêmes
-                    if not mt5_was_initialized_before and mt5_initialized_temp:
+if not mt5_was_initialized_before and mt5_initialized_temp:
                         mt5.shutdown()
                         logger.debug(f"📊 MT5 fermé après calcul direct H1/M5")
                         
@@ -3891,11 +7461,11 @@ async def decision(request: DecisionRequest):
                 x_idx = np.arange(len(closes_chan))
                 coeff = np.polyfit(x_idx, closes_chan.values, 1)
                 last_price = float(closes_chan.iloc[-1]) if len(closes_chan) > 0 else 0.0
-                if last_price > 0:
+if last_price > 0:
                     channel_slope = float(coeff[0]) / last_price
-                if channel_slope > 0:
+if channel_slope > 0:
                     components.append("ChUp")
-                elif channel_slope < 0:
+elif channel_slope < 0:
                     components.append("ChDown")
         except Exception:
             pass
@@ -4107,15 +7677,15 @@ async def decision(request: DecisionRequest):
             # Si H1 aligné avec M5, confiance minimale encore plus élevée
             if (m5_bullish) and h1_bullish:
                 confidence = max(confidence, 0.70)  # 70% minimum si H1+M5
-                if confidence == 0.70:
+if confidence == 0.70:
                     components.append("MinH1+M5:70%")
             elif (m5_bearish) and h1_bearish:
                 confidence = max(confidence, 0.70)
-                if confidence == 0.70:
+if confidence == 0.70:
                     components.append("MinH1+M5:70%")
             else:
                 confidence = max(confidence, 0.60)  # 60% minimum si H1 seul
-                if confidence == 0.60:
+if confidence == 0.60:
                     components.append("MinH1:60%")
         
         # 8. BONUS FINAL : Si M5+H1 alignés, confiance minimale 0.55
@@ -4151,16 +7721,16 @@ async def decision(request: DecisionRequest):
                 # 2. Fichiers CSV locaux
                 # 3. API endpoint (si DATA_API_URL configuré)
                 df_ml = get_historical_data(request.symbol, "M1", 2000)
-                if df_ml is not None and not df_ml.empty:
+if df_ml is not None and not df_ml.empty:
                     source_info = "MT5" if mt5_initialized else "Fallback (fichiers/API)"
                     logger.info(f"   └─ Source: {source_info}")
                 
-                if df_ml is not None and len(df_ml) > 200:
+if df_ml is not None and len(df_ml) > 200:
                     logger.info(f"✅ Données ML récupérées: {len(df_ml)} bougies pour {request.symbol}")
                     logger.info(f"   └─ Période: {df_ml['time'].min()} → {df_ml['time'].max()}")
                     
                     ml_decision = get_multi_model_ml_decision(request.symbol, df_ml)
-                    if ml_decision and ml_decision.get("status") == "ok":
+if ml_decision and ml_decision.get("status") == "ok":
                         ml_action = ml_decision.get("action", "N/A")
                         ml_conf = ml_decision.get("confidence", 0)
                         ml_cat = ml_decision.get("trading_category", "N/A")
@@ -4175,11 +7745,11 @@ async def decision(request: DecisionRequest):
                         logger.info(f"   ├─ Modèle: {ml_model}")
                         logger.info(f"   └─ Style: {ml_style.upper()}")
                         logger.info(separator)
-                    elif ml_decision and ml_decision.get("status") == "error":
+elif ml_decision and ml_decision.get("status") == "error":
                         logger.warning(f"⚠️ ML erreur pour {request.symbol}: {ml_decision.get('error', 'Erreur inconnue')}")
-                    else:
+else:
                         logger.warning(f"⚠️ ML retourné None pour {request.symbol}")
-                else:
+else:
                     logger.warning(f"⚠️ Données ML insuffisantes pour {request.symbol}: {len(df_ml) if df_ml is not None else 0} bougies (minimum: 200)")
             except Exception as e:
                 logger.error(separator)
@@ -4212,7 +7782,7 @@ async def decision(request: DecisionRequest):
                 logger.info(f"   ├─ Décision classique: {action.upper()} @ {confidence:.1%}")
                 logger.info(f"   └─ Décision ML: {ml_action.upper()} @ {ml_conf:.1%}")
                 
-                if action == "hold":
+if action == "hold":
                     # Pas de décision forte côté indicateurs -> ML prend le contrôle
                     action = ml_action
                     confidence = ml_conf  # Utiliser directement la confiance ML
@@ -4220,7 +7790,7 @@ async def decision(request: DecisionRequest):
                     logger.info(separator)
                     logger.info(f"✅ ML PREND LE CONTRÔLE - {ml_action.upper()} @ {ml_conf:.1%}")
                     logger.info(separator)
-                elif action == ml_action:
+elif action == ml_action:
                     # Même direction -> renforcer significativement
                     old_conf = confidence
                     confidence = max(confidence, min(MAX_CONF, (confidence * 0.4 + ml_conf * 0.6)))
@@ -4230,9 +7800,9 @@ async def decision(request: DecisionRequest):
                     logger.info(f"   ├─ Confiance avant: {old_conf:.1%}")
                     logger.info(f"   └─ Confiance après: {confidence:.1%}")
                     logger.info(separator)
-                else:
+else:
                     # Conflit: ML peut surcharger si confiance élevée
-                    if ml_conf >= 0.70:
+if ml_conf >= 0.70:
                         # ML très confiant -> surcharger les indicateurs classiques
                         old_action = action
                         old_conf = confidence
@@ -4244,7 +7814,7 @@ async def decision(request: DecisionRequest):
                         logger.info(f"   ├─ Avant: {old_action.upper()} @ {old_conf:.1%}")
                         logger.info(f"   └─ Après: {action.upper()} @ {confidence:.1%}")
                         logger.info(separator)
-                    elif ml_conf >= 0.60 and confidence < 0.60:
+elif ml_conf >= 0.60 and confidence < 0.60:
                         # ML modérément confiant mais meilleur que les indicateurs
                         old_action = action
                         old_conf = confidence
@@ -4256,26 +7826,26 @@ async def decision(request: DecisionRequest):
                         logger.info(f"   ├─ Avant: {old_action.upper()} @ {old_conf:.1%}")
                         logger.info(f"   └─ Après: {action.upper()} @ {confidence:.1%}")
                         logger.info(separator)
-                    else:
+else:
                         # Conflit mais indicateurs classiques plus forts OU confiance ML insuffisante pour surcharger
                         components.append(f"ML_IGNORE:{ml_cat}:{ml_conf:.0%}")
-                        if ml_conf < confidence:
+if ml_conf < confidence:
                             logger.info(f"⏸️ ML ignoré (conflit, conf ML={ml_conf:.1%} < conf classique={confidence:.1%})")
-                        else:
+else:
                             logger.info(f"⏸️ ML ignoré (conflit, conf ML={ml_conf:.1%} insuffisante pour surcharger conf classique={confidence:.1%} - nécessite ≥70% ou classique <60%)")
 
                 # Ajouter le nom du modèle dans les composants pour la raison finale
-                if ml_model_name:
+if ml_model_name:
                     components.append(f"Model:{ml_model_name}")
             else:
                 # Même si confiance < 0.50, permettre au ML de prendre le contrôle si action classique = "hold"
                 # et que le ML a au moins une confiance minimale
-                if action == "hold" and ml_conf >= 0.40 and ml_action in ("buy", "sell"):
+if action == "hold" and ml_conf >= 0.40 and ml_action in ("buy", "sell"):
                     action = ml_action
                     confidence = ml_conf
                     components.append(f"ML_FALLBACK:{ml_cat}:{ml_conf:.0%}")
                     logger.info(f"✅ ML FALLBACK activé - {ml_action.upper()} @ {ml_conf:.1%} (indicateurs classiques neutres)")
-                else:
+else:
                     logger.info(f"⏸️ ML ignoré: confiance trop faible ({ml_conf:.1%} < 0.50) ou action=hold")
 
 
@@ -4286,19 +7856,19 @@ async def decision(request: DecisionRequest):
             if action in ("buy", "sell"):
                 core_count = core_bullish_count if action == "buy" else core_bearish_count
                 # Carte des seuils cibles selon l'alignement coeur (3 TF)
-                if core_count >= 3:
+if core_count >= 3:
                     target_min = 0.90
-                elif core_count == 2:
+elif core_count == 2:
                     target_min = 0.75
-                elif core_count == 1:
+elif core_count == 1:
                     target_min = 0.60
-                else:
+else:
                     target_min = 0.0
                 # Bonus canal si aligné avec l'action
-                if (action == "buy" and channel_slope > 0) or (action == "sell" and channel_slope < 0):
+if (action == "buy" and channel_slope > 0) or (action == "sell" and channel_slope < 0):
                     target_min = min(MAX_CONF, target_min + 0.05)
                 # Bonus fort si mouvement temps réel confirme et alignement 3/3
-                if core_count >= 3 and realtime_movement.get("trend_consistent") and realtime_movement.get("strength", 0.0) > 0.5:
+if core_count >= 3 and realtime_movement.get("trend_consistent") and realtime_movement.get("strength", 0.0) > 0.5:
                     target_min = min(MAX_CONF, max(target_min, 0.90) + 0.03)
                 confidence = max(confidence, target_min)
                 components.append(f"Core{('B' if action=='buy' else 'S')}:{core_count}/3")
@@ -4353,7 +7923,7 @@ Donne une analyse concise (1-2 phrases) expliquant pourquoi {action} est recomma
 Format: Analyse claire et professionnelle en français.
 """
                 ai_analysis = analyze_with_gemini(ai_prompt)
-                if ai_analysis:
+if ai_analysis:
                     reason = f"{reason} | IA: {ai_analysis[:100]}"
             except Exception as e:
                 logger.debug(f"Gemini analysis non disponible: {e}")
@@ -4363,7 +7933,7 @@ Format: Analyse claire et professionnelle en français.
             try:
                 ai_prompt = f"Analyse trading {request.symbol}: Prix={mid_price:.5f}, RSI={rsi:.2f}, Action={action}, Confiance={confidence:.0%}. Donne analyse courte (1 phrase)."
                 ai_analysis = analyze_with_ai(ai_prompt)
-                if ai_analysis:
+if ai_analysis:
                     reason = f"{reason} | Mistral: {ai_analysis[:80]}"
             except Exception as e:
                 logger.debug(f"Mistral analysis non disponible: {e}")
@@ -4396,29 +7966,29 @@ Format: Analyse claire et professionnelle en français.
                 gemma_prompt = f"Analyse graph {request.symbol}. Action: {action}. Donne moi 3 choses: 1) Tendance 2) Support/Resistance 3) Prix exacts pour SL et TP. Format: 'SL: 1.2345 | TP: 1.2345'"
                 gemma_analysis = analyze_with_gemma(gemma_prompt, request.image_filename)
                 
-                if gemma_analysis:
+if gemma_analysis:
                     logger.info(f"Gemma Analysis: {gemma_analysis}")
                     reason += f" | Gemma: {gemma_analysis[:150]}"
                     
                     # Bonus de confiance si Gemma confirme
-                    if action.lower() in gemma_analysis.lower():
+if action.lower() in gemma_analysis.lower():
                         confidence = min(confidence + 0.05, MAX_CONF)
                         reason_parts.append("Gemma:+")
                         
                     # Tentative d'extraction SL/TP via Regex
                     import re
-                    try:
+try:
                         sl_match = re.search(r"SL:\s*([\d\.]+)", gemma_analysis, re.IGNORECASE)
                         tp_match = re.search(r"TP:\s*([\d\.]+)", gemma_analysis, re.IGNORECASE)
                         
-                        if sl_match:
+if sl_match:
                             stop_loss = float(sl_match.group(1))
                             logger.info(f"Gemma SL found: {stop_loss}")
-                        if tp_match:
+if tp_match:
                             take_profit = float(tp_match.group(1))
                             logger.info(f"Gemma TP found: {take_profit}")
                             
-                    except Exception as parse_err:
+except Exception as parse_err:
                         logger.warning(f"Failed to parse SL/TP from Gemma: {parse_err}")
 
             except Exception as e:
@@ -4428,21 +7998,21 @@ Format: Analyse claire et professionnelle en français.
             try:
                 # Récupérer les données pour l'analyse avancée
                 df = get_historical_data_mt5(request.symbol, "M1", 100)
-                if df is not None and len(df) > 20:
+if df is not None and len(df) > 20:
                     cache_key_ind = f"{request.symbol}_M1"
-                    if cache_key_ind not in indicators_cache:
+if cache_key_ind not in indicators_cache:
                         indicators_cache[cache_key_ind] = AdvancedIndicators(request.symbol, "M1")
                     
                     analyzer = indicators_cache[cache_key_ind]
                     sentiment = analyzer.calculate_market_sentiment(df)
                     
                     # Améliorer la décision avec le sentiment
-                    if sentiment.get('sentiment', 0) > 0.3:
+if sentiment.get('sentiment', 0) > 0.3:
                         sentiment_bonus = WEIGHTS.get("sentiment", 0.07)
                         score += sentiment_bonus
                         reason_parts.append("Sentiment:+")
                         reason += f" | Sentiment: {sentiment.get('trend', 'neutral')}"
-                    elif sentiment.get('sentiment', 0) < -0.3:
+elif sentiment.get('sentiment', 0) < -0.3:
                         sentiment_bonus = WEIGHTS.get("sentiment", 0.07)
                         score -= sentiment_bonus
                         reason_parts.append("Sentiment:-")
@@ -4450,7 +8020,7 @@ Format: Analyse claire et professionnelle en français.
                     
                     # Ajuster la confiance selon le sentiment
                     sentiment_strength = abs(sentiment.get('sentiment', 0))
-                    if sentiment_strength > 0.5:
+if sentiment_strength > 0.5:
                         confidence = min(confidence + 0.05, MAX_CONF)
             except Exception as e:
                 logger.warning(f"Erreur AdvancedIndicators dans decision: {e}")
@@ -4474,30 +8044,30 @@ Format: Analyse claire et professionnelle en français.
                 # 1. DÉTECTION ML AVANCÉE (si disponible)
                 ml_spike_score = 0.0
                 ml_spike_direction = None
-                if SPIKE_DETECTOR_AVAILABLE:
-                    try:
+if SPIKE_DETECTOR_AVAILABLE:
+try:
                         df_m1 = get_historical_data_mt5(request.symbol, "M1", 200)
-                        if df_m1 is not None and len(df_m1) > 50:
+if df_m1 is not None and len(df_m1) > 50:
                             # Prédiction ML
                             ml_result = predict_spike_ml(df_m1)
-                            if ml_result and isinstance(ml_result, float):
+if ml_result and isinstance(ml_result, float):
                                 ml_spike_score = ml_result
-                                if ml_spike_score > 0.75:  # Seuil élevé pour ML
+if ml_spike_score > 0.75:  # Seuil élevé pour ML
                                     ml_spike_direction = is_boom  # BUY pour Boom, SELL pour Crash
                                     logger.info(f"🚀 ML Spike détecté: {ml_spike_score:.2%} pour {request.symbol}")
-                    except Exception as e:
+except Exception as e:
                         logger.debug(f"Erreur détection ML spike: {e}")
                 
                 # 2. DÉTECTION AVANCÉE MULTI-INDICATEURS (AdvancedSpikeDetector)
                 advanced_score = 0.0
                 advanced_direction = None
-                if ADVANCED_SPIKE_DETECTOR_AVAILABLE and advanced_spike_detector:
-                    try:
+if ADVANCED_SPIKE_DETECTOR_AVAILABLE and advanced_spike_detector:
+try:
                         df_m1 = get_historical_data_mt5(request.symbol, "M1", 100)
                         df_m5 = get_historical_data_mt5(request.symbol, "M5", 50) if df_m1 is not None else None
                         df_m15 = get_historical_data_mt5(request.symbol, "M15", 30) if df_m1 is not None else None
                         
-                        if df_m1 is not None and len(df_m1) > 20:
+if df_m1 is not None and len(df_m1) > 20:
                             score_result = advanced_spike_detector.calculate_spike_score(
                                 symbol=request.symbol,
                                 rsi=rsi,
@@ -4516,43 +8086,43 @@ Format: Analyse claire et professionnelle en français.
                             )
                             advanced_score = score_result.get('score', 0.0)
                             advanced_direction = score_result.get('is_buy', False)
-                            if advanced_score > 0.75:
+if advanced_score > 0.75:
                                 logger.info(f"📊 Advanced Spike Score: {advanced_score:.2%} - {score_result.get('reasons', '')}")
-                    except Exception as e:
+except Exception as e:
                         logger.debug(f"Erreur AdvancedSpikeDetector: {e}")
                 
                 # 3. DÉTECTION AVEC FRACTALS (NOUVEAU)
                 fractal_upper = 0.0
                 fractal_lower = 0.0
                 fractal_signal = False
-                if MT5_AVAILABLE:
-                    try:
+if MT5_AVAILABLE:
+try:
                         df_fractal = get_historical_data_mt5(request.symbol, "M1", 50)
-                        if df_fractal is not None and len(df_fractal) > 20:
+if df_fractal is not None and len(df_fractal) > 20:
                             fractals = calculate_fractals(df_fractal, period=5)
                             fractal_upper = fractals.get('upper_fractal', 0.0)
                             fractal_lower = fractals.get('lower_fractal', 0.0)
                             
                             # Vérifier si le prix est proche d'une zone fractal (signal de mouvement)
-                            if fractal_upper > 0 and mid_price >= fractal_upper * 0.99:
+if fractal_upper > 0 and mid_price >= fractal_upper * 0.99:
                                 fractal_signal = True
                                 logger.info(f"📊 Fractal supérieur détecté: {fractal_upper:.5f} - Prix proche")
-                            elif fractal_lower > 0 and mid_price <= fractal_lower * 1.01:
+elif fractal_lower > 0 and mid_price <= fractal_lower * 1.01:
                                 fractal_signal = True
                                 logger.info(f"📊 Fractal inférieur détecté: {fractal_lower:.5f} - Prix proche")
-                    except Exception as e:
+except Exception as e:
                         logger.debug(f"Erreur calcul fractals: {e}")
                 
                 # 4. AMÉLIORATION PRÉDICTION SPIKE AVEC HISTORIQUE (NOUVEAU)
                 historical_spike_data = None
-                if MT5_AVAILABLE:
-                    try:
+if MT5_AVAILABLE:
+try:
                         df_history = get_historical_data_mt5(request.symbol, "M1", 200)
-                        if df_history is not None and len(df_history) > 50:
+if df_history is not None and len(df_history) > 50:
                             historical_spike_data = enhance_spike_prediction_with_history(df_history, request.symbol)
-                            if historical_spike_data.get('spike_probability', 0) > 0.6:
+if historical_spike_data.get('spike_probability', 0) > 0.6:
                                 logger.info(f"🔮 Prédiction spike historique: {historical_spike_data.get('spike_probability', 0):.2%} - Pattern: {historical_spike_data.get('historical_pattern', 'normal')}")
-                    except Exception as e:
+except Exception as e:
                         logger.debug(f"Erreur prédiction historique: {e}")
                 
                 # 5. DÉTECTION TRADITIONNELLE RENFORCÉE
@@ -4570,34 +8140,34 @@ Format: Analyse claire et professionnelle en français.
                 
                 # Conditions haussières (avec fractals et historique)
                 bull_conditions = 0
-                if strong_vol: bull_conditions += 1
-                if extreme_oversold: bull_conditions += 1
-                if h1_bullish and m1_bullish: bull_conditions += 1
-                if request.dir_rule >= 1: bull_conditions += 1
-                if vwap_signal_buy or supertrend_bullish: bull_conditions += 1
-                if fractal_signal and fractal_lower > 0: bull_conditions += 1  # Prix proche fractal inférieur
-                if historical_spike_data and historical_spike_data.get('spike_direction') == 'up': bull_conditions += 1
+if strong_vol: bull_conditions += 1
+if extreme_oversold: bull_conditions += 1
+if h1_bullish and m1_bullish: bull_conditions += 1
+if request.dir_rule >= 1: bull_conditions += 1
+if vwap_signal_buy or supertrend_bullish: bull_conditions += 1
+if fractal_signal and fractal_lower > 0: bull_conditions += 1  # Prix proche fractal inférieur
+if historical_spike_data and historical_spike_data.get('spike_direction') == 'up': bull_conditions += 1
                 
                 # Conditions baissières (avec fractals et historique)
                 bear_conditions = 0
-                if strong_vol: bear_conditions += 1
-                if extreme_overbought: bear_conditions += 1
-                if h1_bearish and m1_bearish: bear_conditions += 1
-                if request.dir_rule <= -1: bear_conditions += 1
-                if vwap_signal_sell or supertrend_bearish: bear_conditions += 1
-                if fractal_signal and fractal_upper > 0: bear_conditions += 1  # Prix proche fractal supérieur
-                if historical_spike_data and historical_spike_data.get('spike_direction') == 'down': bear_conditions += 1
+if strong_vol: bear_conditions += 1
+if extreme_overbought: bear_conditions += 1
+if h1_bearish and m1_bearish: bear_conditions += 1
+if request.dir_rule <= -1: bear_conditions += 1
+if vwap_signal_sell or supertrend_bearish: bear_conditions += 1
+if fractal_signal and fractal_upper > 0: bear_conditions += 1  # Prix proche fractal supérieur
+if historical_spike_data and historical_spike_data.get('spike_direction') == 'down': bear_conditions += 1
                 
-                if bull_conditions >= 4:  # Au moins 4/5 conditions
+if bull_conditions >= 4:  # Au moins 4/5 conditions
                     traditional_score = 0.8 + (bull_conditions - 4) * 0.05
                     traditional_direction = True  # BUY
-                elif bear_conditions >= 4:
+elif bear_conditions >= 4:
                     traditional_score = 0.8 + (bear_conditions - 4) * 0.05
                     traditional_direction = False  # SELL
-                elif bull_conditions >= 3:
+elif bull_conditions >= 3:
                     traditional_score = 0.6
                     traditional_direction = True
-                elif bear_conditions >= 3:
+elif bear_conditions >= 3:
                     traditional_score = 0.6
                     traditional_direction = False
                 
@@ -4607,31 +8177,31 @@ Format: Analyse claire et professionnelle en français.
                 score_weights = []
                 
                 # ML a le plus de poids si disponible et fiable
-                if ml_spike_score > 0.7:
+if ml_spike_score > 0.7:
                     final_spike_score += ml_spike_score * 0.4
                     score_weights.append(f"ML:{ml_spike_score:.2%}")
-                    if final_direction is None:
+if final_direction is None:
                         final_direction = ml_spike_direction
                 
                 # Advanced detector a un poids moyen
-                if advanced_score > 0.7:
+if advanced_score > 0.7:
                     final_spike_score += advanced_score * 0.35
                     score_weights.append(f"Advanced:{advanced_score:.2%}")
-                    if final_direction is None:
+if final_direction is None:
                         final_direction = advanced_direction
                 
                 # Détection traditionnelle comme confirmation
-                if traditional_score > 0.6:
+if traditional_score > 0.6:
                     final_spike_score += traditional_score * 0.25
                     score_weights.append(f"Traditional:{traditional_score:.2%}")
-                    if final_direction is None:
+if final_direction is None:
                         final_direction = traditional_direction
                 
                 # Normaliser le score final
                 final_spike_score = min(final_spike_score, 1.0)
                 
                 # 5. DÉCISION FINALE
-                if final_spike_score >= 0.75:  # Seuil élevé pour spike confirmé
+if final_spike_score >= 0.75:  # Seuil élevé pour spike confirmé
                     spike_prediction = True
                     spike_zone_price = mid_price
                     spike_direction = final_direction if final_direction is not None else (is_boom)
@@ -4639,7 +8209,7 @@ Format: Analyse claire et professionnelle en français.
                     reason += f" | 🚀 SPIKE CONFIRMÉ (Score: {final_spike_score:.2%}, Sources: {', '.join(score_weights)})"
                     logger.info(f"✅ SPIKE DÉTECTÉ pour {request.symbol}: Score={final_spike_score:.2%}, Direction={'BUY' if spike_direction else 'SELL'}")
                     
-                elif final_spike_score >= 0.60:  # Pré-alerte
+elif final_spike_score >= 0.60:  # Pré-alerte
                     early_spike_warning = True
                     early_spike_zone_price = mid_price
                     early_spike_direction = final_direction if final_direction is not None else (moderate_oversold)
@@ -4696,13 +8266,13 @@ Format: Analyse claire et professionnelle en français.
                 spike_direction = strong_bull_spike or (step_spike and extreme_oversold)
                 confidence = min(confidence + 0.2, 0.95)
                 
-                if is_boom:
+if is_boom:
                     reason += " | Spike Boom confirmé (fallback)"
-                elif is_crash:
+elif is_crash:
                     reason += " | Spike Crash confirmé (fallback)"
-                elif is_step:
+elif is_step:
                     reason += " | Spike Step Index détecté (fallback)"
-                else:
+else:
                     reason += " | Spike Volatilité confirmé (fallback)"
             
             # Pré-alerte améliorée avec filtre de bruit
@@ -4716,11 +8286,11 @@ Format: Analyse claire et professionnelle en français.
                 early_spike_direction = moderate_oversold
                 confidence = min(confidence + 0.05, 0.85)
                 
-                if is_boom:
+if is_boom:
                     reason += " | Pré-alerte Spike Boom (fallback)"
-                elif is_crash:
+elif is_crash:
                     reason += " | Pré-alerte Spike Crash (fallback)"
-                else:
+else:
                     reason += " | Pré-alerte Volatilité (fallback)"
             is_boom = "Boom" in request.symbol
             is_crash = "Crash" in request.symbol
@@ -4772,13 +8342,13 @@ Format: Analyse claire et professionnelle en français.
                 spike_direction = strong_bull_spike or (step_spike and extreme_oversold)
                 confidence = min(confidence + 0.2, 0.95)  # Bonus plus important
                 
-                if is_boom:
+if is_boom:
                     reason += " | Spike Boom confirmé (conditions strictes)"
-                elif is_crash:
+elif is_crash:
                     reason += " | Spike Crash confirmé (conditions strictes)"
-                elif is_step:
+elif is_step:
                     reason += " | Spike Step Index détecté"
-                else:
+else:
                     reason += " | Spike Volatilité confirmé"
 
             # Pré-alerte améliorée avec filtre de bruit
@@ -4792,11 +8362,11 @@ Format: Analyse claire et professionnelle en français.
                 early_spike_direction = moderate_oversold
                 confidence = min(confidence + 0.05, 0.85)  # Petit bonus de confiance
                 
-                if is_boom:
+if is_boom:
                     reason += " | Pré-alerte Spike Boom (conditions modérées)"
-                elif is_crash:
+elif is_crash:
                     reason += " | Pré-alerte Spike Crash (conditions modérées)"
-                else:
+else:
                     reason += " | Pré-alerte Volatilité (conditions modérées)"
         
         # Calcul des zones d'achat/vente
@@ -4824,28 +8394,28 @@ Format: Analyse claire et professionnelle en français.
                 buy_validation_reasons = []
                 
                 # Critères techniques
-                if h1_bullish: buy_validation_score += 0.25; buy_validation_reasons.append("H1↑")
-                if m5_bullish: buy_validation_score += 0.20; buy_validation_reasons.append("M5↑")
-                if m1_bullish: buy_validation_score += 0.1; buy_validation_reasons.append("M1↑")
-                if rsi_bullish: buy_validation_score += 0.1; buy_validation_reasons.append("RSI↑")
-                if vwap_signal_buy: buy_validation_score += 0.1; buy_validation_reasons.append("VWAP↑")
-                if supertrend_bullish: buy_validation_score += 0.1; buy_validation_reasons.append("ST↑")
+if h1_bullish: buy_validation_score += 0.25; buy_validation_reasons.append("H1↑")
+if m5_bullish: buy_validation_score += 0.20; buy_validation_reasons.append("M5↑")
+if m1_bullish: buy_validation_score += 0.1; buy_validation_reasons.append("M1↑")
+if rsi_bullish: buy_validation_score += 0.1; buy_validation_reasons.append("RSI↑")
+if vwap_signal_buy: buy_validation_score += 0.1; buy_validation_reasons.append("VWAP↑")
+if supertrend_bullish: buy_validation_score += 0.1; buy_validation_reasons.append("ST↑")
                 
                 # Validation ML si disponible
-                if ml_decision and ml_decision.get("action") == "buy":
+if ml_decision and ml_decision.get("action") == "buy":
                     ml_conf = float(ml_decision.get("confidence", 0.0))
                     buy_validation_score += ml_conf * 0.3
                     buy_validation_reasons.append(f"ML:{ml_conf:.0%}")
                 
                 # Seuil minimum pour valider un BUY intelligent
                 MIN_BUY_INTELLIGENCE = 0.50  # Au moins 50% de validation
-                if buy_validation_score < MIN_BUY_INTELLIGENCE:
+if buy_validation_score < MIN_BUY_INTELLIGENCE:
                     logger.warning(f"⚠️ BUY rejeté: Score validation insuffisant ({buy_validation_score:.2f} < {MIN_BUY_INTELLIGENCE})")
                     logger.warning(f"   Raisons: {', '.join(buy_validation_reasons) if buy_validation_reasons else 'Aucune'}")
                     action = "hold"
                     confidence = max(confidence * 0.5, 0.20)  # Réduire la confiance
                     reason += f" | BUY rejeté (validation: {buy_validation_score:.0%} < {MIN_BUY_INTELLIGENCE:.0%})"
-                else:
+else:
                     logger.info(f"✅ BUY validé: Score={buy_validation_score:.2f} ({', '.join(buy_validation_reasons)})")
             
             # 2. Validation multi-critères pour SELL
@@ -4854,34 +8424,34 @@ Format: Analyse claire et professionnelle en français.
                 sell_validation_reasons = []
                 
                 # Critères techniques
-                if h1_bearish: sell_validation_score += 0.25; sell_validation_reasons.append("H1↓")
-                if m5_bearish: sell_validation_score += 0.20; sell_validation_reasons.append("M5↓")
-                if m1_bearish: sell_validation_score += 0.1; sell_validation_reasons.append("M1↓")
-                if rsi_bearish: sell_validation_score += 0.1; sell_validation_reasons.append("RSI↓")
-                if vwap_signal_sell: sell_validation_score += 0.1; sell_validation_reasons.append("VWAP↓")
-                if supertrend_bearish: sell_validation_score += 0.1; sell_validation_reasons.append("ST↓")
+if h1_bearish: sell_validation_score += 0.25; sell_validation_reasons.append("H1↓")
+if m5_bearish: sell_validation_score += 0.20; sell_validation_reasons.append("M5↓")
+if m1_bearish: sell_validation_score += 0.1; sell_validation_reasons.append("M1↓")
+if rsi_bearish: sell_validation_score += 0.1; sell_validation_reasons.append("RSI↓")
+if vwap_signal_sell: sell_validation_score += 0.1; sell_validation_reasons.append("VWAP↓")
+if supertrend_bearish: sell_validation_score += 0.1; sell_validation_reasons.append("ST↓")
                 
                 # Validation ML si disponible
-                if ml_decision and ml_decision.get("action") == "sell":
+if ml_decision and ml_decision.get("action") == "sell":
                     ml_conf = float(ml_decision.get("confidence", 0.0))
                     sell_validation_score += ml_conf * 0.3
                     sell_validation_reasons.append(f"ML:{ml_conf:.0%}")
                 
                 # Seuil minimum pour valider un SELL intelligent
                 MIN_SELL_INTELLIGENCE = 0.50  # Au moins 50% de validation
-                if sell_validation_score < MIN_SELL_INTELLIGENCE:
+if sell_validation_score < MIN_SELL_INTELLIGENCE:
                     logger.warning(f"⚠️ SELL rejeté: Score validation insuffisant ({sell_validation_score:.2f} < {MIN_SELL_INTELLIGENCE})")
                     logger.warning(f"   Raisons: {', '.join(sell_validation_reasons) if sell_validation_reasons else 'Aucune'}")
                     action = "hold"
                     confidence = max(confidence * 0.5, 0.20)  # Réduire la confiance
                     reason += f" | SELL rejeté (validation: {sell_validation_score:.0%} < {MIN_SELL_INTELLIGENCE:.0%})"
-                else:
+else:
                     logger.info(f"✅ SELL validé: Score={sell_validation_score:.2f} ({', '.join(sell_validation_reasons)})")
             
             # 3. Validation spéciale en mode initialisation
             if initialization_mode and action != "hold":
                 # En mode initialisation, être encore plus strict
-                if confidence < 0.65:  # Seuil plus élevé à l'initialisation
+if confidence < 0.65:  # Seuil plus élevé à l'initialisation
                     logger.info(f"🔄 Initialisation: {action.upper()} rejeté (confiance {confidence:.1%} < 65% requis)")
                     action = "hold"
                     confidence = 0.30
@@ -5058,16 +8628,16 @@ async def analysis(
             # Essayer de récupérer les données directement du corps de la requête
             if request is not None:
                 body = await request.body()
-                if body:
-                    try:
-                        data = json.loads(body)
-                        if 'symbol' in data:
-                            symbol = data['symbol']
-                            logger.info(f"Symbole extrait du corps de la requête: {symbol}")
-                        elif 'raw_request' in data and isinstance(data['raw_request'], dict) and 'symbol' in data['raw_request']:
-                            return await handle_raw_analysis_request(data['raw_request'], None)
-                    except json.JSONDecodeError:
-                        pass
+if body:
+try:
+                    data = json.loads(body)
+if 'symbol' in data:
+                        symbol = data['symbol']
+                        logger.info(f"Symbole extrait du corps de la requête: {symbol}")
+elif 'raw_request' in data and isinstance(data['raw_request'], dict) and 'symbol' in data['raw_request']:
+                        return await handle_raw_analysis_request(data['raw_request'], None)
+except json.JSONDecodeError:
+                    pass
                     
             if symbol is None:
                 logger.error("Aucun paramètre valide fourni")
@@ -5141,7 +8711,7 @@ async def predict(symbol: str, timeframe: str = "M1"):
     """
     try:
         cache_key = f"{symbol}_{timeframe}"
-        current_time = datetime.now().timestamp()
+        current_time = time.time()
         
         if cache_key in prediction_cache and \
            (current_time - last_updated.get(cache_key, 0)) < CACHE_DURATION:
@@ -5151,11 +8721,11 @@ async def predict(symbol: str, timeframe: str = "M1"):
         if ml_predictor and mt5_initialized:
             try:
                 df = get_historical_data_mt5(symbol, timeframe, 500)
-                if df is not None and len(df) > 100:
+if df is not None and len(df) > 100:
                     features = ml_predictor.create_advanced_features(df)
-                    if not features.empty:
+if not features.empty:
                         prediction_result = ml_predictor.predict_direction(features.iloc[-1:])
-                        if prediction_result:
+if prediction_result:
                             prediction = {
                                 "symbol": symbol,
                                 "timeframe": timeframe,
@@ -5431,9 +9001,9 @@ async def predict_prices(request: PricePredictionRequest):
                 period = period_map.get(timeframe, mt5.TIMEFRAME_M1)
                 rates = mt5.copy_rates_from_pos(symbol, period, 0, min(500, bars_to_predict + 100))
                 
-                if rates is not None and len(rates) >= 50:
+if rates is not None and len(rates) >= 50:
                     df = pd.DataFrame(rates)
-                    if 'time' in df.columns:
+if 'time' in df.columns:
                         df['time'] = pd.to_datetime(df['time'], unit='s')
                     
                     # Utiliser la prédiction améliorée de ai_server_improvements
@@ -5552,7 +9122,7 @@ async def get_prediction_accuracy(symbol: str):
                     "timestamp": p["validation_timestamp"],
                     "accuracy": round(p["accuracy_score"], 3)
                 }
-                for p in validated[-10:]  # 10 dernières validations
+for p in validated[-10:]  # 10 dernières validations
             ]
         }
         
@@ -5918,7 +9488,7 @@ async def trades_feedback(request: TradeFeedbackRequest):
             "is_win": bool(request.is_win),
             "side": (request.side or "").lower(),
             "ai_confidence": float(request.ai_confidence) if request.ai_confidence is not None else None,
-            "timestamp": request.timestamp or datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+            "timestamp": request.timestamp or int(time.time()),
         })
         logger.info(f"📊 Feedback trade reçu: {symbol} {tf} - {'WIN' if request.is_win else 'LOSS'} (profit: {request.profit:.2f})")
         return _compute_ml_metrics(symbol, tf)
@@ -6112,27 +9682,27 @@ async def send_predictions_summary():
         try:
             processed_symbols = set()
             for s in summary_lines:
-                if s.startswith("📈"):
+if s.startswith("📈"):
                     parts = s.split()
-                    if len(parts) > 1:
+if len(parts) > 1:
                         processed_symbols.add(parts[1])
             
             for cache_key, pred in realtime_predictions.items():
                 symbol = pred.get('symbol', cache_key.split('_')[0] if '_' in cache_key else cache_key)
-                if symbol not in processed_symbols:
+if symbol not in processed_symbols:
                     summary_lines.append(f"📈 {symbol}")
                     summary_lines.append(f"  Prédiction temps réel")
                     direction = pred.get('direction', 'N/A')
-                    if direction == 'N/A':
+if direction == 'N/A':
                         # Essayer de déduire la direction depuis les prix prédits
                         predicted_prices = pred.get('predicted_prices', [])
                         current_price = pred.get('current_price', 0)
-                        if predicted_prices and current_price > 0:
+if predicted_prices and current_price > 0:
                             avg_predicted = sum(predicted_prices) / len(predicted_prices)
                             direction = "BUY" if avg_predicted > current_price else "SELL"
                     summary_lines.append(f"  Direction: {direction}")
                     conf = pred.get('accuracy_score', pred.get('confidence', 0))
-                    if isinstance(conf, (int, float)) and conf > 0:
+if isinstance(conf, (int, float)) and conf > 0:
                         summary_lines.append(f"  Score: {conf*100:.1f}%")
                     summary_lines.append("")
                     symbol_count += 1
@@ -6225,7 +9795,7 @@ def predict_with_model(symbol: str, features: Dict[str, float], model_name: Opti
 # Gestion du cache avancée
 def clear_old_cache(max_age_seconds: int = 3600):
     """Nettoie le cache des entrées trop anciennes"""
-    current_time = datetime.now().timestamp()
+    current_time = time.time()
     keys_to_remove = []
     
     for key, last_update in last_updated.items():
@@ -6590,15 +10160,15 @@ async def receive_trade_feedback(feedback: TradeFeedback):
             try:
                 # Map le symbole vers sa catégorie
                 symbol_upper = feedback.symbol.upper()
-                if "BOOM" in symbol_upper or "CRASH" in symbol_upper:
+if "BOOM" in symbol_upper or "CRASH" in symbol_upper:
                     category = "BOOM_CRASH"
-                elif any(keyword in symbol_upper for keyword in ['VOLATILITY', 'STEP', 'JUMP', 'RANGE BREAK']):
+elif any(keyword in symbol_upper for keyword in ['VOLATILITY', 'STEP', 'JUMP', 'RANGE BREAK']):
                     category = "VOLATILITY"
-                elif any(crypto in symbol_upper for crypto in ['BTC', 'ETH', 'ADA', 'DOT']):
+elif any(crypto in symbol_upper for crypto in ['BTC', 'ETH', 'ADA', 'DOT']):
                     category = "CRYPTO"
-                elif any(pair in symbol_upper for pair in ['USD', 'EUR', 'GBP', 'JPY']):
+elif any(pair in symbol_upper for pair in ['USD', 'EUR', 'GBP', 'JPY']):
                     category = "FOREX"
-                else:
+else:
                     category = "COMMODITIES"
                 
                 # Compter les trades récents pour cette catégorie
@@ -6618,7 +10188,7 @@ async def receive_trade_feedback(feedback: TradeFeedback):
                     """, category)
                     
                     # Si on a assez de trades, déclencher le réentraînement en arrière-plan
-                    if count_result and count_result >= continuous_learner.min_new_samples:
+if count_result and count_result >= continuous_learner.min_new_samples:
                         logger.info(f"🔄 Assez de trades ({count_result}) pour réentraîner {category} - Déclenchement en arrière-plan...")
                         # Déclencher le réentraînement de manière asynchrone (non-bloquant)
                         asyncio.create_task(_trigger_retraining_async(category))
@@ -6726,7 +10296,7 @@ async def get_feedback_status():
                 min_samples = continuous_learner.min_new_samples if CONTINUOUS_LEARNING_AVAILABLE and continuous_learner else 50
                 ready_for_retraining = {}
                 
-                for row in trades_by_category:
+for row in trades_by_category:
                     category = row['category']
                     count = row['count']
                     ready_for_retraining[category] = {
@@ -6757,7 +10327,7 @@ async def get_feedback_status():
                         "total_profit": float(row['total_profit']) if row['total_profit'] else 0.0,
                         "ready_for_retraining": row['count'] >= min_samples
                     }
-                    for row in trades_by_category
+for row in trades_by_category
                 },
                 "last_trades": [
                     {
@@ -6767,7 +10337,7 @@ async def get_feedback_status():
                         "is_win": row['is_win'],
                         "created_at": row['created_at'].isoformat() if row['created_at'] else None
                     }
-                    for row in last_trades
+for row in last_trades
                 ],
                 "continuous_learning": {
                     "available": CONTINUOUS_LEARNING_AVAILABLE,
@@ -7364,7 +10934,7 @@ class GemmaTradingBot:
             "Identifie la tendance, supports, résistances et donne un commentaire concis."
         )
 
-        temp_path = os.path.join(self.chart_dir, f"temp_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png")
+        temp_path = os.path.join(self.chart_dir, f"temp_{int(time.time())}.png")
         image.save(temp_path)
         try:
             result = analyze_with_gemma(prompt=prompt, image_filename=temp_path)
@@ -7390,7 +10960,7 @@ class GemmaTradingBot:
             
             detected_signals = []
             for signal, keywords in signals.items():
-                if any(keyword in response.lower() for keyword in keywords):
+if any(keyword in response.lower() for keyword in keywords):
                     detected_signals.append(signal.upper())
             
             # Détection des niveaux de prix
@@ -7915,7 +11485,7 @@ async def get_autoscan_signals(symbol: Optional[str] = None):
             try:
                 # Récupérer les données OHLC récentes
                 df = get_historical_data(sym, "M1", 100)
-                if df.empty:
+if df.empty:
                     logger.warning(f"Aucune donnée disponible pour {sym}")
                     continue
                 
@@ -7941,49 +11511,49 @@ async def get_autoscan_signals(symbol: Optional[str] = None):
                 reason = ""
                 
                 # Condition 1: RSI en survente (< 30) -> Signal BUY
-                if rsi < 30:
+if rsi < 30:
                     action = "BUY"
                     confidence = 0.75
                     reason = "RSI Survente"
                 # Condition 2: RSI en surachat (> 70) -> Signal SELL
-                elif rsi > 70:
+elif rsi > 70:
                     action = "SELL"
                     confidence = 0.75
                     reason = "RSI Surachat"
                 # Condition 3: Croisement de MA haussier
-                elif len(ema_fast) >= 3 and len(ema_slow) >= 3:
+elif len(ema_fast) >= 3 and len(ema_slow) >= 3:
                     ema_fast_prev = float(ema_fast.iloc[-2])
                     ema_slow_prev = float(ema_slow.iloc[-2])
-                    if ema_fast_val > ema_slow_val and ema_fast_prev <= ema_slow_prev:
+if ema_fast_val > ema_slow_val and ema_fast_prev <= ema_slow_prev:
                         action = "BUY"
                         confidence = 0.70
                         reason = "MA Croisement Haussier"
                     # Condition 4: Croisement de MA baissier
-                    elif ema_fast_val < ema_slow_val and ema_fast_prev >= ema_slow_prev:
+elif ema_fast_val < ema_slow_val and ema_fast_prev >= ema_slow_prev:
                         action = "SELL"
                         confidence = 0.70
                         reason = "MA Croisement Baissier"
                 # Condition 5: Volatilité élevée
-                if action is None:
+if action is None:
                     volatility = abs(current_price - ema_slow_val) / ema_slow_val if ema_slow_val > 0 else 0
-                    if volatility > 0.002:  # 0.2%
-                        if current_price > ema_slow_val:
+if volatility > 0.002:  # 0.2%
+if current_price > ema_slow_val:
                             action = "BUY"
                             confidence = 0.65
                             reason = "Volatilité Haussier"
-                        else:
+else:
                             action = "SELL"
                             confidence = 0.65
                             reason = "Volatilité Baissier"
                 
                 # Si un signal a été détecté, créer l'entrée
-                if action and confidence >= 0.55:  # Seuil minimum de confiance
+if action and confidence >= 0.55:  # Seuil minimum de confiance
                     # Calculer stop loss et take profit basés sur ATR
-                    if action == "BUY":
+if action == "BUY":
                         entry_price = current_price
                         stop_loss = entry_price - (atr * 2)
                         take_profit = entry_price + (atr * 4.5)  # Augmenté de 3.0 à 4.5 (+50%)
-                    else:  # SELL
+else:  # SELL
                         entry_price = current_price
                         stop_loss = entry_price + (atr * 2)
                         take_profit = entry_price - (atr * 4.5)  # Augmenté de 3.0 à 4.5 (+50%)

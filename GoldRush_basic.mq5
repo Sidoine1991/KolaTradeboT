@@ -99,16 +99,19 @@ input bool UseAdvancedDashboard = true;
 //==================== PARAMÈTRES DÉTECTION DE SPIKES ====================
 input group "--- DÉTECTION DE SPIKES ---"
 input bool UseSpikeDetection = true;
-input double SpikeThresholdPercent = 0.1;  // Réduit à 0.1% pour Boom/Crash
-input int SpikeDetectionWindow = 3;        // Réduit à 3 pour plus de sensibilité
-input double SpikeMinConfidence = 0.05;     // Réduit à 5% pour plus de détections
+input double SpikeThresholdPercent = 0.08;  // Seuil % (Boom/Crash: 0.05 auto si activé)
+input int SpikeDetectionWindow = 5;         // Fenêtre pour MA (exclut barre courante)
+input double SpikeMinConfidence = 0.03;     // Confiance min 3% pour plus de détections
 input bool UseVolumeSpikeDetection = true;
-input double VolumeSpikeMultiplier = 1.5;   // Réduit pour Boom/Crash
+input double VolumeSpikeMultiplier = 1.3;   // Volume: 1.3x = spike
 input bool UseStandardDeviationSpike = true;
-input double StdDevSpikeThreshold = 1.0;    // Réduit pour Boom/Crash
+input double StdDevSpikeThreshold = 0.7;    // Z-score: 0.7 = plus sensible
 input bool UseSpikePatternAnalysis = true;
-input int SpikePatternLookback = 12;        // Réduit pour Boom/Crash
+input int SpikePatternLookback = 12;
 input bool UseLimitOrdersForSpikes = true;
+input bool UseBoomCrashSensitiveMode = true;  // Seuils plus sensibles auto sur Boom/Crash
+input bool ShowSpikeIndicatorOnChart = true;  // Indicateur temps réel sur le graphique
+input int SpikeArrowsRetentionBars = 50;      // Garder les flèches X barres (0=5min)
 
 //==================== GESTION DES RISQUES ====================
 input group "--- GESTION DES RISQUES ---"
@@ -125,6 +128,7 @@ input int MaxDailyTrades = 10;
 input double RiskPerTrade = 2.0;
 input double MinSignalStrength = 0.30;
 input int DashboardRefresh = 5;
+input bool UseIndexFallback = true;           // Fallback Boom=BUY / Crash=SELL quand IA hold et RSI neutre
 
 //==================== SYSTÈME INTELLIGENT (MAX PROFIT / SÉCURITÉ / ANTI-PERTE) ====================
 input group "--- SYSTÈME INTELLIGENT ---"
@@ -729,6 +733,24 @@ void OnTick()
       lastAIUpdate = TimeCurrent();
    }
 
+   // Mise à jour du tableau de bord (recommandations IA, signaux, confiance Render) — visible même sans nouveau bar
+   if(UseAdvancedDashboard)
+   {
+      static datetime lastDashboardUpdate = 0;
+      if(TimeCurrent() - lastDashboardUpdate >= MathMax(1, DashboardRefresh))
+      {
+         lastDashboardUpdate = TimeCurrent();
+         if(UseMultiTimeframeEMA || UseSupertrendIndicator)
+            UpdateMultiTimeframeData();
+         double rsiVal = 50.0, adxVal = 0.0, atrVal = 0.0;
+         if(rsi_H1 != INVALID_HANDLE) { double buf[1]; if(CopyBuffer(rsi_H1, 0, 0, 1, buf) > 0) rsiVal = buf[0]; }
+         if(adx_H1 != INVALID_HANDLE) { double buf[1]; if(CopyBuffer(adx_H1, 0, 0, 1, buf) > 0) adxVal = buf[0]; }
+         if(atr_H1 != INVALID_HANDLE) { double buf[1]; if(CopyBuffer(atr_H1, 0, 0, 1, buf) > 0) atrVal = buf[0]; }
+         DrawMultiTimeframeIndicators();
+         DrawAdvancedDashboard(rsiVal, adxVal, atrVal);
+      }
+   }
+
    datetime barTime = iTime(_Symbol, PERIOD_M5, 0);
    if(barTime == lastBarTime)
       return;
@@ -843,32 +865,69 @@ void OnTick()
       }
    }
 
-   // MODE FALLBACK - Si aucun signal fort n'est détecté, utiliser un signal simple
-   if(!shouldTrade)
+   // MODE FALLBACK - Si aucun signal fort (IA hold, endpoints inactifs, technique non aligné)
+   if(!shouldTrade && PositionsTotal() == 0)
    {
-      // Vérifier si nous avons au moins une position ouverte
-      if(PositionsTotal() == 0)
+      double rsiValue = 50.0;
+      if(rsi_H1 != INVALID_HANDLE)
       {
-         // Générer un signal basé sur RSI simple pour éviter le blocage total
-         double rsiValue = 50.0;
-         if(rsi_H1 != INVALID_HANDLE)
-         {
-            double rsiBuffer[1];
-            if(CopyBuffer(rsi_H1, 0, 0, 1, rsiBuffer) > 0)
-               rsiValue = rsiBuffer[0];
-         }
-         
-         if(rsiValue < 35) // RSI très bas = signal d'achat potentiel
+         double rsiBuffer[1];
+         if(CopyBuffer(rsi_H1, 0, 0, 1, rsiBuffer) > 0)
+            rsiValue = rsiBuffer[0];
+      }
+      // Seuils élargis (45/55) pour déclencher des trades quand l'IA renvoie "hold"
+      if(rsiValue < 45)
+      {
+         shouldTrade = true;
+         tradeType = ORDER_TYPE_BUY;
+         Print("🔄 FALLBACK RSI - ACHAT (RSI ", DoubleToString(rsiValue, 1), " < 45)");
+      }
+      else if(rsiValue > 55)
+      {
+         shouldTrade = true;
+         tradeType = ORDER_TYPE_SELL;
+         Print("🔄 FALLBACK RSI - VENTE (RSI ", DoubleToString(rsiValue, 1), " > 55)");
+      }
+      // Fallback tendance M5 (EMA rapide vs lente) si RSI neutre
+      else if(UseMultiTimeframeEMA && emaFast_M5_val != 0 && emaSlow_M5_val != 0)
+      {
+         if(emaFast_M5_val > emaSlow_M5_val)
          {
             shouldTrade = true;
             tradeType = ORDER_TYPE_BUY;
-            Print("🔄 MODE FALLBACK - ACHAT RSI bas (", DoubleToString(rsiValue, 1), ")");
+            Print("🔄 FALLBACK TENDANCE M5 - ACHAT (EMA M5 haussière)");
          }
-         else if(rsiValue > 65) // RSI très haut = signal de vente potentiel
+         else if(emaFast_M5_val < emaSlow_M5_val)
          {
             shouldTrade = true;
             tradeType = ORDER_TYPE_SELL;
-            Print("🔄 MODE FALLBACK - VENTE RSI haut (", DoubleToString(rsiValue, 1), ")");
+            Print("🔄 FALLBACK TENDANCE M5 - VENTE (EMA M5 baissière)");
+         }
+      }
+      // Fallback indices : RSI/EMA souvent à 0 ou 50 sur Boom/Crash/Volatility → signal par type de symbole
+      if(!shouldTrade && UseIndexFallback)
+      {
+         if(StringFind(_Symbol, "Boom") >= 0)
+         {
+            shouldTrade = true;
+            tradeType = ORDER_TYPE_BUY;
+            Print("🔄 FALLBACK INDICE BOOM - ACHAT (", _Symbol, ")");
+         }
+         else if(StringFind(_Symbol, "Crash") >= 0)
+         {
+            shouldTrade = true;
+            tradeType = ORDER_TYPE_SELL;
+            Print("🔄 FALLBACK INDICE CRASH - VENTE (", _Symbol, ")");
+         }
+         else if(StringFind(_Symbol, "Step") >= 0 || StringFind(_Symbol, "Volatility") >= 0)
+         {
+            double open1 = iOpen(_Symbol, PERIOD_M5, 1);
+            double close1 = iClose(_Symbol, PERIOD_M5, 1);
+            if(open1 > 0 && close1 > 0)
+            {
+               if(close1 > open1) { shouldTrade = true; tradeType = ORDER_TYPE_BUY;  Print("🔄 FALLBACK INDICE STEP/VOL - ACHAT (bougie M5 haussière)"); }
+               else               { shouldTrade = true; tradeType = ORDER_TYPE_SELL; Print("🔄 FALLBACK INDICE STEP/VOL - VENTE (bougie M5 baissière)"); }
+            }
          }
       }
    }
@@ -1254,18 +1313,21 @@ void ManageTrailingStop()
                double minSL = bid - (stopLevel * 2);
                newSL = MathMax(newSL, minSL);
                newSL = MathMax(newSL, open);
+               // Ne jamais proposer un SL au-dessus du prix (invalide pour BUY) — évite "SL trop proche" sur symboles MT5
+               newSL = MathMin(newSL, bid - stopLevel);
                double distance = bid - newSL;
+               if(distance < stopLevel)
+                  continue; // SL invalide, passer sans spam
+
                // Désactivation temporaire des erreurs SL pour Volatility
                if(StringFind(_Symbol, "Volatility") >= 0)
                {
-                  Print("🔧 SYMBOLE VOLATILITY - Validation SL désactivée dans trailing stop");
-                  continue; // Continuer sans erreur
-               }
-               
-               if(distance < stopLevel)
-               {
-                  Print("❌ SL trop proche du prix actuel pour BUY. Distance: ", DoubleToString(distance, 5),
-                        ", Minimum: ", DoubleToString(stopLevel, 5));
+                  newSL = NormalizeDouble(newSL, digits);
+                  if(CheckStopLoss(symbol, (ENUM_POSITION_TYPE)posType, open, newSL, currentTP))
+                  {
+                     trade.SetExpertMagicNumber(InpMagicNum);
+                     trade.PositionModify(ticket, newSL, currentTP);
+                  }
                   continue;
                }
 
@@ -1307,18 +1369,21 @@ void ManageTrailingStop()
                double maxSL = ask + (stopLevel * 2);
                newSL = MathMin(newSL, maxSL);
                newSL = MathMin(newSL, open);
+               // Ne jamais proposer un SL en dessous du prix (invalide pour SELL) — évite "SL trop proche" sur symboles MT5
+               newSL = MathMax(newSL, ask + stopLevel);
                double distance = newSL - ask;
+               if(distance < stopLevel)
+                  continue; // SL invalide, passer sans spam
+
                // Désactivation temporaire des erreurs SL pour Volatility
                if(StringFind(_Symbol, "Volatility") >= 0)
                {
-                  Print("🔧 SYMBOLE VOLATILITY - Validation SL désactivée dans trailing stop");
-                  continue; // Continuer sans erreur
-               }
-               
-               if(distance < stopLevel)
-               {
-                  Print("❌ SL trop proche du prix actuel pour SELL. Distance: ", DoubleToString(distance, 5),
-                        ", Minimum: ", DoubleToString(stopLevel, 5));
+                  newSL = NormalizeDouble(newSL, digits);
+                  if(CheckStopLoss(symbol, (ENUM_POSITION_TYPE)posType, open, newSL, currentTP))
+                  {
+                     trade.SetExpertMagicNumber(InpMagicNum);
+                     trade.PositionModify(ticket, newSL, currentTP);
+                  }
                   continue;
                }
 
@@ -1508,8 +1573,9 @@ void ManageIntelligentStops()
          if(posType == POSITION_TYPE_BUY)
          {
             newSL = bid - SecureTrailPips * point;
-            newSL = NormalizeDouble(newSL, digits);
             newSL = MathMax(newSL, openPrice);
+            newSL = MathMin(newSL, bid - minDist); // jamais au-dessus du prix (symboles MT5)
+            newSL = NormalizeDouble(newSL, digits);
             if(newSL > currentSL + minDist && newSL < bid - minDist)
             {
                if(CheckStopLoss(_Symbol, (ENUM_POSITION_TYPE)posType, openPrice, newSL, currentTP))
@@ -1521,8 +1587,9 @@ void ManageIntelligentStops()
          else
          {
             newSL = ask + SecureTrailPips * point;
-            newSL = NormalizeDouble(newSL, digits);
             newSL = MathMin(newSL, openPrice);
+            newSL = MathMax(newSL, ask + minDist); // jamais en dessous du prix (symboles MT5)
+            newSL = NormalizeDouble(newSL, digits);
             if((currentSL == 0 || newSL < currentSL - minDist) && newSL > ask + minDist)
             {
                if(CheckStopLoss(_Symbol, (ENUM_POSITION_TYPE)posType, openPrice, newSL, currentTP))
@@ -1651,6 +1718,11 @@ void CloseAllPositionsForSymbol(string symbol, string reason)
 //+------------------------------------------------------------------+
 double GetCorrectLotSize()
 {
+   static string lastLotSymbol = "";
+   static datetime lastLotPrintTime = 0;
+   bool doLog = (lastLotSymbol != _Symbol || TimeCurrent() - lastLotPrintTime >= 300);
+   if(doLog) { lastLotSymbol = _Symbol; lastLotPrintTime = TimeCurrent(); }
+
    string symbol = _Symbol;
    double minLot = SymbolInfoDouble(symbol, SYMBOL_VOLUME_MIN);
    double maxLot = SymbolInfoDouble(symbol, SYMBOL_VOLUME_MAX);
@@ -1661,16 +1733,12 @@ double GetCorrectLotSize()
       StringFind(symbol, "Boom") >= 0 || StringFind(symbol, "Crash") >= 0 ||
       StringFind(symbol, "Volatility") >= 0)
    {
-      Print("📊 Symbole à risque détecté: ", symbol);
-      Print("   Lot minimum broker: ", minLot);
-      Print("   Lot maximum broker: ", maxLot);
-      Print("   Step lot: ", stepLot);
-      Print("   ⚠️ Utilisation du lot minimum pour sécurité");
-
       double adjustedLot = MathRound(minLot / stepLot) * stepLot;
       adjustedLot = MathMax(adjustedLot, minLot);
-
-      Print("   ✅ Lot ajusté: ", adjustedLot);
+      if(doLog)
+      {
+         Print("📊 Symbole à risque: ", symbol, " | Lot min: ", minLot, " max: ", maxLot, " → ajusté: ", adjustedLot);
+      }
       return adjustedLot;
    }
 
@@ -1679,24 +1747,16 @@ double GetCorrectLotSize()
       StringFind(symbol, "AUD") >= 0 || StringFind(symbol, "CAD") >= 0 ||
       StringFind(symbol, "CHF") >= 0 || StringFind(symbol, "NZD") >= 0)
    {
-      Print("📊 Symbole Forex détecté: ", symbol);
-      Print("   Lot minimum broker: ", minLot);
-      Print("   ⚠️ Utilisation du lot minimum pour sécurité");
-
       double adjustedLot = MathRound(minLot / stepLot) * stepLot;
       adjustedLot = MathMax(adjustedLot, minLot);
-
-      Print("   ✅ Lot ajusté: ", adjustedLot);
+      if(doLog) Print("📊 Forex: ", symbol, " → lot: ", adjustedLot);
       return adjustedLot;
    }
 
    double finalLot = MathMax(InpLots, minLot);
    finalLot = MathRound(finalLot / stepLot) * stepLot;
    finalLot = MathMin(finalLot, maxLot);
-
-   Print("📊 Symbole standard: ", symbol);
-   Print("   Lot configuré: ", finalLot);
-
+   if(doLog) Print("📊 Symbole standard: ", symbol, " → lot: ", finalLot);
    return finalLot;
 }
 
@@ -1864,7 +1924,8 @@ void UpdateAISignal()
             }
          }
          
-         // Mettre à jour la source
+         // Mettre à jour la source (pour le dashboard: LOCAL vs RENDER)
+         lastAISource = (usedURL == AI_LocalServerURL) ? 0 : 1;
          string serverType = (usedURL == AI_LocalServerURL) ? "Local" : "Distant";
          Print("✅ Signal AI (", serverType, "): ", g_lastAIAction, 
                " (Confiance: ", DoubleToString(g_lastAIConfidence * 100, 1), "%)");
@@ -2279,6 +2340,29 @@ void DrawAdvancedDashboard(double rsi, double adx, double atr)
                          (StringFind(LastTradeSignal, "VENTE") >= 0 ? colorBear : colorNeutral);
       text += "Dernier signal: " + LastTradeSignal + "\n";
    }
+
+   // ----- RECOMMANDATIONS IA / RENDER (toujours visibles) -----
+   text += "\n🎯 RECOMMANDATIONS IA (RENDER/LOCAL)\n";
+   text += "────────────────────\n";
+   if(UseAI_Agent)
+   {
+      string recSignal = (g_lastAIAction == "" || g_lastAIAction == "error") ? "—" : g_lastAIAction;
+      StringToUpper(recSignal);
+      text += "Signal: " + recSignal + "\n";
+      text += "Confiance: " + DoubleToString(g_lastAIConfidence * 100, 1) + "%\n";
+      text += "Source: " + (lastAISource == 0 ? "🖥️ LOCAL" : "☁️ RENDER") + "\n";
+      if(g_lastAIAction == "buy")
+         text += "→ Recommandation: ACHAT\n";
+      else if(g_lastAIAction == "sell")
+         text += "→ Recommandation: VENTE\n";
+      else if(g_lastAIAction == "hold")
+         text += "→ Recommandation: NE PAS TRADER (hold)\n";
+      else
+         text += "→ En attente réponse serveur\n";
+   }
+   else
+      text += "IA désactivée\n";
+   text += "────────────────────\n";
 
    text += "\n📈 ANALYSE TECHNIQUE\n";
    text += "────────────────────\n";
@@ -2751,7 +2835,7 @@ bool ValidateAdvancedEntry(ENUM_ORDER_TYPE orderType)
    double tpDist = (InpTakeProfit > 0) ? (InpTakeProfit * point) : (atrVal * 3.0);
    if(slDist <= 0) slDist = 100 * point;
    if(tpDist <= 0) tpDist = 150 * point;
-   double rrRatio = tpDist / slDist;
+   double rrRatio = (slDist > 0) ? (tpDist / slDist) : 1.0;
    if(MinRiskRewardRatio > 0 && rrRatio < MinRiskRewardRatio)
    {
       Print("❌ Entrée rejetée: ratio risque/récompense ", DoubleToString(rrRatio, 2), " < ", DoubleToString(MinRiskRewardRatio, 2));
@@ -2764,7 +2848,10 @@ bool ValidateAdvancedEntry(ENUM_ORDER_TYPE orderType)
          ", UseSupportResistance: ", UseSupportResistance ? "OUI" : "NON",
          ", UseSupertrend: ", UseSupertrendIndicator ? "OUI" : "NON");
 
-   if(UseSupportResistance)
+   bool isIndexSymbol = (StringFind(_Symbol, "Boom") >= 0 || StringFind(_Symbol, "Crash") >= 0 ||
+                         StringFind(_Symbol, "Volatility") >= 0 || StringFind(_Symbol, "Step") >= 0 ||
+                         StringFind(_Symbol, "Jump") >= 0 || StringFind(_Symbol, "DEX") >= 0);
+   if(UseSupportResistance && !isIndexSymbol)
    {
       if(orderType == ORDER_TYPE_BUY && currentPrice > H1_Resistance * 0.995)
       {
@@ -2778,7 +2865,8 @@ bool ValidateAdvancedEntry(ENUM_ORDER_TYPE orderType)
       }
    }
 
-   if(UseSupertrendIndicator)
+   // Supertrend : ne pas bloquer sur indices (Boom/Crash/Volatility) où Supertrend est souvent indisponible
+   if(UseSupertrendIndicator && isSupertrendAvailable)
    {
       Print("🔍 Supertrend H1 direction: ", supertrend_H1_dir);
       if(orderType == ORDER_TYPE_BUY && supertrend_H1_dir < 0)
@@ -3044,29 +3132,48 @@ string UpdateCoherentEndpoint()
 //+------------------------------------------------------------------+
 
 //+------------------------------------------------------------------+
+//| Vérifier si symbole Boom/Crash (seuils plus sensibles)           |
+//+------------------------------------------------------------------+
+bool IsBoomCrashSymbol()
+{
+   string sym = _Symbol;
+   return (StringFind(sym, "Boom") >= 0 || StringFind(sym, "Crash") >= 0 || 
+           StringFind(sym, "Volatility") >= 0 || StringFind(sym, "Step Index") >= 0);
+}
+
+//+------------------------------------------------------------------+
 //| DÉTECTION DE SPIKE PAR POURCENTAGE                              |
+//| Utilise les barres PRÉCÉDENTES pour la MA (exclut barre courante)|
 //+------------------------------------------------------------------+
 bool DetectPercentageSpike(double currentPrice, double &priceMA, double &priceSTD, double &intensity, double &confidence)
 {
    double prices[];
    ArraySetAsSeries(prices, true);
 
-   if(CopyClose(_Symbol, PERIOD_CURRENT, 0, SpikeDetectionWindow, prices) < SpikeDetectionWindow)
+   // Besoin de Window+1 barres: [0]=courant, [1..Window]=pour la MA
+   int barsNeeded = SpikeDetectionWindow + 1;
+   if(CopyClose(_Symbol, PERIOD_CURRENT, 0, barsNeeded, prices) < barsNeeded)
       return false;
 
+   // MA sur les barres PRÉCÉDENTES uniquement (pas la barre courante)
    priceMA = 0;
-   for(int i = 0; i < SpikeDetectionWindow; i++)
+   for(int i = 1; i <= SpikeDetectionWindow; i++)
       priceMA += prices[i];
    priceMA /= SpikeDetectionWindow;
 
    priceSTD = 0;
-   for(int i = 0; i < SpikeDetectionWindow; i++)
+   for(int i = 1; i <= SpikeDetectionWindow; i++)
       priceSTD += MathPow(prices[i] - priceMA, 2);
    priceSTD = MathSqrt(priceSTD / SpikeDetectionWindow);
 
-   double priceChangePct = ((currentPrice - priceMA) / priceMA) * 100;
+   double priceChangePct = (priceMA != 0) ? ((currentPrice - priceMA) / priceMA) * 100 : 0;
 
-   bool isSpike = MathAbs(priceChangePct) > SpikeThresholdPercent;
+   // Seuil plus bas pour Boom/Crash
+   double threshold = SpikeThresholdPercent;
+   if(UseBoomCrashSensitiveMode && IsBoomCrashSymbol())
+      threshold = MathMin(SpikeThresholdPercent, 0.05);
+
+   bool isSpike = MathAbs(priceChangePct) > threshold;
 
    if(isSpike)
    {
@@ -3075,27 +3182,28 @@ bool DetectPercentageSpike(double currentPrice, double &priceMA, double &priceST
       double pctMA = 0;
       double pctSTD = 0;
       double pctChanges[];
-      ArraySetAsSeries(pctChanges, true);
 
       for(int i = 1; i < SpikeDetectionWindow; i++)
       {
-         pctChanges[i-1] = ((prices[i-1] - prices[i]) / prices[i]) * 100;
-         pctMA += pctChanges[i-1];
+         if(prices[i+1] > 0)
+            pctMA += ((prices[i] - prices[i+1]) / prices[i+1]) * 100;
       }
 
       if(SpikeDetectionWindow > 1)
       {
          pctMA /= (SpikeDetectionWindow - 1);
-
-         for(int i = 0; i < SpikeDetectionWindow - 1; i++)
-            pctSTD += MathPow(pctChanges[i] - pctMA, 2);
+         for(int i = 1; i < SpikeDetectionWindow; i++)
+         {
+            double pctCh = (prices[i+1] > 0) ? ((prices[i] - prices[i+1]) / prices[i+1]) * 100 : 0;
+            pctSTD += MathPow(pctCh - pctMA, 2);
+         }
          pctSTD = MathSqrt(pctSTD / (SpikeDetectionWindow - 1));
       }
 
       if(pctSTD > 0)
          confidence = MathMin(MathAbs(priceChangePct) / (MathAbs(pctMA) + 0.5 * pctSTD), 1.0);
       else
-         confidence = MathMin(intensity / SpikeThresholdPercent, 1.0);
+         confidence = MathMin(intensity / threshold, 1.0);
 
       return true;
    }
@@ -3105,22 +3213,24 @@ bool DetectPercentageSpike(double currentPrice, double &priceMA, double &priceST
 
 //+------------------------------------------------------------------+
 //| DÉTECTION DE SPIKE PAR ÉCART-TYPE (Z-SCORE)                     |
+//| MA sur barres précédentes, compare à prix courant                |
 //+------------------------------------------------------------------+
 bool DetectStandardDeviationSpike(double currentPrice, double &priceMA, double &priceSTD, double &spikeZScore, double &intensity, double &confidence)
 {
    double prices[];
    ArraySetAsSeries(prices, true);
 
-   if(CopyClose(_Symbol, PERIOD_CURRENT, 0, SpikeDetectionWindow, prices) < SpikeDetectionWindow)
+   int barsNeeded = SpikeDetectionWindow + 1;
+   if(CopyClose(_Symbol, PERIOD_CURRENT, 0, barsNeeded, prices) < barsNeeded)
       return false;
 
    priceMA = 0;
-   for(int i = 0; i < SpikeDetectionWindow; i++)
+   for(int i = 1; i <= SpikeDetectionWindow; i++)
       priceMA += prices[i];
    priceMA /= SpikeDetectionWindow;
 
    priceSTD = 0;
-   for(int i = 0; i < SpikeDetectionWindow; i++)
+   for(int i = 1; i <= SpikeDetectionWindow; i++)
       priceSTD += MathPow(prices[i] - priceMA, 2);
    priceSTD = MathSqrt(priceSTD / SpikeDetectionWindow);
 
@@ -3129,12 +3239,16 @@ bool DetectStandardDeviationSpike(double currentPrice, double &priceMA, double &
    else
       spikeZScore = 0;
 
-   bool isSpike = spikeZScore > StdDevSpikeThreshold;
+   double threshold = StdDevSpikeThreshold;
+   if(UseBoomCrashSensitiveMode && IsBoomCrashSymbol())
+      threshold = MathMin(StdDevSpikeThreshold, 0.6);
+
+   bool isSpike = spikeZScore > threshold;
 
    if(isSpike)
    {
       intensity = spikeZScore;
-      confidence = MathMin(spikeZScore / StdDevSpikeThreshold, 1.0);
+      confidence = MathMin(spikeZScore / threshold, 1.0);
       return true;
    }
 
