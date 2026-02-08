@@ -231,8 +231,8 @@ void OnTick()
       if(canBuy)
       {
          double sl = 0, tp = 0;
-         NormalizeSLTP(true, ask, sl, tp);
-         if(trade.Buy(LotSize, _Symbol, ask, sl, tp, "BoomCrash Crash BUY rebond"))
+         // NormalizeSLTP(true, ask, sl, tp); // DÉSACTIVÉ - force sl=0 tp=0
+         if(trade.Buy(LotSize, _Symbol, ask, 0, 0, "BoomCrash Crash BUY rebond"))
             Print("✅ CRASH BUY | RSI=", DoubleToString(rsi_value[0],1), " (survente)");
          else
             Print("❌ CRASH BUY échec: ", trade.ResultRetcode());
@@ -240,8 +240,8 @@ void OnTick()
       else if(canSell)
       {
          double sl = 0, tp = 0;
-         NormalizeSLTP(false, bid, sl, tp);
-         if(trade.Sell(LotSize, _Symbol, bid, sl, tp, "BoomCrash Crash SELL surachat"))
+         // NormalizeSLTP(false, bid, sl, tp); // DÉSACTIVÉ - force sl=0 tp=0
+         if(trade.Sell(LotSize, _Symbol, bid, 0, 0, "BoomCrash Crash SELL surachat"))
             Print("✅ CRASH SELL | RSI=", DoubleToString(rsi_value[0],1), " (surachat)");
          else
             Print("❌ CRASH SELL échec: ", trade.ResultRetcode());
@@ -262,8 +262,8 @@ void OnTick()
       if(canSell)
       {
          double sl = 0, tp = 0;
-         NormalizeSLTP(false, bid, sl, tp);
-         if(trade.Sell(LotSize, _Symbol, bid, sl, tp, "BoomCrash Boom SELL surachat"))
+         // NormalizeSLTP(false, bid, sl, tp); // DÉSACTIVÉ - force sl=0 tp=0
+         if(trade.Sell(LotSize, _Symbol, bid, 0, 0, "BoomCrash Boom SELL surachat"))
             Print("✅ BOOM SELL | RSI=", DoubleToString(rsi_value[0],1), " (surachat)");
          else
             Print("❌ BOOM SELL échec: ", trade.ResultRetcode());
@@ -271,8 +271,8 @@ void OnTick()
       else if(canBuy)
       {
          double sl = 0, tp = 0;
-         NormalizeSLTP(true, ask, sl, tp);
-         if(trade.Buy(LotSize, _Symbol, ask, sl, tp, "BoomCrash Boom BUY rebond"))
+         // NormalizeSLTP(true, ask, sl, tp); // DÉSACTIVÉ - force sl=0 tp=0
+         if(trade.Buy(LotSize, _Symbol, ask, 0, 0, "BoomCrash Boom BUY rebond"))
             Print("✅ BOOM BUY | RSI=", DoubleToString(rsi_value[0],1), " (survente)");
          else
             Print("❌ BOOM BUY échec: ", trade.ResultRetcode());
