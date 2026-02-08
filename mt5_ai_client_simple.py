@@ -25,6 +25,13 @@ MAX_LOSS_USD = 5.0  # Fermer si perte >= -5$
 PROFIT_TARGET_USD = 10.0  # Fermer si profit >= +10$
 REENTRY_DELAY_SECONDS = 3  # Délai avant ré-entrée après profit
 
+# SL/TP configuration
+STOP_LOSS_POINTS = 100  # Stop Loss en points
+TAKE_PROFIT_POINTS = 200  # Take Profit en points
+USE_TRAILING_STOP = False  # Trailing stop désactivé pour éviter les conflits
+TRAILING_STOP_POINTS = 50  # Distance trailing stop
+TRAILING_STEP = 20  # Pas trailing stop
+
 # Tailles de position
 POSITION_SIZES = {
     "Boom 300 Index": 0.5,
@@ -54,6 +61,8 @@ class MT5AIClientSimple:
         self.last_profit_close_direction = {}
         # Suivi du trailing stop
         self.best_prices = {}  # Meilleur prix atteint par position
+        # Suivi des ordres de fermeture pour éviter les doublons
+        self.pending_closes = set()  # Tickets en attente de fermeture
         
     def connect_mt5(self):
         """Connexion à MT5"""
@@ -116,15 +125,22 @@ class MT5AIClientSimple:
         try:
             positions = mt5.positions_get()
             if not positions:
+                # Nettoyer les pending_closes si aucune position
+                self.pending_closes.clear()
                 return
             
             for position in positions:
                 # Calculer le profit total (inclut swap + commission)
                 total_profit = position.profit + position.swap + position.commission
                 
+                # Vérifier si cette position est déjà en cours de fermeture
+                if position.ticket in self.pending_closes:
+                    continue
+                
                 # RÈGLE 1: FERMER SI PERTE >= -5$
                 if total_profit <= -MAX_LOSS_USD:
                     logger.warning(f"🚨 PERTE MAX ATTEINTE: {position.symbol} - Perte: {total_profit:.2f}$ (limite: -{MAX_LOSS_USD}$)")
+                    self.pending_closes.add(position.ticket)  # Marquer comme en attente
                     self.close_position(position.ticket, f"Max Loss -{MAX_LOSS_USD}$")
                     continue
                 
@@ -140,6 +156,7 @@ class MT5AIClientSimple:
                     
                     logger.info(f"🔄 Ré-entrée prévue dans {REENTRY_DELAY_SECONDS}s pour {position.symbol} direction={direction}")
                     
+                    self.pending_closes.add(position.ticket)  # Marquer comme en attente
                     self.close_position(position.ticket, f"Profit Target +{PROFIT_TARGET_USD}$")
                     
         except Exception as e:
@@ -151,6 +168,8 @@ class MT5AIClientSimple:
             position = mt5.positions_get(ticket=ticket)
             if not position:
                 logger.error(f"Position {ticket} non trouvée")
+                # Nettoyer le pending_close même si position non trouvée
+                self.pending_closes.discard(ticket)
                 return False
                 
             position = position[0]
@@ -196,13 +215,21 @@ class MT5AIClientSimple:
                 if position.symbol in self.positions:
                     del self.positions[position.symbol]
                 
+                # Nettoyer le pending_close
+                self.pending_closes.discard(ticket)
+                
                 return True
             else:
                 logger.error(f"❌ Échec fermeture position {ticket}: {result.retcode} - {result.comment}")
+                # Nettoyer le pending_close même en cas d'échec pour éviter les boucles infinies
+                if result.retcode == 10009:  # Order already exists
+                    self.pending_closes.discard(ticket)
                 return False
                 
         except Exception as e:
             logger.error(f"Erreur fermeture position {ticket}: {e}")
+            # Nettoyer le pending_close en cas d'exception
+            self.pending_closes.discard(ticket)
             return False
     
     def check_quick_reentry(self):
@@ -430,6 +457,7 @@ class MT5AIClientSimple:
             if not positions:
                 self.positions.clear()
                 self.best_prices.clear()
+                self.pending_closes.clear()  # Nettoyer aussi les pending_closes
                 return
             
             current_tickets = set()
@@ -460,6 +488,9 @@ class MT5AIClientSimple:
                     if pos['ticket'] in self.best_prices:
                         del self.best_prices[pos['ticket']]
                     del self.positions[symbol]
+            
+            # Nettoyer les pending_closes pour les tickets qui n'existent plus
+            self.pending_closes = self.pending_closes.intersection(current_tickets)
             
         except Exception as e:
             logger.error(f"Erreur vérification positions: {e}")

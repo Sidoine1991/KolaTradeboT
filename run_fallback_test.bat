@@ -1,0 +1,22 @@
+@echo off
+echo ========================================
+echo TEST SYSTÈME FALLBACK LOCAL → RENDER
+echo ========================================
+echo.
+echo Ce script va tester le système de fallback du robot de trading
+echo Il simulera les différents scénarios de connexion:
+echo   1. Serveur local disponible
+echo   2. Local indisponible, Render disponible  
+echo   3. Les deux serveurs indisponibles
+echo   4. Utilisation directe de Render
+echo.
+echo Installation des dépendances si nécessaire...
+pip install requests >nul 2>&1
+echo.
+echo Lancement du test...
+python test_fallback_python.py
+echo.
+echo ========================================
+echo FIN DU TEST
+echo ========================================
+pause

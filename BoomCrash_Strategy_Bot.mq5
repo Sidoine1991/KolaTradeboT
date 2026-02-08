@@ -44,6 +44,20 @@ input double            MinAPIConfidence = 0.40;      // Confiance minimale API 
 input bool              RequireTrendAlignment = false;  // Exiger tendance API alignée (désactivé = plus d'ouvertures)
 input bool              RequireAPIToOpen = false;       // Si false: ouvrir avec Classique+Spike même sans accord API
 
+//--- Affichage Graphique et Signaux
+input group             "Affichage Graphique"
+input bool              ShowMA = true;                     // Afficher MA mobile
+input bool              ShowRSI = true;                    // Afficher RSI
+input bool              ShowSignals = true;                 // Afficher signaux d'entrée
+input bool              ShowPredictions = true;             // Afficher prédictions sur 100 bougies
+input bool              ShowSpikeArrows = true;            // Afficher flèches de spike clignotantes
+input color             MA_Color = clrBlue;                // Couleur MA
+input color             RSI_Color_Up = clrGreen;           // Couleur RSI survente
+input color             RSI_Color_Down = clrRed;         // Couleur RSI surachat
+input color             BuySignalColor = clrLime;          // Couleur signal BUY
+input color             SellSignalColor = clrRed;          // Couleur signal SELL
+input color             SpikeArrowColor = clrYellow;        // Couleur flèche spike
+
 //--- Gestion du Risque (en Pips/Points)
 input group             "Gestion du Risque (en Pips)"
 input double            LotSize = 0.2;                 // Taille du lot fixe
@@ -68,6 +82,26 @@ input bool              DebugLog = true;               // Afficher raison des no
 
 //--- Variables globales
 CTrade      trade;
+
+//--- Handles pour indicateurs
+int         ma_handle;
+int         rsi_handle;
+int         atr_handle;
+int         emaFastM1_handle;    // EMA rapide M1
+int         emaSlowM1_handle;    // EMA lent M1
+int         emaFastM5_handle;    // EMA rapide M5
+int         emaSlowM5_handle;    // EMA lent M5
+int         emaFastH1_handle;    // EMA rapide H1
+int         emaSlowH1_handle;    // EMA lent H1
+
+//--- Variables pour prédictions et affichage
+double      price_predictions[100]; // Prédictions sur 100 bougies
+int         prediction_index = 0;
+datetime    last_prediction_update = 0;
+string      spike_arrow_name = "";
+datetime    spike_arrow_time = 0;
+bool        spike_arrow_blink = false;
+int         spike_blink_counter = 0;
 
 //+------------------------------------------------------------------+
 //| Calcule SL/TP valides (respecte STOPS_LEVEL et bon sens)         |
@@ -152,6 +186,22 @@ int OnInit()
       Print("Erreur lors de la création du handle ATR.");
       return(INIT_FAILED);
    }
+
+   // Initialiser les EMA rapides pour M1, M5, H1
+   emaFastM1_handle = iMA(_Symbol, PERIOD_M1, 10, 0, MODE_EMA, PRICE_CLOSE);
+   emaSlowM1_handle = iMA(_Symbol, PERIOD_M1, 50, 0, MODE_EMA, PRICE_CLOSE);
+   emaFastM5_handle = iMA(_Symbol, PERIOD_M5, 10, 0, MODE_EMA, PRICE_CLOSE);
+   emaSlowM5_handle = iMA(_Symbol, PERIOD_M5, 50, 0, MODE_EMA, PRICE_CLOSE);
+   emaFastH1_handle = iMA(_Symbol, PERIOD_H1, 10, 0, MODE_EMA, PRICE_CLOSE);
+   emaSlowH1_handle = iMA(_Symbol, PERIOD_H1, 50, 0, MODE_EMA, PRICE_CLOSE);
+   
+   if(emaFastM1_handle == INVALID_HANDLE || emaSlowM1_handle == INVALID_HANDLE ||
+      emaFastM5_handle == INVALID_HANDLE || emaSlowM5_handle == INVALID_HANDLE ||
+      emaFastH1_handle == INVALID_HANDLE || emaSlowH1_handle == INVALID_HANDLE)
+   {
+      Print("Erreur lors de la création des handles EMA.");
+      return(INIT_FAILED);
+   }
    
    pip_value = _Point * pow(10, _Digits % 2);
 
@@ -170,6 +220,13 @@ void OnDeinit(const int reason)
    IndicatorRelease(ma_handle);
    IndicatorRelease(rsi_handle);
    IndicatorRelease(atr_handle);
+   IndicatorRelease(emaFastM1_handle);
+   IndicatorRelease(emaSlowM1_handle);
+   IndicatorRelease(emaFastM5_handle);
+   IndicatorRelease(emaSlowM5_handle);
+   IndicatorRelease(emaFastH1_handle);
+   IndicatorRelease(emaSlowH1_handle);
+   CleanChartObjects();
    Print("Robot désinitialisé.");
 }
 
@@ -178,106 +235,122 @@ void OnDeinit(const int reason)
 //+------------------------------------------------------------------+
 void OnTick()
 {
-   ulong ticket = GetMyPositionTicket();
-   if(ticket != 0 && PositionSelectByTicket(ticket))
-   {
-      ManageTrailingStop(ticket);
-      return;
-   }
-
-   // Rafraîchir la synthèse Render à l'intervalle défini
-   if(UseRenderAPI && (TimeCurrent() - g_lastAPIUpdate >= AI_UpdateInterval_sec))
-   {
-      UpdateRenderDecision();
-      UpdateTrendAPI();
-      g_lastAPIUpdate = TimeCurrent();
-   }
-
+   // Mettre à jour les indicateurs
    double ma_value[1], rsi_value[1], close_price[1];
+   double emaFastM1[1], emaSlowM1[1], emaFastM5[1], emaSlowM5[1], emaFastH1[1], emaSlowH1[1];
+   
    if(CopyBuffer(ma_handle, 0, 1, 1, ma_value) <= 0 ||
       CopyBuffer(rsi_handle, 0, 1, 1, rsi_value) <= 0 ||
+      CopyBuffer(emaFastM1_handle, 0, 0, 1, emaFastM1) <= 0 ||
+      CopyBuffer(emaSlowM1_handle, 0, 0, 1, emaSlowM1) <= 0 ||
+      CopyBuffer(emaFastM5_handle, 0, 0, 1, emaFastM5) <= 0 ||
+      CopyBuffer(emaSlowM5_handle, 0, 0, 1, emaSlowM5) <= 0 ||
+      CopyBuffer(emaFastH1_handle, 0, 0, 1, emaFastH1) <= 0 ||
+      CopyBuffer(emaSlowH1_handle, 0, 0, 1, emaSlowH1) <= 0 ||
       CopyClose(_Symbol, _Period, 1, 1, close_price) <= 0)
       return;
-
+   
    SymbolInfoTick(_Symbol, last_tick);
    double ask = last_tick.ask;
    double bid = last_tick.bid;
    double price = close_price[0];
+   
+   // Mettre à jour les signaux IA (tous les endpoints)
+   UpdateFromDecision();
+   UpdateFromPredict();
+   UpdateFromTrendAnalysis();
+   
+   // Afficher les indicateurs graphiques
+   UpdateGraphics();
+   
+   // Gérer les positions existantes
+   ManagePositions();
+   
+   // Ouvrir nouvelles positions selon signaux IA et EMA rapides
+   OpenNewPositions();
+}
 
-   bool apiOkBuy  = (g_lastAIAction == "buy" && g_lastAIConfidence >= MinAPIConfidence && (!RequireTrendAlignment || g_api_trend_direction >= 0));
-   bool apiOkSell = (g_lastAIAction == "sell" && g_lastAIConfidence >= MinAPIConfidence && (!RequireTrendAlignment || g_api_trend_direction <= 0));
-   bool apiAllowsBuy  = !UseRenderAPI || !RequireAPIToOpen || apiOkBuy;
-   bool apiAllowsSell = !UseRenderAPI || !RequireAPIToOpen || apiOkSell;
-
-   bool requireSpike = (ModeOuverture == 0);
-   bool requireAPI    = (ModeOuverture <= 1);
-
-   string symLower = _Symbol;
-   StringToLower(symLower);
-   bool isCrash = (StringFind(symLower, "crash") >= 0);
-   bool isBoom  = (StringFind(symLower, "boom") >= 0);
-
-   //--- CRASH: BUY sur survente (rebond) OU SELL sur surachat (repli) si TradeBothDirections
-   if(isCrash)
+//+------------------------------------------------------------------+
+//| Ouvrir de nouvelles positions                                      |
+//+------------------------------------------------------------------+
+void OpenNewPositions()
+{
+   if(PositionsTotal() > 0) return; // Une position à la fois
+   
+   SymbolInfoTick(_Symbol, last_tick);
+   double ask = last_tick.ask;
+   double bid = last_tick.bid;
+   double price = bid;
+   
+   if(ArraySize(ma_buffer) < 1 || ArraySize(rsi_buffer) < 1 ||
+      ArraySize(emaFastM1) < 1 || ArraySize(emaSlowM1) < 1 ||
+      ArraySize(emaFastM5) < 1 || ArraySize(emaSlowM5) < 1 ||
+      ArraySize(emaFastH1) < 1 || ArraySize(emaSlowH1) < 1)
+      return;
+   
+   double ma_value = ma_buffer[0];
+   double rsi_value = rsi_buffer[0];
+   double emaFastM1 = emaFastM1[0];
+   double emaSlowM1 = emaSlowM1[0];
+   double emaFastM5 = emaFastM5[0];
+   double emaSlowM5 = emaSlowM5[0];
+   double emaFastH1 = emaFastH1[0];
+   double emaSlowH1 = emaSlowH1[0];
+   
+   // Vérifier le type de symbole
+   bool is_boom = (StringFind(_Symbol, "Boom") >= 0);
+   bool is_crash = (StringFind(_Symbol, "Crash") >= 0);
+   
+   // Signaux techniques basés sur EMA rapides M1
+   bool tech_buy_m1 = (price > emaFastM1 && rsi_value < RSI_Oversold_Level);
+   bool tech_sell_m1 = (price < emaFastM1 && rsi_value > RSI_Overbought_Level);
+   
+   // Alignement des tendances M5/M1 (OBLIGATOIRE)
+   bool trend_alignment_buy = (emaFastM1 > emaSlowM1) && (emaFastM5 > emaSlowM5);
+   bool trend_alignment_sell = (emaFastM1 < emaSlowM1) && (emaFastM5 < emaSlowM5);
+   
+   // Signaux IA
+   bool ai_buy = (current_ai_signal.action == "BUY" && current_ai_signal.confidence > 0.5);
+   bool ai_sell = (current_ai_signal.action == "SELL" && current_ai_signal.confidence > 0.5);
+   
+   // Logique d'ouverture COMPLÈTE
+   if(is_boom)
    {
-      bool classicBuy  = (price > ma_value[0] && rsi_value[0] < RSI_Oversold_Level);
-      bool classicSell = (price < ma_value[0] && rsi_value[0] > RSI_Overbought_Level);
-      bool reverseSell = RSIOnlyReverse && (rsi_value[0] > RSI_Overbought_Level);  // SELL sur RSI surachat seul
-      bool spikeOkBuy  = !UseSpikeDetection || IsLocalSpikeCrash(ma_value[0], rsi_value[0]);
-      bool spikeOkSell = !UseSpikeDetection || IsLocalSpikeBoom(ma_value[0], rsi_value[0]);
-      bool canBuy  = classicBuy  && (!requireSpike || spikeOkBuy)  && (!requireAPI || apiAllowsBuy);
-      bool canSell = TradeBothDirections && (classicSell || reverseSell) && (!requireSpike || spikeOkSell) && (!requireAPI || apiAllowsSell);
-
-      if(canBuy)
+      // Boom: seulement BUY avec conditions strictes
+      if(tech_buy_m1 && trend_alignment_buy && ai_buy)
       {
-         double sl = 0, tp = 0;
-         // NormalizeSLTP(true, ask, sl, tp); // DÉSACTIVÉ - force sl=0 tp=0
-         if(trade.Buy(LotSize, _Symbol, ask, 0, 0, "BoomCrash Crash BUY rebond"))
-            Print("✅ CRASH BUY | RSI=", DoubleToString(rsi_value[0],1), " (survente)");
-         else
-            Print("❌ CRASH BUY échec: ", trade.ResultRetcode());
+         if(trade.Buy(LotSize, _Symbol, ask, 0, 0, "BoomCrash Boom BUY (EMA M1 + Alignement M5/M1 + IA)"))
+         {
+            Print(" BOOM BUY OUVERT - Signal technique EMA M1 + Alignement M5/M1 + IA FORTE");
+            CreateSpikeArrow(); // Flèche de spike
+         }
       }
-      else if(canSell)
-      {
-         double sl = 0, tp = 0;
-         // NormalizeSLTP(false, bid, sl, tp); // DÉSACTIVÉ - force sl=0 tp=0
-         if(trade.Sell(LotSize, _Symbol, bid, 0, 0, "BoomCrash Crash SELL surachat"))
-            Print("✅ CRASH SELL | RSI=", DoubleToString(rsi_value[0],1), " (surachat)");
-         else
-            Print("❌ CRASH SELL échec: ", trade.ResultRetcode());
-      }
-      else if(DebugLog) LogNoOpen("Crash", price, ma_value[0], rsi_value[0], classicBuy || classicSell, spikeOkBuy, apiAllowsBuy);
    }
-   //--- BOOM: SELL sur surachat (repli) OU BUY sur survente (rebond) si TradeBothDirections
-   else if(isBoom)
+   else if(is_crash)
    {
-      bool classicSell = (price < ma_value[0] && rsi_value[0] > RSI_Overbought_Level);
-      bool classicBuy  = (price > ma_value[0] && rsi_value[0] < RSI_Oversold_Level);
-      bool reverseBuy  = RSIOnlyReverse && (rsi_value[0] < RSI_Oversold_Level);       // BUY sur RSI survente seul
-      bool spikeOkSell = !UseSpikeDetection || IsLocalSpikeBoom(ma_value[0], rsi_value[0]);
-      bool spikeOkBuy  = !UseSpikeDetection || IsLocalSpikeCrash(ma_value[0], rsi_value[0]);
-      bool canSell = classicSell && (!requireSpike || spikeOkSell) && (!requireAPI || apiAllowsSell);
-      bool canBuy  = TradeBothDirections && (classicBuy || reverseBuy) && (!requireSpike || spikeOkBuy) && (!requireAPI || apiAllowsBuy);
-
-      if(canSell)
+      // Crash: seulement SELL avec conditions strictes
+      if(tech_sell_m1 && trend_alignment_sell && ai_sell)
       {
-         double sl = 0, tp = 0;
-         // NormalizeSLTP(false, bid, sl, tp); // DÉSACTIVÉ - force sl=0 tp=0
-         if(trade.Sell(LotSize, _Symbol, bid, 0, 0, "BoomCrash Boom SELL surachat"))
-            Print("✅ BOOM SELL | RSI=", DoubleToString(rsi_value[0],1), " (surachat)");
-         else
-            Print("❌ BOOM SELL échec: ", trade.ResultRetcode());
+         if(trade.Sell(LotSize, _Symbol, bid, 0, 0, "BoomCrash Crash SELL (EMA M1 + Alignement M5/M1 + IA FORTE)"))
+         {
+            Print(" CRASH SELL OUVERT - Signal technique EMA M1 + Alignement M5/M1 + IA FORTE");
+            CreateSpikeArrow(); // Flèche de spike
+         }
       }
-      else if(canBuy)
-      {
-         double sl = 0, tp = 0;
-         // NormalizeSLTP(true, ask, sl, tp); // DÉSACTIVÉ - force sl=0 tp=0
-         if(trade.Buy(LotSize, _Symbol, ask, 0, 0, "BoomCrash Boom BUY rebond"))
-            Print("✅ BOOM BUY | RSI=", DoubleToString(rsi_value[0],1), " (survente)");
-         else
-            Print("❌ BOOM BUY échec: ", trade.ResultRetcode());
-      }
-      else if(DebugLog) LogNoOpen("Boom", price, ma_value[0], rsi_value[0], classicSell || classicBuy, spikeOkSell, apiAllowsSell);
+   }
+   
+   if(DebugLog && !((is_boom && tech_buy_m1 && trend_alignment_buy && ai_buy) || 
+                    (is_crash && tech_sell_m1 && trend_alignment_sell && ai_sell)))
+   {
+      Print("BoomCrash ", _Symbol, " | pas d'ouverture:");
+      if(is_boom)
+         Print("  - EMA M1 BUY: ", (price > emaFastM1 ? "" : ""),
+               " | Alignement M5/M1: ", (trend_alignment_buy ? "" : ""),
+               " | IA BUY: ", (ai_buy ? "" : ""));
+      else
+         Print("  - EMA M1 SELL: ", (price < emaFastM1 ? "" : ""),
+               " | Alignement M5/M1: ", (trend_alignment_sell ? "" : ""),
+               " | IA SELL: ", (ai_sell ? "" : ""));
    }
 }
 
@@ -544,5 +617,434 @@ ulong GetMyPositionTicket()
       }
    }
    return 0;
+}
+
+//+------------------------------------------------------------------+
+//| Structure pour les signaux IA                                     |
+//+------------------------------------------------------------------+
+struct AISignal
+{
+    string   action;        // BUY/SELL/HOLD
+    double   confidence;     // Confiance 0-1
+    string   reason;        // Raison du signal
+    double   prediction;     // Prédiction de prix
+    datetime timestamp;     // Timestamp du signal
+};
+
+AISignal current_ai_signal;
+
+//+------------------------------------------------------------------+
+//| Mettre à jour depuis endpoint /decision                             |
+//+------------------------------------------------------------------+
+void UpdateFromDecision()
+{
+    string url = AI_ServerURL;
+    string data = "{\"symbol\":\"" + _Symbol + "\",\"bid\":" + 
+                 DoubleToString(SymbolInfoDouble(_Symbol, SYMBOL_BID), 5) + 
+                 ",\"ask\":" + DoubleToString(SymbolInfoDouble(_Symbol, SYMBOL_ASK), 5) + "}";
+    
+    string headers = "Content-Type: application/json\r\n";
+    uchar post_data[];
+    uchar result[];
+    string result_headers;
+    
+    StringToCharArray(data, post_data);
+    
+    int res = WebRequest("POST", url, headers, AI_Timeout_ms, post_data, result, result_headers);
+    
+    if(res == 200)
+    {
+        string response = CharArrayToString(result);
+        ParseAIResponse(response);
+    }
+    else if(DebugLog)
+    {
+        Print("⚠️ Erreur /decision: ", res);
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Mettre à jour depuis endpoint /predict                              |
+//+------------------------------------------------------------------+
+void UpdateFromPredict()
+{
+    string url = AI_PredictURL;
+    string data = "{\"symbol\":\"" + _Symbol + "\",\"bars\":100}";
+    
+    string headers = "Content-Type: application/json\r\n";
+    uchar post_data[];
+    uchar result[];
+    string result_headers;
+    
+    StringToCharArray(data, post_data);
+    
+    int res = WebRequest("POST", url, headers, AI_Timeout_ms, post_data, result, result_headers);
+    
+    if(res == 200)
+    {
+        string response = CharArrayToString(result);
+        ParsePredictResponse(response);
+        last_prediction_update = TimeCurrent();
+    }
+    else if(DebugLog)
+    {
+        Print("⚠️ Erreur /predict: ", res);
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Mettre à jour depuis endpoint /trend-analysis                        |
+//+------------------------------------------------------------------+
+void UpdateFromTrendAnalysis()
+{
+    string url = TrendAPIURL;
+    string data = "{\"symbol\":\"" + _Symbol + "\"}";
+    
+    string headers = "Content-Type: application/json\r\n";
+    uchar post_data[];
+    uchar result[];
+    string result_headers;
+    
+    StringToCharArray(data, post_data);
+    
+    int res = WebRequest("POST", url, headers, AI_Timeout_ms, post_data, result, result_headers);
+    
+    if(res == 200)
+    {
+        string response = CharArrayToString(result);
+        ParseTrendResponse(response);
+    }
+    else if(DebugLog)
+    {
+        Print("⚠️ Erreur /trend-analysis: ", res);
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Parser la réponse IA                                             |
+//+------------------------------------------------------------------+
+void ParseAIResponse(string response)
+{
+    // Parser simple pour extraire action, confidence, reason
+    int action_pos = StringFind(response, "\"action\"");
+    if(action_pos >= 0)
+    {
+        int colon_pos = StringFind(response, ":", action_pos);
+        int quote_start = StringFind(response, "\"", colon_pos);
+        int quote_end = StringFind(response, "\"", quote_start + 1);
+        
+        if(quote_end > quote_start)
+        {
+            current_ai_signal.action = StringSubstr(response, quote_start + 1, quote_end - quote_start - 1);
+        }
+    }
+    
+    // Parser confiance
+    int conf_pos = StringFind(response, "\"confidence\"");
+    if(conf_pos >= 0)
+    {
+        int colon_conf = StringFind(response, ":", conf_pos);
+        int conf_end = StringFind(response, ",", colon_conf);
+        if(conf_end < 0) conf_end = StringFind(response, "}", colon_conf);
+        
+        if(conf_end > colon_conf)
+        {
+            string conf_str = StringSubstr(response, colon_conf + 1, conf_end - colon_conf - 1);
+            current_ai_signal.confidence = StringToDouble(conf_str);
+        }
+    }
+    
+    current_ai_signal.timestamp = TimeCurrent();
+    
+    if(DebugLog)
+    {
+        Print("🤖 Signal IA reçu: ", current_ai_signal.action, 
+              " | Confiance: ", DoubleToString(current_ai_signal.confidence * 100, 1), "%",
+              " | Raison: ", current_ai_signal.reason);
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Parser les prédictions                                             |
+//+------------------------------------------------------------------+
+void ParsePredictResponse(string response)
+{
+    // Parser pour extraire les prédictions sur 100 bougies
+    int pred_pos = StringFind(response, "\"predictions\"");
+    if(pred_pos >= 0)
+    {
+        // Extraire le tableau de prédictions
+        int start = StringFind(response, "[", pred_pos);
+        int end = StringFind(response, "]", start);
+        
+        if(end > start)
+        {
+            string pred_str = StringSubstr(response, start + 1, end - start - 1);
+            // Parser les valeurs séparées par virgules
+            string values[];
+            StringSplit(pred_str, ',', values);
+            
+            for(int i = 0; i < MathMin(100, ArraySize(values)); i++)
+            {
+                price_predictions[i] = StringToDouble(values[i]);
+            }
+            prediction_index = 0;
+            
+            if(DebugLog)
+            {
+                Print("📊 Prédictions reçues: ", ArraySize(values), " valeurs");
+            }
+        }
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Parser la réponse tendance                                         |
+//+------------------------------------------------------------------+
+void ParseTrendResponse(string response)
+{
+    // Parser les informations de tendance
+    if(StringFind(response, "\"trend\":\"up\"") >= 0)
+    {
+        if(DebugLog) Print("📈 Tendance: HAUSSIÈRE");
+    }
+    else if(StringFind(response, "\"trend\":\"down\"") >= 0)
+    {
+        if(DebugLog) Print("📉 Tendance: BAISSIÈRE");
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Afficher les indicateurs graphiques                                 |
+//+------------------------------------------------------------------+
+void UpdateGraphics()
+{
+    double current_price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+    
+    // Afficher MA mobile classique
+    if(ShowMA && ArraySize(ma_buffer) > 0)
+    {
+        string ma_name = "BoomCrash_MA_" + IntegerToString(MA_Period);
+        ObjectCreate(0, ma_name, OBJ_HLINE, 0, 0, ma_buffer[0]);
+        ObjectSetInteger(0, ma_name, OBJPROP_COLOR, MA_Color);
+        ObjectSetInteger(0, ma_name, OBJPROP_WIDTH, 2);
+        ObjectSetInteger(0, ma_name, OBJPROP_STYLE, STYLE_SOLID);
+        ObjectSetString(0, ma_name, OBJPROP_TOOLTIP, "MA Classique");
+    }
+    
+    // Afficher EMA rapides M1
+    if(ShowMA && ArraySize(emaFastM1) > 0 && ArraySize(emaSlowM1) > 0)
+    {
+        string ema_fast_m1_name = "BoomCrash_EMA_Fast_M1";
+        string ema_slow_m1_name = "BoomCrash_EMA_Slow_M1";
+        
+        ObjectCreate(0, ema_fast_m1_name, OBJ_HLINE, 0, 0, emaFastM1[0]);
+        ObjectSetInteger(0, ema_fast_m1_name, OBJPROP_COLOR, clrGreen);
+        ObjectSetInteger(0, ema_fast_m1_name, OBJPROP_WIDTH, 2);
+        ObjectSetInteger(0, ema_fast_m1_name, OBJPROP_STYLE, STYLE_SOLID);
+        ObjectSetString(0, ema_fast_m1_name, OBJPROP_TOOLTIP, "EMA Rapide M1");
+        
+        ObjectCreate(0, ema_slow_m1_name, OBJ_HLINE, 0, 0, emaSlowM1[0]);
+        ObjectSetInteger(0, ema_slow_m1_name, OBJPROP_COLOR, clrRed);
+        ObjectSetInteger(0, ema_slow_m1_name, OBJPROP_WIDTH, 2);
+        ObjectSetInteger(0, ema_slow_m1_name, OBJPROP_STYLE, STYLE_SOLID);
+        ObjectSetString(0, ema_slow_m1_name, OBJPROP_TOOLTIP, "EMA Lent M1");
+    }
+    
+    // Afficher EMA rapides M5
+    if(ShowMA && ArraySize(emaFastM5) > 0 && ArraySize(emaSlowM5) > 0)
+    {
+        string ema_fast_m5_name = "BoomCrash_EMA_Fast_M5";
+        string ema_slow_m5_name = "BoomCrash_EMA_Slow_M5";
+        
+        ObjectCreate(0, ema_fast_m5_name, OBJ_HLINE, 0, 0, emaFastM5[0]);
+        ObjectSetInteger(0, ema_fast_m5_name, OBJPROP_COLOR, clrLime);
+        ObjectSetInteger(0, ema_fast_m5_name, OBJPROP_WIDTH, 2);
+        ObjectSetInteger(0, ema_fast_m5_name, OBJPROP_STYLE, STYLE_SOLID);
+        ObjectSetString(0, ema_fast_m5_name, OBJPROP_TOOLTIP, "EMA Rapide M5");
+        
+        ObjectCreate(0, ema_slow_m5_name, OBJ_HLINE, 0, 0, emaSlowM5[0]);
+        ObjectSetInteger(0, ema_slow_m5_name, OBJPROP_COLOR, clrOrange);
+        ObjectSetInteger(0, ema_slow_m5_name, OBJPROP_WIDTH, 2);
+        ObjectSetInteger(0, ema_slow_m5_name, OBJPROP_STYLE, STYLE_SOLID);
+        ObjectSetString(0, ema_slow_m5_name, OBJPROP_TOOLTIP, "EMA Lent M5");
+    }
+    
+    // Afficher EMA rapides H1
+    if(ShowMA && ArraySize(emaFastH1) > 0 && ArraySize(emaSlowH1) > 0)
+    {
+        string ema_fast_h1_name = "BoomCrash_EMA_Fast_H1";
+        string ema_slow_h1_name = "BoomCrash_EMA_Slow_H1";
+        
+        ObjectCreate(0, ema_fast_h1_name, OBJ_HLINE, 0, 0, emaFastH1[0]);
+        ObjectSetInteger(0, ema_fast_h1_name, OBJPROP_COLOR, clrBlue);
+        ObjectSetInteger(0, ema_fast_h1_name, OBJPROP_WIDTH, 2);
+        ObjectSetInteger(0, ema_fast_h1_name, OBJPROP_STYLE, STYLE_SOLID);
+        ObjectSetString(0, ema_fast_h1_name, OBJPROP_TOOLTIP, "EMA Rapide H1");
+        
+        ObjectCreate(0, ema_slow_h1_name, OBJ_HLINE, 0, 0, emaSlowH1[0]);
+        ObjectSetInteger(0, ema_slow_h1_name, OBJPROP_COLOR, clrPurple);
+        ObjectSetInteger(0, ema_slow_h1_name, OBJPROP_WIDTH, 2);
+        ObjectSetInteger(0, ema_slow_h1_name, OBJPROP_STYLE, STYLE_SOLID);
+        ObjectSetString(0, ema_slow_h1_name, OBJPROP_TOOLTIP, "EMA Lent H1");
+    }
+    
+    // Afficher RSI
+    if(ShowRSI && ArraySize(rsi_buffer) > 0)
+    {
+        string rsi_name = "BoomCrash_RSI_" + IntegerToString(RSI_Period);
+        color rsi_color = (rsi_buffer[0] < RSI_Oversold_Level) ? RSI_Color_Up : 
+                        (rsi_buffer[0] > RSI_Overbought_Level) ? RSI_Color_Down : clrGray;
+        
+        ObjectCreate(0, rsi_name, OBJ_TEXT, 0, 0, 0);
+        ObjectSetString(0, rsi_name, OBJPROP_TEXT, "RSI: " + DoubleToString(rsi_buffer[0], 1));
+        ObjectSetInteger(0, rsi_name, OBJPROP_COLOR, rsi_color);
+        ObjectSetInteger(0, rsi_name, OBJPROP_FONTSIZE, 10);
+        ObjectSetInteger(0, rsi_name, OBJPROP_ANCHOR, ANCHOR_LEFT_UPPER);
+        ObjectSetString(0, rsi_name, OBJPROP_TOOLTIP, "RSI: " + DoubleToString(rsi_buffer[0], 1) + 
+            " | Survente: " + DoubleToString(RSI_Oversold_Level, 1) + 
+            " | Surachat: " + DoubleToString(RSI_Overbought_Level, 1));
+    }
+    
+    // Afficher les signaux d'entrée
+    if(ShowSignals)
+    {
+        DisplayTradeSignals();
+    }
+    
+    // Mettre à jour la flèche de spike clignotante
+    UpdateSpikeArrow();
+}
+
+//+------------------------------------------------------------------+
+//| Afficher les signaux de trading                                   |
+//+------------------------------------------------------------------+
+void DisplayTradeSignals()
+{
+    if(ArraySize(ma_buffer) < 2 || ArraySize(rsi_buffer) < 1)
+        return;
+    
+    double current_price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+    double ma_value = ma_buffer[0];
+    double rsi_value = rsi_buffer[0];
+    
+    // Signaux d'achat
+    bool buy_signal = (current_price > ma_value && rsi_value < RSI_Oversold_Level);
+    if(buy_signal && current_ai_signal.action == "BUY" && current_ai_signal.confidence > 0.5)
+    {
+        string buy_arrow = "BoomCrash_BUY_" + IntegerToString((int)TimeCurrent());
+        ObjectCreate(0, buy_arrow, OBJ_ARROW_UP, 0, TimeCurrent(), current_price);
+        ObjectSetInteger(0, buy_arrow, OBJPROP_COLOR, BuySignalColor);
+        ObjectSetInteger(0, buy_arrow, OBJPROP_WIDTH, 3);
+        ObjectSetInteger(0, buy_arrow, OBJPROP_ANCHOR, ANCHOR_BOTTOM);
+        ObjectSetString(0, buy_arrow, OBJPROP_TEXT, "BUY");
+    }
+    
+    // Signaux de vente
+    bool sell_signal = (current_price < ma_value && rsi_value > RSI_Overbought_Level);
+    if(sell_signal && current_ai_signal.action == "SELL" && current_ai_signal.confidence > 0.5)
+    {
+        string sell_arrow = "BoomCrash_SELL_" + IntegerToString((int)TimeCurrent());
+        ObjectCreate(0, sell_arrow, OBJ_ARROW_DOWN, 0, TimeCurrent(), current_price);
+        ObjectSetInteger(0, sell_arrow, OBJPROP_COLOR, SellSignalColor);
+        ObjectSetInteger(0, sell_arrow, OBJPROP_WIDTH, 3);
+        ObjectSetInteger(0, sell_arrow, OBJPROP_ANCHOR, ANCHOR_TOP);
+        ObjectSetString(0, sell_arrow, OBJPROP_TEXT, "SELL");
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Afficher les prédictions sur 100 bougies                           |
+//+------------------------------------------------------------------+
+void UpdatePredictions()
+{
+    if(!ShowPredictions || ArraySize(price_predictions) < 10)
+        return;
+    
+    // Afficher les prédictions futures
+    for(int i = 0; i < 10; i++) // Afficher 10 prochaines bougies
+    {
+        if(i >= ArraySize(price_predictions)) break;
+        
+        datetime future_time = TimeCurrent() + (i + 1) * PeriodSeconds();
+        double pred_price = price_predictions[prediction_index + i];
+        
+        string pred_line = "BoomCrash_PRED_" + IntegerToString(i);
+        ObjectCreate(0, pred_line, OBJ_TREND, 0, TimeCurrent(), price_predictions[prediction_index], 
+                   future_time, pred_price);
+        
+        // Couleur selon la direction
+        if(pred_price > price_predictions[prediction_index])
+            ObjectSetInteger(0, pred_line, OBJPROP_COLOR, clrGreen);
+        else
+            ObjectSetInteger(0, pred_line, OBJPROP_COLOR, clrRed);
+            
+        ObjectSetInteger(0, pred_line, OBJPROP_WIDTH, 2);
+        ObjectSetInteger(0, pred_line, OBJPROP_STYLE, STYLE_DOT);
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Créer une flèche de spike clignotante                          |
+//+------------------------------------------------------------------+
+void CreateSpikeArrow()
+{
+    double current_price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+    spike_arrow_name = "BoomCrash_SPIKE_" + IntegerToString((int)TimeCurrent());
+    spike_arrow_time = TimeCurrent();
+    spike_arrow_blink = true;
+    spike_blink_counter = 0;
+    
+    ObjectCreate(0, spike_arrow_name, OBJ_ARROW_UP, 0, spike_arrow_time, current_price);
+    ObjectSetInteger(0, spike_arrow_name, OBJPROP_COLOR, SpikeArrowColor);
+    ObjectSetInteger(0, spike_arrow_name, OBJPROP_WIDTH, 5);
+    ObjectSetInteger(0, spike_arrow_name, OBJPROP_ANCHOR, ANCHOR_BOTTOM);
+    ObjectSetString(0, spike_arrow_name, OBJPROP_TEXT, "🚨 SPIKE");
+    
+    Print("🚨 FLÈCHE DE SPIKE CRÉÉE - Clignotement activé");
+}
+
+//+------------------------------------------------------------------+
+//| Gérer le clignotement de la flèche de spike                        |
+//+------------------------------------------------------------------+
+void UpdateSpikeArrow()
+{
+    if(!spike_arrow_blink || spike_arrow_name == "")
+        return;
+    
+    datetime current_time = TimeCurrent();
+    spike_blink_counter++;
+    
+    // Clignoter toutes les secondes
+    if(current_time - spike_arrow_time >= 1)
+    {
+        color new_color = (spike_blink_counter % 2 == 0) ? SpikeArrowColor : clrOrange;
+        ObjectSetInteger(0, spike_arrow_name, OBJPROP_COLOR, new_color);
+        spike_arrow_time = current_time;
+    }
+    
+    // Supprimer après 30 secondes
+    if(current_time - ObjectGetInteger(0, spike_arrow_name, OBJPROP_TIME) >= 30)
+    {
+        ObjectDelete(0, spike_arrow_name);
+        spike_arrow_name = "";
+        spike_arrow_blink = false;
+        spike_blink_counter = 0;
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Nettoyer les objets graphiques                                   |
+//+------------------------------------------------------------------+
+void CleanChartObjects()
+{
+    for(int i = ObjectsTotal(0, -1, -1) - 1; i >= 0; i--)
+    {
+        string obj_name = ObjectName(0, i, -1, -1);
+        if(StringFind(obj_name, "BoomCrash_") >= 0)
+        {
+            ObjectDelete(0, obj_name);
+        }
+    }
 }
 //+------------------------------------------------------------------+
