@@ -2631,13 +2631,14 @@ bool ValidateLimitOrderConditions(ENUM_ORDER_TYPE limitOrderType)
       return false;
    }
    
+   // DÉSACTIVÉ: Plus de blocage par cohérence des endpoints
    // VÉRIFICATION PRIORITAIRE: Cohérence de TOUS les endpoints d'analyse
    int orderDirection = orderIsBuy ? 1 : -1;
-   if(!CheckCoherenceOfAllAnalyses(orderDirection))
-   {
-      Print("🚫 VALIDATION LIMIT: Cohérence insuffisante de tous les endpoints d'analyse - Ordre annulé - Direction: ", (orderDirection == 1 ? "BUY" : "SELL"));
-      return false; // BLOQUER si cohérence insuffisante
-   }
+   // if(!CheckCoherenceOfAllAnalyses(orderDirection))
+   // {
+   //    Print("🚫 VALIDATION LIMIT: Cohérence insuffisante de tous les endpoints d'analyse - Ordre annulé - Direction: ", (orderDirection == 1 ? "BUY" : "SELL"));
+   //    return false; // BLOQUER si cohérence insuffisante
+   // }
    
    // ===== VÉRIFICATION 2: Direction de la zone prédite (par où le prix va passer) =====
    // Vérifier que la direction de la prédiction correspond toujours à l'ordre
@@ -10052,12 +10053,12 @@ void LookForTradingOpportunity()
       }
       
       // Anti-panne: si l'analyse cohérente n'est pas disponible, on ne trade pas (mode "sûr")
-      // SAUF si l'analyse cohérente est désactivée dans les paramètres
-      if(ShowCoherentAnalysis && (g_coherentAnalysis.lastUpdate == 0 || age > (AI_CoherentAnalysisInterval * 2)))
-      {
-         Print("🚫 TRADE BLOQUÉ (COHÉRENT): Analyse cohérente absente/trop ancienne (age=", age, "s)");
-         return;
-      }
+      // DÉSACTIVÉ: Plus de blocage par analyse cohérente
+      // if(ShowCoherentAnalysis && (g_coherentAnalysis.lastUpdate == 0 || age > (AI_CoherentAnalysisInterval * 2)))
+      // {
+      //    Print("🚫 TRADE BLOQUÉ (COHÉRENT): Analyse cohérente absente/trop ancienne (age=", age, "s)");
+      //    return;
+      // }
       
       double coherentConf01 = g_coherentAnalysis.confidence;
       if(coherentConf01 > 1.0) coherentConf01 /= 100.0; // Support API qui renvoie 0-100
@@ -10068,19 +10069,20 @@ void LookForTradingOpportunity()
       bool coherentSell = (StringFind(decision, "SELL") >= 0 || StringFind(decision, "VENTE") >= 0);
       bool coherentAligned = (tradeDirection == 1 ? coherentBuy : coherentSell);
       
-      if(ShowCoherentAnalysis && (!coherentAligned || coherentConf01 < MinCoherentConfidence))
-      {
-         Print("🚫 TRADE BLOQUÉ (COHÉRENT): Décision/Confiance insuffisante | Decision=", g_coherentAnalysis.decision,
-               " | Conf=", DoubleToString(coherentConf01 * 100.0, 1), "% < ", DoubleToString(MinCoherentConfidence * 100.0, 0), "%");
-         return;
-      }
+      // DÉSACTIVÉ: Plus de blocage par confiance cohérente
+      // if(ShowCoherentAnalysis && (!coherentAligned || coherentConf01 < MinCoherentConfidence))
+      // {
+      //    Print("🚫 TRADE BLOQUÉ (COHÉRENT): Décision/Confiance insuffisante | Decision=", g_coherentAnalysis.decision,
+      //          " | Conf=", DoubleToString(coherentConf01 * 100.0, 1), "% < ", DoubleToString(MinCoherentConfidence * 100.0, 0), "%");
+      //    return;
+      // }
       
-      // VÉRIFICATION PRIORITAIRE: Cohérence de TOUS les endpoints d'analyse (seulement si activé)
-      if(ShowCoherentAnalysis && !CheckCoherenceOfAllAnalyses(tradeDirection))
-      {
-         Print("🚫 TRADE BLOQUÉ: Cohérence insuffisante de tous les endpoints d'analyse - Direction: ", (tradeDirection == 1 ? "BUY" : "SELL"));
-         return; // BLOQUER si cohérence insuffisante
-      }
+      // DÉSACTIVÉ: Plus de blocage par cohérence des endpoints
+      // if(ShowCoherentAnalysis && !CheckCoherenceOfAllAnalyses(tradeDirection))
+      // {
+      //    Print("🚫 TRADE BLOQUÉ: Cohérence insuffisante de tous les endpoints d'analyse - Direction: ", (tradeDirection == 1 ? "BUY" : "SELL"));
+      //    return; // BLOQUER si cohérence insuffisante
+      // }
       
       // NOUVEAU OBLIGATOIRE 0: Vérifier qu'on n'est PAS dans une zone de correction
       if(IsPriceInCorrectionZone(signalType))
