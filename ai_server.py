@@ -1,7 +1,13 @@
 #!/usr/bin/env python3
 """
 Serveur IA pour TradBOT - Gestion des prédictions et analyses de marché
-Version: 2.0.0
+Version: 2.1.0 - STABILISÉ
+Corrections majeures:
+- Ajout champ timestamp dans DecisionRequest (fix erreur 422)
+- Correction gestion colonne timestamp dans adaptive_predict.py  
+- Ajout endpoint /trend principal (fix erreur 404)
+- Définition variable backend_available (fix NameError)
+- Amélioration gestion des erreurs et logging
 Compatible avec F_INX_robot4.mq5
 """
 
@@ -1034,6 +1040,9 @@ ALPHAVANTAGE_DAILY_LIMIT = 25
 
 # Indicateur global de disponibilité du backend ML
 BACKEND_AVAILABLE = False
+
+# Indicateur global de disponibilité du backend ML
+backend_available = False
 
 # Tentative d'importation des modules backend (optionnel, mais non bloquant pour l'API)
 sys.path.insert(0, str(Path(__file__).parent / "backend"))
@@ -2133,6 +2142,7 @@ class DecisionRequest(BaseModel):
     deriv_patterns_bullish: Optional[int] = None  # Nombre de patterns bullish
     deriv_patterns_bearish: Optional[int] = None  # Nombre de patterns bearish
     deriv_patterns_confidence: Optional[float] = None  # Confiance moyenne des patterns
+    timestamp: Optional[str] = None  # Timestamp de la requête (ajouté pour corriger l'erreur 422)
 
 # ===== MODÈLES POUR FEEDBACK LOOP =====
 class TradeFeedback(BaseModel):
@@ -2989,6 +2999,106 @@ async def get_market_state_endpoint(symbol: str = "EURUSD", timeframe: str = "M1
             "timeframe": timeframe,
             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
+
+@app.get("/trend/health")
+async def trend_health():
+    """Vérification de santé pour le module de tendance"""
+    return {
+        "status": "ok",
+        "module": "trend_analysis",
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "mt5_available": mt5_initialized
+    }
+
+@app.get("/trend")
+async def get_trend(symbol: str, timeframe: str = "M1"):
+    """Endpoint principal pour l'analyse de tendance MT5"""
+    try:
+        logger.info(f"📈 Requête tendance reçue pour {symbol} (timeframe: {timeframe})")
+        
+        # Validation des paramètres
+        if not symbol or symbol.strip() == "":
+            raise HTTPException(status_code=422, detail="Le symbole est requis et ne peut être vide")
+        
+        if timeframe not in ["M1", "M5", "M15", "M30", "H1", "H4", "D1"]:
+            raise HTTPException(status_code=422, detail="Le timeframe doit être M1, M5, M15, M30, H1, H4 ou D1")
+        
+        # Récupérer les données historiques depuis MT5
+        df_m1 = get_historical_data_mt5(symbol, "M1", 500)
+        df_m5 = get_historical_data_mt5(symbol, "M5", 200)
+        df_h1 = get_historical_data_mt5(symbol, "H1", 100)
+        
+        if df_m1 is None or df_m5 is None or df_h1 is None:
+            raise HTTPException(status_code=500, detail="Impossible de récupérer les données historiques depuis MT5")
+        
+        # Calculer les tendances
+        def calculate_trend(df):
+            if len(df) < 2:
+                return "NEUTRAL", 0.0
+            
+            latest = df['close'].iloc[-1]
+            previous = df['close'].iloc[-2]
+            
+            if latest > previous:
+                return "UPTREND", (latest - previous) / previous * 100
+            elif latest < previous:
+                return "DOWNTREND", (previous - latest) / previous * 100
+            else:
+                return "NEUTRAL", 0.0
+        
+        trend_m1, change_m1 = calculate_trend(df_m1)
+        trend_m5, change_m5 = calculate_trend(df_m5)
+        trend_h1, change_h1 = calculate_trend(df_h1)
+        
+        # Calculer le consensus
+        uptrend_count = sum([trend_m1 == "UPTREND", trend_m5 == "UPTREND", trend_h1 == "UPTREND"])
+        downtrend_count = sum([trend_m1 == "DOWNTREND", trend_m5 == "DOWNTREND", trend_h1 == "DOWNTREND"])
+        
+        if uptrend_count >= 2:
+            consensus = "STRONG_UPTREND"
+            confidence = min(0.9, 0.5 + (uptrend_count * 0.15))
+        elif downtrend_count >= 2:
+            consensus = "STRONG_DOWNTREND"
+            confidence = min(0.9, 0.5 + (downtrend_count * 0.15))
+        else:
+            consensus = "NEUTRAL"
+            confidence = 0.5
+        
+        response = {
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "trend_m1": {
+                "direction": trend_m1,
+                "change_percent": change_m1
+            },
+            "trend_m5": {
+                "direction": trend_m5,
+                "change_percent": change_m5
+            },
+            "trend_h1": {
+                "direction": trend_h1,
+                "change_percent": change_h1
+            },
+            "consensus": {
+                "direction": consensus,
+                "confidence": confidence,
+                "uptrend_count": uptrend_count,
+                "downtrend_count": downtrend_count
+            },
+            "data_points": {
+                "m1": len(df_m1) if df_m1 is not None else 0,
+                "m5": len(df_m5) if df_m5 is not None else 0,
+                "h1": len(df_h1) if df_h1 is not None else 0
+            }
+        }
+        
+        logger.info(f"✅ Analyse tendance {symbol}: {consensus} (confiance: {confidence:.2f})")
+        return response
+        
+    except Exception as e:
+        logger.error(f"Erreur dans /trend: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Erreur lors de l'analyse de tendance: {str(e)}")
 
 @app.get("/angelofspike/trend")
 async def get_angelofspike_trend(symbol: str = "Boom 1000 Index", timeframe: str = "M1"):
