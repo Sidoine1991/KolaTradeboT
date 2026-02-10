@@ -4675,8 +4675,8 @@ async def decision(request: DecisionRequest):
         
         # Log détaillé pour comprendre le calcul
         logger.info(f"📊 Confiance {request.symbol}: {action.upper()} | Score={direction_score:+.3f} | "
-                   f"Base={base_confidence:.2f} | H4/D1={long_term_bonus:.2f} | H1+H4/D1={long_term_alignment_bonus:.2f} | "
-                   f"M5+H1={medium_term_bonus:.2f} | Align={alignment_bonus:.2f} | FINAL={confidence:.2f} ({confidence*100:.1f}%)")
+                   f"Base={base_confidence*100:.1f}% | H4/D1={long_term_bonus*100:.1f}% | H1+H4/D1={long_term_alignment_bonus*100:.1f}% | "
+                   f"M5+H1={medium_term_bonus*100:.1f}% | Align={alignment_bonus*100:.1f}% | FINAL={confidence*100:.1f}%")
         
         # Construire la raison initiale structurée
         reason_parts = []
