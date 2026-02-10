@@ -389,6 +389,18 @@ void OnTick()
    }
 
    // ────────────────────────────────────────────────
+   // Mise à jour dashboard gauche (toujours exécuté)
+   // ────────────────────────────────────────────────
+   if(TimeCurrent() - lastDashboardUpdate >= 10)  // Mise à jour toutes les 10 secondes
+   {
+      UpdateLeftDashboard();
+      lastDashboardUpdate = TimeCurrent();
+      static int dashboardDebugCounter = 0;
+      if(++dashboardDebugCounter % 6 == 0) // Message toutes les 60 secondes
+         Print("📊 Dashboard actif - Mise à jour toutes les 10 secondes");
+   }
+
+   // ────────────────────────────────────────────────
    // Objectif journalier atteint → on arrête de trader aujourd'hui
    // ────────────────────────────────────────────────
    static datetime last_daily_profit_check_time = 0;
@@ -519,13 +531,6 @@ void OnTick()
    {
       ManageTrailingAndBreakeven();
       lastTrailCheck = TimeCurrent();
-   }
-   
-   // Mise à jour dashboard gauche
-   if(TimeCurrent() - lastDashboardUpdate >= 10)  // Mise à jour toutes les 10 secondes
-   {
-      UpdateLeftDashboard();
-      lastDashboardUpdate = TimeCurrent();
    }
 }
 

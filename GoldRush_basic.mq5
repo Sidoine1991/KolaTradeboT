@@ -1530,6 +1530,18 @@ void OnTick()
    }
 
    // ────────────────────────────────────────────────
+   // Mise à jour dashboard gauche (toujours exécuté)
+   // ────────────────────────────────────────────────
+   if(TimeCurrent() - lastDashboardUpdate >= 10)  // Mise à jour toutes les 10 secondes
+   {
+      UpdateLeftDashboard();
+      lastDashboardUpdate = TimeCurrent();
+      static int dashboardDebugCounter = 0;
+      if(++dashboardDebugCounter % 6 == 0) // Message toutes les 60 secondes
+         Print("📊 Dashboard GoldRush actif - Mise à jour toutes les 10 secondes");
+   }
+
+   // ────────────────────────────────────────────────
    // Objectif journalier atteint → on arrête de trader aujourd'hui
    // ──────────────────────────
    double current_daily_net = CalculateDailyNetProfit();
@@ -2430,13 +2442,6 @@ void ManagePositionsAdvanced()
             break; // Sortir après une duplication
          }
       }
-   }
-   
-   // Mise à jour dashboard gauche
-   if(TimeCurrent() - lastDashboardUpdate >= 10)  // Mise à jour toutes les 10 secondes
-   {
-      UpdateLeftDashboard();
-      lastDashboardUpdate = TimeCurrent();
    }
 }
 
