@@ -307,9 +307,10 @@ void OnTick() {
    // Appeler l'API locale d'abord
    uchar result[];
    string result_headers;
-   string headers = "Content-Type: application/json\r\nUser-Agent: MT5-TradBOT/3.0\r\n";
+   uchar data[];
+   StringToCharArray(jsonData, data);
    
-   int res = WebRequest("POST", aiServerURL, headers, 10000, jsonData, result, result_headers);
+   int res = WebRequest("POST", aiServerURL, "Content-Type: application/json\r\nUser-Agent: MT5-TradBOT/3.0\r\n", 10000, data, result, result_headers);
    
    if(res == 200) {
       string response = CharArrayToString(result, 0, -1, CP_UTF8);
@@ -333,7 +334,9 @@ void OnTick() {
    } else {
       Print("❌ Erreur API locale, tentative fallback...");
       // Essayer le serveur distant en fallback
-      res = WebRequest("POST", fallbackURL, headers, 15000, jsonData, result, result_headers);
+      uchar fallbackData[];
+      StringToCharArray(jsonData, fallbackData);
+      res = WebRequest("POST", fallbackURL, "Content-Type: application/json\r\nUser-Agent: MT5-TradBOT/3.0\r\n", 15000, fallbackData, result, result_headers);
       if(res == 200) {
          string response = CharArrayToString(result, 0, -1, CP_UTF8);
          // Parser la réponse (même logique)
@@ -378,14 +381,14 @@ void OnTick() {
    if(filterValid) {
       if(g_lastAIConfidence >= AI_MinConfidence) {
          double lot = CalculateRiskBasedLotSize(InpRiskPercentPerTrade, InpStopLoss);
-         if(shouldLog) Print("💰 Lot calculé: ", lot, " | Min lot: ", SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN));
+         if(shouldLog) Print("💰 Lot calculé: ", DoubleToString(lot, 2), " | Min lot: ", DoubleToString(SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN), 2));
          if(lot >= SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN)) {
             double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
             double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
             if(StringFind(StringToUpper(g_lastAIAction), "BUY") >= 0) {
                double sl = ask - InpStopLoss * SymbolInfoDouble(_Symbol, SYMBOL_POINT);
                double tp = ask + InpTakeProfit * SymbolInfoDouble(_Symbol, SYMBOL_POINT);
-               Print("🟢 TENTATIVE BUY | Lot: ", lot, " | Ask: ", ask, " | SL: ", sl, " | TP: ", tp);
+               Print("🟢 TENTATIVE BUY | Lot: ", DoubleToString(lot, 2), " | Ask: ", DoubleToString(ask, 5), " | SL: ", DoubleToString(sl, 5), " | TP: ", DoubleToString(tp, 5));
                trade.Buy(lot, _Symbol, ask, sl, tp, "AI BUY");
                if(trade.ResultRetcode() == 10009) {
                   tradesTodayCount++;
@@ -396,7 +399,7 @@ void OnTick() {
             } else if(StringFind(StringToUpper(g_lastAIAction), "SELL") >= 0) {
                double sl = bid + InpStopLoss * SymbolInfoDouble(_Symbol, SYMBOL_POINT);
                double tp = bid - InpTakeProfit * SymbolInfoDouble(_Symbol, SYMBOL_POINT);
-               Print("🔴 TENTATIVE SELL | Lot: ", lot, " | Bid: ", bid, " | SL: ", sl, " | TP: ", tp);
+               Print("🔴 TENTATIVE SELL | Lot: ", DoubleToString(lot, 2), " | Bid: ", DoubleToString(bid, 5), " | SL: ", DoubleToString(sl, 5), " | TP: ", DoubleToString(tp, 5));
                trade.Sell(lot, _Symbol, bid, sl, tp, "AI SELL");
                if(trade.ResultRetcode() == 10009) {
                   tradesTodayCount++;
@@ -406,7 +409,7 @@ void OnTick() {
                }
             }
          } else {
-            if(shouldLog) Print("❌ Lot trop petit: ", lot, " < ", SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN));
+            if(shouldLog) Print("❌ Lot trop petit: ", DoubleToString(lot, 2), " < ", DoubleToString(SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN), 2));
          }
       } else {
          if(shouldLog) Print("❌ Confiance IA insuffisante: ", g_lastAIConfidence * 100, "% < ", AI_MinConfidence * 100, "%");
