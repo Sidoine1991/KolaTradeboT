@@ -399,6 +399,17 @@ void OnTick()
       if(++dashboardDebugCounter % 6 == 0) // Message toutes les 60 secondes
          Print("📊 Dashboard actif - Mise à jour toutes les 10 secondes");
    }
+   
+   // ────────────────────────────────────────────────
+   // Nettoyage des objets expirés (toutes les 5 minutes)
+   // ────────────────────────────────────────────────
+   static datetime lastCleanupTime = 0;
+   if(TimeCurrent() - lastCleanupTime >= 300) // Nettoyer toutes les 5 minutes
+   {
+      CleanExpiredObjects();
+      lastCleanupTime = TimeCurrent();
+      Print("🧹 Nettoyage des objets graphiques expirés");
+   }
 
    // ────────────────────────────────────────────────
    // Objectif journalier atteint → on arrête de trader aujourd'hui
@@ -2557,6 +2568,35 @@ void CleanChartObjects()
         if(StringFind(obj_name, "BoomCrash_") >= 0)
         {
             ObjectDelete(0, obj_name);
+        }
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Nettoyer tous les objets graphiques expirés                      |
+//+------------------------------------------------------------------+
+void CleanExpiredObjects()
+{
+    datetime currentTime = TimeCurrent();
+    datetime cutoffTime = currentTime - 3600; // Supprimer les objets de plus d'1 heure
+    
+    for(int i = ObjectsTotal(0, -1, -1) - 1; i >= 0; i--)
+    {
+        string objName = ObjectName(0, i, -1, -1);
+        
+        // Vérifier si c'est un objet de nos robots
+        if(StringFind(objName, "BoomCrash_") >= 0 || 
+           StringFind(objName, "DASH_") >= 0 ||
+           StringFind(objName, "SpikeArrow_") >= 0 ||
+           StringFind(objName, "Prediction_") >= 0)
+        {
+            datetime objTime = (datetime)ObjectGetInteger(0, objName, OBJPROP_TIME);
+            
+            // Si l'objet est trop ancien ou a une date future, le supprimer
+            if(objTime < cutoffTime || objTime > currentTime)
+            {
+                ObjectDelete(0, objName);
+            }
         }
     }
 }
