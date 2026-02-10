@@ -38,6 +38,34 @@ from collections import deque
 # Configurer le logger avant les imports d'améliorations
 logger = logging.getLogger("tradbot_ai")
 
+# ========== CONFIGURATIONS AMÉLIORATIONS PRIORITAIRES ==========
+# Seuils de confiance minimum pour éviter les signaux trop faibles
+MIN_CONFIDENCE_THRESHOLD = 0.65  # 65% minimum
+FORCE_HOLD_THRESHOLD = 0.60      # Force HOLD si confiance < 60%
+
+# Prompt système amélioré pour Boom/Crash
+BOOM_CRASH_SYSTEM_PROMPT = """
+Tu es un trader expert spécialisé sur les indices synthétiques Deriv (Boom & Crash 50/100/300/600/900/1000).
+
+RÈGLES STRICTES POUR BOOM/CRASH:
+1. Confiance MINIMUM 65% pour tout signal BUY/SELL. En dessous → HOLD obligatoire.
+2. SUR BOOM: Privilégie BUY quand RSI < 40 + EMA crossover haussier SANS spike récent.
+3. SUR CRASH: Privilégie SELL quand RSI > 60 + EMA crossover baissier SANS spike récent.
+4. JAMAIS de signal si ATR dernière bougie > 2.8×ATR moyen → risque spike trop élevé.
+5. Détecte les patterns de spike: bougie > 3×range moyen + volume élevé.
+
+FORMAT DE RÉPONSE OBLIGATOIRE:
+- action: "buy"/"sell"/"hold" 
+- confidence: 0.65-1.0 (jamais en dessous de 0.65)
+- reason: phrase courte et précise
+- metadata: RSI, EMA, ATR ratio, spike_risk
+"""
+
+# Cache court pour éviter les analyses répétées
+decision_cache = {}
+cache_timestamps = {}
+CACHE_DURATION = 30  # 30 secondes
+
 # Importer les fonctions améliorées
 try:
     from ai_server_improvements import (
@@ -78,6 +106,112 @@ try:
 except ImportError:
     YFINANCE_AVAILABLE = False
     logger.warning("⚠️ yfinance non disponible")
+
+# ========== FONCTIONS UTILITAIRES AMÉLIORATIONS ==========
+def apply_confidence_thresholds(action: str, confidence: float, reason: str) -> tuple:
+    """
+    Applique les seuils de confiance minimum pour éviter les signaux trop faibles.
+    Force HOLD si confiance < 60%, applique plancher 65% pour les signaux.
+    """
+    if confidence < FORCE_HOLD_THRESHOLD:
+        return "hold", FORCE_HOLD_THRESHOLD, f"{reason} (confiance trop faible → hold forcé)"
+    
+    if action != "hold" and confidence < MIN_CONFIDENCE_THRESHOLD:
+        return "hold", MIN_CONFIDENCE_THRESHOLD, f"{reason} (confiance < 65% → hold)"
+    
+    # Forcer un minimum de 65% pour les signaux buy/sell
+    if action != "hold" and confidence < MIN_CONFIDENCE_THRESHOLD:
+        confidence = MIN_CONFIDENCE_THRESHOLD
+        reason += f" (confiance forcée à {MIN_CONFIDENCE_THRESHOLD*100:.0f}%)"
+    
+    return action, confidence, reason
+
+def get_cached_decision(symbol: str) -> Optional[Dict]:
+    """Vérifie le cache pour une décision récente."""
+    current_time = time.time()
+    if symbol in decision_cache:
+        cache_age = current_time - cache_timestamps.get(symbol, 0)
+        if cache_age < CACHE_DURATION:
+            logger.debug(f"✅ Cache trouvé pour {symbol} (âge: {cache_age:.1f}s)")
+            return decision_cache[symbol]
+        else:
+            # Cache expiré, supprimer
+            del decision_cache[symbol]
+            del cache_timestamps[symbol]
+    return None
+
+def cache_decision(symbol: str, decision_data: Dict):
+    """Stocke une décision dans le cache."""
+    decision_cache[symbol] = decision_data
+    cache_timestamps[symbol] = time.time()
+    logger.debug(f"💾 Décision mise en cache pour {symbol}")
+
+def calculate_boom_crash_metadata(df: pd.DataFrame, symbol: str, request) -> Dict:
+    """
+    Calcule les métadonnées spécifiques pour Boom/Crash.
+    """
+    metadata = {}
+    
+    try:
+        # RSI
+        if 'rsi' in df.columns:
+            metadata['rsi'] = float(df['rsi'].iloc[-1])
+        elif hasattr(request, 'rsi') and request.rsi is not None:
+            metadata['rsi'] = request.rsi
+        
+        # EMA fast/slow
+        ema_fast = df['close'].ewm(span=9).mean()
+        ema_slow = df['close'].ewm(span=21).mean()
+        metadata['ema_fast'] = float(ema_fast.iloc[-1])
+        metadata['ema_slow'] = float(ema_slow.iloc[-1])
+        metadata['ema_crossover'] = ema_fast.iloc[-1] > ema_slow.iloc[-1]
+        
+        # ATR et ratio
+        atr = calculate_atr(df)
+        atr_mean = atr.rolling(20).mean().iloc[-1]
+        atr_current = atr.iloc[-1]
+        metadata['atr_ratio'] = float(atr_current / atr_mean) if atr_mean > 0 else 1.0
+        
+        # Détection de risque de spike
+        range_mean = df['high'].sub(df['low']).rolling(20).mean().iloc[-1]
+        current_range = df['high'].iloc[-1] - df['low'].iloc[-1]
+        metadata['spike_risk'] = current_range > (2.8 * range_mean)
+        
+        # SL/TP suggérés
+        if metadata['spike_risk']:
+            metadata['suggested_sl_pips'] = 60  # Plus large pour spike
+            metadata['suggested_tp_pips'] = 150
+        else:
+            metadata['suggested_sl_pips'] = 35
+            metadata['suggested_tp_pips'] = 90
+            
+    except Exception as e:
+        logger.warning(f"⚠️ Erreur calcul métadonnées: {e}")
+        metadata = {'error': str(e)}
+    
+    return metadata
+
+def calculate_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
+    """Calcule l'ATR (Average True Range)."""
+    high_low = df['high'] - df['low']
+    high_close = (df['high'] - df['close'].shift()).abs()
+    low_close = (df['low'] - df['close'].shift()).abs()
+    
+    true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+    atr = true_range.rolling(window=period).mean()
+    
+    return atr
+
+def calculate_rsi(prices: pd.Series, period: int = 14) -> pd.Series:
+    """Calcule le RSI."""
+    delta = prices.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    
+    rs = gain / loss
+    rsi = 100 - (100 / (1 + rs))
+    
+    return rsi
 
 # Cache pour les données historiques (fallback cloud)
 _history_cache: Dict[str, pd.DataFrame] = {}
@@ -2179,6 +2313,7 @@ class DecisionResponse(BaseModel):
     model_used: Optional[str] = None
     technical_analysis: Optional[Dict[str, Any]] = None
     gemma_analysis: Optional[str] = None  # Analyse complète Gemma+Gemini
+    metadata: Optional[Dict[str, Any]] = None  # Métadonnées enrichies (RSI, EMA, ATR, etc.)
 
 class TrendlineData(BaseModel):
     start: Dict[str, Any]  # {"time": timestamp, "price": float}
@@ -5020,7 +5155,41 @@ Format: Analyse claire et professionnelle en français.
         init_marker = "🔄 [INIT]" if initialization_mode else ""
         logger.info(f"✅ {init_marker} Décision IA pour {request.symbol}: action={action}, confidence={confidence:.3f} ({confidence*100:.1f}%), reason={reason[:100]}")
         
-        # Mise en cache
+        # ========== AMÉLIORATIONS PRIORITAIRES APPLIQUÉES ICI ==========
+        
+        # 1. Vérifier le cache court d'abord
+        cached_decision = get_cached_decision(request.symbol)
+        if cached_decision and not initialization_mode:
+            logger.debug(f"📋 Utilisation décision en cache pour {request.symbol}")
+            return DecisionResponse(**cached_decision)
+        
+        # 2. Appliquer les seuils de confiance minimum
+        action, confidence, reason = apply_confidence_thresholds(action, confidence, reason)
+        logger.info(f"🎯 Seuils appliqués: action={action}, confidence={confidence:.3f}")
+        
+        # 3. Calculer les métadonnées enrichies pour Boom/Crash
+        metadata = {}
+        if "boom" in request.symbol.lower() or "crash" in request.symbol.lower():
+            try:
+                # Récupérer données récentes pour métadonnées
+                df_recent = get_historical_data_mt5(request.symbol, "M1", 50)
+                if df_recent is not None and len(df_recent) > 20:
+                    metadata = calculate_boom_crash_metadata(df_recent, request.symbol, request)
+                    logger.debug(f"📊 Métadonnées Boom/Crash calculées: {list(metadata.keys())}")
+            except Exception as meta_err:
+                logger.warning(f"⚠️ Erreur métadonnées: {meta_err}")
+                metadata = {"error": str(meta_err)}
+        
+        # 4. Mettre à jour response_data avec métadonnées si présentes
+        if metadata:
+            response_data["metadata"] = metadata
+        
+        # 5. Mettre en cache la décision améliorée
+        cache_decision(request.symbol, response_data)
+        
+        # ========== FIN DES AMÉLIORATIONS ==========
+        
+        # Mise en cache (original - gardé pour compatibilité)
         prediction_cache[cache_key] = response_data
         last_updated[cache_key] = current_time
         
@@ -5736,6 +5905,14 @@ class MT5HistoryUploadRequest(BaseModel):
     timeframe: str = Field(..., description="Timeframe (M1, M5, M15, H1, H4, D1)")
     data: List[Dict[str, Any]] = Field(..., description="Liste des bougies OHLCV au format: [{'time': timestamp, 'open': float, 'high': float, 'low': float, 'close': float, 'tick_volume': int}, ...]")
 
+class ForceDecisionRequest(BaseModel):
+    """Requête pour forcer une décision en mode test"""
+    symbol: str
+    action: str = Field(..., description="Action forcée: 'buy', 'sell', ou 'hold'")
+    confidence: float = Field(default=0.85, description="Confiance forcée (défaut: 85%)")
+    reason: str = Field(default="Test mode - décision forcée", description="Raison de la décision forcée")
+    override_thresholds: bool = Field(default=True, description="Ignorer les seuils de confiance minimum")
+
 @app.post("/mt5/history-upload")
 async def upload_mt5_history(request: MT5HistoryUploadRequest):
     """
@@ -5813,6 +5990,80 @@ async def upload_mt5_history(request: MT5HistoryUploadRequest):
     except Exception as e:
         logger.error(f"Erreur dans /mt5/history-upload: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Erreur lors de l'upload des données historiques: {str(e)}")
+
+@app.post("/decision/force", response_model=DecisionResponse)
+async def force_decision(request: ForceDecisionRequest):
+    """
+    Endpoint pour forcer une décision en mode test.
+    Utile pour backtester différents scénarios sans attendre que le modèle "se réveille".
+    
+    Args:
+        request: Requête contenant l'action forcée et les paramètres
+        
+    Returns:
+        DecisionResponse: Décision forcée avec métadonnées
+    """
+    try:
+        logger.info(f"🧪 MODE TEST - Forçage décision pour {request.symbol}: action={request.action}, confidence={request.confidence}")
+        
+        # Validation de l'action
+        if request.action not in ["buy", "sell", "hold"]:
+            raise HTTPException(status_code=400, detail="Action doit être 'buy', 'sell', ou 'hold'")
+        
+        # Validation de la confiance
+        if not (0.0 <= request.confidence <= 1.0):
+            raise HTTPException(status_code=400, detail="La confiance doit être entre 0.0 et 1.0")
+        
+        # Appliquer les seuils si demandé
+        final_confidence = request.confidence
+        final_reason = request.reason
+        
+        if not request.override_thresholds:
+            action, final_confidence, final_reason = apply_confidence_thresholds(
+                request.action, request.confidence, request.reason
+            )
+        else:
+            action = request.action
+        
+        # Créer les métadonnées de test
+        metadata = {
+            "test_mode": True,
+            "forced_action": True,
+            "original_confidence": request.confidence,
+            "thresholds_overridden": request.override_thresholds,
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        # Retourner la décision forcée
+        response = DecisionResponse(
+            action=action,
+            confidence=final_confidence,
+            reason=final_reason,
+            spike_prediction=False,
+            spike_zone_price=None,
+            stop_loss=None,
+            take_profit=None,
+            spike_direction=None,
+            early_spike_warning=False,
+            early_spike_zone_price=None,
+            early_spike_direction=None,
+            buy_zone_low=None,
+            buy_zone_high=None,
+            sell_zone_low=None,
+            sell_zone_high=None,
+            timestamp=datetime.now().isoformat(),
+            model_used="force_test_mode",
+            metadata=metadata
+        )
+        
+        logger.info(f"✅ Décision forcée retournée: {action} @ {final_confidence:.3f}")
+        return response
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Erreur dans /decision/force: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Erreur lors du forçage de décision: {str(e)}")
 
 @app.post("/predictions/validate")
 async def validate_prediction(request: PredictionValidationRequest):
