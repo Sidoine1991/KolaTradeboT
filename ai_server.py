@@ -40,7 +40,7 @@ logger = logging.getLogger("tradbot_ai")
 
 # ========== CONFIGURATIONS AMÉLIORATIONS PRIORITAIRES ==========
 # Seuils de confiance minimum pour éviter les signaux trop faibles
-MIN_CONFIDENCE_THRESHOLD = 0.65  # 65% minimum
+MIN_CONFIDENCE_THRESHOLD = 0.68  # 68% minimum (plancher plus élevé)
 FORCE_HOLD_THRESHOLD = 0.60      # Force HOLD si confiance < 60%
 
 # Prompt système amélioré pour Boom/Crash
@@ -48,7 +48,7 @@ BOOM_CRASH_SYSTEM_PROMPT = """
 Tu es un trader expert spécialisé sur les indices synthétiques Deriv (Boom & Crash 50/100/300/600/900/1000).
 
 RÈGLES STRICTES POUR BOOM/CRASH:
-1. Confiance MINIMUM 65% pour tout signal BUY/SELL. En dessous → HOLD obligatoire.
+1. Confiance MINIMUM 68% pour tout signal BUY/SELL. En dessous → HOLD obligatoire.
 2. SUR BOOM: Privilégie BUY quand RSI < 40 + EMA crossover haussier SANS spike récent.
 3. SUR CRASH: Privilégie SELL quand RSI > 60 + EMA crossover baissier SANS spike récent.
 4. JAMAIS de signal si ATR dernière bougie > 2.8×ATR moyen → risque spike trop élevé.
@@ -56,7 +56,7 @@ RÈGLES STRICTES POUR BOOM/CRASH:
 
 FORMAT DE RÉPONSE OBLIGATOIRE:
 - action: "buy"/"sell"/"hold" 
-- confidence: 0.65-1.0 (jamais en dessous de 0.65)
+- confidence: 0.68-1.0 (jamais en dessous de 0.68)
 - reason: phrase courte et précise
 - metadata: RSI, EMA, ATR ratio, spike_risk
 """
@@ -111,18 +111,23 @@ except ImportError:
 def apply_confidence_thresholds(action: str, confidence: float, reason: str) -> tuple:
     """
     Applique les seuils de confiance minimum pour éviter les signaux trop faibles.
-    Force HOLD si confiance < 60%, applique plancher 65% pour les signaux.
+    Force HOLD si confiance < 60%, applique plancher 68% pour les signaux.
     """
-    if confidence < FORCE_HOLD_THRESHOLD:
-        return "hold", FORCE_HOLD_THRESHOLD, f"{reason} (confiance trop faible → hold forcé)"
+    # Forcer un plancher de confiance à 68%
+    confidence = max(confidence, 0.68)
     
-    if action != "hold" and confidence < MIN_CONFIDENCE_THRESHOLD:
-        return "hold", MIN_CONFIDENCE_THRESHOLD, f"{reason} (confiance < 65% → hold)"
+    # Forcer HOLD si confiance encore trop faible après plancher
+    if confidence < 0.68:
+        return "hold", 0.68, f"{reason} (confiance trop faible → hold forcé)"
     
-    # Forcer un minimum de 65% pour les signaux buy/sell
-    if action != "hold" and confidence < MIN_CONFIDENCE_THRESHOLD:
-        confidence = MIN_CONFIDENCE_THRESHOLD
-        reason += f" (confiance forcée à {MIN_CONFIDENCE_THRESHOLD*100:.0f}%)"
+    # Si action non-hold mais confiance < 68%, forcer HOLD
+    if action != "hold" and confidence < 0.68:
+        return "hold", 0.68, f"{reason} (confiance < 68% → hold)"
+    
+    # Forcer un minimum de 68% pour les signaux buy/sell
+    if action != "hold" and confidence < 0.68:
+        confidence = 0.68
+        reason += f" (confiance forcée à 68%)"
     
     return action, confidence, reason
 
@@ -149,45 +154,106 @@ def cache_decision(symbol: str, decision_data: Dict):
 def calculate_boom_crash_metadata(df: pd.DataFrame, symbol: str, request) -> Dict:
     """
     Calcule les métadonnées spécifiques pour Boom/Crash.
+    Garantit les métadonnées de base pour le filtre local renforcé.
     """
     metadata = {}
     
     try:
-        # RSI
-        if 'rsi' in df.columns:
-            metadata['rsi'] = float(df['rsi'].iloc[-1])
+        # RSI (priorité: df calculé > request > défaut)
+        current_rsi = None
+        if 'rsi' in df.columns and len(df) > 0:
+            current_rsi = float(df['rsi'].iloc[-1])
         elif hasattr(request, 'rsi') and request.rsi is not None:
-            metadata['rsi'] = request.rsi
+            current_rsi = request.rsi
+        else:
+            current_rsi = 50.0  # Défaut neutre
         
-        # EMA fast/slow
-        ema_fast = df['close'].ewm(span=9).mean()
-        ema_slow = df['close'].ewm(span=21).mean()
-        metadata['ema_fast'] = float(ema_fast.iloc[-1])
-        metadata['ema_slow'] = float(ema_slow.iloc[-1])
-        metadata['ema_crossover'] = ema_fast.iloc[-1] > ema_slow.iloc[-1]
+        metadata['rsi'] = current_rsi
         
-        # ATR et ratio
-        atr = calculate_atr(df)
-        atr_mean = atr.rolling(20).mean().iloc[-1]
-        atr_current = atr.iloc[-1]
-        metadata['atr_ratio'] = float(atr_current / atr_mean) if atr_mean > 0 else 1.0
+        # EMA fast/slow avec valeurs par défaut si erreur
+        try:
+            if len(df) > 21:  # Assez de données pour EMA
+                ema_fast = df['close'].ewm(span=9).mean()
+                ema_slow = df['close'].ewm(span=21).mean()
+                ema_fast_val = float(ema_fast.iloc[-1])
+                ema_slow_val = float(ema_slow.iloc[-1])
+                
+                metadata['ema_fast'] = ema_fast_val
+                metadata['ema_slow'] = ema_slow_val
+                metadata['ema_trend'] = "bullish" if ema_fast_val > ema_slow_val else "bearish"
+                metadata['ema_crossover'] = ema_fast_val > ema_slow_val
+            else:
+                # Pas assez de données - utiliser prix actuel
+                current_price = float(df['close'].iloc[-1]) if len(df) > 0 else 0.0
+                metadata['ema_fast'] = current_price
+                metadata['ema_slow'] = current_price
+                metadata['ema_trend'] = "neutral"
+                metadata['ema_crossover'] = False
+        except Exception as ema_err:
+            logger.warning(f"⚠️ Erreur calcul EMA: {ema_err}")
+            metadata['ema_fast'] = 0.0
+            metadata['ema_slow'] = 0.0
+            metadata['ema_trend'] = "neutral"
+            metadata['ema_crossover'] = False
         
-        # Détection de risque de spike
-        range_mean = df['high'].sub(df['low']).rolling(20).mean().iloc[-1]
-        current_range = df['high'].iloc[-1] - df['low'].iloc[-1]
-        metadata['spike_risk'] = current_range > (2.8 * range_mean)
+        # ATR et ratio avec valeurs par défaut
+        try:
+            if len(df) > 20:
+                atr = calculate_atr(df)
+                atr_mean = atr.rolling(20).mean().iloc[-1]
+                atr_current = atr.iloc[-1]
+                atr_ratio = float(atr_current / atr_mean) if atr_mean > 0 else 1.0
+            else:
+                atr_ratio = 1.0  # Défaut normal
+            
+            metadata['atr_ratio'] = atr_ratio
+        except Exception as atr_err:
+            logger.warning(f"⚠️ Erreur calcul ATR: {atr_err}")
+            metadata['atr_ratio'] = 1.0
         
-        # SL/TP suggérés
-        if metadata['spike_risk']:
+        # Détection de risque de spike avec valeurs par défaut
+        try:
+            if len(df) > 20:
+                range_mean = df['high'].sub(df['low']).rolling(20).mean().iloc[-1]
+                current_range = df['high'].iloc[-1] - df['low'].iloc[-1]
+                spike_detected = current_range > (2.8 * range_mean)
+            else:
+                spike_detected = False
+            
+            metadata['spike_risk'] = spike_detected
+        except Exception as spike_err:
+            logger.warning(f"⚠️ Erreur détection spike: {spike_err}")
+            metadata['spike_risk'] = False
+        
+        # SL/TP suggérés basés sur le risque
+        if metadata.get('spike_risk', False):
             metadata['suggested_sl_pips'] = 60  # Plus large pour spike
             metadata['suggested_tp_pips'] = 150
         else:
             metadata['suggested_sl_pips'] = 35
             metadata['suggested_tp_pips'] = 90
             
+        # Métadonnées additionnelles pour le filtre local
+        metadata['symbol'] = symbol
+        metadata['is_boom'] = 'boom' in symbol.lower()
+        metadata['is_crash'] = 'crash' in symbol.lower()
+        metadata['timestamp'] = datetime.now().isoformat()
+            
     except Exception as e:
         logger.warning(f"⚠️ Erreur calcul métadonnées: {e}")
-        metadata = {'error': str(e)}
+        # Garantir les métadonnées de base même en cas d'erreur
+        metadata = {
+            'rsi': getattr(request, 'rsi', 50.0),
+            'atr_ratio': 1.0,
+            'spike_risk': False,
+            'ema_trend': 'neutral',
+            'ema_fast': 0.0,
+            'ema_slow': 0.0,
+            'ema_crossover': False,
+            'error': str(e),
+            'symbol': symbol,
+            'timestamp': datetime.now().isoformat()
+        }
     
     return metadata
 
@@ -3709,6 +3775,50 @@ async def decision(request: DecisionRequest):
             logger.warning(f"❌ Validation échouée pour {request.symbol}: {validation_errors}")
             raise HTTPException(status_code=422, detail=error_detail)
         
+        # ========== AMÉLIORATIONS PRIORITAIRES - APPLIQUÉES TÔT ==========
+        # 1. Vérifier le cache court d'abord
+        cached_decision = get_cached_decision(request.symbol)
+        if cached_decision:
+            logger.debug(f"📋 Utilisation décision en cache pour {request.symbol}")
+            return DecisionResponse(**cached_decision)
+        
+        # 2. Calculer les métadonnées de base (pour tous les symboles)
+        metadata = {}
+        try:
+            df_recent = get_historical_data_mt5(request.symbol, "M1", 50)
+            if df_recent is not None and len(df_recent) > 20:
+                metadata = calculate_boom_crash_metadata(df_recent, request.symbol, request)
+                logger.debug(f"📊 Métadonnées calculées pour {request.symbol}: {list(metadata.keys())}")
+            else:
+                metadata = {
+                    'rsi': getattr(request, 'rsi', 50.0),
+                    'atr_ratio': 1.0,
+                    'spike_risk': False,
+                    'ema_trend': 'neutral',
+                    'ema_fast': 0.0,
+                    'ema_slow': 0.0,
+                    'ema_crossover': False,
+                    'symbol': request.symbol,
+                    'timestamp': datetime.now().isoformat(),
+                    'data_insufficient': True
+                }
+        except Exception as meta_err:
+            logger.warning(f"⚠️ Erreur métadonnées pour {request.symbol}: {meta_err}")
+            metadata = {
+                'rsi': getattr(request, 'rsi', 50.0),
+                'atr_ratio': 1.0,
+                'spike_risk': False,
+                'ema_trend': 'neutral',
+                'ema_fast': 0.0,
+                'ema_slow': 0.0,
+                'ema_crossover': False,
+                'symbol': request.symbol,
+                'timestamp': datetime.now().isoformat(),
+                'error': str(meta_err)
+            }
+        
+        # ========== FIN DES AMÉLIORATIONS PRÉCOCES ==========
+        
         # ========== DÉTECTION MODE INITIALISATION DEPUIS GRAPHIQUE ==========
         # Détecter si c'est une initialisation (première requête pour ce symbole)
         initialization_mode = False
@@ -3777,10 +3887,12 @@ async def decision(request: DecisionRequest):
             # Forcer HOLD pour tout achat sur Crash (règle de sécurité)
             if request.dir_rule == 1:  # 1 = BUY
                 logger.debug(f"🔒 Achat sur Crash bloqué (règle sécurité): {request.symbol}")
+                # Appliquer les seuils de confiance même pour les retards anticipés
+                action, confidence, reason = apply_confidence_thresholds("hold", 0.1, "INTERDICTION: Achats sur Crash non autorisés")
                 return DecisionResponse(
-                    action="hold",
-                    confidence=0.1,
-                    reason="INTERDICTION: Achats sur Crash non autorisés",
+                    action=action,
+                    confidence=confidence,
+                    reason=reason,
                     spike_prediction=False,
                     spike_zone_price=None,
                     stop_loss=None,
@@ -3792,17 +3904,20 @@ async def decision(request: DecisionRequest):
                     buy_zone_low=None,
                     buy_zone_high=None,
                     sell_zone_low=None,
-                    sell_zone_high=None
+                    sell_zone_high=None,
+                    metadata=metadata  # Toujours inclure les métadonnées
                 )
         
         if "boom" in symbol_lower:
             # Forcer HOLD pour toute vente sur Boom (règle de sécurité)
             if request.dir_rule == 0:  # 0 = SELL
                 logger.debug(f"🔒 Vente sur Boom bloquée (règle sécurité): {request.symbol}")
+                # Appliquer les seuils de confiance même pour les retards anticipés
+                action, confidence, reason = apply_confidence_thresholds("hold", 0.1, "INTERDICTION: Ventes sur Boom non autorisées")
                 return DecisionResponse(
-                    action="hold",
-                    confidence=0.1,
-                    reason="INTERDICTION: Ventes sur Boom non autorisées",
+                    action=action,
+                    confidence=confidence,
+                    reason=reason,
                     spike_prediction=False,
                     spike_zone_price=None,
                     stop_loss=None,
@@ -3814,7 +3929,8 @@ async def decision(request: DecisionRequest):
                     buy_zone_low=None,
                     buy_zone_high=None,
                     sell_zone_low=None,
-                    sell_zone_high=None
+                    sell_zone_high=None,
+                    metadata=metadata  # Toujours inclure les métadonnées
                 )
             
         # Log de la requête reçue (déjà loggé par le middleware, pas besoin de répéter)
@@ -5167,22 +5283,46 @@ Format: Analyse claire et professionnelle en français.
         action, confidence, reason = apply_confidence_thresholds(action, confidence, reason)
         logger.info(f"🎯 Seuils appliqués: action={action}, confidence={confidence:.3f}")
         
-        # 3. Calculer les métadonnées enrichies pour Boom/Crash
+        # 3. Calculer les métadonnées enrichies (pour tous les symboles)
         metadata = {}
-        if "boom" in request.symbol.lower() or "crash" in request.symbol.lower():
-            try:
-                # Récupérer données récentes pour métadonnées
-                df_recent = get_historical_data_mt5(request.symbol, "M1", 50)
-                if df_recent is not None and len(df_recent) > 20:
-                    metadata = calculate_boom_crash_metadata(df_recent, request.symbol, request)
-                    logger.debug(f"📊 Métadonnées Boom/Crash calculées: {list(metadata.keys())}")
-            except Exception as meta_err:
-                logger.warning(f"⚠️ Erreur métadonnées: {meta_err}")
-                metadata = {"error": str(meta_err)}
+        try:
+            # Toujours essayer de calculer les métadonnées de base
+            df_recent = get_historical_data_mt5(request.symbol, "M1", 50)
+            if df_recent is not None and len(df_recent) > 20:
+                metadata = calculate_boom_crash_metadata(df_recent, request.symbol, request)
+                logger.debug(f"📊 Métadonnées calculées pour {request.symbol}: {list(metadata.keys())}")
+            else:
+                # Métadonnées minimales si pas assez de données
+                metadata = {
+                    'rsi': getattr(request, 'rsi', 50.0),
+                    'atr_ratio': 1.0,
+                    'spike_risk': False,
+                    'ema_trend': 'neutral',
+                    'ema_fast': 0.0,
+                    'ema_slow': 0.0,
+                    'ema_crossover': False,
+                    'symbol': request.symbol,
+                    'timestamp': datetime.now().isoformat(),
+                    'data_insufficient': True
+                }
+        except Exception as meta_err:
+            logger.warning(f"⚠️ Erreur métadonnées pour {request.symbol}: {meta_err}")
+            # Garantir les métadonnées de base même en cas d'erreur
+            metadata = {
+                'rsi': getattr(request, 'rsi', 50.0),
+                'atr_ratio': 1.0,
+                'spike_risk': False,
+                'ema_trend': 'neutral',
+                'ema_fast': 0.0,
+                'ema_slow': 0.0,
+                'ema_crossover': False,
+                'symbol': request.symbol,
+                'timestamp': datetime.now().isoformat(),
+                'error': str(meta_err)
+            }
         
-        # 4. Mettre à jour response_data avec métadonnées si présentes
-        if metadata:
-            response_data["metadata"] = metadata
+        # 4. Mettre à jour response_data avec métadonnées (toujours incluses)
+        response_data["metadata"] = metadata
         
         # 5. Mettre en cache la décision améliorée
         cache_decision(request.symbol, response_data)
