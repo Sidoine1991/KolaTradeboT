@@ -132,11 +132,11 @@ bool IsLocalFilterValid(string aiDirection, string &outReason) {
    
    // Assoupli : buy si RSI <75, sell si >25 (plus permissif)
    if(isBuyDirection && rsi[0] >= 75.0) {
-      outReason = "BUY refusé : RSI trop haut (>75)";
+      outReason = "BUY refusé : RSI trop haut (>" + DoubleToString(75.0, 0) + ")";
       return false;
    }
    if(isSellDirection && rsi[0] <= 25.0) {
-      outReason = "SELL refusé : RSI trop bas (<25)";
+      outReason = "SELL refusé : RSI trop bas (<" + DoubleToString(25.0, 0) + ")";
       return false;
    }
    
@@ -367,7 +367,6 @@ void OnTick() {
    }
 
    // Afficher les valeurs des indicateurs pour le débogage
-   double rsi[1], emaFast[1], emaSlow[1], atr[1];
    if(CopyBuffer(rsi_H1, 0, 0, 1, rsi) > 0 && 
       CopyBuffer(emaFast_M1, 0, 0, 1, emaFast) > 0 &&
       CopyBuffer(emaSlow_M1, 0, 0, 1, emaSlow) > 0 &&
@@ -426,7 +425,7 @@ void OnTick() {
                   tradesTodayCount++;
                   Print("✅ BUY EXECUTÉ | Ticket: ", trade.ResultOrder());
                } else {
-                  Print("❌ BUY ÉCHOUÉ | Erreur: ", trade.ResultRetcode(), " | ", trade.ResultRetcodeDescription());
+                  Print("❌ BUY ÉCHOUÉ | Erreur: ", IntegerToString(trade.ResultRetcode()), " | ", trade.ResultRetcodeDescription());
                }
             } else if(StringFind(StringToUpper(g_lastAIAction), "SELL") >= 0) {
                double sl = bid + InpStopLoss * SymbolInfoDouble(_Symbol, SYMBOL_POINT);
@@ -437,14 +436,14 @@ void OnTick() {
                   tradesTodayCount++;
                   Print("✅ SELL EXECUTÉ | Ticket: ", trade.ResultOrder());
                } else {
-                  Print("❌ SELL ÉCHOUÉ | Erreur: ", trade.ResultRetcode(), " | ", trade.ResultRetcodeDescription());
+                  Print("❌ SELL ÉCHOUÉ | Erreur: ", IntegerToString(trade.ResultRetcode()), " | ", trade.ResultRetcodeDescription());
                }
             }
          } else {
             if(shouldLog) Print("❌ Lot trop petit: ", DoubleToString(lot, 2), " < ", DoubleToString(SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN), 2));
          }
       } else {
-         if(shouldLog) Print("❌ Confiance IA insuffisante: ", g_lastAIConfidence * 100, "% < ", AI_MinConfidence * 100, "%");
+         if(shouldLog) Print("❌ Confiance IA insuffisante: ", DoubleToString(g_lastAIConfidence * 100, 1), "% < ", DoubleToString(AI_MinConfidence * 100, 1), "%");
       }
    }
 
