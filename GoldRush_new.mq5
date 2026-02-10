@@ -44,7 +44,7 @@ input int    InpMaxDailyTrades = 100;          // MAX 100 trades par jour comme 
 input double MaxDailyLossUSD = 20.0;           // Stop si perte >= -20$
 
 input group "IA"
-input double AI_MinConfidence = 0.65;          // Assoupli pour plus d'opportunités
+input double AI_MinConfidence = 0.50;          // Réduit à 50% pour plus d'opportunités
 
 // ==================== VARIABLES GLOBALES ====================
 CTrade trade;
@@ -130,28 +130,29 @@ bool IsLocalFilterValid(string aiDirection, string &outReason) {
    bool isBuyDirection = (StringFind(StringToUpper(aiDirection), "BUY") >= 0);
    bool isSellDirection = (StringFind(StringToUpper(aiDirection), "SELL") >= 0);
    
-   // Assoupli : buy si RSI <70, sell si >30
-   if(isBuyDirection && rsi[0] >= 70.0) {
-      outReason = "BUY refusé : RSI trop haut";
+   // Assoupli : buy si RSI <75, sell si >25 (plus permissif)
+   if(isBuyDirection && rsi[0] >= 75.0) {
+      outReason = "BUY refusé : RSI trop haut (>75)";
       return false;
    }
-   if(isSellDirection && rsi[0] <= 30.0) {
-      outReason = "SELL refusé : RSI trop bas";
-      return false;
-   }
-   
-   if(isBuyDirection && emaFast[0] <= emaSlow[0]) {
-      outReason = "BUY refusé : EMA9 n'est pas au-dessus de EMA21";
-      return false;
-   }
-   if(isSellDirection && emaFast[0] >= emaSlow[0]) {
-      outReason = "SELL refusé : EMA9 n'est pas en dessous de EMA21";
+   if(isSellDirection && rsi[0] <= 25.0) {
+      outReason = "SELL refusé : RSI trop bas (<25)";
       return false;
    }
    
-   // ATR check assoupli (1.8 au lieu de 1.6)
-   if(atr[0] > 1.8 * atr[1]) {
-      outReason = "ATR trop élevé (risque spike)";
+   // Assoupli : permet les trades même si EMA n'est pas parfaitement aligné
+   if(isBuyDirection && emaFast[0] < emaSlow[0] * 0.999) {
+      outReason = "BUY refusé : EMA9 significativement sous EMA21";
+      return false;
+   }
+   if(isSellDirection && emaFast[0] > emaSlow[0] * 1.001) {
+      outReason = "SELL refusé : EMA9 significativement au-dessus de EMA21";
+      return false;
+   }
+   
+   // ATR check très assoupli (2.5 au lieu de 1.8)
+   if(atr[0] > 2.5 * atr[1]) {
+      outReason = "ATR trop élevé (risque spike extrême)";
       return false;
    }
    
@@ -304,6 +305,8 @@ void OnTick() {
    string jsonData = StringFormat("{\"symbol\":\"%s\",\"bid\":%.5f,\"ask\":%.5f,\"rsi\":%.2f,\"atr\":%.5f,\"ema_fast\":%.5f,\"ema_slow\":%.5f}",
                               _Symbol, bid, ask, rsi[0], atr[0], emaFast[0], emaSlow[0]);
    
+   Print("📤 Envoi API IA: ", jsonData);
+   
    // Appeler l'API locale d'abord
    uchar result[];
    string result_headers;
@@ -314,6 +317,7 @@ void OnTick() {
    
    if(res == 200) {
       string response = CharArrayToString(result, 0, -1, CP_UTF8);
+      Print("📥 Réponse API IA brute: ", response);
       // Parser la réponse JSON (simplifié)
       g_lastAIAction = "hold";
       g_lastAIConfidence = 0.68;
@@ -339,6 +343,7 @@ void OnTick() {
       res = WebRequest("POST", fallbackURL, "Content-Type: application/json\r\nUser-Agent: MT5-TradBOT/3.0\r\n", 15000, fallbackData, result, result_headers);
       if(res == 200) {
          string response = CharArrayToString(result, 0, -1, CP_UTF8);
+         Print("📥 Réponse API fallback brute: ", response);
          // Parser la réponse (même logique)
          g_lastAIAction = "hold";
          g_lastAIConfidence = 0.68;
@@ -361,6 +366,33 @@ void OnTick() {
       }
    }
 
+   // Afficher les valeurs des indicateurs pour le débogage
+   double rsi[1], emaFast[1], emaSlow[1], atr[1];
+   if(CopyBuffer(rsi_H1, 0, 0, 1, rsi) > 0 && 
+      CopyBuffer(emaFast_M1, 0, 0, 1, emaFast) > 0 &&
+      CopyBuffer(emaSlow_M1, 0, 0, 1, emaSlow) > 0 &&
+      CopyBuffer(atr_M1, 0, 0, 1, atr) > 0) {
+      
+      Print("📊 VALEURS INDICATEURS - RSI: ", DoubleToString(rsi[0], 2), 
+            " | EMA Fast: ", DoubleToString(emaFast[0], 5), 
+            " | EMA Slow: ", DoubleToString(emaSlow[0], 5),
+            " | ATR: ", DoubleToString(atr[0], 5));
+      
+      // Afficher la tendance EMA
+      if(emaFast[0] > emaSlow[0]) {
+         Print("  ↳ Tendance: HAUSSIÈRE (EMA Fast > EMA Slow)");
+      } else {
+         Print("  ↳ Tendance: BAISSIÈRE (EMA Fast < EMA Slow)");
+      }
+      
+      // Afficher la zone RSI
+      if(rsi[0] > 70) Print("  ↳ RSI en zone de SURACHAT");
+      else if(rsi[0] < 30) Print("  ↳ RSI en zone de SURVENTE");
+      else Print("  ↳ RSI en zone neutre");
+   } else {
+      Print("❌ Impossible de récupérer les valeurs des indicateurs");
+   }
+   
    // Filtre local assoupli
    string reason = "";
    bool filterValid = IsLocalFilterValid(g_lastAIAction, reason);
