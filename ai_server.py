@@ -7972,6 +7972,84 @@ async def get_market_profile_analysis(
 
 # ==================== FIN INDICATEURS TECHNIQUES AVANCÉS ====================
 
+# ==================== MARKET STATE ENDPOINT ====================
+
+@app.get("/market-state")
+async def get_market_state(symbol: str, timeframe: str = "M1"):
+    """
+    Endpoint pour fournir l'état du marché aux robots MT5
+    Remplace l'ancien système de tendance qui générait des erreurs 500
+    """
+    try:
+        # Récupérer les données historiques
+        df = get_historical_data(symbol, timeframe, 100)
+        if df.empty:
+            return {
+                "error": f"Aucune donnée disponible pour {symbol}",
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "timestamp": datetime.now().isoformat()
+            }
+        
+        # Calculer les indicateurs de base
+        current_price = float(df['close'].iloc[-1])
+        
+        # Moyennes mobiles pour la tendance
+        sma_20 = df['close'].rolling(20).mean().iloc[-1]
+        sma_50 = df['close'].rolling(50).mean().iloc[-1]
+        
+        # RSI
+        delta = df['close'].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+        rs = gain / loss
+        rsi = 100 - (100 / (1 + rs)).iloc[-1]
+        
+        # Déterminer la tendance
+        if current_price > sma_20 and sma_20 > sma_50:
+            trend = "HAUSSIERE"
+            trend_arrow = "↑"
+        elif current_price < sma_20 and sma_20 < sma_50:
+            trend = "BAISSIERE"
+            trend_arrow = "↓"
+        else:
+            trend = "NEUTRE"
+            trend_arrow = "→"
+        
+        # Déterminer l'état du marché
+        if rsi < 30:
+            state = "SURVENTE"
+        elif rsi > 70:
+            state = "SURACHAT"
+        else:
+            state = "NORMAL"
+        
+        return {
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "timestamp": datetime.now().isoformat(),
+            "state": state,
+            "trend": trend,
+            "trend_arrow": trend_arrow,
+            "current_price": current_price,
+            "sma_20": float(sma_20) if pd.notna(sma_20) else None,
+            "sma_50": float(sma_50) if pd.notna(sma_50) else None,
+            "rsi": float(rsi) if pd.notna(rsi) else None,
+            "status": "success"
+        }
+        
+    except Exception as e:
+        logger.error(f"Erreur dans /market-state: {str(e)}", exc_info=True)
+        return {
+            "error": f"Erreur lors de l'analyse de l'état du marché: {str(e)}",
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "timestamp": datetime.now().isoformat(),
+            "status": "error"
+        }
+
+# ==================== FIN MARKET STATE ENDPOINT ====================
+
 # ==================== AUTOSCAN ENDPOINTS ====================
 
 @app.get("/autoscan/signals")
@@ -8170,6 +8248,7 @@ if __name__ == "__main__":
     print(f"  - POST /indicators/analyze           : Analyse avec AdvancedIndicators")
     print(f"  - POST /trend                     : Analyse de tendance MT5 (POST)")
     print(f"  - GET  /trend?symbol=SYMBOL       : Analyse de tendance MT5 (GET)")
+    print(f"  - GET  /market-state?symbol=SYMBOL  : État du marché (tendance, RSI, prix)")
     print(f"  - GET  /trend/health              : Santé module tendance")
     print(f"  - GET  /indicators/sentiment/{{symbol}} : Sentiment du marché")
     print(f"  - GET  /indicators/volume_profile/{{symbol}} : Profil de volume")
