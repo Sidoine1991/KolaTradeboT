@@ -3420,6 +3420,21 @@ void UpdateAISignal()
       if(CopyBuffer(atr_H1, 0, 0, 1, atrBuffer) > 0 && !MathIsValidNumber(atrBuffer[0]))
          atrValue = NormalizeDouble(atrBuffer[0], _Digits);
    }
+   
+   // Récupération des EMA avec gestion d'erreur
+   if(emaFast_H1 != INVALID_HANDLE)
+   {
+      double emaFastBuffer[1] = {0};
+      if(CopyBuffer(emaFast_H1, 0, 0, 1, emaFastBuffer) > 0 && !MathIsValidNumber(emaFastBuffer[0]))
+         emaFast = NormalizeDouble(emaFastBuffer[0], _Digits);
+   }
+   
+   if(emaSlow_H1 != INVALID_HANDLE)
+   {
+      double emaSlowBuffer[1] = {0};
+      if(CopyBuffer(emaSlow_H1, 0, 0, 1, emaSlowBuffer) > 0 && !MathIsValidNumber(emaSlowBuffer[0]))
+         emaSlow = NormalizeDouble(emaSlowBuffer[0], _Digits);
+   }
 
    // Construction du payload JSON
    string data = "{" +
