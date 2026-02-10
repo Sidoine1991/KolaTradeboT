@@ -1521,6 +1521,15 @@ void OnTick()
    lastTickTime = TimeCurrent();
 
    // ────────────────────────────────────────────────
+   // Initialisation des variables IA pour le dashboard
+   // ────────────────────────────────────────────────
+   if(g_lastAIAction == "")
+   {
+      g_lastAIAction = "hold";
+      g_lastAIConfidence = 0.50;
+   }
+
+   // ────────────────────────────────────────────────
    // Objectif journalier atteint → on arrête de trader aujourd'hui
    // ──────────────────────────
    double current_daily_net = CalculateDailyNetProfit();
