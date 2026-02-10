@@ -19,6 +19,11 @@ input int               AdvancedUpdateInterval = 60;         // Mettre à jour s
 // #include "BoomCrash_PreSpike_Functions.mqh"  // File not found - commented out
 // #include "Advanced_Strategies.mqh"           // File not found - commented out
 
+//--- Constantes manquantes pour la compatibilité
+#ifndef ANCHOR_LEFT_UPPER
+#define ANCHOR_LEFT_UPPER 0
+#endif
+
 //--- Stratégie de Trading
 input group             "Stratégie de Trading"
 input int               MA_Period = 50;                 // Période de la Moyenne Mobile (réduit pour plus de réactivité)
@@ -375,6 +380,15 @@ void OnTick()
    SymbolInfoTick(_Symbol, last_tick);
 
    // ────────────────────────────────────────────────
+   // Initialisation des variables IA pour le dashboard
+   // ────────────────────────────────────────────────
+   if(g_lastAIAction == "")
+   {
+      g_lastAIAction = "hold";
+      g_lastAIConfidence = 0.50;
+   }
+
+   // ────────────────────────────────────────────────
    // Objectif journalier atteint → on arrête de trader aujourd'hui
    // ────────────────────────────────────────────────
    static datetime last_daily_profit_check_time = 0;
@@ -544,7 +558,7 @@ void UpdateLeftDashboard()
    string profitStatus = (dailyNetProfit >= 10.0) ? "ATTEINT (stop trades)" : StringFormat("%.2f $ / 10.0 $", dailyNetProfit);
    color profitColor = (dailyNetProfit >= 10.0) ? colorOK : (dailyNetProfit > 0 ? colorWarn : colorAlert);
    
-   double lotExample = CalculateRiskBasedLotSize(InpRiskPercentPerTrade, InpStopLoss);  // Étape 2
+   double lotExample = CalculateRiskBasedLotSize(InpRiskPercentPerTrade, StopLoss_Pips);  // Étape 2
    string riskStatus = StringFormat("Risque/trade: %.1f %% → Lot: %.2f", InpRiskPercentPerTrade, lotExample);
    
    // Étape 3A/D : filtre local
