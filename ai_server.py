@@ -264,9 +264,31 @@ def calculate_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
     low_close = (df['low'] - df['close'].shift()).abs()
     
     true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-    atr = true_range.rolling(window=period).mean()
+    return true_range.rolling(window=period).mean()
+
+def convert_numpy_to_python(obj):
+    """
+    Convertit les types numpy en types Python standards pour la sérialisation JSON.
+    Récursif pour les dictionnaires et listes.
+    """
+    import numpy as np
     
-    return atr
+    if isinstance(obj, np.bool_):
+        return bool(obj)
+    elif isinstance(obj, np.integer):
+        return int(obj)
+    elif isinstance(obj, np.floating):
+        return float(obj)
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif isinstance(obj, dict):
+        return {key: convert_numpy_to_python(value) for key, value in obj.items()}
+    elif isinstance(obj, list):
+        return [convert_numpy_to_python(item) for item in obj]
+    elif isinstance(obj, tuple):
+        return tuple(convert_numpy_to_python(item) for item in obj)
+    else:
+        return obj
 
 def calculate_rsi(prices: pd.Series, period: int = 14) -> pd.Series:
     """Calcule le RSI."""
@@ -5322,7 +5344,7 @@ Format: Analyse claire et professionnelle en français.
             }
         
         # 4. Mettre à jour response_data avec métadonnées (toujours incluses)
-        response_data["metadata"] = metadata
+        response_data["metadata"] = convert_numpy_to_python(metadata)
         
         # 5. Mettre en cache la décision améliorée
         cache_decision(request.symbol, response_data)
@@ -5337,11 +5359,14 @@ Format: Analyse claire et professionnelle en français.
         try:
             # Déterminer le timeframe (par défaut M1, mais on peut le déduire du contexte si nécessaire)
             timeframe = "M1"  # Par défaut, le robot utilise M1 pour la plupart des décisions
+            # Convertir les données pour éviter les erreurs de sérialisation numpy
+            clean_decision = convert_numpy_to_python(response_data)
+            clean_ml_decision = convert_numpy_to_python(ml_decision) if ml_decision else None
             save_prediction_to_mt5_files(
                 symbol=request.symbol,
                 timeframe=timeframe,
-                decision=response_data,
-                ml_decision=ml_decision
+                decision=clean_decision,
+                ml_decision=clean_ml_decision
             )
         except Exception as save_err:
             # Ne pas bloquer la réponse si la sauvegarde échoue
