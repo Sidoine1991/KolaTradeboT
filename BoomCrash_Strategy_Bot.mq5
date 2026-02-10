@@ -53,7 +53,7 @@ input string            TrendAPIURL = "";    // Désactivé (404)
 input string            AI_PredictURL = ""; // Désactivé (404)
 input int               AI_Timeout_ms = 10000;         // Timeout WebRequest (ms)
 input int               AI_UpdateInterval_sec = 60;     // Rafraîchir l'API toutes les N secondes (augmenté pour réduire spam)
-input double            MinAPIConfidence = 0.78;      // on monte un peu la barre (0-1)
+input double            MinAPIConfidence = 0.65;      // Ajusté pour 68% minimum (0-1)
 input bool              RequireTrendAlignment = false;  // Exiger tendance API alignée (désactivé = plus d'ouvertures)
 input bool              RequireAPIToOpen = false;       // Si false: ouvrir avec Classique+Spike même sans accord API
 
@@ -417,7 +417,7 @@ void OnTick()
    static datetime last_daily_profit_check_time = 0;
    double current_daily_net = CalculateDailyNetProfit();
 
-   if(current_daily_net >= 10.0)   // ← tu pourras changer cette valeur plus tard (ex: 8, 12, 15...)
+   if(current_daily_net >= 50.0)   // Augmenté pour tests (était 10$)
    {
    }
 
@@ -458,7 +458,7 @@ void OnTick()
 
    // Objectif journalier atteint → on arrête de trader aujourd'hui
    // ────────────────────────────────────────────────
-   if(current_daily_net >= 10.0)   // ← tu pourras changer cette valeur plus tard (ex: 8, 12, 15...)
+   if(current_daily_net >= 50.0)   // Augmenté pour tests (était 10$)
    {
       if(TimeCurrent() - last_daily_profit_check_time >= 300) // Message toutes les 5 minutes au lieu d'une heure
       {
@@ -2074,8 +2074,8 @@ bool IsLocalFilterValid(string aiDirection, double aiConfidence, string &outReas
    IndicatorRelease(atr50_handle);
    }
    
-   // Règle finale
-   int requiredConditions = (aiConfidence >= 0.78) ? 2 : 3;
+   // Règle finale - ajustée pour le nouveau seuil de 68%
+   int requiredConditions = (aiConfidence >= 0.68) ? 2 : 3;
    
    if(conditionsOK >= requiredConditions)
    {

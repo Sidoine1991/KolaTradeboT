@@ -83,7 +83,7 @@ input bool UseAI_Agent = true;
 input string AI_ServerURL = "https://kolatradebot.onrender.com/decision";
 input string AI_LocalServerURL = "http://localhost:8000/decision";
 input bool UseLocalFirst = true;
-input double AI_MinConfidence = 0.78;          // on monte un peu la barre (78%)
+input double AI_MinConfidence = 0.65;          // Ajusté pour 68% minimum
 input int AI_Timeout_ms = 10000;
 input int AI_UpdateInterval = 10;
 
@@ -1167,8 +1167,8 @@ bool IsLocalFilterValid(string aiDirection, double aiConfidence, string &outReas
    double atr_avg[1];
    if(CopyBuffer(iATR(_Symbol, PERIOD_M1, 50), 0, 0, 1, atr_avg) > 0 && atr[0] < 1.6 * atr_avg[0]) conditionsOK++;
    
-   // Règle finale
-   int requiredConditions = (aiConfidence >= 0.78) ? 2 : 3;
+   // Règle finale - ajustée pour le nouveau seuil de 68%
+   int requiredConditions = (aiConfidence >= 0.68) ? 2 : 3;
    
    if(conditionsOK >= requiredConditions)
    {
@@ -1557,7 +1557,7 @@ void OnTick()
    // ──────────────────────────
    double current_daily_net = CalculateDailyNetProfit();
 
-   if(current_daily_net >= 10.0)   // ← tu pourras changer cette valeur plus tard (ex: 8, 12, 15...)
+   if(current_daily_net >= 50.0)   // Augmenté pour tests (était 10$)
    {
       if(TimeCurrent() - last_daily_profit_check >= 300) // Message toutes les 5 minutes au lieu d'une heure
       {
@@ -5684,8 +5684,8 @@ void UpdateLeftDashboard()
    string trailStatus = (openPositions > 0) ? StringFormat("%d positions ouvertes (trailing actif)", openPositions) : "Aucune position (breakeven prêt)";
    
    // Confiance IA (étape 3D fallback)
-   string aiStatus = StringFormat("Confiance IA: %.2f %% (%s)", g_lastAIConfidence * 100, (g_lastAIConfidence >= 0.78) ? "OK" : "Fallback renforcé");
-   color aiColor = (g_lastAIConfidence >= 0.78) ? colorOK : colorWarn;
+   string aiStatus = StringFormat("Confiance IA: %.2f %% (%s)", g_lastAIConfidence * 100, (g_lastAIConfidence >= 0.68) ? "OK" : "Fallback renforcé");
+   color aiColor = (g_lastAIConfidence >= 0.68) ? colorOK : colorWarn;
    
    // ────────────────────────────────
    // Création des labels (coin gauche)
