@@ -289,6 +289,16 @@ int CountActiveSymbols();
 void DrawDerivPatternsOnChart();
 void UpdateDerivArrowBlink();
 bool DetectDynamicPatternsAndExecute();
+void ActivateTrailingStop();
+bool PlaceLimitOrderOnArrow(ENUM_ORDER_TYPE signalType);
+void DrawFutureCandlesAdaptive();
+void TradeBasedOnFutureCandles(string direction, double confidence, double currentPrice, double atrValue);
+bool ParsePredictionData(string json, string &direction, double &confidence);
+// Nouvelles fonctions d'amélioration
+void DetectAndDisplayCorrections();
+void PartialClosePosition(ulong ticket, double currentProfit);
+void ActivateBreakeven(ulong ticket, double currentProfit);
+
 //+------------------------------------------------------------------+
 //| Détection indices synthétiques Deriv                             |
 //+------------------------------------------------------------------+
@@ -3382,20 +3392,129 @@ void LookForTradingOpportunity()
                   return;
                }
                
-               // Boom/Crash: TOUJOURS exécution IMMÉDIATE au marché (pas de limite).
-               // Une seule fois par setup → on attend le spike, on capture, on ferme.
-               // Autres symboles: exécution marché uniquement si confiance très élevée.
-               bool allowMarket = false;
+               // Boom/Crash: Utiliser ordres LIMIT pour capturer les spikes
+               // Placer l'ordre en attente du spike pour une meilleure exécution
+               bool allowLimit = false;
                if(isBoomCrashSymbol)
-                  allowMarket = true;  // Boom/Crash: marché dès qu'on a un signal valide (seuil 50%)
-               else if(g_lastAIConfidence >= AI_MarketExecutionConfidence)
-                  allowMarket = true;
+                  allowLimit = true;  // Boom/Crash: ordre LIMIT pour capturer spike
 
-               if(allowMarket)
+               if(allowLimit)
                {
                   if(DebugMode)
-                     Print("🚀 ", (isBoomCrashSymbol ? "Boom/Crash" : "Signal fort"), 
-                           " - Exécution IMMÉDIATE au marché (", DoubleToString(g_lastAIConfidence, 1), "%)");
+                     Print("🚀 Boom/Crash - Placement ordre LIMIT pour capturer spike (", DoubleToString(g_lastAIConfidence, 1), "%)");
+                  
+                  // Calculer SL/TP adaptés pour Boom/Crash
+                  double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+                  double atrValue = 0;
+                  double atrBuffer[1];
+                  if(CopyBuffer(atrHandle, 0, 0, 1, atrBuffer) > 0)
+                     atrValue = atrBuffer[0];
+                  else
+                     atrValue = currentPrice * 0.001;
+                  
+                  double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+                  double stopLoss = 0;
+                  double takeProfit = 0;
+                  double entryPrice = 0;
+                  
+                  if(signalType == ORDER_TYPE_BUY) // BUY sur Boom
+                  {
+                     // Placer BUY LIMIT sous le prix actuel pour capturer le spike baissier
+                     entryPrice = currentPrice - (atrValue * 0.3); // 30% d'ATR sous le prix
+                     stopLoss = entryPrice - (atrValue * 0.5); // SL très serré
+                     takeProfit = entryPrice + (atrValue * 2.0); // TP rapide pour spike
+                  }
+                  else // SELL sur Crash
+                  {
+                     // Placer SELL LIMIT au-dessus du prix actuel pour capturer le spike haussier
+                     entryPrice = currentPrice + (atrValue * 0.3); // 30% d'ATR au-dessus du prix
+                     stopLoss = entryPrice + (atrValue * 0.5); // SL très serré
+                     takeProfit = entryPrice - (atrValue * 2.0); // TP rapide pour spike
+                  }
+                  
+                  // Vérifier les distances minimales
+                  double minDistance = MathMax(20 * point, atrValue * 0.2);
+                  double slDistance = MathAbs(entryPrice - stopLoss);
+                  double tpDistance = MathAbs(takeProfit - entryPrice);
+                  
+                  if(slDistance < minDistance || tpDistance < minDistance)
+                  {
+                     if(DebugMode)
+                        Print("⚠️ Distances SL/TP trop faibles pour Boom/Crash LIMIT");
+                     return;
+                  }
+                  
+                  // Taille de position adaptée
+                  double lotSize = InitialLotSize;
+                  if(g_lastAIConfidence >= 0.95)
+                     lotSize = InitialLotSize * 1.5;
+                  else if(g_lastAIConfidence >= 0.90)
+                     lotSize = InitialLotSize * 1.2;
+                  
+                  lotSize = NormalizeLotSize(lotSize);
+                  
+                  // Placer l'ordre LIMIT
+                  ENUM_ORDER_TYPE pendingType = GetPendingTypeFromSignal(signalType);
+                  string orderComment = "Boom/Crash LIMIT SPIKE - " + EnumToString(signalType) + " (conf: " + DoubleToString(g_lastAIConfidence*100, 1) + "%)";
+                  
+                  if(EnsureStopsDistanceValid(entryPrice, pendingType, stopLoss, takeProfit))
+                  {
+                     bool success = false;
+                     if(signalType == ORDER_TYPE_BUY)
+                     {
+                        success = trade.BuyLimit(lotSize, _Symbol, entryPrice, stopLoss, takeProfit, ORDER_TIME_GTC, 0, orderComment);
+                     }
+                     else // SELL
+                     {
+                        success = trade.SellLimit(lotSize, _Symbol, entryPrice, stopLoss, takeProfit, ORDER_TIME_GTC, 0, orderComment);
+                     }
+                     
+                     if(success)
+                     {
+                        double riskUSD = slDistance * lotSize * SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+                        double rewardUSD = tpDistance * lotSize * SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+                        
+                        Print("🚀 ORDRE LIMIT BOOM/CRASH PLACÉ POUR SPIKE:");
+                        Print(" 📈 Type: ", EnumToString(pendingType));
+                        Print(" 💰 Entrée: ", DoubleToString(entryPrice, _Digits));
+                        Print(" 🛡️ SL: ", DoubleToString(stopLoss, _Digits), " (risque: ", DoubleToString(riskUSD, 2), "$)");
+                        Print(" 🎯 TP: ", DoubleToString(takeProfit, _Digits), " (gain: ", DoubleToString(rewardUSD, 2), "$)");
+                        Print(" 📊 Ratio R/R: 1:", DoubleToString(rewardUSD/riskUSD, 1));
+                        Print(" 📏 Taille: ", DoubleToString(lotSize, 2));
+                        Print(" 🎯 Confiance: ", DoubleToString(g_lastAIConfidence*100, 1), "%");
+                        Print(" ⚡ Stratégie: LIMIT pour capturer spike Boom/Crash");
+                        
+                        // Envoyer notification
+                        if(!DisableNotifications)
+                        {
+                           string notificationText = "🚀 BOOM/CRASH LIMIT SPIKE\n" + _Symbol + " " + EnumToString(pendingType) +
+                                                    "\n@" + DoubleToString(entryPrice, _Digits) +
+                                                    "\nConfiance: " + DoubleToString(g_lastAIConfidence*100, 1) + "%";
+                           SendNotification(notificationText);
+                           Alert(notificationText);
+                        }
+                        
+                        // Marquer comme exécuté
+                        MarkOrderAsExecuted(_Symbol);
+                        return;
+                     }
+                     else
+                     {
+                        Print("❌ Erreur placement ordre LIMIT Boom/Crash: ", trade.ResultRetcode(), " - ", trade.ResultRetcodeDescription());
+                     }
+                  }
+               }
+               else
+               {
+                  // Pour les autres symboles, utiliser la logique normale d'exécution marché si confiance élevée
+                  bool allowMarket = false;
+                  if(g_lastAIConfidence >= AI_MarketExecutionConfidence)
+                     allowMarket = true;
+
+                  if(allowMarket)
+                  {
+                     if(DebugMode)
+                        Print("🚀 Signal fort - Exécution IMMÉDIATE au marché (", DoubleToString(g_lastAIConfidence, 1), "%)");
                   
                   // Boom/Crash: exécution dédiée (SL/TP basés sur spikes)
                   // Autres: exécution marché classique via trade.Buy/Sell
@@ -8676,54 +8795,6 @@ void DetectAndDisplayCorrections()
             Print(" Prix cible: ", DoubleToString(targetPrice, _Digits));
             Print(" Prix actuel: ", DoubleToString(currentPrice, _Digits));
             Print(" Distance: ", DoubleToString(MathAbs(targetPrice - currentPrice) / point, 1), " pips");
-         }
-      }
-   }
-}
-
-//+------------------------------------------------------------------+
-//| Fermer toutes les positions Volatility si perte cumulée élevée |
-//+------------------------------------------------------------------+
-void CloseVolatilityIfLossExceeded(double lossLimit)
-{
-   double totalProfitVol = 0.0;
-   // Calculer le PnL cumulé des positions Volatility (tous symboles) pour ce Magic
-   for(int i = PositionsTotal() - 1; i >= 0; i--)
-   {
-      ulong ticket = PositionGetTicket(i);
-      if(ticket > 0 && positionInfo.SelectByTicket(ticket))
-      {
-         string sym = positionInfo.Symbol();
-         if(IsVolatilitySymbol(sym) && positionInfo.Magic() == InpMagicNumber)
-         {
-            totalProfitVol += positionInfo.Profit();
-         }
-      }
-   }
-   // Si perte cumulée dépasse le seuil, fermer toutes les positions Volatility
-   if(totalProfitVol <= -MathAbs(lossLimit))
-   {
-      for(int i = PositionsTotal() - 1; i >= 0; i--)
-      {
-         ulong ticket = PositionGetTicket(i);
-         if(ticket > 0 && positionInfo.SelectByTicket(ticket))
-         {
-            string sym = positionInfo.Symbol();
-            if(IsVolatilitySymbol(sym) && positionInfo.Magic() == InpMagicNumber)
-            {
-               double p = positionInfo.Profit();
-               if(trade.PositionClose(ticket))
-               {
-                  Print("🛑 Volatility perte cumulée dépassée (", DoubleToString(totalProfitVol, 2),
-                        "$ <= ", DoubleToString(-MathAbs(lossLimit), 2), "$) - Fermeture ticket=", ticket,
-                        " sym=", sym, " profit=", DoubleToString(p, 2), "$");
-               }
-               else if(DebugMode)
-               {
-                  Print("❌ Erreur fermeture Volatility ticket=", ticket, " code=", trade.ResultRetcode(),
-                        " desc=", trade.ResultRetcodeDescription());
-               }
-            }
          }
       }
    }
