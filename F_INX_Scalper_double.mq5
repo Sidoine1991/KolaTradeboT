@@ -187,7 +187,6 @@ static datetime g_lastAITime      = 0;
 // Helpers d'exécution / seuils
 bool   IsDerivSyntheticIndex(const string symbol);
 ENUM_ORDER_TYPE GetPendingTypeFromSignal(const ENUM_ORDER_TYPE signalType);
-bool   EnsureStopsDistanceValid(double entryPrice, ENUM_ORDER_TYPE pendingType, double &sl, double &tp);
 
 // Variables pour suivre les ordres déjà exécutés (anti-doublon)
 static string g_executedOrdersSymbols = ""; // Liste des symboles avec ordres déjà exécutés
@@ -3454,7 +3453,8 @@ void LookForTradingOpportunity()
                   
                   // Placer l'ordre LIMIT
                   ENUM_ORDER_TYPE pendingType = GetPendingTypeFromSignal(signalType);
-                  string orderComment = "Boom/Crash LIMIT SPIKE - " + EnumToString(pendingType) + " (conf: " + DoubleToString(g_lastAIConfidence, 1) + "%)";
+                  string pendingTypeStr = (pendingType == ORDER_TYPE_BUY_LIMIT) ? "BUY_LIMIT" : "SELL_LIMIT";
+                  string orderComment = "Boom/Crash LIMIT SPIKE - " + pendingTypeStr + " (conf: " + DoubleToString(g_lastAIConfidence, 1) + "%)";
                   
                   if(EnsureStopsDistanceValid(entryPrice, pendingType, stopLoss, takeProfit))
                   {
@@ -3530,7 +3530,6 @@ void LookForTradingOpportunity()
          }
       }
    }
-}
 }
 
 //+------------------------------------------------------------------+
