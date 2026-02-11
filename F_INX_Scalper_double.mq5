@@ -48,7 +48,7 @@ input bool   HighPerformanceMode = true; // Mode haute performance (réduit char
 input int    PositionCheckInterval = 10; // Intervalle vérification positions (secondes)
 input int    GraphicsUpdateInterval = 120; // Intervalle mise à jour graphiques (secondes)
 input bool   DisableAllGraphics = false; // Désactiver tous les graphiques (performance maximale)
-input bool   ShowInfoOnChart = false; // Afficher les infos IA directement sur le graphique
+input bool   ShowInfoOnChart = true; // Afficher les infos IA directement sur le graphique
 input bool   DisableNotifications = false; // Désactiver les notifications (performance)
 
 input group "--- AI AGENT ---"
@@ -811,7 +811,7 @@ void OnTick()
    
    // Initialiser le tableau de bord au premier tick (seulement si activé)
    static bool dashboardInitialized = false;
-   if(ShowDashboard && ShowInfoOnChart && !dashboardInitialized)
+   if(ShowDashboard && !dashboardInitialized)
    {
       // Initialiser les états par défaut
       for(int i = 0; i < 4; i++)
@@ -888,13 +888,15 @@ void OnTick()
       if(g_lastPredictionData != "")
       {
          DrawPredictionsOnChart(g_lastPredictionData);
+         if(!DisableAllGraphics)
+            DrawFutureCandlesAdaptive();
       }
       
       // Détecter et afficher les corrections vers résistances/supports
       DetectAndDisplayCorrections();
       
       // Forcer la mise à jour du tableau de bord
-      if(ShowDashboard && ShowInfoOnChart && g_lastAIAction != "")
+      if(ShowDashboard && g_lastAIAction != "")
       {
          ENUM_ORDER_TYPE dummyType = (g_lastAIAction == "buy") ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
          CheckAllEndpointsAlignment(dummyType);
