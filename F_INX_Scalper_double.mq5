@@ -3455,7 +3455,7 @@ void LookForTradingOpportunity()
                   
                   // Placer l'ordre LIMIT
                   ENUM_ORDER_TYPE pendingType = GetPendingTypeFromSignal(signalType);
-                  string orderComment = "Boom/Crash LIMIT SPIKE - " + EnumToString(signalType) + " (conf: " + DoubleToString(g_lastAIConfidence*100, 1) + "%)";
+                  string orderComment = "Boom/Crash LIMIT SPIKE - " + EnumToString(pendingType) + " (conf: " + DoubleToString(g_lastAIConfidence, 1) + "%)";
                   
                   if(EnsureStopsDistanceValid(entryPrice, pendingType, stopLoss, takeProfit))
                   {
@@ -3481,7 +3481,7 @@ void LookForTradingOpportunity()
                         Print(" 🎯 TP: ", DoubleToString(takeProfit, _Digits), " (gain: ", DoubleToString(rewardUSD, 2), "$)");
                         Print(" 📊 Ratio R/R: 1:", DoubleToString(rewardUSD/riskUSD, 1));
                         Print(" 📏 Taille: ", DoubleToString(lotSize, 2));
-                        Print(" 🎯 Confiance: ", DoubleToString(g_lastAIConfidence*100, 1), "%");
+                        Print(" 🎯 Confiance: ", DoubleToString(g_lastAIConfidence, 1), "%");
                         Print(" ⚡ Stratégie: LIMIT pour capturer spike Boom/Crash");
                         
                         // Envoyer notification
@@ -3489,7 +3489,7 @@ void LookForTradingOpportunity()
                         {
                            string notificationText = "🚀 BOOM/CRASH LIMIT SPIKE\n" + _Symbol + " " + EnumToString(pendingType) +
                                                     "\n@" + DoubleToString(entryPrice, _Digits) +
-                                                    "\nConfiance: " + DoubleToString(g_lastAIConfidence*100, 1) + "%";
+                                                    "\nConfiance: " + DoubleToString(g_lastAIConfidence, 1) + "%";
                            SendNotification(notificationText);
                            Alert(notificationText);
                         }
@@ -3557,124 +3557,14 @@ void LookForTradingOpportunity()
                   else
                   {
                      if(DebugMode)
-                        Print("❌ Échec exécution immédiate", isBoomCrashSymbol ? " (Boom/Crash: pas de fallback LIMIT)" : " - fallback vers ordre LIMIT");
-                     
-                     // Fallback LIMIT uniquement pour les symboles non Boom/Crash
-                     if(!isBoomCrashSymbol && PlaceLimitOrderOnArrow(signalType))
-                        MarkOrderAsExecuted(_Symbol);
+                        Print("❌ Erreur exécution marché: ", trade.ResultRetcode(), " - ", trade.ResultRetcodeDescription());
+                  }
                   }
                }
-               else
-               {
-                  // Pour les autres symboles ou confiance plus faible: ordre LIMIT normal
-                  if(DebugMode)
-                     Print("🔍 Flèche DERIV détectée - Tentative placement ordre LIMIT pour: ", EnumToString(signalType));
-                  
-                  if(PlaceLimitOrderOnArrow(signalType))
-                  {
-                     MarkOrderAsExecuted(_Symbol);
-                     
-                     string signalText = "🚨 SIGNAL IA DÉTECTÉ: " + (g_lastAIAction == "buy" ? "BUY" : "SELL") + " (confiance: " + DoubleToString(g_lastAIConfidence, 1) + "%)";
-                     signalText += "\n⚡ Flèche DERIV présente";
-                     signalText += "\n🎯 Ordre LIMIT placé avec succès";
-                     
-                     if(DebugMode)
-                        Print("🎯 Ordre limité placé dès détection flèche - Type: ", EnumToString(signalType));
-                  }
-                  else
-                  {
-                     if(DebugMode)
-                        Print("❌ ÉCHEC placement ordre LIMIT pour ", EnumToString(signalType));
-                  }
             }
          }
       }
-      }
-      else
-      {
-         // Expliquer pourquoi le signal IA n'est pas exécuté
-         if(StringCompare(g_lastAIAction, "hold") == 0)
-         {
-            if(DebugMode)
-               Print("⏸️ Signal IA = 'HOLD' - pas de trade");
-         }
-         else if(g_lastAIConfidence < requiredConfidence)
-         {
-            // TENTATIVE DE SAUVETAGE PAR PRÉDICTION FORTE
-            string predDir = "";
-            double predConf = 0.0;
-            // Utiliser le helper pour parser
-            ParsePredictionData(g_lastPredictionData, predDir, predConf);
-            
-            // Si la prédiction est très forte (> 75%) et alignée avec le signal
-            // On peut tenter un ordre LIMIT (jamais MARKET ici)
-            bool predictionRescue = false;
-            
-            // Convertir UP/DOWN en buy/sell pour comparaison
-            string normPredDir = predDir;
-            if(normPredDir == "UP") normPredDir = "buy";
-            if(normPredDir == "DOWN") normPredDir = "sell";
-            
-            if(predConf >= 0.75 && StringCompare(g_lastAIAction, normPredDir) == 0)
-            {
-               // Déterminer le type de signal pour le sauvetage
-               ENUM_ORDER_TYPE rescueSignalType = (StringCompare(normPredDir, "buy") == 0) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
-               
-               if(DebugMode) 
-                  Print("⚠️ Confiance globale faible (" + DoubleToString(g_lastAIConfidence*100,1) + "%) MAIS Prediction forte (" + DoubleToString(predConf*100,1) + "%) - Forçage Limit Order");
-               
-               predictionRescue = true;
-               
-               // Forcer l'utilisation de Limit Order
-               if(PlaceLimitOrderOnArrow(rescueSignalType))
-               {
-                  MarkOrderAsExecuted(_Symbol);
-                  string signalText = "🚨 SIGNAL IA (RESCUE): " + (rescueSignalType == ORDER_TYPE_BUY ? "BUY" : "SELL");
-                  signalText += "\n🔮 Prédiction forte: " + DoubleToString(predConf*100, 1) + "%";
-                  signalText += "\n🎯 Ordre LIMIT placé avec succès";
-                  if(!DisableNotifications) SendNotification(signalText);
-               }
-            }
-            
-            if(!predictionRescue && DebugMode)
-               Print("📉 Confiance IA insuffisante: ", DoubleToString(g_lastAIConfidence*100, 1), "% < ", DoubleToString(requiredConfidence*100, 1), "% requis");
-         }
-         else if(g_aiFallbackMode)
-         {
-            if(DebugMode)
-               Print("🔄 Mode fallback IA actif - attente récupération");
-         }
-      }
-      
-      // NOUVEAU: Détecter les patterns dynamiques et lancer des trades limités
-      if(DetectDynamicPatternsAndExecute())
-      {
-         if(DebugMode)
-            Print("🎯 Pattern dynamique détecté et trade exécuté avec trailing stop activé");
-      }
    }
-   else
-   {
-      // Expliquer pourquoi la section IA n'est pas exécutée
-      if(!UseAI_Agent)
-      {
-         if(DebugMode)
-            Print("🤖 Agent IA désactivé");
-      }
-      else if(DisableNotifications)
-      {
-         if(DebugMode)
-            Print("🔕 Notifications désactivées - IA ", AllowTradingWhenNotificationsDisabled ? "active (trading autorisé)" : "bloquée (trading interdit)");
-      }
-      else if(g_lastAIAction == "")
-      {
-         if(DebugMode)
-            Print("❌ Aucun signal IA disponible (g_lastAIAction vide)");
-      }
-   }
-   
-   if(DebugMode)
-      Print("🏁 Fin recherche opportunités - aucune position prise");
 }
 
 //+------------------------------------------------------------------+
