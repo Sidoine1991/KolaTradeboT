@@ -2513,6 +2513,10 @@ class AnalysisResponse(BaseModel):
     m15: Dict[str, Any] = {}
     ete: Optional[Dict[str, Any]] = None
 
+class TrendRequest(BaseModel):
+    symbol: str
+    timeframe: Optional[str] = "M1"
+
 class TimeWindowsResponse(BaseModel):
     symbol: str
     preferred_hours: List[int]  # Liste d'heures 0-23
@@ -2581,6 +2585,84 @@ def check_trend(symbol: str) -> Dict[str, str]:
             trends[tf_name] = "INDÉTERMINÉ"
     
     return trends
+
+def build_coherent_analysis(symbol: str, timeframes: Optional[List[str]] = None) -> Dict[str, Any]:
+    """
+    Analyse cohérente simple basée sur la tendance multi-TF.
+    Retourne une structure contenant un champ decision (BUY/SELL/HOLD).
+    """
+    tfs = timeframes or ["D1", "H4", "H1", "M30", "M15", "M5", "M1"]
+    trends: Dict[str, str] = {}
+    bullish = 0
+    bearish = 0
+    neutral = 0
+    total = 0
+
+    for tf in tfs:
+        df = get_historical_data(symbol, tf, 200)
+        if df is None or df.empty or "close" not in df.columns:
+            trends[tf] = "INDÉTERMINÉ"
+            continue
+
+        total += 1
+        sma_fast = df["close"].rolling(window=20).mean().iloc[-1]
+        sma_slow = df["close"].rolling(window=50).mean().iloc[-1]
+        if sma_fast > sma_slow * 1.001:
+            trends[tf] = "HAUSSIER"
+            bullish += 1
+        elif sma_fast < sma_slow * 0.999:
+            trends[tf] = "BAISSIER"
+            bearish += 1
+        else:
+            trends[tf] = "NEUTRE"
+            neutral += 1
+
+    if total == 0:
+        return {
+            "status": "error",
+            "symbol": symbol,
+            "decision": "HOLD",
+            "decision_type": "NO_DATA",
+            "confidence": 0.0,
+            "stability": "UNKNOWN",
+            "bullish_pct": 0.0,
+            "bearish_pct": 0.0,
+            "neutral_pct": 0.0,
+            "trends": trends,
+            "timestamp": datetime.now().isoformat(),
+            "message": "Aucune donnée disponible"
+        }
+
+    bullish_pct = bullish / total
+    bearish_pct = bearish / total
+    neutral_pct = neutral / total
+
+    if bullish_pct >= 0.6:
+        decision = "BUY"
+        decision_type = "BULLISH"
+        confidence = min(0.9, 0.6 + bullish_pct * 0.3)
+    elif bearish_pct >= 0.6:
+        decision = "SELL"
+        decision_type = "BEARISH"
+        confidence = min(0.9, 0.6 + bearish_pct * 0.3)
+    else:
+        decision = "HOLD"
+        decision_type = "NEUTRAL"
+        confidence = 0.5
+
+    return {
+        "status": "ok",
+        "symbol": symbol,
+        "decision": decision,
+        "decision_type": decision_type,
+        "confidence": round(confidence, 2),
+        "stability": "STABLE" if max(bullish_pct, bearish_pct) >= 0.7 else "MIXED",
+        "bullish_pct": round(bullish_pct, 2),
+        "bearish_pct": round(bearish_pct, 2),
+        "neutral_pct": round(neutral_pct, 2),
+        "trends": trends,
+        "timestamp": datetime.now().isoformat()
+    }
 
 # Fonctions utilitaires
 def get_historical_data(symbol: str, timeframe: str = "H1", count: int = 500) -> pd.DataFrame:
@@ -3339,13 +3421,13 @@ async def get_trend(symbol: str, timeframe: str = "M1"):
         if timeframe not in ["M1", "M5", "M15", "M30", "H1", "H4", "D1"]:
             raise HTTPException(status_code=422, detail="Le timeframe doit être M1, M5, M15, M30, H1, H4 ou D1")
         
-        # Récupérer les données historiques depuis MT5
-        df_m1 = get_historical_data_mt5(symbol, "M1", 500)
-        df_m5 = get_historical_data_mt5(symbol, "M5", 200)
-        df_h1 = get_historical_data_mt5(symbol, "H1", 100)
+        # Récupérer les données historiques (cache upload MT5 ou fallback)
+        df_m1 = get_historical_data(symbol, "M1", 500)
+        df_m5 = get_historical_data(symbol, "M5", 200)
+        df_h1 = get_historical_data(symbol, "H1", 100)
         
         if df_m1 is None or df_m5 is None or df_h1 is None:
-            raise HTTPException(status_code=500, detail="Impossible de récupérer les données historiques depuis MT5")
+            raise HTTPException(status_code=500, detail="Impossible de récupérer les données historiques")
         
         # Calculer les tendances
         def calculate_trend(df):
@@ -3373,12 +3455,15 @@ async def get_trend(symbol: str, timeframe: str = "M1"):
         if uptrend_count >= 2:
             consensus = "STRONG_UPTREND"
             confidence = min(0.9, 0.5 + (uptrend_count * 0.15))
+            decision = "BUY"
         elif downtrend_count >= 2:
             consensus = "STRONG_DOWNTREND"
             confidence = min(0.9, 0.5 + (downtrend_count * 0.15))
+            decision = "SELL"
         else:
             consensus = "NEUTRAL"
             confidence = 0.5
+            decision = "HOLD"
         
         response = {
             "symbol": symbol,
@@ -3402,6 +3487,7 @@ async def get_trend(symbol: str, timeframe: str = "M1"):
                 "uptrend_count": uptrend_count,
                 "downtrend_count": downtrend_count
             },
+            "decision": decision,
             "data_points": {
                 "m1": len(df_m1) if df_m1 is not None else 0,
                 "m5": len(df_m5) if df_m5 is not None else 0,
@@ -3415,6 +3501,24 @@ async def get_trend(symbol: str, timeframe: str = "M1"):
     except Exception as e:
         logger.error(f"Erreur dans /trend: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Erreur lors de l'analyse de tendance: {str(e)}")
+
+@app.post("/trend")
+async def post_trend(request: TrendRequest):
+    """Endpoint POST pour l'analyse de tendance (compat MT5 WebRequest)"""
+    return await get_trend(request.symbol, request.timeframe or "M1")
+
+@app.get("/coherent-analysis")
+async def get_coherent_analysis(symbol: str, timeframe: Optional[str] = None):
+    """Endpoint GET pour l'analyse cohérente multi-TF"""
+    timeframes = ["D1", "H4", "H1", "M30", "M15", "M5", "M1"]
+    if timeframe:
+        timeframes = [timeframe]
+    return build_coherent_analysis(symbol, timeframes)
+
+@app.post("/coherent-analysis")
+async def post_coherent_analysis(request: CoherentAnalysisRequest):
+    """Endpoint POST pour l'analyse cohérente multi-TF"""
+    return build_coherent_analysis(request.symbol, request.timeframes)
 
 @app.get("/angelofspike/trend")
 async def get_angelofspike_trend(symbol: str = "Boom 1000 Index", timeframe: str = "M1"):
