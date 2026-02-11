@@ -40,8 +40,8 @@ logger = logging.getLogger("tradbot_ai")
 
 # ========== CONFIGURATIONS AMÉLIORATIONS PRIORITAIRES ==========
 # Seuils de confiance minimum pour éviter les signaux trop faibles
-MIN_CONFIDENCE_THRESHOLD = 0.68  # 68% minimum (plancher plus élevé)
-FORCE_HOLD_THRESHOLD = 0.60      # Force HOLD si confiance < 60%
+MIN_CONFIDENCE_THRESHOLD = 0.55  # 55% minimum (plus réaliste)
+FORCE_HOLD_THRESHOLD = 0.40      # Force HOLD si confiance < 40% (plus flexible)
 
 # Prompt système amélioré pour Boom/Crash
 BOOM_CRASH_SYSTEM_PROMPT = """
@@ -3645,6 +3645,324 @@ async def decision_gemma(request: DecisionRequest):
             elif request.rsi > 70:
                 action = "sell"
                 confidence += 0.2
+                reason += f"RSI surachat ({request.rsi:.1f}). "
+        
+        # Analyse EMA
+        if request.ema_fast_h1 and request.ema_slow_h1:
+            if request.ema_fast_h1 > request.ema_slow_h1:
+                if action != "sell":
+                    action = "buy"
+                    confidence += 0.15
+                    reason += f"EMA H1 haussière ({request.ema_fast_h1:.5f} > {request.ema_slow_h1:.5f}). "
+            else:
+                if action != "buy":
+                    action = "sell"
+                    confidence += 0.15
+                    reason += f"EMA H1 baissière ({request.ema_fast_h1:.5f} < {request.ema_slow_h1:.5f}). "
+        
+        # Étape 2: Analyse visuelle avec Gemma (si image disponible)
+        gemma_analysis = None
+        sl_from_gemma = None
+        tp_from_gemma = None
+        
+        if GEMMA_AVAILABLE and request.image_filename:
+            try:
+                # Construire le chemin complet de l'image depuis MT5
+                mt5_image_path = os.path.join(MT5_FILES_DIR, request.image_filename)
+                
+                if os.path.exists(mt5_image_path):
+                    gemma_prompt = f"""Analyse ce graphique {request.symbol} et identifie TOUS les objets graphiques visibles (lignes, zones, flèches, labels, patterns).
+                    
+                    Action suggérée: {action}
+                    
+                    Analyse DÉTAILLÉE demandée:
+                    1. Identifie tous les objets graphiques visibles sur le graphique (support/résistance, zones, flèches de signal, patterns, etc.)
+                    2. Interprète leur signification pour le trading
+                    3. Évalue si ces objets confirment ou infirment l'action {action}
+                    
+                    Réponds UNIQUEMENT en JSON avec ces champs:
+                    - "tendance": "haussière" ou "baissière" ou "neutre"
+                    - "force": 1-10 (10 = très fort)
+                    - "support": prix exact du support le plus proche
+                    - "résistance": prix exact de la résistance la plus proche
+                    - "stop_loss": prix optimal pour SL
+                    - "take_profit": prix optimal pour TP
+                    - "confirmation": true/false si tu confirmes l'action {action}
+                    - "objets_graphiques": liste des objets identifiés (zones, lignes, patterns, etc.)
+                    - "interprétation_objets": explication de comment les objets graphiques influencent la décision
+                    """
+                    
+                    gemma_analysis = analyze_with_gemma(gemma_prompt, mt5_image_path)
+                    
+                    if gemma_analysis:
+                        logger.info(f"Analyse Gemma reçue: {gemma_analysis[:200]}...")
+                        
+                        # Extraire SL/TP de la réponse Gemma
+                        try:
+                            import re
+                            sl_match = re.search(r'"stop_loss":\s*([0-9.]+)', gemma_analysis)
+                            tp_match = re.search(r'"take_profit":\s*([0-9.]+)', gemma_analysis)
+                            confirmation_match = re.search(r'"confirmation":\s*(true|false)', gemma_analysis)
+                            
+                            if sl_match:
+                                sl_from_gemma = float(sl_match.group(1))
+                            if tp_match:
+                                tp_from_gemma = float(tp_match.group(1))
+                            if confirmation_match:
+                                gemma_confirms = confirmation_match.group(1) == "true"
+                                if gemma_confirms:
+                                    confidence += 0.25
+                                else:
+                                    confidence -= 0.15
+                                    
+                        except Exception as parse_err:
+                            logger.warning(f"Erreur parsing réponse Gemma: {parse_err}")
+                        
+                        reason += f"Analyse visuelle Gemma effectuée. "
+                        
+                else:
+                    logger.warning(f"Fichier image non trouvé: {mt5_image_path}")
+                    
+            except Exception as gemma_err:
+                logger.error(f"Erreur analyse Gemma: {type(gemma_err).__name__}: {str(gemma_err)}", exc_info=True)
+        
+        # Étape 3: Formulation finale avec Gemini
+        global GEMINI_AVAILABLE, gemini_model  # Déclarer global AVANT toute utilisation
+        if GEMINI_AVAILABLE and gemini_model is not None:
+            try:
+                gemini_prompt = f"""En tant qu'expert trading, analyse ces données pour {request.symbol}:
+                
+                DONNÉES TECHNIQUES:
+                - Action initiale: {action}
+                - Confiance: {confidence:.2f}
+                - RSI: {request.rsi} (surventé<30, surachat>70)
+                - EMA H1: rapide={request.ema_fast_h1}, lente={request.ema_slow_h1}
+                - Prix actuel: bid={request.bid}, ask={request.ask}
+                
+                ANALYSE VISUELLE GEMMA:
+                {gemma_analysis if gemma_analysis else "Non disponible"}
+                
+                INSTRUCTIONS:
+                1. Valide ou infirme l'action initiale
+                2. Donne une recommandation finale claire: BUY/SELL/HOLD
+                3. Attribue une confiance finale (0.0-1.0)
+                4. Fournis une raison concise (<200 caractères)
+                5. SL/TP: {"SL=" + str(sl_from_gemma) + ", TP=" + str(tp_from_gemma) if sl_from_gemma and tp_from_gemma else "Génère des niveaux logiques"}
+                
+                Réponds UNIQUEMENT en JSON:
+                {{"action": "BUY/SELL/HOLD", "confidence": 0.00, "reason": "texte concis", "sl": 0.00000, "tp": 0.00000}}
+                """
+                
+                response = gemini_model.generate_content(gemini_prompt)
+                gemini_response = response.text.strip()
+                
+                # Nettoyer et parser la réponse JSON
+                if gemini_response.startswith("```json"):
+                    gemini_response = gemini_response.replace("```json", "").replace("```", "").strip()
+                
+                gemini_result = json.loads(gemini_response)
+                
+                action = gemini_result.get("action", action)
+                confidence = gemini_result.get("confidence", confidence)
+                reason = gemini_result.get("reason", reason)
+                sl_from_gemma = gemini_result.get("sl", sl_from_gemma)
+                tp_from_gemma = gemini_result.get("tp", tp_from_gemma)
+                
+                logger.info(f"Recommandation Gemini: {action} (conf: {confidence:.2f})")
+                
+            except Exception as gemini_err:
+                logger.error(f"Erreur formulation Gemini: {type(gemini_err).__name__}: {str(gemini_err)}", exc_info=True)
+                # Si le modèle est obsolète, désactiver Gemini pour cette session
+                if "NotFound" in str(gemini_err) or "404" in str(gemini_err) or "not found" in str(gemini_err).lower():
+                    logger.warning("Modèle Gemini obsolète détecté. Désactivation de Gemini pour cette requête.")
+                    GEMINI_AVAILABLE = False
+                    gemini_model = None
+        
+        # Limiter la confiance
+        confidence = max(0.0, min(1.0, confidence))
+        
+        # Prédiction de spike (pour Boom/Crash)
+        spike_prediction = False
+        spike_zone_price = None
+        
+        if "Boom" in request.symbol or "Crash" in request.symbol:
+            if request.volatility_regime == 1:  # High volatility
+                spike_prediction = True
+                spike_zone_price = request.ask if "Boom" in request.symbol else request.bid
+                confidence += 0.1
+        
+        # Construire la réponse finale
+        response = DecisionResponse(
+            action=action,
+            confidence=confidence,
+            reason=reason[:250],  # Limiter la longueur
+            spike_prediction=spike_prediction,
+            spike_zone_price=spike_zone_price,
+            stop_loss=sl_from_gemma,
+            take_profit=tp_from_gemma,
+            timestamp=datetime.now().isoformat(),
+            model_used="Gemma+Gemini",
+            technical_analysis={
+                "rsi": request.rsi,
+                "ema_fast_h1": request.ema_fast_h1,
+                "ema_slow_h1": request.ema_slow_h1,
+                "supertrend_line": request.supertrend_line,
+                "volatility_regime": request.volatility_regime
+            },
+            gemma_analysis=gemma_analysis[:500] if gemma_analysis else f"Modèle Gemini utilisé - Confiance: {confidence:.2f}, Action: {action}"
+        )
+        
+        logger.info(f"Décision finale pour {request.symbol}: {action} (conf: {confidence:.2f})")
+        return response
+        
+    except Exception as e:
+        logger.error(f"Erreur dans decision_gemma: {type(e).__name__}: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Erreur interne: {type(e).__name__}: {str(e)}")
+
+@app.post("/decision", response_model=DecisionResponse)
+async def decision(request: DecisionRequest):
+    """
+    Endpoint principal de décision utilisé par le robot MT5
+    Combine analyse technique, tendances multi-TF et IA pour prendre une décision finale
+    """
+    try:
+        # Validation des champs obligatoires
+        if not request.symbol:
+            raise HTTPException(status_code=422, detail="Le symbole est requis")
+        
+        logger.info(f"🎯 Requête DECISION reçue pour {request.symbol}")
+        
+        # Vérifier le cache d'abord
+        cache_key = f"{request.symbol}_{request.bid}_{request.ask}_{request.rsi}"
+        current_time = datetime.now().timestamp()
+        
+        if cache_key in decision_cache:
+            cached_time = cache_timestamps.get(cache_key, 0)
+            if current_time - cached_time < CACHE_DURATION:
+                logger.debug(f"📋 Utilisation décision en cache pour {request.symbol}")
+                return DecisionResponse(**decision_cache[cache_key])
+        
+        # Analyse technique de base
+        action = "hold"
+        confidence = 0.5
+        reason = "Analyse technique en cours..."
+        
+        # Analyse RSI
+        if request.rsi:
+            if request.rsi < 30:
+                action = "buy"
+                confidence += 0.15
+                reason += f"RSI surventé ({request.rsi:.1f}). "
+            elif request.rsi > 70:
+                action = "sell"
+                confidence += 0.15
+                reason += f"RSI surachat ({request.rsi:.1f}). "
+        
+        # Analyse EMA H1
+        if request.ema_fast_h1 and request.ema_slow_h1:
+            if request.ema_fast_h1 > request.ema_slow_h1:
+                if action != "sell":
+                    action = "buy"
+                    confidence += 0.1
+                    reason += f"EMA H1 haussière ({request.ema_fast_h1:.5f} > {request.ema_slow_h1:.5f}). "
+            else:
+                if action != "buy":
+                    action = "sell"
+                    confidence += 0.1
+                    reason += f"EMA H1 baissière ({request.ema_fast_h1:.5f} < {request.ema_slow_h1:.5f}). "
+        
+        # Analyse des tendances multi-timeframes
+        try:
+            trend_data = await get_trend_data(request.symbol)
+            if trend_data:
+                m1_trend = trend_data.get("trend_m1", {}).get("direction", "NEUTRAL")
+                m5_trend = trend_data.get("trend_m5", {}).get("direction", "NEUTRAL")
+                h1_trend = trend_data.get("trend_h1", {}).get("direction", "NEUTRAL")
+                
+                # Compter les tendances alignées
+                uptrend_count = sum([m1_trend == "UPTREND", m5_trend == "UPTREND", h1_trend == "UPTREND"])
+                downtrend_count = sum([m1_trend == "DOWNTREND", m5_trend == "DOWNTREND", h1_trend == "DOWNTREND"])
+                
+                if uptrend_count >= 2:
+                    if action != "sell":
+                        action = "buy"
+                        confidence += 0.2
+                        reason += "Tendance haussière multi-TF. "
+                elif downtrend_count >= 2:
+                    if action != "buy":
+                        action = "sell"
+                        confidence += 0.2
+                        reason += "Tendance baissière multi-TF. "
+                        
+        except Exception as trend_err:
+            logger.warning(f"Erreur analyse tendance: {trend_err}")
+        
+        # Ajuster la confiance selon les conditions
+        if action == "hold":
+            confidence = max(0.3, confidence - 0.2)  # Réduire la confiance pour HOLD
+        
+        # S'assurer que la confiance est dans les limites
+        confidence = max(0.0, min(1.0, confidence))
+        
+        # Créer la réponse
+        response = DecisionResponse(
+            action=action,
+            confidence=confidence,
+            reason=reason[:200],
+            spike_prediction=False,
+            spike_zone_price=None,
+            stop_loss=None,
+            take_profit=None,
+            timestamp=datetime.now().isoformat(),
+            model_used="Technical+Multi-TF",
+            technical_analysis={
+                "rsi": request.rsi,
+                "ema_fast_h1": request.ema_fast_h1,
+                "ema_slow_h1": request.ema_slow_h1
+            }
+        )
+        
+        # Mettre en cache
+        decision_cache[cache_key] = {
+            "action": response.action,
+            "confidence": response.confidence,
+            "reason": response.reason,
+            "timestamp": response.timestamp,
+            "model_used": response.model_used
+        }
+        cache_timestamps[cache_key] = current_time
+        
+        logger.info(f"✅ DÉCISION {request.symbol}: {action} (conf: {confidence:.2f}) - {response.model_used}")
+        return response
+        
+    except Exception as e:
+        logger.error(f"Erreur dans decision: {type(e).__name__}: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Erreur décision: {str(e)}")
+    """
+    Endpoint avancé qui utilise Gemma pour l'analyse visuelle du graphique MT5
+    et Gemini pour formuler la recommandation finale de trading.
+    """
+    try:
+        # Validation des champs obligatoires
+        if not request.symbol:
+            raise HTTPException(status_code=422, detail="Le symbole est requis")
+        
+        logger.info(f"Requête DecisionGemma reçue pour {request.symbol}")
+        
+        # Étape 1: Analyse technique initiale
+        action = "hold"
+        confidence = 0.5
+        reason = "Analyse en cours..."
+        
+        # Analyse RSI
+        if request.rsi:
+            if request.rsi < 30:
+                action = "buy"
+                confidence += 0.2
+                reason += f"RSI surventé ({request.rsi:.1f}). "
+            elif request.rsi > 70:
+                action = "sell"
+                confidence += 0.2
                 reason += f"RSI suracheté ({request.rsi:.1f}). "
         
         # Analyse EMA
@@ -4076,12 +4394,12 @@ async def decision(request: DecisionRequest):
                         
                         # En mode initialisation, être plus flexible mais prudent
                         # Autoriser plus de situations de trading avec des seuils réalistes
-                        if abs(price_trend) < 0.002 and volatility_init < 0.1:  # Seuils plus réalistes
+                        if abs(price_trend) < 0.0005 and volatility_init < 0.05:  # Seuils beaucoup plus réalistes
                             logger.info(f"⚠️ Initialisation: Marché extrêmement calme - Recommandation HOLD conservatrice")
                             return DecisionResponse(
                                 action="hold",
-                                confidence=0.30,
-                                reason=f"Initialisation: Marché extrêmement calme (tendance: {price_trend:+.2%}, volatilité: {volatility_init:.3f}%) - Attente signal plus clair",
+                                confidence=0.45,  # Plus réaliste
+                                reason=f"Initialisation: Marché extrêmement calme (tendance: {price_trend:+.3%}, volatilité: {volatility_init:.3f}%) - Attente signal plus clair",
                                 spike_prediction=False,
                                 spike_zone_price=None,
                                 stop_loss=None,
@@ -4089,7 +4407,6 @@ async def decision(request: DecisionRequest):
                                 spike_direction=None,
                                 early_spike_warning=False,
                                 early_spike_zone_price=None,
-                                early_spike_direction=None,
                                 buy_zone_low=None,
                                 buy_zone_high=None,
                                 sell_zone_low=None,
