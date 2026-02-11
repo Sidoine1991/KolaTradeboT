@@ -3194,7 +3194,7 @@ async def root():
         "mistral_available": MISTRAL_AVAILABLE,
         "gemini_available": GEMINI_AVAILABLE,
         "backend_available": backend_available,
-        "ai_indicators": ai_indicators,
+        "ai_indicators": AI_INDICATORS_AVAILABLE,
         "endpoints": [
             "/decision (POST)",
             "/test (POST)",
