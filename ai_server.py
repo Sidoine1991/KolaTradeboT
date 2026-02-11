@@ -2151,6 +2151,90 @@ def get_prediction_confidence_multiplier(symbol: str) -> float:
     else:
         return 0.3  # Très faible précision
 
+
+# ===== CALIBRATION ADAPTATIVE (réduction décalage prédiction/mouvement réel) =====
+# Stockage persistant de la calibration par symbole (drift, précision, ajustements)
+CALIBRATION_FILE = DATA_DIR / "symbol_calibration.json"
+_symbol_calibration: Dict[str, Dict[str, Any]] = {}
+_calibration_loaded = False
+
+def _ensure_calibration_loaded():
+    """Charge la calibration depuis le fichier au premier accès"""
+    global _symbol_calibration, _calibration_loaded
+    if not _calibration_loaded and CALIBRATION_FILE.exists():
+        try:
+            with open(CALIBRATION_FILE, "r", encoding="utf-8") as f:
+                _symbol_calibration.update(json.load(f))
+            _calibration_loaded = True
+            logger.info(f"✅ Calibration chargée: {len(_symbol_calibration)} symboles")
+        except Exception as e:
+            logger.warning(f"Erreur chargement calibration: {e}")
+            _calibration_loaded = True
+
+def _save_calibration():
+    """Sauvegarde la calibration sur disque"""
+    try:
+        CALIBRATION_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(CALIBRATION_FILE, "w", encoding="utf-8") as f:
+            json.dump(_symbol_calibration, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        logger.warning(f"Erreur sauvegarde calibration: {e}")
+
+def get_symbol_calibration(symbol: str, timeframe: str = "M1") -> Dict[str, Any]:
+    """
+    Retourne la calibration pour un symbole (ML feedback + prédiction accuracy).
+    Utilisé par /decision pour ajuster confiance et réduire le décalage.
+    """
+    _ensure_calibration_loaded()
+    cal = _symbol_calibration.get(symbol, {})
+    pred_acc = get_prediction_accuracy_score(symbol)
+    pred_mult = get_prediction_confidence_multiplier(symbol)
+    # ML metrics (si disponible via _compute_ml_metrics)
+    ml_min_conf = 0.60  # défaut
+    try:
+        ml = _compute_ml_metrics(symbol, timeframe)
+        ml_min_conf = float(ml.get("recommendations", {}).get("min_confidence", 0.60))
+    except Exception:
+        pass
+    return {
+        "min_confidence": max(0.45, min(0.85, ml_min_conf)),
+        "confidence_multiplier": pred_mult,
+        "prediction_accuracy": pred_acc,
+        "drift_factor": cal.get("drift_factor", 1.0),
+        "last_updated": cal.get("last_updated"),
+    }
+
+def apply_calibration_to_decision(symbol: str, action: str, confidence: float, reason: str, timeframe: str = "M1") -> Tuple[str, float, str]:
+    """
+    Applique la calibration (feedback + prédiction) pour réduire le décalage.
+    Ajuste la confiance et force HOLD si précision historique trop faible.
+    """
+    cal = get_symbol_calibration(symbol, timeframe)
+    mult = cal["confidence_multiplier"]
+    min_conf = cal["min_confidence"]
+    pred_acc = cal["prediction_accuracy"]
+    new_confidence = confidence * mult
+    if action != "hold":
+        if new_confidence < min_conf:
+            return "hold", max(0.50, min_conf), f"{reason} | Calibration: conf ajustée ({pred_acc*100:.0f}% précision) → hold"
+        new_confidence = max(new_confidence, min_conf)
+    return action, min(0.98, new_confidence), f"{reason} | Cal: x{mult:.2f}" if mult < 1.0 else reason
+
+def update_calibration_from_feedback(symbol: str, is_win: bool, profit: float, side: str = ""):
+    """Met à jour la calibration après un feedback de trade (appelé par /trades/feedback)"""
+    _ensure_calibration_loaded()
+    if symbol not in _symbol_calibration:
+        _symbol_calibration[symbol] = {"wins": 0, "total": 0, "drift_factor": 1.0}
+    c = _symbol_calibration[symbol]
+    c["total"] = c.get("total", 0) + 1
+    if is_win:
+        c["wins"] = c.get("wins", 0) + 1
+    win_rate = c["wins"] / c["total"] if c["total"] > 0 else 0.5
+    # drift_factor: si win_rate bas, réduire la confiance future
+    c["drift_factor"] = max(0.7, min(1.2, 0.8 + win_rate * 0.4))
+    c["last_updated"] = datetime.now().isoformat()
+    _save_calibration()
+
 # Stockage des dernières prédictions en temps réel
 realtime_predictions: Dict[str, Dict[str, Any]] = {}  # {symbol: {prediction_data}}
 
@@ -5315,6 +5399,15 @@ Format: Analyse claire et professionnelle en français.
         action, confidence, reason = apply_confidence_thresholds(action, confidence, reason)
         logger.info(f"🎯 Seuils appliqués: action={action}, confidence={confidence:.3f}")
         
+        # 2b. Calibration adaptative (réduit le décalage prédiction/mouvement réel)
+        action, confidence, reason = apply_calibration_to_decision(
+            request.symbol, action, confidence, reason, timeframe="M1"
+        )
+        response_data["action"] = action
+        response_data["confidence"] = round(confidence, 3)
+        response_data["reason"] = reason
+        logger.debug(f"📐 Calibration appliquée: action={action}, confidence={confidence:.3f}")
+        
         # 3. Calculer les métadonnées enrichies (pour tous les symboles)
         metadata = {}
         try:
@@ -6303,12 +6396,11 @@ class DecisionAccuracyRequest(BaseModel):
 async def log_decision_accuracy(request: DecisionAccuracyRequest):
     """
     Enregistre la précision d'une décision de trading pour le feedback loop.
-    Permet au système d'apprendre de ses décisions.
+    Alimente _feedback_by_key pour la calibration ML et met à jour symbol_calibration.
     """
     try:
         logger.info(f"📊 Précision décision reçue: {request.symbol} - {request.action} (conf: {request.confidence:.2f})")
         
-        # Log simple pour l'instant (peut être étendu avec stockage en base de données)
         accuracy_data = {
             "symbol": request.symbol,
             "action": request.action,
@@ -6317,10 +6409,25 @@ async def log_decision_accuracy(request: DecisionAccuracyRequest):
             "profit": request.profit,
             "timestamp": request.timestamp or datetime.now().isoformat()
         }
-        
-        # Ici, on pourrait sauvegarder dans une base de données ou un fichier
-        # Pour l'instant, on log juste l'information
         logger.info(f"✅ Données de précision enregistrées: {accuracy_data}")
+        
+        # Alimenter le buffer de feedback ML (calibration)
+        is_win = str(request.result or "").lower() in ("win", "won", "1", "true", "yes")
+        if request.profit is not None:
+            is_win = request.profit > 0
+        profit = float(request.profit or 0.0)
+        try:
+            buf = _get_feedback_buf(request.symbol, "M1")
+            buf.append({
+                "profit": profit,
+                "is_win": is_win,
+                "side": (request.action or "").lower(),
+                "ai_confidence": float(request.confidence),
+                "timestamp": request.timestamp or datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+            })
+            update_calibration_from_feedback(request.symbol, is_win, profit, request.action)
+        except Exception as fb_err:
+            logger.warning(f"⚠️ Feedback buffer: {fb_err}")
         
         return {
             "success": True,
@@ -6456,6 +6563,7 @@ async def trades_feedback(request: TradeFeedbackRequest):
             "ai_confidence": float(request.ai_confidence) if request.ai_confidence is not None else None,
             "timestamp": request.timestamp or datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
         })
+        update_calibration_from_feedback(symbol, bool(request.is_win), float(request.profit), request.side or "")
         logger.info(f"📊 Feedback trade reçu: {symbol} {tf} - {'WIN' if request.is_win else 'LOSS'} (profit: {request.profit:.2f})")
         return _compute_ml_metrics(symbol, tf)
     except Exception as e:
@@ -6502,6 +6610,14 @@ async def ml_continuous_status():
         "last_tick": _continuous_last_tick,
         "feedback_keys": len(_feedback_by_key),
     }
+
+@app.get("/calibration/{symbol}")
+async def get_calibration(symbol: str, timeframe: str = "M1"):
+    """
+    Retourne la calibration adaptative pour un symbole.
+    Utilisé pour visualiser min_confidence, confidence_multiplier, drift_factor, etc.
+    """
+    return get_symbol_calibration(symbol, timeframe)
 
 # ===== SYSTÈME DE NOTIFICATIONS VONAGE =====
 # Importer le service de notification unifié

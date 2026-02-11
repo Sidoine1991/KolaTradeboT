@@ -920,18 +920,7 @@ void OnTick()
    }
    
    // OPTIMISATION MAXIMALE: Désactiver complètement les graphiques
-   if(!DisableAllGraphics)
-   {
-      static datetime lastDrawUpdate = 0;
-      int graphicsInterval = HighPerformanceMode ? GraphicsUpdateInterval : 30;
-      if(TimeCurrent() - lastDrawUpdate >= graphicsInterval)
-      {
-         // Seulement les labels essentiels (très léger)
-         DrawAIConfidenceAndTrendSummary();
-         
-         lastDrawUpdate = TimeCurrent();
-      }
-   }
+   // Désactivé: ancien overlay IA (éviter superposition avec nouveau dashboard)
    
    // OPTIMISATION: Mises à jour très peu fréquentes pour éléments lourds (désactivé si graphics désactivés)
    if(!DisableAllGraphics)
@@ -1856,7 +1845,7 @@ void CleanAllGraphicalObjects()
 {
    // Supprimer TOUS les objets graphiques sauf les labels essentiels
    int total = ObjectsTotal(0);
-   string objectsToKeep[] = {"AI_CONFIDENCE_", "AI_TREND_SUMMARY_"};
+   string objectsToKeep[] = {"__KEEP_NONE__"};
    
    for(int i = total - 1; i >= 0; i--)
    {
@@ -1896,8 +1885,8 @@ void CleanOldGraphicalObjects()
    
    // Déclarer les tableaux au début de la fonction
    string prefixesToDelete[] = {"DERIV_", "Deriv_"}; // Supprimer seulement les patterns Deriv obsolètes
-   string objectsToKeep[] = {"AI_CONFIDENCE_", "AI_TREND_SUMMARY_", "EMA_50_", "EMA_100_", "EMA_200_", 
-                              "AI_BUY_", "AI_SELL_", "SR_", "Trend_", "SMC_OB_", "DERIV_ARROW_"};
+   string objectsToKeep[] = {"EMA_50_", "EMA_100_", "EMA_200_", 
+                             "AI_BUY_", "AI_SELL_", "SR_", "Trend_", "SMC_OB_", "DERIV_ARROW_"};
    
    // Supprimer les anciens objets graphiques sauf ceux qu'on veut garder
    int total = ObjectsTotal(0);
@@ -2145,6 +2134,11 @@ void CleanupDashboard()
       string endpointName = g_dashboardName + "Endpoint" + IntegerToString(i);
       ObjectDelete(0, endpointName);
    }
+
+   // Nettoyer les anciens labels IA (anciens overlays)
+   ObjectDelete(0, "AI_CONFIDENCE_" + _Symbol);
+   ObjectDelete(0, "AI_TREND_SUMMARY_" + _Symbol);
+   ObjectDelete(0, "ENDPOINTS_STATUS_" + _Symbol);
 }
 
 //+------------------------------------------------------------------+
