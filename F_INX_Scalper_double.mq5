@@ -3385,20 +3385,99 @@ void LookForTradingOpportunity()
                if(DebugMode)
                   Print("🔍 Flèche DERIV détectée - Placement ordre LIMIT pour: ", EnumToString(signalType));
                
-               // Pour Boom/Crash: utiliser la stratégie de spike
+               // Pour Boom/Crash: utiliser la stratégie adaptée selon la confiance
                if(isBoomCrashSymbol)
                {
-                  if(DebugMode)
-                     Print("🚀 Boom/Crash - Placement ordre LIMIT pour capturer spike (", DoubleToString(g_lastAIConfidence, 1), "%)");
-                  
-                  // Calculer SL/TP adaptés pour Boom/Crash
-                  double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-                  double atrValue = 0;
-                  double atrBuffer[1];
-                  if(CopyBuffer(atrHandle, 0, 0, 1, atrBuffer) > 0)
-                     atrValue = atrBuffer[0];
+                  // SI confiance ≥80% ET flèche DERIV présente → Ordre MARKET normal
+                  if(g_lastAIConfidence >= 0.80 && hasDerivArrow)
+                  {
+                     if(DebugMode)
+                        Print("🚀 Boom/Crash - Confiance élevée (", DoubleToString(g_lastAIConfidence, 1), "%) + Flèche DERIV → Ordre MARKET normal");
+                     
+                     // Exécuter ordre marché avec SL/TP adaptés pour spike
+                     double price = SymbolInfoDouble(_Symbol, (signalType == ORDER_TYPE_BUY) ? SYMBOL_ASK : SYMBOL_BID);
+                     double atrValue = 0;
+                     double atrBuffer[1];
+                     if(CopyBuffer(atrHandle, 0, 0, 1, atrBuffer) > 0)
+                        atrValue = atrBuffer[0];
+                     else
+                        atrValue = price * 0.001;
+                     
+                     double stopLoss = 0;
+                     double takeProfit = 0;
+                     
+                     if(signalType == ORDER_TYPE_BUY) // BUY sur Boom
+                     {
+                        stopLoss = NormalizeDouble(price - (atrValue * 0.8), _Digits); // SL serré pour spike
+                        takeProfit = NormalizeDouble(price + (atrValue * 2.5), _Digits); // TP rapide pour spike
+                        
+                        bool success = trade.Buy(NormalizeLotSize(InitialLotSize), _Symbol, price, stopLoss, takeProfit,
+                                                "BOOM MARKET (conf: " + DoubleToString(g_lastAIConfidence,1) + "%)");
+                        
+                        if(success)
+                        {
+                           MarkOrderAsExecuted(_Symbol);
+                           if(DebugMode)
+                              Print("✅ Trade Boom MARKET exécuté - SL: ", DoubleToString(stopLoss, _Digits), " TP: ", DoubleToString(takeProfit, _Digits));
+                           
+                           // Notification
+                           if(!DisableNotifications)
+                           {
+                              string notificationText = "🚀 BOOM MARKET EXECUTED\n" + _Symbol + " BUY\nConfiance: " + DoubleToString(g_lastAIConfidence, 1) + "%\nSL: " + DoubleToString(stopLoss, _Digits) + "\nTP: " + DoubleToString(takeProfit, _Digits);
+                              SendNotification(notificationText);
+                              Alert(notificationText);
+                           }
+                        }
+                        else
+                        {
+                           if(DebugMode)
+                              Print("❌ Erreur trade Boom MARKET: ", trade.ResultRetcode(), " - ", trade.ResultRetcodeDescription());
+                        }
+                     }
+                     else // SELL sur Crash
+                     {
+                        stopLoss = NormalizeDouble(price + (atrValue * 0.8), _Digits); // SL serré pour spike
+                        takeProfit = NormalizeDouble(price - (atrValue * 2.5), _Digits); // TP rapide pour spike
+                        
+                        bool success = trade.Sell(NormalizeLotSize(InitialLotSize), _Symbol, price, stopLoss, takeProfit,
+                                                 "CRASH MARKET (conf: " + DoubleToString(g_lastAIConfidence,1) + "%)");
+                        
+                        if(success)
+                        {
+                           MarkOrderAsExecuted(_Symbol);
+                           if(DebugMode)
+                              Print("✅ Trade Crash MARKET exécuté - SL: ", DoubleToString(stopLoss, _Digits), " TP: ", DoubleToString(takeProfit, _Digits));
+                           
+                           // Notification
+                           if(!DisableNotifications)
+                           {
+                              string notificationText = "🚀 CRASH MARKET EXECUTED\n" + _Symbol + " SELL\nConfiance: " + DoubleToString(g_lastAIConfidence, 1) + "%\nSL: " + DoubleToString(stopLoss, _Digits) + "\nTP: " + DoubleToString(takeProfit, _Digits);
+                              SendNotification(notificationText);
+                              Alert(notificationText);
+                           }
+                        }
+                        else
+                        {
+                           if(DebugMode)
+                              Print("❌ Erreur trade Crash MARKET: ", trade.ResultRetcode(), " - ", trade.ResultRetcodeDescription());
+                        }
+                     }
+                     return; // Sortir après exécution marché
+                  }
                   else
-                     atrValue = currentPrice * 0.001;
+                  {
+                     // SINON → Ordre LIMIT pour capturer spike (logique existante)
+                     if(DebugMode)
+                        Print("🚀 Boom/Crash - Placement ordre LIMIT pour capturer spike (", DoubleToString(g_lastAIConfidence, 1), "%)");
+                     
+                     // Calculer SL/TP adaptés pour Boom/Crash
+                     double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+                     double atrValue = 0;
+                     double atrBuffer[1];
+                     if(CopyBuffer(atrHandle, 0, 0, 1, atrBuffer) > 0)
+                        atrValue = atrBuffer[0];
+                     else
+                        atrValue = currentPrice * 0.001;
                   
                   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
                   double stopLoss = 0;
