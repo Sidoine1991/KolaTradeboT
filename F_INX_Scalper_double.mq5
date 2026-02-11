@@ -327,48 +327,6 @@ ENUM_ORDER_TYPE GetPendingTypeFromSignal(const ENUM_ORDER_TYPE signalType)
 }
 
 //+------------------------------------------------------------------+
-//| Valide/Ajuste distances SL/TP vs contraintes broker               |
-//+------------------------------------------------------------------+
-bool EnsureStopsDistanceValid(double entryPrice, ENUM_ORDER_TYPE pendingType, double &sl, double &tp)
-{
-   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
-   long stopLevelPoints = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
-   double minDistance = stopLevelPoints * point;
-   if(minDistance < 5 * point) minDistance = 5 * point;
-
-   // Pour certains symboles synthétiques, on force un peu plus d'écart
-   if(IsDerivSyntheticIndex(_Symbol))
-      minDistance = MathMax(minDistance, 15 * point);
-
-   double slDist = MathAbs(entryPrice - sl);
-   double tpDist = MathAbs(tp - entryPrice);
-
-   if(slDist < minDistance || tpDist < minDistance)
-   {
-      // Ajuster en conservant la direction logique
-      if(pendingType == ORDER_TYPE_BUY_LIMIT)
-      {
-         sl = NormalizeDouble(entryPrice - minDistance - 2 * point, _Digits);
-         tp = NormalizeDouble(entryPrice + (LimitRR * (entryPrice - sl)), _Digits);
-      }
-      else if(pendingType == ORDER_TYPE_SELL_LIMIT)
-      {
-         sl = NormalizeDouble(entryPrice + minDistance + 2 * point, _Digits);
-         tp = NormalizeDouble(entryPrice - (LimitRR * (sl - entryPrice)), _Digits);
-      }
-      else
-      {
-         return false;
-      }
-
-      slDist = MathAbs(entryPrice - sl);
-      tpDist = MathAbs(tp - entryPrice);
-   }
-
-   return (slDist >= minDistance && tpDist >= minDistance && sl > 0 && tp > 0 && sl != tp);
-}
-
-//+------------------------------------------------------------------+
 //| Vérifier si un ordre a déjà été exécuté pour un symbole          |
 //| Évite les doublons quand la flèche clignote plusieurs fois      |
 //+------------------------------------------------------------------+
@@ -1876,10 +1834,42 @@ void CleanOldGraphicalObjects()
 //+------------------------------------------------------------------+
 void DrawAIConfidenceAndTrendSummary()
 {
-   // Affichage IA decision supprimé (ancien et symbole) - sur demande utilisateur
-   string aiLabelName = "AI_CONFIDENCE_" + _Symbol;
-   if(ObjectFind(0, aiLabelName) >= 0)
-      ObjectDelete(0, aiLabelName);
+   // Afficher la recommandation IA si disponible
+   if(g_lastAIAction != "" && g_lastAIConfidence > 0)
+   {
+      string aiLabelName = "AI_CONFIDENCE_" + _Symbol;
+      if(ObjectFind(0, aiLabelName) < 0)
+         ObjectCreate(0, aiLabelName, OBJ_LABEL, 0, 0, 0);
+      
+      ObjectSetInteger(0, aiLabelName, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+      ObjectSetInteger(0, aiLabelName, OBJPROP_XDISTANCE, 10);
+      ObjectSetInteger(0, aiLabelName, OBJPROP_YDISTANCE, 30);
+      
+      string actionText = "";
+      if(StringCompare(g_lastAIAction, "buy") == 0)
+         actionText = "🟢 BUY";
+      else if(StringCompare(g_lastAIAction, "sell") == 0)
+         actionText = "🔴 SELL";
+      else
+         actionText = "⏸️ HOLD";
+      
+      string aiText = "IA: " + actionText + " (" + DoubleToString(g_lastAIConfidence, 1) + "%)";
+      if(g_lastAIReason != "")
+         aiText += "\n" + StringSubstr(g_lastAIReason, 0, 50) + "...";
+      
+      ObjectSetString(0, aiLabelName, OBJPROP_TEXT, aiText);
+      ObjectSetInteger(0, aiLabelName, OBJPROP_COLOR, clrWhite);
+      ObjectSetString(0, aiLabelName, OBJPROP_FONT, "Arial");
+      ObjectSetInteger(0, aiLabelName, OBJPROP_FONTSIZE, 10);
+      ObjectSetInteger(0, aiLabelName, OBJPROP_BACK, false);
+   }
+   else
+   {
+      // Supprimer l'ancien label si pas de signal IA
+      string aiLabelName = "AI_CONFIDENCE_" + _Symbol;
+      if(ObjectFind(0, aiLabelName) >= 0)
+         ObjectDelete(0, aiLabelName);
+   }
    
    // Résumés de tendance par timeframe (si disponibles depuis api_trend)
    // Récupérer les EMA pour afficher les tendances
