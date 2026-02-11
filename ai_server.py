@@ -308,12 +308,9 @@ _history_cache: Dict[str, pd.DataFrame] = {}
 # Fonctions de détection de spikes Boom/Crash
 # =========================
 def is_boom_crash_symbol(symbol: str) -> bool:
-    """Vérifie si le symbole est un indice Boom ou Crash"""
-    boom_crash_patterns = [
-        "Boom 500 Index", "Boom 300 Index", "Boom 600 Index", "Boom 900 Index",
-        "Crash 300 Index", "Crash 500 Index", "Crash 1000 Index"
-    ]
-    return any(pattern in symbol for pattern in boom_crash_patterns)
+    """Vérifie si le symbole est un indice Boom ou Crash (tous indices Deriv)"""
+    s = symbol.lower()
+    return ("boom" in s and "index" in s) or ("crash" in s and "index" in s)
 
 def detect_spike_pattern(df: pd.DataFrame, symbol: str) -> Dict[str, Any]:
     """
@@ -706,15 +703,21 @@ def get_market_data_cloud(symbol: str, period: str = "5d", interval: str = "1m")
         # Mapping des symboles pour yfinance
         symbol_map = {
             "EURUSD": "EURUSD=X",
-            "GBPUSD": "GBPUSD=X", 
+            "GBPUSD": "GBPUSD=X",
             "USDJPY": "USDJPY=X",
             "Boom 500 Index": "^GSPC",
-            "Crash 300 Index": "^VIX",
-            "Volatility 75 Index": "^VIX",
             "Boom 300 Index": "^GSPC",
             "Boom 600 Index": "^GSPC",
             "Boom 900 Index": "^GSPC",
-            "Crash 1000 Index": "^VIX"
+            "Boom 1000 Index": "^GSPC",
+            "Crash 300 Index": "^VIX",
+            "Crash 500 Index": "^VIX",
+            "Crash 900 Index": "^VIX",
+            "Crash 1000 Index": "^VIX",
+            "Volatility 75 Index": "^VIX",
+            "Volatility 100 Index": "^VIX",
+            "Volatility 25 Index": "^VIX",
+            "Step Index": "^GSPC",
         }
         
         yf_symbol = symbol_map.get(symbol, symbol)
@@ -754,13 +757,19 @@ def generate_simulated_data(symbol: str, periods: int = 100) -> pd.DataFrame:
             "EURUSD": 1.0850,
             "GBPUSD": 1.2750,
             "USDJPY": 148.50,
-            "Boom 500 Index": 5000,
-            "Crash 300 Index": 300,
-            "Volatility 75 Index": 75,
             "Boom 300 Index": 300,
+            "Boom 500 Index": 5000,
             "Boom 600 Index": 600,
             "Boom 900 Index": 900,
-            "Crash 1000 Index": 1000
+            "Boom 1000 Index": 1000,
+            "Crash 300 Index": 300,
+            "Crash 500 Index": 500,
+            "Crash 900 Index": 900,
+            "Crash 1000 Index": 1000,
+            "Volatility 25 Index": 25,
+            "Volatility 75 Index": 75,
+            "Volatility 100 Index": 100,
+            "Step Index": 1000,
         }
         
         base_price = base_prices.get(symbol, 100)
@@ -3932,7 +3941,8 @@ async def decision(request: DecisionRequest):
         
         if "boom" in symbol_lower:
             # Forcer HOLD pour toute vente sur Boom (règle de sécurité)
-            if request.dir_rule == 0:  # 0 = SELL
+            # dir_rule: 1=BUY, -1=SELL, 0=neutre
+            if request.dir_rule <= -1:  # SELL
                 logger.debug(f"🔒 Vente sur Boom bloquée (règle sécurité): {request.symbol}")
                 # Appliquer les seuils de confiance même pour les retards anticipés
                 action, confidence, reason = apply_confidence_thresholds("hold", 0.1, "INTERDICTION: Ventes sur Boom non autorisées")
