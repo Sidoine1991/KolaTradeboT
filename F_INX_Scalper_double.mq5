@@ -289,12 +289,6 @@ int CountActiveSymbols();
 void DrawDerivPatternsOnChart();
 void UpdateDerivArrowBlink();
 bool DetectDynamicPatternsAndExecute();
-void ActivateTrailingStop();
-bool PlaceLimitOrderOnArrow(ENUM_ORDER_TYPE signalType);
-void DrawFutureCandlesAdaptive();
-void TradeBasedOnFutureCandles(string direction, double confidence, double currentPrice, double atrValue);
-bool ParsePredictionData(string json, string &direction, double &confidence);
-
 //+------------------------------------------------------------------+
 //| Détection indices synthétiques Deriv                             |
 //+------------------------------------------------------------------+
@@ -8684,106 +8678,6 @@ void DetectAndDisplayCorrections()
             Print(" Distance: ", DoubleToString(MathAbs(targetPrice - currentPrice) / point, 1), " pips");
          }
       }
-   }
-}
-
-//+------------------------------------------------------------------+
-//| Exécuter immédiatement un trade Boom/Crash au marché |
-//+------------------------------------------------------------------+
-bool ExecuteImmediateBoomCrashTrade(ENUM_ORDER_TYPE signalType)
-{
-   double currentPrice = SymbolInfoDouble(_Symbol, (signalType == ORDER_TYPE_BUY) ? SYMBOL_ASK : SYMBOL_BID);
-   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
-   
-   // Calculer SL/TP rapides pour Boom/Crash (spikes)
-   double atrValue = 0;
-   double atrBuffer[1];
-   if(CopyBuffer(atrHandle, 0, 0, 1, atrBuffer) > 0)
-      atrValue = atrBuffer[0];
-   else
-      atrValue = currentPrice * 0.001; // Fallback 0.1%
-   
-   double stopLoss = 0;
-   double takeProfit = 0;
-   
-   if(signalType == ORDER_TYPE_BUY)
-   {
-      // Pour BUY sur Boom: SL serré, TP rapide
-      stopLoss = currentPrice - (atrValue * 0.5); // SL très serré
-      takeProfit = currentPrice + (atrValue * 1.5); // TP rapide (1:3 ratio)
-   }
-   else // SELL sur Crash
-   {
-      // Pour SELL sur Crash: SL serré, TP rapide
-      stopLoss = currentPrice + (atrValue * 0.5); // SL très serré
-      takeProfit = currentPrice - (atrValue * 1.5); // TP rapide (1:3 ratio)
-   }
-   
-   // Vérifier les distances minimales pour Boom/Crash
-   double minDistance = MathMax(20 * point, atrValue * 0.2); // Minimum 20 points ou 0.2 ATR
-   double slDistance = MathAbs(currentPrice - stopLoss);
-   double tpDistance = MathAbs(takeProfit - currentPrice);
-   
-   if(slDistance < minDistance || tpDistance < minDistance)
-   {
-      if(DebugMode)
-         Print("⚠️ Distances SL/TP trop faibles pour Boom/Crash: SL=", DoubleToString(slDistance/point, 0), " TP=", DoubleToString(tpDistance/point, 0));
-      return false;
-   }
-   
-   // Taille de position adaptée à la confiance
-   double lotSize = InitialLotSize;
-   if(g_lastAIConfidence >= 95.0)
-      lotSize = InitialLotSize * 1.5; // Confiance très élevée
-   else if(g_lastAIConfidence >= 90.0)
-      lotSize = InitialLotSize * 1.2; // Confiance élevée
-   
-   lotSize = NormalizeLotSize(lotSize);
-   
-   // Exécuter l'ordre au marché immédiatement
-   string orderComment = "Boom/Crash IMMEDIATE - " + EnumToString(signalType) + " (conf: " + DoubleToString(g_lastAIConfidence, 1) + "%)";
-   
-   bool success = false;
-   if(signalType == ORDER_TYPE_BUY)
-   {
-      success = trade.Buy(lotSize, _Symbol, currentPrice, stopLoss, takeProfit, orderComment);
-   }
-   else // SELL
-   {
-      success = trade.Sell(lotSize, _Symbol, currentPrice, stopLoss, takeProfit, orderComment);
-   }
-   
-   if(success)
-   {
-      double riskUSD = slDistance * lotSize * SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
-      double rewardUSD = tpDistance * lotSize * SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
-      
-      Print("🚀 TRADE BOOM/CRASH EXÉCUTÉ IMMÉDIATEMENT:");
-      Print(" 📈 Type: ", EnumToString(signalType));
-      Print(" 💰 Entrée: ", DoubleToString(currentPrice, _Digits));
-      Print(" 🛡️ SL: ", DoubleToString(stopLoss, _Digits), " (risque: ", DoubleToString(riskUSD, 2), "$)");
-      Print(" 🎯 TP: ", DoubleToString(takeProfit, _Digits), " (gain: ", DoubleToString(rewardUSD, 2), "$)");
-      Print(" 📊 Ratio R/R: 1:", DoubleToString(rewardUSD/riskUSD, 1));
-      Print(" 📏 Taille: ", DoubleToString(lotSize, 2));
-      Print(" 🎯 Confiance: ", DoubleToString(g_lastAIConfidence, 1), "%");
-      Print(" ⚡ Exécution: IMMÉDIATE (spike Boom/Crash)");
-      
-      // Envoyer notification
-      if(!DisableNotifications)
-      {
-         string notificationText = "🚀 BOOM/CRASH IMMÉDIAT\n" + _Symbol + " " + EnumToString(signalType) +
-                                  "\n@" + DoubleToString(currentPrice, _Digits) +
-                                  "\nConfiance: " + DoubleToString(g_lastAIConfidence, 1) + "%";
-         SendNotification(notificationText);
-         Alert(notificationText);
-      }
-      
-      return true;
-   }
-   else
-   {
-      Print("❌ Erreur exécution Boom/Crash: ", trade.ResultRetcode(), " - ", trade.ResultRetcodeDescription());
-      return false;
    }
 }
 
