@@ -220,6 +220,8 @@ struct PositionTracker {
    datetime openTime;
    double maxProfitReached;  // Profit maximum atteint pour cette position
    bool profitSecured;       // Indique si le profit a été sécurisé
+   double partialClosedLot; // Lot fermé partiellement - NOUVEAU
+   bool breakevenActivated; // Breakeven activé - NOUVEAU
 };
 
 static PositionTracker g_positionTracker;
@@ -247,6 +249,10 @@ static datetime g_lastDayReset = 0;
 
 // Suivi pour fermeture après spike (Boom/Crash)
 static double g_lastBoomCrashPrice = 0.0;  // Prix de référence pour détecter le spike
+
+// Variables pour les sorties rapides Volatility et Boom/Crash
+static double g_volatilityQuickTP = 2.0;  // Seuil pour fermeture rapide Volatility
+static double g_boomCrashSpikeTP = 0.01; // Seuil pour fermeture rapide Boom/Crash
 
 // Suivi des tentatives de spike et cooldown (Boom/Crash)
 static string   g_spikeSymbols[];
@@ -357,198 +363,6 @@ bool EnsureStopsDistanceValid(double entryPrice, ENUM_ORDER_TYPE pendingType, do
    }
 
    return (slDist >= minDistance && tpDist >= minDistance && sl > 0 && tp > 0 && sl != tp);
-}
-
-//+------------------------------------------------------------------+
-//| Détecter et afficher les corrections vers résistances/supports   |
-//| Affiche une notification sur le graphique quand le prix approche  |
-//| une zone d'entrée intéressante pour les signaux IA connus      |
-//+------------------------------------------------------------------+
-void DetectAndDisplayCorrections()
-{
-   // Vérifier si nous avons un signal IA récent (SELL ou BUY)
-   if(g_lastAIAction == "" || g_lastAIConfidence < 0.70)
-      return; // Pas de signal IA fiable récent
-   
-   double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
-   
-   // Récupérer les données de prix récents
-   double close[], high[], low[];
-   datetime time[];
-   ArraySetAsSeries(close, true);
-   ArraySetAsSeries(high, true);
-   ArraySetAsSeries(low, true);
-   ArraySetAsSeries(time, true);
-   
-   if(CopyClose(_Symbol, PERIOD_M1, 0, 20, close) < 20 ||
-      CopyHigh(_Symbol, PERIOD_M1, 0, 20, high) < 20 ||
-      CopyLow(_Symbol, PERIOD_M1, 0, 20, low) < 20 ||
-      CopyTime(_Symbol, PERIOD_M1, 0, 20, time) < 20)
-      return;
-   
-   // Récupérer les supports/résistances
-   double atrM1[], atrM5[], atrH1[];
-   ArraySetAsSeries(atrM1, true);
-   ArraySetAsSeries(atrM5, true);
-   ArraySetAsSeries(atrH1, true);
-   
-   if(CopyBuffer(atrM1Handle, 0, 0, 1, atrM1) <= 0 ||
-      CopyBuffer(atrM5Handle, 0, 0, 1, atrM5) <= 0 ||
-      CopyBuffer(atrH1Handle, 0, 0, 1, atrH1) <= 0)
-      return;
-   
-   // Calculer les niveaux
-   double resistanceM1 = currentPrice + (1.5 * atrM1[0]);
-   double resistanceM5 = currentPrice + (2.0 * atrM5[0]);
-   double resistanceH1 = currentPrice + (2.5 * atrH1[0]);
-   double supportM1 = currentPrice - (1.5 * atrM1[0]);
-   double supportM5 = currentPrice - (2.0 * atrM5[0]);
-   double supportH1 = currentPrice - (2.5 * atrH1[0]);
-   
-   // Détecter les corrections
-   bool isCorrectionToResistance = false;
-   bool isCorrectionToSupport = false;
-   string targetZone = "";
-   double targetPrice = 0;
-   
-   if(StringCompare(g_lastAIAction, "sell") == 0)
-   {
-      // Signal SELL connu - chercher correction vers résistance
-      // Vérifier si le prix monte après une baisse (correction haussière)
-      bool wasDropping = (close[3] > close[2] && close[2] > close[1]); // Baisse sur 3 périodes
-      bool isCorrectingUp = (close[0] > close[1] && close[1] > close[2]); // Reprise sur 2 périodes
-      
-      if(wasDropping && isCorrectingUp)
-      {
-         // Vérifier la distance aux résistances
-         double distToM1 = resistanceM1 - currentPrice;
-         double distToM5 = resistanceM5 - currentPrice;
-         double distToH1 = resistanceH1 - currentPrice;
-         
-         // Si approche d'une résistance (moins de 1 ATR)
-         if(distToM1 < atrM1[0] && distToM1 > 0)
-         {
-            isCorrectionToResistance = true;
-            targetZone = "Résistance M1";
-            targetPrice = resistanceM1;
-         }
-         else if(distToM5 < atrM5[0] && distToM5 > 0)
-         {
-            isCorrectionToResistance = true;
-            targetZone = "Résistance M5";
-            targetPrice = resistanceM5;
-         }
-         else if(distToH1 < atrH1[0] && distToH1 > 0)
-         {
-            isCorrectionToResistance = true;
-            targetZone = "Résistance H1";
-            targetPrice = resistanceH1;
-         }
-      }
-   }
-   else if(StringCompare(g_lastAIAction, "buy") == 0)
-   {
-      // Signal BUY connu - chercher correction vers support
-      // Vérifier si le prix baisse après une hausse (correction baissière)
-      bool wasRising = (close[3] < close[2] && close[2] < close[1]); // Hausse sur 3 périodes
-      bool isCorrectingDown = (close[0] < close[1] && close[1] < close[2]); // Baisse sur 2 périodes
-      
-      if(wasRising && isCorrectingDown)
-      {
-         // Vérifier la distance aux supports
-         double distToM1 = currentPrice - supportM1;
-         double distToM5 = currentPrice - supportM5;
-         double distToH1 = currentPrice - supportH1;
-         
-         // Si approche d'un support (moins de 1 ATR)
-         if(distToM1 < atrM1[0] && distToM1 > 0)
-         {
-            isCorrectionToSupport = true;
-            targetZone = "Support M1";
-            targetPrice = supportM1;
-         }
-         else if(distToM5 < atrM5[0] && distToM5 > 0)
-         {
-            isCorrectionToSupport = true;
-            targetZone = "Support M5";
-            targetPrice = supportM5;
-         }
-         else if(distToH1 < atrH1[0] && distToH1 > 0)
-         {
-            isCorrectionToSupport = true;
-            targetZone = "Support H1";
-            targetPrice = supportH1;
-         }
-      }
-   }
-   
-   // Afficher la notification sur le graphique si correction détectée
-   if((isCorrectionToResistance || isCorrectionToSupport) && targetPrice > 0)
-   {
-      string correctionName = "CORRECTION_NOTIFICATION_" + _Symbol;
-      datetime currentTime = TimeCurrent();
-      datetime notificationTime = currentTime + PeriodSeconds(PERIOD_M1) * 2;
-      
-      // Supprimer l'ancienne notification
-      ObjectDelete(0, correctionName);
-      
-      // Créer la nouvelle notification
-      if(ObjectCreate(0, correctionName, OBJ_TEXT, 0, notificationTime, targetPrice))
-      {
-         string notificationText = "";
-         color notificationColor = clrWhite;
-         
-         if(isCorrectionToResistance)
-         {
-            notificationText = "🔄 CORRECTION VERS RÉSISTANCE\n"
-                             "⬆️ Signal SELL IA: " + DoubleToString(g_lastAIConfidence*100, 1) + "%\n"
-                             "🎯 Cible: " + targetZone + " @ " + DoubleToString(targetPrice, _Digits) + "\n"
-                             "💡 Entrée SELL LIMIT possible";
-            notificationColor = clrOrange;
-         }
-         else if(isCorrectionToSupport)
-         {
-            notificationText = "🔄 CORRECTION VERS SUPPORT\n"
-                             "⬇️ Signal BUY IA: " + DoubleToString(g_lastAIConfidence*100, 1) + "%\n"
-                             "🎯 Cible: " + targetZone + " @ " + DoubleToString(targetPrice, _Digits) + "\n"
-                             "💡 Entrée BUY LIMIT possible";
-            notificationColor = clrDodgerBlue;
-         }
-         
-         ObjectSetString(0, correctionName, OBJPROP_TEXT, notificationText);
-         ObjectSetInteger(0, correctionName, OBJPROP_COLOR, notificationColor);
-         ObjectSetInteger(0, correctionName, OBJPROP_FONTSIZE, 8);
-         ObjectSetString(0, correctionName, OBJPROP_FONT, "Arial Bold");
-         ObjectSetInteger(0, correctionName, OBJPROP_BACK, false);
-         ObjectSetInteger(0, correctionName, OBJPROP_ANCHOR, ANCHOR_LEFT);
-         
-         // Dessiner une flèche vers la cible
-         string arrowName = "CORRECTION_ARROW_" + _Symbol;
-         ObjectDelete(0, arrowName);
-         
-         if(ObjectCreate(0, arrowName, OBJ_ARROW, 0, notificationTime, targetPrice))
-         {
-            ObjectSetInteger(0, arrowName, OBJPROP_COLOR, notificationColor);
-            ObjectSetInteger(0, arrowName, OBJPROP_STYLE, STYLE_SOLID);
-            ObjectSetInteger(0, arrowName, OBJPROP_WIDTH, 2);
-            ObjectSetInteger(0, arrowName, OBJPROP_ARROWCODE, isCorrectionToResistance ? 241 : 242);
-            ObjectSetInteger(0, arrowName, OBJPROP_BACK, false);
-         }
-         
-         // Log dans Experts
-         if(DebugMode)
-         {
-            Print("🔄 CORRECTION DÉTECTÉE:");
-            Print("   Signal IA: ", StringToUpper(g_lastAIAction), " (conf: ", DoubleToString(g_lastAIConfidence*100, 1), "%)");
-            Print("   Type: ", isCorrectionToResistance ? "Vers résistance" : "Vers support");
-            Print("   Zone cible: ", targetZone);
-            Print("   Prix cible: ", DoubleToString(targetPrice, _Digits));
-            Print("   Prix actuel: ", DoubleToString(currentPrice, _Digits));
-            Print("   Distance: ", DoubleToString(MathAbs(targetPrice - currentPrice) / point, 1), " pips");
-         }
-      }
-   }
 }
 
 //+------------------------------------------------------------------+
@@ -8678,4 +8492,348 @@ bool ParsePredictionData(string json, string &direction, double &confidence)
    
    return (direction != "" && confidence > 0);
 }
+
+//+------------------------------------------------------------------+
+//| NOUVELLES FONCTIONS D'AMÉLIORATION                           |
+//+------------------------------------------------------------------+
+
+//+------------------------------------------------------------------+
+//| Détecter et afficher les corrections vers résistances/supports |
+//+------------------------------------------------------------------+
+void DetectAndDisplayCorrections()
+{
+   // Vérifier si nous avons un signal IA récent (SELL ou BUY)
+   if(g_lastAIAction == "" || g_lastAIConfidence < 0.70)
+      return; // Pas de signal IA fiable récent
+  
+   double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+  
+   // Récupérer les données de prix récents
+   double close[], high[], low[];
+   datetime time[];
+   ArraySetAsSeries(close, true);
+   ArraySetAsSeries(high, true);
+   ArraySetAsSeries(low, true);
+   ArraySetAsSeries(time, true);
+  
+   if(CopyClose(_Symbol, PERIOD_M1, 0, 20, close) < 20 ||
+      CopyHigh(_Symbol, PERIOD_M1, 0, 20, high) < 20 ||
+      CopyLow(_Symbol, PERIOD_M1, 0, 20, low) < 20 ||
+      CopyTime(_Symbol, PERIOD_M1, 0, 20, time) < 20)
+      return;
+  
+   // Récupérer les ATR
+   double atrM1[], atrM5[], atrH1[];
+   ArraySetAsSeries(atrM1, true);
+   ArraySetAsSeries(atrM5, true);
+   ArraySetAsSeries(atrH1, true);
+  
+   if(CopyBuffer(atrM1Handle, 0, 0, 1, atrM1) <= 0 ||
+      CopyBuffer(atrM5Handle, 0, 0, 1, atrM5) <= 0 ||
+      CopyBuffer(atrH1Handle, 0, 0, 1, atrH1) <= 0)
+      return;
+  
+   // Calculer les niveaux
+   double resistanceM1 = currentPrice + (1.5 * atrM1[0]);
+   double resistanceM5 = currentPrice + (2.0 * atrM5[0]);
+   double resistanceH1 = currentPrice + (2.5 * atrH1[0]);
+   double supportM1 = currentPrice - (1.5 * atrM1[0]);
+   double supportM5 = currentPrice - (2.0 * atrM5[0]);
+   double supportH1 = currentPrice - (2.5 * atrH1[0]);
+  
+   // Détecter les corrections
+   bool isCorrectionToResistance = false;
+   bool isCorrectionToSupport = false;
+   string targetZone = "";
+   double targetPrice = 0;
+  
+   if(StringCompare(g_lastAIAction, "sell") == 0)
+   {
+      // Signal SELL connu - chercher correction vers résistance
+      // Vérifier si le prix monte après une baisse (correction haussière)
+      bool wasDropping = (close[3] > close[2] && close[2] > close[1]); // Baisse sur 3 périodes
+      bool isCorrectingUp = (close[0] > close[1] && close[1] > close[2]); // Reprise sur 2 périodes
+      
+      if(wasDropping && isCorrectingUp)
+      {
+         // Vérifier la distance aux résistances
+         double distToM1 = resistanceM1 - currentPrice;
+         double distToM5 = resistanceM5 - currentPrice;
+         double distToH1 = resistanceH1 - currentPrice;
+         
+         // Si approche d'une résistance (moins de 1 ATR)
+         if(distToM1 < atrM1[0] && distToM1 > 0)
+         {
+            isCorrectionToResistance = true;
+            targetZone = "Résistance M1";
+            targetPrice = resistanceM1;
+         }
+         else if(distToM5 < atrM5[0] && distToM5 > 0)
+         {
+            isCorrectionToResistance = true;
+            targetZone = "Résistance M5";
+            targetPrice = resistanceM5;
+         }
+         else if(distToH1 < atrH1[0] && distToH1 > 0)
+         {
+            isCorrectionToResistance = true;
+            targetZone = "Résistance H1";
+            targetPrice = resistanceH1;
+         }
+      }
+   }
+   else if(StringCompare(g_lastAIAction, "buy") == 0)
+   {
+      // Signal BUY connu - chercher correction vers support
+      // Vérifier si le prix baisse après une hausse (correction baissière)
+      bool wasRising = (close[3] < close[2] && close[2] < close[1]); // Hausse sur 3 périodes
+      bool isCorrectingDown = (close[0] < close[1] && close[1] < close[2]); // Baisse sur 2 périodes
+      
+      if(wasRising && isCorrectingDown)
+      {
+         // Vérifier la distance aux supports
+         double distToM1 = currentPrice - supportM1;
+         double distToM5 = currentPrice - supportM5;
+         double distToH1 = currentPrice - supportH1;
+         
+         // Si approche d'un support (moins de 1 ATR)
+         if(distToM1 < atrM1[0] && distToM1 > 0)
+         {
+            isCorrectionToSupport = true;
+            targetZone = "Support M1";
+            targetPrice = supportM1;
+         }
+         else if(distToM5 < atrM5[0] && distToM5 > 0)
+         {
+            isCorrectionToSupport = true;
+            targetZone = "Support M5";
+            targetPrice = supportM5;
+         }
+         else if(distToH1 < atrH1[0] && distToH1 > 0)
+         {
+            isCorrectionToSupport = true;
+            targetZone = "Support H1";
+            targetPrice = supportH1;
+         }
+      }
+   }
+   
+   // Afficher la notification sur le graphique si correction détectée
+   if((isCorrectionToResistance || isCorrectionToSupport) && targetPrice > 0)
+   {
+      string correctionName = "CORRECTION_NOTIFICATION_" + _Symbol;
+      datetime currentTime = TimeCurrent();
+      datetime notificationTime = currentTime + PeriodSeconds(PERIOD_M1) * 2;
+      
+      // Supprimer l'ancienne notification
+      ObjectDelete(0, correctionName);
+      
+      // Créer la nouvelle notification
+      if(ObjectCreate(0, correctionName, OBJ_TEXT, 0, notificationTime, targetPrice))
+      {
+         string notificationText = "";
+         color notificationColor = clrWhite;
+         
+         if(isCorrectionToResistance)
+         {
+            notificationText = "🔄 CORRECTION VERS RÉSISTANCE\n"
+                             "⬆️ Signal SELL IA: " + DoubleToString(g_lastAIConfidence, 1) + "%\n"
+                             "🎯 Cible: " + targetZone + " @ " + DoubleToString(targetPrice, _Digits) + "\n"
+                             "💡 Entrée SELL LIMIT possible";
+            notificationColor = clrOrange;
+         }
+         else if(isCorrectionToSupport)
+         {
+            notificationText = "🔄 CORRECTION VERS SUPPORT\n"
+                             "⬇️ Signal BUY IA: " + DoubleToString(g_lastAIConfidence, 1) + "%\n"
+                             "🎯 Cible: " + targetZone + " @ " + DoubleToString(targetPrice, _Digits) + "\n"
+                             "💡 Entrée BUY LIMIT possible";
+            notificationColor = clrDodgerBlue;
+         }
+         
+         ObjectSetString(0, correctionName, OBJPROP_TEXT, notificationText);
+         ObjectSetInteger(0, correctionName, OBJPROP_COLOR, notificationColor);
+         ObjectSetInteger(0, correctionName, OBJPROP_FONTSIZE, 8);
+         ObjectSetString(0, correctionName, OBJPROP_FONT, "Arial Bold");
+         ObjectSetInteger(0, correctionName, OBJPROP_BACK, false);
+         ObjectSetInteger(0, correctionName, OBJPROP_ANCHOR, ANCHOR_LEFT);
+         
+         // Dessiner une flèche vers la cible
+         string arrowName = "CORRECTION_ARROW_" + _Symbol;
+         ObjectDelete(0, arrowName);
+         
+         if(ObjectCreate(0, arrowName, OBJ_ARROW, 0, notificationTime, targetPrice))
+         {
+            ObjectSetInteger(0, arrowName, OBJPROP_COLOR, notificationColor);
+            ObjectSetInteger(0, arrowName, OBJPROP_STYLE, STYLE_SOLID);
+            ObjectSetInteger(0, arrowName, OBJPROP_WIDTH, 2);
+            ObjectSetInteger(0, arrowName, OBJPROP_ARROWCODE, isCorrectionToResistance ? 241 : 242);
+            ObjectSetInteger(0, arrowName, OBJPROP_BACK, false);
+         }
+         
+         // Log dans Experts
+         if(DebugMode)
+         {
+            Print("🔄 CORRECTION DÉTECTÉE:");
+            Print(" Signal IA: ", StringToUpper(g_lastAIAction), " (conf: ", DoubleToString(g_lastAIConfidence, 1), "%)");
+            Print(" Type: ", isCorrectionToResistance ? "Vers résistance" : "Vers support");
+            Print(" Zone cible: ", targetZone);
+            Print(" Prix cible: ", DoubleToString(targetPrice, _Digits));
+            Print(" Prix actuel: ", DoubleToString(currentPrice, _Digits));
+            Print(" Distance: ", DoubleToString(MathAbs(targetPrice - currentPrice) / point, 1), " pips");
+         }
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Exécuter immédiatement un trade Boom/Crash au marché |
+//+------------------------------------------------------------------+
+bool ExecuteImmediateBoomCrashTrade(ENUM_ORDER_TYPE signalType)
+{
+   double currentPrice = SymbolInfoDouble(_Symbol, (signalType == ORDER_TYPE_BUY) ? SYMBOL_ASK : SYMBOL_BID);
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   
+   // Calculer SL/TP rapides pour Boom/Crash (spikes)
+   double atrValue = 0;
+   double atrBuffer[1];
+   if(CopyBuffer(atrHandle, 0, 0, 1, atrBuffer) > 0)
+      atrValue = atrBuffer[0];
+   else
+      atrValue = currentPrice * 0.001; // Fallback 0.1%
+   
+   double stopLoss = 0;
+   double takeProfit = 0;
+   
+   if(signalType == ORDER_TYPE_BUY)
+   {
+      // Pour BUY sur Boom: SL serré, TP rapide
+      stopLoss = currentPrice - (atrValue * 0.5); // SL très serré
+      takeProfit = currentPrice + (atrValue * 1.5); // TP rapide (1:3 ratio)
+   }
+   else // SELL sur Crash
+   {
+      // Pour SELL sur Crash: SL serré, TP rapide
+      stopLoss = currentPrice + (atrValue * 0.5); // SL très serré
+      takeProfit = currentPrice - (atrValue * 1.5); // TP rapide (1:3 ratio)
+   }
+   
+   // Vérifier les distances minimales pour Boom/Crash
+   double minDistance = MathMax(20 * point, atrValue * 0.2); // Minimum 20 points ou 0.2 ATR
+   double slDistance = MathAbs(currentPrice - stopLoss);
+   double tpDistance = MathAbs(takeProfit - currentPrice);
+   
+   if(slDistance < minDistance || tpDistance < minDistance)
+   {
+      if(DebugMode)
+         Print("⚠️ Distances SL/TP trop faibles pour Boom/Crash: SL=", DoubleToString(slDistance/point, 0), " TP=", DoubleToString(tpDistance/point, 0));
+      return false;
+   }
+   
+   // Taille de position adaptée à la confiance
+   double lotSize = InitialLotSize;
+   if(g_lastAIConfidence >= 95.0)
+      lotSize = InitialLotSize * 1.5; // Confiance très élevée
+   else if(g_lastAIConfidence >= 90.0)
+      lotSize = InitialLotSize * 1.2; // Confiance élevée
+   
+   lotSize = NormalizeLotSize(lotSize);
+   
+   // Exécuter l'ordre au marché immédiatement
+   string orderComment = "Boom/Crash IMMEDIATE - " + EnumToString(signalType) + " (conf: " + DoubleToString(g_lastAIConfidence, 1) + "%)";
+   
+   bool success = false;
+   if(signalType == ORDER_TYPE_BUY)
+   {
+      success = trade.Buy(lotSize, _Symbol, currentPrice, stopLoss, takeProfit, orderComment);
+   }
+   else // SELL
+   {
+      success = trade.Sell(lotSize, _Symbol, currentPrice, stopLoss, takeProfit, orderComment);
+   }
+   
+   if(success)
+   {
+      double riskUSD = slDistance * lotSize * SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+      double rewardUSD = tpDistance * lotSize * SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+      
+      Print("🚀 TRADE BOOM/CRASH EXÉCUTÉ IMMÉDIATEMENT:");
+      Print(" 📈 Type: ", EnumToString(signalType));
+      Print(" 💰 Entrée: ", DoubleToString(currentPrice, _Digits));
+      Print(" 🛡️ SL: ", DoubleToString(stopLoss, _Digits), " (risque: ", DoubleToString(riskUSD, 2), "$)");
+      Print(" 🎯 TP: ", DoubleToString(takeProfit, _Digits), " (gain: ", DoubleToString(rewardUSD, 2), "$)");
+      Print(" 📊 Ratio R/R: 1:", DoubleToString(rewardUSD/riskUSD, 1));
+      Print(" 📏 Taille: ", DoubleToString(lotSize, 2));
+      Print(" 🎯 Confiance: ", DoubleToString(g_lastAIConfidence, 1), "%");
+      Print(" ⚡ Exécution: IMMÉDIATE (spike Boom/Crash)");
+      
+      // Envoyer notification
+      if(!DisableNotifications)
+      {
+         string notificationText = "🚀 BOOM/CRASH IMMÉDIAT\n" + _Symbol + " " + EnumToString(signalType) +
+                                  "\n@" + DoubleToString(currentPrice, _Digits) +
+                                  "\nConfiance: " + DoubleToString(g_lastAIConfidence, 1) + "%";
+         SendNotification(notificationText);
+         Alert(notificationText);
+      }
+      
+      return true;
+   }
+   else
+   {
+      Print("❌ Erreur exécution Boom/Crash: ", trade.ResultRetcode(), " - ", trade.ResultRetcodeDescription());
+      return false;
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Fermer toutes les positions Volatility si perte cumulée élevée |
+//+------------------------------------------------------------------+
+void CloseVolatilityIfLossExceeded(double lossLimit)
+{
+   double totalProfitVol = 0.0;
+   // Calculer le PnL cumulé des positions Volatility (tous symboles) pour ce Magic
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket > 0 && positionInfo.SelectByTicket(ticket))
+      {
+         string sym = positionInfo.Symbol();
+         if(IsVolatilitySymbol(sym) && positionInfo.Magic() == InpMagicNumber)
+         {
+            totalProfitVol += positionInfo.Profit();
+         }
+      }
+   }
+   // Si perte cumulée dépasse le seuil, fermer toutes les positions Volatility
+   if(totalProfitVol <= -MathAbs(lossLimit))
+   {
+      for(int i = PositionsTotal() - 1; i >= 0; i--)
+      {
+         ulong ticket = PositionGetTicket(i);
+         if(ticket > 0 && positionInfo.SelectByTicket(ticket))
+         {
+            string sym = positionInfo.Symbol();
+            if(IsVolatilitySymbol(sym) && positionInfo.Magic() == InpMagicNumber)
+            {
+               double p = positionInfo.Profit();
+               if(trade.PositionClose(ticket))
+               {
+                  Print("🛑 Volatility perte cumulée dépassée (", DoubleToString(totalProfitVol, 2),
+                        "$ <= ", DoubleToString(-MathAbs(lossLimit), 2), "$) - Fermeture ticket=", ticket,
+                        " sym=", sym, " profit=", DoubleToString(p, 2), "$");
+               }
+               else if(DebugMode)
+               {
+                  Print("❌ Erreur fermeture Volatility ticket=", ticket, " code=", trade.ResultRetcode(),
+                        " desc=", trade.ResultRetcodeDescription());
+               }
+            }
+         }
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
 //+------------------------------------------------------------------+
