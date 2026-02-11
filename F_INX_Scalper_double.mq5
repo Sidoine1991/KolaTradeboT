@@ -3374,14 +3374,14 @@ void LookForTradingOpportunity()
          if(signalType != WRONG_VALUE)
          {
             // Vérifier si la flèche DERIV est présente (condition requise)
-            bool hasDerivArrow = true; // Simplification - toujours considérer comme vrai
+            bool hasDerivArrow = IsDerivArrowPresent();
             
             if(hasDerivArrow)
             {
                // Réinitialiser la liste des ordres exécutés si nécessaire
                ResetExecutedOrdersList();
                
-               // Détecter si c'est un symbole Boom/Crash pour exécution immédiate
+               // Détecter si c'est un symbole Boom/Crash pour exécution spéciale
                bool isBoomCrashSymbol = (StringFind(_Symbol, "Boom") != -1 || StringFind(_Symbol, "Crash") != -1);
                
                // Vérifier si un ordre a déjà été exécuté pour ce symbole
@@ -3392,13 +3392,12 @@ void LookForTradingOpportunity()
                   return;
                }
                
-               // Boom/Crash: Utiliser ordres LIMIT pour capturer les spikes
-               // Placer l'ordre en attente du spike pour une meilleure exécution
-               bool allowLimit = false;
+               // TOUJOURS essayer de placer un ordre LIMIT quand la flèche DERIV est présente
+               if(DebugMode)
+                  Print("🔍 Flèche DERIV détectée - Placement ordre LIMIT pour: ", EnumToString(signalType));
+               
+               // Pour Boom/Crash: utiliser la stratégie de spike
                if(isBoomCrashSymbol)
-                  allowLimit = true;  // Boom/Crash: ordre LIMIT pour capturer spike
-
-               if(allowLimit)
                {
                   if(DebugMode)
                      Print("🚀 Boom/Crash - Placement ordre LIMIT pour capturer spike (", DoubleToString(g_lastAIConfidence, 1), "%)");
@@ -3506,65 +3505,150 @@ void LookForTradingOpportunity()
                }
                else
                {
-                  // Pour les autres symboles, utiliser la logique normale d'exécution marché si confiance élevée
-                  bool allowMarket = false;
-                  if(g_lastAIConfidence >= AI_MarketExecutionConfidence)
-                     allowMarket = true;
-
-                  if(allowMarket)
-                  {
-                     if(DebugMode)
-                        Print("🚀 Signal fort - Exécution IMMÉDIATE au marché (", DoubleToString(g_lastAIConfidence, 1), "%)");
+                  // Pour les autres symboles: placer ordre LIMIT près de la résistance/support la plus proche
+                  if(DebugMode)
+                     Print("📍 Symbole normal - Placement ordre LIMIT près support/résistance");
                   
-                  // Boom/Crash: exécution dédiée (SL/TP basés sur spikes)
-                  // Autres: exécution marché classique via trade.Buy/Sell
-                  bool marketSuccess = false;
-                  if(isBoomCrashSymbol)
-                     marketSuccess = ExecuteImmediateBoomCrashTrade(signalType);
-                  else
-                  {
-                     double price = SymbolInfoDouble(_Symbol, (signalType == ORDER_TYPE_BUY) ? SYMBOL_ASK : SYMBOL_BID);
-                     double sl=0, tp=0;
-                     // Utiliser ATR pour un SL/TP raisonnable
-                     double atr[];
-                     ArraySetAsSeries(atr, true);
-                     double atrVal = 0;
-                     if(CopyBuffer(atrHandle, 0, 0, 1, atr) > 0) atrVal = atr[0];
-                     if(atrVal <= 0) atrVal = SymbolInfoDouble(_Symbol, SYMBOL_POINT) * 50;
-
-                     if(signalType == ORDER_TYPE_BUY)
-                     {
-                        sl = NormalizeDouble(price - 1.2 * atrVal, _Digits);
-                        tp = NormalizeDouble(price + 2.4 * atrVal, _Digits);
-                        marketSuccess = trade.Buy(NormalizeLotSize(InitialLotSize), _Symbol, price, sl, tp,
-                                                 "AI STRONG MARKET (conf: " + DoubleToString(g_lastAIConfidence,1) + "%)");
-                     }
-                     else
-                     {
-                        sl = NormalizeDouble(price + 1.2 * atrVal, _Digits);
-                        tp = NormalizeDouble(price - 2.4 * atrVal, _Digits);
-                        marketSuccess = trade.Sell(NormalizeLotSize(InitialLotSize), _Symbol, price, sl, tp,
-                                                  "AI STRONG MARKET (conf: " + DoubleToString(g_lastAIConfidence,1) + "%)");
-                     }
-                  }
-
-                  if(marketSuccess)
+                  // Utiliser la fonction existante pour placer l'ordre LIMIT
+                  if(PlaceLimitOrderOnArrow(signalType))
                   {
                      MarkOrderAsExecuted(_Symbol);
+                     string signalText = "🚨 SIGNAL IA DÉTECTÉ: " + (g_lastAIAction == "buy" ? "BUY" : "SELL") + " (confiance: " + DoubleToString(g_lastAIConfidence, 1) + "%)";
+                     signalText += "\n⚡ Flèche DERIV présente";
+                     signalText += "\n🎯 Ordre LIMIT placé avec succès";
+                     
                      if(DebugMode)
-                        Print("✅ Trade exécuté immédiatement - Type: ", EnumToString(signalType));
+                        Print("🎯 Ordre limité placé dès détection flèche - Type: ", EnumToString(signalType));
                   }
                   else
                   {
                      if(DebugMode)
-                        Print("❌ Erreur exécution marché: ", trade.ResultRetcode(), " - ", trade.ResultRetcodeDescription());
-                  }
+                        Print("❌ ÉCHEC placement ordre LIMIT pour ", EnumToString(signalType));
                   }
                }
             }
          }
       }
    }
+}
+}
+
+//+------------------------------------------------------------------+
+//| Vérifier si la flèche DERIV est présente sur le graphique          |
+//+------------------------------------------------------------------+
+bool IsDerivArrowPresent()
+{
+   // Chercher les objets flèche sur le graphique
+   for(int i = ObjectsTotal(0) - 1; i >= 0; i--)
+   {
+      string objName = ObjectName(0, i);
+      if(StringFind(objName, "Arrow") != -1 || StringFind(objName, "DERIV") != -1 || 
+         StringFind(objName, "deriv") != -1 || StringFind(objName, "arrow") != -1)
+      {
+         if(DebugMode)
+            Print("🔍 Flèche DERIV détectée: ", objName);
+         return true;
+      }
+   }
+   
+   // Si aucune flèche trouvée, vérifier les objets texte spécifiques
+   for(int i = ObjectsTotal(0) - 1; i >= 0; i--)
+   {
+      string objName = ObjectName(0, i);
+      if(StringFind(objName, "BUY") != -1 || StringFind(objName, "SELL") != -1 ||
+         StringFind(objName, "ACHAT") != -1 || StringFind(objName, "VENTE") != -1)
+      {
+         if(DebugMode)
+            Print("🔍 Signal texte détecté: ", objName);
+         return true;
+      }
+   }
+   
+   return false;
+}
+
+//+------------------------------------------------------------------+
+//| Améliorer la validation des distances SL/TP                        |
+//+------------------------------------------------------------------+
+bool EnsureStopsDistanceValid(double entryPrice, ENUM_ORDER_TYPE pendingType, double &sl, double &tp)
+{
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   long stopLevelPoints = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
+   double minDistance = stopLevelPoints * point;
+   
+   // Augmenter la distance minimale pour éviter les erreurs
+   if(minDistance < 10 * point) minDistance = 10 * point;
+   
+   // Pour certains symboles synthétiques, on force un peu plus d'écart
+   if(IsVolatilitySymbol(_Symbol) || StringFind(_Symbol, "Boom") != -1 || StringFind(_Symbol, "Crash") != -1)
+      minDistance = MathMax(minDistance, 20 * point);
+
+   double slDist = MathAbs(entryPrice - sl);
+   double tpDist = MathAbs(tp - entryPrice);
+
+   // Vérifier et corriger les distances si nécessaire
+   if(slDist < minDistance)
+   {
+      if(DebugMode)
+         Print("⚠️ SL trop proche: ", DoubleToString(slDist/point, 0), " points < minimum: ", DoubleToString(minDistance/point, 0), " points");
+      
+      // Ajuster le SL pour respecter la distance minimale
+      if(pendingType == ORDER_TYPE_BUY_LIMIT)
+      {
+         sl = NormalizeDouble(entryPrice - minDistance - 2 * point, _Digits);
+         tp = NormalizeDouble(entryPrice + (LimitRR * (entryPrice - sl)), _Digits);
+      }
+      else if(pendingType == ORDER_TYPE_SELL_LIMIT)
+      {
+         sl = NormalizeDouble(entryPrice + minDistance + 2 * point, _Digits);
+         tp = NormalizeDouble(entryPrice - (LimitRR * (sl - entryPrice)), _Digits);
+      }
+      else
+      {
+         return false;
+      }
+      
+      // Recalculer les distances après ajustement
+      slDist = MathAbs(entryPrice - sl);
+      tpDist = MathAbs(tp - entryPrice);
+   }
+
+   if(tpDist < minDistance)
+   {
+      if(DebugMode)
+         Print("⚠️ TP trop proche: ", DoubleToString(tpDist/point, 0), " points < minimum: ", DoubleToString(minDistance/point, 0), " points");
+      
+      // Ajuster le TP pour respecter la distance minimale
+      if(pendingType == ORDER_TYPE_BUY_LIMIT)
+      {
+         tp = NormalizeDouble(entryPrice + MathMax(minDistance + 2 * point, LimitRR * slDist), _Digits);
+      }
+      else if(pendingType == ORDER_TYPE_SELL_LIMIT)
+      {
+         tp = NormalizeDouble(entryPrice - MathMax(minDistance + 2 * point, LimitRR * slDist), _Digits);
+      }
+      else
+      {
+         return false;
+      }
+      
+      tpDist = MathAbs(tp - entryPrice);
+   }
+
+   // Vérification finale
+   bool isValid = (slDist >= minDistance && tpDist >= minDistance && sl > 0 && tp > 0 && sl != tp);
+   
+   if(!isValid && DebugMode)
+   {
+      Print("❌ Distances SL/TP invalides après ajustement:");
+      Print("   SL Distance: ", DoubleToString(slDist/point, 0), " points (min: ", DoubleToString(minDistance/point, 0), ")");
+      Print("   TP Distance: ", DoubleToString(tpDist/point, 0), " points (min: ", DoubleToString(minDistance/point, 0), ")");
+      Print("   Entry: ", DoubleToString(entryPrice, _Digits));
+      Print("   SL: ", DoubleToString(sl, _Digits));
+      Print("   TP: ", DoubleToString(tp, _Digits));
+   }
+
+   return isValid;
 }
 
 //+------------------------------------------------------------------+
