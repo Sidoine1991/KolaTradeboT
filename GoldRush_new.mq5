@@ -302,8 +302,8 @@ void OnTick() {
    }
    
    // Construire le JSON pour l'API
-   string jsonData = StringFormat("{\"symbol\":\"%s\",\"bid\":%.5f,\"ask\":%.5f,\"rsi\":%.2f,\"atr\":%.5f,\"ema_fast\":%.5f,\"ema_slow\":%.5f}",
-                              _Symbol, bid, ask, rsi[0], atr[0], emaFast[0], emaSlow[0]);
+   string jsonData = StringFormat("{\"symbol\":\"%s\",\"bid\":%.5f,\"ask\":%.5f,\"rsi\":%.2f,\"atr\":%.5f,\"ema_fast_h1\":%.5f,\"ema_slow_h1\":%.5f,\"ema_fast_m1\":%.5f,\"ema_slow_m1\":%.5f,\"is_spike_mode\":false,\"dir_rule\":0,\"supertrend_trend\":0,\"volatility_regime\":0,\"volatility_ratio\":1.0,\"timestamp\":\"%s\"}",
+                              _Symbol, bid, ask, rsi[0], atr[0], emaFast[0], emaSlow[0], emaFast[0], emaSlow[0], TimeToString(TimeCurrent(), TIME_DATE|TIME_SECONDS));
    
    Print("📤 Envoi API IA: ", jsonData);
    

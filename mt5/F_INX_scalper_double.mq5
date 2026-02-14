@@ -8414,4 +8414,26 @@ bool PlaceLimitOrderOnArrow(ENUM_ORDER_TYPE signalType)
    }
 }
 
+
+
+//+------------------------------------------------------------------+
+//| Vérifie si le marché est fermé                                   |
+//+------------------------------------------------------------------+
+bool IsMarketClosed() {
+    datetime currentTime = TimeCurrent();
+    MqlDateTime dt;
+    TimeToStruct(currentTime, dt);
+    
+    // Week-end - Samedi et Dimanche
+    if(dt.day_of_week == 0 || dt.day_of_week == 6) return true;
+    
+    // Heures de trading pour indices synthétiques (24/5 du Lundi au Vendredi)
+    // Marché ouvert: Lundi-Vendredi 00:00-23:59 UTC
+    if(dt.hour >= 0 && dt.hour < 24 && dt.day_of_week >= 1 && dt.day_of_week <= 5) {
+        return false; // Marché ouvert
+    }
+    
+    return true; // Hors heures de trading
+}
+
 //+------------------------------------------------------------------+
