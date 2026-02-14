@@ -83,7 +83,7 @@ input bool UseAI_Agent = true;
 input string AI_ServerURL = "https://kolatradebot.onrender.com/decision";
 input string AI_LocalServerURL = "http://localhost:8000/decision";
 input bool UseLocalFirst = true;
-input double AI_MinConfidence = 0.65;          // Ajusté pour 68% minimum
+input double AI_MinConfidence = 0.35;          // Ajusté pour 35% (match AI actuel à 30%)
 input int AI_Timeout_ms = 10000;
 input int AI_UpdateInterval = 10;
 
@@ -3443,13 +3443,16 @@ void UpdateAISignal()
                   "\"ask\":" + DoubleToString(ask, _Digits) + "," +
                   "\"rsi\":" + DoubleToString(rsiValue, 2) + "," +
                   "\"atr\":" + DoubleToString(atrValue, _Digits) + "," +
-                  "\"ema_fast\":" + DoubleToString(emaFast, _Digits) + "," +
-                  "\"ema_slow\":" + DoubleToString(emaSlow, _Digits) + "," +
+                  "\"ema_fast_h1\":" + DoubleToString(emaFast, _Digits) + "," +
+                  "\"ema_slow_h1\":" + DoubleToString(emaSlow, _Digits) + "," +
+                  "\"ema_fast_m1\":" + DoubleToString(emaFast, _Digits) + "," +
+                  "\"ema_slow_m1\":" + DoubleToString(emaSlow, _Digits) + "," +
                   "\"is_spike_mode\":" + (spikeDetected ? "true" : "false") + "," +
                   "\"dir_rule\":0," +
                   "\"supertrend_trend\":0," +
                   "\"volatility_regime\":0," +
-                  "\"volatility_ratio\":1.0" +
+                  "\"volatility_ratio\":1.0," +
+                  "\"timestamp\":\"" + TimeToString(TimeCurrent(), TIME_DATE|TIME_SECONDS) + "\"" +
                   "}";
 
    Print("📦 Envoi des données au serveur AI...");
@@ -3946,7 +3949,19 @@ void ExecuteAdvancedTrade(ENUM_ORDER_TYPE orderType, double ask, double bid)
       takeProfitPips = MathMax(takeProfitPips, 300);
       Print("🔧 SYMBOLE VOLATILITY - Point ajusté à: ", point, " - SL: ", stopLossPips, " - TP: ", takeProfitPips);
    }
-
+   
+   // === VALIDATION ANTI-VALEURS ABERRANTES ===
+   double currentPrice = (orderType == ORDER_TYPE_BUY) ? ask : bid;
+   
+   // Vérifier que les valeurs initiales sont cohérentes
+   if(stopLossPips <= 0 || takeProfitPips <= 0)
+   {
+      Print("❌ ERREUR CRITIQUE: stopLossPips ou takeProfitPips <= 0");
+      Print("   stopLossPips: ", stopLossPips, ", takeProfitPips: ", takeProfitPips);
+      return;
+   }
+   
+   // Calcul des SL/TP
    if(UseDynamicSLTP)
    {
       double atrValue[1];
@@ -3980,6 +3995,90 @@ void ExecuteAdvancedTrade(ENUM_ORDER_TYPE orderType, double ask, double bid)
       else { sl = ask + stopLossPips * point; tp = ask - takeProfitPips * point; }
       Print("📊 Stops par défaut - SL: ", sl, " - TP: ", tp);
    }
+   
+   // === VALIDATION RIGOUREUSE ANTI-ABERRATIONS ===
+   
+   // 1. Vérifier que SL/TP ne sont pas aberrants
+   if(sl <= 0 || tp <= 0)
+   {
+      Print("❌ ERREUR CRITIQUE: SL ou TP <= 0 après calcul");
+      Print("   SL: ", sl, ", TP: ", tp, ", Prix: ", currentPrice);
+      return;
+   }
+   
+   // 2. Vérifier que TP n'est pas aberrant (> 100000 ou < 0.001 * prix)
+   if(tp > 100000 || tp < currentPrice * 0.001 || tp > currentPrice * 1000)
+   {
+      Print("❌ ERREUR CRITIQUE: TP aberrant détecté - ", tp);
+      Print("   Prix: ", currentPrice, ", TP devrait être entre ", currentPrice * 0.001, " et ", currentPrice * 1000);
+      Print("   Annulation du trade pour sécurité");
+      return;
+   }
+   
+   // 3. Vérifier que SL n'est pas aberrant
+   if(sl > 100000 || sl < currentPrice * 0.001 || sl > currentPrice * 1000)
+   {
+      Print("❌ ERREUR CRITIQUE: SL aberrant détecté - ", sl);
+      Print("   Prix: ", currentPrice, ", SL devrait être entre ", currentPrice * 0.001, " et ", currentPrice * 1000);
+      Print("   Annulation du trade pour sécurité");
+      return;
+   }
+   
+   // 4. Validation spécifique pour SELL
+   if(orderType == ORDER_TYPE_SELL)
+   {
+      if(sl <= currentPrice)
+      {
+         Print("❌ ERREUR: SL SELL invalide - ", sl, " <= Prix: ", currentPrice);
+         Print("   Pour SELL, SL doit être AU-DESSUS du prix");
+         return;
+      }
+      if(tp >= currentPrice)
+      {
+         Print("❌ ERREUR: TP SELL invalide - ", tp, " >= Prix: ", currentPrice);
+         Print("   Pour SELL, TP doit être EN DESSOUS du prix");
+         return;
+      }
+   }
+   
+   // 5. Validation spécifique pour BUY
+   if(orderType == ORDER_TYPE_BUY)
+   {
+      if(sl >= currentPrice)
+      {
+         Print("❌ ERREUR: SL BUY invalide - ", sl, " >= Prix: ", currentPrice);
+         Print("   Pour BUY, SL doit être EN DESSOUS du prix");
+         return;
+      }
+      if(tp <= currentPrice)
+      {
+         Print("❌ ERREUR: TP BUY invalide - ", tp, " <= Prix: ", currentPrice);
+         Print("   Pour BUY, TP doit être AU-DESSUS du prix");
+         return;
+      }
+   }
+   
+   // 6. Validation des distances minimales
+   long stopsLevel = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
+   double minDistance = stopsLevel * point;
+   if(minDistance <= 0) minDistance = 20 * point; // Minimum 20 points
+   
+   double slDist = MathAbs(currentPrice - sl);
+   double tpDist = MathAbs(tp - currentPrice);
+   
+   if(slDist < minDistance)
+   {
+      Print("❌ ERREUR: SL trop proche - Distance: ", slDist, " < Minimum: ", minDistance);
+      return;
+   }
+   
+   if(tpDist < minDistance)
+   {
+      Print("❌ ERREUR: TP trop proche - Distance: ", tpDist, " < Minimum: ", minDistance);
+      return;
+   }
+   
+   Print("✅ STOPS VALIDÉS - SL: ", sl, ", TP: ", tp, ", Prix: ", currentPrice);
 
    // Lot basé sur le risque (RiskPerTrade) et plafonné par MaxLossPerTradePercent
    double tradeRiskPercent = InpRiskPercentPerTrade;
@@ -4020,7 +4119,6 @@ void ExecuteAdvancedTrade(ENUM_ORDER_TYPE orderType, double ask, double bid)
    }
    correctLotSize = MathMax(correctLotSize, GetCorrectLotSize()); // au moins le minimum sécurisé pour le symbole
 
-   double currentPrice = (orderType == ORDER_TYPE_BUY) ? ask : bid;
    Print("🔍 DIAGNOSTIC TRADE - Type: ", orderType == ORDER_TYPE_BUY ? "BUY" : "SELL", " - Lot: ", correctLotSize, " - SL: ", sl, " - TP: ", tp);
 
    if(orderType == ORDER_TYPE_BUY)
