@@ -10881,6 +10881,7 @@ int AI_GetDecision(double rsi, double atr,
    }
    payload += ",\"volatility_regime\":" + IntegerToString(volatilityRegime);
    payload += ",\"volatility_ratio\":" + DoubleToString(volatilityRatio, 4);
+   payload += ",\"timestamp\":\"" + TimeToString(TimeCurrent(), TIME_DATE|TIME_SECONDS) + "\"";
 
    // Enrichir les données: OHLC des 5 dernières bougies M1
    MqlRates ratesOHLC[];

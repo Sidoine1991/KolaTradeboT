@@ -21,22 +21,22 @@ RENDER_API_URL = "https://kolatradebot.onrender.com"
 LOCAL_API_URL = "http://localhost:8000"  # Utilisation du port 8000
 TIMEFRAMES = ["M5"]  # Horizon M5 comme demandé
 CHECK_INTERVAL = 60  # Secondes entre chaque vérification
-MIN_CONFIDENCE = 0.80  # Confiance minimale pour prendre un trade (80% = 0.80) - NOUVEAU
+MIN_CONFIDENCE = 0.65  # Confiance minimale pour prendre un trade (65% - plus réaliste)
 
-# SL/TP par défaut (Boom/Crash, Volatility, Metals)
-SL_PERCENTAGE_DEFAULT = 0.02  # 2%
-TP_PERCENTAGE_DEFAULT = 0.04  # 4%
+# SL/TP par défaut (Boom/Crash, Volatility, Metals) - Risk/Reward 1:2
+SL_PERCENTAGE_DEFAULT = 0.015  # 1.5% (réduit)
+TP_PERCENTAGE_DEFAULT = 0.03   # 3% (ratio 1:2)
 
-# SL/TP spécifiques Forex (pips plus larges)
-SL_PERCENTAGE_FOREX = 0.01  # 1%
-TP_PERCENTAGE_FOREX = 0.06  # 6%
+# SL/TP spécifiques Forex (pips plus larges) - Risk/Reward 1:2
+SL_PERCENTAGE_FOREX = 0.008   # 0.8% (réduit)
+TP_PERCENTAGE_FOREX = 0.016   # 1.6% (ratio 1:2)
 
-# Tailles de position par type de symbole
+# Tailles de position par type de symbole (réduites pour meilleur money management)
 POSITION_SIZES = {
-    "Boom 300 Index": 0.2,
-    "Boom 600 Index": 0.2,
-    "Boom 900 Index": 0.2,
-    "Crash 1000 Index": 0.2,
+    "Boom 300 Index": 0.01,    # Réduit de 0.2 à 0.01
+    "Boom 600 Index": 0.01,    # Réduit de 0.2 à 0.01
+    "Boom 900 Index": 0.01,    # Réduit de 0.2 à 0.01
+    "Crash 1000 Index": 0.01,  # Réduit de 0.2 à 0.01
     "EURUSD": 0.01,
     "GBPUSD": 0.01,
     "USDJPY": 0.01
@@ -1513,8 +1513,8 @@ class AggressiveTradingStrategy:
             logger.error(f"🛑 SÉCURITÉ AGGRESSIVE: PAS DE DÉCISION FORTE pour {symbol}: {signal_data.get('decision')} - REQUIS ACHAT FORT/VENTE FORTE")
             return False
             
-        # Double vérification de la confiance (sécurité)
-        if signal_data.get('confidence', 0) < 0.8:  # 80% de confiance minimale
+        # Double vérification de la confiance (sécurité) - aligné avec MIN_CONFIDENCE
+        if signal_data.get('confidence', 0) < 0.65:  # 65% de confiance minimale (réduit)
             logger.error(f"🛑 SÉCURITÉ AGGRESSIVE: CONFIANCE < 0.8 pour {symbol}: {signal_data.get('confidence', 0)}")
             return False
             
@@ -2378,8 +2378,8 @@ class MT5AIClient:
             best_signal = max(votes, key=votes.get)
             best_confidence = votes[best_signal]
 
-            # Seuil de confiance réduit à 35% pour plus de réactivité
-            if best_confidence >= 0.35 and best_signal != 'HOLD':  # Seuil abaissé de 0.45 à 0.35
+            # Seuil de confiance réduit et aligné avec MIN_CONFIDENCE
+            if best_confidence >= 0.65 and best_signal != 'HOLD':  # Aligné avec MIN_CONFIDENCE
                 # Créer le signal final avec plus d'informations
                 signal_data = {
                     'signal': best_signal,
@@ -2733,8 +2733,8 @@ class MT5AIClient:
     
     def calculate_smart_sltp(self, symbol, entry_price, order_type):
         """
-        Calcule SL/TP proportionnels au prix
-        SL = 20% du prix | TP = 80% du prix
+        Calcule SL/TP proportionnels au prix avec validation stricte
+        SL = 1.5% du prix | TP = 3% du prix (ratio 1:2)
         """
         symbol_info = mt5.symbol_info(symbol)
         if not symbol_info:
@@ -2746,28 +2746,53 @@ class MT5AIClient:
         # Choisir les pourcentages selon la catégorie
         category = self.symbol_detector.get_category(symbol)
         if category == "Forex":
-            sl_pct = SL_PERCENTAGE_FOREX
-            tp_pct = TP_PERCENTAGE_FOREX
+            sl_pct = SL_PERCENTAGE_FOREX  # 0.8%
+            tp_pct = TP_PERCENTAGE_FOREX  # 1.6%
         else:
-            sl_pct = SL_PERCENTAGE_DEFAULT
-            tp_pct = TP_PERCENTAGE_DEFAULT
+            sl_pct = SL_PERCENTAGE_DEFAULT  # 1.5%
+            tp_pct = TP_PERCENTAGE_DEFAULT  # 3%
 
         # Calculer les distances en prix selon le pourcentage sélectionné
         sl_distance_price = entry_price * sl_pct
         tp_distance_price = entry_price * tp_pct
         
-        # Convertir en points pour information
-        sl_distance_points = sl_distance_price / point
-        tp_distance_points = tp_distance_price / point
+        # Validation initiale : éviter les valeurs aberrantes
+        if sl_distance_price <= 0 or tp_distance_price <= 0:
+            logger.error(f"❌ Distances SL/TP invalides pour {symbol}: SL={sl_distance_price}, TP={tp_distance_price}")
+            return None, None
         
+        # Calcul des SL/TP avec logique CORRIGÉE
         if order_type == mt5.ORDER_TYPE_BUY:
-            # BUY: SL en dessous, TP au dessus
+            # BUY: SL en dessous du prix d'entrée, TP au dessus
             sl = entry_price - sl_distance_price
             tp = entry_price + tp_distance_price
         else:  # SELL
-            # SELL: SL au dessus, TP en dessous
+            # SELL: SL au dessus du prix d'entrée, TP en dessous (CORRIGÉ)
             sl = entry_price + sl_distance_price
             tp = entry_price - tp_distance_price
+        
+        # Validation stricte : éviter les valeurs aberrantes
+        if sl <= 0 or tp <= 0:
+            logger.error(f"❌ SL/TP négatifs pour {symbol}: SL={sl}, TP={tp}")
+            return None, None
+            
+        # Validation spécifique pour SELL
+        if order_type == mt5.ORDER_TYPE_SELL:
+            if sl <= entry_price:  # SL doit être au-dessus pour SELL
+                logger.error(f"❌ SL SELL invalide {symbol}: SL={sl} <= Prix={entry_price}")
+                return None, None
+            if tp >= entry_price:  # TP doit être en dessous pour SELL
+                logger.error(f"❌ TP SELL invalide {symbol}: TP={tp} >= Prix={entry_price}")
+                return None, None
+        
+        # Validation spécifique pour BUY
+        if order_type == mt5.ORDER_TYPE_BUY:
+            if sl >= entry_price:  # SL doit être en dessous pour BUY
+                logger.error(f"❌ SL BUY invalide {symbol}: SL={sl} >= Prix={entry_price}")
+                return None, None
+            if tp <= entry_price:  # TP doit être au dessus pour BUY
+                logger.error(f"❌ TP BUY invalide {symbol}: TP={tp} <= Prix={entry_price}")
+                return None, None
         
         # Validation: respecter trade_stops_level (éviter "Invalid stops")
         stops_level = getattr(symbol_info, "trade_stops_level", 0) or getattr(symbol_info, "stops_level", 0) or 0
@@ -2776,12 +2801,15 @@ class MT5AIClient:
 
         sl_dist = abs(entry_price - sl)
         tp_dist = abs(tp - entry_price)
+        
+        # Ajustement si distance minimale non respectée
         if sl_dist < min_dist_price:
             if order_type == mt5.ORDER_TYPE_BUY:
                 sl = entry_price - min_dist_price - (2 * point)
             else:
                 sl = entry_price + min_dist_price + (2 * point)
             sl = round(sl, digits)
+            
         if tp_dist < min_dist_price:
             if order_type == mt5.ORDER_TYPE_BUY:
                 tp = entry_price + min_dist_price + (2 * point)
@@ -2793,12 +2821,70 @@ class MT5AIClient:
         sl = round(sl, digits)
         tp = round(tp, digits)
 
+        # Validation finale stricte
+        if sl <= 0 or tp <= 0:
+            logger.error(f"❌ SL/TP finaux invalides pour {symbol}: SL={sl}, TP={tp}")
+            return None, None
+
         logger.info(
-            f"SL/TP calculés pour {symbol}: Entry={entry_price}, SL={sl} ({sl_pct*100:.0f}%), TP={tp} ({tp_pct*100:.0f}%)"
+            f"✅ SL/TP validés pour {symbol}: Entry={entry_price}, SL={sl} ({sl_pct*100:.1f}%), TP={tp} ({tp_pct*100:.1f}%)"
         )
         
         return sl, tp
     
+    def detect_correction_phase(self, symbol, signal):
+        """Détecte si le prix est en phase de correction contraire au signal"""
+        try:
+            # Récupérer les dernières bougies M1 pour analyse rapide
+            rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M1, 0, 20)
+            if not rates or len(rates) < 10:
+                return False, 0.0
+                
+            closes = [rate['close'] for rate in rates]
+            if len(closes) < 10:
+                return False, 0.0
+            
+            # Calculer le momentum récent (5 dernières bougies)
+            recent_closes = closes[-5:]
+            if len(recent_closes) < 3:
+                return False, 0.0
+                
+            # Momentum simple
+            momentum = (recent_closes[-1] - recent_closes[0]) / recent_closes[0]
+            
+            # Tendance courte (10 bougies)
+            short_trend = (closes[-1] - closes[-10]) / closes[-10] if len(closes) >= 10 else 0
+            
+            # Détection de correction
+            is_correction = False
+            correction_strength = 0.0
+            
+            if signal == "SELL":
+                # Pour SELL: correction = momentum haussier contraire
+                if momentum > 0.001:  # 0.1% de hausse
+                    is_correction = True
+                    correction_strength = abs(momentum)
+                # Vérifier si la tendance courte est haussière (contre signal SELL)
+                elif short_trend > 0.0005:  # 0.05% de tendance haussière
+                    is_correction = True
+                    correction_strength = abs(short_trend)
+                    
+            elif signal == "BUY":
+                # Pour BUY: correction = momentum baissier contraire
+                if momentum < -0.001:  # -0.1% de baisse
+                    is_correction = True
+                    correction_strength = abs(momentum)
+                # Vérifier si la tendance courte est baissière (contre signal BUY)
+                elif short_trend < -0.0005:  # -0.05% de tendance baissière
+                    is_correction = True
+                    correction_strength = abs(short_trend)
+            
+            return is_correction, correction_strength
+            
+        except Exception as e:
+            logger.error(f"Erreur détection correction {symbol}: {e}")
+            return False, 0.0
+
     def choose_entry_strategy(self, symbol, signal):
         """Choisit une stratégie d'entrée M5 basée sur S/R et trendlines.
         - Forex/Metals: tenter un pending à proximité du support (BUY) ou résistance (SELL)
@@ -3063,6 +3149,32 @@ class MT5AIClient:
             
             point = symbol_info.point
             tick = mt5.symbol_info_tick(symbol)
+            
+            # Ajouter un délai de confirmation après signal fort (éviter les entrées précoces)
+            if confidence >= 0.70:  # Signaux très forts
+                logger.info(f"⏳ SIGNAL FORT {symbol}: {signal} avec {confidence*100:.1f}% - Attente confirmation de 30s")
+                time.sleep(30)  # Attendre 30 secondes pour confirmation
+                # Revérifier si le signal est toujours valide
+                current_tick = mt5.symbol_info_tick(symbol)
+                if not current_tick:
+                    logger.error(f"Impossible de revérifier {symbol} après attente")
+                    return False
+                    
+                current_price = current_tick.bid if signal == "SELL" else current_tick.ask
+                is_still_correction, _ = self.detect_correction_phase(symbol, signal)
+                
+                if is_still_correction:
+                    logger.warning(f"🚫 {symbol}: Toujours en correction après attente - Entrée annulée")
+                    return False
+                    
+                logger.info(f"✅ {symbol}: Signal confirmé après attente - Entrée autorisée")
+            
+            # Vérifier si le prix est en phase de correction (NOUVEAU)
+            is_correction, correction_strength = self.detect_correction_phase(symbol, signal)
+            if is_correction:
+                logger.warning(f"🚫 CORRECTION DÉTECTÉE pour {symbol}: {signal} - Momentum contraire de {correction_strength*100:.2f}%")
+                logger.info(f"⏸️ ATTENTE: Entrée {signal} reportée jusqu'à fin de correction")
+                return False  # Ne pas entrer pendant correction
             
             # Stratégie d'entrée (pending ou marché)
             action_type = mt5.TRADE_ACTION_DEAL
@@ -3994,13 +4106,16 @@ class MT5AIClient:
                         "ask": float(ask),
                         "rsi": 50.0,  # Valeur neutre par défaut
                         "atr": 0.001,  # Valeur par défaut
-                        "ema_fast": float(bid),
-                        "ema_slow": float(ask),
+                        "ema_fast_h1": float(bid),  # Corrigé: ema_fast -> ema_fast_h1
+                        "ema_slow_h1": float(ask),  # Corrigé: ema_slow -> ema_slow_h1
+                        "ema_fast_m1": float(bid),  # Ajouté: ema_fast_m1
+                        "ema_slow_m1": float(ask),  # Ajouté: ema_slow_m1
                         "is_spike_mode": False,
                         "dir_rule": 0,
                         "supertrend_trend": 0,
                         "volatility_regime": 0,
-                        "volatility_ratio": 1.0
+                        "volatility_ratio": 1.0,
+                        "timestamp": datetime.now().isoformat()  # Ajouté: timestamp requis
                     }
                     
                     # Envoyer les données complètes
