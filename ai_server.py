@@ -38,6 +38,18 @@ from collections import deque
 # Configurer le logger avant les imports d'améliorations
 logger = logging.getLogger("tradbot_ai")
 
+# ========== MODE SIMPLIFIÉ POUR ROBOCOP v2 ==========
+# Activer le mode simplifié pour RoboCop v2 (plus stable, moins de dépendances)
+SIMPLIFIED_MODE = True  # Mettre à False pour utiliser le mode complet
+
+if SIMPLIFIED_MODE:
+    logger.info("🚀 MODE SIMPLIFIÉ ACTIVÉ - RoboCop v2 compatible")
+    logger.info("   • Analyse technique basée sur RSI + EMA")
+    logger.info("   • Pas de ML complexe - Stabilité maximale")
+    logger.info("   • Endpoints: /decision, /trades/feedback")
+else:
+    logger.info("🔧 MODE COMPLET ACTIVÉ - Toutes les fonctionnalités")
+
 # ========== CONFIGURATIONS AMÉLIORATIONS PRIORITAIRES ==========
 # Seuils de confiance minimum pour éviter les signaux trop faibles
 MIN_CONFIDENCE_THRESHOLD = 0.55  # 55% minimum (plus réaliste)
@@ -106,6 +118,10 @@ try:
 except ImportError:
     YFINANCE_AVAILABLE = False
     logger.warning("⚠️ yfinance non disponible")
+
+# Variables globales pour le suivi en mode simplifié
+decision_count = 0
+feedback_count = 0
 
 # ========== FONCTIONS UTILITAIRES AMÉLIORATIONS ==========
 def apply_confidence_thresholds(action: str, confidence: float, reason: str) -> tuple:
@@ -2547,6 +2563,92 @@ class DashboardStatsResponse(BaseModel):
     robot_performance: Dict[str, Any]
     coherent_analysis: Optional[CoherentAnalysisResponse] = None
 
+# ========== FONCTION SIMPLIFIÉE POUR ROBOCOP v2 ==========
+async def decision_simplified(request: DecisionRequest):
+    """
+    Fonction de décision simplifiée pour RoboCop v2
+    Analyse technique basée sur RSI + EMA multi-timeframe
+    """
+    global decision_count
+    decision_count += 1
+    
+    logger.info(f"🎯 MODE SIMPLIFIÉ - Requête décision pour {request.symbol}")
+    logger.info(f"   Bid: {request.bid}, Ask: {request.ask}, RSI: {request.rsi}")
+    
+    # Analyse technique simplifiée
+    action = "hold"
+    confidence = 0.5
+    reason = "Analyse technique de base"
+    
+    # Analyse RSI
+    if request.rsi:
+        if request.rsi < 30:
+            action = "buy"
+            confidence += 0.2
+            reason = f"RSI surventé ({request.rsi:.1f})"
+        elif request.rsi > 70:
+            action = "sell"
+            confidence += 0.2
+            reason = f"RSI surachat ({request.rsi:.1f})"
+    
+    # Analyse EMA M1
+    if request.ema_fast_m1 and request.ema_slow_m1:
+        if request.ema_fast_m1 > request.ema_slow_m1:
+            if action != "sell":
+                action = "buy"
+                confidence += 0.15
+                reason += " | EMA M1 haussière"
+        else:
+            if action != "buy":
+                action = "sell"
+                confidence += 0.15
+                reason += " | EMA M1 baissière"
+    
+    # Analyse EMA H1 (prioritaire)
+    if request.ema_fast_h1 and request.ema_slow_h1:
+        if request.ema_fast_h1 > request.ema_slow_h1:
+            if action != "sell":
+                action = "buy"
+                confidence += 0.25
+                reason += " | EMA H1 haussière"
+        else:
+            if action != "buy":
+                action = "sell"
+                confidence += 0.25
+                reason += " | EMA H1 baissière"
+    
+    # Ajuster la confiance selon l'action
+    if action == "hold":
+        confidence = max(0.3, confidence - 0.3)
+    
+    # Limiter la confiance entre 0 et 1
+    confidence = max(0.0, min(1.0, confidence))
+    
+    # Calculer SL/TP simples basés sur l'ATR
+    stop_loss = None
+    take_profit = None
+    if request.atr and request.atr > 0:
+        if action == "buy":
+            stop_loss = request.bid - (request.atr * 2)
+            take_profit = request.ask + (request.atr * 3)
+        elif action == "sell":
+            stop_loss = request.ask + (request.atr * 2)
+            take_profit = request.bid - (request.atr * 3)
+    
+    response = DecisionResponse(
+        action=action,
+        confidence=confidence,
+        reason=reason[:100],  # Limiter la raison à 100 caractères
+        stop_loss=stop_loss,
+        take_profit=take_profit,
+        timestamp=datetime.now().isoformat(),
+        model_used="Technical_Analysis_v2_Simplified"
+    )
+    
+    logger.info(f"✅ DÉCISION SIMPLIFIÉE {request.symbol}: {action} (conf: {confidence:.2f}) - {reason}")
+    
+    return response
+
 def convert_numpy_types(obj):
     """Convertit les types numpy en types Python natifs pour la sérialisation JSON."""
     if isinstance(obj, (np.integer, np.floating, np.uint64)):
@@ -2558,114 +2660,6 @@ def convert_numpy_types(obj):
     return obj
 
 def check_trend(symbol: str) -> Dict[str, str]:
-    """Vérifie la tendance sur plusieurs timeframes"""
-    timeframes = {
-        'M1': mt5.TIMEFRAME_M1,
-        'M5': mt5.TIMEFRAME_M5,
-        'H1': mt5.TIMEFRAME_H1
-    }
-    
-    trends = {}
-    
-    for tf_name, tf in timeframes.items():
-        rates = mt5.copy_rates_from_pos(symbol, tf, 0, 200)
-        if rates is not None:
-            df = pd.DataFrame(rates)
-            sma_50 = df['close'].rolling(window=50).mean().iloc[-1]
-            sma_200 = df['close'].rolling(window=200).mean().iloc[-1]
-            
-            # Détermination de la tendance
-            if sma_50 > sma_200 * 1.01:  # 1% de marge
-                trends[tf_name] = "HAUSSIER"
-            elif sma_50 < sma_200 * 0.99:  # 1% de marge
-                trends[tf_name] = "BAISSIER"
-            else:
-                trends[tf_name] = "NEUTRE"
-        else:
-            trends[tf_name] = "INDÉTERMINÉ"
-    
-    return trends
-
-def build_coherent_analysis(symbol: str, timeframes: Optional[List[str]] = None) -> Dict[str, Any]:
-    """
-    Analyse cohérente simple basée sur la tendance multi-TF.
-    Retourne une structure contenant un champ decision (BUY/SELL/HOLD).
-    """
-    tfs = timeframes or ["D1", "H4", "H1", "M30", "M15", "M5", "M1"]
-    trends: Dict[str, str] = {}
-    bullish = 0
-    bearish = 0
-    neutral = 0
-    total = 0
-
-    for tf in tfs:
-        df = get_historical_data(symbol, tf, 200)
-        if df is None or df.empty or "close" not in df.columns:
-            trends[tf] = "INDÉTERMINÉ"
-            continue
-
-        total += 1
-        sma_fast = df["close"].rolling(window=20).mean().iloc[-1]
-        sma_slow = df["close"].rolling(window=50).mean().iloc[-1]
-        if sma_fast > sma_slow * 1.001:
-            trends[tf] = "HAUSSIER"
-            bullish += 1
-        elif sma_fast < sma_slow * 0.999:
-            trends[tf] = "BAISSIER"
-            bearish += 1
-        else:
-            trends[tf] = "NEUTRE"
-            neutral += 1
-
-    if total == 0:
-        return {
-            "status": "error",
-            "symbol": symbol,
-            "decision": "HOLD",
-            "decision_type": "NO_DATA",
-            "confidence": 0.0,
-            "stability": "UNKNOWN",
-            "bullish_pct": 0.0,
-            "bearish_pct": 0.0,
-            "neutral_pct": 0.0,
-            "trends": trends,
-            "timestamp": datetime.now().isoformat(),
-            "message": "Aucune donnée disponible"
-        }
-
-    bullish_pct = bullish / total
-    bearish_pct = bearish / total
-    neutral_pct = neutral / total
-
-    if bullish_pct >= 0.6:
-        decision = "BUY"
-        decision_type = "BULLISH"
-        confidence = min(0.9, 0.6 + bullish_pct * 0.3)
-    elif bearish_pct >= 0.6:
-        decision = "SELL"
-        decision_type = "BEARISH"
-        confidence = min(0.9, 0.6 + bearish_pct * 0.3)
-    else:
-        decision = "HOLD"
-        decision_type = "NEUTRAL"
-        confidence = 0.5
-
-    return {
-        "status": "ok",
-        "symbol": symbol,
-        "decision": decision,
-        "decision_type": decision_type,
-        "confidence": round(confidence, 2),
-        "stability": "STABLE" if max(bullish_pct, bearish_pct) >= 0.7 else "MIXED",
-        "bullish_pct": round(bullish_pct, 2),
-        "bearish_pct": round(bearish_pct, 2),
-        "neutral_pct": round(neutral_pct, 2),
-        "trends": trends,
-        "timestamp": datetime.now().isoformat()
-    }
-
-# Fonctions utilitaires
-def get_historical_data(symbol: str, timeframe: str = "H1", count: int = 500) -> pd.DataFrame:
     """
     Récupère les données historiques depuis la source disponible (MT5 ou autre)
     
@@ -3823,7 +3817,7 @@ async def decision_gemma(request: DecisionRequest):
 async def decision(request: DecisionRequest):
     """
     Endpoint principal de décision utilisé par le robot MT5
-    Combine analyse technique, tendances multi-TF et IA pour prendre une décision finale
+    Mode simplifié pour RoboCop v2 ou mode complet selon la configuration
     """
     try:
         # Validation des champs obligatoires
@@ -3832,6 +3826,11 @@ async def decision(request: DecisionRequest):
         
         logger.info(f"🎯 Requête DECISION reçue pour {request.symbol}")
         
+        # MODE SIMPLIFIÉ - RoboCop v2 compatible
+        if SIMPLIFIED_MODE:
+            return await decision_simplified(request)
+        
+        # MODE COMPLET - Analyse avancée
         # Vérifier le cache d'abord
         cache_key = f"{request.symbol}_{request.bid}_{request.ask}_{request.rsi}"
         current_time = datetime.now().timestamp()
@@ -7602,12 +7601,29 @@ async def _trigger_retraining_async(category: str):
     except Exception as e:
         logger.error(f"❌ [AUTO-RETRAIN] Erreur lors du réentraînement en arrière-plan: {e}", exc_info=True)
 
+feedback_count = 0
+
 @app.post("/trades/feedback")
 async def receive_trade_feedback(feedback: TradeFeedback):
     """
     Endpoint pour recevoir les résultats de trade depuis le robot MT5
-    Stocke dans PostgreSQL pour analyse et amélioration continue
+    Mode simplifié ou complet selon la configuration
     """
+    global feedback_count
+    feedback_count += 1
+    
+    logger.info(f"📊 Feedback reçu: {feedback.symbol} - Profit: {feedback.profit:.2f} - Win: {feedback.is_win}")
+    
+    # MODE SIMPLIFIÉ - Pas de base de données
+    if SIMPLIFIED_MODE:
+        return {
+            "status": "received",
+            "message": f"Feedback traité pour {feedback.symbol}",
+            "total_feedbacks": feedback_count,
+            "mode": "simplified"
+        }
+    
+    # MODE COMPLET - Avec base de données
     if not DB_AVAILABLE:
         raise HTTPException(
             status_code=503,
