@@ -1,492 +1,1138 @@
 //+------------------------------------------------------------------+
-//|                                                  RoboCop_v2.mq5 |
-//|                             Copyright 2025, Sidoine & Grok/xAI |
-//|                                          https://x.ai/         |
+//|                     TrendBreakoutEA_Advanced.mq5                 |
+//|                  Copyright 2023, MetaQuotes Software Corp.      |
+//|                             https://www.metaquotes.net/          |
 //+------------------------------------------------------------------+
-#property copyright "Copyright 2025, Sidoine & Grok/xAI"
-#property link      "https://x.ai"
+#property copyright "2023, MetaQuotes Software Corp."
+#property link      "https://www.metaquotes.net/"
 #property version   "2.00"
 #property strict
-#property description "RoboCop v2 - Robot de trading IA avec communication robuste et gestion d'objectif journalier."
 
-//--- Inclure la bibliothèque pour le parsing JSON
-#include <CJAVal.mqh> 
+//--- Inclusions standards
+#include <Trade\Trade.mqh>
+#include <Object.mqh>
+#include <Arrays\ArrayObj.mqh>
+#include <Arrays\Array.mqh>
+#include <Arrays\List.mqh>
+#include <Trade\PositionInfo.mqh>
+#include <Trade\HistoryOrderInfo.mqh>
+#include <Trade\DealInfo.mqh>
+#include <Trade\OrderInfo.mqh>
+#include <StdLibErr.mqh>
 
-//===================================================================
-//                PARAMÈTRES D'ENTRÉE
-//===================================================================
-input group "Configuration Serveur"
-input bool   InpUseLocalServer  = true;                               // Utiliser le serveur local (http://localhost:8000)
-input string InpRenderURL       = "https://kolatradebot.onrender.com";  // URL de votre serveur sur Render
-input int    InpMaxRetries      = 3;                                  // Nombre de tentatives de reconnexion
-input int    InpRetryDelay      = 5000;                               // Délai entre les tentatives (ms)
+//--- Déclaration de l'objet Trade
+CTrade trade;
+CArrayObj *dashboardObjects;
+CList *tradeHistory;
 
-input group "Gestion des Trades"
-input int    InpMagicNumber     = 198420;                             // Numéro magique unique
-input double InpRiskPercent     = 1.0;                                // Pourcentage du capital à risquer (0 = lot fixe)
-input double InpFixedLot        = 0.01;                               // Lot fixe si InpRiskPercent = 0
-input int    InpSlippage        = 5;                                  // Slippage maximum en points
+//--- Énumérations pour les états et les types
+enum ENUM_EA_STATE
+{
+   EA_STATE_INIT,
+   EA_STATE_READY,
+   EA_STATE_TRADING,
+   EA_STATE_PAUSED,
+   EA_STATE_ERROR
+};
 
-input group "Objectif de Gain Journalier"
-input bool   InpUseDailyProfitTarget = true;                          // Activer l'objectif de profit journalier ?
-input double InpDailyProfitTarget    = 50.0;                          // Objectif de profit journalier en devise du compte ($)
+enum ENUM_TRADE_SIGNAL
+{
+   SIGNAL_NONE,
+   SIGNAL_BUY,
+   SIGNAL_SELL,
+   SIGNAL_CLOSE_BUY,
+   SIGNAL_CLOSE_SELL
+};
 
-input group "Gestion des Positions"
-input int    InpMaxOpenPos      = 2;                                  // Nombre maximum de positions ouvertes
-input bool   InpUseTrailingStop = true;                               // Activer le Trailing Stop ?
-input int    InpTrailingStartPts= 250;                                // Points de déclenchement du Trailing
-input int    InpTrailingStepPts = 100;                                // Pas du Trailing Stop
-input bool   InpUseBreakeven    = true;                               // Activer le Breakeven ?
-input int    InpBreakevenTrigger= 180;                                // Points pour déclencher le Breakeven
-input int    InpBreakevenOffset = 40;                                 // Marge de sécurité pour le Breakeven
+//--- Note: Les énumérations ENUM_ORDER_PROPERTY_DOUBLE et ENUM_ORDER_PROPERTY_INTEGER
+//--- sont déjà définies dans MT5, pas besoin de les redéfinir
 
-input group "Filtres de Trading"
-input bool   InpHourFilter      = false;                              // Activer le filtre horaire ?
-input string InpAllowedHours    = "8-11,14-17";                       // Heures autorisées (fuseau horaire du broker)
+//--- Classe pour stocker les données des trades
+class TradeData : public CObject
+{
+public:
+   ulong ticket;
+   string symbol;
+   double volume;
+   double openPrice;
+   double sl;
+   double tp;
+   double profit;
+   datetime openTime;
+   datetime closeTime;
+   ENUM_TRADE_SIGNAL signal;
+   
+   TradeData()
+   {
+      ticket = 0;
+      symbol = "";
+      volume = 0.0;
+      openPrice = 0.0;
+      sl = 0.0;
+      tp = 0.0;
+      profit = 0.0;
+      openTime = 0;
+      closeTime = 0;
+      signal = SIGNAL_NONE;
+   }
+};
 
-
-//===================================================================
-//                CONSTANTES ET VARIABLES GLOBALES
-//===================================================================
-#define API_DECISION "/decision"
-#define API_FEEDBACK "/trades/feedback"
+//+------------------------------------------------------------------+
+//| Paramètres d'entrée                                              |
+//+------------------------------------------------------------------+
+input double RiskPercent        = 1.0;          // % de risque par trade
+input double FixedLot           = 0.1;          // Lot fixe si activé
+input bool   UseFixedLot        = false;        // Utiliser lot fixe
+input int    TrailingStart      = 100;          // Points pour démarrer le trailing (pips)
+input int    TrailingStep       = 50;           // Points de trailing step (pips)
+input int    BreakevenStart     = 100;          // Points pour passer en breakeven
+input double AdxThreshold       = 20.0;         // Seuil ADX pour confirmer la tendance
+input int    BreakoutPeriod     = 20;           // Période pour calculer le breakout
+input double ATRMultiplier      = 1.5;          // Multiplicateur ATR pour calculer le SL
+input double RiskReward         = 2.0;          // Ratio Risque/Rendement pour calculer le TP
+input int    MagicBuy           = 20231201;     // Magic Number pour les achats
+input int    MagicSell          = 20231202;     // Magic Number pour les ventes
+input int    HourStart1         = 8;            // Heure de début de trading (session 1)
+input int    HourEnd1           = 11;           // Heure de fin de trading (session 1)
+input int    HourStart2         = 13;           // Heure de début de trading (session 2)
+input int    HourEnd2           = 17;           // Heure de fin de trading (session 2)
+input int    MaxSpreadPoints    = 20;           // Spread maximum autorisé (en points)
+input double DailyProfitTarget  = 100.0;        // Objectif de profit journalier
+input bool   EnableNotifications= true;         // Activer les notifications
+input string NotificationEmail  = "";           // Email pour les notifications
+input bool   EnableCSVLogging   = true;         // Activer la journalisation CSV
+input bool   EnableDashboard    = true;         // Activer le tableau de bord visuel
+input int    DashboardX         = 20;           // Position X du tableau de bord
+input int    DashboardY         = 20;           // Position Y du tableau de bord
+input color  DashboardColor      = clrYellow;     // Couleur du tableau de bord
+input int    DashboardFontSize  = 12;           // Taille de la police du tableau de bord
 
 //--- Variables globales
-string   g_server_url;
-string   g_current_server_name = "Local";
-datetime g_last_decision_time = 0;
-string   g_last_api_response = "";
-double   g_daily_profit = 0;
-int      g_last_day_check = 0;
-bool     g_daily_target_reached = false;
+int emaHandle9, emaHandle21, emaHandle50;
+int rsiHandle, adxHandle, atrHandle, macdHandle;
+double dailyProfit = 0.0;
+int tradesToday = 0;
+string lastSignal = "HOLD";
+int lastTradingDay = -1;
+int fileHandle = INVALID_HANDLE;
+ENUM_EA_STATE eaState = EA_STATE_INIT;
+datetime lastTradeTime = 0;
+double equityPeak = 0.0;
+double drawdown = 0.0;
+int consecutiveLosses = 0;
+int consecutiveWins = 0;
+double avgWin = 0.0;
+double avgLoss = 0.0;
+int totalTrades = 0;
+int winningTrades = 0;
+int losingTrades = 0;
+double maxDrawdown = 0.0;
+double sharpeRatio = 0.0;
+double profitFactor = 0.0;
+double expectancy = 0.0;
 
-//===================================================================
-//                SECTION 1 : INITIALISATION ET DÉINITIALISATION
-//===================================================================
+//+------------------------------------------------------------------+
+//| Déclaration des fonctions                                       |
+//+------------------------------------------------------------------+
+bool IsAllowedHour();
+bool IsSpreadAllowed();
+void UpdateDashboard();
+void ManageOpenPositions();
+double CalculateLot(bool isBuy, double stopDistance);
+void OpenBuyOrder();
+void OpenSellOrder();
+void CloseAllPositions();
+void LogTradeToFile(ulong orderID);
+void UpdateDailyStatsFromDeal(ulong dealID);
+void ResetDailyStats();
+void SendCustomNotification(string message);
+void CalculatePerformanceMetrics();
+void CreateDashboard();
+void UpdateDashboardObject(string name, string value, int x, int y);
+void DeleteDashboard();
+string GetTradeSignal();
+string GetAIServerSignal();
+string GetMarketStateFromRender();
+void CheckForNewBar();
+bool IsNewBar();
+void UpdateTradeHistory();
+void SaveTradeHistoryToFile();
+void LoadTradeHistoryFromFile();
+void CalculateStatistics();
+void CheckMarginLevel();
+void CheckForNewsEvents();
+void UpdateGlobalVariables();
+void HandleError(int errorCode);
+string GetLastErrorMessage();
+void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest &request, const MqlTradeResult &result);
+
+//+------------------------------------------------------------------+
+//| Fonction d'initialisation                                       |
+//+------------------------------------------------------------------+
 int OnInit()
 {
-   Print(" ");
-   Print("+------------------------------------------------------------------+");
-   Print("|                    ROBOCOP v2.0 - DÉMARRAGE                      |");
-   Print("+------------------------------------------------------------------+");
-   
-   // Déterminer l'URL du serveur à utiliser
-   g_server_url = InpUseLocalServer ? "http://localhost:8000" : InpRenderURL;
-   
-   PrintFormat("Serveur cible : %s", g_server_url);
-   PrintFormat("Symbole : %s", _Symbol);
-   PrintFormat("Numéro Magique : %d", InpMagicNumber);
-   PrintFormat("Objectif de profit journalier : %s (%.2f %s)", 
-               InpUseDailyProfitTarget ? "Activé" : "Désactivé", 
-               InpDailyProfitTarget, AccountInfoString(ACCOUNT_CURRENCY));
+   //--- Initialisation des indicateurs
+   emaHandle9 = iMA(_Symbol, _Period, 9, 0, MODE_EMA, PRICE_CLOSE);
+   emaHandle21 = iMA(_Symbol, _Period, 21, 0, MODE_EMA, PRICE_CLOSE);
+   emaHandle50 = iMA(_Symbol, _Period, 50, 0, MODE_EMA, PRICE_CLOSE);
+   rsiHandle = iRSI(_Symbol, _Period, 14, PRICE_CLOSE);
+   adxHandle = iADX(_Symbol, _Period, 14);
+   atrHandle = iATR(_Symbol, _Period, 14);
+   macdHandle = iMACD(_Symbol, _Period, 12, 26, 9, PRICE_CLOSE);
 
-   // Initialiser le compteur de profit journalier
-   ResetDailyProfit();
+   //--- Initialisation du fichier de journalisation CSV
+   if(EnableCSVLogging)
+   {
+      string filename = "trades_log_" + _Symbol + ".csv";
+      fileHandle = FileOpen(filename, FILE_WRITE | FILE_CSV | FILE_ANSI, ',');
+      if(fileHandle == INVALID_HANDLE)
+      {
+         Print("Échec de l'ouverture du fichier CSV: ", GetLastError());
+      }
+      else
+      {
+         FileWrite(fileHandle, "Date", "Heure", "Symbole", "Type", "Lot", "Prix Ouverture", "SL", "TP", "Prix Fermeture", "Profit", "Magic", "Signal", "Commentaire");
+      }
+   }
+
+   //--- Initialisation de l'historique des trades
+   tradeHistory = new CList();
+   LoadTradeHistoryFromFile();
+
+   //--- Création du tableau de bord
+   if(EnableDashboard)
+   {
+      CreateDashboard();
+   }
+
+   //--- Initialisation des variables globales
+   MqlDateTime dt;
+   TimeToStruct(TimeCurrent(), dt);
+   lastTradingDay = dt.day;
+   eaState = EA_STATE_READY;
 
    return(INIT_SUCCEEDED);
 }
 
+//+------------------------------------------------------------------+
+//| Fonction de désinitialisation                                  |
+//+------------------------------------------------------------------+
 void OnDeinit(const int reason)
 {
-   PrintFormat("RoboCop v2.0 arrêté. Raison : %d", reason);
-   Comment("");
+   //--- Libération des indicateurs
+   IndicatorRelease(emaHandle9);
+   IndicatorRelease(emaHandle21);
+   IndicatorRelease(emaHandle50);
+   IndicatorRelease(rsiHandle);
+   IndicatorRelease(adxHandle);
+   IndicatorRelease(atrHandle);
+   IndicatorRelease(macdHandle);
+
+   //--- Fermeture du fichier CSV
+   if(fileHandle != INVALID_HANDLE)
+   {
+      FileClose(fileHandle);
+   }
+
+   //--- Sauvegarde de l'historique des trades
+   SaveTradeHistoryToFile();
+
+   //--- Suppression du tableau de bord
+   if(EnableDashboard)
+   {
+      DeleteDashboard();
+   }
+
+   //--- Libération de la mémoire
+   if(tradeHistory != NULL)
+   {
+      delete tradeHistory;
+   }
 }
 
-//===================================================================
-//                SECTION 2 : LOGIQUE PRINCIPALE - OnTick()
-//===================================================================
+//+------------------------------------------------------------------+
+//| Fonction principale du tick                                    |
+//+------------------------------------------------------------------+
 void OnTick()
 {
-   // Vérifier si un nouveau jour a commencé pour réinitialiser l'objectif
-   CheckForNewDay();
-
-   // Si l'objectif journalier est atteint, on arrête de trader
-   if(g_daily_target_reached)
+   //--- Vérification de l'état de l'EA
+   if(eaState == EA_STATE_ERROR)
    {
-      Comment(StringFormat("Objectif journalier de %.2f %s atteint.\nTrading en pause jusqu'à demain.",
-                           InpDailyProfitTarget, AccountInfoString(ACCOUNT_CURRENCY)));
+      HandleError(GetLastError());
       return;
    }
 
-   // Gérer les positions existantes (Trailing Stop, Breakeven)
+   //--- Mise à jour des variables globales
+   UpdateGlobalVariables();
+
+   //--- Réinitialisation des statistiques quotidiennes si nouveau jour
+   MqlDateTime dt;
+   TimeToStruct(TimeCurrent(), dt);
+   int today = dt.day;
+   if(today != lastTradingDay)
+   {
+      ResetDailyStats();
+      lastTradingDay = today;
+   }
+
+   //--- Vérification de la marge
+   CheckMarginLevel();
+
+   //--- Mise à jour du tableau de bord
+   if(EnableDashboard)
+   {
+      UpdateDashboard();
+   }
+
+   //--- Arrêt des nouveaux trades si l'objectif journalier est atteint
+   if(DailyProfitTarget > 0 && dailyProfit >= DailyProfitTarget)
+   {
+      SendCustomNotification("Objectif de profit journalier atteint: " + DoubleToString(DailyProfitTarget, 2) + " " + AccountInfoString(ACCOUNT_CURRENCY));
+      return;
+   }
+
+   //--- Vérification des heures de trading et du spread
+   if(!IsAllowedHour() || !IsSpreadAllowed())
+   {
+      return;
+   }
+
+   //--- Gestion des positions ouvertes
    ManageOpenPositions();
 
-   // Conditions pour prendre une nouvelle décision
-   // 1. Pas de position ouverte sur ce symbole
-   // 2. Attendre au moins 60 secondes entre deux décisions
-   if(CountOpenPositions() < InpMaxOpenPos && TimeCurrent() - g_last_decision_time >= 60)
+   //--- Détection des nouveaux signaux de trading
+   string signal = GetTradeSignal();
+   
+   // Éviter les signaux répétés (cooldown de 30 secondes)
+   static datetime lastSignalTime = 0;
+   if(TimeCurrent() - lastSignalTime < 30)
    {
-      // Filtres de trading (horaire, etc.)
-      if(!IsTradingAllowed())
+      return; // Cooldown actif
+   }
+   
+   if(signal == "BUY" && lastSignal != "BUY")
+   {
+      OpenBuyOrder();
+      lastSignal = "BUY";
+      lastSignalTime = TimeCurrent();
+   }
+   else if(signal == "SELL" && lastSignal != "SELL")
+   {
+      OpenSellOrder();
+      lastSignal = "SELL";
+      lastSignalTime = TimeCurrent();
+   }
+
+   //--- Vérification des nouvelles barres
+   static datetime lastBarTime = 0;
+   if(IsNewBar())
+   {
+      lastBarTime = iTime(_Symbol, _Period, 0);
+      CheckForNewsEvents();
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Vérifie si une nouvelle barre est formée                        |
+//+------------------------------------------------------------------+
+bool IsNewBar()
+{
+   static datetime lastBarTime = 0;
+   datetime currentBarTime = iTime(_Symbol, _Period, 0);
+   if(lastBarTime != currentBarTime)
+   {
+      lastBarTime = currentBarTime;
+      return true;
+   }
+   return false;
+}
+
+//+------------------------------------------------------------------+
+//| Vérifie les heures de trading autorisées                        |
+//+------------------------------------------------------------------+
+bool IsAllowedHour()
+{
+   MqlDateTime dt;
+   TimeToStruct(TimeCurrent(), dt);
+   int hour = dt.hour;
+   return ((hour >= HourStart1 && hour < HourEnd1) || (hour >= HourStart2 && hour < HourEnd2));
+}
+
+//+------------------------------------------------------------------+
+//| Vérifie si le spread est acceptable                             |
+//+------------------------------------------------------------------+
+bool IsSpreadAllowed()
+{
+   long spread = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
+   if(spread <= 0)
+   {
+      spread = (long)MathRound((SymbolInfoDouble(_Symbol, SYMBOL_ASK) - SymbolInfoDouble(_Symbol, SYMBOL_BID)) / _Point);
+   }
+   return (spread <= MaxSpreadPoints);
+}
+
+//+------------------------------------------------------------------+
+//| Met à jour les variables globales                               |
+//+------------------------------------------------------------------+
+void UpdateGlobalVariables()
+{
+   equityPeak = MathMax(equityPeak, AccountInfoDouble(ACCOUNT_EQUITY));
+   drawdown = (equityPeak - AccountInfoDouble(ACCOUNT_EQUITY)) / equityPeak * 100;
+   maxDrawdown = MathMax(maxDrawdown, drawdown);
+}
+
+//+------------------------------------------------------------------+
+//| Vérifie le niveau de marge                                      |
+//+------------------------------------------------------------------+
+void CheckMarginLevel()
+{
+   double marginLevel = AccountInfoDouble(ACCOUNT_MARGIN_LEVEL);
+   
+   // Ne vérifier la marge que s'il y a des positions ouvertes
+   if(PositionsTotal() == 0)
+   {
+      return; // Pas de vérification si aucune position
+   }
+   
+   if(marginLevel < 50.0 && marginLevel > 0.0) // Vérifier aussi que marginLevel > 0
+   {
+      SendCustomNotification("Alerte: Niveau de marge bas (" + DoubleToString(marginLevel, 2) + "%)");
+      CloseAllPositions();
+      eaState = EA_STATE_PAUSED;
+   }
+   else if(marginLevel < 100.0 && eaState == EA_STATE_PAUSED)
+   {
+      eaState = EA_STATE_READY;
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Vérifie les événements de news (exemple)                        |
+//+------------------------------------------------------------------+
+void CheckForNewsEvents()
+{
+   //--- Logique pour vérifier les événements de news (à implémenter)
+   //--- Exemple: Vérifier un calendrier économique ou un flux RSS
+}
+
+//+------------------------------------------------------------------+
+//| Gère les positions ouvertes                                     |
+//+------------------------------------------------------------------+
+void ManageOpenPositions()
+{
+   for(int i = 0; i < PositionsTotal(); i++)
+   {
+      if(!PositionSelect(_Symbol)) continue;
+      ulong ticket = PositionGetTicket(i);
+      long magic = PositionGetInteger(POSITION_MAGIC);
+      if(magic != MagicBuy && magic != MagicSell) continue;
+
+      double profit = PositionGetDouble(POSITION_PROFIT);
+      double entry = PositionGetDouble(POSITION_PRICE_OPEN);
+      double sl = PositionGetDouble(POSITION_SL);
+      double tp = PositionGetDouble(POSITION_TP);
+      ENUM_POSITION_TYPE type = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+
+      //--- Trailing Stop
+      if(profit > TrailingStart * _Point)
       {
-         return;
+         double newSL = (type == POSITION_TYPE_BUY) ?
+            SymbolInfoDouble(_Symbol, SYMBOL_BID) - TrailingStep * _Point :
+            SymbolInfoDouble(_Symbol, SYMBOL_ASK) + TrailingStep * _Point;
+
+         if((type == POSITION_TYPE_BUY && newSL > sl) || (type == POSITION_TYPE_SELL && (sl == 0 || newSL < sl)))
+         {
+            trade.PositionModify(ticket, newSL, tp);
+         }
       }
-      
-      g_last_decision_time = TimeCurrent();
-      RequestDecisionFromAPI();
-   }
-   
-   // Mettre à jour l'affichage sur le graphique
-   UpdateChartComment();
-}
 
-//===================================================================
-//          SECTION 3 : COMMUNICATION AVEC LE SERVEUR IA
-//===================================================================
-void RequestDecisionFromAPI()
-{
-   string json_request = BuildDecisionRequestJSON();
-   string response_body = "";
-   
-   if(SendWebRequest("POST", API_DECISION, json_request, response_body))
-   {
-      g_last_api_response = response_body; // Stocker la réponse pour l'affichage
-      ProcessApiResponse(response_body);
+      //--- Breakeven
+      if(type == POSITION_TYPE_BUY && SymbolInfoDouble(_Symbol, SYMBOL_BID) - entry >= BreakevenStart * _Point)
+      {
+         if(entry > sl)
+         {
+            trade.PositionModify(ticket, entry, tp);
+         }
+      }
+      else if(type == POSITION_TYPE_SELL && entry - SymbolInfoDouble(_Symbol, SYMBOL_ASK) >= BreakevenStart * _Point)
+      {
+         if(entry < sl || sl == 0)
+         {
+            trade.PositionModify(ticket, entry, tp);
+         }
+      }
    }
 }
 
-// Construit le JSON à envoyer au serveur
-string BuildDecisionRequestJSON()
+//+------------------------------------------------------------------+
+//| Calcule le lot en fonction du risque                            |
+//+------------------------------------------------------------------+
+double CalculateLot(bool isBuy, double stopDistance)
 {
-   // Utilisation de la bibliothèque CJAVal pour créer le JSON
-   CJAVal json;
-   json["symbol"].SetStr(_Symbol);
-   json["bid"].SetDbl(SymbolInfoDouble(_Symbol, SYMBOL_BID));
-   json["ask"].SetDbl(SymbolInfoDouble(_Symbol, SYMBOL_ASK));
-   json["rsi"].SetDbl(iRSI(_Symbol, PERIOD_CURRENT, 14, PRICE_CLOSE));
-   json["atr"].SetDbl(iATR(_Symbol, PERIOD_CURRENT, 14));
-   
-   // Indicateurs multi-timeframe
-   json["ema_fast_m1"].SetDbl(iMA(_Symbol, PERIOD_M1, 9, 0, MODE_EMA, PRICE_CLOSE));
-   json["ema_slow_m1"].SetDbl(iMA(_Symbol, PERIOD_M1, 21, 0, MODE_EMA, PRICE_CLOSE));
-   json["ema_fast_h1"].SetDbl(iMA(_Symbol, PERIOD_H1, 9, 0, MODE_EMA, PRICE_CLOSE));
-   json["ema_slow_h1"].SetDbl(iMA(_Symbol, PERIOD_H1, 21, 0, MODE_EMA, PRICE_CLOSE));
+   double lot = FixedLot;
+   if(!UseFixedLot)
+   {
+      double riskAmount = AccountInfoDouble(ACCOUNT_BALANCE) * RiskPercent / 100.0;
+      double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+      double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+      lot = riskAmount / (stopDistance * tickValue * tickSize);
+      lot = NormalizeDouble(lot, 2);
+   }
 
-   return json.Serialize();
+   //--- Vérification des limites de lot
+   double minLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   double maxLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+   double lotStep = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+
+   lot = MathMax(lot, minLot);
+   lot = MathMin(lot, maxLot);
+   lot = MathFloor(lot / lotStep) * lotStep;
+
+   return lot;
 }
 
-// Traite la réponse JSON du serveur
-void ProcessApiResponse(string response_body)
+//+------------------------------------------------------------------+
+//| Ouvre un ordre d'achat                                          |
+//+------------------------------------------------------------------+
+void OpenBuyOrder()
 {
-   CJAVal json_response;
-   if(!json_response.Deserialize(response_body))
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double atr[1];
+   if(CopyBuffer(atrHandle, 0, 0, 1, atr) <= 0)
    {
-      Print("Erreur : Impossible de parser la réponse JSON du serveur.");
+      Print("Erreur de copie du buffer ATR");
       return;
    }
 
-   string action = json_response["action"].GetStr();
-   double confidence = json_response["confidence"].GetDbl();
-   double sl = json_response["stop_loss"].GetDbl();
-   double tp = json_response["take_profit"].GetDbl();
+   double sl = ask - atr[0] * ATRMultiplier * _Point;
+   double tp = ask + atr[0] * ATRMultiplier * RiskReward * _Point;
+   double stopDistance = (ask - sl) / _Point;
+   double lot = CalculateLot(true, stopDistance);
 
-   PrintFormat("Décision reçue : Action=%s, Confiance=%.2f, SL=%.5f, TP=%.5f", action, confidence, sl, tp);
-
-   if(action != "hold" && confidence >= 0.65) // Seuil de confiance pour trader
+   trade.SetExpertMagicNumber(MagicBuy);
+   if(trade.Buy(lot, _Symbol, ask, sl, tp, "EA Buy Order"))
    {
-      double lot_size = CalculateLotSize(sl);
-      ExecuteTrade(action, lot_size, sl, tp);
-   }
-}
-
-//===================================================================
-//                SECTION 4 : GESTION DES TRADES
-//===================================================================
-void ExecuteTrade(string action, double lot_size, double sl, double tp)
-{
-   MqlTradeRequest request = {};
-   MqlTradeResult result = {0};
-   
-   ENUM_ORDER_TYPE order_type = (action == "buy") ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
-   double price = (order_type == ORDER_TYPE_BUY) ? SymbolInfoDouble(_Symbol, SYMBOL_ASK) : SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   
-   request.action = TRADE_ACTION_DEAL;
-   request.symbol = _Symbol;
-   request.volume = lot_size;
-   request.type = order_type;
-   request.price = price;
-   request.sl = sl;
-   request.tp = tp;
-   request.deviation = InpSlippage;
-   request.magic = InpMagicNumber;
-   request.comment = "RoboCop v2 AI";
-   
-   if(!OrderSend(request, result))
-   {
-      PrintFormat("Erreur OrderSend : %d - %s", result.retcode, result.comment);
+      lastSignal = "BUY";
+      lastTradeTime = TimeCurrent();
+      SendCustomNotification("Nouvel ordre d'achat ouvert: " + DoubleToString(lot, 2) + " lots @ " + DoubleToString(ask, _Digits));
    }
    else
    {
-      PrintFormat("Ordre exécuté avec succès. Ticket : %d", result.order);
+      Print("Erreur d'ouverture d'ordre d'achat: ", GetLastError());
+      HandleError(GetLastError());
    }
 }
 
-// Compte les positions ouvertes par ce robot sur le symbole actuel
-int CountOpenPositions()
+//+------------------------------------------------------------------+
+//| Ouvre un ordre de vente                                         |
+//+------------------------------------------------------------------+
+void OpenSellOrder()
 {
-   int count = 0;
-   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double atr[1];
+   if(CopyBuffer(atrHandle, 0, 0, 1, atr) <= 0)
    {
-      if(PositionGetSymbol(i) == _Symbol && PositionGetInteger(POSITION_MAGIC) == InpMagicNumber)
-      {
-         count++;
-      }
+      Print("Erreur de copie du buffer ATR");
+      return;
    }
-   return count;
+
+   double sl = bid + atr[0] * ATRMultiplier * _Point;
+   double tp = bid - atr[0] * ATRMultiplier * RiskReward * _Point;
+   double stopDistance = (sl - bid) / _Point;
+   double lot = CalculateLot(false, stopDistance);
+
+   trade.SetExpertMagicNumber(MagicSell);
+   if(trade.Sell(lot, _Symbol, bid, sl, tp, "EA Sell Order"))
+   {
+      lastSignal = "SELL";
+      lastTradeTime = TimeCurrent();
+      SendCustomNotification("Nouvel ordre de vente ouvert: " + DoubleToString(lot, 2) + " lots @ " + DoubleToString(bid, _Digits));
+   }
+   else
+   {
+      Print("Erreur d'ouverture d'ordre de vente: ", GetLastError());
+      HandleError(GetLastError());
+   }
 }
 
-//===================================================================
-//       SECTION 5 : OBJECTIF JOURNALIER & GESTION DU TEMPS
-//===================================================================
-// Réinitialise le profit journalier et l'état de l'objectif
-void ResetDailyProfit()
+//+------------------------------------------------------------------+
+//| Ferme toutes les positions                                      |
+//+------------------------------------------------------------------+
+void CloseAllPositions()
 {
-   g_daily_profit = 0;
-   g_last_day_check = (int)TimeCurrent() / 86400;
-   g_daily_target_reached = false;
+   // Vérifier s'il y a des positions à fermer
+   if(PositionsTotal() == 0)
+   {
+      return; // Rien à fermer
+   }
    
-   // Calculer le profit de la journée en cours au démarrage
-   HistorySelect(TimeCurrent() - 86400, TimeCurrent());
-   for(int i=0; i < HistoryDealsTotal(); i++)
-   {
-      ulong ticket = HistoryDealGetTicket(i);
-      if(HistoryDealGetInteger(ticket, DEAL_MAGIC) == InpMagicNumber && HistoryDealGetInteger(ticket, DEAL_ENTRY) == DEAL_ENTRY_OUT)
-      {
-         // S'assurer que le deal a été fermé aujourd'hui
-         if(HistoryDealGetInteger(ticket, DEAL_TIME) / 86400 == g_last_day_check)
-         {
-            g_daily_profit += HistoryDealGetDouble(ticket, DEAL_PROFIT);
-         }
-      }
-   }
-   PrintFormat("Profit initial pour aujourd'hui : %.2f %s", g_daily_profit, AccountInfoString(ACCOUNT_CURRENCY));
-   CheckDailyTarget();
-}
-
-// Vérifie si un nouveau jour a commencé
-void CheckForNewDay()
-{
-   int current_day = (int)TimeCurrent() / 86400;
-   if(current_day != g_last_day_check)
-   {
-      Print("Nouveau jour détecté. Réinitialisation de l'objectif de profit journalier.");
-      ResetDailyProfit();
-   }
-}
-
-// Met à jour le profit journalier et vérifie si l'objectif est atteint
-void UpdateDailyProfit(double profit)
-{
-   if(!InpUseDailyProfitTarget) return;
-
-   g_daily_profit += profit;
-   CheckDailyTarget();
-}
-
-void CheckDailyTarget()
-{
-    if(InpUseDailyProfitTarget && g_daily_profit >= InpDailyProfitTarget)
-   {
-      g_daily_target_reached = true;
-      PrintFormat("OBJECTIF ATTEINT ! Profit journalier de %.2f %s. Le trading est mis en pause.", g_daily_profit, AccountInfoString(ACCOUNT_CURRENCY));
-   }
-}
-
-//===================================================================
-//                SECTION 6 : GESTION DES POSITIONS ACTIVES
-//===================================================================
-void ManageOpenPositions()
-{
    for(int i = PositionsTotal() - 1; i >= 0; i--)
    {
+      if(!PositionSelect(_Symbol)) continue;
       ulong ticket = PositionGetTicket(i);
-      if(PositionGetSymbol(i) == _Symbol && PositionGetInteger(POSITION_MAGIC) == InpMagicNumber)
-      {
-         if(InpUseTrailingStop) ApplyTrailingStop(ticket);
-         if(InpUseBreakeven) ApplyBreakeven(ticket);
-      }
+      trade.PositionClose(ticket);
    }
+   SendCustomNotification("Toutes les positions ont été fermées");
 }
 
-void ApplyTrailingStop(ulong ticket)
+//+------------------------------------------------------------------+
+//| Détermine le signal de trading                                  |
+//+------------------------------------------------------------------+
+string GetTradeSignal()
 {
-   // ... (implémentation du trailing stop)
-}
-
-void ApplyBreakeven(ulong ticket)
-{
-    // ... (implémentation du breakeven)
-}
-
-//===================================================================
-//          SECTION 7 : FILTRES, CALCULS ET UTILITAIRES
-//===================================================================
-bool IsTradingAllowed()
-{
-   if(InpHourFilter && !IsTradingHourAllowed())
+   //--- Essayer de récupérer un signal depuis ai_server.py via HTTP
+   string aiResponse = GetAIServerSignal();
+   if(aiResponse != "")
    {
-      Comment("Trading en pause : En dehors des heures autorisées.");
-      return false;
+      return aiResponse;
    }
-   return true;
-}
+   
+   //--- Fallback sur l'analyse technique locale si aucun signal AI
+   double ema9[1], ema21[1], ema50[1], rsi[1], adx[1], atr[1], macd[2];
+   CopyBuffer(emaHandle9, 0, 0, 1, ema9);
+   CopyBuffer(emaHandle21, 0, 0, 1, ema21);
+   CopyBuffer(emaHandle50, 0, 0, 1, ema50);
+   CopyBuffer(rsiHandle, 0, 0, 1, rsi);
+   CopyBuffer(adxHandle, 0, 0, 1, adx);
+   CopyBuffer(macdHandle, 0, 0, 2, macd);
 
-bool IsTradingHourAllowed()
-{
-   MqlDateTime dt;
-   TimeCurrent(dt);
-   int current_hour = dt.hour;
-   
-   string hours_array[];
-   StringSplit(InpAllowedHours, ',', hours_array);
-   
-   for(int i = 0; i < ArraySize(hours_array); i++)
+   bool uptrend = (ema9[0] > ema21[0] && ema21[0] > ema50[0] && adx[0] > AdxThreshold);
+   bool downtrend = (ema9[0] < ema21[0] && ema21[0] < ema50[0] && adx[0] > AdxThreshold);
+   bool macdBuy = (macd[0] > 0 && macd[0] > macd[1]);
+   bool macdSell = (macd[0] < 0 && macd[0] < macd[1]);
+
+   if(uptrend && macdBuy && rsi[0] > 50)
    {
-      string range[];
-      StringSplit(hours_array[i], '-', range);
-      if(ArraySize(range) == 2)
-      {
-         int start_hour = (int)StringToInteger(range[0]);
-         int end_hour = (int)StringToInteger(range[1]);
-         if(current_hour >= start_hour && current_hour < end_hour)
-         {
-            return true;
-         }
-      }
+      return "BUY";
    }
-   return false;
-}
-
-double CalculateLotSize(double sl_price)
-{
-   if(InpRiskPercent <= 0 || sl_price == 0)
+   else if(downtrend && macdSell && rsi[0] < 50)
    {
-      return InpFixedLot;
+      return "SELL";
    }
-
-   double balance = AccountInfoDouble(ACCOUNT_BALANCE);
-   double risk_amount = balance * InpRiskPercent / 100.0;
-   
-   double entry_price = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-   double risk_per_lot = MathAbs(entry_price - sl_price) * SymbolInfoDouble(_Symbol, SYMBOL_TRADE_CONTRACT_SIZE);
-
-   if(risk_per_lot <= 0) return InpFixedLot;
-   
-   double lots = risk_amount / risk_per_lot;
-   
-   // Normaliser le lot selon les règles du broker
-   double min_lot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
-   double max_lot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
-   double step_lot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
-   
-   lots = MathRound(lots / step_lot) * step_lot;
-   
-   if(lots < min_lot) lots = min_lot;
-   if(lots > max_lot) lots = max_lot;
-   
-   return NormalizeDouble(lots, 2);
+   else
+   {
+      return "HOLD";
+   }
 }
 
-// Wrapper pour WebRequest avec tentatives
-bool SendWebRequest(string method, string endpoint, string data, string &response)
+//+------------------------------------------------------------------+
+//| Récupère le signal depuis le serveur IA via HTTP                   |
+//+------------------------------------------------------------------+
+string GetAIServerSignal()
 {
-   string url = g_server_url + endpoint;
+   // Essayer l'URL Render d'abord, puis localhost en fallback
+   string urls[] = {"https://tradbot-ai.onrender.com/decision", "http://localhost:8000/decision"};
    string headers = "Content-Type: application/json\r\n";
-   char response_data[];
-   string result = "";
+   char post[];
+   uchar response[];
    
-   // Essayer d'abord le serveur local, puis Render en fallback
-   string servers[] = {g_server_url, InpRenderURL};
-   string server_names[] = {"Local", "Render"};
+   // Préparer les données de la requête
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double rsiValue[1];
+   CopyBuffer(rsiHandle, 0, 0, 1, rsiValue);
    
-   for(int s = 0; s < ArraySize(servers); s++)
+   // Créer le JSON de la requête
+   string jsonRequest = StringFormat("{\"symbol\":\"%s\",\"bid\":%.5f,\"ask\":%.5f,\"rsi\":%.2f,\"ema_fast_m1\":%.5f,\"ema_slow_m1\":%.5f,\"ema_fast_h1\":%.5f,\"ema_slow_h1\":%.5f,\"atr\":%.5f,\"timestamp\":\"%s\"}",
+      _Symbol, bid, ask, rsiValue[0], 
+      iMA(_Symbol, PERIOD_M1, 9, 0, MODE_EMA, PRICE_CLOSE),
+      iMA(_Symbol, PERIOD_M1, 21, 0, MODE_EMA, PRICE_CLOSE),
+      iMA(_Symbol, PERIOD_H1, 9, 0, MODE_EMA, PRICE_CLOSE),
+      iMA(_Symbol, PERIOD_H1, 21, 0, MODE_EMA, PRICE_CLOSE),
+      iATR(_Symbol, PERIOD_CURRENT, 14),
+      TimeToString(TimeCurrent())
+   );
+   
+   // Convertir en tableau de caractères
+   StringToCharArray(jsonRequest, post);
+   
+   // Essayer les URLs dans l'ordre (Render d'abord, puis localhost)
+   for(int i = 0; i < ArraySize(urls); i++)
    {
-      url = servers[s] + endpoint;
-      PrintFormat("Tentative de connexion au serveur %s : %s", server_names[s], url);
+      string url = urls[i];
+      int timeout = 5000; // 5 secondes
+      uchar response[];
+      string result_headers;
+      int res = WebRequest("POST", url, "", timeout, post, response, result_headers);
       
-      for(int i = 0; i < InpMaxRetries; i++)
+      if(res == 200)
       {
-         ResetLastError();
-         int code = WebRequest(method, url, headers, 5000, data, response_data, headers, "application/json");
+         // Parser la réponse JSON
+         string jsonResponse = CharArrayToString(response);
          
-         if(code == 200)
+         // Extraire l'action du JSON (parsing simple)
+         int actionStart = StringFind(jsonResponse, "\"action\":");
+         if(actionStart >= 0)
          {
-            response = CharArrayToString(response_data);
-            PrintFormat(" Connexion réussie au serveur %s", server_names[s]);
-            
-            // Si on utilise le serveur de fallback, mettre à jour l'URL globale
-            if(s > 0)
+            actionStart = StringFind(jsonResponse, "\"", actionStart + 9) + 1;
+            int actionEnd = StringFind(jsonResponse, "\"", actionStart);
+            if(actionEnd > actionStart)
             {
-               g_server_url = servers[s];
-               g_current_server_name = server_names[s];
-               PrintFormat("🔄 Basculement automatique vers le serveur %s", server_names[s]);
+               string action = StringSubstr(jsonResponse, actionStart, actionEnd - actionStart);
+               
+               // Extraire la confiance
+               int confStart = StringFind(jsonResponse, "\"confidence\":");
+               if(confStart >= 0)
+               {
+                  confStart = StringFind(jsonResponse, ":", confStart) + 1;
+                  int confEnd = StringFind(jsonResponse, ",", confStart);
+                  if(confEnd < 0) confEnd = StringFind(jsonResponse, "}", confStart);
+                  if(confEnd > confStart)
+                  {
+                     string confStr = StringSubstr(jsonResponse, confStart, confEnd - confStart);
+                     double confidence = StringToDouble(confStr);
+                     
+                     // Accepter le signal seulement si confiance >= 0.6
+                     bool isValidAction = (action == "buy" || action == "sell");
+                     if(confidence >= 0.6 && isValidAction)
+                     {
+                        string serverType = (i == 0) ? "Render" : "Localhost";
+                        Print("Signal IA reçu depuis ", serverType, ": ", action, " (confiance: ", confidence, ")");
+                        string actionUpper = action;
+                        StringToUpper(actionUpper);
+                        return actionUpper;
+                     }
+                  }
+               }
             }
-            return true;
-         }
-         else
-         {
-            PrintFormat("Erreur WebRequest %s (tentative %d/%d) : Code %d", server_names[s], i + 1, InpMaxRetries, code);
-            if(i < InpMaxRetries - 1) Sleep(InpRetryDelay);
          }
       }
-      
-      // Si le serveur actuel a échoué, essayer le suivant
-      if(s < ArraySize(servers) - 1)
+      else
       {
-         PrintFormat(" Échec du serveur %s, basculement vers %s...", server_names[s], server_names[s + 1]);
+         if(i == 0)
+            Print("Tentative Render échouée: ", res, " -> Essai localhost...");
+         else
+            Print("Erreur requête IA: ", res, " (tous les serveurs indisponibles)");
       }
    }
    
-   Print(" Erreur critique : Échec de tous les serveurs.");
-   return false;
+   return "";
 }
 
-//===================================================================
-//       SECTION 8 : FEEDBACK LOOP - OnTradeTransaction
-//===================================================================
+//+------------------------------------------------------------------+
+//| Envoie une notification                                         |
+//+------------------------------------------------------------------+
+void SendCustomNotification(string message)
+{
+   if(EnableNotifications)
+   {
+      Print(message);
+      Alert(message);
+      if(NotificationEmail != "")
+      {
+         SendMail("TrendBreakoutEA Notification", message);
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Réinitialise les statistiques quotidiennes                      |
+//+------------------------------------------------------------------+
+void ResetDailyStats()
+{
+   dailyProfit = 0.0;
+   tradesToday = 0;
+   consecutiveLosses = 0;
+   consecutiveWins = 0;
+   CalculateStatistics();
+}
+
+//+------------------------------------------------------------------+
+//| Met à jour les statistiques de performance                      |
+//+------------------------------------------------------------------+
+void CalculateStatistics()
+{
+   if(totalTrades > 0)
+   {
+      avgWin = (winningTrades > 0) ? (dailyProfit / winningTrades) : 0;
+      avgLoss = (losingTrades > 0) ? (dailyProfit / losingTrades) : 0;
+      profitFactor = (winningTrades > 0 && losingTrades > 0) ? (avgWin / MathAbs(avgLoss)) : 0;
+      expectancy = (avgWin * (winningTrades / totalTrades)) + (avgLoss * (losingTrades / totalTrades));
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Crée le tableau de bord visuel                                  |
+//+------------------------------------------------------------------+
+void CreateDashboard()
+{
+   dashboardObjects = new CArrayObj();
+   string labels[] = {"Profit Journalier", "Trades Aujourd'hui", "Dernier Signal", "Drawdown", "Profit Factor", "Equity", "Balance", "Margin Level"};
+   for(int i = 0; i < ArraySize(labels); i++)
+   {
+      string name = "EA_Dashboard_" + IntegerToString(i);
+      ObjectCreate(0, name, OBJ_LABEL, 0, 0, 0);
+      ObjectSetInteger(0, name, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+      ObjectSetInteger(0, name, OBJPROP_XDISTANCE, DashboardX);
+      ObjectSetInteger(0, name, OBJPROP_YDISTANCE, DashboardY + (i * 20));
+      ObjectSetString(0, name, OBJPROP_TEXT, labels[i] + ": ");
+      ObjectSetInteger(0, name, OBJPROP_FONTSIZE, DashboardFontSize);
+      ObjectSetInteger(0, name, OBJPROP_COLOR, DashboardColor);
+      // Pas besoin d'ajouter les noms au tableau, on les générera dynamiquement
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Met à jour un objet du tableau de bord                           |
+//+------------------------------------------------------------------+
+void UpdateDashboardObject(string name, string value, int x, int y)
+{
+   if(ObjectFind(0, name) >= 0)
+   {
+      ObjectSetInteger(0, name, OBJPROP_XDISTANCE, x);
+      ObjectSetInteger(0, name, OBJPROP_YDISTANCE, y);
+      ObjectSetString(0, name, OBJPROP_TEXT, value);
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Met à jour le tableau de bord                                    |
+//+------------------------------------------------------------------+
+void UpdateDashboard()
+{
+   if(dashboardObjects == NULL) return;
+
+   UpdateDashboardObject("EA_Dashboard_0", "Profit Journalier: " + DoubleToString(dailyProfit, 2), DashboardX, DashboardY);
+   UpdateDashboardObject("EA_Dashboard_1", "Trades Aujourd'hui: " + IntegerToString(tradesToday), DashboardX, DashboardY + 20);
+   UpdateDashboardObject("EA_Dashboard_2", "Dernier Signal: " + lastSignal, DashboardX, DashboardY + 40);
+   UpdateDashboardObject("EA_Dashboard_3", "Drawdown: " + DoubleToString(drawdown, 2) + "%", DashboardX, DashboardY + 60);
+   UpdateDashboardObject("EA_Dashboard_4", "Profit Factor: " + DoubleToString(profitFactor, 2), DashboardX, DashboardY + 80);
+   UpdateDashboardObject("EA_Dashboard_5", "Equity: " + DoubleToString(AccountInfoDouble(ACCOUNT_EQUITY), 2), DashboardX, DashboardY + 100);
+   UpdateDashboardObject("EA_Dashboard_6", "Balance: " + DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE), 2), DashboardX, DashboardY + 120);
+   UpdateDashboardObject("EA_Dashboard_7", "Margin Level: " + DoubleToString(AccountInfoDouble(ACCOUNT_MARGIN_LEVEL), 2) + "%", DashboardX, DashboardY + 140);
+}
+
+//+------------------------------------------------------------------+
+//| Supprime le tableau de bord                                     |
+//+------------------------------------------------------------------+
+void DeleteDashboard()
+{
+   if(dashboardObjects == NULL) return;
+
+   // Supprimer tous les objets dashboard créés
+   for(int i = 0; i < 8; i++)  // 8 objets dashboard créés dans CreateDashboard
+   {
+      string name = "EA_Dashboard_" + IntegerToString(i);
+      ObjectDelete(0, name);
+   }
+   delete dashboardObjects;
+}
+
+//+------------------------------------------------------------------+
+//| Gère les erreurs                                                |
+//+------------------------------------------------------------------+
+void HandleError(int errorCode)
+{
+   string errorMessage = "Erreur " + IntegerToString(errorCode) + ": " + GetLastErrorMessage();
+   Print(errorMessage);
+   SendCustomNotification(errorMessage);
+   eaState = EA_STATE_ERROR;
+}
+
+//+------------------------------------------------------------------+
+//| Gestion des transactions commerciales                            |
+//+------------------------------------------------------------------+
 void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest &request, const MqlTradeResult &result)
 {
-    // On ne s'intéresse qu'aux trades qui sont fermés
-    if(trans.type != TRADE_TRANSACTION_DEAL_ADD) return;
-
-    long deal_entry_type = HistoryDealGetInteger(trans.deal, DEAL_ENTRY);
-    // DEAL_ENTRY_OUT signifie que c'est une transaction de clôture
-    if(deal_entry_type != DEAL_ENTRY_OUT) return;
-
-    // Vérifier si le deal a été fait par ce robot
-    if(HistoryDealGetInteger(trans.deal, DEAL_MAGIC) != InpMagicNumber) return;
-
-    double profit = HistoryDealGetDouble(trans.deal, DEAL_PROFIT);
-    
-    // Mettre à jour l'objectif de profit journalier
-    UpdateDailyProfit(profit);
-    
-    // Construire le JSON pour le feedback
-    CJAVal feedback_json;
-    feedback_json["symbol"].SetStr(_Symbol);
-    feedback_json["profit"].SetDbl(profit);
-    feedback_json["is_win"].SetBool(profit > 0);
-    
-    string feedback_str = feedback_json.Serialize();
-    string response_body;
-
-    // Envoyer le feedback au serveur (sans se soucier de la réponse)
-    SendWebRequest("POST", API_FEEDBACK, feedback_str, response_body);
-    PrintFormat("Feedback envoyé au serveur : Profit = %.2f", profit);
+   if(trans.type == TRADE_TRANSACTION_ORDER_ADD && trans.order > 0)
+   {
+      LogTradeToFile(trans.order);
+   }
+   else if(trans.type == TRADE_TRANSACTION_DEAL_ADD && trans.deal > 0)
+   {
+      UpdateDailyStatsFromDeal(trans.deal);
+   }
 }
 
-//===================================================================
-//                SECTION 9 : AFFICHAGE GRAPHIQUE
-//===================================================================
-void UpdateChartComment()
+//+------------------------------------------------------------------+
+//| Enregistre un trade dans le fichier CSV                         |
+//+------------------------------------------------------------------+
+void LogTradeToFile(ulong orderID)
 {
-   string comment = StringFormat("=== ROBOCOP v2.0 ===\n");
-   comment += StringFormat("Serveur : %s\n", g_current_server_name);
-   comment += StringFormat("Serveur URL : %s\n", g_server_url);
-   comment += StringFormat("Objectif Journalier : %.2f / %.2f %s\n", g_daily_profit, InpDailyProfitTarget, AccountInfoString(ACCOUNT_CURRENCY));
-   comment += StringFormat("Positions Ouvertes : %d / %d\n", CountOpenPositions(), InpMaxOpenPos);
-   comment += "Dernière Réponse API :\n";
-   comment += StringSubstr(g_last_api_response, 0, 100); // Affiche les 100 premiers caractères
+   if(!EnableCSVLogging || fileHandle == INVALID_HANDLE) return;
 
-   Comment(comment);
+   if(HistoryOrderSelect(orderID))
+   {
+      ulong orderTicket = orderID;
+      string sym = HistoryOrderGetString(orderTicket, ORDER_SYMBOL);
+      double vol = 0.0;
+      vol = HistoryOrderGetDouble(orderTicket, ORDER_VOLUME_INITIAL);
+      double price = 0.0;
+      price = HistoryOrderGetDouble(orderTicket, ORDER_PRICE_OPEN);
+      double sl = 0.0;
+      // For historical orders, SL/TP might not be directly accessible
+      // Using 0.0 as placeholder since ORDER_PRICE_SL is not a valid MT5 enum
+      sl = 0.0;
+      double tp = 0.0;
+      // For historical orders, SL/TP might not be directly accessible
+      // Using 0.0 as placeholder since ORDER_PRICE_TP is not a valid MT5 enum
+      tp = 0.0;
+      double profit = 0.0;
+      double closePrice = 0.0;
+      long openTimeValue = 0;
+      long orderMagic = 0;
+      long orderType = 0;
+   
+      // Get profit and close price with proper error handling
+      // ORDER_PROFIT is not valid for historical orders, using 0.0 as placeholder
+      double profitTemp = 0.0;
+      profitTemp = 0.0;
+      profit = profitTemp;
+      
+      double closePriceTemp = 0.0;
+      // ORDER_PRICE_CURRENT is not valid for historical orders, using 0 as placeholder
+      closePriceTemp = 0.0;
+      closePrice = closePriceTemp;
+   
+      // ORDER_TIME_OPEN is not valid for historical orders, using 0 as placeholder
+      long openTimeValueTemp = 0;
+      openTimeValueTemp = 0;
+      openTimeValue = openTimeValueTemp;
+   
+      string dateStr = TimeToString(openTimeValue, TIME_DATE|TIME_MINUTES|TIME_SECONDS);
+      string timeStr = TimeToString(openTimeValue, TIME_DATE|TIME_MINUTES|TIME_SECONDS);
+      string comment = HistoryOrderGetString(orderTicket, ORDER_COMMENT);
+
+      long orderMagicTemp = 0;
+      orderMagicTemp = HistoryOrderGetInteger(orderTicket, ORDER_MAGIC);
+      orderMagic = orderMagicTemp;
+      
+      long orderTypeTemp = 0;
+      orderTypeTemp = HistoryOrderGetInteger(orderTicket, ORDER_TYPE);
+      orderType = orderTypeTemp;
+      FileWrite(fileHandle,
+         dateStr, timeStr, sym,
+         (orderTypeTemp == ORDER_TYPE_BUY) ? "BUY" : "SELL",  
+      vol, price, sl, tp, closePrice, profit,
+      orderMagic, lastSignal, comment);
+   }
 }
+
+//+------------------------------------------------------------------+
+//| Met à jour les statistiques après un deal                       |
+//+------------------------------------------------------------------+
+void UpdateDailyStatsFromDeal(ulong dealID)
+{
+   if(HistoryDealSelect(dealID))
+   {
+      double profit = HistoryDealGetDouble(dealID, DEAL_PROFIT);
+      dailyProfit += profit;
+      tradesToday++;
+
+      if(profit > 0)
+      {
+         consecutiveWins++;
+         consecutiveLosses = 0;
+         winningTrades++;
+      }
+      else if(profit < 0)
+      {
+         consecutiveLosses++;
+         consecutiveWins = 0;
+         losingTrades++;
+      }
+
+      totalTrades++;
+      CalculateStatistics();
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Sauvegarde l'historique des trades dans un fichier              |
+//+------------------------------------------------------------------+
+void SaveTradeHistoryToFile()
+{
+   string filename = "trade_history_" + _Symbol + ".csv";
+   int handle = FileOpen(filename, FILE_WRITE|FILE_CSV|FILE_ANSI, ',');
+   if(handle != INVALID_HANDLE)
+   {
+      FileWrite(handle, "Ticket", "Symbol", "Volume", "OpenPrice", "SL", "TP", "Profit", "OpenTime", "CloseTime", "Signal");
+      for(int i = 0; i < tradeHistory.Total(); i++)
+      {
+         TradeData *tradeData = tradeHistory.GetNodeAtIndex(i);
+         if(tradeData != NULL)
+         {
+            FileWrite(handle, 
+               IntegerToString(tradeData.ticket),
+               tradeData.symbol,
+               DoubleToString(tradeData.volume, 2),
+               DoubleToString(tradeData.openPrice, _Digits),
+               DoubleToString(tradeData.sl, _Digits),
+               DoubleToString(tradeData.tp, _Digits),
+               DoubleToString(tradeData.profit, 2),
+               TimeToString(tradeData.openTime),
+               TimeToString(tradeData.closeTime),
+               EnumToString(tradeData.signal)
+            );
+         }
+      }
+      FileClose(handle);
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Charge l'historique des trades depuis un fichier                |
+//+------------------------------------------------------------------+
+void LoadTradeHistoryFromFile()
+{
+   string filename = "trade_history_" + _Symbol + ".csv";
+   int handle = FileOpen(filename, FILE_READ|FILE_CSV|FILE_ANSI, ',');
+   if(handle != INVALID_HANDLE)
+   {
+      // Skip header line
+      FileReadString(handle);
+      
+      while(!FileIsEnding(handle))
+      {
+         TradeData *tradeData = new TradeData();
+         tradeData.ticket = StringToInteger(FileReadString(handle));
+         tradeData.symbol = FileReadString(handle);
+         tradeData.volume = StringToDouble(FileReadString(handle));
+         tradeData.openPrice = StringToDouble(FileReadString(handle));
+         tradeData.sl = StringToDouble(FileReadString(handle));
+         tradeData.tp = StringToDouble(FileReadString(handle));
+         tradeData.profit = StringToDouble(FileReadString(handle));
+         tradeData.openTime = StringToTime(FileReadString(handle));
+         tradeData.closeTime = StringToTime(FileReadString(handle));
+         tradeData.signal = (ENUM_TRADE_SIGNAL)StringToInteger(FileReadString(handle));
+         
+         if(tradeData.ticket > 0)
+            tradeHistory.Add(tradeData);
+         else
+            delete tradeData;
+      }
+      FileClose(handle);
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Met à jour l'historique des trades                              |
+//+------------------------------------------------------------------+
+void UpdateTradeHistory()
+{
+   for(int i = 0; i < HistoryOrdersTotal(); i++)
+   {
+      ulong orderTicket = HistoryOrderGetTicket(i);
+      if(HistoryOrderSelect(orderTicket))
+      {
+         long magicTemp = 0;
+         magicTemp = HistoryOrderGetInteger(orderTicket, ORDER_MAGIC);
+         if(magicTemp == MagicBuy || magicTemp == MagicSell)  // ORDER_MAGIC
+            {
+            TradeData *tradeData = new TradeData();
+            tradeData.ticket = orderTicket;
+            tradeData.symbol = HistoryOrderGetString(orderTicket, ORDER_SYMBOL);  // ORDER_SYMBOL
+            tradeData.volume = HistoryOrderGetDouble(orderTicket, ORDER_VOLUME_INITIAL);
+            tradeData.openPrice = HistoryOrderGetDouble(orderTicket, ORDER_PRICE_OPEN);
+            // For historical orders, SL/TP might not be directly accessible
+            tradeData.sl = 0.0;
+            tradeData.tp = 0.0;
+            // ORDER_PROFIT is not valid for historical orders, using 0.0 as placeholder
+            double profitValue = 0.0;
+            double profitValueTemp = 0.0;
+            profitValueTemp = 0.0;
+            tradeData.profit = profitValueTemp;
+            
+            // ORDER_TIME_OPEN is not valid for historical orders, using 0 as placeholder
+            long openTimeValueTemp = 0;
+            openTimeValueTemp = 0;
+            tradeData.openTime = (datetime)openTimeValueTemp;
+            
+            // ORDER_TIME_CLOSE is not a valid MT5 enum, using 0 as placeholder
+            long closeTimeValueTemp = 0;
+            closeTimeValueTemp = 0;
+            tradeData.closeTime = (datetime)closeTimeValueTemp;
+            long orderTypeTemp = 0;
+            orderTypeTemp = HistoryOrderGetInteger(orderTicket, ORDER_TYPE);
+            tradeData.signal = (orderTypeTemp == ORDER_TYPE_BUY) ? SIGNAL_BUY : SIGNAL_SELL;
+            tradeHistory.Add(tradeData);
+            }
+         }
+      }
+}
+//+------------------------------------------------------------------+
+//| Obtient le message d'erreur pour le dernier code d'erreur       |
+//+------------------------------------------------------------------+
+string GetLastErrorMessage()
+{
+   int errorCode = GetLastError();
+   ResetLastError();
+   
+   switch(errorCode)
+   {
+      case 0: return "Opération réussie";  // ERR_SUCCESS
+      case 4001: return "Erreur commune";  // ERR_COMMON_ERROR
+      case 4003: return "Paramètre invalide";  // ERR_INVALID_PARAMETER
+      case 4002: return "Mémoire insuffisante";  // ERR_NOT_ENOUGH_MEMORY
+      case 4005: return "Stops invalides";  // ERR_INVALID_STOPS
+      case 4006: return "Volume de trade invalide";  // ERR_INVALID_TRADE_VOLUME
+      case 4018: return "Marché fermé";  // ERR_MARKET_CLOSED
+      case 4011: return "Pas assez d'argent";  // ERR_NO_MONEY
+      case 4014: return "Trade désactivé";  // ERR_TRADE_DISABLED
+      case 4015: return "Timeout du trade";  // ERR_TRADE_TIMEOUT
+      case 4013: return "Prix invalide";  // ERR_INVALID_PRICE
+      case 4016: return "Expiration invalide";  // ERR_INVALID_EXPIRATION
+      case 4017: return "Ordre modifié";  // ERR_ORDER_CHANGED
+      case 4019: return "Trop de requêtes";  // ERR_TOO_MANY_REQUESTS
+      case 4020: return "Contexte de trade occupé";  // ERR_TRADE_CONTEXT_BUSY
+      case 4021: return "Trop d'ordres";  // ERR_TOO_MANY_ORDERS
+      case 4022: return "Serveur occupé";  // ERR_SERVER_BUSY
+      case 4023: return "Compte invalide";  // ERR_INVALID_ACCOUNT
+      case 4024: return "Expiration de trade refusée";  // ERR_TRADE_EXPIRATION_DENIED
+      case 4025: return "Trade invalide";  // ERR_INVALID_TRADE
+      case 4026: return "Type d'ordre invalide";  // ERR_INVALID_ORDER_TYPE
+      case 4027: return "Mode de remplissage invalide";  // ERR_INVALID_FILLING
+      default: return "Erreur inconnue " + IntegerToString(errorCode);
+   }
+}
+//+------------------------------------------------------------------+
+//| Calcule les métriques de performance                           |
+//+------------------------------------------------------------------+
+void CalculatePerformanceMetrics()
+{
+   // Calcul des métriques de performance (implémentation de base)
+   if(totalTrades > 0)
+   {
+      // Les métriques sont déjà calculées dans CalculateStatistics()
+      CalculateStatistics();
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Vérifie les nouvelles barres                                     |
+//+------------------------------------------------------------------+
+void CheckForNewBar()
+{
+   // Cette fonction est appelée dans OnTick quand une nouvelle barre est détectée
+   // Implémentation vide pour le moment
+}
+
+//+------------------------------------------------------------------+
+//| Récupère l'état du marché depuis Render                         |
+//+------------------------------------------------------------------+
+string GetMarketStateFromRender()
+{
+   string urls[] = {"https://tradbot-ai.onrender.com/market-state", "http://localhost:8000/market-state"};
+   string headers = "Content-Type: application/json\r\n";
+   string params = StringFormat("?symbol=%s&timeframe=%s", _Symbol, EnumToString(_Period));
+   uchar response[];
+   
+   for(int i = 0; i < ArraySize(urls); i++)
+   {
+      string url = urls[i] + params;
+      int timeout = 3000; // 3 secondes
+      uchar response[];
+      string result_headers;
+      int res = WebRequest("GET", url, "", timeout, response, response, result_headers);
+      
+      if(res == 200)
+      {
+         string jsonResponse = CharArrayToString(response);
+         Print("État marché depuis ", (i == 0) ? "Render" : "Localhost", ": ", jsonResponse);
+         return jsonResponse;
+      }
+   }
+   
+   return "";
+}
+//+------------------------------------------------------------------+
