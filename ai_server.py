@@ -49,6 +49,23 @@ except ImportError as e:
     ML_TRAINER_AVAILABLE = False
     logger.warning(f"⚠️ Système d'entraînement continu non disponible: {e}")
 
+# Importer le système de recommandation ML
+try:
+    from ml_recommendation_system import MLRecommendationSystem
+    ML_RECOMMENDATION_AVAILABLE = True
+    logger.info("🎯 Système de recommandation ML chargé avec succès")
+except ImportError as e:
+    ML_RECOMMENDATION_AVAILABLE = False
+    logger.warning(f"⚠️ Système de recommandation ML non disponible: {e}")
+
+# Initialiser le système de recommandation ML
+if ML_TRAINER_AVAILABLE and ML_RECOMMENDATION_AVAILABLE:
+    ml_recommendation_system = MLRecommendationSystem(ml_trainer)
+    logger.info("🚀 Système de recommandation ML initialisé")
+else:
+    ml_recommendation_system = None
+    logger.warning("⚠️ Système de recommandation ML non initialisé")
+
 # Importer le système ML de décision
 try:
     from ml_trading_system import ml_enhancer
@@ -2838,36 +2855,31 @@ async def root():
         "service": "TradBOT AI Server",
         "version": "2.0.1",
         "mt5_available": MT5_AVAILABLE,
-        "mt5_initialized": mt5_initialized,
-        "mistral_available": MISTRAL_AVAILABLE,
-        "gemini_available": GEMINI_AVAILABLE,
-        "backend_available": backend_available,
-        "ai_indicators": AI_INDICATORS_AVAILABLE,
+        "ml_trainer_available": ML_TRAINER_AVAILABLE,
+        "ml_recommendation_available": ML_RECOMMENDATION_AVAILABLE,
         "endpoints": [
-            "/decision (POST)",
-            "/test (POST)",
-            "/validate (POST)",
-            "/analysis (GET)",
-            "/time_windows/{symbol} (GET)",
             "/health (GET)",
-            "/status (GET)",
-            "/logs (GET)",
-            "/predict/{symbol} (GET)",
-            "/prediction (POST)",
-            "/indicators/analyze (POST)",
-            "/indicators/sentiment/{symbol} (GET)",
-            "/indicators/volume_profile/{symbol} (GET)",
-            "/analyze/gemini (POST)",
-            "/mt5/history-upload (POST)",
+            "/dashboard (GET) - Tableau de bord complet pour le robot",
+            "/analyze (POST)",
+            "/mt5/symbols (GET)",
+            "/mt5/account (GET)",
+            "/mt5/positions (GET)",
+            "/mt5/close_position (POST)",
+            "/mt5/place_order (POST)",
             "/ml/metrics (GET)",
             "/ml/start (POST)",
             "/ml/stop (POST)",
-            "/ml/retrain (POST)"
+            "/ml/retrain (POST)",
+            "/ml/recommendations (GET)",
+            "/ml/recommendations/{symbol} (GET)",
+            "/ml/opportunities (GET)",
+            "/validate (POST)",
+            "/test (POST)"
         ]
     }
 
 @app.get("/health")
-async def health():
+async def health_check():
     """Endpoint de santé pour Render et monitoring"""
     return {
         "status": "healthy",
@@ -2875,9 +2887,8 @@ async def health():
         "service": "TradBOT AI Server",
         "version": "2.0.1",
         "mt5_available": MT5_AVAILABLE,
-        "mt5_initialized": mt5_initialized,
         "ml_trainer_available": ML_TRAINER_AVAILABLE,
-        "ml_trainer_status": ml_trainer.get_current_metrics() if ML_TRAINER_AVAILABLE else None
+        "ml_recommendation_available": ML_RECOMMENDATION_AVAILABLE
     }
 
 @app.get("/ml/metrics")
@@ -2933,6 +2944,306 @@ async def force_retrain():
         "retrained_models": retrained_count,
         "message": f"{retrained_count} modèles réentraînés avec succès"
     }
+
+@app.get("/ml/recommendations")
+async def get_ml_recommendations(symbol: Optional[str] = None, limit: int = 10):
+    """
+    Endpoint pour obtenir les recommandations de trading intelligentes basées sur ML
+
+    Args:
+        symbol: Symbole spécifique (optionnel, tous les symboles si None)
+        limit: Nombre maximum de recommandations à retourner
+
+    Returns:
+        Recommandations complètes avec actions, opportunités, risques, etc.
+    """
+    if not ML_TRAINER_AVAILABLE or not ML_RECOMMENDATION_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Système de recommandation ML non disponible")
+
+    try:
+        # Analyser les métriques ML et générer les recommandations
+        recommendations_data = ml_recommendation_system.analyze_ml_metrics()
+
+        # Filtrer par symbole si demandé
+        if symbol:
+            filtered_recommendations = [
+                rec for rec in recommendations_data["recommendations"]
+                if rec["symbol"] == symbol
+            ]
+            recommendations_data["recommendations"] = filtered_recommendations[:limit]
+        else:
+            recommendations_data["recommendations"] = recommendations_data["recommendations"][:limit]
+
+        return {
+            "status": "success",
+            "data": recommendations_data,
+            "message": f"Recommandations ML générées pour {len(recommendations_data['recommendations'])} symboles"
+        }
+
+    except Exception as e:
+        logger.error(f"❌ Erreur génération recommandations ML: {e}")
+        raise HTTPException(status_code=500, detail=f"Erreur génération recommandations: {str(e)}")
+
+@app.get("/ml/recommendations/{symbol}")
+async def get_symbol_recommendation(symbol: str):
+    """
+    Endpoint pour obtenir la recommandation spécifique pour un symbole
+
+    Args:
+        symbol: Le symbole à analyser
+
+    Returns:
+        Recommandation détaillée pour ce symbole
+    """
+    if not ML_TRAINER_AVAILABLE or not ML_RECOMMENDATION_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Système de recommandation ML non disponible")
+
+    try:
+        # Obtenir la recommandation pour ce symbole spécifique
+        recommendation = ml_recommendation_system.get_recommendation_for_symbol(symbol)
+
+        if not recommendation:
+            return {
+                "status": "not_found",
+                "symbol": symbol,
+                "message": f"Aucune recommandation disponible pour {symbol}",
+                "data": None
+            }
+
+        # Convertir en dict pour la réponse JSON
+        rec_dict = {
+            "symbol": recommendation.symbol,
+            "action": recommendation.action.value,
+            "confidence": recommendation.confidence,
+            "opportunity_score": recommendation.opportunity_score,
+            "opportunity_level": recommendation.opportunity_level.value,
+            "reason": recommendation.reason,
+            "should_trade": recommendation.should_trade,
+            "should_limit_order": recommendation.should_limit_order,
+            "limit_order_price": recommendation.limit_order_price,
+            "should_close": recommendation.should_close,
+            "trailing_stop_distance": recommendation.trailing_stop_distance,
+            "timeframe_priority": recommendation.timeframe_priority,
+            "risk_level": recommendation.risk_level,
+            "timestamp": recommendation.timestamp.isoformat()
+        }
+
+        return {
+            "status": "success",
+            "symbol": symbol,
+            "data": rec_dict,
+            "message": f"Recommandation ML générée pour {symbol}"
+        }
+
+    except Exception as e:
+        logger.error(f"❌ Erreur recommandation pour {symbol}: {e}")
+        raise HTTPException(status_code=500, detail=f"Erreur recommandation {symbol}: {str(e)}")
+
+@app.get("/dashboard")
+async def get_robot_dashboard():
+    """
+    Endpoint complet pour le tableau de bord du robot MT5
+    Retourne toutes les informations en temps réel:
+    - Métriques ML en temps réel
+    - Prédictions de mouvement de prix
+    - Recommandations intelligentes
+    - État du système
+    """
+    try:
+        dashboard_data = {
+            "timestamp": datetime.now().isoformat(),
+            "system_status": {
+                "server": "running",
+                "mt5_available": MT5_AVAILABLE,
+                "ml_trainer_available": ML_TRAINER_AVAILABLE,
+                "ml_recommendation_available": ML_RECOMMENDATION_AVAILABLE
+            },
+            "ml_metrics": None,
+            "ml_recommendations": None,
+            "price_predictions": [],
+            "top_opportunities": []
+        }
+        
+        # 1. Métriques ML en temps réel
+        if ML_TRAINER_AVAILABLE:
+            try:
+                dashboard_data["ml_metrics"] = ml_trainer.get_current_metrics()
+            except Exception as e:
+                logger.warning(f"⚠️ Erreur récupération métriques ML: {e}")
+                dashboard_data["ml_metrics"] = {"error": str(e)}
+        
+        # 2. Recommandations ML intelligentes
+        if ML_RECOMMENDATION_AVAILABLE and ML_TRAINER_AVAILABLE:
+            try:
+                recommendations_data = ml_recommendation_system.analyze_ml_metrics()
+                dashboard_data["ml_recommendations"] = recommendations_data
+                
+                # Extraire les top opportunités
+                opportunities = ml_recommendation_system.get_top_opportunities(5)
+                dashboard_data["top_opportunities"] = [
+                    {
+                        "symbol": opp.symbol,
+                        "total_score": opp.total_score,
+                        "buy_opportunity": opp.buy_opportunity,
+                        "sell_opportunity": opp.sell_opportunity,
+                        "trend_strength": opp.trend_strength,
+                        "ml_confidence": opp.ml_confidence,
+                        "recommendation": "ACHETER" if opp.buy_opportunity > opp.sell_opportunity else "VENDRE"
+                    }
+                    for opp in opportunities
+                ]
+            except Exception as e:
+                logger.warning(f"⚠️ Erreur récupération recommandations ML: {e}")
+                dashboard_data["ml_recommendations"] = {"error": str(e)}
+        
+        # 3. Prédictions de mouvement de prix (pour les symboles actifs)
+        if ML_TRAINER_AVAILABLE:
+            try:
+                # Symboles à analyser pour les prédictions
+                symbols_to_predict = ["EURJPY", "GBPJPY", "USDJPY", "EURUSD", "GBPUSD"]
+                
+                for symbol in symbols_to_predict:
+                    try:
+                        # Récupérer les dernières métriques pour ce symbole
+                        metrics = ml_trainer.get_current_metrics()
+                        
+                        # Chercher les métriques spécifiques à ce symbole
+                        symbol_metrics = None
+                        if 'models' in metrics:
+                            for model_key, model_data in metrics['models'].items():
+                                if symbol in model_key:
+                                    symbol_metrics = model_data
+                                    break
+                        
+                        if symbol_metrics and 'metrics' in symbol_metrics:
+                            model_metrics = symbol_metrics['metrics']
+                            
+                            # Générer une prédiction basée sur les métriques ML
+                            prediction = {
+                                "symbol": symbol,
+                                "current_prediction": "HOLD",
+                                "confidence": 0.5,
+                                "price_direction": "NEUTRAL",
+                                "accuracy": model_metrics.get('accuracy', 0.5),
+                                "f1_score": model_metrics.get('f1_score', 0.5),
+                                "last_updated": symbol_metrics.get('last_updated', datetime.now().isoformat()),
+                                "feature_importance": model_metrics.get('feature_importance', {}),
+                                "trend_signal": "NEUTRAL"
+                            }
+                            
+                            # Analyser les features pour déterminer la direction
+                            feature_importance = model_metrics.get('feature_importance', {})
+                            if feature_importance:
+                                # Signaux basés sur l'importance des features
+                                rsi_importance = feature_importance.get('rsi', 0)
+                                ema_importance = feature_importance.get('ema_diff', 0)
+                                volume_importance = feature_importance.get('volume', 0)
+                                
+                                if rsi_importance > 0.1:
+                                    prediction["trend_signal"] = "RSI_DOMINANT"
+                                elif ema_importance > 0.1:
+                                    prediction["trend_signal"] = "TREND_DOMINANT"
+                                elif volume_importance > 0.1:
+                                    prediction["trend_signal"] = "VOLUME_DOMINANT"
+                                
+                                # Calculer la confiance basée sur la précision du modèle
+                                accuracy = model_metrics.get('accuracy', 0.5)
+                                prediction["confidence"] = min(0.95, accuracy * 1.1)
+                                
+                                # Déterminer la direction basée sur les métriques
+                                if accuracy > 0.7:
+                                    if 'buy' in str(model_metrics).lower():
+                                        prediction["current_prediction"] = "BUY"
+                                        prediction["price_direction"] = "HAUSSIER"
+                                    elif 'sell' in str(model_metrics).lower():
+                                        prediction["current_prediction"] = "SELL"
+                                        prediction["price_direction"] = "BAISSIER"
+                            
+                            dashboard_data["price_predictions"].append(prediction)
+                            
+                    except Exception as e:
+                        logger.warning(f"⚠️ Erreur prédiction pour {symbol}: {e}")
+                        continue
+                        
+            except Exception as e:
+                logger.warning(f"⚠️ Erreur génération prédictions: {e}")
+        
+        # 4. Statistiques globales
+        total_models = 0
+        avg_accuracy = 0
+        if dashboard_data["ml_metrics"] and 'models' in dashboard_data["ml_metrics"]:
+            models = dashboard_data["ml_metrics"]["models"]
+            total_models = len(models)
+            if models:
+                accuracies = []
+                for model_data in models.values():
+                    if 'metrics' in model_data and 'accuracy' in model_data['metrics']:
+                        accuracies.append(model_data['metrics']['accuracy'])
+                avg_accuracy = sum(accuracies) / len(accuracies) if accuracies else 0
+        
+        dashboard_data["global_stats"] = {
+            "total_models": total_models,
+            "average_accuracy": round(avg_accuracy, 3),
+            "system_health": "HEALTHY" if avg_accuracy > 0.6 else "WARNING",
+            "last_update": datetime.now().isoformat()
+        }
+        
+        return {
+            "status": "success",
+            "data": dashboard_data,
+            "message": "Tableau de bord robot mis à jour"
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ Erreur génération dashboard: {e}")
+        return {
+            "status": "error",
+            "message": f"Erreur dashboard: {str(e)}",
+            "timestamp": datetime.now().isoformat()
+        }
+
+@app.get("/ml/opportunities")
+async def get_top_opportunities(limit: int = 5):
+    """
+    Endpoint pour obtenir les meilleures opportunités de trading selon ML
+
+    Args:
+        limit: Nombre d'opportunités à retourner (défaut: 5)
+
+    Returns:
+        Liste des symboles les plus opportuns
+    """
+    if not ML_TRAINER_AVAILABLE or not ML_RECOMMENDATION_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Système de recommandation ML non disponible")
+
+    try:
+        # Obtenir les meilleures opportunités
+        opportunities = ml_recommendation_system.get_top_opportunities(limit)
+
+        opportunities_data = []
+        for opp in opportunities:
+            opportunities_data.append({
+                "symbol": opp.symbol,
+                "total_score": opp.total_score,
+                "buy_opportunity": opp.buy_opportunity,
+                "sell_opportunity": opp.sell_opportunity,
+                "hold_opportunity": opp.hold_opportunity,
+                "volatility_risk": opp.volatility_risk,
+                "trend_strength": opp.trend_strength,
+                "ml_confidence": opp.ml_confidence,
+                "last_updated": opp.last_updated.isoformat()
+            })
+
+        return {
+            "status": "success",
+            "data": opportunities_data,
+            "count": len(opportunities_data),
+            "message": f"Top {len(opportunities_data)} opportunités ML identifiées"
+        }
+
+    except Exception as e:
+        logger.error(f"❌ Erreur récupération opportunités: {e}")
+        raise HTTPException(status_code=500, detail=f"Erreur opportunités: {str(e)}")
 
 @app.post("/test")
 async def test_endpoint():
@@ -8957,82 +9268,6 @@ async def get_autoscan_signals(symbol: Optional[str] = None):
         }
 
 # ==================== FIN AUTOSCAN ENDPOINTS ====================
-
-# Point d'entrée du programme
-if __name__ == "__main__":
-    logger.info("=" * 60)
-    logger.info("TRADBOT AI SERVER")
-    logger.info("=" * 60)
-    logger.info(f"Serveur démarré sur http://localhost:{API_PORT}")
-    logger.info(f"MT5: {'Disponible' if mt5_initialized else 'Non disponible (mode API uniquement)'}")
-    logger.info(f"Mistral AI: {'Configuré' if MISTRAL_AVAILABLE else 'Non configuré'}")
-    logger.info(f"Google Gemini AI: {'Configuré' if GEMINI_AVAILABLE else 'Non configuré'}")
-    logger.info(f"Symbole par défaut: {DEFAULT_SYMBOL}")
-    logger.info(f"Timeframes disponibles: {len(['M1', 'M5', 'M15', 'H1', 'H4', 'D1'])}")
-    logger.info("=" * 60)
-    logger.info("Serveur prêt à recevoir des requêtes")
-    logger.info("=" * 60)
-    
-    print("\n" + "=" * 60)
-    print("Démarrage du serveur AI TradBOT...")
-    print("=" * 60)
-    print(f"API disponible sur: http://127.0.0.1:{API_PORT}")
-    print("\nEndpoints disponibles:")
-    print(f"  - GET  /                           : Vérification de l'état du serveur")
-    print(f"  - GET  /health                     : Vérification de santé")
-    print(f"  - GET  /status                     : Statut détaillé")
-    print(f"  - GET  /logs                       : Derniers logs")
-    print(f"  - POST /decision                  : Décision de trading (appelé par MQ5)")
-    print(f"  - GET  /analysis?symbol=SYMBOL     : Analyse structure H1/H4/M15")
-    print(f"  - GET  /time_windows/{{symbol}}     : Fenêtres horaires optimales")
-    print(f"  - GET  /predict/{{symbol}}          : Prédiction (legacy)")
-    print(f"  - POST /prediction                  : Prédiction de prix futurs (pour MQ5)")
-    print(f"  - GET  /analyze/{{symbol}}           : Analyse complète (legacy)")
-    print(f"  - POST /indicators/analyze           : Analyse avec AdvancedIndicators")
-    print(f"  - POST /trend                     : Analyse de tendance MT5 (POST)")
-    print(f"  - GET  /trend?symbol=SYMBOL       : Analyse de tendance MT5 (GET)")
-    print(f"  - GET  /market-state?symbol=SYMBOL  : État du marché (tendance, RSI, prix)")
-    print(f"  - GET  /trend/health              : Santé module tendance")
-    print(f"  - GET  /indicators/sentiment/{{symbol}} : Sentiment du marché")
-    print(f"  - GET  /indicators/volume_profile/{{symbol}} : Profil de volume")
-    print(f"  - POST /analyze/gemini               : Analyse avec Google Gemini AI")
-    print(f"  - POST /trading/analyze             : Capture et analyse de graphique avec Gemma")
-    print(f"  - POST /trading/generate-signal     : Génération de signaux de trading")
-    print("  - GET  /indicators/ichimoku/{symbol}     : Analyse Ichimoku Kinko Hyo")
-    print("  - GET  /indicators/fibonacci/{symbol}    : Niveaux de retracement/extension Fibonacci")
-    print("  - GET  /indicators/order-blocks/{symbol} : Détection des blocs d'ordre")
-    print("  - GET  /indicators/liquidity-zones/{symbol} : Zones de liquidité")
-    print("  - GET  /indicators/market-profile/{symbol}  : Profil de marché (Market Profile)")
-    print(f"  - GET  /autoscan/signals?symbol=SYMBOL    : Signaux AutoScan (compatible MT5)")
-    print(f"  - GET  /deriv/patterns/{{symbol}}            : Détection patterns Deriv (XABCD, Cypher, H&S, etc.)")
-    print(f"  - GET  /deriv/tools/vwap/{{symbol}}          : Anchored VWAP")
-    print(f"  - GET  /deriv/tools/volume-profile/{{symbol}}: Volume Profile")
-    print("\nDocumentation interactive:")
-    print(f"  - http://127.0.0.1:{API_PORT}/docs")
-    print("=" * 60)
-    
-    # Démarrer le serveur
-    # Note: reload nécessite une chaîne d'import, on utilise un mode compatible
-    import sys
-    use_reload = "--reload" in sys.argv or os.getenv("AUTO_RELOAD", "false").lower() == "true"
-    
-    if use_reload:
-        # Mode reload (développement) - utiliser la chaîne d'import
-        uvicorn.run(
-            "ai_server:app",
-            host=HOST,
-            port=API_PORT,
-            log_level="info",
-            reload=True
-        )
-    else:
-        # Mode production (sans reload) - passer l'app directement
-        uvicorn.run(
-            app,
-            host=HOST,
-            port=API_PORT,
-            log_level="info"
-        )
 
 # Endpoint pour entraîner les modèles ML
 @app.post("/train_ml_models")
