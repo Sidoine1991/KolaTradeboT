@@ -29,8 +29,27 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-# ===== SYSTÈME D'APPRENTISSAGE AUTOMATIQUE =====
-# Importer le système ML
+import uvicorn
+import pandas as pd
+import numpy as np
+import requests
+import joblib
+from collections import deque
+
+# Configurer le logger avant les imports d'améliorations
+logger = logging.getLogger("tradbot_ai")
+
+# ===== SYSTÈME D'APPRENTISSAGE AUTOMATIQUE INTÉGRÉ =====
+# Importer le système ML intégré
+try:
+    from integrated_ml_trainer import ml_trainer
+    ML_TRAINER_AVAILABLE = True
+    logger.info("🤖 Système d'entraînement continu intégré chargé")
+except ImportError as e:
+    ML_TRAINER_AVAILABLE = False
+    logger.warning(f"⚠️ Système d'entraînement continu non disponible: {e}")
+
+# Importer le système ML de décision
 try:
     from ml_trading_system import ml_enhancer
     ML_AVAILABLE = True
@@ -64,15 +83,6 @@ def enhance_decision_with_ml(symbol: str, decision: str, confidence: float, mark
             "ml_reason": "error",
             "ml_applied": False
         }
-import uvicorn
-import pandas as pd
-import numpy as np
-import requests
-import joblib
-from collections import deque
-
-# Configurer le logger avant les imports d'améliorations
-logger = logging.getLogger("tradbot_ai")
 
 # ========== MODE SIMPLIFIÉ POUR ROBOCOP v2 ==========
 # Activer le mode simplifié pour RoboCop v2 (plus stable, moins de dépendances)
@@ -2715,7 +2725,10 @@ async def decision_simplified(request: DecisionRequest):
     if action == "hold":
         confidence = max(0.3, confidence - 0.2)
     
-    # 8. Calcul SL/TP
+    # 8. CONVERTIR LA CONFIANCE EN POURCENTAGE POUR MT5
+    confidence_percentage = int(confidence * 100)
+    
+    # 9. Calcul SL/TP
     stop_loss = None
     take_profit = None
     
@@ -2728,10 +2741,10 @@ async def decision_simplified(request: DecisionRequest):
         stop_loss = request.ask + atr * 2
         take_profit = request.ask - atr * 3
     
-    # 9. Créer la réponse enrichie
+    # 10. Créer la réponse enrichie
     response = DecisionResponse(
         action=action,
-        confidence=confidence,
+        confidence=confidence_percentage,  # Utiliser le pourcentage pour MT5
         reason=reason,
         stop_loss=stop_loss,
         take_profit=take_profit,
@@ -2743,11 +2756,13 @@ async def decision_simplified(request: DecisionRequest):
             "ml_enhanced": ml_result["ml_applied"],
             "ml_reason": ml_result["ml_reason"],
             "base_scores": {"buy": buy_score, "sell": sell_score},
-            "market_data": market_data
+            "market_data": market_data,
+            "confidence_decimal": confidence,  # Garder la valeur décimale pour référence
+            "confidence_percentage": confidence_percentage
         }
     )
     
-    # 10. Sauvegarder la décision dans Supabase
+    # 11. Sauvegarder la décision dans Supabase
     try:
         if RUNNING_ON_SUPABASE:
             await save_decision_to_supabase(request, response, ml_result)
@@ -2774,7 +2789,7 @@ async def save_decision_to_supabase(request: DecisionRequest, response: Decision
         "symbol": request.symbol,
         "timeframe": "M1",
         "prediction": response.action,
-        "confidence": response.confidence,
+        "confidence": response.confidence / 100,  # Utiliser la valeur décimale pour Supabase
         "reason": response.reason,
         "model_used": "technical_ml_enhanced",
         "metadata": {
@@ -2812,7 +2827,11 @@ async def save_decision_to_supabase(request: DecisionRequest, response: Decision
                 logger.error(f"❌ Erreur sauvegarde décision: {resp.status_code} - {resp.text}")
                 
         except Exception as e:
-            logger.error(f"❌ Erreur connexion Supabase: {e}")async def root():
+            logger.error(f"❌ Erreur connexion Supabase: {e}")
+
+
+
+async def root():
     """Endpoint racine pour vérifier que le serveur fonctionne"""
     return {
         "status": "running",
@@ -2839,7 +2858,11 @@ async def save_decision_to_supabase(request: DecisionRequest, response: Decision
             "/indicators/sentiment/{symbol} (GET)",
             "/indicators/volume_profile/{symbol} (GET)",
             "/analyze/gemini (POST)",
-            "/mt5/history-upload (POST)"
+            "/mt5/history-upload (POST)",
+            "/ml/metrics (GET)",
+            "/ml/start (POST)",
+            "/ml/stop (POST)",
+            "/ml/retrain (POST)"
         ]
     }
 
@@ -2852,7 +2875,63 @@ async def health():
         "service": "TradBOT AI Server",
         "version": "2.0.1",
         "mt5_available": MT5_AVAILABLE,
-        "mt5_initialized": mt5_initialized
+        "mt5_initialized": mt5_initialized,
+        "ml_trainer_available": ML_TRAINER_AVAILABLE,
+        "ml_trainer_status": ml_trainer.get_current_metrics() if ML_TRAINER_AVAILABLE else None
+    }
+
+@app.get("/ml/metrics")
+async def get_ml_metrics():
+    """Endpoint pour récupérer les métriques ML en temps réel"""
+    if not ML_TRAINER_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Système ML non disponible")
+    
+    return ml_trainer.get_current_metrics()
+
+@app.post("/ml/start")
+async def start_ml_trainer():
+    """Démarre le système d'entraînement continu"""
+    if not ML_TRAINER_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Système ML non disponible")
+    
+    await ml_trainer.start()
+    return {"status": "started", "message": "Système d'entraînement continu démarré"}
+
+@app.post("/ml/stop")
+async def stop_ml_trainer():
+    """Arrête le système d'entraînement continu"""
+    if not ML_TRAINER_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Système ML non disponible")
+    
+    await ml_trainer.stop()
+    return {"status": "stopped", "message": "Système d'entraînement continu arrêté"}
+
+@app.post("/ml/retrain")
+async def force_retrain():
+    """Force un réentraînement immédiat de tous les modèles"""
+    if not ML_TRAINER_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Système ML non disponible")
+    
+    # Forcer le réentraînement
+    models = ml_trainer.load_existing_models()
+    retrained_count = 0
+    
+    for model_key, model_info in models.items():
+        symbol = model_info['symbol']
+        timeframe = model_info['timeframe']
+        
+        # Récupérer les données et réentraîner
+        df = await ml_trainer.fetch_training_data_simple(symbol, timeframe)
+        if df is not None and len(df) >= ml_trainer.min_samples_for_retraining:
+            new_metrics = ml_trainer.train_model_simple(df, symbol, timeframe)
+            if new_metrics:
+                await ml_trainer.save_metrics_to_supabase(new_metrics)
+                retrained_count += 1
+    
+    return {
+        "status": "completed",
+        "retrained_models": retrained_count,
+        "message": f"{retrained_count} modèles réentraînés avec succès"
     }
 
 @app.post("/test")
@@ -9006,3 +9085,55 @@ async def get_ml_stats():
     except Exception as e:
         logger.error(f"❌ Erreur stats ML: {e}")
         return {"status": "error", "message": str(e)}
+
+# ========== DÉMARRAGE AUTOMATIQUE DU SYSTÈME ML ==========
+@app.on_event("startup")
+async def startup_event():
+    """Événements au démarrage du serveur"""
+    logger.info("🚀 Démarrage du serveur IA TradBOT...")
+    
+    # Démarrer le système d'entraînement continu ML
+    if ML_TRAINER_AVAILABLE:
+        logger.info("🤖 Démarrage du système d'entraînement continu ML...")
+        try:
+            await ml_trainer.start()
+            logger.info("✅ Système ML démarré avec succès")
+        except Exception as e:
+            logger.error(f"❌ Erreur démarrage système ML: {e}")
+    
+    logger.info("🎯 Serveur IA TradBOT prêt!")
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Événements à l'arrêt du serveur"""
+    logger.info("🛑 Arrêt du serveur IA TradBOT...")
+    
+    # Arrêter le système ML
+    if ML_TRAINER_AVAILABLE:
+        try:
+            await ml_trainer.stop()
+            logger.info("🛑 Système ML arrêté")
+        except Exception as e:
+            logger.error(f"❌ Erreur arrêt système ML: {e}")
+
+if __name__ == "__main__":
+    import uvicorn
+    
+    # Démarrer le serveur avec gestion des événements de vie
+    logger.info("🌟 Lancement du serveur IA TradBOT avec système ML intégré")
+    logger.info("📡 Endpoints disponibles:")
+    logger.info("   • /health - Santé du serveur")
+    logger.info("   • /decision - Décisions de trading")  
+    logger.info("   • /ml/metrics - Métriques ML en temps réel")
+    logger.info("   • /ml/start - Démarrer entraînement ML")
+    logger.info("   • /ml/stop - Arrêter entraînement ML")
+    logger.info("   • /ml/retrain - Forcer réentraînement")
+    logger.info("   • /ml_stats - Statistiques ML détaillées")
+    
+    uvicorn.run(
+        "ai_server:app",
+        host="127.0.0.1",
+        port=8000,
+        reload=False,
+        log_level="info"
+    )
