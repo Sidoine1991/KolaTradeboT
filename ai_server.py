@@ -2567,7 +2567,7 @@ class DashboardStatsResponse(BaseModel):
 async def decision_simplified(request: DecisionRequest):
     """
     Fonction de décision simplifiée pour RoboCop v2
-    Analyse technique basée sur RSI + EMA multi-timeframe
+    Analyse technique basée sur RSI + EMA multi-timeframe + Price Action
     """
     global decision_count
     decision_count += 1
@@ -2575,56 +2575,124 @@ async def decision_simplified(request: DecisionRequest):
     logger.info(f"🎯 MODE SIMPLIFIÉ - Requête décision pour {request.symbol}")
     logger.info(f"   Bid: {request.bid}, Ask: {request.ask}, RSI: {request.rsi}")
     
-    # Analyse technique simplifiée
+    # Analyse technique améliorée avec price action
     action = "hold"
     confidence = 0.5
-    reason = "Analyse technique de base"
+    reason = "Analyse technique multi-timeframe"
     
-    # Analyse RSI
+    # Scores pondérés par timeframe
+    buy_score = 0.0
+    sell_score = 0.0
+    
+    # 1. Analyse RSI (poids: 15%)
     if request.rsi:
         if request.rsi < 30:
-            action = "buy"
-            confidence += 0.2
-            reason = f"RSI surventé ({request.rsi:.1f})"
+            buy_score += 0.15
+            reason += f"RSI surventé ({request.rsi:.1f}). "
         elif request.rsi > 70:
-            action = "sell"
-            confidence += 0.2
-            reason = f"RSI surachat ({request.rsi:.1f})"
+            sell_score += 0.15
+            reason += f"RSI surachat ({request.rsi:.1f}). "
+        elif 30 <= request.rsi <= 40:  # Zone de survente modérée
+            buy_score += 0.08
+            reason += f"RSI zone survente ({request.rsi:.1f}). "
+        elif 60 <= request.rsi <= 70:  # Zone de surachat modérée
+            sell_score += 0.08
+            reason += f"RSI zone surachat ({request.rsi:.1f}). "
     
-    # Analyse EMA M1
+    # 2. Analyse EMA M1 (poids: 20%)
     if request.ema_fast_m1 and request.ema_slow_m1:
-        if request.ema_fast_m1 > request.ema_slow_m1:
-            if action != "sell":
-                action = "buy"
-                confidence += 0.15
-                reason += " | EMA M1 haussière"
+        ema_diff_m1 = request.ema_fast_m1 - request.ema_slow_m1
+        ema_strength_m1 = abs(ema_diff_m1) / request.ema_slow_m1 if request.ema_slow_m1 > 0 else 0
+        
+        if ema_diff_m1 > 0:
+            buy_score += 0.20 * min(1.0, ema_strength_m1 * 100)  # Pondération par force
+            reason += f"EMA M1 haussière (+{ema_strength_m1*100:.1f}%). "
         else:
-            if action != "buy":
-                action = "sell"
-                confidence += 0.15
-                reason += " | EMA M1 baissière"
+            sell_score += 0.20 * min(1.0, ema_strength_m1 * 100)
+            reason += f"EMA M1 baissière ({ema_strength_m1*100:.1f}%). "
     
-    # Analyse EMA H1 (prioritaire)
+    # 3. Analyse EMA H1 (poids: 35% - le plus important)
     if request.ema_fast_h1 and request.ema_slow_h1:
-        if request.ema_fast_h1 > request.ema_slow_h1:
-            if action != "sell":
-                action = "buy"
-                confidence += 0.25
-                reason += " | EMA H1 haussière"
+        ema_diff_h1 = request.ema_fast_h1 - request.ema_slow_h1
+        ema_strength_h1 = abs(ema_diff_h1) / request.ema_slow_h1 if request.ema_slow_h1 > 0 else 0
+        
+        if ema_diff_h1 > 0:
+            buy_score += 0.35 * min(1.0, ema_strength_h1 * 50)  # H1 plus pondéré
+            reason += f"EMA H1 haussière (+{ema_strength_h1*50:.1f}%). "
         else:
-            if action != "buy":
-                action = "sell"
-                confidence += 0.25
-                reason += " | EMA H1 baissière"
+            sell_score += 0.35 * min(1.0, ema_strength_h1 * 50)
+            reason += f"EMA H1 baissière ({ema_strength_h1*50:.1f}%). "
     
-    # Ajuster la confiance selon l'action
+    # 4. Analyse EMA M5 (poids: 25%)
+    if request.ema_fast_m5 and request.ema_slow_m5:
+        ema_diff_m5 = request.ema_fast_m5 - request.ema_slow_m5
+        ema_strength_m5 = abs(ema_diff_m5) / request.ema_slow_m5 if request.ema_slow_m5 > 0 else 0
+        
+        if ema_diff_m5 > 0:
+            buy_score += 0.25 * min(1.0, ema_strength_m5 * 75)
+            reason += f"EMA M5 haussière (+{ema_strength_m5*75:.1f}%). "
+        else:
+            sell_score += 0.25 * min(1.0, ema_strength_m5 * 75)
+            reason += f"EMA M5 baissière ({ema_strength_m5*75:.1f}%). "
+    
+    # 5. Analyse de la position du prix par rapport aux EMA (price action)
+    if request.bid and request.ema_fast_h1:
+        price_vs_ema_h1 = (request.bid - request.ema_fast_h1) / request.ema_fast_h1 * 100
+        
+        if -0.5 <= price_vs_ema_h1 <= 0.5:  # Prix proche de EMA H1
+            if buy_score > sell_score:
+                buy_score += 0.05  # Favoriser la continuité
+                reason += "Prix proche support EMA H1. "
+            else:
+                sell_score += 0.05
+                reason += "Prix proche résistance EMA H1. "
+        elif price_vs_ema_h1 > 1.0:  # Prix bien au-dessus EMA H1
+            buy_score += 0.08
+            reason += "Prix au-dessus EMA H1. "
+        elif price_vs_ema_h1 < -1.0:  # Prix bien en dessous EMA H1
+            sell_score += 0.08
+            reason += "Prix en dessous EMA H1. "
+    
+    # 6. Analyse de cohérence multi-timeframe
+    m1_bullish = request.ema_fast_m1 > request.ema_slow_m1 if (request.ema_fast_m1 and request.ema_slow_m1) else False
+    m5_bullish = request.ema_fast_m5 > request.ema_slow_m5 if (request.ema_fast_m5 and request.ema_slow_m5) else False
+    h1_bullish = request.ema_fast_h1 > request.ema_slow_h1 if (request.ema_fast_h1 and request.ema_slow_h1) else False
+    
+    bullish_count = sum([m1_bullish, m5_bullish, h1_bullish])
+    bearish_count = 3 - bullish_count
+    
+    # Bonus de cohérence
+    if bullish_count >= 2:
+        buy_score += 0.15 * (bullish_count / 3)
+        reason += f"Cohérence haussière ({bullish_count}/3). "
+    elif bearish_count >= 2:
+        sell_score += 0.15 * (bearish_count / 3)
+        reason += f"Cohérence baissière ({bearish_count}/3). "
+    
+    # 7. Décision finale basée sur les scores
+    if buy_score > sell_score:
+        action = "buy"
+        confidence = 0.5 + (buy_score - sell_score) / 2  # Confiance basée sur l'écart
+    elif sell_score > buy_score:
+        action = "sell"
+        confidence = 0.5 + (sell_score - buy_score) / 2
+    else:
+        action = "hold"
+        confidence = 0.5  # Neutre si scores égaux
+    
+    # 8. Ajustements finaux de la confiance
     if action == "hold":
-        confidence = max(0.3, confidence - 0.3)
+        confidence = max(0.3, confidence - 0.2)  # Réduire la confiance pour HOLD
+    
+    # Bonus de confiance si forte cohérence (3/3)
+    if (bullish_count == 3 and action == "buy") or (bearish_count == 3 and action == "sell"):
+        confidence = min(0.85, confidence + 0.15)
+        reason += "Forte cohérence TF. "
     
     # Limiter la confiance entre 0 et 1
     confidence = max(0.0, min(1.0, confidence))
     
-    # Calculer SL/TP simples basés sur l'ATR
+    # Calculer SL/TP basés sur l'ATR
     stop_loss = None
     take_profit = None
     if request.atr and request.atr > 0:
@@ -2638,14 +2706,16 @@ async def decision_simplified(request: DecisionRequest):
     response = DecisionResponse(
         action=action,
         confidence=confidence,
-        reason=reason[:100],  # Limiter la raison à 100 caractères
+        reason=reason[:150],  # Limiter la raison à 150 caractères
         stop_loss=stop_loss,
         take_profit=take_profit,
         timestamp=datetime.now().isoformat(),
-        model_used="Technical_Analysis_v2_Simplified"
+        model_used="Technical_Analysis_v3_Enhanced"
     )
     
-    logger.info(f"✅ DÉCISION SIMPLIFIÉE {request.symbol}: {action} (conf: {confidence:.2f}) - {reason}")
+    logger.info(f"✅ DÉCISION AMÉLIORÉE {request.symbol}: {action} (conf: {confidence:.2f})")
+    logger.info(f"   Scores - Buy: {buy_score:.3f}, Sell: {sell_score:.3f}")
+    logger.info(f"   Raison: {reason}")
     
     return response
 
