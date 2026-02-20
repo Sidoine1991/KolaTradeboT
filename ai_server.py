@@ -28,6 +28,42 @@ from starlette.requests import Request as StarletteRequest
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
+
+# ===== SYSTÈME D'APPRENTISSAGE AUTOMATIQUE =====
+# Importer le système ML
+try:
+    from ml_trading_system import ml_enhancer
+    ML_AVAILABLE = True
+    logger.info("🧠 Système ML chargé avec succès")
+except ImportError as e:
+    ML_AVAILABLE = False
+    logger.warning(f"⚠️ Système ML non disponible: {e}")
+
+# Fonction pour améliorer les décisions avec ML
+def enhance_decision_with_ml(symbol: str, decision: str, confidence: float, market_data: dict = None) -> dict:
+    """Améliorer une décision avec le système ML"""
+    if not ML_AVAILABLE:
+        return {
+            "original_decision": decision,
+            "original_confidence": confidence,
+            "enhanced_decision": decision,
+            "enhanced_confidence": confidence,
+            "ml_reason": "ml_unavailable",
+            "ml_applied": False
+        }
+    
+    try:
+        return ml_enhancer.enhance_decision(symbol, decision, confidence, market_data)
+    except Exception as e:
+        logger.error(f"❌ Erreur enhancement ML: {e}")
+        return {
+            "original_decision": decision,
+            "original_confidence": confidence,
+            "enhanced_decision": decision,
+            "enhanced_confidence": confidence,
+            "ml_reason": "error",
+            "ml_applied": False
+        }
 import uvicorn
 import pandas as pd
 import numpy as np
@@ -1133,8 +1169,8 @@ except Exception:
     Image = None
 
 # Configuration des répertoires via variables d'environnement
-# Vérification si on est sur Render
-RUNNING_ON_RENDER = bool(os.getenv("RENDER") or os.getenv("RENDER_SERVICE_ID"))
+# Vérification si on est sur Supabase
+RUNNING_ON_SUPABASE = bool(os.getenv("SUPABASE_URL") or os.getenv("SUPABASE_PROJECT_ID"))
 
 # Fonction pour créer un répertoire avec gestion des erreurs
 def safe_makedirs(path, mode=0o755):
@@ -1152,7 +1188,7 @@ def safe_makedirs(path, mode=0o755):
 
 # Configuration des chemins
 try:
-    if RUNNING_ON_RENDER:
+    if RUNNING_ON_SUPABASE:
         # Sur Render, on utilise le répertoire temporaire du système
         import tempfile
         base_temp_dir = tempfile.gettempdir()
@@ -1759,7 +1795,7 @@ CACHE_DURATION = 30  # secondes
 # Dossiers de prédictions / métriques MT5
 RUNNING_ON_RENDER = bool(os.getenv("RENDER") or os.getenv("RENDER_SERVICE_ID"))
 
-if RUNNING_ON_RENDER:
+if RUNNING_ON_SUPABASE:
     # Sur Render, on utilise le dossier temporaire par défaut
     # qui est garanti d'être accessible en écriture
     # On utilise /tmp/ comme racine pour les données et modèles
@@ -1825,7 +1861,7 @@ else:
 LOG_FILE = Path("ai_server.log")
 FEEDBACK_FILE = DATA_DIR / "trade_feedback.jsonl"
 
-if RUNNING_ON_RENDER:
+if RUNNING_ON_SUPABASE:
     # Mode cloud: tout est stocké dans le répertoire data/ du serveur
     MT5_PREDICTIONS_DIR = DATA_DIR / "Predictions"
     MT5_RESULTS_DIR = DATA_DIR / "Results"
@@ -2458,6 +2494,8 @@ class DecisionRequest(BaseModel):
     ema_slow_h1: Optional[float] = None
     ema_fast_m1: Optional[float] = None
     ema_slow_m1: Optional[float] = None
+    ema_fast_m5: Optional[float] = None
+    ema_slow_m5: Optional[float] = None
     atr: Optional[float] = 0.0
     dir_rule: int = 0  # 0 = neutre par défaut
     is_spike_mode: bool = False
@@ -2564,18 +2602,18 @@ class DashboardStatsResponse(BaseModel):
     coherent_analysis: Optional[CoherentAnalysisResponse] = None
 
 # ========== FONCTION SIMPLIFIÉE POUR ROBOCOP v2 ==========
+# Modifier la fonction decision_simplified pour utiliser le ML
 async def decision_simplified(request: DecisionRequest):
     """
-    Fonction de décision simplifiée pour RoboCop v2
-    Analyse technique basée sur RSI + EMA multi-timeframe + Price Action
+    Fonction de décision simplifiée avec amélioration ML
     """
     global decision_count
     decision_count += 1
     
-    logger.info(f"🎯 MODE SIMPLIFIÉ - Requête décision pour {request.symbol}")
+    logger.info(f"🎯 MODE SIMPLIFIÉ + ML - Requête décision pour {request.symbol}")
     logger.info(f"   Bid: {request.bid}, Ask: {request.ask}, RSI: {request.rsi}")
     
-    # Analyse technique améliorée avec price action
+    # Analyse technique de base
     action = "hold"
     confidence = 0.5
     reason = "Analyse technique multi-timeframe"
@@ -2592,10 +2630,10 @@ async def decision_simplified(request: DecisionRequest):
         elif request.rsi > 70:
             sell_score += 0.15
             reason += f"RSI surachat ({request.rsi:.1f}). "
-        elif 30 <= request.rsi <= 40:  # Zone de survente modérée
+        elif 30 <= request.rsi <= 40:
             buy_score += 0.08
             reason += f"RSI zone survente ({request.rsi:.1f}). "
-        elif 60 <= request.rsi <= 70:  # Zone de surachat modérée
+        elif 60 <= request.rsi <= 70:
             sell_score += 0.08
             reason += f"RSI zone surachat ({request.rsi:.1f}). "
     
@@ -2605,19 +2643,19 @@ async def decision_simplified(request: DecisionRequest):
         ema_strength_m1 = abs(ema_diff_m1) / request.ema_slow_m1 if request.ema_slow_m1 > 0 else 0
         
         if ema_diff_m1 > 0:
-            buy_score += 0.20 * min(1.0, ema_strength_m1 * 100)  # Pondération par force
+            buy_score += 0.20 * min(1.0, ema_strength_m1 * 100)
             reason += f"EMA M1 haussière (+{ema_strength_m1*100:.1f}%). "
         else:
             sell_score += 0.20 * min(1.0, ema_strength_m1 * 100)
             reason += f"EMA M1 baissière ({ema_strength_m1*100:.1f}%). "
     
-    # 3. Analyse EMA H1 (poids: 35% - le plus important)
+    # 3. Analyse EMA H1 (poids: 35%)
     if request.ema_fast_h1 and request.ema_slow_h1:
         ema_diff_h1 = request.ema_fast_h1 - request.ema_slow_h1
         ema_strength_h1 = abs(ema_diff_h1) / request.ema_slow_h1 if request.ema_slow_h1 > 0 else 0
         
         if ema_diff_h1 > 0:
-            buy_score += 0.35 * min(1.0, ema_strength_h1 * 50)  # H1 plus pondéré
+            buy_score += 0.35 * min(1.0, ema_strength_h1 * 50)
             reason += f"EMA H1 haussière (+{ema_strength_h1*50:.1f}%). "
         else:
             sell_score += 0.35 * min(1.0, ema_strength_h1 * 50)
@@ -2635,701 +2673,146 @@ async def decision_simplified(request: DecisionRequest):
             sell_score += 0.25 * min(1.0, ema_strength_m5 * 75)
             reason += f"EMA M5 baissière ({ema_strength_m5*75:.1f}%). "
     
-    # 5. Analyse de la position du prix par rapport aux EMA (price action)
-    if request.bid and request.ema_fast_h1:
-        price_vs_ema_h1 = (request.bid - request.ema_fast_h1) / request.ema_fast_h1 * 100
-        
-        if -0.5 <= price_vs_ema_h1 <= 0.5:  # Prix proche de EMA H1
-            if buy_score > sell_score:
-                buy_score += 0.05  # Favoriser la continuité
-                reason += "Prix proche support EMA H1. "
-            else:
-                sell_score += 0.05
-                reason += "Prix proche résistance EMA H1. "
-        elif price_vs_ema_h1 > 1.0:  # Prix bien au-dessus EMA H1
-            buy_score += 0.08
-            reason += "Prix au-dessus EMA H1. "
-        elif price_vs_ema_h1 < -1.0:  # Prix bien en dessous EMA H1
-            sell_score += 0.08
-            reason += "Prix en dessous EMA H1. "
-    
-    # 6. Analyse de cohérence multi-timeframe
-    m1_bullish = request.ema_fast_m1 > request.ema_slow_m1 if (request.ema_fast_m1 and request.ema_slow_m1) else False
-    m5_bullish = request.ema_fast_m5 > request.ema_slow_m5 if (request.ema_fast_m5 and request.ema_slow_m5) else False
-    h1_bullish = request.ema_fast_h1 > request.ema_slow_h1 if (request.ema_fast_h1 and request.ema_slow_h1) else False
-    
-    bullish_count = sum([m1_bullish, m5_bullish, h1_bullish])
-    bearish_count = 3 - bullish_count
-    
-    # Bonus de cohérence
-    if bullish_count >= 2:
-        buy_score += 0.15 * (bullish_count / 3)
-        reason += f"Cohérence haussière ({bullish_count}/3). "
-    elif bearish_count >= 2:
-        sell_score += 0.15 * (bearish_count / 3)
-        reason += f"Cohérence baissière ({bearish_count}/3). "
-    
-    # 7. Décision finale basée sur les scores
+    # 5. Décision technique de base
     if buy_score > sell_score:
-        action = "buy"
-        confidence = 0.5 + (buy_score - sell_score) / 2  # Confiance basée sur l'écart
+        base_action = "buy"
+        base_confidence = 0.5 + (buy_score - sell_score) / 2
     elif sell_score > buy_score:
-        action = "sell"
-        confidence = 0.5 + (sell_score - buy_score) / 2
+        base_action = "sell"
+        base_confidence = 0.5 + (sell_score - buy_score) / 2
     else:
-        action = "hold"
-        confidence = 0.5  # Neutre si scores égaux
+        base_action = "hold"
+        base_confidence = 0.5
     
-    # 8. Ajustements finaux de la confiance
+    # 6. AMÉLIORATION AVEC ML
+    market_data = {
+        "symbol": request.symbol,
+        "bid": request.bid,
+        "ask": request.ask,
+        "rsi": request.rsi,
+        "ema_fast_m1": request.ema_fast_m1,
+        "ema_slow_m1": request.ema_slow_m1,
+        "ema_fast_h1": request.ema_fast_h1,
+        "ema_slow_h1": request.ema_slow_h1,
+        "ema_fast_m5": request.ema_fast_m5,
+        "ema_slow_m5": request.ema_slow_m5,
+        "atr": request.atr,
+        "timestamp": request.timestamp
+    }
+    
+    ml_result = enhance_decision_with_ml(request.symbol, base_action, base_confidence, market_data)
+    
+    # Utiliser la décision améliorée par ML
+    action = ml_result["enhanced_decision"]
+    confidence = ml_result["enhanced_confidence"]
+    
+    # Ajouter la raison ML à la raison technique
+    if ml_result["ml_applied"]:
+        reason += f"[ML: {ml_result['ml_reason']}] "
+        logger.info(f"🧠 ML Enhancement: {base_action} → {action} ({base_confidence:.2f} → {confidence:.2f})")
+    
+    # 7. Ajustements finaux
     if action == "hold":
-        confidence = max(0.3, confidence - 0.2)  # Réduire la confiance pour HOLD
+        confidence = max(0.3, confidence - 0.2)
     
-    # Bonus de confiance si forte cohérence (3/3)
-    if (bullish_count == 3 and action == "buy") or (bearish_count == 3 and action == "sell"):
-        confidence = min(0.85, confidence + 0.15)
-        reason += "Forte cohérence TF. "
-    
-    # Limiter la confiance entre 0 et 1
-    confidence = max(0.0, min(1.0, confidence))
-    
-    # Calculer SL/TP basés sur l'ATR
+    # 8. Calcul SL/TP
     stop_loss = None
     take_profit = None
-    if request.atr and request.atr > 0:
-        if action == "buy":
-            stop_loss = request.bid - (request.atr * 2)
-            take_profit = request.ask + (request.atr * 3)
-        elif action == "sell":
-            stop_loss = request.ask + (request.atr * 2)
-            take_profit = request.bid - (request.atr * 3)
     
+    if action == "buy" and request.bid:
+        atr = request.atr if request.atr and request.atr > 0 else 0.0020
+        stop_loss = request.bid - atr * 2
+        take_profit = request.bid + atr * 3
+    elif action == "sell" and request.ask:
+        atr = request.atr if request.atr and request.atr > 0 else 0.0020
+        stop_loss = request.ask + atr * 2
+        take_profit = request.ask - atr * 3
+    
+    # 9. Créer la réponse enrichie
     response = DecisionResponse(
         action=action,
         confidence=confidence,
-        reason=reason[:150],  # Limiter la raison à 150 caractères
+        reason=reason,
         stop_loss=stop_loss,
         take_profit=take_profit,
         timestamp=datetime.now().isoformat(),
-        model_used="Technical_Analysis_v3_Enhanced"
+        model_used="technical_ml_enhanced",
+        metadata={
+            "original_decision": ml_result["original_decision"],
+            "original_confidence": ml_result["original_confidence"],
+            "ml_enhanced": ml_result["ml_applied"],
+            "ml_reason": ml_result["ml_reason"],
+            "base_scores": {"buy": buy_score, "sell": sell_score},
+            "market_data": market_data
+        }
     )
     
-    logger.info(f"✅ DÉCISION AMÉLIORÉE {request.symbol}: {action} (conf: {confidence:.2f})")
-    logger.info(f"   Scores - Buy: {buy_score:.3f}, Sell: {sell_score:.3f}")
-    logger.info(f"   Raison: {reason}")
+    # 10. Sauvegarder la décision dans Supabase
+    try:
+        if RUNNING_ON_SUPABASE:
+            await save_decision_to_supabase(request, response, ml_result)
+    except Exception as e:
+        logger.error(f"❌ Erreur sauvegarde décision Supabase: {e}")
     
     return response
 
-def convert_numpy_types(obj):
-    """Convertit les types numpy en types Python natifs pour la sérialisation JSON."""
-    if isinstance(obj, (np.integer, np.floating, np.uint64)):
-        return int(obj) if isinstance(obj, (np.integer, np.uint64)) else float(obj)
-    elif isinstance(obj, dict):
-        return {k: convert_numpy_types(v) for k, v in obj.items()}
-    elif isinstance(obj, (list, tuple)):
-        return [convert_numpy_types(x) for x in obj]
-    return obj
-
-def check_trend(symbol: str) -> Dict[str, str]:
-    """
-    Récupère les données historiques depuis la source disponible (MT5 ou autre)
+async def save_decision_to_supabase(request: DecisionRequest, response: DecisionResponse, ml_result: dict):
+    """Sauvegarder la décision améliorée dans Supabase"""
+    import httpx
     
-    Args:
-        symbol: Symbole du marché (ex: "EURUSD")
-        timeframe: Période temporelle (M1, M5, M15, H1, H4, D1)
-        count: Nombre de bougies à récupérer
-        
-    Returns:
-        DataFrame pandas avec les données OHLCV
-    """
-    # PRIORITÉ 1: Vérifier le cache des données uploadées depuis MT5 (bridge)
-    cache_key = f"{symbol}_{timeframe}"
-    if cache_key in mt5_uploaded_history_cache:
-        cached_data = mt5_uploaded_history_cache[cache_key]
-        cache_age = (datetime.now() - cached_data["timestamp"]).total_seconds()
-        
-        if cache_age < MT5_HISTORY_CACHE_TTL:
-            df_cached = cached_data["data"]
-            if df_cached is not None and not df_cached.empty:
-                logger.info(f"✅ Données récupérées depuis cache MT5 uploadé: {len(df_cached)} bougies pour {symbol} {timeframe}")
-                return df_cached.tail(count) if len(df_cached) > count else df_cached
-        else:
-            # Cache expiré, le retirer
-            del mt5_uploaded_history_cache[cache_key]
-            logger.debug(f"Cache expiré pour {cache_key}, retiré")
+    supabase_url = os.getenv("SUPABASE_URL", "https://bpzqnooiisgadzicwupi.supabase.co")
+    supabase_key = os.getenv("SUPABASE_ANON_KEY")
     
-    # PRIORITÉ 2: Essayer MT5 si disponible (avec tentative de connexion automatique)
-    df = get_historical_data_mt5(symbol, timeframe, count)
-    if df is not None and not df.empty:
-        return df
+    headers = {
+        "apikey": supabase_key,
+        "Authorization": f"Bearer {supabase_key}",
+        "Content-Type": "application/json",
+        "Prefer": "return=representation"
+    }
     
-    # Fallback 1: Fichiers CSV locaux
-    try:
-        data_file = Path(f"data/{symbol}_{timeframe}.csv")
-        if data_file.exists():
-            df = pd.read_csv(data_file)
-            if 'time' in df.columns:
-                df['time'] = pd.to_datetime(df['time'])
-                logger.info(f"✅ Données chargées depuis fichier local: {len(df)} bougies")
-                return df.tail(count) if len(df) > count else df
-    except Exception as e:
-        logger.debug(f"Impossible de charger les données depuis le fichier local: {e}")
+    decision_data = {
+        "symbol": request.symbol,
+        "timeframe": "M1",
+        "prediction": response.action,
+        "confidence": response.confidence,
+        "reason": response.reason,
+        "model_used": "technical_ml_enhanced",
+        "metadata": {
+            "original_decision": ml_result["original_decision"],
+            "original_confidence": ml_result["original_confidence"],
+            "ml_enhanced": ml_result["ml_applied"],
+            "ml_reason": ml_result["ml_reason"],
+            "request_data": {
+                "bid": request.bid,
+                "ask": request.ask,
+                "rsi": request.rsi,
+                "ema_fast_m1": request.ema_fast_m1,
+                "ema_slow_m1": request.ema_slow_m1,
+                "ema_fast_h1": request.ema_fast_h1,
+                "ema_slow_h1": request.ema_slow_h1,
+                "ema_fast_m5": request.ema_fast_m5,
+                "ema_slow_m5": request.ema_slow_m5,
+                "atr": request.atr
+            }
+        }
+    }
     
-    # Fallback 2: Essayer de récupérer depuis un endpoint API si disponible
-    try:
-        # Vérifier si un endpoint de données historiques est disponible
-        api_url = os.getenv('DATA_API_URL', '')
-        if api_url:
-            import requests
-            params = {'symbol': symbol, 'timeframe': timeframe, 'count': count}
-            response = requests.get(f"{api_url}/ohlc", params=params, timeout=5)
-            if response.status_code == 200:
-                data = response.json()
-                if data and 'data' in data:
-                    df = pd.DataFrame(data['data'])
-                    if 'time' in df.columns:
-                        df['time'] = pd.to_datetime(df['time'])
-                        logger.info(f"✅ Données récupérées depuis API: {len(df)} bougies")
-                        return df
-    except Exception as e:
-        logger.debug(f"Impossible de récupérer les données depuis l'API: {e}")
-    
-    # Si aucune source n'est disponible, retourner un DataFrame vide
-    logger.warning(f"⚠️ Aucune source de données disponible pour {symbol} {timeframe}")
-    return pd.DataFrame()
-
-def get_historical_data_mt5(symbol: str, timeframe: str = "H1", count: int = 500):
-    """Récupère les données historiques depuis MT5 avec connexion automatique si nécessaire"""
-    global mt5_initialized
-    
-    # Si MT5 n'est pas initialisé, essayer de se connecter avec les variables d'environnement
-    if not mt5_initialized:
+    async with httpx.AsyncClient() as client:
         try:
-            mt5_login = int(os.getenv('MT5_LOGIN', 0))
-            mt5_password = os.getenv('MT5_PASSWORD', '')
-            mt5_server = os.getenv('MT5_SERVER', '')
+            resp = await client.post(
+                f"{supabase_url}/rest/v1/predictions",
+                json=decision_data,
+                headers=headers,
+                timeout=10.0
+            )
             
-            if mt5_login and mt5_password and mt5_server:
-                logger.info(f"🔄 Tentative de connexion MT5 pour {symbol}...")
-                if mt5.initialize(login=mt5_login, password=mt5_password, server=mt5_server):
-                    mt5_initialized = True
-                    logger.info("✅ Connexion MT5 réussie")
-                else:
-                    error_code = mt5.last_error()
-                    logger.warning(f"❌ Échec de connexion MT5: {error_code}")
-                    return None
+            if resp.status_code == 201:
+                logger.info(f"✅ Décision ML sauvegardée dans Supabase pour {request.symbol}")
             else:
-                logger.debug("Variables d'environnement MT5 non configurées (MT5_LOGIN, MT5_PASSWORD, MT5_SERVER)")
-                return None
+                logger.error(f"❌ Erreur sauvegarde décision: {resp.status_code} - {resp.text}")
+                
         except Exception as e:
-            logger.warning(f"Erreur lors de la tentative de connexion MT5: {e}")
-            return None
-    
-    try:
-        tf_map = {
-            "M1": mt5.TIMEFRAME_M1,
-            "M5": mt5.TIMEFRAME_M5,
-            "M15": mt5.TIMEFRAME_M15,
-            "H1": mt5.TIMEFRAME_H1,
-            "H4": mt5.TIMEFRAME_H4,
-            "D1": mt5.TIMEFRAME_D1
-        }
-        
-        tf = tf_map.get(timeframe, mt5.TIMEFRAME_H1)
-        rates = mt5.copy_rates_from_pos(symbol, tf, 0, count)
-        
-        if rates is None or len(rates) == 0:
-            logger.warning(f"Aucune donnée récupérée depuis MT5 pour {symbol} {timeframe}")
-            return None
-        
-        df = pd.DataFrame(rates)
-        df['time'] = pd.to_datetime(df['time'], unit='s')
-        logger.debug(f"✅ {len(df)} bougies récupérées depuis MT5 pour {symbol} {timeframe}")
-        return df
-    except Exception as e:
-        logger.error(f"Erreur lors de la récupération des données MT5: {e}")
-        return None
-
-
-# =========================
-#   ROUTAGE ML MULTI-MODÈLES
-#   (Boom/Crash, Forex, Commodities, Volatility)
-# =========================
-
-def _map_symbol_to_trading_category(symbol: str) -> str:
-    """
-    Catégorie de trading « humaine » utilisée pour le reporting et la logique de style.
-    
-    - BOOM_CRASH     : indices Boom/Crash et assimilés (SYNTHETIC_SPECIAL)
-    - VOLATILITY     : indices de volatilité / synthétiques généraux
-    - FOREX          : paires de devises
-    - COMMODITIES    : métaux / énergies / assimilés (mappés sur modèle actions au départ)
-    """
-    if not ADAPTIVE_PREDICT_AVAILABLE or get_symbol_category is None:  # type: ignore
-        # Fallback simple si le router adaptatif n'est pas dispo
-        s = symbol.upper()
-        if "BOOM" in s or "CRASH" in s:
-            return "BOOM_CRASH"
-        if "VOLATILITY" in s or "RANGE BREAK" in s or "STEP" in s:
-            return "VOLATILITY"
-        if any(k in s for k in ["USD", "EUR", "GBP", "JPY", "AUD", "CAD", "CHF", "NZD"]):
-            return "FOREX"
-        return "VOLATILITY"
-    
-    base_cat = get_symbol_category(symbol)  # type: ignore
-    if base_cat == "SYNTHETIC_SPECIAL":
-        return "BOOM_CRASH"
-    if base_cat == "SYNTHETIC_GENERAL":
-        return "VOLATILITY"
-    if base_cat == "FOREX":
-        return "FOREX"
-    if base_cat == "STOCKS":
-        return "COMMODITIES"
-    # CRYPTO / UNIVERSAL -> on mappe par défaut sur VOLATILITY pour la dynamique de risque
-    return "VOLATILITY"
-
-
-def get_multi_model_ml_decision(symbol: str, df_ohlc: pd.DataFrame) -> Optional[Dict[str, Any]]:
-    """
-    Utilise les modèles adaptatifs XGBoost par catégorie (adaptive_predict)
-    pour produire une décision ML consolidée pour le symbole donné.
-    
-    Retourne un dict avec:
-      - status: "ok" ou "error"
-      - action: "buy" / "sell" / "hold"
-      - confidence: float 0-1
-      - style: "scalp" / "swing"
-      - trading_category: catégorie humaine (BOOM_CRASH, FOREX, COMMODITIES, VOLATILITY)
-      - model_name, underlying_category, raw (résultat brut)
-    """
-    if not ADAPTIVE_PREDICT_AVAILABLE or predict_adaptive is None:  # type: ignore
-        return None
-    if df_ohlc is None or df_ohlc.empty:
-        return None
-
-    try:
-        result = predict_adaptive(symbol, df_ohlc)  # type: ignore
-    except Exception as e:
-        logger.warning(f"Erreur predict_adaptive pour {symbol}: {e}")
-        return {"status": "error", "error": str(e)}
-
-    if not isinstance(result, dict):
-        return {"status": "error", "error": "Résultat inattendu de predict_adaptive"}
-
-    if "error" in result:
-        return {
-            "status": "error",
-            "error": result.get("error"),
-            "category": result.get("category"),
-            "model_name": result.get("model_name"),
-        }
-
-    proba = float(result.get("probability", 0.0))
-    pred = int(result.get("prediction", 0))
-    model_name = result.get("model_name", "adaptive_xgb")
-    underlying_cat = result.get("category", "UNIVERSAL")
-
-    trading_cat = _map_symbol_to_trading_category(symbol)
-
-    # Direction binaire: 1 = hausse, 0 = baisse (convention interne)
-    direction_up = pred == 1
-
-    # Respecter les règles Boom/Crash (buy-only / sell-only)
-    symbol_upper = symbol.upper()
-    action: str
-    if "CRASH" in symbol_upper:
-        # Crash = SELL only
-        if direction_up:
-            action = "hold"  # modèle en désaccord avec la règle dure -> on ne trade pas
-        else:
-            action = "sell"
-    elif "BOOM" in symbol_upper:
-        # Boom = BUY only
-        if direction_up:
-            action = "buy"
-        else:
-            action = "hold"
-    else:
-        action = "buy" if direction_up else "sell"
-
-    # Style par catégorie
-    if trading_cat in ("BOOM_CRASH", "VOLATILITY"):
-        style = "scalp"
-    else:
-        style = "swing"
-
-    confidence = max(0.0, min(1.0, proba))
-
-    return {
-        "status": "ok",
-        "action": action,
-        "confidence": confidence,
-        "style": style,
-        "trading_category": trading_cat,
-        "underlying_category": underlying_cat,
-        "model_name": model_name,
-        "raw": result,
-    }
-
-
-def save_prediction_to_mt5_files(
-    symbol: str,
-    timeframe: str,
-    decision: Dict[str, Any],
-    ml_decision: Optional[Dict[str, Any]] = None,
-) -> None:
-    """
-    Sauvegarde la décision et les infos ML dans un fichier CSV par symbole/timeframe
-    dans le dossier MT5 commun (Predictions).
-
-    Format: une ligne par décision, séparateur ';'
-    Colonnes principales:
-      time;symbol;timeframe;action;confidence;style;category;model_name;details_json
-    """
-    try:
-        if not MT5_PREDICTIONS_DIR.exists():
-            return
-
-        ts = datetime.now().isoformat()
-        action = decision.get("action", "")
-        conf = decision.get("confidence", 0.0)
-        style = ""
-        category = ""
-        model_name = ""
-
-        if isinstance(ml_decision, dict) and ml_decision.get("status") == "ok":
-            style = ml_decision.get("style", "") or ""
-            category = ml_decision.get("trading_category", "") or ""
-            model_name = ml_decision.get("model_name", "") or ""
-
-        # Détails bruts en JSON compact (pour ré-entraînement éventuel)
-        details = {
-            "decision": decision,
-            "ml_decision": ml_decision,
-        }
-        details_str = json.dumps(details, separators=(",", ":"), ensure_ascii=False)
-
-        # Nom de fichier: SYMBOL_TIMEFRAME_predictions.csv (remplacer caractères spéciaux)
-        safe_symbol = symbol.replace(" ", "_").replace("/", "_")
-        safe_tf = timeframe.replace(" ", "_")
-        filename = MT5_PREDICTIONS_DIR / f"{safe_symbol}_{safe_tf}_predictions.csv"
-
-        header = (
-            "time;symbol;timeframe;action;confidence;style;category;model_name;details_json\n"
-        )
-        line = (
-            f"{ts};{symbol};{timeframe};{action};{conf:.4f};"
-            f"{style};{category};{model_name};{details_str}\n"
-        )
-
-        # Append avec création automatique de l'en-tête si fichier nouveau
-        file_exists = filename.exists()
-        with open(filename, "a", encoding="utf-8") as f:
-            if not file_exists:
-                f.write(header)
-            f.write(line)
-
-    except Exception as e:
-        logger.warning(f"Erreur sauvegarde prédiction MT5 pour {symbol}: {e}")
-
-def analyze_with_mistral(prompt: str) -> Optional[str]:
-    """Analyse avec Mistral AI si disponible"""
-    if not MISTRAL_AVAILABLE or not mistral_api_key:
-        return None
-    
-    try:
-        response = mistral_client.chat.complete(
-            model="mistral-small-latest",
-            messages=[
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.2,
-            max_tokens=512
-        )
-        return response.choices[0].message.content
-    except Exception as e:
-        logger.error(f"Erreur Mistral AI: {e}")
-        return None
-
-
-def analyze_with_gemma(
-    prompt: str, 
-    max_tokens: int = 200, 
-    temperature: float = 0.7, 
-    top_p: float = 0.9
-) -> Optional[str]:
-    """Analyse avec le modèle Gemma (version texte uniquement)
-    
-    Args:
-        prompt: Le prompt à envoyer au modèle
-        max_tokens: Nombre maximum de tokens à générer
-        temperature: Contrôle le caractère aléatoire (0.0 à 1.0)
-        top_p: Filtrage par noyau (nucleus sampling)
-        
-    Returns:
-        str: La réponse générée par le modèle, ou None en cas d'erreur
-    """
-    global gemma_processor, gemma_model
-    
-    if not gemma_processor or not gemma_model:
-        logger.error("❌ Modèle ou processeur Gemma non initialisé")
-        return None
-    
-    try:
-        logger.info("\n" + "="*80)
-        logger.info("🔍 DÉMARRAGE ANALYSE GEMMA (TEXTE UNIQUEMENT)")
-        logger.info("="*80)
-        logger.info(f"📝 Prompt: {prompt[:150]}..." if len(prompt) > 150 else f"📝 Prompt: {prompt}")
-        
-        # Préparation des entrées texte uniquement
-        logger.info("🔄 Préparation des entrées...")
-        inputs = gemma_processor(
-            text=prompt,
-            return_tensors="pt"
-        ).to("cuda" if torch and torch.cuda.is_available() else "cpu")
-        
-        # Génération de la réponse
-        logger.info("⚡ Génération de la réponse...")
-        start_time = time.time()
-        
-        generate_kwargs = {
-            "max_length": max_tokens,
-            "temperature": temperature,
-            "top_p": top_p,
-            "do_sample": True,
-            "pad_token_id": gemma_processor.tokenizer.pad_token_id
-        }
-        
-        # Génération avec suivi de la progression
-        try:
-            no_grad_context = torch.no_grad() if torch else contextlib.nullcontext()
-            with no_grad_context:
-                output = gemma_model.generate(
-                    **inputs,
-                    **generate_kwargs,
-                    output_scores=True,
-                    return_dict_in_generate=True
-                )
-            
-            # Décodage de la réponse
-            response = gemma_processor.batch_decode(output.sequences, skip_special_tokens=True)[0]
-            duration = time.time() - start_time
-            
-            # Formatage de la réponse
-            response = response.strip()
-            logger.info("\n" + "="*80)
-            logger.info("✅ ANALYSE TERMINÉE")
-            logger.info("="*80)
-            logger.info(f"⏱️  Durée: {duration:.2f} secondes")
-            logger.info(f"📊 Réponse ({len(response)} caractères):")
-            
-            # Affichage d'un extrait de la réponse
-            response_lines = response.split('\n')
-            for i, line in enumerate(response_lines[:5]):  # Affiche les 5 premières lignes
-                logger.info(f"   {line}")
-            if len(response_lines) > 5:
-                logger.info("   ... (suite de la réponse disponible) ...")
-            
-            # Analyse des signaux si nécessaire
-            if "signal" in prompt.lower() or "trading" in prompt.lower():
-                gemma_bot = GemmaTradingBot()
-                gemma_bot.analyze_gemma_response(response)
-            
-            return response
-            
-        except RuntimeError as e:
-            if "out of memory" in str(e).lower():
-                logger.error("⚠️  Erreur: Mémoire GPU insuffisante. Essayez de réduire la taille du modèle ou du batch.")
-                if torch and torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-            raise
-            
-    except Exception as e:
-        logger.error("❌ ERREUR LORS DE L'ANALYSE GEMMA")
-        logger.error("="*60)
-        logger.error(f"Type: {type(e).__name__}")
-        logger.error(f"Message: {str(e)}")
-        if hasattr(e, 'args') and e.args:
-            logger.error(f"Détails: {e.args[0]}")
-        logger.error("Stack trace:")
-        logger.error(traceback.format_exc())
-        return None
-    
-    finally:
-        # Nettoyage de la mémoire GPU
-        if torch and torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            logger.info("🧹 Mémoire GPU nettoyée")
-
-def analyze_with_gemini(prompt: str, max_retries: int = 3) -> Optional[str]:
-    """
-    Fonction désactivée - Utilisez Mistral AI à la place
-    """
-    # Ne logger qu'une seule fois au démarrage, pas à chaque appel
-    return None
-
-def analyze_with_ai(prompt: str, max_retries: int = 2) -> Optional[str]:
-    """
-    Analyse un prompt avec Mistral AI pour des prédictions de spike améliorées
-    
-    Args:
-        prompt: Le prompt à analyser
-        max_retries: Nombre de tentatives
-        
-    Returns:
-        La réponse de l'IA ou None en cas d'échec
-    """
-    if not MISTRAL_AVAILABLE or not mistral_api_key:
-        logger.error("Mistral AI n'est pas disponible")
-        return None
-    
-    try:
-        # Optimisation pour les prédictions de spike
-        if "spike" in prompt.lower() or "volatility" in prompt.lower():
-            # Utiliser un modèle plus performant et une température plus basse pour les spikes
-            logger.info("Utilisation de Mistral AI pour l'analyse de spike (optimisée)")
-            response = mistral_client.chat.complete(
-                model="mistral-small",  # Modèle plus performant pour les spikes
-                messages=[
-                    {
-                        "role": "system", 
-                        "content": (
-                            "Tu es un expert en trading de volatilité spécialisé "
-                            "dans la détection de spikes. Analyse les indicateurs "
-                            "techniques avec une précision extrême. Donne des "
-                            "prédictions fiables basées sur les patterns de "
-                            "volatilité, RSI, EMA et ATR."
-                        )
-                    },
-                    {"role": "user", "content": prompt}
-                ],
-                # Température plus basse pour plus de cohérence
-                temperature=0.3,
-                # Limiter les tokens pour des réponses plus ciblées
-                max_tokens=800
-            )
-        else:
-            # Utilisation standard pour les autres analyses
-            logger.info("Utilisation de Mistral AI pour l'analyse standard")
-            response = mistral_client.chat.complete(
-                model="mistral-tiny",
-                messages=[
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.7,
-                max_tokens=1000
-            )
-        return response.choices[0].message.content
-    except Exception as e:
-        logger.error(f"Erreur avec Mistral AI: {str(e)}")
-        return None
-
-def generate_fibonacci_levels(base_price: float) -> Dict[str, Dict[str, Any]]:
-    """
-    Génère les niveaux de Fibonacci pour un prix de base donné.
-    
-    Args:
-        base_price: Prix de base pour le calcul des niveaux
-        
-    Returns:
-        Dictionnaire contenant les niveaux de Fibonacci pour différents timeframes
-    """
-    levels = {
-        "0": 0.0,
-        "236": 0.236,
-        "382": 0.382,
-        "500": 0.5,
-        "618": 0.618,
-        "786": 0.786,
-        "1000": 1.0
-    }
-    
-    # Calcul des niveaux de support/résistance
-    support = base_price * 0.95
-    resistance = base_price * 1.05
-    
-    # Création de la réponse pour chaque timeframe
-    response = {}
-    for tf in ["h1", "h4", "m15"]:
-        response[tf] = {
-            "fibonacci": {level: base_price * factor for level, factor in levels.items()},
-            "trend": "neutral",
-            "support": support,
-            "resistance": resistance,
-            "status": "fibonacci_analysis"
-        }
-    
-    return response
-
-def detect_trendlines(df: pd.DataFrame, lookback: int = 3) -> Dict[str, Any]:
-    """Détecte les trendlines dans les données historiques"""
-    if df is None or len(df) < lookback * 2:
-        return {}
-    
-    try:
-        # Détection des swings (highs et lows)
-        highs = []
-        lows = []
-        
-        for i in range(lookback, len(df) - lookback):
-            # Swing high
-            is_high = all(
-                df.iloc[i]['high'] >= df.iloc[i+j]['high'] 
-                for j in range(-lookback, lookback+1) 
-                if j != 0
-            )
-            if is_high:
-                highs.append({
-                    'index': i,
-                    'time': df.iloc[i]['time'],
-                    'price': df.iloc[i]['high']
-                })
-            
-            # Swing low
-            is_low = all(
-                df.iloc[i]['low'] <= df.iloc[i+j]['low'] 
-                for j in range(-lookback, lookback+1) 
-                if j != 0
-            )
-            if is_low:
-                lows.append({
-                    'index': i,
-                    'time': df.iloc[i]['time'],
-                    'price': df.iloc[i]['low']
-                })
-        
-        # Trendline haussière (deux derniers lows)
-        bullish_tl = None
-        if len(lows) >= 2:
-            l1 = lows[-2]
-            l2 = lows[-1]
-            if l2['price'] > l1['price']:
-                bullish_tl = {
-                    "start": {"time": int(l1['time'].timestamp()), "price": l1['price']},
-                    "end": {"time": int(l2['time'].timestamp()), "price": l2['price']}
-                }
-        
-        # Trendline baissière (deux derniers highs)
-        bearish_tl = None
-        if len(highs) >= 2:
-            h1 = highs[-2]
-            h2 = highs[-1]
-            if h2['price'] < h1['price']:
-                bearish_tl = {
-                    "start": {"time": int(h1['time'].timestamp()), "price": h1['price']},
-                    "end": {"time": int(h2['time'].timestamp()), "price": h2['price']}
-                }
-        
-        return {
-            "bullish": bullish_tl,
-            "bearish": bearish_tl
-        }
-    except Exception as e:
-        logger.error(f"Erreur détection trendlines: {e}")
-        return {}
-
-# Routes de l'API
-@app.get("/")
-async def root():
+            logger.error(f"❌ Erreur connexion Supabase: {e}")async def root():
     """Endpoint racine pour vérifier que le serveur fonctionne"""
     return {
         "status": "running",
@@ -9471,3 +8954,55 @@ if __name__ == "__main__":
             port=API_PORT,
             log_level="info"
         )
+
+# Endpoint pour entraîner les modèles ML
+@app.post("/train_ml_models")
+async def train_ml_models():
+    """Endpoint pour entraîner les modèles ML"""
+    try:
+        if not ML_AVAILABLE:
+            return {"status": "error", "message": "ML system not available"}
+        
+        logger.info("🧪 Début entraînement modèles ML...")
+        results = ml_enhancer.train_all_symbols()
+        
+        return {
+            "status": "success",
+            "message": "ML models training completed",
+            "results": results,
+            "timestamp": datetime.now().isoformat()
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ Erreur entraînement ML: {e}")
+        return {"status": "error", "message": str(e)}
+
+# Endpoint pour obtenir les statistiques ML
+@app.get("/ml_stats")
+async def get_ml_stats():
+    """Obtenir les statistiques des modèles ML"""
+    try:
+        if not ML_AVAILABLE:
+            return {"status": "error", "message": "ML system not available"}
+        
+        stats = {}
+        for symbol, model in ml_enhancer.ml_system.symbol_models.items():
+            stats[symbol] = {
+                "win_rate": model.get("win_rate", 0),
+                "total_trades": model.get("total_trades", 0),
+                "confidence_threshold": model.get("confidence_threshold", 0.7),
+                "last_updated": model.get("last_updated"),
+                "decision_weights": model.get("decision_weights", {}),
+                "time_patterns": model.get("time_patterns", {})
+            }
+        
+        return {
+            "status": "success",
+            "stats": stats,
+            "total_models": len(stats),
+            "timestamp": datetime.now().isoformat()
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ Erreur stats ML: {e}")
+        return {"status": "error", "message": str(e)}
