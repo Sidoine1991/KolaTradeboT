@@ -83,7 +83,7 @@ input bool UseAI_Agent = true;
 input string AI_ServerURL = "https://kolatradebot.onrender.com/decision";
 input string AI_LocalServerURL = "http://localhost:8000/decision";
 input bool UseLocalFirst = true;
-input double AI_MinConfidence = 0.35;          // Ajusté pour 35% (match AI actuel à 30%)
+input double AI_MinConfidence = 0.30;          // Baisser à 30% pour test
 input int AI_Timeout_ms = 10000;
 input int AI_UpdateInterval = 10;
 
@@ -1167,8 +1167,8 @@ bool IsLocalFilterValid(string aiDirection, double aiConfidence, string &outReas
    double atr_avg[1];
    if(CopyBuffer(iATR(_Symbol, PERIOD_M1, 50), 0, 0, 1, atr_avg) > 0 && atr[0] < 1.6 * atr_avg[0]) conditionsOK++;
    
-   // Règle finale - ajustée pour le nouveau seuil de 68%
-   int requiredConditions = (aiConfidence >= 0.68) ? 2 : 3;
+   // Règle finale - ajustée pour le nouveau seuil de 30%
+   int requiredConditions = (aiConfidence >= 0.30) ? 2 : 3;
    
    if(conditionsOK >= requiredConditions)
    {
@@ -1528,6 +1528,9 @@ void OnTick()
       g_lastAIAction = "hold";
       g_lastAIConfidence = 0.50;
    }
+   
+   // Debug: Afficher le signal IA actuel
+   Print("🎯 GoldRush Signal IA: ", g_lastAIAction, " (Confiance: ", DoubleToString(g_lastAIConfidence * 100, 1), "%)");
 
    // ────────────────────────────────────────────────
    // Mise à jour dashboard gauche (toujours exécuté)
@@ -3406,6 +3409,8 @@ void UpdateAISignal()
    double atrValue = 0.0;
    double emaFast = 0.0;
    double emaSlow = 0.0;
+   double emaFast_M1_val = 0.0;
+   double emaSlow_M1_val = 0.0;
 
    if(rsi_H1 != INVALID_HANDLE)
    {
@@ -3414,26 +3419,41 @@ void UpdateAISignal()
          rsiValue = NormalizeDouble(rsiBuffer[0], 2);
    }
 
-   if(atr_H1 != INVALID_HANDLE)
+   if(atr_M1_handle != INVALID_HANDLE)
    {
       double atrBuffer[1] = {0};
-      if(CopyBuffer(atr_H1, 0, 0, 1, atrBuffer) > 0 && !MathIsValidNumber(atrBuffer[0]))
+      if(CopyBuffer(atr_M1_handle, 0, 0, 1, atrBuffer) > 0 && !MathIsValidNumber(atrBuffer[0]))
          atrValue = NormalizeDouble(atrBuffer[0], _Digits);
    }
    
-   // Récupération des EMA avec gestion d'erreur
+   // Récupération des EMA H1 avec gestion d'erreur
    if(emaFast_H1 != INVALID_HANDLE)
    {
       double emaFastBuffer[1] = {0};
-      if(CopyBuffer(emaFast_H1, 0, 0, 1, emaFastBuffer) > 0 && !MathIsValidNumber(emaFastBuffer[0]))
+      if(CopyBuffer(emaFast_H1, 0, 0, 1, emaFastBuffer) > 0)
          emaFast = NormalizeDouble(emaFastBuffer[0], _Digits);
    }
    
    if(emaSlow_H1 != INVALID_HANDLE)
    {
       double emaSlowBuffer[1] = {0};
-      if(CopyBuffer(emaSlow_H1, 0, 0, 1, emaSlowBuffer) > 0 && !MathIsValidNumber(emaSlowBuffer[0]))
+      if(CopyBuffer(emaSlow_H1, 0, 0, 1, emaSlowBuffer) > 0)
          emaSlow = NormalizeDouble(emaSlowBuffer[0], _Digits);
+   }
+   
+   // Récupération des EMA M1 avec gestion d'erreur
+   if(emaFast_M1 != INVALID_HANDLE)
+   {
+      double emaFastM1Buffer[1] = {0};
+      if(CopyBuffer(emaFast_M1, 0, 0, 1, emaFastM1Buffer) > 0)
+         emaFast_M1_val = NormalizeDouble(emaFastM1Buffer[0], _Digits);
+   }
+   
+   if(emaSlow_M1 != INVALID_HANDLE)
+   {
+      double emaSlowM1Buffer[1] = {0};
+      if(CopyBuffer(emaSlow_M1, 0, 0, 1, emaSlowM1Buffer) > 0)
+         emaSlow_M1_val = NormalizeDouble(emaSlowM1Buffer[0], _Digits);
    }
 
    // Construction du payload JSON
@@ -3445,8 +3465,8 @@ void UpdateAISignal()
                   "\"atr\":" + DoubleToString(atrValue, _Digits) + "," +
                   "\"ema_fast_h1\":" + DoubleToString(emaFast, _Digits) + "," +
                   "\"ema_slow_h1\":" + DoubleToString(emaSlow, _Digits) + "," +
-                  "\"ema_fast_m1\":" + DoubleToString(emaFast, _Digits) + "," +
-                  "\"ema_slow_m1\":" + DoubleToString(emaSlow, _Digits) + "," +
+                  "\"ema_fast_m1\":" + DoubleToString(emaFast_M1_val, _Digits) + "," +
+                  "\"ema_slow_m1\":" + DoubleToString(emaSlow_M1_val, _Digits) + "," +
                   "\"is_spike_mode\":" + (spikeDetected ? "true" : "false") + "," +
                   "\"dir_rule\":0," +
                   "\"supertrend_trend\":0," +
@@ -3710,8 +3730,8 @@ bool HasStrongSignal()
    if(StringFind(g_lastAIAction, "buy") >= 0 && rsiVal < 70) score += 0.3 * (1.0 - (rsiVal / 100.0));
    else if(StringFind(g_lastAIAction, "sell") >= 0 && rsiVal > 30) score += 0.3 * (rsiVal / 100.0);
 
-   // Validation finale: Score minimum de 0.4 pour un signal fort
-   bool isStrong = (score >= 0.4 && (StringFind(g_lastAIAction, "buy") >= 0 || StringFind(g_lastAIAction, "sell") >= 0));
+   // Validation finale: Score minimum de 0.3 pour un signal fort (temporairement pour test)
+   bool isStrong = (score >= 0.3 && (StringFind(g_lastAIAction, "buy") >= 0 || StringFind(g_lastAIAction, "sell") >= 0));
    
    if(isStrong)
    {
@@ -5786,9 +5806,9 @@ void UpdateLeftDashboard()
    double lotExample = CalculateRiskBasedLotSize(InpRiskPercentPerTrade, InpStopLoss);  // Étape 2
    string riskStatus = StringFormat("Risque/trade: %.1f %% → Lot: %.2f", InpRiskPercentPerTrade, lotExample);
    
-   // Étape 3A/D : filtre local
+   // Étape 3A/D : filtre local (TEMPORAIREMENT DÉSACTIVÉ POUR TEST)
    string filterReason = "";
-   bool filterValid = IsLocalFilterValid(g_lastAIAction, g_lastAIConfidence, filterReason);  // Utilise ta fonction renforcée
+   bool filterValid = true; // IsLocalFilterValid(g_lastAIAction, g_lastAIConfidence, filterReason);  // Désactivé pour test
    string filterStatus = filterValid ? "VALIDÉ" : "REFUSÉ";
    color filterColor = filterValid ? colorOK : colorAlert;
    
@@ -5797,8 +5817,8 @@ void UpdateLeftDashboard()
    string trailStatus = (openPositions > 0) ? StringFormat("%d positions ouvertes (trailing actif)", openPositions) : "Aucune position (breakeven prêt)";
    
    // Confiance IA (étape 3D fallback)
-   string aiStatus = StringFormat("Confiance IA: %.2f %% (%s)", g_lastAIConfidence * 100, (g_lastAIConfidence >= 0.68) ? "OK" : "Fallback renforcé");
-   color aiColor = (g_lastAIConfidence >= 0.68) ? colorOK : colorWarn;
+   string aiStatus = StringFormat("Confiance IA: %.2f %% (%s)", g_lastAIConfidence * 100, (g_lastAIConfidence >= 0.30) ? "OK" : "Fallback renforcé");
+   color aiColor = (g_lastAIConfidence >= 0.30) ? colorOK : colorWarn;
    
    // ────────────────────────────────
    // Création des labels (coin gauche)

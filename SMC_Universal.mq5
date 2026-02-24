@@ -51,6 +51,7 @@ void GetLatestConfirmedSwings(double &lastSH, datetime &lastSHTime, double &last
 void DrawConfirmedSwingPoints();
 bool DetectBoomCrashSwingPoints();
 void UpdateSpikeWarningBlink();
+void CheckPredictedSwingTriggers();
 
 //+------------------------------------------------------------------+
 //| SMC - Structures et énumérations (intégré)                       |
@@ -251,6 +252,7 @@ input bool   ShowPremiumDiscount = true; // Zones Premium (vente) / Discount (ac
 input bool   ShowSignalArrow     = true; // Flèche dynamique clignotante BUY/SELL
 input bool   ShowPredictedSwing  = true; // SL/SH prédits (futurs) sur le canal
 input bool   ShowEMASupportResistance = true; // EMA M1, M5, H1 en support/résistance
+input int    SpikePredictionOffsetMinutes = 60; // Décalage dans le futur pour afficher l'entrée de spike dans la zone prédite
 
 input group "=== SL/TP DYNAMIQUES (prudent / sécuriser gain) ==="
 input double SL_ATRMult        = 2.5;    // Stop Loss (x ATR) - prudent
@@ -809,12 +811,13 @@ void OnTick()
    static datetime lastDashboardUpdate = 0;
    datetime currentTime = TimeCurrent();
    
-   // Traitement contrôlé pour stabilité
+   // Traitement contrôlé pour stabilité (max ~1 tick toutes les 2 secondes)
    if(currentTime - lastProcess < 2) return;
    lastProcess = currentTime;
    
-   // Capturer régulièrement les données graphiques pour alimenter l'IA
-   CaptureChartDataFromChart();
+   // Capturer régulièrement les données graphiques pour alimenter l'IA (mais pas à chaque tick)
+   if(currentTime - g_lastChartCapture >= 10)
+      CaptureChartDataFromChart();
    
    // GESTION DES POSITIONS CRITIQUES (priorité haute)
    CloseWorstPositionIfTotalLossExceeded();
@@ -823,6 +826,8 @@ void OnTick()
    ManageBoomCrashSpikeClose();
    if(UseTrailingStop)
       ManageTrailingStop();
+   // Entrées automatiques sur SH/SL prédits (canal ML)
+   CheckPredictedSwingTriggers();
    
    // SYSTÈME IA COMPLET (toutes les 60 secondes pour réactivité maximale)
    if(UseAIServer && currentTime - lastAIUpdate >= 60)
@@ -855,8 +860,8 @@ void OnTick()
       ExecuteAIDecisionMarketOrder();
    }
    
-   // GRAPHIQUES SMC CONTRÔLÉS (toutes les 60 secondes)
-   if(ShowChartGraphics && currentTime - lastGraphicsUpdate >= 60)
+   // GRAPHIQUES SMC CONTRÔLÉS (toutes les 90 secondes pour alléger MT5)
+   if(ShowChartGraphics && currentTime - lastGraphicsUpdate >= 90)
    {
       lastGraphicsUpdate = currentTime;
       
@@ -1053,10 +1058,10 @@ void DrawSwingHighLow()
 {
    MqlRates rates[];
    ArraySetAsSeries(rates, true);
-   int bars = 1000; // Analyser 1000 bougies pour prédiction dynamique
+   int bars = 600; // Analyser 600 bougies pour prédiction dynamique (plus léger)
    if(CopyRates(_Symbol, LTF, 0, bars, rates) < bars) return;
    double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
-   int swingHalf = 500; // Analyser les 500 dernières bougies pour Swing
+   int swingHalf = 300; // Analyser les 300 dernières bougies pour Swing
    ObjectsDeleteAll(0, "SMC_Swing_");
    ObjectsDeleteAll(0, "SMC_Dyn_SH_");
    ObjectsDeleteAll(0, "SMC_Dyn_SL_");
@@ -1329,7 +1334,11 @@ void PlaceHistoricalBasedScalpingOrders(MqlRates &rates[], int futureBars, doubl
    {
       double lastSL = recentSwingLows[0]; // Le SL le plus récent
       double buyLimitPrice = lastSL; // Ordre placé directement au niveau du SL
-      double tpPrice = buyLimitPrice + currentATR * 3.0; // TP plus large pour cette stratégie
+      double tpPrice = buyLimitPrice + currentATR * 1.5; // TP plus proche pour scalping
+      
+      // Ne placer un ordre que si le SL est relativement proche (max 2 ATR)
+      if(MathAbs(buyLimitPrice - currentPrice) > currentATR * 2.0)
+         goto skip_buy_hist;
       
       MqlTradeRequest request = {};
       MqlTradeResult result = {};
@@ -1349,6 +1358,7 @@ void PlaceHistoricalBasedScalpingOrders(MqlRates &rates[], int futureBars, doubl
          Print("📈 ORDRE BUY BASÉ SL HISTORIQUE - Prix: ", buyLimitPrice, " | TP: ", tpPrice, " | SL: ", request.sl);
          ordersToPlace--;
       }
+   skip_buy_hist:
    }
    
    // ORDRE 2: BASÉ SUR LE DERNIER SH HISTORIQUE (STRATÉGIE SELL)
@@ -1356,7 +1366,10 @@ void PlaceHistoricalBasedScalpingOrders(MqlRates &rates[], int futureBars, doubl
    {
       double lastSH = recentSwingHighs[0]; // Le SH le plus récent
       double sellLimitPrice = lastSH; // Ordre placé directement au niveau du SH
-      double tpPrice = sellLimitPrice - currentATR * 3.0; // TP plus large pour cette stratégie
+      double tpPrice = sellLimitPrice - currentATR * 1.5; // TP plus proche pour scalping
+      
+      if(MathAbs(sellLimitPrice - currentPrice) > currentATR * 2.0)
+         goto skip_sell_hist;
       
       MqlTradeRequest request = {};
       MqlTradeResult result = {};
@@ -1376,6 +1389,7 @@ void PlaceHistoricalBasedScalpingOrders(MqlRates &rates[], int futureBars, doubl
          Print("📉 ORDRE SELL BASÉ SH HISTORIQUE - Prix: ", sellLimitPrice, " | TP: ", tpPrice, " | SL: ", request.sl);
          ordersToPlace--;
       }
+   skip_sell_hist:
    }
    
    if(ordersToPlace > 0)
@@ -1438,7 +1452,10 @@ void DetectAndPlaceBoomCrashSpikeOrders(MqlRates &rates[], double currentPrice, 
             string spikeName = "SPIKE_ENTRY_" + IntegerToString(i);
             color spikeColor = isBoom ? clrOrange : clrPurple;
             
-            if(ObjectCreate(0, spikeName, OBJ_ARROW, 0, rates[i].time, currentClose))
+            // Positionner l'affichage du spike dans la zone prédite (décalé dans le futur)
+            datetime spikeTime = TimeCurrent() + (datetime)(SpikePredictionOffsetMinutes * 60);
+            
+            if(ObjectCreate(0, spikeName, OBJ_ARROW, 0, spikeTime, currentClose))
             {
                ObjectSetInteger(0, spikeName, OBJPROP_COLOR, spikeColor);
                ObjectSetInteger(0, spikeName, OBJPROP_WIDTH, 5);
@@ -1453,7 +1470,7 @@ void DetectAndPlaceBoomCrashSpikeOrders(MqlRates &rates[], double currentPrice, 
             // Flèche unique d'avertissement clignotante
             if(ObjectFind(0, "SMC_Spike_Warning") < 0)
             {
-               if(ObjectCreate(0, "SMC_Spike_Warning", OBJ_ARROW, 0, rates[i].time, currentClose))
+               if(ObjectCreate(0, "SMC_Spike_Warning", OBJ_ARROW, 0, spikeTime, currentClose))
                {
                   ObjectSetInteger(0, "SMC_Spike_Warning", OBJPROP_COLOR, clrYellow);
                   ObjectSetInteger(0, "SMC_Spike_Warning", OBJPROP_WIDTH, 6);
@@ -1910,6 +1927,15 @@ void DrawPremiumDiscountZones()
    ObjectSetInteger(0, "SMC_ICT_EQUILIBRE_LABEL", OBJPROP_COLOR, clrYellow);
    ObjectSetInteger(0, "SMC_ICT_EQUILIBRE_LABEL", OBJPROP_FONTSIZE, 8);
    ObjectSetInteger(0, "SMC_ICT_EQUILIBRE_LABEL", OBJPROP_ANCHOR, ANCHOR_LEFT);
+   
+   // Ligne verticale pour séparer clairement la zone passée de la zone prédite
+   ObjectDelete(0, "SMC_PAST_FUTURE_DIVIDER");
+   if(ObjectCreate(0, "SMC_PAST_FUTURE_DIVIDER", OBJ_VLINE, 0, t1, 0))
+   {
+      ObjectSetInteger(0, "SMC_PAST_FUTURE_DIVIDER", OBJPROP_COLOR, clrWhite);
+      ObjectSetInteger(0, "SMC_PAST_FUTURE_DIVIDER", OBJPROP_WIDTH, 2);
+      ObjectSetInteger(0, "SMC_PAST_FUTURE_DIVIDER", OBJPROP_STYLE, STYLE_SOLID);
+   }
 }
 
 void DrawSignalArrow()
@@ -1976,6 +2002,68 @@ void UpdateSpikeWarningBlink()
       {
          color c = g_spikeWarningVisible ? clrYellow : clrNONE;
          ObjectSetInteger(0, "SMC_Spike_Warning", OBJPROP_COLOR, c);
+      }
+   }
+}
+
+// Entrée automatique quand le prix touche les niveaux SH/SL prédits (canal ML)
+void CheckPredictedSwingTriggers()
+{
+   // Pas de nouvelle position si on a déjà atteint la limite
+   if(CountPositionsOurEA() >= MaxPositionsTerminal) return;
+   
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   int total = ObjectsTotal(0, -1, -1);
+   if(total <= 0) return;
+   
+   for(int i = total - 1; i >= 0; i--)
+   {
+      string name = ObjectName(0, i);
+      // Traiter à la fois les SH/SL prédits par le canal ML, les swings dynamiques et la trajectoire précise
+      bool isPredSH = (StringFind(name, "SMC_Pred_SH_") == 0 || StringFind(name, "SMC_Dyn_SH_") == 0 || StringFind(name, "SMC_Prec_SH_") == 0);
+      bool isPredSL = (StringFind(name, "SMC_Pred_SL_") == 0 || StringFind(name, "SMC_Dyn_SL_") == 0 || StringFind(name, "SMC_Prec_SL_") == 0);
+      
+      if(isPredSH)
+      {
+         double level = ObjectGetDouble(0, name, OBJPROP_PRICE);
+         // Déclencher un SELL au marché quand le prix touche ou dépasse le SH prédit
+         if(bid >= level && level > 0)
+         {
+            SMC_Signal sig;
+            sig.action = "SELL";
+            sig.entryPrice = bid;
+            sig.reasoning = "Predicted SH touch";
+            sig.concept = "Pred-SH";
+            // SL/TP simples basés sur ATR via DetectSMCSignal / ExecuteSignal
+            // Utiliser les paramètres par défaut de SL/TP en laissant 0 (ils seront gérés par trailing + gestion globale)
+            sig.stopLoss = 0;
+            sig.takeProfit = 0;
+            ExecuteSignal(sig);
+            
+            // Supprimer le niveau pour éviter des déclenchements multiples
+            ObjectDelete(0, name);
+            break;
+         }
+      }
+      else if(isPredSL)
+      {
+         double level = ObjectGetDouble(0, name, OBJPROP_PRICE);
+         // Déclencher un BUY au marché quand le prix touche ou casse le SL prédit
+         if(ask <= level && level > 0)
+         {
+            SMC_Signal sig;
+            sig.action = "BUY";
+            sig.entryPrice = ask;
+            sig.reasoning = "Predicted SL touch";
+            sig.concept = "Pred-SL";
+            sig.stopLoss = 0;
+            sig.takeProfit = 0;
+            ExecuteSignal(sig);
+            
+            ObjectDelete(0, name);
+            break;
+         }
       }
    }
 }
@@ -2519,9 +2607,6 @@ bool DetectSMCSignal(SMC_Signal &sig)
       newSwingHigh = r[1].high;
       for(int i = 2; i < 8; i++) { if(r[i].low < newSwingLow) newSwingLow = r[i].low; if(r[i].high > newSwingHigh) newSwingHigh = r[i].high; }
    }
-   // Filtre strict de zone: BUY uniquement en discount, SELL uniquement en premium
-   if(hasBuySignal && !inDiscount)  hasBuySignal  = false;
-   if(hasSellSignal && !inPremium)  hasSellSignal = false;
    
    double buffer = atr[0] * 0.5;
    if(hasBuySignal && !hasSellSignal)
@@ -2642,8 +2727,10 @@ void ExecuteSignal(SMC_Signal &sig)
    double lotSize = CalculateLotSize();
    if(lotSize <= 0) { ReleaseOpenLock(); return; }
    
-   // Bloquer les signaux contraires à la direction IA principale (si confiance suffisante)
-   if(g_lastAIConfidence >= MinAIConfidence)
+   // Bloquer les signaux contraires à la direction IA principale
+   // uniquement si la confiance IA est vraiment forte (>= max(MinAIConfidence, 60%))
+   double strongAIThreshold = MathMax(MinAIConfidence, 0.60);
+   if(g_lastAIConfidence >= strongAIThreshold)
    {
       if((g_lastAIAction == "BUY" || g_lastAIAction == "buy") && sig.action == "SELL")
       {

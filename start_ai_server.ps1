@@ -1,14 +1,37 @@
-# Script PowerShell pour démarrer le serveur IA TradBOT en arrière-plan
-Write-Host "Démarrage du serveur IA TradBOT..." -ForegroundColor Green
+# Script PowerShell pour démarrer le serveur IA TradBOT avec venv
+Write-Host "========================================" -ForegroundColor Cyan
+Write-Host "  Démarrage du Serveur IA TradBOT" -ForegroundColor Cyan
+Write-Host "========================================" -ForegroundColor Cyan
+Write-Host ""
 
 cd 'D:\Dev\TradBOT'
 
-# Lancer le serveur en arrière-plan
-Start-Process -FilePath ".\.venv\Scripts\python.exe" `
-    -ArgumentList "ai_server.py" `
-    -WindowStyle Hidden `
-    -PassThru | Out-Null
+# Vérifier si l'environnement virtuel existe
+$venvPython = ".\venv\Scripts\python.exe"
+if (-not (Test-Path $venvPython)) {
+    Write-Host "❌ Environnement virtuel venv non trouvé!" -ForegroundColor Red
+    Write-Host "💡 Créez-le avec:" -ForegroundColor Yellow
+    Write-Host "   python -m venv venv" -ForegroundColor White
+    Write-Host "   venv\Scripts\activate" -ForegroundColor White
+    Write-Host "   pip install fastapi uvicorn pandas numpy requests joblib" -ForegroundColor White
+    Write-Host ""
+    Read-Host "Appuyez sur Entrée pour quitter"
+    exit 1
+}
 
-Write-Host "Serveur IA démarré en arrière-plan sur http://127.0.0.1:8000/" -ForegroundColor Green
-Write-Host "Pour arrêter le serveur, utilisez: Get-Process python | Where-Object {$_.Path -like '*TradBOT*'} | Stop-Process" -ForegroundColor Yellow
+Write-Host "✅ Environnement virtuel trouvé" -ForegroundColor Green
+Write-Host "🚀 Démarrage du serveur IA..." -ForegroundColor Yellow
+Write-Host ""
+
+# Lancer le serveur avec l'environnement virtuel
+try {
+    & $venvPython ai_server.py
+} catch {
+    Write-Host "❌ Erreur lors du démarrage du serveur:" -ForegroundColor Red
+    Write-Host $_.Exception.Message -ForegroundColor Red
+}
+
+Write-Host ""
+Write-Host "🛑 Serveur IA arrêté" -ForegroundColor Yellow
+Read-Host "Appuyez sur Entrée pour quitter"
 

@@ -2968,10 +2968,11 @@ async def save_decision_to_supabase(request: DecisionRequest, response: Decision
             if not (0.0 <= accuracy_decimal <= 1.0):
                 accuracy_decimal = 0.5
 
+            # Sauvegarder l'accuracy en POURCENTAGE (0-100) pour coller à l'affichage MT5
             metrics_payload = {
                 "symbol": request.symbol,
                 "timeframe": "M1",
-                "accuracy": float(accuracy_decimal),
+                "accuracy": float(accuracy_decimal * 100.0),
                 "metadata": {
                     "model_used": response.model_used or "technical_ml_enhanced",
                     "last_action": response.action,

@@ -4416,7 +4416,7 @@ class MT5AIClient:
                         last_aggressive_check = current_time
                     
                     if current_time - last_neutral_check >= 60:
-                        self.monitor_all_symbols_neutral_decisions()
+                        logger.info("📊 Surveillance des décisions neutres - désactivée")
                         last_neutral_check = current_time
                     
                     if current_time - last_sl_check >= 60:
@@ -4445,7 +4445,7 @@ class MT5AIClient:
         except KeyboardInterrupt:
             logger.info("🛑 Arrêt demandé par l'utilisateur")
         finally:
-            self.disconnect_mt5()
+            # logger.info("👋 Client MT5 AI arrêté")
             logger.info("👋 Client MT5 AI arrêté")
 
 if __name__ == "__main__":

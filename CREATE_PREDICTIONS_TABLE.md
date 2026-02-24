@@ -51,3 +51,4 @@ Les 4 tables devraient maintenant être:
 - **Dashboard**: https://supabase.com/dashboard
 - **Project**: KolaTradeBoT
 - **Project ID**: bpzqnooiisgadzicwupi
+
