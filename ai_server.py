@@ -1066,16 +1066,20 @@ def get_market_data(symbol: str, timeframe: str = "M1", count: int = 1000) -> pd
 # Charger les variables d'environnement
 try:
     from dotenv import load_dotenv
-    # Charger explicitement depuis le répertoire courant
-    env_path = Path(__file__).parent / '.env'
+    base_dir = Path(__file__).parent
+    env_path = base_dir / '.env'
+    supabase_env_path = base_dir / '.env.supabase'
     if env_path.exists():
         load_dotenv(env_path)
         logger.info(f"✅ Fichier .env chargé depuis: {env_path}")
+    elif supabase_env_path.exists():
+        load_dotenv(supabase_env_path)
+        logger.info(f"✅ Fichier .env.supabase chargé depuis: {supabase_env_path}")
     else:
         load_dotenv()  # Essaie de charger depuis le répertoire courant
         logger.info(
             "✅ Variables d'environnement chargées "
-            "(fichier .env non trouvé, utilisation des variables système)"
+            "(aucun fichier .env/.env.supabase trouvé, utilisation des variables système)"
         )
 except ImportError:
     logger.warning(
@@ -2942,6 +2946,62 @@ async def save_decision_to_supabase(request: DecisionRequest, response: Decision
                 
         except Exception as e:
             logger.error(f"❌ Erreur connexion Supabase: {e}")
+
+    # Enregistrer également une métrique simple dans model_metrics pour activer l'apprentissage continu
+    try:
+        if supabase_key:
+            # Extraire une "accuracy" proxy à partir de la confiance (décimale)
+            accuracy_decimal = None
+            meta = getattr(response, "metadata", None)
+            if isinstance(meta, dict) and "confidence_decimal" in meta:
+                try:
+                    accuracy_decimal = float(meta.get("confidence_decimal"))
+                except (TypeError, ValueError):
+                    accuracy_decimal = None
+            if accuracy_decimal is None:
+                try:
+                    # response.confidence est renvoyée en pourcentage (0-100)
+                    accuracy_decimal = float(response.confidence) / 100.0
+                except Exception:
+                    accuracy_decimal = 0.5
+
+            if not (0.0 <= accuracy_decimal <= 1.0):
+                accuracy_decimal = 0.5
+
+            metrics_payload = {
+                "symbol": request.symbol,
+                "timeframe": "M1",
+                "accuracy": float(accuracy_decimal),
+                "metadata": {
+                    "model_used": response.model_used or "technical_ml_enhanced",
+                    "last_action": response.action,
+                    "last_confidence_pct": float(response.confidence),
+                    "reason_sample": response.reason[:240] if isinstance(response.reason, str) else "",
+                },
+            }
+
+            try:
+                async with httpx.AsyncClient() as client:
+                    r_metrics = await client.post(
+                        f"{supabase_url}/rest/v1/model_metrics",
+                        json=metrics_payload,
+                        headers=headers,
+                        timeout=10.0,
+                    )
+                    if r_metrics.status_code not in (200, 201):
+                        logger.debug(
+                            f"Supabase model_metrics: statut {r_metrics.status_code} "
+                            f"body={r_metrics.text}"
+                        )
+                    else:
+                        logger.debug(
+                            f"✅ model_metrics insérée pour {request.symbol} "
+                            f"accuracy={metrics_payload['accuracy']:.3f}"
+                        )
+            except Exception as e:
+                logger.debug(f"Supabase model_metrics: {e}")
+    except Exception as e:
+        logger.debug(f"Erreur lors de la sauvegarde dans model_metrics: {e}")
 
 
 async def fetch_supabase_ml_context(symbol: str, timeframe: str = "M1") -> Dict[str, Any]:
