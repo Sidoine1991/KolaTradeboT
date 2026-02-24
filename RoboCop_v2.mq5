@@ -303,25 +303,50 @@ void OnTick()
    //--- Détection des nouveaux signaux de trading
    string signal = GetTradeSignal();
    
-   // Éviter les signaux répétés (cooldown de 30 secondes)
-   static datetime lastSignalTime = 0;
-   if(TimeCurrent() - lastSignalTime < 30)
-   {
-      return; // Cooldown actif
-   }
+   // Debug: Afficher le signal reçu
+   Print("🎯 Signal reçu: ", signal);
    
-   if(signal == "BUY" && lastSignal != "BUY")
-   {
-      OpenBuyOrder();
-      lastSignal = "BUY";
-      lastSignalTime = TimeCurrent();
-   }
-   else if(signal == "SELL" && lastSignal != "SELL")
-   {
-      OpenSellOrder();
-      lastSignal = "SELL";
-      lastSignalTime = TimeCurrent();
-   }
+   // TEMPORAIREMENT DÉSACTIVÉ: Logique simplifiée pour Boom/Crash
+   // if(StringFind(_Symbol, "Boom") >= 0 || StringFind(_Symbol, "Crash") >= 0)
+   // {
+   //    // Pour Boom/Crash, utiliser directement le signal de l'IA
+   //    if(signal == "BUY" && lastSignal != "BUY")
+   //    {
+   //       // Seulement BUY sur Boom
+   //       if(StringFind(_Symbol, "Boom") >= 0)
+   //       {
+   //          OpenBuyOrder();
+   //          lastSignal = "BUY";
+   //          Print("Trade Boom: BUY exécuté");
+   //       }
+   //    }
+   //    else if(signal == "SELL" && lastSignal != "SELL")
+   //    {
+   //       // Seulement SELL sur Crash
+   //       if(StringFind(_Symbol, "Crash") >= 0)
+   //       {
+   //          OpenSellOrder();
+   //          lastSignal = "SELL";
+   //          Print("Trade Crash: SELL exécuté");
+   //       }
+   //    }
+   // }
+   // else
+   // {
+      // Logique normale pour les autres symboles
+      if(signal == "BUY" && lastSignal != "BUY")
+      {
+         OpenBuyOrder();
+         lastSignal = "BUY";
+         Print("Trade: BUY exécuté");
+      }
+      else if(signal == "SELL" && lastSignal != "SELL")
+      {
+         OpenSellOrder();
+         lastSignal = "SELL";
+         Print("Trade: SELL exécuté");
+      }
+   // }
 
    //--- Vérification des nouvelles barres
    static datetime lastBarTime = 0;
@@ -345,40 +370,6 @@ bool IsNewBar()
       return true;
    }
    return false;
-}
-
-//+------------------------------------------------------------------+
-//| Vérifie les heures de trading autorisées                        |
-//+------------------------------------------------------------------+
-bool IsAllowedHour()
-{
-   MqlDateTime dt;
-   TimeToStruct(TimeCurrent(), dt);
-   int hour = dt.hour;
-   return ((hour >= HourStart1 && hour < HourEnd1) || (hour >= HourStart2 && hour < HourEnd2));
-}
-
-//+------------------------------------------------------------------+
-//| Vérifie si le spread est acceptable                             |
-//+------------------------------------------------------------------+
-bool IsSpreadAllowed()
-{
-   long spread = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
-   if(spread <= 0)
-   {
-      spread = (long)MathRound((SymbolInfoDouble(_Symbol, SYMBOL_ASK) - SymbolInfoDouble(_Symbol, SYMBOL_BID)) / _Point);
-   }
-   return (spread <= MaxSpreadPoints);
-}
-
-//+------------------------------------------------------------------+
-//| Met à jour les variables globales                               |
-//+------------------------------------------------------------------+
-void UpdateGlobalVariables()
-{
-   equityPeak = MathMax(equityPeak, AccountInfoDouble(ACCOUNT_EQUITY));
-   drawdown = (equityPeak - AccountInfoDouble(ACCOUNT_EQUITY)) / equityPeak * 100;
-   maxDrawdown = MathMax(maxDrawdown, drawdown);
 }
 
 //+------------------------------------------------------------------+
@@ -621,7 +612,7 @@ string GetTradeSignal()
 string GetAIServerSignal()
 {
    // Essayer l'URL Render d'abord, puis localhost en fallback
-   string urls[] = {"https://tradbot-ai.onrender.com/decision", "http://localhost:8000/decision"};
+   string urls[] = {"https://kolatradebot.onrender.com/decision", "http://localhost:8000/decision"};
    string headers = "Content-Type: application/json\r\n";
    char post[];
    uchar response[];
@@ -632,16 +623,33 @@ string GetAIServerSignal()
    double rsiValue[1];
    CopyBuffer(rsiHandle, 0, 0, 1, rsiValue);
    
+   // Obtenir les valeurs EMA pour M1 et H1
+   double emaFastM1[1], emaSlowM1[1], emaFastH1[1], emaSlowH1[1], atrValue[1];
+   int emaM1Handle9 = iMA(_Symbol, PERIOD_M1, 9, 0, MODE_EMA, PRICE_CLOSE);
+   int emaM1Handle21 = iMA(_Symbol, PERIOD_M1, 21, 0, MODE_EMA, PRICE_CLOSE);
+   int emaH1Handle9 = iMA(_Symbol, PERIOD_H1, 9, 0, MODE_EMA, PRICE_CLOSE);
+   int emaH1Handle21 = iMA(_Symbol, PERIOD_H1, 21, 0, MODE_EMA, PRICE_CLOSE);
+   int atrHandleCurrent = iATR(_Symbol, PERIOD_CURRENT, 14);
+   
+   CopyBuffer(emaM1Handle9, 0, 0, 1, emaFastM1);
+   CopyBuffer(emaM1Handle21, 0, 0, 1, emaSlowM1);
+   CopyBuffer(emaH1Handle9, 0, 0, 1, emaFastH1);
+   CopyBuffer(emaH1Handle21, 0, 0, 1, emaSlowH1);
+   CopyBuffer(atrHandleCurrent, 0, 0, 1, atrValue);
+   
    // Créer le JSON de la requête
    string jsonRequest = StringFormat("{\"symbol\":\"%s\",\"bid\":%.5f,\"ask\":%.5f,\"rsi\":%.2f,\"ema_fast_m1\":%.5f,\"ema_slow_m1\":%.5f,\"ema_fast_h1\":%.5f,\"ema_slow_h1\":%.5f,\"atr\":%.5f,\"timestamp\":\"%s\"}",
       _Symbol, bid, ask, rsiValue[0], 
-      iMA(_Symbol, PERIOD_M1, 9, 0, MODE_EMA, PRICE_CLOSE),
-      iMA(_Symbol, PERIOD_M1, 21, 0, MODE_EMA, PRICE_CLOSE),
-      iMA(_Symbol, PERIOD_H1, 9, 0, MODE_EMA, PRICE_CLOSE),
-      iMA(_Symbol, PERIOD_H1, 21, 0, MODE_EMA, PRICE_CLOSE),
-      iATR(_Symbol, PERIOD_CURRENT, 14),
+      emaFastM1[0], emaSlowM1[0], emaFastH1[0], emaSlowH1[0],
+      atrValue[0],
       TimeToString(TimeCurrent())
    );
+   
+   // Debug: Afficher les données envoyées
+   Print("📊 Données envoyées: ", jsonRequest);
+   Print("🔍 EMA M1 Fast: ", emaFastM1[0], " Slow: ", emaSlowM1[0]);
+   Print("🔍 EMA H1 Fast: ", emaFastH1[0], " Slow: ", emaSlowH1[0]);
+   Print("🔍 RSI: ", rsiValue[0], " ATR: ", atrValue[0]);
    
    // Convertir en tableau de caractères
    StringToCharArray(jsonRequest, post);
@@ -682,9 +690,9 @@ string GetAIServerSignal()
                      string confStr = StringSubstr(jsonResponse, confStart, confEnd - confStart);
                      double confidence = StringToDouble(confStr);
                      
-                     // Accepter le signal seulement si confiance >= 0.6
+                     // Accepter le signal seulement si confiance >= 0.3 (temporairement pour test)
                      bool isValidAction = (action == "buy" || action == "sell");
-                     if(confidence >= 0.6 && isValidAction)
+                     if(confidence >= 0.3 && isValidAction)
                      {
                         string serverType = (i == 0) ? "Render" : "Localhost";
                         Print("Signal IA reçu depuis ", serverType, ": ", action, " (confiance: ", confidence, ")");
@@ -1112,18 +1120,18 @@ void CheckForNewBar()
 //+------------------------------------------------------------------+
 string GetMarketStateFromRender()
 {
-   string urls[] = {"https://tradbot-ai.onrender.com/market-state", "http://localhost:8000/market-state"};
+   string urls[] = {"https://kolatradebot.onrender.com/market-state", "http://localhost:8000/market-state"};
    string headers = "Content-Type: application/json\r\n";
    string params = StringFormat("?symbol=%s&timeframe=%s", _Symbol, EnumToString(_Period));
    uchar response[];
+   string result_headers;
    
    for(int i = 0; i < ArraySize(urls); i++)
    {
       string url = urls[i] + params;
       int timeout = 3000; // 3 secondes
-      uchar response[];
-      string result_headers;
-      int res = WebRequest("GET", url, "", timeout, response, response, result_headers);
+      uchar data[]; // Données à envoyer (vide pour GET)
+      int res = WebRequest("GET", url, headers, timeout, data, response, result_headers);
       
       if(res == 200)
       {
@@ -1134,5 +1142,53 @@ string GetMarketStateFromRender()
    }
    
    return "";
+}
+//+------------------------------------------------------------------+
+//| Vérifie si l'heure actuelle est autorisée pour le trading          |
+//+------------------------------------------------------------------+
+bool IsAllowedHour()
+{
+   MqlDateTime timeStruct;
+   TimeToStruct(TimeCurrent(), timeStruct);
+   int currentHour = timeStruct.hour;
+   
+   // Sessions de trading configurées
+   if(currentHour >= HourStart1 && currentHour <= HourEnd1)
+      return true;
+   if(currentHour >= HourStart2 && currentHour <= HourEnd2)
+      return true;
+      
+   return false;
+}
+
+//+------------------------------------------------------------------+
+//| Vérifie si le spread actuel est acceptable                         |
+//+------------------------------------------------------------------+
+bool IsSpreadAllowed()
+{
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   double spread = (ask - bid) / point;
+   return (spread <= MaxSpreadPoints);
+}
+//+------------------------------------------------------------------+
+//| Met à jour les variables globales du terminal                       |
+//+------------------------------------------------------------------+
+void UpdateGlobalVariables()
+{
+   // Calculer le winRate s'il n'existe pas
+   double winRate = (totalTrades > 0) ? ((double)winningTrades / totalTrades * 100) : 0;
+   
+   // Mettre à jour les variables globales pour le suivi
+   GlobalVariableSet("RoboCop_TotalTrades", totalTrades);
+   GlobalVariableSet("RoboCop_WinningTrades", winningTrades);
+   GlobalVariableSet("RoboCop_LosingTrades", losingTrades);
+   GlobalVariableSet("RoboCop_TotalProfit", dailyProfit);
+   GlobalVariableSet("RoboCop_DailyProfit", dailyProfit);
+   GlobalVariableSet("RoboCop_WinRate", winRate);
+   GlobalVariableSet("RoboCop_ProfitFactor", profitFactor);
+   GlobalVariableSet("RoboCop_LastSignal", StringToDouble(lastSignal));
+   GlobalVariableSet("RoboCop_EAState", (int)eaState);
 }
 //+------------------------------------------------------------------+
