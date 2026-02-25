@@ -32,7 +32,8 @@ class IntegratedMLTrainer:
     """Système d'entraînement continu intégré à l'API"""
     
     def __init__(self):
-        self.models_dir = "models"
+        self.models_dir = os.getenv("MODELS_DIR", "models")
+        os.makedirs(self.models_dir, exist_ok=True)
         self.supabase_url = os.getenv("SUPABASE_URL", "https://bpzqnooiisgadzicwupi.supabase.co")
         self.supabase_key = os.getenv("SUPABASE_ANON_KEY")
         self.training_interval = 300  # 5 minutes
