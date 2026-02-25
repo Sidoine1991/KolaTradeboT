@@ -2880,10 +2880,9 @@ async def decision_simplified(request: DecisionRequest):
         }
     )
     
-    # 11. Sauvegarder la décision dans Supabase
+    # 11. Sauvegarder la décision dans Supabase (local OU cloud) si les clés sont disponibles
     try:
-        if RUNNING_ON_SUPABASE:
-            await save_decision_to_supabase(request, response, ml_result)
+        await save_decision_to_supabase(request, response, ml_result)
     except Exception as e:
         logger.error(f"❌ Erreur sauvegarde décision Supabase: {e}")
     
@@ -2895,6 +2894,9 @@ async def save_decision_to_supabase(request: DecisionRequest, response: Decision
     
     supabase_url = os.getenv("SUPABASE_URL", "https://bpzqnooiisgadzicwupi.supabase.co")
     supabase_key = os.getenv("SUPABASE_ANON_KEY")
+    if not supabase_url or not supabase_key:
+        logger.debug("Supabase non configuré (SUPABASE_URL ou SUPABASE_ANON_KEY manquant) - saut de la sauvegarde.")
+        return
     
     headers = {
         "apikey": supabase_key,
