@@ -2863,14 +2863,60 @@ async def decision_simplified(request: DecisionRequest):
         reason += f"[ML: {ml_result['ml_reason']}] "
         logger.info(f"🧠 ML Enhancement: {base_action} → {action} ({base_confidence:.2f} → {confidence:.2f})")
     
-    # 7. Ajustements finaux
+    # 7. Règles agressives spécifiques Boom/Crash (plus de BUY/SELL, moins de HOLD)
+    try:
+        if IMPROVEMENTS_AVAILABLE and is_boom_crash_symbol(str(request.symbol)):
+            symbol_lower = str(request.symbol).lower()
+            is_boom = "boom" in symbol_lower
+            is_crash = "crash" in symbol_lower
+            
+            ema_fast_m1 = request.ema_fast_m1 or 0.0
+            ema_slow_m1 = request.ema_slow_m1 or 0.0
+            ema_fast_m5 = request.ema_fast_m5 or 0.0
+            ema_slow_m5 = request.ema_slow_m5 or 0.0
+            ema_fast_h1 = request.ema_fast_h1 or 0.0
+            ema_slow_h1 = request.ema_slow_h1 or 0.0
+            
+            ema_up = (
+                (ema_fast_m1 > ema_slow_m1) or
+                (ema_fast_m5 > ema_slow_m5) or
+                (ema_fast_h1 > ema_slow_h1)
+            )
+            ema_down = (
+                (ema_fast_m1 < ema_slow_m1) or
+                (ema_fast_m5 < ema_slow_m5) or
+                (ema_fast_h1 < ema_slow_h1)
+            )
+            
+            # Si IA est en HOLD mais la tendance est claire, forcer une décision
+            if action == "hold":
+                if is_boom and ema_up:
+                    action = "buy"
+                    confidence = max(confidence, 0.6)
+                    reason += "[Boom agressif: tendance haussière → BUY] "
+                elif is_crash and ema_down:
+                    action = "sell"
+                    confidence = max(confidence, 0.6)
+                    reason += "[Crash agressif: tendance baissière → SELL] "
+            
+            # Si déjà BUY/SELL aligné avec la tendance, renforcer légèrement la confiance
+            elif is_boom and action == "buy" and ema_up:
+                confidence = min(0.95, max(confidence, 0.7))
+                reason += "[Boom agressif: BUY confirmé par tendance] "
+            elif is_crash and action == "sell" and ema_down:
+                confidence = min(0.95, max(confidence, 0.7))
+                reason += "[Crash agressif: SELL confirmé par tendance] "
+    except Exception as e:
+        logger.debug(f"Règles agressives Boom/Crash ignorées: {e}")
+    
+    # 8. Ajustements finaux (garder une confiance minimale même sur HOLD)
     if action == "hold":
         confidence = max(0.3, confidence - 0.2)
     
-    # 8. Confiance pour MT5: envoyer décimale 0-1 (l'EA attend 0-1 et affiche *100)
+    # 9. Confiance pour MT5: envoyer décimale 0-1 (l'EA attend 0-1 et affiche *100)
     confidence_percentage = confidence
     
-    # 9. Calcul SL/TP
+    # 10. Calcul SL/TP
     stop_loss = None
     take_profit = None
     
