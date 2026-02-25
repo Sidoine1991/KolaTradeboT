@@ -262,6 +262,60 @@ class IntegratedMLTrainer:
         
         return metrics
     
+    def predict(self, symbol: str, timeframe: str, market_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """
+        Prédiction avec Random Forest si modèle disponible.
+        Retourne {"action": "buy|sell|hold", "confidence": float 0-1, "model": "random_forest"} ou None.
+        """
+        models = self.load_existing_models()
+        key = f"{symbol}_{timeframe}"
+        if key not in models:
+            return None
+        m = models[key]
+        model_obj = m.get("model")
+        scaler = m.get("scaler")
+        features_used = m.get("metrics", {}).get("features_used") if isinstance(m.get("metrics"), dict) else None
+        if not features_used and os.path.exists(os.path.join(self.models_dir, f"{key}_metrics.json")):
+            try:
+                with open(os.path.join(self.models_dir, f"{key}_metrics.json")) as f:
+                    m["metrics"] = json.load(f)
+                    features_used = m["metrics"].get("features_used", [])
+            except Exception:
+                features_used = ["rsi", "atr", "bid", "ask", "confidence"]
+        if not features_used:
+            features_used = ["rsi", "atr", "bid", "ask", "confidence", "ema_fast_m1", "ema_slow_m1", "ema_diff_m1", "ema_fast_h1", "ema_slow_h1", "ema_diff_h1"]
+        req = market_data or {}
+        row = {}
+        for col in features_used:
+            v = req.get(col)
+            if v is None:
+                if col == "ema_diff_m1" and "ema_fast_m1" in req and "ema_slow_m1" in req:
+                    v = float(req.get("ema_fast_m1", 0)) - float(req.get("ema_slow_m1", 1))
+                elif col == "ema_diff_h1" and "ema_fast_h1" in req and "ema_slow_h1" in req:
+                    v = float(req.get("ema_fast_h1", 0)) - float(req.get("ema_slow_h1", 1))
+                elif col in ("rsi", "atr", "bid", "ask", "confidence"):
+                    v = float(req.get(col, 50 if col == "rsi" else (0.001 if col == "atr" else (1.0 if col in ("bid","ask") else 0.5))))
+                else:
+                    v = 0.0
+            row[col] = float(v) if not isinstance(v, (int, float)) else v
+        X = pd.DataFrame([row])
+        for c in features_used:
+            if c not in X.columns:
+                X[c] = 0.0
+        X = X[features_used].fillna(0)
+        try:
+            if scaler is not None:
+                X_scaled = scaler.transform(X)
+            else:
+                X_scaled = X.values
+            pred = int(model_obj.predict(X_scaled)[0])
+            action = "buy" if pred == 1 else ("sell" if pred == 0 else "hold")
+            acc = m.get("metrics", {}).get("random_forest", {}).get("accuracy", 0.6) if isinstance(m.get("metrics"), dict) else 0.6
+            return {"action": action, "confidence": float(acc), "model": "random_forest"}
+        except Exception as e:
+            logger.debug(f"Erreur prédiction ML {key}: {e}")
+            return None
+    
     async def save_metrics_to_supabase(self, metrics: Dict[str, Any]):
         """Sauvegarde les métriques dans Supabase (si table existe)"""
         headers = {

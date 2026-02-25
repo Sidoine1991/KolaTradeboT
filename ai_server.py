@@ -79,19 +79,33 @@ except ImportError as e:
     ML_AVAILABLE = False
     logger.warning(f"⚠️ Système ML non disponible: {e}")
 
-# Fonction pour améliorer les décisions avec ML
+# Fonction pour améliorer les décisions avec ML (Random Forest, ml_enhancer, etc.)
 def enhance_decision_with_ml(symbol: str, decision: str, confidence: float, market_data: dict = None) -> dict:
-    """Améliorer une décision avec le système ML"""
+    """Améliorer une décision avec les modèles ML (Random Forest d'abord, puis ml_enhancer)"""
+    base = {
+        "original_decision": decision,
+        "original_confidence": confidence,
+        "enhanced_decision": decision,
+        "enhanced_confidence": confidence,
+        "ml_reason": "no_model",
+        "ml_applied": False
+    }
+    market_data = market_data or {}
+    # 1. Random Forest (integrated_ml_trainer) si modèle disponible
+    if ML_TRAINER_AVAILABLE:
+        try:
+            pred = ml_trainer.predict(symbol, "M1", market_data)
+            if pred:
+                base["enhanced_decision"] = pred["action"]
+                base["enhanced_confidence"] = pred.get("confidence", confidence)
+                base["ml_reason"] = pred.get("model", "random_forest")
+                base["ml_applied"] = True
+                return base
+        except Exception as e:
+            logger.debug(f"Predict RF skip: {e}")
+    # 2. ml_enhancer (ml_trading_system) si ML_AVAILABLE
     if not ML_AVAILABLE:
-        return {
-            "original_decision": decision,
-            "original_confidence": confidence,
-            "enhanced_decision": decision,
-            "enhanced_confidence": confidence,
-            "ml_reason": "ml_unavailable",
-            "ml_applied": False
-        }
-    
+        return base
     try:
         return ml_enhancer.enhance_decision(symbol, decision, confidence, market_data)
     except Exception as e:
@@ -2853,8 +2867,8 @@ async def decision_simplified(request: DecisionRequest):
     if action == "hold":
         confidence = max(0.3, confidence - 0.2)
     
-    # 8. CONVERTIR LA CONFIANCE EN POURCENTAGE POUR MT5
-    confidence_percentage = int(confidence * 100)
+    # 8. Confiance pour MT5: envoyer décimale 0-1 (l'EA attend 0-1 et affiche *100)
+    confidence_percentage = confidence
     
     # 9. Calcul SL/TP
     stop_loss = None
@@ -2872,7 +2886,7 @@ async def decision_simplified(request: DecisionRequest):
     # 10. Créer la réponse enrichie
     response = DecisionResponse(
         action=action,
-        confidence=confidence_percentage,  # Utiliser le pourcentage pour MT5
+        confidence=confidence_percentage,  # Décimale 0-1 (MT5 affiche *100)
         reason=reason,
         stop_loss=stop_loss,
         take_profit=take_profit,
@@ -2919,7 +2933,7 @@ async def save_decision_to_supabase(request: DecisionRequest, response: Decision
         "symbol": request.symbol,
         "timeframe": "M1",
         "prediction": response.action,
-        "confidence": response.confidence / 100,  # Utiliser la valeur décimale pour Supabase
+        "confidence": response.confidence,  # Déjà 0-1 pour Supabase
         "reason": response.reason,
         "model_used": "technical_ml_enhanced",
         "metadata": {
