@@ -10020,6 +10020,8 @@ async def get_ml_stats():
 async def startup_event():
     """Événements au démarrage du serveur"""
     logger.info("🚀 Démarrage du serveur IA TradBOT...")
+    # Créer le répertoire models pour l'entraînement ML (Render, etc.)
+    os.makedirs("models", exist_ok=True)
     
     # Démarrer l'entraînement continu ML (Supabase: fetch predictions → train → save model_metrics)
     supabase_configured = bool(os.getenv("SUPABASE_URL") and os.getenv("SUPABASE_ANON_KEY"))
