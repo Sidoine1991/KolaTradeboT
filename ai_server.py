@@ -4565,15 +4565,16 @@ async def decision_gemma(request: DecisionRequest):
         raise HTTPException(status_code=500, detail=f"Erreur interne: {type(e).__name__}: {str(e)}")
 
 @app.post("/decision", response_model=DecisionResponse)
-async def decision(request: DecisionRequest):
+async def decision(request: DecisionRequest = Body(...)):
     """
     Endpoint principal de décision utilisé par le robot MT5
     Mode simplifié pour RoboCop v2 ou mode complet selon la configuration
     """
     try:
-        # Validation des champs obligatoires
+        # Validation des champs obligatoires (ne pas renvoyer 422 inutilement)
         if not request.symbol:
-            raise HTTPException(status_code=422, detail="Le symbole est requis")
+            # Si le symbole est manquant, utiliser un fallback neutre au lieu d'un 422
+            request.symbol = "UNKNOWN"
         
         logger.info(f"🎯 Requête DECISION reçue pour {request.symbol}")
         
