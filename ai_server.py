@@ -39,6 +39,10 @@ from collections import deque
 # Configurer le logger avant les imports d'améliorations
 logger = logging.getLogger("tradbot_ai")
 
+# Sur Render / Supabase, utiliser /tmp pour les modèles (accessible en écriture)
+if os.getenv("RENDER") or os.getenv("RENDER_SERVICE_ID") or os.getenv("SUPABASE_URL"):
+    os.environ.setdefault("MODELS_DIR", "/tmp/models")
+
 # ===== SYSTÈME D'APPRENTISSAGE AUTOMATIQUE INTÉGRÉ =====
 # Importer le système ML intégré
 try:
@@ -1839,8 +1843,8 @@ async def train_models_on_startup():
     
     logger.info("🚀 Planification de l'entraînement automatique des modèles ML en arrière-plan...")
     
-    if not ML_AVAILABLE:
-        logger.warning("⚠️ scikit-learn non disponible - entraînement ML désactivé")
+    if not ML_TRAINER_AVAILABLE:
+        logger.warning("⚠️ integrated_ml_trainer non disponible - entraînement ML désactivé")
         return
     
     # Démarrer l'entraînement en arrière-plan pour ne pas bloquer le démarrage
@@ -1868,13 +1872,13 @@ async def train_models_background():
     total_training_tasks = len(priority_symbols) * len(timeframes)
     completed_tasks = 0
     
+    models_dir = getattr(ml_trainer, "models_dir", "models") if ML_TRAINER_AVAILABLE else "models"
+    
     for symbol in priority_symbols:
         for timeframe in timeframes:
             try:
                 model_key = f"{symbol}_{timeframe}"
-                
-                # Vérifier si le modèle existe déjà
-                model_path = f"models/{model_key}_rf.joblib"
+                model_path = os.path.join(models_dir, f"{model_key}_rf.joblib")
                 if os.path.exists(model_path):
                     logger.info(f"✅ Modèle déjà existant pour {model_key}")
                     completed_tasks += 1
@@ -1882,21 +1886,27 @@ async def train_models_background():
                 
                 logger.info(f"📊 Entraînement du modèle pour {symbol} {timeframe}...")
                 
-                # Entraîner le modèle avec timeout
                 try:
-                    train_result = await asyncio.wait_for(
-                        asyncio.to_thread(train_ml_models, symbol, timeframe, historical_data=None),
-                        timeout=60.0  # Timeout de 60 secondes par modèle
+                    if not ML_TRAINER_AVAILABLE:
+                        logger.warning(f"⚠️ integrated_ml_trainer non disponible - skip {model_key}")
+                        continue
+                    df = await asyncio.wait_for(
+                        ml_trainer.fetch_training_data_simple(symbol, timeframe),
+                        timeout=30.0
                     )
-                    
-                    if "error" not in train_result:
+                    if df is None or len(df) < ml_trainer.min_samples_for_retraining:
+                        logger.debug(f"Données insuffisantes pour {model_key}")
+                        continue
+                    train_result = await asyncio.wait_for(
+                        asyncio.to_thread(ml_trainer.train_model_simple, df, symbol, timeframe),
+                        timeout=60.0
+                    )
+                    if train_result:
                         logger.info(f"✅ Modèle entraîné avec succès pour {model_key}")
                         completed_tasks += 1
-                    else:
-                        logger.error(f"❌ Erreur entraînement modèle {model_key}: {train_result['error']}")
                         
                 except asyncio.TimeoutError:
-                    logger.warning(f"⏰ Timeout entraînement modèle {symbol} {timeframe} - Passage au suivant")
+                    logger.warning(f"⏰ Timeout entraînement {symbol} {timeframe} - Passage au suivant")
                     continue
                 
             except Exception as e:
