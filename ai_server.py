@@ -2614,9 +2614,9 @@ indicators_cache = {}
 
 # Modèles Pydantic pour les requêtes/réponses
 class DecisionRequest(BaseModel):
-    symbol: str
-    bid: float
-    ask: float
+    symbol: Optional[str] = "UNKNOWN"
+    bid: Optional[float] = None
+    ask: Optional[float] = None
     rsi: Optional[float] = 50.0  # Valeur neutre par défaut
     ema_fast_h1: Optional[float] = None
     ema_slow_h1: Optional[float] = None
@@ -5018,51 +5018,20 @@ def enhance_spike_prediction_with_history(df: pd.DataFrame, symbol: str) -> Dict
 
 @app.post("/decision", response_model=DecisionResponse)
 async def decision(request: DecisionRequest):
-    # Logging détaillé seulement en mode debug, sinon juste les logs du middleware suffisent
-    logger.debug(f"🎯 Décision IA demandée pour {request.symbol} (bid={request.bid}, ask={request.ask})")
+    # Normaliser les champs manquants pour éviter 422 (robot MT5 peut envoyer payload incomplet)
+    symbol = (request.symbol or "").strip() or "UNKNOWN"
+    bid = request.bid
+    ask = request.ask
+    if bid is None or bid <= 0:
+        bid = (ask - 0.0001) if (ask and ask > 0) else 1.0
+    if ask is None or ask <= 0:
+        ask = (bid + 0.0001) if (bid and bid > 0) else 1.0001
+    if bid >= ask:
+        ask = bid + 0.0001
+    rsi = request.rsi if (request.rsi is not None and 0 <= request.rsi <= 100) else 50.0
+    request = request.model_copy(update={"symbol": symbol, "bid": bid, "ask": ask, "rsi": rsi})
+    logger.debug(f"🎯 Décision IA demandée pour {symbol} (bid={bid}, ask={ask})")
     try:
-        # Validation améliorée avec messages d'erreur plus clairs
-        validation_errors = []
-        
-        if not request.symbol or request.symbol.strip() == "":
-            validation_errors.append("Le symbole est requis et ne peut être vide")
-            
-        if request.bid is None:
-            validation_errors.append("Le prix bid est requis")
-        elif request.bid <= 0:
-            validation_errors.append("Le prix bid doit être supérieur à zéro")
-            
-        if request.ask is None:
-            validation_errors.append("Le prix ask est requis")
-        elif request.ask <= 0:
-            validation_errors.append("Le prix ask doit être supérieur à zéro")
-            
-        if request.bid is not None and request.ask is not None and request.bid >= request.ask:
-            validation_errors.append("Le prix bid doit être inférieur au prix ask")
-            
-        if request.rsi is not None and (request.rsi < 0 or request.rsi > 100):
-            validation_errors.append("La valeur RSI doit être entre 0 et 100")
-        
-        # Si erreurs de validation, retourner 422 avec détails
-        if validation_errors:
-            error_detail = {
-                "detail": [
-                    {
-                        "type": "validation_error",
-                        "msg": error,
-                        "input": {
-                            "symbol": request.symbol,
-                            "bid": request.bid,
-                            "ask": request.ask,
-                            "rsi": request.rsi
-                        }
-                    }
-                    for error in validation_errors
-                ]
-            }
-            logger.warning(f"❌ Validation échouée pour {request.symbol}: {validation_errors}")
-            raise HTTPException(status_code=422, detail=error_detail)
-        
         # ========== AMÉLIORATIONS PRIORITAIRES - APPLIQUÉES TÔT ==========
         # 1. Vérifier le cache court d'abord
         cached_decision = get_cached_decision(request.symbol)
