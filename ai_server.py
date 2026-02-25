@@ -2909,9 +2909,10 @@ async def decision_simplified(request: DecisionRequest):
     except Exception as e:
         logger.debug(f"Règles agressives Boom/Crash ignorées: {e}")
     
-    # 8. Ajustements finaux (garder une confiance minimale même sur HOLD)
+    # 8. Ajustements finaux (laisser une confiance dynamique sur HOLD, éviter un plancher fixe à 30%)
     if action == "hold":
-        confidence = max(0.3, confidence - 0.2)
+        # Garder la confiance calculée (technique + ML), mais éviter 0 absolu
+        confidence = max(0.1, confidence)
     
     # 9. Confiance pour MT5: envoyer décimale 0-1 (l'EA attend 0-1 et affiche *100)
     confidence_percentage = confidence
