@@ -4574,17 +4574,54 @@ async def decision_gemma(request: DecisionRequest):
         logger.error(f"Erreur dans decision_gemma: {type(e).__name__}: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Erreur interne: {type(e).__name__}: {str(e)}")
 
+def _parse_decision_body(raw: bytes) -> DecisionRequest:
+    """Parse le body JSON de manière tolérante pour éviter 422 (robot MT5 payloads variables)."""
+    try:
+        body = json.loads(raw.decode("utf-8") if isinstance(raw, bytes) else raw)
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    # Extraire avec coercions et valeurs par défaut
+    def _float(v, default=0.0):
+        if v is None: return default
+        try: return float(v)
+        except (TypeError, ValueError): return default
+    def _str(v, default="UNKNOWN"):
+        if v is None or v == "": return default
+        return str(v).strip() or default
+    symbol = _str(body.get("symbol"))
+    bid = _float(body.get("bid"), 1.0)
+    ask = _float(body.get("ask"), 1.0001)
+    if bid >= ask:
+        ask = bid + 0.0001
+    return DecisionRequest(
+        symbol=symbol, bid=bid, ask=ask,
+        rsi=min(100, max(0, _float(body.get("rsi"), 50.0))),
+        ema_fast_h1=body.get("ema_fast_h1"), ema_slow_h1=body.get("ema_slow_h1"),
+        ema_fast_m1=body.get("ema_fast_m1"), ema_slow_m1=body.get("ema_slow_m1"),
+        ema_fast_m5=body.get("ema_fast_m5"), ema_slow_m5=body.get("ema_slow_m5"),
+        atr=_float(body.get("atr")), dir_rule=int(body.get("dir_rule", 0) or 0),
+        is_spike_mode=bool(body.get("is_spike_mode", False)),
+        vwap=body.get("vwap"), vwap_distance=body.get("vwap_distance"), above_vwap=body.get("above_vwap"),
+        supertrend_trend=int(body.get("supertrend_trend", 0) or 0),
+        supertrend_line=body.get("supertrend_line"),
+        volatility_regime=int(body.get("volatility_regime", 0) or 0),
+        volatility_ratio=_float(body.get("volatility_ratio"), 1.0),
+        image_filename=body.get("image_filename"), deriv_patterns=body.get("deriv_patterns"),
+        deriv_patterns_bullish=body.get("deriv_patterns_bullish"), deriv_patterns_bearish=body.get("deriv_patterns_bearish"),
+        deriv_patterns_confidence=body.get("deriv_patterns_confidence"), timestamp=body.get("timestamp"),
+    )
+
 @app.post("/decision", response_model=DecisionResponse)
-async def decision(request: DecisionRequest = Body(...)):
+async def decision(req: Request):
     """
     Endpoint principal de décision utilisé par le robot MT5
-    Mode simplifié pour RoboCop v2 ou mode complet selon la configuration
+    Parse le body manuellement pour éviter 422 sur payloads incomplets.
     """
     try:
-        # Validation des champs obligatoires (ne pas renvoyer 422 inutilement)
-        if not request.symbol:
-            # Si le symbole est manquant, utiliser un fallback neutre au lieu d'un 422
-            request.symbol = "UNKNOWN"
+        raw = await req.body()
+        request = _parse_decision_body(raw)
         
         logger.info(f"🎯 Requête DECISION reçue pour {request.symbol}")
         
