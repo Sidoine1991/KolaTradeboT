@@ -10,7 +10,10 @@ import time
 import json
 import logging
 import requests
-import MetaTrader5 as mt5
+try:
+    import MetaTrader5 as mt5
+except ImportError:
+    mt5 = None  # Optionnel (dashboard utilisable sans MT5)
 from datetime import datetime, timedelta
 from flask import Flask, render_template_string, jsonify, request
 import threading
@@ -18,6 +21,7 @@ from collections import deque
 
 # Configuration
 RENDER_API_URL = "https://kolatradebot.onrender.com"
+AI_SERVER_URL = os.getenv("AI_SERVER_URL", "http://localhost:8000")
 # Liste étendue de symboles à surveiller
 SYMBOLS_TO_MONITOR = [
     "Boom 300 Index", "Boom 500 Index", "Boom 1000 Index",
@@ -107,6 +111,11 @@ HTML_TEMPLATE = """
                         </div>
                     </div>
                 </div>
+                <div class="card">
+                    <div class="card-title">Métriques ML / Entraînement</div>
+                    <div id="ml-metrics-content" class="stats-grid"></div>
+                    <canvas id="ml-accuracy-chart" style="max-height: 180px; margin-top: 15px;"></canvas>
+                </div>
             </div>
         </div>
 
@@ -184,8 +193,22 @@ HTML_TEMPLATE = """
             tradeHistory = data.trade_history || [];
             renderTradeHistory();
 
-            // Mise à jour du graphique
+            // Mise à jour du graphique profit
             updateProfitChart(data.daily_stats.profit_history || []);
+            
+            // Métriques ML
+            if (data.ml_metrics && Object.keys(data.ml_metrics).length) {
+                const mlEl = document.getElementById('ml-metrics-content');
+                const gm = data.global_stats || {};
+                mlEl.innerHTML = `
+                    <div class="stat-item"><div class="stat-label">Modèles</div><div class="stat-value">${gm.total_models || 0}</div></div>
+                    <div class="stat-item"><div class="stat-label">Accuracy moy.</div><div class="stat-value">${gm.average_accuracy != null ? (gm.average_accuracy * 100).toFixed(1) + '%' : 'N/A'}</div></div>
+                    <div class="stat-item"><div class="stat-label">Statut</div><div class="stat-value">${data.ml_metrics.status === 'running' ? 'Actif' : 'Arrêté'}</div></div>
+                `;
+                updateMLAccuracyChart(data.ml_metrics);
+            } else {
+                document.getElementById('ml-metrics-content').innerHTML = '<p style="color:#888;">En attente du serveur IA...</p>';
+            }
             
             // Footer
             document.getElementById('last-sync').textContent = data.last_sync_time;
@@ -215,6 +238,33 @@ HTML_TEMPLATE = """
             document.getElementById('page-info').textContent = `Page ${currentPage} sur ${Math.ceil(tradeHistory.length / rowsPerPage)}`;
             document.getElementById('prev-page').disabled = currentPage === 1;
             document.getElementById('next-page').disabled = currentPage * rowsPerPage >= tradeHistory.length;
+        }
+
+        function updateMLAccuracyChart(mlMetrics) {
+            const metrics = mlMetrics.metrics || {};
+            const labels = Object.keys(metrics);
+            const accs = labels.map(k => {
+                const m = metrics[k];
+                const rf = m && m.metrics && m.metrics.random_forest;
+                return rf && rf.accuracy != null ? (rf.accuracy * 100) : 0;
+            });
+            const ctx = document.getElementById('ml-accuracy-chart');
+            if (!ctx || !ctx.getContext) return;
+            const c2d = ctx.getContext('2d');
+            if (window.mlChart) {
+                window.mlChart.data.labels = labels;
+                window.mlChart.data.datasets[0].data = accs;
+                window.mlChart.update();
+            } else if (labels.length > 0) {
+                window.mlChart = new Chart(c2d, {
+                    type: 'bar',
+                    data: {
+                        labels: labels.map(l => l.replace('_M1','').replace('_M5','')),
+                        datasets: [{ label: 'Accuracy %', data: accs, backgroundColor: 'rgba(30, 144, 255, 0.5)' }]
+                    },
+                    options: { responsive: true, scales: { y: { min: 0, max: 100 } } }
+                });
+            }
         }
 
         function updateProfitChart(profitHistory) {
@@ -250,7 +300,7 @@ HTML_TEMPLATE = """
         }
 
         function fetchData() {
-            fetch('/api/data')
+            fetch('api/data')
                 .then(response => response.json())
                 .then(data => renderDashboard(data))
                 .catch(error => console.error('Erreur de fetch:', error));
@@ -338,12 +388,26 @@ def index():
     """Page principale du dashboard"""
     return render_template_string(HTML_TEMPLATE)
 
+def _fetch_ai_server_dashboard():
+    """Récupère les métriques ML du serveur IA et les fusionne dans global_data."""
+    try:
+        r = requests.get(f"{AI_SERVER_URL}/dashboard", timeout=3)
+        if r.status_code == 200:
+            data = r.json()
+            if data.get("status") in ("ok", "success") and "data" in data:
+                d = data["data"]
+                global_data["ml_metrics"] = d.get("ml_metrics", {})
+                global_data["global_stats"] = d.get("global_stats", {})
+    except Exception as e:
+        logging.debug("Serveur IA non disponible pour dashboard: %s", str(e)[:80])
+
 @app.route('/api/data')
 def api_data():
     """API endpoint pour les données du dashboard"""
-    # Convertir le deque en liste pour la sérialisation JSON
+    _fetch_ai_server_dashboard()
     data_copy = global_data.copy()
     data_copy['trade_history'] = list(global_data['trade_history'])
+    data_copy['global_stats'] = global_data.get('global_stats', {})
     return jsonify(data_copy)
 
 @app.route('/api/sync', methods=['POST'])
