@@ -15,18 +15,62 @@ import numpy as np
 from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional
 import httpx
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import accuracy_score, f1_score, classification_report
 from dotenv import load_dotenv
 import warnings
 warnings.filterwarnings('ignore')
 
+try:
+    import xgboost as xgb
+    XGBOOST_AVAILABLE = True
+except ImportError:
+    XGBOOST_AVAILABLE = False
+
+try:
+    import lightgbm as lgb
+    LIGHTGBM_AVAILABLE = True
+except ImportError:
+    LIGHTGBM_AVAILABLE = False
+
 # Charger les variables d'environnement
 load_dotenv('.env.supabase')
 
 # Configuration
 logger = logging.getLogger("tradbot_ml_trainer")
+
+# Modèle par catégorie de symbole (BOOM_CRASH, VOLATILITY, FOREX, CRYPTO, STEP, JUMP)
+MODEL_BY_CATEGORY = {
+    "BOOM_CRASH": "xgboost",      # Spikes, patterns binaires
+    "VOLATILITY": "xgboost",      # Indices volatilité
+    "STEP": "lightgbm",           # Step indices
+    "JUMP": "lightgbm",           # Jump indices
+    "FOREX": "lightgbm",         # Paires forex
+    "CRYPTO": "xgboost",         # Crypto
+    "STOCKS": "lightgbm",        # Actions
+    "UNIVERSAL": "random_forest", # Fallback
+}
+
+
+def get_symbol_category(symbol: str) -> str:
+    """Détermine la catégorie du symbole pour le choix du modèle."""
+    s = (symbol or "").upper()
+    if "BOOM" in s or "CRASH" in s:
+        return "BOOM_CRASH"
+    if "VOLATILITY" in s or "RANGE BREAK" in s or "VOLSWITCH" in s or "SKEW" in s:
+        return "VOLATILITY"
+    if "STEP" in s or "MULTI STEP" in s:
+        return "STEP"
+    if "JUMP" in s or "DEX" in s or "DRIFT" in s or "TREK" in s:
+        return "JUMP"
+    if any(p in s for p in ["USD", "EUR", "GBP", "JPY", "AUD", "CAD", "CHF", "NZD"]):
+        return "FOREX"
+    if any(c in s for c in ["BTC", "ETH", "XRP", "ADA", "SOL", "DOT", "LTC", "BCH"]):
+        return "CRYPTO"
+    if any(st in s for st in ["AAPL", "MSFT", "GOOG", "TSLA", "AMZN", "NVDA"]):
+        return "STOCKS"
+    return "UNIVERSAL"
 
 class IntegratedMLTrainer:
     """Système d'entraînement continu intégré à l'API"""
@@ -52,39 +96,41 @@ class IntegratedMLTrainer:
         self.cache_duration = 60  # 1 minute de cache
         
     def load_existing_models(self) -> Dict[str, Any]:
-        """Charge tous les modèles existants"""
+        """Charge tous les modèles existants (RF, XGBoost, LightGBM)."""
         models = {}
+        suffixes = ["_rf.joblib", "_xgboost.joblib", "_lightgbm.joblib"]
         
         if not os.path.exists(self.models_dir):
             logger.warning(f"Répertoire {self.models_dir} non trouvé")
             return models
             
         for file in os.listdir(self.models_dir):
-            if file.endswith('_rf.joblib'):
-                # Extraire symbole et timeframe
-                parts = file.replace('_rf.joblib', '').split('_')
-                if len(parts) >= 2:
-                    symbol = '_'.join(parts[:-1])
-                    timeframe = parts[-1]
-                    key = f"{symbol}_{timeframe}"
-                    
-                    try:
-                        model_path = os.path.join(self.models_dir, file)
-                        scaler_path = os.path.join(self.models_dir, file.replace('_rf.joblib', '_scaler.joblib'))
-                        metrics_path = os.path.join(self.models_dir, file.replace('_rf.joblib', '_metrics.json'))
-                        
-                        models[key] = {
-                            'model': joblib.load(model_path),
-                            'scaler': joblib.load(scaler_path) if os.path.exists(scaler_path) else None,
-                            'metrics': json.load(open(metrics_path)) if os.path.exists(metrics_path) else {},
-                            'symbol': symbol,
-                            'timeframe': timeframe,
-                            'last_training': datetime.now()
-                        }
-                        logger.info(f"✅ Modèle chargé: {key}")
-                    except Exception as e:
-                        logger.error(f"❌ Erreur chargement modèle {file}: {e}")
-                        
+            for suf in suffixes:
+                if file.endswith(suf):
+                    base = file.replace(suf, "")
+                    parts = base.split("_")
+                    if len(parts) >= 2:
+                        symbol = "_".join(parts[:-1])
+                        timeframe = parts[-1]
+                        key = base
+                        model_type = suf.replace(".joblib", "").lstrip("_")
+                        try:
+                            model_path = os.path.join(self.models_dir, file)
+                            scaler_path = os.path.join(self.models_dir, base + "_scaler.joblib")
+                            metrics_path = os.path.join(self.models_dir, base + "_metrics.json")
+                            models[key] = {
+                                'model': joblib.load(model_path),
+                                'scaler': joblib.load(scaler_path) if os.path.exists(scaler_path) else None,
+                                'metrics': json.load(open(metrics_path)) if os.path.exists(metrics_path) else {},
+                                'symbol': symbol,
+                                'timeframe': timeframe,
+                                'model_type': model_type,
+                                'last_training': datetime.now()
+                            }
+                            logger.info(f"✅ Modèle chargé: {key} ({model_type})")
+                        except Exception as e:
+                            logger.error(f"❌ Erreur chargement modèle {file}: {e}")
+                    break
         return models
     
     async def fetch_training_data_simple(self, symbol: str, timeframe: str = "M1", limit: int = 1000) -> Optional[pd.DataFrame]:
@@ -194,72 +240,74 @@ class IntegratedMLTrainer:
             
         return pd.DataFrame(training_data)
     
+    def _create_model(self, model_type: str):
+        """Crée un modèle selon le type (xgboost, lightgbm, random_forest)."""
+        if model_type == "xgboost" and XGBOOST_AVAILABLE:
+            return xgb.XGBClassifier(n_estimators=80, max_depth=6, learning_rate=0.1, random_state=42, use_label_encoder=False, eval_metric="logloss")
+        if model_type == "lightgbm" and LIGHTGBM_AVAILABLE:
+            return lgb.LGBMClassifier(n_estimators=80, max_depth=6, learning_rate=0.1, random_state=42, verbose=-1)
+        return RandomForestClassifier(n_estimators=50, max_depth=8, min_samples_split=5, random_state=42)
+
     def train_model_simple(self, df: pd.DataFrame, symbol: str, timeframe: str) -> Dict[str, Any]:
-        """Entraîne un modèle avec les nouvelles données (version simplifiée)"""
+        """Entraîne un modèle adapté à la catégorie du symbole (XGBoost, LightGBM, Random Forest)."""
         if len(df) < self.min_samples_for_retraining:
             logger.warning(f"⚠️ Pas assez de données pour {symbol} {timeframe}: {len(df)} < {self.min_samples_for_retraining}")
             return None
         
-        # Préparer les features
+        category = get_symbol_category(symbol)
+        model_type = MODEL_BY_CATEGORY.get(category, "random_forest")
+        if model_type == "xgboost" and not XGBOOST_AVAILABLE:
+            model_type = "lightgbm" if LIGHTGBM_AVAILABLE else "random_forest"
+        elif model_type == "lightgbm" and not LIGHTGBM_AVAILABLE:
+            model_type = "xgboost" if XGBOOST_AVAILABLE else "random_forest"
+        
         feature_columns = [col for col in df.columns if col not in ['target', 'prediction_id', 'timestamp']]
         X = df[feature_columns].fillna(0)
         y = df['target']
         
-        # Normaliser
         scaler = StandardScaler()
         X_scaled = scaler.fit_transform(X)
         
-        # Entraîner Random Forest (plus simple)
-        rf_model = RandomForestClassifier(
-            n_estimators=50,  # Réduit pour la vitesse
-            max_depth=8,
-            min_samples_split=5,
-            random_state=42
-        )
+        model_obj = self._create_model(model_type)
+        model_obj.fit(X_scaled, y)
         
-        rf_model.fit(X_scaled, y)
-        
-        # Calculer les métriques
-        y_pred = rf_model.predict(X_scaled)
+        y_pred = model_obj.predict(X_scaled)
         accuracy = accuracy_score(y, y_pred)
         f1 = f1_score(y, y_pred, average='weighted')
+        feature_importance = dict(zip(feature_columns, getattr(model_obj, 'feature_importances_', np.zeros(len(feature_columns)))))
         
-        # Importance des features
-        feature_importance = dict(zip(feature_columns, rf_model.feature_importances_))
-        
-        # Sauvegarder le modèle
-        model_key = f"{symbol}_{timeframe}"
-        model_path = os.path.join(self.models_dir, f"{model_key}_rf.joblib")
+        model_key = f"{symbol.replace(' ', '_')}_{timeframe}"
+        model_path = os.path.join(self.models_dir, f"{model_key}_{model_type}.joblib")
         scaler_path = os.path.join(self.models_dir, f"{model_key}_scaler.joblib")
         
-        joblib.dump(rf_model, model_path)
+        joblib.dump(model_obj, model_path)
         joblib.dump(scaler, scaler_path)
         
-        # Métriques
         metrics = {
             "symbol": symbol,
             "timeframe": timeframe,
             "training_date": datetime.now().isoformat(),
+            "category": category,
+            "model_type": model_type,
             "metrics": {
-                "random_forest": {
+                model_type: {
                     "accuracy": float(accuracy),
                     "f1_score": float(f1),
                     "feature_importance": feature_importance
-                }
+                },
+                "random_forest": {"accuracy": float(accuracy), "f1_score": float(f1), "feature_importance": feature_importance}
             },
-            "best_model": "random_forest",
+            "best_model": model_type,
             "features_used": feature_columns,
             "training_samples": len(df),
             "test_samples": int(len(df) * 0.2)
         }
         
-        # Sauvegarder les métriques
         metrics_path = os.path.join(self.models_dir, f"{model_key}_metrics.json")
         with open(metrics_path, 'w') as f:
             json.dump(metrics, f, indent=2)
         
-        logger.info(f"✅ Modèle entraîné: {model_key} | Accuracy: {accuracy:.4f} | F1: {f1:.4f}")
-        
+        logger.info(f"✅ Modèle {model_type} entraîné: {model_key} [{category}] | Accuracy: {accuracy:.4f} | F1: {f1:.4f}")
         return metrics
     
     def predict(self, symbol: str, timeframe: str, market_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -310,8 +358,10 @@ class IntegratedMLTrainer:
                 X_scaled = X.values
             pred = int(model_obj.predict(X_scaled)[0])
             action = "buy" if pred == 1 else ("sell" if pred == 0 else "hold")
-            acc = m.get("metrics", {}).get("random_forest", {}).get("accuracy", 0.6) if isinstance(m.get("metrics"), dict) else 0.6
-            return {"action": action, "confidence": float(acc), "model": "random_forest"}
+            model_type = m.get("model_type") or m.get("metrics", {}).get("best_model", "random_forest") if isinstance(m.get("metrics"), dict) else "random_forest"
+            mt_metrics = m.get("metrics", {}) or {}
+            acc = mt_metrics.get(model_type, mt_metrics.get("random_forest", {})).get("accuracy", 0.6) if isinstance(mt_metrics, dict) else 0.6
+            return {"action": action, "confidence": float(acc), "model": model_type}
         except Exception as e:
             logger.debug(f"Erreur prédiction ML {key}: {e}")
             return None
@@ -327,8 +377,9 @@ class IntegratedMLTrainer:
             "Prefer": "return=minimal"
         }
         try:
-            rf = metrics.get("metrics", {}).get("random_forest", {})
-            acc = float(rf.get("accuracy", 0.0))
+            best = metrics.get("best_model", "random_forest")
+            mt = metrics.get("metrics", {}).get(best) or metrics.get("metrics", {}).get("random_forest", {})
+            acc = float(mt.get("accuracy", 0.0))
             # Schéma model_metrics: symbol, timeframe, accuracy (real 0-1), training_date, metadata
             metric_data = {
                 "symbol": metrics["symbol"],
@@ -336,11 +387,11 @@ class IntegratedMLTrainer:
                 "accuracy": acc if acc <= 1.0 else acc / 100.0,
                 "training_date": metrics.get("training_date", datetime.now().isoformat()),
                 "metadata": {
-                    "model_type": "random_forest",
-                    "f1_score": rf.get("f1_score"),
+                    "model_type": metrics.get("best_model", "random_forest"),
+                    "f1_score": mt.get("f1_score"),
                     "training_samples": metrics.get("training_samples"),
-                    "feature_importance": rf.get("feature_importance", {}),
-                    "best_model": "random_forest",
+                    "feature_importance": mt.get("feature_importance", {}),
+                    "best_model": metrics.get("best_model", "random_forest"),
                 }
             }
             async with httpx.AsyncClient() as client:
@@ -366,15 +417,16 @@ class IntegratedMLTrainer:
         if not self.supabase_key:
             return
         try:
-            rf = metrics.get("metrics", {}).get("random_forest", {})
+            best = metrics.get("best_model", "random_forest")
+            mt = metrics.get("metrics", {}).get(best) or metrics.get("metrics", {}).get("random_forest", {})
             payload = {
                 "symbol": metrics["symbol"],
                 "timeframe": metrics.get("timeframe", "M1"),
                 "status": status,
                 "samples_used": metrics.get("training_samples", 0),
-                "accuracy": rf.get("accuracy"),
-                "f1_score": rf.get("f1_score"),
-                "metadata": {"model_type": "random_forest"},
+                "accuracy": mt.get("accuracy"),
+                "f1_score": mt.get("f1_score"),
+                "metadata": {"model_type": best},
             }
             async with httpx.AsyncClient() as client:
                 r = await client.post(
@@ -405,7 +457,8 @@ class IntegratedMLTrainer:
         for model_key, metrics in self.current_metrics.items():
             symbol = metrics.get('symbol', 'Unknown')
             timeframe = metrics.get('timeframe', 'M1')
-            rf_metrics = metrics.get('metrics', {}).get('random_forest', {})
+            best = metrics.get('best_model', 'random_forest')
+            rf_metrics = metrics.get('metrics', {}).get(best) or metrics.get('metrics', {}).get('random_forest', {})
             
             accuracy = rf_metrics.get('accuracy', 0)
             f1_score = rf_metrics.get('f1_score', 0)

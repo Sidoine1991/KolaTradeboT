@@ -3751,6 +3751,114 @@ async def get_symbol_recommendation(symbol: str):
         logger.error(f"❌ Erreur recommandation pour {symbol}: {e}")
         raise HTTPException(status_code=500, detail=f"Erreur recommandation {symbol}: {str(e)}")
 
+
+async def _fetch_ml_metrics_from_supabase() -> Dict[str, Any]:
+    """Charge les métriques ML depuis Supabase model_metrics (fallback quand current_metrics vide)."""
+    supabase_url = os.getenv("SUPABASE_URL", "https://bpzqnooiisgadzicwupi.supabase.co")
+    supabase_key = os.getenv("SUPABASE_SERVICE_KEY") or os.getenv("SUPABASE_ANON_KEY")
+    if not supabase_key or not supabase_url:
+        return {}
+    try:
+        import httpx
+        headers = {"apikey": supabase_key, "Authorization": f"Bearer {supabase_key}"}
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.get(
+                f"{supabase_url}/rest/v1/model_metrics",
+                params={"order": "training_date.desc", "limit": "500"},
+                headers=headers,
+            )
+        if r.status_code != 200 or not r.json():
+            return {}
+        rows = r.json()
+        # Garder uniquement la dernière métrique par (symbol, timeframe)
+        seen = set()
+        metrics = {}
+        for row in rows:
+            sym = row.get("symbol", "")
+            tf = row.get("timeframe", "M1")
+            key = f"{sym}_{tf}"
+            if key in seen:
+                continue
+            seen.add(key)
+            meta = row.get("metadata") or {}
+            if isinstance(meta, str):
+                try:
+                    meta = json.loads(meta)
+                except Exception:
+                    meta = {}
+            acc = float(row.get("accuracy", 0.5))
+            f1 = meta.get("f1_score")
+            samples = meta.get("training_samples", 0)
+            training_date = row.get("training_date", "")
+            metrics[key] = {
+                "symbol": sym,
+                "timeframe": tf,
+                "training_date": training_date,
+                "training_samples": samples,
+                "metrics": {
+                    "random_forest": {
+                        "accuracy": acc if acc <= 1 else acc / 100,
+                        "f1_score": f1,
+                    }
+                },
+            }
+        return {
+            "status": "running",
+            "metrics": metrics,
+            "models_count": len(metrics),
+            "last_update": datetime.now().isoformat(),
+            "source": "supabase",
+        }
+    except Exception as e:
+        logger.debug("Erreur chargement métriques Supabase pour dashboard: %s", str(e)[:100])
+        return {}
+
+
+async def _fetch_ml_metrics_for_symbol_from_supabase(symbol: str, timeframe: str = "M1") -> Optional[Dict[str, Any]]:
+    """Charge les métriques ML pour UN symbole depuis Supabase (format plat pour le graphique MT5)."""
+    supabase_url = os.getenv("SUPABASE_URL", "https://bpzqnooiisgadzicwupi.supabase.co")
+    supabase_key = os.getenv("SUPABASE_SERVICE_KEY") or os.getenv("SUPABASE_ANON_KEY")
+    if not supabase_key or not supabase_url:
+        return None
+    try:
+        import httpx
+        headers = {"apikey": supabase_key, "Authorization": f"Bearer {supabase_key}"}
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            r = await client.get(
+                f"{supabase_url}/rest/v1/model_metrics",
+                params={"symbol": f"eq.{symbol}", "timeframe": f"eq.{timeframe}", "order": "training_date.desc", "limit": "1"},
+                headers=headers,
+            )
+        if r.status_code != 200 or not r.json():
+            return None
+        row = r.json()[0]
+        meta = row.get("metadata") or {}
+        if isinstance(meta, str):
+            try:
+                meta = json.loads(meta)
+            except Exception:
+                meta = {}
+        acc = float(row.get("accuracy", 0.5))
+        acc_pct = (acc * 100) if acc <= 1 else acc
+        samples = meta.get("training_samples", 0)
+        model_name = meta.get("best_model") or meta.get("model_type", "random_forest")
+        return {
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "accuracy": f"{acc_pct:.1f}",
+            "model_name": model_name,
+            "total_samples": str(samples),
+            "feedback_wins": 0,
+            "feedback_losses": 0,
+            "status": "trained",
+            "best_model": model_name,
+            "last_update": row.get("training_date", ""),
+        }
+    except Exception as e:
+        logger.debug("Supabase metrics for %s: %s", symbol, str(e)[:60])
+        return None
+
+
 @app.get("/dashboard")
 async def get_robot_dashboard():
     """
@@ -3776,13 +3884,29 @@ async def get_robot_dashboard():
             "top_opportunities": []
         }
         
-        # 1. Métriques ML en temps réel
+        # 1. Métriques ML en temps réel (ml_trainer in-memory + fallback Supabase)
         if ML_TRAINER_AVAILABLE:
             try:
-                dashboard_data["ml_metrics"] = ml_trainer.get_current_metrics()
+                ml_metrics = ml_trainer.get_current_metrics()
+                train_metrics = ml_metrics.get("metrics") or ml_metrics.get("models") or {}
+                if not train_metrics or ml_metrics.get("models_count", 0) == 0:
+                    # Fallback: charger depuis Supabase model_metrics (entraînement continu par symbole)
+                    supabase_metrics = await _fetch_ml_metrics_from_supabase()
+                    if supabase_metrics.get("metrics"):
+                        ml_metrics = {**ml_metrics, "metrics": supabase_metrics["metrics"], "models_count": len(supabase_metrics["metrics"])}
+                dashboard_data["ml_metrics"] = ml_metrics
             except Exception as e:
                 logger.warning(f"⚠️ Erreur récupération métriques ML: {e}")
-                dashboard_data["ml_metrics"] = {"error": str(e)}
+                try:
+                    supabase_metrics = await _fetch_ml_metrics_from_supabase()
+                    dashboard_data["ml_metrics"] = supabase_metrics if supabase_metrics.get("metrics") else {"error": str(e)}
+                except Exception:
+                    dashboard_data["ml_metrics"] = {"error": str(e)}
+        else:
+            # ML trainer non dispo: essayer quand même Supabase pour afficher les métriques sauvegardées
+            supabase_metrics = await _fetch_ml_metrics_from_supabase()
+            if supabase_metrics.get("metrics"):
+                dashboard_data["ml_metrics"] = supabase_metrics
         
         # 2. Recommandations ML intelligentes
         if ML_RECOMMENDATION_AVAILABLE and ML_TRAINER_AVAILABLE:
@@ -7804,10 +7928,11 @@ def _compute_ml_metrics(symbol: str, timeframe: str) -> Dict[str, Any]:
     trainer_samples = None
     trainer_status = "collecting_data"
     if ML_TRAINER_AVAILABLE and ml_trainer is not None:
-        model_key = f"{symbol}_{timeframe}"
+        model_key = f"{symbol.replace(' ', '_')}_{timeframe}"
         tm = getattr(ml_trainer, "current_metrics", {}).get(model_key)
         if tm:
-            rf = tm.get("metrics", {}).get("random_forest", {})
+            best = tm.get("best_model", "random_forest")
+            rf = tm.get("metrics", {}).get(best) or tm.get("metrics", {}).get("random_forest", {})
             acc = rf.get("accuracy", 0)
             trainer_acc_pct = (acc * 100.0) if acc <= 1.0 else acc
             trainer_samples = tm.get("training_samples", 0)
@@ -7823,12 +7948,12 @@ def _compute_ml_metrics(symbol: str, timeframe: str) -> Dict[str, Any]:
         base_acc = _ml_clamp(win_rate * 100.0, 35.0, 95.0)
 
     # Priorité: métriques du trainer si dispo, sinon feedback
-    if trainer_acc_pct is not None:
+    if trainer_acc_pct is not None and tm:
         rf = trainer_acc_pct
         gb = _ml_clamp(trainer_acc_pct + 0.3, 0.0, 100.0)
         mlp = _ml_clamp(trainer_acc_pct - 0.5, 0.0, 100.0)
         best_acc = rf
-        best_model = "random_forest"
+        best_model = tm.get("best_model", "random_forest")
         total_n = trainer_samples or n
     else:
         rf = _ml_clamp(base_acc + 0.8, 0.0, 100.0)
@@ -7967,8 +8092,20 @@ async def trades_feedback(request: TradeFeedbackRequest):
 
 @app.get("/ml/metrics")
 async def ml_metrics(symbol: str, timeframe: str = "M1"):
-    """Alias simple: retourne les métriques détaillées."""
-    return _compute_ml_metrics(symbol, timeframe)
+    """Métriques pour le graphique MT5 - format plat (accuracy, model_name, total_samples, status)."""
+    computed = _compute_ml_metrics(symbol, timeframe)
+    # Si le trainer a des données réelles, les utiliser
+    model_key = f"{symbol}_{timeframe}"
+    if ML_TRAINER_AVAILABLE and ml_trainer is not None:
+        tm = getattr(ml_trainer, "current_metrics", {}).get(model_key)
+        if tm and tm.get("training_samples"):
+            return computed
+    # Sinon: fallback Supabase pour afficher le résumé d'entraînement sur le graphique
+    supabase_data = await _fetch_ml_metrics_for_symbol_from_supabase(symbol, timeframe)
+    if supabase_data:
+        # Fusionner avec computed (pour recommendations etc.) tout en gardant les clés plates pour l'EA
+        return {**computed, **supabase_data}
+    return computed
 
 @app.get("/ml/metrics/detailed")
 async def ml_metrics_detailed(symbol: str, timeframe: str = "M1"):
