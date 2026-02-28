@@ -265,6 +265,11 @@ class IntegratedMLTrainer:
         X = df[feature_columns].fillna(0)
         y = df['target']
         
+        unique_classes = np.unique(y)
+        if len(unique_classes) < 2:
+            logger.warning(f"⚠️ Pas assez de classes pour {symbol} {timeframe}: uniquement {unique_classes.tolist()} (min 2 requis). Ignorer.")
+            return None
+        
         scaler = StandardScaler()
         X_scaled = scaler.fit_transform(X)
         
