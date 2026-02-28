@@ -26,6 +26,7 @@ from typing import Optional, List, Dict, Any, Tuple, Set
 from fastapi import FastAPI, HTTPException, Request, Body, status
 from starlette.requests import Request as StarletteRequest
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.wsgi import WSGIMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
@@ -824,10 +825,11 @@ def get_prediction_channel_5000(symbol: str, timeframe: str = "M1", future_bars:
             import os
             import httpx
             supabase_url = os.getenv("SUPABASE_URL", "https://bpzqnooiisgadzicwupi.supabase.co")
-            supabase_key = os.getenv("SUPABASE_ANON_KEY")
+            # Utiliser la clé de service si disponible (permissions complètes), sinon anon
+            supabase_key = os.getenv("SUPABASE_SERVICE_KEY") or os.getenv("SUPABASE_ANON_KEY")
             if supabase_key:
                 r = httpx.get(
-                    f"{supabase_url}/rest/v1/model_metrics?symbol=eq.{symbol}&order=created_at.desc&limit=1",
+                    f"{supabase_url}/rest/v1/model_metrics?symbol=eq.{symbol}&order=training_date.desc&limit=1",
                     headers={"apikey": supabase_key, "Authorization": f"Bearer {supabase_key}"},
                     timeout=5,
                 )
@@ -1081,7 +1083,7 @@ def get_market_data(symbol: str, timeframe: str = "M1", count: int = 1000) -> pd
     logger.info(f"Données simulées générées: {len(data)} bougies pour {symbol}")
     return data
 
-# Charger les variables d'environnement
+# Charger les variables d'environnement (fusion .env + .env.supabase)
 try:
     from dotenv import load_dotenv
     base_dir = Path(__file__).parent
@@ -1090,15 +1092,12 @@ try:
     if env_path.exists():
         load_dotenv(env_path)
         logger.info(f"✅ Fichier .env chargé depuis: {env_path}")
-    elif supabase_env_path.exists():
-        load_dotenv(supabase_env_path)
-        logger.info(f"✅ Fichier .env.supabase chargé depuis: {supabase_env_path}")
-    else:
-        load_dotenv()  # Essaie de charger depuis le répertoire courant
-        logger.info(
-            "✅ Variables d'environnement chargées "
-            "(aucun fichier .env/.env.supabase trouvé, utilisation des variables système)"
-        )
+    if supabase_env_path.exists():
+        load_dotenv(supabase_env_path)  # Fusion: .env.supabase complète/écrase les vars Supabase
+        logger.info(f"✅ Fichier .env.supabase fusionné (SUPABASE_*, DATABASE_URL)")
+    if not env_path.exists() and not supabase_env_path.exists():
+        load_dotenv()
+        logger.info("✅ Variables d'environnement chargées (système)")
 except ImportError:
     logger.warning(
         "⚠️ python-dotenv non disponible - "
@@ -1108,7 +1107,58 @@ except Exception as e:
     logger.warning(f"⚠️ Erreur lors du chargement du .env: {e}")
 
 # Configuration PostgreSQL pour feedback loop
-DATABASE_URL = os.getenv("DATABASE_URL", "")
+def _resolve_database_url() -> str:
+    """
+    Construit ou corrige la DATABASE_URL pour Supabase.
+    - Utilise DATABASE_URL si valide.
+    - Sinon construit depuis SUPABASE_PROJECT_ID + SUPABASE_DB_PASSWORD.
+    - Corrige le mot de passe avec @ non encodé (remplace par %40).
+    """
+    from urllib.parse import quote_plus, urlparse, urlunparse
+
+    raw = os.getenv("DATABASE_URL", "").strip()
+    project_id = os.getenv("SUPABASE_PROJECT_ID", "bpzqnooiisgadzicwupi")
+    db_password = os.getenv("SUPABASE_DB_PASSWORD", "")
+
+    # Construction depuis variables Supabase si DATABASE_URL vide ou invalide
+    if db_password and ("supabase" in raw.lower() or not raw):
+        host = os.getenv("SUPABASE_DB_HOST") or f"db.{project_id}.supabase.co"
+        port = os.getenv("SUPABASE_DB_PORT", "5432")
+        user = os.getenv("SUPABASE_DB_USER", "postgres")
+        dbname = os.getenv("SUPABASE_DB_NAME", "postgres")
+        pass_enc = quote_plus(db_password)
+        raw = f"postgresql://{user}:{pass_enc}@{host}:{port}/{dbname}?sslmode=require"
+        logger.info(f"📝 DATABASE_URL construite depuis SUPABASE_* (host={host})")
+        return raw
+
+    if not raw:
+        return ""
+
+    # Corriger @ non encodé dans le mot de passe (cause getaddrinfo failed)
+    parsed = urlparse(raw)
+    netloc = parsed.netloc
+    if "@" in netloc:
+        parts = netloc.rsplit("@", 1)
+        if len(parts) == 2:
+            userinfo, hostport = parts
+            # Encoder @ dans le mot de passe
+            if "@" in userinfo and ":" in userinfo:
+                user, pass_raw = userinfo.split(":", 1)
+                if "@" in pass_raw:
+                    pass_enc = quote_plus(pass_raw)
+                    userinfo = f"{user}:{pass_enc}"
+                    logger.info("📝 DATABASE_URL corrigée (mot de passe avec @ encodé)")
+            # Remplacer pooler par host direct Supabase (db.PROJECT_ID.supabase.co)
+            if "pooler.supabase.com" in hostport and project_id:
+                _port = hostport.rsplit(":", 1)[-1] if ":" in hostport else "5432"
+                hostport = f"db.{project_id}.supabase.co:{_port}"
+                logger.info(f"📝 DATABASE_URL: pooler remplacé par db.{project_id}.supabase.co")
+            netloc = f"{userinfo}@{hostport}"
+            raw = urlunparse(parsed._replace(netloc=netloc))
+    return raw
+
+
+DATABASE_URL = _resolve_database_url()
 DB_AVAILABLE = bool(DATABASE_URL and ASYNCPG_AVAILABLE)
 
 # Fonctions d'aide pour les indicateurs
@@ -1733,6 +1783,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Intégrer le web dashboard (interface graphique)
+try:
+    from web_dashboard import app as flask_dashboard_app
+    app.mount("/ui", WSGIMiddleware(flask_dashboard_app))
+    logger.info("📊 Dashboard web intégré: http://localhost:8000/ui")
+except Exception as e:
+    logger.warning("⚠️ Dashboard web non chargé (optionnel): %s", str(e)[:80])
+
 # Middleware pour logger toutes les requêtes entrantes
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
@@ -1764,14 +1822,13 @@ async def get_db_pool():
     )
             return None
         try:
-            # Pour Render PostgreSQL, il faut ajouter SSL
-            # Parse la DATABASE_URL pour ajouter sslmode si nécessaire
             dsn = DATABASE_URL
-            if "render.com" in DATABASE_URL.lower() and "sslmode" not in DATABASE_URL.lower():
-                # Ajouter sslmode=require pour Render PostgreSQL
-                separator = "?" if "?" not in dsn else "&"
-                dsn = f"{dsn}{separator}sslmode=require"
-                logger.info("📝 Ajout de sslmode=require pour Render PostgreSQL")
+            # Ajouter sslmode=require pour Supabase/Render PostgreSQL si absent
+            if "supabase.co" in dsn.lower() or "render.com" in dsn.lower():
+                if "sslmode" not in dsn.lower():
+                    separator = "?" if "?" not in dsn else "&"
+                    dsn = f"{dsn}{separator}sslmode=require"
+                    logger.info("📝 Ajout de sslmode=require pour PostgreSQL")
             
             app.state.db_pool = await asyncpg.create_pool(
                 dsn=dsn,
@@ -2964,9 +3021,10 @@ async def save_decision_to_supabase(request: DecisionRequest, response: Decision
     import httpx
     
     supabase_url = os.getenv("SUPABASE_URL", "https://bpzqnooiisgadzicwupi.supabase.co")
-    supabase_key = os.getenv("SUPABASE_ANON_KEY")
+    # Utiliser la clé de service si disponible (permissions complètes), sinon la clé anonyme
+    supabase_key = os.getenv("SUPABASE_SERVICE_KEY") or os.getenv("SUPABASE_ANON_KEY")
     if not supabase_url or not supabase_key:
-        logger.debug("Supabase non configuré (SUPABASE_URL ou SUPABASE_ANON_KEY manquant) - saut de la sauvegarde.")
+        logger.debug("Supabase non configuré (SUPABASE_URL ou SUPABASE_SERVICE_KEY/ANON_KEY manquant) - saut de la sauvegarde.")
         return
     
     headers = {
@@ -3041,11 +3099,11 @@ async def save_decision_to_supabase(request: DecisionRequest, response: Decision
             if not (0.0 <= accuracy_decimal <= 1.0):
                 accuracy_decimal = 0.5
 
-            # Sauvegarder l'accuracy en POURCENTAGE (0-100) pour coller à l'affichage MT5
+            # Schéma model_metrics: accuracy en 0-1 (real)
             metrics_payload = {
                 "symbol": request.symbol,
                 "timeframe": "M1",
-                "accuracy": float(accuracy_decimal * 100.0),
+                "accuracy": float(accuracy_decimal),
                 "metadata": {
                     "model_used": response.model_used or "technical_ml_enhanced",
                     "last_action": response.action,
@@ -3063,14 +3121,17 @@ async def save_decision_to_supabase(request: DecisionRequest, response: Decision
                         timeout=10.0,
                     )
                     if r_metrics.status_code not in (200, 201):
-                        logger.debug(
-                            f"Supabase model_metrics: statut {r_metrics.status_code} "
-                            f"body={r_metrics.text}"
+                        logger.error(
+                            "Supabase model_metrics: statut %s body=%s payload=%s",
+                            r_metrics.status_code,
+                            r_metrics.text,
+                            metrics_payload,
                         )
                     else:
-                        logger.debug(
-                            f"✅ model_metrics insérée pour {request.symbol} "
-                            f"accuracy={metrics_payload['accuracy']:.3f}"
+                        logger.info(
+                            "✅ model_metrics insérée pour %s accuracy=%.3f",
+                            request.symbol,
+                            metrics_payload["accuracy"],
                         )
             except Exception as e:
                 logger.debug(f"Supabase model_metrics: {e}")
@@ -3085,7 +3146,7 @@ async def fetch_supabase_ml_context(symbol: str, timeframe: str = "M1") -> Dict[
     """
     import httpx
     supabase_url = os.getenv("SUPABASE_URL", "https://bpzqnooiisgadzicwupi.supabase.co")
-    supabase_key = os.getenv("SUPABASE_ANON_KEY")
+    supabase_key = os.getenv("SUPABASE_SERVICE_KEY") or os.getenv("SUPABASE_ANON_KEY")
     if not supabase_key:
         return {}
     sym_enc = symbol.replace(" ", "%20")
@@ -3822,15 +3883,16 @@ async def get_robot_dashboard():
         # 4. Statistiques globales
         total_models = 0
         avg_accuracy = 0
-        if dashboard_data["ml_metrics"] and 'models' in dashboard_data["ml_metrics"]:
-            models = dashboard_data["ml_metrics"]["models"]
+        models = dashboard_data.get("ml_metrics", {}).get("metrics") or dashboard_data.get("ml_metrics", {}).get("models") or {}
+        if models:
             total_models = len(models)
-            if models:
-                accuracies = []
-                for model_data in models.values():
-                    if 'metrics' in model_data and 'accuracy' in model_data['metrics']:
-                        accuracies.append(model_data['metrics']['accuracy'])
-                avg_accuracy = sum(accuracies) / len(accuracies) if accuracies else 0
+            accuracies = []
+            for model_data in models.values():
+                rf = (model_data.get("metrics") or {}).get("random_forest") if isinstance(model_data.get("metrics"), dict) else {}
+                acc = rf.get("accuracy") if rf else model_data.get("metrics", {}).get("accuracy") if isinstance(model_data.get("metrics"), dict) else None
+                if acc is not None:
+                    accuracies.append(float(acc) if float(acc) <= 1 else float(acc) / 100)
+            avg_accuracy = sum(accuracies) / len(accuracies) if accuracies else 0
         
         dashboard_data["global_stats"] = {
             "total_models": total_models,
@@ -7729,14 +7791,27 @@ def _get_feedback_buf(symbol: str, timeframe: str) -> deque:
 def _compute_ml_metrics(symbol: str, timeframe: str) -> Dict[str, Any]:
     """
     Retourne un JSON compatible avec le parser MT5 `ParseMLMetricsResponse()`:
-    - best_model
+    - best_model, accuracy, model_name, total_samples (clés plates pour le robot)
     - metrics: random_forest/gradient_boosting/mlp -> accuracy
-    - training_samples/test_samples
-    - recommendations.min_confidence
+    - Fusionne les métriques du ml_trainer (entraînement Supabase) si disponibles.
     """
     k = _ml_key(symbol, timeframe)
     buf = _get_feedback_buf(symbol, timeframe)
     n = len(buf)
+
+    # Fusionner avec ml_trainer si disponible (entraînement continu Supabase)
+    trainer_acc_pct = None
+    trainer_samples = None
+    trainer_status = "collecting_data"
+    if ML_TRAINER_AVAILABLE and ml_trainer is not None:
+        model_key = f"{symbol}_{timeframe}"
+        tm = getattr(ml_trainer, "current_metrics", {}).get(model_key)
+        if tm:
+            rf = tm.get("metrics", {}).get("random_forest", {})
+            acc = rf.get("accuracy", 0)
+            trainer_acc_pct = (acc * 100.0) if acc <= 1.0 else acc
+            trainer_samples = tm.get("training_samples", 0)
+            trainer_status = "trained"
 
     # Par défaut (si pas encore de feedback), garder un niveau "neutre" pour permettre au robot de démarrer
     if n == 0:
@@ -7747,21 +7822,29 @@ def _compute_ml_metrics(symbol: str, timeframe: str) -> Dict[str, Any]:
         win_rate = wins / n
         base_acc = _ml_clamp(win_rate * 100.0, 35.0, 95.0)
 
-    # Simuler 3 "modèles" à partir de la performance observée (léger, robuste)
-    rf = _ml_clamp(base_acc + 0.8, 0.0, 100.0)
-    gb = _ml_clamp(base_acc + 0.3, 0.0, 100.0)
-    mlp = _ml_clamp(base_acc - 0.5, 0.0, 100.0)
+    # Priorité: métriques du trainer si dispo, sinon feedback
+    if trainer_acc_pct is not None:
+        rf = trainer_acc_pct
+        gb = _ml_clamp(trainer_acc_pct + 0.3, 0.0, 100.0)
+        mlp = _ml_clamp(trainer_acc_pct - 0.5, 0.0, 100.0)
+        best_acc = rf
+        best_model = "random_forest"
+        total_n = trainer_samples or n
+    else:
+        rf = _ml_clamp(base_acc + 0.8, 0.0, 100.0)
+        gb = _ml_clamp(base_acc + 0.3, 0.0, 100.0)
+        mlp = _ml_clamp(base_acc - 0.5, 0.0, 100.0)
+        best_model = "random_forest"
+        best_acc = rf
+        if gb > best_acc:
+            best_model, best_acc = "gradient_boosting", gb
+        if mlp > best_acc:
+            best_model, best_acc = "mlp", mlp
+        total_n = n
 
-    best_model = "random_forest"
-    best_acc = rf
-    if gb > best_acc:
-        best_model, best_acc = "gradient_boosting", gb
-    if mlp > best_acc:
-        best_model, best_acc = "mlp", mlp
-
-    # Recommandation dynamique: si win_rate baisse, on remonte la confiance mini
-    # (et inversement si win_rate est bon, on peut baisser un peu pour saisir plus d'opportunités)
     min_conf = _ml_clamp(0.75 - (win_rate - 0.50) * 0.30, 0.55, 0.85)
+    wins = sum(1 for x in buf if x.get("is_win")) if n else 0
+    losses = n - wins
 
     payload = {
         "symbol": symbol,
@@ -7772,13 +7855,18 @@ def _compute_ml_metrics(symbol: str, timeframe: str) -> Dict[str, Any]:
             "gradient_boosting": {"accuracy": float(gb)},
             "mlp": {"accuracy": float(mlp)},
         },
-        "training_samples": int(n),
-        "test_samples": int(max(0, n // 5)),
-        "recommendations": {
-            "min_confidence": float(min_conf),
-        },
+        "training_samples": int(total_n),
+        "test_samples": int(max(0, total_n // 5)),
+        "recommendations": {"min_confidence": float(min_conf)},
         "last_update": datetime.now().isoformat(),
         "is_valid": True,
+        # Clés plates pour le robot MT5 (UpdateMLMetricsDisplay / ExtractJsonValue)
+        "accuracy": f"{best_acc:.1f}",
+        "model_name": best_model,
+        "total_samples": str(total_n),
+        "feedback_wins": wins,
+        "feedback_losses": losses,
+        "status": trainer_status if trainer_acc_pct is not None else ("trained" if n > 0 else "collecting_data"),
     }
 
     _metrics_cache[k] = payload
@@ -7803,8 +7891,15 @@ async def _push_feedback_to_supabase(symbol: str, timeframe: str, side: Optional
     """Envoie le feedback vers Supabase trade_feedback pour que le robot apprenne des erreurs."""
     import httpx
     supabase_url = os.getenv("SUPABASE_URL", "https://bpzqnooiisgadzicwupi.supabase.co")
-    supabase_key = os.getenv("SUPABASE_ANON_KEY")
-    if not supabase_key:
+    # Utiliser la clé de service si disponible (permissions complètes), sinon la clé anonyme
+    supabase_key = os.getenv("SUPABASE_SERVICE_KEY") or os.getenv("SUPABASE_ANON_KEY")
+
+    # Vérification explicite de la configuration Supabase pour éviter les échecs silencieux
+    if not supabase_key or not supabase_url:
+        logger.debug(
+            "Supabase non configuré pour le feedback (SUPABASE_URL ou SUPABASE_SERVICE_KEY/ANON_KEY manquant) - "
+            f"url='{supabase_url}', key_present={bool(supabase_key)}"
+        )
         return
     now_iso = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.000Z")
     payload = {
@@ -7830,11 +7925,18 @@ async def _push_feedback_to_supabase(symbol: str, timeframe: str, side: Optional
                 timeout=5.0,
             )
             if r.status_code in (200, 201):
-                logger.debug(f"✅ Feedback envoyé à Supabase pour {symbol}")
+                logger.info(f"✅ Feedback envoyé à Supabase (trade_feedback) pour {symbol} ({timeframe})")
             else:
-                logger.debug(f"Supabase trade_feedback: {r.status_code}")
+                logger.error(
+                    "Supabase trade_feedback HTTP %s pour %s (%s) - body=%s payload=%s",
+                    r.status_code,
+                    symbol,
+                    timeframe,
+                    r.text,
+                    payload,
+                )
     except Exception as e:
-        logger.debug(f"Supabase trade_feedback: {e}")
+        logger.error(f"Supabase trade_feedback exception pour {symbol} ({timeframe}): {e}")
 
 
 @app.post("/trades/feedback")
@@ -10132,7 +10234,10 @@ async def startup_event():
     os.makedirs("models", exist_ok=True)
     
     # Démarrer l'entraînement continu ML (Supabase: fetch predictions → train → save model_metrics)
-    supabase_configured = bool(os.getenv("SUPABASE_URL") and os.getenv("SUPABASE_ANON_KEY"))
+    supabase_configured = bool(
+        os.getenv("SUPABASE_URL")
+        and (os.getenv("SUPABASE_SERVICE_KEY") or os.getenv("SUPABASE_ANON_KEY"))
+    )
     if ML_TRAINER_AVAILABLE and supabase_configured:
         logger.info("🤖 Démarrage entraînement continu ML (Supabase)...")
         try:
@@ -10141,7 +10246,7 @@ async def startup_event():
         except Exception as e:
             logger.error(f"❌ Erreur démarrage entraînement continu: {e}")
     elif ML_TRAINER_AVAILABLE and not supabase_configured:
-        logger.info("ℹ️ Entraînement continu désactivé: SUPABASE_URL et SUPABASE_ANON_KEY requis")
+        logger.info("ℹ️ Entraînement continu désactivé: SUPABASE_URL et SUPABASE_SERVICE_KEY/ANON_KEY requis")
     
     logger.info("🎯 Serveur IA TradBOT prêt!")
 
@@ -10171,6 +10276,7 @@ if __name__ == "__main__":
     logger.info("   • /ml/stop - Arrêter entraînement ML")
     logger.info("   • /ml/retrain - Forcer réentraînement")
     logger.info("   • /ml_stats - Statistiques ML détaillées")
+    logger.info("   • /ui - Dashboard web (interface graphique)")
     
     uvicorn.run(
         "ai_server:app",

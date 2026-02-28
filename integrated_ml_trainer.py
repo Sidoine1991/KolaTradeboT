@@ -35,7 +35,7 @@ class IntegratedMLTrainer:
         self.models_dir = os.getenv("MODELS_DIR", "models")
         os.makedirs(self.models_dir, exist_ok=True)
         self.supabase_url = os.getenv("SUPABASE_URL", "https://bpzqnooiisgadzicwupi.supabase.co")
-        self.supabase_key = os.getenv("SUPABASE_ANON_KEY")
+        self.supabase_key = os.getenv("SUPABASE_SERVICE_KEY") or os.getenv("SUPABASE_ANON_KEY")
         self.training_interval = 300  # 5 minutes
         self.min_samples_for_retraining = 50  # Réduit pour les tests
         self.is_running = False
@@ -317,27 +317,32 @@ class IntegratedMLTrainer:
             return None
     
     async def save_metrics_to_supabase(self, metrics: Dict[str, Any]):
-        """Sauvegarde les métriques dans Supabase (si table existe)"""
+        """Sauvegarde les métriques dans Supabase - schéma: symbol, timeframe, accuracy (0-1), training_date, metadata."""
+        if not self.supabase_key:
+            return
         headers = {
             "apikey": self.supabase_key,
             "Authorization": f"Bearer {self.supabase_key}",
             "Content-Type": "application/json",
-            "Prefer": "return=representation"
+            "Prefer": "return=minimal"
         }
-        
         try:
+            rf = metrics.get("metrics", {}).get("random_forest", {})
+            acc = float(rf.get("accuracy", 0.0))
+            # Schéma model_metrics: symbol, timeframe, accuracy (real 0-1), training_date, metadata
             metric_data = {
                 "symbol": metrics["symbol"],
                 "timeframe": metrics["timeframe"],
-                "model_type": "random_forest",
-                "accuracy": metrics["metrics"]["random_forest"]["accuracy"],
-                "f1_score": metrics["metrics"]["random_forest"]["f1_score"],
-                "training_samples": metrics["training_samples"],
-                "training_date": metrics["training_date"],
-                "feature_importance": json.dumps(metrics["metrics"]["random_forest"]["feature_importance"]),
-                "metadata": json.dumps(metrics)
+                "accuracy": acc if acc <= 1.0 else acc / 100.0,
+                "training_date": metrics.get("training_date", datetime.now().isoformat()),
+                "metadata": {
+                    "model_type": "random_forest",
+                    "f1_score": rf.get("f1_score"),
+                    "training_samples": metrics.get("training_samples"),
+                    "feature_importance": rf.get("feature_importance", {}),
+                    "best_model": "random_forest",
+                }
             }
-            
             async with httpx.AsyncClient() as client:
                 resp = await client.post(
                     f"{self.supabase_url}/rest/v1/model_metrics",
@@ -345,15 +350,48 @@ class IntegratedMLTrainer:
                     headers=headers,
                     timeout=10.0
                 )
-                
-                if resp.status_code == 201:
+                if resp.status_code in (200, 201):
                     logger.info(f"✅ Métriques sauvegardées pour {metrics['symbol']} {metrics['timeframe']}")
+                    await self._log_training_run(metrics, "completed")
                 else:
-                    # Si la table n'existe pas, on ignore silencieusement
-                    logger.debug(f"⚠️ Table model_metrics non disponible: {resp.status_code}")
-                    
+                    logger.error(
+                        "model_metrics POST %s body=%s payload=%s",
+                        resp.status_code, resp.text, metric_data
+                    )
         except Exception as e:
-            logger.debug(f"⚠️ Erreur sauvegarde métriques Supabase: {e}")
+            logger.warning(f"Erreur sauvegarde métriques Supabase: {e}")
+
+    async def _log_training_run(self, metrics: Dict[str, Any], status: str = "completed"):
+        """Log optionnel dans training_runs (si table existe)."""
+        if not self.supabase_key:
+            return
+        try:
+            rf = metrics.get("metrics", {}).get("random_forest", {})
+            payload = {
+                "symbol": metrics["symbol"],
+                "timeframe": metrics.get("timeframe", "M1"),
+                "status": status,
+                "samples_used": metrics.get("training_samples", 0),
+                "accuracy": rf.get("accuracy"),
+                "f1_score": rf.get("f1_score"),
+                "metadata": {"model_type": "random_forest"},
+            }
+            async with httpx.AsyncClient() as client:
+                r = await client.post(
+                    f"{self.supabase_url}/rest/v1/training_runs",
+                    json=payload,
+                    headers={
+                        "apikey": self.supabase_key,
+                        "Authorization": f"Bearer {self.supabase_key}",
+                        "Content-Type": "application/json",
+                        "Prefer": "return=minimal",
+                    },
+                    timeout=5.0,
+                )
+                if r.status_code not in (200, 201):
+                    logger.debug(f"training_runs POST {r.status_code} (table peut-être absente)")
+        except Exception as e:
+            logger.debug(f"training_runs: {e}")
     
     def log_metrics_to_console(self):
         """Affiche les métriques dans la console"""
@@ -396,7 +434,7 @@ class IntegratedMLTrainer:
         """Boucle d'entraînement continu - récupère données Supabase, stocke métriques Supabase"""
         logger.info("🚀 Entraînement continu démarré (Supabase: fetch predictions → train → save model_metrics)")
         if not self.supabase_key:
-            logger.warning("⚠️ SUPABASE_ANON_KEY non configuré - entraînement Supabase désactivé")
+            logger.warning("⚠️ SUPABASE_SERVICE_KEY/ANON_KEY non configuré - entraînement Supabase désactivé")
             return
         
         while self.is_running:
