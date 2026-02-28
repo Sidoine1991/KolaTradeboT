@@ -112,9 +112,14 @@ HTML_TEMPLATE = """
                     </div>
                 </div>
                 <div class="card">
-                    <div class="card-title">Métriques ML / Entraînement</div>
+                    <div class="card-title">Métriques ML / Entraînement continu par symbole</div>
                     <div id="ml-metrics-content" class="stats-grid"></div>
+                    <div id="ml-symbols-table" style="margin-top: 15px; overflow-x: auto;"></div>
                     <canvas id="ml-accuracy-chart" style="max-height: 180px; margin-top: 15px;"></canvas>
+                </div>
+                <div class="card">
+                    <div class="card-title">Infos graphique MT5 (style Comment)</div>
+                    <pre id="mt5-chart-summary" style="font-family: 'Consolas', 'Monaco', monospace; font-size: 12px; color: #c0c0c0; background: #252525; padding: 12px; border-radius: 6px; overflow-x: auto; margin: 0; white-space: pre-wrap; max-height: 220px; overflow-y: auto;"></pre>
                 </div>
             </div>
         </div>
@@ -196,20 +201,78 @@ HTML_TEMPLATE = """
             // Mise à jour du graphique profit
             updateProfitChart(data.daily_stats.profit_history || []);
             
-            // Métriques ML
-            if (data.ml_metrics && Object.keys(data.ml_metrics).length) {
+            // Métriques ML et entraînement par symbole
+            const metrics = data.ml_metrics && data.ml_metrics.metrics ? data.ml_metrics.metrics : {};
+            const hasMetrics = data.ml_metrics && (Object.keys(metrics).length > 0 || data.ml_metrics.models_count > 0);
+            if (hasMetrics || (data.ml_metrics && data.ml_metrics.error)) {
                 const mlEl = document.getElementById('ml-metrics-content');
                 const gm = data.global_stats || {};
                 mlEl.innerHTML = `
-                    <div class="stat-item"><div class="stat-label">Modèles</div><div class="stat-value">${gm.total_models || 0}</div></div>
+                    <div class="stat-item"><div class="stat-label">Modèles</div><div class="stat-value">${gm.total_models || Object.keys(metrics).length || 0}</div></div>
                     <div class="stat-item"><div class="stat-label">Accuracy moy.</div><div class="stat-value">${gm.average_accuracy != null ? (gm.average_accuracy * 100).toFixed(1) + '%' : 'N/A'}</div></div>
-                    <div class="stat-item"><div class="stat-label">Statut</div><div class="stat-value">${data.ml_metrics.status === 'running' ? 'Actif' : 'Arrêté'}</div></div>
+                    <div class="stat-item"><div class="stat-label">Statut</div><div class="stat-value">${data.ml_metrics.status === 'running' || data.ml_metrics.source === 'supabase' ? 'Actif' : (data.ml_metrics.error || 'Arrêté')}</div></div>
                 `;
+                // Tableau détaillé par symbole (entraînement continu)
+                const tableEl = document.getElementById('ml-symbols-table');
+                if (Object.keys(metrics).length > 0) {
+                    let rows = '<table style="width:100%;border-collapse:collapse;font-size:13px;"><thead><tr style="background:#2a2a2a;"><th style="padding:6px 10px;text-align:left;">Symbole</th><th>Timeframe</th><th>Accuracy</th><th>Dernier entraînement</th><th>Échantillons</th></tr></thead><tbody>';
+                    for (const k of Object.keys(metrics)) {
+                        const m = metrics[k];
+                        const rf = (m.metrics || {}).random_forest || m.metrics || {};
+                        const acc = (rf.accuracy != null ? (rf.accuracy <= 1 ? rf.accuracy * 100 : rf.accuracy) : 0).toFixed(1);
+                        const date = (m.training_date || '').replace('T',' ').substring(0, 19) || '-';
+                        const samples = m.training_samples ?? '-';
+                        rows += `<tr style="border-bottom:1px solid #333;"><td style="padding:6px 10px;">${m.symbol || k}</td><td>${m.timeframe || 'M1'}</td><td>${acc}%</td><td style="font-size:11px;color:#aaa">${date}</td><td>${samples}</td></tr>`;
+                    }
+                    rows += '</tbody></table>';
+                    tableEl.innerHTML = rows;
+                } else {
+                    tableEl.innerHTML = data.ml_metrics.error ? `<p style="color:#f44;">${data.ml_metrics.error}</p>` : '<p style="color:#888;">Aucun modèle entraîné (Supabase vide ou serveur IA indisponible).</p>';
+                }
                 updateMLAccuracyChart(data.ml_metrics);
             } else {
-                document.getElementById('ml-metrics-content').innerHTML = '<p style="color:#888;">En attente du serveur IA...</p>';
+                document.getElementById('ml-metrics-content').innerHTML = '<p style="color:#888;">En attente de données (serveur IA ou Supabase model_metrics)...</p>';
+                document.getElementById('ml-symbols-table').innerHTML = '<p style="color:#666;font-size:12px;">Vérifiez que le serveur IA tourne (port 8000) et que Supabase contient des métriques (table model_metrics).</p>';
             }
             
+            // Infos graphique MT5 (style Comment du robot)
+            const mt5El = document.getElementById('mt5-chart-summary');
+            const mt5Lines = ['═══ Résumé Dashboard (style graphique MT5) ═══', ''];
+            if (data.daily_stats) {
+                const s = data.daily_stats;
+                mt5Lines.push(`Trades: ${s.total_trades} | Taux: ${s.win_rate.toFixed(1)}% | Profit: ${s.total_profit.toFixed(2)}$`);
+                mt5Lines.push(`Profit Factor: ${s.profit_factor.toFixed(2)}`);
+                mt5Lines.push('');
+            }
+            const posCount = data.positions && (Array.isArray(data.positions) ? data.positions.length : Object.keys(data.positions).length) || 0;
+            mt5Lines.push(`Positions ouvertes: ${posCount}`);
+            if (data.signals && Object.keys(data.signals).length > 0) {
+                mt5Lines.push('Signaux IA:');
+                for (const sym in data.signals) {
+                    const sig = data.signals[sym];
+                    const action = sig.signal || sig.action || 'WAIT';
+                    const conf = sig.confidence != null ? (sig.confidence <= 1 ? (sig.confidence * 100).toFixed(1) : sig.confidence.toFixed(1)) : '-';
+                    mt5Lines.push(`  ${sym}: ${action} ${conf}%`);
+                }
+                mt5Lines.push('');
+            }
+            if (data.ml_metrics) {
+                const ml = data.ml_metrics;
+                const gm = data.global_stats || {};
+                const models = gm.total_models || ml.models_count || (ml.metrics ? Object.keys(ml.metrics).length : 0);
+                const acc = gm.average_accuracy != null ? (gm.average_accuracy * 100).toFixed(1) : (ml.metrics && Object.keys(ml.metrics).length ? 'oui' : 'N/A');
+                const status = ml.status === 'running' || ml.source === 'supabase' ? 'Actif' : ml.error || ml.status || '—';
+                mt5Lines.push(`ML (entraînement): Modèles ${models} | Accuracy moy. ${acc}% | Statut: ${status}`);
+            } else {
+                mt5Lines.push('ML (entraînement): En attente de données...');
+            }
+            if (data.symbol_performance) {
+                mt5Lines.push('');
+                const fmt = v => (v >= 0 ? '+' : '') + v.toFixed(2) + '$';
+                mt5Lines.push('Top symboles: ' + (data.symbol_performance.best || []).slice(0, 3).map(x => x.symbol + ' ' + fmt(x.profit)).join(' | '));
+            }
+            mt5El.textContent = mt5Lines.join('\n');
+
             // Footer
             document.getElementById('last-sync').textContent = data.last_sync_time;
             document.getElementById('data-source').textContent = data.data_source;
