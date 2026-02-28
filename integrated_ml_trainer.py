@@ -157,7 +157,9 @@ class IntegratedMLTrainer:
                 predictions_url = f"{self.supabase_url}/rest/v1/predictions"
                 
                 # Utiliser une requête plus simple
-                simple_query = f"symbol=eq.{symbol.replace(' ', '+')}&limit={limit}&order=created_at.desc"
+                # Supabase stocke indices avec espaces (Boom 300 Index), forex sans (EURUSD)
+                symbol_for_query = symbol.replace('_', ' ').replace(' ', '+')
+                simple_query = f"symbol=eq.{symbol_for_query}&limit={limit}&order=created_at.desc"
                 
                 pred_resp = await client.get(
                     predictions_url, 
