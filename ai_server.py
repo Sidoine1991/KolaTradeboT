@@ -35,7 +35,7 @@ import pandas as pd
 import numpy as np
 import requests
 import joblib
-from collections import deque
+from collections import deque, defaultdict
 
 # Configurer le logger avant les imports d'améliorations
 logger = logging.getLogger("tradbot_ai")
@@ -860,6 +860,23 @@ def get_prediction_channel_5000(symbol: str, timeframe: str = "M1", future_bars:
         lower_start -= half_w
         lower_end -= half_w
 
+        # Points SH/SL prédits (10 étapes dans la zone future)
+        predicted_points = []
+        step = max(1, future_bars // 10)
+        for k in range(1, 11):
+            bars_ahead = min(k * step, future_bars)
+            x_point = n + bars_ahead
+            up_val = float(np.polyval(coeffs_high, x_point)) + half_w
+            lo_val = float(np.polyval(coeffs_low, x_point)) - half_w
+            predicted_points.append(
+                {
+                    "index": k,
+                    "bars_ahead": int(bars_ahead),
+                    "sh_price": round(up_val, 8),
+                    "sl_price": round(lo_val, 8),
+                }
+            )
+
         if hasattr(times, "iloc"):
             last_ts = times.iloc[-1]
         else:
@@ -868,6 +885,42 @@ def get_prediction_channel_5000(symbol: str, timeframe: str = "M1", future_bars:
             time_start = int(last_ts.timestamp())
         else:
             time_start = int(pd.Timestamp(last_ts).timestamp())
+
+        # Sauvegarde facultative du canal et des points prédits dans Supabase
+        try:
+            import os
+            import httpx
+
+            supabase_url = os.getenv("SUPABASE_URL", "https://bpzqnooiisgadzicwupi.supabase.co")
+            supabase_key = os.getenv("SUPABASE_SERVICE_KEY") or os.getenv("SUPABASE_ANON_KEY")
+            if supabase_key:
+                payload = {
+                    "symbol": symbol,
+                    "timeframe": timeframe,
+                    "time_start": time_start,
+                    "period_seconds": period_seconds,
+                    "future_bars": future_bars,
+                    "upper_start": round(upper_start, 8),
+                    "upper_end": round(upper_end, 8),
+                    "lower_start": round(lower_start, 8),
+                    "lower_end": round(lower_end, 8),
+                    "width_mult": float(width_mult),
+                    "predicted_points": convert_numpy_to_python(predicted_points),
+                }
+                httpx.post(
+                    f"{supabase_url}/rest/v1/prediction_channels",
+                    json=payload,
+                    headers={
+                        "apikey": supabase_key,
+                        "Authorization": f"Bearer {supabase_key}",
+                        "Content-Type": "application/json",
+                        "Prefer": "return=minimal",
+                    },
+                    timeout=5.0,
+                )
+        except Exception:
+            # En cas d'échec de Supabase, on continue simplement sans bloquer l'API
+            pass
 
         return {
             "ok": True,
@@ -881,6 +934,7 @@ def get_prediction_channel_5000(symbol: str, timeframe: str = "M1", future_bars:
             "lower_start": round(lower_start, 8),
             "lower_end": round(lower_end, 8),
             "width_mult": width_mult,
+            "predicted_points": predicted_points,
         }
     except Exception as e:
         logger.error(f"Erreur canal prédiction 5000 pour {symbol}: {e}")
@@ -2693,6 +2747,79 @@ if BACKEND_AVAILABLE:
 # Dictionnaire pour stocker les instances d'AdvancedIndicators par symbole/tf
 indicators_cache = {}
 
+# ÉTAT TEMPS RÉEL POUR LES SPIKES (Boom/Crash) - inspiré de SpikeSniperDeriv
+_last_tick_price: Dict[str, float] = defaultdict(float)
+_last_spike_info: Dict[str, Dict[str, Any]] = {}
+SPIKE_THRESHOLD_POINTS: float = float(os.getenv("SPIKE_THRESHOLD_POINTS", "1.0"))
+SPIKE_RECENT_WINDOW_SECONDS: int = int(os.getenv("SPIKE_RECENT_WINDOW_SECONDS", "5"))
+
+
+def update_spike_state_from_request(req: "DecisionRequest") -> None:
+    """
+    Met à jour l'état temps réel de spike à partir d'une requête de décision.
+    Logique simplifiée inspirée de SpikeSniperDeriv:
+    - Boom: spike si diff >= SPIKE_THRESHOLD_POINTS
+    - Crash: spike si diff <= -SPIKE_THRESHOLD_POINTS
+    """
+    try:
+        sym = (req.symbol or "").strip()
+        if not sym:
+            return
+
+        # Utiliser mid-price comme proxy du dernier prix
+        last_price = None
+        if req.bid is not None and req.ask is not None:
+            last_price = (float(req.bid) + float(req.ask)) / 2.0
+        elif req.bid is not None:
+            last_price = float(req.bid)
+        elif req.ask is not None:
+            last_price = float(req.ask)
+
+        if last_price is None or last_price <= 0:
+            return
+
+        prev = _last_tick_price[sym]
+        _last_tick_price[sym] = last_price
+
+        # Pas de comparaison possible au premier tick
+        if prev <= 0:
+            return
+
+        diff = last_price - prev
+        s_low = sym.lower()
+        threshold = SPIKE_THRESHOLD_POINTS
+
+        is_boom = "boom" in s_low
+        is_crash = "crash" in s_low
+
+        is_spike = False
+        direction: Optional[str] = None
+
+        if is_boom and diff >= threshold:
+            is_spike = True
+            direction = "BOOM"
+        elif is_crash and diff <= -threshold:
+            is_spike = True
+            direction = "CRASH"
+
+        if not is_spike:
+            return
+
+        info = {
+            "time": datetime.utcnow(),
+            "direction": direction,
+            "diff_points": float(diff),
+        }
+        _last_spike_info[sym] = info
+        logger.info(
+            "🚨 Spike temps réel détecté | symbol=%s direction=%s diff=%.5f",
+            sym,
+            direction,
+            diff,
+        )
+    except Exception as e:
+        logger.warning("Erreur update_spike_state_from_request: %s", e)
+
 # Modèles Pydantic pour les requêtes/réponses
 class DecisionRequest(BaseModel):
     symbol: Optional[str] = "UNKNOWN"
@@ -2759,6 +2886,15 @@ class DecisionResponse(BaseModel):
     gemma_analysis: Optional[str] = None  # Analyse complète Gemma+Gemini
     metadata: Optional[Dict[str, Any]] = None  # Métadonnées enrichies (RSI, EMA, ATR, etc.)
 
+
+class SpikeStatus(BaseModel):
+    """Statut temps réel de spike pour un symbole donné."""
+    symbol: str
+    spike: bool
+    direction: Optional[str] = None  # "BOOM" ou "CRASH"
+    diff_points: float = 0.0
+    last_spike_time: Optional[str] = None
+
 class TrendlineData(BaseModel):
     start: Dict[str, Any]  # {"time": timestamp, "price": float}
     end: Dict[str, Any]    # {"time": timestamp, "price": float}
@@ -2820,6 +2956,10 @@ async def decision_simplified(request: DecisionRequest):
     decision_count += 1
     
     logger.info(f"🎯 MODE SIMPLIFIÉ + ML - Requête décision pour {request.symbol}")
+    try:
+        update_spike_state_from_request(request)
+    except Exception as e:
+        logger.debug(f"⚠️ update_spike_state_from_request (simplifié) erreur: {e}")
     logger.info(f"   Bid: {request.bid}, Ask: {request.ask}, RSI: {request.rsi}")
     
     # Analyse technique de base
@@ -5325,6 +5465,11 @@ async def decision(request: DecisionRequest):
     rsi = request.rsi if (request.rsi is not None and 0 <= request.rsi <= 100) else 50.0
     request = request.model_copy(update={"symbol": symbol, "bid": bid, "ask": ask, "rsi": rsi})
     logger.debug(f"🎯 Décision IA demandée pour {symbol} (bid={bid}, ask={ask})")
+    # Mettre à jour l'état de spike en temps réel à partir de ce tick
+    try:
+        update_spike_state_from_request(request)
+    except Exception as e:
+        logger.debug(f"⚠️ update_spike_state_from_request erreur: {e}")
     try:
         # ========== AMÉLIORATIONS PRIORITAIRES - APPLIQUÉES TÔT ==========
         # 1. Vérifier le cache court d'abord
@@ -7877,6 +8022,36 @@ async def log_decision_accuracy(request: DecisionAccuracyRequest):
     except Exception as e:
         logger.error(f"Erreur dans /decision/accuracy: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Erreur lors de l'enregistrement de la précision: {str(e)}")
+
+
+@app.get("/spike/realtime", response_model=SpikeStatus)
+async def spike_realtime(symbol: str):
+    """
+    Retourne le statut temps réel de spike pour un symbole (détecté à partir des requêtes /decision).
+    """
+    sym = (symbol or "").strip()
+    info = _last_spike_info.get(sym)
+    spike = False
+    direction: Optional[str] = None
+    diff = 0.0
+    last_time_str: Optional[str] = None
+
+    if info:
+        last_time = info.get("time")
+        if isinstance(last_time, datetime):
+            last_time_str = last_time.isoformat()
+            if datetime.utcnow() - last_time <= timedelta(seconds=SPIKE_RECENT_WINDOW_SECONDS):
+                spike = True
+                direction = info.get("direction")
+                diff = float(info.get("diff_points", 0.0))
+
+    return SpikeStatus(
+        symbol=sym,
+        spike=spike,
+        direction=direction,
+        diff_points=diff,
+        last_spike_time=last_time_str,
+    )
 
 # ===== ML FEEDBACK + METRICS (ENTRAÎNEMENT CONTINU) =====
 # Système de feedback léger en mémoire pour apprentissage online
