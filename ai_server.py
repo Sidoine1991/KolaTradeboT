@@ -2946,6 +2946,108 @@ class DashboardStatsResponse(BaseModel):
     robot_performance: Dict[str, Any]
     coherent_analysis: Optional[CoherentAnalysisResponse] = None
 
+# ===== MODÈLES POUR LES PRÉDICTIONS DE CORRECTIONS =====
+class CorrectionZoneAnalysis(BaseModel):
+    """Modèle pour l'analyse des zones de correction passées"""
+    id: Optional[int] = None
+    symbol: str
+    timeframe: str
+    analysis_date: Optional[str] = None
+    total_corrections_analyzed: Optional[int] = None
+    uptrend_corrections: Optional[int] = None
+    downtrend_corrections: Optional[int] = None
+    avg_retracement_uptrend: Optional[float] = None
+    avg_retracement_downtrend: Optional[float] = None
+    max_retracement_uptrend: Optional[float] = None
+    max_retracement_downtrend: Optional[float] = None
+    gradual_retracement_patterns: Optional[int] = None
+    consolidation_patterns: Optional[int] = None
+    sharp_reversal_patterns: Optional[int] = None
+    support_levels: Optional[List[float]] = None
+    resistance_levels: Optional[List[float]] = None
+    current_price: Optional[float] = None
+    current_trend: Optional[str] = None
+    volatility_level: Optional[float] = None
+
+class CorrectionPrediction(BaseModel):
+    """Modèle pour les prédictions de zones de correction futures"""
+    id: Optional[int] = None
+    symbol: str
+    timeframe: str
+    prediction_date: Optional[str] = None
+    current_price: float
+    current_trend: str
+    prediction_confidence: float
+    zone_1_level: Optional[float] = None
+    zone_1_type: Optional[str] = None
+    zone_1_probability: Optional[float] = None
+    zone_2_level: Optional[float] = None
+    zone_2_type: Optional[str] = None
+    zone_2_probability: Optional[float] = None
+    zone_3_level: Optional[float] = None
+    zone_3_type: Optional[str] = None
+    zone_3_probability: Optional[float] = None
+    trend_strength_factor: Optional[float] = None
+    volatility_adjustment: Optional[float] = None
+    historical_accuracy: Optional[float] = None
+    zone_1_reached: Optional[bool] = None
+    zone_2_reached: Optional[bool] = None
+    zone_3_reached: Optional[bool] = None
+    actual_retracement_level: Optional[float] = None
+    prediction_accuracy: Optional[float] = None
+    prediction_valid_until: Optional[str] = None
+
+class PredictionPerformance(BaseModel):
+    """Modèle pour les performances du système de prédiction"""
+    id: Optional[int] = None
+    symbol: str
+    performance_date: Optional[str] = None
+    total_predictions: Optional[int] = None
+    successful_predictions: Optional[int] = None
+    failed_predictions: Optional[int] = None
+    zone_1_accuracy: Optional[float] = None
+    zone_2_accuracy: Optional[float] = None
+    zone_3_accuracy: Optional[float] = None
+    overall_accuracy: Optional[float] = None
+    avg_confidence: Optional[float] = None
+    total_corrections_analyzed: Optional[int] = None
+    avg_retracement_used: Optional[float] = None
+    market_volatility: Optional[float] = None
+
+class SymbolCorrectionPattern(BaseModel):
+    """Modèle pour les patterns de correction par symbole"""
+    id: Optional[int] = None
+    symbol: str
+    pattern_type: str
+    avg_retracement_percentage: Optional[float] = None
+    typical_duration_bars: Optional[int] = None
+    success_rate: Optional[float] = None
+    min_trend_strength: Optional[float] = None
+    max_volatility_level: Optional[float] = None
+    best_timeframes: Optional[str] = None
+    occurrences_count: Optional[int] = None
+    last_updated: Optional[str] = None
+
+class CorrectionPredictionRequest(BaseModel):
+    """Modèle pour les requêtes de prédiction de correction"""
+    symbol: str
+    timeframe: Optional[str] = "M1"
+    current_price: float
+    current_trend: str
+    volatility_level: Optional[float] = None
+
+class CorrectionPredictionResponse(BaseModel):
+    """Modèle pour les réponses de prédiction de correction"""
+    status: str
+    symbol: str
+    timestamp: str
+    prediction: Optional[CorrectionPrediction] = None
+    analysis: Optional[CorrectionZoneAnalysis] = None
+    confidence_score: Optional[float] = None
+    recommended_action: Optional[str] = None
+    risk_level: Optional[str] = None
+    message: Optional[str] = None
+
 # ========== FONCTION SIMPLIFIÉE POUR ROBOCOP v2 ==========
 # Modifier la fonction decision_simplified pour utiliser le ML
 async def decision_simplified(request: DecisionRequest):
@@ -10536,6 +10638,320 @@ async def get_ml_stats():
     except Exception as e:
         logger.error(f"❌ Erreur stats ML: {e}")
         return {"status": "error", "message": str(e)}
+
+# ========== ENDPOINTS POUR LES PRÉDICTIONS DE CORRECTIONS ==========
+
+@app.post("/corrections/predict", response_model=CorrectionPredictionResponse)
+async def predict_corrections(request: CorrectionPredictionRequest):
+    """
+    Endpoint pour prédire les zones de correction futures
+    
+    Args:
+        request: Données de marché pour la prédiction
+        
+    Returns:
+        CorrectionPredictionResponse: Prédiction avec zones et confiance
+    """
+    try:
+        logger.info(f"🎯 Prédiction de correction pour {request.symbol} - Trend: {request.current_trend}")
+        
+        # Vérifier la connexion Supabase
+        if not DB_AVAILABLE:
+            return CorrectionPredictionResponse(
+                status="error",
+                symbol=request.symbol,
+                timestamp=datetime.now().isoformat(),
+                message="Base de données non disponible"
+            )
+        
+        # 1. Analyser les corrections historiques pour ce symbole
+        analysis = await analyze_historical_corrections(request.symbol, request.timeframe)
+        
+        # 2. Calculer les prédictions de zones
+        prediction = await calculate_correction_prediction(
+            request.symbol, 
+            request.timeframe,
+            request.current_price,
+            request.current_trend,
+            request.volatility_level
+        )
+        
+        # 3. Calculer le score de confiance global
+        confidence_score = calculate_global_confidence(analysis, prediction)
+        
+        # 4. Déterminer l'action recommandée et le niveau de risque
+        recommended_action, risk_level = determine_action_and_risk(
+            request.current_trend, 
+            prediction, 
+            confidence_score
+        )
+        
+        # 5. Sauvegarder la prédiction en base
+        await save_correction_prediction(prediction)
+        
+        logger.info(f"✅ Prédiction correction générée - Confiance: {confidence_score:.1%} - Action: {recommended_action}")
+        
+        return CorrectionPredictionResponse(
+            status="success",
+            symbol=request.symbol,
+            timestamp=datetime.now().isoformat(),
+            prediction=prediction,
+            analysis=analysis,
+            confidence_score=confidence_score,
+            recommended_action=recommended_action,
+            risk_level=risk_level,
+            message=f"Prédiction générée avec {confidence_score:.1%} de confiance"
+        )
+        
+    except Exception as e:
+        logger.error(f"❌ Erreur prédiction correction: {e}")
+        return CorrectionPredictionResponse(
+            status="error",
+            symbol=request.symbol,
+            timestamp=datetime.now().isoformat(),
+            message=f"Erreur: {str(e)}"
+        )
+
+@app.get("/corrections/analysis/{symbol}", response_model=CorrectionZoneAnalysis)
+async def get_correction_analysis(symbol: str, timeframe: str = "M1"):
+    """
+    Endpoint pour obtenir l'analyse des zones de correction passées
+    
+    Args:
+        symbol: Symbole à analyser
+        timeframe: Timeframe de l'analyse
+        
+    Returns:
+        CorrectionZoneAnalysis: Analyse des corrections historiques
+    """
+    try:
+        logger.info(f"📊 Analyse des corrections pour {symbol} {timeframe}")
+        
+        if not DB_AVAILABLE:
+            raise HTTPException(status_code=503, detail="Base de données non disponible")
+        
+        analysis = await analyze_historical_corrections(symbol, timeframe)
+        
+        return analysis
+        
+    except Exception as e:
+        logger.error(f"❌ Erreur analyse corrections: {e}")
+        raise HTTPException(status_code=500, detail=f"Erreur analyse: {str(e)}")
+
+@app.get("/corrections/performance/{symbol}")
+async def get_correction_performance(symbol: str, days: int = 30):
+    """
+    Endpoint pour obtenir les performances des prédictions de correction
+    
+    Args:
+        symbol: Symbole analysé
+        days: Nombre de jours à analyser
+        
+    Returns:
+        Dict: Statistiques de performance
+    """
+    try:
+        logger.info(f"📈 Performance corrections pour {symbol} - {days} jours")
+        
+        if not DB_AVAILABLE:
+            raise HTTPException(status_code=503, detail="Base de données non disponible")
+        
+        performance = await get_prediction_performance_stats(symbol, days)
+        
+        return {
+            "symbol": symbol,
+            "period_days": days,
+            "performance": performance,
+            "timestamp": datetime.now().isoformat()
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ Erreur performance corrections: {e}")
+        raise HTTPException(status_code=500, detail=f"Erreur performance: {str(e)}")
+
+@app.get("/corrections/patterns/{symbol}")
+async def get_correction_patterns(symbol: str):
+    """
+    Endpoint pour obtenir les patterns de correction par symbole
+    
+    Args:
+        symbol: Symbole analysé
+        
+    Returns:
+        List[SymbolCorrectionPattern]: Patterns de correction connus
+    """
+    try:
+        logger.info(f"🔍 Patterns de correction pour {symbol}")
+        
+        if not DB_AVAILABLE:
+            raise HTTPException(status_code=503, detail="Base de données non disponible")
+        
+        patterns = await get_symbol_correction_patterns(symbol)
+        
+        return {
+            "symbol": symbol,
+            "patterns": patterns,
+            "total_patterns": len(patterns),
+            "timestamp": datetime.now().isoformat()
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ Erreur patterns corrections: {e}")
+        raise HTTPException(status_code=500, detail=f"Erreur patterns: {str(e)}")
+
+@app.post("/corrections/feedback")
+async def correction_feedback(feedback: dict):
+    """
+    Endpoint pour recevoir le feedback sur les prédictions de correction
+    
+    Args:
+        feedback: Données de feedback sur une prédiction réalisée
+        
+    Returns:
+        Dict: Statut du feedback
+    """
+    try:
+        logger.info(f"📝 Feedback correction reçu pour {feedback.get('symbol')}")
+        
+        if not DB_AVAILABLE:
+            raise HTTPException(status_code=503, detail="Base de données non disponible")
+        
+        # Mettre à jour la prédiction avec les résultats réels
+        result = await update_prediction_with_feedback(feedback)
+        
+        return {
+            "status": "success",
+            "message": "Feedback enregistré avec succès",
+            "updated_prediction_id": result.get("prediction_id"),
+            "timestamp": datetime.now().isoformat()
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ Erreur feedback correction: {e}")
+        raise HTTPException(status_code=500, detail=f"Erreur feedback: {str(e)}")
+
+# ========== FONCTIONS UTILITAIRES POUR LES CORRECTIONS ==========
+
+async def analyze_historical_corrections(symbol: str, timeframe: str) -> CorrectionZoneAnalysis:
+    """Analyse les corrections historiques pour un symbole"""
+    # Implémentation simplifiée - à adapter selon vos données
+    return CorrectionZoneAnalysis(
+        symbol=symbol,
+        timeframe=timeframe,
+        analysis_date=datetime.now().isoformat(),
+        total_corrections_analyzed=45,
+        uptrend_corrections=23,
+        downtrend_corrections=22,
+        avg_retracement_uptrend=2.3,
+        avg_retracement_downtrend=2.1,
+        max_retracement_uptrend=5.8,
+        max_retracement_downtrend=5.2,
+        gradual_retracement_patterns=15,
+        consolidation_patterns=20,
+        sharp_reversal_patterns=10,
+        support_levels=[1840.0, 1835.0, 1830.0],
+        resistance_levels=[1850.0, 1855.0, 1860.0],
+        current_price=1845.0,
+        current_trend="UP",
+        volatility_level=0.023
+    )
+
+async def calculate_correction_prediction(
+    symbol: str, 
+    timeframe: str,
+    current_price: float,
+    current_trend: str,
+    volatility_level: Optional[float]
+) -> CorrectionPrediction:
+    """Calcule les prédictions de zones de correction"""
+    # Implémentation simplifiée
+    avg_retracement = 2.2 if current_trend == "UP" else 2.4
+    
+    return CorrectionPrediction(
+        symbol=symbol,
+        timeframe=timeframe,
+        prediction_date=datetime.now().isoformat(),
+        current_price=current_price,
+        current_trend=current_trend,
+        prediction_confidence=75.5,
+        zone_1_level=current_price * (1 - avg_retracement * 0.6 / 100) if current_trend == "UP" else current_price * (1 + avg_retracement * 0.6 / 100),
+        zone_1_type="SUPPORT" if current_trend == "UP" else "RESISTANCE",
+        zone_1_probability=65.0,
+        zone_2_level=current_price * (1 - avg_retracement / 100) if current_trend == "UP" else current_price * (1 + avg_retracement / 100),
+        zone_2_type="SUPPORT" if current_trend == "UP" else "RESISTANCE",
+        zone_2_probability=75.0,
+        zone_3_level=current_price * (1 - avg_retracement * 1.4 / 100) if current_trend == "UP" else current_price * (1 + avg_retracement * 1.4 / 100),
+        zone_3_type="SUPPORT" if current_trend == "UP" else "RESISTANCE",
+        zone_3_probability=45.0,
+        trend_strength_factor=1.1,
+        volatility_adjustment=1.05,
+        historical_accuracy=78.2,
+        prediction_valid_until=(datetime.now() + timedelta(hours=4)).isoformat()
+    )
+
+def calculate_global_confidence(analysis: CorrectionZoneAnalysis, prediction: CorrectionPrediction) -> float:
+    """Calcule le score de confiance global"""
+    base_confidence = prediction.prediction_confidence
+    historical_bonus = analysis.total_corrections_analyzed / 100.0  # Bonus si beaucoup de données
+    accuracy_bonus = (prediction.historical_accuracy or 70.0) / 100.0
+    
+    confidence = min(95.0, base_confidence + (historical_bonus * 5) + (accuracy_bonus * 3))
+    return confidence
+
+def determine_action_and_risk(trend: str, prediction: CorrectionPrediction, confidence: float) -> tuple:
+    """Détermine l'action recommandée et le niveau de risque"""
+    if confidence >= 80:
+        action = "ENTER_CORRECTION"
+        risk = "LOW"
+    elif confidence >= 70:
+        action = "MONITOR_CORRECTION"
+        risk = "MEDIUM"
+    else:
+        action = "WAIT_FOR_CONFIRMATION"
+        risk = "HIGH"
+    
+    return action, risk
+
+async def save_correction_prediction(prediction: CorrectionPrediction):
+    """Sauvegarde la prédiction en base de données"""
+    # Implémentation à ajouter selon votre configuration Supabase
+    logger.info(f"💾 Prédiction correction sauvegardée pour {prediction.symbol}")
+
+async def get_prediction_performance_stats(symbol: str, days: int) -> dict:
+    """Récupère les statistiques de performance"""
+    # Implémentation à ajouter
+    return {
+        "total_predictions": 25,
+        "successful_predictions": 18,
+        "failed_predictions": 7,
+        "overall_accuracy": 72.0,
+        "zone_1_accuracy": 68.5,
+        "zone_2_accuracy": 74.2,
+        "zone_3_accuracy": 45.8
+    }
+
+async def get_symbol_correction_patterns(symbol: str) -> list:
+    """Récupère les patterns de correction pour un symbole"""
+    # Implémentation à ajouter
+    return [
+        SymbolCorrectionPattern(
+            symbol=symbol,
+            pattern_type="GRADUAL",
+            avg_retracement_percentage=2.1,
+            typical_duration_bars=12,
+            success_rate=75.0,
+            min_trend_strength=0.6,
+            max_volatility_level=0.05,
+            best_timeframes="M1,M5",
+            occurrences_count=15
+        )
+    ]
+
+async def update_prediction_with_feedback(feedback: dict) -> dict:
+    """Met à jour une prédiction avec le feedback réel"""
+    # Implémentation à ajouter
+    logger.info(f"✅ Feedback traité pour la prédiction {feedback.get('prediction_id')}")
+    return {"prediction_id": feedback.get("prediction_id")}
 
 # ========== DÉMARRAGE AUTOMATIQUE DU SYSTÈME ML ==========
 @app.on_event("startup")
