@@ -34,8 +34,20 @@ try:
 except ImportError:
     LIGHTGBM_AVAILABLE = False
 
-# Charger les variables d'environnement
-load_dotenv('.env.supabase')
+# Charger les variables d'environnement en gérant les encodages Windows possibles
+try:
+    # Tentative en UTF-8 (standard recommandé)
+    load_dotenv('.env.supabase', encoding='utf-8')
+except UnicodeDecodeError:
+    try:
+        # Fallback pour fichiers .env enregistrés en ANSI/Windows-1252
+        load_dotenv('.env.supabase', encoding='cp1252')
+    except Exception as e:
+        # Dernier recours: essayer en latin-1 et ne jamais bloquer le serveur IA
+        try:
+            load_dotenv('.env.supabase', encoding='latin-1')
+        except Exception:
+            print(f"[integrated_ml_trainer] Impossible de lire .env.supabase proprement: {e}. Le serveur IA continue sans certaines variables.")
 
 # Configuration
 logger = logging.getLogger("tradbot_ml_trainer")

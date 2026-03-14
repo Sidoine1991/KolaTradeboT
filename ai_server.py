@@ -8411,6 +8411,48 @@ async def trades_feedback(request: TradeFeedbackRequest):
             close_time=processed_close,
             coherent_confidence=request.coherent_confidence
         ))
+
+        # Déclencher automatiquement le réentraînement en arrière-plan (non-bloquant)
+        if CONTINUOUS_LEARNING_AVAILABLE and continuous_learner:
+            # Vérifier combien de trades ont été reçus pour cette catégorie
+            try:
+                # Map le symbole vers sa catégorie
+                symbol_upper = symbol.upper()
+                if "BOOM" in symbol_upper or "CRASH" in symbol_upper:
+                    category = "BOOM_CRASH"
+                elif any(keyword in symbol_upper for keyword in ['VOLATILITY', 'STEP', 'JUMP', 'RANGE BREAK']):
+                    category = "VOLATILITY"
+                elif any(crypto in symbol_upper for crypto in ['BTC', 'ETH', 'ADA', 'DOT']):
+                    category = "CRYPTO"
+                elif any(pair in symbol_upper for pair in ['USD', 'EUR', 'GBP', 'JPY']):
+                    category = "FOREX"
+                else:
+                    category = "COMMODITIES"
+                
+                # Récupérer le pool de connexions (gestion globale)
+                db_pool = await get_db_pool()
+                if db_pool:
+                    async with db_pool.acquire() as conn:
+                        count_result = await conn.fetchval("""
+                            SELECT COUNT(*) FROM trade_feedback
+                            WHERE created_at >= NOW() - INTERVAL '7 days'
+                            AND (
+                                CASE
+                                    WHEN symbol LIKE '%BOOM%' OR symbol LIKE '%CRASH%' THEN 'BOOM_CRASH'
+                                    WHEN symbol LIKE '%VOLATILITY%' OR symbol LIKE '%STEP%' OR symbol LIKE '%JUMP%' THEN 'VOLATILITY'
+                                    WHEN symbol LIKE '%BTC%' OR symbol LIKE '%ETH%' THEN 'CRYPTO'
+                                    WHEN symbol LIKE '%USD%' OR symbol LIKE '%EUR%' OR symbol LIKE '%GBP%' THEN 'FOREX'
+                                    ELSE 'COMMODITIES'
+                                END
+                            ) = $1
+                        """, category)
+                        
+                        # Si on a assez de trades, déclencher le réentraînement en arrière-plan
+                        if count_result and count_result >= continuous_learner.min_new_samples:
+                            logger.info(f"🔄 Assez de trades ({count_result}) pour réentraîner {category} - Déclenchement...")
+                            asyncio.create_task(_trigger_retraining_async(category))
+            except Exception as e:
+                logger.warning(f"⚠️ Erreur lors de la vérification du réentraînement: {e}")
         
         logger.info(f"📊 Feedback trade reçu: {symbol} {tf} - {'WIN' if request.is_win else 'LOSS'} (profit: {request.profit:.2f})")
         return _compute_ml_metrics(symbol, tf)
@@ -9045,62 +9087,11 @@ async def _trigger_retraining_async(category: str):
     except Exception as e:
         logger.error(f"❌ [AUTO-RETRAIN] Erreur lors du réentraînement en arrière-plan: {e}", exc_info=True)
 
-feedback_count = 0
 
-        
-        # Déclencher automatiquement le réentraînement en arrière-plan (non-bloquant)
-        if CONTINUOUS_LEARNING_AVAILABLE and continuous_learner:
-            # Vérifier combien de trades ont été reçus pour cette catégorie
-            try:
-                # Map le symbole vers sa catégorie
-                symbol_upper = feedback.symbol.upper()
-                if "BOOM" in symbol_upper or "CRASH" in symbol_upper:
-                    category = "BOOM_CRASH"
-                elif any(keyword in symbol_upper for keyword in ['VOLATILITY', 'STEP', 'JUMP', 'RANGE BREAK']):
-                    category = "VOLATILITY"
-                elif any(crypto in symbol_upper for crypto in ['BTC', 'ETH', 'ADA', 'DOT']):
-                    category = "CRYPTO"
-                elif any(pair in symbol_upper for pair in ['USD', 'EUR', 'GBP', 'JPY']):
-                    category = "FOREX"
-                else:
-                    category = "COMMODITIES"
-                
-                # Compter les trades récents pour cette catégorie
-                async with pool.acquire() as conn:
-                    count_result = await conn.fetchval("""
-                        SELECT COUNT(*) FROM trade_feedback
-                        WHERE created_at >= NOW() - INTERVAL '7 days'
-                        AND (
-                            CASE
-                                WHEN symbol LIKE '%BOOM%' OR symbol LIKE '%CRASH%' THEN 'BOOM_CRASH'
-                                WHEN symbol LIKE '%VOLATILITY%' OR symbol LIKE '%STEP%' OR symbol LIKE '%JUMP%' THEN 'VOLATILITY'
-                                WHEN symbol LIKE '%BTC%' OR symbol LIKE '%ETH%' THEN 'CRYPTO'
-                                WHEN symbol LIKE '%USD%' OR symbol LIKE '%EUR%' OR symbol LIKE '%GBP%' THEN 'FOREX'
-                                ELSE 'COMMODITIES'
-                            END
-                        ) = $1
-                    """, category)
-                    
-                    # Si on a assez de trades, déclencher le réentraînement en arrière-plan
-                    if count_result and count_result >= continuous_learner.min_new_samples:
-                        logger.info(f"🔄 Assez de trades ({count_result}) pour réentraîner {category} - Déclenchement en arrière-plan...")
-                        # Déclencher le réentraînement de manière asynchrone (non-bloquant)
-                        asyncio.create_task(_trigger_retraining_async(category))
-            except Exception as e:
-                logger.warning(f"⚠️ Erreur lors de la vérification du réentraînement: {e}")
-        
-        return {
-            "status": "ok",
-            "message": "Feedback enregistré avec succès",
-            "symbol": feedback.symbol,
-            "profit": feedback.profit
-        }
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Erreur enregistrement feedback: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Erreur serveur: {str(e)}")
+# ============================================================================
+# ENDPOINTS: ADDITIONAL UTILITIES
+# ============================================================================
+
 
 
 @app.get("/ml/feedback/status")
