@@ -22,7 +22,7 @@ import traceback
 import contextlib
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional, List, Dict, Any, Tuple, Set
+from typing import Optional, List, Dict, Any, Tuple, Set, Union
 from fastapi import FastAPI, HTTPException, Request, Body, status
 from starlette.requests import Request as StarletteRequest
 from fastapi.middleware.cors import CORSMiddleware
@@ -2327,7 +2327,7 @@ def store_prediction(
         "symbol": symbol,
         "timeframe": timeframe,
         "timestamp": prediction["timestamp"],
-        "predicted_prices": predicted_prices[:50],  # Limiter pour la réponse
+        "predicted_prices": predicted_prices[:500],  # Augmenté à 500 pour MT5 visualization
         "current_price": current_price,
         "accuracy_score": round(accuracy_score, 3),
         "validation_count": sum(1 for p in prediction_history[symbol] if p.get("is_validated", False)),
@@ -7820,7 +7820,7 @@ async def get_realtime_predictions(symbol: str, timeframe: str = "M1"):
                 "symbol": symbol,
                 "timeframe": timeframe,
                 "timestamp": last_pred["timestamp"],
-                "predicted_prices": last_pred["predicted_prices"][:50],  # Limiter à 50 prix pour la réponse
+                "predicted_prices": last_pred["predicted_prices"][:500],  # Augmenté à 500
                 "current_price": last_pred["current_price"],
                 "accuracy_score": round(accuracy_score, 3),
                 "validation_count": sum(1 for p in prediction_history[symbol] if p.get("is_validated", False)),
@@ -8164,9 +8164,12 @@ class TradeFeedbackRequest(BaseModel):
     profit: float
     is_win: bool
     ai_confidence: Optional[float] = None  # 0..1 (optional)
-    open_time: Optional[int] = None
-    close_time: Optional[int] = None
-    timestamp: Optional[int] = None
+    entry_price: Optional[float] = None
+    exit_price: Optional[float] = None
+    open_time: Optional[Union[str, int]] = None
+    close_time: Optional[Union[str, int]] = None
+    timestamp: Optional[Union[str, int]] = None
+    coherent_confidence: Optional[float] = None
 
 # Buffer de feedback en mémoire (Render free: stockage éphémère)
 _feedback_by_key: Dict[str, deque] = {}  # key = "{symbol}:{tf}"
@@ -8289,7 +8292,13 @@ async def _continuous_training_loop(symbols: List[str], timeframe: str, interval
                 logger.warning(f"⚠️ Continuous loop: {sym}: {e}")
         await asyncio.sleep(max(10, interval_sec))
 
-async def _push_feedback_to_supabase(symbol: str, timeframe: str, side: Optional[str], profit: float, is_win: bool, ai_confidence: Optional[float]):
+async def _push_feedback_to_supabase(
+    symbol: str, timeframe: str, side: Optional[str], profit: float, 
+    is_win: bool, ai_confidence: Optional[float], 
+    entry_price: Optional[float] = None, exit_price: Optional[float] = None,
+    open_time: Optional[str] = None, close_time: Optional[str] = None,
+    coherent_confidence: Optional[float] = None
+):
     """Envoie le feedback vers Supabase trade_feedback pour que le robot apprenne des erreurs."""
     import httpx
     supabase_url = os.getenv("SUPABASE_URL", "https://bpzqnooiisgadzicwupi.supabase.co")
@@ -8299,21 +8308,34 @@ async def _push_feedback_to_supabase(symbol: str, timeframe: str, side: Optional
     # Vérification explicite de la configuration Supabase pour éviter les échecs silencieux
     if not supabase_key or not supabase_url:
         logger.debug(
-            "Supabase non configuré pour le feedback (SUPABASE_URL ou SUPABASE_SERVICE_KEY/ANON_KEY manquant) - "
-            f"url='{supabase_url}', key_present={bool(supabase_key)}"
+            "Supabase non configuré pour le feedback (SUPABASE_URL ou SUPABASE_SERVICE_KEY/ANON_KEY manquant)"
         )
         return
+        
     now_iso = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    
+    # Formater les dates pour Supabase (doivent être ISO)
+    def to_iso(t):
+        if not t: return now_iso
+        try:
+            # Si déjà ISO (contient T), renvoyer tel quel
+            if 'T' in t: return t
+            # Sinon supposer format "YYYY-MM-DD HH:MM:SS"
+            dt = datetime.strptime(t, "%Y-%m-%d %H:%M:%S")
+            return dt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        except:
+            return now_iso
+
     payload = {
         "symbol": symbol,
         "timeframe": timeframe or "M1",
-        "open_time": now_iso,
-        "close_time": now_iso,
-        "entry_price": 0,
-        "exit_price": 0,
+        "open_time": to_iso(open_time),
+        "close_time": to_iso(close_time),
+        "entry_price": float(entry_price) if entry_price is not None else 0,
+        "exit_price": float(exit_price) if exit_price is not None else 0,
         "profit": float(profit),
         "ai_confidence": float(ai_confidence) if ai_confidence is not None else None,
-        "coherent_confidence": float(ai_confidence) if ai_confidence is not None else None,
+        "coherent_confidence": float(coherent_confidence if coherent_confidence is not None else ai_confidence) if (coherent_confidence is not None or ai_confidence is not None) else None,
         "decision": (side or "HOLD").upper(),
         "is_win": bool(is_win),
         "side": (side or "").lower(),
@@ -8329,14 +8351,7 @@ async def _push_feedback_to_supabase(symbol: str, timeframe: str, side: Optional
             if r.status_code in (200, 201):
                 logger.info(f"✅ Feedback envoyé à Supabase (trade_feedback) pour {symbol} ({timeframe})")
             else:
-                logger.error(
-                    "Supabase trade_feedback HTTP %s pour %s (%s) - body=%s payload=%s",
-                    r.status_code,
-                    symbol,
-                    timeframe,
-                    r.text,
-                    payload,
-                )
+                logger.error(f"Supabase trade_feedback HTTP {r.status_code}: {r.text}")
     except Exception as e:
         logger.error(f"Supabase trade_feedback exception pour {symbol} ({timeframe}): {e}")
 
@@ -8345,22 +8360,58 @@ async def _push_feedback_to_supabase(symbol: str, timeframe: str, side: Optional
 async def trades_feedback(request: TradeFeedbackRequest):
     """
     Reçoit le résultat d'un trade (profit, win/loss) et met à jour les métriques online.
-    Envoie aussi à Supabase pour que /trend utilise ces données (apprentissage des erreurs).
-    Retourne les métriques détaillées (compat MT5).
+    Envoie aussi à Supabase pour que le robot apprenne des erreurs.
     """
     try:
         symbol = request.symbol
         tf = request.timeframe or "M1"
+        
+        # Gestion flexible des timestamps (ms int ou ISO str)
+        def process_time(t):
+            if t is None: return None
+            if isinstance(t, (int, float)):
+                # Si c'est un grand nombre, c'est probablement des millisecondes
+                if t > 10**10: t = t / 1000.0
+                return datetime.utcfromtimestamp(t).strftime("%Y-%m-%d %H:%M:%S")
+            return str(t)
+
+        processed_open = process_time(request.open_time)
+        processed_close = process_time(request.close_time)
+        processed_ts = process_time(request.timestamp) or datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+
+        # Mise à jour du buffer mémoire
         buf = _get_feedback_buf(symbol, tf)
         buf.append({
             "profit": float(request.profit),
             "is_win": bool(request.is_win),
             "side": (request.side or "").lower(),
             "ai_confidence": float(request.ai_confidence) if request.ai_confidence is not None else None,
-            "timestamp": request.timestamp or datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+            "coherent_confidence": float(request.coherent_confidence) if request.coherent_confidence is not None else None,
+            "timestamp": processed_ts,
+            "open_time": processed_open,
+            "close_time": processed_close,
+            "entry_price": request.entry_price,
+            "exit_price": request.exit_price
         })
+        
+        # Recalibration locale
         update_calibration_from_feedback(symbol, bool(request.is_win), float(request.profit), request.side or "")
-        asyncio.create_task(_push_feedback_to_supabase(symbol, tf, request.side, request.profit, request.is_win, request.ai_confidence))
+        
+        # Persistance Supabase asynchrone
+        asyncio.create_task(_push_feedback_to_supabase(
+            symbol=symbol, 
+            timeframe=tf, 
+            side=request.side, 
+            profit=request.profit, 
+            is_win=request.is_win, 
+            ai_confidence=request.ai_confidence,
+            entry_price=request.entry_price,
+            exit_price=request.exit_price,
+            open_time=processed_open,
+            close_time=processed_close,
+            coherent_confidence=request.coherent_confidence
+        ))
+        
         logger.info(f"📊 Feedback trade reçu: {symbol} {tf} - {'WIN' if request.is_win else 'LOSS'} (profit: {request.profit:.2f})")
         return _compute_ml_metrics(symbol, tf)
     except Exception as e:
@@ -8996,75 +9047,6 @@ async def _trigger_retraining_async(category: str):
 
 feedback_count = 0
 
-@app.post("/trades/feedback")
-async def receive_trade_feedback(feedback: TradeFeedback):
-    """
-    Endpoint pour recevoir les résultats de trade depuis le robot MT5
-    Mode simplifié ou complet selon la configuration
-    """
-    global feedback_count
-    feedback_count += 1
-    
-    logger.info(f"📊 Feedback reçu: {feedback.symbol} - Profit: {feedback.profit:.2f} - Win: {feedback.is_win}")
-    
-    # MODE SIMPLIFIÉ - Pas de base de données
-    if SIMPLIFIED_MODE:
-        return {
-            "status": "received",
-            "message": f"Feedback traité pour {feedback.symbol}",
-            "total_feedbacks": feedback_count,
-            "mode": "simplified"
-        }
-    
-    # MODE COMPLET - Avec base de données
-    if not DB_AVAILABLE:
-        raise HTTPException(
-            status_code=503,
-            detail="Service de feedback non disponible - DATABASE_URL non configurée"
-        )
-    
-    try:
-        pool = await get_db_pool()
-        if not pool:
-            raise HTTPException(status_code=503, detail="Connexion base de données impossible")
-        
-        # Valider et parser les timestamps
-        try:
-            open_time_dt = datetime.fromisoformat(feedback.open_time.replace('Z', '+00:00'))
-            close_time_dt = datetime.fromisoformat(feedback.close_time.replace('Z', '+00:00'))
-        except ValueError as e:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Format de date invalide: {str(e)}. Utilisez le format ISO 8601"
-            )
-        
-        # Insérer dans la base de données
-        async with pool.acquire() as conn:
-            await conn.execute("""
-                INSERT INTO trade_feedback (
-                    symbol, open_time, close_time, entry_price, exit_price,
-                    profit, ai_confidence, coherent_confidence, decision, is_win
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-            """,
-                feedback.symbol,
-                open_time_dt,
-                close_time_dt,
-                feedback.entry_price,
-                feedback.exit_price,
-                feedback.profit,
-                feedback.ai_confidence,
-                feedback.coherent_confidence,
-                feedback.decision,
-                feedback.is_win
-            )
-        
-        # Logger pour suivi
-        win_str = "✅ WIN" if feedback.is_win else "❌ LOSS"
-        logger.info(
-            f"📊 Feedback reçu: {feedback.symbol} {feedback.decision} - "
-            f"Profit: ${feedback.profit:.2f} {win_str} "
-            f"(IA: {feedback.ai_confidence:.1%}, Coh: {feedback.coherent_confidence:.1%})"
-        )
         
         # Déclencher automatiquement le réentraînement en arrière-plan (non-bloquant)
         if CONTINUOUS_LEARNING_AVAILABLE and continuous_learner:
