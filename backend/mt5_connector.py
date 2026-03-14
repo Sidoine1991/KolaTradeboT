@@ -34,7 +34,14 @@ sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'strate
 
 load_dotenv()
 
-MT5_LOGIN = int(os.getenv('MT5_LOGIN', 0))
+# Lecture robuste du login MT5 (éviter crash si valeur placeholder comme 'votre-login-mt5')
+_mt5_login_raw = os.getenv('MT5_LOGIN', '').strip()
+try:
+    MT5_LOGIN = int(_mt5_login_raw) if _mt5_login_raw else 0
+except ValueError:
+    print(f"⚠️ MT5_LOGIN invalide dans les variables d'environnement: '{_mt5_login_raw}'.")
+    print("   Veuillez mettre votre VRAI login numérique MT5 dans .env.supabase ou .env (clé MT5_LOGIN).")
+    MT5_LOGIN = 0
 MT5_PASSWORD = os.getenv('MT5_PASSWORD', '')
 MT5_SERVER = os.getenv('MT5_SERVER', '')
 
