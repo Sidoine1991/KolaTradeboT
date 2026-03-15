@@ -10178,6 +10178,51 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
                   // Utiliser la dernière confiance IA connue
                   double ai_confidence = g_lastAIConfidence;
 
+                  // Récupérer les prix d'entrée et de sortie plus précisément
+                  double entry_price = 0.0;
+                  double exit_price = deal.Price();
+                  
+                  // Si c'est un deal de clôture, rechercher le deal d'entrée correspondant
+                  if(deal.Entry() == DEAL_ENTRY_OUT)
+                  {
+                     // Rechercher dans l'historique des deals le deal d'entrée correspondant
+                     ulong deal_ticket = deal.PositionId();
+                     datetime deal_time = deal.Time();
+                     
+                     // Parcourir l'historique récent pour trouver le deal d'entrée
+                     for(int i = 0; i < HistoryDealsTotal(); i++)
+                     {
+                        if(HistoryDealSelect(i))
+                        {
+                           ulong hist_ticket = HistoryDealGetInteger(DEAL_TICKET);
+                           ulong hist_position_id = HistoryDealGetInteger(DEAL_POSITION_ID);
+                           datetime hist_time = (datetime)HistoryDealGetInteger(DEAL_TIME);
+                           ENUM_DEAL_ENTRY hist_entry = (ENUM_DEAL_ENTRY)HistoryDealGetInteger(DEAL_ENTRY);
+                           
+                           // Même position, deal d'entrée, et antérieur au deal de clôture
+                           if(hist_position_id == deal_position_id && 
+                              hist_entry == DEAL_ENTRY_IN && 
+                              hist_time < deal_time)
+                           {
+                              entry_price = HistoryDealGetDouble(DEAL_PRICE);
+                              break; // Trouvé!
+                           }
+                        }
+                     }
+                     
+                     // Si toujours pas trouvé, utiliser une approximation
+                     if(entry_price == 0.0)
+                     {
+                        entry_price = SymbolInfoDouble(symbol, SYMBOL_ASK); // Approximation
+                     }
+                  }
+                  else
+                  {
+                     // Pour les deals d'entrée
+                     entry_price = deal.Price();
+                     exit_price = SymbolInfoDouble(symbol, SYMBOL_BID); // Approximation
+                  }
+
                   // Créer le payload JSON
                   string json_payload = StringFormat(
                      "{"
@@ -10188,7 +10233,9 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
                      "\"ai_confidence\":%.4f,"
                      "\"side\":\"%s\","
                      "\"open_time\":%lld,"
-                     "\"close_time\":%lld"
+                     "\"close_time\":%lld,"
+                     "\"entry_price\":%.4f,"
+                     "\"exit_price\":%.4f"
                      "}",
                      symbol,
                      profit,
@@ -10196,7 +10243,9 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
                      ai_confidence,
                      side,
                      open_time,
-                     close_time
+                     close_time,
+                     entry_price,
+                     exit_price
                   );
 
                   // Envoyer à l'IA server (essayer primaire puis secondaire)
@@ -10206,6 +10255,7 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
                   Print("📤 ENVOI FEEDBACK IA - URL1: ", url1);
                   Print("📤 ENVOI FEEDBACK IA - URL2: ", url2);
                   Print("📤 ENVOI FEEDBACK IA - Données: symbol=", symbol, " profit=", DoubleToString(profit, 2), " ai_conf=", DoubleToString(ai_confidence, 2));
+                  Print("📤 ENVOI FEEDBACK IA - Prix: Entry=", DoubleToString(entry_price, 4), " Exit=", DoubleToString(exit_price, 4));
 
                   string headers = "Content-Type: application/json\r\n";
                   char post_data[];
@@ -11276,9 +11326,9 @@ void CheckAndExecuteDerivArrowTrade()
             if(StringFind(stairJson, "staircase_up_prob") >= 0 || StringFind(stairJson, "staircase_down_prob") >= 0)
             {
                if(isBoom)
-                  staircaseProb = StrToDouble(ExtractJsonValue(stairJson, "staircase_up_prob"));
+                  staircaseProb = StringToDouble(ExtractJsonValue(stairJson, "staircase_up_prob"));
                else if(isCrash)
-                  staircaseProb = StrToDouble(ExtractJsonValue(stairJson, "staircase_down_prob"));
+                  staircaseProb = StringToDouble(ExtractJsonValue(stairJson, "staircase_down_prob"));
             }
          }
       }
