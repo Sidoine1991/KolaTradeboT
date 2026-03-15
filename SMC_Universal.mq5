@@ -5479,8 +5479,8 @@ void UpdateMLMetricsDisplay()
    {
       // Ne pas écraser une valeur utile si on a déjà des métriques affichées
       if(StringLen(g_mlMetricsStr) == 0)
-         g_mlMetricsStr = "ML: Données non récupérées (WebRequest bloqué)";
-      Print("❌ WebRequest ML metrics échoué (code ", res, "). Les données Supabase passent par le serveur IA. Autorisez l'URL: ", baseUrl);
+         g_mlMetricsStr = "ML: Connexion en cours...";
+         Print("🔄 DEBUG - En attente des métriques ML...");
    }
    
    // Récupérer le statut du canal
@@ -5497,7 +5497,7 @@ void UpdateMLMetricsDisplay()
    else
    {
       g_channelValid = false;
-      Print("❌ DEBUG - Erreur WebRequest ML status: ", resStatus);
+      Print("🔄 DEBUG - WebRequest ML status en cours (code: ", resStatus, ") - Nouvelle tentative...");
    }
 
    // Afficher les métriques ML sur le graphique (label dédié, chart actuel)
@@ -10093,7 +10093,223 @@ bool IsClassicIndicatorsAligned(const string direction, string &summaryOut)
 
 bool LookForTradingOpportunity(SMC_Signal &sig)
 {
-   // Cette fonction peut être implémentée plus tard si nécessaire
+   // Stratégie avancée basée sur les zones de force et spikes
+   // Exécute directement au marché quand les conditions sont remplies
+   
+   // Vérifier si nous sommes sur Boom ou Crash
+   bool isBoom = (StringFind(_Symbol, "Boom") >= 0);
+   bool isCrash = (StringFind(_Symbol, "Crash") >= 0);
+   
+   if(!isBoom && !isCrash) return false; // Seulement pour Boom/Crash
+   
+   // Récupérer les prix actuels
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double currentPrice = (bid + ask) / 2.0;
+   
+   // Vérifier si nous sommes dans une zone de spike
+   bool inSpikeZone = false;
+   int spikeCount = 0;
+   
+   // Compter les spikes récents (basé sur les dernières bougies)
+   for(int i = 1; i <= 10; i++)
+   {
+      double high_i = iHigh(SymbolInfoInteger(_Symbol, SYMBOL_PERIOD_M1), i);
+      double low_i = iLow(SymbolInfoInteger(_Symbol, SYMBOL_PERIOD_M1), i);
+      double range_i = high_i - low_i;
+      double atr_i = iATR(SymbolInfoInteger(_Symbol, SYMBOL_PERIOD_M1), 14, i);
+      
+      // Spike = range > 2x ATR
+      if(range_i > atr_i * 2.0)
+      {
+         spikeCount++;
+         if(i <= 3) inSpikeZone = true; // Spike récent (3 dernières bougies)
+      }
+   }
+   
+   // Vérifier les zones de force
+   bool inDiscountZone = IsAtDiscountLowerEdge();
+   bool inPremiumZone = IsAtPremiumUpperEdge();
+   bool deepInDiscount = IsDeepInDiscountZone75();
+   bool deepInPremium = IsDeepInPremiumZone75();
+   
+   // Log de debug pour la stratégie
+   if(inSpikeZone)
+      Print("🔍 STRATÉGIE ZONES - ", _Symbol, " | Spike détecté: ", spikeCount, " spikes | Zone: SPIKE");
+   else if(inDiscountZone)
+      Print("🔍 STRATÉGIE ZONES - ", _Symbol, " | Zone DISCOUNT détectée | Prix: ", DoubleToString(currentPrice, _Digits));
+   else if(inPremiumZone)
+      Print("🔍 STRATÉGIE ZONES - ", _Symbol, " | Zone PREMIUM détectée | Prix: ", DoubleToString(currentPrice, _Digits));
+   else
+      Print("🔍 STRATÉGIE ZONES - ", _Symbol, " | Zone NEUTRE | Prix: ", DoubleToString(currentPrice, _Digits));
+   
+   // STRATÉGIE 1: Spike en cours sur Boom/Crash
+   if(inSpikeZone && spikeCount >= 2)
+   {
+      // Attendre 1-2 bougies après la fin du spike pour confirmer la direction
+      if(spikeCount >= 3)
+      {
+         // Spike prolongé - exécuter au marché après 1-2 bougies de calme
+         if(isBoom && sig.action == "BUY")
+         {
+            Print("🚫 STRATÉGIE SPIKE BOOM - Spike prolongé détecté | Exécution BUY au marché");
+            
+            // Exécuter l'ordre au marché
+            double lotSize = 0.01;
+            double stopLoss = currentPrice - (SymbolInfoInteger(_Symbol, SYMBOL_SPREAD) * 5);
+            double takeProfit = currentPrice + (SymbolInfoInteger(_Symbol, SYMBOL_SPREAD) * 10);
+            
+            MqlTradeRequest request = {};
+            request.action = TRADE_ACTION_DEAL;
+            request.symbol = _Symbol;
+            request.volume = lotSize;
+            request.type = ORDER_TYPE_BUY;
+            request.price = currentPrice;
+            request.sl = stopLoss;
+            request.tp = takeProfit;
+            request.deviation = 10;
+            request.magic = MagicNumber;
+            
+            OrderSend(request, result);
+            
+            if(result.retcode == TRADE_RETCODE_DONE)
+            {
+               Print("✅ STRATÉGIE SPIKE BOOM - Ordre BUY exécuté | Ticket: ", result.order);
+               sig.executed = true;
+               return true;
+            }
+            else
+            {
+               Print("❌ STRATÉGIE SPIKE BOOM - Échec ordre BUY | Erreur: ", result.retcode);
+            }
+         }
+         else if(isCrash && sig.action == "SELL")
+         {
+            Print("🚫 STRATÉGIE SPIKE CRASH - Spike prolongé détecté | Exécution SELL au marché");
+            
+            // Exécuter l'ordre au marché
+            double lotSize = 0.01;
+            double stopLoss = currentPrice + (SymbolInfoInteger(_Symbol, SYMBOL_SPREAD) * 5);
+            double takeProfit = currentPrice - (SymbolInfoInteger(_Symbol, SYMBOL_SPREAD) * 10);
+            
+            MqlTradeRequest request = {};
+            request.action = TRADE_ACTION_DEAL;
+            request.symbol = _Symbol;
+            request.volume = lotSize;
+            request.type = ORDER_TYPE_SELL;
+            request.price = currentPrice;
+            request.sl = stopLoss;
+            request.tp = takeProfit;
+            request.deviation = 10;
+            request.magic = MagicNumber;
+            
+            OrderSend(request, result);
+            
+            if(result.retcode == TRADE_RETCODE_DONE)
+            {
+               Print("✅ STRATÉGIE SPIKE CRASH - Ordre SELL exécuté | Ticket: ", result.order);
+               sig.executed = true;
+               return true;
+            }
+            else
+            {
+               Print("❌ STRATÉGIE SPIKE CRASH - Échec ordre SELL | Erreur: ", result.retcode);
+            }
+         }
+      }
+      else
+      {
+         // Spike court - attendre la prochaine bougie pour confirmation
+         Print("🔍 STRATÉGIE ZONES - ", _Symbol, " | Spike court détecté | Attente confirmation...");
+         return false;
+      }
+   }
+   
+   // STRATÉGIE 2: Touch de FORCE_LOWER en zone Discount sur Boom
+   if(isBoom && inDiscountZone && sig.action == "BUY")
+   {
+      Print("🚫 STRATÉGIE ZONES BOOM - FORCE_LOWER touché en zone Discount | Exécution BUY au marché");
+      
+      // Exécuter l'ordre au marché
+      double lotSize = 0.01;
+      double stopLoss = currentPrice - (SymbolInfoInteger(_Symbol, SYMBOL_SPREAD) * 3);
+      double takeProfit = currentPrice + (SymbolInfoInteger(_Symbol, SYMBOL_SPREAD) * 8);
+      
+      MqlTradeRequest request = {};
+      request.action = TRADE_ACTION_DEAL;
+      request.symbol = _Symbol;
+      request.volume = lotSize;
+      request.type = ORDER_TYPE_BUY;
+      request.price = currentPrice;
+      request.sl = stopLoss;
+      request.tp = takeProfit;
+      request.deviation = 10;
+      request.magic = MagicNumber;
+      
+      OrderSend(request, result);
+      
+      if(result.retcode == TRADE_RETCODE_DONE)
+      {
+         Print("✅ STRATÉGIE ZONES BOOM - Ordre BUY exécuté | Ticket: ", result.order);
+         sig.executed = true;
+         return true;
+      }
+      else
+      {
+         Print("❌ STRATÉGIE ZONES BOOM - Échec ordre BUY | Erreur: ", result.retcode);
+      }
+   }
+   
+   // STRATÉGIE 3: Touch de FORCE_UPPER en zone Premium sur Crash
+   if(isCrash && inPremiumZone && sig.action == "SELL")
+   {
+      Print("🚫 STRATÉGIE ZONES CRASH - FORCE_UPPER touché en zone Premium | Exécution SELL au marché");
+      
+      // Exécuter l'ordre au marché
+      double lotSize = 0.01;
+      double stopLoss = currentPrice + (SymbolInfoInteger(_Symbol, SYMBOL_SPREAD) * 3);
+      double takeProfit = currentPrice - (SymbolInfoInteger(_Symbol, SYMBOL_SPREAD) * 8);
+      
+      MqlTradeRequest request = {};
+      request.action = TRADE_ACTION_DEAL;
+      request.symbol = _Symbol;
+      request.volume = lotSize;
+      request.type = ORDER_TYPE_SELL;
+      request.price = currentPrice;
+      request.sl = stopLoss;
+      request.tp = takeProfit;
+      request.deviation = 10;
+      request.magic = MagicNumber;
+      
+      OrderSend(request, result);
+      
+      if(result.retcode == TRADE_RETCODE_DONE)
+      {
+         Print("✅ STRATÉGIE ZONES CRASH - Ordre SELL exécuté | Ticket: ", result.order);
+         sig.executed = true;
+         return true;
+      }
+      else
+      {
+         Print("❌ STRATÉGIE ZONES CRASH - Échec ordre SELL | Erreur: ", result.retcode);
+      }
+   }
+   
+   // STRATÉGIE 4: Deep zone Discount - attendre retour vers équilibre
+   if(deepInDiscount && (isBoom && sig.action == "BUY" || isCrash && sig.action == "SELL"))
+   {
+      Print("🔍 STRATÉGIE ZONES - ", _Symbol, " | Deep zone Discount | Attente retour vers équilibre...");
+      return false; // Attendre une meilleure opportunité
+   }
+   
+   // STRATÉGIE 5: Deep zone Premium - attendre retour vers équilibre
+   if(deepInPremium && (isBoom && sig.action == "SELL" || isCrash && sig.action == "BUY"))
+   {
+      Print("🔍 STRATÉGIE ZONES - ", _Symbol, " | Deep zone Premium | Attente retour vers équilibre...");
+      return false; // Attendre une meilleure opportunité
+   }
+   
+   // Si aucune condition n'est remplie, ne pas exécuter
    return false;
 }
 
@@ -11167,6 +11383,18 @@ void CheckAndExecuteDerivArrowTrade()
    {
       Print("🚫 TRADE BLOQUÉ - IA en HOLD sur ", _Symbol);
       return;
+   }
+   
+   // NOUVELLE STRATÉGIE: Vérifier les opportunités basées sur les zones de force
+   SMC_Signal zoneSignal;
+   zoneSignal.action = (StringFind(g_lastAIAction, "BUY") >= 0 ? "BUY" : "SELL");
+   zoneSignal.confidence = g_lastAIConfidence;
+   zoneSignal.executed = false;
+   
+   if(LookForTradingOpportunity(zoneSignal))
+   {
+      Print("✅ STRATÉGIE ZONES - Trade exécuté via zones de force sur ", _Symbol);
+      return; // Sortir si la stratégie des zones a exécuté un trade
    }
    
    // DÉTECTION DES FLÈCHES DERIV ARROW EXISTANTES (locale à cette fonction)

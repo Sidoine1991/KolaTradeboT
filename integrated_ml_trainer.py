@@ -348,7 +348,36 @@ class IntegratedMLTrainer:
             json.dump(metrics, f, indent=2)
         
         logger.info(f"✅ Modèle {model_type} entraîné: {model_key} [{category}] | Accuracy: {accuracy:.4f} | F1: {f1:.4f}")
+        
+        # Logger dans Supabase après l'entraînement
+        try:
+            import asyncio
+            if asyncio.get_event_loop().is_running():
+                # Si déjà dans une boucle asyncio, créer une tâche
+                asyncio.create_task(self._log_training_metrics(metrics))
+            else:
+                # Si pas de boucle, exécuter directement
+                asyncio.run(self._log_training_metrics(metrics))
+        except Exception as e:
+            logger.warning(f"Erreur logging Supabase: {e}")
+        
         return metrics
+    
+    async def _log_training_metrics(self, metrics: Dict[str, Any]):
+        """Logger toutes les métriques d'entraînement dans Supabase."""
+        try:
+            # 1. Logger le training run
+            await self._log_training_run(metrics, "completed")
+            
+            # 2. Logger l'importance des features
+            await self._log_feature_importance(metrics)
+            
+            # 3. Logger la calibration du symbole
+            await self._log_symbol_calibration(metrics)
+            
+            logger.info(f"✅ All training metrics logged to Supabase: {metrics['symbol']}")
+        except Exception as e:
+            logger.warning(f"❌ Error logging training metrics: {e}")
     
     def predict(self, symbol: str, timeframe: str, market_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """
@@ -453,7 +482,7 @@ class IntegratedMLTrainer:
             logger.warning(f"Erreur sauvegarde métriques Supabase: {e}")
 
     async def _log_training_run(self, metrics: Dict[str, Any], status: str = "completed"):
-        """Log optionnel dans training_runs (si table existe)."""
+        """Log systématique dans training_runs."""
         if not self.supabase_key:
             return
         try:
@@ -466,7 +495,12 @@ class IntegratedMLTrainer:
                 "samples_used": metrics.get("training_samples", 0),
                 "accuracy": mt.get("accuracy"),
                 "f1_score": mt.get("f1_score"),
-                "metadata": {"model_type": best},
+                "duration_sec": metrics.get("training_duration", 0),
+                "metadata": {
+                    "model_type": best,
+                    "features_used": mt.get("features_used", []),
+                    "category": get_symbol_category(metrics["symbol"])
+                },
             }
             async with httpx.AsyncClient() as client:
                 r = await client.post(
@@ -478,13 +512,106 @@ class IntegratedMLTrainer:
                         "Content-Type": "application/json",
                         "Prefer": "return=minimal",
                     },
-                    timeout=5.0,
+                    timeout=10.0,
                 )
-                if r.status_code not in (200, 201):
-                    logger.debug(f"training_runs POST {r.status_code} (table peut-être absente)")
+                if r.status_code in (200, 201):
+                    logger.info(f"✅ Training run logged: {metrics['symbol']} {metrics.get('timeframe', 'M1')}")
+                else:
+                    logger.warning(f"⚠️ training_runs POST {r.status_code}: {r.text[:200]}")
         except Exception as e:
-            logger.debug(f"training_runs: {e}")
+            logger.warning(f"❌ training_runs error: {e}")
     
+    async def _log_feature_importance(self, metrics: Dict[str, Any], training_run_id: str = None):
+        """Log l'importance des features dans la table feature_importance."""
+        if not self.supabase_key:
+            return
+        try:
+            best = metrics.get("best_model", "random_forest")
+            mt = metrics.get("metrics", {}).get(best) or metrics.get("metrics", {}).get("random_forest", {})
+            feature_importance = mt.get("feature_importance", {})
+            
+            if not feature_importance:
+                return
+            
+            # Préparer les données de feature importance
+            features_data = []
+            for feature_name, importance in feature_importance.items():
+                features_data.append({
+                    "symbol": metrics["symbol"],
+                    "timeframe": metrics.get("timeframe", "M1"),
+                    "model_type": best,
+                    "training_run_id": training_run_id,
+                    "feature_name": feature_name,
+                    "importance": float(importance),
+                    "rank": None  # Sera calculé plus tard si besoin
+                })
+            
+            # Insérer en lot
+            async with httpx.AsyncClient() as client:
+                r = await client.post(
+                    f"{self.supabase_url}/rest/v1/feature_importance",
+                    json=features_data,
+                    headers={
+                        "apikey": self.supabase_key,
+                        "Authorization": f"Bearer {self.supabase_key}",
+                        "Content-Type": "application/json",
+                        "Prefer": "return=minimal",
+                    },
+                    timeout=10.0,
+                )
+                if r.status_code in (200, 201):
+                    logger.info(f"✅ Feature importance logged: {len(features_data)} features for {metrics['symbol']}")
+                else:
+                    logger.warning(f"⚠️ feature_importance POST {r.status_code}: {r.text[:200]}")
+        except Exception as e:
+            logger.warning(f"❌ feature_importance error: {e}")
+    
+    async def _log_symbol_calibration(self, metrics: Dict[str, Any]):
+        """Log la calibration du symbole dans la table symbol_calibration."""
+        if not self.supabase_key:
+            return
+        try:
+            best = metrics.get("best_model", "random_forest")
+            mt = metrics.get("metrics", {}).get(best) or metrics.get("metrics", {}).get("random_forest", {})
+            
+            # Calculer le drift factor basé sur la performance
+            accuracy = mt.get("accuracy", 0.5)
+            drift_factor = 1.0 - abs(0.5 - accuracy)  # Plus proche de 0.5 = plus de drift
+            
+            payload = {
+                "symbol": metrics["symbol"],
+                "timeframe": metrics.get("timeframe", "M1"),
+                "wins": int(mt.get("wins", 0)),
+                "total": int(mt.get("total", 0)),
+                "drift_factor": round(drift_factor, 6),
+                "last_updated": datetime.now().isoformat(),
+                "metadata": {
+                    "model_type": best,
+                    "accuracy": accuracy,
+                    "f1_score": mt.get("f1_score", 0),
+                    "category": get_symbol_category(metrics["symbol"])
+                }
+            }
+            
+            async with httpx.AsyncClient() as client:
+                # Upsert : mettre à jour si existe, sinon insérer
+                r = await client.post(
+                    f"{self.supabase_url}/rest/v1/symbol_calibration",
+                    json=payload,
+                    headers={
+                        "apikey": self.supabase_key,
+                        "Authorization": f"Bearer {self.supabase_key}",
+                        "Content-Type": "application/json",
+                        "Prefer": "return=minimal",
+                    },
+                    timeout=10.0,
+                )
+                if r.status_code in (200, 201):
+                    logger.info(f"✅ Symbol calibration logged: {metrics['symbol']}")
+                else:
+                    logger.warning(f"⚠️ symbol_calibration POST {r.status_code}: {r.text[:200]}")
+        except Exception as e:
+            logger.warning(f"❌ symbol_calibration error: {e}")
     def log_metrics_to_console(self):
         """Affiche les métriques dans la console"""
         if not self.current_metrics:

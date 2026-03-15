@@ -40,7 +40,7 @@ logger = logging.getLogger("tradbot_ai")
 
 # ========== MODE SIMPLIFIÉ POUR ROBOCOP v2 ==========
 # Activer le mode simplifié pour RoboCop v2 (plus stable, moins de dépendances)
-SIMPLIFIED_MODE = True  # Mettre à False pour utiliser le mode complet
+SIMPLIFIED_MODE = False  # Désactiver pour utiliser toutes les tables Supabase
 
 if SIMPLIFIED_MODE:
     logger.info("🚀 MODE SIMPLIFIÉ ACTIVÉ - RoboCop v2 compatible")
@@ -48,7 +48,11 @@ if SIMPLIFIED_MODE:
     logger.info("   • Pas de ML complexe - Stabilité maximale")
     logger.info("   • Endpoints: /decision, /trades/feedback")
 else:
-    logger.info("🔧 MODE COMPLET ACTIVÉ - Toutes les fonctionnalités")
+    logger.info("🔧 MODE COMPLET ACTIVÉ - Toutes les fonctionnalités Supabase")
+    logger.info("   • Training runs dans Supabase")
+    logger.info("   • Feature importance tracking")
+    logger.info("   • Symbol calibration")
+    logger.info("   • Correction patterns")
 
 # ========== CONFIGURATIONS AMÉLIORATIONS PRIORITAIRES ==========
 # Seuils de confiance minimum pour éviter les signaux trop faibles
@@ -1325,6 +1329,16 @@ except Exception as e:
     get_symbol_category = None  # type: ignore
     ADAPTIVE_PREDICT_AVAILABLE = False
     logger.warning(f"Module adaptive_predict non disponible: {e}")
+
+# Importer le système de patterns de correction
+try:
+    from backend.symbol_patterns_logger import patterns_logger
+    PATTERNS_LOGGER_AVAILABLE = True
+    logger.info(" Système de patterns de correction chargé")
+except ImportError as e:
+    PATTERNS_LOGGER_AVAILABLE = False
+    logger.warning(f" Système de patterns non disponible: {e}")
+    patterns_logger = None
 
 # 3) Détecteur de spikes ML (facultatif)
 try:
