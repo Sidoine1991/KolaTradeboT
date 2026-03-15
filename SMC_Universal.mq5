@@ -10178,49 +10178,38 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
                   // Utiliser la dernière confiance IA connue
                   double ai_confidence = g_lastAIConfidence;
 
-                  // Récupérer les prix d'entrée et de sortie plus précisément
+                  // Récupérer les prix d'entrée et de sortie - version simplifiée
                   double entry_price = 0.0;
                   double exit_price = deal.Price();
                   
-                  // Si c'est un deal de clôture, rechercher le deal d'entrée correspondant
+                  // Si c'est un deal de clôture, utiliser une approximation pour le prix d'entrée
                   if(deal.Entry() == DEAL_ENTRY_OUT)
                   {
-                     // Rechercher dans l'historique des deals le deal d'entrée correspondant
-                     ulong deal_ticket = deal.PositionId();
-                     datetime deal_time = deal.Time();
-                     
-                     // Parcourir l'historique récent pour trouver le deal d'entrée
-                     for(int i = 0; i < HistoryDealsTotal(); i++)
+                     // Approximation basée sur le profit et le type de trade
+                     if(profit < 0) // Perte = prix a baissé pour SELL ou augmenté pour BUY
                      {
-                        if(HistoryDealSelect(i))
-                        {
-                           ulong hist_ticket = HistoryDealGetInteger(DEAL_TICKET);
-                           ulong hist_position_id = HistoryDealGetInteger(DEAL_POSITION_ID);
-                           datetime hist_time = (datetime)HistoryDealGetInteger(DEAL_TIME);
-                           ENUM_DEAL_ENTRY hist_entry = (ENUM_DEAL_ENTRY)HistoryDealGetInteger(DEAL_ENTRY);
-                           
-                           // Même position, deal d'entrée, et antérieur au deal de clôture
-                           if(hist_position_id == deal_position_id && 
-                              hist_entry == DEAL_ENTRY_IN && 
-                              hist_time < deal_time)
-                           {
-                              entry_price = HistoryDealGetDouble(DEAL_PRICE);
-                              break; // Trouvé!
-                           }
-                        }
+                        if(side == "SELL")
+                           entry_price = exit_price + MathAbs(profit) * 10; // Approximation
+                        else
+                           entry_price = exit_price - MathAbs(profit) * 10; // Approximation
+                     }
+                     else // Gain
+                     {
+                        if(side == "SELL")
+                           entry_price = exit_price - profit * 10; // Approximation
+                        else
+                           entry_price = exit_price + profit * 10; // Approximation
                      }
                      
-                     // Si toujours pas trouvé, utiliser une approximation
-                     if(entry_price == 0.0)
-                     {
-                        entry_price = SymbolInfoDouble(symbol, SYMBOL_ASK); // Approximation
-                     }
+                     // S'assurer que le prix d'entrée n'est pas à 0
+                     if(entry_price <= 0.0)
+                        entry_price = SymbolInfoDouble(symbol, SYMBOL_ASK);
                   }
                   else
                   {
                      // Pour les deals d'entrée
                      entry_price = deal.Price();
-                     exit_price = SymbolInfoDouble(symbol, SYMBOL_BID); // Approximation
+                     exit_price = SymbolInfoDouble(symbol, SYMBOL_BID);
                   }
 
                   // Créer le payload JSON
