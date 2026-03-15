@@ -2883,6 +2883,10 @@ class DecisionResponse(BaseModel):
     timestamp: Optional[str] = None
     model_used: Optional[str] = None
     technical_analysis: Optional[Dict[str, Any]] = None
+    predicted_prices: List[float] = Field(default_factory=list)
+    alignment: str = "N/A"
+    coherence: str = "N/A"
+    metadata: Dict[str, Any] = Field(default_factory=dict)
     gemma_analysis: Optional[str] = None  # Analyse complète Gemma+Gemini
     metadata: Optional[Dict[str, Any]] = None  # Métadonnées enrichies (RSI, EMA, ATR, etc.)
 
@@ -3229,7 +3233,33 @@ async def decision_simplified(request: DecisionRequest):
         stop_loss = request.ask + atr * 2
         take_profit = request.ask - atr * 3
     
-    # 10. Créer la réponse enrichie
+    # 11. Préparer les prédictions (simuler une tendance basée sur RSI/EMA si pas de modèle ML complexe)
+    predicted_prices = []
+    if request.bid:
+        p = request.bid
+        # Tendance simplifiée pour le canal
+        step = 0
+        if action == "buy": step = 0.00001
+        elif action == "sell": step = -0.00001
+        
+        for _ in range(500):
+            p += step + (np.random.normal(0, 0.000005))
+            predicted_prices.append(float(p))
+            
+    # 12. Déterminer alignement et cohérence
+    alignment = "N/A"
+    if request.ema_fast_m1 and request.ema_fast_m5 and request.ema_fast_h1:
+        m1_up = request.ema_fast_m1 > request.ema_slow_m1
+        m5_up = request.ema_fast_m5 > request.ema_slow_m5
+        h1_up = request.ema_fast_h1 > request.ema_slow_h1
+        if m1_up == m5_up == h1_up:
+            alignment = "M1/M5/H1: ALIGNÉ (" + ("HAUSSIER" if m1_up else "BAISSIER") + ")"
+        else:
+            alignment = "M1/M5/H1: MIXTE"
+            
+    coherence = f"COHÉRENCE: {int(confidence * 100)}%"
+    
+    # 13. Créer la réponse enrichie
     response = DecisionResponse(
         action=action,
         confidence=confidence_percentage,  # Décimale 0-1 (MT5 affiche *100)
@@ -3238,6 +3268,9 @@ async def decision_simplified(request: DecisionRequest):
         take_profit=take_profit,
         timestamp=datetime.now().isoformat(),
         model_used="technical_ml_enhanced",
+        predicted_prices=predicted_prices,
+        alignment=alignment,
+        coherence=coherence,
         metadata={
             "original_decision": ml_result["original_decision"],
             "original_confidence": ml_result["original_confidence"],
@@ -3245,8 +3278,9 @@ async def decision_simplified(request: DecisionRequest):
             "ml_reason": ml_result["ml_reason"],
             "base_scores": {"buy": buy_score, "sell": sell_score},
             "market_data": market_data,
-            "confidence_decimal": confidence,  # Garder la valeur décimale pour référence
-            "confidence_percentage": confidence_percentage
+            "confidence_decimal": confidence,
+            "confidence_percentage": confidence_percentage,
+            "spike_probability": market_data.get("spike_probability", 0.0)
         }
     )
     
@@ -3258,67 +3292,100 @@ async def decision_simplified(request: DecisionRequest):
     
     return response
 
-async def save_decision_to_supabase(request: DecisionRequest, response: DecisionResponse, ml_result: dict):
-    """Sauvegarder la décision améliorée dans Supabase"""
+
+async def _push_prediction_to_supabase(
+    request: DecisionRequest,
+    response: DecisionResponse,
+    ml_result: Optional[dict] = None,
+):
+    """
+    Write every AI prediction to the Supabase predictions table.
+    Called from decision_simplified and /decision so you can monitor the robot's decisions in the database.
+    """
     import httpx
-    
+
     supabase_url = os.getenv("SUPABASE_URL", "https://bpzqnooiisgadzicwupi.supabase.co")
-    # Utiliser la clé de service si disponible (permissions complètes), sinon la clé anonyme
     supabase_key = os.getenv("SUPABASE_SERVICE_KEY") or os.getenv("SUPABASE_ANON_KEY")
     if not supabase_url or not supabase_key:
-        logger.debug("Supabase non configuré (SUPABASE_URL ou SUPABASE_SERVICE_KEY/ANON_KEY manquant) - saut de la sauvegarde.")
         return
-    
-    headers = {
-        "apikey": supabase_key,
-        "Authorization": f"Bearer {supabase_key}",
-        "Content-Type": "application/json",
-        "Prefer": "return=representation"
+
+    request_data = {
+        "bid": request.bid,
+        "ask": request.ask,
+        "rsi": request.rsi,
+        "ema_fast_m1": request.ema_fast_m1,
+        "ema_slow_m1": request.ema_slow_m1,
+        "ema_fast_h1": request.ema_fast_h1,
+        "ema_slow_h1": request.ema_slow_h1,
+        "ema_fast_m5": request.ema_fast_m5,
+        "ema_slow_m5": request.ema_slow_m5,
+        "atr": request.atr,
     }
-    
+    if ml_result:
+        metadata = {
+            "original_decision": ml_result.get("original_decision", response.action),
+            "original_confidence": ml_result.get("original_confidence", response.confidence),
+            "ml_enhanced": ml_result.get("ml_applied", False),
+            "ml_reason": ml_result.get("ml_reason", ""),
+            "request_data": request_data,
+        }
+    else:
+        metadata = {
+            "original_decision": response.action,
+            "original_confidence": response.confidence,
+            "ml_enhanced": False,
+            "ml_reason": "",
+            "request_data": request_data,
+        }
+
     decision_data = {
         "symbol": request.symbol,
         "timeframe": "M1",
         "prediction": response.action,
-        "confidence": response.confidence,  # Déjà 0-1 pour Supabase
-        "reason": response.reason,
-        "model_used": "technical_ml_enhanced",
-        "metadata": {
-            "original_decision": ml_result["original_decision"],
-            "original_confidence": ml_result["original_confidence"],
-            "ml_enhanced": ml_result["ml_applied"],
-            "ml_reason": ml_result["ml_reason"],
-            "request_data": {
-                "bid": request.bid,
-                "ask": request.ask,
-                "rsi": request.rsi,
-                "ema_fast_m1": request.ema_fast_m1,
-                "ema_slow_m1": request.ema_slow_m1,
-                "ema_fast_h1": request.ema_fast_h1,
-                "ema_slow_h1": request.ema_slow_h1,
-                "ema_fast_m5": request.ema_fast_m5,
-                "ema_slow_m5": request.ema_slow_m5,
-                "atr": request.atr
-            }
-        }
+        "confidence": response.confidence,
+        "reason": (response.reason or "")[:2000],
+        "model_used": getattr(response, "model_used", None) or "technical_ml_enhanced",
+        "metadata": metadata,
     }
-    
-    async with httpx.AsyncClient() as client:
-        try:
+
+    try:
+        async with httpx.AsyncClient() as client:
             resp = await client.post(
                 f"{supabase_url}/rest/v1/predictions",
                 json=decision_data,
-                headers=headers,
-                timeout=10.0
+                headers={
+                    "apikey": supabase_key,
+                    "Authorization": f"Bearer {supabase_key}",
+                    "Content-Type": "application/json",
+                    "Prefer": "return=minimal",
+                },
+                timeout=10.0,
             )
-            
             if resp.status_code == 201:
-                logger.info(f"✅ Décision ML sauvegardée dans Supabase pour {request.symbol}")
+                logger.debug(f"✅ Prediction logged to Supabase for {request.symbol}")
             else:
-                logger.error(f"❌ Erreur sauvegarde décision: {resp.status_code} - {resp.text}")
-                
-        except Exception as e:
-            logger.error(f"❌ Erreur connexion Supabase: {e}")
+                logger.warning(f"Predictions table HTTP {resp.status_code}: {resp.text[:200]}")
+    except Exception as e:
+        logger.debug(f"Predictions Supabase: {e}")
+
+
+async def save_decision_to_supabase(request: DecisionRequest, response: DecisionResponse, ml_result: dict):
+    """Sauvegarder la décision améliorée dans Supabase (predictions + model_metrics)."""
+    import httpx
+
+    await _push_prediction_to_supabase(request, response, ml_result)
+
+    supabase_url = os.getenv("SUPABASE_URL", "https://bpzqnooiisgadzicwupi.supabase.co")
+    supabase_key = os.getenv("SUPABASE_SERVICE_KEY") or os.getenv("SUPABASE_ANON_KEY")
+    if not supabase_url or not supabase_key:
+        return
+
+    headers = {
+        "apikey": supabase_key,
+        "Authorization": f"Bearer {supabase_key}",
+        "Content-Type": "application/json",
+        "Prefer": "return=representation",
+    }
 
     # Enregistrer également une métrique simple dans model_metrics pour activer l'apprentissage continu
     try:
@@ -3498,14 +3565,6 @@ async def health_check():
         "ml_trainer_available": ML_TRAINER_AVAILABLE,
         "ml_recommendation_available": ML_RECOMMENDATION_AVAILABLE
     }
-
-@app.get("/ml/metrics")
-async def get_ml_metrics():
-    """Endpoint pour récupérer les métriques ML en temps réel"""
-    if not ML_TRAINER_AVAILABLE:
-        raise HTTPException(status_code=503, detail="Système ML non disponible")
-    
-    return ml_trainer.get_current_metrics()
 
 @app.post("/ml/start")
 async def start_ml_trainer():
@@ -5218,6 +5277,9 @@ async def decision(req: Request):
             "model_used": response.model_used
         }
         cache_timestamps[cache_key] = current_time
+        
+        # Log prediction to Supabase for monitoring (non-blocking)
+        asyncio.create_task(_push_prediction_to_supabase(request, response, None))
         
         logger.info(f"✅ DÉCISION {request.symbol}: {action} (conf: {confidence:.2f}) - {response.model_used}")
         return response
@@ -8462,20 +8524,20 @@ async def trades_feedback(request: TradeFeedbackRequest):
 
 @app.get("/ml/metrics")
 async def ml_metrics(symbol: str, timeframe: str = "M1"):
-    """Métriques pour le graphique MT5 - format plat (accuracy, model_name, total_samples, status)."""
+    """Métriques pour le graphique MT5 - format plat (accuracy, model_name, total_samples, status, data_source)."""
     computed = _compute_ml_metrics(symbol, timeframe)
     # Si le trainer a des données réelles, les utiliser
     model_key = f"{symbol}_{timeframe}"
     if ML_TRAINER_AVAILABLE and ml_trainer is not None:
         tm = getattr(ml_trainer, "current_metrics", {}).get(model_key)
         if tm and tm.get("training_samples"):
-            return computed
+            return {**computed, "data_source": "ml_trainer"}
     # Sinon: fallback Supabase pour afficher le résumé d'entraînement sur le graphique
     supabase_data = await _fetch_ml_metrics_for_symbol_from_supabase(symbol, timeframe)
     if supabase_data:
-        # Fusionner avec computed (pour recommendations etc.) tout en gardant les clés plates pour l'EA
-        return {**computed, **supabase_data}
-    return computed
+        logger.info(f"📊 ML metrics pour {symbol} depuis Supabase (model_metrics)")
+        return {**computed, **supabase_data, "data_source": "supabase"}
+    return {**computed, "data_source": "computed"}
 
 @app.get("/ml/metrics/detailed")
 async def ml_metrics_detailed(symbol: str, timeframe: str = "M1"):
