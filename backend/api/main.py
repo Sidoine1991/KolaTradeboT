@@ -39,6 +39,14 @@ import base64
 from dotenv import load_dotenv
 import math
 
+# Importer le module ML Metrics
+try:
+    from backend.api.ml_metrics import router as ml_metrics_router
+    ML_METRICS_AVAILABLE = True
+except ImportError:
+    ML_METRICS_AVAILABLE = False
+    print("⚠️ Module ML Metrics non disponible")
+
 # Charger .env pour clés Gemini
 try:
     project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
@@ -88,6 +96,11 @@ app.include_router(whatsapp_router)
 # --- Inclusion du router Robot Integration ---
 from backend.api.robot_integration import router as robot_router
 app.include_router(robot_router)
+
+# --- Inclusion du router ML Metrics ---
+if ML_METRICS_AVAILABLE:
+    app.include_router(ml_metrics_router, prefix="/api/ml", tags=["ML Metrics"])
+    print("✅ Router ML Metrics inclus")
 
 # CORS
 app.add_middleware(
