@@ -4712,6 +4712,115 @@ async def post_trend(request: TrendRequest):
     return await get_trend(request.symbol, request.timeframe or "M1")
 
 
+def _detect_staircase_pattern(df, direction: str = "UP") -> float:
+    """
+    Détection heuristique d'un pattern "escalier" sur M1.
+    - direction="UP"  : escalier montant (Boom)
+    - direction="DOWN": escalier descendant (Crash)
+    Retourne une probabilité entre 0.0 et 1.0.
+    """
+    try:
+        import numpy as np
+    except Exception:
+        np = None
+
+    if df is None or len(df) < 20:
+        return 0.0
+
+    # On regarde les 40 dernières bougies max
+    window = min(40, len(df))
+    sub = df.tail(window).copy()
+
+    closes = sub["close"].values
+    highs = sub.get("high", sub["close"]).values
+    lows = sub.get("low", sub["close"]).values
+
+    # Variation globale
+    global_change = (closes[-1] - closes[0]) / closes[0]
+    if direction == "UP" and global_change <= 0:
+        return 0.0
+    if direction == "DOWN" and global_change >= 0:
+        return 0.0
+
+    # Détection grossière de "marches" : petites bougies suivies de bougies plus longues
+    if np is not None:
+        body = np.abs(sub["close"].values - sub["open"].values)
+    else:
+        body = [abs(c - o) for c, o in zip(sub["close"].values, sub["open"].values)]
+    avg_body = float(sum(body) / len(body))
+    long_threshold = avg_body * 1.8  # bougie considérée comme "spike" local
+    small_threshold = avg_body * 0.5
+
+    steps = 0
+    i = 3
+    while i < window:
+        # 2-3 petites bougies puis 1 grande dans la bonne direction
+        small_ok = all(b <= small_threshold for b in body[i-3:i])
+        long_ok = body[i] >= long_threshold
+        if not (small_ok and long_ok):
+            i += 1
+            continue
+
+        if direction == "UP":
+            if closes[i] > closes[i-1] and highs[i] > highs[i-1]:
+                steps += 1
+        else:
+            if closes[i] < closes[i-1] and lows[i] < lows[i-1]:
+                steps += 1
+        i += 3  # sauter au bloc suivant
+
+    if steps == 0:
+        return 0.0
+
+    prob = min(1.0, 0.3 + 0.15 * steps)
+    prob *= min(1.0, abs(global_change) * 10.0 + 0.5)
+    return float(max(0.0, min(1.0, prob)))
+
+
+@app.get("/ml/staircase")
+async def ml_staircase(symbol: str, timeframe: str = "M1"):
+    """
+    Endpoint léger pour détecter un pattern "escalier" (staircase) sur M1.
+    - Boom: escalier montant (staircase_up_prob)
+    - Crash: escalier descendant (staircase_down_prob)
+    Utilisable par l'EA pour rendre le scalping Boom/Crash plus intelligent.
+    """
+    try:
+        if not symbol or not symbol.strip():
+            raise HTTPException(status_code=400, detail="symbol requis")
+        symbol = symbol.strip()
+
+        df_m1 = _get_trend_data(symbol, "M1", 200)
+        if df_m1 is None or len(df_m1) < 20:
+            return {
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "staircase_up_prob": 0.0,
+                "staircase_down_prob": 0.0,
+                "status": "no_data",
+            }
+
+        upper = symbol.upper()
+        is_boom = "BOOM" in upper
+        is_crash = "CRASH" in upper
+
+        up_prob = _detect_staircase_pattern(df_m1, "UP") if is_boom else 0.0
+        down_prob = _detect_staircase_pattern(df_m1, "DOWN") if is_crash else 0.0
+
+        return {
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "staircase_up_prob": round(up_prob, 3),
+            "staircase_down_prob": round(down_prob, 3),
+            "status": "ok",
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Erreur /ml/staircase pour {symbol}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 def build_coherent_analysis(symbol: str, timeframes: Optional[List[str]] = None) -> dict:
     """
     Construit une analyse cohérente multi-timeframe (alignement des tendances).
