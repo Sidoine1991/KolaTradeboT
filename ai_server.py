@@ -8653,6 +8653,116 @@ async def ml_metrics_detailed(symbol: str, timeframe: str = "M1"):
     """Compat avec le robot MT5 (ParseMLMetricsResponse)."""
     return _compute_ml_metrics(symbol, timeframe)
 
+# --- Compat MT5 (SMC_Universal.mq5) ---
+# L'EA appelle: GET /api/ml/metrics/{symbol}?timeframe=M1
+# et attend des clés "plates" (training_level, accuracy, f1_score, samples_used, model_type, created_at, top_features, calibration, ml_response).
+@app.get("/api/ml/metrics/{symbol}")
+async def api_ml_metrics(symbol: str, timeframe: str = "M1"):
+    """
+    Endpoint compat pour afficher les stats d'entraînement sur le graphique MT5.
+    Source principale: Supabase table `model_metrics` (si dispo), sinon fallback computed.
+    """
+    # Symbole déjà décodé par FastAPI (espaces OK). On garde tel quel pour matcher Supabase.
+    tf = str(timeframe or "M1").upper()
+    sym = symbol
+
+    # Essayer d'abord Supabase (métriques d'entraînement persistées)
+    sup = await _fetch_ml_metrics_for_symbol_from_supabase(sym, tf)
+
+    # Helpers
+    def _training_level(samples_int: int) -> str:
+        if samples_int < 100:
+            return "🔴 DÉBUTANT"
+        if samples_int < 500:
+            return "🟡 INTERMÉDIAIRE"
+        if samples_int < 1000:
+            return "🟢 AVANCÉ"
+        return "🔵 EXPERT"
+
+    if sup:
+        # `sup["accuracy"]` est un pourcentage string ("78.2") → convertir en ratio (0..1) pour l'EA
+        acc_pct = 0.0
+        try:
+            acc_pct = float(sup.get("accuracy", 0.0))
+        except Exception:
+            acc_pct = 0.0
+        acc_ratio = acc_pct / 100.0 if acc_pct > 1.0 else acc_pct
+
+        samples_used = 0
+        try:
+            samples_used = int(float(sup.get("total_samples", 0) or 0))
+        except Exception:
+            samples_used = 0
+
+        model_type = sup.get("model_name") or sup.get("best_model") or "unknown"
+        created_at = sup.get("last_update") or ""
+
+        cal = get_symbol_calibration(sym, tf)
+        # Normaliser les champs calibration attendus par l'EA
+        calibration = {
+            "drift_factor": cal.get("drift_factor", 1.0),
+            "wins": cal.get("wins", 0),
+            "total": cal.get("total", 0),
+            "win_rate": (cal.get("wins", 0) / max(1, cal.get("total", 1))) * 100.0,
+            "last_updated": cal.get("last_updated") or cal.get("updated_at") or None,
+        } if isinstance(cal, dict) and cal else None
+
+        # Réponse ML courante: on fournit au minimum HOLD + confiance neutre
+        ml_response = {
+            "prediction": "HOLD",
+            "confidence": 0.0,
+            "timestamp": datetime.now().isoformat(),
+        }
+
+        return {
+            "symbol": sym,
+            "timeframe": tf,
+            "training_level": _training_level(samples_used),
+            "accuracy": acc_ratio,          # 0..1
+            "f1_score": acc_ratio,          # 0..1 (fallback)
+            "samples_used": samples_used,
+            "model_type": model_type,
+            "created_at": created_at,
+            "top_features": [],
+            "calibration": calibration,
+            "ml_response": ml_response,
+            "data_source": "supabase_model_metrics",
+        }
+
+    # Fallback: métriques computed (peut être "live" sans Supabase)
+    computed = _compute_ml_metrics(sym, tf)
+    # Harmoniser au mieux vers le format attendu par l'EA
+    acc = 0.0
+    try:
+        acc = float(computed.get("accuracy", 0.0))
+    except Exception:
+        acc = 0.0
+    # `_compute_ml_metrics` peut renvoyer déjà 0..1, on clamp
+    if acc > 1.0:
+        acc = acc / 100.0
+    acc = max(0.0, min(1.0, acc))
+
+    samples_used = 0
+    try:
+        samples_used = int(float(computed.get("total_samples", 0) or 0))
+    except Exception:
+        samples_used = 0
+
+    return {
+        "symbol": sym,
+        "timeframe": tf,
+        "training_level": _training_level(samples_used),
+        "accuracy": acc,
+        "f1_score": acc,
+        "samples_used": samples_used,
+        "model_type": computed.get("model_name", "computed"),
+        "created_at": datetime.now().isoformat(),
+        "top_features": [],
+        "calibration": get_symbol_calibration(sym, tf),
+        "ml_response": {"prediction": "HOLD", "confidence": 0.0, "timestamp": datetime.now().isoformat()},
+        "data_source": "computed",
+    }
+
 @app.get("/ml/signal")
 async def ml_signal(symbol: str, timeframe: str = "M1"):
     """

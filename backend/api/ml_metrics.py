@@ -7,13 +7,19 @@ Utilisé par MT5 pour afficher les métriques sur le graphique
 import os
 import json
 import httpx
-from datetime import datetime, timedelta
-from typing import Dict, Any, Optional
+from datetime import datetime
+from typing import Dict, Any
 from fastapi import APIRouter, HTTPException
 from dotenv import load_dotenv
 
-# Charger les variables d'environnement
-load_dotenv('.env.supabase')
+# Charger les variables d'environnement (chemin robuste, sinon fallback)
+_HERE = os.path.dirname(__file__)
+_PROJECT_ROOT = os.path.abspath(os.path.join(_HERE, "../.."))
+_ENV_SUPABASE = os.path.join(_PROJECT_ROOT, ".env.supabase")
+if os.path.exists(_ENV_SUPABASE):
+    load_dotenv(_ENV_SUPABASE)
+else:
+    load_dotenv()
 
 router = APIRouter()
 
@@ -184,15 +190,31 @@ ml_metrics_api = MLMetricsAPI()
 async def get_ml_metrics(symbol: str, timeframe: str = "M1"):
     """Endpoint pour récupérer les métriques ML pour un symbole"""
     try:
-        # Nettoyer le symbole (remplacer les espaces par des underscores)
-        clean_symbol = symbol.replace(" ", "_")
-        
-        metrics = await ml_metrics_api.get_latest_training_metrics(clean_symbol, timeframe)
-        
+        # IMPORTANT: ne pas transformer le symbole (Supabase stocke souvent "Boom 500 Index" avec espaces)
+        tf = str(timeframe or "M1").upper()
+        metrics = await ml_metrics_api.get_latest_training_metrics(symbol, tf)
+
         if "error" in metrics:
             raise HTTPException(status_code=404, detail=metrics["error"])
-        
-        return metrics
+
+        # Compat EA MT5: aplatir les clés attendues par `SMC_Universal.mq5` (ExtractJsonValue sur clés top-level)
+        last_training = metrics.get("last_training") or {}
+        flat = {
+            "symbol": metrics.get("symbol", symbol),
+            "timeframe": metrics.get("timeframe", tf),
+            "training_level": last_training.get("training_level"),
+            "accuracy": last_training.get("accuracy"),
+            "f1_score": last_training.get("f1_score"),
+            "samples_used": last_training.get("samples_used"),
+            "model_type": last_training.get("model_type"),
+            "created_at": last_training.get("created_at"),
+            "top_features": metrics.get("top_features", []),
+            "calibration": metrics.get("calibration"),
+            "ml_response": metrics.get("ml_response"),
+        }
+
+        # Garder aussi la structure complète pour debug/backward compat
+        return {**metrics, **flat}
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Erreur: {str(e)}")
