@@ -37,6 +37,30 @@ import requests
 import joblib
 from collections import deque, defaultdict
 
+# --- Supabase config helpers ---
+def _get_supabase_config(strict: bool = True) -> Tuple[str, str]:
+    """
+    Retourne (SUPABASE_URL, SUPABASE_KEY).
+    En mode strict, refuse les valeurs par défaut silencieuses pour éviter d'écrire dans le mauvais projet.
+    """
+    supabase_url = (os.getenv("SUPABASE_URL") or "").strip()
+    supabase_key = (
+        os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+        or os.getenv("SUPABASE_SERVICE_KEY")
+        or os.getenv("SUPABASE_ANON_KEY")
+        or ""
+    ).strip()
+
+    if strict and (not supabase_url or not supabase_key):
+        raise RuntimeError("Supabase non configuré (SUPABASE_URL et SUPABASE_*KEY requis)")
+
+    if supabase_key:
+        masked = supabase_key[:6] + "..." + supabase_key[-4:] if len(supabase_key) > 12 else "***"
+    else:
+        masked = "(none)"
+    logger.info(f"🔌 Supabase config: url={supabase_url or '(none)'} key={masked}")
+    return supabase_url, supabase_key
+
 # Configurer le logger avant les imports d'améliorations
 logger = logging.getLogger("tradbot_ai")
 
@@ -1159,6 +1183,12 @@ except ImportError:
     )
 except Exception as e:
     logger.warning(f"⚠️ Erreur lors du chargement du .env: {e}")
+
+# Log explicite (évite d'écrire dans un projet par défaut par erreur)
+try:
+    _get_supabase_config(strict=False)
+except Exception as _e:
+    logger.warning(f"⚠️ Supabase non configuré au démarrage: {_e}")
 
 # Configuration PostgreSQL pour feedback loop
 def _resolve_database_url() -> str:
@@ -8171,32 +8201,80 @@ async def upload_mt5_deals(request: MT5DealsUploadRequest):
     Payload: {"deals":[{mt5_deal_id, position_id, symbol, profit, is_win, close_time, price, magic}, ...]}
     """
     try:
-        supabase_url = os.getenv("SUPABASE_URL", "").strip()
-        supabase_key = (os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_SERVICE_KEY") or os.getenv("SUPABASE_ANON_KEY") or "").strip()
-        if not supabase_url or not supabase_key:
-            raise HTTPException(status_code=500, detail="Supabase non configuré (SUPABASE_URL / KEY)")
+        try:
+            supabase_url, supabase_key = _get_supabase_config(strict=True)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
 
         deals = request.deals or []
         if not deals:
             return {"ok": True, "received": 0, "upserted": 0}
 
+        from datetime import timezone
+
+        def _normalize_close_time(v: Any) -> Optional[str]:
+            if v is None:
+                return None
+            # MT5 peut envoyer un timestamp Unix (int) ou une string "YYYY.MM.DD HH:MM:SS"
+            try:
+                if isinstance(v, (int, float)):
+                    dt = datetime.fromtimestamp(float(v), tz=timezone.utc)
+                    return dt.isoformat().replace("+00:00", "Z")
+                if isinstance(v, str):
+                    s = v.strip()
+                    if not s:
+                        return None
+                    s = s.replace(".", "-")
+                    # "YYYY-MM-DD HH:MM:SS" -> "YYYY-MM-DDTHH:MM:SS"
+                    if "T" not in s and " " in s:
+                        s = s.replace(" ", "T", 1)
+                    # si pas de timezone, on force UTC (Z)
+                    if "Z" not in s and "+" not in s:
+                        s = s + "Z"
+                    return s
+            except Exception:
+                return None
+            return None
+
+        def _normalize_is_win(v: Any, profit: float) -> bool:
+            if isinstance(v, bool):
+                return v
+            if isinstance(v, (int, float)):
+                return float(v) > 0.5
+            if isinstance(v, str):
+                s = v.strip().lower()
+                if s in ("true", "1", "yes", "y"):
+                    return True
+                if s in ("false", "0", "no", "n"):
+                    return False
+            return profit > 0.0
+
         rows = []
+        skipped = 0
         for d in deals[:2000]:
             sym = (d.get("symbol") or "").strip()
             if not sym:
+                skipped += 1
+                continue
+            profit = float(d.get("profit") or 0.0)
+            close_time_norm = _normalize_close_time(d.get("close_time"))
+            if not close_time_norm:
+                skipped += 1
                 continue
             rows.append({
                 "symbol": sym,
                 "timeframe": "M1",
-                "profit": float(d.get("profit") or 0.0),
-                "is_win": bool(d.get("is_win")),
-                "close_time": d.get("close_time"),
+                "profit": profit,
+                "is_win": _normalize_is_win(d.get("is_win"), profit),
+                "close_time": close_time_norm,
                 "exit_price": d.get("price"),
                 "mt5_deal_id": d.get("mt5_deal_id"),
                 "position_id": d.get("position_id"),
                 "magic": d.get("magic"),
                 "decision": "UNKNOWN",
             })
+
+        logger.info(f"📥 /mt5/deals-upload received={len(deals)} kept={len(rows)} skipped={skipped} supabase={supabase_url}")
 
         import httpx
         headers = {
@@ -8211,7 +8289,14 @@ async def upload_mt5_deals(request: MT5DealsUploadRequest):
             raise HTTPException(status_code=500, detail=f"Supabase trade_feedback upsert HTTP {r.status_code}: {r.text[:200]}")
 
         asyncio.create_task(_refresh_symbol_trade_stats("M1"))
-        return {"ok": True, "received": len(deals), "upserted": len(rows)}
+        return {
+            "ok": True,
+            "received": len(deals),
+            "kept": len(rows),
+            "skipped": skipped,
+            "upsert_attempted": len(rows),
+            "supabase_url": supabase_url,
+        }
     except HTTPException:
         raise
     except Exception as e:
