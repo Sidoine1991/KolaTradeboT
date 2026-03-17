@@ -8150,6 +8150,10 @@ class MT5DealsUploadRequest(BaseModel):
     """Requête pour uploader des deals clôturés MT5 (batch)"""
     deals: List[Dict[str, Any]]
 
+class MT5SymbolTradeStatsUploadRequest(BaseModel):
+    """Requête MT5: uploader des stats agrégées par symbole (jour/mois)"""
+    rows: List[Dict[str, Any]]
+
 class ForceDecisionRequest(BaseModel):
     """Requête pour forcer une décision en mode test"""
     symbol: str
@@ -8347,6 +8351,149 @@ async def upload_mt5_deals(request: MT5DealsUploadRequest):
     except Exception as e:
         logger.error(f"❌ Erreur upload deals MT5: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/mt5/symbol-trade-stats-upload")
+async def upload_mt5_symbol_trade_stats(request: MT5SymbolTradeStatsUploadRequest):
+    """
+    MT5 -> Serveur: reçoit des stats agrégées calculées depuis l'historique MT5,
+    puis UPSERT dans Supabase `symbol_trade_stats`.
+
+    Clé: (symbol, period_type, period_start, timeframe)
+    Périodes attendues: UTC.
+    """
+    try:
+        try:
+            supabase_url, supabase_key = _get_supabase_config(strict=True)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+        rows_in = request.rows or []
+        if not rows_in:
+            return {"ok": True, "received": 0, "upserted": 0}
+
+        from datetime import timezone
+        import httpx
+
+        def _norm_period_type(v: Any) -> Optional[str]:
+            s = (str(v or "")).strip().lower()
+            return s if s in ("day", "month") else None
+
+        def _norm_period_start(v: Any) -> Optional[str]:
+            # attendu: "YYYY-MM-DD" (date ISO). Tolère datetime iso et epoch.
+            if v is None:
+                return None
+            try:
+                if isinstance(v, (int, float)):
+                    dt = datetime.fromtimestamp(float(v), tz=timezone.utc)
+                    return dt.date().isoformat()
+                s = str(v).strip()
+                if not s:
+                    return None
+                if "T" in s:
+                    return s.split("T", 1)[0]
+                return s[:10]
+            except Exception:
+                return None
+
+        def _norm_last_trade_at(v: Any) -> Optional[str]:
+            # tolère epoch seconds/ms ou string
+            if v is None:
+                return None
+            try:
+                if isinstance(v, (int, float)):
+                    x = float(v)
+                    if x > 1e12:  # ms
+                        x /= 1000.0
+                    dt = datetime.fromtimestamp(x, tz=timezone.utc)
+                    return dt.isoformat().replace("+00:00", "Z")
+                s = str(v).strip()
+                if not s:
+                    return None
+                s = s.replace(".", "-")
+                if "T" not in s and " " in s:
+                    s = s.replace(" ", "T", 1)
+                if "Z" not in s and "+" not in s:
+                    s = s + "Z"
+                return s
+            except Exception:
+                return None
+
+        kept: List[Dict[str, Any]] = []
+        skipped = 0
+        for r in rows_in[:1000]:
+            sym = (r.get("symbol") or "").strip()
+            if not sym:
+                skipped += 1
+                continue
+            pt = _norm_period_type(r.get("period_type"))
+            ps = _norm_period_start(r.get("period_start"))
+            tf = (r.get("timeframe") or "M1").strip()
+            if not pt or not ps or not tf:
+                skipped += 1
+                continue
+            try:
+                trade_count = int(r.get("trade_count") or 0)
+                wins = int(r.get("wins") or 0)
+                losses = int(r.get("losses") or 0)
+                net_profit = float(r.get("net_profit") or 0.0)
+                gross_profit = float(r.get("gross_profit") or 0.0)
+                gross_loss = float(r.get("gross_loss") or 0.0)
+            except Exception:
+                skipped += 1
+                continue
+
+            kept.append({
+                "symbol": sym,
+                "period_type": pt,
+                "period_start": ps,
+                "timeframe": tf,
+                "trade_count": max(0, trade_count),
+                "wins": max(0, wins),
+                "losses": max(0, losses),
+                "net_profit": net_profit,
+                "gross_profit": max(0.0, gross_profit),
+                "gross_loss": max(0.0, gross_loss),
+                "last_trade_at": _norm_last_trade_at(r.get("last_trade_at")),
+            })
+
+        logger.info(f"📥 /mt5/symbol-trade-stats-upload received={len(rows_in)} kept={len(kept)} skipped={skipped} supabase={supabase_url}")
+        if not kept:
+            return {"ok": True, "received": len(rows_in), "upserted": 0, "skipped": skipped}
+
+        headers = {
+            "apikey": supabase_key,
+            "Authorization": f"Bearer {supabase_key}",
+            "Content-Type": "application/json",
+            "Prefer": "resolution=merge-duplicates,return=minimal",
+        }
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.post(f"{supabase_url}/rest/v1/symbol_trade_stats", headers=headers, json=kept)
+        if resp.status_code not in (200, 201, 204):
+            raise HTTPException(status_code=500, detail=f"Supabase symbol_trade_stats upsert HTTP {resp.status_code}: {resp.text[:200]}")
+
+        # Mettre à jour le cache local (utilisé par /ml/metrics)
+        for row in kept:
+            sym = row["symbol"]
+            ptype = row["period_type"]
+            _symbol_stats_cache.setdefault(sym, {})[ptype] = {
+                "trade_count": int(row.get("trade_count") or 0),
+                "wins": int(row.get("wins") or 0),
+                "losses": int(row.get("losses") or 0),
+                "net_profit": float(row.get("net_profit") or 0.0),
+                "gross_profit": float(row.get("gross_profit") or 0.0),
+                "gross_loss": float(row.get("gross_loss") or 0.0),
+                "last_trade_at": row.get("last_trade_at"),
+            }
+
+        return {"ok": True, "received": len(rows_in), "upserted": len(kept), "skipped": skipped}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Erreur upload stats symboles MT5: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.post("/decision/force", response_model=DecisionResponse)
 async def force_decision(request: ForceDecisionRequest):
