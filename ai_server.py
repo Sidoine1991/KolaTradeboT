@@ -1167,12 +1167,33 @@ try:
     base_dir = Path(__file__).parent
     env_path = base_dir / '.env'
     supabase_env_path = base_dir / '.env.supabase'
+
+    def _safe_load_dotenv(path: Path) -> bool:
+        # Certains .env contiennent des caractères non-UTF8 sous Windows.
+        # On tente utf-8 puis latin-1 (fallback).
+        try:
+            load_dotenv(path)
+            return True
+        except UnicodeDecodeError:
+            try:
+                load_dotenv(path, encoding="latin-1")
+                return True
+            except Exception:
+                return False
+        except Exception:
+            return False
+
     if env_path.exists():
-        load_dotenv(env_path)
-        logger.info(f"✅ Fichier .env chargé depuis: {env_path}")
+        if _safe_load_dotenv(env_path):
+            logger.info(f"✅ Fichier .env chargé depuis: {env_path}")
+        else:
+            logger.warning(f"⚠️ Impossible de charger .env (encodage?) depuis: {env_path}")
     if supabase_env_path.exists():
-        load_dotenv(supabase_env_path)  # Fusion: .env.supabase complète/écrase les vars Supabase
-        logger.info(f"✅ Fichier .env.supabase fusionné (SUPABASE_*, DATABASE_URL)")
+        # Fusion: .env.supabase complète/écrase les vars Supabase
+        if _safe_load_dotenv(supabase_env_path):
+            logger.info("✅ Fichier .env.supabase fusionné (SUPABASE_*, DATABASE_URL)")
+        else:
+            logger.warning(f"⚠️ Impossible de charger .env.supabase (encodage?) depuis: {supabase_env_path}")
     if not env_path.exists() and not supabase_env_path.exists():
         load_dotenv()
         logger.info("✅ Variables d'environnement chargées (système)")
@@ -1984,12 +2005,36 @@ async def startup_event():
         _symbol_stats_task = asyncio.create_task(_symbol_stats_loop(interval_sec=300))
         logger.info("✅ Boucle stats symboles démarrée (300s)")
 
+    # Démarrer l'entraînement continu ML (Supabase: fetch predictions → train → save model_metrics)
+    try:
+        os.makedirs("models", exist_ok=True)
+        supabase_configured = bool(
+            os.getenv("SUPABASE_URL")
+            and (os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_SERVICE_KEY") or os.getenv("SUPABASE_ANON_KEY"))
+        )
+        if ML_TRAINER_AVAILABLE and supabase_configured:
+            logger.info("🤖 Démarrage entraînement continu ML (Supabase)...")
+            await ml_trainer.start()
+            logger.info("✅ Entraînement continu Supabase activé (predictions → model_metrics)")
+        elif ML_TRAINER_AVAILABLE and not supabase_configured:
+            logger.info("ℹ️ Entraînement continu désactivé: SUPABASE_URL et SUPABASE_*KEY requis")
+    except Exception as e:
+        logger.error(f"❌ Erreur démarrage entraînement continu: {e}", exc_info=True)
+
 @app.on_event("shutdown")
 async def shutdown_event():
     """Close database pool on shutdown"""
     if hasattr(app.state, "db_pool") and app.state.db_pool:
         await app.state.db_pool.close()
         logger.info("🔒 Pool PostgreSQL fermé")
+
+    # Arrêter le système ML
+    if ML_TRAINER_AVAILABLE:
+        try:
+            await ml_trainer.stop()
+            logger.info("🛑 Système ML arrêté")
+        except Exception as e:
+            logger.error(f"❌ Erreur arrêt système ML: {e}")
 
 
 async def train_models_on_startup():
@@ -11654,44 +11699,6 @@ async def update_prediction_with_feedback(feedback: dict) -> dict:
     # Implémentation à ajouter
     logger.info(f"✅ Feedback traité pour la prédiction {feedback.get('prediction_id')}")
     return {"prediction_id": feedback.get("prediction_id")}
-
-# ========== DÉMARRAGE AUTOMATIQUE DU SYSTÈME ML ==========
-@app.on_event("startup")
-async def startup_event():
-    """Événements au démarrage du serveur"""
-    logger.info("🚀 Démarrage du serveur IA TradBOT...")
-    # Créer le répertoire models pour l'entraînement ML (Render, etc.)
-    os.makedirs("models", exist_ok=True)
-    
-    # Démarrer l'entraînement continu ML (Supabase: fetch predictions → train → save model_metrics)
-    supabase_configured = bool(
-        os.getenv("SUPABASE_URL")
-        and (os.getenv("SUPABASE_SERVICE_KEY") or os.getenv("SUPABASE_ANON_KEY"))
-    )
-    if ML_TRAINER_AVAILABLE and supabase_configured:
-        logger.info("🤖 Démarrage entraînement continu ML (Supabase)...")
-        try:
-            await ml_trainer.start()
-            logger.info("✅ Entraînement continu Supabase activé (predictions → model_metrics)")
-        except Exception as e:
-            logger.error(f"❌ Erreur démarrage entraînement continu: {e}")
-    elif ML_TRAINER_AVAILABLE and not supabase_configured:
-        logger.info("ℹ️ Entraînement continu désactivé: SUPABASE_URL et SUPABASE_SERVICE_KEY/ANON_KEY requis")
-    
-    logger.info("🎯 Serveur IA TradBOT prêt!")
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    """Événements à l'arrêt du serveur"""
-    logger.info("🛑 Arrêt du serveur IA TradBOT...")
-    
-    # Arrêter le système ML
-    if ML_TRAINER_AVAILABLE:
-        try:
-            await ml_trainer.stop()
-            logger.info("🛑 Système ML arrêté")
-        except Exception as e:
-            logger.error(f"❌ Erreur arrêt système ML: {e}")
 
 if __name__ == "__main__":
     import uvicorn
