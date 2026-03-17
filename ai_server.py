@@ -1940,11 +1940,19 @@ async def startup_event():
             async with pool.acquire() as conn:
                 await conn.execute(CREATE_FEEDBACK_TABLE_SQL)
                 logger.info("✅ Table trade_feedback créée/vérifiée")
+                await conn.execute(CREATE_SYMBOL_TRADE_STATS_SQL)
+                logger.info("✅ Table symbol_trade_stats créée/vérifiée")
     except Exception as e:
         logger.error(f"❌ Erreur initialisation base de données: {e}", exc_info=True)
     
     # Entraîner automatiquement les modèles ML pour les symboles principaux
     await train_models_on_startup()
+
+    # Démarrer la boucle de stats symboles (discipline)
+    global _symbol_stats_task
+    if _symbol_stats_task is None or _symbol_stats_task.done():
+        _symbol_stats_task = asyncio.create_task(_symbol_stats_loop(interval_sec=300))
+        logger.info("✅ Boucle stats symboles démarrée (300s)")
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -5359,6 +5367,12 @@ async def decision(req: Request):
         # S'assurer que la confiance est dans les limites
         confidence = max(0.0, min(1.0, confidence))
         
+        # Discipline finale basée sur stats (jour/mois) calculées depuis trade_feedback (source MT5)
+        new_action, new_conf, pol_reason = _apply_symbol_risk_policy(request.symbol, action, confidence)
+        if pol_reason:
+            reason += pol_reason + " "
+        action, confidence = new_action, new_conf
+
         # Créer la réponse
         response = DecisionResponse(
             action=action,
@@ -8351,6 +8365,155 @@ _continuous_enabled = False
 _continuous_task: Optional[asyncio.Task] = None
 _continuous_last_tick: Optional[str] = None
 
+# --- Discipline par stats symboles (jour/mois) ---
+_symbol_stats_task: Optional[asyncio.Task] = None
+_symbol_stats_last_tick: Optional[str] = None
+_symbol_stats_cache: Dict[str, Dict[str, Any]] = {}  # {symbol: {"day": {...}, "month": {...}}}
+
+CREATE_SYMBOL_TRADE_STATS_SQL = """
+CREATE TABLE IF NOT EXISTS symbol_trade_stats (
+  symbol text NOT NULL,
+  period_type text NOT NULL CHECK (period_type IN ('day','month')),
+  period_start date NOT NULL,
+  timeframe text NOT NULL DEFAULT 'M1',
+  trade_count integer NOT NULL DEFAULT 0,
+  wins integer NOT NULL DEFAULT 0,
+  losses integer NOT NULL DEFAULT 0,
+  net_profit numeric(14, 2) NOT NULL DEFAULT 0,
+  gross_profit numeric(14, 2) NOT NULL DEFAULT 0,
+  gross_loss numeric(14, 2) NOT NULL DEFAULT 0,
+  last_trade_at timestamptz NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT symbol_trade_stats_pkey PRIMARY KEY (symbol, period_type, period_start, timeframe)
+);
+CREATE INDEX IF NOT EXISTS idx_symbol_trade_stats_period
+  ON symbol_trade_stats (period_type, period_start DESC, symbol);
+"""
+
+async def _refresh_symbol_trade_stats(timeframe: str = "M1") -> None:
+    """
+    Recalcule les stats JOUR + MOIS à partir de trade_feedback (source MT5),
+    puis upsert dans symbol_trade_stats et met à jour le cache mémoire.
+    """
+    pool = await get_db_pool()
+    if not pool:
+        return
+
+    now = datetime.utcnow()
+    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+    async with pool.acquire() as conn:
+        await conn.execute(CREATE_SYMBOL_TRADE_STATS_SQL)
+
+        async def _agg(from_ts: datetime, to_ts: datetime) -> List[asyncpg.Record]:
+            return await conn.fetch(
+                """
+                SELECT
+                  symbol,
+                  COUNT(*)::int AS trade_count,
+                  SUM(CASE WHEN is_win THEN 1 ELSE 0 END)::int AS wins,
+                  SUM(CASE WHEN (NOT is_win) THEN 1 ELSE 0 END)::int AS losses,
+                  COALESCE(SUM(profit), 0)::numeric AS net_profit,
+                  COALESCE(SUM(CASE WHEN profit > 0 THEN profit ELSE 0 END), 0)::numeric AS gross_profit,
+                  COALESCE(SUM(CASE WHEN profit < 0 THEN -profit ELSE 0 END), 0)::numeric AS gross_loss,
+                  MAX(created_at) AS last_trade_at
+                FROM trade_feedback
+                WHERE created_at >= $1 AND created_at <= $2
+                GROUP BY symbol
+                """,
+                from_ts,
+                to_ts,
+            )
+
+        day_rows = await _agg(day_start, now)
+        month_rows = await _agg(month_start, now)
+
+        async def _upsert(period_type: str, period_start: datetime, rows: List[asyncpg.Record]) -> None:
+            for r in rows:
+                await conn.execute(
+                    """
+                    INSERT INTO symbol_trade_stats (
+                      symbol, period_type, period_start, timeframe,
+                      trade_count, wins, losses,
+                      net_profit, gross_profit, gross_loss,
+                      last_trade_at, updated_at
+                    )
+                    VALUES ($1,$2,$3::date,$4,$5,$6,$7,$8,$9,$10,$11,now())
+                    ON CONFLICT (symbol, period_type, period_start, timeframe)
+                    DO UPDATE SET
+                      trade_count=EXCLUDED.trade_count,
+                      wins=EXCLUDED.wins,
+                      losses=EXCLUDED.losses,
+                      net_profit=EXCLUDED.net_profit,
+                      gross_profit=EXCLUDED.gross_profit,
+                      gross_loss=EXCLUDED.gross_loss,
+                      last_trade_at=EXCLUDED.last_trade_at,
+                      updated_at=now()
+                    """,
+                    r["symbol"],
+                    period_type,
+                    period_start.date(),
+                    timeframe,
+                    int(r["trade_count"] or 0),
+                    int(r["wins"] or 0),
+                    int(r["losses"] or 0),
+                    float(r["net_profit"] or 0),
+                    float(r["gross_profit"] or 0),
+                    float(r["gross_loss"] or 0),
+                    r["last_trade_at"],
+                )
+
+        await _upsert("day", day_start, day_rows)
+        await _upsert("month", month_start, month_rows)
+
+        # Update cache
+        cache: Dict[str, Dict[str, Any]] = {}
+        for r in day_rows:
+            cache.setdefault(r["symbol"], {})["day"] = dict(r)
+        for r in month_rows:
+            cache.setdefault(r["symbol"], {})["month"] = dict(r)
+        _symbol_stats_cache.clear()
+        _symbol_stats_cache.update(cache)
+
+async def _symbol_stats_loop(interval_sec: int = 300) -> None:
+    global _symbol_stats_last_tick
+    while True:
+        _symbol_stats_last_tick = datetime.utcnow().isoformat()
+        try:
+            await _refresh_symbol_trade_stats("M1")
+        except Exception as e:
+            logger.warning(f"⚠️ symbol stats loop: {e}")
+        await asyncio.sleep(max(30, int(interval_sec)))
+
+def _apply_symbol_risk_policy(symbol: str, action: str, confidence: float) -> Tuple[str, float, str]:
+    """
+    Applique une discipline simple basée sur stats JOUR/MOIS pour éviter de cramer le compte.
+    - Si pertes journalières >= 2 OU net_profit jour <= -10 => HOLD forcé
+    - Si mois positif + bon winrate => légère récompense (+confidence)
+    """
+    st = _symbol_stats_cache.get(symbol) or {}
+    day = st.get("day") or {}
+    month = st.get("month") or {}
+
+    day_losses = int(day.get("losses") or 0)
+    day_net = float(day.get("net_profit") or 0.0)
+    month_wins = int(month.get("wins") or 0)
+    month_losses = int(month.get("losses") or 0)
+    month_net = float(month.get("net_profit") or 0.0)
+    month_total = max(1, month_wins + month_losses)
+    month_wr = month_wins / month_total
+
+    if day_losses >= 2 or day_net <= -10.0:
+        return ("hold", 0.0, f"Discipline: STOP symbole (jour losses={day_losses}, net={day_net:.2f}$)")
+
+    # Reward léger si stable
+    if month_net > 0 and month_wr >= 0.60:
+        return (action, min(1.0, confidence + 0.05), f"Reward: bon symbole (mois wr={month_wr:.2f}, net={month_net:.2f}$)")
+
+    return (action, confidence, "")
+
 def _ml_key(symbol: str, timeframe: str) -> str:
     return f"{symbol}:{timeframe}"
 
@@ -8645,8 +8808,22 @@ async def ml_metrics(symbol: str, timeframe: str = "M1"):
     supabase_data = await _fetch_ml_metrics_for_symbol_from_supabase(symbol, timeframe)
     if supabase_data:
         logger.info(f" ML metrics pour {symbol} depuis Supabase (model_metrics)")
-        return {**computed, **supabase_data, "data_source": "supabase"}
-    return {**computed, "data_source": "computed"}
+        base = {**computed, **supabase_data, "data_source": "supabase"}
+    else:
+        base = {**computed, "data_source": "computed"}
+
+    # Ajouter stats discipline (jour/mois) si dispo
+    st = _symbol_stats_cache.get(symbol) or {}
+    day = st.get("day") or {}
+    month = st.get("month") or {}
+    base["day_wins"] = int(day.get("wins") or 0)
+    base["day_losses"] = int(day.get("losses") or 0)
+    base["day_net_profit"] = float(day.get("net_profit") or 0.0)
+    base["month_wins"] = int(month.get("wins") or 0)
+    base["month_losses"] = int(month.get("losses") or 0)
+    base["month_net_profit"] = float(month.get("net_profit") or 0.0)
+    base["symbol_stats_last_tick"] = _symbol_stats_last_tick
+    return base
 
 @app.get("/ml/metrics/detailed")
 async def ml_metrics_detailed(symbol: str, timeframe: str = "M1"):
