@@ -914,7 +914,7 @@ def get_prediction_channel_5000(symbol: str, timeframe: str = "M1", future_bars:
                         "apikey": supabase_key,
                         "Authorization": f"Bearer {supabase_key}",
                         "Content-Type": "application/json",
-                        "Prefer": "return=minimal",
+                        "Prefer": "resolution=merge-duplicates,return=minimal",
                     },
                     timeout=5.0,
                 )
@@ -4501,7 +4501,34 @@ async def prediction_channel(symbol: Optional[str] = None, timeframe: str = "M1"
     if not symbol or not symbol.strip():
         return {"ok": False, "reason": "symbol required"}
     symbol = symbol.strip()
+
+    # 1) Essayer de renvoyer un canal persistant depuis Supabase (si disponible)
+    try:
+        supabase_url = os.getenv("SUPABASE_URL", "").strip()
+        supabase_key = (os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_SERVICE_KEY") or os.getenv("SUPABASE_ANON_KEY") or "").strip()
+        if supabase_url and supabase_key:
+            import httpx
+            headers = {"apikey": supabase_key, "Authorization": f"Bearer {supabase_key}"}
+            params = {
+                "symbol": f"eq.{symbol}",
+                "timeframe": f"eq.{timeframe}",
+                "order": "time_start.desc",
+                "limit": "1",
+            }
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                r = await client.get(f"{supabase_url}/rest/v1/prediction_channels", params=params, headers=headers)
+            if r.status_code == 200 and r.json():
+                row = r.json()[0]
+                row["ok"] = True
+                row["source"] = "supabase"
+                return row
+    except Exception as e:
+        logger.debug(f"prediction-channel supabase fetch: {e}")
+
+    # 2) Sinon calculer (et la fonction tente déjà une sauvegarde Supabase)
     result = get_prediction_channel_5000(symbol, timeframe, future_bars)
+    if isinstance(result, dict):
+        result.setdefault("source", "computed")
     return result
 
 
@@ -8393,89 +8420,108 @@ CREATE INDEX IF NOT EXISTS idx_symbol_trade_stats_period
 
 async def _refresh_symbol_trade_stats(timeframe: str = "M1") -> None:
     """
-    Recalcule les stats JOUR + MOIS à partir de trade_feedback (source MT5),
-    puis upsert dans symbol_trade_stats et met à jour le cache mémoire.
+    Recalcule les stats JOUR + MOIS depuis Supabase `trade_feedback` (source MT5),
+    puis UPSERT dans Supabase `symbol_trade_stats` et met à jour le cache mémoire.
+
+    Définition WIN/LOSS alignée avec MT5: profit > 0 / profit < 0.
+    Périodes: UTC.
     """
-    pool = await get_db_pool()
-    if not pool:
+    supabase_url = os.getenv("SUPABASE_URL", "").strip()
+    supabase_key = (os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_SERVICE_KEY") or os.getenv("SUPABASE_ANON_KEY") or "").strip()
+    if not supabase_url or not supabase_key:
         return
+
+    import httpx
 
     now = datetime.utcnow()
     day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
 
-    async with pool.acquire() as conn:
-        await conn.execute(CREATE_SYMBOL_TRADE_STATS_SQL)
+    headers = {"apikey": supabase_key, "Authorization": f"Bearer {supabase_key}"}
 
-        async def _agg(from_ts: datetime, to_ts: datetime) -> List[asyncpg.Record]:
-            return await conn.fetch(
-                """
-                SELECT
-                  symbol,
-                  COUNT(*)::int AS trade_count,
-                  SUM(CASE WHEN is_win THEN 1 ELSE 0 END)::int AS wins,
-                  SUM(CASE WHEN (NOT is_win) THEN 1 ELSE 0 END)::int AS losses,
-                  COALESCE(SUM(profit), 0)::numeric AS net_profit,
-                  COALESCE(SUM(CASE WHEN profit > 0 THEN profit ELSE 0 END), 0)::numeric AS gross_profit,
-                  COALESCE(SUM(CASE WHEN profit < 0 THEN -profit ELSE 0 END), 0)::numeric AS gross_loss,
-                  MAX(created_at) AS last_trade_at
-                FROM trade_feedback
-                WHERE created_at >= $1 AND created_at <= $2
-                GROUP BY symbol
-                """,
-                from_ts,
-                to_ts,
-            )
+    async def _fetch_feedback(from_ts: datetime, to_ts: datetime) -> List[Dict[str, Any]]:
+        # IMPORTANT: utiliser params (httpx encode correctement le +00:00)
+        params = [
+            ("select", "symbol,profit,close_time"),
+            ("close_time", f"gte.{from_ts.isoformat()}"),
+            ("close_time", f"lte.{to_ts.isoformat()}"),
+        ]
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.get(f"{supabase_url}/rest/v1/trade_feedback", params=params, headers=headers)
+        if r.status_code != 200:
+            raise RuntimeError(f"Supabase trade_feedback HTTP {r.status_code}: {r.text[:200]}")
+        data = r.json()
+        return data if isinstance(data, list) else []
 
-        day_rows = await _agg(day_start, now)
-        month_rows = await _agg(month_start, now)
+    def _aggregate(rows: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+        out: Dict[str, Dict[str, Any]] = {}
+        for row in rows:
+            sym = row.get("symbol")
+            if not sym:
+                continue
+            try:
+                p = float(row.get("profit") or 0.0)
+            except Exception:
+                p = 0.0
+            st = out.setdefault(sym, {"trade_count": 0, "wins": 0, "losses": 0, "net_profit": 0.0, "gross_profit": 0.0, "gross_loss": 0.0, "last_trade_at": None})
+            st["trade_count"] += 1
+            if p > 0:
+                st["wins"] += 1
+                st["gross_profit"] += p
+            elif p < 0:
+                st["losses"] += 1
+                st["gross_loss"] += -p
+            st["net_profit"] += p
+            ct = row.get("close_time")
+            if ct and (st["last_trade_at"] is None or str(ct) > str(st["last_trade_at"])):
+                st["last_trade_at"] = ct
+        return out
 
-        async def _upsert(period_type: str, period_start: datetime, rows: List[asyncpg.Record]) -> None:
-            for r in rows:
-                await conn.execute(
-                    """
-                    INSERT INTO symbol_trade_stats (
-                      symbol, period_type, period_start, timeframe,
-                      trade_count, wins, losses,
-                      net_profit, gross_profit, gross_loss,
-                      last_trade_at, updated_at
-                    )
-                    VALUES ($1,$2,$3::date,$4,$5,$6,$7,$8,$9,$10,$11,now())
-                    ON CONFLICT (symbol, period_type, period_start, timeframe)
-                    DO UPDATE SET
-                      trade_count=EXCLUDED.trade_count,
-                      wins=EXCLUDED.wins,
-                      losses=EXCLUDED.losses,
-                      net_profit=EXCLUDED.net_profit,
-                      gross_profit=EXCLUDED.gross_profit,
-                      gross_loss=EXCLUDED.gross_loss,
-                      last_trade_at=EXCLUDED.last_trade_at,
-                      updated_at=now()
-                    """,
-                    r["symbol"],
-                    period_type,
-                    period_start.date(),
-                    timeframe,
-                    int(r["trade_count"] or 0),
-                    int(r["wins"] or 0),
-                    int(r["losses"] or 0),
-                    float(r["net_profit"] or 0),
-                    float(r["gross_profit"] or 0),
-                    float(r["gross_loss"] or 0),
-                    r["last_trade_at"],
-                )
+    day_data = _aggregate(await _fetch_feedback(day_start, now))
+    month_data = _aggregate(await _fetch_feedback(month_start, now))
 
-        await _upsert("day", day_start, day_rows)
-        await _upsert("month", month_start, month_rows)
+    # Upsert Supabase symbol_trade_stats via PostgREST
+    up_headers = {**headers, "Content-Type": "application/json", "Prefer": "resolution=merge-duplicates,return=minimal"}
 
-        # Update cache
-        cache: Dict[str, Dict[str, Any]] = {}
-        for r in day_rows:
-            cache.setdefault(r["symbol"], {})["day"] = dict(r)
-        for r in month_rows:
-            cache.setdefault(r["symbol"], {})["month"] = dict(r)
-        _symbol_stats_cache.clear()
-        _symbol_stats_cache.update(cache)
+    def _rows(period_type: str, period_start: datetime, data: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
+        rows_out: List[Dict[str, Any]] = []
+        for sym, st in data.items():
+            rows_out.append({
+                "symbol": sym,
+                "period_type": period_type,
+                "period_start": period_start.date().isoformat(),
+                "timeframe": timeframe,
+                "trade_count": int(st["trade_count"]),
+                "wins": int(st["wins"]),
+                "losses": int(st["losses"]),
+                "net_profit": float(st["net_profit"]),
+                "gross_profit": float(st["gross_profit"]),
+                "gross_loss": float(st["gross_loss"]),
+                "last_trade_at": st["last_trade_at"],
+            })
+        return rows_out
+
+    rows_day = _rows("day", day_start, day_data)
+    rows_month = _rows("month", month_start, month_data)
+
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        if rows_day:
+            r1 = await client.post(f"{supabase_url}/rest/v1/symbol_trade_stats", headers=up_headers, json=rows_day)
+            if r1.status_code not in (200, 201, 204):
+                raise RuntimeError(f"Supabase symbol_trade_stats upsert day HTTP {r1.status_code}: {r1.text[:200]}")
+        if rows_month:
+            r2 = await client.post(f"{supabase_url}/rest/v1/symbol_trade_stats", headers=up_headers, json=rows_month)
+            if r2.status_code not in (200, 201, 204):
+                raise RuntimeError(f"Supabase symbol_trade_stats upsert month HTTP {r2.status_code}: {r2.text[:200]}")
+
+    # Update cache
+    cache: Dict[str, Dict[str, Any]] = {}
+    for sym, st in day_data.items():
+        cache.setdefault(sym, {})["day"] = st
+    for sym, st in month_data.items():
+        cache.setdefault(sym, {})["month"] = st
+    _symbol_stats_cache.clear()
+    _symbol_stats_cache.update(cache)
 
 async def _symbol_stats_loop(interval_sec: int = 300) -> None:
     global _symbol_stats_last_tick
@@ -8745,6 +8791,9 @@ async def trades_feedback(request: TradeFeedbackRequest):
             close_time=processed_close,
             coherent_confidence=request.coherent_confidence
         ))
+
+        # Refresh stats symbole "quasi temps réel" après feedback (non bloquant)
+        asyncio.create_task(_refresh_symbol_trade_stats("M1"))
 
         # Déclencher automatiquement le réentraînement en arrière-plan (non-bloquant)
         if CONTINUOUS_LEARNING_AVAILABLE and continuous_learner:
