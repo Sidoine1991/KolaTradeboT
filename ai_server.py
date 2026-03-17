@@ -8071,6 +8071,10 @@ class MT5HistoryUploadRequest(BaseModel):
     timeframe: str = Field(..., description="Timeframe (M1, M5, M15, H1, H4, D1)")
     data: List[Dict[str, Any]] = Field(..., description="Liste des bougies OHLCV au format: [{'time': timestamp, 'open': float, 'high': float, 'low': float, 'close': float, 'tick_volume': int}, ...]")
 
+class MT5DealsUploadRequest(BaseModel):
+    """Requête pour uploader des deals clôturés MT5 (batch)"""
+    deals: List[Dict[str, Any]]
+
 class ForceDecisionRequest(BaseModel):
     """Requête pour forcer une décision en mode test"""
     symbol: str
@@ -8156,6 +8160,63 @@ async def upload_mt5_history(request: MT5HistoryUploadRequest):
     except Exception as e:
         logger.error(f"Erreur dans /mt5/history-upload: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Erreur lors de l'upload des données historiques: {str(e)}")
+
+
+@app.post("/mt5/deals-upload")
+async def upload_mt5_deals(request: MT5DealsUploadRequest):
+    """
+    Upload batch de deals clôturés depuis MT5.
+    Objectif: garantir 0 incohérence (Supabase reflète MT5 même si un feedback temps réel a été raté).
+
+    Payload: {"deals":[{mt5_deal_id, position_id, symbol, profit, is_win, close_time, price, magic}, ...]}
+    """
+    try:
+        supabase_url = os.getenv("SUPABASE_URL", "").strip()
+        supabase_key = (os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_SERVICE_KEY") or os.getenv("SUPABASE_ANON_KEY") or "").strip()
+        if not supabase_url or not supabase_key:
+            raise HTTPException(status_code=500, detail="Supabase non configuré (SUPABASE_URL / KEY)")
+
+        deals = request.deals or []
+        if not deals:
+            return {"ok": True, "received": 0, "upserted": 0}
+
+        rows = []
+        for d in deals[:2000]:
+            sym = (d.get("symbol") or "").strip()
+            if not sym:
+                continue
+            rows.append({
+                "symbol": sym,
+                "timeframe": "M1",
+                "profit": float(d.get("profit") or 0.0),
+                "is_win": bool(d.get("is_win")),
+                "close_time": d.get("close_time"),
+                "exit_price": d.get("price"),
+                "mt5_deal_id": d.get("mt5_deal_id"),
+                "position_id": d.get("position_id"),
+                "magic": d.get("magic"),
+                "decision": "UNKNOWN",
+            })
+
+        import httpx
+        headers = {
+            "apikey": supabase_key,
+            "Authorization": f"Bearer {supabase_key}",
+            "Content-Type": "application/json",
+            "Prefer": "resolution=merge-duplicates,return=minimal",
+        }
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            r = await client.post(f"{supabase_url}/rest/v1/trade_feedback", headers=headers, json=rows)
+        if r.status_code not in (200, 201, 204):
+            raise HTTPException(status_code=500, detail=f"Supabase trade_feedback upsert HTTP {r.status_code}: {r.text[:200]}")
+
+        asyncio.create_task(_refresh_symbol_trade_stats("M1"))
+        return {"ok": True, "received": len(deals), "upserted": len(rows)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Erreur upload deals MT5: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/decision/force", response_model=DecisionResponse)
 async def force_decision(request: ForceDecisionRequest):
