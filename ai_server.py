@@ -2343,6 +2343,170 @@ def detect_realtime_movement(symbol: str, current_price: float) -> Dict[str, Any
 mt5_uploaded_history_cache: Dict[str, Dict[str, Any]] = {}
 MT5_HISTORY_CACHE_TTL = 300  # TTL de 5 minutes (les données sont rafraîchies régulièrement)
 
+# ===== PROFIL HORAIRE "SYMBOL PROPICE" =====
+# Fallback local (si Supabase indispo). Ces caches ne remplacent pas la source of truth Supabase.
+symbol_hour_profile_cache: Dict[Tuple[str, str, int], Dict[str, Any]] = {}
+symbol_hour_status_cache: Dict[Tuple[str, str], Dict[str, Any]] = {}
+
+def _safe_float(v: Any, default: float = 0.0) -> float:
+    try:
+        if v is None:
+            return default
+        return float(v)
+    except Exception:
+        return default
+
+def _clamp(x: float, lo: float, hi: float) -> float:
+    return lo if x < lo else hi if x > hi else x
+
+def _robust_minmax(values: List[float], q_low: float = 0.10, q_high: float = 0.90) -> Tuple[float, float]:
+    """Retourne (low, high) robustes via quantiles; fallback min/max."""
+    vals = [float(v) for v in values if isinstance(v, (int, float)) and np.isfinite(v)]
+    if not vals:
+        return 0.0, 1.0
+    s = pd.Series(vals, dtype="float64")
+    try:
+        lo = float(s.quantile(q_low))
+        hi = float(s.quantile(q_high))
+    except Exception:
+        lo = float(s.min())
+        hi = float(s.max())
+    if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
+        lo = float(s.min())
+        hi = float(s.max())
+    if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
+        return 0.0, 1.0
+    return lo, hi
+
+def compute_symbol_hour_profile_from_m1(
+    df: "pd.DataFrame",
+    symbol: str,
+    timeframe: str = "M1",
+    lookback_days: int = 14,
+    atr_period: int = 14,
+    vol_window: int = 30,
+    spike_k_atr: float = 2.0,
+) -> List[Dict[str, Any]]:
+    """
+    Calcule un profil horaire 0..23 (UTC) à partir d'un batch de bougies OHLCV.
+    Colonnes requises: time, open, high, low, close (time en timestamp unix ou ISO).
+    """
+    if df is None or df.empty:
+        return []
+    _df = df.copy()
+    if "time" not in _df.columns:
+        return []
+    _df["time"] = pd.to_datetime(_df["time"], utc=True, errors="coerce")
+    _df = _df.dropna(subset=["time"])
+    if _df.empty:
+        return []
+
+    for col in ("open", "high", "low", "close"):
+        if col not in _df.columns:
+            return []
+        _df[col] = pd.to_numeric(_df[col], errors="coerce")
+    _df = _df.dropna(subset=["high", "low", "close"])
+    if _df.empty:
+        return []
+
+    _df = _df.sort_values("time").reset_index(drop=True)
+
+    prev_close = _df["close"].shift(1)
+    tr = pd.concat(
+        [
+            (_df["high"] - _df["low"]).abs(),
+            (_df["high"] - prev_close).abs(),
+            (_df["low"] - prev_close).abs(),
+        ],
+        axis=1,
+    ).max(axis=1)
+    atr = tr.rolling(window=atr_period, min_periods=max(2, atr_period // 2)).mean()
+    _df["atr"] = atr
+
+    close = _df["close"].replace(0, np.nan)
+    logret = np.log(close / close.shift(1))
+    _df["volatility"] = logret.rolling(window=vol_window, min_periods=max(5, vol_window // 3)).std()
+
+    rng = (_df["high"] - _df["low"]).abs()
+    _df["spike"] = (rng > (spike_k_atr * _df["atr"])).astype("float64")
+    _df["ret"] = logret.replace([np.inf, -np.inf], np.nan)
+
+    _df["hour_utc"] = _df["time"].dt.hour.astype("int64")
+
+    g = _df.groupby("hour_utc", dropna=True)
+    rows: List[Dict[str, Any]] = []
+    for hour in range(24):
+        if hour not in g.groups:
+            rows.append(
+                {
+                    "symbol": symbol,
+                    "timeframe": timeframe,
+                    "lookback_days": int(lookback_days),
+                    "hour_utc": int(hour),
+                    "samples": 0,
+                    "atr_mean": 0.0,
+                    "volatility_mean": 0.0,
+                    "spike_rate": 0.0,
+                    "trend_bias": 0.0,
+                    "propice_score": 0.0,
+                }
+            )
+            continue
+
+        sub = _df.loc[g.groups[hour]]
+        samples = int(len(sub))
+        atr_mean = float(np.nanmean(sub["atr"])) if samples else 0.0
+        vol_mean = float(np.nanmean(sub["volatility"])) if samples else 0.0
+        spike_rate = float(np.nanmean(sub["spike"])) if samples else 0.0
+
+        ret_mean = float(np.nanmean(sub["ret"])) if samples else 0.0
+        ret_std = float(np.nanstd(sub["ret"])) if samples else 0.0
+        bias = 0.0
+        if np.isfinite(ret_mean) and np.isfinite(ret_std) and ret_std > 1e-12:
+            bias = float(np.tanh(ret_mean / (ret_std + 1e-12)))
+
+        rows.append(
+            {
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "lookback_days": int(lookback_days),
+                "hour_utc": int(hour),
+                "samples": samples,
+                "atr_mean": _safe_float(atr_mean),
+                "volatility_mean": _safe_float(vol_mean),
+                "spike_rate": _safe_float(spike_rate),
+                "trend_bias": _safe_float(bias),
+                "propice_score": 0.0,
+            }
+        )
+
+    # Normalisation robuste sur 24h (par symbole)
+    atr_vals = [_safe_float(r["atr_mean"]) for r in rows]
+    vol_vals = [_safe_float(r["volatility_mean"]) for r in rows]
+    spk_vals = [_safe_float(r["spike_rate"]) for r in rows]
+    samp_vals = [float(r.get("samples", 0) or 0) for r in rows]
+
+    atr_lo, atr_hi = _robust_minmax(atr_vals)
+    vol_lo, vol_hi = _robust_minmax(vol_vals)
+    spk_lo, spk_hi = _robust_minmax(spk_vals)
+    samp_lo, samp_hi = _robust_minmax(samp_vals)
+
+    def _norm(v: float, lo: float, hi: float) -> float:
+        if hi <= lo:
+            return 0.0
+        return _clamp((v - lo) / (hi - lo), 0.0, 1.0)
+
+    w_atr, w_vol, w_spk, w_samp = 0.35, 0.35, 0.20, 0.10
+    for r in rows:
+        na = _norm(_safe_float(r["atr_mean"]), atr_lo, atr_hi)
+        nv = _norm(_safe_float(r["volatility_mean"]), vol_lo, vol_hi)
+        ns = _norm(_safe_float(r["spike_rate"]), spk_lo, spk_hi)
+        nsa = _norm(float(r.get("samples", 0) or 0), samp_lo, samp_hi)
+        score = (w_atr * na) + (w_vol * nv) + (w_spk * ns) + (w_samp * nsa)
+        r["propice_score"] = float(_clamp(score, 0.0, 1.0))
+
+    return rows
+
 # ===== SYSTÈME DE VALIDATION ET CALIBRATION DES PRÉDICTIONS =====
 # Stockage des prédictions historiques pour validation
 prediction_history: Dict[str, List[Dict[str, Any]]] = {}  # {symbol: [predictions]}
@@ -5117,7 +5281,156 @@ async def status():
         "trend_analysis": {
             "available": True,
             "mt5_available": mt5_initialized
+        },
+        "symbol_propice": {
+            "cache_profiles": len(symbol_hour_profile_cache),
+            "cache_status": len(symbol_hour_status_cache),
+        },
+    }
+
+
+@app.get("/symbols/propice/status")
+async def get_symbol_propice_status(symbol: str, timeframe: str = "M1", lookback_days: int = 14):
+    """
+    Statut détaillé d'un symbole (profil horaire + score maintenant) avec fallback cache.
+    """
+    symbol = (symbol or "").strip()
+    timeframe = (timeframe or "M1").strip().upper()
+    if not symbol:
+        raise HTTPException(status_code=400, detail="symbol requis")
+    if timeframe != "M1":
+        raise HTTPException(status_code=400, detail="timeframe supporté: M1 uniquement")
+    lookback_days = int(lookback_days or 14)
+
+    now_hour_utc = int(datetime.utcnow().hour)
+
+    # 1) cache local
+    cached_profile = symbol_hour_profile_cache.get((symbol, timeframe, lookback_days))
+    cached_status = symbol_hour_status_cache.get((symbol, timeframe))
+    if cached_profile and cached_profile.get("rows"):
+        rows = cached_profile["rows"]
+        now_row = next((r for r in rows if int(r.get("hour_utc", -1)) == now_hour_utc), None)
+        return {
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "lookback_days": lookback_days,
+            "now_hour_utc": now_hour_utc,
+            "profile_rows": rows,
+            "now": {
+                "propice_score": float((now_row or {}).get("propice_score", 0.0) or 0.0),
+                "trend_bias": float((now_row or {}).get("trend_bias", 0.0) or 0.0),
+                "reason": (cached_status or {}).get("reason", "cache"),
+                "computed_at": (cached_status or {}).get("computed_at"),
+            },
+            "source": "cache",
         }
+
+    # 2) Supabase fallback
+    try:
+        supabase_url, supabase_key = _get_supabase_config(strict=True)
+        import httpx
+        headers = {
+            "apikey": supabase_key,
+            "Authorization": f"Bearer {supabase_key}",
+        }
+        params = {
+            "symbol": f"eq.{symbol}",
+            "timeframe": f"eq.{timeframe}",
+            "lookback_days": f"eq.{lookback_days}",
+            "order": "hour_utc.asc",
+        }
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.get(f"{supabase_url}/rest/v1/symbol_hour_profile", headers=headers, params=params)
+        if r.status_code not in (200, 206):
+            raise RuntimeError(f"Supabase HTTP {r.status_code}: {r.text[:200]}")
+        rows = r.json() if r.text else []
+        now_row = next((rr for rr in rows if int(rr.get("hour_utc", -1)) == now_hour_utc), None)
+        return {
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "lookback_days": lookback_days,
+            "now_hour_utc": now_hour_utc,
+            "profile_rows": rows,
+            "now": {
+                "propice_score": float((now_row or {}).get("propice_score", 0.0) or 0.0),
+                "trend_bias": float((now_row or {}).get("trend_bias", 0.0) or 0.0),
+                "reason": "supabase",
+            },
+            "source": "supabase",
+        }
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Statut indisponible (cache vide et Supabase KO): {e}")
+
+
+@app.get("/symbols/propice/top")
+async def get_symbols_propice_top(timeframe: str = "M1", lookback_days: int = 14, n: int = 5):
+    """
+    Retourne les Top N symbols propices pour l'heure UTC actuelle.
+    Fallback: cache local si Supabase indisponible.
+    """
+    timeframe = (timeframe or "M1").strip().upper()
+    if timeframe != "M1":
+        raise HTTPException(status_code=400, detail="timeframe supporté: M1 uniquement")
+    lookback_days = int(lookback_days or 14)
+    n = max(1, min(int(n or 5), 50))
+    now_hour_utc = int(datetime.utcnow().hour)
+
+    # 1) essayer Supabase d'abord (source-of-truth)
+    try:
+        supabase_url, supabase_key = _get_supabase_config(strict=True)
+        import httpx
+        headers = {
+            "apikey": supabase_key,
+            "Authorization": f"Bearer {supabase_key}",
+        }
+        params = {
+            "timeframe": f"eq.{timeframe}",
+            "lookback_days": f"eq.{lookback_days}",
+            "hour_utc": f"eq.{now_hour_utc}",
+            "order": "propice_score.desc",
+            "limit": str(n),
+        }
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.get(f"{supabase_url}/rest/v1/symbol_hour_profile", headers=headers, params=params)
+        if r.status_code in (200, 206):
+            rows = r.json() if r.text else []
+            return {
+                "timeframe": timeframe,
+                "lookback_days": lookback_days,
+                "now_hour_utc": now_hour_utc,
+                "n": n,
+                "rows": rows,
+                "source": "supabase",
+            }
+    except Exception:
+        pass
+
+    # 2) fallback cache
+    out = []
+    for (sym, tf, lb), payload in symbol_hour_profile_cache.items():
+        if tf != timeframe or lb != lookback_days:
+            continue
+        rows = payload.get("rows") or []
+        now_row = next((r for r in rows if int(r.get("hour_utc", -1)) == now_hour_utc), None)
+        if not now_row:
+            continue
+        out.append({
+            "symbol": sym,
+            "timeframe": timeframe,
+            "lookback_days": lookback_days,
+            "hour_utc": now_hour_utc,
+            "propice_score": float(now_row.get("propice_score", 0.0) or 0.0),
+            "trend_bias": float(now_row.get("trend_bias", 0.0) or 0.0),
+            "reason": "cache",
+        })
+    out.sort(key=lambda r: float(r.get("propice_score", 0.0) or 0.0), reverse=True)
+    return {
+        "timeframe": timeframe,
+        "lookback_days": lookback_days,
+        "now_hour_utc": now_hour_utc,
+        "n": n,
+        "rows": out[:n],
+        "source": "cache",
     }
 
 @app.get("/logs")
@@ -8162,6 +8475,95 @@ class ForceDecisionRequest(BaseModel):
     reason: str = Field(default="Test mode - décision forcée", description="Raison de la décision forcée")
     override_thresholds: bool = Field(default=True, description="Ignorer les seuils de confiance minimum")
 
+# ===== SUPABASE: PROFIL HORAIRE "SYMBOL PROPICE" (UPSERT/READ) =====
+async def _upsert_symbol_hour_profile_to_supabase(
+    symbol: str,
+    timeframe: str,
+    lookback_days: int,
+    rows: List[Dict[str, Any]],
+) -> bool:
+    """
+    Upsert vers Supabase table `symbol_hour_profile` (clé primaire: symbol,timeframe,lookback_days,hour_utc).
+    Retourne True si succès, sinon False (ne lève pas).
+    """
+    try:
+        supabase_url, supabase_key = _get_supabase_config(strict=True)
+        import httpx
+
+        # normaliser payload (éviter datetime non sérialisables)
+        payload = []
+        for r in rows:
+            payload.append({
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "lookback_days": int(lookback_days),
+                "hour_utc": int(r.get("hour_utc", 0)),
+                "samples": int(r.get("samples", 0) or 0),
+                "atr_mean": float(r.get("atr_mean", 0.0) or 0.0),
+                "volatility_mean": float(r.get("volatility_mean", 0.0) or 0.0),
+                "spike_rate": float(r.get("spike_rate", 0.0) or 0.0),
+                "trend_bias": float(r.get("trend_bias", 0.0) or 0.0),
+                "propice_score": float(r.get("propice_score", 0.0) or 0.0),
+            })
+
+        headers = {
+            "apikey": supabase_key,
+            "Authorization": f"Bearer {supabase_key}",
+            "Content-Type": "application/json",
+            "Prefer": "resolution=merge-duplicates,return=minimal",
+        }
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.post(f"{supabase_url}/rest/v1/symbol_hour_profile", headers=headers, json=payload)
+        if resp.status_code not in (200, 201, 204):
+            logger.warning(f"Supabase symbol_hour_profile upsert HTTP {resp.status_code}: {resp.text[:200]}")
+            return False
+        return True
+    except Exception as e:
+        logger.warning(f"Supabase upsert symbol_hour_profile failed: {e}")
+        return False
+
+
+async def _upsert_symbol_hour_status_to_supabase(
+    symbol: str,
+    timeframe: str,
+    now_hour_utc: int,
+    propice_score: float,
+    penalty_factor: float = 1.0,
+    reason: str = "",
+) -> bool:
+    """
+    Upsert vers Supabase table `symbol_hour_status` (PK: symbol,timeframe).
+    Retourne True si succès, sinon False (ne lève pas).
+    """
+    try:
+        supabase_url, supabase_key = _get_supabase_config(strict=True)
+        import httpx
+
+        payload = [{
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "now_hour_utc": int(now_hour_utc),
+            "propice_score": float(propice_score or 0.0),
+            "penalty_factor": float(penalty_factor or 1.0),
+            "reason": str(reason or ""),
+        }]
+
+        headers = {
+            "apikey": supabase_key,
+            "Authorization": f"Bearer {supabase_key}",
+            "Content-Type": "application/json",
+            "Prefer": "resolution=merge-duplicates,return=minimal",
+        }
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(f"{supabase_url}/rest/v1/symbol_hour_status", headers=headers, json=payload)
+        if resp.status_code not in (200, 201, 204):
+            logger.warning(f"Supabase symbol_hour_status upsert HTTP {resp.status_code}: {resp.text[:200]}")
+            return False
+        return True
+    except Exception as e:
+        logger.warning(f"Supabase upsert symbol_hour_status failed: {e}")
+        return False
+
 @app.post("/mt5/history-upload")
 async def upload_mt5_history(request: MT5HistoryUploadRequest):
     """
@@ -8220,6 +8622,58 @@ async def upload_mt5_history(request: MT5HistoryUploadRequest):
             }
             
             logger.info(f"✅ Données historiques uploadées depuis MT5: {len(df)} bougies pour {request.symbol} {request.timeframe}")
+
+            # Profil horaire "symbol propice" (M1 uniquement)
+            try:
+                if request.timeframe == "M1":
+                    lookback_days = 14
+                    profile_rows = compute_symbol_hour_profile_from_m1(
+                        df=df,
+                        symbol=request.symbol,
+                        timeframe="M1",
+                        lookback_days=lookback_days,
+                    )
+                    if profile_rows:
+                        symbol_hour_profile_cache[(request.symbol, "M1", lookback_days)] = {
+                            "rows": profile_rows,
+                            "computed_at": datetime.utcnow(),
+                        }
+                        now_hour_utc = int(datetime.utcnow().hour)
+                        now_row = next((r for r in profile_rows if int(r.get("hour_utc", -1)) == now_hour_utc), None)
+                        if now_row:
+                            symbol_hour_status_cache[(request.symbol, "M1")] = {
+                                "symbol": request.symbol,
+                                "timeframe": "M1",
+                                "now_hour_utc": now_hour_utc,
+                                "propice_score": float(now_row.get("propice_score", 0.0) or 0.0),
+                                "trend_bias": float(now_row.get("trend_bias", 0.0) or 0.0),
+                                "penalty_factor": 1.0,
+                                "reason": "computed_from_mt5_history_upload",
+                                "computed_at": datetime.utcnow(),
+                            }
+                        # Upsert Supabase (best-effort)
+                        asyncio.create_task(
+                            _upsert_symbol_hour_profile_to_supabase(
+                                symbol=request.symbol,
+                                timeframe="M1",
+                                lookback_days=lookback_days,
+                                rows=profile_rows,
+                            )
+                        )
+                        if now_row:
+                            asyncio.create_task(
+                                _upsert_symbol_hour_status_to_supabase(
+                                    symbol=request.symbol,
+                                    timeframe="M1",
+                                    now_hour_utc=now_hour_utc,
+                                    propice_score=float(now_row.get("propice_score", 0.0) or 0.0),
+                                    penalty_factor=1.0,
+                                    reason="computed_from_mt5_history_upload",
+                                )
+                            )
+            except Exception as e:
+                # Ne jamais bloquer l'upload historique si le calcul propice échoue
+                logger.warning(f"⚠️ Profil horaire non calculé pour {request.symbol} M1: {e}")
             
             return {
                 "status": "success",
