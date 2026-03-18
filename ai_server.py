@@ -2507,6 +2507,127 @@ def compute_symbol_hour_profile_from_m1(
 
     return rows
 
+
+async def _compute_propice_top_from_trade_feedback(
+    timeframe: str,
+    lookback_days: int,
+    n: int,
+    now_hour_utc: int,
+) -> Dict[str, Any]:
+    """
+    Calcule les Top N symboles \"propices\" à partir des résultats de trades (trade_feedback) stockés dans Supabase.
+    Approche: pour l'heure UTC courante, agréger (wins/losses/net_profit/samples) sur les trades clôturés
+    et produire un propice_score 0..1.
+    """
+    supabase_url, supabase_key = _get_supabase_config(strict=True)
+    import httpx
+    from datetime import timezone
+
+    headers = {
+        "apikey": supabase_key,
+        "Authorization": f"Bearer {supabase_key}",
+    }
+
+    # Fenêtre de lookback sur close_time
+    dt_from = datetime.utcnow().replace(tzinfo=timezone.utc) - timedelta(days=int(lookback_days or 14))
+    iso_from = dt_from.isoformat()
+
+    # Télécharger les trades clôturés récents (on agrège en Python)
+    # NOTE: PostgREST group-by n'est pas toujours disponible -> on agrège client-side
+    params = {
+        "timeframe": f"eq.{timeframe}",
+        "close_time": f"gte.{iso_from}",
+        "select": "symbol,close_time,profit,is_win",
+        "order": "close_time.desc",
+        "limit": "5000",  # garde-fou
+    }
+
+    async with httpx.AsyncClient(timeout=12.0) as client:
+        r = await client.get(f"{supabase_url}/rest/v1/trade_feedback", headers=headers, params=params)
+    if r.status_code not in (200, 206):
+        raise RuntimeError(f"Supabase trade_feedback HTTP {r.status_code}: {r.text[:200]}")
+
+    rows = r.json() if r.text else []
+    if not rows:
+        return {"rows": [], "source": "supabase_trade_feedback", "note": "no_rows"}
+
+    # Agréger par symbole pour l'heure UTC courante
+    agg: Dict[str, Dict[str, Any]] = {}
+    for rr in rows:
+        sym = (rr.get("symbol") or "").strip()
+        if not sym:
+            continue
+        ct = rr.get("close_time")
+        if not ct:
+            continue
+        try:
+            ct_dt = pd.to_datetime(ct, utc=True, errors="coerce")
+        except Exception:
+            ct_dt = None
+        if ct_dt is None or pd.isna(ct_dt):
+            continue
+        if int(getattr(ct_dt, "hour", -1)) != int(now_hour_utc):
+            continue
+
+        profit = rr.get("profit")
+        try:
+            p = float(profit) if profit is not None else 0.0
+        except Exception:
+            p = 0.0
+        is_win = rr.get("is_win")
+        w = bool(is_win) if is_win is not None else (p > 0)
+
+        a = agg.get(sym)
+        if not a:
+            a = {"symbol": sym, "samples": 0, "wins": 0, "losses": 0, "net_profit": 0.0}
+            agg[sym] = a
+        a["samples"] += 1
+        a["net_profit"] += p
+        if w:
+            a["wins"] += 1
+        else:
+            a["losses"] += 1
+
+    if not agg:
+        return {"rows": [], "source": "supabase_trade_feedback", "note": "no_rows_for_hour"}
+
+    # Score: win_rate (0..1) + profit contribution (tanh normalized) + sample bonus
+    out = []
+    net_profits = [float(v.get("net_profit", 0.0) or 0.0) for v in agg.values()]
+    lo, hi = _robust_minmax(net_profits, 0.10, 0.90)
+    rng = (hi - lo) if hi > lo else 1.0
+
+    for sym, a in agg.items():
+        samples = int(a.get("samples", 0) or 0)
+        wins = int(a.get("wins", 0) or 0)
+        losses = int(a.get("losses", 0) or 0)
+        netp = float(a.get("net_profit", 0.0) or 0.0)
+
+        win_rate = (wins / max(1, wins + losses))
+        profit_norm = (netp - lo) / rng  # ~0..1
+        profit_norm = float(_clamp(profit_norm, 0.0, 1.0))
+        sample_bonus = float(_clamp(samples / 20.0, 0.0, 1.0))
+
+        score = 0.55 * win_rate + 0.35 * profit_norm + 0.10 * sample_bonus
+        out.append(
+            {
+                "symbol": sym,
+                "timeframe": timeframe,
+                "lookback_days": int(lookback_days),
+                "hour_utc": int(now_hour_utc),
+                "samples": samples,
+                "wins": wins,
+                "losses": losses,
+                "net_profit": round(netp, 2),
+                "win_rate": round(win_rate, 4),
+                "propice_score": float(_clamp(score, 0.0, 1.0)),
+                "reason": "trade_feedback",
+            }
+        )
+
+    out.sort(key=lambda r: float(r.get("propice_score", 0.0) or 0.0), reverse=True)
+    return {"rows": out[:n], "source": "supabase_trade_feedback"}
+
 # ===== SYSTÈME DE VALIDATION ET CALIBRATION DES PRÉDICTIONS =====
 # Stockage des prédictions historiques pour validation
 prediction_history: Dict[str, List[Dict[str, Any]]] = {}  # {symbol: [predictions]}
@@ -5375,7 +5496,23 @@ async def get_symbols_propice_top(timeframe: str = "M1", lookback_days: int = 14
     n = max(1, min(int(n or 5), 50))
     now_hour_utc = int(datetime.utcnow().hour)
 
-    # 1) essayer Supabase d'abord (source-of-truth)
+    # 1) essayer Supabase trade_feedback d'abord (source-of-truth = résultats réels)
+    try:
+        payload = await _compute_propice_top_from_trade_feedback(timeframe, lookback_days, n, now_hour_utc)
+        rows = payload.get("rows") or []
+        if rows:
+            return {
+                "timeframe": timeframe,
+                "lookback_days": lookback_days,
+                "now_hour_utc": now_hour_utc,
+                "n": n,
+                "rows": rows,
+                "source": payload.get("source", "supabase_trade_feedback"),
+            }
+    except Exception:
+        pass
+
+    # 2) fallback Supabase symbol_hour_profile (profil volatilité/spike basé M1)
     try:
         supabase_url, supabase_key = _get_supabase_config(strict=True)
         import httpx
@@ -5400,12 +5537,12 @@ async def get_symbols_propice_top(timeframe: str = "M1", lookback_days: int = 14
                 "now_hour_utc": now_hour_utc,
                 "n": n,
                 "rows": rows,
-                "source": "supabase",
+                "source": "supabase_symbol_hour_profile",
             }
     except Exception:
         pass
 
-    # 2) fallback cache
+    # 3) fallback cache
     out = []
     for (sym, tf, lb), payload in symbol_hour_profile_cache.items():
         if tf != timeframe or lb != lookback_days:
