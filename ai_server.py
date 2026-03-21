@@ -8683,7 +8683,44 @@ async def robot_predict_ohlc(symbol: str, timeframe: str = "M1", horizon: int = 
         h = int(max(1, min(500, horizon)))
         c = int(max(200, min(2000, count)))
 
-        df = get_historical_data_mt5(symbol, "M1", c)
+        def _symbol_candidates(sym: str) -> List[str]:
+            s = (sym or "").strip()
+            if not s:
+                return []
+            out: List[str] = [s]
+            su = s.upper().replace(" ", "")
+            aliases = {
+                "BOOM1000": ["Boom 1000 Index", "Boom1000", "BOOM 1000", "BOOM 1000 INDEX"],
+                "BOOM500": ["Boom 500 Index", "Boom500", "BOOM 500", "BOOM 500 INDEX"],
+                "CRASH1000": ["Crash 1000 Index", "Crash1000", "CRASH 1000", "CRASH 1000 INDEX"],
+                "CRASH500": ["Crash 500 Index", "Crash500", "CRASH 500", "CRASH 500 INDEX"],
+            }
+            for k, vals in aliases.items():
+                if su == k:
+                    out.extend(vals)
+            # Déduire aussi une variante "X 1000 Index" si la saisie ressemble à BOOM1000/CRASH1000
+            if su.startswith("BOOM") and su[4:].isdigit():
+                out.append(f"Boom {su[4:]} Index")
+            if su.startswith("CRASH") and su[5:].isdigit():
+                out.append(f"Crash {su[5:]} Index")
+            # Uniques, ordre conservé
+            uniq: List[str] = []
+            seen = set()
+            for x in out:
+                if x and x not in seen:
+                    uniq.append(x)
+                    seen.add(x)
+            return uniq
+
+        used_symbol = symbol
+        df = None
+        for cand in _symbol_candidates(symbol):
+            test_df = get_historical_data_mt5(cand, "M1", c)
+            if test_df is not None and not test_df.empty and len(test_df) >= 80:
+                used_symbol = cand
+                df = test_df
+                break
+
         if df is None or df.empty or len(df) < 80:
             raise HTTPException(status_code=404, detail=f"Données insuffisantes pour {symbol}")
 
@@ -8718,11 +8755,12 @@ async def robot_predict_ohlc(symbol: str, timeframe: str = "M1", horizon: int = 
             symbol=symbol,
             timeframe="M1",
             candles=valid,
-            metadata={"source": "robot_predict_ohlc", "generator": "structure_v1"},
+            metadata={"source": "robot_predict_ohlc", "generator": "structure_v1", "requested_symbol": symbol, "used_symbol": used_symbol},
         )
 
         return {
-            "symbol": symbol,
+            "symbol": used_symbol,
+            "requested_symbol": symbol,
             "timeframe": "M1",
             "horizon": len(valid),
             "source": "ai_server",
