@@ -9821,10 +9821,23 @@ async def upload_mt5_deals(request: MT5DealsUploadRequest):
             "Content-Type": "application/json",
             "Prefer": "resolution=merge-duplicates,return=minimal",
         }
+        r = None
         async with httpx.AsyncClient(timeout=15.0) as client:
-            r = await client.post(f"{supabase_url}/rest/v1/trade_feedback", headers=headers, json=rows)
-        if r.status_code not in (200, 201, 204):
-            raise HTTPException(status_code=500, detail=f"Supabase trade_feedback upsert HTTP {r.status_code}: {r.text[:200]}")
+            for attempt in range(3):
+                r = await client.post(f"{supabase_url}/rest/v1/trade_feedback", headers=headers, json=rows)
+                if r.status_code in (200, 201, 204):
+                    break
+                # Idempotence: si deal déjà présent (unique mt5_deal_id), considérer OK.
+                if r.status_code == 409 and ("mt5_deal_id" in (r.text or "") or "duplicate key" in (r.text or "").lower()):
+                    logger.info("ℹ️ /mt5/deals-upload duplicate mt5_deal_id détecté -> considéré comme succès idempotent")
+                    break
+                # Retry seulement sur erreurs transitoires.
+                if r.status_code in (408, 425, 429, 500, 502, 503, 504) and attempt < 2:
+                    await asyncio.sleep(0.4 * (attempt + 1))
+                    continue
+                break
+        if not r or r.status_code not in (200, 201, 204, 409):
+            raise HTTPException(status_code=500, detail=f"Supabase trade_feedback upsert HTTP {r.status_code if r else 'N/A'}: {(r.text[:200] if r else 'no response')}")
 
         asyncio.create_task(_refresh_symbol_trade_stats("M1"))
         return {
@@ -9976,10 +9989,18 @@ async def upload_mt5_symbol_trade_stats(request: MT5SymbolTradeStatsUploadReques
             "Content-Type": "application/json",
             "Prefer": "resolution=merge-duplicates,return=minimal",
         }
+        resp = None
         async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.post(f"{supabase_url}/rest/v1/symbol_trade_stats", headers=headers, json=kept)
-        if resp.status_code not in (200, 201, 204):
-            raise HTTPException(status_code=500, detail=f"Supabase symbol_trade_stats upsert HTTP {resp.status_code}: {resp.text[:200]}")
+            for attempt in range(3):
+                resp = await client.post(f"{supabase_url}/rest/v1/symbol_trade_stats", headers=headers, json=kept)
+                if resp.status_code in (200, 201, 204):
+                    break
+                if resp.status_code in (408, 425, 429, 500, 502, 503, 504) and attempt < 2:
+                    await asyncio.sleep(0.4 * (attempt + 1))
+                    continue
+                break
+        if not resp or resp.status_code not in (200, 201, 204):
+            raise HTTPException(status_code=500, detail=f"Supabase symbol_trade_stats upsert HTTP {resp.status_code if resp else 'N/A'}: {(resp.text[:200] if resp else 'no response')}")
 
         # Mettre à jour le cache local (utilisé par /ml/metrics)
         for row in kept:
