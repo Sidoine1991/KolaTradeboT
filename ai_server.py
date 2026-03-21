@@ -8204,6 +8204,88 @@ class PricePredictionRequest(BaseModel):
     history: Optional[List[float]] = None  # Données historiques fournies par le robot MQ5
     history_ohlc: Optional[Dict[str, List[float]]] = None  # Données OHLC complètes (open, high, low, close)
 
+
+def _generate_future_ohlc_series(
+    df: pd.DataFrame,
+    horizon: int = 200
+) -> List[Dict[str, Any]]:
+    """
+    Génère une projection OHLC future stable à partir des dernières bougies.
+    Retourne une liste de dictionnaires: time, open, high, low, close, confidence
+    """
+    if df is None or df.empty or len(df) < 80:
+        return []
+
+    d = df.copy()
+    if 'time' in d.columns:
+        d['time'] = pd.to_datetime(d['time'])
+    else:
+        d['time'] = pd.date_range(end=datetime.utcnow(), periods=len(d), freq='1min')
+    d = d.sort_values('time').reset_index(drop=True)
+
+    close = d['close'].astype(float)
+    ret = close.pct_change().fillna(0.0)
+    sigma = float(ret.tail(120).std())
+    sigma = max(1e-6, min(0.01, sigma))
+    mu = float(ret.tail(120).mean())
+
+    # Biais tendance simple EMA20/EMA50
+    ema20 = close.ewm(span=20, adjust=False).mean().iloc[-1]
+    ema50 = close.ewm(span=50, adjust=False).mean().iloc[-1]
+    last_close = float(close.iloc[-1])
+    trend_bias = 0.0 if last_close == 0 else max(-0.0015, min(0.0015, (ema20 - ema50) / last_close))
+
+    # ATR ratio approximé
+    if all(col in d.columns for col in ['high', 'low']):
+        tr = (d['high'].astype(float) - d['low'].astype(float)).tail(120)
+        atr = float(tr.mean()) if len(tr) else 0.0
+    else:
+        atr = 0.0
+    atr_ratio = (atr / last_close) if last_close > 0 and atr > 0 else sigma * 1.2
+    atr_ratio = max(1e-6, min(0.02, atr_ratio))
+
+    # Générateur pseudo-déterministe (évite flicker)
+    last_time = pd.to_datetime(d['time'].iloc[-1])
+    seed = abs(hash(f"ohlc:{int(last_time.timestamp())//60}:{len(d)}")) % (2**32)
+    rng = np.random.default_rng(seed)
+
+    candles: List[Dict[str, Any]] = []
+    curr_close = max(1e-8, last_close)
+    prev_ret = 0.0
+    h = int(max(1, min(500, horizon)))
+    conf = float(max(0.3, min(0.9, 0.55 + abs(trend_bias) * 120)))
+
+    for i in range(h):
+        eps = float(rng.normal(0.0, sigma))
+        r = (mu * 0.5) + (trend_bias * 0.2) + (prev_ret * 0.25) + eps
+        r = max(-0.03, min(0.03, r))
+
+        o = curr_close
+        c = max(1e-8, o * (1.0 + r))
+        body = abs(c - o)
+        wick_scale = max(atr_ratio * o, body * 0.35, 1e-8)
+        up_wick = float(abs(rng.normal(wick_scale * 0.7, wick_scale * 0.25)))
+        dn_wick = float(abs(rng.normal(wick_scale * 0.7, wick_scale * 0.25)))
+        hi = max(o, c) + up_wick
+        lo = min(o, c) - dn_wick
+        if lo <= 0:
+            lo = min(o, c) * 0.999
+
+        t = last_time + timedelta(minutes=i + 1)
+        candles.append({
+            "time": int(t.timestamp()),
+            "open": float(o),
+            "high": float(max(hi, o, c)),
+            "low": float(min(lo, o, c)),
+            "close": float(c),
+            "confidence": conf
+        })
+        prev_ret = (c / o) - 1.0 if o > 0 else 0.0
+        curr_close = c
+
+    return candles
+
+
 # ============================================================================
 # FONCTIONS D'ANALYSE DES PATTERNS DE BOUGIES ET STRUCTURE DU MARCHÉ
 # ============================================================================
@@ -8475,6 +8557,66 @@ async def predict_prices(request: PricePredictionRequest):
     except Exception as e:
         logger.error(f"Erreur critique dans /prediction: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Erreur lors de la prédiction de prix: {str(e)}")
+
+
+@app.get("/robot/predict_ohlc")
+async def robot_predict_ohlc(symbol: str, timeframe: str = "M1", horizon: int = 200, count: int = 500):
+    """
+    Endpoint principal pour le robot MT5:
+    retourne une projection OHLC future (chandeliers japonais) en M1.
+    """
+    try:
+        tf = (timeframe or "M1").upper()
+        if tf != "M1":
+            raise HTTPException(status_code=400, detail="timeframe supporté: M1 uniquement")
+
+        h = int(max(1, min(500, horizon)))
+        c = int(max(200, min(2000, count)))
+
+        df = get_historical_data_mt5(symbol, "M1", c)
+        if df is None or df.empty or len(df) < 80:
+            raise HTTPException(status_code=404, detail=f"Données insuffisantes pour {symbol}")
+
+        candles = _generate_future_ohlc_series(df, h)
+        if not candles:
+            raise HTTPException(status_code=500, detail="Impossible de générer la projection OHLC")
+
+        # Vérification finale de cohérence OHLC
+        valid = []
+        for cdl in candles:
+            o = float(cdl.get("open", 0))
+            hi = float(cdl.get("high", 0))
+            lo = float(cdl.get("low", 0))
+            cl = float(cdl.get("close", 0))
+            if o <= 0 or hi <= 0 or lo <= 0 or cl <= 0:
+                continue
+            hi = max(hi, o, cl)
+            lo = min(lo, o, cl)
+            valid.append({
+                "time": int(cdl.get("time", 0)),
+                "open": o,
+                "high": hi,
+                "low": lo,
+                "close": cl,
+                "confidence": float(cdl.get("confidence", 0.5))
+            })
+
+        if not valid:
+            raise HTTPException(status_code=500, detail="Projection OHLC invalide après validation")
+
+        return {
+            "symbol": symbol,
+            "timeframe": "M1",
+            "horizon": len(valid),
+            "source": "ai_server",
+            "candles": valid
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Erreur /robot/predict_ohlc: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.get("/prediction/accuracy/{symbol}")
 async def get_prediction_accuracy(symbol: str):
