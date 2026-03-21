@@ -9682,6 +9682,17 @@ async def upload_mt5_symbol_trade_stats(request: MT5SymbolTradeStatsUploadReques
             except Exception:
                 return None
 
+        def _parse_dt(v: Any) -> Optional[datetime]:
+            if v is None:
+                return None
+            try:
+                if isinstance(v, datetime):
+                    return v
+                s = str(v).strip().replace("Z", "+00:00")
+                return datetime.fromisoformat(s)
+            except Exception:
+                return None
+
         kept: List[Dict[str, Any]] = []
         skipped = 0
         for r in rows_in[:1000]:
@@ -9703,6 +9714,15 @@ async def upload_mt5_symbol_trade_stats(request: MT5SymbolTradeStatsUploadReques
                 gross_profit = float(r.get("gross_profit") or 0.0)
                 gross_loss = float(r.get("gross_loss") or 0.0)
             except Exception:
+                skipped += 1
+                continue
+            if trade_count < 0 or wins < 0 or losses < 0:
+                skipped += 1
+                continue
+            if wins + losses > trade_count:
+                skipped += 1
+                continue
+            if gross_profit < 0 or gross_loss < 0:
                 skipped += 1
                 continue
 
@@ -9748,6 +9768,10 @@ async def upload_mt5_symbol_trade_stats(request: MT5SymbolTradeStatsUploadReques
                 "gross_loss": float(row.get("gross_loss") or 0.0),
                 "last_trade_at": row.get("last_trade_at"),
             }
+            _symbol_stats_upload_freshness.setdefault(sym, {})[ptype] = {
+                "last_trade_at": _parse_dt(row.get("last_trade_at")),
+                "updated_at": datetime.utcnow(),
+            }
 
         return {"ok": True, "received": len(rows_in), "upserted": len(kept), "skipped": skipped}
 
@@ -9755,6 +9779,51 @@ async def upload_mt5_symbol_trade_stats(request: MT5SymbolTradeStatsUploadReques
         raise
     except Exception as e:
         logger.error(f"❌ Erreur upload stats symboles MT5: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/mt5/symbol-trade-stats/verify")
+async def verify_symbol_trade_stats(symbol: str, timeframe: str = "M1"):
+    """
+    Vérifie l'écart entre stats en cache (incluant uploads MT5) et recomputation locale depuis trade_feedback.
+    """
+    try:
+        sym = (symbol or "").strip()
+        if not sym:
+            raise HTTPException(status_code=400, detail="symbol requis")
+        await _refresh_symbol_trade_stats(timeframe)
+        st = _symbol_stats_cache.get(sym) or {}
+        day = st.get("day") or {}
+        month = st.get("month") or {}
+        upload_day = (_symbol_stats_upload_freshness.get(sym) or {}).get("day") or {}
+        upload_month = (_symbol_stats_upload_freshness.get(sym) or {}).get("month") or {}
+
+        def _pack(period: str, data: Dict[str, Any], up_meta: Dict[str, Any]) -> Dict[str, Any]:
+            return {
+                "period_type": period,
+                "trade_count": int(data.get("trade_count") or 0),
+                "wins": int(data.get("wins") or 0),
+                "losses": int(data.get("losses") or 0),
+                "net_profit": float(data.get("net_profit") or 0.0),
+                "gross_profit": float(data.get("gross_profit") or 0.0),
+                "gross_loss": float(data.get("gross_loss") or 0.0),
+                "last_trade_at": data.get("last_trade_at"),
+                "upload_meta": {
+                    "last_trade_at": up_meta.get("last_trade_at").isoformat() if isinstance(up_meta.get("last_trade_at"), datetime) else None,
+                    "updated_at": up_meta.get("updated_at").isoformat() if isinstance(up_meta.get("updated_at"), datetime) else None,
+                },
+            }
+
+        return {
+            "ok": True,
+            "symbol": sym,
+            "timeframe": timeframe,
+            "day": _pack("day", day, upload_day),
+            "month": _pack("month", month, upload_month),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Erreur verify symbol trade stats: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -9997,6 +10066,7 @@ _continuous_last_tick: Optional[str] = None
 _symbol_stats_task: Optional[asyncio.Task] = None
 _symbol_stats_last_tick: Optional[str] = None
 _symbol_stats_cache: Dict[str, Dict[str, Any]] = {}  # {symbol: {"day": {...}, "month": {...}}}
+_symbol_stats_upload_freshness: Dict[str, Dict[str, Dict[str, Any]]] = {}  # {symbol: {period_type: {"last_trade_at": dt, "updated_at": dt}}}
 
 CREATE_SYMBOL_TRADE_STATS_SQL = """
 CREATE TABLE IF NOT EXISTS symbol_trade_stats (
@@ -10078,6 +10148,17 @@ async def _refresh_symbol_trade_stats(timeframe: str = "M1") -> None:
                 st["last_trade_at"] = ct
         return out
 
+    def _parse_dt(v: Any) -> Optional[datetime]:
+        if v is None:
+            return None
+        try:
+            if isinstance(v, datetime):
+                return v
+            s = str(v).strip().replace("Z", "+00:00")
+            return datetime.fromisoformat(s)
+        except Exception:
+            return None
+
     day_data = _aggregate(await _fetch_feedback(day_start, now))
     month_data = _aggregate(await _fetch_feedback(month_start, now))
 
@@ -10104,6 +10185,71 @@ async def _refresh_symbol_trade_stats(timeframe: str = "M1") -> None:
 
     rows_day = _rows("day", day_start, day_data)
     rows_month = _rows("month", month_start, month_data)
+
+    # Priorité aux uploads MT5 plus récents (éviter qu'un refresh remplace des stats plus fraîches)
+    def _prefer_uploaded(rows: List[Dict[str, Any]], period_type: str) -> List[Dict[str, Any]]:
+        out_rows: List[Dict[str, Any]] = []
+        seen: set = set()
+        for row in rows:
+            sym = row.get("symbol")
+            if not sym:
+                continue
+            seen.add(sym)
+            uploaded = (_symbol_stats_upload_freshness.get(sym) or {}).get(period_type) or {}
+            up_last = uploaded.get("last_trade_at")
+            row_last = _parse_dt(row.get("last_trade_at"))
+            if up_last is None:
+                out_rows.append(row)
+                continue
+            # Si upload plus récent (ou égal en last_trade_at mais plus récent en updated_at), on conserve la version cache upload
+            uploaded_is_fresher = False
+            if up_last and row_last:
+                uploaded_is_fresher = up_last >= row_last
+            elif up_last and not row_last:
+                uploaded_is_fresher = True
+            if uploaded_is_fresher:
+                cached = (_symbol_stats_cache.get(sym) or {}).get(period_type)
+                if isinstance(cached, dict):
+                    out_rows.append({
+                        "symbol": sym,
+                        "period_type": period_type,
+                        "period_start": row.get("period_start"),
+                        "timeframe": row.get("timeframe", timeframe),
+                        "trade_count": int(cached.get("trade_count") or 0),
+                        "wins": int(cached.get("wins") or 0),
+                        "losses": int(cached.get("losses") or 0),
+                        "net_profit": float(cached.get("net_profit") or 0.0),
+                        "gross_profit": float(cached.get("gross_profit") or 0.0),
+                        "gross_loss": float(cached.get("gross_loss") or 0.0),
+                        "last_trade_at": cached.get("last_trade_at"),
+                    })
+                    continue
+            out_rows.append(row)
+        # Ajouter les symboles disponibles uniquement côté upload MT5 (ex: lag trade_feedback)
+        for sym, per_map in _symbol_stats_cache.items():
+            if sym in seen:
+                continue
+            cached = (per_map or {}).get(period_type)
+            uploaded = (_symbol_stats_upload_freshness.get(sym) or {}).get(period_type) or {}
+            if not isinstance(cached, dict) or uploaded.get("last_trade_at") is None:
+                continue
+            out_rows.append({
+                "symbol": sym,
+                "period_type": period_type,
+                "period_start": (day_start if period_type == "day" else month_start).date().isoformat(),
+                "timeframe": timeframe,
+                "trade_count": int(cached.get("trade_count") or 0),
+                "wins": int(cached.get("wins") or 0),
+                "losses": int(cached.get("losses") or 0),
+                "net_profit": float(cached.get("net_profit") or 0.0),
+                "gross_profit": float(cached.get("gross_profit") or 0.0),
+                "gross_loss": float(cached.get("gross_loss") or 0.0),
+                "last_trade_at": cached.get("last_trade_at"),
+            })
+        return out_rows
+
+    rows_day = _prefer_uploaded(rows_day, "day")
+    rows_month = _prefer_uploaded(rows_month, "month")
 
     async with httpx.AsyncClient(timeout=10.0) as client:
         if rows_day:

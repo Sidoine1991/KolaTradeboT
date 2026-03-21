@@ -1808,6 +1808,12 @@ bool ICT_ValidateEvidenceSequence(const string symbol, ENUM_TIMEFRAMES tf, const
 }
 void DrawICTValidationGraphics()
 {
+   if(DashboardSingleSourceMode)
+   {
+      ObjectDelete(0, "SMC_ICT_SIG_CHECKLIST");
+      return;
+   }
+
    ObjectsDeleteAll(0, "SMC_ICT_SIG_");
 
    int buyScore = 0, sellScore = 0;
@@ -1903,6 +1909,11 @@ datetime g_lastPropiceUpdate = 0;
 // Stats symboles (source serveur/Supabase) pour affichage cohérent MT5 = Excel = Supabase
 int    g_dayWins = 0, g_dayLosses = 0, g_monthWins = 0, g_monthLosses = 0;
 double g_dayNetProfit = 0.0, g_monthNetProfit = 0.0;
+datetime g_symbolStatsLastLocalUpdate = 0;
+datetime g_symbolStatsLastSyncAttempt = 0;
+datetime g_symbolStatsLastSyncOk = 0;
+bool     g_symbolStatsSyncOk = false;
+string   g_symbolStatsLastChecksum = "";
 
 // Variables de trading et positions
 double g_maxProfit = 0.0;
@@ -2044,6 +2055,7 @@ input bool   ShowBookmarkLevels    = true; // Lignes horizontales sur derniers S
 
 input group "=== TABLEAU DE BORD ET MÉTRIQUES ==="
 input bool   UseDashboard        = true;   // Afficher le tableau de bord avec métriques
+input bool   DashboardSingleSourceMode = true; // Eviter les doublons: infos texte uniquement via UpdateDashboard()
 input bool   ShowMLMetrics       = true;   // Afficher les métriques ML (entraînement modèle)
 input bool   AutoStartMLContinuousTraining = true; // Démarrer l'entraînement continu ML automatiquement
 input int    MLContinuousCheckIntervalSec  = 300;  // Vérifier/relancer continuous training (sec)
@@ -3270,12 +3282,13 @@ void ManageBoomCrashSpikeClose()
          // 2) si un 2e spike semble imminent, attendre de capter ce 2e spike avant fermeture
          double spikeProbNow = (symbol == _Symbol) ? CalculateSpikeProbability() : g_lastSpikeProbability;
          bool secondSpikeImminent = (spikeProbNow >= BoomCrashSecondSpikeImminentProb);
+         bool secondSpikeCertain = (secondSpikeImminent && spikeProbNow >= MathMax(BoomCrashSecondSpikeImminentProb, 0.90));
          double firstSpikeTarget = MathMax(0.01, BoomCrashSpikeTP);
          double secondSpikeTarget = firstSpikeTarget * 1.8;
 
          if(profit >= firstSpikeTarget)
          {
-            if(secondSpikeImminent)
+            if(secondSpikeCertain)
             {
                if(profit >= secondSpikeTarget)
                {
@@ -4311,7 +4324,7 @@ void UpdateDashboard()
    string lines[25]; // Augmenté à 25 pour inclure toutes les lignes
    color  cols[25];
    int n = 0;
-   lines[n] = "SMC Universal + FVG_Kill PRO"; cols[n] = clrWhite; n++;
+   lines[n] = "[Contexte] SMC Universal + FVG_Kill PRO"; cols[n] = clrWhite; n++;
    lines[n] = "Stratégie: SMC(FVG|OB|LS|BOS) + FVG_Kill(EMA HTF + LS)"; cols[n] = clrSilver; n++;
    lines[n] = "Trend HTF: " + trendHTF + " | LS: " + lsStr + " | KillZone: " + killStr; cols[n] = clrWhite; n++;
    lines[n] = catStr + " | " + bcStr + " | IA: " + ((g_lastAIAction != "") ? (g_lastAIAction + " " + DoubleToString(g_lastAIConfidence*100,1) + "%") : "OFF"); cols[n] = clrAqua; n++;
@@ -4323,7 +4336,7 @@ void UpdateDashboard()
    if(ShowFutureCandlesM1 && n < 24)
    {
       string src = (g_futureCandlesSource == "" ? "NONE" : g_futureCandlesSource);
-      lines[n] = "Future M1: " + IntegerToString(FutureCandlesCount) + " candles | Source: " + src;
+      lines[n] = "[IA/Prediction] Future M1: " + IntegerToString(FutureCandlesCount) + " candles | SourcePred: " + src;
       cols[n] = (src == "SERVER" ? clrLimeGreen : (src == "FALLBACK" ? clrYellow : clrTomato));
       n++;
    }
@@ -4342,6 +4355,15 @@ void UpdateDashboard()
                  " | Conf: " + DoubleToString(g_serverCorrectionConfidence, 1) +
                  "% | Action: " + g_serverCorrectionAction;
       cols[n] = (corrActive ? clrTomato : clrSilver);
+      n++;
+   }
+   if(n < 24)
+   {
+      string localState = (g_symbolStatsLastLocalUpdate > 0 && (TimeGMT() - g_symbolStatsLastLocalUpdate) <= 30) ? "OK" : "STALE";
+      string syncState = g_symbolStatsSyncOk ? "OK" : "FAIL";
+      string syncAt = (g_symbolStatsLastSyncOk > 0) ? TimeToString(g_symbolStatsLastSyncOk, TIME_DATE|TIME_SECONDS) : "N/A";
+      lines[n] = "DataStatus: MT5_LOCAL=" + localState + " | SYNC_SUPABASE=" + syncState + " | LAST_SYNC=" + syncAt;
+      cols[n] = (g_symbolStatsSyncOk ? clrSilver : clrTomato);
       n++;
    }
    
@@ -4372,8 +4394,8 @@ void UpdateDashboard()
    string dayStr = FormatWLNet(g_dayWins, g_dayLosses, g_dayNetProfit);
    string monthStr = FormatWLNet(g_monthWins, g_monthLosses, g_monthNetProfit);
    // Lignes compactes (évite que \"Net=xx$\" soit coupé à droite)
-   lines[n] = "StatsJ (UTC,MT5): " + dayStr; cols[n] = clrWhite; n++;
-   lines[n] = "StatsM (UTC,MT5): " + monthStr; cols[n] = clrWhite; n++;
+   lines[n] = "[Performance] StatsJ UTC(MT5): " + dayStr; cols[n] = clrWhite; n++;
+   lines[n] = "StatsM UTC(MT5): " + monthStr; cols[n] = clrWhite; n++;
    
    // Ligne: État de protection par symbole
    string protectionStatus = "";
@@ -8523,21 +8545,24 @@ void DrawFutureCandlesM1()
       }
    }
 
-   // Statut visuel même si dashboard désactivé.
-   if(ObjectCreate(0, "SMC_FUT_STATUS", OBJ_LABEL, 0, 0, 0))
+   if(!DashboardSingleSourceMode)
    {
-      ObjectSetInteger(0, "SMC_FUT_STATUS", OBJPROP_CORNER, CORNER_LEFT_UPPER);
-      int yBase = (g_dashboardBottomY > 0 ? g_dashboardBottomY + 6 : 90);
-      ObjectSetInteger(0, "SMC_FUT_STATUS", OBJPROP_XDISTANCE, 10);
-      ObjectSetInteger(0, "SMC_FUT_STATUS", OBJPROP_YDISTANCE, yBase);
-      ObjectSetString(0, "SMC_FUT_STATUS", OBJPROP_FONT, "Consolas");
-      ObjectSetInteger(0, "SMC_FUT_STATUS", OBJPROP_FONTSIZE, 8);
-      ObjectSetInteger(0, "SMC_FUT_STATUS", OBJPROP_COLOR, (g_futureCandlesSource == "SERVER") ? clrLimeGreen : clrYellow);
-      ObjectSetString(0, "SMC_FUT_STATUS", OBJPROP_TEXT,
-                      "FutureCandles M1: " + IntegerToString(n) +
-                      " | Source: " + g_futureCandlesSource +
-                      " | Run: " + (g_futurePredictionRunId == "" ? "NONE" : "OK") +
-                      " | Valid: " + (g_futurePredictionRunValidated ? IntegerToString(g_futurePredictionValidatedSteps) : "PENDING"));
+      // Statut visuel même si dashboard désactivé.
+      if(ObjectCreate(0, "SMC_FUT_STATUS", OBJ_LABEL, 0, 0, 0))
+      {
+         ObjectSetInteger(0, "SMC_FUT_STATUS", OBJPROP_CORNER, CORNER_LEFT_UPPER);
+         int yBase = (g_dashboardBottomY > 0 ? g_dashboardBottomY + 6 : 90);
+         ObjectSetInteger(0, "SMC_FUT_STATUS", OBJPROP_XDISTANCE, 10);
+         ObjectSetInteger(0, "SMC_FUT_STATUS", OBJPROP_YDISTANCE, yBase);
+         ObjectSetString(0, "SMC_FUT_STATUS", OBJPROP_FONT, "Consolas");
+         ObjectSetInteger(0, "SMC_FUT_STATUS", OBJPROP_FONTSIZE, 8);
+         ObjectSetInteger(0, "SMC_FUT_STATUS", OBJPROP_COLOR, (g_futureCandlesSource == "SERVER") ? clrLimeGreen : clrYellow);
+         ObjectSetString(0, "SMC_FUT_STATUS", OBJPROP_TEXT,
+                         "FutureCandles M1: " + IntegerToString(n) +
+                         " | Source: " + g_futureCandlesSource +
+                         " | Run: " + (g_futurePredictionRunId == "" ? "NONE" : "OK") +
+                         " | Valid: " + (g_futurePredictionRunValidated ? IntegerToString(g_futurePredictionValidatedSteps) : "PENDING"));
+      }
    }
    ChartRedraw(0);
 }
@@ -8596,21 +8621,30 @@ void DrawPredictionChannelLines()
       ObjectSetInteger(0, "SMC_Chan_Lower", OBJPROP_RAY_LEFT, false);
       ObjectSetInteger(0, "SMC_Chan_Lower", OBJPROP_BACK, false);
    }
-   string lbl = "Canal ML " + IntegerToString(pastBars) + "?" + IntegerToString(PredictionChannelBars) + " bars";
-   if(ObjectFind(0, "SMC_Chan_Label") < 0)
-      ObjectCreate(0, "SMC_Chan_Label", OBJ_LABEL, 0, 0, 0);
-   int yBase = (g_dashboardBottomY > 0 ? g_dashboardBottomY + 22 : 50);
-   ObjectSetInteger(0, "SMC_Chan_Label", OBJPROP_CORNER, CORNER_LEFT_UPPER);
-   ObjectSetInteger(0, "SMC_Chan_Label", OBJPROP_XDISTANCE, 10);
-   ObjectSetInteger(0, "SMC_Chan_Label", OBJPROP_YDISTANCE, yBase);
-   ObjectSetString(0, "SMC_Chan_Label", OBJPROP_TEXT, lbl);
-   ObjectSetInteger(0, "SMC_Chan_Label", OBJPROP_COLOR, clrSilver);
-   ObjectSetString(0, "SMC_Chan_Label", OBJPROP_FONT, "Consolas");
-   ObjectSetInteger(0, "SMC_Chan_Label", OBJPROP_FONTSIZE, 8);
+   if(!DashboardSingleSourceMode)
+   {
+      string lbl = "Canal ML " + IntegerToString(pastBars) + "?" + IntegerToString(PredictionChannelBars) + " bars";
+      if(ObjectFind(0, "SMC_Chan_Label") < 0)
+         ObjectCreate(0, "SMC_Chan_Label", OBJ_LABEL, 0, 0, 0);
+      int yBase = (g_dashboardBottomY > 0 ? g_dashboardBottomY + 22 : 50);
+      ObjectSetInteger(0, "SMC_Chan_Label", OBJPROP_CORNER, CORNER_LEFT_UPPER);
+      ObjectSetInteger(0, "SMC_Chan_Label", OBJPROP_XDISTANCE, 10);
+      ObjectSetInteger(0, "SMC_Chan_Label", OBJPROP_YDISTANCE, yBase);
+      ObjectSetString(0, "SMC_Chan_Label", OBJPROP_TEXT, lbl);
+      ObjectSetInteger(0, "SMC_Chan_Label", OBJPROP_COLOR, clrSilver);
+      ObjectSetString(0, "SMC_Chan_Label", OBJPROP_FONT, "Consolas");
+      ObjectSetInteger(0, "SMC_Chan_Label", OBJPROP_FONTSIZE, 8);
+   }
 }
 
 void DrawPredictionChannelLabel(string text)
 {
+   if(DashboardSingleSourceMode)
+   {
+      ObjectDelete(0, "SMC_Chan_Status");
+      return;
+   }
+
    if(ObjectFind(0, "SMC_Chan_Status") < 0)
       ObjectCreate(0, "SMC_Chan_Status", OBJ_LABEL, 0, 0, 0);
    int yBase = (g_dashboardBottomY > 0 ? g_dashboardBottomY + 36 : 66);
@@ -11824,6 +11858,7 @@ void EnsureLocalSymbolStatsUpToDate()
       g_monthLosses = lMonth;
       g_monthNetProfit = netMonth;
    }
+   g_symbolStatsLastLocalUpdate = nowUtc;
 }
 
 // Envoie les stats jour/mois (UTC) au serveur pour UPSERT dans Supabase `symbol_trade_stats`
@@ -11837,6 +11872,7 @@ void SyncSymbolTradeStatsToServer()
    lastSync = now;
 
    if(AI_ServerURL == "" && AI_ServerRender == "") return;
+   g_symbolStatsLastSyncAttempt = TimeGMT();
 
    datetime nowUtc = TimeGMT();
    MqlDateTime dt;
@@ -11921,11 +11957,16 @@ void SyncSymbolTradeStatsToServer()
    {
       g_dayWins = wDay; g_dayLosses = lDay; g_dayNetProfit = netDay;
       g_monthWins = wMonth; g_monthLosses = lMonth; g_monthNetProfit = netMonth;
+      g_symbolStatsSyncOk = true;
+      g_symbolStatsLastSyncOk = TimeGMT();
+      g_symbolStatsLastChecksum = IntegerToString(tcDay) + "|" + IntegerToString(wDay) + "|" + IntegerToString(lDay) + "|" + DoubleToString(netDay, 2) +
+                                  "|" + IntegerToString(tcMonth) + "|" + IntegerToString(wMonth) + "|" + IntegerToString(lMonth) + "|" + DoubleToString(netMonth, 2);
       Print("📊 STATS SYM SYNC OK - ", _Symbol, " | day ", IntegerToString(wDay), "W/", IntegerToString(lDay), "L net=", DoubleToString(netDay, 2),
             " | month ", IntegerToString(wMonth), "W/", IntegerToString(lMonth), "L net=", DoubleToString(netMonth, 2));
    }
    else
    {
+      g_symbolStatsSyncOk = false;
       Print("⚠️ STATS SYM SYNC ÉCHEC - HTTP ", http_result, " | ", _Symbol);
    }
 }
