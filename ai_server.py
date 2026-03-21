@@ -8712,13 +8712,40 @@ async def robot_predict_ohlc(symbol: str, timeframe: str = "M1", horizon: int = 
                     seen.add(x)
             return uniq
 
+        def _valid_ohlc_frame(x: Optional[pd.DataFrame]) -> bool:
+            if x is None or x.empty or len(x) < 80:
+                return False
+            need_cols = {"open", "high", "low", "close"}
+            return need_cols.issubset(set(x.columns))
+
         used_symbol = symbol
         df = None
         for cand in _symbol_candidates(symbol):
+            # 1) Source MT5 directe (si initialisée)
             test_df = get_historical_data_mt5(cand, "M1", c)
-            if test_df is not None and not test_df.empty and len(test_df) >= 80:
+            if _valid_ohlc_frame(test_df):
                 used_symbol = cand
                 df = test_df
+                break
+
+            # 2) Fallback robuste: cache/upload/API/sim via pipeline serveur
+            try:
+                test_df2 = get_market_data(cand, "M1", c)
+            except Exception:
+                test_df2 = None
+            if _valid_ohlc_frame(test_df2):
+                used_symbol = cand
+                df = test_df2
+                break
+
+            # 3) Dernier fallback local récent
+            try:
+                test_df3 = get_recent_historical_data(cand, max(c, 500))
+            except Exception:
+                test_df3 = None
+            if _valid_ohlc_frame(test_df3):
+                used_symbol = cand
+                df = test_df3
                 break
 
         if df is None or df.empty or len(df) < 80:
