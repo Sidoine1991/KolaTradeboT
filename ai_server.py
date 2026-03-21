@@ -8209,7 +8209,8 @@ class PricePredictionRequest(BaseModel):
 
 def _generate_future_ohlc_series(
     df: pd.DataFrame,
-    horizon: int = 200
+    horizon: int = 200,
+    behavior_profile: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     """
     Génère une projection OHLC future stable à partir des dernières bougies.
@@ -8253,36 +8254,62 @@ def _generate_future_ohlc_series(
     atr_ratio = (atr / last_close) if last_close > 0 and atr > 0 else sigma * 1.2
     atr_ratio = max(1e-6, min(0.02, atr_ratio))
 
+    # Profil comportemental du symbole (optionnel, dérivé Supabase)
+    prof = behavior_profile or {}
+    leg_mean = int(max(4, min(40, float(prof.get("avg_leg_bars", 14)))))
+    retrace_ratio = float(max(0.20, min(0.85, float(prof.get("retrace_ratio", 0.48)))))
+    reversal_prob = float(max(0.03, min(0.45, float(prof.get("reversal_prob", 0.18)))))
+    vol_mult = float(max(0.55, min(2.20, float(prof.get("vol_multiplier", 1.0)))))
+    trend_pref = float(max(-1.0, min(1.0, float(prof.get("trend_preference", 0.0)))))
+
     # Générateur pseudo-déterministe (évite flicker)
     last_time = pd.to_datetime(d['time'].iloc[-1])
-    seed = abs(hash(f"ohlc:{int(last_time.timestamp())//60}:{len(d)}")) % (2**32)
+    seed = abs(hash(f"ohlc:{int(last_time.timestamp())//60}:{len(d)}:{leg_mean}:{int(retrace_ratio*100)}")) % (2**32)
     rng = np.random.default_rng(seed)
 
     candles: List[Dict[str, Any]] = []
     curr_close = max(1e-8, last_close)
     prev_ret = 0.0
     h = int(max(1, min(500, horizon)))
-    conf = float(max(0.3, min(0.9, 0.55 + abs(trend_bias) * 120)))
+    conf = float(max(0.3, min(0.93, 0.52 + abs(trend_bias) * 120 + (0.08 * (1.0 - reversal_prob)))))
 
-    # Chemin directeur en segments pour éviter une ligne droite:
-    # impulsion -> retrace -> continuation -> distribution.
-    seg1 = max(6, int(h * 0.22))
-    seg2 = max(seg1 + 6, int(h * 0.47))
-    seg3 = max(seg2 + 6, int(h * 0.78))
+    # State machine non-linéaire : alterne impulsion/pullback/continuation/range
+    regime = "impulse_up" if (trend == "uptrend" or trend_pref > 0.15) else ("impulse_down" if (trend == "downtrend" or trend_pref < -0.15) else "range")
+    leg_left = max(3, int(rng.integers(max(4, leg_mean - 4), leg_mean + 5)))
+    leg_id = 0
 
     for i in range(h):
-        if i < seg1:
-            phase = "impulse"
+        if leg_left <= 0:
+            leg_id += 1
+            toss = float(rng.random())
+            if regime in ("impulse_up", "continuation_up"):
+                regime = "pullback_down" if toss < (0.55 + retrace_ratio * 0.25) else ("range" if toss < 0.85 else "continuation_up")
+            elif regime in ("impulse_down", "continuation_down"):
+                regime = "pullback_up" if toss < (0.55 + retrace_ratio * 0.25) else ("range" if toss < 0.85 else "continuation_down")
+            elif regime in ("pullback_down", "pullback_up"):
+                if regime == "pullback_down":
+                    regime = "continuation_up" if toss > reversal_prob else "impulse_down"
+                else:
+                    regime = "continuation_down" if toss > reversal_prob else "impulse_up"
+            else:
+                regime = "impulse_up" if toss > 0.5 else "impulse_down"
+            leg_left = max(3, int(rng.integers(max(4, leg_mean - 5), leg_mean + 6)))
+
+        if regime in ("impulse_up", "continuation_up"):
+            phase = "impulse_up"
             phase_w = 1.0
-        elif i < seg2:
-            phase = "retrace"
-            phase_w = -0.75
-        elif i < seg3:
-            phase = "continuation"
-            phase_w = 0.8
+        elif regime in ("impulse_down", "continuation_down"):
+            phase = "impulse_down"
+            phase_w = -1.0
+        elif regime == "pullback_down":
+            phase = "retrace_down"
+            phase_w = -0.72
+        elif regime == "pullback_up":
+            phase = "retrace_up"
+            phase_w = 0.72
         else:
-            phase = "distribution"
-            phase_w = -0.25
+            phase = "range"
+            phase_w = 0.0
 
         structure_bias = 0.0
         if trend == "uptrend":
@@ -8290,15 +8317,22 @@ def _generate_future_ohlc_series(
         elif trend == "downtrend":
             structure_bias = -0.00035 - min(0.0012, trend_strength * 0.8)
 
-        # Oscillation contrôlée pour reproduire les zigzags.
-        osc = math.sin((i + 1) * 0.41) * sigma * 0.8
-        eps = float(rng.normal(0.0, sigma * 0.65))
-        r = (mu * 0.35) + (trend_bias * 0.35) + (structure_bias * phase_w) + (prev_ret * 0.20) + osc + eps
+        # Oscillations multi-fréquences : reproduit segments/croisements spécifiques au symbole
+        osc = (
+            math.sin((i + 1) * (0.25 + 0.15 * retrace_ratio)) * sigma * 0.65 +
+            math.sin((i + 1) * (0.67 + 0.12 * reversal_prob)) * sigma * 0.35
+        )
+        eps = float(rng.normal(0.0, sigma * 0.55 * vol_mult))
+        r = (mu * 0.30) + (trend_bias * 0.28) + (structure_bias * 0.30) + (phase_w * sigma * 2.0) + (prev_ret * 0.18) + osc + eps
 
         # Attraction vers niveaux de structure (supports/résistances).
-        anchor = support_lvl if phase == "retrace" else resistance_lvl if phase == "continuation" else mid_lvl
+        anchor = (
+            support_lvl if phase in ("retrace_down", "impulse_up") else
+            resistance_lvl if phase in ("retrace_up", "impulse_down") else
+            mid_lvl
+        )
         if curr_close > 0 and anchor > 0:
-            anchor_pull = ((anchor / curr_close) - 1.0) * 0.12
+            anchor_pull = ((anchor / curr_close) - 1.0) * (0.10 + 0.05 * retrace_ratio)
             r += max(-0.0025, min(0.0025, anchor_pull))
 
         r = max(-0.03, min(0.03, r))
@@ -8315,9 +8349,9 @@ def _generate_future_ohlc_series(
             lo = min(o, c) * 0.999
 
         t = last_time + timedelta(minutes=i + 1)
-        struct_tag = "BOS_UP" if (trend == "uptrend" and phase in ("impulse", "continuation")) else (
-            "BOS_DOWN" if (trend == "downtrend" and phase in ("impulse", "continuation")) else
-            ("RETRACE_TO_SUPPORT" if phase == "retrace" else "RANGE")
+        struct_tag = "BOS_UP" if phase in ("impulse_up",) else (
+            "BOS_DOWN" if phase in ("impulse_down",) else
+            ("RETRACE_TO_SUPPORT" if phase == "retrace_down" else ("RETRACE_TO_RESISTANCE" if phase == "retrace_up" else "RANGE"))
         )
         candles.append({
             "time": int(t.timestamp()),
@@ -8328,12 +8362,77 @@ def _generate_future_ohlc_series(
             "confidence": conf,
             "phase": phase,
             "structure_tag": struct_tag,
-            "level_ref": float(anchor if anchor > 0 else mid_lvl)
+            "level_ref": float(anchor if anchor > 0 else mid_lvl),
+            "regime": regime,
+            "leg_id": leg_id
         })
         prev_ret = (c / o) - 1.0 if o > 0 else 0.0
         curr_close = c
+        leg_left -= 1
 
     return candles
+
+
+async def _fetch_symbol_behavior_profile(symbol: str, timeframe: str = "M1") -> Dict[str, Any]:
+    """Construit un profil comportemental par symbole depuis Supabase."""
+    profile: Dict[str, Any] = {
+        "avg_leg_bars": 14,
+        "retrace_ratio": 0.48,
+        "reversal_prob": 0.18,
+        "vol_multiplier": 1.0,
+        "trend_preference": 0.0,
+    }
+    try:
+        supabase_url, supabase_key = _get_supabase_config(strict=True)
+        import httpx
+        headers = {"apikey": supabase_key, "Authorization": f"Bearer {supabase_key}"}
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            r_pat = await client.get(
+                f"{supabase_url}/rest/v1/symbol_correction_patterns",
+                headers=headers,
+                params={
+                    "symbol": f"eq.{symbol}",
+                    "order": "success_rate.desc.nullslast,occurrences_count.desc.nullslast",
+                    "limit": "30",
+                },
+            )
+            patterns = r_pat.json() if r_pat.status_code < 300 and r_pat.text else []
+            if patterns:
+                durs = [float(p.get("typical_duration_bars") or 0.0) for p in patterns if float(p.get("typical_duration_bars") or 0.0) > 0]
+                rets = [float(p.get("avg_retracement_percentage") or 0.0) for p in patterns if float(p.get("avg_retracement_percentage") or 0.0) > 0]
+                succ = [float(p.get("success_rate") or 0.0) for p in patterns if float(p.get("success_rate") or 0.0) > 0]
+                if durs:
+                    profile["avg_leg_bars"] = max(5, min(40, int(np.mean(durs))))
+                if rets:
+                    profile["retrace_ratio"] = max(0.20, min(0.85, float(np.mean(rets) / 100.0)))
+                if succ:
+                    s = float(np.mean(succ))
+                    profile["reversal_prob"] = max(0.05, min(0.42, 0.30 - (s - 50.0) / 300.0))
+
+            r_day = await client.get(
+                f"{supabase_url}/rest/v1/symbol_prediction_score_daily",
+                headers=headers,
+                params={
+                    "symbol": f"eq.{symbol}",
+                    "timeframe": f"eq.{timeframe}",
+                    "order": "day.desc",
+                    "limit": "10",
+                    "select": "score,direction_hit_rate,samples",
+                },
+            )
+            day_rows = r_day.json() if r_day.status_code < 300 and r_day.text else []
+            if day_rows:
+                scores = [float(x.get("score") or 0.0) for x in day_rows if x.get("score") is not None]
+                hits = [float(x.get("direction_hit_rate") or 0.0) for x in day_rows]
+                if scores:
+                    avg_score = float(np.mean(scores))
+                    profile["vol_multiplier"] = max(0.65, min(1.8, 1.15 - (avg_score * 0.35)))
+                if hits:
+                    avg_hit = float(np.mean(hits))
+                    profile["trend_preference"] = max(-0.55, min(0.55, (avg_hit - 0.5) * 1.6))
+    except Exception as e:
+        logger.debug(f"behavior profile fallback for {symbol}: {e}")
+    return profile
 
 
 async def _store_prediction_run_to_supabase(
@@ -8751,7 +8850,8 @@ async def robot_predict_ohlc(symbol: str, timeframe: str = "M1", horizon: int = 
         if df is None or df.empty or len(df) < 80:
             raise HTTPException(status_code=404, detail=f"Données insuffisantes pour {symbol}")
 
-        candles = _generate_future_ohlc_series(df, h)
+        behavior_profile = await _fetch_symbol_behavior_profile(used_symbol, "M1")
+        candles = _generate_future_ohlc_series(df, h, behavior_profile=behavior_profile)
         if not candles:
             raise HTTPException(status_code=500, detail="Impossible de générer la projection OHLC")
 
@@ -8782,7 +8882,13 @@ async def robot_predict_ohlc(symbol: str, timeframe: str = "M1", horizon: int = 
             symbol=symbol,
             timeframe="M1",
             candles=valid,
-            metadata={"source": "robot_predict_ohlc", "generator": "structure_v1", "requested_symbol": symbol, "used_symbol": used_symbol},
+            metadata={
+                "source": "robot_predict_ohlc",
+                "generator": "structure_v2_profiled",
+                "requested_symbol": symbol,
+                "used_symbol": used_symbol,
+                "behavior_profile": behavior_profile,
+            },
         )
 
         return {
@@ -8798,6 +8904,28 @@ async def robot_predict_ohlc(symbol: str, timeframe: str = "M1", horizon: int = 
         raise
     except Exception as e:
         logger.error(f"Erreur /robot/predict_ohlc: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/robot/predict_ohlc/profile")
+async def robot_predict_ohlc_profile(symbol: str, timeframe: str = "M1"):
+    """
+    Retourne le profil comportemental utilisé pour la génération non-linéaire
+    des bougies futures d'un symbole.
+    """
+    try:
+        tf = (timeframe or "M1").upper()
+        if tf in ("1M", "M1"):
+            tf = "M1"
+        profile = await _fetch_symbol_behavior_profile(symbol, tf)
+        return {
+            "symbol": symbol,
+            "timeframe": tf,
+            "profile": profile,
+            "generated_at": datetime.utcnow().isoformat(),
+        }
+    except Exception as e:
+        logger.error(f"Erreur /robot/predict_ohlc/profile: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -8911,7 +9039,13 @@ async def validate_prediction_run(
             mae = abs(pc - ac)
             mape = mae / max(1e-8, abs(ac))
             price_score = max(0.0, 1.0 - min(1.0, mape * 300.0))
-            score = (0.6 if direction_hit else 0.0) + (0.4 * price_score)
+            # Bonus/penalty explicite:
+            # - bonne direction => score positif [0.7..1.0]
+            # - mauvaise direction => score négatif [-1.0..-0.7]
+            if direction_hit:
+                score = 0.7 + (0.3 * price_score)
+            else:
+                score = -0.7 - (0.3 * (1.0 - price_score))
 
             hit_count += 1 if direction_hit else 0
             mae_total += mae
@@ -12857,26 +12991,47 @@ async def correction_feedback(feedback: dict):
 
 async def analyze_historical_corrections(symbol: str, timeframe: str) -> CorrectionZoneAnalysis:
     """Analyse les corrections historiques pour un symbole"""
-    # Implémentation simplifiée - à adapter selon vos données
+    patterns = await get_symbol_correction_patterns(symbol)
+    total = 0
+    up = 0
+    down = 0
+    avg_ret = 2.2
+    avg_succ = 70.0
+    if patterns:
+        total = int(sum((p.occurrences_count or 0) for p in patterns))
+        avg_ret = float(np.mean([p.avg_retracement_percentage or 2.2 for p in patterns]))
+        avg_succ = float(np.mean([p.success_rate or 70.0 for p in patterns]))
+        for p in patterns:
+            pt = (p.pattern_type or "").upper()
+            occ = int(p.occurrences_count or 0)
+            if "UP" in pt or "BULL" in pt:
+                up += occ
+            elif "DOWN" in pt or "BEAR" in pt:
+                down += occ
+    if total <= 0:
+        total = 45
+        up = 23
+        down = 22
+
     return CorrectionZoneAnalysis(
         symbol=symbol,
         timeframe=timeframe,
         analysis_date=datetime.now().isoformat(),
-        total_corrections_analyzed=45,
-        uptrend_corrections=23,
-        downtrend_corrections=22,
-        avg_retracement_uptrend=2.3,
-        avg_retracement_downtrend=2.1,
-        max_retracement_uptrend=5.8,
-        max_retracement_downtrend=5.2,
-        gradual_retracement_patterns=15,
-        consolidation_patterns=20,
-        sharp_reversal_patterns=10,
-        support_levels=[1840.0, 1835.0, 1830.0],
-        resistance_levels=[1850.0, 1855.0, 1860.0],
-        current_price=1845.0,
+        total_corrections_analyzed=total,
+        uptrend_corrections=up,
+        downtrend_corrections=down,
+        avg_retracement_uptrend=avg_ret,
+        avg_retracement_downtrend=avg_ret * 0.95,
+        max_retracement_uptrend=avg_ret * 2.6,
+        max_retracement_downtrend=avg_ret * 2.4,
+        gradual_retracement_patterns=max(1, int(total * 0.33)),
+        consolidation_patterns=max(1, int(total * 0.45)),
+        sharp_reversal_patterns=max(1, int(total * 0.22)),
+        support_levels=[],
+        resistance_levels=[],
+        current_price=0.0,
         current_trend="UP",
-        volatility_level=0.023
+        volatility_level=max(0.005, min(0.12, (100.0 - avg_succ) / 1000.0))
     )
 
 async def calculate_correction_prediction(
@@ -12887,8 +13042,20 @@ async def calculate_correction_prediction(
     volatility_level: Optional[float]
 ) -> CorrectionPrediction:
     """Calcule les prédictions de zones de correction"""
-    # Implémentation simplifiée
+    patterns = await get_symbol_correction_patterns(symbol)
     avg_retracement = 2.2 if current_trend == "UP" else 2.4
+    avg_success = 72.0
+    if patterns:
+        vals_ret = [float(p.avg_retracement_percentage or avg_retracement) for p in patterns if (p.avg_retracement_percentage or 0) > 0]
+        vals_succ = [float(p.success_rate or 0.0) for p in patterns if (p.success_rate or 0) > 0]
+        if vals_ret:
+            avg_retracement = float(np.mean(vals_ret))
+        if vals_succ:
+            avg_success = float(np.mean(vals_succ))
+    vol = float(volatility_level or 0.02)
+    vol_adj = max(0.8, min(1.35, 1.0 + (vol - 0.02) * 5.0))
+    avg_retracement = max(0.3, min(8.0, avg_retracement * vol_adj))
+    base_conf = max(55.0, min(92.0, avg_success))
     
     return CorrectionPrediction(
         symbol=symbol,
@@ -12896,7 +13063,7 @@ async def calculate_correction_prediction(
         prediction_date=datetime.now().isoformat(),
         current_price=current_price,
         current_trend=current_trend,
-        prediction_confidence=75.5,
+        prediction_confidence=base_conf,
         zone_1_level=current_price * (1 - avg_retracement * 0.6 / 100) if current_trend == "UP" else current_price * (1 + avg_retracement * 0.6 / 100),
         zone_1_type="SUPPORT" if current_trend == "UP" else "RESISTANCE",
         zone_1_probability=65.0,
@@ -12906,9 +13073,9 @@ async def calculate_correction_prediction(
         zone_3_level=current_price * (1 - avg_retracement * 1.4 / 100) if current_trend == "UP" else current_price * (1 + avg_retracement * 1.4 / 100),
         zone_3_type="SUPPORT" if current_trend == "UP" else "RESISTANCE",
         zone_3_probability=45.0,
-        trend_strength_factor=1.1,
-        volatility_adjustment=1.05,
-        historical_accuracy=78.2,
+        trend_strength_factor=max(0.8, min(1.4, 1.0 + (avg_success - 70.0) / 100.0)),
+        volatility_adjustment=vol_adj,
+        historical_accuracy=avg_success,
         prediction_valid_until=(datetime.now() + timedelta(hours=4)).isoformat()
     )
 
@@ -12955,20 +13122,32 @@ async def get_prediction_performance_stats(symbol: str, days: int) -> dict:
 
 async def get_symbol_correction_patterns(symbol: str) -> list:
     """Récupère les patterns de correction pour un symbole"""
-    # Implémentation à ajouter
-    return [
-        SymbolCorrectionPattern(
-            symbol=symbol,
-            pattern_type="GRADUAL",
-            avg_retracement_percentage=2.1,
-            typical_duration_bars=12,
-            success_rate=75.0,
-            min_trend_strength=0.6,
-            max_volatility_level=0.05,
-            best_timeframes="M1,M5",
-            occurrences_count=15
-        )
-    ]
+    try:
+        supabase_url, supabase_key = _get_supabase_config(strict=True)
+        import httpx
+
+        headers = {"apikey": supabase_key, "Authorization": f"Bearer {supabase_key}"}
+        params = {
+            "symbol": f"eq.{symbol}",
+            "order": "success_rate.desc.nullslast,occurrences_count.desc.nullslast,last_updated.desc",
+            "limit": "20",
+        }
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.get(f"{supabase_url}/rest/v1/symbol_correction_patterns", headers=headers, params=params)
+        if r.status_code >= 300:
+            logger.warning(f"symbol_correction_patterns fetch HTTP {r.status_code}: {r.text[:180]}")
+            return []
+        rows = r.json() if r.text else []
+        out = []
+        for row in rows:
+            try:
+                out.append(SymbolCorrectionPattern(**row))
+            except Exception:
+                continue
+        return out
+    except Exception as e:
+        logger.warning(f"Récupération patterns correction échouée pour {symbol}: {e}")
+        return []
 
 async def update_prediction_with_feedback(feedback: dict) -> dict:
     """Met à jour une prédiction avec le feedback réel"""
