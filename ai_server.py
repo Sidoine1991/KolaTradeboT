@@ -2630,6 +2630,112 @@ async def _compute_propice_top_from_trade_feedback(
     out.sort(key=lambda r: float(r.get("propice_score", 0.0) or 0.0), reverse=True)
     return {"rows": out[:n], "source": "supabase_trade_feedback"}
 
+
+def _normalize_symbol_name(sym: str) -> str:
+    s = (sym or "").strip()
+    if not s:
+        return s
+    su = s.upper().replace(" ", "")
+    aliases = {
+        "BOOM1000": "Boom 1000 Index",
+        "BOOM500": "Boom 500 Index",
+        "CRASH1000": "Crash 1000 Index",
+        "CRASH500": "Crash 500 Index",
+        "CRASH900": "Crash 900 Index",
+        "CRASH600": "Crash 600 Index",
+        "CRASH300": "Crash 300 Index",
+        "BOOM600": "Boom 600 Index",
+    }
+    return aliases.get(su, s)
+
+
+@app.get("/dashboard/top-net-summary")
+async def get_dashboard_top_net_summary(timeframe: str = "M1", days: int = 30, top_n: int = 3):
+    """
+    Résumé dashboard (flat JSON) pour MT5:
+    - Top N symboles par net profit USD (trade_feedback)
+    - Performance globale modèle (%) basée sur symbol_prediction_score_daily pondéré par samples
+    """
+    try:
+        supabase_url, supabase_key = _get_supabase_config(strict=True)
+        import httpx
+        d = int(max(1, min(365, days)))
+        n = int(max(1, min(5, top_n)))
+        tf = (timeframe or "M1").upper()
+        dt_from = (datetime.utcnow() - timedelta(days=d)).isoformat()
+        headers = {"apikey": supabase_key, "Authorization": f"Bearer {supabase_key}"}
+
+        # 1) trade_feedback -> top net (normalisé par alias symbol)
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            rf = await client.get(
+                f"{supabase_url}/rest/v1/trade_feedback",
+                headers=headers,
+                params={
+                    "select": "symbol,profit,close_time",
+                    "close_time": f"gte.{dt_from}",
+                    "order": "close_time.desc",
+                    "limit": "20000",
+                },
+            )
+        if rf.status_code >= 300:
+            raise HTTPException(status_code=502, detail=f"trade_feedback read error {rf.status_code}")
+        rows = rf.json() if rf.text else []
+        agg: Dict[str, float] = {}
+        for r in rows:
+            sym = _normalize_symbol_name(str(r.get("symbol") or ""))
+            if not sym:
+                continue
+            p = float(r.get("profit") or 0.0)
+            agg[sym] = float(agg.get(sym, 0.0) + p)
+        top = sorted(agg.items(), key=lambda kv: kv[1], reverse=True)[:n]
+
+        # 2) perf globale modèle depuis symbol_prediction_score_daily
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            rs = await client.get(
+                f"{supabase_url}/rest/v1/symbol_prediction_score_daily",
+                headers=headers,
+                params={
+                    "select": "symbol,timeframe,day,samples,direction_hit_rate",
+                    "timeframe": f"eq.{tf}",
+                    "day": f"gte.{dt_from[:10]}",
+                    "limit": "20000",
+                },
+            )
+        if rs.status_code >= 300:
+            raise HTTPException(status_code=502, detail=f"prediction score read error {rs.status_code}")
+        score_rows = rs.json() if rs.text else []
+        total_samples = 0
+        weighted_hits = 0.0
+        for r in score_rows:
+            s = int(r.get("samples") or 0)
+            h = float(r.get("direction_hit_rate") or 0.0)
+            total_samples += s
+            weighted_hits += h * s
+        global_perf = (weighted_hits / total_samples) * 100.0 if total_samples > 0 else 0.0
+
+        out: Dict[str, Any] = {
+            "timeframe": tf,
+            "window_days": d,
+            "global_model_perf_pct": round(global_perf, 2),
+            "global_model_samples": int(total_samples),
+            "top_count": len(top),
+            "updated_at": datetime.utcnow().isoformat(),
+        }
+        for i in range(3):
+            idx = i + 1
+            if i < len(top):
+                out[f"top{idx}_symbol"] = top[i][0]
+                out[f"top{idx}_net_usd"] = round(float(top[i][1]), 2)
+            else:
+                out[f"top{idx}_symbol"] = "N/A"
+                out[f"top{idx}_net_usd"] = 0.0
+        return out
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Erreur /dashboard/top-net-summary: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
 # ===== SYSTÈME DE VALIDATION ET CALIBRATION DES PRÉDICTIONS =====
 # Stockage des prédictions historiques pour validation
 prediction_history: Dict[str, List[Dict[str, Any]]] = {}  # {symbol: [predictions]}

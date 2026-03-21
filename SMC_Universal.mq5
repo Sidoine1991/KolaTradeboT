@@ -326,6 +326,7 @@ void DrawLiquidityZonesOnChart();
 void DrawHistoricalSwingPoints(MqlRates &rates[], int bars, double point);
 void DrawBookmarkLevels();
 void ManageBoomCrashSpikeClose();
+void CheckAndExecuteSecondSpikeReentry();
 void ManageDollarExits();
 void CloseWorstPositionIfTotalLossExceeded();
 void CloseAllPositionsIfTotalProfitReached();
@@ -345,6 +346,7 @@ void BuildFutureCandlesFallbackLocal(int horizon);
 bool ParseFutureCandlesJson(const string &json, int expectedCount);
 bool ValidateFuturePredictionRunToServer(int minReadyBars = 30);
 bool FetchPredictionScoreFromServer();
+bool FetchTopNetSummaryFromServer();
 bool IsInServerPredictedCorrectionZone();
 void DrawSMCChannelsMultiTF();
 void DrawEMASupertrendMultiTF();
@@ -1895,6 +1897,16 @@ double   g_predictionScore = -1.0;
 int      g_predictionSamples = 0;
 datetime g_predictionScoreUpdatedAt = 0;
 string   g_predictionScoreSource = "N/A";
+string   g_top1Symbol = "N/A";
+string   g_top2Symbol = "N/A";
+string   g_top3Symbol = "N/A";
+double   g_top1NetUSD = 0.0;
+double   g_top2NetUSD = 0.0;
+double   g_top3NetUSD = 0.0;
+double   g_globalModelPerfPct = -1.0;
+int      g_globalModelSamples = 0;
+datetime g_topNetLastUpdate = 0;
+string   g_topNetSource = "N/A";
 bool     g_serverCorrectionActive = false;
 double   g_serverCorrectionConfidence = 0.0;
 string   g_serverCorrectionAction = "N/A";
@@ -2056,6 +2068,7 @@ input bool   ShowBookmarkLevels    = true; // Lignes horizontales sur derniers S
 input group "=== TABLEAU DE BORD ET MÉTRIQUES ==="
 input bool   UseDashboard        = true;   // Afficher le tableau de bord avec métriques
 input bool   DashboardSingleSourceMode = true; // Eviter les doublons: infos texte uniquement via UpdateDashboard()
+input bool   ShowTop3NetProfitBottomRight = true; // Afficher en bas à droite le top 3 net profit + perf globale modèle
 input bool   ShowMLMetrics       = true;   // Afficher les métriques ML (entraînement modèle)
 input bool   AutoStartMLContinuousTraining = true; // Démarrer l'entraînement continu ML automatiquement
 input int    MLContinuousCheckIntervalSec  = 300;  // Vérifier/relancer continuous training (sec)
@@ -2079,7 +2092,8 @@ input bool   UsePropiceSymbolsFilter = true;  // ⚠️ IMPORTANT: Filtre horair
                                             // Si le symbole actuel n'est pas dans ce Top, le robot BLOQUE tous les trades (même si signal IA/SMC valide)
                                             // Objectif: Maximiser les probabilités de succès en tradant uniquement pendant les heures optimales pour chaque symbole
 input int    PropiceTopN = 5;                // Top N symbols renvoyés par /symbols/propice/top
-input int    PropiceUpdateIntervalSec = 60;  // Refresh filtre propice (secondes)
+input int    PropiceUpdateIntervalSec = 20;  // Refresh filtre propice (secondes) - scan plus fréquent
+input bool   PreferBestSymbolWithoutBlocking = true; // Prioriser le meilleur symbole sans bloquer les autres symboles attachés
 input bool   UseRenderAsPrimary = false; // Utiliser le serveur local en premier (Render en fallback)
 input string AI_ServerURL2      = "http://localhost:8000";  // URL serveur local
 input bool   PropiceAllowMarketOrdersOnAllPropiceSymbols = true; // Marché: autoriser sur tous les symboles propices (pas seulement le rang 0)
@@ -2181,9 +2195,9 @@ input group "=== BOOM/CRASH ==="
 input bool   BoomBuyOnly       = true;   // Boom: BUY uniquement
 input bool   CrashSellOnly     = true;   // Crash: SELL uniquement
 input bool   NoSLTP_BoomCrash  = false;  // Pas de SL/TP sur Boom/Crash (DÉSACTIVÉ - utilise SL/TP normal)
-input double BoomCrashSpikeTP  = 0.50;   // Fermer dès petit gain (spike capté) si profit > ce seuil ($) - AUGMENTÉ
+input double BoomCrashSpikeTP  = 0.05;   // Fermer dès spike capté, même gain très faible ($)
 input double BoomCrashSpikePct = 0.50;   // Pourcentage de mouvement pour détecter spike (50% - beaucoup plus élevé)
-input double BoomCrashSecondSpikeImminentProb = 0.85; // Si proba spike >= seuil, attendre un 2e spike avant fermeture
+input double BoomCrashSecondSpikeImminentProb = 0.85; // Si proba spike >= seuil, fermer quand même puis armer une réentrée
 input double TargetProfitBoomCrashUSD = 2.0; // Gain à capter ($) - fermer si profit >= ce seuil (Spike_Close)
 input double MaxLossDollars    = 15.0;   // Fermer toute position si perte atteint ($) - augmenté pour éviter fermetures prématurées
 input double TakeProfitDollars = 2.0;    // Fermer si bénéfice atteint ($) - Volatility/Forex/Commodity
@@ -2410,6 +2424,9 @@ static datetime g_boomSR20TouchTime = 0;
 static datetime g_crashSR20TouchTime = 0;
 static double   g_boomSR20TouchLevel = 0.0;
 static double   g_crashSR20TouchLevel = 0.0;
+static bool     g_secondSpikeReentryArmed = false;
+static datetime g_secondSpikeReentryArmTime = 0;
+static string   g_secondSpikeReentryDirection = "";
 // Variables swing (compatibles avec nouveau système anti-repaint)
 double g_lastSwingHigh = 0, g_lastSwingLow = 0;
 datetime g_lastSwingHighTime = 0, g_lastSwingLowTime = 0;
@@ -3277,36 +3294,17 @@ void ManageBoomCrashSpikeClose()
       
       if(!touchExitMode && UseSpikeAutoClose)
       {
-         // Règle demandée:
-         // 1) fermer juste après spike capté
-         // 2) si un 2e spike semble imminent, attendre de capter ce 2e spike avant fermeture
+         // Nouvelle règle:
+         // 1) fermer TOUJOURS juste après spike capté (même faible gain)
+         // 2) si 2e spike imminent, armer une réentrée après 2 petites bougies M1
          double spikeProbNow = (symbol == _Symbol) ? CalculateSpikeProbability() : g_lastSpikeProbability;
          bool secondSpikeImminent = (spikeProbNow >= BoomCrashSecondSpikeImminentProb);
-         bool secondSpikeCertain = (secondSpikeImminent && spikeProbNow >= MathMax(BoomCrashSecondSpikeImminentProb, 0.90));
-         double firstSpikeTarget = MathMax(0.01, BoomCrashSpikeTP);
-         double secondSpikeTarget = firstSpikeTarget * 1.8;
+         double firstSpikeTarget = MathMax(0.05, BoomCrashSpikeTP);
 
          if(profit >= firstSpikeTarget)
          {
-            if(secondSpikeCertain)
-            {
-               if(profit >= secondSpikeTarget)
-               {
-                  shouldClose = true;
-                  closeReason = "2e spike capté (imminent)";
-               }
-               else if(DebugSpikeDetection)
-               {
-                  Print("⏳ Spike close différé - 2e spike attendu | ", symbol,
-                        " | p=", DoubleToString(spikeProbNow * 100.0, 1), "%",
-                        " | profit=", DoubleToString(profit, 2), "$ / cible2=", DoubleToString(secondSpikeTarget, 2), "$");
-               }
-            }
-            else
-            {
-               shouldClose = true;
-               closeReason = "Spike capté";
-            }
+            shouldClose = true;
+            closeReason = secondSpikeImminent ? "Spike capté (2e imminent: réentrée armée)" : "Spike capté";
          }
       }
       
@@ -3326,6 +3324,17 @@ void ManageBoomCrashSpikeClose()
          {
             // OPTIMISATION: Log minimal pour éviter le lag
             Print("?? EA FERMETURE SPIKE - ", symbol, " | ticket=", ticket, " | Profit: ", DoubleToString(profit, 2));
+
+            // Si un second spike est imminent, on arme une réentrée après 2 petites bougies M1.
+            double spikeProbArm = (symbol == _Symbol) ? CalculateSpikeProbability() : g_lastSpikeProbability;
+            if(spikeProbArm >= BoomCrashSecondSpikeImminentProb)
+            {
+               g_secondSpikeReentryArmed = true;
+               g_secondSpikeReentryArmTime = TimeCurrent();
+               g_secondSpikeReentryDirection = (StringFind(symbol, "Boom") >= 0 ? "BUY" : "SELL");
+               Print("🎯 2e spike imminent - réentrée armée | dir=", g_secondSpikeReentryDirection,
+                     " | p=", DoubleToString(spikeProbArm * 100.0, 1), "%");
+            }
             
             if(UseNotifications)
             {
@@ -3901,15 +3910,15 @@ void OnTick()
    if(currentTime - lastProcess < 2) return;
    lastProcess = currentTime;
    
-   // Log informatif sur la priorité du symbole actuel (toutes les 5 minutes)
-   if(UsePropiceSymbolsFilter && g_currentSymbolIsPropice && (currentTime - lastPropiceInfoLog >= 300))
+   // Log informatif sur la priorité du symbole actuel (toutes les 2 minutes)
+   if(UsePropiceSymbolsFilter && (currentTime - lastPropiceInfoLog >= 120))
    {
       string mostPropice = GetMostPropiceSymbol();
       if(mostPropice != "" && mostPropice != _Symbol)
       {
          Print("📍 INFO PRIORITÉ - Symbole actuel: ", _Symbol, " (position #", g_currentSymbolPriority + 1, "ème)");
-         Print("   🥇 Symbole le plus propice: ", mostPropice, " - Le robot donnera la priorité à ce symbole");
-         Print("   💡 Conditions plus strictes appliquées aux symboles moins prioritaires");
+         Print("   🥇 Symbole le plus propice: ", mostPropice, " - priorité active, autres symboles restent autorisés");
+         Print("   💡 Verrous qualité conservés (confiance IA, spread, confirmation, anti-dup)");
       }
       lastPropiceInfoLog = currentTime;
    }
@@ -4087,6 +4096,9 @@ void OnTick()
    
    // NOUVEAU: Recovery exceptionnel Boom/Crash (touch M5 + 4 petites bougies M1)
    CheckAndExecuteExceptionalBoomCrashRecoveryEntries();
+   
+   // Réentrée dédiée après fermeture spike si 2e spike imminent (attend 2 petites bougies M1)
+   CheckAndExecuteSecondSpikeReentry();
    
    // DÉTECTION ULTRA-RAPIDE DE SPIKE (toutes les 5 secondes pour Boom/Crash)
    static datetime lastSpikeCheck = 0;
@@ -4306,6 +4318,8 @@ void UpdateDashboard()
    {
       if(!FetchPredictionScoreFromServer())
          g_predictionScoreSource = "N/A";
+      if(!FetchTopNetSummaryFromServer())
+         g_topNetSource = "N/A";
       lastPredScoreFetch = TimeCurrent();
    }
    string killStr = SMC_IsKillZone(LondonStart, LondonEnd, NYOStart, NYOEnd) ? "ACTIVE" : "OFF";
@@ -4574,6 +4588,35 @@ void UpdateDashboard()
          Print("?? DEBUG Propice - y=", propiceY, " | dashboardBottom=", g_dashboardBottomY);
          lastPropiceDebugLog = TimeCurrent();
       }
+   }
+
+   // Top 3 net profit + performance globale modèle (en bas à droite)
+   if(ShowTop3NetProfitBottomRight)
+   {
+      string nameRight = "SMC_TOP_NET_RIGHT";
+      if(ObjectFind(0, nameRight) < 0)
+      {
+         ObjectCreate(0, nameRight, OBJ_LABEL, 0, 0, 0);
+         ObjectSetString(0, nameRight, OBJPROP_FONT, "Consolas");
+         ObjectSetInteger(0, nameRight, OBJPROP_FONTSIZE, 8);
+         ObjectSetInteger(0, nameRight, OBJPROP_BACK, false);
+      }
+      ObjectSetInteger(0, nameRight, OBJPROP_CORNER, CORNER_RIGHT_LOWER);
+      ObjectSetInteger(0, nameRight, OBJPROP_XDISTANCE, 10);
+      ObjectSetInteger(0, nameRight, OBJPROP_YDISTANCE, 10);
+      ObjectSetInteger(0, nameRight, OBJPROP_COLOR, clrAqua);
+      string perfTxt = (g_globalModelPerfPct >= 0.0 ? DoubleToString(g_globalModelPerfPct, 1) + "%" : "N/A");
+      string rightTxt =
+         "Top3 Net$ (30j)\n" +
+         "1) " + g_top1Symbol + " : " + DoubleToString(g_top1NetUSD, 2) + "$\n" +
+         "2) " + g_top2Symbol + " : " + DoubleToString(g_top2NetUSD, 2) + "$\n" +
+         "3) " + g_top3Symbol + " : " + DoubleToString(g_top3NetUSD, 2) + "$\n" +
+         "Perf Globale Modèle: " + perfTxt + " | Samples: " + IntegerToString(g_globalModelSamples);
+      ObjectSetString(0, nameRight, OBJPROP_TEXT, rightTxt);
+   }
+   else
+   {
+      ObjectDelete(0, "SMC_TOP_NET_RIGHT");
    }
 
    // Fallback "si labels invisibles": afficher aussi en Comment()
@@ -8404,6 +8447,42 @@ bool FetchPredictionScoreFromServer()
    return true;
 }
 
+bool FetchTopNetSummaryFromServer()
+{
+   if(!UseAIServer) return false;
+   string path = "/dashboard/top-net-summary?timeframe=M1&days=30&top_n=3";
+   string headers = "";
+   char post[], result[];
+   string resultHeaders;
+   string url1 = UseRenderAsPrimary ? (AI_ServerRender + path) : (AI_ServerURL + path);
+   string url2 = UseRenderAsPrimary ? (AI_ServerURL + path) : (AI_ServerRender + path);
+   int res = WebRequest("GET", url1, headers, MathMax(2000, AI_Timeout_ms), post, result, resultHeaders);
+   if(res != 200)
+      res = WebRequest("GET", url2, headers, MathMax(3000, AI_Timeout_ms2), post, result, resultHeaders);
+   if(res != 200) return false;
+
+   string json = CharArrayToString(result);
+   string s1 = ExtractJsonValue(json, "top1_symbol");
+   string s2 = ExtractJsonValue(json, "top2_symbol");
+   string s3 = ExtractJsonValue(json, "top3_symbol");
+   double n1 = ExtractJsonNumber(json, "top1_net_usd");
+   double n2 = ExtractJsonNumber(json, "top2_net_usd");
+   double n3 = ExtractJsonNumber(json, "top3_net_usd");
+   double perf = ExtractJsonNumber(json, "global_model_perf_pct");
+   int samples = (int)ExtractJsonNumber(json, "global_model_samples");
+
+   if(s1 == "" || s1 == "N/A") s1 = "N/A";
+   if(s2 == "" || s2 == "N/A") s2 = "N/A";
+   if(s3 == "" || s3 == "N/A") s3 = "N/A";
+   g_top1Symbol = s1; g_top2Symbol = s2; g_top3Symbol = s3;
+   g_top1NetUSD = n1; g_top2NetUSD = n2; g_top3NetUSD = n3;
+   g_globalModelPerfPct = perf;
+   g_globalModelSamples = MathMax(0, samples);
+   g_topNetLastUpdate = TimeCurrent();
+   g_topNetSource = "SERVER";
+   return true;
+}
+
 bool IsInServerPredictedCorrectionZone()
 {
    if(!UseServerCorrectionZoneFilter) return false;
@@ -10404,7 +10483,7 @@ void CleanupDashboardObjects()
    }
 
    // Nettoyage ciblé des labels d'information susceptibles de rester obsolètes
-   string staleLabels[] = {"SMC_FUT_STATUS", "SMC_Chan_Label", "SMC_Chan_Status", "SMC_ICT_SIG_CHECKLIST"};
+   string staleLabels[] = {"SMC_FUT_STATUS", "SMC_Chan_Label", "SMC_Chan_Status", "SMC_ICT_SIG_CHECKLIST", "SMC_TOP_NET_RIGHT"};
    for(int s = 0; s < ArraySize(staleLabels); s++)
    {
       if(ObjectFind(0, staleLabels[s]) >= 0 && ObjectDelete(0, staleLabels[s]))
@@ -11589,12 +11668,16 @@ void ExecuteForexBOSRetest()
    // FILTRE PRIORITÉ SYMBOLES PROPICES - BLOCAGE TOTAL SI NON PRIORITAIRE
    if(UsePropiceSymbolsFilter)
    {
-      if(!g_currentSymbolIsPropice)
+      if(!g_currentSymbolIsPropice && !PreferBestSymbolWithoutBlocking)
       {
          Print("🚫 FOREX BOS+Retest BLOQUÉ - Symbole non 'propice': ", _Symbol);
          Print("   Heure UTC: ", TimeToString(TimeCurrent(), TIME_SECONDS), " | Top propices: ", g_propiceTopSymbolsText);
          Print("   🚫 BLOCAGE TOTAL - Aucun trade autorisé sur les symboles non propices");
          return;
+      }
+      else if(!g_currentSymbolIsPropice && PreferBestSymbolWithoutBlocking)
+      {
+         Print("⚠️ FOREX BOS+Retest - symbole non propice mais autorisé (mode opportunités max): ", _Symbol);
       }
       
       // Avant: blocage total si pas rang 0.
@@ -15471,12 +15554,16 @@ void ExecuteDerivArrowTrade(string direction)
    // FILTRE PRIORITÉ SYMBOLES PROPICES - BLOCAGE TOTAL SI NON PRIORITAIRE
    if(UsePropiceSymbolsFilter)
    {
-      if(!g_currentSymbolIsPropice)
+      if(!g_currentSymbolIsPropice && !PreferBestSymbolWithoutBlocking)
       {
          Print("🚫 FLÈCHE DERIV ARROW BLOQUÉE - Symbole non 'propice': ", _Symbol);
          Print("   Heure UTC: ", TimeToString(TimeCurrent(), TIME_SECONDS), " | Top propices: ", g_propiceTopSymbolsText);
          Print("   🚫 BLOCAGE TOTAL - Aucun trade autorisé sur les symboles non propices");
          return;
+      }
+      else if(!g_currentSymbolIsPropice && PreferBestSymbolWithoutBlocking)
+      {
+         Print("⚠️ FLÈCHE DERIV ARROW - symbole non propice mais autorisé (mode opportunités max): ", _Symbol);
       }
       
       // Avant: blocage total si pas rang 0.
@@ -15758,12 +15845,16 @@ void ExecuteOTEImbalanceTrade()
    // FILTRE PRIORITÉ SYMBOLES PROPICES - BLOCAGE TOTAL SI NON PRIORITAIRE
    if(UsePropiceSymbolsFilter)
    {
-      if(!g_currentSymbolIsPropice)
+      if(!g_currentSymbolIsPropice && !PreferBestSymbolWithoutBlocking)
       {
          Print("🚫 OTE+Imbalance BLOQUÉE - Symbole non 'propice': ", _Symbol);
          Print("   Heure UTC: ", TimeToString(TimeCurrent(), TIME_SECONDS), " | Top propices: ", g_propiceTopSymbolsText);
          Print("   🚫 BLOCAGE TOTAL - Aucun trade autorisé sur les symboles non propices");
          return;
+      }
+      else if(!g_currentSymbolIsPropice && PreferBestSymbolWithoutBlocking)
+      {
+         Print("⚠️ OTE+Imbalance - symbole non propice mais autorisé (mode opportunités max): ", _Symbol);
       }
       
       // RÈGLE STRICTE: BLOQUER TOUS LES TRADES SAUF SUR LE SYMBOLE LE PLUS PROPICE
@@ -16760,13 +16851,17 @@ void ExecuteAIDecisionMarketOrder()
    // FILTRE PRIORITÉ SYMBOLES PROPICES - BLOCAGE TOTAL SI NON PRIORITAIRE
    if(UsePropiceSymbolsFilter)
    {
-      if(!g_currentSymbolIsPropice)
+      if(!g_currentSymbolIsPropice && !PreferBestSymbolWithoutBlocking)
       {
          Print("🚫 TRADE IA BLOQUÉ - Symbole non 'propice' actuellement: ", _Symbol);
          Print("   Heure UTC: ", TimeToString(TimeCurrent(), TIME_SECONDS), " | Top propices: ", g_propiceTopSymbolsText);
          Print("   💡 Le robot trade UNIQUEMENT sur les symboles les plus performants selon l'heure actuelle");
          Print("   🚫 BLOCAGE TOTAL - Aucun trade autorisé sur les symboles non propices");
          return;
+      }
+      else if(!g_currentSymbolIsPropice && PreferBestSymbolWithoutBlocking)
+      {
+         Print("⚠️ TRADE IA - symbole non propice mais autorisé (mode opportunités max): ", _Symbol);
       }
       
       // Avant: blocage total si pas rang 0.
@@ -21011,6 +21106,45 @@ void CheckAndExecuteExceptionalBoomCrashRecoveryEntries()
          }
       }
    }
+}
+
+// Réentrée "second spike" :
+// - une fois la position fermée après spike capté
+// - si second spike était imminent au moment de la fermeture
+// - attendre 2 petites bougies M1 puis réentrer (BUY Boom / SELL Crash).
+void CheckAndExecuteSecondSpikeReentry()
+{
+   if(!g_secondSpikeReentryArmed) return;
+   if(!UseSpikeAutoClose) { g_secondSpikeReentryArmed = false; return; }
+   if(!IsBoomSymbol(_Symbol) && !IsCrashSymbol(_Symbol)) { g_secondSpikeReentryArmed = false; return; }
+
+   // Timeout de sécurité: si rien ne se passe, on désarme.
+   if(g_secondSpikeReentryArmTime > 0 && (TimeCurrent() - g_secondSpikeReentryArmTime) > 900)
+   {
+      g_secondSpikeReentryArmed = false;
+      g_secondSpikeReentryDirection = "";
+      return;
+   }
+
+   if(CountPositionsForSymbol(_Symbol) > 0) return;
+
+   int smallCount = CountSmallM1CandlesSince(g_secondSpikeReentryArmTime);
+   if(smallCount < 2) return;
+
+   string dir = g_secondSpikeReentryDirection;
+   if(dir == "")
+      dir = IsBoomSymbol(_Symbol) ? "BUY" : "SELL";
+
+   Print("🚀 Réentrée 2e spike - tentative | ", _Symbol, " | dir=", dir, " | smallM1=", smallCount);
+   int beforePos = CountPositionsForSymbol(_Symbol);
+   ExecuteSpikeTrade(dir);
+   int afterPos = CountPositionsForSymbol(_Symbol);
+
+   // Désarmer après tentative pour éviter les boucles.
+   g_secondSpikeReentryArmed = false;
+   g_secondSpikeReentryDirection = "";
+   if(afterPos <= beforePos)
+      Print("⚠️ Réentrée 2e spike non exécutée (filtres/conditions) | ", _Symbol, " | dir=", dir);
 }
 
 // Fonctions utilitaires pour la détection de spikes
