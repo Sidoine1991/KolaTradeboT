@@ -14,6 +14,7 @@ Compatible avec F_INX_robot4.mq5
 import os
 import json
 import time
+import math
 import asyncio
 import logging
 import sys
@@ -23,6 +24,7 @@ import contextlib
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Tuple, Set, Union
+from uuid import uuid4
 from fastapi import FastAPI, HTTPException, Request, Body, status
 from starlette.requests import Request as StarletteRequest
 from fastapi.middleware.cors import CORSMiddleware
@@ -8224,23 +8226,30 @@ def _generate_future_ohlc_series(
     d = d.sort_values('time').reset_index(drop=True)
 
     close = d['close'].astype(float)
+    high = d['high'].astype(float) if 'high' in d.columns else close
+    low = d['low'].astype(float) if 'low' in d.columns else close
     ret = close.pct_change().fillna(0.0)
     sigma = float(ret.tail(120).std())
     sigma = max(1e-6, min(0.01, sigma))
     mu = float(ret.tail(120).mean())
 
-    # Biais tendance simple EMA20/EMA50
+    # Biais tendance + structure (non-linéaire)
     ema20 = close.ewm(span=20, adjust=False).mean().iloc[-1]
     ema50 = close.ewm(span=50, adjust=False).mean().iloc[-1]
     last_close = float(close.iloc[-1])
     trend_bias = 0.0 if last_close == 0 else max(-0.0015, min(0.0015, (ema20 - ema50) / last_close))
+    structure = analyze_market_structure(d.tail(240), lookback=40)
+    trend = structure.get("trend", "neutral")
+    trend_strength = float(structure.get("strength", 0.0) or 0.0)
+
+    # Niveaux de structure utilisés comme "aimants"
+    support_lvl = float(low.tail(80).quantile(0.2))
+    resistance_lvl = float(high.tail(80).quantile(0.8))
+    mid_lvl = (support_lvl + resistance_lvl) / 2.0 if support_lvl > 0 and resistance_lvl > 0 else last_close
 
     # ATR ratio approximé
-    if all(col in d.columns for col in ['high', 'low']):
-        tr = (d['high'].astype(float) - d['low'].astype(float)).tail(120)
-        atr = float(tr.mean()) if len(tr) else 0.0
-    else:
-        atr = 0.0
+    tr = (high - low).tail(120)
+    atr = float(tr.mean()) if len(tr) else 0.0
     atr_ratio = (atr / last_close) if last_close > 0 and atr > 0 else sigma * 1.2
     atr_ratio = max(1e-6, min(0.02, atr_ratio))
 
@@ -8255,9 +8264,43 @@ def _generate_future_ohlc_series(
     h = int(max(1, min(500, horizon)))
     conf = float(max(0.3, min(0.9, 0.55 + abs(trend_bias) * 120)))
 
+    # Chemin directeur en segments pour éviter une ligne droite:
+    # impulsion -> retrace -> continuation -> distribution.
+    seg1 = max(6, int(h * 0.22))
+    seg2 = max(seg1 + 6, int(h * 0.47))
+    seg3 = max(seg2 + 6, int(h * 0.78))
+
     for i in range(h):
-        eps = float(rng.normal(0.0, sigma))
-        r = (mu * 0.5) + (trend_bias * 0.2) + (prev_ret * 0.25) + eps
+        if i < seg1:
+            phase = "impulse"
+            phase_w = 1.0
+        elif i < seg2:
+            phase = "retrace"
+            phase_w = -0.75
+        elif i < seg3:
+            phase = "continuation"
+            phase_w = 0.8
+        else:
+            phase = "distribution"
+            phase_w = -0.25
+
+        structure_bias = 0.0
+        if trend == "uptrend":
+            structure_bias = 0.00035 + min(0.0012, trend_strength * 0.8)
+        elif trend == "downtrend":
+            structure_bias = -0.00035 - min(0.0012, trend_strength * 0.8)
+
+        # Oscillation contrôlée pour reproduire les zigzags.
+        osc = math.sin((i + 1) * 0.41) * sigma * 0.8
+        eps = float(rng.normal(0.0, sigma * 0.65))
+        r = (mu * 0.35) + (trend_bias * 0.35) + (structure_bias * phase_w) + (prev_ret * 0.20) + osc + eps
+
+        # Attraction vers niveaux de structure (supports/résistances).
+        anchor = support_lvl if phase == "retrace" else resistance_lvl if phase == "continuation" else mid_lvl
+        if curr_close > 0 and anchor > 0:
+            anchor_pull = ((anchor / curr_close) - 1.0) * 0.12
+            r += max(-0.0025, min(0.0025, anchor_pull))
+
         r = max(-0.03, min(0.03, r))
 
         o = curr_close
@@ -8272,18 +8315,83 @@ def _generate_future_ohlc_series(
             lo = min(o, c) * 0.999
 
         t = last_time + timedelta(minutes=i + 1)
+        struct_tag = "BOS_UP" if (trend == "uptrend" and phase in ("impulse", "continuation")) else (
+            "BOS_DOWN" if (trend == "downtrend" and phase in ("impulse", "continuation")) else
+            ("RETRACE_TO_SUPPORT" if phase == "retrace" else "RANGE")
+        )
         candles.append({
             "time": int(t.timestamp()),
             "open": float(o),
             "high": float(max(hi, o, c)),
             "low": float(min(lo, o, c)),
             "close": float(c),
-            "confidence": conf
+            "confidence": conf,
+            "phase": phase,
+            "structure_tag": struct_tag,
+            "level_ref": float(anchor if anchor > 0 else mid_lvl)
         })
         prev_ret = (c / o) - 1.0 if o > 0 else 0.0
         curr_close = c
 
     return candles
+
+
+async def _store_prediction_run_to_supabase(
+    symbol: str,
+    timeframe: str,
+    candles: List[Dict[str, Any]],
+    metadata: Optional[Dict[str, Any]] = None,
+) -> Optional[str]:
+    """Enregistre un run de prédiction + ses bougies dans Supabase (best effort)."""
+    try:
+        supabase_url, supabase_key = _get_supabase_config(strict=True)
+        import httpx
+
+        run_id = str(uuid4())
+        headers = {
+            "apikey": supabase_key,
+            "Authorization": f"Bearer {supabase_key}",
+            "Content-Type": "application/json",
+            "Prefer": "return=minimal",
+        }
+        run_payload = {
+            "id": run_id,
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "horizon": len(candles),
+            "model_version": "structure_v1",
+            "metadata": metadata or {},
+            "created_at": datetime.utcnow().isoformat(),
+        }
+        candle_rows = []
+        for idx, cdl in enumerate(candles):
+            candle_rows.append({
+                "run_id": run_id,
+                "step": idx + 1,
+                "candle_time": int(cdl.get("time", 0)),
+                "open": float(cdl.get("open", 0.0)),
+                "high": float(cdl.get("high", 0.0)),
+                "low": float(cdl.get("low", 0.0)),
+                "close": float(cdl.get("close", 0.0)),
+                "confidence": float(cdl.get("confidence", 0.5)),
+                "phase": str(cdl.get("phase", "unknown")),
+                "structure_tag": str(cdl.get("structure_tag", "unknown")),
+                "level_ref": float(cdl.get("level_ref", 0.0)),
+            })
+
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            r1 = await client.post(f"{supabase_url}/rest/v1/prediction_runs", headers=headers, json=run_payload)
+            if r1.status_code >= 300:
+                logger.warning(f"prediction_runs insert skipped: {r1.status_code} {r1.text[:200]}")
+                return None
+            r2 = await client.post(f"{supabase_url}/rest/v1/prediction_candles", headers=headers, json=candle_rows)
+            if r2.status_code >= 300:
+                logger.warning(f"prediction_candles insert skipped: {r2.status_code} {r2.text[:200]}")
+                return None
+        return run_id
+    except Exception as e:
+        logger.warning(f"Supabase store prediction run skipped: {e}")
+        return None
 
 
 # ============================================================================
@@ -8567,6 +8675,8 @@ async def robot_predict_ohlc(symbol: str, timeframe: str = "M1", horizon: int = 
     """
     try:
         tf = (timeframe or "M1").upper()
+        if tf in ("1M", "M1"):
+            tf = "M1"
         if tf != "M1":
             raise HTTPException(status_code=400, detail="timeframe supporté: M1 uniquement")
 
@@ -8604,17 +8714,238 @@ async def robot_predict_ohlc(symbol: str, timeframe: str = "M1", horizon: int = 
         if not valid:
             raise HTTPException(status_code=500, detail="Projection OHLC invalide après validation")
 
+        run_id = await _store_prediction_run_to_supabase(
+            symbol=symbol,
+            timeframe="M1",
+            candles=valid,
+            metadata={"source": "robot_predict_ohlc", "generator": "structure_v1"},
+        )
+
         return {
             "symbol": symbol,
             "timeframe": "M1",
             "horizon": len(valid),
             "source": "ai_server",
+            "prediction_run_id": run_id,
             "candles": valid
         }
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Erreur /robot/predict_ohlc: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/symbols/prediction-score")
+async def get_symbol_prediction_score(symbol: str, timeframe: str = "M1", days: int = 30):
+    """Retourne le score agrégé récent d'un symbole depuis Supabase."""
+    try:
+        supabase_url, supabase_key = _get_supabase_config(strict=True)
+        import httpx
+
+        d = int(max(1, min(180, days)))
+        headers = {"apikey": supabase_key, "Authorization": f"Bearer {supabase_key}"}
+        params = {
+            "symbol": f"eq.{symbol}",
+            "timeframe": f"eq.{timeframe.upper()}",
+            "order": "day.desc",
+            "limit": str(d),
+            "select": "day,direction_hit_rate,avg_mae,score,samples",
+        }
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            r = await client.get(f"{supabase_url}/rest/v1/symbol_prediction_score_daily", headers=headers, params=params)
+        if r.status_code >= 300:
+            raise HTTPException(status_code=502, detail=f"Supabase error: {r.status_code}")
+        rows = r.json() if r.text else []
+        if not rows:
+            return {"symbol": symbol, "timeframe": timeframe.upper(), "score": None, "samples": 0, "rows": []}
+        scores = [float(x.get("score", 0.0)) for x in rows if x.get("score") is not None]
+        samples = sum(int(x.get("samples", 0) or 0) for x in rows)
+        agg = float(sum(scores) / len(scores)) if scores else 0.0
+        return {
+            "symbol": symbol,
+            "timeframe": timeframe.upper(),
+            "window_days": d,
+            "score": round(agg, 4),
+            "samples": samples,
+            "rows": rows,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Erreur /symbols/prediction-score: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/robot/prediction/validate-run")
+async def validate_prediction_run(
+    payload: Dict[str, Any] = Body(...),
+):
+    """
+    Valide un run de prédiction contre des bougies réelles et met à jour
+    prediction_outcomes + symbol_prediction_score_daily.
+    """
+    try:
+        run_id = str(payload.get("run_id", "")).strip()
+        symbol = str(payload.get("symbol", "")).strip()
+        timeframe = str(payload.get("timeframe", "M1")).strip().upper() or "M1"
+        actual_candles = payload.get("actual_candles", [])
+
+        if not run_id or not symbol:
+            raise HTTPException(status_code=400, detail="run_id et symbol sont requis")
+        if not actual_candles:
+            raise HTTPException(status_code=400, detail="actual_candles vide")
+
+        supabase_url, supabase_key = _get_supabase_config(strict=True)
+        import httpx
+
+        headers = {
+            "apikey": supabase_key,
+            "Authorization": f"Bearer {supabase_key}",
+            "Content-Type": "application/json",
+        }
+
+        # Charger les bougies prédites du run
+        params = {
+            "run_id": f"eq.{run_id}",
+            "select": "step,open,high,low,close",
+            "order": "step.asc",
+        }
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            rp = await client.get(f"{supabase_url}/rest/v1/prediction_candles", headers=headers, params=params)
+        if rp.status_code >= 300:
+            raise HTTPException(status_code=502, detail=f"Supabase read error: {rp.status_code}")
+        predicted_rows = rp.json() if rp.text else []
+        if not predicted_rows:
+            raise HTTPException(status_code=404, detail="Run introuvable (prediction_candles vide)")
+
+        pred_by_step = {int(r["step"]): r for r in predicted_rows if r.get("step") is not None}
+        outcome_rows: List[Dict[str, Any]] = []
+        hit_count = 0
+        mae_total = 0.0
+        score_total = 0.0
+        used = 0
+
+        for row in actual_candles:
+            step = int(row.get("step", 0) or 0)
+            if step <= 0 or step not in pred_by_step:
+                continue
+            pred = pred_by_step[step]
+            po = float(pred.get("open", 0.0))
+            pc = float(pred.get("close", 0.0))
+            ao = float(row.get("open", 0.0))
+            ah = float(row.get("high", 0.0))
+            al = float(row.get("low", 0.0))
+            ac = float(row.get("close", 0.0))
+            if ao <= 0 or ah <= 0 or al <= 0 or ac <= 0 or po <= 0 or pc <= 0:
+                continue
+
+            pred_dir = 1 if pc >= po else -1
+            act_dir = 1 if ac >= ao else -1
+            direction_hit = pred_dir == act_dir
+            mae = abs(pc - ac)
+            mape = mae / max(1e-8, abs(ac))
+            price_score = max(0.0, 1.0 - min(1.0, mape * 300.0))
+            score = (0.6 if direction_hit else 0.0) + (0.4 * price_score)
+
+            hit_count += 1 if direction_hit else 0
+            mae_total += mae
+            score_total += score
+            used += 1
+            outcome_rows.append({
+                "run_id": run_id,
+                "step": step,
+                "actual_open": ao,
+                "actual_high": ah,
+                "actual_low": al,
+                "actual_close": ac,
+                "direction_hit": direction_hit,
+                "mae": mae,
+                "mape": mape,
+                "score": score,
+                "evaluated_at": datetime.utcnow().isoformat(),
+            })
+
+        if not outcome_rows:
+            raise HTTPException(status_code=400, detail="Aucune bougie valide à comparer")
+
+        write_headers = {**headers, "Prefer": "resolution=merge-duplicates,return=minimal"}
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            wo = await client.post(
+                f"{supabase_url}/rest/v1/prediction_outcomes?on_conflict=run_id,step",
+                headers=write_headers,
+                json=outcome_rows,
+            )
+        if wo.status_code >= 300:
+            raise HTTPException(status_code=502, detail=f"Supabase write outcomes error: {wo.status_code}")
+
+        day_key = datetime.utcnow().date().isoformat()
+        batch_samples = used
+        batch_hit_rate = hit_count / max(1, used)
+        batch_mae = mae_total / max(1, used)
+        batch_score = score_total / max(1, used)
+
+        # Fusion pondérée avec la ligne du jour
+        params_day = {
+            "symbol": f"eq.{symbol}",
+            "timeframe": f"eq.{timeframe.upper()}",
+            "day": f"eq.{day_key}",
+            "select": "samples,direction_hit_rate,avg_mae,score",
+            "limit": "1",
+        }
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            gd = await client.get(f"{supabase_url}/rest/v1/symbol_prediction_score_daily", headers=headers, params=params_day)
+        prev_rows = gd.json() if gd.status_code < 300 and gd.text else []
+        prev = prev_rows[0] if prev_rows else {}
+        prev_samples = int(prev.get("samples", 0) or 0)
+        total_samples = prev_samples + batch_samples
+
+        def _wavg(prev_value: float, batch_value: float) -> float:
+            if total_samples <= 0:
+                return batch_value
+            return ((prev_value * prev_samples) + (batch_value * batch_samples)) / total_samples
+
+        merged_row = {
+            "symbol": symbol,
+            "timeframe": timeframe.upper(),
+            "day": day_key,
+            "samples": total_samples,
+            "direction_hit_rate": _wavg(float(prev.get("direction_hit_rate", 0.0) or 0.0), batch_hit_rate),
+            "avg_mae": _wavg(float(prev.get("avg_mae", 0.0) or 0.0), batch_mae),
+            "score": _wavg(float(prev.get("score", 0.0) or 0.0), batch_score),
+            "updated_at": datetime.utcnow().isoformat(),
+        }
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            sd = await client.post(
+                f"{supabase_url}/rest/v1/symbol_prediction_score_daily?on_conflict=symbol,timeframe,day",
+                headers=write_headers,
+                json=[merged_row],
+            )
+        if sd.status_code >= 300:
+            raise HTTPException(status_code=502, detail=f"Supabase write daily score error: {sd.status_code}")
+
+        return {
+            "run_id": run_id,
+            "symbol": symbol,
+            "timeframe": timeframe.upper(),
+            "validated_steps": used,
+            "batch": {
+                "direction_hit_rate": round(batch_hit_rate, 4),
+                "avg_mae": batch_mae,
+                "score": round(batch_score, 4),
+            },
+            "daily": {
+                "day": day_key,
+                "samples": total_samples,
+                "direction_hit_rate": round(merged_row["direction_hit_rate"], 4),
+                "avg_mae": merged_row["avg_mae"],
+                "score": round(merged_row["score"], 4),
+            },
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Erreur /robot/prediction/validate-run: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
