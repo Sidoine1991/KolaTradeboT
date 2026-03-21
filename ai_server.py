@@ -21,7 +21,7 @@ import sys
 import argparse
 import traceback
 import contextlib
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Tuple, Set, Union
 from uuid import uuid4
@@ -9761,6 +9761,13 @@ async def upload_mt5_deals(request: MT5DealsUploadRequest):
                 return None
             return None
 
+        def _normalize_open_time(v: Any, fallback_close_time: Optional[str]) -> Optional[str]:
+            normalized = _normalize_close_time(v)
+            if normalized:
+                return normalized
+            # Certains payloads MT5 n'envoient pas open_time; on évite l'échec NOT NULL.
+            return fallback_close_time
+
         def _normalize_is_win(v: Any, profit: float) -> bool:
             if isinstance(v, bool):
                 return v
@@ -9786,12 +9793,18 @@ async def upload_mt5_deals(request: MT5DealsUploadRequest):
             if not close_time_norm:
                 skipped += 1
                 continue
+            open_time_norm = _normalize_open_time(d.get("open_time"), close_time_norm)
+            entry_price = d.get("entry_price")
+            if entry_price is None:
+                entry_price = d.get("price")
             rows.append({
                 "symbol": sym,
                 "timeframe": "M1",
+                "open_time": open_time_norm,
                 "profit": profit,
                 "is_win": _normalize_is_win(d.get("is_win"), profit),
                 "close_time": close_time_norm,
+                "entry_price": entry_price,
                 "exit_price": d.get("price"),
                 "mt5_deal_id": d.get("mt5_deal_id"),
                 "position_id": d.get("position_id"),
@@ -13202,8 +13215,16 @@ async def predict_corrections(request: CorrectionPredictionRequest):
             confidence_score
         )
         
-        # 5. Sauvegarder la prédiction en base
-        await save_correction_prediction(prediction)
+        # 5. Sauvegarder la prédiction en base (trace réelle Supabase)
+        await save_correction_prediction(
+            request.symbol,
+            request.timeframe,
+            analysis,
+            prediction,
+            confidence_score,
+            recommended_action,
+            risk_level,
+        )
         
         logger.info(f"✅ Prédiction correction générée - Confiance: {confidence_score:.1%} - Action: {recommended_action}")
         
@@ -13346,10 +13367,173 @@ async def correction_feedback(feedback: dict):
         logger.error(f"❌ Erreur feedback correction: {e}")
         raise HTTPException(status_code=500, detail=f"Erreur feedback: {str(e)}")
 
+@app.get("/corrections/storage-status")
+async def correction_storage_status(symbol: Optional[str] = None, timeframe: str = "M1"):
+    """
+    Diagnostic stockage corrections:
+    - compte de lignes
+    - dernière ligne
+    pour les tables actives (Option A).
+    """
+    try:
+        supabase_url, supabase_key = _get_supabase_config(strict=True)
+        headers = {"apikey": supabase_key, "Authorization": f"Bearer {supabase_key}"}
+
+        sym = (symbol or "").strip()
+        tf = (timeframe or "M1").strip()
+
+        table_specs = [
+            {
+                "table": "correction_zones_analysis",
+                "order": "analysis_date.desc",
+                "columns": "id,symbol,timeframe,analysis_date,total_corrections_analyzed,current_trend,volatility_level",
+            },
+            {
+                "table": "correction_predictions",
+                "order": "prediction_date.desc",
+                "columns": "id,symbol,timeframe,prediction_date,prediction_confidence,current_trend,zone_1_level,zone_2_level,zone_3_level",
+            },
+            {
+                "table": "prediction_performance",
+                "order": "performance_date.desc",
+                "columns": "id,symbol,performance_date,total_predictions,successful_predictions,failed_predictions,overall_accuracy,avg_confidence",
+            },
+            {
+                "table": "correction_summary_stats",
+                "order": "period_end.desc",
+                "columns": "id,symbol,timeframe,period_start,period_end,total_corrections,successful_predictions,success_rate",
+            },
+            {
+                "table": "symbol_correction_patterns",
+                "order": "last_updated.desc",
+                "columns": "id,symbol,pattern_type,success_rate,occurrences_count,last_updated",
+            },
+        ]
+
+        import httpx
+        out = []
+        async with httpx.AsyncClient(timeout=12.0) as client:
+            for spec in table_specs:
+                table = spec["table"]
+                filters = []
+                if sym:
+                    filters.append(f"symbol=eq.{sym}")
+                if "timeframe" in spec["columns"]:
+                    filters.append(f"timeframe=eq.{tf}")
+                filter_qs = ("&" + "&".join(filters)) if filters else ""
+
+                count_url = f"{supabase_url}/rest/v1/{table}?select=id&limit=1{filter_qs}"
+                count_headers = dict(headers)
+                count_headers["Prefer"] = "count=exact"
+
+                status_code = None
+                count = 0
+                last_row = None
+                error = None
+
+                try:
+                    rc = await client.get(count_url, headers=count_headers)
+                    status_code = rc.status_code
+                    if rc.status_code < 300:
+                        cr = rc.headers.get("content-range", "0-0/0")
+                        try:
+                            count = int(cr.split("/")[-1])
+                        except Exception:
+                            count = 0
+
+                        if count > 0:
+                            last_params = {
+                                "select": spec["columns"],
+                                "order": spec["order"],
+                                "limit": "1",
+                            }
+                            if sym:
+                                last_params["symbol"] = f"eq.{sym}"
+                            if "timeframe" in spec["columns"]:
+                                last_params["timeframe"] = f"eq.{tf}"
+                            rl = await client.get(f"{supabase_url}/rest/v1/{table}", headers=headers, params=last_params)
+                            if rl.status_code < 300 and rl.text:
+                                rows = rl.json()
+                                if rows:
+                                    last_row = rows[0]
+                            else:
+                                error = f"last_row_http_{rl.status_code}"
+                    else:
+                        error = f"count_http_{rc.status_code}"
+                except Exception as e:
+                    error = str(e)
+
+                out.append(
+                    {
+                        "table": table,
+                        "status_code": status_code,
+                        "count": count,
+                        "last_row": last_row,
+                        "error": error,
+                    }
+                )
+
+        return {
+            "ok": True,
+            "symbol_filter": sym or "ALL",
+            "timeframe_filter": tf,
+            "tables": out,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+    except Exception as e:
+        logger.error(f"❌ Erreur /corrections/storage-status: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 # ========== FONCTIONS UTILITAIRES POUR LES CORRECTIONS ==========
 
 async def analyze_historical_corrections(symbol: str, timeframe: str) -> CorrectionZoneAnalysis:
     """Analyse les corrections historiques pour un symbole"""
+    # Source primaire: table active correction_zones_analysis (alignement Option A).
+    try:
+        supabase_url, supabase_key = _get_supabase_config(strict=True)
+        headers = {"apikey": supabase_key, "Authorization": f"Bearer {supabase_key}"}
+        params = {
+            "symbol": f"eq.{symbol}",
+            "timeframe": f"eq.{timeframe}",
+            "order": "analysis_date.desc",
+            "limit": "1",
+        }
+        import httpx
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.get(
+                f"{supabase_url}/rest/v1/correction_zones_analysis",
+                headers=headers,
+                params=params,
+            )
+        if r.status_code < 300 and r.text:
+            rows = r.json()
+            if rows:
+                row = rows[0]
+                return CorrectionZoneAnalysis(
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    analysis_date=row.get("analysis_date") or datetime.now().isoformat(),
+                    total_corrections_analyzed=int(row.get("total_corrections_analyzed") or 0),
+                    uptrend_corrections=int(row.get("uptrend_corrections") or 0),
+                    downtrend_corrections=int(row.get("downtrend_corrections") or 0),
+                    avg_retracement_uptrend=float(row.get("avg_retracement_uptrend") or 0.0),
+                    avg_retracement_downtrend=float(row.get("avg_retracement_downtrend") or 0.0),
+                    max_retracement_uptrend=float(row.get("max_retracement_uptrend") or 0.0),
+                    max_retracement_downtrend=float(row.get("max_retracement_downtrend") or 0.0),
+                    gradual_retracement_patterns=int(row.get("gradual_retracement_patterns") or 0),
+                    consolidation_patterns=int(row.get("consolidation_patterns") or 0),
+                    sharp_reversal_patterns=int(row.get("sharp_reversal_patterns") or 0),
+                    support_levels=row.get("support_levels") or [],
+                    resistance_levels=row.get("resistance_levels") or [],
+                    current_price=float(row.get("current_price") or 0.0),
+                    current_trend=str(row.get("current_trend") or "UP"),
+                    volatility_level=float(row.get("volatility_level") or 0.02),
+                )
+    except Exception:
+        # Fallback conservateur vers patterns si table absente/inaccessible.
+        pass
+
+    # Fallback: reconstruction via symbol_correction_patterns.
     patterns = await get_symbol_correction_patterns(symbol)
     total = 0
     up = 0
@@ -13461,23 +13645,248 @@ def determine_action_and_risk(trend: str, prediction: CorrectionPrediction, conf
     
     return action, risk
 
-async def save_correction_prediction(prediction: CorrectionPrediction):
-    """Sauvegarde la prédiction en base de données"""
-    # Implémentation à ajouter selon votre configuration Supabase
-    logger.info(f"💾 Prédiction correction sauvegardée pour {prediction.symbol}")
+async def save_correction_prediction(
+    symbol: str,
+    timeframe: str,
+    analysis: CorrectionZoneAnalysis,
+    prediction: CorrectionPrediction,
+    confidence_score: float,
+    recommended_action: str,
+    risk_level: str,
+):
+    """Sauvegarde une trace de prédiction correction dans les tables actives Supabase."""
+    try:
+        supabase_url, supabase_key = _get_supabase_config(strict=True)
+        headers = {
+            "apikey": supabase_key,
+            "Authorization": f"Bearer {supabase_key}",
+            "Content-Type": "application/json",
+            "Prefer": "return=minimal",
+        }
+
+        now = datetime.now(timezone.utc)
+        period_start = now - timedelta(days=30)
+        total = int(analysis.total_corrections_analyzed or 0)
+        # confidence_score est en pourcentage (70-95), conversion en ratio.
+        success_ratio = max(0.0, min(1.0, float(confidence_score) / 100.0))
+        successful = int(round(success_ratio * total)) if total > 0 else 0
+
+        # Compat pydantic v1/v2 pour sérialiser la prédiction.
+        if hasattr(prediction, "model_dump"):
+            pred_payload = prediction.model_dump()
+        else:
+            pred_payload = prediction.dict()
+
+        import httpx
+
+        # 1) Trace primaire: correction_predictions (table active dédiée aux prédictions)
+        prediction_row = {
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "prediction_date": now.isoformat(),
+            "current_price": float(prediction.current_price or 0.0),
+            "current_trend": str(prediction.current_trend or "UP"),
+            "prediction_confidence": float(prediction.prediction_confidence or 0.0),
+            "zone_1_level": float(prediction.zone_1_level or 0.0),
+            "zone_1_type": str(prediction.zone_1_type or "SUPPORT"),
+            "zone_1_probability": float(prediction.zone_1_probability or 0.0),
+            "zone_2_level": float(prediction.zone_2_level or 0.0),
+            "zone_2_type": str(prediction.zone_2_type or "SUPPORT"),
+            "zone_2_probability": float(prediction.zone_2_probability or 0.0),
+            "zone_3_level": float(prediction.zone_3_level or 0.0),
+            "zone_3_type": str(prediction.zone_3_type or "SUPPORT"),
+            "zone_3_probability": float(prediction.zone_3_probability or 0.0),
+            "trend_strength_factor": float(prediction.trend_strength_factor or 1.0),
+            "volatility_adjustment": float(prediction.volatility_adjustment or 1.0),
+            "historical_accuracy": float(prediction.historical_accuracy or 0.0),
+            "prediction_valid_until": prediction.prediction_valid_until or (now + timedelta(hours=4)).isoformat(),
+            "created_at": now.isoformat(),
+            "updated_at": now.isoformat(),
+        }
+
+        # 2) Snapshot journalier: prediction_performance (table active de suivi)
+        perf_row = {
+            "symbol": symbol,
+            "performance_date": now.date().isoformat(),
+            "total_predictions": 1,
+            "successful_predictions": 1 if success_ratio >= 0.5 else 0,
+            "failed_predictions": 1 if success_ratio < 0.5 else 0,
+            "zone_1_accuracy": float(prediction.zone_1_probability or 0.0),
+            "zone_2_accuracy": float(prediction.zone_2_probability or 0.0),
+            "zone_3_accuracy": float(prediction.zone_3_probability or 0.0),
+            "overall_accuracy": float(confidence_score),
+            "avg_confidence": float(prediction.prediction_confidence or 0.0),
+            "total_corrections_analyzed": total,
+            "avg_retracement_used": float(analysis.avg_retracement_uptrend or 0.0),
+            "market_volatility": float(analysis.volatility_level or 0.0),
+        }
+
+        pred_duration = float(getattr(prediction, "expected_duration_bars", 0.0) or 0.0)
+        pred_type = str(getattr(prediction, "correction_type", "UNKNOWN") or "UNKNOWN")
+
+        payload = {
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "period_start": period_start.isoformat(),
+            "period_end": now.isoformat(),
+            "total_corrections": total,
+            "successful_predictions": successful,
+            "avg_retracement_pct": float(analysis.avg_retracement_uptrend or 0.0),
+            "avg_duration_bars": pred_duration,
+            # Table legacy attend un ratio (ex: 0.7575), pas un pourcentage.
+            "success_rate": float(max(0.0, min(1.0, confidence_score / 100.0))),
+            "dominant_pattern": pred_type,
+            "created_at": now.isoformat(),
+            "updated_at": now.isoformat(),
+            "metadata": {
+                "source": "ai_server/corrections_predict",
+                "recommended_action": recommended_action,
+                "risk_level": risk_level,
+                "confidence_score": confidence_score,
+                "prediction": pred_payload,
+            },
+        }
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r_pred = await client.post(
+                f"{supabase_url}/rest/v1/correction_predictions",
+                headers=headers,
+                json=prediction_row,
+            )
+            if r_pred.status_code >= 300:
+                logger.warning(f"correction_predictions insert HTTP {r_pred.status_code}: {r_pred.text[:180]}")
+
+            r_perf = await client.post(
+                f"{supabase_url}/rest/v1/prediction_performance",
+                headers=headers,
+                json=perf_row,
+            )
+            if r_perf.status_code >= 300:
+                logger.warning(f"prediction_performance insert HTTP {r_perf.status_code}: {r_perf.text[:180]}")
+
+            # 3) Compat rétro: correction_summary_stats (legacy interne serveur)
+            r = await client.post(
+                f"{supabase_url}/rest/v1/correction_summary_stats",
+                headers=headers,
+                json=payload,
+            )
+        if r.status_code >= 300:
+            logger.warning(f"correction_summary_stats insert HTTP {r.status_code}: {r.text[:180]}")
+
+        logger.info(f"💾 Prédiction correction sauvegardée (tables actives) pour {symbol} ({timeframe})")
+    except Exception as e:
+        logger.warning(f"Sauvegarde corrections Supabase échouée: {e}")
 
 async def get_prediction_performance_stats(symbol: str, days: int) -> dict:
     """Récupère les statistiques de performance"""
-    # Implémentation à ajouter
-    return {
-        "total_predictions": 25,
-        "successful_predictions": 18,
-        "failed_predictions": 7,
-        "overall_accuracy": 72.0,
-        "zone_1_accuracy": 68.5,
-        "zone_2_accuracy": 74.2,
-        "zone_3_accuracy": 45.8
-    }
+    try:
+        supabase_url, supabase_key = _get_supabase_config(strict=True)
+        headers = {"apikey": supabase_key, "Authorization": f"Bearer {supabase_key}"}
+
+        since = (datetime.now(timezone.utc) - timedelta(days=max(1, int(days)))).isoformat()
+        since_day = (datetime.now(timezone.utc) - timedelta(days=max(1, int(days)))).date().isoformat()
+
+        # Source primaire: prediction_performance (table active)
+        primary_params = {
+            "symbol": f"eq.{symbol}",
+            "performance_date": f"gte.{since_day}",
+            "select": "total_predictions,successful_predictions,failed_predictions,overall_accuracy,zone_1_accuracy,zone_2_accuracy,zone_3_accuracy",
+            "order": "performance_date.desc",
+            "limit": "500",
+        }
+        import httpx
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r_primary = await client.get(
+                f"{supabase_url}/rest/v1/prediction_performance",
+                headers=headers,
+                params=primary_params,
+            )
+        if r_primary.status_code < 300 and r_primary.text:
+            rows = r_primary.json()
+            if rows:
+                total_predictions = int(sum(int(rw.get("total_predictions") or 0) for rw in rows))
+                successful_predictions = int(sum(int(rw.get("successful_predictions") or 0) for rw in rows))
+                failed_predictions = int(sum(int(rw.get("failed_predictions") or 0) for rw in rows))
+                overall_vals = [float(rw.get("overall_accuracy") or 0.0) for rw in rows]
+                z1_vals = [float(rw.get("zone_1_accuracy") or 0.0) for rw in rows]
+                z2_vals = [float(rw.get("zone_2_accuracy") or 0.0) for rw in rows]
+                z3_vals = [float(rw.get("zone_3_accuracy") or 0.0) for rw in rows]
+                return {
+                    "total_predictions": total_predictions,
+                    "successful_predictions": successful_predictions,
+                    "failed_predictions": failed_predictions,
+                    "overall_accuracy": float(np.mean(overall_vals)) if overall_vals else 0.0,
+                    "zone_1_accuracy": float(np.mean(z1_vals)) if z1_vals else 0.0,
+                    "zone_2_accuracy": float(np.mean(z2_vals)) if z2_vals else 0.0,
+                    "zone_3_accuracy": float(np.mean(z3_vals)) if z3_vals else 0.0,
+                }
+
+        # Fallback legacy: correction_summary_stats
+        params = {
+            "symbol": f"eq.{symbol}",
+            "period_end": f"gte.{since}",
+            "select": "total_corrections,successful_predictions,success_rate,metadata",
+            "order": "period_end.desc",
+            "limit": "500",
+        }
+
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.get(f"{supabase_url}/rest/v1/correction_summary_stats", headers=headers, params=params)
+        if r.status_code >= 300:
+            logger.warning(f"correction_summary_stats perf fetch HTTP {r.status_code}: {r.text[:180]}")
+            raise RuntimeError(f"HTTP {r.status_code}")
+
+        rows = r.json() if r.text else []
+        if not rows:
+            return {
+                "total_predictions": 0,
+                "successful_predictions": 0,
+                "failed_predictions": 0,
+                "overall_accuracy": 0.0,
+                "zone_1_accuracy": 0.0,
+                "zone_2_accuracy": 0.0,
+                "zone_3_accuracy": 0.0,
+            }
+
+        total_predictions = int(sum(int(rw.get("total_corrections") or 0) for rw in rows))
+        successful_predictions = int(sum(int(rw.get("successful_predictions") or 0) for rw in rows))
+        failed_predictions = max(0, total_predictions - successful_predictions)
+        overall_accuracy = (successful_predictions / total_predictions * 100.0) if total_predictions > 0 else 0.0
+
+        # Approximation zone-level depuis metadata.prediction.zone_X_confidence
+        z1 = []
+        z2 = []
+        z3 = []
+        for rw in rows:
+            md = rw.get("metadata") or {}
+            pred = md.get("prediction") if isinstance(md, dict) else {}
+            if isinstance(pred, dict):
+                if pred.get("zone_1_confidence") is not None:
+                    z1.append(float(pred.get("zone_1_confidence")) * 100.0)
+                if pred.get("zone_2_confidence") is not None:
+                    z2.append(float(pred.get("zone_2_confidence")) * 100.0)
+                if pred.get("zone_3_confidence") is not None:
+                    z3.append(float(pred.get("zone_3_confidence")) * 100.0)
+
+        return {
+            "total_predictions": total_predictions,
+            "successful_predictions": successful_predictions,
+            "failed_predictions": failed_predictions,
+            "overall_accuracy": overall_accuracy,
+            "zone_1_accuracy": float(np.mean(z1)) if z1 else overall_accuracy,
+            "zone_2_accuracy": float(np.mean(z2)) if z2 else overall_accuracy,
+            "zone_3_accuracy": float(np.mean(z3)) if z3 else overall_accuracy,
+        }
+    except Exception as e:
+        logger.warning(f"Performance corrections fallback ({symbol}): {e}")
+        return {
+            "total_predictions": 0,
+            "successful_predictions": 0,
+            "failed_predictions": 0,
+            "overall_accuracy": 0.0,
+            "zone_1_accuracy": 0.0,
+            "zone_2_accuracy": 0.0,
+            "zone_3_accuracy": 0.0,
+        }
 
 async def get_symbol_correction_patterns(symbol: str) -> list:
     """Récupère les patterns de correction pour un symbole"""
@@ -13510,9 +13919,62 @@ async def get_symbol_correction_patterns(symbol: str) -> list:
 
 async def update_prediction_with_feedback(feedback: dict) -> dict:
     """Met à jour une prédiction avec le feedback réel"""
-    # Implémentation à ajouter
-    logger.info(f"✅ Feedback traité pour la prédiction {feedback.get('prediction_id')}")
-    return {"prediction_id": feedback.get("prediction_id")}
+    try:
+        supabase_url, supabase_key = _get_supabase_config(strict=True)
+        headers = {
+            "apikey": supabase_key,
+            "Authorization": f"Bearer {supabase_key}",
+            "Content-Type": "application/json",
+            "Prefer": "return=minimal",
+        }
+
+        symbol = str(feedback.get("symbol") or "").strip()
+        timeframe = str(feedback.get("timeframe") or "M1").strip()
+        success = bool(feedback.get("success", False))
+        retracement = float(feedback.get("retracement_pct", 0.0) or 0.0)
+        duration_bars = int(feedback.get("duration_bars", 0) or 0)
+        correction_type = str(feedback.get("correction_type") or "UNKNOWN").strip()
+        now = datetime.now(timezone.utc)
+
+        if not symbol:
+            return {"prediction_id": feedback.get("prediction_id"), "updated": False, "reason": "missing_symbol"}
+
+        row = {
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "period_start": (now - timedelta(days=1)).isoformat(),
+            "period_end": now.isoformat(),
+            "total_corrections": 1,
+            "successful_predictions": 1 if success else 0,
+            "avg_retracement_pct": retracement,
+            "avg_duration_bars": float(duration_bars),
+            "success_rate": 100.0 if success else 0.0,
+            "dominant_pattern": correction_type,
+            "created_at": now.isoformat(),
+            "updated_at": now.isoformat(),
+            "metadata": {
+                "source": "ai_server/corrections_feedback",
+                "prediction_id": feedback.get("prediction_id"),
+                "raw_feedback": feedback,
+            },
+        }
+
+        import httpx
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.post(
+                f"{supabase_url}/rest/v1/correction_summary_stats",
+                headers=headers,
+                json=row,
+            )
+        if r.status_code >= 300:
+            logger.warning(f"correction_summary_stats feedback insert HTTP {r.status_code}: {r.text[:180]}")
+            return {"prediction_id": feedback.get("prediction_id"), "updated": False}
+
+        logger.info(f"✅ Feedback correction persisté pour {symbol}")
+        return {"prediction_id": feedback.get("prediction_id"), "updated": True}
+    except Exception as e:
+        logger.warning(f"Feedback correction persist échoué: {e}")
+        return {"prediction_id": feedback.get("prediction_id"), "updated": False, "error": str(e)}
 
 if __name__ == "__main__":
     import uvicorn
