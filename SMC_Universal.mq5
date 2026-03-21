@@ -8212,11 +8212,39 @@ void BuildFutureCandlesFallbackLocal(int horizon)
    double prevRet = 0.0;
    double currClose = closeNow;
    datetime t0 = rates[0].time;
+   int legLen = MathMax(6, MathMin(30, horizon / 8));
+   int legLeft = legLen;
+   int regime = (trendBias >= 0 ? 1 : -1); // 1 up, -1 down
+   double support = rates[MathMin(80, bars - 1)].low;
+   double resistance = rates[MathMin(80, bars - 1)].high;
+   if(support <= 0 || resistance <= 0 || resistance <= support)
+   {
+      support = closeNow * 0.995;
+      resistance = closeNow * 1.005;
+   }
 
    for(int k = 0; k < horizon; k++)
    {
-      double eps = sigma * MathSin((double)(k + 1) * 1.618) * 0.6;
-      double r = (mu * 0.5) + (trendBias * 0.5) + (prevRet * 0.25) + eps;
+      if(legLeft <= 0)
+      {
+         // Alternance impulsion/retrace/range pour éviter la projection linéaire.
+         double phasePick = MathAbs(MathSin((double)(k + 3) * 0.73));
+         if(phasePick > 0.72) regime = -regime;
+         else if(phasePick < 0.22) regime = 0; // range
+         else if(regime == 0) regime = (trendBias >= 0 ? 1 : -1);
+         legLen = MathMax(5, 8 + (int)(MathAbs(MathSin((double)(k + 5) * 0.41)) * 14.0));
+         legLeft = legLen;
+      }
+
+      double phaseW = (regime == 0 ? 0.0 : (regime > 0 ? 1.0 : -1.0));
+      double osc1 = MathSin((double)(k + 1) * (0.32 + sigma * 55.0)) * sigma * 0.95;
+      double osc2 = MathSin((double)(k + 1) * (0.89 + MathAbs(trendBias) * 800.0)) * sigma * 0.45;
+      double pull = 0.0;
+      double anchor = (phaseW >= 0 ? support : resistance);
+      if(currClose > 0 && anchor > 0)
+         pull = MathMax(-0.0022, MathMin(0.0022, ((anchor / currClose) - 1.0) * 0.12));
+
+      double r = (mu * 0.28) + (trendBias * 0.35) + (prevRet * 0.20) + (phaseW * sigma * 1.85) + osc1 + osc2 + pull;
       r = MathMax(-0.03, MathMin(0.03, r));
 
       double o = currClose;
@@ -8239,6 +8267,7 @@ void BuildFutureCandlesFallbackLocal(int horizon)
 
       prevRet = (c / o) - 1.0;
       currClose = c;
+      legLeft--;
    }
 }
 

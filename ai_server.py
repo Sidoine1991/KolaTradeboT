@@ -8969,6 +8969,98 @@ async def get_symbol_prediction_score(symbol: str, timeframe: str = "M1", days: 
         logger.error(f"Erreur /symbols/prediction-score: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/symbols/prediction-score/rebuild")
+async def rebuild_prediction_score_daily(symbol: str = "", timeframe: str = "M1", days: int = 30):
+    """
+    Recalcule `symbol_prediction_score_daily` à partir de `prediction_outcomes`
+    (jointure logique via `prediction_runs`) pour remplir l'historique.
+    """
+    try:
+        supabase_url, supabase_key = _get_supabase_config(strict=True)
+        import httpx
+        tf = (timeframe or "M1").upper()
+        d = int(max(1, min(365, days)))
+        dt_from = (datetime.utcnow() - timedelta(days=d)).isoformat()
+        headers = {
+            "apikey": supabase_key,
+            "Authorization": f"Bearer {supabase_key}",
+            "Content-Type": "application/json",
+            "Prefer": "resolution=merge-duplicates,return=minimal",
+        }
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            run_params = {
+                "select": "id,symbol,timeframe",
+                "timeframe": f"eq.{tf}",
+                "limit": "5000",
+            }
+            if (symbol or "").strip():
+                run_params["symbol"] = f"eq.{symbol.strip()}"
+            rr = await client.get(f"{supabase_url}/rest/v1/prediction_runs", headers=headers, params=run_params)
+            if rr.status_code >= 300:
+                raise HTTPException(status_code=502, detail=f"runs read error {rr.status_code}")
+            runs = rr.json() if rr.text else []
+            run_map = {str(r.get("id")): {"symbol": str(r.get("symbol")), "timeframe": str(r.get("timeframe") or tf)} for r in runs if r.get("id")}
+            if not run_map:
+                return {"ok": True, "upserted": 0, "note": "no_runs"}
+
+            oo = await client.get(
+                f"{supabase_url}/rest/v1/prediction_outcomes",
+                headers=headers,
+                params={
+                    "select": "run_id,score,mae,direction_hit,evaluated_at",
+                    "evaluated_at": f"gte.{dt_from}",
+                    "limit": "20000",
+                },
+            )
+            if oo.status_code >= 300:
+                raise HTTPException(status_code=502, detail=f"outcomes read error {oo.status_code}")
+            outcomes = oo.json() if oo.text else []
+
+            agg: Dict[tuple, Dict[str, float]] = {}
+            for o in outcomes:
+                rid = str(o.get("run_id") or "")
+                meta = run_map.get(rid)
+                if not meta:
+                    continue
+                ev = str(o.get("evaluated_at") or "")
+                if len(ev) < 10:
+                    continue
+                k = (meta["symbol"], meta["timeframe"], ev[:10])
+                b = agg.setdefault(k, {"samples": 0.0, "hits": 0.0, "mae_sum": 0.0, "score_sum": 0.0})
+                b["samples"] += 1.0
+                b["hits"] += (1.0 if bool(o.get("direction_hit")) else 0.0)
+                b["mae_sum"] += float(o.get("mae") or 0.0)
+                b["score_sum"] += float(o.get("score") or 0.0)
+
+            rows: List[Dict[str, Any]] = []
+            for (sym, tff, day_key), v in agg.items():
+                samples = int(v["samples"])
+                rows.append({
+                    "symbol": sym,
+                    "timeframe": tff,
+                    "day": day_key,
+                    "samples": samples,
+                    "direction_hit_rate": float(v["hits"]) / max(1, samples),
+                    "avg_mae": float(v["mae_sum"]) / max(1, samples),
+                    "score": float(v["score_sum"]) / max(1, samples),
+                    "updated_at": datetime.utcnow().isoformat(),
+                })
+
+            if rows:
+                rs = await client.post(
+                    f"{supabase_url}/rest/v1/symbol_prediction_score_daily?on_conflict=symbol,timeframe,day",
+                    headers=headers,
+                    json=rows,
+                )
+                if rs.status_code >= 300:
+                    raise HTTPException(status_code=502, detail=f"daily upsert error {rs.status_code}: {rs.text[:160]}")
+            return {"ok": True, "upserted": len(rows), "days_window": d, "symbol_filter": (symbol or "").strip() or "ALL"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Erreur /symbols/prediction-score/rebuild: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.post("/robot/prediction/validate-run")
 async def validate_prediction_run(
@@ -9001,7 +9093,7 @@ async def validate_prediction_run(
         # Charger les bougies prédites du run
         params = {
             "run_id": f"eq.{run_id}",
-            "select": "step,open,high,low,close",
+            "select": "step,open,high,low,close,candle_time",
             "order": "step.asc",
         }
         async with httpx.AsyncClient(timeout=10.0) as client:
@@ -9051,6 +9143,11 @@ async def validate_prediction_run(
             mae_total += mae
             score_total += score
             used += 1
+            candle_time = int(pred.get("candle_time", 0) or 0)
+            evaluated_at_iso = (
+                datetime.utcfromtimestamp(candle_time).isoformat()
+                if candle_time > 0 else datetime.utcnow().isoformat()
+            )
             outcome_rows.append({
                 "run_id": run_id,
                 "step": step,
@@ -9062,7 +9159,7 @@ async def validate_prediction_run(
                 "mae": mae,
                 "mape": mape,
                 "score": score,
-                "evaluated_at": datetime.utcnow().isoformat(),
+                "evaluated_at": evaluated_at_iso,
             })
 
         if not outcome_rows:
@@ -9078,50 +9175,63 @@ async def validate_prediction_run(
         if wo.status_code >= 300:
             raise HTTPException(status_code=502, detail=f"Supabase write outcomes error: {wo.status_code}")
 
-        day_key = datetime.utcnow().date().isoformat()
-        batch_samples = used
-        batch_hit_rate = hit_count / max(1, used)
-        batch_mae = mae_total / max(1, used)
-        batch_score = score_total / max(1, used)
+        # Agrégation par jour (UTC) issue de evaluated_at pour éviter une seule ligne figée.
+        by_day: Dict[str, Dict[str, float]] = {}
+        for o in outcome_rows:
+            ev = str(o.get("evaluated_at", ""))
+            day_key = (ev[:10] if len(ev) >= 10 else datetime.utcnow().date().isoformat())
+            bucket = by_day.setdefault(day_key, {"samples": 0.0, "hits": 0.0, "mae_sum": 0.0, "score_sum": 0.0})
+            bucket["samples"] += 1.0
+            bucket["hits"] += (1.0 if bool(o.get("direction_hit")) else 0.0)
+            bucket["mae_sum"] += float(o.get("mae", 0.0) or 0.0)
+            bucket["score_sum"] += float(o.get("score", 0.0) or 0.0)
 
-        # Fusion pondérée avec la ligne du jour
-        params_day = {
-            "symbol": f"eq.{symbol}",
-            "timeframe": f"eq.{timeframe.upper()}",
-            "day": f"eq.{day_key}",
-            "select": "samples,direction_hit_rate,avg_mae,score",
-            "limit": "1",
-        }
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            gd = await client.get(f"{supabase_url}/rest/v1/symbol_prediction_score_daily", headers=headers, params=params_day)
-        prev_rows = gd.json() if gd.status_code < 300 and gd.text else []
-        prev = prev_rows[0] if prev_rows else {}
-        prev_samples = int(prev.get("samples", 0) or 0)
-        total_samples = prev_samples + batch_samples
+        merged_rows: List[Dict[str, Any]] = []
+        for day_key, agg in by_day.items():
+            batch_samples = int(agg["samples"])
+            batch_hit_rate = float(agg["hits"]) / max(1, batch_samples)
+            batch_mae = float(agg["mae_sum"]) / max(1, batch_samples)
+            batch_score = float(agg["score_sum"]) / max(1, batch_samples)
 
-        def _wavg(prev_value: float, batch_value: float) -> float:
-            if total_samples <= 0:
-                return batch_value
-            return ((prev_value * prev_samples) + (batch_value * batch_samples)) / total_samples
+            params_day = {
+                "symbol": f"eq.{symbol}",
+                "timeframe": f"eq.{timeframe.upper()}",
+                "day": f"eq.{day_key}",
+                "select": "samples,direction_hit_rate,avg_mae,score",
+                "limit": "1",
+            }
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                gd = await client.get(f"{supabase_url}/rest/v1/symbol_prediction_score_daily", headers=headers, params=params_day)
+            prev_rows = gd.json() if gd.status_code < 300 and gd.text else []
+            prev = prev_rows[0] if prev_rows else {}
+            prev_samples = int(prev.get("samples", 0) or 0)
+            total_samples = prev_samples + batch_samples
 
-        merged_row = {
-            "symbol": symbol,
-            "timeframe": timeframe.upper(),
-            "day": day_key,
-            "samples": total_samples,
-            "direction_hit_rate": _wavg(float(prev.get("direction_hit_rate", 0.0) or 0.0), batch_hit_rate),
-            "avg_mae": _wavg(float(prev.get("avg_mae", 0.0) or 0.0), batch_mae),
-            "score": _wavg(float(prev.get("score", 0.0) or 0.0), batch_score),
-            "updated_at": datetime.utcnow().isoformat(),
-        }
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            sd = await client.post(
-                f"{supabase_url}/rest/v1/symbol_prediction_score_daily?on_conflict=symbol,timeframe,day",
-                headers=write_headers,
-                json=[merged_row],
-            )
-        if sd.status_code >= 300:
-            raise HTTPException(status_code=502, detail=f"Supabase write daily score error: {sd.status_code}")
+            def _wavg(prev_value: float, batch_value: float) -> float:
+                if total_samples <= 0:
+                    return batch_value
+                return ((prev_value * prev_samples) + (batch_value * batch_samples)) / total_samples
+
+            merged_rows.append({
+                "symbol": symbol,
+                "timeframe": timeframe.upper(),
+                "day": day_key,
+                "samples": total_samples,
+                "direction_hit_rate": _wavg(float(prev.get("direction_hit_rate", 0.0) or 0.0), batch_hit_rate),
+                "avg_mae": _wavg(float(prev.get("avg_mae", 0.0) or 0.0), batch_mae),
+                "score": _wavg(float(prev.get("score", 0.0) or 0.0), batch_score),
+                "updated_at": datetime.utcnow().isoformat(),
+            })
+
+        if merged_rows:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                sd = await client.post(
+                    f"{supabase_url}/rest/v1/symbol_prediction_score_daily?on_conflict=symbol,timeframe,day",
+                    headers=write_headers,
+                    json=merged_rows,
+                )
+            if sd.status_code >= 300:
+                raise HTTPException(status_code=502, detail=f"Supabase write daily score error: {sd.status_code}")
 
         return {
             "run_id": run_id,
@@ -9134,11 +9244,8 @@ async def validate_prediction_run(
                 "score": round(batch_score, 4),
             },
             "daily": {
-                "day": day_key,
-                "samples": total_samples,
-                "direction_hit_rate": round(merged_row["direction_hit_rate"], 4),
-                "avg_mae": merged_row["avg_mae"],
-                "score": round(merged_row["score"], 4),
+                "rows_upserted": len(merged_rows),
+                "days": [r["day"] for r in merged_rows],
             },
         }
     except HTTPException:
