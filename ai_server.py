@@ -70,6 +70,14 @@ logger = logging.getLogger("tradbot_ai")
 if os.getenv("RENDER") or os.getenv("RENDER_SERVICE_ID") or os.getenv("SUPABASE_URL"):
     os.environ.setdefault("MODELS_DIR", "/tmp/models")
 
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    """Lit un booléen depuis les variables d'environnement."""
+    val = os.getenv(name)
+    if val is None:
+        return default
+    return val.strip().lower() in {"1", "true", "yes", "on"}
+
 # ===== SYSTÈME D'APPRENTISSAGE AUTOMATIQUE INTÉGRÉ =====
 # Importer le système ML intégré
 try:
@@ -1474,6 +1482,23 @@ except Exception:
 # Configuration des répertoires via variables d'environnement
 # Vérification si on est sur Supabase
 RUNNING_ON_SUPABASE = bool(os.getenv("SUPABASE_URL") or os.getenv("SUPABASE_PROJECT_ID"))
+RUNNING_ON_RENDER = bool(os.getenv("RENDER") or os.getenv("RENDER_SERVICE_ID"))
+
+# Mode économie d'énergie: activé par défaut sur Render.
+# Permet de limiter les tâches de fond 24/24 qui consomment le quota.
+AI_LOW_POWER_MODE = _env_bool("AI_LOW_POWER_MODE", default=RUNNING_ON_RENDER)
+
+# Réglages "sobres" pour limiter la conso 24/24 sur Render
+_startup_training_default = (not RUNNING_ON_RENDER) and (not AI_LOW_POWER_MODE)
+_symbol_stats_loop_default = (not RUNNING_ON_RENDER) and (not AI_LOW_POWER_MODE)
+_supabase_trainer_default = (not RUNNING_ON_RENDER) and (not AI_LOW_POWER_MODE)
+
+AI_ENABLE_STARTUP_TRAINING = _env_bool("AI_ENABLE_STARTUP_TRAINING", default=_startup_training_default)
+AI_ENABLE_SYMBOL_STATS_LOOP = _env_bool("AI_ENABLE_SYMBOL_STATS_LOOP", default=_symbol_stats_loop_default)
+AI_SYMBOL_STATS_INTERVAL_SEC = int(os.getenv("AI_SYMBOL_STATS_INTERVAL_SEC", "3600" if RUNNING_ON_RENDER else "300"))
+AI_ENABLE_SUPABASE_CONTINUOUS_TRAINER = _env_bool("AI_ENABLE_SUPABASE_CONTINUOUS_TRAINER", default=_supabase_trainer_default)
+AI_CONTINUOUS_DEFAULT_INTERVAL_SEC = int(os.getenv("AI_CONTINUOUS_DEFAULT_INTERVAL_SEC", "3600" if RUNNING_ON_RENDER else "600"))
+AI_CONTINUOUS_MIN_INTERVAL_SEC = int(os.getenv("AI_CONTINUOUS_MIN_INTERVAL_SEC", "1800" if RUNNING_ON_RENDER else "300"))
 
 # Fonction pour créer un répertoire avec gestion des erreurs
 def safe_makedirs(path, mode=0o755):
@@ -1984,6 +2009,9 @@ CREATE INDEX IF NOT EXISTS idx_trade_feedback_created_at ON trade_feedback(creat
 @app.on_event("startup")
 async def startup_event():
     """Initialize database on startup"""
+    if AI_LOW_POWER_MODE:
+        logger.info("🔋 AI_LOW_POWER_MODE actif: réduction des tâches de fond non essentielles")
+
     if not DB_AVAILABLE:
         logger.info("📊 Mode sans PostgreSQL - feedback loop désactivé")
     
@@ -1998,14 +2026,20 @@ async def startup_event():
     except Exception as e:
         logger.error(f"❌ Erreur initialisation base de données: {e}", exc_info=True)
     
-    # Entraîner automatiquement les modèles ML pour les symboles principaux
-    await train_models_on_startup()
+    # Entraîner automatiquement les modèles ML au démarrage (optionnel)
+    if AI_ENABLE_STARTUP_TRAINING:
+        await train_models_on_startup()
+    else:
+        logger.info("ℹ️ Startup training ML désactivé (AI_ENABLE_STARTUP_TRAINING=false)")
 
-    # Démarrer la boucle de stats symboles (discipline)
+    # Démarrer la boucle de stats symboles (optionnelle)
     global _symbol_stats_task
-    if _symbol_stats_task is None or _symbol_stats_task.done():
-        _symbol_stats_task = asyncio.create_task(_symbol_stats_loop(interval_sec=300))
-        logger.info("✅ Boucle stats symboles démarrée (300s)")
+    if AI_ENABLE_SYMBOL_STATS_LOOP:
+        if _symbol_stats_task is None or _symbol_stats_task.done():
+            _symbol_stats_task = asyncio.create_task(_symbol_stats_loop(interval_sec=AI_SYMBOL_STATS_INTERVAL_SEC))
+            logger.info(f"✅ Boucle stats symboles démarrée ({AI_SYMBOL_STATS_INTERVAL_SEC}s)")
+    else:
+        logger.info("ℹ️ Boucle stats symboles désactivée (AI_ENABLE_SYMBOL_STATS_LOOP=false)")
 
     # Démarrer l'entraînement continu ML (Supabase: fetch predictions → train → save model_metrics)
     try:
@@ -2014,10 +2048,12 @@ async def startup_event():
             os.getenv("SUPABASE_URL")
             and (os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_SERVICE_KEY") or os.getenv("SUPABASE_ANON_KEY"))
         )
-        if ML_TRAINER_AVAILABLE and supabase_configured:
+        if ML_TRAINER_AVAILABLE and supabase_configured and AI_ENABLE_SUPABASE_CONTINUOUS_TRAINER:
             logger.info("🤖 Démarrage entraînement continu ML (Supabase)...")
             await ml_trainer.start()
             logger.info("✅ Entraînement continu Supabase activé (predictions → model_metrics)")
+        elif ML_TRAINER_AVAILABLE and supabase_configured and not AI_ENABLE_SUPABASE_CONTINUOUS_TRAINER:
+            logger.info("ℹ️ Entraînement continu Supabase désactivé (AI_ENABLE_SUPABASE_CONTINUOUS_TRAINER=false)")
         elif ML_TRAINER_AVAILABLE and not supabase_configured:
             logger.info("ℹ️ Entraînement continu désactivé: SUPABASE_URL et SUPABASE_*KEY requis")
     except Exception as e:
@@ -11060,7 +11096,7 @@ async def ml_signal(symbol: str, timeframe: str = "M1"):
         }
 
 @app.post("/ml/continuous/start")
-async def ml_continuous_start(symbols: Optional[str] = None, timeframe: str = "M1", interval_sec: int = 300):
+async def ml_continuous_start(symbols: Optional[str] = None, timeframe: str = "M1", interval_sec: Optional[int] = None):
     """
     Démarre l'entraînement continu "online" (recalibrage à partir des feedbacks).
     symbols: "EURUSD,GBPUSD,USDJPY"
@@ -11070,10 +11106,12 @@ async def ml_continuous_start(symbols: Optional[str] = None, timeframe: str = "M
         return {"status": "already_running"}
     
     syms = [s.strip() for s in (symbols or os.getenv("ML_SYMBOLS", "EURUSD,GBPUSD,USDJPY,USDCAD,AUDUSD,NZDUSD,EURJPY")).split(",") if s.strip()]
+    requested_interval = interval_sec if interval_sec is not None else AI_CONTINUOUS_DEFAULT_INTERVAL_SEC
+    safe_interval = max(int(requested_interval), AI_CONTINUOUS_MIN_INTERVAL_SEC)
     _continuous_enabled = True
-    _continuous_task = asyncio.create_task(_continuous_training_loop(syms, timeframe, interval_sec))
+    _continuous_task = asyncio.create_task(_continuous_training_loop(syms, timeframe, safe_interval))
     logger.info(f"✅ Continuous ML training démarré pour: {syms}")
-    return {"status": "started", "symbols": syms, "timeframe": timeframe, "interval_sec": interval_sec}
+    return {"status": "started", "symbols": syms, "timeframe": timeframe, "interval_sec": safe_interval}
 
 @app.post("/ml/continuous/stop")
 async def ml_continuous_stop():
