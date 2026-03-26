@@ -8366,6 +8366,7 @@ def _generate_future_ohlc_series(
     try:
         from ai_server_improvements import predict_prices_advanced
         last_close = float(df['close'].iloc[-1])
+        logger.info(f"Appel de predict_prices_advanced pour {symbol} avec last_close={last_close}, horizon={horizon}")
         # Utiliser l'IA avancée basée sur indicateurs et S/R
         adv_pred = predict_prices_advanced(df, last_close, horizon, "M1", symbol)
         
@@ -8373,6 +8374,7 @@ def _generate_future_ohlc_series(
         conf = adv_pred.get('confidence', 0.5)
         direction = adv_pred.get('direction', 'NEUTRAL')
         atr = adv_pred.get('atr', last_close * 0.001)
+        logger.info(f"predict_prices_advanced pour {symbol} terminé. Direction: {direction}, Confiance: {conf}")
     except Exception as e:
         logger.warning(f"Fallback dans _generate_future_ohlc_series: {e}")
         last_close = float(df['close'].iloc[-1])
@@ -8442,8 +8444,21 @@ def _generate_future_ohlc_series(
     return candles
 
 
+_SYMBOL_PROFILE_CACHE = {}
+_SYMBOL_PROFILE_CACHE_TTL = 3600 # 1h
+
 async def _fetch_symbol_behavior_profile(symbol: str, timeframe: str = "M1") -> Dict[str, Any]:
-    """Construit un profil comportemental par symbole depuis Supabase."""
+    """Construit un profil comportemental par symbole depuis Supabase avec cache."""
+    now = time.time()
+    cache_key = f"{symbol}_{timeframe}"
+    if cache_key in _SYMBOL_PROFILE_CACHE:
+        entry = _SYMBOL_PROFILE_CACHE[cache_key]
+        if now - entry["expiry"] < _SYMBOL_PROFILE_CACHE_TTL:
+            return entry["data"]
+
+    start_fetch = now
+    logger.info(f"Récupération du profil comportemental pour {symbol}...")
+
     profile: Dict[str, Any] = {
         "avg_leg_bars": 14,
         "retrace_ratio": 0.48,
@@ -8455,7 +8470,7 @@ async def _fetch_symbol_behavior_profile(symbol: str, timeframe: str = "M1") -> 
         supabase_url, supabase_key = _get_supabase_config(strict=True)
         import httpx
         headers = {"apikey": supabase_key, "Authorization": f"Bearer {supabase_key}"}
-        async with httpx.AsyncClient(timeout=8.0) as client:
+        async with httpx.AsyncClient(timeout=3.0) as client:
             r_pat = await client.get(
                 f"{supabase_url}/rest/v1/symbol_correction_patterns",
                 headers=headers,
@@ -8919,8 +8934,13 @@ async def robot_predict_ohlc(symbol: str, timeframe: str = "M1", horizon: int = 
         if df is None or df.empty or len(df) < 80:
             raise HTTPException(status_code=404, detail=f"Données insuffisantes pour {symbol}")
 
+        start_time = time.time()
         behavior_profile = await _fetch_symbol_behavior_profile(used_symbol, "M1")
+        logger.info(f"Calcul des bougies futures pour {used_symbol}...")
         candles = _generate_future_ohlc_series(df, h, behavior_profile=behavior_profile, symbol=used_symbol)
+        duration = time.time() - start_time
+        logger.info(f"Génération bougies futures terminée en {duration:.3f}s pour {used_symbol}")
+        
         if not candles:
             raise HTTPException(status_code=500, detail="Impossible de générer la projection OHLC")
 
@@ -10980,9 +11000,11 @@ async def ml_signal(symbol: str, timeframe: str = "M1"):
                     signal = random.choices(signals, weights=weights)[0]
                     confidence = random.uniform(0.6, 0.9)
                     
+                    # Compat MT5: certains EAs attendent "action" au lieu de "signal"
                     return {
                         "symbol": symbol,
                         "timeframe": timeframe,
+                        "action": signal,
                         "signal": signal,
                         "confidence": confidence,
                         "accuracy": metrics.get("accuracy", 0.5),
@@ -10998,6 +11020,7 @@ async def ml_signal(symbol: str, timeframe: str = "M1"):
         return {
             "symbol": symbol,
             "timeframe": timeframe,
+            "action": "HOLD",
             "signal": "HOLD",  # Signal par défaut
             "confidence": 0.5,
             "accuracy": metrics.get("accuracy", 0.5),
@@ -11012,6 +11035,7 @@ async def ml_signal(symbol: str, timeframe: str = "M1"):
         return {
             "symbol": symbol,
             "timeframe": timeframe,
+            "action": "HOLD",
             "signal": "HOLD",
             "confidence": 0.5,
             "accuracy": 0.5,
