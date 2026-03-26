@@ -8353,164 +8353,91 @@ def _generate_future_ohlc_series(
     df: pd.DataFrame,
     horizon: int = 200,
     behavior_profile: Optional[Dict[str, Any]] = None,
+    symbol: str = "UNKNOWN"
 ) -> List[Dict[str, Any]]:
     """
-    Génère une projection OHLC future stable à partir des dernières bougies.
-    Retourne une liste de dictionnaires: time, open, high, low, close, confidence
+    Génère une projection OHLC future avancée basée sur Supabase et les indicateurs.
+    Utilise predict_prices_advanced pour calculer la courbe principale des prix 'close', 
+    et le comportement historique pour proportionner les mèches (wicks) et les retracements.
     """
-    if df is None or df.empty or len(df) < 80:
+    if df is None or df.empty or len(df) < 50:
         return []
 
-    d = df.copy()
-    if 'time' in d.columns:
-        d['time'] = pd.to_datetime(d['time'])
-    else:
-        d['time'] = pd.date_range(end=datetime.utcnow(), periods=len(d), freq='1min')
-    d = d.sort_values('time').reset_index(drop=True)
+    try:
+        from ai_server_improvements import predict_prices_advanced
+        last_close = float(df['close'].iloc[-1])
+        # Utiliser l'IA avancée basée sur indicateurs et S/R
+        adv_pred = predict_prices_advanced(df, last_close, horizon, "M1", symbol)
+        
+        predicted_prices = adv_pred.get('prediction', [])
+        conf = adv_pred.get('confidence', 0.5)
+        direction = adv_pred.get('direction', 'NEUTRAL')
+        atr = adv_pred.get('atr', last_close * 0.001)
+    except Exception as e:
+        logger.warning(f"Fallback dans _generate_future_ohlc_series: {e}")
+        last_close = float(df['close'].iloc[-1])
+        predicted_prices = [last_close] * horizon
+        conf = 0.5
+        direction = 'NEUTRAL'
+        atr = last_close * 0.001
 
-    close = d['close'].astype(float)
-    high = d['high'].astype(float) if 'high' in d.columns else close
-    low = d['low'].astype(float) if 'low' in d.columns else close
-    ret = close.pct_change().fillna(0.0)
-    sigma = float(ret.tail(120).std())
-    sigma = max(1e-6, min(0.01, sigma))
-    mu = float(ret.tail(120).mean())
+    if not predicted_prices:
+        return []
 
-    # Biais tendance + structure (non-linéaire)
-    ema20 = close.ewm(span=20, adjust=False).mean().iloc[-1]
-    ema50 = close.ewm(span=50, adjust=False).mean().iloc[-1]
-    last_close = float(close.iloc[-1])
-    trend_bias = 0.0 if last_close == 0 else max(-0.0015, min(0.0015, (ema20 - ema50) / last_close))
-    structure = analyze_market_structure(d.tail(240), lookback=40)
-    trend = structure.get("trend", "neutral")
-    trend_strength = float(structure.get("strength", 0.0) or 0.0)
-
-    # Niveaux de structure utilisés comme "aimants"
-    support_lvl = float(low.tail(80).quantile(0.2))
-    resistance_lvl = float(high.tail(80).quantile(0.8))
-    mid_lvl = (support_lvl + resistance_lvl) / 2.0 if support_lvl > 0 and resistance_lvl > 0 else last_close
-
-    # ATR ratio approximé
-    tr = (high - low).tail(120)
-    atr = float(tr.mean()) if len(tr) else 0.0
-    atr_ratio = (atr / last_close) if last_close > 0 and atr > 0 else sigma * 1.2
-    atr_ratio = max(1e-6, min(0.02, atr_ratio))
-
-    # Profil comportemental du symbole (optionnel, dérivé Supabase)
+    # Injecter le profil de Supabase pour texturiser le OHLC (mèches, bruit, comportement)
     prof = behavior_profile or {}
-    leg_mean = int(max(4, min(40, float(prof.get("avg_leg_bars", 14)))))
-    retrace_ratio = float(max(0.20, min(0.85, float(prof.get("retrace_ratio", 0.48)))))
-    reversal_prob = float(max(0.03, min(0.45, float(prof.get("reversal_prob", 0.18)))))
     vol_mult = float(max(0.55, min(2.20, float(prof.get("vol_multiplier", 1.0)))))
-    trend_pref = float(max(-1.0, min(1.0, float(prof.get("trend_preference", 0.0)))))
-
-    # Générateur pseudo-déterministe (évite flicker)
-    last_time = pd.to_datetime(d['time'].iloc[-1])
-    seed = abs(hash(f"ohlc:{int(last_time.timestamp())//60}:{len(d)}:{leg_mean}:{int(retrace_ratio*100)}")) % (2**32)
+    retrace_ratio = float(max(0.20, min(0.85, float(prof.get("retrace_ratio", 0.48)))))
+    
+    last_time = pd.to_datetime(df['time'].iloc[-1]) if 'time' in df.columns else datetime.utcnow()
+    seed = abs(hash(f"ohlc:{int(last_time.timestamp())//60}:{len(df)}")) % (2**32)
     rng = np.random.default_rng(seed)
 
     candles: List[Dict[str, Any]] = []
-    curr_close = max(1e-8, last_close)
-    prev_ret = 0.0
-    h = int(max(1, min(500, horizon)))
-    conf = float(max(0.3, min(0.93, 0.52 + abs(trend_bias) * 120 + (0.08 * (1.0 - reversal_prob)))))
+    curr_close = max(1e-8, float(df['close'].iloc[-1]))
 
-    # State machine non-linéaire : alterne impulsion/pullback/continuation/range
-    regime = "impulse_up" if (trend == "uptrend" or trend_pref > 0.15) else ("impulse_down" if (trend == "downtrend" or trend_pref < -0.15) else "range")
-    leg_left = max(3, int(rng.integers(max(4, leg_mean - 4), leg_mean + 5)))
-    leg_id = 0
-
-    for i in range(h):
-        if leg_left <= 0:
-            leg_id += 1
-            toss = float(rng.random())
-            if regime in ("impulse_up", "continuation_up"):
-                regime = "pullback_down" if toss < (0.55 + retrace_ratio * 0.25) else ("range" if toss < 0.85 else "continuation_up")
-            elif regime in ("impulse_down", "continuation_down"):
-                regime = "pullback_up" if toss < (0.55 + retrace_ratio * 0.25) else ("range" if toss < 0.85 else "continuation_down")
-            elif regime in ("pullback_down", "pullback_up"):
-                if regime == "pullback_down":
-                    regime = "continuation_up" if toss > reversal_prob else "impulse_down"
-                else:
-                    regime = "continuation_down" if toss > reversal_prob else "impulse_up"
-            else:
-                regime = "impulse_up" if toss > 0.5 else "impulse_down"
-            leg_left = max(3, int(rng.integers(max(4, leg_mean - 5), leg_mean + 6)))
-
-        if regime in ("impulse_up", "continuation_up"):
-            phase = "impulse_up"
-            phase_w = 1.0
-        elif regime in ("impulse_down", "continuation_down"):
-            phase = "impulse_down"
-            phase_w = -1.0
-        elif regime == "pullback_down":
-            phase = "retrace_down"
-            phase_w = -0.72
-        elif regime == "pullback_up":
-            phase = "retrace_up"
-            phase_w = 0.72
-        else:
-            phase = "range"
-            phase_w = 0.0
-
-        structure_bias = 0.0
-        if trend == "uptrend":
-            structure_bias = 0.00035 + min(0.0012, trend_strength * 0.8)
-        elif trend == "downtrend":
-            structure_bias = -0.00035 - min(0.0012, trend_strength * 0.8)
-
-        # Oscillations multi-fréquences : reproduit segments/croisements spécifiques au symbole
-        osc = (
-            math.sin((i + 1) * (0.25 + 0.15 * retrace_ratio)) * sigma * 0.65 +
-            math.sin((i + 1) * (0.67 + 0.12 * reversal_prob)) * sigma * 0.35
-        )
-        eps = float(rng.normal(0.0, sigma * 0.55 * vol_mult))
-        r = (mu * 0.30) + (trend_bias * 0.28) + (structure_bias * 0.30) + (phase_w * sigma * 2.0) + (prev_ret * 0.18) + osc + eps
-
-        # Attraction vers niveaux de structure (supports/résistances).
-        anchor = (
-            support_lvl if phase in ("retrace_down", "impulse_up") else
-            resistance_lvl if phase in ("retrace_up", "impulse_down") else
-            mid_lvl
-        )
-        if curr_close > 0 and anchor > 0:
-            anchor_pull = ((anchor / curr_close) - 1.0) * (0.10 + 0.05 * retrace_ratio)
-            r += max(-0.0025, min(0.0025, anchor_pull))
-
-        r = max(-0.03, min(0.03, r))
-
+    for i, p_price in enumerate(predicted_prices):
+        if i >= horizon:
+            break
+            
+        t = last_time + timedelta(minutes=i + 1)
+        c = float(p_price)
         o = curr_close
-        c = max(1e-8, o * (1.0 + r))
+        
         body = abs(c - o)
-        wick_scale = max(atr_ratio * o, body * 0.35, 1e-8)
-        up_wick = float(abs(rng.normal(wick_scale * 0.7, wick_scale * 0.25)))
-        dn_wick = float(abs(rng.normal(wick_scale * 0.7, wick_scale * 0.25)))
+        wick_scale = max(atr * 0.3 * vol_mult, body * 0.4, 1e-8)
+        
+        # Mèches adaptées selon retrace_ratio de Supabase
+        up_wick = float(abs(rng.normal(wick_scale * (0.8 + retrace_ratio*0.2), wick_scale * 0.3)))
+        dn_wick = float(abs(rng.normal(wick_scale * (0.8 + retrace_ratio*0.2), wick_scale * 0.3)))
+        
         hi = max(o, c) + up_wick
         lo = min(o, c) - dn_wick
         if lo <= 0:
             lo = min(o, c) * 0.999
+            
+        phase = "impulse_up" if c > o else "impulse_down"
+        if direction == 'BULLISH' and c < o:
+            phase = "retrace_down"
+        elif direction == 'BEARISH' and c > o:
+            phase = "retrace_up"
 
-        t = last_time + timedelta(minutes=i + 1)
-        struct_tag = "BOS_UP" if phase in ("impulse_up",) else (
-            "BOS_DOWN" if phase in ("impulse_down",) else
-            ("RETRACE_TO_SUPPORT" if phase == "retrace_down" else ("RETRACE_TO_RESISTANCE" if phase == "retrace_up" else "RANGE"))
-        )
+        struct_tag = "ML_" + direction
+        
         candles.append({
             "time": int(t.timestamp()),
             "open": float(o),
             "high": float(max(hi, o, c)),
             "low": float(min(lo, o, c)),
             "close": float(c),
-            "confidence": conf,
+            "confidence": float(conf),
             "phase": phase,
             "structure_tag": struct_tag,
-            "level_ref": float(anchor if anchor > 0 else mid_lvl),
-            "regime": regime,
-            "leg_id": leg_id
+            "level_ref": float(c),
+            "regime": direction,
+            "leg_id": i // 10
         })
-        prev_ret = (c / o) - 1.0 if o > 0 else 0.0
         curr_close = c
-        leg_left -= 1
 
     return candles
 
@@ -8993,7 +8920,7 @@ async def robot_predict_ohlc(symbol: str, timeframe: str = "M1", horizon: int = 
             raise HTTPException(status_code=404, detail=f"Données insuffisantes pour {symbol}")
 
         behavior_profile = await _fetch_symbol_behavior_profile(used_symbol, "M1")
-        candles = _generate_future_ohlc_series(df, h, behavior_profile=behavior_profile)
+        candles = _generate_future_ohlc_series(df, h, behavior_profile=behavior_profile, symbol=used_symbol)
         if not candles:
             raise HTTPException(status_code=500, detail="Impossible de générer la projection OHLC")
 
