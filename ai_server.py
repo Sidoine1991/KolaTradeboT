@@ -142,7 +142,25 @@ def enhance_decision_with_ml(symbol: str, decision: str, confidence: float, mark
     if not ML_AVAILABLE:
         return base
     try:
-        return ml_enhancer.enhance_decision(symbol, decision, confidence, market_data)
+        enhanced = ml_enhancer.enhance_decision(symbol, decision, confidence, market_data)
+
+        # Anti-regression: si le ML n'a pas de modele ("no_model"), ou s'il degrade une
+        # decision technique BUY/SELL en HOLD sans confiance superieure, on garde la base.
+        if isinstance(enhanced, dict):
+            ml_reason = str(enhanced.get("ml_reason", "")).lower()
+            ml_action = str(enhanced.get("enhanced_decision", enhanced.get("action", decision))).lower()
+            try:
+                ml_conf = float(enhanced.get("enhanced_confidence", enhanced.get("confidence", confidence)))
+            except Exception:
+                ml_conf = confidence
+
+            if decision in ("buy", "sell"):
+                if ml_reason in ("no_model", "model_missing", "model_not_found"):
+                    return base
+                if ml_action == "hold" and ml_conf <= max(confidence, 0.55):
+                    return base
+
+        return enhanced if isinstance(enhanced, dict) else base
     except Exception as e:
         logger.error(f"❌ Erreur enhancement ML: {e}")
         return {
@@ -3372,6 +3390,11 @@ class DecisionRequest(BaseModel):
     deriv_patterns_bullish: Optional[int] = None  # Nombre de patterns bullish
     deriv_patterns_bearish: Optional[int] = None  # Nombre de patterns bearish
     deriv_patterns_confidence: Optional[float] = None  # Confiance moyenne des patterns
+    # Champs optionnels envoyés par certains EA (ex: SMC_Universal) pour fallback.
+    volatility_compression: Optional[float] = None
+    price_acceleration: Optional[float] = None
+    volume_spike: Optional[bool] = None
+    spike_probability: Optional[float] = None
     timestamp: Optional[str] = None  # Timestamp de la requête (ajouté pour corriger l'erreur 422)
 
 # ===== MODÈLES POUR FEEDBACK LOOP =====
@@ -3663,6 +3686,34 @@ async def decision_simplified(request: DecisionRequest):
     else:
         base_action = "hold"
         base_confidence = 0.5
+
+    # 5b. Fallback si indicateurs "coeur" absents (EMA a 0/None, RSI neutre)
+    # Utilise les champs EA si disponibles pour eviter HOLD 50% partout.
+    if base_action == "hold":
+        try:
+            accel = float(request.price_acceleration) if request.price_acceleration is not None else 0.0
+            spike_prob = float(request.spike_probability) if request.spike_probability is not None else None
+            vol_comp = float(request.volatility_compression) if request.volatility_compression is not None else None
+
+            # Acceleration prix: donne une direction minimale
+            if abs(accel) >= 0.0008:
+                base_action = "buy" if accel > 0 else "sell"
+                base_confidence = 0.58
+                reason += f"Fallback accel ({accel:+.6f}). "
+
+            # Spike probability: sur Boom/Crash, donne un petit biais directionnel via dir_rule si fourni
+            if spike_prob is not None and spike_prob >= 0.7 and request.dir_rule in (1, -1):
+                base_action = "buy" if request.dir_rule == 1 else "sell"
+                base_confidence = max(base_confidence, 0.60)
+                reason += f"Fallback spike_prob ({spike_prob:.2f}). "
+
+            # Compression volatilite: marche "tendu" -> augmenter legerement la confiance si deja directionnelle
+            if vol_comp is not None and base_action != "hold":
+                if vol_comp < 0.75:
+                    base_confidence = min(0.70, base_confidence + 0.05)
+                    reason += f"Vol compression ({vol_comp:.2f}). "
+        except Exception as _fb_ex:
+            logger.debug(f"Fallback EA fields skipped: {_fb_ex}")
     
     # 6. AMÉLIORATION AVEC ML
     market_data = {
@@ -5966,8 +6017,20 @@ async def decision_gemma(request: DecisionRequest):
 
 def _parse_decision_body(raw: bytes) -> DecisionRequest:
     """Parse le body JSON de manière tolérante pour éviter 422 (robot MT5 payloads variables)."""
+    def _pick(d: dict, keys: list, default=None):
+        for k in keys:
+            if k in d and d.get(k) is not None:
+                return d.get(k)
+        return default
+
     try:
-        body = json.loads(raw.decode("utf-8") if isinstance(raw, bytes) else raw)
+        if isinstance(raw, bytes):
+            text = raw.decode("utf-8", errors="ignore").strip()
+            if text.startswith("\ufeff"):
+                text = text.lstrip("\ufeff")
+        else:
+            text = str(raw or "").strip()
+        body = json.loads(text)
     except Exception:
         body = {}
     if not isinstance(body, dict):
@@ -5980,27 +6043,40 @@ def _parse_decision_body(raw: bytes) -> DecisionRequest:
     def _str(v, default="UNKNOWN"):
         if v is None or v == "": return default
         return str(v).strip() or default
-    symbol = _str(body.get("symbol"))
-    bid = _float(body.get("bid"), 1.0)
-    ask = _float(body.get("ask"), 1.0001)
+    symbol = _str(_pick(body, ["symbol", "Symbol", "_Symbol", "SYMBOL"]))
+    bid = _float(_pick(body, ["bid", "Bid", "BID"]), 1.0)
+    ask = _float(_pick(body, ["ask", "Ask", "ASK"]), 1.0001)
     if bid >= ask:
         ask = bid + 0.0001
     return DecisionRequest(
         symbol=symbol, bid=bid, ask=ask,
-        rsi=min(100, max(0, _float(body.get("rsi"), 50.0))),
-        ema_fast_h1=body.get("ema_fast_h1"), ema_slow_h1=body.get("ema_slow_h1"),
-        ema_fast_m1=body.get("ema_fast_m1"), ema_slow_m1=body.get("ema_slow_m1"),
-        ema_fast_m5=body.get("ema_fast_m5"), ema_slow_m5=body.get("ema_slow_m5"),
-        atr=_float(body.get("atr")), dir_rule=int(body.get("dir_rule", 0) or 0),
-        is_spike_mode=bool(body.get("is_spike_mode", False)),
-        vwap=body.get("vwap"), vwap_distance=body.get("vwap_distance"), above_vwap=body.get("above_vwap"),
-        supertrend_trend=int(body.get("supertrend_trend", 0) or 0),
-        supertrend_line=body.get("supertrend_line"),
-        volatility_regime=int(body.get("volatility_regime", 0) or 0),
-        volatility_ratio=_float(body.get("volatility_ratio"), 1.0),
-        image_filename=body.get("image_filename"), deriv_patterns=body.get("deriv_patterns"),
-        deriv_patterns_bullish=body.get("deriv_patterns_bullish"), deriv_patterns_bearish=body.get("deriv_patterns_bearish"),
-        deriv_patterns_confidence=body.get("deriv_patterns_confidence"), timestamp=body.get("timestamp"),
+        rsi=min(100, max(0, _float(_pick(body, ["rsi", "RSI"]), 50.0))),
+        ema_fast_h1=_pick(body, ["ema_fast_h1", "emaFastH1", "EMA_FAST_H1"]),
+        ema_slow_h1=_pick(body, ["ema_slow_h1", "emaSlowH1", "EMA_SLOW_H1"]),
+        ema_fast_m1=_pick(body, ["ema_fast_m1", "emaFastM1", "EMA_FAST_M1"]),
+        ema_slow_m1=_pick(body, ["ema_slow_m1", "emaSlowM1", "EMA_SLOW_M1"]),
+        ema_fast_m5=_pick(body, ["ema_fast_m5", "emaFastM5", "EMA_FAST_M5"]),
+        ema_slow_m5=_pick(body, ["ema_slow_m5", "emaSlowM5", "EMA_SLOW_M5"]),
+        atr=_float(_pick(body, ["atr", "ATR"])),
+        dir_rule=int(_pick(body, ["dir_rule", "dirRule", "DIR_RULE"], 0) or 0),
+        is_spike_mode=bool(_pick(body, ["is_spike_mode", "isSpikeMode"], False)),
+        vwap=_pick(body, ["vwap", "VWAP"]),
+        vwap_distance=_pick(body, ["vwap_distance", "vwapDistance"]),
+        above_vwap=_pick(body, ["above_vwap", "aboveVwap"]),
+        supertrend_trend=int(_pick(body, ["supertrend_trend", "supertrendTrend"], 0) or 0),
+        supertrend_line=_pick(body, ["supertrend_line", "supertrendLine"]),
+        volatility_regime=int(_pick(body, ["volatility_regime", "volatilityRegime"], 0) or 0),
+        volatility_ratio=_float(_pick(body, ["volatility_ratio", "volatilityRatio"]), 1.0),
+        image_filename=_pick(body, ["image_filename", "imageFilename"]),
+        deriv_patterns=_pick(body, ["deriv_patterns", "derivPatterns"]),
+        deriv_patterns_bullish=_pick(body, ["deriv_patterns_bullish", "derivPatternsBullish"]),
+        deriv_patterns_bearish=_pick(body, ["deriv_patterns_bearish", "derivPatternsBearish"]),
+        deriv_patterns_confidence=_pick(body, ["deriv_patterns_confidence", "derivPatternsConfidence"]),
+        volatility_compression=_float(_pick(body, ["volatility_compression", "volatilityCompression"]), 1.0),
+        price_acceleration=_float(_pick(body, ["price_acceleration", "priceAcceleration"]), 0.0),
+        volume_spike=bool(_pick(body, ["volume_spike", "volumeSpike"], False)),
+        spike_probability=_float(_pick(body, ["spike_probability", "spikeProbability"]), 0.0),
+        timestamp=_pick(body, ["timestamp", "time", "datetime"]),
     )
 
 @app.post("/decision", response_model=DecisionResponse)
