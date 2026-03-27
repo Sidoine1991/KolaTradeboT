@@ -2967,6 +2967,19 @@ def get_prediction_accuracy_score(symbol: str) -> float:
 
 def get_prediction_confidence_multiplier(symbol: str) -> float:
     """Retourne un multiplicateur de confiance basé sur la précision historique"""
+    # IMPORTANT:
+    # Si aucun historique validé n'existe encore, ne pas pénaliser la confiance.
+    # Sinon la calibration peut forcer un HOLD systématique (cas observé en prod).
+    if symbol not in prediction_history:
+        return 1.0
+
+    validated = [
+        p for p in prediction_history[symbol]
+        if p.get("is_validated") and p.get("accuracy_score") is not None
+    ]
+    if len(validated) == 0:
+        return 1.0
+
     accuracy = get_prediction_accuracy_score(symbol)
     
     if accuracy >= 0.80:
@@ -2974,9 +2987,9 @@ def get_prediction_confidence_multiplier(symbol: str) -> float:
     elif accuracy >= 0.60:
         return 0.8  # Réduire confiance de 20%
     elif accuracy >= 0.40:
-        return 0.5  # Réduire confiance de 50%
+        return 0.7  # Réduction modérée pour éviter HOLD excessif
     else:
-        return 0.3  # Très faible précision
+        return 0.5  # Très faible précision, mais pas bloquant systématique
 
 
 # ===== CALIBRATION ADAPTATIVE (réduction décalage prédiction/mouvement réel) =====
@@ -3724,15 +3737,31 @@ async def decision_simplified(request: DecisionRequest):
     except Exception as e:
         logger.debug(f"Règles agressives Boom/Crash ignorées: {e}")
     
-    # 8. Ajustements finaux (laisser une confiance dynamique sur HOLD, éviter un plancher fixe à 30%)
+    # 8. Fallback anti-HOLD systématique:
+    # si aucun modèle ML n'est disponible et que la décision reste HOLD 50%,
+    # exploiter dir_rule fourni par le robot pour produire une direction minimale.
+    try:
+        if action == "hold" and not ml_result.get("ml_applied", False):
+            if request.dir_rule == 1:
+                action = "buy"
+                confidence = max(confidence, 0.58)
+                reason += "[Fallback dir_rule: BUY (ML no_model)] "
+            elif request.dir_rule == -1:
+                action = "sell"
+                confidence = max(confidence, 0.58)
+                reason += "[Fallback dir_rule: SELL (ML no_model)] "
+    except Exception as e:
+        logger.debug(f"Fallback dir_rule ignoré: {e}")
+    
+    # 9. Ajustements finaux (laisser une confiance dynamique sur HOLD, éviter un plancher fixe à 30%)
     if action == "hold":
         # Garder la confiance calculée (technique + ML), mais éviter 0 absolu
         confidence = max(0.1, confidence)
     
-    # 9. Confiance pour MT5: envoyer décimale 0-1 (l'EA attend 0-1 et affiche *100)
+    # 10. Confiance pour MT5: envoyer décimale 0-1 (l'EA attend 0-1 et affiche *100)
     confidence_percentage = confidence
     
-    # 10. Calcul SL/TP
+    # 11. Calcul SL/TP
     stop_loss = None
     take_profit = None
     
@@ -3745,7 +3774,7 @@ async def decision_simplified(request: DecisionRequest):
         stop_loss = request.ask + atr * 2
         take_profit = request.ask - atr * 3
     
-    # 11. Préparer les prédictions (simuler une tendance basée sur RSI/EMA si pas de modèle ML complexe)
+    # 12. Préparer les prédictions (simuler une tendance basée sur RSI/EMA si pas de modèle ML complexe)
     predicted_prices = []
     if request.bid:
         p = request.bid
@@ -3758,7 +3787,7 @@ async def decision_simplified(request: DecisionRequest):
             p += step + (np.random.normal(0, 0.000005))
             predicted_prices.append(float(p))
             
-    # 12. Déterminer alignement et cohérence
+    # 13. Déterminer alignement et cohérence
     alignment = "N/A"
     if request.ema_fast_m1 and request.ema_fast_m5 and request.ema_fast_h1:
         m1_up = request.ema_fast_m1 > request.ema_slow_m1
@@ -3771,7 +3800,7 @@ async def decision_simplified(request: DecisionRequest):
             
     coherence = f"COHÉRENCE: {int(confidence * 100)}%"
     
-    # 13. Créer la réponse enrichie
+    # 14. Créer la réponse enrichie
     response = DecisionResponse(
         action=action,
         confidence=confidence_percentage,  # Décimale 0-1 (MT5 affiche *100)
@@ -3796,7 +3825,7 @@ async def decision_simplified(request: DecisionRequest):
         }
     )
     
-    # 11. Sauvegarder la décision dans Supabase (local OU cloud) si les clés sont disponibles
+    # 15. Sauvegarder la décision dans Supabase (local OU cloud) si les clés sont disponibles
     try:
         await save_decision_to_supabase(request, response, ml_result)
     except Exception as e:
