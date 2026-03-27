@@ -3795,10 +3795,14 @@ async def decision_simplified(request: DecisionRequest):
         logger.debug(f"Règles agressives Boom/Crash ignorées: {e}")
     
     # 8. Fallback anti-HOLD systématique:
-    # si aucun modèle ML n'est disponible et que la décision reste HOLD 50%,
-    # exploiter dir_rule fourni par le robot pour produire une direction minimale.
+    # si la décision reste HOLD avec dir_rule fourni par le robot, forcer une
+    # direction minimale dans les cas no_model (ou quand le ML n'est pas appliqué).
     try:
-        if action == "hold" and not ml_result.get("ml_applied", False):
+        ml_reason = str(ml_result.get("ml_reason", "")).lower()
+        no_model_state = (not ml_result.get("ml_applied", False)) or (
+            ml_reason in ("no_model", "model_missing", "model_not_found")
+        )
+        if action == "hold" and no_model_state:
             if request.dir_rule == 1:
                 action = "buy"
                 confidence = max(confidence, 0.58)
