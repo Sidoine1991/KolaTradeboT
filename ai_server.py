@@ -153,9 +153,15 @@ def enhance_decision_with_ml(symbol: str, decision: str, confidence: float, mark
                 ml_conf = float(enhanced.get("enhanced_confidence", enhanced.get("confidence", confidence)))
             except Exception:
                 ml_conf = confidence
+            no_model_reasons = ("no_model", "model_missing", "model_not_found")
+
+            # Important: "no_model" ne doit pas être traité comme un ML réellement appliqué.
+            # Sinon decision_simplified n'exécute jamais son fallback dir_rule anti-HOLD.
+            if ml_reason in no_model_reasons:
+                enhanced["ml_applied"] = False
 
             if decision in ("buy", "sell"):
-                if ml_reason in ("no_model", "model_missing", "model_not_found"):
+                if ml_reason in no_model_reasons:
                     return base
                 if ml_action == "hold" and ml_conf <= max(confidence, 0.55):
                     return base
