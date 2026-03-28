@@ -3692,7 +3692,18 @@ async def decision_simplified(request: DecisionRequest):
         base_confidence = 0.5 + (sell_score - buy_score) / 2
     else:
         base_action = "hold"
-        base_confidence = 0.5
+        # HOLD: ne pas figer 50 % — faire dépendre la confiance du RSI et de l’activité des scores
+        _rsi_h = float(request.rsi) if request.rsi is not None else 50.0
+        _rsi_h = max(0.0, min(100.0, _rsi_h))
+        _spr_h = abs(buy_score - sell_score)
+        _act_h = min(1.0, buy_score + sell_score)
+        base_confidence = (
+            0.34
+            + 0.20 * (abs(_rsi_h - 50.0) / 50.0)
+            + 0.18 * min(1.0, _spr_h * 3.0)
+            + 0.22 * _act_h
+        )
+        base_confidence = max(0.30, min(0.68, base_confidence))
 
     # 5b. Fallback si indicateurs "coeur" absents (EMA a 0/None, RSI neutre)
     # Utilise les champs EA si disponibles pour eviter HOLD 50% partout.
@@ -3815,10 +3826,25 @@ async def decision_simplified(request: DecisionRequest):
     except Exception as e:
         logger.debug(f"Fallback dir_rule ignoré: {e}")
     
-    # 9. Ajustements finaux (laisser une confiance dynamique sur HOLD, éviter un plancher fixe à 30%)
+    # 9. Ajustements finaux — HOLD: mélanger ML / technique avec contexte (symboles volatils sans ML)
     if action == "hold":
-        # Garder la confiance calculée (technique + ML), mais éviter 0 absolu
-        confidence = max(0.1, confidence)
+        _rsi_f = float(request.rsi) if request.rsi is not None else 50.0
+        _rsi_f = max(0.0, min(100.0, _rsi_f))
+        _spr_f = abs(buy_score - sell_score)
+        _act_f = min(1.0, buy_score + sell_score)
+        hold_ctx = (
+            0.32
+            + 0.20 * (abs(_rsi_f - 50.0) / 50.0)
+            + 0.16 * min(1.0, _spr_f * 3.0)
+            + 0.22 * _act_f
+        )
+        hold_ctx = max(0.28, min(0.72, hold_ctx))
+        confidence = max(0.10, 0.38 * float(confidence) + 0.62 * hold_ctx)
+        confidence = max(0.28, min(0.74, float(confidence)))
+    elif action in ("buy", "sell") and 0.465 <= float(confidence) <= 0.535:
+        _m = abs(buy_score - sell_score)
+        if _m > 1e-6:
+            confidence = min(0.92, float(confidence) + min(0.24, _m * 0.4))
     
     # 10. Confiance pour MT5: envoyer décimale 0-1 (l'EA attend 0-1 et affiche *100)
     confidence_percentage = confidence
