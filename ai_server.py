@@ -3419,6 +3419,7 @@ class TradeFeedback(BaseModel):
 
 
 class DecisionResponse(BaseModel):
+    symbol: Optional[str] = None  # Echo du symbole demandé (clients MT5 / validation croisée)
     action: str  # "buy", "sell", "hold"
     confidence: float  # 0.0-1.0
     reason: str
@@ -8044,6 +8045,7 @@ Format: Analyse claire et professionnelle en français.
         
         # Construire la réponse
         response_data = {
+            "symbol": request.symbol,
             "action": action,
             "confidence": round(confidence, 3),
             "reason": reason,
