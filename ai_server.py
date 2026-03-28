@@ -3862,8 +3862,12 @@ async def decision_simplified(request: DecisionRequest):
             
     coherence = f"COHÉRENCE: {int(confidence * 100)}%"
     
-    # 14. Créer la réponse enrichie
+    # 14. Créer la réponse enrichie (symbol en tête du JSON pour validation MT5 — évite matcher metadata.market_data)
+    _echo_sym = (str(request.symbol).strip() if request.symbol is not None else "")
+    if _echo_sym.upper() == "UNKNOWN":
+        _echo_sym = ""
     response = DecisionResponse(
+        symbol=_echo_sym or None,
         action=action,
         confidence=confidence_percentage,  # Décimale 0-1 (MT5 affiche *100)
         reason=reason,
@@ -6186,7 +6190,11 @@ async def decision(req: Request):
         action, confidence = new_action, new_conf
 
         # Créer la réponse
+        _echo_sym2 = (str(request.symbol).strip() if request.symbol is not None else "")
+        if _echo_sym2.upper() == "UNKNOWN":
+            _echo_sym2 = ""
         response = DecisionResponse(
+            symbol=_echo_sym2 or None,
             action=action,
             confidence=confidence,
             reason=reason[:200],
@@ -6205,6 +6213,7 @@ async def decision(req: Request):
         
         # Mettre en cache
         decision_cache[cache_key] = {
+            "symbol": response.symbol,
             "action": response.action,
             "confidence": response.confidence,
             "reason": response.reason,
