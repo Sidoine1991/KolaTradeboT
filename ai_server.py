@@ -15,7 +15,6 @@ import os
 import json
 import time
 import math
-import hashlib
 import asyncio
 import logging
 import sys
@@ -143,31 +142,7 @@ def enhance_decision_with_ml(symbol: str, decision: str, confidence: float, mark
     if not ML_AVAILABLE:
         return base
     try:
-        enhanced = ml_enhancer.enhance_decision(symbol, decision, confidence, market_data)
-
-        # Anti-regression: si le ML n'a pas de modele ("no_model"), ou s'il degrade une
-        # decision technique BUY/SELL en HOLD sans confiance superieure, on garde la base.
-        if isinstance(enhanced, dict):
-            ml_reason = str(enhanced.get("ml_reason", "")).lower()
-            ml_action = str(enhanced.get("enhanced_decision", enhanced.get("action", decision))).lower()
-            try:
-                ml_conf = float(enhanced.get("enhanced_confidence", enhanced.get("confidence", confidence)))
-            except Exception:
-                ml_conf = confidence
-            no_model_reasons = ("no_model", "model_missing", "model_not_found")
-
-            # Important: "no_model" ne doit pas être traité comme un ML réellement appliqué.
-            # Sinon decision_simplified n'exécute jamais son fallback dir_rule anti-HOLD.
-            if ml_reason in no_model_reasons:
-                enhanced["ml_applied"] = False
-
-            if decision in ("buy", "sell"):
-                if ml_reason in no_model_reasons:
-                    return base
-                if ml_action == "hold" and ml_conf <= max(confidence, 0.55):
-                    return base
-
-        return enhanced if isinstance(enhanced, dict) else base
+        return ml_enhancer.enhance_decision(symbol, decision, confidence, market_data)
     except Exception as e:
         logger.error(f"❌ Erreur enhancement ML: {e}")
         return {
@@ -179,7 +154,17 @@ def enhance_decision_with_ml(symbol: str, decision: str, confidence: float, mark
             "ml_applied": False
         }
 
-# ========== MODE SIMPLIFIÉ (SIMPLIFIED_MODE défini après chargement .env, voir plus bas) ==========
+# ========== MODE SIMPLIFIÉ POUR ROBOCOP v2 ==========
+# Activer le mode simplifié pour RoboCop v2 (plus stable, moins de dépendances)
+SIMPLIFIED_MODE = True  # Mettre à False pour utiliser le mode complet
+
+if SIMPLIFIED_MODE:
+    logger.info("🚀 MODE SIMPLIFIÉ ACTIVÉ - RoboCop v2 compatible")
+    logger.info("   • Analyse technique basée sur RSI + EMA")
+    logger.info("   • Pas de ML complexe - Stabilité maximale")
+    logger.info("   • Endpoints: /decision, /trades/feedback")
+else:
+    logger.info("🔧 MODE COMPLET ACTIVÉ - Toutes les fonctionnalités")
 
 # ========== CONFIGURATIONS AMÉLIORATIONS PRIORITAIRES ==========
 # Seuils de confiance minimum pour éviter les signaux trop faibles
@@ -208,63 +193,6 @@ FORMAT DE RÉPONSE OBLIGATOIRE:
 decision_cache = {}
 cache_timestamps = {}
 CACHE_DURATION = 30  # 30 secondes
-
-# Dernière décision connue par symbole (pour /dashboard et diagnostic multi-symboles)
-last_decision_by_symbol: Dict[str, Dict[str, Any]] = {}
-
-
-def _track_decision_snapshot(
-    symbol: str,
-    action: str,
-    confidence: float,
-    reason: str,
-    model_used: Optional[str] = None,
-) -> None:
-    """Enregistre signal + confiance par symbole pour l'UI /dashboard."""
-    sym = (symbol or "").strip()
-    if not sym or sym.upper() == "UNKNOWN":
-        return
-    try:
-        cf = float(confidence)
-    except (TypeError, ValueError):
-        cf = 0.0
-    pct = cf * 100.0 if cf <= 1.0 else cf
-    last_decision_by_symbol[sym] = {
-        "symbol": sym,
-        "action": str(action or "hold").lower(),
-        "confidence": cf,
-        "confidence_percent": round(pct, 2),
-        "reason": (reason or "")[:220],
-        "model_used": model_used,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-    }
-
-
-def _get_live_signal_snapshot(symbol: str, max_age_seconds: int = 300) -> Optional[Dict[str, Any]]:
-    """
-    Retourne le dernier signal réellement observé via /decision pour un symbole.
-    Si le signal est trop ancien ou absent, renvoie None.
-    """
-    sym = (symbol or "").strip()
-    if not sym:
-        return None
-    snap = last_decision_by_symbol.get(sym)
-    if not snap:
-        return None
-    ts_raw = snap.get("timestamp")
-    if not ts_raw:
-        return None
-    try:
-        ts = datetime.fromisoformat(str(ts_raw).replace("Z", "+00:00"))
-        now = datetime.now(timezone.utc)
-        if ts.tzinfo is None:
-            ts = ts.replace(tzinfo=timezone.utc)
-        age = (now - ts).total_seconds()
-        if age > max_age_seconds:
-            return None
-    except Exception:
-        return None
-    return snap
 
 # Importer les fonctions améliorées
 try:
@@ -353,16 +281,6 @@ def cache_decision(symbol: str, decision_data: Dict):
     """Stocke une décision dans le cache."""
     decision_cache[symbol] = decision_data
     cache_timestamps[symbol] = time.time()
-    try:
-        _track_decision_snapshot(
-            symbol,
-            str(decision_data.get("action", "hold")),
-            float(decision_data.get("confidence", 0.0)),
-            str(decision_data.get("reason", "")),
-            decision_data.get("model_used"),
-        )
-    except Exception:
-        pass
     logger.debug(f"💾 Décision mise en cache pour {symbol}")
 
 def calculate_boom_crash_metadata(df: pd.DataFrame, symbol: str, request) -> Dict:
@@ -1296,17 +1214,6 @@ except ImportError:
     )
 except Exception as e:
     logger.warning(f"⚠️ Erreur lors du chargement du .env: {e}")
-
-# Mode décision /decision : défaut True (stable RoboCop). Fichier .env pris en compte.
-# Pipeline complet (MT5 historique + règles avancées) : AI_SERVER_SIMPLIFIED_MODE=false
-SIMPLIFIED_MODE = _env_bool("AI_SERVER_SIMPLIFIED_MODE", True)
-if SIMPLIFIED_MODE:
-    logger.info("🚀 MODE SIMPLIFIÉ ACTIVÉ - RoboCop v2 compatible")
-    logger.info("   • Analyse technique basée sur RSI + EMA")
-    logger.info("   • Pas de ML complexe - Stabilité maximale")
-    logger.info("   • Endpoints: /decision, /trades/feedback")
-else:
-    logger.info("🔧 MODE COMPLET ACTIVÉ - Toutes les fonctionnalités")
 
 # Log explicite (évite d'écrire dans un projet par défaut par erreur)
 try:
@@ -3060,19 +2967,6 @@ def get_prediction_accuracy_score(symbol: str) -> float:
 
 def get_prediction_confidence_multiplier(symbol: str) -> float:
     """Retourne un multiplicateur de confiance basé sur la précision historique"""
-    # IMPORTANT:
-    # Si aucun historique validé n'existe encore, ne pas pénaliser la confiance.
-    # Sinon la calibration peut forcer un HOLD systématique (cas observé en prod).
-    if symbol not in prediction_history:
-        return 1.0
-
-    validated = [
-        p for p in prediction_history[symbol]
-        if p.get("is_validated") and p.get("accuracy_score") is not None
-    ]
-    if len(validated) == 0:
-        return 1.0
-
     accuracy = get_prediction_accuracy_score(symbol)
     
     if accuracy >= 0.80:
@@ -3080,9 +2974,9 @@ def get_prediction_confidence_multiplier(symbol: str) -> float:
     elif accuracy >= 0.60:
         return 0.8  # Réduire confiance de 20%
     elif accuracy >= 0.40:
-        return 0.7  # Réduction modérée pour éviter HOLD excessif
+        return 0.5  # Réduire confiance de 50%
     else:
-        return 0.5  # Très faible précision, mais pas bloquant systématique
+        return 0.3  # Très faible précision
 
 
 # ===== CALIBRATION ADAPTATIVE (réduction décalage prédiction/mouvement réel) =====
@@ -3465,11 +3359,6 @@ class DecisionRequest(BaseModel):
     deriv_patterns_bullish: Optional[int] = None  # Nombre de patterns bullish
     deriv_patterns_bearish: Optional[int] = None  # Nombre de patterns bearish
     deriv_patterns_confidence: Optional[float] = None  # Confiance moyenne des patterns
-    # Champs optionnels envoyés par certains EA (ex: SMC_Universal) pour fallback.
-    volatility_compression: Optional[float] = None
-    price_acceleration: Optional[float] = None
-    volume_spike: Optional[bool] = None
-    spike_probability: Optional[float] = None
     timestamp: Optional[str] = None  # Timestamp de la requête (ajouté pour corriger l'erreur 422)
 
 # ===== MODÈLES POUR FEEDBACK LOOP =====
@@ -3488,7 +3377,6 @@ class TradeFeedback(BaseModel):
 
 
 class DecisionResponse(BaseModel):
-    symbol: Optional[str] = None  # Echo du symbole demandé (clients MT5 / validation croisée)
     action: str  # "buy", "sell", "hold"
     confidence: float  # 0.0-1.0
     reason: str
@@ -3510,8 +3398,9 @@ class DecisionResponse(BaseModel):
     predicted_prices: List[float] = Field(default_factory=list)
     alignment: str = "N/A"
     coherence: str = "N/A"
-    metadata: Optional[Dict[str, Any]] = Field(default_factory=dict)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
     gemma_analysis: Optional[str] = None  # Analyse complète Gemma+Gemini
+    metadata: Optional[Dict[str, Any]] = None  # Métadonnées enrichies (RSI, EMA, ATR, etc.)
 
 
 class SpikeStatus(BaseModel):
@@ -3675,159 +3564,6 @@ class CorrectionPredictionResponse(BaseModel):
     risk_level: Optional[str] = None
     message: Optional[str] = None
 
-
-def _symbol_entropy_01(symbol: str) -> float:
-    """
-    Composante stable 0..1 dérivée du nom du symbole.
-    Même RSI/EMA neutres sur plusieurs paires ne produisent plus exactement le même score de situation.
-    """
-    s = (symbol or "").strip().upper()
-    if not s:
-        return 0.5
-    h = hashlib.sha256(s.encode("utf-8")).digest()
-    return int.from_bytes(h[:4], "big") / 4294967295.0
-
-
-def _decision_situation_score(
-    request: DecisionRequest,
-    buy_score: float,
-    sell_score: float,
-) -> float:
-    """
-    Score 0..1 spécifique au tick / au symbole : combinaison RSI, forces des scores,
-    écart EMA multi-TF, spread relatif, accélération, compression, spike, ATR, dir_rule.
-    Permet d'éviter qu'une grande majorité de symboles convergent vers la même confiance.
-    """
-    terms: list[float] = []
-    weights: list[float] = []
-
-    rsi = 50.0
-    if request.rsi is not None:
-        try:
-            rsi = max(0.0, min(100.0, float(request.rsi)))
-        except (TypeError, ValueError):
-            pass
-    terms.append(abs(rsi - 50.0) / 50.0)
-    weights.append(0.17)
-
-    act = min(1.0, float(buy_score) + float(sell_score))
-    terms.append(act)
-    weights.append(0.18)
-
-    bal = abs(float(buy_score) - float(sell_score))
-    terms.append(min(1.0, bal * 2.2))
-    weights.append(0.12)
-
-    ema_sep = 0.0
-    ema_n = 0
-    for ef, es in (
-        (request.ema_fast_m1, request.ema_slow_m1),
-        (request.ema_fast_m5, request.ema_slow_m5),
-        (request.ema_fast_h1, request.ema_slow_h1),
-    ):
-        if ef is None or es is None:
-            continue
-        try:
-            efv, esv = float(ef), float(es)
-            base = abs(esv) if abs(esv) > 1e-12 else (abs(efv) if abs(efv) > 1e-12 else 0.0)
-            if base <= 0:
-                continue
-            # Indices / forex : ratio relatif — x100 sous-estimait les gros prix (Boom/Crash)
-            ema_sep += min(1.0, abs(efv - esv) / base * 320.0)
-            ema_n += 1
-        except (TypeError, ValueError):
-            continue
-    terms.append(ema_sep / ema_n if ema_n else 0.0)
-    weights.append(0.18)
-
-    # Niveau de prix (échelle différente par symbole : Vol vs Boom vs forex)
-    pl_n = 0.0
-    try:
-        bd = float(request.bid or 0)
-        if bd > 0:
-            pl_n = min(1.0, max(0.0, (math.log10(bd) - 0.8) / 6.2))
-    except (TypeError, ValueError):
-        pass
-    terms.append(pl_n)
-    weights.append(0.07)
-
-    # Profil instrument (nom de symbole — classes Deriv distinctes)
-    sym_l = (request.symbol or "").lower()
-    if "volatility" in sym_l:
-        fam = 0.66
-    elif "boom" in sym_l or "crash" in sym_l:
-        fam = 0.58
-    elif "jump" in sym_l:
-        fam = 0.52
-    elif "step" in sym_l:
-        fam = 0.48
-    else:
-        fam = 0.50
-    terms.append(fam)
-    weights.append(0.06)
-
-    rel_spread = 0.0
-    try:
-        b = float(request.bid or 0)
-        a = float(request.ask or 0)
-        if b > 0 and a >= b:
-            rel_spread = min(1.0, (a - b) / b * 8000.0)
-    except (TypeError, ValueError):
-        pass
-    terms.append(rel_spread)
-    weights.append(0.07)
-
-    acc_n = 0.0
-    if request.price_acceleration is not None:
-        try:
-            acc_n = min(1.0, abs(float(request.price_acceleration)) * 12000.0)
-        except (TypeError, ValueError):
-            pass
-    terms.append(acc_n)
-    weights.append(0.08)
-
-    vc_n = 0.0
-    if request.volatility_compression is not None:
-        try:
-            vc = float(request.volatility_compression)
-            vc_n = min(1.0, max(0.0, 1.0 - vc))
-        except (TypeError, ValueError):
-            pass
-    terms.append(vc_n)
-    weights.append(0.05)
-
-    sp_n = 0.0
-    if request.spike_probability is not None:
-        try:
-            sp_n = min(1.0, float(request.spike_probability))
-        except (TypeError, ValueError):
-            pass
-    terms.append(sp_n)
-    weights.append(0.05)
-
-    atr_n = 0.0
-    if request.atr is not None and request.bid:
-        try:
-            bd, atv = float(request.bid), float(request.atr)
-            if bd > 0 and atv > 0:
-                atr_n = min(1.0, (atv / bd) * 600.0)
-        except (TypeError, ValueError):
-            pass
-    terms.append(atr_n)
-    weights.append(0.06)
-
-    dr_n = 1.0 if request.dir_rule in (1, -1) else 0.0
-    terms.append(dr_n)
-    weights.append(0.02)
-
-    terms.append(_symbol_entropy_01(request.symbol))
-    weights.append(0.06)
-
-    s = sum(t * w for t, w in zip(terms, weights))
-    s /= sum(weights) if weights else 1.0
-    return max(0.0, min(1.0, s))
-
-
 # ========== FONCTION SIMPLIFIÉE POUR ROBOCOP v2 ==========
 # Modifier la fonction decision_simplified pour utiliser le ML
 async def decision_simplified(request: DecisionRequest):
@@ -3907,67 +3643,13 @@ async def decision_simplified(request: DecisionRequest):
     # 5. Décision technique de base
     if buy_score > sell_score:
         base_action = "buy"
+        base_confidence = 0.5 + (buy_score - sell_score) / 2
     elif sell_score > buy_score:
         base_action = "sell"
+        base_confidence = 0.5 + (sell_score - buy_score) / 2
     else:
         base_action = "hold"
-        _sit_h = _decision_situation_score(request, buy_score, sell_score)
-        # Plage élargie : fortement liée au contexte réel du symbole (pas un plancher identique pour tous)
-        base_confidence = 0.33 + 0.48 * _sit_h
-        base_confidence = max(0.31, min(0.82, base_confidence))
-
-    # 5a. Confiance : formule legacy ou alternative (AI_CONFIDENCE_MODE)
-    if base_action in ("buy", "sell"):
-        try:
-            from ai_confidence_metrics import (
-                compute_simplified_confidence_with_tf_entropy,
-                count_ema_direction_votes,
-            )
-
-            ema_bull, ema_bear = count_ema_direction_votes(
-                request.ema_fast_m1,
-                request.ema_slow_m1,
-                request.ema_fast_m5,
-                request.ema_slow_m5,
-                request.ema_fast_h1,
-                request.ema_slow_h1,
-            )
-            base_confidence, _conf_tag = compute_simplified_confidence_with_tf_entropy(
-                buy_score, sell_score, base_action, ema_bull, ema_bear, 3
-            )
-            if _conf_tag not in ("legacy", "legacy_hold"):
-                reason += f"[Conf:{_conf_tag}] "
-        except Exception as _cm_ex:
-            logger.debug(f"confidence metrics: {_cm_ex}")
-            base_confidence = 0.5 + abs(buy_score - sell_score) / 2.0
-
-    # 5b. Fallback si indicateurs "coeur" absents (EMA a 0/None, RSI neutre)
-    # Utilise les champs EA si disponibles pour eviter HOLD 50% partout.
-    if base_action == "hold":
-        try:
-            accel = float(request.price_acceleration) if request.price_acceleration is not None else 0.0
-            spike_prob = float(request.spike_probability) if request.spike_probability is not None else None
-            vol_comp = float(request.volatility_compression) if request.volatility_compression is not None else None
-
-            # Acceleration prix: donne une direction minimale
-            if abs(accel) >= 0.0008:
-                base_action = "buy" if accel > 0 else "sell"
-                base_confidence = 0.58
-                reason += f"Fallback accel ({accel:+.6f}). "
-
-            # Spike probability: sur Boom/Crash, donne un petit biais directionnel via dir_rule si fourni
-            if spike_prob is not None and spike_prob >= 0.7 and request.dir_rule in (1, -1):
-                base_action = "buy" if request.dir_rule == 1 else "sell"
-                base_confidence = max(base_confidence, 0.60)
-                reason += f"Fallback spike_prob ({spike_prob:.2f}). "
-
-            # Compression volatilite: marche "tendu" -> augmenter legerement la confiance si deja directionnelle
-            if vol_comp is not None and base_action != "hold":
-                if vol_comp < 0.75:
-                    base_confidence = min(0.70, base_confidence + 0.05)
-                    reason += f"Vol compression ({vol_comp:.2f}). "
-        except Exception as _fb_ex:
-            logger.debug(f"Fallback EA fields skipped: {_fb_ex}")
+        base_confidence = 0.5
     
     # 6. AMÉLIORATION AVEC ML
     market_data = {
@@ -4042,51 +3724,15 @@ async def decision_simplified(request: DecisionRequest):
     except Exception as e:
         logger.debug(f"Règles agressives Boom/Crash ignorées: {e}")
     
-    # 8. Fallback anti-HOLD systématique:
-    # si la décision reste HOLD avec dir_rule fourni par le robot, forcer une
-    # direction minimale dans les cas no_model (ou quand le ML n'est pas appliqué).
-    try:
-        ml_reason = str(ml_result.get("ml_reason", "")).lower()
-        no_model_state = (not ml_result.get("ml_applied", False)) or (
-            ml_reason in ("no_model", "model_missing", "model_not_found")
-        )
-        if action == "hold" and no_model_state:
-            if request.dir_rule == 1:
-                action = "buy"
-                confidence = max(confidence, 0.58)
-                reason += "[Fallback dir_rule: BUY (ML no_model)] "
-            elif request.dir_rule == -1:
-                action = "sell"
-                confidence = max(confidence, 0.58)
-                reason += "[Fallback dir_rule: SELL (ML no_model)] "
-    except Exception as e:
-        logger.debug(f"Fallback dir_rule ignoré: {e}")
-    
-    # 9. Confiance affichée MT5 = même valeur que le champ JSON racine "confidence" (0–1), par symbole / requête.
-    # On évite les mélanges qui plaquaient ~0.328 (32.8 %) pour HOLD — on ancre sur le score de situation + signal ML.
-    _sit_f = _decision_situation_score(request, buy_score, sell_score)
-    _imb = abs(buy_score - sell_score)
+    # 8. Ajustements finaux (laisser une confiance dynamique sur HOLD, éviter un plancher fixe à 30%)
     if action == "hold":
-        hold_ctx = 0.30 + 0.54 * _sit_f + min(0.08, _imb * 0.12)
-        hold_ctx = max(0.26, min(0.86, hold_ctx))
-        c0 = float(confidence)
-        # HOLD: situation dominante, léger poids sur la confiance ML/brute (varie par symbole, pas palier fixe)
-        confidence = max(0.34, min(0.90, 0.22 * c0 + 0.78 * hold_ctx))
-    elif action in ("buy", "sell"):
-        cf = float(confidence)
-        cf = cf * (0.97 + 0.12 * _sit_f)
-        cf = cf + min(0.12, _imb * 0.32)
-        cf = min(0.96, max(0.44, cf))
-        if 0.465 <= cf <= 0.535:
-            _m = abs(buy_score - sell_score)
-            if _m > 1e-6:
-                cf = min(0.93, cf + min(0.22, _m * 0.38))
-        confidence = cf
-
-    # 10. Confiance pour MT5: décimale 0–1 (champ racine "confidence" — affichage graphique / dashboard)
-    confidence_percentage = float(confidence)
+        # Garder la confiance calculée (technique + ML), mais éviter 0 absolu
+        confidence = max(0.1, confidence)
     
-    # 11. Calcul SL/TP
+    # 9. Confiance pour MT5: envoyer décimale 0-1 (l'EA attend 0-1 et affiche *100)
+    confidence_percentage = confidence
+    
+    # 10. Calcul SL/TP
     stop_loss = None
     take_profit = None
     
@@ -4099,7 +3745,7 @@ async def decision_simplified(request: DecisionRequest):
         stop_loss = request.ask + atr * 2
         take_profit = request.ask - atr * 3
     
-    # 12. Préparer les prédictions (simuler une tendance basée sur RSI/EMA si pas de modèle ML complexe)
+    # 11. Préparer les prédictions (simuler une tendance basée sur RSI/EMA si pas de modèle ML complexe)
     predicted_prices = []
     if request.bid:
         p = request.bid
@@ -4112,7 +3758,7 @@ async def decision_simplified(request: DecisionRequest):
             p += step + (np.random.normal(0, 0.000005))
             predicted_prices.append(float(p))
             
-    # 13. Déterminer alignement et cohérence
+    # 12. Déterminer alignement et cohérence
     alignment = "N/A"
     if request.ema_fast_m1 and request.ema_fast_m5 and request.ema_fast_h1:
         m1_up = request.ema_fast_m1 > request.ema_slow_m1
@@ -4125,12 +3771,8 @@ async def decision_simplified(request: DecisionRequest):
             
     coherence = f"COHÉRENCE: {int(confidence * 100)}%"
     
-    # 14. Créer la réponse enrichie (symbol en tête du JSON pour validation MT5 — évite matcher metadata.market_data)
-    _echo_sym = (str(request.symbol).strip() if request.symbol is not None else "")
-    if _echo_sym.upper() == "UNKNOWN":
-        _echo_sym = ""
+    # 13. Créer la réponse enrichie
     response = DecisionResponse(
-        symbol=_echo_sym or None,
         action=action,
         confidence=confidence_percentage,  # Décimale 0-1 (MT5 affiche *100)
         reason=reason,
@@ -4148,29 +3790,17 @@ async def decision_simplified(request: DecisionRequest):
             "ml_reason": ml_result["ml_reason"],
             "base_scores": {"buy": buy_score, "sell": sell_score},
             "market_data": market_data,
-            # Pas de clé "confidence_*" en doublon du racine — évite confusion parseur EA
-            "decision_confidence_echo": confidence_percentage,
-            "spike_probability": market_data.get("spike_probability", 0.0),
+            "confidence_decimal": confidence,
+            "confidence_percentage": confidence_percentage,
+            "spike_probability": market_data.get("spike_probability", 0.0)
         }
     )
     
-    # 15. Sauvegarder la décision dans Supabase (local OU cloud) si les clés sont disponibles
+    # 11. Sauvegarder la décision dans Supabase (local OU cloud) si les clés sont disponibles
     try:
         await save_decision_to_supabase(request, response, ml_result)
     except Exception as e:
         logger.error(f"❌ Erreur sauvegarde décision Supabase: {e}")
-    
-    try:
-        if _echo_sym:
-            _track_decision_snapshot(
-                _echo_sym,
-                response.action,
-                response.confidence,
-                response.reason or "",
-                response.model_used or "technical_ml_enhanced",
-            )
-    except Exception:
-        pass
     
     return response
 
@@ -4275,17 +3905,15 @@ async def save_decision_to_supabase(request: DecisionRequest, response: Decision
             # Extraire une "accuracy" proxy à partir de la confiance (décimale)
             accuracy_decimal = None
             meta = getattr(response, "metadata", None)
-            if isinstance(meta, dict) and "decision_confidence_echo" in meta:
+            if isinstance(meta, dict) and "confidence_decimal" in meta:
                 try:
-                    accuracy_decimal = float(meta.get("decision_confidence_echo"))
+                    accuracy_decimal = float(meta.get("confidence_decimal"))
                 except (TypeError, ValueError):
                     accuracy_decimal = None
             if accuracy_decimal is None:
                 try:
-                    # response.confidence = décimale 0–1 (MT5)
-                    accuracy_decimal = float(response.confidence)
-                    if accuracy_decimal > 1.0:
-                        accuracy_decimal /= 100.0
+                    # response.confidence est renvoyée en pourcentage (0-100)
+                    accuracy_decimal = float(response.confidence) / 100.0
                 except Exception:
                     accuracy_decimal = 0.5
 
@@ -5066,11 +4694,7 @@ async def get_robot_dashboard():
             "ml_metrics": None,
             "ml_recommendations": None,
             "price_predictions": [],
-            "top_opportunities": [],
-            # Dernières décisions /decision par symbole (signal + confiance réels par requête MT5)
-            "latest_decisions_by_symbol": dict(
-                sorted(last_decision_by_symbol.items(), key=lambda kv: kv[0])
-            ),
+            "top_opportunities": []
         }
         
         # 1. Métriques ML en temps réel (ml_trainer in-memory + fallback Supabase)
@@ -5121,30 +4745,77 @@ async def get_robot_dashboard():
                 logger.warning(f"⚠️ Erreur récupération recommandations ML: {e}")
                 dashboard_data["ml_recommendations"] = {"error": str(e)}
         
-        # 3. Prédictions de mouvement de prix: strictement issues des décisions réelles récentes.
-        try:
-            for sym, snap in last_decision_by_symbol.items():
-                live = _get_live_signal_snapshot(sym)
-                if not live:
-                    continue
-                action = str(live.get("action") or "hold").upper()
-                dashboard_data["price_predictions"].append(
-                    {
-                        "symbol": sym,
-                        "current_prediction": action,
-                        "signal": action,
-                        "confidence": float(live.get("confidence", 0.0)),
-                        "price_direction": (
-                            "HAUSSIER" if action == "BUY" else "BAISSIER" if action == "SELL" else "NEUTRAL"
-                        ),
-                        "reason": live.get("reason"),
-                        "model_used": live.get("model_used"),
-                        "last_updated": live.get("timestamp"),
-                        "data_source": "live_decision_snapshot",
-                    }
-                )
-        except Exception as e:
-            logger.warning(f"⚠️ Erreur génération prédictions dashboard (live): {e}")
+        # 3. Prédictions de mouvement de prix (pour les symboles actifs)
+        if ML_TRAINER_AVAILABLE:
+            try:
+                # Symboles à analyser pour les prédictions
+                symbols_to_predict = ["EURJPY", "GBPJPY", "USDJPY", "EURUSD", "GBPUSD"]
+                
+                for symbol in symbols_to_predict:
+                    try:
+                        # Récupérer les dernières métriques pour ce symbole
+                        metrics = ml_trainer.get_current_metrics()
+                        
+                        # Chercher les métriques spécifiques à ce symbole
+                        symbol_metrics = None
+                        if 'models' in metrics:
+                            for model_key, model_data in metrics['models'].items():
+                                if symbol in model_key:
+                                    symbol_metrics = model_data
+                                    break
+                        
+                        if symbol_metrics and 'metrics' in symbol_metrics:
+                            model_metrics = symbol_metrics['metrics']
+                            
+                            # Générer une prédiction basée sur les métriques ML
+                            prediction = {
+                                "symbol": symbol,
+                                "current_prediction": "HOLD",
+                                "confidence": 0.5,
+                                "price_direction": "NEUTRAL",
+                                "accuracy": model_metrics.get('accuracy', 0.5),
+                                "f1_score": model_metrics.get('f1_score', 0.5),
+                                "last_updated": symbol_metrics.get('last_updated', datetime.now().isoformat()),
+                                "feature_importance": model_metrics.get('feature_importance', {}),
+                                "trend_signal": "NEUTRAL"
+                            }
+                            
+                            # Analyser les features pour déterminer la direction
+                            feature_importance = model_metrics.get('feature_importance', {})
+                            if feature_importance:
+                                # Signaux basés sur l'importance des features
+                                rsi_importance = feature_importance.get('rsi', 0)
+                                ema_importance = feature_importance.get('ema_diff', 0)
+                                volume_importance = feature_importance.get('volume', 0)
+                                
+                                if rsi_importance > 0.1:
+                                    prediction["trend_signal"] = "RSI_DOMINANT"
+                                elif ema_importance > 0.1:
+                                    prediction["trend_signal"] = "TREND_DOMINANT"
+                                elif volume_importance > 0.1:
+                                    prediction["trend_signal"] = "VOLUME_DOMINANT"
+                                
+                                # Calculer la confiance basée sur la précision du modèle
+                                accuracy = model_metrics.get('accuracy', 0.5)
+                                prediction["confidence"] = min(0.95, accuracy * 1.1)
+                                
+                                # Déterminer la direction basée sur les métriques
+                                if accuracy > 0.7:
+                                    if 'buy' in str(model_metrics).lower():
+                                        prediction["current_prediction"] = "BUY"
+                                        prediction["price_direction"] = "HAUSSIER"
+                                    elif 'sell' in str(model_metrics).lower():
+                                        prediction["current_prediction"] = "SELL"
+                                        prediction["price_direction"] = "BAISSIER"
+                            
+                            dashboard_data["price_predictions"].append(prediction)
+                            
+                    except Exception as e:
+                        logger.warning(f"⚠️ Erreur prédiction pour {symbol}: {e}")
+                        continue
+                        
+            except Exception as e:
+                logger.warning(f"⚠️ Erreur génération prédictions: {e}")
         
         # 4. Statistiques globales
         total_models = 0
@@ -5880,10 +5551,6 @@ async def status():
             "cache_profiles": len(symbol_hour_profile_cache),
             "cache_status": len(symbol_hour_status_cache),
         },
-        "decisions_by_symbol": {
-            "count": len(last_decision_by_symbol),
-            "symbols": sorted(last_decision_by_symbol.keys())[:64],
-        },
     }
 
 
@@ -6270,20 +5937,8 @@ async def decision_gemma(request: DecisionRequest):
 
 def _parse_decision_body(raw: bytes) -> DecisionRequest:
     """Parse le body JSON de manière tolérante pour éviter 422 (robot MT5 payloads variables)."""
-    def _pick(d: dict, keys: list, default=None):
-        for k in keys:
-            if k in d and d.get(k) is not None:
-                return d.get(k)
-        return default
-
     try:
-        if isinstance(raw, bytes):
-            text = raw.decode("utf-8", errors="ignore").strip()
-            if text.startswith("\ufeff"):
-                text = text.lstrip("\ufeff")
-        else:
-            text = str(raw or "").strip()
-        body = json.loads(text)
+        body = json.loads(raw.decode("utf-8") if isinstance(raw, bytes) else raw)
     except Exception:
         body = {}
     if not isinstance(body, dict):
@@ -6296,41 +5951,359 @@ def _parse_decision_body(raw: bytes) -> DecisionRequest:
     def _str(v, default="UNKNOWN"):
         if v is None or v == "": return default
         return str(v).strip() or default
-    symbol = _str(_pick(body, ["symbol", "Symbol", "_Symbol", "SYMBOL"]))
-    bid = _float(_pick(body, ["bid", "Bid", "BID"]), 1.0)
-    ask = _float(_pick(body, ["ask", "Ask", "ASK"]), 1.0001)
+    symbol = _str(body.get("symbol"))
+    bid = _float(body.get("bid"), 1.0)
+    ask = _float(body.get("ask"), 1.0001)
     if bid >= ask:
         ask = bid + 0.0001
     return DecisionRequest(
         symbol=symbol, bid=bid, ask=ask,
-        rsi=min(100, max(0, _float(_pick(body, ["rsi", "RSI"]), 50.0))),
-        ema_fast_h1=_pick(body, ["ema_fast_h1", "emaFastH1", "EMA_FAST_H1"]),
-        ema_slow_h1=_pick(body, ["ema_slow_h1", "emaSlowH1", "EMA_SLOW_H1"]),
-        ema_fast_m1=_pick(body, ["ema_fast_m1", "emaFastM1", "EMA_FAST_M1"]),
-        ema_slow_m1=_pick(body, ["ema_slow_m1", "emaSlowM1", "EMA_SLOW_M1"]),
-        ema_fast_m5=_pick(body, ["ema_fast_m5", "emaFastM5", "EMA_FAST_M5"]),
-        ema_slow_m5=_pick(body, ["ema_slow_m5", "emaSlowM5", "EMA_SLOW_M5"]),
-        atr=_float(_pick(body, ["atr", "ATR"])),
-        dir_rule=int(_pick(body, ["dir_rule", "dirRule", "DIR_RULE"], 0) or 0),
-        is_spike_mode=bool(_pick(body, ["is_spike_mode", "isSpikeMode"], False)),
-        vwap=_pick(body, ["vwap", "VWAP"]),
-        vwap_distance=_pick(body, ["vwap_distance", "vwapDistance"]),
-        above_vwap=_pick(body, ["above_vwap", "aboveVwap"]),
-        supertrend_trend=int(_pick(body, ["supertrend_trend", "supertrendTrend"], 0) or 0),
-        supertrend_line=_pick(body, ["supertrend_line", "supertrendLine"]),
-        volatility_regime=int(_pick(body, ["volatility_regime", "volatilityRegime"], 0) or 0),
-        volatility_ratio=_float(_pick(body, ["volatility_ratio", "volatilityRatio"]), 1.0),
-        image_filename=_pick(body, ["image_filename", "imageFilename"]),
-        deriv_patterns=_pick(body, ["deriv_patterns", "derivPatterns"]),
-        deriv_patterns_bullish=_pick(body, ["deriv_patterns_bullish", "derivPatternsBullish"]),
-        deriv_patterns_bearish=_pick(body, ["deriv_patterns_bearish", "derivPatternsBearish"]),
-        deriv_patterns_confidence=_pick(body, ["deriv_patterns_confidence", "derivPatternsConfidence"]),
-        volatility_compression=_float(_pick(body, ["volatility_compression", "volatilityCompression"]), 1.0),
-        price_acceleration=_float(_pick(body, ["price_acceleration", "priceAcceleration"]), 0.0),
-        volume_spike=bool(_pick(body, ["volume_spike", "volumeSpike"], False)),
-        spike_probability=_float(_pick(body, ["spike_probability", "spikeProbability"]), 0.0),
-        timestamp=_pick(body, ["timestamp", "time", "datetime"]),
+        rsi=min(100, max(0, _float(body.get("rsi"), 50.0))),
+        ema_fast_h1=body.get("ema_fast_h1"), ema_slow_h1=body.get("ema_slow_h1"),
+        ema_fast_m1=body.get("ema_fast_m1"), ema_slow_m1=body.get("ema_slow_m1"),
+        ema_fast_m5=body.get("ema_fast_m5"), ema_slow_m5=body.get("ema_slow_m5"),
+        atr=_float(body.get("atr")), dir_rule=int(body.get("dir_rule", 0) or 0),
+        is_spike_mode=bool(body.get("is_spike_mode", False)),
+        vwap=body.get("vwap"), vwap_distance=body.get("vwap_distance"), above_vwap=body.get("above_vwap"),
+        supertrend_trend=int(body.get("supertrend_trend", 0) or 0),
+        supertrend_line=body.get("supertrend_line"),
+        volatility_regime=int(body.get("volatility_regime", 0) or 0),
+        volatility_ratio=_float(body.get("volatility_ratio"), 1.0),
+        image_filename=body.get("image_filename"), deriv_patterns=body.get("deriv_patterns"),
+        deriv_patterns_bullish=body.get("deriv_patterns_bullish"), deriv_patterns_bearish=body.get("deriv_patterns_bearish"),
+        deriv_patterns_confidence=body.get("deriv_patterns_confidence"), timestamp=body.get("timestamp"),
     )
+
+@app.post("/decision", response_model=DecisionResponse)
+async def decision(req: Request):
+    """
+    Endpoint principal de décision utilisé par le robot MT5
+    Parse le body manuellement pour éviter 422 sur payloads incomplets.
+    """
+    try:
+        raw = await req.body()
+        request = _parse_decision_body(raw)
+        
+        logger.info(f"🎯 Requête DECISION reçue pour {request.symbol}")
+        
+        # MODE SIMPLIFIÉ - RoboCop v2 compatible
+        if SIMPLIFIED_MODE:
+            return await decision_simplified(request)
+        
+        # MODE COMPLET - Analyse avancée
+        # Vérifier le cache d'abord
+        cache_key = f"{request.symbol}_{request.bid}_{request.ask}_{request.rsi}"
+        current_time = datetime.now().timestamp()
+        
+        if cache_key in decision_cache:
+            cached_time = cache_timestamps.get(cache_key, 0)
+            if current_time - cached_time < CACHE_DURATION:
+                logger.debug(f"📋 Utilisation décision en cache pour {request.symbol}")
+                return DecisionResponse(**decision_cache[cache_key])
+        
+        # Analyse technique de base
+        action = "hold"
+        confidence = 0.5
+        reason = "Analyse technique en cours..."
+        
+        # Analyse RSI
+        if request.rsi:
+            if request.rsi < 30:
+                action = "buy"
+                confidence += 0.15
+                reason += f"RSI surventé ({request.rsi:.1f}). "
+            elif request.rsi > 70:
+                action = "sell"
+                confidence += 0.15
+                reason += f"RSI surachat ({request.rsi:.1f}). "
+        
+        # Analyse EMA H1
+        if request.ema_fast_h1 and request.ema_slow_h1:
+            if request.ema_fast_h1 > request.ema_slow_h1:
+                if action != "sell":
+                    action = "buy"
+                    confidence += 0.1
+                    reason += f"EMA H1 haussière ({request.ema_fast_h1:.5f} > {request.ema_slow_h1:.5f}). "
+            else:
+                if action != "buy":
+                    action = "sell"
+                    confidence += 0.1
+                    reason += f"EMA H1 baissière ({request.ema_fast_h1:.5f} < {request.ema_slow_h1:.5f}). "
+        
+        # Analyse des tendances multi-timeframes
+        try:
+            trend_data = await get_trend_data(request.symbol)
+            if trend_data:
+                m1_trend = trend_data.get("trend_m1", {}).get("direction", "NEUTRAL")
+                m5_trend = trend_data.get("trend_m5", {}).get("direction", "NEUTRAL")
+                h1_trend = trend_data.get("trend_h1", {}).get("direction", "NEUTRAL")
+                
+                # Compter les tendances alignées
+                uptrend_count = sum([m1_trend == "UPTREND", m5_trend == "UPTREND", h1_trend == "UPTREND"])
+                downtrend_count = sum([m1_trend == "DOWNTREND", m5_trend == "DOWNTREND", h1_trend == "DOWNTREND"])
+                
+                if uptrend_count >= 2:
+                    if action != "sell":
+                        action = "buy"
+                        confidence += 0.2
+                        reason += "Tendance haussière multi-TF. "
+                elif downtrend_count >= 2:
+                    if action != "buy":
+                        action = "sell"
+                        confidence += 0.2
+                        reason += "Tendance baissière multi-TF. "
+                        
+        except Exception as trend_err:
+            logger.warning(f"Erreur analyse tendance: {trend_err}")
+        
+        # Ajuster la confiance selon les conditions
+        if action == "hold":
+            confidence = max(0.3, confidence - 0.2)  # Réduire la confiance pour HOLD
+        
+        # S'assurer que la confiance est dans les limites
+        confidence = max(0.0, min(1.0, confidence))
+        
+        # Discipline finale basée sur stats (jour/mois) calculées depuis trade_feedback (source MT5)
+        new_action, new_conf, pol_reason = _apply_symbol_risk_policy(request.symbol, action, confidence)
+        if pol_reason:
+            reason += pol_reason + " "
+        action, confidence = new_action, new_conf
+
+        # Créer la réponse
+        response = DecisionResponse(
+            action=action,
+            confidence=confidence,
+            reason=reason[:200],
+            spike_prediction=False,
+            spike_zone_price=None,
+            stop_loss=None,
+            take_profit=None,
+            timestamp=datetime.now().isoformat(),
+            model_used="Technical+Multi-TF",
+            technical_analysis={
+                "rsi": request.rsi,
+                "ema_fast_h1": request.ema_fast_h1,
+                "ema_slow_h1": request.ema_slow_h1
+            }
+        )
+        
+        # Mettre en cache
+        decision_cache[cache_key] = {
+            "action": response.action,
+            "confidence": response.confidence,
+            "reason": response.reason,
+            "timestamp": response.timestamp,
+            "model_used": response.model_used
+        }
+        cache_timestamps[cache_key] = current_time
+        
+        # Log prediction to Supabase for monitoring (non-blocking)
+        asyncio.create_task(_push_prediction_to_supabase(request, response, None))
+        
+        logger.info(f"✅ DÉCISION {request.symbol}: {action} (conf: {confidence:.2f}) - {response.model_used}")
+        return response
+        
+    except Exception as e:
+        logger.error(f"Erreur dans decision: {type(e).__name__}: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Erreur décision: {str(e)}")
+    """
+    Endpoint avancé qui utilise Gemma pour l'analyse visuelle du graphique MT5
+    et Gemini pour formuler la recommandation finale de trading.
+    """
+    try:
+        # Validation des champs obligatoires
+        if not request.symbol:
+            raise HTTPException(status_code=422, detail="Le symbole est requis")
+        
+        logger.info(f"Requête DecisionGemma reçue pour {request.symbol}")
+        
+        # Étape 1: Analyse technique initiale
+        action = "hold"
+        confidence = 0.5
+        reason = "Analyse en cours..."
+        
+        # Analyse RSI
+        if request.rsi:
+            if request.rsi < 30:
+                action = "buy"
+                confidence += 0.2
+                reason += f"RSI surventé ({request.rsi:.1f}). "
+            elif request.rsi > 70:
+                action = "sell"
+                confidence += 0.2
+                reason += f"RSI suracheté ({request.rsi:.1f}). "
+        
+        # Analyse EMA
+        if request.ema_fast_h1 and request.ema_slow_h1:
+            if request.ema_fast_h1 > request.ema_slow_h1:
+                if action != "sell":
+                    action = "buy"
+                    confidence += 0.15
+                reason += f"EMA H1 haussière ({request.ema_fast_h1:.5f} > {request.ema_slow_h1:.5f}). "
+            else:
+                if action != "buy":
+                    action = "sell"
+                    confidence += 0.15
+                reason += f"EMA H1 baissière ({request.ema_fast_h1:.5f} < {request.ema_slow_h1:.5f}). "
+        
+        # Étape 2: Analyse visuelle avec Gemma (si image disponible)
+        gemma_analysis = None
+        sl_from_gemma = None
+        tp_from_gemma = None
+        
+        if GEMMA_AVAILABLE and request.image_filename:
+            try:
+                # Construire le chemin complet de l'image depuis MT5
+                mt5_image_path = os.path.join(MT5_FILES_DIR, request.image_filename)
+                
+                if os.path.exists(mt5_image_path):
+                    gemma_prompt = f"""Analyse ce graphique {request.symbol} et identifie TOUS les objets graphiques visibles (lignes, zones, flèches, labels, patterns).
+                    
+                    Action suggérée: {action}
+                    
+                    Analyse DÉTAILLÉE demandée:
+                    1. Identifie tous les objets graphiques visibles sur le graphique (support/résistance, zones, flèches de signal, patterns, etc.)
+                    2. Interprète leur signification pour le trading
+                    3. Évalue si ces objets confirment ou infirment l'action suggérée {action}
+                    
+                    Réponds en format JSON avec ces champs:
+                    - "tendance": "haussière" ou "baissière" ou "neutre"
+                    - "force": 1-10 (10 = très fort)
+                    - "support": prix exact du support le plus proche
+                    - "resistance": prix exact de la résistance la plus proche
+                    - "stop_loss": prix optimal pour SL
+                    - "take_profit": prix optimal pour TP
+                    - "confirmation": true/false si tu confirmes l'action {action}
+                    - "objets_graphiques": liste des objets identifiés (zones, lignes, patterns, etc.)
+                    - "interpretation_objets": explication de comment les objets graphiques influencent la décision
+                    """
+                    
+                    gemma_analysis = analyze_with_gemma(gemma_prompt, mt5_image_path)
+                    
+                    if gemma_analysis:
+                        logger.info(f"Analyse Gemma reçue: {gemma_analysis[:200]}...")
+                        
+                        # Extraire SL/TP de la réponse Gemma
+                        try:
+                            import re
+                            sl_match = re.search(r'"stop_loss":\s*([0-9.]+)', gemma_analysis)
+                            tp_match = re.search(r'"take_profit":\s*([0-9.]+)', gemma_analysis)
+                            confirmation_match = re.search(r'"confirmation":\s*(true|false)', gemma_analysis)
+                            
+                            if sl_match:
+                                sl_from_gemma = float(sl_match.group(1))
+                            if tp_match:
+                                tp_from_gemma = float(tp_match.group(1))
+                            if confirmation_match:
+                                gemma_confirms = confirmation_match.group(1) == "true"
+                                if gemma_confirms:
+                                    confidence += 0.25
+                                else:
+                                    confidence -= 0.15
+                                    
+                        except Exception as parse_err:
+                            logger.warning(f"Erreur parsing réponse Gemma: {parse_err}")
+                        
+                        reason += f"Analyse visuelle Gemma effectuée. "
+                        
+                else:
+                    logger.warning(f"Fichier image non trouvé: {mt5_image_path}")
+                    
+            except Exception as gemma_err:
+                logger.error(f"Erreur analyse Gemma: {type(gemma_err).__name__}: {str(gemma_err)}", exc_info=True)
+        
+        # Étape 3: Formulation finale avec Gemini
+        global GEMINI_AVAILABLE, gemini_model  # Déclarer global AVANT toute utilisation
+        if GEMINI_AVAILABLE and gemini_model is not None:
+            try:
+                gemini_prompt = f"""En tant qu'expert trading, analyse ces données pour {request.symbol}:
+                
+                DONNÉES TECHNIQUES:
+                - Action initiale: {action}
+                - Confiance: {confidence:.2f}
+                - RSI: {request.rsi} (surventé<30, suracheté>70)
+                - EMA H1: rapide={request.ema_fast_h1}, lente={request.ema_slow_h1}
+                - Prix actuel: bid={request.bid}, ask={request.ask}
+                
+                ANALYSE VISUELLE GEMMA:
+                {gemma_analysis if gemma_analysis else "Non disponible"}
+                
+                INSTRUCTIONS:
+                1. Valide ou infirme l'action initiale
+                2. Donne une recommandation finale claire: BUY/SELL/HOLD
+                3. Attribue une confiance finale (0.0-1.0)
+                4. Fournis une raison concise (<200 caractères)
+                5. SL/TP: {"SL=" + str(sl_from_gemma) + ", TP=" + str(tp_from_gemma) if sl_from_gemma and tp_from_gemma else "Génère des niveaux logiques"}
+                
+                Réponds UNIQUEMENT en JSON:
+                {{"action": "BUY/SELL/HOLD", "confidence": 0.00, "reason": "texte concis", "sl": 0.00000, "tp": 0.00000}}
+                """
+                
+                response = gemini_model.generate_content(gemini_prompt)
+                gemini_response = response.text.strip()
+                
+                # Nettoyer et parser la réponse JSON
+                if gemini_response.startswith("```json"):
+                    gemini_response = gemini_response.replace("```json", "").replace("```", "").strip()
+                
+                gemini_result = json.loads(gemini_response)
+                
+                action = gemini_result.get("action", action)
+                confidence = gemini_result.get("confidence", confidence)
+                reason = gemini_result.get("reason", reason)
+                sl_from_gemma = gemini_result.get("sl", sl_from_gemma)
+                tp_from_gemma = gemini_result.get("tp", tp_from_gemma)
+                
+                logger.info(f"Recommandation Gemini: {action} (conf: {confidence:.2f})")
+                
+            except Exception as gemini_err:
+                logger.error(f"Erreur formulation Gemini: {type(gemini_err).__name__}: {str(gemini_err)}", exc_info=True)
+                # Si le modèle est obsolète, désactiver Gemini pour cette session
+                if "NotFound" in str(gemini_err) or "404" in str(gemini_err) or "not found" in str(gemini_err).lower():
+                    logger.warning("Modèle Gemini obsolète détecté. Désactivation de Gemini pour cette requête.")
+                    GEMINI_AVAILABLE = False
+                    gemini_model = None
+        
+        # Limiter la confiance
+        confidence = max(0.0, min(1.0, confidence))
+        
+        # Prédiction de spike (pour Boom/Crash)
+        spike_prediction = False
+        spike_zone_price = None
+        
+        if "Boom" in request.symbol or "Crash" in request.symbol:
+            if request.volatility_regime == 1:  # High volatility
+                spike_prediction = True
+                spike_zone_price = request.ask if "Boom" in request.symbol else request.bid
+                confidence += 0.1
+        
+        # Construire la réponse finale
+        response = DecisionResponse(
+            action=action,
+            confidence=confidence,
+            reason=reason[:250],  # Limiter la longueur
+            spike_prediction=spike_prediction,
+            spike_zone_price=spike_zone_price,
+            stop_loss=sl_from_gemma,
+            take_profit=tp_from_gemma,
+            timestamp=datetime.now().isoformat(),
+            model_used="Gemma+Gemini",
+            technical_analysis={
+                "rsi": request.rsi,
+                "ema_fast_h1": request.ema_fast_h1,
+                "ema_slow_h1": request.ema_slow_h1,
+                "supertrend_line": request.supertrend_line,
+                "volatility_regime": request.volatility_regime
+            },
+            gemma_analysis=gemma_analysis[:500] if gemma_analysis else f"Modèle Gemini utilisé - Confiance: {confidence:.2f}, Action: {action}"
+        )
+        
+        logger.info(f"Décision finale pour {request.symbol}: {action} (conf: {confidence:.2f})")
+        return response
+        
+    except Exception as e:
+        logger.error(f"Erreur dans decision_gemma: {type(e).__name__}: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Erreur interne: {type(e).__name__}: {str(e)}")
 
 # Fonction pour récupérer les données de tendance avec gestion d'erreur robuste
 async def get_trend_data(symbol: str):
@@ -6461,14 +6434,7 @@ def enhance_spike_prediction_with_history(df: pd.DataFrame, symbol: str) -> Dict
     }
 
 @app.post("/decision", response_model=DecisionResponse)
-async def decision(req: Request):
-    """POST /decision : corps JSON toléré via _parse_decision_body (évite 422 côté FastAPI)."""
-    try:
-        raw = await req.body()
-        request = _parse_decision_body(raw)
-    except Exception as e:
-        logger.error(f"Erreur lecture corps /decision: {type(e).__name__}: {e}", exc_info=True)
-        raise HTTPException(status_code=400, detail="Corps JSON /decision invalide")
+async def decision(request: DecisionRequest):
     # Normaliser les champs manquants pour éviter 422 (robot MT5 peut envoyer payload incomplet)
     symbol = (request.symbol or "").strip() or "UNKNOWN"
     bid = request.bid
@@ -6482,8 +6448,6 @@ async def decision(req: Request):
     rsi = request.rsi if (request.rsi is not None and 0 <= request.rsi <= 100) else 50.0
     request = request.model_copy(update={"symbol": symbol, "bid": bid, "ask": ask, "rsi": rsi})
     logger.debug(f"🎯 Décision IA demandée pour {symbol} (bid={bid}, ask={ask})")
-    if SIMPLIFIED_MODE:
-        return await decision_simplified(request)
     # Mettre à jour l'état de spike en temps réel à partir de ce tick
     try:
         update_spike_state_from_request(request)
@@ -6766,13 +6730,6 @@ async def decision(req: Request):
                         prediction_cache[cache_key] = response_data
                         last_updated[cache_key] = current_time
                         
-                        _track_decision_snapshot(
-                            request.symbol,
-                            action,
-                            confidence,
-                            reason,
-                            "AdvancedEntryScoring",
-                        )
                         # Retourner la réponse directement
                         return DecisionResponse(**response_data)
             except Exception as e:
@@ -7071,21 +7028,6 @@ async def decision(req: Request):
         
         # 1. Confiance de base proportionnelle au score
         base_confidence = MIN_CONF + (normalized_score * (MAX_CONF - MIN_CONF))
-
-        # 1b. Même mode complet : base alternative entropie TF ou mélange (voir AI_CONFIDENCE_MODE)
-        try:
-            from ai_confidence_metrics import confidence_tf_entropy, get_confidence_mode, get_blend_weight
-
-            _cm = get_confidence_mode()
-            if _cm == "entropy_tf":
-                base_confidence = confidence_tf_entropy(bullish_tfs, bearish_tfs, 3, MIN_CONF, MAX_CONF)
-            elif _cm == "blend_entropy_tf":
-                leg = MIN_CONF + (normalized_score * (MAX_CONF - MIN_CONF))
-                ent = confidence_tf_entropy(bullish_tfs, bearish_tfs, 3, MIN_CONF, MAX_CONF)
-                w = get_blend_weight()
-                base_confidence = (1.0 - w) * leg + w * ent
-        except Exception:
-            pass
         
         # 2. BONUS UNIQUE pour tendance long terme (H1/M5) - éliminer la redondance
         long_term_bonus = 0.0
@@ -7987,7 +7929,6 @@ Format: Analyse claire et professionnelle en français.
         
         # Construire la réponse
         response_data = {
-            "symbol": request.symbol,
             "action": action,
             "confidence": round(confidence, 3),
             "reason": reason,
@@ -8010,13 +7951,18 @@ Format: Analyse claire et professionnelle en français.
         logger.info(f"✅ {init_marker} Décision IA pour {request.symbol}: action={action}, confidence={confidence:.3f} ({confidence*100:.1f}%), reason={reason[:100]}")
         
         # ========== AMÉLIORATIONS PRIORITAIRES APPLIQUÉES ICI ==========
-        # (Ne pas re-vérifier le cache ici : le calcul ci-dessus serait ignoré et une ancienne décision renvoyée.)
         
-        # 1. Appliquer les seuils de confiance minimum
+        # 1. Vérifier le cache court d'abord
+        cached_decision = get_cached_decision(request.symbol)
+        if cached_decision and not initialization_mode:
+            logger.debug(f"📋 Utilisation décision en cache pour {request.symbol}")
+            return DecisionResponse(**cached_decision)
+        
+        # 2. Appliquer les seuils de confiance minimum
         action, confidence, reason = apply_confidence_thresholds(action, confidence, reason)
         logger.info(f"🎯 Seuils appliqués: action={action}, confidence={confidence:.3f}")
         
-        # 1b. Calibration adaptative (réduit le décalage prédiction/mouvement réel)
+        # 2b. Calibration adaptative (réduit le décalage prédiction/mouvement réel)
         action, confidence, reason = apply_calibration_to_decision(
             request.symbol, action, confidence, reason, timeframe="M1"
         )
@@ -8025,7 +7971,7 @@ Format: Analyse claire et professionnelle en français.
         response_data["reason"] = reason
         logger.debug(f"📐 Calibration appliquée: action={action}, confidence={confidence:.3f}")
         
-        # 2. Calculer les métadonnées enrichies (pour tous les symboles)
+        # 3. Calculer les métadonnées enrichies (pour tous les symboles)
         metadata = {}
         try:
             # Toujours essayer de calculer les métadonnées de base
@@ -8063,10 +8009,10 @@ Format: Analyse claire et professionnelle en français.
                 'error': str(meta_err)
             }
         
-        # 3. Mettre à jour response_data avec métadonnées (toujours incluses)
+        # 4. Mettre à jour response_data avec métadonnées (toujours incluses)
         response_data["metadata"] = convert_numpy_to_python(metadata)
         
-        # 4. Mettre en cache la décision améliorée
+        # 5. Mettre en cache la décision améliorée
         cache_decision(request.symbol, response_data)
         
         # ========== FIN DES AMÉLIORATIONS ==========
@@ -8420,7 +8366,6 @@ def _generate_future_ohlc_series(
     try:
         from ai_server_improvements import predict_prices_advanced
         last_close = float(df['close'].iloc[-1])
-        logger.info(f"Appel de predict_prices_advanced pour {symbol} avec last_close={last_close}, horizon={horizon}")
         # Utiliser l'IA avancée basée sur indicateurs et S/R
         adv_pred = predict_prices_advanced(df, last_close, horizon, "M1", symbol)
         
@@ -8428,7 +8373,6 @@ def _generate_future_ohlc_series(
         conf = adv_pred.get('confidence', 0.5)
         direction = adv_pred.get('direction', 'NEUTRAL')
         atr = adv_pred.get('atr', last_close * 0.001)
-        logger.info(f"predict_prices_advanced pour {symbol} terminé. Direction: {direction}, Confiance: {conf}")
     except Exception as e:
         logger.warning(f"Fallback dans _generate_future_ohlc_series: {e}")
         last_close = float(df['close'].iloc[-1])
@@ -8498,21 +8442,8 @@ def _generate_future_ohlc_series(
     return candles
 
 
-_SYMBOL_PROFILE_CACHE = {}
-_SYMBOL_PROFILE_CACHE_TTL = 3600 # 1h
-
 async def _fetch_symbol_behavior_profile(symbol: str, timeframe: str = "M1") -> Dict[str, Any]:
-    """Construit un profil comportemental par symbole depuis Supabase avec cache."""
-    now = time.time()
-    cache_key = f"{symbol}_{timeframe}"
-    if cache_key in _SYMBOL_PROFILE_CACHE:
-        entry = _SYMBOL_PROFILE_CACHE[cache_key]
-        if now - entry["expiry"] < _SYMBOL_PROFILE_CACHE_TTL:
-            return entry["data"]
-
-    start_fetch = now
-    logger.info(f"Récupération du profil comportemental pour {symbol}...")
-
+    """Construit un profil comportemental par symbole depuis Supabase."""
     profile: Dict[str, Any] = {
         "avg_leg_bars": 14,
         "retrace_ratio": 0.48,
@@ -8524,7 +8455,7 @@ async def _fetch_symbol_behavior_profile(symbol: str, timeframe: str = "M1") -> 
         supabase_url, supabase_key = _get_supabase_config(strict=True)
         import httpx
         headers = {"apikey": supabase_key, "Authorization": f"Bearer {supabase_key}"}
-        async with httpx.AsyncClient(timeout=3.0) as client:
+        async with httpx.AsyncClient(timeout=8.0) as client:
             r_pat = await client.get(
                 f"{supabase_url}/rest/v1/symbol_correction_patterns",
                 headers=headers,
@@ -8988,13 +8919,8 @@ async def robot_predict_ohlc(symbol: str, timeframe: str = "M1", horizon: int = 
         if df is None or df.empty or len(df) < 80:
             raise HTTPException(status_code=404, detail=f"Données insuffisantes pour {symbol}")
 
-        start_time = time.time()
         behavior_profile = await _fetch_symbol_behavior_profile(used_symbol, "M1")
-        logger.info(f"Calcul des bougies futures pour {used_symbol}...")
         candles = _generate_future_ohlc_series(df, h, behavior_profile=behavior_profile, symbol=used_symbol)
-        duration = time.time() - start_time
-        logger.info(f"Génération bougies futures terminée en {duration:.3f}s pour {used_symbol}")
-        
         if not candles:
             raise HTTPException(status_code=500, detail="Impossible de générer la projection OHLC")
 
@@ -10964,16 +10890,12 @@ async def api_ml_metrics(symbol: str, timeframe: str = "M1"):
             "last_updated": cal.get("last_updated") or cal.get("updated_at") or None,
         } if isinstance(cal, dict) and cal else None
 
-        # Réponse ML courante: uniquement depuis signal réel observé (pas de placeholder)
-        live = _get_live_signal_snapshot(sym)
-        ml_response = None
-        if live:
-            action = str(live.get("action") or "hold").upper()
-            ml_response = {
-                "prediction": action,
-                "confidence": float(live.get("confidence", 0.0)),
-                "timestamp": live.get("timestamp"),
-            }
+        # Réponse ML courante: on fournit au minimum HOLD + confiance neutre
+        ml_response = {
+            "prediction": "HOLD",
+            "confidence": 0.0,
+            "timestamp": datetime.now().isoformat(),
+        }
 
         return {
             "symbol": sym,
@@ -11009,7 +10931,6 @@ async def api_ml_metrics(symbol: str, timeframe: str = "M1"):
     except Exception:
         samples_used = 0
 
-    live_fallback = _get_live_signal_snapshot(sym)
     return {
         "symbol": sym,
         "timeframe": tf,
@@ -11021,15 +10942,7 @@ async def api_ml_metrics(symbol: str, timeframe: str = "M1"):
         "created_at": datetime.now().isoformat(),
         "top_features": [],
         "calibration": get_symbol_calibration(sym, tf),
-        "ml_response": (
-            {
-                "prediction": str(live_fallback.get("action") or "hold").upper(),
-                "confidence": float(live_fallback.get("confidence", 0.0)),
-                "timestamp": live_fallback.get("timestamp"),
-            }
-            if live_fallback
-            else None
-        ),
+        "ml_response": {"prediction": "HOLD", "confidence": 0.0, "timestamp": datetime.now().isoformat()},
         "data_source": "computed",
     }
 
@@ -11040,37 +10953,58 @@ async def ml_signal(symbol: str, timeframe: str = "M1"):
     Compatible avec les appels existants du robot
     """
     try:
+        # Obtenir les métriques ML existantes
         metrics = _compute_ml_metrics(symbol, timeframe)
-        live = _get_live_signal_snapshot(symbol)
-        if not live:
-            return {
-                "symbol": symbol,
-                "timeframe": timeframe,
-                "action": "NO_DATA",
-                "signal": "NO_DATA",
-                "confidence": 0.0,
-                "accuracy": metrics.get("accuracy", 0.0),
-                "model_name": metrics.get("model_name", "unknown"),
-                "total_samples": metrics.get("total_samples", 0),
-                "status": "no_data",
-                "message": "Aucun signal réel récent disponible pour ce symbole",
-                "timestamp": datetime.now().isoformat()
-            }
-
-        action = str(live.get("action") or "hold").upper()
+        
+        # Créer un signal simple basé sur les métriques
+        accuracy = float(metrics.get("accuracy", 0))
+        if accuracy > 0.6:
+            # Si bonne accuracy, utiliser le modèle pour prédire
+            model_key = f"{symbol}_{timeframe}"
+            
+            # Essayer d'obtenir une prédiction du modèle
+            if ML_TRAINER_AVAILABLE and ml_trainer is not None:
+                try:
+                    # Simuler une prédiction simple
+                    import random
+                    signals = ["BUY", "SELL", "HOLD"]
+                    weights = [0.35, 0.35, 0.3]  # Distribution équilibrée
+                    
+                    # Biais basé sur les métriques récentes si disponibles
+                    win_rate = float(metrics.get("win_rate", 0))
+                    if win_rate > 0.6:
+                        weights = [0.4, 0.3, 0.3]  # Plus de BUY si bon win rate
+                    elif win_rate < 0.4:
+                        weights = [0.3, 0.4, 0.3]  # Plus de SELL si mauvais win rate
+                    
+                    signal = random.choices(signals, weights=weights)[0]
+                    confidence = random.uniform(0.6, 0.9)
+                    
+                    return {
+                        "symbol": symbol,
+                        "timeframe": timeframe,
+                        "signal": signal,
+                        "confidence": confidence,
+                        "accuracy": metrics.get("accuracy", 0.5),
+                        "model_name": metrics.get("model_name", "random_forest"),
+                        "total_samples": metrics.get("total_samples", 0),
+                        "status": "success",
+                        "timestamp": datetime.now().isoformat()
+                    }
+                except Exception as e:
+                    logger.warning(f" Erreur prédiction ML pour {symbol}: {e}")
+        
+        # Fallback: signal basé sur les métriques disponibles
         return {
             "symbol": symbol,
             "timeframe": timeframe,
-            "action": action,
-            "signal": action,
-            "confidence": float(live.get("confidence", 0.0)),
-            "accuracy": metrics.get("accuracy", 0.0),
-            "model_name": metrics.get("model_name", "unknown"),
+            "signal": "HOLD",  # Signal par défaut
+            "confidence": 0.5,
+            "accuracy": metrics.get("accuracy", 0.5),
+            "model_name": metrics.get("model_name", "random_forest"),
             "total_samples": metrics.get("total_samples", 0),
-            "status": "live",
-            "reason": live.get("reason"),
-            "data_source": "live_decision_snapshot",
-            "timestamp": live.get("timestamp"),
+            "status": "fallback",
+            "timestamp": datetime.now().isoformat()
         }
         
     except Exception as e:
@@ -11078,10 +11012,9 @@ async def ml_signal(symbol: str, timeframe: str = "M1"):
         return {
             "symbol": symbol,
             "timeframe": timeframe,
-            "action": "NO_DATA",
-            "signal": "NO_DATA",
-            "confidence": 0.0,
-            "accuracy": 0.0,
+            "signal": "HOLD",
+            "confidence": 0.5,
+            "accuracy": 0.5,
             "model_name": "error",
             "total_samples": 0,
             "status": "error",
