@@ -3878,16 +3878,39 @@ async def decision_simplified(request: DecisionRequest):
     # 5. Décision technique de base
     if buy_score > sell_score:
         base_action = "buy"
-        base_confidence = 0.5 + (buy_score - sell_score) / 2
     elif sell_score > buy_score:
         base_action = "sell"
-        base_confidence = 0.5 + (sell_score - buy_score) / 2
     else:
         base_action = "hold"
         _sit_h = _decision_situation_score(request, buy_score, sell_score)
         # Plage élargie : fortement liée au contexte réel du symbole (pas un plancher identique pour tous)
         base_confidence = 0.33 + 0.48 * _sit_h
         base_confidence = max(0.31, min(0.82, base_confidence))
+
+    # 5a. Confiance : formule legacy ou alternative (AI_CONFIDENCE_MODE)
+    if base_action in ("buy", "sell"):
+        try:
+            from ai_confidence_metrics import (
+                compute_simplified_confidence_with_tf_entropy,
+                count_ema_direction_votes,
+            )
+
+            ema_bull, ema_bear = count_ema_direction_votes(
+                request.ema_fast_m1,
+                request.ema_slow_m1,
+                request.ema_fast_m5,
+                request.ema_slow_m5,
+                request.ema_fast_h1,
+                request.ema_slow_h1,
+            )
+            base_confidence, _conf_tag = compute_simplified_confidence_with_tf_entropy(
+                buy_score, sell_score, base_action, ema_bull, ema_bear, 3
+            )
+            if _conf_tag not in ("legacy", "legacy_hold"):
+                reason += f"[Conf:{_conf_tag}] "
+        except Exception as _cm_ex:
+            logger.debug(f"confidence metrics: {_cm_ex}")
+            base_confidence = 0.5 + abs(buy_score - sell_score) / 2.0
 
     # 5b. Fallback si indicateurs "coeur" absents (EMA a 0/None, RSI neutre)
     # Utilise les champs EA si disponibles pour eviter HOLD 50% partout.
@@ -7396,6 +7419,21 @@ async def decision(request: DecisionRequest):
         
         # 1. Confiance de base proportionnelle au score
         base_confidence = MIN_CONF + (normalized_score * (MAX_CONF - MIN_CONF))
+
+        # 1b. Même mode complet : base alternative entropie TF ou mélange (voir AI_CONFIDENCE_MODE)
+        try:
+            from ai_confidence_metrics import confidence_tf_entropy, get_confidence_mode, get_blend_weight
+
+            _cm = get_confidence_mode()
+            if _cm == "entropy_tf":
+                base_confidence = confidence_tf_entropy(bullish_tfs, bearish_tfs, 3, MIN_CONF, MAX_CONF)
+            elif _cm == "blend_entropy_tf":
+                leg = MIN_CONF + (normalized_score * (MAX_CONF - MIN_CONF))
+                ent = confidence_tf_entropy(bullish_tfs, bearish_tfs, 3, MIN_CONF, MAX_CONF)
+                w = get_blend_weight()
+                base_confidence = (1.0 - w) * leg + w * ent
+        except Exception:
+            pass
         
         # 2. BONUS UNIQUE pour tendance long terme (H1/M5) - éliminer la redondance
         long_term_bonus = 0.0
