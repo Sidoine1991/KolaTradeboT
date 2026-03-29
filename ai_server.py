@@ -13212,7 +13212,7 @@ async def predict_corrections(request: CorrectionPredictionRequest):
             risk_level,
         )
         
-        logger.info(f"✅ Prédiction correction générée - Confiance: {confidence_score:.1%} - Action: {recommended_action}")
+        logger.info(f"✅ Prédiction correction générée - Confiance: {confidence_score:.1f}% - Action: {recommended_action}")
         
         return CorrectionPredictionResponse(
             status="success",
@@ -13223,7 +13223,7 @@ async def predict_corrections(request: CorrectionPredictionRequest):
             confidence_score=confidence_score,
             recommended_action=recommended_action,
             risk_level=risk_level,
-            message=f"Prédiction générée avec {confidence_score:.1%} de confiance"
+            message=f"Prédiction générée avec {confidence_score:.1f}% de confiance"
         )
         
     except Exception as e:
@@ -13608,14 +13608,43 @@ async def calculate_correction_prediction(
         prediction_valid_until=(datetime.now() + timedelta(hours=4)).isoformat()
     )
 
+def _normalize_confidence_percent(value: float, default: float = 70.0) -> float:
+    """Normalise une confiance en pourcentage [0..100].
+
+    Accepte les formats:
+    - ratio 0..1
+    - pourcentage 0..100
+    - pourcentage x100 (ex: 7641 -> 76.41)
+    """
+    try:
+        v = float(value)
+    except Exception:
+        v = float(default)
+
+    if v <= 0:
+        v = float(default)
+
+    if v <= 1.0:
+        v *= 100.0
+    elif v > 100.0:
+        if v <= 10000.0:
+            v /= 100.0
+        else:
+            v = 100.0
+
+    return max(0.0, min(100.0, v))
+
+
 def calculate_global_confidence(analysis: CorrectionZoneAnalysis, prediction: CorrectionPrediction) -> float:
-    """Calcule le score de confiance global"""
-    base_confidence = prediction.prediction_confidence
-    historical_bonus = analysis.total_corrections_analyzed / 100.0  # Bonus si beaucoup de données
-    accuracy_bonus = (prediction.historical_accuracy or 70.0) / 100.0
-    
-    confidence = min(95.0, base_confidence + (historical_bonus * 5) + (accuracy_bonus * 3))
-    return confidence
+    """Calcule le score de confiance global (en %)."""
+    base_confidence = _normalize_confidence_percent(prediction.prediction_confidence, default=70.0)
+    historical_bonus = max(0.0, float(analysis.total_corrections_analyzed or 0)) / 100.0  # Bonus si beaucoup de données
+    acc_pct = _normalize_confidence_percent(prediction.historical_accuracy or 70.0, default=70.0)
+    accuracy_bonus = acc_pct / 100.0
+
+    confidence = base_confidence + (historical_bonus * 5.0) + (accuracy_bonus * 3.0)
+    confidence = min(95.0, confidence)
+    return max(0.0, confidence)
 
 def determine_action_and_risk(trend: str, prediction: CorrectionPrediction, confidence: float) -> tuple:
     """Détermine l'action recommandée et le niveau de risque"""
