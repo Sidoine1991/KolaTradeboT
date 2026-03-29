@@ -239,6 +239,33 @@ def _track_decision_snapshot(
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
+
+def _get_live_signal_snapshot(symbol: str, max_age_seconds: int = 300) -> Optional[Dict[str, Any]]:
+    """
+    Retourne le dernier signal réellement observé via /decision pour un symbole.
+    Si le signal est trop ancien ou absent, renvoie None.
+    """
+    sym = (symbol or "").strip()
+    if not sym:
+        return None
+    snap = last_decision_by_symbol.get(sym)
+    if not snap:
+        return None
+    ts_raw = snap.get("timestamp")
+    if not ts_raw:
+        return None
+    try:
+        ts = datetime.fromisoformat(str(ts_raw).replace("Z", "+00:00"))
+        now = datetime.now(timezone.utc)
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        age = (now - ts).total_seconds()
+        if age > max_age_seconds:
+            return None
+    except Exception:
+        return None
+    return snap
+
 # Importer les fonctions améliorées
 try:
     from ai_server_improvements import (
@@ -5094,77 +5121,30 @@ async def get_robot_dashboard():
                 logger.warning(f"⚠️ Erreur récupération recommandations ML: {e}")
                 dashboard_data["ml_recommendations"] = {"error": str(e)}
         
-        # 3. Prédictions de mouvement de prix (pour les symboles actifs)
-        if ML_TRAINER_AVAILABLE:
-            try:
-                # Symboles à analyser pour les prédictions
-                symbols_to_predict = ["EURJPY", "GBPJPY", "USDJPY", "EURUSD", "GBPUSD"]
-                
-                for symbol in symbols_to_predict:
-                    try:
-                        # Récupérer les dernières métriques pour ce symbole
-                        metrics = ml_trainer.get_current_metrics()
-                        
-                        # Chercher les métriques spécifiques à ce symbole
-                        symbol_metrics = None
-                        if 'models' in metrics:
-                            for model_key, model_data in metrics['models'].items():
-                                if symbol in model_key:
-                                    symbol_metrics = model_data
-                                    break
-                        
-                        if symbol_metrics and 'metrics' in symbol_metrics:
-                            model_metrics = symbol_metrics['metrics']
-                            
-                            # Générer une prédiction basée sur les métriques ML
-                            prediction = {
-                                "symbol": symbol,
-                                "current_prediction": "HOLD",
-                                "confidence": 0.5,
-                                "price_direction": "NEUTRAL",
-                                "accuracy": model_metrics.get('accuracy', 0.5),
-                                "f1_score": model_metrics.get('f1_score', 0.5),
-                                "last_updated": symbol_metrics.get('last_updated', datetime.now().isoformat()),
-                                "feature_importance": model_metrics.get('feature_importance', {}),
-                                "trend_signal": "NEUTRAL"
-                            }
-                            
-                            # Analyser les features pour déterminer la direction
-                            feature_importance = model_metrics.get('feature_importance', {})
-                            if feature_importance:
-                                # Signaux basés sur l'importance des features
-                                rsi_importance = feature_importance.get('rsi', 0)
-                                ema_importance = feature_importance.get('ema_diff', 0)
-                                volume_importance = feature_importance.get('volume', 0)
-                                
-                                if rsi_importance > 0.1:
-                                    prediction["trend_signal"] = "RSI_DOMINANT"
-                                elif ema_importance > 0.1:
-                                    prediction["trend_signal"] = "TREND_DOMINANT"
-                                elif volume_importance > 0.1:
-                                    prediction["trend_signal"] = "VOLUME_DOMINANT"
-                                
-                                # Calculer la confiance basée sur la précision du modèle
-                                accuracy = model_metrics.get('accuracy', 0.5)
-                                prediction["confidence"] = min(0.95, accuracy * 1.1)
-                                
-                                # Déterminer la direction basée sur les métriques
-                                if accuracy > 0.7:
-                                    if 'buy' in str(model_metrics).lower():
-                                        prediction["current_prediction"] = "BUY"
-                                        prediction["price_direction"] = "HAUSSIER"
-                                    elif 'sell' in str(model_metrics).lower():
-                                        prediction["current_prediction"] = "SELL"
-                                        prediction["price_direction"] = "BAISSIER"
-                            
-                            dashboard_data["price_predictions"].append(prediction)
-                            
-                    except Exception as e:
-                        logger.warning(f"⚠️ Erreur prédiction pour {symbol}: {e}")
-                        continue
-                        
-            except Exception as e:
-                logger.warning(f"⚠️ Erreur génération prédictions: {e}")
+        # 3. Prédictions de mouvement de prix: strictement issues des décisions réelles récentes.
+        try:
+            for sym, snap in last_decision_by_symbol.items():
+                live = _get_live_signal_snapshot(sym)
+                if not live:
+                    continue
+                action = str(live.get("action") or "hold").upper()
+                dashboard_data["price_predictions"].append(
+                    {
+                        "symbol": sym,
+                        "current_prediction": action,
+                        "signal": action,
+                        "confidence": float(live.get("confidence", 0.0)),
+                        "price_direction": (
+                            "HAUSSIER" if action == "BUY" else "BAISSIER" if action == "SELL" else "NEUTRAL"
+                        ),
+                        "reason": live.get("reason"),
+                        "model_used": live.get("model_used"),
+                        "last_updated": live.get("timestamp"),
+                        "data_source": "live_decision_snapshot",
+                    }
+                )
+        except Exception as e:
+            logger.warning(f"⚠️ Erreur génération prédictions dashboard (live): {e}")
         
         # 4. Statistiques globales
         total_models = 0
@@ -10984,12 +10964,16 @@ async def api_ml_metrics(symbol: str, timeframe: str = "M1"):
             "last_updated": cal.get("last_updated") or cal.get("updated_at") or None,
         } if isinstance(cal, dict) and cal else None
 
-        # Réponse ML courante: on fournit au minimum HOLD + confiance neutre
-        ml_response = {
-            "prediction": "HOLD",
-            "confidence": 0.0,
-            "timestamp": datetime.now().isoformat(),
-        }
+        # Réponse ML courante: uniquement depuis signal réel observé (pas de placeholder)
+        live = _get_live_signal_snapshot(sym)
+        ml_response = None
+        if live:
+            action = str(live.get("action") or "hold").upper()
+            ml_response = {
+                "prediction": action,
+                "confidence": float(live.get("confidence", 0.0)),
+                "timestamp": live.get("timestamp"),
+            }
 
         return {
             "symbol": sym,
@@ -11025,6 +11009,7 @@ async def api_ml_metrics(symbol: str, timeframe: str = "M1"):
     except Exception:
         samples_used = 0
 
+    live_fallback = _get_live_signal_snapshot(sym)
     return {
         "symbol": sym,
         "timeframe": tf,
@@ -11036,7 +11021,15 @@ async def api_ml_metrics(symbol: str, timeframe: str = "M1"):
         "created_at": datetime.now().isoformat(),
         "top_features": [],
         "calibration": get_symbol_calibration(sym, tf),
-        "ml_response": {"prediction": "HOLD", "confidence": 0.0, "timestamp": datetime.now().isoformat()},
+        "ml_response": (
+            {
+                "prediction": str(live_fallback.get("action") or "hold").upper(),
+                "confidence": float(live_fallback.get("confidence", 0.0)),
+                "timestamp": live_fallback.get("timestamp"),
+            }
+            if live_fallback
+            else None
+        ),
         "data_source": "computed",
     }
 
@@ -11047,61 +11040,37 @@ async def ml_signal(symbol: str, timeframe: str = "M1"):
     Compatible avec les appels existants du robot
     """
     try:
-        # Obtenir les métriques ML existantes
         metrics = _compute_ml_metrics(symbol, timeframe)
-        
-        # Créer un signal simple basé sur les métriques
-        accuracy = float(metrics.get("accuracy", 0))
-        if accuracy > 0.6:
-            # Si bonne accuracy, utiliser le modèle pour prédire
-            model_key = f"{symbol}_{timeframe}"
-            
-            # Essayer d'obtenir une prédiction du modèle
-            if ML_TRAINER_AVAILABLE and ml_trainer is not None:
-                try:
-                    # Simuler une prédiction simple
-                    import random
-                    signals = ["BUY", "SELL", "HOLD"]
-                    weights = [0.35, 0.35, 0.3]  # Distribution équilibrée
-                    
-                    # Biais basé sur les métriques récentes si disponibles
-                    win_rate = float(metrics.get("win_rate", 0))
-                    if win_rate > 0.6:
-                        weights = [0.4, 0.3, 0.3]  # Plus de BUY si bon win rate
-                    elif win_rate < 0.4:
-                        weights = [0.3, 0.4, 0.3]  # Plus de SELL si mauvais win rate
-                    
-                    signal = random.choices(signals, weights=weights)[0]
-                    confidence = random.uniform(0.6, 0.9)
-                    
-                    # Compat MT5: certains EAs attendent "action" au lieu de "signal"
-                    return {
-                        "symbol": symbol,
-                        "timeframe": timeframe,
-                        "action": signal,
-                        "signal": signal,
-                        "confidence": confidence,
-                        "accuracy": metrics.get("accuracy", 0.5),
-                        "model_name": metrics.get("model_name", "random_forest"),
-                        "total_samples": metrics.get("total_samples", 0),
-                        "status": "success",
-                        "timestamp": datetime.now().isoformat()
-                    }
-                except Exception as e:
-                    logger.warning(f" Erreur prédiction ML pour {symbol}: {e}")
-        
-        # Fallback: signal basé sur les métriques disponibles
+        live = _get_live_signal_snapshot(symbol)
+        if not live:
+            return {
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "action": "NO_DATA",
+                "signal": "NO_DATA",
+                "confidence": 0.0,
+                "accuracy": metrics.get("accuracy", 0.0),
+                "model_name": metrics.get("model_name", "unknown"),
+                "total_samples": metrics.get("total_samples", 0),
+                "status": "no_data",
+                "message": "Aucun signal réel récent disponible pour ce symbole",
+                "timestamp": datetime.now().isoformat()
+            }
+
+        action = str(live.get("action") or "hold").upper()
         return {
             "symbol": symbol,
             "timeframe": timeframe,
-            "action": "HOLD",
-            "signal": "HOLD",  # Signal par défaut
-            "confidence": 0.5,
-            "accuracy": metrics.get("accuracy", 0.5),
-            "model_name": metrics.get("model_name", "random_forest"),
+            "action": action,
+            "signal": action,
+            "confidence": float(live.get("confidence", 0.0)),
+            "accuracy": metrics.get("accuracy", 0.0),
+            "model_name": metrics.get("model_name", "unknown"),
             "total_samples": metrics.get("total_samples", 0),
-            "status": "fallback",
-            "timestamp": datetime.now().isoformat()
+            "status": "live",
+            "reason": live.get("reason"),
+            "data_source": "live_decision_snapshot",
+            "timestamp": live.get("timestamp"),
         }
         
     except Exception as e:
@@ -11109,10 +11078,10 @@ async def ml_signal(symbol: str, timeframe: str = "M1"):
         return {
             "symbol": symbol,
             "timeframe": timeframe,
-            "action": "HOLD",
-            "signal": "HOLD",
-            "confidence": 0.5,
-            "accuracy": 0.5,
+            "action": "NO_DATA",
+            "signal": "NO_DATA",
+            "confidence": 0.0,
+            "accuracy": 0.0,
             "model_name": "error",
             "total_samples": 0,
             "status": "error",
