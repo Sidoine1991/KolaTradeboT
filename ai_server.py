@@ -214,7 +214,7 @@ except ImportError:
         "utilisation des fonctions de base"
     )
 
-# PostgreSQL async support for feedback loop
+# PostgreSQL async support for feedback loop & trading stats
 try:
     import asyncpg
     ASYNCPG_AVAILABLE = True
@@ -222,9 +222,6 @@ except ImportError:
     ASYNCPG_AVAILABLE = False
     logger_placeholder = logging.getLogger("tradbot_ai")
     logger_placeholder.warning("asyncpg non disponible - installer avec: pip install asyncpg")
-
-# Machine Learning imports (Phase 2) - seront initialisés après logger
-ML_AVAILABLE = False
 
 # Import yfinance pour les données de marché (compatible cloud)
 try:
@@ -238,6 +235,257 @@ except ImportError:
 # Variables globales pour le suivi en mode simplifié
 decision_count = 0
 feedback_count = 0
+
+# ===== Modèles Pydantic pour trades & stats =====
+
+
+class TradeIn(BaseModel):
+    symbol: str
+    category: str = "boomcrash"
+    strategy: str
+    direction: str
+    volume: float
+    entry_price: float
+    stop_loss: Optional[float] = None
+    take_profit: Optional[float] = None
+    close_price: Optional[float] = None
+    result_usd: Optional[float] = None
+    result_points: Optional[float] = None
+    risk_reward: Optional[float] = None
+    opened_at: datetime
+    closed_at: Optional[datetime] = None
+    session_tag: Optional[str] = None
+    timeframe: str = "M1"
+    ai_action: Optional[str] = None
+    ai_confidence: Optional[float] = None
+    ml_score: Optional[float] = None
+    execution_slippage_points: Optional[float] = None
+    mt5_ticket: Optional[int] = None
+    context: Dict[str, Any] = Field(default_factory=dict)
+
+
+class SymbolStatsOut(BaseModel):
+    symbol: str
+    trade_count: int
+    wins: int
+    losses: int
+    net_profit: float
+    max_drawdown: Optional[float] = None
+    max_consecutive_losses: Optional[int] = None
+
+
+class SymbolConfigOut(BaseModel):
+    symbol: str
+    enabled: bool = True
+    max_open_positions: int = 1
+    min_expectancy: float = 0.0
+    min_ai_confidence: float = 0.55
+    max_daily_loss_usd: Optional[float] = None
+    max_symbol_loss_usd: Optional[float] = None
+    max_consecutive_losses: Optional[int] = None
+    risk_profile: str = "balanced"
+    overrides: Dict[str, Any] = Field(default_factory=dict)
+
+
+@app.post("/trades")
+async def create_trade(trade: TradeIn):
+    """Enregistre un trade dans la table core `trades`."""
+    try:
+        if not DB_AVAILABLE:
+            raise HTTPException(status_code=503, detail="Base de données non disponible")
+
+        symbol = (trade.symbol or "").strip()
+        strategy = (trade.strategy or "").strip()
+        direction = (trade.direction or "").strip().upper()
+
+        if not symbol:
+            raise HTTPException(status_code=400, detail="symbol requis")
+        if not strategy:
+            raise HTTPException(status_code=400, detail="strategy requis")
+        if direction not in ("BUY", "SELL"):
+            raise HTTPException(status_code=400, detail="direction doit être BUY ou SELL")
+
+        pool = await get_db_pool()
+        if not pool:
+            raise HTTPException(status_code=503, detail="Connexion base de données impossible")
+
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                INSERT INTO trades (
+                    mt5_ticket, symbol, category, strategy, direction,
+                    volume, entry_price, stop_loss, take_profit, close_price,
+                    result_usd, result_points, risk_reward,
+                    opened_at, closed_at,
+                    session_tag, timeframe,
+                    ai_action, ai_confidence, ml_score,
+                    execution_slippage_points, context
+                )
+                VALUES (
+                    $1, $2, $3, $4, $5,
+                    $6, $7, $8, $9, $10,
+                    $11, $12, $13,
+                    $14, $15,
+                    $16, $17,
+                    $18, $19, $20,
+                    $21, $22::jsonb
+                )
+                RETURNING id, created_at
+                """,
+                trade.mt5_ticket,
+                symbol,
+                trade.category,
+                strategy,
+                direction,
+                trade.volume,
+                trade.entry_price,
+                trade.stop_loss,
+                trade.take_profit,
+                trade.close_price,
+                trade.result_usd,
+                trade.result_points,
+                trade.risk_reward,
+                trade.opened_at,
+                trade.closed_at,
+                trade.session_tag,
+                trade.timeframe,
+                trade.ai_action,
+                trade.ai_confidence,
+                trade.ml_score,
+                trade.execution_slippage_points,
+                json.dumps(trade.context or {}),
+            )
+
+        return {
+            "ok": True,
+            "id": str(row["id"]),
+            "symbol": symbol,
+            "created_at": row["created_at"].isoformat() if row and row["created_at"] else None,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Erreur /trades: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/stats/symbol", response_model=SymbolStatsOut)
+async def get_symbol_daily_stats(symbol: str, trade_date: Optional[str] = None):
+    """Retourne les stats journalières d'un symbole depuis `daily_symbol_stats`."""
+    try:
+        if not DB_AVAILABLE:
+            raise HTTPException(status_code=503, detail="Base de données non disponible")
+
+        sym = (symbol or "").strip()
+        if not sym:
+            raise HTTPException(status_code=400, detail="symbol requis")
+
+        parsed_date = None
+        if trade_date:
+            try:
+                parsed_date = datetime.strptime(trade_date, "%Y-%m-%d").date()
+            except ValueError:
+                raise HTTPException(status_code=400, detail="trade_date invalide (format attendu: YYYY-MM-DD)")
+
+        pool = await get_db_pool()
+        if not pool:
+            raise HTTPException(status_code=503, detail="Connexion base de données impossible")
+
+        async with pool.acquire() as conn:
+            if parsed_date:
+                row = await conn.fetchrow(
+                    """
+                    SELECT symbol, trade_count, wins, losses, net_profit, max_drawdown, max_consecutive_losses
+                    FROM daily_symbol_stats
+                    WHERE symbol = $1 AND trade_date = $2
+                    """,
+                    sym,
+                    parsed_date,
+                )
+            else:
+                row = await conn.fetchrow(
+                    """
+                    SELECT symbol, trade_count, wins, losses, net_profit, max_drawdown, max_consecutive_losses
+                    FROM daily_symbol_stats
+                    WHERE symbol = $1
+                    ORDER BY trade_date DESC
+                    LIMIT 1
+                    """,
+                    sym,
+                )
+
+        if not row:
+            raise HTTPException(status_code=404, detail=f"Aucune statistique trouvée pour {sym}")
+
+        return SymbolStatsOut(
+            symbol=row["symbol"],
+            trade_count=int(row["trade_count"] or 0),
+            wins=int(row["wins"] or 0),
+            losses=int(row["losses"] or 0),
+            net_profit=float(row["net_profit"] or 0.0),
+            max_drawdown=float(row["max_drawdown"]) if row["max_drawdown"] is not None else None,
+            max_consecutive_losses=(
+                int(row["max_consecutive_losses"]) if row["max_consecutive_losses"] is not None else None
+            ),
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Erreur /stats/symbol: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/config/symbol", response_model=SymbolConfigOut)
+async def get_symbol_config(symbol: str):
+    """Retourne la config adaptive d'un symbole depuis `symbol_config`."""
+    try:
+        if not DB_AVAILABLE:
+            raise HTTPException(status_code=503, detail="Base de données non disponible")
+
+        sym = (symbol or "").strip()
+        if not sym:
+            raise HTTPException(status_code=400, detail="symbol requis")
+
+        pool = await get_db_pool()
+        if not pool:
+            raise HTTPException(status_code=503, detail="Connexion base de données impossible")
+
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT
+                    symbol, enabled, max_open_positions, min_expectancy, min_ai_confidence,
+                    max_daily_loss_usd, max_symbol_loss_usd, max_consecutive_losses,
+                    risk_profile, overrides
+                FROM symbol_config
+                WHERE symbol = $1
+                """,
+                sym,
+            )
+
+        if not row:
+            return SymbolConfigOut(symbol=sym)
+
+        return SymbolConfigOut(
+            symbol=row["symbol"],
+            enabled=bool(row["enabled"]),
+            max_open_positions=int(row["max_open_positions"] or 1),
+            min_expectancy=float(row["min_expectancy"] or 0.0),
+            min_ai_confidence=float(row["min_ai_confidence"] or 0.55),
+            max_daily_loss_usd=float(row["max_daily_loss_usd"]) if row["max_daily_loss_usd"] is not None else None,
+            max_symbol_loss_usd=float(row["max_symbol_loss_usd"]) if row["max_symbol_loss_usd"] is not None else None,
+            max_consecutive_losses=(
+                int(row["max_consecutive_losses"]) if row["max_consecutive_losses"] is not None else None
+            ),
+            risk_profile=row["risk_profile"] or "balanced",
+            overrides=dict(row["overrides"] or {}),
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Erreur /config/symbol: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 # ========== FONCTIONS UTILITAIRES AMÉLIORATIONS ==========
 def apply_confidence_thresholds(action: str, confidence: float, reason: str) -> tuple:
@@ -443,6 +691,23 @@ def is_boom_crash_symbol(symbol: str) -> bool:
     """Vérifie si le symbole est un indice Boom ou Crash (tous indices Deriv)"""
     s = symbol.lower()
     return ("boom" in s and "index" in s) or ("crash" in s and "index" in s)
+
+
+def enforce_ea_boom_crash_direction(symbol: str, action: str, confidence: float, reason: str):
+    """
+    Aligner la décision HTTP avec SMC_Universal.mq5 : Boom = BUY seulement, Crash = SELL seulement.
+    Une direction interdite est ramenée à HOLD pour laisser la logique aggressive (EMA) proposer SELL/BUY.
+    """
+    if not is_boom_crash_symbol(str(symbol)):
+        return action, confidence, reason
+    s = str(symbol).lower()
+    a = (action or "hold").lower()
+    if "crash" in s and a == "buy":
+        return "hold", min(float(confidence), 0.55), reason + "[Crash: BUY incompatible EA → HOLD] "
+    if "boom" in s and a == "sell":
+        return "hold", min(float(confidence), 0.55), reason + "[Boom: SELL incompatible EA → HOLD] "
+    return action, confidence, reason
+
 
 def detect_spike_pattern(df: pd.DataFrame, symbol: str) -> Dict[str, Any]:
     """
@@ -3678,6 +3943,10 @@ async def decision_simplified(request: DecisionRequest):
         reason += f"[ML: {ml_result['ml_reason']}] "
         logger.info(f"🧠 ML Enhancement: {base_action} → {action} ({base_confidence:.2f} → {confidence:.2f})")
     
+    action, confidence, reason = enforce_ea_boom_crash_direction(
+        request.symbol, action, confidence, reason
+    )
+    
     # 7. Règles agressives spécifiques Boom/Crash (plus de BUY/SELL, moins de HOLD)
     try:
         if IMPROVEMENTS_AVAILABLE and is_boom_crash_symbol(str(request.symbol)):
@@ -6062,6 +6331,10 @@ async def decision(req: Request):
         
         # S'assurer que la confiance est dans les limites
         confidence = max(0.0, min(1.0, confidence))
+        
+        action, confidence, reason = enforce_ea_boom_crash_direction(
+            request.symbol, action, confidence, reason
+        )
         
         # Discipline finale basée sur stats (jour/mois) calculées depuis trade_feedback (source MT5)
         new_action, new_conf, pol_reason = _apply_symbol_risk_policy(request.symbol, action, confidence)
