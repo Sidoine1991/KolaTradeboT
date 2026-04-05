@@ -270,6 +270,29 @@ class TradeIn(BaseModel):
     context: Dict[str, Any] = Field(default_factory=dict)
 
 
+class StairDetectIn(BaseModel):
+    client_event_id: Optional[str] = None
+    symbol: str
+    category: str = "boomcrash"
+    direction: str
+    timeframe: str = "M1"
+    pattern_kinds: Optional[str] = None
+    features: Dict[str, Any] = Field(default_factory=dict)
+    ai_action: Optional[str] = None
+    ai_confidence: Optional[float] = None
+    mt5_ticket: Optional[int] = None
+    source: str = "ea"
+
+
+class StairOutcomeIn(BaseModel):
+    id: Optional[str] = None
+    client_event_id: Optional[str] = None
+    outcome: str
+    result_usd: Optional[float] = None
+    closed_at: Optional[str] = None
+    mt5_ticket: Optional[int] = None
+
+
 class SymbolStatsOut(BaseModel):
     symbol: str
     trade_count: int
@@ -513,18 +536,298 @@ def is_boom_crash_symbol(symbol: str) -> bool:
 
 def enforce_ea_boom_crash_direction(symbol: str, action: str, confidence: float, reason: str):
     """
-    Aligner la décision HTTP avec SMC_Universal.mq5 : Boom = BUY seulement, Crash = SELL seulement.
+    Aligner la décision HTTP avec SMC_Universal.mq5 :
+    Boom = BUY seulement, Crash = SELL seulement ;
+    Weltrade GainX = pas de SELL, PainX = pas de BUY (même principe).
     Une direction interdite est ramenée à HOLD pour laisser la logique aggressive (EMA) proposer SELL/BUY.
     """
-    if not is_boom_crash_symbol(str(symbol)):
-        return action, confidence, reason
     s = str(symbol).lower()
     a = (action or "hold").lower()
-    if "crash" in s and a == "buy":
-        return "hold", min(float(confidence), 0.55), reason + "[Crash: BUY incompatible EA → HOLD] "
-    if "boom" in s and a == "sell":
-        return "hold", min(float(confidence), 0.55), reason + "[Boom: SELL incompatible EA → HOLD] "
+    if is_boom_crash_symbol(str(symbol)):
+        if "crash" in s and a == "buy":
+            return "hold", min(float(confidence), 0.55), reason + "[Crash: BUY incompatible EA → HOLD] "
+        if "boom" in s and a == "sell":
+            return "hold", min(float(confidence), 0.55), reason + "[Boom: SELL incompatible EA → HOLD] "
+    try:
+        from backend.weltrade_symbols import is_weltrade_pain_synth, is_weltrade_gain_synth
+    except ImportError:
+        from weltrade_symbols import is_weltrade_pain_synth, is_weltrade_gain_synth
+    if is_weltrade_pain_synth(str(symbol)) and a == "buy":
+        return "hold", min(float(confidence), 0.55), reason + "[PainX: BUY incompatible EA → HOLD] "
+    if is_weltrade_gain_synth(str(symbol)) and a == "sell":
+        return "hold", min(float(confidence), 0.55), reason + "[GainX: SELL incompatible EA → HOLD] "
     return action, confidence, reason
+
+
+def synth_stair_direction_for_symbol(symbol: str) -> Optional[str]:
+    """Direction trade autorisée pour indices escalier (Boom/GainX → BUY, Crash/PainX → SELL)."""
+    s = str(symbol).lower()
+    if "boom" in s:
+        return "BUY"
+    if "crash" in s:
+        return "SELL"
+    try:
+        from backend.weltrade_symbols import is_weltrade_pain_synth, is_weltrade_gain_synth
+    except ImportError:
+        from weltrade_symbols import is_weltrade_pain_synth, is_weltrade_gain_synth
+    if is_weltrade_gain_synth(str(symbol)):
+        return "BUY"
+    if is_weltrade_pain_synth(str(symbol)):
+        return "SELL"
+    return None
+
+
+def _stair_category_for_symbol(symbol: str) -> str:
+    if is_boom_crash_symbol(str(symbol)):
+        return "boomcrash"
+    try:
+        from backend.weltrade_symbols import is_weltrade_pain_synth, is_weltrade_gain_synth
+    except ImportError:
+        from weltrade_symbols import is_weltrade_pain_synth, is_weltrade_gain_synth
+    if is_weltrade_pain_synth(str(symbol)) or is_weltrade_gain_synth(str(symbol)):
+        return "weltrade_synth"
+    return "other"
+
+
+# --- Stair detections (Supabase) : cache stats + helpers REST ---
+_stair_summary_cache: Dict[str, Tuple[float, List[Dict[str, Any]]]] = {}
+STAIR_STATS_MIN_CLOSED = 8
+STAIR_STATS_CACHE_TTL = 55.0
+
+
+def _stair_compute_quality_from_features(features: Dict[str, Any]) -> float:
+    """Heuristique légère 0..1 à partir des features envoyées par l'EA (sans modèle lourd)."""
+    if not features:
+        return 0.55
+    q = 0.5
+    try:
+        ar = float(features.get("aligned_ratio", 0.0) or 0.0)
+        if ar >= 0.62:
+            q += 0.12
+        elif ar >= 0.55:
+            q += 0.06
+        nmp = float(features.get("net_move_pct", 0.0) or 0.0)
+        if nmp >= 0.12:
+            q += 0.05
+        if features.get("forming_match") is True:
+            q += 0.04
+        if features.get("early_match") is True:
+            q += 0.03
+    except (TypeError, ValueError):
+        pass
+    return max(0.05, min(0.98, q))
+
+
+def _stair_pick_summary_row(rows: List[Dict[str, Any]], pattern_kinds: Optional[str]) -> Optional[Dict[str, Any]]:
+    if not rows:
+        return None
+    pk = (pattern_kinds or "").strip().lower()
+    if pk:
+        for r in rows:
+            if str(r.get("pattern_kinds") or "").lower() == pk:
+                return r
+        for r in rows:
+            if pk in str(r.get("pattern_kinds") or "").lower():
+                return r
+    best = None
+    best_n = -1
+    for r in rows:
+        n = int(r.get("closed_trades") or 0)
+        if n > best_n:
+            best_n = n
+            best = r
+    return best
+
+
+async def _stair_fetch_quality_rows(symbol: str, direction: str) -> List[Dict[str, Any]]:
+    supabase_url = (os.getenv("SUPABASE_URL") or "").strip()
+    supabase_key = (
+        os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+        or os.getenv("SUPABASE_SERVICE_KEY")
+        or os.getenv("SUPABASE_ANON_KEY")
+        or ""
+    ).strip()
+    if not supabase_url or not supabase_key:
+        return []
+    sym = (symbol or "").strip()
+    d = (direction or "").strip().upper()
+    if not sym or d not in ("BUY", "SELL"):
+        return []
+    cache_key = f"{sym}|{d}"
+    now = time.time()
+    hit = _stair_summary_cache.get(cache_key)
+    if hit and (now - hit[0]) < STAIR_STATS_CACHE_TTL:
+        return hit[1]
+
+    import httpx
+
+    params = {
+        "symbol": f"eq.{sym}",
+        "direction": f"eq.{d}",
+        "select": "symbol,direction,pattern_kinds,closed_trades,wins,losses,win_rate",
+    }
+    headers = {
+        "apikey": supabase_key,
+        "Authorization": f"Bearer {supabase_key}",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            r = await client.get(
+                f"{supabase_url.rstrip('/')}/rest/v1/stair_quality_summary",
+                params=params,
+                headers=headers,
+            )
+        if r.status_code != 200:
+            logger.warning("stair_quality_summary HTTP %s: %s", r.status_code, (r.text or "")[:200])
+            return []
+        data = r.json()
+        if not isinstance(data, list):
+            return []
+        _stair_summary_cache[cache_key] = (now, data)
+        return data
+    except Exception as e:
+        logger.debug("stair_quality_summary fetch error: %s", e)
+        return []
+
+
+async def _stair_empirical_win_rate(symbol: str, direction: str, pattern_kinds: Optional[str]) -> Tuple[Optional[float], int]:
+    rows = await _stair_fetch_quality_rows(symbol, direction)
+    row = _stair_pick_summary_row(rows, pattern_kinds)
+    if not row:
+        return None, 0
+    n = int(row.get("closed_trades") or 0)
+    wr = row.get("win_rate")
+    if wr is None:
+        return None, n
+    try:
+        return float(wr), n
+    except (TypeError, ValueError):
+        return None, n
+
+
+def _stair_confidence_delta(win_rate: Optional[float], closed_n: int) -> float:
+    if win_rate is None or closed_n < STAIR_STATS_MIN_CLOSED:
+        return 0.0
+    edge = float(win_rate) - 0.5
+    return max(-0.09, min(0.09, edge * 0.35))
+
+
+async def apply_stair_history_to_decision(
+    symbol: str,
+    action: str,
+    confidence: float,
+    reason: str,
+    stair_detected: bool,
+    stair_direction: Optional[str],
+    stair_pattern_kinds: Optional[str],
+) -> Tuple[str, float, str]:
+    if not stair_detected:
+        return action, confidence, reason
+    sd = (stair_direction or "").strip().upper() or synth_stair_direction_for_symbol(symbol)
+    if not sd:
+        return action, confidence, reason
+    act = (action or "hold").lower()
+    aligned = (act == "buy" and sd == "BUY") or (act == "sell" and sd == "SELL")
+    if act == "hold" or not aligned:
+        return action, confidence, reason
+    wr, n = await _stair_empirical_win_rate(symbol, sd, stair_pattern_kinds)
+    delta = _stair_confidence_delta(wr, n)
+    if delta == 0.0:
+        if wr is not None:
+            reason += f"[stair histo: win_rate={wr:.2f} n={n} — échantillon faible ou neutre] "
+        return action, confidence, reason
+    new_c = max(0.05, min(0.97, float(confidence) + delta))
+    reason += f"[stair learning: Δconf {delta:+.3f} win_rate={wr:.2f} n={n}] "
+    return action, new_c, reason
+
+
+async def _insert_stair_detection_supabase(payload: Dict[str, Any]) -> None:
+    supabase_url = (os.getenv("SUPABASE_URL") or "").strip()
+    supabase_key = (
+        os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+        or os.getenv("SUPABASE_SERVICE_KEY")
+        or os.getenv("SUPABASE_ANON_KEY")
+        or ""
+    ).strip()
+    if not supabase_url or not supabase_key:
+        return
+    import httpx
+
+    headers = {
+        "apikey": supabase_key,
+        "Authorization": f"Bearer {supabase_key}",
+        "Content-Type": "application/json",
+        "Prefer": "return=minimal",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.post(
+                f"{supabase_url.rstrip('/')}/rest/v1/stair_detections",
+                headers=headers,
+                json=payload,
+            )
+        if r.status_code not in (200, 201):
+            logger.warning("stair_detections insert HTTP %s: %s", r.status_code, (r.text or "")[:300])
+    except Exception as e:
+        logger.debug("stair_detections insert error: %s", e)
+
+
+async def _patch_stair_outcome_supabase(
+    *,
+    row_id: Optional[str] = None,
+    client_event_id: Optional[str] = None,
+    outcome: str,
+    result_usd: Optional[float] = None,
+    closed_at_iso: Optional[str] = None,
+    mt5_ticket: Optional[int] = None,
+) -> bool:
+    from urllib.parse import quote
+
+    supabase_url = (os.getenv("SUPABASE_URL") or "").strip()
+    supabase_key = (
+        os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+        or os.getenv("SUPABASE_SERVICE_KEY")
+        or os.getenv("SUPABASE_ANON_KEY")
+        or ""
+    ).strip()
+    if not supabase_url or not supabase_key:
+        return False
+    import httpx
+
+    patch: Dict[str, Any] = {
+        "outcome": outcome.lower(),
+        "updated_at": datetime.utcnow().isoformat() + "Z",
+    }
+    if result_usd is not None:
+        patch["result_usd"] = result_usd
+    if closed_at_iso:
+        patch["closed_at"] = closed_at_iso
+    if mt5_ticket is not None:
+        patch["mt5_ticket"] = mt5_ticket
+
+    headers = {
+        "apikey": supabase_key,
+        "Authorization": f"Bearer {supabase_key}",
+        "Content-Type": "application/json",
+        "Prefer": "return=minimal",
+    }
+    base = f"{supabase_url.rstrip('/')}/rest/v1/stair_detections"
+    if row_id:
+        q = f"{base}?id=eq.{quote(str(row_id), safe='')}"
+    elif client_event_id:
+        q = f"{base}?client_event_id=eq.{quote(str(client_event_id), safe='')}"
+    else:
+        return False
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.patch(q, headers=headers, json=patch)
+        if r.status_code not in (200, 204):
+            logger.warning("stair_detections patch HTTP %s: %s", r.status_code, (r.text or "")[:300])
+            return False
+        return True
+    except Exception as e:
+        logger.debug("stair_detections patch error: %s", e)
+        return False
 
 
 def detect_spike_pattern(df: pd.DataFrame, symbol: str) -> Dict[str, Any]:
@@ -615,6 +918,15 @@ def detect_spike_pattern(df: pd.DataFrame, symbol: str) -> Dict[str, Any]:
             has_spike = False  # Pas de SELL sur Boom
         elif is_crash and spike_direction == "BUY":
             has_spike = False  # Pas de BUY sur Crash
+        else:
+            try:
+                from backend.weltrade_symbols import is_weltrade_pain_synth, is_weltrade_gain_synth
+            except ImportError:
+                from weltrade_symbols import is_weltrade_pain_synth, is_weltrade_gain_synth
+            if is_weltrade_gain_synth(symbol) and spike_direction == "SELL":
+                has_spike = False
+            elif is_weltrade_pain_synth(symbol) and spike_direction == "BUY":
+                has_spike = False
     
     # Calculer la confiance du spike
     spike_confidence = 0.0
@@ -2148,6 +2460,71 @@ async def create_trade(trade: TradeIn):
     except Exception as e:
         logger.error(f"Erreur /trades: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/stair/detect")
+async def stair_detect_report(body: StairDetectIn):
+    """Enregistre une détection escalier M1 (EA ou script) dans Supabase `stair_detections`."""
+    sym = (body.symbol or "").strip()
+    d = (body.direction or "").strip().upper()
+    if not sym:
+        raise HTTPException(status_code=400, detail="symbol requis")
+    if d not in ("BUY", "SELL"):
+        raise HTTPException(status_code=400, detail="direction doit être BUY ou SELL")
+    wr, _n = await _stair_empirical_win_rate(sym, d, body.pattern_kinds)
+    q = _stair_compute_quality_from_features(body.features or {})
+    payload = {
+        "client_event_id": body.client_event_id,
+        "symbol": sym,
+        "category": (body.category or "boomcrash").strip() or "boomcrash",
+        "direction": d,
+        "timeframe": (body.timeframe or "M1").strip() or "M1",
+        "pattern_kinds": body.pattern_kinds,
+        "quality_score": q,
+        "empirical_win_rate_at_detect": wr,
+        "features": body.features or {},
+        "ai_action": body.ai_action,
+        "ai_confidence": body.ai_confidence,
+        "mt5_ticket": body.mt5_ticket,
+        "outcome": "open",
+        "source": (body.source or "ea").strip() or "ea",
+    }
+    await _insert_stair_detection_supabase(payload)
+    return {"ok": True, "quality_score": q, "empirical_win_rate_snapshot": wr, "closed_trades_in_bucket": _n}
+
+
+@app.patch("/stair/outcome")
+async def stair_outcome_update(body: StairOutcomeIn):
+    """Clôture un enregistrement stair (win/loss/breakeven/expired) par id ou client_event_id."""
+    oc = (body.outcome or "").strip().lower()
+    if oc not in ("win", "loss", "breakeven", "expired"):
+        raise HTTPException(status_code=400, detail="outcome invalide")
+    if not body.id and not body.client_event_id:
+        raise HTTPException(status_code=400, detail="id ou client_event_id requis")
+    ok = await _patch_stair_outcome_supabase(
+        row_id=(body.id or "").strip() or None,
+        client_event_id=(body.client_event_id or "").strip() or None,
+        outcome=oc,
+        result_usd=body.result_usd,
+        closed_at_iso=body.closed_at,
+        mt5_ticket=body.mt5_ticket,
+    )
+    if not ok:
+        raise HTTPException(status_code=404, detail="ligne stair_detections introuvable ou Supabase indisponible")
+    _stair_summary_cache.clear()
+    return {"ok": True}
+
+
+@app.get("/stair/stats")
+async def stair_stats_query(symbol: str, direction: str, pattern_kinds: Optional[str] = None):
+    """Lit les agrégats `stair_quality_summary` pour calibrage / dashboard."""
+    sym = (symbol or "").strip()
+    d = (direction or "").strip().upper()
+    if not sym or d not in ("BUY", "SELL"):
+        raise HTTPException(status_code=400, detail="symbol et direction (BUY|SELL) requis")
+    rows = await _stair_fetch_quality_rows(sym, d)
+    row = _stair_pick_summary_row(rows, pattern_kinds)
+    return {"symbol": sym, "direction": d, "pattern_kinds": pattern_kinds, "best_match": row, "rows": rows}
 
 
 @app.get("/stats/symbol", response_model=SymbolStatsOut)
@@ -3700,6 +4077,12 @@ class DecisionRequest(BaseModel):
     deriv_patterns_bearish: Optional[int] = None  # Nombre de patterns bearish
     deriv_patterns_confidence: Optional[float] = None  # Confiance moyenne des patterns
     timestamp: Optional[str] = None  # Timestamp de la requête (ajouté pour corriger l'erreur 422)
+    # Escalier synthétique M1 (Boom/Crash, GainX/PainX) — alimente stair_detections + ajustement confiance
+    stair_detected: Optional[bool] = False
+    stair_direction: Optional[str] = None  # BUY | SELL (sinon déduit du symbole)
+    stair_pattern_kinds: Optional[str] = None  # ex: classic,forming
+    stair_client_event_id: Optional[str] = None  # UUID côté EA pour lier le feedback trade
+    stair_features: Optional[Dict[str, Any]] = None  # ex: aligned_ratio, net_move_pct, forming_match
 
 # ===== MODÈLES POUR FEEDBACK LOOP =====
 class TradeFeedback(BaseModel):
@@ -4082,6 +4465,21 @@ async def decision_simplified(request: DecisionRequest):
     except Exception as e:
         logger.debug(f"Règles agressives Boom/Crash ignorées: {e}")
     
+    # 7b. Historique stair (Supabase) : ajuste la confiance si win_rate significatif pour symbole+direction
+    try:
+        if request.stair_detected:
+            action, confidence, reason = await apply_stair_history_to_decision(
+                str(request.symbol or ""),
+                action,
+                confidence,
+                reason,
+                bool(request.stair_detected),
+                request.stair_direction,
+                request.stair_pattern_kinds,
+            )
+    except Exception as e:
+        logger.debug("apply_stair_history_to_decision: %s", e)
+    
     # 8. Ajustements finaux (laisser une confiance dynamique sur HOLD, éviter un plancher fixe à 30%)
     if action == "hold":
         # Garder la confiance calculée (technique + ML), mais éviter 0 absolu
@@ -4129,6 +4527,38 @@ async def decision_simplified(request: DecisionRequest):
             
     coherence = f"COHÉRENCE: {int(confidence * 100)}%"
     
+    stair_client_eid: Optional[str] = None
+    if request.stair_detected:
+        sym_st = str(request.symbol or "")
+        sd_st = (request.stair_direction or "").strip().upper() or synth_stair_direction_for_symbol(sym_st)
+        if sd_st:
+            stair_client_eid = (request.stair_client_event_id or "").strip() or str(uuid4())
+            pk_st = (request.stair_pattern_kinds or "").strip()
+            feats_st = dict(request.stair_features or {})
+            try:
+                feats_st.setdefault("rsi", request.rsi)
+                feats_st.setdefault("atr", request.atr)
+            except Exception:
+                pass
+            q_st = _stair_compute_quality_from_features(feats_st)
+            wr_st, _n_st = await _stair_empirical_win_rate(sym_st, sd_st, pk_st if pk_st else None)
+            payload_st = {
+                "client_event_id": stair_client_eid,
+                "symbol": sym_st,
+                "category": _stair_category_for_symbol(sym_st),
+                "direction": sd_st,
+                "timeframe": "M1",
+                "pattern_kinds": pk_st or None,
+                "quality_score": q_st,
+                "empirical_win_rate_at_detect": wr_st,
+                "features": feats_st,
+                "ai_action": action,
+                "ai_confidence": float(confidence),
+                "outcome": "open",
+                "source": "decision_endpoint",
+            }
+            asyncio.create_task(_insert_stair_detection_supabase(payload_st))
+    
     # 13. Créer la réponse enrichie
     response = DecisionResponse(
         action=action,
@@ -4150,7 +4580,9 @@ async def decision_simplified(request: DecisionRequest):
             "market_data": market_data,
             "confidence_decimal": confidence,
             "confidence_percentage": confidence_percentage,
-            "spike_probability": market_data.get("spike_probability", 0.0)
+            "spike_probability": market_data.get("spike_probability", 0.0),
+            "stair_detected": bool(request.stair_detected),
+            "stair_client_event_id": stair_client_eid,
         }
     )
     
@@ -10651,6 +11083,8 @@ class TradeFeedbackRequest(BaseModel):
     close_time: Optional[Union[str, int]] = None
     timestamp: Optional[Union[str, int]] = None
     coherent_confidence: Optional[float] = None
+    stair_detection_id: Optional[str] = None  # uuid ligne stair_detections
+    stair_client_event_id: Optional[str] = None  # idempotence / même clé qu'à la détection
 
 # Buffer de feedback en mémoire (Render free: stockage éphémère)
 _feedback_by_key: Dict[str, deque] = {}  # key = "{symbol}:{tf}"
@@ -11149,6 +11583,27 @@ async def trades_feedback(request: TradeFeedbackRequest):
             close_time=processed_close,
             coherent_confidence=request.coherent_confidence
         ))
+
+        # Mettre à jour la ligne stair_detections (win/loss) si l'EA a fourni l'id
+        sid = (getattr(request, "stair_detection_id", None) or "").strip()
+        sce = (getattr(request, "stair_client_event_id", None) or "").strip()
+        if sid or sce:
+            oc = "win" if request.is_win else "loss"
+            if abs(float(request.profit or 0.0)) < 1e-9:
+                oc = "breakeven"
+
+            async def _stair_outcome_from_feedback():
+                ok = await _patch_stair_outcome_supabase(
+                    row_id=sid or None,
+                    client_event_id=sce or None,
+                    outcome=oc,
+                    result_usd=float(request.profit),
+                    closed_at_iso=processed_close,
+                )
+                if ok:
+                    _stair_summary_cache.clear()
+
+            asyncio.create_task(_stair_outcome_from_feedback())
 
         # Refresh stats symbole "quasi temps réel" après feedback (non bloquant)
         asyncio.create_task(_refresh_symbol_trade_stats("M1"))
