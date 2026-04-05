@@ -36,6 +36,7 @@ import uvicorn
 import pandas as pd
 import numpy as np
 import requests
+import re
 import joblib
 from collections import deque, defaultdict
 
@@ -488,9 +489,21 @@ _history_cache: Dict[str, pd.DataFrame] = {}
 # Fonctions de détection de spikes Boom/Crash
 # =========================
 def is_boom_crash_symbol(symbol: str) -> bool:
-    """Vérifie si le symbole est un indice Boom ou Crash (tous indices Deriv)"""
-    s = symbol.lower()
-    return ("boom" in s and "index" in s) or ("crash" in s and "index" in s)
+    """Vérifie si le symbole est un indice Boom ou Crash (Deriv : *Index*, Boom500, Crash 1000, etc.)"""
+    s_raw = str(symbol).lower()
+    s = s_raw.replace(" ", "").replace("_", "")
+    boom = "boom" in s_raw
+    crash = "crash" in s_raw
+    if not boom and not crash:
+        return False
+    if "index" in s_raw:
+        return True
+    # Symboles sans le mot « index » (ex. broker compact)
+    if boom and re.search(r"boom\d", s):
+        return True
+    if crash and re.search(r"crash\d", s):
+        return True
+    return False
 
 
 def enforce_ea_boom_crash_direction(symbol: str, action: str, confidence: float, reason: str):
@@ -2893,6 +2906,43 @@ async def _compute_propice_top_from_trade_feedback(
     if not agg:
         return {"rows": [], "source": "supabase_trade_feedback", "note": "no_rows_for_hour"}
 
+    # Charger la fiabilité ML (reliability_score) par symbole pour pondérer le score "propice"
+    reliability_by_symbol: Dict[str, float] = {}
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            rm = await client.get(
+                f"{supabase_url}/rest/v1/model_metrics",
+                headers=headers,
+                params={
+                    "timeframe": f"eq.{timeframe}",
+                    "select": "symbol,training_date,metadata",
+                    "order": "training_date.desc",
+                    "limit": "500",
+                },
+            )
+        if rm.status_code in (200, 206) and rm.text:
+            rowsm = rm.json()
+            for row in rowsm:
+                sym = (row.get("symbol") or "").strip()
+                if not sym or sym in reliability_by_symbol:
+                    continue
+                meta = row.get("metadata") or {}
+                if isinstance(meta, str):
+                    try:
+                        meta = json.loads(meta)
+                    except Exception:
+                        meta = {}
+                rel = meta.get("reliability_score")
+                try:
+                    relf = float(rel)
+                    relf = max(0.0, min(1.0, relf))
+                except Exception:
+                    relf = None  # type: ignore
+                if relf is not None:
+                    reliability_by_symbol[sym] = float(relf)
+    except Exception:
+        reliability_by_symbol = {}
+
     # Score: win_rate (0..1) + profit contribution (tanh normalized) + sample bonus
     out = []
     net_profits = [float(v.get("net_profit", 0.0) or 0.0) for v in agg.values()]
@@ -2911,6 +2961,10 @@ async def _compute_propice_top_from_trade_feedback(
         sample_bonus = float(_clamp(samples / 20.0, 0.0, 1.0))
 
         score = 0.55 * win_rate + 0.35 * profit_norm + 0.10 * sample_bonus
+        rel = reliability_by_symbol.get(sym)
+        if rel is not None:
+            # Pondération douce: 0.85..1.15 selon fiabilité (évite de sur-filtrer)
+            score *= (0.85 + 0.30 * float(rel))
         out.append(
             {
                 "symbol": sym,
@@ -2922,6 +2976,7 @@ async def _compute_propice_top_from_trade_feedback(
                 "losses": losses,
                 "net_profit": round(netp, 2),
                 "win_rate": round(win_rate, 4),
+                "reliability_score": float(rel) if rel is not None else None,
                 "propice_score": float(_clamp(score, 0.0, 1.0)),
                 "reason": "trade_feedback",
             }
@@ -3904,6 +3959,19 @@ async def decision_simplified(request: DecisionRequest):
             sell_score += 0.25 * min(1.0, ema_strength_m5 * 75)
             reason += f"EMA M5 baissière ({ema_strength_m5*75:.1f}%). "
     
+    # 4b. Boom : bonus si M1+M5 haussiers (contrepoids au H1 baissier — stair M1 / scalp)
+    try:
+        if is_boom_crash_symbol(str(request.symbol)) and "boom" in str(request.symbol).lower():
+            e1f = float(request.ema_fast_m1 or 0.0)
+            e1s = float(request.ema_slow_m1 or 0.0)
+            e5f = float(request.ema_fast_m5 or 0.0)
+            e5s = float(request.ema_slow_m5 or 0.0)
+            if e1f > e1s and e5f > e5s and e1s > 0.0 and e5s > 0.0:
+                buy_score += 0.18
+                reason += "[Boom: M1+M5 haussiers — bonus buy_score vs H1] "
+    except Exception:
+        pass
+    
     # 5. Décision technique de base
     if buy_score > sell_score:
         base_action = "buy"
@@ -3947,8 +4015,9 @@ async def decision_simplified(request: DecisionRequest):
     )
     
     # 7. Règles agressives spécifiques Boom/Crash (plus de BUY/SELL, moins de HOLD)
+    # Ne pas dépendre de IMPROVEMENTS_AVAILABLE : alignement critique pour MT5 / stair M1.
     try:
-        if IMPROVEMENTS_AVAILABLE and is_boom_crash_symbol(str(request.symbol)):
+        if is_boom_crash_symbol(str(request.symbol)):
             symbol_lower = str(request.symbol).lower()
             is_boom = "boom" in symbol_lower
             is_crash = "crash" in symbol_lower
@@ -4167,9 +4236,12 @@ async def save_decision_to_supabase(request: DecisionRequest, response: Decision
         "Prefer": "return=representation",
     }
 
-    # Enregistrer également une métrique simple dans model_metrics pour activer l'apprentissage continu
+    # (Important) Par défaut on NE doit PAS écrire un proxy dans `model_metrics` à chaque prédiction,
+    # sinon on écrase les métriques réelles produites par le trainer (integrated_ml_trainer / continuous_ml_trainer).
+    # Tu peux réactiver ce comportement via env var pour debug.
     try:
-        if supabase_key:
+        enable_proxy = os.getenv("AI_ENABLE_MODEL_METRICS_PROXY_FROM_PREDICTIONS", "false").lower() == "true"
+        if enable_proxy and supabase_key:
             # Extraire une "accuracy" proxy à partir de la confiance (décimale)
             accuracy_decimal = None
             meta = getattr(response, "metadata", None)
@@ -4188,7 +4260,6 @@ async def save_decision_to_supabase(request: DecisionRequest, response: Decision
             if not (0.0 <= accuracy_decimal <= 1.0):
                 accuracy_decimal = 0.5
 
-            # Schéma model_metrics: accuracy en 0-1 (real)
             metrics_payload = {
                 "symbol": request.symbol,
                 "timeframe": "M1",
@@ -4198,34 +4269,32 @@ async def save_decision_to_supabase(request: DecisionRequest, response: Decision
                     "last_action": response.action,
                     "last_confidence_pct": float(response.confidence),
                     "reason_sample": response.reason[:240] if isinstance(response.reason, str) else "",
+                    "source": "predictions_proxy",
                 },
             }
 
-            try:
-                async with httpx.AsyncClient() as client:
-                    r_metrics = await client.post(
-                        f"{supabase_url}/rest/v1/model_metrics",
-                        json=metrics_payload,
-                        headers=headers,
-                        timeout=10.0,
+            async with httpx.AsyncClient() as client:
+                r_metrics = await client.post(
+                    f"{supabase_url}/rest/v1/model_metrics",
+                    json=metrics_payload,
+                    headers=headers,
+                    timeout=10.0,
+                )
+                if r_metrics.status_code not in (200, 201):
+                    logger.error(
+                        "Supabase model_metrics proxy: statut %s body=%s payload=%s",
+                        r_metrics.status_code,
+                        r_metrics.text,
+                        metrics_payload,
                     )
-                    if r_metrics.status_code not in (200, 201):
-                        logger.error(
-                            "Supabase model_metrics: statut %s body=%s payload=%s",
-                            r_metrics.status_code,
-                            r_metrics.text,
-                            metrics_payload,
-                        )
-                    else:
-                        logger.info(
-                            "✅ model_metrics insérée pour %s accuracy=%.3f",
-                            request.symbol,
-                            metrics_payload["accuracy"],
-                        )
-            except Exception as e:
-                logger.debug(f"Supabase model_metrics: {e}")
+                else:
+                    logger.info(
+                        "✅ model_metrics proxy insérée pour %s accuracy=%.3f",
+                        request.symbol,
+                        metrics_payload["accuracy"],
+                    )
     except Exception as e:
-        logger.debug(f"Erreur lors de la sauvegarde dans model_metrics: {e}")
+        logger.debug(f"Erreur lors de la sauvegarde proxy model_metrics: {e}")
 
 
 async def fetch_supabase_ml_context(symbol: str, timeframe: str = "M1") -> Dict[str, Any]:
@@ -4923,6 +4992,29 @@ async def _fetch_ml_metrics_for_symbol_from_supabase(symbol: str, timeframe: str
         acc_pct = (acc * 100) if acc <= 1 else acc
         samples = meta.get("training_samples", 0)
         model_name = meta.get("best_model") or meta.get("model_type", "random_forest")
+        precision = meta.get("precision", None)
+        recall = meta.get("recall", None)
+        reliability = meta.get("reliability_score", None)
+        per_class = meta.get("per_class", None)
+        # Normaliser (par ex: parfois stocké 0..1, parfois 0..100)
+        try:
+            if precision is not None:
+                precision = float(precision)
+                precision = (precision / 100.0) if precision > 1.0 else precision
+        except Exception:
+            precision = None
+        try:
+            if recall is not None:
+                recall = float(recall)
+                recall = (recall / 100.0) if recall > 1.0 else recall
+        except Exception:
+            recall = None
+        try:
+            if reliability is not None:
+                reliability = float(reliability)
+                reliability = max(0.0, min(1.0, reliability))
+        except Exception:
+            reliability = None
         return {
             "symbol": symbol,
             "timeframe": timeframe,
@@ -4934,6 +5026,10 @@ async def _fetch_ml_metrics_for_symbol_from_supabase(symbol: str, timeframe: str
             "status": "trained",
             "best_model": model_name,
             "last_update": row.get("training_date", ""),
+            "precision": precision,
+            "recall": recall,
+            "reliability_score": reliability,
+            "per_class": per_class,
         }
     except Exception as e:
         logger.debug("Supabase metrics for %s: %s", symbol, str(e)[:60])
@@ -10816,9 +10912,14 @@ def _compute_ml_metrics(symbol: str, timeframe: str) -> Dict[str, Any]:
     trainer_acc_pct = None
     trainer_samples = None
     trainer_status = "collecting_data"
+    trainer_reliability = None
     if ML_TRAINER_AVAILABLE and ml_trainer is not None:
-        model_key = f"{symbol.replace(' ', '_')}_{timeframe}"
-        tm = getattr(ml_trainer, "current_metrics", {}).get(model_key)
+        # integrated_ml_trainer utilise souvent "Boom 300 Index_M1" (espaces),
+        # alors que d'autres parties utilisent "Boom_300_Index_M1" (underscores).
+        key_space = f"{symbol}_{timeframe}"
+        key_us = f"{symbol.replace(' ', '_')}_{timeframe}"
+        cur = getattr(ml_trainer, "current_metrics", {}) or {}
+        tm = cur.get(key_space) or cur.get(key_us)
         if tm:
             best = tm.get("best_model", "random_forest")
             rf = tm.get("metrics", {}).get(best) or tm.get("metrics", {}).get("random_forest", {})
@@ -10826,6 +10927,12 @@ def _compute_ml_metrics(symbol: str, timeframe: str) -> Dict[str, Any]:
             trainer_acc_pct = (acc * 100.0) if acc <= 1.0 else acc
             trainer_samples = tm.get("training_samples", 0)
             trainer_status = "trained"
+            try:
+                trainer_reliability = float(rf.get("reliability_score")) if rf.get("reliability_score") is not None else None
+                if trainer_reliability is not None:
+                    trainer_reliability = max(0.0, min(1.0, trainer_reliability))
+            except Exception:
+                trainer_reliability = None
 
     # Par défaut (si pas encore de feedback), garder un niveau "neutre" pour permettre au robot de démarrer
     if n == 0:
@@ -10881,6 +10988,7 @@ def _compute_ml_metrics(symbol: str, timeframe: str) -> Dict[str, Any]:
         "feedback_wins": wins,
         "feedback_losses": losses,
         "status": trainer_status if trainer_acc_pct is not None else ("trained" if n > 0 else "collecting_data"),
+        "reliability_score": trainer_reliability,
     }
 
     _metrics_cache[k] = payload
@@ -11175,6 +11283,9 @@ async def api_ml_metrics(symbol: str, timeframe: str = "M1"):
             "training_level": _training_level(samples_used),
             "accuracy": acc_ratio,          # 0..1
             "f1_score": acc_ratio,          # 0..1 (fallback)
+            # Optionnel: vraies métriques si disponibles (provenant de metadata model_metrics)
+            "precision": sup.get("precision", None),
+            "recall": sup.get("recall", None),
             "samples_used": samples_used,
             "model_type": model_type,
             "created_at": created_at,
