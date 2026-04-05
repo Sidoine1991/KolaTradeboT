@@ -255,7 +255,8 @@ def train_volatility_model(X, y, features_list):
         'random_state': 42,
         'eval_metric': 'logloss',
         'reg_alpha': 0.1,
-        'reg_lambda': 1.0
+        'reg_lambda': 1.0,
+        'early_stopping_rounds': 30,
     }
     
     # Entraînement
@@ -263,8 +264,7 @@ def train_volatility_model(X, y, features_list):
     model.fit(
         X_train_scaled, y_train,
         eval_set=[(X_test_scaled, y_test)],
-        early_stopping_rounds=30,
-        verbose=False
+        verbose=False,
     )
     
     # Évaluation

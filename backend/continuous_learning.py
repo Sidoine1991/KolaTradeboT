@@ -458,14 +458,14 @@ class ContinuousLearning:
             subsample=0.8,
             colsample_bytree=0.8,
             random_state=42,
-            eval_metric='logloss'
+            eval_metric='logloss',
+            early_stopping_rounds=20,
         )
         
         model.fit(
             X_train_scaled, y_train,
             eval_set=[(X_test_scaled, y_test)],
-            early_stopping_rounds=20,
-            verbose=False
+            verbose=False,
         )
         
         # Évaluer

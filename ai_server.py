@@ -89,6 +89,11 @@ except ImportError as e:
     ML_TRAINER_AVAILABLE = False
     logger.warning(f"⚠️ Système d'entraînement continu non disponible: {e}")
 
+try:
+    from backend.weltrade_symbols import WELTRADE_STARTUP_TRAIN_SYMBOLS
+except ImportError:
+    WELTRADE_STARTUP_TRAIN_SYMBOLS = ()
+
 # Importer le système de recommandation ML
 try:
     from ml_recommendation_system import MLRecommendationSystem
@@ -2384,11 +2389,27 @@ async def train_models_background():
     
     logger.info("🔄 Début de l'entraînement des modèles ML en arrière-plan...")
     
-    # Symboles principaux à entraîner automatiquement (réduit pour accélérer)
-    priority_symbols = [
-        "EURUSD", "GBPUSD",  # Forex majeurs uniquement
-        "Boom 300 Index", "Boom 600 Index"  # Boom principaux uniquement
+    # Symboles principaux + indices Weltrade (PainX / GainX) — même logique que train_adaptive_models / integrated_ml_trainer
+    base_priority = [
+        "EURUSD", "GBPUSD",
+        "Boom 300 Index", "Boom 600 Index",
     ]
+    wt_env = (os.getenv("AI_WELTRADE_STARTUP_SYMBOLS") or "").strip()
+    if wt_env:
+        weltrade_list = [s.strip() for s in wt_env.split(",") if s.strip()]
+    else:
+        weltrade_list = list(WELTRADE_STARTUP_TRAIN_SYMBOLS)
+    seen: Set[str] = set()
+    priority_symbols: List[str] = []
+    for s in base_priority + weltrade_list:
+        if s not in seen:
+            seen.add(s)
+            priority_symbols.append(s)
+    if weltrade_list:
+        logger.info(
+            "📌 Entraînement startup: %d symbole(s) Weltrade (PainX/GainX) ajouté(s) à la file",
+            len(weltrade_list),
+        )
     
     timeframes = ["M1", "M5"]  # Timeframes réduits
     

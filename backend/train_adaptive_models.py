@@ -26,11 +26,17 @@ except ImportError:
     print("❌ Erreur: Impossible d'importer backend.mt5_connector")
     sys.exit(1)
 
+try:
+    from backend.weltrade_symbols import is_weltrade_synth_index, normalize_broker_symbol
+except ImportError:
+    from weltrade_symbols import is_weltrade_synth_index, normalize_broker_symbol
+
 def categorize_symbols(symbols_list):
     """Catégorise automatiquement les symboles MT5"""
     categories = {
         'SYNTHETIC_SPECIAL': [],    # Boom/Crash spécifiques
         'SYNTHETIC_GENERAL': [],    # Autres indices synthétiques
+        'WELTRADE_SYNTH': [],       # Weltrade PAINX / GAIN / …
         'CRYPTO': [],
         'FOREX': [],
         'STOCKS': [],
@@ -43,6 +49,8 @@ def categorize_symbols(symbols_list):
         # Boom/Crash spécifiques
         if "BOOM" in symbol_upper or "CRASH" in symbol_upper:
             categories['SYNTHETIC_SPECIAL'].append(symbol)
+        elif is_weltrade_synth_index(symbol):
+            categories['WELTRADE_SYNTH'].append(symbol)
         
         # Autres indices synthétiques
         elif any(keyword in symbol_upper for keyword in ['VOLATILITY', 'STEP', 'JUMP', 'RANGE BREAK', 'DEX', 'DRIFT', 'TREK', 'VOLSWITCH', 'SKEW', 'MULTI STEP']):
@@ -52,8 +60,8 @@ def categorize_symbols(symbols_list):
         elif any(crypto in symbol_upper for crypto in ['BTC', 'ETH', 'ADA', 'DOT', 'LNK', 'LTC', 'BCH', 'XRP', 'XLM', 'XMR', 'ZEC', 'XTZ', 'NEO', 'MKR', 'SOL', 'TRX', 'UNI', 'SHB', 'TON', 'FET', 'APT', 'COM', 'IMX', 'SAN', 'TRU', 'MLN', 'NER']):
             categories['CRYPTO'].append(symbol)
         
-        # Forex
-        elif any(pair in symbol_upper for pair in ['USD', 'EUR', 'GBP', 'JPY', 'AUD', 'CAD', 'CHF', 'NZD', 'SEK', 'NOK', 'PLN', 'ZAR', 'SGD', 'HKD', 'THB', 'MXN', 'CNH']):
+        # Forex (nom normalisé : EURUSD.pro → EURUSD)
+        elif any(pair in normalize_broker_symbol(symbol) for pair in ['USD', 'EUR', 'GBP', 'JPY', 'AUD', 'CAD', 'CHF', 'NZD', 'SEK', 'NOK', 'PLN', 'ZAR', 'SGD', 'HKD', 'THB', 'MXN', 'CNH']):
             if 'INDEX' not in symbol_upper and 'BASKET' not in symbol_upper and 'DFX' not in symbol_upper:
                 categories['FOREX'].append(symbol)
         
@@ -141,7 +149,7 @@ def create_adaptive_features(df, symbol_category):
     df_features['momentum_20'] = df_features['close'] / df_features['close'].shift(20) - 1
     
     # Features spécifiques par catégorie
-    if symbol_category in ["SYNTHETIC_SPECIAL", "SYNTHETIC_GENERAL"]:
+    if symbol_category in ["SYNTHETIC_SPECIAL", "SYNTHETIC_GENERAL", "WELTRADE_SYNTH"]:
         # Features pour indices synthétiques
         df_features['spike_detection'] = (df_features['high'] - df_features['low']) / df_features['close'] > 0.05
         df_features['volatility_regime'] = df_features['volatility'].rolling(50).mean()
@@ -222,7 +230,7 @@ def prepare_training_data(symbols, category, timeframe='1m', candles_per_symbol=
     ]
     
     # Ajouter features spécifiques selon la catégorie
-    if category in ["SYNTHETIC_SPECIAL", "SYNTHETIC_GENERAL"]:
+    if category in ["SYNTHETIC_SPECIAL", "SYNTHETIC_GENERAL", "WELTRADE_SYNTH"]:
         common_features.extend(['spike_detection', 'volatility_regime'])
     elif category == "CRYPTO":
         common_features.extend(['crypto_volatility', 'btc_correlation'])
@@ -252,7 +260,7 @@ def train_model(X, y, category, features_list):
     X_test_scaled = scaler.transform(X_test)
     
     # Configuration XGBoost selon la catégorie
-    if category in ["SYNTHETIC_SPECIAL", "SYNTHETIC_GENERAL"]:
+    if category in ["SYNTHETIC_SPECIAL", "SYNTHETIC_GENERAL", "WELTRADE_SYNTH"]:
         # Modèles pour indices synthétiques (plus de features de volatilité)
         params = {
             'n_estimators': 200,
@@ -309,12 +317,12 @@ def train_model(X, y, category, features_list):
         }
     
     # Entraînement
-    model = xgb.XGBClassifier(**params)
+    params_fit = {**params, "early_stopping_rounds": 20}
+    model = xgb.XGBClassifier(**params_fit)
     model.fit(
         X_train_scaled, y_train,
         eval_set=[(X_test_scaled, y_test)],
-        early_stopping_rounds=20,
-        verbose=False
+        verbose=False,
     )
     
     # Évaluation
