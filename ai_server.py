@@ -8059,8 +8059,11 @@ async def decision(request: DecisionRequest):
         # Intégration ML améliorée - Le ML peut maintenant surcharger les indicateurs classiques
         ml_style = None
         if isinstance(ml_decision, dict) and ml_decision.get("status") == "ok":
-            ml_action = ml_decision.get("action", "hold")
-            ml_conf = float(ml_decision.get("confidence", 0.0))
+            ml_action = str(ml_decision.get("action", "hold")).strip().lower()
+            ml_conf_raw = float(ml_decision.get("confidence", 0.0))
+            # Normaliser la confiance ML en ratio [0..1] (certaines sources renvoient 0..100)
+            ml_conf = (ml_conf_raw / 100.0) if ml_conf_raw > 1.0 else ml_conf_raw
+            ml_conf = max(0.0, min(1.0, ml_conf))
             ml_style = ml_decision.get("style", None)
             ml_cat = ml_decision.get("trading_category", "")
             ml_model_name = ml_decision.get("model_name", "")
