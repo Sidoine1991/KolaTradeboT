@@ -473,6 +473,55 @@ def calculate_boom_crash_metadata(df: pd.DataFrame, symbol: str, request) -> Dic
     
     return metadata
 
+
+def compute_hms_reaction_zones(df: pd.DataFrame, bins: int = 40) -> Dict[str, Any]:
+    """HMS-like zones: détecte zones de réaction et milieu de range non tradable."""
+    if df is None or df.empty or len(df) < 80:
+        return {"valid": False}
+    try:
+        closes = df["close"].astype(float).values
+        highs = df["high"].astype(float).values
+        lows = df["low"].astype(float).values
+        lo = float(np.min(lows))
+        hi = float(np.max(highs))
+        if hi <= lo:
+            return {"valid": False}
+
+        hist, edges = np.histogram(closes, bins=bins, range=(lo, hi))
+        if hist is None or len(hist) == 0:
+            return {"valid": False}
+
+        top_idx = np.argsort(hist)[-3:][::-1]
+        zones = []
+        for idx in top_idx:
+            z_low = float(edges[idx])
+            z_high = float(edges[idx + 1])
+            zones.append({
+                "low": z_low,
+                "high": z_high,
+                "mid": (z_low + z_high) / 2.0,
+                "touches": int(hist[idx]),
+            })
+
+        current_price = float(closes[-1])
+        nearest = min(zones, key=lambda z: abs(current_price - z["mid"]))
+        zone_width = max(nearest["high"] - nearest["low"], 1e-10)
+        dist_ratio = abs(current_price - nearest["mid"]) / zone_width
+        full_range = max(hi - lo, 1e-10)
+        pos_in_range = (current_price - lo) / full_range
+        in_mid_range = 0.42 <= pos_in_range <= 0.58
+        return {
+            "valid": True,
+            "nearest_zone": nearest,
+            "range_low": lo,
+            "range_high": hi,
+            "pos_in_range": pos_in_range,
+            "in_mid_range": in_mid_range,
+            "distance_to_zone_mid_ratio": dist_ratio,
+        }
+    except Exception:
+        return {"valid": False}
+
 def calculate_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
     """Calcule l'ATR (Average True Range)."""
     high_low = df['high'] - df['low']
@@ -7307,6 +7356,87 @@ def enhance_spike_prediction_with_history(df: pd.DataFrame, symbol: str) -> Dict
         'recent_volatility': recent_volatility
     }
 
+
+def compute_hms_levels_from_df(df: Optional[pd.DataFrame], current_price: float) -> Dict[str, Any]:
+    """
+    HMS zones: détecte les zones de réaction répétées pour éviter les entrées au milieu du range.
+    Retourne un score (0..1), un point d'achat/vente et des zones buy/sell.
+    """
+    out: Dict[str, Any] = {
+        "hms_score": 0.0,
+        "hms_buy_point": None,
+        "hms_sell_point": None,
+        "hms_buy_zone_low": None,
+        "hms_buy_zone_high": None,
+        "hms_sell_zone_low": None,
+        "hms_sell_zone_high": None,
+        "hms_in_mid_range": False,
+        "hms_pos_in_range": 0.5,
+        "hms_reaction_count": 0,
+    }
+    try:
+        if df is None or len(df) < 80:
+            return out
+        lows = df["low"].astype(float).values
+        highs = df["high"].astype(float).values
+        closes = df["close"].astype(float).values
+        lo = float(np.min(lows))
+        hi = float(np.max(highs))
+        if hi <= lo:
+            return out
+
+        hist, edges = np.histogram(closes, bins=40, range=(lo, hi))
+        if hist is None or len(hist) == 0:
+            return out
+
+        top_idx = np.argsort(hist)[-3:][::-1]
+        zones: List[Dict[str, Any]] = []
+        for idx in top_idx:
+            z_low = float(edges[idx])
+            z_high = float(edges[idx + 1])
+            zones.append({
+                "low": z_low,
+                "high": z_high,
+                "mid": (z_low + z_high) / 2.0,
+                "touches": int(hist[idx]),
+            })
+        if not zones:
+            return out
+
+        range_size = max(hi - lo, 1e-10)
+        pos_in_range = (current_price - lo) / range_size
+        in_mid_range = 0.42 <= pos_in_range <= 0.58
+
+        zones_sorted = sorted(zones, key=lambda z: z["mid"])
+        buy_zone = zones_sorted[0]
+        sell_zone = zones_sorted[-1]
+
+        buy_dist = abs(current_price - buy_zone["mid"]) / range_size
+        sell_dist = abs(current_price - sell_zone["mid"]) / range_size
+        nearest_dist = min(buy_dist, sell_dist)
+        reaction_count = int(sum(z.get("touches", 0) for z in zones))
+
+        score = 1.0 - min(1.0, nearest_dist * 4.0)
+        if in_mid_range:
+            score *= 0.55
+        score = max(0.0, min(1.0, score))
+
+        out.update({
+            "hms_score": float(score),
+            "hms_buy_point": float(buy_zone["mid"]),
+            "hms_sell_point": float(sell_zone["mid"]),
+            "hms_buy_zone_low": float(buy_zone["low"]),
+            "hms_buy_zone_high": float(buy_zone["high"]),
+            "hms_sell_zone_low": float(sell_zone["low"]),
+            "hms_sell_zone_high": float(sell_zone["high"]),
+            "hms_in_mid_range": bool(in_mid_range),
+            "hms_pos_in_range": float(max(0.0, min(1.0, pos_in_range))),
+            "hms_reaction_count": reaction_count,
+        })
+        return out
+    except Exception:
+        return out
+
 @app.post("/decision", response_model=DecisionResponse)
 async def decision(request: DecisionRequest):
     # Normaliser les champs manquants pour éviter 422 (robot MT5 peut envoyer payload incomplet)
@@ -8731,6 +8861,28 @@ Format: Analyse claire et professionnelle en français.
             buffer = request.atr * 0.5
             sell_zone_low = mid_price - buffer
             sell_zone_high = mid_price + buffer
+
+        # HMS: zones réelles de réaction + score de qualité
+        hms = compute_hms_levels_from_df(df_recent if 'df_recent' in locals() else None, mid_price)
+        hms_score = float(hms.get("hms_score", 0.0))
+        if hms.get("hms_buy_zone_low") is not None:
+            buy_zone_low = float(hms["hms_buy_zone_low"])
+            buy_zone_high = float(hms["hms_buy_zone_high"])
+        if hms.get("hms_sell_zone_low") is not None:
+            sell_zone_low = float(hms["hms_sell_zone_low"])
+            sell_zone_high = float(hms["hms_sell_zone_high"])
+
+        # Filtre HMS: couper les entrées au milieu du range
+        if action != "hold" and bool(hms.get("hms_in_mid_range", False)) and hms_score < 0.55:
+            action = "hold"
+            confidence = max(0.2, confidence * 0.6)
+            reason += " | HMS: milieu de range (réactions faibles)"
+        elif action == "buy" and hms_score >= 0.65 and hms.get("hms_buy_point") is not None:
+            confidence = min(0.98, confidence + 0.08)
+            reason += " | HMS: zone achat réactive"
+        elif action == "sell" and hms_score >= 0.65 and hms.get("hms_sell_point") is not None:
+            confidence = min(0.98, confidence + 0.08)
+            reason += " | HMS: zone vente réactive"
         
         # ========== VALIDATION FINALE INTELLIGENCE DES ORDRES ==========
         # S'assurer que les ordres sont vraiment intelligents avant de les envoyer
@@ -8839,6 +8991,13 @@ Format: Analyse claire et professionnelle en français.
             "buy_zone_high": buy_zone_high,
             "sell_zone_low": sell_zone_low,
             "sell_zone_high": sell_zone_high,
+            "hms_score": round(hms_score, 3),
+            "hms_buy_point": hms.get("hms_buy_point"),
+            "hms_sell_point": hms.get("hms_sell_point"),
+            "hms_buy_zone_low": hms.get("hms_buy_zone_low"),
+            "hms_buy_zone_high": hms.get("hms_buy_zone_high"),
+            "hms_sell_zone_low": hms.get("hms_sell_zone_low"),
+            "hms_sell_zone_high": hms.get("hms_sell_zone_high"),
             "stop_loss": stop_loss,
             "take_profit": take_profit
         }
@@ -8865,6 +9024,33 @@ Format: Analyse claire et professionnelle en français.
         action, confidence, reason = apply_calibration_to_decision(
             request.symbol, action, confidence, reason, timeframe="M1"
         )
+
+        # HMS-like zones: éviter les entrées en milieu de range / mauvais côté du range.
+        hms_meta: Dict[str, Any] = {"valid": False}
+        try:
+            df_hms = get_historical_data_mt5(request.symbol, "M5", 180) if (MT5_AVAILABLE and mt5_initialized) else None
+            hms = compute_hms_reaction_zones(df_hms) if df_hms is not None and len(df_hms) >= 80 else {"valid": False}
+            hms_meta = hms
+            if hms.get("valid", False):
+                pos_in_range = float(hms.get("pos_in_range", 0.5))
+                dist_ratio = float(hms.get("distance_to_zone_mid_ratio", 10.0))
+                in_mid_range = bool(hms.get("in_mid_range", False))
+                if action != "hold":
+                    if in_mid_range and dist_ratio > 0.7:
+                        action = "hold"
+                        confidence = max(0.60, min(0.90, confidence))
+                        reason += " | HMS: milieu de range, zone non tradable"
+                    elif action == "buy" and pos_in_range > 0.65:
+                        action = "hold"
+                        confidence = max(0.60, min(0.90, confidence))
+                        reason += " | HMS: BUY trop haut dans le range"
+                    elif action == "sell" and pos_in_range < 0.35:
+                        action = "hold"
+                        confidence = max(0.60, min(0.90, confidence))
+                        reason += " | HMS: SELL trop bas dans le range"
+        except Exception as _hms_err:
+            logger.debug(f"HMS filter skipped: {_hms_err}")
+
         response_data["action"] = action
         response_data["confidence"] = round(confidence, 3)
         response_data["reason"] = reason
@@ -8909,6 +9095,7 @@ Format: Analyse claire et professionnelle en français.
             }
         
         # 4. Mettre à jour response_data avec métadonnées (toujours incluses)
+        metadata["hms_zones"] = hms_meta
         response_data["metadata"] = convert_numpy_to_python(metadata)
         
         # 5. Mettre en cache la décision améliorée
