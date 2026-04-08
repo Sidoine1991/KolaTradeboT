@@ -94,6 +94,13 @@ try:
 except ImportError:
     WELTRADE_STARTUP_TRAIN_SYMBOLS = ()
 
+try:
+    from backend.indicator_confluence import apply_core_indicator_confluence
+    INDICATOR_CONFLUENCE_AVAILABLE = True
+except ImportError:
+    apply_core_indicator_confluence = None  # type: ignore
+    INDICATOR_CONFLUENCE_AVAILABLE = False
+
 # Importer le système de recommandation ML
 try:
     from ml_recommendation_system import MLRecommendationSystem
@@ -4083,6 +4090,9 @@ class DecisionRequest(BaseModel):
     stair_pattern_kinds: Optional[str] = None  # ex: classic,forming
     stair_client_event_id: Optional[str] = None  # UUID côté EA pour lier le feedback trade
     stair_features: Optional[Dict[str, Any]] = None  # ex: aligned_ratio, net_move_pct, forming_match
+    # Confluence finale (envoyés par MT5) : MACD histogramme M1, biais Ichimoku H1 (-1/0/1)
+    macd_histogram: Optional[float] = None
+    ichimoku_bias: Optional[int] = 0
 
 # ===== MODÈLES POUR FEEDBACK LOOP =====
 class TradeFeedback(BaseModel):
@@ -4480,6 +4490,27 @@ async def decision_simplified(request: DecisionRequest):
     except Exception as e:
         logger.debug("apply_stair_history_to_decision: %s", e)
     
+    # 7c. Validation finale RSI / MACD / Ichimoku (confluence)
+    confluence_detail: Dict[str, Any] = {}
+    if INDICATOR_CONFLUENCE_AVAILABLE and apply_core_indicator_confluence and _env_bool(
+        "ENABLE_CORE_INDICATOR_CONFLUENCE", True
+    ):
+        try:
+            min_v = int(os.getenv("CORE_INDICATOR_MIN_VOTES", "2"))
+            action, confidence, reason, confluence_detail = apply_core_indicator_confluence(
+                request, action, confidence, reason, min_votes=max(1, min_v)
+            )
+            if confluence_detail and not confluence_detail.get("skipped"):
+                logger.info(
+                    "📊 Confluence RSI/MACD/Ichi | %s | votes=%s/%s | %s",
+                    request.symbol,
+                    confluence_detail.get("votes_for"),
+                    confluence_detail.get("votes_against"),
+                    confluence_detail.get("core_labels"),
+                )
+        except Exception as e:
+            logger.debug("confluence: %s", e)
+    
     # 8. Ajustements finaux (laisser une confiance dynamique sur HOLD, éviter un plancher fixe à 30%)
     if action == "hold":
         # Garder la confiance calculée (technique + ML), mais éviter 0 absolu
@@ -4560,6 +4591,21 @@ async def decision_simplified(request: DecisionRequest):
             asyncio.create_task(_insert_stair_detection_supabase(payload_st))
     
     # 13. Créer la réponse enrichie
+    meta_out = {
+        "original_decision": ml_result["original_decision"],
+        "original_confidence": ml_result["original_confidence"],
+        "ml_enhanced": ml_result["ml_applied"],
+        "ml_reason": ml_result["ml_reason"],
+        "base_scores": {"buy": buy_score, "sell": sell_score},
+        "market_data": market_data,
+        "confidence_decimal": confidence,
+        "confidence_percentage": confidence_percentage,
+        "spike_probability": market_data.get("spike_probability", 0.0),
+        "stair_detected": bool(request.stair_detected),
+        "stair_client_event_id": stair_client_eid,
+    }
+    if confluence_detail:
+        meta_out["indicator_confluence"] = confluence_detail
     response = DecisionResponse(
         action=action,
         confidence=confidence_percentage,  # Décimale 0-1 (MT5 affiche *100)
@@ -4571,19 +4617,7 @@ async def decision_simplified(request: DecisionRequest):
         predicted_prices=predicted_prices,
         alignment=alignment,
         coherence=coherence,
-        metadata={
-            "original_decision": ml_result["original_decision"],
-            "original_confidence": ml_result["original_confidence"],
-            "ml_enhanced": ml_result["ml_applied"],
-            "ml_reason": ml_result["ml_reason"],
-            "base_scores": {"buy": buy_score, "sell": sell_score},
-            "market_data": market_data,
-            "confidence_decimal": confidence,
-            "confidence_percentage": confidence_percentage,
-            "spike_probability": market_data.get("spike_probability", 0.0),
-            "stair_detected": bool(request.stair_detected),
-            "stair_client_event_id": stair_client_eid,
-        }
+        metadata=meta_out
     )
     
     # 11. Sauvegarder la décision dans Supabase (local OU cloud) si les clés sont disponibles
@@ -6789,6 +6823,8 @@ def _parse_decision_body(raw: bytes) -> DecisionRequest:
         image_filename=body.get("image_filename"), deriv_patterns=body.get("deriv_patterns"),
         deriv_patterns_bullish=body.get("deriv_patterns_bullish"), deriv_patterns_bearish=body.get("deriv_patterns_bearish"),
         deriv_patterns_confidence=body.get("deriv_patterns_confidence"), timestamp=body.get("timestamp"),
+        macd_histogram=body.get("macd_histogram"),
+        ichimoku_bias=int(body.get("ichimoku_bias", 0) or 0),
     )
 
 @app.post("/decision", response_model=DecisionResponse)
@@ -6890,7 +6926,28 @@ async def decision(req: Request):
             reason += pol_reason + " "
         action, confidence = new_action, new_conf
 
+        conv_meta: Dict[str, Any] = {}
+        if INDICATOR_CONFLUENCE_AVAILABLE and apply_core_indicator_confluence and _env_bool(
+            "ENABLE_CORE_INDICATOR_CONFLUENCE", True
+        ):
+            try:
+                min_v = int(os.getenv("CORE_INDICATOR_MIN_VOTES", "2"))
+                action, confidence, reason, conv_meta = apply_core_indicator_confluence(
+                    request, action, confidence, reason, min_votes=max(1, min_v)
+                )
+            except Exception as e:
+                logger.debug("confluence (/decision): %s", e)
+
         # Créer la réponse
+        ta = {
+            "rsi": request.rsi,
+            "ema_fast_h1": request.ema_fast_h1,
+            "ema_slow_h1": request.ema_slow_h1,
+            "macd_histogram": getattr(request, "macd_histogram", None),
+            "ichimoku_bias": getattr(request, "ichimoku_bias", 0),
+        }
+        if conv_meta:
+            ta["indicator_confluence"] = conv_meta
         response = DecisionResponse(
             action=action,
             confidence=confidence,
@@ -6901,11 +6958,7 @@ async def decision(req: Request):
             take_profit=None,
             timestamp=datetime.now().isoformat(),
             model_used="Technical+Multi-TF",
-            technical_analysis={
-                "rsi": request.rsi,
-                "ema_fast_h1": request.ema_fast_h1,
-                "ema_slow_h1": request.ema_slow_h1
-            }
+            technical_analysis=ta
         )
         
         # Mettre en cache
@@ -8750,7 +8803,27 @@ Format: Analyse claire et professionnelle en français.
                     action = "hold"
                     confidence = 0.30
                     reason += " | Initialisation: Confiance insuffisante pour trader immédiatement"
-        
+
+        # ========== CONFLUENCE FINALE RSI / MACD / ICHIMOKU (alignée EA MQ5) ==========
+        tech_confluence: Dict[str, Any] = {}
+        if _env_bool("INDICATOR_CONFLUENCE_GATE", True):
+            try:
+                from backend.indicator_confluence import apply_rsi_macd_ichimoku_gate
+
+                df_gate = None
+                if MT5_AVAILABLE and mt5_initialized:
+                    df_gate = get_historical_data_mt5(request.symbol, "M1", 120)
+                action, confidence, reason, tech_confluence = apply_rsi_macd_ichimoku_gate(
+                    request.symbol,
+                    action,
+                    confidence,
+                    reason,
+                    df_gate,
+                    min_votes=2,
+                )
+            except Exception as gate_err:
+                logger.debug(f"Confluence RSI/MACD/Ichi: {gate_err}")
+
         # Construire la réponse
         response_data = {
             "action": action,
@@ -8769,7 +8842,9 @@ Format: Analyse claire et professionnelle en français.
             "stop_loss": stop_loss,
             "take_profit": take_profit
         }
-        
+        if tech_confluence:
+            response_data["technical_analysis"] = convert_numpy_to_python(tech_confluence)
+
         # Log de débogage pour vérifier les valeurs
         init_marker = "🔄 [INIT]" if initialization_mode else ""
         logger.info(f"✅ {init_marker} Décision IA pour {request.symbol}: action={action}, confidence={confidence:.3f} ({confidence*100:.1f}%), reason={reason[:100]}")
