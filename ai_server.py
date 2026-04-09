@@ -4435,7 +4435,20 @@ async def decision_simplified(request: DecisionRequest):
     except Exception:
         pass
     
-    # 5. Décision technique de base
+    # 5. Analyse de marché pro (multi-TF + SMC proxy) AVANT la décision finale
+    market_pro = compute_market_pro_analysis(request)
+    reason += f"[MarketPro: {market_pro.get('summary', 'n/a')}] "
+
+    # 5b. Pré-filtre de sécurité (urgent): éviter les entrées faibles en range/chaos
+    setup_score = _safe_float(market_pro.get("setup_score"), 0.0)
+    market_conclusion = str(market_pro.get("conclusion", "hold")).lower()
+    market_regime = str(market_pro.get("regime", "unknown")).lower()
+    if market_conclusion == "hold" and market_regime in ("range", "chaotic") and setup_score < 0.72:
+        reason += "[Kill-switch setup faible en range/chaos -> HOLD] "
+        buy_score *= 0.35
+        sell_score *= 0.35
+
+    # 6. Décision technique de base
     if buy_score > sell_score:
         base_action = "buy"
         base_confidence = 0.5 + (buy_score - sell_score) / 2
@@ -4446,18 +4459,59 @@ async def decision_simplified(request: DecisionRequest):
         base_action = "hold"
         base_confidence = 0.5
     
-    # 6. Mode simplifié RAPIDE: éviter les chargements ML lourds par requête.
-    # Cela supprime les délais extrêmes et stabilise l'affichage IA côté MT5.
-    action = base_action
-    confidence = base_confidence
-    ml_result = {"ml_applied": False, "ml_reason": "skipped_fast_path"}
-    reason += "[ML: skipped_fast_path] "
+    # 7. AMÉLIORATION AVEC ML
+    market_data = {
+        "symbol": request.symbol,
+        "bid": request.bid,
+        "ask": request.ask,
+        "rsi": request.rsi,
+        "ema_fast_m1": request.ema_fast_m1,
+        "ema_slow_m1": request.ema_slow_m1,
+        "ema_fast_h1": request.ema_fast_h1,
+        "ema_slow_h1": request.ema_slow_h1,
+        "ema_fast_m5": request.ema_fast_m5,
+        "ema_slow_m5": request.ema_slow_m5,
+        "atr": request.atr,
+        "timestamp": request.timestamp,
+        "market_pro_summary": market_pro.get("summary"),
+        "market_pro_setup_score": setup_score,
+        "market_pro_conclusion": market_conclusion,
+    }
+    
+    ml_result = enhance_decision_with_ml(request.symbol, base_action, base_confidence, market_data)
+    
+    # Utiliser la décision améliorée par ML
+    action = ml_result["enhanced_decision"]
+    confidence = ml_result["enhanced_confidence"]
+    
+    # Ajouter la raison ML à la raison technique
+    if ml_result["ml_applied"]:
+        reason += f"[ML: {ml_result['ml_reason']}] "
+        logger.info(f"🧠 ML Enhancement: {base_action} → {action} ({base_confidence:.2f} → {confidence:.2f})")
     
     action, confidence, reason = enforce_ea_boom_crash_direction(
         request.symbol, action, confidence, reason
     )
     
-    # 7. Règles agressives spécifiques Boom/Crash (plus de BUY/SELL, moins de HOLD)
+    # 7b. Conclusion Market Pro appliquée avant règles agressives
+    if market_conclusion in ("buy", "sell"):
+        if action == "hold":
+            action = market_conclusion
+            confidence = max(confidence, 0.58 + setup_score * 0.20)
+            reason += f"[MarketPro conclusion {market_conclusion.upper()} appliquée] "
+        elif action == market_conclusion:
+            confidence = min(0.95, confidence + 0.06 + setup_score * 0.08)
+            reason += "[MarketPro confirme la direction] "
+        else:
+            confidence = max(0.10, confidence - (0.08 + (0.72 - min(0.72, setup_score)) * 0.25))
+            reason += "[MarketPro en contradiction: confiance réduite] "
+    elif market_conclusion == "hold":
+        if action != "hold" and market_regime in ("range", "chaotic") and setup_score < 0.72:
+            action = "hold"
+            confidence = min(confidence, 0.48)
+            reason += "[MarketPro: contexte défavorable -> HOLD] "
+
+    # 8. Règles agressives spécifiques Boom/Crash (plus de BUY/SELL, moins de HOLD)
     # Ne pas dépendre de IMPROVEMENTS_AVAILABLE : alignement critique pour MT5 / stair M1.
     try:
         if is_boom_crash_symbol(str(request.symbol)):
@@ -4504,7 +4558,7 @@ async def decision_simplified(request: DecisionRequest):
     except Exception as e:
         logger.debug(f"Règles agressives Boom/Crash ignorées: {e}")
     
-    # 7b. Historique stair (Supabase) : ajuste la confiance si win_rate significatif pour symbole+direction
+    # 8b. Historique stair (Supabase) : ajuste la confiance si win_rate significatif pour symbole+direction
     try:
         if request.stair_detected:
             action, confidence, reason = await apply_stair_history_to_decision(
@@ -4519,14 +4573,13 @@ async def decision_simplified(request: DecisionRequest):
     except Exception as e:
         logger.debug("apply_stair_history_to_decision: %s", e)
     
-    # 7c. Validation finale RSI / MACD / Ichimoku (confluence)
+    # 8c. Validation finale RSI / MACD / Ichimoku (confluence)
     confluence_detail: Dict[str, Any] = {}
     if INDICATOR_CONFLUENCE_AVAILABLE and apply_core_indicator_confluence and _env_bool(
         "ENABLE_CORE_INDICATOR_CONFLUENCE", True
     ):
         try:
-            # Par défaut 1 vote pour éviter HOLD uniforme en phase no_model.
-            min_v = int(os.getenv("CORE_INDICATOR_MIN_VOTES", "1"))
+            min_v = int(os.getenv("CORE_INDICATOR_MIN_VOTES", "2"))
             action, confidence, reason, confluence_detail = apply_core_indicator_confluence(
                 request, action, confidence, reason, min_votes=max(1, min_v)
             )
@@ -4540,33 +4593,23 @@ async def decision_simplified(request: DecisionRequest):
                 )
         except Exception as e:
             logger.debug("confluence: %s", e)
-
-    # 7d. Fallback directionnel anti-HOLD uniforme quand ML est indisponible.
-    # Si le motif principal est "no_model" et qu'aucun blocage dur n'est actif,
-    # on utilise dir_rule (envoyé par MQ5) pour éviter HOLD 50% sur tous les symboles.
-    try:
-        reason_l = (reason or "").lower()
-        hard_hold = ("hms" in reason_l) or ("correction" in reason_l) or ("interdiction" in reason_l)
-        if action == "hold" and ("no_model" in reason_l) and not hard_hold:
-            dr = int(getattr(request, "dir_rule", 0) or 0)
-            if dr != 0:
-                action = "buy" if dr > 0 else "sell"
-                rsi_bias = min(0.18, abs(float(request.rsi or 50.0) - 50.0) / 100.0)
-                confidence = max(confidence, 0.52 + rsi_bias)
-                confidence = min(confidence, 0.72)
-                reason += " [DIR_RULE_FALLBACK:no_model]"
-    except Exception as e:
-        logger.debug("dir_rule fallback (simplified): %s", e)
     
-    # 8. Ajustements finaux (laisser une confiance dynamique sur HOLD, éviter un plancher fixe à 30%)
+    # 9. Risk controls adaptatifs (lot sizing + kill-switch journalier/hebdo)
+    risk_controls = _build_adaptive_risk_controls(request, action, confidence, market_pro)
+    if risk_controls.get("block_trade", False) and action in ("buy", "sell"):
+        action = "hold"
+        confidence = min(confidence, 0.42)
+        reason += f"[RiskGate {risk_controls.get('decision_gate_reason')}] "
+
+    # 10. Ajustements finaux (laisser une confiance dynamique sur HOLD, éviter un plancher fixe à 30%)
     if action == "hold":
         # Garder la confiance calculée (technique + ML), mais éviter 0 absolu
         confidence = max(0.1, confidence)
     
-    # 9. Confiance pour MT5: envoyer décimale 0-1 (l'EA attend 0-1 et affiche *100)
+    # 11. Confiance pour MT5: envoyer décimale 0-1 (l'EA attend 0-1 et affiche *100)
     confidence_percentage = confidence
     
-    # 10. Calcul SL/TP
+    # 12. Calcul SL/TP
     stop_loss = None
     take_profit = None
     
@@ -4579,7 +4622,7 @@ async def decision_simplified(request: DecisionRequest):
         stop_loss = request.ask + atr * 2
         take_profit = request.ask - atr * 3
     
-    # 11. Préparer les prédictions (simuler une tendance basée sur RSI/EMA si pas de modèle ML complexe)
+    # 13. Préparer les prédictions (simuler une tendance basée sur RSI/EMA si pas de modèle ML complexe)
     predicted_prices = []
     if request.bid:
         p = request.bid
@@ -4592,7 +4635,7 @@ async def decision_simplified(request: DecisionRequest):
             p += step + (np.random.normal(0, 0.000005))
             predicted_prices.append(float(p))
             
-    # 12. Déterminer alignement et cohérence
+    # 14. Déterminer alignement et cohérence
     alignment = "N/A"
     if request.ema_fast_m1 and request.ema_fast_m5 and request.ema_fast_h1:
         m1_up = request.ema_fast_m1 > request.ema_slow_m1
@@ -4637,7 +4680,7 @@ async def decision_simplified(request: DecisionRequest):
             }
             asyncio.create_task(_insert_stair_detection_supabase(payload_st))
     
-    # 13. Créer la réponse enrichie
+    # 15. Créer la réponse enrichie
     meta_out = {
         "original_decision": ml_result["original_decision"],
         "original_confidence": ml_result["original_confidence"],
@@ -4650,6 +4693,10 @@ async def decision_simplified(request: DecisionRequest):
         "spike_probability": market_data.get("spike_probability", 0.0),
         "stair_detected": bool(request.stair_detected),
         "stair_client_event_id": stair_client_eid,
+        "market_pro": market_pro,
+        "risk_controls": risk_controls,
+        "lot_factor_recommended": risk_controls.get("lot_factor_recommended"),
+        "decision_gate_reason": risk_controls.get("decision_gate_reason", "ALLOW"),
     }
     if confluence_detail:
         meta_out["indicator_confluence"] = confluence_detail
@@ -6836,16 +6883,7 @@ async def decision_gemma(request: DecisionRequest):
 def _parse_decision_body(raw: bytes) -> DecisionRequest:
     """Parse le body JSON de manière tolérante pour éviter 422 (robot MT5 payloads variables)."""
     try:
-        text = raw.decode("utf-8", errors="ignore") if isinstance(raw, bytes) else str(raw)
-        # MT5 peut envoyer un buffer char avec terminateur NUL, voire du bruit autour du JSON.
-        # Nettoyage robuste pour éviter body={} => symbol UNKNOWN => HOLD générique.
-        text = text.replace("\x00", "").strip()
-        if text != "":
-            first_obj = text.find("{")
-            last_obj = text.rfind("}")
-            if first_obj >= 0 and last_obj > first_obj:
-                text = text[first_obj:last_obj + 1]
-        body = json.loads(text) if text else {}
+        body = json.loads(raw.decode("utf-8") if isinstance(raw, bytes) else raw)
     except Exception:
         body = {}
     if not isinstance(body, dict):
@@ -8978,7 +9016,7 @@ Format: Analyse claire et professionnelle en français.
                     confidence,
                     reason,
                     df_gate,
-                    min_votes=max(1, int(os.getenv("INDICATOR_CONFLUENCE_MIN_VOTES", "1"))),
+                    min_votes=2,
                 )
             except Exception as gate_err:
                 logger.debug(f"Confluence RSI/MACD/Ichi: {gate_err}")
@@ -9062,27 +9100,6 @@ Format: Analyse claire et professionnelle en français.
         response_data["confidence"] = round(confidence, 3)
         response_data["reason"] = reason
         logger.debug(f"📐 Calibration appliquée: action={action}, confidence={confidence:.3f}")
-
-        # 2c. Fallback directionnel anti-HOLD uniforme:
-        # si ML est indisponible ("no_model") et qu'aucun filtre dur n'impose HOLD,
-        # utiliser dir_rule pour éviter un HOLD ~50% sur tous les symboles.
-        try:
-            reason_l = (reason or "").lower()
-            hard_hold = ("hms:" in reason_l) or ("interdiction" in reason_l) or ("correction" in reason_l)
-            if action == "hold" and ("no_model" in reason_l) and not hard_hold and int(getattr(request, "dir_rule", 0) or 0) != 0:
-                dir_rule = int(getattr(request, "dir_rule", 0) or 0)
-                action = "buy" if dir_rule > 0 else "sell"
-                rsi_val = float(getattr(request, "rsi", 50.0) or 50.0)
-                rsi_bias = min(0.18, abs(rsi_val - 50.0) / 100.0)  # 0..0.18
-                confidence = max(confidence, 0.52 + rsi_bias)
-                confidence = min(0.72, confidence)
-                reason += " | DIR_RULE_FALLBACK(no_model)"
-                response_data["action"] = action
-                response_data["confidence"] = round(confidence, 3)
-                response_data["reason"] = reason
-                logger.info(f"🧭 no_model fallback appliqué {request.symbol}: {action.upper()} {confidence:.2f}")
-        except Exception as _dir_fb_err:
-            logger.debug(f"dir_rule fallback skipped: {_dir_fb_err}")
         
         # 3. Calculer les métadonnées enrichies (pour tous les symboles)
         metadata = {}
@@ -9156,26 +9173,9 @@ Format: Analyse claire et professionnelle en français.
         
     except Exception as e:
         logger.error(f"Erreur dans /decision: {str(e)}", exc_info=True)
-        # Ne jamais renvoyer 500 au robot MT5 pour /decision:
-        # retourner un HOLD explicite pour éviter l'état "IA OFF" côté EA.
-        safe_symbol = "UNKNOWN"
-        try:
-            safe_symbol = (request.symbol or "UNKNOWN")
-        except Exception:
-            pass
-        return DecisionResponse(
-            action="hold",
-            confidence=0.0,
-            reason=f"SAFE_FALLBACK: internal_error on /decision ({type(e).__name__})",
-            spike_prediction=False,
-            spike_zone_price=None,
-            stop_loss=None,
-            take_profit=None,
-            metadata={
-                "symbol": safe_symbol,
-                "error_type": type(e).__name__,
-                "error_message": str(e)[:220]
-            }
+        raise HTTPException(
+            status_code=500,
+            detail=str(e)
         )
 
 async def handle_raw_analysis_request(raw_request: dict, symbol: Optional[str]) -> AnalysisResponse:
@@ -9819,6 +9819,244 @@ def analyze_market_structure(df: pd.DataFrame, lookback: int = 20) -> Dict[str, 
                 structure['strength'] = min(0.005, abs(structure['swing_lows'][-1][1] - structure['swing_lows'][-2][1]) / recent['close'].iloc[-1])
     
     return structure
+
+def _trend_label_from_structure(structure: Dict[str, Any]) -> str:
+    trend = str((structure or {}).get("trend", "neutral")).lower()
+    if trend == "uptrend":
+        return "bullish"
+    if trend == "downtrend":
+        return "bearish"
+    return "neutral"
+
+def _detect_recent_fvg(df: Optional[pd.DataFrame], lookback: int = 80) -> Dict[str, Any]:
+    out: Dict[str, Any] = {"valid": False, "direction": "neutral", "gap_size": 0.0, "age": None}
+    if df is None or len(df) < 8:
+        return out
+    try:
+        recent = df.tail(max(8, lookback)).reset_index(drop=True)
+        best_idx = None
+        best_gap = 0.0
+        best_dir = "neutral"
+        for i in range(2, len(recent)):
+            h1 = _safe_float(recent.loc[i - 2, "high"])
+            l1 = _safe_float(recent.loc[i - 2, "low"])
+            h3 = _safe_float(recent.loc[i, "high"])
+            l3 = _safe_float(recent.loc[i, "low"])
+            bullish_gap = l3 - h1
+            bearish_gap = l1 - h3
+            if bullish_gap > best_gap:
+                best_gap = bullish_gap
+                best_idx = i
+                best_dir = "bullish"
+            if bearish_gap > best_gap:
+                best_gap = bearish_gap
+                best_idx = i
+                best_dir = "bearish"
+        if best_idx is None or best_gap <= 0:
+            return out
+        px = _safe_float(recent.loc[len(recent) - 1, "close"], 1.0)
+        rel_gap = best_gap / max(abs(px), 1e-9)
+        out.update({
+            "valid": bool(rel_gap >= 0.00015),
+            "direction": best_dir,
+            "gap_size": float(best_gap),
+            "age": int(len(recent) - 1 - best_idx),
+        })
+        return out
+    except Exception:
+        return out
+
+def _detect_ote_zone(df: Optional[pd.DataFrame], current_price: float, lookback: int = 120) -> Dict[str, Any]:
+    out: Dict[str, Any] = {"valid": False, "direction": "neutral", "ote_low": None, "ote_high": None, "distance": None}
+    if df is None or len(df) < 30:
+        return out
+    try:
+        recent = df.tail(lookback)
+        swing_hi = _safe_float(recent["high"].max(), current_price)
+        swing_lo = _safe_float(recent["low"].min(), current_price)
+        if swing_hi <= swing_lo:
+            return out
+        rng = swing_hi - swing_lo
+        c = current_price
+        # OTE classique 62%-79%
+        bullish_low = swing_hi - 0.79 * rng
+        bullish_high = swing_hi - 0.62 * rng
+        bearish_low = swing_lo + 0.62 * rng
+        bearish_high = swing_lo + 0.79 * rng
+        if bullish_low <= c <= bullish_high:
+            dist = min(abs(c - bullish_low), abs(c - bullish_high))
+            out.update({
+                "valid": True,
+                "direction": "bullish",
+                "ote_low": float(bullish_low),
+                "ote_high": float(bullish_high),
+                "distance": float(dist),
+            })
+            return out
+        if bearish_low <= c <= bearish_high:
+            dist = min(abs(c - bearish_low), abs(c - bearish_high))
+            out.update({
+                "valid": True,
+                "direction": "bearish",
+                "ote_low": float(bearish_low),
+                "ote_high": float(bearish_high),
+                "distance": float(dist),
+            })
+            return out
+        return out
+    except Exception:
+        return out
+
+def _detect_order_block_proxy(df: Optional[pd.DataFrame], lookback: int = 120) -> Dict[str, Any]:
+    out: Dict[str, Any] = {"valid": False, "direction": "neutral", "strength": 0.0}
+    if df is None or len(df) < 25:
+        return out
+    try:
+        recent = df.tail(lookback).copy().reset_index(drop=True)
+        recent["body"] = (recent["close"] - recent["open"]).abs()
+        median_body = float(recent["body"].median()) if len(recent) else 0.0
+        if median_body <= 0:
+            return out
+        best = (0.0, "neutral")
+        for i in range(2, len(recent)):
+            o = _safe_float(recent.loc[i - 1, "open"])
+            c = _safe_float(recent.loc[i - 1, "close"])
+            body = abs(c - o)
+            impulse = abs(_safe_float(recent.loc[i, "close"]) - _safe_float(recent.loc[i - 2, "open"]))
+            if body <= 0 or impulse <= 0:
+                continue
+            strength = (impulse / max(body, 1e-9)) / 4.0
+            if c < o and _safe_float(recent.loc[i, "close"]) > _safe_float(recent.loc[i, "open"]):
+                best = max(best, (strength, "bullish"), key=lambda x: x[0])
+            elif c > o and _safe_float(recent.loc[i, "close"]) < _safe_float(recent.loc[i, "open"]):
+                best = max(best, (strength, "bearish"), key=lambda x: x[0])
+        score = max(0.0, min(1.0, float(best[0])))
+        out.update({"valid": score >= 0.45, "direction": best[1], "strength": score})
+        return out
+    except Exception:
+        return out
+
+def compute_market_pro_analysis(request: "DecisionRequest") -> Dict[str, Any]:
+    """
+    Analyse de marché pro orientée décision:
+    - tendance multi-timeframes (M1/M5/H1)
+    - OB proxy, OTE, FVG, stair/HMS, contexte ICT
+    - conclusion utilisable pour filtrer / orienter la décision
+    """
+    symbol = str(getattr(request, "symbol", "") or "UNKNOWN")
+    current_price = _safe_float(getattr(request, "bid", None) or getattr(request, "ask", None), 1.0)
+    out: Dict[str, Any] = {
+        "symbol": symbol,
+        "summary": "Analyse pro indisponible",
+        "conclusion": "hold",
+        "setup_score": 0.0,
+        "regime": "unknown",
+        "trend_alignment": "mixed",
+        "quality_flags": {},
+    }
+    try:
+        df_m1 = get_historical_data_mt5(symbol, "M1", 220)
+        df_m5 = get_historical_data_mt5(symbol, "M5", 200)
+        df_h1 = get_historical_data_mt5(symbol, "H1", 150)
+
+        s_m1 = analyze_market_structure(df_m1, 30) if df_m1 is not None and len(df_m1) >= 30 else {"trend": "neutral", "strength": 0.0}
+        s_m5 = analyze_market_structure(df_m5, 30) if df_m5 is not None and len(df_m5) >= 30 else {"trend": "neutral", "strength": 0.0}
+        s_h1 = analyze_market_structure(df_h1, 30) if df_h1 is not None and len(df_h1) >= 30 else {"trend": "neutral", "strength": 0.0}
+
+        trend_labels = [_trend_label_from_structure(s_m1), _trend_label_from_structure(s_m5), _trend_label_from_structure(s_h1)]
+        bull_n = int(sum(1 for t in trend_labels if t == "bullish"))
+        bear_n = int(sum(1 for t in trend_labels if t == "bearish"))
+        if bull_n >= 2:
+            trend_alignment = "bullish"
+        elif bear_n >= 2:
+            trend_alignment = "bearish"
+        else:
+            trend_alignment = "mixed"
+
+        # Régime simple (trend/range/chaotic) basé sur dispersion de closes
+        regime = "unknown"
+        if df_m1 is not None and len(df_m1) >= 80:
+            closes = df_m1["close"].astype(float)
+            ret_std = float(closes.pct_change().tail(60).std() or 0.0)
+            slope = float((closes.iloc[-1] - closes.iloc[-60]) / max(abs(closes.iloc[-60]), 1e-9))
+            if ret_std > 0.0035:
+                regime = "chaotic"
+            elif abs(slope) < 0.0007:
+                regime = "range"
+            else:
+                regime = "trend"
+
+        ob = _detect_order_block_proxy(df_m5, lookback=120)
+        ote = _detect_ote_zone(df_h1, current_price, lookback=120)
+        fvg = _detect_recent_fvg(df_m1, lookback=80)
+        hms = compute_hms_levels_from_df(df_m1, current_price)
+
+        # ICT context proxy: balayage de liquidité + rejection
+        ict_bias = "neutral"
+        if df_m1 is not None and len(df_m1) >= 25:
+            rec = df_m1.tail(25)
+            hh = float(rec["high"].iloc[:-1].max())
+            ll = float(rec["low"].iloc[:-1].min())
+            last_close = float(rec["close"].iloc[-1])
+            last_high = float(rec["high"].iloc[-1])
+            last_low = float(rec["low"].iloc[-1])
+            if last_high > hh and last_close < hh:
+                ict_bias = "bearish"  # sweep du haut + rejet
+            elif last_low < ll and last_close > ll:
+                ict_bias = "bullish"  # sweep du bas + rejet
+
+        setup_score = 0.0
+        if trend_alignment in ("bullish", "bearish"):
+            setup_score += 0.35
+        if ob.get("valid"):
+            setup_score += 0.20
+        if ote.get("valid"):
+            setup_score += 0.20
+        if fvg.get("valid"):
+            setup_score += 0.15
+        if _safe_float(hms.get("hms_score"), 0.0) >= 0.55 and not bool(hms.get("hms_in_mid_range", False)):
+            setup_score += 0.10
+        setup_score = max(0.0, min(1.0, setup_score))
+
+        conclusion = "hold"
+        if setup_score >= 0.62 and trend_alignment in ("bullish", "bearish"):
+            conclusion = "buy" if trend_alignment == "bullish" else "sell"
+        if regime in ("range", "chaotic") and setup_score < 0.72:
+            conclusion = "hold"
+
+        out.update({
+            "summary": (
+                f"Trend={trend_alignment} | regime={regime} | "
+                f"OB={ob.get('valid')} OTE={ote.get('valid')} FVG={fvg.get('valid')} "
+                f"ICT={ict_bias} stair_mid={hms.get('hms_in_mid_range', False)} score={setup_score:.2f}"
+            ),
+            "conclusion": conclusion,
+            "setup_score": float(setup_score),
+            "regime": regime,
+            "trend_alignment": trend_alignment,
+            "quality_flags": {
+                "ob_valid": bool(ob.get("valid")),
+                "ote_valid": bool(ote.get("valid")),
+                "fvg_valid": bool(fvg.get("valid")),
+                "ict_bias": ict_bias,
+                "stair_valid": bool(_safe_float(hms.get("hms_score"), 0.0) >= 0.55),
+                "stair_mid_range": bool(hms.get("hms_in_mid_range", False)),
+            },
+            "details": {
+                "trend_m1": s_m1,
+                "trend_m5": s_m5,
+                "trend_h1": s_h1,
+                "order_block": ob,
+                "ote": ote,
+                "fvg": fvg,
+                "hms": hms,
+            },
+        })
+        return out
+    except Exception as e:
+        out["summary"] = f"Analyse pro erreur: {e}"
+        out["conclusion"] = "hold"
+        return out
 
 def analyze_candle_characteristics(df: pd.DataFrame, lookback: int = 10) -> Dict[str, Any]:
     """
@@ -11649,6 +11887,125 @@ def _apply_symbol_risk_policy(symbol: str, action: str, confidence: float) -> Tu
         return (action, min(1.0, confidence + 0.05), f"Reward: bon symbole (mois wr={month_wr:.2f}, net={month_net:.2f}$)")
 
     return (action, confidence, "")
+
+def _parse_iso_or_space_dt(v: Any) -> Optional[datetime]:
+    if v is None:
+        return None
+    if isinstance(v, datetime):
+        return v
+    try:
+        s = str(v).strip()
+        if not s:
+            return None
+        s = s.replace("Z", "+00:00")
+        return datetime.fromisoformat(s)
+    except Exception:
+        try:
+            return datetime.strptime(str(v), "%Y-%m-%d %H:%M:%S")
+        except Exception:
+            return None
+
+def _recent_feedback_snapshot(symbol: str, timeframe: str = "M1") -> Dict[str, Any]:
+    buf = _get_feedback_buf(symbol, timeframe)
+    entries = list(buf)
+    now = datetime.utcnow()
+    week_profit = 0.0
+    consec_losses = 0
+
+    # profits 7 jours + pertes consécutives récentes
+    for e in entries:
+        dt = _parse_iso_or_space_dt(e.get("close_time") or e.get("timestamp"))
+        if dt is not None and dt.tzinfo is not None:
+            dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+        if dt is not None and (now - dt) <= timedelta(days=7):
+            week_profit += _safe_float(e.get("profit"), 0.0)
+
+    for e in reversed(entries):
+        if bool(e.get("is_win", False)):
+            break
+        if _safe_float(e.get("profit"), 0.0) < 0.0:
+            consec_losses += 1
+        else:
+            break
+
+    return {
+        "week_profit": float(week_profit),
+        "consecutive_losses": int(consec_losses),
+        "feedback_samples": int(len(entries)),
+    }
+
+def _build_adaptive_risk_controls(
+    request: "DecisionRequest",
+    action: str,
+    confidence: float,
+    market_pro: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    symbol = str(getattr(request, "symbol", "") or "UNKNOWN")
+    st = _symbol_stats_cache.get(symbol) or {}
+    day = st.get("day") or {}
+    month = st.get("month") or {}
+    fb = _recent_feedback_snapshot(symbol, "M1")
+
+    day_losses = int(day.get("losses") or 0)
+    day_net = float(day.get("net_profit") or 0.0)
+    month_wins = int(month.get("wins") or 0)
+    month_losses = int(month.get("losses") or 0)
+    month_total = max(1, month_wins + month_losses)
+    month_wr = month_wins / month_total
+
+    vol_ratio = max(0.2, min(3.0, _safe_float(getattr(request, "volatility_ratio", 1.0), 1.0)))
+    regime = str((market_pro or {}).get("regime", "unknown")).lower()
+    setup_score = max(0.0, min(1.0, _safe_float((market_pro or {}).get("setup_score", 0.0), 0.0)))
+
+    # lot_factor recommandé (multiplicateur appliqué côté EA sur lot de base)
+    lot_factor = 1.0
+    lot_factor *= max(0.35, min(1.35, 0.45 + confidence))
+    lot_factor *= max(0.50, min(1.10, 1.15 - (vol_ratio - 1.0) * 0.30))
+    lot_factor *= max(0.55, min(1.20, 0.75 + setup_score * 0.55))
+    if regime in ("range", "chaotic"):
+        lot_factor *= 0.72
+    if day_net < 0:
+        lot_factor *= 0.85
+    if fb.get("consecutive_losses", 0) >= 2:
+        lot_factor *= 0.70
+    if month_wr >= 0.60 and float(month.get("net_profit") or 0.0) > 0:
+        lot_factor *= 1.08
+    lot_factor = max(0.10, min(1.50, float(lot_factor)))
+
+    # kill-switch structuré (env override possibles)
+    max_daily_losses = int(os.getenv("AI_DAILY_MAX_LOSSES", "3"))
+    max_consec_losses = int(os.getenv("AI_MAX_CONSECUTIVE_LOSSES", "3"))
+    max_daily_loss_usd = float(os.getenv("AI_DAILY_MAX_LOSS_USD", "20"))
+    max_weekly_loss_usd = float(os.getenv("AI_WEEKLY_MAX_LOSS_USD", "80"))
+
+    block_reasons: List[str] = []
+    if day_losses >= max_daily_losses:
+        block_reasons.append(f"daily_losses>={max_daily_losses}")
+    if day_net <= -abs(max_daily_loss_usd):
+        block_reasons.append(f"daily_net<=-{abs(max_daily_loss_usd):.2f}")
+    if int(fb.get("consecutive_losses", 0)) >= max_consec_losses:
+        block_reasons.append(f"consecutive_losses>={max_consec_losses}")
+    if float(fb.get("week_profit", 0.0)) <= -abs(max_weekly_loss_usd):
+        block_reasons.append(f"weekly_net<=-{abs(max_weekly_loss_usd):.2f}")
+
+    block_trade = bool(block_reasons) and action in ("buy", "sell")
+    gate_reason = "ALLOW" if not block_trade else "BLOCK:" + "|".join(block_reasons)
+
+    return {
+        "lot_factor_recommended": float(lot_factor),
+        "position_size_mode": "adaptive",
+        "risk_confidence_weight": float(max(0.0, min(1.0, confidence))),
+        "risk_setup_weight": float(setup_score),
+        "risk_volatility_ratio": float(vol_ratio),
+        "risk_regime": regime,
+        "daily_losses": day_losses,
+        "daily_net_profit": float(day_net),
+        "weekly_net_profit": float(fb.get("week_profit", 0.0)),
+        "consecutive_losses": int(fb.get("consecutive_losses", 0)),
+        "month_win_rate": float(month_wr),
+        "block_trade": bool(block_trade),
+        "decision_gate_reason": gate_reason,
+    }
 
 def _ml_key(symbol: str, timeframe: str) -> str:
     return f"{symbol}:{timeframe}"
