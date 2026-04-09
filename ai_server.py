@@ -4446,32 +4446,12 @@ async def decision_simplified(request: DecisionRequest):
         base_action = "hold"
         base_confidence = 0.5
     
-    # 6. AMÉLIORATION AVEC ML
-    market_data = {
-        "symbol": request.symbol,
-        "bid": request.bid,
-        "ask": request.ask,
-        "rsi": request.rsi,
-        "ema_fast_m1": request.ema_fast_m1,
-        "ema_slow_m1": request.ema_slow_m1,
-        "ema_fast_h1": request.ema_fast_h1,
-        "ema_slow_h1": request.ema_slow_h1,
-        "ema_fast_m5": request.ema_fast_m5,
-        "ema_slow_m5": request.ema_slow_m5,
-        "atr": request.atr,
-        "timestamp": request.timestamp
-    }
-    
-    ml_result = enhance_decision_with_ml(request.symbol, base_action, base_confidence, market_data)
-    
-    # Utiliser la décision améliorée par ML
-    action = ml_result["enhanced_decision"]
-    confidence = ml_result["enhanced_confidence"]
-    
-    # Ajouter la raison ML à la raison technique
-    if ml_result["ml_applied"]:
-        reason += f"[ML: {ml_result['ml_reason']}] "
-        logger.info(f"🧠 ML Enhancement: {base_action} → {action} ({base_confidence:.2f} → {confidence:.2f})")
+    # 6. Mode simplifié RAPIDE: éviter les chargements ML lourds par requête.
+    # Cela supprime les délais extrêmes et stabilise l'affichage IA côté MT5.
+    action = base_action
+    confidence = base_confidence
+    ml_result = {"ml_applied": False, "ml_reason": "skipped_fast_path"}
+    reason += "[ML: skipped_fast_path] "
     
     action, confidence, reason = enforce_ea_boom_crash_direction(
         request.symbol, action, confidence, reason
@@ -4545,7 +4525,8 @@ async def decision_simplified(request: DecisionRequest):
         "ENABLE_CORE_INDICATOR_CONFLUENCE", True
     ):
         try:
-            min_v = int(os.getenv("CORE_INDICATOR_MIN_VOTES", "2"))
+            # Par défaut 1 vote pour éviter HOLD uniforme en phase no_model.
+            min_v = int(os.getenv("CORE_INDICATOR_MIN_VOTES", "1"))
             action, confidence, reason, confluence_detail = apply_core_indicator_confluence(
                 request, action, confidence, reason, min_votes=max(1, min_v)
             )
@@ -4559,6 +4540,23 @@ async def decision_simplified(request: DecisionRequest):
                 )
         except Exception as e:
             logger.debug("confluence: %s", e)
+
+    # 7d. Fallback directionnel anti-HOLD uniforme quand ML est indisponible.
+    # Si le motif principal est "no_model" et qu'aucun blocage dur n'est actif,
+    # on utilise dir_rule (envoyé par MQ5) pour éviter HOLD 50% sur tous les symboles.
+    try:
+        reason_l = (reason or "").lower()
+        hard_hold = ("hms" in reason_l) or ("correction" in reason_l) or ("interdiction" in reason_l)
+        if action == "hold" and ("no_model" in reason_l) and not hard_hold:
+            dr = int(getattr(request, "dir_rule", 0) or 0)
+            if dr != 0:
+                action = "buy" if dr > 0 else "sell"
+                rsi_bias = min(0.18, abs(float(request.rsi or 50.0) - 50.0) / 100.0)
+                confidence = max(confidence, 0.52 + rsi_bias)
+                confidence = min(confidence, 0.72)
+                reason += " [DIR_RULE_FALLBACK:no_model]"
+    except Exception as e:
+        logger.debug("dir_rule fallback (simplified): %s", e)
     
     # 8. Ajustements finaux (laisser une confiance dynamique sur HOLD, éviter un plancher fixe à 30%)
     if action == "hold":
@@ -6838,7 +6836,16 @@ async def decision_gemma(request: DecisionRequest):
 def _parse_decision_body(raw: bytes) -> DecisionRequest:
     """Parse le body JSON de manière tolérante pour éviter 422 (robot MT5 payloads variables)."""
     try:
-        body = json.loads(raw.decode("utf-8") if isinstance(raw, bytes) else raw)
+        text = raw.decode("utf-8", errors="ignore") if isinstance(raw, bytes) else str(raw)
+        # MT5 peut envoyer un buffer char avec terminateur NUL, voire du bruit autour du JSON.
+        # Nettoyage robuste pour éviter body={} => symbol UNKNOWN => HOLD générique.
+        text = text.replace("\x00", "").strip()
+        if text != "":
+            first_obj = text.find("{")
+            last_obj = text.rfind("}")
+            if first_obj >= 0 and last_obj > first_obj:
+                text = text[first_obj:last_obj + 1]
+        body = json.loads(text) if text else {}
     except Exception:
         body = {}
     if not isinstance(body, dict):
@@ -8971,7 +8978,7 @@ Format: Analyse claire et professionnelle en français.
                     confidence,
                     reason,
                     df_gate,
-                    min_votes=2,
+                    min_votes=max(1, int(os.getenv("INDICATOR_CONFLUENCE_MIN_VOTES", "1"))),
                 )
             except Exception as gate_err:
                 logger.debug(f"Confluence RSI/MACD/Ichi: {gate_err}")
@@ -9055,6 +9062,27 @@ Format: Analyse claire et professionnelle en français.
         response_data["confidence"] = round(confidence, 3)
         response_data["reason"] = reason
         logger.debug(f"📐 Calibration appliquée: action={action}, confidence={confidence:.3f}")
+
+        # 2c. Fallback directionnel anti-HOLD uniforme:
+        # si ML est indisponible ("no_model") et qu'aucun filtre dur n'impose HOLD,
+        # utiliser dir_rule pour éviter un HOLD ~50% sur tous les symboles.
+        try:
+            reason_l = (reason or "").lower()
+            hard_hold = ("hms:" in reason_l) or ("interdiction" in reason_l) or ("correction" in reason_l)
+            if action == "hold" and ("no_model" in reason_l) and not hard_hold and int(getattr(request, "dir_rule", 0) or 0) != 0:
+                dir_rule = int(getattr(request, "dir_rule", 0) or 0)
+                action = "buy" if dir_rule > 0 else "sell"
+                rsi_val = float(getattr(request, "rsi", 50.0) or 50.0)
+                rsi_bias = min(0.18, abs(rsi_val - 50.0) / 100.0)  # 0..0.18
+                confidence = max(confidence, 0.52 + rsi_bias)
+                confidence = min(0.72, confidence)
+                reason += " | DIR_RULE_FALLBACK(no_model)"
+                response_data["action"] = action
+                response_data["confidence"] = round(confidence, 3)
+                response_data["reason"] = reason
+                logger.info(f"🧭 no_model fallback appliqué {request.symbol}: {action.upper()} {confidence:.2f}")
+        except Exception as _dir_fb_err:
+            logger.debug(f"dir_rule fallback skipped: {_dir_fb_err}")
         
         # 3. Calculer les métadonnées enrichies (pour tous les symboles)
         metadata = {}
@@ -9128,9 +9156,26 @@ Format: Analyse claire et professionnelle en français.
         
     except Exception as e:
         logger.error(f"Erreur dans /decision: {str(e)}", exc_info=True)
-        raise HTTPException(
-            status_code=500,
-            detail=str(e)
+        # Ne jamais renvoyer 500 au robot MT5 pour /decision:
+        # retourner un HOLD explicite pour éviter l'état "IA OFF" côté EA.
+        safe_symbol = "UNKNOWN"
+        try:
+            safe_symbol = (request.symbol or "UNKNOWN")
+        except Exception:
+            pass
+        return DecisionResponse(
+            action="hold",
+            confidence=0.0,
+            reason=f"SAFE_FALLBACK: internal_error on /decision ({type(e).__name__})",
+            spike_prediction=False,
+            spike_zone_price=None,
+            stop_loss=None,
+            take_profit=None,
+            metadata={
+                "symbol": safe_symbol,
+                "error_type": type(e).__name__,
+                "error_message": str(e)[:220]
+            }
         )
 
 async def handle_raw_analysis_request(raw_request: dict, symbol: Optional[str]) -> AnalysisResponse:
