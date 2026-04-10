@@ -4297,6 +4297,121 @@ class CorrectionPredictionResponse(BaseModel):
     risk_level: Optional[str] = None
     message: Optional[str] = None
 
+
+def _ema_dir(ema_fast: Optional[float], ema_slow: Optional[float]) -> int:
+    """Return +1 bullish, -1 bearish, 0 neutral from EMA fast/slow."""
+    try:
+        ef = float(ema_fast or 0.0)
+        es = float(ema_slow or 0.0)
+        if ef <= 0.0 or es <= 0.0:
+            return 0
+        if ef > es:
+            return 1
+        if ef < es:
+            return -1
+    except Exception:
+        return 0
+    return 0
+
+
+def _mtf_dir_from_mt5(symbol: str, timeframe: str) -> int:
+    """Directional bias from MT5 indicators on a timeframe."""
+    try:
+        ind = get_mt5_indicators(symbol, timeframe, count=260)
+        if not ind:
+            return 0
+        # Prefer EMA 20/50 when available.
+        d = _ema_dir(ind.get("ema_20"), ind.get("ema_50"))
+        if d != 0:
+            return d
+        # Fallback to EMA 50/100 for slower frames.
+        return _ema_dir(ind.get("ema_50"), ind.get("ema_100"))
+    except Exception:
+        return 0
+
+
+def compute_mtf_funnel_decision(request: "DecisionRequest") -> Dict[str, Any]:
+    """
+    Entonnoir MTF:
+    - Direction: W1/D1/H4
+    - Zones: H1/M30
+    - Trigger: M15
+    - Exécution: M5/M1
+    Returns final action/confidence + stage diagnostics.
+    """
+    symbol = str(request.symbol or "")
+    tf_dirs: Dict[str, int] = {
+        "W1": _mtf_dir_from_mt5(symbol, "W1"),
+        "D1": _mtf_dir_from_mt5(symbol, "D1"),
+        "H4": _mtf_dir_from_mt5(symbol, "H4"),
+        "H1": _ema_dir(request.ema_fast_h1, request.ema_slow_h1),
+        "M30": _mtf_dir_from_mt5(symbol, "M30"),
+        "M15": _mtf_dir_from_mt5(symbol, "M15"),
+        "M5": _ema_dir(request.ema_fast_m5, request.ema_slow_m5),
+        "M1": _ema_dir(request.ema_fast_m1, request.ema_slow_m1),
+    }
+
+    def stage_dir(items: Dict[str, float], threshold: float = 0.10) -> int:
+        score = 0.0
+        total = 0.0
+        for tf, w in items.items():
+            d = tf_dirs.get(tf, 0)
+            if d == 0:
+                continue
+            score += d * w
+            total += abs(w)
+        if total <= 0.0:
+            return 0
+        norm = score / total
+        if norm >= threshold:
+            return 1
+        if norm <= -threshold:
+            return -1
+        return 0
+
+    macro = stage_dir({"W1": 0.35, "D1": 0.35, "H4": 0.30})
+    zones = stage_dir({"H1": 0.55, "M30": 0.45})
+    trigger = stage_dir({"M15": 1.0})
+    entry = stage_dir({"M5": 0.6, "M1": 0.4})
+
+    # Final decision logic (conservative if stages conflict)
+    final_dir = 0
+    conflict = False
+    if macro == 0:
+        final_dir = 0
+    else:
+        final_dir = macro
+        for s in (zones, trigger, entry):
+            if s != 0 and s != macro:
+                conflict = True
+                final_dir = 0
+                break
+
+    aligned_count = sum(
+        1 for s in (macro, zones, trigger, entry) if (s != 0 and s == (macro if macro != 0 else s))
+    )
+    confidence = 0.50 + min(0.40, aligned_count * 0.10)
+    if conflict:
+        confidence = max(0.45, confidence - 0.15)
+    confidence = max(0.0, min(0.99, confidence))
+
+    action = "hold"
+    if final_dir > 0:
+        action = "buy"
+    elif final_dir < 0:
+        action = "sell"
+
+    return {
+        "action": action,
+        "confidence": confidence,
+        "macro": macro,
+        "zones": zones,
+        "trigger": trigger,
+        "entry": entry,
+        "timeframe_dirs": tf_dirs,
+        "conflict": conflict,
+    }
+
 # ========== FONCTION SIMPLIFIÉE POUR ROBOCOP v2 ==========
 # Modifier la fonction decision_simplified pour utiliser le ML
 async def decision_simplified(request: DecisionRequest):
@@ -4515,6 +4630,26 @@ async def decision_simplified(request: DecisionRequest):
     if action == "hold":
         # Garder la confiance calculée (technique + ML), mais éviter 0 absolu
         confidence = max(0.1, confidence)
+
+    # 8b. Entonnoir MTF (W1/D1/H4 -> H1/M30 -> M15 -> M5/M1) pour décision finale.
+    funnel = compute_mtf_funnel_decision(request)
+    funnel_action = funnel.get("action", "hold")
+    funnel_conf = float(funnel.get("confidence", 0.5))
+    if funnel_action == action:
+        confidence = max(confidence, funnel_conf)
+        reason += f" [Funnel MTF aligné: {funnel_action.upper()}]"
+    elif action == "hold" and funnel_action in ("buy", "sell"):
+        action = funnel_action
+        confidence = max(confidence, funnel_conf * 0.95)
+        reason += f" [Funnel MTF a déclenché {funnel_action.upper()}]"
+    elif action in ("buy", "sell") and funnel_action == "hold":
+        action = "hold"
+        confidence = max(0.45, min(confidence, funnel_conf))
+        reason += " [Funnel MTF: conflit inter-TF -> HOLD]"
+    elif action != funnel_action and funnel_action in ("buy", "sell"):
+        action = "hold"
+        confidence = max(0.45, min(confidence, funnel_conf))
+        reason += " [Funnel MTF: désaccord final -> HOLD]"
     
     # 9. Confiance pour MT5: envoyer décimale 0-1 (l'EA attend 0-1 et affiche *100)
     confidence_percentage = confidence
@@ -4603,6 +4738,8 @@ async def decision_simplified(request: DecisionRequest):
         "spike_probability": market_data.get("spike_probability", 0.0),
         "stair_detected": bool(request.stair_detected),
         "stair_client_event_id": stair_client_eid,
+        "funnel_mtf": funnel,
+        "final_decision": {"action": action, "confidence": confidence_percentage},
     }
     if confluence_detail:
         meta_out["indicator_confluence"] = confluence_detail
@@ -6938,6 +7075,26 @@ async def decision(req: Request):
             except Exception as e:
                 logger.debug("confluence (/decision): %s", e)
 
+        # Entonnoir MTF pour décision finale (direction -> zones -> trigger -> exécution)
+        funnel = compute_mtf_funnel_decision(request)
+        f_action = funnel.get("action", "hold")
+        f_conf = float(funnel.get("confidence", 0.5))
+        if f_action == action:
+            confidence = max(confidence, f_conf)
+            reason += " [Funnel MTF aligné]"
+        elif action == "hold" and f_action in ("buy", "sell"):
+            action = f_action
+            confidence = max(confidence, f_conf * 0.95)
+            reason += f" [Funnel MTF -> {f_action.upper()}]"
+        elif action in ("buy", "sell") and f_action == "hold":
+            action = "hold"
+            confidence = max(0.45, min(confidence, f_conf))
+            reason += " [Funnel MTF conflit inter-TF]"
+        elif action != f_action and f_action in ("buy", "sell"):
+            action = "hold"
+            confidence = max(0.45, min(confidence, f_conf))
+            reason += " [Funnel MTF désaccord final]"
+
         # Créer la réponse
         ta = {
             "rsi": request.rsi,
@@ -6945,6 +7102,8 @@ async def decision(req: Request):
             "ema_slow_h1": request.ema_slow_h1,
             "macd_histogram": getattr(request, "macd_histogram", None),
             "ichimoku_bias": getattr(request, "ichimoku_bias", 0),
+            "funnel_mtf": funnel,
+            "final_decision": {"action": action, "confidence": confidence},
         }
         if conv_meta:
             ta["indicator_confluence"] = conv_meta
