@@ -4502,7 +4502,61 @@ async def decision_simplified(request: DecisionRequest):
         pass
     
     # 5. Décision technique de base
-    if buy_score > sell_score:
+    # Sur Boom/Crash, l'EA ne trade qu'un seul sens. Si on élit "buy" sur Crash (ex. H1 haussier qui pèse 35 %),
+    # enforce_ea_boom_crash_direction ramène tout en HOLD : l'utilisateur voit des spikes baissiers mais IA=HOLD.
+    sym_l = str(request.symbol or "").lower()
+    is_crash_sc = is_boom_crash_symbol(str(request.symbol)) and "crash" in sym_l
+    is_boom_sc = is_boom_crash_symbol(str(request.symbol)) and "boom" in sym_l
+
+    if is_crash_sc:
+        if sell_score >= buy_score:
+            base_action = "sell"
+            base_confidence = 0.5 + (sell_score - buy_score) / 2
+            reason += "[Crash: score SELL≥BUY] "
+        else:
+            m1b = (
+                request.ema_fast_m1 is not None
+                and request.ema_slow_m1 is not None
+                and float(request.ema_fast_m1) < float(request.ema_slow_m1)
+            )
+            m5b = (
+                request.ema_fast_m5 is not None
+                and request.ema_slow_m5 is not None
+                and float(request.ema_fast_m5) < float(request.ema_slow_m5)
+            )
+            if m1b or m5b:
+                base_action = "sell"
+                base_confidence = max(0.58, 0.52 + sell_score * 0.45)
+                reason += "[Crash: H1/pondération haussière mais M1/M5 baissiers (spikes) → SELL] "
+            else:
+                base_action = "hold"
+                base_confidence = min(0.62, 0.48 + abs(buy_score - sell_score) * 0.15)
+                reason += "[Crash: pas de base BUY (interdit EA) — HOLD si pas de M1/M5 baissiers] "
+    elif is_boom_sc:
+        if buy_score >= sell_score:
+            base_action = "buy"
+            base_confidence = 0.5 + (buy_score - sell_score) / 2
+            reason += "[Boom: score BUY≥SELL] "
+        else:
+            m1u = (
+                request.ema_fast_m1 is not None
+                and request.ema_slow_m1 is not None
+                and float(request.ema_fast_m1) > float(request.ema_slow_m1)
+            )
+            m5u = (
+                request.ema_fast_m5 is not None
+                and request.ema_slow_m5 is not None
+                and float(request.ema_fast_m5) > float(request.ema_slow_m5)
+            )
+            if m1u or m5u:
+                base_action = "buy"
+                base_confidence = max(0.58, 0.52 + buy_score * 0.45)
+                reason += "[Boom: H1/pondération baissière mais M1/M5 haussiers → BUY] "
+            else:
+                base_action = "hold"
+                base_confidence = min(0.62, 0.48 + abs(buy_score - sell_score) * 0.15)
+                reason += "[Boom: pas de base SELL (interdit EA) — HOLD si pas de M1/M5 haussiers] "
+    elif buy_score > sell_score:
         base_action = "buy"
         base_confidence = 0.5 + (buy_score - sell_score) / 2
     elif sell_score > buy_score:
