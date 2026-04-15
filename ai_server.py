@@ -3068,7 +3068,7 @@ MT5_HISTORY_CACHE_TTL = 300  # TTL de 5 minutes (les données sont rafraîchies 
 symbol_hour_profile_cache: Dict[Tuple[str, str, int], Dict[str, Any]] = {}
 symbol_hour_status_cache: Dict[Tuple[str, str], Dict[str, Any]] = {}
 
-def _safe_float(v: Any, default: float = 0.0) -> float:
+def _chart_safe_float(v: Any, default: float = 0.0) -> float:
     try:
         if v is None:
             return default
@@ -13403,6 +13403,123 @@ async def analyze_indicators(request_data: Dict[str, Any]):
         return result
     except Exception as e:
         logger.error(f"Erreur analyse indicateurs: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+def _safe_float(v: Any, default: float = 0.0) -> float:
+    try:
+        if v is None:
+            return default
+        return float(v)
+    except Exception:
+        return default
+
+
+@app.post("/ml/chart-tech-state")
+async def analyze_chart_tech_state(request_data: Dict[str, Any]):
+    """
+    Endpoint léger pour analyser techniquement un symbole sans capture image.
+    Le robot envoie l'état des indicateurs visibles écran (EMA/RSI/ATR/MACD/volume...).
+    """
+    try:
+        symbol = str(request_data.get("symbol", "UNKNOWN"))
+        timeframe = str(request_data.get("timeframe", "M1"))
+        indicators = request_data.get("indicators", {}) or {}
+
+        close = _chart_safe_float(indicators.get("close") or request_data.get("close"), 0.0)
+        ema9 = _chart_safe_float(indicators.get("ema9"), 0.0)
+        ema21 = _chart_safe_float(indicators.get("ema21"), 0.0)
+        ema50 = _chart_safe_float(indicators.get("ema50"), 0.0)
+        rsi = _chart_safe_float(indicators.get("rsi"), 50.0)
+        macd = _chart_safe_float(indicators.get("macd"), 0.0)
+        macd_signal = _chart_safe_float(indicators.get("macd_signal"), 0.0)
+        atr = _chart_safe_float(indicators.get("atr"), 0.0)
+        volume_ratio = _chart_safe_float(indicators.get("volume_ratio"), 1.0)
+
+        in_correction = bool(indicators.get("in_correction_zone", False))
+        in_discount = bool(indicators.get("in_discount_zone", False))
+        in_premium = bool(indicators.get("in_premium_zone", False))
+
+        # 1) Trend score
+        trend_score = 0.0
+        if close > 0 and ema9 > 0 and ema21 > 0 and ema50 > 0:
+            if close > ema9 > ema21 > ema50:
+                trend_score += 1.0
+            elif close < ema9 < ema21 < ema50:
+                trend_score -= 1.0
+            else:
+                if close > ema21:
+                    trend_score += 0.30
+                elif close < ema21:
+                    trend_score -= 0.30
+
+        # 2) Momentum score
+        mom_score = 0.0
+        if rsi >= 55:
+            mom_score += min((rsi - 50.0) / 30.0, 1.0)
+        elif rsi <= 45:
+            mom_score -= min((50.0 - rsi) / 30.0, 1.0)
+        if macd > macd_signal:
+            mom_score += 0.25
+        elif macd < macd_signal:
+            mom_score -= 0.25
+
+        # 3) Spike pressure (compression + volume + momentum)
+        spike_pressure = 0.0
+        if volume_ratio > 1.0:
+            spike_pressure += min((volume_ratio - 1.0) / 2.0, 1.0) * 0.45
+        if atr > 0 and close > 0:
+            atr_pct = (atr / close) * 100.0
+            if atr_pct < 0.02:
+                spike_pressure += 0.20  # compression
+            elif atr_pct > 0.25:
+                spike_pressure += 0.15  # expansion
+        if abs(mom_score) > 0.50:
+            spike_pressure += 0.20
+        spike_pressure = max(0.0, min(spike_pressure, 1.0))
+
+        # 4) Raw action
+        total = trend_score * 0.60 + mom_score * 0.40
+        action = "HOLD"
+        if total >= 0.35:
+            action = "BUY"
+        elif total <= -0.35:
+            action = "SELL"
+
+        # 5) Context adjustments
+        if in_correction and action != "HOLD":
+            # On conserve l'action, mais confiance réduite en zone correction.
+            total *= 0.82
+        if in_discount and action == "BUY":
+            total *= 1.08
+        if in_premium and action == "SELL":
+            total *= 1.08
+
+        conf = min(0.95, max(0.50, abs(total)))
+        if action == "HOLD":
+            conf = min(0.80, max(0.50, 0.55 + spike_pressure * 0.20))
+
+        return {
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "action": action,
+            "confidence": round(conf, 4),
+            "spike_probability": round(spike_pressure, 4),
+            "trend_score": round(trend_score, 4),
+            "momentum_score": round(mom_score, 4),
+            "context": {
+                "in_correction_zone": in_correction,
+                "in_discount_zone": in_discount,
+                "in_premium_zone": in_premium,
+            },
+            "note": "No image required. Send indicator state every 600s for low memory load.",
+            "recommended_poll_seconds": 600
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Erreur /ml/chart-tech-state: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/indicators/sentiment/{symbol}")
