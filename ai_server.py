@@ -4093,13 +4093,42 @@ def update_m5_line_tracking_from_request(req: "DecisionRequest") -> Dict[str, An
 def _enrich_response_payload_with_m5_tracking(
     response_payload: Dict[str, Any], tracking_info: Optional[Dict[str, Any]]
 ) -> Dict[str, Any]:
-    """Injecte le tracking M5 dans metadata sans casser le payload existant."""
+    """
+    Injecte le tracking M5 dans metadata ET duplique des champs clés au top-level.
+
+    Important: certains clients MT5 parsers sont "plats" (StringFind/ExtractJsonValue).
+    On expose donc aussi:
+    - should_replace_limit_order
+    - line_moved
+    - update_index
+    - changed_fields
+    - buy_entry / sell_entry / pure_red_line
+    """
     if not tracking_info:
         return response_payload
     enriched = dict(response_payload or {})
     metadata = dict(enriched.get("metadata") or {})
     metadata["m5_line_tracking"] = tracking_info
     enriched["metadata"] = metadata
+
+    # Flat keys for MT5 clients (best-effort)
+    try:
+        enriched["should_replace_limit_order"] = bool(tracking_info.get("should_replace_limit_order", False))
+        enriched["line_moved"] = bool(tracking_info.get("line_moved", False))
+        enriched["update_index"] = int(tracking_info.get("update_index") or 0)
+        enriched["changed_fields"] = tracking_info.get("changed_fields") or []
+
+        levels = tracking_info.get("levels") if isinstance(tracking_info.get("levels"), dict) else {}
+        if isinstance(levels, dict):
+            if levels.get("buy_entry") is not None:
+                enriched["buy_entry"] = float(levels["buy_entry"])
+            if levels.get("sell_entry") is not None:
+                enriched["sell_entry"] = float(levels["sell_entry"])
+            if levels.get("pure_red_line") is not None:
+                enriched["pure_red_line"] = float(levels["pure_red_line"])
+    except Exception:
+        # Must not break response
+        pass
     return enriched
 
 
