@@ -3988,6 +3988,119 @@ _last_tick_price: Dict[str, float] = defaultdict(float)
 _last_spike_info: Dict[str, Dict[str, Any]] = {}
 SPIKE_THRESHOLD_POINTS: float = float(os.getenv("SPIKE_THRESHOLD_POINTS", "1.0"))
 SPIKE_RECENT_WINDOW_SECONDS: int = int(os.getenv("SPIKE_RECENT_WINDOW_SECONDS", "5"))
+_m5_line_tracking_state: Dict[str, Dict[str, Any]] = {}
+
+
+def _safe_optional_float(value: Any) -> Optional[float]:
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except Exception:
+        return None
+
+
+def _extract_m5_levels_from_request(req: "DecisionRequest") -> Dict[str, Optional[float]]:
+    """
+    Extrait les niveaux M5 trackés depuis la requête.
+    Supporte les champs plats + aliases dans chart_levels.
+    """
+    levels: Dict[str, Optional[float]] = {
+        "uptrend_line": _safe_optional_float(getattr(req, "m5_uptrend_line", None)),
+        "downtrend_line": _safe_optional_float(getattr(req, "m5_downtrend_line", None)),
+        "buy_entry": _safe_optional_float(getattr(req, "m5_buy_entry_point", None)),
+        "sell_entry": _safe_optional_float(getattr(req, "m5_sell_entry_point", None)),
+        "pure_red_line": _safe_optional_float(getattr(req, "m5_pure_red_line", None)),
+    }
+
+    chart_levels = getattr(req, "chart_levels", None)
+    if isinstance(chart_levels, dict):
+        aliases = {
+            "uptrend_line": ["m5_uptrend_line", "uptrend_line", "m5_uptrend", "uptrend"],
+            "downtrend_line": ["m5_downtrend_line", "downtrend_line", "m5_downtrend", "downtrend"],
+            "buy_entry": ["m5_buy_entry_point", "buy_entry_point", "m5_buy_entry", "buy_entry"],
+            "sell_entry": ["m5_sell_entry_point", "sell_entry_point", "m5_sell_entry", "sell_entry"],
+            "pure_red_line": ["m5_pure_red_line", "pure_red_line", "red_line", "ligne_rouge_pure"],
+        }
+        for key, key_aliases in aliases.items():
+            if levels[key] is not None:
+                continue
+            for alias in key_aliases:
+                if alias in chart_levels:
+                    parsed = _safe_optional_float(chart_levels.get(alias))
+                    if parsed is not None:
+                        levels[key] = parsed
+                        break
+    return levels
+
+
+def update_m5_line_tracking_from_request(req: "DecisionRequest") -> Dict[str, Any]:
+    """
+    Met à jour le tracking des lignes M5 et signale quand un ancien limit doit être remplacé.
+    """
+    symbol = (getattr(req, "symbol", None) or "").strip()
+    if not symbol:
+        return {
+            "enabled": False,
+            "reason": "missing_symbol",
+            "should_replace_limit_order": False,
+        }
+
+    levels = _extract_m5_levels_from_request(req)
+    previous = _m5_line_tracking_state.get(symbol, {})
+    changed_fields: List[str] = []
+    tolerance = float(os.getenv("M5_LINE_MOVE_TOLERANCE", "0.00001"))
+
+    for key, new_value in levels.items():
+        old_value = previous.get(key)
+        if new_value is None:
+            continue
+        if old_value is None or abs(float(new_value) - float(old_value)) > tolerance:
+            changed_fields.append(key)
+
+    update_index = int(previous.get("update_index", 0))
+    moved = len(changed_fields) > 0
+    if moved:
+        update_index += 1
+
+    snapshot = {
+        "symbol": symbol,
+        "levels": levels,
+        "changed_fields": changed_fields,
+        "line_moved": moved,
+        "should_replace_limit_order": moved and any(
+            field in ("buy_entry", "sell_entry", "pure_red_line") for field in changed_fields
+        ),
+        "update_index": update_index,
+        "tracked_at": datetime.now(timezone.utc).isoformat(),
+        "tolerance": tolerance,
+    }
+    _m5_line_tracking_state[symbol] = {
+        **levels,
+        "update_index": update_index,
+    }
+
+    if moved:
+        logger.info(
+            "📐 M5 line tracking | %s moved=%s replace_limit=%s",
+            symbol,
+            ",".join(changed_fields),
+            snapshot["should_replace_limit_order"],
+        )
+    return snapshot
+
+
+def _enrich_response_payload_with_m5_tracking(
+    response_payload: Dict[str, Any], tracking_info: Optional[Dict[str, Any]]
+) -> Dict[str, Any]:
+    """Injecte le tracking M5 dans metadata sans casser le payload existant."""
+    if not tracking_info:
+        return response_payload
+    enriched = dict(response_payload or {})
+    metadata = dict(enriched.get("metadata") or {})
+    metadata["m5_line_tracking"] = tracking_info
+    enriched["metadata"] = metadata
+    return enriched
 
 
 def update_spike_state_from_request(req: "DecisionRequest") -> None:
@@ -4084,6 +4197,12 @@ class DecisionRequest(BaseModel):
     deriv_patterns_bearish: Optional[int] = None  # Nombre de patterns bearish
     deriv_patterns_confidence: Optional[float] = None  # Confiance moyenne des patterns
     timestamp: Optional[str] = None  # Timestamp de la requête (ajouté pour corriger l'erreur 422)
+    m5_uptrend_line: Optional[float] = None
+    m5_downtrend_line: Optional[float] = None
+    m5_buy_entry_point: Optional[float] = None
+    m5_sell_entry_point: Optional[float] = None
+    m5_pure_red_line: Optional[float] = None
+    chart_levels: Optional[Dict[str, Any]] = None
     # Escalier synthétique M1 (Boom/Crash, GainX/PainX) — alimente stair_detections + ajustement confiance
     stair_detected: Optional[bool] = False
     stair_direction: Optional[str] = None  # BUY | SELL (sinon déduit du symbole)
@@ -7014,6 +7133,12 @@ def _parse_decision_body(raw: bytes) -> DecisionRequest:
         image_filename=body.get("image_filename"), deriv_patterns=body.get("deriv_patterns"),
         deriv_patterns_bullish=body.get("deriv_patterns_bullish"), deriv_patterns_bearish=body.get("deriv_patterns_bearish"),
         deriv_patterns_confidence=body.get("deriv_patterns_confidence"), timestamp=body.get("timestamp"),
+        m5_uptrend_line=body.get("m5_uptrend_line"),
+        m5_downtrend_line=body.get("m5_downtrend_line"),
+        m5_buy_entry_point=body.get("m5_buy_entry_point"),
+        m5_sell_entry_point=body.get("m5_sell_entry_point"),
+        m5_pure_red_line=body.get("m5_pure_red_line"),
+        chart_levels=body.get("chart_levels"),
         macd_histogram=body.get("macd_histogram"),
         ichimoku_bias=int(body.get("ichimoku_bias", 0) or 0),
     )
@@ -7540,13 +7665,18 @@ async def decision(request: DecisionRequest):
         update_spike_state_from_request(request)
     except Exception as e:
         logger.debug(f"⚠️ update_spike_state_from_request erreur: {e}")
+    m5_tracking_info: Dict[str, Any] = {}
+    try:
+        m5_tracking_info = update_m5_line_tracking_from_request(request)
+    except Exception as e:
+        logger.debug(f"⚠️ update_m5_line_tracking_from_request erreur: {e}")
     try:
         # ========== AMÉLIORATIONS PRIORITAIRES - APPLIQUÉES TÔT ==========
         # 1. Vérifier le cache court d'abord
         cached_decision = get_cached_decision(request.symbol)
         if cached_decision:
             logger.debug(f"📋 Utilisation décision en cache pour {request.symbol}")
-            return DecisionResponse(**cached_decision)
+            return DecisionResponse(**_enrich_response_payload_with_m5_tracking(cached_decision, m5_tracking_info))
         
         # 2. Calculer les métadonnées de base (pour tous les symboles)
         metadata = {}
@@ -7582,6 +7712,7 @@ async def decision(request: DecisionRequest):
                 'timestamp': datetime.now().isoformat(),
                 'error': str(meta_err)
             }
+        metadata["m5_line_tracking"] = m5_tracking_info
         
         # ========== FIN DES AMÉLIORATIONS PRÉCOCES ==========
         
@@ -7639,7 +7770,8 @@ async def decision(request: DecisionRequest):
                                 buy_zone_low=None,
                                 buy_zone_high=None,
                                 sell_zone_low=None,
-                                sell_zone_high=None
+                                sell_zone_high=None,
+                                metadata={"m5_line_tracking": m5_tracking_info}
                             )
                         else:
                             logger.info(f"✅ Initialisation: Conditions acceptables pour trading - Analyse continue")
@@ -7736,10 +7868,10 @@ async def decision(request: DecisionRequest):
                     # Ne pas retourner le cache, continuer le calcul
                 elif cached.get("action") != "hold" and cached.get("confidence", 0) > 0.5:
                     # Cache valide avec action non-hold, retourner
-                    return DecisionResponse(**cached)
+                    return DecisionResponse(**_enrich_response_payload_with_m5_tracking(cached, m5_tracking_info))
             elif cached.get("action") != "hold" or cached.get("confidence", 0) > 0.5:
                 # Cache valide normalement
-                return DecisionResponse(**cached)
+                return DecisionResponse(**_enrich_response_payload_with_m5_tracking(cached, m5_tracking_info))
             else:
                 # Si cache = "hold" avec faible confiance, recalculer
                 logger.debug(f"Cache ignoré pour {request.symbol} (action=hold, confiance faible) - Recalcul...")
@@ -7818,6 +7950,7 @@ async def decision(request: DecisionRequest):
                         last_updated[cache_key] = current_time
                         
                         # Retourner la réponse directement
+                        response_data = _enrich_response_payload_with_m5_tracking(response_data, m5_tracking_info)
                         return DecisionResponse(**response_data)
             except Exception as e:
                 logger.warning(f"⚠️ Erreur scoring avancé, utilisation méthode standard: {e}")
@@ -9068,7 +9201,7 @@ Format: Analyse claire et professionnelle en français.
         cached_decision = get_cached_decision(request.symbol)
         if cached_decision and not initialization_mode:
             logger.debug(f"📋 Utilisation décision en cache pour {request.symbol}")
-            return DecisionResponse(**cached_decision)
+            return DecisionResponse(**_enrich_response_payload_with_m5_tracking(cached_decision, m5_tracking_info))
         
         # 2. Appliquer les seuils de confiance minimum
         action, confidence, reason = apply_confidence_thresholds(action, confidence, reason)
@@ -9123,6 +9256,7 @@ Format: Analyse claire et professionnelle en français.
         
         # 4. Mettre à jour response_data avec métadonnées (toujours incluses)
         response_data["metadata"] = convert_numpy_to_python(metadata)
+        response_data = _enrich_response_payload_with_m5_tracking(response_data, m5_tracking_info)
         
         # 5. Mettre en cache la décision améliorée
         cache_decision(request.symbol, response_data)
