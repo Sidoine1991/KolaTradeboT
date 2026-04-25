@@ -19,7 +19,7 @@ from pathlib import Path
 # ─── Configuration ────────────────────────────────────────────────────────────
 
 WS_HOST = "0.0.0.0"
-WS_PORT = 9001
+WS_PORT = 8000
 
 LOG_DIR = Path("logs")
 LOG_DIR.mkdir(exist_ok=True)
