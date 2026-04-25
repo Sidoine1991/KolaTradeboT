@@ -4232,6 +4232,11 @@ class DecisionRequest(BaseModel):
     m5_sell_entry_point: Optional[float] = None
     m5_pure_red_line: Optional[float] = None
     chart_levels: Optional[Dict[str, Any]] = None
+    chart_pattern_name: Optional[str] = None
+    chart_pattern_direction: Optional[str] = None
+    chart_pattern_score: Optional[float] = None
+    chart_pattern_zone_low: Optional[float] = None
+    chart_pattern_zone_high: Optional[float] = None
     # Escalier synthétique M1 (Boom/Crash, GainX/PainX) — alimente stair_detections + ajustement confiance
     stair_detected: Optional[bool] = False
     stair_direction: Optional[str] = None  # BUY | SELL (sinon déduit du symbole)
@@ -7168,6 +7173,11 @@ def _parse_decision_body(raw: bytes) -> DecisionRequest:
         m5_sell_entry_point=body.get("m5_sell_entry_point"),
         m5_pure_red_line=body.get("m5_pure_red_line"),
         chart_levels=body.get("chart_levels"),
+        chart_pattern_name=body.get("chart_pattern_name"),
+        chart_pattern_direction=body.get("chart_pattern_direction"),
+        chart_pattern_score=_float(body.get("chart_pattern_score"), 0.0),
+        chart_pattern_zone_low=body.get("chart_pattern_zone_low"),
+        chart_pattern_zone_high=body.get("chart_pattern_zone_high"),
         macd_histogram=body.get("macd_histogram"),
         ichimoku_bias=int(body.get("ichimoku_bias", 0) or 0),
     )
@@ -7303,6 +7313,17 @@ async def decision(req: Request):
             confidence = max(0.45, min(confidence, f_conf))
             reason += " [Funnel MTF désaccord final]"
 
+        pattern_ctx = {
+            "pattern_name": (request.chart_pattern_name or "NONE"),
+            "direction": (request.chart_pattern_direction or "NEUTRAL"),
+            "score": float(request.chart_pattern_score or 0.0),
+            "zone_low": request.chart_pattern_zone_low,
+            "zone_high": request.chart_pattern_zone_high,
+        }
+        action, confidence = _apply_chart_pattern_bias(action, confidence, pattern_ctx)
+        if str(pattern_ctx.get("pattern_name")) != "NONE":
+            reason += f" [Pattern {pattern_ctx.get('pattern_name')} {pattern_ctx.get('direction')}]"
+
         # Créer la réponse
         ta = {
             "rsi": request.rsi,
@@ -7311,6 +7332,7 @@ async def decision(req: Request):
             "macd_histogram": getattr(request, "macd_histogram", None),
             "ichimoku_bias": getattr(request, "ichimoku_bias", 0),
             "funnel_mtf": funnel,
+            "chart_pattern": pattern_ctx,
             "final_decision": {"action": action, "confidence": confidence},
         }
         if conv_meta:
@@ -12438,6 +12460,85 @@ async def api_ml_metrics(symbol: str, timeframe: str = "M1"):
         "data_source": "computed",
     }
 
+def _detect_chart_patterns_from_df(df: pd.DataFrame) -> Dict[str, Any]:
+    """Détection légère de figures chartistes + chandeliers pour décision/signal."""
+    out: Dict[str, Any] = {
+        "pattern_name": "NONE",
+        "direction": "NEUTRAL",
+        "score": 0.0,
+        "zone_low": None,
+        "zone_high": None,
+    }
+    if df is None or len(df) < 30:
+        return out
+
+    d = df.copy()
+    for col in ("open", "high", "low", "close"):
+        if col not in d.columns:
+            return out
+
+    c0 = d.iloc[-1]
+    c1 = d.iloc[-2]
+    body0 = abs(float(c0["close"]) - float(c0["open"]))
+    rng0 = max(1e-10, float(c0["high"]) - float(c0["low"]))
+
+    bull_engulf = (
+        float(c1["close"]) < float(c1["open"])
+        and float(c0["close"]) > float(c0["open"])
+        and float(c0["open"]) <= float(c1["close"])
+        and float(c0["close"]) >= float(c1["open"])
+    )
+    bear_engulf = (
+        float(c1["close"]) > float(c1["open"])
+        and float(c0["close"]) < float(c0["open"])
+        and float(c0["open"]) >= float(c1["close"])
+        and float(c0["close"]) <= float(c1["open"])
+    )
+    hammer = (
+        (min(float(c0["open"]), float(c0["close"])) - float(c0["low"])) >= body0 * 1.8
+        and (float(c0["high"]) - max(float(c0["open"]), float(c0["close"]))) <= body0 * 0.6
+    )
+    shooting = (
+        (float(c0["high"]) - max(float(c0["open"]), float(c0["close"]))) >= body0 * 1.8
+        and (min(float(c0["open"]), float(c0["close"])) - float(c0["low"])) <= body0 * 0.6
+    )
+
+    if bull_engulf:
+        out.update({"pattern_name": "Bullish Engulfing", "direction": "BUY", "score": 0.62})
+    elif bear_engulf:
+        out.update({"pattern_name": "Bearish Engulfing", "direction": "SELL", "score": 0.62})
+    elif hammer and float(c0["close"]) > float(c0["open"]):
+        out.update({"pattern_name": "Hammer", "direction": "BUY", "score": 0.54})
+    elif shooting and float(c0["close"]) < float(c0["open"]):
+        out.update({"pattern_name": "Shooting Star", "direction": "SELL", "score": 0.54})
+
+    w = d.tail(25)
+    out["zone_low"] = float(w["low"].min())
+    out["zone_high"] = float(w["high"].max())
+    return out
+
+
+def _apply_chart_pattern_bias(action: str, confidence: float, p: Dict[str, Any]) -> Tuple[str, float]:
+    direction = str(p.get("direction", "NEUTRAL")).upper()
+    score = float(p.get("score", 0.0) or 0.0)
+    bias = min(0.18, max(0.0, abs(score) * 0.25))
+    a = (action or "hold").lower()
+    c = float(confidence or 0.5)
+    if direction == "BUY":
+        if a == "buy":
+            c = min(0.99, c + bias)
+        elif a == "sell":
+            a = "hold"
+            c = max(0.45, c - bias)
+    elif direction == "SELL":
+        if a == "sell":
+            c = min(0.99, c + bias)
+        elif a == "buy":
+            a = "hold"
+            c = max(0.45, c - bias)
+    return a, c
+
+
 @app.get("/ml/signal")
 async def ml_signal(symbol: str, timeframe: str = "M1"):
     """
@@ -12447,6 +12548,10 @@ async def ml_signal(symbol: str, timeframe: str = "M1"):
     try:
         # Obtenir les métriques ML existantes
         metrics = _compute_ml_metrics(symbol, timeframe)
+        df_recent = get_historical_data_mt5(symbol, timeframe, 120)
+        pattern_ctx = _detect_chart_patterns_from_df(df_recent) if df_recent is not None else {
+            "pattern_name": "NONE", "direction": "NEUTRAL", "score": 0.0, "zone_low": None, "zone_high": None
+        }
         
         # Créer un signal simple basé sur les métriques
         accuracy = float(metrics.get("accuracy", 0))
@@ -12471,6 +12576,8 @@ async def ml_signal(symbol: str, timeframe: str = "M1"):
                     
                     signal = random.choices(signals, weights=weights)[0]
                     confidence = random.uniform(0.6, 0.9)
+                    signal, confidence = _apply_chart_pattern_bias(signal.lower(), confidence, pattern_ctx)
+                    signal = signal.upper()
                     
                     return {
                         "symbol": symbol,
@@ -12480,6 +12587,7 @@ async def ml_signal(symbol: str, timeframe: str = "M1"):
                         "accuracy": metrics.get("accuracy", 0.5),
                         "model_name": metrics.get("model_name", "random_forest"),
                         "total_samples": metrics.get("total_samples", 0),
+                        "chart_pattern": pattern_ctx,
                         "status": "success",
                         "timestamp": datetime.now().isoformat()
                     }
@@ -12487,14 +12595,16 @@ async def ml_signal(symbol: str, timeframe: str = "M1"):
                     logger.warning(f" Erreur prédiction ML pour {symbol}: {e}")
         
         # Fallback: signal basé sur les métriques disponibles
+        signal_fallback, conf_fallback = _apply_chart_pattern_bias("hold", 0.5, pattern_ctx)
         return {
             "symbol": symbol,
             "timeframe": timeframe,
-            "signal": "HOLD",  # Signal par défaut
-            "confidence": 0.5,
+            "signal": signal_fallback.upper(),
+            "confidence": conf_fallback,
             "accuracy": metrics.get("accuracy", 0.5),
             "model_name": metrics.get("model_name", "random_forest"),
             "total_samples": metrics.get("total_samples", 0),
+            "chart_pattern": pattern_ctx,
             "status": "fallback",
             "timestamp": datetime.now().isoformat()
         }
