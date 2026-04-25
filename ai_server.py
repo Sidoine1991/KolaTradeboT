@@ -1,8 +1,8 @@
 """
-╔══════════════════════════════════════════════════════════════════════════════╗
-║          AI_SERVER.PY — Moteur de Décision Trading 360°                     ║
-║          Scalping M5/M15 + Swing H1 | Forex & Indices Volatilité            ║
-╚══════════════════════════════════════════════════════════════════════════════╝
+================================================================================
+          AI_SERVER.PY - Moteur de Decision Trading 360
+          Scalping M5/M15 + Swing H1 | Forex & Indices Volatilité
+================================================================================
 """
 
 import asyncio
@@ -593,11 +593,11 @@ async def websocket_endpoint(websocket: WebSocket):
         log.info(f"WebSocket déconnectée : {client_addr}")
 
 async def main():
-    log.info(f"╔══ AI Trading Server démarré ══╗")
-    log.info(f"║  Host    : {WS_HOST}:{WS_PORT}")
-    log.info(f"║  Balance : {RISK_PARAMS['account_balance']} USD")
-    log.info(f"║  Risk/T  : {RISK_PARAMS['scalping_risk_pct']}% scalp / {RISK_PARAMS['swing_risk_pct']}% swing")
-    log.info(f"╚═══════════════════════════════╝")
+    log.info(f"--- AI Trading Server demarre ---")
+    log.info(f"Host    : {WS_HOST}:{WS_PORT}")
+    log.info(f"Balance : {RISK_PARAMS['account_balance']} USD")
+    log.info(f"Risk/T  : {RISK_PARAMS['scalping_risk_pct']}% scalp / {RISK_PARAMS['swing_risk_pct']}% swing")
+    log.info(f"----------------------------------")
     
     # En local, on peut encore utiliser websockets.serve si lancé via python ai_server.py
     # Mais sur Render, c'est uvicorn qui gère tout via 'app'
