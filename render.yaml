@@ -4,7 +4,8 @@ services:
     env: python
     plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn ai_server:app --host 0.0.0.0 --port $PORT
+    # ai_server_supabase expose les endpoints MT5: /mt5/history-upload, /mt5/deals-upload, etc.
+    startCommand: uvicorn ai_server_supabase:app --host 0.0.0.0 --port $PORT
     runtime: python
     pythonVersion: "3.11.7"
     envVars:
