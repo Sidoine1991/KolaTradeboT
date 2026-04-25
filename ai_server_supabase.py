@@ -1138,6 +1138,12 @@ except Exception:
 
 # Configuration des répertoires via variables d'environnement
 # Vérification si on est sur Render
+RUNNING_ON_RENDER = bool(
+    os.getenv("RENDER")
+    or os.getenv("RENDER_SERVICE_ID")
+    or os.getenv("RENDER_EXTERNAL_URL")
+    or os.getenv("RENDER_INTERNAL_URL")
+)
 RUNNING_ON_SUPABASE = bool(os.getenv("SUPABASE_URL") or os.getenv("SUPABASE_PROJECT_ID"))
 
 # Fonction pour créer un répertoire avec gestion des erreurs
