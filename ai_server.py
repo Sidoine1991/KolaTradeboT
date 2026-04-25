@@ -15,11 +15,25 @@ from datetime import datetime, timezone
 from dataclasses import dataclass, field, asdict
 from typing import Optional
 from pathlib import Path
+import os
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.responses import JSONResponse
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 
 WS_HOST = "0.0.0.0"
-WS_PORT = 8000
+WS_PORT = int(os.environ.get("PORT", 8000))
+
+# --- FastAPI App for Render Health Checks ---
+app = FastAPI(title="AI Trading Server")
+
+@app.get("/")
+async def root():
+    return {"status": "online", "message": "AI Trading Server is running"}
+
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
 
 LOG_DIR = Path("logs")
 LOG_DIR.mkdir(exist_ok=True)
@@ -555,6 +569,28 @@ async def handler(websocket):
 
     log.info(f"Déconnexion : {client_addr}")
 
+@app.websocket("/")
+async def websocket_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    client_addr = websocket.client
+    log.info(f"WebSocket connectée : {client_addr}")
+    try:
+        while True:
+            message = await websocket.receive_text()
+            try:
+                data = json.loads(message)
+                result = await process_analysis(data)
+                await websocket.send_text(json.dumps(result, ensure_ascii=False))
+            except json.JSONDecodeError as e:
+                err = {"status": "ERROR", "message": f"JSON invalide: {e}"}
+                await websocket.send_text(json.dumps(err))
+                log.error(f"JSON invalide reçu de {client_addr}: {e}")
+            except Exception as e:
+                err = {"status": "ERROR", "message": str(e)}
+                await websocket.send_text(json.dumps(err))
+                log.exception(f"Erreur traitement pour {client_addr}")
+    except WebSocketDisconnect:
+        log.info(f"WebSocket déconnectée : {client_addr}")
 
 async def main():
     log.info(f"╔══ AI Trading Server démarré ══╗")
@@ -562,9 +598,11 @@ async def main():
     log.info(f"║  Balance : {RISK_PARAMS['account_balance']} USD")
     log.info(f"║  Risk/T  : {RISK_PARAMS['scalping_risk_pct']}% scalp / {RISK_PARAMS['swing_risk_pct']}% swing")
     log.info(f"╚═══════════════════════════════╝")
-
+    
+    # En local, on peut encore utiliser websockets.serve si lancé via python ai_server.py
+    # Mais sur Render, c'est uvicorn qui gère tout via 'app'
     async with websockets.serve(handler, WS_HOST, WS_PORT):
-        await asyncio.Future()  # run forever
+        await asyncio.Future()
 
 
 if __name__ == "__main__":
