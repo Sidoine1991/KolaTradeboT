@@ -1,3 +1,60 @@
+//+------------------------------------------------------------------+
+//| Vérifie que le prix touche une EMA ou l'entrée M5, ET a conf M5  |
+//+------------------------------------------------------------------+
+bool IsHighConfidenceEntryTouchConfirmed(const string direction)
+{
+   string dir = direction; StringToUpper(dir);
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double price = (dir == "BUY") ? ask : bid;
+   
+   // 1. Condition EMA Touch (EMA 13 M1 ou EMA 21 M5)
+   double ema13m1 = 0.0, ema21m5 = 0.0;
+   bool hasEma13 = ReadEMAValue(PERIOD_M1, 13, ema13m1);
+   bool hasEma21 = ReadEMAValue(PERIOD_M5, 21, ema21m5);
+   
+   double atr = GetCurrentATRValue();
+   if(atr <= 0.0) atr = price * 0.0008;
+   double tolAbs = atr * 0.5;
+   if(tolAbs <= 0.0) tolAbs = point * 15.0;
+   
+   bool isEmaTouch = false;
+   if(hasEma13 && MathAbs(price - ema13m1) <= tolAbs) isEmaTouch = true;
+   if(hasEma21 && MathAbs(price - ema21m5) <= tolAbs) isEmaTouch = true;
+   
+   // 2. Condition M5 Entry Point Touch
+   bool isM5EntryTouch = false;
+   double m5Tol = point * 30.0;
+   if(SMC_GetSymbolCategory(_Symbol) == SYM_BOOM_CRASH && M5TouchTolerancePointsBoomCrash > 0)
+      m5Tol = point * (double)M5TouchTolerancePointsBoomCrash;
+      
+   if(dir == "BUY" && g_m5BuyLevelActive && g_m5BuyEntryLevel > 0)
+   {
+      if(MathAbs(ask - g_m5BuyEntryLevel) <= m5Tol) isM5EntryTouch = true;
+   }
+   else if(dir == "SELL" && g_m5SellLevelActive && g_m5SellEntryLevel > 0)
+   {
+      if(MathAbs(bid - g_m5SellEntryLevel) <= m5Tol) isM5EntryTouch = true;
+   }
+   
+   // 3. Condition M5 Confirmation
+   bool hasM5Conf = IsOTECandlestickConfirmationOnTF(dir, PERIOD_M5);
+   
+   if(!(isEmaTouch || isM5EntryTouch) || !hasM5Conf)
+   {
+      static datetime lastLog = 0;
+      if(TimeCurrent() - lastLog >= 15)
+      {
+         Print("⏳ ATTENTE TOUCH - IA OK mais attente de (EMA_Touch ou M5_Entry_Touch) ET Conf_M5 sur ", _Symbol);
+         lastLog = TimeCurrent();
+      }
+      return false;
+   }
+   
+   return true;
+}
+
 //| SMC_Universal.mq5                                                 |
 //| Robot Smart Money Concepts - UN SEUL ROBOT multi-actifs + IA      |
 //| Boom/Crash | Volatility | Forex | Commodities | Metals           |
@@ -14,6 +71,12 @@
 // #include "SMC_Setups_Display.mqh" // Désactivé pour éviter l'erreur de fichier non trouvé
 
 bool IsOTEEntryDirectionSafeForPremiumDiscount(const string symbol, const string direction);
+bool SetIntelligentTrailingMode(const ulong ticket, const int trailMode);
+bool LockProfitByRiskMultiple(const ulong ticket, const double riskMultipleToLock);
+bool IsOTECandlestickConfirmationOnTF(const string direction, const ENUM_TIMEFRAMES tf);
+bool IsOTEEntryConfirmedOnM15OrM5(const string direction);
+bool HasConfirmedBOSForOTE(const string direction, const ENUM_TIMEFRAMES tf, const int lookbackBars = 20);
+bool HasOTEBOSConfirmationM15OrM5(const string direction);
 
 //+------------------------------------------------------------------+
 //|  STRUCTURES ET PROTOTYPES POUR ANALYSE 360°                      |
@@ -70,41 +133,2889 @@ string GetDominantBias360(SymbolData360 &sd);
 int CalcConfluenceScore360(SymbolData360 &sd);
 string GetCurrentSession360();
 double GetSpreadPips360(string sym);
+void UpdateManualAssistantDashboard();
+void CleanupManualAssistantDashboard();
+void TriggerManual360AnalysisPush();
+string BuildManual360Summary(const string symbol);
 
 //+------------------------------------------------------------------+
 //| MATÉRIALISATION DES SETUPS SMC SUR GRAPHIQUE                   |
 //+------------------------------------------------------------------+
 
-// Dessiner un setup OTE (Optimal Trade Entry)
-void DrawOTESetup(double entryPrice, double stopLoss, double takeProfit, string direction)
+// Détecter si un pattern engulfing M5 est présent
+bool IsM5EngulfingPattern(const string direction)
 {
-   // Supprimer les anciens objets OTE
-   ObjectsDeleteAll(0, "OTE_SETUP_");
+   MqlRates rates[];
+   ArraySetAsSeries(rates, true);
+   if(CopyRates(_Symbol, PERIOD_M5, 0, 3, rates) < 3) return false;
+   
+   string dir = direction; StringToUpper(dir);
+   
+   if(dir == "BUY")
+   {
+      // Engulfing bullish: bougie précédente baissière, bougie actuelle haussière qui englobe
+      bool prevBearish = rates[2].close < rates[2].open;
+      bool currBullish = rates[1].close > rates[1].open;
+      bool engulfs = rates[1].close > rates[2].open && rates[1].open < rates[2].close;
+      
+      return prevBearish && currBullish && engulfs;
+   }
+   else if(dir == "SELL")
+   {
+      // Engulfing bearish: bougie précédente haussière, bougie actuelle baissière qui englobe
+      bool prevBullish = rates[2].close > rates[2].open;
+      bool currBearish = rates[1].close < rates[1].open;
+      bool engulfs = rates[1].close < rates[2].open && rates[1].open > rates[2].close;
+      
+      return prevBullish && currBearish && engulfs;
+   }
+   
+   return false;
+}
+
+// Détecter pattern Morning Star (retournement haussier)
+bool IsMorningStarPattern()
+{
+   MqlRates rates[];
+   ArraySetAsSeries(rates, true);
+   if(CopyRates(_Symbol, PERIOD_M5, 0, 4, rates) < 4) return false;
+   
+   // Bougie 1: baissière avec corps significatif
+   bool firstBearish = rates[3].close < rates[3].open;
+   double firstBody = MathAbs(rates[3].close - rates[3].open);
+   double firstRange = rates[3].high - rates[3].low;
+   
+   // Bougie 2: petite (doji ou petite bougie) - indécision
+   double secondBody = MathAbs(rates[2].close - rates[2].open);
+   double secondRange = rates[2].high - rates[2].low;
+   bool isSmallSecond = secondBody < firstBody * 0.3 && secondRange < firstRange * 0.5;
+   
+   // Bougie 3: haussière avec corps significatif qui ferme au-dessus du milieu de la première
+   bool thirdBullish = rates[1].close > rates[1].open;
+   double thirdBody = MathAbs(rates[1].close - rates[1].open);
+   double firstMid = rates[3].open + (rates[3].close - rates[3].open) * 0.5;
+   bool closesAboveMid = rates[1].close > firstMid;
+   
+   return firstBearish && isSmallSecond && thirdBullish && thirdBody > firstBody * 0.6 && closesAboveMid;
+}
+
+// Détecter pattern Evening Star (retournement baissier)
+bool IsEveningStarPattern()
+{
+   MqlRates rates[];
+   ArraySetAsSeries(rates, true);
+   if(CopyRates(_Symbol, PERIOD_M5, 0, 4, rates) < 4) return false;
+   
+   // Bougie 1: haussière avec corps significatif
+   bool firstBullish = rates[3].close > rates[3].open;
+   double firstBody = MathAbs(rates[3].close - rates[3].open);
+   double firstRange = rates[3].high - rates[3].low;
+   
+   // Bougie 2: petite (doji ou petite bougie) - indécision
+   double secondBody = MathAbs(rates[2].close - rates[2].open);
+   double secondRange = rates[2].high - rates[2].low;
+   bool isSmallSecond = secondBody < firstBody * 0.3 && secondRange < firstRange * 0.5;
+   
+   // Bougie 3: baissière avec corps significatif qui ferme en-dessous du milieu de la première
+   bool thirdBearish = rates[1].close < rates[1].open;
+   double thirdBody = MathAbs(rates[1].close - rates[1].open);
+   double firstMid = rates[3].open + (rates[3].close - rates[3].open) * 0.5;
+   bool closesBelowMid = rates[1].close < firstMid;
+   
+   return firstBullish && isSmallSecond && thirdBearish && thirdBody > firstBody * 0.6 && closesBelowMid;
+}
+
+// Détecter pattern Three White Soldiers (tendance haussière forte)
+bool IsThreeWhiteSoldiers()
+{
+   MqlRates rates[];
+   ArraySetAsSeries(rates, true);
+   if(CopyRates(_Symbol, PERIOD_M5, 0, 4, rates) < 4) return false;
+   
+   // Trois bougies haussières consécutives
+   bool candle1Bullish = rates[3].close > rates[3].open;
+   bool candle2Bullish = rates[2].close > rates[2].open;
+   bool candle3Bullish = rates[1].close > rates[1].open;
+   
+   // Chaque bougie ferme plus haut que la précédente
+   bool higherCloses = rates[3].close < rates[2].close && rates[2].close < rates[1].close;
+   
+   // Corps significatifs (pas de mèches trop longues)
+   double body1 = MathAbs(rates[3].close - rates[3].open);
+   double body2 = MathAbs(rates[2].close - rates[2].open);
+   double body3 = MathAbs(rates[1].close - rates[1].open);
+   double range1 = rates[3].high - rates[3].low;
+   double range2 = rates[2].high - rates[2].low;
+   double range3 = rates[1].high - rates[1].low;
+   
+   bool significantBodies = body1 > range1 * 0.5 && body2 > range2 * 0.5 && body3 > range3 * 0.5;
+   
+   return candle1Bullish && candle2Bullish && candle3Bullish && higherCloses && significantBodies;
+}
+
+// Détecter pattern Three Black Crows (tendance baissière forte)
+bool IsThreeBlackCrows()
+{
+   MqlRates rates[];
+   ArraySetAsSeries(rates, true);
+   if(CopyRates(_Symbol, PERIOD_M5, 0, 4, rates) < 4) return false;
+   
+   // Trois bougies baissières consécutives
+   bool candle1Bearish = rates[3].close < rates[3].open;
+   bool candle2Bearish = rates[2].close < rates[2].open;
+   bool candle3Bearish = rates[1].close < rates[1].open;
+   
+   // Chaque bougie ferme plus bas que la précédente
+   bool lowerCloses = rates[3].close > rates[2].close && rates[2].close > rates[1].close;
+   
+   // Corps significatifs (pas de mèches trop longues)
+   double body1 = MathAbs(rates[3].close - rates[3].open);
+   double body2 = MathAbs(rates[2].close - rates[2].open);
+   double body3 = MathAbs(rates[1].close - rates[1].open);
+   double range1 = rates[3].high - rates[3].low;
+   double range2 = rates[2].high - rates[2].low;
+   double range3 = rates[1].high - rates[1].low;
+   
+   bool significantBodies = body1 > range1 * 0.5 && body2 > range2 * 0.5 && body3 > range3 * 0.5;
+   
+   return candle1Bearish && candle2Bearish && candle3Bearish && lowerCloses && significantBodies;
+}
+
+// Détecter pattern Inside Bar (consolidation avant breakout)
+bool IsInsideBarPattern()
+{
+   MqlRates rates[];
+   ArraySetAsSeries(rates, true);
+   if(CopyRates(_Symbol, PERIOD_M5, 0, 3, rates) < 3) return false;
+   
+   // La bougie actuelle est complètement à l'intérieur de la précédente
+   bool insideHigh = rates[1].high <= rates[2].high;
+   bool insideLow = rates[1].low >= rates[2].low;
+   
+   return insideHigh && insideLow;
+}
+
+// Fonction unifiée de confirmation par patterns avancés
+bool IsAdvancedPatternConfirmation(const string direction)
+{
+   string dir = direction; StringToUpper(dir);
+   
+   if(dir == "BUY")
+   {
+      // Pour BUY: Morning Star, Three White Soldiers, Bullish Engulfing
+      return IsMorningStarPattern() || IsThreeWhiteSoldiers() || IsM5EngulfingPattern("BUY");
+   }
+   else if(dir == "SELL")
+   {
+      // Pour SELL: Evening Star, Three Black Crows, Bearish Engulfing
+      return IsEveningStarPattern() || IsThreeBlackCrows() || IsM5EngulfingPattern("SELL");
+   }
+   
+   return false;
+}
+
+// Détecter divergence RSI haussière (prix fait plus bas mais RSI fait plus haut)
+bool IsRSIBullishDivergence(ENUM_TIMEFRAMES tf = PERIOD_M5, int lookback = 20)
+{
+   double rsiBuf[];
+   ArraySetAsSeries(rsiBuf, true);
+   
+   int rsiHandle = iRSI(_Symbol, tf, 14, PRICE_CLOSE);
+   if(rsiHandle == INVALID_HANDLE) return false;
+   
+   if(CopyBuffer(rsiHandle, 0, 0, lookback + 5, rsiBuf) < lookback + 5)
+   {
+      IndicatorRelease(rsiHandle);
+      return false;
+   }
+   
+   MqlRates rates[];
+   ArraySetAsSeries(rates, true);
+   if(CopyRates(_Symbol, tf, 0, lookback + 5, rates) < lookback + 5)
+   {
+      IndicatorRelease(rsiHandle);
+      return false;
+   }
+   
+   // Chercher deux creux: un creux prix plus bas mais RSI plus haut
+   double priceLow1 = 0, priceLow2 = 0;
+   double rsiLow1 = 0, rsiLow2 = 0;
+   int idxLow1 = -1, idxLow2 = -1;
+   
+   for(int i = 2; i < lookback; i++)
+   {
+      if(rates[i].low < rates[i-1].low && rates[i].low < rates[i+1].low)
+      {
+         if(idxLow1 == -1)
+         {
+            priceLow1 = rates[i].low;
+            rsiLow1 = rsiBuf[i];
+            idxLow1 = i;
+         }
+         else if(idxLow2 == -1 && i > idxLow1 + 2)
+         {
+            priceLow2 = rates[i].low;
+            rsiLow2 = rsiBuf[i];
+            idxLow2 = i;
+            break;
+         }
+      }
+   }
+   
+   IndicatorRelease(rsiHandle);
+   
+   // Divergence haussière: prix fait plus bas mais RSI fait plus haut
+   if(idxLow1 != -1 && idxLow2 != -1 && priceLow2 < priceLow1 && rsiLow2 > rsiLow1)
+   {
+      return true;
+   }
+   
+   return false;
+}
+
+// Détecter divergence RSI baissière (prix fait plus haut mais RSI fait plus bas)
+bool IsRSIBearishDivergence(ENUM_TIMEFRAMES tf = PERIOD_M5, int lookback = 20)
+{
+   double rsiBuf[];
+   ArraySetAsSeries(rsiBuf, true);
+   
+   int rsiHandle = iRSI(_Symbol, tf, 14, PRICE_CLOSE);
+   if(rsiHandle == INVALID_HANDLE) return false;
+   
+   if(CopyBuffer(rsiHandle, 0, 0, lookback + 5, rsiBuf) < lookback + 5)
+   {
+      IndicatorRelease(rsiHandle);
+      return false;
+   }
+   
+   MqlRates rates[];
+   ArraySetAsSeries(rates, true);
+   if(CopyRates(_Symbol, tf, 0, lookback + 5, rates) < lookback + 5)
+   {
+      IndicatorRelease(rsiHandle);
+      return false;
+   }
+   
+   // Chercher deux sommets: un sommet prix plus haut mais RSI plus bas
+   double priceHigh1 = 0, priceHigh2 = 0;
+   double rsiHigh1 = 0, rsiHigh2 = 0;
+   int idxHigh1 = -1, idxHigh2 = -1;
+   
+   for(int i = 2; i < lookback; i++)
+   {
+      if(rates[i].high > rates[i-1].high && rates[i].high > rates[i+1].high)
+      {
+         if(idxHigh1 == -1)
+         {
+            priceHigh1 = rates[i].high;
+            rsiHigh1 = rsiBuf[i];
+            idxHigh1 = i;
+         }
+         else if(idxHigh2 == -1 && i > idxHigh1 + 2)
+         {
+            priceHigh2 = rates[i].high;
+            rsiHigh2 = rsiBuf[i];
+            idxHigh2 = i;
+            break;
+         }
+      }
+   }
+   
+   IndicatorRelease(rsiHandle);
+   
+   // Divergence baissière: prix fait plus haut mais RSI fait plus bas
+   if(idxHigh1 != -1 && idxHigh2 != -1 && priceHigh2 > priceHigh1 && rsiHigh2 < rsiHigh1)
+   {
+      return true;
+   }
+   
+   return false;
+}
+
+// Détecter divergence MACD haussière
+bool IsMACDBullishDivergence(ENUM_TIMEFRAMES tf = PERIOD_M5, int lookback = 20)
+{
+   double macdBuf[];
+   ArraySetAsSeries(macdBuf, true);
+   
+   int macdHandle = iMACD(_Symbol, tf, 12, 26, 9, PRICE_CLOSE);
+   if(macdHandle == INVALID_HANDLE) return false;
+   
+   if(CopyBuffer(macdHandle, 0, 0, lookback + 5, macdBuf) < lookback + 5)
+   {
+      IndicatorRelease(macdHandle);
+      return false;
+   }
+   
+   MqlRates rates[];
+   ArraySetAsSeries(rates, true);
+   if(CopyRates(_Symbol, tf, 0, lookback + 5, rates) < lookback + 5)
+   {
+      IndicatorRelease(macdHandle);
+      return false;
+   }
+   
+   // Chercher deux creux: prix plus bas mais MACD plus haut
+   double priceLow1 = 0, priceLow2 = 0;
+   double macdLow1 = 0, macdLow2 = 0;
+   int idxLow1 = -1, idxLow2 = -1;
+   
+   for(int i = 2; i < lookback; i++)
+   {
+      if(rates[i].low < rates[i-1].low && rates[i].low < rates[i+1].low)
+      {
+         if(idxLow1 == -1)
+         {
+            priceLow1 = rates[i].low;
+            macdLow1 = macdBuf[i];
+            idxLow1 = i;
+         }
+         else if(idxLow2 == -1 && i > idxLow1 + 2)
+         {
+            priceLow2 = rates[i].low;
+            macdLow2 = macdBuf[i];
+            idxLow2 = i;
+            break;
+         }
+      }
+   }
+   
+   IndicatorRelease(macdHandle);
+   
+   if(idxLow1 != -1 && idxLow2 != -1 && priceLow2 < priceLow1 && macdLow2 > macdLow1)
+   {
+      return true;
+   }
+   
+   return false;
+}
+
+// Détecter divergence MACD baissière
+bool IsMACDBearishDivergence(ENUM_TIMEFRAMES tf = PERIOD_M5, int lookback = 20)
+{
+   double macdBuf[];
+   ArraySetAsSeries(macdBuf, true);
+   
+   int macdHandle = iMACD(_Symbol, tf, 12, 26, 9, PRICE_CLOSE);
+   if(macdHandle == INVALID_HANDLE) return false;
+   
+   if(CopyBuffer(macdHandle, 0, 0, lookback + 5, macdBuf) < lookback + 5)
+   {
+      IndicatorRelease(macdHandle);
+      return false;
+   }
+   
+   MqlRates rates[];
+   ArraySetAsSeries(rates, true);
+   if(CopyRates(_Symbol, tf, 0, lookback + 5, rates) < lookback + 5)
+   {
+      IndicatorRelease(macdHandle);
+      return false;
+   }
+   
+   // Chercher deux sommets: prix plus haut mais MACD plus bas
+   double priceHigh1 = 0, priceHigh2 = 0;
+   double macdHigh1 = 0, macdHigh2 = 0;
+   int idxHigh1 = -1, idxHigh2 = -1;
+   
+   for(int i = 2; i < lookback; i++)
+   {
+      if(rates[i].high > rates[i-1].high && rates[i].high > rates[i+1].high)
+      {
+         if(idxHigh1 == -1)
+         {
+            priceHigh1 = rates[i].high;
+            macdHigh1 = macdBuf[i];
+            idxHigh1 = i;
+         }
+         else if(idxHigh2 == -1 && i > idxHigh1 + 2)
+         {
+            priceHigh2 = rates[i].high;
+            macdHigh2 = macdBuf[i];
+            idxHigh2 = i;
+            break;
+         }
+      }
+   }
+   
+   IndicatorRelease(macdHandle);
+   
+   if(idxHigh1 != -1 && idxHigh2 != -1 && priceHigh2 > priceHigh1 && macdHigh2 < macdHigh1)
+   {
+      return true;
+   }
+   
+   return false;
+}
+
+// Confirmation par divergence combinée RSI + MACD
+bool IsDivergenceConfirmation(const string direction, ENUM_TIMEFRAMES tf = PERIOD_M5)
+{
+   string dir = direction; StringToUpper(dir);
+   
+   if(dir == "BUY")
+   {
+      bool rsiDiv = IsRSIBullishDivergence(tf);
+      bool macdDiv = IsMACDBullishDivergence(tf);
+      // Au moins une divergence haussière confirmée
+      return rsiDiv || macdDiv;
+   }
+   else if(dir == "SELL")
+   {
+      bool rsiDiv = IsRSIBearishDivergence(tf);
+      bool macdDiv = IsMACDBearishDivergence(tf);
+      // Au moins une divergence baissière confirmée
+      return rsiDiv || macdDiv;
+   }
+   
+   return false;
+}
+
+// Obtenir l'ATR pour un timeframe donné
+double GetATR(ENUM_TIMEFRAMES tf, int period = 14)
+{
+   int localAtrHandle = iATR(_Symbol, tf, period);
+   if(localAtrHandle == INVALID_HANDLE) return 0;
+   
+   double atrBuf[];
+   ArraySetAsSeries(atrBuf, true);
+   if(CopyBuffer(localAtrHandle, 0, 0, 1, atrBuf) < 1)
+   {
+      IndicatorRelease(localAtrHandle);
+      return 0;
+   }
+   
+   double atrValue = atrBuf[0];
+   IndicatorRelease(localAtrHandle);
+   return atrValue;
+}
+
+// Filtre de volatilité multi-timeframe - éviter les conditions extrêmes
+bool IsVolatilityAcceptable(ENUM_TIMEFRAMES tf = PERIOD_M5)
+{
+   double localAtrM1 = GetATR(PERIOD_M1, 14);
+   double localAtrM5 = GetATR(PERIOD_M5, 14);
+   double localAtrH1 = GetATR(PERIOD_H1, 14);
+   
+   // Convertir en points/pips selon le symbole
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   double atrM1Pips = localAtrM1 / point / 10;
+   double atrM5Pips = localAtrM5 / point / 10;
+   double atrH1Pips = localAtrH1 / point / 10;
+   
+   // Vérifier que la volatilité n'est pas trop faible (marché mort)
+   double minVolatility = 2.0; // Minimum 2 pips de volatilité
+   if(atrM5Pips < minVolatility && atrH1Pips < minVolatility)
+   {
+      return false; // Volatilité trop faible - éviter
+   }
+   
+   // Vérifier que la volatilité n'est pas trop extrême (chao)
+   double maxVolatility = 100.0; // Maximum 100 pips de volatilité
+   if(atrM5Pips > maxVolatility || atrH1Pips > maxVolatility)
+   {
+      return false; // Volatilité trop extrême - éviter
+   }
+   
+   // Vérifier la cohérence de volatilité entre timeframes
+   // Si M1 est beaucoup plus volatil que H1, c'est suspect
+   if(atrM1Pips > atrH1Pips * 3.0)
+   {
+      return false; // Incohérence de volatilité - éviter
+   }
+   
+   return true;
+}
+
+// Filtre de volatilité pour Boom/Crash (adapté aux indices synthétiques)
+bool IsBoomCrashVolatilityAcceptable()
+{
+   double localAtrM1 = GetATR(PERIOD_M1, 14);
+   double localAtrM5 = GetATR(PERIOD_M5, 14);
+   
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   if(point <= 0.0) point = _Point; // Fallback
+   double atrM1Points = (point > 0) ? localAtrM1 / point : 0;
+   double atrM5Points = (point > 0) ? localAtrM5 / point : 0;
+   
+   // Pour Boom/Crash, vérifier qu'il n'y a pas de volatilité extrême
+   double maxBoomCrashVolatility = 5000.0; // Ajuster selon le symbole
+   if(atrM5Points > maxBoomCrashVolatility)
+   {
+      return false; // Volatilité Boom/Crash trop extrême
+   }
+   
+   // Vérifier qu'il y a assez de volatilité pour un trade
+   double minBoomCrashVolatility = 50.0;
+   if(atrM5Points < minBoomCrashVolatility)
+   {
+      return false; // Volatilité Boom/Crash trop faible
+   }
+   
+   return true;
+}
+
+// Vérifier si la volatilité est dans une plage optimale pour le trading
+bool IsVolatilityOptimalForEntry(const string direction, ENUM_TIMEFRAMES tf = PERIOD_M5)
+{
+   string symbol = _Symbol;
+   
+   // Pour Boom/Crash, utiliser le filtre spécifique
+   if(StringFind(symbol, "BOOM") >= 0 || StringFind(symbol, "CRASH") >= 0 ||
+      StringFind(symbol, "GAINX") >= 0 || StringFind(symbol, "PAINX") >= 0)
+   {
+      return IsBoomCrashVolatilityAcceptable();
+   }
+   
+   // Pour Forex/Métaux/Commodities
+   return IsVolatilityAcceptable(tf);
+}
+
+// Calculer le coefficient de variation de prix (mesure de consolidation)
+double CalculatePriceVariationCoefficient(ENUM_TIMEFRAMES tf = PERIOD_M5, int lookback = 20)
+{
+   MqlRates rates[];
+   ArraySetAsSeries(rates, true);
+   if(CopyRates(_Symbol, tf, 0, lookback, rates) < lookback) return 0;
+   
+   // Calculer la moyenne des prix de clôture
+   double sum = 0;
+   for(int i = 0; i < lookback; i++)
+   {
+      sum += rates[i].close;
+   }
+   double mean = sum / lookback;
+   
+   // Calculer l'écart-type
+   double variance = 0;
+   for(int i = 0; i < lookback; i++)
+   {
+      variance += MathPow(rates[i].close - mean, 2);
+   }
+   variance /= lookback;
+   double stdDev = MathSqrt(variance);
+   
+   // Coefficient de variation = écart-type / moyenne
+   if(mean == 0) return 0;
+   return (stdDev / mean) * 100; // En pourcentage
+}
+
+// Détecter si le marché est en consolidation/ranging
+bool IsMarketInConsolidation(ENUM_TIMEFRAMES tf = PERIOD_M5, int lookback = 20)
+{
+   MqlRates rates[];
+   ArraySetAsSeries(rates, true);
+   if(CopyRates(_Symbol, tf, 0, lookback, rates) < lookback) return false;
+   
+   // Calculer le range de prix sur la période
+   double highest = rates[ArrayMaximum(rates)].high;
+   double lowest = rates[ArrayMinimum(rates)].low;
+   double range = highest - lowest;
+   
+   // Calculer le prix moyen
+   double avgPrice = 0;
+   for(int i = 0; i < lookback; i++)
+   {
+      avgPrice += rates[i].close;
+   }
+   avgPrice /= lookback;
+   
+   // Range en pourcentage du prix moyen
+   double rangePercent = (range / avgPrice) * 100;
+   
+   // Si le range est trop petit, c'est une consolidation
+   double consolidationThreshold = 0.5; // 0.5% de variation = consolidation
+   if(rangePercent < consolidationThreshold)
+   {
+      return true;
+   }
+   
+   // Vérifier l'ADL (Average Directional Index) pour confirmer l'absence de tendance
+   int adxHandle = iADX(_Symbol, tf, 14);
+   if(adxHandle == INVALID_HANDLE) return false;
+   
+   double adxBuf[];
+   ArraySetAsSeries(adxBuf, true);
+   if(CopyBuffer(adxHandle, 0, 0, 1, adxBuf) < 1)
+   {
+      IndicatorRelease(adxHandle);
+      return false;
+   }
+   
+   double adxValue = adxBuf[0];
+   IndicatorRelease(adxHandle);
+   
+   // ADX < 20 = pas de tendance claire = consolidation
+   if(adxValue < 20)
+   {
+      return true;
+   }
+   
+   return false;
+}
+
+// Détecter si le marché a une tendance claire (directionnelle)
+bool IsMarketTrending(ENUM_TIMEFRAMES tf = PERIOD_M5, int lookback = 20)
+{
+   // Si le marché est en consolidation, il n'est pas trendant
+   if(IsMarketInConsolidation(tf, lookback))
+   {
+      return false;
+   }
+   
+   // Vérifier l'ADL pour confirmer la tendance
+   int adxHandle = iADX(_Symbol, tf, 14);
+   if(adxHandle == INVALID_HANDLE) return false;
+   
+   double adxBuf[];
+   ArraySetAsSeries(adxBuf, true);
+   if(CopyBuffer(adxHandle, 0, 0, 1, adxBuf) < 1)
+   {
+      IndicatorRelease(adxHandle);
+      return false;
+   }
+   
+   double adxValue = adxBuf[0];
+   IndicatorRelease(adxHandle);
+   
+   // ADX > 25 = tendance claire
+   return adxValue > 25;
+}
+
+// Obtenir la direction de la tendance dominante
+string GetTrendDirection(ENUM_TIMEFRAMES tf = PERIOD_M5)
+{
+   MqlRates rates[];
+   ArraySetAsSeries(rates, true);
+   if(CopyRates(_Symbol, tf, 0, 20, rates) < 20) return "NEUTRAL";
+   
+   // Utiliser EMA stack pour déterminer la direction
+   double ema21 = GetEMA(_Symbol, tf, 21);
+   double ema50 = GetEMA(_Symbol, tf, 50);
+   double currentPrice = rates[0].close;
+   
+   if(currentPrice > ema21 && ema21 > ema50)
+   {
+      return "BUY";
+   }
+   else if(currentPrice < ema21 && ema21 < ema50)
+   {
+      return "SELL";
+   }
+   
+   return "NEUTRAL";
+}
+
+// Filtre de consolidation - interdire les entrées en marché sans direction
+bool IsConsolidationFilterPass(const string direction, ENUM_TIMEFRAMES tf = PERIOD_M5)
+{
+   // Si le marché est en consolidation, interdire l'entrée
+   if(IsMarketInConsolidation(tf))
+   {
+      Print("⚠️ CONSOLIDATION FILTER - Marché en consolidation, entrée interdite | Symbole=", _Symbol);
+      return false;
+   }
+   
+   // Vérifier que la direction demandée correspond à la tendance
+   string trendDirection = GetTrendDirection(tf);
+   string dir = direction; StringToUpper(dir);
+   
+   if(dir != "NEUTRAL" && trendDirection != "NEUTRAL" && dir != trendDirection)
+   {
+      Print("⚠️ TREND MISMATCH - Direction demandée=", dir, " mais tendance=", trendDirection, " | Symbole=", _Symbol);
+      return false;
+   }
+   
+   // Le marché doit être trendant
+   if(!IsMarketTrending(tf))
+   {
+      Print("⚠️ NO CLEAR TREND - Pas de tendance claire, entrée interdite | Symbole=", _Symbol);
+      return false;
+   }
+   
+   return true;
+}
+
+// Structure pour suivre les partial closes par position
+struct PartialCloseInfo {
+   ulong ticket;
+   double originalLot;
+   double closedLot1;
+   double closedLot2;
+   double closedLot3;
+   bool tp1Hit;
+   bool tp2Hit;
+   bool tp3Hit;
+   datetime entryTime;
+};
+
+PartialCloseInfo g_partialCloseInfo[];
+int g_partialCloseCount = 0;
+
+// Enregistrer une position pour suivi partial close
+void RegisterPositionForPartialClose(ulong ticket, double lot)
+{
+   // Vérifier si déjà enregistré
+   for(int i = 0; i < g_partialCloseCount; i++)
+   {
+      if(g_partialCloseInfo[i].ticket == ticket) return;
+   }
+   
+   // Ajouter nouveau
+   ArrayResize(g_partialCloseInfo, g_partialCloseCount + 1);
+   g_partialCloseInfo[g_partialCloseCount].ticket = ticket;
+   g_partialCloseInfo[g_partialCloseCount].originalLot = lot;
+   g_partialCloseInfo[g_partialCloseCount].closedLot1 = 0;
+   g_partialCloseInfo[g_partialCloseCount].closedLot2 = 0;
+   g_partialCloseInfo[g_partialCloseCount].closedLot3 = 0;
+   g_partialCloseInfo[g_partialCloseCount].tp1Hit = false;
+   g_partialCloseInfo[g_partialCloseCount].tp2Hit = false;
+   g_partialCloseInfo[g_partialCloseCount].tp3Hit = false;
+   g_partialCloseInfo[g_partialCloseCount].entryTime = TimeCurrent();
+   g_partialCloseCount++;
+}
+
+// Effectuer un partial close sécurisé
+bool ExecutePartialClose(ulong ticket, double closePercentage, string reason)
+{
+   if(!PositionSelectByTicket(ticket)) return false;
+   
+   double currentLot = PositionGetDouble(POSITION_VOLUME);
+   double closeLot = currentLot * closePercentage;
+   
+   if(closeLot <= 0) return false;
+   
+   ENUM_POSITION_TYPE posType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+   
+   bool result = false;
+   if(posType == POSITION_TYPE_BUY)
+   {
+      result = trade.Sell(closeLot, _Symbol, 0, 0, 0, "PARTIAL_CLOSE_" + reason);
+   }
+   else if(posType == POSITION_TYPE_SELL)
+   {
+      result = trade.Buy(closeLot, _Symbol, 0, 0, 0, "PARTIAL_CLOSE_" + reason);
+   }
+   
+   if(result)
+   {
+      Print("✅ PARTIAL CLOSE - Ticket=", ticket, " Lot=", closeLot, " Raison=", reason);
+   }
+   
+   return result;
+}
+
+// Gérer les partial closes automatiques basés sur le profit
+void ManagePartialCloseByProfit()
+{
+   for(int i = g_partialCloseCount - 1; i >= 0; i--)
+   {
+      ulong ticket = g_partialCloseInfo[i].ticket;
+      
+      if(!PositionSelectByTicket(ticket))
+      {
+         // Position fermée, supprimer de la liste
+         ArrayRemove(g_partialCloseInfo, i, 1);
+         g_partialCloseCount--;
+         continue;
+      }
+      
+      double profit = PositionGetDouble(POSITION_PROFIT);
+      double currentLot = PositionGetDouble(POSITION_VOLUME);
+      double originalLot = g_partialCloseInfo[i].originalLot;
+      
+      // TP1: Fermer 30% à 1xR (risk)
+      double riskPips = 50.0; // Ajuster selon le symbole
+      double tp1Profit = riskPips * originalLot * 10; // Approximation
+      
+      if(!g_partialCloseInfo[i].tp1Hit && profit >= tp1Profit && currentLot > originalLot * 0.3)
+      {
+         if(ExecutePartialClose(ticket, 0.30, "TP1_30PCT"))
+         {
+            g_partialCloseInfo[i].tp1Hit = true;
+            g_partialCloseInfo[i].closedLot1 = originalLot * 0.30;
+            // TP1 atteint: trailing plus structurel + premier verrouillage de gain
+            SetIntelligentTrailingMode(ticket, 1);   // Swing
+            LockProfitByRiskMultiple(ticket, 0.25);  // Verrouille ~0.25R
+         }
+      }
+      
+      // TP2: Fermer 30% supplémentaire à 2xR
+      double tp2Profit = tp1Profit * 2.0;
+      if(g_partialCloseInfo[i].tp1Hit && !g_partialCloseInfo[i].tp2Hit && profit >= tp2Profit && currentLot > originalLot * 0.3)
+      {
+         if(ExecutePartialClose(ticket, 0.30, "TP2_30PCT"))
+         {
+            g_partialCloseInfo[i].tp2Hit = true;
+            g_partialCloseInfo[i].closedLot2 = originalLot * 0.30;
+            // TP2 atteint: trailing plus serré + verrouillage renforcé des gains
+            SetIntelligentTrailingMode(ticket, 2);   // EMA
+            LockProfitByRiskMultiple(ticket, 1.00);  // Verrouille 1R
+         }
+      }
+      
+      // TP3: Fermer 30% supplémentaire à 3xR (garder 10% pour le run)
+      double tp3Profit = tp1Profit * 3.0;
+      if(g_partialCloseInfo[i].tp2Hit && !g_partialCloseInfo[i].tp3Hit && profit >= tp3Profit && currentLot > originalLot * 0.1)
+      {
+         if(ExecutePartialClose(ticket, 0.30, "TP3_30PCT"))
+         {
+            g_partialCloseInfo[i].tp3Hit = true;
+            g_partialCloseInfo[i].closedLot3 = originalLot * 0.30;
+         }
+      }
+   }
+}
+
+// Gérer les partial closes basés sur le temps (time-based exit)
+void ManagePartialCloseByTime()
+{
+   for(int i = g_partialCloseCount - 1; i >= 0; i--)
+   {
+      ulong ticket = g_partialCloseInfo[i].ticket;
+      
+      if(!PositionSelectByTicket(ticket))
+      {
+         ArrayRemove(g_partialCloseInfo, i, 1);
+         g_partialCloseCount--;
+         continue;
+      }
+      
+      datetime entryTime = g_partialCloseInfo[i].entryTime;
+      int elapsedMinutes = (int)((TimeCurrent() - entryTime) / 60);
+      
+      // Après 30 minutes, si profit positif, fermer 50%
+      if(elapsedMinutes >= 30 && elapsedMinutes < 31)
+      {
+         double profit = PositionGetDouble(POSITION_PROFIT);
+         if(profit > 0)
+         {
+            double currentLot = PositionGetDouble(POSITION_VOLUME);
+            if(currentLot > 0.01)
+            {
+               ExecutePartialClose(ticket, 0.50, "TIME_30MIN");
+            }
+         }
+      }
+      
+      // Après 60 minutes, fermer tout si profit positif
+      if(elapsedMinutes >= 60 && elapsedMinutes < 61)
+      {
+         double profit = PositionGetDouble(POSITION_PROFIT);
+         if(profit > 0)
+         {
+            double currentLot = PositionGetDouble(POSITION_VOLUME);
+            if(currentLot > 0.01)
+            {
+               ExecutePartialClose(ticket, 1.0, "TIME_60MIN_FULL");
+            }
+         }
+      }
+   }
+}
+
+// Structure pour suivi du trailing stop intelligent
+struct IntelligentTrailingStopInfo {
+   ulong ticket;
+   double entryPrice;
+   double originalSL;
+   double currentSL;
+   double highestProfit;
+   bool breakevenTriggered;
+   double breakevenTriggerPrice;
+   datetime lastUpdate;
+   int trailMode; // 0=ATR, 1=SwingHighLow, 2=EMA
+};
+
+IntelligentTrailingStopInfo g_trailingStopInfo[];
+int g_trailingStopCount = 0;
+
+// Configurer le mode de trailing pour un ticket (0=ATR, 1=Swing, 2=EMA)
+bool SetIntelligentTrailingMode(const ulong ticket, const int trailMode)
+{
+   for(int i = 0; i < g_trailingStopCount; i++)
+   {
+      if(g_trailingStopInfo[i].ticket == ticket)
+      {
+         g_trailingStopInfo[i].trailMode = trailMode;
+         g_trailingStopInfo[i].lastUpdate = TimeCurrent();
+         return true;
+      }
+   }
+   return false;
+}
+
+// Déplace le SL pour verrouiller une partie du risque initial (en multiple de R)
+bool LockProfitByRiskMultiple(const ulong ticket, const double riskMultipleToLock)
+{
+   if(!PositionSelectByTicket(ticket) || riskMultipleToLock < 0.0)
+      return false;
+
+   ENUM_POSITION_TYPE posType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+   double currentSL = PositionGetDouble(POSITION_SL);
+   double tp = PositionGetDouble(POSITION_TP);
+
+   for(int i = 0; i < g_trailingStopCount; i++)
+   {
+      if(g_trailingStopInfo[i].ticket != ticket)
+         continue;
+
+      double entry = g_trailingStopInfo[i].entryPrice;
+      double originalSL = g_trailingStopInfo[i].originalSL;
+      double risk = MathAbs(entry - originalSL);
+      if(risk <= 0.0)
+         return false;
+
+      double targetSL = currentSL;
+      if(posType == POSITION_TYPE_BUY)
+      {
+         targetSL = entry + (risk * riskMultipleToLock);
+         if(currentSL > 0.0 && targetSL <= currentSL)
+            return false;
+      }
+      else if(posType == POSITION_TYPE_SELL)
+      {
+         targetSL = entry - (risk * riskMultipleToLock);
+         if(currentSL > 0.0 && targetSL >= currentSL)
+            return false;
+      }
+      else
+      {
+         return false;
+      }
+
+      targetSL = NormalizeDouble(targetSL, _Digits);
+      bool ok = trade.PositionModify(ticket, targetSL, tp);
+      if(ok)
+      {
+         g_trailingStopInfo[i].currentSL = targetSL;
+         Print("✅ LOCK PROFIT R - Ticket=", ticket, " | R=", DoubleToString(riskMultipleToLock, 2),
+               " | Nouveau SL=", DoubleToString(targetSL, _Digits));
+      }
+      return ok;
+   }
+
+   return false;
+}
+
+// Enregistrer position pour trailing stop intelligent
+void RegisterPositionForIntelligentTrailing(ulong ticket, double entryPrice, double sl)
+{
+   for(int i = 0; i < g_trailingStopCount; i++)
+   {
+      if(g_trailingStopInfo[i].ticket == ticket) return;
+   }
+   
+   ArrayResize(g_trailingStopInfo, g_trailingStopCount + 1);
+   g_trailingStopInfo[g_trailingStopCount].ticket = ticket;
+   g_trailingStopInfo[g_trailingStopCount].entryPrice = entryPrice;
+   g_trailingStopInfo[g_trailingStopCount].originalSL = sl;
+   g_trailingStopInfo[g_trailingStopCount].currentSL = sl;
+   g_trailingStopInfo[g_trailingStopCount].highestProfit = 0;
+   g_trailingStopInfo[g_trailingStopCount].breakevenTriggered = false;
+   g_trailingStopInfo[g_trailingStopCount].breakevenTriggerPrice = 0;
+   g_trailingStopInfo[g_trailingStopCount].lastUpdate = TimeCurrent();
+   g_trailingStopInfo[g_trailingStopCount].trailMode = 0; // ATR par défaut
+   g_trailingStopCount++;
+}
+
+// Mettre à jour le trailing stop intelligent basé sur ATR
+bool UpdateTrailingStopATR(ulong ticket)
+{
+   if(!PositionSelectByTicket(ticket)) return false;
+   
+   ENUM_POSITION_TYPE posType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+   double currentPrice = PositionGetDouble(POSITION_PRICE_CURRENT);
+   double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+   double currentSL = PositionGetDouble(POSITION_SL);
+   double profit = PositionGetDouble(POSITION_PROFIT);
+   
+   // Obtenir l'ATR actuel
+   double atr = GetATR(PERIOD_M5, 14);
+   if(atr == 0) return false;
+   
+   double atrMultiplier = 2.0; // 2x ATR pour trailing
+   double newSL;
+   
+   if(posType == POSITION_TYPE_BUY)
+   {
+      newSL = currentPrice - (atr * atrMultiplier);
+      if(newSL <= currentSL) return false; // Ne bouger que si favorable
+   }
+   else
+   {
+      newSL = currentPrice + (atr * atrMultiplier);
+      if(newSL >= currentSL) return false; // Ne bouger que si favorable
+   }
+   
+   // Mettre à jour le SL
+   bool result = trade.PositionModify(ticket, newSL, PositionGetDouble(POSITION_TP));
+   if(result)
+   {
+      Print("✅ TRAILING STOP ATR - Ticket=", ticket, " Nouveau SL=", newSL);
+   }
+   
+   return result;
+}
+
+// Mettre à jour le trailing stop basé sur Swing High/Low
+bool UpdateTrailingStopSwing(ulong ticket)
+{
+   if(!PositionSelectByTicket(ticket)) return false;
+   
+   ENUM_POSITION_TYPE posType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+   double currentSL = PositionGetDouble(POSITION_SL);
+   
+   MqlRates rates[];
+   ArraySetAsSeries(rates, true);
+   if(CopyRates(_Symbol, PERIOD_M5, 0, 20, rates) < 20) return false;
+   
+   double newSL;
+   
+   if(posType == POSITION_TYPE_BUY)
+   {
+      // Pour BUY: trailing sur le swing low le plus récent
+      double recentSwingLow = rates[0].low;
+      for(int i = 1; i < 10; i++)
+      {
+         if(rates[i].low < rates[i-1].low && rates[i].low < rates[i+1].low)
+         {
+            recentSwingLow = rates[i].low;
+            break;
+         }
+      }
+      newSL = recentSwingLow;
+      if(newSL <= currentSL) return false;
+   }
+   else
+   {
+      // Pour SELL: trailing sur le swing high le plus récent
+      double recentSwingHigh = rates[0].high;
+      for(int i = 1; i < 10; i++)
+      {
+         if(rates[i].high > rates[i-1].high && rates[i].high > rates[i+1].high)
+         {
+            recentSwingHigh = rates[i].high;
+            break;
+         }
+      }
+      newSL = recentSwingHigh;
+      if(newSL >= currentSL) return false;
+   }
+   
+   bool result = trade.PositionModify(ticket, newSL, PositionGetDouble(POSITION_TP));
+   if(result)
+   {
+      Print("✅ TRAILING STOP SWING - Ticket=", ticket, " Nouveau SL=", newSL);
+   }
+   
+   return result;
+}
+
+// Mettre à jour le trailing stop basé sur EMA
+bool UpdateTrailingStopEMA(ulong ticket)
+{
+   if(!PositionSelectByTicket(ticket)) return false;
+   
+   ENUM_POSITION_TYPE posType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+   double currentSL = PositionGetDouble(POSITION_SL);
+   
+   double ema21 = GetEMA(_Symbol, PERIOD_M5, 21);
+   double ema50 = GetEMA(_Symbol, PERIOD_M5, 50);
+   
+   double newSL;
+   
+   if(posType == POSITION_TYPE_BUY)
+   {
+      // Pour BUY: trailing sur EMA21 ou EMA50 (le plus haut)
+      newSL = MathMax(ema21, ema50);
+      if(newSL <= currentSL) return false;
+   }
+   else
+   {
+      // Pour SELL: trailing sur EMA21 ou EMA50 (le plus bas)
+      newSL = MathMin(ema21, ema50);
+      if(newSL >= currentSL) return false;
+   }
+   
+   bool result = trade.PositionModify(ticket, newSL, PositionGetDouble(POSITION_TP));
+   if(result)
+   {
+      Print("✅ TRAILING STOP EMA - Ticket=", ticket, " Nouveau SL=", newSL);
+   }
+   
+   return result;
+}
+
+// Breakeven intelligent - déplacer SL au breakeven après profit suffisant
+bool UpdateIntelligentBreakeven(ulong ticket)
+{
+   if(!PositionSelectByTicket(ticket)) return false;
+   
+   for(int i = 0; i < g_trailingStopCount; i++)
+   {
+      if(g_trailingStopInfo[i].ticket == ticket)
+      {
+         if(g_trailingStopInfo[i].breakevenTriggered) return false; // Déjà fait
+         
+         double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+         double currentSL = PositionGetDouble(POSITION_SL);
+         double profit = PositionGetDouble(POSITION_PROFIT);
+         double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+         
+         // Déclencher breakeven après 20 pips de profit
+         double breakevenPips = 20.0;
+         double profitPips = profit / (PositionGetDouble(POSITION_VOLUME) * point * 10);
+         
+         if(profitPips >= breakevenPips)
+         {
+            double breakevenSL = openPrice + (2 * point); // +2 points de buffer
+            
+            bool result = trade.PositionModify(ticket, breakevenSL, PositionGetDouble(POSITION_TP));
+            if(result)
+            {
+               g_trailingStopInfo[i].breakevenTriggered = true;
+               g_trailingStopInfo[i].currentSL = breakevenSL;
+               Print("✅ BREAKEVEN - Ticket=", ticket, " SL déplacé à breakeven=", breakevenSL);
+               return true;
+            }
+         }
+         
+         break;
+      }
+   }
+   
+   return false;
+}
+
+// Gérer le trailing stop intelligent pour toutes les positions
+void ManageIntelligentTrailingStops()
+{
+   for(int i = g_trailingStopCount - 1; i >= 0; i--)
+   {
+      ulong ticket = g_trailingStopInfo[i].ticket;
+      
+      if(!PositionSelectByTicket(ticket))
+      {
+         ArrayRemove(g_trailingStopInfo, i, 1);
+         g_trailingStopCount--;
+         continue;
+      }
+      
+      // Mettre à jour le profit le plus élevé
+      double profit = PositionGetDouble(POSITION_PROFIT);
+      if(profit > g_trailingStopInfo[i].highestProfit)
+      {
+         g_trailingStopInfo[i].highestProfit = profit;
+      }
+      
+      // 1. D'abord essayer le breakeven intelligent
+      if(!g_trailingStopInfo[i].breakevenTriggered)
+      {
+         UpdateIntelligentBreakeven(ticket);
+      }
+      
+      // 2. Ensuite, mettre à jour le trailing stop selon le mode
+      int trailMode = g_trailingStopInfo[i].trailMode;
+      
+      switch(trailMode)
+      {
+         case 0: // ATR
+            UpdateTrailingStopATR(ticket);
+            break;
+         case 1: // Swing High/Low
+            UpdateTrailingStopSwing(ticket);
+            break;
+         case 2: // EMA
+            UpdateTrailingStopEMA(ticket);
+            break;
+      }
+      
+      g_trailingStopInfo[i].lastUpdate = TimeCurrent();
+   }
+}
+
+// Structure pour suivi de la protection contre le giveback de gains
+struct GivebackProtectionInfo {
+   ulong ticket;
+   double highestProfit;
+   double givebackThresholdPercent;
+   bool protectionTriggered;
+   datetime lastCheck;
+};
+
+GivebackProtectionInfo g_givebackProtectionInfo[];
+int g_givebackProtectionCount = 0;
+
+// Enregistrer position pour protection giveback
+void RegisterPositionForGivebackProtection(ulong ticket, double givebackThresholdPercent = 30.0)
+{
+   for(int i = 0; i < g_givebackProtectionCount; i++)
+   {
+      if(g_givebackProtectionInfo[i].ticket == ticket) return;
+   }
+   
+   ArrayResize(g_givebackProtectionInfo, g_givebackProtectionCount + 1);
+   g_givebackProtectionInfo[g_givebackProtectionCount].ticket = ticket;
+   g_givebackProtectionInfo[g_givebackProtectionCount].highestProfit = 0;
+   g_givebackProtectionInfo[g_givebackProtectionCount].givebackThresholdPercent = givebackThresholdPercent;
+   g_givebackProtectionInfo[g_givebackProtectionCount].protectionTriggered = false;
+   g_givebackProtectionInfo[g_givebackProtectionCount].lastCheck = TimeCurrent();
+   g_givebackProtectionCount++;
+}
+
+// Protection contre le giveback de gains
+void ManageGivebackProtection()
+{
+   // Filet global: enregistrer automatiquement toutes les positions de cet EA
+   // pour que la protection fonctionne même si l'entrée n'a pas appelé RegisterPositionForGivebackProtection.
+   for(int p = PositionsTotal() - 1; p >= 0; p--)
+   {
+      if(PositionGetTicket(p) == 0) continue;
+      if((long)PositionGetInteger(POSITION_MAGIC) != (long)InpMagicNumber) continue;
+      ulong t = (ulong)PositionGetInteger(POSITION_TICKET);
+      RegisterPositionForGivebackProtection(t, 30.0);
+   }
+
+   for(int i = g_givebackProtectionCount - 1; i >= 0; i--)
+   {
+      ulong ticket = g_givebackProtectionInfo[i].ticket;
+      
+      if(!PositionSelectByTicket(ticket))
+      {
+         ArrayRemove(g_givebackProtectionInfo, i, 1);
+         g_givebackProtectionCount--;
+         continue;
+      }
+      
+      double profit = PositionGetDouble(POSITION_PROFIT);
+      double currentLot = PositionGetDouble(POSITION_VOLUME);
+      
+      // Mettre à jour le profit le plus élevé
+      if(profit > g_givebackProtectionInfo[i].highestProfit)
+      {
+         g_givebackProtectionInfo[i].highestProfit = profit;
+      }
+      
+      double highestProfit = g_givebackProtectionInfo[i].highestProfit;
+      double givebackThresholdPercent = g_givebackProtectionInfo[i].givebackThresholdPercent;
+      
+      // Si le profit est négatif ou nul, ne rien faire
+      if(highestProfit <= 0) continue;
+      
+      // Calculer le giveback actuel
+      double givebackAmount = highestProfit - profit;
+      double givebackPercent = (givebackAmount / highestProfit) * 100;
+
+      // Règle dure demandée: à partir d'un pic >= 1$, ne pas tolérer >50% de giveback.
+      if(UseHardGiveback50From1USD &&
+         highestProfit + 1e-9 >= HardGivebackMinPeakUSD &&
+         givebackPercent + 1e-9 >= HardGivebackMaxGivebackPct)
+      {
+         string rsn = "HARD_GIVEBACK_50_FROM_1USD | peak=" + DoubleToString(highestProfit, 2) +
+                      " | now=" + DoubleToString(profit, 2) +
+                      " | gb=" + DoubleToString(givebackPercent, 1) + "%";
+         Print("⚠️ ", rsn, " | ticket=", ticket);
+         if(PositionCloseWithLog(ticket, rsn))
+         {
+            g_givebackProtectionInfo[i].protectionTriggered = true;
+            ArrayRemove(g_givebackProtectionInfo, i, 1);
+            g_givebackProtectionCount--;
+         }
+         continue;
+      }
+      
+      // Si le giveback dépasse le seuil, fermer la position
+      if(givebackPercent >= givebackThresholdPercent && profit > 0)
+      {
+         Print("⚠️ GIVEBACK PROTECTION TRIGGERED - Ticket=", ticket, 
+               " Giveback=", givebackPercent, "% (Seuil=", givebackThresholdPercent, "%)");
+
+         if(PositionCloseWithLog(ticket, "GIVEBACK_PROTECTION"))
+         {
+            Print("✅ GIVEBACK PROTECTION - Position fermée pour protéger les gains | Ticket=", ticket);
+            g_givebackProtectionInfo[i].protectionTriggered = true;
+            ArrayRemove(g_givebackProtectionInfo, i, 1);
+            g_givebackProtectionCount--;
+            continue;
+         }
+      }
+      
+      g_givebackProtectionInfo[i].lastCheck = TimeCurrent();
+   }
+}
+
+// Protection avancée - fermer partiellement si giveback détecté
+void ManagePartialGivebackProtection()
+{
+   for(int i = g_givebackProtectionCount - 1; i >= 0; i--)
+   {
+      ulong ticket = g_givebackProtectionInfo[i].ticket;
+      
+      if(!PositionSelectByTicket(ticket)) continue;
+      
+      double profit = PositionGetDouble(POSITION_PROFIT);
+      double currentLot = PositionGetDouble(POSITION_VOLUME);
+      
+      if(profit > g_givebackProtectionInfo[i].highestProfit)
+      {
+         g_givebackProtectionInfo[i].highestProfit = profit;
+      }
+      
+      double highestProfit = g_givebackProtectionInfo[i].highestProfit;
+      if(highestProfit <= 0) continue;
+      
+      double givebackAmount = highestProfit - profit;
+      double givebackPercent = (givebackAmount / highestProfit) * 100;
+      
+      // Niveaux de protection progressive
+      // 20% giveback = fermer 25%
+      if(givebackPercent >= 20 && givebackPercent < 25 && currentLot > 0.01)
+      {
+         ExecutePartialClose(ticket, 0.25, "GIVEBACK_20PCT");
+      }
+      // 30% giveback = fermer 50%
+      else if(givebackPercent >= 30 && givebackPercent < 35 && currentLot > 0.01)
+      {
+         ExecutePartialClose(ticket, 0.50, "GIVEBACK_30PCT");
+      }
+      // 40% giveback = fermer 100%
+      else if(givebackPercent >= 40 && currentLot > 0.01)
+      {
+         ExecutePartialClose(ticket, 1.0, "GIVEBACK_40PCT_FULL");
+      }
+   }
+}
+
+// Obtenir le niveau d'entrée sniper basé sur EMA/M5 trend
+double GetSniperEntryLevel(const string direction, double oteEntry, double range)
+{
+   string dir = direction; StringToUpper(dir);
+   double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   
+   // Obtenir les EMA M5
+   double ema9 = GetEMA(_Symbol, PERIOD_M5, 9);
+   double ema21 = GetEMA(_Symbol, PERIOD_M5, 21);
+   double ema50 = GetEMA(_Symbol, PERIOD_M5, 50);
+   
+   if(ema9 <= 0 || ema21 <= 0 || ema50 <= 0)
+      return oteEntry; // Fallback sur OTE entry si EMA non disponibles
+   
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   double tolerance = point * 50; // Tolérance de 50 pips
+   
+   if(dir == "BUY")
+   {
+      // Pour BUY: chercher l'EMA la plus proche en dessous du prix
+      double bestEntry = oteEntry;
+      
+      // Priorité 1: EMA9 si proche du prix et alignée avec tendance
+      if(ema9 < currentPrice && MathAbs(currentPrice - ema9) < tolerance && ema9 > ema21)
+      {
+         bestEntry = ema9;
+      }
+      // Priorité 2: EMA21 si proche et alignée
+      else if(ema21 < currentPrice && MathAbs(currentPrice - ema21) < tolerance && ema21 > ema50)
+      {
+         bestEntry = ema21;
+      }
+      // Priorité 3: EMA50 si proche
+      else if(ema50 < currentPrice && MathAbs(currentPrice - ema50) < tolerance * 2)
+      {
+         bestEntry = ema50;
+      }
+      
+      // S'assurer que l'entrée n'est pas trop loin de l'OTE entry
+      if(MathAbs(bestEntry - oteEntry) > range * 0.1)
+         bestEntry = oteEntry;
+      
+      return bestEntry;
+   }
+   else // SELL
+   {
+      // Pour SELL: chercher l'EMA la plus proche au-dessus du prix
+      double bestEntry = oteEntry;
+      
+      // Priorité 1: EMA9 si proche du prix et alignée avec tendance
+      if(ema9 > currentPrice && MathAbs(currentPrice - ema9) < tolerance && ema9 < ema21)
+      {
+         bestEntry = ema9;
+      }
+      // Priorité 2: EMA21 si proche et alignée
+      else if(ema21 > currentPrice && MathAbs(currentPrice - ema21) < tolerance && ema21 < ema50)
+      {
+         bestEntry = ema21;
+      }
+      // Priorité 3: EMA50 si proche
+      else if(ema50 > currentPrice && MathAbs(currentPrice - ema50) < tolerance * 2)
+      {
+         bestEntry = ema50;
+      }
+      
+      // S'assurer que l'entrée n'est pas trop loin de l'OTE entry
+      if(MathAbs(bestEntry - oteEntry) > range * 0.1)
+         bestEntry = oteEntry;
+      
+      return bestEntry;
+   }
+}
+
+// Détecter si un setup OTE est actif sur les 100 dernières bougies avec confirmation M5
+bool DetectActiveOTESetupOn100Bars(string &directionOut, double &entryOut, double &slOut, double &tpOut, double &highOut, double &lowOut)
+{
+   directionOut = "";
+   entryOut = 0.0;
+   slOut = 0.0;
+   tpOut = 0.0;
+   highOut = 0.0;
+   lowOut = 0.0;
+   
+   ENUM_SYMBOL_CATEGORY cat = SMC_GetSymbolCategory(_Symbol);
+   if(!(cat == SYM_FOREX || cat == SYM_METAL || cat == SYM_COMMODITY || cat == SYM_BOOM_CRASH || cat == SYM_WELTRADE_SYNTH))
+      return false;
+   
+   if(!UseOTE)
+      return false;
+   
+   // Obtenir les 100 dernières bougies sur le timeframe actuel
+   double high[], low[], close[];
+   datetime time[];
+   ArraySetAsSeries(high, true);
+   ArraySetAsSeries(low, true);
+   ArraySetAsSeries(close, true);
+   ArraySetAsSeries(time, true);
+   
+   int bars = 100;
+   if(CopyHigh(_Symbol, PERIOD_CURRENT, 0, bars, high) < bars ||
+      CopyLow(_Symbol, PERIOD_CURRENT, 0, bars, low) < bars ||
+      CopyClose(_Symbol, PERIOD_CURRENT, 0, bars, close) < bars ||
+      CopyTime(_Symbol, PERIOD_CURRENT, 0, bars, time) < bars)
+      return false;
+   
+   // Trouver le swing high et swing low significatifs sur 100 bougies
+   double highestHigh = high[ArrayMaximum(high)];
+   double lowestLow = low[ArrayMinimum(low)];
+   
+   if(highestHigh <= lowestLow)
+      return false;
+   
+   double range = highestHigh - lowestLow;
+   double currentPrice = close[0];
+   
+   // Calculer les zones OTE (62-78.6%)
+   double ote62, ote786;
+   
+   double tolerance = range * 0.005; // Tolérance de 0.5% de la zone
+
+   // BUY OTE (61.8 -> 78.6 depuis le swing low)
+   ote62 = lowestLow + range * 0.62;
+   ote786 = lowestLow + range * 0.786;
+   bool inBuyZone = (currentPrice >= ote62 && currentPrice <= ote786);
+   bool nearBuyZone = (MathAbs(currentPrice - ote62) < tolerance || MathAbs(currentPrice - ote786) < tolerance);
+   if(inBuyZone || nearBuyZone)
+   {
+      directionOut = "BUY";
+      entryOut = currentPrice;
+      slOut = lowestLow;
+      tpOut = currentPrice + (currentPrice - slOut) * 2.0;
+      highOut = highestHigh;
+      lowOut = lowestLow;
+
+      if(!HasOTEBOSConfirmationM15OrM5("BUY"))
+         return false;
+      if(!IsOTEEntryConfirmedOnM15OrM5("BUY"))
+         return false;
+      if(OTE_RequireStrongTrend && !IsStrongM1M5TrendByEMAs("BUY"))
+         return false;
+
+      entryOut = GetSniperEntryLevel("BUY", entryOut, range);
+      return true;
+   }
+
+   // SELL OTE (78.6 -> 61.8 depuis le swing high)
+   ote62 = highestHigh - range * 0.62;
+   ote786 = highestHigh - range * 0.786;
+   if(ote62 < ote786)
+   {
+      double tmp = ote62; ote62 = ote786; ote786 = tmp;
+   }
+   bool inSellZone = (currentPrice >= ote786 && currentPrice <= ote62);
+   bool nearSellZone = (MathAbs(currentPrice - ote62) < tolerance || MathAbs(currentPrice - ote786) < tolerance);
+   if(inSellZone || nearSellZone)
+   {
+      directionOut = "SELL";
+      entryOut = currentPrice;
+      slOut = highestHigh;
+      tpOut = currentPrice - (slOut - currentPrice) * 2.0;
+      highOut = highestHigh;
+      lowOut = lowestLow;
+
+      if(!HasOTEBOSConfirmationM15OrM5("SELL"))
+         return false;
+      if(!IsOTEEntryConfirmedOnM15OrM5("SELL"))
+         return false;
+      if(OTE_RequireStrongTrend && !IsStrongM1M5TrendByEMAs("SELL"))
+         return false;
+
+      entryOut = GetSniperEntryLevel("SELL", entryOut, range);
+      return true;
+   }
+   
+   return false;
+}
+
+// Dessiner un niveau Fibonacci
+void DrawFiboLevel(string name, double price, string label, color col, datetime time)
+{
+   if(StrategyVisualMinimalMode)
+      return;
+
+   // Ligne horizontale
+   string lineName = name + "_LINE";
+   ObjectCreate(0, lineName, OBJ_HLINE, 0, time, price);
+   ObjectSetInteger(0, lineName, OBJPROP_COLOR, col);
+   ObjectSetInteger(0, lineName, OBJPROP_STYLE, STYLE_DOT);
+   ObjectSetInteger(0, lineName, OBJPROP_WIDTH, 1);
+   ObjectSetInteger(0, lineName, OBJPROP_BACK, true);
+   
+   // Label
+   string labelName = name + "_LABEL";
+   ObjectCreate(0, labelName, OBJ_TEXT, 0, time + PeriodSeconds(PERIOD_M1) * 5, price);
+   ObjectSetString(0, labelName, OBJPROP_TEXT, label);
+   ObjectSetInteger(0, labelName, OBJPROP_COLOR, col);
+   ObjectSetInteger(0, labelName, OBJPROP_FONTSIZE, 8);
+   ObjectSetInteger(0, labelName, OBJPROP_BACK, false);
+}
+
+// Dessiner les zones OTE+Fibo dynamiques sur 100 bougies
+void DrawDynamicOTEFibo()
+{
+   // Anti-détachement: éviter les destructions massives d'objets et limiter la fréquence.
+   static datetime s_lastDraw = 0;
+   datetime nowDraw = TimeCurrent();
+   int minInterval = MathMax(2, HeavyGraphicsMinIntervalSec);
+   if(s_lastDraw > 0 && (nowDraw - s_lastDraw) < minInterval)
+      return;
+   s_lastDraw = nowDraw;
+
+   if(MaxChartObjectsSafety > 0)
+   {
+      int objN = ObjectsTotal(0, -1, -1);
+      if(objN > MaxChartObjectsSafety)
+         return;
+   }
    
    datetime currentTime = TimeCurrent();
-   datetime futureTime = currentTime + PeriodSeconds(PERIOD_M1) * 20;
+   datetime futureTime = currentTime + PeriodSeconds(PERIOD_H1) * 50;
    
-   // Zone d'entrée OTE
-   string entryZone = "OTE_SETUP_ENTRY_ZONE";
-   ObjectCreate(0, entryZone, OBJ_RECTANGLE, 0, currentTime, entryPrice - SymbolInfoDouble(_Symbol, SYMBOL_POINT) * 2, 
-                futureTime, entryPrice + SymbolInfoDouble(_Symbol, SYMBOL_POINT) * 2);
+   // Vérifier si un setup OTE est actif sur les 100 dernières bougies
+   string activeDirection;
+   double activeEntry, activeSL, activeTP, activeHigh, activeLow;
+   
+   if(!DetectActiveOTESetupOn100Bars(activeDirection, activeEntry, activeSL, activeTP, activeHigh, activeLow))
+   {
+      // Pas de setup actif - les zones sont déjà supprimées
+      return;
+   }
+   
+   double range = activeHigh - activeLow;
+   if(range <= 0.0)
+      return;
+   
+   // Calculer les niveaux Fibonacci dynamiques basés sur le range des 100 bougies
+   double fibo618, fibo705, fibo79, fibo886;
+   
+   if(activeDirection == "BUY")
+   {
+      fibo618 = activeLow + range * 0.62;
+      fibo705 = activeLow + range * 0.705;
+      fibo79 = activeLow + range * 0.786;
+      fibo886 = activeLow + range * 0.886;
+   }
+   else
+   {
+      fibo618 = activeHigh - range * 0.62;
+      fibo705 = activeHigh - range * 0.705;
+      fibo79 = activeHigh - range * 0.786;
+      fibo886 = activeHigh - range * 0.886;
+   }
+   
+   // Dessiner les niveaux Fibonacci (désactivé en mode visuel minimal)
+   // 0.886 caché car non utilisé dans la vidéo de référence OTE
+   // DrawFiboLevel("OTE_DYN_FIBO_886", fibo886, "88.6%", clrGray, currentTime);
+   DrawFiboLevel("OTE_DYN_FIBO_79", fibo79, "78.6%", clrOrange, currentTime);
+   DrawFiboLevel("OTE_DYN_FIBO_705", fibo705, "70.5%", clrGold, currentTime);
+   DrawFiboLevel("OTE_DYN_FIBO_618", fibo618, "62.0%", clrLime, currentTime);
+   DrawFiboLevel("OTE_DYN_FIBO_0", activeLow, "0%", clrBlue, currentTime);
+   DrawFiboLevel("OTE_DYN_FIBO_100", activeHigh, "100%", clrBlue, currentTime);
+   
+   if(!StrategyVisualMinimalMode)
+   {
+      // Rectangle SL (rouge transparent)
+      string slRectName = "OTE_DYN_SL_RECT";
+      if(activeDirection == "BUY")
+      {
+         if(ObjectFind(0, slRectName) < 0)
+            ObjectCreate(0, slRectName, OBJ_RECTANGLE, 0, currentTime, activeEntry, futureTime, activeSL);
+         else
+         {
+            ObjectMove(0, slRectName, 0, currentTime, activeEntry);
+            ObjectMove(0, slRectName, 1, futureTime, activeSL);
+         }
+      }
+      else
+      {
+         if(ObjectFind(0, slRectName) < 0)
+            ObjectCreate(0, slRectName, OBJ_RECTANGLE, 0, currentTime, activeSL, futureTime, activeEntry);
+         else
+         {
+            ObjectMove(0, slRectName, 0, currentTime, activeSL);
+            ObjectMove(0, slRectName, 1, futureTime, activeEntry);
+         }
+      }
+      ObjectSetInteger(0, slRectName, OBJPROP_COLOR, clrRed);
+      ObjectSetInteger(0, slRectName, OBJPROP_BGCOLOR, C'255,100,100');
+      ObjectSetInteger(0, slRectName, OBJPROP_FILL, true);
+      ObjectSetInteger(0, slRectName, OBJPROP_BACK, true);
+      ObjectSetInteger(0, slRectName, OBJPROP_WIDTH, 1);
+      ObjectSetInteger(0, slRectName, OBJPROP_STYLE, STYLE_SOLID);
+      ObjectSetInteger(0, slRectName, OBJPROP_SELECTABLE, false);
+   }
+   
+   if(!StrategyVisualMinimalMode)
+   {
+      // Rectangle TP (vert transparent)
+      string tpRectName = "OTE_DYN_TP_RECT";
+      if(activeDirection == "BUY")
+      {
+         if(ObjectFind(0, tpRectName) < 0)
+            ObjectCreate(0, tpRectName, OBJ_RECTANGLE, 0, currentTime, activeTP, futureTime, activeEntry);
+         else
+         {
+            ObjectMove(0, tpRectName, 0, currentTime, activeTP);
+            ObjectMove(0, tpRectName, 1, futureTime, activeEntry);
+         }
+      }
+      else
+      {
+         if(ObjectFind(0, tpRectName) < 0)
+            ObjectCreate(0, tpRectName, OBJ_RECTANGLE, 0, currentTime, activeEntry, futureTime, activeTP);
+         else
+         {
+            ObjectMove(0, tpRectName, 0, currentTime, activeEntry);
+            ObjectMove(0, tpRectName, 1, futureTime, activeTP);
+         }
+      }
+      ObjectSetInteger(0, tpRectName, OBJPROP_COLOR, clrGreen);
+      ObjectSetInteger(0, tpRectName, OBJPROP_BGCOLOR, C'100,255,100');
+      ObjectSetInteger(0, tpRectName, OBJPROP_FILL, true);
+      ObjectSetInteger(0, tpRectName, OBJPROP_BACK, true);
+      ObjectSetInteger(0, tpRectName, OBJPROP_WIDTH, 1);
+      ObjectSetInteger(0, tpRectName, OBJPROP_STYLE, STYLE_SOLID);
+      ObjectSetInteger(0, tpRectName, OBJPROP_SELECTABLE, false);
+   }
+   
+   // Zone d'entrée OTE (vraie poche 62-78.6, pas une bande ultra-fine)
+   string entryZone = "OTE_DYN_ENTRY_ZONE";
+   double ptLocal = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   if(ptLocal <= 0.0) ptLocal = _Point;
+   double z62Entry = (activeDirection == "BUY") ? (activeLow + range * 0.618) : (activeHigh - range * 0.618);
+   double z786Entry = (activeDirection == "BUY") ? (activeLow + range * 0.786) : (activeHigh - range * 0.786);
+   double ezLow = MathMin(z62Entry, z786Entry);
+   double ezHigh = MathMax(z62Entry, z786Entry);
+   if(ObjectFind(0, entryZone) < 0)
+      ObjectCreate(0, entryZone, OBJ_RECTANGLE, 0, currentTime, ezLow, futureTime, ezHigh);
+   else
+   {
+      ObjectMove(0, entryZone, 0, currentTime, ezLow);
+      ObjectMove(0, entryZone, 1, futureTime, ezHigh);
+   }
    ObjectSetInteger(0, entryZone, OBJPROP_COLOR, clrBlue);
-   ObjectSetInteger(0, entryZone, OBJPROP_BGCOLOR, C'220,220,255');
+    ObjectSetInteger(0, entryZone, OBJPROP_BGCOLOR, C'120,120,255');
    ObjectSetInteger(0, entryZone, OBJPROP_FILL, true);
-   ObjectSetInteger(0, entryZone, OBJPROP_BACK, true);
+   ObjectSetInteger(0, entryZone, OBJPROP_BACK, false);
    ObjectSetInteger(0, entryZone, OBJPROP_STYLE, STYLE_SOLID);
-   ObjectSetInteger(0, entryZone, OBJPROP_WIDTH, 1);
+   ObjectSetInteger(0, entryZone, OBJPROP_WIDTH, 2);
    
    // Ligne d'entrée
-   string entryLine = "OTE_SETUP_ENTRY_LINE";
-   ObjectCreate(0, entryLine, OBJ_HLINE, 0, currentTime, entryPrice);
+   string entryLine = "OTE_DYN_ENTRY_LINE";
+   if(ObjectFind(0, entryLine) < 0)
+      ObjectCreate(0, entryLine, OBJ_HLINE, 0, currentTime, activeEntry);
+   else
+      ObjectSetDouble(0, entryLine, OBJPROP_PRICE, activeEntry);
    ObjectSetInteger(0, entryLine, OBJPROP_COLOR, clrBlue);
    ObjectSetInteger(0, entryLine, OBJPROP_STYLE, STYLE_SOLID);
-   ObjectSetInteger(0, entryLine, OBJPROP_WIDTH, 2);
+   ObjectSetInteger(0, entryLine, OBJPROP_WIDTH, 3);
    ObjectSetInteger(0, entryLine, OBJPROP_BACK, false);
    
    // Ligne SL
-   string slLine = "OTE_SETUP_SL_LINE";
+   string slLine = "OTE_DYN_SL_LINE";
+   if(ObjectFind(0, slLine) < 0)
+      ObjectCreate(0, slLine, OBJ_HLINE, 0, currentTime, activeSL);
+   else
+      ObjectSetDouble(0, slLine, OBJPROP_PRICE, activeSL);
+   ObjectSetInteger(0, slLine, OBJPROP_COLOR, clrRed);
+   ObjectSetInteger(0, slLine, OBJPROP_STYLE, STYLE_DASH);
+   ObjectSetInteger(0, slLine, OBJPROP_WIDTH, 2);
+   ObjectSetInteger(0, slLine, OBJPROP_BACK, false);
+   
+   // Ligne TP
+   string tpLine = "OTE_DYN_TP_LINE";
+   if(ObjectFind(0, tpLine) < 0)
+      ObjectCreate(0, tpLine, OBJ_HLINE, 0, currentTime, activeTP);
+   else
+      ObjectSetDouble(0, tpLine, OBJPROP_PRICE, activeTP);
+   ObjectSetInteger(0, tpLine, OBJPROP_COLOR, clrGreen);
+   ObjectSetInteger(0, tpLine, OBJPROP_STYLE, STYLE_DASH);
+   ObjectSetInteger(0, tpLine, OBJPROP_WIDTH, 2);
+   ObjectSetInteger(0, tpLine, OBJPROP_BACK, false);
+
+   // --- Visuels protocole (Premium/Discount, Eq 0.5, poche OTE, TP1/TP2, SL sous 79%) ---
+   if(ShowOTEProtocolVisuals)
+   {
+      string dirP = activeDirection;
+      StringToUpper(dirP);
+
+      double curBid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+      double curAsk = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+      double curMid = (curBid > 0.0 && curAsk > 0.0) ? (curBid + curAsk) * 0.5 : curBid;
+      if(curMid > 0.0)
+      {
+         double z62 = (dirP == "BUY") ? (activeLow + range * 0.618) : (activeHigh - range * 0.618);
+         double z786 = (dirP == "BUY") ? (activeLow + range * 0.786) : (activeHigh - range * 0.786);
+         double zLow = MathMin(z62, z786);
+         double zHigh = MathMax(z62, z786);
+         double zoneTol = MathMax(ptLocal * 2.0, range * 0.005); // même logique tolérante que la détection OTE active
+         bool inZone = (curMid >= (zLow - zoneTol) && curMid <= (zHigh + zoneTol));
+
+         datetime tLeft = currentTime;
+         int fwd = MathMax(30, OTEProtocolVisualForwardBarsM1);
+         datetime tRight = currentTime + (datetime)(PeriodSeconds(PERIOD_M1) * fwd);
+
+         // Nettoyer proprement quand hors zone (sans ObjectsDeleteAll massif)
+         string pfx = "OTE_PROTO_";
+         if(!inZone)
+         {
+            string keys[12] = {"PREMIUM","DISCOUNT","EQ","OTE","SW_H","SW_L","TP1","TP2","SLG","TITLE","SL","TP"};
+            for(int k=0;k<12;k++)
+            {
+               string nm = pfx + keys[k];
+               if(ObjectFind(0, nm) >= 0) ObjectDelete(0, nm);
+               if(ObjectFind(0, nm + "_LBL") >= 0) ObjectDelete(0, nm + "_LBL");
+            }
+         }
+         else
+         {
+            double eq = (dirP == "BUY") ? (activeLow + range * 0.50) : (activeHigh - range * 0.50);
+            double tp1 = (dirP == "BUY") ? (activeLow + range * 0.236) : (activeHigh - range * 0.236);
+            double tp2 = (dirP == "BUY") ? activeHigh : activeLow; // Swing High / Swing Low
+            double slGuide = (dirP == "BUY") ? (zLow - (double)MathMax(1, OTEProtocolSLBufferPoints) * ptLocal)
+                                             : (zHigh + (double)MathMax(1, OTEProtocolSLBufferPoints) * ptLocal);
+
+            // Discount zone (0 -> eq)
+            string disc = pfx + "DISCOUNT";
+            double discTop = (dirP == "BUY") ? eq : activeHigh;
+            double discBot = (dirP == "BUY") ? activeLow : eq;
+            if(ObjectFind(0, disc) < 0) ObjectCreate(0, disc, OBJ_RECTANGLE, 0, tLeft, discTop, tRight, discBot);
+            else { ObjectMove(0, disc, 0, tLeft, discTop); ObjectMove(0, disc, 1, tRight, discBot); }
+            ObjectSetInteger(0, disc, OBJPROP_COLOR, clrDarkGreen);
+            ObjectSetInteger(0, disc, OBJPROP_BGCOLOR, C'0,120,0');
+            ObjectSetInteger(0, disc, OBJPROP_FILL, true);
+            ObjectSetInteger(0, disc, OBJPROP_BACK, true);
+
+            // Premium zone (eq -> 1.0)
+            string prem = pfx + "PREMIUM";
+            double premTop = (dirP == "BUY") ? activeHigh : eq;
+            double premBot = (dirP == "BUY") ? eq : activeLow;
+            if(ObjectFind(0, prem) < 0) ObjectCreate(0, prem, OBJ_RECTANGLE, 0, tLeft, premTop, tRight, premBot);
+            else { ObjectMove(0, prem, 0, tLeft, premTop); ObjectMove(0, prem, 1, tRight, premBot); }
+            ObjectSetInteger(0, prem, OBJPROP_COLOR, clrMaroon);
+            ObjectSetInteger(0, prem, OBJPROP_BGCOLOR, C'120,0,0');
+            ObjectSetInteger(0, prem, OBJPROP_FILL, true);
+            ObjectSetInteger(0, prem, OBJPROP_BACK, true);
+
+            // Eq line
+            string eqN = pfx + "EQ";
+            if(ObjectFind(0, eqN) < 0) ObjectCreate(0, eqN, OBJ_HLINE, 0, 0, eq);
+            else ObjectSetDouble(0, eqN, OBJPROP_PRICE, eq);
+            ObjectSetInteger(0, eqN, OBJPROP_COLOR, clrSilver);
+            ObjectSetInteger(0, eqN, OBJPROP_STYLE, STYLE_DASH);
+            ObjectSetInteger(0, eqN, OBJPROP_WIDTH, 1);
+
+            // OTE pocket
+            string ote = pfx + "OTE";
+            if(ObjectFind(0, ote) < 0) ObjectCreate(0, ote, OBJ_RECTANGLE, 0, tLeft, zHigh, tRight, zLow);
+            else { ObjectMove(0, ote, 0, tLeft, zHigh); ObjectMove(0, ote, 1, tRight, zLow); }
+            ObjectSetInteger(0, ote, OBJPROP_COLOR, clrOrange);
+            ObjectSetInteger(0, ote, OBJPROP_BGCOLOR, C'255,170,60');
+            ObjectSetInteger(0, ote, OBJPROP_FILL, true);
+            ObjectSetInteger(0, ote, OBJPROP_BACK, false);
+            ObjectSetInteger(0, ote, OBJPROP_WIDTH, 2);
+
+            // Swing High / Low
+            string shN = pfx + "SW_H";
+            if(ObjectFind(0, shN) < 0) ObjectCreate(0, shN, OBJ_HLINE, 0, 0, activeHigh);
+            else ObjectSetDouble(0, shN, OBJPROP_PRICE, activeHigh);
+            ObjectSetInteger(0, shN, OBJPROP_COLOR, clrWhite);
+            ObjectSetInteger(0, shN, OBJPROP_STYLE, STYLE_DOT);
+            ObjectSetInteger(0, shN, OBJPROP_WIDTH, 1);
+
+            string slN = pfx + "SW_L";
+            if(ObjectFind(0, slN) < 0) ObjectCreate(0, slN, OBJ_HLINE, 0, 0, activeLow);
+            else ObjectSetDouble(0, slN, OBJPROP_PRICE, activeLow);
+            ObjectSetInteger(0, slN, OBJPROP_COLOR, clrWhite);
+            ObjectSetInteger(0, slN, OBJPROP_STYLE, STYLE_DOT);
+            ObjectSetInteger(0, slN, OBJPROP_WIDTH, 1);
+
+            // TP1 / TP2
+            string tp1N = pfx + "TP1";
+            if(ObjectFind(0, tp1N) < 0) ObjectCreate(0, tp1N, OBJ_HLINE, 0, 0, tp1);
+            else ObjectSetDouble(0, tp1N, OBJPROP_PRICE, tp1);
+            ObjectSetInteger(0, tp1N, OBJPROP_COLOR, clrLimeGreen);
+            ObjectSetInteger(0, tp1N, OBJPROP_STYLE, STYLE_SOLID);
+            ObjectSetInteger(0, tp1N, OBJPROP_WIDTH, 1);
+
+            string tp2N = pfx + "TP2";
+            if(ObjectFind(0, tp2N) < 0) ObjectCreate(0, tp2N, OBJ_HLINE, 0, 0, tp2);
+            else ObjectSetDouble(0, tp2N, OBJPROP_PRICE, tp2);
+            ObjectSetInteger(0, tp2N, OBJPROP_COLOR, clrLime);
+            ObjectSetInteger(0, tp2N, OBJPROP_STYLE, STYLE_SOLID);
+            ObjectSetInteger(0, tp2N, OBJPROP_WIDTH, 2);
+
+            // SL guide
+            string slg = pfx + "SLG";
+            if(ObjectFind(0, slg) < 0) ObjectCreate(0, slg, OBJ_HLINE, 0, 0, slGuide);
+            else ObjectSetDouble(0, slg, OBJPROP_PRICE, slGuide);
+            ObjectSetInteger(0, slg, OBJPROP_COLOR, clrTomato);
+            ObjectSetInteger(0, slg, OBJPROP_STYLE, STYLE_DASHDOT);
+            ObjectSetInteger(0, slg, OBJPROP_WIDTH, 1);
+
+            // SL / TP réels du setup OTE actif (toujours visibles en zone active protocole)
+            string slReal = pfx + "SL";
+            if(ObjectFind(0, slReal) < 0) ObjectCreate(0, slReal, OBJ_HLINE, 0, 0, activeSL);
+            else ObjectSetDouble(0, slReal, OBJPROP_PRICE, activeSL);
+            ObjectSetInteger(0, slReal, OBJPROP_COLOR, clrRed);
+            ObjectSetInteger(0, slReal, OBJPROP_STYLE, STYLE_DASH);
+            ObjectSetInteger(0, slReal, OBJPROP_WIDTH, 2);
+
+            string tpReal = pfx + "TP";
+            if(ObjectFind(0, tpReal) < 0) ObjectCreate(0, tpReal, OBJ_HLINE, 0, 0, activeTP);
+            else ObjectSetDouble(0, tpReal, OBJPROP_PRICE, activeTP);
+            ObjectSetInteger(0, tpReal, OBJPROP_COLOR, clrLime);
+            ObjectSetInteger(0, tpReal, OBJPROP_STYLE, STYLE_DASH);
+            ObjectSetInteger(0, tpReal, OBJPROP_WIDTH, 2);
+
+            datetime tLbl = tRight - (datetime)(PeriodSeconds(PERIOD_M1) * 2);
+            if(tLbl <= tLeft)
+               tLbl = tLeft + (datetime)(PeriodSeconds(PERIOD_M1) * 2);
+
+            string slLbl = pfx + "SL_LBL";
+            if(ObjectFind(0, slLbl) < 0) ObjectCreate(0, slLbl, OBJ_TEXT, 0, tLbl, activeSL);
+            else ObjectMove(0, slLbl, 0, tLbl, activeSL);
+            ObjectSetString(0, slLbl, OBJPROP_TEXT, "SL");
+            ObjectSetInteger(0, slLbl, OBJPROP_COLOR, clrRed);
+            ObjectSetInteger(0, slLbl, OBJPROP_FONTSIZE, 9);
+
+            string tpLbl = pfx + "TP_LBL";
+            if(ObjectFind(0, tpLbl) < 0) ObjectCreate(0, tpLbl, OBJ_TEXT, 0, tLbl, activeTP);
+            else ObjectMove(0, tpLbl, 0, tLbl, activeTP);
+            ObjectSetString(0, tpLbl, OBJPROP_TEXT, "TP");
+            ObjectSetInteger(0, tpLbl, OBJPROP_COLOR, clrLime);
+            ObjectSetInteger(0, tpLbl, OBJPROP_FONTSIZE, 9);
+
+            string tp1Lbl = pfx + "TP1_LBL";
+            if(ObjectFind(0, tp1Lbl) < 0) ObjectCreate(0, tp1Lbl, OBJ_TEXT, 0, tLbl, tp1);
+            else ObjectMove(0, tp1Lbl, 0, tLbl, tp1);
+            ObjectSetString(0, tp1Lbl, OBJPROP_TEXT, "TP1");
+            ObjectSetInteger(0, tp1Lbl, OBJPROP_COLOR, clrLimeGreen);
+            ObjectSetInteger(0, tp1Lbl, OBJPROP_FONTSIZE, 8);
+
+            string tp2Lbl = pfx + "TP2_LBL";
+            if(ObjectFind(0, tp2Lbl) < 0) ObjectCreate(0, tp2Lbl, OBJ_TEXT, 0, tLbl, tp2);
+            else ObjectMove(0, tp2Lbl, 0, tLbl, tp2);
+            ObjectSetString(0, tp2Lbl, OBJPROP_TEXT, "TP2");
+            ObjectSetInteger(0, tp2Lbl, OBJPROP_COLOR, clrLime);
+            ObjectSetInteger(0, tp2Lbl, OBJPROP_FONTSIZE, 8);
+
+            // Title (compact)
+            string title = pfx + "TITLE";
+            if(ObjectFind(0, title) < 0) ObjectCreate(0, title, OBJ_LABEL, 0, 0, 0);
+            ObjectSetInteger(0, title, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+            ObjectSetInteger(0, title, OBJPROP_XDISTANCE, 10);
+            ObjectSetInteger(0, title, OBJPROP_YDISTANCE, 2);
+            ObjectSetInteger(0, title, OBJPROP_FONTSIZE, 10);
+            ObjectSetString(0, title, OBJPROP_TEXT, "OTE+FIBO PROTOCOL ACTIVE (" + dirP + ") — in zone");
+            ObjectSetInteger(0, title, OBJPROP_COLOR, clrWhite);
+         }
+      }
+   }
+   
+   if(!StrategyVisualMinimalMode)
+   {
+      // Labels
+      string entryLabel = "OTE_DYN_ENTRY_LABEL";
+      ObjectCreate(0, entryLabel, OBJ_TEXT, 0, currentTime + PeriodSeconds(PERIOD_M1) * 2, activeEntry + SymbolInfoDouble(_Symbol, SYMBOL_POINT) * 5);
+      ObjectSetString(0, entryLabel, OBJPROP_TEXT, "OTE Entry " + activeDirection + " @" + DoubleToString(activeEntry, _Digits));
+      ObjectSetInteger(0, entryLabel, OBJPROP_COLOR, clrWhite);
+      ObjectSetInteger(0, entryLabel, OBJPROP_FONTSIZE, 10);
+      ObjectSetInteger(0, entryLabel, OBJPROP_BACK, false);
+      
+      string slLabel = "OTE_DYN_SL_LABEL";
+      ObjectCreate(0, slLabel, OBJ_TEXT, 0, currentTime + PeriodSeconds(PERIOD_M1) * 2, activeSL - SymbolInfoDouble(_Symbol, SYMBOL_POINT) * 3);
+      ObjectSetString(0, slLabel, OBJPROP_TEXT, "SL @" + DoubleToString(activeSL, _Digits));
+      ObjectSetInteger(0, slLabel, OBJPROP_COLOR, clrRed);
+      ObjectSetInteger(0, slLabel, OBJPROP_FONTSIZE, 9);
+      ObjectSetInteger(0, slLabel, OBJPROP_BACK, false);
+      
+      string tpLabel = "OTE_DYN_TP_LABEL";
+      ObjectCreate(0, tpLabel, OBJ_TEXT, 0, currentTime + PeriodSeconds(PERIOD_M1) * 2, activeTP + SymbolInfoDouble(_Symbol, SYMBOL_POINT) * 3);
+      ObjectSetString(0, tpLabel, OBJPROP_TEXT, "TP @" + DoubleToString(activeTP, _Digits));
+      ObjectSetInteger(0, tpLabel, OBJPROP_COLOR, clrGreen);
+      ObjectSetInteger(0, tpLabel, OBJPROP_FONTSIZE, 9);
+      ObjectSetInteger(0, tpLabel, OBJPROP_BACK, false);
+      
+      // Titre du setup
+      string title = "OTE_DYN_TITLE";
+      ObjectCreate(0, title, OBJ_TEXT, 0, currentTime, activeTP + SymbolInfoDouble(_Symbol, SYMBOL_POINT) * 10);
+      ObjectSetString(0, title, OBJPROP_TEXT, "⚡ OTE DYNAMIQUE (100 bars) - " + activeDirection + " ⚡");
+      ObjectSetInteger(0, title, OBJPROP_COLOR, clrYellow);
+      ObjectSetInteger(0, title, OBJPROP_FONTSIZE, 12);
+      ObjectSetInteger(0, title, OBJPROP_BACK, false);
+   }
+   
+   if(!StrategyVisualMinimalMode)
+   {
+      Print("🎯 SETUP OTE DYNAMIQUE ACTIF - ", activeDirection, " ", _Symbol);
+      Print("   📊 Range 100 bars: ", DoubleToString(activeLow, _Digits), " à ", DoubleToString(activeHigh, _Digits));
+      Print("   📍 Entry: ", DoubleToString(activeEntry, _Digits));
+      Print("   🛡️ SL: ", DoubleToString(activeSL, _Digits));
+      Print("   🎯 TP: ", DoubleToString(activeTP, _Digits));
+      Print("   📊 Fibo 61.8%: ", DoubleToString(fibo618, _Digits));
+      Print("   📊 Fibo 70.5%: ", DoubleToString(fibo705, _Digits));
+      Print("   📊 Fibo 79%: ", DoubleToString(fibo79, _Digits));
+      Print("   📊 Fibo 88.6%: ", DoubleToString(fibo886, _Digits));
+   }
+}
+
+//+------------------------------------------------------------------+
+//| AFFICHAGE ZONE OTE SURLIGNÉE QUAND PRIX TOUCHE + PATTERNS       |
+//+------------------------------------------------------------------+
+void DrawOTEZoneHighlightedOnTouch()
+{
+   ObjectsDeleteAll(0, "OTE_TOUCH_");
+   
+   MqlRates rates[];
+   ArraySetAsSeries(rates, true);
+   int copied = CopyRates(_Symbol, PERIOD_M1, 0, 50, rates);
+   if(copied < 10) return;
+   
+   double currentPrice = rates[0].close;
+   double swingHigh = rates[0].high;
+   double swingLow = rates[0].low;
+   
+   // Trouver zone active
+   for(int i = 0; i < 50 && i < copied; i++)
+   {
+      swingHigh = MathMax(swingHigh, rates[i].high);
+      swingLow = MathMin(swingLow, rates[i].low);
+   }
+   
+   double range = swingHigh - swingLow;
+   string direction = (currentPrice > (swingHigh + swingLow) / 2) ? "BUY" : "SELL";
+   
+   // Zones Fibonacci
+   double fibo618 = (direction == "BUY") ? swingLow + range * 0.618 : swingHigh - range * 0.618;
+   double fibo705 = (direction == "BUY") ? swingLow + range * 0.705 : swingHigh - range * 0.705;
+   double z2Low = MathMin(fibo618, fibo705);
+   double z2High = MathMax(fibo618, fibo705);
+   
+   // Vérifier si le prix touche la zone OTE (S2)
+   bool inZone = (currentPrice >= z2Low && currentPrice <= z2High);
+   
+   if(inZone)
+   {
+      datetime now = TimeCurrent();
+      datetime future = now + PeriodSeconds(PERIOD_M1) * 50;
+      double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+      
+      // Zone surlignée LARGE quand prix dedans
+      string zoneActive = "OTE_TOUCH_ACTIVE_ZONE";
+      ObjectCreate(0, zoneActive, OBJ_RECTANGLE, 0, now, z2High + point * 50, future, z2Low - point * 50);
+      ObjectSetInteger(0, zoneActive, OBJPROP_COLOR, direction == "BUY" ? clrGreen : clrRed);
+      ObjectSetInteger(0, zoneActive, OBJPROP_BGCOLOR, direction == "BUY" ? C'0,255,0' : C'255,0,0');
+      ObjectSetInteger(0, zoneActive, OBJPROP_FILL, true);
+      ObjectSetInteger(0, zoneActive, OBJPROP_BACK, false);
+      ObjectSetInteger(0, zoneActive, OBJPROP_WIDTH, 3);
+      
+      // Label ZONE ACTIVE
+      string zoneLabel = "OTE_TOUCH_LABEL";
+      ObjectCreate(0, zoneLabel, OBJ_TEXT, 0, now, (z2High + z2Low) / 2);
+      ObjectSetString(0, zoneLabel, OBJPROP_TEXT, "✓ ZONE ACTIVE");
+      ObjectSetInteger(0, zoneLabel, OBJPROP_COLOR, clrWhite);
+      ObjectSetInteger(0, zoneLabel, OBJPROP_FONTSIZE, 10);
+      ObjectSetInteger(0, zoneLabel, OBJPROP_BACK, true);
+   }
+}
+
+//+------------------------------------------------------------------+
+//| AFFICHER LES PATTERNS CHARTISTES DÉTECTÉS (TRIANGLES, FLAGS)    |
+//+------------------------------------------------------------------+
+void DrawDetectedChartPatterns()
+{
+   ObjectsDeleteAll(0, "PATTERN_");
+   
+   MqlRates rates[];
+   ArraySetAsSeries(rates, true);
+   int copied = CopyRates(_Symbol, PERIOD_M1, 0, 100, rates);
+   if(copied < 20) return;
+   
+   datetime now = TimeCurrent();
+   int barsAnalyzed = MathMin(50, copied - 5);
+   
+   // Détecter triangles
+   bool foundTriangle = false;
+   double triHigh = 0, triLow = 0;
+   int triStartBar = 0;
+   
+   for(int i = 15; i < barsAnalyzed - 5; i++)
+   {
+      double h1 = rates[i].high;
+      double h2 = rates[i-5].high;
+      double l1 = rates[i].low;
+      double l2 = rates[i-5].low;
+      
+      // Triangle: range diminue progressivement
+      if(h1 < h2 && l1 > l2 && (h2 - l2) > (h1 - l1) * 1.3)
+      {
+         foundTriangle = true;
+         triHigh = h1;
+         triLow = l1;
+         triStartBar = i;
+         break;
+      }
+   }
+   
+   if(foundTriangle)
+   {
+      // Dessiner triangle
+      string triName = "PATTERN_TRIANGLE";
+      datetime triTime = rates[triStartBar].time;
+      double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+      
+      ObjectCreate(0, triName, OBJ_RECTANGLE, 0, triTime - PeriodSeconds(PERIOD_M1) * 20, triHigh, triTime + PeriodSeconds(PERIOD_M1) * 5, triLow);
+      ObjectSetInteger(0, triName, OBJPROP_COLOR, clrMagenta);
+      ObjectSetInteger(0, triName, OBJPROP_BGCOLOR, clrMagenta);
+      ObjectSetInteger(0, triName, OBJPROP_FILL, false);
+      ObjectSetInteger(0, triName, OBJPROP_BACK, true);
+      ObjectSetInteger(0, triName, OBJPROP_WIDTH, 2);
+      
+      // Label
+      string triLabel = "PATTERN_TRIANGLE_LBL";
+      ObjectCreate(0, triLabel, OBJ_TEXT, 0, triTime, triHigh + point * 30);
+      ObjectSetString(0, triLabel, OBJPROP_TEXT, "△ TRIANGLE");
+      ObjectSetInteger(0, triLabel, OBJPROP_COLOR, clrMagenta);
+      ObjectSetInteger(0, triLabel, OBJPROP_FONTSIZE, 8);
+   }
+   
+   // Détecter drapeaux (flags)
+   bool foundFlag = false;
+   double flagHigh = 0, flagLow = 0;
+   int flagStartBar = 0;
+   
+   for(int i = 10; i < barsAnalyzed - 3; i++)
+   {
+      // Flag: petites bougies serées après un mouvement
+      double avgRange = 0;
+      for(int j = 0; j < 5; j++)
+         avgRange += rates[i-j].high - rates[i-j].low;
+      avgRange /= 5;
+      
+      bool tightRange = (rates[i].high - rates[i].low) < avgRange * 0.5;
+      bool tightPrev = (rates[i-1].high - rates[i-1].low) < avgRange * 0.5;
+      bool tightPrev2 = (rates[i-2].high - rates[i-2].low) < avgRange * 0.5;
+      
+      if(tightRange && tightPrev && tightPrev2)
+      {
+         foundFlag = true;
+         flagHigh = rates[i].high;
+         flagLow = rates[i].low;
+         flagStartBar = i;
+         break;
+      }
+   }
+   
+   if(foundFlag)
+   {
+      string flagName = "PATTERN_FLAG";
+      datetime flagTime = rates[flagStartBar].time;
+      double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+      
+      ObjectCreate(0, flagName, OBJ_RECTANGLE, 0, flagTime - PeriodSeconds(PERIOD_M1) * 15, flagHigh, flagTime + PeriodSeconds(PERIOD_M1) * 3, flagLow);
+      ObjectSetInteger(0, flagName, OBJPROP_COLOR, clrCyan);
+      ObjectSetInteger(0, flagName, OBJPROP_BGCOLOR, clrCyan);
+      ObjectSetInteger(0, flagName, OBJPROP_FILL, false);
+      ObjectSetInteger(0, flagName, OBJPROP_BACK, true);
+      ObjectSetInteger(0, flagName, OBJPROP_WIDTH, 2);
+      
+      string flagLabel = "PATTERN_FLAG_LBL";
+      ObjectCreate(0, flagLabel, OBJ_TEXT, 0, flagTime, flagHigh + point * 30);
+      ObjectSetString(0, flagLabel, OBJPROP_TEXT, "⚑ FLAG");
+      ObjectSetInteger(0, flagLabel, OBJPROP_COLOR, clrCyan);
+      ObjectSetInteger(0, flagLabel, OBJPROP_FONTSIZE, 8);
+   }
+}
+
+//+------------------------------------------------------------------+
+//| PRÉDICTION FUTURE DU PRIX (FLÈCHE + PROJECTION)                 |
+//+------------------------------------------------------------------+
+void DrawFuturePricePrediction()
+{
+   ObjectsDeleteAll(0, "PRED_");
+   
+   MqlRates rates[];
+   ArraySetAsSeries(rates, true);
+   int copied = CopyRates(_Symbol, PERIOD_M1, 0, 50, rates);
+   if(copied < 20) return;
+   
+   double currentPrice = rates[0].close;
+   double currentHigh = rates[0].high;
+   double currentLow = rates[0].low;
+   
+   // Analyser la tendance (5 dernières bougies)
+   double sumClose = 0;
+   for(int i = 0; i < 5; i++)
+      sumClose += rates[i].close;
+   double avg5 = sumClose / 5;
+   
+   // Direction prédite
+   string predictedDir = (currentPrice > avg5) ? "HAUT ⬆" : "BAS ⬇";
+   color predColor = (currentPrice > avg5) ? clrLime : clrRed;
+   
+   // ATR pour estimer le mouvement
+   double atr = currentHigh - currentLow;
+   for(int i = 1; i < 10; i++)
+      atr = MathMax(atr, rates[i].high - rates[i].low);
+   atr = atr / 10;
+   
+   // Projection future
+   double projectionUp = currentPrice + atr * 1.5;
+   double projectionDown = currentPrice - atr * 1.5;
+   
+   datetime now = TimeCurrent();
+   datetime futureTime = now + PeriodSeconds(PERIOD_M1) * 100;
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   
+   // Flèche de prédiction
+   string predArrow = "PRED_ARROW";
+   double arrowPrice = (currentPrice > avg5) ? currentPrice + atr * 0.5 : currentPrice - atr * 0.5;
+   ObjectCreate(0, predArrow, OBJ_ARROW, 0, now, arrowPrice);
+   ObjectSetInteger(0, predArrow, OBJPROP_COLOR, predColor);
+   ObjectSetInteger(0, predArrow, OBJPROP_ARROWCODE, (currentPrice > avg5) ? 233 : 234);
+   ObjectSetInteger(0, predArrow, OBJPROP_WIDTH, 5);
+   ObjectSetInteger(0, predArrow, OBJPROP_BACK, false);
+   
+   // Ligne de projection
+   string projLine = "PRED_PROJECTION";
+   double projTarget = (currentPrice > avg5) ? projectionUp : projectionDown;
+   ObjectCreate(0, projLine, OBJ_TREND, 0, now, currentPrice, futureTime, projTarget);
+   ObjectSetInteger(0, projLine, OBJPROP_COLOR, predColor);
+   ObjectSetInteger(0, projLine, OBJPROP_WIDTH, 2);
+   ObjectSetInteger(0, projLine, OBJPROP_STYLE, STYLE_DASH);
+   ObjectSetInteger(0, projLine, OBJPROP_BACK, true);
+   
+   // Label prédiction
+   string predLabel = "PRED_LABEL";
+   ObjectCreate(0, predLabel, OBJ_TEXT, 0, now + PeriodSeconds(PERIOD_M1) * 20, currentPrice);
+   ObjectSetString(0, predLabel, OBJPROP_TEXT, predictedDir);
+   ObjectSetInteger(0, predLabel, OBJPROP_COLOR, predColor);
+   ObjectSetInteger(0, predLabel, OBJPROP_FONTSIZE, 9);
+   ObjectSetInteger(0, predLabel, OBJPROP_BACK, true);
+   
+   // Niveaux de projection
+   string projUpLabel = "PRED_UP";
+   ObjectCreate(0, projUpLabel, OBJ_TEXT, 0, futureTime - PeriodSeconds(PERIOD_M1) * 20, projectionUp);
+   ObjectSetString(0, projUpLabel, OBJPROP_TEXT, "↑ " + DoubleToString(projectionUp, _Digits));
+   ObjectSetInteger(0, projUpLabel, OBJPROP_COLOR, clrLime);
+   ObjectSetInteger(0, projUpLabel, OBJPROP_FONTSIZE, 7);
+   
+   string projDownLabel = "PRED_DOWN";
+   ObjectCreate(0, projDownLabel, OBJ_TEXT, 0, futureTime - PeriodSeconds(PERIOD_M1) * 20, projectionDown);
+   ObjectSetString(0, projDownLabel, OBJPROP_TEXT, "↓ " + DoubleToString(projectionDown, _Digits));
+   ObjectSetInteger(0, projDownLabel, OBJPROP_COLOR, clrRed);
+   ObjectSetInteger(0, projDownLabel, OBJPROP_FONTSIZE, 7);
+}
+
+//+------------------------------------------------------------------+
+//| PRÉDICTION DES FUTURES ZONES OTE AVEC SEGMENTS & FLÈCHES        |
+//+------------------------------------------------------------------+
+void DrawFutureOTEPredictionWithSegments()
+{
+   // Supprimer les anciens objets de prédiction
+   ObjectsDeleteAll(0, "FUTURE_OTE_");
+   
+   // Afficher aussi la zone OTE surlignée et les patterns
+   DrawOTEZoneHighlightedOnTouch();
+   DrawDetectedChartPatterns();
+   DrawFuturePricePrediction();
+   
+   // Récupérer les données actuelles
+   MqlRates rates[];
+   ArraySetAsSeries(rates, true);
+   int copied = CopyRates(_Symbol, PERIOD_M1, 0, 100, rates);
+   if(copied < 20) return;
+   
+   double currentPrice = rates[0].close;
+   double swingHigh = rates[0].high;
+   double swingLow = rates[0].low;
+   
+   // Trouver swing high/low sur dernières 100 bougies
+   for(int i = 0; i < 100 && i < copied; i++)
+   {
+      swingHigh = MathMax(swingHigh, rates[i].high);
+      swingLow = MathMin(swingLow, rates[i].low);
+   }
+   
+   // Déterminer la direction
+   string direction = (currentPrice > (swingHigh + swingLow) / 2) ? "BUY" : "SELL";
+   double range = swingHigh - swingLow;
+   if(range <= 0.0) return;
+   
+   // Paramètres temporels
+   datetime currentTime = TimeCurrent();
+   datetime futureTime1 = currentTime + PeriodSeconds(PERIOD_M1) * 50;   // Segment 1
+   datetime futureTime2 = currentTime + PeriodSeconds(PERIOD_M1) * 100;  // Segment 2
+   datetime futureTime3 = currentTime + PeriodSeconds(PERIOD_M1) * 150;  // Segment 3
+   
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   color arrowColor = (direction == "BUY") ? clrLime : clrRed;
+   color lineColor = (direction == "BUY") ? clrGreen : clrDarkRed;
+   
+   // ===== SEGMENT 1 : Zone OTE actuelle =====
+   double seg1High = swingHigh;
+   double seg1Low = swingLow;
+   double seg1Mid = (seg1High + seg1Low) / 2;
+   
+   // Ligne de zone OTE 1
+   string seg1Line = "FUTURE_OTE_SEG1_LINE";
+   ObjectCreate(0, seg1Line, OBJ_TREND, 0, currentTime, seg1Mid, futureTime1, seg1Mid);
+   ObjectSetInteger(0, seg1Line, OBJPROP_COLOR, lineColor);
+   ObjectSetInteger(0, seg1Line, OBJPROP_WIDTH, 3);
+   ObjectSetInteger(0, seg1Line, OBJPROP_STYLE, STYLE_SOLID);
+   ObjectSetInteger(0, seg1Line, OBJPROP_BACK, true);
+   
+   // Flèche unidirectionnelle Segment 1
+   string seg1Arrow = "FUTURE_OTE_SEG1_ARROW";
+   double arrowPrice1 = (direction == "BUY") ? seg1Mid + point * 20 : seg1Mid - point * 20;
+   ObjectCreate(0, seg1Arrow, OBJ_ARROW, 0, currentTime + PeriodSeconds(PERIOD_M1) * 15, seg1Mid);
+   ObjectSetInteger(0, seg1Arrow, OBJPROP_COLOR, arrowColor);
+   ObjectSetInteger(0, seg1Arrow, OBJPROP_ARROWCODE, direction == "BUY" ? 233 : 234);  // Up/Down arrows
+   ObjectSetInteger(0, seg1Arrow, OBJPROP_WIDTH, 4);
+   ObjectSetInteger(0, seg1Arrow, OBJPROP_BACK, false);
+   
+   // Label Segment 1 - ABRÉGÉ
+   string seg1Label = "FUTURE_OTE_SEG1_LABEL";
+   ObjectCreate(0, seg1Label, OBJ_TEXT, 0, currentTime + PeriodSeconds(PERIOD_M1) * 5, seg1High + point * 30);
+   ObjectSetString(0, seg1Label, OBJPROP_TEXT, "S1");
+   ObjectSetInteger(0, seg1Label, OBJPROP_COLOR, clrYellow);
+   ObjectSetInteger(0, seg1Label, OBJPROP_FONTSIZE, 7);
+   ObjectSetInteger(0, seg1Label, OBJPROP_BACK, false);
+   
+   // ===== SEGMENT 2 : Zone de validation Fibonacci =====
+   double fibo618 = (direction == "BUY") ? swingLow + range * 0.618 : swingHigh - range * 0.618;
+   double fibo705 = (direction == "BUY") ? swingLow + range * 0.705 : swingHigh - range * 0.705;
+   double seg2Mid = (fibo618 + fibo705) / 2;
+   
+   // Ligne de zone OTE 2
+   string seg2Line = "FUTURE_OTE_SEG2_LINE";
+   ObjectCreate(0, seg2Line, OBJ_TREND, 0, futureTime1, seg2Mid, futureTime2, seg2Mid);
+   ObjectSetInteger(0, seg2Line, OBJPROP_COLOR, lineColor);
+   ObjectSetInteger(0, seg2Line, OBJPROP_WIDTH, 3);
+   ObjectSetInteger(0, seg2Line, OBJPROP_STYLE, STYLE_SOLID);
+   ObjectSetInteger(0, seg2Line, OBJPROP_BACK, true);
+   
+   // Flèche unidirectionnelle Segment 2
+   string seg2Arrow = "FUTURE_OTE_SEG2_ARROW";
+   ObjectCreate(0, seg2Arrow, OBJ_ARROW, 0, futureTime1 + PeriodSeconds(PERIOD_M1) * 15, seg2Mid);
+   ObjectSetInteger(0, seg2Arrow, OBJPROP_COLOR, arrowColor);
+   ObjectSetInteger(0, seg2Arrow, OBJPROP_ARROWCODE, direction == "BUY" ? 233 : 234);
+   ObjectSetInteger(0, seg2Arrow, OBJPROP_WIDTH, 4);
+   ObjectSetInteger(0, seg2Arrow, OBJPROP_BACK, false);
+   
+   // Label Segment 2 - ABRÉGÉ
+   string seg2Label = "FUTURE_OTE_SEG2_LABEL";
+   ObjectCreate(0, seg2Label, OBJ_TEXT, 0, futureTime1 + PeriodSeconds(PERIOD_M1) * 5, seg2Mid + (direction == "BUY" ? point * 30 : -point * 30));
+   ObjectSetString(0, seg2Label, OBJPROP_TEXT, "S2");
+   ObjectSetInteger(0, seg2Label, OBJPROP_COLOR, clrOrange);
+   ObjectSetInteger(0, seg2Label, OBJPROP_FONTSIZE, 7);
+   ObjectSetInteger(0, seg2Label, OBJPROP_BACK, false);
+   
+   // ===== SEGMENT 3 : Zone d'extension future =====
+   double fibo786 = (direction == "BUY") ? swingLow + range * 0.786 : swingHigh - range * 0.786;
+   double fibo886 = (direction == "BUY") ? swingLow + range * 0.886 : swingHigh - range * 0.886;
+   double seg3Mid = (fibo786 + fibo886) / 2;
+   
+   // Ligne de zone OTE 3
+   string seg3Line = "FUTURE_OTE_SEG3_LINE";
+   ObjectCreate(0, seg3Line, OBJ_TREND, 0, futureTime2, seg3Mid, futureTime3, seg3Mid);
+   ObjectSetInteger(0, seg3Line, OBJPROP_COLOR, lineColor);
+   ObjectSetInteger(0, seg3Line, OBJPROP_WIDTH, 3);
+   ObjectSetInteger(0, seg3Line, OBJPROP_STYLE, STYLE_DASH);
+   ObjectSetInteger(0, seg3Line, OBJPROP_BACK, true);
+   
+   // Flèche unidirectionnelle Segment 3
+   string seg3Arrow = "FUTURE_OTE_SEG3_ARROW";
+   ObjectCreate(0, seg3Arrow, OBJ_ARROW, 0, futureTime2 + PeriodSeconds(PERIOD_M1) * 15, seg3Mid);
+   ObjectSetInteger(0, seg3Arrow, OBJPROP_COLOR, arrowColor);
+   ObjectSetInteger(0, seg3Arrow, OBJPROP_ARROWCODE, direction == "BUY" ? 233 : 234);
+   ObjectSetInteger(0, seg3Arrow, OBJPROP_WIDTH, 4);
+   ObjectSetInteger(0, seg3Arrow, OBJPROP_BACK, false);
+   
+   // Label Segment 3 - ABRÉGÉ
+   string seg3Label = "FUTURE_OTE_SEG3_LABEL";
+   ObjectCreate(0, seg3Label, OBJ_TEXT, 0, futureTime2 + PeriodSeconds(PERIOD_M1) * 5, seg3Mid + (direction == "BUY" ? point * 30 : -point * 30));
+   ObjectSetString(0, seg3Label, OBJPROP_TEXT, "S3");
+   ObjectSetInteger(0, seg3Label, OBJPROP_COLOR, clrLightBlue);
+   ObjectSetInteger(0, seg3Label, OBJPROP_FONTSIZE, 7);
+   ObjectSetInteger(0, seg3Label, OBJPROP_BACK, false);
+   
+   // ===== CONNECTEURS ENTRE SEGMENTS =====
+   // Connecteur Seg1 -> Seg2
+   string connector12 = "FUTURE_OTE_CONNECTOR_1_2";
+   ObjectCreate(0, connector12, OBJ_TREND, 0, futureTime1, seg1Mid, futureTime1, seg2Mid);
+   ObjectSetInteger(0, connector12, OBJPROP_COLOR, lineColor);
+   ObjectSetInteger(0, connector12, OBJPROP_WIDTH, 2);
+   ObjectSetInteger(0, connector12, OBJPROP_STYLE, STYLE_DOT);
+   ObjectSetInteger(0, connector12, OBJPROP_BACK, true);
+   
+   // Connecteur Seg2 -> Seg3
+   string connector23 = "FUTURE_OTE_CONNECTOR_2_3";
+   ObjectCreate(0, connector23, OBJ_TREND, 0, futureTime2, seg2Mid, futureTime2, seg3Mid);
+   ObjectSetInteger(0, connector23, OBJPROP_COLOR, lineColor);
+   ObjectSetInteger(0, connector23, OBJPROP_WIDTH, 2);
+   ObjectSetInteger(0, connector23, OBJPROP_STYLE, STYLE_DOT);
+   ObjectSetInteger(0, connector23, OBJPROP_BACK, true);
+   
+   // ===== TITRE PRINCIPAL - MINIMAL =====
+   string titleMain = "FUTURE_OTE_MAIN_TITLE";
+   ObjectCreate(0, titleMain, OBJ_TEXT, 0, currentTime, swingHigh + range * 0.15);
+   string titleText = "OTE [" + direction + "]";
+   ObjectSetString(0, titleMain, OBJPROP_TEXT, titleText);
+   ObjectSetInteger(0, titleMain, OBJPROP_COLOR, clrWhite);
+   ObjectSetInteger(0, titleMain, OBJPROP_FONTSIZE, 9);
+   ObjectSetInteger(0, titleMain, OBJPROP_BACK, false);
+   
+   // ===== ZONES DE PRIX (RECTANGLES) =====
+   
+   // Zone 1 - Rectangle semi-transparent
+   string zone1 = "FUTURE_OTE_ZONE_1";
+   ObjectCreate(0, zone1, OBJ_RECTANGLE, 0, currentTime, seg1High, futureTime1, seg1Low);
+   ObjectSetInteger(0, zone1, OBJPROP_COLOR, lineColor);
+   ObjectSetInteger(0, zone1, OBJPROP_BGCOLOR, direction == "BUY" ? C'0,200,0' : C'200,0,0');
+   ObjectSetInteger(0, zone1, OBJPROP_FILL, true);
+   ObjectSetInteger(0, zone1, OBJPROP_BACK, true);
+   
+   // Zone 2 - Rectangle semi-transparent
+   string zone2 = "FUTURE_OTE_ZONE_2";
+   double z2High = MathMax(fibo618, fibo705);
+   double z2Low = MathMin(fibo618, fibo705);
+   ObjectCreate(0, zone2, OBJ_RECTANGLE, 0, futureTime1, z2High, futureTime2, z2Low);
+   ObjectSetInteger(0, zone2, OBJPROP_COLOR, clrOrange);
+   ObjectSetInteger(0, zone2, OBJPROP_BGCOLOR, C'255,165,0');
+   ObjectSetInteger(0, zone2, OBJPROP_FILL, true);
+   ObjectSetInteger(0, zone2, OBJPROP_BACK, true);
+   
+   // Zone 3 - Rectangle semi-transparent
+   string zone3 = "FUTURE_OTE_ZONE_3";
+   double z3High = MathMax(fibo786, fibo886);
+   double z3Low = MathMin(fibo786, fibo886);
+   ObjectCreate(0, zone3, OBJ_RECTANGLE, 0, futureTime2, z3High, futureTime3, z3Low);
+   ObjectSetInteger(0, zone3, OBJPROP_COLOR, clrLightBlue);
+   ObjectSetInteger(0, zone3, OBJPROP_BGCOLOR, C'173,216,230');
+   ObjectSetInteger(0, zone3, OBJPROP_FILL, true);
+   ObjectSetInteger(0, zone3, OBJPROP_BACK, true);
+   
+   // Afficher les infos en console
+   Print("✅ FUTURE OTE PREDICTION ACTIVÉE - ", _Symbol);
+   Print("   📍 Direction: ", direction);
+   Print("   📊 Segment 1 (ZONE ACTUELLE): ", DoubleToString(seg1Low, _Digits), " à ", DoubleToString(seg1High, _Digits));
+   Print("   📊 Segment 2 (VALIDÉE 61.8-70.5%): ", DoubleToString(z2Low, _Digits), " à ", DoubleToString(z2High, _Digits));
+   Print("   📊 Segment 3 (EXTENSION 78.6-88.6%): ", DoubleToString(z3Low, _Digits), " à ", DoubleToString(z3High, _Digits));
+}
+
+//+------------------------------------------------------------------+
+//| METTRE À JOUR LE TABLEAU DE BORD AVEC PRÉDICTIONS OTE           |
+//+------------------------------------------------------------------+
+void UpdateDashboardWithFutureOTE()
+{
+   // Appeler la nouvelle fonction de prédiction
+   DrawFutureOTEPredictionWithSegments();
+   
+   // Maintenir aussi l'affichage OTE existant
+   if(ShowOTEProtocolVisuals || !StrategyVisualMinimalMode)
+   {
+      DrawDynamicOTEFibo();
+   }
+}
+
+//+------------------------------------------------------------------+
+//| FONCTIONS DE DÉTECTION DES CONFIRMATIONS OTE AMÉLIORÉES          |
+//+------------------------------------------------------------------+
+
+// Valider un swing point selon la méthode Kasper
+bool OTE_ValidateSwingPoint(const MqlRates &rates[], const int index, const bool isHigh)
+{
+   int validationBars = OTE_SwingValidationBars;
+   if(index < validationBars || index >= ArraySize(rates) - validationBars) return false;
+   
+   if(isHigh)
+   {
+      // Swing high valide: doit être plus haut que les N bougies avant et après
+      double candidateHigh = rates[index].high;
+      for(int i = 1; i <= validationBars; i++)
+      {
+         if(rates[index - i].high >= candidateHigh || rates[index + i].high >= candidateHigh)
+            return false;
+      }
+      return true;
+   }
+   else
+   {
+      // Swing low valide: doit être plus bas que les N bougies avant et après  
+      double candidateLow = rates[index].low;
+      for(int i = 1; i <= validationBars; i++)
+      {
+         if(rates[index - i].low <= candidateLow || rates[index + i].low <= candidateLow)
+            return false;
+      }
+      return true;
+   }
+}
+
+// Détecter les breaker blocks
+bool OTE_DetectBreakerBlock(const MqlRates &rates[], const bool isBuy, double &breakerPrice)
+{
+   if(!OTE_EnableBreakerBlocks) return false;
+   
+   // Chercher une rupture de structure suivie d'un retest
+   for(int i = 5; i < ArraySize(rates) - 5; i++)
+   {
+      if(isBuy)
+      {
+         // Breaker block haussier: cassé un plus bas précédent, puis retest
+         if(rates[i].low < rates[i-5].low && rates[i+1].low > rates[i-5].low && rates[i+2].low > rates[i-5].low)
+         {
+            breakerPrice = rates[i-5].low;
+            return true;
+         }
+      }
+      else
+      {
+         // Breaker block baissier: cassé un plus haut précédent, puis retest
+         if(rates[i].high > rates[i-5].high && rates[i+1].high < rates[i-5].high && rates[i+2].high < rates[i-5].high)
+         {
+            breakerPrice = rates[i-5].high;
+            return true;
+         }
+      }
+   }
+   return false;
+}
+
+// Détecter les order blocks (dernière bougie de forte mouvement)
+bool OTE_DetectOrderBlock(const MqlRates &rates[], const bool isBuy, double &orderBlockPrice)
+{
+   if(!OTE_EnableOrderBlocks) return false;
+   
+   for(int i = 2; i < ArraySize(rates) - 1; i++)
+   {
+      double range = rates[i].high - rates[i].low;
+      double avgRange = 0.0;
+      
+      // Calculer la range moyenne des 10 dernières bougies
+      for(int j = 1; j <= 10 && i + j < ArraySize(rates); j++)
+      {
+         avgRange += rates[i + j].high - rates[i + j].low;
+      }
+      avgRange /= 10.0;
+      
+      // Order block: bougie avec range > 1.5x la moyenne
+      if(range > avgRange * 1.5)
+      {
+         if(isBuy)
+         {
+            // Order block haussier: bougie baissière forte
+            if(rates[i].close < rates[i].open)
+            {
+               orderBlockPrice = rates[i].low;
+               return true;
+            }
+         }
+         else
+         {
+            // Order block baissier: bougie haussière forte
+            if(rates[i].close > rates[i].open)
+            {
+               orderBlockPrice = rates[i].high;
+               return true;
+            }
+         }
+      }
+   }
+   return false;
+}
+
+// Détecter la prise de liquidité (sweep of liquidity)
+bool OTE_DetectLiquiditySweep(const MqlRates &rates[], const bool isBuy, datetime &sweepTime)
+{
+   if(!OTE_EnableLiquiditySweep) return false;
+   
+   for(int i = 3; i < ArraySize(rates) - 2; i++)
+   {
+      if(isBuy)
+      {
+         // Prise de liquidité haussière: cassé un plus bas puis retourné rapidement
+         if(rates[i].low < rates[i-1].low && rates[i].low < rates[i-2].low && 
+            rates[i+1].high > rates[i].high && rates[i+2].high > rates[i+1].high)
+         {
+            sweepTime = rates[i].time;
+            return true;
+         }
+      }
+      else
+      {
+         // Prise de liquidité baissière: cassé un plus haut puis retourné rapidement
+         if(rates[i].high > rates[i-1].high && rates[i].high > rates[i-2].high &&
+            rates[i+1].low < rates[i].low && rates[i+2].low < rates[i+1].low)
+         {
+            sweepTime = rates[i].time;
+            return true;
+         }
+      }
+   }
+   return false;
+}
+
+// Calculer le score de confluence (1-5)
+int OTE_CalculateConfluenceScore(const bool hasFVG, const bool hasBreaker, const bool hasOrderBlock, 
+                                const bool hasLiquidity, const bool trendAligned)
+{
+   int score = 0;
+   if(hasFVG) score += 1;
+   if(hasBreaker) score += 1;
+   if(hasOrderBlock) score += 1;
+   if(hasLiquidity) score += 1;
+   if(trendAligned) score += 1;
+   return MathMin(score, 5);
+}
+
+// Dessiner les confirmations sur le graphique (version optimisée)
+void OTE_DrawConfirmationsOptimized(const bool isBuy, const datetime curTime, const double oteZoneLow, const double oteZoneHigh)
+{
+   if(!OTE_ShowConfluenceScore) return;
+   
+   // Limiter le nombre d'objets dessinés
+   if(g_oteObjectCount >= OTE_MaxObjectsToDraw) return;
+   
+   string prefix = "OTE_CONF_" + IntegerToString((long)curTime);
+   
+   // Dessiner breaker block
+   if(g_oteHasBreakerBlock && g_oteBreakerBlockPrice > 0)
+   {
+      string bbName = prefix + "_BREAKER";
+      datetime bbTime = curTime - PeriodSeconds() * 10;
+      
+      if(ObjectCreate(0, bbName, OBJ_RECTANGLE, 0, bbTime, g_oteBreakerBlockPrice - 0.0010, curTime, g_oteBreakerBlockPrice + 0.0010))
+      {
+         ObjectSetInteger(0, bbName, OBJPROP_COLOR, clrPurple);
+         ObjectSetInteger(0, bbName, OBJPROP_BGCOLOR, clrPurple);
+         ObjectSetInteger(0, bbName, OBJPROP_BACK, true);
+         ObjectSetInteger(0, bbName, OBJPROP_FILL, true);
+         ObjectSetString(0, bbName, OBJPROP_TOOLTIP, "Breaker Block");
+         g_oteObjectCount++;
+      }
+   }
+   
+   // Dessiner order block
+   if(g_oteHasOrderBlock && g_oteOrderBlockPrice > 0)
+   {
+      string obName = prefix + "_ORDERBLOCK";
+      datetime obTime = curTime - PeriodSeconds() * 8;
+      
+      if(ObjectCreate(0, obName, OBJ_RECTANGLE, 0, obTime, g_oteOrderBlockPrice - 0.0010, curTime, g_oteOrderBlockPrice + 0.0010))
+      {
+         ObjectSetInteger(0, obName, OBJPROP_COLOR, clrMaroon);
+         ObjectSetInteger(0, obName, OBJPROP_BGCOLOR, clrMaroon);
+         ObjectSetInteger(0, obName, OBJPROP_BACK, true);
+         ObjectSetInteger(0, obName, OBJPROP_FILL, true);
+         ObjectSetString(0, obName, OBJPROP_TOOLTIP, "Order Block");
+         g_oteObjectCount++;
+      }
+   }
+   
+   // Dessiner score de confluence
+   if(g_oteConfluenceScore > 0)
+   {
+      string scoreName = prefix + "_SCORE";
+      if(ObjectCreate(0, scoreName, OBJ_TEXT, 0, curTime - PeriodSeconds() * 5, isBuy ? oteZoneHigh : oteZoneLow))
+      {
+         string scoreText = "Confluence: " + IntegerToString(g_oteConfluenceScore) + "/5";
+         ObjectSetString(0, scoreName, OBJPROP_TEXT, scoreText);
+         ObjectSetInteger(0, scoreName, OBJPROP_COLOR, g_oteConfluenceScore >= OTE_MinConfluenceScore ? clrLime : clrOrange);
+         ObjectSetInteger(0, scoreName, OBJPROP_FONTSIZE, 10);
+         g_oteObjectCount++;
+      }
+   }
+}
+
+// Nettoyage optimisé des objets OTE
+void OTE_CleanupOptimized()
+{
+   // Supprimer uniquement les objets OTE anciens (plus de 5 minutes)
+   datetime cutoff = TimeCurrent() - 300; // 5 minutes
+   string prefix = "OTE_";
+   
+   for(int i = ObjectsTotal(0) - 1; i >= 0; i--)
+   {
+      string objName = ObjectName(0, i);
+      if(StringFind(objName, prefix, 0) == 0)
+      {
+         datetime objTime = (datetime)ObjectGetInteger(0, objName, OBJPROP_TIME);
+         if(objTime < cutoff)
+         {
+            ObjectDelete(0, objName);
+            g_oteObjectCount--;
+         }
+      }
+   }
+   
+   // Réinitialiser le compteur si nécessaire
+   if(g_oteObjectCount < 0) g_oteObjectCount = 0;
+}
+
+// Gérer l'affichage temporaire des zones discount/premium
+void OTE_ManageTemporaryZones(double currentPrice, double swingHigh, double swingLow)
+{
+   if(!OTE_TemporaryZones) return;
+   
+   datetime currentTime = TimeCurrent();
+   
+   // Limiter les appels: seulement toutes les 5 secondes maximum
+   static datetime lastZoneUpdate = 0;
+   if(currentTime - lastZoneUpdate < 5) return;
+   lastZoneUpdate = currentTime;
+   
+   // Afficher les zones seulement pendant 30 secondes après détection
+   if(currentTime - g_oteLastZoneDisplayTime > 30)
+   {
+      // Supprimer les anciennes zones temporaires
+      ObjectsDeleteAll(0, "OTE_TEMP_ZONE_");
+      return;
+   }
+   
+   // Calculer les zones discount/premium
+   double range = swingHigh - swingLow;
+   if(range <= 0) return;
+   
+   // Zone discount (25% supérieur du range pour BUY, 25% inférieur pour SELL)
+   double discountTop = swingLow + range * 0.25;
+   double discountBottom = swingLow;
+   
+   // Zone premium (25% inférieur du range pour BUY, 25% supérieur pour SELL)  
+   double premiumTop = swingHigh;
+   double premiumBottom = swingHigh - range * 0.25;
+   
+   // Déterminer la direction basée sur le prix actuel
+   bool isPremiumZone = (currentPrice > (swingLow + range * 0.75));
+   bool isDiscountZone = (currentPrice < (swingLow + range * 0.25));
+   
+   string zoneName = "";
+   color zoneColor = clrNONE;
+   double zoneHigh = 0, zoneLow = 0;
+   
+   if(isPremiumZone)
+   {
+      zoneName = "OTE_TEMP_ZONE_PREMIUM";
+      zoneColor = clrRed;
+      zoneHigh = premiumTop;
+      zoneLow = premiumBottom;
+   }
+   else if(isDiscountZone)
+   {
+      zoneName = "OTE_TEMP_ZONE_DISCOUNT";
+      zoneColor = clrGreen;
+      zoneHigh = discountTop;
+      zoneLow = discountBottom;
+   }
+   
+   if(zoneName != "")
+   {
+      datetime futureTime = currentTime + PeriodSeconds() * 10;
+      
+      if(ObjectCreate(0, zoneName, OBJ_RECTANGLE, 0, currentTime, zoneHigh, futureTime, zoneLow))
+      {
+         ObjectSetInteger(0, zoneName, OBJPROP_COLOR, zoneColor);
+         ObjectSetInteger(0, zoneName, OBJPROP_BGCOLOR, zoneColor);
+         ObjectSetInteger(0, zoneName, OBJPROP_BACK, true);
+         ObjectSetInteger(0, zoneName, OBJPROP_FILL, true);
+         ObjectSetInteger(0, zoneName, OBJPROP_STYLE, STYLE_DOT);
+         ObjectSetInteger(0, zoneName, OBJPROP_WIDTH, 1);
+         ObjectSetInteger(0, zoneName, OBJPROP_TIMEFRAMES, OBJ_ALL_PERIODS);
+         
+         // Ajouter un label
+         string labelName = zoneName + "_LABEL";
+         string labelText = isPremiumZone ? "PREMIUM ZONE" : "DISCOUNT ZONE";
+         
+         if(ObjectCreate(0, labelName, OBJ_TEXT, 0, currentTime, isPremiumZone ? zoneLow : zoneHigh))
+         {
+            ObjectSetString(0, labelName, OBJPROP_TEXT, labelText);
+            ObjectSetInteger(0, labelName, OBJPROP_COLOR, clrWhite);
+            ObjectSetInteger(0, labelName, OBJPROP_FONTSIZE, 8);
+            ObjectSetInteger(0, labelName, OBJPROP_BACK, false);
+         }
+         
+         g_oteLastZoneDisplayTime = currentTime;
+      }
+   }
+}
+
+// Fonction optimisée pour dessiner OTE sans détacher le robot
+void OTE_DrawOptimized(double entryPrice, double stopLoss, double takeProfit, string direction)
+{
+   // Réinitialiser le compteur d'objets au début
+   g_oteObjectCount = 0;
+   
+   // Utiliser le nettoyage optimisé
+   OTE_CleanupOptimized();
+   
+   // Vérifier la limite d'objets
+   if(g_oteObjectCount >= OTE_MaxObjectsToDraw)
+   {
+      Print("⚠️ OTE Drawing limit reached - skipping new objects");
+      return;
+   }
+   
+   // Dessiner le setup OTE principal
+   DrawOTESetup(entryPrice, stopLoss, takeProfit, direction);
+   
+   // Dessiner les confirmations si activé
+   if(OTE_ShowConfluenceScore)
+   {
+      double oteLow = MathMin(entryPrice, stopLoss);
+      double oteHigh = MathMax(entryPrice, stopLoss);
+      OTE_DrawConfirmationsOptimized(direction == "BUY", TimeCurrent(), oteLow, oteHigh);
+   }
+   
+   // Gérer les zones temporaires
+   if(OTE_TemporaryZones)
+   {
+      double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+      OTE_ManageTemporaryZones(currentPrice, takeProfit, stopLoss);
+   }
+}
+
+// Dessiner un setup OTE (Optimal Trade Entry) - Version optimisée
+void DrawOTESetup(double entryPrice, double stopLoss, double takeProfit, string direction)
+{
+   // Éviter le détachement: limiter le nombre d'objets et utiliser un nettoyage optimisé
+   if(OTE_OptimizedDrawing)
+   {
+      OTE_CleanupOptimized();
+      
+      // Si trop d'objets, ne pas dessiner pour éviter le détachement
+      if(g_oteObjectCount >= OTE_MaxObjectsToDraw)
+      {
+         Print("⚠️ OTE Drawing skipped - too many objects (", g_oteObjectCount, " >= ", OTE_MaxObjectsToDraw, ")");
+         return;
+      }
+   }
+   else
+   {
+      // Version originale: supprimer tous les anciens objets OTE
+      ObjectsDeleteAll(0, "OTE_SETUP_");
+   }
+   ObjectsDeleteAll(0, "OTE_FIBO_");
+   ObjectsDeleteAll(0, "OTE_SL_");
+   ObjectsDeleteAll(0, "OTE_TP_");
+   
+   datetime currentTime = TimeCurrent();
+   datetime futureTime = currentTime + PeriodSeconds(PERIOD_H1) * 50; // Extension de 50 bougies H1
+   
+   // Calculer les niveaux Fibonacci basés sur SL et TP
+   double risk = MathAbs(entryPrice - stopLoss);
+   double fibo618 = (direction == "BUY") ? stopLoss + risk * 0.618 : stopLoss - risk * 0.618;
+   double fibo705 = (direction == "BUY") ? stopLoss + risk * 0.705 : stopLoss - risk * 0.705;
+   double fibo79 = (direction == "BUY") ? stopLoss + risk * 0.79 : stopLoss - risk * 0.79;
+   double fibo886 = (direction == "BUY") ? stopLoss + risk * 0.886 : stopLoss - risk * 0.886;
+   
+   // Dessiner les niveaux Fibonacci
+   DrawFiboLevel("OTE_FIBO_886", fibo886, "88.6%", clrGray, currentTime);
+   DrawFiboLevel("OTE_FIBO_79", fibo79, "79%", clrOrange, currentTime);
+   DrawFiboLevel("OTE_FIBO_705", fibo705, "70.5%", clrGold, currentTime);
+   DrawFiboLevel("OTE_FIBO_618", fibo618, "61.8%", clrLime, currentTime);
+   
+   if(!StrategyVisualMinimalMode)
+   {
+      // Rectangle SL (rouge transparent)
+      string slRectName = "OTE_DYN_SL_RECT";
+      if(direction == "BUY")
+      {
+         ObjectCreate(0, slRectName, OBJ_RECTANGLE, 0, currentTime, entryPrice, futureTime, stopLoss);
+      }
+      else
+      {
+         ObjectCreate(0, slRectName, OBJ_RECTANGLE, 0, currentTime, stopLoss, futureTime, entryPrice);
+      }
+      ObjectSetInteger(0, slRectName, OBJPROP_COLOR, clrRed);
+      ObjectSetInteger(0, slRectName, OBJPROP_BGCOLOR, C'255,100,100');
+      ObjectSetInteger(0, slRectName, OBJPROP_FILL, true);
+      ObjectSetInteger(0, slRectName, OBJPROP_BACK, true);
+      ObjectSetInteger(0, slRectName, OBJPROP_WIDTH, 1);
+      ObjectSetInteger(0, slRectName, OBJPROP_STYLE, STYLE_SOLID);
+      ObjectSetInteger(0, slRectName, OBJPROP_SELECTABLE, false);
+   }
+   
+   if(!StrategyVisualMinimalMode)
+   {
+      // Rectangle TP (vert transparent)
+      string tpRectName = "OTE_DYN_TP_RECT";
+      if(direction == "BUY")
+      {
+         ObjectCreate(0, tpRectName, OBJ_RECTANGLE, 0, currentTime, takeProfit, futureTime, entryPrice);
+      }
+      else
+      {
+         ObjectCreate(0, tpRectName, OBJ_RECTANGLE, 0, currentTime, entryPrice, futureTime, takeProfit);
+      }
+      ObjectSetInteger(0, tpRectName, OBJPROP_COLOR, clrGreen);
+      ObjectSetInteger(0, tpRectName, OBJPROP_BGCOLOR, C'100,255,100');
+      ObjectSetInteger(0, tpRectName, OBJPROP_FILL, true);
+      ObjectSetInteger(0, tpRectName, OBJPROP_BACK, true);
+      ObjectSetInteger(0, tpRectName, OBJPROP_WIDTH, 1);
+      ObjectSetInteger(0, tpRectName, OBJPROP_STYLE, STYLE_SOLID);
+      ObjectSetInteger(0, tpRectName, OBJPROP_SELECTABLE, false);
+   }
+   
+   // Zone d'entrée OTE
+   string entryZone = "OTE_DYN_ENTRY_ZONE";
+   ObjectCreate(0, entryZone, OBJ_RECTANGLE, 0, currentTime, entryPrice - SymbolInfoDouble(_Symbol, SYMBOL_POINT) * 2, 
+                futureTime, entryPrice + SymbolInfoDouble(_Symbol, SYMBOL_POINT) * 2);
+   ObjectSetInteger(0, entryZone, OBJPROP_COLOR, clrBlue);
+   ObjectSetInteger(0, entryZone, OBJPROP_BGCOLOR, C'100,100,255');
+   ObjectSetInteger(0, entryZone, OBJPROP_FILL, true);
+   ObjectSetInteger(0, entryZone, OBJPROP_BACK, true);
+   ObjectSetInteger(0, entryZone, OBJPROP_STYLE, STYLE_SOLID);
+   ObjectSetInteger(0, entryZone, OBJPROP_WIDTH, 2);
+   
+   // Ligne d'entrée
+   string entryLine = "OTE_DYN_ENTRY_LINE";
+   ObjectCreate(0, entryLine, OBJ_HLINE, 0, currentTime, entryPrice);
+   ObjectSetInteger(0, entryLine, OBJPROP_COLOR, clrBlue);
+   ObjectSetInteger(0, entryLine, OBJPROP_STYLE, STYLE_SOLID);
+   ObjectSetInteger(0, entryLine, OBJPROP_WIDTH, 3);
+   ObjectSetInteger(0, entryLine, OBJPROP_BACK, false);
+   
+   // Ligne SL
+   string slLine = "OTE_DYN_SL_LINE";
    ObjectCreate(0, slLine, OBJ_HLINE, 0, currentTime, stopLoss);
    ObjectSetInteger(0, slLine, OBJPROP_COLOR, clrRed);
    ObjectSetInteger(0, slLine, OBJPROP_STYLE, STYLE_DASH);
@@ -112,47 +3023,58 @@ void DrawOTESetup(double entryPrice, double stopLoss, double takeProfit, string 
    ObjectSetInteger(0, slLine, OBJPROP_BACK, false);
    
    // Ligne TP
-   string tpLine = "OTE_SETUP_TP_LINE";
+   string tpLine = "OTE_DYN_TP_LINE";
    ObjectCreate(0, tpLine, OBJ_HLINE, 0, currentTime, takeProfit);
    ObjectSetInteger(0, tpLine, OBJPROP_COLOR, clrGreen);
    ObjectSetInteger(0, tpLine, OBJPROP_STYLE, STYLE_DASH);
    ObjectSetInteger(0, tpLine, OBJPROP_WIDTH, 2);
    ObjectSetInteger(0, tpLine, OBJPROP_BACK, false);
    
-   // Labels
-   string entryLabel = "OTE_SETUP_ENTRY_LABEL";
-   ObjectCreate(0, entryLabel, OBJ_TEXT, 0, currentTime + PeriodSeconds(PERIOD_M1) * 2, entryPrice + SymbolInfoDouble(_Symbol, SYMBOL_POINT) * 5);
-   ObjectSetString(0, entryLabel, OBJPROP_TEXT, "OTE Entry " + direction + " @" + DoubleToString(entryPrice, _Digits));
-   ObjectSetInteger(0, entryLabel, OBJPROP_COLOR, clrBlue);
-   ObjectSetInteger(0, entryLabel, OBJPROP_FONTSIZE, 10);
-   ObjectSetInteger(0, entryLabel, OBJPROP_BACK, false);
+   if(!StrategyVisualMinimalMode)
+   {
+      // Labels
+      string entryLabel = "OTE_DYN_ENTRY_LABEL";
+      ObjectCreate(0, entryLabel, OBJ_TEXT, 0, currentTime + PeriodSeconds(PERIOD_M1) * 2, entryPrice + SymbolInfoDouble(_Symbol, SYMBOL_POINT) * 5);
+      ObjectSetString(0, entryLabel, OBJPROP_TEXT, "OTE Entry " + direction + " @" + DoubleToString(entryPrice, _Digits));
+      ObjectSetInteger(0, entryLabel, OBJPROP_COLOR, clrWhite);
+      ObjectSetInteger(0, entryLabel, OBJPROP_FONTSIZE, 10);
+      ObjectSetInteger(0, entryLabel, OBJPROP_BACK, false);
+      
+      string slLabel = "OTE_DYN_SL_LABEL";
+      ObjectCreate(0, slLabel, OBJ_TEXT, 0, currentTime + PeriodSeconds(PERIOD_M1) * 2, stopLoss - SymbolInfoDouble(_Symbol, SYMBOL_POINT) * 3);
+      ObjectSetString(0, slLabel, OBJPROP_TEXT, "SL @" + DoubleToString(stopLoss, _Digits));
+      ObjectSetInteger(0, slLabel, OBJPROP_COLOR, clrRed);
+      ObjectSetInteger(0, slLabel, OBJPROP_FONTSIZE, 9);
+      ObjectSetInteger(0, slLabel, OBJPROP_BACK, false);
+      
+      string tpLabel = "OTE_DYN_TP_LABEL";
+      ObjectCreate(0, tpLabel, OBJ_TEXT, 0, currentTime + PeriodSeconds(PERIOD_M1) * 2, takeProfit + SymbolInfoDouble(_Symbol, SYMBOL_POINT) * 3);
+      ObjectSetString(0, tpLabel, OBJPROP_TEXT, "TP @" + DoubleToString(takeProfit, _Digits));
+      ObjectSetInteger(0, tpLabel, OBJPROP_COLOR, clrGreen);
+      ObjectSetInteger(0, tpLabel, OBJPROP_FONTSIZE, 9);
+      ObjectSetInteger(0, tpLabel, OBJPROP_BACK, false);
+      
+      // Titre du setup
+      string title = "OTE_DYN_TITLE";
+      ObjectCreate(0, title, OBJ_TEXT, 0, currentTime, takeProfit + SymbolInfoDouble(_Symbol, SYMBOL_POINT) * 10);
+      ObjectSetString(0, title, OBJPROP_TEXT, "⚡ OTE DYNAMIQUE (100 bars) - " + direction + " ⚡");
+      ObjectSetInteger(0, title, OBJPROP_COLOR, clrYellow);
+      ObjectSetInteger(0, title, OBJPROP_FONTSIZE, 12);
+      ObjectSetInteger(0, title, OBJPROP_BACK, false);
+   }
    
-   string slLabel = "OTE_SETUP_SL_LABEL";
-   ObjectCreate(0, slLabel, OBJ_TEXT, 0, currentTime + PeriodSeconds(PERIOD_M1) * 2, stopLoss - SymbolInfoDouble(_Symbol, SYMBOL_POINT) * 3);
-   ObjectSetString(0, slLabel, OBJPROP_TEXT, "SL @" + DoubleToString(stopLoss, _Digits));
-   ObjectSetInteger(0, slLabel, OBJPROP_COLOR, clrRed);
-   ObjectSetInteger(0, slLabel, OBJPROP_FONTSIZE, 9);
-   ObjectSetInteger(0, slLabel, OBJPROP_BACK, false);
-   
-   string tpLabel = "OTE_SETUP_TP_LABEL";
-   ObjectCreate(0, tpLabel, OBJ_TEXT, 0, currentTime + PeriodSeconds(PERIOD_M1) * 2, takeProfit + SymbolInfoDouble(_Symbol, SYMBOL_POINT) * 3);
-   ObjectSetString(0, tpLabel, OBJPROP_TEXT, "TP @" + DoubleToString(takeProfit, _Digits));
-   ObjectSetInteger(0, tpLabel, OBJPROP_COLOR, clrGreen);
-   ObjectSetInteger(0, tpLabel, OBJPROP_FONTSIZE, 9);
-   ObjectSetInteger(0, tpLabel, OBJPROP_BACK, false);
-   
-   // Titre du setup
-   string title = "OTE_SETUP_TITLE";
-   ObjectCreate(0, title, OBJ_TEXT, 0, currentTime, takeProfit + SymbolInfoDouble(_Symbol, SYMBOL_POINT) * 10);
-   ObjectSetString(0, title, OBJPROP_TEXT, "⚡ OTE SETUP - " + direction + " ⚡");
-   ObjectSetInteger(0, title, OBJPROP_COLOR, clrYellow);
-   ObjectSetInteger(0, title, OBJPROP_FONTSIZE, 12);
-   ObjectSetInteger(0, title, OBJPROP_BACK, false);
-   
-   Print("🎯 SETUP OTE MATÉRIALISÉ - ", direction, " ", _Symbol);
-   Print("   📍 Entry: ", DoubleToString(entryPrice, _Digits));
-   Print("   🛡️ SL: ", DoubleToString(stopLoss, _Digits));
-   Print("   🎯 TP: ", DoubleToString(takeProfit, _Digits));
+   if(!StrategyVisualMinimalMode)
+   {
+      Print("🎯 SETUP OTE DYNAMIQUE ACTIF - ", direction, " ", _Symbol);
+      Print("   📊 Range: ", DoubleToString(stopLoss, _Digits), " à ", DoubleToString(entryPrice, _Digits));
+      Print("   📍 Entry: ", DoubleToString(entryPrice, _Digits));
+      Print("   🛡️ SL: ", DoubleToString(stopLoss, _Digits));
+      Print("   🎯 TP: ", DoubleToString(takeProfit, _Digits));
+      Print("   📊 Fibo 61.8%: ", DoubleToString(fibo618, _Digits));
+      Print("   📊 Fibo 70.5%: ", DoubleToString(fibo705, _Digits));
+      Print("   📊 Fibo 79%: ", DoubleToString(fibo79, _Digits));
+      Print("   📊 Fibo 88.6%: ", DoubleToString(fibo886, _Digits));
+   }
 
    // Exécuter immédiatement au marché quand l'OTE Entry apparaît (optionnel).
    if(ExecuteMarketOnOTEAppearance)
@@ -167,6 +3089,8 @@ void DrawOTESetup(double entryPrice, double stopLoss, double takeProfit, string 
       {
          if(IsInEquilibriumCorrectionZone()) return;
          if(!IsOTEEntryDirectionSafeForPremiumDiscount(_Symbol, dir)) return;
+         if(!HasOTEBOSConfirmationM15OrM5(dir)) return;
+         if(!IsOTEEntryConfirmedOnM15OrM5(dir)) return;
          if(!IsAllowedByTradingTimeAndQuota(_Symbol, dir)) return;
          if(!IsSpreadAcceptable()) return;
          if(IsEntryCooldownActive()) return;
@@ -183,7 +3107,14 @@ void DrawOTESetup(double entryPrice, double stopLoss, double takeProfit, string 
          if(UseAIServer && ia != "" && ia != "HOLD" && ia != dir)
             return;
 
-         double lot = CalculateLotSize();
+         double ep = NormalizeDouble(entryPrice, _Digits);
+         
+         // Appliquer les inputs manuels du panel si activé
+         double usedSL = stopLoss;
+         double usedTP = takeProfit;
+         ApplyManualPanelInputs(ep, dir, usedSL, usedTP);
+         
+         double lot = CalculateLotSizeFromManualRisk(ep, usedSL);
          if(lot <= 0.0) return;
 
          bool ok = false;
@@ -193,12 +3124,9 @@ void DrawOTESetup(double entryPrice, double stopLoss, double takeProfit, string 
          double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
          double pt = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
          if(pt <= 0.0) pt = _Point;
-         double ep = NormalizeDouble(entryPrice, _Digits);
          double minOff = (double)OTE_StructuralMinDistancePts * pt;
 
          double usedEntry = ep;
-         double usedSL = stopLoss;
-         double usedTP = takeProfit;
          if(OTE_PlaceLimitWhenStructuralBetter && dir == "SELL" && ep > bid + minOff)
          {
             ENUM_ORDER_TYPE ot = ORDER_TYPE_SELL_LIMIT;
@@ -517,32 +3445,28 @@ void DrawSMCPredictionSetup()
       string m5TrendLabel = "SMC_PRED_M5_TREND_LABEL";
       ObjectCreate(0, m5TrendLabel, OBJ_TEXT, 0, timeStart + PeriodSeconds(PERIOD_M1) * 100, 
                    bosLow + m5TrendSlope * 40);
-      ObjectSetString(0, m5TrendLabel, OBJPROP_TEXT, "M5 TREND ENTRY");
+      ObjectSetString(0, m5TrendLabel, OBJPROP_TEXT, "M5↑");
       ObjectSetInteger(0, m5TrendLabel, OBJPROP_COLOR, clrYellow);
-      ObjectSetInteger(0, m5TrendLabel, OBJPROP_FONTSIZE, 9);
+      ObjectSetInteger(0, m5TrendLabel, OBJPROP_FONTSIZE, 6);
       ObjectSetInteger(0, m5TrendLabel, OBJPROP_BACK, false);
       
-      // 5b. ENTRY au 50%
+      // 5b. ENTRY au 50% - ZONE SURLIGNÉE
       string entryZone = "SMC_PRED_ENTRY_ZONE";
       ObjectCreate(0, entryZone, OBJ_RECTANGLE, 0, 
-                   timeStart + PeriodSeconds(PERIOD_M1) * 80, entry - (swingHigh - swingLow) * 0.01,
-                   timeStart + PeriodSeconds(PERIOD_M1) * 100, entry + (swingHigh - swingLow) * 0.01);
-      ObjectSetInteger(0, entryZone, OBJPROP_COLOR, entryColor);
-      ObjectSetInteger(0, entryZone, OBJPROP_BGCOLOR, C'144,238,144');
+                   timeStart + PeriodSeconds(PERIOD_M1) * 80, entry - (swingHigh - swingLow) * 0.015,
+                   timeStart + PeriodSeconds(PERIOD_M1) * 100, entry + (swingHigh - swingLow) * 0.015);
+      ObjectSetInteger(0, entryZone, OBJPROP_COLOR, clrWhite);
+      ObjectSetInteger(0, entryZone, OBJPROP_BGCOLOR, entryColor);
       ObjectSetInteger(0, entryZone, OBJPROP_FILL, true);
-      ObjectSetInteger(0, entryZone, OBJPROP_BACK, true);
+      ObjectSetInteger(0, entryZone, OBJPROP_BACK, false);
+      ObjectSetInteger(0, entryZone, OBJPROP_WIDTH, 2);
       
       string entryLine = "SMC_PRED_ENTRY_LINE";
       ObjectCreate(0, entryLine, OBJ_HLINE, 0, timeStart, entry);
       ObjectSetInteger(0, entryLine, OBJPROP_COLOR, entryColor);
       ObjectSetInteger(0, entryLine, OBJPROP_STYLE, STYLE_SOLID);
-      ObjectSetInteger(0, entryLine, OBJPROP_WIDTH, 3);
+      ObjectSetInteger(0, entryLine, OBJPROP_WIDTH, 4);
       ObjectSetInteger(0, entryLine, OBJPROP_BACK, false);
-      
-      // Label d'entrée - VISIBLE (texte blanc)
-      string entryLabel = "SMC_PRED_ENTRY_LABEL";
-      CreateVisibleLabel(entryLabel, timeStart + PeriodSeconds(PERIOD_M1) * 85, 
-                        entry + (swingHigh - swingLow) * 0.03, "🟢 ENTRY 50%", entryColor);
       
       // 6. STOP LOSS
       string slLine = "SMC_PRED_SL_LINE";
@@ -552,10 +3476,10 @@ void DrawSMCPredictionSetup()
       ObjectSetInteger(0, slLine, OBJPROP_WIDTH, 2);
       ObjectSetInteger(0, slLine, OBJPROP_BACK, false);
       
-      // Label SL - VISIBLE
+      // Label SL - MINIMAL
       string slLabel = "SMC_PRED_SL_LABEL";
-      CreateVisibleLabel(slLabel, timeStart + PeriodSeconds(PERIOD_M1) * 5, 
-                        stopLoss - (swingHigh - swingLow) * 0.02, "🔴 SL", clrRed);
+      CreateSmallLabel(slLabel, timeStart + PeriodSeconds(PERIOD_M1) * 5, 
+                        stopLoss - (swingHigh - swingLow) * 0.02, "S", clrRed);
       
       // 7. TAKE PROFIT (RR 1:5)
       string tpLine = "SMC_PRED_TP_LINE";
@@ -565,10 +3489,10 @@ void DrawSMCPredictionSetup()
       ObjectSetInteger(0, tpLine, OBJPROP_WIDTH, 2);
       ObjectSetInteger(0, tpLine, OBJPROP_BACK, false);
       
-      // Label TP - VISIBLE
+      // Label TP - MINIMAL
       string tpLabel = "SMC_PRED_TP_LABEL";
-      CreateVisibleLabel(tpLabel, timeStart + PeriodSeconds(PERIOD_M1) * 5, 
-                        takeProfit + (swingHigh - swingLow) * 0.02, "🟢 TP (RR 1:5)", clrGreen);
+      CreateSmallLabel(tpLabel, timeStart + PeriodSeconds(PERIOD_M1) * 5, 
+                        takeProfit + (swingHigh - swingLow) * 0.02, "T", clrGreen);
       
       // 8. TITRE SETUP
       string title = "SMC_PRED_TITLE";
@@ -716,10 +3640,10 @@ void DrawSMCPredictionSetup()
       ObjectSetInteger(0, slLine, OBJPROP_WIDTH, 2);
       ObjectSetInteger(0, slLine, OBJPROP_BACK, false);
       
-      // Label SL - VISIBLE
+      // Label SL - MINIMAL
       string slLabel = "SMC_PRED_SL_LABEL";
-      CreateVisibleLabel(slLabel, timeStart + PeriodSeconds(PERIOD_M1) * 5, 
-                        stopLoss + (swingHigh - swingLow) * 0.02, "🔴 SL", clrRed);
+      CreateSmallLabel(slLabel, timeStart + PeriodSeconds(PERIOD_M1) * 5, 
+                        stopLoss + (swingHigh - swingLow) * 0.02, "S", clrRed);
       
       // 7. TAKE PROFIT (RR 1:5)
       string tpLine = "SMC_PRED_TP_LINE";
@@ -729,10 +3653,10 @@ void DrawSMCPredictionSetup()
       ObjectSetInteger(0, tpLine, OBJPROP_WIDTH, 2);
       ObjectSetInteger(0, tpLine, OBJPROP_BACK, false);
       
-      // Label TP - VISIBLE
+      // Label TP - MINIMAL
       string tpLabel = "SMC_PRED_TP_LABEL";
-      CreateVisibleLabel(tpLabel, timeStart + PeriodSeconds(PERIOD_M1) * 5, 
-                        takeProfit - (swingHigh - swingLow) * 0.02, "🟢 TP (RR 1:5)", clrGreen);
+      CreateSmallLabel(tpLabel, timeStart + PeriodSeconds(PERIOD_M1) * 5, 
+                        takeProfit - (swingHigh - swingLow) * 0.02, "T", clrGreen);
       
       // 8. TITRE SETUP
       string title = "SMC_PRED_TITLE";
@@ -781,6 +3705,16 @@ void CreateVisibleLabel(string name, datetime time, double price, string text, c
    ObjectSetInteger(0, name, OBJPROP_COLOR, clrWhite); // Texte blanc pour contraste
    ObjectSetInteger(0, name, OBJPROP_FONTSIZE, 10);
    ObjectSetInteger(0, name, OBJPROP_BACK, false); // Pas de fond
+}
+
+// Créer un petit label minimal (pour S/T/E)
+void CreateSmallLabel(string name, datetime time, double price, string text, color col)
+{
+   ObjectCreate(0, name, OBJ_TEXT, 0, time, price);
+   ObjectSetString(0, name, OBJPROP_TEXT, text);
+   ObjectSetInteger(0, name, OBJPROP_COLOR, col);
+   ObjectSetInteger(0, name, OBJPROP_FONTSIZE, 6);
+   ObjectSetInteger(0, name, OBJPROP_BACK, false);
 }
 
 // Récupérer les niveaux du SMC Prediction Setup
@@ -892,26 +3826,37 @@ void ExecuteSMCPredictionArrowTrade()
       return;
    }
    
-   double lot = NormalizeVolumeForSymbol(GetMinLotForSymbol(_Symbol));
+   // NOUVEAU FILTRE: IA Haute confiance = attendre EMA/M5_Entry Touch + M5 Conf
+   if(!IsHighConfidenceEntryTouchConfirmed(detectedDir))
+   {
+      return; // On annule l'entrée au marché, on attend que le prix touche et confirme
+   }
+
+   // ===== ENTRÉE MARCHÉ =====
+   double entryPrice = (detectedDir == "BUY") ? SymbolInfoDouble(_Symbol, SYMBOL_ASK)
+                                              : SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   
+   // Appliquer les inputs manuels du panel si activé
+   double usedSL = levels.stopLoss;
+   double usedTP = levels.takeProfit;
+   ApplyManualPanelInputs(entryPrice, detectedDir, usedSL, usedTP);
+   
+   double lot = CalculateLotSizeFromManualRisk(entryPrice, usedSL);
    if(lot <= 0.0)
    {
       Print("❌ SMC ARROW TRADE BLOQUÉ - lot minimum indisponible");
       return;
    }
    
-   // ===== ENTRÉE MARCHÉ =====
-   double entryPrice = (detectedDir == "BUY") ? SymbolInfoDouble(_Symbol, SYMBOL_ASK)
-                                              : SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   
    bool success = false;
    if(detectedDir == "BUY")
    {
-      success = trade.Buy(lot, _Symbol, entryPrice, levels.stopLoss, levels.takeProfit, 
+      success = trade.Buy(lot, _Symbol, entryPrice, usedSL, usedTP, 
                          "SMC_PRED_BUY");
    }
    else
    {
-      success = trade.Sell(lot, _Symbol, entryPrice, levels.stopLoss, levels.takeProfit,
+      success = trade.Sell(lot, _Symbol, entryPrice, usedSL, usedTP,
                           "SMC_PRED_SELL");
    }
    
@@ -920,8 +3865,8 @@ void ExecuteSMCPredictionArrowTrade()
       Print("\n✅ === POSITION OUVERTE VIA SMC_DERIV_ARROW ===");
       Print("Direction: ", detectedDir);
       Print("Entry: ", DoubleToString(entryPrice, _Digits));
-      Print("SL: ", DoubleToString(levels.stopLoss, _Digits));
-      Print("TP: ", DoubleToString(levels.takeProfit, _Digits));
+      Print("SL: ", DoubleToString(usedSL, _Digits));
+      Print("TP: ", DoubleToString(usedTP, _Digits));
       Print("M5 TREND ENTRY: ", DoubleToString(levels.m5TrendEntryPoint, _Digits));
       Print("Lot: ", DoubleToString(lot, 2));
       
@@ -942,20 +3887,25 @@ void PlaceSMCPredictionLimitOrders(string direction, double m5TrendEntry, double
    if(!IsDirectionAllowedForBoomCrash(_Symbol, direction)) return;
    if(IsMaxPositionsReached()) return;
 
-   double lot = NormalizeVolumeForSymbol(GetMinLotForSymbol(_Symbol) * 0.5); // Demi-lot pour limit
+   // Appliquer les inputs manuels du panel si activé
+   double usedSL = stopLoss;
+   double usedTP = takeProfit;
+   ApplyManualPanelInputs(m5TrendEntry, direction, usedSL, usedTP);
+   
+   double lot = CalculateLotSizeFromManualRisk(m5TrendEntry, usedSL);
    if(lot <= 0.0) return;
    
    if(direction == "BUY")
    {
       // Ordre Buy Limit sur M5 Trend Entry Point
-      bool limitSuccess = trade.BuyLimit(lot, m5TrendEntry, _Symbol, stopLoss, takeProfit,
+      bool limitSuccess = trade.BuyLimit(lot, m5TrendEntry, _Symbol, usedSL, usedTP,
                                         ORDER_TIME_GTC, 0, "SMC_PRED_LIMIT_BUY");
       if(limitSuccess)
       {
          Print("📍 ORDER LIMIT BUY placé");
          Print("   Price: ", DoubleToString(m5TrendEntry, _Digits));
-         Print("   SL: ", DoubleToString(stopLoss, _Digits));
-         Print("   TP: ", DoubleToString(takeProfit, _Digits));
+         Print("   SL: ", DoubleToString(usedSL, _Digits));
+         Print("   TP: ", DoubleToString(usedTP, _Digits));
          Print("   Lot: ", DoubleToString(lot, 2));
       }
       else
@@ -966,14 +3916,14 @@ void PlaceSMCPredictionLimitOrders(string direction, double m5TrendEntry, double
    else // SELL
    {
       // Ordre Sell Limit sur M5 Trend Entry Point
-      bool limitSuccess = trade.SellLimit(lot, m5TrendEntry, _Symbol, stopLoss, takeProfit,
+      bool limitSuccess = trade.SellLimit(lot, m5TrendEntry, _Symbol, usedSL, usedTP,
                                          ORDER_TIME_GTC, 0, "SMC_PRED_LIMIT_SELL");
       if(limitSuccess)
       {
          Print("📍 ORDER LIMIT SELL placé");
          Print("   Price: ", DoubleToString(m5TrendEntry, _Digits));
-         Print("   SL: ", DoubleToString(stopLoss, _Digits));
-         Print("   TP: ", DoubleToString(takeProfit, _Digits));
+         Print("   SL: ", DoubleToString(usedSL, _Digits));
+         Print("   TP: ", DoubleToString(usedTP, _Digits));
          Print("   Lot: ", DoubleToString(lot, 2));
       }
       else
@@ -1195,6 +4145,7 @@ void DrawLiquidityZonesOnChart();
 void DrawHistoricalSwingPoints(MqlRates &rates[], int bars, double point);
 void DrawBookmarkLevels();
 void ManageBoomCrashSpikeClose();
+void ManageM1TrendReversalExit();
 void CheckAndExecuteSecondSpikeReentry();
 void ManageDollarExits();
 void CloseWorstPositionIfTotalLossExceeded();
@@ -1303,12 +4254,16 @@ bool GetSMCPredictionSetupLevels(SMCPredictionLevels &levelsOut);
 void CheckAndExecutePendingLimitPureArrowScalp();
 void UpdateM5EntryLevelsAndLines();
 void CheckAndExecuteM5TouchEntryTrade();
+void CheckAndExecuteEMAPullbackAndSweepReclaim();
 void SyncMovingEntryPointLimitOrders();
 void CheckAndExecuteStairEntry();
 void CheckAndExecuteStairEmaTouchScalpEntry();
 bool IsStairEma13M1AndEma21M5TouchReady(const string direction);
 void CheckAndPlaceStairEscalierLimitOrder();
 void ManageStairEscalierTrailingAndExit();
+void ManageEarlyExitDynamicSL();
+double GetRSI(string symbol, ENUM_TIMEFRAMES timeframe, int period);
+double GetEMA(string symbol, ENUM_TIMEFRAMES timeframe, int period);
 void NotifyStairPatternOnM1IfDetected();
 void UpdateStairSetupChartDisplay();
 void AnnounceOTEApproach();
@@ -1436,6 +4391,22 @@ bool IsSpikeImminentWithoutAI();
 void CheckAndExecuteSpikeTrade();
 void ExecuteSpikeTrade();
 void ExecuteSpikeTrade(string direction);
+
+// Spike cluster (zone confluence séries)
+double ComputeSpikeClusterScoreM1(const string symbol, double &atrOut, double &atrRatioOut, int &spikeBarsOut);
+bool   UpdateSpikeClusterZone(const string symbol);
+bool   IsSpikeClusterZoneActive(const string symbol);
+void   DrawSpikeClusterZone(const string symbol);
+
+// RSI 14 Impulsion (divergence / compression breakout / reversal)
+enum ENUM_RSI_IMPULSE_TYPE { RSI_IMPULSE_NONE=0, RSI_IMPULSE_BULLISH=1, RSI_IMPULSE_BEARISH=2 };
+ENUM_RSI_IMPULSE_TYPE DetectRSIImpulsePattern(string &detailOut);
+bool IsRSIDivergenceBullish(double &rsiBuf[], MqlRates &rates[], int lookback, double minSwingPips);
+bool IsRSIDivergenceBearish(double &rsiBuf[], MqlRates &rates[], int lookback, double minSwingPips);
+bool IsRSICompressionBreakoutBullish(double &rsiBuf[], int lookback, double maxRange, int minBars);
+bool IsRSICompressionBreakoutBearish(double &rsiBuf[], int lookback, double maxRange, int minBars);
+bool IsRSIReversalBullish(double &rsiBuf[], int lookback, double tolerance);
+bool IsRSIReversalBearish(double &rsiBuf[], int lookback, double tolerance);
 
 // Variantes multi-symboles (pour gérer les positions d'autres symboles que _Symbol)
 bool IsVolumeSpikeDetectedForSymbol(const string symbol);
@@ -1704,7 +4675,7 @@ ENUM_SYMBOL_CATEGORY SMC_GetSymbolCategory(string symbol)
    if(StringFind(s, "PAIN") >= 0 && StringFind(s, "INX") >= 0) return SYM_WELTRADE_SYNTH;
    if(StringFind(s, "GAININDEX") >= 0 || StringFind(s, "GAIN INDEX") >= 0) return SYM_WELTRADE_SYNTH;
    if(s == "GAIN") return SYM_WELTRADE_SYNTH;
-   if(StringFind(s, "VOLATILITY") >= 0 || StringFind(s, "RANGE BREAK") >= 0) return SYM_VOLATILITY;
+   if(StringFind(s, "VOLATILITY") >= 0 || StringFind(s, "RANGE BREAK") >= 0 || StringFind(s, "STEP") >= 0) return SYM_VOLATILITY;
    if(StringFind(s, "XAU") >= 0 || StringFind(s, "GOLD") >= 0) return SYM_METAL;
    if(StringFind(s, "XAG") >= 0 || StringFind(s, "SILVER") >= 0) return SYM_METAL;
    if(StringFind(s, "OIL") >= 0 || StringFind(s, "COPPER") >= 0) return SYM_COMMODITY;
@@ -1719,6 +4690,27 @@ ENUM_SYMBOL_CATEGORY SMC_GetSymbolCategory(string symbol)
       StringFind(s, "ZAR") >= 0 || StringFind(s, "NOK") >= 0 || StringFind(s, "SEK") >= 0 || StringFind(s, "DKK") >= 0)
       return SYM_FOREX;
    return SYM_UNKNOWN;
+}
+
+bool IsCryptoSymbol(const string symbol)
+{
+   string s = symbol;
+   StringToUpper(s);
+   int dotPos = StringFind(s, ".");
+   if(dotPos > 0)
+      s = StringSubstr(s, 0, dotPos);
+
+   return (StringFind(s, "BTC") >= 0 ||
+           StringFind(s, "ETH") >= 0 ||
+           StringFind(s, "XRP") >= 0 ||
+           StringFind(s, "LTC") >= 0 ||
+           StringFind(s, "SOL") >= 0 ||
+           StringFind(s, "DOGE") >= 0);
+}
+
+bool IsWeltradeOTEOnlyActive(const string symbol)
+{
+   return (WeltradeOTEOnly && SMC_GetSymbolCategory(symbol) == SYM_WELTRADE_SYNTH);
 }
 
 bool IsBoomSymbol(const string symbol)
@@ -2150,6 +5142,55 @@ bool IsAIConfidenceAtLeast(const double minConfUnit, const string contextTag, co
 // Filtres d'entrée plus pointues (fiabilité)
 static datetime g_lastEntryTimeForSymbol = 0;
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Spread stats (moyenne glissante, points)
+// ─────────────────────────────────────────────────────────────────────────────
+int      g_spreadPtsBuf[600];
+int      g_spreadPtsBufCount = 0;
+int      g_spreadPtsBufIdx = 0;
+datetime g_lastSpreadSampleUtc = 0;
+
+void UpdateSpreadStats()
+{
+   int interval = MathMax(1, SpreadStatsSampleIntervalSec);
+   datetime nowT = TimeCurrent();
+   if(g_lastSpreadSampleUtc > 0 && (nowT - g_lastSpreadSampleUtc) < interval)
+      return;
+   g_lastSpreadSampleUtc = nowT;
+
+   int spr = (int)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD); // points
+   if(spr < 0) spr = 0;
+   g_spreadPtsBuf[g_spreadPtsBufIdx] = spr;
+   g_spreadPtsBufIdx = (g_spreadPtsBufIdx + 1) % ArraySize(g_spreadPtsBuf);
+   if(g_spreadPtsBufCount < ArraySize(g_spreadPtsBuf))
+      g_spreadPtsBufCount++;
+}
+
+double GetSpreadAvgPoints()
+{
+   int interval = MathMax(1, SpreadStatsSampleIntervalSec);
+   int winSec = MathMax(10, SpreadStatsWindowSec);
+   int need = (int)MathCeil((double)winSec / (double)interval);
+   if(need < 1) need = 1;
+   int n = MathMin(g_spreadPtsBufCount, need);
+   if(n <= 0) return 0.0;
+
+   long sum = 0;
+   for(int i = 0; i < n; i++)
+   {
+      int idx = g_spreadPtsBufIdx - 1 - i;
+      if(idx < 0) idx += ArraySize(g_spreadPtsBuf);
+      sum += g_spreadPtsBuf[idx];
+   }
+   return (double)sum / (double)n;
+}
+
+double GetSpreadAvgPips()
+{
+   // Convention commune MT5: pips ~ points/10 pour la plupart des symboles (y compris XAU généralement).
+   return GetSpreadAvgPoints() / 10.0;
+}
+
 // Réentrées spike (avant CanOpen) — mode: 0=off, 1=proba spike imminent, 2=chaîne OTE+IA, 3=réentrée systématique après close spike
 bool     g_secondSpikeReentryArmed = false;
 datetime g_secondSpikeReentryArmTime = 0;
@@ -2159,6 +5200,9 @@ bool     g_oteSpikeChainEntry = false; // true le temps d'un ExecuteSpikeTradeBo
 
 bool IsSpreadAcceptable()
 {
+   // Maintenir la moyenne glissante même si on bloque une entrée.
+   UpdateSpreadStats();
+
    if(MaxSpreadPoints <= 0) return true;
    long spread = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
    if(spread > MaxSpreadPoints)
@@ -2258,11 +5302,23 @@ bool CanOpenAdditionalPositionForSymbol(const string symbol, const string action
    if(!IsAllowedByTradingTimeAndQuota(symbol, action))
       return false;
 
-   // Weltrade synth: blocage strict en zone de correction pour éviter les entrées au mauvais moment.
+   // Weltrade synth: blocage en correction, sauf exception signal fort aligné (éviter silence total).
    if(SMC_GetSymbolCategory(symbol) == SYM_WELTRADE_SYNTH && IsInEquilibriumCorrectionZone())
    {
-      Print("🚫 SIGNAL IGNORÉ - Zone de correction active sur ", symbol, " (Weltrade)");
-      return false;
+      string a = action;
+      StringToUpper(a);
+      bool dirAllowed = DirectionMatchesBoomCrashOrWeltradeSynth(symbol, a);
+      double aiConfPct = AIConfidencePercent();
+      bool aiStrong = (aiConfPct + 1e-9 >= WeltradeCorrectionBypassMinAIConfidencePercent);
+      bool emaStackOk = (a == "BUY" || a == "SELL") ? IsStrongM1M5TrendByEMAs(a) : false;
+      bool allowBypass = WeltradeAllowStrongSignalInCorrection && dirAllowed && aiStrong && emaStackOk;
+      if(!allowBypass)
+      {
+         Print("🚫 SIGNAL IGNORÉ - Zone de correction active sur ", symbol, " (Weltrade)");
+         return false;
+      }
+      Print("⚡ WELTRADE BYPASS CORRECTION - signal fort autorisé | ", symbol,
+            " | dir=", a, " | IA=", DoubleToString(aiConfPct, 1), "%");
    }
 
    // Cooldown post-fermeture: attendre N petites bougies M1 avant de reprendre une entrée sur le même symbole.
@@ -3175,6 +6231,9 @@ double   g_lastChartPatternProj2 = 0.0;
 double   g_lastChartPatternProj3 = 0.0;
 input bool   UseMTFConsensusAsPrimaryAI = true; // Utiliser le consensus MTF comme direction IA reelle du robot
 input int    MTFConsensusRefreshSeconds = 8; // Frequence de recalcul du consensus MTF
+input bool   DisableAIMarketOrdersOnCrypto = true; // Option 2: désactiver les entrées IA/MTF au marché sur crypto (ex BTCUSD)
+input bool   DisableHighConfidenceAutoEntryOnCrypto = true; // Option 2: désactiver la stratégie "High Confidence auto entry" sur crypto
+input bool   WeltradeOTEOnly = true; // Weltrade (GAINX/PAINX): n'autoriser que OTE+FIBO pour toute entrée
 
 // Analyse périodique du graphique attaché (hors trading).
 datetime g_lastMinuteChartAnalysisUtc = 0;
@@ -3182,6 +6241,15 @@ datetime g_lastMinuteChartAnalysisUtc = 0;
 // Probabilité de spike calculée / reçue depuis l'IA
 double   g_lastSpikeProbability = 0.0;
 datetime g_lastSpikeUpdate      = 0;
+
+// Spike cluster zone (confluence) - temps réel
+double   g_spikeClusterScore = 0.0;          // 0..1
+double   g_spikeClusterAtrRatio = 1.0;
+int      g_spikeClusterSpikeBars = 0;
+datetime g_spikeClusterUpdatedAt = 0;
+datetime g_spikeClusterZoneUntil = 0;
+double   g_spikeClusterZoneHigh = 0.0;
+double   g_spikeClusterZoneLow  = 0.0;
 
 // Variables ML pour le tableau de bord
 string g_mlMetricsStr = "";
@@ -3233,6 +6301,8 @@ datetime g_symbolStatsLastSyncAttempt = 0;
 datetime g_symbolStatsLastSyncOk = 0;
 bool     g_symbolStatsSyncOk = false;
 string   g_symbolStatsLastChecksum = "";
+datetime g_symbolStatsBackoffUntil = 0;
+int      g_symbolStatsConsecutiveFail = 0;
 
 // Entrée spike série M5 (bypass IA HOLD / DERIV / future protect quand structure validée)
 bool     g_m5ChSpikeSeriesActive = false;
@@ -3244,6 +6314,8 @@ datetime g_stairEmaTouchScalpLastExecUtc = 0;
 // Variables de trading et positions
 double g_maxProfit = 0.0;
 datetime g_lastBoomCrashPrice = 0;
+string   g_boomCrashGuardSymbols[20];
+datetime g_boomCrashGuardPauseUntil[20];
 datetime s_lastRefUpdate = 0;
 
 // Eviter les erreurs MT5 juste après fermeture (ex: "Position doesn't exist" sur SL/TP)
@@ -3278,6 +6350,16 @@ input int    InpMagicNumber       = 202502; // Magic Number
 input double MaxTotalLossDollars = 10.0;   // Perte maximale totale en dollars avant de couper toutes les positions
 input double HoldAutoCloseLossDefaultDollars = 2.0; // Seuil perte ($) pour auto-fermeture quand IA passe en HOLD
 input double HoldAutoCloseLossFxVol40Dollars = 3.5; // Exception FX VOL 40: seuil perte HOLD plus large
+input bool   EnableHoldAutoScalping = true;  // Activer scalping automatique quand IA est HOLD
+input double HoldScalpingEntryTolerancePct = 0.05; // Tolérance de touche point d'entrée (5%)
+input double HoldScalpingSLPct = 0.15; // Stop Loss scalping HOLD (15%)
+input double HoldScalpingTPPct = 0.30; // Take Profit scalping HOLD (30%)
+input int    HoldScalpingMinTrendStrength = 60; // Force de tendance minimale M5 (0-100) pour scalping HOLD
+input bool   HoldScalpingRequireClearTrend = true; // Exiger tendance claire (pas de consolidation) pour scalping HOLD
+input double HoldScalpingConsolidationThreshold = 0.003; // Seuil de consolidation (0.3% de variation)
+input bool   HoldScalpingUseEMA = true; // Utiliser EMA au lieu de SuperTrend pour entrées plus rapides
+input double HoldScalpingStrongTrendAdvancePct = 0.002; // Avancer ordres en tendance forte (0.2% avant niveau)
+input int    HoldScalpingStrongTrendThreshold = 80; // Seuil tendance forte pour avancer ordres (0-100)
 input double DailyProfitTarget = 20.0;     // Objectif de profit journalier en dollars
 input int    PauseAfterProfitHours = 4;    // Durée de la pause en heures après avoir atteint l'objectif de profit la plus perdante
 input double MaxLossPerSpikeTradeDollars = 3.0;  // Perte max par trade Spike Boom/Crash ($) - lot réduit si dépassement
@@ -3287,6 +6369,45 @@ input double MaxDailyDrawdownPercent  = 10.0; // Drawdown max journalier (%) ava
 input double DailyProfitTargetDollars = 20.0; // Gain journalier max ($) - stop trading jusqu'à fin de journée
 input double MaxDailyLossDollars      = 10.0; // Perte journalière max ($) - pause 2h
 input double CumulativeLossPauseThresholdDollars = 5.0; // Pertes consécutives cumulées ($) avant pause
+
+input group "=== TRADING ALGO GUI (Interface Manuel Charles) ==="
+input bool   UseTradingAlgoGUI = false;  // Activer l'interface graphique manuelle (Charles Robot)
+input int    GUI_PanelX = 20;             // Position X du panneau GUI
+input int    GUI_PanelY = 20;             // Position Y du panneau GUI
+input int    GUI_PanelWidth = 280;        // Largeur du panneau GUI
+input color  GUI_PanelBgColor = clrNavy;   // Couleur fond panneau GUI
+input color  GUI_PanelTextColor = clrWhite; // Couleur texte GUI
+input int    GUI_UpdateIntervalSec = 2;    // Intervalle minimum entre les mises à jour GUI (évite détachement)
+input color  GUI_BuyColor = clrLime;        // Couleur BUY GUI
+input color  GUI_SellColor = clrRed;        // Couleur SELL GUI
+input int    GUI_FontSize = 9;             // Taille police GUI
+input string GUI_FontName = "Arial";       // Police GUI
+input double GUI_DefaultRiskPercent = 0.5; // Risque % par défaut GUI
+input double GUI_DefaultTP1 = 50.0;       // TP1 points par défaut GUI
+input double GUI_DefaultTP2 = 100.0;      // TP2 points par défaut GUI
+input double GUI_DefaultTP3 = 150.0;      // TP3 points par défaut GUI
+input double GUI_DefaultTP4 = 200.0;      // TP4 points par défaut GUI
+input double GUI_DefaultSL = 30.0;        // SL points par défaut GUI
+input bool   GUI_UseAIServer = true;      // GUI: Utiliser le serveur IA pour l'analyse
+input string GUI_AI_ServerURL = "https://kolatradebot.onrender.com";  // GUI: URL primaire (Render)
+input int    GUI_AI_Timeout_ms = 5000;    // GUI: Timeout WebRequest (ms)
+input double GUI_InpRSI = 50.0;           // GUI: RSI (0 = auto-calculé)
+input double GUI_InpEMA_Fast_H1 = 0;      // GUI: EMA Fast H1 (0 = auto)
+input double GUI_InpEMA_Slow_H1 = 0;      // GUI: EMA Slow H1 (0 = auto)
+input double GUI_InpEMA_Fast_M1 = 0;      // GUI: EMA Fast M1 (0 = auto)
+input double GUI_InpEMA_Slow_M1 = 0;      // GUI: EMA Slow M1 (0 = auto)
+input double GUI_InpEMA_Fast_M5 = 0;      // GUI: EMA Fast M5 (0 = auto)
+input double GUI_InpEMA_Slow_M5 = 0;      // GUI: EMA Slow M5 (0 = auto)
+input double GUI_InpATR = 0;              // GUI: ATR (0 = auto)
+input int    GUI_InpDirRule = 0;          // GUI: Direction rule (0=neutre, 1=buy, -1=sell)
+input bool   GUI_InpIsSpikeMode = false;  // GUI: Mode spike
+input double GUI_InpVWAP = 0;             // GUI: VWAP (0 = auto)
+input double GUI_InpVWAPDistance = 0;     // GUI: Distance VWAP (0 = auto)
+input bool   GUI_InpAboveVWAP = false;    // GUI: Au-dessus VWAP
+input int    GUI_InpSuperTrendTrend = 0;  // GUI: SuperTrend trend (0=neutre, 1=up, -1=down)
+input double GUI_InpSuperTrendLine = 0;   // GUI: SuperTrend line (0 = auto)
+input int    GUI_InpVolatilityRegime = 0; // GUI: Volatility regime (0=neutre)
+input double GUI_InpVolatilityRatio = 1.0;// GUI: Volatility ratio
 input int    CumulativeLossPauseMinutes = 30; // Durée de pause après pertes consécutives (min)
 input bool   EnableProfitLock             = true;  // Stop si gros giveback après gros gain
 input double ProfitLockStartDollars       = 10.0;  // Active après ce gain max journalier ($)
@@ -3334,9 +6455,20 @@ input bool   CloseOnlyOnAIHoldOrBrokerSLTP = true; // Empêche les fermetures ac
 input bool   BlockManualLossCloseBeforeSL = true; // Si la position est en perte et que le SL broker n'est pas touché, bloquer toute fermeture active.
 input group "=== ENTRÉES PLUS POINTUES (fiabilité) ==="
 input int    MaxSpreadPoints          = 80;   // Spread max (points) - éviter entrée si spread trop élevé
+
+input group "=== SPREAD STATS (moyenne glissante) ==="
+input bool   ShowSpreadStatsOnDashboard = true; // Afficher spread courant + moyen dans le dashboard
+input int    SpreadStatsSampleIntervalSec = 1;  // Intervalle d'échantillonnage (sec)
+input int    SpreadStatsWindowSec         = 120; // Fenêtre moyenne (sec)
 input int    EntryCooldownSeconds     = 90;   // Cooldown min (sec) après dernière entrée sur ce symbole
 input int    MinSmallM1CandlesAfterClose = 3; // Après fermeture: attendre au moins N petites bougies M1 avant nouvelle entrée
 input int    BoomCrashSmallM1CandlesBeforeEntry = 3; // Boom/Crash (recovery touch M5): petites bougies M1 après spike avant entrée — 2 ou 3
+input bool   BoomCrashLossGuardEnabled = true; // Boom/Crash: garde-fou anti-pertes basé sur historique récent
+input int    BoomCrashLossGuardLookbackMinutes = 120; // Fenêtre historique (min) pour évaluer les pertes récentes
+input int    BoomCrashLossGuardMaxConsecutiveLosses = 2; // Pause si >= N pertes consécutives sur la fenêtre
+input double BoomCrashLossGuardMaxNetLossUSD = 2.50; // Pause si net <= -N$ sur la fenêtre
+input int    BoomCrashLossGuardPauseMinutes = 45; // Durée de pause auto après déclenchement du garde-fou
+input bool   BoomCrashBlockEntriesInConsolidation = true; // Boom/Crash: bloquer les nouvelles entrées si M5 est en consolidation/range
 input bool   RequireConfirmationCandle = true; // Exiger 1 bougie M1 dans le sens (close>open BUY, close<open SELL)
 input double MinProfitPotentialUSD    = 2.0;  // Gain potentiel min ($) - ex: 2$ pour capital 10$ = mouvement franc requis
 input double InpRiskReward        = 3.0;   // Ratio Risque/Rendement pour TP (3.0 = 1:3)
@@ -3359,7 +6491,7 @@ input double SpikeCompressionThreshold = 0.5;    // Seuil de compression ATR (0.
 input int    SpikeCalmBarsMin = 3;               // Nombre minimum de bougies calmes requises
 input double SpikeMomentumChange = 5.0;         // Changement RSI minimum pour momentum accélérant
 input bool   DebugSpikeDetection = false;       // Logs détaillés de détection spike
-input bool   EnableSpikeCountdownAutoEntry = true; // Compte a rebours spike (<=60s) + entree marche auto
+input bool   EnableSpikeCountdownAutoEntry = false; // Compte a rebours spike (<=60s) + entree marche auto (DÉSACTIVÉ - anti-détachement)
 input double SpikeCountdownTriggerProbability = 0.82; // Seuil proba pour lancer le compte a rebours
 input int    SpikeCountdownMaxSeconds = 60; // Fenetre max du compte a rebours
 input double SpikeAutoEntryMinAIConfidence = 0.80; // Confiance IA min pour auto-entree spike
@@ -3371,11 +6503,26 @@ input bool   SpikeMassiveBypassCooldown = true; // Ignorer EntryCooldown sur spi
 input bool   SpikeMassiveBypassLastCandleConfirm = true; // Ignorer confirmation derniere bougie M1
 input bool   SpikeMassiveBypassDerivArrow = true; // Ne pas attendre la fleche DERIV en mode agressif
 
+// === ZONE DE CONFLUENCE "SPIKE CLUSTER" (Boom/Crash + PAINX/GAINX) ===
+input bool   ShowSpikeClusterZone = true;     // Afficher la zone de confluence spikes (cluster)
+input int    SpikeClusterLookbackBarsM1 = 60; // Fenêtre M1 pour estimer la fréquence des spikes (cluster)
+input int    SpikeClusterMinSpikeBars = 4;    // Nb min de bougies "spike" sur la fenêtre pour considérer un cluster
+input double SpikeClusterMinScore = 0.72;     // Score min (0..1) pour autoriser les entrées "spike/series"
+input double SpikeClusterZoneAtrMult = 1.25;  // Largeur de zone autour du prix (± ATR*M)
+input bool   SpikeClusterRequireDirectionalStructure = true; // Crash: cluster valide seulement si structure descendante (Boom/GainX inverse)
+input int    SpikeClusterFutureShiftMinutes = 1; // Décaler visuellement la zone cluster vers le futur (minutes)
+input double SpikeClusterAnchorSmoothing = 0.65; // Lissage ancre cluster (0..1, plus haut=plus stable)
+input int    SpikeClusterProjectionMinutes = 20; // Projection de la zone dans le futur (minutes)
+input int    SpikeClusterRefreshSec = 5;      // Fréquence de recalcul/rafraîchissement (secondes)
+
 input bool   UseSessions       = true;   // LO/NYO: appliqué seulement si perte jour >= MaxDailyLossDollars ($)
 input bool   ShowChartGraphics = true;   // FVG, OB, Fibo, EMA, Swing H/L sur le graphique
-input bool   EnableMinuteChartAnalysis = true; // Analyse/rafraîchissement du graphique attaché toutes les minutes
+input bool   OTEOnlyStrictMode = true;   // true: aucune nouvelle entrée hors logique OTE
+input bool   BoomCrashOnlyOTEAndEMAPullback = true; // Boom/Crash: n'autoriser que OTE protocole + EMA pullback confirmé
+input bool   EnableMinuteChartAnalysis = false; // Anti-détachement: analyse timer désactivée par défaut
 input int    MinuteChartAnalysisIntervalSec = 60; // Intervalle (secondes) du timer d'analyse (>=30 recommandé)
 input bool   MinuteChartAnalysisForceTechSync = true; // Force PushChartTechStateToAIServer() à chaque minute (si IA active)
+input bool   EnableScanner360Timer = false; // Anti-détachement: scanner 360 désactivé par défaut (activer seulement si stable)
 input bool   ShowPremiumDiscount = true; // Zones Premium (vente) / Discount (achat) / Équilibre
 input bool   ShowSignalArrow     = true; // Flèche dynamique clignotante BUY/SELL
 input bool   RequireSMCDerivArrowForMarketOrders = true; // Avant tout ordre au marché, attendre SMC_DERIV_ARROW
@@ -3420,7 +6567,7 @@ input int    StairFormingRsiPullbackBars = 5;
 input double StairChartSignalMinAIConfidencePct = 0.0; // Min IA (%) pour dessin STAIR (0 = même seuil que notify pattern)
 input bool   ShowStairSetupOnChart = true;    // Rectangle + lignes type OTE quand pattern stair M1 détecté
 input group "=== STAIR ENTRY (Boom/Crash + GainX/PainX Weltrade, complément OTE) ==="
-input bool   UseStairEntry = true; // Entrée marché: M5+M1 forts + escalier M1 (hors touch ligne M5 / hors OTE)
+input bool   UseStairEntry = false; // DÉSACTIVÉ: Seul OTE+Fibo avec confirmation M5 autorisé
 input int    StairEntryCooldownSeconds = 120; // Anti-spam entre deux stairEntry sur le même graphique
 input double StairEntryMinAIConfidencePercent = 60.0; // Confiance IA min (%) pour stairEntry (Boom/Crash)
 input double StairEntryWeltradeMinAIConfidencePercent = 60.0; // Confiance IA min (%) pour stairEntry (Weltrade synth)
@@ -3446,7 +6593,13 @@ input bool   StairEntryEmaTouchDebug = false; // Logs throttlés du filtre touch
 input bool   UseStairEmaTouchScalpEntry = true; // Boom/GAINX BUY: entrée marché immédiate en escalier haussier sur touch EMA13 M1 + EMA21 M5
 input int    StairEmaTouchScalpCooldownSeconds = 35; // Cooldown dédié (s) entre 2 entrées scalp EMA touch
 input bool   StairEntryBypassWeakScissorPrudent = true; // Stair: ne pas bloquer/réduire le lot par le mode prudent « canal ciseau » (souvent la cause des non-entrées malgré l’escalier)
-input group "=== STAIR ESCALIER (niveau A=marché existant, niveau B=1 limite d’attente, sorties) ==="
+input group "=== SORTIE SUR INVERSION LIGNE M1 TREND ==="
+input bool   UseM1TrendReversalExit     = true;   // Fermer la position si la ligne M1 trend change de sens
+input int    M1TrendReversalLookback    = 20;     // Lookback M1 (bougies) pour la régression linéaire de tendance
+input double M1TrendReversalMinSlope    = 0.0;    // Pente min absolue pour confirmer un vrai changement (0 = tout signal)
+input int    M1TrendReversalMinSeconds  = 30;     // Délai min (s) après ouverture avant de sortir sur inversion
+
+input group "=== STAIR ESCALIER (niveau A=marché existant, niveau B=1 limite d'attente, sorties) ==="
 input bool   UseStairEscalierMode = true; // Activer limite niveau B + trailing / sorties dédiées positions STAIR
 input bool   StairEscPlaceLimitLevelB = true; // Si escalier M1 OK mais pas niveau A (EMA et/ou IA), placer 1 seul BUY_LIMIT/SELL_LIMIT (pullback)
 input double StairEscLimitPullbackATRMult = 0.45; // Boom/GainX: sous le bid ; Crash/PainX: au-dessus de l’ask (× ATR M1)
@@ -3498,6 +6651,32 @@ input int    Zone4StartHourUTC = 20;
 input int    Zone4EndHourUTC   = 23; // Zone 4 = 3h
 input int    MaxTradesPerZonePerDay = 5; // 4 zones x 5 trades = 20 max/jour
 input int    MaxDailyTrades         = 20; // Au-delà => robot en pause (plus d'entrées)
+
+input group "=== PRESET XAU (DERIV) — SCALP 2 TRADES/JOUR ==="
+input bool   XAU_DerivScalpPresetEnabled = true;   // Appliquer règles spéciales OR (scalp Deriv)
+input int    XAU_MaxDailyTrades          = 2;      // Max positions/jour sur XAU (EA)
+input int    XAU_MaxSpreadPoints         = 80;     // Bloquer si spread > N points (SYMBOL_SPREAD)
+input bool   XAU_EnforceH1TrendFilter    = true;   // Exiger tendance H1 claire (EMA50 vs EMA200) sur XAU
+input double XAU_MinAIConfidencePercent  = 90.0;   // XAU: IA minimum pour autoriser toute entrée
+input bool   XAU_RequireOTEActive        = true;   // XAU: exiger setup OTE actif avant toute entrée
+
+input group "=== FAST SETUPS (hors OTE strict) ==="
+input bool   UseEMAPullbackDynamicEntry       = true;  // Entrée sur touch/rejet EMA 21/50 en tendance forte
+input double EMAPullbackMaxDistanceATRMult    = 0.30;  // Distance max au cluster EMA (x ATR M1)
+input bool   EMAPullbackRequireTrendH1M15     = true;  // Exiger alignement tendance H1+M15
+input int    EMAPullbackCooldownSeconds       = 30;    // Cooldown entre 2 tentatives EMA pullback
+input bool   EMAPullbackAllowOnVolatility     = false; // Step/Volatility: désactiver pullback EMA seul (évite pertes en chop)
+input double EMAPullbackMinAIConfidencePercent = 85.0; // Seuil IA mini (%) pour autoriser un pullback EMA
+input bool   UseLiquiditySweepReclaimEntry    = true;  // Entrée après sweep de liquidité + reclaim
+input int    SweepReclaimTolerancePoints      = 15;    // Tolérance reclaim autour du niveau sweep (points)
+input bool   SweepReclaimRequireTrendFilter   = true;  // Exiger alignement H1+M15 du reclaim
+input int    SweepReclaimCooldownSeconds      = 45;    // Cooldown entre 2 tentatives sweep reclaim
+input bool   WeltradeAllowStrongSignalInCorrection = true; // Weltrade: autoriser entrée en correction si signal fort aligné
+input double WeltradeCorrectionBypassMinAIConfidencePercent = 78.0; // Seuil IA (%) pour bypass correction Weltrade
+input int    FastSetupMinSLPoints             = 180;   // Eviter SL trop serré (positions timides)
+input int    FastSetupMinTPPoints             = 280;   // Eviter TP trop court (positions timides)
+input double FastSetupMinRR                   = 1.30;  // RR minimum pour setups rapides
+input double FastSetupMinExpectedProfitUSD    = 0.70;  // Profit potentiel minimum estimé ($)
 
 bool   g_cfgAllowBoomCrashTrendEntryWithoutArrow = false;
 double g_cfgBoomCrashTrendEntryMinConfidencePct = 90.0;
@@ -3572,18 +6751,34 @@ void ApplyExtraStopLossForLimitOrders(double entryPrice, double &stopLoss, const
    stopLoss = NormalizeDouble(stopLoss, _Digits);
 }
 
+input group "=== PANEL D'INPUTS MANUEL (SL/TP/RISK/REWARD) ==="
+input bool   UseManualPanelInputs = false; // Activer le panel d'inputs manuel (TP1-TP4, SL, Risk%, Reward)
+input double ManualTP1Points    = 0.0;    // TP1 en points (0 = désactivé)
+input double ManualTP2Points    = 0.0;    // TP2 en points (0 = désactivé)
+input double ManualTP3Points    = 0.0;    // TP3 en points (0 = désactivé)
+input double ManualTP4Points    = 0.0;    // TP4 en points (0 = désactivé)
+input double ManualSLPoints     = 0.0;    // SL en points (0 = désactivé)
+input double ManualRiskPercent  = 0.5;    // Risque en % du capital pour calcul auto position size
+input double ManualRewardUSD    = 0.0;    // Reward cible en USD (0 = calcul auto via RR ratio)
+input double ManualPositionSize = 0.0;    // Position size manuelle en lots (0 = calcul auto via risk%)
+
+input group "=== DASHBOARD MANUEL MM + SIMULATION ==="
+input bool   UseManualAssistantDashboard = true; // Afficher panneau manuel MM/simulation (n'agit pas sur l'auto-trading)
+input bool   ManualAssistantPush360ToMobile = true; // Bouton Analyse 360 envoie aussi une notification push MT5
+
 input group "=== SL/TP DYNAMIQUES (prudent / sécuriser gain) ==="
-input double SL_ATRMult        = 2.1;    // Stop Loss (x ATR) — un peu plus serré qu avant (2.5)
-input double TP_ATRMult        = 5.0;    // Take Profit (x ATR) - ratio 2:1
+input double SL_ATRMult        = 1.5;    // Stop Loss (x ATR) — réduit pour petit capital
+input double TP_ATRMult        = 3.0;    // Take Profit (x ATR) - réduit pour petit capital
+input int    SLTightenPoints   = 5;      // Rapprocher le SL de N points (sans violer les contraintes broker)
 input group "=== SL marchés / LIMIT Boom-Crash (plus bas = SL plus proche) ==="
 input double BoomCrashSlMinPointsFloor    = 340.0; // Points min SL si stopsLevel broker = 0 (ex-Boom ~500 pts)
 input double BoomCrashSlBrokerFloorPoints = 340.0; // Avec stopsLevel : plancher en points (max avec distance broker)
 input double BoomCrashSlSafeDistanceMult  = 2.05; // x distance min avant SL/TP marché (ex-2.5 Boom/Crash)
-input int    BoomCrashFixedSlPoints       = 220;  // SL en points : M5_ENTRY_TRACK, spikes simples, LIMIT pm (ex-300)
-input int    BoomCrashFixedTpPoints       = 440;  // TP en points (ex-600, souvent ~2x SL)
+input int    BoomCrashFixedSlPoints       = 150;  // SL en points : réduit pour petit capital
+input int    BoomCrashFixedTpPoints       = 300;  // TP en points : réduit pour petit capital
 input group "=== ORDRES LIMITES: FILTRE TENDANCE + SL PLUS LARGE ==="
 input bool   LimitOrdersRequireTrendConfirmation = true; // Avant tout ordre LIMIT, exiger filtres tendance (EMA+OB+OTE selon config)
-input int    LimitOrdersExtraStopLossM1Candles   = 10;   // Augmenter SL des LIMIT d'environ N bougies M1
+input int    LimitOrdersExtraStopLossM1Candles   = 18;   // Augmenter SL des LIMIT d'environ N bougies M1 (élargi de +8 bougies)
 input int    LimitOrdersAvgRangeBarsM1           = 10;   // Nb bougies M1 pour estimer la "petite bougie" (range moyen)
 input double LimitOrdersWeltradeExtraSLMultiplier = 2.0; // GAINX/PAINX: SL LIMIT plus large (multiplicateur du buffer M1)
 input double LimitOrdersExtraSLMinAtrMultM1      = 1.0; // SL LIMIT: distance mini supplémentaire = ATR(M1) * mult (en plus du range moyen)
@@ -3594,13 +6789,38 @@ input int    MovingEntryPointLimitRefreshSeconds = 1;    // Fréquence de synchr
 input int    MovingEntryPointLimitMoveThresholdPoints = 1; // Écart mini (points) avant modification d'un LIMIT existant
 input group "=== TRAILING STOP (sécuriser les gains) ==="
 input bool   UseTrailingStop    = true;   // Activer le Trailing Stop automatique
-input double TrailingStop_ATRMult = 3.0;  // Distance Trailing Stop (x ATR) - moins agressif pour protéger les gains
+input double TrailingStop_ATRMult = 1.5;  // Distance Trailing Stop (x ATR) - réduit pour petit capital
 input double TrailingStartProfitDollars = 0.10; // Activer le trailing dès petit gain ($)
+input bool   UseHardGiveback50From1USD = true; // Si pic >= 1$, fermer quand le profit redescend de 50% du pic
+input double HardGivebackMinPeakUSD = 1.0;     // Seuil d'activation du filet anti-giveback
+input double HardGivebackMaxGivebackPct = 50.0; // 50 = ne tolérer qu'une reprise max de 50% du gain
 input bool   DynamicSL_Enable = true;               // SL dynamique (BE + trailing + lock gain max)
-input double DynamicSL_StartProfitDollars = 0.10;   // Commencer à protéger à partir de ce profit ($)
-input double DynamicSL_LockPctOfMax = 0.50;         // Protéger au moins X% du gain max (0.50 = 50%)
-input int    DynamicSL_BE_BufferPoints = 5;         // Marge break-even (points)
-input bool   DynamicSL_OnBoomCrash = true;          // Boom/Crash: même SL dynamique (BE + trailing + lock) — la sortie spike reste UseSpikeAutoClose / ManageBoomCrashSpikeClose
+input double DynamicSL_StartProfitDollars = 0.15;   // Commencer à protéger à partir de ce profit ($) - réduit pour petit capital
+input double DynamicSL_LockPctOfMax = 0.70;         // Protéger au moins X% du gain max (0.70 = 70% - protection renforcée)
+input int    DynamicSL_BE_BufferPoints = 5;         // Marge break-even (points) - réduite pour M1
+input bool   DynamicSL_OnBoomCrash = true;          // Boom/Crash: ACTIVÉ pour trailing stop avec petit capital
+input bool   DynamicSL_OnWeltradeSynth = true;      // PAINX/GAINX: ACTIVÉ pour trailing stop avec petit capital
+input bool   DynamicSL_OnCryptoForexIndices = true; // ACTIVÉ: SL dynamique sur Crypto/Forex/Indices pour protéger les gains
+
+input group "=== SL DYNAMIQUE PRÉCOCE (sortie si entrée non prometteuse) ==="
+input bool   EarlyExit_Enable = true;               // Activer la sortie précoce si l'entrée n'est plus prometteuse
+input int    EarlyExit_CheckSeconds = 30;           // Délai avant de vérifier si l'entrée est prometteuse (secondes)
+input double EarlyExit_MinProgressPct = 0.30;       // Progrès minimum attendu vers TP (30% du chemin vers TP)
+input double EarlyExit_MaxLossPct = 0.50;           // Perte maximale acceptable avant sortie (50% du SL original)
+input bool   OTE_RequireM5CandlestickConfirmation = true; // Exiger confirmation candlestick M5 pour entrée OTE
+input bool   OTE_RequireStrongTrend = true;         // Exiger tendance forte (EMA M5 alignée) pour éviter contre-tendance
+input bool   OTE_RequireM15OrM5ConfirmationBeforeM1 = true; // Exiger confirmation M15 ou M5 avant toute exécution OTE en M1
+input bool   OTE_AllowExtendedCandlestickPatterns = true; // Étendre la confirmation aux patterns (engulfing, pin bar, morning/evening star, etc.)
+input bool   OTE_RequireBOSConfirmation = true; // Protocole strict: BOS confirmé obligatoire avant exécution OTE
+input int    OTE_BOSLookbackBars = 20; // Lookback pour validation BOS sur M15/M5
+input double EarlyExit_MinProfitUSD = 0.50;         // Profit minimum ($) avant d'activer la protection SL dynamique
+input double EarlyExit_MinEquityForHighVol = 100.0; // Équité minimum ($) pour trader les symboles à forte volatilité
+input bool   EarlyExit_UseRSI = true;               // Utiliser RSI pour détecter retournement de tendance
+input double EarlyExit_RSI_BuyThreshold = 70;       // RSI seuil pour sortie BUY (si RSI > 70, surachat)
+input double EarlyExit_RSI_SellThreshold = 30;      // RSI seuil pour sortie SELL (si RSI < 30, survente)
+input bool   EarlyExit_UseEMA = true;               // Utiliser EMA pour détecter retournement de tendance
+input int    EarlyExit_EMA_Fast = 9;                // EMA rapide pour détection
+input int    EarlyExit_EMA_Slow = 21;               // EMA lente pour détection
 
 input group "=== GRAPHIQUES SMC (affichage visuel) ==="
 input bool   ShowPredictionChannel = true; // Afficher le canal de prédiction ML
@@ -3610,10 +6830,17 @@ input int    FutureCandlesRefreshSeconds = 20; // TTL cache prédiction (s)
 input bool   AutoValidateFuturePredictions = true; // Envoyer validation prédictions vs réel au serveur
 input int    FuturePredictionMinBarsToValidate = 30; // Nb min de bougies réelles closes avant envoi validation
 input bool   ShowBookmarkLevels    = true; // Lignes horizontales sur derniers Swing High/Low (bookmark ICT)
+input int    MaxChartObjectsSafety = 1400; // Sécurité: si trop d'objets, réduire les dessins lourds (évite détachement)
+input int    HeavyGraphicsMinIntervalSec = 10; // Throttle global des dessins lourds (bougies futures, canaux, etc.)
 
 input group "=== TABLEAU DE BORD ET MÉTRIQUES ==="
 input bool   UseDashboard        = true;   // Afficher le tableau de bord avec métriques
 input bool   DashboardSingleSourceMode = true; // Eviter les doublons: infos texte uniquement via UpdateDashboard()
+input bool   DashboardEssentialMode = true; // Dashboard compact: uniquement les infos essentielles de la stratégie active
+input bool   StrategyVisualMinimalMode = true; // Graphique épuré: ne garder que OTE zone, Entry, SL, TP
+input bool   ShowOTEProtocolVisuals = true; // Quand prix entre dans OTE: afficher Premium/Discount + Eq 0.5 + OTE + TP1/TP2 (style protocole)
+input int    OTEProtocolVisualForwardBarsM1 = 240; // Extension visuelle vers la droite (en barres M1)
+input int    OTEProtocolSLBufferPoints = 25; // SL guide visuel (sous 79%) = 0.786 +/- buffer points
 input bool   ShowTop3NetProfitBottomRight = true; // Afficher en bas à droite le top 3 net profit + perf globale modèle
 input bool   ShowMLMetrics       = true;   // Afficher les métriques ML (entraînement modèle)
 input bool   AutoStartMLContinuousTraining = true; // Démarrer l'entraînement continu ML automatiquement
@@ -3622,18 +6849,18 @@ input int    MLMetricsLabelYOffsetPixels   = 200;  // Décalage vertical (px) po
 input int    DashboardLabelXOffsetPixels   = 10;   // Offset X dashboard (px)
 input int    DashboardLabelYStartPixels    = 18;   // Début Y dashboard (px)
 input int    DashboardLabelLineHeightPixels= 22;   // Hauteur ligne dashboard (px) - augmenté pour éviter la superposition
-input bool   UseSpikeAutoClose    = true;   // Fermeture automatique des spikes (ACTIVÉ)
+input bool   UseSpikeAutoClose    = false;  // DÉSACTIVÉ: Seul OTE+Fibo avec confirmation M5 autorisé
 input bool   UseDollarExits       = true;  // Fermetures basées sur $ (DÉSACTIVÉ - laisse SL/TP normal)
 input bool   UseIAHoldClose       = true;  // Fermer sur HOLD (désactivé=laisser SL/TP naturel, capturer le spike)
 input bool   EnableSpikePeakGivebackClose = true; // Fermer si un gain spike est rendu (protection anti-retournement)
 input double SpikePeakGivebackMinProfitUSD = 0.25; // Profit max mini atteint avant activation du giveback
-input double SpikePeakGivebackDeltaUSD = 0.18; // Drawdown depuis le pic de profit qui déclenche la fermeture
+input double SpikePeakGivebackDeltaUSD = 0.05; // Drawdown depuis le pic de profit qui déclenche la fermeture - réduit pour fermer plus rapidement
 input bool   UseDirectionConflictClose = true; // Fermer sur conflit direction (ACTIVÉ - permet rotation automatique)
 
 input group "=== AI SERVER (confirmation signaux) ==="
 input bool   UseAIServer       = true;   // Utiliser le serveur IA pour confirmation
-input string AI_ServerURL       = "http://localhost:8000";  // URL du serveur IA local
-input string AI_ServerRender    = "https://kolatradebot.onrender.com";  // URL render en fallback
+input string AI_ServerURL       = "http://localhost:8000";  // URL secondaire (fallback local)
+input string AI_ServerRender    = "https://kolatradebot.onrender.com";  // URL primaire (Render)
 input int    AI_Timeout_ms     = 5000;   // Timeout WebRequest (ms)
 input int    AI_UpdateInterval_Seconds = 30;  // Intervalle mise à jour IA (secondes)
 input bool   UsePropiceSymbolsFilter = true;  // ⚠️ IMPORTANT: Filtre horaire - Le robot trade UNIQUEMENT sur les symboles les plus "propices" selon l'heure actuelle (UTC)
@@ -3643,7 +6870,7 @@ input bool   UsePropiceSymbolsFilter = true;  // ⚠️ IMPORTANT: Filtre horair
 input int    PropiceTopN = 5;                // Top N symbols renvoyés par /symbols/propice/top
 input int    PropiceUpdateIntervalSec = 20;  // Refresh filtre propice (secondes) - scan plus fréquent
 input bool   PreferBestSymbolWithoutBlocking = true; // Prioriser le meilleur symbole sans bloquer les autres symboles attachés
-input bool   UseRenderAsPrimary = false; // Utiliser le serveur local en premier (Render en fallback)
+input bool   UseRenderAsPrimary = true; // Utiliser Render en premier, local en fallback
 input string AI_ServerURL2      = "http://localhost:8000";  // URL serveur local
 input bool   EnableChartTechStateSync = true; // Envoyer l'etat des indicateurs vers /ml/chart-tech-state
 input int    ChartTechStateSyncIntervalSec = 600; // Intervalle sync endpoint (10 min)
@@ -3681,8 +6908,16 @@ input bool   RequireStructureAfterSweep = true; // Smart Money: entrée après c
 input bool   NoEntryDuringSweep = true;  // Attendre 1+ barres après le sweep (jamais pendant panique)
 input bool   StopBeyondNewStructure = true; // Stop au-delà nouvelle structure (pas niveau évident)
 input bool   UseBOS            = true;   // Break Of Structure
-input bool   UseOTE            = true;   // Optimal Trade Entry (Fib 0.62-0.79)
-input bool   UseEqualHL        = true;   // Equal Highs/Lows (EQH/EQL)
+input bool   OTE_EnableBreakerBlocks = true;    // Activer détection breaker blocks
+input bool     OTE_EnableOrderBlocks = true;      // Activer détection order blocks
+input bool     OTE_EnableLiquiditySweep = true;   // Activer détection prise de liquidité
+input int      OTE_MinConfluenceScore = 3;        // Score minimum de confluence pour trading (1-5)
+input bool     OTE_ShowConfluenceScore = true;    // Afficher le score de confluence
+input int      OTE_SwingValidationBars = 5;      // Nombre de bougies pour valider swing points
+input bool     OTE_OptimizedDrawing = true;       // Dessin OTE optimisé pour éviter détachement
+input int      OTE_MaxObjectsToDraw = 50;         // Limiter objets dessinés pour performance
+input bool     OTE_TemporaryZones = true;         // Zones discount/premium temporaires
+input bool   UseOTE            = true;   // Optimal Trade Entry (Fib 0.62-0.79) - STRATÉGIE UNIQUE ACTIVÉE
 input bool   ShowOTEImbalanceOnChart = true; // Dessiner setup OTE + Imbalance (FVG) sur le graphique
 input group "=== HMS — zones structurelles (style range / support / équilibre / cible) ==="
 input bool   ShowHMSZonesOnChart = true; // Afficher les zones HMS (range, support, équilibre 0.5, cible premium, OTE visuelle)
@@ -3718,7 +6953,12 @@ input bool   UseTrendAlignedEntryFilter = true;  // Exiger alignement EMA + OB +
 input bool   RequireOBForEntry          = true;  // Exiger un Order Block confirmé dans la direction
 input bool   RequireOTEFiboZone         = true;  // Exiger zone OTE Fibonacci 0.618-0.786
 input bool   BoomCrashRelaxTrendFilterForSpikes = true; // Boom/Crash: EMA OK + (IA alignée forte OU canal ML) → ignorer OB/OTE (spikes)
+input int    TrendFilterOBProximityPoints = 40;          // Tolérance distance prix↔OB (points) pour éviter les faux blocages
+input double TrendFilterOBProximityAtrMult = 0.35;       // Tolérance distance prix↔OB en multiple d'ATR M1
 input int    M5TouchTolerancePointsBoomCrash   = 30;    // Tolérance touch M5 en points (Boom/Crash, spikes rapides; 0 = comme les autres)
+input bool   CrashPostCorrectionEmaReentryEnabled = true; // Crash SELL: ré-armer en correction et exécuter dès sortie sur touch EMA/M5
+input int    CrashPostCorrectionArmWindowSec = 180;       // Fenêtre de validité de l'arm post-correction (sec)
+input bool   CrashPostCorrectionRequireStrongEMA = true;   // Exiger pile EMA M1+M5 forte pour SELL au re-entry
 input int    M5EntryLevelsRefreshSeconds       = 15;    // Recalcul ENTRY M5 + lignes (min 1 s — plus bas = LIMIT suiveurs plus réactifs)
 input double OTE_MinConfidenceForex  = 55.0;  // Confiance IA minimum pour Forex (plus flexible)
 input double OTE_MinConfidenceOther  = 60.0;  // Confiance IA minimum pour autres symboles
@@ -4187,6 +7427,17 @@ string   g_oteImbPendingSymbol = "";
 bool     g_oteImbPendingUseFlexible = false;
 datetime g_oteImbPendingSince = 0;
 
+// Variables globales pour confirmations OTE améliorées
+int g_oteConfluenceScore = 0;
+bool g_oteHasBreakerBlock = false;
+bool g_oteHasOrderBlock = false;
+bool g_oteHasLiquiditySweep = false;
+double g_oteBreakerBlockPrice = 0.0;
+double g_oteOrderBlockPrice = 0.0;
+datetime g_oteLiquiditySweepTime = 0;
+datetime g_oteLastZoneDisplayTime = 0;
+int g_oteObjectCount = 0;
+
 // NOUVELLES VARIABLES : STATISTIQUES JOURNALIÈRES
 int    g_dailyTradeCount = 0;
 int    g_dailyWinCount = 0;
@@ -4367,21 +7618,216 @@ bool IsHighVolatilityCapitalGatePassed(const string symbol, const string context
    return false;
 }
 
+int GetBoomCrashGuardSlot(const string symbol, const bool createIfMissing)
+{
+   int freeIdx = -1;
+   for(int i = 0; i < ArraySize(g_boomCrashGuardSymbols); i++)
+   {
+      if(g_boomCrashGuardSymbols[i] == symbol)
+         return i;
+      if(freeIdx < 0 && g_boomCrashGuardSymbols[i] == "")
+         freeIdx = i;
+   }
+   if(createIfMissing && freeIdx >= 0)
+   {
+      g_boomCrashGuardSymbols[freeIdx] = symbol;
+      g_boomCrashGuardPauseUntil[freeIdx] = 0;
+      return freeIdx;
+   }
+   return -1;
+}
+
+bool IsBoomCrashLossGuardPaused(const string symbol, datetime &untilOut)
+{
+   untilOut = 0;
+   int idx = GetBoomCrashGuardSlot(symbol, false);
+   if(idx < 0) return false;
+   datetime now = TimeCurrent();
+   datetime u = g_boomCrashGuardPauseUntil[idx];
+   if(u > now)
+   {
+      untilOut = u;
+      return true;
+   }
+   if(u != 0 && u <= now)
+      g_boomCrashGuardPauseUntil[idx] = 0;
+   return false;
+}
+
+void SetBoomCrashLossGuardPause(const string symbol, const int minutes)
+{
+   int idx = GetBoomCrashGuardSlot(symbol, true);
+   if(idx < 0) return;
+   datetime now = TimeCurrent();
+   g_boomCrashGuardPauseUntil[idx] = now + (datetime)(MathMax(1, minutes) * 60);
+}
+
+bool GetRecentBoomCrashLossStats(const string symbol,
+                                 const int lookbackMinutes,
+                                 int &consecutiveLossesOut,
+                                 double &netOut)
+{
+   consecutiveLossesOut = 0;
+   netOut = 0.0;
+   if(symbol == "") return false;
+   int lb = MathMax(10, lookbackMinutes);
+   datetime toT = TimeCurrent();
+   datetime fromT = toT - (datetime)(lb * 60);
+   if(!HistorySelect(fromT, toT))
+      return false;
+
+   int total = HistoryDealsTotal();
+   if(total <= 0) return true;
+
+   bool streakOpen = true;
+   for(int i = total - 1; i >= 0; i--)
+   {
+      ulong ticket = HistoryDealGetTicket(i);
+      if(ticket == 0) continue;
+      if((long)HistoryDealGetInteger(ticket, DEAL_MAGIC) != InpMagicNumber) continue;
+      if(HistoryDealGetString(ticket, DEAL_SYMBOL) != symbol) continue;
+      if((long)HistoryDealGetInteger(ticket, DEAL_ENTRY) != DEAL_ENTRY_OUT) continue;
+
+      double p = HistoryDealGetDouble(ticket, DEAL_PROFIT) +
+                 HistoryDealGetDouble(ticket, DEAL_SWAP) +
+                 HistoryDealGetDouble(ticket, DEAL_COMMISSION);
+      netOut += p;
+      if(streakOpen)
+      {
+         if(p < 0.0) consecutiveLossesOut++;
+         else streakOpen = false;
+      }
+   }
+   return true;
+}
+
 bool IsAllowedByTradingTimeAndQuota(const string symbol, const string action)
 {
    if(!IsHighVolatilityCapitalGatePassed(symbol, "CAPITAL FILTER"))
       return false;
 
+   // Preset XAU (Deriv) scalping: 2 trades/jour max + spread max + tendance H1 obligatoire.
+   bool isXau = false;
+   if(XAU_DerivScalpPresetEnabled)
+   {
+      string su = symbol;
+      StringToUpper(su);
+      isXau = (StringFind(su, "XAU") >= 0 || StringFind(su, "GOLD") >= 0);
+      if(isXau)
+      {
+         double aiConfPct = AIConfidencePercent();
+         if(XAU_MinAIConfidencePercent > 0.0 && aiConfPct + 1e-9 < XAU_MinAIConfidencePercent)
+         {
+            Print("🚫 XAU SCALP BLOQUÉ - IA insuffisante sur ", symbol,
+                  " | IA=", DoubleToString(aiConfPct, 1), "% < ", DoubleToString(XAU_MinAIConfidencePercent, 1), "%");
+            return false;
+         }
+         if(XAU_RequireOTEActive && symbol == _Symbol)
+         {
+            string dTmp = "";
+            double eTmp = 0.0, slTmp = 0.0, tpTmp = 0.0, hTmp = 0.0, lTmp = 0.0;
+            if(!DetectActiveOTESetupOn100Bars(dTmp, eTmp, slTmp, tpTmp, hTmp, lTmp))
+            {
+               Print("🚫 XAU SCALP BLOQUÉ - OTE non active sur ", symbol, " (condition obligatoire)");
+               return false;
+            }
+         }
+
+         int spr = (int)SymbolInfoInteger(symbol, SYMBOL_SPREAD);
+         if(XAU_MaxSpreadPoints > 0 && spr > XAU_MaxSpreadPoints)
+         {
+            Print("🚫 XAU SCALP BLOQUÉ - Spread trop élevé sur ", symbol,
+                  " | spread=", spr, " pts > ", XAU_MaxSpreadPoints);
+            return false;
+         }
+         if(XAU_EnforceH1TrendFilter)
+         {
+            string aU = action;
+            StringToUpper(aU);
+            if(aU == "BUY" || aU == "SELL")
+            {
+               int h50  = iMA(symbol, PERIOD_H1, 50, 0, MODE_EMA, PRICE_CLOSE);
+               int h200 = iMA(symbol, PERIOD_H1, 200, 0, MODE_EMA, PRICE_CLOSE);
+               double e50 = 0.0, e200 = 0.0;
+               if(h50 != INVALID_HANDLE && h200 != INVALID_HANDLE)
+               {
+                  double b1[]; double b2[];
+                  ArraySetAsSeries(b1, true);
+                  ArraySetAsSeries(b2, true);
+                  if(CopyBuffer(h50, 0, 0, 1, b1) >= 1) e50 = b1[0];
+                  if(CopyBuffer(h200, 0, 0, 1, b2) >= 1) e200 = b2[0];
+               }
+               if(h50 != INVALID_HANDLE) IndicatorRelease(h50);
+               if(h200 != INVALID_HANDLE) IndicatorRelease(h200);
+               bool h1Up = (e50 > 0.0 && e200 > 0.0 && e50 > e200);
+               bool h1Dn = (e50 > 0.0 && e200 > 0.0 && e50 < e200);
+               if((aU == "BUY" && !h1Up) || (aU == "SELL" && !h1Dn))
+               {
+                  Print("🚫 XAU SCALP BLOQUÉ - Tendance H1 non alignée | ", symbol,
+                        " | action=", aU,
+                        " | EMA50=", DoubleToString(e50, _Digits),
+                        " | EMA200=", DoubleToString(e200, _Digits));
+                  return false;
+               }
+            }
+         }
+      }
+   }
+
    datetime nowT = TimeCurrent();
+   ENUM_SYMBOL_CATEGORY cat = SMC_GetSymbolCategory(symbol);
+
+   // Garde-fou dédié Boom/Crash: stopper la spirale de pertes en phase défavorable.
+   if(BoomCrashLossGuardEnabled && cat == SYM_BOOM_CRASH)
+   {
+      datetime guardUntil = 0;
+      if(IsBoomCrashLossGuardPaused(symbol, guardUntil))
+      {
+         int secLeft = (int)(guardUntil - nowT);
+         if(secLeft < 0) secLeft = 0;
+         Print("⏸ BOOM/CRASH LOSS GUARD - Pause active sur ", symbol,
+               " | reprise dans ", secLeft, "s");
+         return false;
+      }
+
+      if(BoomCrashBlockEntriesInConsolidation && symbol == _Symbol && IsMarketInConsolidation(PERIOD_M5, 20))
+      {
+         Print("🚫 BOOM/CRASH LOSS GUARD - Entrée bloquée (consolidation/range M5) sur ", symbol);
+         return false;
+      }
+
+      int streakLosses = 0;
+      double netRecent = 0.0;
+      if(GetRecentBoomCrashLossStats(symbol, BoomCrashLossGuardLookbackMinutes, streakLosses, netRecent))
+      {
+         bool hitStreak = (BoomCrashLossGuardMaxConsecutiveLosses > 0 &&
+                           streakLosses >= BoomCrashLossGuardMaxConsecutiveLosses);
+         bool hitNet = (BoomCrashLossGuardMaxNetLossUSD > 0.0 &&
+                        netRecent <= -MathAbs(BoomCrashLossGuardMaxNetLossUSD));
+         if(hitStreak || hitNet)
+         {
+            SetBoomCrashLossGuardPause(symbol, BoomCrashLossGuardPauseMinutes);
+            Print("🚫 BOOM/CRASH LOSS GUARD DÉCLENCHÉ - ", symbol,
+                  " | pertes consécutives=", streakLosses,
+                  " | net ", BoomCrashLossGuardLookbackMinutes, "m=", DoubleToString(netRecent, 2), "$",
+                  " | pause ", BoomCrashLossGuardPauseMinutes, " min");
+            return false;
+         }
+      }
+   }
+
    MqlDateTime md;
    TimeToStruct(nowT, md);
    md.hour = 0; md.min = 0; md.sec = 0;
    datetime dayStart = StructToTime(md);
 
    int totalToday = CountTodayOpenedTradesEASymbol(dayStart, nowT, symbol);
-   if(totalToday >= MaxDailyTrades)
+   int maxTradesToday = MaxDailyTrades;
+   if(isXau && XAU_MaxDailyTrades > 0)
+      maxTradesToday = MathMin(maxTradesToday, XAU_MaxDailyTrades);
+   if(totalToday >= maxTradesToday)
    {
-      Print("⏸ ROBOT EN PAUSE - Limite journalière atteinte pour ", symbol, ": ", totalToday, "/", MaxDailyTrades,
+      Print("⏸ ROBOT EN PAUSE - Limite journalière atteinte pour ", symbol, ": ", totalToday, "/", maxTradesToday,
             " | Symbole=", symbol, " | Action=", action);
       return false;
    }
@@ -4559,13 +8005,14 @@ input bool   ChartPatternDrawProjection = true; // Dessiner des segments oblique
 input bool   ChartPatternNotifyInSignals = true; // Inclure la figure détectée dans les notifications signal
 input double ChartPatternDirectionalWeight = 12.0; // Bonus/malus max appliqué au score setup selon direction figure
 input bool   OnlyDrawConfirmedOBWithFibConfluence = true; // Filtrer les OB: uniquement confirmés + confluence Fibonacci OTE
-input int    MaxConfirmedOBToDraw = 3; // Limiter le nombre d'OB validés affichés (anti-encombrement)
+input int    MaxConfirmedOBToDraw = 2; // Limiter le nombre d'OB validés affichés (anti-encombrement)
+input double OBMinRRForDisplay = 3.0; // RR minimum requis pour afficher une zone OB (objectif vers dernier swing opposé)
 input bool   OTECurrentZoneUseTrendFallback = true; // Si IA non FOR, autoriser entrée OTE_CURR selon tendance alignée
 input bool   M5EntryLimitRequirePatternValidation = true; // LIMIT M5_ENTRY/M5_TREND_ENTRY uniquement si pattern validé
-input bool   KeepScenarioObjectsPersistent = true; // Ne pas faire disparaitre les objets: mise a jour en place
-input bool   KeepSMCOTEObjectsPersistent = true; // Garder OTE/FVG/5star visibles (mise a jour au lieu d'effacer)
-input int    SMCOTE_LookbackBarsLTF = 1000; // Profondeur bougies LTF pour swings/OTE/FVG (M15 par defaut)
-input int    SMCOTE_LookbackBarsHTF = 240;  // Profondeur bougies HTF pour trend/structure (H4 par defaut)
+input bool   KeepScenarioObjectsPersistent = false; // Ne pas faire disparaitre les objets: mise a jour en place
+input bool   KeepSMCOTEObjectsPersistent = false; // Garder OTE/FVG/5star visibles (mise a jour au lieu d'effacer)
+input int    SMCOTE_LookbackBarsLTF = 500; // Profondeur bougies LTF pour swings/OTE/FVG (M15 par defaut)
+input int    SMCOTE_LookbackBarsHTF = 120;  // Profondeur bougies HTF pour trend/structure (H4 par defaut)
 
 input group "=== FVG_Kill PRO (Smart Money) ==="
 input bool   UseFVGKillMode    = true;   // Activer logique FVG_Kill (EMA HTF + LS)
@@ -4596,8 +8043,8 @@ input int    PredictionChannelPastBars = 1000; // (interne)
 input int    PredictionChannelBars = 1000;  // (interne, canal de prédiction sur 1000 bougies futures)
 
 input group "=== CANAUX SMC MULTI-TF ==="
-input bool   ShowSMCChannelsMultiTF = true;  // Afficher canaux SMC sur H1, M30, M5
-input bool   ShowEMASupertrendMultiTF = true; // Afficher EMA Supertrend S/R sur H1, M30, M5
+input bool   ShowSMCChannelsMultiTF = false;  // Afficher canaux SMC sur H1, M30, M5 (DÉSACTIVÉ POUR CLARTÉ)
+input bool   ShowEMASupertrendMultiTF = false; // Afficher EMA Supertrend S/R sur H1, M30, M5 (DÉSACTIVÉ POUR CLARTÉ)
 
 //+------------------------------------------------------------------+
 //| FONCTIONS DE PRÉSERVATION DES GAINS                           |
@@ -5295,6 +8742,95 @@ void ManageMaximumHoldingTime()
    }
 }
 
+//+------------------------------------------------------------------+
+//| SORTIE SUR INVERSION LIGNE M1 TREND                              |
+//| Si la pente M1 (régression linéaire) change de sens par rapport  |
+//| à la direction de la position → fermer immédiatement.           |
+//| BUY + pente négative = sortie | SELL + pente positive = sortie   |
+//+------------------------------------------------------------------+
+void ManageM1TrendReversalExit()
+{
+   if(!UseM1TrendReversalExit) return;
+
+   int lookback = M1TrendReversalLookback;
+
+   // Récupérer les données M1 pour la régression linéaire
+   MqlRates m1Rates[];
+   ArraySetAsSeries(m1Rates, true);
+   if(CopyRates(_Symbol, PERIOD_M1, 0, lookback + 2, m1Rates) < lookback)
+      return;
+
+   // Calculer la pente de la régression linéaire (même logique que DrawM1TrendLines)
+   double sumX = 0, sumY = 0, sumXY = 0, sumX2 = 0;
+   for(int i = 0; i < lookback; i++)
+   {
+      double x = i;
+      double y = m1Rates[i].close;
+      sumX  += x;
+      sumY  += y;
+      sumXY += x * y;
+      sumX2 += x * x;
+   }
+
+   double slope = (lookback * sumXY - sumX * sumY) / (lookback * sumX2 - sumX * sumY);
+
+   // Vérifier que la pente est significative (pas du bruit)
+   if(MathAbs(slope) < M1TrendReversalMinSlope)
+      return; // Pente trop faible pour confirmer un changement
+
+   bool m1Bullish = (slope > 0);
+   bool m1Bearish = (slope < 0);
+
+   // Parcourir toutes les positions ouvertes
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      if(PositionGetTicket(i) > 0)
+      {
+         string symbol = PositionGetString(POSITION_SYMBOL);
+         ulong ticket = PositionGetInteger(POSITION_TICKET);
+         ENUM_POSITION_TYPE posType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+         datetime openTime = (datetime)PositionGetInteger(POSITION_TIME);
+         double profit = PositionGetDouble(POSITION_PROFIT);
+
+         if(PositionGetInteger(POSITION_MAGIC) != InpMagicNumber) continue;
+         if(symbol != _Symbol) continue;
+
+         // Respecter le délai minimum après ouverture
+         if((int)(TimeCurrent() - openTime) < M1TrendReversalMinSeconds)
+            continue;
+
+         bool shouldClose = false;
+         string reason = "";
+
+         // Position BUY + M1 trend devenu baissier → sortir
+         if(posType == POSITION_TYPE_BUY && m1Bearish)
+         {
+            shouldClose = true;
+            reason = "M1 TREND INVERSÉ (pente " + DoubleToString(slope, _Digits) + ") contre BUY";
+         }
+
+         // Position SELL + M1 trend devenu haussier → sortir
+         if(posType == POSITION_TYPE_SELL && m1Bullish)
+         {
+            shouldClose = true;
+            reason = "M1 TREND INVERSÉ (pente +" + DoubleToString(MathAbs(slope), _Digits) + ") contre SELL";
+         }
+
+         if(shouldClose)
+         {
+            bool success = PositionCloseWithLog(ticket, reason);
+            if(success)
+            {
+               Print("🔄 POSITION FERMÉE - Inversion ligne M1 trend");
+               Print("   📍 ", reason);
+               Print("   💰 P&L: ", DoubleToString(profit, 2), "$");
+               Print("   📉 Pente M1: ", DoubleToString(slope, _Digits));
+            }
+         }
+      }
+   }
+}
+
 // Surveiller et gérer les positions qui sont en correction contre la tendance
 void ManagePositionsAgainstTrendCorrection()
 {
@@ -5596,6 +9132,28 @@ void ExecuteMarketOrderOnOTETouch(OTESetupTracker &setup)
    {
       Print("🚫 OTE TOUCH BLOQUÉ - Position déjà prise sur ", _Symbol, " | dir=", setup.direction);
       return;
+   }
+   
+   if(!HasOTEBOSConfirmationM15OrM5(setup.direction))
+   {
+      Print("🚫 OTE TOUCH BLOQUÉ - BOS non confirmé (M15/M5) pour ", setup.direction, " sur ", _Symbol);
+      return;
+   }
+   if(!IsOTEEntryConfirmedOnM15OrM5(setup.direction))
+   {
+      Print("🚫 OTE TOUCH BLOQUÉ - Pas de confirmation candlestick M15/M5 pour ", setup.direction, " sur ", _Symbol);
+      return;
+   }
+   
+   // Vérification: Tendance forte EMA M5 (éviter contre-tendance)
+   if(OTE_RequireStrongTrend)
+   {
+      if(!IsStrongM1M5TrendByEMAs(setup.direction))
+      {
+         Print("🚫 OTE TOUCH BLOQUÉ - Tendance M5 faible ou contre-tendance pour ", setup.direction, " sur ", _Symbol);
+         return;
+      }
+      Print("✅ Tendance forte EMA M5 validée pour ", setup.direction, " sur ", _Symbol);
    }
    
    double lot = NormalizeVolumeForSymbol(GetMinLotForSymbol(_Symbol));
@@ -6019,7 +9577,7 @@ input group "=== BOOM/CRASH ==="
 input bool   BoomBuyOnly       = true;   // Boom: BUY uniquement
 input bool   CrashSellOnly     = true;   // Crash: SELL uniquement
 input bool   BoomCrashHardBlockTradeOnAIHold = true; // Important: ne jamais entrer si l'IA serveur est en HOLD
-input bool   UseM5ChannelSpikeSeriesEntry = true; // 2e stratégie: canal M5 + série de spikes M1 + 1–3 petites bougies après dernier spike (bypass HOLD si structure OK)
+input bool   UseM5ChannelSpikeSeriesEntry = false; // DÉSACTIVÉ: Stratégie unique OTE + Fibo pour éviter contre-tendance
 input int    M5ChSpikeSmallM1CandlesMin = 1; // Petites bougies M1 consécutives après le dernier spike (min)
 input int    M5ChSpikeSmallM1CandlesMax = 3; // idem (max)
 input int    M5ChSpikeLookbackM1 = 50; // Fenêtre M1 pour compter les spikes
@@ -6036,7 +9594,7 @@ input bool   M5ChSpikeAllowInCorrectionZone = false; // Autoriser cette entrée 
 input bool   OteSpikeChainAllowInCorrectionZone = false; // Chaîne OTE (réentrée mode 2): autoriser spike dans bande équilibre ICT
 input bool   SpikeAllowInCorrectionZone = false; // true: autorise spikes + touch OTE marché en correction si spike réel (réactif / risqué)
 input bool   NoSLTP_BoomCrash  = false;  // Obsolète (ignoré): SL/TP toujours posés à l’ouverture — conservé pour compatibilité .set
-input bool   UseIA80ArrowAutoEntry = true; // Boom/Crash: entrée marché si IA confiance > seuil + flèche graphique (complément touch/DERIV)
+input bool   UseIA80ArrowAutoEntry = false; // DÉSACTIVÉ: Seul OTE+Fibo avec confirmation M5 autorisé
 input double IA80ArrowAutoMinConfidence = 0.80; // Seuil confiance IA (0..1, ex. 0.80 = 80% ; si >1 traité comme %)
 input int    IA80ArrowExitSmallM1Count = 4; // Après flèche verte/rouge: N petites M1 clôturées sans spike → fermeture (souvent 3–5)
 input int    IA80ArrowArrowGoneHoldSec = 2; // Secondes sans flèche alignée avant fermeture IA80
@@ -6093,7 +9651,7 @@ input bool   AlwaysReenterAfterSpikeClose = true; // Après fermeture spike: arm
 input int    AlwaysReentryAfterSpikeCloseMinSmallM1 = 2; // Petites M1 avant tentative de réentrée (mode réentrée systématique)
 input int    AlwaysReentryAfterSpikeCloseTimeoutSec = 900; // Timeout (s) rester armé en mode réentrée systématique (0 = 900 appliqué dans le code)
 input int    MinSmallM1CandlesAfterCloseAlwaysReentry = 1; // Avec réentrée systématique armée: min entre ce nombre et MinSmallM1CandlesAfterClose (0=désactivé)
-input double TargetProfitBoomCrashUSD = 2.0; // Gain à capter ($) - fermer si profit >= ce seuil (Spike_Close)
+input double TargetProfitBoomCrashUSD = 0.10; // Gain à capter ($) - réduit à 0.1$ pour fermer immédiatement après spike
 input double MaxLossDollars    = 15.0;   // Fermer toute position si perte atteint ($) - augmenté pour éviter fermetures prématurées
 input double TakeProfitDollars = 2.0;    // Fermer si bénéfice atteint ($) - Volatility/Forex/Commodity
 input bool   UseMaxLossBoomCrashPerTrade = true; // Boom/Crash: fermer si perte par position > seuil
@@ -6117,6 +9675,16 @@ input bool   UseVWAPFilter              = true;  // Utiliser le VWAP intraday
 input bool   UsePivotFilter             = true;  // Utiliser les points pivots journaliers
 input bool   UseIchimokuFilter          = true;  // Utiliser un résumé tendance Ichimoku H1
 input bool   UseOBVFilter               = true;  // Utiliser le volume OBV comme confirmation
+
+input group "=== RSI 14 IMPULSION (Divergence / Compression / Reversal) ==="
+input bool   UseRSIImpulseFilter        = true;   // Activer le filtre RSI Impulsion pour affiner les entrées
+input int    RSIImpulsePeriod           = 14;     // Période RSI (14 par défaut)
+input int    RSIImpulseLookback         = 40;     // Lookback en bougies M1 pour détecter les patterns
+input double RSIDivergenceMinSwingPips  = 5.0;    // Distance min (pips) entre 2 swings prix pour valider divergence
+input double RSICompressionMaxRange     = 12.0;   // Range RSI max pour zone de compression (ex: 12 = RSI 44-56)
+input int    RSICompressionMinBars     = 5;       // Nombre min de bougies en compression avant breakout
+input double RSIReversalTolerance      = 2.0;    // Tolérance (pts RSI) pour double top/bottom sur RSI
+input bool   RSIImpulseAsSpikeSignal   = true;    // Compter RSI Impulsion comme signal spike (IsSpikeImminentWithoutAI)
 
 //| GESTION DES POSITIONS ET VARIABLES GLOBALES                    |
 
@@ -6253,6 +9821,47 @@ CTrade trade;
 CPositionInfo posInfo;  // Local position info variable
 COrderInfo orderInfo;
 
+//--- Variables globales Trading Algo GUI
+string g_guiSignal = "WAIT";           // BUY, SELL, WAIT (GUI)
+double g_guiRiskPercent = 0.5;         // Risque en % (GUI)
+double g_guiLotSize = 0.01;           // Lot size calculé (GUI)
+double g_guiEntryPrice = 0;            // Prix d'entrée (GUI)
+double g_guiTP1 = 0;                  // TP1 (GUI)
+double g_guiTP2 = 0;                  // TP2 (GUI)
+double g_guiTP3 = 0;                  // TP3 (GUI)
+double g_guiTP4 = 0;                  // TP4 (GUI)
+double g_guiSL = 0;                   // Stop Loss (GUI)
+double g_guiRiskUSD = 0;              // Risque en USD (GUI)
+double g_guiRewardUSD = 0;             // Reward en USD (GUI)
+double g_guiRRRatio = 0;               // Risk/Reward ratio (GUI)
+bool   g_guiPanelVisible = true;       // Visibilité du panneau GUI
+
+//--- Variables de l'analyse IA (GUI)
+string g_guiAIAction = "HOLD";         // Action IA: BUY, SELL, HOLD
+double g_guiAIConfidence = 0.0;        // Confiance IA (0-1)
+string g_guiAIReason = "";             // Raison de la décision IA
+double g_guiAIStopLoss = 0;            // SL proposé par IA
+double g_guiAITakeProfit = 0;          // TP proposé par IA
+bool   g_guiAIAnalysisReady = false;   // Analyse IA prête
+string g_guiAIModelUsed = "";          // Modèle IA utilisé
+
+//--- Variables techniques calculées (GUI)
+double g_guiTechRSI = 50.0;
+double g_guiTechEMA_Fast_H1 = 0;
+double g_guiTechEMA_Slow_H1 = 0;
+double g_guiTechEMA_Fast_M1 = 0;
+double g_guiTechEMA_Slow_M1 = 0;
+double g_guiTechEMA_Fast_M5 = 0;
+double g_guiTechEMA_Slow_M5 = 0;
+double g_guiTechATR = 0;
+double g_guiTechVWAP = 0;
+double g_guiTechVWAPDistance = 0;
+bool   g_guiTechAboveVWAP = false;
+int    g_guiTechSuperTrendTrend = 0;
+double g_guiTechSuperTrendLine = 0;
+int    g_guiTechVolatilityRegime = 0;
+double g_guiTechVolatilityRatio = 1.0;
+
 int atrHandle;
 int emaHandle = INVALID_HANDLE;
 int hEmaFast = INVALID_HANDLE;  // EMA rapide pour tendance
@@ -6306,6 +9915,10 @@ static datetime g_lastBoomCrashPriceTime = 0;
 // sont passées (BoomCrashSmallM1CandlesBeforeEntry). Recovery: fermeture après 5 petites bougies M1.
 static datetime g_lastBoomSpikeTime = 0;
 static datetime g_lastCrashSpikeTime = 0;
+// Temps du dernier spike M1 détecté sur le marché (indépendant de l'entrée trade)
+// Utilisé pour fermer les positions ouvertes AVANT le spike marché, même si spikeActiveNow est déjà passé
+static datetime g_lastBoomMarketSpikeDetectedTime = 0;
+static datetime g_lastCrashMarketSpikeDetectedTime = 0;
 static datetime g_lastBoomM5BuyTouchTime = 0;
 static datetime g_lastM5BuyTouchTime = 0;
 static datetime g_lastM5SellTouchTime = 0;
@@ -6351,6 +9964,16 @@ struct SymbolPauseInfo {
 SymbolPauseInfo g_symbolPauses[20]; // Maximum 20 symboles
 int g_pauseCount = 0;
 int g_dashboardBottomY = 0; // pixels: dernière ligne du dashboard (pour empiler les labels)
+double g_manualMmCapital = 0.0;
+double g_manualMmRiskPct = 0.5;
+double g_manualMmEntry = 0.0;
+double g_manualMmSL = 0.0;
+double g_manualMmTP = 0.0;
+double g_manualMmLot = 0.0;
+string g_manualMmPreview = "";
+bool   g_manualMmDoCalc = false;
+bool   g_manualMmDoSync = false;
+bool   g_manualMmDo360 = false;
 
 // Filtre symboles "propices" (profil horaire)
 datetime g_lastPropiceUpdateTime = 0;
@@ -6470,6 +10093,10 @@ int OnInit()
       DrawMLMetricsOnChart();        // Affichage immédiat sur le graphique
    }
 
+   // Initialiser le scanner 360° uniquement si activé explicitement (peut être coûteux/instable selon environnement).
+   if(EnableScanner360Timer)
+      Init360Scanner();
+
    // Timer: analyse/rafraîchissement périodique du graphique attaché.
    // Important: cette passe est "observation" (pas de trading), utile quand il n'y a pas de ticks.
    if(EnableMinuteChartAnalysis)
@@ -6477,6 +10104,22 @@ int OnInit()
       int sec = (int)MathMax(30, MinuteChartAnalysisIntervalSec);
       EventSetTimer(sec);
    }
+   
+   // Créer le panneau Trading Algo GUI si activé
+   if(UseTradingAlgoGUI)
+   {
+      CreateTradingAlgoGUI();
+      Print("🤖 Trading Algo GUI activé");
+   }
+
+   // Valeurs initiales panneau manuel MM/simulation (mode observation uniquement).
+   g_manualMmCapital = AccountInfoDouble(ACCOUNT_BALANCE);
+   g_manualMmRiskPct = MathMax(0.1, ManualRiskPercent);
+   g_manualMmEntry = 0.0;
+   g_manualMmSL = 0.0;
+   g_manualMmTP = 0.0;
+   g_manualMmLot = 0.0;
+   
    return INIT_SUCCEEDED;
 }
 
@@ -6545,9 +10188,18 @@ void OnDeinit(const int reason)
    // Nettoyer les objets graphiques du robot
    CleanupSMCChartObjects();
 
+   // Nettoyer le panneau Trading Algo GUI si activé
+   if(UseTradingAlgoGUI)
+   {
+      GUI_CleanupPanel();
+      Print("🤖 Trading Algo GUI nettoyé");
+   }
+
    // Arrêt timer (si activé)
    if(EnableMinuteChartAnalysis)
       EventKillTimer();
+
+   CleanupManualAssistantDashboard();
 }
 
 // Passe d'analyse périodique du graphique attaché.
@@ -6594,8 +10246,13 @@ void RunMinuteChartAnalysis()
 void OnTimer()
 {
    RunMinuteChartAnalysis();
-   Run360AnalysisScanner();          // Analyse 360° multi-symbols
-   MonitorAndCleanLimitOrders360(); // Sécurité : annule les ordres limits non alignés avec l'IA
+   if(EnableScanner360Timer)
+   {
+      Run360AnalysisScanner();          // Analyse 360° multi-symbols
+      MonitorAndCleanLimitOrders360(); // Sécurité : annule les ordres limits non alignés avec l'IA
+   }
+   
+   // OTE+FIBO est maintenu en mise à jour permanente dans OnTick (plus stable que timer).
 }
 
 bool IsBullishHTF()
@@ -6778,7 +10435,8 @@ void CheckBoomChannelScalping()
       Print("   Prix Bid: ", DoubleToString(currentBid, _Digits));
       Print("   Trend Line Inf: ", DoubleToString(lowerPrice, _Digits));
       Print("   Trend Line Sup: ", DoubleToString(upperPrice, _Digits));
-      Print("   Largeur Canal: ", DoubleToString((upperPrice - lowerPrice) / atrVal, 1), " ATR");
+      double atrWidth = (atrVal > 0) ? (upperPrice - lowerPrice) / atrVal : 0;
+      Print("   Largeur Canal: ", DoubleToString(atrWidth, 1), " ATR");
       
       // Vérifier si on a déjà une position BUY Boom
       if(CountPositionsForSymbol(_Symbol) > 0)
@@ -6902,6 +10560,7 @@ void ExecuteFVGKillBuy()
 {
    // Vérifier si l'ATR handle est valide
    if(atrHandle == INVALID_HANDLE) return;
+   if(IsWeltradeOTEOnlyActive(_Symbol)) return;
    // STRATÉGIE UNIQUE SPIKE POUR BOOM/CRASH: ne pas utiliser FVG_Kill sur ces indices
    if(SMC_GetSymbolCategory(_Symbol) == SYM_BOOM_CRASH) return;
    
@@ -6965,6 +10624,7 @@ void ExecuteFVGKillSell()
 {
    // Vérifier si l'ATR handle est valide
    if(atrHandle == INVALID_HANDLE) return;
+   if(IsWeltradeOTEOnlyActive(_Symbol)) return;
    // STRATÉGIE UNIQUE SPIKE POUR BOOM/CRASH: ne pas utiliser FVG_Kill sur ces indices
    if(SMC_GetSymbolCategory(_Symbol) == SYM_BOOM_CRASH) return;
    
@@ -7561,6 +11221,17 @@ void ManageBoomCrashSpikeClose()
       bool afterLastCrashSpikeRef = (isCrashPos && g_lastCrashSpikeTime > 0 && openTime >= (g_lastCrashSpikeTime - BoomCrashSpikeRefTimeToleranceSec));
       bool afterSpikeRef = afterLastBoomSpikeRef || afterLastCrashSpikeRef;
 
+      // Vérification du spike de marché détecté (indépendant de l'heure d'entrée)
+      // Fermer les positions ouvertes AVANT le spike de marché, même si spikeActiveNow est déjà passé
+      int marketSpikeWindowSec = 60; // Fenêtre de validité du spike de marché (60 secondes)
+      bool afterBoomMarketSpike = (isBoomPos && g_lastBoomMarketSpikeDetectedTime > 0 &&
+                                   openTime < g_lastBoomMarketSpikeDetectedTime &&
+                                   (TimeCurrent() - g_lastBoomMarketSpikeDetectedTime) <= marketSpikeWindowSec);
+      bool afterCrashMarketSpike = (isCrashPos && g_lastCrashMarketSpikeDetectedTime > 0 &&
+                                    openTime < g_lastCrashMarketSpikeDetectedTime &&
+                                    (TimeCurrent() - g_lastCrashMarketSpikeDetectedTime) <= marketSpikeWindowSec);
+      bool afterMarketSpikeRef = afterBoomMarketSpike || afterCrashMarketSpike;
+
       bool captureCandidate = (isSpikeTrade || spikeStyleClose);
       bool spikeActiveNow = false;
       if(UseSpikeAutoClose)
@@ -7693,7 +11364,7 @@ void ManageBoomCrashSpikeClose()
          // 2) Sinon: fermer au spike ref capté (sans dépendre de spikeActive)
          else
          {
-            if(UseSpikeAutoClose && captureCandidate && afterSpikeRef &&
+            if(UseSpikeAutoClose && captureCandidate && (afterSpikeRef || afterMarketSpikeRef) &&
                secondsSinceOpen >= minSecSpike)
             {
                bool impulseStrong = false;
@@ -7731,7 +11402,10 @@ void ManageBoomCrashSpikeClose()
                else
                {
                   shouldClose = true;
-                  closeReason = "Spike ref capté (fermeture)";
+                  if(afterMarketSpikeRef)
+                     closeReason = "Spike marché détecté (fermeture persistante)";
+                  else
+                     closeReason = "Spike ref capté (fermeture)";
                }
             }
             // 3) Fallback: si pas de ref spike (ex: autre chemin), fermer dès spike détecté — sans seuil de gain/perte
@@ -7772,6 +11446,11 @@ void ManageBoomCrashSpikeClose()
             s_waitingSecondSpikeStart = 0;
             if(IsBoomSymbol(symbol))  g_lastBoomSpikeTime = 0;
             if(IsCrashSymbol(symbol)) g_lastCrashSpikeTime = 0;
+            // Reset temps de spike de marché détecté
+            if(IsBoomSymbol(symbol) || IsWeltradeGainSynthSymbol(symbol))
+               g_lastBoomMarketSpikeDetectedTime = 0;
+            if(IsCrashSymbol(symbol) || IsWeltradePainSynthSymbol(symbol))
+               g_lastCrashMarketSpikeDetectedTime = 0;
 
             // OPTIMISATION: Log minimal pour éviter le lag
             Print("?? EA FERMETURE SPIKE - ", symbol, " | ticket=", ticket, " | Profit: ", DoubleToString(profit, 2));
@@ -8061,6 +11740,17 @@ void ClosePositionsOnIAHold()
 // Objectif: ne rien laisser visuellement, même en mode observation / pause.
 void DrawAllIndicatorGraphics()
 {
+   static datetime s_lastHeavyDraw = 0;
+   datetime now = TimeCurrent();
+   if(s_lastHeavyDraw > 0 && (now - s_lastHeavyDraw) < (datetime)HeavyGraphicsMinIntervalSec)
+      return;
+   s_lastHeavyDraw = now;
+
+   // Sécurité anti-détachement: si trop d'objets, éviter de recréer des centaines d'objets à chaque passe.
+   // On garde les éléments essentiels, mais on coupe les modules les plus coûteux.
+   int objCount = ObjectsTotal(0, -1, -1);
+   bool tooManyObjects = (MaxChartObjectsSafety > 0 && objCount > MaxChartObjectsSafety);
+
    // DÉTECTION ANTI-REPAINT DES SWING POINTS
    DetectNonRepaintingSwingPoints();
    DrawConfirmedSwingPoints();
@@ -8079,8 +11769,33 @@ void DrawAllIndicatorGraphics()
       // CheckSMCChannelReturnMovements();
    }
    
+   // Limiter le nombre total d'objets graphiques pour éviter le détachement
+   static datetime lastGraphicCleanup = 0;
+   static int totalObjectsLimit = 100; // Limite stricte pour performance
+   
+   if(TimeCurrent() - lastGraphicCleanup > 60) // Nettoyage toutes les minutes
+   {
+      int totalObjects = ObjectsTotal(0);
+      if(totalObjects > totalObjectsLimit)
+      {
+         // Supprimer les objets les plus anciens pour respecter la limite
+         for(int i = totalObjects - 1; i >= totalObjectsLimit; i--)
+         {
+            string objName = ObjectName(0, i);
+            // Préserver les objets critiques (ordres, positions importantes)
+            if(StringFind(objName, "ORDER_") == 0 || StringFind(objName, "POSITION_") == 0) continue;
+            ObjectDelete(0, objName);
+         }
+      }
+      lastGraphicCleanup = TimeCurrent();
+   }
+
    // AFFICHAGE STATUT IA ET PRÉDICTIONS
    DrawAIStatusAndPredictions();
+
+   // Zone confluence spikes (Boom/Crash + PAINX/GAINX) — modélisation temps réel
+   if(ShowSpikeClusterZone)
+      DrawSpikeClusterZone(_Symbol);
    
    // Graphiques essentiels et zones Premium/Discount
    DrawSwingHighLow();
@@ -8089,11 +11804,31 @@ void DrawAllIndicatorGraphics()
    DrawOBOnChart();
    if(DrawICTChecklistGraphics) DrawICTValidationGraphics();
    DrawFibonacciOnChart();
-   DrawEMACurveOnChart();
+   // DrawEMACurveOnChart();
    DrawLiquidityZonesOnChart();
    
-   // Toujours afficher les zones Premium/Discount + équilibre/correction sur le graphique.
-   DrawPremiumDiscountZones();
+   // Utiliser les zones temporaires OTE au lieu des zones permanentes
+   if(OTE_TemporaryZones)
+   {
+      // Obtenir les swing highs/lows pour les zones temporaires
+      double swingHigh = 0, swingLow = 0;
+      // Fallback: utiliser les derniers highs/lows si pas de setup OTE actif
+      double high[], low[];
+      ArraySetAsSeries(high, true); ArraySetAsSeries(low, true);
+      if(CopyHigh(_Symbol, PERIOD_H1, 0, 50, high) >= 20 && CopyLow(_Symbol, PERIOD_H1, 0, 50, low) >= 20)
+      {
+         swingHigh = high[ArrayMaximum(high, 0, 20)];
+         swingLow = low[ArrayMinimum(low, 0, 20)];
+      }
+      
+      if(swingHigh > 0 && swingLow > 0)
+         OTE_ManageTemporaryZones(SymbolInfoDouble(_Symbol, SYMBOL_BID), swingHigh, swingLow);
+   }
+   else
+   {
+      // Zones permanentes désactivées - ne rien afficher
+      ObjectsDeleteAll(0, "SMC_ICT_");
+   }
 
    if(ShowHMSZonesOnChart)
       DrawHMSZonesOnChart();
@@ -8107,11 +11842,24 @@ void DrawAllIndicatorGraphics()
    UpdateSpikeWarningBlink();
    
    if(ShowPredictedSwing) DrawPredictedSwingPoints();
-   if(ShowEMASupportResistance) DrawEMASupportResistance();
-   if(ShowPredictionChannel) DrawPredictionChannel();
-   if(ShowFutureCandlesM1) DrawFutureCandlesM1();
-   if(ShowSMCChannelsMultiTF) DrawSMCChannelsMultiTF();
-   if(ShowEMASupertrendMultiTF) DrawEMASupertrendMultiTF();
+   // if(ShowEMASupportResistance) DrawEMASupportResistance(); 
+   // if(ShowPredictionChannel) DrawPredictionChannel(); 
+   if(!tooManyObjects)
+   {
+      if(ShowFutureCandlesM1) DrawFutureCandlesM1();
+      if(ShowSMCChannelsMultiTF) DrawSMCChannelsMultiTF();
+      if(ShowEMASupertrendMultiTF) DrawEMASupertrendMultiTF();
+   }
+   else
+   {
+      // Avertissement léger (pas à chaque tick) si on coupe des graphismes lourds
+      static datetime s_lastWarn = 0;
+      if(s_lastWarn == 0 || (now - s_lastWarn) > 60)
+      {
+         s_lastWarn = now;
+         Print("⚠️ GRAPHICS SAFETY: trop d'objets (", objCount, ") → désactivation temporaire des dessins lourds (FUT candles / Channels / EMA-ST).");
+      }
+   }
    //if(ShowLimitOrderLevels) DrawLimitOrderLevels(); // SUPPRIMÉ - Plus d'affichage ordres limit
 
    if(ShowOTEImbalanceOnChart) DrawOTEImbalanceOnChart();
@@ -8314,6 +12062,30 @@ void OnTick()
    // GESTION DES POSITIONS EN CORRECTION CONTRE TENDANCE
    ManagePositionsAgainstTrendCorrection();
    
+   // NOUVEAU: Gérer les partial closes automatiques basés sur le profit
+   ManagePartialCloseByProfit();
+   
+   // NOUVEAU: Gérer les partial closes basés sur le temps
+   ManagePartialCloseByTime();
+   
+   // NOUVEAU: Gérer le trailing stop intelligent
+   ManageIntelligentTrailingStops();
+   
+   // NOUVEAU: Gérer la protection contre le giveback de gains
+   ManageGivebackProtection();
+   
+   // NOUVEAU: Gérer la protection partielle contre le giveback
+   ManagePartialGivebackProtection();
+   
+   // NOUVEAU: Stratégie Cluster Spike + Limit M1 Trend (Boom/Crash, PAINX/GAINX)
+   ManageClusterM1LimitStrategy();
+   
+   // NOUVEAU: Déclenchement auto ordres marché IA > 90% avec trailing stop 50%
+   ManageHighConfidenceAutoEntry();
+   
+   // SORTIE SI LIGNE M1 TREND CHANGE DE SENS CONTRE LA POSITION
+   ManageM1TrendReversalExit();
+   
    // GESTION DU TEMPS DE DÉTENTION MAXIMUM
    ManageMaximumHoldingTime();
    
@@ -8332,6 +12104,21 @@ void OnTick()
    static datetime lastPropiceInfoLog = 0;
    static datetime lastForexM5BypassLog = 0;
    datetime currentTime = TimeCurrent();
+
+   // Dashboard manuel MM / simulation pré-trade (sans impact sur auto-trading).
+   UpdateManualAssistantDashboard();
+
+   // OTE+FIBO permanent: mise à jour sur tick avec nouvelles prédictions futures
+   if(ShowChartGraphics)
+   {
+      static datetime s_lastDynOteTick = 0;
+      if(s_lastDynOteTick == 0 || (currentTime - s_lastDynOteTick) >= 2)
+      {
+         // Afficher la prédiction des futures zones OTE avec segments
+         UpdateDashboardWithFutureOTE();
+         s_lastDynOteTick = currentTime;
+      }
+   }
    
    // Traitement contrôlé pour stabilité (max ~1 tick toutes les 2 secondes)
    if(currentTime - lastProcess < 2) return;
@@ -8471,6 +12258,7 @@ void OnTick()
    else
    {
       ManageTrailingStop(); // OBLIGATOIRE - s'exécute toujours
+      ManageEarlyExitDynamicSL(); // SL dynamique précoce - sortie si entrée non prometteuse
    }
    
    // Si on est en mode ultra léger: ne pas lancer l'IA ni mettre à jour les graphiques/dashboard
@@ -8496,8 +12284,11 @@ void OnTick()
       ApplyMTFConsensusToAIDecision(false);
    }
 
-   // Boom/Crash: entrée « IA forte + flèche » après rafraîchissement IA (ne modifie pas OTE / StairEntry / DERIV touch)
-   if(SMC_GetSymbolCategory(_Symbol) == SYM_BOOM_CRASH)
+   // Boom/Crash: entrée « IA forte + flèche » (désactivée en mode OTE-only
+   // et en mode OTE+EMA-only).
+   if(!OTEOnlyStrictMode &&
+      SMC_GetSymbolCategory(_Symbol) == SYM_BOOM_CRASH &&
+      !BoomCrashOnlyOTEAndEMAPullback)
       TryOpenIA80DerivArrowAutoEntry();
 
    // Mettre à jour le Top N "propice" (affichage + filtre optionnel)
@@ -8545,39 +12336,58 @@ void OnTick()
    //else
    //   GuardPendingLimitOrdersWithAI();
    
-   // NOUVEAU: Détection de spikes sans IA pour ne manquer aucune opportunité
-   CheckAndExecuteSpikeTrade();
+   if(!OTEOnlyStrictMode)
+   {
+      // NOUVEAU: Détection de spikes sans IA pour ne manquer aucune opportunité
+      if(!(BoomCrashOnlyOTEAndEMAPullback && SMC_GetSymbolCategory(_Symbol) == SYM_BOOM_CRASH))
+         CheckAndExecuteSpikeTrade();
 
-   // 2e stratégie Boom/Crash: canal M5 + série de spikes M1 + petites bougies (bypass IA HOLD si structure OK)
-   CheckAndExecuteM5ChannelSpikeSeriesEntry();
+      // 2e stratégie Boom/Crash: canal M5 + série de spikes M1 + petites bougies (bypass IA HOLD si structure OK)
+      if(!(BoomCrashOnlyOTEAndEMAPullback && SMC_GetSymbolCategory(_Symbol) == SYM_BOOM_CRASH))
+         CheckAndExecuteM5ChannelSpikeSeriesEntry();
+   }
 
    // Fermeture profit-only par symbole à 3$ (POSITION_PROFIT uniquement)
    // Exécutée avant les entrées M5 pour éviter toute réouverture sur le même tick.
    CloseAllPositionsIfSymbolProfitReached(3.0);
    
-   // Affichage graphique type OTE quand escalier M1 (classique / jeune / forming) est détecté
-   UpdateStairSetupChartDisplay();
-   // Alerte push « signal stair » (pattern M1) avant tentative d’entrée — indépendant des filtres d’exécution (EMA, etc.)
-   NotifyStairPatternOnM1IfDetected();
-   // Entrée scalp dédiée: Boom/GAINX BUY sur retouche EMA13 M1 + confluence EMA21 M5
-   CheckAndExecuteStairEmaTouchScalpEntry();
-   
-   // Entrée stairEntry: escalier M1 + tendance M1/M5 (Boom BUY / Crash SELL), complément OTE / hors touch M5
-   CheckAndExecuteStairEntry();
-   // Niveau B: une limite d’attente si escalier OK mais IA/EMA pas encore niveau A
-   CheckAndPlaceStairEscalierLimitOrder();
-   
-   // NOUVEAU: Vérification des touches M5 pour exécution M1 (priorité haute)
-   SyncMovingEntryPointLimitOrders();
-   SyncIAHoldLimitWithM5Entry();
-   CheckAndExecutePendingLimitPureArrowScalp();
-   CheckAndExecuteM5TouchEntryTrade();
-   
-   // NOUVEAU: Recovery exceptionnel Boom/Crash (touch M5 + N petites bougies M1, input BoomCrashSmallM1CandlesBeforeEntry)
-   CheckAndExecuteExceptionalBoomCrashRecoveryEntries();
-   
-   // Réentrée dédiée après fermeture spike si 2e spike imminent (attend 2 petites bougies M1)
-   CheckAndExecuteSecondSpikeReentry();
+   if(!OTEOnlyStrictMode)
+   {
+      bool blockBoomCrashExtras = (BoomCrashOnlyOTEAndEMAPullback && SMC_GetSymbolCategory(_Symbol) == SYM_BOOM_CRASH);
+      // Affichage graphique type OTE quand escalier M1 (classique / jeune / forming) est détecté
+      if(!blockBoomCrashExtras)
+         UpdateStairSetupChartDisplay();
+      // Alerte push « signal stair » (pattern M1) avant tentative d’entrée — indépendant des filtres d’exécution (EMA, etc.)
+      if(!blockBoomCrashExtras)
+         NotifyStairPatternOnM1IfDetected();
+      // Entrée scalp dédiée: Boom/GAINX BUY sur retouche EMA13 M1 + confluence EMA21 M5
+      if(!blockBoomCrashExtras)
+         CheckAndExecuteStairEmaTouchScalpEntry();
+      
+      // Entrée stairEntry: escalier M1 + tendance M1/M5 (Boom BUY / Crash SELL), complément OTE / hors touch M5
+      if(!blockBoomCrashExtras)
+         CheckAndExecuteStairEntry();
+      // Niveau B: une limite d’attente si escalier OK mais IA/EMA pas encore niveau A
+      if(!blockBoomCrashExtras)
+         CheckAndPlaceStairEscalierLimitOrder();
+      
+      // NOUVEAU: Vérification des touches M5 pour exécution M1 (priorité haute)
+      SyncMovingEntryPointLimitOrders();
+      SyncIAHoldLimitWithM5Entry();
+      if(!blockBoomCrashExtras)
+      {
+         CheckAndExecutePendingLimitPureArrowScalp();
+         CheckAndExecuteM5TouchEntryTrade();
+      }
+      
+      // NOUVEAU: Recovery exceptionnel Boom/Crash (touch M5 + N petites bougies M1, input BoomCrashSmallM1CandlesBeforeEntry)
+      if(!blockBoomCrashExtras)
+         CheckAndExecuteExceptionalBoomCrashRecoveryEntries();
+      
+      // Réentrée dédiée après fermeture spike si 2e spike imminent (attend 2 petites bougies M1)
+      if(!blockBoomCrashExtras)
+         CheckAndExecuteSecondSpikeReentry();
+   }
    
    // DÉTECTION ULTRA-RAPIDE DE SPIKE (toutes les 5 secondes pour Boom/Crash)
    static datetime lastSpikeCheck = 0;
@@ -8608,7 +12418,7 @@ void OnTick()
    
    // BLOCAGE DES ORDRES AU MARCHÉ CLASSIQUES - SEULS LES TOUCH M5 SONT AUTORISÉS (sauf Forex broker si bypass)
    // Les ordres au marché ne sont autorisés que si le prix touche les lignes BUY/SELL ENTRY M5
-   if(UsePropiceSymbolsFilter && g_currentSymbolIsPropice)
+   if(!OTEOnlyStrictMode && UsePropiceSymbolsFilter && g_currentSymbolIsPropice)
    {
       bool m5linesOk = (g_m5BuyLevelActive || g_m5SellLevelActive);
       bool forexM5Bypass = (PropiceForexBypassM5MarketGate && SMC_GetSymbolCategory(_Symbol) == SYM_FOREX);
@@ -8630,7 +12440,7 @@ void OnTick()
          ExecuteAIDecisionMarketOrder();
       }
    }
-   else
+   else if(!OTEOnlyStrictMode)
    {
       // Si filtre non activé, comportement normal
       ExecuteAIDecisionMarketOrder();
@@ -8780,6 +12590,9 @@ void UpdateDashboard()
    }
    int posCount = CountPositionsForSymbol(_Symbol);
    int totalPos = CountPositionsOurEA();
+   UpdateSpreadStats();
+   int sprNowPts = (int)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
+   double sprAvgPts = GetSpreadAvgPoints();
    
    double totalPL = 0;
    for(int i = PositionsTotal() - 1; i >= 0; i--)
@@ -8866,35 +12679,81 @@ void UpdateDashboard()
    string lines[25]; // Augmenté à 25 pour inclure toutes les lignes
    color  cols[25];
    int n = 0;
+   if(DashboardEssentialMode)
+   {
+      string iaText = (g_lastAIAction != "") ? (g_lastAIAction + " " + DoubleToString(g_lastAIConfidence*100,1) + "%") : "OFF";
+      string dirBuy = "BUY";
+      string dirSell = "SELL";
+      bool bosBuy = HasOTEBOSConfirmationM15OrM5(dirBuy);
+      bool bosSell = HasOTEBOSConfirmationM15OrM5(dirSell);
+      bool confBuy = IsOTEEntryConfirmedOnM15OrM5(dirBuy);
+      bool confSell = IsOTEEntryConfirmedOnM15OrM5(dirSell);
+      string bosTxt = "BOS B/S: " + string(bosBuy ? "OK" : "NO") + "/" + string(bosSell ? "OK" : "NO");
+      string confTxt = "CONF M15|M5 B/S: " + string(confBuy ? "OK" : "NO") + "/" + string(confSell ? "OK" : "NO");
+
+      // Couleurs dynamiques
+      color cIA = (g_lastAIAction == "BUY") ? clrLime : ((g_lastAIAction == "SELL") ? clrRed : clrGray);
+      color cBOS = (bosBuy || bosSell) ? clrLime : clrGray;
+      color cConf = (confBuy || confSell) ? clrLime : clrGray;
+      color cPos = (posCount > 0) ? clrOrange : clrLightGray;
+      color cTime = (timeGate == "ALLOW") ? clrLime : clrRed;
+      color cPL = (totalPL > 0) ? clrLime : ((totalPL < 0) ? clrRed : clrYellow);
+
+      lines[n] = "🌟 SMC OTE PROTOCOL | " + _Symbol + " | " + catStr; cols[n] = clrGold; n++;
+      lines[n] = "🤖 IA: " + iaText + " | TrendHTF: " + trendHTF; cols[n] = cIA; n++;
+      lines[n] = "🔍 " + bosTxt; cols[n] = cBOS; n++;
+      lines[n] = "✅ " + confTxt; cols[n] = cConf; n++;
+      lines[n] = "💼 Positions: " + IntegerToString(posCount) + " | Pending: " + IntegerToString(totalLimits); cols[n] = cPos; n++;
+      lines[n] = "⏳ TIME FILTER: " + timeGate + " | ZoneUTC: " + IntegerToString(zoneNow); cols[n] = cTime; n++;
+      lines[n] = "💰 P/L EA: " + DoubleToString(totalPL, 2) + "$ | Day: " + DoubleToString(g_dayNetProfit, 2) + "$"; cols[n] = cPL; n++;
+      if(ShowSpreadStatsOnDashboard)
+      {
+         lines[n] = "📏 Spread pts: cur=" + IntegerToString(sprNowPts) + " | avg" + IntegerToString(SpreadStatsWindowSec) + "s=" + DoubleToString(sprAvgPts, 1);
+         cols[n] = (sprNowPts <= MaxSpreadPoints ? clrLightGray : clrOrangeRed);
+         n++;
+      }
+      lines[n] = "👁️ OTE visual: " + string(StrategyVisualMinimalMode ? "MINIMAL" : "FULL"); cols[n] = clrLightGray; n++;
+
+      DrawDashboardOnChart(lines, cols, n);
+      if(ShowMLMetrics)
+         DrawMLMetricsOnChart();
+      return;
+   }
+
    lines[n] = "[Contexte] SMC Universal + FVG_Kill PRO"; cols[n] = clrWhite; n++;
-   lines[n] = "Stratégie: SMC(FVG|OB|LS|BOS) + FVG_Kill(EMA HTF + LS)"; cols[n] = clrSilver; n++;
+   lines[n] = "Stratégie: SMC(FVG|OB|LS|BOS) + FVG_Kill(EMA HTF + LS)"; cols[n] = clrWhite; n++;
    lines[n] = "Trend HTF: " + trendHTF + " | LS: " + lsStr + " | KillZone: " + killStr; cols[n] = clrWhite; n++;
-   lines[n] = catStr + " | " + bcStr + " | IA: " + ((g_lastAIAction != "") ? (g_lastAIAction + " " + DoubleToString(g_lastAIConfidence*100,1) + "%") : "OFF"); cols[n] = clrAqua; n++;
+   lines[n] = catStr + " | " + bcStr + " | IA: " + ((g_lastAIAction != "") ? (g_lastAIAction + " " + DoubleToString(g_lastAIConfidence*100,1) + "%") : "OFF"); cols[n] = clrWhite; n++;
    lines[n] = "Positions: " + IntegerToString(totalPos) + "/" + IntegerToString(MaxPositionsTerminal) + " | " + _Symbol + ": " + IntegerToString(posCount) + "/1"; cols[n] = clrWhite; n++;
-   lines[n] = "LIMIT: total=" + IntegerToString(totalLimits) + " | canal=" + IntegerToString(channelLimits) + " | autres=" + IntegerToString(otherLimits); cols[n] = clrKhaki; n++;
-   lines[n] = "Rule: Boom=BUY only | Crash=SELL only"; cols[n] = clrAqua; n++;
-   lines[n] = "TIME FILTER: " + timeGate + " | " + timeReason; cols[n] = (timeGate == "ALLOW" ? clrLimeGreen : clrTomato); n++;
+   lines[n] = "LIMIT: total=" + IntegerToString(totalLimits) + " | canal=" + IntegerToString(channelLimits) + " | autres=" + IntegerToString(otherLimits); cols[n] = clrWhite; n++;
+   if(ShowSpreadStatsOnDashboard && n < 24)
+   {
+      lines[n] = "Spread pts: cur=" + IntegerToString(sprNowPts) + " | avg" + IntegerToString(SpreadStatsWindowSec) + "s=" + DoubleToString(sprAvgPts, 1) +
+                 " | Max=" + IntegerToString(MaxSpreadPoints);
+      cols[n] = (sprNowPts <= MaxSpreadPoints ? clrWhite : clrOrangeRed);
+      n++;
+   }
+   lines[n] = "Rule: Boom=BUY only | Crash=SELL only"; cols[n] = clrWhite; n++;
+   lines[n] = "TIME FILTER: " + timeGate + " | " + timeReason; cols[n] = clrWhite; n++;
    lines[n] = "UTC Zone: " + IntegerToString(zoneNow) +
               " | ZoneQuota: " + IntegerToString(zoneCount) + "/" + IntegerToString(MaxTradesPerZonePerDay) +
               " | DayTrades: " + IntegerToString(totalToday) + "/" + IntegerToString(MaxDailyTrades) +
               " | Sessions: " + (UseSessions ? "ON" : "OFF") + " | EnforceUTC: " + (EnforceTradingTimeZones ? "ON" : "OFF");
-   cols[n] = clrSilver; n++;
-   lines[n] = "P/L: " + DoubleToString(totalPL, 2) + "$ (max " + DoubleToString(MaxTotalLossDollars, 0) + "$) | Swing:" + swingStr; cols[n] = (totalPL >= 0 ? clrLime : clrTomato); n++;
+   cols[n] = clrWhite; n++;
+   lines[n] = "P/L: " + DoubleToString(totalPL, 2) + "$ (max " + DoubleToString(MaxTotalLossDollars, 0) + "$) | Swing:" + swingStr; cols[n] = clrWhite; n++;
    lines[n] = "ATR: " + DoubleToString(atrVal, _Digits) + " | EMA(9): " + DoubleToString(emaVal, _Digits) + " | Canal ML: " + string(g_channelValid ? "OK" : "—"); cols[n] = clrWhite; n++;
    if(ShowFutureCandlesM1 && n < 24)
    {
       string src = (g_futureCandlesSource == "" ? "NONE" : g_futureCandlesSource);
       lines[n] = "[IA/Prediction] Future M1: " + IntegerToString(FutureCandlesCount) + " candles | SourcePred: " + src;
-      cols[n] = (src == "SERVER" ? clrLimeGreen : (src == "FALLBACK" ? clrYellow : clrTomato));
-      n++;
+      cols[n] = clrWhite; n++;
    }
    if(n < 24)
    {
       string scoreTxt = (g_predictionScore >= 0.0 ? DoubleToString(g_predictionScore, 3) : "N/A");
       lines[n] = "PredScore M1(7d): " + scoreTxt + " | Samples: " + IntegerToString(g_predictionSamples) +
                  " | Source: " + g_predictionScoreSource;
-      cols[n] = (g_predictionScore >= 0.70 ? clrLimeGreen : (g_predictionScore >= 0.0 ? clrYellow : clrSilver));
-      n++;
+      cols[n] = clrWhite; n++;
    }
    if(n < 24)
    {
@@ -8902,8 +12761,7 @@ void UpdateDashboard()
       lines[n] = "CorrZone(SRV): " + string(corrActive ? "ACTIVE" : "OFF") +
                  " | Conf: " + DoubleToString(g_serverCorrectionConfidence, 1) +
                  "% | Action: " + g_serverCorrectionAction;
-      cols[n] = (corrActive ? clrTomato : clrSilver);
-      n++;
+      cols[n] = clrWhite; n++;
    }
    if(n < 24)
    {
@@ -8911,8 +12769,7 @@ void UpdateDashboard()
       string syncState = g_symbolStatsSyncOk ? "OK" : "FAIL";
       string syncAt = (g_symbolStatsLastSyncOk > 0) ? TimeToString(g_symbolStatsLastSyncOk, TIME_DATE|TIME_SECONDS) : "N/A";
       lines[n] = "DataStatus: MT5_LOCAL=" + localState + " | SYNC_SUPABASE=" + syncState + " | LAST_SYNC=" + syncAt;
-      cols[n] = (g_symbolStatsSyncOk ? clrSilver : clrTomato);
-      n++;
+      cols[n] = clrWhite; n++;
    }
    
    // Afficher l'état de la pause après profit journalier (basé sur l'historique)
@@ -8922,13 +12779,13 @@ void UpdateDashboard()
       int remainingSeconds = (int)(pauseEndTime - TimeCurrent());
       int remainingHours = remainingSeconds / 3600;
       int remainingMinutes = (remainingSeconds % 3600) / 60;
-      lines[n] = "🎯 PROFIT TARGET ATTEINT - PAUSE " + IntegerToString(remainingHours) + "h " + IntegerToString(remainingMinutes) + "min"; cols[n] = clrYellow; n++;
-      lines[n] = "💰 Profit: " + DoubleToString(g_dayNetProfit, 2) + "$ / " + DoubleToString(DailyProfitTarget, 2) + "$ (historique)"; cols[n] = clrLime; n++;
+      lines[n] = "🎯 PROFIT TARGET ATTEINT - PAUSE " + IntegerToString(remainingHours) + "h " + IntegerToString(remainingMinutes) + "min"; cols[n] = clrWhite; n++;
+      lines[n] = "💰 Profit: " + DoubleToString(g_dayNetProfit, 2) + "$ / " + DoubleToString(DailyProfitTarget, 2) + "$ (historique)"; cols[n] = clrWhite; n++;
    }
    else if(g_dayNetProfit >= DailyProfitTarget * 0.8) // Approche de l'objectif
    {
       double progress = (g_dayNetProfit / DailyProfitTarget) * 100.0;
-      lines[n] = "🎯 Objectif: " + DoubleToString(g_dayNetProfit, 2) + "$ / " + DoubleToString(DailyProfitTarget, 2) + "$ (" + DoubleToString(progress, 1) + "%)"; cols[n] = clrAqua; n++;
+      lines[n] = "🎯 Objectif: " + DoubleToString(g_dayNetProfit, 2) + "$ / " + DoubleToString(DailyProfitTarget, 2) + "$ (" + DoubleToString(progress, 1) + "%)"; cols[n] = clrWhite; n++;
    }
    else
    {
@@ -8951,17 +12808,17 @@ void UpdateDashboard()
    if(g_symbolTradingBlocked)
    {
       protectionStatus = "🚨 SYMBOLE BLOQUÉ - Perte: " + DoubleToString(g_symbolCurrentLoss, 2) + "$ > " + DoubleToString(MaxLossPerSymbolDollars, 2) + "$";
-      protectionColor = clrRed;
+      protectionColor = clrWhite;
    }
    else if(g_symbolCurrentLoss > 0)
    {
       protectionStatus = "⚠️ Perte actuelle: " + DoubleToString(g_symbolCurrentLoss, 2) + "$ / " + DoubleToString(MaxLossPerSymbolDollars, 2) + "$";
-      protectionColor = clrYellow;
+      protectionColor = clrWhite;
    }
    else
    {
       protectionStatus = "✅ Symbole protégé - Aucune perte actuelle";
-      protectionColor = clrLimeGreen;
+      protectionColor = clrWhite;
    }
    lines[n] = protectionStatus; cols[n] = protectionColor; n++;
    
@@ -8972,7 +12829,7 @@ void UpdateDashboard()
    if(hasFutureLevels)
    {
       string predictionStatus = "🔮 PRÉDICTIONS FUTURES: ";
-      color predictionColor = clrCyan;
+      color predictionColor = clrWhite;
       
       // Affichage spécifique selon le type de symbole pour les ordres limit
       bool isBoom = (StringFind(_Symbol, "Boom") >= 0);
@@ -9030,7 +12887,7 @@ void UpdateDashboard()
       if(n < 24) // garder de la place pour le reste
       {
          lines[n] = "📌 PENDING " + side + " @ " + DoubleToString(op, _Digits) + " SL " + slStr + " TP " + tpStr;
-         cols[n] = (ot == ORDER_TYPE_BUY_LIMIT ? clrLime : clrTomato);
+         cols[n] = clrWhite;
          n++;
       }
       shownPending++;
@@ -9040,7 +12897,7 @@ void UpdateDashboard()
    if(hasFutureLevels && totalLimits == 0 && n < 24)
    {
       lines[n] = "⚠️ Prédiction future active mais aucun LIMIT pending envoyé";
-      cols[n] = clrYellow;
+      cols[n] = clrWhite;
       n++;
    }
    
@@ -10929,63 +14786,8 @@ void DrawFVGOnChart()
    if(CopyRates(_Symbol, LTF, 0, bars, rates) < bars) return;
    ObjectsDeleteAll(0, "SMC_FVG_");
    ObjectsDeleteAll(0, "SMC_IFVG_");
-   int cnt = 0;
-   for(int fvgIndex = 2; fvgIndex < bars - 2 && cnt < 15; fvgIndex++)
-   {
-      if(rates[fvgIndex].close > rates[fvgIndex].open && rates[fvgIndex+1].high < rates[fvgIndex-1].low)
-      {
-         double top = rates[fvgIndex-1].low, bot = rates[fvgIndex+1].high;
-         datetime t1 = rates[fvgIndex+1].time, t2 = TimeCurrent() + PeriodSeconds(LTF)*20;
-         string name = "SMC_FVG_Bull_" + IntegerToString(fvgIndex);
-         if(ObjectCreate(0, name, OBJ_RECTANGLE, 0, t1, bot, t2, top))
-         {
-            ObjectSetInteger(0, name, OBJPROP_COLOR, clrGreen);
-            ObjectSetInteger(0, name, OBJPROP_WIDTH, 1);
-            ObjectSetInteger(0, name, OBJPROP_BACK, false);
-            ObjectSetInteger(0, name, OBJPROP_FILL, false);
-            cnt++;
-         }
-      }
-      if(rates[fvgIndex].close < rates[fvgIndex].open && rates[fvgIndex+1].low > rates[fvgIndex-1].high)
-      {
-         double top = rates[fvgIndex+1].low, bot = rates[fvgIndex-1].high;
-         datetime t1 = rates[fvgIndex+1].time, t2 = TimeCurrent() + PeriodSeconds(LTF)*20;
-         string name = "SMC_FVG_Bear_" + IntegerToString(fvgIndex);
-         if(ObjectCreate(0, name, OBJ_RECTANGLE, 0, t1, bot, t2, top))
-         {
-            ObjectSetInteger(0, name, OBJPROP_COLOR, clrRed);
-            ObjectSetInteger(0, name, OBJPROP_WIDTH, 1);
-            ObjectSetInteger(0, name, OBJPROP_BACK, false);
-            ObjectSetInteger(0, name, OBJPROP_FILL, false);
-            cnt++;
-         }
-      }
-   }
-
-   FVGData ifvgSell, ifvgBuy;
-   datetime t2ifvg = TimeCurrent() + PeriodSeconds(LTF)*20;
-   if(ICT_DetectInvertedFVG(_Symbol, LTF, -1, MathMax(80, ICTLookbackBars), ifvgSell))
-   {
-      string n1 = "SMC_IFVG_SELL";
-      if(ObjectCreate(0, n1, OBJ_RECTANGLE, 0, ifvgSell.time, ifvgSell.bottom, t2ifvg, ifvgSell.top))
-      {
-         ObjectSetInteger(0, n1, OBJPROP_COLOR, clrTomato);
-         ObjectSetInteger(0, n1, OBJPROP_WIDTH, 2);
-         ObjectSetInteger(0, n1, OBJPROP_STYLE, STYLE_DASHDOT);
-         ObjectSetInteger(0, n1, OBJPROP_FILL, false);
-      }
-   }
-   if(ICT_DetectInvertedFVG(_Symbol, LTF, 1, MathMax(80, ICTLookbackBars), ifvgBuy))
-   {
-      string n2 = "SMC_IFVG_BUY";
-      if(ObjectCreate(0, n2, OBJ_RECTANGLE, 0, ifvgBuy.time, ifvgBuy.bottom, t2ifvg, ifvgBuy.top))
-      {
-         ObjectSetInteger(0, n2, OBJPROP_COLOR, clrLimeGreen);
-         ObjectSetInteger(0, n2, OBJPROP_WIDTH, 2);
-         ObjectSetInteger(0, n2, OBJPROP_STYLE, STYLE_DASHDOT);
-         ObjectSetInteger(0, n2, OBJPROP_FILL, false);
-      }
-   }
+   // Désactivé volontairement: suppression des rectangles SMC_FVG_Bull/SMC_FVG_Bear.
+   // Désactivé volontairement: suppression des rectangles SMC_IFVG.
 }
 
 void DrawOBOnChart()
@@ -11014,6 +14816,8 @@ void DrawOBOnChart()
    double sellFibB = swingHigh - rg * 0.786;
    double sellFibLow = MathMin(sellFibA, sellFibB);
    double sellFibHigh = MathMax(sellFibA, sellFibB);
+   bool bosBuyOk = HasOTEBOSConfirmationM15OrM5("BUY");
+   bool bosSellOk = HasOTEBOSConfirmationM15OrM5("SELL");
 
    for(int fvgIndex = 3; fvgIndex < bars - 4 && cnt < MathMax(1, MaxConfirmedOBToDraw); fvgIndex++)
    {
@@ -11024,6 +14828,10 @@ void DrawOBOnChart()
          double obHigh = rates[fvgIndex].high;
          double obMid = (obLow + obHigh) * 0.5;
          bool fibConfluence = (obMid >= buyFibLow && obMid <= buyFibHigh);
+         double risk = MathMax(point * 5.0, obMid - (obLow - tol));
+         double reward = MathMax(0.0, swingHigh - obMid);
+         double rr = (risk > 0.0) ? (reward / risk) : 0.0;
+         bool rrOk = (rr >= MathMax(1.0, OBMinRRForDisplay));
          bool confirmed = false;
          for(int t = 1; t < fvgIndex; t++)
          {
@@ -11032,6 +14840,8 @@ void DrawOBOnChart()
             if(touched && reacted) { confirmed = true; break; }
          }
          if(OnlyDrawConfirmedOBWithFibConfluence && (!fibConfluence || !confirmed))
+            continue;
+         if(!bosBuyOk || !rrOk)
             continue;
 
          datetime t2 = TimeCurrent() + PeriodSeconds(LTF)*30;
@@ -11052,6 +14862,10 @@ void DrawOBOnChart()
          double obHigh = rates[fvgIndex].high;
          double obMid = (obLow + obHigh) * 0.5;
          bool fibConfluence = (obMid >= sellFibLow && obMid <= sellFibHigh);
+         double risk = MathMax(point * 5.0, (obHigh + tol) - obMid);
+         double reward = MathMax(0.0, obMid - swingLow);
+         double rr = (risk > 0.0) ? (reward / risk) : 0.0;
+         bool rrOk = (rr >= MathMax(1.0, OBMinRRForDisplay));
          bool confirmed = false;
          for(int t = 1; t < fvgIndex; t++)
          {
@@ -11060,6 +14874,8 @@ void DrawOBOnChart()
             if(touched && reacted) { confirmed = true; break; }
          }
          if(OnlyDrawConfirmedOBWithFibConfluence && (!fibConfluence || !confirmed))
+            continue;
+         if(!bosSellOk || !rrOk)
             continue;
 
          datetime t2 = TimeCurrent() + PeriodSeconds(LTF)*30;
@@ -11317,6 +15133,16 @@ bool ShouldExecuteOTETrade(string direction, string aiAction, double aiConfidenc
       if(DebugMode) Print("❌ OTE BLOQUÉ - Premium/Discount (Boom/Crash/Weltrade) | ", _Symbol, " | ", direction);
       return false;
    }
+   if(!HasOTEBOSConfirmationM15OrM5(direction))
+   {
+      if(DebugMode) Print("❌ OTE BLOQUÉ - BOS non confirmé (M15/M5) | ", _Symbol, " | ", direction);
+      return false;
+   }
+   if(!IsOTEEntryConfirmedOnM15OrM5(direction))
+   {
+      if(DebugMode) Print("❌ OTE BLOQUÉ - Confirmation candlestick M15/M5 absente | ", _Symbol, " | ", direction);
+      return false;
+   }
    if(!PassFutureDirectionConfidenceGate(direction, "OTE", false))
       return false;
    if(!PassFutureDirectionConfidenceGate(direction, "OTE", false))
@@ -11331,7 +15157,8 @@ bool ShouldExecuteOTETrade(string direction, string aiAction, double aiConfidenc
    string dirU = direction;
    StringToUpper(aiU);
    StringToUpper(dirU);
-   if(aiU != dirU && aiAction != "") {
+   bool aiDirectionalSignal = (aiU == "BUY" || aiU == "SELL");
+   if(aiDirectionalSignal && aiU != dirU) {
       if(DebugMode) Print("❌ OTE NON ALIGNÉ - Direction: ", direction, " | IA: ", aiAction);
       return false;
    }
@@ -11479,8 +15306,8 @@ void ExecuteFutureOTETrade(string direction, double entryPrice, double swingLow,
    // [FIX] Sécurité ultra : forcer l'orientation correcte si elle est inversée malgré tout
    ValidateAndAdjustStopLossTakeProfit(direction, entryPrice, stopLoss, takeProfit);
    
-   // Matérialiser visuellement le setup OTE dès qu'il est validé côté logique.
-   DrawOTESetup(entryPrice, stopLoss, takeProfit, direction);
+   // Matérialiser visuellement le setup OTE dès qu'il est validé côté logique (version optimisée).
+   OTE_DrawOptimized(entryPrice, stopLoss, takeProfit, direction);
    
    // Calculer l'espérance mathématique finale
    double expectancy = CalculateTradeExpectancy(direction, entryPrice, stopLoss, takeProfit);
@@ -11718,13 +15545,28 @@ bool IsTrendAlignedEntry(const string direction)
                           (isSell && ob.direction == -1);
          // Le prix doit être à l'intérieur ou juste au-dessus/dessous de l'OB
          bool priceInOB = (bid >= ob.low && bid <= ob.high);
+         double atrM1 = GetATRValue(PERIOD_M1, 14);
+         if(atrM1 <= 0.0) atrM1 = SymbolInfoDouble(_Symbol, SYMBOL_POINT) * 20.0;
+         double obTol = MathMax(SymbolInfoDouble(_Symbol, SYMBOL_POINT) * MathMax(1, TrendFilterOBProximityPoints),
+                                atrM1 * MathMax(0.0, TrendFilterOBProximityAtrMult));
+         bool nearOBBreakout = false;
+         if(isSell && bid < ob.low)
+            nearOBBreakout = ((ob.low - bid) <= obTol);
+         else if(isBuy && bid > ob.high)
+            nearOBBreakout = ((bid - ob.high) <= obTol);
+         bool structuralOverride = nearOBBreakout && HasOTEBOSConfirmationM15OrM5(direction);
 
-         if(!obAligned || !priceInOB)
+         if(!obAligned || (!priceInOB && !structuralOverride))
          {
             Print("🚫 TREND FILTER - OB non aligné ou prix hors OB pour ", direction, " sur ", _Symbol,
                   " | OB dir=", ob.direction, " | OB [", DoubleToString(ob.low, _Digits),
                   " - ", DoubleToString(ob.high, _Digits), "] | Bid=", DoubleToString(bid, _Digits));
             return false;
+         }
+         if(structuralOverride)
+         {
+            Print("✅ TREND FILTER - Override OB (proximité breakout + BOS confirmé) pour ", direction, " sur ", _Symbol,
+                  " | tol=", DoubleToString(obTol, _Digits), " | Bid=", DoubleToString(bid, _Digits));
          }
       }
       else
@@ -11821,6 +15663,9 @@ void ValidateAndAdjustStopLossTakeProfit(string direction, double entryPrice, do
       // Forex et autres : standard
       minDistance = MathMax(MathMax(stopsLevel, freezeLevel), 30 * tickSize); // Minimum 30 ticks pour Forex
    }
+   // Rapprocher légèrement les SL (ex: 5 points), sans passer sous la contrainte broker.
+   double tightenDist = (double)MathMax(0, SLTightenPoints) * point;
+   minDistance = MathMax(MathMax(stopsLevel, freezeLevel), minDistance - tightenDist);
    minDistance = MathMax(minDistance, 2.0 * tickSize); // marge anti-arrondi
 
    // Prix de référence broker au moment de la validation.
@@ -11935,6 +15780,17 @@ void EnforceMinBoomCrashStopLossDollarRisk(const string symbol, const string dir
    }
 
    stopLoss = sl;
+
+   // Réduction de 5 points SL pour Boom et Crash
+   double slReductionPoints = 5.0;
+   double slReduction = slReductionPoints * point;
+   
+   if(direction == "BUY")
+      stopLoss += slReduction;  // Rapprocher le SL (pour BUY, SL est en-dessous)
+   else
+      stopLoss -= slReduction;  // Rapprocher le SL (pour SELL, SL est au-dessus)
+   
+   stopLoss = NormalizeDouble(stopLoss, _Digits);
 }
 
 // Valider et ajuster le SL pour les modifications de position
@@ -11945,15 +15801,15 @@ bool ValidateStopLossForModification(string symbol, string direction, double cur
    double tickSize = SymbolInfoDouble(symbol, SYMBOL_TRADE_TICK_SIZE);
    if(tickSize <= 0) tickSize = point;
    
-   // Obtenir les distances minimales du courtier
-   double stopsLevel = (double)SymbolInfoInteger(symbol, SYMBOL_TRADE_STOPS_LEVEL) * tickSize;
+   // Obtenir les distances minimales du courtier (points -> prix via SYMBOL_POINT)
+   double stopsLevel = (double)SymbolInfoInteger(symbol, SYMBOL_TRADE_STOPS_LEVEL) * point;
    
    // Distance minimale adaptée selon le type de symbole
    double minDistance;
    if(StringFind(symbol, "XAG") >= 0 || StringFind(symbol, "XAU") >= 0)
    {
-      // Métaux précieux : distances plus grandes
-      minDistance = MathMax(stopsLevel, 50 * tickSize); // Minimum 50 ticks pour les métaux
+      // Métaux précieux : distance raisonnable pour permettre le trailing réel
+      minDistance = MathMax(stopsLevel, 20 * tickSize);
    }
    else if(IsBoomCrashOrWeltradeDirectionalSynth(symbol))
    {
@@ -11962,9 +15818,13 @@ bool ValidateStopLossForModification(string symbol, string direction, double cur
    }
    else
    {
-      // Forex et autres : standard
-      minDistance = MathMax(stopsLevel, 30 * tickSize); // Minimum 30 ticks pour Forex
+      // Forex/indices/step/autres : distance plus souple
+      minDistance = MathMax(stopsLevel, 10 * tickSize);
    }
+
+   // Rapprocher légèrement les SL (ex: 5 points), sans violer stopsLevel.
+   double tightenDist = (double)MathMax(0, SLTightenPoints) * point;
+   minDistance = MathMax(stopsLevel, minDistance - tightenDist);
    
    // Valider et ajuster le SL selon la direction
    if(direction == "BUY")
@@ -13010,7 +16870,8 @@ void PlaceSMCChannelLimitOrder()
          return;
       }
       
-      Print("?? SMC BOOM - ", entryType, " | Distance canal: ", DoubleToString(distanceToCanal/atrVal, 1), " ATR | Entry: ", DoubleToString(entry, _Digits));
+      double atrDist = (atrVal > 0) ? distanceToCanal / atrVal : 0;
+      Print("?? SMC BOOM - ", entryType, " | Distance canal: ", DoubleToString(atrDist, 1), " ATR | Entry: ", DoubleToString(entry, _Digits));
    }
    // Crash: SELL LIMIT avec logique de proximité intelligente
    else if(isCrash)
@@ -13104,7 +16965,8 @@ void PlaceSMCChannelLimitOrder()
          return;
       }
       
-      Print("?? SMC CRASH - ", entryType, " | Distance canal: ", DoubleToString(distanceToCanal/atrVal, 1), " ATR | Entry: ", DoubleToString(entry, _Digits));
+      double atrDist = (atrVal > 0) ? distanceToCanal / atrVal : 0;
+      Print("?? SMC CRASH - ", entryType, " | Distance canal: ", DoubleToString(atrDist, 1), " ATR | Entry: ", DoubleToString(entry, _Digits));
    }
    else
    {
@@ -14125,6 +17987,17 @@ bool FetchFutureCandlesM1Hybrid(bool forceRefresh = false)
 
 void DrawFutureCandlesM1()
 {
+   static datetime s_lastRedraw = 0;
+   datetime now = TimeCurrent();
+   // Ne pas supprimer/recréer les objets à haute fréquence: c'est très coûteux et peut détacher l'EA.
+   if(s_lastRedraw > 0 && (now - s_lastRedraw) < (datetime)MathMax(5, FutureCandlesRefreshSeconds))
+      return;
+   s_lastRedraw = now;
+
+   // Sécurité: si le graphique contient déjà trop d'objets, on évite d'en rajouter.
+   if(MaxChartObjectsSafety > 0 && ObjectsTotal(0, -1, -1) > MaxChartObjectsSafety)
+      return;
+
    ObjectsDeleteAll(0, "SMC_FUT_CANDLE_");
    ObjectsDeleteAll(0, "SMC_FUT_WICK_");
    ObjectDelete(0, "SMC_FUT_STATUS");
@@ -14756,7 +18629,13 @@ void ExecuteSignal(SMC_Signal &sig)
 {
    if(IsMaxPositionsReached()) return;
    if(!TryAcquireOpenLock()) return;
-   double lotSize = CalculateLotSize();
+   
+   // Appliquer les inputs manuels du panel si activé
+   double usedSL = sig.stopLoss;
+   double usedTP = sig.takeProfit;
+   ApplyManualPanelInputs(sig.entryPrice, sig.action, usedSL, usedTP);
+   
+   double lotSize = CalculateLotSizeFromManualRisk(sig.entryPrice, usedSL);
    lotSize = ApplyRecoveryLot(lotSize, sig.action);
    if(lotSize <= 0) { ReleaseOpenLock(); return; }
    
@@ -14868,7 +18747,7 @@ void ExecuteSignal(SMC_Signal &sig)
    
    if(sig.action == "BUY")
    {
-      trade.Buy(lotSize, _Symbol, 0, sig.stopLoss, sig.takeProfit, "SMC " + sig.concept);
+      trade.Buy(lotSize, _Symbol, 0, usedSL, usedTP, "SMC " + sig.concept);
       if(trade.ResultRetcode() == TRADE_RETCODE_DONE)
       {
          Print("? SMC BUY @ ", sig.entryPrice, " - ", sig.concept);
@@ -14877,7 +18756,7 @@ void ExecuteSignal(SMC_Signal &sig)
    }
    else if(sig.action == "SELL")
    {
-      trade.Sell(lotSize, _Symbol, 0, sig.stopLoss, sig.takeProfit, "SMC " + sig.concept);
+      trade.Sell(lotSize, _Symbol, 0, usedSL, usedTP, "SMC " + sig.concept);
       if(trade.ResultRetcode() == TRADE_RETCODE_DONE)
       {
          Print("? SMC SELL @ ", sig.entryPrice, " - ", sig.concept);
@@ -15008,6 +18887,92 @@ double CalculateLotSize()
    }
    
    return NormalizeVolumeForSymbol(normalizedLot);
+}
+
+// Calculer la position size basée sur le risk% et le SL manuel (panel d'inputs)
+double CalculateLotSizeFromManualRisk(double entryPrice, double stopLoss)
+{
+   if(!UseManualPanelInputs) return CalculateLotSize();
+   if(ManualRiskPercent <= 0.0) return CalculateLotSize();
+   if(ManualPositionSize > 0.0) return NormalizeVolumeForSymbol(ManualPositionSize);
+   
+   double minLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   double lotStep = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+   double maxLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+   double balance = AccountInfoDouble(ACCOUNT_BALANCE);
+   
+   double riskAmount = balance * (ManualRiskPercent / 100.0);
+   double slDistance = MathAbs(entryPrice - stopLoss);
+   
+   if(slDistance <= 0.0) return CalculateLotSize();
+   
+   double tickVal = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+   double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+   
+   if(tickVal <= 0.0 || tickSize <= 0.0) return CalculateLotSize();
+   
+   // Calculer le lot basé sur le risque en dollars et la distance SL
+   double lotSize = riskAmount / (slDistance * (tickVal / tickSize));
+   
+   // Arrondir selon le step du broker
+   int steps = (int)MathRound(lotSize / lotStep);
+   lotSize = steps * lotStep;
+   
+   // S'assurer que le lot est dans la plage valide
+   lotSize = MathMax(minLot, MathMin(maxLot, lotSize));
+   
+   // Log de débogage
+   Print("📊 PANEL MANUEL - Calcul position size");
+   Print("   💰 Balance: ", DoubleToString(balance, 2), "$");
+   Print("   🎯 Risk%: ", DoubleToString(ManualRiskPercent, 2), "% | RiskAmount: ", DoubleToString(riskAmount, 2), "$");
+   Print("   📏 SL Distance: ", DoubleToString(slDistance, _Digits));
+   Print("   📦 Lot calculé: ", DoubleToString(lotSize, 2));
+   
+   return NormalizeVolumeForSymbol(lotSize);
+}
+
+// Appliquer les TP1-TP4 et SL manuels si le panel est activé
+void ApplyManualPanelInputs(double entryPrice, string direction, double &stopLoss, double &takeProfit)
+{
+   if(!UseManualPanelInputs) return;
+   
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   if(point <= 0.0) point = _Point;
+   
+   // Appliquer SL manuel si spécifié
+   if(ManualSLPoints > 0.0)
+   {
+      double slDistance = ManualSLPoints * point;
+      if(direction == "BUY")
+         stopLoss = entryPrice - slDistance;
+      else
+         stopLoss = entryPrice + slDistance;
+      
+      stopLoss = NormalizeDouble(stopLoss, _Digits);
+      Print("📊 PANEL MANUEL - SL appliqué: ", DoubleToString(stopLoss, _Digits), " (", DoubleToString(ManualSLPoints, 1), " points)");
+   }
+   
+   // Appliquer TP manuel (TP1 par défaut pour takeProfit principal)
+   if(ManualTP1Points > 0.0)
+   {
+      double tpDistance = ManualTP1Points * point;
+      if(direction == "BUY")
+         takeProfit = entryPrice + tpDistance;
+      else
+         takeProfit = entryPrice - tpDistance;
+      
+      takeProfit = NormalizeDouble(takeProfit, _Digits);
+      Print("📊 PANEL MANUEL - TP1 appliqué: ", DoubleToString(takeProfit, _Digits), " (", DoubleToString(ManualTP1Points, 1), " points)");
+   }
+   
+   // Log des TP2-TP4 pour information
+   if(ManualTP2Points > 0.0 || ManualTP3Points > 0.0 || ManualTP4Points > 0.0)
+   {
+      Print("📊 PANEL MANUEL - TP additionnels configurés:");
+      if(ManualTP2Points > 0.0) Print("   TP2: ", DoubleToString(ManualTP2Points, 1), " points");
+      if(ManualTP3Points > 0.0) Print("   TP3: ", DoubleToString(ManualTP3Points, 1), " points");
+      if(ManualTP4Points > 0.0) Print("   TP4: ", DoubleToString(ManualTP4Points, 1), " points");
+   }
 }
 
 // Variante pour ordres en attente (BUY/SELL LIMIT) sur niveaux stratégiques (Pivot/SuperTrend/etc.).
@@ -16406,7 +20371,7 @@ void PredictFutureProtectedPoints()
          }
       }
       
-      if(validPoints > 0)
+      if(validPoints > 0 && highCount > 1)
       {
          avgHighDistance /= (highCount - 1);
          highTrendSlope /= validPoints;
@@ -16439,7 +20404,8 @@ void PredictFutureProtectedPoints()
          futureHighs[i] = projectedBasePrice + (avgHighDistance * (i + 1)) + trendProjection + volatilityAdjustment;
          
          // Projection temporelle améliorée - basée sur la vitesse historique
-         int timeBars = 15 + (i * 10) + (int)(avgHighDistance / atr * 5); // 15, 25, 35+ bougies
+         int atrTimeBars = (atr > 0.0001) ? (int)(avgHighDistance / atr * 5) : 0;
+         int timeBars = 15 + (i * 10) + atrTimeBars; // 15, 25, 35+ bougies
          datetime futureTime = currentTime + (PeriodSeconds(PERIOD_M15) * timeBars);
          
          // Créer une ligne plus longue dans le futur pour meilleure visualisation
@@ -16537,7 +20503,7 @@ void PredictFutureProtectedPoints()
          }
       }
       
-      if(validLowPoints > 0)
+      if(validLowPoints > 0 && lowCount > 1)
       {
          avgLowDistance /= (lowCount - 1);
          lowTrendSlope /= validLowPoints;
@@ -16570,7 +20536,8 @@ void PredictFutureProtectedPoints()
          futureLows[i] = projectedBaseLow - (avgLowDistance * (i + 1)) - trendProjection - volatilityAdjustment;
          
          // Projection temporelle améliorée - basée sur la vitesse historique
-         int timeBars = 15 + (i * 10) + (int)(avgLowDistance / atr * 5); // 15, 25, 35+ bougies
+         int atrFactor = (atr > 0.0001) ? (int)(avgLowDistance / atr * 5) : 0;
+         int timeBars = 15 + (i * 10) + atrFactor; // 15, 25, 35+ bougies
          datetime futureTime = currentTime + (PeriodSeconds(PERIOD_M15) * timeBars);
          
          // Créer une ligne plus longue dans le futur pour meilleure visualisation
@@ -16824,7 +20791,8 @@ bool GetFutureProtectedPointLevels(double &futureSupportOut, double &futureResis
       double avgHighDistance = 0.0;
       for(int i = 1; i < highCount; i++)
          avgHighDistance += recentHighs[i] - recentHighs[i-1];
-      avgHighDistance /= (highCount - 1);
+      if(highCount > 1)
+         avgHighDistance /= (highCount - 1);
       
       futureResistanceOut = recentHighs[0] + avgHighDistance;
       if(atr > 0)
@@ -16888,6 +20856,329 @@ bool GetFutureProtectedPointLevels(double &futureSupportOut, double &futureResis
    return (futureSupportOut > 0 || futureResistanceOut > 0);
 }
 
+string MMObjName(const string suffix)
+{
+   return "SMC_MM_" + suffix;
+}
+
+void CleanupManualAssistantDashboard()
+{
+   string names[] = {
+      MMObjName("BG"), MMObjName("TITLE"),
+      MMObjName("LBL_CAP"), MMObjName("LBL_RISK"), MMObjName("LBL_ENTRY"), MMObjName("LBL_SL"), MMObjName("LBL_TP"), MMObjName("LBL_LOT"),
+      MMObjName("ED_CAP"), MMObjName("ED_RISK"), MMObjName("ED_ENTRY"), MMObjName("ED_SL"), MMObjName("ED_TP"), MMObjName("ED_LOT"),
+      MMObjName("BTN_CALC"), MMObjName("BTN_SYNC"), MMObjName("BTN_360"),
+      MMObjName("OUT_1"), MMObjName("OUT_2"), MMObjName("OUT_3"), MMObjName("OUT_4")
+   };
+   for(int i = 0; i < ArraySize(names); i++)
+      ObjectDelete(0, names[i]);
+}
+
+void TriggerManual360AnalysisPush()
+{
+   // Forcer un cycle 360 immédiat sur demande utilisateur.
+   if(g_symbolCount360 <= 0)
+      Init360Scanner();
+   Run360AnalysisScanner();
+
+   string summary = BuildManual360Summary(_Symbol);
+   g_manualMmPreview = summary;
+   Print("📡 MANUAL 360 - ", summary);
+   if(ManualAssistantPush360ToMobile && UseNotifications)
+      SendNotification(summary);
+}
+
+string BuildManual360Summary(const string symbol)
+{
+   bool bosM5 = DetectBOS360(symbol, PERIOD_M5);
+   bool chochM5 = DetectCHoCH360(symbol, PERIOD_M5);
+   bool bosM15 = DetectBOS360(symbol, PERIOD_M15);
+   bool chochM15 = DetectCHoCH360(symbol, PERIOD_M15);
+   bool bosH1 = DetectBOS360(symbol, PERIOD_H1);
+   bool chochH1 = DetectCHoCH360(symbol, PERIOD_H1);
+
+   int hEma50 = iMA(symbol, PERIOD_H1, 50, 0, MODE_EMA, PRICE_CLOSE);
+   double ema50 = 0.0;
+   if(hEma50 != INVALID_HANDLE)
+   {
+      double arr[];
+      ArraySetAsSeries(arr, true);
+      if(CopyBuffer(hEma50, 0, 0, 1, arr) >= 1)
+         ema50 = arr[0];
+      IndicatorRelease(hEma50);
+   }
+   double closeH1 = iClose(symbol, PERIOD_H1, 1);
+   string bias = (closeH1 >= ema50 && ema50 > 0.0) ? "BULLISH" : "BEARISH";
+   string action = "HOLD";
+   if((bosM15 || bosH1) && !chochM15 && !chochH1) action = "BUY";
+   else if((chochM15 || chochH1) && !bosM15 && !bosH1) action = "SELL";
+
+   int hRsi = iRSI(symbol, PERIOD_M15, 14, PRICE_CLOSE);
+   double rsi = 50.0;
+   if(hRsi != INVALID_HANDLE)
+   {
+      double rArr[];
+      ArraySetAsSeries(rArr, true);
+      if(CopyBuffer(hRsi, 0, 0, 1, rArr) >= 1)
+         rsi = rArr[0];
+      IndicatorRelease(hRsi);
+   }
+
+   double spread = GetSpreadPips360(symbol);
+   string ai360Act = "";
+   int ai360Conf = 0;
+   for(int i = 0; i < g_symbolCount360; i++)
+   {
+      if(g_symbols360[i].symbol == symbol)
+      {
+         ai360Act = g_symbols360[i].last_action;
+         ai360Conf = g_symbols360[i].last_conf;
+         break;
+      }
+   }
+   StringToUpper(ai360Act);
+   string ai360Str = (ai360Act == "BUY" || ai360Act == "SELL" || ai360Act == "HOLD")
+                     ? (" | AI360:" + ai360Act + " " + IntegerToString(ai360Conf) + "%")
+                     : "";
+
+   string msg = "360 " + symbol +
+                " | Bias:" + bias +
+                " | Act:" + action +
+                " | M5 B/C:" + (bosM5 ? "1" : "0") + "/" + (chochM5 ? "1" : "0") +
+                " | M15 B/C:" + (bosM15 ? "1" : "0") + "/" + (chochM15 ? "1" : "0") +
+                " | H1 B/C:" + (bosH1 ? "1" : "0") + "/" + (chochH1 ? "1" : "0") +
+                " | RSI15:" + DoubleToString(rsi, 1) +
+                " | Spr:" + DoubleToString(spread, 1) + "p" +
+                ai360Str;
+   return msg;
+}
+
+void UpdateManualAssistantDashboard()
+{
+   if(!UseManualAssistantDashboard || !UseDashboard)
+   {
+      CleanupManualAssistantDashboard();
+      return;
+   }
+
+   // Positionner le panneau manuel dans l'angle gauche, juste sous le dashboard principal.
+   int x = MathMax(0, DashboardLabelXOffsetPixels);
+   int y0 = MathMax(0, (g_dashboardBottomY > 0 ? (g_dashboardBottomY + 10) : DashboardLabelYStartPixels));
+   int row = 18;
+   int boxW = 100;
+
+   // Auto-preview 360 (évite panneau "vide" si pas de tick ou bouton non pressé)
+   static datetime lastAuto360 = 0;
+   datetime nowAuto = TimeCurrent();
+   if(lastAuto360 == 0 || (nowAuto - lastAuto360) >= 10)
+   {
+      if(g_symbolCount360 <= 0)
+         Init360Scanner();
+      g_manualMmPreview = BuildManual360Summary(_Symbol);
+      lastAuto360 = nowAuto;
+   }
+
+   string bg = MMObjName("BG");
+   if(ObjectFind(0, bg) < 0)
+   {
+      ObjectCreate(0, bg, OBJ_RECTANGLE_LABEL, 0, 0, 0);
+      ObjectSetInteger(0, bg, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+      ObjectSetInteger(0, bg, OBJPROP_BGCOLOR, C'15,22,35');
+      ObjectSetInteger(0, bg, OBJPROP_COLOR, clrSlateGray);
+      ObjectSetInteger(0, bg, OBJPROP_BORDER_TYPE, BORDER_FLAT);
+   }
+   ObjectSetInteger(0, bg, OBJPROP_XDISTANCE, x);
+   ObjectSetInteger(0, bg, OBJPROP_YDISTANCE, y0);
+   ObjectSetInteger(0, bg, OBJPROP_XSIZE, 365);
+   ObjectSetInteger(0, bg, OBJPROP_YSIZE, 285);
+
+   string labels[] = {"CAPITAL $", "RISK %", "ENTRY", "SL", "TP", "LOT (0=auto)"};
+   string labIds[] = {"LBL_CAP", "LBL_RISK", "LBL_ENTRY", "LBL_SL", "LBL_TP", "LBL_LOT"};
+   string editIds[] = {"ED_CAP", "ED_RISK", "ED_ENTRY", "ED_SL", "ED_TP", "ED_LOT"};
+   string editVals[] = {
+      DoubleToString(g_manualMmCapital, 2),
+      DoubleToString(g_manualMmRiskPct, 2),
+      DoubleToString(g_manualMmEntry, _Digits),
+      DoubleToString(g_manualMmSL, _Digits),
+      DoubleToString(g_manualMmTP, _Digits),
+      DoubleToString(g_manualMmLot, 2)
+   };
+
+   string title = MMObjName("TITLE");
+   if(ObjectFind(0, title) < 0)
+   {
+      ObjectCreate(0, title, OBJ_LABEL, 0, 0, 0);
+      ObjectSetInteger(0, title, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+      ObjectSetString(0, title, OBJPROP_FONT, "Consolas");
+      ObjectSetInteger(0, title, OBJPROP_FONTSIZE, 8);
+   }
+   ObjectSetInteger(0, title, OBJPROP_XDISTANCE, x + 8);
+   ObjectSetInteger(0, title, OBJPROP_YDISTANCE, y0 + 6);
+   ObjectSetInteger(0, title, OBJPROP_COLOR, clrGold);
+   ObjectSetString(0, title, OBJPROP_TEXT, "MANUAL MM + PREVIEW (No auto-exec)");
+
+   for(int i = 0; i < 6; i++)
+   {
+      string lName = MMObjName(labIds[i]);
+      if(ObjectFind(0, lName) < 0)
+      {
+         ObjectCreate(0, lName, OBJ_LABEL, 0, 0, 0);
+         ObjectSetInteger(0, lName, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+         ObjectSetString(0, lName, OBJPROP_FONT, "Consolas");
+         ObjectSetInteger(0, lName, OBJPROP_FONTSIZE, 8);
+      }
+      ObjectSetInteger(0, lName, OBJPROP_XDISTANCE, x + 8);
+      ObjectSetInteger(0, lName, OBJPROP_YDISTANCE, y0 + 30 + i * row);
+      ObjectSetInteger(0, lName, OBJPROP_COLOR, clrLightGray);
+      ObjectSetString(0, lName, OBJPROP_TEXT, labels[i]);
+
+      string eName = MMObjName(editIds[i]);
+      if(ObjectFind(0, eName) < 0)
+      {
+         ObjectCreate(0, eName, OBJ_EDIT, 0, 0, 0);
+         ObjectSetInteger(0, eName, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+         ObjectSetString(0, eName, OBJPROP_FONT, "Consolas");
+         ObjectSetInteger(0, eName, OBJPROP_FONTSIZE, 8);
+         ObjectSetInteger(0, eName, OBJPROP_BGCOLOR, clrWhite);
+         ObjectSetInteger(0, eName, OBJPROP_COLOR, clrBlack);
+      }
+      ObjectSetInteger(0, eName, OBJPROP_XDISTANCE, x + 130);
+      ObjectSetInteger(0, eName, OBJPROP_YDISTANCE, y0 + 28 + i * row);
+      ObjectSetInteger(0, eName, OBJPROP_XSIZE, boxW);
+      ObjectSetInteger(0, eName, OBJPROP_YSIZE, 16);
+      if(StringLen(ObjectGetString(0, eName, OBJPROP_TEXT)) == 0)
+         ObjectSetString(0, eName, OBJPROP_TEXT, editVals[i]);
+   }
+
+   string bCalc = MMObjName("BTN_CALC");
+   string bSync = MMObjName("BTN_SYNC");
+   string b360  = MMObjName("BTN_360");
+   string btns[] = {bCalc, bSync, b360};
+   string btnTxt[] = {"CALCUL", "SYNC SIGNAL", "ANALYSE 360"};
+   for(int b = 0; b < 3; b++)
+   {
+      if(ObjectFind(0, btns[b]) < 0)
+      {
+         ObjectCreate(0, btns[b], OBJ_BUTTON, 0, 0, 0);
+         ObjectSetInteger(0, btns[b], OBJPROP_CORNER, CORNER_LEFT_UPPER);
+         ObjectSetInteger(0, btns[b], OBJPROP_FONTSIZE, 8);
+      }
+      ObjectSetInteger(0, btns[b], OBJPROP_XDISTANCE, x + 8 + (b * 118));
+      ObjectSetInteger(0, btns[b], OBJPROP_YDISTANCE, y0 + 145);
+      ObjectSetInteger(0, btns[b], OBJPROP_XSIZE, 112);
+      ObjectSetInteger(0, btns[b], OBJPROP_YSIZE, 18);
+      ObjectSetString(0, btns[b], OBJPROP_TEXT, btnTxt[b]);
+      ObjectSetInteger(0, btns[b], OBJPROP_BGCOLOR, C'30,60,90');
+      ObjectSetInteger(0, btns[b], OBJPROP_COLOR, clrWhite);
+   }
+
+   g_manualMmCapital = MathMax(1.0, StringToDouble(ObjectGetString(0, MMObjName("ED_CAP"), OBJPROP_TEXT)));
+   g_manualMmRiskPct = MathMax(0.01, StringToDouble(ObjectGetString(0, MMObjName("ED_RISK"), OBJPROP_TEXT)));
+   g_manualMmEntry = StringToDouble(ObjectGetString(0, MMObjName("ED_ENTRY"), OBJPROP_TEXT));
+   g_manualMmSL = StringToDouble(ObjectGetString(0, MMObjName("ED_SL"), OBJPROP_TEXT));
+   g_manualMmTP = StringToDouble(ObjectGetString(0, MMObjName("ED_TP"), OBJPROP_TEXT));
+   g_manualMmLot = MathMax(0.0, StringToDouble(ObjectGetString(0, MMObjName("ED_LOT"), OBJPROP_TEXT)));
+
+   if((bool)ObjectGetInteger(0, bSync, OBJPROP_STATE))
+   {
+      ObjectSetInteger(0, bSync, OBJPROP_STATE, false);
+      g_manualMmDoSync = true;
+   }
+   if(g_manualMmDoSync)
+   {
+      g_manualMmDoSync = false;
+      double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+      if(point <= 0.0) point = _Point;
+      double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+      double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+      string dir = g_lastAIAction;
+      StringToUpper(dir);
+      if(dir != "BUY" && dir != "SELL")
+         dir = (ask >= bid ? "BUY" : "SELL");
+      double slPts = (ManualSLPoints > 0.0 ? ManualSLPoints : 200.0);
+      double rr = MathMax(1.0, InpRiskReward);
+      g_manualMmEntry = (dir == "BUY") ? ask : bid;
+      if(dir == "BUY")
+      {
+         g_manualMmSL = g_manualMmEntry - (slPts * point);
+         g_manualMmTP = g_manualMmEntry + (slPts * rr * point);
+      }
+      else
+      {
+         g_manualMmSL = g_manualMmEntry + (slPts * point);
+         g_manualMmTP = g_manualMmEntry - (slPts * rr * point);
+      }
+      ObjectSetString(0, MMObjName("ED_ENTRY"), OBJPROP_TEXT, DoubleToString(g_manualMmEntry, _Digits));
+      ObjectSetString(0, MMObjName("ED_SL"), OBJPROP_TEXT, DoubleToString(g_manualMmSL, _Digits));
+      ObjectSetString(0, MMObjName("ED_TP"), OBJPROP_TEXT, DoubleToString(g_manualMmTP, _Digits));
+   }
+
+   if((bool)ObjectGetInteger(0, b360, OBJPROP_STATE))
+   {
+      ObjectSetInteger(0, b360, OBJPROP_STATE, false);
+      g_manualMmDo360 = true;
+   }
+   if(g_manualMmDo360)
+   {
+      g_manualMmDo360 = false;
+      TriggerManual360AnalysisPush();
+   }
+
+   double slDist = MathAbs(g_manualMmEntry - g_manualMmSL);
+   double tpDist = MathAbs(g_manualMmTP - g_manualMmEntry);
+   double tickVal = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+   double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+   double lotAuto = 0.0;
+   double riskAmount = g_manualMmCapital * (g_manualMmRiskPct / 100.0);
+   if(slDist > 0.0 && tickVal > 0.0 && tickSize > 0.0)
+      lotAuto = riskAmount / (slDist * (tickVal / tickSize));
+   double lotFinal = (g_manualMmLot > 0.0 ? g_manualMmLot : lotAuto);
+   lotFinal = NormalizeVolumeForSymbol(MathMax(0.0, lotFinal));
+
+   double lossMoney = 0.0;
+   double profitMoney = 0.0;
+   if(tickVal > 0.0 && tickSize > 0.0 && lotFinal > 0.0)
+   {
+      double perPrice = (tickVal / tickSize) * lotFinal;
+      lossMoney = slDist * perPrice;
+      profitMoney = tpDist * perPrice;
+   }
+   double rrNow = (lossMoney > 0.0 ? (profitMoney / lossMoney) : 0.0);
+   string side = (g_manualMmTP >= g_manualMmEntry) ? "BUY" : "SELL";
+   if(g_manualMmTP == g_manualMmEntry) side = "FLAT";
+
+   if((bool)ObjectGetInteger(0, bCalc, OBJPROP_STATE))
+   {
+      ObjectSetInteger(0, bCalc, OBJPROP_STATE, false);
+      g_manualMmDoCalc = true;
+   }
+   if(g_manualMmDoCalc)
+      g_manualMmDoCalc = false;
+
+   string out1 = "Dir=" + side + " | Lot=" + DoubleToString(lotFinal, 2) + " | Risk$=" + DoubleToString(lossMoney, 2);
+   string out2 = "Reward$=" + DoubleToString(profitMoney, 2) + " | RR=" + DoubleToString(rrNow, 2) + " | Capital$=" + DoubleToString(g_manualMmCapital, 2);
+   string out3 = "SLdist=" + DoubleToString(slDist / _Point, 1) + " pts | TPdist=" + DoubleToString(tpDist / _Point, 1) + " pts";
+   string out4 = (g_manualMmPreview != "" ? g_manualMmPreview : "360: en attente (bouton ANALYSE 360)");
+   string outs[] = {out1, out2, out3, out4};
+   color oc[] = {clrAqua, clrLime, clrLightGray, clrOrange};
+
+   for(int k = 0; k < 4; k++)
+   {
+      string on = MMObjName("OUT_" + IntegerToString(k + 1));
+      if(ObjectFind(0, on) < 0)
+      {
+         ObjectCreate(0, on, OBJ_LABEL, 0, 0, 0);
+         ObjectSetInteger(0, on, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+         ObjectSetString(0, on, OBJPROP_FONT, "Consolas");
+         ObjectSetInteger(0, on, OBJPROP_FONTSIZE, 8);
+      }
+      ObjectSetInteger(0, on, OBJPROP_XDISTANCE, x + 8);
+      ObjectSetInteger(0, on, OBJPROP_YDISTANCE, y0 + 170 + (k * 20));
+      ObjectSetInteger(0, on, OBJPROP_COLOR, oc[k]);
+      ObjectSetString(0, on, OBJPROP_TEXT, outs[k]);
+   }
+}
+
 void DrawDashboardOnChart(const string &lines[], const color &colors[], int count)
 {
    // NETTOYAGE AGRESSIF - Supprimer TOUS les anciens labels dashboard
@@ -16915,7 +21206,27 @@ void DrawDashboardOnChart(const string &lines[], const color &colors[], int coun
    int y0 = MathMax(0, DashboardLabelYStartPixels);
    int lh = MathMax(12, DashboardLabelLineHeightPixels);  // compact et lisible
 
+   // ══════════════════════════════════════════════════
+   // BACKGROUND DASHBOARD (PANNEAU TRANSLUCIDE)
+   // ══════════════════════════════════════════════════
+   string bgName = "SMC_DASH_BG";
+   if(ObjectFind(0, bgName) < 0)
+   {
+      ObjectCreate(0, bgName, OBJ_RECTANGLE_LABEL, 0, 0, 0);
+      ObjectSetInteger(0, bgName, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+      ObjectSetInteger(0, bgName, OBJPROP_BORDER_TYPE, BORDER_FLAT);
+      ObjectSetInteger(0, bgName, OBJPROP_COLOR, clrNavy);       // Bordure
+      ObjectSetInteger(0, bgName, OBJPROP_BGCOLOR, C'10,15,25'); // Fond très sombre (presque noir/bleu)
+      ObjectSetInteger(0, bgName, OBJPROP_BACK, false);
+      ObjectSetInteger(0, bgName, OBJPROP_WIDTH, 2);
+   }
+   
+   // Ajuster la taille du fond selon le contenu
    int maxLines = MathMin(count, 40);  // on autorise plus de lignes visibles
+   ObjectSetInteger(0, bgName, OBJPROP_XDISTANCE, MathMax(0, x - 5));
+   ObjectSetInteger(0, bgName, OBJPROP_YDISTANCE, MathMax(0, y0 - 5));
+   ObjectSetInteger(0, bgName, OBJPROP_XSIZE, 420); // Largeur fixe suffisante pour les textes
+   ObjectSetInteger(0, bgName, OBJPROP_YSIZE, (maxLines * lh) + 10);
 
    static datetime lastDebugLog = 0;
    if(DebugMLMetricsHttp && TimeCurrent() - lastDebugLog >= 300)
@@ -16961,17 +21272,26 @@ void DrawDashboardOnChart(const string &lines[], const color &colors[], int coun
 // Applique la stratégie adaptée à la catégorie de symbole (Boom/Crash, Volatility, Forex/Metals)
 void RunCategoryStrategy()
 {
+   if(OTEOnlyStrictMode)
+   {
+      // En mode strict OTE, autoriser tout de même les setups rapides explicitement activés.
+      CheckAndExecuteEMAPullbackAndSweepReclaim();
+      return;
+   }
+
    ENUM_SYMBOL_CATEGORY cat = SMC_GetSymbolCategory(_Symbol);
    
    switch(cat)
    {
       case SYM_BOOM_CRASH:
-         // Boom/Crash: priorité aux signaux DERIV ARROW + logique spike dédiée
-         ExecuteSMCPredictionArrowTrade(); // ⭐ NEW: Détection flèche SMC + position market + orders limit
-         CheckAndExecuteDerivArrowTrade();
-         // Disabled: les ordres LIMIT "Protected future points" sont désactivés
-         // (objectif: exécution 100% market via touch/entry lines).
-         // La détection/gestion des spikes et canaux Boom/Crash est déjà appelée plus bas (ManageBoomCrashSpikeClose, CheckImminentSpike, etc.)
+         // Boom/Crash: mode verrouillé = uniquement OTE protocole + EMA pullback confirmé.
+         // Les autres chemins d'entrée (arrow/stair/spike/recovery) sont bloqués ailleurs.
+         if(!BoomCrashOnlyOTEAndEMAPullback)
+         {
+            ExecuteSMCPredictionArrowTrade(); // ⭐ NEW: Détection flèche SMC + position market + orders limit
+            CheckAndExecuteDerivArrowTrade();
+         }
+         CheckAndExecuteEMAPullbackAndSweepReclaim();
          break;
 
       case SYM_VOLATILITY:
@@ -16987,6 +21307,7 @@ void RunCategoryStrategy()
          ExecuteOTEImbalanceTrade();
          ExecuteForexBOSRetest();
          ExecutePriceActionM15Strategy(); // 3e stratégie: Price Action pure M15
+         CheckAndExecuteEMAPullbackAndSweepReclaim();
          // Fallback (si pas de signal BOS+retest): conserver le comportement générique existant
          CheckAndExecuteDerivArrowTrade();
          break;
@@ -16999,6 +21320,7 @@ void RunCategoryStrategy()
          ExecuteSMCPredictionArrowTrade(); // ⭐ NEW: SMC prediction arrow trade
          ExecuteOTEImbalanceTrade();
          ExecutePriceActionM15Strategy(); // Price Action pure M15
+         CheckAndExecuteEMAPullbackAndSweepReclaim();
          CheckAndExecuteDerivArrowTrade();
          break;
    }
@@ -18114,6 +22436,63 @@ void TestSupabaseConnectivity()
    }
 }
 
+string GetSymbolStatsRetryFilePath(const string symbol)
+{
+   string s = symbol;
+   StringReplace(s, " ", "_");
+   StringReplace(s, "/", "_");
+   StringReplace(s, "\\", "_");
+   return "smc_symbol_stats_retry_" + s + ".json";
+}
+
+void SavePendingSymbolStatsPayload(const string payload)
+{
+   string fn = GetSymbolStatsRetryFilePath(_Symbol);
+   int fh = FileOpen(fn, FILE_WRITE | FILE_TXT | FILE_ANSI | FILE_COMMON);
+   if(fh == INVALID_HANDLE) return;
+   FileWriteString(fh, payload);
+   FileClose(fh);
+}
+
+bool LoadPendingSymbolStatsPayload(string &payloadOut)
+{
+   payloadOut = "";
+   string fn = GetSymbolStatsRetryFilePath(_Symbol);
+   if(!FileIsExist(fn, FILE_COMMON)) return false;
+   int fh = FileOpen(fn, FILE_READ | FILE_TXT | FILE_ANSI | FILE_COMMON);
+   if(fh == INVALID_HANDLE) return false;
+   payloadOut = FileReadString(fh);
+   FileClose(fh);
+   return (payloadOut != "");
+}
+
+void ClearPendingSymbolStatsPayload()
+{
+   string fn = GetSymbolStatsRetryFilePath(_Symbol);
+   if(FileIsExist(fn, FILE_COMMON))
+      FileDelete(fn, FILE_COMMON);
+}
+
+int SendSymbolStatsPayloadWithFallback(const string payload, string &urlUsedOut, string &respOut)
+{
+   string url1 = UseRenderAsPrimary ? (AI_ServerRender + "/mt5/symbol-trade-stats-upload") : (AI_ServerURL + "/mt5/symbol-trade-stats-upload");
+   string url2 = UseRenderAsPrimary ? (AI_ServerURL + "/mt5/symbol-trade-stats-upload") : (AI_ServerRender + "/mt5/symbol-trade-stats-upload");
+   string headers = "Content-Type: application/json\r\n";
+   char post_data[], result_data[];
+   string result_headers;
+   StringToCharArray(payload, post_data, 0, WHOLE_ARRAY, CP_UTF8);
+
+   urlUsedOut = url1;
+   int http_result = WebRequest("POST", url1, headers, AI_Timeout_ms, post_data, result_data, result_headers);
+   if(http_result != 200)
+   {
+      urlUsedOut = url2;
+      http_result = WebRequest("POST", url2, headers, AI_Timeout_ms2, post_data, result_data, result_headers);
+   }
+   respOut = CharArrayToString(result_data);
+   return http_result;
+}
+
 // Envoie les stats jour/mois (UTC) au serveur pour UPSERT dans Supabase `symbol_trade_stats`
 void SyncSymbolTradeStatsToServer()
 {
@@ -18122,6 +22501,7 @@ void SyncSymbolTradeStatsToServer()
    static datetime lastSync = 0;
    datetime now = TimeCurrent();
    if(now - lastSync < 300) return; // 5 minutes
+   if(g_symbolStatsBackoffUntil > now) return; // anti-spam lors des erreurs serveur répétées
    lastSync = now;
 
    if(AI_ServerURL == "" && AI_ServerRender == "") 
@@ -18200,21 +22580,31 @@ void SyncSymbolTradeStatsToServer()
       _Symbol, monthDate, tcMonth, wMonth, lMonth, netMonth, gpMonth, glMonth, lastMonthMs
    );
 
-   string url1 = UseRenderAsPrimary ? (AI_ServerRender + "/mt5/symbol-trade-stats-upload") : (AI_ServerURL + "/mt5/symbol-trade-stats-upload");
-   string url2 = UseRenderAsPrimary ? (AI_ServerURL + "/mt5/symbol-trade-stats-upload") : (AI_ServerRender + "/mt5/symbol-trade-stats-upload");
-
-   string headers = "Content-Type: application/json\r\n";
-   char post_data[];
-   char result_data[];
-   string result_headers;
-   StringToCharArray(json_payload, post_data, 0, StringLen(json_payload));
-
-   int http_result = WebRequest("POST", url1, headers, AI_Timeout_ms, post_data, result_data, result_headers);
-   if(http_result != 200)
+   // Si un payload précédent est en file d'attente locale, tenter de le rejouer d'abord.
+   string pendingPayload = "";
+   if(LoadPendingSymbolStatsPayload(pendingPayload))
    {
-      Print("⚠️ ÉCHEC SERVEUR 1 - HTTP ", http_result, " | URL: ", url1);
-      http_result = WebRequest("POST", url2, headers, AI_Timeout_ms2, post_data, result_data, result_headers);
+      string pendingUrl = "", pendingResp = "";
+      int pendingRes = SendSymbolStatsPayloadWithFallback(pendingPayload, pendingUrl, pendingResp);
+      if(pendingRes == 200)
+      {
+         ClearPendingSymbolStatsPayload();
+         Print("✅ RETRY QUEUE SUPABASE RÉUSSI - ", _Symbol);
+      }
+      else
+      {
+         g_symbolStatsSyncOk = false;
+         g_symbolStatsConsecutiveFail++;
+         int backoffSec = (int)MathMin(1800.0, 30.0 * MathPow(2.0, MathMin(5, g_symbolStatsConsecutiveFail)));
+         g_symbolStatsBackoffUntil = now + backoffSec;
+         Print("❌ RETRY QUEUE SUPABASE ÉCHEC - HTTP ", pendingRes, " | ", _Symbol, " | Backoff=", backoffSec, "s");
+         return;
+      }
    }
+
+   string usedUrl = "";
+   string responseBody = "";
+   int http_result = SendSymbolStatsPayloadWithFallback(json_payload, usedUrl, responseBody);
 
    if(http_result == 200)
    {
@@ -18224,15 +22614,27 @@ void SyncSymbolTradeStatsToServer()
       g_symbolStatsLastSyncOk = TimeGMT();
       g_symbolStatsLastChecksum = IntegerToString(tcDay) + "|" + IntegerToString(wDay) + "|" + IntegerToString(lDay) + "|" + DoubleToString(netDay, 2) +
                                   "|" + IntegerToString(tcMonth) + "|" + IntegerToString(wMonth) + "|" + IntegerToString(lMonth) + "|" + DoubleToString(netMonth, 2);
+      g_symbolStatsConsecutiveFail = 0;
+      g_symbolStatsBackoffUntil = 0;
+      ClearPendingSymbolStatsPayload();
       Print("✅ SYNC SUPABASE RÉUSSIE - ", _Symbol, " | day ", IntegerToString(wDay), "W/", IntegerToString(lDay), "L net=", DoubleToString(netDay, 2),
             " | month ", IntegerToString(wMonth), "W/", IntegerToString(lMonth), "L net=", DoubleToString(netMonth, 2));
    }
    else
    {
       g_symbolStatsSyncOk = false;
+      g_symbolStatsConsecutiveFail++;
+      int backoffSec = (int)MathMin(1800.0, 30.0 * MathPow(2.0, MathMin(5, g_symbolStatsConsecutiveFail)));
+      g_symbolStatsBackoffUntil = now + backoffSec;
+      SavePendingSymbolStatsPayload(json_payload);
+      string payloadShort = StringSubstr(json_payload, 0, MathMin(260, StringLen(json_payload)));
+      string respShort = StringSubstr(responseBody, 0, MathMin(200, StringLen(responseBody)));
       Print("❌ SYNC SUPABASE ÉCHEC - HTTP ", http_result, " | ", _Symbol);
-      Print("   URL tentée: ", (http_result != 200 ? url2 : url1));
-      Print("   Timeout: ", (http_result != 200 ? AI_Timeout_ms2 : AI_Timeout_ms), "ms");
+      Print("   URL tentée: ", usedUrl);
+      Print("   Timeout: ", (StringFind(usedUrl, AI_ServerRender) >= 0 ? AI_Timeout_ms2 : AI_Timeout_ms), "ms");
+      Print("   Backoff: ", backoffSec, "s | FailCount: ", g_symbolStatsConsecutiveFail);
+      Print("   Payload(260): ", payloadShort);
+      if(respShort != "") Print("   Response(200): ", respShort);
       
       // Diagnostique supplémentaire
       if(http_result == -1)
@@ -18671,11 +23073,9 @@ void ManageTrailingStop()
       if(!posInfo.SelectByIndex(i)) continue;
       if(posInfo.Magic() != InpMagicNumber) continue;
       
-      // SL dynamique: tous les symboles y compris Boom/Crash si DynamicSL_OnBoomCrash (sortie spike séparée, plus haut dans OnTick)
+      // SL dynamique forcé sur toutes les catégories (exigence: toute position).
       string symbol = posInfo.Symbol();
       ENUM_SYMBOL_CATEGORY cat = SMC_GetSymbolCategory(symbol);
-      if(cat == SYM_BOOM_CRASH && !DynamicSL_OnBoomCrash)
-         continue;
 
       ulong  ticket = posInfo.Ticket();
       double profit = posInfo.Profit() + posInfo.Swap() + posInfo.Commission();
@@ -18773,7 +23173,7 @@ void ManageTrailingStop()
             if(ValidateStopLossForModification(symbol, "BUY", bid, newSL))
             {
                // Only move SL if it improves the current SL and is above open price
-               bool shouldModify = (newSL > currentSL && newSL > openPrice);
+               bool shouldModify = (newSL > currentSL && newSL >= (openPrice + point));
                Print("🔍 DEBUG BUY Modify: ShouldModify=", shouldModify ? "YES" : "NO", " | NewSL>CurrentSL=", (newSL > currentSL) ? "YES" : "NO", " | NewSL>OpenPrice=", (newSL > openPrice) ? "YES" : "NO");
                
                if(shouldModify)
@@ -18812,7 +23212,7 @@ void ManageTrailingStop()
             if(ValidateStopLossForModification(symbol, "SELL", ask, newSL))
             {
                // Only move SL if it improves the current SL and is below open price
-               bool shouldModify = ((newSL < currentSL || currentSL == 0) && newSL < openPrice);
+               bool shouldModify = ((newSL < currentSL || currentSL == 0) && newSL <= (openPrice - point));
                Print("🔍 DEBUG SELL Modify: ShouldModify=", shouldModify ? "YES" : "NO", " | NewSL<CurrentSL=", (newSL < currentSL || currentSL == 0) ? "YES" : "NO", " | NewSL<OpenPrice=", (newSL < openPrice) ? "YES" : "NO");
                
                if(shouldModify)
@@ -18852,6 +23252,265 @@ void ManageTrailingStop()
             GlobalVariableDel(gv);
       }
    }
+}
+
+//+------------------------------------------------------------------+
+//| SL DYNAMIQUE PRÉCOCE - Sortie si entrée non prometteuse           |
+//+------------------------------------------------------------------+
+void ManageEarlyExitDynamicSL()
+{
+   if(!EarlyExit_Enable) return;
+   
+   // Throttle: éviter spam de vérifications
+   static datetime lastRun = 0;
+   datetime now = TimeCurrent();
+   if(now - lastRun < 5) return; // max 1 fois / 5 secondes
+   lastRun = now;
+   
+   // Obtenir l'équité actuelle pour le filtre de volatilité
+   double accountEquity = AccountInfoDouble(ACCOUNT_EQUITY);
+   
+   CPositionInfo localPosInfo;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      if(!localPosInfo.SelectByIndex(i)) continue;
+      if(localPosInfo.Magic() != InpMagicNumber) continue;
+      
+      string symbol = localPosInfo.Symbol();
+      ENUM_SYMBOL_CATEGORY cat = SMC_GetSymbolCategory(symbol);
+      
+      // Appliquer seulement sur Crypto/Forex/Indices (pas Boom/Crash)
+      if(cat == SYM_BOOM_CRASH || cat == SYM_WELTRADE_SYNTH) continue;
+      if(!(cat == SYM_FOREX || cat == SYM_COMMODITY || cat == SYM_METAL || cat == SYM_VOLATILITY)) continue;
+      
+      // FILTRE VOLATILITÉ DÉSACTIVÉ: Permettre SL dynamique sur Step Index même avec petit capital
+      
+      ulong ticket = posInfo.Ticket();
+      double openPrice = posInfo.PriceOpen();
+      double currentSL = posInfo.StopLoss();
+      double currentTP = posInfo.TakeProfit();
+      ENUM_POSITION_TYPE posType = posInfo.PositionType();
+      datetime openTime = (datetime)posInfo.Time();
+      int secondsSinceOpen = (int)(now - openTime);
+      
+      // Vérifier si le délai minimum est écoulé
+      if(secondsSinceOpen < EarlyExit_CheckSeconds) continue;
+      
+      // Obtenir le prix actuel
+      MqlTick tick;
+      if(!SymbolInfoTick(symbol, tick)) continue;
+      double currentPrice = (posType == POSITION_TYPE_BUY) ? tick.bid : tick.ask;
+      
+      // Calculer le profit actuel en dollars
+      double currentProfitUSD = posInfo.Profit();
+      
+      // PROTECTION DES GAINS: Si le profit est >= 0.5$, activer la protection SL dynamique
+      if(currentProfitUSD >= EarlyExit_MinProfitUSD)
+      {
+         // Si on a du profit, déplacer le SL en breakeven ou au-dessus pour protéger
+         double newSL = currentSL;
+         double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
+         
+         if(posType == POSITION_TYPE_BUY)
+         {
+            // Déplacer le SL au niveau d'entrée + marge pour protéger le gain
+            double breakEvenSL = openPrice + (point * DynamicSL_BE_BufferPoints);
+            // Si le SL actuel est inférieur au breakeven, le remonter
+            if(currentSL < breakEvenSL)
+               newSL = breakEvenSL;
+         }
+         else
+         {
+            double breakEvenSL = openPrice - (point * DynamicSL_BE_BufferPoints);
+            if(currentSL > breakEvenSL)
+               newSL = breakEvenSL;
+         }
+         
+         // Valider et modifier le SL si nécessaire
+         if(newSL != currentSL && ValidateStopLossForModification(symbol, (posType == POSITION_TYPE_BUY) ? "BUY" : "SELL", currentPrice, newSL))
+         {
+            if(trade.PositionModify(ticket, newSL, currentTP))
+            {
+               Print("🛡️ SL DYNAMIQUE - Gain protégé: ", symbol, " | Profit: ", DoubleToString(currentProfitUSD, 2), "$ | SL: ", 
+                     DoubleToString(currentSL, _Digits), " -> ", DoubleToString(newSL, _Digits));
+            }
+         }
+      }
+      
+      // Calculer la distance totale entre entry et TP
+      double totalDistance = 0;
+      if(posType == POSITION_TYPE_BUY)
+         totalDistance = currentTP - openPrice;
+      else
+         totalDistance = openPrice - currentTP;
+      
+      if(totalDistance <= 0) continue;
+      
+      // Calculer le progrès actuel vers TP
+      double progressDistance = 0;
+      if(posType == POSITION_TYPE_BUY)
+         progressDistance = currentPrice - openPrice;
+      else
+         progressDistance = openPrice - currentPrice;
+      
+      double progressPct = progressDistance / totalDistance;
+      
+      // Calculer la perte actuelle par rapport au SL original
+      double slDistance = 0;
+      if(posType == POSITION_TYPE_BUY)
+         slDistance = openPrice - currentSL;
+      else
+         slDistance = currentSL - openPrice;
+      
+      double currentLoss = 0;
+      if(posType == POSITION_TYPE_BUY)
+         currentLoss = openPrice - currentPrice;
+      else
+         currentLoss = currentPrice - openPrice;
+      
+      double lossPct = (slDistance > 0) ? (currentLoss / slDistance) : 0;
+      
+      // Évaluation RSI
+      bool rsiSignalExit = false;
+      if(EarlyExit_UseRSI)
+      {
+         double rsi = GetRSI(symbol, PERIOD_M1, 14);
+         if(posType == POSITION_TYPE_BUY && rsi > EarlyExit_RSI_BuyThreshold)
+            rsiSignalExit = true;
+         else if(posType == POSITION_TYPE_SELL && rsi < EarlyExit_RSI_SellThreshold)
+            rsiSignalExit = true;
+      }
+      
+      // Évaluation EMA
+      bool emaSignalExit = false;
+      if(EarlyExit_UseEMA)
+      {
+         double emaFast = GetEMA(symbol, PERIOD_M1, EarlyExit_EMA_Fast);
+         double emaSlow = GetEMA(symbol, PERIOD_M1, EarlyExit_EMA_Slow);
+         
+         if(posType == POSITION_TYPE_BUY && currentPrice < emaFast && emaFast < emaSlow)
+            emaSignalExit = true;
+         else if(posType == POSITION_TYPE_SELL && currentPrice > emaFast && emaFast > emaSlow)
+            emaSignalExit = true;
+      }
+      
+      // Critères de sortie précoce
+      bool shouldExit = false;
+      string exitReason = "";
+      
+      // Critère 1: Pas de progrès suffisant vers TP
+      if(progressPct < EarlyExit_MinProgressPct && lossPct > 0.1)
+      {
+         shouldExit = true;
+         exitReason = "Pas de progrès (" + DoubleToString(progressPct * 100, 1) + "% < " + DoubleToString(EarlyExit_MinProgressPct * 100, 1) + "%)";
+      }
+      
+      // Critère 2: Perte dépasse le seuil maximum acceptable
+      if(lossPct > EarlyExit_MaxLossPct)
+      {
+         shouldExit = true;
+         exitReason = "Perte excessive (" + DoubleToString(lossPct * 100, 1) + "% > " + DoubleToString(EarlyExit_MaxLossPct * 100, 1) + "%)";
+      }
+      
+      // Critère 3: Signal RSI de retournement
+      if(rsiSignalExit)
+      {
+         shouldExit = true;
+         exitReason = "RSI retournement";
+      }
+      
+      // Critère 4: Signal EMA de retournement
+      if(emaSignalExit)
+      {
+         shouldExit = true;
+         exitReason = "EMA retournement";
+      }
+      
+      // Exécuter la sortie si nécessaire
+      if(shouldExit)
+      {
+         Print("🚨 SL DYNAMIQUE PRÉCOCE - Sortie position: ", symbol, " | Ticket: ", ticket, " | Raison: ", exitReason);
+         
+         // Option 1: Fermer la position complètement
+         if(PositionCloseWithLog(ticket, "Early Exit: " + exitReason))
+         {
+            Print("✅ Position fermée par SL dynamique précoce: ", symbol, " | ", exitReason);
+         }
+         else
+         {
+            Print("❌ Échec fermeture SL dynamique précoce: ", symbol, " | ", trade.ResultRetcode());
+         }
+      }
+      else if(lossPct > 0.3 && currentSL > 0 && currentProfitUSD < 0)
+      {
+         // Option 2: Réduire le SL si la perte est significative mais pas critique (seulement si en perte)
+         double newSL = currentSL;
+         double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
+         
+         if(posType == POSITION_TYPE_BUY)
+         {
+            // Rapprocher le SL de 20% pour limiter la perte
+            double slReduction = slDistance * 0.2;
+            newSL = currentSL + slReduction;
+         }
+         else
+         {
+            double slReduction = slDistance * 0.2;
+            newSL = currentSL - slReduction;
+         }
+         
+         // Valider et modifier le SL
+         if(ValidateStopLossForModification(symbol, (posType == POSITION_TYPE_BUY) ? "BUY" : "SELL", currentPrice, newSL))
+         {
+            if(trade.PositionModify(ticket, newSL, currentTP))
+            {
+               Print("🔧 SL dynamique précoce - SL réduit: ", symbol, " | ", DoubleToString(currentSL, _Digits), " -> ", DoubleToString(newSL, _Digits));
+            }
+         }
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Obtenir RSI pour un symbole et timeframe                          |
+//+------------------------------------------------------------------+
+double GetRSI(string symbol, ENUM_TIMEFRAMES timeframe, int period)
+{
+   int handle = iRSI(symbol, timeframe, period, PRICE_CLOSE);
+   if(handle == INVALID_HANDLE) return 50;
+   
+   double rsi[];
+   ArraySetAsSeries(rsi, true);
+   
+   if(CopyBuffer(handle, 0, 0, 1, rsi) < 1)
+   {
+      IndicatorRelease(handle);
+      return 50;
+   }
+   
+   IndicatorRelease(handle);
+   return rsi[0];
+}
+
+//+------------------------------------------------------------------+
+//| Obtenir EMA pour un symbole et timeframe                          |
+//+------------------------------------------------------------------+
+double GetEMA(string symbol, ENUM_TIMEFRAMES timeframe, int period)
+{
+   int handle = iMA(symbol, timeframe, period, 0, MODE_EMA, PRICE_CLOSE);
+   if(handle == INVALID_HANDLE) return 0;
+   
+   double ema[];
+   ArraySetAsSeries(ema, true);
+   
+   if(CopyBuffer(handle, 0, 0, 1, ema) < 1)
+   {
+      IndicatorRelease(handle);
+      return 0;
+   }
+   
+   IndicatorRelease(handle);
+   return ema[0];
 }
 
 //| DONNÉES GRAPHIQUES POUR ANALYSE EN TEMPS RÉEL          |
@@ -19611,6 +24270,23 @@ bool IsClassicIndicatorsAligned(const string direction, string &summaryOut)
       }
    }
 
+   // 9) RSI 14 Impulsion (Divergence / Compression Breakout / Reversal)
+   if(UseRSIImpulseFilter)
+   {
+      string rsiImpulseDetail = "";
+      ENUM_RSI_IMPULSE_TYPE rsiImpulse = DetectRSIImpulsePattern(rsiImpulseDetail);
+      if(rsiImpulse == RSI_IMPULSE_BULLISH)
+      {
+         if(dir == "BUY")  { scoreFor++; summaryOut += "[RSI_IMPULSE_BULL] "; }
+         else              { scoreAgainst++; summaryOut += "[RSI_IMPULSE_BULL CONTRA] "; }
+      }
+      else if(rsiImpulse == RSI_IMPULSE_BEARISH)
+      {
+         if(dir == "SELL") { scoreFor++; summaryOut += "[RSI_IMPULSE_BEAR] "; }
+         else              { scoreAgainst++; summaryOut += "[RSI_IMPULSE_BEAR CONTRA] "; }
+      }
+   }
+
    // Décision finale : au moins ClassicMinConfirmations en faveur
    bool ok = (scoreFor >= ClassicMinConfirmations);
 
@@ -20302,9 +24978,9 @@ bool DetectBoomCrashSwingPoints()
    if(CopyRates(_Symbol, PERIOD_M1, 0, barsToAnalyze, rates) < barsToAnalyze)
       return false;
    
-   // Nettoyer les anciens objets Boom/Crash
-   ObjectsDeleteAll(0, "SMC_BC_SH_");
-   ObjectsDeleteAll(0, "SMC_BC_SL_");
+   // DÉSACTIVÉ: Nettoyage et création d'objets graphiques Boom/Crash pour éviter le détachement
+   // ObjectsDeleteAll(0, "SMC_BC_SH_");
+   // ObjectsDeleteAll(0, "SMC_BC_SL_");
    
    double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
    double avgMove = 0;
@@ -20382,6 +25058,8 @@ bool DetectBoomCrashSwingPoints()
                
                if(confirmedAfterSpike)
                {
+                  // DÉSACTIVÉ: Création d'objets graphiques pour éviter le détachement
+                  /*
                   string shName = "SMC_BC_SH_" + IntegerToString(j);
                   if(ObjectCreate(0, shName, OBJ_ARROW, 0, rates[j].time, currentHigh))
                   {
@@ -20401,9 +25079,8 @@ bool DetectBoomCrashSwingPoints()
                         ObjectSetInteger(0, lineName, OBJPROP_WIDTH, 3);
                         ObjectSetInteger(0, lineName, OBJPROP_BACK, true);
                      }
-                     
-                     Print("?? SH APRÈS SPIKE BOOM (Signal SELL) - Prix: ", DoubleToString(currentHigh, _Digits), " | Spike: ", DoubleToString(rates[i].high, _Digits), " | Time: ", TimeToString(rates[j].time));
-                  }
+                  */
+                  Print("?? SH APRÈS SPIKE BOOM (Signal SELL) - Prix: ", DoubleToString(currentHigh, _Digits), " | Spike: ", DoubleToString(rates[i].high, _Digits), " | Time: ", TimeToString(rates[j].time));
                   break; // Prendre le premier SH valide après le spike
                }
             }
@@ -20445,6 +25122,8 @@ bool DetectBoomCrashSwingPoints()
                
                if(confirmedBeforeSpike)
                {
+                  // DÉSACTIVÉ: Création d'objets graphiques pour éviter le détachement
+                  /*
                   string slName = "SMC_BC_SL_" + IntegerToString(j);
                   if(ObjectCreate(0, slName, OBJ_ARROW, 0, rates[j].time, currentLow))
                   {
@@ -20464,9 +25143,8 @@ bool DetectBoomCrashSwingPoints()
                         ObjectSetInteger(0, lineName, OBJPROP_WIDTH, 3);
                         ObjectSetInteger(0, lineName, OBJPROP_BACK, true);
                      }
-                     
-                     Print("?? SL AVANT SPIKE CRASH (Signal CRASH) - Prix: ", DoubleToString(currentLow, _Digits), " | Spike: ", DoubleToString(rates[i].low, _Digits), " | Time: ", TimeToString(rates[j].time));
-                  }
+                  */
+                  Print("?? SL AVANT SPIKE CRASH (Signal CRASH) - Prix: ", DoubleToString(currentLow, _Digits), " | Spike: ", DoubleToString(rates[i].low, _Digits), " | Time: ", TimeToString(rates[j].time));
                   break; // Prendre le premier SL valide avant le spike
                }
             }
@@ -22219,6 +26897,322 @@ void MonitorAndClosePositionsOnHold()
    
    // Mettre à jour l'action précédente
    g_lastAIActionPrevious = g_lastAIAction;
+   
+   // Appeler le scalping automatique si IA est en HOLD
+   if(EnableHoldAutoScalping && (g_lastAIAction == "HOLD" || g_lastAIAction == "hold"))
+   {
+      CheckHoldAutoScalping();
+   }
+}
+
+//| DÉTECTION DE CONSOLIDATION |
+// Retourne true si le marché est en consolidation (pas de tendance claire)
+bool IsMarketConsolidating()
+{
+   MqlRates rates[];
+   ArraySetAsSeries(rates, true);
+   if(CopyRates(_Symbol, PERIOD_M5, 0, 20, rates) < 20) return false;
+   
+   // Calculer la variation totale sur 20 bougies M5
+   double highestHigh = rates[0].high;
+   double lowestLow = rates[0].low;
+   
+   for(int i = 1; i < 20; i++)
+   {
+      highestHigh = MathMax(highestHigh, rates[i].high);
+      lowestLow = MathMin(lowestLow, rates[i].low);
+   }
+   
+   double totalRange = highestHigh - lowestLow;
+   double avgPrice = (highestHigh + lowestLow) / 2.0;
+   
+   // Calculer le pourcentage de variation
+   double variationPct = totalRange / avgPrice;
+   
+   // Si la variation est inférieure au seuil, c'est une consolidation
+   bool isConsolidating = (variationPct < HoldScalpingConsolidationThreshold);
+   
+   if(isConsolidating && EnableHoldAutoScalping)
+   {
+      static datetime lastConsolLog = 0;
+      if(TimeCurrent() - lastConsolLog >= 60)
+      {
+         Print("🔍 CONSOLIDATION DÉTECTÉE - Variation: ", DoubleToString(variationPct * 100, 3), "% < ", 
+               DoubleToString(HoldScalpingConsolidationThreshold * 100, 3), "%");
+         lastConsolLog = TimeCurrent();
+      }
+   }
+   
+   return isConsolidating;
+}
+
+//| DÉTECTION DE POINTS D'ENTRÉE M5 POUR SCALPING HOLD |
+// Retourne true si un point d'entrée M5 est détecté et proche du prix actuel
+bool GetM5TrendEntryPoint(double &buyEntry, double &sellEntry, int &trendStrength)
+{
+   buyEntry = 0.0;
+   sellEntry = 0.0;
+   trendStrength = 0;
+   
+   MqlRates rates[];
+   ArraySetAsSeries(rates, true);
+   if(CopyRates(_Symbol, PERIOD_M5, 0, 50, rates) < 50) return false;
+   
+   // Calculer EMA Fast et EMA Slow sur M5
+   double emaFast[], emaSlow[];
+   ArraySetAsSeries(emaFast, true);
+   ArraySetAsSeries(emaSlow, true);
+   
+   // Utiliser les handles M5 existants
+   int stHandle = INVALID_HANDLE;
+   if(emaFastM5 == INVALID_HANDLE || emaSlowM5 == INVALID_HANDLE) return false;
+   if(CopyBuffer(emaFastM5, 0, 0, 50, emaFast) < 50) return false;
+   if(CopyBuffer(emaSlowM5, 0, 0, 50, emaSlow) < 50) return false;
+   
+   // Calculer la force de tendance basée sur la séparation des EMA
+   double emaDiff = emaFast[0] - emaSlow[0];
+   double avgPrice = (emaFast[0] + emaSlow[0]) / 2.0;
+   double emaDiffPct = MathAbs(emaDiff) / avgPrice;
+   
+   // Force de tendance sur 0-100
+   trendStrength = (int)MathMin(100.0, emaDiffPct * 5000.0);
+   
+   // Déterminer la direction de la tendance
+   bool isBullish = emaFast[0] > emaSlow[0];
+   
+   if(HoldScalpingUseEMA)
+   {
+      // Utiliser EMA comme points d'entrée plus rapides
+      // En tendance haussière: entrée sur EMA Fast (plus proche du prix)
+      // En tendance baissière: entrée sur EMA Fast
+      double emaEntry = emaFast[0];
+      
+      if(isBullish)
+         buyEntry = emaEntry;
+      else
+         sellEntry = emaEntry;
+         
+      // En tendance forte, avancer l'entrée avant l'EMA
+      if(trendStrength >= HoldScalpingStrongTrendThreshold)
+      {
+         double advance = avgPrice * HoldScalpingStrongTrendAdvancePct;
+         if(isBullish)
+            buyEntry = emaEntry + advance; // Avancer au-dessus de l'EMA
+         else
+            sellEntry = emaEntry - advance; // Avancer en-dessous de l'EMA
+      }
+   }
+   else
+   {
+      // Utiliser SuperTrend M5 pour support/résistance
+      stHandle = iCustom(_Symbol, PERIOD_M5, "Supertrend", 10, 3.0);
+      if(stHandle == INVALID_HANDLE) return false;
+      
+      double stLine[];
+      ArraySetAsSeries(stLine, true);
+      if(CopyBuffer(stHandle, 0, 0, 50, stLine) >= 50)
+      {
+         double stValue = stLine[0];
+         if(!MathIsValidNumber(stValue) || stValue == 0.0)
+         {
+            // Alternative: utiliser plus hauts/bas récents
+            double recentHigh = rates[0].high;
+            double recentLow = rates[0].low;
+            for(int i = 1; i < 20; i++)
+            {
+               recentHigh = MathMax(recentHigh, rates[i].high);
+               recentLow = MathMin(recentLow, rates[i].low);
+            }
+            
+            if(isBullish)
+               buyEntry = recentLow;
+            else
+               sellEntry = recentHigh;
+         }
+         else
+         {
+            // Utiliser SuperTrend comme support/résistance
+            if(isBullish)
+               buyEntry = stValue;
+            else
+               sellEntry = stValue;
+         }
+      }
+      else
+      {
+         // Fallback: utiliser plus hauts/bas récents
+         double recentHigh = rates[0].high;
+         double recentLow = rates[0].low;
+         for(int i = 1; i < 20; i++)
+         {
+            recentHigh = MathMax(recentHigh, rates[i].high);
+            recentLow = MathMin(recentLow, rates[i].low);
+         }
+         
+         if(isBullish)
+            buyEntry = recentLow;
+         else
+            sellEntry = recentHigh;
+      }
+   }
+   
+   // Vérifier si les points d'entrée sont valides
+   if(buyEntry > 0.0 && buyEntry < rates[0].close * 0.95) buyEntry = 0.0;
+   if(sellEntry > 0.0 && sellEntry > rates[0].close * 1.05) sellEntry = 0.0;
+   
+   // Libérer le handle SuperTrend si créé
+   if(stHandle != INVALID_HANDLE) IndicatorRelease(stHandle);
+   
+   return (buyEntry > 0.0 || sellEntry > 0.0);
+}
+
+//| SCALPING AUTOMATIQUE QUAND IA EST HOLD |
+void CheckHoldAutoScalping()
+{
+   // Vérifier si on a déjà une position sur ce symbole
+   if(CountPositionsForSymbol(_Symbol) > 0) return;
+   if(CountOrdersForSymbol(_Symbol) > 0) return;
+   
+   // Vérifier si le trading est activé
+   if(!EnableTrading) return;
+   
+   // Vérifier si on a atteint la limite de positions
+   if(IsMaxPositionsReached()) return;
+   
+   // Vérifier si le marché est en consolidation (si filtre activé)
+   if(HoldScalpingRequireClearTrend && IsMarketConsolidating())
+   {
+      static datetime lastConsolBlockLog = 0;
+      if(TimeCurrent() - lastConsolBlockLog >= 60)
+      {
+         Print("🚫 HOLD SCALPING BLOQUÉ - Marché en consolidation (pas de tendance claire)");
+         lastConsolBlockLog = TimeCurrent();
+      }
+      return;
+   }
+   
+   // Obtenir les points d'entrée M5
+   double buyEntry, sellEntry;
+   int trendStrength;
+   if(!GetM5TrendEntryPoint(buyEntry, sellEntry, trendStrength)) return;
+   
+   // Vérifier la force de tendance minimale
+   if(trendStrength < HoldScalpingMinTrendStrength)
+   {
+      static datetime lastTrendLog = 0;
+      if(TimeCurrent() - lastTrendLog >= 60)
+      {
+         Print("🔍 HOLD SCALPING - Tendance M5 trop faible: ", trendStrength, " < ", HoldScalpingMinTrendStrength);
+         lastTrendLog = TimeCurrent();
+      }
+      return;
+   }
+   
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   
+   // Vérifier si le prix touche un point d'entrée
+   double tolerance = (ask - bid) * HoldScalpingEntryTolerancePct;
+   
+   // Vérifier touche BUY entry (support)
+   if(buyEntry > 0.0 && MathAbs(bid - buyEntry) <= tolerance)
+   {
+      // Vérifier si la tendance M5 est haussière
+      if(trendStrength >= HoldScalpingMinTrendStrength)
+      {
+         Print("🎯 HOLD SCALPING - Prix touche M5 BUY Entry: ", DoubleToString(buyEntry, _Digits));
+         Print("   Trend Strength: ", trendStrength, "% | Bid: ", DoubleToString(bid, _Digits));
+         
+         // Exécuter ordre scalping BUY
+         ExecuteHoldScalpingOrder("BUY", ask, point);
+      }
+   }
+   
+   // Vérifier touche SELL entry (résistance)
+   if(sellEntry > 0.0 && MathAbs(ask - sellEntry) <= tolerance)
+   {
+      // Vérifier si la tendance M5 est baissière
+      if(trendStrength >= HoldScalpingMinTrendStrength)
+      {
+         Print("🎯 HOLD SCALPING - Prix touche M5 SELL Entry: ", DoubleToString(sellEntry, _Digits));
+         Print("   Trend Strength: ", trendStrength, "% | Ask: ", DoubleToString(ask, _Digits));
+         
+         // Exécuter ordre scalping SELL
+         ExecuteHoldScalpingOrder("SELL", bid, point);
+      }
+   }
+}
+
+//| EXÉCUTER ORDRE SCALPING HOLD |
+void ExecuteHoldScalpingOrder(string direction, double entryPrice, double point)
+{
+   if(IsWeltradeOTEOnlyActive(_Symbol)) return;
+
+   double lotSize = InpLotSize;
+   if(UseMinLotOnly)
+   {
+      double minLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+      lotSize = minLot;
+   }
+   
+   double sl, tp;
+   double atr = iATR(_Symbol, PERIOD_M1, 14);
+   if(atr <= 0) atr = entryPrice * 0.001;
+   
+   if(direction == "BUY")
+   {
+      sl = entryPrice - (atr * HoldScalpingSLPct);
+      tp = entryPrice + (atr * HoldScalpingTPPct);
+   }
+   else // SELL
+   {
+      sl = entryPrice + (atr * HoldScalpingSLPct);
+      tp = entryPrice - (atr * HoldScalpingTPPct);
+   }
+   
+   // Valider distances minimales
+   long stopsLevel = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
+   double minDist = (double)stopsLevel * point;
+   if(MathAbs(entryPrice - sl) < minDist)
+   {
+      if(direction == "BUY")
+         sl = entryPrice - minDist - (2 * point);
+      else
+         sl = entryPrice + minDist + (2 * point);
+   }
+   if(MathAbs(tp - entryPrice) < minDist)
+   {
+      if(direction == "BUY")
+         tp = entryPrice + minDist + (2 * point);
+      else
+         tp = entryPrice - minDist - (2 * point);
+   }
+   
+   // Exécuter l'ordre
+   MqlTradeRequest request = {};
+   MqlTradeResult result = {};
+   
+   request.action = TRADE_ACTION_DEAL;
+   request.symbol = _Symbol;
+   request.volume = lotSize;
+   request.type = (direction == "BUY") ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+   request.price = entryPrice;
+   request.sl = sl;
+   request.tp = tp;
+   request.deviation = 10;
+   request.magic = InpMagicNumber;
+   request.comment = "HOLD_SCALPING_M5";
+   
+   if(!OrderSend(request, result))
+   {
+      Print("❌ HOLD SCALPING ÉCHOUÉ - ", direction, " | Erreur: ", result.comment);
+   }
+   else
+   {
+      Print("✅ HOLD SCALPING RÉUSSI - ", direction, " | Ticket: ", result.order);
+      Print("   Entry: ", DoubleToString(entryPrice, _Digits), " | SL: ", DoubleToString(sl, _Digits), " | TP: ", DoubleToString(tp, _Digits));
+   }
 }
 bool IsMaxPositionsReached()
 {
@@ -22236,9 +27230,8 @@ bool IsMaxPositionsReached()
 
    int totalPositions = PositionsTotal();
    
-   // NOUVEAU: Protection capital faible - Si < 20$, limiter à 1 position seulement
-   double accountEquity = AccountInfoDouble(ACCOUNT_EQUITY);
-   int maxAllowedPositions = (accountEquity < 20.0) ? 1 : MaxPositionsTerminal;
+   // Règle demandée: plafond global strict (tous symboles confondus)
+   int maxAllowedPositions = MaxPositionsTerminal;
    
    // Si on a déjà le nombre maximum de positions autorisées, bloquer les nouveaux trades
    if(totalPositions >= maxAllowedPositions)
@@ -22249,15 +27242,7 @@ bool IsMaxPositionsReached()
          static datetime lastLog = 0;
          if(TimeCurrent() - lastLog >= 60) // Log toutes les minutes maximum
          {
-            if(accountEquity < 20.0)
-            {
-               Print("?? CAPITAL FAIBLE - Équité: ", DoubleToString(accountEquity, 2), "$ < 20.00$");
-               Print("   ?? LIMITATION À 1 POSITION SEULEMENT pour protéger le capital");
-            }
-            else
-            {
-               Print("??? PROTECTION CAPITAL - ", totalPositions, "/", maxAllowedPositions, " positions atteintes (sur symboles différents)");
-            }
+            Print("??? PROTECTION CAPITAL - ", totalPositions, "/", maxAllowedPositions, " positions atteintes (sur symboles différents)");
             
             Print("   ?? Positions actuelles :");
             for(int i = 0; i < totalPositions; i++)
@@ -22274,7 +27259,7 @@ bool IsMaxPositionsReached()
                }
             }
             
-            if(accountEquity < 20.0)
+            if(AccountInfoDouble(ACCOUNT_EQUITY) < 20.0)
             {
                Print("   ?? NOUVEAUX TRADES BLOQUÉS - Capital faible, 1 position max");
             }
@@ -22655,6 +27640,8 @@ bool GetLatestColoredSignalArrowTimeForBoomCrashDir(const string needDir, dateti
 //| EXÉCUTER UN TRADE BASÉ SUR LA FLÈCHE DERIV ARROW |
 void ExecuteDerivArrowTrade(string direction)
 {
+   if(IsWeltradeOTEOnlyActive(_Symbol)) return;
+
    if(!IsHighVolatilityCapitalGatePassed(_Symbol, "DERIV ARROW"))
       return;
 
@@ -24126,6 +29113,9 @@ bool DetectOTEImbalanceSetup(string &dirOut, double &entryOut, double &slOut, do
 //| Exécuter les ordres au marché basés sur les décisions IA SMC EMA   |
 void ExecuteAIDecisionMarketOrder()
 {
+   if(DisableAIMarketOrdersOnCrypto && IsCryptoSymbol(_Symbol))
+      return;
+
    // Catégorie du symbole pour adapter le seuil de confiance IA
    ENUM_SYMBOL_CATEGORY cat = SMC_GetSymbolCategory(_Symbol);
    double requiredConf = MinAIConfidence;
@@ -24439,8 +29429,11 @@ void ExecuteAIDecisionMarketOrder()
       return;
    }
 
-   // Valider/Ajuster SL/TP avant d'envoyer l'ordre précis (stop-level broker + tick size)
+   // Appliquer les inputs manuels du panel si activé
    string dirForValidation = (g_lastAIAction == "BUY" || g_lastAIAction == "buy") ? "BUY" : "SELL";
+   ApplyManualPanelInputs(preciseEntry, dirForValidation, preciseSL, preciseTP);
+
+   // Valider/Ajuster SL/TP avant d'envoyer l'ordre précis (stop-level broker + tick size)
    ValidateAndAdjustStopLossTakeProfit(dirForValidation, preciseEntry, preciseSL, preciseTP);
 
    double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
@@ -24479,7 +29472,7 @@ void ExecuteAIDecisionMarketOrder()
       }
    }
    
-   double lot = CalculateLotSize();
+   double lot = CalculateLotSizeFromManualRisk(preciseEntry, preciseSL);
    Print("🔍 DIAGNOSTIC VOLUME - ", _Symbol);
    Print("   📦 Lot calculé: ", DoubleToString(lot, 2));
    Print("   📊 Min Lot: ", DoubleToString(SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN), 2));
@@ -24508,8 +29501,8 @@ void ExecuteAIDecisionMarketOrder()
       {
          orderExecuted = true;
          
-         // Matérialiser le setup OTE sur le graphique
-         DrawOTESetup(preciseEntry, preciseSL, preciseTP, "BUY");
+         // Matérialiser le setup OTE sur le graphique (version optimisée)
+         OTE_DrawOptimized(preciseEntry, preciseSL, preciseTP, "BUY");
          
          Print("?? ORDRE BUY PRÉCIS EXÉCUTÉ - Entry: ", DoubleToString(preciseEntry, _Digits), 
                " | SL: ", DoubleToString(preciseSL, _Digits), 
@@ -24538,8 +29531,8 @@ void ExecuteAIDecisionMarketOrder()
       {
          orderExecuted = true;
          
-         // Matérialiser le setup OTE sur le graphique
-         DrawOTESetup(preciseEntry, preciseSL, preciseTP, "SELL");
+         // Matérialiser le setup OTE sur le graphique (version optimisée)
+         OTE_DrawOptimized(preciseEntry, preciseSL, preciseTP, "SELL");
          
          Print("?? ORDRE SELL PRÉCIS EXÉCUTÉ - Entry: ", DoubleToString(preciseEntry, _Digits), 
                " | SL: ", DoubleToString(preciseSL, _Digits), 
@@ -26522,6 +31515,9 @@ void CheckImminentSpike()
    ENUM_SYMBOL_CATEGORY cat = SMC_GetSymbolCategory(_Symbol);
    if(cat != SYM_BOOM_CRASH) return;
    
+   // DÉSACTIVÉ: Création d'objets graphiques pour éviter le détachement
+   // La logique de détection de spike reste active mais sans affichage graphique
+   
    // Probabilité unifiée (même algo que l'affichage / filtre)
    double finalSpikeProb = CalculateSpikeProbability();
    double volCompression = CalculateVolatilityCompression();
@@ -26540,10 +31536,8 @@ void CheckImminentSpike()
       
       Print(alertMsg);
       
-      // Pas de push « spike imminent » — seuls exécution marché + fermeture spike captée notifient
-      
-      // Dessiner un marqueur visuel rapide
-      DrawSpikeWarning(finalSpikeProb);
+      // DÉSACTIVÉ: Dessiner un marqueur visuel rapide pour éviter le détachement
+      // DrawSpikeWarning(finalSpikeProb);
    }
 
    // Mode prediction proche (<= 1 minute): compte a rebours + fleche clignotante + entree marche auto.
@@ -26710,7 +31704,8 @@ void CheckSMCChannelReturnMovements()
          // Vérifier si le mouvement est assez fort pour justifier une entrée immédiate
          if(returnStrength >= 0.5 && currentDistance <= atrVal * 3.0)
          {
-            Print("?? MOUVEMENT RETOUR BOOM - Vers canal inférieur | Force: ", DoubleToString(returnStrength, 1), " ATR | Distance: ", DoubleToString(currentDistance/atrVal, 1), " ATR");
+            double atrDist = (atrVal > 0) ? currentDistance / atrVal : 0;
+            Print("?? MOUVEMENT RETOUR BOOM - Vers canal inférieur | Force: ", DoubleToString(returnStrength, 1), " ATR | Distance: ", DoubleToString(atrDist, 1), " ATR");
             
             // Placer un ordre limite plus proche pour capturer ce mouvement
             PlaceReturnMovementLimitOrder("BUY", bid, lowerPrice, atrVal, returnStrength);
@@ -26733,7 +31728,8 @@ void CheckSMCChannelReturnMovements()
          // Vérifier si le mouvement est assez fort pour justifier une entrée immédiate
          if(returnStrength >= 0.5 && currentDistance <= atrVal * 3.0)
          {
-            Print("?? MOUVEMENT RETOUR CRASH - Vers canal supérieur | Force: ", DoubleToString(returnStrength, 1), " ATR | Distance: ", DoubleToString(currentDistance/atrVal, 1), " ATR");
+            double atrDist = (atrVal > 0) ? currentDistance / atrVal : 0;
+            Print("?? MOUVEMENT RETOUR CRASH - Vers canal supérieur | Force: ", DoubleToString(returnStrength, 1), " ATR | Distance: ", DoubleToString(atrDist, 1), " ATR");
             
             // Placer un ordre limite plus proche pour capturer ce mouvement
             PlaceReturnMovementLimitOrder("SELL", ask, upperPrice, atrVal, returnStrength);
@@ -28055,26 +33051,129 @@ void ExecuteSMC_OTETrade(string direction, double entry, double sl, double tp)
    if(!TryAcquireOpenLock()) return;
    if(!IsAI360SafetyPass(_Symbol, direction)) return;
 
-   // Boom/Crash: éviter d'ouvrir un OTE immédiatement après le dernier spike détecté (entrées en queue de mouvement)
-   if(SMC_GetSymbolCategory(_Symbol) == SYM_BOOM_CRASH && OTEBoomCrashCooldownSecondsAfterSpike > 0)
+   // Boom/Crash + Weltrade synthétiques: éviter d'ouvrir un OTE immédiatement après le dernier spike détecté (entrées en queue de mouvement)
+   ENUM_SYMBOL_CATEGORY cat = SMC_GetSymbolCategory(_Symbol);
+   if((cat == SYM_BOOM_CRASH || cat == SYM_WELTRADE_SYNTH) && OTEBoomCrashCooldownSecondsAfterSpike > 0)
    {
       datetime lastSpikeT = 0;
-      if(IsBoomSymbol(_Symbol))
+      if(IsBoomSymbol(_Symbol) || IsWeltradeGainSynthSymbol(_Symbol))
          lastSpikeT = g_lastBoomSpikeTime;
-      else if(IsCrashSymbol(_Symbol))
+      else if(IsCrashSymbol(_Symbol) || IsWeltradePainSynthSymbol(_Symbol))
          lastSpikeT = g_lastCrashSpikeTime;
       if(lastSpikeT > 0)
       {
          int elapsed = (int)(TimeCurrent() - lastSpikeT);
          if(elapsed >= 0 && elapsed < OTEBoomCrashCooldownSecondsAfterSpike)
          {
-            Print("🚫 SMC_OTE BLOQUÉ (Boom/Crash) — cooldown spike: ", elapsed, "s < ",
+            Print("🚫 SMC_OTE BLOQUÉ (Boom/Crash/Weltrade) — cooldown spike: ", elapsed, "s < ",
                   OTEBoomCrashCooldownSecondsAfterSpike, "s (anti-chase après spike)");
             ReleaseOpenLock();
             return;
          }
       }
    }
+
+   if(!HasOTEBOSConfirmationM15OrM5(direction))
+   {
+      Print("🚫 SMC_OTE BLOQUÉ - BOS non confirmé (M15/M5) pour ", direction, " sur ", _Symbol);
+      ReleaseOpenLock();
+      return;
+   }
+   if(!IsOTEEntryConfirmedOnM15OrM5(direction))
+   {
+      Print("🚫 SMC_OTE BLOQUÉ - Pas de confirmation candlestick M15/M5 pour ", direction, " sur ", _Symbol);
+      ReleaseOpenLock();
+      return;
+   }
+
+   // Boom/Crash + Weltrade synthétiques: tendance forte EMA M5 obligatoire
+   if(OTE_RequireStrongTrend && (cat == SYM_BOOM_CRASH || cat == SYM_WELTRADE_SYNTH))
+   {
+      if(!IsStrongM1M5TrendByEMAs(direction))
+      {
+         Print("🚫 SMC_OTE BLOQUÉ - Tendance EMA M5 non alignée pour ", direction, " sur ", _Symbol);
+         ReleaseOpenLock();
+         return;
+      }
+      Print("✅ Tendance EMA M5 alignée pour ", direction, " sur ", _Symbol);
+   }
+
+   // NOUVEAU: Filtre de volatilité multi-timeframe (ATR)
+   if(!IsVolatilityOptimalForEntry(direction, PERIOD_M5))
+   {
+      Print("🚫 SMC_OTE BLOQUÉ - Volatilité non optimale pour entrée sur ", _Symbol);
+      ReleaseOpenLock();
+      return;
+   }
+   Print("✅ Volatilité optimale validée pour ", direction, " sur ", _Symbol);
+
+   // NOUVEAU: Filtre de consolidation/ranging market
+   if(!IsConsolidationFilterPass(direction, PERIOD_M5))
+   {
+      Print("🚫 SMC_OTE BLOQUÉ - Marché en consolidation ou sans tendance claire sur ", _Symbol);
+      ReleaseOpenLock();
+      return;
+   }
+   Print("✅ Filtre consolidation validé - Marché trendant pour ", direction, " sur ", _Symbol);
+
+   // NOUVEAU: Confirmation par patterns candlestick avancés
+   if(!IsM5CandlestickConfirmation(direction))
+   {
+      Print("🚫 SMC_OTE BLOQUÉ - Pas de pattern candlestick avancé confirmé pour ", direction, " sur ", _Symbol);
+      ReleaseOpenLock();
+      return;
+   }
+   Print("✅ Pattern candlestick avancé confirmé pour ", direction, " sur ", _Symbol);
+
+   // NOUVEAU: Confirmation par divergence RSI/MACD
+   if(!IsDivergenceConfirmation(direction, PERIOD_M5))
+   {
+      Print("🚫 SMC_OTE BLOQUÉ - Pas de divergence RSI/MACD confirmée pour ", direction, " sur ", _Symbol);
+      ReleaseOpenLock();
+      return;
+   }
+   Print("✅ Divergence RSI/MACD confirmée pour ", direction, " sur ", _Symbol);
+   
+   // NOUVEAU: Détecter les confirmations OTE améliorées
+   MqlRates rates[];
+   ArraySetAsSeries(rates, true);
+   if(CopyRates(_Symbol, PERIOD_M15, 0, 100, rates) < 50)
+   {
+      Print("❌ SMC_OTE - Erreur chargement rates pour confirmations");
+      ReleaseOpenLock();
+      return;
+   }
+   
+   g_oteHasBreakerBlock = OTE_DetectBreakerBlock(rates, direction == "BUY", g_oteBreakerBlockPrice);
+   g_oteHasOrderBlock = OTE_DetectOrderBlock(rates, direction == "BUY", g_oteOrderBlockPrice);
+   g_oteHasLiquiditySweep = OTE_DetectLiquiditySweep(rates, direction == "BUY", g_oteLiquiditySweepTime);
+   
+   // Vérifier s'il y a un FVG existant (utiliser la logique existante)
+   bool hasFVG = false;
+   // TODO: Intégrer avec la détection FVG existante
+   
+   // Vérifier l'alignement de tendance
+   bool trendAligned = IsTrendAlignedEntry(direction);
+   
+   // Calculer le score de confluence
+   g_oteConfluenceScore = OTE_CalculateConfluenceScore(hasFVG, g_oteHasBreakerBlock, 
+                                                      g_oteHasOrderBlock, g_oteHasLiquiditySweep, trendAligned);
+   
+   // Vérifier le score minimum requis
+   if(g_oteConfluenceScore < OTE_MinConfluenceScore)
+   {
+      Print("🚫 SMC_OTE BLOQUÉ - Score confluence insuffisant: ", g_oteConfluenceScore, "/5 (min: ", OTE_MinConfluenceScore, ")");
+      Print("   📊 Détail: FVG:", hasFVG ? "✓" : "✗", " | BB:", g_oteHasBreakerBlock ? "✓" : "✗", 
+            " | OB:", g_oteHasOrderBlock ? "✓" : "✗", " | LIQ:", g_oteHasLiquiditySweep ? "✓" : "✗", 
+            " | TREND:", trendAligned ? "✓" : "✗");
+      ReleaseOpenLock();
+      return;
+   }
+   
+   Print("✅ Score confluence OTE validé: ", g_oteConfluenceScore, "/5");
+   Print("   📊 Confirmations: FVG:", hasFVG ? "✓" : "✗", " | BB:", g_oteHasBreakerBlock ? "✓" : "✗", 
+         " | OB:", g_oteHasOrderBlock ? "✓" : "✗", " | LIQ:", g_oteHasLiquiditySweep ? "✓" : "✗", 
+         " | TREND:", trendAligned ? "✓" : "✗");
    
    // NOUVEAU: Obtenir les prédictions de Protected Points futurs pour validation
    double futureSupport = 0.0, futureResistance = 0.0;
@@ -28172,6 +33271,7 @@ void ExecuteSMC_OTETrade(string direction, double entry, double sl, double tp)
       }
    }
 
+   bool hasM5EngulfingAtEntry = IsM5EngulfingPattern(direction);
    bool success = false;
    string comment = "SMC_OTE_5STAR";
 
@@ -28186,6 +33286,9 @@ void ExecuteSMC_OTETrade(string direction, double entry, double sl, double tp)
 
    if(success)
    {
+      // Dessiner les rectangles SL et TP transparents sur le graphique
+      DrawSLTPRectangles(direction, entry, sl, tp);
+      
       // Ajouter les informations sur les prédictions futures dans le log de succès
       string predictionInfo = "";
       if(hasFutureLevels)
@@ -28203,6 +33306,22 @@ void ExecuteSMC_OTETrade(string direction, double entry, double sl, double tp)
             " | Lot: ", DoubleToString(lot, 2),
             " | Risk/Reward: 2R",
             predictionInfo);
+      
+      // NOUVEAU: Enregistrer la position pour les protections intelligentes
+      ulong ticket = trade.ResultOrder();
+      if(ticket > 0)
+      {
+         RegisterPositionForPartialClose(ticket, lot);
+         RegisterPositionForIntelligentTrailing(ticket, entry, sl);
+         RegisterPositionForGivebackProtection(ticket, 30.0); // 30% giveback threshold
+         // OTE + confirmation Engulfing M5: trailing explicitement activé dès l'entrée.
+         if(hasM5EngulfingAtEntry)
+         {
+            SetIntelligentTrailingMode(ticket, 0); // Démarrage ATR
+            Print("✅ OTE+ENGULFING M5 - Trailing stop activé | Ticket=", ticket);
+         }
+         Print("✅ Position enregistrée pour protections intelligentes | Ticket=", ticket);
+      }
    }
    else
    {
@@ -28262,6 +33381,353 @@ void DrawSpikeWarning(double probability)
                          (probability >= 0.60 ? "JAUNE ATTENTION" : "BLANC INFO"))));
 }
 
+// Dessine les rectangles SL et TP transparents pour les entrées OTE
+void DrawSLTPRectangles(string direction, double entry, double sl, double tp)
+{
+   MqlRates r[];
+   ArraySetAsSeries(r, true);
+   if(CopyRates(_Symbol, PERIOD_CURRENT, 0, 1, r) < 1) return;
+   
+   datetime now = r[0].time;
+   datetime futureTime = now + PeriodSeconds(PERIOD_H1) * 50; // Extension de 50 bougies H1
+   
+   // Supprimer les anciens rectangles
+   ObjectsDeleteAll(0, "SMC_OTE_SL_");
+   ObjectsDeleteAll(0, "SMC_OTE_TP_");
+   
+   string slRectName = "SMC_OTE_SL_" + _Symbol;
+   string tpRectName = "SMC_OTE_TP_" + _Symbol;
+   
+   if(direction == "BUY")
+   {
+      // Rectangle SL (rouge transparent) - entre entry et SL
+      ObjectCreate(0, slRectName, OBJ_RECTANGLE, 0, now, entry, futureTime, sl);
+      ObjectSetInteger(0, slRectName, OBJPROP_COLOR, clrRed);
+      ObjectSetInteger(0, slRectName, OBJPROP_FILL, true);
+      ObjectSetInteger(0, slRectName, OBJPROP_BACK, true);
+      ObjectSetInteger(0, slRectName, OBJPROP_WIDTH, 1);
+      ObjectSetInteger(0, slRectName, OBJPROP_STYLE, STYLE_SOLID);
+      ObjectSetInteger(0, slRectName, OBJPROP_SELECTABLE, false);
+      
+      // Label SL
+      string slLabelName = "SMC_OTE_SL_LABEL_" + _Symbol;
+      ObjectCreate(0, slLabelName, OBJ_TEXT, 0, now, (entry + sl) / 2);
+      ObjectSetString(0, slLabelName, OBJPROP_TEXT, "SL");
+      ObjectSetInteger(0, slLabelName, OBJPROP_COLOR, clrRed);
+      ObjectSetInteger(0, slLabelName, OBJPROP_FONTSIZE, 10);
+      ObjectSetInteger(0, slLabelName, OBJPROP_BACK, true);
+      
+      // Rectangle TP (vert transparent) - entre entry et TP
+      ObjectCreate(0, tpRectName, OBJ_RECTANGLE, 0, now, tp, futureTime, entry);
+      ObjectSetInteger(0, tpRectName, OBJPROP_COLOR, clrGreen);
+      ObjectSetInteger(0, tpRectName, OBJPROP_FILL, true);
+      ObjectSetInteger(0, tpRectName, OBJPROP_BACK, true);
+      ObjectSetInteger(0, tpRectName, OBJPROP_WIDTH, 1);
+      ObjectSetInteger(0, tpRectName, OBJPROP_STYLE, STYLE_SOLID);
+      ObjectSetInteger(0, tpRectName, OBJPROP_SELECTABLE, false);
+      
+      // Label TP
+      string tpLabelName = "SMC_OTE_TP_LABEL_" + _Symbol;
+      ObjectCreate(0, tpLabelName, OBJ_TEXT, 0, now, (entry + tp) / 2);
+      ObjectSetString(0, tpLabelName, OBJPROP_TEXT, "TP");
+      ObjectSetInteger(0, tpLabelName, OBJPROP_COLOR, clrGreen);
+      ObjectSetInteger(0, tpLabelName, OBJPROP_FONTSIZE, 10);
+      ObjectSetInteger(0, tpLabelName, OBJPROP_BACK, true);
+   }
+   else // SELL
+   {
+      // Rectangle SL (rouge transparent) - entre entry et SL
+      ObjectCreate(0, slRectName, OBJ_RECTANGLE, 0, now, sl, futureTime, entry);
+      ObjectSetInteger(0, slRectName, OBJPROP_COLOR, clrRed);
+      ObjectSetInteger(0, slRectName, OBJPROP_FILL, true);
+      ObjectSetInteger(0, slRectName, OBJPROP_BACK, true);
+      ObjectSetInteger(0, slRectName, OBJPROP_WIDTH, 1);
+      ObjectSetInteger(0, slRectName, OBJPROP_STYLE, STYLE_SOLID);
+      ObjectSetInteger(0, slRectName, OBJPROP_SELECTABLE, false);
+      
+      // Label SL
+      string slLabelName = "SMC_OTE_SL_LABEL_" + _Symbol;
+      ObjectCreate(0, slLabelName, OBJ_TEXT, 0, now, (entry + sl) / 2);
+      ObjectSetString(0, slLabelName, OBJPROP_TEXT, "SL");
+      ObjectSetInteger(0, slLabelName, OBJPROP_COLOR, clrRed);
+      ObjectSetInteger(0, slLabelName, OBJPROP_FONTSIZE, 10);
+      ObjectSetInteger(0, slLabelName, OBJPROP_BACK, true);
+      
+      // Rectangle TP (vert transparent) - entre entry et TP
+      ObjectCreate(0, tpRectName, OBJ_RECTANGLE, 0, now, entry, futureTime, tp);
+      ObjectSetInteger(0, tpRectName, OBJPROP_COLOR, clrGreen);
+      ObjectSetInteger(0, tpRectName, OBJPROP_FILL, true);
+      ObjectSetInteger(0, tpRectName, OBJPROP_BACK, true);
+      ObjectSetInteger(0, tpRectName, OBJPROP_WIDTH, 1);
+      ObjectSetInteger(0, tpRectName, OBJPROP_STYLE, STYLE_SOLID);
+      ObjectSetInteger(0, tpRectName, OBJPROP_SELECTABLE, false);
+      
+      // Label TP
+      string tpLabelName = "SMC_OTE_TP_LABEL_" + _Symbol;
+      ObjectCreate(0, tpLabelName, OBJ_TEXT, 0, now, (entry + tp) / 2);
+      ObjectSetString(0, tpLabelName, OBJPROP_TEXT, "TP");
+      ObjectSetInteger(0, tpLabelName, OBJPROP_COLOR, clrGreen);
+      ObjectSetInteger(0, tpLabelName, OBJPROP_FONTSIZE, 10);
+      ObjectSetInteger(0, tpLabelName, OBJPROP_BACK, true);
+   }
+   
+   Print("🎨 Rectangles SL/TP dessinés - ", _Symbol, " | ", direction,
+         " | SL: ", DoubleToString(sl, _Digits),
+         " | TP: ", DoubleToString(tp, _Digits));
+}
+
+// =============================================================================
+//  SPIKE CLUSTER ZONE (Boom/Crash + PAINX/GAINX)
+//  Objectif: détecter les périodes où les spikes arrivent "en série" (cluster)
+//  et projeter une zone de confluence sur le graphique en temps réel.
+// =============================================================================
+
+double ComputeSpikeClusterScoreM1(const string symbol, double &atrOut, double &atrRatioOut, int &spikeBarsOut)
+{
+   atrOut = 0.0;
+   atrRatioOut = 1.0;
+   spikeBarsOut = 0;
+
+   // Concerne surtout Boom/Crash + Weltrade synth
+   ENUM_SYMBOL_CATEGORY cat = SMC_GetSymbolCategory(symbol);
+   if(cat != SYM_BOOM_CRASH && cat != SYM_WELTRADE_SYNTH)
+      return 0.0;
+
+   int lookback = MathMax(20, SpikeClusterLookbackBarsM1);
+   MqlRates r[];
+   ArraySetAsSeries(r, true);
+   if(CopyRates(symbol, PERIOD_M1, 0, lookback + 30, r) < lookback + 5)
+      return 0.0;
+
+   // ATR M1 (simple via iATR)
+   int hAtr = iATR(symbol, PERIOD_M1, 20);
+   if(hAtr != INVALID_HANDLE)
+   {
+      double a[]; ArraySetAsSeries(a, true);
+      if(CopyBuffer(hAtr, 0, 0, 25, a) >= 21)
+      {
+         atrOut = a[0];
+         double sum = 0.0;
+         for(int i = 1; i <= 20; i++) sum += a[i];
+         double avgAtr = sum / 20.0;
+         if(avgAtr > 0.0) atrRatioOut = atrOut / avgAtr;
+      }
+   }
+   if(atrOut <= 0.0)
+   {
+      // fallback: approx ATR via ranges
+      double sumR = 0.0;
+      for(int i = 1; i <= 20; i++) sumR += (r[i].high - r[i].low);
+      atrOut = sumR / 20.0;
+      atrRatioOut = 1.0;
+   }
+
+   // Compter les bougies "spike" récentes: range >= ATR * M
+   double atr = MathMax(atrOut, SymbolInfoDouble(symbol, SYMBOL_POINT) * 10.0);
+   int spikeBars = 0;
+   for(int i = 1; i <= lookback; i++)
+   {
+      double range = r[i].high - r[i].low;
+      if(range >= atr * MathMax(1.0, M5ChSpikeBarRangeAtrMult))
+         spikeBars++;
+   }
+   spikeBarsOut = spikeBars;
+
+   // Mesures complémentaires: fréquence + régime ATR + "calm before storm" (compression)
+   double freq = (double)spikeBars / (double)lookback;              // 0..1
+   double atrReg = MathMin(1.0, MathMax(0.0, (atrRatioOut - 0.8) / 1.0)); // map ~[0.8..1.8+] -> 0..1
+
+   // Compression: si ATR récent trop bas vs moyenne -> souvent pré-spike
+   double comp = 0.0;
+   if(atrRatioOut < 0.95) comp = MathMin(1.0, (0.95 - atrRatioOut) / 0.25); // 0..1
+
+   // Score final: privilégier la fréquence (cluster) + un peu de régime/comp
+   double score = 0.65 * MathMin(1.0, freq * 3.0) + 0.25 * atrReg + 0.10 * comp;
+   score = MathMax(0.0, MathMin(1.0, score));
+   return score;
+}
+
+bool UpdateSpikeClusterZone(const string symbol)
+{
+   if(!ShowSpikeClusterZone) return false;
+   ENUM_SYMBOL_CATEGORY cat = SMC_GetSymbolCategory(symbol);
+   if(cat != SYM_BOOM_CRASH && cat != SYM_WELTRADE_SYNTH) return false;
+
+   datetime now = TimeCurrent();
+   if(g_spikeClusterUpdatedAt > 0 && (now - g_spikeClusterUpdatedAt) < SpikeClusterRefreshSec)
+      return (g_spikeClusterScore >= SpikeClusterMinScore);
+
+   double atr = 0.0, atrRatio = 1.0;
+   int spikeBars = 0;
+   double score = ComputeSpikeClusterScoreM1(symbol, atr, atrRatio, spikeBars);
+
+   g_spikeClusterScore = score;
+   g_spikeClusterAtrRatio = atrRatio;
+   g_spikeClusterSpikeBars = spikeBars;
+   g_spikeClusterUpdatedAt = now;
+
+   // Zone prix: ancrée sur les spikes historiques récents (pas sur le dernier tick),
+   // puis lissée pour éviter que la zone "colle" à la dernière bougie.
+   double bid = SymbolInfoDouble(symbol, SYMBOL_BID);
+   double ask = SymbolInfoDouble(symbol, SYMBOL_ASK);
+   double mid = (bid > 0 && ask > 0) ? ((bid + ask) * 0.5) : bid;
+   if(mid <= 0) mid = (rsi14M1 != INVALID_HANDLE ? SymbolInfoDouble(symbol, SYMBOL_BID) : 1.0);
+
+   int lookback = MathMax(20, SpikeClusterLookbackBarsM1);
+   MqlRates rr[];
+   ArraySetAsSeries(rr, true);
+   int copied = CopyRates(symbol, PERIOD_M1, 0, lookback + 10, rr);
+   double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
+   if(point <= 0.0) point = _Point;
+   double atrRef = MathMax(atr, point * 10.0);
+
+   double weightedSum = 0.0;
+   double weightTotal = 0.0;
+   double spikeHi = -DBL_MAX;
+   double spikeLo = DBL_MAX;
+   int localSpikeBars = 0;
+   if(copied > 5)
+   {
+      for(int i = 1; i <= lookback && i < copied; i++)
+      {
+         double r = rr[i].high - rr[i].low;
+         if(r >= atrRef * MathMax(1.0, M5ChSpikeBarRangeAtrMult))
+         {
+            double center = (rr[i].high + rr[i].low) * 0.5;
+            double w = MathMax(1.0, r / atrRef);
+            weightedSum += center * w;
+            weightTotal += w;
+            spikeHi = MathMax(spikeHi, rr[i].high);
+            spikeLo = MathMin(spikeLo, rr[i].low);
+            localSpikeBars++;
+         }
+      }
+   }
+
+   double anchor = (weightTotal > 0.0) ? (weightedSum / weightTotal) : mid;
+   if(g_spikeClusterZoneHigh > g_spikeClusterZoneLow)
+   {
+      double prevAnchor = (g_spikeClusterZoneHigh + g_spikeClusterZoneLow) * 0.5;
+      double alpha = MathMax(0.0, MathMin(1.0, SpikeClusterAnchorSmoothing));
+      anchor = alpha * prevAnchor + (1.0 - alpha) * anchor;
+   }
+
+   double width = MathMax(point * 10.0, atrRef * SpikeClusterZoneAtrMult);
+   if(localSpikeBars > 0 && spikeHi > spikeLo)
+   {
+      double spikeSpan = spikeHi - spikeLo;
+      double adaptive = MathMax(point * 10.0, spikeSpan * 0.45);
+      width = MathMax(width, adaptive);
+   }
+
+   // Filtre directionnel du cluster (évite les faux clusters "montants" sur Crash).
+   if(SpikeClusterRequireDirectionalStructure)
+   {
+      int trendPairs = 0;
+      int trendAligned = 0;
+      double prevCenter = 0.0;
+      bool hasPrev = false;
+      for(int i = lookback; i >= 1 && i < copied; i--)
+      {
+         double r = rr[i].high - rr[i].low;
+         if(r < atrRef * MathMax(1.0, M5ChSpikeBarRangeAtrMult))
+            continue;
+         double center = (rr[i].high + rr[i].low) * 0.5;
+         if(hasPrev)
+         {
+            trendPairs++;
+            if(IsCrashSymbol(symbol))
+            {
+               if(center < prevCenter) trendAligned++;
+            }
+            else if(IsBoomSymbol(symbol) || IsWeltradeGainSynthSymbol(symbol))
+            {
+               if(center > prevCenter) trendAligned++;
+            }
+            else if(IsWeltradePainSynthSymbol(symbol))
+            {
+               if(center < prevCenter) trendAligned++;
+            }
+         }
+         prevCenter = center;
+         hasPrev = true;
+      }
+
+      if(trendPairs >= 2)
+      {
+         double trendRatio = (double)trendAligned / (double)trendPairs;
+         if(trendRatio < 0.55)
+         {
+            g_spikeClusterScore = 0.0;
+            g_spikeClusterSpikeBars = 0;
+            return false;
+         }
+      }
+   }
+
+   g_spikeClusterZoneHigh = anchor + width;
+   g_spikeClusterZoneLow  = anchor - width;
+   g_spikeClusterZoneUntil = now + (datetime)(MathMax(5, SpikeClusterProjectionMinutes) * 60);
+
+   return (score >= SpikeClusterMinScore && spikeBars >= SpikeClusterMinSpikeBars);
+}
+
+bool IsSpikeClusterZoneActive(const string symbol)
+{
+   if(!ShowSpikeClusterZone) return false;
+   if(!UpdateSpikeClusterZone(symbol)) return false;
+   if(TimeCurrent() > g_spikeClusterZoneUntil) return false;
+   return (g_spikeClusterScore >= SpikeClusterMinScore);
+}
+
+void DrawSpikeClusterZone(const string symbol)
+{
+   if(!ShowSpikeClusterZone) return;
+   if(SMC_GetSymbolCategory(symbol) != SYM_BOOM_CRASH && SMC_GetSymbolCategory(symbol) != SYM_WELTRADE_SYNTH)
+      return;
+
+   UpdateSpikeClusterZone(symbol);
+
+   string rectName = "SMC_SPIKE_CLUSTER_ZONE_" + symbol;
+   string textName = "SMC_SPIKE_CLUSTER_TEXT_" + symbol;
+
+   // Nettoyer / recréer (throttle déjà fait via UpdateSpikeClusterZone)
+   ObjectDelete(0, rectName);
+   ObjectDelete(0, textName);
+
+   datetime t1 = TimeCurrent() + (datetime)(MathMax(0, SpikeClusterFutureShiftMinutes) * 60);
+   datetime t2 = g_spikeClusterZoneUntil;
+   if(t2 <= t1) t2 = t1 + 600;
+
+   bool active = (g_spikeClusterScore >= SpikeClusterMinScore && g_spikeClusterSpikeBars >= SpikeClusterMinSpikeBars);
+   color c = active ? clrOrangeRed : clrDimGray;
+
+   if(ObjectCreate(0, rectName, OBJ_RECTANGLE, 0, t1, g_spikeClusterZoneHigh, t2, g_spikeClusterZoneLow))
+   {
+      ObjectSetInteger(0, rectName, OBJPROP_COLOR, c);
+      ObjectSetInteger(0, rectName, OBJPROP_WIDTH, 1);
+      ObjectSetInteger(0, rectName, OBJPROP_FILL, true);
+      ObjectSetInteger(0, rectName, OBJPROP_BACK, true);
+      ObjectSetInteger(0, rectName, OBJPROP_STYLE, STYLE_SOLID);
+   }
+
+   string txt =
+      "SPIKE CLUSTER ZONE " + (active ? "[ACTIVE]" : "[watch]") +
+      " | score=" + DoubleToString(g_spikeClusterScore, 2) +
+      " | spikes=" + IntegerToString(g_spikeClusterSpikeBars) +
+      " | atrR=" + DoubleToString(g_spikeClusterAtrRatio, 2);
+
+   if(ObjectCreate(0, textName, OBJ_TEXT, 0, t1, g_spikeClusterZoneHigh))
+   {
+      ObjectSetString(0, textName, OBJPROP_TEXT, txt);
+      ObjectSetInteger(0, textName, OBJPROP_COLOR, c);
+      ObjectSetInteger(0, textName, OBJPROP_FONTSIZE, 9);
+      ObjectSetString(0, textName, OBJPROP_FONT, "Consolas");
+      ObjectSetInteger(0, textName, OBJPROP_ANCHOR, ANCHOR_LEFT_UPPER);
+      ObjectSetInteger(0, textName, OBJPROP_BACK, true);
+   }
+}
+
 // Affiche l'état IA et les prédictions sur le graphique
 void DrawAIStatusAndPredictions()
 {
@@ -28286,16 +33752,17 @@ void DrawAIStatusAndPredictions()
    datetime boxTime = r[0].time;
    double boxPrice = r[0].high + (r[0].high - r[0].low) * 0.8;
    
-   // Créer le rectangle de fond
+   // Créer le rectangle de fond (TRANSPARENT)
    ObjectCreate(0, statusBoxName, OBJ_RECTANGLE_LABEL, 0, 0, 0);
    ObjectSetInteger(0, statusBoxName, OBJPROP_XDISTANCE, 10);
-   // Bas-gauche, sans chevaucher les autres labels (ex: canal ML à ~50px)
    ObjectSetInteger(0, statusBoxName, OBJPROP_YDISTANCE, 90);
    ObjectSetInteger(0, statusBoxName, OBJPROP_XSIZE, 430);
    ObjectSetInteger(0, statusBoxName, OBJPROP_YSIZE, 138);
    ObjectSetInteger(0, statusBoxName, OBJPROP_BGCOLOR, clrBlack);
-   ObjectSetInteger(0, statusBoxName, OBJPROP_BORDER_COLOR, clrGray);
-   ObjectSetInteger(0, statusBoxName, OBJPROP_CORNER, CORNER_LEFT_LOWER); // Bas à gauche
+   ObjectSetInteger(0, statusBoxName, OBJPROP_BORDER_COLOR, CLR_NONE);
+   ObjectSetInteger(0, statusBoxName, OBJPROP_BACK, true);
+   ObjectSetInteger(0, statusBoxName, OBJPROP_COLOR, CLR_NONE);
+   ObjectSetInteger(0, statusBoxName, OBJPROP_CORNER, CORNER_LEFT_LOWER);
    
    // Texte de statut IA (source serveur + consensus MTF + direction réelle utilisée).
    string iaServer = UseAIServer ?
@@ -28310,11 +33777,20 @@ void DrawAIStatusAndPredictions()
    // Texte de prédiction spike
    double spikeProb = CalculateSpikeProbability();
    string spikeStatus = "SPIKE: " + DoubleToString(spikeProb*100, 1) + "%";
+   string spikeCluster = "";
+   if(ShowSpikeClusterZone && (SMC_GetSymbolCategory(_Symbol) == SYM_BOOM_CRASH || SMC_GetSymbolCategory(_Symbol) == SYM_WELTRADE_SYNTH))
+   {
+      UpdateSpikeClusterZone(_Symbol);
+      spikeCluster =
+         "\nSPIKE_CLUSTER: " + DoubleToString(g_spikeClusterScore*100, 0) + "% | spikes=" +
+         IntegerToString(g_spikeClusterSpikeBars) + " | atrR=" + DoubleToString(g_spikeClusterAtrRatio, 2) +
+         " | " + (IsSpikeClusterZoneActive(_Symbol) ? "ACTIVE" : "watch");
+   }
    
    // Créer le texte de statut
    ObjectCreate(0, statusTextName, OBJ_LABEL, 0, 0, 0);
    ObjectSetString(0, statusTextName, OBJPROP_TEXT,
-                 iaFinal + "\n" + iaMtf + "\n" + iaServer + "\n" + chartTech + "\n" + spikeStatus + "\nSymbole: " + _Symbol);
+                iaFinal + "\n" + iaMtf + "\n" + iaServer + "\n" + chartTech + "\n" + spikeStatus + spikeCluster + "\nSymbole: " + _Symbol);
    ObjectSetInteger(0, statusTextName, OBJPROP_XDISTANCE, 20);
    ObjectSetInteger(0, statusTextName, OBJPROP_YDISTANCE, 100); // Aligné avec la boîte
    ObjectSetInteger(0, statusTextName, OBJPROP_COLOR, clrWhite);
@@ -28337,6 +33813,601 @@ void DrawAIStatusAndPredictions()
       ObjectSetString(0, chartTechTechName, OBJPROP_FONT, "Consolas");
       ObjectSetInteger(0, chartTechTechName, OBJPROP_CORNER, CORNER_LEFT_LOWER);
    }
+}
+
+//+------------------------------------------------------------------+
+//| PLACER ORDRES LIMIT SUR M1 TREND QUAND PRIX DANS SPIKE CLUSTER    |
+//| Fonction principale: quand prix entre dans cluster zone,          |
+//| placer Buy Limit ou Sell Limit sur la ligne de tendance M1        |
+//+------------------------------------------------------------------+
+
+// Variables globales pour le tracking
+bool g_priceInClusterZone = false;
+datetime g_clusterLimitOrderPlacedAt = 0;
+ulong g_clusterLimitOrderTicket = 0;
+
+// Input pour la stratégie cluster limit
+input bool   UseClusterM1LimitStrategy = true;    // Activer la stratégie cluster + limit M1
+input double ClusterLimitRiskPercent = 0.3;       // Risque % pour ordres cluster limit
+input int    ClusterLimitCooldownMinutes = 5;     // Délai min entre 2 ordres cluster (minutes)
+input double ClusterLimitDistancePips = 5.0;      // Distance en pips pour placer l'ordre limit
+input int    ClusterLimitExpiryMinutes = 10;      // Expiration ordre limit (minutes)
+
+//+------------------------------------------------------------------+
+//| Obtenir le prix de la ligne de tendance M1 actuelle               |
+//+------------------------------------------------------------------+
+double GetM1TrendLinePrice(bool &isBullish)
+{
+   MqlRates m1Rates[];
+   ArraySetAsSeries(m1Rates, true);
+   if(CopyRates(_Symbol, PERIOD_M1, 0, 30, m1Rates) < 20)
+      return 0.0;
+   
+   // Calculer la régression linéaire (même logique que DrawM1TrendLines)
+   double sumX = 0, sumY = 0, sumXY = 0, sumX2 = 0;
+   int lookback = 20;
+   
+   for(int i = 0; i < lookback; i++)
+   {
+      double x = i;
+      double y = m1Rates[i].close;
+      sumX += x;
+      sumY += y;
+      sumXY += x * y;
+      sumX2 += x * x;
+   }
+   
+   double denominator = (lookback * sumX2 - sumX * sumX);
+   if(denominator == 0) return 0.0;
+   
+   double slope = (lookback * sumXY - sumX * sumY) / denominator;
+   double intercept = (sumY - slope * sumX) / lookback;
+   
+   isBullish = (slope > 0);
+   
+   // Retourner le prix de tendance actuel (x = 0)
+   return intercept;
+}
+
+//+------------------------------------------------------------------+
+//| Vérifier si le prix est entré dans la zone de cluster spike       |
+//+------------------------------------------------------------------+
+bool IsPriceInSpikeClusterZone()
+{
+   if(!ShowSpikeClusterZone) return false;
+   if(!IsSpikeClusterZoneActive(_Symbol)) return false;
+   
+   MqlTick tick;
+   if(!SymbolInfoTick(_Symbol, tick)) return false;
+   
+   double currentPrice = tick.bid;
+   
+   // Vérifier si le prix est dans la zone [Low, High] du cluster
+   bool inZone = (currentPrice >= g_spikeClusterZoneLow && currentPrice <= g_spikeClusterZoneHigh);
+   
+   return inZone;
+}
+
+//+------------------------------------------------------------------+
+//| Placer un ordre limit sur la ligne M1 trend                      |
+//+------------------------------------------------------------------+
+bool PlaceClusterLimitOrder()
+{
+   if(!UseClusterM1LimitStrategy) return false;
+   
+   // Vérifier le cooldown
+   datetime now = TimeCurrent();
+   if(g_clusterLimitOrderPlacedAt > 0 && (now - g_clusterLimitOrderPlacedAt) < (datetime)(ClusterLimitCooldownMinutes * 60))
+   {
+      Print("⏳ COOLDOWN - Attente avant prochain ordre cluster limit");
+      return false;
+   }
+   
+   // Vérifier qu'on n'a pas déjà un ordre limit en cours
+   if(g_clusterLimitOrderTicket > 0)
+   {
+      if(OrderSelect(g_clusterLimitOrderTicket))
+      {
+         ENUM_ORDER_STATE state = (ENUM_ORDER_STATE)OrderGetInteger(ORDER_STATE);
+         if(state == ORDER_STATE_PLACED || state == ORDER_STATE_STARTED)
+         {
+            Print("⏳ ORDRE LIMIT EXISTANT - Ticket=", g_clusterLimitOrderTicket);
+            return false;
+         }
+      }
+      g_clusterLimitOrderTicket = 0;
+   }
+   
+   // Obtenir le prix de la ligne M1 trend
+   bool isBullish;
+   double trendLinePrice = GetM1TrendLinePrice(isBullish);
+   if(trendLinePrice <= 0)
+   {
+      Print("❌ ERREUR - Impossible de calculer prix ligne M1 trend");
+      return false;
+   }
+   
+   // Déterminer le type d'ordre
+   ENUM_ORDER_TYPE orderType = isBullish ? ORDER_TYPE_BUY_LIMIT : ORDER_TYPE_SELL_LIMIT;
+   string direction = isBullish ? "BUY" : "SELL";
+
+   // Règle directionnelle cluster: Crash => SELL only, Boom => BUY only.
+   if(!IsDirectionAllowedForBoomCrash(_Symbol, direction))
+   {
+      Print("🚫 CLUSTER LIMIT BLOQUÉ - Direction invalide pour ", _Symbol,
+            " | dir=", direction, " (Crash=SELL only, Boom=BUY only)");
+      return false;
+   }
+   
+   // Calculer le prix d'entrée limit (trend line ± offset)
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   double pipSize = 10.0 * point; // 1 pip = 10 points pour la plupart des paires
+   double entryPrice = trendLinePrice;
+   
+   if(orderType == ORDER_TYPE_BUY_LIMIT)
+      entryPrice = trendLinePrice - (ClusterLimitDistancePips * pipSize);
+   else
+      entryPrice = trendLinePrice + (ClusterLimitDistancePips * pipSize);
+   
+   // Calculer SL et TP
+   double sl = 0, tp = 0;
+   double atr = GetATRValue(PERIOD_M1, 14);
+   if(atr <= 0) atr = 10.0 * point;
+   
+   if(orderType == ORDER_TYPE_BUY_LIMIT)
+   {
+      sl = entryPrice - (atr * 1.5);
+      tp = entryPrice + (atr * 3.0);
+   }
+   else
+   {
+      sl = entryPrice + (atr * 1.5);
+      tp = entryPrice - (atr * 3.0);
+   }
+   
+   // Calculer le lot size
+   double lotSize = CalculateLotSizeForRisk(ClusterLimitRiskPercent, MathAbs(entryPrice - sl));
+   if(lotSize <= 0) lotSize = 0.01;
+   
+   // Calculer l'expiration
+   datetime expiry = now + (datetime)(ClusterLimitExpiryMinutes * 60);
+   
+   // Validation stricte prix/SL/TP selon règles broker avant envoi.
+   double validEntry = NormalizeDouble(entryPrice, _Digits);
+   double validSL = NormalizeDouble(sl, _Digits);
+   double validTP = NormalizeDouble(tp, _Digits);
+   ENUM_ORDER_TYPE validType = orderType;
+   if(!ValidateAndAdjustLimitPrice(validEntry, validSL, validTP, validType))
+   {
+      Print("❌ CLUSTER LIMIT REJETÉ AVANT ENVOI - Prix invalides après validation broker");
+      Print("   Type=", direction, " Entry=", DoubleToString(validEntry, _Digits),
+            " SL=", DoubleToString(validSL, _Digits),
+            " TP=", DoubleToString(validTP, _Digits));
+      return false;
+   }
+
+   // Placer l'ordre limit
+   MqlTradeRequest request;
+   MqlTradeResult result;
+   ZeroMemory(request);
+   ZeroMemory(result);
+   
+   request.action = TRADE_ACTION_PENDING;
+   request.symbol = _Symbol;
+   request.volume = lotSize;
+   request.price = validEntry;
+   request.sl = validSL;
+   request.tp = validTP;
+   request.deviation = 10;
+   request.type = orderType;
+   int fillMode = (int)SymbolInfoInteger(_Symbol, SYMBOL_FILLING_MODE);
+   if((fillMode & SYMBOL_FILLING_FOK) == SYMBOL_FILLING_FOK)
+      request.type_filling = ORDER_FILLING_FOK;
+   else if((fillMode & SYMBOL_FILLING_IOC) == SYMBOL_FILLING_IOC)
+      request.type_filling = ORDER_FILLING_IOC;
+   else
+      request.type_filling = ORDER_FILLING_RETURN;
+   request.type_time = ORDER_TIME_SPECIFIED;
+   request.expiration = expiry;
+   request.comment = "CLUSTER_M1_LIMIT " + direction;
+   
+   if(!OrderSend(request, result))
+   {
+      Print("❌ ERREUR PLACEMENT ORDRE LIMIT - Retcode=", result.retcode);
+      return false;
+   }
+   
+   g_clusterLimitOrderTicket = result.order;
+   g_clusterLimitOrderPlacedAt = now;
+   
+   Print("✅ ORDRE LIMIT PLACÉ - Type=", direction, " | Entry=", entryPrice, 
+         " | SL=", sl, " | TP=", tp, " | Lot=", lotSize, " | Ticket=", result.order);
+   
+   // Notification
+   string message = StringFormat("🎯 CLUSTER M1 LIMIT - %s %s @ %.5f | SL %.5f | TP %.5f | Lot %.2f",
+                               direction, _Symbol, entryPrice, sl, tp, lotSize);
+   SendNotification(message);
+   
+   return true;
+}
+
+//+------------------------------------------------------------------+
+//| Calculer lot size selon risque                                     |
+//+------------------------------------------------------------------+
+double CalculateLotSizeForRisk(double riskPercent, double slDistance)
+{
+   if(slDistance <= 0) return 0.01;
+   
+   double balance = AccountInfoDouble(ACCOUNT_BALANCE);
+   double riskAmount = balance * (riskPercent / 100.0);
+   
+   double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+   double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+   
+   if(tickValue <= 0 || tickSize <= 0) return 0.01;
+   
+   double lots = riskAmount / (slDistance / tickSize * tickValue);
+   
+   // Normaliser
+   double minLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   double maxLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+   double stepLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+   
+   if(stepLot > 0)
+      lots = MathFloor(lots / stepLot) * stepLot;
+   
+   if(lots < minLot) lots = minLot;
+   if(lots > maxLot) lots = maxLot;
+   
+   return NormalizeDouble(lots, 2);
+}
+
+//+------------------------------------------------------------------+
+//| Gérer la stratégie cluster limit (appelée depuis OnTick)          |
+//+------------------------------------------------------------------+
+void ManageClusterM1LimitStrategy()
+{
+   if(!UseClusterM1LimitStrategy) return;
+   if(IsWeltradeOTEOnlyActive(_Symbol)) return;
+   
+   // Vérifier si on est sur un symbole Boom/Crash ou Weltrade synthétique
+   ENUM_SYMBOL_CATEGORY cat = SMC_GetSymbolCategory(_Symbol);
+   if(cat != SYM_BOOM_CRASH && cat != SYM_WELTRADE_SYNTH)
+      return;
+   
+   // Vérifier si le prix est entré dans le cluster zone
+   bool priceInZone = IsPriceInSpikeClusterZone();
+   
+   // Log d'état (toutes les 30 secondes pour éviter le spam)
+   static datetime lastLog = 0;
+   datetime now = TimeCurrent();
+   if(now - lastLog >= 30)
+   {
+      if(priceInZone)
+         Print("🎯 PRIX DANS CLUSTER ZONE - Prêt à placer ordre limit M1 trend");
+      else
+         Print("👁️ Prix hors cluster zone - Low=", g_spikeClusterZoneLow, " High=", g_spikeClusterZoneHigh);
+      lastLog = now;
+   }
+   
+   // Si le prix vient d'entrer dans la zone, placer un ordre limit
+   if(priceInZone && !g_priceInClusterZone)
+   {
+      Print("🚨 ENTRÉE DANS CLUSTER ZONE - Placement ordre limit sur M1 trend");
+      PlaceClusterLimitOrder();
+   }
+   
+   g_priceInClusterZone = priceInZone;
+}
+
+//+------------------------------------------------------------------+
+//| DÉCLENCHEMENT AUTO ORDRES MARCHÉ - IA CONFIDENCE > 90%            |
+//| Volatilités Deriv/Weltrade: achat/vente auto avec trailing 50%     |
+//+------------------------------------------------------------------+
+
+// Variables globales
+bool g_highConfidenceSignalActive = false;
+datetime g_lastHighConfidenceTrade = 0;
+ulong g_highConfidencePositionTicket = 0;
+
+// Input pour la stratégie
+input bool   UseHighConfidenceAutoEntry = true;     // Activer entrée auto IA > 90%
+input double HighConfidenceThreshold = 90.0;          // Seuil confiance IA (%) pour entrée auto
+input double HighConfidenceRiskPercent = 0.5;       // Risque % pour entrées haute confiance
+input double HighConfidenceTrailingPercent = 50.0;   // Trailing stop activation à -50% de perte
+
+//+------------------------------------------------------------------+
+//| Vérifier si on peut placer un trade haute confiance IA             |
+//+------------------------------------------------------------------+
+bool ShouldEnterHighConfidenceTrade()
+{
+   if(!UseHighConfidenceAutoEntry) return false;
+   if(IsWeltradeOTEOnlyActive(_Symbol)) return false;
+   if(!UseAIServer) return false;
+   
+   // Vérifier si on est sur volatilité (Boom/Crash ou Weltrade)
+   ENUM_SYMBOL_CATEGORY cat = SMC_GetSymbolCategory(_Symbol);
+   if(cat != SYM_BOOM_CRASH && cat != SYM_WELTRADE_SYNTH)
+      return false;
+   
+   // Vérifier confiance IA > 90%
+   double aiConfPct = AIConfidencePercent();
+   if(aiConfPct < HighConfidenceThreshold)
+      return false;
+   
+   // Vérifier action IA valide (BUY ou SELL)
+   string iaAction = g_lastAIAction;
+   StringToUpper(iaAction);
+   if(iaAction != "BUY" && iaAction != "SELL")
+      return false;
+      
+   // Sécurité fondamentale: Bloquer les directions inversées (BUY sur Crash, SELL sur Boom)
+   if(!IsDirectionAllowedForBoomCrash(_Symbol, iaAction))
+   {
+      return false;
+   }
+   
+   // NOUVEAU FILTRE: IA Haute confiance = attendre EMA/M5_Entry Touch + M5 Conf
+   if(!IsHighConfidenceEntryTouchConfirmed(iaAction))
+   {
+      return false;
+   }
+   
+   // Vérifier cooldown (pas de trade dans les 2 dernières minutes)
+   datetime now = TimeCurrent();
+   if(g_lastHighConfidenceTrade > 0 && (now - g_lastHighConfidenceTrade) < 120)
+      return false;
+   
+   // Vérifier qu'on n'a pas déjà une position haute confiance ouverte
+   if(g_highConfidencePositionTicket > 0)
+   {
+      if(PositionSelectByTicket(g_highConfidencePositionTicket))
+      {
+         if(PositionGetInteger(POSITION_TYPE) == (iaAction == "BUY" ? POSITION_TYPE_BUY : POSITION_TYPE_SELL))
+         {
+            // Position existe encore
+            return false;
+         }
+      }
+      g_highConfidencePositionTicket = 0;
+   }
+   
+   return true;
+}
+
+//+------------------------------------------------------------------+
+//| Exécuter un trade haute confiance IA avec trailing stop 50%        |
+//+------------------------------------------------------------------+
+bool ExecuteHighConfidenceTrade()
+{
+   if(!ShouldEnterHighConfidenceTrade()) return false;
+   
+   string iaAction = g_lastAIAction;
+   StringToUpper(iaAction);
+   
+   MqlTick tick;
+   if(!SymbolInfoTick(_Symbol, tick)) return false;
+   
+   // Calculer SL et TP basé sur ATR
+   double atr = GetATRValue(PERIOD_M1, 14);
+   if(atr <= 0) atr = 20.0 * _Point;
+   
+   double entryPrice, sl, tp;
+   
+   if(iaAction == "BUY")
+   {
+      entryPrice = tick.ask;
+      sl = entryPrice - (atr * 1.5);
+      tp = entryPrice + (atr * 4.0);
+   }
+   else // SELL
+   {
+      entryPrice = tick.bid;
+      sl = entryPrice + (atr * 1.5);
+      tp = entryPrice - (atr * 4.0);
+   }
+   
+   // Validation stricte des niveaux de stops (SYMBOL_TRADE_STOPS_LEVEL)
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   int stopsLevel = (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
+   double minDist = MathMax((double)stopsLevel * point, point * 10.0);
+   
+   if(iaAction == "BUY")
+   {
+      if((entryPrice - sl) < minDist) sl = entryPrice - minDist;
+      if((tp - entryPrice) < minDist) tp = entryPrice + minDist;
+   }
+   else
+   {
+      if((sl - entryPrice) < minDist) sl = entryPrice + minDist;
+      if((entryPrice - tp) < minDist) tp = entryPrice - minDist;
+   }
+   
+   // Calculer lot size
+   double slDistance = MathAbs(entryPrice - sl);
+   double lotSize = CalculateLotSizeForRisk(HighConfidenceRiskPercent, slDistance);
+   
+   // Placer le trade
+   bool success = false;
+   string comment = "HIGH_CONF_AI_" + iaAction + "_" + DoubleToString(AIConfidencePercent(), 1) + "%";
+   
+   if(iaAction == "BUY")
+      success = trade.Buy(lotSize, _Symbol, 0, sl, tp, comment);
+   else
+      success = trade.Sell(lotSize, _Symbol, 0, sl, tp, comment);
+   
+   if(!success)
+   {
+      Print("❌ HIGH CONF TRADE ÉCHOUÉ - ", iaAction, " | Error: ", trade.ResultRetcode());
+      return false;
+   }
+   
+   // Stocker le ticket
+   g_highConfidencePositionTicket = trade.ResultOrder();
+   g_lastHighConfidenceTrade = TimeCurrent();
+   
+   // Activer le trailing stop 50% sur cette position
+   EnableFiftyPercentTrailing(g_highConfidencePositionTicket, entryPrice, lotSize, iaAction);
+   
+   // Notification
+   string message = StringFormat("🚀 HIGH CONF %s | %s @ %.5f | Conf: %.1f%% | Lot: %.2f | SL: %.5f | TP: %.5f",
+                               iaAction, _Symbol, entryPrice, AIConfidencePercent(), lotSize, sl, tp);
+   SendNotification(message);
+   Print(message);
+   
+   return true;
+}
+
+//+------------------------------------------------------------------+
+//| Activer le trailing stop 50% sur une position                      |
+//+------------------------------------------------------------------+
+void EnableFiftyPercentTrailing(ulong ticket, double entryPrice, double lotSize, string direction)
+{
+   // Enregistrer la position pour trailing stop 50%
+   // Utiliser le système de trailing stop existant mais avec seuil 50%
+   RegisterPositionForFiftyPercentTrailing(ticket, entryPrice, lotSize, direction);
+   
+   Print("📊 TRAILING STOP 50% ACTIVÉ - Position #", ticket, " | Entry: ", entryPrice,
+         " | Max DD autorisé: 50% du profit");
+}
+
+//+------------------------------------------------------------------+
+//| Enregistrer position pour trailing stop 50%                      |
+//+------------------------------------------------------------------+
+struct FiftyPercentTrailingData {
+   ulong ticket;
+   double entryPrice;
+   double maxProfitReached;
+   datetime openTime;
+   bool active;
+   string direction;
+};
+
+FiftyPercentTrailingData g_fiftyPctTrailingPositions[];
+int g_fiftyPctTrailingCount = 0;
+
+void RegisterPositionForFiftyPercentTrailing(ulong ticket, double entryPrice, double lotSize, string direction)
+{
+   // Redimensionner le tableau
+   int newSize = g_fiftyPctTrailingCount + 1;
+   ArrayResize(g_fiftyPctTrailingPositions, newSize);
+   
+   // Enregistrer la nouvelle position
+   g_fiftyPctTrailingPositions[g_fiftyPctTrailingCount].ticket = ticket;
+   g_fiftyPctTrailingPositions[g_fiftyPctTrailingCount].entryPrice = entryPrice;
+   g_fiftyPctTrailingPositions[g_fiftyPctTrailingCount].maxProfitReached = 0;
+   g_fiftyPctTrailingPositions[g_fiftyPctTrailingCount].openTime = TimeCurrent();
+   g_fiftyPctTrailingPositions[g_fiftyPctTrailingCount].active = true;
+   g_fiftyPctTrailingPositions[g_fiftyPctTrailingCount].direction = direction;
+   
+   g_fiftyPctTrailingCount++;
+   
+   Print("✅ Position #", ticket, " enregistrée pour trailing 50% | Direction: ", direction);
+}
+
+//+------------------------------------------------------------------+
+//| Gérer le trailing stop 50% (appelé depuis OnTick)                  |
+//+------------------------------------------------------------------+
+void ManageFiftyPercentTrailing()
+{
+   if(g_fiftyPctTrailingCount == 0) return;
+   
+   for(int i = g_fiftyPctTrailingCount - 1; i >= 0; i--)
+   {
+      if(!g_fiftyPctTrailingPositions[i].active) continue;
+      
+      ulong ticket = g_fiftyPctTrailingPositions[i].ticket;
+      
+      // Vérifier si position existe encore
+      if(!PositionSelectByTicket(ticket))
+      {
+         // Position fermée, la retirer
+         g_fiftyPctTrailingPositions[i].active = false;
+         Print("📊 Position #", ticket, " fermée - retirée du trailing 50%");
+         continue;
+      }
+      
+      double currentProfit = PositionGetDouble(POSITION_PROFIT);
+      
+      // Mettre à jour le profit max atteint
+      if(currentProfit > g_fiftyPctTrailingPositions[i].maxProfitReached)
+      {
+         g_fiftyPctTrailingPositions[i].maxProfitReached = currentProfit;
+      }
+      
+      // Calculer le giveback depuis le max
+      double giveback = g_fiftyPctTrailingPositions[i].maxProfitReached - currentProfit;
+      double maxProfit = g_fiftyPctTrailingPositions[i].maxProfitReached;
+      
+      // Si profit max est significatif et giveback atteint 50% du max, fermer
+      if(maxProfit > 0 && giveback >= (maxProfit * 0.5))
+      {
+         // Fermer la position (giveback de 50% atteint)
+         trade.PositionClose(ticket);
+         
+         Print("🛑 TRAILING STOP 50% DÉCLENCHÉ - Position #", ticket,
+               " | Max Profit: ", DoubleToString(maxProfit, 2),
+               " | Current: ", DoubleToString(currentProfit, 2),
+               " | Giveback: ", DoubleToString(giveback, 2), " (50%)");
+         
+         g_fiftyPctTrailingPositions[i].active = false;
+      }
+   }
+   
+   // Nettoyer les entrées inactives (compression du tableau)
+   int activeCount = 0;
+   for(int i = 0; i < g_fiftyPctTrailingCount; i++)
+   {
+      if(g_fiftyPctTrailingPositions[i].active)
+      {
+         if(i != activeCount)
+            g_fiftyPctTrailingPositions[activeCount] = g_fiftyPctTrailingPositions[i];
+         activeCount++;
+      }
+   }
+   
+   if(activeCount != g_fiftyPctTrailingCount)
+   {
+      g_fiftyPctTrailingCount = activeCount;
+      ArrayResize(g_fiftyPctTrailingPositions, g_fiftyPctTrailingCount);
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Gérer la stratégie haute confiance (appelée depuis OnTick)         |
+//+------------------------------------------------------------------+
+void ManageHighConfidenceAutoEntry()
+{
+   if(!UseHighConfidenceAutoEntry) return;
+   if(DisableHighConfidenceAutoEntryOnCrypto && IsCryptoSymbol(_Symbol)) return;
+   
+   // Log d'état toutes les 30 secondes
+   static datetime lastLog = 0;
+   datetime now = TimeCurrent();
+   if(now - lastLog >= 30)
+   {
+      double confPct = AIConfidencePercent();
+      string action = g_lastAIAction;
+      
+      if(confPct >= HighConfidenceThreshold && (action == "BUY" || action == "SELL"))
+      {
+         Print("🎯 HIGH CONF SIGNAL - ", action, " @ ", confPct, "% | Prêt à trader");
+      }
+      else
+      {
+         Print("👁️ Attente signal high conf... | Current: ", action, " @ ", confPct, "%");
+      }
+      lastLog = now;
+   }
+   
+   // Vérifier si on doit entrer
+   if(ShouldEnterHighConfidenceTrade())
+   {
+      ExecuteHighConfidenceTrade();
+   }
+   
+   // Gérer le trailing stop 50%
+   ManageFiftyPercentTrailing();
 }
 
 //| DÉTECTER UN SPIKE RÉCENT sur Boom/Crash                           |
@@ -28631,6 +34702,12 @@ void ExecuteSpikeTradeBody(string direction)
 
    if(!IsSpreadAcceptable()) return;
    if(!(massiveMode && SpikeMassiveBypassCooldown) && IsEntryCooldownActive()) return;
+
+   // NOUVEAU FILTRE: IA Haute confiance = attendre EMA/M5_Entry Touch + M5 Conf
+   if(!IsHighConfidenceEntryTouchConfirmed(direction))
+   {
+      return; // On annule l'entrée au marché, on attend que le prix touche et confirme
+   }
    if(!m5ch && !oteChain && !(massiveMode && SpikeMassiveBypassLastCandleConfirm) &&
       !IsLastCandleConfirmingDirection(direction)) return;
 
@@ -28793,11 +34870,19 @@ void ExecuteSpikeTradeBody(string direction)
       double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
       double sl = 0, tp = 0;
       
+      // Contraintes stops level
+      double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+      int stopsLevel = (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
+      double minDist = MathMax((double)stopsLevel * point, point * 10.0);
+      
       // Appliquer SL/TP seulement si NoSLTP_BoomCrash est désactivé
       if(!NoSLTP_BoomCrash || SMC_GetSymbolCategory(_Symbol) != SYM_BOOM_CRASH)
       {
          sl = ask - atrValue * 2.0;  // Pour BUY: SL en-dessous (plus bas)
          tp = ask + atrValue * 3.0;  // Pour BUY: TP au-dessus (plus haut)
+         
+         if((ask - sl) < minDist) sl = ask - minDist;
+         if((tp - ask) < minDist) tp = ask + minDist;
       }
       
       Print("?? DEBUG - BUY - Ask: ", DoubleToString(ask, _Digits), " | SL: ", DoubleToString(sl, _Digits), " | TP: ", DoubleToString(tp, _Digits));
@@ -28831,11 +34916,19 @@ void ExecuteSpikeTradeBody(string direction)
       double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
       double sl = 0, tp = 0;
       
+      // Contraintes stops level
+      double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+      int stopsLevel = (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
+      double minDist = MathMax((double)stopsLevel * point, point * 10.0);
+      
       // Appliquer SL/TP seulement si NoSLTP_BoomCrash est désactivé
       if(!NoSLTP_BoomCrash || SMC_GetSymbolCategory(_Symbol) != SYM_BOOM_CRASH)
       {
          sl = bid + atrValue * 2.0;  // Pour SELL: SL au-dessus (plus haut)
          tp = bid - atrValue * 3.0;  // Pour SELL: TP en-dessous (plus bas)
+         
+         if((sl - bid) < minDist) sl = bid + minDist;
+         if((bid - tp) < minDist) tp = bid - minDist;
       }
       
       Print("?? DEBUG - SELL - Bid: ", DoubleToString(bid, _Digits), " | SL: ", DoubleToString(sl, _Digits), " | TP: ", DoubleToString(tp, _Digits));
@@ -29137,7 +35230,21 @@ bool IsPriceSpikeDetectedForSymbol(const string symbol)
    // Crash: abaisser légèrement le seuil car les ticks sont parfois peu volumétriques et le range est plus "saccadé"
    if(IsCrashSymbol(symbol))
       mult = MathMin(mult, 1.2);
-   bool spikeDetected = (currentRange > atr * mult);
+
+   // Ajuster le seuil en fonction de la confluence cumulative
+   double confluenceFactor = GetSpikeConfluenceFactor(symbol);
+   double adjustedMult = mult * confluenceFactor;
+   bool spikeDetected = (currentRange > atr * adjustedMult);
+
+   // Enregistrer l'heure du spike de marché détecté (pour fermeture persistante des positions)
+   if(spikeDetected)
+   {
+      datetime now = TimeCurrent();
+      if(IsBoomSymbol(symbol) || IsWeltradeGainSynthSymbol(symbol))
+         g_lastBoomMarketSpikeDetectedTime = now;
+      else if(IsCrashSymbol(symbol) || IsWeltradePainSynthSymbol(symbol))
+         g_lastCrashMarketSpikeDetectedTime = now;
+   }
 
    if(DebugSpikeDetection)
    {
@@ -29161,13 +35268,173 @@ bool IsBoomCrashM1SpikeRangeBars01(const string symbol)
       mult = 1.5;
    if(IsCrashSymbol(symbol))
       mult = MathMin(mult, 1.2);
-   double thr = atr * mult;
+
+   // Ajuster le seuil en fonction de la confluence cumulative
+   double confluenceFactor = GetSpikeConfluenceFactor(symbol);
+   double adjustedMult = mult * confluenceFactor;
+   double thr = atr * adjustedMult;
 
    double h0 = iHigh(symbol, PERIOD_M1, 0), l0 = iLow(symbol, PERIOD_M1, 0);
    double h1 = iHigh(symbol, PERIOD_M1, 1), l1 = iLow(symbol, PERIOD_M1, 1);
    double r0 = (h0 > 0 && l0 > 0) ? (h0 - l0) : 0.0;
    double r1 = (h1 > 0 && l1 > 0) ? (h1 - l1) : 0.0;
-   return (r0 > thr || r1 > thr);
+   bool spikeDetected = (r0 > thr || r1 > thr);
+
+   // Enregistrer l'heure du spike de marché détecté
+   if(spikeDetected)
+   {
+      datetime now = TimeCurrent();
+      if(IsBoomSymbol(symbol) || IsWeltradeGainSynthSymbol(symbol))
+         g_lastBoomMarketSpikeDetectedTime = now;
+      else if(IsCrashSymbol(symbol) || IsWeltradePainSynthSymbol(symbol))
+         g_lastCrashMarketSpikeDetectedTime = now;
+   }
+
+   return spikeDetected;
+}
+
+// Détection de confluence cumulative pour ajuster dynamiquement les seuils de spike
+// Combine: range M1, volume, compression ATR pour abaisser les seuils en zone de forte confluence
+// Retourne un facteur de réduction (0.7 = seuil réduit de 30%, 1.0 = pas de réduction)
+double GetSpikeConfluenceFactor(const string symbol)
+{
+   SymbolSelect(symbol, true);
+   double atr = iATR(symbol, PERIOD_M1, 20);
+   if(atr <= 0.0) return 1.0;
+
+   // 1. Vérifier le range M1 actuel vs ATR
+   double h0 = iHigh(symbol, PERIOD_M1, 0), l0 = iLow(symbol, PERIOD_M1, 0);
+   double h1 = iHigh(symbol, PERIOD_M1, 1), l1 = iLow(symbol, PERIOD_M1, 1);
+   double r0 = (h0 > 0 && l0 > 0) ? (h0 - l0) : 0.0;
+   double r1 = (h1 > 0 && l1 > 0) ? (h1 - l1) : 0.0;
+   double maxRange = MathMax(r0, r1);
+   double rangeRatio = (atr > 0.0) ? (maxRange / atr) : 0.0;
+
+   // 2. Vérifier le volume actuel vs moyenne
+   double recentVolume = (double)iVolume(symbol, PERIOD_M1, 0);
+   double avgVolume = 0.0;
+   for(int i = 1; i <= 20; i++)
+   {
+      double v = (double)iVolume(symbol, PERIOD_M1, i);
+      if(v <= 0) continue;
+      avgVolume += v;
+   }
+   avgVolume /= 20.0;
+   double volumeRatio = (avgVolume > 0.0) ? (recentVolume / avgVolume) : 0.0;
+
+   // 3. Vérifier la compression ATR
+   double atrCurrent = iATR(symbol, PERIOD_M1, 1);
+   double atrAvg = 0.0;
+   for(int i = 2; i <= 21; i++)
+   {
+      atrAvg += iATR(symbol, PERIOD_M1, i);
+   }
+   atrAvg /= 20.0;
+   bool compression = (atrCurrent < atrAvg * SpikeCompressionThreshold);
+
+   // Calculer le facteur de confluence
+   // Plus le ratio range est proche du seuil, plus le volume est élevé, plus on réduit le seuil
+   double confluenceScore = 0.0;
+
+   // Range proche du seuil (0.8-1.2 du SpikePriceMultiplier)
+   if(rangeRatio >= 0.8 * SpikePriceMultiplier && rangeRatio <= 1.2 * SpikePriceMultiplier)
+      confluenceScore += 0.3;
+   else if(rangeRatio >= 0.6 * SpikePriceMultiplier)
+      confluenceScore += 0.15;
+
+   // Volume élevé
+   if(volumeRatio >= 1.5 * SpikeVolumeMultiplier)
+      confluenceScore += 0.35;
+   else if(volumeRatio >= SpikeVolumeMultiplier)
+      confluenceScore += 0.2;
+
+   // Compression présente
+   if(compression)
+      confluenceScore += 0.35;
+
+   // Facteur de réduction: 0.6 (très forte confluence) à 1.0 (pas de confluence)
+   double confluenceFactor = 1.0 - (confluenceScore * 0.4); // Réduction max 40%
+   confluenceFactor = MathMax(0.6, confluenceFactor); // Minimum 0.6
+
+   if(DebugSpikeDetection)
+   {
+      Print("🎯 Confluence [", symbol, "] - RangeRatio: ", DoubleToString(rangeRatio, 2),
+            " | VolumeRatio: ", DoubleToString(volumeRatio, 2),
+            " | Compression: ", compression ? "OUI" : "NON",
+            " | Score: ", DoubleToString(confluenceScore, 2),
+            " | Facteur: ", DoubleToString(confluenceFactor, 2));
+   }
+
+   return confluenceFactor;
+}
+
+// Détection de séquence de spikes (pattern escalier comme sur RSI)
+// Détecte si plusieurs bougies consécutives montrent des signaux de spike dans la même direction
+bool IsSpikeSequenceDetected(const string symbol, const ENUM_POSITION_TYPE posType, int maxBars = 3)
+{
+   SymbolSelect(symbol, true);
+   double atr = iATR(symbol, PERIOD_M1, 20);
+   if(atr <= 0.0) return false;
+
+   double mult = SpikePriceMultiplier;
+   if(mult <= 0.0) mult = 1.5;
+   if(IsCrashSymbol(symbol)) mult = MathMin(mult, 1.2);
+   double thr = atr * mult * 0.7; // Seuil abaissé pour détecter les mini-spikes
+
+   int consecutiveSpikes = 0;
+   bool directionOk = false;
+
+   for(int bar = 0; bar < maxBars; bar++)
+   {
+      double h = iHigh(symbol, PERIOD_M1, bar);
+      double l = iLow(symbol, PERIOD_M1, bar);
+      if(h <= 0.0 || l <= 0.0) continue;
+
+      double range = h - l;
+      if(range < thr) continue;
+
+      double open = iOpen(symbol, PERIOD_M1, bar);
+      if(open <= 0.0) continue;
+
+      double close = (bar == 0) ? ((posType == POSITION_TYPE_SELL) ? SymbolInfoDouble(symbol, SYMBOL_BID)
+                                                                     : SymbolInfoDouble(symbol, SYMBOL_ASK))
+                                : iClose(symbol, PERIOD_M1, bar);
+
+      // Vérifier la direction du spike
+      bool spikeInDirection = false;
+      if(posType == POSITION_TYPE_BUY && (IsBoomSymbol(symbol) || IsWeltradeGainSynthSymbol(symbol)))
+      {
+         spikeInDirection = (close > open && (close - open) >= range * 0.08);
+      }
+      else if(posType == POSITION_TYPE_SELL && (IsCrashSymbol(symbol) || IsWeltradePainSynthSymbol(symbol)))
+      {
+         spikeInDirection = (close < open && (open - close) >= range * 0.08);
+      }
+
+      if(spikeInDirection)
+      {
+         consecutiveSpikes++;
+         directionOk = true;
+      }
+      else
+      {
+         // Si on a une séquence, on peut tolérer une bougie neutre
+         if(consecutiveSpikes > 0 && range >= thr * 0.5)
+            consecutiveSpikes++;
+         else
+            break;
+      }
+   }
+
+   bool sequenceDetected = (consecutiveSpikes >= 2); // Au moins 2 bougies avec spike
+
+   if(DebugSpikeDetection && sequenceDetected)
+   {
+      Print("📊 Séquence Spike [", symbol, "] - Bougies consécutives: ", consecutiveSpikes,
+            " | Direction OK: ", directionOk ? "OUI" : "NON");
+   }
+
+   return sequenceDetected;
 }
 
 // Spike directionnel Boom/Crash: indices synthétiques (surtout Crash) ont souvent tick volume plat ;
@@ -29186,7 +35453,18 @@ bool IsDirectionalBoomCrashSpikeForPosition(const string symbol, const ENUM_POSI
    if(mult <= 0.0)
       mult = 1.5;
 
-   double thr = atr * mult;
+   // Ajuster le seuil en fonction de la confluence cumulative
+   double confluenceFactor = GetSpikeConfluenceFactor(symbol);
+   double adjustedMult = mult * confluenceFactor;
+   double thr = atr * adjustedMult;
+
+   // Vérifier si une séquence de spikes est détectée (pattern escalier)
+   bool spikeSequence = IsSpikeSequenceDetected(symbol, posType, 3);
+   if(spikeSequence)
+   {
+      // En cas de séquence, abaisser encore le seuil pour capturer les mini-spikes
+      thr = atr * mult * 0.65;
+   }
 
    // On évite CopyRates pour réduire la charge CPU (appel fréquent dans ManageBoomCrashSpikeClose)
    for(int bar = 0; bar <= 1; bar++)
@@ -29399,6 +35677,312 @@ bool IsAcceleratingMomentum()
    return momentumDetected;
 }
 
+//+------------------------------------------------------------------+
+//| RSI 14 IMPULSION - Divergence / Compression Breakout / Reversal  |
+//| Les configurations chartistes du RSI 14 prédisent les impulsions |
+//| (spikes) avant qu'elles ne se produisent sur le prix.           |
+//+------------------------------------------------------------------+
+
+// Récupérer le buffer RSI 14 M1 sur N barres (ArraySetAsSeries=true)
+bool GetRSIBuffer14M1(double &rsiOut[], int count)
+{
+   ArraySetAsSeries(rsiOut, true);
+   if(rsi14M1 == INVALID_HANDLE) return false;
+   if(CopyBuffer(rsi14M1, 0, 0, count, rsiOut) < count) return false;
+   return true;
+}
+
+// --- DIVERGENCE BULLISH RSI ---
+// Le prix fait un lower low mais le RSI fait un higher low → impulsion haussière imminente
+bool IsRSIDivergenceBullish(double &rsiBuf[], MqlRates &rates[], int lookback, double minSwingPips)
+{
+   int len = ArraySize(rsiBuf);
+   if(len < lookback) return false;
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   if(point <= 0) return false;
+   double minSwingPrice = minSwingPips * point;
+
+   // Chercher 2 swing lows récents dans le lookback
+   int swingIdx1 = -1, swingIdx2 = -1;
+   double swingLow1 = 0, swingLow2 = 0;
+   double rsiLow1 = 0, rsiLow2 = 0;
+
+   for(int i = 2; i < lookback - 2 && i < len - 2; i++)
+   {
+      bool isSwingLow = (rates[i].low < rates[i-1].low && rates[i].low < rates[i+1].low &&
+                         rates[i].low < rates[i-2].low && rates[i].low < rates[i+2].low);
+      if(isSwingLow)
+      {
+         if(swingIdx1 < 0)
+         {
+            swingIdx1 = i; swingLow1 = rates[i].low; rsiLow1 = rsiBuf[i];
+         }
+         else if(swingIdx2 < 0 && i != swingIdx1)
+         {
+            swingIdx2 = i; swingLow2 = rates[i].low; rsiLow2 = rsiBuf[i];
+            break;
+         }
+      }
+   }
+
+   if(swingIdx1 < 0 || swingIdx2 < 0) return false;
+
+   // S'assurer que swingIdx2 est plus ancien (index plus grand = plus ancien en series)
+   if(swingIdx2 < swingIdx1) { int t=swingIdx2; swingIdx2=swingIdx1; swingIdx1=t;
+                                double td=swingLow2; swingLow2=swingLow1; swingLow1=td;
+                                double tr=rsiLow2; rsiLow2=rsiLow1; rsiLow1=tr; }
+
+   // Divergence bullish: prix lower low (swingLow1 < swingLow2) mais RSI higher low (rsiLow1 > rsiLow2)
+   bool priceLowerLow = (swingLow1 < swingLow2 - minSwingPrice);
+   bool rsiHigherLow  = (rsiLow1 > rsiLow2 + 1.0); // au moins 1 pt RSI de hausse
+
+   return (priceLowerLow && rsiHigherLow);
+}
+
+// --- DIVERGENCE BEARISH RSI ---
+// Le prix fait un higher high mais le RSI fait un lower high → impulsion baissière imminente
+bool IsRSIDivergenceBearish(double &rsiBuf[], MqlRates &rates[], int lookback, double minSwingPips)
+{
+   int len = ArraySize(rsiBuf);
+   if(len < lookback) return false;
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   if(point <= 0) return false;
+   double minSwingPrice = minSwingPips * point;
+
+   int swingIdx1 = -1, swingIdx2 = -1;
+   double swingHigh1 = 0, swingHigh2 = 0;
+   double rsiHigh1 = 0, rsiHigh2 = 0;
+
+   for(int i = 2; i < lookback - 2 && i < len - 2; i++)
+   {
+      bool isSwingHigh = (rates[i].high > rates[i-1].high && rates[i].high > rates[i+1].high &&
+                          rates[i].high > rates[i-2].high && rates[i].high > rates[i+2].high);
+      if(isSwingHigh)
+      {
+         if(swingIdx1 < 0)
+         {
+            swingIdx1 = i; swingHigh1 = rates[i].high; rsiHigh1 = rsiBuf[i];
+         }
+         else if(swingIdx2 < 0 && i != swingIdx1)
+         {
+            swingIdx2 = i; swingHigh2 = rates[i].high; rsiHigh2 = rsiBuf[i];
+            break;
+         }
+      }
+   }
+
+   if(swingIdx1 < 0 || swingIdx2 < 0) return false;
+
+   if(swingIdx2 < swingIdx1) { int t=swingIdx2; swingIdx2=swingIdx1; swingIdx1=t;
+                                double td=swingHigh2; swingHigh2=swingHigh1; swingHigh1=td;
+                                double tr=rsiHigh2; rsiHigh2=rsiHigh1; rsiHigh1=tr; }
+
+   // Divergence bearish: prix higher high mais RSI lower high
+   bool priceHigherHigh = (swingHigh1 > swingHigh2 + minSwingPrice);
+   bool rsiLowerHigh    = (rsiHigh1 < rsiHigh2 - 1.0);
+
+   return (priceHigherHigh && rsiLowerHigh);
+}
+
+// --- COMPRESSION BREAKOUT BULLISH ---
+// RSI reste dans un range étroit pendant N barres puis casse à la hausse → impulsion haussière
+bool IsRSICompressionBreakoutBullish(double &rsiBuf[], int lookback, double maxRange, int minBars)
+{
+   int len = ArraySize(rsiBuf);
+   if(len < lookback || len < minBars + 2) return false;
+
+   // Vérifier que les dernières bougies étaient en compression (RSI dans un range étroit)
+   int compressBars = 0;
+   double rsiMin = 100.0, rsiMax = 0.0;
+
+   // Scanner depuis la barre 2 (on laisse barre 0 = breakout potentiel)
+   for(int i = 2; i < MathMin(lookback, len) && compressBars < minBars + 5; i++)
+   {
+      double range = rsiMax - rsiMin;
+      if(compressBars > 0 && range > maxRange)
+         break; // La compression est cassée → on arrête
+
+      double r = rsiBuf[i];
+      if(r < rsiMin) rsiMin = r;
+      if(r > rsiMax) rsiMax = r;
+      compressBars++;
+   }
+
+   double compressionRange = rsiMax - rsiMin;
+   bool wasCompressed = (compressBars >= minBars && compressionRange <= maxRange);
+
+   // Barre 0 (actuelle) doit casser à la hausse hors du range de compression
+   bool breakoutUp = (rsiBuf[0] > rsiMax + 1.0);
+
+   return (wasCompressed && breakoutUp);
+}
+
+// --- COMPRESSION BREAKOUT BEARISH ---
+// RSI reste dans un range étroit pendant N barres puis casse à la baisse → impulsion baissière
+bool IsRSICompressionBreakoutBearish(double &rsiBuf[], int lookback, double maxRange, int minBars)
+{
+   int len = ArraySize(rsiBuf);
+   if(len < lookback || len < minBars + 2) return false;
+
+   int compressBars = 0;
+   double rsiMin = 100.0, rsiMax = 0.0;
+
+   for(int i = 2; i < MathMin(lookback, len) && compressBars < minBars + 5; i++)
+   {
+      double range = rsiMax - rsiMin;
+      if(compressBars > 0 && range > maxRange)
+         break;
+
+      double r = rsiBuf[i];
+      if(r < rsiMin) rsiMin = r;
+      if(r > rsiMax) rsiMax = r;
+      compressBars++;
+   }
+
+   double compressionRange = rsiMax - rsiMin;
+   bool wasCompressed = (compressBars >= minBars && compressionRange <= maxRange);
+
+   bool breakoutDown = (rsiBuf[0] < rsiMin - 1.0);
+
+   return (wasCompressed && breakoutDown);
+}
+
+// --- REVERSAL BULLISH (Double Bottom sur RSI) ---
+// RSI forme 2 creux proches en valeur → pattern de retournement haussier
+bool IsRSIReversalBullish(double &rsiBuf[], int lookback, double tolerance)
+{
+   int len = ArraySize(rsiBuf);
+   if(len < lookback) return false;
+
+   // Chercher 2 creux RSI dans le lookback
+   int trough1Idx = -1, trough2Idx = -1;
+   double trough1Val = 0, trough2Val = 0;
+
+   for(int i = 1; i < lookback - 1 && i < len - 1; i++)
+   {
+      bool isTrough = (rsiBuf[i] < rsiBuf[i-1] && rsiBuf[i] < rsiBuf[i+1] && rsiBuf[i] < 45.0);
+      if(isTrough)
+      {
+         if(trough1Idx < 0)
+         {
+            trough1Idx = i; trough1Val = rsiBuf[i];
+         }
+         else if(trough2Idx < 0 && i != trough1Idx && MathAbs(i - trough1Idx) >= 3)
+         {
+            trough2Idx = i; trough2Val = rsiBuf[i];
+            break;
+         }
+      }
+   }
+
+   if(trough1Idx < 0 || trough2Idx < 0) return false;
+
+   // Double bottom: les 2 creux sont proches en valeur (tolerance)
+   bool isDoubleBottom = (MathAbs(trough1Val - trough2Val) <= tolerance);
+
+   // Le RSI actuel doit être au-dessus des creux (confirmation du retournement)
+   bool rsiRising = (rsiBuf[0] > MathMax(trough1Val, trough2Val) + 2.0);
+
+   return (isDoubleBottom && rsiRising);
+}
+
+// --- REVERSAL BEARISH (Double Top sur RSI) ---
+// RSI forme 2 pics proches en valeur → pattern de retournement baissier
+bool IsRSIReversalBearish(double &rsiBuf[], int lookback, double tolerance)
+{
+   int len = ArraySize(rsiBuf);
+   if(len < lookback) return false;
+
+   int peak1Idx = -1, peak2Idx = -1;
+   double peak1Val = 0, peak2Val = 0;
+
+   for(int i = 1; i < lookback - 1 && i < len - 1; i++)
+   {
+      bool isPeak = (rsiBuf[i] > rsiBuf[i-1] && rsiBuf[i] > rsiBuf[i+1] && rsiBuf[i] > 55.0);
+      if(isPeak)
+      {
+         if(peak1Idx < 0)
+         {
+            peak1Idx = i; peak1Val = rsiBuf[i];
+         }
+         else if(peak2Idx < 0 && i != peak1Idx && MathAbs(i - peak1Idx) >= 3)
+         {
+            peak2Idx = i; peak2Val = rsiBuf[i];
+            break;
+         }
+      }
+   }
+
+   if(peak1Idx < 0 || peak2Idx < 0) return false;
+
+   bool isDoubleTop = (MathAbs(peak1Val - peak2Val) <= tolerance);
+   bool rsiFalling = (rsiBuf[0] < MathMin(peak1Val, peak2Val) - 2.0);
+
+   return (isDoubleTop && rsiFalling);
+}
+
+// --- FONCTION PRINCIPALE: Détection du pattern RSI Impulsion ---
+// Retourne le type d'impulsion détecté et un détail textuel
+ENUM_RSI_IMPULSE_TYPE DetectRSIImpulsePattern(string &detailOut)
+{
+   detailOut = "";
+
+   if(!UseRSIImpulseFilter)
+      return RSI_IMPULSE_NONE;
+
+   int lb = RSIImpulseLookback;
+   int count = lb + 5;
+
+   // Récupérer le buffer RSI 14 M1
+   double rsiBuf[];
+   if(!GetRSIBuffer14M1(rsiBuf, count))
+      return RSI_IMPULSE_NONE;
+
+   // Récupérer les rates M1 pour la divergence
+   MqlRates rates[];
+   ArraySetAsSeries(rates, true);
+   if(CopyRates(_Symbol, PERIOD_M1, 0, count, rates) < count)
+      return RSI_IMPULSE_NONE;
+
+   int bullishSignals = 0;
+   int bearishSignals = 0;
+   string bullDetail = "";
+   string bearDetail = "";
+
+   // 1) Divergence
+   if(IsRSIDivergenceBullish(rsiBuf, rates, lb, RSIDivergenceMinSwingPips))
+   { bullishSignals++; bullDetail += "DIV_BULL "; }
+   if(IsRSIDivergenceBearish(rsiBuf, rates, lb, RSIDivergenceMinSwingPips))
+   { bearishSignals++; bearDetail += "DIV_BEAR "; }
+
+   // 2) Compression Breakout
+   if(IsRSICompressionBreakoutBullish(rsiBuf, lb, RSICompressionMaxRange, RSICompressionMinBars))
+   { bullishSignals++; bullDetail += "COMP_BULL "; }
+   if(IsRSICompressionBreakoutBearish(rsiBuf, lb, RSICompressionMaxRange, RSICompressionMinBars))
+   { bearishSignals++; bearDetail += "COMP_BEAR "; }
+
+   // 3) Reversal (double top/bottom sur RSI)
+   if(IsRSIReversalBullish(rsiBuf, lb, RSIReversalTolerance))
+   { bullishSignals++; bullDetail += "REV_BULL "; }
+   if(IsRSIReversalBearish(rsiBuf, lb, RSIReversalTolerance))
+   { bearishSignals++; bearDetail += "REV_BEAR "; }
+
+   // Décision: nécessite au moins 1 signal dans une direction et aucun signal contraire
+   // OU au moins 2 signaux dans la même direction (prioritaire même si 1 signal contraire)
+   if(bullishSignals >= 2 || (bullishSignals >= 1 && bearishSignals == 0))
+   {
+      detailOut = "RSI_IMPULSE_BULL(" + bullDetail + ") RSI=" + DoubleToString(rsiBuf[0], 1);
+      return RSI_IMPULSE_BULLISH;
+   }
+   if(bearishSignals >= 2 || (bearishSignals >= 1 && bullishSignals == 0))
+   {
+      detailOut = "RSI_IMPULSE_BEAR(" + bearDetail + ") RSI=" + DoubleToString(rsiBuf[0], 1);
+      return RSI_IMPULSE_BEARISH;
+   }
+
+   return RSI_IMPULSE_NONE;
+}
+
 // Fonction principale de détection de spike imminent
 bool IsSpikeImminentWithoutAI()
 {
@@ -29412,6 +35996,12 @@ bool IsSpikeImminentWithoutAI()
    if(IsCalmBeforeStorm()) signalCount++;
    if(IsSMCSpikeZone()) signalCount++;
    if(IsAcceleratingMomentum()) signalCount++;
+   if(RSIImpulseAsSpikeSignal)
+   {
+      string rsiImpDetail = "";
+      ENUM_RSI_IMPULSE_TYPE rsiImp = DetectRSIImpulsePattern(rsiImpDetail);
+      if(rsiImp != RSI_IMPULSE_NONE) signalCount++;
+   }
    
    bool spikeImminent = (signalCount >= SpikeDetectionMinSignals);
    
@@ -29427,6 +36017,45 @@ bool IsSpikeImminentWithoutAI()
 // Vérification et exécution de trade spike
 void CheckAndExecuteSpikeTrade()
 {
+   // NOUVEAU: Sur Boom/Crash + Weltrade synthétiques, n'autoriser les entrées que dans les zones OTE
+   // pour éviter les contre-tendances
+   ENUM_SYMBOL_CATEGORY cat = SMC_GetSymbolCategory(_Symbol);
+   if(cat == SYM_BOOM_CRASH || cat == SYM_WELTRADE_SYNTH)
+   {
+      // Vérifier si une zone OTE valide existe pour la direction attendue
+      string expectedDir = "";
+      if(IsBoomSymbol(_Symbol) || IsWeltradeGainSynthSymbol(_Symbol))
+         expectedDir = "BUY";
+      else if(IsCrashSymbol(_Symbol) || IsWeltradePainSynthSymbol(_Symbol))
+         expectedDir = "SELL";
+      
+      if(expectedDir != "")
+      {
+         double zLow, zHigh;
+         if(!GetCurrentOTEZoneBounds(expectedDir, zLow, zHigh))
+         {
+            if(DebugSpikeDetection)
+               Print("🚫 SPIKE BLOQUÉ - Pas de zone OTE valide pour ", expectedDir, " sur ", _Symbol);
+            return;
+         }
+      }
+   }
+   
+   // Nouvelle discipline: sur Boom/Crash + PAINX/GAINX, n'autoriser les entrées spike
+   // que dans une zone de confluence "cluster" active.
+   bool isSpikeFamily = (cat == SYM_BOOM_CRASH || cat == SYM_WELTRADE_SYNTH);
+   if(isSpikeFamily)
+   {
+      if(!IsSpikeClusterZoneActive(_Symbol))
+      {
+         if(DebugSpikeDetection)
+            Print("🚫 SPIKE BLOQUÉ - Spike Cluster Zone non active | score=",
+                  DoubleToString(g_spikeClusterScore, 2),
+                  " | spikes=", IntegerToString(g_spikeClusterSpikeBars));
+         return;
+      }
+   }
+
    // 1. Vérifier si IA est suffisamment forte
    if(g_lastAIConfidence >= MinAIConfidencePercent)
    {
@@ -30128,6 +36757,8 @@ static double g_m5SellEntryLevel = 0.0;
 static datetime g_m5LevelsLastUpdate = 0;
 static bool g_m5BuyLevelActive = false;
 static bool g_m5SellLevelActive = false;
+static bool g_crashSellPostCorrectionArmed = false;
+static datetime g_crashSellPostCorrectionArmTime = 0;
 
 bool ReadEMAValue(const ENUM_TIMEFRAMES tf, const int period, double &valueOut)
 {
@@ -30157,6 +36788,115 @@ bool IsStrongM1M5TrendByEMAs(const string direction)
    if(dir == "SELL")
       return (bid < e9m1 && e9m1 < e21m1 && e21m1 < e50m1 && bid < e9m5 && e9m5 < e21m5 && e21m5 < e50m5);
    return false;
+}
+
+//+------------------------------------------------------------------+
+//| Confirmation OTE: patterns chandeliers + BOS sur M15/M5          |
+//+------------------------------------------------------------------+
+bool IsOTECandlestickConfirmationOnTF(const string direction, const ENUM_TIMEFRAMES tf)
+{
+   MqlRates rates[];
+   ArraySetAsSeries(rates, true);
+   if(CopyRates(_Symbol, tf, 0, 5, rates) < 5)
+      return false;
+
+   string dir = direction;
+   StringToUpper(dir);
+   if(dir != "BUY" && dir != "SELL")
+      return false;
+
+   double o1 = rates[1].open, c1 = rates[1].close, h1 = rates[1].high, l1 = rates[1].low;
+   double o2 = rates[2].open, c2 = rates[2].close, h2 = rates[2].high, l2 = rates[2].low;
+   double o3 = rates[3].open, c3 = rates[3].close;
+   double body1 = MathAbs(c1 - o1);
+   double range1 = h1 - l1;
+   double body2 = MathAbs(c2 - o2);
+   if(range1 <= 0.0)
+      return false;
+
+   if(dir == "BUY")
+   {
+      bool engulf = (c2 < o2 && c1 > o1 && c1 >= o2 && o1 <= c2);
+      bool hammer = ((MathMin(o1, c1) - l1) >= body1 * 1.5 && (h1 - MathMax(o1, c1)) <= body1 * 0.6);
+      bool dojiBull = (body1 <= range1 * 0.12 && c1 > o1);
+      bool morningStar = (c3 < o3 && body2 < MathAbs(c3 - o3) * 0.5 && c1 > o1 && c1 > ((o3 + c3) * 0.5));
+      bool bullishBreak = (c1 > h2 && c1 > o1);
+      if(engulf)
+         return true;
+      if(!OTE_AllowExtendedCandlestickPatterns)
+         return false;
+      return (hammer || dojiBull || morningStar || bullishBreak);
+   }
+
+   bool engulf = (c2 > o2 && c1 < o1 && c1 <= o2 && o1 >= c2);
+   bool shootingStar = ((h1 - MathMax(o1, c1)) >= body1 * 1.5 && (MathMin(o1, c1) - l1) <= body1 * 0.6);
+   bool dojiBear = (body1 <= range1 * 0.12 && c1 < o1);
+   bool eveningStar = (c3 > o3 && body2 < MathAbs(c3 - o3) * 0.5 && c1 < o1 && c1 < ((o3 + c3) * 0.5));
+   bool bearishBreak = (c1 < l2 && c1 < o1);
+   if(engulf)
+      return true;
+   if(!OTE_AllowExtendedCandlestickPatterns)
+      return false;
+   return (shootingStar || dojiBear || eveningStar || bearishBreak);
+}
+
+bool HasConfirmedBOSForOTE(const string direction, const ENUM_TIMEFRAMES tf, const int lookbackBars)
+{
+   int lb = MathMax(8, lookbackBars);
+   MqlRates rates[];
+   ArraySetAsSeries(rates, true);
+   if(CopyRates(_Symbol, tf, 0, lb + 5, rates) < lb + 5)
+      return false;
+
+   string dir = direction;
+   StringToUpper(dir);
+   if(dir != "BUY" && dir != "SELL")
+      return false;
+
+   double close1 = rates[1].close;
+   double recentHigh = -DBL_MAX;
+   double recentLow = DBL_MAX;
+   for(int i = 2; i < lb + 2; i++)
+   {
+      if(rates[i].high > recentHigh) recentHigh = rates[i].high;
+      if(rates[i].low < recentLow) recentLow = rates[i].low;
+   }
+
+   if(dir == "BUY")
+      return (close1 > recentHigh);
+   return (close1 < recentLow);
+}
+
+bool HasOTEBOSConfirmationM15OrM5(const string direction)
+{
+   if(!OTE_RequireBOSConfirmation)
+      return true;
+
+   bool bosM15 = HasConfirmedBOSForOTE(direction, PERIOD_M15, OTE_BOSLookbackBars);
+   bool bosM5 = HasConfirmedBOSForOTE(direction, PERIOD_M5, OTE_BOSLookbackBars);
+   bool ok = (bosM15 || bosM5);
+   if(ok)
+      Print("✅ BOS OTE confirmé (", (bosM15 ? "M15" : "M5"), ") pour ", direction, " sur ", _Symbol);
+   return ok;
+}
+
+bool IsOTEEntryConfirmedOnM15OrM5(const string direction)
+{
+   if(!OTE_RequireM5CandlestickConfirmation && !OTE_RequireM15OrM5ConfirmationBeforeM1)
+      return true;
+
+   bool m15 = IsOTECandlestickConfirmationOnTF(direction, PERIOD_M15);
+   bool m5 = IsOTECandlestickConfirmationOnTF(direction, PERIOD_M5);
+   bool ok = (m15 || m5);
+   if(ok)
+      Print("✅ Confirmation candlestick OTE validée (", (m15 ? "M15" : "M5"), ") pour ", direction, " sur ", _Symbol);
+   return ok;
+}
+
+// Compatibilité: l'ancien gate M5 délègue vers le nouveau moteur multi-pattern.
+bool IsM5CandlestickConfirmation(const string direction)
+{
+   return IsOTECandlestickConfirmationOnTF(direction, PERIOD_M5);
 }
 
 bool IsStairEma13M1AndEma21M5TouchReady(const string direction)
@@ -31139,11 +37879,89 @@ void UpdateM5EntryLevelsAndLines()
    
    // Dessiner les lignes épaisses sur le graphique
    DrawM5EntryLines();
+   DrawM1TrendLines(); // NOUVEAU: lignes de tendance M1
    
    g_m5LevelsLastUpdate = currentTime;
    
    Print("📊 NIVEAUX M5 MIS À JOUR - Buy: ", DoubleToString(g_m5BuyEntryLevel, _Digits), 
          " | Sell: ", DoubleToString(g_m5SellEntryLevel, _Digits));
+}
+
+//+------------------------------------------------------------------+
+//| Dessine les lignes de tendance M1 pour identifier les entrées     |
+//+------------------------------------------------------------------+
+void DrawM1TrendLines()
+{
+   // Supprimer les anciennes lignes M1
+   ObjectsDeleteAll(0, "M1_TREND_");
+   
+   datetime currentTime = TimeCurrent();
+   datetime lineEndTime = currentTime + PeriodSeconds(PERIOD_M1) * 50; // Étendre sur 50 bougies M1
+   datetime futureLabelTime = currentTime + PeriodSeconds(PERIOD_M1) * 40;
+   
+   // Récupérer les données M1
+   MqlRates m1Rates[];
+   ArraySetAsSeries(m1Rates, true);
+   if(CopyRates(_Symbol, PERIOD_M1, 0, 30, m1Rates) < 20)
+      return;
+   
+   // Calculer la tendance M1 simple (régression linéaire sur 20 bougies)
+   double sumX = 0, sumY = 0, sumXY = 0, sumX2 = 0;
+   int lookback = 20;
+   
+   for(int i = 0; i < lookback; i++)
+   {
+      double x = i;
+      double y = m1Rates[i].close;
+      sumX += x;
+      sumY += y;
+      sumXY += x * y;
+      sumX2 += x * x;
+   }
+   
+   double slope = (lookback * sumXY - sumX * sumY) / (lookback * sumX2 - sumX * sumY);
+   double intercept = (sumY - slope * sumX) / lookback;
+   
+   // Calculer les prix de tendance actuels et futurs
+   double currentTrendPrice = intercept; // x = 0 pour la bougie actuelle
+   double futureTrendPrice = intercept + slope * 10; // x = 10 pour 10 bougies dans le futur
+   
+   // Déterminer la direction de la tendance
+   bool bullishTrend = (slope > 0);
+   
+   // Ligne de tendance M1 BUY (si bullish)
+   if(bullishTrend)
+   {
+      string m1BuyTrendName = "M1_TREND_BUY_LINE";
+      ObjectCreate(0, m1BuyTrendName, OBJ_TREND, 0, currentTime - PeriodSeconds(PERIOD_M1) * 20, intercept + slope * 20, currentTime + PeriodSeconds(PERIOD_M1) * 10, futureTrendPrice);
+      ObjectSetInteger(0, m1BuyTrendName, OBJPROP_COLOR, clrLime);
+      ObjectSetInteger(0, m1BuyTrendName, OBJPROP_WIDTH, 3);
+      ObjectSetInteger(0, m1BuyTrendName, OBJPROP_STYLE, STYLE_SOLID);
+      ObjectSetInteger(0, m1BuyTrendName, OBJPROP_RAY_RIGHT, true);
+      ObjectSetInteger(0, m1BuyTrendName, OBJPROP_BACK, false);
+      
+      string m1BuyLabel = "M1_TREND_BUY_LABEL";
+      ObjectCreate(0, m1BuyLabel, OBJ_TEXT, 0, futureLabelTime, futureTrendPrice);
+      ObjectSetString(0, m1BuyLabel, OBJPROP_TEXT, "M1 TREND BUY " + DoubleToString(futureTrendPrice, _Digits));
+      ObjectSetInteger(0, m1BuyLabel, OBJPROP_COLOR, clrLime);
+      ObjectSetInteger(0, m1BuyLabel, OBJPROP_FONTSIZE, 10);
+   }
+   else // Trend baissier
+   {
+      string m1SellTrendName = "M1_TREND_SELL_LINE";
+      ObjectCreate(0, m1SellTrendName, OBJ_TREND, 0, currentTime - PeriodSeconds(PERIOD_M1) * 20, intercept + slope * 20, currentTime + PeriodSeconds(PERIOD_M1) * 10, futureTrendPrice);
+      ObjectSetInteger(0, m1SellTrendName, OBJPROP_COLOR, clrRed);
+      ObjectSetInteger(0, m1SellTrendName, OBJPROP_WIDTH, 3);
+      ObjectSetInteger(0, m1SellTrendName, OBJPROP_STYLE, STYLE_SOLID);
+      ObjectSetInteger(0, m1SellTrendName, OBJPROP_RAY_RIGHT, true);
+      ObjectSetInteger(0, m1SellTrendName, OBJPROP_BACK, false);
+      
+      string m1SellLabel = "M1_TREND_SELL_LABEL";
+      ObjectCreate(0, m1SellLabel, OBJ_TEXT, 0, futureLabelTime, futureTrendPrice);
+      ObjectSetString(0, m1SellLabel, OBJPROP_TEXT, "M1 TREND SELL " + DoubleToString(futureTrendPrice, _Digits));
+      ObjectSetInteger(0, m1SellLabel, OBJPROP_COLOR, clrRed);
+      ObjectSetInteger(0, m1SellLabel, OBJPROP_FONTSIZE, 10);
+   }
 }
 
 //+------------------------------------------------------------------+
@@ -31387,21 +38205,23 @@ void SyncMovingEntryPointLimitOrders()
          if(MathAbs(existingPrice - entry) < moveThreshold)
             continue;
 
-         MqlTradeRequest modReq = {};
-         MqlTradeResult  modRes = {};
-         modReq.action = TRADE_ACTION_MODIFY;
-         modReq.order  = existingTicket;
-         modReq.symbol = _Symbol;
-         modReq.magic  = InpMagicNumber;
-         modReq.price  = NormalizeDouble(entry, _Digits);
-         modReq.sl     = NormalizeDouble(sl, _Digits);
-         modReq.tp     = NormalizeDouble(tp, _Digits);
-         if(OrderSend(modReq, modRes))
+         // Suppression de l'ancien ordre au lieu de le modifier
+         MqlTradeRequest delReq = {};
+         MqlTradeResult  delRes = {};
+         delReq.action = TRADE_ACTION_REMOVE;
+         delReq.order  = existingTicket;
+         delReq.symbol = _Symbol;
+         
+         if(OrderSend(delReq, delRes))
          {
-            Print("🔁 LIMIT ENTRY TRACK modifié | ", _Symbol, " | ", dir,
-                  " | ", DoubleToString(existingPrice, _Digits), " -> ", DoubleToString(entry, _Digits));
+            Print("🗑️ LIMIT ENTRY TRACK ancien supprimé (remplacement) | ", _Symbol, " | ", dir);
          }
-         continue;
+         else
+         {
+            Print("❌ LIMIT ENTRY TRACK suppression échouée | ", _Symbol, " | erreur: ", delRes.retcode);
+            continue; // Si on ne peut pas supprimer, on abandonne pour ce tick
+         }
+         // L'ordre sera recréé dans la suite de la boucle (qui traite la création quand il n'y a pas d'existingTicket)
       }
 
       if(CountPositionsForSymbol(_Symbol) > 0)
@@ -31447,8 +38267,28 @@ void CheckAndExecuteM5TouchEntryTrade()
    double currentBid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double currentAsk = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   // Tolérance de touch: élargie pour éviter de rater l'ENTRY M5 sur spikes rapides.
+   double touchTolerance = point * 5;
+   if(SMC_GetSymbolCategory(_Symbol) == SYM_BOOM_CRASH && M5TouchTolerancePointsBoomCrash > 0)
+      touchTolerance = point * (double)M5TouchTolerancePointsBoomCrash;
 
-   if(IsInEquilibriumCorrectionZone())
+   bool inCorrectionNow = IsInEquilibriumCorrectionZone();
+
+   // Crash SELL: si la correction est active mais que le prix touche proprement SELL ENTRY M5,
+   // on "arme" la réentrée pour tirer dès la sortie de correction (évite entrée tardive).
+   if(CrashPostCorrectionEmaReentryEnabled &&
+      IsCrashSymbol(_Symbol) &&
+      g_m5SellLevelActive && g_m5SellEntryLevel > 0.0)
+   {
+      double armTol = touchTolerance;
+      if(MathAbs(currentBid - g_m5SellEntryLevel) <= armTol)
+      {
+         g_crashSellPostCorrectionArmed = true;
+         g_crashSellPostCorrectionArmTime = TimeCurrent();
+      }
+   }
+
+   if(inCorrectionNow)
    {
       static datetime lastCorrTouchLog = 0;
       datetime now = TimeCurrent();
@@ -31460,11 +38300,33 @@ void CheckAndExecuteM5TouchEntryTrade()
       }
       return;
    }
-   
-   // Tolérance de touch: élargie pour éviter de rater l'ENTRY M5 sur spikes rapides.
-   double touchTolerance = point * 5;
-   if(SMC_GetSymbolCategory(_Symbol) == SYM_BOOM_CRASH && M5TouchTolerancePointsBoomCrash > 0)
-      touchTolerance = point * (double)M5TouchTolerancePointsBoomCrash;
+
+   // Exécuter immédiatement la réentrée SELL armée après sortie de correction (fenêtre courte).
+   if(CrashPostCorrectionEmaReentryEnabled &&
+      IsCrashSymbol(_Symbol) &&
+      g_crashSellPostCorrectionArmed)
+   {
+      int armWindow = MathMax(10, CrashPostCorrectionArmWindowSec);
+      if((TimeCurrent() - g_crashSellPostCorrectionArmTime) <= armWindow)
+      {
+         bool nearSell = (g_m5SellLevelActive && g_m5SellEntryLevel > 0.0 &&
+                         MathAbs(currentBid - g_m5SellEntryLevel) <= touchTolerance * 1.4);
+         bool emaOk = (!CrashPostCorrectionRequireStrongEMA || IsStrongM1M5TrendByEMAs("SELL"));
+         if(nearSell && emaOk)
+         {
+            if(ExecuteM5TouchOrder("SELL", "CRASH_POST_CORR_EMA_REENTRY"))
+            {
+               Print("⚡ CRASH REENTRY EXÉCUTÉ - sortie correction + touch EMA/M5 propre sur ", _Symbol);
+               g_crashSellPostCorrectionArmed = false;
+               return;
+            }
+         }
+      }
+      else
+      {
+         g_crashSellPostCorrectionArmed = false;
+      }
+   }
    
    // DEBUG: Afficher les niveaux actuels et prix
    static datetime lastDebugLog = 0;
@@ -32356,6 +39218,179 @@ void CheckAndExecuteStairEntry()
 //+------------------------------------------------------------------+
 //| Exécute un ordre au marché lors du touch M5 (ou stairEntry)       |
 //+------------------------------------------------------------------+
+void CheckAndExecuteEMAPullbackAndSweepReclaim()
+{
+   if(!EnableTrading || BlockAllTrades)
+      return;
+   if(CountPositionsForSymbol(_Symbol) > 0)
+      return;
+
+   string su = _Symbol;
+   StringToUpper(su);
+   bool isXau = (StringFind(su, "XAU") >= 0 || StringFind(su, "GOLD") >= 0);
+   ENUM_SYMBOL_CATEGORY cat = SMC_GetSymbolCategory(_Symbol);
+   bool isVolFamily = (cat == SYM_VOLATILITY || cat == SYM_WELTRADE_SYNTH);
+
+   datetime now = TimeCurrent();
+   static datetime s_lastEmaAttempt = 0;
+   static datetime s_lastSweepAttempt = 0;
+
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   if(point <= 0.0) point = _Point;
+
+   MqlRates m1[];
+   ArraySetAsSeries(m1, true);
+   if(CopyRates(_Symbol, PERIOD_M1, 0, 8, m1) < 5)
+      return;
+
+   double atrM1 = GetATRValue(PERIOD_M1, 14);
+   if(atrM1 <= 0.0)
+      atrM1 = MathAbs(m1[1].high - m1[1].low);
+   if(atrM1 <= 0.0)
+      atrM1 = point * 20.0;
+
+   // Tendance structurelle H1 + M15 (optionnelle).
+   double e50h1 = GetEMA(_Symbol, PERIOD_H1, 50);
+   double e200h1 = GetEMA(_Symbol, PERIOD_H1, 200);
+   double e50m15 = GetEMA(_Symbol, PERIOD_M15, 50);
+   double e200m15 = GetEMA(_Symbol, PERIOD_M15, 200);
+   bool trendBuy = (e50h1 > 0.0 && e200h1 > 0.0 && e50m15 > 0.0 && e200m15 > 0.0 && e50h1 > e200h1 && e50m15 > e200m15);
+   bool trendSell = (e50h1 > 0.0 && e200h1 > 0.0 && e50m15 > 0.0 && e200m15 > 0.0 && e50h1 < e200h1 && e50m15 < e200m15);
+
+   // 1) Pullback EMA dynamique (touch/rejet EMA 21/50) UNIQUEMENT en tendance forte
+   //    -> jamais en correction ou en range.
+   if(!isXau && UseEMAPullbackDynamicEntry && (s_lastEmaAttempt == 0 || (now - s_lastEmaAttempt) >= MathMax(1, EMAPullbackCooldownSeconds)))
+   {
+      if(isVolFamily && !EMAPullbackAllowOnVolatility)
+      {
+         // Sur Step/Volatility: laisser Sweep+Reclaim décider, éviter EMA seul.
+      }
+      else
+      {
+         s_lastEmaAttempt = now;
+         double tol = MathMax(point * 5.0, atrM1 * MathMax(0.05, EMAPullbackMaxDistanceATRMult));
+         double aiConfPct = AIConfidencePercent();
+         if(EMAPullbackMinAIConfidencePercent <= 0.0 || aiConfPct + 1e-9 >= EMAPullbackMinAIConfidencePercent)
+         {
+            double e21m1 = 0.0, e50m1 = 0.0, e21m5 = 0.0, e50m5 = 0.0;
+            bool has21m1 = ReadEMAValue(PERIOD_M1, 21, e21m1);
+            bool has50m1 = ReadEMAValue(PERIOD_M1, 50, e50m1);
+            bool has21m5 = ReadEMAValue(PERIOD_M5, 21, e21m5);
+            bool has50m5 = ReadEMAValue(PERIOD_M5, 50, e50m5);
+
+            double body = MathAbs(m1[1].close - m1[1].open);
+            double lowWick = MathMax(0.0, MathMin(m1[1].open, m1[1].close) - m1[1].low);
+            double upWick = MathMax(0.0, m1[1].high - MathMax(m1[1].open, m1[1].close));
+            bool bullReject = (m1[1].close > m1[1].open) && (lowWick >= body * 0.30);
+            bool bearReject = (m1[1].close < m1[1].open) && (upWick >= body * 0.30);
+
+            bool touchBuy = false;
+            bool touchSell = false;
+            if(has21m1) { touchBuy = touchBuy || (m1[1].low <= e21m1 + tol && m1[1].close >= e21m1 - tol); touchSell = touchSell || (m1[1].high >= e21m1 - tol && m1[1].close <= e21m1 + tol); }
+            if(has50m1) { touchBuy = touchBuy || (m1[1].low <= e50m1 + tol && m1[1].close >= e50m1 - tol); touchSell = touchSell || (m1[1].high >= e50m1 - tol && m1[1].close <= e50m1 + tol); }
+            if(has21m5) { touchBuy = touchBuy || (ask <= e21m5 + tol); touchSell = touchSell || (bid >= e21m5 - tol); }
+            if(has50m5) { touchBuy = touchBuy || (ask <= e50m5 + tol); touchSell = touchSell || (bid >= e50m5 - tol); }
+
+            bool inCorrection = IsInEquilibriumCorrectionZone();
+            bool inRange = IsMarketInConsolidation(PERIOD_M1, 20) || IsMarketInConsolidation(PERIOD_M5, 20);
+            bool strongTrendBuy = trendBuy && IsStrongM1M5TrendByEMAs("BUY");
+            bool strongTrendSell = trendSell && IsStrongM1M5TrendByEMAs("SELL");
+
+            if(inCorrection || inRange)
+            {
+               static datetime s_lastEmaBlockLog = 0;
+               if(now - s_lastEmaBlockLog >= 20)
+               {
+                  Print("🚫 EMA PULLBACK DYN BLOQUÉ - marché en correction/range | ", _Symbol,
+                        " | correction=", (inCorrection ? "oui" : "non"),
+                        " | range=", (inRange ? "oui" : "non"));
+                  s_lastEmaBlockLog = now;
+               }
+            }
+            else if(touchBuy && bullReject && strongTrendBuy && (!EMAPullbackRequireTrendH1M15 || trendBuy))
+            {
+               if(ExecuteM5TouchOrder("BUY", "EMA_PULLBACK_DYN"))
+               {
+                  Print("⚡ EMA PULLBACK DYN EXÉCUTÉ - BUY ", _Symbol,
+                        " | tol=", DoubleToString(tol, _Digits));
+                  return;
+               }
+            }
+            else if(touchSell && bearReject && strongTrendSell && (!EMAPullbackRequireTrendH1M15 || trendSell))
+            {
+               if(ExecuteM5TouchOrder("SELL", "EMA_PULLBACK_DYN"))
+               {
+                  Print("⚡ EMA PULLBACK DYN EXÉCUTÉ - SELL ", _Symbol,
+                        " | tol=", DoubleToString(tol, _Digits));
+                  return;
+               }
+            }
+         }
+      }
+   }
+
+   // 2) Liquidity sweep + reclaim (capturer les retournements rapides hors OTE)
+   // En mode Boom/Crash OTE+EMA-only: on désactive ce chemin pour rester strict.
+   bool allowSweepReclaim = true;
+   if(BoomCrashOnlyOTEAndEMAPullback && cat == SYM_BOOM_CRASH)
+      allowSweepReclaim = false;
+   if(allowSweepReclaim && UseLiquiditySweepReclaimEntry &&
+      (s_lastSweepAttempt == 0 || (now - s_lastSweepAttempt) >= MathMax(1, SweepReclaimCooldownSeconds)))
+   {
+      s_lastSweepAttempt = now;
+
+      string lsType = "";
+      int barsAgo = 99;
+      if(SMC_DetectLiquiditySweepEx(_Symbol, PERIOD_M5, lsType, barsAgo))
+      {
+         MqlRates m5[];
+         ArraySetAsSeries(m5, true);
+         int copied = CopyRates(_Symbol, PERIOD_M5, 0, 20, m5);
+         if(copied > (barsAgo + 1) && barsAgo >= 1)
+         {
+            double tolRec = MathMax(point * (double)MathMax(1, SweepReclaimTolerancePoints), atrM1 * 0.10);
+            bool bullCandle = (m1[1].close > m1[1].open);
+            bool bearCandle = (m1[1].close < m1[1].open);
+
+            if(lsType == "SSL")
+            {
+               // Sweep de liquidité vendeuse (low balayé) -> reclaim haussier attendu.
+               double reclaimLevel = m5[barsAgo + 1].low;
+               bool reclaimed = (ask >= reclaimLevel + tolRec);
+               if(reclaimed && bullCandle && (!SweepReclaimRequireTrendFilter || trendBuy))
+               {
+                  if(ExecuteM5TouchOrder("BUY", "SWEEP_RECLAIM"))
+                  {
+                     Print("🧲 SWEEP+RECLAIM EXÉCUTÉ - BUY ", _Symbol,
+                           " | level=", DoubleToString(reclaimLevel, _Digits),
+                           " | tol=", DoubleToString(tolRec, _Digits));
+                     return;
+                  }
+               }
+            }
+            else if(lsType == "BSL")
+            {
+               // Sweep de liquidité acheteuse (high balayé) -> reclaim baissier attendu.
+               double reclaimLevel = m5[barsAgo + 1].high;
+               bool reclaimed = (bid <= reclaimLevel - tolRec);
+               if(reclaimed && bearCandle && (!SweepReclaimRequireTrendFilter || trendSell))
+               {
+                  if(ExecuteM5TouchOrder("SELL", "SWEEP_RECLAIM"))
+                  {
+                     Print("🧲 SWEEP+RECLAIM EXÉCUTÉ - SELL ", _Symbol,
+                           " | level=", DoubleToString(reclaimLevel, _Digits),
+                           " | tol=", DoubleToString(tolRec, _Digits));
+                     return;
+                  }
+               }
+            }
+         }
+      }
+   }
+}
+
 bool ExecuteM5TouchOrder(string direction, string commentCore, bool dryRun)
 {
    if(!IsHighVolatilityCapitalGatePassed(_Symbol, "M5 TOUCH"))
@@ -32370,14 +39405,36 @@ bool ExecuteM5TouchOrder(string direction, string commentCore, bool dryRun)
 
    const bool isStairEntry = (commentCore == "STAIR_ENTRY");
    const bool isOteCurTouchFor = (commentCore == "OTE_CUR_TOUCH_FOR");
-   const bool fastScalpByDesign = (isStairEntry || isOteCurTouchFor);
+   const bool isEmaPullbackDyn = (StringFind(commentCore, "EMA_PULLBACK") >= 0);
+   const bool isSweepReclaim = (StringFind(commentCore, "SWEEP_RECLAIM") >= 0);
+   const bool isCrashPostCorrReentry = (StringFind(commentCore, "CRASH_POST_CORR_EMA") >= 0);
+   const bool fastScalpByDesign = (isStairEntry || isOteCurTouchFor || isEmaPullbackDyn || isSweepReclaim || isCrashPostCorrReentry);
 
    string logPfx = "M5 TOUCH";
    if(isStairEntry)
       logPfx = "STAIR ENTRY";
    else if(isOteCurTouchFor)
       logPfx = "OTE CUR TOUCH FOR";
+   else if(isEmaPullbackDyn)
+      logPfx = "EMA PULLBACK DYN";
+   else if(isSweepReclaim)
+      logPfx = "SWEEP RECLAIM";
+   else if(isCrashPostCorrReentry)
+      logPfx = "CRASH POST-CORR EMA REENTRY";
    const bool quiet = dryRun;
+   if(isOteCurTouchFor)
+   {
+      if(!HasOTEBOSConfirmationM15OrM5(direction))
+      {
+         if(!quiet) Print("🚫 OTE CUR TOUCH FOR BLOQUÉ - BOS non confirmé (M15/M5) | ", _Symbol, " | dir=", direction);
+         return false;
+      }
+      if(!IsOTEEntryConfirmedOnM15OrM5(direction))
+      {
+         if(!quiet) Print("🚫 OTE CUR TOUCH FOR BLOQUÉ - confirmation candlestick M15/M5 absente | ", _Symbol, " | dir=", direction);
+         return false;
+      }
+   }
    if(isOteCurTouchFor)
    {
       // Priorité scalping OTE courant: si un pending bloque, le supprimer puis exécuter au marché.
@@ -32712,6 +39769,49 @@ bool ExecuteM5TouchOrder(string direction, string commentCore, bool dryRun)
       }
    }
    
+   // Filtre anti "position timide" pour setups rapides (STAIR/OTE_CUR/EMA_PULLBACK/SWEEP_RECLAIM)
+   if(fastScalpByDesign)
+   {
+      double slPts = MathAbs(price - stopLoss) / point;
+      double tpPts = MathAbs(takeProfit - price) / point;
+      double rr = (slPts > 0.0 ? (tpPts / slPts) : 0.0);
+
+      if(slPts < (double)MathMax(1, FastSetupMinSLPoints))
+      {
+         if(!quiet)
+            Print("🚫 ", logPfx, " BLOQUÉ - SL trop court (timide): ",
+                  DoubleToString(slPts, 1), " pts < ", IntegerToString(FastSetupMinSLPoints), " pts");
+         return false;
+      }
+      if(tpPts < (double)MathMax(1, FastSetupMinTPPoints))
+      {
+         if(!quiet)
+            Print("🚫 ", logPfx, " BLOQUÉ - TP trop court (timide): ",
+                  DoubleToString(tpPts, 1), " pts < ", IntegerToString(FastSetupMinTPPoints), " pts");
+         return false;
+      }
+      if(rr + 1e-9 < MathMax(0.1, FastSetupMinRR))
+      {
+         if(!quiet)
+            Print("🚫 ", logPfx, " BLOQUÉ - RR trop faible (timide): ",
+                  DoubleToString(rr, 2), " < ", DoubleToString(FastSetupMinRR, 2));
+         return false;
+      }
+
+      double tickVal = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+      double tickSz = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+      double expectedUsd = 0.0;
+      if(tickVal > 0.0 && tickSz > 0.0 && lotSize > 0.0)
+         expectedUsd = (MathAbs(takeProfit - price) / tickSz) * tickVal * lotSize;
+      if(expectedUsd + 1e-9 < MathMax(0.0, FastSetupMinExpectedProfitUSD))
+      {
+         if(!quiet)
+            Print("🚫 ", logPfx, " BLOQUÉ - profit potentiel trop faible (timide): ",
+                  DoubleToString(expectedUsd, 2), "$ < ", DoubleToString(FastSetupMinExpectedProfitUSD, 2), "$");
+         return false;
+      }
+   }
+
    // Préparer la requête d'ordre
    MqlTradeRequest request = {};
    MqlTradeResult result = {};
@@ -33301,7 +40401,890 @@ double ExtractJSONDouble360(string json, string key) {
 
 //| END OF PROGRAM                                                  |
 
+//+------------------------------------------------------------------+
+//| TRADING ALGO GUI - Interface Manuel Charles Robot                 |
+//+------------------------------------------------------------------+
 
+//+------------------------------------------------------------------+
+//| Créer le panneau de trading GUI                                    |
+//+------------------------------------------------------------------+
+void CreateTradingAlgoGUI()
+{
+   if(!UseTradingAlgoGUI) return;
+   
+   int x = GUI_PanelX;
+   int y = GUI_PanelY;
+   int w = GUI_PanelWidth;
+   int h = 580;
+   
+   // Fond du panneau
+   GUI_CreateRectangle("GUI_PANEL_BG", x, y, w, h, GUI_PanelBgColor);
+   
+   // Titre
+   GUI_CreateLabel("GUI_TITLE", x + 10, y + 10, "🤖 TRADING ALGO - CHARLES", GUI_FontSize + 2, clrYellow);
+   
+   // Symbole
+   GUI_CreateLabel("GUI_SYMBOL", x + 10, y + 40, "SYMBOL: " + _Symbol, GUI_FontSize, GUI_PanelTextColor);
+   
+   // Signal actuel
+   GUI_CreateLabel("GUI_SIGNAL_LABEL", x + 10, y + 65, "SIGNAL:", GUI_FontSize, GUI_PanelTextColor);
+   GUI_CreateLabel("GUI_SIGNAL_VALUE", x + 80, y + 65, "⏳ WAIT", GUI_FontSize + 1, clrGray);
+   
+   // Boutons BUY/SELL
+   GUI_CreateButton("GUI_BTN_BUY", x + 10, y + 90, 80, 30, "📈 BUY", clrWhite, clrGreen);
+   GUI_CreateButton("GUI_BTN_SELL", x + 100, y + 90, 80, 30, "📉 SELL", clrWhite, clrRed);
+   GUI_CreateButton("GUI_BTN_WAIT", x + 190, y + 90, 70, 30, "⏳ WAIT", clrWhite, clrGray);
+   
+   // Séparateur
+   GUI_CreateHLine("GUI_SEP1", x + 10, y + 130, w - 20, clrWhite);
+   
+   // Risque %
+   GUI_CreateLabel("GUI_RISK_LABEL", x + 10, y + 140, "RISK %:", GUI_FontSize, GUI_PanelTextColor);
+   GUI_CreateEdit("GUI_RISK_INPUT", x + 80, y + 138, 50, 20, DoubleToString(GUI_DefaultRiskPercent, 2), GUI_FontSize);
+   
+   // Lot size calculé
+   GUI_CreateLabel("GUI_LOT_LABEL", x + 10, y + 165, "LOT SIZE:", GUI_FontSize, GUI_PanelTextColor);
+   GUI_CreateLabel("GUI_LOT_VALUE", x + 80, y + 165, "0.01", GUI_FontSize + 1, clrYellow);
+   
+   // Séparateur
+   GUI_CreateHLine("GUI_SEP2", x + 10, y + 190, w - 20, clrWhite);
+   
+   // TP1
+   GUI_CreateLabel("GUI_TP1_LABEL", x + 10, y + 200, "TP1:", GUI_FontSize, GUI_PanelTextColor);
+   GUI_CreateEdit("GUI_TP1_INPUT", x + 80, y + 198, 50, 20, DoubleToString(GUI_DefaultTP1, 1), GUI_FontSize);
+   GUI_CreateLabel("GUI_TP1_PRICE", x + 140, y + 200, "---", GUI_FontSize, clrLime);
+   
+   // TP2
+   GUI_CreateLabel("GUI_TP2_LABEL", x + 10, y + 225, "TP2:", GUI_FontSize, GUI_PanelTextColor);
+   GUI_CreateEdit("GUI_TP2_INPUT", x + 80, y + 223, 50, 20, DoubleToString(GUI_DefaultTP2, 1), GUI_FontSize);
+   GUI_CreateLabel("GUI_TP2_PRICE", x + 140, y + 225, "---", GUI_FontSize, clrLime);
+   
+   // TP3
+   GUI_CreateLabel("GUI_TP3_LABEL", x + 10, y + 250, "TP3:", GUI_FontSize, GUI_PanelTextColor);
+   GUI_CreateEdit("GUI_TP3_INPUT", x + 80, y + 248, 50, 20, DoubleToString(GUI_DefaultTP3, 1), GUI_FontSize);
+   GUI_CreateLabel("GUI_TP3_PRICE", x + 140, y + 250, "---", GUI_FontSize, clrLime);
+   
+   // TP4
+   GUI_CreateLabel("GUI_TP4_LABEL", x + 10, y + 275, "TP4:", GUI_FontSize, GUI_PanelTextColor);
+   GUI_CreateEdit("GUI_TP4_INPUT", x + 80, y + 273, 50, 20, DoubleToString(GUI_DefaultTP4, 1), GUI_FontSize);
+   GUI_CreateLabel("GUI_TP4_PRICE", x + 140, y + 275, "---", GUI_FontSize, clrLime);
+   
+   // SL
+   GUI_CreateLabel("GUI_SL_LABEL", x + 10, y + 300, "STOP-LOSS:", GUI_FontSize, GUI_PanelTextColor);
+   GUI_CreateEdit("GUI_SL_INPUT", x + 80, y + 298, 50, 20, DoubleToString(GUI_DefaultSL, 1), GUI_FontSize);
+   GUI_CreateLabel("GUI_SL_PRICE", x + 140, y + 300, "---", GUI_FontSize, clrRed);
+   
+   // Séparateur
+   GUI_CreateHLine("GUI_SEP3", x + 10, y + 325, w - 20, clrWhite);
+   
+   // Statistiques
+   GUI_CreateLabel("GUI_RISK_USD", x + 10, y + 335, "Risk USD: ---", GUI_FontSize - 1, clrOrange);
+   GUI_CreateLabel("GUI_REWARD_USD", x + 10, y + 350, "Reward USD: ---", GUI_FontSize - 1, clrLime);
+   GUI_CreateLabel("GUI_RR_RATIO", x + 10, y + 365, "R/R: ---", GUI_FontSize - 1, clrCyan);
+   
+   // Séparateur IA
+   // GUI_CreateHLine("GUI_SEP4", x + 10, y + 380, w - 20, clrYellow);
+   
+   // Section Analyse IA
+   // GUI_CreateLabel("GUI_AI_TITLE", x + 10, y + 390, "🤖 ANALYSE IA", GUI_FontSize, clrYellow);
+   
+   // Bouton Analyse IA
+   // GUI_CreateButton("GUI_BTN_AI_ANALYZE", x + 10, y + 410, w - 20, 30, "📊 ANALYSER TECHNIQUE", clrWhite, clrMagenta);
+   
+   // Résultat IA
+   // GUI_CreateLabel("GUI_AI_ACTION_LABEL", x + 10, y + 445, "Signal IA:", GUI_FontSize, GUI_PanelTextColor);
+   // GUI_CreateLabel("GUI_AI_ACTION_VALUE", x + 80, y + 445, "⏳ WAIT", GUI_FontSize + 1, clrGray);
+   
+   // GUI_CreateLabel("GUI_AI_CONFIDENCE_LABEL", x + 10, y + 465, "Confiance:", GUI_FontSize, GUI_PanelTextColor);
+   // GUI_CreateLabel("GUI_AI_CONFIDENCE_VALUE", x + 80, y + 465, "---", GUI_FontSize, clrCyan);
+   
+   // GUI_CreateLabel("GUI_AI_REASON_LABEL", x + 10, y + 485, "Raison:", GUI_FontSize, GUI_PanelTextColor);
+   // GUI_CreateLabel("GUI_AI_REASON_VALUE", x + 80, y + 485, "---", GUI_FontSize - 1, clrWhite);
+   
+   // Séparateur final
+   // GUI_CreateHLine("GUI_SEP5", x + 10, y + 505, w - 20, clrWhite);
+   
+   // Bouton EXECUTE
+   GUI_CreateButton("GUI_BTN_EXECUTE", x + 10, y + 380, w - 20, 35, "🚀 EXECUTE TRADE", clrWhite, clrBlue);
+   
+   // Initialiser les valeurs
+   MqlTick tick;
+   if(SymbolInfoTick(_Symbol, tick))
+      g_guiEntryPrice = tick.ask;
+   
+   g_guiRiskPercent = GUI_DefaultRiskPercent;
+   g_guiTP1 = GUI_DefaultTP1;
+   g_guiTP2 = GUI_DefaultTP2;
+   g_guiTP3 = GUI_DefaultTP3;
+   g_guiTP4 = GUI_DefaultTP4;
+   g_guiSL = GUI_DefaultSL;
+   
+   // Initialiser les variables IA
+   // g_guiAIAnalysisReady = false;
+   // g_guiAIAction = "WAIT";
+   // g_guiAIConfidence = 0.0;
+   // g_guiAIReason = "";
+   // g_guiAIStopLoss = 0;
+   // g_guiAITakeProfit = 0;
+   // g_guiAIModelUsed = "";
+   
+   Print("✅ Panneau Trading Algo GUI créé");
+}
 
+//+------------------------------------------------------------------+
+//| Calculer les TP/SL GUI                                             |
+//+------------------------------------------------------------------+
+void GUI_CalculateTPSL()
+{
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+   
+   if(g_guiSignal == "BUY")
+   {
+      g_guiSL = g_guiEntryPrice - (StringToDouble(ObjectGetString(0, "GUI_SL_INPUT", OBJPROP_TEXT)) * point);
+      g_guiTP1 = g_guiEntryPrice + (StringToDouble(ObjectGetString(0, "GUI_TP1_INPUT", OBJPROP_TEXT)) * point);
+      g_guiTP2 = g_guiEntryPrice + (StringToDouble(ObjectGetString(0, "GUI_TP2_INPUT", OBJPROP_TEXT)) * point);
+      g_guiTP3 = g_guiEntryPrice + (StringToDouble(ObjectGetString(0, "GUI_TP3_INPUT", OBJPROP_TEXT)) * point);
+      g_guiTP4 = g_guiEntryPrice + (StringToDouble(ObjectGetString(0, "GUI_TP4_INPUT", OBJPROP_TEXT)) * point);
+   }
+   else if(g_guiSignal == "SELL")
+   {
+      g_guiSL = g_guiEntryPrice + (StringToDouble(ObjectGetString(0, "GUI_SL_INPUT", OBJPROP_TEXT)) * point);
+      g_guiTP1 = g_guiEntryPrice - (StringToDouble(ObjectGetString(0, "GUI_TP1_INPUT", OBJPROP_TEXT)) * point);
+      g_guiTP2 = g_guiEntryPrice - (StringToDouble(ObjectGetString(0, "GUI_TP2_INPUT", OBJPROP_TEXT)) * point);
+      g_guiTP3 = g_guiEntryPrice - (StringToDouble(ObjectGetString(0, "GUI_TP3_INPUT", OBJPROP_TEXT)) * point);
+      g_guiTP4 = g_guiEntryPrice - (StringToDouble(ObjectGetString(0, "GUI_TP4_INPUT", OBJPROP_TEXT)) * point);
+   }
+}
 
+//+------------------------------------------------------------------+
+//| Calculer le lot size GUI selon le risque                           |
+//+------------------------------------------------------------------+
+void GUI_CalculateLotSize()
+{
+   g_guiRiskPercent = StringToDouble(ObjectGetString(0, "GUI_RISK_INPUT", OBJPROP_TEXT));
+   
+   double balance = AccountInfoDouble(ACCOUNT_BALANCE);
+   double riskAmount = balance * (g_guiRiskPercent / 100.0);
+   
+   double slDistance = MathAbs(g_guiEntryPrice - g_guiSL);
+   double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+   double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+   
+   if(slDistance > 0 && tickSize > 0)
+   {
+      double lots = riskAmount / (slDistance / tickSize * tickValue);
+      g_guiLotSize = NormalizeLotSizeGUI(lots);
+      
+      g_guiRiskUSD = riskAmount;
+      g_guiRewardUSD = (MathAbs(g_guiTP1 - g_guiEntryPrice) / slDistance) * riskAmount;
+      g_guiRRRatio = g_guiRewardUSD / g_guiRiskUSD;
+   }
+   else
+   {
+      g_guiLotSize = 0.01;
+      g_guiRiskUSD = 0;
+      g_guiRewardUSD = 0;
+      g_guiRRRatio = 0;
+   }
+}
 
+//+------------------------------------------------------------------+
+//| Normaliser le lot size GUI                                         |
+//+------------------------------------------------------------------+
+double NormalizeLotSizeGUI(double lots)
+{
+   double minLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   double maxLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+   double stepLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+   
+   if(stepLot > 0)
+      lots = MathFloor(lots / stepLot) * stepLot;
+   
+   if(lots < minLot) lots = minLot;
+   if(lots > maxLot) lots = maxLot;
+   
+   return NormalizeDouble(lots, 2);
+}
+
+//+------------------------------------------------------------------+
+//| Mettre à jour l'affichage GUI                                       |
+//+------------------------------------------------------------------+
+void GUI_UpdateDisplay()
+{
+   if(!UseTradingAlgoGUI) return;
+   
+   // Throttle pour éviter les mises à jour trop fréquentes (détachement)
+   static datetime lastGUIUpdateTime = 0;
+   datetime currentTime = TimeCurrent();
+   if(currentTime - lastGUIUpdateTime < GUI_UpdateIntervalSec && lastGUIUpdateTime > 0)
+      return;
+   lastGUIUpdateTime = currentTime;
+   
+   int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+   
+   ObjectSetString(0, "GUI_TP1_PRICE", OBJPROP_TEXT, DoubleToString(g_guiTP1, digits));
+   ObjectSetString(0, "GUI_TP2_PRICE", OBJPROP_TEXT, DoubleToString(g_guiTP2, digits));
+   ObjectSetString(0, "GUI_TP3_PRICE", OBJPROP_TEXT, DoubleToString(g_guiTP3, digits));
+   ObjectSetString(0, "GUI_TP4_PRICE", OBJPROP_TEXT, DoubleToString(g_guiTP4, digits));
+   ObjectSetString(0, "GUI_SL_PRICE", OBJPROP_TEXT, DoubleToString(g_guiSL, digits));
+   ObjectSetString(0, "GUI_LOT_VALUE", OBJPROP_TEXT, DoubleToString(g_guiLotSize, 2));
+   ObjectSetString(0, "GUI_RISK_USD", OBJPROP_TEXT, StringFormat("Risk USD: %.2f", g_guiRiskUSD));
+   ObjectSetString(0, "GUI_REWARD_USD", OBJPROP_TEXT, StringFormat("Reward USD: %.2f", g_guiRewardUSD));
+   ObjectSetString(0, "GUI_RR_RATIO", OBJPROP_TEXT, StringFormat("R/R: %.2f", g_guiRRRatio));
+}
+
+//+------------------------------------------------------------------+
+//| Gérer les clics sur les boutons GUI                                 |
+//+------------------------------------------------------------------+
+void GUI_HandleButtonClick(string objectName)
+{
+   if(!UseTradingAlgoGUI) return;
+   
+   if(objectName == "GUI_BTN_BUY")
+   {
+      g_guiSignal = "BUY";
+      ObjectSetString(0, "GUI_SIGNAL_VALUE", OBJPROP_TEXT, "📈 BUY");
+      ObjectSetInteger(0, "GUI_SIGNAL_VALUE", OBJPROP_COLOR, GUI_BuyColor);
+      GUI_CalculateTPSL();
+      GUI_CalculateLotSize();
+      GUI_UpdateDisplay();
+      Print("📈 Signal BUY sélectionné (GUI)");
+   }
+   else if(objectName == "GUI_BTN_SELL")
+   {
+      g_guiSignal = "SELL";
+      ObjectSetString(0, "GUI_SIGNAL_VALUE", OBJPROP_TEXT, "📉 SELL");
+      ObjectSetInteger(0, "GUI_SIGNAL_VALUE", OBJPROP_COLOR, GUI_SellColor);
+      GUI_CalculateTPSL();
+      GUI_CalculateLotSize();
+      GUI_UpdateDisplay();
+      Print("📉 Signal SELL sélectionné (GUI)");
+   }
+   else if(objectName == "GUI_BTN_WAIT")
+   {
+      g_guiSignal = "WAIT";
+      ObjectSetString(0, "GUI_SIGNAL_VALUE", OBJPROP_TEXT, "⏳ WAIT");
+      ObjectSetInteger(0, "GUI_SIGNAL_VALUE", OBJPROP_COLOR, clrGray);
+      Print("⏳ Signal WAIT sélectionné (GUI)");
+   }
+   else if(objectName == "GUI_BTN_EXECUTE")
+   {
+      GUI_ExecuteTrade();
+   }
+   
+   ObjectSetInteger(0, objectName, OBJPROP_STATE, false);
+}
+
+//+------------------------------------------------------------------+
+//| Exécuter le trade GUI                                              |
+//+------------------------------------------------------------------+
+void GUI_ExecuteTrade()
+{
+   if(!UseTradingAlgoGUI) return;
+   
+   if(g_guiSignal == "WAIT")
+   {
+      Alert("⚠️ Veuillez sélectionner BUY ou SELL avant d'exécuter le trade (GUI)");
+      return;
+   }
+   
+   if(g_guiLotSize <= 0)
+   {
+      Alert("⚠️ Lot size invalide (GUI)");
+      return;
+   }
+   
+   MqlTick tick;
+   if(!SymbolInfoTick(_Symbol, tick))
+   {
+      Alert("⚠️ Impossible d'obtenir les prix (GUI)");
+      return;
+   }
+   
+   // ══════════════════════════════════════════════════
+   // PROTECTION DIRECTIONNELLE BOOM/CRASH (GUI)
+   // ══════════════════════════════════════════════════
+   if(!IsDirectionAllowedForBoomCrash(_Symbol, g_guiSignal))
+   {
+      string blockedMsg = "⛔ GUI BLOQUÉ: " + g_guiSignal + " interdit sur " + _Symbol;
+      Print(blockedMsg);
+      Alert(blockedMsg);
+      return;
+   }
+   
+   bool result = false;
+   string comment = "Trading Algo GUI - Charles Robot";
+   
+   if(g_guiSignal == "BUY")
+   {
+      result = trade.Buy(g_guiLotSize, _Symbol, tick.ask, g_guiSL, g_guiTP1, comment);
+      if(result)
+         Print("✅ BUY GUI exécuté: Lot=", g_guiLotSize, " Entry=", tick.ask, " SL=", g_guiSL, " TP1=", g_guiTP1);
+      else
+         Print("❌ BUY GUI échoué: ", trade.ResultRetcode(), " - ", trade.ResultRetcodeDescription());
+   }
+   else if(g_guiSignal == "SELL")
+   {
+      result = trade.Sell(g_guiLotSize, _Symbol, tick.bid, g_guiSL, g_guiTP1, comment);
+      if(result)
+         Print("✅ SELL GUI exécuté: Lot=", g_guiLotSize, " Entry=", tick.bid, " SL=", g_guiSL, " TP1=", g_guiTP1);
+      else
+         Print("❌ SELL GUI échoué: ", trade.ResultRetcode(), " - ", trade.ResultRetcodeDescription());
+   }
+   
+   if(result)
+   {
+      Alert("🚀 Trade GUI exécuté avec succès! Signal: ", g_guiSignal, " Lot: ", g_guiLotSize);
+      g_guiSignal = "WAIT";
+      ObjectSetString(0, "GUI_SIGNAL_VALUE", OBJPROP_TEXT, "⏳ WAIT");
+      ObjectSetInteger(0, "GUI_SIGNAL_VALUE", OBJPROP_COLOR, clrGray);
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Nettoyer le panneau GUI                                            |
+//+------------------------------------------------------------------+
+void GUI_CleanupPanel()
+{
+   string objects[] = {
+      "GUI_PANEL_BG", "GUI_TITLE", "GUI_SYMBOL", "GUI_SIGNAL_LABEL", "GUI_SIGNAL_VALUE",
+      "GUI_BTN_BUY", "GUI_BTN_SELL", "GUI_BTN_WAIT", "GUI_SEP1", "GUI_SEP2", "GUI_SEP3", /*"GUI_SEP4", "GUI_SEP5",*/
+      "GUI_RISK_LABEL", "GUI_RISK_INPUT", "GUI_LOT_LABEL", "GUI_LOT_VALUE",
+      "GUI_TP1_LABEL", "GUI_TP1_INPUT", "GUI_TP1_PRICE",
+      "GUI_TP2_LABEL", "GUI_TP2_INPUT", "GUI_TP2_PRICE",
+      "GUI_TP3_LABEL", "GUI_TP3_INPUT", "GUI_TP3_PRICE",
+      "GUI_TP4_LABEL", "GUI_TP4_INPUT", "GUI_TP4_PRICE",
+      "GUI_SL_LABEL", "GUI_SL_INPUT", "GUI_SL_PRICE",
+      "GUI_RISK_USD", "GUI_REWARD_USD", "GUI_RR_RATIO",
+      /*"GUI_AI_TITLE", "GUI_BTN_AI_ANALYZE",
+      "GUI_AI_ACTION_LABEL", "GUI_AI_ACTION_VALUE",
+      "GUI_AI_CONFIDENCE_LABEL", "GUI_AI_CONFIDENCE_VALUE",
+      "GUI_AI_REASON_LABEL", "GUI_AI_REASON_VALUE",*/
+      "GUI_BTN_EXECUTE"
+   };
+   
+   for(int i = 0; i < ArraySize(objects); i++)
+   {
+      ObjectDelete(0, objects[i]);
+   }
+   
+   ChartRedraw();
+}
+
+//+------------------------------------------------------------------+
+//| Fonctions utilitaires GUI                                           |
+//+------------------------------------------------------------------+
+void GUI_CreateRectangle(string name, int x, int y, int width, int height, color col)
+{
+   if(ObjectFind(0, name) < 0)
+   {
+      ObjectCreate(0, name, OBJ_RECTANGLE_LABEL, 0, 0, 0);
+      ObjectSetInteger(0, name, OBJPROP_XDISTANCE, x);
+      ObjectSetInteger(0, name, OBJPROP_YDISTANCE, y);
+      ObjectSetInteger(0, name, OBJPROP_XSIZE, width);
+      ObjectSetInteger(0, name, OBJPROP_YSIZE, height);
+      ObjectSetInteger(0, name, OBJPROP_BGCOLOR, col);
+      ObjectSetInteger(0, name, OBJPROP_BORDER_COLOR, clrWhite);
+      ObjectSetInteger(0, name, OBJPROP_BORDER_TYPE, BORDER_FLAT);
+      ObjectSetInteger(0, name, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+      ObjectSetInteger(0, name, OBJPROP_BACK, false);
+      ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
+   }
+}
+
+void GUI_CreateLabel(string name, int x, int y, string text, int size, color col)
+{
+   if(ObjectFind(0, name) < 0)
+   {
+      ObjectCreate(0, name, OBJ_LABEL, 0, 0, 0);
+      ObjectSetString(0, name, OBJPROP_TEXT, text);
+      ObjectSetInteger(0, name, OBJPROP_XDISTANCE, x);
+      ObjectSetInteger(0, name, OBJPROP_YDISTANCE, y);
+      ObjectSetInteger(0, name, OBJPROP_FONTSIZE, size);
+      ObjectSetString(0, name, OBJPROP_FONT, GUI_FontName);
+      ObjectSetInteger(0, name, OBJPROP_COLOR, col);
+      ObjectSetInteger(0, name, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+      ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
+   }
+   else
+   {
+      ObjectSetString(0, name, OBJPROP_TEXT, text);
+      ObjectSetInteger(0, name, OBJPROP_COLOR, col);
+   }
+}
+
+void GUI_CreateEdit(string name, int x, int y, int width, int height, string text, int size)
+{
+   if(ObjectFind(0, name) < 0)
+   {
+      ObjectCreate(0, name, OBJ_EDIT, 0, 0, 0);
+      ObjectSetString(0, name, OBJPROP_TEXT, text);
+      ObjectSetInteger(0, name, OBJPROP_XDISTANCE, x);
+      ObjectSetInteger(0, name, OBJPROP_YDISTANCE, y);
+      ObjectSetInteger(0, name, OBJPROP_XSIZE, width);
+      ObjectSetInteger(0, name, OBJPROP_YSIZE, height);
+      ObjectSetInteger(0, name, OBJPROP_FONTSIZE, size);
+      ObjectSetString(0, name, OBJPROP_FONT, GUI_FontName);
+      ObjectSetInteger(0, name, OBJPROP_COLOR, clrWhite);
+      ObjectSetInteger(0, name, OBJPROP_BGCOLOR, clrBlack);
+      ObjectSetInteger(0, name, OBJPROP_BORDER_COLOR, clrWhite);
+      ObjectSetInteger(0, name, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+      ObjectSetInteger(0, name, OBJPROP_SELECTABLE, true);
+      ObjectSetInteger(0, name, OBJPROP_READONLY, false);
+   }
+}
+
+void GUI_CreateButton(string name, int x, int y, int width, int height, string text, color textCol, color bgCol)
+{
+   if(ObjectFind(0, name) < 0)
+   {
+      ObjectCreate(0, name, OBJ_BUTTON, 0, 0, 0);
+      ObjectSetString(0, name, OBJPROP_TEXT, text);
+      ObjectSetInteger(0, name, OBJPROP_XDISTANCE, x);
+      ObjectSetInteger(0, name, OBJPROP_YDISTANCE, y);
+      ObjectSetInteger(0, name, OBJPROP_XSIZE, width);
+      ObjectSetInteger(0, name, OBJPROP_YSIZE, height);
+      ObjectSetInteger(0, name, OBJPROP_FONTSIZE, GUI_FontSize);
+      ObjectSetString(0, name, OBJPROP_FONT, GUI_FontName);
+      ObjectSetInteger(0, name, OBJPROP_COLOR, textCol);
+      ObjectSetInteger(0, name, OBJPROP_BGCOLOR, bgCol);
+      ObjectSetInteger(0, name, OBJPROP_BORDER_COLOR, clrWhite);
+      ObjectSetInteger(0, name, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+      ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
+   }
+}
+
+void GUI_CreateHLine(string name, int x, int y, int width, color col)
+{
+   if(ObjectFind(0, name) < 0)
+   {
+      ObjectCreate(0, name, OBJ_RECTANGLE_LABEL, 0, 0, 0);
+      ObjectSetInteger(0, name, OBJPROP_XDISTANCE, x);
+      ObjectSetInteger(0, name, OBJPROP_YDISTANCE, y);
+      ObjectSetInteger(0, name, OBJPROP_XSIZE, width);
+      ObjectSetInteger(0, name, OBJPROP_YSIZE, 1);
+      ObjectSetInteger(0, name, OBJPROP_BGCOLOR, col);
+      ObjectSetInteger(0, name, OBJPROP_BORDER_TYPE, BORDER_FLAT);
+      ObjectSetInteger(0, name, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+      ObjectSetInteger(0, name, OBJPROP_BACK, false);
+      ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Calculer les indicateurs techniques automatiquement (GUI)         |
+//+------------------------------------------------------------------+
+void GUI_CalculateTechnicalIndicators()
+{
+   MqlTick tick;
+   if(!SymbolInfoTick(_Symbol, tick)) return;
+   
+   double bid = tick.bid;
+   double ask = tick.ask;
+   
+   // RSI M1
+   if(GUI_InpRSI == 0)
+   {
+      int hRsi = iRSI(_Symbol, PERIOD_M1, 14, PRICE_CLOSE);
+      if(hRsi != INVALID_HANDLE)
+      {
+         double rsiBuf[];
+         ArraySetAsSeries(rsiBuf, true);
+         if(CopyBuffer(hRsi, 0, 0, 1, rsiBuf) >= 1)
+            g_guiTechRSI = rsiBuf[0];
+         else
+            g_guiTechRSI = 50.0;
+         IndicatorRelease(hRsi);
+      }
+      else
+         g_guiTechRSI = 50.0;
+   }
+   else
+      g_guiTechRSI = GUI_InpRSI;
+   
+   // EMA H1
+   if(GUI_InpEMA_Fast_H1 == 0 || GUI_InpEMA_Slow_H1 == 0)
+   {
+      int hEmaFastH1 = iMA(_Symbol, PERIOD_H1, 9, 0, MODE_EMA, PRICE_CLOSE);
+      int hEmaSlowH1 = iMA(_Symbol, PERIOD_H1, 21, 0, MODE_EMA, PRICE_CLOSE);
+      if(hEmaFastH1 != INVALID_HANDLE && hEmaSlowH1 != INVALID_HANDLE)
+      {
+         double bufFast[], bufSlow[];
+         ArraySetAsSeries(bufFast, true);
+         ArraySetAsSeries(bufSlow, true);
+         if(CopyBuffer(hEmaFastH1, 0, 0, 1, bufFast) >= 1)
+            g_guiTechEMA_Fast_H1 = bufFast[0];
+         if(CopyBuffer(hEmaSlowH1, 0, 0, 1, bufSlow) >= 1)
+            g_guiTechEMA_Slow_H1 = bufSlow[0];
+         IndicatorRelease(hEmaFastH1);
+         IndicatorRelease(hEmaSlowH1);
+      }
+   }
+   else
+   {
+      g_guiTechEMA_Fast_H1 = GUI_InpEMA_Fast_H1;
+      g_guiTechEMA_Slow_H1 = GUI_InpEMA_Slow_H1;
+   }
+   
+   // EMA M1
+   if(GUI_InpEMA_Fast_M1 == 0 || GUI_InpEMA_Slow_M1 == 0)
+   {
+      int hEmaFastM1 = iMA(_Symbol, PERIOD_M1, 9, 0, MODE_EMA, PRICE_CLOSE);
+      int hEmaSlowM1 = iMA(_Symbol, PERIOD_M1, 21, 0, MODE_EMA, PRICE_CLOSE);
+      if(hEmaFastM1 != INVALID_HANDLE && hEmaSlowM1 != INVALID_HANDLE)
+      {
+         double bufFast[], bufSlow[];
+         ArraySetAsSeries(bufFast, true);
+         ArraySetAsSeries(bufSlow, true);
+         if(CopyBuffer(hEmaFastM1, 0, 0, 1, bufFast) >= 1)
+            g_guiTechEMA_Fast_M1 = bufFast[0];
+         if(CopyBuffer(hEmaSlowM1, 0, 0, 1, bufSlow) >= 1)
+            g_guiTechEMA_Slow_M1 = bufSlow[0];
+         IndicatorRelease(hEmaFastM1);
+         IndicatorRelease(hEmaSlowM1);
+      }
+   }
+   else
+   {
+      g_guiTechEMA_Fast_M1 = GUI_InpEMA_Fast_M1;
+      g_guiTechEMA_Slow_M1 = GUI_InpEMA_Slow_M1;
+   }
+   
+   // EMA M5
+   if(GUI_InpEMA_Fast_M5 == 0 || GUI_InpEMA_Slow_M5 == 0)
+   {
+      int hEmaFastM5 = iMA(_Symbol, PERIOD_M5, 9, 0, MODE_EMA, PRICE_CLOSE);
+      int hEmaSlowM5 = iMA(_Symbol, PERIOD_M5, 21, 0, MODE_EMA, PRICE_CLOSE);
+      if(hEmaFastM5 != INVALID_HANDLE && hEmaSlowM5 != INVALID_HANDLE)
+      {
+         double bufFast[], bufSlow[];
+         ArraySetAsSeries(bufFast, true);
+         ArraySetAsSeries(bufSlow, true);
+         if(CopyBuffer(hEmaFastM5, 0, 0, 1, bufFast) >= 1)
+            g_guiTechEMA_Fast_M5 = bufFast[0];
+         if(CopyBuffer(hEmaSlowM5, 0, 0, 1, bufSlow) >= 1)
+            g_guiTechEMA_Slow_M5 = bufSlow[0];
+         IndicatorRelease(hEmaFastM5);
+         IndicatorRelease(hEmaSlowM5);
+      }
+   }
+   else
+   {
+      g_guiTechEMA_Fast_M5 = GUI_InpEMA_Fast_M5;
+      g_guiTechEMA_Slow_M5 = GUI_InpEMA_Slow_M5;
+   }
+   
+   // ATR
+   if(GUI_InpATR == 0)
+   {
+      int hAtr = iATR(_Symbol, PERIOD_M1, 14);
+      if(hAtr != INVALID_HANDLE)
+      {
+         double atrBuf[];
+         ArraySetAsSeries(atrBuf, true);
+         if(CopyBuffer(hAtr, 0, 0, 1, atrBuf) >= 1)
+            g_guiTechATR = atrBuf[0];
+         IndicatorRelease(hAtr);
+      }
+   }
+   else
+      g_guiTechATR = GUI_InpATR;
+   
+   // Autres paramètres
+   g_guiTechVWAP = GUI_InpVWAP;
+   g_guiTechVWAPDistance = GUI_InpVWAPDistance;
+   g_guiTechAboveVWAP = GUI_InpAboveVWAP;
+   g_guiTechSuperTrendTrend = GUI_InpSuperTrendTrend;
+   g_guiTechSuperTrendLine = GUI_InpSuperTrendLine;
+   g_guiTechVolatilityRegime = GUI_InpVolatilityRegime;
+   g_guiTechVolatilityRatio = GUI_InpVolatilityRatio;
+}
+
+//+------------------------------------------------------------------+
+//| Extraire une valeur string depuis JSON (GUI)                       |
+//+------------------------------------------------------------------+
+string GUI_ExtractJsonValue(string json, string key)
+{
+   string searchKey = "\"" + key + "\"";
+   int pos = StringFind(json, searchKey);
+   if(pos < 0) return "";
+   
+   int colonPos = StringFind(json, ":", pos);
+   if(colonPos < 0) return "";
+   
+   int valueStart = colonPos + 1;
+   while(valueStart < (int)StringLen(json) && (json[valueStart] == ' ' || json[valueStart] == '\t'))
+      valueStart++;
+   
+   if(valueStart >= (int)StringLen(json)) return "";
+   
+   bool isString = (json[valueStart] == '"');
+   if(isString) valueStart++;
+   
+   int valueEnd = valueStart;
+   if(isString)
+   {
+      while(valueEnd < (int)StringLen(json) && json[valueEnd] != '"')
+         valueEnd++;
+   }
+   else
+   {
+      while(valueEnd < (int)StringLen(json) && json[valueEnd] != ',' && json[valueEnd] != '}' && json[valueEnd] != '\n')
+         valueEnd++;
+   }
+   
+   string result = StringSubstr(json, valueStart, valueEnd - valueStart);
+   StringTrimRight(result);
+   return result;
+}
+
+//+------------------------------------------------------------------+
+//| Extraire une valeur double depuis JSON (GUI)                      |
+//+------------------------------------------------------------------+
+double GUI_ExtractJsonDouble(string json, string key)
+{
+   string valueStr = GUI_ExtractJsonValue(json, key);
+   if(valueStr == "") return 0.0;
+   return StringToDouble(valueStr);
+}
+
+//+------------------------------------------------------------------+
+//| Envoyer la requête de décision au serveur IA (GUI)                |
+//+------------------------------------------------------------------+
+string GUI_SendDecisionRequest()
+{
+   if(!GUI_UseAIServer)
+   {
+      Print("⚠️ Serveur IA GUI désactivé");
+      return "";
+   }
+   
+   MqlTick tick;
+   if(!SymbolInfoTick(_Symbol, tick))
+   {
+      Print("❌ Impossible d'obtenir les prix");
+      return "";
+   }
+   
+   // Construire le JSON de la requête
+   string json = "{";
+   json += "\"symbol\":\"" + _Symbol + "\",";
+   json += "\"bid\":" + DoubleToString(tick.bid, 5) + ",";
+   json += "\"ask\":" + DoubleToString(tick.ask, 5) + ",";
+   json += "\"rsi\":" + DoubleToString(g_guiTechRSI, 2) + ",";
+   json += "\"ema_fast_h1\":" + DoubleToString(g_guiTechEMA_Fast_H1, 5) + ",";
+   json += "\"ema_slow_h1\":" + DoubleToString(g_guiTechEMA_Slow_H1, 5) + ",";
+   json += "\"ema_fast_m1\":" + DoubleToString(g_guiTechEMA_Fast_M1, 5) + ",";
+   json += "\"ema_slow_m1\":" + DoubleToString(g_guiTechEMA_Slow_M1, 5) + ",";
+   json += "\"ema_fast_m5\":" + DoubleToString(g_guiTechEMA_Fast_M5, 5) + ",";
+   json += "\"ema_slow_m5\":" + DoubleToString(g_guiTechEMA_Slow_M5, 5) + ",";
+   json += "\"atr\":" + DoubleToString(g_guiTechATR, 5) + ",";
+   json += "\"dir_rule\":" + IntegerToString(GUI_InpDirRule) + ",";
+   json += "\"is_spike_mode\":" + (GUI_InpIsSpikeMode ? "true" : "false") + ",";
+   json += "\"vwap\":" + DoubleToString(g_guiTechVWAP, 5) + ",";
+   json += "\"vwap_distance\":" + DoubleToString(g_guiTechVWAPDistance, 5) + ",";
+   json += "\"above_vwap\":" + (g_guiTechAboveVWAP ? "true" : "false") + ",";
+   json += "\"supertrend_trend\":" + IntegerToString(g_guiTechSuperTrendTrend) + ",";
+   json += "\"supertrend_line\":" + DoubleToString(g_guiTechSuperTrendLine, 5) + ",";
+   json += "\"volatility_regime\":" + IntegerToString(g_guiTechVolatilityRegime) + ",";
+   json += "\"volatility_ratio\":" + DoubleToString(g_guiTechVolatilityRatio, 2) + ",";
+   json += "\"timestamp\":\"" + TimeToString(TimeCurrent(), TIME_DATE|TIME_MINUTES|TIME_SECONDS) + "\"";
+   json += "}";
+   
+   // Préparer la requête WebRequest
+   char data[];
+   char result[];
+   string resultHeaders;
+   StringToCharArray(json, data, 0, WHOLE_ARRAY, CP_UTF8);
+   ArrayResize(data, ArraySize(data) - 1);
+   
+   string headers = "Content-Type: application/json\r\n";
+   
+   Print("📤 Envoi requête décision GUI à ", GUI_AI_ServerURL, "/decision");
+   
+   int timeout = GUI_AI_Timeout_ms;
+   int res = WebRequest("POST", GUI_AI_ServerURL + "/decision", headers, timeout, data, result, resultHeaders);
+   
+   if(res == 200)
+   {
+      string response = CharArrayToString(result, 0, WHOLE_ARRAY, CP_UTF8);
+      Print("✅ Réponse reçue GUI: ", response);
+      return response;
+   }
+   else
+   {
+      Print("❌ Erreur WebRequest GUI: ", res, " - ", GetLastError());
+      return "";
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Parser la réponse de décision IA (GUI)                            |
+//+------------------------------------------------------------------+
+bool GUI_ParseDecisionResponse(string json)
+{
+   if(json == "") return false;
+   
+   g_guiAIAction = GUI_ExtractJsonValue(json, "action");
+   StringToUpper(g_guiAIAction);
+   
+   g_guiAIConfidence = GUI_ExtractJsonDouble(json, "confidence");
+   g_guiAIReason = GUI_ExtractJsonValue(json, "reason");
+   g_guiAIStopLoss = GUI_ExtractJsonDouble(json, "stop_loss");
+   g_guiAITakeProfit = GUI_ExtractJsonDouble(json, "take_profit");
+   g_guiAIModelUsed = GUI_ExtractJsonValue(json, "model_used");
+   
+   string tradeAllowed = GUI_ExtractJsonValue(json, "trade_allowed");
+   if(tradeAllowed == "false" && g_guiAIAction == "HOLD")
+      g_guiAIAction = "HOLD";
+   
+   g_guiAIAnalysisReady = true;
+   
+   Print("🤖 Analyse IA GUI: Action=", g_guiAIAction, " Confiance=", g_guiAIConfidence, " Raison=", g_guiAIReason);
+   
+   return true;
+}
+
+//+------------------------------------------------------------------+
+//| Mettre à jour l'affichage des résultats IA (GUI)                  |
+//+------------------------------------------------------------------+
+void GUI_UpdateAIDisplay()
+{
+   if(!g_guiAIAnalysisReady) return;
+   
+   string actionText = "⏳ WAIT";
+   color actionColor = clrGray;
+   
+   if(g_guiAIAction == "BUY")
+   {
+      actionText = "📈 BUY";
+      actionColor = clrLime;
+   }
+   else if(g_guiAIAction == "SELL")
+   {
+      actionText = "📉 SELL";
+      actionColor = clrRed;
+   }
+   else if(g_guiAIAction == "HOLD")
+   {
+      actionText = "⏸️ HOLD";
+      actionColor = clrOrange;
+   }
+   
+   ObjectSetString(0, "GUI_AI_ACTION_VALUE", OBJPROP_TEXT, actionText);
+   ObjectSetInteger(0, "GUI_AI_ACTION_VALUE", OBJPROP_COLOR, actionColor);
+   
+   ObjectSetString(0, "GUI_AI_CONFIDENCE_VALUE", OBJPROP_TEXT, DoubleToString(g_guiAIConfidence * 100, 1) + "%");
+   
+   string reasonDisplay = g_guiAIReason;
+   if(StringLen(reasonDisplay) > 40)
+      reasonDisplay = StringSubstr(reasonDisplay, 0, 40) + "...";
+   ObjectSetString(0, "GUI_AI_REASON_VALUE", OBJPROP_TEXT, reasonDisplay);
+   
+   if(g_guiAIAction == "BUY" || g_guiAIAction == "SELL")
+   {
+      g_guiSignal = g_guiAIAction;
+      ObjectSetString(0, "GUI_SIGNAL_VALUE", OBJPROP_TEXT, actionText);
+      ObjectSetInteger(0, "GUI_SIGNAL_VALUE", OBJPROP_COLOR, actionColor);
+      
+      if(g_guiAIStopLoss > 0)
+      {
+         double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+         g_guiSL = g_guiAIStopLoss;
+         int slPoints = (int)MathRound(MathAbs(g_guiEntryPrice - g_guiSL) / point);
+         ObjectSetString(0, "GUI_SL_INPUT", OBJPROP_TEXT, DoubleToString(slPoints, 1));
+      }
+      
+      if(g_guiAITakeProfit > 0)
+      {
+         double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+         g_guiTP1 = g_guiAITakeProfit;
+         int tpPoints = (int)MathRound(MathAbs(g_guiTP1 - g_guiEntryPrice) / point);
+         ObjectSetString(0, "GUI_TP1_INPUT", OBJPROP_TEXT, DoubleToString(tpPoints, 1));
+      }
+      
+      GUI_CalculateTPSL();
+      GUI_CalculateLotSize();
+      GUI_UpdateDisplay();
+   }
+   
+   GUI_SendPushNotification();
+}
+
+//+------------------------------------------------------------------+
+//| Envoyer notification push (GUI)                                   |
+//+------------------------------------------------------------------+
+void GUI_SendPushNotification()
+{
+   string message = "🤖 Analyse IA GUI " + _Symbol + ": " + g_guiAIAction + " (" + DoubleToString(g_guiAIConfidence * 100, 1) + "%)";
+   if(g_guiAIReason != "")
+      message += " - " + g_guiAIReason;
+   
+   SendNotification(message);
+   Print("📱 Notification push GUI envoyée: ", message);
+}
+
+//+------------------------------------------------------------------+
+//| Exécuter l'analyse IA complète (GUI)                              |
+//+------------------------------------------------------------------+
+void GUI_ExecuteAIAnalysis()
+{
+   Print("📊 Début analyse technique GUI pour ", _Symbol);
+   
+   GUI_CalculateTechnicalIndicators();
+   
+   string response = GUI_SendDecisionRequest();
+   
+   if(response != "")
+   {
+      if(GUI_ParseDecisionResponse(response))
+      {
+         GUI_UpdateAIDisplay();
+         Print("✅ Analyse IA GUI terminée avec succès");
+      }
+      else
+      {
+         Print("❌ Erreur lors du parsing de la réponse IA GUI");
+      }
+   }
+   else
+   {
+      Print("❌ Aucune réponse du serveur IA GUI");
+      ObjectSetString(0, "GUI_AI_ACTION_VALUE", OBJPROP_TEXT, "❌ ERREUR");
+      ObjectSetInteger(0, "GUI_AI_ACTION_VALUE", OBJPROP_COLOR, clrRed);
+   }
+}
+
+void OnChartEvent(const int id, const long &lparam, const double &dparam, const string &sparam)
+{
+   if(id == CHARTEVENT_OBJECT_CLICK)
+   {
+      if(sparam == MMObjName("BTN_CALC"))
+      {
+         g_manualMmDoCalc = true;
+         return;
+      }
+      if(sparam == MMObjName("BTN_SYNC"))
+      {
+         g_manualMmDoSync = true;
+         return;
+      }
+      if(sparam == MMObjName("BTN_360"))
+      {
+         g_manualMmDo360 = true;
+         return;
+      }
+   }
+   else if(id == CHARTEVENT_OBJECT_ENDEDIT)
+   {
+      if(sparam == MMObjName("ED_CAP")) g_manualMmCapital = MathMax(1.0, StringToDouble(ObjectGetString(0, sparam, OBJPROP_TEXT)));
+      else if(sparam == MMObjName("ED_RISK")) g_manualMmRiskPct = MathMax(0.01, StringToDouble(ObjectGetString(0, sparam, OBJPROP_TEXT)));
+      else if(sparam == MMObjName("ED_ENTRY")) g_manualMmEntry = StringToDouble(ObjectGetString(0, sparam, OBJPROP_TEXT));
+      else if(sparam == MMObjName("ED_SL")) g_manualMmSL = StringToDouble(ObjectGetString(0, sparam, OBJPROP_TEXT));
+      else if(sparam == MMObjName("ED_TP")) g_manualMmTP = StringToDouble(ObjectGetString(0, sparam, OBJPROP_TEXT));
+      else if(sparam == MMObjName("ED_LOT")) g_manualMmLot = MathMax(0.0, StringToDouble(ObjectGetString(0, sparam, OBJPROP_TEXT)));
+   }
+}
+
+//+------------------------------------------------------------------+

@@ -4933,6 +4933,211 @@ def compute_mtf_funnel_decision(request: "DecisionRequest") -> Dict[str, Any]:
         "conflict": conflict,
     }
 
+# ========== DÉTECTION FIGURES CHARTISTES (SERVEUR IA) ==========
+def _normalize_pattern_direction(direction: Optional[str]) -> str:
+    d = str(direction or "").strip().lower()
+    if d in {"buy", "bull", "bullish", "up"}:
+        return "buy"
+    if d in {"sell", "bear", "bearish", "down"}:
+        return "sell"
+    return "neutral"
+
+
+def _extract_local_extrema(series: np.ndarray, order: int = 2) -> Tuple[List[int], List[int]]:
+    mins: List[int] = []
+    maxs: List[int] = []
+    n = int(len(series))
+    if n < (order * 2 + 3):
+        return mins, maxs
+    for i in range(order, n - order):
+        w = series[i - order:i + order + 1]
+        c = series[i]
+        if np.all(c <= w):
+            mins.append(i)
+        if np.all(c >= w):
+            maxs.append(i)
+    return mins, maxs
+
+
+def detect_chart_pattern_from_mt5(symbol: str, lookback: int = 180) -> Dict[str, Any]:
+    neutral = {
+        "name": "NONE",
+        "direction": "neutral",
+        "score": 0.0,
+        "zone_low": None,
+        "zone_high": None,
+        "source": "server_mt5",
+        "details": "",
+    }
+    try:
+        if not symbol or not MT5_AVAILABLE or not mt5_initialized:
+            return neutral
+        rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M5, 0, max(80, int(lookback)))
+        if rates is None or len(rates) < 80:
+            return neutral
+        df = pd.DataFrame(rates)
+        if not {"high", "low", "close"}.issubset(df.columns):
+            return neutral
+
+        highs = df["high"].astype(float).to_numpy()
+        lows = df["low"].astype(float).to_numpy()
+        closes = df["close"].astype(float).to_numpy()
+        n = len(closes)
+        if n < 80:
+            return neutral
+
+        tr = np.maximum(highs[1:] - lows[1:], np.abs(closes[1:] - closes[:-1]))
+        atr = float(np.mean(tr[-40:])) if len(tr) >= 40 else float(np.mean(tr)) if len(tr) > 0 else 0.0
+        atr = max(atr, 1e-9)
+
+        minima, maxima = _extract_local_extrema(lows, order=2)
+        max_close, _ = _extract_local_extrema(closes, order=2)
+        maxima = sorted(set(maxima + max_close))
+        candidates: List[Dict[str, Any]] = []
+
+        if len(minima) >= 2:
+            i1, i2 = minima[-2], minima[-1]
+            if i2 - i1 >= 5:
+                seg_hi = highs[i1:i2 + 1]
+                if len(seg_hi) > 0:
+                    peak_idx = int(i1 + int(np.argmax(seg_hi)))
+                    l1 = float(lows[i1]); l2 = float(lows[i2]); pk = float(highs[peak_idx])
+                    tol = max(atr * 0.8, abs(pk) * 0.00035)
+                    lows_similarity = max(0.0, 1.0 - abs(l1 - l2) / max(tol, 1e-9))
+                    rebound = max(0.0, min(1.2, (pk - max(l1, l2)) / atr))
+                    breakout = 1.0 if closes[-1] > pk else max(0.0, min(1.0, (closes[-1] - max(l1, l2)) / max(pk - max(l1, l2), atr)))
+                    score = 0.34 * lows_similarity + 0.33 * min(1.0, rebound) + 0.33 * breakout
+                    if score >= 0.56:
+                        candidates.append({
+                            "name": "DOUBLE_BOTTOM_W",
+                            "direction": "buy",
+                            "score": float(min(0.95, score)),
+                            "zone_low": float(min(l1, l2)),
+                            "zone_high": float(pk),
+                            "source": "server_mt5",
+                            "details": f"W i1={i1} i2={i2} breakout={breakout:.2f}",
+                        })
+
+        if len(minima) >= 3:
+            a, b, c = minima[-3], minima[-2], minima[-1]
+            if (b - a >= 4) and (c - b >= 4):
+                la = float(lows[a]); lb = float(lows[b]); lc = float(lows[c])
+                if lb < la and lb < lc:
+                    left_peak = float(np.max(highs[a:b + 1])) if b > a else float(highs[b])
+                    right_peak = float(np.max(highs[b:c + 1])) if c > b else float(highs[c])
+                    neckline = (left_peak + right_peak) * 0.5
+                    shoulder_tol = max(atr * 0.9, abs(neckline) * 0.0004)
+                    shoulders_similarity = max(0.0, 1.0 - abs(la - lc) / max(shoulder_tol, 1e-9))
+                    head_depth = max(0.0, min(1.2, (min(la, lc) - lb) / atr))
+                    breakout = 1.0 if closes[-1] > neckline else max(0.0, min(1.0, (closes[-1] - lb) / max(neckline - lb, atr)))
+                    score = 0.38 * shoulders_similarity + 0.32 * min(1.0, head_depth) + 0.30 * breakout
+                    if score >= 0.58:
+                        candidates.append({
+                            "name": "INVERSE_HEAD_SHOULDERS",
+                            "direction": "buy",
+                            "score": float(min(0.97, score)),
+                            "zone_low": float(min(la, lb, lc)),
+                            "zone_high": float(neckline),
+                            "source": "server_mt5",
+                            "details": f"IHS a={a} b={b} c={c} breakout={breakout:.2f}",
+                        })
+
+        if len(maxima) >= 2:
+            j1, j2 = maxima[-2], maxima[-1]
+            if j2 - j1 >= 5:
+                seg_lo = lows[j1:j2 + 1]
+                if len(seg_lo) > 0:
+                    trough_idx = int(j1 + int(np.argmin(seg_lo)))
+                    h1 = float(highs[j1]); h2 = float(highs[j2]); trw = float(lows[trough_idx])
+                    tol = max(atr * 0.8, abs(trw) * 0.00035)
+                    highs_similarity = max(0.0, 1.0 - abs(h1 - h2) / max(tol, 1e-9))
+                    retrace = max(0.0, min(1.2, (min(h1, h2) - trw) / atr))
+                    breakout = 1.0 if closes[-1] < trw else max(0.0, min(1.0, (max(h1, h2) - closes[-1]) / max(max(h1, h2) - trw, atr)))
+                    score = 0.34 * highs_similarity + 0.33 * min(1.0, retrace) + 0.33 * breakout
+                    if score >= 0.56:
+                        candidates.append({
+                            "name": "DOUBLE_TOP_M",
+                            "direction": "sell",
+                            "score": float(min(0.95, score)),
+                            "zone_low": float(trw),
+                            "zone_high": float(max(h1, h2)),
+                            "source": "server_mt5",
+                            "details": f"M j1={j1} j2={j2} breakout={breakout:.2f}",
+                        })
+
+        if len(maxima) >= 3:
+            x, y, z = maxima[-3], maxima[-2], maxima[-1]
+            if (y - x >= 4) and (z - y >= 4):
+                hx = float(highs[x]); hy = float(highs[y]); hz = float(highs[z])
+                if hy > hx and hy > hz:
+                    left_tr = float(np.min(lows[x:y + 1])) if y > x else float(lows[y])
+                    right_tr = float(np.min(lows[y:z + 1])) if z > y else float(lows[z])
+                    neckline = (left_tr + right_tr) * 0.5
+                    shoulder_tol = max(atr * 0.9, abs(neckline) * 0.0004)
+                    shoulders_similarity = max(0.0, 1.0 - abs(hx - hz) / max(shoulder_tol, 1e-9))
+                    head_height = max(0.0, min(1.2, (hy - max(hx, hz)) / atr))
+                    breakout = 1.0 if closes[-1] < neckline else max(0.0, min(1.0, (hy - closes[-1]) / max(hy - neckline, atr)))
+                    score = 0.38 * shoulders_similarity + 0.32 * min(1.0, head_height) + 0.30 * breakout
+                    if score >= 0.58:
+                        candidates.append({
+                            "name": "HEAD_SHOULDERS",
+                            "direction": "sell",
+                            "score": float(min(0.97, score)),
+                            "zone_low": float(neckline),
+                            "zone_high": float(max(hx, hy, hz)),
+                            "source": "server_mt5",
+                            "details": f"HS x={x} y={y} z={z} breakout={breakout:.2f}",
+                        })
+
+        if not candidates:
+            return neutral
+        return max(candidates, key=lambda c: float(c.get("score", 0.0) or 0.0))
+    except Exception as e:
+        logger.debug(f"detect_chart_pattern_from_mt5: {e}")
+        return neutral
+
+
+def resolve_chart_pattern_signal(request: "DecisionRequest") -> Dict[str, Any]:
+    neutral = {
+        "name": "NONE",
+        "direction": "neutral",
+        "score": 0.0,
+        "zone_low": None,
+        "zone_high": None,
+        "source": "none",
+        "details": "",
+    }
+    candidates: List[Dict[str, Any]] = []
+
+    try:
+        req_name = str(request.chart_pattern_name or "").strip()
+        req_dir = _normalize_pattern_direction(request.chart_pattern_direction)
+        req_score_raw = float(request.chart_pattern_score or 0.0)
+        req_score = req_score_raw / 100.0 if req_score_raw > 1.0 else req_score_raw
+        if req_name and req_dir in {"buy", "sell"} and req_score > 0.0:
+            candidates.append({
+                "name": req_name.upper(),
+                "direction": req_dir,
+                "score": float(max(0.35, min(0.98, req_score))),
+                "zone_low": request.chart_pattern_zone_low,
+                "zone_high": request.chart_pattern_zone_high,
+                "source": "mt5_client",
+                "details": "provided_by_client",
+            })
+    except Exception:
+        pass
+
+    mt5_sig = detect_chart_pattern_from_mt5(str(request.symbol or ""))
+    if mt5_sig.get("direction") in {"buy", "sell"} and float(mt5_sig.get("score", 0.0) or 0.0) > 0.0:
+        candidates.append(mt5_sig)
+
+    if not candidates:
+        return neutral
+    best = max(candidates, key=lambda c: float(c.get("score", 0.0) or 0.0))
+    best["all_candidates"] = candidates
+    return best
+
+
 # ========== FONCTION SIMPLIFIÉE POUR ROBOCOP v2 ==========
 # Modifier la fonction decision_simplified pour utiliser le ML
 async def decision_simplified(request: DecisionRequest):
@@ -5008,6 +5213,22 @@ async def decision_simplified(request: DecisionRequest):
         else:
             sell_score += 0.25 * min(1.0, ema_strength_m5 * 75)
             reason += f"EMA M5 baissière ({ema_strength_m5*75:.1f}%). "
+
+    # 4c. Figures chartistes (W/M/ETE/ETE inversée) modélisées côté serveur IA
+    chart_pattern_signal = resolve_chart_pattern_signal(request)
+    cp_dir = str(chart_pattern_signal.get("direction", "neutral"))
+    cp_score = float(chart_pattern_signal.get("score", 0.0) or 0.0)
+    if cp_dir in {"buy", "sell"} and cp_score > 0.0:
+        cp_bonus = min(0.24, max(0.06, cp_score * 0.22))
+        cp_name = str(chart_pattern_signal.get("name", "PATTERN"))
+        if cp_dir == "buy":
+            buy_score += cp_bonus
+            sell_score = max(0.0, sell_score - cp_bonus * 0.30)
+            reason += f"Pattern {cp_name} bullish (+{cp_bonus:.2f}). "
+        else:
+            sell_score += cp_bonus
+            buy_score = max(0.0, buy_score - cp_bonus * 0.30)
+            reason += f"Pattern {cp_name} bearish (+{cp_bonus:.2f}). "
     
     # 4b. Boom : bonus si M1+M5 haussiers (contrepoids au H1 baissier — stair M1 / scalp)
     try:
@@ -5100,7 +5321,10 @@ async def decision_simplified(request: DecisionRequest):
         "ema_fast_m5": request.ema_fast_m5,
         "ema_slow_m5": request.ema_slow_m5,
         "atr": request.atr,
-        "timestamp": request.timestamp
+        "timestamp": request.timestamp,
+        "chart_pattern_name": chart_pattern_signal.get("name"),
+        "chart_pattern_direction": chart_pattern_signal.get("direction"),
+        "chart_pattern_score": chart_pattern_signal.get("score"),
     }
     
     ml_result = enhance_decision_with_ml(request.symbol, base_action, base_confidence, market_data)
@@ -5313,6 +5537,7 @@ async def decision_simplified(request: DecisionRequest):
         "spike_probability": market_data.get("spike_probability", 0.0),
         "stair_detected": bool(request.stair_detected),
         "stair_client_event_id": stair_client_eid,
+        "chart_pattern_model": chart_pattern_signal,
         "funnel_mtf": funnel,
         "final_decision": {"action": action, "confidence": confidence_percentage},
     }
