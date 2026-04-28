@@ -25,6 +25,7 @@ Write-Host ""
 
 # Lancer le serveur avec l'environnement virtuel
 try {
+    # Serveur principal (WebSocket + endpoints health)
     & $venvPython ai_server.py
 } catch {
     Write-Host "❌ Erreur lors du démarrage du serveur:" -ForegroundColor Red

@@ -70,3 +70,34 @@ def is_weltrade_synth_index(symbol: str) -> bool:
     )):
         return True
     return False
+
+
+def is_weltrade_pain_synth(symbol: str) -> bool:
+    """PainX / Pain INX : pas de BUY (équivalent logique « anti-BUY sur Crash »)."""
+    u = normalize_broker_symbol(symbol).replace(" ", "")
+    if not u:
+        return False
+    if "PAINX" in u:
+        return True
+    if "PAIN" in u and "INX" in u:
+        return True
+    return False
+
+
+def is_weltrade_gain_synth(symbol: str) -> bool:
+    """GainX / GAIN court broker : pas de SELL (équivalent « anti-SELL sur Boom »)."""
+    if is_weltrade_pain_synth(symbol):
+        return False
+    u = normalize_broker_symbol(symbol).replace(" ", "")
+    if not u:
+        return False
+    if "GAINX" in u:
+        return True
+    if "GAININDEX" in u or "GAIN INDEX" in (symbol or "").upper():
+        return True
+    nu = normalize_broker_symbol(symbol).upper().strip()
+    if nu == "GAIN" or (nu.startswith("GAIN") and len(nu) <= 8 and not any(
+        c in nu for c in ("USD", "EUR", "GBP", "JPY", "AUD", "CAD", "CHF", "NZD")
+    )):
+        return True
+    return False

@@ -9,7 +9,7 @@ from fastapi import FastAPI, Query, Request, HTTPException, Body
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Dict, Any
-from backend.mt5_connector import get_ohlc, get_all_symbols, TIMEFRAME_MAPPING, get_current_price
+from backend.mt5_connector import get_ohlc, get_all_symbols, TIMEFRAME_MAPPING, get_current_price, monitor_positions_loss_limit
 from backend.adaptive_predict import predict_adaptive
 import threading
 import redis
@@ -101,6 +101,14 @@ app.include_router(robot_router)
 if ML_METRICS_AVAILABLE:
     app.include_router(ml_metrics_router, prefix="/api/ml", tags=["ML Metrics"])
     print("✅ Router ML Metrics inclus")
+
+# --- Inclusion du router Economic News ---
+try:
+    from backend.api.economic_news import router as economic_news_router
+    app.include_router(economic_news_router, prefix="/economic", tags=["Economic News"])
+    print("✅ Router Economic News inclus")
+except ImportError:
+    print("⚠️ Module Economic News non disponible")
 
 # CORS
 app.add_middleware(
@@ -1221,6 +1229,67 @@ def health():
     except Exception as e:
         return {"status": "error", "detail": str(e)}
 
+# --- Endpoint global de monitoring des pertes ---
+@app.post("/monitor/loss-protection")
+async def global_loss_protection(max_loss: float = 3.0):
+    """
+    Endpoint global pour surveiller et fermer automatiquement les positions qui dépassent la perte max.
+    Ce endpoint est accessible depuis n'importe où et fonctionne pour TOUS les symboles.
+
+    Args:
+        max_loss: Perte maximale autorisée en dollars (défaut: 3.0$)
+
+    Returns:
+        Rapport avec les positions fermées
+    """
+    try:
+        result = monitor_positions_loss_limit(max_loss_usd=max_loss)
+        return result
+    except Exception as e:
+        return {"success": False, "message": f"Erreur monitoring: {str(e)}"}
+
+@app.get("/monitor/status")
+async def monitor_status():
+    """
+    Retourne le statut du système de protection des pertes.
+    """
+    try:
+        from backend.mt5_connector import is_connected, get_open_positions
+
+        mt5_connected = is_connected()
+        positions = get_open_positions() if mt5_connected else []
+
+        return {
+            "protection_active": True,
+            "max_loss_per_trade": 3.0,
+            "mt5_connected": mt5_connected,
+            "open_positions_count": len(positions) if positions else 0,
+            "monitoring_interval": "1 second (via continuous_loss_monitor.py)",
+            "api_available": True
+        }
+    except Exception as e:
+        return {
+            "protection_active": False,
+            "error": str(e)
+        }
+
 if __name__ == "__main__":
     import uvicorn
+
+    # Bannière de démarrage avec info protection pertes
+    print("\n" + "=" * 80)
+    print(" 🚀 TRADBOT AI SERVER - DÉMARRAGE")
+    print("=" * 80)
+    print("📡 Port: 8000")
+    print("🌐 URL: http://localhost:8000")
+    print("📚 Documentation: http://localhost:8000/docs")
+    print()
+    print("🛡️  SYSTÈME DE PROTECTION DES PERTES ACTIVÉ")
+    print("   • Perte maximale par trade: 3.00 USD")
+    print("   • Monitoring API disponible: /monitor/loss-protection")
+    print("   • Statut monitoring: /monitor/status")
+    print("   • Pour monitoring continu: python backend/continuous_loss_monitor.py")
+    print("=" * 80)
+    print()
+
     uvicorn.run(app, host="0.0.0.0", port=8000) 

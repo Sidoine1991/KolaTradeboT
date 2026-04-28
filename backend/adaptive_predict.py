@@ -3,6 +3,11 @@ import joblib
 import numpy as np
 import pandas as pd
 
+try:
+    from backend.weltrade_symbols import normalize_broker_symbol, is_weltrade_synth_index
+except ImportError:
+    from weltrade_symbols import normalize_broker_symbol, is_weltrade_synth_index
+
 # Import xgboost pour que joblib puisse charger les modèles XGBoost sauvegardés
 try:
     import xgboost as xgb
@@ -101,7 +106,7 @@ except ImportError:
         df_features['momentum_20'] = df_features['close'] / (df_features['close'].shift(20) + 1e-8) - 1
         
         # Features spécifiques par catégorie
-        if symbol_category in ["SYNTHETIC_SPECIAL", "SYNTHETIC_GENERAL"]:
+        if symbol_category in ["SYNTHETIC_SPECIAL", "SYNTHETIC_GENERAL", "WELTRADE_SYNTH"]:
             # Features pour indices synthétiques
             df_features['spike_detection'] = ((df_features['high'] - df_features['low']) / (df_features['close'] + 1e-8) > 0.05).astype(int)
             df_features['volatility_regime'] = df_features['volatility'].rolling(50).mean()
@@ -138,14 +143,18 @@ except ImportError:
         return df_features
 
 def get_symbol_category(symbol):
-    symbol_upper = symbol.upper()
+    """Catégorie ML : Weltrade FX (suffixe .pro etc.) → FOREX ; PAINX/GAIN/… → WELTRADE_SYNTH."""
+    symbol_upper = (symbol or "").upper()
+    nu = normalize_broker_symbol(symbol)
     if "BOOM" in symbol_upper or "CRASH" in symbol_upper:
         return "SYNTHETIC_SPECIAL"
+    if is_weltrade_synth_index(symbol):
+        return "WELTRADE_SYNTH"
     elif any(keyword in symbol_upper for keyword in ['VOLATILITY', 'STEP', 'JUMP', 'RANGE BREAK', 'DEX', 'DRIFT', 'TREK', 'VOLSWITCH', 'SKEW', 'MULTI STEP']):
         return "SYNTHETIC_GENERAL"
     elif any(crypto in symbol_upper for crypto in ['BTC', 'ETH', 'ADA', 'DOT', 'LNK', 'LTC', 'BCH', 'XRP', 'XLM', 'XMR', 'ZEC', 'XTZ', 'NEO', 'MKR', 'SOL', 'TRX', 'UNI', 'SHB', 'TON', 'FET', 'APT', 'COM', 'IMX', 'SAN', 'TRU', 'MLN', 'NER']):
         return "CRYPTO"
-    elif any(pair in symbol_upper for pair in ['USD', 'EUR', 'GBP', 'JPY', 'AUD', 'CAD', 'CHF', 'NZD', 'SEK', 'NOK', 'PLN', 'ZAR', 'SGD', 'HKD', 'THB', 'MXN', 'CNH']):
+    elif any(pair in nu for pair in ['USD', 'EUR', 'GBP', 'JPY', 'AUD', 'CAD', 'CHF', 'NZD', 'SEK', 'NOK', 'PLN', 'ZAR', 'SGD', 'HKD', 'THB', 'MXN', 'CNH']) and 'INDEX' not in symbol_upper and 'BASKET' not in symbol_upper and 'DFX' not in symbol_upper:
         return "FOREX"
     elif any(stock in symbol_upper for stock in ['AAPL', 'MSFT', 'GOOG', 'AMZN', 'TSLA', 'META', 'NVDA', 'NFLX', 'JPM', 'BAC', 'WMT', 'PG', 'JNJ', 'V', 'HD', 'MA', 'PYPL', 'DIS', 'CRM', 'NKE', 'PFE', 'KO', 'MCD', 'ABNB', 'UBER', 'ZM', 'AAL', 'DAL', 'GM', 'F', 'BA', 'IBM', 'INTC', 'CSCO', 'ORCL', 'ADBE', 'NFLX', 'AMD', 'BABA', 'AIG', 'GS', 'C', 'DBK', 'EBAY', 'FDX', 'FOX', 'HPQ', 'SONY', 'TEVA', 'AIR', 'AIRF', 'BAY', 'BMW', 'BIIB', 'CONG', 'ADS']):
         return "STOCKS"
@@ -173,6 +182,12 @@ MODEL_CONFIGS = {
         'scaler_path': 'backend/forex_xgb_model_scaler.pkl',
         'name': 'XGBoost Forex'
     },
+    # Weltrade PAINX / GAIN / … : mêmes features que indices synth. (fichiers optionnels ; repli resolve_model_category)
+    'WELTRADE_SYNTH': {
+        'model_path': 'backend/weltrade_synth_xgb_model.pkl',
+        'scaler_path': 'backend/weltrade_synth_xgb_model_scaler.pkl',
+        'name': 'XGBoost Weltrade synth (PAINX/GAIN)'
+    },
     'STOCKS': {
         'model_path': 'backend/stocks_xgb_model.pkl',
         'scaler_path': 'backend/stocks_xgb_model_scaler.pkl',
@@ -196,6 +211,14 @@ MODEL_FEATURES = {
         'spike_detection', 'volatility_regime'
     ],
     "SYNTHETIC_GENERAL": [
+        'return', 'return_1', 'return_2', 'return_3', 'volatility', 'volatility_5', 'volatility_10',
+        'ma_5', 'ma_10', 'ma_20', 'ma_50', 'ma_ratio_5_20', 'ma_ratio_10_50',
+        'rsi', 'macd', 'macd_signal', 'macd_histogram', 'bb_position', 'atr', 'volume_ratio',
+        'price_range', 'body_size', 'upper_shadow', 'lower_shadow', 'hour', 'minute', 'day_of_week',
+        'momentum_5', 'momentum_10', 'momentum_20',
+        'spike_detection', 'volatility_regime'
+    ],
+    "WELTRADE_SYNTH": [
         'return', 'return_1', 'return_2', 'return_3', 'volatility', 'volatility_5', 'volatility_10',
         'ma_5', 'ma_10', 'ma_20', 'ma_50', 'ma_ratio_5_20', 'ma_ratio_10_50',
         'rsi', 'macd', 'macd_signal', 'macd_histogram', 'bb_position', 'atr', 'volume_ratio',
@@ -237,30 +260,53 @@ MODEL_FEATURES = {
     ]
 }
 
+
+def resolve_model_category(requested: str) -> str:
+    """Sélectionne la première catégorie dont les fichiers model+scaler existent (repli Weltrade → synth. général)."""
+    if requested == "WELTRADE_SYNTH":
+        order = ["WELTRADE_SYNTH", "SYNTHETIC_GENERAL", "UNIVERSAL"]
+    elif requested == "FOREX":
+        order = ["FOREX", "UNIVERSAL"]
+    else:
+        order = [requested, "UNIVERSAL"]
+    for cat in order:
+        cfg = MODEL_CONFIGS.get(cat, MODEL_CONFIGS["UNIVERSAL"])
+        mp, sp = cfg["model_path"], cfg["scaler_path"]
+        if os.path.exists(mp) and os.path.exists(sp):
+            return cat
+    return "UNIVERSAL"
+
+
 def predict_adaptive(symbol, df_ohlc):
     # Vérifier que xgboost est disponible avant de charger le modèle
     if not XGBOOST_AVAILABLE:
         return {'error': 'xgboost n\'est pas installé. Installez-le avec: pip install xgboost', 'category': 'UNKNOWN', 'model_name': 'N/A'}
     
-    category = get_symbol_category(symbol)
-    config = MODEL_CONFIGS.get(category, MODEL_CONFIGS['UNIVERSAL'])
+    requested = get_symbol_category(symbol)
+    use_cat = resolve_model_category(requested)
+    config = MODEL_CONFIGS.get(use_cat, MODEL_CONFIGS['UNIVERSAL'])
     model_path = config['model_path']
     scaler_path = config['scaler_path']
     model_name = config['name']
     if not (os.path.exists(model_path) and os.path.exists(scaler_path)):
-        return {'error': f"Modèle ou scaler non trouvé pour la catégorie {category}", 'category': category, 'model_name': model_name}
+        return {
+            'error': f"Modèle ou scaler non trouvé (demandé={requested}, résolu={use_cat})",
+            'category': requested,
+            'resolved_category': use_cat,
+            'model_name': model_name,
+        }
     
     # Charger le modèle et le scaler
     import joblib
     model = joblib.load(model_path)
     scaler = joblib.load(scaler_path)
     
-    # Créer les features
-    features_df = create_adaptive_features(df_ohlc, category)
+    # Créer les features (alignées sur le jeu de fichiers réellement chargé)
+    features_df = create_adaptive_features(df_ohlc, use_cat)
     features_df = features_df.fillna(0)
     
     # Obtenir la liste des features attendues
-    features = MODEL_FEATURES.get(category, MODEL_FEATURES['UNIVERSAL'])
+    features = MODEL_FEATURES.get(use_cat, MODEL_FEATURES['UNIVERSAL'])
     
     # Si le modèle a des feature_names_in_ (XGBoost >= 1.6), les utiliser pour l'ordre exact
     expected_features = features
@@ -273,14 +319,14 @@ def predict_adaptive(symbol, df_ohlc):
     if missing_features:
         # Pour les features manquantes spécifiques à la catégorie, les créer si nécessaire
         for feat in missing_features:
-            if feat == 'spike_detection' and category == "CRYPTO":
+            if feat == 'spike_detection' and use_cat == "CRYPTO":
                 # Ne devrait pas arriver pour CRYPTO, mais au cas où
                 features_df['spike_detection'] = 0
-            elif feat == 'volatility_regime' and category == "CRYPTO":
+            elif feat == 'volatility_regime' and use_cat == "CRYPTO":
                 features_df['volatility_regime'] = 0
-            elif feat == 'crypto_volatility' and category == "CRYPTO":
+            elif feat == 'crypto_volatility' and use_cat == "CRYPTO":
                 features_df['crypto_volatility'] = features_df['volatility'] * 100
-            elif feat == 'btc_correlation' and category == "CRYPTO":
+            elif feat == 'btc_correlation' and use_cat == "CRYPTO":
                 features_df['btc_correlation'] = 1.0
             else:
                 # Feature manquante non gérée, la remplir avec 0
@@ -291,7 +337,7 @@ def predict_adaptive(symbol, df_ohlc):
     
     # Vérifier la cohérence du nombre de features
     if hasattr(scaler, 'n_features_in_') and scaler.n_features_in_ != X_pred.shape[1]:
-        return {'error': f"Scaler attend {scaler.n_features_in_} features, {X_pred.shape[1]} fournis.", 'category': category, 'model_name': model_name}
+        return {'error': f"Scaler attend {scaler.n_features_in_} features, {X_pred.shape[1]} fournis.", 'category': requested, 'resolved_category': use_cat, 'model_name': model_name}
     
     # Convertir en array numpy pour éviter les problèmes de validation de colonnes XGBoost
     # Si XGBoost valide les colonnes, il faut utiliser un DataFrame avec les bons noms
@@ -313,7 +359,8 @@ def predict_adaptive(symbol, df_ohlc):
         if "feature names" in error_msg.lower() or "feature_names" in error_msg.lower():
             return {
                 'error': f"Erreur de validation des features: {error_msg}. Features attendues: {expected_features}, Features fournies: {list(X_pred.columns)}",
-                'category': category,
+                'category': requested,
+                'resolved_category': use_cat,
                 'model_name': model_name,
                 'expected_features': expected_features,
                 'provided_features': list(X_pred.columns)
@@ -324,7 +371,8 @@ def predict_adaptive(symbol, df_ohlc):
         'prediction': int(pred),
         'probability': float(proba),
         'model_name': model_name,
-        'category': category,
+        'category': requested,
+        'resolved_category': use_cat,
         'features_used': expected_features,
         'input_row': X_pred.iloc[0].to_dict()
     }

@@ -3116,7 +3116,7 @@ class MT5AIClient:
                     logger.error(f"❌ Erreur exécution trade 100% ACHAT pour {symbol}")
             
             # PROTECTION Boom/Crash: pas de SELL sur Boom, pas de BUY sur Crash
-            # Boom = BUY uniquement (spike haussier) | Crash = SELL uniquement (spike baissier)
+            # Weltrade: pas de SELL sur GainX, pas de BUY sur PainX (même principe)
             is_boom = "Boom" in symbol
             is_crash = "Crash" in symbol
             if is_boom and signal == "SELL":
@@ -3124,6 +3124,19 @@ class MT5AIClient:
                 return False
             if is_crash and signal == "BUY":
                 logger.info(f"Ordre bloqué: pas de BUY sur Crash ({symbol} = SELL uniquement)")
+                return False
+            try:
+                from backend.weltrade_symbols import is_weltrade_pain_synth, is_weltrade_gain_synth
+            except ImportError:
+                try:
+                    from weltrade_symbols import is_weltrade_pain_synth, is_weltrade_gain_synth
+                except ImportError:
+                    is_weltrade_pain_synth = is_weltrade_gain_synth = lambda _s: False
+            if is_weltrade_gain_synth(symbol) and signal == "SELL":
+                logger.info(f"Ordre bloqué: pas de SELL sur GainX ({symbol} = BUY uniquement)")
+                return False
+            if is_weltrade_pain_synth(symbol) and signal == "BUY":
+                logger.info(f"Ordre bloqué: pas de BUY sur PainX ({symbol} = SELL uniquement)")
                 return False
             
             # Vérifier si nous avons déjà une position sur ce symbole

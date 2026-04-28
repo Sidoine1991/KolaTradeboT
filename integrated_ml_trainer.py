@@ -17,7 +17,8 @@ from typing import Dict, List, Any, Optional
 import httpx
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import accuracy_score, f1_score, classification_report
+from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score, classification_report
+from sklearn.model_selection import train_test_split
 from dotenv import load_dotenv
 import warnings
 warnings.filterwarnings('ignore')
@@ -58,25 +59,34 @@ MODEL_BY_CATEGORY = {
     "VOLATILITY": "xgboost",      # Indices volatilité
     "STEP": "lightgbm",           # Step indices
     "JUMP": "lightgbm",           # Jump indices
+    "WELTRADE_SYNTH": "lightgbm", # Weltrade PAINX / GAIN / indices broker
     "FOREX": "lightgbm",         # Paires forex
     "CRYPTO": "xgboost",         # Crypto
     "STOCKS": "lightgbm",        # Actions
     "UNIVERSAL": "random_forest", # Fallback
 }
 
+try:
+    from backend.weltrade_symbols import normalize_broker_symbol, is_weltrade_synth_index
+except ImportError:
+    from weltrade_symbols import normalize_broker_symbol, is_weltrade_synth_index
+
 
 def get_symbol_category(symbol: str) -> str:
     """Détermine la catégorie du symbole pour le choix du modèle."""
     s = (symbol or "").upper()
+    nu = normalize_broker_symbol(symbol)
     if "BOOM" in s or "CRASH" in s:
         return "BOOM_CRASH"
+    if is_weltrade_synth_index(symbol):
+        return "WELTRADE_SYNTH"
     if "VOLATILITY" in s or "RANGE BREAK" in s or "VOLSWITCH" in s or "SKEW" in s:
         return "VOLATILITY"
     if "STEP" in s or "MULTI STEP" in s:
         return "STEP"
     if "JUMP" in s or "DEX" in s or "DRIFT" in s or "TREK" in s:
         return "JUMP"
-    if any(p in s for p in ["USD", "EUR", "GBP", "JPY", "AUD", "CAD", "CHF", "NZD"]):
+    if any(p in nu for p in ["USD", "EUR", "GBP", "JPY", "AUD", "CAD", "CHF", "NZD"]):
         return "FOREX"
     if any(c in s for c in ["BTC", "ETH", "XRP", "ADA", "SOL", "DOT", "LTC", "BCH"]):
         return "CRYPTO"
@@ -167,15 +177,22 @@ class IntegratedMLTrainer:
             async with httpx.AsyncClient() as client:
                 # Récupérer les prédictions récentes avec une requête plus simple
                 predictions_url = f"{self.supabase_url}/rest/v1/predictions"
+
+                # Supabase stocke en général les indices avec espaces (ex: "Boom 600 Index")
+                # alors que les fichiers modèles contiennent souvent des "_" (ex: "Boom_600_Index").
+                symbol_for_query = (symbol or "").replace("_", " ").strip()
                 
                 # Utiliser une requête plus simple
-                # Supabase stocke indices avec espaces (Boom 300 Index), forex sans (EURUSD)
-                symbol_for_query = symbol.replace('_', ' ').replace(' ', '+')
-                simple_query = f"symbol=eq.{symbol_for_query}&limit={limit}&order=created_at.desc"
-                
                 pred_resp = await client.get(
                     predictions_url, 
-                    params=simple_query,
+                    # Utiliser `params` en dict (sinon httpx peut ne pas encoder correctement la requête).
+                    # httpx encode ensuite les espaces proprement dans l'URL.
+                    params={
+                        "symbol": f"eq.{symbol_for_query}",
+                        "timeframe": f"eq.{timeframe}",
+                        "limit": limit,
+                        "order": "created_at.desc",
+                    },
                     headers=headers
                 )
                 
@@ -305,15 +322,66 @@ class IntegratedMLTrainer:
             logger.warning(f"⚠️ Pas assez de classes pour {symbol} {timeframe}: uniquement {unique_classes.tolist()} (min 2 requis). Ignorer.")
             return None
         
-        scaler = StandardScaler()
-        X_scaled = scaler.fit_transform(X)
-        
         model_obj = self._create_model(model_type)
-        model_obj.fit(X_scaled, y)
+        # Split train/test pour que l'accuracy reflète la généralisation
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y,
+            test_size=0.2,
+            random_state=42,
+            stratify=y if len(unique_classes) > 1 else None
+        )
+
+        scaler = StandardScaler()
+        X_train_scaled = scaler.fit_transform(X_train)
+        X_test_scaled = scaler.transform(X_test)
         
-        y_pred = model_obj.predict(X_scaled)
-        accuracy = accuracy_score(y, y_pred)
-        f1 = f1_score(y, y_pred, average='weighted')
+        model_obj.fit(X_train_scaled, y_train)
+        y_pred = model_obj.predict(X_test_scaled)
+        
+        accuracy = accuracy_score(y_test, y_pred)
+        precision = precision_score(y_test, y_pred, average='weighted', zero_division=0)
+        recall = recall_score(y_test, y_pred, average='weighted', zero_division=0)
+        f1 = f1_score(y_test, y_pred, average='weighted')
+
+        # Métriques par classe (0=sell, 1=buy, 2=hold) si présentes
+        try:
+            present_labels = [int(x) for x in np.unique(np.concatenate([np.unique(y_test), np.unique(y_pred)]))]
+        except Exception:
+            present_labels = []
+        labels_for_report = [x for x in (0, 1, 2) if x in present_labels] if present_labels else [0, 1, 2]
+        per_class = {}
+        try:
+            rep = classification_report(
+                y_test,
+                y_pred,
+                labels=labels_for_report,
+                output_dict=True,
+                zero_division=0,
+            )
+            # rep keys are strings of labels
+            def _cls(label_int: int, name: str) -> None:
+                k = str(int(label_int))
+                if k not in rep:
+                    return
+                per_class[name] = {
+                    "precision": float(rep[k].get("precision", 0.0)),
+                    "recall": float(rep[k].get("recall", 0.0)),
+                    "f1": float(rep[k].get("f1-score", 0.0)),
+                    "support": int(rep[k].get("support", 0) or 0),
+                }
+            _cls(1, "buy")
+            _cls(0, "sell")
+            _cls(2, "hold")
+        except Exception:
+            per_class = {}
+
+        # Reliability score (0..1): combine perf + sample size penalty
+        # - perf part uses weighted F1 primarily (more robust than accuracy)
+        # - sample penalty ramps up until ~500 samples
+        samples = int(len(df) or 0)
+        sample_factor = float(np.clip(samples / 500.0, 0.0, 1.0))
+        perf = float(np.clip(0.15 + 0.85 * f1, 0.0, 1.0))
+        reliability_score = float(np.clip(0.60 * perf + 0.40 * sample_factor, 0.0, 1.0))
         feature_importance = dict(zip(feature_columns, [float(x) for x in getattr(model_obj, 'feature_importances_', np.zeros(len(feature_columns)))]))
         
         model_key = f"{symbol.replace(' ', '_')}_{timeframe}"
@@ -332,10 +400,22 @@ class IntegratedMLTrainer:
             "metrics": {
                 model_type: {
                     "accuracy": float(accuracy),
+                    "precision": float(precision),
+                    "recall": float(recall),
                     "f1_score": float(f1),
+                    "per_class": per_class,
+                    "reliability_score": reliability_score,
                     "feature_importance": feature_importance
                 },
-                "random_forest": {"accuracy": float(accuracy), "f1_score": float(f1), "feature_importance": feature_importance}
+                "random_forest": {
+                    "accuracy": float(accuracy),
+                    "precision": float(precision),
+                    "recall": float(recall),
+                    "f1_score": float(f1),
+                    "per_class": per_class,
+                    "reliability_score": reliability_score,
+                    "feature_importance": feature_importance
+                }
             },
             "best_model": model_type,
             "features_used": feature_columns,
@@ -347,7 +427,10 @@ class IntegratedMLTrainer:
         with open(metrics_path, 'w') as f:
             json.dump(metrics, f, indent=2)
         
-        logger.info(f"✅ Modèle {model_type} entraîné: {model_key} [{category}] | Accuracy: {accuracy:.4f} | F1: {f1:.4f}")
+        logger.info(
+            f"✅ Modèle {model_type} entraîné: {model_key} [{category}] "
+            f"| Accuracy: {accuracy:.4f} | Precision: {precision:.4f} | Recall: {recall:.4f} | F1: {f1:.4f}"
+        )
         
         # Logger dans Supabase après l'entraînement
         try:
@@ -425,12 +508,51 @@ class IntegratedMLTrainer:
                 X_scaled = scaler.transform(X)
             else:
                 X_scaled = X.values
-            pred = int(model_obj.predict(X_scaled)[0])
+            pred_raw = model_obj.predict(X_scaled)[0]
+            try:
+                pred = int(pred_raw)
+            except (TypeError, ValueError):
+                pred = int(round(float(pred_raw)))
             action = "buy" if pred == 1 else ("sell" if pred == 0 else "hold")
             model_type = m.get("model_type") or m.get("metrics", {}).get("best_model", "random_forest") if isinstance(m.get("metrics"), dict) else "random_forest"
             mt_metrics = m.get("metrics", {}) or {}
             acc = mt_metrics.get(model_type, mt_metrics.get("random_forest", {})).get("accuracy", 0.6) if isinstance(mt_metrics, dict) else 0.6
-            return {"action": action, "confidence": float(acc), "model": model_type}
+            try:
+                acc_f = float(acc)
+                if acc_f > 1.0:
+                    acc_f /= 100.0
+                acc_f = max(0.0, min(1.0, acc_f))
+            except (TypeError, ValueError):
+                acc_f = 0.6
+            # Confiance = probabilité du tirage courant (predict_proba), PAS la précision d'apprentissage
+            # (l'ancienne logique renvoyait toujours la même accuracy → même % affiché pour toutes les requêtes d'un symbole, souvent quasi identique entre symboles).
+            conf_ml = acc_f
+            if hasattr(model_obj, "predict_proba"):
+                try:
+                    proba = model_obj.predict_proba(X_scaled)[0]
+                    classes = getattr(model_obj, "classes_", None)
+                    if classes is not None and len(np.atleast_1d(classes)) == len(proba):
+                        cls_flat = np.atleast_1d(classes).ravel()
+                        match_idx = None
+                        for i, c in enumerate(cls_flat):
+                            try:
+                                if int(c) == int(pred_raw) or float(c) == float(pred_raw):
+                                    match_idx = i
+                                    break
+                            except (TypeError, ValueError):
+                                continue
+                        if match_idx is not None and match_idx < len(proba):
+                            conf_ml = float(np.clip(proba[match_idx], 0.0, 1.0))
+                        else:
+                            conf_ml = float(np.clip(float(np.max(proba)), 0.0, 1.0))
+                    else:
+                        conf_ml = float(np.clip(float(np.max(proba)), 0.0, 1.0))
+                except Exception as pe:
+                    logger.debug(f"predict_proba indisponible pour {key}: {pe}")
+                    conf_ml = acc_f
+            # Légère calibration avec la perf historique (évite proba extrême 0.99 systématique sur RF)
+            conf_ml = max(0.22, min(0.96, 0.78 * conf_ml + 0.22 * acc_f))
+            return {"action": action, "confidence": float(conf_ml), "model": model_type}
         except Exception as e:
             logger.debug(f"Erreur prédiction ML {key}: {e}")
             return None
@@ -457,7 +579,11 @@ class IntegratedMLTrainer:
                 "training_date": metrics.get("training_date", datetime.now().isoformat()),
                 "metadata": {
                     "model_type": metrics.get("best_model", "random_forest"),
+                    "precision": mt.get("precision"),
+                    "recall": mt.get("recall"),
                     "f1_score": mt.get("f1_score"),
+                    "per_class": mt.get("per_class", {}),
+                    "reliability_score": mt.get("reliability_score", None),
                     "training_samples": metrics.get("training_samples"),
                     "feature_importance": mt.get("feature_importance", {}),
                     "best_model": metrics.get("best_model", "random_forest"),
@@ -643,12 +769,32 @@ class IntegratedMLTrainer:
     
     def _get_symbols_to_train(self) -> List[tuple]:
         """Symboles/timeframes à entraîner: modèles existants ou liste par défaut depuis Supabase"""
+        pairs = []
+        seen = set()
+        # 1) Modèles existants (ceux-ci ont déjà un fichier modèle et doivent continuer à être ré-entrainés)
         models = self.load_existing_models()
-        if models:
-            return [(m['symbol'], m['timeframe']) for m in models.values()]
-        symbols_str = os.getenv("ML_SYMBOLS", "Boom 300 Index,Boom 600 Index,EURUSD,GBPUSD")
-        symbols = [s.strip() for s in symbols_str.split(",") if s.strip()]
-        return [(sym, "M1") for sym in symbols]
+        for m in (models or {}).values():
+            sym = (m.get("symbol") or "").strip()
+            tf = (m.get("timeframe") or "M1").strip().upper()
+            if not sym:
+                continue
+            k = (sym, tf)
+            if k in seen:
+                continue
+            seen.add(k)
+            pairs.append(k)
+
+        # 2) Symboles explicitement demandés (même si aucun modèle n'existe encore localement)
+        symbols_str = os.getenv("ML_SYMBOLS", "Boom 300 Index,Boom 600 Index,Crash 600 Index,EURUSD,GBPUSD")
+        symbols = [s.strip() for s in (symbols_str or "").split(",") if s.strip()]
+        for sym in symbols:
+            k = (sym, "M1")
+            if k in seen:
+                continue
+            seen.add(k)
+            pairs.append(k)
+
+        return pairs
     
     async def continuous_training_loop(self):
         """Boucle d'entraînement continu - récupère données Supabase, stocke métriques Supabase"""

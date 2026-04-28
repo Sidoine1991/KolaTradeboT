@@ -93,13 +93,13 @@ input double            InpFixedRiskUSD        = 0.0;     // ou mets 2.0 si tu p
 
 input group             "Gestion Boom/Crash Spéciale"
 input bool              UseBoomCrashAutoClose = true;   // Fermeture automatique après spike
-input double            BoomCrashMinProfitUSD = 0.50;   // Profit minimum pour fermeture (USD)
+input double            BoomCrashMinProfitUSD = 0.10;   // Profit minimum pour fermeture (USD) - réduit à 0.1$ pour fermer immédiatement après spike
 input int               BoomCrashMinProfitPips = 50;    // Profit minimum pour fermeture (pips)
 input bool              UseBoomCrashTrailing = true;    // Trailing stop spécial Boom/Crash
 
 input group             "Fermeture après spike (réaliser le gain)"
 input bool              CloseOnSpikeProfit = true;     // Fermer la position quand le spike a donné ce profit
-input double            SpikeProfitClose_USD = 0.50;   // Fermer quand profit >= ce montant (USD)
+input double            SpikeProfitClose_USD = 0.10;   // Fermer quand profit >= ce montant (USD) - réduit à 0.1$ pour fermer immédiatement après spike
 
 input group             "Gestion des Pertes"
 input bool              CloseOnMaxLoss = true;         // Fermer après perte maximale
