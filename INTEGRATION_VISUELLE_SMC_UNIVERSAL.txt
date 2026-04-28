@@ -1,0 +1,461 @@
+═══════════════════════════════════════════════════════════════════════════════
+     GUIDE VISUEL D'INTÉGRATION - NOTIFICATIONS ENRICHIES DANS SMC_UNIVERSAL
+═══════════════════════════════════════════════════════════════════════════════
+
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  ÉTAPE 1: AJOUTER L'INCLUDE (LIGNE 26)                                     │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+Ouvrir: SMC_Universal.mq5
+
+Chercher la section des includes (autour de la ligne 26):
+
+╔═══════════════════════════════════════════════════════════════════════════╗
+║  23  // Includes externes                                                 ║
+║  24  #include <Trade\Trade.mqh>                                           ║
+║  25  #include <Economic_News_Ticker.mqh>                                  ║
+║  26  #include <Push_Notifications_Analysis.mqh>                           ║
+║  27                                                                        ║
+╚═══════════════════════════════════════════════════════════════════════════╝
+                                   │
+                                   │ AJOUTER ICI ⬇
+                                   ▼
+╔═══════════════════════════════════════════════════════════════════════════╗
+║  23  // Includes externes                                                 ║
+║  24  #include <Trade\Trade.mqh>                                           ║
+║  25  #include <Economic_News_Ticker.mqh>                                  ║
+║  26  #include <Push_Notifications_Analysis.mqh>                           ║
+║  27  #include <Enhanced_Push_Notifications.mqh>        // ✅ NOUVEAU      ║
+║  28                                                                        ║
+╚═══════════════════════════════════════════════════════════════════════════╝
+
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  ÉTAPE 2: AJOUTER LA MACRO DE REDIRECTION (APRÈS LES INCLUDES)             │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+Juste après les includes, avant les paramètres:
+
+╔═══════════════════════════════════════════════════════════════════════════╗
+║  27  #include <Enhanced_Push_Notifications.mqh>                           ║
+║  28                                                                        ║
+║  29  // Paramètres globaux                                                ║
+╚═══════════════════════════════════════════════════════════════════════════╝
+                                   │
+                                   │ AJOUTER ICI ⬇
+                                   ▼
+╔═══════════════════════════════════════════════════════════════════════════╗
+║  27  #include <Enhanced_Push_Notifications.mqh>                           ║
+║  28                                                                        ║
+║  29  // Redirection automatique de toutes les notifications               ║
+║  30  #define SendNotification(msg) SendEnhancedNotification(msg, \        ║
+║  31                                                      _Symbol, true)    ║
+║  32                                                                        ║
+║  33  // Paramètres globaux                                                ║
+╚═══════════════════════════════════════════════════════════════════════════╝
+
+⚠️  NOTE: Avec cette macro, AUCUNE autre modification n'est nécessaire !
+    Toutes les notifications existantes seront automatiquement enrichies.
+
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  ÉTAPE 3: INITIALISER LE MODULE DANS OnInit()                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+Chercher la fonction OnInit() (autour de la ligne 7000-8000):
+
+╔═══════════════════════════════════════════════════════════════════════════╗
+║  int OnInit()                                                             ║
+║  {                                                                        ║
+║     Print("🚀 Initialisation SMC_Universal...");                         ║
+║                                                                           ║
+║     // ... autres initialisations ...                                    ║
+║                                                                           ║
+║     InitEconomicTicker();                                                ║
+║                                                                           ║
+║     Print("✅ SMC_Universal initialisé");                                ║
+║     return(INIT_SUCCEEDED);                                              ║
+║  }                                                                        ║
+╚═══════════════════════════════════════════════════════════════════════════╝
+                                   │
+                                   │ MODIFIER ICI ⬇
+                                   ▼
+╔═══════════════════════════════════════════════════════════════════════════╗
+║  int OnInit()                                                             ║
+║  {                                                                        ║
+║     Print("🚀 Initialisation SMC_Universal...");                         ║
+║                                                                           ║
+║     // ... autres initialisations ...                                    ║
+║                                                                           ║
+║     InitEconomicTicker();                                                ║
+║     InitEnhancedNotifications();              // ✅ AJOUTER CETTE LIGNE  ║
+║                                                                           ║
+║     Print("✅ SMC_Universal initialisé");                                ║
+║     return(INIT_SUCCEEDED);                                              ║
+║  }                                                                        ║
+╚═══════════════════════════════════════════════════════════════════════════╝
+
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  ÉTAPE 4: COMPILER ET VÉRIFIER                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+1. Dans MetaEditor:
+   ┌─────────────────────────────────────────────┐
+   │  File > Compile (F7)                        │
+   └─────────────────────────────────────────────┘
+
+2. Vérifier aucune erreur:
+   ╔════════════════════════════════════════════════════════════════════════╗
+   ║  Compilation Results                                                   ║
+   ╠════════════════════════════════════════════════════════════════════════╣
+   ║  0 error(s), 0 warning(s)                                ✅            ║
+   ║  'SMC_Universal.mq5' compiled successfully                             ║
+   ╚════════════════════════════════════════════════════════════════════════╝
+
+3. Si erreur de type:
+   ╔════════════════════════════════════════════════════════════════════════╗
+   ║  'SendEnhancedNotification' - undeclared identifier                    ║
+   ╚════════════════════════════════════════════════════════════════════════╝
+
+   ⚠️  Vérifier que Enhanced_Push_Notifications.mqh est bien dans:
+       C:\Users\USER\AppData\Roaming\MetaQuotes\Terminal\...\MQL5\Include\
+
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  ÉTAPE 5: TESTER EN RÉEL                                                    │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+1. Lancer le backend Python:
+   ┌─────────────────────────────────────────────┐
+   │  cd D:\Dev\TradBOT\backend                  │
+   │  python api/main.py                         │
+   └─────────────────────────────────────────────┘
+
+2. Vérifier API disponible:
+   ┌─────────────────────────────────────────────┐
+   │  http://localhost:8000/docs                 │
+   └─────────────────────────────────────────────┘
+
+3. Attacher EA sur graphique MT5
+
+4. Vérifier logs dans onglet "Expert":
+   ╔════════════════════════════════════════════════════════════════════════╗
+   ║  🚀 Initialisation SMC_Universal...                                    ║
+   ║  ✅ Ticker économique initialisé pour EURUSD                           ║
+   ║  ✅ Module notifications enrichies initialisé                          ║
+   ║     📊 Ajout auto données économiques: OUI                             ║
+   ║     📢 Seulement HIGH impact: NON                                      ║
+   ║     💭 Sentiment de marché: OUI                                        ║
+   ║     ⏱️ Cache: 300 secondes                                             ║
+   ║  ✅ SMC_Universal initialisé                                           ║
+   ╚════════════════════════════════════════════════════════════════════════╝
+
+   ✅ Si vous voyez ces lignes, l'intégration est réussie !
+
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  ÉTAPE 6: VÉRIFIER PREMIÈRE NOTIFICATION ENRICHIE                           │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+Attendre qu'un signal soit détecté ou qu'une position se ferme.
+
+Sur votre téléphone (notifications MT5):
+
+╔═══════════════════════════════════════════════════════════════════════════╗
+║                    AVANT (Sans enrichissement)                            ║
+╠═══════════════════════════════════════════════════════════════════════════╣
+║                                                                           ║
+║  🟢 BUY EURUSD                                                            ║
+║  OTE Entry @ 1.0850                                                       ║
+║                                                                           ║
+╚═══════════════════════════════════════════════════════════════════════════╝
+
+                                   ⬇  TRANSFORMATION  ⬇
+
+╔═══════════════════════════════════════════════════════════════════════════╗
+║                    APRÈS (Avec enrichissement)                            ║
+╠═══════════════════════════════════════════════════════════════════════════╣
+║                                                                           ║
+║  🟢 BUY EURUSD                                                            ║
+║  OTE Entry @ 1.0850                                                       ║
+║                                                                           ║
+║  📢 HIGH IMPACT: ECB Rate Decision [HIGH] à 13:45 UTC                    ║
+║  🔴 RISK OFF | Impact: 85/100                                             ║
+║                                                                           ║
+╚═══════════════════════════════════════════════════════════════════════════╝
+
+
+═══════════════════════════════════════════════════════════════════════════════
+                        RÉCAPITULATIF DES MODIFICATIONS
+═══════════════════════════════════════════════════════════════════════════════
+
+Nombre total de lignes AJOUTÉES dans SMC_Universal.mq5:
+
+    ┌─────────────────────────────────────────────────────┐
+    │  3 LIGNES SEULEMENT                                 │
+    │                                                     │
+    │  1. #include <Enhanced_Push_Notifications.mqh>      │
+    │  2. #define SendNotification(msg) ...               │
+    │  3. InitEnhancedNotifications();                    │
+    └─────────────────────────────────────────────────────┘
+
+Nombre total de lignes MODIFIÉES:
+
+    ┌─────────────────────────────────────────────────────┐
+    │  0 LIGNES (grâce à la macro)                        │
+    └─────────────────────────────────────────────────────┘
+
+
+═══════════════════════════════════════════════════════════════════════════════
+                         ALTERNATIVE: SANS MACRO (Plus de contrôle)
+═══════════════════════════════════════════════════════════════════════════════
+
+Si vous préférez NE PAS utiliser la macro (pour plus de contrôle):
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  NE PAS AJOUTER LA MACRO                                                    │
+│  Remplacer manuellement chaque SendNotification()                           │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+Chercher toutes les occurrences de "SendNotification(" dans le fichier:
+
+1. Ligne 15587: Protection symbole
+   ╔═══════════════════════════════════════════════════════════════════════╗
+   ║  SendNotification(alertMsg);                                          ║
+   ╚═══════════════════════════════════════════════════════════════════════╝
+                                   ⬇
+   ╔═══════════════════════════════════════════════════════════════════════╗
+   ║  SendEnhancedNotification(alertMsg, _Symbol, true);                   ║
+   ╚═══════════════════════════════════════════════════════════════════════╝
+
+2. Ligne 24484: NotifyTradeEvent()
+   ╔═══════════════════════════════════════════════════════════════════════╗
+   ║  SendNotification(message);                                           ║
+   ╚═══════════════════════════════════════════════════════════════════════╝
+                                   ⬇
+   ╔═══════════════════════════════════════════════════════════════════════╗
+   ║  SendEnhancedNotification(message, _Symbol, true);                    ║
+   ╚═══════════════════════════════════════════════════════════════════════╝
+
+3. Ligne 24496: NotifyTradeLifecycle()
+   ╔═══════════════════════════════════════════════════════════════════════╗
+   ║  SendNotification(message);                                           ║
+   ╚═══════════════════════════════════════════════════════════════════════╝
+                                   ⬇
+   ╔═══════════════════════════════════════════════════════════════════════╗
+   ║  SendEnhancedNotification(message, _Symbol, true);                    ║
+   ╚═══════════════════════════════════════════════════════════════════════╝
+
+4. Ligne 24531: Flèche DERIV apparue
+   ╔═══════════════════════════════════════════════════════════════════════╗
+   ║  SendNotification("DERIV " + label + " — apparue | " + _Symbol);      ║
+   ╚═══════════════════════════════════════════════════════════════════════╝
+                                   ⬇
+   ╔═══════════════════════════════════════════════════════════════════════╗
+   ║  SendEnhancedNotification("DERIV " + label + " — apparue | " + \      ║
+   ║                            _Symbol, _Symbol, true);                   ║
+   ╚═══════════════════════════════════════════════════════════════════════╝
+
+5. Ligne 24546: Flèche DERIV disparue
+   ╔═══════════════════════════════════════════════════════════════════════╗
+   ║  SendNotification("DERIV flèche " + label + " — disparue | " + \      ║
+   ║                    _Symbol);                                          ║
+   ╚═══════════════════════════════════════════════════════════════════════╝
+                                   ⬇
+   ╔═══════════════════════════════════════════════════════════════════════╗
+   ║  SendEnhancedNotification("DERIV flèche " + label + " — disparue | " \║
+   ║                            + _Symbol, _Symbol, true);                 ║
+   ╚═══════════════════════════════════════════════════════════════════════╝
+
+TOTAL: 5 modifications manuelles
+
+⚖️  CHOIX:
+    - Macro = 1 ligne, automatique, moins de contrôle
+    - Manuel = 5 modifications, plus de contrôle, plus explicite
+
+
+═══════════════════════════════════════════════════════════════════════════════
+                              PARAMÈTRES OPTIONNELS
+═══════════════════════════════════════════════════════════════════════════════
+
+Ajouter ces paramètres dans la section "input" de SMC_Universal:
+
+╔═══════════════════════════════════════════════════════════════════════════╗
+║  input group "=== NOTIFICATIONS ENRICHIES ==="                            ║
+║  input bool   EnhancedNotificationsEnabled = true;                        ║
+║  input bool   AutoAddEconomicData = true;                                 ║
+║  input bool   OnlyHighImpactInNotifs = false;                             ║
+║  input bool   AddMarketSentiment = true;                                  ║
+║  input int    EconomicDataCacheDuration = 300;                            ║
+╚═══════════════════════════════════════════════════════════════════════════╝
+
+Cela permettra de configurer le module depuis les propriétés de l'EA:
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  MT5: Clic droit sur graphique > Expert Advisors > Properties              │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────┐               │
+│  │  NOTIFICATIONS ENRICHIES                                │               │
+│  ├─────────────────────────────────────────────────────────┤               │
+│  │  [✓] EnhancedNotificationsEnabled                       │               │
+│  │  [✓] AutoAddEconomicData                                │               │
+│  │  [ ] OnlyHighImpactInNotifs                             │               │
+│  │  [✓] AddMarketSentiment                                 │               │
+│  │  [300] EconomicDataCacheDuration                        │               │
+│  └─────────────────────────────────────────────────────────┘               │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+
+═══════════════════════════════════════════════════════════════════════════════
+                                TESTS RECOMMANDÉS
+═══════════════════════════════════════════════════════════════════════════════
+
+1. Test Notification Manuelle (dans OnInit):
+   ╔════════════════════════════════════════════════════════════════════════╗
+   ║  int OnInit()                                                          ║
+   ║  {                                                                     ║
+   ║     // ... initialisations ...                                        ║
+   ║                                                                        ║
+   ║     InitEnhancedNotifications();                                      ║
+   ║                                                                        ║
+   ║     // Test immédiat                                                  ║
+   ║     SendEnhancedNotification("🧪 Test notification enrichie", \       ║
+   ║                               _Symbol, true);                         ║
+   ║                                                                        ║
+   ║     return INIT_SUCCEEDED;                                            ║
+   ║  }                                                                     ║
+   ╚════════════════════════════════════════════════════════════════════════╝
+
+2. Test Résumé Économique (dans OnInit):
+   ╔════════════════════════════════════════════════════════════════════════╗
+   ║  int OnInit()                                                          ║
+   ║  {                                                                     ║
+   ║     // ... initialisations ...                                        ║
+   ║                                                                        ║
+   ║     InitEnhancedNotifications();                                      ║
+   ║                                                                        ║
+   ║     // Afficher résumé dans logs                                      ║
+   ║     Print(GetCurrentEconomicSummary(_Symbol));                        ║
+   ║                                                                        ║
+   ║     return INIT_SUCCEEDED;                                            ║
+   ║  }                                                                     ║
+   ╚════════════════════════════════════════════════════════════════════════╝
+
+3. Test Signal Complet (remplacer une notification existante):
+   ╔════════════════════════════════════════════════════════════════════════╗
+   ║  // Au lieu de:                                                        ║
+   ║  SendNotification("🟢 BUY " + _Symbol);                                ║
+   ║                                                                        ║
+   ║  // Utiliser:                                                          ║
+   ║  SendFullAnalysisNotification(                                         ║
+   ║     "BUY",                                                             ║
+   ║     "OTE Entry",                                                       ║
+   ║     entryPrice,                                                        ║
+   ║     stopLoss,                                                          ║
+   ║     takeProfit,                                                        ║
+   ║     confidence,                                                        ║
+   ║     _Symbol                                                            ║
+   ║  );                                                                    ║
+   ╚════════════════════════════════════════════════════════════════════════╝
+
+
+═══════════════════════════════════════════════════════════════════════════════
+                              DÉPANNAGE VISUEL
+═══════════════════════════════════════════════════════════════════════════════
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  PROBLÈME 1: Erreur de compilation                                          │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+╔════════════════════════════════════════════════════════════════════════════╗
+║  ❌ 'SendEnhancedNotification' - undeclared identifier                     ║
+╚════════════════════════════════════════════════════════════════════════════╝
+
+SOLUTION:
+1. Vérifier que Enhanced_Push_Notifications.mqh est dans:
+   📁 C:\Users\USER\AppData\Roaming\MetaQuotes\Terminal\XXX\MQL5\Include\
+
+2. Vérifier l'include:
+   #include <Enhanced_Push_Notifications.mqh>  ✅ Bon
+   #include "Enhanced_Push_Notifications.mqh"  ❌ Mauvais (guillemets)
+
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  PROBLÈME 2: Pas de données économiques dans notifications                  │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+╔════════════════════════════════════════════════════════════════════════════╗
+║  Notification reçue:                                                       ║
+║  🟢 BUY EURUSD                                                             ║
+║  (pas de données économiques)                                              ║
+╚════════════════════════════════════════════════════════════════════════════╝
+
+VÉRIFICATIONS:
+1. Backend lancé ?
+   ┌──────────────────────────────────────────┐
+   │  ✅ http://localhost:8000/docs répond    │
+   └──────────────────────────────────────────┘
+
+2. Logs EA:
+   ╔═══════════════════════════════════════════════════════════════════════╗
+   ║  ⚠️ API économique indisponible (404)                                 ║
+   ╚═══════════════════════════════════════════════════════════════════════╝
+   → Lancer backend: python backend/api/main.py
+
+3. Paramètres:
+   ╔═══════════════════════════════════════════════════════════════════════╗
+   ║  AutoAddEconomicData = true  ✅                                       ║
+   ╚═══════════════════════════════════════════════════════════════════════╝
+
+4. WebRequest autorisé dans MT5:
+   Outils > Options > Expert Advisors
+   ┌──────────────────────────────────────────┐
+   │  [✓] Allow WebRequest for listed URL:    │
+   │      http://localhost:8000                │
+   └──────────────────────────────────────────┘
+
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  PROBLÈME 3: Notifications trop longues (tronquées)                         │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+╔════════════════════════════════════════════════════════════════════════════╗
+║  Notification reçue:                                                       ║
+║  🟢 BUY EURUSD | OTE Entry @ 1.0850 | SL: 1.0820 | TP: 1.0900 |...       ║
+║  (coupé à 256 caractères)                                                  ║
+╚════════════════════════════════════════════════════════════════════════════╝
+
+SOLUTIONS:
+1. Activer filtre HIGH impact uniquement:
+   OnlyHighImpactInNotifs = true
+
+2. Message plus compact:
+   SendEnhancedNotification(msg, _Symbol, true);  // true = compact
+
+3. Le module tronque automatiquement à 253 car. + "..."
+
+
+═══════════════════════════════════════════════════════════════════════════════
+                                  RÉSUMÉ FINAL
+═══════════════════════════════════════════════════════════════════════════════
+
+✅ FICHIER MODIFIÉ: SMC_Universal.mq5
+
+✅ MODIFICATIONS:
+   - 1 include ajouté (ligne ~27)
+   - 1 macro ajoutée (ligne ~29)  OU  5 SendNotification modifiées
+   - 1 init ajoutée dans OnInit()
+
+✅ TEMPS TOTAL: 5 minutes
+
+✅ COMPILATION: 0 erreur
+
+✅ RÉSULTAT: Toutes les notifications enrichies automatiquement avec données
+             économiques en temps réel !
+
+
+════════════════════════════════════════════════════════════════════════
+        🎉 INTÉGRATION TERMINÉE - NOTIFICATIONS 10X PLUS UTILES ! 🎉
+════════════════════════════════════════════════════════════════════════

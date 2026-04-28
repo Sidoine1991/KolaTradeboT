@@ -1,0 +1,271 @@
+===================================================================================
+🎯 CONFIGURATION OPTIMALE OTE - SMC_Universal.mq5
+===================================================================================
+📅 Date: 2026-04-28
+🎯 Objectif: Stratégie PURE OTE + Fibonacci pour micro-comptes (10-50$)
+📊 Qualité > Quantité: 2-3 trades/semaine de haute qualité
+💰 Risk/Reward minimum: 2:1 (Target: TP2)
+===================================================================================
+
+⚠️ IMPORTANT: Copiez EXACTEMENT ces paramètres dans MT5 ⚠️
+
+===================================================================================
+📌 ÉTAPE 1: ACTIVER LE MODE OTE STRICT
+===================================================================================
+
+Ouvrez les paramètres du robot SMC_Universal.mq5 dans MT5, puis:
+
+╔═══════════════════════════════════════════════════════════════════════════════╗
+║                          === GÉNÉRAL ===                                      ║
+╠═══════════════════════════════════════════════════════════════════════════════╣
+║  OTE_StrictModeOnly                = true     ⭐ ACTIVER (clé principale)     ║
+║  UseMinLotOnly                     = true                                     ║
+║  InpLotSize                        = 0.01     (Lot minimum - calculé auto)    ║
+║  EnableTrading                     = true                                     ║
+║  MaxPositionsTerminal              = 1        ⭐ 1 seule position             ║
+║  OnePositionPerSymbol              = true                                     ║
+║  InpMagicNumber                    = 202502                                   ║
+║  MaxTotalLossDollars               = 2.0      ⭐ Max 2$ de perte totale       ║
+║  EmergencyHardLossCut_Enable       = true                                     ║
+║  EmergencyHardLossCut_USD          = 1.0      ⭐ Coupe urgence 1$ (10%)       ║
+║  MaxRiskPerTradePercent            = 2.0      ⭐ 2% risque par trade          ║
+║  MaxDailyDrawdownPercent           = 10.0                                     ║
+║  DailyProfitTargetDollars          = 2.0      ⭐ +2$/jour = +20% du compte    ║
+║  MaxDailyLossDollars               = 2.0                                      ║
+╚═══════════════════════════════════════════════════════════════════════════════╝
+
+NOTES:
+- OTE_StrictModeOnly = true → Désactive AUTOMATIQUEMENT toutes les autres stratégies
+- MaxPositionsTerminal = 1 → Protection: 1 seule position à la fois
+- MaxRiskPerTradePercent = 2.0 → Pour compte 10$: risque 0.20$ par trade
+- DailyProfitTargetDollars = 2.0 → Objectif +2$/jour (+20% du compte 10$)
+
+===================================================================================
+📌 ÉTAPE 2: PARAMÈTRES OTE (Confirmés automatiquement par le mode strict)
+===================================================================================
+
+Ces paramètres sont AUTOMATIQUEMENT configurés par OTE_StrictModeOnly = true.
+Vous pouvez les vérifier, mais ils seront forcés au démarrage du robot:
+
+╔═══════════════════════════════════════════════════════════════════════════════╗
+║                    === SMC_OTE — STRATÉGIE PRINCIPALE ===                     ║
+╠═══════════════════════════════════════════════════════════════════════════════╣
+║  UseSMC_OTEStrategy                = true     ✅ (Auto)                        ║
+║  UseOTE                            = true     ✅ (Auto)                        ║
+║  RequireOTEFiboZone                = true     ✅ (Auto)                        ║
+║  OTE_UseLimitOrders                = true     ✅ Entrées LIMIT seulement      ║
+║  OTE_RequireStrongTrend            = true     ✅ Tendance forte obligatoire   ║
+║  OTE_RequireBOSConfirmation        = true     ✅ BOS M15/M5 obligatoire       ║
+║  OTE_RequireM5CandlestickConfirmation = true ✅ Pattern M5 obligatoire        ║
+║  OTE_RequireRealEntryPrecision     = true     ✅ Entrée précise zone OTE      ║
+╚═══════════════════════════════════════════════════════════════════════════════╝
+
+╔═══════════════════════════════════════════════════════════════════════════════╗
+║               === STRATÉGIES DÉSACTIVÉES (Mode Strict) ===                    ║
+╠═══════════════════════════════════════════════════════════════════════════════╣
+║  UseSpikeAutoClose                 = false    ❌ (Auto)                        ║
+║  UseStairEntry                     = false    ❌ (Auto)                        ║
+║  UseIA80ArrowAutoEntry             = false    ❌ (Auto)                        ║
+║  UseM5ChannelSpikeSeriesEntry      = false    ❌ (Auto)                        ║
+║  UsePreOTEEntry                    = false    ❌ (Auto)                        ║
+║  ExecuteMarketOnOTEAppearance      = false    ❌ (Auto)                        ║
+║  ExecuteMarketOnOTETouch           = false    ❌ (Auto)                        ║
+║  OTE_EarlyEntryOnEMA20EMA23Impulse = false    ❌ (Auto)                        ║
+╚═══════════════════════════════════════════════════════════════════════════════╝
+
+===================================================================================
+📌 ÉTAPE 3: AFFICHAGE GRAPHIQUE (Pour voir les setups OTE)
+===================================================================================
+
+╔═══════════════════════════════════════════════════════════════════════════════╗
+║                      === AFFICHAGE GRAPHIQUE ===                              ║
+╠═══════════════════════════════════════════════════════════════════════════════╣
+║  ShowChartGraphics                 = true     ✅ Afficher graphiques          ║
+║  ShowOTEImbalanceOnChart           = true     ✅ Afficher setups OTE          ║
+║  ShowOTEProtocolVisuals            = true     ✅ Protocole OTE visuel         ║
+║  StrategyVisualMinimalMode         = false    ✅ Tous les détails OTE         ║
+║  DrawFibonacciOnChart              = true     ✅ Niveaux Fibonacci            ║
+║  ShowHMSZonesOnChart               = true     ✅ Zones HMS                    ║
+╚═══════════════════════════════════════════════════════════════════════════════╝
+
+Ce que vous verrez sur le graphique:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🟦 ZONE OTE (61.8-78.6%)    Rectangle bleu transparent
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🟢 📍 ENTRY                  Ligne verte épaisse (4px) + label "ENTRY"
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🔴 🛑 STOP LOSS              Ligne rouge épaisse (4px) + label "SL"
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🔵 🎯 TP1 (RR 1:1)           Ligne bleue (3px) + label "TP1 (1:1)"
+🔵 🎯 TP2 (RR 2:1)           Ligne bleue (3px) + label "TP2 (2:1)" ⭐ Target
+🔵 🎯 TP3 (RR 3:1)           Ligne bleue (2px) + label "TP3 (3:1)"
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+💰 INFO RR                   Label en haut: "OTE SETUP BUY | RR 2:1 | Risk/Reward"
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+===================================================================================
+📌 ÉTAPE 4: PARAMÈTRES IA (Optionnel - pour améliorer la qualité)
+===================================================================================
+
+╔═══════════════════════════════════════════════════════════════════════════════╗
+║                        === SERVEUR IA (Optionnel) ===                         ║
+╠═══════════════════════════════════════════════════════════════════════════════╣
+║  UseAIServer                       = true     (Si serveur IA disponible)      ║
+║  AI_ServerURL                      = "http://localhost:8000"                  ║
+║  UseMTFConsensusAsPrimaryAI        = true     Consensus multi-timeframe       ║
+║  MTFConsensusRefreshSeconds        = 8        Fréquence consensus             ║
+║  DisableAIMarketOrdersOnCrypto     = true     Pas de MARKET sur crypto        ║
+╚═══════════════════════════════════════════════════════════════════════════════╝
+
+===================================================================================
+📌 ÉTAPE 5: MARCHÉS AUTORISÉS (OTE fonctionne sur tous ces marchés)
+===================================================================================
+
+╔═══════════════════════════════════════════════════════════════════════════════╗
+║                    === SMC_OTE — MARCHÉS AUTORISÉS ===                        ║
+╠═══════════════════════════════════════════════════════════════════════════════╣
+║  SMC_OTE_AllowForex                = true     ✅ Forex (EUR/USD, GBP/USD...)  ║
+║  SMC_OTE_AllowMetals               = true     ✅ Métaux (XAU/USD, XAG/USD)    ║
+║  SMC_OTE_AllowCommodities          = true     ✅ Commodités (Oil...)          ║
+║  SMC_OTE_AllowBoomCrash            = true     ✅ Boom/Crash                   ║
+║  SMC_OTE_AllowWeltradeSynth        = true     ✅ PAINX/GAINX                  ║
+║  SMC_OTE_AllowVolatility           = false    ❌ Volatility (trop bruyant)    ║
+╚═══════════════════════════════════════════════════════════════════════════════╝
+
+===================================================================================
+📌 RÉCAPITULATIF: PARAMÈTRES CLÉS À VÉRIFIER
+===================================================================================
+
+Avant de démarrer le robot, vérifiez ces 8 paramètres CRITIQUES:
+
+✅ 1. OTE_StrictModeOnly              = true    ⭐ CLÉ PRINCIPALE
+✅ 2. MaxPositionsTerminal             = 1       Une seule position
+✅ 3. MaxRiskPerTradePercent           = 2.0     2% par trade
+✅ 4. EmergencyHardLossCut_USD         = 1.0     Coupe urgence 1$
+✅ 5. DailyProfitTargetDollars         = 2.0     Objectif +2$/jour
+✅ 6. OTE_UseLimitOrders               = true    LIMIT seulement
+✅ 7. ShowOTEImbalanceOnChart          = true    Voir les setups
+✅ 8. UseMinLotOnly                    = true    Lot minimum
+
+===================================================================================
+📊 EXEMPLE DE TRADE OTE (Compte 10$)
+===================================================================================
+
+Scénario BUY:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. 📊 Détection zone OTE              Prix dans 61.8-78.6% Fibonacci
+2. ✅ Confirmation BOS                Break of Structure sur M15
+3. ✅ Confirmation pattern            Engulfing haussier sur M5
+4. ✅ Confirmation tendance           EMA M5 alignée (EMA21 > EMA50)
+5. 📍 Ordre LIMIT placé               Entry: 1.1000 (zone OTE 70%)
+6. 🛑 Stop Loss                       SL: 1.0980 (sous 78.6% = 20 pips)
+7. 🎯 Take Profit 1                   TP1: 1.1020 (RR 1:1 = 20 pips)
+8. 🎯 Take Profit 2                   TP2: 1.1040 (RR 2:1 = 40 pips) ⭐ Target
+9. 🎯 Take Profit 3                   TP3: 1.1060 (RR 3:1 = 60 pips)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+💰 CALCUL DU LOT (Compte 10$):
+   - Balance: 10$
+   - Risque: 2% = 0.20$
+   - SL: 20 pips
+   - Lot calculé: 0.01 (lot minimum)
+
+   Si TP2 atteint (RR 2:1):
+   - Gain: 0.40$ (+4% du compte)
+
+   5 trades gagnants consécutifs:
+   - 10$ → 12$ (+20% du compte)
+
+===================================================================================
+🎯 OBJECTIFS RÉALISTES PAR MOIS (Compte 10$)
+===================================================================================
+
+Stratégie: 2-3 trades par SEMAINE (qualité maximale)
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  Trades/mois   │  Win Rate   │  RR    │  Résultat   │  Nouveau solde       │
+├─────────────────────────────────────────────────────────────────────────────┤
+│  8 trades      │  60%        │  2:1   │  +1.60$     │  11.60$ (+16%)       │
+│  10 trades     │  65%        │  2:1   │  +2.60$     │  12.60$ (+26%)       │
+│  12 trades     │  70%        │  2:1   │  +4.08$     │  14.08$ (+41%)       │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+Après 6 mois (capitalisation composée):
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  Mois    │  Trades   │  Win Rate   │  Solde                                 │
+├─────────────────────────────────────────────────────────────────────────────┤
+│  Mois 1  │  10       │  65%        │  12.60$ (+26%)                         │
+│  Mois 2  │  10       │  65%        │  15.88$ (+59%)                         │
+│  Mois 3  │  10       │  65%        │  20.01$ (+100%)                        │
+│  Mois 4  │  10       │  65%        │  25.21$ (+152%)                        │
+│  Mois 5  │  10       │  65%        │  31.76$ (+218%)                        │
+│  Mois 6  │  10       │  65%        │  40.02$ (+300%)                        │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+⚠️ IMPORTANT: Ces résultats supposent une discipline stricte et le respect
+des règles de gestion de risque (2% max par trade, 1 seule position).
+
+===================================================================================
+🚨 RÈGLES D'OR À RESPECTER
+===================================================================================
+
+1. ✅ PATIENCE: Attendre SEULEMENT les setups OTE parfaits (zone 61.8-78.6%)
+2. ✅ CONFIRMATIONS: Exiger BOS + Pattern M5 + Tendance alignée
+3. ✅ LIMIT SEULEMENT: Ne JAMAIS entrer au marché (risque de mauvais prix)
+4. ✅ 1 POSITION MAX: Ne jamais avoir 2 positions ouvertes simultanément
+5. ✅ RESPECT DU RISQUE: Toujours 2% max du compte par trade
+6. ✅ TP2 COMME TARGET: Viser minimum RR 2:1 (TP2)
+7. ✅ PAS DE REVENGE TRADING: Si 2 pertes consécutives → pause 1h
+8. ✅ JOURNALISER: Noter chaque trade (entrée, sortie, raison)
+9. ✅ BACKTESTING: Tester sur demo 2 semaines avant live
+10. ✅ PROGRESSION: Augmenter le compte progressivement (pas de dépôt massif)
+
+===================================================================================
+🔍 VÉRIFICATION AVANT DÉMARRAGE
+===================================================================================
+
+Checklist à cocher AVANT de démarrer le robot sur compte réel:
+
+☐ 1. OTE_StrictModeOnly = true activé dans les paramètres
+☐ 2. Compte demo testé pendant minimum 2 semaines
+☐ 3. Win rate observé en demo >= 55%
+☐ 4. Graphique affiche clairement les zones OTE (Entry, SL, TP1/TP2/TP3)
+☐ 5. Vérifié que le robot NE place QUE des ordres LIMIT
+☐ 6. Vérifié qu'il n'y a jamais plus de 1 position ouverte
+☐ 7. Calcul de lot vérifié: 2% risque = lot adapté au compte
+☐ 8. Serveur IA configuré (si utilisé)
+☐ 9. Journal de trading préparé
+☐ 10. Objectifs réalistes fixés (+2$/jour pour compte 10$)
+
+===================================================================================
+📞 SUPPORT ET DOCUMENTATION
+===================================================================================
+
+Fichiers importants créés:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✅ OTE_ANALYSIS_COMPLETE.md        Analyse détaillée des problèmes
+✅ OTE_OPTIMAL_CONFIG.txt          Ce fichier (configuration optimale)
+✅ GUIDE_FIBONACCI_OTE.md          Guide d'utilisation OTE (existant)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Modifications effectuées dans SMC_Universal.mq5:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✅ Ajout paramètre OTE_StrictModeOnly (ligne ~5587)
+✅ Ajout fonction EnforceOTEStrictMode() (avant OnInit)
+✅ Amélioration DrawDynamicOTEFibo() avec Entry, SL, TP1/TP2/TP3 visibles
+✅ Ajout fonction CalculateMicroAccountLot() pour calcul lot adapté
+✅ Modification RunCategoryStrategy() pour mode OTE strict
+✅ Modification OnTick() pour désactiver stratégies concurrentes en mode strict
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+===================================================================================
+🎯 BONNE CHANCE AVEC VOS TRADES OTE !
+===================================================================================
+
+Date: 2026-04-28
+Auteur: Claude Code (Configuration SMC_Universal.mq5)
+
+⚠️ DISCLAIMER: Le trading comporte des risques. Ne tradez qu'avec de l'argent
+que vous pouvez vous permettre de perdre. Testez toujours en démo d'abord.
+
+===================================================================================

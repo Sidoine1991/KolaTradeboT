@@ -1,0 +1,415 @@
+
+//+------------------------------------------------------------------+
+//| MODULE D'ANALYSE TECHNIQUE 360°                                  |
+//+------------------------------------------------------------------+
+
+void DiscoverSymbols360()
+{
+   // Toujours inclure le symbol de l'EA en premier
+   AddSymbol360(_Symbol);
+
+   // Scanner les symbols du MarketWatch
+   int total = SymbolsTotal(true); 
+   for(int i = 0; i < total && i < 50; i++) {
+      string sym = SymbolName(i, true);
+      if(sym != _Symbol && sym != "") {
+         AddSymbol360(sym);
+      }
+   }
+   Print("360 Scanner: ", g_symbolCount360, " symbols découverts.");
+}
+
+void AddSymbol360(string sym)
+{
+   for(int i = 0; i < g_symbolCount360; i++) {
+      if(g_symbols360[i].symbol == sym) return;
+   }
+
+   ArrayResize(g_symbols360, g_symbolCount360 + 1);
+   g_symbols360[g_symbolCount360].symbol      = sym;
+   g_symbols360[g_symbolCount360].initialized = false;
+   g_symbols360[g_symbolCount360].last_bar_m5 = 0;
+   g_symbolCount360++;
+}
+
+bool InitSymbolIndicators360(SymbolData360 &sd)
+{
+   string s = sd.symbol;
+   // M5
+   sd.tf_m5.ema8    = iMA(s, PERIOD_M5,  8,  0, MODE_EMA, PRICE_CLOSE);
+   sd.tf_m5.ema21   = iMA(s, PERIOD_M5,  21, 0, MODE_EMA, PRICE_CLOSE);
+   sd.tf_m5.ema50   = iMA(s, PERIOD_M5,  50, 0, MODE_EMA, PRICE_CLOSE);
+   sd.tf_m5.ema200  = iMA(s, PERIOD_M5,  200,0, MODE_EMA, PRICE_CLOSE);
+   sd.tf_m5.rsi     = iRSI(s, PERIOD_M5, 14, PRICE_CLOSE);
+   sd.tf_m5.macd    = iMACD(s, PERIOD_M5, 12, 26, 9, PRICE_CLOSE);
+   sd.tf_m5.stoch   = iStochastic(s, PERIOD_M5, 5, 3, 3, MODE_SMA, STO_LOWHIGH);
+   sd.tf_m5.adx     = iADX(s, PERIOD_M5, 14);
+   sd.tf_m5.atr     = iATR(s, PERIOD_M5, 14);
+   sd.tf_m5.bb      = iBands(s, PERIOD_M5, 20, 0, 2.0, PRICE_CLOSE);
+   // M15
+   sd.tf_m15.ema8   = iMA(s, PERIOD_M15, 8,  0, MODE_EMA, PRICE_CLOSE);
+   sd.tf_m15.ema21  = iMA(s, PERIOD_M15, 21, 0, MODE_EMA, PRICE_CLOSE);
+   sd.tf_m15.ema50  = iMA(s, PERIOD_M15, 50, 0, MODE_EMA, PRICE_CLOSE);
+   sd.tf_m15.ema200 = iMA(s, PERIOD_M15, 200,0, MODE_EMA, PRICE_CLOSE);
+   sd.tf_m15.rsi    = iRSI(s, PERIOD_M15, 14, PRICE_CLOSE);
+   sd.tf_m15.macd   = iMACD(s, PERIOD_M15, 12, 26, 9, PRICE_CLOSE);
+   sd.tf_m15.stoch  = iStochastic(s, PERIOD_M15, 5, 3, 3, MODE_SMA, STO_LOWHIGH);
+   sd.tf_m15.adx    = iADX(s, PERIOD_M15, 14);
+   sd.tf_m15.atr    = iATR(s, PERIOD_M15, 14);
+   sd.tf_m15.bb     = iBands(s, PERIOD_M15, 20, 0, 2.0, PRICE_CLOSE);
+   // H1
+   sd.tf_h1.ema8    = iMA(s, PERIOD_H1,  8,  0, MODE_EMA, PRICE_CLOSE);
+   sd.tf_h1.ema21   = iMA(s, PERIOD_H1,  21, 0, MODE_EMA, PRICE_CLOSE);
+   sd.tf_h1.ema50   = iMA(s, PERIOD_H1,  50, 0, MODE_EMA, PRICE_CLOSE);
+   sd.tf_h1.ema200  = iMA(s, PERIOD_H1,  200,0, MODE_EMA, PRICE_CLOSE);
+   sd.tf_h1.rsi     = iRSI(s, PERIOD_H1,  14, PRICE_CLOSE);
+   sd.tf_h1.macd    = iMACD(s, PERIOD_H1,  12, 26, 9, PRICE_CLOSE);
+   sd.tf_h1.adx     = iADX(s, PERIOD_H1,  14);
+   sd.tf_h1.atr     = iATR(s, PERIOD_H1,  14);
+   sd.tf_h1.bb      = iBands(s, PERIOD_H1,  20, 0, 2.0, PRICE_CLOSE);
+   // H4/D1 léger
+   sd.tf_h4.ema50   = iMA(s, PERIOD_H4,  50, 0, MODE_EMA, PRICE_CLOSE);
+   sd.tf_h4.ema200  = iMA(s, PERIOD_H4,  200,0, MODE_EMA, PRICE_CLOSE);
+   sd.tf_h4.rsi     = iRSI(s, PERIOD_H4,  14, PRICE_CLOSE);
+   sd.tf_h4.atr     = iATR(s, PERIOD_H4,  14);
+   sd.tf_h4.adx     = iADX(s, PERIOD_H4,  14);
+   sd.tf_d1.ema50   = iMA(s, PERIOD_D1,  50, 0, MODE_EMA, PRICE_CLOSE);
+   sd.tf_d1.ema200  = iMA(s, PERIOD_D1,  200,0, MODE_EMA, PRICE_CLOSE);
+   sd.tf_d1.rsi     = iRSI(s, PERIOD_D1,  14, PRICE_CLOSE);
+   sd.tf_d1.atr     = iATR(s, PERIOD_D1,  14);
+
+   sd.initialized = true;
+   return true;
+}
+
+void Run360AnalysisScanner()
+{
+   static datetime lastScan = 0;
+   if(TimeCurrent() - lastScan < 5) return; 
+   lastScan = TimeCurrent();
+
+   for(int i = 0; i < g_symbolCount360; i++) {
+      if(!g_symbols360[i].initialized) continue;
+
+      string sym = g_symbols360[i].symbol;
+      datetime current_bar = iTime(sym, PERIOD_M5, 0);
+
+      if(current_bar != g_symbols360[i].last_bar_m5) {
+         g_symbols360[i].last_bar_m5 = current_bar;
+         string json_data = BuildAnalysisJSON360(g_symbols360[i]);
+         SendToAIServer360(json_data, sym);
+      }
+   }
+
+   ReadSignalsFromServer360();
+}
+
+string BuildAnalysisJSON360(SymbolData360 &sd)
+{
+   string s = sd.symbol;
+   string tf_m5_json  = BuildTFJson360(sd.tf_m5,  s, PERIOD_M5);
+   string tf_m15_json = BuildTFJson360(sd.tf_m15, s, PERIOD_M15);
+   string tf_h1_json  = BuildTFJson360(sd.tf_h1,  s, PERIOD_H1);
+   string tf_h4_json  = BuildTFJsonLight360(sd.tf_h4, s, PERIOD_H4);
+   string tf_d1_json  = BuildTFJsonLight360(sd.tf_d1, s, PERIOD_D1);
+
+   int    conf_score  = CalcConfluenceScore360(sd);
+   string bias        = GetDominantBias360(sd);
+   string phase       = GetMarketPhase360(sd);
+   string session     = GetCurrentSession360();
+   bool   trade_ok    = conf_score >= 70;
+   string spread_ok   = (GetSpreadPips360(s) <= 3.0) ? "true" : "false";
+
+   string json = "{"
+      "\"timestamp_utc\":\"" + TimeToString(TimeGMT(), TIME_DATE|TIME_SECONDS) + "\","
+      "\"symbol\":\"" + s + "\","
+      "\"broker\":\"" + AccountInfoString(ACCOUNT_COMPANY) + "\","
+      "\"analysis_version\":\"360v1\","
+      "\"market_phase\":\"" + phase + "\","
+      "\"session\":\"" + session + "\","
+      "\"news_risk\":\"LOW\","
+      "\"timeframes\":{"
+         "\"M5\":" + tf_m5_json + ","
+         "\"M15\":" + tf_m15_json + ","
+         "\"H1\":" + tf_h1_json + ","
+         "\"H4\":" + tf_h4_json + ","
+         "\"D1\":" + tf_d1_json +
+      "},"
+      "\"meta\":{"
+         "\"dominant_bias\":\"" + bias + "\","
+         "\"confluence_score\":" + IntegerToString(conf_score) + ","
+         "\"volatility_class\":\"NORMAL\","
+         "\"trade_allowed\":" + (trade_ok ? "true" : "false") + ","
+         "\"spread_filter_ok\":" + spread_ok + ","
+         "\"session_filter_ok\":true,"
+         "\"market_structure\":\"" + GetMarketStructure360(s) + "\""
+      "}"
+   "}";
+   return json;
+}
+
+string BuildTFJson360(TFHandles360 &tfh, string sym, ENUM_TIMEFRAMES tf)
+{
+   double ema8_v  = GetIndicatorValue360(tfh.ema8,  0, 1);
+   double ema21_v = GetIndicatorValue360(tfh.ema21, 0, 1);
+   double ema50_v = GetIndicatorValue360(tfh.ema50, 0, 1);
+   double ema200v = GetIndicatorValue360(tfh.ema200,0, 1);
+   double rsi_v   = GetIndicatorValue360(tfh.rsi,   0, 1);
+   double macd_l  = GetIndicatorValue360(tfh.macd,  0, 1);
+   double macd_s  = GetIndicatorValue360(tfh.macd,  1, 1);
+   double macd_h  = macd_l - macd_s;
+   double stoch_k = GetIndicatorValue360(tfh.stoch, 0, 1);
+   double stoch_d = GetIndicatorValue360(tfh.stoch, 1, 1);
+   double adx_v   = GetIndicatorValue360(tfh.adx,   0, 1);
+   double atr_v   = GetIndicatorValue360(tfh.atr,   0, 1) / SymbolInfoDouble(sym, SYMBOL_POINT) / 10;
+   double bb_up   = GetIndicatorValue360(tfh.bb,    1, 1);
+   double bb_mid  = GetIndicatorValue360(tfh.bb,    0, 1);
+   double bb_dn   = GetIndicatorValue360(tfh.bb,    2, 1);
+   double open_p  = iOpen(sym, tf, 1);
+   double high_p  = iHigh(sym, tf, 1);
+   double low_p   = iLow(sym, tf, 1);
+   double close_p = iClose(sym, tf, 1);
+
+   string json = "{"
+      "\"open\":" + DoubleToString(open_p, 5) + ","
+      "\"high\":" + DoubleToString(high_p, 5) + ","
+      "\"low\":" + DoubleToString(low_p, 5) + ","
+      "\"close\":" + DoubleToString(close_p, 5) + ","
+      "\"spread_pips\":" + DoubleToString(GetSpreadPips360(sym), 1) + ","
+      "\"ema_8\":" + DoubleToString(ema8_v, 5) + ","
+      "\"ema_21\":" + DoubleToString(ema21_v, 5) + ","
+      "\"ema_50\":" + DoubleToString(ema50_v, 5) + ","
+      "\"ema_200\":" + DoubleToString(ema200v, 5) + ","
+      "\"ema_alignment\":\"" + GetEMAAlignment360(ema8_v, ema21_v, ema50_v) + "\","
+      "\"rsi_14\":" + DoubleToString(rsi_v, 2) + ","
+      "\"rsi_zone\":\"" + GetRSIZone360(rsi_v) + "\","
+      "\"macd_hist\":" + DoubleToString(macd_h, 5) + ","
+      "\"macd_cross\":\"" + GetMACDCross360(tfh.macd, 1) + "\","
+      "\"stoch_k\":" + DoubleToString(stoch_k, 1) + ","
+      "\"stoch_d\":" + DoubleToString(stoch_d, 1) + ","
+      "\"adx_14\":" + DoubleToString(adx_v, 1) + ","
+      "\"atr_14_pips\":" + DoubleToString(atr_v, 1) + ","
+      "\"bb_upper\":" + DoubleToString(bb_up, 5) + ","
+      "\"bb_mid\":" + DoubleToString(bb_mid, 5) + ","
+      "\"bb_lower\":" + DoubleToString(bb_dn, 5) + ","
+      "\"candle_type\":\"" + GetCandleType360(sym, tf, 1) + "\","
+      "\"candle_confirmation\":" + (IsCandleConfirmed360(sym, tf, GetCandleType360(sym, tf, 1)) ? "true" : "false") + ","
+      "\"price_vs_ema21\":\"" + ((close_p > ema21_v) ? "ABOVE" : "BELOW") + "\","
+      "\"nearest_support\":" + DoubleToString(GetNearestSupport360(sym, tf), 5) + ","
+      "\"nearest_resist\":" + DoubleToString(GetNearestResist360(sym, tf), 5) + ","
+      "\"dist_to_support_pips\":" + DoubleToString(MathAbs(close_p - GetNearestSupport360(sym, tf)) / SymbolInfoDouble(sym, SYMBOL_POINT) / 10, 1) + ","
+      "\"dist_to_resist_pips\":" + DoubleToString(MathAbs(GetNearestResist360(sym, tf) - close_p) / SymbolInfoDouble(sym, SYMBOL_POINT) / 10, 1) + ","
+      "\"bos_detected\":" + (DetectBOS360(sym, tf) ? "true" : "false") + ","
+      "\"choch_detected\":" + (DetectCHoCH360(sym, tf) ? "true" : "false") + ","
+      "\"market_phase\":\"" + GetPhaseTF360(sym, tf) + "\""
+   "}";
+   return json;
+}
+
+string BuildTFJsonLight360(TFHandles360 &tfh, string sym, ENUM_TIMEFRAMES tf)
+{
+   double ema50_v = GetIndicatorValue360(tfh.ema50,  0, 1);
+   double ema200v = GetIndicatorValue360(tfh.ema200, 0, 1);
+   double rsi_v   = GetIndicatorValue360(tfh.rsi,    0, 1);
+   double adx_v   = GetIndicatorValue360(tfh.adx,    0, 1);
+   double atr_v   = GetIndicatorValue360(tfh.atr,    0, 1) / SymbolInfoDouble(sym, SYMBOL_POINT) / 10;
+   double close_p = iClose(sym, tf, 1);
+   string align   = (ema50_v > ema200v) ? "BULLISH_STACK" : "BEARISH_STACK";
+   string json = "{\"close\":" + DoubleToString(close_p, 5) + ",\"ema_50\":" + DoubleToString(ema50_v, 5) + ",\"ema_200\":" + DoubleToString(ema200v, 5) + ",\"ema_alignment\":\"" + align + "\",\"rsi_14\":" + DoubleToString(rsi_v, 2) + ",\"adx_14\":" + DoubleToString(adx_v, 1) + ",\"atr_14_pips\":" + DoubleToString(atr_v, 1) + ",\"market_phase\":\"" + GetPhaseTF360(sym, tf) + "\"}";
+   return json;
+}
+
+double GetIndicatorValue360(int handle, int buffer, int shift)
+{
+   if(handle == INVALID_HANDLE) return 0;
+   double arr[];
+   ArraySetAsSeries(arr, true);
+   if(CopyBuffer(handle, buffer, shift, 1, arr) <= 0) return 0;
+   return arr[0];
+}
+
+string GetEMAAlignment360(double e8, double e21, double e50)
+{
+   if(e8 > e21 && e21 > e50) return "BULLISH_STACK";
+   if(e8 < e21 && e21 < e50) return "BEARISH_STACK";
+   return "MIXED";
+}
+
+string GetRSIZone360(double rsi)
+{
+   if(rsi >= 70) return "OVERBOUGHT";
+   if(rsi <= 30) return "OVERSOLD";
+   return "NEUTRAL";
+}
+
+string GetMACDCross360(int handle, int shift)
+{
+   double macd_now  = GetIndicatorValue360(handle, 0, shift);
+   double sig_now   = GetIndicatorValue360(handle, 1, shift);
+   double macd_prev = GetIndicatorValue360(handle, 0, shift + 1);
+   double sig_prev  = GetIndicatorValue360(handle, 1, shift + 1);
+   if(macd_prev < sig_prev && macd_now > sig_now) return "BULLISH_1_BAR_AGO";
+   if(macd_prev > sig_prev && macd_now < sig_now) return "BEARISH_1_BAR_AGO";
+   return "NEUTRAL";
+}
+
+string GetCandleType360(string sym, ENUM_TIMEFRAMES tf, int shift)
+{
+   double o = iOpen(sym, tf, shift);
+   double h = iHigh(sym, tf, shift);
+   double l = iLow(sym, tf, shift);
+   double c = iClose(sym, tf, shift);
+   double body = MathAbs(c - o);
+   double total = h - l;
+   if(total < 0.0001) return "DOJI";
+   bool bullish = c > o;
+   if(bullish) return "BULLISH_CANDLE";
+   return "BEARISH_CANDLE";
+}
+
+bool IsCandleConfirmed360(string sym, ENUM_TIMEFRAMES tf, string candle_type)
+{
+   long vol = iVolume(sym, tf, 1);
+   return vol > 0;
+}
+
+double GetNearestSupport360(string sym, ENUM_TIMEFRAMES tf)
+{
+   double low = iLow(sym, tf, iLowest(sym, tf, MODE_LOW, 20, 1));
+   return low;
+}
+
+double GetNearestResist360(string sym, ENUM_TIMEFRAMES tf)
+{
+   double high = iHigh(sym, tf, iHighest(sym, tf, MODE_HIGH, 20, 1));
+   return high;
+}
+
+bool DetectBOS360(string sym, ENUM_TIMEFRAMES tf)
+{
+   double last_h = iHigh(sym, tf, iHighest(sym, tf, MODE_HIGH, 10, 2));
+   return iClose(sym, tf, 1) > last_h;
+}
+
+bool DetectCHoCH360(string sym, ENUM_TIMEFRAMES tf)
+{
+   double last_l = iLow(sym, tf, iLowest(sym, tf, MODE_LOW, 10, 2));
+   return iClose(sym, tf, 1) < last_l;
+}
+
+string GetPhaseTF360(string sym, ENUM_TIMEFRAMES tf)
+{
+   return "UNKNOWN";
+}
+
+string GetMarketStructure360(string sym)
+{
+   return "MIXED";
+}
+
+string GetDominantBias360(SymbolData360 &sd)
+{
+   double ema50 = GetIndicatorValue360(sd.tf_h1.ema50, 0, 1);
+   double close = iClose(sd.symbol, PERIOD_H1, 1);
+   return (close > ema50) ? "BULLISH" : "BEARISH";
+}
+
+int CalcConfluenceScore360(SymbolData360 &sd)
+{
+   int score = 50;
+   return score;
+}
+
+string GetCurrentSession360()
+{
+   return "ACTIVE";
+}
+
+double GetSpreadPips360(string sym)
+{
+   return (double)SymbolInfoInteger(sym, SYMBOL_SPREAD) / 10.0;
+}
+
+void SendToAIServer360(string json_data, string sym)
+{
+   string filename = "analysis_" + sym + ".json";
+   int fh = FileOpen(filename, FILE_WRITE | FILE_TXT | FILE_ANSI | FILE_COMMON);
+   if(fh != INVALID_HANDLE) {
+      FileWriteString(fh, json_data);
+      FileClose(fh);
+      // Print("✅ Analysis sent to bridge for ", sym);
+   }
+}
+
+void ReadSignalsFromServer360()
+{
+   if(!FileIsExist(g_signalFile360, FILE_COMMON)) return;
+
+   int fh = FileOpen(g_signalFile360, FILE_READ | FILE_TXT | FILE_ANSI | FILE_COMMON);
+   if(fh == INVALID_HANDLE) return;
+
+   string content = "";
+   while(!FileIsEnding(fh)) content += FileReadString(fh);
+   FileClose(fh);
+   FileDelete(g_signalFile360, FILE_COMMON);
+
+   if(content != "") {
+      Print("🤖 AI SIGNAL RECEIVED: ", content);
+      ExecuteAI360Signal(content);
+   }
+}
+
+void ExecuteAI360Signal(string json)
+{
+   // Simple JSON parser for signal
+   string status = ExtractJSONString360(json, "status");
+   if(status == "SIGNALS") {
+      // Multiple signals possible
+      // For simplicity, we search for the current symbol's signal
+      string sym = _Symbol;
+      if(StringFind(json, "\""+sym+"\"") >= 0) {
+         // Found signal for current symbol
+         string action = ExtractJSONString360(json, "action");
+         if(action == "HOLD") return;
+         
+         double sl = ExtractJSONDouble360(json, "stop_loss");
+         double tp1 = ExtractJSONDouble360(json, "take_profit_1");
+         double lot = ExtractJSONDouble360(json, "lot_size");
+         
+         if(lot <= 0) lot = GetMinLotForSymbol(sym);
+         
+         if(action == "BUY") {
+            if(!IsDirectionAllowedForBoomCrash(sym, "BUY")) return;
+            if(IsMaxPositionsReached()) return;
+            trade.Buy(lot, sym, 0, sl, tp1, "AI360_SCALP");
+         } else if(action == "SELL") {
+            if(!IsDirectionAllowedForBoomCrash(sym, "SELL")) return;
+            if(IsMaxPositionsReached()) return;
+            trade.Sell(lot, sym, 0, sl, tp1, "AI360_SCALP");
+         }
+      }
+   }
+}
+
+string ExtractJSONString360(string json, string key)
+{
+   string search = "\"" + key + "\":\"";
+   int pos = StringFind(json, search);
+   if(pos < 0) return "";
+   pos += StringLen(search);
+   int end = StringFind(json, "\"", pos);
+   if(end < 0) return "";
+   return StringSubstr(json, pos, end - pos);
+}
+
+double ExtractJSONDouble360(string json, string key)
+{
+   string search = "\"" + key + "\":";
+   int pos = StringFind(json, search);
+   if(pos < 0) return 0;
+   pos += StringLen(search);
+   int end = StringFind(json, ",", pos);
+   if(end < 0) end = StringFind(json, "}", pos);
+   if(end < 0) return 0;
+   return StringToDouble(StringSubstr(json, pos, end - pos));
+}

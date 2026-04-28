@@ -7,6 +7,10 @@ env/
 .env
 .env.local
 .env.production
+.env.supabase
+
+# Sauvegardes Supabase locales (peuvent être volumineuses)
+backups/
 
 # Fichiers Python
 __pycache__/

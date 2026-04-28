@@ -2,6 +2,7 @@
 import MetaTrader5 as mt5  # type: ignore
 import pandas as pd
 import os
+import math
 import sys
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
@@ -594,8 +595,8 @@ def send_order_to_mt5(symbol, order_type, volume, price=None, sl=None, tp=None):
         order_type: 'BUY' ou 'SELL'
         volume: volume à trader (float)
         price: prix d'entrée (None = au marché)
-        sl: stop loss (None = pas de SL)
-        tp: take profit (None = pas de TP)
+        sl: stop loss (None = SL auto)
+        tp: take profit (None = TP auto)
     Returns:
         Dictionnaire résultat de l'ordre MT5
     """
@@ -615,13 +616,130 @@ def send_order_to_mt5(symbol, order_type, volume, price=None, sl=None, tp=None):
         mt5_type = mt5.ORDER_TYPE_SELL
     else:
         raise ValueError(f"Type d'ordre non supporté: {order_type}")
+
+    # --- Validation/ajustement SL/TP vs stop-level broker + tick size ---
+    # Cela évite les rejets MT5: "[Invalid stops]" sur synth indices (Boom/Crash).
+    tick = None
+    try:
+        tick = mt5.symbol_info_tick(symbol)  # type: ignore
+    except Exception:
+        tick = None
+
+    symbol_info = mt5.symbol_info(symbol)
+    if symbol_info is not None:
+        point = float(getattr(symbol_info, "point", 0.0) or 0.0)
+        digits = int(getattr(symbol_info, "digits", 0) or 0)
+        tick_size = float(
+            getattr(symbol_info, "trade_tick_size", 0.0)
+            or getattr(symbol_info, "tick_size", 0.0)
+            or 0.0
+        )
+        if tick_size <= 0.0:
+            tick_size = point if point > 0.0 else 0.0
+
+        stops_level_points = getattr(symbol_info, "trade_stops_level", None)
+        if stops_level_points is None:
+            stops_level_points = getattr(symbol_info, "stops_level", 0)
+        try:
+            stops_level_points = float(stops_level_points or 0)
+        except Exception:
+            stops_level_points = 0.0
+
+        min_dist_price = stops_level_points * point if point > 0.0 else 0.0
+        buffer_price = tick_size if tick_size > 0.0 else point
+        if buffer_price < 0.0:
+            buffer_price = 0.0
+
+        def align_to_tick(val: float, mode: str) -> float:
+            if tick_size <= 0.0:
+                return val
+            ticks = val / tick_size
+            if mode == "UP":
+                return math.ceil(ticks) * tick_size
+            if mode == "DOWN":
+                return math.floor(ticks) * tick_size
+            return round(ticks) * tick_size
+
+        if price is None and tick is not None:
+            price = float(tick.ask) if mt5_type == mt5.ORDER_TYPE_BUY else float(tick.bid)
+
+        reference_price = float(price) if price is not None else 0.0
+
+        # --- Politique: toujours démarrer avec SL + TP ---
+        # Si l'appelant ne fournit pas SL/TP, on les calcule avec une distance par défaut,
+        # tout en respectant le stop-level broker.
+        default_sl_points = float(os.getenv("MT5_DEFAULT_SL_POINTS", "300") or "300")
+        default_tp_rr = float(os.getenv("MT5_DEFAULT_TP_RR", "2.0") or "2.0")
+        default_tp_rr = max(0.5, min(20.0, default_tp_rr))
+        base_dist = 0.0
+        if point > 0.0:
+            base_dist = max(min_dist_price + buffer_price, default_sl_points * point)
+        if base_dist > 0.0 and reference_price:
+            if mt5_type == mt5.ORDER_TYPE_BUY:
+                if sl is None:
+                    sl = reference_price - base_dist
+                if tp is None:
+                    tp = reference_price + (abs(reference_price - sl) * default_tp_rr)
+            else:
+                if sl is None:
+                    sl = reference_price + base_dist
+                if tp is None:
+                    tp = reference_price - (abs(reference_price - sl) * default_tp_rr)
+
+        # SELL: sl au-dessus, tp au-dessous; BUY: sl au-dessous, tp au-dessus
+        # On force toujours la "bonne relation" (sl/tp de l'autre côté),
+        # puis on garantit la distance minimale si min_dist_price > 0.
+        if mt5_type == mt5.ORDER_TYPE_BUY:
+            if sl is not None:
+                # Sl doit être strictement en-dessous
+                if sl >= reference_price:
+                    sl = reference_price - (buffer_price if buffer_price > 0.0 else point)
+                # Distance minimale si activée
+                if min_dist_price > 0.0 and (reference_price - sl) < min_dist_price:
+                    sl = reference_price - (min_dist_price + buffer_price)
+                sl = align_to_tick(sl, "DOWN")
+                if digits > 0:
+                    sl = round(sl, digits)
+            if tp is not None:
+                # Tp doit être strictement au-dessus
+                if tp <= reference_price:
+                    tp = reference_price + (buffer_price if buffer_price > 0.0 else point)
+                # Distance minimale si activée
+                if min_dist_price > 0.0 and (tp - reference_price) < min_dist_price:
+                    tp = reference_price + (min_dist_price + buffer_price)
+                tp = align_to_tick(tp, "UP")
+                if digits > 0:
+                    tp = round(tp, digits)
+        else:  # SELL
+            if sl is not None:
+                # Sl doit être strictement au-dessus
+                if sl <= reference_price:
+                    sl = reference_price + (buffer_price if buffer_price > 0.0 else point)
+                # Distance minimale si activée
+                if min_dist_price > 0.0 and (sl - reference_price) < min_dist_price:
+                    sl = reference_price + (min_dist_price + buffer_price)
+                sl = align_to_tick(sl, "UP")
+                if digits > 0:
+                    sl = round(sl, digits)
+            if tp is not None:
+                # Tp doit être strictement en-dessous
+                if tp >= reference_price:
+                    tp = reference_price - (buffer_price if buffer_price > 0.0 else point)
+                # Distance minimale si activée
+                if min_dist_price > 0.0 and (reference_price - tp) < min_dist_price:
+                    tp = reference_price - (min_dist_price + buffer_price)
+                tp = align_to_tick(tp, "DOWN")
+                if digits > 0:
+                    tp = round(tp, digits)
     # Préparer la requête
+    if price is None and tick is not None:
+        price = float(tick.ask) if mt5_type == mt5.ORDER_TYPE_BUY else float(tick.bid)
     request = {
         'action': mt5.TRADE_ACTION_DEAL,
         'symbol': symbol,
         'volume': float(volume),
         'type': mt5_type,
-        'price': price if price is not None else mt5.symbol_info_tick(symbol).ask if mt5_type == mt5.ORDER_TYPE_BUY else mt5.symbol_info_tick(symbol).bid,  # type: ignore
+        'price': price,  # price doit être défini au moins via tick.ask/bid
         'sl': sl,
         'tp': tp,
         'deviation': 10,
@@ -630,7 +748,7 @@ def send_order_to_mt5(symbol, order_type, volume, price=None, sl=None, tp=None):
         'type_time': mt5.ORDER_TIME_GTC,
         'type_filling': mt5.ORDER_FILLING_IOC,
     }
-    # Nettoyer les None
+    # Nettoyer les None (SL/TP devraient être présents à ce stade)
     request = {k: v for k, v in request.items() if v is not None}
     result = mt5.order_send(request)  # type: ignore
     return result._asdict() if hasattr(result, '_asdict') else result
@@ -790,12 +908,113 @@ def test_connection():
 
 def get_open_positions():
     """Récupère les positions ouvertes sur MT5"""
-    return mt5.positions_get()  # type: ignore 
+    return mt5.positions_get()  # type: ignore
 
 
 def get_trade_history(from_date, to_date):
     """Récupère l'historique des trades sur MT5 pour une période donnée"""
-    return mt5.history_deals_get(from_date, to_date)  # type: ignore 
+    return mt5.history_deals_get(from_date, to_date)  # type: ignore
+
+
+def monitor_positions_loss_limit(max_loss_usd=3.0):
+    """
+    Surveille toutes les positions ouvertes et ferme automatiquement celles qui dépassent la perte max autorisée.
+
+    Args:
+        max_loss_usd: Perte maximale autorisée en dollars (par défaut 3.0$)
+
+    Returns:
+        Dict avec le statut et les positions fermées
+    """
+    if not is_connected():
+        return {"success": False, "message": "MT5 n'est pas connecté"}
+
+    positions = mt5.positions_get()  # type: ignore
+    if not positions:
+        return {"success": True, "message": "Aucune position ouverte", "closed_positions": []}
+
+    closed_positions = []
+
+    for pos in positions:
+        current_profit = float(pos.profit)
+
+        # Si la perte dépasse le seuil (profit négatif)
+        if current_profit < 0 and abs(current_profit) >= max_loss_usd:
+            print(f"⚠️ ALERTE PERTE: {pos.symbol} - Perte actuelle: {current_profit:.2f}$ (limite: -{max_loss_usd}$)")
+
+            # Fermer la position immédiatement
+            volume = pos.volume
+            price = pos.price_current
+
+            if pos.type == mt5.POSITION_TYPE_BUY:  # type: ignore
+                order_type = mt5.ORDER_TYPE_SELL  # type: ignore
+            else:
+                order_type = mt5.ORDER_TYPE_BUY  # type: ignore
+
+            info = mt5.symbol_info(pos.symbol)  # type: ignore
+
+            # Déterminer le filling mode
+            filling = None
+            if info and info.filling_mode & mt5.ORDER_FILLING_FOK:  # type: ignore
+                filling = mt5.ORDER_FILLING_FOK  # type: ignore
+            elif info and info.filling_mode & mt5.ORDER_FILLING_IOC:  # type: ignore
+                filling = mt5.ORDER_FILLING_IOC  # type: ignore
+            elif info and info.filling_mode & mt5.ORDER_FILLING_RETURN:  # type: ignore
+                filling = mt5.ORDER_FILLING_RETURN  # type: ignore
+            else:
+                filling = mt5.ORDER_FILLING_IOC  # type: ignore
+
+            request = {
+                "action": mt5.TRADE_ACTION_DEAL,  # type: ignore
+                "symbol": pos.symbol,
+                "volume": volume,
+                "type": order_type,
+                "position": pos.ticket,
+                "price": price,
+                "deviation": 20,
+                "magic": 123456,
+                "comment": f"AUTO_CLOSE_LOSS_LIMIT_{max_loss_usd}$",
+                "type_time": mt5.ORDER_TIME_GTC,  # type: ignore
+                "type_filling": filling,
+            }
+
+            result = mt5.order_send(request)  # type: ignore
+
+            if result and hasattr(result, 'retcode') and result.retcode == mt5.TRADE_RETCODE_DONE:  # type: ignore
+                closed_info = {
+                    "symbol": pos.symbol,
+                    "ticket": pos.ticket,
+                    "loss": current_profit,
+                    "closed_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "status": "SUCCESS"
+                }
+                closed_positions.append(closed_info)
+                print(f"✅ Position {pos.symbol} (ticket {pos.ticket}) fermée - Perte: {current_profit:.2f}$")
+            else:
+                retcode = getattr(result, 'retcode', None)
+                comment = getattr(result, 'comment', '')
+                closed_info = {
+                    "symbol": pos.symbol,
+                    "ticket": pos.ticket,
+                    "loss": current_profit,
+                    "status": "FAILED",
+                    "error": f"Code {retcode}: {comment}"
+                }
+                closed_positions.append(closed_info)
+                print(f"❌ Échec fermeture {pos.symbol}: {retcode} - {comment}")
+
+    if closed_positions:
+        return {
+            "success": True,
+            "message": f"{len(closed_positions)} position(s) fermée(s) pour dépassement de perte",
+            "closed_positions": closed_positions
+        }
+    else:
+        return {
+            "success": True,
+            "message": "Toutes les positions sont dans la limite de perte autorisée",
+            "closed_positions": []
+        } 
 
 
 def calculate_position_size(capital, risk_percent, stop_loss_points, symbol):

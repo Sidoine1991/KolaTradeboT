@@ -1,0 +1,291 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>SMC_Universal — Stratégie de trading (séquence logique)</title>
+  <style>
+    :root{
+      --bg:#0b1020;
+      --panel:#111a33;
+      --text:#e7ecff;
+      --muted:#b8c0e6;
+      --accent:#7aa2ff;
+      --good:#44d7a8;
+      --warn:#ffcc66;
+      --bad:#ff6b6b;
+      --code:#0a0f1f;
+      --border:rgba(255,255,255,.08);
+    }
+    *{box-sizing:border-box}
+    body{
+      margin:0;
+      background:linear-gradient(180deg,var(--bg),#070a14 70%);
+      color:var(--text);
+      font:14px/1.55 system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;
+    }
+    header{
+      padding:28px 18px 16px;
+      border-bottom:1px solid var(--border);
+      background:radial-gradient(1000px 400px at 20% 0%, rgba(122,162,255,.22), transparent 55%);
+    }
+    .wrap{max-width:1100px;margin:0 auto;padding:0 10px}
+    h1{margin:0 0 6px;font-size:22px;letter-spacing:.2px}
+    .sub{color:var(--muted);margin:0}
+    main{padding:18px}
+    .grid{display:grid;grid-template-columns:1fr;gap:12px}
+    @media (min-width: 980px){.grid{grid-template-columns: 1.15fr .85fr}}
+    section{
+      background:rgba(17,26,51,.82);
+      border:1px solid var(--border);
+      border-radius:14px;
+      padding:14px 14px 12px;
+      box-shadow:0 10px 30px rgba(0,0,0,.25);
+    }
+    h2{margin:0 0 10px;font-size:16px}
+    h3{margin:14px 0 8px;font-size:14px;color:var(--accent)}
+    .pill{
+      display:inline-block;
+      padding:2px 8px;
+      border-radius:999px;
+      background:rgba(122,162,255,.16);
+      border:1px solid rgba(122,162,255,.28);
+      color:var(--text);
+      font-size:12px;
+      margin-left:6px;
+      vertical-align:middle;
+    }
+    ul,ol{margin:8px 0 8px 18px}
+    li{margin:6px 0}
+    .muted{color:var(--muted)}
+    .k{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+    .callout{
+      border-left:3px solid var(--accent);
+      background:rgba(122,162,255,.10);
+      padding:10px 10px;
+      border-radius:10px;
+      margin:10px 0;
+    }
+    .good{border-left-color:var(--good);background:rgba(68,215,168,.10)}
+    .warn{border-left-color:var(--warn);background:rgba(255,204,102,.10)}
+    .bad{border-left-color:var(--bad);background:rgba(255,107,107,.10)}
+    code,pre{
+      background:var(--code);
+      border:1px solid var(--border);
+      border-radius:10px;
+      color:var(--text);
+    }
+    code{padding:2px 6px}
+    pre{padding:10px;overflow:auto}
+    .flow{
+      border:1px dashed rgba(255,255,255,.18);
+      border-radius:12px;
+      padding:10px;
+      background:rgba(0,0,0,.18);
+    }
+    .step{
+      display:flex; gap:10px; align-items:flex-start;
+      padding:8px 8px;
+      border-bottom:1px solid rgba(255,255,255,.07);
+    }
+    .step:last-child{border-bottom:none}
+    .n{
+      width:24px; flex:0 0 24px;
+      height:24px; border-radius:8px;
+      display:flex; align-items:center; justify-content:center;
+      background:rgba(122,162,255,.18);
+      border:1px solid rgba(122,162,255,.35);
+      font-weight:700; font-size:12px;
+    }
+    .t{flex:1}
+    footer{padding:16px 18px;color:var(--muted);border-top:1px solid var(--border)}
+    a{color:var(--accent)}
+  </style>
+</head>
+<body>
+  <header>
+    <div class="wrap">
+      <h1>SMC_Universal — Stratégie de trading (séquence logique)</h1>
+      <p class="sub">
+        Description basée sur l’ordre d’exécution réel dans <span class="k">OnTick()</span>, les filtres, et les règles d’entrées/sorties.
+        <span class="pill">MT5 EA</span>
+      </p>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <div class="grid">
+      <section>
+        <h2>1) Séquence logique globale (OnTick)</h2>
+        <div class="flow">
+          <div class="step">
+            <div class="n">0</div>
+            <div class="t">
+              <b>Throttle stabilité</b> (traitement ~1 tick / 2 secondes).
+              <div class="muted">Objectif: éviter surcharge + détachements.</div>
+            </div>
+          </div>
+          <div class="step">
+            <div class="n">1</div>
+            <div class="t">
+              <b>Mode observation</b> (<span class="k">BlockAllTrades</span>) → aucune entrée/sortie, seulement IA + graphiques + dashboard.
+            </div>
+          </div>
+          <div class="step">
+            <div class="n">2</div>
+            <div class="t">
+              <b>Bloc Boom/Crash</b>:
+              <ul>
+                <li><b>Entrées principales</b>: <span class="k">Deriv Arrow</span> (fonction dédiée).</li>
+                <li><b>Sorties</b>: gestion spike + sorties en $ + trailing si activé.</li>
+              </ul>
+            </div>
+          </div>
+          <div class="step">
+            <div class="n">3</div>
+            <div class="t">
+              <b>Mise à jour IA/ML</b> (si activé) → appelle le serveur pour décision + métriques ML (périodiques).
+            </div>
+          </div>
+          <div class="step">
+            <div class="n">4</div>
+            <div class="t">
+              <b>Protection / discipline</b>:
+              <ul>
+                <li>Fermeture immédiate si IA passe en <span class="k">HOLD</span> (et surveillance continue).</li>
+                <li>Fermeture sur conflits de direction (Boom/Crash).</li>
+                <li>Rotation auto des positions (éviter blocage long sur un symbole).</li>
+              </ul>
+            </div>
+          </div>
+          <div class="step">
+            <div class="n">5</div>
+            <div class="t">
+              <b>Graphiques & détection SMC</b> (toutes les ~15 s): swings non-repaint, zones, canaux, supertrend multi-TF, etc.
+            </div>
+          </div>
+          <div class="step">
+            <div class="n">6</div>
+            <div class="t">
+              <b>Entrées au marché</b> (non Boom/Crash principalement):
+              <div class="muted">Basées sur la décision IA (SMC/EMA).</div>
+            </div>
+          </div>
+          <div class="step">
+            <div class="n">7</div>
+            <div class="t">
+              <b>Sync stats symboles</b> (MT5 History → serveur → Supabase):
+              <div class="muted">Envoi périodique des stats journalières/mensuelles par symbole.</div>
+            </div>
+          </div>
+          <div class="step">
+            <div class="n">8</div>
+            <div class="t">
+              <b>Entrées stratégiques en LIMIT</b>:
+              <ul>
+                <li>Placement d’ordres <span class="k">BUY_LIMIT</span>/<span class="k">SELL_LIMIT</span> sur niveaux stratégiques (Pivot/Supertrend M5, etc.).</li>
+                <li>Seulement si <b>toutes les conditions</b> sont réunies et si l’IA/ML est favorable.</li>
+              </ul>
+            </div>
+          </div>
+          <div class="step">
+            <div class="n">9</div>
+            <div class="t">
+              <b>Dashboard</b> (toutes les ~15 s) — affichage état IA/ML + stats jour/mois + risk.
+            </div>
+          </div>
+        </div>
+
+        <div class="callout warn">
+          <b>Important</b>: Le robot combine plusieurs “moteurs” (Boom/Crash Deriv Arrow + non Boom/Crash IA market + LIMIT stratégiques).
+          La priorité est donnée à la <b>stabilité</b> et à la <b>discipline</b> (HOLD, pauses, limites d’ordres).
+        </div>
+      </section>
+
+      <section>
+        <h2>2) Règles clés (résumé)</h2>
+        <h3>2.1 IA / ML (gating)</h3>
+        <ul>
+          <li><b>Décision IA</b>: <span class="k">BUY / SELL / HOLD</span> + <span class="k">confidence</span>.</li>
+          <li><b>Blocage</b>: si IA est <span class="k">HOLD</span>, les positions peuvent être fermées selon règles, et les nouvelles entrées sont évitées.</li>
+          <li><b>Confiance minimum</b>: des seuils existent pour autoriser un trade (plus strict hors Boom/Crash).</li>
+        </ul>
+
+        <h3>2.2 Gestion du risque</h3>
+        <ul>
+          <li><b>Pauses</b>: pause perte journalière / pause profit / pause perte cumulative / drawdown journalier max.</li>
+          <li><b>Exits</b>: sorties en $ (objectifs/limites), protection petites pertes, trailing stop optionnel.</li>
+          <li><b>Anti-duplication</b>: évite d’empiler positions/ordres sur un même symbole selon règles.</li>
+        </ul>
+
+        <h3>2.3 Filtres “conditions réunies”</h3>
+        <ul>
+          <li><b>Filtres classiques</b> (si activés): EMA/RSI/MACD/Bollinger/VWAP/Pivots/Ichimoku/OBV via un score de confirmations.</li>
+          <li><b>SMC/ICT</b>: swings, zones liquidité, BOS, FVG/OB, Premium/Discount, KillZone (selon options).</li>
+        </ul>
+      </section>
+    </div>
+
+    <section>
+      <h2>3) Entrées stratégiques LIMIT (Pivot / Supertrend M5)</h2>
+      <div class="callout good">
+        <b>Objectif</b>: quand la décision IA/ML est favorable, laisser le robot “sniper” des entrées sur des niveaux
+        structurels où l’exécution est plus propre (meilleur prix, risque mieux borné).
+      </div>
+
+      <h3>3.1 Conditions d’activation (simplifiées)</h3>
+      <ol>
+        <li><b>Pas Boom/Crash</b> (ces marchés ont leur logique dédiée Deriv Arrow).</li>
+        <li><b>Pas de position ouverte</b> sur le symbole (éviter empilement).</li>
+        <li><b>IA favorable</b>: action <span class="k">BUY</span> ou <span class="k">SELL</span> + confiance suffisante (fonction de gating).</li>
+        <li><b>Conditions réunies</b>: filtres classiques alignés (si activés).</li>
+        <li><b>Limites</b>: max 2 ordres LIMIT par symbole, dont 1 seul hors canal.</li>
+        <li><b>Niveau proche disponible</b> (distance max en ATR) via sélection du meilleur niveau.</li>
+      </ol>
+
+      <h3>3.2 Sélection du niveau (source des niveaux)</h3>
+      <ul>
+        <li><b>Pivots locaux M1</b>: pivot low/pivot high (structure micro).</li>
+        <li><b>Pivots journaliers</b>: <span class="k">S1/S2</span> pour BUY, <span class="k">R1/R2</span> pour SELL.</li>
+        <li><b>SuperTrend</b>: supports/résistances (notamment <b>SuperTrend M5</b>, aussi H1 si proche).</li>
+        <li><b>Swings</b>: derniers swings globaux (si proches).</li>
+        <li><b>Fallback</b>: support/résistance chart si encore dans la distance max.</li>
+      </ul>
+
+      <h3>3.3 Paramétrage SL/TP (principe)</h3>
+      <ul>
+        <li><b>SL/TP</b> construits autour du prix d’entrée avec des multiples d’ATR (<span class="k">SL_ATRMult</span>, <span class="k">TP_ATRMult</span>).</li>
+        <li><b>Validation broker</b>: correction éventuelle des distances via la routine de validation (stops level, distance minimale, symbol type).</li>
+      </ul>
+
+      <div class="callout warn">
+        <b>Note pratique</b>: si tu veux “encore plus intelligent”, on peut ajouter une règle stricte “ML favorable”
+        basée sur le <b>canal de prédiction</b> (ex: BUY LIMIT uniquement si l’entrée est proche de la borne basse du canal ML,
+        SELL LIMIT proche de la borne haute) en plus de l’action IA.
+      </div>
+    </section>
+
+    <section>
+      <h2>4) Stats par symbole (source MT5 + stockage Supabase)</h2>
+      <p>
+        Les stats sont calculées à partir de l’historique MT5 (deals) filtrés par <span class="k">magic</span> et symbole,
+        puis envoyées au serveur pour UPSERT dans <span class="k">public.symbol_trade_stats</span>.
+      </p>
+      <ul>
+        <li><b>Périodes</b>: <span class="k">day</span> (UTC 00:00 → maintenant) et <span class="k">month</span> (UTC 1er du mois 00:00 → maintenant).</li>
+        <li><b>Colonnes</b>: trade_count, wins, losses, net_profit, gross_profit, gross_loss, last_trade_at.</li>
+        <li><b>Clé primaire</b>: (symbol, period_type, period_start, timeframe).</li>
+        <li><b>Envoi</b>: endpoint serveur <span class="k">POST /mt5/symbol-trade-stats-upload</span> (throttle).</li>
+      </ul>
+    </section>
+  </main>
+
+  <footer>
+    <div class="wrap">
+      <div>Fichier généré pour documenter la stratégie actuelle. Source: logique runtime EA + endpoints serveur.</div>
+      <div class="muted">Astuce: si tu veux une version “flowchart” Mermaid intégrée, je peux ajouter un diagramme en plus.</div>
+    </div>
+  </footer>
+</body>
+</html>
+

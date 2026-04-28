@@ -22,6 +22,11 @@ except ImportError as e:
     print(f"Erreur d'import: {e}")
     sys.exit(1)
 
+try:
+    from backend.weltrade_symbols import is_weltrade_synth_index, normalize_broker_symbol
+except ImportError:
+    from weltrade_symbols import is_weltrade_synth_index, normalize_broker_symbol
+
 import joblib
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
@@ -33,6 +38,7 @@ def categorize_symbols(symbols_list):
     categories = {
         'SYNTHETIC_SPECIAL': [],  # Boom/Crash spécifiques
         'SYNTHETIC_GENERAL': [],  # Autres indices synthétiques
+        'WELTRADE_SYNTH': [],
         'CRYPTO': [],
         'FOREX': [],
         'STOCKS': [],
@@ -45,6 +51,8 @@ def categorize_symbols(symbols_list):
         # Boom/Crash spécifiques
         if "BOOM" in symbol_upper or "CRASH" in symbol_upper:
             categories['SYNTHETIC_SPECIAL'].append(symbol)
+        elif is_weltrade_synth_index(symbol):
+            categories['WELTRADE_SYNTH'].append(symbol)
         
         # Autres indices synthétiques
         elif any(keyword in symbol_upper for keyword in ['VOLATILITY', 'STEP', 'JUMP', 'RANGE BREAK', 'DEX', 'DRIFT', 'TREK', 'VOLSWITCH', 'SKEW', 'MULTI STEP']):
@@ -55,7 +63,7 @@ def categorize_symbols(symbols_list):
             categories['CRYPTO'].append(symbol)
         
         # Forex
-        elif any(pair in symbol_upper for pair in ['USD', 'EUR', 'GBP', 'JPY', 'AUD', 'CAD', 'CHF', 'NZD', 'SEK', 'NOK', 'PLN', 'ZAR', 'SGD', 'HKD', 'THB', 'MXN', 'CNH']):
+        elif any(pair in normalize_broker_symbol(symbol) for pair in ['USD', 'EUR', 'GBP', 'JPY', 'AUD', 'CAD', 'CHF', 'NZD', 'SEK', 'NOK', 'PLN', 'ZAR', 'SGD', 'HKD', 'THB', 'MXN', 'CNH']):
             if 'INDEX' not in symbol_upper and 'BASKET' not in symbol_upper:
                 categories['FOREX'].append(symbol)
         
@@ -143,7 +151,7 @@ def create_features(df, symbol_category):
     df_features['momentum_20'] = df_features['close'] / df_features['close'].shift(20) - 1
     
     # Features spécifiques par catégorie
-    if symbol_category in ["SYNTHETIC_SPECIAL", "SYNTHETIC_GENERAL"]:
+    if symbol_category in ["SYNTHETIC_SPECIAL", "SYNTHETIC_GENERAL", "WELTRADE_SYNTH"]:
         # Features pour indices synthétiques
         df_features['spike_detection'] = (df_features['high'] - df_features['low']) / df_features['close'] > 0.05
         df_features['volatility_regime'] = df_features['volatility'].rolling(50).mean()
@@ -244,7 +252,7 @@ def train_model_for_category(category_name, symbols, category_type, max_symbols=
     ]
     
     # Ajouter features spécifiques selon la catégorie
-    if category_type in ["SYNTHETIC_SPECIAL", "SYNTHETIC_GENERAL"]:
+    if category_type in ["SYNTHETIC_SPECIAL", "SYNTHETIC_GENERAL", "WELTRADE_SYNTH"]:
         common_features.extend(['spike_detection', 'volatility_regime'])
     elif category_type == "CRYPTO":
         common_features.extend(['crypto_volatility', 'btc_correlation'])
@@ -371,6 +379,8 @@ def main():
                 category_type = "SYNTHETIC_SPECIAL"
             elif category_name == "SYNTHETIC_GENERAL":
                 category_type = "SYNTHETIC_GENERAL"
+            elif category_name == "WELTRADE_SYNTH":
+                category_type = "WELTRADE_SYNTH"
             elif category_name == "CRYPTO":
                 category_type = "CRYPTO"
             elif category_name == "FOREX":

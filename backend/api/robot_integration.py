@@ -20,7 +20,7 @@ from typing import Tuple, Dict, List
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
 # Imports des modules existants
-from backend.mt5_connector import get_ohlc, get_current_price, get_all_symbols, get_symbol_info, get_spread
+from backend.mt5_connector import get_ohlc, get_current_price, get_all_symbols, get_symbol_info, get_spread, monitor_positions_loss_limit
 from backend.technical_analysis import add_technical_indicators, calculate_rsi, calculate_atr, calculate_macd, calculate_ema, calculate_bollinger_bands
 from backend.spike_detector import detect_spikes, predict_spike_ml
 from backend.advanced_ml_predictor import AdvancedMLPredictor
@@ -111,6 +111,11 @@ class IndicatorResponse(BaseModel):
     timeframe: str
     indicators: Dict[str, Any]
     timestamp: str
+
+class FutureOHLCRequest(BaseModel):
+    symbol: str
+    timeframe: str = "1m"
+    horizon: int = 200
 
 # Modèles de données supplémentaires
 class SymbolAnalysis(BaseModel):
@@ -514,6 +519,132 @@ async def get_spike_analysis(symbol: str, timeframe: str = "1m", count: int = 20
         logger.error(f"Erreur dans get_spike_analysis: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@router.get("/predict_ohlc")
+async def predict_future_ohlc(symbol: str, timeframe: str = "1m", horizon: int = 200, count: int = 400):
+    """
+    Prédit une trajectoire OHLC future (chandeliers) pour le robot MT5.
+    Source primaire: modèle adaptatif + features techniques.
+    """
+    try:
+        tf = (timeframe or "1m").lower()
+        if tf not in ["1m", "m1"]:
+            raise HTTPException(status_code=400, detail="timeframe supporté: 1m uniquement")
+
+        h = int(max(1, min(500, horizon)))
+        c = int(max(250, min(2000, count)))
+
+        df = get_ohlc(symbol, timeframe="1m", count=c)
+        if df is None or df.empty or len(df) < 120:
+            raise HTTPException(status_code=404, detail=f"Pas assez de données pour {symbol}")
+
+        df = df.copy()
+        # Normaliser un timestamp exploitable
+        if "timestamp" in df.columns:
+            ts = pd.to_datetime(df["timestamp"])
+        elif "time" in df.columns:
+            ts = pd.to_datetime(df["time"])
+        else:
+            ts = pd.date_range(end=datetime.utcnow(), periods=len(df), freq="1min")
+        df["timestamp"] = ts
+        df = df.sort_values("timestamp").reset_index(drop=True)
+
+        # Contexte de marché
+        try:
+            df_ta = add_technical_indicators(df.copy())
+        except Exception:
+            df_ta = df.copy()
+
+        # Volatilité de base
+        close = df["close"].astype(float)
+        ret = close.pct_change().fillna(0.0)
+        sigma = float(ret.tail(120).std())
+        sigma = max(1e-6, min(0.01, sigma))
+
+        # ATR ratio si disponible
+        atr_ratio = sigma * 1.2
+        if "atr_14" in df_ta.columns:
+            last_atr = float(df_ta["atr_14"].iloc[-1]) if pd.notna(df_ta["atr_14"].iloc[-1]) else 0.0
+            last_close = float(close.iloc[-1]) if close.iloc[-1] != 0 else 1.0
+            if last_atr > 0 and last_close > 0:
+                atr_ratio = max(1e-6, min(0.02, last_atr / last_close))
+
+        # Drift directionnel via modèle adaptatif existant
+        adaptive = predict_adaptive(symbol, df.tail(300))
+        proba_up = float(adaptive.get("probability", 0.5)) if isinstance(adaptive, dict) else 0.5
+        proba_up = max(0.01, min(0.99, proba_up))
+        drift = (proba_up - 0.5) * sigma * 0.9
+
+        # Biais tendance court terme (EMA20/EMA50 si dispo)
+        trend_bias = 0.0
+        if "ema_20" in df_ta.columns and "ema_50" in df_ta.columns:
+            e20 = float(df_ta["ema_20"].iloc[-1]) if pd.notna(df_ta["ema_20"].iloc[-1]) else float(close.iloc[-1])
+            e50 = float(df_ta["ema_50"].iloc[-1]) if pd.notna(df_ta["ema_50"].iloc[-1]) else float(close.iloc[-1])
+            base = max(abs(float(close.iloc[-1])), 1e-8)
+            trend_bias = max(-0.0015, min(0.0015, (e20 - e50) / base))
+
+        last_close = float(close.iloc[-1])
+        last_time = pd.to_datetime(df["timestamp"].iloc[-1])
+        if pd.isna(last_time):
+            last_time = datetime.utcnow()
+
+        candles: List[Dict[str, Any]] = []
+        curr_close = max(1e-8, last_close)
+        prev_ret = 0.0
+        # générateur déterministe stable par symbole (évite le flicker)
+        seed = abs(hash(f"{symbol}|{int(last_time.timestamp())//60}")) % (2**32)
+        rng = np.random.default_rng(seed)
+
+        for i in range(h):
+            # composantes de retour
+            eps = float(rng.normal(0.0, sigma))
+            mom = prev_ret * 0.25
+            r = drift + trend_bias * 0.2 + mom + eps
+            # clip des extrêmes
+            r = max(-0.03, min(0.03, r))
+
+            o = curr_close
+            c_price = max(1e-8, o * (1.0 + r))
+
+            body = abs(c_price - o)
+            wick_scale = max(atr_ratio * o, body * 0.35, 1e-8)
+            up_wick = float(abs(rng.normal(wick_scale * 0.7, wick_scale * 0.25)))
+            dn_wick = float(abs(rng.normal(wick_scale * 0.7, wick_scale * 0.25)))
+            h_price = max(o, c_price) + up_wick
+            l_price = max(1e-8, min(o, c_price) - dn_wick)
+
+            # gardes cohérence OHLC
+            h_price = max(h_price, o, c_price)
+            l_price = min(l_price, o, c_price)
+            if l_price <= 0:
+                l_price = min(o, c_price) * 0.999
+
+            t = last_time + timedelta(minutes=i + 1)
+            candles.append({
+                "time": int(t.timestamp()),
+                "open": float(o),
+                "high": float(h_price),
+                "low": float(l_price),
+                "close": float(c_price),
+                "confidence": float(max(0.25, min(0.95, 0.55 + abs(proba_up - 0.5) * 0.8)))
+            })
+
+            prev_ret = (c_price / o) - 1.0 if o > 0 else 0.0
+            curr_close = c_price
+
+        return {
+            "symbol": symbol,
+            "timeframe": "M1",
+            "horizon": h,
+            "source": "server",
+            "model_probability_up": proba_up,
+            "candles": candles
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Erreur predict_future_ohlc: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @router.get("/health")
 async def robot_health():
     """
@@ -563,6 +694,24 @@ async def validate_signal(symbol: str, action: str, confidence: float, reason: s
         
     except Exception as e:
         logger.error(f"Erreur validation signal: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/monitor/loss-limit")
+async def monitor_loss_limit(max_loss: float = 3.0):
+    """
+    Surveille et ferme automatiquement les positions qui dépassent la perte maximale autorisée.
+
+    Args:
+        max_loss: Perte maximale autorisée en dollars (par défaut 3.0$)
+
+    Returns:
+        Résultat du monitoring avec les positions fermées
+    """
+    try:
+        result = monitor_positions_loss_limit(max_loss_usd=max_loss)
+        return result
+    except Exception as e:
+        logger.error(f"Erreur monitoring loss limit: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/config")

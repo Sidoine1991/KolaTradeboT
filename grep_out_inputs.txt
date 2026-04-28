@@ -1,0 +1,14 @@
+2186: input bool   RequireFutureProtectTouchForBoomCrashDerivArrow = true; // Boom/Crash: armer entrée sur touch future protect avant flèche DERIV
+2187: input int    FutureProtectTouchArmSeconds = 120; // Fenêtre après touch pour accepter la flèche (secondes)
+2188: input double FutureProtectTouchToleranceATRMult = 0.4; // Tolérance de touch autour du niveau (x ATR M15)
+2189: input int    FutureProtectTouchCheckIntervalSec = 2; // Throttle calcul touch (secondes)
+2221: input int    SpikePredictionOffsetMinutes = 60; // Décalage dans le futur pour afficher l'entrée de spike dans la zone prédite
+2236: input bool   ShowPredictionChannel = true; // Afficher le canal de prédiction ML
+2237: input bool   ShowFutureCandlesM1 = true; // Afficher les chandeliers japonais futurs M1
+2238: input int    FutureCandlesCount = 200; // Nombre de bougies futures à projeter
+2239: input int    FutureCandlesRefreshSeconds = 120; // TTL cache prédiction (s)
+2240: input bool   AutoValidateFuturePredictions = true; // Envoyer validation prédictions vs réel au serveur
+2241: input int    FuturePredictionMinBarsToValidate = 30; // Nb min de bougies réelles closes avant envoi validation
+2797: input int    PredictionChannelPastBars = 1000; // (interne)
+2798: input int    PredictionChannelBars = 1000;  // (interne, canal de prédiction sur 1000 bougies futures)
+3628: input int    SMCChannelFutureBars = 5000;    // Bougies futures M1 à projeter

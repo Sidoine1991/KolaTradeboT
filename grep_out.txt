@@ -1,0 +1,27 @@
+426: void ExecuteOTEImbalanceTrade();
+431: void CheckAndExecuteDerivArrowTrade();
+465: void CheckImminentSpike();
+509: bool IsVolatilityCompressionDetected();
+514: void CheckAndExecuteSpikeTrade();
+5300: CheckImminentSpike();
+5509: void OnTick()
+5668: return; // Gestion risque déjà exécutée en début de OnTick
+5761: CheckAndExecuteSpikeTrade();
+5783: CheckImminentSpike(); // Vérification rapide sans graphiques
+13411: CheckAndExecuteDerivArrowTrade();
+13414: // La détection/gestion des spikes et canaux Boom/Crash est déjà appelée plus bas (ManageBoomCrashSpikeClose, CheckImminentSpike, etc.)
+13420: CheckAndExecuteDerivArrowTrade(); // conserve la détection flèche, mais l'entrée est filtrée par l'IA + confiance
+13425: ExecuteOTEImbalanceTrade();
+13428: CheckAndExecuteDerivArrowTrade();
+13436: ExecuteOTEImbalanceTrade();
+13437: CheckAndExecuteDerivArrowTrade();
+15460: // Mémoriser la probabilité locale de spike pour réutilisation (CheckImminentSpike, filtres ML, etc.)
+15587: // FALLBACK: Le fallback sera géré par OnTick directement
+15588: // GenerateFallbackAIDecision(); // Déplacé dans OnTick
+16188: void CheckAndExecuteDerivArrowTrade()
+16204: Print("?? DEBUG - CheckAndExecuteDerivArrowTrade appelée pour: ", _Symbol, " | Time: ", TimeToString(TimeCurrent(), TIME_SECONDS));
+18189: void ExecuteOTEImbalanceTrade()
+20701: void CheckImminentSpike()
+22890: bool IsVolatilityCompressionDetected()
+23006: if(IsVolatilityCompressionDetected()) signalCount++;
+23023: void CheckAndExecuteSpikeTrade()

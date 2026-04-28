@@ -1,0 +1,812 @@
+//+------------------------------------------------------------------+
+//|  EA_Analysis360.mq5                                              |
+//|  Analyse technique 360° multi-symbol + envoi WebSocket           |
+//|  Compatible : Forex majeurs, cross, exotiques, indices volatilité|
+//+------------------------------------------------------------------+
+#property copyright "Trading System 360°"
+#property version   "1.00"
+#property strict
+
+#include <Trade\Trade.mqh>
+#include <Indicators\Indicators.mqh>
+
+//── Paramètres d'entrée ────────────────────────────────────────────────────────
+input string   AI_SERVER_HOST  = "127.0.0.1";   // IP du serveur Python
+input int      AI_SERVER_PORT  = 9001;           // Port WebSocket
+input int      RECONNECT_DELAY = 5000;           // Délai reconnexion (ms)
+input int      MAX_RETRIES     = 3;              // Tentatives d'envoi max
+input bool     LOG_TO_FILE     = true;           // Activer logs fichier
+input bool     AUTO_TRADE      = false;          // Exécuter les signaux auto
+input double   ACCOUNT_BALANCE = 10000.0;        // Capital de référence
+
+//── Handles d'indicateurs par timeframe ────────────────────────────────────────
+struct TFHandles {
+   int ema8, ema21, ema50, ema200;
+   int rsi, macd, stoch, adx, atr;
+   int bb;
+};
+
+struct SymbolData {
+   string   symbol;
+   TFHandles tf_m5, tf_m15, tf_h1, tf_h4, tf_d1;
+   datetime last_bar_m5;
+   bool     initialized;
+};
+
+// Liste des symbols à analyser
+SymbolData symbols[];
+int        symbol_count = 0;
+
+// Socket WebSocket simplifié via fichier d'échange
+string EXCHANGE_FILE = "MT5_AI_exchange.json";
+string SIGNAL_FILE   = "AI_MT5_signals.json";
+string LOG_FILE_PATH;
+
+//── Initialisation ─────────────────────────────────────────────────────────────
+int OnInit()
+{
+   LOG_FILE_PATH = "EA_log_" + TimeToString(TimeCurrent(), TIME_DATE) + ".txt";
+   LOG_FILE_PATH = StringReplace(LOG_FILE_PATH, ".", "");
+   LOG_FILE_PATH = LOG_FILE_PATH + ".txt";
+
+   WriteLog("══════════════════════════════════════");
+   WriteLog("EA Analysis 360° démarré");
+   WriteLog("Symbol principal : " + _Symbol);
+   WriteLog("Serveur AI : " + AI_SERVER_HOST + ":" + IntegerToString(AI_SERVER_PORT));
+
+   // Découvrir tous les symbols ouverts dans le terminal
+   DiscoverSymbols();
+
+   // Initialiser les indicateurs pour chaque symbol
+   for(int i = 0; i < symbol_count; i++) {
+      if(!InitSymbolIndicators(symbols[i])) {
+         WriteLog("ERREUR init indicateurs pour " + symbols[i].symbol);
+      } else {
+         WriteLog("✅ Indicateurs initialisés : " + symbols[i].symbol);
+      }
+   }
+
+   // Timer toutes les 5 secondes pour vérifier nouvelles bougies
+   EventSetTimer(5);
+
+   WriteLog("Initialisation terminée. " + IntegerToString(symbol_count) + " symbol(s) actif(s)");
+   return INIT_SUCCEEDED;
+}
+
+//── Découverte des symbols ouverts ─────────────────────────────────────────────
+void DiscoverSymbols()
+{
+   // Toujours inclure le symbol de l'EA en premier
+   AddSymbol(_Symbol);
+
+   // Scanner les 50 premiers symbols du MarketWatch
+   int total = SymbolsTotal(true); // true = MarketWatch uniquement
+   for(int i = 0; i < total && i < 50; i++) {
+      string sym = SymbolName(i, true);
+      if(sym != _Symbol && sym != "") {
+         AddSymbol(sym);
+      }
+   }
+   WriteLog("Symbols découverts : " + IntegerToString(symbol_count));
+}
+
+void AddSymbol(string sym)
+{
+   // Vérifier si déjà dans la liste
+   for(int i = 0; i < symbol_count; i++) {
+      if(symbols[i].symbol == sym) return;
+   }
+
+   ArrayResize(symbols, symbol_count + 1);
+   symbols[symbol_count].symbol      = sym;
+   symbols[symbol_count].initialized = false;
+   symbols[symbol_count].last_bar_m5 = 0;
+   symbol_count++;
+}
+
+//── Initialisation des indicateurs pour un symbol ─────────────────────────────
+bool InitSymbolIndicators(SymbolData &sd)
+{
+   string s = sd.symbol;
+
+   // M5
+   sd.tf_m5.ema8    = iMA(s, PERIOD_M5,  8,  0, MODE_EMA, PRICE_CLOSE);
+   sd.tf_m5.ema21   = iMA(s, PERIOD_M5,  21, 0, MODE_EMA, PRICE_CLOSE);
+   sd.tf_m5.ema50   = iMA(s, PERIOD_M5,  50, 0, MODE_EMA, PRICE_CLOSE);
+   sd.tf_m5.ema200  = iMA(s, PERIOD_M5,  200,0, MODE_EMA, PRICE_CLOSE);
+   sd.tf_m5.rsi     = iRSI(s, PERIOD_M5, 14, PRICE_CLOSE);
+   sd.tf_m5.macd    = iMACD(s, PERIOD_M5, 12, 26, 9, PRICE_CLOSE);
+   sd.tf_m5.stoch   = iStochastic(s, PERIOD_M5, 5, 3, 3, MODE_SMA, STO_LOWHIGH);
+   sd.tf_m5.adx     = iADX(s, PERIOD_M5, 14);
+   sd.tf_m5.atr     = iATR(s, PERIOD_M5, 14);
+   sd.tf_m5.bb      = iBands(s, PERIOD_M5, 20, 0, 2.0, PRICE_CLOSE);
+
+   // M15
+   sd.tf_m15.ema8   = iMA(s, PERIOD_M15, 8,  0, MODE_EMA, PRICE_CLOSE);
+   sd.tf_m15.ema21  = iMA(s, PERIOD_M15, 21, 0, MODE_EMA, PRICE_CLOSE);
+   sd.tf_m15.ema50  = iMA(s, PERIOD_M15, 50, 0, MODE_EMA, PRICE_CLOSE);
+   sd.tf_m15.ema200 = iMA(s, PERIOD_M15, 200,0, MODE_EMA, PRICE_CLOSE);
+   sd.tf_m15.rsi    = iRSI(s, PERIOD_M15, 14, PRICE_CLOSE);
+   sd.tf_m15.macd   = iMACD(s, PERIOD_M15, 12, 26, 9, PRICE_CLOSE);
+   sd.tf_m15.stoch  = iStochastic(s, PERIOD_M15, 5, 3, 3, MODE_SMA, STO_LOWHIGH);
+   sd.tf_m15.adx    = iADX(s, PERIOD_M15, 14);
+   sd.tf_m15.atr    = iATR(s, PERIOD_M15, 14);
+   sd.tf_m15.bb     = iBands(s, PERIOD_M15, 20, 0, 2.0, PRICE_CLOSE);
+
+   // H1
+   sd.tf_h1.ema8    = iMA(s, PERIOD_H1,  8,  0, MODE_EMA, PRICE_CLOSE);
+   sd.tf_h1.ema21   = iMA(s, PERIOD_H1,  21, 0, MODE_EMA, PRICE_CLOSE);
+   sd.tf_h1.ema50   = iMA(s, PERIOD_H1,  50, 0, MODE_EMA, PRICE_CLOSE);
+   sd.tf_h1.ema200  = iMA(s, PERIOD_H1,  200,0, MODE_EMA, PRICE_CLOSE);
+   sd.tf_h1.rsi     = iRSI(s, PERIOD_H1,  14, PRICE_CLOSE);
+   sd.tf_h1.macd    = iMACD(s, PERIOD_H1,  12, 26, 9, PRICE_CLOSE);
+   sd.tf_h1.adx     = iADX(s, PERIOD_H1,  14);
+   sd.tf_h1.atr     = iATR(s, PERIOD_H1,  14);
+   sd.tf_h1.bb      = iBands(s, PERIOD_H1,  20, 0, 2.0, PRICE_CLOSE);
+
+   // H4
+   sd.tf_h4.ema50   = iMA(s, PERIOD_H4,  50, 0, MODE_EMA, PRICE_CLOSE);
+   sd.tf_h4.ema200  = iMA(s, PERIOD_H4,  200,0, MODE_EMA, PRICE_CLOSE);
+   sd.tf_h4.rsi     = iRSI(s, PERIOD_H4,  14, PRICE_CLOSE);
+   sd.tf_h4.atr     = iATR(s, PERIOD_H4,  14);
+   sd.tf_h4.adx     = iADX(s, PERIOD_H4,  14);
+
+   // D1
+   sd.tf_d1.ema50   = iMA(s, PERIOD_D1,  50, 0, MODE_EMA, PRICE_CLOSE);
+   sd.tf_d1.ema200  = iMA(s, PERIOD_D1,  200,0, MODE_EMA, PRICE_CLOSE);
+   sd.tf_d1.rsi     = iRSI(s, PERIOD_D1,  14, PRICE_CLOSE);
+   sd.tf_d1.atr     = iATR(s, PERIOD_D1,  14);
+
+   sd.initialized = true;
+   return true;
+}
+
+//── Timer principal ────────────────────────────────────────────────────────────
+void OnTimer()
+{
+   for(int i = 0; i < symbol_count; i++) {
+      if(!symbols[i].initialized) continue;
+
+      string sym = symbols[i].symbol;
+      datetime current_bar = iTime(sym, PERIOD_M5, 0);
+
+      // Nouvelle bougie M5 détectée ?
+      if(current_bar != symbols[i].last_bar_m5) {
+         symbols[i].last_bar_m5 = current_bar;
+         string json_data = BuildAnalysisJSON(symbols[i]);
+         SendToAIServer(json_data, sym);
+      }
+   }
+
+   // Lire les signaux retournés par le serveur AI
+   ReadSignalsFromServer();
+}
+
+//── Construction du JSON d'analyse 360° ───────────────────────────────────────
+string BuildAnalysisJSON(SymbolData &sd)
+{
+   string s = sd.symbol;
+
+   // ── Données M5 ────────────────────────────────────────────────────────────
+   string tf_m5_json  = BuildTFJson(sd.tf_m5,  s, PERIOD_M5);
+   string tf_m15_json = BuildTFJson(sd.tf_m15, s, PERIOD_M15);
+   string tf_h1_json  = BuildTFJson(sd.tf_h1,  s, PERIOD_H1);
+   string tf_h4_json  = BuildTFJsonLight(sd.tf_h4, s, PERIOD_H4);
+   string tf_d1_json  = BuildTFJsonLight(sd.tf_d1, s, PERIOD_D1);
+
+   // ── Meta données ──────────────────────────────────────────────────────────
+   int    conf_score  = CalcConfluenceScore(sd);
+   string bias        = GetDominantBias(sd);
+   string phase       = GetMarketPhase(sd);
+   string session     = GetCurrentSession();
+   string news_risk   = GetNewsRisk();
+   bool   trade_ok    = conf_score >= 70;
+   string spread_ok   = (GetSpreadPips(s) <= 3.0) ? "true" : "false";
+
+   string json =
+      "{"
+      "\"timestamp_utc\":\""     + TimeToString(TimeGMT(), TIME_DATE|TIME_SECONDS) + "\","
+      "\"symbol\":\""            + s + "\","
+      "\"broker\":\""            + AccountInfoString(ACCOUNT_COMPANY) + "\","
+      "\"analysis_version\":\"360v1\","
+      "\"market_phase\":\""      + phase + "\","
+      "\"session\":\""           + session + "\","
+      "\"news_risk\":\""         + news_risk + "\","
+      "\"timeframes\":{"
+         "\"M5\":"   + tf_m5_json  + ","
+         "\"M15\":"  + tf_m15_json + ","
+         "\"H1\":"   + tf_h1_json  + ","
+         "\"H4\":"   + tf_h4_json  + ","
+         "\"D1\":"   + tf_d1_json  +
+      "},"
+      "\"meta\":{"
+         "\"dominant_bias\":\""  + bias + "\","
+         "\"confluence_score\":" + IntegerToString(conf_score) + ","
+         "\"volatility_class\":\"NORMAL\","
+         "\"trade_allowed\":"    + (trade_ok ? "true" : "false") + ","
+         "\"spread_filter_ok\":" + spread_ok + ","
+         "\"session_filter_ok\":true,"
+         "\"market_structure\":\"" + GetMarketStructure(s) + "\""
+      "}"
+      "}";
+
+   return json;
+}
+
+//── JSON pour un timeframe complet ────────────────────────────────────────────
+string BuildTFJson(TFHandles &tfh, string sym, ENUM_TIMEFRAMES tf)
+{
+   // Lire les valeurs des indicateurs (bougie 1 = dernière fermée)
+   double ema8_v  = GetIndicatorValue(tfh.ema8,  0, 1);
+   double ema21_v = GetIndicatorValue(tfh.ema21, 0, 1);
+   double ema50_v = GetIndicatorValue(tfh.ema50, 0, 1);
+   double ema200v = GetIndicatorValue(tfh.ema200,0, 1);
+   double rsi_v   = GetIndicatorValue(tfh.rsi,   0, 1);
+   double macd_l  = GetIndicatorValue(tfh.macd,  0, 1);  // ligne MACD
+   double macd_s  = GetIndicatorValue(tfh.macd,  1, 1);  // signal
+   double macd_h  = macd_l - macd_s;                     // histogramme
+   double stoch_k = GetIndicatorValue(tfh.stoch, 0, 1);
+   double stoch_d = GetIndicatorValue(tfh.stoch, 1, 1);
+   double adx_v   = GetIndicatorValue(tfh.adx,   0, 1);
+   double atr_v   = GetIndicatorValue(tfh.atr,   0, 1) / SymbolInfoDouble(sym, SYMBOL_POINT) / 10;
+   double bb_up   = GetIndicatorValue(tfh.bb,    1, 1);
+   double bb_mid  = GetIndicatorValue(tfh.bb,    0, 1);
+   double bb_dn   = GetIndicatorValue(tfh.bb,    2, 1);
+
+   double open_p  = iOpen(sym, tf, 1);
+   double high_p  = iHigh(sym, tf, 1);
+   double low_p   = iLow(sym, tf, 1);
+   double close_p = iClose(sym, tf, 1);
+
+   string ema_align = GetEMAAlignment(ema8_v, ema21_v, ema50_v);
+   string rsi_zone  = GetRSIZone(rsi_v);
+   string candle    = GetCandleType(sym, tf, 1);
+   string price_vs  = (close_p > ema21_v) ? "ABOVE" : "BELOW";
+   string macd_cros = GetMACDCross(tfh.macd, 1);
+
+   double sup_lvl   = GetNearestSupport(sym, tf);
+   double res_lvl   = GetNearestResist(sym, tf);
+   double dist_sup  = MathAbs(close_p - sup_lvl) / SymbolInfoDouble(sym, SYMBOL_POINT) / 10;
+   double dist_res  = MathAbs(res_lvl - close_p) / SymbolInfoDouble(sym, SYMBOL_POINT) / 10;
+
+   double fib_data[];
+   GetFibLevels(sym, tf, fib_data);
+   double fib382 = (ArraySize(fib_data) > 0) ? fib_data[0] : 0;
+   double fib618 = (ArraySize(fib_data) > 1) ? fib_data[1] : 0;
+
+   double spread = GetSpreadPips(sym);
+   bool candle_ok = IsCandleConfirmed(sym, tf, candle);
+
+   string json =
+      "{"
+      "\"open\":"               + DoubleToString(open_p,  5) + ","
+      "\"high\":"               + DoubleToString(high_p,  5) + ","
+      "\"low\":"                + DoubleToString(low_p,   5) + ","
+      "\"close\":"              + DoubleToString(close_p, 5) + ","
+      "\"spread_pips\":"        + DoubleToString(spread,  1) + ","
+      "\"ema_8\":"              + DoubleToString(ema8_v,  5) + ","
+      "\"ema_21\":"             + DoubleToString(ema21_v, 5) + ","
+      "\"ema_50\":"             + DoubleToString(ema50_v, 5) + ","
+      "\"ema_200\":"            + DoubleToString(ema200v, 5) + ","
+      "\"ema_alignment\":\""    + ema_align + "\","
+      "\"rsi_14\":"             + DoubleToString(rsi_v,   2) + ","
+      "\"rsi_zone\":\""         + rsi_zone + "\","
+      "\"rsi_divergence\":null,"
+      "\"macd_line\":"          + DoubleToString(macd_l,  5) + ","
+      "\"macd_signal\":"        + DoubleToString(macd_s,  5) + ","
+      "\"macd_hist\":"          + DoubleToString(macd_h,  5) + ","
+      "\"macd_cross\":\""       + macd_cros + "\","
+      "\"stoch_k\":"            + DoubleToString(stoch_k, 1) + ","
+      "\"stoch_d\":"            + DoubleToString(stoch_d, 1) + ","
+      "\"adx_14\":"             + DoubleToString(adx_v,   1) + ","
+      "\"atr_14_pips\":"        + DoubleToString(atr_v,   1) + ","
+      "\"bb_upper\":"           + DoubleToString(bb_up,   5) + ","
+      "\"bb_mid\":"             + DoubleToString(bb_mid,  5) + ","
+      "\"bb_lower\":"           + DoubleToString(bb_dn,   5) + ","
+      "\"candle_type\":\""      + candle + "\","
+      "\"candle_confirmation\":" + (candle_ok ? "true" : "false") + ","
+      "\"price_vs_ema21\":\""   + price_vs + "\","
+      "\"nearest_support\":"    + DoubleToString(sup_lvl, 5) + ","
+      "\"nearest_resist\":"     + DoubleToString(res_lvl, 5) + ","
+      "\"dist_to_support_pips\":"+ DoubleToString(dist_sup,1) + ","
+      "\"dist_to_resist_pips\":" + DoubleToString(dist_res,1) + ","
+      "\"bos_detected\":"       + (DetectBOS(sym, tf) ? "true" : "false") + ","
+      "\"choch_detected\":"     + (DetectCHoCH(sym, tf) ? "true" : "false") + ","
+      "\"fib_382\":"            + DoubleToString(fib382,  5) + ","
+      "\"fib_618\":"            + DoubleToString(fib618,  5) + ","
+      "\"market_phase\":\""     + GetPhaseTF(sym, tf) + "\""
+      "}";
+
+   return json;
+}
+
+//── JSON léger pour H4/D1 ─────────────────────────────────────────────────────
+string BuildTFJsonLight(TFHandles &tfh, string sym, ENUM_TIMEFRAMES tf)
+{
+   double ema50_v = GetIndicatorValue(tfh.ema50,  0, 1);
+   double ema200v = GetIndicatorValue(tfh.ema200, 0, 1);
+   double rsi_v   = GetIndicatorValue(tfh.rsi,    0, 1);
+   double adx_v   = GetIndicatorValue(tfh.adx,    0, 1);
+   double atr_v   = GetIndicatorValue(tfh.atr,    0, 1) / SymbolInfoDouble(sym, SYMBOL_POINT) / 10;
+   double close_p = iClose(sym, tf, 1);
+   string align   = (ema50_v > ema200v) ? "BULLISH_STACK" : "BEARISH_STACK";
+
+   string json =
+      "{"
+      "\"close\":"           + DoubleToString(close_p, 5) + ","
+      "\"ema_50\":"          + DoubleToString(ema50_v, 5) + ","
+      "\"ema_200\":"         + DoubleToString(ema200v, 5) + ","
+      "\"ema_alignment\":\"" + align + "\","
+      "\"rsi_14\":"          + DoubleToString(rsi_v,   2) + ","
+      "\"adx_14\":"          + DoubleToString(adx_v,   1) + ","
+      "\"atr_14_pips\":"     + DoubleToString(atr_v,   1) + ","
+      "\"market_phase\":\""  + GetPhaseTF(sym, tf) + "\""
+      "}";
+   return json;
+}
+
+//── Fonctions d'analyse ────────────────────────────────────────────────────────
+double GetIndicatorValue(int handle, int buffer, int shift)
+{
+   if(handle == INVALID_HANDLE) return 0;
+   double arr[];
+   ArraySetAsSeries(arr, true);
+   if(CopyBuffer(handle, buffer, shift, 1, arr) <= 0) return 0;
+   return arr[0];
+}
+
+string GetEMAAlignment(double e8, double e21, double e50)
+{
+   if(e8 > e21 && e21 > e50) return "BULLISH_STACK";
+   if(e8 < e21 && e21 < e50) return "BEARISH_STACK";
+   if(e8 > e21 && e21 < e50) return "MIXED_RECOVERY";
+   return "MIXED";
+}
+
+string GetRSIZone(double rsi)
+{
+   if(rsi >= 70) return "OVERBOUGHT";
+   if(rsi <= 30) return "OVERSOLD";
+   if(rsi > 55)  return "NEUTRAL_BULLISH";
+   if(rsi < 45)  return "NEUTRAL_BEARISH";
+   return "NEUTRAL";
+}
+
+string GetMACDCross(int handle, int shift)
+{
+   double macd_now  = GetIndicatorValue(handle, 0, shift);
+   double sig_now   = GetIndicatorValue(handle, 1, shift);
+   double macd_prev = GetIndicatorValue(handle, 0, shift + 1);
+   double sig_prev  = GetIndicatorValue(handle, 1, shift + 1);
+
+   if(macd_prev < sig_prev && macd_now > sig_now) return "BULLISH_1_BAR_AGO";
+   if(macd_prev > sig_prev && macd_now < sig_now) return "BEARISH_1_BAR_AGO";
+
+   double macd_2 = GetIndicatorValue(handle, 0, shift + 2);
+   double sig_2  = GetIndicatorValue(handle, 1, shift + 2);
+   if(macd_2 < sig_2 && macd_prev > sig_prev) return "BULLISH_2_BARS_AGO";
+   if(macd_2 > sig_2 && macd_prev < sig_prev) return "BEARISH_2_BARS_AGO";
+
+   return (macd_now > sig_now) ? "BULLISH_TREND" : "BEARISH_TREND";
+}
+
+string GetCandleType(string sym, ENUM_TIMEFRAMES tf, int shift)
+{
+   double o = iOpen(sym, tf, shift);
+   double h = iHigh(sym, tf, shift);
+   double l = iLow(sym, tf, shift);
+   double c = iClose(sym, tf, shift);
+
+   double body      = MathAbs(c - o);
+   double total     = h - l;
+   double upper_wck = h - MathMax(o, c);
+   double lower_wck = MathMin(o, c) - l;
+   bool   bullish   = c > o;
+
+   if(total < 0.0001) return "DOJI";
+
+   double body_pct  = body / total;
+
+   // Pin Bar
+   if(lower_wck >= body * 2 && upper_wck < body && body_pct < 0.35)
+      return "PIN_BAR_BULLISH";
+   if(upper_wck >= body * 2 && lower_wck < body && body_pct < 0.35)
+      return "PIN_BAR_BEARISH";
+
+   // Engulfing (comparer avec bougie précédente)
+   double po = iOpen(sym, tf, shift + 1);
+   double pc = iClose(sym, tf, shift + 1);
+   if(bullish && c > po && o < pc && po > pc)
+      return "ENGULFING_BULLISH";
+   if(!bullish && c < po && o > pc && po < pc)
+      return "ENGULFING_BEARISH";
+
+   // Marubozu
+   if(body_pct > 0.85 && bullish)  return "MARUBOZU_BULLISH";
+   if(body_pct > 0.85 && !bullish) return "MARUBOZU_BEARISH";
+
+   // Doji
+   if(body_pct < 0.1) return "DOJI";
+
+   return bullish ? "BULLISH_CANDLE" : "BEARISH_CANDLE";
+}
+
+bool IsCandleConfirmed(string sym, ENUM_TIMEFRAMES tf, string candle_type)
+{
+   // Une bougie est confirmée si volume > moyenne et body bien formé
+   long vol = iVolume(sym, tf, 1);
+   long avg_vol = 0;
+   for(int i = 2; i <= 10; i++) avg_vol += iVolume(sym, tf, i);
+   avg_vol /= 9;
+
+   if(StringFind(candle_type, "DOJI") >= 0) return false;
+   if(StringFind(candle_type, "BULLISH") >= 0 || StringFind(candle_type, "BEARISH") >= 0)
+      return (vol >= avg_vol * 0.8);
+   return false;
+}
+
+double GetNearestSupport(string sym, ENUM_TIMEFRAMES tf)
+{
+   double close_now = iClose(sym, tf, 1);
+   double support   = close_now;
+
+   // Chercher le plus bas swing des 50 dernières bougies
+   for(int i = 2; i < 50; i++) {
+      double l = iLow(sym, tf, i);
+      if(l < close_now) {
+         bool is_swing = (iLow(sym, tf, i-1) > l && iLow(sym, tf, i+1) > l);
+         if(is_swing && l > support - (support * 0.005)) {
+            support = l;
+         }
+      }
+   }
+   return support;
+}
+
+double GetNearestResist(string sym, ENUM_TIMEFRAMES tf)
+{
+   double close_now = iClose(sym, tf, 1);
+   double resist    = close_now * 1.01; // fallback +1%
+
+   for(int i = 2; i < 50; i++) {
+      double h = iHigh(sym, tf, i);
+      if(h > close_now) {
+         bool is_swing = (iHigh(sym, tf, i-1) < h && iHigh(sym, tf, i+1) < h);
+         if(is_swing && h < resist + (resist * 0.005)) {
+            resist = h;
+         }
+      }
+   }
+   return resist;
+}
+
+void GetFibLevels(string sym, ENUM_TIMEFRAMES tf, double &fib_out[])
+{
+   // Trouver le dernier impulse (swing high et swing low récents)
+   double swing_high = 0, swing_low = 999999;
+   for(int i = 1; i < 50; i++) {
+      double h = iHigh(sym, tf, i);
+      double l = iLow(sym, tf, i);
+      if(h > swing_high) swing_high = h;
+      if(l < swing_low)  swing_low  = l;
+   }
+
+   double range = swing_high - swing_low;
+   ArrayResize(fib_out, 5);
+   fib_out[0] = swing_high - range * 0.382;  // 38.2%
+   fib_out[1] = swing_high - range * 0.500;  // 50%
+   fib_out[2] = swing_high - range * 0.618;  // 61.8%
+   fib_out[3] = swing_high - range * 0.236;  // 23.6%
+   fib_out[4] = swing_high - range * 0.786;  // 78.6%
+}
+
+bool DetectBOS(string sym, ENUM_TIMEFRAMES tf)
+{
+   // Break of Structure : clôture au-dessus du dernier swing high (bull BOS)
+   double last_sh = 0;
+   for(int i = 3; i < 30; i++) {
+      double h = iHigh(sym, tf, i);
+      if(iHigh(sym, tf, i-1) < h && iHigh(sym, tf, i+1) < h) {
+         last_sh = h;
+         break;
+      }
+   }
+   if(last_sh <= 0) return false;
+   double close_now = iClose(sym, tf, 1);
+   return close_now > last_sh;
+}
+
+bool DetectCHoCH(string sym, ENUM_TIMEFRAMES tf)
+{
+   // CHoCH : dans un uptrend, price casse sous un Higher Low récent
+   double last_hl = 999999;
+   bool uptrend = false;
+
+   for(int i = 3; i < 30; i++) {
+      double l = iLow(sym, tf, i);
+      if(iLow(sym, tf, i-1) > l && iLow(sym, tf, i+1) > l) {
+         // C'est un swing low
+         if(l < last_hl) {
+            last_hl  = l;
+            uptrend  = true;
+         }
+         break;
+      }
+   }
+
+   if(!uptrend || last_hl >= 999999) return false;
+   return iClose(sym, tf, 1) < last_hl;
+}
+
+string GetMarketPhase(SymbolData &sd)
+{
+   string s = sd.symbol;
+   double ema21_m15 = GetIndicatorValue(sd.tf_m15.ema21, 0, 1);
+   double ema50_h1  = GetIndicatorValue(sd.tf_h1.ema50,  0, 1);
+   double adx_h1    = GetIndicatorValue(sd.tf_h1.adx,    0, 1);
+   double close_h1  = iClose(s, PERIOD_H1, 1);
+
+   if(adx_h1 > 25 && close_h1 > ema50_h1) return "TRENDING_UP";
+   if(adx_h1 > 25 && close_h1 < ema50_h1) return "TRENDING_DOWN";
+   if(DetectBOS(s, PERIOD_H1))             return "BREAKOUT";
+   return "RANGING";
+}
+
+string GetPhaseTF(string sym, ENUM_TIMEFRAMES tf)
+{
+   int adx_h = iADX(sym, tf, 14);
+   double adx_v[];
+   ArraySetAsSeries(adx_v, true);
+   CopyBuffer(adx_h, 0, 1, 1, adx_v);
+   double close_n = iClose(sym, tf, 1);
+   int ema50_h = iMA(sym, tf, 50, 0, MODE_EMA, PRICE_CLOSE);
+   double ema_v[];
+   ArraySetAsSeries(ema_v, true);
+   CopyBuffer(ema50_h, 0, 1, 1, ema_v);
+
+   if(ArraySize(adx_v) < 1 || ArraySize(ema_v) < 1) return "UNKNOWN";
+   if(adx_v[0] > 25 && close_n > ema_v[0]) return "TRENDING_UP";
+   if(adx_v[0] > 25 && close_n < ema_v[0]) return "TRENDING_DOWN";
+   return "RANGING";
+}
+
+string GetMarketStructure(string sym)
+{
+   // Vérifier HH/HL ou LL/LH sur H1 (30 dernières bougies)
+   double h1 = iHigh(sym, PERIOD_H1, 1);
+   double h2 = iHigh(sym, PERIOD_H1, 5);
+   double l1 = iLow(sym,  PERIOD_H1, 1);
+   double l2 = iLow(sym,  PERIOD_H1, 5);
+
+   if(h1 > h2 && l1 > l2) return "HH_HL_INTACT";
+   if(h1 < h2 && l1 < l2) return "LL_LH_INTACT";
+   return "MIXED_STRUCTURE";
+}
+
+string GetDominantBias(SymbolData &sd)
+{
+   double ema50_h1  = GetIndicatorValue(sd.tf_h1.ema50,  0, 1);
+   double ema200_h1 = GetIndicatorValue(sd.tf_h1.ema200, 0, 1);
+   double close_h1  = iClose(sd.symbol, PERIOD_H1, 1);
+
+   if(close_h1 > ema50_h1 && ema50_h1 > ema200_h1) return "BULLISH";
+   if(close_h1 < ema50_h1 && ema50_h1 < ema200_h1) return "BEARISH";
+   return "NEUTRAL";
+}
+
+int CalcConfluenceScore(SymbolData &sd)
+{
+   int score = 0;
+   string s  = sd.symbol;
+
+   // Alignement EMAs H1 (+20)
+   double e8  = GetIndicatorValue(sd.tf_h1.ema8,  0, 1);
+   double e21 = GetIndicatorValue(sd.tf_h1.ema21, 0, 1);
+   double e50 = GetIndicatorValue(sd.tf_h1.ema50, 0, 1);
+   string align = GetEMAAlignment(e8, e21, e50);
+   if(align == "BULLISH_STACK" || align == "BEARISH_STACK") score += 20;
+   else score -= 10;
+
+   // RSI zone favorable (+10)
+   double rsi = GetIndicatorValue(sd.tf_m15.rsi, 0, 1);
+   if(rsi > 40 && rsi < 60) score += 10;
+
+   // MACD confirme (+10)
+   double macd_h = GetIndicatorValue(sd.tf_m15.macd, 0, 1) -
+                   GetIndicatorValue(sd.tf_m15.macd, 1, 1);
+   if(MathAbs(macd_h) > 0) score += 10;
+
+   // ADX > 25 (+10)
+   double adx = GetIndicatorValue(sd.tf_h1.adx, 0, 1);
+   if(adx >= 25) score += 10;
+
+   // Structure (+15)
+   string struct_ok = GetMarketStructure(s);
+   if(struct_ok == "HH_HL_INTACT" || struct_ok == "LL_LH_INTACT") score += 15;
+
+   // Bougie confirmation M5 (+10)
+   string candle = GetCandleType(s, PERIOD_M5, 1);
+   if(IsCandleConfirmed(s, PERIOD_M5, candle)) score += 10;
+
+   // Session premium (+10)
+   string sess = GetCurrentSession();
+   if(StringFind(sess, "LONDON") >= 0 || StringFind(sess, "NEW_YORK") >= 0) score += 10;
+
+   // Spread (+5)
+   if(GetSpreadPips(s) <= 2.0) score += 5;
+
+   // Pas de news HIGH (+5)
+   if(GetNewsRisk() != "HIGH") score += 5;
+
+   // Fibonacci confluence (+5)
+   double fib[];
+   GetFibLevels(s, PERIOD_H1, fib);
+   double close = iClose(s, PERIOD_H1, 1);
+   if(ArraySize(fib) > 2) {
+      if(MathAbs(close - fib[0]) < 0.0010 || MathAbs(close - fib[2]) < 0.0010) score += 5;
+   }
+
+   return MathMax(0, MathMin(100, score));
+}
+
+string GetCurrentSession()
+{
+   MqlDateTime gmt;
+   TimeToStruct(TimeGMT(), gmt);
+   int hour = gmt.hour;
+
+   // London 07:00 - 16:00 GMT
+   // New York 12:00 - 21:00 GMT
+   // Overlap  12:00 - 16:00 GMT
+   bool london   = (hour >= 7  && hour < 16);
+   bool new_york = (hour >= 12 && hour < 21);
+   bool overlap  = (hour >= 12 && hour < 16);
+   bool tokyo    = (hour >= 0  && hour < 9);
+   bool sydney   = (hour >= 21 || hour < 7);
+
+   if(overlap)  return "LONDON_NY_OVERLAP";
+   if(london)   return "LONDON";
+   if(new_york) return "NEW_YORK";
+   if(tokyo)    return "TOKYO";
+   if(sydney)   return "SYDNEY";
+   return "CLOSED";
+}
+
+string GetNewsRisk()
+{
+   // Placeholder — intégrer un calendrier économique si disponible
+   // En production, connecter à une API calendrier ou fichier CSV de news
+   return "LOW";
+}
+
+double GetSpreadPips(string sym)
+{
+   double spread_pts = (double)SymbolInfoInteger(sym, SYMBOL_SPREAD);
+   double point      = SymbolInfoDouble(sym, SYMBOL_POINT);
+   // Convertir en pips (1 pip = 10 points pour 5 décimales)
+   return spread_pts * point / point / 10 * spread_pts;
+}
+
+//── Communication avec le serveur AI ──────────────────────────────────────────
+// Méthode : écriture dans fichier partagé (MQL5 Files)
+// Pour WebSocket natif, utiliser DLL externe ou socket library
+
+void SendToAIServer(string json_data, string sym)
+{
+   // Écriture du JSON dans le dossier MQL5/Files
+   string filename = "analysis_" + sym + ".json";
+   int fh = FileOpen(filename, FILE_WRITE | FILE_TXT | FILE_ANSI);
+   if(fh == INVALID_HANDLE) {
+      WriteLog("ERREUR : impossible d'écrire " + filename);
+      return;
+   }
+   FileWriteString(fh, json_data);
+   FileClose(fh);
+
+   WriteLog("✅ Analyse envoyée → " + sym + " (" + IntegerToString(StringLen(json_data)) + " bytes)");
+}
+
+void ReadSignalsFromServer()
+{
+   // Lire les signaux retournés par ai_server.py
+   if(!FileIsExist(SIGNAL_FILE)) return;
+
+   int fh = FileOpen(SIGNAL_FILE, FILE_READ | FILE_TXT | FILE_ANSI);
+   if(fh == INVALID_HANDLE) return;
+
+   string content = "";
+   while(!FileIsEnding(fh)) {
+      content += FileReadString(fh);
+   }
+   FileClose(fh);
+
+   if(content == "") return;
+
+   // Supprimer le fichier après lecture
+   FileDelete(SIGNAL_FILE);
+
+   // Parser et afficher le signal
+   WriteLog("SIGNAL REÇU : " + content);
+
+   // Si AUTO_TRADE activé, exécuter le signal
+   if(AUTO_TRADE) {
+      ExecuteSignalFromJSON(content);
+   }
+}
+
+void ExecuteSignalFromJSON(string json)
+{
+   // Parser simplifié — extraire action, entry, sl, tp1, symbol
+   string action = ExtractJSONString(json, "action");
+   string sym    = ExtractJSONString(json, "symbol");
+   double sl     = ExtractJSONDouble(json, "stop_loss");
+   double tp     = ExtractJSONDouble(json, "take_profit_1");
+   double lot    = ExtractJSONDouble(json, "lot_size");
+
+   if(action == "HOLD" || action == "") return;
+
+   CTrade trade;
+   trade.SetDeviationInPoints(10);
+
+   double price = SymbolInfoDouble(sym, action == "BUY" ? SYMBOL_ASK : SYMBOL_BID);
+
+   if(action == "BUY") {
+      if(trade.Buy(lot, sym, price, sl, tp, "AI360_SCALP")) {
+         WriteLog("✅ BUY exécuté : " + sym + " lot=" + DoubleToString(lot,2) +
+                  " SL=" + DoubleToString(sl,5) + " TP=" + DoubleToString(tp,5));
+      }
+   } else if(action == "SELL") {
+      if(trade.Sell(lot, sym, price, sl, tp, "AI360_SCALP")) {
+         WriteLog("✅ SELL exécuté : " + sym + " lot=" + DoubleToString(lot,2) +
+                  " SL=" + DoubleToString(sl,5) + " TP=" + DoubleToString(tp,5));
+      }
+   }
+}
+
+//── Utilitaires JSON parsing (minimal) ───────────────────────────────────────
+string ExtractJSONString(string json, string key)
+{
+   string search = "\"" + key + "\":\"";
+   int pos = StringFind(json, search);
+   if(pos < 0) return "";
+   pos += StringLen(search);
+   int end = StringFind(json, "\"", pos);
+   if(end < 0) return "";
+   return StringSubstr(json, pos, end - pos);
+}
+
+double ExtractJSONDouble(string json, string key)
+{
+   string search = "\"" + key + "\":";
+   int pos = StringFind(json, search);
+   if(pos < 0) return 0;
+   pos += StringLen(search);
+   int end = StringFind(json, ",", pos);
+   if(end < 0) end = StringFind(json, "}", pos);
+   if(end < 0) return 0;
+   return StringToDouble(StringSubstr(json, pos, end - pos));
+}
+
+//── Logging ───────────────────────────────────────────────────────────────────
+void WriteLog(string msg)
+{
+   string full_msg = TimeToString(TimeCurrent(), TIME_DATE|TIME_SECONDS) + " | " + msg;
+   Print(full_msg);
+
+   if(!LOG_TO_FILE) return;
+   int fh = FileOpen(LOG_FILE_PATH, FILE_WRITE | FILE_READ | FILE_TXT | FILE_ANSI);
+   if(fh == INVALID_HANDLE) return;
+   FileSeek(fh, 0, SEEK_END);
+   FileWriteString(fh, full_msg + "\n");
+   FileClose(fh);
+}
+
+//── Deinit ────────────────────────────────────────────────────────────────────
+void OnDeinit(const int reason)
+{
+   EventKillTimer();
+   WriteLog("EA Analysis 360° arrêté. Raison : " + IntegerToString(reason));
+}
+
+//── OnTick (backup si timer manqué) ──────────────────────────────────────────
+void OnTick() { }

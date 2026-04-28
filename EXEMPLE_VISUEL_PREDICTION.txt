@@ -1,0 +1,262 @@
+╔═══════════════════════════════════════════════════════════════════════════════╗
+║                                                                               ║
+║        🔮 EXEMPLE VISUEL - ZONE DE PRÉDICTION ML SUR GRAPHIQUE MT5           ║
+║                                                                               ║
+╚═══════════════════════════════════════════════════════════════════════════════╝
+
+═════════════════════════════════════════════════════════════════════════════════
+SCENARIO 1: TENDANCE HAUSSIÈRE (5 bougies prédites)
+═════════════════════════════════════════════════════════════════════════════════
+
+Prix
+  ↑
+1.0920 ┤                                          🎯 Target (43%)
+       │                                         ╱│
+1.0915 ┤                                        ╱ │ ▲ Flèche UP
+       │                                       ╱  │
+1.0910 ┤                                  ╭───╯   │ 📊 Bougie 5
+       │                                  │       │    Vert transparent
+1.0905 ┤                                  │       │    Corps + mèches
+       │                             ╭────╯       │
+1.0900 ┤                        ╭────╯        📊 │ Bougie 4 (51%)
+       │                        │             ▲   │
+1.0895 ┤                   ╭────╯                 │
+       │                   │                  📊  │ Bougie 3 (60%)
+1.0890 ┤              ╭────╯                  ▲   │
+       │              │                            │
+1.0885 ┤         ╭────╯                       📊  │ Bougie 2 (72%)
+       │         │                            ▲    │
+1.0880 ┤    ╭────╯                                 │
+       │    │                                 📊   │ Bougie 1 (85%)
+1.0875 ┤────┤                                 ▲    │
+       │    │[Zone de prédiction transparente]     │
+1.0870 ┤━━━━┿━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┤ Prix actuel
+       │    │                                       │
+       │    │ ⚡ ZONE PRÉDICTION ML                 │
+       │    ╰───────────────────────────────────────┤
+       │                                            │
+       └────┼───────┼───────┼───────┼───────┼───────┼──→ Temps
+          Actuel  +5min  +10min +15min +20min +25min
+
+Légende:
+━━━━ Prix actuel (ligne horizontale)
+╭─╯  Trajectoire jaune épaisse (segments reliant clôtures)
+▲    Flèches directionnelles
+📊   Bougies futures (rectangle + mèches)
+🎯   Cible finale
+85%  Pourcentage de confiance (au-dessus de chaque bougie)
+
+═════════════════════════════════════════════════════════════════════════════════
+SCENARIO 2: TENDANCE BAISSIÈRE AVEC REBOND (7 bougies)
+═════════════════════════════════════════════════════════════════════════════════
+
+Prix
+  ↑
+98500 ┤━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ Prix actuel
+      │                                                   (Crash 500 Index)
+98450 ┤    │
+      │    │ ▼ Flèche DOWN
+      │    │
+98400 ┤    │
+      │    ╰────┐                              📊 Bougie 1 (85%)
+      │         │                              ▼  Rouge transparent
+98350 ┤         │
+      │         ╰────┐                          📊 Bougie 2 (72%)
+      │              │                          ▼
+98300 ┤              │
+      │              ╰────┐  🔄 Pivot            📊 Bougie 3 (60%)
+      │                   │                     ▼
+98250 ┤                   │
+      │                   ╰────┐                📊 Bougie 4 (51%)
+      │                        │                ▼
+98200 ┤                        │
+      │                        ╰────┐  🔄 Pivot
+      │                             │           📊 Bougie 5 (43%)
+98150 ┤                             │           ▼  Rebond commence
+      │                             ╰────┐
+      │                                  │      📊 Bougie 6 (36%)
+98100 ┤                                  │      ▲  Vert (inversion)
+      │                                  ╰────┐
+      │                                       │ 📊 Bougie 7 (30%)
+98050 ┤                                       │ ▲
+      │                                       ╰─── 🎯 Target
+98000 ┤
+      │  [Zone de prédiction gris foncé transparent]
+      │
+      └────┼───────┼───────┼───────┼───────┼───────┼───────┼──→ Temps
+         Actuel  +1m    +2m    +3m    +4m    +5m    +6m
+
+Points clés:
+🔄 Pivot = Changement de direction détecté
+🎯 Target = Objectif final de la prédiction
+
+═════════════════════════════════════════════════════════════════════════════════
+SCENARIO 3: MARCHÉ LATÉRAL (SIDEWAYS) - 5 bougies
+═════════════════════════════════════════════════════════════════════════════════
+
+Prix
+  ↑
+1.1685 ┤            ╭──────╮                    📊 Bougie 4 (51%)
+       │            │      │
+1.1680 ┤    ╭───────╯      ╰────────╮          📊 Bougie 3 (60%)
+       │    │                       │
+1.1675 ┤━━━━┿━━━━━━━━━━━━━━━━━━━━━━━┿━━━━━━━━━━ Prix actuel (Équilibre)
+       │    │                       │
+1.1670 ┤    ╰──────╮        ╭───────╯          📊 Bougie 2 (72%)
+       │           │        │
+1.1665 ┤           ╰────────╯                  📊 Bougie 1 (85%)
+       │
+       │  📊 Bougie 5 (43%)
+       │
+       │  [Zone de prédiction - oscillations]
+       │
+       └────┼───────┼───────┼───────┼───────┼───────┼──→ Temps
+
+Caractéristiques marché latéral:
+- Pas de flèches directionnelles claires
+- Bougies alternent vert/rouge
+- Trajectoire horizontale ondulante
+- Confiance plus faible (marché incertain)
+
+═════════════════════════════════════════════════════════════════════════════════
+DÉTAILS DES ÉLÉMENTS VISUELS
+═════════════════════════════════════════════════════════════════════════════════
+
+1. BOUGIES PRÉDITES
+   ┌─────────────────────────────────────────────┐
+   │  ╔═══╗  ← Mèche haute (high)                │
+   │  ║   ║                                       │
+   │  ║ █ ║  ← Corps (open → close)              │
+   │  ║   ║     Vert si close > open             │
+   │  ╚═══╝     Rouge si close < open            │
+   │    │                                         │
+   │    └──── Mèche basse (low)                  │
+   │                                              │
+   │  85%  ← Label confiance (au-dessus)         │
+   └─────────────────────────────────────────────┘
+
+2. TRAJECTOIRE
+   Point A ──────▲──────→ Point B
+           │     │        (Segment jaune épaisseur 2)
+           │     └─ Flèche direction (▲ ou ▼)
+           └─ Ligne continue
+
+3. ZONE DE PRÉDICTION
+   ╔════════════════════════════════════╗
+   ║                                    ║  ← Rectangle transparent
+   ║  ⚡ ZONE PRÉDICTION ML (label)    ║     Couleur: gris foncé
+   ║                                    ║     Alpha: 230 (très transparent)
+   ║  [Bougies + Trajectoire ici]      ║
+   ║                                    ║
+   ╚════════════════════════════════════╝
+
+4. POINTS CLÉS
+   🎯 Target    = Cible finale (dernier point)
+   🔄 Pivot     = Retournement de tendance
+   📍 Support   = Niveau bas probable
+   📍 Résistance= Niveau haut probable
+
+5. LABELS DE CONFIANCE
+   85%  72%  60%  51%  43%  36%  30%
+   ▲    ▲    ▲    ▲    ▲    ▲    ▲
+   │    │    │    │    │    │    └─ Bougie 7 (faible confiance)
+   │    │    │    │    │    └────── Bougie 6
+   │    │    │    │    └─────────── Bougie 5 (moyenne)
+   │    │    │    └──────────────── Bougie 4
+   │    │    └───────────────────── Bougie 3 (bonne)
+   │    └────────────────────────── Bougie 2 (très bonne)
+   └─────────────────────────────── Bougie 1 (excellente)
+
+   Formule: Confiance = 85% × (0.85 ^ index)
+
+═════════════════════════════════════════════════════════════════════════════════
+COULEURS ET TRANSPARENCE
+═════════════════════════════════════════════════════════════════════════════════
+
+Zone de prédiction:
+  Couleur: clrDarkSlateGray (gris foncé)
+  Alpha:   230 (très transparent, on voit à travers)
+
+Bougies haussières:
+  Couleur: clrLimeGreen (vert citron)
+  Alpha:   180 × (confidence/100) = plus transparent si moins confiant
+
+Bougies baissières:
+  Couleur: clrCrimson (rouge profond)
+  Alpha:   180 × (confidence/100)
+
+Trajectoire:
+  Couleur: clrYellow (jaune vif)
+  Épaisseur: 2 pixels
+  Style: Ligne continue
+
+Flèches:
+  Couleur: clrYellow (même que trajectoire)
+  Codes: 233 (▲) pour UP, 234 (▼) pour DOWN
+  Taille: 2
+
+Labels:
+  Confiance: clrGray (gris) - Police 7pt
+  Target/Pivot: clrYellow - Police 8pt
+
+═════════════════════════════════════════════════════════════════════════════════
+EXEMPLE COMPLET SUR GRAPHIQUE MT5 RÉEL
+═════════════════════════════════════════════════════════════════════════════════
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ MT5 - EURUSD M5                                          [X] Fermer          │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ Fichier  Affichage  Insertion  Graphiques  Outils                          │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  Prix                            ⚡ ZONE PRÉDICTION ML                      │
+│    ↑                          ╔══════════════════════════╗                 │
+│ 1.0920┤                       ║                      🎯  ║                 │
+│       │                       ║                     ╱│   ║                 │
+│ 1.0910┤                       ║              📊    ╱     ║ 43%            │
+│       │                       ║              ▲   ╱       ║                 │
+│ 1.0900┤                       ║        📊      ╱         ║ 51%            │
+│       │                       ║        ▲     ╱           ║                 │
+│ 1.0890┤                       ║  📊        ╱             ║ 60%            │
+│       │                       ║  ▲       ╱               ║                 │
+│ 1.0880┤                       ║📊      ╱                 ║ 72%            │
+│       │                       ║▲     ╱                   ║                 │
+│ 1.0870┤━━━━━━━━━━━━━━━━━━━━━━━╫━━━━╱━━━━━━━━━━━━━━━━━━━━╫━━ Prix actuel  │
+│       │                       ║  ╱                       ║                 │
+│ 1.0860┤                       ║ ╱    [Bougies passées]  ║                 │
+│       │    [Zone historique]  ║╱                         ║                 │
+│ 1.0850┤    Bougies réelles    ╚══════════════════════════╝                 │
+│       │                                                                     │
+│       └────┴────┴────┴────┴────┴────┴────┴────┴────┴────┴────┴─→ Temps   │
+│         12:00  12:05  12:10  12:15  12:20  12:25  12:30  12:35           │
+│                            ▲                                                │
+│                         Maintenant                                          │
+│                                                                             │
+│  Dashboard Capital (coin sup. droit):                                      │
+│  ┌───────────────────────┐                                                 │
+│  │ ═══ CAPITAL MGMT ═══  │                                                 │
+│  │ Balance: 1024.50 USD  │                                                 │
+│  │ P&L: +24.50 (+2.4%)   │                                                 │
+│  │ STATUS: ACTIF         │                                                 │
+│  └───────────────────────┘                                                 │
+│                                                                             │
+│  [Terminal - Experts]                                                      │
+│  13:45:00  ✅ Zone prédiction affichée: 5 bougies futures                 │
+│  13:45:00  🔮 Tendance: UP (75.5%) - Confiance ML: 68.5%                  │
+│  13:45:00  🎯 Target prédit: 1.0920 dans 25 minutes                       │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+═════════════════════════════════════════════════════════════════════════════════
+
+✅ Tous les éléments sont dessinés avec les fonctions MQL5:
+   - ObjectCreate() pour bougies, trajectoires, zones
+   - ObjectSetInteger() pour couleurs, transparence
+   - ObjectSetString() pour labels
+   - ChartRedraw() pour rafraîchir
+
+✅ Mise à jour automatique toutes les 60 secondes
+
+✅ Pas d'impact sur les performances de trading
+
+═════════════════════════════════════════════════════════════════════════════════
