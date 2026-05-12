@@ -24,9 +24,11 @@ import contextlib
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Tuple, Set, Union
+
 from uuid import uuid4
 from dataclasses import dataclass, asdict
 from fastapi import FastAPI, HTTPException, Request, Body, status
+from fastapi.exceptions import RequestValidationError
 from starlette.requests import Request as StarletteRequest
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.wsgi import WSGIMiddleware
@@ -68,6 +70,15 @@ def _get_supabase_config(strict: bool = True) -> Tuple[str, str]:
 
 # Configurer le logger avant les imports d'améliorations
 logger = logging.getLogger("tradbot_ai")
+
+# Import du système de fallback Qwen pour trading rapide
+try:
+    from qwen_fallback_system import get_trading_signal_with_fallback
+    FALLBACK_AVAILABLE = True
+    logger.info("Système fallback Qwen disponible")
+except ImportError:
+    FALLBACK_AVAILABLE = False
+    logger.info("Système fallback Qwen non disponible")
 
 # Sur Render / Supabase, utiliser /tmp pour les modèles (accessible en écriture)
 if os.getenv("RENDER") or os.getenv("RENDER_SERVICE_ID") or os.getenv("SUPABASE_URL"):
@@ -208,6 +219,92 @@ FORMAT DE RÉPONSE OBLIGATOIRE:
 decision_cache = {}
 cache_timestamps = {}
 CACHE_DURATION = 30  # 30 secondes
+
+# Cache symbôle+timeframe pour decision_simplified (aligné optimisation TradBOT / latence répétée)
+simplified_tf_cache: Dict[str, Dict[str, Any]] = {}
+simplified_tf_cache_ts: Dict[str, float] = {}
+_OLLAMA_TAGS_PROBE_TS: float = 0.0
+_OLLAMA_TAGS_PROBE_OK: bool = False
+
+
+def decision_simplified_cache_key(request: "DecisionRequest") -> str:
+    """Clé stabilisée PERIOD_* → timeframe court (ex: M5) pour TTL partagés entre robots."""
+    sym = str(getattr(request, "symbol", "") or "UNKNOWN").strip().upper()
+    tf_raw = getattr(request, "timeframe", None) or ""
+    tf = str(tf_raw).strip()
+    if tf.upper().startswith("PERIOD_"):
+        tf = tf.split("PERIOD_", 1)[-1].strip()
+    if not tf:
+        tf = "_"
+    return f"{sym}|{tf}"
+
+
+def get_simplified_tf_cached_decision(request: "DecisionRequest") -> Optional["DecisionResponse"]:
+    if not _env_bool("ENABLE_SIMPLIFIED_DECISION_CACHE", True):
+        return None
+    ck = decision_simplified_cache_key(request)
+    ts = simplified_tf_cache_ts.get(ck, 0.0)
+    if ts <= 0 or (time.time() - ts) >= float(CACHE_DURATION):
+        simplified_tf_cache.pop(ck, None)
+        simplified_tf_cache_ts.pop(ck, None)
+        return None
+    payload = simplified_tf_cache.get(ck)
+    if not payload:
+        return None
+    try:
+        return DecisionResponse(**payload)
+    except Exception as e:
+        logger.debug(f"⚠️ Restauration cache simplified invalide ({ck}): {e}")
+        simplified_tf_cache.pop(ck, None)
+        simplified_tf_cache_ts.pop(ck, None)
+        return None
+
+
+def set_simplified_tf_cached_decision(request: "DecisionRequest", response: "DecisionResponse") -> None:
+    if not _env_bool("ENABLE_SIMPLIFIED_DECISION_CACHE", True):
+        return
+    ck = decision_simplified_cache_key(request)
+    try:
+        d = response.model_dump() if hasattr(response, "model_dump") else dict(response.dict())
+        d["predicted_prices"] = []
+        simplified_tf_cache[ck] = d
+        simplified_tf_cache_ts[ck] = time.time()
+    except Exception as e:
+        logger.debug(f"Mise cache simplified ignorée ({ck}): {e}")
+
+
+def ollama_service_reachable(force: bool = False) -> bool:
+    """Sonde légère /api/tags pour /health — résultat memoïsé ~5s."""
+    global _OLLAMA_TAGS_PROBE_TS, _OLLAMA_TAGS_PROBE_OK
+    now = time.time()
+    if not force and (now - _OLLAMA_TAGS_PROBE_TS) < 5.0:
+        return _OLLAMA_TAGS_PROBE_OK
+    _OLLAMA_TAGS_PROBE_TS = now
+    try:
+        base = os.getenv("OLLAMA_TAGS_URL", "").strip()
+        if not base:
+            raw = os.getenv("OLLAMA_URL", "http://127.0.0.1:11434/api/generate").strip()
+            if "/api/generate" in raw:
+                base = raw.split("/api/generate", 1)[0].rstrip("/") + "/api/tags"
+            elif raw.endswith("/api/tags"):
+                base = raw
+            else:
+                base = raw.rstrip("/") + "/api/tags" if "://" in raw else "http://127.0.0.1:11434/api/tags"
+        r = requests.get(base, timeout=3)
+        _OLLAMA_TAGS_PROBE_OK = r.status_code == 200
+        return _OLLAMA_TAGS_PROBE_OK
+    except Exception:
+        _OLLAMA_TAGS_PROBE_OK = False
+        return False
+
+# Rotation Qwen multi-symboles (anti-saturation)
+# - 1 symbole par slot (par défaut 5 min)
+# - revisit mini par symbole (par défaut 15 min)
+QWEN_ROTATION_ENABLED = True
+QWEN_ROTATION_STEP_SECONDS = 300
+QWEN_SYMBOL_REVISIT_SECONDS = 900
+qwen_symbol_ring: List[str] = []
+qwen_symbol_last_run: Dict[str, float] = {}
 
 # Importer les fonctions améliorées
 try:
@@ -2319,6 +2416,20 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+@app.exception_handler(RequestValidationError)
+async def _log_validation_errors(request: Request, exc: RequestValidationError):
+    """Journalise le détail des 422 (souvent corps vide ou JSON mal formé sur /analyze/ollama)."""
+    path = request.url.path or ""
+    if "analyze/ollama" in path:
+        logger.warning(
+            "422 RequestValidationError sur %s — %s",
+            path,
+            exc.errors(),
+        )
+    return JSONResponse(status_code=422, content={"detail": exc.errors()})
+
+
 # =============================================================================
 # Decision Engine 360 (intégration de ai_serverbis.py)
 # - Expose un WebSocket FastAPI: /ws360
@@ -2736,7 +2847,7 @@ async def get_db_pool():
                 dsn=dsn,
                 min_size=1,
                 max_size=5,
-                command_timeout=30,  # Timeout réduit à 30s
+                command_timeout=15,  # Timeout réduit à 30s
                 server_settings={
                     'application_name': 'tradbot_ai_server'
                 }
@@ -3188,14 +3299,14 @@ async def train_models_background():
                         continue
                     df = await asyncio.wait_for(
                         ml_trainer.fetch_training_data_simple(symbol, timeframe),
-                        timeout=30.0
+                        timeout=15.0
                     )
                     if df is None or len(df) < ml_trainer.min_samples_for_retraining:
                         logger.debug(f"Données insuffisantes pour {model_key}")
                         continue
                     train_result = await asyncio.wait_for(
                         asyncio.to_thread(ml_trainer.train_model_simple, df, symbol, timeframe),
-                        timeout=60.0
+                        timeout=15.0
                     )
                     if train_result:
                         logger.info(f"✅ Modèle entraîné avec succès pour {model_key}")
@@ -4567,8 +4678,18 @@ def update_spike_state_from_request(req: "DecisionRequest") -> None:
         logger.warning("Erreur update_spike_state_from_request: %s", e)
 
 # Modèles Pydantic pour les requêtes/réponses
+class RecentCandle(BaseModel):
+    """Bougie OHLC compacte (o,h,l,c) — séries envoyées par MT5 pour le contexte Qwen."""
+
+    o: float
+    h: float
+    l: float
+    c: float
+
+
 class DecisionRequest(BaseModel):
     symbol: Optional[str] = "UNKNOWN"
+    timeframe: Optional[str] = None  # ex. PERIOD_M5 ou M5 (cache décision simplifiée)
     bid: Optional[float] = None
     ask: Optional[float] = None
     rsi: Optional[float] = 50.0  # Valeur neutre par défaut
@@ -4598,6 +4719,20 @@ class DecisionRequest(BaseModel):
     m5_downtrend_line: Optional[float] = None
     m5_buy_entry_point: Optional[float] = None
     m5_sell_entry_point: Optional[float] = None
+    m1_buy_entry_point: Optional[float] = None
+    m1_sell_entry_point: Optional[float] = None
+    m15_buy_entry_point: Optional[float] = None
+    m15_sell_entry_point: Optional[float] = None
+    m30_buy_entry_point: Optional[float] = None
+    m30_sell_entry_point: Optional[float] = None
+    h1_buy_entry_point: Optional[float] = None
+    h1_sell_entry_point: Optional[float] = None
+    h4_buy_entry_point: Optional[float] = None
+    h4_sell_entry_point: Optional[float] = None
+    d1_buy_entry_point: Optional[float] = None
+    d1_sell_entry_point: Optional[float] = None
+    w1_buy_entry_point: Optional[float] = None
+    w1_sell_entry_point: Optional[float] = None
     m5_pure_red_line: Optional[float] = None
     chart_levels: Optional[Dict[str, Any]] = None
     chart_pattern_name: Optional[str] = None
@@ -4614,6 +4749,8 @@ class DecisionRequest(BaseModel):
     # Confluence finale (envoyés par MT5) : MACD histogramme M1, biais Ichimoku H1 (-1/0/1)
     macd_histogram: Optional[float] = None
     ichimoku_bias: Optional[int] = 0
+    # Dernières bougies OHLC (ex. 20) même TF que la requête — ordre chronologique, plus récent en dernier
+    recent_candles: Optional[List[RecentCandle]] = None
 
 # ===== MODÈLES POUR FEEDBACK LOOP =====
 class TradeFeedback(BaseModel):
@@ -4655,6 +4792,94 @@ class DecisionResponse(BaseModel):
     metadata: Dict[str, Any] = Field(default_factory=dict)
     gemma_analysis: Optional[str] = None  # Analyse complète Gemma+Gemini
     metadata: Optional[Dict[str, Any]] = None  # Métadonnées enrichies (RSI, EMA, ATR, etc.)
+
+
+# === MODÈLES OLLAMA LOCAL (Analyse approfondie par LLM local) ===
+class OllamaAnalysisRequest(BaseModel):
+    """Requête pour analyse approfondie via Ollama local"""
+    class Config:
+        # Le robot / scripts peuvent envoyer des champs supplémentaires : évite 422 injustifié.
+        extra = "ignore"
+
+    symbol: str
+    timeframe: str = "M1"
+    bid: Optional[float] = None
+    ask: Optional[float] = None
+    rsi: Optional[float] = 50.0
+    ema_fast_m1: Optional[float] = None
+    ema_slow_m1: Optional[float] = None
+    ema_fast_m5: Optional[float] = None
+    ema_slow_m5: Optional[float] = None
+    ema_fast_h1: Optional[float] = None
+    ema_slow_h1: Optional[float] = None
+    atr: Optional[float] = 0.0
+    m1_buy_entry: Optional[float] = None
+    m1_sell_entry: Optional[float] = None
+    m5_buy_entry: Optional[float] = None
+    m5_sell_entry: Optional[float] = None
+    m15_buy_entry: Optional[float] = None
+    m15_sell_entry: Optional[float] = None
+    h1_buy_entry: Optional[float] = None
+    h1_sell_entry: Optional[float] = None
+    volume_spike: Optional[bool] = False
+    price_acceleration: Optional[float] = 0.0
+    spike_probability: Optional[float] = 0.0
+    spike_direction: Optional[int] = 0  # +1 BUY, -1 SELL, 0 NONE
+    macd_histogram: Optional[float] = None
+    ichimoku_bias: Optional[int] = 0
+    timestamp: Optional[str] = None
+    recent_candles: Optional[List[RecentCandle]] = None
+
+
+class OllamaAnalysisResponse(BaseModel):
+    """Réponse d'analyse approfondie Ollama"""
+    symbol: str
+    timeframe: str
+    analysis: str  # Analyse textuelle complète
+    summary: str  # Résumé court (1-2 lignes)
+    sentiment: str  # "BULLISH", "BEARISH", "NEUTRAL"
+    confidence: float  # 0.0-1.0
+    recommendation: str  # "BUY", "SELL", "HOLD"
+    key_levels: Dict[str, Optional[float]]  # support, resistance, entry_buy, entry_sell
+    risk_reward: Optional[float] = None
+    reasoning: str  # Raison de la recommandation
+    timestamp: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
+    model_used: str = "ollama"
+    latency_ms: Optional[float] = None
+
+
+# ========= Endpoint IA léger pour le script GOM (interprétation temps réel) =========
+class GOMInterpretRequest(BaseModel):
+    symbol: str = "UNKNOWN"
+    bid: Optional[float] = None
+    ask: Optional[float] = None
+    atr_m15: Optional[float] = None
+    rsi_m1: Optional[float] = 50.0
+    ema9_m1: Optional[float] = None
+    ema21_m1: Optional[float] = None
+    ema9_m5: Optional[float] = None
+    ema21_m5: Optional[float] = None
+    verdict_num: Optional[float] = 0.0
+    spike_prob: Optional[float] = 0.0
+    spike_dir_num: Optional[int] = 0  # +1 BUY, -1 SELL, 0 NONE
+    m5_buy: Optional[float] = None
+    m5_sell: Optional[float] = None
+    m15_buy: Optional[float] = None
+    m15_sell: Optional[float] = None
+    sido_dtop: Optional[float] = None
+    sido_dbot: Optional[float] = None
+
+
+class GOMInterpretResponse(BaseModel):
+    action: str  # "buy" | "sell" | "hold"
+    confidence: float  # 0..1
+    reason: str
+    timestamp: str
+    # Compatibilité scripts / anciens payloads (claude optimiz — champs doubles)
+    ai_status: int = 1
+    ai_confidence: float = 0.0
+    ai_decision: str = "HOLD"
+    ai_reasoning: str = ""
 
 
 class SpikeStatus(BaseModel):
@@ -5147,6 +5372,11 @@ async def decision_simplified(request: DecisionRequest):
     global decision_count
     decision_count += 1
     
+    cached_pre = get_simplified_tf_cached_decision(request)
+    if cached_pre is not None:
+        logger.debug(f"⚡ CACHE decision_simplified HIT [{decision_simplified_cache_key(request)}]")
+        return cached_pre
+    
     logger.info(f"🎯 MODE SIMPLIFIÉ + ML - Requête décision pour {request.symbol}")
     try:
         update_spike_state_from_request(request)
@@ -5450,18 +5680,242 @@ async def decision_simplified(request: DecisionRequest):
         confidence = max(0.45, min(confidence, funnel_conf))
         reason += " [Funnel MTF: désaccord final -> HOLD]"
     
+    # 8c. Fusion décision technique + Qwen local (Ollama).
+    # Objectif: associer la décision du script (entry points / niveaux) avec l'analyse Qwen.
+    qwen_meta: Dict[str, Any] = {}
+    stop_loss = None
+    take_profit = None
+    qwen_sched_note = "QWEN=OFF"
+    if _env_bool("ENABLE_QWEN_DECISION_BLEND", True):
+        try:
+            # Charger la config runtime (permet override via .env sans redéployer)
+            global QWEN_ROTATION_ENABLED, QWEN_ROTATION_STEP_SECONDS, QWEN_SYMBOL_REVISIT_SECONDS
+            QWEN_ROTATION_ENABLED = _env_bool("QWEN_ROTATION_ENABLED", True)
+            try:
+                QWEN_ROTATION_STEP_SECONDS = max(60, int(os.getenv("QWEN_ROTATION_STEP_SECONDS", "300")))
+            except Exception:
+                QWEN_ROTATION_STEP_SECONDS = 300
+            try:
+                QWEN_SYMBOL_REVISIT_SECONDS = max(120, int(os.getenv("QWEN_SYMBOL_REVISIT_SECONDS", "900")))
+            except Exception:
+                QWEN_SYMBOL_REVISIT_SECONDS = 900
+
+            # Scheduler Qwen: un symbole par slot, revisit mini par symbole
+            sym_key = str(request.symbol or "").strip().upper()
+            now_ts = time.time()
+            can_run_qwen = True
+            sched_reason = "ok"
+            slot_symbol = sym_key
+            wait_seconds = 0
+
+            if QWEN_ROTATION_ENABLED:
+                if not sym_key or sym_key == "UNKNOWN":
+                    can_run_qwen = False
+                    sched_reason = "unknown_symbol"
+                else:
+                    if sym_key not in qwen_symbol_ring:
+                        qwen_symbol_ring.append(sym_key)
+                    ring_len = len(qwen_symbol_ring)
+                    if ring_len <= 0:
+                        can_run_qwen = False
+                        sched_reason = "ring_empty"
+                    else:
+                        slot_idx = int(now_ts // QWEN_ROTATION_STEP_SECONDS) % ring_len
+                        slot_symbol = qwen_symbol_ring[slot_idx]
+                        if sym_key != slot_symbol:
+                            can_run_qwen = False
+                            sched_reason = "slot_mismatch"
+                            wait_seconds = int(QWEN_ROTATION_STEP_SECONDS - (now_ts % QWEN_ROTATION_STEP_SECONDS))
+                        else:
+                            last_run = qwen_symbol_last_run.get(sym_key, 0.0)
+                            age = now_ts - last_run if last_run > 0 else 1e9
+                            if age < QWEN_SYMBOL_REVISIT_SECONDS:
+                                can_run_qwen = False
+                                sched_reason = "revisit_window"
+                                wait_seconds = int(QWEN_SYMBOL_REVISIT_SECONDS - age)
+
+            # Exception opportunité forte: autoriser Qwen même hors slot.
+            # Cas visé: marché en mouvement, prix proche des entries script + momentum exploitable.
+            def _near_level(price: Optional[float], lvl: Optional[float], atr_v: Optional[float]) -> bool:
+                try:
+                    if price is None or lvl is None or atr_v is None:
+                        return False
+                    p = float(price); l = float(lvl); a = float(atr_v)
+                    if p <= 0 or l <= 0 or a <= 0:
+                        return False
+                    return abs(p - l) <= a * 0.45
+                except Exception:
+                    return False
+
+            is_strong_opportunity = False
+            try:
+                bid_v = float(request.bid or 0.0)
+                atr_v = float(request.atr or 0.0)
+                rsi_v = float(request.rsi or 50.0)
+                near_buy = (
+                    _near_level(bid_v, request.m5_buy_entry_point, atr_v) or
+                    _near_level(bid_v, request.m15_buy_entry_point, atr_v)
+                )
+                near_sell = (
+                    _near_level(bid_v, request.m5_sell_entry_point, atr_v) or
+                    _near_level(bid_v, request.m15_sell_entry_point, atr_v)
+                )
+                momentum_extreme = (rsi_v <= 42.0 or rsi_v >= 58.0)
+                is_strong_opportunity = (momentum_extreme and (near_buy or near_sell))
+            except Exception:
+                is_strong_opportunity = False
+
+            if (not can_run_qwen) and is_strong_opportunity:
+                can_run_qwen = True
+                sched_reason = "opportunity_override"
+                logger.info("🧠 Qwen scheduler override %s (opportunité forte)", sym_key or "UNKNOWN")
+
+            if not can_run_qwen:
+                qwen_sched_note = "QWEN=SKIP|" + sched_reason + "|w=" + str(max(0, wait_seconds)) + "s"
+                qwen_meta = {
+                    "enabled": True,
+                    "status": "scheduled_skip",
+                    "reason": sched_reason,
+                    "symbol": sym_key,
+                    "slot_symbol": slot_symbol,
+                    "wait_seconds": max(0, wait_seconds),
+                    "ring_size": len(qwen_symbol_ring),
+                    "rotation_step_seconds": QWEN_ROTATION_STEP_SECONDS,
+                    "revisit_seconds": QWEN_SYMBOL_REVISIT_SECONDS,
+                }
+                logger.info(
+                    "🧠 Qwen scheduler skip %s reason=%s slot=%s wait=%ss ring=%d",
+                    sym_key or "UNKNOWN", sched_reason, slot_symbol, max(0, wait_seconds), len(qwen_symbol_ring)
+                )
+            else:
+                qwen_sched_note = "QWEN=RUN|" + (slot_symbol if slot_symbol else sym_key)
+                logger.info(
+                    "🧠 Qwen scheduler run %s slot=%s ring=%d",
+                    sym_key, slot_symbol, len(qwen_symbol_ring)
+                )
+
+            tf_label = str(getattr(request, "timeframe", None) or "M5")
+            if can_run_qwen:
+                oreq = OllamaAnalysisRequest(
+                    symbol=str(request.symbol or "UNKNOWN"),
+                    timeframe=tf_label,
+                    bid=request.bid,
+                    ask=request.ask,
+                    rsi=request.rsi,
+                    ema_fast_m1=request.ema_fast_m1,
+                    ema_slow_m1=request.ema_slow_m1,
+                    ema_fast_m5=request.ema_fast_m5,
+                    ema_slow_m5=request.ema_slow_m5,
+                    ema_fast_h1=request.ema_fast_h1,
+                    ema_slow_h1=request.ema_slow_h1,
+                    atr=request.atr,
+                    m1_buy_entry=request.m1_buy_entry_point,
+                    m1_sell_entry=request.m1_sell_entry_point,
+                    m5_buy_entry=request.m5_buy_entry_point,
+                    m5_sell_entry=request.m5_sell_entry_point,
+                    m15_buy_entry=request.m15_buy_entry_point,
+                    m15_sell_entry=request.m15_sell_entry_point,
+                    h1_buy_entry=request.h1_buy_entry_point,
+                    h1_sell_entry=request.h1_sell_entry_point,
+                    macd_histogram=request.macd_histogram,
+                    ichimoku_bias=request.ichimoku_bias,
+                    timestamp=request.timestamp,
+                    recent_candles=request.recent_candles,
+                )
+                q_model = os.getenv("OLLAMA_MODEL", "qwen3.5:4b")
+                q_timeout = int(os.getenv("QWEN_DECISION_TIMEOUT_SECONDS", "8"))
+                q_prompt = _build_ollama_prompt(oreq)
+                q_raw = _call_ollama_local(q_prompt, model=q_model, timeout=q_timeout)
+                if q_raw:
+                    q_parsed = _parse_ollama_json(q_raw)
+                    q_rec = str(q_parsed.get("recommendation", "HOLD") or "HOLD").strip().upper()
+                    q_conf = float(q_parsed.get("confidence", 0.5) or 0.5)
+                    if q_conf > 1.0:
+                        q_conf = q_conf / 100.0
+                    q_conf = max(0.0, min(1.0, q_conf))
+                    q_reason = str(q_parsed.get("reasoning", "") or "").strip()
+                    q_levels = q_parsed.get("key_levels", {}) if isinstance(q_parsed.get("key_levels", {}), dict) else {}
+
+                    q_action = "hold"
+                    if q_rec == "BUY":
+                        q_action = "buy"
+                    elif q_rec == "SELL":
+                        q_action = "sell"
+                    logger.info("🧠 Qwen blend %s: rec=%s conf=%.2f", request.symbol, q_rec, q_conf)
+
+                    # Règles de fusion:
+                    # - alignement => renfort confiance
+                    # - désaccord BUY/SELL => HOLD de sécurité
+                    if q_action == action and q_action in ("buy", "sell"):
+                        confidence = min(0.98, max(confidence, q_conf))
+                        reason += f" [Qwen aligné {q_action.upper()} {int(q_conf*100)}%]"
+                    elif action == "hold" and q_action in ("buy", "sell") and q_conf >= 0.62:
+                        action = q_action
+                        confidence = max(confidence, q_conf * 0.95)
+                        reason += f" [Qwen a déclenché {q_action.upper()}]"
+                    elif action in ("buy", "sell") and q_action in ("buy", "sell") and q_action != action:
+                        action = "hold"
+                        confidence = max(0.45, min(confidence, q_conf))
+                        reason += " [Conflit technique/Qwen -> HOLD]"
+
+                    # Utiliser les niveaux Qwen si présents pour améliorer SL/TP
+                    try:
+                        q_sl = float(q_levels.get("stop_loss")) if q_levels.get("stop_loss") is not None else None
+                    except Exception:
+                        q_sl = None
+                    try:
+                        q_tp = float(q_levels.get("take_profit_1")) if q_levels.get("take_profit_1") is not None else None
+                    except Exception:
+                        q_tp = None
+
+                    if action == "buy":
+                        if q_sl is not None and q_sl > 0:
+                            stop_loss = q_sl
+                        if q_tp is not None and q_tp > 0:
+                            take_profit = q_tp
+                    elif action == "sell":
+                        if q_sl is not None and q_sl > 0:
+                            stop_loss = q_sl
+                        if q_tp is not None and q_tp > 0:
+                            take_profit = q_tp
+
+                    qwen_symbol_last_run[sym_key] = now_ts
+                    qwen_meta = {
+                        "enabled": True,
+                        "model": q_model,
+                        "recommendation": q_rec,
+                        "action": q_action,
+                        "confidence": q_conf,
+                        "reasoning": q_reason,
+                        "key_levels": q_levels,
+                        "scheduler": {
+                            "slot_symbol": slot_symbol,
+                            "ring_size": len(qwen_symbol_ring),
+                            "rotation_step_seconds": QWEN_ROTATION_STEP_SECONDS,
+                            "revisit_seconds": QWEN_SYMBOL_REVISIT_SECONDS,
+                        },
+                    }
+                else:
+                    qwen_sched_note = "QWEN=NORESP"
+                    qwen_meta = {"enabled": True, "model": q_model, "status": "no_response"}
+        except Exception as e:
+            logger.warning("Qwen blend error: %s", e)
+            qwen_sched_note = "QWEN=ERR"
+            qwen_meta = {"enabled": True, "status": "error", "error": str(e)}
+    else:
+        qwen_meta = {"enabled": False}
+    reason += " [" + qwen_sched_note + "]"
+
     # 9. Confiance pour MT5: envoyer décimale 0-1 (l'EA attend 0-1 et affiche *100)
     confidence_percentage = confidence
     
-    # 10. Calcul SL/TP
-    stop_loss = None
-    take_profit = None
+    # 10. Calcul SL/TP (si non déjà définis par la fusion Qwen)
     
-    if action == "buy" and request.bid:
+    if action == "buy" and request.bid and stop_loss is None and take_profit is None:
         atr = request.atr if request.atr and request.atr > 0 else 0.0020
         stop_loss = request.bid - atr * 2
         take_profit = request.bid + atr * 3
-    elif action == "sell" and request.ask:
+    elif action == "sell" and request.ask and stop_loss is None and take_profit is None:
         atr = request.atr if request.atr and request.atr > 0 else 0.0020
         stop_loss = request.ask + atr * 2
         take_profit = request.ask - atr * 3
@@ -5539,6 +5993,7 @@ async def decision_simplified(request: DecisionRequest):
         "stair_client_event_id": stair_client_eid,
         "chart_pattern_model": chart_pattern_signal,
         "funnel_mtf": funnel,
+        "qwen_blend": qwen_meta,
         "final_decision": {"action": action, "confidence": confidence_percentage},
     }
     if confluence_detail:
@@ -5550,12 +6005,14 @@ async def decision_simplified(request: DecisionRequest):
         stop_loss=stop_loss,
         take_profit=take_profit,
         timestamp=datetime.now().isoformat(),
-        model_used="technical_ml_enhanced",
+        model_used="technical_ml_qwen_blend",
         predicted_prices=predicted_prices,
         alignment=alignment,
         coherence=coherence,
         metadata=meta_out
     )
+    
+    set_simplified_tf_cached_decision(request, response)
     
     # 11. Sauvegarder la décision dans Supabase (local OU cloud) si les clés sont disponibles
     try:
@@ -5829,6 +6286,10 @@ async def root():
 @app.get("/health")
 async def health_check():
     """Endpoint de santé pour Render et monitoring"""
+    try:
+        ollama_ok = ollama_service_reachable()
+    except Exception:
+        ollama_ok = False
     return {
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
@@ -5836,7 +6297,10 @@ async def health_check():
         "version": "2.0.1",
         "mt5_available": MT5_AVAILABLE,
         "ml_trainer_available": ML_TRAINER_AVAILABLE,
-        "ml_recommendation_available": ML_RECOMMENDATION_AVAILABLE
+        "ml_recommendation_available": ML_RECOMMENDATION_AVAILABLE,
+        "ollama_available": bool(ollama_ok),
+        "simplified_tf_cache_entries": len(simplified_tf_cache),
+        "CACHE_DURATION_SECONDS": CACHE_DURATION,
     }
 
 @app.post("/ml/start")
@@ -7725,10 +8189,43 @@ async def decision_gemma(request: DecisionRequest):
 
 def _parse_decision_body(raw: bytes) -> DecisionRequest:
     """Parse le body JSON de manière tolérante pour éviter 422 (robot MT5 payloads variables)."""
+    raw_text = ""
     try:
-        body = json.loads(raw.decode("utf-8") if isinstance(raw, bytes) else raw)
+        raw_text = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else str(raw)
     except Exception:
+        raw_text = ""
+
+    # Nettoyage robuste pour payloads MT5:
+    # - retire NUL bytes
+    # - garde uniquement le bloc JSON principal {...}
+    # - remplace NaN/Inf non-JSON par null
+    cleaned = raw_text.replace("\x00", "").strip()
+    lb = cleaned.find("{")
+    rb = cleaned.rfind("}")
+    if lb >= 0 and rb > lb:
+        cleaned = cleaned[lb:rb + 1]
+    cleaned = re.sub(r'(?<![A-Za-z0-9_])(?:nan|NaN|NAN|inf|Inf|INF|-inf|-Inf|-INF)(?![A-Za-z0-9_])', "null", cleaned)
+
+    try:
+        body = json.loads(cleaned) if cleaned else {}
+    except Exception:
+        # Fallback minimal: extraire au moins symbol/bid/ask/rsi par regex si JSON imparfait
         body = {}
+        try:
+            m_sym = re.search(r'"symbol"\s*:\s*"([^"]+)"', cleaned)
+            m_bid = re.search(r'"bid"\s*:\s*([-+]?\d*\.?\d+)', cleaned)
+            m_ask = re.search(r'"ask"\s*:\s*([-+]?\d*\.?\d+)', cleaned)
+            m_rsi = re.search(r'"rsi"\s*:\s*([-+]?\d*\.?\d+)', cleaned)
+            if m_sym:
+                body["symbol"] = m_sym.group(1)
+            if m_bid:
+                body["bid"] = m_bid.group(1)
+            if m_ask:
+                body["ask"] = m_ask.group(1)
+            if m_rsi:
+                body["rsi"] = m_rsi.group(1)
+        except Exception:
+            body = {}
     if not isinstance(body, dict):
         body = {}
     # Extraire avec coercions et valeurs par défaut
@@ -7745,7 +8242,9 @@ def _parse_decision_body(raw: bytes) -> DecisionRequest:
     if bid >= ask:
         ask = bid + 0.0001
     return DecisionRequest(
-        symbol=symbol, bid=bid, ask=ask,
+        symbol=symbol,
+        timeframe=body.get("timeframe"),
+        bid=bid, ask=ask,
         rsi=min(100, max(0, _float(body.get("rsi"), 50.0))),
         ema_fast_h1=body.get("ema_fast_h1"), ema_slow_h1=body.get("ema_slow_h1"),
         ema_fast_m1=body.get("ema_fast_m1"), ema_slow_m1=body.get("ema_slow_m1"),
@@ -7764,6 +8263,20 @@ def _parse_decision_body(raw: bytes) -> DecisionRequest:
         m5_downtrend_line=body.get("m5_downtrend_line"),
         m5_buy_entry_point=body.get("m5_buy_entry_point"),
         m5_sell_entry_point=body.get("m5_sell_entry_point"),
+        m1_buy_entry_point=body.get("m1_buy_entry_point"),
+        m1_sell_entry_point=body.get("m1_sell_entry_point"),
+        m15_buy_entry_point=body.get("m15_buy_entry_point"),
+        m15_sell_entry_point=body.get("m15_sell_entry_point"),
+        m30_buy_entry_point=body.get("m30_buy_entry_point"),
+        m30_sell_entry_point=body.get("m30_sell_entry_point"),
+        h1_buy_entry_point=body.get("h1_buy_entry_point"),
+        h1_sell_entry_point=body.get("h1_sell_entry_point"),
+        h4_buy_entry_point=body.get("h4_buy_entry_point"),
+        h4_sell_entry_point=body.get("h4_sell_entry_point"),
+        d1_buy_entry_point=body.get("d1_buy_entry_point"),
+        d1_sell_entry_point=body.get("d1_sell_entry_point"),
+        w1_buy_entry_point=body.get("w1_buy_entry_point"),
+        w1_sell_entry_point=body.get("w1_sell_entry_point"),
         m5_pure_red_line=body.get("m5_pure_red_line"),
         chart_levels=body.get("chart_levels"),
         chart_pattern_name=body.get("chart_pattern_name"),
@@ -7831,7 +8344,33 @@ async def decision(req: Request):
             except Exception:
                 d = dict(resp) if isinstance(resp, dict) else {"action": "hold"}
             act = str(d.get("action", "hold") or "hold").lower()
-            d["trade_allowed"] = (act != "hold")
+            au = act.upper()
+            if au == "LONG":
+                au = "BUY"
+            elif au == "SHORT":
+                au = "SELL"
+            if au not in ("BUY", "SELL", "HOLD"):
+                au = "HOLD"
+            d["decision"] = au
+            try:
+                bid_f = float(getattr(request, "bid") or 0.0)
+                ask_f = float(getattr(request, "ask") or 0.0)
+                mid = (bid_f + ask_f) / 2.0 if bid_f > 0 and ask_f > 0 else max(bid_f, ask_f)
+                if not d.get("entry_price"):
+                    if au == "BUY":
+                        d["entry_price"] = bid_f or mid
+                    elif au == "SELL":
+                        d["entry_price"] = ask_f or mid
+                    else:
+                        d["entry_price"] = mid or bid_f or ask_f
+            except Exception:
+                pass
+            try:
+                cf = float(d.get("confidence") or 0.0)
+                d["confidence"] = max(0.0, min(1.0, cf))
+            except Exception:
+                d["confidence"] = 0.5
+            d["trade_allowed"] = (au != "HOLD")
             d["source"] = "DECISION_UNIFIED_CLASSIC_SIMPLIFIED"
             return JSONResponse(d)
         
@@ -9980,6 +10519,143 @@ Format: Analyse claire et professionnelle en français.
             status_code=500,
             detail=str(e)
         )
+
+
+@app.post("/gom/interpret", response_model=GOMInterpretResponse)
+async def gom_interpret(req: Request):
+    """
+    Interprétation temps réel des indicateurs envoyés par le script GOM.
+    Réponse stable: BUY/SELL/HOLD + confidence + reason.
+    """
+    try:
+        try:
+            body = await req.json()
+            if not isinstance(body, dict):
+                body = {}
+        except Exception:
+            body = {}
+
+        def _f(v, d=0.0):
+            try:
+                if v is None:
+                    return d
+                s = str(v).strip().lower()
+                if s in ("nan", "inf", "-inf", ""):
+                    return d
+                return float(v)
+            except Exception:
+                return d
+
+        def _i(v, d=0):
+            try:
+                if v is None:
+                    return d
+                return int(float(v))
+            except Exception:
+                return d
+
+        bid = _f(body.get("bid"), 0.0)
+        atr = _f(body.get("atr_m15"), 0.0)
+        rsi = _f(body.get("rsi_m1"), 50.0)
+        spike_p = _f(body.get("spike_prob"), 0.0)
+        spike_dir = _i(body.get("spike_dir_num"), 0)
+        ver = _f(body.get("verdict_num"), 0.0)
+
+        buy_score = 0.0
+        sell_score = 0.0
+        reasons = []
+
+        if ver >= 2.5:
+            buy_score += 0.55; reasons.append("verdict PERFECT BUY")
+        elif ver >= 1.5:
+            buy_score += 0.40; reasons.append("verdict GOOD BUY")
+        elif ver > 0.5:
+            buy_score += 0.25; reasons.append("verdict BUY")
+        elif ver <= -2.5:
+            sell_score += 0.55; reasons.append("verdict PERFECT SELL")
+        elif ver <= -1.5:
+            sell_score += 0.40; reasons.append("verdict GOOD SELL")
+        elif ver < -0.5:
+            sell_score += 0.25; reasons.append("verdict SELL")
+
+        if rsi <= 35:
+            buy_score += 0.18; reasons.append(f"RSI M1 bas {rsi:.0f}")
+        elif rsi >= 65:
+            sell_score += 0.18; reasons.append(f"RSI M1 haut {rsi:.0f}")
+
+        def ema_bias(fast, slow):
+            if fast is None or slow is None:
+                return 0
+            try:
+                return 1 if float(fast) >= float(slow) else -1
+            except Exception:
+                return 0
+
+        b1 = ema_bias(body.get("ema9_m1"), body.get("ema21_m1"))
+        b5 = ema_bias(body.get("ema9_m5"), body.get("ema21_m5"))
+        if b1 > 0:
+            buy_score += 0.12; reasons.append("EMA M1 up")
+        elif b1 < 0:
+            sell_score += 0.12; reasons.append("EMA M1 down")
+        if b5 > 0:
+            buy_score += 0.14; reasons.append("EMA M5 up")
+        elif b5 < 0:
+            sell_score += 0.14; reasons.append("EMA M5 down")
+
+        if spike_p >= 0.62 and spike_dir in (1, -1):
+            if spike_dir == 1:
+                buy_score += 0.30 * min(1.0, spike_p); reasons.append(f"spike BUY {spike_p:.2f}")
+            else:
+                sell_score += 0.30 * min(1.0, spike_p); reasons.append(f"spike SELL {spike_p:.2f}")
+
+        if atr > 0.0 and bid > 0.0:
+            def near(level):
+                try:
+                    return level is not None and float(level) > 0 and abs(bid - float(level)) <= atr * 0.45
+                except Exception:
+                    return False
+
+            if near(body.get("m5_buy")):
+                buy_score += 0.10; reasons.append("near M5 buy")
+            if near(body.get("m15_buy")):
+                buy_score += 0.06; reasons.append("near M15 buy")
+            if near(body.get("m5_sell")):
+                sell_score += 0.10; reasons.append("near M5 sell")
+            if near(body.get("m15_sell")):
+                sell_score += 0.06; reasons.append("near M15 sell")
+
+        gap = buy_score - sell_score
+        action = "hold"
+        if gap >= 0.18:
+            action = "buy"
+        elif gap <= -0.18:
+            action = "sell"
+
+        # Même règle que le robot MT5 : pas de signal directionnel sans verdict final GOOD/PERFECT (|verdict_num| ≥ 2).
+        if action != "hold" and abs(ver) < 2.0:
+            reasons.insert(0, "bloqué: verdict final requiert GOOD ou PERFECT (|verdict_num| ≥ 2)")
+            action = "hold"
+            gap = 0.0
+
+        conf = min(0.99, max(0.50, 0.50 + abs(gap)))
+        if action == "hold":
+            conf = min(conf, 0.70)
+
+        reason = "; ".join(reasons[:6]) if reasons else "neutral"
+        ai_decision = {"buy": "BUY", "sell": "SELL", "hold": "HOLD"}.get(action, "HOLD")
+        return GOMInterpretResponse(
+            action=action,
+            confidence=float(conf),
+            reason=reason,
+            timestamp=datetime.utcnow().isoformat() + "Z",
+            ai_status=1,
+            ai_confidence=float(conf),
+            ai_decision=ai_decision,
+            ai_reasoning=reason[:512],
+        )
+    except Exception as e:
+        logger.error("Erreur /gom/interpret: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
 async def handle_raw_analysis_request(raw_request: dict, symbol: Optional[str]) -> AnalysisResponse:
     """Gère les requêtes brutes (compatibilité MT5)"""
@@ -16288,8 +16964,15 @@ async def get_symbol_correction_patterns(symbol: str) -> list:
         logger.warning(f"Récupération patterns correction échouée pour {symbol}: {e}")
         return []
 
+# Flag pour désactiver Supabase si le quota est dépassé (Erreur 402)
+SUPABASE_DISABLED_BY_QUOTA = False
+
 async def update_prediction_with_feedback(feedback: dict) -> dict:
     """Met à jour une prédiction avec le feedback réel"""
+    global SUPABASE_DISABLED_BY_QUOTA
+    if SUPABASE_DISABLED_BY_QUOTA:
+        return {"prediction_id": feedback.get("prediction_id"), "updated": False, "reason": "supabase_disabled"}
+        
     try:
         supabase_url, supabase_key = _get_supabase_config(strict=True)
         headers = {
@@ -16337,6 +17020,12 @@ async def update_prediction_with_feedback(feedback: dict) -> dict:
                 headers=headers,
                 json=row,
             )
+        
+        if r.status_code == 402:
+            logger.warning("🚫 Quota Supabase dépassé (402). Désactivation des écritures DB.")
+            SUPABASE_DISABLED_BY_QUOTA = True
+            return {"prediction_id": feedback.get("prediction_id"), "updated": False, "reason": "quota_exceeded"}
+            
         if r.status_code >= 300:
             logger.warning(f"correction_summary_stats feedback insert HTTP {r.status_code}: {r.text[:180]}")
             return {"prediction_id": feedback.get("prediction_id"), "updated": False}
@@ -16347,6 +17036,293 @@ async def update_prediction_with_feedback(feedback: dict) -> dict:
         logger.warning(f"Feedback correction persist échoué: {e}")
         return {"prediction_id": feedback.get("prediction_id"), "updated": False, "error": str(e)}
 
+# =============================================================================
+# PONT OLLAMA LOCAL - Analyse approfondie par LLM local
+# =============================================================================
+
+def _call_ollama_local(prompt: str, model: str = "qwen3.5:4b", timeout: int = 30) -> Optional[str]:
+    """Appelle le modèle Ollama local optimisé pour trading rapide (< 30s) avec fallback"""
+    try:
+        ollama_url = os.getenv("OLLAMA_URL", "http://localhost:11434/api/generate")
+        payload = {
+            "model": model,
+            "prompt": prompt,
+            "stream": False,
+            "options": {
+                "temperature": 0.1,
+                "num_predict": 100,
+                "top_k": 5,
+                "top_p": 0.8,
+                "repeat_penalty": 1.05,
+                "num_ctx": 512,
+                "seed": 42,
+                "stop": ["\n\n", "###", "---"]
+            }
+        }
+        resp = requests.post(ollama_url, json=payload, timeout=timeout)
+        if resp.status_code == 200:
+            data = resp.json()
+            return data.get("response", "").strip()
+        else:
+            logger.warning(f"Ollama HTTP {resp.status_code}: {resp.text[:200]}")
+            return None
+    except Exception as e:
+        logger.warning(f"Erreur Ollama: {type(e).__name__}: {e}")
+        
+        # Essayer le système de fallback si disponible
+        if FALLBACK_AVAILABLE and "RSI=" in prompt and "MACD=" in prompt:
+            try:
+                # Extraire les indicateurs
+                import re
+                rsi_match = re.search(r'RSI=([\d.]+)', prompt)
+                macd_match = re.search(r'MACD=([\d.-]+)', prompt)
+                symbol_match = re.search(r'([A-Z]{6})', prompt)
+                
+                if rsi_match and macd_match and symbol_match:
+                    rsi = float(rsi_match.group(1))
+                    macd = float(macd_match.group(1))
+                    symbol = symbol_match.group(1)
+                    
+                    # Appel au système de fallback
+                    result = get_trading_signal_with_fallback(symbol, rsi, macd, 0.001)
+                    
+                    # Formater la réponse comme Qwen le ferait
+                    response = f"{symbol} {result['signal']} | Confidence: {result['confidence']}% | {result['reason']}"
+                    logger.info(f"Fallback Qwen utilisé: {response}")
+                    return response
+                    
+            except Exception as fallback_error:
+                logger.warning(f"Erreur fallback: {fallback_error}")
+        
+        return None
+
+def _build_ollama_prompt(req: OllamaAnalysisRequest) -> str:
+    """Construit le prompt pour Ollama avec le processus d'analyse GOM complet et méthodologie trader professionnel"""
+    lines = [
+        f"Tu es un trader professionnel avec 15+ ans d'expérience en analyse technique multi-timeframes. Tu dois appliquer la méthodologie complète du script GOM (KOLA + SIDO) pour analyser {req.symbol} sur {req.timeframe}.",
+        "",
+        "=== PROCESSUS D'ANALYSE GOM COMPLET ===",
+        "Étape 1: Analyse de structure de marché (KOLA Three Line Break)",
+        "Étape 2: Détection des niveaux de confluence par touches multiples",
+        "Étape 3: Identification des figures chartistes (SIDO)", 
+        "Étape 4: Calcul du score technique combiné (KOLA + SIDO + MTF bias)",
+        "Étape 5: Application des filtres de confirmation (Volume, Momentum, Structure, Volatilité)",
+        "Étape 6: Détermination du verdict final avec force et qualité",
+        "",
+        "=== DONNÉES DE MARCHÉ ===",
+        f"Symbole: {req.symbol}",
+        f"Timeframe: {req.timeframe}",
+        f"Prix actuel: Bid={req.bid:.5f} Ask={req.ask:.5f}" if req.bid and req.ask else "Prix: N/A",
+        f"ATR (volatilité): {req.atr:.5f}" if req.atr else "ATR: N/A",
+        f"Spread: {(req.ask - req.bid):.5f}" if req.bid and req.ask else "Spread: N/A",
+        "",
+    ]
+    dg = 5
+    if req.recent_candles and len(req.recent_candles) > 0:
+        lines.append("=== DERNIÈRES BOUGIES OHLC (même timeframe que la requête) ===")
+        lines.append(
+            "Ordre chronologique : la DERNIÈRE ligne est la bougie la PLUS RÉCENTE (inclut souvent la bougie en cours). "
+            "Base ton court-terme (structure, momentum, patterns) sur ces données."
+        )
+        for i, bar in enumerate(req.recent_candles, 1):
+            lines.append(
+                f"  {i:2d}) O={bar.o:.{dg}f} H={bar.h:.{dg}f} L={bar.l:.{dg}f} C={bar.c:.{dg}f}"
+            )
+        lines.append("")
+    lines.extend([
+        "=== INDICATEURS TECHNIQUES FONDAMENTAUX ===",
+        f"RSI(14): {req.rsi:.2f}" if req.rsi is not None else "RSI: N/A",
+        f"MACD Histogramme: {req.macd_histogram:.6f}" if req.macd_histogram is not None else "MACD: N/A",
+        f"Ichimoku Bias: {'HAUSSIÈRE' if req.ichimoku_bias > 0 else 'BAISSIÈRE' if req.ichimoku_bias < 0 else 'NEUTRE'}" if req.ichimoku_bias != 0 else "Ichimoku: N/A",
+    ])
+
+    # EMAs
+    if req.ema_fast_m1 and req.ema_slow_m1:
+        lines.append(f"EMA M1: fast={req.ema_fast_m1:.5f} slow={req.ema_slow_m1:.5f}")
+        trend_m1 = "HAUSSIÈRE" if req.ema_fast_m1 > req.ema_slow_m1 else "BAISSIÈRE"
+        lines.append(f"  → Tendance M1: {trend_m1}")
+    if req.ema_fast_m5 and req.ema_slow_m5:
+        lines.append(f"EMA M5: fast={req.ema_fast_m5:.5f} slow={req.ema_slow_m5:.5f}")
+        trend_m5 = "HAUSSIÈRE" if req.ema_fast_m5 > req.ema_slow_m5 else "BAISSIÈRE"
+        lines.append(f"  → Tendance M5: {trend_m5}")
+    if req.ema_fast_h1 and req.ema_slow_h1:
+        lines.append(f"EMA H1: fast={req.ema_fast_h1:.5f} slow={req.ema_slow_h1:.5f}")
+        trend_h1 = "HAUSSIÈRE" if req.ema_fast_h1 > req.ema_slow_h1 else "BAISSIÈRE"
+        lines.append(f"  → Tendance H1: {trend_h1}")
+    
+    # Entry points
+    lines.append("")
+    lines.append("=== NIVEAUX D'ENTRÉE (GOM KOLA) ===")
+    if req.m1_buy_entry: lines.append(f"M1 BUY entry: {req.m1_buy_entry:.5f}")
+    if req.m1_sell_entry: lines.append(f"M1 SELL entry: {req.m1_sell_entry:.5f}")
+    if req.m5_buy_entry: lines.append(f"M5 BUY entry: {req.m5_buy_entry:.5f}")
+    if req.m5_sell_entry: lines.append(f"M5 SELL entry: {req.m5_sell_entry:.5f}")
+    if req.m15_buy_entry: lines.append(f"M15 BUY entry: {req.m15_buy_entry:.5f}")
+    if req.m15_sell_entry: lines.append(f"M15 SELL entry: {req.m15_sell_entry:.5f}")
+    if req.h1_buy_entry: lines.append(f"H1 BUY entry: {req.h1_buy_entry:.5f}")
+    if req.h1_sell_entry: lines.append(f"H1 SELL entry: {req.h1_sell_entry:.5f}")
+    
+    # Autres indicateurs
+    if req.volume_spike:
+        lines.append("⚠️ VOLUME SPIKE détecté - Confirmation potentielle de mouvement")
+    if req.price_acceleration and abs(req.price_acceleration) > 0.0001:
+        lines.append(f"Accélération prix: {req.price_acceleration:.6f} - Momentum en cours")
+    
+    # Spike prediction (spécifique Boom/Crash)
+    if req.spike_probability:
+        lines.append(f"Probabilité Spike: {req.spike_probability:.1%}")
+        if req.spike_direction:
+            spike_dir = "HAUSSIER" if req.spike_direction > 0 else "BAISSIER"
+            lines.append(f"Direction Spike: {spike_dir}")
+    
+    lines.extend([
+        "",
+        "=== MÉTHODOLOGIE TRADER PROFESSIONNELLE ===",
+        "CONTEXTE: Tu es face au marché en temps réel. Le robot TradBOT attend ton analyse pour exécuter.",
+        "RESPONSABILITÉ: Ton verdict influence directement des décisions de trading réelles.",
+        "",
+        "PROCESSUS D'ANALYSE COMPLET:",
+        "1. STRUCTURE: Analyse la tendance multi-timeframes (M1→H1→H4→D1)",
+        "2. NIVEAUX: Évalue la confluence des touches GOM KOLA (plus de touches = niveau plus fort)",
+        "3. FIGURES: Identifie les patterns chartistes SIDO (double top/bottom, head & shoulders)",
+        "4. MOMENTUM: Confirme avec RSI, MACD, volume et volatilité",
+        "5. RISQUE: Détermine Stop Loss basé sur ATR et structure",
+        "6. OBJECTIFS: Calcule Take Profit selon ratios risque/récompense (1:2 minimum)",
+        "",
+        "FACTEURS DE QUALITÉ GOM:",
+        "- PERFECT: Force ≥3.6, Filtres ≥80%, Confluence forte",
+        "- GOOD: Force ≥2.8, Filtres ≥60%", 
+        "- BASE: Force ≥2.0, Filtres ≥40%",
+        "",
+        "INSTRUCTIONS POUR LE ROBOT:",
+        "Fournis une analyse structurée que le robot peut utiliser pour décision:",
+        "1. ANALYSE_COMPLETE: Description technique détaillée (processus GOM appliqué)",
+        "2. SENTIMENT_MARCHÉ: BULLISH / BEARISH / NEUTRAL",
+        "3. ACTION_RECOMMANDÉE: BUY / SELL / HOLD",
+        "4. CONFIANCE_TRADE: Pourcentage (0-100%) basé sur qualité GOM",
+        "5. JUSTIFICATION: Raisons techniques spécifiques (GOM KOLA + SIDO + filtres)",
+        "6. NIVEAUX_OPÉRATIONNELS: Entry, SL, TP1/TP2/TP3 pour exécution robot",
+        "7. RISQUE/RECOMPENSE: Ratio calculé selon ATR et structure",
+        "",
+        "FORMAT JSON EXIGÉ (sans markdown):",
+        '{"analysis":"analyse technique complète avec processus GOM...","summary":"résumé décision 1 ligne","sentiment":"BULLISH","recommendation":"BUY","confidence":0.85,"reasoning":"justification basée sur confluence GOM et filtres...","key_levels":{"support":0.00000,"resistance":0.00000,"entry_buy":0.00000,"entry_sell":0.00000,"stop_loss":0.00000,"take_profit_1":0.00000,"take_profit_2":0.00000,"take_profit_3":0.00000},"risk_reward":2.5,"gom_quality":"PERFECT BUY"}'
+    ])
+    
+    return "\n".join(lines)
+
+
+def _parse_ollama_json(raw: str) -> Dict[str, Any]:
+    """Parse la réponse JSON d'Ollama avec fallback robuste"""
+    # Essayer d'extraire le JSON depuis la réponse texte
+    import re
+    
+    # Chercher un bloc JSON
+    json_match = re.search(r'\{.*\}', raw, re.DOTALL)
+    if json_match:
+        try:
+            return json.loads(json_match.group())
+        except json.JSONDecodeError:
+            pass
+    
+    # Fallback: extraction par regex
+    result: Dict[str, Any] = {
+        "analysis": raw[:500] if raw else "Analyse non disponible",
+        "summary": "Résumé indisponible",
+        "sentiment": "NEUTRAL",
+        "recommendation": "HOLD",
+        "confidence": 0.5,
+        "reasoning": "Parsing échoué, fallback sur HOLD",
+        "key_levels": {"support": None, "resistance": None, "entry_buy": None, "entry_sell": None},
+        "risk_reward": None,
+    }
+    
+    if not raw:
+        return result
+    
+    raw_up = raw.upper()
+    if "BULLISH" in raw_up or "HAUSSI" in raw_up:
+        result["sentiment"] = "BULLISH"
+    elif "BEARISH" in raw_up or "BAISSI" in raw_up:
+        result["sentiment"] = "BEARISH"
+    
+    if "BUY" in raw_up:
+        result["recommendation"] = "BUY"
+        result["confidence"] = 0.65
+    elif "SELL" in raw_up:
+        result["recommendation"] = "SELL"
+        result["confidence"] = 0.65
+    
+    # Chercher un pourcentage de confiance
+    conf_match = re.search(r'(\d{1,3})\s*%', raw)
+    if conf_match:
+        val = float(conf_match.group(1))
+        result["confidence"] = min(val / 100.0, 1.0)
+    
+    return result
+
+
+@app.post("/analyze/ollama", response_model=OllamaAnalysisResponse)
+async def analyze_with_ollama(request: OllamaAnalysisRequest):
+    """
+    Endpoint pour analyse approfondie via Ollama local.
+    Reçoit tous les indicateurs techniques, envoie à un LLM local,
+    retourne une analyse structurée avec sentiment et recommandation.
+    """
+    start_time = time.time()
+    logger.info(f"🧠 Ollama: Analyse demandée pour {request.symbol} {request.timeframe}")
+    
+    try:
+        # Construire le prompt
+        prompt = _build_ollama_prompt(request)
+        
+        # Appeler Ollama
+        model_name = os.getenv("OLLAMA_MODEL", "qwen3.5:4b")
+        raw_response = _call_ollama_local(prompt, model=model_name, timeout=20)
+        
+        if not raw_response:
+            logger.warning("Ollama: Pas de réponse du modèle local")
+            return OllamaAnalysisResponse(
+                symbol=request.symbol,
+                timeframe=request.timeframe,
+                analysis="Modèle Ollama non disponible ou timeout.",
+                summary="Ollama indisponible",
+                sentiment="NEUTRAL",
+                confidence=0.0,
+                recommendation="HOLD",
+                key_levels={"support": None, "resistance": None, "entry_buy": None, "entry_sell": None},
+                reasoning="Serveur Ollama local non joignable",
+                latency_ms=(time.time() - start_time) * 1000,
+            )
+        
+        logger.info(f"🧠 Ollama: Réponse reçue ({len(raw_response)} caractères)")
+        
+        # Parser la réponse
+        parsed = _parse_ollama_json(raw_response)
+        
+        # Construire la réponse
+        latency_ms = (time.time() - start_time) * 1000
+        response = OllamaAnalysisResponse(
+            symbol=request.symbol,
+            timeframe=request.timeframe,
+            analysis=parsed.get("analysis", raw_response[:500]),
+            summary=parsed.get("summary", "Résumé indisponible"),
+            sentiment=parsed.get("sentiment", "NEUTRAL"),
+            confidence=parsed.get("confidence", 0.5),
+            recommendation=parsed.get("recommendation", "HOLD"),
+            key_levels=parsed.get("key_levels", {"support": None, "resistance": None, "entry_buy": None, "entry_sell": None}),
+            risk_reward=parsed.get("risk_reward"),
+            reasoning=parsed.get("reasoning", "Analyse par modèle local"),
+            latency_ms=latency_ms,
+        )
+        
+        logger.info(f"✅ Ollama: {request.symbol} → {response.recommendation} (conf={response.confidence:.2f}, sentiment={response.sentiment}, lat={latency_ms:.0f}ms)")
+        return response
+        
+    except Exception as e:
+        logger.error(f"Erreur endpoint /analyze/ollama: {type(e).__name__}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 if __name__ == "__main__":
     import uvicorn
     
@@ -16355,6 +17331,7 @@ if __name__ == "__main__":
     logger.info("📡 Endpoints disponibles:")
     logger.info("   • /health - Santé du serveur")
     logger.info("   • /decision - Décisions de trading")  
+    logger.info("   • /analyze/ollama - Analyse approfondie LLM local")
     logger.info("   • /ml/metrics - Métriques ML en temps réel")
     logger.info("   • /ml/start - Démarrer entraînement ML")
     logger.info("   • /ml/stop - Arrêter entraînement ML")
@@ -16364,8 +17341,50 @@ if __name__ == "__main__":
     
     uvicorn.run(
         "ai_server:app",
-        host="127.0.0.1",
-        port=8000,
+        host=HOST,
+        port=API_PORT,
         reload=False,
         log_level="info"
     )
+
+@app.get("/fallback-status")
+async def get_fallback_status():
+    """Retourne le statut du système de fallback"""
+    try:
+        if FALLBACK_AVAILABLE:
+            from qwen_fallback_system import fallback_system
+            status = fallback_system.get_status()
+            return {
+                "status": "ok",
+                "fallback_available": True,
+                "fallback_mode": status["fallback_mode"],
+                "last_ollama_success": status["last_ollama_success"],
+                "ollama_timeout": status["ollama_timeout"]
+            }
+        else:
+            return {
+                "status": "ok",
+                "fallback_available": False,
+                "message": "Système fallback non disponible"
+            }
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+@app.post("/test-fallback")
+async def test_fallback_endpoint(symbol: str = "EURUSD", rsi: float = 65, macd: float = 0.002, atr: float = 0.001):
+    """Test le système de fallback avec des indicateurs"""
+    try:
+        if FALLBACK_AVAILABLE:
+            result = get_trading_signal_with_fallback(symbol, rsi, macd, atr)
+            return {
+                "status": "ok",
+                "result": result,
+                "timestamp": datetime.now().isoformat()
+            }
+        else:
+            return {
+                "status": "error",
+                "message": "Système fallback non disponible"
+            }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
