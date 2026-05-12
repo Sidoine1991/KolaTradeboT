@@ -19,4 +19,9 @@ uvicorn>=0.30.0,<1.0.0
 pydantic>=2.8.0,<3.0.0
 joblib>=1.3.0,<2.0.0
 xgboost>=2.0.0,<3.0.0
-mistralai>=1.0.0,<2.0.0
+
+# --- Mistral (optionnel) ---
+# Le SDK PyPI « mistralai » en 1.12+ exige Python >=3.10. Ne pas utiliser mistralai>=1,<2 sur Python 3.9 ou pip<24.
+# ai_server_cloud n’importe pas mistralai : laissez commenté pour l’image Docker minimale.
+# Si vous en avez besoin : décommentez une seule ligne, avec Docker FROM python:3.12-slim-bookworm (ci-dessus).
+# mistralai>=1.0.3,<3.0.0

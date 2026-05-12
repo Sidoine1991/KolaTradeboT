@@ -9,7 +9,7 @@ from fastapi import FastAPI, Query, Request, HTTPException, Body
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Dict, Any
-from backend.mt5_connector import get_ohlc, get_all_symbols, TIMEFRAME_MAPPING, get_current_price, monitor_positions_loss_limit
+from backend.mt5_connector import get_ohlc, get_all_symbols, TIMEFRAME_MAPPING, get_current_price, monitor_positions_loss_limit, get_open_positions_count, can_open_new_position
 from backend.adaptive_predict import predict_adaptive
 import threading
 import redis
@@ -1251,19 +1251,22 @@ async def global_loss_protection(max_loss: float = 3.0):
 @app.get("/monitor/status")
 async def monitor_status():
     """
-    Retourne le statut du système de protection des pertes.
+    Retourne le statut du système de protection des pertes et limitation de positions.
     """
     try:
         from backend.mt5_connector import is_connected, get_open_positions
 
         mt5_connected = is_connected()
         positions = get_open_positions() if mt5_connected else []
+        max_positions = int(os.getenv("MT5_MAX_POSITIONS", "2"))
 
         return {
             "protection_active": True,
             "max_loss_per_trade": 3.0,
+            "max_positions_simultaneous": max_positions,
             "mt5_connected": mt5_connected,
             "open_positions_count": len(positions) if positions else 0,
+            "can_open_new_position": len(positions) < max_positions if positions else True,
             "monitoring_interval": "1 second (via continuous_loss_monitor.py)",
             "api_available": True
         }
@@ -1273,10 +1276,40 @@ async def monitor_status():
             "error": str(e)
         }
 
+@app.get("/monitor/positions")
+async def monitor_positions_status(max_positions: int = 2):
+    """
+    Vérifie si une nouvelle position peut être ouverte selon la limite configurée.
+
+    Args:
+        max_positions: Nombre maximum de positions simultanées (défaut: 2)
+
+    Returns:
+        Statut des positions et autorisation d'ouverture
+    """
+    try:
+        current_count = get_open_positions_count()
+        can_open, message = can_open_new_position(max_positions)
+
+        return {
+            "current_positions": current_count,
+            "max_positions": max_positions,
+            "can_open_new": can_open,
+            "message": message,
+            "remaining_slots": max(0, max_positions - current_count)
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
 if __name__ == "__main__":
     import uvicorn
 
     # Bannière de démarrage avec info protection pertes
+    max_positions = int(os.getenv("MT5_MAX_POSITIONS", "2"))
+
     print("\n" + "=" * 80)
     print(" 🚀 TRADBOT AI SERVER - DÉMARRAGE")
     print("=" * 80)
@@ -1284,11 +1317,17 @@ if __name__ == "__main__":
     print("🌐 URL: http://localhost:8000")
     print("📚 Documentation: http://localhost:8000/docs")
     print()
-    print("🛡️  SYSTÈME DE PROTECTION DES PERTES ACTIVÉ")
+    print("🛡️  SYSTÈME DE PROTECTION ACTIVÉ")
     print("   • Perte maximale par trade: 3.00 USD")
-    print("   • Monitoring API disponible: /monitor/loss-protection")
-    print("   • Statut monitoring: /monitor/status")
-    print("   • Pour monitoring continu: python backend/continuous_loss_monitor.py")
+    print(f"   • Positions simultanées max: {max_positions}")
+    print("   • Monitoring API: /monitor/loss-protection")
+    print("   • Statut: /monitor/status")
+    print("   • Positions: /monitor/positions")
+    print("   • Monitoring continu: python backend/continuous_loss_monitor.py")
+    print()
+    print("⚙️  CONFIGURATION (variables d'environnement)")
+    print("   • MT5_MAX_LOSS_PER_TRADE=3.0  (perte max en USD)")
+    print(f"   • MT5_MAX_POSITIONS={max_positions}  (positions simultanées)")
     print("=" * 80)
     print()
 

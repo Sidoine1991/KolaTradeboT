@@ -1272,6 +1272,18 @@ except ImportError:
 MISTRAL_AVAILABLE = False
 mistral_client = None
 
+# Configuration Anthropic API (direct, sans Bedrock)
+ANTHROPIC_API_BASE = os.getenv("ANTHROPIC_API_BASE", "https://api.anthropic.com")
+ANTHROPIC_API_VERSION = os.getenv("ANTHROPIC_API_VERSION", "2023-06-01")
+ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet-20241022")
+anthropic_api_key = os.getenv("ANTHROPIC_API_KEY", "").strip()
+anthropic_admin_api_key = os.getenv("ANTHROPIC_ADMIN_API_KEY", "").strip()
+ANTHROPIC_AVAILABLE = bool(anthropic_api_key)
+if ANTHROPIC_AVAILABLE:
+    logger.info("Anthropic API disponible (appel direct activé)")
+else:
+    logger.info("Anthropic API non configurée (ANTHROPIC_API_KEY manquant)")
+
 # Gemini totalement désactivé pour le déploiement Render
 GEMINI_AVAILABLE = False
 gemini_model = None
@@ -3071,6 +3083,45 @@ def analyze_with_mistral(prompt: str) -> Optional[str]:
         return None
 
 
+def analyze_with_anthropic(prompt: str, max_retries: int = 2) -> Optional[str]:
+    """Analyse un prompt avec l'API Anthropic (appel direct, sans Bedrock)."""
+    if not ANTHROPIC_AVAILABLE:
+        return None
+
+    url = f"{ANTHROPIC_API_BASE.rstrip('/')}/v1/messages"
+    headers = {
+        "x-api-key": anthropic_api_key,
+        "anthropic-version": ANTHROPIC_API_VERSION,
+        "content-type": "application/json",
+    }
+
+    payload = {
+        "model": ANTHROPIC_MODEL,
+        "max_tokens": 800,
+        "temperature": 0.3 if ("spike" in prompt.lower() or "volatility" in prompt.lower()) else 0.6,
+        "messages": [{"role": "user", "content": prompt}],
+    }
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            resp = requests.post(url, headers=headers, json=payload, timeout=30)
+            if resp.status_code == 429:
+                logger.warning(f"Anthropic rate-limit (tentative {attempt}/{max_retries})")
+                time.sleep(min(2 * attempt, 5))
+                continue
+            resp.raise_for_status()
+            data = resp.json()
+            content_blocks = data.get("content") or []
+            text_parts = [b.get("text", "") for b in content_blocks if isinstance(b, dict) and b.get("type") == "text"]
+            answer = "\n".join([p for p in text_parts if p]).strip()
+            return answer or None
+        except Exception as e:
+            logger.error(f"Erreur Anthropic API (tentative {attempt}/{max_retries}): {e}")
+            if attempt < max_retries:
+                time.sleep(min(2 * attempt, 5))
+    return None
+
+
 def analyze_with_gemma(
     prompt: str, 
     max_tokens: int = 200, 
@@ -3198,20 +3249,26 @@ def analyze_with_ai(prompt: str, max_retries: int = 2) -> Optional[str]:
     Returns:
         La réponse de l'IA ou None en cas d'échec
     """
-    if not MISTRAL_AVAILABLE or not mistral_api_key:
-        logger.error("Mistral AI n'est pas disponible")
+    # Priorité: Anthropic direct (pour éviter les limites RPM Bedrock)
+    if ANTHROPIC_AVAILABLE:
+        logger.info("Utilisation de l'API Anthropic directe")
+        anthropic_result = analyze_with_anthropic(prompt, max_retries=max_retries)
+        if anthropic_result:
+            return anthropic_result
+        logger.warning("Fallback Mistral suite à échec Anthropic")
+
+    if not MISTRAL_AVAILABLE:
+        logger.error("Aucun provider IA disponible (Anthropic/Mistral)")
         return None
-    
+
     try:
-        # Optimisation pour les prédictions de spike
         if "spike" in prompt.lower() or "volatility" in prompt.lower():
-            # Utiliser un modèle plus performant et une température plus basse pour les spikes
             logger.info("Utilisation de Mistral AI pour l'analyse de spike (optimisée)")
             response = mistral_client.chat.complete(
-                model="mistral-small",  # Modèle plus performant pour les spikes
+                model="mistral-small",
                 messages=[
                     {
-                        "role": "system", 
+                        "role": "system",
                         "content": (
                             "Tu es un expert en trading de volatilité spécialisé "
                             "dans la détection de spikes. Analyse les indicateurs "
@@ -3222,19 +3279,14 @@ def analyze_with_ai(prompt: str, max_retries: int = 2) -> Optional[str]:
                     },
                     {"role": "user", "content": prompt}
                 ],
-                # Température plus basse pour plus de cohérence
                 temperature=0.3,
-                # Limiter les tokens pour des réponses plus ciblées
                 max_tokens=800
             )
         else:
-            # Utilisation standard pour les autres analyses
             logger.info("Utilisation de Mistral AI pour l'analyse standard")
             response = mistral_client.chat.complete(
                 model="mistral-tiny",
-                messages=[
-                    {"role": "user", "content": prompt}
-                ],
+                messages=[{"role": "user", "content": prompt}],
                 temperature=0.7,
                 max_tokens=1000
             )
@@ -3242,6 +3294,38 @@ def analyze_with_ai(prompt: str, max_retries: int = 2) -> Optional[str]:
     except Exception as e:
         logger.error(f"Erreur avec Mistral AI: {str(e)}")
         return None
+
+
+def get_anthropic_api_key_metadata(api_key_id: str) -> Dict[str, Any]:
+    """
+    Récupère les métadonnées d'une API key Anthropic via endpoint organisation.
+    Nécessite ANTHROPIC_ADMIN_API_KEY.
+    """
+    if not anthropic_admin_api_key:
+        raise HTTPException(
+            status_code=503,
+            detail="ANTHROPIC_ADMIN_API_KEY manquant (endpoint organisation indisponible)"
+        )
+    if not api_key_id:
+        raise HTTPException(status_code=400, detail="api_key_id manquant")
+
+    url = f"{ANTHROPIC_API_BASE.rstrip('/')}/v1/organizations/api_keys/{api_key_id}"
+    headers = {
+        "anthropic-version": ANTHROPIC_API_VERSION,
+        "x-api-key": anthropic_admin_api_key,
+    }
+    try:
+        resp = requests.get(url, headers=headers, timeout=20)
+        if resp.status_code == 404:
+            raise HTTPException(status_code=404, detail="API key Anthropic introuvable")
+        if resp.status_code == 401:
+            raise HTTPException(status_code=401, detail="ANTHROPIC_ADMIN_API_KEY invalide")
+        resp.raise_for_status()
+        return resp.json()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Erreur Anthropic API: {e}")
 
 def generate_fibonacci_levels(base_price: float) -> Dict[str, Dict[str, Any]]:
     """
@@ -3358,6 +3442,7 @@ async def root():
         "mt5_available": MT5_AVAILABLE,
         "mt5_initialized": mt5_initialized,
         "mistral_available": MISTRAL_AVAILABLE,
+        "anthropic_available": ANTHROPIC_AVAILABLE,
         "gemini_available": GEMINI_AVAILABLE,
         "backend_available": backend_available,
         "ai_indicators": AI_INDICATORS_AVAILABLE,
@@ -3378,6 +3463,17 @@ async def root():
             "/analyze/gemini (POST)",
             "/mt5/history-upload (POST)"
         ]
+    }
+
+
+@app.get("/anthropic/api_keys/{api_key_id}")
+async def anthropic_api_key_metadata(api_key_id: str):
+    """Expose les métadonnées d'une clé Anthropic via l'API Admin."""
+    data = get_anthropic_api_key_metadata(api_key_id)
+    return {
+        "provider": "anthropic",
+        "timestamp": datetime.now().isoformat(),
+        "api_key": data,
     }
 
 @app.get("/health")

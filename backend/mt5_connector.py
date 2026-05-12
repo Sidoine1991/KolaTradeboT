@@ -587,7 +587,7 @@ def get_symbol_info(symbol):
     }
 
 
-def send_order_to_mt5(symbol, order_type, volume, price=None, sl=None, tp=None):
+def send_order_to_mt5(symbol, order_type, volume, price=None, sl=None, tp=None, max_positions=2):
     """
     Envoie un ordre réel (achat ou vente) sur MT5.
     Args:
@@ -597,11 +597,19 @@ def send_order_to_mt5(symbol, order_type, volume, price=None, sl=None, tp=None):
         price: prix d'entrée (None = au marché)
         sl: stop loss (None = SL auto)
         tp: take profit (None = TP auto)
+        max_positions: Nombre max de positions simultanées (défaut: 2)
     Returns:
         Dictionnaire résultat de l'ordre MT5
     """
     if not is_connected():
         raise RuntimeError("MT5 n'est pas connecté")
+
+    # Vérifier la limite de positions simultanées
+    max_positions_allowed = int(os.getenv("MT5_MAX_POSITIONS", str(max_positions)))
+    all_positions = mt5.positions_get()  # type: ignore
+    if all_positions and len(all_positions) >= max_positions_allowed:
+        raise RuntimeError(f"Limite de positions atteinte : {len(all_positions)}/{max_positions_allowed} positions ouvertes. Fermez une position avant d'en ouvrir une nouvelle.")
+
     # Bloquer l'ouverture d'ordres dupliqués pour le même symbole
     try:
         open_pos = mt5.positions_get(symbol=symbol)  # type: ignore
@@ -909,6 +917,44 @@ def test_connection():
 def get_open_positions():
     """Récupère les positions ouvertes sur MT5"""
     return mt5.positions_get()  # type: ignore
+
+
+def get_open_positions_count():
+    """
+    Retourne le nombre de positions actuellement ouvertes sur MT5.
+
+    Returns:
+        int: Nombre de positions ouvertes (0 si aucune ou erreur)
+    """
+    if not is_connected():
+        return 0
+
+    positions = mt5.positions_get()  # type: ignore
+    if positions is None:
+        return 0
+
+    return len(positions)
+
+
+def can_open_new_position(max_positions=2):
+    """
+    Vérifie si une nouvelle position peut être ouverte selon la limite configurée.
+
+    Args:
+        max_positions: Nombre maximum de positions simultanées autorisées (défaut: 2)
+
+    Returns:
+        tuple: (bool, str) - (True/False, message explicatif)
+    """
+    if not is_connected():
+        return False, "MT5 n'est pas connecté"
+
+    current_positions = get_open_positions_count()
+
+    if current_positions >= max_positions:
+        return False, f"Limite de positions atteinte : {current_positions}/{max_positions} positions ouvertes"
+
+    return True, f"OK : {current_positions}/{max_positions} positions ouvertes"
 
 
 def get_trade_history(from_date, to_date):

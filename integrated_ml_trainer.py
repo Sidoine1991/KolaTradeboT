@@ -30,10 +30,12 @@ except ImportError:
     XGBOOST_AVAILABLE = False
 
 try:
-    import lightgbm as lgb
+    import lightgbm as lgb  # noqa: F401
     LIGHTGBM_AVAILABLE = True
 except ImportError:
     LIGHTGBM_AVAILABLE = False
+
+_LIGHTGBM_SKIP_LOGGED = False
 
 # Charger les variables d'environnement en gérant les encodages Windows possibles
 try:
@@ -116,6 +118,26 @@ class IntegratedMLTrainer:
         self.data_cache = {}
         self.cache_timestamps = {}
         self.cache_duration = 60  # 1 minute de cache
+        # Supabase 402 = quota / projet restreint — ne pas spammer les logs ni les POST inutiles.
+        self._supabase_writes_disabled = (
+            os.getenv("SUPABASE_DISABLE_WRITES", "").strip().lower() in ("1", "true", "yes")
+        )
+        self._supabase_quota_logged = False
+
+    def _disable_supabase_writes_if_402(self, status: int) -> None:
+        if status != 402:
+            return
+        self._supabase_writes_disabled = True
+        if not self._supabase_quota_logged:
+            self._supabase_quota_logged = True
+            logger.warning(
+                "Supabase HTTP 402 (quota dépassé ou service restreint) : écritures ML désactivées pour cette session. "
+                "Les modèles .joblib restent locaux ; ce n'est pas une erreur Ollama. "
+                "Pour couper le bruit au démarrage : SUPABASE_DISABLE_WRITES=1"
+            )
+
+    def _supabase_writes_allowed(self) -> bool:
+        return bool(self.supabase_key) and not self._supabase_writes_disabled
         
     def load_existing_models(self) -> Dict[str, Any]:
         """Charge tous les modèles existants (RF, XGBoost, LightGBM)."""
@@ -126,9 +148,18 @@ class IntegratedMLTrainer:
             logger.warning(f"Répertoire {self.models_dir} non trouvé")
             return models
             
+        global _LIGHTGBM_SKIP_LOGGED
         for file in os.listdir(self.models_dir):
             for suf in suffixes:
                 if file.endswith(suf):
+                    if suf == "_lightgbm.joblib" and not LIGHTGBM_AVAILABLE:
+                        if not _LIGHTGBM_SKIP_LOGGED:
+                            _LIGHTGBM_SKIP_LOGGED = True
+                            logger.warning(
+                                "Package 'lightgbm' absent : fichiers *_lightgbm.joblib ignorés "
+                                "(installer avec : pip install lightgbm). xgboost / rf restent utilisés."
+                            )
+                        break
                     base = file.replace(suf, "")
                     parts = base.split("_")
                     if len(parts) >= 2:
@@ -151,7 +182,11 @@ class IntegratedMLTrainer:
                             }
                             logger.info(f"✅ Modèle chargé: {key} ({model_type})")
                         except Exception as e:
-                            logger.error(f"❌ Erreur chargement modèle {file}: {e}")
+                            err = str(e).lower()
+                            if "lightgbm" in err or "no module named" in err:
+                                logger.warning(f"⚠️ Modèle non chargé {file}: {e}")
+                            else:
+                                logger.error(f"❌ Erreur chargement modèle {file}: {e}")
                     break
         return models
     
@@ -197,7 +232,11 @@ class IntegratedMLTrainer:
                 )
                 
                 if pred_resp.status_code != 200:
-                    logger.warning(f"⚠️ Pas de données pour {symbol} (status: {pred_resp.status_code})")
+                    self._disable_supabase_writes_if_402(pred_resp.status_code)
+                    if pred_resp.status_code == 402 and self._supabase_quota_logged:
+                        logger.debug("Pas de données Supabase (402) pour %s — fallback données locales", symbol)
+                    else:
+                        logger.warning(f"⚠️ Pas de données pour {symbol} (status: {pred_resp.status_code})")
                     # Créer des données factices pour éviter "Samples: 0"
                     dummy_data = self._create_dummy_training_data(symbol, timeframe)
                     if dummy_data is not None:
@@ -449,6 +488,9 @@ class IntegratedMLTrainer:
     async def _log_training_metrics(self, metrics: Dict[str, Any]):
         """Logger toutes les métriques d'entraînement dans Supabase."""
         try:
+            if not self._supabase_writes_allowed():
+                logger.debug("Logging Supabase ignoré (désactivé ou quota 402) pour %s", metrics.get("symbol"))
+                return
             # 1. Logger le training run
             await self._log_training_run(metrics, "completed")
             
@@ -458,7 +500,10 @@ class IntegratedMLTrainer:
             # 3. Logger la calibration du symbole
             await self._log_symbol_calibration(metrics)
             
-            logger.info(f"✅ All training metrics logged to Supabase: {metrics['symbol']}")
+            if self._supabase_writes_disabled:
+                logger.info(f"📁 Métriques entraînement locales seulement (Supabase indisponible): {metrics['symbol']}")
+            else:
+                logger.info(f"✅ All training metrics logged to Supabase: {metrics['symbol']}")
         except Exception as e:
             logger.warning(f"❌ Error logging training metrics: {e}")
     
@@ -559,7 +604,7 @@ class IntegratedMLTrainer:
     
     async def save_metrics_to_supabase(self, metrics: Dict[str, Any]):
         """Sauvegarde les métriques dans Supabase - schéma: symbol, timeframe, accuracy (0-1), training_date, metadata."""
-        if not self.supabase_key:
+        if not self._supabase_writes_allowed():
             return
         headers = {
             "apikey": self.supabase_key,
@@ -600,16 +645,20 @@ class IntegratedMLTrainer:
                     logger.info(f"✅ Métriques sauvegardées pour {metrics['symbol']} {metrics['timeframe']}")
                     await self._log_training_run(metrics, "completed")
                 else:
-                    logger.error(
-                        "model_metrics POST %s body=%s payload=%s",
-                        resp.status_code, resp.text, metric_data
-                    )
+                    self._disable_supabase_writes_if_402(resp.status_code)
+                    if resp.status_code == 402:
+                        logger.debug("model_metrics POST 402 (quota Supabase), métriques restent locales")
+                    else:
+                        logger.error(
+                            "model_metrics POST %s body=%s payload=%s",
+                            resp.status_code, resp.text, metric_data
+                        )
         except Exception as e:
             logger.warning(f"Erreur sauvegarde métriques Supabase: {e}")
 
     async def _log_training_run(self, metrics: Dict[str, Any], status: str = "completed"):
         """Log systématique dans training_runs."""
-        if not self.supabase_key:
+        if not self._supabase_writes_allowed():
             return
         try:
             best = metrics.get("best_model", "random_forest")
@@ -643,13 +692,15 @@ class IntegratedMLTrainer:
                 if r.status_code in (200, 201):
                     logger.info(f"✅ Training run logged: {metrics['symbol']} {metrics.get('timeframe', 'M1')}")
                 else:
-                    logger.warning(f"⚠️ training_runs POST {r.status_code}: {r.text[:200]}")
+                    self._disable_supabase_writes_if_402(r.status_code)
+                    if r.status_code != 402:
+                        logger.warning(f"⚠️ training_runs POST {r.status_code}: {r.text[:200]}")
         except Exception as e:
             logger.warning(f"❌ training_runs error: {e}")
     
     async def _log_feature_importance(self, metrics: Dict[str, Any], training_run_id: str = None):
         """Log l'importance des features dans la table feature_importance."""
-        if not self.supabase_key:
+        if not self._supabase_writes_allowed():
             return
         try:
             best = metrics.get("best_model", "random_forest")
@@ -688,13 +739,15 @@ class IntegratedMLTrainer:
                 if r.status_code in (200, 201):
                     logger.info(f"✅ Feature importance logged: {len(features_data)} features for {metrics['symbol']}")
                 else:
-                    logger.warning(f"⚠️ feature_importance POST {r.status_code}: {r.text[:200]}")
+                    self._disable_supabase_writes_if_402(r.status_code)
+                    if r.status_code != 402:
+                        logger.warning(f"⚠️ feature_importance POST {r.status_code}: {r.text[:200]}")
         except Exception as e:
             logger.warning(f"❌ feature_importance error: {e}")
     
     async def _log_symbol_calibration(self, metrics: Dict[str, Any]):
         """Log la calibration du symbole dans la table symbol_calibration."""
-        if not self.supabase_key:
+        if not self._supabase_writes_allowed():
             return
         try:
             best = metrics.get("best_model", "random_forest")
@@ -735,7 +788,9 @@ class IntegratedMLTrainer:
                 if r.status_code in (200, 201):
                     logger.info(f"✅ Symbol calibration logged: {metrics['symbol']}")
                 else:
-                    logger.warning(f"⚠️ symbol_calibration POST {r.status_code}: {r.text[:200]}")
+                    self._disable_supabase_writes_if_402(r.status_code)
+                    if r.status_code != 402:
+                        logger.warning(f"⚠️ symbol_calibration POST {r.status_code}: {r.text[:200]}")
         except Exception as e:
             logger.warning(f"❌ symbol_calibration error: {e}")
     def log_metrics_to_console(self):

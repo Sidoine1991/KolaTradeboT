@@ -56,6 +56,13 @@ input bool   OTE_RequirePriceActionConfirmation = true;  // Confirmation price a
 input bool   OTE_RequireStructureAlignment = true;       // Alignement structure SMC
 input int    OTE_MinConfirmations = 5;                   // Nombre minimum de confirmations
 
+input group "=== CONFIRMATIONS COUPLÉES M5+H1 ==="
+input bool   OTE_RequireM5H1CoupledConfirmation = true;   // Exiger confirmation M5+H1 couplée
+input bool   OTE_RequireM5H1EMAAlignment = true;          // Alignement EMA M5+H1 obligatoire
+input bool   OTE_RequireM5H1PriceActionAlignment = true;  // Alignement price action M5+H1
+input bool   OTE_RequireM5H1MomentumAlignment = true;     // Alignement momentum M5+H1
+input double OTE_M5H1MinConfluenceScore = 75.0;          // Score minimum de confluence M5+H1
+
 // Filtres qualité de setup OTE
 input group "=== QUALITÉ SETUP OTE ==="
 input double OTE_MinQualityScore = 75.0;        // Score qualité minimum (%)
@@ -110,10 +117,13 @@ struct OTEConfirmationScore
    bool momentumConfirmation;      // Confirmation momentum
    bool priceActionConfirmation;   // Confirmation price action
    bool structureAlignment;        // Alignement structure
-   bool freshSetup;                // Setup récent
-   bool cleanZone;                 // Zone propre
-   int totalConfirmations;         // Total confirmations
-   double qualityScore;            // Score qualité (0-100)
+   bool zoneCleanliness;          // Propreté zone OTE
+   bool m5h1EMAAlignment;         // Alignement EMA M5+H1
+   bool m5h1PriceActionAlignment; // Alignement price action M5+H1
+   bool m5h1MomentumAlignment;    // Alignement momentum M5+H1
+   double m5h1ConfluenceScore;    // Score confluence M5+H1 (0-100%)
+   int totalConfirmations;         // Nombre total de confirmations
+   double qualityScore;            // Score qualité (0-100%)
 };
 
 struct EnhancedOTESetup
@@ -445,12 +455,12 @@ OTEConfirmationScore EvaluateOTEConfirmations(string symbol, string direction, d
       score.qualityScore += 5.0;
    }
 
-   // 8. Zone propre
-   score.cleanZone = CheckCleanOTEZone(symbol, entryPrice, direction);
-   if(score.cleanZone)
+   // 8. Propreté zone OTE
+   score.zoneCleanliness = CheckOTEZoneCleanliness(symbol, entryPrice, fibLevel);
+   if(score.zoneCleanliness)
    {
       score.totalConfirmations++;
-      score.qualityScore += 5.0;
+      score.qualityScore += 10.0;
       Print("   ✅ Zone OTE propre");
    }
    else if(OTE_RequireCleanZone)
@@ -458,7 +468,24 @@ OTEConfirmationScore EvaluateOTEConfirmations(string symbol, string direction, d
       Print("   ❌ Zone OTE encombrée");
    }
 
-   Print("📊 SCORE CONFIRMATIONS OTE: ", score.totalConfirmations, "/8 (", DoubleToString(score.qualityScore, 1), "%)");
+   // 9. Confirmations couplées M5+H1
+   if(OTE_RequireM5H1CoupledConfirmation)
+   {
+      score.m5h1ConfluenceScore = CheckM5H1CoupledConfirmation(symbol, direction, entryPrice);
+      
+      if(score.m5h1ConfluenceScore >= OTE_M5H1MinConfluenceScore)
+      {
+         score.totalConfirmations++;
+         score.qualityScore += 20.0;
+         Print("   ✅ Confirmation M5+H1 couplée (", DoubleToString(score.m5h1ConfluenceScore, 1), "%)");
+      }
+      else
+      {
+         Print("   ❌ Confirmation M5+H1 insuffisante (", DoubleToString(score.m5h1ConfluenceScore, 1), "% < ", DoubleToString(OTE_M5H1MinConfluenceScore, 1), "%)");
+      }
+   }
+
+   Print("📊 SCORE CONFIRMATIONS OTE: ", score.totalConfirmations, "/9 (", DoubleToString(score.qualityScore, 1), "%)");
 
    return score;
 }
@@ -864,6 +891,200 @@ void ManageBreakEvenProtection()
          }
       }
    }
+}
+
+//+------------------------------------------------------------------+
+//| Confirmation couplée M5+H1 pour OTE                              |
+//+------------------------------------------------------------------+
+double CheckM5H1CoupledConfirmation(string symbol, string direction, double entryPrice)
+{
+   if(!OTE_RequireM5H1CoupledConfirmation) return 100.0;
+   
+   double totalScore = 0.0;
+   int maxScore = 0;
+   
+   // 1. Alignement EMA M5+H1
+   if(OTE_RequireM5H1EMAAlignment)
+   {
+      double m5Score = CheckEMAAlignmentOnTimeframe(symbol, direction, PERIOD_M5, entryPrice);
+      double h1Score = CheckEMAAlignmentOnTimeframe(symbol, direction, PERIOD_H1, entryPrice);
+      double emaScore = (m5Score + h1Score) / 2.0;
+      totalScore += emaScore;
+      maxScore += 100;
+      
+      Print("   📊 EMA M5: ", DoubleToString(m5Score, 1), "% | H1: ", DoubleToString(h1Score, 1), "% | Combiné: ", DoubleToString(emaScore, 1), "%");
+   }
+   
+   // 2. Alignement Price Action M5+H1
+   if(OTE_RequireM5H1PriceActionAlignment)
+   {
+      double m5PA = CheckPriceActionOnTimeframe(symbol, direction, PERIOD_M5);
+      double h1PA = CheckPriceActionOnTimeframe(symbol, direction, PERIOD_H1);
+      double paScore = (m5PA + h1PA) / 2.0;
+      totalScore += paScore;
+      maxScore += 100;
+      
+      Print("   📊 Price Action M5: ", DoubleToString(m5PA, 1), "% | H1: ", DoubleToString(h1PA, 1), "% | Combiné: ", DoubleToString(paScore, 1), "%");
+   }
+   
+   // 3. Alignement Momentum M5+H1
+   if(OTE_RequireM5H1MomentumAlignment)
+   {
+      double m5Mom = CheckMomentumOnTimeframe(symbol, direction, PERIOD_M5);
+      double h1Mom = CheckMomentumOnTimeframe(symbol, direction, PERIOD_H1);
+      double momScore = (m5Mom + h1Mom) / 2.0;
+      totalScore += momScore;
+      maxScore += 100;
+      
+      Print("   📊 Momentum M5: ", DoubleToString(m5Mom, 1), "% | H1: ", DoubleToString(h1Mom, 1), "% | Combiné: ", DoubleToString(momScore, 1), "%");
+   }
+   
+   // Score final de confluence
+   double finalScore = (maxScore > 0) ? (totalScore / maxScore * 100.0) : 0.0;
+   
+   return finalScore;
+}
+
+//+------------------------------------------------------------------+
+//| Vérification alignement EMA sur timeframe spécifique              |
+//+------------------------------------------------------------------+
+double CheckEMAAlignmentOnTimeframe(string symbol, string direction, ENUM_TIMEFRAMES tf, double entryPrice)
+{
+   double ema9 = iMA(symbol, tf, 9, 0, MODE_EMA, PRICE_CLOSE);
+   double ema21 = iMA(symbol, tf, 21, 0, MODE_EMA, PRICE_CLOSE);
+   double ema50 = iMA(symbol, tf, 50, 0, MODE_EMA, PRICE_CLOSE);
+   
+   if(ema9 <= 0 || ema21 <= 0 || ema50 <= 0) return 0.0;
+   
+   double score = 0.0;
+   
+   if(direction == "BUY")
+   {
+      // Prix au-dessus des EMA
+      if(entryPrice > ema9) score += 33.3;
+      if(ema9 > ema21) score += 33.3;
+      if(ema21 > ema50) score += 33.4;
+   }
+   else // SELL
+   {
+      // Prix en-dessous des EMA
+      if(entryPrice < ema9) score += 33.3;
+      if(ema9 < ema21) score += 33.3;
+      if(ema21 < ema50) score += 33.4;
+   }
+   
+   return score;
+}
+
+//+------------------------------------------------------------------+
+//| Vérification Price Action sur timeframe spécifique               |
+//+------------------------------------------------------------------+
+double CheckPriceActionOnTimeframe(string symbol, string direction, ENUM_TIMEFRAMES tf)
+{
+   double open[], high[], low[], close[];
+   ArraySetAsSeries(open, true);
+   ArraySetAsSeries(high, true);
+   ArraySetAsSeries(low, true);
+   ArraySetAsSeries(close, true);
+   
+   if(CopyClose(symbol, tf, 0, 3, close) < 3 ||
+      CopyOpen(symbol, tf, 0, 3, open) < 3 ||
+      CopyHigh(symbol, tf, 0, 3, high) < 3 ||
+      CopyLow(symbol, tf, 0, 3, low) < 3)
+      return 0.0;
+   
+   double score = 0.0;
+   
+   if(direction == "BUY")
+   {
+      // Bougie haussière récente
+      if(close[0] > open[0]) score += 25.0;
+      
+      // Higher Highs et Higher Lows
+      if(high[0] > high[1] && low[0] > low[1]) score += 25.0;
+      
+      // Pas de nouvelle baisse significative
+      if(low[0] > low[1]) score += 25.0;
+      
+      // Momentum haussier
+      if(close[0] > close[1] && close[1] > close[2]) score += 25.0;
+   }
+   else // SELL
+   {
+      // Bougie baissière récente
+      if(close[0] < open[0]) score += 25.0;
+      
+      // Lower Lows et Lower Highs
+      if(low[0] < low[1] && high[0] < high[1]) score += 25.0;
+      
+      // Pas de nouvelle hausse significative
+      if(high[0] < high[1]) score += 25.0;
+      
+      // Momentum baissier
+      if(close[0] < close[1] && close[1] < close[2]) score += 25.0;
+   }
+   
+   return score;
+}
+
+//+------------------------------------------------------------------+
+//| Vérification Momentum sur timeframe spécifique                   |
+//+------------------------------------------------------------------+
+double CheckMomentumOnTimeframe(string symbol, string direction, ENUM_TIMEFRAMES tf)
+{
+   double score = 0.0;
+   
+   // RSI
+   double rsi = iRSI(symbol, tf, 14, PRICE_CLOSE);
+   if(rsi > 0)
+   {
+      if(direction == "BUY")
+      {
+         if(rsi > 50 && rsi < 70) score += 40.0;  // Zone haussière mais pas surachat
+         else if(rsi >= 70) score -= 20.0;        // Surachat
+         else score += 20.0;                       // Neutre/baissier mais acceptable
+      }
+      else // SELL
+      {
+         if(rsi < 50 && rsi > 30) score += 40.0;  // Zone baissière mais pas survente
+         else if(rsi <= 30) score -= 20.0;        // Survente
+         else score += 20.0;                       // Neutle/haussier mais acceptable
+      }
+   }
+   
+   // MACD
+   double macdMain = iMACD(symbol, tf, 12, 26, 9, PRICE_CLOSE, MODE_MAIN, 0);
+   double macdSignal = iMACD(symbol, tf, 12, 26, 9, PRICE_CLOSE, MODE_SIGNAL, 0);
+   
+   if(macdMain != 0 && macdSignal != 0)
+   {
+      if(direction == "BUY" && macdMain > macdSignal && macdMain > 0)
+         score += 30.0;
+      else if(direction == "SELL" && macdMain < macdSignal && macdMain < 0)
+         score += 30.0;
+      else if(direction == "BUY" && macdMain > macdSignal)
+         score += 15.0;
+      else if(direction == "SELL" && macdMain < macdSignal)
+         score += 15.0;
+   }
+   
+   // Stochastic
+   double stochMain = iStochastic(symbol, tf, 5, 3, 3, MODE_SMA, STO_LOWHIGH, MODE_MAIN, 0);
+   double stochSignal = iStochastic(symbol, tf, 5, 3, 3, MODE_SMA, STO_LOWHIGH, MODE_SIGNAL, 0);
+   
+   if(stochMain != 0 && stochSignal != 0)
+   {
+      if(direction == "BUY" && stochMain > stochSignal && stochMain < 80)
+         score += 30.0;
+      else if(direction == "SELL" && stochMain < stochSignal && stochMain > 20)
+         score += 30.0;
+      else if(direction == "BUY" && stochMain > stochSignal)
+         score += 15.0;
+      else if(direction == "SELL" && stochMain < stochSignal)
+         score += 15.0;
+   }
+   
+   return MathMax(0.0, MathMin(100.0, score));
 }
 
 //+------------------------------------------------------------------+

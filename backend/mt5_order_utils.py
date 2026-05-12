@@ -16,10 +16,18 @@ def connect_mt5():
         return False, "Login MT5 impossible."
     return True, "OK"
 
-def place_order_mt5(symbol, order_type, lot, price=None, sl=None, tp=None, max_loss_usd=3.0):
+def place_order_mt5(symbol, order_type, lot, price=None, sl=None, tp=None, max_loss_usd=3.0, max_positions=2):
     ok, msg = connect_mt5()
     if not ok:
         return False, msg
+
+    # Vérifier la limite de positions simultanées
+    max_positions_allowed = int(os.getenv("MT5_MAX_POSITIONS", str(max_positions)))
+    all_positions = mt5.positions_get()  # type: ignore
+    if all_positions and len(all_positions) >= max_positions_allowed:
+        mt5.shutdown()  # type: ignore
+        return False, f"Limite de positions atteinte : {len(all_positions)}/{max_positions_allowed} positions ouvertes. Fermez une position avant d'en ouvrir une nouvelle."
+
     # Bloquer l'ouverture d'ordres dupliqués pour le même symbole
     try:
         existing_positions = mt5.positions_get(symbol=symbol)  # type: ignore
