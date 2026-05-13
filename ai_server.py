@@ -2001,6 +2001,129 @@ AI_ENABLE_SUPABASE_CONTINUOUS_TRAINER = _env_bool("AI_ENABLE_SUPABASE_CONTINUOUS
 AI_CONTINUOUS_DEFAULT_INTERVAL_SEC = int(os.getenv("AI_CONTINUOUS_DEFAULT_INTERVAL_SEC", "3600" if RUNNING_ON_RENDER else "600"))
 AI_CONTINUOUS_MIN_INTERVAL_SEC = int(os.getenv("AI_CONTINUOUS_MIN_INTERVAL_SEC", "1800" if RUNNING_ON_RENDER else "300"))
 
+# Intégration TradingAgents (dépôt local) - boucle d'analyse temps réel
+AI_ENABLE_TRADINGAGENTS_RT = _env_bool("AI_ENABLE_TRADINGAGENTS_RT", default=False)
+AI_TRADINGAGENTS_INTERVAL_SEC = max(60, int(os.getenv("AI_TRADINGAGENTS_INTERVAL_SEC", "300")))
+AI_TRADINGAGENTS_REPO_PATH = (
+    os.getenv("AI_TRADINGAGENTS_REPO_PATH")
+    or r"D:\Dev\Depot Github\TradingAgents-main"
+).strip()
+AI_TRADINGAGENTS_SYMBOLS = [
+    s.strip().upper()
+    for s in (os.getenv("AI_TRADINGAGENTS_SYMBOLS", "") or "").split(",")
+    if s.strip()
+]
+_tradingagents_task: Optional[asyncio.Task] = None
+_tradingagents_cursor: int = 0
+_tradingagents_results: Dict[str, Dict[str, Any]] = {}
+_tradingagents_last_error: Optional[str] = None
+_tradingagents_lock = asyncio.Lock()
+
+
+def _import_tradingagents_local():
+    """Importe TradingAgents depuis un dépôt local configuré."""
+    repo_path = Path(AI_TRADINGAGENTS_REPO_PATH)
+    if not repo_path.exists():
+        raise FileNotFoundError(f"Répertoire TradingAgents introuvable: {repo_path}")
+    repo_str = str(repo_path)
+    if repo_str not in sys.path:
+        sys.path.insert(0, repo_str)
+    from tradingagents.graph.trading_graph import TradingAgentsGraph  # type: ignore
+    from tradingagents.default_config import DEFAULT_CONFIG as TA_DEFAULT_CONFIG  # type: ignore
+    return TradingAgentsGraph, TA_DEFAULT_CONFIG
+
+
+def _extract_tradingagents_recommendation(decision: Any) -> Dict[str, Any]:
+    """Normalise la décision TradingAgents en structure exploitable par le robot."""
+    payload = decision if isinstance(decision, dict) else {"raw": str(decision)}
+    recommendation = (
+        payload.get("recommendation")
+        or payload.get("action")
+        or payload.get("decision")
+        or payload.get("final_action")
+        or "HOLD"
+    )
+    confidence = payload.get("confidence", payload.get("score", 0.0))
+    try:
+        confidence = float(confidence)
+        if confidence > 1.0:
+            confidence = min(1.0, confidence / 100.0)
+    except Exception:
+        confidence = 0.0
+    reasoning = (
+        payload.get("reasoning")
+        or payload.get("summary")
+        or payload.get("analysis")
+        or str(payload)[:500]
+    )
+    return {
+        "recommendation": str(recommendation).upper(),
+        "confidence": max(0.0, min(1.0, confidence)),
+        "reasoning": str(reasoning),
+        "raw_decision": payload,
+    }
+
+
+async def _run_tradingagents_once(symbol: str) -> Dict[str, Any]:
+    """Exécute une analyse TradingAgents pour un symbole."""
+    symbol = (symbol or "").strip().upper()
+    if not symbol:
+        raise ValueError("symbol requis")
+
+    started_at = time.time()
+    TradingAgentsGraph, ta_default_config = _import_tradingagents_local()
+
+    def _sync_run() -> Dict[str, Any]:
+        cfg = ta_default_config.copy()
+        ta_graph = TradingAgentsGraph(debug=False, config=cfg)
+        today = datetime.utcnow().strftime("%Y-%m-%d")
+        _, decision = ta_graph.propagate(symbol, today)
+        return _extract_tradingagents_recommendation(decision)
+
+    normalized = await asyncio.to_thread(_sync_run)
+    return {
+        "symbol": symbol,
+        "status": "ok",
+        "ran_at": datetime.utcnow().isoformat(),
+        "latency_ms": (time.time() - started_at) * 1000.0,
+        **normalized,
+    }
+
+
+async def _tradingagents_realtime_loop() -> None:
+    """Boucle continue: 1 symbole toutes les N secondes (défaut 300s)."""
+    global _tradingagents_cursor, _tradingagents_last_error
+    logger.info(
+        "🧭 TradingAgents RT démarré: interval=%ss, symbols=%s",
+        AI_TRADINGAGENTS_INTERVAL_SEC,
+        ",".join(AI_TRADINGAGENTS_SYMBOLS) or "(none)",
+    )
+    while True:
+        try:
+            if not AI_TRADINGAGENTS_SYMBOLS:
+                await asyncio.sleep(max(60, AI_TRADINGAGENTS_INTERVAL_SEC))
+                continue
+
+            symbol = AI_TRADINGAGENTS_SYMBOLS[_tradingagents_cursor % len(AI_TRADINGAGENTS_SYMBOLS)]
+            _tradingagents_cursor += 1
+            result = await _run_tradingagents_once(symbol)
+            async with _tradingagents_lock:
+                _tradingagents_results[symbol] = result
+                _tradingagents_last_error = None
+            logger.info(
+                "✅ TradingAgents RT %s -> %s (conf=%.2f, %.0fms)",
+                symbol,
+                result.get("recommendation"),
+                float(result.get("confidence", 0.0)),
+                float(result.get("latency_ms", 0.0)),
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            _tradingagents_last_error = str(e)
+            logger.error("❌ TradingAgents RT erreur: %s", e, exc_info=True)
+        await asyncio.sleep(AI_TRADINGAGENTS_INTERVAL_SEC)
+
 # Fonction pour créer un répertoire avec gestion des erreurs
 def safe_makedirs(path, mode=0o755):
     try:
@@ -3154,6 +3277,7 @@ CREATE INDEX IF NOT EXISTS idx_trade_feedback_created_at ON trade_feedback(creat
 @app.on_event("startup")
 async def startup_event():
     """Initialize database on startup"""
+    global _tradingagents_task
     if AI_LOW_POWER_MODE:
         logger.info("🔋 AI_LOW_POWER_MODE actif: réduction des tâches de fond non essentielles")
 
@@ -3204,9 +3328,20 @@ async def startup_event():
     except Exception as e:
         logger.error(f"❌ Erreur démarrage entraînement continu: {e}", exc_info=True)
 
+    # Démarrer la boucle d'analyse TradingAgents (optionnelle, dépôt local)
+    if AI_ENABLE_TRADINGAGENTS_RT:
+        if not AI_TRADINGAGENTS_SYMBOLS:
+            logger.warning("⚠️ TradingAgents RT activé mais aucun symbole (AI_TRADINGAGENTS_SYMBOLS vide)")
+        elif _tradingagents_task is None or _tradingagents_task.done():
+            _tradingagents_task = asyncio.create_task(_tradingagents_realtime_loop())
+            logger.info("✅ Boucle TradingAgents RT démarrée (%ss)", AI_TRADINGAGENTS_INTERVAL_SEC)
+    else:
+        logger.info("ℹ️ TradingAgents RT désactivé (AI_ENABLE_TRADINGAGENTS_RT=false)")
+
 @app.on_event("shutdown")
 async def shutdown_event():
     """Close database pool on shutdown"""
+    global _tradingagents_task
     if hasattr(app.state, "db_pool") and app.state.db_pool:
         await app.state.db_pool.close()
         logger.info("🔒 Pool PostgreSQL fermé")
@@ -3218,6 +3353,12 @@ async def shutdown_event():
             logger.info("🛑 Système ML arrêté")
         except Exception as e:
             logger.error(f"❌ Erreur arrêt système ML: {e}")
+
+    if _tradingagents_task and not _tradingagents_task.done():
+        _tradingagents_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await _tradingagents_task
+        logger.info("🛑 Boucle TradingAgents RT arrêtée")
 
 
 async def train_models_on_startup():
@@ -5686,7 +5827,8 @@ async def decision_simplified(request: DecisionRequest):
     stop_loss = None
     take_profit = None
     qwen_sched_note = "QWEN=OFF"
-    if _env_bool("ENABLE_QWEN_DECISION_BLEND", True):
+    # Désactivé par défaut : Qwen/Ollama ne doit pas piloter /decision (analyses séparées /analyze/ollama si besoin).
+    if _env_bool("ENABLE_QWEN_DECISION_BLEND", False):
         try:
             # Charger la config runtime (permet override via .env sans redéployer)
             global QWEN_ROTATION_ENABLED, QWEN_ROTATION_STEP_SECONDS, QWEN_SYMBOL_REVISIT_SECONDS
@@ -7802,6 +7944,15 @@ async def status():
         "symbol_propice": {
             "cache_profiles": len(symbol_hour_profile_cache),
             "cache_status": len(symbol_hour_status_cache),
+        },
+        "tradingagents_rt": {
+            "enabled": AI_ENABLE_TRADINGAGENTS_RT,
+            "interval_sec": AI_TRADINGAGENTS_INTERVAL_SEC,
+            "repo_path": AI_TRADINGAGENTS_REPO_PATH,
+            "symbols": AI_TRADINGAGENTS_SYMBOLS,
+            "task_running": bool(_tradingagents_task and not _tradingagents_task.done()),
+            "last_error": _tradingagents_last_error,
+            "results_cached": len(_tradingagents_results),
         },
     }
 
@@ -17320,6 +17471,35 @@ async def analyze_with_ollama(request: OllamaAnalysisRequest):
         
     except Exception as e:
         logger.error(f"Erreur endpoint /analyze/ollama: {type(e).__name__}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/tradingagents/realtime/status")
+async def tradingagents_realtime_status():
+    """Statut de la boucle d'analyse TradingAgents temps réel."""
+    async with _tradingagents_lock:
+        results = dict(_tradingagents_results)
+    return {
+        "enabled": AI_ENABLE_TRADINGAGENTS_RT,
+        "interval_sec": AI_TRADINGAGENTS_INTERVAL_SEC,
+        "repo_path": AI_TRADINGAGENTS_REPO_PATH,
+        "symbols": AI_TRADINGAGENTS_SYMBOLS,
+        "task_running": bool(_tradingagents_task and not _tradingagents_task.done()),
+        "last_error": _tradingagents_last_error,
+        "results": results,
+    }
+
+
+@app.post("/tradingagents/realtime/run-once")
+async def tradingagents_realtime_run_once(symbol: str):
+    """Exécute immédiatement une analyse TradingAgents pour un symbole."""
+    try:
+        result = await _run_tradingagents_once(symbol)
+        async with _tradingagents_lock:
+            _tradingagents_results[result["symbol"]] = result
+        return result
+    except Exception as e:
+        logger.error("Erreur run-once TradingAgents (%s): %s", symbol, e, exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
