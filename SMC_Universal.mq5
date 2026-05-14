@@ -129,6 +129,7 @@ input bool   GomEntryCrossKeepPlanIfNoClose = true; // franchissement niveau mai
 input bool   SpikeClosedNotifyOnlyExactSpike = true; // notification « Spike fermé » uniquement si vrai motif spike + gain ≥ seuil
 input double SpikeClosedNotifyMinProfitUSD = 0.10; // $ — évite « spike fermé » sur micro-gain ou fermeture « profil scalping »
 input bool   SpikeAutoCloseAllowLightLossExit = true; // si true : ferme aussi sur perte légère (≤ -0,50$) dans ManageBoomCrashSpikeClose — ACTIVÉ pour fermer rapidement
+input bool   SpikeCapturedRequireRealSpike = true; // Exiger mouvement rapide prix (0.3% en 5s) avant fermeture spike — ÉVITE fausses alertes sans position
 
 input bool   EnableExternalAIInterpretation = false; // /gom/interpret (optionnel, hors verdict GOM)
 input string ExternalAIUrl = "http://127.0.0.1:8000/gom/interpret";
@@ -303,6 +304,8 @@ static string   g_lastExtAiReason = "";
 CTrade          g_gomSpikeTrade;
 static datetime g_gomLastSpikeCaptureCloseUtc = 0;
 static datetime g_gomLastSpikeCapturedNoCloseNotifyUtc = 0;
+static double   g_gomLastPriceForSpikeDetection = 0.0;  // Tracker mouvement prix pour spike réel
+static datetime g_gomLastSpikeDetectionTime = 0;        // Timestamp dernière détection spike
 
 static datetime g_gomLastSpikeM5PendingTime = 0;
 static datetime g_gomLastSpikeImminentFirstTime = 0;
@@ -3984,6 +3987,51 @@ int GOM_ClosePositionsAfterSpikeCapture(const bool buySpikeCaptured, const bool 
       return 0;
    }
 
+   // ✅ NOUVEAU: Vérifier qu'il s'agit d'un vrai spike Boom/Crash (mouvement rapide négatif → positif)
+   datetime now = TimeCurrent();
+   double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   bool isRealSpike = false;
+
+   // Détection spike rapide (5 dernières secondes max)
+   if(g_gomLastSpikeDetectionTime > 0 && (now - g_gomLastSpikeDetectionTime) <= 5)
+   {
+      if(g_gomLastPriceForSpikeDetection > 0.0)
+      {
+         double priceChange = currentPrice - g_gomLastPriceForSpikeDetection;
+         double priceChangePct = (priceChange / g_gomLastPriceForSpikeDetection) * 100.0;
+
+         // Boom: mouvement haussier rapide (min 0.3%)
+         if(buySpikeCaptured && StringFind(_Symbol, "Boom") >= 0 && priceChangePct >= 0.3)
+         {
+            isRealSpike = true;
+            Print("✅ SPIKE BOOM RÉEL détecté: +", DoubleToString(priceChangePct, 2), "% en ", (now - g_gomLastSpikeDetectionTime), "s");
+         }
+
+         // Crash: mouvement baissier rapide (min -0.3%)
+         if(sellSpikeCaptured && StringFind(_Symbol, "Crash") >= 0 && priceChangePct <= -0.3)
+         {
+            isRealSpike = true;
+            Print("✅ SPIKE CRASH RÉEL détecté: ", DoubleToString(priceChangePct, 2), "% en ", (now - g_gomLastSpikeDetectionTime), "s");
+         }
+      }
+   }
+
+   // Mettre à jour le prix de référence pour la prochaine détection
+   g_gomLastPriceForSpikeDetection = currentPrice;
+   g_gomLastSpikeDetectionTime = now;
+
+   // Si pas de spike réel détecté ET qu'on exige un vrai spike, sortir
+   if(SpikeCapturedRequireRealSpike && !isRealSpike)
+   {
+      static datetime lastNoSpikeLog = 0;
+      if(now - lastNoSpikeLog >= 30)
+      {
+         Print("⚠️ Niveau GOM franchi mais pas de spike rapide détecté (variation < 0.3% en 5s) — fermeture annulée");
+         lastNoSpikeLog = now;
+      }
+      return 0;
+   }
+
    datetime now = TimeCurrent();
    if(g_gomLastSpikeCaptureCloseUtc > 0 && (now - g_gomLastSpikeCaptureCloseUtc) < 1)
       return 0;
@@ -4100,17 +4148,16 @@ void GOM_CheckCaptureSpikeAndCleanup(void)
    if(captured)
    {
       int closedN = GOM_ClosePositionsAfterSpikeCapture(buyCaptured, sellCaptured);
+
+      // ❌ CORRECTION: NE PAS notifier si aucune position fermée (pas de spike réel sur position ouverte)
+      // L'ancienne logique notifiait même sans position, ce qui créait des fausses alertes
       if(closedN == 0)
       {
-         datetime nowCap = TimeCurrent();
-         if(nowCap - g_gomLastSpikeCapturedNoCloseNotifyUtc >= 90)
-         {
-            g_gomLastSpikeCapturedNoCloseNotifyUtc = nowCap;
-            GOM_AlertPush("Spike capturé",
-                          "Niveau GOM franchi — aucune position fermée (sens opposé, filtre magic, ou P/L). Vérifier GomSpikeCapturedCloseAnyProfit.",
-                          NotifySoundSpike);
-         }
+         // Log silencieux pour diagnostic, pas de notification push
+         Print("⚠️ GOM niveau franchi mais aucune position fermée | BUY=", (buyCaptured ? "OUI" : "NON"),
+               " | SELL=", (sellCaptured ? "OUI" : "NON"), " | positions=", PositionsTotal());
       }
+
       if(closedN > 0 || !GomEntryCrossKeepPlanIfNoClose)
       {
       GlobalVariableSet(prefix + "_BUY_ENTRY", 0.0);
