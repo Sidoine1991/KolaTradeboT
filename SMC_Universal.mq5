@@ -307,10 +307,6 @@ static datetime g_gomLastSpikeCapturedNoCloseNotifyUtc = 0;
 static double   g_gomLastPriceForSpikeDetection = 0.0;  // Tracker mouvement prix pour spike réel
 static datetime g_gomLastSpikeDetectionTime = 0;        // Timestamp dernière détection spike
 
-// Instances Spike Detector + Trailing Stop avancé Boom/Crash
-CSpikeDetector           g_spikeDetector;
-CBoomCrashTrailingStop   g_boomCrashTrailing;
-
 static datetime g_gomLastSpikeM5PendingTime = 0;
 static datetime g_gomLastSpikeImminentFirstTime = 0;
 static datetime g_doubleSpikeFirstTs = 0;
@@ -6817,6 +6813,12 @@ bool IsBoomSymbol(const string symbol)
    StringToUpper(s);
    return (StringFind(s, "BOOM") >= 0);
 }
+
+//+------------------------------------------------------------------+
+//| Instances Globales Spike Detector + Trailing Stop               |
+//+------------------------------------------------------------------+
+CSpikeDetector           g_spikeDetector;
+CBoomCrashTrailingStop   g_boomCrashTrailing;
 
 bool IsCrashSymbol(const string symbol)
 {
