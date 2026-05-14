@@ -307,6 +307,10 @@ static datetime g_gomLastSpikeCapturedNoCloseNotifyUtc = 0;
 static double   g_gomLastPriceForSpikeDetection = 0.0;  // Tracker mouvement prix pour spike réel
 static datetime g_gomLastSpikeDetectionTime = 0;        // Timestamp dernière détection spike
 
+// Instances Spike Detector + Trailing Stop avancé Boom/Crash
+CSpikeDetector           g_spikeDetector;
+CBoomCrashTrailingStop   g_boomCrashTrailing;
+
 static datetime g_gomLastSpikeM5PendingTime = 0;
 static datetime g_gomLastSpikeImminentFirstTime = 0;
 static datetime g_doubleSpikeFirstTs = 0;
@@ -6537,6 +6541,250 @@ enum ENUM_SYMBOL_CATEGORY {
    SYM_METAL,
    SYM_UNKNOWN
 };
+
+//+------------------------------------------------------------------+
+//| Classe de Détection de Spike Boom/Crash (Simple et Rapide)      |
+//+------------------------------------------------------------------+
+class CSpikeDetector
+{
+private:
+   string   m_symbol;
+   double   m_lastPrice;
+   datetime m_lastPriceTime;
+   double   m_spikeThreshold;    // 0.003 = 0.3%
+   int      m_spikeTimeWindow;   // 5 secondes
+
+public:
+   CSpikeDetector()
+   {
+      m_symbol = "";
+      m_spikeThreshold = 0.003;
+      m_spikeTimeWindow = 5;
+      m_lastPrice = 0.0;
+      m_lastPriceTime = 0;
+   }
+
+   void Init(string symbol, double threshold = 0.003, int timeWindow = 5)
+   {
+      m_symbol = symbol;
+      m_spikeThreshold = threshold;
+      m_spikeTimeWindow = timeWindow;
+      m_lastPrice = 0.0;
+      m_lastPriceTime = 0;
+   }
+
+   // Détection spike rapide (mouvement négatif → positif)
+   bool DetectSpike(string &direction, double &spikePercent)
+   {
+      if(m_symbol == "") return false;
+
+      datetime now = TimeCurrent();
+      double currentPrice = SymbolInfoDouble(m_symbol, SYMBOL_BID);
+
+      // Initialisation première fois
+      if(m_lastPriceTime == 0 || m_lastPrice <= 0.0)
+      {
+         m_lastPrice = currentPrice;
+         m_lastPriceTime = now;
+         return false;
+      }
+
+      // Vérifier fenêtre de temps
+      int elapsed = (int)(now - m_lastPriceTime);
+      if(elapsed > m_spikeTimeWindow || elapsed <= 0)
+      {
+         m_lastPrice = currentPrice;
+         m_lastPriceTime = now;
+         return false;
+      }
+
+      // Calculer variation %
+      double priceChange = currentPrice - m_lastPrice;
+      spikePercent = (priceChange / m_lastPrice) * 100.0;
+
+      bool detected = false;
+
+      // Détection Boom (spike haussier)
+      if(StringFind(m_symbol, "Boom") >= 0 && spikePercent >= m_spikeThreshold * 100.0)
+      {
+         direction = "BUY";
+         detected = true;
+      }
+
+      // Détection Crash (spike baissier)
+      if(StringFind(m_symbol, "Crash") >= 0 && spikePercent <= -m_spikeThreshold * 100.0)
+      {
+         direction = "SELL";
+         detected = true;
+      }
+
+      if(detected)
+      {
+         // Reset pour prochaine détection
+         m_lastPrice = currentPrice;
+         m_lastPriceTime = now;
+      }
+
+      return detected;
+   }
+};
+
+//+------------------------------------------------------------------+
+//| Classe Trailing Stop Spécial Boom/Crash (Spike-Aware)           |
+//+------------------------------------------------------------------+
+class CBoomCrashTrailingStop
+{
+private:
+   string   m_symbol;
+   ulong    m_positionTicket;
+   double   m_distanceInitial;    // 0.0015 = 0.15%
+   double   m_distanceSpike;      // 0.0010 = 0.10%
+   double   m_stepPercent;        // 0.0005 = 0.05%
+   double   m_minProfitUSD;       // 0.10 = 0.10$
+   double   m_highestPrice;       // Plus haut atteint (BUY)
+   double   m_lowestPrice;        // Plus bas atteint (SELL)
+   bool     m_spikeMode;          // Mode agressif activé
+   CTrade   m_trade;
+
+public:
+   ulong    positionTicket;       // Public pour vérification externe
+
+   CBoomCrashTrailingStop()
+   {
+      m_symbol = "";
+      m_positionTicket = 0;
+      positionTicket = 0;
+      m_distanceInitial = 0.0015;  // 0.15%
+      m_distanceSpike = 0.0010;    // 0.10%
+      m_stepPercent = 0.0005;      // 0.05%
+      m_minProfitUSD = 0.10;
+      m_highestPrice = 0.0;
+      m_lowestPrice = 0.0;
+      m_spikeMode = false;
+   }
+
+   void SetParameters(double distanceInitial, double distanceSpike, double step, double minProfit)
+   {
+      m_distanceInitial = distanceInitial;
+      m_distanceSpike = distanceSpike;
+      m_stepPercent = step;
+      m_minProfitUSD = minProfit;
+   }
+
+   void Init(ulong ticket, string symbol)
+   {
+      m_positionTicket = ticket;
+      positionTicket = ticket;
+      m_symbol = symbol;
+
+      if(!PositionSelectByTicket(ticket)) return;
+
+      ENUM_POSITION_TYPE ptype = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+      double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+
+      if(ptype == POSITION_TYPE_BUY)
+      {
+         m_highestPrice = openPrice;
+         m_lowestPrice = 0.0;
+      }
+      else
+      {
+         m_lowestPrice = openPrice;
+         m_highestPrice = 0.0;
+      }
+
+      m_spikeMode = false;
+   }
+
+   void Update(bool spikeDetected = false)
+   {
+      if(m_positionTicket == 0) return;
+      if(!PositionSelectByTicket(m_positionTicket)) return;
+
+      ENUM_POSITION_TYPE ptype = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+      double currentPrice = (ptype == POSITION_TYPE_BUY) ?
+                           SymbolInfoDouble(m_symbol, SYMBOL_BID) :
+                           SymbolInfoDouble(m_symbol, SYMBOL_ASK);
+
+      double profit = PositionGetDouble(POSITION_PROFIT);
+      double swap = PositionGetDouble(POSITION_SWAP);
+      double netProfit = profit + swap;
+
+      // Activer mode spike si détecté ET profit > seuil
+      if(spikeDetected && netProfit >= m_minProfitUSD)
+      {
+         if(!m_spikeMode)
+         {
+            m_spikeMode = true;
+            Print("🚀 MODE SPIKE TRAILING activé | Ticket: ", m_positionTicket,
+                  " | Profit: ", DoubleToString(netProfit, 2), "$");
+         }
+      }
+
+      // Position BUY
+      if(ptype == POSITION_TYPE_BUY)
+      {
+         if(currentPrice > m_highestPrice || m_highestPrice == 0.0)
+            m_highestPrice = currentPrice;
+
+         double distance = m_spikeMode ? m_distanceSpike : m_distanceInitial;
+         double newSL = m_highestPrice * (1.0 - distance);
+
+         // Arrondir
+         double tickSize = SymbolInfoDouble(m_symbol, SYMBOL_TRADE_TICK_SIZE);
+         if(tickSize > 0)
+            newSL = MathRound(newSL / tickSize) * tickSize;
+
+         double currentSL = PositionGetDouble(POSITION_SL);
+         if(newSL > currentSL + m_stepPercent * currentPrice)
+         {
+            double tp = PositionGetDouble(POSITION_TP);
+            if(m_trade.PositionModify(m_positionTicket, newSL, tp))
+            {
+               static datetime lastLog = 0;
+               if(TimeCurrent() - lastLog >= 5)
+               {
+                  Print("✅ Boom/Crash Trailing BUY | Ticket: ", m_positionTicket,
+                        " | SL: ", DoubleToString(newSL, _Digits),
+                        " | Mode: ", (m_spikeMode ? "SPIKE" : "NORMAL"));
+                  lastLog = TimeCurrent();
+               }
+            }
+         }
+      }
+      // Position SELL
+      else
+      {
+         if(currentPrice < m_lowestPrice || m_lowestPrice == 0.0)
+            m_lowestPrice = currentPrice;
+
+         double distance = m_spikeMode ? m_distanceSpike : m_distanceInitial;
+         double newSL = m_lowestPrice * (1.0 + distance);
+
+         double tickSize = SymbolInfoDouble(m_symbol, SYMBOL_TRADE_TICK_SIZE);
+         if(tickSize > 0)
+            newSL = MathRound(newSL / tickSize) * tickSize;
+
+         double currentSL = PositionGetDouble(POSITION_SL);
+         if(currentSL == 0.0 || newSL < currentSL - m_stepPercent * currentPrice)
+         {
+            double tp = PositionGetDouble(POSITION_TP);
+            if(m_trade.PositionModify(m_positionTicket, newSL, tp))
+            {
+               static datetime lastLog = 0;
+               if(TimeCurrent() - lastLog >= 5)
+               {
+                  Print("✅ Boom/Crash Trailing SELL | Ticket: ", m_positionTicket,
+                        " | SL: ", DoubleToString(newSL, _Digits),
+                        " | Mode: ", (m_spikeMode ? "SPIKE" : "NORMAL"));
+                  lastLog = TimeCurrent();
+               }
+            }
+         }
+      }
+   }
+};
+
 ENUM_SYMBOL_CATEGORY SMC_GetSymbolCategory(string symbol)
 {
    string s = symbol;
@@ -8349,6 +8597,15 @@ input double TrailingStop_ATRMult = 3.0;  // Distance Trailing Stop (x ATR) - mo
 input double TrailingStartProfitDollars = 1.00; // Trailing / lock gain : activer seulement à partir de ce profit ($)
 input bool   DynamicSL_Enable = true;               // SL dynamique (BE + trailing + lock gain max)
 input double DynamicSL_StartProfitDollars = 1.00;   // Activer protection gain à partir de ce profit ($)
+
+input group "=== TRAILING STOP AVANCÉ BOOM/CRASH (spike-aware) ==="
+input bool   EnableBoomCrashAdvancedTrailing = true;  // Activer trailing spécial Boom/Crash (détection spike)
+input double BoomCrashTrailingInitialPct = 0.15;      // Distance initiale % (0.15 = 0.15%)
+input double BoomCrashTrailingSpikePct = 0.10;        // Distance spike % (0.10 = 0.10% - agressif après spike)
+input double BoomCrashTrailingStepPct = 0.05;         // Step % (0.05 = 0.05% - suit chaque mouvement)
+input double BoomCrashTrailingSpikeMinProfit = 0.10;  // Profit min $ pour mode spike (0.10 = 0.10$)
+input double BoomCrashSpikeDetectionThreshold = 0.30; // Seuil détection spike % (0.30 = 0.30% en 5s)
+input int    BoomCrashSpikeDetectionWindow = 5;       // Fenêtre détection spike (secondes)
 input double DynamicSL_LockPctOfMax = 0.70;         // Garder au moins X% du pic de gain en $ (0.70 = au plus ~30% de rendu du pic)
 input int    DynamicSL_BE_BufferPoints = 5;         // Marge break-even (points)
 
@@ -10481,6 +10738,21 @@ int OnInit()
       if(UseDashboard)
          UpdateDashboard();
    }
+
+   // Initialiser Spike Detector + Trailing Stop avancé Boom/Crash
+   if(EnableBoomCrashAdvancedTrailing)
+   {
+      g_spikeDetector.Init(_Symbol, BoomCrashSpikeDetectionThreshold / 100.0, BoomCrashSpikeDetectionWindow);
+      g_boomCrashTrailing.SetParameters(
+         BoomCrashTrailingInitialPct / 100.0,
+         BoomCrashTrailingSpikePct / 100.0,
+         BoomCrashTrailingStepPct / 100.0,
+         BoomCrashTrailingSpikeMinProfit
+      );
+      Print("✅ Trailing Stop Avancé Boom/Crash activé | Initial: ", BoomCrashTrailingInitialPct,
+            "% | Spike: ", BoomCrashTrailingSpikePct, "% | Seuil spike: ", BoomCrashSpikeDetectionThreshold, "%");
+   }
+
    return INIT_SUCCEEDED;
 }
 
@@ -13011,7 +13283,50 @@ void OnTick()
    }
    else
    {
-      ManageTrailingStop(); // OBLIGATOIRE - s'exécute toujours
+      // 🎯 NOUVEAU: Détection spike + Trailing Stop avancé Boom/Crash (avant trailing classique)
+      if(EnableBoomCrashAdvancedTrailing)
+      {
+         ENUM_SYMBOL_CATEGORY cat = SMC_GetSymbolCategory(_Symbol);
+         if(cat == SYM_BOOM_CRASH)
+         {
+            // 1. Détecter spike
+            string spikeDirection = "";
+            double spikePercent = 0.0;
+            bool spikeDetected = g_spikeDetector.DetectSpike(spikeDirection, spikePercent);
+
+            if(spikeDetected)
+            {
+               Print("🎯 SPIKE DÉTECTÉ ", _Symbol, " | ", spikeDirection, " | ",
+                     DoubleToString(spikePercent, 2), "% en ", BoomCrashSpikeDetectionWindow, "s");
+            }
+
+            // 2. Gérer trailing stop avancé sur positions Boom/Crash
+            for(int i = PositionsTotal() - 1; i >= 0; i--)
+            {
+               ulong ticket = PositionGetTicket(i);
+               if(ticket == 0) continue;
+
+               if(!PositionSelectByTicket(ticket)) continue;
+               if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
+
+               // Vérifier si c'est notre EA
+               long mg = (long)PositionGetInteger(POSITION_MAGIC);
+               if(mg != InpMagicNumber) continue;
+
+               // Initialiser trailing si nouvelle position
+               if(g_boomCrashTrailing.positionTicket != ticket)
+               {
+                  g_boomCrashTrailing.Init(ticket, _Symbol);
+                  Print("🎯 Trailing Boom/Crash initialisé pour position #", ticket);
+               }
+
+               // Mettre à jour trailing (mode spike si détecté)
+               g_boomCrashTrailing.Update(spikeDetected);
+            }
+         }
+      }
+
+      ManageTrailingStop(); // OBLIGATOIRE - s'exécute toujours (trailing classique pour autres symboles)
    }
    
    // Si on est en mode ultra léger: ne pas lancer l'IA ni mettre à jour les graphiques/dashboard
