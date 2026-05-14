@@ -63,6 +63,19 @@ def _get_supabase_config(strict: bool = True) -> Tuple[str, str]:
 
     return supabase_url, supabase_key
 
+
+def _supabase_credentials_ready() -> bool:
+    """True si URL + clé service/anon présentes (sans lever d'exception)."""
+    url = (os.getenv("SUPABASE_URL") or "").strip()
+    key = (
+        os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+        or os.getenv("SUPABASE_SERVICE_KEY")
+        or os.getenv("SUPABASE_ANON_KEY")
+        or ""
+    ).strip()
+    return bool(url and key)
+
+
 # Configurer le logger avant les imports d'améliorations
 logger = logging.getLogger("tradbot_ai")
 
@@ -1988,9 +2001,12 @@ AI_CONTINUOUS_MIN_INTERVAL_SEC = int(os.getenv("AI_CONTINUOUS_MIN_INTERVAL_SEC",
 # Intégration TradingAgents (dépôt local). La boucle temps réel est **désactivée par défaut** :
 # exécution manuelle via CLI TradingAgents + POST /tradingagents/manual-report, puis /decision côté MT5.
 # Activer explicitement la boucle serveur : AI_ENABLE_TRADINGAGENTS_AUTO_LOOP=true
+# Exécuter aussi POST /tradingagents/realtime/run-once depuis MT5 : AI_TRADINGAGENTS_ALLOW_HTTP_RUNS=true (défaut false).
 # Fusion ordres (limite/stop) dans la réponse /decision si aligné avec l'action : AI_TRADINGAGENTS_EXEC_MERGE_ENABLED (défaut true),
 # seuil confiance AI_TRADINGAGENTS_EXEC_MERGE_MIN_CONF (défaut 0.55), SL/TP depuis TA : AI_TRADINGAGENTS_MERGE_STOPS_FROM_TA (défaut true).
 AI_ENABLE_TRADINGAGENTS_AUTO_LOOP = _env_bool("AI_ENABLE_TRADINGAGENTS_AUTO_LOOP", default=False)
+# Par défaut: ne pas exécuter TradingAgents depuis POST /tradingagents/realtime/run-once (MT5) — lancer TA en CLI + manual-report.
+AI_TRADINGAGENTS_ALLOW_HTTP_RUNS = _env_bool("AI_TRADINGAGENTS_ALLOW_HTTP_RUNS", default=False)
 AI_TRADINGAGENTS_MANUAL_TTL_SEC = max(60, int(os.getenv("AI_TRADINGAGENTS_MANUAL_TTL_SEC", "1800")))
 AI_TRADINGAGENTS_INTERVAL_SEC = max(60, int(os.getenv("AI_TRADINGAGENTS_INTERVAL_SEC", "300")))
 AI_TRADINGAGENTS_REPO_PATH = (
@@ -2012,6 +2028,7 @@ _tradingagents_lock = asyncio.Lock()
 _tradingagents_manual_reports: Dict[str, Dict[str, Any]] = {}
 _tradingagents_manual_lock = asyncio.Lock()
 _TRADINGAGENTS_MT5_MAX_SYMBOLS = max(1, min(64, int(os.getenv("AI_TRADINGAGENTS_MT5_MAX_SYMBOLS", "32"))))
+_tradingagents_cred_warned = False
 
 
 def _normalize_tradingagents_symbol_list(symbols: List[str]) -> List[str]:
@@ -2284,6 +2301,7 @@ def _tradingagents_build_cfg_nvidia_nim_fallback(ta_default_config: Dict[str, An
 
 async def _run_tradingagents_once(symbol: str) -> Dict[str, Any]:
     """Exécute une analyse TradingAgents pour un symbole (repli OpenAI si quota Google)."""
+    global _tradingagents_cred_warned
     symbol = (symbol or "").strip().upper()
     if not symbol:
         raise ValueError("symbol requis")
@@ -2317,7 +2335,19 @@ async def _run_tradingagents_once(symbol: str) -> Dict[str, Any]:
         }
     except Exception as e:
         err_s = str(e)
-        logger.warning("TradingAgents primary run failed (%s): %s", symbol, err_s[:500])
+        cred_missing = "Missing credentials" in err_s or (
+            "api_key" in err_s.lower() and ("OPENAI" in err_s or "openai" in err_s)
+        )
+        if cred_missing:
+            if not _tradingagents_cred_warned:
+                _tradingagents_cred_warned = True
+                logger.info(
+                    "TradingAgents: clés LLM absentes — exécution primaire ignorée "
+                    "(activer AI_TRADINGAGENTS_ALLOW_HTTP_RUNS=true uniquement si configuré)."
+                )
+            logger.debug("TradingAgents primary run failed (%s): %s", symbol, err_s[:500])
+        else:
+            logger.warning("TradingAgents primary run failed (%s): %s", symbol, err_s[:500])
 
         use_fb = _env_bool("AI_TRADINGAGENTS_FALLBACK_OPENAI", True)
         oa_key = (os.getenv("OPENAI_API_KEY") or "").strip()
@@ -3708,7 +3738,10 @@ async def startup_event():
             _tradingagents_task = asyncio.create_task(_tradingagents_realtime_loop())
             logger.info("✅ Boucle TradingAgents auto démarrée (%ss)", AI_TRADINGAGENTS_INTERVAL_SEC)
     else:
-        logger.info("ℹ️ TradingAgents auto-loop désactivée (AI_ENABLE_TRADINGAGENTS_AUTO_LOOP=false) — utiliser CLI + POST /tradingagents/manual-report")
+        logger.info(
+            "ℹ️ TradingAgents: boucle serveur désactivée (AI_ENABLE_TRADINGAGENTS_AUTO_LOOP=false); "
+            "run-once HTTP désactivé par défaut (AI_TRADINGAGENTS_ALLOW_HTTP_RUNS=false) — CLI + POST /tradingagents/manual-report"
+        )
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -4231,6 +4264,8 @@ async def _compute_propice_top_from_trade_feedback(
     Approche: pour l'heure UTC courante, agréger (wins/losses/net_profit/samples) sur les trades clôturés
     et produire un propice_score 0..1.
     """
+    if not _supabase_credentials_ready():
+        return {"rows": [], "source": "none", "note": "persistence_off"}
     supabase_url, supabase_key = _get_supabase_config(strict=True)
     import httpx
     from datetime import timezone
@@ -4412,6 +4447,24 @@ async def get_dashboard_top_net_summary(timeframe: str = "M1", days: int = 30, t
     - Performance globale modèle (%) basée sur symbol_prediction_score_daily pondéré par samples
     """
     try:
+        if not _supabase_credentials_ready():
+            d = int(max(1, min(365, days)))
+            n = int(max(1, min(5, top_n)))
+            tf = (timeframe or "M1").upper()
+            out: Dict[str, Any] = {
+                "timeframe": tf,
+                "window_days": d,
+                "global_model_perf_pct": 0.0,
+                "global_model_samples": 0,
+                "top_count": 0,
+                "updated_at": datetime.utcnow().isoformat(),
+                "persistence": "off",
+            }
+            for i in range(3):
+                idx = i + 1
+                out[f"top{idx}_symbol"] = "N/A"
+                out[f"top{idx}_net_usd"] = 0.0
+            return out
         supabase_url, supabase_key = _get_supabase_config(strict=True)
         import httpx
         d = int(max(1, min(365, days)))
@@ -8406,6 +8459,7 @@ async def status():
         },
         "tradingagents_rt": {
             "auto_loop_enabled": AI_ENABLE_TRADINGAGENTS_AUTO_LOOP,
+            "allow_http_runs": AI_TRADINGAGENTS_ALLOW_HTTP_RUNS,
             "manual_report_ttl_sec": AI_TRADINGAGENTS_MANUAL_TTL_SEC,
             "manual_reports_cached": len(_tradingagents_manual_reports),
             "interval_sec": AI_TRADINGAGENTS_INTERVAL_SEC,
@@ -12231,6 +12285,17 @@ async def robot_predict_ohlc_profile(symbol: str, timeframe: str = "M1"):
 async def get_symbol_prediction_score(symbol: str, timeframe: str = "M1", days: int = 30):
     """Retourne le score agrégé récent d'un symbole depuis Supabase."""
     try:
+        if not _supabase_credentials_ready():
+            d = int(max(1, min(180, days)))
+            return {
+                "symbol": symbol,
+                "timeframe": timeframe.upper(),
+                "window_days": d,
+                "score": None,
+                "samples": 0,
+                "rows": [],
+                "persistence": "off",
+            }
         supabase_url, supabase_key = _get_supabase_config(strict=True)
         import httpx
 
@@ -12918,12 +12983,18 @@ async def upload_mt5_deals(request: MT5DealsUploadRequest):
     Payload: {"deals":[{mt5_deal_id, position_id, symbol, profit, is_win, close_time, price, magic}, ...]}
     """
     try:
-        try:
-            supabase_url, supabase_key = _get_supabase_config(strict=True)
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
-
         deals = request.deals or []
+        if not _supabase_credentials_ready():
+            return {
+                "ok": True,
+                "received": len(deals),
+                "kept": 0,
+                "skipped": len(deals),
+                "upsert_attempted": 0,
+                "persistence": "off",
+            }
+        supabase_url, supabase_key = _get_supabase_config(strict=True)
+
         if not deals:
             return {"ok": True, "received": 0, "upserted": 0}
 
@@ -13057,10 +13128,16 @@ async def upload_mt5_symbol_trade_stats(request: MT5SymbolTradeStatsUploadReques
     Périodes attendues: UTC.
     """
     try:
-        try:
-            supabase_url, supabase_key = _get_supabase_config(strict=True)
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
+        if not _supabase_credentials_ready():
+            rows_in = request.rows or []
+            return {
+                "ok": True,
+                "received": len(rows_in),
+                "upserted": 0,
+                "skipped": 0,
+                "persistence": "off",
+            }
+        supabase_url, supabase_key = _get_supabase_config(strict=True)
 
         rows_in = request.rows or []
         if not rows_in:
@@ -17321,6 +17398,8 @@ async def save_correction_prediction(
 ):
     """Sauvegarde une trace de prédiction correction dans les tables actives Supabase."""
     try:
+        if not _supabase_credentials_ready():
+            return
         supabase_url, supabase_key = _get_supabase_config(strict=True)
         headers = {
             "apikey": supabase_key,
@@ -17439,11 +17518,22 @@ async def save_correction_prediction(
 
         logger.info(f"💾 Prédiction correction sauvegardée (tables actives) pour {symbol} ({timeframe})")
     except Exception as e:
-        logger.warning("Sauvegarde corrections persist échouée: %s", e)
+        if _supabase_credentials_ready():
+            logger.warning("Sauvegarde corrections persist échouée: %s", e)
 
 async def get_prediction_performance_stats(symbol: str, days: int) -> dict:
     """Récupère les statistiques de performance"""
     try:
+        if not _supabase_credentials_ready():
+            return {
+                "total_predictions": 0,
+                "successful_predictions": 0,
+                "failed_predictions": 0,
+                "overall_accuracy": 0.0,
+                "zone_1_accuracy": 0.0,
+                "zone_2_accuracy": 0.0,
+                "zone_3_accuracy": 0.0,
+            }
         supabase_url, supabase_key = _get_supabase_config(strict=True)
         headers = {"apikey": supabase_key, "Authorization": f"Bearer {supabase_key}"}
 
@@ -17556,6 +17646,8 @@ async def get_prediction_performance_stats(symbol: str, days: int) -> dict:
 async def get_symbol_correction_patterns(symbol: str) -> list:
     """Récupère les patterns de correction pour un symbole"""
     try:
+        if not _supabase_credentials_ready():
+            return []
         supabase_url, supabase_key = _get_supabase_config(strict=True)
         import httpx
 
@@ -17579,7 +17671,8 @@ async def get_symbol_correction_patterns(symbol: str) -> list:
                 continue
         return out
     except Exception as e:
-        logger.warning(f"Récupération patterns correction échouée pour {symbol}: {e}")
+        if _supabase_credentials_ready():
+            logger.warning(f"Récupération patterns correction échouée pour {symbol}: {e}")
         return []
 
 # Flag pour désactiver Supabase si le quota est dépassé (Erreur 402)
@@ -18011,6 +18104,7 @@ async def tradingagents_realtime_status():
     effective = mt5_syms if mt5_syms else list(AI_TRADINGAGENTS_SYMBOLS)
     return {
         "auto_loop_enabled": AI_ENABLE_TRADINGAGENTS_AUTO_LOOP,
+        "allow_http_runs": AI_TRADINGAGENTS_ALLOW_HTTP_RUNS,
         "manual_report_ttl_sec": AI_TRADINGAGENTS_MANUAL_TTL_SEC,
         "manual_reports_cached": n_manual,
         "interval_sec": AI_TRADINGAGENTS_INTERVAL_SEC,
@@ -18128,6 +18222,20 @@ async def catalog_trading_symbols():
 async def tradingagents_realtime_run_once(symbol: str):
     """Exécute immédiatement une analyse TradingAgents pour un symbole."""
     try:
+        if not AI_TRADINGAGENTS_ALLOW_HTTP_RUNS:
+            sym = (symbol or "").strip().upper()
+            return {
+                "symbol": sym,
+                "data_ticker": _mt5_to_yfinance_ticker(sym),
+                "ran_at": datetime.utcnow().isoformat(),
+                "status": "disabled",
+                "llm_route": "none",
+                "latency_ms": 0.0,
+                "recommendation": "HOLD",
+                "confidence": 0.0,
+                "reasoning": "Exécution HTTP désactivée (AI_TRADINGAGENTS_ALLOW_HTTP_RUNS=false). Lancer TradingAgents en CLI et pousser via POST /tradingagents/manual-report.",
+                "raw_decision": {},
+            }
         result = await _run_tradingagents_once(symbol)
         async with _tradingagents_lock:
             _tradingagents_results[result["symbol"]] = result
