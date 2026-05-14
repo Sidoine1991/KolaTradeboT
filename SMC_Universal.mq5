@@ -4032,7 +4032,7 @@ int GOM_ClosePositionsAfterSpikeCapture(const bool buySpikeCaptured, const bool 
       return 0;
    }
 
-   datetime now = TimeCurrent();
+   // Vérifier cooldown de fermeture (évite fermetures multiples rapides)
    if(g_gomLastSpikeCaptureCloseUtc > 0 && (now - g_gomLastSpikeCaptureCloseUtc) < 1)
       return 0;
 
