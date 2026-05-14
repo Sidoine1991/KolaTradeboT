@@ -12,6 +12,583 @@
 #include <Trade/OrderInfo.mqh>
 #include <Trade/DealInfo.mqh>
 #include <Trade/HistoryOrderInfo.mqh>
+
+// ============================================================================
+// SMC_AutoTrader - Intégré directement (pas de fichier .mqh séparé)
+// ============================================================================
+
+#ifndef SMC_AUTO_TRADER_INTEGRATED
+#define SMC_AUTO_TRADER_INTEGRATED
+
+// Structure pour les statistiques de trading
+struct TradingStats
+{
+    int totalTrades;        // Nombre total de trades
+    int winningTrades;      // Trades gagnants
+    int losingTrades;       // Trades perdants
+    double totalProfit;     // Profit total ($)
+    double totalLoss;       // Perte totale ($)
+    double netProfit;       // Profit net ($)
+    double winRate;         // Taux de réussite (%)
+    datetime lastNotifyTime; // Dernière notification
+};
+
+// Classe de trading automatique
+class CAutoTrader
+{
+private:
+    CTrade m_trade;
+    CPositionInfo m_position;
+
+    // Paramètres de trading
+    double m_maxRiskDollars;        // Risque max par trade ($)
+    double m_minLotSize;            // Lot minimum
+    double m_maxLotSize;            // Lot maximum
+    long m_magicNumber;             // Magic number
+    string m_tradeComment;          // Commentaire des ordres
+
+    // Paramètres de scalping
+    double m_scalpTpPoints;         // Take profit scalping (points)
+    double m_scalpSlPoints;         // Stop loss scalping (points)
+    bool m_enableTrailingStop;      // Activer trailing stop
+    double m_trailingStopPoints;    // Distance trailing stop (points)
+    double m_trailingStepPoints;    // Pas de déplacement (points)
+
+    // Notifications
+    int m_notifyIntervalMinutes;    // Intervalle notifications (minutes)
+    bool m_enablePushNotifications; // Activer notifications push
+
+    // Statistiques
+    TradingStats m_stats;
+
+    // Throttle trading
+    datetime m_lastTradeTime[];     // Dernier trade par symbole
+    int m_minSecondsBetweenTrades;  // Temps minimum entre trades
+
+    // Gestion des positions
+    int m_maxPositionsPerSymbol;    // Max positions par symbole
+    int m_maxTotalPositions;        // Max positions totales
+
+public:
+    // Constructeur
+    CAutoTrader()
+    {
+        m_maxRiskDollars = 0.50;        // 50 cents par trade (pour capital 10$)
+        m_minLotSize = 0.01;
+        m_maxLotSize = 0.10;
+        m_magicNumber = 91305800;       // Magic number unique
+        m_tradeComment = "Scanner_Auto";
+
+        // Scalping
+        m_scalpTpPoints = 50;           // 50 points TP
+        m_scalpSlPoints = 30;           // 30 points SL
+        m_enableTrailingStop = true;
+        m_trailingStopPoints = 20;      // 20 points trailing
+        m_trailingStepPoints = 5;       // 5 points step
+
+        // Notifications
+        m_notifyIntervalMinutes = 10;
+        m_enablePushNotifications = true;
+
+        // Limites
+        m_minSecondsBetweenTrades = 120; // 2 minutes entre trades
+        m_maxPositionsPerSymbol = 1;
+        m_maxTotalPositions = 2;         // LIMITE STRICTE: 2 positions maximum (reste annulé)
+
+        // Init stats
+        ResetStats();
+
+        // Configuration du trade
+        m_trade.SetExpertMagicNumber(m_magicNumber);
+        m_trade.SetDeviationInPoints(50);
+        m_trade.SetTypeFilling(ORDER_FILLING_IOC);
+    }
+
+    // Configuration
+    void SetMaxRiskDollars(double risk) { m_maxRiskDollars = MathMax(0.10, risk); }
+    void SetScalpingParams(double tpPoints, double slPoints)
+    {
+        m_scalpTpPoints = tpPoints;
+        m_scalpSlPoints = slPoints;
+    }
+    void SetTrailingStop(bool enable, double points, double step)
+    {
+        m_enableTrailingStop = enable;
+        m_trailingStopPoints = points;
+        m_trailingStepPoints = step;
+    }
+    void SetNotifications(bool enable, int intervalMinutes)
+    {
+        m_enablePushNotifications = enable;
+        m_notifyIntervalMinutes = intervalMinutes;
+    }
+    void SetMaxPositions(int perSymbol, int total)
+    {
+        m_maxPositionsPerSymbol = perSymbol;
+        m_maxTotalPositions = total;
+    }
+
+    // Trading automatique sur une opportunité - UTILISE LES NIVEAUX DU SCANNER
+    bool TradeOpportunity(const string symbol, const string direction, const string quality,
+                         const double entry, const double sl, const double tp1,
+                         const double spikeProb)
+    {
+        // Vérifications de sécurité
+        if(!IsGoodOpportunity(quality, spikeProb))
+            return false;
+
+        // VÉRIFIER LIMITE STRICTE: 2 POSITIONS MAXIMUM
+        int currentPositions = CountOpenPositions();
+        if(currentPositions >= m_maxTotalPositions)
+        {
+            // TERMINAL OCCUPÉ - ANNULER cette opportunité
+            static datetime lastRejectLog = 0;
+            static int rejectedCount = 0;
+
+            rejectedCount++;
+
+            // Log groupé toutes les 60 secondes
+            if(TimeCurrent() - lastRejectLog > 60)
+            {
+                Print("🚫 TERMINAL OCCUPÉ (", currentPositions, "/", m_maxTotalPositions,
+                      ") - ", rejectedCount, " opportunité(s) annulée(s) dans la dernière minute");
+                lastRejectLog = TimeCurrent();
+                rejectedCount = 0;
+            }
+            return false;
+        }
+
+        if(!CanTrade(symbol))
+            return false;
+
+        // PRIORITÉ ABSOLUE: Utiliser les niveaux calculés par le scanner
+        double finalEntry = entry;
+        double finalSl = sl;
+        double finalTp = tp1; // Utiliser TP1 du scanner
+
+        // Validation des niveaux du scanner (pas de log, silencieux)
+        if(finalEntry <= 0 || finalSl <= 0 || finalTp <= 0)
+            return false;
+
+        // Vérifier cohérence des niveaux (pas de log, silencieux)
+        if(direction == "BUY")
+        {
+            if(finalSl >= finalEntry || finalTp <= finalEntry)
+                return false;
+        }
+        else if(direction == "SELL")
+        {
+            if(finalSl <= finalEntry || finalTp >= finalEntry)
+                return false;
+        }
+
+        // Calculer le lot size basé sur le risque et le SL du scanner
+        double lotSize = CalculateLotSize(symbol, finalEntry, finalSl);
+        if(lotSize < m_minLotSize)
+            return false;
+
+        // Placer l'ordre AVEC LES NIVEAUX EXACTS DU SCANNER
+        bool success = false;
+        if(direction == "BUY")
+            success = OpenBuyPosition(symbol, lotSize, finalSl, finalTp);
+        else if(direction == "SELL")
+            success = OpenSellPosition(symbol, lotSize, finalSl, finalTp);
+
+        // Mise à jour stats
+        if(success)
+        {
+            m_stats.totalTrades++;
+            UpdateLastTradeTime(symbol);
+
+            string msg = StringFormat("✅ TRADE OUVERT: %s %s %.2f lots @ %.5f\n(SL:%.5f TP:%.5f) Quality:%s",
+                                     symbol, direction, lotSize, finalEntry, finalSl, finalTp, quality);
+            Print(msg);
+
+            if(m_enablePushNotifications)
+                SendNotification(msg);
+        }
+
+        return success;
+    }
+
+    // Gérer les positions ouvertes (trailing stop)
+    void ManageOpenPositions()
+    {
+        if(!m_enableTrailingStop)
+            return;
+
+        for(int i = PositionsTotal() - 1; i >= 0; i--)
+        {
+            if(!m_position.SelectByIndex(i))
+                continue;
+
+            if(m_position.Magic() != m_magicNumber)
+                continue;
+
+            string symbol = m_position.Symbol();
+            double currentSl = m_position.StopLoss();
+            double currentTp = m_position.TakeProfit();
+
+            // Calculer nouveau SL avec trailing
+            double newSl = 0;
+            ENUM_POSITION_TYPE posType = (ENUM_POSITION_TYPE)m_position.Type();
+            if(CalculateTrailingStop(symbol, posType, m_position.PriceOpen(),
+                                    currentSl, newSl))
+            {
+                if(MathAbs(newSl - currentSl) > m_trailingStepPoints * SymbolInfoDouble(symbol, SYMBOL_POINT))
+                {
+                    m_trade.PositionModify(m_position.Ticket(), newSl, currentTp);
+                    Print("📊 Trailing Stop: ", symbol, " nouveau SL: ", newSl);
+                }
+            }
+        }
+    }
+
+    // Envoyer notification périodique
+    void SendPeriodicNotification()
+    {
+        if(!m_enablePushNotifications)
+            return;
+
+        datetime now = TimeCurrent();
+        if(now - m_stats.lastNotifyTime < m_notifyIntervalMinutes * 60)
+            return;
+
+        m_stats.lastNotifyTime = now;
+
+        // Mettre à jour les statistiques
+        UpdateStats();
+
+        // Construire le message
+        string msg = "📊 SCANNER AUTO-TRADING\n";
+        msg += "━━━━━━━━━━━━━━━━━━━━\n";
+        msg += StringFormat("⏰ %s\n\n", TimeToString(now, TIME_DATE|TIME_MINUTES));
+
+        // Stats globales
+        msg += StringFormat("📈 Trades: %d (W:%d L:%d)\n",
+                           m_stats.totalTrades,
+                           m_stats.winningTrades,
+                           m_stats.losingTrades);
+
+        if(m_stats.totalTrades > 0)
+            msg += StringFormat("✅ Win Rate: %.1f%%\n", m_stats.winRate);
+
+        msg += StringFormat("💰 Profit Net: $%.2f\n", m_stats.netProfit);
+
+        // Positions ouvertes
+        int openPos = CountOpenPositions();
+        msg += StringFormat("\n📊 Positions Ouvertes: %d\n", openPos);
+
+        if(openPos > 0)
+        {
+            double totalPL = 0;
+            for(int i = 0; i < PositionsTotal(); i++)
+            {
+                if(!m_position.SelectByIndex(i))
+                    continue;
+
+                if(m_position.Magic() != m_magicNumber)
+                    continue;
+
+                double pl = m_position.Profit() + m_position.Swap() + m_position.Commission();
+                totalPL += pl;
+
+                string dir = (m_position.Type() == POSITION_TYPE_BUY) ? "BUY" : "SELL";
+                msg += StringFormat("  %s %s: $%.2f\n",
+                                   m_position.Symbol(),
+                                   dir,
+                                   pl);
+            }
+            msg += StringFormat("\n💵 P/L Total: $%.2f\n", totalPL);
+        }
+
+        msg += "\n━━━━━━━━━━━━━━━━━━━━";
+
+        SendNotification(msg);
+        Print(msg);
+    }
+
+    // Obtenir les statistiques
+    TradingStats GetStats() { return m_stats; }
+
+    // Réinitialiser les statistiques
+    void ResetStats()
+    {
+        m_stats.totalTrades = 0;
+        m_stats.winningTrades = 0;
+        m_stats.losingTrades = 0;
+        m_stats.totalProfit = 0;
+        m_stats.totalLoss = 0;
+        m_stats.netProfit = 0;
+        m_stats.winRate = 0;
+        m_stats.lastNotifyTime = 0;
+    }
+
+
+private:
+    // Vérifier si l'opportunité est assez bonne
+    bool IsGoodOpportunity(const string quality, const double spikeProb)
+    {
+        // Trader seulement PERFECT et GOOD
+        if(quality != "PERFECT" && quality != "GOOD")
+            return false;
+
+        // Pour GOOD, exiger une probabilité spike élevée
+        if(quality == "GOOD" && spikeProb < 0.50)
+            return false;
+
+        return true;
+    }
+
+    // Vérifier si on peut trader ce symbole
+    bool CanTrade(const string symbol)
+    {
+        // Vérifier limite positions totales (pas de log, déjà géré dans TradeOpportunity)
+        if(CountOpenPositions() >= m_maxTotalPositions)
+            return false;
+
+        // Vérifier limite par symbole (log uniquement si problème)
+        if(CountSymbolPositions(symbol) >= m_maxPositionsPerSymbol)
+            return false;
+
+        // Vérifier throttle temps (pas de log, trop verbeux)
+        datetime lastTrade = GetLastTradeTime(symbol);
+        if(lastTrade > 0 && TimeCurrent() - lastTrade < m_minSecondsBetweenTrades)
+            return false;
+
+        return true;
+    }
+
+    // Calculer le lot size basé sur le risque
+    double CalculateLotSize(const string symbol, const double entry, const double sl)
+    {
+        if(sl <= 0 || entry <= 0)
+            return m_minLotSize;
+
+        double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
+        double tickValue = SymbolInfoDouble(symbol, SYMBOL_TRADE_TICK_VALUE);
+        double minLot = SymbolInfoDouble(symbol, SYMBOL_VOLUME_MIN);
+        double maxLot = SymbolInfoDouble(symbol, SYMBOL_VOLUME_MAX);
+        double lotStep = SymbolInfoDouble(symbol, SYMBOL_VOLUME_STEP);
+
+        // Distance SL en points
+        double slDistance = MathAbs(entry - sl) / point;
+        if(slDistance < 10)
+            slDistance = 10;
+
+        // Calcul du lot pour ne pas risquer plus de m_maxRiskDollars
+        double riskPerPoint = m_maxRiskDollars / slDistance;
+        double lotSize = riskPerPoint / tickValue;
+
+        // Arrondir au step
+        lotSize = MathFloor(lotSize / lotStep) * lotStep;
+
+        // Limiter
+        if(lotSize < minLot) lotSize = minLot;
+        if(lotSize > maxLot) lotSize = maxLot;
+        if(lotSize > m_maxLotSize) lotSize = m_maxLotSize;
+
+        return lotSize;
+    }
+
+    // Calculer les niveaux de scalping
+    void CalculateScalpingLevels(const string symbol, const string direction,
+                                 const double entry, double &sl, double &tp)
+    {
+        double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
+        double bid = SymbolInfoDouble(symbol, SYMBOL_BID);
+        double ask = SymbolInfoDouble(symbol, SYMBOL_ASK);
+
+        if(direction == "BUY")
+        {
+            sl = entry - (m_scalpSlPoints * point);
+            tp = entry + (m_scalpTpPoints * point);
+        }
+        else // SELL
+        {
+            sl = entry + (m_scalpSlPoints * point);
+            tp = entry - (m_scalpTpPoints * point);
+        }
+
+        // Normaliser
+        int digits = (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS);
+        sl = NormalizeDouble(sl, digits);
+        tp = NormalizeDouble(tp, digits);
+    }
+
+    // Ouvrir position BUY
+    bool OpenBuyPosition(const string symbol, const double lots, const double sl, const double tp)
+    {
+        double ask = SymbolInfoDouble(symbol, SYMBOL_ASK);
+        return m_trade.Buy(lots, symbol, ask, sl, tp, m_tradeComment);
+    }
+
+    // Ouvrir position SELL
+    bool OpenSellPosition(const string symbol, const double lots, const double sl, const double tp)
+    {
+        double bid = SymbolInfoDouble(symbol, SYMBOL_BID);
+        return m_trade.Sell(lots, symbol, bid, sl, tp, m_tradeComment);
+    }
+
+    // Calculer trailing stop
+    bool CalculateTrailingStop(const string symbol, ENUM_POSITION_TYPE posType,
+                              const double openPrice, const double currentSl, double &newSl)
+    {
+        double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
+        double bid = SymbolInfoDouble(symbol, SYMBOL_BID);
+        double ask = SymbolInfoDouble(symbol, SYMBOL_ASK);
+
+        if(posType == POSITION_TYPE_BUY)
+        {
+            // BUY: trailing stop monte avec le prix
+            double trailLevel = bid - (m_trailingStopPoints * point);
+            if(trailLevel > currentSl && trailLevel > openPrice)
+            {
+                newSl = trailLevel;
+                return true;
+            }
+        }
+        else // SELL
+        {
+            // SELL: trailing stop descend avec le prix
+            double trailLevel = ask + (m_trailingStopPoints * point);
+            if((currentSl == 0 || trailLevel < currentSl) && trailLevel < openPrice)
+            {
+                newSl = trailLevel;
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    // Compter positions ouvertes
+    int CountOpenPositions()
+    {
+        int count = 0;
+        for(int i = 0; i < PositionsTotal(); i++)
+        {
+            if(!m_position.SelectByIndex(i))
+                continue;
+
+            if(m_position.Magic() == m_magicNumber)
+                count++;
+        }
+        return count;
+    }
+
+    // Compter positions pour un symbole
+    int CountSymbolPositions(const string symbol)
+    {
+        int count = 0;
+        for(int i = 0; i < PositionsTotal(); i++)
+        {
+            if(!m_position.SelectByIndex(i))
+                continue;
+
+            if(m_position.Magic() == m_magicNumber && m_position.Symbol() == symbol)
+                count++;
+        }
+        return count;
+    }
+
+    // Obtenir dernier trade sur symbole
+    datetime GetLastTradeTime(const string symbol)
+    {
+        int size = ArraySize(m_lastTradeTime);
+        long symbolHash = StringToInteger(symbol);
+        for(int i = 0; i < size; i += 2)
+        {
+            if(i+1 >= size) break;
+
+            // Format: [hash_symbol, timestamp]
+            if((long)m_lastTradeTime[i] == symbolHash)
+                return m_lastTradeTime[i+1];
+        }
+        return 0;
+    }
+
+    // Mettre à jour dernier trade
+    void UpdateLastTradeTime(const string symbol)
+    {
+        long hash = StringToInteger(symbol);
+        int size = ArraySize(m_lastTradeTime);
+
+        // Chercher si existe
+        for(int i = 0; i < size; i += 2)
+        {
+            if(i+1 >= size) break;
+
+            if((long)m_lastTradeTime[i] == hash)
+            {
+                m_lastTradeTime[i+1] = TimeCurrent();
+                return;
+            }
+        }
+
+        // Ajouter nouveau
+        ArrayResize(m_lastTradeTime, size + 2);
+        m_lastTradeTime[size] = (datetime)hash;
+        m_lastTradeTime[size + 1] = TimeCurrent();
+    }
+
+    // Mettre à jour statistiques
+    void UpdateStats()
+    {
+        m_stats.totalProfit = 0;
+        m_stats.totalLoss = 0;
+        m_stats.winningTrades = 0;
+        m_stats.losingTrades = 0;
+
+        // Analyser l'historique
+        HistorySelect(0, TimeCurrent());
+        int totalDeals = HistoryDealsTotal();
+
+        for(int i = 0; i < totalDeals; i++)
+        {
+            ulong ticket = HistoryDealGetTicket(i);
+            if(ticket == 0) continue;
+
+            if(HistoryDealGetInteger(ticket, DEAL_MAGIC) != m_magicNumber)
+                continue;
+
+            if(HistoryDealGetInteger(ticket, DEAL_ENTRY) != DEAL_ENTRY_OUT)
+                continue;
+
+            double profit = HistoryDealGetDouble(ticket, DEAL_PROFIT);
+            double swap = HistoryDealGetDouble(ticket, DEAL_SWAP);
+            double commission = HistoryDealGetDouble(ticket, DEAL_COMMISSION);
+
+            double netPL = profit + swap + commission;
+
+            if(netPL > 0)
+            {
+                m_stats.winningTrades++;
+                m_stats.totalProfit += netPL;
+            }
+            else if(netPL < 0)
+            {
+                m_stats.losingTrades++;
+                m_stats.totalLoss += MathAbs(netPL);
+            }
+        }
+
+        m_stats.netProfit = m_stats.totalProfit - m_stats.totalLoss;
+
+        int total = m_stats.winningTrades + m_stats.losingTrades;
+        if(total > 0)
+            m_stats.winRate = (m_stats.winningTrades * 100.0) / total;
+    }
+
+};
+
+#endif // SMC_AUTO_TRADER_INTEGRATED
+
+// ============================================================================
+// Fin SMC_AutoTrader intégré
+// ============================================================================
+
+#include "SMC_OpportunityScanner.mqh"  // Scanner multi-symboles temps réel
 // #include "SMC_Setups_Display.mqh" // Désactivé pour éviter l'erreur de fichier non trouvé
 // --- GOM_KOLA_SIDO merged (no separate mqh for MT5) ---
 // Intégré dans SMC_Universal.mq5 (plus besoin d'exécuter le script sur le graphique)
@@ -19,6 +596,26 @@
 #define GOM_KOLA_SIDO_CORE_MQH
 
 // Trade.mqh déjà inclus par SMC_Universal.mq5
+
+input group "SCANNER MULTI-SYMBOLES TEMPS RÉEL"
+input bool   EnableOpportunityScanner = true;      // Activer le scanner d'opportunités
+input string ScannerSymbolsList = "Boom 1000 Index,Crash 1000 Index,Volatility 75 Index,Volatility 100 Index,Step Index,EURUSD,GBPUSD,XAUUSD";  // Liste des symboles à scanner (séparés par des virgules)
+input int    ScannerRefreshSeconds = 2;            // Intervalle de scan (secondes)
+input int    ScannerPanelX = 10;                   // Position X du panneau
+input int    ScannerPanelY = 30;                   // Position Y du panneau
+input int    ScannerPanelWidth = 500;              // Largeur du panneau
+input int    ScannerRowHeight = 25;                // Hauteur des lignes
+input bool   ScannerShowPanel = true;              // Afficher le panneau graphique
+
+input group "TRADING AUTOMATIQUE (SCANNER)"
+input bool   EnableScannerAutoTrading = true;      // Activer trading automatique sur opportunités scannées
+input double AutoTradeMaxRiskDollars = 0.50;       // Risque maximum par trade ($) - Pour capital 10$ = 0.50$ max
+input double AutoTradeScalpTpPoints = 50;          // Take Profit scalping (points)
+input double AutoTradeScalpSlPoints = 30;          // Stop Loss scalping (points)
+input bool   EnableAutoTrailingStop = true;        // Activer trailing stop automatique
+input double AutoTrailingStopPoints = 20;          // Distance trailing stop (points)
+input double AutoTrailingStepPoints = 5;           // Pas de déplacement trailing (points)
+input int    AutoTradeNotifyIntervalMin = 10;      // Intervalle notifications push (minutes)
 
 input group "TIMEFRAMES"
 input bool ShowM1Levels = true;   // Activé pour entrées précises M1
@@ -4013,6 +4610,21 @@ int GOM_ClosePositionsAfterSpikeCapture(const bool buySpikeCaptured, const bool 
             isRealSpike = true;
             Print("✅ SPIKE CRASH RÉEL détecté: ", DoubleToString(priceChangePct, 2), "% en ", (now - g_gomLastSpikeDetectionTime), "s");
          }
+
+         // Volatility / Step / Jump (sans nom Boom/Crash) : mouvement aligné sur le sens capté (seuil plus souple)
+         if(!isRealSpike && SMC_GetSymbolCategory(_Symbol) == SYM_VOLATILITY)
+         {
+            if(buySpikeCaptured && priceChangePct >= 0.15)
+            {
+               isRealSpike = true;
+               Print("✅ SPIKE VOL RÉEL (BUY): +", DoubleToString(priceChangePct, 2), "% en ", (now - g_gomLastSpikeDetectionTime), "s");
+            }
+            if(sellSpikeCaptured && priceChangePct <= -0.15)
+            {
+               isRealSpike = true;
+               Print("✅ SPIKE VOL RÉEL (SELL): ", DoubleToString(priceChangePct, 2), "% en ", (now - g_gomLastSpikeDetectionTime), "s");
+            }
+         }
       }
    }
 
@@ -6786,9 +7398,11 @@ ENUM_SYMBOL_CATEGORY SMC_GetSymbolCategory(string symbol)
    string s = symbol;
    StringToUpper(s);
    if(StringFind(s, "BOOM") >= 0 || StringFind(s, "CRASH") >= 0) return SYM_BOOM_CRASH;
-   // Indices volatilité Deriv : tokens précis (évite faux positifs « GAIN »/« PAIN » dans le nom broker d’une paire FX).
+   // Indices volatilité type R_75 / R_10 (1s) — nom court sans mot « VOLATILITY »
+   if(StringLen(s) >= 3 && StringFind(s, "R_") == 0) return SYM_VOLATILITY;
    if(StringFind(s, "VOLATILITY") >= 0 || StringFind(s, "RANGE BREAK") >= 0 ||
       StringFind(s, "FX VOL") >= 0 || StringFind(s, "SFX VOL") >= 0 ||
+      StringFind(s, "STEP") >= 0 || StringFind(s, "JUMP") >= 0 ||
       StringFind(s, "PAINX") >= 0 || StringFind(s, "GAINX") >= 0 || StringFind(s, "XEL") >= 0) return SYM_VOLATILITY;
    if(StringFind(s, "XAU") >= 0 || StringFind(s, "GOLD") >= 0) return SYM_METAL;
    if(StringFind(s, "XAG") >= 0 || StringFind(s, "SILVER") >= 0) return SYM_METAL;
@@ -6797,10 +7411,11 @@ ENUM_SYMBOL_CATEGORY SMC_GetSymbolCategory(string symbol)
    return SYM_UNKNOWN;
 }
 
-// Fermeture auto « spike » ciblée : Boom/Crash + indices broker Gainx/Painx (pas V75, Step, etc.).
+// Fermeture auto « spike » : Boom/Crash + volatilité (V75, Step, Jump…) + Gainx/Painx (aligné SMC_Universal_Enhanced).
 bool EA_IsBoomCrashOrGainxPainxForSpikeAutoClose(const string symbol)
 {
-   if(SMC_GetSymbolCategory(symbol) == SYM_BOOM_CRASH)
+   const ENUM_SYMBOL_CATEGORY cat = SMC_GetSymbolCategory(symbol);
+   if(cat == SYM_BOOM_CRASH || cat == SYM_VOLATILITY)
       return true;
    string s = symbol;
    StringToUpper(s);
@@ -8642,7 +9257,7 @@ input bool   UseIAHoldClose       = true;  // Fermer sur HOLD (désactivé=laiss
 input bool   UseDirectionConflictClose = true; // Fermer sur conflit direction (ACTIVÉ - permet rotation automatique)
 
 input group "=== AI SERVER (Render kolatradebot-7ofl + local) ==="
-input bool   UseAIServer       = true;   // Utiliser le serveur IA pour confirmation
+input bool   UseAIServer       = false;  // Désactivé par défaut (Mode local GOM) - Activer manuellement si serveur IA disponible
 input string AI_ServerURL       = "http://127.0.0.1:8000";  // URL du serveur IA local
 input string AI_ServerRender    = "https://kolatradebot-7ofl.onrender.com";  // Déploiement Render (Docker ai_server_cloud) — liste WebRequest MT5 obligatoire
 input int    AI_Timeout_ms     = 8000;   // Timeout WebRequest (ms) — Render cold start
@@ -8650,7 +9265,7 @@ input int    AI_UpdateInterval_Seconds = 120;  // Intervalle mise à jour IA (se
 input int    AI_DecisionCacheSeconds = 30;       // Cache réponse POST /decision (0 = désactivé, debug live)
 input bool   BlockNewEntriesOnAIDisconnect = false; // true = bloque entrées si IA OFF (souvent 0 ordre limite M5 tant que le serveur ne répond pas)
 input int    AI_MaxSignalAgeSeconds = 180; // Age max du signal IA pour autoriser une entrée
-input bool   UsePropiceSymbolsFilter = true;  // ⚠️ IMPORTANT: Filtre horaire - Le robot trade UNIQUEMENT sur les symboles les plus "propices" selon l'heure actuelle (UTC)
+input bool   UsePropiceSymbolsFilter = false;  // ⚠️ DÉSACTIVÉ - Nécessite serveur IA (Supabase indisponible)
                                             // Fonctionnement: Le serveur analyse les performances par tranche horaire et retourne le Top N des symboles les plus performants
                                             // Si le symbole actuel n'est pas dans ce Top, le robot BLOQUE tous les trades (même si signal IA/SMC valide)
                                             // Objectif: Maximiser les probabilités de succès en tradant uniquement pendant les heures optimales pour chaque symbole
@@ -8667,8 +9282,8 @@ input int    AI_Timeout_ms2     = 10000;  // Timeout WebRequest (ms) - Render co
 input string AI_ModelName       = "SMC_Model";  // Nom du modèle IA
 input string AI_ModelVersion    = "1.0";  // Version du modèle IA
 input bool   AI_UseGPU          = true;   // Utiliser le GPU pour l'IA (si disponible)
-input bool   RequireAIConfirmation = true; // Exiger confirmation IA pour SMC (false = trader sans IA)
-input bool   EnableTradingAgentsInfluence = true; // Utiliser /tradingagents/realtime/run-once pour résumé + influence
+input bool   RequireAIConfirmation = false; // ⚠️ DÉSACTIVÉ - Mode GOM uniquement
+input bool   EnableTradingAgentsInfluence = false; // ⚠️ DÉSACTIVÉ - Nécessite serveur IA
 input int    TradingAgentsUpdateIntervalSeconds = 300; // Refresh TradingAgents (5 min)
 input double TradingAgentsMinConfidence = 0.60; // Confiance min pour influencer
 input bool   TradingAgentsBlockContradiction = true; // Bloquer trade si TradingAgents contredit fortement
@@ -10505,6 +11120,9 @@ CTrade trade;
 CPositionInfo posInfo;  // Local position info variable
 COrderInfo orderInfo;
 
+// Scanner d'opportunités multi-symboles
+COpportunityScanner *g_OpportunityScanner = NULL;
+
 int atrHandle;
 int emaHandle = INVALID_HANDLE;
 int hEmaFast = INVALID_HANDLE;  // EMA rapide pour tendance
@@ -10755,6 +11373,38 @@ int OnInit()
             "% | Spike: ", BoomCrashTrailingSpikePct, "% | Seuil spike: ", BoomCrashSpikeDetectionThreshold, "%");
    }
 
+   // Initialiser le scanner d'opportunités
+   if(EnableOpportunityScanner)
+   {
+      g_OpportunityScanner = new COpportunityScanner();
+      if(g_OpportunityScanner != NULL)
+      {
+         g_OpportunityScanner.SetScanInterval(ScannerRefreshSeconds);
+         g_OpportunityScanner.SetPanelPosition(ScannerPanelX, ScannerPanelY);
+         g_OpportunityScanner.SetPanelWidth(ScannerPanelWidth);
+         g_OpportunityScanner.SetRowHeight(ScannerRowHeight);
+         g_OpportunityScanner.ShowPanel(ScannerShowPanel);
+
+         // Configurer le trading automatique
+         if(EnableScannerAutoTrading)
+         {
+            g_OpportunityScanner.EnableAutoTrading(
+               true,
+               AutoTradeMaxRiskDollars,
+               AutoTradeScalpTpPoints,
+               AutoTradeScalpSlPoints,
+               EnableAutoTrailingStop,
+               AutoTrailingStopPoints,
+               AutoTrailingStepPoints
+            );
+            Print("✅ Trading automatique activé - Risque: $", AutoTradeMaxRiskDollars,
+                  " TP:", AutoTradeScalpTpPoints, "pts SL:", AutoTradeScalpSlPoints, "pts");
+         }
+
+         Print("✅ Scanner multi-symboles initialisé - ", ScannerSymbolsList);
+      }
+   }
+
    return INIT_SUCCEEDED;
 }
 
@@ -10791,6 +11441,13 @@ void OnDeinit(const int reason)
    Print("?? DÉTACHEMENT ROBOT SMC | ", _Symbol, " | Raison: ", reasonStr);
    if(reason == REASON_INITFAILED)
       Print("?? CAUSE: Erreur dans OnInit ou crash (indicateurs, mémoire, etc.)");
+
+   // Nettoyer le scanner d'opportunités
+   if(g_OpportunityScanner != NULL)
+   {
+      delete g_OpportunityScanner;
+      g_OpportunityScanner = NULL;
+   }
 
    if(UseEmbeddedGomKolaSidoScript)
       GomKolaSidoEmbedded_OnDeinit();
@@ -11600,7 +12257,7 @@ void ManageBoomCrashSpikeClose()
       // Forex / métaux / matières : jamais la fermeture « Spike capté » de ce module (évite confusions avec indices).
       if(cat == SYM_FOREX || cat == SYM_METAL || cat == SYM_COMMODITY)
          continue;
-      // Boom/Crash + Gainx/Painx uniquement (pas V75, Step, Jump, etc.).
+      // Boom/Crash + volatilité + Gainx/Painx (fermeture spike / scalp).
       if(!EA_IsBoomCrashOrGainxPainxForSpikeAutoClose(symbol)) continue;
       
       // NOUVEAU: Distinguer les trades "SPIKE TRADE" des autres:
@@ -11694,9 +12351,18 @@ void ManageBoomCrashSpikeClose()
       {
          bool isBoomPos = (StringFind(symbol, "Boom") >= 0);
          bool isCrashPos = (StringFind(symbol, "Crash") >= 0);
-         bool shouldCloseOnArrow =
-            (isBoomPos && arrowDirection == "BUY" && posInfo.PositionType() == POSITION_TYPE_BUY) ||
-            (isCrashPos && arrowDirection == "SELL" && posInfo.PositionType() == POSITION_TYPE_SELL);
+         const ENUM_SYMBOL_CATEGORY symCatArrow = SMC_GetSymbolCategory(symbol);
+         bool shouldCloseOnArrow = false;
+         if(isBoomPos)
+            shouldCloseOnArrow = (arrowDirection == "BUY" && posInfo.PositionType() == POSITION_TYPE_BUY);
+         else if(isCrashPos)
+            shouldCloseOnArrow = (arrowDirection == "SELL" && posInfo.PositionType() == POSITION_TYPE_SELL);
+         else if(symCatArrow == SYM_VOLATILITY)
+         {
+            shouldCloseOnArrow =
+               (arrowDirection == "BUY" && posInfo.PositionType() == POSITION_TYPE_BUY) ||
+               (arrowDirection == "SELL" && posInfo.PositionType() == POSITION_TYPE_SELL);
+         }
 
          if(shouldCloseOnArrow)
          {
@@ -11842,7 +12508,14 @@ void ManageBoomCrashSpikeClose()
             {
                g_secondSpikeReentryArmed = true;
                g_secondSpikeReentryArmTime = TimeCurrent();
-               g_secondSpikeReentryDirection = (StringFind(symbol, "Boom") >= 0 ? "BUY" : "SELL");
+               string reDir = "SELL";
+               if(StringFind(symbol, "Boom") >= 0)
+                  reDir = "BUY";
+               else if(StringFind(symbol, "Crash") >= 0)
+                  reDir = "SELL";
+               else if(SMC_GetSymbolCategory(symbol) == SYM_VOLATILITY)
+                  reDir = (posInfo.PositionType() == POSITION_TYPE_BUY ? "BUY" : "SELL");
+               g_secondSpikeReentryDirection = reDir;
                Print("🎯 2e spike imminent - réentrée armée | dir=", g_secondSpikeReentryDirection,
                      " | p=", DoubleToString(spikeProbArm * 100.0, 1), "%");
             }
@@ -12641,10 +13314,75 @@ bool GOM_MarketEntryBlockedByFinalWait(void)
    return false;
 }
 
+// Vérifier si IA bloque l'exécution au marché (HOLD = interdit)
+bool AI_MarketEntryBlockedByHold()
+{
+   if(!UseAIServer)
+      return false;
+
+   string aiAction = g_lastAIAction;
+   StringToUpper(aiAction);
+
+   if(aiAction == "HOLD")
+      return true;
+
+   return false;
+}
+
+// Vérifier si le symbole a déjà une position ouverte ou un ordre en attente
+bool SymbolHasOpenPositionOrOrder(const string symbol)
+{
+   // Vérifier les positions ouvertes
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      if(PositionGetSymbol(i) == symbol)
+      {
+         long magic = PositionGetInteger(POSITION_MAGIC);
+         if(EA_IsOurTradeMagic(magic))
+            return true;
+      }
+   }
+
+   // Vérifier les ordres en attente (LIMIT, STOP)
+   for(int i = OrdersTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = OrderGetTicket(i);
+      if(ticket == 0) continue;
+
+      if(EA_SymbolsMatch(OrderGetString(ORDER_SYMBOL), symbol))
+      {
+         long magic = OrderGetInteger(ORDER_MAGIC);
+         if(EA_IsOurTradeMagic(magic))
+            return true;
+      }
+   }
+
+   return false;
+}
+
 bool GOM_Internal_TradeGateAllows(const string directionUpper)
 {
+   // Bloquer si verdict GOM est WAIT
    if(GOM_MarketEntryBlockedByFinalWait())
       return false;
+
+   // Bloquer si IA est en HOLD
+   if(AI_MarketEntryBlockedByHold())
+      return false;
+
+   // Bloquer si le symbole a déjà une position ou un ordre
+   if(SymbolHasOpenPositionOrOrder(_Symbol))
+   {
+      static datetime lastLog = 0;
+      datetime now = TimeCurrent();
+      if(now - lastLog > 60)
+      {
+         Print("🚫 TRADE BLOQUÉ - Symbole ", _Symbol, " a déjà une position/ordre ouverte");
+         lastLog = now;
+      }
+      return false;
+   }
+
    if(!UseInternalGOMEngine || !GOM_FilterOrdersByEngine)
       return true;
    if(GOM_UseAtrVolatilityFilter && !g_gomAtrVolOk)
@@ -13082,6 +13820,12 @@ void DrawOTEImbalanceOnChart()
 
 void OnTick()
 {
+   // Scanner multi-symboles en temps réel
+   if(EnableOpportunityScanner && g_OpportunityScanner != NULL)
+   {
+      g_OpportunityScanner.ScanMarkets(ScannerSymbolsList);
+   }
+
    // Fermeture urgence perte excessive : uniquement cette boucle à chaque tick (léger).
    ClosePositionsWithExcessiveLoss();
    if(!BlockAllTrades && (ClosePositionWhenPriceHitsOppositeM5KolaLine || ClosePositionWhenTouchesDrawnM5EntryOpposite))
@@ -25610,9 +26354,30 @@ static datetime g_lastHoldCloseTime = 0;
 //| PLACER ORDRE LIMIT POST-HOLD APRÈS PERTE 2,0$ |
 void PlacePostHoldLimitOrder(string closedSymbol, ENUM_POSITION_TYPE closedType, double closedProfit)
 {
+   // Vérifier verdict GOM - INTERDIT de placer ordre LIMIT si verdict WAIT
+   if(GOM_MarketEntryBlockedByFinalWait())
+   {
+      Print("🚫 POST-HOLD LIMIT BLOQUÉ - verdict GOM WAIT | ", closedSymbol);
+      return;
+   }
+
+   // Vérifier si IA est en HOLD
+   if(AI_MarketEntryBlockedByHold())
+   {
+      Print("🚫 POST-HOLD LIMIT BLOQUÉ - IA en HOLD | ", closedSymbol);
+      return;
+   }
+
+   // Vérifier si le symbole a déjà une position/ordre
+   if(SymbolHasOpenPositionOrOrder(closedSymbol))
+   {
+      Print("🚫 POST-HOLD LIMIT BLOQUÉ - Symbole ", closedSymbol, " a déjà position/ordre");
+      return;
+   }
+
    Print("?? DEBUG POST-HOLD - Début fonction");
    Print("   ?? Symbole: ", closedSymbol, " | Type: ", (closedType == POSITION_TYPE_BUY ? "BUY" : "SELL"), " | Profit: ", DoubleToString(closedProfit, 2), "$");
-   
+
    // Vérifier si la fermeture était bien due à HOLD avec perte ? 2,0$
    if(closedProfit > -2.0)
    {
@@ -29514,6 +30279,27 @@ void CheckSMCChannelReturnMovements()
 //| PLACEMENT D'ORDRE LIMITE POUR MOUVEMENT DE RETOUR               |
 void PlaceReturnMovementLimitOrder(string direction, double currentPrice, double channelPrice, double atrVal, double strength)
 {
+   // Vérifier verdict GOM - INTERDIT de placer ordre LIMIT si verdict WAIT
+   if(GOM_MarketEntryBlockedByFinalWait())
+   {
+      Print("🚫 RETURN LIMIT BLOQUÉ - verdict GOM WAIT | ", _Symbol);
+      return;
+   }
+
+   // Vérifier si IA est en HOLD
+   if(AI_MarketEntryBlockedByHold())
+   {
+      Print("🚫 RETURN LIMIT BLOQUÉ - IA en HOLD | ", _Symbol);
+      return;
+   }
+
+   // Vérifier si le symbole a déjà une position/ordre
+   if(SymbolHasOpenPositionOrOrder(_Symbol))
+   {
+      Print("🚫 RETURN LIMIT BLOQUÉ - Symbole ", _Symbol, " a déjà position/ordre");
+      return;
+   }
+
    if(!IsDirectionAllowedForBoomCrash(_Symbol, direction))
    {
       Print("🚫 RETURN LIMIT BLOQUÉ - Direction interdite sur ", _Symbol, " : ", direction);

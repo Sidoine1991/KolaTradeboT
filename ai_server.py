@@ -27,7 +27,7 @@ from typing import Optional, List, Dict, Any, Tuple, Set, Union
 
 from uuid import uuid4
 from dataclasses import dataclass, asdict
-from fastapi import FastAPI, HTTPException, Request, Body, status
+from fastapi import FastAPI, HTTPException, Request, Body, status, Query
 from fastapi.exceptions import RequestValidationError
 from starlette.requests import Request as StarletteRequest
 from fastapi.middleware.cors import CORSMiddleware
@@ -61,11 +61,6 @@ def _get_supabase_config(strict: bool = True) -> Tuple[str, str]:
     if strict and (not supabase_url or not supabase_key):
         raise RuntimeError("Supabase non configuré (SUPABASE_URL et SUPABASE_*KEY requis)")
 
-    if supabase_key:
-        masked = supabase_key[:6] + "..." + supabase_key[-4:] if len(supabase_key) > 12 else "***"
-    else:
-        masked = "(none)"
-    logger.info(f"🔌 Supabase config: url={supabase_url or '(none)'} key={masked}")
     return supabase_url, supabase_key
 
 # Configurer le logger avant les imports d'améliorations
@@ -1700,11 +1695,8 @@ try:
         else:
             logger.warning(f"⚠️ Impossible de charger .env (encodage?) depuis: {env_path}")
     if supabase_env_path.exists():
-        # Fusion: .env.supabase complète/écrase les vars Supabase
-        if _safe_load_dotenv(supabase_env_path):
-            logger.info("✅ Fichier .env.supabase fusionné (SUPABASE_*, DATABASE_URL)")
-        else:
-            logger.warning(f"⚠️ Impossible de charger .env.supabase (encodage?) depuis: {supabase_env_path}")
+        # Fusion: .env.supabase complète/écrase les vars d'environnement distantes
+        _safe_load_dotenv(supabase_env_path)
     if not env_path.exists() and not supabase_env_path.exists():
         load_dotenv()
         logger.info("✅ Variables d'environnement chargées (système)")
@@ -1715,12 +1707,6 @@ except ImportError:
     )
 except Exception as e:
     logger.warning(f"⚠️ Erreur lors du chargement du .env: {e}")
-
-# Log explicite (évite d'écrire dans un projet par défaut par erreur)
-try:
-    _get_supabase_config(strict=False)
-except Exception as _e:
-    logger.warning(f"⚠️ Supabase non configuré au démarrage: {_e}")
 
 # Configuration PostgreSQL pour feedback loop
 def _resolve_database_url() -> str:
@@ -1744,7 +1730,6 @@ def _resolve_database_url() -> str:
         dbname = os.getenv("SUPABASE_DB_NAME", "postgres")
         pass_enc = quote_plus(db_password)
         raw = f"postgresql://{user}:{pass_enc}@{host}:{port}/{dbname}?sslmode=require"
-        logger.info(f"📝 DATABASE_URL construite depuis SUPABASE_* (host={host})")
         return raw
 
     if not raw:
@@ -1768,7 +1753,6 @@ def _resolve_database_url() -> str:
             if "pooler.supabase.com" in hostport and project_id:
                 _port = hostport.rsplit(":", 1)[-1] if ":" in hostport else "5432"
                 hostport = f"db.{project_id}.supabase.co:{_port}"
-                logger.info(f"📝 DATABASE_URL: pooler remplacé par db.{project_id}.supabase.co")
             netloc = f"{userinfo}@{hostport}"
             raw = urlunparse(parsed._replace(netloc=netloc))
     return raw
@@ -2001,8 +1985,13 @@ AI_ENABLE_SUPABASE_CONTINUOUS_TRAINER = _env_bool("AI_ENABLE_SUPABASE_CONTINUOUS
 AI_CONTINUOUS_DEFAULT_INTERVAL_SEC = int(os.getenv("AI_CONTINUOUS_DEFAULT_INTERVAL_SEC", "3600" if RUNNING_ON_RENDER else "600"))
 AI_CONTINUOUS_MIN_INTERVAL_SEC = int(os.getenv("AI_CONTINUOUS_MIN_INTERVAL_SEC", "1800" if RUNNING_ON_RENDER else "300"))
 
-# Intégration TradingAgents (dépôt local) - boucle d'analyse temps réel
-AI_ENABLE_TRADINGAGENTS_RT = _env_bool("AI_ENABLE_TRADINGAGENTS_RT", default=False)
+# Intégration TradingAgents (dépôt local). La boucle temps réel est **désactivée par défaut** :
+# exécution manuelle via CLI TradingAgents + POST /tradingagents/manual-report, puis /decision côté MT5.
+# Activer explicitement la boucle serveur : AI_ENABLE_TRADINGAGENTS_AUTO_LOOP=true
+# Fusion ordres (limite/stop) dans la réponse /decision si aligné avec l'action : AI_TRADINGAGENTS_EXEC_MERGE_ENABLED (défaut true),
+# seuil confiance AI_TRADINGAGENTS_EXEC_MERGE_MIN_CONF (défaut 0.55), SL/TP depuis TA : AI_TRADINGAGENTS_MERGE_STOPS_FROM_TA (défaut true).
+AI_ENABLE_TRADINGAGENTS_AUTO_LOOP = _env_bool("AI_ENABLE_TRADINGAGENTS_AUTO_LOOP", default=False)
+AI_TRADINGAGENTS_MANUAL_TTL_SEC = max(60, int(os.getenv("AI_TRADINGAGENTS_MANUAL_TTL_SEC", "1800")))
 AI_TRADINGAGENTS_INTERVAL_SEC = max(60, int(os.getenv("AI_TRADINGAGENTS_INTERVAL_SEC", "300")))
 AI_TRADINGAGENTS_REPO_PATH = (
     os.getenv("AI_TRADINGAGENTS_REPO_PATH")
@@ -2013,11 +2002,67 @@ AI_TRADINGAGENTS_SYMBOLS = [
     for s in (os.getenv("AI_TRADINGAGENTS_SYMBOLS", "") or "").split(",")
     if s.strip()
 ]
+# Symboles poussés par MT5 (fusion multi-graphiques) — prioritaires sur AI_TRADINGAGENTS_SYMBOLS
+_tradingagents_mt5_symbols: List[str] = []
 _tradingagents_task: Optional[asyncio.Task] = None
 _tradingagents_cursor: int = 0
 _tradingagents_results: Dict[str, Dict[str, Any]] = {}
 _tradingagents_last_error: Optional[str] = None
 _tradingagents_lock = asyncio.Lock()
+_tradingagents_manual_reports: Dict[str, Dict[str, Any]] = {}
+_tradingagents_manual_lock = asyncio.Lock()
+_TRADINGAGENTS_MT5_MAX_SYMBOLS = max(1, min(64, int(os.getenv("AI_TRADINGAGENTS_MT5_MAX_SYMBOLS", "32"))))
+
+
+def _normalize_tradingagents_symbol_list(symbols: List[str]) -> List[str]:
+    """Dédoublonne, majuscules, limite la taille (symboles MT5 ou tickers)."""
+    out: List[str] = []
+    seen: Set[str] = set()
+    for raw in symbols:
+        u = (raw or "").strip().upper()
+        if not u or u in seen:
+            continue
+        seen.add(u)
+        out.append(u)
+        if len(out) >= _TRADINGAGENTS_MT5_MAX_SYMBOLS:
+            break
+    return out
+
+
+async def _peek_manual_tradingagents_report(symbol: str) -> Optional[Dict[str, Any]]:
+    """Rapport issu du CLI (POST /tradingagents/manual-report) encore dans la fenêtre TTL."""
+    sym = (symbol or "").strip().upper()
+    if not sym:
+        return None
+    now = time.time()
+    async with _tradingagents_manual_lock:
+        row = _tradingagents_manual_reports.get(sym)
+        if not row:
+            return None
+        if now - float(row.get("ts", 0)) > AI_TRADINGAGENTS_MANUAL_TTL_SEC:
+            del _tradingagents_manual_reports[sym]
+            return None
+        return dict(row)
+
+
+def _mt5_to_yfinance_ticker(mt5_symbol: str) -> str:
+    """
+    Yahoo Finance / yfinance n'utilise pas les noms broker MT5 bruts.
+    Ex. XAUUSD -> GC=F, paires 6 lettres -> EURUSD=X.
+    """
+    s = (mt5_symbol or "").strip().upper()
+    for sep in (".", "#"):
+        if sep in s:
+            s = s.split(sep, 1)[0]
+    if s == "XAUUSD" or (len(s) >= 3 and s.startswith("XAU")):
+        return "GC=F"
+    if s == "XAGUSD" or (len(s) >= 3 and s.startswith("XAG")):
+        return "SI=F"
+    if len(s) == 6 and s.isalpha() and s.endswith("USD"):
+        return f"{s}=X"
+    if len(s) == 6 and s.isalpha():
+        return f"{s}=X"
+    return s
 
 
 def _import_tradingagents_local():
@@ -2056,55 +2101,323 @@ def _extract_tradingagents_recommendation(decision: Any) -> Dict[str, Any]:
         or payload.get("analysis")
         or str(payload)[:500]
     )
-    return {
+    out: Dict[str, Any] = {
         "recommendation": str(recommendation).upper(),
         "confidence": max(0.0, min(1.0, confidence)),
         "reasoning": str(reasoning),
         "raw_decision": payload,
     }
+    for k in (
+        "execution_type",
+        "order_type",
+        "entry_price",
+        "limit_price",
+        "pending_price",
+        "stop_price",
+        "stop_loss",
+        "take_profit",
+    ):
+        if k in payload and payload[k] is not None:
+            out[k] = payload[k]
+    return out
+
+
+def _normalize_ta_execution_type(val: Any) -> Optional[str]:
+    """Retourne market | limit | stop | stop_limit, ou None (= marché)."""
+    if val is None:
+        return None
+    s = str(val).strip().lower()
+    if s in ("", "m", "market", "au_marche", "marche"):
+        return None
+    if s in ("l", "limit", "buy_limit", "sell_limit", "ordre_limite"):
+        return "limit"
+    if s in ("s", "stop", "buy_stop", "sell_stop", "stop_order"):
+        return "stop"
+    if "stop_limit" in s or s in ("stoplimit", "stop-limit"):
+        return "stop_limit"
+    return None
+
+
+def _float_from_ta_row(row: Dict[str, Any], *keys: str) -> Optional[float]:
+    for k in keys:
+        if k not in row or row[k] is None:
+            continue
+        try:
+            v = float(row[k])
+            if v == v and abs(v) < 1e100:  # not NaN
+                return v
+        except Exception:
+            continue
+    return None
+
+
+def _dig_tradingagents_order_hints(row: Dict[str, Any]) -> Dict[str, Any]:
+    """Lit execution_type / prix / SL / TP depuis une ligne cache RT ou rapport manuel."""
+    raw = row.get("raw_decision") if isinstance(row.get("raw_decision"), dict) else None
+    if raw is None and isinstance(row.get("raw"), dict):
+        raw = row["raw"]
+    if not isinstance(raw, dict):
+        raw = {}
+    hints: Dict[str, Any] = {}
+    for src in (row, raw):
+        if not isinstance(src, dict):
+            continue
+        et = _normalize_ta_execution_type(
+            src.get("execution_type") or src.get("order_type") or src.get("order_kind")
+        )
+        if et and "execution_type" not in hints:
+            hints["execution_type"] = et
+        ep = _float_from_ta_row(src, "entry_price", "limit_price", "pending_price", "price", "order_price")
+        if ep is not None and ep > 0 and "entry_price" not in hints:
+            hints["entry_price"] = ep
+        sl = _float_from_ta_row(src, "stop_loss", "sl", "stop_loss_price")
+        if sl is not None and sl > 0 and "stop_loss" not in hints:
+            hints["stop_loss"] = sl
+        tp = _float_from_ta_row(src, "take_profit", "tp", "take_profit_1", "tp1")
+        if tp is not None and tp > 0 and "take_profit" not in hints:
+            hints["take_profit"] = tp
+    return hints
+
+
+async def _collect_tradingagents_execution_hints(symbol: str) -> Dict[str, Any]:
+    """
+    Fusionne cache boucle RT + rapport manuel pour des consignes d'exécution MT5.
+    Priorité : résultat RT « ok » si présent, sinon champs du rapport manuel.
+    """
+    sym = (symbol or "").strip().upper()
+    if not sym:
+        return {}
+    row_rt: Optional[Dict[str, Any]] = None
+    async with _tradingagents_lock:
+        row_rt = _tradingagents_results.get(sym)
+        if row_rt is None:
+            for k, v in _tradingagents_results.items():
+                if str(k).strip().upper() == sym:
+                    row_rt = v
+                    break
+    manual = await _peek_manual_tradingagents_report(symbol)
+
+    merged: Dict[str, Any] = {}
+    for label, row in (("rt", row_rt), ("manual", manual)):
+        if not row or not isinstance(row, dict):
+            continue
+        if label == "rt":
+            st = str(row.get("status") or "")
+            if st not in ("ok", "openai_fallback_ok", "nvidia_nim_fallback_ok"):
+                continue
+        h = _dig_tradingagents_order_hints(row)
+        for k, v in h.items():
+            if k not in merged or merged[k] in (None, 0, "", 0.0):
+                merged[k] = v
+        rec = str(row.get("recommendation") or "HOLD").strip().upper()
+        try:
+            mc = float(row.get("confidence") or 0.0)
+            if mc > 1.0:
+                mc = min(1.0, mc / 100.0)
+        except Exception:
+            mc = 0.0
+        merged.setdefault("_recommendation", rec)
+        merged["_confidence"] = max(float(merged.get("_confidence") or 0.0), mc)
+        merged.setdefault("_source", label)
+    return merged
+
+
+def _tradingagents_err_is_quota_or_rate_limit(msg: str) -> bool:
+    m = (msg or "").lower()
+    return (
+        "resource_exhausted" in m
+        or "429" in m
+        or "quota" in m
+        or "rate limit" in m
+        or "rate_limit" in m
+        or "too many requests" in m
+    )
+
+
+def _tradingagents_build_cfg_from_base(ta_default_config: Dict[str, Any]) -> Dict[str, Any]:
+    """Fusionne DEFAULT_CONFIG TradingAgents avec les surcharges TradBOT / .env."""
+    cfg = ta_default_config.copy()
+    if _env_bool("AI_TRADINGAGENTS_USE_FLASH_FOR_ALL", False):
+        flash = (os.getenv("AI_TRADINGAGENTS_FLASH_MODEL") or "gemini-2.0-flash").strip()
+        cfg["quick_think_llm"] = flash
+        cfg["deep_think_llm"] = flash
+    else:
+        qt = (os.getenv("AI_TRADINGAGENTS_QUICK_THINK_LLM") or "").strip()
+        dt = (os.getenv("AI_TRADINGAGENTS_DEEP_THINK_LLM") or "").strip()
+        if qt:
+            cfg["quick_think_llm"] = qt
+        if dt:
+            cfg["deep_think_llm"] = dt
+    prov = (os.getenv("TRADINGAGENTS_LLM_PROVIDER") or os.getenv("AI_TRADINGAGENTS_LLM_PROVIDER") or "").strip()
+    if prov:
+        cfg["llm_provider"] = prov.lower()
+    bu = (os.getenv("AI_TRADINGAGENTS_LLM_BACKEND_URL") or "").strip()
+    if bu:
+        cfg["backend_url"] = bu
+    return cfg
+
+
+def _tradingagents_build_cfg_openai_fallback(ta_default_config: Dict[str, Any]) -> Dict[str, Any]:
+    """Config minimale OpenAI (repli quota Gemini)."""
+    cfg = ta_default_config.copy()
+    cfg["llm_provider"] = "openai"
+    qm = (os.getenv("AI_TRADINGAGENTS_OPENAI_QUICK_MODEL") or "gpt-4o-mini").strip()
+    dm = (os.getenv("AI_TRADINGAGENTS_OPENAI_DEEP_MODEL") or qm).strip()
+    cfg["quick_think_llm"] = qm
+    cfg["deep_think_llm"] = dm
+    return cfg
+
+
+def _tradingagents_build_cfg_nvidia_nim_fallback(ta_default_config: Dict[str, Any]) -> Dict[str, Any]:
+    """Repli NVIDIA NIM (API OpenAI-compatible) — nécessite NVIDIA_NIM_API_KEY et tradingagents>=nvidia_nim."""
+    cfg = ta_default_config.copy()
+    cfg["llm_provider"] = "nvidia_nim"
+    cfg["backend_url"] = (
+        os.getenv("AI_TRADINGAGENTS_NIM_BACKEND_URL") or "https://integrate.api.nvidia.com/v1"
+    ).strip()
+    qm = (os.getenv("AI_TRADINGAGENTS_NIM_QUICK_MODEL") or "z-ai/glm5").strip()
+    dm = (os.getenv("AI_TRADINGAGENTS_NIM_DEEP_MODEL") or qm).strip()
+    cfg["quick_think_llm"] = qm
+    cfg["deep_think_llm"] = dm
+    return cfg
 
 
 async def _run_tradingagents_once(symbol: str) -> Dict[str, Any]:
-    """Exécute une analyse TradingAgents pour un symbole."""
+    """Exécute une analyse TradingAgents pour un symbole (repli OpenAI si quota Google)."""
     symbol = (symbol or "").strip().upper()
     if not symbol:
         raise ValueError("symbol requis")
 
     started_at = time.time()
     TradingAgentsGraph, ta_default_config = _import_tradingagents_local()
+    data_ticker = _mt5_to_yfinance_ticker(symbol)
+    today = datetime.utcnow().strftime("%Y-%m-%d")
 
-    def _sync_run() -> Dict[str, Any]:
-        cfg = ta_default_config.copy()
+    def _sync_propagate(cfg: Dict[str, Any]) -> Dict[str, Any]:
         ta_graph = TradingAgentsGraph(debug=False, config=cfg)
-        today = datetime.utcnow().strftime("%Y-%m-%d")
-        _, decision = ta_graph.propagate(symbol, today)
+        _, decision = ta_graph.propagate(data_ticker, today)
         return _extract_tradingagents_recommendation(decision)
 
-    normalized = await asyncio.to_thread(_sync_run)
-    return {
+    base_result: Dict[str, Any] = {
         "symbol": symbol,
-        "status": "ok",
+        "data_ticker": data_ticker,
         "ran_at": datetime.utcnow().isoformat(),
-        "latency_ms": (time.time() - started_at) * 1000.0,
-        **normalized,
     }
+
+    try:
+        cfg = _tradingagents_build_cfg_from_base(ta_default_config)
+        normalized = await asyncio.to_thread(_sync_propagate, cfg)
+        latency_ms = (time.time() - started_at) * 1000.0
+        return {
+            **base_result,
+            "status": "ok",
+            "llm_route": "primary",
+            "latency_ms": latency_ms,
+            **normalized,
+        }
+    except Exception as e:
+        err_s = str(e)
+        logger.warning("TradingAgents primary run failed (%s): %s", symbol, err_s[:500])
+
+        use_fb = _env_bool("AI_TRADINGAGENTS_FALLBACK_OPENAI", True)
+        oa_key = (os.getenv("OPENAI_API_KEY") or "").strip()
+        quota_like = _tradingagents_err_is_quota_or_rate_limit(err_s)
+
+        if use_fb and oa_key and (quota_like or _env_bool("AI_TRADINGAGENTS_FALLBACK_OPENAI_FORCE", False)):
+            try:
+                cfg_fb = _tradingagents_build_cfg_openai_fallback(ta_default_config)
+                normalized_fb = await asyncio.to_thread(_sync_propagate, cfg_fb)
+                latency_ms = (time.time() - started_at) * 1000.0
+                logger.info(
+                    "TradingAgents OpenAI fallback OK %s -> %s (%.0fms)",
+                    symbol,
+                    normalized_fb.get("recommendation"),
+                    latency_ms,
+                )
+                return {
+                    **base_result,
+                    "status": "openai_fallback_ok",
+                    "llm_route": "openai_fallback",
+                    "latency_ms": latency_ms,
+                    "reason_note": f"Primary LLM failed ({err_s[:280]}); used OpenAI fallback.",
+                    **normalized_fb,
+                }
+            except Exception as e2:
+                err2 = str(e2)
+                logger.error("TradingAgents OpenAI fallback failed (%s): %s", symbol, err2[:500])
+
+        nim_key = (os.getenv("NVIDIA_NIM_API_KEY") or "").strip()
+        use_nim_fb = _env_bool("AI_TRADINGAGENTS_FALLBACK_NVIDIA_NIM", True)
+        if (
+            use_nim_fb
+            and nim_key
+            and (quota_like or _env_bool("AI_TRADINGAGENTS_FALLBACK_NVIDIA_NIM_FORCE", False))
+        ):
+            try:
+                cfg_nim = _tradingagents_build_cfg_nvidia_nim_fallback(ta_default_config)
+                normalized_nim = await asyncio.to_thread(_sync_propagate, cfg_nim)
+                latency_ms = (time.time() - started_at) * 1000.0
+                logger.info(
+                    "TradingAgents NVIDIA NIM fallback OK %s -> %s (%.0fms)",
+                    symbol,
+                    normalized_nim.get("recommendation"),
+                    latency_ms,
+                )
+                return {
+                    **base_result,
+                    "status": "nvidia_nim_fallback_ok",
+                    "llm_route": "nvidia_nim_fallback",
+                    "latency_ms": latency_ms,
+                    "reason_note": f"Primary LLM failed ({err_s[:280]}); used NVIDIA NIM fallback.",
+                    **normalized_nim,
+                }
+            except Exception as e3:
+                err3 = str(e3)
+                logger.error("TradingAgents NVIDIA NIM fallback failed (%s): %s", symbol, err3[:500])
+
+        latency_ms = (time.time() - started_at) * 1000.0
+        reason = err_s[:2000] if err_s else "unknown_error"
+        if quota_like:
+            status = "quota_exceeded"
+            note = (
+                "Quota ou limite de débit Google Gemini atteinte (souvent 20 req/j en gratuit). "
+                "Options: facturation Google AI, attendre le reset, "
+                "OPENAI_API_KEY + AI_TRADINGAGENTS_FALLBACK_OPENAI=true, "
+                "ou NVIDIA_NIM_API_KEY + AI_TRADINGAGENTS_FALLBACK_NVIDIA_NIM=true (modèles NIM)."
+            )
+        else:
+            status = "error"
+            note = "Analyse TradingAgents impossible. Voir le champ reasoning pour le détail."
+
+        return {
+            **base_result,
+            "status": status,
+            "llm_route": "none",
+            "latency_ms": latency_ms,
+            "recommendation": "HOLD",
+            "confidence": 0.0,
+            "reasoning": note + " | " + reason,
+            "raw_decision": {"error": reason},
+        }
 
 
 async def _tradingagents_realtime_loop() -> None:
     """Boucle continue: 1 symbole toutes les N secondes (défaut 300s)."""
     global _tradingagents_cursor, _tradingagents_last_error
     logger.info(
-        "🧭 TradingAgents RT démarré: interval=%ss, symbols=%s",
+        "🧭 TradingAgents RT démarré: interval=%ss, env_symbols=%s (mt5 push remplace si non vide)",
         AI_TRADINGAGENTS_INTERVAL_SEC,
         ",".join(AI_TRADINGAGENTS_SYMBOLS) or "(none)",
     )
     while True:
         try:
-            if not AI_TRADINGAGENTS_SYMBOLS:
+            async with _tradingagents_lock:
+                symbols = list(_tradingagents_mt5_symbols) if _tradingagents_mt5_symbols else list(AI_TRADINGAGENTS_SYMBOLS)
+            if not symbols:
                 await asyncio.sleep(max(60, AI_TRADINGAGENTS_INTERVAL_SEC))
                 continue
 
-            symbol = AI_TRADINGAGENTS_SYMBOLS[_tradingagents_cursor % len(AI_TRADINGAGENTS_SYMBOLS)]
+            symbol = symbols[_tradingagents_cursor % len(symbols)]
             _tradingagents_cursor += 1
             result = await _run_tradingagents_once(symbol)
             async with _tradingagents_lock:
@@ -2268,6 +2581,65 @@ DERIV_API_TOKEN = os.getenv("DERIV_API_TOKEN", "")
 DERIV_WS_URL = f"wss://ws.derivws.com/websockets/v3?app_id={DERIV_APP_ID}"
 DERIV_AVAILABLE = True
 logger.info(f"Deriv API WebSocket disponible (app_id: {DERIV_APP_ID})")
+
+
+async def deriv_ws_request(request_data: dict, timeout: float = 25.0) -> dict:
+    """Requête WebSocket minimale vers Deriv (ex. active_symbols)."""
+    import websockets as ws_mod
+
+    try:
+        async with ws_mod.connect(
+            DERIV_WS_URL,
+            close_timeout=5.0,
+            open_timeout=min(15.0, timeout),
+            ping_interval=20,
+            ping_timeout=20,
+        ) as ws:
+            await ws.send(json.dumps(request_data))
+            for _ in range(40):
+                raw = await asyncio.wait_for(ws.recv(), timeout=timeout)
+                data = json.loads(raw)
+                if not isinstance(data, dict):
+                    continue
+                if data.get("error"):
+                    return data
+                if "active_symbols" in data:
+                    return data
+                if "echo_req" in data and len(data) <= 2:
+                    continue
+            return {"error": {"message": "deriv_ws_unexpected_response"}}
+    except asyncio.TimeoutError:
+        return {"error": {"message": "deriv_ws_timeout"}}
+    except Exception as e:
+        logger.error("Deriv WS error: %s", e, exc_info=True)
+        return {"error": {"message": str(e)}}
+
+
+def _mt5_symbol_catalog_snapshot() -> Dict[str, Any]:
+    """Liste des symboles MT5 si le terminal est connecté (sans shutdown global)."""
+    out: Dict[str, Any] = {"available": False, "symbols": [], "count": 0, "hint": None, "error": None}
+    if not MT5_AVAILABLE:
+        out["hint"] = "MetaTrader5 non installé"
+        return out
+    try:
+        from backend import mt5_connector
+
+        if hasattr(mt5_connector, "is_connected") and not mt5_connector.is_connected():
+            out["hint"] = "MT5 non connecté — ouvre le terminal et connecte-toi au compte"
+            return out
+        symbols = mt5.symbols_get()  # type: ignore
+        if not symbols:
+            out["hint"] = "Aucun symbole retourné par MT5"
+            return out
+        names = sorted({s.name for s in symbols})
+        out["available"] = True
+        out["count"] = len(names)
+        out["symbols"] = names[:4000]
+        return out
+    except Exception as e:
+        out["error"] = str(e)
+        return out
+
 
 # Compteur de requêtes Alpha Vantage (limite: 25/jour gratuit)
 alphavantage_request_count = 0
@@ -3318,25 +3690,25 @@ async def startup_event():
             and (os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_SERVICE_KEY") or os.getenv("SUPABASE_ANON_KEY"))
         )
         if ML_TRAINER_AVAILABLE and supabase_configured and AI_ENABLE_SUPABASE_CONTINUOUS_TRAINER:
-            logger.info("🤖 Démarrage entraînement continu ML (Supabase)...")
+            logger.info("🤖 Démarrage entraînement continu ML...")
             await ml_trainer.start()
-            logger.info("✅ Entraînement continu Supabase activé (predictions → model_metrics)")
+            logger.info("✅ Entraînement continu ML activé (predictions → model_metrics)")
         elif ML_TRAINER_AVAILABLE and supabase_configured and not AI_ENABLE_SUPABASE_CONTINUOUS_TRAINER:
-            logger.info("ℹ️ Entraînement continu Supabase désactivé (AI_ENABLE_SUPABASE_CONTINUOUS_TRAINER=false)")
+            logger.info("ℹ️ Entraînement continu ML désactivé (AI_ENABLE_SUPABASE_CONTINUOUS_TRAINER=false)")
         elif ML_TRAINER_AVAILABLE and not supabase_configured:
-            logger.info("ℹ️ Entraînement continu désactivé: SUPABASE_URL et SUPABASE_*KEY requis")
+            logger.info("ℹ️ Entraînement continu ML désactivé: configuration backend distante incomplète")
     except Exception as e:
         logger.error(f"❌ Erreur démarrage entraînement continu: {e}", exc_info=True)
 
     # Démarrer la boucle d'analyse TradingAgents (optionnelle, dépôt local)
-    if AI_ENABLE_TRADINGAGENTS_RT:
+    if AI_ENABLE_TRADINGAGENTS_AUTO_LOOP:
         if not AI_TRADINGAGENTS_SYMBOLS:
-            logger.warning("⚠️ TradingAgents RT activé mais aucun symbole (AI_TRADINGAGENTS_SYMBOLS vide)")
+            logger.warning("⚠️ TradingAgents auto-loop activé mais aucun symbole (AI_TRADINGAGENTS_SYMBOLS vide)")
         elif _tradingagents_task is None or _tradingagents_task.done():
             _tradingagents_task = asyncio.create_task(_tradingagents_realtime_loop())
-            logger.info("✅ Boucle TradingAgents RT démarrée (%ss)", AI_TRADINGAGENTS_INTERVAL_SEC)
+            logger.info("✅ Boucle TradingAgents auto démarrée (%ss)", AI_TRADINGAGENTS_INTERVAL_SEC)
     else:
-        logger.info("ℹ️ TradingAgents RT désactivé (AI_ENABLE_TRADINGAGENTS_RT=false)")
+        logger.info("ℹ️ TradingAgents auto-loop désactivée (AI_ENABLE_TRADINGAGENTS_AUTO_LOOP=false) — utiliser CLI + POST /tradingagents/manual-report")
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -3882,8 +4254,11 @@ async def _compute_propice_top_from_trade_feedback(
         "limit": "5000",  # garde-fou
     }
 
-    async with httpx.AsyncClient(timeout=12.0) as client:
-        r = await client.get(f"{supabase_url}/rest/v1/trade_feedback", headers=headers, params=params)
+    try:
+        async with httpx.AsyncClient(timeout=12.0) as client:
+            r = await client.get(f"{supabase_url}/rest/v1/trade_feedback", headers=headers, params=params)
+    except httpx.RequestError:
+        return {"rows": [], "source": "supabase_trade_feedback", "note": "network_error"}
     if r.status_code not in (200, 206):
         raise RuntimeError(f"Supabase trade_feedback HTTP {r.status_code}: {r.text[:200]}")
 
@@ -4113,6 +4488,17 @@ async def get_dashboard_top_net_summary(timeframe: str = "M1", days: int = 30, t
     except HTTPException:
         raise
     except Exception as e:
+        import httpx as _hx
+        if isinstance(e, _hx.RequestError):
+            logger.warning(
+                "Erreur /dashboard/top-net-summary (réseau): %s: %s",
+                type(e).__name__,
+                str(e)[:400],
+            )
+            raise HTTPException(
+                status_code=503,
+                detail=f"Données Supabase injoignables ({type(e).__name__}). Vérifie réseau / clés / pare-feu.",
+            )
         logger.error(f"Erreur /dashboard/top-net-summary: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -4916,6 +5302,9 @@ class DecisionResponse(BaseModel):
     spike_zone_price: Optional[float] = None
     stop_loss: Optional[float] = None
     take_profit: Optional[float] = None
+    # Consignes MT5 (TradingAgents + fusion /decision) — l'EA peut placer limite / stop / marché
+    entry_price: Optional[float] = None
+    execution_type: Optional[str] = None  # market | limit | stop | stop_limit (None ou market = au marché)
     spike_direction: Optional[bool] = None  # True=BUY, False=SELL
     early_spike_warning: bool = False
     early_spike_zone_price: Optional[float] = None
@@ -5613,7 +6002,27 @@ async def decision_simplified(request: DecisionRequest):
                 reason += "[Boom: M1+M5 haussiers — bonus buy_score vs H1] "
     except Exception:
         pass
-    
+
+    # 4d. Rapport manuel CLI TradingAgents → pondération buy/sell (fusion avec analyse technique)
+    try:
+        manual = await _peek_manual_tradingagents_report(str(request.symbol))
+        if manual:
+            rec = str(manual.get("recommendation") or "HOLD").strip().upper()
+            mc = float(manual.get("confidence") or 0.0)
+            if mc > 1.0:
+                mc = min(1.0, mc / 100.0)
+            w = float(os.getenv("AI_TRADINGAGENTS_CLI_WEIGHT", "0.28"))
+            if rec == "BUY" and mc >= 0.45:
+                buy_score += w * mc
+                reason += f"[CLI TradingAgents: BUY {int(mc * 100)}%] "
+            elif rec == "SELL" and mc >= 0.45:
+                sell_score += w * mc
+                reason += f"[CLI TradingAgents: SELL {int(mc * 100)}%] "
+            elif rec in ("HOLD", "NEUTRAL", "WAIT"):
+                reason += "[CLI TradingAgents: HOLD] "
+    except Exception:
+        pass
+
     # 5. Décision technique de base
     # Sur Boom/Crash, l'EA ne trade qu'un seul sens. Si on élit "buy" sur Crash (ex. H1 haussier qui pèse 35 %),
     # enforce_ea_boom_crash_direction ramène tout en HOLD : l'utilisateur voit des spikes baissiers mais IA=HOLD.
@@ -6088,6 +6497,51 @@ async def decision_simplified(request: DecisionRequest):
             
     coherence = f"COHÉRENCE: {int(confidence * 100)}%"
     
+    # 12b. TradingAgents (cache RT + rapport manuel) → prix d'entrée, type d'ordre, SL/TP pour MT5
+    entry_price_out: Optional[float] = None
+    execution_type_out: Optional[str] = None
+    if _env_bool("AI_TRADINGAGENTS_EXEC_MERGE_ENABLED", True):
+        try:
+            ta_hints = await _collect_tradingagents_execution_hints(str(request.symbol))
+            min_c = float(os.getenv("AI_TRADINGAGENTS_EXEC_MERGE_MIN_CONF", "0.55"))
+            ta_rec = str(ta_hints.get("_recommendation") or ta_hints.get("recommendation") or "HOLD").strip().upper()
+            ta_conf = float(ta_hints.get("_confidence") or ta_hints.get("confidence") or 0.0)
+            side_match = (
+                (action == "buy" and ta_rec == "BUY")
+                or (action == "sell" and ta_rec == "SELL")
+            )
+            if ta_conf >= min_c and side_match and action in ("buy", "sell"):
+                et = (ta_hints.get("execution_type") or "").strip().lower()
+                if et in ("limit", "stop", "stop_limit"):
+                    execution_type_out = et
+                ep = ta_hints.get("entry_price")
+                if ep is not None:
+                    try:
+                        epf = float(ep)
+                        if epf > 0:
+                            entry_price_out = epf
+                    except Exception:
+                        pass
+                if _env_bool("AI_TRADINGAGENTS_MERGE_STOPS_FROM_TA", True):
+                    try:
+                        sl_h = ta_hints.get("stop_loss")
+                        if sl_h is not None and float(sl_h) > 0:
+                            stop_loss = float(sl_h)
+                    except Exception:
+                        pass
+                    try:
+                        tp_h = ta_hints.get("take_profit")
+                        if tp_h is not None and float(tp_h) > 0:
+                            take_profit = float(tp_h)
+                    except Exception:
+                        pass
+                if execution_type_out and entry_price_out:
+                    reason += f" [TradingAgents {execution_type_out.upper()} @ {entry_price_out}]"
+                elif execution_type_out:
+                    reason += f" [TradingAgents {execution_type_out.upper()} — prix via marché/ATR]"
+        except Exception as e:
+            logger.debug("TradingAgents exec merge: %s", e)
+
     stair_client_eid: Optional[str] = None
     if request.stair_detected:
         sym_st = str(request.symbol or "")
@@ -6140,12 +6594,19 @@ async def decision_simplified(request: DecisionRequest):
     }
     if confluence_detail:
         meta_out["indicator_confluence"] = confluence_detail
+    if entry_price_out is not None or execution_type_out:
+        meta_out["tradingagents_execution"] = {
+            "entry_price": entry_price_out,
+            "execution_type": execution_type_out,
+        }
     response = DecisionResponse(
         action=action,
         confidence=confidence_percentage,  # Décimale 0-1 (MT5 affiche *100)
         reason=reason,
         stop_loss=stop_loss,
         take_profit=take_profit,
+        entry_price=entry_price_out,
+        execution_type=execution_type_out,
         timestamp=datetime.now().isoformat(),
         model_used="technical_ml_qwen_blend",
         predicted_prices=predicted_prices,
@@ -6160,7 +6621,7 @@ async def decision_simplified(request: DecisionRequest):
     try:
         await save_decision_to_supabase(request, response, ml_result)
     except Exception as e:
-        logger.error(f"❌ Erreur sauvegarde décision Supabase: {e}")
+        logger.error(f"❌ Erreur sauvegarde décision (persistance): {e}")
     
     return response
 
@@ -6233,12 +6694,10 @@ async def _push_prediction_to_supabase(
                 },
                 timeout=10.0,
             )
-            if resp.status_code == 201:
-                logger.debug(f"✅ Prediction logged to Supabase for {request.symbol}")
-            else:
+            if resp.status_code != 201:
                 logger.warning(f"Predictions table HTTP {resp.status_code}: {resp.text[:200]}")
     except Exception as e:
-        logger.debug(f"Predictions Supabase: {e}")
+        logger.debug("predictions persist: %s", e)
 
 
 async def save_decision_to_supabase(request: DecisionRequest, response: DecisionResponse, ml_result: dict):
@@ -6305,7 +6764,7 @@ async def save_decision_to_supabase(request: DecisionRequest, response: Decision
                 )
                 if r_metrics.status_code not in (200, 201):
                     logger.error(
-                        "Supabase model_metrics proxy: statut %s body=%s payload=%s",
+                        "model_metrics proxy: statut %s body=%s payload=%s",
                         r_metrics.status_code,
                         r_metrics.text,
                         metrics_payload,
@@ -6361,8 +6820,8 @@ async def fetch_supabase_ml_context(symbol: str, timeframe: str = "M1") -> Dict[
                         out["drift_factor"] = float(m.get("drift_factor", 1.0))
                     except Exception:
                         pass
-        except Exception as e:
-            logger.debug(f"Supabase model_metrics: {e}")
+        except Exception:
+            pass
         try:
             r2 = await client.get(
                 f"{supabase_url}/rest/v1/symbol_calibration",
@@ -6375,8 +6834,8 @@ async def fetch_supabase_ml_context(symbol: str, timeframe: str = "M1") -> Dict[
                 out["calibration_wins"] = int(row.get("wins", 0))
                 out["calibration_total"] = int(row.get("total", 0))
                 out["drift_factor"] = float(row.get("drift_factor", 1.0))
-        except Exception as e:
-            logger.debug(f"Supabase symbol_calibration: {e}")
+        except Exception:
+            pass
         try:
             r3 = await client.get(
                 f"{supabase_url}/rest/v1/trade_feedback",
@@ -6389,8 +6848,8 @@ async def fetch_supabase_ml_context(symbol: str, timeframe: str = "M1") -> Dict[
                 wins = sum(1 for x in rows if x.get("is_win") is True)
                 out["recent_count"] = len(rows)
                 out["recent_win_rate"] = wins / len(rows) if rows else 0.5
-        except Exception as e:
-            logger.debug(f"Supabase trade_feedback: {e}")
+        except Exception:
+            pass
     return out
 
 
@@ -6990,7 +7449,7 @@ async def _fetch_ml_metrics_from_supabase() -> Dict[str, Any]:
             "source": "supabase",
         }
     except Exception as e:
-        logger.debug("Erreur chargement métriques Supabase pour dashboard: %s", str(e)[:100])
+        logger.debug("Erreur chargement métriques persistées pour dashboard: %s", str(e)[:100])
         return {}
 
 
@@ -7062,7 +7521,7 @@ async def _fetch_ml_metrics_for_symbol_from_supabase(symbol: str, timeframe: str
             "per_class": per_class,
         }
     except Exception as e:
-        logger.debug("Supabase metrics for %s: %s", symbol, str(e)[:60])
+        logger.debug("ml metrics persist for %s: %s", symbol, str(e)[:60])
         return None
 
 
@@ -7421,7 +7880,7 @@ async def prediction_channel(symbol: Optional[str] = None, timeframe: str = "M1"
                 row["source"] = "supabase"
                 return row
     except Exception as e:
-        logger.debug(f"prediction-channel supabase fetch: {e}")
+        logger.debug("prediction-channel persist fetch: %s", e)
 
     # 2) Sinon calculer (et la fonction tente déjà une sauvegarde Supabase)
     result = get_prediction_channel_5000(symbol, timeframe, future_bars)
@@ -7600,7 +8059,7 @@ async def get_trend(symbol: Optional[str] = None, timeframe: str = "M1"):
                 if final_confidence < 0.5:
                     final_decision = "HOLD"
         except Exception as e:
-            logger.debug(f"Enrichissement Supabase /trend: {e}")
+            logger.debug("Enrichissement ML contexte /trend: %s", e)
 
         response = {
             "symbol": symbol,
@@ -7946,10 +8405,13 @@ async def status():
             "cache_status": len(symbol_hour_status_cache),
         },
         "tradingagents_rt": {
-            "enabled": AI_ENABLE_TRADINGAGENTS_RT,
+            "auto_loop_enabled": AI_ENABLE_TRADINGAGENTS_AUTO_LOOP,
+            "manual_report_ttl_sec": AI_TRADINGAGENTS_MANUAL_TTL_SEC,
+            "manual_reports_cached": len(_tradingagents_manual_reports),
             "interval_sec": AI_TRADINGAGENTS_INTERVAL_SEC,
             "repo_path": AI_TRADINGAGENTS_REPO_PATH,
-            "symbols": AI_TRADINGAGENTS_SYMBOLS,
+            "symbols_env": AI_TRADINGAGENTS_SYMBOLS,
+            "symbols_mt5_push": list(_tradingagents_mt5_symbols),
             "task_running": bool(_tradingagents_task and not _tradingagents_task.done()),
             "last_error": _tradingagents_last_error,
             "results_cached": len(_tradingagents_results),
@@ -8027,6 +8489,12 @@ async def get_symbol_propice_status(symbol: str, timeframe: str = "M1", lookback
             "source": "supabase",
         }
     except Exception as e:
+        import httpx as _hx
+        if isinstance(e, _hx.RequestError):
+            raise HTTPException(
+                status_code=503,
+                detail=f"Supabase injoignable ({type(e).__name__}). Vérifie URL, clé API et connexion.",
+            )
         raise HTTPException(status_code=503, detail=f"Statut indisponible (cache vide et Supabase KO): {e}")
 
 
@@ -11319,7 +11787,7 @@ async def _store_prediction_run_to_supabase(
                 return None
         return run_id
     except Exception as e:
-        logger.warning(f"Supabase store prediction run skipped: {e}")
+        logger.warning("store prediction run skipped: %s", e)
         return None
 
 
@@ -12261,11 +12729,11 @@ async def _upsert_symbol_hour_profile_to_supabase(
         async with httpx.AsyncClient(timeout=15.0) as client:
             resp = await client.post(f"{supabase_url}/rest/v1/symbol_hour_profile", headers=headers, json=payload)
         if resp.status_code not in (200, 201, 204):
-            logger.warning(f"Supabase symbol_hour_profile upsert HTTP {resp.status_code}: {resp.text[:200]}")
+            logger.warning("symbol_hour_profile upsert HTTP %s: %s", resp.status_code, resp.text[:200])
             return False
         return True
     except Exception as e:
-        logger.warning(f"Supabase upsert symbol_hour_profile failed: {e}")
+        logger.warning("upsert symbol_hour_profile failed: %s", e)
         return False
 
 
@@ -12303,11 +12771,11 @@ async def _upsert_symbol_hour_status_to_supabase(
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.post(f"{supabase_url}/rest/v1/symbol_hour_status", headers=headers, json=payload)
         if resp.status_code not in (200, 201, 204):
-            logger.warning(f"Supabase symbol_hour_status upsert HTTP {resp.status_code}: {resp.text[:200]}")
+            logger.warning("symbol_hour_status upsert HTTP %s: %s", resp.status_code, resp.text[:200])
             return False
         return True
     except Exception as e:
-        logger.warning(f"Supabase upsert symbol_hour_status failed: {e}")
+        logger.warning("upsert symbol_hour_status failed: %s", e)
         return False
 
 @app.post("/mt5/history-upload")
@@ -12536,7 +13004,7 @@ async def upload_mt5_deals(request: MT5DealsUploadRequest):
                 "decision": "UNKNOWN",
             })
 
-        logger.info(f"📥 /mt5/deals-upload received={len(deals)} kept={len(rows)} skipped={skipped} supabase={supabase_url}")
+        logger.info(f"📥 /mt5/deals-upload received={len(deals)} kept={len(rows)} skipped={skipped}")
 
         import httpx
         headers = {
@@ -12703,7 +13171,7 @@ async def upload_mt5_symbol_trade_stats(request: MT5SymbolTradeStatsUploadReques
                 "last_trade_at": _norm_last_trade_at(r.get("last_trade_at")),
             })
 
-        logger.info(f"📥 /mt5/symbol-trade-stats-upload received={len(rows_in)} kept={len(kept)} skipped={skipped} supabase={supabase_url}")
+        logger.info(f"📥 /mt5/symbol-trade-stats-upload received={len(rows_in)} kept={len(kept)} skipped={skipped}")
         if not kept:
             return {"ok": True, "received": len(rows_in), "upserted": 0, "skipped": skipped}
 
@@ -13640,11 +14108,11 @@ async def _push_feedback_to_supabase(
                 timeout=5.0,
             )
             if r.status_code in (200, 201):
-                logger.info(f"✅ Feedback envoyé à Supabase (trade_feedback) pour {symbol} ({timeframe})")
+                logger.info(f"✅ Feedback trade enregistré pour {symbol} ({timeframe})")
             else:
-                logger.error(f"Supabase trade_feedback HTTP {r.status_code}: {r.text}")
+                logger.error(f"trade_feedback HTTP {r.status_code}: {r.text}")
     except Exception as e:
-        logger.error(f"Supabase trade_feedback exception pour {symbol} ({timeframe}): {e}")
+        logger.error(f"trade_feedback exception pour {symbol} ({timeframe}): {e}")
 
 
 @app.post("/trades/feedback")
@@ -13788,7 +14256,6 @@ async def ml_metrics(symbol: str, timeframe: str = "M1"):
     # Sinon: fallback Supabase pour afficher le résumé d'entraînement sur le graphique
     supabase_data = await _fetch_ml_metrics_for_symbol_from_supabase(symbol, timeframe)
     if supabase_data:
-        logger.info(f" ML metrics pour {symbol} depuis Supabase (model_metrics)")
         base = {**computed, **supabase_data, "data_source": "supabase"}
     else:
         base = {**computed, "data_source": "computed"}
@@ -16972,7 +17439,7 @@ async def save_correction_prediction(
 
         logger.info(f"💾 Prédiction correction sauvegardée (tables actives) pour {symbol} ({timeframe})")
     except Exception as e:
-        logger.warning(f"Sauvegarde corrections Supabase échouée: {e}")
+        logger.warning("Sauvegarde corrections persist échouée: %s", e)
 
 async def get_prediction_performance_stats(symbol: str, days: int) -> dict:
     """Récupère les statistiques de performance"""
@@ -17173,7 +17640,7 @@ async def update_prediction_with_feedback(feedback: dict) -> dict:
             )
         
         if r.status_code == 402:
-            logger.warning("🚫 Quota Supabase dépassé (402). Désactivation des écritures DB.")
+            logger.warning("🚫 Quota API distant dépassé (402). Désactivation des écritures DB.")
             SUPABASE_DISABLED_BY_QUOTA = True
             return {"prediction_id": feedback.get("prediction_id"), "updated": False, "reason": "quota_exceeded"}
             
@@ -17474,19 +17941,186 @@ async def analyze_with_ollama(request: OllamaAnalysisRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+class TradingAgentsMt5SymbolsBody(BaseModel):
+    """Symboles graphiques MT5 : fusion multi-EA (merge=true) ou remplacement de la liste."""
+
+    symbols: List[str] = Field(default_factory=list)
+    merge: bool = False
+
+
+class TradingAgentsManualReportBody(BaseModel):
+    """Rapport produit hors serveur (ex. `python -m cli.main`) à fusionner sur les prochains POST /decision."""
+
+    symbol: str
+    recommendation: str = Field(..., description="BUY, SELL ou HOLD")
+    confidence: float = Field(0.5, ge=0.0, le=100.0)
+    reasoning: Optional[str] = None
+    raw: Optional[Dict[str, Any]] = None
+    # Optionnel : consignes d'exécution pour MT5 (fusion dans /decision si aligné avec l'action technique)
+    execution_type: Optional[str] = Field(
+        default=None,
+        description="market | limit | stop | stop_limit (None = marché)",
+    )
+    entry_price: Optional[float] = None
+    stop_loss: Optional[float] = None
+    take_profit: Optional[float] = None
+
+
+@app.post("/tradingagents/manual-report")
+async def tradingagents_manual_report(body: TradingAgentsManualReportBody):
+    """
+    Enregistre le rapport du CLI TradingAgents pour le symbole (MT5).
+    Les appels suivants à POST /decision pour ce symbole pondèrent buy/sell avec ce rapport (TTL configurable).
+    """
+    sym = (body.symbol or "").strip().upper()
+    if not sym:
+        raise HTTPException(status_code=400, detail="symbol requis")
+    rec = (body.recommendation or "").strip().upper()
+    if rec not in ("BUY", "SELL", "HOLD", "NEUTRAL", "WAIT"):
+        raise HTTPException(status_code=422, detail="recommendation doit être BUY, SELL ou HOLD (NEUTRAL/WAIT acceptés)")
+    rec_norm = "HOLD" if rec in ("NEUTRAL", "WAIT") else rec
+    conf = float(body.confidence or 0.0)
+    if conf > 1.0:
+        conf = min(1.0, conf / 100.0)
+    conf = max(0.0, min(1.0, conf))
+    entry = {
+        "ts": time.time(),
+        "recommendation": rec_norm,
+        "confidence": conf,
+        "reasoning": (body.reasoning or "")[:12000],
+        "raw": body.raw,
+        "execution_type": body.execution_type,
+        "entry_price": body.entry_price,
+        "stop_loss": body.stop_loss,
+        "take_profit": body.take_profit,
+    }
+    async with _tradingagents_manual_lock:
+        _tradingagents_manual_reports[sym] = entry
+    logger.info("📝 TradingAgents manual report enregistré: %s %s conf=%.2f", sym, entry["recommendation"], conf)
+    return {"ok": True, "symbol": sym, "ttl_sec": AI_TRADINGAGENTS_MANUAL_TTL_SEC}
+
+
 @app.get("/tradingagents/realtime/status")
 async def tradingagents_realtime_status():
     """Statut de la boucle d'analyse TradingAgents temps réel."""
     async with _tradingagents_lock:
         results = dict(_tradingagents_results)
+        mt5_syms = list(_tradingagents_mt5_symbols)
+    async with _tradingagents_manual_lock:
+        n_manual = len(_tradingagents_manual_reports)
+    effective = mt5_syms if mt5_syms else list(AI_TRADINGAGENTS_SYMBOLS)
     return {
-        "enabled": AI_ENABLE_TRADINGAGENTS_RT,
+        "auto_loop_enabled": AI_ENABLE_TRADINGAGENTS_AUTO_LOOP,
+        "manual_report_ttl_sec": AI_TRADINGAGENTS_MANUAL_TTL_SEC,
+        "manual_reports_cached": n_manual,
         "interval_sec": AI_TRADINGAGENTS_INTERVAL_SEC,
         "repo_path": AI_TRADINGAGENTS_REPO_PATH,
-        "symbols": AI_TRADINGAGENTS_SYMBOLS,
+        "symbols_env": AI_TRADINGAGENTS_SYMBOLS,
+        "symbols_mt5_push": mt5_syms,
+        "symbols_effective": effective,
+        "symbols": effective,
         "task_running": bool(_tradingagents_task and not _tradingagents_task.done()),
         "last_error": _tradingagents_last_error,
         "results": results,
+    }
+
+
+@app.post("/tradingagents/realtime/mt5-symbols")
+async def tradingagents_set_mt5_symbols(body: TradingAgentsMt5SymbolsBody):
+    """
+    Enregistre les symboles des graphiques MT5. Avec merge=true, chaque EA peut pousser _Symbol ;
+    la boucle RT analyse la réunion (ordre stable, max AI_TRADINGAGENTS_MT5_MAX_SYMBOLS).
+    Avec merge=false, remplace entièrement la liste poussée (liste vide = effacer).
+    """
+    global _tradingagents_mt5_symbols
+    normalized = _normalize_tradingagents_symbol_list(body.symbols)
+    async with _tradingagents_lock:
+        if body.merge:
+            merged: List[str] = []
+            seen: Set[str] = set()
+            for s in _tradingagents_mt5_symbols + normalized:
+                if s in seen:
+                    continue
+                seen.add(s)
+                merged.append(s)
+                if len(merged) >= _TRADINGAGENTS_MT5_MAX_SYMBOLS:
+                    break
+            _tradingagents_mt5_symbols = merged
+        else:
+            _tradingagents_mt5_symbols = normalized
+        out = list(_tradingagents_mt5_symbols)
+    eff = out if out else list(AI_TRADINGAGENTS_SYMBOLS)
+    logger.info("🧭 TradingAgents symboles MT5 mis à jour: %s (effectif boucle: %s)", out, eff)
+    return {"ok": True, "symbols_mt5_push": out, "symbols_effective": eff, "merge": body.merge}
+
+
+@app.get("/deriv/active-symbols")
+async def deriv_active_symbols(
+    limit: int = Query(default=8000, ge=1, le=20000),
+    market: Optional[str] = Query(
+        default=None,
+        description="Filtre optionnel sur le champ market (ex. synthetic_index, forex)",
+    ),
+):
+    """Liste les symboles actifs Deriv (WS `active_symbols` / brief) — même source que le compte demo."""
+    response = await deriv_ws_request({"active_symbols": "brief", "product_type": "basic"})
+    if response.get("error"):
+        err = response["error"]
+        detail = err.get("message", err) if isinstance(err, dict) else str(err)
+        raise HTTPException(status_code=502, detail=str(detail))
+    symbols = response.get("active_symbols") or []
+    if market and market.strip():
+        m = market.strip().lower()
+        symbols = [s for s in symbols if (s.get("market") or "").lower() == m]
+    slim = [
+        {
+            "symbol": s.get("symbol"),
+            "display_name": s.get("display_name"),
+            "market": s.get("market"),
+            "is_trading_suspended": s.get("is_trading_suspended"),
+            "pip": s.get("pip"),
+        }
+        for s in symbols[:limit]
+    ]
+    synthetic = sum(1 for s in (response.get("active_symbols") or []) if s.get("market") == "synthetic_index")
+    forex = sum(1 for s in (response.get("active_symbols") or []) if s.get("market") == "forex")
+    return {
+        "total_all": len(response.get("active_symbols") or []),
+        "returned": len(slim),
+        "synthetic_indices": synthetic,
+        "forex": forex,
+        "symbols": slim,
+        "deriv_app_id": DERIV_APP_ID,
+    }
+
+
+@app.get("/catalog/trading-symbols")
+async def catalog_trading_symbols():
+    """Agrège symboles MT5 (si connecté) + codes Deriv pour menus / choix manuel."""
+    mt5_block = await asyncio.to_thread(_mt5_symbol_catalog_snapshot)
+    deriv_resp = await deriv_ws_request({"active_symbols": "brief", "product_type": "basic"})
+    deriv_syms: List[str] = []
+    deriv_err = None
+    if deriv_resp.get("error"):
+        err = deriv_resp["error"]
+        deriv_err = err.get("message", err) if isinstance(err, dict) else str(err)
+    else:
+        for s in deriv_resp.get("active_symbols") or []:
+            sym = s.get("symbol")
+            if sym:
+                deriv_syms.append(str(sym))
+    return {
+        "mt5": mt5_block,
+        "deriv": {
+            "count": len(deriv_syms),
+            "symbols": sorted(set(deriv_syms))[:12000],
+            "error": deriv_err,
+        },
+        "tradingagents_yfinance_hint": (
+            "TradingAgents lit les données via yfinance: utiliser des tickers reconnus par Yahoo "
+            "(SPY, BTC-USD, EURUSD=X). Les symboles Deriv (R_75, frxEURUSD) sont listés ici pour "
+            "référence broker ; le mapping Yahoo est à faire au cas par cas."
+        ),
     }
 
 
