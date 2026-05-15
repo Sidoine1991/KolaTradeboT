@@ -24,5 +24,5 @@ COPY . .
 # Exposer le port
 EXPOSE 10000
 
-# Commande de démarrage
-CMD ["uvicorn", "ai_server_cloud:app", "--host", "0.0.0.0", "--port", "10000"]
+# Commande de démarrage (ai_server.py avec AWS RDS)
+CMD ["uvicorn", "ai_server:app", "--host", "0.0.0.0", "--port", "10000"]
