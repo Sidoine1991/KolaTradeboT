@@ -1,13 +1,19 @@
 //+------------------------------------------------------------------+
 //| SMC_OpportunityScanner.mqh                                        |
 //| Scanner temps réel multi-symboles pour opportunités de trading   |
+//| TradBOT build 2026-05-15 — utilise g_SmcOpportunityScannerAutoTrader (pas m_autoTrader)
 //+------------------------------------------------------------------+
 
 #ifndef SMC_OPPORTUNITY_SCANNER_MQH
 #define SMC_OPPORTUNITY_SCANNER_MQH
 
-// SMC_AutoTrader est maintenant intégré directement dans SMC_Universal.mq5
-// Pas besoin d'include ici
+#include "SMC_AutoTrader.mqh"
+
+// Instance unique du module auto-trading du scanner (une définition par programme compilé).
+#ifndef G_SMC_OPPORTUNITY_SCANNER_AUTOTRADER_DEFINED
+#define G_SMC_OPPORTUNITY_SCANNER_AUTOTRADER_DEFINED
+CAutoTrader g_SmcOpportunityScannerAutoTrader;
+#endif
 
 // Structure pour stocker les opportunités détectées
 struct OpportunityData
@@ -45,6 +51,7 @@ private:
     // Position du panneau sur le graphique
     int m_panelX;
     int m_panelY;
+    bool m_panelAnchorRight; // true: m_panelX = marge depuis le bord droit
     int m_panelWidth;
     int m_rowHeight;
     int m_headerHeight;
@@ -66,8 +73,6 @@ private:
     string m_fontName;
     bool m_showPanel;
 
-    // Auto-trader
-    CAutoTrader *m_autoTrader;
     bool m_enableAutoTrading;
     datetime m_tradedOpportunities[];  // Tracker opportunités déjà tradées
 
@@ -82,15 +87,15 @@ public:
     // Constructeur
     COpportunityScanner()
     {
-        m_autoTrader = NULL;
         m_enableAutoTrading = false;
         m_maxSymbols = 20;
         m_lastScanTime = 0;
-        m_scanIntervalSeconds = 2;  // Scan toutes les 2 secondes
+        m_scanIntervalSeconds = 4;  // Scan toutes les N secondes (défaut allégé)
 
-        // Position par défaut (coin supérieur gauche)
-        m_panelX = 10;
-        m_panelY = 30;
+        // Position par défaut (coin supérieur droit : évite le dashboard)
+        m_panelX = 12;
+        m_panelY = 100;
+        m_panelAnchorRight = true;
         m_panelWidth = 520;  // Largeur augmentée pour afficher tous les niveaux
         m_rowHeight = 45;    // Hauteur augmentée pour 2 lignes (info + niveaux)
         m_headerHeight = 30;
@@ -100,7 +105,7 @@ public:
         ArrayResize(m_atrHandles, 0);
         ArrayResize(m_atrSymbols, 0);
         m_lastPanelUpdate = 0;
-        m_panelUpdateInterval = 5;  // Update panneau toutes les 5 secondes (au lieu de 2)
+        m_panelUpdateInterval = 8;  // Update panneau toutes les N secondes
 
         // Couleurs par défaut
         m_colorBuy = clrLimeGreen;
@@ -125,16 +130,26 @@ public:
     ~COpportunityScanner()
     {
         CleanupPanel();
-        if(m_autoTrader != NULL)
-        {
-            delete m_autoTrader;
-            m_autoTrader = NULL;
-        }
     }
 
     // Configuration
     void SetScanInterval(int seconds) { m_scanIntervalSeconds = MathMax(1, seconds); }
-    void SetPanelPosition(int x, int y) { m_panelX = x; m_panelY = y; }
+    void SetPanelPosition(int x, int y)
+    {
+        m_panelX = x;
+        m_panelY = y;
+    }
+    void SetPanelAnchorRight(bool anchorRight) { m_panelAnchorRight = anchorRight; }
+
+    int PanelContentLeftPx()
+    {
+        if(!m_panelAnchorRight)
+            return m_panelX;
+        long cw = ChartGetInteger(0, CHART_WIDTH_IN_PIXELS);
+        if(cw <= 50)
+            cw = 1200;
+        return (int)cw - m_panelWidth - m_panelX;
+    }
     void SetPanelWidth(int width) { m_panelWidth = MathMax(300, width); }
     void SetRowHeight(int height) { m_rowHeight = MathMax(20, height); }
     void ShowPanel(bool show) { m_showPanel = show; }
@@ -144,20 +159,14 @@ public:
                           bool trailingStop, double trailPoints, double trailStep)
     {
         m_enableAutoTrading = enable;
+        if(!enable)
+            return;
 
-        if(enable && m_autoTrader == NULL)
-        {
-            m_autoTrader = new CAutoTrader();
-        }
-
-        if(m_autoTrader != NULL)
-        {
-            m_autoTrader.SetMaxRiskDollars(maxRisk);
-            m_autoTrader.SetScalpingParams(tpPoints, slPoints);
-            m_autoTrader.SetTrailingStop(trailingStop, trailPoints, trailStep);
-            m_autoTrader.SetNotifications(true, 10);  // Notifications toutes les 10 min
-            m_autoTrader.SetMaxPositions(1, 3);       // 1 par symbole, 3 total
-        }
+        g_SmcOpportunityScannerAutoTrader.SetMaxRiskDollars(maxRisk);
+        g_SmcOpportunityScannerAutoTrader.SetScalpingParams(tpPoints, slPoints);
+        g_SmcOpportunityScannerAutoTrader.SetTrailingStop(trailingStop, trailPoints, trailStep);
+        g_SmcOpportunityScannerAutoTrader.SetNotifications(true, 10);  // Notifications toutes les 10 min
+        g_SmcOpportunityScannerAutoTrader.SetMaxPositions(1, 3);       // 1 par symbole, 3 total
     }
 
     // Scanner principal - appelé à chaque tick
@@ -184,11 +193,11 @@ public:
             ScanSymbol(symbols[i], m_opportunities[i]);
 
             // Trading automatique sur opportunités PERFECT et GOOD
-            if(m_enableAutoTrading && m_autoTrader != NULL && m_opportunities[i].isValid)
+            if(m_enableAutoTrading && m_opportunities[i].isValid)
             {
                 if(!HasBeenTraded(m_opportunities[i]))
                 {
-                    bool success = m_autoTrader.TradeOpportunity(
+                    bool success = g_SmcOpportunityScannerAutoTrader.TradeOpportunity(
                         m_opportunities[i].symbol,
                         m_opportunities[i].direction,
                         m_opportunities[i].quality,
@@ -205,10 +214,10 @@ public:
         }
 
         // Gérer les positions ouvertes (trailing stop)
-        if(m_enableAutoTrading && m_autoTrader != NULL)
+        if(m_enableAutoTrading)
         {
-            m_autoTrader.ManageOpenPositions();
-            m_autoTrader.SendPeriodicNotification();
+            g_SmcOpportunityScannerAutoTrader.ManageOpenPositions();
+            g_SmcOpportunityScannerAutoTrader.SendPeriodicNotification();
         }
 
         // Mettre à jour l'affichage (throttle pour réduire charge CPU)
@@ -820,7 +829,7 @@ public:
 
         string name = "SCANNER_BG";
         ObjectCreate(0, name, OBJ_RECTANGLE_LABEL, 0, 0, 0);
-        ObjectSetInteger(0, name, OBJPROP_XDISTANCE, m_panelX);
+        ObjectSetInteger(0, name, OBJPROP_XDISTANCE, PanelContentLeftPx());
         ObjectSetInteger(0, name, OBJPROP_YDISTANCE, m_panelY);
         ObjectSetInteger(0, name, OBJPROP_XSIZE, m_panelWidth);
         ObjectSetInteger(0, name, OBJPROP_YSIZE, totalHeight);
@@ -840,7 +849,7 @@ public:
         // Fond de l'en-tête
         string name = "SCANNER_HEADER_BG";
         ObjectCreate(0, name, OBJ_RECTANGLE_LABEL, 0, 0, 0);
-        ObjectSetInteger(0, name, OBJPROP_XDISTANCE, m_panelX);
+        ObjectSetInteger(0, name, OBJPROP_XDISTANCE, PanelContentLeftPx());
         ObjectSetInteger(0, name, OBJPROP_YDISTANCE, m_panelY);
         ObjectSetInteger(0, name, OBJPROP_XSIZE, m_panelWidth);
         ObjectSetInteger(0, name, OBJPROP_YSIZE, m_headerHeight);
@@ -856,7 +865,7 @@ public:
         name = "SCANNER_TITLE";
         string title = "SCANNER OPPORTUNITÉS TEMPS RÉEL";
         ObjectCreate(0, name, OBJ_LABEL, 0, 0, 0);
-        ObjectSetInteger(0, name, OBJPROP_XDISTANCE, m_panelX + 10);
+        ObjectSetInteger(0, name, OBJPROP_XDISTANCE, PanelContentLeftPx() + 10);
         ObjectSetInteger(0, name, OBJPROP_YDISTANCE, m_panelY + 8);
         ObjectSetInteger(0, name, OBJPROP_COLOR, clrGold);
         ObjectSetInteger(0, name, OBJPROP_FONTSIZE, m_fontSize + 2);
@@ -873,7 +882,7 @@ public:
         name = "SCANNER_TIMESTAMP";
         string ts = TimeToString(TimeCurrent(), TIME_DATE | TIME_MINUTES | TIME_SECONDS);
         ObjectCreate(0, name, OBJ_LABEL, 0, 0, 0);
-        ObjectSetInteger(0, name, OBJPROP_XDISTANCE, m_panelX + m_panelWidth - 10);
+        ObjectSetInteger(0, name, OBJPROP_XDISTANCE, PanelContentLeftPx() + m_panelWidth - 10);
         ObjectSetInteger(0, name, OBJPROP_YDISTANCE, m_panelY + 10);
         ObjectSetInteger(0, name, OBJPROP_COLOR, clrSilver);
         ObjectSetInteger(0, name, OBJPROP_FONTSIZE, m_fontSize - 1);
@@ -895,7 +904,7 @@ public:
         color rowBg = (index % 2 == 0) ? C'25,25,30' : C'20,20,25';
         string name = "SCANNER_ROW_BG_" + IntegerToString(index);
         ObjectCreate(0, name, OBJ_RECTANGLE_LABEL, 0, 0, 0);
-        ObjectSetInteger(0, name, OBJPROP_XDISTANCE, m_panelX);
+        ObjectSetInteger(0, name, OBJPROP_XDISTANCE, PanelContentLeftPx());
         ObjectSetInteger(0, name, OBJPROP_YDISTANCE, y);
         ObjectSetInteger(0, name, OBJPROP_XSIZE, m_panelWidth);
         ObjectSetInteger(0, name, OBJPROP_YSIZE, rowHeightExtended);
@@ -906,7 +915,7 @@ public:
         ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
         ObjectSetInteger(0, name, OBJPROP_ZORDER, 101);
 
-        int xOffset = m_panelX + 5;
+        int xOffset = PanelContentLeftPx() + 5;
         int digits = (int)SymbolInfoInteger(opp.symbol, SYMBOL_DIGITS);
 
         // LIGNE 1: Symbole + Direction + Qualité
@@ -969,7 +978,7 @@ public:
 
         // LIGNE 2: NIVEAUX DE TRADING (Entry, SL, TP1, TP2, TP3)
         int y2 = y + 20;
-        xOffset = m_panelX + 5;
+        xOffset = PanelContentLeftPx() + 5;
 
         // Entry
         name = "SCANNER_ENTRY_" + IntegerToString(index);
@@ -1079,7 +1088,7 @@ public:
 
         string name = "SCANNER_NO_OPP";
         ObjectCreate(0, name, OBJ_LABEL, 0, 0, 0);
-        ObjectSetInteger(0, name, OBJPROP_XDISTANCE, m_panelX + m_panelWidth / 2);
+        ObjectSetInteger(0, name, OBJPROP_XDISTANCE, PanelContentLeftPx() + m_panelWidth / 2);
         ObjectSetInteger(0, name, OBJPROP_YDISTANCE, y + 40);
         ObjectSetInteger(0, name, OBJPROP_COLOR, clrGray);
         ObjectSetInteger(0, name, OBJPROP_FONTSIZE, m_fontSize + 1);

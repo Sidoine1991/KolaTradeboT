@@ -1,35 +1,35 @@
 services:
   - type: web
     name: tradbot-api
-    env: docker
+    runtime: docker
     plan: free
-    # Le Dockerfile contient déjà CMD ["uvicorn", "ai_server:app", "--host", "0.0.0.0", "--port", "10000"]
-    # On ne met donc PAS de startCommand ici pour éviter les conflits
+    # Évite tout shim `uvicorn` sur le PATH (erreur « unrecognized arguments: ai_server:app »).
+    dockerCommand: sh -c 'exec python -m uvicorn ai_server:app --host 0.0.0.0 --port ${PORT:-10000}'
     envVars:
-      - key: PORT
-        value: "10000"
       - key: PYTHONUNBUFFERED
         value: "1"
       - key: DISABLE_ML_TRAINING
-        value: "true"  # Désactiver l'entraînement au démarrage pour éviter les timeouts
+        value: "true"
+      # Ne pas fixer PORT ici : Render injecte PORT dynamiquement sur les Web Services.
+      # MT5 / DB : renseigner uniquement dans le dashboard Render (Blueprint sync: false).
       - key: MT5_LOGIN
-        value: "5775742"
+        sync: false
       - key: MT5_PASSWORD
-        value: "Sahara1991@"
+        sync: false
       - key: MT5_SERVER
-        value: "Deriv-Demo"
+        sync: false
       - key: DATABASE_URL
-        value: "postgresql://dbadmin:REMOVED_DB_PASSWORD@trading-db.cq9suk2wcwxh.us-east-1.rds.amazonaws.com:5432/trading_bot?sslmode=require"
+        sync: false
       - key: AWS_RDS_HOST
-        value: "trading-db.cq9suk2wcwxh.us-east-1.rds.amazonaws.com"
+        sync: false
       - key: AWS_RDS_PORT
-        value: "5432"
+        sync: false
       - key: AWS_RDS_DATABASE
-        value: "trading_bot"
+        sync: false
       - key: AWS_RDS_USER
-        value: "dbadmin"
+        sync: false
       - key: AWS_RDS_PASSWORD
-        value: "REMOVED_DB_PASSWORD"
+        sync: false
       - key: AWS_RDS_SSLMODE
         value: "require"
       - key: USE_SUPABASE
@@ -42,10 +42,13 @@ services:
         value: "/tmp/data"
     buildFilter:
       paths:
+        - Dockerfile
+        - requirements-cloud.txt
+        - pyproject.toml
         - ai_server.py
         - ai_server_cloud.py
         - requirements.txt
-        - backend/
+        - backend/**
     repo: https://github.com/Sidoine1991/KolaTradeboT.git
     rootDir: .
     autoDeploy: yes
@@ -53,5 +56,4 @@ services:
       name: models-disk
       mountPath: /models
       sizeGB: 1
-    # Note: Disks require a paid Render plan. 
-    # If on free plan, persistence will not be available.
+    # Note: Disks require a paid Render plan (free plan = no persistence).

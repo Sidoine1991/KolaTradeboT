@@ -1,37 +1,45 @@
-//+------------------------------------------------------------------+
-//| GOM_KOLA_SIDO_Script.mq5                                          |
-//| Script GOM KOLA + SIDO (Niveaux + Dashboard + Figures)           |
-//| VERSION LÉGÈRE - Sans Scanner/AutoTrader (porté par SMC_Universal)|
-//+------------------------------------------------------------------+
 #property strict
 #property script_show_inputs
 
 #include <Trade/Trade.mqh>
+#include "GOM_Enhanced_Dashboard.mqh"  // Fichier local dans le même dossier
+// Scanner multi-symboles : uniquement dans SMC_Universal.mq5 (évite conflit mqh / CAutoTrader dans les scripts)
 
-// ============================================================================
-// NOTE: Scanner et AutoTrader sont maintenant dans SMC_Universal.mq5 (EA)
-// Ce script se concentre uniquement sur l'analyse technique GOM:
-// - Niveaux KOLA multi-timeframes
-// - Dashboard GOM complet
-// - Figures chartistes SIDO
-// ============================================================================
+// Commission position (POSITION_COMMISSION déprécié en build récents)
+double GOM_Script_PositionDealCommission(const ulong position_id)
+{
+   double sum = 0.0;
+   if(position_id == 0)
+      return 0.0;
+   if(!HistorySelectByPosition(position_id))
+      return 0.0;
+   const int n = HistoryDealsTotal();
+   for(int i = 0; i < n; i++)
+   {
+      const ulong deal = HistoryDealGetTicket(i);
+      if(deal == 0)
+         continue;
+      sum += HistoryDealGetDouble(deal, DEAL_COMMISSION);
+   }
+   return sum;
+}
 
 input group "TIMEFRAMES"
 input bool ShowM1Levels = true;   // Activé pour entrées précises M1
 input bool ShowM5Levels = true;   // Activé pour niveaux M5
 input bool ShowM15Levels = true;  // Activé pour confirmation M15
-input bool ShowM30Levels = true;  // Activé pour structure M30
-input bool ShowH1Levels = true;   // Activé pour tendance H1
-input bool ShowH4Levels = true;   // Activé pour tendance H4
-input bool ShowD1Levels = true;   // Activé pour niveaux journaliers
-input bool ShowW1Levels = true;  // Désactivé pour éviter surcharge
+input bool ShowM30Levels = false; // Désactivé par défaut (charge CPU)
+input bool ShowH1Levels = true;   // Tendance H1
+input bool ShowH4Levels = false;  // Désactivé par défaut (charge CPU)
+input bool ShowD1Levels = false;  // Désactivé par défaut
+input bool ShowW1Levels = false;  // Désactivé par défaut
 
 input group "ALGORITHM (THREE LINE BREAK)"
 input int  LineBreakPeriod = 3;
-input int  MaxBarsToAnalyze = 300;
+input int  MaxBarsToAnalyze = 120;
 
 input group "TOUCH SYSTEM"
-input bool   EnableTouchDetection = true;   // Activé pour détection de touch
+input bool   EnableTouchDetection = false;  // Désactivé par défaut (charge CPU)
 input double TouchZoneATRPercent = 30.0;    // Augmenté pour plus de sensibilité
 input int    BarsForTouchCount = 150;       // Réduit pour plus de réactivité
 input int    MinLineWidth = 1;
@@ -39,14 +47,14 @@ input int    MaxLineWidth = 5;
 input int    TouchesForMaxWidth = 8;        // Réduit pour plus de précision
 
 input group "PARAMETRES D'AFFICHAGE KOLA"
-input bool  ShowLabels = true;
+input bool  ShowLabels = false;
 input bool  ShowTouchCount = false;
 input int   LabelShiftBars = 3;
 input color BuyLevelColor = clrLimeGreen;
 input color SellLevelColor = clrRed;
 
 input group "MODULE SIDO (FIGURES CHARTISTES)"
-input bool   EnableSIDO = true;
+input bool   EnableSIDO = false;
 input int    SIDOPivotLookback = 3;
 input int    SIDOBarsToAnalyze = 300;
 input int    SIDOMaxBarsBetweenSwings = 80;
@@ -55,6 +63,7 @@ input color  SIDODoubleTopColor = clrOrangeRed;
 input color  SIDODoubleBottomColor = clrDeepSkyBlue;
 input bool   ShowSIDOLabels = true;
 input bool   ShowBottomDashboard = true;
+input bool   UseEnhancedDashboard = true;       // Nouveau tableau de bord avec stats ML AWS RDS
 input bool   EnableChartLeftShift = true;       // Forcer le décalage pour l'espace futur
 input bool   EnableChartAutoscroll = false;     // Verrouiller le défilement automatique (Faux pour stabilité)
 input double ChartLeftShiftPct = 45.0;          // Largeur zone future augmentée (Shift 45%)
@@ -102,17 +111,17 @@ input bool   DashboardCompactAnchorBottomRight = true;
 input int    DashboardSecondaryRightMargin = 15;          
 input bool   ShowDashboardExtraIndicators = true; // Garde VOL et ATR dans le bandeau inférieur
 input bool   EnableSpikePrediction = true;
-input int    SpikeLookbackBarsM1 = 20;          // Réduit pour plus de réactivité
-input double SpikeAlertMinProbability = 0.45;   // Réduit pour plus de signaux
-input double SpikeBypassMinProbability = 0.40; // Réduit pour ne pas rater les spikes
-input double SpikeBlinkMinProbability = 0.35;  // Réduit pour alertes précoces
-input double SpikeBlinkLeadThAdjMax = 0.20;    // Augmenté pour détection plus précoce
-input bool   SpikeModeBypassStrict = true;      // Assouplir les verrous stricts pendant un spike valide
+input int    SpikeLookbackBarsM1 = 25;          // Lookback élargi pour pattern plus stable (réduire faux positifs)
+input double SpikeAlertMinProbability = 0.62;   // RELEVÉ — qualité > quantité avec capital 20$
+input double SpikeBypassMinProbability = 0.58;  // Seuil bypass relevé — spikes haute probabilité uniquement
+input double SpikeBlinkMinProbability = 0.52;   // Alerte précoce relevée — moins de bruit
+input double SpikeBlinkLeadThAdjMax = 0.15;     // Fenêtre lead réduite — moins d'entrées prématurées
+input bool   SpikeModeBypassStrict = false;     // false = PAS d'assouplissement pendant spike (protège capital 20$)
 input bool   EnableDoubleSpikeCapture = true;   // sur S/R M5-M15-H1: garder la position pour capter un 2e spike proche
-input int    DoubleSpikeWindowBars = 2;         // Augmenté pour plus de fenêtre de capture
-input double DoubleSpikeNearLevelAtr = 0.75;    // Augmenté pour plus de tolérance
-input double DoubleSpikeMinProb = 0.42;         // Réduit pour plus de sensibilité
-input int    DoubleSpikeHoldSeconds = 90;      // Augmenté pour maximiser le 2e spike
+input int    DoubleSpikeWindowBars = 2;         // Fenêtre 2e spike conservée
+input double DoubleSpikeNearLevelAtr = 0.60;    // Légèrement réduit pour plus de précision
+input double DoubleSpikeMinProb = 0.58;         // Relevé — qualité du 2e spike exigée
+input int    DoubleSpikeHoldSeconds = 60;       // Réduit — ne pas tenir trop longtemps en espérant (capital 20$)
 
 input group "FERMETURE AUTO: spike capté (même logique que cleanup GOM)"
 input bool   EnableAutoClosePositionsOnSpikeCaptured = true; // Fermer positions au marché quand BUY/SELL entry GOM est « franchi » (spike capté)
@@ -128,21 +137,26 @@ input int    ExternalAITimeoutMs = 1800;
 input int    ExternalAIThrottleMs = 2000;
 input int    RobotAIStaleSeconds = 90;
 input bool   KeepScriptAttached = true;
-input int    RefreshSeconds = 1;              // Réduit pour plus de réactivité
+input int    RefreshSeconds = 20;             // Timer script : cadence de base (↑ = moins de charge CPU)
+
+input group "PERFORMANCE (éviter double charge avec SMC_Universal)"
+input bool   DeferToSMC_UniversalEA = false;  // true = pas de logique GOM en double : script reste attaché en veille si SMC_Universal est sur le graphique
+input int    DeferModeSleepSeconds = 60;      // Réservé (boucle veille utilise 500 ms)
 
 input group "PERFORMANCE (throttle boucles)"
-input int    TfRefreshSeconds_M1  = 2;    // Recalcul M1 (KOLA/SIDO) toutes les N secondes
-input int    TfRefreshSeconds_M5  = 5;    // Recalcul M5
-input int    TfRefreshSeconds_M15 = 10;   // Recalcul M15
-input int    TfRefreshSeconds_M30 = 15;   // Recalcul M30
-input int    TfRefreshSeconds_H1  = 30;   // Recalcul H1
-input int    TfRefreshSeconds_H4  = 60;   // Recalcul H4
-input int    TfRefreshSeconds_D1  = 120;  // Recalcul D1
-input int    TfRefreshSeconds_W1  = 300;  // Recalcul W1
-input int    SMCProcessRefreshSeconds = 2; // Traitement ICT/SMC toutes les N secondes
-input int    ScriptEmaRefreshSeconds  = 5; // Courbe EMA (objets) toutes les N secondes
-input int    BollingerVwapRefreshSeconds = 5; // BB+VWAP (calcul + courbe) toutes les N secondes
-input int    DashboardRefreshSeconds = 1; // Dashboard + publications GV toutes les N secondes
+input bool   GOM_SkipChartRedraw = true;
+input int    TfRefreshSeconds_M1  = 8;
+input int    TfRefreshSeconds_M5  = 18;
+input int    TfRefreshSeconds_M15 = 30;
+input int    TfRefreshSeconds_M30 = 45;
+input int    TfRefreshSeconds_H1  = 90;
+input int    TfRefreshSeconds_H4  = 180;
+input int    TfRefreshSeconds_D1  = 300;
+input int    TfRefreshSeconds_W1  = 600;
+input int    SMCProcessRefreshSeconds = 20;
+input int    ScriptEmaRefreshSeconds  = 45;
+input int    BollingerVwapRefreshSeconds = 45;
+input int    DashboardRefreshSeconds = 15;
 input bool   AutoScaleRefreshByCharts = true; // Ajuste automatiquement les périodes quand plusieurs symboles sont attachés
 input int    ChartsPerLoadStep = 3; // +1 facteur de charge tous les N charts
 input int    MaxAutoScaleFactor = 6; // Limite du facteur auto (évite de trop ralentir)
@@ -177,7 +191,7 @@ input double BollingerVwapVerdictWeight = 1.0;     // 1 = pondération par défa
 input group "INDICATEURS AVANCÉS (style TradingView, légers)"
 input bool   EnableAdvancedIndicators = true;
 input ENUM_TIMEFRAMES AdvancedIndicatorsTF = PERIOD_M5;
-input int    AdvancedIndicatorsRefreshSeconds = 5; // throttle calcul (anti-lag)
+input int    AdvancedIndicatorsRefreshSeconds = 8; // throttle calcul (anti-lag)
 input int    SupertrendAtrPeriod = 10;
 input double SupertrendAtrMult = 3.0;
 input int    KeltnerEmaPeriod = 20;
@@ -4016,7 +4030,7 @@ int GOM_ClosePositionsAfterSpikeCapture(const bool buySpikeCaptured, const bool 
          continue;
 
       double net = PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP) +
-                   PositionGetDouble(POSITION_COMMISSION);
+                   GOM_Script_PositionDealCommission((ulong)PositionGetInteger(POSITION_IDENTIFIER));
       if(GomEntryCrossCloseMinProfitUSD > 0.0 && net + 1e-9 < GomEntryCrossCloseMinProfitUSD)
          continue;
 
@@ -5789,6 +5803,23 @@ bool ValidateVerdict(VerdictScore &verdict, double bid, double atr, bool require
 
 void OnStart()
 {
+// Nettoyer le dashboard amélioré à la fin (si le script se termine)
+if(UseEnhancedDashboard && !KeepScriptAttached)
+   GOM_CleanEnhancedDashboard();
+
+// Avec SMC_Universal sur le même graphique : rester attaché sans doubler la charge (boucle veille).
+if(DeferToSMC_UniversalEA)
+{
+   Print("GOM_KOLA_SIDO : mode veille — SMC_Universal fournit déjà GOM. Script reste attaché (onglet stop pour arrêter).");
+   while(!IsStopped())
+   {
+      Comment("GOM_KOLA_SIDO : veille | SMC_Universal actif — pas de double exécution");
+      Sleep(500);
+   }
+   GOM_ReleaseAllCachedHandles();
+   return;
+}
+
 int waitMs = MathMax(1, GOM_EffectiveRefreshSeconds(RefreshSeconds)) * 1000;
 
 if(!KeepScriptAttached)
@@ -5804,16 +5835,17 @@ ProcessOrClear(PERIOD_W1, ShowW1Levels);
 DrawAndPublishScriptEMAs();
 DrawAndPublishBollingerVWAP();
 GOM_CheckCaptureSpikeAndCleanup();
-DrawBottomDashboard();
-ChartRedraw(0);
+
+// Choisir quel dashboard afficher
+if(UseEnhancedDashboard)
+   GOM_DrawEnhancedDashboard();
+else
+   DrawBottomDashboard();
+
+if(!GOM_SkipChartRedraw)
+   ChartRedraw(0);
 return;
 }
-
-// ============================================================================
-// SCANNER ET AUTOTRADER RETIRÉS
-// Utiliser SMC_Universal.mq5 (EA) pour le scanner + trading automatique
-// Ce script GOM se concentre sur l'analyse technique visuelle uniquement
-// ============================================================================
 
 // Initialiser le détecteur de spike (une seule fois)
 if(!g_spikeDetectorInitialized)
@@ -5833,8 +5865,6 @@ if(!g_spikeDetectorInitialized)
 while(!IsStopped())
 {
 datetime now = TimeCurrent();
-
-// Scanner multi-symboles désormais dans SMC_Universal.mq5 uniquement
 
 // Traiter les éléments ICT SMC (throttlé)
 static datetime s_lastSmc = 0;
@@ -5871,14 +5901,19 @@ static datetime s_lastDash = 0;
 if(GOM_ShouldRun(now, s_lastDash, DashboardRefreshSeconds))
 {
    GOM_CheckCaptureSpikeAndCleanup();
-   DrawBottomDashboard();
-   ChartRedraw(0);
+
+   // Choisir quel dashboard afficher
+   if(UseEnhancedDashboard)
+      GOM_DrawEnhancedDashboard();
+   else
+      DrawBottomDashboard();
+
+   if(!GOM_SkipChartRedraw)
+      ChartRedraw(0);
 }
 waitMs = MathMax(1, GOM_EffectiveRefreshSeconds(RefreshSeconds)) * 1000;
 Sleep(waitMs);
 }
-
-// Scanner désormais dans SMC_Universal.mq5 uniquement
 
 // Script terminé / détaché
 GOM_ReleaseAllCachedHandles();

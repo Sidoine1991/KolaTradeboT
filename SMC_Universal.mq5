@@ -26,10 +26,11 @@ input group "SCANNER MULTI-SYMBOLES TEMPS RÉEL"
 input bool   EnableOpportunityScanner = true;      // ACTIVÉ — scanner les meilleures opportunités multi-symboles pour trouver le meilleur trade
 input string ScannerSymbolsList = "Boom 1000 Index,Crash 1000 Index,EURUSD,XAUUSD";  // ↓ OPTIMISÉ 4 symboles — réduit charge CPU (était 8)
 input int    ScannerRefreshSeconds = 60;           // ↑ OPTIMISÉ 60s — réduit charge CPU (était 30s)
-input int    ScannerPanelX = 10;                   // Position X du panneau
-input int    ScannerPanelY = 30;                   // Position Y du panneau
+input int    ScannerPanelX = 12;                   // Gauche: X depuis bord gauche | Droite: marge depuis bord droit
+input int    ScannerPanelY = 100;                  // Y depuis le haut (évite chevauchement avec le dashboard)
 input int    ScannerPanelWidth = 500;              // Largeur du panneau
 input int    ScannerRowHeight = 25;                // Hauteur des lignes
+input bool   ScannerPanelAnchorRight = true;       // Caler le panneau au bord droit du graphique
 input bool   ScannerShowPanel = false;             // Panneau = beaucoup d'objets graphiques (CPU)
 
 input group "TRADING AUTOMATIQUE (SCANNER)"
@@ -90,6 +91,10 @@ input bool   DashboardMLAnchorTop = true;       // Ancrer en haut (true) ou en b
 input int    DashboardMLCellWidth = 100;        // Largeur des cellules
 input int    DashboardMLCellHeight = 25;        // Hauteur des cellules
 input int    DashboardMLFontSize = 8;           // Taille de la police (7=compact, 8=normal, 9=grand)
+
+input bool   GomScriptLiveLabelAnchorRight = true; // Libellé GOM LIVE : à droite pour libérer le coin du dashboard
+input int    GomScriptLiveLabelMarginX = 12;         // Marge depuis le bord gauche ou droit selon l'ancre
+input int    GomScriptLiveLabelY = 118;             // Y depuis le haut
 
 input bool   EnableChartLeftShift = false;      // Décalage chart (désactivé en mode OTE+Fibo léger)
 input bool   EnableChartAutoscroll = true;      // Défilement auto (plus d'objets visibles au fil du prix)
@@ -3167,9 +3172,19 @@ void DrawScriptLiveLabel(const string labelName, const string text)
 {
 if(ObjectFind(0, labelName) < 0)
 ObjectCreate(0, labelName, OBJ_LABEL, 0, 0, 0);
+if(GomScriptLiveLabelAnchorRight)
+{
+ObjectSetInteger(0, labelName, OBJPROP_CORNER, CORNER_RIGHT_UPPER);
+ObjectSetInteger(0, labelName, OBJPROP_ANCHOR, ANCHOR_RIGHT_UPPER);
+ObjectSetInteger(0, labelName, OBJPROP_XDISTANCE, GomScriptLiveLabelMarginX);
+}
+else
+{
 ObjectSetInteger(0, labelName, OBJPROP_CORNER, CORNER_LEFT_UPPER);
-ObjectSetInteger(0, labelName, OBJPROP_XDISTANCE, 10);
-ObjectSetInteger(0, labelName, OBJPROP_YDISTANCE, 140);
+ObjectSetInteger(0, labelName, OBJPROP_ANCHOR, ANCHOR_LEFT_UPPER);
+ObjectSetInteger(0, labelName, OBJPROP_XDISTANCE, GomScriptLiveLabelMarginX);
+}
+ObjectSetInteger(0, labelName, OBJPROP_YDISTANCE, GomScriptLiveLabelY);
 ObjectSetInteger(0, labelName, OBJPROP_COLOR, clrWhite);
 ObjectSetInteger(0, labelName, OBJPROP_FONTSIZE, 9);
 ObjectSetString(0, labelName, OBJPROP_FONT, "Consolas");
@@ -10990,6 +11005,7 @@ int OnInit()
       {
          g_OpportunityScanner.SetScanInterval(ScannerRefreshSeconds);
          g_OpportunityScanner.SetPanelPosition(ScannerPanelX, ScannerPanelY);
+         g_OpportunityScanner.SetPanelAnchorRight(ScannerPanelAnchorRight);
          g_OpportunityScanner.SetPanelWidth(ScannerPanelWidth);
          g_OpportunityScanner.SetRowHeight(ScannerRowHeight);
          g_OpportunityScanner.ShowPanel(ScannerShowPanel);
@@ -13570,6 +13586,9 @@ void OnTick()
 
    if(!SMC_IsStrictUTCTradingWindowOpen())
    {
+      // Indiquer au dashboard que le robot est en pause UTC
+      GlobalVariableSet("EA_DASH_UTC_PAUSE", 1.0);
+
       static datetime lastUtcWindowPauseLog = 0;
       if(currentTime - lastUtcWindowPauseLog >= 60)
       {
@@ -14057,6 +14076,31 @@ void GomEmbedded_UpdateAiCornerLabel(void)
    ObjectSetInteger(0, nm, OBJPROP_ZORDER, MathMax(520, DashboardLabelZOrder + 5));
 }
 
+// Pousse l'heure de reprise « interne » EA pour le dashboard ML (décompte + heure locale)
+void PushEaResumeClockForMLDashboard(void)
+{
+   datetime now = TimeCurrent();
+   datetime resume = 0;
+
+   if(g_dailyPauseUntil > now && g_dailyPauseUntil > resume)
+      resume = g_dailyPauseUntil;
+   if(g_dailyLossPauseUntil > now && g_dailyLossPauseUntil > resume)
+      resume = g_dailyLossPauseUntil;
+   if(g_lossPauseUntil > now && g_lossPauseUntil > resume)
+      resume = g_lossPauseUntil;
+
+   for(int i = 0; i < g_pauseCount; i++)
+   {
+      if(g_symbolPauses[i].symbol != _Symbol)
+         continue;
+      if(g_symbolPauses[i].pauseUntil > now && g_symbolPauses[i].pauseUntil > resume)
+         resume = g_symbolPauses[i].pauseUntil;
+   }
+
+   GlobalVariableSet("EA_DASH_RESUME_AT", (double)resume);
+   GlobalVariableSet("EA_DASH_ENABLE_TRADING", EnableTrading ? 1.0 : 0.0);
+}
+
 //| FONCTIONS DE GESTION DES PAUSES ET BLACKLIST TEMPORAIRE        |
 
 void UpdateDashboard()
@@ -14064,6 +14108,7 @@ void UpdateDashboard()
    // Afficher le nouveau dashboard ML AWS RDS (prioritaire)
    if(UseEnhancedDashboard)
    {
+      PushEaResumeClockForMLDashboard();
       // Nettoyage automatique des dessins expirés
       static datetime lastCleanupTime = 0;
       if(TimeCurrent() - lastCleanupTime >= 300) // Toutes les 5 minutes

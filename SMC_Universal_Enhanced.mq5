@@ -229,6 +229,7 @@ struct AISignal {
     double entry_price;
     double stop_loss;
     double take_profit;
+    string execution_type; // MARKET | LIMIT | STOP | STOP_LIMIT (réponse /decision + TradingAgents)
     string reasoning;
     datetime timestamp;
     bool is_valid;
@@ -248,6 +249,7 @@ struct AISignal {
         entry_price = 0.0;
         stop_loss = 0.0;
         take_profit = 0.0;
+        execution_type = "MARKET";
         reasoning = "";
         timestamp = 0;
         is_valid = false;
@@ -565,6 +567,8 @@ input bool   UseAIServer       = true;   // Utiliser le serveur IA
 input bool   EnableOllamaRemoteAnalysis = false; // true = appels /analyze/ollama + GV Ollama ; false = aucun impact LLM
 input bool   EnableTradingAgentsRemoteAnalysis = true; // Lire analyse TradingAgents depuis ai_server (/tradingagents/realtime/status)
 input int    TradingAgentsUpdateIntervalSeconds = 300; // Rafraîchissement analyse TradingAgents (5 min)
+input bool   TradingAgentsRegisterChartOnServer = true; // POST /tradingagents/realtime/mt5-symbols (merge) pour fusion multi-graphiques MT5
+input int    TradingAgentsRegisterIntervalSeconds = 0; // 0 = même période que TradingAgentsUpdateIntervalSeconds
 input double TradingAgentsMinConfidenceInfluence = 0.60; // Seuil conf mini pour influencer décision
 input bool   TradingAgentsBlockContradiction = true; // Bloquer trade si contradiction forte TradingAgents
 input string AI_ServerURL       = "http://127.0.0.1:8000";  // URL du serveur IA
@@ -628,8 +632,10 @@ input double TrailingStop_ATRMult = 1.2;  // Distance Trailing (x ATR) - réduit
 input double TrailingStartProfitDollars = 0.05; // Profit min pour trailing ($) - réduit
 input bool   BoomCrashNoTrailingStop = false;   // Boom/Crash/GainX/PainX : permettre trailing pour maximiser profits
 input bool   BoomCrashCloseOnScriptSpike = true; // Fermer si le script publie un spike aligné avec la position
-input double BoomCrashSpikeCloseMinProb = 0.50;  // Probabilité spike min réduite
-input double BoomCrashSpikeCloseMinProfitUSD = 0.0; // 0 = dès que le spike script est aligné
+input double BoomCrashSpikeCloseMinProb = 0.50;  // Probabilité spike min (si MatchEntryProbGate=false)
+input bool   BoomCrashSpikeCloseMatchEntryProbGate = true; // true = même seuil SPIKE_PROB que l'entrée (GOOD/PERFECT vs plain)
+input bool   BoomCrashSpikeCloseRelaxedDirection = true; // true: alignement spike si SPIKE_DIR_NUM>0 (BUY) ou <0 (SELL) ; false = ±0.5
+input double BoomCrashSpikeCloseMinProfitUSD = 0.0; // 0 = dès spike aligné ; sinon P/L **net** ($) mini (profit+swap+commission)
 
 input group "=== GRAPHIQUES ==="
 input bool   ShowChartGraphics = true;   // Afficher les graphiques SMC
@@ -1392,12 +1398,33 @@ public:
             take_profit = StringToDouble(tp_str);
         }
 
+        // Type d'exécution (marché / limite / stop) — ai_server + TradingAgents
+        int exec_pos = StringFind(json, "\"execution_type\"");
+        string execution_type = "MARKET";
+        if(exec_pos >= 0) {
+            int exStart = StringFind(json, "\"", exec_pos + 16);
+            if(exStart >= 0) {
+                exStart += 1;
+                int exEnd = StringFind(json, "\"", exStart);
+                if(exEnd > exStart)
+                    execution_type = StringSubstr(json, exStart, exEnd - exStart);
+            }
+        }
+        StringTrimLeft(execution_type);
+        StringTrimRight(execution_type);
+        StringToUpper(execution_type);
+        if(execution_type == "")
+            execution_type = "MARKET";
+        if(execution_type != "MARKET" && execution_type != "LIMIT" && execution_type != "STOP" && execution_type != "STOP_LIMIT")
+            execution_type = "MARKET";
+
         signal.direction = action;
         signal.confidence = confidence;
         signal.reasoning = reason;
         signal.entry_price = entry_price;
         signal.stop_loss = stop_loss;
         signal.take_profit = take_profit;
+        signal.execution_type = execution_type;
         signal.server_status = server_status;
         signal.is_fallback = false;
 
@@ -1875,6 +1902,37 @@ public:
         ta.is_valid = (ta.recommendation == "BUY" || ta.recommendation == "SELL" || ta.recommendation == "HOLD");
         return ta;
     }
+
+    // Enregistre le symbole du graphique sur ai_server (liste fusionnée pour plusieurs EA / fenêtres MT5).
+    bool RegisterTradingAgentsMt5Symbol(const string symbol) {
+        string symJson = symbol;
+        StringReplace(symJson, "\\", "\\\\");
+        StringReplace(symJson, "\"", "\\\"");
+        StringReplace(symJson, "\r", "");
+        StringReplace(symJson, "\n", "");
+
+        string body = "{\"merge\":true,\"symbols\":[\"" + symJson + "\"]}";
+
+        char post[];
+        int n = StringToCharArray(body, post, 0, WHOLE_ARRAY, CP_UTF8);
+        if(n > 0)
+            ArrayResize(post, n - 1);
+
+        string headers = "Content-Type: application/json\r\n";
+        char resultArr[];
+        string resultHeaders;
+        string url = m_server_url + "/tradingagents/realtime/mt5-symbols";
+        int tOut = MathMax(m_timeout, 3000);
+
+        int res = WebRequest("POST", url, headers, tOut, post, resultArr, resultHeaders);
+        if(res == 200)
+            return true;
+        if(res == -1)
+            Print("⚠️ TRADINGAGENTS: enregistrement symbole WebRequest err=", GetLastError(), " | ", url);
+        else
+            Print("⚠️ TRADINGAGENTS: enregistrement symbole HTTP ", res, " | ", url);
+        return false;
+    }
 };
 
 // Instance du connecteur IA
@@ -2299,12 +2357,16 @@ bool IsDirectionAllowedForCurrentSymbol(string direction) {
     return true;
 }
 
-// Synthétiques type Boom500 / Crash1000 / GainX / PainX : pas de trailing SL, sortie privilégiée sur spike script.
+// Synthétiques type Boom500 / Crash1000 / GainX / PainX + indices volatilité (même logique spike / script GOM).
 bool IsBoomCrashStyleSymbol(const string symbol) {
     string u = symbol;
     StringToUpper(u);
-    return (StringFind(u, "BOOM") >= 0 || StringFind(u, "CRASH") >= 0 ||
-            StringFind(u, "GAINX") >= 0 || StringFind(u, "PAINX") >= 0);
+    if(StringFind(u, "BOOM") >= 0 || StringFind(u, "CRASH") >= 0 ||
+       StringFind(u, "GAINX") >= 0 || StringFind(u, "PAINX") >= 0)
+        return true;
+    if(StringFind(u, "VOLATILITY") >= 0 || StringFind(u, "STEP") >= 0 || StringFind(u, "JUMP") >= 0)
+        return true;
+    return false;
 }
 
 double GetCategoryMinAIConfidence(string symbol) {
@@ -3086,6 +3148,17 @@ void UpdateTradingAgentsAnalysis() {
     g_lastTradingAgentsUpdateTime = now;
     if(!EnableTradingAgentsRemoteAnalysis || g_aiConnector == NULL) return;
 
+    if(TradingAgentsRegisterChartOnServer) {
+        static datetime s_lastTaMt5Reg = 0;
+        int regIntv = TradingAgentsRegisterIntervalSeconds;
+        if(regIntv <= 0)
+            regIntv = MathMax(30, TradingAgentsUpdateIntervalSeconds);
+        if(s_lastTaMt5Reg == 0 || (now - s_lastTaMt5Reg) >= regIntv) {
+            s_lastTaMt5Reg = now;
+            g_aiConnector.RegisterTradingAgentsMt5Symbol(_Symbol);
+        }
+    }
+
     TradingAgentsAnalysis ta = g_aiConnector.GetTradingAgentsAnalysis(_Symbol);
     if(!ta.is_valid) return;
     g_lastTradingAgentsAnalysis = ta;
@@ -3239,9 +3312,18 @@ void CalculateStopLossTakeProfit(string direction, double entry_price,
     take_profit = NormalizeDouble(take_profit, _Digits);
 }
 
-bool ExecuteTrade(string direction, double lot, double sl, double tp, string comment) {
-    Print("🔍 EXECUTE_TRADE: Début - Dir=", direction, " Lot=", lot, " SL=", sl, " TP=", tp);
-    
+bool ExecuteTrade(string direction, double lot, double sl, double tp, string comment,
+                  string execution_type = "MARKET", double pending_price = 0.0) {
+    StringTrimLeft(execution_type);
+    StringTrimRight(execution_type);
+    StringToUpper(execution_type);
+    if(execution_type == "")
+        execution_type = "MARKET";
+
+    Print("🔍 EXECUTE_TRADE: Dir=", direction, " mode=", execution_type,
+          " pending=", DoubleToString(pending_price, _Digits),
+          " Lot=", lot, " SL=", sl, " TP=", tp);
+
     if(!EnableTrading) {
         Print("⛔ TRADING: Trading désactivé");
         return false;
@@ -3276,6 +3358,11 @@ bool ExecuteTrade(string direction, double lot, double sl, double tp, string com
     double tpAdj = tp;
     double mktRef = (direction == "BUY") ? SymbolInfoDouble(_Symbol, SYMBOL_ASK)
                                          : SymbolInfoDouble(_Symbol, SYMBOL_BID);
+    bool use_pending = (execution_type == "LIMIT" || execution_type == "STOP" || execution_type == "STOP_LIMIT")
+                       && pending_price > 0.0;
+    if(use_pending)
+        mktRef = pending_price;
+
     EA_ValidateAndAdjustStops(_Symbol, direction, mktRef, slAdj, tpAdj);
     if(MathAbs(slAdj - sl) > SymbolInfoDouble(_Symbol, SYMBOL_POINT) * 0.5 ||
        MathAbs(tpAdj - tp) > SymbolInfoDouble(_Symbol, SYMBOL_POINT) * 0.5) {
@@ -3283,25 +3370,42 @@ bool ExecuteTrade(string direction, double lot, double sl, double tp, string com
               " | TP ", DoubleToString(tp, _Digits), " → ", DoubleToString(tpAdj, _Digits),
               " (ref ", DoubleToString(mktRef, _Digits), ")");
     }
-    
+
     Print("✅ EXECUTE_TRADE: Toutes validations passées, envoi ordre");
 
     bool result = false;
+    double px = NormalizeDouble(pending_price, _Digits);
 
-    if(direction == "BUY") {
-        result = trade.Buy(lot, _Symbol, 0.0, slAdj, tpAdj, comment);
-    } else if(direction == "SELL") {
-        result = trade.Sell(lot, _Symbol, 0.0, slAdj, tpAdj, comment);
+    if(!use_pending) {
+        if(execution_type != "MARKET")
+            Print("⚠️ EXECUTE_TRADE: ", execution_type, " sans prix valide → ordre au marché");
+        if(direction == "BUY")
+            result = trade.Buy(lot, _Symbol, 0.0, slAdj, tpAdj, comment);
+        else if(direction == "SELL")
+            result = trade.Sell(lot, _Symbol, 0.0, slAdj, tpAdj, comment);
+    } else if(execution_type == "LIMIT") {
+        if(direction == "BUY")
+            result = trade.BuyLimit(lot, px, _Symbol, slAdj, tpAdj, ORDER_TIME_GTC, 0, comment);
+        else if(direction == "SELL")
+            result = trade.SellLimit(lot, px, _Symbol, slAdj, tpAdj, ORDER_TIME_GTC, 0, comment);
+    } else {
+        // STOP ou STOP_LIMIT : envoi stop (breakout) — stop-limit complet non implémenté ici
+        if(execution_type == "STOP_LIMIT")
+            Print("ℹ️ EXECUTE_TRADE: STOP_LIMIT mappé sur STOP (un seul prix)");
+        if(direction == "BUY")
+            result = trade.BuyStop(lot, px, _Symbol, slAdj, tpAdj, ORDER_TIME_GTC, 0, comment);
+        else if(direction == "SELL")
+            result = trade.SellStop(lot, px, _Symbol, slAdj, tpAdj, ORDER_TIME_GTC, 0, comment);
     }
 
     if(result) {
         g_lastEntryTime = TimeCurrent();
         g_dailyTradeCount++;
-        Print("✅ TRADING: Ordre ", direction, " exécuté sur ", _Symbol,
-              " (lot: ", DoubleToString(lot, 2), ", SL: ", DoubleToString(slAdj, _Digits),
-              ", TP: ", DoubleToString(tpAdj, _Digits), ")");
+        Print("✅ TRADING: Ordre ", direction, " (", execution_type, ") sur ", _Symbol,
+              " (lot: ", DoubleToString(lot, 2), ", px: ", DoubleToString(px, _Digits),
+              ", SL: ", DoubleToString(slAdj, _Digits), ", TP: ", DoubleToString(tpAdj, _Digits), ")");
     } else {
-        Print("❌ TRADING: Échec ordre ", direction, " - ", trade.ResultComment());
+        Print("❌ TRADING: Échec ordre ", direction, " (", execution_type, ") - ", trade.ResultComment());
     }
 
     return result;
@@ -3410,9 +3514,24 @@ bool ShouldCloseBoomCrashOnScriptSpike(const string symbol, const ENUM_POSITION_
     if(!IsBoomCrashStyleSymbol(symbol)) return false;
     double sp = ReadGlobalDouble(ScriptGVKey("SPIKE_PROB"), 0.0);
     double sd = ReadGlobalDouble(ScriptGVKey("SPIKE_DIR_NUM"), 0.0);
-    if(sp + 1e-9 < BoomCrashSpikeCloseMinProb) return false;
-    if(ptype == POSITION_TYPE_BUY && sd > 0.5) return true;
-    if(ptype == POSITION_TYPE_SELL && sd < -0.5) return true;
+    // Script peut publier la prob en % (0–100) plutôt qu'en fraction
+    if(sp > 1.0001)
+        sp /= 100.0;
+
+    double probNeed = BoomCrashSpikeCloseMinProb;
+    if(BoomCrashSpikeCloseMatchEntryProbGate) {
+        ScriptVerdictData vtmp;
+        LoadScriptVerdictData(vtmp);
+        const bool goodOrPerfect = (MathAbs(vtmp.verdict_num) >= 2.0);
+        probNeed = goodOrPerfect ? MinSpikeProbGoodPerfect : MinSpikeProbPlainBypass;
+    }
+    if(sp + 1e-9 < probNeed) return false;
+
+    const bool relax = BoomCrashSpikeCloseRelaxedDirection;
+    if(ptype == POSITION_TYPE_BUY)
+        return relax ? (sd > 0.0) : (sd > 0.5);
+    if(ptype == POSITION_TYPE_SELL)
+        return relax ? (sd < 0.0) : (sd < -0.5);
     return false;
 }
 
@@ -4153,7 +4272,20 @@ void CheckAndExecuteTrades() {
     if(fq > 1.0) fq /= 100.0;
     string comment = (use_script_plan ? "SCRIPT_" : "AI_") + final_direction + "_FQ" +
                     DoubleToString(fq * 100.0, 0) + "%";
-    ExecuteTrade(final_direction, lot, sl, tp, comment);
+    string exec_mode = "MARKET";
+    double pend_px = entry_price;
+    if(!use_script_plan) {
+        exec_mode = g_lastAIAction.execution_type;
+        StringTrimLeft(exec_mode);
+        StringTrimRight(exec_mode);
+        StringToUpper(exec_mode);
+        if(exec_mode == "")
+            exec_mode = "MARKET";
+        if(g_lastAIAction.entry_price > 0.0 &&
+           (exec_mode == "LIMIT" || exec_mode == "STOP" || exec_mode == "STOP_LIMIT"))
+            pend_px = g_lastAIAction.entry_price;
+    }
+    ExecuteTrade(final_direction, lot, sl, tp, comment, exec_mode, pend_px);
 }
 
 void CheckAndClosePositions() {
@@ -4167,18 +4299,26 @@ void CheckAndClosePositions() {
         string symbol = PositionGetString(POSITION_SYMBOL);
         if(symbol != _Symbol) continue;
 
+        long posMagic = (long)PositionGetInteger(POSITION_MAGIC);
+        if(posMagic != InpMagicNumber) continue;
+
         double profit = PositionGetDouble(POSITION_PROFIT);
+        double sw0 = PositionGetDouble(POSITION_SWAP);
+        double cm0 = PositionGetDouble(POSITION_COMMISSION);
+        double netProfit = profit + sw0 + cm0;
         ulong ticket = PositionGetInteger(POSITION_TICKET);
         ENUM_POSITION_TYPE ptype = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
 
         bool spikeProfitOk = (BoomCrashSpikeCloseMinProfitUSD <= 0.0)
-                             ? (profit >= 0.0)
-                             : (profit >= BoomCrashSpikeCloseMinProfitUSD);
+                             ? (netProfit >= 0.0)
+                             : (netProfit >= BoomCrashSpikeCloseMinProfitUSD);
         if(ShouldCloseBoomCrashOnScriptSpike(symbol, ptype) && spikeProfitOk) {
             if(trade.PositionClose(ticket)) {
-                Print("⚡ SPIKE EXIT: Position fermée (Boom/Crash style) — prob spike=",
+                Print("⚡ SPIKE EXIT: Position fermée — prob spike=",
                       DoubleToString(ReadGlobalDouble(ScriptGVKey("SPIKE_PROB"), 0.0) * 100.0, 1),
-                      "% profit=$", DoubleToString(profit, 2));
+                      "% | P/L net=$", DoubleToString(netProfit, 2),
+                      " (profit=", DoubleToString(profit, 2), " swap=", DoubleToString(sw0, 2),
+                      " comm=", DoubleToString(cm0, 2), ")");
             }
             continue;
         }
@@ -4186,7 +4326,7 @@ void CheckAndClosePositions() {
         if(force_wait_close) {
             if(IsBoomCrashStyleSymbol(symbol) && BoomCrashMaxFloatLossUsdBeforeScriptWaitClose > 1e-6) {
                 double sw = PositionGetDouble(POSITION_SWAP);
-                double com = PositionGetDouble(POSITION_PROFIT) - PositionGetDouble(POSITION_PRICE_OPEN) * PositionGetDouble(POSITION_VOLUME);
+                double com = PositionGetDouble(POSITION_COMMISSION);
                 double totalUsd = profit + sw + com;
                 if(totalUsd < 0.0 && totalUsd > -BoomCrashMaxFloatLossUsdBeforeScriptWaitClose) {
                     Print("⏭️ SKIP CLOSE WAIT: Boom/Crash — P/L=", DoubleToString(totalUsd, 2),

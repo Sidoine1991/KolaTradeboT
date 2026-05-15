@@ -24,5 +24,7 @@ COPY . .
 # Exposer le port
 EXPOSE 10000
 
-# Commande de démarrage (ai_server.py avec AWS RDS)
-CMD ["uvicorn", "ai_server:app", "--host", "0.0.0.0", "--port", "10000"]
+# Commande de démarrage — python -m uvicorn évite un shim PATH trompeur (erreur « unrecognized arguments: ai_server:app »)
+# Render injecte PORT ; défaut 10000 pour build local.
+ENV PORT=10000
+CMD ["sh", "-c", "exec python -m uvicorn ai_server:app --host 0.0.0.0 --port ${PORT:-10000}"]

@@ -50,7 +50,7 @@ except UnicodeDecodeError:
         try:
             load_dotenv('.env.supabase', encoding='latin-1')
         except Exception:
-            print(f"[integrated_ml_trainer] Impossible de lire .env.supabase proprement: {e}. Le serveur IA continue sans certaines variables.")
+            pass
 
 # Configuration
 logger = logging.getLogger("tradbot_ml_trainer")
@@ -71,7 +71,15 @@ MODEL_BY_CATEGORY = {
 try:
     from backend.weltrade_symbols import normalize_broker_symbol, is_weltrade_synth_index
 except ImportError:
-    from weltrade_symbols import normalize_broker_symbol, is_weltrade_synth_index
+    try:
+        from weltrade_symbols import normalize_broker_symbol, is_weltrade_synth_index
+    except ImportError:
+        # Fallback: fonctions stub si module non disponible
+        def normalize_broker_symbol(symbol: str) -> str:
+            return (symbol or "").strip().upper()
+        def is_weltrade_synth_index(symbol: str) -> bool:
+            s = (symbol or "").upper()
+            return any(x in s for x in ["GAINX", "PAINX", "GAIN", "PAIN"])
 
 
 def get_symbol_category(symbol: str) -> str:
@@ -108,33 +116,30 @@ class IntegratedMLTrainer:
         self.min_samples_for_retraining = 50  # Réduit pour les tests
         self.is_running = False
         self.training_task = None
-        
+
         # Métriques en temps réel
         self.current_metrics = {}
         self.training_history = []
         self.last_training_time = {}
-        
+
         # Cache pour éviter les requêtes trop fréquentes
         self.data_cache = {}
         self.cache_timestamps = {}
         self.cache_duration = 60  # 1 minute de cache
-        # Supabase 402 = quota / projet restreint — ne pas spammer les logs ni les POST inutiles.
+        # HTTP 402 = quota / projet restreint — désactiver les POST sans spammer les logs.
         self._supabase_writes_disabled = (
             os.getenv("SUPABASE_DISABLE_WRITES", "").strip().lower() in ("1", "true", "yes")
         )
-        self._supabase_quota_logged = False
+
+        # Cache des modèles chargés (évite de recharger à chaque prédiction)
+        self.models = {}
+        logger.info(f"Chargement initial des modèles ML depuis {self.models_dir}...")
+        self.models = self.load_existing_models()
 
     def _disable_supabase_writes_if_402(self, status: int) -> None:
         if status != 402:
             return
         self._supabase_writes_disabled = True
-        if not self._supabase_quota_logged:
-            self._supabase_quota_logged = True
-            logger.warning(
-                "Supabase HTTP 402 (quota dépassé ou service restreint) : écritures ML désactivées pour cette session. "
-                "Les modèles .joblib restent locaux ; ce n'est pas une erreur Ollama. "
-                "Pour couper le bruit au démarrage : SUPABASE_DISABLE_WRITES=1"
-            )
 
     def _supabase_writes_allowed(self) -> bool:
         return bool(self.supabase_key) and not self._supabase_writes_disabled
@@ -143,11 +148,11 @@ class IntegratedMLTrainer:
         """Charge tous les modèles existants (RF, XGBoost, LightGBM)."""
         models = {}
         suffixes = ["_rf.joblib", "_xgboost.joblib", "_lightgbm.joblib"]
-        
+
         if not os.path.exists(self.models_dir):
             logger.warning(f"Répertoire {self.models_dir} non trouvé")
             return models
-            
+
         global _LIGHTGBM_SKIP_LOGGED
         for file in os.listdir(self.models_dir):
             for suf in suffixes:
@@ -160,13 +165,18 @@ class IntegratedMLTrainer:
                                 "(installer avec : pip install lightgbm). xgboost / rf restent utilisés."
                             )
                         break
+                    # Retirer le suffixe pour obtenir la base
                     base = file.replace(suf, "")
-                    parts = base.split("_")
-                    if len(parts) >= 2:
-                        symbol = "_".join(parts[:-1])
-                        timeframe = parts[-1]
-                        key = base
-                        model_type = suf.replace(".joblib", "").lstrip("_")
+                    model_type = suf.replace(".joblib", "").lstrip("_")
+
+                    # Gérer les noms avec espaces (ex: "Boom 300 Index_M1") ET underscores (ex: "Boom_300_Index_M1")
+                    # On cherche le dernier underscore pour extraire le timeframe
+                    last_underscore_idx = base.rfind("_")
+                    if last_underscore_idx > 0:
+                        symbol = base[:last_underscore_idx]  # Tout avant le dernier _
+                        timeframe = base[last_underscore_idx + 1:]  # Après le dernier _
+                        key = base  # Clé = base sans le suffixe type
+
                         try:
                             model_path = os.path.join(self.models_dir, file)
                             scaler_path = os.path.join(self.models_dir, base + "_scaler.joblib")
@@ -175,19 +185,23 @@ class IntegratedMLTrainer:
                                 'model': joblib.load(model_path),
                                 'scaler': joblib.load(scaler_path) if os.path.exists(scaler_path) else None,
                                 'metrics': json.load(open(metrics_path)) if os.path.exists(metrics_path) else {},
-                                'symbol': symbol,
+                                'symbol': symbol.replace("_", " ").strip(),  # Normaliser: remplacer _ par espace
                                 'timeframe': timeframe,
                                 'model_type': model_type,
                                 'last_training': datetime.now()
                             }
-                            logger.info(f"✅ Modèle chargé: {key} ({model_type})")
+                            logger.info(f"[OK] Modèle chargé: {symbol.replace('_', ' ')} {timeframe} ({model_type})")
                         except Exception as e:
                             err = str(e).lower()
                             if "lightgbm" in err or "no module named" in err:
-                                logger.warning(f"⚠️ Modèle non chargé {file}: {e}")
+                                logger.warning(f"Modèle non chargé {file}: {e}")
                             else:
-                                logger.error(f"❌ Erreur chargement modèle {file}: {e}")
+                                logger.error(f"ERREUR chargement modèle {file}: {e}")
+                    else:
+                        logger.warning(f"Nom fichier modèle invalide (pas de timeframe): {file}")
                     break
+
+        logger.info(f"Total modèles ML chargés: {len(models)}")
         return models
     
     async def fetch_training_data_simple(self, symbol: str, timeframe: str = "M1", limit: int = 1000) -> Optional[pd.DataFrame]:
@@ -233,9 +247,7 @@ class IntegratedMLTrainer:
                 
                 if pred_resp.status_code != 200:
                     self._disable_supabase_writes_if_402(pred_resp.status_code)
-                    if pred_resp.status_code == 402 and self._supabase_quota_logged:
-                        logger.debug("Pas de données Supabase (402) pour %s — fallback données locales", symbol)
-                    else:
+                    if pred_resp.status_code != 402:
                         logger.warning(f"⚠️ Pas de données pour {symbol} (status: {pred_resp.status_code})")
                     # Créer des données factices pour éviter "Samples: 0"
                     dummy_data = self._create_dummy_training_data(symbol, timeframe)
@@ -481,7 +493,7 @@ class IntegratedMLTrainer:
                 # Si pas de boucle, exécuter directement
                 asyncio.run(self._log_training_metrics(metrics))
         except Exception as e:
-            logger.warning(f"Erreur logging Supabase: {e}")
+            logger.warning("Erreur logging métriques distantes: %s", e)
         
         return metrics
     
@@ -489,7 +501,7 @@ class IntegratedMLTrainer:
         """Logger toutes les métriques d'entraînement dans Supabase."""
         try:
             if not self._supabase_writes_allowed():
-                logger.debug("Logging Supabase ignoré (désactivé ou quota 402) pour %s", metrics.get("symbol"))
+                logger.debug("Logging métriques ignoré pour %s", metrics.get("symbol"))
                 return
             # 1. Logger le training run
             await self._log_training_run(metrics, "completed")
@@ -501,9 +513,9 @@ class IntegratedMLTrainer:
             await self._log_symbol_calibration(metrics)
             
             if self._supabase_writes_disabled:
-                logger.info(f"📁 Métriques entraînement locales seulement (Supabase indisponible): {metrics['symbol']}")
+                logger.info(f"📁 Métriques entraînement locales seulement: {metrics['symbol']}")
             else:
-                logger.info(f"✅ All training metrics logged to Supabase: {metrics['symbol']}")
+                logger.info(f"✅ Métriques d'entraînement persistées: {metrics['symbol']}")
         except Exception as e:
             logger.warning(f"❌ Error logging training metrics: {e}")
     
@@ -512,11 +524,29 @@ class IntegratedMLTrainer:
         Prédiction avec Random Forest si modèle disponible.
         Retourne {"action": "buy|sell|hold", "confidence": float 0-1, "model": "random_forest"} ou None.
         """
-        models = self.load_existing_models()
-        key = f"{symbol}_{timeframe}"
-        if key not in models:
-            return None
-        m = models[key]
+        # Normaliser le symbole pour matcher les noms de fichiers (espaces → underscores)
+        symbol_normalized = symbol.replace(" ", "_").strip()
+        key = f"{symbol_normalized}_{timeframe}"
+
+        # Essayer d'abord la clé avec underscores
+        if key not in self.models:
+            # Essayer avec espaces (format alternatif)
+            key_spaces = f"{symbol.strip()}_{timeframe}"
+            if key_spaces not in self.models:
+                # Dernière tentative: chercher n'importe quel modèle pour ce symbole
+                found = False
+                for model_key in self.models.keys():
+                    model_symbol = self.models[model_key].get('symbol', '').replace("_", " ").strip()
+                    if model_symbol.lower() == symbol.strip().lower() and model_key.endswith(f"_{timeframe}"):
+                        key = model_key
+                        found = True
+                        break
+                if not found:
+                    return None
+            else:
+                key = key_spaces
+
+        m = self.models[key]
         model_obj = m.get("model")
         scaler = m.get("scaler")
         features_used = m.get("metrics", {}).get("features_used") if isinstance(m.get("metrics"), dict) else None
@@ -647,14 +677,14 @@ class IntegratedMLTrainer:
                 else:
                     self._disable_supabase_writes_if_402(resp.status_code)
                     if resp.status_code == 402:
-                        logger.debug("model_metrics POST 402 (quota Supabase), métriques restent locales")
+                        logger.debug("model_metrics POST 402, métriques restent locales")
                     else:
                         logger.error(
                             "model_metrics POST %s body=%s payload=%s",
                             resp.status_code, resp.text, metric_data
                         )
         except Exception as e:
-            logger.warning(f"Erreur sauvegarde métriques Supabase: {e}")
+            logger.warning("Erreur sauvegarde métriques distantes: %s", e)
 
     async def _log_training_run(self, metrics: Dict[str, Any], status: str = "completed"):
         """Log systématique dans training_runs."""
@@ -852,10 +882,10 @@ class IntegratedMLTrainer:
         return pairs
     
     async def continuous_training_loop(self):
-        """Boucle d'entraînement continu - récupère données Supabase, stocke métriques Supabase"""
-        logger.info("🚀 Entraînement continu démarré (Supabase: fetch predictions → train → save model_metrics)")
+        """Boucle d'entraînement continu — fetch predictions distant → train → métriques."""
+        logger.info("🚀 Entraînement continu démarré (fetch predictions → train → save model_metrics)")
         if not self.supabase_key:
-            logger.warning("⚠️ SUPABASE_SERVICE_KEY/ANON_KEY non configuré - entraînement Supabase désactivé")
+            logger.warning("⚠️ Clés API service distantes non configurées — entraînement continu distant désactivé")
             return
         
         while self.is_running:

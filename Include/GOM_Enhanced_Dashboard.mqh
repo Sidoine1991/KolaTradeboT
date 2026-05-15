@@ -1,6 +1,7 @@
 //+------------------------------------------------------------------+
 //| GOM_Enhanced_Dashboard.mqh                                        |
 //| Tableau de bord amélioré avec stats ML AWS RDS                   |
+//| (copie alignée sur GOM_Enhanced_Dashboard.mqh à la racine)        |
 //+------------------------------------------------------------------+
 #property copyright "TradBOT 2026"
 #property strict
@@ -389,6 +390,12 @@ void GOM_DrawEnhancedDashboardV3(int posX = 10, int posY = 30, bool anchorTop = 
 
    // Forcer le rafraîchissement
    ChartRedraw(0);
+}
+
+// Tableau de bord compact et informatif
+void GOM_DrawEnhancedDashboard()
+{
+   GOM_DrawEnhancedDashboardV3(10, 10, true, 90, 24, 7);
 }
 
 // Nettoyer tout le tableau de bord

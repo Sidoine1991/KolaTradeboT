@@ -1,29 +1,49 @@
 @echo off
-echo ========================================
-echo   Démarrage du Serveur IA TradBOT
-echo ========================================
+REM ============================================================================
+REM Lancement du serveur IA TradBOT - Mode Local (sans Supabase/Gemini)
+REM ============================================================================
+
+echo.
+echo ======================================
+echo  SERVEUR IA TRADBOT - MODE LOCAL
+echo ======================================
 echo.
 
-REM Vérifier si l'environnement virtuel existe
-if not exist "venv\Scripts\python.exe" (
-    echo ❌ Environnement virtuel venv non trouvé!
-    echo 💡 Créez-le avec:
-    echo    python -m venv venv
-    echo    venv\Scripts\activate
-    echo    pip install fastapi uvicorn pandas numpy requests joblib
-    echo.
+cd /d "%~dp0"
+
+REM Verifier que Python est installe
+python --version >/dev/null 2>&1
+if errorlevel 1 (
+    echo ERREUR: Python n'est pas installe ou pas dans le PATH
     pause
     exit /b 1
 )
 
-echo ✅ Environnement virtuel trouvé
-echo 🚀 Démarrage du serveur IA...
+echo [1/3] Verification Python... OK
 echo.
 
-REM Activer l'environnement virtuel et démarrer le serveur
-call venv\Scripts\activate.bat
+REM Verifier les dependances
+echo [2/3] Verification des dependances...
+pip show fastapi uvicorn pandas >/dev/null 2>&1
+if errorlevel 1 (
+    echo Installation des dependances manquantes...
+    pip install -q fastapi uvicorn pandas numpy requests joblib scikit-learn
+)
+echo Dependances... OK
+echo.
+
+REM Lancer le serveur
+echo [3/3] Lancement du serveur IA...
+echo.
+echo ======================================
+echo  SERVEUR DEMARRE
+echo  URL Local:  http://127.0.0.1:8000
+echo  URL Render: https://kolatradebot-7ofl.onrender.com
+echo ======================================
+echo.
+echo Appuyez sur CTRL+C pour arreter le serveur
+echo.
+
 python ai_server.py
 
-echo.
-echo 🛑 Serveur IA arrêté
 pause
