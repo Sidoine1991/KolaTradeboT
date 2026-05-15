@@ -88,6 +88,15 @@ except ImportError:
     FALLBACK_AVAILABLE = False
     logger.info("Système fallback Qwen non disponible")
 
+# Import du helper AWS RDS PostgreSQL (remplace Supabase)
+try:
+    from aws_rds_helper import aws_rds_client, push_to_database
+    AWS_RDS_AVAILABLE = True
+    logger.info("✅ AWS RDS PostgreSQL helper chargé")
+except ImportError as e:
+    AWS_RDS_AVAILABLE = False
+    logger.warning(f"⚠️ AWS RDS helper non disponible: {e}")
+
 # Sur Render / Supabase, utiliser /tmp pour les modèles (accessible en écriture)
 if os.getenv("RENDER") or os.getenv("RENDER_SERVICE_ID") or os.getenv("SUPABASE_URL"):
     os.environ.setdefault("MODELS_DIR", "/tmp/models")
@@ -121,6 +130,17 @@ try:
 except ImportError:
     apply_core_indicator_confluence = None  # type: ignore
     INDICATOR_CONFLUENCE_AVAILABLE = False
+
+# Importer le système d'apprentissage adaptatif (instanciation plus tard)
+try:
+    from adaptive_learning_system import AdaptiveLearningSystem, TradeResult
+    ADAPTIVE_LEARNING_AVAILABLE = True
+    adaptive_learning = None  # Sera initialisé après configuration des dossiers
+    logger.info("✅ Module apprentissage adaptatif chargé")
+except ImportError as e:
+    ADAPTIVE_LEARNING_AVAILABLE = False
+    adaptive_learning = None
+    logger.warning(f"⚠️ Module apprentissage adaptatif non disponible: {e}")
 
 # Importer le système de recommandation ML
 try:
@@ -202,31 +222,37 @@ else:
 
 # ========== CONFIGURATIONS AMÉLIORATIONS PRIORITAIRES ==========
 # Seuils de confiance minimum pour éviter les signaux trop faibles
-MIN_CONFIDENCE_THRESHOLD = 0.55  # 55% minimum (plus réaliste)
-FORCE_HOLD_THRESHOLD = 0.40      # Force HOLD si confiance < 40% (plus flexible)
+# ULTRA-CONSERVATEUR : Capital 20$ — uniquement les signaux très fiables
+MIN_CONFIDENCE_THRESHOLD = 0.72  # 72% minimum — strict pour protéger capital 20$
+FORCE_HOLD_THRESHOLD = 0.60      # Force HOLD si confiance < 60% — pas de trade incertain avec 20$
 
 # Prompt système amélioré pour Boom/Crash
 BOOM_CRASH_SYSTEM_PROMPT = """
 Tu es un trader expert spécialisé sur les indices synthétiques Deriv (Boom & Crash 50/100/300/600/900/1000).
 
-RÈGLES STRICTES POUR BOOM/CRASH:
-1. Confiance MINIMUM 68% pour tout signal BUY/SELL. En dessous → HOLD obligatoire.
-2. SUR BOOM: Privilégie BUY quand RSI < 40 + EMA crossover haussier SANS spike récent.
-3. SUR CRASH: Privilégie SELL quand RSI > 60 + EMA crossover baissier SANS spike récent.
-4. JAMAIS de signal si ATR dernière bougie > 2.8×ATR moyen → risque spike trop élevé.
-5. Détecte les patterns de spike: bougie > 3×range moyen + volume élevé.
+CONTEXTE CAPITAL: 20 USD. Mode ULTRA-CONSERVATEUR. Chaque trade doit être un trade de qualité A+.
+
+RÈGLES STRICTES POUR BOOM/CRASH (capital 20$):
+1. Confiance MINIMUM 75% pour tout signal BUY/SELL. En dessous → HOLD obligatoire.
+2. SUR BOOM: Privilégie BUY UNIQUEMENT quand RSI < 35 + EMA M1+M5 crossover haussier + pattern pré-spike confirmé.
+3. SUR CRASH: Privilégie SELL UNIQUEMENT quand RSI > 65 + EMA M1+M5 crossover baissier + pattern pré-spike confirmé.
+4. JAMAIS de signal si ATR dernière bougie > 2.5×ATR moyen → risque spike trop élevé (faux spike possible).
+5. Détecte les patterns de spike: bougie > 3×range moyen + volume élevé + compression récente (range10 < range50×0.6).
+6. PROTECTION CAPITAL: Si 2 trades perdants consécutifs dans les 2 dernières heures → HOLD forcé pendant 1h.
+7. QUALITÉ: Préférer 1 excellent trade par jour à 5 trades moyens. Un seul spike bien capturé = +5-10% du capital.
+8. TIMING: Ne PAS trader pendant les premières 5 minutes après un spike (volatilité résiduelle).
 
 FORMAT DE RÉPONSE OBLIGATOIRE:
-- action: "buy"/"sell"/"hold" 
-- confidence: 0.68-1.0 (jamais en dessous de 0.68)
-- reason: phrase courte et précise
-- metadata: RSI, EMA, ATR ratio, spike_risk
+- action: "buy"/"sell"/"hold"
+- confidence: 0.75-1.0 (jamais en dessous de 0.75 pour buy/sell)
+- reason: phrase courte et précise incluant le pattern identifié
+- metadata: RSI, EMA_M1, EMA_M5, ATR ratio, spike_risk, compression_ratio
 """
 
 # Cache court pour éviter les analyses répétées
 decision_cache = {}
 cache_timestamps = {}
-CACHE_DURATION = 30  # 30 secondes
+CACHE_DURATION = 45  # 45 secondes — augmenté pour réduire les appels redondants (capital 20$ = décisions stables)
 
 # Cache symbôle+timeframe pour decision_simplified (aligné optimisation TradBOT / latence répétée)
 simplified_tf_cache: Dict[str, Dict[str, Any]] = {}
@@ -421,37 +447,38 @@ class SymbolConfigOut(BaseModel):
     symbol: str
     enabled: bool = True
     max_open_positions: int = 1
-    min_expectancy: float = 0.0
-    min_ai_confidence: float = 0.55
-    max_daily_loss_usd: Optional[float] = None
-    max_symbol_loss_usd: Optional[float] = None
-    max_consecutive_losses: Optional[int] = None
-    risk_profile: str = "balanced"
+    min_expectancy: float = 0.20  # Espérance min 20% — ultra-conservateur pour capital 20$
+    min_ai_confidence: float = 0.72  # Confiance min 72% — aligné avec MIN_CONFIDENCE_THRESHOLD
+    max_daily_loss_usd: Optional[float] = 0.40  # Perte max/jour/symbole: 2% du capital 20$
+    max_symbol_loss_usd: Optional[float] = 0.40  # Perte max cumulée/symbole: 2% du capital
+    max_consecutive_losses: Optional[int] = 2  # Max 2 pertes consécutives avant pause
+    risk_profile: str = "ultra_conservative"  # Profil ultra-conservateur pour 20$
     overrides: Dict[str, Any] = Field(default_factory=dict)
 
 
 # ========== FONCTIONS UTILITAIRES AMÉLIORATIONS ==========
 def apply_confidence_thresholds(action: str, confidence: float, reason: str) -> tuple:
     """
-    Applique les seuils de confiance minimum pour éviter les signaux trop faibles.
-    Force HOLD si confiance < 60%, applique plancher 68% pour les signaux.
+    Applique les seuils de confiance minimum pour protéger le capital 20$.
+    Force HOLD si confiance < 72%, applique plancher 75% pour les signaux buy/sell.
+    ULTRA-CONSERVATEUR : chaque signal doit être de haute qualité.
     """
-    # Forcer un plancher de confiance à 68%
-    confidence = max(confidence, 0.68)
-    
-    # Forcer HOLD si confiance encore trop faible après plancher
-    if confidence < 0.68:
-        return "hold", 0.68, f"{reason} (confiance trop faible → hold forcé)"
-    
-    # Si action non-hold mais confiance < 68%, forcer HOLD
-    if action != "hold" and confidence < 0.68:
-        return "hold", 0.68, f"{reason} (confiance < 68% → hold)"
-    
-    # Forcer un minimum de 68% pour les signaux buy/sell
-    if action != "hold" and confidence < 0.68:
-        confidence = 0.68
-        reason += f" (confiance forcée à 68%)"
-    
+    # Si action est hold, retourner directement (pas de plancher nécessaire)
+    if action == "hold":
+        return action, max(confidence, 0.50), reason
+
+    # Forcer HOLD si confiance < 72% (seuil minimum pour capital 20$)
+    if confidence < 0.72:
+        return "hold", confidence, f"{reason} (confiance {confidence:.0%} < 72% → HOLD forcé, capital 20$ protégé)"
+
+    # Forcer un plancher de confiance à 75% pour les signaux buy/sell actifs
+    if action != "hold" and confidence < 0.75:
+        confidence = 0.75
+        reason += f" (confiance plancher 75% appliqué — mode ultra-conservateur 20$)"
+
+    # Limiter la confiance max à 95% (éviter surconfiance)
+    confidence = min(confidence, 0.95)
+
     return action, confidence, reason
 
 def get_cached_decision(symbol: str) -> Optional[Dict]:
@@ -2520,7 +2547,16 @@ try:
     logger.info(f"Répertoire des modèles: {DEFAULT_MODELS_DIR}")
     logger.info(f"Chemin du modèle Gemma: {GEMMA_MODEL_PATH}")
     logger.info(f"Répertoire des fichiers MT5: {MT5_FILES_DIR}")
-    
+
+    # [NOUVEAU] Initialiser le système d'apprentissage adaptatif maintenant que DATA_DIR existe
+    if ADAPTIVE_LEARNING_AVAILABLE and adaptive_learning is None:
+        try:
+            db_path = os.path.join(DEFAULT_DATA_DIR, "adaptive_learning.db")
+            adaptive_learning = AdaptiveLearningSystem(db_path=db_path)
+            logger.info(f"✅ Système apprentissage adaptatif initialisé: {db_path}")
+        except Exception as e:
+            logger.warning(f"⚠️ Erreur init système adaptatif: {e}")
+
 except Exception as e:
     logger.error(f"Erreur lors de la configuration des répertoires: {e}")
     raise
@@ -6685,16 +6721,10 @@ async def _push_prediction_to_supabase(
     ml_result: Optional[dict] = None,
 ):
     """
-    Write every AI prediction to the Supabase predictions table.
+    Write every AI prediction to the database (AWS RDS or Supabase fallback).
     Called from decision_simplified and /decision so you can monitor the robot's decisions in the database.
     """
-    import httpx
-
-    supabase_url = os.getenv("SUPABASE_URL", "https://bpzqnooiisgadzicwupi.supabase.co")
-    supabase_key = os.getenv("SUPABASE_SERVICE_KEY") or os.getenv("SUPABASE_ANON_KEY")
-    if not supabase_url or not supabase_key:
-        return
-
+    # Préparer les métadonnées
     request_data = {
         "bid": request.bid,
         "ask": request.ask,
@@ -6728,13 +6758,36 @@ async def _push_prediction_to_supabase(
         "symbol": request.symbol,
         "timeframe": "M1",
         "prediction": response.action,
-        "confidence": response.confidence,
+        "confidence": response.confidence / 100.0,  # Convert to decimal for DB
         "reason": (response.reason or "")[:2000],
         "model_used": getattr(response, "model_used", None) or "technical_ml_enhanced",
         "metadata": metadata,
     }
 
+    # Utiliser AWS RDS si disponible, sinon fallback vers Supabase
+    if AWS_RDS_AVAILABLE and _env_bool("USE_SUPABASE", False) == False:
+        try:
+            import json
+            # Convertir metadata en JSON string pour PostgreSQL JSONB
+            decision_data["metadata"] = json.dumps(decision_data["metadata"])
+            result_id = aws_rds_client.insert("predictions", decision_data)
+            if result_id:
+                logger.debug(f"✅ Prediction enregistrée dans AWS RDS (ID: {result_id})")
+            return
+        except Exception as e:
+            logger.error(f"❌ Erreur AWS RDS prediction: {e}")
+            # Ne pas fallback vers Supabase ici, juste logger l'erreur
+            return
+
+    # Fallback Supabase (si activé)
+    supabase_url = os.getenv("SUPABASE_URL", "https://bpzqnooiisgadzicwupi.supabase.co")
+    supabase_key = os.getenv("SUPABASE_SERVICE_KEY") or os.getenv("SUPABASE_ANON_KEY")
+    if not supabase_url or not supabase_key:
+        return
+
     try:
+        import httpx
+        decision_data["confidence"] = response.confidence  # Garder en pourcentage pour Supabase
         async with httpx.AsyncClient() as client:
             resp = await client.post(
                 f"{supabase_url}/rest/v1/predictions",
@@ -6754,11 +6807,62 @@ async def _push_prediction_to_supabase(
 
 
 async def save_decision_to_supabase(request: DecisionRequest, response: DecisionResponse, ml_result: dict):
-    """Sauvegarder la décision améliorée dans Supabase (predictions + model_metrics)."""
-    import httpx
-
+    """Sauvegarder la décision améliorée dans la base de données (AWS RDS ou Supabase fallback)."""
     await _push_prediction_to_supabase(request, response, ml_result)
 
+    # (Important) Par défaut on NE doit PAS écrire un proxy dans `model_metrics` à chaque prédiction,
+    # sinon on écrase les métriques réelles produites par le trainer (integrated_ml_trainer / continuous_ml_trainer).
+    # Tu peux réactiver ce comportement via env var pour debug.
+    enable_proxy = os.getenv("AI_ENABLE_MODEL_METRICS_PROXY_FROM_PREDICTIONS", "false").lower() == "true"
+
+    if not enable_proxy:
+        return
+
+    # Extraire une "accuracy" proxy à partir de la confiance (décimale)
+    accuracy_decimal = None
+    meta = getattr(response, "metadata", None)
+    if isinstance(meta, dict) and "confidence_decimal" in meta:
+        try:
+            accuracy_decimal = float(meta.get("confidence_decimal"))
+        except (TypeError, ValueError):
+            accuracy_decimal = None
+    if accuracy_decimal is None:
+        try:
+            # response.confidence est renvoyée en pourcentage (0-100)
+            accuracy_decimal = float(response.confidence) / 100.0
+        except Exception:
+            accuracy_decimal = 0.5
+
+    if not (0.0 <= accuracy_decimal <= 1.0):
+        accuracy_decimal = 0.5
+
+    metrics_payload = {
+        "symbol": request.symbol,
+        "timeframe": "M1",
+        "model_type": response.model_used or "technical_ml_enhanced",
+        "accuracy": float(accuracy_decimal),
+        "metadata": {
+            "last_action": response.action,
+            "last_confidence_pct": float(response.confidence),
+            "reason_sample": response.reason[:240] if isinstance(response.reason, str) else "",
+            "source": "predictions_proxy",
+        },
+    }
+
+    # Utiliser AWS RDS si disponible
+    if AWS_RDS_AVAILABLE and _env_bool("USE_SUPABASE", False) == False:
+        try:
+            import json
+            metrics_payload["metadata"] = json.dumps(metrics_payload["metadata"])
+            result_id = aws_rds_client.insert("model_metrics", metrics_payload)
+            if result_id:
+                logger.info(f"✅ model_metrics proxy insérée dans AWS RDS pour {request.symbol} accuracy={accuracy_decimal:.3f}")
+            return
+        except Exception as e:
+            logger.debug(f"Erreur lors de la sauvegarde proxy model_metrics AWS RDS: {e}")
+            return
+
+    # Fallback Supabase
     supabase_url = os.getenv("SUPABASE_URL", "https://bpzqnooiisgadzicwupi.supabase.co")
     supabase_key = os.getenv("SUPABASE_SERVICE_KEY") or os.getenv("SUPABASE_ANON_KEY")
     if not supabase_url or not supabase_key:
@@ -6771,63 +6875,28 @@ async def save_decision_to_supabase(request: DecisionRequest, response: Decision
         "Prefer": "return=representation",
     }
 
-    # (Important) Par défaut on NE doit PAS écrire un proxy dans `model_metrics` à chaque prédiction,
-    # sinon on écrase les métriques réelles produites par le trainer (integrated_ml_trainer / continuous_ml_trainer).
-    # Tu peux réactiver ce comportement via env var pour debug.
     try:
-        enable_proxy = os.getenv("AI_ENABLE_MODEL_METRICS_PROXY_FROM_PREDICTIONS", "false").lower() == "true"
-        if enable_proxy and supabase_key:
-            # Extraire une "accuracy" proxy à partir de la confiance (décimale)
-            accuracy_decimal = None
-            meta = getattr(response, "metadata", None)
-            if isinstance(meta, dict) and "confidence_decimal" in meta:
-                try:
-                    accuracy_decimal = float(meta.get("confidence_decimal"))
-                except (TypeError, ValueError):
-                    accuracy_decimal = None
-            if accuracy_decimal is None:
-                try:
-                    # response.confidence est renvoyée en pourcentage (0-100)
-                    accuracy_decimal = float(response.confidence) / 100.0
-                except Exception:
-                    accuracy_decimal = 0.5
-
-            if not (0.0 <= accuracy_decimal <= 1.0):
-                accuracy_decimal = 0.5
-
-            metrics_payload = {
-                "symbol": request.symbol,
-                "timeframe": "M1",
-                "accuracy": float(accuracy_decimal),
-                "metadata": {
-                    "model_used": response.model_used or "technical_ml_enhanced",
-                    "last_action": response.action,
-                    "last_confidence_pct": float(response.confidence),
-                    "reason_sample": response.reason[:240] if isinstance(response.reason, str) else "",
-                    "source": "predictions_proxy",
-                },
-            }
-
-            async with httpx.AsyncClient() as client:
-                r_metrics = await client.post(
-                    f"{supabase_url}/rest/v1/model_metrics",
-                    json=metrics_payload,
-                    headers=headers,
-                    timeout=10.0,
+        import httpx
+        async with httpx.AsyncClient() as client:
+            r_metrics = await client.post(
+                f"{supabase_url}/rest/v1/model_metrics",
+                json=metrics_payload,
+                headers=headers,
+                timeout=10.0,
+            )
+            if r_metrics.status_code not in (200, 201):
+                logger.error(
+                    "model_metrics proxy: statut %s body=%s payload=%s",
+                    r_metrics.status_code,
+                    r_metrics.text,
+                    metrics_payload,
                 )
-                if r_metrics.status_code not in (200, 201):
-                    logger.error(
-                        "model_metrics proxy: statut %s body=%s payload=%s",
-                        r_metrics.status_code,
-                        r_metrics.text,
-                        metrics_payload,
-                    )
-                else:
-                    logger.info(
-                        "✅ model_metrics proxy insérée pour %s accuracy=%.3f",
-                        request.symbol,
-                        metrics_payload["accuracy"],
-                    )
+            else:
+                logger.info(
+                    "✅ model_metrics proxy insérée pour %s accuracy=%.3f",
+                    request.symbol,
+                    metrics_payload["accuracy"],
+                )
     except Exception as e:
         logger.debug(f"Erreur lors de la sauvegarde proxy model_metrics: {e}")
 
@@ -14129,28 +14198,16 @@ async def _continuous_training_loop(symbols: List[str], timeframe: str, interval
         await asyncio.sleep(max(10, interval_sec))
 
 async def _push_feedback_to_supabase(
-    symbol: str, timeframe: str, side: Optional[str], profit: float, 
-    is_win: bool, ai_confidence: Optional[float], 
+    symbol: str, timeframe: str, side: Optional[str], profit: float,
+    is_win: bool, ai_confidence: Optional[float],
     entry_price: Optional[float] = None, exit_price: Optional[float] = None,
     open_time: Optional[str] = None, close_time: Optional[str] = None,
     coherent_confidence: Optional[float] = None
 ):
-    """Envoie le feedback vers Supabase trade_feedback pour que le robot apprenne des erreurs."""
-    import httpx
-    supabase_url = os.getenv("SUPABASE_URL", "https://bpzqnooiisgadzicwupi.supabase.co")
-    # Utiliser la clé de service si disponible (permissions complètes), sinon la clé anonyme
-    supabase_key = os.getenv("SUPABASE_SERVICE_KEY") or os.getenv("SUPABASE_ANON_KEY")
-
-    # Vérification explicite de la configuration Supabase pour éviter les échecs silencieux
-    if not supabase_key or not supabase_url:
-        logger.debug(
-            "Supabase non configuré pour le feedback (SUPABASE_URL ou SUPABASE_SERVICE_KEY/ANON_KEY manquant)"
-        )
-        return
-        
+    """Envoie le feedback vers la base de données (AWS RDS ou Supabase fallback) pour que le robot apprenne des erreurs."""
     now_iso = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.000Z")
-    
-    # Formater les dates pour Supabase (doivent être ISO)
+
+    # Formater les dates (compatible AWS RDS et Supabase)
     def to_iso(t):
         if not t: return now_iso
         try:
@@ -14170,13 +14227,40 @@ async def _push_feedback_to_supabase(
         "entry_price": float(entry_price) if entry_price is not None else 0,
         "exit_price": float(exit_price) if exit_price is not None else 0,
         "profit": float(profit),
-        "ai_confidence": float(ai_confidence) if ai_confidence is not None else None,
-        "coherent_confidence": float(coherent_confidence if coherent_confidence is not None else ai_confidence) if (coherent_confidence is not None or ai_confidence is not None) else None,
+        "ai_confidence": float(ai_confidence) / 100.0 if ai_confidence is not None else None,  # Decimal pour RDS
+        "coherent_confidence": float(coherent_confidence if coherent_confidence is not None else ai_confidence) / 100.0 if (coherent_confidence is not None or ai_confidence is not None) else None,
         "decision": (side or "HOLD").upper(),
         "is_win": bool(is_win),
         "side": (side or "").lower(),
     }
+
+    # Utiliser AWS RDS si disponible, sinon fallback vers Supabase
+    if AWS_RDS_AVAILABLE and _env_bool("USE_SUPABASE", False) == False:
+        try:
+            result_id = aws_rds_client.insert("trade_feedback", payload)
+            if result_id:
+                logger.info(f"✅ Feedback trade enregistré dans AWS RDS pour {symbol} ({timeframe})")
+            return
+        except Exception as e:
+            logger.error(f"❌ Erreur AWS RDS feedback: {e}")
+            return
+
+    # Fallback Supabase (si activé)
+    supabase_url = os.getenv("SUPABASE_URL", "https://bpzqnooiisgadzicwupi.supabase.co")
+    supabase_key = os.getenv("SUPABASE_SERVICE_KEY") or os.getenv("SUPABASE_ANON_KEY")
+
+    if not supabase_key or not supabase_url:
+        logger.debug(
+            "Supabase non configuré pour le feedback (SUPABASE_URL ou SUPABASE_SERVICE_KEY/ANON_KEY manquant)"
+        )
+        return
+
+    # Remettre les valeurs en pourcentage pour Supabase
+    payload["ai_confidence"] = float(ai_confidence) if ai_confidence is not None else None
+    payload["coherent_confidence"] = float(coherent_confidence if coherent_confidence is not None else ai_confidence) if (coherent_confidence is not None or ai_confidence is not None) else None
+
     try:
+        import httpx
         async with httpx.AsyncClient() as client:
             r = await client.post(
                 f"{supabase_url}/rest/v1/trade_feedback",
@@ -14232,7 +14316,26 @@ async def trades_feedback(request: TradeFeedbackRequest):
         
         # Recalibration locale
         update_calibration_from_feedback(symbol, bool(request.is_win), float(request.profit), request.side or "")
-        
+
+        # [NOUVEAU] Apprentissage adaptatif continu
+        if ADAPTIVE_LEARNING_AVAILABLE and adaptive_learning:
+            try:
+                trade_result = TradeResult(
+                    symbol=symbol,
+                    direction=request.side.upper() if request.side else "UNKNOWN",
+                    profit=float(request.profit),
+                    confidence=float(request.ai_confidence) if request.ai_confidence else 0.0,
+                    setup_score=float(request.coherent_confidence) if request.coherent_confidence else 0.0,
+                    gom_verdict="UNKNOWN",  # MT5 peut envoyer cela dans une future version
+                    ticket=0,  # Non fourni par l'API
+                    open_price=float(request.entry_price) if request.entry_price else 0.0,
+                    close_price=float(request.exit_price) if request.exit_price else 0.0
+                )
+                adaptive_learning.record_trade(trade_result)
+                logger.debug(f"[ADAPTIVE] Trade enregistre: {symbol} {request.side} (profit: {request.profit:.2f})")
+            except Exception as e:
+                logger.warning(f"[ADAPTIVE] Erreur apprentissage adaptatif: {e}")
+
         # Persistance Supabase asynchrone
         asyncio.create_task(_push_feedback_to_supabase(
             symbol=symbol, 
@@ -14872,20 +14975,29 @@ def load_ml_models():
     """Charge les modèles ML depuis le répertoire models"""
     models = {}
     if not MODELS_DIR.exists():
+        logger.warning(f"MODELS_DIR n'existe pas: {MODELS_DIR}")
         return models
-    
+
     try:
-        for model_file in MODELS_DIR.glob("*.pkl"):
+        # Charger TOUS les fichiers .joblib ET .pkl
+        model_files = list(MODELS_DIR.glob("*.joblib")) + list(MODELS_DIR.glob("*.pkl"))
+
+        if not model_files:
+            logger.warning(f"Aucun modèle trouvé dans {MODELS_DIR}")
+            return models
+
+        for model_file in model_files:
             try:
                 import joblib
-                model_name = model_file.stem
+                model_name = model_file.stem  # Nom sans extension
                 models[model_name] = joblib.load(model_file)
-                logger.info(f"Modèle chargé: {model_name}")
+                logger.info(f"[OK] Modèle chargé: {model_name}")
             except Exception as e:
                 logger.warning(f"Impossible de charger {model_file}: {e}")
     except Exception as e:
         logger.error(f"Erreur lors du chargement des modèles: {e}")
-    
+
+    logger.info(f"Total modèles chargés: {len(models)}")
     return models
 
 # Charger les modèles au démarrage
