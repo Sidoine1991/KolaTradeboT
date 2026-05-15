@@ -49,7 +49,12 @@ def _get_supabase_config(strict: bool = True) -> Tuple[str, str]:
     """
     Retourne (SUPABASE_URL, SUPABASE_KEY).
     En mode strict, refuse les valeurs par défaut silencieuses pour éviter d'écrire dans le mauvais projet.
+    IMPORTANT: Si USE_SUPABASE=false, retourne ("", "") pour désactiver tous les appels Supabase.
     """
+    # Bloquer complètement si USE_SUPABASE=false
+    if not _env_bool("USE_SUPABASE", False):
+        return "", ""
+
     supabase_url = (os.getenv("SUPABASE_URL") or "").strip()
     supabase_key = (
         os.getenv("SUPABASE_SERVICE_ROLE_KEY")
@@ -65,7 +70,14 @@ def _get_supabase_config(strict: bool = True) -> Tuple[str, str]:
 
 
 def _supabase_credentials_ready() -> bool:
-    """True si URL + clé service/anon présentes (sans lever d'exception)."""
+    """
+    True si URL + clé service/anon présentes (sans lever d'exception).
+    IMPORTANT: Retourne toujours False si USE_SUPABASE=false.
+    """
+    # Bloquer complètement si USE_SUPABASE=false
+    if not _env_bool("USE_SUPABASE", False):
+        return False
+
     url = (os.getenv("SUPABASE_URL") or "").strip()
     key = (
         os.getenv("SUPABASE_SERVICE_ROLE_KEY")
@@ -781,6 +793,12 @@ def _stair_pick_summary_row(rows: List[Dict[str, Any]], pattern_kinds: Optional[
 
 
 async def _stair_fetch_quality_rows(symbol: str, direction: str) -> List[Dict[str, Any]]:
+    """Fetch stair quality summary - désactivé si USE_SUPABASE=false"""
+    # Si USE_SUPABASE est false, ne pas appeler Supabase
+    if not _env_bool("USE_SUPABASE", False):
+        logger.debug("_stair_fetch_quality_rows: désactivé (USE_SUPABASE=false)")
+        return []
+
     supabase_url = (os.getenv("SUPABASE_URL") or "").strip()
     supabase_key = (
         os.getenv("SUPABASE_SERVICE_ROLE_KEY")
@@ -883,6 +901,23 @@ async def apply_stair_history_to_decision(
 
 
 async def _insert_stair_detection_supabase(payload: Dict[str, Any]) -> None:
+    """Insert stair detection - AWS RDS si disponible, sinon Supabase si activé"""
+    # Utiliser AWS RDS si disponible
+    if AWS_RDS_AVAILABLE and not _env_bool("USE_SUPABASE", False):
+        try:
+            result_id = aws_rds_client.insert("stair_detections", payload)
+            if result_id:
+                logger.debug(f"Stair detection enregistrée dans AWS RDS (ID: {result_id})")
+            return
+        except Exception as e:
+            logger.error(f"Erreur AWS RDS stair_detections: {e}")
+            return
+
+    # Fallback Supabase (seulement si USE_SUPABASE=true)
+    if not _env_bool("USE_SUPABASE", False):
+        logger.debug("_insert_stair_detection_supabase: désactivé (USE_SUPABASE=false)")
+        return
+
     supabase_url = (os.getenv("SUPABASE_URL") or "").strip()
     supabase_key = (
         os.getenv("SUPABASE_SERVICE_ROLE_KEY")
@@ -922,7 +957,43 @@ async def _patch_stair_outcome_supabase(
     closed_at_iso: Optional[str] = None,
     mt5_ticket: Optional[int] = None,
 ) -> bool:
+    """Update stair outcome - AWS RDS si disponible, sinon Supabase si activé"""
     from urllib.parse import quote
+
+    # Utiliser AWS RDS si disponible
+    if AWS_RDS_AVAILABLE and not _env_bool("USE_SUPABASE", False):
+        try:
+            update_data = {
+                "outcome": outcome.lower(),
+                "updated_at": datetime.utcnow().isoformat() + "Z",
+            }
+            if result_usd is not None:
+                update_data["result_usd"] = result_usd
+            if closed_at_iso:
+                update_data["closed_at"] = closed_at_iso
+            if mt5_ticket is not None:
+                update_data["mt5_ticket"] = mt5_ticket
+
+            filters = {}
+            if row_id:
+                filters["id"] = row_id
+            elif client_event_id:
+                filters["client_event_id"] = client_event_id
+            else:
+                return False
+
+            success = aws_rds_client.update("stair_detections", update_data, filters)
+            if success:
+                logger.debug(f"Stair outcome mis à jour dans AWS RDS")
+            return success
+        except Exception as e:
+            logger.error(f"Erreur AWS RDS stair outcome update: {e}")
+            return False
+
+    # Fallback Supabase (seulement si USE_SUPABASE=true)
+    if not _env_bool("USE_SUPABASE", False):
+        logger.debug("_patch_stair_outcome_supabase: désactivé (USE_SUPABASE=false)")
+        return False
 
     supabase_url = (os.getenv("SUPABASE_URL") or "").strip()
     supabase_key = (
@@ -1396,21 +1467,23 @@ def get_prediction_channel_5000(symbol: str, timeframe: str = "M1", future_bars:
             import httpx
             supabase_url = os.getenv("SUPABASE_URL", "https://bpzqnooiisgadzicwupi.supabase.co")
             # Utiliser la clé de service si disponible (permissions complètes), sinon anon
-            supabase_key = os.getenv("SUPABASE_SERVICE_KEY") or os.getenv("SUPABASE_ANON_KEY")
-            if supabase_key:
-                r = httpx.get(
-                    f"{supabase_url}/rest/v1/model_metrics?symbol=eq.{symbol}&order=training_date.desc&limit=1",
-                    headers={"apikey": supabase_key, "Authorization": f"Bearer {supabase_key}"},
-                    timeout=5,
-                )
-                if r.status_code == 200 and r.json():
-                    row = r.json()[0]
-                    acc = row.get("accuracy") or row.get("accuracy_score")
-                    if acc is not None:
-                        if acc < 0.6:
-                            width_mult = 1.4
-                        elif acc < 0.75:
-                            width_mult = 1.2
+            # Seulement si USE_SUPABASE=true
+            if _env_bool("USE_SUPABASE", False):
+                supabase_key = os.getenv("SUPABASE_SERVICE_KEY") or os.getenv("SUPABASE_ANON_KEY")
+                if supabase_key:
+                    r = httpx.get(
+                        f"{supabase_url}/rest/v1/model_metrics?symbol=eq.{symbol}&order=training_date.desc&limit=1",
+                        headers={"apikey": supabase_key, "Authorization": f"Bearer {supabase_key}"},
+                        timeout=5,
+                    )
+                    if r.status_code == 200 and r.json():
+                        row = r.json()[0]
+                        acc = row.get("accuracy") or row.get("accuracy_score")
+                        if acc is not None:
+                            if acc < 0.6:
+                                width_mult = 1.4
+                            elif acc < 0.75:
+                                width_mult = 1.2
                 pred_acc = get_prediction_accuracy_score(symbol) if symbol else 0.5
                 if pred_acc < 0.6:
                     width_mult = max(width_mult, 1.3)
@@ -1456,38 +1529,42 @@ def get_prediction_channel_5000(symbol: str, timeframe: str = "M1", future_bars:
         else:
             time_start = int(pd.Timestamp(last_ts).timestamp())
 
-        # Sauvegarde facultative du canal et des points prédits dans Supabase
+        # Sauvegarde facultative du canal et des points prédits (désactivée si USE_SUPABASE=false)
         try:
             import os
             import httpx
 
-            supabase_url = os.getenv("SUPABASE_URL", "https://bpzqnooiisgadzicwupi.supabase.co")
-            supabase_key = os.getenv("SUPABASE_SERVICE_KEY") or os.getenv("SUPABASE_ANON_KEY")
-            if supabase_key:
-                payload = {
-                    "symbol": symbol,
-                    "timeframe": timeframe,
-                    "time_start": time_start,
-                    "period_seconds": period_seconds,
-                    "future_bars": future_bars,
-                    "upper_start": round(upper_start, 8),
-                    "upper_end": round(upper_end, 8),
-                    "lower_start": round(lower_start, 8),
-                    "lower_end": round(lower_end, 8),
-                    "width_mult": float(width_mult),
-                    "predicted_points": convert_numpy_to_python(predicted_points),
-                }
-                httpx.post(
-                    f"{supabase_url}/rest/v1/prediction_channels",
-                    json=payload,
-                    headers={
-                        "apikey": supabase_key,
-                        "Authorization": f"Bearer {supabase_key}",
-                        "Content-Type": "application/json",
-                        "Prefer": "resolution=merge-duplicates,return=minimal",
-                    },
-                    timeout=5.0,
-                )
+            if not _env_bool("USE_SUPABASE", False):
+                # Supabase désactivé, ne pas sauvegarder
+                pass
+            else:
+                supabase_url = os.getenv("SUPABASE_URL", "https://bpzqnooiisgadzicwupi.supabase.co")
+                supabase_key = os.getenv("SUPABASE_SERVICE_KEY") or os.getenv("SUPABASE_ANON_KEY")
+                if supabase_key:
+                    payload = {
+                        "symbol": symbol,
+                        "timeframe": timeframe,
+                        "time_start": time_start,
+                        "period_seconds": period_seconds,
+                        "future_bars": future_bars,
+                        "upper_start": round(upper_start, 8),
+                        "upper_end": round(upper_end, 8),
+                        "lower_start": round(lower_start, 8),
+                        "lower_end": round(lower_end, 8),
+                        "width_mult": float(width_mult),
+                        "predicted_points": convert_numpy_to_python(predicted_points),
+                    }
+                    httpx.post(
+                        f"{supabase_url}/rest/v1/prediction_channels",
+                        json=payload,
+                        headers={
+                            "apikey": supabase_key,
+                            "Authorization": f"Bearer {supabase_key}",
+                            "Content-Type": "application/json",
+                            "Prefer": "resolution=merge-duplicates,return=minimal",
+                        },
+                        timeout=5.0,
+                    )
         except Exception:
             # En cas d'échec de Supabase, on continue simplement sans bloquer l'API
             pass
