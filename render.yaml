@@ -1,16 +1,11 @@
 services:
   - type: web
     name: tradbot-api
-    env: python
+    env: docker
     plan: free
-    buildCommand: pip install -r requirements.txt
-    # ai_server.py avec AWS RDS PostgreSQL (remplace Supabase)
-    startCommand: uvicorn ai_server:app --host 0.0.0.0 --port $PORT
-    runtime: python
-    pythonVersion: "3.11.7"
+    # Le Dockerfile contient déjà CMD ["uvicorn", "ai_server:app", "--host", "0.0.0.0", "--port", "10000"]
+    # On ne met donc PAS de startCommand ici pour éviter les conflits
     envVars:
-      - key: PYTHON_VERSION
-        value: "3.11.7"
       - key: PORT
         value: "10000"
       - key: PYTHONUNBUFFERED
