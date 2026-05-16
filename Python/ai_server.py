@@ -49,11 +49,11 @@ class DatabaseConnection:
 
     def __init__(self):
         self.conn = None
-        self.host = os.getenv('RDS_HOST', 'localhost')
-        self.port = os.getenv('RDS_PORT', '5432')
-        self.database = os.getenv('RDS_DATABASE', 'tradbot')
-        self.user = os.getenv('RDS_USER', 'postgres')
-        self.password = os.getenv('RDS_PASSWORD', '')
+        self.host = os.getenv('AWS_RDS_HOST', os.getenv('RDS_HOST', 'localhost'))
+        self.port = os.getenv('AWS_RDS_PORT', os.getenv('RDS_PORT', '5432'))
+        self.database = os.getenv('AWS_RDS_DATABASE', os.getenv('RDS_DATABASE', 'tradbot'))
+        self.user = os.getenv('AWS_RDS_USER', os.getenv('RDS_USER', 'postgres'))
+        self.password = os.getenv('AWS_RDS_PASSWORD', os.getenv('RDS_PASSWORD', ''))
 
     def connect(self) -> bool:
         """Connect to AWS RDS PostgreSQL"""
