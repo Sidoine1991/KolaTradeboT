@@ -260,16 +260,53 @@ ML Trainer: {'Available' if data.get('ml_trainer_available') else 'Unavailable'}
         if not metrics or not decision:
             return f"{symbol:<20} OFFLINE" + " " * 50
 
-        action = decision.get('action', 'HOLD').upper()[:4]
+        # Extraire l'action - chercher dans plusieurs endroits possibles
+        action = "HOLD"
+        if isinstance(decision.get('action'), str):
+            action = decision.get('action', 'HOLD').upper()[:4]
+        elif isinstance(decision.get('decision'), str):
+            action = decision.get('decision', 'HOLD').upper()[:4]
+
+        # Extraire confiance
         confidence = decision.get('confidence', 0)
-        model = metrics.get('best_model', 'N/A')[:12]
-        accuracy = metrics.get('metrics', {}).get(model, {}).get('accuracy', 0)
+        if not isinstance(confidence, (int, float)):
+            confidence = 0.5
 
+        # Extraire modèle
+        model = metrics.get('best_model', 'N/A')
+        if not model:
+            model = decision.get('model_used', 'N/A')
+        model = str(model)[:12] if model else 'N/A'
+
+        # Extraire accuracy
+        try:
+            accuracy = metrics.get('metrics', {}).get(model.lower(), {}).get('accuracy', 0)
+            if not accuracy:
+                accuracy = metrics.get('accuracy', 0)
+        except:
+            accuracy = 0
+
+        accuracy = float(accuracy) if isinstance(accuracy, (int, float)) else 0
+
+        # Extraire metadata
         metadata = decision.get('metadata', {})
-        market_data = metadata.get('market_data', {})
-        rsi = market_data.get('rsi', 0)
-        ema_fast = market_data.get('ema_fast_m1', 0)
+        market_data = metadata.get('market_data', {}) if metadata else {}
 
+        # RSI
+        try:
+            rsi = market_data.get('rsi', 0)
+            rsi = float(rsi) if isinstance(rsi, (int, float)) else 0
+        except:
+            rsi = 0
+
+        # EMA
+        try:
+            ema_fast = market_data.get('ema_fast_m1', 0)
+            ema_fast = float(ema_fast) if isinstance(ema_fast, (int, float)) else 0
+        except:
+            ema_fast = 0
+
+        # Spike prediction
         spike_pred = decision.get('spike_prediction', False)
         spike_text = "YES " if spike_pred else "NO  "
 
@@ -285,6 +322,7 @@ ML Trainer: {'Available' if data.get('ml_trainer_available') else 'Unavailable'}
                 line = self.format_metrics_line(symbol)
                 self.metrics_labels[symbol].config(text=line)
             except Exception as e:
+                logger.error(f"Error formatting {symbol}: {e}")
                 self.metrics_labels[symbol].config(text=f"{symbol:<20} ERROR: {str(e)[:30]}")
 
     def log_decision(self, symbol, decision):
