@@ -528,6 +528,107 @@ class SymbolConfigOut(BaseModel):
     overrides: Dict[str, Any] = Field(default_factory=dict)
 
 
+# ============================================================================
+# ML Data Collection Models
+# ============================================================================
+class IndicatorSnapshot(BaseModel):
+    """Market data snapshot from EA - 50+ indicators for ML training"""
+    # Identification
+    symbol: str
+    timestamp: int  # Unix timestamp
+    timeframe: str = "M1"
+
+    # Price
+    bid: float
+    ask: float
+    spread_pips: float = 0.0
+
+    # Momentum
+    rsi_m1: float = 0.0
+    rsi_m5: float = 0.0
+    rsi_m15: float = 0.0
+    rsi_h1: float = 0.0
+
+    # Volatility
+    atr_m1: float = 0.0
+    atr_m5: float = 0.0
+    atr_m15: float = 0.0
+    atr_h1: float = 0.0
+    atr_ratio: float = 0.0
+
+    # Trend (EMA)
+    ema_fast_m1: float = 0.0
+    ema_slow_m1: float = 0.0
+    ema_fast_m5: float = 0.0
+    ema_slow_m5: float = 0.0
+    ema_fast_m15: float = 0.0
+    ema_slow_m15: float = 0.0
+    ema_fast_h1: float = 0.0
+    ema_slow_h1: float = 0.0
+
+    # SMC Structures
+    fvg_detected: bool = False
+    fvg_direction: int = 0
+    bos_detected: bool = False
+    bos_direction: int = 0
+    ob_proximity_atr: float = 0.0
+    sweep_detected: bool = False
+    sweep_type: str = ""
+
+    # KOLA Levels
+    m5_buy_level: float = 0.0
+    m5_sell_level: float = 0.0
+    m5_buy_touches: int = 0
+    m5_sell_touches: int = 0
+    m15_buy_level: float = 0.0
+    m15_sell_level: float = 0.0
+    m15_buy_touches: int = 0
+    m15_sell_touches: int = 0
+    h1_buy_level: float = 0.0
+    h1_sell_level: float = 0.0
+    h1_buy_touches: int = 0
+    h1_sell_touches: int = 0
+
+    # Confluence & Scores
+    tech_buy_score: float = 0.0
+    tech_sell_score: float = 0.0
+    entry_quality: int = 0
+    spike_probability: float = 0.0
+
+    # Bollinger Bands + VWAP
+    bb_squeeze: bool = False
+    vwap_distance_pct: float = 0.0
+    bb_pctb: float = 0.0
+    bb_width_pct: float = 0.0
+
+    # Volume
+    volume_current: int = 0
+    volume_ratio: float = 0.0
+
+    # SIDO Patterns
+    sido_double_top: bool = False
+    sido_double_bottom: bool = False
+
+    # Asset Category
+    asset_category: str = ""
+
+    # Multi-timeframe
+    coherence_score: float = 0.0
+
+    # Signal
+    signal_action: str = "HOLD"
+    signal_confidence: float = 0.0
+
+
+class SnapshotStorageResponse(BaseModel):
+    """Response after storing snapshot"""
+    status: str = "stored"
+    snapshot_id: Optional[int] = None
+    symbol: str
+    timestamp: int
+    message: str = ""
+
+
 # ========== FONCTIONS UTILITAIRES AMÉLIORATIONS ==========
 def apply_confidence_thresholds(action: str, confidence: float, reason: str) -> tuple:
     """
@@ -5934,104 +6035,6 @@ class CorrectionPredictionResponse(BaseModel):
 # ============================================================================
 # ML Data Collection Models
 # ============================================================================
-class IndicatorSnapshot(BaseModel):
-    """Market data snapshot from EA - 50+ indicators for ML training"""
-    # Identification
-    symbol: str
-    timestamp: int  # Unix timestamp
-    timeframe: str = "M1"
-
-    # Price
-    bid: float
-    ask: float
-    spread_pips: float = 0.0
-
-    # Momentum
-    rsi_m1: float = 0.0
-    rsi_m5: float = 0.0
-    rsi_m15: float = 0.0
-    rsi_h1: float = 0.0
-
-    # Volatility
-    atr_m1: float = 0.0
-    atr_m5: float = 0.0
-    atr_m15: float = 0.0
-    atr_h1: float = 0.0
-    atr_ratio: float = 0.0
-
-    # Trend (EMA)
-    ema_fast_m1: float = 0.0
-    ema_slow_m1: float = 0.0
-    ema_fast_m5: float = 0.0
-    ema_slow_m5: float = 0.0
-    ema_fast_m15: float = 0.0
-    ema_slow_m15: float = 0.0
-    ema_fast_h1: float = 0.0
-    ema_slow_h1: float = 0.0
-
-    # SMC Structures
-    fvg_detected: bool = False
-    fvg_direction: int = 0
-    bos_detected: bool = False
-    bos_direction: int = 0
-    ob_proximity_atr: float = 0.0
-    sweep_detected: bool = False
-    sweep_type: str = ""
-
-    # KOLA Levels
-    m5_buy_level: float = 0.0
-    m5_sell_level: float = 0.0
-    m5_buy_touches: int = 0
-    m5_sell_touches: int = 0
-    m15_buy_level: float = 0.0
-    m15_sell_level: float = 0.0
-    m15_buy_touches: int = 0
-    m15_sell_touches: int = 0
-    h1_buy_level: float = 0.0
-    h1_sell_level: float = 0.0
-    h1_buy_touches: int = 0
-    h1_sell_touches: int = 0
-
-    # Confluence & Scores
-    tech_buy_score: float = 0.0
-    tech_sell_score: float = 0.0
-    entry_quality: int = 0
-    spike_probability: float = 0.0
-
-    # Bollinger Bands + VWAP
-    bb_squeeze: bool = False
-    vwap_distance_pct: float = 0.0
-    bb_pctb: float = 0.0
-    bb_width_pct: float = 0.0
-
-    # Volume
-    volume_current: int = 0
-    volume_ratio: float = 0.0
-
-    # SIDO Patterns
-    sido_double_top: bool = False
-    sido_double_bottom: bool = False
-
-    # Asset Category
-    asset_category: str = ""
-
-    # Multi-timeframe
-    coherence_score: float = 0.0
-
-    # Signal
-    signal_action: str = "HOLD"
-    signal_confidence: float = 0.0
-
-
-class SnapshotStorageResponse(BaseModel):
-    """Response after storing snapshot"""
-    status: str = "stored"
-    snapshot_id: Optional[int] = None
-    symbol: str
-    timestamp: int
-    message: str = ""
-
-
 def _ema_dir(ema_fast: Optional[float], ema_slow: Optional[float]) -> int:
     """Return +1 bullish, -1 bearish, 0 neutral from EMA fast/slow."""
     try:
