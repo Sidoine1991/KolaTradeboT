@@ -1,3 +1,6 @@
+import os
+from dotenv import load_dotenv
+
 #!/usr/bin/env python3
 """
 Script de migration de la base de données de Render vers Supabase
@@ -27,7 +30,7 @@ from urllib.parse import quote_plus
 encoded_password = quote_plus(SUPABASE_PASSWORD)
 SUPABASE_DB_URL = f"postgresql://postgres:{encoded_password}@aws-0-eu-central-1.pooler.supabase.com:5432/postgres"
 SUPABASE_KEY = "sb_publishable_2VWOLl6v_UU2zBp1i58lLw_CBue22fc"
-SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJwenFub29paXNnYWR6aWN3dXBpIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzE1ODQ0NDcsImV4cCI6MjA4NzE2MDQ0N30.BDdYM-SQDCIVJJueUH8ed9-vHrY_g2sb8PDeD9vb_L4"
+SUPABASE_ANON_KEY = os.getenv("SUPABASE_KEY", "")
 
 # Alternative: utiliser l'URL complète avec le mot de passe
 def get_supabase_db_url():

@@ -1,3 +1,6 @@
+import os
+from dotenv import load_dotenv
+
 #!/usr/bin/env python3
 """
 Script final pour créer les tables Supabase via l'API REST standard
@@ -15,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 # Configuration Supabase
 SUPABASE_URL = "https://bpzqnooiisgadzicwupi.supabase.co"
-SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJwenFub29paXNnYWR6aWN3dXBpIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzE1ODQ0NDcsImV4cCI6MjA4NzE2MDQ0N30.BDdYM-SQDCIVJJueUH8ed9-vHrY_g2sb8PDeD9vb_L4"
+SUPABASE_ANON_KEY = os.getenv("SUPABASE_KEY", "")
 SUPABASE_PROJECT_ID = "bpzqnooiisgadzicwupi"
 SUPABASE_PASSWORD = "Socrate2025@1991"
 

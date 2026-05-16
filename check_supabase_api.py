@@ -3,17 +3,21 @@
 Script pour vérifier les données via l'API REST Supabase
 """
 
+import os
 import requests
 import json
 import logging
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # Configuration du logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Configuration Supabase
-SUPABASE_URL = "https://bpzqnooiisgadzicwupi.supabase.co"
-SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJwenFub29paXNnYWR6aWN3dXBpIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzE1ODQ0NDcsImV4cCI6MjA4NzE2MDQ0N30.BDdYM-SQDCIVJJueUH8ed9-vHrY_g2sb8PDeD9vb_L4"
+# Configuration Supabase (from environment variables)
+SUPABASE_URL = os.getenv("SUPABASE_URL", "")
+SUPABASE_ANON_KEY = os.getenv("SUPABASE_KEY", "")
 
 def check_supabase_api_data():
     """Vérifier les données via l'API REST Supabase"""
