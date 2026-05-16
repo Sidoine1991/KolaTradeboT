@@ -2,7 +2,7 @@
 """
 TradBOT AI Server - AWS RDS Version
 Prédictions et analyses de marché - Sans Supabase
-Version: 2.1.0 AWS-RDS
+Version: 2.1.0 AWS-RDS - CACHE_BUST_20260516_2025
 
 Features:
 - Connexion AWS RDS PostgreSQL
@@ -10,6 +10,7 @@ Features:
 - Prédictions de signaux de trading
 - Analyse de marché
 - Pas de dépendances Supabase
+- NO Supabase validation (clean AWS-only)
 """
 
 import os
