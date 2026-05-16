@@ -75,6 +75,36 @@ void GOM_CleanExpiredDrawings()
    }
 }
 
+// Libellé court du timeframe du graphique
+string GOM_ChartPeriodTag(void)
+{
+   switch(_Period)
+   {
+      case PERIOD_M1:  return "M1";
+      case PERIOD_M2:  return "M2";
+      case PERIOD_M3:  return "M3";
+      case PERIOD_M4:  return "M4";
+      case PERIOD_M5:  return "M5";
+      case PERIOD_M6:  return "M6";
+      case PERIOD_M10: return "M10";
+      case PERIOD_M12: return "M12";
+      case PERIOD_M15: return "M15";
+      case PERIOD_M20: return "M20";
+      case PERIOD_M30: return "M30";
+      case PERIOD_H1:  return "H1";
+      case PERIOD_H2:  return "H2";
+      case PERIOD_H3:  return "H3";
+      case PERIOD_H4:  return "H4";
+      case PERIOD_H6:  return "H6";
+      case PERIOD_H8:  return "H8";
+      case PERIOD_H12: return "H12";
+      case PERIOD_D1:  return "D1";
+      case PERIOD_W1:  return "W1";
+      case PERIOD_MN1: return "MN";
+      default:         return "TF";
+   }
+}
+
 // Structure pour les stats ML depuis AWS RDS
 struct MLStats
 {
@@ -116,18 +146,132 @@ MLStats GOM_GetMLStats()
    return stats;
 }
 
+// Début de journée serveur (minuit broker) pour agréger l’historique « aujourd’hui »
+datetime GOM_BrokerDayStart(datetime serverNow)
+{
+   MqlDateTime t;
+   TimeToStruct(serverNow, t);
+   t.hour = 0;
+   t.min = 0;
+   t.sec = 0;
+   return StructToTime(t);
+}
+
+// Métriques compte / symbole directement depuis MT5 (hors GlobalVariables RDS)
+struct LiveMT5DashMetrics
+{
+   double balance;
+   double equity;
+   double marginUsed;
+   double marginFree;
+   double floatingPL;
+   int    positionsOnSymbol;
+   double lotsOnSymbol;
+   double floatingOnSymbol;
+   int    closedDealsToday;
+   int    winsToday;
+   int    lossesToday;
+   double realizedTodayUSD;
+   int    positionsAccount;
+   double lotsAccount;
+   double marginLevelPct;
+   long   leverage;
+};
+
+void GOM_ComputeLiveMT5DashMetrics(LiveMT5DashMetrics &m)
+{
+   m.balance = AccountInfoDouble(ACCOUNT_BALANCE);
+   m.equity = AccountInfoDouble(ACCOUNT_EQUITY);
+   m.marginUsed = AccountInfoDouble(ACCOUNT_MARGIN);
+   m.marginFree = AccountInfoDouble(ACCOUNT_MARGIN_FREE);
+   m.floatingPL = AccountInfoDouble(ACCOUNT_PROFIT);
+
+   m.positionsOnSymbol = 0;
+   m.lotsOnSymbol = 0.0;
+   m.floatingOnSymbol = 0.0;
+   m.positionsAccount = 0;
+   m.lotsAccount = 0.0;
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0)
+         continue;
+      if(!PositionSelectByTicket(ticket))
+         continue;
+
+      string sym = PositionGetString(POSITION_SYMBOL);
+      double vol = PositionGetDouble(POSITION_VOLUME);
+      double fp = PositionGetDouble(POSITION_PROFIT)
+                  + PositionGetDouble(POSITION_SWAP)
+                  + PositionGetDouble(POSITION_COMMISSION);
+
+      m.positionsAccount++;
+      m.lotsAccount += vol;
+
+      if(sym == _Symbol)
+      {
+         m.positionsOnSymbol++;
+         m.lotsOnSymbol += vol;
+         m.floatingOnSymbol += fp;
+      }
+   }
+
+   m.leverage = AccountInfoInteger(ACCOUNT_LEVERAGE);
+   m.marginLevelPct = AccountInfoDouble(ACCOUNT_MARGIN_LEVEL);
+
+   m.closedDealsToday = 0;
+   m.winsToday = 0;
+   m.lossesToday = 0;
+   m.realizedTodayUSD = 0.0;
+
+   datetime day0 = GOM_BrokerDayStart(TimeCurrent());
+   datetime now = TimeCurrent() + 60;
+   if(!HistorySelect(day0, now))
+      return;
+
+   for(int j = HistoryDealsTotal() - 1; j >= 0; j--)
+   {
+      ulong deal = HistoryDealGetTicket(j);
+      if(deal == 0)
+         continue;
+      if(HistoryDealGetString(deal, DEAL_SYMBOL) != _Symbol)
+         continue;
+
+      ENUM_DEAL_ENTRY ent = (ENUM_DEAL_ENTRY)HistoryDealGetInteger(deal, DEAL_ENTRY);
+      if(ent != DEAL_ENTRY_OUT && ent != DEAL_ENTRY_OUT_BY)
+         continue;
+
+      ENUM_DEAL_TYPE dtyp = (ENUM_DEAL_TYPE)HistoryDealGetInteger(deal, DEAL_TYPE);
+      if(dtyp != DEAL_TYPE_BUY && dtyp != DEAL_TYPE_SELL)
+         continue;
+
+      double net = HistoryDealGetDouble(deal, DEAL_PROFIT)
+                  + HistoryDealGetDouble(deal, DEAL_SWAP)
+                  + HistoryDealGetDouble(deal, DEAL_COMMISSION);
+
+      m.closedDealsToday++;
+      m.realizedTodayUSD += net;
+      if(net > 1e-8)
+         m.winsToday++;
+      else if(net < -1e-8)
+         m.lossesToday++;
+   }
+}
+
 // État du robot
 struct RobotStatus
 {
-   bool isActive;             // Robot actif
+   bool isActive;             // Robot actif (GV optionnelle ML/sync)
    bool isPaused;             // En pause après profit
    datetime pauseUntil;       // Reprise à cette heure
    string pauseReason;        // Raison de la pause
-   int positionsOpen;         // Positions ouvertes
-   double dailyProfitUSD;     // Profit journalier
+   int positionsOpen;         // Positions ouvertes sur _Symbol
+   double dailyProfitUSD;     // Profit journalier (GV ou complément ML)
    double targetReachedPct;   // % de l'objectif atteint
    bool eaTradingEnabled;     // EnableTrading (EA) — poussé par SMC_Universal
    datetime eaResumeAt;       // Fin de pause « interne » EA (serveur), 0 = aucune
+   LiveMT5DashMetrics live;   // Toujours synchronisé MT5
 };
 
 // Récupérer le statut du robot
@@ -135,7 +279,7 @@ RobotStatus GOM_GetRobotStatus()
 {
    RobotStatus status;
 
-   status.isActive = GlobalVariableGet("ROBOT_ACTIVE") > 0.5;
+   status.isActive = (!GlobalVariableCheck("ROBOT_ACTIVE") || GlobalVariableGet("ROBOT_ACTIVE") > 0.5);
    status.isPaused = GlobalVariableGet("ROBOT_PAUSED") > 0.5;
    status.pauseUntil = (datetime)GlobalVariableGet("ROBOT_PAUSE_UNTIL");
 
@@ -153,16 +297,18 @@ RobotStatus GOM_GetRobotStatus()
       status.pauseReason = "";
    }
 
-   // Positions ouvertes
-   status.positionsOpen = 0;
-   for(int i = PositionsTotal() - 1; i >= 0; i--)
-   {
-      if(PositionGetSymbol(i) == _Symbol)
-         status.positionsOpen++;
-   }
+   GOM_ComputeLiveMT5DashMetrics(status.live);
 
-   // Profit journalier
-   status.dailyProfitUSD = GlobalVariableGet("ROBOT_DAILY_PROFIT");
+   status.positionsOpen = status.live.positionsOnSymbol;
+
+   // Profit « jour » affiché : réalisé (historique) + flottant symbole ; sinon fallback GV ML
+   double liveDay = status.live.realizedTodayUSD + status.live.floatingOnSymbol;
+   double gvDay = GlobalVariableGet("ROBOT_DAILY_PROFIT");
+   status.dailyProfitUSD = liveDay;
+   if(status.live.closedDealsToday == 0 && MathAbs(status.live.floatingOnSymbol) < 1e-8 &&
+      GlobalVariableCheck("ROBOT_DAILY_PROFIT"))
+      status.dailyProfitUSD = gvDay;
+
    status.targetReachedPct = GlobalVariableGet("ROBOT_TARGET_PCT");
 
    status.eaTradingEnabled = (!GlobalVariableCheck("EA_DASH_ENABLE_TRADING") ||
@@ -223,58 +369,98 @@ void GOM_DrawEnhancedDashboardV3(int posX = 10, int posY = 30, bool anchorTop = 
 
    MLStats ml = GOM_GetMLStats();
    RobotStatus robot = GOM_GetRobotStatus();
+   LiveMT5DashMetrics lv = robot.live;
 
-   // Configuration layout (paramètres personnalisables)
    int baseX = posX;
-   int baseY = posY;
+   int cy = posY;
    int cellW = cellWidth;
    int cellH = cellHeight;
    int gap = 2;
    int fontSize = fontSizeCustom;
 
    color txtWhite = clrWhite;
-   color bgDark = 0x1E1E1E;    // Gris très foncé
-   color bgGreen = 0x2E7D32;   // Vert mat
-   color bgRed = 0xC62828;     // Rouge mat
-   color bgOrange = 0xEF6C00;  // Orange
-   color bgBlue = 0x1565C0;    // Bleu mat
+   color bgDark = 0x1E1E1E;
+   color bgGreen = 0x2E7D32;
+   color bgRed = 0xC62828;
+   color bgOrange = 0xEF6C00;
+   color bgBlue = 0x1565C0;
+   color bgPurple = 0x4527A0;
 
-   int row = 0;
+   int spanW = cellW * 3 + gap * 2;
+   string accCur = AccountInfoString(ACCOUNT_CURRENCY);
+   int spreadPts = (int)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
 
-   // === LIGNE 1: STATUT ROBOT ===
-   string statusTxt = robot.isActive ? "🤖 ACTIVE" : "⏸️ STOPPED";
-   color statusBg = robot.isActive ? bgGreen : bgDark;
+   // Ligne 0 — bandeau identité graphique + spread + devise + levier
+   int hdrH = cellH + 22;
+   string hdrTxt = _Symbol + "  " + GOM_ChartPeriodTag()
+                   + "\n" + TimeToString(TimeCurrent(), TIME_DATE | TIME_MINUTES | TIME_SECONDS)
+                   + "  spr " + IntegerToString(spreadPts)
+                   + "\n" + accCur + "  |  lev 1:" + IntegerToString((int)lv.leverage);
+   GOM_DrawDashCell("DASH_HDR", baseX, cy, spanW, hdrH, hdrTxt, bgPurple, txtWhite, fontSize - 1, anchorTop);
+   cy += hdrH + gap;
+
+   // Ligne 1 — état + positions sur ce symbole + equity / balance / flottant total
+   bool termAuto = (TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) != 0);
+   string statusTxt = "🤖 ACTIVE";
+   color statusBg = bgGreen;
 
    if(robot.isPaused)
    {
       statusTxt = "⏸️ PAUSE";
       statusBg = bgOrange;
    }
+   else if(!termAuto)
+   {
+      statusTxt = "🔒 AUTO OFF";
+      statusBg = bgDark;
+   }
+   else if(!robot.eaTradingEnabled)
+   {
+      statusTxt = "⏸️ STOPPED";
+      statusBg = bgDark;
+   }
 
-   GOM_DrawDashCell("DASH_STATUS", baseX, baseY + row * (cellH + gap),
-                    cellW, cellH, statusTxt, statusBg, txtWhite, fontSize, anchorTop);
+   int r1h = cellH + 8;
+   GOM_DrawDashCell("DASH_STATUS", baseX, cy, cellW, r1h, statusTxt, statusBg, txtWhite, fontSize, anchorTop);
 
-   // Positions ouvertes
-   string posTxt = "📊 POS:" + IntegerToString(robot.positionsOpen);
-   GOM_DrawDashCell("DASH_POS", baseX + (cellW + gap), baseY + row * (cellH + gap),
-                    cellW, cellH, posTxt, bgBlue, txtWhite, fontSize, anchorTop);
+   string posTxt = "📊 Ce symbole\nPOS " + IntegerToString(robot.positionsOpen)
+                   + "\n" + DoubleToString(lv.lotsOnSymbol, 2) + " lot";
+   GOM_DrawDashCell("DASH_POS", baseX + (cellW + gap), cy, cellW, r1h, posTxt, bgBlue, txtWhite, fontSize - 1, anchorTop);
 
-   // Profit journalier
-   string profitTxt = "💵 " + DoubleToString(robot.dailyProfitUSD, 2) + "$";
-   color profitBg = (robot.dailyProfitUSD >= 0) ? bgGreen : bgRed;
-   GOM_DrawDashCell("DASH_PROFIT", baseX + 2 * (cellW + gap), baseY + row * (cellH + gap),
-                    cellW, cellH, profitTxt, profitBg, txtWhite, fontSize, anchorTop);
+   string profitTxt = "💰 Equity\n" + DoubleToString(lv.equity, 2)
+                      + "\nBal " + DoubleToString(lv.balance, 2)
+                      + "\nFl Σ " + DoubleToString(lv.floatingPL, 2);
+   color profitBg = (lv.floatingPL >= 0.0) ? bgGreen : bgRed;
+   GOM_DrawDashCell("DASH_PROFIT", baseX + 2 * (cellW + gap), cy, cellW, r1h, profitTxt, profitBg, txtWhite, fontSize - 1, anchorTop);
+   cy += r1h + gap;
 
-   row++;
+   // Ligne 2 — exposition totale compte + marges + P&L réalisé jour (symbole) + flottant symbole
+   int r2h = cellH + 14;
+   string mlvlStr = "—";
+   if(lv.marginUsed > 1e-8 && lv.marginLevelPct > 1e-8 && lv.marginLevelPct < 999999.0)
+      mlvlStr = DoubleToString(lv.marginLevelPct, 1) + "%";
 
-   // === LIGNE 2: PAUSE INFO (si en pause) ===
+   string acct1 = "🌐 Compte\nPOS " + IntegerToString(lv.positionsAccount)
+                  + "\nLots Σ " + DoubleToString(lv.lotsAccount, 2);
+   GOM_DrawDashCell("DASH_ACCT1", baseX, cy, cellW, r2h, acct1, bgBlue, txtWhite, fontSize - 1, anchorTop);
+
+   string acct2 = "⚓ Marge\nU " + DoubleToString(lv.marginUsed, 2)
+                  + "\nLibre " + DoubleToString(lv.marginFree, 2);
+   GOM_DrawDashCell("DASH_ACCT2", baseX + (cellW + gap), cy, cellW, r2h, acct2, bgOrange, txtWhite, fontSize - 1, anchorTop);
+
+   string acct3 = "📐 Mg lvl\n" + mlvlStr
+                  + "\nRéal jr\n" + DoubleToString(lv.realizedTodayUSD, 2)
+                  + "\nFl sym\n" + DoubleToString(lv.floatingOnSymbol, 2);
+   GOM_DrawDashCell("DASH_ACCT3", baseX + 2 * (cellW + gap), cy, cellW, r2h, acct3, bgDark, txtWhite, fontSize - 1, anchorTop);
+   cy += r2h + gap;
+
+   // === PAUSE ML (GV) ===
    if(robot.isPaused)
    {
       string pauseTxt = robot.pauseReason;
-      GOM_DrawDashCell("DASH_PAUSE_REASON", baseX, baseY + row * (cellH + gap),
+      GOM_DrawDashCell("DASH_PAUSE_REASON", baseX, cy,
                        cellW, cellH, pauseTxt, bgOrange, txtWhite, fontSize - 1, anchorTop);
 
-      // Temps restant
       int remaining = (int)(robot.pauseUntil - TimeCurrent());
       string timeTxt = "⏱️ ";
       if(remaining > 0)
@@ -288,10 +474,10 @@ void GOM_DrawEnhancedDashboardV3(int posX = 10, int posY = 30, bool anchorTop = 
          timeTxt += "SOON";
       }
 
-      GOM_DrawDashCell("DASH_PAUSE_TIME", baseX + (cellW + gap), baseY + row * (cellH + gap),
+      GOM_DrawDashCell("DASH_PAUSE_TIME", baseX + (cellW + gap), cy,
                        cellW * 2 + gap, cellH, timeTxt, bgOrange, txtWhite, fontSize, anchorTop);
 
-      row++;
+      cy += cellH + gap;
    }
    else
    {
@@ -331,9 +517,9 @@ void GOM_DrawEnhancedDashboardV3(int posX = 10, int posY = 30, bool anchorTop = 
       if(showEaResumeRow)
       {
          int resumeH = cellH + 12;
-         GOM_DrawDashCell("DASH_EA_RESUME", baseX, baseY + row * (cellH + gap),
+         GOM_DrawDashCell("DASH_EA_RESUME", baseX, cy,
                           cellW * 3 + gap * 2, resumeH, eaResumeTxt, eaResumeBg, txtWhite, fontSize - 1, anchorTop);
-         row++;
+         cy += resumeH + gap;
       }
       else
       {
@@ -342,51 +528,101 @@ void GOM_DrawEnhancedDashboardV3(int posX = 10, int posY = 30, bool anchorTop = 
       }
    }
 
-   // === LIGNE 3: ML STATS ===
-   // Précision ML
-   string accTxt = "🎯 " + DoubleToString(ml.accuracyPercent, 1) + "%";
-   color accBg = (ml.accuracyPercent >= 65) ? bgGreen :
-                 (ml.accuracyPercent >= 55) ? bgOrange : bgRed;
-   GOM_DrawDashCell("DASH_ML_ACC", baseX, baseY + row * (cellH + gap),
-                    cellW, cellH, accTxt, accBg, txtWhite, fontSize, anchorTop);
+   // === ML cloud + stats jour (EA vs MT5) ===
+   int rMl = cellH + 12;
 
-   // Win rate
-   string wrTxt = "📈 " + DoubleToString(ml.winRate, 1) + "%";
-   color wrBg = (ml.winRate >= 60) ? bgGreen :
-                (ml.winRate >= 50) ? bgOrange : bgRed;
-   GOM_DrawDashCell("DASH_ML_WR", baseX + (cellW + gap), baseY + row * (cellH + gap),
-                    cellW, cellH, wrTxt, wrBg, txtWhite, fontSize, anchorTop);
+   string accTxt = "☁ ML préc.\n";
+   color accBg = bgDark;
+   if(ml.totalPredictions > 0)
+   {
+      accTxt += DoubleToString(ml.accuracyPercent, 1) + "%\n☁ WR "
+                + DoubleToString(ml.winRate, 1) + "%";
+      accBg = (ml.accuracyPercent >= 65) ? bgGreen :
+              (ml.accuracyPercent >= 55) ? bgOrange : bgRed;
+   }
+   else
+      accTxt += "— (RDS)";
 
-   // Modèles chargés
-   string modelsTxt = "🧠 x" + IntegerToString(ml.modelsLoaded);
-   GOM_DrawDashCell("DASH_ML_MODELS", baseX + 2 * (cellW + gap), baseY + row * (cellH + gap),
-                    cellW, cellH, modelsTxt, bgBlue, txtWhite, fontSize, anchorTop);
+   GOM_DrawDashCell("DASH_ML_ACC", baseX, cy, cellW, rMl, accTxt, accBg, txtWhite, fontSize - 1, anchorTop);
 
-   row++;
+   int wl = lv.winsToday + lv.lossesToday;
+   double dayWr = (wl > 0) ? (100.0 * (double)lv.winsToday / (double)wl) : 0.0;
+   string daySrc = "MT5";
+   int dispW = lv.winsToday;
+   int dispL = lv.lossesToday;
 
-   // === LIGNE 4: ML ACTIVITY ===
-   // Dernière prédiction
-   int predAge = (int)(TimeCurrent() - ml.lastPrediction);
-   string predTxt = "🔮 ";
-   if(predAge < 60) predTxt += IntegerToString(predAge) + "s";
-   else if(predAge < 3600) predTxt += IntegerToString(predAge / 60) + "m";
-   else predTxt += IntegerToString(predAge / 3600) + "h";
+   if(GlobalVariableCheck("EA_DASH_TRADES_DAY"))
+   {
+      daySrc = "EA";
+      dispW = (int)GlobalVariableGet("EA_DASH_WINS_DAY");
+      dispL = (int)GlobalVariableGet("EA_DASH_LOSSES_DAY");
+      wl = dispW + dispL;
+      dayWr = (wl > 0) ? (100.0 * (double)dispW / (double)wl) : 0.0;
+   }
 
-   color predBg = (predAge < 120) ? bgGreen :
-                  (predAge < 600) ? bgOrange : bgRed;
-   GOM_DrawDashCell("DASH_ML_PRED", baseX, baseY + row * (cellH + gap),
-                    cellW, cellH, predTxt, predBg, txtWhite, fontSize, anchorTop);
+   string wrTxt = "📅 " + daySrc + " jour\nW" + IntegerToString(dispW)
+                  + " L" + IntegerToString(dispL);
+   if(wl > 0)
+      wrTxt += "\n" + DoubleToString(dayWr, 0) + "%";
+   color wrBg = (wl == 0) ? bgDark :
+                (dayWr >= 55.0) ? bgGreen :
+                (dayWr >= 45.0) ? bgOrange : bgRed;
+   GOM_DrawDashCell("DASH_ML_WR", baseX + (cellW + gap), cy, cellW, rMl, wrTxt, wrBg, txtWhite, fontSize - 1, anchorTop);
 
-   // Total prédictions
-   string totalPredTxt = "📊 " + IntegerToString(ml.totalPredictions);
-   GOM_DrawDashCell("DASH_ML_TOTAL", baseX + (cellW + gap), baseY + row * (cellH + gap),
-                    cellW, cellH, totalPredTxt, bgDark, txtWhite, fontSize, anchorTop);
+   string cloudTxt = "☁ Cloud hist.\nTr " + IntegerToString(ml.tradesTotal)
+                     + " | G " + IntegerToString(ml.tradesWin)
+                     + "\nØ " + DoubleToString(ml.avgProfitUSD, 2) + " " + accCur
+                     + "\nMod x" + IntegerToString(ml.modelsLoaded);
+   color cloudBg = (ml.tradesTotal > 0) ? bgBlue : bgDark;
+   GOM_DrawDashCell("DASH_ML_MODELS", baseX + 2 * (cellW + gap), cy, cellW, rMl, cloudTxt, cloudBg, txtWhite, fontSize - 1, anchorTop);
+   cy += rMl + gap;
 
-   // Trades total
-   string tradesTxt = "💼 " + IntegerToString(ml.tradesTotal);
-   GOM_DrawDashCell("DASH_ML_TRADES", baseX + 2 * (cellW + gap), baseY + row * (cellH + gap),
-                    cellW, cellH, tradesTxt, bgDark, txtWhite, fontSize, anchorTop);
+   // === Dernière synchro ML + détail clôtures + P&L combiné ===
+   int rBot = cellH + 12;
 
+   string trainTxt = "—";
+   if(ml.lastTraining > 0)
+      trainTxt = TimeToString(ml.lastTraining, TIME_DATE | TIME_MINUTES);
+
+   string predTxt = "🔮 Age pred.\n";
+   color predBg = bgDark;
+   if(ml.lastPrediction <= 0)
+      predTxt += "—";
+   else
+   {
+      int predAge = (int)(TimeCurrent() - ml.lastPrediction);
+      if(predAge < 60)
+         predTxt += IntegerToString(predAge) + "s";
+      else if(predAge < 3600)
+         predTxt += IntegerToString(predAge / 60) + "m";
+      else if(predAge < 86400 * 365)
+         predTxt += IntegerToString(predAge / 3600) + "h";
+      else
+         predTxt += "—";
+
+      predBg = (predAge < 120) ? bgGreen :
+               (predAge < 600) ? bgOrange : bgRed;
+   }
+   predTxt += "\nTrain\n" + trainTxt;
+
+   GOM_DrawDashCell("DASH_ML_PRED", baseX, cy, cellW, rBot, predTxt, predBg, txtWhite, fontSize - 1, anchorTop);
+
+   string totalPredTxt = "📊 Broker jr\nClôtures " + IntegerToString(lv.closedDealsToday)
+                         + "\nPrédit. " + IntegerToString(ml.totalPredictions)
+                         + "\nCible % " + DoubleToString(robot.targetReachedPct, 0);
+   GOM_DrawDashCell("DASH_ML_TOTAL", baseX + (cellW + gap), cy, cellW, rBot, totalPredTxt, bgDark, txtWhite, fontSize - 1, anchorTop);
+
+   string srvMode = "?";
+   long tmAcc = AccountInfoInteger(ACCOUNT_TRADE_MODE);
+   if(tmAcc == ACCOUNT_TRADE_MODE_DEMO) srvMode = "Démo";
+   else if(tmAcc == ACCOUNT_TRADE_MODE_REAL) srvMode = "Réel";
+   else if(tmAcc == ACCOUNT_TRADE_MODE_CONTEST) srvMode = "Contest";
+
+   string tradesTxt = "Σ P&L jr\n" + DoubleToString(robot.dailyProfitUSD, 2) + " " + accCur
+                      + "\nFl sym " + DoubleToString(lv.floatingOnSymbol, 2)
+                      + "\n" + srvMode;
+   color tradesBg = (robot.dailyProfitUSD >= 0.0) ? bgGreen : bgRed;
+   GOM_DrawDashCell("DASH_ML_TRADES", baseX + 2 * (cellW + gap), cy, cellW, rBot, tradesTxt, tradesBg, txtWhite, fontSize - 1, anchorTop);
    // Forcer le rafraîchissement
    ChartRedraw(0);
 }
@@ -394,7 +630,9 @@ void GOM_DrawEnhancedDashboardV3(int posX = 10, int posY = 30, bool anchorTop = 
 // Nettoyer tout le tableau de bord
 void GOM_CleanEnhancedDashboard()
 {
-   string prefixes[] = {"DASH_STATUS", "DASH_POS", "DASH_PROFIT",
+   string prefixes[] = {"DASH_HDR",
+                        "DASH_STATUS", "DASH_POS", "DASH_PROFIT",
+                        "DASH_ACCT1", "DASH_ACCT2", "DASH_ACCT3",
                         "DASH_PAUSE_REASON", "DASH_PAUSE_TIME", "DASH_EA_RESUME",
                         "DASH_ML_ACC", "DASH_ML_WR", "DASH_ML_MODELS",
                         "DASH_ML_PRED", "DASH_ML_TOTAL", "DASH_ML_TRADES"};

@@ -13,7 +13,8 @@
 #include <Trade/DealInfo.mqh>
 #include <Trade/HistoryOrderInfo.mqh>
 #include "SMC_OpportunityScanner.mqh"  // inclut SMC_AutoTrader.mqh + g_SmcOpportunityScannerAutoTrader
-#include "GOM_Enhanced_Dashboard.mqh"  // Dashboard ML AWS RDS
+// Dashboard ML : métriques broker dans GOM_Enhanced_Dashboard.mqh ; PushEaResumeClockForMLDashboard() publie EA_DASH_* / ROBOT_* depuis cet EA
+#include "GOM_Enhanced_Dashboard.mqh"
 // #include "SMC_Setups_Display.mqh" // Désactivé pour éviter l'erreur de fichier non trouvé
 // --- GOM_KOLA_SIDO merged (no separate mqh for MT5) ---
 // Intégré dans SMC_Universal.mq5 (plus besoin d'exécuter le script sur le graphique)
@@ -89,7 +90,7 @@ input int    DashboardMLPosX = 10;              // Position X (pixels depuis le 
 input int    DashboardMLPosY = 30;              // Position Y (pixels depuis le haut)
 input bool   DashboardMLAnchorTop = true;       // Ancrer en haut (true) ou en bas (false)
 input int    DashboardMLCellWidth = 100;        // Largeur des cellules
-input int    DashboardMLCellHeight = 25;        // Hauteur des cellules
+input int    DashboardMLCellHeight = 32;        // Hauteur des cellules (+ lignes = tableau plus lisible)
 input int    DashboardMLFontSize = 8;           // Taille de la police (7=compact, 8=normal, 9=grand)
 
 input bool   GomScriptLiveLabelAnchorRight = true; // Libellé GOM LIVE : à droite pour libérer le coin du dashboard
@@ -14076,7 +14077,7 @@ void GomEmbedded_UpdateAiCornerLabel(void)
    ObjectSetInteger(0, nm, OBJPROP_ZORDER, MathMax(520, DashboardLabelZOrder + 5));
 }
 
-// Pousse l'heure de reprise « interne » EA pour le dashboard ML (décompte + heure locale)
+// Pousse vers GlobalVariables tout ce que le dashboard ML lit (reprise EA + stats jour SMC)
 void PushEaResumeClockForMLDashboard(void)
 {
    datetime now = TimeCurrent();
@@ -14099,6 +14100,16 @@ void PushEaResumeClockForMLDashboard(void)
 
    GlobalVariableSet("EA_DASH_RESUME_AT", (double)resume);
    GlobalVariableSet("EA_DASH_ENABLE_TRADING", EnableTrading ? 1.0 : 0.0);
+
+   // Aligner ROBOT_* avec l’état réel de l’EA (évite « STOPPED » uniquement à cause d’anciennes GV RDS)
+   GlobalVariableSet("ROBOT_ACTIVE", EnableTrading ? 1.0 : 0.0);
+   double dailyNetUsd = g_dailyTotalProfit - g_dailyTotalLoss;
+   GlobalVariableSet("ROBOT_DAILY_PROFIT", dailyNetUsd);
+   GlobalVariableSet("EA_DASH_TRADES_DAY", (double)g_dailyTradeCount);
+   GlobalVariableSet("EA_DASH_WINS_DAY", (double)g_dailyWinCount);
+   GlobalVariableSet("EA_DASH_LOSSES_DAY", (double)g_dailyLossCount);
+   GlobalVariableSet("EA_DASH_EQUITY", AccountInfoDouble(ACCOUNT_EQUITY));
+   GlobalVariableSet("EA_DASH_BALANCE", AccountInfoDouble(ACCOUNT_BALANCE));
 }
 
 //| FONCTIONS DE GESTION DES PAUSES ET BLACKLIST TEMPORAIRE        |

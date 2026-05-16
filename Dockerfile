@@ -24,7 +24,7 @@ COPY . .
 # Exposer le port
 EXPOSE 10000
 
-# Commande de démarrage — python -m uvicorn évite un shim PATH trompeur (erreur « unrecognized arguments: ai_server:app »)
+# Commande de démarrage — lancer ai_server.py directement (gère ses propres arguments --host et --port)
 # Render injecte PORT ; défaut 10000 pour build local.
 ENV PORT=10000
-CMD ["sh", "-c", "exec python -m uvicorn ai_server:app --host 0.0.0.0 --port ${PORT:-10000}"]
+CMD ["sh", "-c", "exec python ai_server.py --host 0.0.0.0 --port ${PORT:-10000}"]
