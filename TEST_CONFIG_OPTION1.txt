@@ -1,0 +1,31 @@
+========================================
+LIVE TEST - OPTION 1: LOWER AI CONFIDENCE
+========================================
+
+OBJECTIVE: Lower confidence threshold to see if trades execute
+
+CURRENT SETTINGS (in SMC_Universal.mq5):
+  Line 8933: MinAIConfidencePercent = 62.0%
+  Line 8934: MinAIConfidencePercentBoomCrash = 58.0%
+  Line 8935: MinAIConfidencePercentVolatility = 55.0%
+
+CHANGE TO (for testing):
+  MinAIConfidencePercent = 45.0%           (was 62.0%)
+  MinAIConfidencePercentBoomCrash = 40.0%  (was 58.0%)
+  MinAIConfidencePercentVolatility = 35.0% (was 55.0%)
+
+RATIONALE:
+  - Current: Requires 55-62% AI confidence
+  - Problem: Live logs show 51-55% confidence being rejected
+  - Test: Lower threshold to 35-45% to allow trades
+
+EXPECTED BEHAVIOR:
+  - Trades should execute when technical signals fire (even with lower AI confidence)
+  - More trades = more data on whether confidence matters
+
+MONITORING:
+  - Watch trade execution count
+  - Monitor P&L (profit/loss)
+  - Check if low-confidence trades still win
+
+TEST DURATION: 1-2 hours

@@ -8912,7 +8912,7 @@ input int    ConsecutiveLossesToPause = 2;            // Nombre de pertes consé
 input int    ConsecutiveLossPauseMinutes = 90;        // Durée de la pause après streak de pertes — 1h30 (plus conservateur)
 input bool   BlockAllEntriesIfSymbolPaused = true;    // Si le symbole est en pause (streak pertes, profit target, etc.) → lot 0 pour TOUTES entrées (y compris Boom/Crash)
 input double MaxDailyRealizedLossPerSymbolUSD = 0.40; // Plafond perte réalisée (jour, symbole) — 2% du capital 20$, pas de nouvelle entrée ce jour
-input bool   BlockTradingNonTopPropiceWhenLosing = true; // Multi-graph: si filtre propice actif et ce symbole n'est pas le plus propice → bloquer entrées (évite répéter pertes sur 2e/3e choix)
+input bool   BlockTradingNonTopPropiceWhenLosing = false; // TEST OPTION 3: Disabled (was true) - allow trades even if not top propice symbol
 input bool   BlockEquilibriumCorrectionTrades = true; // Bloquer les trades en zone de correction (autour de l'équilibre ICT)
 input bool   UseServerCorrectionZoneFilter = true;    // Bloquer aussi selon prédiction correction serveur/Supabase
 input double ServerCorrectionMinConfidence = 63.0;    // Seuil confiance (%) pour bloquer quand le serveur signale correction (plus bas = plus de blocage)
@@ -8930,9 +8930,9 @@ input bool   RecoveryLotOnlyHighConviction = true;    // Double lot "recovery" s
 input double RecoveryMinAIConfidencePercent = 92.0;   // Confiance IA min (%) pour appliquer le recovery lot (plus strict = moins de recovery)
 input double RecoveryMinSetupScore = 87.0;              // Score setup (0-100) min pour appliquer le recovery lot (plus strict = plus "très sûr")
 input double MinSetupScoreEntry      = 80.0;  // ↑ Score 80% minimum — ULTRA-STRICT (rejette setups médiocres)
-input double MinAIConfidencePercent   = 62.0;  // Confiance IA min (%) — 62% laisse passer plus de signaux (était 75%)
-input double MinAIConfidencePercentBoomCrash = 58.0; // Seuil IA dédié Boom/Crash (touch / spike)
-input double MinAIConfidencePercentVolatility = 55.0; // Seuil IA dédié Volatility Index
+input double MinAIConfidencePercent   = 45.0;  // TEST OPTION 1: Baissé à 45% (était 62%) pour tester trades à faible confiance
+input double MinAIConfidencePercentBoomCrash = 40.0; // TEST OPTION 1: Baissé à 40% (était 58%)
+input double MinAIConfidencePercentVolatility = 35.0; // TEST OPTION 1: Baissé à 35% (était 55%)
 input bool   CloseOnlyOnAIHoldOrBrokerSLTP = true; // Empêche les fermetures actives (sauf IA=HOLD). Laisser SL/TP broker gérer le reste.
 input group "=== ENTRÉES PLUS POINTUES (fiabilité) ==="
 input int    MaxSpreadPoints          = 80;   // Spread max (points) Forex/CFD classiques
@@ -26923,12 +26923,16 @@ void ExecuteDerivArrowTrade(string direction)
    if(SMC_GetSymbolCategory(_Symbol) == SYM_BOOM_CRASH && IsBoomCrashEntryCooldownActive("ExecuteDerivArrowTrade"))
       return;
 
-   if(!GOM_BypassBoomCrashIAForGomPlan(direction) && !IsBoomCrashDirectionAllowedByIA(_Symbol, direction))
-   {
-      Print("🚫 DERIV ARROW BLOQUÉ - Direction vs IA (Boom/Crash) sur ", _Symbol, " : ", direction,
-            " | plan=", g_lastPlanQuality, " | IA=", g_lastAIAction);
-      return;
+   // TEST OPTION 2: Disable AI direction check to allow trades regardless of AI direction
+   if(false) { // DISABLED FOR TESTING
+      if(!GOM_BypassBoomCrashIAForGomPlan(direction) && !IsBoomCrashDirectionAllowedByIA(_Symbol, direction))
+      {
+         Print("🚫 DERIV ARROW BLOQUÉ - Direction vs IA (Boom/Crash) sur ", _Symbol, " : ", direction,
+               " | plan=", g_lastPlanQuality, " | IA=", g_lastAIAction);
+         return;
+      }
    }
+   Print("✅ TEST OPTION 2: Direction check DISABLED - allowing trade regardless of IA agreement");
 
    string gomDir0 = direction;
    StringToUpper(gomDir0);
