@@ -5,44 +5,67 @@
 #property copyright "TradBOT 2026"
 #property strict
 
-// Nettoyage automatique des dessins expirés (GOM/KOLA/SIDO + SMC/OTE graphe, hors labels UI)
-void GOM_CleanExpiredDrawings()
+// UI dashboard / scanner — ne jamais purger comme « dessin expiré »
+bool GOM_IsProtectedUiObject(const string name)
 {
-   const int maxAgeSec = 14400; // 4h — aligné tendances GOM
-   datetime nowTime = TimeCurrent();
-   int total = ObjectsTotal(0, 0, -1);
+   if(StringFind(name, "DASH_") == 0)
+      return true;
+   if(StringFind(name, "GOM_DASH_") == 0)
+      return true;
+   if(StringFind(name, "SCANNER_") == 0)
+      return true;
+   if(StringFind(name, "SMC_DASHBOARD") == 0)
+      return true;
+   if(StringFind(name, "SMC_ML_METRICS") == 0)
+      return true;
+   if(StringFind(name, "GOM_MLINFO") == 0)
+      return true;
+   if(StringFind(name, "SMC_GOM_IA") == 0)
+      return true;
+   return false;
+}
 
-   for(int i = total - 1; i >= 0; i--)
+bool GOM_IsDrawableTradeObject(const string name)
+{
+   if(GOM_IsProtectedUiObject(name))
+      return false;
+   if(StringFind(name, "GOM_") == 0)
+      return true;
+   if(StringFind(name, "KOLA_") == 0)
+      return true;
+   if(StringFind(name, "SIDO_") == 0)
+      return true;
+   if(StringFind(name, "SMC_") == 0)
+      return true;
+   if(StringFind(name, "OTE_SETUP_") == 0)
+      return true;
+   if(StringFind(name, "BOS_SETUP_") == 0)
+      return true;
+   if(StringFind(name, "CHOCH_SETUP_") == 0)
+      return true;
+   return false;
+}
+
+datetime GOM_ObjectNewestAnchorTime(const string name)
+{
+   datetime t0 = (datetime)ObjectGetInteger(0, name, OBJPROP_TIME, 0);
+   datetime t1 = (datetime)ObjectGetInteger(0, name, OBJPROP_TIME, 1);
+   return (t0 > t1) ? t0 : t1;
+}
+
+// Nettoyage automatique des dessins expirés (GOM/KOLA/SIDO + SMC/OTE, hors UI dashboard)
+void GOM_CleanExpiredDrawings(const int maxAgeSec = 7200)
+{
+   datetime nowTime = TimeCurrent();
+   int deleted = 0;
+
+   for(int i = ObjectsTotal(0, 0, -1) - 1; i >= 0; i--)
    {
       string name = ObjectName(0, i, 0, -1);
+      if(!GOM_IsDrawableTradeObject(name))
+         continue;
+
       long typ = (long)ObjectGetInteger(0, name, OBJPROP_TYPE);
-
-      bool isGomFamily = (StringFind(name, "GOM_") == 0 ||
-                          StringFind(name, "KOLA_") == 0 ||
-                          StringFind(name, "SIDO_") == 0);
-      if(isGomFamily)
-      {
-         datetime expiration = (datetime)ObjectGetInteger(0, name, OBJPROP_TIME, 1);
-         if(expiration > 0 && expiration < nowTime)
-         {
-            ObjectDelete(0, name);
-            continue;
-         }
-
-         if(typ == OBJ_TREND)
-         {
-            datetime objTime = (datetime)ObjectGetInteger(0, name, OBJPROP_TIME, 0);
-            datetime objTime2 = (datetime)ObjectGetInteger(0, name, OBJPROP_TIME, 1);
-            datetime tmx = (objTime > objTime2) ? objTime : objTime2;
-            if(nowTime - tmx > maxAgeSec)
-               ObjectDelete(0, name);
-         }
-         continue;
-      }
-
-      bool isChartStale = (StringFind(name, "SMC_") == 0 || StringFind(name, "OTE_SETUP_") == 0);
-      if(!isChartStale)
-         continue;
 
       if(typ == OBJ_LABEL || typ == OBJ_RECTANGLE_LABEL)
          continue;
@@ -50,29 +73,24 @@ void GOM_CleanExpiredDrawings()
       if(typ == OBJ_HLINE)
          continue;
 
-      if(typ == OBJ_TREND)
+      datetime expiration = (datetime)ObjectGetInteger(0, name, OBJPROP_TIME, 1);
+      if(expiration > 0 && expiration < nowTime)
       {
-         datetime t0 = (datetime)ObjectGetInteger(0, name, OBJPROP_TIME, 0);
-         datetime t1 = (datetime)ObjectGetInteger(0, name, OBJPROP_TIME, 1);
-         datetime tmx = (t0 > t1) ? t0 : t1;
-         if(tmx > 0 && nowTime - tmx > maxAgeSec)
-            ObjectDelete(0, name);
+         if(ObjectDelete(0, name))
+            deleted++;
+         continue;
       }
-      else if(typ == OBJ_TEXT || typ == OBJ_ARROW)
+
+      datetime tmx = GOM_ObjectNewestAnchorTime(name);
+      if(tmx > 0 && nowTime - tmx > maxAgeSec)
       {
-         datetime t0 = (datetime)ObjectGetInteger(0, name, OBJPROP_TIME, 0);
-         if(t0 > 0 && nowTime - t0 > maxAgeSec)
-            ObjectDelete(0, name);
-      }
-      else if(typ == OBJ_RECTANGLE || typ == OBJ_VLINE || typ == OBJ_FIBO)
-      {
-         datetime t0 = (datetime)ObjectGetInteger(0, name, OBJPROP_TIME, 0);
-         datetime t1 = (datetime)ObjectGetInteger(0, name, OBJPROP_TIME, 1);
-         datetime tmx = (t0 > t1) ? t0 : t1;
-         if(tmx > 0 && nowTime - tmx > maxAgeSec)
-            ObjectDelete(0, name);
+         if(ObjectDelete(0, name))
+            deleted++;
       }
    }
+
+   if(deleted > 0)
+      ChartRedraw(0);
 }
 
 // Libellé court du timeframe du graphique
@@ -204,7 +222,7 @@ void GOM_ComputeLiveMT5DashMetrics(LiveMT5DashMetrics &m)
       double vol = PositionGetDouble(POSITION_VOLUME);
       double fp = PositionGetDouble(POSITION_PROFIT)
                   + PositionGetDouble(POSITION_SWAP)
-                  + PositionGetDouble(POSITION_COMMISSION);
+                  + PositionGetDouble(POSITION_COMMISSION_CURRENT);
 
       m.positionsAccount++;
       m.lotsAccount += vol;
@@ -417,14 +435,16 @@ void GOM_DrawDashCell(string objName, int x, int y, int w, int h,
    ObjectSetInteger(0, objName + "_BG", OBJPROP_CORNER, corner);
    ObjectSetInteger(0, objName + "_BG", OBJPROP_BACK, false);
    ObjectSetInteger(0, objName + "_BG", OBJPROP_SELECTABLE, false);
-   ObjectSetInteger(0, objName + "_BG", OBJPROP_HIDDEN, true);
+   ObjectSetInteger(0, objName + "_BG", OBJPROP_HIDDEN, false);
+   ObjectSetInteger(0, objName + "_BG", OBJPROP_ZORDER, 2000);
+   ObjectSetInteger(0, objName + "_BG", OBJPROP_TIMEFRAMES, OBJ_ALL_PERIODS);
 
    if(ObjectFind(0, objName + "_TXT") < 0)
       ObjectCreate(0, objName + "_TXT", OBJ_LABEL, 0, 0, 0);
 
    ObjectSetInteger(0, objName + "_TXT", OBJPROP_COLOR, txtColor);
    ObjectSetInteger(0, objName + "_TXT", OBJPROP_FONTSIZE, fs);
-   ObjectSetString(0, objName + "_TXT", OBJPROP_FONT, "Segoe UI");
+   ObjectSetString(0, objName + "_TXT", OBJPROP_FONT, "Arial");
    ObjectSetString(0, objName + "_TXT", OBJPROP_TEXT, text);
    ObjectSetInteger(0, objName + "_TXT", OBJPROP_ANCHOR, ANCHOR_LEFT_UPPER);
    ObjectSetInteger(0, objName + "_TXT", OBJPROP_CORNER, corner);
@@ -434,20 +454,16 @@ void GOM_DrawDashCell(string objName, int x, int y, int w, int h,
    else
       ObjectSetInteger(0, objName + "_TXT", OBJPROP_YDISTANCE, y + h - pad);
    ObjectSetInteger(0, objName + "_TXT", OBJPROP_SELECTABLE, false);
-   ObjectSetInteger(0, objName + "_TXT", OBJPROP_HIDDEN, true);
+   ObjectSetInteger(0, objName + "_TXT", OBJPROP_HIDDEN, false);
+   ObjectSetInteger(0, objName + "_TXT", OBJPROP_BACK, false);
+   ObjectSetInteger(0, objName + "_TXT", OBJPROP_ZORDER, 2001);
+   ObjectSetInteger(0, objName + "_TXT", OBJPROP_TIMEFRAMES, OBJ_ALL_PERIODS);
 }
 
 // Tableau de bord vertical — une ligne par bandeau (évite chevauchement)
 void GOM_DrawEnhancedDashboardV3(int posX = 10, int posY = 30, bool anchorTop = true, int cellWidth = 100, int cellHeight = 25, int fontSizeCustom = 8)
 {
    GOM_CleanEnhancedDashboard();
-
-   static datetime lastClean = 0;
-   if(TimeCurrent() - lastClean > 300)
-   {
-      GOM_CleanExpiredDrawings();
-      lastClean = TimeCurrent();
-   }
 
    MLStats ml = GOM_GetMLStats();
    RobotStatus robot = GOM_GetRobotStatus();

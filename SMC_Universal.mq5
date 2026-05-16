@@ -89,9 +89,10 @@ input bool   UseEnhancedDashboard = true;       // Activer le tableau de bord ML
 input int    DashboardMLPosX = 10;              // Position X (pixels depuis le bord gauche)
 input int    DashboardMLPosY = 30;              // Position Y (pixels depuis le haut)
 input bool   DashboardMLAnchorTop = true;       // Ancrer en haut (true) ou en bas (false)
-input int    DashboardMLCellWidth = 110;        // Largeur des cellules
-input int    DashboardMLCellHeight = 40;        // Hauteur des cellules (+ lignes = tableau plus lisible)
-input int    DashboardMLFontSize = 8;           // Taille de la police (7=compact, 8=normal, 9=grand)
+input int    DashboardMLCellWidth = 124;        // Largeur des cellules (évite chevauchement)
+input int    DashboardMLCellHeight = 46;        // Hauteur des cellules (+ lignes = tableau plus lisible)
+input int    DashboardMLFontSize = 7;           // Taille police (7=compact lisible, 8=normal)
+input int    DrawingsMaxAgeMinutes = 120;       // Purge auto dessins GOM/SMC plus vieux que X min (0=désactivé)
 
 input bool   GomScriptLiveLabelAnchorRight = true; // Libellé GOM LIVE : à droite pour libérer le coin du dashboard
 input int    GomScriptLiveLabelMarginX = 12;         // Marge depuis le bord gauche ou droit selon l'ancre
@@ -259,7 +260,7 @@ input double StructureATRMultiplier = 0.5;      // Réduit — structure plus st
 input bool   EnableVolatilityFilter = true;
 input double VolatilityMinATRPct = 0.03;        // Relevé — éviter marchés plats (capital 20$ = chaque trade doit bouger)
 input bool   StrictConfluenceMode = true;       // ACTIVÉ — exiger confluence multi-signaux (qualité > quantité avec 20$)
-input double MinFilterPassRatio = 0.65;         // ↑ ULTRA-STRICT 65% — rejette trades médiocres (capital 20$ = qualité A+ uniquement)
+input double MinFilterPassRatio = 0.50;         // Ratio filtres OK (50% = plus d'opportunités, 65% = très strict)
 input bool   RelaxedFiltersHighVolSynth = false; // ↓ PAS d'assouplissement même sur Volatility (qualité maximale)
 input double MinFilterQualityRelaxed = 0.50;    // ↑ Même en mode relaxé, exiger 50% minimum (très sélectif)
 input bool   RequireMTFAndStructure = true;     // ✅ ACTIVÉ — alignement MTF + structure OBLIGATOIRE
@@ -273,11 +274,11 @@ input double KolaClosestAnchorMaxAtr = 1.20;           // Réduit — exiger pro
 
 input group "QUALITÉ D'ENTRÉE (évite setups faibles)"
 input bool   EnableEntryQualityGate = true;            // ACTIVÉ — filtrer les setups faibles (capital 20$ = uniquement les meilleurs)
-input double MinEntryQualityScore = 0.65;              // ↑ Score qualité 65% minimum — ULTRA-STRICT (rejette trades médiocres)
+input double MinEntryQualityScore = 0.55;              // Score qualité min (55% = équilibre opportunités / risque 20$)
 input bool   EntryQualityGateSynthOnly = false;        // ✅ Tous symboles — qualité exigée PARTOUT
-input bool   EntryQualityRelaxOnSpikeSetup = false;    // ✅ Qualité exigée AUSSI sur spikes (pas d'exception)
-input bool   EntryQualityRelaxOnHighConfluence = false; // ↓ PAS de relâchement même si confluence forte (strict total)
-input double EntryQualityConfluenceRelaxMin = 0.60;    // ↑ Confluence 60% minimum pour relâcher (très exigeant)
+input bool   EntryQualityRelaxOnSpikeSetup = true;     // Assouplir si spike Boom/Crash aligné (probabilité élevée)
+input bool   EntryQualityRelaxOnHighConfluence = true; // Assouplir si confluence niveaux KOLA forte
+input double EntryQualityConfluenceRelaxMin = 0.50;    // Confluence 50% min pour relâcher le gate qualité
 
 input group "AUTO PENDING: SPIKE + NEAR M5 (Boom / Gainx / Crash / Painx)"
 input bool   EnableSpikeNearM5AutoPending = true;  // ACTIVÉ pour trading automatique
@@ -5421,7 +5422,7 @@ GOM_DrawM1ForecastChartOverlay(bidN);
 GOM_UpdateNotifyPositionAndSpike(bidN,
    GOM_GlobalGetForScript("SPIKE_PROB", 0.0),
    GOM_GlobalGetForScript("SPIKE_DIR_NUM", 0.0));
-if(ShowMLFeatureInfo)
+if(ShowMLFeatureInfo && !UseEnhancedDashboard)
 GOM_DrawMLInfoFloatingLabel();
 else
 ObjectDelete(0, "GOM_MLINFO_BR");
@@ -10889,7 +10890,9 @@ int OnInit()
       CleanupAllChartObjects();
       Print("🧹 Nettoyage complet des anciens dessins effectué au démarrage");
    }
-   
+   if(DrawingsMaxAgeMinutes > 0)
+      GOM_CleanExpiredDrawings();
+
    atrHandle = iATR(_Symbol, LTF, 14);
    emaHandle = iMA(_Symbol, LTF, 9, 0, MODE_EMA, PRICE_CLOSE);
    hEmaFast = iMA(_Symbol, LTF, 9, 0, MODE_EMA, PRICE_CLOSE);   // EMA rapide
@@ -11029,6 +11032,12 @@ int OnInit()
 
          Print("✅ Scanner multi-symboles initialisé - ", ScannerSymbolsList);
       }
+   }
+
+   if(UseEnhancedDashboard)
+   {
+      PushEaResumeClockForMLDashboard();
+      UpdateDashboard();
    }
 
    return INIT_SUCCEEDED;
@@ -14052,7 +14061,7 @@ void GetAIDashboardStatus(string &aiStatus, color &aiLineCol)
 void GomEmbedded_UpdateAiCornerLabel(void)
 {
    const string nm = "SMC_GOM_IA_STATUS";
-   if(!ShowAiStatusOnGomEmbeddedChart)
+   if(!ShowAiStatusOnGomEmbeddedChart || UseEnhancedDashboard)
    {
       ObjectDelete(0, nm);
       return;
@@ -14125,15 +14134,17 @@ void UpdateDashboard()
    if(UseEnhancedDashboard)
    {
       PushEaResumeClockForMLDashboard();
-      // Nettoyage automatique des dessins expirés
-      static datetime lastCleanupTime = 0;
-      if(TimeCurrent() - lastCleanupTime >= 300) // Toutes les 5 minutes
+      Comment("");
+      ObjectDelete(0, "SMC_GOM_IA_STATUS");
+      ObjectDelete(0, "GOM_MLINFO_BR");
+
+      static datetime lastDrawingCleanup = 0;
+      if(DrawingsMaxAgeMinutes > 0 && TimeCurrent() - lastDrawingCleanup >= 60)
       {
          GOM_CleanExpiredDrawings();
-         lastCleanupTime = TimeCurrent();
+         lastDrawingCleanup = TimeCurrent();
       }
 
-      // Afficher le dashboard amélioré avec paramètres configurables
       GOM_DrawEnhancedDashboardV3(DashboardMLPosX, DashboardMLPosY, DashboardMLAnchorTop,
                                   DashboardMLCellWidth, DashboardMLCellHeight, DashboardMLFontSize);
       return;
@@ -21188,6 +21199,10 @@ void CleanupAllChartObjects()
    // Préfixes de tous les objets SMC à nettoyer
    string prefixes[] = {
       "SMC_",           // Tous les objets SMC
+      "GOM_",           // Module GOM intégré
+      "KOLA_",          // Niveaux KOLA
+      "SIDO_",          // Figures SIDO
+      "OTE_SETUP_",     // Setups OTE graphiques
       "FVG_",           // Fair Value Gaps
       "OB_",            // Order Blocks
       "BOS_",           // Break of Structure
