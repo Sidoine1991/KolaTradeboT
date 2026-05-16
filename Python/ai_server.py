@@ -337,6 +337,7 @@ async def decision(signal: TradeSignal):
 
 def main():
     """Start the AI Server"""
+    print("🚀 Starting TradBOT AI Server - CLEAN AWS RDS VERSION (no env validation)")
     parser = argparse.ArgumentParser(description='TradBOT AI Server - AWS RDS Version')
     parser.add_argument('--host', default='127.0.0.1', help='Host address')
     parser.add_argument('--port', type=int, default=8000, help='Port number')
