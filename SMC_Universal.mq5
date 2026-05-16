@@ -24,7 +24,7 @@
 // Trade.mqh déjà inclus par SMC_Universal.mq5
 
 input group "SCANNER MULTI-SYMBOLES TEMPS RÉEL"
-input bool   EnableOpportunityScanner = false;     // ⚠️ DÉSACTIVÉ par défaut — remplacé par Dashboard ML (activer si besoin de scan multi-symboles)
+input bool   EnableOpportunityScanner = true;     // ✅ ACTIVÉ par défaut — scanner multi-symboles temps réel
 input string ScannerSymbolsList = "Boom 1000 Index,Crash 1000 Index,EURUSD,XAUUSD";  // ↓ OPTIMISÉ 4 symboles — réduit charge CPU (était 8)
 input int    ScannerRefreshSeconds = 60;           // ↑ OPTIMISÉ 60s — réduit charge CPU (était 30s)
 input int    ScannerPanelX = 12;                   // Gauche: X depuis bord gauche | Droite: marge depuis bord droit
@@ -35,7 +35,7 @@ input bool   ScannerPanelAnchorRight = true;       // Caler le panneau au bord d
 input bool   ScannerShowPanel = false;             // Panneau = beaucoup d'objets graphiques (CPU)
 
 input group "TRADING AUTOMATIQUE (SCANNER)"
-input bool   EnableScannerAutoTrading = false;     // ⚠️ DÉSACTIVÉ par défaut — activer uniquement si EnableOpportunityScanner = true
+input bool   EnableScannerAutoTrading = true;     // ✅ ACTIVÉ par défaut — trading automatique sur opportunités SMC
 input double AutoTradeMaxRiskDollars = 0.20;       // Risque maximum par trade ($) — 1% du capital 20$ (ultra-conservateur)
 input double AutoTradeScalpTpPoints = 80;          // Take Profit scalping (points) — ratio TP/SL = 2.67:1 optimisé
 input double AutoTradeScalpSlPoints = 30;          // Stop Loss scalping (points) — inchangé, bien calibré
