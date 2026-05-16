@@ -228,10 +228,21 @@ ML Trainer: {'Available' if data.get('ml_trainer_available') else 'Unavailable'}
         return None
 
     def fetch_decision(self, symbol, price=None, confluence=3):
-        """Récupère une décision pour un symbole"""
+        """Récupère une décision pour un symbole - appelle /ml/signal comme l'EA"""
         try:
+            # Essayer d'abord /ml/signal (ce que l'EA appelle réellement)
+            response = requests.get(
+                f"{self.api_url}/ml/signal",
+                params={"symbol": symbol, "timeframe": "M1"},
+                timeout=5
+            )
+
+            if response.status_code == 200:
+                return response.json()
+
+            # Fallback sur /decision si /ml/signal n'existe pas
             if price is None:
-                price = 100.0  # Valeur par défaut
+                price = 100.0
 
             payload = {
                 "symbol": symbol,
