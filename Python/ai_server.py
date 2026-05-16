@@ -305,10 +305,13 @@ async def decision(signal: TradeSignal):
         # Calcular score de calidad
         quality_score = calculate_quality_score(signal.confluence)
 
-        # Determinar acción basada en confluence y precio
+        # Determine action based on confluence
         if signal.confluence >= 4 and signal.price > 0:
-            action = "BUY" if signal.direction > 0 else "SELL"
+            action = "BUY"
             confidence = min(0.5 + (signal.confluence / 10.0), 0.95)
+        elif signal.confluence <= 2:
+            action = "SELL"
+            confidence = 0.4
         else:
             action = "HOLD"
             confidence = 0.5
@@ -317,10 +320,7 @@ async def decision(signal: TradeSignal):
             action=action,
             confidence=confidence,
             reason=f"Confluence: {signal.confluence}/5 | Quality: {quality_score}%",
-            quality_score=quality_score,
-            entry_price=signal.price,
-            stop_loss=signal.price * 0.98 if signal.direction > 0 else signal.price * 1.02,
-            take_profit=signal.price * 1.02 if signal.direction > 0 else signal.price * 0.98
+            quality_score=quality_score
         )
 
         # Guardar decisión en BD
