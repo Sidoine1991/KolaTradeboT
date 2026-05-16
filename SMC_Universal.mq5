@@ -34670,9 +34670,9 @@ void SniperModules_DrawGraphics()
          datetime barTimePrev = iTime(_Symbol, _Period, currentFVG.barIndex + 3);
 
          ObjectCreate(0, fvgName, OBJ_RECTANGLE, 0, barTimePrev, currentFVG.top, barTime, currentFVG.bottom);
-         ObjectSetInteger(0, fvgName, OBJPROP_COLOR, clrCyan);
+         ObjectSetInteger(0, fvgName, OBJPROP_COLOR, C'100,200,255');
          ObjectSetInteger(0, fvgName, OBJPROP_FILL, true);
-         ObjectSetInteger(0, fvgName, OBJPROP_OPACITY, 30);
+         ObjectSetInteger(0, fvgName, OBJPROP_WIDTH, 1);
       }
 
       OrderBlockData currentOB;
@@ -34687,7 +34687,7 @@ void SniperModules_DrawGraphics()
          ObjectCreate(0, obName, OBJ_RECTANGLE, 0, barTimePrev, currentOB.high, barTime, currentOB.low);
          ObjectSetInteger(0, obName, OBJPROP_COLOR, obCol);
          ObjectSetInteger(0, obName, OBJPROP_FILL, true);
-         ObjectSetInteger(0, obName, OBJPROP_OPACITY, 50);
+         ObjectSetInteger(0, obName, OBJPROP_WIDTH, 1);
       }
 
       if(g_CurrentVote.confluenceScore > 0)
