@@ -37,7 +37,7 @@ input bool   ScannerShowPanel = false;             // Panneau = beaucoup d'objet
 
 input group "TRADING AUTOMATIQUE (SCANNER)"
 input bool   EnableScannerAutoTrading = true;     // ✅ ACTIVÉ par défaut — trading automatique sur opportunités SMC
-input double AutoTradeMaxRiskDollars = 0.20;       // Risque maximum par trade ($) — 1% du capital 20$ (ultra-conservateur)
+input double AutoTradeMaxRiskDollars = 2.0;        // TEST: Augmenté à 2$ (10% du capital) pour permettre trades
 input double AutoTradeScalpTpPoints = 80;          // Take Profit scalping (points) — ratio TP/SL = 2.67:1 optimisé
 input double AutoTradeScalpSlPoints = 30;          // Stop Loss scalping (points) — inchangé, bien calibré
 input bool   EnableAutoTrailingStop = true;        // Activer trailing stop automatique
@@ -8888,7 +8888,7 @@ input double DailyProfitTargetDollars = 5.0;  // Gain journalier max ($) — aug
 input double MaxDailyLossDollars      = 1.50; // Perte journalière max ($) — 7.5% du capital, discipline absolue
 input double CumulativeLossPauseThresholdDollars = 1.0; // Pertes consécutives cumulées ($) avant pause — 5% du capital
 input int    CumulativeLossPauseMinutes = 60; // Durée de pause après pertes consécutives (min) — pause longue pour calmer
-input bool   EnableProfitLock             = true;  // Stop si gros giveback après gros gain
+input bool   EnableProfitLock             = false; // TEST: Disabled to allow trades
 input double ProfitLockStartDollars       = 3.0;  // Active dès 3$ de gain — plus tolérant (3x)
 input double ProfitLockMaxGivebackDollars = 0.50;  // Giveback max 0.50$ depuis le pic — plus de marge
 input bool   ProfitLockClosePositions     = true;  // Fermer positions + supprimer pending lors du stop
