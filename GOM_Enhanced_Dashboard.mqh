@@ -5,9 +5,14 @@
 #property copyright "TradBOT 2026"
 #property strict
 
+// Préfixe objets graphiques du dashboard ML (évite conflit avec CleanupAllChartObjects / DASH_* legacy)
+#define GOM_ML_DASH_PREFIX "MLDASH_"
+
 // UI dashboard / scanner — ne jamais purger comme « dessin expiré »
 bool GOM_IsProtectedUiObject(const string name)
 {
+   if(StringFind(name, GOM_ML_DASH_PREFIX) == 0)
+      return true;
    if(StringFind(name, "DASH_") == 0)
       return true;
    if(StringFind(name, "GOM_DASH_") == 0)
@@ -431,6 +436,7 @@ void GOM_DrawDashCell(string objName, int x, int y, int w, int h,
    ObjectSetInteger(0, objName + "_BG", OBJPROP_XSIZE, w);
    ObjectSetInteger(0, objName + "_BG", OBJPROP_YSIZE, h);
    ObjectSetInteger(0, objName + "_BG", OBJPROP_BGCOLOR, bgColor);
+   ObjectSetInteger(0, objName + "_BG", OBJPROP_COLOR, bgColor);
    ObjectSetInteger(0, objName + "_BG", OBJPROP_BORDER_TYPE, BORDER_FLAT);
    ObjectSetInteger(0, objName + "_BG", OBJPROP_CORNER, corner);
    ObjectSetInteger(0, objName + "_BG", OBJPROP_BACK, false);
@@ -460,10 +466,43 @@ void GOM_DrawDashCell(string objName, int x, int y, int w, int h,
    ObjectSetInteger(0, objName + "_TXT", OBJPROP_TIMEFRAMES, OBJ_ALL_PERIODS);
 }
 
+// Supprime uniquement l'ancien préfixe DASH_ (grille V3 obsolète), pas MLDASH_
+void GOM_CleanLegacyDashPrefixObjects()
+{
+   for(int i = ObjectsTotal(0) - 1; i >= 0; i--)
+   {
+      string name = ObjectName(0, i);
+      if(StringFind(name, "DASH_") != 0)
+         continue;
+      if(StringFind(name, GOM_ML_DASH_PREFIX) == 0)
+         continue;
+      ObjectDelete(0, name);
+   }
+}
+
+// Mettre les objets UI devant les chandelles (sinon tableau « invisible »)
+void GOM_EnsureMlDashboardChartLayer()
+{
+   ChartSetInteger(0, CHART_FOREGROUND, false);
+   ChartSetInteger(0, CHART_SHOW_OBJECT_DESCR, true);
+}
+
+// Résumé court pour Comment() si les labels graphiques sont masqués
+string GOM_BuildEnhancedDashboardComment(const string hdrLine, const string statusLine, const string mlLine, const string pnlLine)
+{
+   return hdrLine + "\n" + statusLine + "\n" + mlLine + "\n" + pnlLine;
+}
+
 // Tableau de bord vertical — une ligne par bandeau (évite chevauchement)
 void GOM_DrawEnhancedDashboardV3(int posX = 10, int posY = 30, bool anchorTop = true, int cellWidth = 100, int cellHeight = 25, int fontSizeCustom = 8)
 {
-   GOM_CleanEnhancedDashboard();
+   static bool s_legacyDashPurged = false;
+   if(!s_legacyDashPurged)
+   {
+      GOM_CleanLegacyDashPrefixObjects();
+      s_legacyDashPurged = true;
+   }
+   GOM_EnsureMlDashboardChartLayer();
 
    MLStats ml = GOM_GetMLStats();
    RobotStatus robot = GOM_GetRobotStatus();
@@ -491,7 +530,7 @@ void GOM_DrawEnhancedDashboardV3(int posX = 10, int posY = 30, bool anchorTop = 
                     + TimeToString(TimeCurrent(), TIME_DATE | TIME_MINUTES)
                     + " | spr " + IntegerToString(spreadPts)
                     + " | " + accCur + " 1:" + IntegerToString((int)lv.leverage);
-   GOM_DrawDashRow("DASH_HDR", baseX, cy, barW, rowH, gap, hdrLine, bgPurple, txtWhite, fontSize, anchorTop);
+   GOM_DrawDashRow(GOM_ML_DASH_PREFIX "HDR", baseX, cy, barW, rowH, gap, hdrLine, bgPurple, txtWhite, fontSize, anchorTop);
 
    bool termAuto = (TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) != 0);
    string statusWord = "ACTIF";
@@ -522,7 +561,7 @@ void GOM_DrawEnhancedDashboardV3(int posX = 10, int posY = 30, bool anchorTop = 
                     + " | Eq " + DoubleToString(lv.equity, 2)
                     + " Bal " + DoubleToString(lv.balance, 2)
                     + " Fl " + DoubleToString(lv.floatingPL, 2);
-   GOM_DrawDashRow("DASH_STATUS", baseX, cy, barW, rowH, gap, rowStat, statusBg, txtWhite, fontSize, anchorTop);
+   GOM_DrawDashRow(GOM_ML_DASH_PREFIX "STATUS", baseX, cy, barW, rowH, gap, rowStat, statusBg, txtWhite, fontSize, anchorTop);
 
    string mlvlStr = "-";
    if(lv.marginUsed > 1e-8 && lv.marginLevelPct > 1e-8 && lv.marginLevelPct < 999999.0)
@@ -535,14 +574,14 @@ void GOM_DrawEnhancedDashboardV3(int posX = 10, int posY = 30, bool anchorTop = 
                     + " | Mg " + mlvlStr
                     + " Real " + DoubleToString(lv.realizedTodayUSD, 2)
                     + " FlSym " + DoubleToString(lv.floatingOnSymbol, 2);
-   GOM_DrawDashRow("DASH_ACCT", baseX, cy, barW, rowH, gap, rowAcct, bgBlue, txtWhite, fontSize, anchorTop);
+   GOM_DrawDashRow(GOM_ML_DASH_PREFIX "ACCT", baseX, cy, barW, rowH, gap, rowAcct, bgBlue, txtWhite, fontSize, anchorTop);
 
    if(robot.utcWindowPause)
    {
       MqlDateTime gmt;
       TimeToStruct(TimeGMT(), gmt);
       string utcLine = "UTC ferme (h" + IntegerToString(gmt.hour) + " UTC) | voir TradeWindow*";
-      GOM_DrawDashRow("DASH_UTC", baseX, cy, barW, rowH, gap, utcLine, bgOrange, txtWhite, fontSize, anchorTop);
+      GOM_DrawDashRow(GOM_ML_DASH_PREFIX "UTC", baseX, cy, barW, rowH, gap, utcLine, bgOrange, txtWhite, fontSize, anchorTop);
    }
 
    if(robot.isPaused)
@@ -557,13 +596,13 @@ void GOM_DrawEnhancedDashboardV3(int posX = 10, int posY = 30, bool anchorTop = 
       }
       else
          pauseLine += " | bientot";
-      GOM_DrawDashRow("DASH_PAUSE", baseX, cy, barW, rowH, gap, pauseLine, bgOrange, txtWhite, fontSize, anchorTop);
+      GOM_DrawDashRow(GOM_ML_DASH_PREFIX "PAUSE", baseX, cy, barW, rowH, gap, pauseLine, bgOrange, txtWhite, fontSize, anchorTop);
    }
 
    datetime nowTc = TimeCurrent();
    if(!robot.eaTradingEnabled)
    {
-      GOM_DrawDashRow("DASH_EA_RESUME", baseX, cy, barW, rowH, gap,
+      GOM_DrawDashRow(GOM_ML_DASH_PREFIX "EA_RESUME", baseX, cy, barW, rowH, gap,
                       "Trading OFF | activer EnableTrading", bgDark, txtWhite, fontSize, anchorTop);
    }
    else if(robot.eaResumeAt > nowTc)
@@ -576,7 +615,7 @@ void GOM_DrawEnhancedDashboardV3(int posX = 10, int posY = 30, bool anchorTop = 
       datetime resumeLocal = (datetime)((long)robot.eaResumeAt + (long)tzOff);
       string resumeLine = "Reprise " + IntegerToString(h) + "h" + IntegerToString(m) + "m" + IntegerToString(s) + "s"
                           + " | " + TimeToString(resumeLocal, TIME_DATE | TIME_MINUTES);
-      GOM_DrawDashRow("DASH_EA_RESUME", baseX, cy, barW, rowH, gap, resumeLine, bgOrange, txtWhite, fontSize, anchorTop);
+      GOM_DrawDashRow(GOM_ML_DASH_PREFIX "EA_RESUME", baseX, cy, barW, rowH, gap, resumeLine, bgOrange, txtWhite, fontSize, anchorTop);
    }
 
    string mlPrec = "ML prec. -";
@@ -608,7 +647,7 @@ void GOM_DrawEnhancedDashboardV3(int posX = 10, int posY = 30, bool anchorTop = 
       double dayWr = 100.0 * dispW / wl;
       dayBg = (dayWr >= 55.0) ? bgGreen : ((dayWr >= 45.0) ? bgOrange : bgRed);
    }
-   GOM_DrawDashRow("DASH_ML", baseX, cy, barW, rowH, gap, rowMl, dayBg, txtWhite, fontSize, anchorTop);
+   GOM_DrawDashRow(GOM_ML_DASH_PREFIX "ML", baseX, cy, barW, rowH, gap, rowMl, dayBg, txtWhite, fontSize, anchorTop);
 
    string predAgeTxt = "-";
    color predBg = bgDark;
@@ -631,7 +670,7 @@ void GOM_DrawEnhancedDashboardV3(int posX = 10, int posY = 30, bool anchorTop = 
                     + " | Clot " + IntegerToString(lv.closedDealsToday)
                     + " | PredTot " + IntegerToString(ml.totalPredictions)
                     + " | Cible " + DoubleToString(robot.targetReachedPct, 0) + "%";
-   GOM_DrawDashRow("DASH_PRED", baseX, cy, barW, rowH, gap, rowPred, predBg, txtWhite, fontSize, anchorTop);
+   GOM_DrawDashRow(GOM_ML_DASH_PREFIX "PRED", baseX, cy, barW, rowH, gap, rowPred, predBg, txtWhite, fontSize, anchorTop);
 
    string srvMode = "?";
    long tmAcc = AccountInfoInteger(ACCOUNT_TRADE_MODE);
@@ -643,7 +682,10 @@ void GOM_DrawEnhancedDashboardV3(int posX = 10, int posY = 30, bool anchorTop = 
    string rowPnl = "P&L jr " + DoubleToString(robot.dailyProfitUSD, 2) + " " + accCur
                    + " | Fl sym " + DoubleToString(lv.floatingOnSymbol, 2)
                    + " | " + srvMode;
-   GOM_DrawDashRow("DASH_PNL", baseX, cy, barW, rowH, gap, rowPnl, pnlBg, txtWhite, fontSize, anchorTop);
+   GOM_DrawDashRow(GOM_ML_DASH_PREFIX "PNL", baseX, cy, barW, rowH, gap, rowPnl, pnlBg, txtWhite, fontSize, anchorTop);
+
+   if(GlobalVariableCheck("EA_DASH_COMMENT_FALLBACK") && GlobalVariableGet("EA_DASH_COMMENT_FALLBACK") > 0.5)
+      Comment(GOM_BuildEnhancedDashboardComment(hdrLine, rowStat, rowMl, rowPnl));
 
    ChartRedraw(0);
 }
@@ -653,13 +695,14 @@ void GOM_DrawEnhancedDashboard(void)
    GOM_DrawEnhancedDashboardV3();
 }
 
-// Nettoyer tout le tableau de bord (y compris anciennes cellules grille)
+// Nettoyer tout le tableau de bord ML (OnDeinit)
 void GOM_CleanEnhancedDashboard()
 {
    for(int i = ObjectsTotal(0) - 1; i >= 0; i--)
    {
       string name = ObjectName(0, i);
-      if(StringFind(name, "DASH_") == 0)
+      if(StringFind(name, GOM_ML_DASH_PREFIX) == 0)
          ObjectDelete(0, name);
    }
+   GOM_CleanLegacyDashPrefixObjects();
 }

@@ -92,6 +92,7 @@ input bool   DashboardMLAnchorTop = true;       // Ancrer en haut (true) ou en b
 input int    DashboardMLCellWidth = 124;        // Largeur des cellules (évite chevauchement)
 input int    DashboardMLCellHeight = 46;        // Hauteur des cellules (+ lignes = tableau plus lisible)
 input int    DashboardMLFontSize = 7;           // Taille police (7=compact lisible, 8=normal)
+input bool   DashboardMLCommentFallback = true; // Secours texte Comment() si bandeaux graphiques masqués
 input int    DrawingsMaxAgeMinutes = 120;       // Purge auto dessins GOM/SMC plus vieux que X min (0=désactivé)
 
 input bool   GomScriptLiveLabelAnchorRight = true; // Libellé GOM LIVE : à droite pour libérer le coin du dashboard
@@ -5946,7 +5947,10 @@ void GomKolaSidoEmbedded_ProcessFrame()
    if(GOM_ShouldRun(now, s_lastDash, DashboardRefreshSeconds))
    {
       GOM_CheckCaptureSpikeAndCleanup();
-      DrawBottomDashboard();
+      if(!UseEnhancedDashboard)
+         DrawBottomDashboard();
+      else
+         UpdateDashboard();
       if(!GOM_SkipChartRedraw)
          ChartRedraw(0);
    }
@@ -13611,6 +13615,13 @@ void OnTick()
    if(currentTime - lastProcess < MathMax(1, GOM_OnTickMainThrottleSec)) return;
    lastProcess = currentTime;
 
+   // Dashboard ML en premier (visible même si BlockAllTrades / pause / UltraLight)
+   if(UseEnhancedDashboard && currentTime - lastDashboardUpdate >= MathMax(5, DashboardRefreshSeconds))
+   {
+      lastDashboardUpdate = currentTime;
+      UpdateDashboard();
+   }
+
    MaybeUpdateTradingAgentsFromOnTick(currentTime);
 
    if(EnableOpportunityScanner && g_OpportunityScanner != NULL && GOM_IsOpportunityScannerOwnerChart())
@@ -14101,8 +14112,8 @@ void OnTick()
    // Fermeture profit-only par symbole à 3$ (POSITION_PROFIT uniquement)
    CloseAllPositionsIfSymbolProfitReached(3.0);
 
-   // TABLEAU DE BORD CONTRÔLÉ
-   if(currentTime - lastDashboardUpdate >= MathMax(15, DashboardRefreshSeconds))
+   // TABLEAU DE BORD legacy (mode non-ML uniquement)
+   if(!UseEnhancedDashboard && currentTime - lastDashboardUpdate >= MathMax(15, DashboardRefreshSeconds))
    {
       lastDashboardUpdate = currentTime;
       UpdateDashboard();
@@ -14259,7 +14270,9 @@ void UpdateDashboard()
    if(UseEnhancedDashboard)
    {
       PushEaResumeClockForMLDashboard();
-      Comment("");
+      GlobalVariableSet("EA_DASH_COMMENT_FALLBACK", DashboardMLCommentFallback ? 1.0 : 0.0);
+      if(!DashboardMLCommentFallback)
+         Comment("");
       ObjectDelete(0, "SMC_GOM_IA_STATUS");
       ObjectDelete(0, "GOM_MLINFO_BR");
 
@@ -14272,6 +14285,7 @@ void UpdateDashboard()
 
       GOM_DrawEnhancedDashboardV3(DashboardMLPosX, DashboardMLPosY, DashboardMLAnchorTop,
                                   DashboardMLCellWidth, DashboardMLCellHeight, DashboardMLFontSize);
+      ChartRedraw(0);
       return;
    }
 
@@ -21257,6 +21271,7 @@ void CleanupDashboardObjects()
    
    // Méthode 1: Nettoyer par préfixes connus
    string prefixes[] = {"SMC_DASHBOARD_LABEL", "SMC_DASH_LINE_", "SMC_ML_METRICS_LABEL", "SMC_PROPICE_LINE", "DASH_", "ML_"};
+   // Ne pas supprimer MLDASH_* (dashboard ML actif)
    
    for(int p = 0; p < ArraySize(prefixes); p++)
    {
@@ -21299,7 +21314,9 @@ void CleanupDashboardObjects()
    {
       string objName = ObjectName(0, i);
       
-      // Supprimer tous les objets avec ces préfixes
+      // Supprimer tous les objets avec ces préfixes (hors dashboard ML MLDASH_)
+      if(StringFind(objName, "MLDASH_") == 0)
+         continue;
       if(StringFind(objName, "SMC_DASH_") == 0 ||
          StringFind(objName, "SMC_DASHBOARD_LABEL") == 0 ||
          StringFind(objName, "SMC_ML_") == 0 ||
@@ -21346,7 +21363,7 @@ void CleanupAllChartObjects()
       "ZONE_",          // Zones (Premium/Discount)
       "PROPICE_",       // Propice symbols
       "ML_",            // ML metrics
-      "DASH_",          // Dashboard
+      "DASH_",          // Ancien dashboard (pas MLDASH_ — protégé ci-dessous)
       "SIGNAL_",        // Signal arrows
       "WARNING_"        // Warnings
    };
@@ -21361,6 +21378,8 @@ void CleanupAllChartObjects()
       for(int i = ObjectsTotal(0) - 1; i >= 0; i--)
       {
          string objName = ObjectName(0, i);
+         if(StringFind(objName, "MLDASH_") == 0)
+            continue;
          if(StringFind(objName, prefix) == 0)  // Commence par le préfixe
          {
             if(ObjectDelete(0, objName))

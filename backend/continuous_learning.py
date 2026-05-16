@@ -26,15 +26,17 @@ try:
     from sklearn.metrics import accuracy_score, classification_report, roc_auc_score
     import xgboost as xgb
 except ImportError as e:
-    print(f"❌ Erreur import sklearn/xgboost: {e}")
-    sys.exit(1)
+    raise ImportError(f"sklearn/xgboost requis pour continuous_learning: {e}") from e
 
 from backend.features import compute_features, EXPECTED_FEATURES
 from backend.adaptive_predict import get_symbol_category, MODEL_CONFIGS, create_adaptive_features, MODEL_FEATURES
 
-# Chemin du dossier MT5 Predictions
+# Chemin du dossier MT5 Predictions (surcharge via .env)
 MT5_PREDICTIONS_DIR = Path(
-    r"C:\Users\USER\AppData\Roaming\MetaQuotes\Terminal\Common\Files\Predictions"
+    os.getenv(
+        "MT5_PREDICTIONS_DIR",
+        r"C:\Users\USER\AppData\Roaming\MetaQuotes\Terminal\Common\Files\Predictions",
+    )
 )
 
 # Mapping entre catégories trading et catégories adaptatives

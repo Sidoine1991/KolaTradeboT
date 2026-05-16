@@ -2099,6 +2099,9 @@ AI_ENABLE_STARTUP_TRAINING = _env_bool("AI_ENABLE_STARTUP_TRAINING", default=_st
 AI_ENABLE_SYMBOL_STATS_LOOP = _env_bool("AI_ENABLE_SYMBOL_STATS_LOOP", default=_symbol_stats_loop_default)
 AI_SYMBOL_STATS_INTERVAL_SEC = int(os.getenv("AI_SYMBOL_STATS_INTERVAL_SEC", "3600" if RUNNING_ON_RENDER else "300"))
 AI_ENABLE_SUPABASE_CONTINUOUS_TRAINER = _env_bool("AI_ENABLE_SUPABASE_CONTINUOUS_TRAINER", default=_supabase_trainer_default)
+_continuous_learning_loop_default = (not RUNNING_ON_RENDER) and (not AI_LOW_POWER_MODE)
+AI_ENABLE_CONTINUOUS_LEARNING_LOOP = _env_bool("AI_ENABLE_CONTINUOUS_LEARNING_LOOP", default=_continuous_learning_loop_default)
+AI_CONTINUOUS_LEARNING_INTERVAL_SEC = int(os.getenv("AI_CONTINUOUS_LEARNING_INTERVAL_SEC", "21600" if RUNNING_ON_RENDER else "10800"))
 AI_CONTINUOUS_DEFAULT_INTERVAL_SEC = int(os.getenv("AI_CONTINUOUS_DEFAULT_INTERVAL_SEC", "3600" if RUNNING_ON_RENDER else "600"))
 AI_CONTINUOUS_MIN_INTERVAL_SEC = int(os.getenv("AI_CONTINUOUS_MIN_INTERVAL_SEC", "1800" if RUNNING_ON_RENDER else "300"))
 
@@ -2844,7 +2847,7 @@ try:
     CONTINUOUS_LEARNING_AVAILABLE = True
     # Initialiser le système d'apprentissage continu
     continuous_learner = ContinuousLearning(
-        min_new_samples=50,  # Minimum 50 trades pour réentraîner
+        min_new_samples=30,  # Minimum 30 trades pour réentraîner
         retrain_interval_days=1,  # Réentraîner au moins une fois par jour
         db_url=DATABASE_URL
     )
@@ -3824,6 +3827,20 @@ async def startup_event():
             logger.info(f"✅ Boucle stats symboles démarrée ({AI_SYMBOL_STATS_INTERVAL_SEC}s)")
     else:
         logger.info("ℹ️ Boucle stats symboles désactivée (AI_ENABLE_SYMBOL_STATS_LOOP=false)")
+
+    global _continuous_learning_bg_task
+    if AI_ENABLE_CONTINUOUS_LEARNING_LOOP and CONTINUOUS_LEARNING_AVAILABLE and continuous_learner:
+        if _continuous_learning_bg_task is None or _continuous_learning_bg_task.done():
+            _continuous_learning_bg_task = asyncio.create_task(
+                _continuous_learning_background_loop(AI_CONTINUOUS_LEARNING_INTERVAL_SEC)
+            )
+            logger.info(
+                "✅ Boucle apprentissage continu démarrée (intervalle %ss, min_samples=%s)",
+                AI_CONTINUOUS_LEARNING_INTERVAL_SEC,
+                continuous_learner.min_new_samples,
+            )
+    elif not CONTINUOUS_LEARNING_AVAILABLE:
+        logger.info("ℹ️ Apprentissage continu backend désactivé (module continuous_learning indisponible)")
 
     # Démarrer l'entraînement continu ML (Supabase: fetch predictions → train → save model_metrics)
     try:
@@ -13907,6 +13924,7 @@ _continuous_last_tick: Optional[str] = None
 
 # --- Discipline par stats symboles (jour/mois) ---
 _symbol_stats_task: Optional[asyncio.Task] = None
+_continuous_learning_bg_task: Optional[asyncio.Task] = None
 _symbol_stats_last_tick: Optional[str] = None
 _symbol_stats_cache: Dict[str, Dict[str, Any]] = {}  # {symbol: {"day": {...}, "month": {...}}}
 _symbol_stats_upload_freshness: Dict[str, Dict[str, Dict[str, Any]]] = {}  # {symbol: {period_type: {"last_trade_at": dt, "updated_at": dt}}}
@@ -15394,6 +15412,23 @@ async def get_signals(
 # ============================================================================
 # ENDPOINTS: FEEDBACK LOOP & MONITORING (Phase 1)
 # ============================================================================
+
+async def _continuous_learning_background_loop(interval_sec: int = 10800) -> None:
+    """Réentraîne périodiquement les modèles à partir des feedbacks trade (trade_feedback)."""
+    await asyncio.sleep(120)  # laisser le serveur finir son démarrage
+    while True:
+        try:
+            if CONTINUOUS_LEARNING_AVAILABLE and continuous_learner:
+                logger.info("🔄 [CONT-LEARN] Cycle apprentissage continu (toutes catégories)...")
+                results = await asyncio.to_thread(continuous_learner.retrain_all_categories)
+                ok = sum(1 for r in (results or {}).values() if isinstance(r, dict) and r.get("status") == "success")
+                logger.info("✅ [CONT-LEARN] Cycle terminé — %s catégorie(s) améliorée(s)", ok)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.warning("⚠️ [CONT-LEARN] Erreur cycle: %s", e)
+        await asyncio.sleep(max(1800, interval_sec))
+
 
 async def _trigger_retraining_async(category: str):
     """Déclenche le réentraînement en arrière-plan de manière asynchrone"""
