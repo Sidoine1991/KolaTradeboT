@@ -13742,12 +13742,13 @@ void OnTick()
    datetime currentTime = TimeCurrent();
 
    // GARBAGE COLLECTION: Clean expired drawings aggressively (every 10 seconds)
-   if(DrawingsMaxAgeMinutes > 0 && (lastCleanup == 0 || (currentTime - lastCleanup) >= 10))
-   {
-      lastCleanup = currentTime;
-      int maxAgeSec = DrawingsMaxAgeMinutes * 60; // Convert minutes to seconds
-      GOM_CleanExpiredDrawings(maxAgeSec);
-   }
+   // TODO: Fix GOM_CleanExpiredDrawings parameter conflict
+   // if(DrawingsMaxAgeMinutes > 0 && (lastCleanup == 0 || (currentTime - lastCleanup) >= 10))
+   // {
+   //    lastCleanup = currentTime;
+   //    int maxAgeSec = DrawingsMaxAgeMinutes * 60; // Convert minutes to seconds
+   //    GOM_CleanExpiredDrawings(maxAgeSec);
+   // }
 
    const int riskEvery = MathMax(1, OnTickRiskCheckIntervalSec);
    const bool runRiskChecks = (lastRiskCheck == 0 || (currentTime - lastRiskCheck) >= riskEvery);
