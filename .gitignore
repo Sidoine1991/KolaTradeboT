@@ -3,11 +3,15 @@
 venv/
 env/
 
-# Variables d'environnement
+# Variables d'environnement (NEVER commit .env files)
 .env
 .env.local
+.env.*.local
 .env.production
 .env.supabase
+.env.backup*
+.env.emergency
+.env.optimized
 
 # Sauvegardes Supabase locales (peuvent être volumineuses)
 backups/
