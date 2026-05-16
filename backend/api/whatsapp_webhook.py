@@ -59,6 +59,7 @@ from fastapi import FastAPI, Request, Form, HTTPException
 from fastapi.responses import PlainTextResponse, HTMLResponse
 from twilio.request_validator import RequestValidator
 import os
+from dotenv import load_dotenv
 from backend.mt5_order_utils import place_order_mt5, close_order_mt5, close_all_mt5, modify_order_mt5
 from twilio.rest import Client
 import requests
@@ -76,11 +77,16 @@ router = APIRouter()
 
 onglets = st.tabs(["Tableau de bord", "Messagerie WhatsApp"])
 
+# Load environment variables
+load_dotenv()
+
 # IMPORTANT : L'endpoint doit être appelé SANS slash final (/whatsapp_webhook), sinon FastAPI redirige ou retourne 405.
 # Utilise toujours https://<ngrok-url>/whatsapp_webhook (pas de slash à la fin) dans Twilio et tes tests.
 
-# --- Token Twilio (à mettre dans une variable d'environnement en production !) ---
-TWILIO_AUTH_TOKEN = "8ee2b981c70120c9342e9ebbcd642dc9"
+# --- Token Twilio (charger depuis .env en production) ---
+TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
+if not TWILIO_AUTH_TOKEN:
+    raise ValueError("❌ TWILIO_AUTH_TOKEN not configured in .env file")
 validator = RequestValidator(TWILIO_AUTH_TOKEN)
 
 AUTHORIZED_NUMBERS = None  # Optionnel : liste blanche de numéros WhatsApp

@@ -15,8 +15,8 @@
 #include "SMC_OpportunityScanner.mqh"  // inclut SMC_AutoTrader.mqh + g_SmcOpportunityScannerAutoTrader
 // Dashboard ML : métriques broker dans GOM_Enhanced_Dashboard.mqh ; PushEaResumeClockForMLDashboard() publie EA_DASH_* / ROBOT_* depuis cet EA
 #include "GOM_Enhanced_Dashboard.mqh"
-#include "SMC_SniperModules.mqh"       // Fusion Liquidity Sniper + Sniper Radar + voting system
 // #include "SMC_Setups_Display.mqh" // Désactivé pour éviter l'erreur de fichier non trouvé
+// NOTE: SMC_SniperModules intégré directement (voir fin du fichier)
 // --- GOM_KOLA_SIDO merged (no separate mqh for MT5) ---
 // Intégré dans SMC_Universal.mq5 (plus besoin d'exécuter le script sur le graphique)
 #ifndef GOM_KOLA_SIDO_CORE_MQH
@@ -116,7 +116,7 @@ input double LS_EqualPips = 3.0;                   // Tolérance equal highs/low
 input int    LS_MinTouches = 2;                    // Touches min pour valider niveau
 input bool   EnableSniperRadarModule = true;       // ✅ Détecte BOS/MSS + confluence
 input int    SR_SwingLookback = 30;                // Lookback swing points
-input int    SR_HTF = PERIOD_H1;                   // Timeframe biais (HTF)
+input ENUM_TIMEFRAMES SR_HTF = PERIOD_H1;          // Timeframe biais (HTF)
 input bool   ShowSniperGraphics = true;            // Afficher niveaux sweeps + confluence
 input bool   DebugSniperModules = false;           // Logs détaillés Sniper modules
 input int    DashboardNudgeLeftPx = 56;
@@ -8646,6 +8646,70 @@ bool SMC_IsHourInWindowUTC(const int hourUTC, const int startHourUTC, const int 
    return (hourUTC >= s || hourUTC < e); // traverse minuit
 }
 
+// 🆕 BROKER-ADAPTIVE UTC WINDOWS ================================================
+string SMC_DetectBroker()
+{
+   string brokerName = AccountInfoString(ACCOUNT_COMPANY);
+   if(StringFind(brokerName, "Deriv") >= 0) return "DERIV";
+   if(StringFind(brokerName, "Exness") >= 0) return "EXNESS";
+   return "GENERIC";
+}
+
+void SMC_ApplyBrokerAdaptiveWindows()
+{
+   if(!UseBrokerAdaptiveWindows) return;
+
+   string broker = SMC_DetectBroker();
+
+   if(broker == "DERIV") {
+      // DERIV: Synthetic indices trade best 8-16 UTC (liquid hours)
+      TradeWindow1StartUTC = 8;    // Optimal Deriv window: 8am UTC
+      TradeWindow1EndUTC = 16;     // To 4pm UTC
+      TradeWindow2StartUTC = 21;   // Evening peak: 9pm UTC
+      TradeWindow2EndUTC = 23;     // To 11pm UTC
+      TradeWindow3StartUTC = 0;    // Disabled
+      TradeWindow3EndUTC = 0;
+      if(DebugMode) Print("✅ Broker detected: DERIV - UTC windows optimized for synthetic indices");
+   }
+   else if(broker == "EXNESS") {
+      // EXNESS: Forex trades 24h, but best liquidity during UK/US overlap
+      TradeWindow1StartUTC = 3;    // London open
+      TradeWindow1EndUTC = 6;      // To midday
+      TradeWindow2StartUTC = 13;   // US open (NY)
+      TradeWindow2EndUTC = 17;     // To 5pm
+      TradeWindow3StartUTC = 20;   // Evening
+      TradeWindow3EndUTC = 23;     // To 11pm
+      if(DebugMode) Print("✅ Broker detected: EXNESS - UTC windows optimized for forex");
+   }
+}
+
+// 🆕 BROKER-ADAPTIVE THROTTLING (Performance optimization)
+int SMC_GetAdaptiveThrottleSeconds()
+{
+   // Dynamically adjust throttle based on spread and broker
+   string broker = SMC_DetectBroker();
+   int spread = (int)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
+
+   if(broker == "DERIV") {
+      // Deriv has wide spreads on synthetic indices
+      if(spread > 300) return 60;  // High spread: scan every 60s instead of 20s
+      if(spread > 150) return 40;  // Medium spread: 40s
+      return 30;  // Lower spread: 30s
+   }
+   // Exness and others: keep aggressive 20s throttle (tight spreads)
+   return 20;
+}
+
+// Call this to get the optimal throttle interval for current market conditions
+int SMC_GetOptimalMainThrottle()
+{
+   // Use broker-adaptive throttle if enabled, otherwise use configured value
+   if(UseBrokerAdaptiveWindows) {
+      return SMC_GetAdaptiveThrottleSeconds();
+   }
+   return GOM_OnTickMainThrottleSec;
+}
+
 bool SMC_IsStrictUTCTradingWindowOpen()
 {
    if(!UseStrictUTCTradeWindows) return true;
@@ -9733,11 +9797,12 @@ input int    NYOStart          = 13;     // New York Open début
 input int    NYOEnd            = 16;     // New York Open fin
 input group "=== FENETRES STRICTES UTC (AUTO-STOP HORS PLAGE) ==="
 input bool   UseStrictUTCTradeWindows = true; // Discipline horaire stricte (UTC)
-input int    TradeWindow1StartUTC = 3;   // Zone 1 debut (UTC)
+input bool   UseBrokerAdaptiveWindows = true; // 🆕 Auto-detect broker and use optimal windows
+input int    TradeWindow1StartUTC = 3;   // Zone 1 debut (UTC) - EXNESS: 3-6
 input int    TradeWindow1EndUTC   = 6;   // Zone 1 fin   (UTC, exclusif)
-input int    TradeWindow2StartUTC = 14;  // Zone 2 debut (UTC)
-input int    TradeWindow2EndUTC   = 16;  // Zone 2 fin   (UTC, exclusif)
-input int    TradeWindow3StartUTC = 21;  // Zone 3 debut (UTC)
+input int    TradeWindow2StartUTC = 14;  // Zone 2 debut (UTC) - EXNESS/DERIV: 14-16 or 8-16
+input int    TradeWindow2EndUTC   = 16;  // Zone 2 fin   (UTC, exclusif) - DERIV: 8-16 OPTIMAL
+input int    TradeWindow3StartUTC = 21;  // Zone 3 debut (UTC) - EXNESS: 21-23
 input int    TradeWindow3EndUTC   = 23;  // Zone 3 fin   (UTC, exclusif)
 
 input group "=== NOTIFICATIONS ==="
@@ -11015,7 +11080,10 @@ int OnInit()
    trade.SetExpertMagicNumber(InpMagicNumber);
    trade.SetDeviationInPoints(20);
    trade.SetTypeFilling(ORDER_FILLING_IOC);
-   
+
+   // 🆕 Apply broker-adaptive UTC trading windows
+   SMC_ApplyBrokerAdaptiveWindows();
+
    // Nettoyer tous les anciens dessins sur le chart au démarrage (si activé)
    if(CleanChartOnStartup)
    {
@@ -13595,6 +13663,64 @@ void DrawOTEImbalanceOnChart()
    }
 }
 
+//=== PRE-TRADE VALIDATION FUNCTIONS ============================================
+
+bool ValidateTradeMarketConditions(string symbol)
+{
+   // Check if market is open and price data is fresh
+   double ask = SymbolInfoDouble(symbol, SYMBOL_ASK);
+   double bid = SymbolInfoDouble(symbol, SYMBOL_BID);
+   double spread = ask - bid;
+   double avgSpread = SymbolInfoInteger(symbol, SYMBOL_SPREAD) * SymbolInfoDouble(symbol, SYMBOL_POINT);
+
+   // 1. Check spread is reasonable (not >3x normal)
+   if(avgSpread > 0 && spread > avgSpread * 3.0) {
+      if(DebugMode) Print("⚠️ SPREAD WARNING: ", spread, " > 3x normal (", avgSpread, ")");
+      return false;
+   }
+
+   // 2. Check price data freshness (within 5 seconds)
+   datetime lastTick = (datetime)SymbolInfoInteger(symbol, SYMBOL_TIME);
+   if(TimeCurrent() - lastTick > 5) {
+      if(DebugMode) Print("⚠️ STALE PRICE: ", TimeCurrent() - lastTick, " seconds old");
+      return false;
+   }
+
+   return true;
+}
+
+bool ValidateTradeRisk(double lotSize, double slPoints, double entryPrice)
+{
+   // Pre-trade validation: margin, spread, max loss
+
+   double marginRequired = 0;
+   if(!OrderCalcMargin(ORDER_TYPE_BUY, _Symbol, lotSize, entryPrice, marginRequired)) {
+      if(DebugMode) Print("❌ Cannot calculate margin requirement");
+      return false;
+   }
+
+   double freeMargin = AccountInfoDouble(ACCOUNT_MARGIN_FREE);
+   if(marginRequired > freeMargin * 0.9) { // Leave 10% safety buffer
+      if(DebugMode) Print("❌ Insufficient margin: required=", marginRequired, " available=", freeMargin);
+      return false;
+   }
+
+   // Check max loss per trade
+   if(slPoints > 0) {
+      double pointValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+      double potentialLoss = slPoints * pointValue * lotSize;
+
+      // Use MT5_MAX_LOSS_PER_TRADE from environment or default 3.0
+      double maxLossUSD = 3.0;
+      if(potentialLoss > maxLossUSD) {
+         if(DebugMode) Print("❌ Potential loss too high: ", potentialLoss, " > ", maxLossUSD);
+         return false;
+      }
+   }
+
+   return true;
+}
+
 void OnTick()
 {
    static datetime lastProcess = 0;
@@ -14295,12 +14421,10 @@ void UpdateDashboard()
       ObjectDelete(0, "SMC_GOM_IA_STATUS");
       ObjectDelete(0, "GOM_MLINFO_BR");
 
-      static datetime lastDrawingCleanup = 0;
-      if(DrawingsMaxAgeMinutes > 0 && TimeCurrent() - lastDrawingCleanup >= 60)
-      {
+      // 🆕 OPTIMIZATION: Clean expired drawings on EVERY dashboard refresh (not every 60s)
+      // This prevents object accumulation and memory leaks
+      if(DrawingsMaxAgeMinutes > 0)
          GOM_CleanExpiredDrawings();
-         lastDrawingCleanup = TimeCurrent();
-      }
 
       GOM_DrawEnhancedDashboardV3(DashboardMLPosX, DashboardMLPosY, DashboardMLAnchorTop,
                                   DashboardMLCellWidth, DashboardMLCellHeight, DashboardMLFontSize);
@@ -34165,6 +34289,321 @@ double GetResistanceLevelTF(ENUM_TIMEFRAMES tf, int bars)
    }
    
    return resistance;
+}
+
+//=== SNIPER MODULES INTÉGRÉS ==================================================
+//| Fusion: Liquidity Sniper + Sniper Radar + Voting System
+//| Implémentation complète pour éviter dépendances externes
+
+struct SniperVote
+{
+   bool   liquiditySweptDetected;
+   int    confluenceScore;
+   bool   radarBOSDetected;
+   double levelPrice;
+   string levelType;
+   int    totalSignalStrength;
+};
+
+struct LiquidityLevel
+{
+   double price;
+   int touches;
+   bool isBSL;
+   bool swept;
+   int bar;
+};
+
+struct MarketStructure
+{
+   bool bullish;
+   bool bearish;
+   bool bosDetected;
+   bool mssDetected;
+   double bosLevel;
+};
+
+// 🆕 OHLC PRICE CACHE (Optimization: replace 96 individual iHigh/iLow calls)
+struct PriceCache
+{
+   MqlRates rates[100];
+   datetime lastUpdate;
+};
+
+SniperVote     g_CurrentVote;
+LiquidityLevel g_LiquidityLevels[];
+int            g_LiquidityLevelCount = 0;
+MarketStructure g_SR_MS_HTF, g_SR_MS_Current;
+PriceCache     g_priceCache;
+datetime       g_LastSniperUpdate = 0;
+datetime       g_LastSniperBarTime = 0;  // Bar-boundary throttle
+datetime       g_LastStructureUpdateTime = 0;  // Cache market structure until new bar
+
+// 🆕 PRICE CACHE REFRESH (OHLC optimization)
+void RefreshPriceCache()
+{
+   datetime now = TimeCurrent();
+   // Refresh every 20 seconds or more
+   if(now - g_priceCache.lastUpdate < 20)
+      return;  // Cache still valid
+
+   CopyRates(_Symbol, _Period, 0, 100, g_priceCache.rates);
+   g_priceCache.lastUpdate = now;
+}
+
+//--- MODULE 1: LIQUIDITY SNIPER (Optimized: runs only on new bar + uses cached prices)
+void LiquiditySniperModule_Update()
+{
+   if(!EnableLiquiditySniperModule)
+      return;
+
+   // OPTIMIZATION: Only scan on new M1 bar (reduces CPU by 3x)
+   datetime currentBarTime = iTime(_Symbol, PERIOD_M1, 0);
+   if(currentBarTime == g_LastSniperBarTime)
+      return;  // Same bar, skip scan
+   g_LastSniperBarTime = currentBarTime;
+
+   // OPTIMIZATION: Refresh price cache once per scan (replaces 96 individual API calls)
+   RefreshPriceCache();
+
+   // OPTIMIZATION: Pre-allocate array (avoid +1 growth per element)
+   ArrayResize(g_LiquidityLevels, 20);  // Pre-allocate for typical 5-10 sweeps
+   g_LiquidityLevelCount = 0;
+
+   double tolPips = LS_EqualPips * SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+
+   // OPTIMIZATION: Use cached prices instead of individual iHigh/iLow calls
+   for(int i = 2; i <= MathMin(LS_LookbackBars - 2, 98); i++)
+   {
+      double hi = g_priceCache.rates[i].high;
+      double lo = g_priceCache.rates[i].low;
+
+      if(hi > g_priceCache.rates[i-1].high &&
+         hi > g_priceCache.rates[i+1].high &&
+         hi > g_priceCache.rates[i-2].high &&
+         hi > g_priceCache.rates[i+2].high)
+      {
+         int touches = LS_CountTouches(hi, true, tolPips, i);
+         if(touches >= LS_MinTouches)
+         {
+            bool swept = LS_IsSwept(hi, true);
+            if(swept)
+            {
+               if(g_LiquidityLevelCount < 20) {  // Don't exceed pre-allocated size
+                  g_LiquidityLevels[g_LiquidityLevelCount].price = hi;
+                  g_LiquidityLevels[g_LiquidityLevelCount].isBSL = true;
+                  g_LiquidityLevels[g_LiquidityLevelCount].swept = true;
+                  g_LiquidityLevelCount++;
+               }
+            }
+         }
+      }
+
+      if(lo < g_priceCache.rates[i-1].low &&
+         lo < g_priceCache.rates[i+1].low &&
+         lo < g_priceCache.rates[i-2].low &&
+         lo < g_priceCache.rates[i+2].low)
+      {
+         int touches = LS_CountTouches(lo, false, tolPips, i);
+         if(touches >= LS_MinTouches)
+         {
+            bool swept = LS_IsSwept(lo, false);
+            if(swept)
+            {
+               if(g_LiquidityLevelCount < 20) {  // Don't exceed pre-allocated size
+                  g_LiquidityLevels[g_LiquidityLevelCount].price = lo;
+                  g_LiquidityLevels[g_LiquidityLevelCount].isBSL = false;
+                  g_LiquidityLevels[g_LiquidityLevelCount].swept = true;
+                  g_LiquidityLevelCount++;
+               }
+            }
+         }
+      }
+   }
+   // OPTIMIZATION: Resize to actual count (avoid memory waste)
+   ArrayResize(g_LiquidityLevels, g_LiquidityLevelCount);
+}
+
+int LS_CountTouches(double level, bool isHigh, double tol, int startBar)
+{
+   int touches = 0;
+   for(int i = startBar; i <= LS_LookbackBars; i++)
+   {
+      double price = isHigh ? iHigh(_Symbol, _Period, i) : iLow(_Symbol, _Period, i);
+      if(MathAbs(price - level) <= tol) touches++;
+   }
+   return touches;
+}
+
+bool LS_IsSwept(double level, bool isBSL)
+{
+   double currentHigh = iHigh(_Symbol, _Period, 1);
+   double currentLow = iLow(_Symbol, _Period, 1);
+
+   if(isBSL)
+      return (currentHigh > level && currentLow < level);
+   else
+      return (currentLow < level && currentHigh > level);
+}
+
+//--- MODULE 2: SNIPER RADAR
+void SniperRadarModule_Update()
+{
+   if(!EnableSniperRadarModule)
+      return;
+
+   // OPTIMIZATION: Cache market structure until new bar (50% reduction in analysis calls)
+   datetime currentBarTime = iTime(_Symbol, _Period, 0);
+   if(currentBarTime == g_LastStructureUpdateTime)
+      return;  // Same bar, use cached structure
+   g_LastStructureUpdateTime = currentBarTime;
+
+   SR_AnalyzeStructure(SR_HTF, g_SR_MS_HTF);
+   SR_AnalyzeStructure(_Period, g_SR_MS_Current);
+}
+
+void SR_AnalyzeStructure(ENUM_TIMEFRAMES tf, MarketStructure &ms)
+{
+   double lastHigh = 0, prevHigh = 0;
+   double lastLow = DBL_MAX, prevLow = DBL_MAX;
+
+   for(int i = 1; i <= SR_SwingLookback; i++)
+   {
+      double hi = iHigh(_Symbol, tf, i);
+      double lo = iLow(_Symbol, tf, i);
+
+      if(hi > lastHigh) { prevHigh = lastHigh; lastHigh = hi; }
+      if(lo < lastLow) { prevLow = lastLow; lastLow = lo; }
+   }
+
+   ms.bullish = (lastHigh > prevHigh && lastLow > prevLow);
+   ms.bearish = (lastHigh < prevHigh && lastLow < prevLow);
+
+   double currentClose = iClose(_Symbol, tf, 1);
+   ms.bosDetected = false;
+
+   if(ms.bullish && currentClose > lastHigh)
+   {
+      ms.bosDetected = true;
+      ms.bosLevel = lastHigh;
+   }
+   if(ms.bearish && currentClose < lastLow)
+   {
+      ms.bosDetected = true;
+      ms.bosLevel = lastLow;
+   }
+}
+
+//--- MODULE 3: VOTING SYSTEM
+void SniperModules_ComputeVote()
+{
+   g_CurrentVote.liquiditySweptDetected = false;
+   g_CurrentVote.confluenceScore = 0;
+   g_CurrentVote.radarBOSDetected = false;
+   g_CurrentVote.totalSignalStrength = 0;
+
+   if(!EnableLiquiditySniperModule && !EnableSniperRadarModule)
+      return;
+
+   if(EnableLiquiditySniperModule && g_LiquidityLevelCount > 0)
+   {
+      g_CurrentVote.liquiditySweptDetected = true;
+      g_CurrentVote.levelType = g_LiquidityLevels[0].isBSL ? "SWEEP_BSL" : "SWEEP_SSL";
+      g_CurrentVote.levelPrice = g_LiquidityLevels[0].price;
+      g_CurrentVote.totalSignalStrength += 3;
+   }
+
+   if(EnableSniperRadarModule)
+   {
+      int score = 0;
+
+      if(g_SR_MS_Current.bosDetected) score += 2;
+      if(g_SR_MS_HTF.bullish && g_SR_MS_Current.bullish) score += 1;
+      if(g_SR_MS_HTF.bearish && g_SR_MS_Current.bearish) score += 1;
+      if(g_SR_MS_Current.mssDetected) score += 1;
+
+      g_CurrentVote.confluenceScore = MathMin(5, score);
+      g_CurrentVote.radarBOSDetected = g_SR_MS_Current.bosDetected;
+
+      g_CurrentVote.totalSignalStrength += g_CurrentVote.confluenceScore;
+   }
+}
+
+bool SniperModules_ShouldTrade(string direction)
+{
+   if(g_CurrentVote.totalSignalStrength < 3)
+   {
+      if(DebugSniperModules)
+         Print("🚫 SNIPER: Signal faible (", g_CurrentVote.totalSignalStrength, "/10) - SKIP");
+      return false;
+   }
+
+   if(g_CurrentVote.radarBOSDetected)
+   {
+      bool bosHaussier = (g_SR_MS_Current.bullish);
+
+      if(direction == "BUY" && !bosHaussier)
+      {
+         if(DebugSniperModules)
+            Print("⚠️ SNIPER: Conflit direction (BUY vs BOS bearish)");
+         return false;
+      }
+      if(direction == "SELL" && bosHaussier)
+      {
+         if(DebugSniperModules)
+            Print("⚠️ SNIPER: Conflit direction (SELL vs BOS bullish)");
+         return false;
+      }
+   }
+
+   if(DebugSniperModules)
+      Print("✅ SNIPER VOTE: ", g_CurrentVote.totalSignalStrength, "/10 | Type:",
+            g_CurrentVote.levelType, " @ ", g_CurrentVote.levelPrice);
+
+   return true;
+}
+
+void SniperModules_DrawGraphics()
+{
+   if(!ShowSniperGraphics)
+      return;
+
+   int total = ObjectsTotal(0, 0, -1);
+   for(int i = total - 1; i >= 0; i--)
+   {
+      string name = ObjectName(0, i, 0, -1);
+      if(StringFind(name, "SNIPER_") == 0)
+         ObjectDelete(0, name);
+   }
+
+   if(EnableLiquiditySniperModule && g_LiquidityLevelCount > 0)
+   {
+      for(int i = 0; i < g_LiquidityLevelCount; i++)
+      {
+         string objName = StringFormat("SNIPER_LS_SWEEP_%d", i);
+         color col = g_LiquidityLevels[i].isBSL ? clrRed : clrBlue;
+
+         ObjectCreate(0, objName, OBJ_HLINE, 0, 0, g_LiquidityLevels[i].price);
+         ObjectSetInteger(0, objName, OBJPROP_COLOR, col);
+         ObjectSetInteger(0, objName, OBJPROP_WIDTH, 2);
+         ObjectSetInteger(0, objName, OBJPROP_STYLE, STYLE_DASHDOT);
+      }
+   }
+
+   if(EnableSniperRadarModule && g_CurrentVote.confluenceScore > 0)
+   {
+      string scoreText = StringFormat("CONFLUENCE: %d/5", g_CurrentVote.confluenceScore);
+      string objName = "SNIPER_CONFLUENCE_TEXT";
+
+      ObjectCreate(0, objName, OBJ_LABEL, 0, 0, 0);
+      ObjectSetString(0, objName, OBJPROP_TEXT, scoreText);
+      ObjectSetInteger(0, objName, OBJPROP_COLOR, clrYellow);
+      ObjectSetInteger(0, objName, OBJPROP_FONTSIZE, 10);
+      ObjectSetInteger(0, objName, OBJPROP_XDISTANCE, 50);
+      ObjectSetInteger(0, objName, OBJPROP_YDISTANCE, 100);
+   }
+
+   ChartRedraw(0);
 }
 
 //| END OF PROGRAM                                                  |

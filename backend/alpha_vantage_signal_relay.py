@@ -1,5 +1,6 @@
 import sys
 import os
+from dotenv import load_dotenv
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 import requests
 import time
@@ -8,7 +9,11 @@ from backend.whatsapp_utils import send_whatsapp_message
 import json
 from datetime import datetime
 
-API_KEY = "4EM6K09BZU52S9JD"
+# Load environment variables
+load_dotenv()
+API_KEY = os.getenv("ALPHA_VANTAGE_API_KEY")
+if not API_KEY:
+    raise ValueError("❌ ALPHA_VANTAGE_API_KEY not configured in .env file")
 SYMBOLS = [
     ("EUR", "USD"),
     ("GBP", "USD"),

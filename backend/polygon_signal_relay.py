@@ -1,5 +1,6 @@
 import sys
 import os
+from dotenv import load_dotenv
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 import requests
 import time
@@ -8,7 +9,11 @@ import json
 from datetime import datetime
 from backend.whatsapp_utils import send_whatsapp_message
 
-API_KEY = "CJFmHohSIYSrNGfTD8I7TDW_Zq2HMq9s"
+# Load environment variables
+load_dotenv()
+API_KEY = os.getenv("POLYGON_API_KEY")
+if not API_KEY:
+    raise ValueError("❌ POLYGON_API_KEY not configured in .env file")
 # Exemples de symboles US (actions), Forex, Crypto
 SYMBOLS = [
     ("AAPL", "stock"),

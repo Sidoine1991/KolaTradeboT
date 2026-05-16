@@ -4,7 +4,7 @@ Serveur IA pour TradBOT - Gestion des prédictions et analyses de marché
 Version: 2.1.0 - STABILISÉ
 Corrections majeures:
 - Ajout champ timestamp dans DecisionRequest (fix erreur 422)
-- Correction gestion colonne timestamp dans adaptive_predict.py  
+- Correction gestion colonne timestamp dans adaptive_predict.py
 - Ajout endpoint /trend principal (fix erreur 404)
 - Définition variable backend_available (fix NameError)
 - Amélioration gestion des erreurs et logging
@@ -24,6 +24,7 @@ import contextlib
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Tuple, Set, Union
+from dotenv import load_dotenv
 
 from uuid import uuid4
 from dataclasses import dataclass, asdict
@@ -43,6 +44,43 @@ import requests
 import re
 import joblib
 from collections import deque, defaultdict
+from slowapi import Limiter
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
+
+# Load environment variables from .env
+load_dotenv()
+
+# === ENVIRONMENT VALIDATION ===
+def validate_required_env_vars():
+    """Validate all required environment variables are set"""
+    required_vars = [
+        "GEMINI_API_KEY",
+        "SUPABASE_URL",
+        "SUPABASE_KEY",
+    ]
+    missing = [var for var in required_vars if not os.getenv(var)]
+    if missing:
+        raise EnvironmentError(
+            f"❌ CRITICAL: Missing required environment variables: {', '.join(missing)}\n"
+            f"Please configure these in your .env file"
+        )
+    print("✅ All required environment variables configured")
+
+# Validate at startup
+validate_required_env_vars()
+
+# === INPUT VALIDATION ===
+VALID_SYMBOL_PATTERN = re.compile(r'^[A-Z0-9_]{2,20}$')
+VALID_TIMEFRAMES = {'M1', 'M5', 'M15', 'M30', 'H1', 'H4', 'D1', 'W1'}
+
+def validate_symbol(symbol: str) -> bool:
+    """Validate symbol format"""
+    return bool(symbol and VALID_SYMBOL_PATTERN.match(symbol))
+
+def validate_timeframe(timeframe: str) -> bool:
+    """Validate timeframe is known"""
+    return timeframe in VALID_TIMEFRAMES
 
 # --- Supabase config helpers ---
 def _get_supabase_config(strict: bool = True) -> Tuple[str, str]:
@@ -3041,12 +3079,22 @@ def adjust_decision_with_rules(
 # Charger les éventuelles règles d'association au démarrage
 load_association_rules()
 
+# === RATE LIMITING SETUP ===
+limiter = Limiter(key_func=get_remote_address)
+
 # Configuration de l'application
 app = FastAPI(
     title="TradBOT AI Server",
     description="API de prédiction et d'analyse pour le robot de trading TradBOT",
     version="2.0.0"
 )
+
+# Add rate limiter to app state
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, lambda req, exc: JSONResponse(
+    status_code=429,
+    content={"detail": "Too many requests - rate limit exceeded (10/minute)"}
+))
 
 # Configuration CORS pour permettre les requêtes depuis MT5
 app.add_middleware(
@@ -11695,10 +11743,25 @@ async def time_windows(symbol: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/predict/{symbol}")
-async def predict(symbol: str, timeframe: str = "M1"):
+@limiter.limit("10/minute")  # Rate limit: 10 requests per minute per IP
+async def predict(request: Request, symbol: str, timeframe: str = "M1"):
     """
     Prédit la tendance pour un symbole donné (endpoint legacy)
+    SECURITY: Validates symbol format and timeframe
     """
+    # INPUT VALIDATION
+    if not validate_symbol(symbol):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid symbol format: {symbol}. Must be 2-20 alphanumeric characters."
+        )
+
+    if not validate_timeframe(timeframe):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid timeframe: {timeframe}. Must be one of {VALID_TIMEFRAMES}"
+        )
+
     try:
         cache_key = f"{symbol}_{timeframe}"
         current_time = datetime.now().timestamp()
@@ -12169,19 +12232,35 @@ def analyze_candle_characteristics(df: pd.DataFrame, lookback: int = 10) -> Dict
     return characteristics
 
 @app.post("/prediction")
-async def predict_prices(request: PricePredictionRequest):
+@limiter.limit("10/minute")  # Rate limit: 10 requests per minute per IP
+async def predict_prices(req: Request, request: PricePredictionRequest):
     """
     Prédit une série de prix futurs pour un symbole donné.
     Utilisé par le robot MQ5 pour les prédictions multi-timeframes (M1, M15, M30, H1).
     Le robot envoie les données historiques pour améliorer la précision de la prédiction.
-    
+
+    SECURITY: Validates symbol and timeframe format
+
     Args:
         request: Requête contenant le symbole, prix actuel, nombre de bougies à prédire, timeframe,
                  et optionnellement les données historiques (history)
-        
+
     Returns:
         dict: Dictionnaire contenant un tableau "prediction" avec les prix prédits
     """
+    # INPUT VALIDATION
+    if not validate_symbol(request.symbol):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid symbol format: {request.symbol}"
+        )
+
+    if not validate_timeframe(request.timeframe):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid timeframe: {request.timeframe}"
+        )
+
     try:
         symbol = request.symbol
         current_price = request.current_price
