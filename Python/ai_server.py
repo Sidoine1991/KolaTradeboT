@@ -2,7 +2,7 @@
 """
 TradBOT AI Server - AWS RDS Version
 Prédictions et analyses de marché - Sans Supabase
-Version: 2.1.0 AWS-RDS - CACHE_BUST_20260516_2025
+Version: 2.1.0 AWS-RDS - FINAL_FORCE_REBUILD_2149
 
 Features:
 - Connexion AWS RDS PostgreSQL
