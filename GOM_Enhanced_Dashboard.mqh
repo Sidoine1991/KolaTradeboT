@@ -259,6 +259,21 @@ void GOM_ComputeLiveMT5DashMetrics(LiveMT5DashMetrics &m)
    }
 }
 
+datetime GOM_SanitizeEpochTimestamp(const double raw)
+{
+   if(raw <= 0.0)
+      return 0;
+   long sec = (long)raw;
+   if(sec > 1000000000000L)
+      sec /= 1000;
+   datetime now = TimeCurrent();
+   if(sec < (long)now - 3600)
+      return 0;
+   if(sec > (long)now + 86400 * 14)
+      return 0;
+   return (datetime)sec;
+}
+
 // État du robot
 struct RobotStatus
 {
@@ -281,8 +296,10 @@ RobotStatus GOM_GetRobotStatus()
    RobotStatus status;
 
    status.isActive = (!GlobalVariableCheck("ROBOT_ACTIVE") || GlobalVariableGet("ROBOT_ACTIVE") > 0.5);
-   status.isPaused = GlobalVariableGet("ROBOT_PAUSED") > 0.5;
-   status.pauseUntil = (datetime)GlobalVariableGet("ROBOT_PAUSE_UNTIL");
+   status.pauseUntil = GOM_SanitizeEpochTimestamp(GlobalVariableGet("ROBOT_PAUSE_UNTIL"));
+   status.isPaused = (GlobalVariableGet("ROBOT_PAUSED") > 0.5);
+   if(status.isPaused && (status.pauseUntil == 0 || status.pauseUntil <= TimeCurrent()))
+      status.isPaused = false;
 
    // Raison de la pause
    if(status.isPaused)
@@ -314,21 +331,80 @@ RobotStatus GOM_GetRobotStatus()
 
    status.eaTradingEnabled = (!GlobalVariableCheck("EA_DASH_ENABLE_TRADING") ||
                               GlobalVariableGet("EA_DASH_ENABLE_TRADING") > 0.5);
-   status.eaResumeAt = (datetime)GlobalVariableGet("EA_DASH_RESUME_AT");
+   status.eaResumeAt = GOM_SanitizeEpochTimestamp(GlobalVariableGet("EA_DASH_RESUME_AT"));
    status.utcWindowPause = (GlobalVariableCheck("EA_DASH_UTC_PAUSE") &&
                             GlobalVariableGet("EA_DASH_UTC_PAUSE") > 0.5);
+
+   if(!status.isPaused && status.eaResumeAt > TimeCurrent())
+      status.isPaused = true;
 
    return status;
 }
 
-// Dessiner une cellule de tableau de bord moderne
+// Nombre de lignes dans un libellé multi-lignes
+int GOM_DashTextLineCount(const string text)
+{
+   int n = 1;
+   for(int i = 0; i < StringLen(text); i++)
+      if(StringGetCharacter(text, i) == '\n')
+         n++;
+   return n;
+}
+
+// Hauteur minimale de cellule selon le contenu (évite débordement)
+int GOM_DashRowHeight(const int baseH, const string text, const int fontSize)
+{
+   int lines = GOM_DashTextLineCount(text);
+   int linePx = MathMax(11, fontSize + 4);
+   int need = lines * linePx + 10;
+   return MathMax(baseH, need);
+}
+
+// Tronquer une ligne pour éviter le débordement horizontal
+string GOM_DashTruncate(const string text, const int maxChars)
+{
+   if(maxChars < 8)
+      return text;
+   int len = StringLen(text);
+   if(len <= maxChars)
+      return text;
+   return StringSubstr(text, 0, maxChars - 3) + "...";
+}
+
+int GOM_DashBarWidth(const int baseX, const int preferredW)
+{
+   int chartPixW = (int)ChartGetInteger(0, CHART_WIDTH_IN_PIXELS);
+   if(chartPixW < 400)
+      chartPixW = 1200;
+   int avail = chartPixW - baseX - 14;
+   int w = preferredW;
+   if(w > avail)
+      w = avail;
+   if(w < 200)
+      w = MathMax(200, avail);
+   return w;
+}
+
+void GOM_DrawDashRow(string objName, int x, int &cy, int w, int rowH, int gap,
+                     string text, color bgColor, color txtColor, int fontSize, bool anchorTop)
+{
+   int maxCh = MathMax(24, w / MathMax(6, fontSize + 1));
+   GOM_DrawDashCell(objName, x, cy, w, rowH, GOM_DashTruncate(text, maxCh),
+                    bgColor, txtColor, fontSize, anchorTop);
+   cy += rowH + gap;
+}
+
+// Dessiner une cellule de tableau de bord (texte aligné en haut à gauche)
 void GOM_DrawDashCell(string objName, int x, int y, int w, int h,
                       string text, color bgColor, color txtColor, int fontSize, bool anchorTop = false)
 {
-   // Choisir le coin d'ancrage
    ENUM_BASE_CORNER corner = anchorTop ? CORNER_LEFT_UPPER : CORNER_LEFT_LOWER;
+   int pad = 5;
+   int lines = GOM_DashTextLineCount(text);
+   int fs = fontSize;
+   if(lines >= 4) fs = MathMax(6, fontSize - 2);
+   else if(lines >= 3) fs = MathMax(7, fontSize - 1);
 
-   // Background rectangle
    if(ObjectFind(0, objName + "_BG") < 0)
       ObjectCreate(0, objName + "_BG", OBJ_RECTANGLE_LABEL, 0, 0, 0);
 
@@ -343,28 +419,31 @@ void GOM_DrawDashCell(string objName, int x, int y, int w, int h,
    ObjectSetInteger(0, objName + "_BG", OBJPROP_SELECTABLE, false);
    ObjectSetInteger(0, objName + "_BG", OBJPROP_HIDDEN, true);
 
-   // Text label
    if(ObjectFind(0, objName + "_TXT") < 0)
       ObjectCreate(0, objName + "_TXT", OBJ_LABEL, 0, 0, 0);
 
-   ObjectSetInteger(0, objName + "_TXT", OBJPROP_XDISTANCE, x + w/2);
-   ObjectSetInteger(0, objName + "_TXT", OBJPROP_YDISTANCE, y + h/2);
    ObjectSetInteger(0, objName + "_TXT", OBJPROP_COLOR, txtColor);
-   ObjectSetInteger(0, objName + "_TXT", OBJPROP_FONTSIZE, fontSize);
-   ObjectSetString(0, objName + "_TXT", OBJPROP_FONT, "Arial");
+   ObjectSetInteger(0, objName + "_TXT", OBJPROP_FONTSIZE, fs);
+   ObjectSetString(0, objName + "_TXT", OBJPROP_FONT, "Segoe UI");
    ObjectSetString(0, objName + "_TXT", OBJPROP_TEXT, text);
-   ObjectSetInteger(0, objName + "_TXT", OBJPROP_ANCHOR, ANCHOR_CENTER);
+   ObjectSetInteger(0, objName + "_TXT", OBJPROP_ANCHOR, ANCHOR_LEFT_UPPER);
    ObjectSetInteger(0, objName + "_TXT", OBJPROP_CORNER, corner);
+   ObjectSetInteger(0, objName + "_TXT", OBJPROP_XDISTANCE, x + pad);
+   if(anchorTop)
+      ObjectSetInteger(0, objName + "_TXT", OBJPROP_YDISTANCE, y + pad);
+   else
+      ObjectSetInteger(0, objName + "_TXT", OBJPROP_YDISTANCE, y + h - pad);
    ObjectSetInteger(0, objName + "_TXT", OBJPROP_SELECTABLE, false);
    ObjectSetInteger(0, objName + "_TXT", OBJPROP_HIDDEN, true);
 }
 
-// Tableau de bord compact et informatif (V3 avec paramètres)
+// Tableau de bord vertical — une ligne par bandeau (évite chevauchement)
 void GOM_DrawEnhancedDashboardV3(int posX = 10, int posY = 30, bool anchorTop = true, int cellWidth = 100, int cellHeight = 25, int fontSizeCustom = 8)
 {
-   // Nettoyer les dessins expirés d'abord
+   GOM_CleanEnhancedDashboard();
+
    static datetime lastClean = 0;
-   if(TimeCurrent() - lastClean > 300) // Toutes les 5 minutes
+   if(TimeCurrent() - lastClean > 300)
    {
       GOM_CleanExpiredDrawings();
       lastClean = TimeCurrent();
@@ -376,10 +455,10 @@ void GOM_DrawEnhancedDashboardV3(int posX = 10, int posY = 30, bool anchorTop = 
 
    int baseX = posX;
    int cy = posY;
-   int cellW = cellWidth;
-   int cellH = cellHeight;
    int gap = 2;
-   int fontSize = fontSizeCustom;
+   int fontSize = MathMax(6, MathMin(10, fontSizeCustom));
+   int rowH = MathMax(18, fontSize + 11);
+   int barW = GOM_DashBarWidth(baseX, MathMax(260, cellWidth * 2));
 
    color txtWhite = clrWhite;
    color bgDark = 0x1E1E1E;
@@ -389,297 +468,182 @@ void GOM_DrawEnhancedDashboardV3(int posX = 10, int posY = 30, bool anchorTop = 
    color bgBlue = 0x1565C0;
    color bgPurple = 0x4527A0;
 
-   int spanW = cellW * 3 + gap * 2;
    string accCur = AccountInfoString(ACCOUNT_CURRENCY);
    int spreadPts = (int)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
 
-   // Ligne 0 — bandeau identité graphique + spread + devise + levier
-   int hdrH = cellH + 22;
-   string hdrTxt = _Symbol + "  " + GOM_ChartPeriodTag()
-                   + "\n" + TimeToString(TimeCurrent(), TIME_DATE | TIME_MINUTES | TIME_SECONDS)
-                   + "  spr " + IntegerToString(spreadPts)
-                   + "\n" + accCur + "  |  lev 1:" + IntegerToString((int)lv.leverage);
-   GOM_DrawDashCell("DASH_HDR", baseX, cy, spanW, hdrH, hdrTxt, bgPurple, txtWhite, fontSize - 1, anchorTop);
-   cy += hdrH + gap;
+   string hdrLine = _Symbol + " " + GOM_ChartPeriodTag() + " | "
+                    + TimeToString(TimeCurrent(), TIME_DATE | TIME_MINUTES)
+                    + " | spr " + IntegerToString(spreadPts)
+                    + " | " + accCur + " 1:" + IntegerToString((int)lv.leverage);
+   GOM_DrawDashRow("DASH_HDR", baseX, cy, barW, rowH, gap, hdrLine, bgPurple, txtWhite, fontSize, anchorTop);
 
-   // Ligne 1 — état + positions sur ce symbole + equity / balance / flottant total
    bool termAuto = (TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) != 0);
-   string statusTxt = "🤖 ACTIVE";
+   string statusWord = "ACTIF";
    color statusBg = bgGreen;
-
    if(robot.utcWindowPause)
    {
-      statusTxt = "⏸️ UTC PAUSE";
+      statusWord = "PAUSE UTC";
       statusBg = bgOrange;
    }
    else if(robot.isPaused)
    {
-      statusTxt = "⏸️ PAUSE";
+      statusWord = "PAUSE";
       statusBg = bgOrange;
    }
    else if(!termAuto)
    {
-      statusTxt = "🔒 AUTO OFF";
+      statusWord = "AUTO OFF";
       statusBg = bgDark;
    }
    else if(!robot.eaTradingEnabled)
    {
-      statusTxt = "⏸️ STOPPED";
+      statusWord = "STOP";
       statusBg = bgDark;
    }
 
-   int r1h = cellH + 8;
-   GOM_DrawDashCell("DASH_STATUS", baseX, cy, cellW, r1h, statusTxt, statusBg, txtWhite, fontSize, anchorTop);
+   string rowStat = statusWord + " | POS " + IntegerToString(robot.positionsOpen)
+                    + " " + DoubleToString(lv.lotsOnSymbol, 2) + " lot"
+                    + " | Eq " + DoubleToString(lv.equity, 2)
+                    + " Bal " + DoubleToString(lv.balance, 2)
+                    + " Fl " + DoubleToString(lv.floatingPL, 2);
+   GOM_DrawDashRow("DASH_STATUS", baseX, cy, barW, rowH, gap, rowStat, statusBg, txtWhite, fontSize, anchorTop);
 
-   string posTxt = "📊 Ce symbole\nPOS " + IntegerToString(robot.positionsOpen)
-                   + "\n" + DoubleToString(lv.lotsOnSymbol, 2) + " lot";
-   GOM_DrawDashCell("DASH_POS", baseX + (cellW + gap), cy, cellW, r1h, posTxt, bgBlue, txtWhite, fontSize - 1, anchorTop);
-
-   string profitTxt = "💰 Equity\n" + DoubleToString(lv.equity, 2)
-                      + "\nBal " + DoubleToString(lv.balance, 2)
-                      + "\nFl Σ " + DoubleToString(lv.floatingPL, 2);
-   color profitBg = (lv.floatingPL >= 0.0) ? bgGreen : bgRed;
-   GOM_DrawDashCell("DASH_PROFIT", baseX + 2 * (cellW + gap), cy, cellW, r1h, profitTxt, profitBg, txtWhite, fontSize - 1, anchorTop);
-   cy += r1h + gap;
-
-   // Ligne 2 — exposition totale compte + marges + P&L réalisé jour (symbole) + flottant symbole
-   int r2h = cellH + 26;
-   string mlvlStr = "—";
+   string mlvlStr = "-";
    if(lv.marginUsed > 1e-8 && lv.marginLevelPct > 1e-8 && lv.marginLevelPct < 999999.0)
       mlvlStr = DoubleToString(lv.marginLevelPct, 1) + "%";
 
-   string acct1 = "🌐 Compte\nPOS " + IntegerToString(lv.positionsAccount)
-                  + "\nLots Σ " + DoubleToString(lv.lotsAccount, 2);
-   GOM_DrawDashCell("DASH_ACCT1", baseX, cy, cellW, r2h, acct1, bgBlue, txtWhite, fontSize - 1, anchorTop);
+   string rowAcct = "Compte POS " + IntegerToString(lv.positionsAccount)
+                    + " Lots " + DoubleToString(lv.lotsAccount, 2)
+                    + " | Marge U " + DoubleToString(lv.marginUsed, 2)
+                    + " Lib " + DoubleToString(lv.marginFree, 2)
+                    + " | Mg " + mlvlStr
+                    + " Real " + DoubleToString(lv.realizedTodayUSD, 2)
+                    + " FlSym " + DoubleToString(lv.floatingOnSymbol, 2);
+   GOM_DrawDashRow("DASH_ACCT", baseX, cy, barW, rowH, gap, rowAcct, bgBlue, txtWhite, fontSize, anchorTop);
 
-   string acct2 = "⚓ Marge\nU " + DoubleToString(lv.marginUsed, 2)
-                  + "\nLibre " + DoubleToString(lv.marginFree, 2);
-   GOM_DrawDashCell("DASH_ACCT2", baseX + (cellW + gap), cy, cellW, r2h, acct2, bgOrange, txtWhite, fontSize - 1, anchorTop);
-
-   string acct3 = "📐 Mg lvl\n" + mlvlStr
-                  + "\nRéal jr\n" + DoubleToString(lv.realizedTodayUSD, 2)
-                  + "\nFl sym\n" + DoubleToString(lv.floatingOnSymbol, 2);
-   GOM_DrawDashCell("DASH_ACCT3", baseX + 2 * (cellW + gap), cy, cellW, r2h, acct3, bgDark, txtWhite, fontSize - 1, anchorTop);
-   cy += r2h + gap;
-
-   // === PAUSE UTC ===
    if(robot.utcWindowPause)
    {
       MqlDateTime gmt;
       TimeToStruct(TimeGMT(), gmt);
-
-      string utcTxt = "⏰ UTC PAUSE (heure " + IntegerToString(gmt.hour) + "h UTC)";
-      GOM_DrawDashCell("DASH_UTC_REASON", baseX, cy,
-                       cellW * 2 + gap, cellH, utcTxt, bgOrange, txtWhite, fontSize - 1, anchorTop);
-
-      // Afficher prochaine fenêtre (simplifié: voir inputs EA)
-      string nextTxt = "↻ Voir inputs TradeWindow*";
-      GOM_DrawDashCell("DASH_UTC_NEXT", baseX + 2 * (cellW + gap), cy,
-                       cellW, cellH, nextTxt, bgOrange, txtWhite, fontSize - 2, anchorTop);
-
-      cy += cellH + gap;
-   }
-   else
-   {
-      ObjectDelete(0, "DASH_UTC_REASON_BG");
-      ObjectDelete(0, "DASH_UTC_REASON_TXT");
-      ObjectDelete(0, "DASH_UTC_NEXT_BG");
-      ObjectDelete(0, "DASH_UTC_NEXT_TXT");
+      string utcLine = "UTC ferme (h" + IntegerToString(gmt.hour) + " UTC) | voir TradeWindow*";
+      GOM_DrawDashRow("DASH_UTC", baseX, cy, barW, rowH, gap, utcLine, bgOrange, txtWhite, fontSize, anchorTop);
    }
 
-   // === PAUSE ML (GV) ===
    if(robot.isPaused)
    {
-      string pauseTxt = robot.pauseReason;
-      GOM_DrawDashCell("DASH_PAUSE_REASON", baseX, cy,
-                       cellW, cellH, pauseTxt, bgOrange, txtWhite, fontSize - 1, anchorTop);
-
-      // Calculer décompte et heure locale
       int remaining = (int)(robot.pauseUntil - TimeCurrent());
-      MqlDateTime localTime;
-      TimeToStruct(robot.pauseUntil, localTime);
-
-      string timeTxt = "⏱️ ";
+      string pauseLine = "Pause: " + robot.pauseReason;
       if(remaining > 0)
       {
          int hours = remaining / 3600;
          int mins = (remaining % 3600) / 60;
-         int secs = remaining % 60;
-         timeTxt += IntegerToString(hours) + "h" + IntegerToString(mins) + "m" + IntegerToString(secs) + "s";
-         timeTxt += "\n📅 " + IntegerToString(localTime.hour) + ":" +
-                    StringFormat("%02d", localTime.min) + " locale";
+         pauseLine += " | fin dans " + IntegerToString(hours) + "h" + IntegerToString(mins) + "m";
       }
       else
-      {
-         timeTxt += "BIENTÔT";
-      }
-
-      GOM_DrawDashCell("DASH_PAUSE_TIME", baseX + (cellW + gap), cy,
-                       cellW * 2 + gap, cellH + 10, timeTxt, bgOrange, txtWhite, fontSize - 1, anchorTop);
-
-      cy += cellH + 10 + gap;
+         pauseLine += " | bientot";
+      GOM_DrawDashRow("DASH_PAUSE", baseX, cy, barW, rowH, gap, pauseLine, bgOrange, txtWhite, fontSize, anchorTop);
    }
-   else
+
+   datetime nowTc = TimeCurrent();
+   if(!robot.eaTradingEnabled)
    {
-      // Supprimer les objets de pause
-      ObjectDelete(0, "DASH_PAUSE_REASON_BG");
-      ObjectDelete(0, "DASH_PAUSE_REASON_TXT");
-      ObjectDelete(0, "DASH_PAUSE_TIME_BG");
-      ObjectDelete(0, "DASH_PAUSE_TIME_TXT");
+      GOM_DrawDashRow("DASH_EA_RESUME", baseX, cy, barW, rowH, gap,
+                      "Trading OFF | activer EnableTrading", bgDark, txtWhite, fontSize, anchorTop);
    }
-
-   // === REPRISE / PAUSE CÔTÉ EA (vide EnableTrading, pauses jour, symbole, pertes…) ===
+   else if(robot.eaResumeAt > nowTc)
    {
-      datetime nowTc = TimeCurrent();
-      bool showEaResumeRow = false;
-      string eaResumeTxt = "";
-      color eaResumeBg = bgOrange;
-
-      if(!robot.eaTradingEnabled)
-      {
-         showEaResumeRow = true;
-         eaResumeTxt = "Trading OFF\n(Activez EnableTrading)";
-         eaResumeBg = bgDark;
-      }
-      else if(robot.eaResumeAt > nowTc)
-      {
-         showEaResumeRow = true;
-         int rem = (int)(robot.eaResumeAt - nowTc);
-         int h = rem / 3600;
-         int m = (rem % 3600) / 60;
-         int s = rem % 60;
-         int tzOff = (int)(TimeLocal() - TimeCurrent());
-         datetime resumeLocal = (datetime)((long)robot.eaResumeAt + (long)tzOff);
-         eaResumeTxt = "Reprise dans " + IntegerToString(h) + "h " + IntegerToString(m) + "m " + IntegerToString(s) + "s\n"
-                       + "À " + TimeToString(resumeLocal, TIME_DATE | TIME_MINUTES | TIME_SECONDS) + " (heure locale)";
-      }
-
-      if(showEaResumeRow)
-      {
-         int resumeH = cellH + 12;
-         GOM_DrawDashCell("DASH_EA_RESUME", baseX, cy,
-                          cellW * 3 + gap * 2, resumeH, eaResumeTxt, eaResumeBg, txtWhite, fontSize - 1, anchorTop);
-         cy += resumeH + gap;
-      }
-      else
-      {
-         ObjectDelete(0, "DASH_EA_RESUME_BG");
-         ObjectDelete(0, "DASH_EA_RESUME_TXT");
-      }
+      int rem = (int)(robot.eaResumeAt - nowTc);
+      int h = rem / 3600;
+      int m = (rem % 3600) / 60;
+      int s = rem % 60;
+      int tzOff = (int)(TimeLocal() - TimeCurrent());
+      datetime resumeLocal = (datetime)((long)robot.eaResumeAt + (long)tzOff);
+      string resumeLine = "Reprise " + IntegerToString(h) + "h" + IntegerToString(m) + "m" + IntegerToString(s) + "s"
+                          + " | " + TimeToString(resumeLocal, TIME_DATE | TIME_MINUTES);
+      GOM_DrawDashRow("DASH_EA_RESUME", baseX, cy, barW, rowH, gap, resumeLine, bgOrange, txtWhite, fontSize, anchorTop);
    }
 
-   // === ML cloud + stats jour (EA vs MT5) ===
-   int rMl = cellH + 12;
-
-   string accTxt = "☁ ML préc.\n";
-   color accBg = bgDark;
+   string mlPrec = "ML prec. -";
    if(ml.totalPredictions > 0)
-   {
-      accTxt += DoubleToString(ml.accuracyPercent, 1) + "%\n☁ WR "
-                + DoubleToString(ml.winRate, 1) + "%";
-      accBg = (ml.accuracyPercent >= 65) ? bgGreen :
-              (ml.accuracyPercent >= 55) ? bgOrange : bgRed;
-   }
-   else
-      accTxt += "— (RDS)";
+      mlPrec = "ML prec. " + DoubleToString(ml.accuracyPercent, 1) + "% WR "
+               + DoubleToString(ml.winRate, 1) + "%";
 
-   GOM_DrawDashCell("DASH_ML_ACC", baseX, cy, cellW, rMl, accTxt, accBg, txtWhite, fontSize - 1, anchorTop);
-
-   int wl = lv.winsToday + lv.lossesToday;
-   double dayWr = (wl > 0) ? (100.0 * (double)lv.winsToday / (double)wl) : 0.0;
-   string daySrc = "MT5";
    int dispW = lv.winsToday;
    int dispL = lv.lossesToday;
-
+   string daySrc = "MT5";
    if(GlobalVariableCheck("EA_DASH_TRADES_DAY"))
    {
       daySrc = "EA";
       dispW = (int)GlobalVariableGet("EA_DASH_WINS_DAY");
       dispL = (int)GlobalVariableGet("EA_DASH_LOSSES_DAY");
-      wl = dispW + dispL;
-      dayWr = (wl > 0) ? (100.0 * (double)dispW / (double)wl) : 0.0;
    }
-
-   string wrTxt = "📅 " + daySrc + " jour\nW" + IntegerToString(dispW)
-                  + " L" + IntegerToString(dispL);
+   int wl = dispW + dispL;
+   string dayLine = daySrc + " jour W" + IntegerToString(dispW) + " L" + IntegerToString(dispL);
    if(wl > 0)
-      wrTxt += "\n" + DoubleToString(dayWr, 0) + "%";
-   color wrBg = (wl == 0) ? bgDark :
-                (dayWr >= 55.0) ? bgGreen :
-                (dayWr >= 45.0) ? bgOrange : bgRed;
-   GOM_DrawDashCell("DASH_ML_WR", baseX + (cellW + gap), cy, cellW, rMl, wrTxt, wrBg, txtWhite, fontSize - 1, anchorTop);
+      dayLine += " (" + DoubleToString(100.0 * dispW / wl, 0) + "%)";
 
-   string cloudTxt = "☁ Cloud hist.\nTr " + IntegerToString(ml.tradesTotal)
-                     + " | G " + IntegerToString(ml.tradesWin)
-                     + "\nØ " + DoubleToString(ml.avgProfitUSD, 2) + " " + accCur
-                     + "\nMod x" + IntegerToString(ml.modelsLoaded);
-   color cloudBg = (ml.tradesTotal > 0) ? bgBlue : bgDark;
-   GOM_DrawDashCell("DASH_ML_MODELS", baseX + 2 * (cellW + gap), cy, cellW, rMl, cloudTxt, cloudBg, txtWhite, fontSize - 1, anchorTop);
-   cy += rMl + gap;
+   string cloudLine = "Cloud Tr " + IntegerToString(ml.tradesTotal)
+                      + " G " + IntegerToString(ml.tradesWin)
+                      + " | Mod x" + IntegerToString(ml.modelsLoaded);
+   string rowMl = mlPrec + " | " + dayLine + " | " + cloudLine;
+   color dayBg = bgDark;
+   if(wl > 0)
+   {
+      double dayWr = 100.0 * dispW / wl;
+      dayBg = (dayWr >= 55.0) ? bgGreen : ((dayWr >= 45.0) ? bgOrange : bgRed);
+   }
+   GOM_DrawDashRow("DASH_ML", baseX, cy, barW, rowH, gap, rowMl, dayBg, txtWhite, fontSize, anchorTop);
 
-   // === Dernière synchro ML + détail clôtures + P&L combiné ===
-   int rBot = cellH + 12;
-
-   string trainTxt = "—";
-   if(ml.lastTraining > 0)
-      trainTxt = TimeToString(ml.lastTraining, TIME_DATE | TIME_MINUTES);
-
-   string predTxt = "🔮 Age pred.\n";
+   string predAgeTxt = "-";
    color predBg = bgDark;
-   if(ml.lastPrediction <= 0)
-      predTxt += "—";
-   else
+   if(ml.lastPrediction > 0)
    {
       int predAge = (int)(TimeCurrent() - ml.lastPrediction);
       if(predAge < 60)
-         predTxt += IntegerToString(predAge) + "s";
+         predAgeTxt = IntegerToString(predAge) + "s";
       else if(predAge < 3600)
-         predTxt += IntegerToString(predAge / 60) + "m";
+         predAgeTxt = IntegerToString(predAge / 60) + "m";
       else if(predAge < 86400 * 365)
-         predTxt += IntegerToString(predAge / 3600) + "h";
-      else
-         predTxt += "—";
-
-      predBg = (predAge < 120) ? bgGreen :
-               (predAge < 600) ? bgOrange : bgRed;
+         predAgeTxt = IntegerToString(predAge / 3600) + "h";
+      predBg = (predAge < 120) ? bgGreen : ((predAge < 600) ? bgOrange : bgRed);
    }
-   predTxt += "\nTrain\n" + trainTxt;
+   string trainTxt = "-";
+   if(ml.lastTraining > 0)
+      trainTxt = TimeToString(ml.lastTraining, TIME_DATE | TIME_MINUTES);
 
-   GOM_DrawDashCell("DASH_ML_PRED", baseX, cy, cellW, rBot, predTxt, predBg, txtWhite, fontSize - 1, anchorTop);
-
-   string totalPredTxt = "📊 Broker jr\nClôtures " + IntegerToString(lv.closedDealsToday)
-                         + "\nPrédit. " + IntegerToString(ml.totalPredictions)
-                         + "\nCible % " + DoubleToString(robot.targetReachedPct, 0);
-   GOM_DrawDashCell("DASH_ML_TOTAL", baseX + (cellW + gap), cy, cellW, rBot, totalPredTxt, bgDark, txtWhite, fontSize - 1, anchorTop);
+   string rowPred = "Pred " + predAgeTxt + " | Train " + trainTxt
+                    + " | Clot " + IntegerToString(lv.closedDealsToday)
+                    + " | PredTot " + IntegerToString(ml.totalPredictions)
+                    + " | Cible " + DoubleToString(robot.targetReachedPct, 0) + "%";
+   GOM_DrawDashRow("DASH_PRED", baseX, cy, barW, rowH, gap, rowPred, predBg, txtWhite, fontSize, anchorTop);
 
    string srvMode = "?";
    long tmAcc = AccountInfoInteger(ACCOUNT_TRADE_MODE);
-   if(tmAcc == ACCOUNT_TRADE_MODE_DEMO) srvMode = "Démo";
-   else if(tmAcc == ACCOUNT_TRADE_MODE_REAL) srvMode = "Réel";
+   if(tmAcc == ACCOUNT_TRADE_MODE_DEMO) srvMode = "Demo";
+   else if(tmAcc == ACCOUNT_TRADE_MODE_REAL) srvMode = "Reel";
    else if(tmAcc == ACCOUNT_TRADE_MODE_CONTEST) srvMode = "Contest";
 
-   string tradesTxt = "Σ P&L jr\n" + DoubleToString(robot.dailyProfitUSD, 2) + " " + accCur
-                      + "\nFl sym " + DoubleToString(lv.floatingOnSymbol, 2)
-                      + "\n" + srvMode;
-   color tradesBg = (robot.dailyProfitUSD >= 0.0) ? bgGreen : bgRed;
-   GOM_DrawDashCell("DASH_ML_TRADES", baseX + 2 * (cellW + gap), cy, cellW, rBot, tradesTxt, tradesBg, txtWhite, fontSize - 1, anchorTop);
-   // Forcer le rafraîchissement
+   color pnlBg = (robot.dailyProfitUSD >= 0.0) ? bgGreen : bgRed;
+   string rowPnl = "P&L jr " + DoubleToString(robot.dailyProfitUSD, 2) + " " + accCur
+                   + " | Fl sym " + DoubleToString(lv.floatingOnSymbol, 2)
+                   + " | " + srvMode;
+   GOM_DrawDashRow("DASH_PNL", baseX, cy, barW, rowH, gap, rowPnl, pnlBg, txtWhite, fontSize, anchorTop);
+
    ChartRedraw(0);
 }
 
-// Nettoyer tout le tableau de bord
+void GOM_DrawEnhancedDashboard(void)
+{
+   GOM_DrawEnhancedDashboardV3();
+}
+
+// Nettoyer tout le tableau de bord (y compris anciennes cellules grille)
 void GOM_CleanEnhancedDashboard()
 {
-   string prefixes[] = {"DASH_HDR",
-                        "DASH_STATUS", "DASH_POS", "DASH_PROFIT",
-                        "DASH_ACCT1", "DASH_ACCT2", "DASH_ACCT3",
-                        "DASH_PAUSE_REASON", "DASH_PAUSE_TIME", "DASH_EA_RESUME",
-                        "DASH_ML_ACC", "DASH_ML_WR", "DASH_ML_MODELS",
-                        "DASH_ML_PRED", "DASH_ML_TOTAL", "DASH_ML_TRADES"};
-
-   for(int i = 0; i < ArraySize(prefixes); i++)
+   for(int i = ObjectsTotal(0) - 1; i >= 0; i--)
    {
-      ObjectDelete(0, prefixes[i] + "_BG");
-      ObjectDelete(0, prefixes[i] + "_TXT");
+      string name = ObjectName(0, i);
+      if(StringFind(name, "DASH_") == 0)
+         ObjectDelete(0, name);
    }
 }
