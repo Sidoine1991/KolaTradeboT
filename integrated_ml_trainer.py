@@ -26,13 +26,13 @@ warnings.filterwarnings('ignore')
 try:
     import xgboost as xgb
     XGBOOST_AVAILABLE = True
-except ImportError:
+except (ImportError, OSError):
     XGBOOST_AVAILABLE = False
 
 try:
     import lightgbm as lgb  # noqa: F401
     LIGHTGBM_AVAILABLE = True
-except ImportError:
+except (ImportError, OSError):
     LIGHTGBM_AVAILABLE = False
 
 _LIGHTGBM_SKIP_LOGGED = False

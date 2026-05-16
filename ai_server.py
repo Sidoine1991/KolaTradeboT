@@ -178,14 +178,18 @@ def _env_bool(name: str, default: bool = False) -> bool:
 validate_required_env_vars()
 
 # ===== SYSTÈME D'APPRENTISSAGE AUTOMATIQUE INTÉGRÉ =====
-# Importer le système ML intégré
-try:
-    from integrated_ml_trainer import ml_trainer
-    ML_TRAINER_AVAILABLE = True
-    logger.info("🤖 Système d'entraînement continu intégré chargé")
-except ImportError as e:
-    ML_TRAINER_AVAILABLE = False
-    logger.warning(f"⚠️ Système d'entraînement continu non disponible: {e}")
+ML_TRAINER_AVAILABLE = False
+if _env_bool("DISABLE_ML_TRAINING", False):
+    logger.info(
+        "Entraînement ML désactivé (DISABLE_ML_TRAINING=true) — integrated_ml_trainer non chargé"
+    )
+else:
+    try:
+        from integrated_ml_trainer import ml_trainer
+        ML_TRAINER_AVAILABLE = True
+        logger.info("🤖 Système d'entraînement continu intégré chargé")
+    except (ImportError, OSError) as e:
+        logger.warning(f"⚠️ Système d'entraînement continu non disponible: {e}")
 
 try:
     from backend.weltrade_symbols import WELTRADE_STARTUP_TRAIN_SYMBOLS
