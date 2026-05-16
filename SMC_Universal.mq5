@@ -8690,7 +8690,7 @@ input double CumulativeLossPauseThresholdDollars = 1.0; // Pertes consécutives 
 input int    CumulativeLossPauseMinutes = 60; // Durée de pause après pertes consécutives (min) — pause longue pour calmer
 input bool   EnableProfitLock             = true;  // Stop si gros giveback après gros gain
 input double ProfitLockStartDollars       = 3.0;  // Active dès 3$ de gain — plus tolérant (3x)
-input double ProfitLockMaxGivebackeDollars = 0.50;  // Giveback max 0.50$ depuis le pic — plus de marge
+input double ProfitLockMaxGivebackDollars = 0.50;  // Giveback max 0.50$ depuis le pic — plus de marge
 input bool   ProfitLockClosePositions     = true;  // Fermer positions + supprimer pending lors du stop
 
 input group "=== SALVAGE BANK (sauvegarde gain jour ≥ 4.00$) ==="
