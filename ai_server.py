@@ -52,23 +52,38 @@ from slowapi.errors import RateLimitExceeded
 load_dotenv()
 
 # === ENVIRONMENT VALIDATION ===
+def _env_bool_early(name: str, default: bool = False) -> bool:
+    val = os.getenv(name)
+    if val is None:
+        return default
+    return val.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def validate_required_env_vars():
-    """Validate all required environment variables are set"""
-    required_vars = [
-        "GEMINI_API_KEY",
-        "SUPABASE_URL",
-        "SUPABASE_KEY",
-    ]
-    missing = [var for var in required_vars if not os.getenv(var)]
+    """Validate environment variables according to deployment mode (Render / local)."""
+    missing: List[str] = []
+
+    if _env_bool_early("USE_SUPABASE", False):
+        if not (os.getenv("SUPABASE_URL") or "").strip():
+            missing.append("SUPABASE_URL")
+        supabase_key = (
+            os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+            or os.getenv("SUPABASE_SERVICE_KEY")
+            or os.getenv("SUPABASE_ANON_KEY")
+            or os.getenv("SUPABASE_KEY")
+        )
+        if not (supabase_key or "").strip():
+            missing.append("SUPABASE_KEY (ou SUPABASE_SERVICE_KEY / SUPABASE_ANON_KEY)")
+
+    if _env_bool_early("ENABLE_GEMINI", False) and not (os.getenv("GEMINI_API_KEY") or "").strip():
+        missing.append("GEMINI_API_KEY")
+
     if missing:
         raise EnvironmentError(
             f"❌ CRITICAL: Missing required environment variables: {', '.join(missing)}\n"
-            f"Please configure these in your .env file"
+            f"Configure-les dans le dashboard Render (Environment) ou dans votre fichier .env"
         )
-    print("✅ All required environment variables configured")
-
-# Validate at startup
-validate_required_env_vars()
+    print("✅ Required environment variables configured for current deployment mode")
 
 # === INPUT VALIDATION ===
 VALID_SYMBOL_PATTERN = re.compile(r'^[A-Z0-9_]{2,20}$')
@@ -158,6 +173,9 @@ def _env_bool(name: str, default: bool = False) -> bool:
     if val is None:
         return default
     return val.strip().lower() in {"1", "true", "yes", "on"}
+
+# Validate at startup (after helpers / AWS RDS import)
+validate_required_env_vars()
 
 # ===== SYSTÈME D'APPRENTISSAGE AUTOMATIQUE INTÉGRÉ =====
 # Importer le système ML intégré
