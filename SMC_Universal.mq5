@@ -11100,7 +11100,7 @@ int OnInit()
       Print("🧹 Nettoyage complet des anciens dessins effectué au démarrage");
    }
    if(DrawingsMaxAgeMinutes > 0)
-      GOM_CleanExpiredDrawings();
+      GOM_CleanExpiredDrawings(DrawingsMaxAgeMinutes * 60);
 
    atrHandle = iATR(_Symbol, LTF, 14);
    emaHandle = iMA(_Symbol, LTF, 9, 0, MODE_EMA, PRICE_CLOSE);
@@ -14445,7 +14445,7 @@ void UpdateDashboard()
       // 🆕 OPTIMIZATION: Clean expired drawings on EVERY dashboard refresh (not every 60s)
       // This prevents object accumulation and memory leaks
       if(DrawingsMaxAgeMinutes > 0)
-         GOM_CleanExpiredDrawings();
+         GOM_CleanExpiredDrawings(DrawingsMaxAgeMinutes * 60);
 
       GOM_DrawEnhancedDashboardV3(DashboardMLPosX, DashboardMLPosY, DashboardMLAnchorTop,
                                   DashboardMLCellWidth, DashboardMLCellHeight, DashboardMLFontSize);
