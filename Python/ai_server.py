@@ -2,7 +2,7 @@
 """
 TradBOT AI Server - AWS RDS Version
 Prédictions et analyses de marché - Sans Supabase
-Version: 2.1.0 AWS-RDS - FINAL_FORCE_REBUILD_2149
+Version: 2.1.0 AWS-RDS - CLEAN_AWS_ONLY_NO_ENV_VALIDATION
 
 Features:
 - Connexion AWS RDS PostgreSQL
@@ -10,7 +10,8 @@ Features:
 - Prédictions de signaux de trading
 - Analyse de marché
 - Pas de dépendances Supabase
-- NO Supabase validation (clean AWS-only)
+- NO environment variable validation needed
+- NO Supabase, NO Gemini API key required
 """
 
 import os
