@@ -271,6 +271,7 @@ struct RobotStatus
    double targetReachedPct;   // % de l'objectif atteint
    bool eaTradingEnabled;     // EnableTrading (EA) — poussé par SMC_Universal
    datetime eaResumeAt;       // Fin de pause « interne » EA (serveur), 0 = aucune
+   bool utcWindowPause;       // Pause UTC hors fenêtres autorisées
    LiveMT5DashMetrics live;   // Toujours synchronisé MT5
 };
 
@@ -314,6 +315,8 @@ RobotStatus GOM_GetRobotStatus()
    status.eaTradingEnabled = (!GlobalVariableCheck("EA_DASH_ENABLE_TRADING") ||
                               GlobalVariableGet("EA_DASH_ENABLE_TRADING") > 0.5);
    status.eaResumeAt = (datetime)GlobalVariableGet("EA_DASH_RESUME_AT");
+   status.utcWindowPause = (GlobalVariableCheck("EA_DASH_UTC_PAUSE") &&
+                            GlobalVariableGet("EA_DASH_UTC_PAUSE") > 0.5);
 
    return status;
 }
@@ -404,7 +407,12 @@ void GOM_DrawEnhancedDashboardV3(int posX = 10, int posY = 30, bool anchorTop = 
    string statusTxt = "🤖 ACTIVE";
    color statusBg = bgGreen;
 
-   if(robot.isPaused)
+   if(robot.utcWindowPause)
+   {
+      statusTxt = "⏸️ UTC PAUSE";
+      statusBg = bgOrange;
+   }
+   else if(robot.isPaused)
    {
       statusTxt = "⏸️ PAUSE";
       statusBg = bgOrange;
@@ -454,6 +462,31 @@ void GOM_DrawEnhancedDashboardV3(int posX = 10, int posY = 30, bool anchorTop = 
    GOM_DrawDashCell("DASH_ACCT3", baseX + 2 * (cellW + gap), cy, cellW, r2h, acct3, bgDark, txtWhite, fontSize - 1, anchorTop);
    cy += r2h + gap;
 
+   // === PAUSE UTC ===
+   if(robot.utcWindowPause)
+   {
+      MqlDateTime gmt;
+      TimeToStruct(TimeGMT(), gmt);
+
+      string utcTxt = "⏰ UTC PAUSE (heure " + IntegerToString(gmt.hour) + "h UTC)";
+      GOM_DrawDashCell("DASH_UTC_REASON", baseX, cy,
+                       cellW * 2 + gap, cellH, utcTxt, bgOrange, txtWhite, fontSize - 1, anchorTop);
+
+      // Afficher prochaine fenêtre (simplifié: voir inputs EA)
+      string nextTxt = "↻ Voir inputs TradeWindow*";
+      GOM_DrawDashCell("DASH_UTC_NEXT", baseX + 2 * (cellW + gap), cy,
+                       cellW, cellH, nextTxt, bgOrange, txtWhite, fontSize - 2, anchorTop);
+
+      cy += cellH + gap;
+   }
+   else
+   {
+      ObjectDelete(0, "DASH_UTC_REASON_BG");
+      ObjectDelete(0, "DASH_UTC_REASON_TXT");
+      ObjectDelete(0, "DASH_UTC_NEXT_BG");
+      ObjectDelete(0, "DASH_UTC_NEXT_TXT");
+   }
+
    // === PAUSE ML (GV) ===
    if(robot.isPaused)
    {
@@ -461,23 +494,30 @@ void GOM_DrawEnhancedDashboardV3(int posX = 10, int posY = 30, bool anchorTop = 
       GOM_DrawDashCell("DASH_PAUSE_REASON", baseX, cy,
                        cellW, cellH, pauseTxt, bgOrange, txtWhite, fontSize - 1, anchorTop);
 
+      // Calculer décompte et heure locale
       int remaining = (int)(robot.pauseUntil - TimeCurrent());
+      MqlDateTime localTime;
+      TimeToStruct(robot.pauseUntil, localTime);
+
       string timeTxt = "⏱️ ";
       if(remaining > 0)
       {
          int hours = remaining / 3600;
          int mins = (remaining % 3600) / 60;
-         timeTxt += IntegerToString(hours) + "h" + IntegerToString(mins) + "m";
+         int secs = remaining % 60;
+         timeTxt += IntegerToString(hours) + "h" + IntegerToString(mins) + "m" + IntegerToString(secs) + "s";
+         timeTxt += "\n📅 " + IntegerToString(localTime.hour) + ":" +
+                    StringFormat("%02d", localTime.min) + " locale";
       }
       else
       {
-         timeTxt += "SOON";
+         timeTxt += "BIENTÔT";
       }
 
       GOM_DrawDashCell("DASH_PAUSE_TIME", baseX + (cellW + gap), cy,
-                       cellW * 2 + gap, cellH, timeTxt, bgOrange, txtWhite, fontSize, anchorTop);
+                       cellW * 2 + gap, cellH + 10, timeTxt, bgOrange, txtWhite, fontSize - 1, anchorTop);
 
-      cy += cellH + gap;
+      cy += cellH + 10 + gap;
    }
    else
    {
