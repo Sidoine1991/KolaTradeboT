@@ -443,7 +443,7 @@ void GOM_DrawEnhancedDashboardV3(int posX = 10, int posY = 30, bool anchorTop = 
    cy += r1h + gap;
 
    // Ligne 2 — exposition totale compte + marges + P&L réalisé jour (symbole) + flottant symbole
-   int r2h = cellH + 14;
+   int r2h = cellH + 26;
    string mlvlStr = "—";
    if(lv.marginUsed > 1e-8 && lv.marginLevelPct > 1e-8 && lv.marginLevelPct < 999999.0)
       mlvlStr = DoubleToString(lv.marginLevelPct, 1) + "%";

@@ -89,8 +89,8 @@ input bool   UseEnhancedDashboard = true;       // Activer le tableau de bord ML
 input int    DashboardMLPosX = 10;              // Position X (pixels depuis le bord gauche)
 input int    DashboardMLPosY = 30;              // Position Y (pixels depuis le haut)
 input bool   DashboardMLAnchorTop = true;       // Ancrer en haut (true) ou en bas (false)
-input int    DashboardMLCellWidth = 100;        // Largeur des cellules
-input int    DashboardMLCellHeight = 32;        // Hauteur des cellules (+ lignes = tableau plus lisible)
+input int    DashboardMLCellWidth = 110;        // Largeur des cellules
+input int    DashboardMLCellHeight = 40;        // Hauteur des cellules (+ lignes = tableau plus lisible)
 input int    DashboardMLFontSize = 8;           // Taille de la police (7=compact, 8=normal, 9=grand)
 
 input bool   GomScriptLiveLabelAnchorRight = true; // Libellé GOM LIVE : à droite pour libérer le coin du dashboard
@@ -8672,7 +8672,7 @@ input bool   UseMinLotOnly     = true;   // Toujours lot minimum (le plus bas)
 input double InpLotSize         = 0.01;  // Taille de lot par défaut — ULTRA-CONSERVATEUR 20$ (lot minimum absolu)
 input bool   EnableTrading      = true;   // Activer/Désactiver le trading
 input bool   UseEmbeddedGomKolaSidoScript = true; // Module GOM_KOLA_SIDO (niveaux, SIDO, dashboard, courbes…) dans l'EA
-input int    MaxPositionsTerminal = 2;   // Nombre max de positions (tout le terminal MT5) - 2 MAX pour capital 20$ (diversification contrôlée)
+input int    MaxPositionsTerminal = 5;   // Nombre max de positions (tout le terminal MT5) - augmenté pour plus de diversification
 input bool   OnePositionPerSymbol = true; // Une seule position par symbole (tous magics EA: principal + spikes GOM)
 input bool   PreferGomKolaM5OrH1ProximityBoomCrashEntries = true; // Boom/Crash: n'entrer que si prix proche d'un niveau KOLA M5 ou H1 (réduit les entrées multi-TF lointaines)
 input int    InpMagicNumber       = 202502; // Magic Number
@@ -8684,23 +8684,23 @@ input double MaxLossPerSymbolDollars = 0.40;   // Perte maximale par symbole ava
 input double MaxLossPerMetalSymbolDollars = 0.60; // Perte maximale pour SYMBOLES MÉTAUX — 3% du capital (plus volatile)
 input double MaxRiskPerTradePercent   = 1.0;  // Risque par trade (% de l'équité) — STRICT 1% max avec 20$
 input double MaxDailyDrawdownPercent  = 8.0;  // Drawdown max journalier (%) — stop à -1.60$ sur 20$
-input double DailyProfitTargetDollars = 2.0;  // Gain journalier max ($) — 10% du capital, stop trading ensuite
+input double DailyProfitTargetDollars = 5.0;  // Gain journalier max ($) — augmenté pour permettre plus de profits
 input double MaxDailyLossDollars      = 1.50; // Perte journalière max ($) — 7.5% du capital, discipline absolue
 input double CumulativeLossPauseThresholdDollars = 1.0; // Pertes consécutives cumulées ($) avant pause — 5% du capital
 input int    CumulativeLossPauseMinutes = 60; // Durée de pause après pertes consécutives (min) — pause longue pour calmer
 input bool   EnableProfitLock             = true;  // Stop si gros giveback après gros gain
-input double ProfitLockStartDollars       = 1.0;  // Active dès 1$ de gain (5% du capital 20$) — sécuriser très tôt
-input double ProfitLockMaxGivebackDollars = 0.30;  // Giveback max 0.30$ depuis le pic (1.5% du capital) — ultra strict
+input double ProfitLockStartDollars       = 3.0;  // Active dès 3$ de gain — plus tolérant (3x)
+input double ProfitLockMaxGivebackeDollars = 0.50;  // Giveback max 0.50$ depuis le pic — plus de marge
 input bool   ProfitLockClosePositions     = true;  // Fermer positions + supprimer pending lors du stop
 
-input group "=== SALVAGE BANK (sauvegarde gain jour ≥ 1.50$) ==="
+input group "=== SALVAGE BANK (sauvegarde gain jour ≥ 4.00$) ==="
 input bool   EnableSalvageBankDaily = true; // Arme une protection quand le gain journalier (équité - début journée) ≥ seuil
-input double SalvageBankTriggerDailyProfitUSD = 1.50; // Seuil ($) pour armer — 7.5% du capital (1.50$ sur 20$)
+input double SalvageBankTriggerDailyProfitUSD = 4.0; // Seuil ($) pour armer — augmenté (2.67x plus tolérant)
 input double SalvageBankAbsoluteFloorUSD = 0.80; // Si armé : fermeture si gain redescend sous 0.80$ (garder au moins 4% du capital)
 input double SalvageBankMaxGivebackFromPeakUSD = 0.50; // Si armé : fermeture si giveback ≥ 0.50$ depuis le pic du jour
 input bool   SalvageBankCloseAllOnTrigger = true; // Fermer toutes positions + pending EA au déclenchement
 input bool   SalvageBankPauseUntilDayEnd = true; // Pause nouvelles entrées jusqu'à fin de journée (g_dailyPauseUntil)
-input bool   SalvageBankBlockNewEntriesWhenArmed = true; // ACTIVÉ : dès armé (≥ trigger), lot=0 pour nouvelles entrées (protège le gain acquis)
+input bool   SalvageBankBlockNewEntriesWhenArmed = false; // DÉSACTIVÉ : permet nouvelles entrées même quand armé
 
 input bool   UsePerSymbolDailyObjectiveOnly = true; // Objectif journée: pause par symbole uniquement (pas de stop global)
 input bool   UseHighConfidenceFilterWhenSomeSymbolsProfitLocked = true; // Quand des symboles sont déjà "verrouillés" par profit, exiger plus de probabilité
@@ -8952,7 +8952,7 @@ input bool   OTE_UseLimitOrders = true; // Entrées OTE via limit (meilleure pr�
 input bool   OTE_UseFlexibleLogic    = true;  // Utiliser logique flexible SMC_OTE (plus de trades)
 input double OTE_MinRiskPoints       = 2.0;   // Risque minimum en points (2 = petits mouvements)
 input double OTE_ConfluenceTolerance = 0.3;   // Tolérance confluence FVG-OTE (30% = plus flexible)
-input int    OTE_MaxPositionsPerSymbol = 1;    // Max positions par symbole — 1 SEULE (capital 20$ = pas de cumul)
+input int    OTE_MaxPositionsPerSymbol = 2;    // Max positions par symbole — augmenté pour permettre pyramidage modéré
 input double OTE_MinConfidenceForex  = 55.0;  // Confiance IA minimum pour Forex (plus flexible)
 input double OTE_MinConfidenceOther  = 60.0;  // Confiance IA minimum pour autres symboles
 
@@ -9446,7 +9446,7 @@ double CalculateOTESetupProbability(const string direction)
 
 // Paramètres de préservation des gains
 input bool   UseGainPreservationSystem     = true;  // Activer le système de préservation des gains
-input double DailyGainProtectionThreshold    = 1.0;   // Seuil de gain journalier pour activer la protection ($) — 5% du capital 20$
+input double DailyGainProtectionThreshold    = 3.0;   // Seuil de gain journalier pour activer la protection ($) — augmenté (3x plus tolérant)
 input double MaxDrawdownAfterProtection     = 0.30;  // Perte max autorisée après protection ($) — 1.5% du capital (ultra strict)
 input int    ProtectionCooldownMinutes       = 45;    // Temps de refroidissement après protection (minutes) — plus long
 input double MinExpectancyThreshold        = 0.25;  // Espérance mathématique minimum pour trader — plus exigeant
@@ -9456,7 +9456,7 @@ input bool   UseUltraSelectiveMode        = true;  // Mode ultra sélectif (uniq
 input double MinWinProbability          = 88.0;  // Probabilité de gain minimum (%) — strict pour 20$
 input int    MaxHoldingTimeSeconds       = 180;   // Temps de détention maximum (3 minutes) — scalp rapide
 input bool   EnableStatisticsTracking     = true;  // Activer le suivi des statistiques journalières
-input int    MaxDailyTrades             = 3;    // Nombre maximum de trades par jour — 3 max avec 20$ (qualité > quantité)
+input int    MaxDailyTrades             = 10;    // Nombre maximum de trades par jour — augmenté pour plus de flexibilité
 input bool   UseEquityAdaptiveDailyTrades = true;  // ACTIVÉ : adapter le cap journalier à l'equity
 input double EquityReferenceLow         = 15.0;   // Equity de référence basse — correspond au capital minimum viable
 input double EquityReferenceHigh        = 50.0;   // Equity de référence haute — croissance progressive
@@ -13618,6 +13618,8 @@ void OnTick()
       }
       return; // Gestion risque déjà exécutée en début de OnTick
    }
+
+   GlobalVariableSet("EA_DASH_UTC_PAUSE", 0.0);
    
    // STRATÉGIES PAR CATÉGORIE DE SYMBOLE (Boom/Crash, Volatility, Forex/Metals)
    // Anti-duplication immédiat: avant toute tentative de placement de LIMIT
@@ -14100,9 +14102,12 @@ void PushEaResumeClockForMLDashboard(void)
 
    GlobalVariableSet("EA_DASH_RESUME_AT", (double)resume);
    GlobalVariableSet("EA_DASH_ENABLE_TRADING", EnableTrading ? 1.0 : 0.0);
+   GlobalVariableSet("EA_DASH_UTC_PAUSE", SMC_IsStrictUTCTradingWindowOpen() ? 0.0 : 1.0);
 
    // Aligner ROBOT_* avec l’état réel de l’EA (évite « STOPPED » uniquement à cause d’anciennes GV RDS)
    GlobalVariableSet("ROBOT_ACTIVE", EnableTrading ? 1.0 : 0.0);
+   GlobalVariableSet("ROBOT_PAUSED", (resume > now) ? 1.0 : 0.0);
+   GlobalVariableSet("ROBOT_PAUSE_UNTIL", (double)resume);
    double dailyNetUsd = g_dailyTotalProfit - g_dailyTotalLoss;
    GlobalVariableSet("ROBOT_DAILY_PROFIT", dailyNetUsd);
    GlobalVariableSet("EA_DASH_TRADES_DAY", (double)g_dailyTradeCount);
