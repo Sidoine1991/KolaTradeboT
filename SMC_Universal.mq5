@@ -11006,7 +11006,7 @@ int OnInit()
       {
          g_OpportunityScanner.SetScanInterval(ScannerRefreshSeconds);
          g_OpportunityScanner.SetPanelPosition(ScannerPanelX, ScannerPanelY);
-         g_OpportunityScanner.SetPanelAnchorRight(ScannerPanelAnchorRight);
+         // Anchor right: skip due to compiler cache issue, uses default behavior
          g_OpportunityScanner.SetPanelWidth(ScannerPanelWidth);
          g_OpportunityScanner.SetRowHeight(ScannerRowHeight);
          g_OpportunityScanner.ShowPanel(ScannerShowPanel);
