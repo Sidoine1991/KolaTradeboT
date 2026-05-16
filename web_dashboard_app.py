@@ -13,7 +13,6 @@ from datetime import datetime
 from typing import Dict, List, Optional, Any
 from fastapi import FastAPI, WebSocket
 from fastapi.responses import HTMLResponse
-from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
 # Configuration
@@ -31,15 +30,6 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="TradBOT Dashboard - ML Enhanced")
-
-# Add CORS middleware (without credentials for wildcard origin compatibility)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 
 class DashboardManager:
