@@ -15,6 +15,7 @@
 #include "SMC_OpportunityScanner.mqh"  // inclut SMC_AutoTrader.mqh + g_SmcOpportunityScannerAutoTrader
 // Dashboard ML : métriques broker dans GOM_Enhanced_Dashboard.mqh ; PushEaResumeClockForMLDashboard() publie EA_DASH_* / ROBOT_* depuis cet EA
 #include "GOM_Enhanced_Dashboard.mqh"
+#include "SMC_SniperModules.mqh"       // Fusion Liquidity Sniper + Sniper Radar + voting system
 // #include "SMC_Setups_Display.mqh" // Désactivé pour éviter l'erreur de fichier non trouvé
 // --- GOM_KOLA_SIDO merged (no separate mqh for MT5) ---
 // Intégré dans SMC_Universal.mq5 (plus besoin d'exécuter le script sur le graphique)
@@ -105,8 +106,19 @@ input double ChartLeftShiftPct = 45.0;          // Largeur zone future augmenté
 input bool   ShowPastFutureSeparator = false;   // Zone PASSE / FUTUR + rectangle (désactivé par défaut = graphique plus lisible)
 input int    FutureZoneBars = 40;               
 input color  FutureZoneFillColor = 0x121212;    // Gris très foncé (presque noir) pour discrétion
-input int    DashboardBottomOffset = 25;        
+input int    DashboardBottomOffset = 25;
 input int    DashboardLeftOffset = 10;
+
+input group "═════════════════════════ SNIPER MODULES (Fusion Liquidity + Radar) ════════════════"
+input bool   EnableLiquiditySniperModule = true;   // ✅ Détecte sweeps sur BSL/SSL
+input int    LS_LookbackBars = 50;                 // Barres pour détecter niveaux
+input double LS_EqualPips = 3.0;                   // Tolérance equal highs/lows
+input int    LS_MinTouches = 2;                    // Touches min pour valider niveau
+input bool   EnableSniperRadarModule = true;       // ✅ Détecte BOS/MSS + confluence
+input int    SR_SwingLookback = 30;                // Lookback swing points
+input int    SR_HTF = PERIOD_H1;                   // Timeframe biais (HTF)
+input bool   ShowSniperGraphics = true;            // Afficher niveaux sweeps + confluence
+input bool   DebugSniperModules = false;           // Logs détaillés Sniper modules
 input int    DashboardNudgeLeftPx = 56;
 input int    DashboardTopRowShiftRightPx = 130; 
 input int    DashboardTopRowExtraGap = 1;       // Espace très fin
@@ -13770,6 +13782,13 @@ void OnTick()
    // STRATÉGIES PAR CATÉGORIE DE SYMBOLE (Boom/Crash, Volatility, Forex/Metals)
    // Anti-duplication immédiat: avant toute tentative de placement de LIMIT
    EnsureSinglePendingLimitOrderForSymbol(_Symbol);
+
+   // SNIPER MODULES - Mise à jour + voting system
+   LiquiditySniperModule_Update();
+   SniperRadarModule_Update();
+   SniperModules_ComputeVote();
+   SniperModules_DrawGraphics();
+
    RunCategoryStrategy();
    
    // Gestion des positions existantes (fermeture rapide après spike)
