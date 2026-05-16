@@ -7071,6 +7071,77 @@ bool IsOrderTypeAllowedForBoomCrash(const string symbol, const ENUM_ORDER_TYPE o
 // - Boom BUY  : refus si IA ≠ BUY (donc SELL ou HOLD bloqués)
 // - Crash SELL: refus si IA ≠ SELL (donc BUY ou HOLD bloqués)
 // Si UseAIServer=false, pas de filtre.
+bool SMC_IsTouchEntryArmedForDirection(const string direction)
+{
+   datetime now = TimeCurrent();
+   int maxAge = MathMax(30, FutureProtectTouchArmSeconds);
+   string d = direction;
+   StringToUpper(d);
+
+   if(d == "BUY" && IsBoomSymbol(_Symbol))
+   {
+      if(g_boomFutureProtectTouchTime > 0 && (now - g_boomFutureProtectTouchTime) <= maxAge)
+         return true;
+      if(g_boomSR20TouchTime > 0 && (now - g_boomSR20TouchTime) <= maxAge)
+         return true;
+   }
+   if(d == "SELL" && IsCrashSymbol(_Symbol))
+   {
+      if(g_crashFutureProtectTouchTime > 0 && (now - g_crashFutureProtectTouchTime) <= maxAge)
+         return true;
+      if(g_crashSR20TouchTime > 0 && (now - g_crashSR20TouchTime) <= maxAge)
+         return true;
+   }
+   return false;
+}
+
+double GetEffectiveMinAIConfidencePercent()
+{
+   ENUM_SYMBOL_CATEGORY cat = SMC_GetSymbolCategory(_Symbol);
+   if(cat == SYM_BOOM_CRASH)
+      return MathMax(40.0, MinAIConfidencePercentBoomCrash);
+   if(cat == SYM_VOLATILITY)
+      return MathMax(40.0, MinAIConfidencePercentVolatility);
+   return MathMax(40.0, MinAIConfidencePercent);
+}
+
+string GOM_TradeGateBlockReason(const string directionUpper)
+{
+   if(UseEmbeddedGomKolaSidoScript && g_lastPlanDir == "WAIT")
+      return "plan GOM WAIT (filtres/qualité — touch bypass si AllowDerivArrowDespiteGomWait)";
+
+   if(!UseInternalGOMEngine || !GOM_FilterOrdersByEngine)
+      return "moteur GOM inactif";
+
+   if(g_gomVerdictLabel == "OFF")
+      return "moteur GOM OFF (UseInternalGOMEngine=false)";
+
+   if(GOM_UseAtrVolatilityFilter && !g_gomAtrVolOk)
+      return "moteur GOM VOL_BLOCK (ATR instable)";
+
+   string d = directionUpper;
+   StringToUpper(d);
+   if(d == "BUY")
+   {
+      if(GOM_EnableHtfHierarchyFilter && !IsBullishHTF())
+         return "moteur GOM: HTF non haussier";
+      if(g_gomScoreBuy < GOM_VerdictGoodAbs)
+         return "moteur GOM: score BUY insuffisant";
+      if(g_gomBias != 1)
+         return "moteur GOM: bias non BUY";
+   }
+   else if(d == "SELL")
+   {
+      if(GOM_EnableHtfHierarchyFilter && !IsBearishHTF())
+         return "moteur GOM: HTF non baissier";
+      if(g_gomScoreSell < GOM_VerdictGoodAbs)
+         return "moteur GOM: score SELL insuffisant";
+      if(g_gomBias != -1)
+         return "moteur GOM: bias non SELL";
+   }
+   return "moteur GOM: " + g_gomVerdictLabel;
+}
+
 bool IsBoomCrashDirectionAllowedByIA(const string symbol, const string action)
 {
    if(!UseAIServer)
@@ -7084,6 +7155,18 @@ bool IsBoomCrashDirectionAllowedByIA(const string symbol, const string action)
 
    string ia = g_lastAIAction;
    StringToUpper(ia);
+
+   if(BoomCrashTouchEntryBypassIA && symbol == _Symbol && SMC_IsTouchEntryArmedForDirection(a))
+   {
+      if(ia == "HOLD")
+      {
+         Print("🚫 TOUCH+IA - HOLD interdit sur ", symbol, " | touch armé mais IA=HOLD");
+         return false;
+      }
+      if(ia != a)
+         Print("⚡ TOUCH bypass IA: ", a, " autorisé sur ", symbol, " (IA=", g_lastAIAction, ", touch armé)");
+      return true;
+   }
 
    // RÈGLE STRICTE : Jamais de trade si IA = HOLD (quel que soit le symbole)
    if(ia == "HOLD")
@@ -7278,8 +7361,40 @@ static datetime g_lastEntryTimeForSymbol = 0;
 
 bool IsSpreadAcceptable()
 {
-   if(MaxSpreadPoints <= 0) return true;
    long spread = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
+   ENUM_SYMBOL_CATEGORY cat = SMC_GetSymbolCategory(_Symbol);
+
+   if(cat == SYM_BOOM_CRASH || cat == SYM_VOLATILITY)
+   {
+      if(MaxSpreadPointsSynth > 0 && spread > MaxSpreadPointsSynth)
+      {
+         Print("🚫 ENTRÉE BLOQUÉE - Spread synth trop élevé: ", (int)spread,
+               " > ", MaxSpreadPointsSynth, " points | ", _Symbol);
+         return false;
+      }
+
+      if(MaxSpreadPctSynth > 0.0)
+      {
+         double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+         double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+         if(bid > 0.0 && ask > bid)
+         {
+            double spreadPct = (ask - bid) / bid * 100.0;
+            if(spreadPct <= MaxSpreadPctSynth)
+               return true;
+            Print("🚫 ENTRÉE BLOQUÉE - Spread % trop élevé: ", DoubleToString(spreadPct, 3),
+                  "% > ", DoubleToString(MaxSpreadPctSynth, 3), "% | pts=", (int)spread, " | ", _Symbol);
+            return false;
+         }
+      }
+
+      if(MaxSpreadPointsSynth <= 0 && MaxSpreadPctSynth <= 0.0)
+         return true;
+      return true;
+   }
+
+   if(MaxSpreadPoints <= 0)
+      return true;
    if(spread > MaxSpreadPoints)
    {
       Print("🚫 ENTRÉE BLOQUÉE - Spread trop élevé: ", (int)spread, " > ", MaxSpreadPoints, " points");
@@ -7299,19 +7414,14 @@ bool IsProfitabilityGuardEntryAllowed(const string direction, const string conte
       return false;
    }
 
-   long spread = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
-   if(MaxSpreadPoints > 0)
+   if(!IsSpreadAcceptable())
    {
-      double spreadMax = MathMax(1.0, (double)MaxSpreadPoints * MathMax(0.10, ProfitabilityGuardMaxSpreadFactor));
-      if((double)spread > spreadMax)
-      {
-         Print("🚫 ", contextTag, " BLOQUÉ - spread strict ", (int)spread, " > ", (int)spreadMax, " points");
-         return false;
-      }
+      Print("🚫 ", contextTag, " BLOQUÉ - spread (voir log IsSpreadAcceptable)");
+      return false;
    }
 
    double aiPct = NormalizeAIConfidenceUnit() * 100.0;
-   double minPct = MinAIConfidencePercent;
+   double minPct = GetEffectiveMinAIConfidencePercent();
    ENUM_SYMBOL_CATEGORY cat = SMC_GetSymbolCategory(_Symbol);
    double extra = MathMax(0.0, ProfitabilityGuardExtraConfPct);
    if(cat == SYM_BOOM_CRASH || cat == SYM_VOLATILITY)
@@ -8731,10 +8841,16 @@ input bool   RecoveryLotOnlyHighConviction = true;    // Double lot "recovery" s
 input double RecoveryMinAIConfidencePercent = 92.0;   // Confiance IA min (%) pour appliquer le recovery lot (plus strict = moins de recovery)
 input double RecoveryMinSetupScore = 87.0;              // Score setup (0-100) min pour appliquer le recovery lot (plus strict = plus "très sûr")
 input double MinSetupScoreEntry      = 80.0;  // ↑ Score 80% minimum — ULTRA-STRICT (rejette setups médiocres)
-input double MinAIConfidencePercent   = 75.0;  // ✅ Confiance IA 75% minimum — ÉQUILIBRE test démo (était 85% trop strict)
+input double MinAIConfidencePercent   = 62.0;  // Confiance IA min (%) — 62% laisse passer plus de signaux (était 75%)
+input double MinAIConfidencePercentBoomCrash = 58.0; // Seuil IA dédié Boom/Crash (touch / spike)
+input double MinAIConfidencePercentVolatility = 55.0; // Seuil IA dédié Volatility Index
 input bool   CloseOnlyOnAIHoldOrBrokerSLTP = true; // Empêche les fermetures actives (sauf IA=HOLD). Laisser SL/TP broker gérer le reste.
 input group "=== ENTRÉES PLUS POINTUES (fiabilité) ==="
-input int    MaxSpreadPoints          = 80;   // Spread max (points) - éviter entrée si spread trop élevé
+input int    MaxSpreadPoints          = 80;   // Spread max (points) Forex/CFD classiques
+input int    MaxSpreadPointsSynth     = 0;    // Boom/Crash/Vol: 0 = ignorer points, utiliser MaxSpreadPctSynth
+input double MaxSpreadPctSynth        = 0.15; // Spread max en % du prix (Boom 900: ~642 pts = OK si < 0.15%)
+input bool   AllowDerivArrowDespiteGomWait = true; // Touch SR20/future protect: autoriser même si plan GOM = WAIT
+input bool   BoomCrashTouchEntryBypassIA = true;   // Touch armé: autoriser BUY Boom même si IA=SELL (jamais si HOLD)
 input int    EntryCooldownSeconds     = 90;   // Cooldown min (sec) après dernière entrée sur ce symbole
 input bool   RequireConfirmationCandle = true; // Exiger 1 bougie M1 dans le sens (close>open BUY, close<open SELL)
 input double MinProfitPotentialUSD    = 0.10;  // Gain potentiel min ($) — réaliste avec lot 0.01 sur capital 20$
@@ -12982,8 +13098,12 @@ void GOM_InternalEngine_Update()
 }
 
 // Aucune entrée au marché si le plan GOM embarqué est WAIT, ou (sans script embarqué) verdict interne WAIT/VOL_BLOCK.
-bool GOM_MarketEntryBlockedByFinalWait(void)
+bool GOM_MarketEntryBlockedByFinalWait(const string forDirection = "")
 {
+   if(AllowDerivArrowDespiteGomWait && forDirection != "" &&
+      SMC_IsTouchEntryArmedForDirection(forDirection))
+      return false;
+
    if(UseEmbeddedGomKolaSidoScript && g_lastPlanDir == "WAIT")
       return true;
    if(UseInternalGOMEngine && GOM_FilterOrdersByEngine && !UseEmbeddedGomKolaSidoScript &&
@@ -12994,8 +13114,11 @@ bool GOM_MarketEntryBlockedByFinalWait(void)
 
 bool GOM_Internal_TradeGateAllows(const string directionUpper)
 {
-   if(GOM_MarketEntryBlockedByFinalWait())
+   if(GOM_MarketEntryBlockedByFinalWait(directionUpper))
       return false;
+
+   if(AllowDerivArrowDespiteGomWait && SMC_IsTouchEntryArmedForDirection(directionUpper))
+      return true;
    if(!UseInternalGOMEngine || !GOM_FilterOrdersByEngine)
       return true;
    if(GOM_UseAtrVolatilityFilter && !g_gomAtrVolOk)
@@ -25297,24 +25420,26 @@ void CheckAndExecuteDerivArrowTrade()
          if(!HasAnyExposureForSymbol(_Symbol))
          {
             string dir = armedBoom ? "BUY" : "SELL";
+            int posBeforeTouch = CountAllPositionsOnSymbolAnyMagic(_Symbol);
             Print("?? TOUCH (future protect / SR20) => entrée marché immédiate (", dir, ") sur ", _Symbol,
                   " | level=", armedBoom
                                  ? DoubleToString((armedBoomFuture ? g_boomFutureProtectTouchLevel : g_boomSR20TouchLevel), _Digits)
                                  : DoubleToString((armedCrashFuture ? g_crashFutureProtectTouchLevel : g_crashSR20TouchLevel), _Digits));
-            ExecuteDerivArrowTrade(dir); // garde toutes les validations existantes (IA/ML/zones/anti-dup)
+            ExecuteDerivArrowTrade(dir);
+
+            if(CountAllPositionsOnSymbolAnyMagic(_Symbol) > posBeforeTouch)
+            {
+               g_boomFutureProtectTouchTime = 0;
+               g_crashFutureProtectTouchTime = 0;
+               g_boomFutureProtectTouchLevel = 0.0;
+               g_crashFutureProtectTouchLevel = 0.0;
+               g_boomSR20TouchTime = 0;
+               g_crashSR20TouchTime = 0;
+               g_boomSR20TouchLevel = 0.0;
+               g_crashSR20TouchLevel = 0.0;
+            }
          }
       }
-
-      // Consommer l'arm: attendre un nouveau touch pour une nouvelle entrée
-      g_boomFutureProtectTouchTime = 0;
-      g_crashFutureProtectTouchTime = 0;
-      g_boomFutureProtectTouchLevel = 0.0;
-      g_crashFutureProtectTouchLevel = 0.0;
-
-      g_boomSR20TouchTime = 0;
-      g_crashSR20TouchTime = 0;
-      g_boomSR20TouchLevel = 0.0;
-      g_crashSR20TouchLevel = 0.0;
 
       return;
    }
@@ -25413,7 +25538,7 @@ void CheckAndExecuteDerivArrowTrade()
    bool inDiscount = IsInDiscountZone();
    bool inPremium  = IsInPremiumZone();
    
-   double requiredConfidence = MinAIConfidencePercent / 100.0;
+   double requiredConfidence = GetEffectiveMinAIConfidencePercent() / 100.0;
    
    if(isBoomCrash)
    {
@@ -26636,7 +26761,8 @@ void ExecuteDerivArrowTrade(string direction)
    StringToUpper(gomDir0);
    if(!GOM_Internal_TradeGateAllows(gomDir0))
    {
-      Print("🚫 DERIV ARROW BLOQUÉ - moteur GOM interne: ", g_gomVerdictLabel, " | ", _Symbol);
+      Print("🚫 DERIV ARROW BLOQUÉ - ", GOM_TradeGateBlockReason(gomDir0), " | ", _Symbol,
+            " | plan=", g_lastPlanDir, " | IA=", g_lastAIAction);
       return;
    }
 
@@ -26681,7 +26807,10 @@ void ExecuteDerivArrowTrade(string direction)
    // Règle globale 75% — sauf cassure canal ML ou verdict GOM GOOD/PERFECT aligné
    if(!g_channelBreakoutEntryContext && !GOM_BypassBoomCrashIAForGomPlan(direction))
    {
-      if(!IsAIConfidenceAtLeast(0.75, "DERIV ARROW"))
+      double minConfUnit = GetEffectiveMinAIConfidencePercent() / 100.0;
+      if(SMC_IsTouchEntryArmedForDirection(direction))
+         minConfUnit = MathMin(minConfUnit, MinAIConfidencePercentBoomCrash / 100.0);
+      if(!IsAIConfidenceAtLeast(minConfUnit, "DERIV ARROW"))
          return;
    }
    else if(!IsAISignalFreshForTrading("DERIV ARROW canal ML"))
@@ -32492,14 +32621,28 @@ void ExecuteSpikeTrade()
       
       if(isBoom && ia != "BUY")
       {
-         Print("🚫 SPIKE ANNULÉ - IA incompatible sur Boom ", _Symbol, " | IA=", g_lastAIAction, " (requis: BUY)");
-         return;
+         if(BoomCrashTouchEntryBypassIA && (SMC_IsTouchEntryArmedForDirection("BUY") || UseSpikeDetectionWithoutAI))
+         {
+            Print("⚡ SPIKE Boom — bypass IA (touch/spike path) | IA=", g_lastAIAction, " | ", _Symbol);
+         }
+         else
+         {
+            Print("🚫 SPIKE ANNULÉ - IA incompatible sur Boom ", _Symbol, " | IA=", g_lastAIAction, " (requis: BUY)");
+            return;
+         }
       }
       
       if(isCrash && ia != "SELL")
       {
-         Print("🚫 SPIKE ANNULÉ - IA incompatible sur Crash ", _Symbol, " | IA=", g_lastAIAction, " (requis: SELL)");
-         return;
+         if(BoomCrashTouchEntryBypassIA && (SMC_IsTouchEntryArmedForDirection("SELL") || UseSpikeDetectionWithoutAI))
+         {
+            Print("⚡ SPIKE Crash — bypass IA (touch/spike path) | IA=", g_lastAIAction, " | ", _Symbol);
+         }
+         else
+         {
+            Print("🚫 SPIKE ANNULÉ - IA incompatible sur Crash ", _Symbol, " | IA=", g_lastAIAction, " (requis: SELL)");
+            return;
+         }
       }
       
       Print("✅ SPIKE - IA validée: ", ia, " sur ", _Symbol);
