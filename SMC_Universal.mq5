@@ -358,6 +358,15 @@ double g_lastPlanTP2 = 0.0;
 double g_lastPlanTP3 = 0.0;
 double g_lastTechBuyScore = 0.0;
 double g_lastTechSellScore = 0.0;
+
+// Broker-adaptive trade windows (modifiable globals instead of input constants)
+int g_g_TradeWindow1StartUTC = 3;   // Zone 1 debut (UTC)
+int g_g_TradeWindow1EndUTC = 6;     // Zone 1 fin (UTC)
+int g_g_TradeWindow2StartUTC = 14;  // Zone 2 debut (UTC)
+int g_g_TradeWindow2EndUTC = 16;    // Zone 2 fin (UTC)
+int g_g_TradeWindow3StartUTC = 21;  // Zone 3 debut (UTC)
+int g_g_TradeWindow3EndUTC = 23;    // Zone 3 fin (UTC)
+
 static datetime g_lastExtAiCall = 0;
 static string   g_lastExtAiAction = "HOLD";
 static double   g_lastExtAiConf = 0.0;
@@ -8663,22 +8672,22 @@ void SMC_ApplyBrokerAdaptiveWindows()
 
    if(broker == "DERIV") {
       // DERIV: Synthetic indices trade best 8-16 UTC (liquid hours)
-      TradeWindow1StartUTC = 8;    // Optimal Deriv window: 8am UTC
-      TradeWindow1EndUTC = 16;     // To 4pm UTC
-      TradeWindow2StartUTC = 21;   // Evening peak: 9pm UTC
-      TradeWindow2EndUTC = 23;     // To 11pm UTC
-      TradeWindow3StartUTC = 0;    // Disabled
-      TradeWindow3EndUTC = 0;
+      g_g_TradeWindow1StartUTC = 8;    // Optimal Deriv window: 8am UTC
+      g_g_TradeWindow1EndUTC = 16;     // To 4pm UTC
+      g_g_TradeWindow2StartUTC = 21;   // Evening peak: 9pm UTC
+      g_g_TradeWindow2EndUTC = 23;     // To 11pm UTC
+      g_g_TradeWindow3StartUTC = 0;    // Disabled
+      g_g_TradeWindow3EndUTC = 0;
       if(DebugMode) Print("✅ Broker detected: DERIV - UTC windows optimized for synthetic indices");
    }
    else if(broker == "EXNESS") {
       // EXNESS: Forex trades 24h, but best liquidity during UK/US overlap
-      TradeWindow1StartUTC = 3;    // London open
-      TradeWindow1EndUTC = 6;      // To midday
-      TradeWindow2StartUTC = 13;   // US open (NY)
-      TradeWindow2EndUTC = 17;     // To 5pm
-      TradeWindow3StartUTC = 20;   // Evening
-      TradeWindow3EndUTC = 23;     // To 11pm
+      g_g_TradeWindow1StartUTC = 3;    // London open
+      g_g_TradeWindow1EndUTC = 6;      // To midday
+      g_g_TradeWindow2StartUTC = 13;   // US open (NY)
+      g_g_TradeWindow2EndUTC = 17;     // To 5pm
+      g_g_TradeWindow3StartUTC = 20;   // Evening
+      g_g_TradeWindow3EndUTC = 23;     // To 11pm
       if(DebugMode) Print("✅ Broker detected: EXNESS - UTC windows optimized for forex");
    }
 }
@@ -8734,9 +8743,9 @@ bool SMC_IsStrictUTCTradingWindowOpen()
    TimeToStruct(TimeGMT(), gmt);
    int h = gmt.hour;
 
-   if(SMC_IsHourInWindowUTC(h, TradeWindow1StartUTC, TradeWindow1EndUTC)) return true;
-   if(SMC_IsHourInWindowUTC(h, TradeWindow2StartUTC, TradeWindow2EndUTC)) return true;
-   if(SMC_IsHourInWindowUTC(h, TradeWindow3StartUTC, TradeWindow3EndUTC)) return true;
+   if(SMC_IsHourInWindowUTC(h, g_TradeWindow1StartUTC, g_TradeWindow1EndUTC)) return true;
+   if(SMC_IsHourInWindowUTC(h, g_TradeWindow2StartUTC, g_TradeWindow2EndUTC)) return true;
+   if(SMC_IsHourInWindowUTC(h, g_TradeWindow3StartUTC, g_TradeWindow3EndUTC)) return true;
    return false;
 }
 double SMC_GetATRMultiplier(ENUM_SYMBOL_CATEGORY cat)
@@ -9798,12 +9807,12 @@ input int    NYOEnd            = 16;     // New York Open fin
 input group "=== FENETRES STRICTES UTC (AUTO-STOP HORS PLAGE) ==="
 input bool   UseStrictUTCTradeWindows = true; // Discipline horaire stricte (UTC)
 input bool   UseBrokerAdaptiveWindows = true; // 🆕 Auto-detect broker and use optimal windows
-input int    TradeWindow1StartUTC = 3;   // Zone 1 debut (UTC) - EXNESS: 3-6
-input int    TradeWindow1EndUTC   = 6;   // Zone 1 fin   (UTC, exclusif)
-input int    TradeWindow2StartUTC = 14;  // Zone 2 debut (UTC) - EXNESS/DERIV: 14-16 or 8-16
-input int    TradeWindow2EndUTC   = 16;  // Zone 2 fin   (UTC, exclusif) - DERIV: 8-16 OPTIMAL
-input int    TradeWindow3StartUTC = 21;  // Zone 3 debut (UTC) - EXNESS: 21-23
-input int    TradeWindow3EndUTC   = 23;  // Zone 3 fin   (UTC, exclusif)
+input int    g_TradeWindow1StartUTC = 3;   // Zone 1 debut (UTC) - EXNESS: 3-6
+input int    g_TradeWindow1EndUTC   = 6;   // Zone 1 fin   (UTC, exclusif)
+input int    g_TradeWindow2StartUTC = 14;  // Zone 2 debut (UTC) - EXNESS/DERIV: 14-16 or 8-16
+input int    g_TradeWindow2EndUTC   = 16;  // Zone 2 fin   (UTC, exclusif) - DERIV: 8-16 OPTIMAL
+input int    g_TradeWindow3StartUTC = 21;  // Zone 3 debut (UTC) - EXNESS: 21-23
+input int    g_TradeWindow3EndUTC   = 23;  // Zone 3 fin   (UTC, exclusif)
 
 input group "=== NOTIFICATIONS ==="
 input bool   UseNotifications  = true;   // Alert + notification push (signaux et trades)
@@ -14514,11 +14523,11 @@ void UpdateDashboard()
    TimeToStruct(TimeGMT(), gmt);
    int hourUTC = gmt.hour;
    string utcZone = "OFF_ZONE";
-   if(SMC_IsHourInWindowUTC(hourUTC, TradeWindow1StartUTC, TradeWindow1EndUTC))
+   if(SMC_IsHourInWindowUTC(hourUTC, g_TradeWindow1StartUTC, g_TradeWindow1EndUTC))
       utcZone = "ZONE1 03-06";
-   else if(SMC_IsHourInWindowUTC(hourUTC, TradeWindow2StartUTC, TradeWindow2EndUTC))
+   else if(SMC_IsHourInWindowUTC(hourUTC, g_TradeWindow2StartUTC, g_TradeWindow2EndUTC))
       utcZone = "ZONE2 14-16";
-   else if(SMC_IsHourInWindowUTC(hourUTC, TradeWindow3StartUTC, TradeWindow3EndUTC))
+   else if(SMC_IsHourInWindowUTC(hourUTC, g_TradeWindow3StartUTC, g_TradeWindow3EndUTC))
       utcZone = "ZONE3 21-23";
    bool utcTradingOpen = SMC_IsStrictUTCTradingWindowOpen();
    string robotStatus = utcTradingOpen ? "TRADING ACTIF" : "ARRET AUTO";
