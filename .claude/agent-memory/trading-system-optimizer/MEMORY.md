@@ -1,0 +1,1 @@
+- [Capital Profile](project_capital_profile.md) — Capital 20$ USD, ultra-conservateur, lot 0.01, max 1%/trade, Boom/Crash spike

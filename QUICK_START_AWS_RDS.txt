@@ -1,0 +1,63 @@
+═══════════════════════════════════════════════════════════
+QUICK START: MIGRATION VERS AWS RDS
+═══════════════════════════════════════════════════════════
+
+ÉTAPE 1: Éditer le mot de passe dans .env
+───────────────────────────────────────────────────────────
+Ouvrez: D:\Dev\TradBOT\.env
+Cherchez la ligne: AWS_RDS_PASSWORD=YOUR_PASSWORD_HERE
+Remplacez par votre vrai mot de passe
+
+ÉTAPE 2: Créer les tables dans AWS RDS
+───────────────────────────────────────────────────────────
+cd D:\Dev\TradBOT
+python migrate_to_aws_rds.py
+
+ÉTAPE 3: Tester la connexion
+───────────────────────────────────────────────────────────
+python test_aws_rds_connection.py
+
+ÉTAPE 4: Vérifier les tables créées
+───────────────────────────────────────────────────────────
+Vous devriez voir 9 tables:
+  - trade_feedback
+  - predictions
+  - correction_predictions
+  - symbol_calibration
+  - model_metrics
+  - trades
+  - stair_detections
+  - adaptive_strategies
+  - strategy_adjustments
+
++ 2 vues:
+  - recent_trades
+  - model_performance
+
+ÉTAPE 5 (optionnel): Migrer ai_server.py
+───────────────────────────────────────────────────────────
+Dans ai_server.py, remplacer les appels Supabase:
+
+AVANT:
+    response = requests.post(
+        f"{supabase_url}/rest/v1/trade_feedback",
+        headers={"apikey": supabase_key},
+        json=data
+    )
+
+APRÈS:
+    from aws_rds_helper import aws_rds_client
+    result_id = aws_rds_client.insert("trade_feedback", data)
+
+═══════════════════════════════════════════════════════════
+AIDE ET SUPPORT
+═══════════════════════════════════════════════════════════
+
+Documentation complète: MIGRATION_SUPABASE_TO_AWS_RDS.md
+
+Problèmes courants:
+  - "password authentication failed" → Vérifier le mot de passe dans .env
+  - "connection timeout" → Vérifier Security Group AWS (port 5432)
+  - "table does not exist" → Exécuter migrate_to_aws_rds.py
+
+═══════════════════════════════════════════════════════════

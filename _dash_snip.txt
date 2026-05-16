@@ -1,0 +1,71 @@
+﻿// Tableau de bord compact et informatif (V3 avec paramÃ¨tres)
+void GOM_DrawEnhancedDashboardV3(int posX = 10, int posY = 30, bool anchorTop = true, int cellWidth = 100, int cellHeight = 25, int fontSizeCustom = 8)
+{
+   // Nettoyer les dessins expirÃ©s d'abord
+   static datetime lastClean = 0;
+   if(TimeCurrent() - lastClean > 300) // Toutes les 5 minutes
+   {
+      GOM_CleanExpiredDrawings();
+      lastClean = TimeCurrent();
+   }
+
+   MLStats ml = GOM_GetMLStats();
+   RobotStatus robot = GOM_GetRobotStatus();
+
+   // Configuration layout (paramÃ¨tres personnalisables)
+   int baseX = posX;
+   int baseY = posY;
+   int cellW = cellWidth;
+   int cellH = cellHeight;
+   int gap = 2;
+   int fontSize = fontSizeCustom;
+
+   color txtWhite = clrWhite;
+   color bgDark = 0x1E1E1E;    // Gris trÃ¨s foncÃ©
+   color bgGreen = 0x2E7D32;   // Vert mat
+   color bgRed = 0xC62828;     // Rouge mat
+   color bgOrange = 0xEF6C00;  // Orange
+   color bgBlue = 0x1565C0;    // Bleu mat
+
+   int row = 0;
+
+   LiveMT5DashMetrics lv = robot.live;
+
+   // === LIGNE 1: STATUT ROBOT (prioritÃ© MT5 / EA, pas seulement GV RDS) ===
+   bool termAuto = (TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) != 0);
+   string statusTxt = "ðŸ¤– ACTIVE";
+   color statusBg = bgGreen;
+
+   if(robot.isPaused)
+   {
+      statusTxt = "â¸ï¸ PAUSE";
+      statusBg = bgOrange;
+   }
+   else if(!termAuto)
+   {
+      statusTxt = "ðŸ”’ AUTO OFF";
+      statusBg = bgDark;
+   }
+   else if(!robot.eaTradingEnabled)
+   {
+      statusTxt = "â¸ï¸ STOPPED";
+      statusBg = bgDark;
+   }
+
+   GOM_DrawDashCell("DASH_STATUS", baseX, baseY + row * (cellH + gap),
+                    cellW, cellH, statusTxt, statusBg, txtWhite, fontSize, anchorTop);
+
+   // Positions + lots engagÃ©s sur le symbole du graphique
+   string posTxt = "ðŸ“Š POS:" + IntegerToString(robot.positionsOpen)
+                   + "\n" + DoubleToString(lv.lotsOnSymbol, 2) + " lot";
+   GOM_DrawDashCell("DASH_POS", baseX + (cellW + gap), baseY + row * (cellH + gap),
+                    cellW, cellH, posTxt, bgBlue, txtWhite, fontSize - 1, anchorTop);
+
+   // Capital compte (temps rÃ©el broker)
+   string profitTxt = "ðŸ’° Eq " + DoubleToString(lv.equity, 2)
+                      + "\nBal " + DoubleToString(lv.balance, 2);
+   color profitBg = (lv.floatingPL >= 0.0) ? bgGreen : bgRed;
+   GOM_DrawDashCell("DASH_PROFIT", baseX + 2 * (cellW + gap), baseY + row * (cellH + gap),
+                    cellW, cellH, profitTxt, profitBg, txtWhite, fontSize - 1, anchorTop);
+
+   row++;

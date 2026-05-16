@@ -1,0 +1,45 @@
+╔═══════════════════════════════════════════════════════════════╗
+║         INSTRUCTIONS DE COMPILATION - SMC_Universal.mq5      ║
+╚═══════════════════════════════════════════════════════════════╝
+
+✅ MODIFICATION EFFECTUÉE:
+   • Fichier: SMC_Universal.mq5
+   • Changement: ProfitabilityGuardMinFilterQuality = 0.20 (au lieu de 0.55)
+   • Effet: Les trades avec FILTER_QUALITY = 0.33 vont maintenant passer ✅
+
+📋 ÉTAPES DE COMPILATION:
+
+1. OUVRIR MetaTrader 5 (MT5)
+
+2. MENU "Tools" → "MetaQuotes Language Editor" (ou F4)
+
+3. DANS L'ÉDITEUR:
+   • Fichier → Ouvrir
+   • Localiser: D:\Dev\TradBOT\SMC_Universal.mq5
+   • Cliquer sur "Ouvrir"
+
+4. COMPILER:
+   • Menu: Compile → Compile (ou appuyer sur F5)
+   • Attendre que la compilation se termine (env. 10-30 secondes)
+
+5. VÉRIFIER:
+   • Message "success" doit apparaître dans la fenêtre de sortie
+   • Le fichier compilé SMC_Universal.ex5 sera créé automatiquement
+
+6. REDÉMARRER MT5:
+   • Fermer l'EA en cours d'exécution
+   • Attacher la nouvelle version de SMC_Universal.ex5 à votre graphique
+
+7. TESTER:
+   • Vérifier les logs pendant 5-10 minutes
+   • Vous devriez voir: "✅ DERIV ARROW EXECUTÉ" au lieu de "🚫 BLOQUÉ"
+
+
+⏱️ DÉLAI ESTIMÉ: 5 minutes
+
+💡 SI ERREURS DE COMPILATION:
+   • Vérifier qu'aucune syntaxe n'a cassé
+   • Ctrl+H pour remplacer et corriger
+   • Relancer la compilation (F5)
+
+════════════════════════════════════════════════════════════════

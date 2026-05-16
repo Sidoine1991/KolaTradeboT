@@ -1,0 +1,148 @@
+╔════════════════════════════════════════════════════════════════════╗
+║                                                                    ║
+║   🤖 TRADING AUTOMATIQUE INSTALLÉ - PRÊT À COMPILER! 🤖          ║
+║                                                                    ║
+╚════════════════════════════════════════════════════════════════════╝
+
+✅ Scanner multi-symboles + Trading automatique
+✅ Scalping avec trailing stop
+✅ Notifications push toutes les 10 minutes
+✅ Gestion du risque pour petit capital (10$)
+
+
+🎯 NOUVEAUX FICHIERS
+═══════════════════════════════════════════════════════════════════
+
+📄 Code:
+  → SMC_AutoTrader.mqh (18 KB)
+  → SMC_OpportunityScanner.mqh (29 KB, mis à jour)
+  → SMC_Universal.mq5 (modifié)
+
+📚 Documentation:
+  → AUTO_TRADING_QUICK_START.md
+  → TRADING_AUTOMATIQUE_README.md
+  → RESUME_COMPLET_SCANNER_AUTO.md
+
+
+🚀 DÉMARRAGE RAPIDE (5 MINUTES)
+═══════════════════════════════════════════════════════════════════
+
+1️⃣ COMPILER
+   → Ouvrir MetaEditor (F4 dans MT5)
+   → Compiler SMC_Universal.mq5 (F7)
+   → Vérifier: 0 errors ✅
+
+2️⃣ CONFIGURER
+   → Ouvrir 2 graphiques (ex: Boom 1000, Crash 1000)
+   → Attacher SMC_Universal sur les 2
+   → Sur un graphique, activer:
+
+   [SCANNER MULTI-SYMBOLES TEMPS RÉEL]
+   EnableOpportunityScanner = true
+   ScannerSymbolsList = "Boom 1000 Index,Crash 1000 Index"
+
+   [TRADING AUTOMATIQUE (SCANNER)]
+   EnableScannerAutoTrading = true
+   AutoTradeMaxRiskDollars = 0.50     ← Pour capital 10$
+   AutoTradeScalpTpPoints = 50
+   AutoTradeScalpSlPoints = 30
+   EnableAutoTrailingStop = true
+
+3️⃣ VÉRIFIER
+   → Panneau scanner visible en haut du graphique ✅
+   → Message "Trading automatique activé" dans Experts ✅
+   → Attendre les opportunités!
+
+
+📱 NOTIFICATIONS
+═══════════════════════════════════════════════════════════════════
+
+À chaque trade:
+  ✅ TRADE OUVERT: Boom 1000 Index BUY 0.02 lots @ 2845.32
+
+Toutes les 10 minutes:
+  📊 SCANNER AUTO-TRADING
+  ━━━━━━━━━━━━━━━━━━━━
+  📈 Trades: 5 (W:3 L:2)
+  ✅ Win Rate: 60.0%
+  💰 Profit Net: $2.45
+  📊 Positions: 2
+  💵 P/L Total: $2.05
+
+
+🎯 DEUX MODES DISPONIBLES
+═══════════════════════════════════════════════════════════════════
+
+MODE 1: Scanner Seul (Observation)
+  EnableScannerAutoTrading = false
+  → Affiche les opportunités
+  → Pas de trade automatique
+  → Pour observer et apprendre
+
+MODE 2: Scanner + Trading Auto (Actif)
+  EnableScannerAutoTrading = true
+  → Affiche les opportunités
+  → Trade automatiquement
+  → Gestion trailing stop
+  → Notifications push
+
+
+💰 CONFIGURATIONS PAR CAPITAL
+═══════════════════════════════════════════════════════════════════
+
+Capital 10$ → AutoTradeMaxRiskDollars = 0.50 (objectif: +1-2$/j)
+Capital 50$ → AutoTradeMaxRiskDollars = 2.00 (objectif: +5-10$/j)
+Capital 100$ → AutoTradeMaxRiskDollars = 5.00 (objectif: +10-20$/j)
+
+
+🛡️ SÉCURITÉ INTÉGRÉE
+═══════════════════════════════════════════════════════════════════
+
+✅ Risque contrôlé (0.50$ max par trade pour capital 10$)
+✅ Calcul automatique du lot size
+✅ 1 position max par symbole
+✅ 3 positions max au total
+✅ Trailing stop automatique
+✅ Throttle: 2 minutes minimum entre trades
+✅ Filtrage: Seulement PERFECT et GOOD (spike ≥50%)
+
+
+📖 DOCUMENTATION COMPLÈTE
+═══════════════════════════════════════════════════════════════════
+
+Démarrage rapide (5 min):
+  → AUTO_TRADING_QUICK_START.md
+
+Guide complet (30 min):
+  → TRADING_AUTOMATIQUE_README.md
+
+Résumé global:
+  → RESUME_COMPLET_SCANNER_AUTO.md
+
+
+⚠️ IMPORTANT
+═══════════════════════════════════════════════════════════════════
+
+1. Testez d'abord en COMPTE DÉMO
+2. Commencez avec un PETIT CAPITAL (10$)
+3. Observez les résultats pendant 1-2 JOURS
+4. Ajustez les paramètres selon VOS RÉSULTATS
+5. Ne tradez que l'argent que vous pouvez PERDRE
+
+
+🎊 C'EST PARTI!
+═══════════════════════════════════════════════════════════════════
+
+1. Lire: AUTO_TRADING_QUICK_START.md
+2. Compiler (F7)
+3. Configurer
+4. Laisser le robot travailler! 🤖
+
+Le scanner détecte, le robot trade, vous gagnez! 💰
+
+
+═══════════════════════════════════════════════════════════════════
+TradBOT SMC - Trading Automatique Intelligent v1.0
+═══════════════════════════════════════════════════════════════════
+
+BON TRADING! 📈💰🚀

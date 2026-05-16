@@ -28,12 +28,12 @@ input group "SCANNER MULTI-SYMBOLES TEMPS RÉEL"
 input bool   EnableOpportunityScanner = true;     // ✅ ACTIVÉ par défaut — scanner multi-symboles temps réel
 input string ScannerSymbolsList = "Boom 1000 Index,Crash 1000 Index,EURUSD,XAUUSD";  // ↓ OPTIMISÉ 4 symboles — réduit charge CPU (était 8)
 input int    ScannerRefreshSeconds = 60;           // ↑ OPTIMISÉ 60s — réduit charge CPU (était 30s)
-input int    ScannerPanelX = 12;                   // Gauche: X depuis bord gauche | Droite: marge depuis bord droit
-input int    ScannerPanelY = 150;                  // Y depuis le haut (EN DESSOUS du Dashboard ML qui occupe ~120px)
-input int    ScannerPanelWidth = 500;              // Largeur du panneau
-input int    ScannerRowHeight = 25;                // Hauteur des lignes
-input bool   ScannerPanelAnchorRight = true;       // Caler le panneau au bord droit du graphique
-input bool   ScannerShowPanel = false;             // Panneau = beaucoup d'objets graphiques (CPU)
+input int    ScannerPanelX = -250;                 // Position: -250 = bord droit (marge 250px du bord droit)
+input int    ScannerPanelY = -150;                 // Position: -150 = bas (150px du bas) — BAS À DROITE
+input int    ScannerPanelWidth = 240;              // Largeur réduite du scanner (ne bloque pas le dashboard)
+input int    ScannerRowHeight = 20;                // Hauteur des lignes (compact)
+input bool   ScannerPanelAnchorRight = true;       // Ancrer au bord droit ✅
+input bool   ScannerShowPanel = true;              // RÉACTIVÉ - Affichage minimal en bas à droite (pas de chevauchement)
 
 input group "TRADING AUTOMATIQUE (SCANNER)"
 input bool   EnableScannerAutoTrading = true;     // ✅ ACTIVÉ par défaut — trading automatique sur opportunités SMC
@@ -287,7 +287,7 @@ input double KolaClosestAnchorMaxAtr = 1.20;           // Réduit — exiger pro
 
 input group "QUALITÉ D'ENTRÉE (évite setups faibles)"
 input bool   EnableEntryQualityGate = true;            // ACTIVÉ — filtrer les setups faibles (capital 20$ = uniquement les meilleurs)
-input double MinEntryQualityScore = 0.55;              // Score qualité min (55% = équilibre opportunités / risque 20$)
+input double MinEntryQualityScore = 0.33;              // Score qualité min (33% = TEST - permettre plus de trades)
 input bool   EntryQualityGateSynthOnly = false;        // ✅ Tous symboles — qualité exigée PARTOUT
 input bool   EntryQualityRelaxOnSpikeSetup = true;     // Assouplir si spike Boom/Crash aligné (probabilité élevée)
 input bool   EntryQualityRelaxOnHighConfluence = true; // Assouplir si confluence niveaux KOLA forte
@@ -7487,24 +7487,27 @@ bool IsLastCandleConfirmingDirection(const string direction)
    if(!RequireConfirmationCandle) return true;
    MqlRates rates[];
    ArraySetAsSeries(rates, true);
-   if(CopyRates(_Symbol, PERIOD_M1, 1, 2, rates) < 2) return true; // pas de données = on autorise
-   double open0 = rates[0].open;
-   double close0 = rates[0].close;
-   string d = direction; StringToUpper(d);
-   if(d == "BUY")
-   {
-      if(close0 <= open0)
+   // TEST OPTION 1: Désactiver vérification direction bougie M1 pour permettre plus de trades
+   if(false) {
+      if(CopyRates(_Symbol, PERIOD_M1, 1, 2, rates) < 2) return true;
+      double open0 = rates[0].open;
+      double close0 = rates[0].close;
+      string d = direction; StringToUpper(d);
+      if(d == "BUY")
       {
-         Print("🚫 ENTRÉE BLOQUÉE - Dernière bougie M1 non haussière (close=", DoubleToString(close0, _Digits), " <= open=", DoubleToString(open0, _Digits), ")");
-         return false;
+         if(close0 <= open0)
+         {
+            Print("🚫 ENTRÉE BLOQUÉE - Dernière bougie M1 non haussière (close=", DoubleToString(close0, _Digits), " <= open=", DoubleToString(open0, _Digits), ")");
+            return false;
+         }
       }
-   }
-   else if(d == "SELL")
-   {
-      if(close0 >= open0)
+      else if(d == "SELL")
       {
-         Print("🚫 ENTRÉE BLOQUÉE - Dernière bougie M1 non baissière (close=", DoubleToString(close0, _Digits), " >= open=", DoubleToString(open0, _Digits), ")");
-         return false;
+         if(close0 >= open0)
+         {
+            Print("🚫 ENTRÉE BLOQUÉE - Dernière bougie M1 non baissière (close=", DoubleToString(close0, _Digits), " >= open=", DoubleToString(open0, _Digits), ")");
+            return false;
+         }
       }
    }
    return true;
@@ -8919,7 +8922,7 @@ input double ServerCorrectionMinConfidence = 63.0;    // Seuil confiance (%) pou
 input bool   EnableProfitabilityGuardMode = true;     // Renforce les conditions d'entrée en régime perdant (réduit overtrading)
 input double ProfitabilityGuardExtraConfPct = 8.0;    // +% confiance IA min (Forex/Metal/Commodity), moitié sur Boom/Crash/Volatility
 input double ProfitabilityGuardMaxSpreadFactor = 0.75;// Max spread dynamique = MaxSpreadPoints * facteur (plus strict si < 1)
-input double ProfitabilityGuardMinFilterQuality = 0.55; // Qualité filtres mini (0..1) quand disponible
+input double ProfitabilityGuardMinFilterQuality = 0.30; // Qualité filtres mini (0..1) — CONFIG STABLE DE DÉPART
 input double EquilibriumCorrectionBandPercent = 26.0; // Largeur zone correction (% Premium↔Discount) — plus large = moins de trades en zone chop
 input int    CorrectionRangeLookbackBarsM1 = 60;      // Lookback M1 pour détecter une correction (range)
 input double CorrectionMaxRangePctM1 = 0.15;          // Range max (%) M1 pour "correction" (plus haut = détection plus large)
@@ -34564,6 +34567,21 @@ bool SniperModules_ShouldTrade(string direction)
       return false;
    }
 
+   int qualityScore = CalculateSignalQualityScore();
+   if(qualityScore < 50)
+   {
+      if(DebugSniperModules)
+         Print("🚫 SNIPER: Qualité insuffisante (", qualityScore, "/100) - confluence:", g_CurrentVote.confluenceScore);
+      return false;
+   }
+
+   if(g_CurrentVote.confluenceScore < 3)
+   {
+      if(DebugSniperModules)
+         Print("🚫 SNIPER: Confluence faible (", g_CurrentVote.confluenceScore, "/5) - SKIP");
+      return false;
+   }
+
    if(g_CurrentVote.radarBOSDetected)
    {
       bool bosHaussier = (g_SR_MS_Current.bullish);
@@ -34583,10 +34601,27 @@ bool SniperModules_ShouldTrade(string direction)
    }
 
    if(DebugSniperModules)
-      Print("✅ SNIPER VOTE: ", g_CurrentVote.totalSignalStrength, "/10 | Type:",
+      Print("✅ SNIPER VOTE: ", g_CurrentVote.totalSignalStrength, "/10 | Quality:", qualityScore, "/100 | Type:",
             g_CurrentVote.levelType, " @ ", g_CurrentVote.levelPrice);
 
    return true;
+}
+
+int CalculateSignalQualityScore()
+{
+   int score = 0;
+
+   if(g_CurrentVote.confluenceScore > 0)
+      score += (g_CurrentVote.confluenceScore * 15);
+
+   if(g_CurrentVote.liquiditySweptDetected)
+      score += 20;
+
+   if(g_CurrentVote.radarBOSDetected)
+      score += 15;
+
+   score = MathMin(score, 100);
+   return score;
 }
 
 void SniperModules_DrawGraphics()
@@ -34607,26 +34642,71 @@ void SniperModules_DrawGraphics()
       for(int i = 0; i < g_LiquidityLevelCount; i++)
       {
          string objName = StringFormat("SNIPER_LS_SWEEP_%d", i);
-         color col = g_LiquidityLevels[i].isBSL ? clrRed : clrBlue;
+         color col = g_LiquidityLevels[i].isBSL ? clrRed : clrGreen;
 
          ObjectCreate(0, objName, OBJ_HLINE, 0, 0, g_LiquidityLevels[i].price);
          ObjectSetInteger(0, objName, OBJPROP_COLOR, col);
-         ObjectSetInteger(0, objName, OBJPROP_WIDTH, 2);
+         ObjectSetInteger(0, objName, OBJPROP_WIDTH, 3);
          ObjectSetInteger(0, objName, OBJPROP_STYLE, STYLE_DASHDOT);
       }
    }
 
-   if(EnableSniperRadarModule && g_CurrentVote.confluenceScore > 0)
+   if(EnableSniperRadarModule)
    {
-      string scoreText = StringFormat("CONFLUENCE: %d/5", g_CurrentVote.confluenceScore);
-      string objName = "SNIPER_CONFLUENCE_TEXT";
+      if(g_SR_MS_Current.bosDetected)
+      {
+         string bosName = StringFormat("SNIPER_BOS_%lld", iTime(_Symbol, _Period, 0));
+         ObjectCreate(0, bosName, OBJ_HLINE, 0, 0, g_SR_MS_Current.bosLevel);
+         ObjectSetInteger(0, bosName, OBJPROP_COLOR, clrCyan);
+         ObjectSetInteger(0, bosName, OBJPROP_WIDTH, 2);
+         ObjectSetInteger(0, bosName, OBJPROP_STYLE, STYLE_SOLID);
+      }
 
-      ObjectCreate(0, objName, OBJ_LABEL, 0, 0, 0);
-      ObjectSetString(0, objName, OBJPROP_TEXT, scoreText);
-      ObjectSetInteger(0, objName, OBJPROP_COLOR, clrYellow);
-      ObjectSetInteger(0, objName, OBJPROP_FONTSIZE, 10);
-      ObjectSetInteger(0, objName, OBJPROP_XDISTANCE, 50);
-      ObjectSetInteger(0, objName, OBJPROP_YDISTANCE, 100);
+      FVGData currentFVG;
+      if(SMC_DetectFVG(_Symbol, _Period, 50, currentFVG))
+      {
+         string fvgName = StringFormat("SNIPER_FVG_%lld", iTime(_Symbol, _Period, 0));
+         datetime barTime = iTime(_Symbol, _Period, currentFVG.barIndex);
+         datetime barTimePrev = iTime(_Symbol, _Period, currentFVG.barIndex + 3);
+
+         ObjectCreate(0, fvgName, OBJ_RECTANGLE, 0, barTimePrev, currentFVG.top, barTime, currentFVG.bottom);
+         ObjectSetInteger(0, fvgName, OBJPROP_COLOR, clrCyan);
+         ObjectSetInteger(0, fvgName, OBJPROP_FILL, true);
+         ObjectSetInteger(0, fvgName, OBJPROP_OPACITY, 30);
+      }
+
+      OrderBlockData currentOB;
+      if(SMC_DetectOrderBlock(_Symbol, _Period, currentOB))
+      {
+         string obName = StringFormat("SNIPER_OB_%lld", iTime(_Symbol, _Period, 0));
+         datetime barTime = iTime(_Symbol, _Period, currentOB.barIndex);
+         datetime barTimePrev = iTime(_Symbol, _Period, currentOB.barIndex + 5);
+
+         color obCol = (currentOB.direction > 0) ? clrYellow : clrOrange;
+
+         ObjectCreate(0, obName, OBJ_RECTANGLE, 0, barTimePrev, currentOB.high, barTime, currentOB.low);
+         ObjectSetInteger(0, obName, OBJPROP_COLOR, obCol);
+         ObjectSetInteger(0, obName, OBJPROP_FILL, true);
+         ObjectSetInteger(0, obName, OBJPROP_OPACITY, 50);
+      }
+
+      if(g_CurrentVote.confluenceScore > 0)
+      {
+         string scoreText = StringFormat("CONFLUENCE: %d/5 | STRENGTH: %d%%",
+            g_CurrentVote.confluenceScore,
+            (int)(g_CurrentVote.totalSignalStrength * 100 / 10));
+         string labelName = "SNIPER_CONFLUENCE_TEXT";
+
+         ObjectCreate(0, labelName, OBJ_LABEL, 0, 0, 0);
+         ObjectSetString(0, labelName, OBJPROP_TEXT, scoreText);
+
+         color labelCol = (g_CurrentVote.confluenceScore >= 4) ? clrLimeGreen : clrYellow;
+         ObjectSetInteger(0, labelName, OBJPROP_COLOR, labelCol);
+         ObjectSetInteger(0, labelName, OBJPROP_FONTSIZE, 11);
+         ObjectSetInteger(0, labelName, OBJPROP_XDISTANCE, 50);
+         ObjectSetInteger(0, labelName, OBJPROP_YDISTANCE, 50);
+         ObjectSetInteger(0, labelName, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+      }
    }
 
    ChartRedraw(0);

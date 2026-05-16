@@ -1,0 +1,371 @@
+╔═══════════════════════════════════════════════════════════════════════════════╗
+║                    TRADBOT v3.0 - GUIDE DÉPLOIEMENT COMPLET                   ║
+║                         MACHINE DE GUERRE OPÉRATIONNELLE                      ║
+╚═══════════════════════════════════════════════════════════════════════════════╝
+
+📋 TABLE DES MATIÈRES
+═════════════════════════════════════════════════════════════════════════════════
+
+1️⃣  PRÉREQUIS & VÉRIFICATIONS
+2️⃣  INSTALLATION OLLAMA (2-3 minutes)
+3️⃣  DÉMARRAGE SERVEUR IA (1 minute)
+4️⃣  CONFIGURATION MT5 (5 minutes)
+5️⃣  TEST & VALIDATION (2 minutes)
+6️⃣  TROUBLESHOOTING (Si problèmes)
+
+
+═════════════════════════════════════════════════════════════════════════════════
+1️⃣  PRÉREQUIS & VÉRIFICATIONS
+═════════════════════════════════════════════════════════════════════════════════
+
+✅ CHECKLIST:
+  □ Python 3.8+ installé
+  □ MT5 / MT4 lancé et connecté au broker
+  □ Port 8000 DISPONIBLE (vérifier: netstat -ano | findstr 8000)
+  □ Internet connection stable
+  □ 4GB RAM minimum
+
+VÉRIFIER PYTHON:
+  cmd> python --version
+  → Doit être 3.8.0 ou plus
+
+VÉRIFIER PORTS:
+  Windows:
+    cmd> netstat -ano | findstr :8000
+    → Si rien = ✅ OK, sinon chercher quel processus utilise le port
+
+  Linux:
+    $ lsof -i :8000
+    $ sudo lsof -i :8000
+
+
+═════════════════════════════════════════════════════════════════════════════════
+2️⃣  INSTALLATION OLLAMA (Local LLM)
+═════════════════════════════════════════════════════════════════════════════════
+
+ÉTAPE A: Télécharger Ollama
+  1. Aller sur: https://ollama.ai
+  2. Télécharger pour votre OS (Windows/Mac/Linux)
+  3. Installer avec les options par défaut
+
+ÉTAPE B: Lancer Ollama et télécharger modèle
+  
+  Windows:
+    - Ollama se lance automatiquement au démarrage
+    - Ouvrir CMD:
+      $ ollama pull mistral
+      $ ollama serve
+  
+  Linux/Mac:
+    $ ollama pull mistral
+    $ ollama serve
+
+  ⏳ LE PULL PREND 5-10 MINUTES (Mistral = 4.1GB)
+  ⏳ LAISSER TOURNER (ollama serve écoute sur 127.0.0.1:11434)
+
+ÉTAPE C: Vérifier Ollama est prêt
+  Ouvrir navigateur:
+  → http://127.0.0.1:11434/api/tags
+  
+  ✅ Si JSON avec liste de modèles = Ollama est OK ✅
+
+⚠️  IMPORTANT: Laisser ollama serve tourner TOUT LE TEMPS
+
+
+═════════════════════════════════════════════════════════════════════════════════
+3️⃣  DÉMARRAGE SERVEUR IA
+═════════════════════════════════════════════════════════════════════════════════
+
+INSTALLATION DEPENDENCIES:
+  cmd> pip install fastapi uvicorn requests pydantic
+
+LANCER LE SERVEUR:
+  
+  Option A - Depuis fichier:
+    Placer ai_server_v3_OPTIMIZED.py dans répertoire de travail
+    
+    cmd> python ai_server_v3_OPTIMIZED.py
+    
+    ou définir le port:
+    
+    cmd> set TRADER_PORT=8000  (Windows)
+    cmd> export TRADER_PORT=8000  (Linux/Mac)
+    cmd> python ai_server_v3_OPTIMIZED.py
+
+LOGS À VOIR (✅ OK):
+  ════════════════════════════════════════════════════════════
+  INFO | TRADBOT_IA_V3 | OLLAMA CONNECTÉ - Modèles: ['mistral:latest']
+  INFO | TRADBOT_IA_V3 | Serveur écoute sur port 8000
+  INFO | TRADBOT_IA_V3 | POST /decision → Décision de trading
+  ════════════════════════════════════════════════════════════
+
+TESTER SERVEUR:
+  Ouvrir navigateur:
+  → http://127.0.0.1:8000/health
+  
+  ✅ Doit retourner:
+  {
+    "status": "ALIVE",
+    "timestamp": 1234567890,
+    "ollama_available": true,
+    "cache_size": 0
+  }
+
+⚠️  IMPORTANT: Le serveur Python doit rester actif 24/7
+
+
+═════════════════════════════════════════════════════════════════════════════════
+4️⃣  CONFIGURATION MT5 - COPIER LES ROBOTS
+═════════════════════════════════════════════════════════════════════════════════
+
+CHEMINS MT5:
+  Windows:
+    C:\Users\[YourUser]\AppData\Roaming\MetaTrader 5\MQL5\Experts\
+  
+  Linux:
+    ~/.wine/drive_c/Users/[YourUser]/AppData/Roaming/MetaTrader 5/MQL5/Experts/
+
+COPIER CES FICHIERS:
+  ✅ GOM_KOLA_SIDO_v3_OPTIMIZED.mq5
+  ✅ SMC_Universal_Enhanced_v3.mq5
+  
+  Dans le dossier Experts/ ci-dessus
+
+COMPILER LES SCRIPTS:
+  1. Ouvrir MetaEditor (F4 dans MT5)
+  2. Ouvrir chaque .mq5
+  3. Compiler (F5 ou Ctrl+F5)
+  4. Vérifier ZÉRO ERREURS dans l'onglet Erreurs
+
+CONFIGURER LES PARAMÈTRES:
+
+  GOM_KOLA_SIDO_v3_OPTIMIZED:
+    AI_SERVER_URL = "http://127.0.0.1:8000"
+    ENABLE_AI_ANALYSIS = true
+    MIN_IA_CONFIDENCE = 0.55
+    
+  SMC_Universal_Enhanced_v3:
+    AI_SERVER_URL = "http://127.0.0.1:8000"
+    USE_AI_SIGNALS = true
+    MIN_AI_CONFIDENCE = 0.55
+    RiskPerTrade = 50.0  ($ par trade)
+
+
+═════════════════════════════════════════════════════════════════════════════════
+5️⃣  TEST & VALIDATION - VÉRIFIER QUE TOUT MARCHE
+═════════════════════════════════════════════════════════════════════════════════
+
+ÉTAPE 1: Vérifier Ollama
+  cmd> curl http://127.0.0.1:11434/api/tags
+  ✅ Doit retourner JSON avec modèles
+
+ÉTAPE 2: Vérifier Serveur IA
+  cmd> curl http://127.0.0.1:8000/health
+  ✅ Doit retourner JSON health check
+
+ÉTAPE 3: Tester décision IA
+  cmd> curl -X POST http://127.0.0.1:8000/decision ^
+       -H "Content-Type: application/json" ^
+       -d "{\"symbol\":\"EURUSD\",\"timeframe\":\"M5\",\"price\":1.0950,\"bid\":1.0949,\"ask\":1.0951,\"timestamp\":1234567890,\"volume\":1000,\"volatility\":0.015,\"trend\":\"UPTREND\"}"
+  
+  ✅ Doit retourner:
+  {
+    "decision": "BUY" ou "SELL",
+    "confidence": 0.65,
+    "entry_price": 1.0950,
+    ...
+  }
+
+ÉTAPE 4: Tester dans MT5
+  1. Lancer un chart (ex: EURUSD M5)
+  2. Charger script GOM_KOLA_SIDO_v3_OPTIMIZED
+  3. Regarder le Comment (bas du chart)
+  4. Voir:
+     ✅ "✅ AI Server ONLINE"
+     ✅ "✅ AI Decision: BUY (0.65)"
+     ✅ Latence <1500ms
+
+ÉTAPE 5: Tester EA (Expert Advisor)
+  1. Lancer chart EURUSD M5
+  2. Charger SMC_Universal_Enhanced_v3
+  3. Regarder les logs
+  4. Voir:
+     ✅ "[AI_DECISION] BUY (conf:0.65) latency:...ms"
+     ✅ Position ouverte (si confluence ok)
+
+
+═════════════════════════════════════════════════════════════════════════════════
+6️⃣  TROUBLESHOOTING - RÉSOUDRE LES PROBLÈMES
+═════════════════════════════════════════════════════════════════════════════════
+
+❌ PROBLÈME: "AI Server OFFLINE" dans MT5
+─────────────────────────────────────────
+SOLUTION:
+  1. Vérifier serveur lancé:
+     cmd> curl http://127.0.0.1:8000/health
+  
+  2. Vérifier port 8000:
+     Windows: netstat -ano | findstr :8000
+     Linux: lsof -i :8000
+  
+  3. Vérifier firewall:
+     - Autoriser port 8000
+     - Débrancher firewall test
+  
+  4. Vérifier URL dans MT5:
+     - Doit être: http://127.0.0.1:8000
+     - PAS: http://localhost:8000
+
+❌ PROBLÈME: "OLLAMA INDISPONIBLE" dans serveur
+──────────────────────────────────────────────
+SOLUTION:
+  1. Vérifier Ollama tourne:
+     cmd> ollama serve
+  
+  2. Vérifier port 11434:
+     Windows: netstat -ano | findstr :11434
+     
+  3. Vérifier modèle installé:
+     cmd> ollama pull mistral
+  
+  4. Tester connexion:
+     cmd> curl http://127.0.0.1:11434/api/tags
+
+❌ PROBLÈME: Compilation erreur MQ5
+──────────────────────────────────
+SOLUTION:
+  1. Ouvrir MetaEditor
+  2. Tools → Options → Compilation
+  3. Vérifier chemins des includes
+  4. Compiler seul (F5) puis exécuter
+  5. Vérifier pas de WebRequest désactivé
+
+❌ PROBLÈME: Positions n'ouvrent pas
+───────────────────────────────────
+SOLUTION:
+  1. Vérifier RiskPerTrade = 50.0 (minimum)
+  2. Vérifier solde du compte >$500
+  3. Vérifier pas au-delà de MaxPositions
+  4. Lancer robot en mode "Visual Backtest" test
+  5. Vérifier logs erreurs dans EA
+
+❌ PROBLÈME: Latence IA élevée (>3000ms)
+────────────────────────────────────────
+SOLUTION:
+  1. Vérifier CPU usage:
+     - Fermer applications
+     - Vérifier pas de scan antivirus
+  
+  2. Ajuster timeout:
+     - GOM_KOLA: AI_TIMEOUT_MS = 3000
+     - SMC: AI_TIMEOUT_MS = 3000
+  
+  3. Réduire MaxBarsToAnalyze:
+     - De 300 à 150
+  
+  4. Redémarrer Ollama:
+     - Tuer processus ollama serve
+     - Relancer: ollama serve
+
+❌ PROBLÈME: Confiance IA toujours 0
+───────────────────────────────────
+SOLUTION:
+  1. Vérifier MIN_IA_CONFIDENCE:
+     - Réduire de 0.55 à 0.50
+  
+  2. Vérifier tendance:
+     - Robot doit détecter UPTREND/DOWNTREND
+     - EN cas de NEUTRAL, fallback s'active
+  
+  3. Vérifier Ollama répond:
+     cmd> curl http://127.0.0.1:11434/api/generate \
+          -d '{"model":"mistral","prompt":"Hello"}'
+  
+  4. Vérifier logs serveur:
+     - Regarder stdout du python
+     - Doit voir "✅ OLLAMA: SYMBOL → BUY (0.65)"
+
+
+═════════════════════════════════════════════════════════════════════════════════
+📊 VÉRIFIER QUE TOUT MARCHE - CHECKLIST FINALE
+═════════════════════════════════════════════════════════════════════════════════
+
+PRÉ-TRADING:
+  ✅ Ollama tourne (ollama serve actif)
+  ✅ Serveur IA tourne (python ai_server_v3_OPTIMIZED.py actif)
+  ✅ http://127.0.0.1:8000/health retourne JSON ✅
+  ✅ http://127.0.0.1:11434/api/tags retourne JSON ✅
+  ✅ MT5 lancé avec un compte démo/réel
+  ✅ Robots compilés SANS ERREURS
+  ✅ Paramètres robots configurés (URL IA, risques)
+
+PENDANT TRADING:
+  ✅ MT5 shows "✅ AI Server ONLINE"
+  ✅ IA décisions dans les 1-2 secondes
+  ✅ Positions ouvrent selon confluence
+  ✅ Stop-loss et Take-profit correctes
+  ✅ Dashboard actualise toutes les 3-5 secondes
+
+
+═════════════════════════════════════════════════════════════════════════════════
+🚀 DÉMARRAGE RAPIDE (RÉSUMÉ)
+═════════════════════════════════════════════════════════════════════════════════
+
+MINUTE 1-2:
+  1. ollama pull mistral
+  2. ollama serve
+  3. Garder cette fenêtre ouverte
+
+MINUTE 3:
+  python ai_server_v3_OPTIMIZED.py
+  Garder cette fenêtre ouverte
+
+MINUTE 4:
+  Ouvrir MT5
+  Copier robots dans MQL5/Experts/
+  Compiler dans MetaEditor
+
+MINUTE 5:
+  Charger robots sur chart
+  Vérifier "✅ AI Server ONLINE"
+  Commencer à trader!
+
+
+═════════════════════════════════════════════════════════════════════════════════
+📞 SUPPORT RAPIDE
+═════════════════════════════════════════════════════════════════════════════════
+
+SI RIEN NE MARCHE:
+  1. Redémarrer les 2 fenêtres:
+     - Ollama
+     - Python Server
+  
+  2. Vérifier les 3 points critiques:
+     - Ollama sur 11434
+     - Serveur IA sur 8000
+     - MT5 connecté à broker
+  
+  3. Test simple curl:
+     curl -X POST http://127.0.0.1:8000/decision \
+     -H "Content-Type: application/json" \
+     -d "{\"symbol\":\"EURUSD\",\"timeframe\":\"M5\",\"price\":1.0950,\"bid\":1.0949,\"ask\":1.0951,\"timestamp\":1234567890,\"volume\":1000,\"volatility\":0.015,\"trend\":\"UPTREND\"}"
+  
+  4. Si curl retourne JSON = Serveur OK
+  5. Si MT5 sees it = Configuration OK
+
+
+═════════════════════════════════════════════════════════════════════════════════
+✅ FIN - VOTRE MACHINE DE GUERRE EST PRÊTE!
+═════════════════════════════════════════════════════════════════════════════════
+
+Vous avez maintenant:
+  🧠 Ollama local (Mistral LLM) - Analyse texte native
+  🔌 Serveur IA robuste - Décisions <1500ms
+  🤖 2 robots MT5 synchronisés - GOM-KOLA-SIDO + SMC
+  📊 Gestion risque intégrée
+  ⚡ Fallback automatique si serveur down
+  💪 Machine de guerre opérationnelle 24/7
+
+GOOD LUCK & GOOD TRADING! 🚀📈
+
+═════════════════════════════════════════════════════════════════════════════════

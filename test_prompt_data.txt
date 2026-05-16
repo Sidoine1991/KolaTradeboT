@@ -1,0 +1,5 @@
+{
+  "model": "qwen3.5:4b",
+  "prompt": "Tu es un trader professionnel avec 15+ ans d'expérience. Analyse EURUSD M1 avec RSI 65, MACD positif, prix 1.08500. Donne une analyse structurée pour trading robot.",
+  "stream": false
+}
