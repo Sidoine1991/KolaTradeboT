@@ -13741,11 +13741,12 @@ void OnTick()
    static datetime lastCleanup = 0;
    datetime currentTime = TimeCurrent();
 
-   // GARBAGE COLLECTION: Clean expired drawings aggressively (every tick)
+   // GARBAGE COLLECTION: Clean expired drawings aggressively (every 10 seconds)
    if(DrawingsMaxAgeMinutes > 0 && (lastCleanup == 0 || (currentTime - lastCleanup) >= 10))
    {
       lastCleanup = currentTime;
-      GOM_CleanExpiredDrawings();
+      int maxAgeSec = DrawingsMaxAgeMinutes * 60; // Convert minutes to seconds
+      GOM_CleanExpiredDrawings(maxAgeSec);
    }
 
    const int riskEvery = MathMax(1, OnTickRiskCheckIntervalSec);
@@ -13776,7 +13777,7 @@ void OnTick()
       lastDashboardUpdate = currentTime;
       // Clean expired drawings before rendering fresh dashboard
       if(DrawingsMaxAgeMinutes > 0)
-         GOM_CleanExpiredDrawings();
+         GOM_CleanExpiredDrawings(DrawingsMaxAgeMinutes * 60);
       UpdateDashboard();
    }
 
@@ -34628,40 +34629,6 @@ void SniperModules_DrawGraphics()
    }
 
    ChartRedraw(0);
-}
-
-//| GARBAGE COLLECTION: Delete expired drawings                    |
-void GOM_CleanExpiredDrawings()
-{
-   if(DrawingsMaxAgeMinutes <= 0)
-      return; // Disabled
-
-   datetime now = TimeCurrent();
-   datetime maxAge = now - DrawingsMaxAgeMinutes * 60;
-
-   int total = ObjectsTotal(0, -1, -1);
-
-   for(int i = total - 1; i >= 0; i--)
-   {
-      string objName = ObjectName(0, i, -1, -1);
-      if(objName == "")
-         continue;
-
-      // Only clean GOM/SMC objects (not user drawings)
-      if(StringFind(objName, "GOM_") != 0 && StringFind(objName, "SMC_") != 0)
-         continue;
-
-      // Skip dashboard objects (keep them fresh)
-      if(StringFind(objName, "GOM_DASH_") == 0)
-         continue;
-
-      datetime createTime = ObjectGetInteger(0, objName, OBJPROP_CREATETIME);
-
-      if(createTime != 0 && createTime < maxAge)
-      {
-         ObjectDelete(0, objName);
-      }
-   }
 }
 
 //| END OF PROGRAM                                                  |
