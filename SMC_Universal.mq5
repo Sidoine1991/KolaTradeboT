@@ -94,7 +94,7 @@ input int    DashboardMLCellWidth = 124;        // Largeur des cellules (évite 
 input int    DashboardMLCellHeight = 46;        // Hauteur des cellules (+ lignes = tableau plus lisible)
 input int    DashboardMLFontSize = 7;           // Taille police (7=compact lisible, 8=normal)
 input bool   DashboardMLCommentFallback = true; // Secours texte Comment() si bandeaux graphiques masqués
-input int    DrawingsMaxAgeMinutes = 120;       // Purge auto dessins GOM/SMC plus vieux que X min (0=désactivé)
+input int    DrawingsMaxAgeMinutes = 5;        // Purge auto dessins GOM/SMC plus vieux que 5 min (réduit de 120 pour nettoyage agressif)
 
 input bool   GomScriptLiveLabelAnchorRight = true; // Libellé GOM LIVE : à droite pour libérer le coin du dashboard
 input int    GomScriptLiveLabelMarginX = 12;         // Marge depuis le bord gauche ou droit selon l'ancre
@@ -13738,7 +13738,15 @@ void OnTick()
    static datetime lastPropiceInfoLog = 0;
    static datetime lastStatsUpdate = 0;
    static datetime lastRiskCheck = 0;
+   static datetime lastCleanup = 0;
    datetime currentTime = TimeCurrent();
+
+   // GARBAGE COLLECTION: Clean expired drawings aggressively (every tick)
+   if(DrawingsMaxAgeMinutes > 0 && (lastCleanup == 0 || (currentTime - lastCleanup) >= 10))
+   {
+      lastCleanup = currentTime;
+      GOM_CleanExpiredDrawings();
+   }
 
    const int riskEvery = MathMax(1, OnTickRiskCheckIntervalSec);
    const bool runRiskChecks = (lastRiskCheck == 0 || (currentTime - lastRiskCheck) >= riskEvery);
@@ -13766,6 +13774,9 @@ void OnTick()
    if(UseEnhancedDashboard && currentTime - lastDashboardUpdate >= MathMax(5, DashboardRefreshSeconds))
    {
       lastDashboardUpdate = currentTime;
+      // Clean expired drawings before rendering fresh dashboard
+      if(DrawingsMaxAgeMinutes > 0)
+         GOM_CleanExpiredDrawings();
       UpdateDashboard();
    }
 
@@ -34617,6 +34628,40 @@ void SniperModules_DrawGraphics()
    }
 
    ChartRedraw(0);
+}
+
+//| GARBAGE COLLECTION: Delete expired drawings                    |
+void GOM_CleanExpiredDrawings()
+{
+   if(DrawingsMaxAgeMinutes <= 0)
+      return; // Disabled
+
+   datetime now = TimeCurrent();
+   datetime maxAge = now - DrawingsMaxAgeMinutes * 60;
+
+   int total = ObjectsTotal(0, -1, -1);
+
+   for(int i = total - 1; i >= 0; i--)
+   {
+      string objName = ObjectName(0, i, -1, -1);
+      if(objName == "")
+         continue;
+
+      // Only clean GOM/SMC objects (not user drawings)
+      if(StringFind(objName, "GOM_") != 0 && StringFind(objName, "SMC_") != 0)
+         continue;
+
+      // Skip dashboard objects (keep them fresh)
+      if(StringFind(objName, "GOM_DASH_") == 0)
+         continue;
+
+      datetime createTime = ObjectGetInteger(0, objName, OBJPROP_CREATETIME);
+
+      if(createTime != 0 && createTime < maxAge)
+      {
+         ObjectDelete(0, objName);
+      }
+   }
 }
 
 //| END OF PROGRAM                                                  |
