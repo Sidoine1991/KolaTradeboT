@@ -10,6 +10,9 @@ ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
 # pip récent : résolution correcte des Requires-Python (mistralai 1.12+ exige Python >=3.10)
 RUN python -m pip install --no-cache-dir --upgrade "pip>=25.0" "setuptools>=75.0" wheel
 
+# CACHE BUSTER - Force full rebuild 2026-05-16T22:14:00Z
+RUN echo "Invalidating Docker layer cache for clean ai_server deployment"
+
 # Copier les fichiers de configuration
 COPY requirements-cloud.txt .
 COPY pyproject.toml .
