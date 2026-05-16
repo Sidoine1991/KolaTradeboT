@@ -13717,6 +13717,9 @@ void OnTick()
       return; // Sortir - aucun trading pendant la pause
    }
 
+   // MOTEUR GOM - Doit s'exécuter TOUJOURS pour maintenir verdict à jour
+   GOM_InternalEngine_Update();
+
    if(!SMC_IsStrictUTCTradingWindowOpen())
    {
       // Indiquer au dashboard que le robot est en pause UTC
@@ -13752,11 +13755,10 @@ void OnTick()
    }
 
    GlobalVariableSet("EA_DASH_UTC_PAUSE", 0.0);
-   
+
    // STRATÉGIES PAR CATÉGORIE DE SYMBOLE (Boom/Crash, Volatility, Forex/Metals)
    // Anti-duplication immédiat: avant toute tentative de placement de LIMIT
    EnsureSinglePendingLimitOrderForSymbol(_Symbol);
-   GOM_InternalEngine_Update();
    RunCategoryStrategy();
    
    // Gestion des positions existantes (fermeture rapide après spike)
