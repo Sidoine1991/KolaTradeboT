@@ -3841,6 +3841,110 @@ async def get_symbol_config(symbol: str):
         logger.error(f"Erreur /config/symbol: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
+
+# ============================================================================
+# ML Data Collection Endpoint
+# ============================================================================
+@app.post("/store_snapshot")
+async def store_indicator_snapshot(body: IndicatorSnapshot):
+    """Store a complete indicator snapshot from EA for ML training.
+
+    Receives 50+ indicators collected by EA's ML_Scanner every 5 minutes.
+    Stores in market_data_snapshots table for ML training and backtesting.
+    """
+    try:
+        if not DB_AVAILABLE:
+            raise HTTPException(status_code=503, detail="Database not available for ML data storage")
+
+        sym = (body.symbol or "").strip()
+        if not sym:
+            raise HTTPException(status_code=400, detail="symbol required")
+
+        if not validate_symbol(sym):
+            raise HTTPException(status_code=400, detail=f"Invalid symbol format: {sym}")
+
+        pool = await get_db_pool()
+        if not pool:
+            raise HTTPException(status_code=503, detail="Database connection failed")
+
+        async with pool.acquire() as conn:
+            # Insert snapshot
+            snapshot_id = await conn.fetchval(
+                """
+                INSERT INTO market_data_snapshots (
+                    symbol, timestamp, timeframe,
+                    bid, ask, spread_pips,
+                    rsi_m1, rsi_m5, rsi_m15, rsi_h1,
+                    atr_m1, atr_m5, atr_m15, atr_h1, atr_ratio,
+                    ema_fast_m1, ema_slow_m1, ema_fast_m5, ema_slow_m5,
+                    ema_fast_m15, ema_slow_m15, ema_fast_h1, ema_slow_h1,
+                    fvg_detected, fvg_direction, bos_detected, bos_direction,
+                    ob_proximity_atr, sweep_detected, sweep_type,
+                    m5_buy_level, m5_sell_level, m5_buy_touches, m5_sell_touches,
+                    m15_buy_level, m15_sell_level, m15_buy_touches, m15_sell_touches,
+                    h1_buy_level, h1_sell_level, h1_buy_touches, h1_sell_touches,
+                    tech_buy_score, tech_sell_score, entry_quality, spike_probability,
+                    bb_squeeze, vwap_distance_pct, bb_pctb, bb_width_pct,
+                    volume_current, volume_ratio,
+                    sido_double_top, sido_double_bottom,
+                    asset_category, coherence_score,
+                    signal_action, signal_confidence
+                )
+                VALUES (
+                    $1, to_timestamp($2), $3,
+                    $4, $5, $6,
+                    $7, $8, $9, $10,
+                    $11, $12, $13, $14, $15,
+                    $16, $17, $18, $19,
+                    $20, $21, $22, $23,
+                    $24, $25, $26, $27,
+                    $28, $29, $30,
+                    $31, $32, $33, $34,
+                    $35, $36, $37, $38,
+                    $39, $40, $41, $42,
+                    $43, $44, $45, $46,
+                    $47, $48, $49, $50,
+                    $51, $52,
+                    $53, $54,
+                    $55, $56,
+                    $57, $58
+                )
+                RETURNING id
+                """,
+                sym, body.timestamp, body.timeframe,
+                body.bid, body.ask, body.spread_pips,
+                body.rsi_m1, body.rsi_m5, body.rsi_m15, body.rsi_h1,
+                body.atr_m1, body.atr_m5, body.atr_m15, body.atr_h1, body.atr_ratio,
+                body.ema_fast_m1, body.ema_slow_m1, body.ema_fast_m5, body.ema_slow_m5,
+                body.ema_fast_m15, body.ema_slow_m15, body.ema_fast_h1, body.ema_slow_h1,
+                body.fvg_detected, body.fvg_direction, body.bos_detected, body.bos_direction,
+                body.ob_proximity_atr, body.sweep_detected, body.sweep_type,
+                body.m5_buy_level, body.m5_sell_level, body.m5_buy_touches, body.m5_sell_touches,
+                body.m15_buy_level, body.m15_sell_level, body.m15_buy_touches, body.m15_sell_touches,
+                body.h1_buy_level, body.h1_sell_level, body.h1_buy_touches, body.h1_sell_touches,
+                body.tech_buy_score, body.tech_sell_score, body.entry_quality, body.spike_probability,
+                body.bb_squeeze, body.vwap_distance_pct, body.bb_pctb, body.bb_width_pct,
+                body.volume_current, body.volume_ratio,
+                body.sido_double_top, body.sido_double_bottom,
+                body.asset_category, body.coherence_score,
+                body.signal_action, body.signal_confidence
+            )
+
+        return SnapshotStorageResponse(
+            status="stored",
+            snapshot_id=snapshot_id,
+            symbol=sym,
+            timestamp=body.timestamp,
+            message=f"Snapshot stored successfully (ID: {snapshot_id})"
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error storing snapshot for {body.symbol}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to store snapshot: {str(e)}")
+
+
 # SQL pour créer la table de feedback
 CREATE_FEEDBACK_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS trade_feedback (
@@ -5825,6 +5929,107 @@ class CorrectionPredictionResponse(BaseModel):
     recommended_action: Optional[str] = None
     risk_level: Optional[str] = None
     message: Optional[str] = None
+
+
+# ============================================================================
+# ML Data Collection Models
+# ============================================================================
+class IndicatorSnapshot(BaseModel):
+    """Market data snapshot from EA - 50+ indicators for ML training"""
+    # Identification
+    symbol: str
+    timestamp: int  # Unix timestamp
+    timeframe: str = "M1"
+
+    # Price
+    bid: float
+    ask: float
+    spread_pips: float = 0.0
+
+    # Momentum
+    rsi_m1: float = 0.0
+    rsi_m5: float = 0.0
+    rsi_m15: float = 0.0
+    rsi_h1: float = 0.0
+
+    # Volatility
+    atr_m1: float = 0.0
+    atr_m5: float = 0.0
+    atr_m15: float = 0.0
+    atr_h1: float = 0.0
+    atr_ratio: float = 0.0
+
+    # Trend (EMA)
+    ema_fast_m1: float = 0.0
+    ema_slow_m1: float = 0.0
+    ema_fast_m5: float = 0.0
+    ema_slow_m5: float = 0.0
+    ema_fast_m15: float = 0.0
+    ema_slow_m15: float = 0.0
+    ema_fast_h1: float = 0.0
+    ema_slow_h1: float = 0.0
+
+    # SMC Structures
+    fvg_detected: bool = False
+    fvg_direction: int = 0
+    bos_detected: bool = False
+    bos_direction: int = 0
+    ob_proximity_atr: float = 0.0
+    sweep_detected: bool = False
+    sweep_type: str = ""
+
+    # KOLA Levels
+    m5_buy_level: float = 0.0
+    m5_sell_level: float = 0.0
+    m5_buy_touches: int = 0
+    m5_sell_touches: int = 0
+    m15_buy_level: float = 0.0
+    m15_sell_level: float = 0.0
+    m15_buy_touches: int = 0
+    m15_sell_touches: int = 0
+    h1_buy_level: float = 0.0
+    h1_sell_level: float = 0.0
+    h1_buy_touches: int = 0
+    h1_sell_touches: int = 0
+
+    # Confluence & Scores
+    tech_buy_score: float = 0.0
+    tech_sell_score: float = 0.0
+    entry_quality: int = 0
+    spike_probability: float = 0.0
+
+    # Bollinger Bands + VWAP
+    bb_squeeze: bool = False
+    vwap_distance_pct: float = 0.0
+    bb_pctb: float = 0.0
+    bb_width_pct: float = 0.0
+
+    # Volume
+    volume_current: int = 0
+    volume_ratio: float = 0.0
+
+    # SIDO Patterns
+    sido_double_top: bool = False
+    sido_double_bottom: bool = False
+
+    # Asset Category
+    asset_category: str = ""
+
+    # Multi-timeframe
+    coherence_score: float = 0.0
+
+    # Signal
+    signal_action: str = "HOLD"
+    signal_confidence: float = 0.0
+
+
+class SnapshotStorageResponse(BaseModel):
+    """Response after storing snapshot"""
+    status: str = "stored"
+    snapshot_id: Optional[int] = None
+    symbol: str
+    timestamp: int
+    message: str = ""
 
 
 def _ema_dir(ema_fast: Optional[float], ema_slow: Optional[float]) -> int:
