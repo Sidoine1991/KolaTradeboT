@@ -11298,23 +11298,25 @@ bool TryAcquireOpenLock()
 void ReleaseOpenLock() { GlobalVariableSet("SMC_OPEN_LOCK_" + IntegerToString(InpMagicNumber), 0); }
 
 //+------------------------------------------------------------------+
-//| OnInit - Initialize EA and ML Scanner                            |
+//| OnInit - Initialize EA and ML Scanner (DISABLED - compilation)   |
 //+------------------------------------------------------------------+
-void OnInit_ML_Scanner()
-{
-   ML_Scanner_Init();
-   Print("[ML_Scanner] EA initialized - scanner ready for 5-minute cycles");
-}
+// TODO: Fix ML_Scanner compilation errors
+// void OnInit_ML_Scanner()
+// {
+//    ML_Scanner_Init();
+//    Print("[ML_Scanner] EA initialized - scanner ready for 5-minute cycles");
+// }
 
 //+------------------------------------------------------------------+
-//| OnTimer - Periodic 5-minute data collection                      |
+//| OnTimer - Periodic 5-minute data collection (DISABLED)           |
 //+------------------------------------------------------------------+
-void OnTimer()
-{
-   if(ML_Scanner_IsTimeToScan()) {
-      ML_Scanner_ScanAllSymbols(AI_ServerURL, AI_ServerRender, UseRenderAsPrimary);
-   }
-}
+// TODO: Fix ML_Scanner compilation errors
+// void OnTimer()
+// {
+//    if(ML_Scanner_IsTimeToScan()) {
+//       ML_Scanner_ScanAllSymbols(AI_ServerURL, AI_ServerRender, UseRenderAsPrimary);
+//    }
+// }
 
 void OnDeinit(const int reason)
 {
@@ -13836,8 +13838,8 @@ void OnTick()
          // GOM_CleanExpiredDrawings(); // TODO: Fix parameter conflict with GOM_Enhanced_Dashboard
       UpdateDashboard();
 
-      // Afficher signal ML du dashboard
-      DisplayMLSignal();
+      // Afficher signal ML du dashboard (TODO: réactiver après fix)
+      // DisplayMLSignal();
    }
 
    MaybeUpdateTradingAgentsFromOnTick(currentTime);
@@ -34809,31 +34811,6 @@ bool FetchMLSignal(string symbol, MLSignal &sig) {
    }
 
    return false;
-}
-
-// Extrait une valeur string JSON
-string ExtractJsonString(string json, string key) {
-   int pos = StringFind(json, key);
-   if(pos == -1) return "";
-
-   pos += StringLen(key);
-   int end = StringFind(json, "\"", pos);
-   if(end == -1) return "";
-
-   return StringSubstr(json, pos, end - pos);
-}
-
-// Extrait une valeur numérique JSON
-string ExtractJsonValue(string json, string key) {
-   int pos = StringFind(json, key);
-   if(pos == -1) return "";
-
-   pos += StringLen(key);
-   int end = StringFind(json, ",", pos);
-   if(end == -1) end = StringFind(json, "}", pos);
-   if(end == -1) return "";
-
-   return StringSubstr(json, pos, end - pos);
 }
 
 // Affiche le signal ML sur le graphique
