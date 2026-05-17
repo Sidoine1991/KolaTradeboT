@@ -84,7 +84,15 @@ class Dashboard:
         return self.symbols
 
     async def fetch_signal(self, symbol: str):
-        return await self.fetch_json(f"{self.api_url}/ml/signal?symbol={symbol}&timeframe=M1")
+        """Récupère le signal ML du serveur local d'abord, puis fallback à Render"""
+        # Essayer d'abord le serveur local
+        signal = await self.fetch_json(f"{self.local_url}/ml/signal?symbol={symbol}&timeframe=M1")
+        if signal:
+            return signal
+
+        # Fallback: utiliser Render
+        signal = await self.fetch_json(f"{self.api_url}/ml/signal?symbol={symbol}&timeframe=M1")
+        return signal
 
     async def update_metrics(self):
         await self.fetch_health()
