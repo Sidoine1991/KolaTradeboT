@@ -18802,6 +18802,54 @@ if __name__ == "__main__":
         log_level="info"
     )
 
+@app.get("/symbols")
+async def get_symbols():
+    """Retourne la liste des symboles du Market Watch MT5 (priorité) + Deriv"""
+    try:
+        import MetaTrader5 as mt5
+
+        mt5_symbols = []
+        mt5_available = False
+
+        # Essayer de récupérer les symboles MT5 du Market Watch
+        try:
+            if mt5.initialize():
+                mt5_available = True
+                symbols = mt5.symbols_get()
+                if symbols:
+                    mt5_symbols = [s.name for s in symbols if s.visible]
+                mt5.shutdown()
+        except Exception as e:
+            logger.debug(f"MT5 non disponible: {e}")
+
+        # Si MT5 a des symboles, les retourner
+        if mt5_symbols:
+            return {
+                "symbols": sorted(list(set(mt5_symbols))),
+                "count": len(mt5_symbols),
+                "source": "mt5_market_watch",
+                "mt5_available": True
+            }
+
+        # Fallback: récupérer depuis le catalogue (Deriv + MT5 télémétrie)
+        catalog = await catalog_trading_symbols()
+        deriv_symbols = catalog.get("deriv", {}).get("symbols", [])
+        mt5_catalog = catalog.get("mt5", {}).get("symbols", [])
+
+        all_symbols = list(set(deriv_symbols + mt5_catalog))
+
+        return {
+            "symbols": sorted(all_symbols),
+            "count": len(all_symbols),
+            "deriv_count": len(deriv_symbols),
+            "mt5_catalog_count": len(mt5_catalog),
+            "source": "deriv_catalog",
+            "mt5_available": False
+        }
+    except Exception as e:
+        logger.error(f"Erreur lors de la récupération des symboles: {e}")
+        return {"symbols": [], "count": 0, "error": str(e), "source": "error"}
+
 @app.get("/fallback-status")
 async def get_fallback_status():
     """Retourne le statut du système de fallback"""

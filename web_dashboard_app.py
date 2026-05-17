@@ -65,13 +65,23 @@ class Dashboard:
             self.health = health
 
     async def fetch_symbols(self):
-        """Récupère la liste des symboles depuis l'API"""
+        """Récupère la liste des symboles depuis l'API locale ou Render"""
+        # Essayer d'abord le serveur local
+        symbols_data = await self.fetch_json(f"{self.local_url}/symbols")
+        if symbols_data and "symbols" in symbols_data:
+            self.symbols = symbols_data["symbols"]
+            logger.info(f"Symboles chargés du serveur LOCAL: {len(self.symbols)} symboles")
+            return self.symbols
+
+        # Fallback: essayer Render
         symbols_data = await self.fetch_json(f"{self.api_url}/symbols")
         if symbols_data and "symbols" in symbols_data:
             self.symbols = symbols_data["symbols"]
-            logger.info(f"Symboles chargés: {len(self.symbols)} symboles")
+            logger.info(f"Symboles chargés de Render: {len(self.symbols)} symboles")
             return self.symbols
-        return []
+
+        logger.warning("Aucun symbole trouvé, utilisation des symboles par défaut")
+        return self.symbols
 
     async def fetch_signal(self, symbol: str):
         return await self.fetch_json(f"{self.api_url}/ml/signal?symbol={symbol}&timeframe=M1")
