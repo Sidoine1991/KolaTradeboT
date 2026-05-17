@@ -7273,35 +7273,10 @@ void DrawEnhancedDashboard()
    // CURRENT PRICE
    string priceText = "💲 Price: " + DoubleToString(currentPrice, digits);
 
-   int y = 20;
-   int lineHeight = 26;  // INCREASED for better spacing
-   int fontSize = 9;    // UNIFORM font size across all dashboard
+   int lineHeight = 26;
+   int fontSize = 9;
 
-   // Draw top dashboard (AI, Price only - Trend moved to bottom)
-   string label1 = "ML_DASH_AI";
-   ObjectCreate(chartID, label1, OBJ_LABEL, 0, 0, 0);
-   ObjectSetInteger(chartID, label1, OBJPROP_XDISTANCE, 10);
-   ObjectSetInteger(chartID, label1, OBJPROP_YDISTANCE, y);
-   ObjectSetString(chartID, label1, OBJPROP_TEXT, aiText);
-   ObjectSetInteger(chartID, label1, OBJPROP_COLOR, aiColor);
-   ObjectSetInteger(chartID, label1, OBJPROP_FONTSIZE, fontSize);
-   ObjectSetInteger(chartID, label1, OBJPROP_BACK, false);
-   y += lineHeight;
-
-   string label3 = "ML_DASH_PRICE";
-   ObjectCreate(chartID, label3, OBJ_LABEL, 0, 0, 0);
-   ObjectSetInteger(chartID, label3, OBJPROP_XDISTANCE, 10);
-   ObjectSetInteger(chartID, label3, OBJPROP_YDISTANCE, y);
-   ObjectSetString(chartID, label3, OBJPROP_TEXT, priceText);
-   ObjectSetInteger(chartID, label3, OBJPROP_COLOR, clrWhite);
-   ObjectSetInteger(chartID, label3, OBJPROP_FONTSIZE, fontSize);
-   ObjectSetInteger(chartID, label3, OBJPROP_BACK, false);
-   y += lineHeight + 5; // Small extra gap
-
-   // ===== ENTRY LEVELS SECTION - REMOVED FROM DASHBOARD =====
-   // BUY/SELL labels removed from dashboard display
-   // Entry levels still drawn as GREEN/RED dashed lines on chart (no text labels)
-
+   // Entry levels drawn as lines (no labels)
    string buySource = "";
    double buyLevel = GetClosestBuyLevel(currentPrice, atr, 2.0, buySource);
 
@@ -7310,7 +7285,6 @@ void DrawEnhancedDashboard()
 
    if(buyLevel > 0)
    {
-      // Draw GREEN horizontal line for BUY level (no text label in dashboard)
       string buyLine = "ENTRY_LVL_BUY";
       ObjectCreate(chartID, buyLine, OBJ_HLINE, 0, 0, buyLevel);
       ObjectSetInteger(chartID, buyLine, OBJPROP_COLOR, clrLimeGreen);
@@ -7321,7 +7295,6 @@ void DrawEnhancedDashboard()
 
    if(sellLevel > 0)
    {
-      // Draw RED horizontal line for SELL level (no text label in dashboard)
       string sellLine = "ENTRY_LVL_SELL";
       ObjectCreate(chartID, sellLine, OBJ_HLINE, 0, 0, sellLevel);
       ObjectSetInteger(chartID, sellLine, OBJPROP_COLOR, clrRed);
@@ -7330,78 +7303,103 @@ void DrawEnhancedDashboard()
       ObjectSetInteger(chartID, sellLine, OBJPROP_BACK, true);
    }
 
-   // ===== TREND SECTION (AFTER ENTRY LEVELS) =====
-   string label2 = "ML_DASH_TREND";
+   // ===== ZONE PREDICTION BASSE (BOTTOM ZONE) =====
+   // Déplace tout le contenu du dashboard dans la zone basse (zone de crédit)
+   // sous les predictions, pour une meilleure organisation visuelle
+
+   int baseY = 450;  // Zone basse pour predictions et infos détaillées
+
+   // Display AI Decision
+   string label_ai = "DASH_AI_BOTTOM";
+   ObjectCreate(chartID, label_ai, OBJ_LABEL, 0, 0, 0);
+   ObjectSetInteger(chartID, label_ai, OBJPROP_XDISTANCE, 10);
+   ObjectSetInteger(chartID, label_ai, OBJPROP_YDISTANCE, baseY);
+   ObjectSetString(chartID, label_ai, OBJPROP_TEXT, verdictText);
+   ObjectSetInteger(chartID, label_ai, OBJPROP_COLOR, verdictColor);
+   ObjectSetInteger(chartID, label_ai, OBJPROP_FONTSIZE, fontSize);
+   ObjectSetInteger(chartID, label_ai, OBJPROP_BACK, false);
+   baseY += lineHeight;
+
+   // Display Current Price
+   string priceStr = DoubleToString(currentPrice, digits);
+   string label_price = "DASH_PRICE_BOTTOM";
+   ObjectCreate(chartID, label_price, OBJ_LABEL, 0, 0, 0);
+   ObjectSetInteger(chartID, label_price, OBJPROP_XDISTANCE, 10);
+   ObjectSetInteger(chartID, label_price, OBJPROP_YDISTANCE, baseY);
+   ObjectSetString(chartID, label_price, OBJPROP_TEXT, "💲 Price: " + priceStr);
+   ObjectSetInteger(chartID, label_price, OBJPROP_COLOR, clrWhite);
+   ObjectSetInteger(chartID, label_price, OBJPROP_FONTSIZE, fontSize);
+   ObjectSetInteger(chartID, label_price, OBJPROP_BACK, false);
+   baseY += lineHeight;
+
+   // Display Trend
+   string label2 = "DASH_TREND_BOTTOM";
    ObjectCreate(chartID, label2, OBJ_LABEL, 0, 0, 0);
    ObjectSetInteger(chartID, label2, OBJPROP_XDISTANCE, 10);
-   ObjectSetInteger(chartID, label2, OBJPROP_YDISTANCE, y);
+   ObjectSetInteger(chartID, label2, OBJPROP_YDISTANCE, baseY);
    ObjectSetString(chartID, label2, OBJPROP_TEXT, trendText);
    ObjectSetInteger(chartID, label2, OBJPROP_COLOR, trendColor);
    ObjectSetInteger(chartID, label2, OBJPROP_FONTSIZE, fontSize);
    ObjectSetInteger(chartID, label2, OBJPROP_BACK, false);
-   y += lineHeight;
+   baseY += lineHeight;
 
-   // ===== PRICE PREDICTION SECTION =====
+   // ===== PRICE PREDICTION SECTION (BOTTOM ZONE) =====
    PricePrediction pred = g_cachedPricePrediction;
    color predColor = (pred.direction == "UP") ? clrLimeGreen :
                      (pred.direction == "DOWN") ? clrRed : clrYellow;
    string predText = "🔮 Prediction: " + pred.direction + " [" + DoubleToString(pred.probability, 1) + "%]";
 
-   string label_pred = "ML_DASH_PREDICTION";
+   string label_pred = "DASH_PREDICTION_BOTTOM";
    ObjectCreate(chartID, label_pred, OBJ_LABEL, 0, 0, 0);
    ObjectSetInteger(chartID, label_pred, OBJPROP_XDISTANCE, 10);
-   ObjectSetInteger(chartID, label_pred, OBJPROP_YDISTANCE, y);
+   ObjectSetInteger(chartID, label_pred, OBJPROP_YDISTANCE, baseY);
    ObjectSetString(chartID, label_pred, OBJPROP_TEXT, predText);
    ObjectSetInteger(chartID, label_pred, OBJPROP_COLOR, predColor);
    ObjectSetInteger(chartID, label_pred, OBJPROP_FONTSIZE, fontSize);
    ObjectSetInteger(chartID, label_pred, OBJPROP_BACK, false);
-   y += lineHeight;
+   baseY += lineHeight;
 
-   // ===== PROBABILITY DETAILS SECTION =====
-   // Display probability reason
+   // ===== PROBABILITY REASONING (BOTTOM ZONE) =====
    string probReasonText = "  └─ " + pred.reasoning;
 
-   string label_prob_reason = "ML_DASH_PROB_REASON";
+   string label_prob_reason = "DASH_PROB_REASON_BOTTOM";
    ObjectCreate(chartID, label_prob_reason, OBJ_LABEL, 0, 0, 0);
    ObjectSetInteger(chartID, label_prob_reason, OBJPROP_XDISTANCE, 10);
-   ObjectSetInteger(chartID, label_prob_reason, OBJPROP_YDISTANCE, y);
+   ObjectSetInteger(chartID, label_prob_reason, OBJPROP_YDISTANCE, baseY);
    ObjectSetString(chartID, label_prob_reason, OBJPROP_TEXT, probReasonText);
    ObjectSetInteger(chartID, label_prob_reason, OBJPROP_COLOR, clrDarkGray);
-   ObjectSetInteger(chartID, label_prob_reason, OBJPROP_FONTSIZE, 8);  // Slightly smaller
+   ObjectSetInteger(chartID, label_prob_reason, OBJPROP_FONTSIZE, 8);
    ObjectSetInteger(chartID, label_prob_reason, OBJPROP_BACK, false);
-   y += lineHeight;
+   baseY += lineHeight;
 
-   // Display detailed probability breakdown (EMA | RSI | ATR)
+   // ===== SIGNAL BREAKDOWN (BOTTOM ZONE) =====
    ProbabilityAnalysis probAnalysis = g_cachedProbabilityAnalysis;
    string detailedProbText = "  EMA:" + DoubleToString(probAnalysis.emaScore, 0) + "% | RSI:" +
                              DoubleToString(probAnalysis.rsiScore, 0) + "% | ATR:" +
                              DoubleToString(probAnalysis.atrScore, 0) + "%";
 
-   string label_prob_detail = "ML_DASH_PROB_DETAIL";
+   string label_prob_detail = "DASH_PROB_DETAIL_BOTTOM";
    ObjectCreate(chartID, label_prob_detail, OBJ_LABEL, 0, 0, 0);
    ObjectSetInteger(chartID, label_prob_detail, OBJPROP_XDISTANCE, 10);
-   ObjectSetInteger(chartID, label_prob_detail, OBJPROP_YDISTANCE, y);
+   ObjectSetInteger(chartID, label_prob_detail, OBJPROP_YDISTANCE, baseY);
    ObjectSetString(chartID, label_prob_detail, OBJPROP_TEXT, detailedProbText);
-   ObjectSetInteger(chartID, label_prob_detail, OBJPROP_COLOR, C'150,150,150');  // Medium gray for details
+   ObjectSetInteger(chartID, label_prob_detail, OBJPROP_COLOR, C'150,150,150');
    ObjectSetInteger(chartID, label_prob_detail, OBJPROP_FONTSIZE, 8);
    ObjectSetInteger(chartID, label_prob_detail, OBJPROP_BACK, false);
-   y += lineHeight + 10; // Extra gap before ML metrics
+   baseY += lineHeight;
 
-   // ===== ML METRICS SECTION (FAR BOTTOM-RIGHT - NO OVERLAP) =====
-   // Position ML metrics in bottom-left corner, well below all other dashboards
-   // This prevents any overlap with the verdict dashboard and entry levels
-
+   // ===== ML METRICS SECTION (BOTTOM ZONE) =====
    string mlAccuracy = DoubleToString(g_mlLastAccuracy, 1);
    string mlModel = g_mlLastModelName;
    string mlText = "📊 ML: " + mlAccuracy + "% | " + mlModel;
 
-   string label_ml = "ML_DASH_METRICS";
+   string label_ml = "DASH_METRICS_BOTTOM";
    ObjectCreate(chartID, label_ml, OBJ_LABEL, 0, 0, 0);
    ObjectSetInteger(chartID, label_ml, OBJPROP_XDISTANCE, 10);
-   ObjectSetInteger(chartID, label_ml, OBJPROP_YDISTANCE, 650);  // VERY BOTTOM - No overlap with any other info
+   ObjectSetInteger(chartID, label_ml, OBJPROP_YDISTANCE, baseY);
    ObjectSetString(chartID, label_ml, OBJPROP_TEXT, mlText);
    ObjectSetInteger(chartID, label_ml, OBJPROP_COLOR, clrSkyBlue);
-   ObjectSetInteger(chartID, label_ml, OBJPROP_FONTSIZE, fontSize);  // UNIFORM with rest of dashboard
+   ObjectSetInteger(chartID, label_ml, OBJPROP_FONTSIZE, fontSize);
    ObjectSetInteger(chartID, label_ml, OBJPROP_BACK, false);
 }
 
