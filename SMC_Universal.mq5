@@ -7342,7 +7342,39 @@ void DrawEnhancedDashboard()
       else
          aiDir = "HOLD";
 
-      aiConf = g_finalVerdict.finalConfPct / 100.0;  // Convert to 0-1 range
+      // Recalculate confidence dynamically from TF alignment + score
+      // Instead of using cached g_finalVerdict.finalConfPct (updated every 2s)
+      bool bullM1 = false, bullM4 = false, bullM5 = false, bullH1 = false, bullD1 = false;
+      SMC_GetTFBullBias(PERIOD_M1, bullM1);
+      SMC_GetTFBullBias(PERIOD_M4, bullM4);
+      SMC_GetTFBullBias(PERIOD_M5, bullM5);
+      SMC_GetTFBullBias(PERIOD_H1, bullH1);
+      SMC_GetTFBullBias(PERIOD_D1, bullD1);
+
+      int dirAligned = 0;
+      if(aiDir == "BUY")
+      {
+         if(bullM1) dirAligned++;
+         if(bullM4) dirAligned++;
+         if(bullM5) dirAligned++;
+         if(bullH1) dirAligned++;
+         if(bullD1) dirAligned++;
+      }
+      else if(aiDir == "SELL")
+      {
+         if(!bullM1) dirAligned++;
+         if(!bullM4) dirAligned++;
+         if(!bullM5) dirAligned++;
+         if(!bullH1) dirAligned++;
+         if(!bullD1) dirAligned++;
+      }
+
+      double tfAlignPct = (double)dirAligned / 5.0 * 100.0;
+      double scorePct = MathAbs(g_finalVerdict.finalScore) * 100.0;
+      double iaPct = NormalizeAIConfidenceUnit() * 100.0;
+      if(iaPct > 100.0) iaPct = 100.0;
+
+      aiConf = MathMax(0.0, MathMin(100.0, 0.55 * tfAlignPct + 0.25 * scorePct + 0.20 * iaPct)) / 100.0;
    }
 
    if(aiConf > 1.0) aiConf /= 100.0;
