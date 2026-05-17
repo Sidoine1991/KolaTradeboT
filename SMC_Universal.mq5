@@ -7246,6 +7246,7 @@ void DrawEnhancedDashboard()
 {
    // Clean old dashboard objects
    ObjectsDeleteAll(0, "ML_DASH_");
+   ObjectsDeleteAll(0, "DASH_");
    ObjectsDeleteAll(0, "ENTRY_LVL_");
 
    long chartID = ChartID();
@@ -7314,8 +7315,8 @@ void DrawEnhancedDashboard()
    ObjectCreate(chartID, label_ai, OBJ_LABEL, 0, 0, 0);
    ObjectSetInteger(chartID, label_ai, OBJPROP_XDISTANCE, 10);
    ObjectSetInteger(chartID, label_ai, OBJPROP_YDISTANCE, baseY);
-   ObjectSetString(chartID, label_ai, OBJPROP_TEXT, verdictText);
-   ObjectSetInteger(chartID, label_ai, OBJPROP_COLOR, verdictColor);
+   ObjectSetString(chartID, label_ai, OBJPROP_TEXT, aiText);
+   ObjectSetInteger(chartID, label_ai, OBJPROP_COLOR, aiColor);
    ObjectSetInteger(chartID, label_ai, OBJPROP_FONTSIZE, fontSize);
    ObjectSetInteger(chartID, label_ai, OBJPROP_BACK, false);
    baseY += lineHeight;
