@@ -225,9 +225,7 @@ void GOM_ComputeLiveMT5DashMetrics(LiveMT5DashMetrics &m)
 
       string sym = PositionGetString(POSITION_SYMBOL);
       double vol = PositionGetDouble(POSITION_VOLUME);
-      double fp = PositionGetDouble(POSITION_PROFIT)
-                  + PositionGetDouble(POSITION_SWAP)
-                  + PositionGetDouble(POSITION_COMMISSION_CURRENT);
+      double fp = PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP);
 
       m.positionsAccount++;
       m.lotsAccount += vol;

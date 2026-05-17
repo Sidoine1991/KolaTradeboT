@@ -12,12 +12,12 @@
 #include <Trade/OrderInfo.mqh>
 #include <Trade/DealInfo.mqh>
 #include <Trade/HistoryOrderInfo.mqh>
-#include "SMC_OpportunityScanner.mqh"  // inclut SMC_AutoTrader.mqh + g_SmcOpportunityScannerAutoTrader
+// #include "SMC_OpportunityScanner.mqh"  // DISABLED: File not found - COpportunityScanner class undefined
 // Dashboard ML : métriques broker dans GOM_Enhanced_Dashboard.mqh ; PushEaResumeClockForMLDashboard() publie EA_DASH_* / ROBOT_* depuis cet EA
-#include "GOM_Enhanced_Dashboard.mqh"
-// ML Data Collection & Scanning (Phase 1: 5-minute multi-symbol scanning) - TODO: fix compilation
-// #include "ML_DataCollector.mqh"
-// #include "ML_Scanner.mqh"
+// #include "GOM_Enhanced_Dashboard.mqh"  // DISABLED: Fix compilation errors first
+// #include "AssetStrategy.mqh"  // DISABLED: File not found
+// #include "ML_DataCollector.mqh"  // DISABLED: Fix compilation errors first
+// #include "ML_Scanner.mqh"  // DISABLED: Fix compilation errors first
 // Dashboard sync - Récupère signaux ML et envoie infos EA (TODO: activer après fix compilation)
 // #include "EA_Dashboard_Sync.mqh"
 // #include "SMC_Setups_Display.mqh" // Désactivé pour éviter l'erreur de fichier non trouvé
@@ -30,7 +30,7 @@
 // Trade.mqh déjà inclus par SMC_Universal.mq5
 
 input group "SCANNER MULTI-SYMBOLES TEMPS RÉEL"
-input bool   EnableOpportunityScanner = true;     // ✅ ACTIVÉ par défaut — scanner multi-symboles temps réel
+input bool   EnableOpportunityScanner = false;    // ❌ DÉSACTIVÉ — SMC_OpportunityScanner.mqh n'existe pas, bloquait les trades
 input string ScannerSymbolsList = "Boom 1000 Index,Crash 1000 Index,EURUSD,XAUUSD";  // ↓ OPTIMISÉ 4 symboles — réduit charge CPU (était 8)
 input int    ScannerRefreshSeconds = 60;           // ↑ OPTIMISÉ 60s — réduit charge CPU (était 30s)
 input int    ScannerPanelX = -250;                 // Position: -250 = bord droit (marge 250px du bord droit)
@@ -41,7 +41,7 @@ input bool   ScannerPanelAnchorRight = true;       // Ancrer au bord droit ✅
 input bool   ScannerShowPanel = true;              // RÉACTIVÉ - Affichage minimal en bas à droite (pas de chevauchement)
 
 input group "TRADING AUTOMATIQUE (SCANNER)"
-input bool   EnableScannerAutoTrading = true;     // ✅ ACTIVÉ par défaut — trading automatique sur opportunités SMC
+input bool   EnableScannerAutoTrading = false;    // ❌ DÉSACTIVÉ — SMC_OpportunityScanner.mqh n'existe pas, bloquait les trades
 input double AutoTradeMaxRiskDollars = 15.0;       // Risque max par trade = 15$
 input double AutoTradeScalpTpPoints = 80;          // Take Profit scalping (points) — ratio TP/SL = 2.67:1 optimisé
 input double AutoTradeScalpSlPoints = 30;          // Stop Loss scalping (points) — inchangé, bien calibré
@@ -10973,7 +10973,7 @@ CPositionInfo posInfo;  // Local position info variable
 COrderInfo orderInfo;
 
 // Scanner d'opportunités multi-symboles
-COpportunityScanner *g_OpportunityScanner = NULL;
+// COpportunityScanner *g_OpportunityScanner = NULL;  // DISABLED: COpportunityScanner class not defined (SMC_OpportunityScanner.mqh missing)
 
 // ML Dashboard URLs and cache (TODO: reactivate when FetchMLSignal is fixed)
 // const string ML_LOCAL_URL = "http://127.0.0.1:8000";
@@ -11238,37 +11238,23 @@ int OnInit()
    }
 
    // Initialiser le scanner d'opportunités (un seul graphique si OpportunityScannerSingleChart)
-   if(EnableOpportunityScanner && GOM_IsOpportunityScannerOwnerChart())
-   {
-      g_OpportunityScanner = new COpportunityScanner();
-      if(g_OpportunityScanner != NULL)
-      {
-         g_OpportunityScanner.SetScanInterval(ScannerRefreshSeconds);
-         g_OpportunityScanner.SetPanelPosition(ScannerPanelX, ScannerPanelY);
-         // Anchor right: skip due to compiler cache issue, uses default behavior
-         g_OpportunityScanner.SetPanelWidth(ScannerPanelWidth);
-         g_OpportunityScanner.SetRowHeight(ScannerRowHeight);
-         g_OpportunityScanner.ShowPanel(ScannerShowPanel);
-
-         // Configurer le trading automatique
-         if(EnableScannerAutoTrading)
-         {
-            g_OpportunityScanner.EnableAutoTrading(
-               true,
-               AutoTradeMaxRiskDollars,
-               AutoTradeScalpTpPoints,
-               AutoTradeScalpSlPoints,
-               EnableAutoTrailingStop,
-               AutoTrailingStopPoints,
-               AutoTrailingStepPoints
-            );
-            Print("✅ Trading automatique activé - Risque: $", AutoTradeMaxRiskDollars,
-                  " TP:", AutoTradeScalpTpPoints, "pts SL:", AutoTradeScalpSlPoints, "pts");
-         }
-
-         Print("✅ Scanner multi-symboles initialisé - ", ScannerSymbolsList);
-      }
-   }
+   // DÉSACTIVÉ: SMC_OpportunityScanner.mqh n'existe pas - classe COpportunityScanner non trouvée
+   // if(EnableOpportunityScanner && GOM_IsOpportunityScannerOwnerChart())
+   // {
+   //    g_OpportunityScanner = new COpportunityScanner();
+   //    if(g_OpportunityScanner != NULL)
+   //    {
+   //       g_OpportunityScanner.SetScanInterval(ScannerRefreshSeconds);
+   //       g_OpportunityScanner.SetPanelPosition(ScannerPanelX, ScannerPanelY);
+   //       g_OpportunityScanner.SetPanelWidth(ScannerPanelWidth);
+   //       g_OpportunityScanner.SetRowHeight(ScannerRowHeight);
+   //       g_OpportunityScanner.ShowPanel(ScannerShowPanel);
+   //       if(EnableScannerAutoTrading)
+   //       {
+   //          g_OpportunityScanner.EnableAutoTrading(true, AutoTradeMaxRiskDollars, ...);
+   //       }
+   //    }
+   // }
 
    if(UseEnhancedDashboard)
    {
@@ -11276,8 +11262,7 @@ int OnInit()
       UpdateDashboard();
    }
 
-   // Initialize ML Scanner for 5-minute data collection (TODO: fix compilation)
-   // OnInit_ML_Scanner();
+   ML_Scanner_Init();
 
    // Set timer for 5-minute scanning (300 seconds)
    EventSetTimer(300);
@@ -11298,25 +11283,13 @@ bool TryAcquireOpenLock()
 void ReleaseOpenLock() { GlobalVariableSet("SMC_OPEN_LOCK_" + IntegerToString(InpMagicNumber), 0); }
 
 //+------------------------------------------------------------------+
-//| OnInit - Initialize EA and ML Scanner (DISABLED - compilation)   |
+//| OnTimer - Periodic 5-minute ML data collection                   |
 //+------------------------------------------------------------------+
-// TODO: Fix ML_Scanner compilation errors
-// void OnInit_ML_Scanner()
-// {
-//    ML_Scanner_Init();
-//    Print("[ML_Scanner] EA initialized - scanner ready for 5-minute cycles");
-// }
-
-//+------------------------------------------------------------------+
-//| OnTimer - Periodic 5-minute data collection (DISABLED)           |
-//+------------------------------------------------------------------+
-// TODO: Fix ML_Scanner compilation errors
-// void OnTimer()
-// {
-//    if(ML_Scanner_IsTimeToScan()) {
-//       ML_Scanner_ScanAllSymbols(AI_ServerURL, AI_ServerRender, UseRenderAsPrimary);
-//    }
-// }
+void OnTimer()
+{
+   if(ML_Scanner_IsTimeToScan())
+      ML_Scanner_ScanAllSymbols(AI_ServerURL, AI_ServerRender, UseRenderAsPrimary);
+}
 
 void OnDeinit(const int reason)
 {
@@ -11348,11 +11321,12 @@ void OnDeinit(const int reason)
       GOM_CleanEnhancedDashboard();
 
    // Nettoyer le scanner d'opportunités
-   if(g_OpportunityScanner != NULL)
-   {
-      delete g_OpportunityScanner;
-      g_OpportunityScanner = NULL;
-   }
+   // DÉSACTIVÉ: Scanner non actif
+   // if(g_OpportunityScanner != NULL)
+   // {
+   //    delete g_OpportunityScanner;
+   //    g_OpportunityScanner = NULL;
+   // }
    GOM_ReleaseOpportunityScannerOwnership();
 
    if(UseEmbeddedGomKolaSidoScript)
@@ -13844,8 +13818,9 @@ void OnTick()
 
    MaybeUpdateTradingAgentsFromOnTick(currentTime);
 
-   if(EnableOpportunityScanner && g_OpportunityScanner != NULL && GOM_IsOpportunityScannerOwnerChart())
-      g_OpportunityScanner.ScanMarkets(ScannerSymbolsList);
+   // DISABLED: COpportunityScanner not defined
+   // if(EnableOpportunityScanner && g_OpportunityScanner != NULL && GOM_IsOpportunityScannerOwnerChart())
+   //    g_OpportunityScanner.ScanMarkets(ScannerSymbolsList);
 
    if(UseEmbeddedGomKolaSidoScript && !UltraLightMode)
       GomKolaSidoEmbedded_ProcessFrame();
@@ -14506,7 +14481,7 @@ void UpdateDashboard()
       // 🆕 OPTIMIZATION: Clean expired drawings on EVERY dashboard refresh (not every 60s)
       // This prevents object accumulation and memory leaks
       if(DrawingsMaxAgeMinutes > 0)
-         // GOM_CleanExpiredDrawings(); // TODO: Fix parameter conflict with GOM_Enhanced_Dashboard
+         GOM_CleanExpiredDrawings(DrawingsMaxAgeMinutes * 60);
 
       GOM_DrawEnhancedDashboardV3(DashboardMLPosX, DashboardMLPosY, DashboardMLAnchorTop,
                                   DashboardMLCellWidth, DashboardMLCellHeight, DashboardMLFontSize);
@@ -27093,7 +27068,7 @@ void ExecuteDerivArrowTrade(string direction)
                extra /= 100.0;
             minAiConfUnit += extra;
          }
-         minAiConfUnit = MathMax(minAiConfUnit, 0.75);
+         minAiConfUnit = MathMax(minAiConfUnit, 0.50);
       }
 
       Print("?? Vérification IA - Confiance: ", DoubleToString(aiConfidenceUnit * 100.0, 1),
