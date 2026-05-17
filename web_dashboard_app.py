@@ -13,7 +13,27 @@ from fastapi.responses import HTMLResponse
 import uvicorn
 
 RENDER_API_URL = "https://kolatradebot-7ofl.onrender.com"
-SYMBOLS = ["Boom 500 Index", "Crash 300 Index", "Step Index", "Volatility 100 Index"]
+LOCAL_API_URL = "http://127.0.0.1:8000"
+
+# Symboles TOUS les symboles Deriv du catalogue
+DEFAULT_SYMBOLS = [
+    '1HZ100V', '1HZ10V', '1HZ15V', '1HZ25V', '1HZ30V', '1HZ50V', '1HZ75V', '1HZ90V',
+    'BOOM1000', 'BOOM150N', 'BOOM300N', 'BOOM50', 'BOOM500', 'BOOM600', 'BOOM900',
+    'CRASH1000', 'CRASH150N', 'CRASH300N', 'CRASH50', 'CRASH500', 'CRASH600', 'CRASH900',
+    'JD10', 'JD100', 'JD25', 'JD50', 'JD75',
+    'OTC_AEX', 'OTC_AS51', 'OTC_DJI', 'OTC_FCHI', 'OTC_FTSE', 'OTC_GDAXI', 'OTC_HSI', 'OTC_N225', 'OTC_NDX', 'OTC_SPC', 'OTC_SSMI', 'OTC_SX5E',
+    'RB100', 'RB200', 'RDBEAR', 'RDBULL',
+    'R_10', 'R_100', 'R_25', 'R_50', 'R_75',
+    'WLDAUD', 'WLDEUR', 'WLDGBP', 'WLDUSD', 'WLDXAU',
+    'cryBTCUSD', 'cryETHUSD',
+    'frxAUDCAD', 'frxAUDCHF', 'frxAUDJPY', 'frxAUDNZD', 'frxAUDUSD',
+    'frxEURAUD', 'frxEURCAD', 'frxEURCHF', 'frxEURGBP', 'frxEURJPY', 'frxEURNZD', 'frxEURUSD',
+    'frxGBPAUD', 'frxGBPCAD', 'frxGBPCHF', 'frxGBPJPY', 'frxGBPNOK', 'frxGBPNZD', 'frxGBPUSD',
+    'frxNZDJPY', 'frxNZDUSD',
+    'frxUSDCAD', 'frxUSDCHF', 'frxUSDJPY', 'frxUSDMXN', 'frxUSDNOK', 'frxUSDPLN', 'frxUSDSEK',
+    'frxXAGUSD', 'frxXAUUSD', 'frxXPDUSD', 'frxXPTUSD',
+    'stpRNG', 'stpRNG2', 'stpRNG3', 'stpRNG4', 'stpRNG5'
+]
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -23,9 +43,11 @@ app = FastAPI(title="TradBOT Dashboard")
 class Dashboard:
     def __init__(self):
         self.api_url = RENDER_API_URL
+        self.local_url = LOCAL_API_URL
         self.metrics = {}
         self.health = {}
         self.active_connections = []
+        self.symbols = DEFAULT_SYMBOLS.copy()
 
     async def fetch_json(self, url: str) -> Optional[Dict]:
         try:
@@ -42,12 +64,29 @@ class Dashboard:
         if health:
             self.health = health
 
+    async def fetch_symbols(self):
+        """Récupère la liste des symboles depuis l'API"""
+        symbols_data = await self.fetch_json(f"{self.api_url}/symbols")
+        if symbols_data and "symbols" in symbols_data:
+            self.symbols = symbols_data["symbols"]
+            logger.info(f"Symboles chargés: {len(self.symbols)} symboles")
+            return self.symbols
+        return []
+
     async def fetch_signal(self, symbol: str):
         return await self.fetch_json(f"{self.api_url}/ml/signal?symbol={symbol}&timeframe=M1")
 
     async def update_metrics(self):
         await self.fetch_health()
-        for symbol in SYMBOLS:
+
+        # Charger les symboles s'ils ne sont pas encore disponibles
+        if not self.symbols:
+            await self.fetch_symbols()
+
+        # Limiter à 50 symboles pour éviter surcharge
+        symbols_to_fetch = self.symbols[:50] if self.symbols else []
+
+        for symbol in symbols_to_fetch:
             signal = await self.fetch_signal(symbol)
             self.metrics[symbol] = {"signal": signal or {}, "timestamp": datetime.now().isoformat()}
 
