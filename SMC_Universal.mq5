@@ -15,6 +15,11 @@
 #include "SMC_OpportunityScanner.mqh"  // inclut SMC_AutoTrader.mqh + g_SmcOpportunityScannerAutoTrader
 // Dashboard ML : métriques broker dans GOM_Enhanced_Dashboard.mqh ; PushEaResumeClockForMLDashboard() publie EA_DASH_* / ROBOT_* depuis cet EA
 #include "GOM_Enhanced_Dashboard.mqh"
+// ML Data Collection & Scanning (Phase 1: 5-minute multi-symbol scanning)
+#include "ML_DataCollector.mqh"
+#include "ML_Scanner.mqh"
+// Dashboard sync - Récupère signaux ML et envoie infos EA
+#include "EA_Dashboard_Sync.mqh"
 // #include "SMC_Setups_Display.mqh" // Désactivé pour éviter l'erreur de fichier non trouvé
 // NOTE: SMC_SniperModules intégré directement (voir fin du fichier)
 // --- GOM_KOLA_SIDO merged (no separate mqh for MT5) ---
@@ -11252,6 +11257,12 @@ int OnInit()
       UpdateDashboard();
    }
 
+   // Initialize ML Scanner for 5-minute data collection
+   OnInit_ML_Scanner();
+
+   // Set timer for 5-minute scanning (300 seconds)
+   EventSetTimer(300);
+
    return INIT_SUCCEEDED;
 }
 
@@ -11267,8 +11278,30 @@ bool TryAcquireOpenLock()
 }
 void ReleaseOpenLock() { GlobalVariableSet("SMC_OPEN_LOCK_" + IntegerToString(InpMagicNumber), 0); }
 
+//+------------------------------------------------------------------+
+//| OnInit - Initialize EA and ML Scanner                            |
+//+------------------------------------------------------------------+
+void OnInit_ML_Scanner()
+{
+   ML_Scanner_Init();
+   Print("[ML_Scanner] EA initialized - scanner ready for 5-minute cycles");
+}
+
+//+------------------------------------------------------------------+
+//| OnTimer - Periodic 5-minute data collection                      |
+//+------------------------------------------------------------------+
+void OnTimer()
+{
+   if(ML_Scanner_IsTimeToScan()) {
+      ML_Scanner_ScanAllSymbols(AI_ServerURL, AI_ServerRender, UseRenderAsPrimary);
+   }
+}
+
 void OnDeinit(const int reason)
 {
+   // Kill the timer
+   EventKillTimer();
+
    // Diagnostic du détachement - identifier la cause exacte
    string reasonStr = "";
    switch(reason)
@@ -13783,6 +13816,15 @@ void OnTick()
       if(DrawingsMaxAgeMinutes > 0)
          // GOM_CleanExpiredDrawings(); // TODO: Fix parameter conflict with GOM_Enhanced_Dashboard
       UpdateDashboard();
+
+      // Récupérer signal ML du dashboard pour le symbole actuel
+      MLSignal ml_sig;
+      if(GetMLSignal(_Symbol, ml_sig))
+      {
+         // Afficher le signal ML sur le graphique
+         Comment("ML Signal: ", ml_sig.signal, " (", (int)(ml_sig.confidence * 100), "%)",
+                 " | Model: ", ml_sig.model_name, " | Pattern: ", ml_sig.pattern_name);
+      }
    }
 
    MaybeUpdateTradingAgentsFromOnTick(currentTime);
