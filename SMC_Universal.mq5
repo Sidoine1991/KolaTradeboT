@@ -327,6 +327,8 @@ bool GetAISignalData();
 bool UpdateAIDecision(int timeoutMs = -1);
 void MaybeUpdateAIServerFromOnTick(datetime currentTime);
 void UpdateMLMetricsDisplay();
+void DrawEnhancedDashboard();
+void DrawFuturePriceProjection();
 void DrawSwingHighLow();
 void DrawFVGOnChart();
 void DrawFibonacciOnChart();
@@ -5964,19 +5966,10 @@ void DrawAllIndicatorGraphics()
    DrawEMACurveOnChart();
    DrawLiquidityZonesOnChart();
    
-   // ✅ AFFICHAGE ESSENTIEL: Dashboard ML + Données AI
-   UpdateMLMetricsDisplay();  // Affiche précision %, modèle, samples
-
-   // ⚠️ TOUS LES AUTRES DESSINS SUPPRIMÉS
-   // - Premium/Discount zones
-   // - Signal arrows
-   // - Predicted swing points
-   // - EMA support/resistance lines
-   // - Prediction channels
-   // - Future candles
-   // - SMC multi-TF channels
-   // - OTE imbalance zones
-   // - Protected high/low predictions
+   // ✅ AFFICHAGE ESSENTIEL: Dashboard ML + IA Decision + Projections Futures
+   UpdateMLMetricsDisplay();  // Récupère précision %, modèle, samples
+   DrawEnhancedDashboard();    // Affiche dashboard avec IA + projections
+   DrawFuturePriceProjection(); // Trace projection prix futur style TradingView
 }
 
 // Dessine sur le graphique la confluence OTE(0.62-0.786) + Imbalance(FVG)
@@ -7124,6 +7117,179 @@ void UpdateMLMetricsDisplay()
       g_channelValid = false;
       Print("? DEBUG - Erreur WebRequest ML status: ", resStatus);
    }
+}
+
+//+------------------------------------------------------------------+
+//| ENHANCED DASHBOARD - Display AI Decision + ML Metrics           |
+//+------------------------------------------------------------------+
+void DrawEnhancedDashboard()
+{
+   // Clean old dashboard objects
+   ObjectsDeleteAll(0, "ML_DASH_");
+
+   long chartID = ChartID();
+   double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+
+   // ===== AI DECISION SECTION =====
+   string aiDir = g_lastAIAction;
+   double aiConf = g_lastAIConfidence;
+   if(aiConf > 1.0) aiConf /= 100.0; // Normalize to 0-1 range
+
+   color aiColor = (aiDir == "BUY") ? clrLimeGreen :
+                   (aiDir == "SELL") ? clrRed : clrYellow;
+
+   string aiText = "🤖 IA: " + aiDir + " [" + DoubleToString(aiConf * 100, 1) + "%]";
+
+   // ===== ML METRICS SECTION =====
+   string mlAccuracy = DoubleToString(g_mlLastAccuracy, 1);
+   string mlModel = g_mlLastModelName;
+
+   string mlText = "📊 ML: " + mlAccuracy + "% | " + mlModel;
+
+   // ===== TREND DIRECTION =====
+   string trend = GetCurrentTrendDirection();
+   color trendColor = (trend == "UPTREND") ? clrLimeGreen :
+                      (trend == "DOWNTREND") ? clrRed : clrYellow;
+   string trendText = "📈 Trend: " + trend;
+
+   // ===== CURRENT PRICE =====
+   string priceText = "💲 Price: " + DoubleToString(currentPrice, digits);
+
+   // Draw dashboard panel (top-left, stacked vertically)
+   int y = 20;
+   int lineHeight = 22;
+
+   // AI Decision (highlighted)
+   string label1 = "ML_DASH_AI";
+   ObjectCreate(chartID, label1, OBJ_LABEL, 0, 0, 0);
+   ObjectSetInteger(chartID, label1, OBJPROP_XDISTANCE, 10);
+   ObjectSetInteger(chartID, label1, OBJPROP_YDISTANCE, y);
+   ObjectSetString(chartID, label1, OBJPROP_TEXT, aiText);
+   ObjectSetInteger(chartID, label1, OBJPROP_COLOR, aiColor);
+   ObjectSetInteger(chartID, label1, OBJPROP_FONTSIZE, 10);
+   ObjectSetInteger(chartID, label1, OBJPROP_BACK, false);
+   y += lineHeight;
+
+   // ML Metrics
+   string label2 = "ML_DASH_METRICS";
+   ObjectCreate(chartID, label2, OBJ_LABEL, 0, 0, 0);
+   ObjectSetInteger(chartID, label2, OBJPROP_XDISTANCE, 10);
+   ObjectSetInteger(chartID, label2, OBJPROP_YDISTANCE, y);
+   ObjectSetString(chartID, label2, OBJPROP_TEXT, mlText);
+   ObjectSetInteger(chartID, label2, OBJPROP_COLOR, clrSkyBlue);
+   ObjectSetInteger(chartID, label2, OBJPROP_FONTSIZE, 10);
+   ObjectSetInteger(chartID, label2, OBJPROP_BACK, false);
+   y += lineHeight;
+
+   // Trend
+   string label3 = "ML_DASH_TREND";
+   ObjectCreate(chartID, label3, OBJ_LABEL, 0, 0, 0);
+   ObjectSetInteger(chartID, label3, OBJPROP_XDISTANCE, 10);
+   ObjectSetInteger(chartID, label3, OBJPROP_YDISTANCE, y);
+   ObjectSetString(chartID, label3, OBJPROP_TEXT, trendText);
+   ObjectSetInteger(chartID, label3, OBJPROP_COLOR, trendColor);
+   ObjectSetInteger(chartID, label3, OBJPROP_FONTSIZE, 10);
+   ObjectSetInteger(chartID, label3, OBJPROP_BACK, false);
+   y += lineHeight;
+
+   // Price
+   string label4 = "ML_DASH_PRICE";
+   ObjectCreate(chartID, label4, OBJ_LABEL, 0, 0, 0);
+   ObjectSetInteger(chartID, label4, OBJPROP_XDISTANCE, 10);
+   ObjectSetInteger(chartID, label4, OBJPROP_YDISTANCE, y);
+   ObjectSetString(chartID, label4, OBJPROP_TEXT, priceText);
+   ObjectSetInteger(chartID, label4, OBJPROP_COLOR, clrWhite);
+   ObjectSetInteger(chartID, label4, OBJPROP_FONTSIZE, 10);
+   ObjectSetInteger(chartID, label4, OBJPROP_BACK, false);
+}
+
+//+------------------------------------------------------------------+
+//| FUTURE PRICE PROJECTION - TradingView style channel             |
+//+------------------------------------------------------------------+
+void DrawFuturePriceProjection()
+{
+   // Clean old projection lines
+   ObjectsDeleteAll(0, "PROJ_");
+
+   long chartID = ChartID();
+   double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+   double atr = iATR(_Symbol, PERIOD_M1, 14);
+   if(atr <= 0) atr = currentPrice * 0.001; // Fallback
+
+   datetime now = TimeCurrent();
+   datetime future30min = now + (PeriodSeconds(PERIOD_M15) * 2); // 30 minutes ahead
+   datetime future60min = now + (PeriodSeconds(PERIOD_M15) * 4); // 60 minutes ahead
+
+   // ==== PROJECTED PRICE LEVELS ====
+   // Optimistic: +2 ATR
+   double projOptimistic = currentPrice + (atr * 2.0);
+   // Base case: +1 ATR
+   double projBase = currentPrice + (atr * 1.0);
+   // Pessimistic: -1 ATR
+   double projPessimistic = currentPrice - (atr * 1.0);
+
+   // ==== DRAW PROJECTION LINES ====
+
+   // 1. Optimistic channel (green dashed)
+   string lineOpt = "PROJ_OPT";
+   ObjectCreate(chartID, lineOpt, OBJ_TREND, 0, now, currentPrice, future60min, projOptimistic);
+   ObjectSetInteger(chartID, lineOpt, OBJPROP_COLOR, clrLimeGreen);
+   ObjectSetInteger(chartID, lineOpt, OBJPROP_STYLE, STYLE_DASH);
+   ObjectSetInteger(chartID, lineOpt, OBJPROP_WIDTH, 2);
+   ObjectSetInteger(chartID, lineOpt, OBJPROP_RAY_RIGHT, false);
+
+   // Label for optimistic
+   string labelOpt = "PROJ_OPT_LABEL";
+   ObjectCreate(chartID, labelOpt, OBJ_TEXT, 0, future60min, projOptimistic + atr * 0.2);
+   ObjectSetString(chartID, labelOpt, OBJPROP_TEXT, "▲ BULL " + DoubleToString(projOptimistic, digits));
+   ObjectSetInteger(chartID, labelOpt, OBJPROP_COLOR, clrLimeGreen);
+   ObjectSetInteger(chartID, labelOpt, OBJPROP_FONTSIZE, 9);
+   ObjectSetInteger(chartID, labelOpt, OBJPROP_BACK, false);
+
+   // 2. Base case (white solid)
+   string lineBase = "PROJ_BASE";
+   ObjectCreate(chartID, lineBase, OBJ_TREND, 0, now, currentPrice, future60min, projBase);
+   ObjectSetInteger(chartID, lineBase, OBJPROP_COLOR, clrWhite);
+   ObjectSetInteger(chartID, lineBase, OBJPROP_STYLE, STYLE_SOLID);
+   ObjectSetInteger(chartID, lineBase, OBJPROP_WIDTH, 2);
+   ObjectSetInteger(chartID, lineBase, OBJPROP_RAY_RIGHT, false);
+
+   // Label for base
+   string labelBase = "PROJ_BASE_LABEL";
+   ObjectCreate(chartID, labelBase, OBJ_TEXT, 0, future60min, projBase + atr * 0.2);
+   ObjectSetString(chartID, labelBase, OBJPROP_TEXT, "━ BASE " + DoubleToString(projBase, digits));
+   ObjectSetInteger(chartID, labelBase, OBJPROP_COLOR, clrWhite);
+   ObjectSetInteger(chartID, labelBase, OBJPROP_FONTSIZE, 9);
+   ObjectSetInteger(chartID, labelBase, OBJPROP_BACK, false);
+
+   // 3. Pessimistic channel (red dashed)
+   string linePess = "PROJ_PESS";
+   ObjectCreate(chartID, linePess, OBJ_TREND, 0, now, currentPrice, future60min, projPessimistic);
+   ObjectSetInteger(chartID, linePess, OBJPROP_COLOR, clrRed);
+   ObjectSetInteger(chartID, linePess, OBJPROP_STYLE, STYLE_DASH);
+   ObjectSetInteger(chartID, linePess, OBJPROP_WIDTH, 2);
+   ObjectSetInteger(chartID, linePess, OBJPROP_RAY_RIGHT, false);
+
+   // Label for pessimistic
+   string labelPess = "PROJ_PESS_LABEL";
+   ObjectCreate(chartID, labelPess, OBJ_TEXT, 0, future60min, projPessimistic - atr * 0.2);
+   ObjectSetString(chartID, labelPess, OBJPROP_TEXT, "▼ BEAR " + DoubleToString(projPessimistic, digits));
+   ObjectSetInteger(chartID, labelPess, OBJPROP_COLOR, clrRed);
+   ObjectSetInteger(chartID, labelPess, OBJPROP_FONTSIZE, 9);
+   ObjectSetInteger(chartID, labelPess, OBJPROP_BACK, false);
+
+   // ==== PROJECTION ZONE (confidence band) ====
+   // Draw a rectangle to show the projected trading range
+   string zoneRect = "PROJ_ZONE";
+   ObjectCreate(chartID, zoneRect, OBJ_RECTANGLE, 0, now, projOptimistic, future60min, projPessimistic);
+   ObjectSetInteger(chartID, zoneRect, OBJPROP_COLOR, clrYellow);
+   ObjectSetInteger(chartID, zoneRect, OBJPROP_STYLE, STYLE_SOLID);
+   ObjectSetInteger(chartID, zoneRect, OBJPROP_WIDTH, 1);
+   ObjectSetInteger(chartID, zoneRect, OBJPROP_FILL, true);
+   ObjectSetInteger(chartID, zoneRect, OBJPROP_BGCOLOR, C'255,255,0'); // Yellow with transparency
+   ObjectSetInteger(chartID, zoneRect, OBJPROP_BACK, true);
 }
 
 string ExtractJsonValue(string json, string key)
