@@ -2414,6 +2414,9 @@ input bool   ShowBookmarkLevels    = true; // Lignes horizontales sur derniers S
 
 input group "=== TABLEAU DE BORD ET MÉTRIQUES ==="
 input bool   UseDashboard        = true;   // Afficher le tableau de bord avec métriques
+input bool   ShowBottomDashboard = true;   // Afficher dashboard GOM_SIDO (M1/M5/H1 + Verdict 5 niveaux)
+input double VerdictThresholdGOOD = 0.35;  // Seuil pour GOOD BUY/SELL (absolu)
+input double VerdictThresholdPERFECT = 0.65; // Seuil pour PERFECT BUY/SELL (absolu)
 input bool   DashboardSingleSourceMode = true; // Eviter les doublons: infos texte uniquement via UpdateDashboard()
 input bool   ShowTop3NetProfitBottomRight = true; // Afficher en bas à droite le top 3 net profit + perf globale modèle
 input bool   ShowMLMetrics       = true;   // Afficher les métriques ML (entraînement modèle)
@@ -25628,7 +25631,7 @@ double GetResistanceLevelTF(ENUM_TIMEFRAMES tf, int bars)
 }
 
 //+------------------------------------------------------------------+
-//| DASHBOARD MULTI-TIMEFRAME - Affiche directions M1/M5/H1 + Verdict
+//| DASHBOARD GOM_SIDO - 5 Niveaux Verdict (WAIT/BUY/GOOD BUY/PERFECT BUY)
 //+------------------------------------------------------------------+
 void DisplayMTFDashboard()
 {
@@ -25636,107 +25639,119 @@ void DisplayMTFDashboard()
 
    int x0 = 10;
    int y0 = 25;
-   int cellW = 80;
-   int cellH = 25;
-   int gap = 5;
+   int cellW = 100;
+   int cellH = 28;
+   int gap = 2;
 
-   // Titre
-   string titleName = "SMC_MTF_TITLE";
-   string titleTxt = "📊 MULTI-TIMEFRAME VERDICT";
-   color titleColor = clrWhite;
-   color titleBg = 0x1a1a1a;
+   // Seuils GOM_SIDO (depuis inputs)
+   double GOOD_THRESHOLD = VerdictThresholdGOOD;
+   double PERFECT_THRESHOLD = VerdictThresholdPERFECT;
 
-   // Afficher titre
-   if(!ObjectCreate(0, titleName, OBJ_RECTANGLE_LABEL, 0, 0, 0))
-      ObjectDelete(0, titleName);
-   ObjectCreate(0, titleName, OBJ_RECTANGLE_LABEL, 0, 0, 0);
-   ObjectSetInteger(0, titleName, OBJPROP_XDISTANCE, x0);
-   ObjectSetInteger(0, titleName, OBJPROP_YDISTANCE, y0);
-   ObjectSetInteger(0, titleName, OBJPROP_XSIZE, cellW * 4 + gap * 3);
-   ObjectSetInteger(0, titleName, OBJPROP_YSIZE, cellH);
-   ObjectSetInteger(0, titleName, OBJPROP_BGCOLOR, titleBg);
-   ObjectSetInteger(0, titleName, OBJPROP_BORDER_TYPE, BORDER_FLAT);
-   ObjectSetInteger(0, titleName, OBJPROP_BORDER_COLOR, 0x444444);
-   ObjectSetInteger(0, titleName, OBJPROP_BORDER_WIDTH, 1);
-   ObjectSetInteger(0, titleName, OBJPROP_ZORDER, 520);
-   ObjectSetString(0, titleName, OBJPROP_TEXT, titleTxt);
-   ObjectSetInteger(0, titleName, OBJPROP_FONTSIZE, 10);
-   ObjectSetString(0, titleName, OBJPROP_FONT, "Arial");
-   ObjectSetInteger(0, titleName, OBJPROP_TEXT_COLOR, titleColor);
-
-   // Récupérer directions calculées
+   // Calculer score confluences M1/M5/H1
    double emaM1Fast = iMA(_Symbol, PERIOD_M1, 9, 0, MODE_EMA, PRICE_CLOSE);
    double emaM1Slow = iMA(_Symbol, PERIOD_M1, 21, 0, MODE_EMA, PRICE_CLOSE);
-   string dirM1 = (emaM1Fast > emaM1Slow) ? "BUY" : "SELL";
-   color bgM1 = (emaM1Fast > emaM1Slow) ? (color)0x4CAF50 : (color)0xF44336;
-
    double emaM5Fast = iMA(_Symbol, PERIOD_M5, 9, 0, MODE_EMA, PRICE_CLOSE);
    double emaM5Slow = iMA(_Symbol, PERIOD_M5, 21, 0, MODE_EMA, PRICE_CLOSE);
-   string dirM5 = (emaM5Fast > emaM5Slow) ? "BUY" : "SELL";
-   color bgM5 = (emaM5Fast > emaM5Slow) ? (color)0x4CAF50 : (color)0xF44336;
-
    double emaH1Fast = iMA(_Symbol, PERIOD_H1, 9, 0, MODE_EMA, PRICE_CLOSE);
    double emaH1Slow = iMA(_Symbol, PERIOD_H1, 21, 0, MODE_EMA, PRICE_CLOSE);
-   string dirH1 = (emaH1Fast > emaH1Slow) ? "BUY" : "SELL";
-   color bgH1 = (emaH1Fast > emaH1Slow) ? (color)0x4CAF50 : (color)0xF44336;
 
-   // Déterminer verdict final (alignement)
-   int alignment = 0;
-   if(dirM1 == dirM5) alignment++;
-   if(dirM5 == dirH1) alignment++;
-   if(dirM1 == dirH1) alignment++;
+   // Directions par TF
+   bool bullM1 = (emaM1Fast > emaM1Slow);
+   bool bullM5 = (emaM5Fast > emaM5Slow);
+   bool bullH1 = (emaH1Fast > emaH1Slow);
 
-   string verdict = "MIXED";
-   color verdictBg = 0x757575; // Gris
+   // Compter alignements (0 = bearish, 1 = mixed, 2 = mixed, 3 = bullish)
+   int alignmentCount = (bullM1 ? 1 : 0) + (bullM5 ? 1 : 0) + (bullH1 ? 1 : 0);
 
-   if(alignment == 3) // Tous alignés
+   // Score confluences: alignmentCount / 3 (0.0 = tout baissier, 1.0 = tout haussier)
+   double confluenceScore = (double)alignmentCount / 3.0;
+
+   // Calculer IA score normalisé (-1 à 1)
+   double iaScore = 0.0;
+   if(g_lastAIAction == "BUY")
+      iaScore = g_lastAIConfidence;
+   else if(g_lastAIAction == "SELL")
+      iaScore = -g_lastAIConfidence;
+   // else HOLD = 0
+
+   // Score fusionné (80% confluence, 20% IA)
+   double finalScore = (confluenceScore - 0.5) * 2.0 * 0.8 + iaScore * 0.2;
+   finalScore = MathMax(-1.0, MathMin(1.0, finalScore));
+
+   // Déterminer verdict (5 niveaux)
+   string verdict = "WAIT";
+   color verdictBg = 0x424242; // Gris foncé WAIT
+   string verdictIcon = "⏸";
+
+   if(MathAbs(finalScore) < GOOD_THRESHOLD)
    {
-      verdict = (dirM1 == "BUY") ? "STRONG BUY" : "STRONG SELL";
-      verdictBg = (dirM1 == "BUY") ? (color)0x1B5E20 : (color)0xB71C1C;
+      verdict = "WAIT";
+      verdictBg = 0x424242; // Gris
+      verdictIcon = "⏸";
    }
-   else if(alignment == 2) // 2 sur 3 alignés
+   else if(finalScore > 0)
    {
-      if(dirM1 == dirM5) verdict = (dirM1 == "BUY") ? "BUY (M1/M5)" : "SELL (M1/M5)";
-      else if(dirM5 == dirH1) verdict = (dirM5 == "BUY") ? "BUY (M5/H1)" : "SELL (M5/H1)";
-      else verdict = (dirM1 == "BUY") ? "BUY (M1/H1)" : "SELL (M1/H1)";
-      verdictBg = (verdict[0] == 'B') ? (color)0x2E7D32 : (color)0xC62828;
+      if(finalScore >= PERFECT_THRESHOLD)
+      {
+         verdict = "PERFECT BUY";
+         verdictBg = 0x1B5E20; // Vert très foncé
+         verdictIcon = "🚀";
+      }
+      else
+      {
+         verdict = "GOOD BUY";
+         verdictBg = 0x2E7D32; // Vert moyen
+         verdictIcon = "📈";
+      }
    }
-   else // Divergence
+   else if(finalScore < 0)
    {
-      verdict = "DIVERGENCE";
-      verdictBg = (color)0xF57F17; // Orange
+      if(finalScore <= -PERFECT_THRESHOLD)
+      {
+         verdict = "PERFECT SELL";
+         verdictBg = 0xB71C1C; // Rouge très foncé
+         verdictIcon = "🔻";
+      }
+      else
+      {
+         verdict = "GOOD SELL";
+         verdictBg = 0xC62828; // Rouge moyen
+         verdictIcon = "📉";
+      }
    }
 
-   // Afficher cellules M1/M5/H1/VERDICT
-   int yRow = y0 + cellH + gap;
+   // Titre dashboard
+   int titleW = cellW * 5 + gap * 4;
+   string titleTxt = verdictIcon + " GOM_SIDO UNIFIED - Score: " + DoubleToString(finalScore, 2);
+   DrawDashboardCell("SMC_TITLE", x0, y0, titleW, cellH - 5, "", titleTxt, 0x1a1a1a);
 
-   // M1
-   DrawDashboardCell("SMC_MTF_M1", x0, yRow, cellW, cellH, "M1", dirM1, bgM1);
+   // Row 1: M1 | M5 | H1 | IA CONF | VERDICT
+   int yRow1 = y0 + cellH;
 
-   // M5
-   DrawDashboardCell("SMC_MTF_M5", x0 + cellW + gap, yRow, cellW, cellH, "M5", dirM5, bgM5);
+   string m1Text = "M1\n" + (bullM1 ? "🟢 BUY" : "🔴 SELL");
+   color m1Bg = bullM1 ? (color)0x4CAF50 : (color)0xF44336;
+   DrawDashboardCell("SMC_M1", x0, yRow1, cellW, cellH, "", m1Text, m1Bg);
 
-   // H1
-   DrawDashboardCell("SMC_MTF_H1", x0 + 2*cellW + 2*gap, yRow, cellW, cellH, "H1", dirH1, bgH1);
+   string m5Text = "M5\n" + (bullM5 ? "🟢 BUY" : "🔴 SELL");
+   color m5Bg = bullM5 ? (color)0x4CAF50 : (color)0xF44336;
+   DrawDashboardCell("SMC_M5", x0 + cellW + gap, yRow1, cellW, cellH, "", m5Text, m5Bg);
 
-   // VERDICT
-   int verdictW = cellW + gap / 2;
-   DrawDashboardCell("SMC_MTF_VERDICT", x0 + 3*cellW + 3*gap, yRow, verdictW, cellH, "VERDICT", verdict, verdictBg);
+   string h1Text = "H1\n" + (bullH1 ? "🟢 BUY" : "🔴 SELL");
+   color h1Bg = bullH1 ? (color)0x4CAF50 : (color)0xF44336;
+   DrawDashboardCell("SMC_H1", x0 + 2*cellW + 2*gap, yRow1, cellW, cellH, "", h1Text, h1Bg);
 
-   // IA Confiance
-   int yRow2 = yRow + cellH + gap;
-   string iaConfTxt = "IA: " + DoubleToString(g_lastAIConfidence * 100, 0) + "%";
-   string iaActTxt = g_lastAIAction;
-   color iaBg = (g_lastAIAction == "BUY") ? (color)0x1976D2 : ((g_lastAIAction == "SELL") ? (color)0xD32F2F : (color)0x616161);
+   string iaConfText = "IA CONF\n" + DoubleToString(g_lastAIConfidence * 100, 0) + "%";
+   color iaConfBg = (g_lastAIConfidence >= 0.7) ? (color)0x1976D2 : (color)0x616161;
+   DrawDashboardCell("SMC_IACONF", x0 + 3*cellW + 3*gap, yRow1, cellW, cellH, "", iaConfText, iaConfBg);
 
-   DrawDashboardCell("SMC_IA_CONF", x0, yRow2, cellW, cellH, "CONF", iaConfTxt, iaBg);
-   DrawDashboardCell("SMC_IA_ACT", x0 + cellW + gap, yRow2, cellW * 3 + 2*gap, cellH, "IA ACTION", iaActTxt, iaBg);
+   string verdictText = verdict + "\n" + DoubleToString(MathAbs(finalScore), 2);
+   DrawDashboardCell("SMC_VERDICT", x0 + 4*cellW + 4*gap, yRow1, cellW, cellH, "", verdictText, verdictBg);
 
    ChartRedraw(0);
 }
 
 //+------------------------------------------------------------------+
-//| Helper: Dessiner une cellule du dashboard
+//| Helper: Dessiner cellule avec fond coloré
 //+------------------------------------------------------------------+
 void DrawDashboardCell(string name, int x, int y, int w, int h, string label, string value, color bg)
 {
@@ -25749,15 +25764,16 @@ void DrawDashboardCell(string name, int x, int y, int w, int h, string label, st
    ObjectSetInteger(0, name, OBJPROP_YSIZE, h);
    ObjectSetInteger(0, name, OBJPROP_BGCOLOR, bg);
    ObjectSetInteger(0, name, OBJPROP_BORDER_TYPE, BORDER_FLAT);
-   ObjectSetInteger(0, name, OBJPROP_BORDER_COLOR, 0x303030);
+   ObjectSetInteger(0, name, OBJPROP_BORDER_COLOR, 0x222222);
    ObjectSetInteger(0, name, OBJPROP_BORDER_WIDTH, 1);
    ObjectSetInteger(0, name, OBJPROP_ZORDER, 520);
 
-   string txt = label + "\n" + value;
+   string txt = (StringLen(label) > 0) ? (label + "\n" + value) : value;
    ObjectSetString(0, name, OBJPROP_TEXT, txt);
-   ObjectSetInteger(0, name, OBJPROP_FONTSIZE, 9);
+   ObjectSetInteger(0, name, OBJPROP_FONTSIZE, 8);
    ObjectSetString(0, name, OBJPROP_FONT, "Arial");
    ObjectSetInteger(0, name, OBJPROP_TEXT_COLOR, clrWhite);
+   ObjectSetInteger(0, name, OBJPROP_TEXT_ALIGN, ALIGN_CENTER);
 }
 
 //| END OF PROGRAM                                                  |
