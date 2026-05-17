@@ -5893,6 +5893,10 @@ void ClosePositionsOnSpikeScalp()
    if(!isScalpableSymbol)
       return;
 
+   int posCount = PositionsTotal();
+   if(posCount > 0)
+      Print("[SPIKE SCALP] Checking ", posCount, " positions on ", sym);
+
    // Parcourir toutes les positions ouvertes
    for(int i = PositionsTotal() - 1; i >= 0; i--)
    {
@@ -6437,17 +6441,18 @@ void OnTick()
       Print("?? DEBUG - Vérification IA HOLD | g_lastAIAction: '", g_lastAIAction, "' | UseAIServer: ", UseAIServer);
       lastDebugLog = TimeCurrent();
    }
-   ClosePositionsOnIAHold();
-   
-   // NOUVEAU: Surveillance des changements IA vers HOLD et fermeture automatique
-   MonitorAndClosePositionsOnHold();
-   
-   // NOUVEAU: Vérifier les conflits de direction sur Boom/Crash
-   ClosePositionsOnDirectionConflict();
-
-   // SCALPING: Fermer positions après spike capture (Boom/Crash + PAINX/GAINX)
+   // SCALPING PRIORITY: Close spike positions FIRST before other position management
+   // This ensures spike profits are locked in before direction changes trigger closing
    if(EnableSpikeScalping)
       ClosePositionsOnSpikeScalp();
+
+   ClosePositionsOnIAHold();
+
+   // NOUVEAU: Surveillance des changements IA vers HOLD et fermeture automatique
+   MonitorAndClosePositionsOnHold();
+
+   // NOUVEAU: Vérifier les conflits de direction sur Boom/Crash
+   ClosePositionsOnDirectionConflict();
 
    // NOUVEAU: Vérifier le toucher des niveaux OTE pour exécution au marché
    CheckAndExecuteMarketOnOTETouch();
