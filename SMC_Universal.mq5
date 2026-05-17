@@ -7211,7 +7211,7 @@ void DrawEnhancedDashboard()
       string buyLine = "ENTRY_LVL_BUY";
       ObjectCreate(chartID, buyLine, OBJ_HLINE, 0, 0, buyLevel);
       ObjectSetInteger(chartID, buyLine, OBJPROP_COLOR, clrLimeGreen);
-      ObjectSetInteger(chartID, buyLine, OBJPROP_STYLE, STYLE_DASHED);
+      ObjectSetInteger(chartID, buyLine, OBJPROP_STYLE, STYLE_DASHES);
       ObjectSetInteger(chartID, buyLine, OBJPROP_WIDTH, 2);
       ObjectSetInteger(chartID, buyLine, OBJPROP_BACK, true);
 
@@ -7234,7 +7234,7 @@ void DrawEnhancedDashboard()
       string sellLine = "ENTRY_LVL_SELL";
       ObjectCreate(chartID, sellLine, OBJ_HLINE, 0, 0, sellLevel);
       ObjectSetInteger(chartID, sellLine, OBJPROP_COLOR, clrRed);
-      ObjectSetInteger(chartID, sellLine, OBJPROP_STYLE, STYLE_DASHED);
+      ObjectSetInteger(chartID, sellLine, OBJPROP_STYLE, STYLE_DASHES);
       ObjectSetInteger(chartID, sellLine, OBJPROP_WIDTH, 2);
       ObjectSetInteger(chartID, sellLine, OBJPROP_BACK, true);
 
