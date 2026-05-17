@@ -42,7 +42,7 @@ input bool   ScannerShowPanel = true;              // RÉACTIVÉ - Affichage min
 
 input group "TRADING AUTOMATIQUE (SCANNER)"
 input bool   EnableScannerAutoTrading = true;     // ✅ ACTIVÉ par défaut — trading automatique sur opportunités SMC
-input double AutoTradeMaxRiskDollars = 2.0;        // TEST: Augmenté à 2$ (10% du capital) pour permettre trades
+input double AutoTradeMaxRiskDollars = 15.0;       // Risque max par trade = 15$
 input double AutoTradeScalpTpPoints = 80;          // Take Profit scalping (points) — ratio TP/SL = 2.67:1 optimisé
 input double AutoTradeScalpSlPoints = 30;          // Stop Loss scalping (points) — inchangé, bien calibré
 input bool   EnableAutoTrailingStop = true;        // Activer trailing stop automatique
