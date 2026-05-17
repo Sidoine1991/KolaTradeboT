@@ -7327,9 +7327,24 @@ void DrawEnhancedDashboard()
 
    // ===== TOP DASHBOARD SECTION (AI, TREND, PRICE) =====
 
-   // AI DECISION
+   // AI DECISION - Use server IA if available, fallback to local verdict
    string aiDir = g_lastAIAction;
    double aiConf = g_lastAIConfidence;
+
+   // If IA from server is empty/HOLD, use local final verdict decision
+   if(aiDir == "" || aiDir == "HOLD" || aiDir == "hold")
+   {
+      // Extract direction from local verdict (e.g., "BUY-PERFECT" -> "BUY")
+      if(StringFind(g_finalVerdict.verdictLabel, "BUY") >= 0)
+         aiDir = "BUY";
+      else if(StringFind(g_finalVerdict.verdictLabel, "SELL") >= 0)
+         aiDir = "SELL";
+      else
+         aiDir = "HOLD";
+
+      aiConf = g_finalVerdict.finalConfPct / 100.0;  // Convert to 0-1 range
+   }
+
    if(aiConf > 1.0) aiConf /= 100.0;
    color aiColor = (aiDir == "BUY") ? clrLimeGreen :
                    (aiDir == "SELL") ? clrRed : clrYellow;
