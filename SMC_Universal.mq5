@@ -18,8 +18,8 @@
 // ML Data Collection & Scanning (Phase 1: 5-minute multi-symbol scanning)
 #include "ML_DataCollector.mqh"
 #include "ML_Scanner.mqh"
-// Dashboard sync - Récupère signaux ML et envoie infos EA
-#include "EA_Dashboard_Sync.mqh"
+// Dashboard sync - Récupère signaux ML et envoie infos EA (TODO: activer après fix compilation)
+// #include "EA_Dashboard_Sync.mqh"
 // #include "SMC_Setups_Display.mqh" // Désactivé pour éviter l'erreur de fichier non trouvé
 // NOTE: SMC_SniperModules intégré directement (voir fin du fichier)
 // --- GOM_KOLA_SIDO merged (no separate mqh for MT5) ---
@@ -13817,14 +13817,13 @@ void OnTick()
          // GOM_CleanExpiredDrawings(); // TODO: Fix parameter conflict with GOM_Enhanced_Dashboard
       UpdateDashboard();
 
-      // Récupérer signal ML du dashboard pour le symbole actuel
-      MLSignal ml_sig;
-      if(GetMLSignal(_Symbol, ml_sig))
-      {
-         // Afficher le signal ML sur le graphique
-         Comment("ML Signal: ", ml_sig.signal, " (", (int)(ml_sig.confidence * 100), "%)",
-                 " | Model: ", ml_sig.model_name, " | Pattern: ", ml_sig.pattern_name);
-      }
+      // TODO: Récupérer signal ML du dashboard pour le symbole actuel
+      // MLSignal ml_sig;
+      // if(GetMLSignal(_Symbol, ml_sig))
+      // {
+      //    Comment("ML Signal: ", ml_sig.signal, " (", (int)(ml_sig.confidence * 100), "%)",
+      //            " | Model: ", ml_sig.model_name, " | Pattern: ", ml_sig.pattern_name);
+      // }
    }
 
    MaybeUpdateTradingAgentsFromOnTick(currentTime);
