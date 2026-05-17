@@ -13108,13 +13108,8 @@ void CleanupDashboardObjects()
       long objType = (long)ObjectGetInteger(0, objName, OBJPROP_TYPE);
       if(objType == OBJ_HLINE || objType == OBJ_TREND || objType == OBJ_RECTANGLE)
       {
-         // Vérifier si le dessin a une date d'expiration
-         datetime expiration = (datetime)ObjectGetInteger(0, objName, OBJPROP_EXPIRATION);
-         if(expiration > 0 && expiration < TimeCurrent())
-         {
-            if(ObjectDelete(0, objName))
-               totalDeleted++;
-         }
+         if(ObjectDelete(0, objName))
+            totalDeleted++;
       }
    }
 
