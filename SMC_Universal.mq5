@@ -436,10 +436,6 @@ struct ProbabilityAnalysis
    double overallScore;    // Combined: 0-100
 };
 
-// Forward declarations for probability functions (defined later in file)
-PricePrediction GetPriceDirection();
-ProbabilityAnalysis GetProbabilityBreakdown();
-
 bool GetFutureProtectedPointLevels(double &futureSupportOut, double &futureResistanceOut);
 bool GetSuperTrendLevel(ENUM_TIMEFRAMES tf, double &supportOut, double &resistanceOut);
 double GetClosestBuyLevel(double currentPrice, double atr, double maxDistATR, string &sourceOut);
@@ -2133,6 +2129,10 @@ bool     g_channelBreakoutEntryContext = false;
 // Probabilité de spike calculée / reçue depuis l'IA
 double   g_lastSpikeProbability = 0.0;
 datetime g_lastSpikeUpdate      = 0;
+
+// Global cache for probability analysis (updated in OnTick before dashboard draw)
+PricePrediction g_cachedPricePrediction;
+ProbabilityAnalysis g_cachedProbabilityAnalysis;
 
 // Variables ML pour le tableau de bord
 string g_mlMetricsStr = "";
@@ -6078,6 +6078,11 @@ void DrawAllIndicatorGraphics()
    
    // ✅ AFFICHAGE ESSENTIEL: Dashboard ML + IA Decision + Projections Futures
    UpdateMLMetricsDisplay();  // Récupère précision %, modèle, samples
+
+   // Update probability analysis caches before drawing dashboard
+   g_cachedPricePrediction = GetPriceDirection();
+   g_cachedProbabilityAnalysis = GetProbabilityBreakdown();
+
    DrawEnhancedDashboard();    // Affiche dashboard avec IA + projections
    DrawFuturePriceProjection(); // Trace projection prix futur style TradingView
 }
@@ -7337,7 +7342,7 @@ void DrawEnhancedDashboard()
    y += lineHeight;
 
    // ===== PRICE PREDICTION SECTION =====
-   PricePrediction pred = GetPriceDirection();
+   PricePrediction pred = g_cachedPricePrediction;
    color predColor = (pred.direction == "UP") ? clrLimeGreen :
                      (pred.direction == "DOWN") ? clrRed : clrYellow;
    string predText = "🔮 Prediction: " + pred.direction + " [" + DoubleToString(pred.probability, 1) + "%]";
@@ -7367,7 +7372,7 @@ void DrawEnhancedDashboard()
    y += lineHeight;
 
    // Display detailed probability breakdown (EMA | RSI | ATR)
-   ProbabilityAnalysis probAnalysis = GetProbabilityBreakdown();
+   ProbabilityAnalysis probAnalysis = g_cachedProbabilityAnalysis;
    string detailedProbText = "  EMA:" + DoubleToString(probAnalysis.emaScore, 0) + "% | RSI:" +
                              DoubleToString(probAnalysis.rsiScore, 0) + "% | ATR:" +
                              DoubleToString(probAnalysis.atrScore, 0) + "%";
