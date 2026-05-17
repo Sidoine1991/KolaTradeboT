@@ -7120,47 +7120,43 @@ void UpdateMLMetricsDisplay()
 }
 
 //+------------------------------------------------------------------+
-//| ENHANCED DASHBOARD - Display AI Decision + ML Metrics           |
+//| ENHANCED DASHBOARD - Display AI Decision + Entry Levels + ML     |
 //+------------------------------------------------------------------+
 void DrawEnhancedDashboard()
 {
    // Clean old dashboard objects
    ObjectsDeleteAll(0, "ML_DASH_");
+   ObjectsDeleteAll(0, "ENTRY_LVL_");
 
    long chartID = ChartID();
    double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+   double atr = iATR(_Symbol, PERIOD_M1, 14);
+   if(atr <= 0) atr = currentPrice * 0.001;
 
-   // ===== AI DECISION SECTION =====
+   // ===== TOP DASHBOARD SECTION (AI, TREND, PRICE) =====
+
+   // AI DECISION
    string aiDir = g_lastAIAction;
    double aiConf = g_lastAIConfidence;
-   if(aiConf > 1.0) aiConf /= 100.0; // Normalize to 0-1 range
-
+   if(aiConf > 1.0) aiConf /= 100.0;
    color aiColor = (aiDir == "BUY") ? clrLimeGreen :
                    (aiDir == "SELL") ? clrRed : clrYellow;
-
    string aiText = "🤖 IA: " + aiDir + " [" + DoubleToString(aiConf * 100, 1) + "%]";
 
-   // ===== ML METRICS SECTION =====
-   string mlAccuracy = DoubleToString(g_mlLastAccuracy, 1);
-   string mlModel = g_mlLastModelName;
-
-   string mlText = "📊 ML: " + mlAccuracy + "% | " + mlModel;
-
-   // ===== TREND DIRECTION =====
+   // TREND
    string trend = GetCurrentTrendDirection();
    color trendColor = (trend == "UPTREND") ? clrLimeGreen :
                       (trend == "DOWNTREND") ? clrRed : clrYellow;
    string trendText = "📈 Trend: " + trend;
 
-   // ===== CURRENT PRICE =====
+   // CURRENT PRICE
    string priceText = "💲 Price: " + DoubleToString(currentPrice, digits);
 
-   // Draw dashboard panel (top-left, stacked vertically)
    int y = 20;
    int lineHeight = 22;
 
-   // AI Decision (highlighted)
+   // Draw top dashboard (AI, Trend, Price)
    string label1 = "ML_DASH_AI";
    ObjectCreate(chartID, label1, OBJ_LABEL, 0, 0, 0);
    ObjectSetInteger(chartID, label1, OBJPROP_XDISTANCE, 10);
@@ -7171,37 +7167,95 @@ void DrawEnhancedDashboard()
    ObjectSetInteger(chartID, label1, OBJPROP_BACK, false);
    y += lineHeight;
 
-   // ML Metrics
-   string label2 = "ML_DASH_METRICS";
+   string label2 = "ML_DASH_TREND";
    ObjectCreate(chartID, label2, OBJ_LABEL, 0, 0, 0);
    ObjectSetInteger(chartID, label2, OBJPROP_XDISTANCE, 10);
    ObjectSetInteger(chartID, label2, OBJPROP_YDISTANCE, y);
-   ObjectSetString(chartID, label2, OBJPROP_TEXT, mlText);
-   ObjectSetInteger(chartID, label2, OBJPROP_COLOR, clrSkyBlue);
+   ObjectSetString(chartID, label2, OBJPROP_TEXT, trendText);
+   ObjectSetInteger(chartID, label2, OBJPROP_COLOR, trendColor);
    ObjectSetInteger(chartID, label2, OBJPROP_FONTSIZE, 10);
    ObjectSetInteger(chartID, label2, OBJPROP_BACK, false);
    y += lineHeight;
 
-   // Trend
-   string label3 = "ML_DASH_TREND";
+   string label3 = "ML_DASH_PRICE";
    ObjectCreate(chartID, label3, OBJ_LABEL, 0, 0, 0);
    ObjectSetInteger(chartID, label3, OBJPROP_XDISTANCE, 10);
    ObjectSetInteger(chartID, label3, OBJPROP_YDISTANCE, y);
-   ObjectSetString(chartID, label3, OBJPROP_TEXT, trendText);
-   ObjectSetInteger(chartID, label3, OBJPROP_COLOR, trendColor);
+   ObjectSetString(chartID, label3, OBJPROP_TEXT, priceText);
+   ObjectSetInteger(chartID, label3, OBJPROP_COLOR, clrWhite);
    ObjectSetInteger(chartID, label3, OBJPROP_FONTSIZE, 10);
    ObjectSetInteger(chartID, label3, OBJPROP_BACK, false);
-   y += lineHeight;
+   y += lineHeight + 10; // Extra gap
 
-   // Price
-   string label4 = "ML_DASH_PRICE";
-   ObjectCreate(chartID, label4, OBJ_LABEL, 0, 0, 0);
-   ObjectSetInteger(chartID, label4, OBJPROP_XDISTANCE, 10);
-   ObjectSetInteger(chartID, label4, OBJPROP_YDISTANCE, y);
-   ObjectSetString(chartID, label4, OBJPROP_TEXT, priceText);
-   ObjectSetInteger(chartID, label4, OBJPROP_COLOR, clrWhite);
-   ObjectSetInteger(chartID, label4, OBJPROP_FONTSIZE, 10);
-   ObjectSetInteger(chartID, label4, OBJPROP_BACK, false);
+   // ===== ENTRY LEVELS SECTION =====
+
+   string buySource = "";
+   double buyLevel = GetClosestBuyLevel(currentPrice, atr, 2.0, buySource);
+
+   string sellSource = "";
+   double sellLevel = GetClosestSellLevel(currentPrice, atr, 2.0, sellSource);
+
+   if(buyLevel > 0)
+   {
+      string buyText = "🟢 BUY @ " + DoubleToString(buyLevel, digits);
+      string label_buy = "ML_DASH_BUY";
+      ObjectCreate(chartID, label_buy, OBJ_LABEL, 0, 0, 0);
+      ObjectSetInteger(chartID, label_buy, OBJPROP_XDISTANCE, 10);
+      ObjectSetInteger(chartID, label_buy, OBJPROP_YDISTANCE, y);
+      ObjectSetString(chartID, label_buy, OBJPROP_TEXT, buyText);
+      ObjectSetInteger(chartID, label_buy, OBJPROP_COLOR, clrLimeGreen);
+      ObjectSetInteger(chartID, label_buy, OBJPROP_FONTSIZE, 10);
+      ObjectSetInteger(chartID, label_buy, OBJPROP_BACK, false);
+
+      // Draw GREEN horizontal line for BUY level
+      string buyLine = "ENTRY_LVL_BUY";
+      ObjectCreate(chartID, buyLine, OBJ_HLINE, 0, 0, buyLevel);
+      ObjectSetInteger(chartID, buyLine, OBJPROP_COLOR, clrLimeGreen);
+      ObjectSetInteger(chartID, buyLine, OBJPROP_STYLE, STYLE_DASHED);
+      ObjectSetInteger(chartID, buyLine, OBJPROP_WIDTH, 2);
+      ObjectSetInteger(chartID, buyLine, OBJPROP_BACK, true);
+
+      y += lineHeight;
+   }
+
+   if(sellLevel > 0)
+   {
+      string sellText = "🔴 SELL @ " + DoubleToString(sellLevel, digits);
+      string label_sell = "ML_DASH_SELL";
+      ObjectCreate(chartID, label_sell, OBJ_LABEL, 0, 0, 0);
+      ObjectSetInteger(chartID, label_sell, OBJPROP_XDISTANCE, 10);
+      ObjectSetInteger(chartID, label_sell, OBJPROP_YDISTANCE, y);
+      ObjectSetString(chartID, label_sell, OBJPROP_TEXT, sellText);
+      ObjectSetInteger(chartID, label_sell, OBJPROP_COLOR, clrRed);
+      ObjectSetInteger(chartID, label_sell, OBJPROP_FONTSIZE, 10);
+      ObjectSetInteger(chartID, label_sell, OBJPROP_BACK, false);
+
+      // Draw RED horizontal line for SELL level
+      string sellLine = "ENTRY_LVL_SELL";
+      ObjectCreate(chartID, sellLine, OBJ_HLINE, 0, 0, sellLevel);
+      ObjectSetInteger(chartID, sellLine, OBJPROP_COLOR, clrRed);
+      ObjectSetInteger(chartID, sellLine, OBJPROP_STYLE, STYLE_DASHED);
+      ObjectSetInteger(chartID, sellLine, OBJPROP_WIDTH, 2);
+      ObjectSetInteger(chartID, sellLine, OBJPROP_BACK, true);
+
+      y += lineHeight;
+   }
+
+   y += 10; // Extra gap before ML metrics
+
+   // ===== ML METRICS SECTION (BOTTOM) =====
+   string mlAccuracy = DoubleToString(g_mlLastAccuracy, 1);
+   string mlModel = g_mlLastModelName;
+   string mlText = "📊 ML: " + mlAccuracy + "% | " + mlModel;
+
+   string label_ml = "ML_DASH_METRICS";
+   ObjectCreate(chartID, label_ml, OBJ_LABEL, 0, 0, 0);
+   ObjectSetInteger(chartID, label_ml, OBJPROP_XDISTANCE, 10);
+   ObjectSetInteger(chartID, label_ml, OBJPROP_YDISTANCE, y);
+   ObjectSetString(chartID, label_ml, OBJPROP_TEXT, mlText);
+   ObjectSetInteger(chartID, label_ml, OBJPROP_COLOR, clrSkyBlue);
+   ObjectSetInteger(chartID, label_ml, OBJPROP_FONTSIZE, 9);
+   ObjectSetInteger(chartID, label_ml, OBJPROP_BACK, false);
 }
 
 //+------------------------------------------------------------------+
@@ -7280,15 +7334,15 @@ void DrawFuturePriceProjection()
    ObjectSetInteger(chartID, labelPess, OBJPROP_FONTSIZE, 9);
    ObjectSetInteger(chartID, labelPess, OBJPROP_BACK, false);
 
-   // ==== PROJECTION ZONE (confidence band) ====
-   // Draw a rectangle to show the projected trading range
+   // ==== PROJECTION ZONE (confidence band) - Ultra transparent ====
+   // Draw a very subtle transparent rectangle
    string zoneRect = "PROJ_ZONE";
    ObjectCreate(chartID, zoneRect, OBJ_RECTANGLE, 0, now, projOptimistic, future60min, projPessimistic);
-   ObjectSetInteger(chartID, zoneRect, OBJPROP_COLOR, clrYellow);
+   ObjectSetInteger(chartID, zoneRect, OBJPROP_COLOR, C'200,200,200');   // Very light gray border
    ObjectSetInteger(chartID, zoneRect, OBJPROP_STYLE, STYLE_SOLID);
-   ObjectSetInteger(chartID, zoneRect, OBJPROP_WIDTH, 1);
+   ObjectSetInteger(chartID, zoneRect, OBJPROP_WIDTH, 1);               // Thinnest possible
    ObjectSetInteger(chartID, zoneRect, OBJPROP_FILL, true);
-   ObjectSetInteger(chartID, zoneRect, OBJPROP_BGCOLOR, C'255,255,0'); // Yellow with transparency
+   ObjectSetInteger(chartID, zoneRect, OBJPROP_BGCOLOR, C'240,240,240'); // Almost invisible light gray
    ObjectSetInteger(chartID, zoneRect, OBJPROP_BACK, true);
 }
 
