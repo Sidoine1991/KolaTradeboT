@@ -333,6 +333,17 @@ void DrawFibonacciOnChart();
 void DrawConfirmedOBWithCHOCH();
 void CheckAndExecuteOTEEntry();
 void DisplayComprehensiveVerdict(bool bullM1, bool bullM5, bool bullH1);
+void SMC_ComputeAndStoreFinalVerdict();
+void CheckAndExecuteVerdictAutoEntry();
+void ManageVerdictEntryLimitOrder();
+bool ExecuteVerdictMarketOrder(const string direction, const string entryTf);
+void CloseAllPositionsIfSymbolLossReached(double targetLossUSD);
+bool SMC_IsGoodOrPerfectVerdict();
+bool SMC_PickVerdictEntryLevel(const string direction, double &levelOut, string &tfOut);
+bool SMC_IsVerdictDirectional();
+bool SMC_VerdictStrongEnoughForEntry();
+bool SMC_AllowDirectionDespiteAIHold(const string direction);
+bool SMC_LogThrottle(const string key, const int intervalSec = 90);
 bool GetChartSwingHighLowForFibo(double &swingHighOut, double &swingLowOut);
 bool PriceLevelInFiboOTEZone(const string direction, double price, double swingHigh, double swingLow);
 bool IsStrongOTEFVGConfluence(double price, string direction);
@@ -439,7 +450,7 @@ void PlacePreciseSwingBasedOrders();
 void CheckAndExecuteDerivArrowTrade();
 void UpdateM5EntryLevelsAndLines();
 void CheckAndExecuteM5TouchEntryTrade();
-bool ExecuteM5TouchOrder(string direction);
+bool ExecuteM5TouchOrder(string direction, double minAiConfOverride = -1.0);
 bool IsBoomCrashDirectionAllowedByIA(const string symbol, const string direction);
 bool IsBoomCrashSmartEntryContextFresh(const string direction);
 bool IsBoomCrashEntryCooldownActive(const string contextTag);
@@ -739,10 +750,15 @@ bool IsBoomCrashDirectionAllowedByIA(const string symbol, const string action)
    string ia = g_lastAIAction;
    StringToUpper(ia);
 
-   // RÈGLE STRICTE : Jamais de trade si IA = HOLD (quel que soit le symbole)
+   // HOLD IA : autoriser si verdict final directionnel fort (BUY/SELL, conf >= seuil)
    if(ia == "HOLD")
    {
-      Print("🚫 IA HOLD - Aucun trade autorisé sur ", symbol, " | IA=", g_lastAIAction, " (requis: BUY ou SELL)");
+      if(SMC_AllowDirectionDespiteAIHold(a))
+         return IsDirectionAllowedForBoomCrash(symbol, a);
+      if(SMC_LogThrottle("ia_hold_" + symbol, 120))
+         Print("🚫 IA HOLD - trade bloqué sur ", symbol,
+               " | verdict=", g_finalVerdict.verdictLabel,
+               " ", DoubleToString(g_finalVerdict.finalConfPct, 1), "%");
       return false;
    }
 
@@ -840,10 +856,11 @@ bool IsAIConfidenceAtLeast(const double minConfUnit, const string contextTag)
    double confUnit = NormalizeAIConfidenceUnit();
    if(confUnit < minConfUnit)
    {
-      Print("🚫 ", contextTag, " - Confiance IA insuffisante: ",
-            DoubleToString(confUnit * 100.0, 1), "% < ",
-            DoubleToString(minConfUnit * 100.0, 1), "% (action=",
-            g_lastAIAction, ")");
+      if(SMC_LogThrottle("ai_low_conf_" + _Symbol + "_" + contextTag, 90))
+         Print("🚫 ", contextTag, " - Confiance IA insuffisante: ",
+               DoubleToString(confUnit * 100.0, 1), "% < ",
+               DoubleToString(minConfUnit * 100.0, 1), "% (action=",
+               g_lastAIAction, ")");
       return false;
    }
    return true;
@@ -2295,9 +2312,28 @@ input bool   ShowBookmarkLevels    = false; // Lignes horizontales sur derniers 
 
 input group "=== TABLEAU DE BORD ET MÉTRIQUES ==="
 input bool   UseDashboard        = true;   // Afficher le tableau de bord avec métriques
-input bool   ShowBottomDashboard = true;   // Afficher dashboard GOM_SIDO (M1/M5/H1 + Verdict 5 niveaux)
+input bool   ShowBottomDashboard = true;   // Bandeau bas: M1/M4/M5/H1/D1 + IA + Verdict (%)
+input bool   ShowComprehensiveVerdictPanel = false; // Panneau "DÉCISION FINALE" bas-droite (doublon si bandeau bas actif)
+input int    DashboardBottomOffset = 25;   // Marge bas bandeau verdict MTF (px, CORNER_LEFT_LOWER)
+input int    DashboardBarMarginLeft = 8;   // Marge gauche bandeau verdict (px)
+input int    DashboardBarMarginRight = 8;  // Marge droite bandeau verdict (px)
+input int    DashboardCellGap = 2;         // Espace entre cellules bandeau verdict (px)
+input int    DashboardVerdictCellHeight = 28; // Hauteur cellules bandeau verdict (px)
 input double VerdictThresholdGOOD = 0.35;  // Seuil pour GOOD BUY/SELL (absolu)
 input double VerdictThresholdPERFECT = 0.65; // Seuil pour PERFECT BUY/SELL (absolu)
+input bool   EnableAutoEntryOnStrongVerdict = true; // Entrée auto sur GOOD/PERFECT BUY/SELL
+input double AutoEntryOnVerdictMinConfPct = 70.0; // Confiance verdict min (%) pour entrée auto
+input bool   AutoEntryPreferM5OverM1 = true; // Priorité M5 > M1 > M30 > H1 pour le niveau d'entrée
+input int    VerdictAutoEntryCooldownSec = 45; // Délai min entre 2 entrées auto verdict
+input bool   AllowTradeWhenAIHoldIfVerdictStrong = true; // Trader si verdict BUY/SELL fort même si IA=HOLD
+input bool   VerdictAutoMarketOnGoodPerfect = true; // Marché auto si GOOD/PERFECT (proche niveau M1/M5/M30/H1)
+input double VerdictEntryNearATRMult = 1.5; // Distance max au niveau d'entrée (x ATR) pour ouvrir
+input double VerdictTakeProfitUSD = 3.0; // Fermeture symbole si profit >= ($)
+input double VerdictMaxLossUSD = 2.0; // Fermeture symbole si perte >= ($)
+input bool   VerdictApplyDynamicSL = true; // Trailing + SL dynamique sur positions VERDICT_*
+input bool   EnableVerdictEntryLimit = false; // LIMIT verdict (désactivé si entrée marché active)
+input int    VerdictLimitRefreshSec = 45; // Recalcul / repositionnement LIMIT verdict (sec)
+input bool   AI_VerboseDecisionLogs = false; // Logs détaillés POST /decision (désactivé = moins de spam)
 input bool   DashboardSingleSourceMode = true; // Eviter les doublons: infos texte uniquement via UpdateDashboard()
 input bool   ShowTop3NetProfitBottomRight = true; // Afficher en bas à droite le top 3 net profit + perf globale modèle
 input bool   ShowMLMetrics       = true;   // Afficher les métriques ML (entraînement modèle)
@@ -2363,6 +2399,11 @@ input bool   UseBOS            = true;   // Break Of Structure
 input bool   UseOTE            = true;   // Optimal Trade Entry (Fib 0.62-0.79)
 input bool   UseEqualHL        = true;   // Equal Highs/Lows (EQH/EQL)
 input bool   ShowOTEImbalanceOnChart = true; // Dessiner setup OTE + Imbalance (FVG) sur le graphique
+input bool   ShowConfirmedChartPatterns = true; // Figures SIDO confirmées (double top/bottom) sur le graphique
+input int    SIDOPivotLookback = 3;        // Lookback pivots SIDO
+input int    SIDOBarsToAnalyze = 300;      // Barres analysées SIDO
+input int    SIDOMaxBarsBetweenSwings = 80; // Écart max entre swings SIDO
+input double SIDOToleranceATRPercent = 35.0; // Tolérance niveau SIDO (% ATR)
 input int    OTEImbalanceProjectionBars = 120; // Projection visuelle (LTF) vers la droite
 input bool   OTE_UseLimitOrders = true; // Entrées OTE via limit (meilleure précision)
 
@@ -4025,7 +4066,11 @@ bool IsAITradeAllowedForDirection(const string direction)
    
    if(g_lastAIAction == "HOLD" || g_lastAIAction == "hold")
    {
-      Print("?? TRADE BLOQUÉ - IA en HOLD sur ", _Symbol, " (", DoubleToString(confU*100,1), "%)");
+      if(SMC_AllowDirectionDespiteAIHold(direction))
+         return true;
+      if(SMC_LogThrottle("trade_hold_" + _Symbol, 120))
+         Print("?? TRADE BLOQUÉ - IA en HOLD sur ", _Symbol, " (", DoubleToString(confU*100,1),
+               "%) | verdict=", g_finalVerdict.verdictLabel);
       return false;
    }
 
@@ -4160,6 +4205,183 @@ struct SymbolPauseInfo {
 SymbolPauseInfo g_symbolPauses[20]; // Maximum 20 symboles
 int g_pauseCount = 0;
 int g_dashboardBottomY = 0; // pixels: dernière ligne du dashboard (pour empiler les labels)
+
+struct SMC_FinalVerdictState
+{
+   bool     bullM1;
+   bool     bullM4;
+   bool     bullM5;
+   bool     bullH1;
+   bool     bullD1;
+   string   direction;      // BUY | SELL | WAIT
+   string   verdictLabel;     // PERFECT BUY, GOOD SELL, WAIT, etc.
+   double   finalConfPct;     // 0-100 (affichage + seuil auto-entry)
+   double   finalScore;       // -1..1 (interne)
+   double   m1EntryLevel;
+   double   m30EntryLevel;
+   double   h1EntryLevel;
+   double   m5BuyEntryLevel;
+   double   m5SellEntryLevel;
+   bool     m5BuyActive;
+   bool     m5SellActive;
+   datetime updated;
+};
+SMC_FinalVerdictState g_finalVerdict;
+static datetime g_lastVerdictAutoEntryTime = 0;
+static datetime g_lastVerdictLimitManageTime = 0;
+
+// Journalisation espacée (clé + intervalle secondes)
+bool SMC_LogThrottle(const string key, const int intervalSec = 90)
+{
+   static string s_keys[];
+   static datetime s_times[];
+   int n = ArraySize(s_keys);
+   for(int i = 0; i < n; i++)
+   {
+      if(s_keys[i] == key)
+      {
+         if(TimeCurrent() - s_times[i] < intervalSec)
+            return false;
+         s_times[i] = TimeCurrent();
+         return true;
+      }
+   }
+   int idx = n;
+   ArrayResize(s_keys, idx + 1);
+   ArrayResize(s_times, idx + 1);
+   s_keys[idx] = key;
+   s_times[idx] = TimeCurrent();
+   return true;
+}
+
+bool SMC_IsVerdictDirectional()
+{
+   return (g_finalVerdict.direction == "BUY" || g_finalVerdict.direction == "SELL");
+}
+
+bool SMC_VerdictStrongEnoughForEntry()
+{
+   if(!SMC_IsVerdictDirectional())
+      return false;
+   return (g_finalVerdict.finalConfPct + 1e-6 >= AutoEntryOnVerdictMinConfPct);
+}
+
+bool SMC_AllowDirectionDespiteAIHold(const string direction)
+{
+   if(!AllowTradeWhenAIHoldIfVerdictStrong)
+      return false;
+   if(!SMC_VerdictStrongEnoughForEntry())
+      return false;
+   string v = g_finalVerdict.direction;
+   string d = direction;
+   StringToUpper(v);
+   StringToUpper(d);
+   return (v == d);
+}
+
+bool SMC_IsGoodOrPerfectVerdict()
+{
+   if(g_finalVerdict.verdictLabel == "" || g_finalVerdict.verdictLabel == "WAIT")
+      return false;
+   return (StringFind(g_finalVerdict.verdictLabel, "GOOD") >= 0 ||
+           StringFind(g_finalVerdict.verdictLabel, "PERFECT") >= 0);
+}
+
+// Choisit le niveau d'entrée MTF le plus proche du prix (M5, M1, M30, H1) dans la tolérance ATR
+bool SMC_PickVerdictEntryLevel(const string direction, double &levelOut, string &tfOut)
+{
+   levelOut = 0.0;
+   tfOut = "";
+
+   double atrVal = 0.0;
+   double atrBuf[];
+   ArraySetAsSeries(atrBuf, true);
+   if(atrHandle != INVALID_HANDLE && CopyBuffer(atrHandle, 0, 0, 1, atrBuf) > 0)
+      atrVal = atrBuf[0];
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   if(point <= 0.0) point = 0.0001;
+   if(atrVal <= 0.0)
+      atrVal = point * 50.0;
+   double maxDist = atrVal * MathMax(0.3, VerdictEntryNearATRMult);
+
+   double refPx = (direction == "BUY")
+                  ? SymbolInfoDouble(_Symbol, SYMBOL_ASK)
+                  : SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   if(refPx <= 0.0) return false;
+
+   string tfs[];
+   double lvls[];
+   ArrayResize(tfs, 0);
+   ArrayResize(lvls, 0);
+
+   if(direction == "BUY")
+   {
+      if(AutoEntryPreferM5OverM1)
+      {
+         if(g_finalVerdict.m5BuyActive && g_finalVerdict.m5BuyEntryLevel > 0.0)
+         { int n=ArraySize(tfs); ArrayResize(tfs,n+1); ArrayResize(lvls,n+1); tfs[n]="M5"; lvls[n]=g_finalVerdict.m5BuyEntryLevel; }
+         if(g_finalVerdict.m1EntryLevel > 0.0)
+         { int n=ArraySize(tfs); ArrayResize(tfs,n+1); ArrayResize(lvls,n+1); tfs[n]="M1"; lvls[n]=g_finalVerdict.m1EntryLevel; }
+         if(g_finalVerdict.m30EntryLevel > 0.0)
+         { int n=ArraySize(tfs); ArrayResize(tfs,n+1); ArrayResize(lvls,n+1); tfs[n]="M30"; lvls[n]=g_finalVerdict.m30EntryLevel; }
+         if(g_finalVerdict.h1EntryLevel > 0.0)
+         { int n=ArraySize(tfs); ArrayResize(tfs,n+1); ArrayResize(lvls,n+1); tfs[n]="H1"; lvls[n]=g_finalVerdict.h1EntryLevel; }
+      }
+      else
+      {
+         if(g_finalVerdict.m1EntryLevel > 0.0)
+         { int n=ArraySize(tfs); ArrayResize(tfs,n+1); ArrayResize(lvls,n+1); tfs[n]="M1"; lvls[n]=g_finalVerdict.m1EntryLevel; }
+         if(g_finalVerdict.m5BuyActive && g_finalVerdict.m5BuyEntryLevel > 0.0)
+         { int n=ArraySize(tfs); ArrayResize(tfs,n+1); ArrayResize(lvls,n+1); tfs[n]="M5"; lvls[n]=g_finalVerdict.m5BuyEntryLevel; }
+         if(g_finalVerdict.m30EntryLevel > 0.0)
+         { int n=ArraySize(tfs); ArrayResize(tfs,n+1); ArrayResize(lvls,n+1); tfs[n]="M30"; lvls[n]=g_finalVerdict.m30EntryLevel; }
+         if(g_finalVerdict.h1EntryLevel > 0.0)
+         { int n=ArraySize(tfs); ArrayResize(tfs,n+1); ArrayResize(lvls,n+1); tfs[n]="H1"; lvls[n]=g_finalVerdict.h1EntryLevel; }
+      }
+   }
+   else
+   {
+      if(AutoEntryPreferM5OverM1)
+      {
+         if(g_finalVerdict.m5SellActive && g_finalVerdict.m5SellEntryLevel > 0.0)
+         { int n=ArraySize(tfs); ArrayResize(tfs,n+1); ArrayResize(lvls,n+1); tfs[n]="M5"; lvls[n]=g_finalVerdict.m5SellEntryLevel; }
+         if(g_finalVerdict.m1EntryLevel > 0.0)
+         { int n=ArraySize(tfs); ArrayResize(tfs,n+1); ArrayResize(lvls,n+1); tfs[n]="M1"; lvls[n]=g_finalVerdict.m1EntryLevel; }
+         if(g_finalVerdict.m30EntryLevel > 0.0)
+         { int n=ArraySize(tfs); ArrayResize(tfs,n+1); ArrayResize(lvls,n+1); tfs[n]="M30"; lvls[n]=g_finalVerdict.m30EntryLevel; }
+         if(g_finalVerdict.h1EntryLevel > 0.0)
+         { int n=ArraySize(tfs); ArrayResize(tfs,n+1); ArrayResize(lvls,n+1); tfs[n]="H1"; lvls[n]=g_finalVerdict.h1EntryLevel; }
+      }
+      else
+      {
+         if(g_finalVerdict.m1EntryLevel > 0.0)
+         { int n=ArraySize(tfs); ArrayResize(tfs,n+1); ArrayResize(lvls,n+1); tfs[n]="M1"; lvls[n]=g_finalVerdict.m1EntryLevel; }
+         if(g_finalVerdict.m5SellActive && g_finalVerdict.m5SellEntryLevel > 0.0)
+         { int n=ArraySize(tfs); ArrayResize(tfs,n+1); ArrayResize(lvls,n+1); tfs[n]="M5"; lvls[n]=g_finalVerdict.m5SellEntryLevel; }
+         if(g_finalVerdict.m30EntryLevel > 0.0)
+         { int n=ArraySize(tfs); ArrayResize(tfs,n+1); ArrayResize(lvls,n+1); tfs[n]="M30"; lvls[n]=g_finalVerdict.m30EntryLevel; }
+         if(g_finalVerdict.h1EntryLevel > 0.0)
+         { int n=ArraySize(tfs); ArrayResize(tfs,n+1); ArrayResize(lvls,n+1); tfs[n]="H1"; lvls[n]=g_finalVerdict.h1EntryLevel; }
+      }
+   }
+
+   int bestIdx = -1;
+   double bestDist = 1e100;
+   for(int i = 0; i < ArraySize(lvls); i++)
+   {
+      if(lvls[i] <= 0.0) continue;
+      double d = MathAbs(refPx - lvls[i]);
+      if(d <= maxDist && d < bestDist)
+      {
+         bestDist = d;
+         bestIdx = i;
+      }
+   }
+   if(bestIdx < 0) return false;
+   levelOut = lvls[bestIdx];
+   tfOut = tfs[bestIdx];
+   return true;
+}
 
 // Filtre symboles "propices" (profil horaire)
 datetime g_lastPropiceUpdateTime = 0;
@@ -4930,6 +5152,69 @@ void CloseAllPositionsIfSymbolProfitReached(double targetProfitUSD)
    }
 }
 
+// Fermeture si perte cumulée symbole >= targetLossUSD (profit + swap + commission)
+void CloseAllPositionsIfSymbolLossReached(double targetLossUSD)
+{
+   if(targetLossUSD <= 0.0) return;
+
+   string symbols[];
+   ArrayResize(symbols, 0);
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      if(!posInfo.SelectByIndex(i)) continue;
+      if(posInfo.Magic() != InpMagicNumber) continue;
+      string sym = posInfo.Symbol();
+      if(sym == "") continue;
+      bool exists = false;
+      for(int k = 0; k < ArraySize(symbols); k++)
+      {
+         if(symbols[k] == sym) { exists = true; break; }
+      }
+      if(!exists)
+      {
+         ArrayResize(symbols, ArraySize(symbols) + 1);
+         symbols[ArraySize(symbols) - 1] = sym;
+      }
+   }
+   if(ArraySize(symbols) <= 0) return;
+
+   string reason = "Symbol loss cap >= " + DoubleToString(targetLossUSD, 2) + "$";
+   for(int s = 0; s < ArraySize(symbols); s++)
+   {
+      string sym = symbols[s];
+      if(sym == "") continue;
+
+      double symbolPnL = 0.0;
+      ulong tickets[];
+      ArrayResize(tickets, 0);
+
+      for(int i = PositionsTotal() - 1; i >= 0; i--)
+      {
+         if(!posInfo.SelectByIndex(i)) continue;
+         if(posInfo.Magic() != InpMagicNumber) continue;
+         if(posInfo.Symbol() != sym) continue;
+
+         symbolPnL += posInfo.Profit() + posInfo.Swap() + posInfo.Commission();
+         ArrayResize(tickets, ArraySize(tickets) + 1);
+         tickets[ArraySize(tickets) - 1] = posInfo.Ticket();
+      }
+
+      if(symbolPnL > -targetLossUSD) continue;
+
+      Print("🛑 PERTE SYMBOLE ATTEINTE — ", sym,
+            " | PnL=", DoubleToString(symbolPnL, 2), "$ <= -",
+            DoubleToString(targetLossUSD, 2), "$");
+
+      for(int t = 0; t < ArraySize(tickets); t++)
+      {
+         ulong ticket = tickets[t];
+         if(ticket == 0) continue;
+         PositionCloseWithLog(ticket, reason);
+      }
+   }
+}
+
 // Fermeture par ordre inverse (comme Spike_Close_BoomCrash) pour compatibilité brokers
 bool ClosePositionByDeal(ulong ticket)
 {
@@ -5682,6 +5967,7 @@ void DrawAllIndicatorGraphics()
    //if(ShowLimitOrderLevels) DrawLimitOrderLevels(); // SUPPRIMÉ - Plus d'affichage ordres limit
 
    if(ShowOTEImbalanceOnChart) DrawOTEImbalanceOnChart();
+   if(ShowConfirmedChartPatterns) DrawConfirmedSIDOPatternsOnChart();
    
    // NOUVEAU: Prédiction des Protected High/Low Points futurs
    PredictFutureProtectedPoints();
@@ -5692,7 +5978,7 @@ void DrawAllIndicatorGraphics()
 void DrawOTEImbalanceOnChart()
 {
    ENUM_SYMBOL_CATEGORY cat = SMC_GetSymbolCategory(_Symbol);
-   if(!(cat == SYM_FOREX || cat == SYM_METAL || cat == SYM_COMMODITY || cat == SYM_BOOM_CRASH)) return;
+   if(!(cat == SYM_FOREX || cat == SYM_METAL || cat == SYM_COMMODITY || cat == SYM_BOOM_CRASH || cat == SYM_VOLATILITY)) return;
    if(!UseFVG || !UseOTE) return;
 
    // Supprimer les anciens dessins OTE/Imbalance (pour ne pas saturer le chart)
@@ -6101,9 +6387,15 @@ void OnTick()
 
    // Fermeture profit-only par symbole à 3$ (POSITION_PROFIT uniquement)
    // Exécutée avant les entrées M5 pour éviter toute réouverture sur le même tick.
-   CloseAllPositionsIfSymbolProfitReached(3.0);
+   CloseAllPositionsIfSymbolProfitReached(VerdictTakeProfitUSD);
+   CloseAllPositionsIfSymbolLossReached(VerdictMaxLossUSD);
    
-   // NOUVEAU: Vérification des touches M5 pour exécution M1 (priorité haute)
+   SMC_ComputeAndStoreFinalVerdict();
+   CheckAndExecuteVerdictAutoEntry();
+   if(EnableVerdictEntryLimit && !VerdictAutoMarketOnGoodPerfect)
+      ManageVerdictEntryLimitOrder();
+
+   // Touch M5 classique (ignoré si entrée auto verdict déjà faite récemment)
    CheckAndExecuteM5TouchEntryTrade();
    
    // NOUVEAU: Recovery exceptionnel Boom/Crash (touch M5 + 4 petites bougies M1)
@@ -6277,8 +6569,8 @@ void OnTick()
       PlaceScalpingLimitOrders(m1Rates, 0, mid, atrVal, 0.0);
    */
    
-   // Fermeture profit-only par symbole à 3$ (POSITION_PROFIT uniquement)
-   CloseAllPositionsIfSymbolProfitReached(3.0);
+   CloseAllPositionsIfSymbolProfitReached(VerdictTakeProfitUSD);
+   CloseAllPositionsIfSymbolLossReached(VerdictMaxLossUSD);
 
    // TABLEAU DE BORD CONTRÔLÉ (toutes les 15 secondes)
    if(currentTime - lastDashboardUpdate >= 15)
@@ -6413,7 +6705,7 @@ void UpdateDashboard()
          double confPct = NormalizeAIConfidenceUnit() * 100.0;
          if(confPct > 100.0) confPct = 100.0;
          if(confPct < 0.0) confPct = 0.0;
-         aiStatus = _Symbol + " | /decision: " + sig + " (" + DoubleToString(confPct, 1) + "%)" + agePart;
+         aiStatus = "IA Statut: " + sig + " | Confiance: " + DoubleToString(confPct, 1) + "% | " + _Symbol + agePart;
          if(stale)
          {
             aiStatus += " | STALE";
@@ -8460,9 +8752,10 @@ void DrawFVGOnChart()
          if(ObjectCreate(0, name, OBJ_RECTANGLE, 0, t1, bot, t2, top))
          {
             ObjectSetInteger(0, name, OBJPROP_COLOR, clrGreen);
-            ObjectSetInteger(0, name, OBJPROP_WIDTH, 1);
-            ObjectSetInteger(0, name, OBJPROP_BACK, false);
-            ObjectSetInteger(0, name, OBJPROP_FILL, false);
+            ObjectSetInteger(0, name, OBJPROP_WIDTH, 2);
+            ObjectSetInteger(0, name, OBJPROP_BACK, true);
+            ObjectSetInteger(0, name, OBJPROP_FILL, true);
+            ObjectSetInteger(0, name, OBJPROP_ZORDER, 50);
             cnt++;
          }
       }
@@ -8474,9 +8767,10 @@ void DrawFVGOnChart()
          if(ObjectCreate(0, name, OBJ_RECTANGLE, 0, t1, bot, t2, top))
          {
             ObjectSetInteger(0, name, OBJPROP_COLOR, clrRed);
-            ObjectSetInteger(0, name, OBJPROP_WIDTH, 1);
-            ObjectSetInteger(0, name, OBJPROP_BACK, false);
-            ObjectSetInteger(0, name, OBJPROP_FILL, false);
+            ObjectSetInteger(0, name, OBJPROP_WIDTH, 2);
+            ObjectSetInteger(0, name, OBJPROP_BACK, true);
+            ObjectSetInteger(0, name, OBJPROP_FILL, true);
+            ObjectSetInteger(0, name, OBJPROP_ZORDER, 50);
             cnt++;
          }
       }
@@ -12591,11 +12885,21 @@ void GuardPendingLimitOrdersWithAI()
 
       bool shouldCancel = false;
 
-      // IA en HOLD -> annuler immédiatement l'ordre LIMIT
+      // Ordres verdict : conservés si verdict fort aligné (même si IA=HOLD)
+      if(StringFind(cmt, "SMC_VERDICT_LIMIT") >= 0)
+      {
+         if(SMC_VerdictStrongEnoughForEntry() &&
+            ((dir == "BUY" && g_finalVerdict.direction == "BUY") ||
+             (dir == "SELL" && g_finalVerdict.direction == "SELL")))
+            continue;
+      }
+
+      // IA en HOLD -> annuler (sauf verdict géré ci-dessus)
       if(iaUpper == "HOLD")
       {
          shouldCancel = true;
-         Print("🚫 LIMIT ANNULÉ - IA en HOLD sur ", _Symbol, " | Ticket=", ticket, " | Comment=", cmt);
+         if(SMC_LogThrottle("limit_cancel_hold_" + _Symbol, 120))
+            Print("🚫 LIMIT ANNULÉ - IA en HOLD sur ", _Symbol, " | Ticket=", ticket);
       }
       else if(iaUpper == "BUY" && dir == "SELL")
       {
@@ -13066,59 +13370,58 @@ void DrawMLMetricsOnChart()
    }
 }
 
+// Objets graphiques SMC/GOM à ne jamais supprimer lors du nettoyage dashboard
+bool SMC_IsProtectedChartObject(const string objName)
+{
+   if(StringLen(objName) < 3) return false;
+   string prefixes[] = {
+      "SMC_MTF_", "SMC_FVG_", "SMC_IFVG_", "SMC_OTEIMB_", "SMC_OTE_BUY_", "SMC_OTE_SELL_",
+      "OTE_SETUP_", "M5_ENTRY_", "SMC_EntryLevel_", "SMC_OB_", "SMC_OB_CONFIRMED_",
+      "SMC_SWING_", "SMC_SH_", "SMC_SL_", "SMC_FIB_", "SMC_LIQ_", "SMC_PD_", "SMC_CHAN_",
+      "SMC_PRED_", "SMC_SPIKE_", "SMC_ARROW_", "SMC_SIGNAL_", "GOM_SIDO_", "GOM_KOLA_",
+      "GOM_SCRIPT_", "GOM_DASH_", "GOM_SPIKE_", "GOM_MLINFO"
+   };
+   for(int p = 0; p < ArraySize(prefixes); p++)
+   {
+      if(StringFind(objName, prefixes[p]) == 0)
+         return true;
+   }
+   return false;
+}
+
 // Fonction de nettoyage global des objets graphiques du dashboard
 void CleanupDashboardObjects()
 {
-   // Nettoyer TOUS les anciens objets dashboard + graphiques expirés
    int totalDeleted = 0;
 
-   // Parcourir TOUS les objets du chart
    for(int i = ObjectsTotal(0) - 1; i >= 0; i--)
    {
       string objName = ObjectName(0, i, 0, -1);
 
-      // Protéger les nouveaux objets GOM_SIDO
-      if(StringFind(objName, "SMC_MTF_") == 0 ||     // M1/M5/H1 dashboard
-         StringFind(objName, "SMC_TITLE") == 0 ||
-         StringFind(objName, "SMC_IACONF") == 0 ||
-         StringFind(objName, "SMC_VERDICT") == 0 ||
-         StringFind(objName, "SMC_M1") == 0 ||
-         StringFind(objName, "SMC_M5") == 0 ||
-         StringFind(objName, "SMC_H1") == 0 ||
-         StringFind(objName, "_TXT") > 0)             // Labels texte
+      if(SMC_IsProtectedChartObject(objName))
          continue;
 
-      // Supprimer anciens dashboards/infos
-      if(StringFind(objName, "SMC_DASH_") == 0 ||
+      if(StringFind(objName, "SMC_MTF_") == 0 ||
+         StringFind(objName, "SMC_DASH_LINE_") == 0 ||
+         StringFind(objName, "SMC_DASH_") == 0 ||
          StringFind(objName, "SMC_DASHBOARD") == 0 ||
          StringFind(objName, "SMC_ML_METRICS") == 0 ||
          StringFind(objName, "SMC_PROPICE") == 0 ||
          StringFind(objName, "SMC_FUT_STATUS") == 0 ||
-         StringFind(objName, "SMC_Chan_") == 0 ||
-         StringFind(objName, "SMC_ICT_") == 0 ||
-         StringFind(objName, "DASH_") == 0 ||
-         StringFind(objName, "ML_") == 0 ||
-         StringFind(objName, "GOM_MLINFO") == 0 ||
-         StringFind(objName, "GOM_SPIKE") == 0)
-      {
-         if(ObjectDelete(0, objName))
-            totalDeleted++;
-      }
-
-      // Supprimer dessins expiés (chandeliers/lignes/rectangles anciennes)
-      long objType = (long)ObjectGetInteger(0, objName, OBJPROP_TYPE);
-      if(objType == OBJ_HLINE || objType == OBJ_TREND || objType == OBJ_RECTANGLE)
+         StringFind(objName, "SMC_UTC_STATUS") == 0 ||
+         StringFind(objName, "SMC_TOP3_") == 0 ||
+         StringFind(objName, "COMP_") == 0 ||
+         StringFind(objName, "SMC_TITLE") == 0 ||
+         StringFind(objName, "SMC_IACONF") == 0 ||
+         StringFind(objName, "SMC_VERDICT") == 0)
       {
          if(ObjectDelete(0, objName))
             totalDeleted++;
       }
    }
 
-   if(totalDeleted > 0)
-   {
-      Print("🧹 NETTOYAGE COMPLET - ", totalDeleted, " objets supprimés (anciens dashboards + dessins expirés)");
-      ChartRedraw(0);
-   }
+   if(totalDeleted > 0 && DebugMode)
+      Print("🧹 Nettoyage dashboard: ", totalDeleted, " objets texte/panneaux supprimés");
 }
 
 // Fonction de nettoyage complet de tous les dessins SMC sur le chart
@@ -14092,7 +14395,8 @@ void DrawDashboardOnChart(const string &lines[], const color &colors[], int coun
       }
    }
 
-   g_dashboardBottomY = y0 + maxLines * lh;
+   int bottomBarReserve = ShowBottomDashboard ? (DashboardBottomOffset + DashboardVerdictCellHeight + 12) : 0;
+   g_dashboardBottomY = y0 + maxLines * lh + bottomBarReserve;
 }
 
 // Applique la stratégie adaptée à la catégorie de symbole (Boom/Crash, Volatility, Forex/Metals)
@@ -15183,16 +15487,6 @@ bool ValidateLimitPriceExactEntry(double entryPrice, double &stopLoss, double &t
 
 void ManageTrailingStop()
 {
-   // DEBUG: Log pour vérifier si la fonction est appelée
-   static datetime lastDebugLog = 0;
-   datetime now = TimeCurrent();
-   if(now - lastDebugLog >= 10) // Log toutes les 10 secondes maximum
-   {
-      Print("🔍 DEBUG ManageTrailingStop() appelée | Positions totales: ", PositionsTotal());
-      lastDebugLog = now;
-   }
-   
-   // OPTIMISATION: Sortir rapidement si aucune position
    if(PositionsTotal() == 0) return;
    
    // OPTIMISATION: Limiter le trailing stop aux positions de notre EA uniquement
@@ -15206,8 +15500,6 @@ void ManageTrailingStop()
    }
    
    if(ourPositionsCount == 0) return;
-   
-   Print("🔍 DEBUG: ", ourPositionsCount, " positions trouvées avec notre magic number");
    
    // NOTE: Modification SL dynamique OBLIGATOIRE partout
    // Plus de condition - le SL dynamique est maintenant obligatoire
@@ -15229,11 +15521,10 @@ void ManageTrailingStop()
       // Boom/Crash, Volatility Index, Forex, Métaux - tous éligibles (aucune exclusion)
       string symbol = posInfo.Symbol();
       ENUM_SYMBOL_CATEGORY cat = SMC_GetSymbolCategory(symbol);
-      if(cat == SYM_BOOM_CRASH)
-      {
-         // Règle utilisateur: ne jamais modifier le SL des positions Boom/Crash.
+      string posCmt = posInfo.Comment();
+      bool isVerdictPos = (StringFind(posCmt, "VERDICT_") >= 0);
+      if(cat == SYM_BOOM_CRASH && !(VerdictApplyDynamicSL && isVerdictPos))
          continue;
-      }
       
       ulong  ticket = posInfo.Ticket();
       double profit = posInfo.Profit() + posInfo.Swap() + posInfo.Commission();
@@ -15241,8 +15532,6 @@ void ManageTrailingStop()
       double currentSL = posInfo.StopLoss();
       double currentTP = posInfo.TakeProfit();
       
-      Print("🔍 DEBUG Position: ", symbol, " | Ticket: ", ticket, " | Profit: ", DoubleToString(profit, 2), "$ | SL: ", DoubleToString(currentSL, _Digits));
-
       // Trailing distance: ATR du symbole de la position (M1)
       double atrValue = 0.0;
       int atrLocalHandle = iATR(symbol, PERIOD_M1, 14);
@@ -15296,8 +15585,6 @@ void ManageTrailingStop()
       bool shouldTrail = (profit >= startP) || (maxP >= startP && profit <= (maxP * (1.0 - lockPct)));
       double lockProfit = maxP * lockPct;
       
-      Print("🔍 DEBUG Trailing: Profit=", DoubleToString(profit, 2), "$ | MaxProfit=", DoubleToString(maxP, 2), "$ | Start=", DoubleToString(startP, 2), "$ | ShouldTrail=", shouldTrail ? "YES" : "NO");
-
       // Convertir lockProfit ($) -> distance prix, selon tick_value/tick_size et volume
       double tickSize = SymbolInfoDouble(symbol, SYMBOL_TRADE_TICK_SIZE);
       double tickVal  = SymbolInfoDouble(symbol, SYMBOL_TRADE_TICK_VALUE);
@@ -16271,7 +16558,8 @@ bool GetAISignalData()
       isoTs
    );
    
-   Print("?? ENVOI IA: ", jsonRequest);
+   if(AI_VerboseDecisionLogs && SMC_LogThrottle("ai_send_" + _Symbol, 30))
+      Print("?? ENVOI IA: ", jsonRequest);
    
    StringToCharArray(jsonRequest, post);
    
@@ -16314,7 +16602,8 @@ bool GetAISignalData()
    if(res == 200)
    {
       string jsonResponse = CharArrayToString(response);
-      Print("?? RÉPONSE IA: ", jsonResponse);
+      if(AI_VerboseDecisionLogs && SMC_LogThrottle("ai_resp_" + _Symbol, 30))
+         Print("?? RÉPONSE IA: ", jsonResponse);
       
       g_aiDecisionServerReachable = true;
       
@@ -17048,11 +17337,19 @@ void CheckAndExecuteDerivArrowTrade()
       lastDebugSymbolLog = TimeCurrent();
    }
    
-   // VALIDATION IA: BLOQUER TOUS LES TRADES SI IA EST EN HOLD
+   // HOLD IA : autoriser si verdict final directionnel fort
    if(UseAIServer && (g_lastAIAction == "HOLD" || g_lastAIAction == "hold"))
    {
-      Print("?? TRADE BLOQUÉ - IA en HOLD sur ", _Symbol);
-      return;
+      string arrowDir = "";
+      if(IsBoomSymbol(_Symbol)) arrowDir = "BUY";
+      else if(IsCrashSymbol(_Symbol)) arrowDir = "SELL";
+      if(arrowDir == "" || !SMC_AllowDirectionDespiteAIHold(arrowDir))
+      {
+         if(SMC_LogThrottle("deriv_hold_" + _Symbol, 120))
+            Print("?? TRADE BLOQUÉ - IA en HOLD sur ", _Symbol,
+                  " | verdict=", g_finalVerdict.verdictLabel);
+         return;
+      }
    }
    
    // NOUVEAU: DÉTECTION DES FLÈCHES DERIV ARROW EXISTANTES
@@ -20844,8 +21141,15 @@ bool UpdateAIDecision(int timeoutMs = -1)
       return false;
    }
    // GetAISignalData met déjà à jour g_lastAIAction / g_lastAIConfidence / alignement / cohérence
-   Print("? Décision IA mise à jour via /decision - Action: ", g_lastAIAction,
-         " | Confiance: ", DoubleToString(NormalizeAIConfidenceUnit()*100.0, 1), "%");
+   if(SMC_LogThrottle("ai_ok_" + _Symbol, 60))
+   {
+      string holdHint = "";
+      if(g_lastAIAction == "HOLD" || g_lastAIAction == "hold")
+         holdHint = " | verdict=" + g_finalVerdict.verdictLabel + " " +
+                    DoubleToString(g_finalVerdict.finalConfPct, 1) + "%";
+      Print("? IA /decision — ", g_lastAIAction, " ",
+            DoubleToString(NormalizeAIConfidenceUnit()*100.0, 1), "% | ", _Symbol, holdHint);
+   }
    // Rafraîchir tout de suite le dashboard / zone IA graphique (sinon décalage jusqu'à 15 s)
    if(UseDashboard)
       UpdateDashboard();
@@ -20992,6 +21296,13 @@ void ProcessAIDecision(string jsonData)
          StringReplace(alignStr, "\"", "");
          g_lastAIAlignment = alignStr;
       }
+   }
+
+   if(g_lastAIAction == "HOLD")
+   {
+      string holdDiag = ExtractJsonValue(jsonData, "hold_diagnostic");
+      if(holdDiag != "" && holdDiag != "N/A" && SMC_LogThrottle("ai_hold_diag_" + _Symbol, 180))
+         Print("ℹ️ IA HOLD — ", _Symbol, " | ", holdDiag);
    }
    
    // Extraire la cohérence
@@ -24703,82 +25014,73 @@ static bool g_m5SellLevelActive = false;
 //+------------------------------------------------------------------+
 void UpdateM5EntryLevelsAndLines()
 {
-   // Mettre à jour toutes les 2 minutes M5 (120 secondes)
    static datetime lastM5Update = 0;
    datetime currentTime = TimeCurrent();
-   
-   if(currentTime - lastM5Update < 120) return; // Mise à jour toutes les 2 minutes
-   lastM5Update = currentTime;
+   bool recalcLevels = (currentTime - lastM5Update >= 30);
+   if(recalcLevels)
+      lastM5Update = currentTime;
    
    // Récupérer les données M5
    MqlRates m5Rates[];
    ArraySetAsSeries(m5Rates, true);
    
-   if(CopyRates(_Symbol, PERIOD_M5, 0, 100, m5Rates) < 50)
+   if(recalcLevels)
    {
-      Print("❌ Erreur: Impossible de récupérer les données M5 pour les niveaux d'entrée");
-      return;
+      if(CopyRates(_Symbol, PERIOD_M5, 0, 100, m5Rates) < 50)
+      {
+         if(DebugMode) Print("❌ Données M5 indisponibles pour niveaux d'entrée");
+         return;
+      }
+
+      double m5Support = GetSupportLevelTF(PERIOD_M5, 20);
+      double m5Resistance = GetResistanceLevelTF(PERIOD_M5, 20);
+
+      double ema9M5 = 0.0, ema21M5 = 0.0;
+      int ema9Handle = iMA(_Symbol, PERIOD_M5, 9, 0, MODE_EMA, PRICE_CLOSE);
+      int ema21Handle = iMA(_Symbol, PERIOD_M5, 21, 0, MODE_EMA, PRICE_CLOSE);
+      if(ema9Handle != INVALID_HANDLE && ema21Handle != INVALID_HANDLE)
+      {
+         double ema9Buf[], ema21Buf[];
+         ArraySetAsSeries(ema9Buf, true);
+         ArraySetAsSeries(ema21Buf, true);
+         if(CopyBuffer(ema9Handle, 0, 0, 1, ema9Buf) >= 1) ema9M5 = ema9Buf[0];
+         if(CopyBuffer(ema21Handle, 0, 0, 1, ema21Buf) >= 1) ema21M5 = ema21Buf[0];
+         IndicatorRelease(ema9Handle);
+         IndicatorRelease(ema21Handle);
+      }
+
+      double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+      g_m5BuyEntryLevel = 0.0;
+      g_m5SellEntryLevel = 0.0;
+      g_m5BuyLevelActive = false;
+      g_m5SellLevelActive = false;
+
+      if(currentPrice > m5Support && m5Support > 0)
+      {
+         g_m5BuyEntryLevel = m5Support + SymbolInfoDouble(_Symbol, SYMBOL_POINT) * 5;
+         g_m5BuyLevelActive = true;
+      }
+      else if(currentPrice > ema21M5 && ema21M5 > 0)
+      {
+         g_m5BuyEntryLevel = ema21M5 + SymbolInfoDouble(_Symbol, SYMBOL_POINT) * 3;
+         g_m5BuyLevelActive = true;
+      }
+
+      if(currentPrice < m5Resistance && m5Resistance > 0)
+      {
+         g_m5SellEntryLevel = m5Resistance - SymbolInfoDouble(_Symbol, SYMBOL_POINT) * 5;
+         g_m5SellLevelActive = true;
+      }
+      else if(currentPrice < ema21M5 && ema21M5 > 0)
+      {
+         g_m5SellEntryLevel = ema21M5 - SymbolInfoDouble(_Symbol, SYMBOL_POINT) * 3;
+         g_m5SellLevelActive = true;
+      }
+
+      g_m5LevelsLastUpdate = currentTime;
    }
-   
-   // Calculer les niveaux de support/résistance M5
-   // SR20 demandé (support/résistance calculés sur 20 bougies)
-   double m5Support = GetSupportLevelTF(PERIOD_M5, 20);
-   double m5Resistance = GetResistanceLevelTF(PERIOD_M5, 20);
-   
-   // Calculer les EMAs M5 pour confirmation
-   double ema9M5 = 0.0, ema21M5 = 0.0;
-   int ema9Handle = iMA(_Symbol, PERIOD_M5, 9, 0, MODE_EMA, PRICE_CLOSE);
-   int ema21Handle = iMA(_Symbol, PERIOD_M5, 21, 0, MODE_EMA, PRICE_CLOSE);
-   
-   if(ema9Handle != INVALID_HANDLE && ema21Handle != INVALID_HANDLE)
-   {
-      double ema9Buf[], ema21Buf[];
-      ArraySetAsSeries(ema9Buf, true);
-      ArraySetAsSeries(ema21Buf, true);
-      
-      if(CopyBuffer(ema9Handle, 0, 0, 1, ema9Buf) >= 1) ema9M5 = ema9Buf[0];
-      if(CopyBuffer(ema21Handle, 0, 0, 1, ema21Buf) >= 1) ema21M5 = ema21Buf[0];
-   }
-   
-   double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   
-   // Déterminer les niveaux d'entrée
-   g_m5BuyEntryLevel = 0.0;
-   g_m5SellEntryLevel = 0.0;
-   g_m5BuyLevelActive = false;
-   g_m5SellLevelActive = false;
-   
-   // Niveau BUY: Support M5 ou EMA21 M5 si le prix est au-dessus
-   if(currentPrice > m5Support && m5Support > 0)
-   {
-      g_m5BuyEntryLevel = m5Support + SymbolInfoDouble(_Symbol, SYMBOL_POINT) * 5; // 5 pips au-dessus du support
-      g_m5BuyLevelActive = true;
-   }
-   else if(currentPrice > ema21M5 && ema21M5 > 0)
-   {
-      g_m5BuyEntryLevel = ema21M5 + SymbolInfoDouble(_Symbol, SYMBOL_POINT) * 3; // 3 pips au-dessus EMA21
-      g_m5BuyLevelActive = true;
-   }
-   
-   // Niveau SELL: Résistance M5 ou EMA21 M5 si le prix est en dessous
-   if(currentPrice < m5Resistance && m5Resistance > 0)
-   {
-      g_m5SellEntryLevel = m5Resistance - SymbolInfoDouble(_Symbol, SYMBOL_POINT) * 5; // 5 pips sous la résistance
-      g_m5SellLevelActive = true;
-   }
-   else if(currentPrice < ema21M5 && ema21M5 > 0)
-   {
-      g_m5SellEntryLevel = ema21M5 - SymbolInfoDouble(_Symbol, SYMBOL_POINT) * 3; // 3 pips sous EMA21
-      g_m5SellLevelActive = true;
-   }
-   
-   // Dessiner les lignes épaisses sur le graphique
+
    DrawM5EntryLines();
-   
-   g_m5LevelsLastUpdate = currentTime;
-   
-   Print("📊 NIVEAUX M5 MIS À JOUR - Buy: ", DoubleToString(g_m5BuyEntryLevel, _Digits), 
-         " | Sell: ", DoubleToString(g_m5SellEntryLevel, _Digits));
 }
 
 //+------------------------------------------------------------------+
@@ -24790,20 +25092,19 @@ void DrawM5EntryLines()
    ObjectsDeleteAll(0, "M5_ENTRY_");
    
    datetime currentTime = TimeCurrent();
-   datetime lineEndTime = currentTime + PeriodSeconds(PERIOD_M1) * 100; // Étendre sur 100 bougies M1
-   
+
    // Ligne BUY ENTRY (épaisse et verte)
    if(g_m5BuyLevelActive && g_m5BuyEntryLevel > 0)
    {
       string buyLineName = "M5_ENTRY_BUY_LINE";
-      ObjectCreate(0, buyLineName, OBJ_HLINE, 0, currentTime, g_m5BuyEntryLevel);
+      if(ObjectFind(0, buyLineName) < 0)
+         ObjectCreate(0, buyLineName, OBJ_HLINE, 0, 0, g_m5BuyEntryLevel);
+      ObjectSetDouble(0, buyLineName, OBJPROP_PRICE, g_m5BuyEntryLevel);
       ObjectSetInteger(0, buyLineName, OBJPROP_COLOR, clrLime);
-      ObjectSetInteger(0, buyLineName, OBJPROP_WIDTH, 5); // Très épaisse
+      ObjectSetInteger(0, buyLineName, OBJPROP_WIDTH, 5);
       ObjectSetInteger(0, buyLineName, OBJPROP_STYLE, STYLE_SOLID);
       ObjectSetInteger(0, buyLineName, OBJPROP_BACK, false);
       ObjectSetString(0, buyLineName, OBJPROP_TEXT, "BUY ENTRY M5");
-      ObjectSetInteger(0, buyLineName, OBJPROP_TIME, currentTime);
-      ObjectSetInteger(0, buyLineName, OBJPROP_TIME, lineEndTime);
       
       // Label pour la ligne BUY
       string buyLabel = "M5_ENTRY_BUY_LABEL";
@@ -24818,14 +25119,14 @@ void DrawM5EntryLines()
    if(g_m5SellLevelActive && g_m5SellEntryLevel > 0)
    {
       string sellLineName = "M5_ENTRY_SELL_LINE";
-      ObjectCreate(0, sellLineName, OBJ_HLINE, 0, currentTime, g_m5SellEntryLevel);
+      if(ObjectFind(0, sellLineName) < 0)
+         ObjectCreate(0, sellLineName, OBJ_HLINE, 0, 0, g_m5SellEntryLevel);
+      ObjectSetDouble(0, sellLineName, OBJPROP_PRICE, g_m5SellEntryLevel);
       ObjectSetInteger(0, sellLineName, OBJPROP_COLOR, clrRed);
-      ObjectSetInteger(0, sellLineName, OBJPROP_WIDTH, 5); // Très épaisse
+      ObjectSetInteger(0, sellLineName, OBJPROP_WIDTH, 5);
       ObjectSetInteger(0, sellLineName, OBJPROP_STYLE, STYLE_SOLID);
       ObjectSetInteger(0, sellLineName, OBJPROP_BACK, false);
       ObjectSetString(0, sellLineName, OBJPROP_TEXT, "SELL ENTRY M5");
-      ObjectSetInteger(0, sellLineName, OBJPROP_TIME, currentTime);
-      ObjectSetInteger(0, sellLineName, OBJPROP_TIME, lineEndTime);
       
       // Label pour la ligne SELL
       string sellLabel = "M5_ENTRY_SELL_LABEL";
@@ -24844,6 +25145,12 @@ void CheckAndExecuteM5TouchEntryTrade()
 {
    if(ShouldBlockNewTradeDueToDailyCap()) return;
 
+   if(EnableAutoEntryOnStrongVerdict &&
+      g_finalVerdict.finalConfPct + 1e-6 >= AutoEntryOnVerdictMinConfPct &&
+      (g_finalVerdict.direction == "BUY" || g_finalVerdict.direction == "SELL") &&
+      TimeCurrent() - g_lastVerdictAutoEntryTime < VerdictAutoEntryCooldownSec)
+      return;
+
    // Vérifier si les niveaux M5 sont à jour
    if(g_m5LevelsLastUpdate == 0 || (TimeCurrent() - g_m5LevelsLastUpdate) > 300) // 5 minutes max
    {
@@ -24859,17 +25166,25 @@ void CheckAndExecuteM5TouchEntryTrade()
    
    // DEBUG: Afficher les niveaux actuels et prix
    static datetime lastDebugLog = 0;
-   if(TimeCurrent() - lastDebugLog >= 30) // Log toutes les 30 secondes
+   if(TimeCurrent() - lastDebugLog >= 120)
    {
       lastDebugLog = TimeCurrent();
-      Print("🔍 SURVEILLANCE TOUCH M5 - Bid: ", DoubleToString(currentBid, _Digits), 
-            " | Ask: ", DoubleToString(currentAsk, _Digits));
-      if(g_m5BuyLevelActive)
-         Print("   🟢 BUY ENTRY M5: ", DoubleToString(g_m5BuyEntryLevel, _Digits), 
-               " | Distance: ", DoubleToString(MathAbs(currentAsk - g_m5BuyEntryLevel) / point, 1), " pips");
-      if(g_m5SellLevelActive)
-         Print("   🔴 SELL ENTRY M5: ", DoubleToString(g_m5SellEntryLevel, _Digits), 
-               " | Distance: ", DoubleToString(MathAbs(currentBid - g_m5SellEntryLevel) / point, 1), " pips");
+      double nearBuy = (g_m5BuyLevelActive && g_m5BuyEntryLevel > 0)
+                       ? MathAbs(currentAsk - g_m5BuyEntryLevel) / point : 1e12;
+      double nearSell = (g_m5SellLevelActive && g_m5SellEntryLevel > 0)
+                        ? MathAbs(currentBid - g_m5SellEntryLevel) / point : 1e12;
+      double nearTol = 80.0;
+      if(nearBuy <= nearTol || nearSell <= nearTol)
+      {
+         Print("🔍 TOUCH M5 proche — Bid: ", DoubleToString(currentBid, _Digits),
+               " Ask: ", DoubleToString(currentAsk, _Digits));
+         if(g_m5BuyLevelActive && nearBuy <= nearTol)
+            Print("   BUY M5 @ ", DoubleToString(g_m5BuyEntryLevel, _Digits),
+                  " dist=", DoubleToString(nearBuy, 1), " pts");
+         if(g_m5SellLevelActive && nearSell <= nearTol)
+            Print("   SELL M5 @ ", DoubleToString(g_m5SellEntryLevel, _Digits),
+                  " dist=", DoubleToString(nearSell, 1), " pts");
+      }
    }
    
    // Vérifier le touch du niveau BUY ENTRY
@@ -25013,7 +25328,7 @@ void CheckAndExecuteM5TouchEntryTrade()
             Print("🚀 TOUCH BUY ENTRY M5 DÉTECTÉ - Prix Ask: ", DoubleToString(currentAsk, _Digits),
                   " | Niveau: ", DoubleToString(g_m5BuyEntryLevel, _Digits));
             Print("   💥 EXÉCUTION AU MARCHÉ - BUY sur ", _Symbol);
-            okBuy = ExecuteM5TouchOrder("BUY");
+            okBuy = ExecuteM5TouchOrder("BUY", -1.0);
          }
 
          if(okBuy)
@@ -25157,7 +25472,7 @@ void CheckAndExecuteM5TouchEntryTrade()
             Print("🚀 TOUCH SELL ENTRY M5 DÉTECTÉ - Prix Bid: ", DoubleToString(currentBid, _Digits),
                   " | Niveau: ", DoubleToString(g_m5SellEntryLevel, _Digits));
             Print("   💥 EXÉCUTION AU MARCHÉ - SELL sur ", _Symbol);
-            ExecuteM5TouchOrder("SELL");
+            ExecuteM5TouchOrder("SELL", -1.0);
          }
          
          // Désactiver temporairement ce niveau pour éviter répétitions
@@ -25175,7 +25490,7 @@ void CheckAndExecuteM5TouchEntryTrade()
 //+------------------------------------------------------------------+
 //| Exécute un ordre au marché lors du touch M5                      |
 //+------------------------------------------------------------------+
-bool ExecuteM5TouchOrder(string direction)
+bool ExecuteM5TouchOrder(string direction, double minAiConfOverride)
 {
    if(IsInEquilibriumCorrectionZone())
    {
@@ -25192,8 +25507,20 @@ bool ExecuteM5TouchOrder(string direction)
       return false;
    }
 
-   // Confiance IA minimum globale (75%)
-   if(!IsAIConfidenceAtLeast(0.75, "M5 TOUCH"))
+   double minConf = 0.75;
+   if(minAiConfOverride > 0.0 && minAiConfOverride < 1.0)
+      minConf = minAiConfOverride;
+   if(SMC_AllowDirectionDespiteAIHold(direction))
+   {
+      if(g_finalVerdict.finalConfPct / 100.0 + 1e-6 < minConf)
+      {
+         if(SMC_LogThrottle("m5_verdict_conf_" + _Symbol, 90))
+            Print("🚫 M5 TOUCH - Confiance verdict insuffisante: ",
+                  DoubleToString(g_finalVerdict.finalConfPct, 1), "%");
+         return false;
+      }
+   }
+   else if(!IsAIConfidenceAtLeast(minConf, "M5 TOUCH"))
       return false;
 
    if(!IsSpreadAcceptable()) return false;
@@ -25462,143 +25789,638 @@ double GetResistanceLevelTF(ENUM_TIMEFRAMES tf, int bars)
    return resistance;
 }
 
-//+------------------------------------------------------------------+
-//| DASHBOARD GOM_SIDO - 5 Niveaux Verdict (WAIT/BUY/GOOD BUY/PERFECT BUY)
-//+------------------------------------------------------------------+
-void DisplayMTFDashboard()
+bool SMC_CopyEMAValue(const string symbol, const ENUM_TIMEFRAMES tf, const int period, double &outVal)
 {
-   if(!ShowBottomDashboard) return;
+   outVal = 0.0;
+   int h = iMA(symbol, tf, period, 0, MODE_EMA, PRICE_CLOSE);
+   if(h == INVALID_HANDLE) return false;
+   double buf[];
+   ArraySetAsSeries(buf, true);
+   bool ok = (CopyBuffer(h, 0, 0, 1, buf) >= 1);
+   IndicatorRelease(h);
+   if(ok) outVal = buf[0];
+   return ok;
+}
 
-   int x0 = 10;
-   int y0 = 25;
-   int cellW = 100;
-   int cellH = 28;
-   int gap = 2;
+bool SMC_IsPivotHighSIDO(const MqlRates &rates[], const int n, const int i, const int lb)
+{
+   double v = rates[i].high;
+   for(int k = 1; k <= lb; k++)
+      if(i - k < 0 || i + k >= n || rates[i - k].high >= v || rates[i + k].high > v)
+         return false;
+   return true;
+}
 
-   // Seuils GOM_SIDO (depuis inputs)
-   double GOOD_THRESHOLD = VerdictThresholdGOOD;
-   double PERFECT_THRESHOLD = VerdictThresholdPERFECT;
+bool SMC_IsPivotLowSIDO(const MqlRates &rates[], const int n, const int i, const int lb)
+{
+   double v = rates[i].low;
+   for(int k = 1; k <= lb; k++)
+      if(i - k < 0 || i + k >= n || rates[i - k].low <= v || rates[i + k].low < v)
+         return false;
+   return true;
+}
 
-   // Calculer score confluences M1/M5/H1
-   double emaM1Fast = iMA(_Symbol, PERIOD_M1, 9, 0, MODE_EMA, PRICE_CLOSE);
-   double emaM1Slow = iMA(_Symbol, PERIOD_M1, 21, 0, MODE_EMA, PRICE_CLOSE);
-   double emaM5Fast = iMA(_Symbol, PERIOD_M5, 9, 0, MODE_EMA, PRICE_CLOSE);
-   double emaM5Slow = iMA(_Symbol, PERIOD_M5, 21, 0, MODE_EMA, PRICE_CLOSE);
-   double emaH1Fast = iMA(_Symbol, PERIOD_H1, 9, 0, MODE_EMA, PRICE_CLOSE);
-   double emaH1Slow = iMA(_Symbol, PERIOD_H1, 21, 0, MODE_EMA, PRICE_CLOSE);
+void SMC_DrawSIDOPatternLine(const string tfTag, const string patternType, const int idxA, const int idxB,
+                             const double levelA, const double levelB, const color clr, const MqlRates &rates[])
+{
+   string line = "GOM_SIDO_" + patternType + "_" + tfTag + "_LN";
+   datetime tA = rates[idxA].time;
+   datetime tB = rates[idxB].time;
+   if(ObjectFind(0, line) < 0)
+      ObjectCreate(0, line, OBJ_TREND, 0, tA, levelA, tB, levelB);
+   ObjectMove(0, line, 0, tA, levelA);
+   ObjectMove(0, line, 1, tB, levelB);
+   ObjectSetInteger(0, line, OBJPROP_COLOR, clr);
+   ObjectSetInteger(0, line, OBJPROP_WIDTH, 2);
+   ObjectSetInteger(0, line, OBJPROP_STYLE, STYLE_DASH);
+   ObjectSetInteger(0, line, OBJPROP_RAY_RIGHT, false);
+   ObjectSetInteger(0, line, OBJPROP_BACK, false);
+   ObjectSetInteger(0, line, OBJPROP_ZORDER, 180);
 
-   // Directions par TF
-   bool bullM1 = (emaM1Fast > emaM1Slow);
-   bool bullM5 = (emaM5Fast > emaM5Slow);
-   bool bullH1 = (emaH1Fast > emaH1Slow);
+   string label = "GOM_SIDO_" + patternType + "_" + tfTag + "_LBL";
+   double y = (levelA + levelB) * 0.5;
+   datetime tLabel = iTime(_Symbol, PERIOD_CURRENT, 3);
+   if(tLabel <= 0) tLabel = tB;
+   if(ObjectFind(0, label) < 0)
+      ObjectCreate(0, label, OBJ_TEXT, 0, tLabel, y);
+   ObjectMove(0, label, 0, tLabel, y);
+   ObjectSetString(0, label, OBJPROP_TEXT, tfTag + " " + patternType);
+   ObjectSetInteger(0, label, OBJPROP_COLOR, clr);
+   ObjectSetInteger(0, label, OBJPROP_FONTSIZE, 8);
+   ObjectSetInteger(0, label, OBJPROP_BACK, false);
+}
 
-   // Afficher les niveaux d'entrée M1/M5/H1 sur le graphique
-   DrawEntryLevelLines(bullM1, emaM1Fast, emaM1Slow, "M1");
-   DrawEntryLevelLines(bullM5, emaM5Fast, emaM5Slow, "M5");
-   DrawEntryLevelLines(bullH1, emaH1Fast, emaH1Slow, "H1");
+void DrawConfirmedSIDOPatternsOnChart()
+{
+   ENUM_TIMEFRAMES tfs[] = {PERIOD_M5, PERIOD_M15, PERIOD_H1};
+   string tags[] = {"M5", "M15", "H1"};
+   int lb = MathMax(1, SIDOPivotLookback);
 
-   // Afficher le tableau de bord décisif complet à bas-droite
-   DisplayComprehensiveVerdict(bullM1, bullM5, bullH1);
+   for(int t = 0; t < ArraySize(tfs); t++)
+   {
+      MqlRates rates[];
+      ArraySetAsSeries(rates, true);
+      int copied = CopyRates(_Symbol, tfs[t], 0, MathMax(80, SIDOBarsToAnalyze), rates);
+      if(copied < lb * 3 + 20) continue;
 
-   // Compter alignements (0 = bearish, 1 = mixed, 2 = mixed, 3 = bullish)
-   int alignmentCount = (bullM1 ? 1 : 0) + (bullM5 ? 1 : 0) + (bullH1 ? 1 : 0);
+      int atrH = iATR(_Symbol, tfs[t], 14);
+      double atrVal = 0.0;
+      if(atrH != INVALID_HANDLE)
+      {
+         double ab[];
+         ArraySetAsSeries(ab, true);
+         if(CopyBuffer(atrH, 0, 0, 1, ab) >= 1) atrVal = ab[0];
+         IndicatorRelease(atrH);
+      }
+      if(atrVal <= 0.0) atrVal = rates[0].close * 0.001;
+      double tol = atrVal * (SIDOToleranceATRPercent / 100.0);
+      int maxIdx = MathMin(copied - lb - 1, SIDOBarsToAnalyze);
 
-   // Score confluences: alignmentCount / 3 (0.0 = tout baissier, 1.0 = tout haussier)
-   double confluenceScore = (double)alignmentCount / 3.0;
+      int lastHigh1 = -1, lastHigh2 = -1, lastLow1 = -1, lastLow2 = -1;
+      for(int i = lb + 1; i <= maxIdx; i++)
+      {
+         if(SMC_IsPivotHighSIDO(rates, copied, i, lb))
+         {
+            lastHigh2 = lastHigh1;
+            lastHigh1 = i;
+         }
+         if(SMC_IsPivotLowSIDO(rates, copied, i, lb))
+         {
+            lastLow2 = lastLow1;
+            lastLow1 = i;
+         }
+      }
 
-   // Calculer IA score normalisé (-1 à 1)
+      string tag = tags[t];
+      ObjectDelete(0, "GOM_SIDO_DOUBLE_TOP_" + tag + "_LN");
+      ObjectDelete(0, "GOM_SIDO_DOUBLE_TOP_" + tag + "_LBL");
+      ObjectDelete(0, "GOM_SIDO_DOUBLE_BOTTOM_" + tag + "_LN");
+      ObjectDelete(0, "GOM_SIDO_DOUBLE_BOTTOM_" + tag + "_LBL");
+
+      if(lastHigh1 >= 0 && lastHigh2 >= 0)
+      {
+         int barsGap = MathAbs(lastHigh1 - lastHigh2);
+         double a = rates[lastHigh1].high;
+         double b = rates[lastHigh2].high;
+         if(barsGap <= SIDOMaxBarsBetweenSwings && MathAbs(a - b) <= tol)
+            SMC_DrawSIDOPatternLine(tag, "DOUBLE_TOP", lastHigh2, lastHigh1, b, a, clrOrangeRed, rates);
+      }
+
+      if(lastLow1 >= 0 && lastLow2 >= 0)
+      {
+         int barsGap = MathAbs(lastLow1 - lastLow2);
+         double a = rates[lastLow1].low;
+         double b = rates[lastLow2].low;
+         if(barsGap <= SIDOMaxBarsBetweenSwings && MathAbs(a - b) <= tol)
+            SMC_DrawSIDOPatternLine(tag, "DOUBLE_BOTTOM", lastLow2, lastLow1, b, a, clrDeepSkyBlue, rates);
+      }
+   }
+}
+
+string SMC_NormalizeAIDirectionLabel()
+{
+   string sig = g_lastAIAction;
+   StringToUpper(sig);
+   if(sig == "BUY" || sig == "SELL" || sig == "HOLD") return sig;
+   return (StringLen(sig) > 0) ? sig : "OFF";
+}
+
+bool SMC_GetTFBullBias(const ENUM_TIMEFRAMES tf, bool &bullOut)
+{
+   double emaFast = 0.0, emaSlow = 0.0;
+   if(!SMC_CopyEMAValue(_Symbol, tf, 9, emaFast) || !SMC_CopyEMAValue(_Symbol, tf, 21, emaSlow))
+      return false;
+   bullOut = (emaFast > emaSlow && emaFast > 0.0);
+   return true;
+}
+
+// Verdict décisif: M1 + M4 + M5 + H1 + Daily (pondération TF 70% / IA 30%)
+void SMC_ComputeAndStoreFinalVerdict()
+{
+   const double GOOD_THRESHOLD = VerdictThresholdGOOD;
+   const double PERFECT_THRESHOLD = VerdictThresholdPERFECT;
+   const int TF_COUNT = 5;
+
+   double emaM1Fast = 0.0;
+   SMC_CopyEMAValue(_Symbol, PERIOD_M1, 9, emaM1Fast);
+
+   bool bullM1 = false, bullM4 = false, bullM5 = false, bullH1 = false, bullD1 = false;
+   SMC_GetTFBullBias(PERIOD_M1, bullM1);
+   SMC_GetTFBullBias(PERIOD_M4, bullM4);
+   SMC_GetTFBullBias(PERIOD_M5, bullM5);
+   SMC_GetTFBullBias(PERIOD_H1, bullH1);
+   SMC_GetTFBullBias(PERIOD_D1, bullD1);
+
+   g_finalVerdict.bullM1 = bullM1;
+   g_finalVerdict.bullM4 = bullM4;
+   g_finalVerdict.bullM5 = bullM5;
+   g_finalVerdict.bullH1 = bullH1;
+   g_finalVerdict.bullD1 = bullD1;
+   g_finalVerdict.m1EntryLevel = emaM1Fast;
+
+   double emaM30Fast = 0.0;
+   SMC_CopyEMAValue(_Symbol, PERIOD_M30, 9, emaM30Fast);
+   g_finalVerdict.m30EntryLevel = emaM30Fast;
+
+   DrawEntryLevelLines(bullM1, emaM1Fast, "M1");
+   double emaM5Fast = 0.0, emaH1Fast = 0.0;
+   SMC_CopyEMAValue(_Symbol, PERIOD_M5, 9, emaM5Fast);
+   SMC_CopyEMAValue(_Symbol, PERIOD_H1, 9, emaH1Fast);
+   g_finalVerdict.h1EntryLevel = emaH1Fast;
+   if(emaM5Fast > 0.0) DrawEntryLevelLines(bullM5, emaM5Fast, "M5");
+   if(emaM30Fast > 0.0)
+   {
+      bool bullM30 = false;
+      SMC_GetTFBullBias(PERIOD_M30, bullM30);
+      DrawEntryLevelLines(bullM30, emaM30Fast, "M30");
+   }
+   if(emaH1Fast > 0.0) DrawEntryLevelLines(bullH1, emaH1Fast, "H1");
+
+   UpdateM5EntryLevelsAndLines();
+   g_finalVerdict.m5BuyEntryLevel = g_m5BuyEntryLevel;
+   g_finalVerdict.m5SellEntryLevel = g_m5SellEntryLevel;
+   g_finalVerdict.m5BuyActive = g_m5BuyLevelActive;
+   g_finalVerdict.m5SellActive = g_m5SellLevelActive;
+
+   int alignmentCount = (bullM1 ? 1 : 0) + (bullM4 ? 1 : 0) + (bullM5 ? 1 : 0) + (bullH1 ? 1 : 0) + (bullD1 ? 1 : 0);
+   double confluenceScore = (double)alignmentCount / (double)TF_COUNT;
+
    double iaScore = 0.0;
-   if(g_lastAIAction == "BUY")
-      iaScore = g_lastAIConfidence;
-   else if(g_lastAIAction == "SELL")
-      iaScore = -g_lastAIConfidence;
-   // else HOLD = 0
+   string iaDir = SMC_NormalizeAIDirectionLabel();
+   if(iaDir == "BUY")
+      iaScore = NormalizeAIConfidenceUnit();
+   else if(iaDir == "SELL")
+      iaScore = -NormalizeAIConfidenceUnit();
 
-   // Score fusionné (80% confluence, 20% IA)
-   double finalScore = (confluenceScore - 0.5) * 2.0 * 0.8 + iaScore * 0.2;
+   double finalScore = (confluenceScore - 0.5) * 2.0 * 0.70 + iaScore * 0.30;
    finalScore = MathMax(-1.0, MathMin(1.0, finalScore));
+   g_finalVerdict.finalScore = finalScore;
 
-   // Déterminer verdict (5 niveaux)
    string verdict = "WAIT";
-   color verdictBg = 0x424242; // Gris foncé WAIT
-   string verdictIcon = "⏸";
-
+   string direction = "WAIT";
    if(MathAbs(finalScore) < GOOD_THRESHOLD)
    {
       verdict = "WAIT";
-      verdictBg = 0x424242; // Gris
-      verdictIcon = "⏸";
+      direction = "WAIT";
    }
-   else if(finalScore > 0)
+   else if(finalScore > 0.0)
    {
-      if(finalScore >= PERFECT_THRESHOLD)
+      direction = "BUY";
+      verdict = (finalScore >= PERFECT_THRESHOLD) ? "PERFECT BUY" : "GOOD BUY";
+   }
+   else
+   {
+      direction = "SELL";
+      verdict = (finalScore <= -PERFECT_THRESHOLD) ? "PERFECT SELL" : "GOOD SELL";
+   }
+
+   g_finalVerdict.direction = direction;
+   g_finalVerdict.verdictLabel = verdict;
+
+   int dirAligned = 0;
+   if(direction == "BUY")
+   {
+      if(bullM1) dirAligned++;
+      if(bullM4) dirAligned++;
+      if(bullM5) dirAligned++;
+      if(bullH1) dirAligned++;
+      if(bullD1) dirAligned++;
+   }
+   else if(direction == "SELL")
+   {
+      if(!bullM1) dirAligned++;
+      if(!bullM4) dirAligned++;
+      if(!bullM5) dirAligned++;
+      if(!bullH1) dirAligned++;
+      if(!bullD1) dirAligned++;
+   }
+
+   double tfAlignPct = (double)dirAligned / (double)TF_COUNT * 100.0;
+   double iaPct = NormalizeAIConfidenceUnit() * 100.0;
+   if(iaPct > 100.0) iaPct = 100.0;
+   if(iaPct < 0.0) iaPct = 0.0;
+
+   bool iaMatchesDir = ((direction == "BUY" && iaDir == "BUY") || (direction == "SELL" && iaDir == "SELL"));
+   double scorePct = MathAbs(finalScore) * 100.0;
+   if(direction == "WAIT")
+      g_finalVerdict.finalConfPct = MathMax(0.0, MathMin(100.0, scorePct));
+   else
+   {
+      double iaPart = iaMatchesDir ? iaPct : iaPct * 0.35;
+      g_finalVerdict.finalConfPct = MathMax(0.0, MathMin(100.0, 0.55 * tfAlignPct + 0.25 * scorePct + 0.20 * iaPart));
+   }
+
+   g_finalVerdict.updated = TimeCurrent();
+}
+
+bool ExecuteVerdictMarketOrder(const string direction, const string entryTf)
+{
+   if(IsInEquilibriumCorrectionZone()) return false;
+   if(ShouldBlockNewTradeDueToDailyCap()) return false;
+   if(!SMC_IsStrictUTCTradingWindowOpen()) return false;
+   if(CountPositionsForSymbol(_Symbol) > 0) return false;
+   if(HasAnyExposureForSymbol(_Symbol)) return false;
+   if(!IsSpreadAcceptable()) return false;
+   if(IsEntryCooldownActive()) return false;
+
+   if(UseAIServer)
+   {
+      if(!IsAISignalFreshForTrading("VERDICT MARKET " + entryTf)) return false;
+      string iaDir = SMC_NormalizeAIDirectionLabel();
+      double minConf = AutoEntryOnVerdictMinConfPct / 100.0;
+      if(iaDir == "HOLD")
       {
-         verdict = "PERFECT BUY";
-         verdictBg = 0x1B5E20; // Vert très foncé
-         verdictIcon = "🚀";
+         if(!SMC_AllowDirectionDespiteAIHold(direction)) return false;
+         if(g_finalVerdict.finalConfPct / 100.0 + 1e-6 < minConf) return false;
       }
       else
       {
-         verdict = "GOOD BUY";
-         verdictBg = 0x2E7D32; // Vert moyen
-         verdictIcon = "📈";
+         if(iaDir != direction) return false;
+         if(!IsAIConfidenceAtLeast(minConf, "VERDICT MARKET " + entryTf)) return false;
       }
    }
-   else if(finalScore < 0)
+
+   if(!IsBoomCrashDirectionAllowedByIA(_Symbol, direction)) return false;
+   if(!CanOpenAdditionalPositionForSymbol(_Symbol, direction)) return false;
+   if(!IsLastCandleConfirmingDirection(direction)) return false;
+
+   double atrVal = 0.0;
+   double atrBuf[];
+   ArraySetAsSeries(atrBuf, true);
+   if(atrHandle != INVALID_HANDLE && CopyBuffer(atrHandle, 0, 0, 1, atrBuf) > 0)
+      atrVal = atrBuf[0];
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   if(point <= 0.0) point = 0.0001;
+   if(atrVal <= 0.0) atrVal = point * 50.0;
+
+   double lotSize = GetOptimalLotSize();
+   if(lotSize <= 0.0) return false;
+
+   double price = (direction == "BUY") ? SymbolInfoDouble(_Symbol, SYMBOL_ASK) : SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double stopLoss = 0.0, takeProfit = 0.0;
+   if(direction == "BUY")
    {
-      if(finalScore <= -PERFECT_THRESHOLD)
-      {
-         verdict = "PERFECT SELL";
-         verdictBg = 0xB71C1C; // Rouge très foncé
-         verdictIcon = "🔻";
-      }
-      else
-      {
-         verdict = "GOOD SELL";
-         verdictBg = 0xC62828; // Rouge moyen
-         verdictIcon = "📉";
-      }
+      stopLoss = price - atrVal * SL_ATRMult;
+      takeProfit = price + atrVal * TP_ATRMult;
+   }
+   else
+   {
+      stopLoss = price + atrVal * SL_ATRMult;
+      takeProfit = price - atrVal * TP_ATRMult;
    }
 
-   // Titre dashboard
-   int titleW = cellW * 5 + gap * 4;
-   string titleTxt = verdictIcon + " GOM_SIDO UNIFIED - Score: " + DoubleToString(finalScore, 2);
-   DrawDashboardCell("SMC_TITLE", x0, y0, titleW, cellH - 5, "", titleTxt, 0x1a1a1a);
+   ValidateAndAdjustStopLossTakeProfit(direction, price, stopLoss, takeProfit);
+   EnforceMinBoomCrashStopLossDollarRisk(_Symbol, direction, price, lotSize, stopLoss);
+   stopLoss = NormalizeDouble(stopLoss, _Digits);
+   takeProfit = NormalizeDouble(takeProfit, _Digits);
 
-   // Row 1: M1 | M5 | H1 | IA CONF | VERDICT
-   int yRow1 = y0 + cellH;
+   MqlTradeRequest request = {};
+   MqlTradeResult result = {};
+   request.action = TRADE_ACTION_DEAL;
+   request.symbol = _Symbol;
+   request.volume = lotSize;
+   request.type = (direction == "BUY") ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+   request.price = price;
+   request.sl = stopLoss;
+   request.tp = takeProfit;
+   request.deviation = 10;
+   request.magic = InpMagicNumber;
+   request.comment = "VERDICT_" + g_finalVerdict.verdictLabel + "_" + entryTf;
 
-   string m1Text = "M1\n" + (bullM1 ? "🟢 BUY" : "🔴 SELL");
-   color m1Bg = bullM1 ? (color)0x4CAF50 : (color)0xF44336;
-   DrawDashboardCell("SMC_M1", x0, yRow1, cellW, cellH, "", m1Text, m1Bg);
+   if(!IsMinimumProfitPotentialMet(price, takeProfit, direction, lotSize))
+      return false;
 
-   string m5Text = "M5\n" + (bullM5 ? "🟢 BUY" : "🔴 SELL");
-   color m5Bg = bullM5 ? (color)0x4CAF50 : (color)0xF44336;
-   DrawDashboardCell("SMC_M5", x0 + cellW + gap, yRow1, cellW, cellH, "", m5Text, m5Bg);
+   if(!OrderSend(request, result) || result.retcode != TRADE_RETCODE_DONE)
+   {
+      Print("❌ VERDICT marché échoué | ", _Symbol, " | ret=", result.retcode);
+      return false;
+   }
 
-   string h1Text = "H1\n" + (bullH1 ? "🟢 BUY" : "🔴 SELL");
-   color h1Bg = bullH1 ? (color)0x4CAF50 : (color)0xF44336;
-   DrawDashboardCell("SMC_H1", x0 + 2*cellW + 2*gap, yRow1, cellW, cellH, "", h1Text, h1Bg);
+   g_lastEntryTimeForSymbol = TimeCurrent();
+   RegisterBoomCrashMarketEntry();
 
-   string iaConfText = "IA CONF\n" + DoubleToString(g_lastAIConfidence * 100, 0) + "%";
-   color iaConfBg = (g_lastAIConfidence >= 0.7) ? (color)0x1976D2 : (color)0x616161;
-   DrawDashboardCell("SMC_IACONF", x0 + 3*cellW + 3*gap, yRow1, cellW, cellH, "", iaConfText, iaConfBg);
+   Print("🎯 VERDICT MARCHÉ — ", g_finalVerdict.verdictLabel, " ", direction,
+         " @ ", entryTf, " | conf ", DoubleToString(g_finalVerdict.finalConfPct, 1),
+         "% | SL=", DoubleToString(stopLoss, _Digits),
+         " TP=", DoubleToString(takeProfit, _Digits));
+   g_lastVerdictAutoEntryTime = TimeCurrent();
+   return true;
+}
 
-   string verdictText = verdict + "\n" + DoubleToString(MathAbs(finalScore), 2);
-   DrawDashboardCell("SMC_VERDICT", x0 + 4*cellW + 4*gap, yRow1, cellW, cellH, "", verdictText, verdictBg);
+void CheckAndExecuteVerdictAutoEntry()
+{
+   if(!EnableAutoEntryOnStrongVerdict) return;
+   if(!VerdictAutoMarketOnGoodPerfect) return;
+   if(ShouldBlockNewTradeDueToDailyCap()) return;
+   if(!SMC_IsStrictUTCTradingWindowOpen()) return;
+   if(g_finalVerdict.updated <= 0) return;
+
+   if(!SMC_IsGoodOrPerfectVerdict()) return;
+   if(g_finalVerdict.direction != "BUY" && g_finalVerdict.direction != "SELL") return;
+   if(g_finalVerdict.finalConfPct + 1e-6 < AutoEntryOnVerdictMinConfPct) return;
+
+   if(TimeCurrent() - g_lastVerdictAutoEntryTime < VerdictAutoEntryCooldownSec) return;
+   if(CountPositionsForSymbol(_Symbol) > 0) return;
+   if(HasAnyExposureForSymbol(_Symbol)) return;
+
+   double entryLvl = 0.0;
+   string entryTf = "";
+   if(!SMC_PickVerdictEntryLevel(g_finalVerdict.direction, entryLvl, entryTf))
+      return;
+
+   ExecuteVerdictMarketOrder(g_finalVerdict.direction, entryTf);
+}
+
+// Un seul BUY_LIMIT ou SELL_LIMIT par symbole sur le niveau d'entrée du verdict fort
+void ManageVerdictEntryLimitOrder()
+{
+   if(!EnableVerdictEntryLimit) return;
+   if(ShouldBlockNewTradeDueToDailyCap()) return;
+   if(!SMC_IsStrictUTCTradingWindowOpen()) return;
+   if(CountPositionsForSymbol(_Symbol) > 0) return;
+   if(HasAnyExposureForSymbol(_Symbol)) return;
+
+   datetime now = TimeCurrent();
+   if(now - g_lastVerdictLimitManageTime < VerdictLimitRefreshSec)
+      return;
+   g_lastVerdictLimitManageTime = now;
+
+   string dir = g_finalVerdict.direction;
+   if(!SMC_VerdictStrongEnoughForEntry())
+   {
+      for(int j = OrdersTotal() - 1; j >= 0; j--)
+      {
+         ulong t = OrderGetTicket(j);
+         if(t == 0 || !OrderSelect(t)) continue;
+         if(OrderGetInteger(ORDER_MAGIC) != InpMagicNumber) continue;
+         if(OrderGetString(ORDER_SYMBOL) != _Symbol) continue;
+         string c = OrderGetString(ORDER_COMMENT);
+         if(StringFind(c, "SMC_VERDICT_LIMIT") < 0) continue;
+         MqlTradeRequest rq = {};
+         MqlTradeResult rs = {};
+         rq.action = TRADE_ACTION_REMOVE;
+         rq.order = t;
+         rq.symbol = _Symbol;
+         OrderSend(rq, rs);
+      }
+      return;
+   }
+
+   if(UseAIServer)
+   {
+      if(!IsAISignalFreshForTrading("VERDICT LIMIT")) return;
+      string ia = SMC_NormalizeAIDirectionLabel();
+      if(ia == "HOLD")
+      {
+         if(!AllowTradeWhenAIHoldIfVerdictStrong) return;
+      }
+      else if(ia != "OFF" && ia != dir)
+         return;
+   }
+
+   if(!IsBoomCrashDirectionAllowedByIA(_Symbol, dir)) return;
+   if(!IsSpreadAcceptable()) return;
+
+   double entry = 0.0;
+   ENUM_ORDER_TYPE orderType = ORDER_TYPE_BUY_LIMIT;
+   if(dir == "BUY")
+   {
+      orderType = ORDER_TYPE_BUY_LIMIT;
+      if(AutoEntryPreferM5OverM1 && g_finalVerdict.m5BuyActive && g_finalVerdict.m5BuyEntryLevel > 0.0)
+         entry = g_finalVerdict.m5BuyEntryLevel;
+      else if(g_finalVerdict.m1EntryLevel > 0.0)
+         entry = g_finalVerdict.m1EntryLevel;
+      else if(g_finalVerdict.m5BuyEntryLevel > 0.0)
+         entry = g_finalVerdict.m5BuyEntryLevel;
+      else
+         return;
+   }
+   else if(dir == "SELL")
+   {
+      orderType = ORDER_TYPE_SELL_LIMIT;
+      if(AutoEntryPreferM5OverM1 && g_finalVerdict.m5SellActive && g_finalVerdict.m5SellEntryLevel > 0.0)
+         entry = g_finalVerdict.m5SellEntryLevel;
+      else if(g_finalVerdict.m1EntryLevel > 0.0)
+         entry = g_finalVerdict.m1EntryLevel;
+      else if(g_finalVerdict.m5SellEntryLevel > 0.0)
+         entry = g_finalVerdict.m5SellEntryLevel;
+      else
+         return;
+   }
+   else
+      return;
+
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   if(point <= 0.0) point = 0.0001;
+
+   ulong keepTicket = 0;
+   double keepPrice = 0.0;
+   ENUM_ORDER_TYPE keepType = orderType;
+   for(int i = OrdersTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = OrderGetTicket(i);
+      if(ticket == 0 || !OrderSelect(ticket)) continue;
+      if(OrderGetInteger(ORDER_MAGIC) != InpMagicNumber) continue;
+      if(OrderGetString(ORDER_SYMBOL) != _Symbol) continue;
+      ENUM_ORDER_TYPE t = (ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE);
+      if(t != ORDER_TYPE_BUY_LIMIT && t != ORDER_TYPE_SELL_LIMIT) continue;
+      string cmt = OrderGetString(ORDER_COMMENT);
+      if(StringFind(cmt, "SMC_VERDICT_LIMIT") < 0) continue;
+      keepTicket = ticket;
+      keepPrice = OrderGetDouble(ORDER_PRICE_OPEN);
+      keepType = t;
+      break;
+   }
+
+   if(keepTicket > 0)
+   {
+      if(keepType == orderType && MathAbs(keepPrice - entry) <= point * 3.0)
+         return;
+      MqlTradeRequest rem = {};
+      MqlTradeResult remr = {};
+      rem.action = TRADE_ACTION_REMOVE;
+      rem.order = keepTicket;
+      rem.symbol = _Symbol;
+      if(!OrderSend(rem, remr))
+         return;
+   }
+
+   if(CountOpenLimitOrdersForSymbol(_Symbol) >= 1)
+      CancelAllPendingLimitOrdersForSymbol(_Symbol);
+
+   double atrVal = 0.0;
+   double atrBuf[];
+   ArraySetAsSeries(atrBuf, true);
+   if(atrHandle != INVALID_HANDLE && CopyBuffer(atrHandle, 0, 0, 1, atrBuf) > 0)
+      atrVal = atrBuf[0];
+   if(atrVal <= 0.0)
+      atrVal = point * 100.0;
+
+   double sl = 0.0, tp = 0.0;
+   if(orderType == ORDER_TYPE_BUY_LIMIT)
+   {
+      sl = entry - atrVal * SL_ATRMult;
+      tp = entry + atrVal * TP_ATRMult;
+   }
+   else
+   {
+      sl = entry + atrVal * SL_ATRMult;
+      tp = entry - atrVal * TP_ATRMult;
+   }
+
+   MqlTradeRequest req = {};
+   MqlTradeResult res = {};
+   req.action = TRADE_ACTION_PENDING;
+   req.symbol = _Symbol;
+   req.volume = GetOptimalLotSize();
+   if(req.volume <= 0.0) return;
+   req.type = orderType;
+   req.price = entry;
+   req.sl = sl;
+   req.tp = tp;
+   req.magic = InpMagicNumber;
+   req.comment = "SMC_VERDICT_LIMIT " + dir;
+
+   if(!ValidateAndAdjustLimitPrice(req.price, req.sl, req.tp, orderType))
+      return;
+
+   if(OrderSend(req, res))
+   {
+      if(SMC_LogThrottle("verdict_limit_ok_" + _Symbol, 90))
+         Print("📌 LIMIT verdict ", dir, " @ ", DoubleToString(req.price, _Digits),
+               " | conf ", DoubleToString(g_finalVerdict.finalConfPct, 1), "% | ", _Symbol);
+   }
+}
+
+//+------------------------------------------------------------------+
+//| DASHBOARD GOM_SIDO - bandeau horizontal bas (style GOM_KOLA_SIDO)
+//+------------------------------------------------------------------+
+void DisplayMTFDashboard()
+{
+   if(!ShowBottomDashboard)
+   {
+      string mtfIds[] = {"SMC_MTF_M1", "SMC_MTF_M4", "SMC_MTF_M5", "SMC_MTF_H1", "SMC_MTF_D1",
+                         "SMC_MTF_IA", "SMC_MTF_VERDICT"};
+      for(int d = 0; d < ArraySize(mtfIds); d++)
+      {
+         ObjectDelete(0, mtfIds[d]);
+         ObjectDelete(0, mtfIds[d] + "_TXT");
+      }
+      return;
+   }
+
+   SMC_ComputeAndStoreFinalVerdict();
+
+   if(ShowComprehensiveVerdictPanel)
+      DisplayComprehensiveVerdict(g_finalVerdict.bullM1, g_finalVerdict.bullM5, g_finalVerdict.bullH1);
+   else
+   {
+      string compIds[] = {"COMP_TITLE_FINAL", "COMP_VERDICT_MAIN", "COMP_SCORE_GLOBAL", "COMP_TF_ANALYSIS",
+                          "COMP_IA_VERDICT", "COMP_INDICATORS", "COMP_OB_STATUS", "COMP_POSITIONS", "COMP_WEIGHTS"};
+      for(int c = 0; c < ArraySize(compIds); c++)
+         ObjectDelete(0, compIds[c]);
+   }
+
+   int y0 = MathMax(2, DashboardBottomOffset);
+   int gap = MathMax(2, DashboardCellGap);
+   int cellH = MathMax(22, DashboardVerdictCellHeight);
+   int chartPixW = (int)ChartGetInteger(0, CHART_WIDTH_IN_PIXELS);
+   if(chartPixW < 200) chartPixW = 1200;
+   int mL = MathMax(2, DashboardBarMarginLeft);
+   int mR = MathMax(6, DashboardBarMarginRight);
+   const int cols = 7;
+   int barInnerW = chartPixW - mL - mR;
+   if(barInnerW < cols * 28) barInnerW = cols * 28;
+   int cellW = (barInnerW - (cols - 1) * gap) / cols;
+   if(cellW < 28) cellW = 28;
+   int xBar = mL;
+
+   string iaDir = SMC_NormalizeAIDirectionLabel();
+   double iaPct = NormalizeAIConfidenceUnit() * 100.0;
+   if(iaPct > 100.0) iaPct = 100.0;
+   if(iaPct < 0.0) iaPct = 0.0;
+
+   string m1Text = "M1:" + (g_finalVerdict.bullM1 ? "BUY" : "SELL");
+   string m4Text = "M4:" + (g_finalVerdict.bullM4 ? "BUY" : "SELL");
+   string m5Text = "M5:" + (g_finalVerdict.bullM5 ? "BUY" : "SELL");
+   string h1Text = "H1:" + (g_finalVerdict.bullH1 ? "BUY" : "SELL");
+   string d1Text = "D1:" + (g_finalVerdict.bullD1 ? "BUY" : "SELL");
+   string iaText = iaDir + " " + DoubleToString(iaPct, 0) + "%";
+   string verdictText = g_finalVerdict.verdictLabel + " " + DoubleToString(g_finalVerdict.finalConfPct, 0) + "%";
+
+   color m1Bg = g_finalVerdict.bullM1 ? (color)0x26A69A : (color)0xEF5350;
+   color m4Bg = g_finalVerdict.bullM4 ? (color)0x26A69A : (color)0xEF5350;
+   color m5Bg = g_finalVerdict.bullM5 ? (color)0x26A69A : (color)0xEF5350;
+   color h1Bg = g_finalVerdict.bullH1 ? (color)0x26A69A : (color)0xEF5350;
+   color d1Bg = g_finalVerdict.bullD1 ? (color)0x26A69A : (color)0xEF5350;
+   color iaBg = (color)0x616161;
+   if(iaDir == "BUY") iaBg = (color)0x1976D2;
+   else if(iaDir == "SELL") iaBg = (color)0xC62828;
+   else if(iaDir == "HOLD") iaBg = (color)0x757575;
+
+   color verdictBg = 0x424242;
+   if(g_finalVerdict.direction == "BUY")
+      verdictBg = (StringFind(g_finalVerdict.verdictLabel, "PERFECT") >= 0) ? (color)0x1B5E20 : (color)0x2E7D32;
+   else if(g_finalVerdict.direction == "SELL")
+      verdictBg = (StringFind(g_finalVerdict.verdictLabel, "PERFECT") >= 0) ? (color)0xB71C1C : (color)0xC62828;
+
+   DrawDashboardCell("SMC_MTF_M1", xBar + 0 * (cellW + gap), y0, cellW, cellH, m1Text, m1Bg);
+   DrawDashboardCell("SMC_MTF_M4", xBar + 1 * (cellW + gap), y0, cellW, cellH, m4Text, m4Bg);
+   DrawDashboardCell("SMC_MTF_M5", xBar + 2 * (cellW + gap), y0, cellW, cellH, m5Text, m5Bg);
+   DrawDashboardCell("SMC_MTF_H1", xBar + 3 * (cellW + gap), y0, cellW, cellH, h1Text, h1Bg);
+   DrawDashboardCell("SMC_MTF_D1", xBar + 4 * (cellW + gap), y0, cellW, cellH, d1Text, d1Bg);
+   DrawDashboardCell("SMC_MTF_IA", xBar + 5 * (cellW + gap), y0, cellW, cellH, iaText, iaBg);
+   DrawDashboardCell("SMC_MTF_VERDICT", xBar + 6 * (cellW + gap), y0, cellW, cellH, verdictText, verdictBg);
 
    ChartRedraw(0);
 }
 
-//+------------------------------------------------------------------+
-//| Helper: Dessiner cellule avec fond coloré (OBJ_RECTANGLE_LABEL)
-//+------------------------------------------------------------------+
-void DrawDashboardCell(string name, int x, int y, int w, int h, string label, string value, color bg)
+void DrawDashboardCell(string name, int x, int y, int w, int h, string text, color bg)
 {
-   if(ObjectFind(0, name) >= 0) ObjectDelete(0, name);
-
-   // Créer rectangle de fond
-   ObjectCreate(0, name, OBJ_RECTANGLE_LABEL, 0, 0, 0);
+   string txtName = name + "_TXT";
+   if(ObjectFind(0, name) < 0)
+      ObjectCreate(0, name, OBJ_RECTANGLE_LABEL, 0, 0, 0);
+   ObjectSetInteger(0, name, OBJPROP_CORNER, CORNER_LEFT_LOWER);
    ObjectSetInteger(0, name, OBJPROP_XDISTANCE, x);
    ObjectSetInteger(0, name, OBJPROP_YDISTANCE, y);
    ObjectSetInteger(0, name, OBJPROP_XSIZE, w);
@@ -25606,28 +26428,27 @@ void DrawDashboardCell(string name, int x, int y, int w, int h, string label, st
    ObjectSetInteger(0, name, OBJPROP_BGCOLOR, bg);
    ObjectSetInteger(0, name, OBJPROP_BORDER_TYPE, BORDER_FLAT);
    ObjectSetInteger(0, name, OBJPROP_BORDER_COLOR, 0x222222);
+   ObjectSetInteger(0, name, OBJPROP_BACK, false);
    ObjectSetInteger(0, name, OBJPROP_ZORDER, 520);
 
-   // Créer label texte par-dessus
-   string textName = name + "_TXT";
-   if(ObjectFind(0, textName) >= 0) ObjectDelete(0, textName);
-
-   ObjectCreate(0, textName, OBJ_LABEL, 0, 0, 0);
-   ObjectSetInteger(0, textName, OBJPROP_XDISTANCE, x + 5);
-   ObjectSetInteger(0, textName, OBJPROP_YDISTANCE, y + 2);
-   ObjectSetInteger(0, textName, OBJPROP_ZORDER, 521);
-
-   string txt = (StringLen(label) > 0) ? (label + "\n" + value) : value;
-   ObjectSetString(0, textName, OBJPROP_TEXT, txt);
-   ObjectSetInteger(0, textName, OBJPROP_FONTSIZE, 8);
-   ObjectSetString(0, textName, OBJPROP_FONT, "Arial");
-   ObjectSetInteger(0, textName, OBJPROP_COLOR, clrWhite);
+   if(ObjectFind(0, txtName) < 0)
+      ObjectCreate(0, txtName, OBJ_LABEL, 0, 0, 0);
+   ObjectSetInteger(0, txtName, OBJPROP_CORNER, CORNER_LEFT_LOWER);
+   ObjectSetInteger(0, txtName, OBJPROP_ANCHOR, ANCHOR_CENTER);
+   ObjectSetInteger(0, txtName, OBJPROP_XDISTANCE, x + w / 2);
+   ObjectSetInteger(0, txtName, OBJPROP_YDISTANCE, y + h / 2);
+   ObjectSetString(0, txtName, OBJPROP_TEXT, text);
+   ObjectSetInteger(0, txtName, OBJPROP_FONTSIZE, 8);
+   ObjectSetString(0, txtName, OBJPROP_FONT, "Segoe UI");
+   ObjectSetInteger(0, txtName, OBJPROP_COLOR, clrWhite);
+   ObjectSetInteger(0, txtName, OBJPROP_BACK, false);
+   ObjectSetInteger(0, txtName, OBJPROP_ZORDER, 521);
 }
 
 //+------------------------------------------------------------------+
 //| Affiche les niveaux d'entrée (EMA Fast) pour chaque TF           |
 //+------------------------------------------------------------------+
-void DrawEntryLevelLines(bool isBullish, double emaFast, double emaSlow, string tfLabel)
+void DrawEntryLevelLines(bool isBullish, double emaFast, string tfLabel)
 {
    // Ligne pour EMA Fast (niveau d'entrée principal)
    string lineName = "SMC_EntryLevel_" + tfLabel;
@@ -25636,14 +26457,18 @@ void DrawEntryLevelLines(bool isBullish, double emaFast, double emaSlow, string 
       ObjectDelete(0, lineName);
 
    // Couleur selon direction
-   color lineColor = isBullish ? clrLimeGreen : clrRed;
-   ENUM_LINE_STYLE lineStyle = isBullish ? STYLE_SOLID : STYLE_SOLID;
-   int lineWidth = 2;
+   if(emaFast <= 0.0) return;
 
-   ObjectCreate(0, lineName, OBJ_HLINE, 0, 0, emaFast);
+   color lineColor = isBullish ? clrLimeGreen : clrRed;
+   int lineWidth = (tfLabel == "M5") ? 3 : 2;
+
+   if(ObjectFind(0, lineName) < 0)
+      ObjectCreate(0, lineName, OBJ_HLINE, 0, 0, emaFast);
+   ObjectSetDouble(0, lineName, OBJPROP_PRICE, emaFast);
    ObjectSetInteger(0, lineName, OBJPROP_COLOR, lineColor);
    ObjectSetInteger(0, lineName, OBJPROP_WIDTH, lineWidth);
-   ObjectSetInteger(0, lineName, OBJPROP_STYLE, lineStyle);
+   ObjectSetInteger(0, lineName, OBJPROP_STYLE, STYLE_SOLID);
+   ObjectSetInteger(0, lineName, OBJPROP_BACK, false);
    ObjectSetInteger(0, lineName, OBJPROP_ZORDER, 100 + (tfLabel == "M1" ? 0 : tfLabel == "M5" ? 1 : 2));
 
    // Ajouter label avec TF pour identifier les lignes
@@ -25739,94 +26564,155 @@ void CheckAndExecuteOTEEntry()
 {
    if(g_confirmedOB.direction == 0) return;  // Pas d'OB confirmée
 
-   MqlRates rates[];
-   ArraySetAsSeries(rates, true);
-   if(CopyRates(_Symbol, LTF, 0, 50, rates) < 50) return;
+   double emaM1Fast = iMA(_Symbol, PERIOD_M1, 9, 0, MODE_EMA, PRICE_CLOSE);
+   double emaM5Fast = iMA(_Symbol, PERIOD_M5, 9, 0, MODE_EMA, PRICE_CLOSE);
+   double emaH1Fast = iMA(_Symbol, PERIOD_H1, 9, 0, MODE_EMA, PRICE_CLOSE);
+   double emaM1Slow = iMA(_Symbol, PERIOD_M1, 21, 0, MODE_EMA, PRICE_CLOSE);
+   double emaM5Slow = iMA(_Symbol, PERIOD_M5, 21, 0, MODE_EMA, PRICE_CLOSE);
+   double emaH1Slow = iMA(_Symbol, PERIOD_H1, 21, 0, MODE_EMA, PRICE_CLOSE);
+
+   // Directions par TF
+   bool bullM1 = (emaM1Fast > emaM1Slow);
+   bool bullM5 = (emaM5Fast > emaM5Slow);
+   bool bullH1 = (emaH1Fast > emaH1Slow);
+
+   // Calculer verdict
+   int alignmentCount = (bullM1 ? 1 : 0) + (bullM5 ? 1 : 0) + (bullH1 ? 1 : 0);
+   double confluenceScore = (double)alignmentCount / 3.0;
+   double iaScore = (g_lastAIAction == "BUY") ? g_lastAIConfidence : (g_lastAIAction == "SELL") ? -g_lastAIConfidence : 0.0;
+   double finalScore = (confluenceScore - 0.5) * 2.0 * 0.8 + iaScore * 0.2;
+   finalScore = MathMax(-1.0, MathMin(1.0, finalScore));
 
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
    int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
 
-   // Zones Fibonacci OTE: 61.8% et 78.6% du retracement
+   // Déterminer niveau d'entrée selon le verdict et la direction
+   double limitEntryPrice = 0;
+   bool shouldPlace = false;
+
+   // CONDITIONS POUR PLACER LIMIT ORDER:
+   // BUY: M1/M5 (GOOD/PERFECT) + H1 (BUY/SELL) → Placer LIMIT BUY à EMA M1 Fast
+   // SELL: M1/M5 (GOOD/PERFECT) + H1 (BUY/SELL) → Placer LIMIT SELL à EMA M1 Fast
+
+   if(g_confirmedOB.direction > 0)  // OB Bullish → BUY
+   {
+      // Vérifier: M1 ou M5 en GOOD/PERFECT, H1 donne direction
+      if((bullM1 || bullM5) && (MathAbs(finalScore) >= VerdictThresholdGOOD))
+      {
+         if(bullH1)  // H1 confirme bullish
+         {
+            // Placer LIMIT BUY à EMA M1 Fast
+            limitEntryPrice = emaM1Fast;
+            shouldPlace = true;
+         }
+      }
+   }
+   else if(g_confirmedOB.direction < 0)  // OB Bearish → SELL
+   {
+      // Vérifier: M1 ou M5 en GOOD/PERFECT, H1 donne direction
+      if((!bullM1 || !bullM5) && (MathAbs(finalScore) >= VerdictThresholdGOOD))
+      {
+         if(!bullH1)  // H1 confirme bearish
+         {
+            // Placer LIMIT SELL à EMA M1 Fast
+            limitEntryPrice = emaM1Fast;
+            shouldPlace = true;
+         }
+      }
+   }
+
+   if(!shouldPlace) return;
+
+   // Zones Fibonacci OTE pour validation
    double fibHigh = MathMax(g_confirmedOB.high, g_confirmedOB.low);
    double fibLow = MathMin(g_confirmedOB.high, g_confirmedOB.low);
    double fib618 = fibLow + (fibHigh - fibLow) * 0.618;
    double fib786 = fibLow + (fibHigh - fibLow) * 0.786;
 
-   bool isOTEConfirmed = false;
-   double entryPrice = 0;
-
-   // OTE confirmée: prix dans la zone 61.8%-78.6%
-   if(g_confirmedOB.direction > 0)  // Bullish OB
-   {
-      if(bid >= fib618 && bid <= fib786)
-      {
-         isOTEConfirmed = true;
-         entryPrice = ask;
-      }
-   }
-   else  // Bearish OB
-   {
-      if(bid >= fib618 && bid <= fib786)
-      {
-         isOTEConfirmed = true;
-         entryPrice = bid;
-      }
-   }
-
-   if(!isOTEConfirmed) return;
-
-   // --- POSITION ENTRY ---
+   // Calculer SL/TP
    double sl, tp1, tp2, tp3;
-   double riskPips = 20;  // Risk en pips
-   double riskDollars = 10;  // Risk en dollars
+   double riskPips = 20;
 
    if(g_confirmedOB.direction > 0)  // BUY
    {
       sl = g_confirmedOB.low - riskPips * point;
       double atr = iATR(_Symbol, LTF, 14);
-      tp1 = entryPrice + atr * 0.5;
-      tp2 = entryPrice + atr * 1.0;
-      tp3 = entryPrice + atr * 1.5;
+      tp1 = limitEntryPrice + atr * 0.5;
+      tp2 = limitEntryPrice + atr * 1.0;
+      tp3 = limitEntryPrice + atr * 1.5;
 
+      // Placer LIMIT BUY à EMA M1 Fast
       double lotSize = GetOptimalLotSize();
-      if(trade.Buy(lotSize, _Symbol, ask, sl, tp1, "OTE BUY Setup | TP1"))
+      MqlTradeRequest request;
+      MqlTradeResult result;
+      ZeroMemory(request);
+      request.action = TRADE_ACTION_PENDING;
+      request.type = ORDER_TYPE_BUY_LIMIT;
+      request.symbol = _Symbol;
+      request.volume = lotSize;
+      request.price = limitEntryPrice;
+      request.sl = sl;
+      request.tp = tp1;
+      request.comment = "LIMIT BUY @ EMA M1 | OB+OTE Setup";
+      request.type_filling = ORDER_FILLING_IOC;
+
+      if(OrderSend(request, result))
       {
-         Print("✅ OTE BUY Entry | Entry: ", DoubleToString(entryPrice, digits),
+         Print("✅ LIMIT BUY Order Placed | Level: ", DoubleToString(limitEntryPrice, digits),
                " | SL: ", DoubleToString(sl, digits),
                " | TP1: ", DoubleToString(tp1, digits),
                " | TP2: ", DoubleToString(tp2, digits),
                " | TP3: ", DoubleToString(tp3, digits));
-
-         // Sauvegarder les niveaux pour gestion multi-TP
          g_lastTP2 = tp2;
          g_lastTP3 = tp3;
+      }
+      else
+      {
+         Print("❌ LIMIT BUY Failed: ", GetLastError());
       }
    }
    else  // SELL
    {
       sl = g_confirmedOB.high + riskPips * point;
       double atr = iATR(_Symbol, LTF, 14);
-      tp1 = entryPrice - atr * 0.5;
-      tp2 = entryPrice - atr * 1.0;
-      tp3 = entryPrice - atr * 1.5;
+      tp1 = limitEntryPrice - atr * 0.5;
+      tp2 = limitEntryPrice - atr * 1.0;
+      tp3 = limitEntryPrice - atr * 1.5;
 
+      // Placer LIMIT SELL à EMA M1 Fast
       double lotSize = GetOptimalLotSize();
-      if(trade.Sell(lotSize, _Symbol, bid, sl, tp1, "OTE SELL Setup | TP1"))
+      MqlTradeRequest request;
+      MqlTradeResult result;
+      ZeroMemory(request);
+      request.action = TRADE_ACTION_PENDING;
+      request.type = ORDER_TYPE_SELL_LIMIT;
+      request.symbol = _Symbol;
+      request.volume = lotSize;
+      request.price = limitEntryPrice;
+      request.sl = sl;
+      request.tp = tp1;
+      request.comment = "LIMIT SELL @ EMA M1 | OB+OTE Setup";
+      request.type_filling = ORDER_FILLING_IOC;
+
+      if(OrderSend(request, result))
       {
-         Print("✅ OTE SELL Entry | Entry: ", DoubleToString(entryPrice, digits),
+         Print("✅ LIMIT SELL Order Placed | Level: ", DoubleToString(limitEntryPrice, digits),
                " | SL: ", DoubleToString(sl, digits),
                " | TP1: ", DoubleToString(tp1, digits),
                " | TP2: ", DoubleToString(tp2, digits),
                " | TP3: ", DoubleToString(tp3, digits));
-
          g_lastTP2 = tp2;
          g_lastTP3 = tp3;
       }
+      else
+      {
+         Print("❌ LIMIT SELL Failed: ", GetLastError());
+      }
    }
 
-   // Réinitialiser après entrée
+   // Réinitialiser après placement
    g_confirmedOB.direction = 0;
 }
 
