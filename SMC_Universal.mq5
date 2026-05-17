@@ -332,6 +332,7 @@ void DrawFVGOnChart();
 void DrawFibonacciOnChart();
 void DrawConfirmedOBWithCHOCH();
 void CheckAndExecuteOTEEntry();
+void DisplayComprehensiveVerdict(bool bullM1, bool bullM5, bool bullH1);
 bool GetChartSwingHighLowForFibo(double &swingHighOut, double &swingLowOut);
 bool PriceLevelInFiboOTEZone(const string direction, double price, double swingHigh, double swingLow);
 bool IsStrongOTEFVGConfluence(double price, string direction);
@@ -25496,6 +25497,9 @@ void DisplayMTFDashboard()
    DrawEntryLevelLines(bullM5, emaM5Fast, emaM5Slow, "M5");
    DrawEntryLevelLines(bullH1, emaH1Fast, emaH1Slow, "H1");
 
+   // Afficher le tableau de bord décisif complet à bas-droite
+   DisplayComprehensiveVerdict(bullM1, bullM5, bullH1);
+
    // Compter alignements (0 = bearish, 1 = mixed, 2 = mixed, 3 = bullish)
    int alignmentCount = (bullM1 ? 1 : 0) + (bullM5 ? 1 : 0) + (bullH1 ? 1 : 0);
 
@@ -25824,6 +25828,189 @@ void CheckAndExecuteOTEEntry()
 
    // Réinitialiser après entrée
    g_confirmedOB.direction = 0;
+}
+
+//+------------------------------------------------------------------+
+//| Tableau de bord décisif complet - Bottom-Right (Zone Prédictive)
+//| Affiche l'analyse complète du robot en un seul endroit
+//+------------------------------------------------------------------+
+void DisplayComprehensiveVerdict(bool bullM1, bool bullM5, bool bullH1)
+{
+   int cornerX = (int)ChartGetInteger(0, CHART_WIDTH_IN_PIXELS) - 350;
+   int cornerY = (int)ChartGetInteger(0, CHART_HEIGHT_IN_PIXELS) - 280;
+
+   // Calculer analyse complète
+   int alignmentCount = (bullM1 ? 1 : 0) + (bullM5 ? 1 : 0) + (bullH1 ? 1 : 0);
+   double confluenceScore = (double)alignmentCount / 3.0;
+
+   double iaScore = 0.0;
+   if(g_lastAIAction == "BUY")
+      iaScore = g_lastAIConfidence;
+   else if(g_lastAIAction == "SELL")
+      iaScore = -g_lastAIConfidence;
+
+   double finalScore = (confluenceScore - 0.5) * 2.0 * 0.8 + iaScore * 0.2;
+   finalScore = MathMax(-1.0, MathMin(1.0, finalScore));
+
+   // Récupérer indicateurs additionnels
+   double rsi = iRSI(_Symbol, LTF, 14, PRICE_CLOSE);
+   double atr = iATR(_Symbol, LTF, 14);
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double macd = iMACD(_Symbol, LTF, 12, 26, 9, PRICE_CLOSE);
+
+   // Déterminer verdict final
+   string finalVerdict = "";
+   color verdictColor = clrGray;
+
+   if(MathAbs(finalScore) < VerdictThresholdGOOD)
+   {
+      finalVerdict = "⏸ WAIT/HOLD";
+      verdictColor = 0x424242;
+   }
+   else if(finalScore > 0)
+   {
+      if(finalScore >= VerdictThresholdPERFECT)
+      {
+         finalVerdict = "🚀 PERFECT BUY";
+         verdictColor = 0x1B5E20;
+      }
+      else
+      {
+         finalVerdict = "📈 GOOD BUY";
+         verdictColor = 0x2E7D32;
+      }
+   }
+   else
+   {
+      if(finalScore <= -VerdictThresholdPERFECT)
+      {
+         finalVerdict = "🔻 PERFECT SELL";
+         verdictColor = 0xB71C1C;
+      }
+      else
+      {
+         finalVerdict = "📉 GOOD SELL";
+         verdictColor = 0xC62828;
+      }
+   }
+
+   // Titrer: DECISION FINALE
+   string titleName = "COMP_TITLE_FINAL";
+   if(ObjectFind(0, titleName) >= 0) ObjectDelete(0, titleName);
+   ObjectCreate(0, titleName, OBJ_LABEL, 0, 0, 0);
+   ObjectSetInteger(0, titleName, OBJPROP_CORNER, CORNER_RIGHT_LOWER);
+   ObjectSetInteger(0, titleName, OBJPROP_XDISTANCE, 20);
+   ObjectSetInteger(0, titleName, OBJPROP_YDISTANCE, 270);
+   ObjectSetString(0, titleName, OBJPROP_TEXT, "⚙️ DÉCISION FINALE");
+   ObjectSetInteger(0, titleName, OBJPROP_FONTSIZE, 10);
+   ObjectSetString(0, titleName, OBJPROP_FONT, "Arial Black");
+   ObjectSetInteger(0, titleName, OBJPROP_COLOR, clrWhite);
+
+   // Verdict principal (très gros)
+   string verdictName = "COMP_VERDICT_MAIN";
+   if(ObjectFind(0, verdictName) >= 0) ObjectDelete(0, verdictName);
+   ObjectCreate(0, verdictName, OBJ_LABEL, 0, 0, 0);
+   ObjectSetInteger(0, verdictName, OBJPROP_CORNER, CORNER_RIGHT_LOWER);
+   ObjectSetInteger(0, verdictName, OBJPROP_XDISTANCE, 20);
+   ObjectSetInteger(0, verdictName, OBJPROP_YDISTANCE, 240);
+   ObjectSetString(0, verdictName, OBJPROP_TEXT, finalVerdict);
+   ObjectSetInteger(0, verdictName, OBJPROP_FONTSIZE, 14);
+   ObjectSetString(0, verdictName, OBJPROP_FONT, "Arial Black");
+   ObjectSetInteger(0, verdictName, OBJPROP_COLOR, verdictColor);
+
+   // Score global
+   string scoreName = "COMP_SCORE_GLOBAL";
+   if(ObjectFind(0, scoreName) >= 0) ObjectDelete(0, scoreName);
+   ObjectCreate(0, scoreName, OBJ_LABEL, 0, 0, 0);
+   ObjectSetInteger(0, scoreName, OBJPROP_CORNER, CORNER_RIGHT_LOWER);
+   ObjectSetInteger(0, scoreName, OBJPROP_XDISTANCE, 20);
+   ObjectSetInteger(0, scoreName, OBJPROP_YDISTANCE, 220);
+   string scoreText = "Score: " + DoubleToString(finalScore, 3) + " | Align: " + IntegerToString(alignmentCount) + "/3";
+   ObjectSetString(0, scoreName, OBJPROP_TEXT, scoreText);
+   ObjectSetInteger(0, scoreName, OBJPROP_FONTSIZE, 9);
+   ObjectSetString(0, scoreName, OBJPROP_FONT, "Arial");
+   ObjectSetInteger(0, scoreName, OBJPROP_COLOR, clrLightGray);
+
+   // Ligne 1: Timeframe Analysis
+   string tfName = "COMP_TF_ANALYSIS";
+   if(ObjectFind(0, tfName) >= 0) ObjectDelete(0, tfName);
+   ObjectCreate(0, tfName, OBJ_LABEL, 0, 0, 0);
+   ObjectSetInteger(0, tfName, OBJPROP_CORNER, CORNER_RIGHT_LOWER);
+   ObjectSetInteger(0, tfName, OBJPROP_XDISTANCE, 20);
+   ObjectSetInteger(0, tfName, OBJPROP_YDISTANCE, 200);
+   string tfText = "M1:" + (bullM1 ? "↑" : "↓") + " M5:" + (bullM5 ? "↑" : "↓") + " H1:" + (bullH1 ? "↑" : "↓");
+   ObjectSetString(0, tfName, OBJPROP_TEXT, tfText);
+   ObjectSetInteger(0, tfName, OBJPROP_FONTSIZE, 9);
+   ObjectSetString(0, tfName, OBJPROP_FONT, "Arial");
+   ObjectSetInteger(0, tfName, OBJPROP_COLOR, clrLightGray);
+
+   // Ligne 2: IA Verdict
+   string iaName = "COMP_IA_VERDICT";
+   if(ObjectFind(0, iaName) >= 0) ObjectDelete(0, iaName);
+   ObjectCreate(0, iaName, OBJ_LABEL, 0, 0, 0);
+   ObjectSetInteger(0, iaName, OBJPROP_CORNER, CORNER_RIGHT_LOWER);
+   ObjectSetInteger(0, iaName, OBJPROP_XDISTANCE, 20);
+   ObjectSetInteger(0, iaName, OBJPROP_YDISTANCE, 180);
+   string iaText = "IA: " + g_lastAIAction + " (" + DoubleToString(g_lastAIConfidence * 100, 0) + "%)";
+   ObjectSetString(0, iaName, OBJPROP_TEXT, iaText);
+   ObjectSetInteger(0, iaName, OBJPROP_FONTSIZE, 9);
+   ObjectSetString(0, iaName, OBJPROP_FONT, "Arial");
+   ObjectSetInteger(0, iaName, OBJPROP_COLOR, clrLightGray);
+
+   // Ligne 3: Indicateurs techniques
+   string indName = "COMP_INDICATORS";
+   if(ObjectFind(0, indName) >= 0) ObjectDelete(0, indName);
+   ObjectCreate(0, indName, OBJ_LABEL, 0, 0, 0);
+   ObjectSetInteger(0, indName, OBJPROP_CORNER, CORNER_RIGHT_LOWER);
+   ObjectSetInteger(0, indName, OBJPROP_XDISTANCE, 20);
+   ObjectSetInteger(0, indName, OBJPROP_YDISTANCE, 160);
+   string indText = "RSI:" + DoubleToString(rsi, 1) + " ATR:" + DoubleToString(atr, 1);
+   ObjectSetString(0, indName, OBJPROP_TEXT, indText);
+   ObjectSetInteger(0, indName, OBJPROP_FONTSIZE, 9);
+   ObjectSetString(0, indName, OBJPROP_FONT, "Arial");
+   ObjectSetInteger(0, indName, OBJPROP_COLOR, clrLightGray);
+
+   // Ligne 4: OB + OTE Status
+   string obName = "COMP_OB_STATUS";
+   if(ObjectFind(0, obName) >= 0) ObjectDelete(0, obName);
+   ObjectCreate(0, obName, OBJ_LABEL, 0, 0, 0);
+   ObjectSetInteger(0, obName, OBJPROP_CORNER, CORNER_RIGHT_LOWER);
+   ObjectSetInteger(0, obName, OBJPROP_XDISTANCE, 20);
+   ObjectSetInteger(0, obName, OBJPROP_YDISTANCE, 140);
+   string obStatus = (g_confirmedOB.direction != 0) ? "OB✓ OTE:" + (g_confirmedOB.direction > 0 ? "BUY" : "SELL") : "OB: Waiting...";
+   ObjectSetString(0, obName, OBJPROP_TEXT, obStatus);
+   ObjectSetInteger(0, obName, OBJPROP_FONTSIZE, 9);
+   ObjectSetString(0, obName, OBJPROP_FONT, "Arial");
+   ObjectSetInteger(0, obName, OBJPROP_COLOR, clrLightGray);
+
+   // Ligne 5: Position Info
+   string posName = "COMP_POSITIONS";
+   if(ObjectFind(0, posName) >= 0) ObjectDelete(0, posName);
+   ObjectCreate(0, posName, OBJ_LABEL, 0, 0, 0);
+   ObjectSetInteger(0, posName, OBJPROP_CORNER, CORNER_RIGHT_LOWER);
+   ObjectSetInteger(0, posName, OBJPROP_XDISTANCE, 20);
+   ObjectSetInteger(0, posName, OBJPROP_YDISTANCE, 120);
+   int openPos = PositionsTotal();
+   string posText = "Positions: " + IntegerToString(openPos) + " | Price: " + DoubleToString(bid, _Digits);
+   ObjectSetString(0, posName, OBJPROP_TEXT, posText);
+   ObjectSetInteger(0, posName, OBJPROP_FONTSIZE, 9);
+   ObjectSetString(0, posName, OBJPROP_FONT, "Arial");
+   ObjectSetInteger(0, posName, OBJPROP_COLOR, clrLightGray);
+
+   // Ligne 6: Analysis Weightings
+   string weightName = "COMP_WEIGHTS";
+   if(ObjectFind(0, weightName) >= 0) ObjectDelete(0, weightName);
+   ObjectCreate(0, weightName, OBJ_LABEL, 0, 0, 0);
+   ObjectSetInteger(0, weightName, OBJPROP_CORNER, CORNER_RIGHT_LOWER);
+   ObjectSetInteger(0, weightName, OBJPROP_XDISTANCE, 20);
+   ObjectSetInteger(0, weightName, OBJPROP_YDISTANCE, 100);
+   string weightText = "📊 80% Confluence + 20% IA";
+   ObjectSetString(0, weightName, OBJPROP_TEXT, weightText);
+   ObjectSetInteger(0, weightName, OBJPROP_FONTSIZE, 8);
+   ObjectSetString(0, weightName, OBJPROP_FONT, "Arial");
+   ObjectSetInteger(0, weightName, OBJPROP_COLOR, 0xFFC107);
+
+   ChartRedraw(0);
 }
 
 //| END OF PROGRAM                                                  |
