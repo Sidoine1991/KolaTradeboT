@@ -2,7 +2,6 @@
 //| Robot Smart Money Concepts - UN SEUL ROBOT multi-actifs + IA      |
 //| Boom/Crash | Volatility | Forex | Commodities | Metals           |
 //| FVG | OB | BOS | LS | OTE | EQH/EQL | P/D | LO/NYO              |
-//| IA cloud (défaut): https://kolatradebot-7ofl.onrender.com → input AI_ServerRender ; WebRequest MT5: autoriser cette URL + http://127.0.0.1:8000 |
 #property copyright "TradBOT SMC"
 #property version   "1.00"
 #property strict
@@ -12,5982 +11,7 @@
 #include <Trade/OrderInfo.mqh>
 #include <Trade/DealInfo.mqh>
 #include <Trade/HistoryOrderInfo.mqh>
-// #include "SMC_OpportunityScanner.mqh"  // DISABLED: File not found - COpportunityScanner class undefined
-// Dashboard ML : métriques broker dans GOM_Enhanced_Dashboard.mqh ; PushEaResumeClockForMLDashboard() publie EA_DASH_* / ROBOT_* depuis cet EA
-// #include "GOM_Enhanced_Dashboard.mqh"  // DISABLED: Fix compilation errors first
-// #include "AssetStrategy.mqh"  // DISABLED: File not found
-// #include "ML_DataCollector.mqh"  // DISABLED: Fix compilation errors first
-// #include "ML_Scanner.mqh"  // DISABLED: Fix compilation errors first
-// Dashboard sync - Récupère signaux ML et envoie infos EA (TODO: activer après fix compilation)
-// #include "EA_Dashboard_Sync.mqh"
 // #include "SMC_Setups_Display.mqh" // Désactivé pour éviter l'erreur de fichier non trouvé
-// NOTE: SMC_SniperModules intégré directement (voir fin du fichier)
-// --- GOM_KOLA_SIDO merged (no separate mqh for MT5) ---
-// Intégré dans SMC_Universal.mq5 (plus besoin d'exécuter le script sur le graphique)
-#ifndef GOM_KOLA_SIDO_CORE_MQH
-#define GOM_KOLA_SIDO_CORE_MQH
-
-// Trade.mqh déjà inclus par SMC_Universal.mq5
-
-input group "SCANNER MULTI-SYMBOLES TEMPS RÉEL"
-input bool   EnableOpportunityScanner = false;    // ❌ DÉSACTIVÉ — SMC_OpportunityScanner.mqh n'existe pas, bloquait les trades
-input string ScannerSymbolsList = "Boom 1000 Index,Crash 1000 Index,EURUSD,XAUUSD";  // ↓ OPTIMISÉ 4 symboles — réduit charge CPU (était 8)
-input int    ScannerRefreshSeconds = 60;           // ↑ OPTIMISÉ 60s — réduit charge CPU (était 30s)
-input int    ScannerPanelX = -250;                 // Position: -250 = bord droit (marge 250px du bord droit)
-input int    ScannerPanelY = -150;                 // Position: -150 = bas (150px du bas) — BAS À DROITE
-input int    ScannerPanelWidth = 240;              // Largeur réduite du scanner (ne bloque pas le dashboard)
-input int    ScannerRowHeight = 20;                // Hauteur des lignes (compact)
-input bool   ScannerPanelAnchorRight = true;       // Ancrer au bord droit ✅
-input bool   ScannerShowPanel = true;              // RÉACTIVÉ - Affichage minimal en bas à droite (pas de chevauchement)
-
-input group "TRADING AUTOMATIQUE (SCANNER)"
-input bool   EnableScannerAutoTrading = false;    // ❌ DÉSACTIVÉ — SMC_OpportunityScanner.mqh n'existe pas, bloquait les trades
-input double AutoTradeMaxRiskDollars = 15.0;       // Risque max par trade = 15$
-input double AutoTradeScalpTpPoints = 80;          // Take Profit scalping (points) — ratio TP/SL = 2.67:1 optimisé
-input double AutoTradeScalpSlPoints = 30;          // Stop Loss scalping (points) — inchangé, bien calibré
-input bool   EnableAutoTrailingStop = true;        // Activer trailing stop automatique
-input double AutoTrailingStopPoints = 15;          // Distance trailing stop (points) — plus serré pour sécuriser vite
-input double AutoTrailingStepPoints = 3;           // Pas de déplacement trailing (points) — plus fin pour suivre le prix
-input int    AutoTradeNotifyIntervalMin = 5;       // Intervalle notifications push (minutes) — plus fréquent pour suivi
-
-input group "TIMEFRAMES"
-input bool ShowM1Levels = false;  // ↓ DÉSACTIVÉ pour performance (analyse M5 suffit)
-input bool ShowM5Levels = true;   // ✅ GARDÉ — timeframe principal
-input bool ShowM15Levels = true;  // ✅ GARDÉ — confirmation MTF
-input bool ShowM30Levels = false; // ✅ DÉSACTIVÉ — charge CPU inutile
-input bool ShowH1Levels = false;  // ↓ DÉSACTIVÉ pour performance (M15 suffit pour tendance)
-input bool ShowH4Levels = false;  // ✅ DÉSACTIVÉ
-input bool ShowD1Levels = false;  // ✅ DÉSACTIVÉ
-input bool ShowW1Levels = false;  // ✅ DÉSACTIVÉ
-
-input group "ALGORITHM (THREE LINE BREAK)"
-input int  LineBreakPeriod = 3;
-input int  MaxBarsToAnalyze = 80; // ↓ OPTIMISÉ 80 barres — réduit calculs (était 120)
-
-input group "TOUCH SYSTEM"
-input bool   EnableTouchDetection = false;  // Désactivé par défaut (charge CPU)
-input double TouchZoneATRPercent = 30.0;    // Augmenté pour plus de sensibilité
-input int    BarsForTouchCount = 150;       // Réduit pour plus de réactivité
-input int    MinLineWidth = 1;
-input int    MaxLineWidth = 5;
-input int    TouchesForMaxWidth = 8;        // Réduit pour plus de précision
-
-input group "PARAMETRES D'AFFICHAGE KOLA"
-input bool  ShowLabels = false;           // Moins d'objets sur le graphique
-input bool  ShowTouchCount = true;
-input int   LabelShiftBars = 3;
-input color BuyLevelColor = clrLimeGreen;
-input color SellLevelColor = clrRed;
-
-input group "MODULE SIDO (FIGURES CHARTISTES)"
-input bool   EnableSIDO = false;            // Figures chartistes : lourd — désactivé par défaut
-input int    SIDOPivotLookback = 3;
-input int    SIDOBarsToAnalyze = 300;
-input int    SIDOMaxBarsBetweenSwings = 80;
-input double SIDOToleranceATRPercent = 35.0;
-input color  SIDODoubleTopColor = clrOrangeRed;
-input color  SIDODoubleBottomColor = clrDeepSkyBlue;
-input bool   ShowSIDOLabels = true;
-input bool   ShowBottomDashboard = true;
-
-input group "DASHBOARD ML AWS RDS"
-input bool   UseEnhancedDashboard = true;       // Activer le tableau de bord ML (stats temps réel depuis AWS)
-input int    DashboardMLPosX = 10;              // Position X (pixels depuis le bord gauche)
-input int    DashboardMLPosY = 30;              // Position Y (pixels depuis le haut)
-input bool   DashboardMLAnchorTop = true;       // Ancrer en haut (true) ou en bas (false)
-input int    DashboardMLCellWidth = 124;        // Largeur des cellules (évite chevauchement)
-input int    DashboardMLCellHeight = 46;        // Hauteur des cellules (+ lignes = tableau plus lisible)
-input int    DashboardMLFontSize = 7;           // Taille police (7=compact lisible, 8=normal)
-input bool   DashboardMLCommentFallback = true; // Secours texte Comment() si bandeaux graphiques masqués
-input int    DrawingsMaxAgeMinutes = 5;        // Purge auto dessins GOM/SMC plus vieux que 5 min (réduit de 120 pour nettoyage agressif)
-
-input bool   GomScriptLiveLabelAnchorRight = true; // Libellé GOM LIVE : à droite pour libérer le coin du dashboard
-input int    GomScriptLiveLabelMarginX = 12;         // Marge depuis le bord gauche ou droit selon l'ancre
-input int    GomScriptLiveLabelY = 118;             // Y depuis le haut
-
-input bool   EnableChartLeftShift = false;      // Décalage chart (désactivé en mode OTE+Fibo léger)
-input bool   EnableChartAutoscroll = true;      // Défilement auto (plus d'objets visibles au fil du prix)
-input double ChartLeftShiftPct = 45.0;          // Largeur zone future augmentée (Shift 45%)
-input bool   ShowPastFutureSeparator = false;   // Zone PASSE / FUTUR + rectangle (désactivé par défaut = graphique plus lisible)
-input int    FutureZoneBars = 40;               
-input color  FutureZoneFillColor = 0x121212;    // Gris très foncé (presque noir) pour discrétion
-input int    DashboardBottomOffset = 25;
-input int    DashboardLeftOffset = 10;
-
-input group "═════════════════════════ SNIPER MODULES (Fusion Liquidity + Radar) ════════════════"
-input bool   EnableLiquiditySniperModule = true;   // ✅ Détecte sweeps sur BSL/SSL
-input int    LS_LookbackBars = 50;                 // Barres pour détecter niveaux
-input double LS_EqualPips = 3.0;                   // Tolérance equal highs/lows
-input int    LS_MinTouches = 2;                    // Touches min pour valider niveau
-input bool   EnableSniperRadarModule = true;       // ✅ Détecte BOS/MSS + confluence
-input int    SR_SwingLookback = 30;                // Lookback swing points
-input ENUM_TIMEFRAMES SR_HTF = PERIOD_H1;          // Timeframe biais (HTF)
-input bool   ShowSniperGraphics = true;            // Afficher niveaux sweeps + confluence
-input bool   DebugSniperModules = false;           // Logs détaillés Sniper modules
-input int    DashboardNudgeLeftPx = 56;
-input int    DashboardTopRowShiftRightPx = 130; 
-input int    DashboardTopRowExtraGap = 1;       // Espace très fin
-input int    DashboardFontSize = 9;             // Parfait pour la taille de cellule
-input int    DashboardStripFontDelta = 0;  
-input color  DashboardTextColor = clrWhite;
-input int    DashboardCellWidth = 100;          
-input int    DashboardCellHeight = 30;          // Hauteur TradingView
-input int    DashboardCellGap = 1;              // Grille très serrée comme TV
-input int    DashboardMetaRowHeight = 30;
-input int    DashboardSummaryCellWidth = 280; 
-input int    DashboardVerdictExtraWidth = 100; 
-input int    DashboardVerdictRowHeight = 30;    
-input bool   DashboardTvFullWidthBar = true;    
-input int    DashboardBarMarginLeft = 8;       
-input int    DashboardBarMarginRight = 8;      
-input color  DashboardCellBorderColor = 0x303030; // Bordure Grid TV
-input int    DashboardLabelZOrder = 520;       
-input color  DashboardVerdictBorderColor = 0x303030;
-input bool   ShowDashboardBackgroundBand = true;  
-input double DashboardVolOnMinAtrPct = 0.06; 
-input double DashboardAtrOkMinAtrPct = 0.04;   
-input string DashboardScriptVersion = "GOM v1.3";
-input bool   ShowM1Forecast500Strip = false;    // Bandeau projection M1×500
-input bool   ShowM1Forecast500ChartOverlay = false; 
-input int    M1ForecastChartBarsDraw = 80;    
-input bool   M1ForecastForceChartShift = true; 
-input double M1ForecastChartShiftPct = 25.0;   
-input int    M1ForecastRegressionBars = 200; 
-input double M1ForecastMaxAbsPct = 35.0;    
-input bool   DashboardCompactVerdictOnly = true; // Bandeau compact 2 rangées (verdict+MTF | méta)
-input bool   DashboardCompactSpanChartWidth = true; // compact : occuper la largeur utile du graphique (marges L/R)
-input int    DashboardCompactBottomMetaHeight = 21; // hauteur rangée basse (synthèse texte)
-input int    DashboardCompactWidth = 450;        
-input bool   DashboardIndicatorsAnchorBottomRight = true; 
-input bool   DashboardCompactAnchorBottomRight = true;     
-input int    DashboardSecondaryRightMargin = 15;          
-input bool   ShowDashboardExtraIndicators = false; // Bandeau secondaire VOL/ATR (désactivé = moins chargé)
-input bool   EnableSpikePrediction = true;
-input int    SpikeLookbackBarsM1 = 20;          // Réduit pour plus de réactivité
-input double SpikeAlertMinProbability = 0.65;   // ↑ PLUS STRICT pour capital 20$ (moins d'alertes = meilleure qualité)
-input double SpikeBypassMinProbability = 0.60; // Seuil bypass relevé — uniquement sur spikes très probables
-input double SpikeBlinkMinProbability = 0.55;  // Alerte précoce — relevé pour réduire le bruit
-input double SpikeBlinkLeadThAdjMax = 0.12;    // Fenêtre lead — réduit (moins d'entrées prématurées avec capital petit)
-input bool   SpikeModeBypassStrict = false;     // false = ne pas assouplir les verrous pendant spike (protège capital)
-input bool   EnableDoubleSpikeCapture = true;   // sur S/R M5-M15-H1: garder la position pour capter un 2e spike proche
-input int    DoubleSpikeWindowBars = 1;         // Fenêtre 2e spike plus étroite
-input double DoubleSpikeNearLevelAtr = 0.55;    // Proximité niveau (plus bas = plus strict)
-input double DoubleSpikeMinProb = 0.60;         // Proba min pour phase double spike — relevé pour qualité (capital 20$)
-input int    DoubleSpikeHoldSeconds = 60;       // Temps max attente 2e spike
-
-input group "FERMETURE AUTO: spike capté (même logique que cleanup GOM)"
-input bool   EnableAutoClosePositionsOnSpikeCaptured = true; // Fermer positions au marché quand BUY/SELL entry GOM est « franchi » (spike capté)
-input long   SpikeCapturedCloseMagicFilter = 0; // 0 = toutes les positions sur ce symbole ; sinon magic exact (ex. même que SMC_Universal InpMagicNumber) — DÉFAUT 0 pour capturer toutes positions
-input int    SpikeCapturedMinPositionAgeSec = 1; // Âge min (s) de la position avant fermeture (évite conflit avec ordre qui vient de partir) — RÉDUIT à 1s pour réactivité
-input int    SpikeCapturedCloseDeviation = 80; // Déviation points pour PositionClose
-input double GomEntryCrossCloseMinProfitUSD = 0.0; // P/L net ($) min pour fermer au franchissement ligne GOM ; 0 = ferme même en perte légère (RECOMMANDÉ pour spike capté)
-input bool   GomSpikeCapturedCloseAnyProfit = true; // Si true : niveau GOM franchi + sens aligné → ferme dès P/L net > 0 (ignore le seuil ci-dessus ; recommandé avec notification « spike capturé »)
-input bool   GomEntryCrossKeepPlanIfNoClose = true; // franchissement niveau mais P/L < min : ne pas effacer le plan GOM
-input bool   SpikeClosedNotifyOnlyExactSpike = true; // notification « Spike fermé » uniquement si vrai motif spike + gain ≥ seuil
-input double SpikeClosedNotifyMinProfitUSD = 0.10; // $ — évite « spike fermé » sur micro-gain ou fermeture « profil scalping »
-input bool   SpikeAutoCloseAllowLightLossExit = true; // si true : ferme aussi sur perte légère (≤ -0,50$) dans ManageBoomCrashSpikeClose — ACTIVÉ pour fermer rapidement
-input bool   SpikeCapturedRequireRealSpike = true; // Exiger mouvement rapide prix (0.3% en 5s) avant fermeture spike — ÉVITE fausses alertes sans position
-
-input bool   EnableExternalAIInterpretation = false; // /gom/interpret (optionnel, hors verdict GOM)
-input string ExternalAIUrl = "http://127.0.0.1:8000/gom/interpret";
-input int    ExternalAITimeoutMs = 1800;
-input int    ExternalAIThrottleMs = 2000;
-input int    RobotAIStaleSeconds = 90;
-input bool   KeepScriptAttached = true;
-input int    RefreshSeconds = 6;              // Cadence de base script embarqué (↑ = moins de charge CPU)
-
-input group "PERFORMANCE (throttle boucles)"
-input int    GOM_OnTickMainThrottleSec = 20; // ↑ OPTIMISÉ 20s — réduit passes lourdes (était 12s)
-input int    OnTickRiskCheckIntervalSec = 5; // ↑ OPTIMISÉ 5s — moins de vérifications (était 2s)
-input bool   OpportunityScannerSingleChart = true; // ✅ Un seul graphique = essentiel
-input bool   GOM_SkipChartRedraw = true;     // ✅ Pas de redraw = fluidité maximale
-input int    TfRefreshSeconds_M1  = 15;   // ↑ OPTIMISÉ M1 (était 8s) — moins de calculs
-input int    TfRefreshSeconds_M5  = 30;   // ↑ OPTIMISÉ M5 (était 18s)
-input int    TfRefreshSeconds_M15 = 60;   // ↑ OPTIMISÉ M15 (était 30s)
-input int    TfRefreshSeconds_M30 = 90;   // ↑ OPTIMISÉ M30 (était 45s)
-input int    TfRefreshSeconds_H1  = 180;  // ↑ OPTIMISÉ H1 (était 90s)
-input int    TfRefreshSeconds_H4  = 360;  // ↑ OPTIMISÉ H4 (était 180s)
-input int    TfRefreshSeconds_D1  = 600;  // ↑ OPTIMISÉ D1 (était 300s)
-input int    TfRefreshSeconds_W1  = 1200; // ↑ OPTIMISÉ W1 (était 600s)
-input int    SMCProcessRefreshSeconds = 40; // ↑ OPTIMISÉ SMC (était 20s)
-input int    ScriptEmaRefreshSeconds  = 90; // ↑ OPTIMISÉ EMA (était 45s)
-input int    BollingerVwapRefreshSeconds = 90; // ↑ OPTIMISÉ BB/VWAP (était 45s)
-input int    DashboardRefreshSeconds = 30; // ↑ OPTIMISÉ Dashboard (était 15s)
-input bool   AutoScaleRefreshByCharts = true; // Ajuste automatiquement les périodes quand plusieurs symboles sont attachés
-input int    ChartsPerLoadStep = 3; // +1 facteur de charge tous les N charts
-input int    MaxAutoScaleFactor = 6; // Limite du facteur auto (évite de trop ralentir)
-input bool   StaggerExecutionBySymbol = true; // Décale les cycles par symbole pour lisser les pics CPU
-input group "NOTIFICATIONS (alerte + son + push MT5)"
-input bool   EnableGomNotifyAlerts = true;
-input bool   NotifyOnNewPosition = true;
-input bool   NotifyOnSpikeAutoPendingOk = true;
-input bool   NotifyOnSpikeSignalArmed = true; // SPIKE BUY/SELL avec proba ≥ SpikeAlertMinProbability (réarme si retour sous seuil)
-input long   NotifyPositionMagic = 0; // 0 = toute position sur le symbole du graphique
-input string NotifySoundNewPosition = "place_order.wav";
-input string NotifySoundSpike = "alert.wav";
-input bool   ShowScriptEMAs = false; // Courbes EMA script : doublon avec GOM embarqué
-input ENUM_TIMEFRAMES ScriptEmaTF = PERIOD_M5;
-input int    ScriptEmaCurveBars = 320; // nombre de barres pour dessiner la courbe (segments OBJ_TREND)
-
-input group "BOLLINGER + VWAP (projection graphe + verdict)"
-input bool   ShowBollingerBands = false; // Courbes BB : charge CPU si GOM déjà actif
-input ENUM_TIMEFRAMES BollingerTF = PERIOD_M5;
-input int    BollingerPeriod = 20;
-input double BollingerDeviation = 2.0;
-input int    BollingerCurveBars = 320;
-input color  BollingerUpperColor = clrCornflowerBlue;
-input color  BollingerMidColor = clrSilver;
-input color  BollingerLowerColor = clrCornflowerBlue;
-input bool   ShowSessionVWAP = false;
-input color  VWAPLineColor = clrGold;
-input int    VWAPCurveBars = 960; // M1: barres max pour la courbe VWAP journée
-input bool   BollingerVwapInfluenceVerdict = true; // intègre BB + VWAP au score techBuy/techSell
-input double BollingerVwapVerdictWeight = 1.0;     // 1 = pondération par défaut ; 0 = pas d’effet
-
-input group "INDICATEURS AVANCÉS (style TradingView, légers)"
-input bool   EnableAdvancedIndicators = false; // Désactivé par défaut (charge CPU)
-input ENUM_TIMEFRAMES AdvancedIndicatorsTF = PERIOD_M5;
-input int    AdvancedIndicatorsRefreshSeconds = 8; // throttle calcul (anti-lag)
-input int    SupertrendAtrPeriod = 10;
-input double SupertrendAtrMult = 3.0;
-input int    KeltnerEmaPeriod = 20;
-input double KeltnerAtrMult = 1.5;
-input int    DonchianPeriod = 20;
-input bool   AdvancedIndicatorsInfluenceVerdict = true;
-input double AdvancedIndicatorsVerdictWeight = 0.8;
-
-input group "INFOS IA / ML (FEAT_* + serveur /decision — label flottant)"
-input bool   ShowMLFeatureInfo = true;   // Publie toujours FEAT_* ; affichage selon MLInfoUseDashboardCells / flottant
-input bool   MLInfoUseDashboardCells = true; // réservé compatibilité (dash plein = toujours 18 cellules sur 1 ligne)
-input int    MLFeatureInfoMarginRight = 10;  // label flottant uniquement si cellules désactivées ou mode compact
-input int    MLFeatureInfoMarginBottom = 96;
-input int    MLFeatureFontSize = 8;
-input int    MLFeatureInfoZOrder = 120;
-
-input group "FILTRES DE CONFIRMATION"
-input bool   EnableVolumeFilter = true;
-input double VolumeMinRatio = 1.2;              // Relevé — exiger un minimum de volume (filtre bruit)
-input int    VolumeLookback = 20;               // Lookback plus large pour moyenne stable
-input bool   EnableMomentumFilter = true;
-input bool   EnableRSIDivergenceFilter = true;
-input int    RSIDivergenceLookback = 5;         // Lookback RSI plus grand — confirmation plus solide
-input double RSIDivergenceThreshold = 4.0;      // Seuil divergence relevé — signaux plus fiables
-input bool   EnableMTFFilter = true;
-input bool   EnableStructureFilter = true;
-input double StructureATRMultiplier = 0.5;      // Réduit — structure plus stricte pour meilleures entrées
-input bool   EnableVolatilityFilter = true;
-input double VolatilityMinATRPct = 0.03;        // Relevé — éviter marchés plats (capital 20$ = chaque trade doit bouger)
-input bool   StrictConfluenceMode = true;       // ACTIVÉ — exiger confluence multi-signaux (qualité > quantité avec 20$)
-input double MinFilterPassRatio = 0.50;         // Ratio filtres OK (50% = plus d'opportunités, 65% = très strict)
-input bool   RelaxedFiltersHighVolSynth = false; // ↓ PAS d'assouplissement même sur Volatility (qualité maximale)
-input double MinFilterQualityRelaxed = 0.50;    // ↑ Même en mode relaxé, exiger 50% minimum (très sélectif)
-input bool   RequireMTFAndStructure = true;     // ✅ ACTIVÉ — alignement MTF + structure OBLIGATOIRE
-input double MinStrengthForEntry = 3.5;         // ↑ Signaux encore plus forts requis (3.5 au lieu de 3.0)
-input bool   RelaxStrengthBoomCrashSpikeKola = false; // false = pas d'assouplissement (protège capital)
-input double RelaxStrengthSpikeKolaBonus = 0.70;     // Bonus spike conservé
-input double RelaxStrengthSpikeKolaMinCap = 1.5;     // Relevé — cap minimum plus exigeant
-input bool   RequireMinConfidenceForHtfEntry = true;  // ACTIVÉ — exiger confiance min pour HTF (qualité)
-input double MinConfidenceHtfEntryPct = 72.0;          // 72% — strict pour protéger capital
-input double KolaClosestAnchorMaxAtr = 1.20;           // Réduit — exiger proximité plus stricte au niveau KOLA
-
-input group "QUALITÉ D'ENTRÉE (évite setups faibles)"
-input bool   EnableEntryQualityGate = true;            // ACTIVÉ — filtrer les setups faibles (capital 20$ = uniquement les meilleurs)
-input double MinEntryQualityScore = 0.33;              // Score qualité min (33% = TEST - permettre plus de trades)
-input bool   EntryQualityGateSynthOnly = false;        // ✅ Tous symboles — qualité exigée PARTOUT
-input bool   EntryQualityRelaxOnSpikeSetup = true;     // Assouplir si spike Boom/Crash aligné (probabilité élevée)
-input bool   EntryQualityRelaxOnHighConfluence = true; // Assouplir si confluence niveaux KOLA forte
-input double EntryQualityConfluenceRelaxMin = 0.50;    // Confluence 50% min pour relâcher le gate qualité
-
-input group "AUTO PENDING: SPIKE + NEAR M5 (Boom / Gainx / Crash / Painx)"
-input bool   EnableSpikeNearM5AutoPending = true;  // ACTIVÉ pour trading automatique
-input bool   SpikeNearM5DeferToArrowFirstPending = true; // true = ne pas placer ici si l'entrée se fait sur 1ère flèche (évite ordre avant la flèche)
-input double SpikeNearM5Lots = 0.01;              // Lot minimum absolu — capital 20$ ultra-conservateur
-input int    SpikeNearM5OffsetPoints = 3;          // Réduit pour entrée plus rapide
-input double SpikeNearM5MinSpikeProb = 0.0;        // 0 = même seuil que SpikeAlertMinProbability
-input int    SpikeNearM5CooldownSec = 75;          // Délai min entre pendings spike+M5 (↑ = moins de rejet SL en rafale)
-input long   SpikeNearM5Magic = 91305701;
-input int    SpikeNearM5MaxSamePending = 1;        // 1 pending max (évite empilement avant spike réel)
-input bool   SpikeNearM5SkipIfSpikeExhausted = false; // Désactivé pour plus d'opportunités
-input string SpikeNearM5Comment = "GOM_SKM5";
-
-input group "AUTO PENDING: 1ère apparition flèche SPIKE IMMINENT"
-input bool   EnableSpikeImminentFirstAutoPending = true;  // ACTIVÉ pour trading automatique
-input bool   SpikeImminentFirstUseMarketOrder = false;    // false = pending (Limit/Stop) ; true = marché
-input bool   SpikeImminentPendingRequireNearM5 = true;   // true = prix proche M5 BUY/SELL (comme spike+M5)
-input bool   SpikeImminentFirstTriggerOnPlanArrowRise = true; // 1ère apparition flèche plan GOM_PLAN_ARROW (LIVE BUY/SELL) + même logique pending
-input bool   SpikeImminentFirstForceLimitOnly = true;     // si niveau M5 valide : uniquement BuyLimit/SellLimit (prix recalé sous/au-dessus du marché si besoin)
-input bool   SpikeImminentFirstSkipDoubleSpikePhase2 = true; // true = pas d'ordre si DOUBLE_SPIKE_PHASE >= 2 (2e spike)
-input int    SpikeImminentFirstCooldownSec = 90;         // Anti-spam 1ère flèche spike imminent
-input long   SpikeImminentFirstMagic = 91305702;
-input string SpikeImminentFirstComment = "GOM_SKIM";
-
-input group "AUTO MARCHÉ: 1ère apparition GOM_PLAN_ARROW (plan LIVE BUY/SELL)"
-input bool   EnableAutoMarketOnGomPlanArrow = true;   // true = ouvre position au marché dès la flèche plan (prioritaire sur pending spike sur même front)
-input int    GomPlanArrowMarketCooldownSec = 90;       // Anti double entre 2 entrées flèche plan
-input double GomPlanArrowMarketLots = 0.01;          // Lot minimum — capital 20$ ultra-conservateur
-input bool   GomPlanArrowRespectMaxPositions = true; // 1 position max / symbole (magic EA)
-input bool   GomPlanArrowBypassBoomCrashIaAlignment = true; // true = verdict GOOD/PERFECT GOM prime sur IA (Boom/Crash)
-input bool   GomPlanArrowRelaxNearM5OnGoodPerfect = true; // GOOD/PERFECT : assouplit distance au niveau M5 (×3) pour déclencher l'ordre
-input bool   GomPlanArrowRequireChartArrowObject = true; // true = exiger que l'objet GOM_PLAN_ARROW existe sur le chart
-input bool   GomPlanArrowRespectSmcSweepConflict = true; // Boom: pas de BUY si sweep SELL SMC récent (GV + flèches SMC_SWEEP_SELL_) ; Crash: pas de SELL si sweep BUY récent
-input int    GomPlanArrowSweepConflictMaxAgeSec = 240;   // Âge max (s) des flèches sweep opposées pour bloquer l'entrée alignée au plan
-input bool   GomPlanArrowRequireNearKolaM5Entry = true;  // true = marché sur flèche plan seulement si prix proche du niveau d'entrée (BUY_ENTRY / M5 BUY ou SELL_ENTRY / M5 SELL), pas à la seule apparition de la flèche
-input double GomPlanArrowNearM5EntryMaxAtrMult = 0.50;   // distance max |prix - ref| ≤ ATR(M15)×ce coef (plancher = quelques points)
-input bool   GomPlanArrowBuyCloserToBuySideM5 = true;   // Boom + plan BUY: le bid doit être plus proche du M5 BUY que du M5 SELL (évite achat collé au SELL ENTRY)
-input bool   GomPlanArrowSellCloserToSellSideM5 = true; // Crash + plan SELL: symétrique (ask plus proche M5 SELL que M5 BUY)
-// Ré-entrées / spike : par défaut l'EA n'ouvre qu'au 1er tick « LIVE BUY/SELL » ; si le prix spike hors zone, aucun ordre. Augmenter ReattemptSec et/ou assouplir spike ci-dessous.
-input int    GomPlanArrowReattemptSec = 45;            // Réessaie l'entrée tant que plan GOOD/PERFECT + BUY/SELL (0 = 1 seule fois au 1er front)
-input double GomPlanArrowNearEntrySpikeRelaxProb = 0.0; // 0 = off. Si prob. spike (0..1) >= seuil : élargit la distance max à l'entrée (Boom+BUY ou Crash+SELL) pour suivre un spike
-input double GomPlanArrowNearEntrySpikeRelaxAtrMult = 3.5; // multiplicateur sur maxDist quand assouplissement spike actif (ex. 3.5 × fenêtre ATR normale)
-input bool   BlockEntryIfNearOppositeM5KolaLine = true; // BUY annulé si prix proche M5 SELL KOLA (ligne rouge) ; SELL si proche M5 BUY (verte) — évite entrées « correction »
-input double OppositeM5LineBlockMaxAtrMult = 0.55;       // |prix - niveau M5 opposé| ≤ ATR(M15)×ce coef ⇒ blocage (voir GOM_PriceNearLevel)
-input bool   OppositeM5LineBlockBoomCrashOnly = true;    // true: indices Boom/Crash (± volatilité si option suivante) ; false: tout symbole avec GV KOLA M5
-input bool   OppositeM5LineBlockIncludeVolatility = true; // si BoomCrashOnly: inclure aussi SYM_VOLATILITY (Step, V75, Gainx/Painx…)
-// Fermeture : si une position BUY/SELL est ouverte et le prix rejoint la ligne M5 KOLA **opposée** (même logique que blocage entrée « correction »).
-input bool   ClosePositionWhenPriceHitsOppositeM5KolaLine = true;
-// Complément : lignes M5_ENTRY_BUY_LINE / M5_ENTRY_SELL_LINE sur le graphique où l'EA tourne (position sur _Symbol).
-input bool   ClosePositionWhenTouchesDrawnM5EntryOpposite = true;
-input int    OppositeM5LineExitMinHoldSec = 3; // Âge min (s) de la position avant fermeture (évite bruit au tick d'ouverture)
-
-static datetime g_gomLastPlanArrowMarketTime = 0;
-static datetime g_gomLastPlanArrowReattemptTime = 0;
-
-string DASH_PREFIX = "GOM_DASH_";
-string GOM_F500V_PREFIX = "GOM_F500V_";
-string g_lastPlanDir = "WAIT";
-string g_lastPlanQuality = "WAIT";
-double g_lastPlanEntry = 0.0;
-double g_lastPlanSL = 0.0;
-double g_lastPlanTP1 = 0.0;
-double g_lastPlanTP2 = 0.0;
-double g_lastPlanTP3 = 0.0;
-double g_lastTechBuyScore = 0.0;
-double g_lastTechSellScore = 0.0;
-
-// Broker-adaptive trade windows (modifiable globals instead of input constants)
-int g_g_TradeWindow1StartUTC = 3;   // Zone 1 debut (UTC)
-int g_g_TradeWindow1EndUTC = 6;     // Zone 1 fin (UTC)
-int g_g_TradeWindow2StartUTC = 14;  // Zone 2 debut (UTC)
-int g_g_TradeWindow2EndUTC = 16;    // Zone 2 fin (UTC)
-int g_g_TradeWindow3StartUTC = 21;  // Zone 3 debut (UTC)
-int g_g_TradeWindow3EndUTC = 23;    // Zone 3 fin (UTC)
-
-static datetime g_lastExtAiCall = 0;
-static string   g_lastExtAiAction = "HOLD";
-static double   g_lastExtAiConf = 0.0;
-static string   g_lastExtAiReason = "";
-
-CTrade          g_gomSpikeTrade;
-static datetime g_gomLastSpikeCaptureCloseUtc = 0;
-static datetime g_gomLastSpikeCapturedNoCloseNotifyUtc = 0;
-static double   g_gomLastPriceForSpikeDetection = 0.0;  // Tracker mouvement prix pour spike réel
-static datetime g_gomLastSpikeDetectionTime = 0;        // Timestamp dernière détection spike
-
-static datetime g_gomLastSpikeM5PendingTime = 0;
-static datetime g_gomLastSpikeImminentFirstTime = 0;
-static datetime g_doubleSpikeFirstTs = 0;
-static int      g_doubleSpikeDir = 0; // +1 BUY, -1 SELL
-
-// ✅ TRAILING STOP SPIKE BOOM/CRASH - Tracker profit maximum par position
-struct SpikeTrailingStop
-{
-   ulong ticket;
-   double maxProfit;        // Profit maximum atteint ($)
-   datetime lastUpdate;     // Dernière mise à jour
-};
-
-SpikeTrailingStop g_spikeTrailingStops[100]; // Max 100 positions simultanées
-int g_spikeTrailingStopCount = 0;
-
-// Fonction pour tracker/obtenir le profit maximum d'une position
-double GetOrUpdateMaxProfit(ulong ticket, double currentProfit)
-{
-   // Chercher si position déjà trackée
-   for(int i = 0; i < g_spikeTrailingStopCount; i++)
-   {
-      if(g_spikeTrailingStops[i].ticket == ticket)
-      {
-         // Mettre à jour si nouveau max
-         if(currentProfit > g_spikeTrailingStops[i].maxProfit)
-         {
-            g_spikeTrailingStops[i].maxProfit = currentProfit;
-            g_spikeTrailingStops[i].lastUpdate = TimeCurrent();
-         }
-         return g_spikeTrailingStops[i].maxProfit;
-      }
-   }
-
-   // Nouvelle position - ajouter au tracker
-   if(g_spikeTrailingStopCount < 100)
-   {
-      g_spikeTrailingStops[g_spikeTrailingStopCount].ticket = ticket;
-      g_spikeTrailingStops[g_spikeTrailingStopCount].maxProfit = MathMax(0.0, currentProfit);
-      g_spikeTrailingStops[g_spikeTrailingStopCount].lastUpdate = TimeCurrent();
-      g_spikeTrailingStopCount++;
-   }
-
-   return MathMax(0.0, currentProfit);
-}
-
-// Fonction pour nettoyer les positions fermées du tracker
-void CleanupClosedPositionsFromTracker()
-{
-   for(int i = g_spikeTrailingStopCount - 1; i >= 0; i--)
-   {
-      // Vérifier si position existe encore
-      if(!PositionSelectByTicket(g_spikeTrailingStops[i].ticket))
-      {
-         // Position fermée - retirer du tracker
-         for(int j = i; j < g_spikeTrailingStopCount - 1; j++)
-         {
-            g_spikeTrailingStops[j] = g_spikeTrailingStops[j + 1];
-         }
-         g_spikeTrailingStopCount--;
-      }
-   }
-}
-
-string TFTag(const ENUM_TIMEFRAMES tf)
-{
-if(tf == PERIOD_M1) return "M1";
-if(tf == PERIOD_M5) return "M5";
-if(tf == PERIOD_M15) return "M15";
-if(tf == PERIOD_M30) return "M30";
-if(tf == PERIOD_H1) return "H1";
-if(tf == PERIOD_H4) return "H4";
-if(tf == PERIOD_D1) return "D1";
-if(tf == PERIOD_W1) return "W1";
-return "UNK";
-}
-
-string GVKey(const string moduleTag, const string tfTag, const string side)
-{
-return moduleTag + "_" + _Symbol + "_" + tfTag + "_" + side;
-}
-
-static int  g_gomNotifyLastPosCount = -1;
-static bool g_gomNotifySpikeArmedLatch = false;
-
-void GOM_AlertPush(const string title, const string detail, const string wavFile)
-{
-if(!EnableGomNotifyAlerts) return;
-string msg = title + " " + _Symbol + " | " + detail;
-Alert(msg);
-if(StringLen(wavFile) > 0)
-   PlaySound(wavFile);
-SendNotification(msg);
-}
-
-int GOM_PositionCountOnSymbol(const string sym, const long magicFilter)
-{
-int n = 0;
-const int total = PositionsTotal();
-for(int i = 0; i < total; i++)
-{
-ulong ticket = PositionGetTicket(i);
-if(ticket == 0) continue;
-if(!PositionSelectByTicket(ticket)) continue;
-if(PositionGetString(POSITION_SYMBOL) != sym) continue;
-if(magicFilter != 0 && PositionGetInteger(POSITION_MAGIC) != magicFilter) continue;
-n++;
-}
-return n;
-}
-
-void GOM_UpdateNotifyPositionAndSpike(const double bid, const double spProb, const double spDirNum)
-{
-if(!EnableGomNotifyAlerts) return;
-
-if(NotifyOnNewPosition)
-{
-const int pc = GOM_PositionCountOnSymbol(_Symbol, NotifyPositionMagic);
-if(g_gomNotifyLastPosCount < 0)
-g_gomNotifyLastPosCount = pc;
-else if(pc > g_gomNotifyLastPosCount)
-GOM_AlertPush("GOM position", "Ouverte (total " + IntegerToString(pc) + ")", NotifySoundNewPosition);
-g_gomNotifyLastPosCount = pc;
-}
-
-if(NotifyOnSpikeSignalArmed)
-{
-const bool dirOk = (spDirNum > 0.5 || spDirNum < -0.5);
-const bool hi = (spProb + 1e-9 >= SpikeAlertMinProbability && dirOk);
-if(hi && !g_gomNotifySpikeArmedLatch)
-{
-const string sd = (spDirNum > 0.5) ? "BUY" : "SELL";
-string det = sd + " " + DoubleToString(spProb * 100.0, 0) + "%";
-if(bid > 0.0) det += " @ " + DoubleToString(bid, _Digits);
-GOM_AlertPush("GOM SPIKE", det, NotifySoundSpike);
-g_gomNotifySpikeArmedLatch = true;
-}
-else if(!hi)
-g_gomNotifySpikeArmedLatch = false;
-}
-}
-
-//+------------------------------------------------------------------+
-//| INTÉGRATION SMC HEDGE FUND                                  |
-//+------------------------------------------------------------------+
-
-// Variables globales pour l'intégration SMC
-static bool g_smcIntegrationEnabled = true;
-static int g_smcZoneCount = 0;
-static datetime g_smcLastAnalysis = 0;
-// Horodatage sweep ICT opposé au sens Boom/Crash (déclaré ici : utilisé par GOM_DetectSMCSweep plus bas)
-datetime g_smcBoomBearSweepContextTime  = 0;
-datetime g_smcCrashBullSweepContextTime = 0;
-
-// Fonction pour détecter les swings comme les Hedge Funds
-void GOM_DetectSMCSwings()
-{
-   if(!g_smcIntegrationEnabled) return;
-   
-   datetime currentTime = TimeCurrent();
-   // Analyser toutes les 30 secondes
-   if(currentTime - g_smcLastAnalysis < 30) return;
-   g_smcLastAnalysis = currentTime;
-   
-   // Nettoyer anciennes zones
-   ArrayResize(g_smcLiquidityZones, 0);
-   g_smcZoneCount = 0;
-   
-   // Analyser les 100 dernières bougies M15
-   for(int i = 50; i >= 5; i--)
-   {
-      double high = iHigh(_Symbol, PERIOD_M15, i);
-      double low = iLow(_Symbol, PERIOD_M15, i);
-      
-      // Détecter swing high
-      bool isSwingHigh = true;
-      for(int j = 1; j <= 5; j++)
-      {
-         if(i + j >= 100) break;
-         if(iHigh(_Symbol, PERIOD_M15, i + j) >= high) { isSwingHigh = false; break; }
-      }
-      for(int j = 1; j <= 5; j++)
-      {
-         if(i - j < 0) break;
-         if(iHigh(_Symbol, PERIOD_M15, i - j) >= high) { isSwingHigh = false; break; }
-      }
-      
-      // Détecter swing low
-      bool isSwingLow = true;
-      for(int j = 1; j <= 5; j++)
-      {
-         if(i + j >= 100) break;
-         if(iLow(_Symbol, PERIOD_M15, i + j) <= low) { isSwingLow = false; break; }
-      }
-      for(int j = 1; j <= 5; j++)
-      {
-         if(i - j < 0) break;
-         if(iLow(_Symbol, PERIOD_M15, i - j) <= low) { isSwingLow = false; break; }
-      }
-      
-      if(isSwingHigh)
-      {
-         ArrayResize(g_smcLiquidityZones, g_smcZoneCount + 1);
-         g_smcLiquidityZones[g_smcZoneCount].price = high;
-         g_smcLiquidityZones[g_smcZoneCount].time = iTime(_Symbol, PERIOD_M15, i);
-         g_smcLiquidityZones[g_smcZoneCount].type = "SWING_HIGH";
-         g_smcLiquidityZones[g_smcZoneCount].touches = 1;
-         g_smcLiquidityZones[g_smcZoneCount].strength = 0.8;
-         g_smcLiquidityZones[g_smcZoneCount].isActive = true;
-         g_smcLiquidityZones[g_smcZoneCount].objectId = "SMC_LIQ_HIGH_" + IntegerToString(i);
-         g_smcZoneCount++;
-
-         // Dessiner zone de liquidité SMC
-         string objName = "SMC_LIQ_HIGH_" + IntegerToString(i);
-         ObjectCreate(0, objName, OBJ_HLINE, 0, 0, high);
-         ObjectSetInteger(0, objName, OBJPROP_COLOR, clrOrange);
-         ObjectSetInteger(0, objName, OBJPROP_WIDTH, 2);
-         ObjectSetInteger(0, objName, OBJPROP_STYLE, STYLE_SOLID);
-         ObjectSetInteger(0, objName, OBJPROP_BACK, true);
-      }
-
-      if(isSwingLow)
-      {
-         ArrayResize(g_smcLiquidityZones, g_smcZoneCount + 1);
-         g_smcLiquidityZones[g_smcZoneCount].price = low;
-         g_smcLiquidityZones[g_smcZoneCount].time = iTime(_Symbol, PERIOD_M15, i);
-         g_smcLiquidityZones[g_smcZoneCount].type = "SWING_LOW";
-         g_smcLiquidityZones[g_smcZoneCount].touches = 1;
-         g_smcLiquidityZones[g_smcZoneCount].strength = 0.8;
-         g_smcLiquidityZones[g_smcZoneCount].isActive = true;
-         g_smcLiquidityZones[g_smcZoneCount].objectId = "SMC_LIQ_LOW_" + IntegerToString(i);
-         g_smcZoneCount++;
-
-         // Dessiner zone de liquidité SMC
-         string objName = "SMC_LIQ_LOW_" + IntegerToString(i);
-         ObjectCreate(0, objName, OBJ_HLINE, 0, 0, low);
-         ObjectSetInteger(0, objName, OBJPROP_COLOR, clrDodgerBlue);
-         ObjectSetInteger(0, objName, OBJPROP_WIDTH, 2);
-         ObjectSetInteger(0, objName, OBJPROP_STYLE, STYLE_SOLID);
-         ObjectSetInteger(0, objName, OBJPROP_BACK, true);
-      }
-   }
-}
-
-bool SMC_ContextBlockBoomBuyFromBearSweep();
-bool SMC_ContextBlockCrashSellFromBullSweep();
-bool IsBoomSymbol(const string symbol);
-bool IsCrashSymbol(const string symbol);
-
-// Fonction pour détecter les sweeps de liquidité SMC
-bool GOM_DetectSMCSweep(string &direction, double &sweepPrice)
-{
-   if(!g_smcIntegrationEnabled || g_smcZoneCount == 0) return false;
-   
-   double currentHigh = iHigh(_Symbol, PERIOD_M15, 1);
-   double currentLow = iLow(_Symbol, PERIOD_M15, 1);
-   double prevHigh = iHigh(_Symbol, PERIOD_M15, 2);
-   double prevLow = iLow(_Symbol, PERIOD_M15, 2);
-   
-   // Vérifier sweep au-dessus (pour entrée BUY)
-   for(int i = 0; i < g_smcZoneCount; i++)
-   {
-      if(g_smcLiquidityZones[i].price > 0 && currentHigh > g_smcLiquidityZones[i].price && prevHigh <= g_smcLiquidityZones[i].price)
-      {
-         // Crash = SELL uniquement: un sweep haut (biais ICT « long ») est un contexte défavorable au short immédiat
-         if(IsCrashSymbol(_Symbol))
-         {
-            g_smcCrashBullSweepContextTime = TimeCurrent();
-            continue;
-         }
-         direction = "BUY";
-         sweepPrice = g_smcLiquidityZones[i].price;
-
-         // Dessiner sweep
-         string objName = "SMC_SWEEP_BUY_" + TimeToString(TimeCurrent(), TIME_SECONDS);
-         ObjectCreate(0, objName, OBJ_ARROW, 0, TimeCurrent(), sweepPrice);
-         ObjectSetInteger(0, objName, OBJPROP_COLOR, clrLime);
-         ObjectSetInteger(0, objName, OBJPROP_WIDTH, 4);
-         ObjectSetInteger(0, objName, OBJPROP_ARROWCODE, 236);
-
-         return true;
-      }
-   }
-
-   // Vérifier sweep en dessous (pour entrée SELL)
-   for(int i = 0; i < g_smcZoneCount; i++)
-   {
-      if(g_smcLiquidityZones[i].price > 0 && currentLow < g_smcLiquidityZones[i].price && prevLow >= g_smcLiquidityZones[i].price)
-      {
-         // Boom = BUY uniquement: sweep bas = prise liquidité « ICT SELL » — ne pas dessiner ni renforcer SELL ; bloquer les longs récents ailleurs
-         if(IsBoomSymbol(_Symbol))
-         {
-            g_smcBoomBearSweepContextTime = TimeCurrent();
-            continue;
-         }
-         direction = "SELL";
-         sweepPrice = g_smcLiquidityZones[i].price;
-         
-         // Dessiner sweep
-         string objName = "SMC_SWEEP_SELL_" + TimeToString(TimeCurrent(), TIME_SECONDS);
-         ObjectCreate(0, objName, OBJ_ARROW, 0, TimeCurrent(), sweepPrice);
-         ObjectSetInteger(0, objName, OBJPROP_COLOR, clrRed);
-         ObjectSetInteger(0, objName, OBJPROP_WIDTH, 4);
-         ObjectSetInteger(0, objName, OBJPROP_ARROWCODE, 238);
-         
-         return true;
-      }
-   }
-   
-   return false;
-}
-
-//+------------------------------------------------------------------+
-//| FONCTIONS ICT SMC - DÉTECTION ET DESSIN                          |
-//+------------------------------------------------------------------+
-
-// Structure pour zones de liquidité SMC
-struct SMC_LiquidityZone {
-   double price;
-   datetime time;
-   string type; // "SWING_HIGH", "SWING_LOW", "EQUAL_HIGH", "EQUAL_LOW"
-   int touches;
-   double strength;
-   bool isActive;
-   string objectId;
-};
-
-// Structure pour marché SMC
-struct SMC_MarketStructure {
-   double lastSwingHigh;
-   double lastSwingLow;
-   datetime lastSwingHighTime;
-   datetime lastSwingLowTime;
-   double currentEqualHigh;
-   double currentEqualLow;
-   int equalHighTouches;
-   int equalLowTouches;
-};
-
-// Variables globales SMC
-SMC_LiquidityZone g_smcLiquidityZones[];
-SMC_MarketStructure g_smcMarketStructure;
-int g_smcSwingLookback = 5;
-double g_smcEqualTolerance = 15.0;
-int g_smcMinEqualTouches = 2;
-double g_smcLiquidityStrength = 0.8;
-int g_smcMaxLiquidityZones = 10;
-
-//+------------------------------------------------------------------+
-//| FONCTIONS DE DÉTECTION SMC                                      |
-//+------------------------------------------------------------------+
-
-bool GOM_SMCIsSwingHigh(int index, ENUM_TIMEFRAMES timeframe) {
-   double high = iHigh(_Symbol, timeframe, index);
-   
-   for(int i = 1; i <= g_smcSwingLookback; i++) {
-      if(index + i >= Bars(_Symbol, timeframe)) break;
-      if(iHigh(_Symbol, timeframe, index + i) >= high) return false;
-   }
-   
-   for(int i = 1; i <= g_smcSwingLookback; i++) {
-      if(index - i < 0) break;
-      if(iHigh(_Symbol, timeframe, index - i) >= high) return false;
-   }
-   
-   return true;
-}
-
-bool GOM_SMCIsSwingLow(int index, ENUM_TIMEFRAMES timeframe) {
-   double low = iLow(_Symbol, timeframe, index);
-   
-   for(int i = 1; i <= g_smcSwingLookback; i++) {
-      if(index + i >= Bars(_Symbol, timeframe)) break;
-      if(iLow(_Symbol, timeframe, index + i) <= low) return false;
-   }
-   
-   for(int i = 1; i <= g_smcSwingLookback; i++) {
-      if(index - i < 0) break;
-      if(iLow(_Symbol, timeframe, index - i) <= low) return false;
-   }
-   
-   return true;
-}
-
-bool GOM_SMCIsEqualHigh(double price1, double price2) {
-   return MathAbs(price1 - price2) <= g_smcEqualTolerance * _Point;
-}
-
-bool GOM_SMCIsEqualLow(double price1, double price2) {
-   return MathAbs(price1 - price2) <= g_smcEqualTolerance * _Point;
-}
-
-bool GOM_SMCIsBullishBOS() {
-   if(g_smcMarketStructure.lastSwingHigh == 0.0) return false;
-   
-   double currentClose = iClose(_Symbol, PERIOD_M15, 0);
-   return currentClose > g_smcMarketStructure.lastSwingHigh;
-}
-
-bool GOM_SMCIsBearishBOS() {
-   if(g_smcMarketStructure.lastSwingLow == 0.0) return false;
-   
-   double currentClose = iClose(_Symbol, PERIOD_M15, 0);
-   return currentClose < g_smcMarketStructure.lastSwingLow;
-}
-
-//+------------------------------------------------------------------+
-//| FONCTIONS DE DESSIN SMC                                         |
-//+------------------------------------------------------------------+
-
-void GOM_SMCDrawLiquidityZone(SMC_LiquidityZone &zone) {
-   string objName = zone.objectId;
-   
-   if(ObjectFind(0, objName) >= 0) {
-      ObjectDelete(0, objName);
-   }
-   
-   ObjectCreate(0, objName, OBJ_HLINE, 0, 0, zone.price);
-   ObjectSetInteger(0, objName, OBJPROP_COLOR, clrOrange);
-   ObjectSetInteger(0, objName, OBJPROP_WIDTH, 2);
-   ObjectSetInteger(0, objName, OBJPROP_STYLE, STYLE_SOLID);
-   ObjectSetInteger(0, objName, OBJPROP_BACK, true);
-   
-   // Ajouter label
-   string labelName = objName + "_LABEL";
-   if(ObjectFind(0, labelName) >= 0) {
-      ObjectDelete(0, labelName);
-   }
-   
-   ObjectCreate(0, labelName, OBJ_TEXT, 0, zone.time, zone.price);
-   ObjectSetString(0, labelName, OBJPROP_TEXT, zone.type + " (" + IntegerToString(zone.touches) + ")");
-   ObjectSetInteger(0, labelName, OBJPROP_COLOR, clrOrange);
-   ObjectSetInteger(0, labelName, OBJPROP_FONTSIZE, 8);
-   ObjectSetString(0, labelName, OBJPROP_FONT, "Arial Bold");
-   ObjectSetInteger(0, labelName, OBJPROP_ANCHOR, ANCHOR_LEFT);
-}
-
-void GOM_SMCDrawSweep(string direction, double price, datetime time) {
-   string objName = "GOM_SMC_SWEEP_" + direction + "_" + TimeToString(time, TIME_DATE|TIME_SECONDS);
-   
-   ObjectCreate(0, objName, OBJ_ARROW, 0, time, price);
-   ObjectSetInteger(0, objName, OBJPROP_COLOR, direction == "BUY" ? clrLime : clrRed);
-   ObjectSetInteger(0, objName, OBJPROP_WIDTH, 4);
-   ObjectSetInteger(0, objName, OBJPROP_ARROWCODE, direction == "BUY" ? 233 : 234);
-   ObjectSetInteger(0, objName, OBJPROP_ANCHOR, ANCHOR_LEFT);
-}
-
-void GOM_SMCDrawBOS(string direction, double price, datetime time) {
-   string objName = "GOM_SMC_BOS_" + direction + "_" + TimeToString(time, TIME_DATE|TIME_SECONDS);
-   
-   ObjectCreate(0, objName, OBJ_ARROW, 0, time, price);
-   ObjectSetInteger(0, objName, OBJPROP_COLOR, direction == "BULLISH" ? clrLime : clrRed);
-   ObjectSetInteger(0, objName, OBJPROP_WIDTH, 3);
-   ObjectSetInteger(0, objName, OBJPROP_ARROWCODE, direction == "BULLISH" ? 241 : 242);
-   ObjectSetInteger(0, objName, OBJPROP_ANCHOR, ANCHOR_LEFT);
-}
-
-void GOM_SMCDrawEqualZone(double price, datetime time, string type) {
-   string objName = "GOM_SMC_EQUAL_" + type + "_" + TimeToString(time, TIME_DATE|TIME_SECONDS);
-   
-   ObjectCreate(0, objName, OBJ_HLINE, 0, 0, price);
-   ObjectSetInteger(0, objName, OBJPROP_COLOR, clrGold);
-   ObjectSetInteger(0, objName, OBJPROP_WIDTH, 3);
-   ObjectSetInteger(0, objName, OBJPROP_STYLE, STYLE_DASH);
-   ObjectSetInteger(0, objName, OBJPROP_BACK, true);
-   
-   // Label
-   string labelName = objName + "_LABEL";
-   ObjectCreate(0, labelName, OBJ_TEXT, 0, time, price);
-   ObjectSetString(0, labelName, OBJPROP_TEXT, "EQUAL " + type);
-   ObjectSetInteger(0, labelName, OBJPROP_COLOR, clrGold);
-   ObjectSetInteger(0, labelName, OBJPROP_FONTSIZE, 9);
-   ObjectSetString(0, labelName, OBJPROP_FONT, "Arial Bold");
-   ObjectSetInteger(0, labelName, OBJPROP_ANCHOR, ANCHOR_LEFT);
-}
-
-//+------------------------------------------------------------------+
-//| FONCTIONS D'ANALYSE SMC                                         |
-//+------------------------------------------------------------------+
-
-void GOM_SMCAnalyzeMarketStructure() {
-   int barsToAnalyze = 100;
-   
-   for(int i = barsToAnalyze; i >= 0; i--) {
-      datetime barTime = iTime(_Symbol, PERIOD_M15, i);
-      
-      // Détecter swing highs
-      if(GOM_SMCIsSwingHigh(i, PERIOD_M15)) {
-         double swingHigh = iHigh(_Symbol, PERIOD_M15, i);
-         
-         if(swingHigh > g_smcMarketStructure.lastSwingHigh) {
-            g_smcMarketStructure.lastSwingHigh = swingHigh;
-            g_smcMarketStructure.lastSwingHighTime = barTime;
-         }
-         
-         // Vérifier equal high
-         if(g_smcMarketStructure.currentEqualHigh > 0 && GOM_SMCIsEqualHigh(swingHigh, g_smcMarketStructure.currentEqualHigh)) {
-            g_smcMarketStructure.equalHighTouches++;
-            if(g_smcMarketStructure.equalHighTouches >= g_smcMinEqualTouches) {
-               GOM_SMCDrawEqualZone(g_smcMarketStructure.currentEqualHigh, barTime, "HIGH");
-            }
-         } else {
-            g_smcMarketStructure.currentEqualHigh = swingHigh;
-            g_smcMarketStructure.equalHighTouches = 1;
-         }
-      }
-      
-      // Détecter swing lows
-      if(GOM_SMCIsSwingLow(i, PERIOD_M15)) {
-         double swingLow = iLow(_Symbol, PERIOD_M15, i);
-         
-         if(swingLow < g_smcMarketStructure.lastSwingLow || g_smcMarketStructure.lastSwingLow == 0.0) {
-            g_smcMarketStructure.lastSwingLow = swingLow;
-            g_smcMarketStructure.lastSwingLowTime = barTime;
-         }
-         
-         // Vérifier equal low
-         if(g_smcMarketStructure.currentEqualLow > 0 && GOM_SMCIsEqualLow(swingLow, g_smcMarketStructure.currentEqualLow)) {
-            g_smcMarketStructure.equalLowTouches++;
-            if(g_smcMarketStructure.equalLowTouches >= g_smcMinEqualTouches) {
-               GOM_SMCDrawEqualZone(g_smcMarketStructure.currentEqualLow, barTime, "LOW");
-            }
-         } else {
-            g_smcMarketStructure.currentEqualLow = swingLow;
-            g_smcMarketStructure.equalLowTouches = 1;
-         }
-      }
-   }
-   
-   // Dessiner BOS
-   if(GOM_SMCIsBullishBOS()) {
-      GOM_SMCDrawBOS("BULLISH", g_smcMarketStructure.lastSwingHigh, TimeCurrent());
-   }
-   if(GOM_SMCIsBearishBOS()) {
-      GOM_SMCDrawBOS("BEARISH", g_smcMarketStructure.lastSwingLow, TimeCurrent());
-   }
-}
-
-//+------------------------------------------------------------------+
-//| NETTOYAGE OBJETS SMC                                            |
-//+------------------------------------------------------------------+
-
-void GOM_SMCCleanChartObjects() {
-   for(int i = ObjectsTotal(0) - 1; i >= 0; i--) {
-      string objName = ObjectName(0, i);
-      if(StringFind(objName, "GOM_SMC_") >= 0) {
-         ObjectDelete(0, objName);
-      }
-   }
-}
-
-//+------------------------------------------------------------------+
-//| FONCTION PRINCIPALE SMC POUR GOM                                |
-//+------------------------------------------------------------------+
-
-void GOM_SMCProcess() {
-   // Nettoyer les anciens objets
-   GOM_SMCCleanChartObjects();
-   
-   // Analyser la structure du marché
-   GOM_SMCAnalyzeMarketStructure();
-}
-
-// Fonction pour influencer le verdict avec SMC (version améliorée)
-void GOM_InfluenceVerdictWithSMC(double &techBuy, double &techSell)
-{
-   if(!g_smcIntegrationEnabled) return;
-
-   if(SMC_ContextBlockBoomBuyFromBearSweep())
-   {
-      techBuy -= 6.5;
-      GOM_GlobalSetForScript("SMC_BOOM_BEAR_SWEEP_BLOCK", 1.0);
-   }
-   else
-      GOM_GlobalSetForScript("SMC_BOOM_BEAR_SWEEP_BLOCK", 0.0);
-
-   if(SMC_ContextBlockCrashSellFromBullSweep())
-   {
-      techSell -= 6.5;
-      GOM_GlobalSetForScript("SMC_CRASH_BULL_SWEEP_BLOCK", 1.0);
-   }
-   else
-      GOM_GlobalSetForScript("SMC_CRASH_BULL_SWEEP_BLOCK", 0.0);
-   
-   string sweepDirection;
-   double sweepPrice;
-   
-   // Détecter les sweeps SMC avec analyse avancée
-   if(GOM_DetectSMCSweep(sweepDirection, sweepPrice))
-   {
-      // Bonus selon la direction du sweep
-      if(sweepDirection == "BUY")
-      {
-         techBuy += 3.5; // Bonus très fort pour sweep SMC BUY
-         techSell -= 1.5; // Pénalisation forte SELL
-         
-         // Bonus additionnel si confirmation volume
-         double currentVolume = GOM_GetVolume(1, PERIOD_M15);
-         double avgVolume = GOM_GetAverageVolume(20, PERIOD_M15);
-         if(currentVolume > avgVolume * 1.5) {
-            techBuy += 1.0; // Bonus volume élevé
-            GOM_GlobalSetForScript("SMC_VOLUME_CONFIRMED", 1.0);
-         }
-      }
-      else if(sweepDirection == "SELL")
-      {
-         techSell += 3.5; // Bonus très fort pour sweep SMC SELL
-         techBuy -= 1.5; // Pénalisation forte BUY
-         
-         // Bonus additionnel si confirmation volume
-         double currentVolume = GOM_GetVolume(1, PERIOD_M15);
-         double avgVolume = GOM_GetAverageVolume(20, PERIOD_M15);
-         if(currentVolume > avgVolume * 1.5) {
-            techSell += 1.0; // Bonus volume élevé
-            GOM_GlobalSetForScript("SMC_VOLUME_CONFIRMED", 1.0);
-         }
-      }
-      
-      // Publier les infos SMC détaillées dans les Global Variables
-      GOM_GlobalSetForScript("SMC_SWEEP_DETECTED", 1.0);
-      GOM_GlobalSetForScript("SMC_SWEEP_DIRECTION", sweepDirection == "BUY" ? 1.0 : -1.0);
-      GOM_GlobalSetForScript("SMC_SWEEP_PRICE", sweepPrice);
-      GOM_GlobalSetForScript("SMC_SWEEP_STRENGTH", 3.5); // Force du signal
-      
-      // Bonus pour confluence avec niveaux KOLA
-      double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-      double atr = GOM_ATRValue(_Symbol, PERIOD_M15, 14);
-      double nearKolaDistance = atr * 0.5;
-      
-      // Lire les niveaux KOLA M5
-      double m5Buy = ReadGVDirect("GOM_KOLA_" + _Symbol + "_M5_BUY", 0.0);
-      double m5Sell = ReadGVDirect("GOM_KOLA_" + _Symbol + "_M5_SELL", 0.0);
-      
-      // Vérifier proximité avec niveaux KOLA
-      if(m5Buy > 0 && MathAbs(bid - m5Buy) <= nearKolaDistance) {
-         if(sweepDirection == "BUY") techBuy += 1.5;
-         GOM_GlobalSetForScript("SMC_KOLA_CONFLUENCE", 1.0);
-      }
-      if(m5Sell > 0 && MathAbs(bid - m5Sell) <= nearKolaDistance) {
-         if(sweepDirection == "SELL") techSell += 1.5;
-         GOM_GlobalSetForScript("SMC_KOLA_CONFLUENCE", 1.0);
-      }
-   }
-   else
-   {
-      GOM_GlobalSetForScript("SMC_SWEEP_DETECTED", 0.0);
-      GOM_GlobalSetForScript("SMC_VOLUME_CONFIRMED", 0.0);
-      GOM_GlobalSetForScript("SMC_KOLA_CONFLUENCE", 0.0);
-   }
-   
-   bool bullB = GOM_SMCIsBullishBOS();
-   bool bearB = GOM_SMCIsBearishBOS();
-   if(bullB)
-      GOM_GlobalSetForScript("SMC_BULLISH_BOS", 1.0);
-   else
-      GOM_GlobalSetForScript("SMC_BULLISH_BOS", 0.0);
-   if(bearB)
-      GOM_GlobalSetForScript("SMC_BEARISH_BOS", 1.0);
-   else
-      GOM_GlobalSetForScript("SMC_BEARISH_BOS", 0.0);
-
-   const double bosW = 1.38;
-   const double bosOpp = 0.58;
-   if(bullB && !bearB)
-   {
-      techBuy += bosW;
-      techSell -= bosOpp;
-   }
-   else if(bearB && !bullB)
-   {
-      techSell += bosW;
-      techBuy -= bosOpp;
-   }
-}
-
-// Fonctions SMC complémentaires pour GOM
-bool GOM_IsBullishBOS()
-{
-   // Lire depuis SMC_Universal_Enhanced si disponible
-   double bos = GlobalVariableGet("SMC_BULLISH_BOS_" + _Symbol);
-   return bos > 0.5;
-}
-
-bool GOM_IsBearishBOS()
-{
-   // Lire depuis SMC_Universal_Enhanced si disponible
-   double bos = GlobalVariableGet("SMC_BEARISH_BOS_" + _Symbol);
-   return bos > 0.5;
-}
-
-//+------------------------------------------------------------------+
-//| Utilitaires GOM (symbole, GV script, indicateurs, graphe)        |
-//+------------------------------------------------------------------+
-void GOM_SymbolToUpperKey(const string symIn, string &outU)
-{
-outU = symIn;
-if(outU == "") outU = _Symbol;
-StringToUpper(outU);
-}
-
-bool GOM_IsBoomOrGainx(const string symIn = "")
-{
-string u;
-GOM_SymbolToUpperKey(symIn, u);
-return (StringFind(u, "BOOM") >= 0 || StringFind(u, "GAINX") >= 0);
-}
-
-bool GOM_IsCrashOrPainx(const string symIn = "")
-{
-string u;
-GOM_SymbolToUpperKey(symIn, u);
-return (StringFind(u, "CRASH") >= 0 || StringFind(u, "PAINX") >= 0);
-}
-
-bool GOM_IsSyntheticBoomCrashFamily(const string symIn = "")
-{
-return (GOM_IsBoomOrGainx(symIn) || GOM_IsCrashOrPainx(symIn));
-}
-
-// Indices très bruités (Volatility, Step, etc.) : les 6 filtres « classiques » bloquent trop souvent.
-bool GOM_IsVolatilityOrSimilarSynth(const string symIn = "")
-{
-string u;
-GOM_SymbolToUpperKey(symIn, u);
-if(StringFind(u, "VOLATILITY") >= 0) return true;
-if(StringFind(u, "VIX") >= 0) return true;
-if(StringFind(u, "STEP INDEX") >= 0) return true;
-if(StringFind(u, "STEP_INDEX") >= 0) return true;
-if(StringFind(u, "JUMP") >= 0) return true;
-if(StringFind(u, "RANGER") >= 0) return true;
-return false;
-}
-
-bool GOM_IsDirectionAllowedForSymbol(const string direction, const string symIn = "")
-{
-if(direction == "BUY" && GOM_IsCrashOrPainx(symIn)) return false;
-if(direction == "SELL" && GOM_IsBoomOrGainx(symIn)) return false;
-return true;
-}
-
-void GOM_GlobalSetForScript(const string keySuffix, const double value)
-{
-GlobalVariableSet("GOM_SCRIPT_" + _Symbol + "_" + keySuffix, value);
-}
-
-double GOM_GlobalGetForScript(const string keySuffix, const double defVal = 0.0)
-{
-string k = "GOM_SCRIPT_" + _Symbol + "_" + keySuffix;
-if(!GlobalVariableCheck(k)) return defVal;
-return GlobalVariableGet(k);
-}
-
-// Flèches sweep SMC (GOM_DetectSMCSweep) : éviter BUY Boom / SELL Crash quand le dernier signal sweep est opposé.
-bool GOM_ChartHasSmcSweepArrowRecent(const string namePrefix, const int maxAgeSec)
-{
-   if(maxAgeSec <= 0 || namePrefix == "") return false;
-   const datetime tCut = TimeCurrent() - (datetime)maxAgeSec;
-   const int n = ObjectsTotal(0, -1, -1);
-   for(int i = 0; i < n; i++)
-   {
-      string nm = ObjectName(0, i, -1, -1);
-      if(nm == "" || StringFind(nm, namePrefix) != 0) continue;
-      const datetime t0 = (datetime)ObjectGetInteger(0, nm, OBJPROP_TIME);
-      if(t0 >= tCut) return true;
-   }
-   return false;
-}
-
-bool GOM_BoomBuyBlockedByOppositeSmcSweep(const int maxAgeSec)
-{
-   if(!GomPlanArrowRespectSmcSweepConflict) return false;
-   if(!GOM_IsBoomOrGainx()) return false;
-   if(GOM_GlobalGetForScript("SMC_SWEEP_DETECTED", 0.0) > 0.5 && GOM_GlobalGetForScript("SMC_SWEEP_DIRECTION", 0.0) < -0.5)
-      return true;
-   return GOM_ChartHasSmcSweepArrowRecent("SMC_SWEEP_SELL_", maxAgeSec);
-}
-
-bool GOM_CrashSellBlockedByOppositeSmcSweep(const int maxAgeSec)
-{
-   if(!GomPlanArrowRespectSmcSweepConflict) return false;
-   if(!GOM_IsCrashOrPainx()) return false;
-   if(GOM_GlobalGetForScript("SMC_SWEEP_DETECTED", 0.0) > 0.5 && GOM_GlobalGetForScript("SMC_SWEEP_DIRECTION", 0.0) > 0.5)
-      return true;
-   return GOM_ChartHasSmcSweepArrowRecent("SMC_SWEEP_BUY_", maxAgeSec);
-}
-
-double GOM_IndicatorCopyRelease(const int handle, const int bufferIndex)
-{
-if(handle == INVALID_HANDLE) return 0.0;
-double b[];
-ArrayResize(b, 1);
-ArraySetAsSeries(b, true);
-int n = CopyBuffer(handle, bufferIndex, 0, 1, b);
-if(n < 1) return 0.0;
-return b[0];
-}
-
-struct GOM_HandleCacheItem
-{
-   string key;
-   int    handle;
-};
-static GOM_HandleCacheItem g_handleCache[];
-
-int GOM_GetCachedHandle(const string key)
-{
-   for(int i = 0; i < ArraySize(g_handleCache); i++)
-      if(g_handleCache[i].key == key) return g_handleCache[i].handle;
-   return INVALID_HANDLE;
-}
-
-int GOM_SetCachedHandle(const string key, const int h)
-{
-   for(int i = 0; i < ArraySize(g_handleCache); i++)
-   {
-      if(g_handleCache[i].key == key)
-      {
-         if(g_handleCache[i].handle != INVALID_HANDLE && g_handleCache[i].handle != h)
-            IndicatorRelease(g_handleCache[i].handle);
-         g_handleCache[i].handle = h;
-         return h;
-      }
-   }
-   int n = ArraySize(g_handleCache) + 1;
-   ArrayResize(g_handleCache, n);
-   g_handleCache[n - 1].key = key;
-   g_handleCache[n - 1].handle = h;
-   return h;
-}
-
-void GOM_ReleaseAllCachedHandles()
-{
-   for(int i = 0; i < ArraySize(g_handleCache); i++)
-   {
-      if(g_handleCache[i].handle != INVALID_HANDLE)
-         IndicatorRelease(g_handleCache[i].handle);
-      g_handleCache[i].handle = INVALID_HANDLE;
-   }
-}
-
-int GOM_LoadFactorByCharts()
-{
-   if(!AutoScaleRefreshByCharts) return 1;
-   int step = MathMax(1, ChartsPerLoadStep);
-   int charts = 0;
-   long ch = ChartFirst();
-   while(ch >= 0)
-   {
-      charts++;
-      ch = ChartNext(ch);
-   }
-   if(charts <= 0) charts = 1;
-   int f = (charts + step - 1) / step;
-   if(f < 1) f = 1;
-   int fMax = MathMax(1, MaxAutoScaleFactor);
-   if(f > fMax) f = fMax;
-   return f;
-}
-
-int GOM_EffectiveRefreshSeconds(const int baseSec)
-{
-   int b = MathMax(1, baseSec);
-   return MathMax(1, b * GOM_LoadFactorByCharts());
-}
-
-int GOM_SymbolExecSlot(const int modulo)
-{
-   if(modulo <= 1) return 0;
-   int h = 0;
-   int n = StringLen(_Symbol);
-   for(int i = 0; i < n; i++)
-      h = (h * 31 + (int)StringGetCharacter(_Symbol, i)) & 0x7fffffff;
-   return (h % modulo);
-}
-
-bool GOM_ShouldRun(datetime now, datetime &lastTs, const int baseSec)
-{
-   int every = GOM_EffectiveRefreshSeconds(baseSec);
-   if(lastTs > 0 && (now - lastTs) < every)
-      return false;
-
-   if(StaggerExecutionBySymbol && every > 1)
-   {
-      int slot = GOM_SymbolExecSlot(every);
-      if(((int)(now % every)) != slot)
-         return false;
-   }
-
-   lastTs = now;
-   return true;
-}
-
-double GOM_ATRValue(const string sym, const ENUM_TIMEFRAMES tf, const int period)
-{
-string k = "ATR|" + sym + "|" + IntegerToString((int)tf) + "|" + IntegerToString(period);
-int h = GOM_GetCachedHandle(k);
-if(h == INVALID_HANDLE)
-   h = GOM_SetCachedHandle(k, iATR(sym, tf, period));
-return GOM_IndicatorCopyRelease(h, 0);
-}
-
-//+------------------------------------------------------------------+
-//| Fonctions de volume pour GOM                                    |
-//+------------------------------------------------------------------+
-
-double GOM_GetVolume(int shift, ENUM_TIMEFRAMES timeframe)
-{
-long volume[];
-ArraySetAsSeries(volume, true);
-if(CopyTickVolume(_Symbol, timeframe, shift, 1, volume) > 0) {
-return (double)volume[0];
-}
-return 0.0;
-}
-
-double GOM_GetAverageVolume(int period, ENUM_TIMEFRAMES timeframe)
-{
-long volume[];
-ArraySetAsSeries(volume, true);
-if(CopyTickVolume(_Symbol, timeframe, 0, period, volume) > 0) {
-double sum = 0.0;
-for(int i = 0; i < period; i++) {
-sum += (double)volume[i];
-}
-return sum / period;
-}
-return 0.0;
-}
-
-double GOM_EMAValue(const string sym, const ENUM_TIMEFRAMES tf, const int period)
-{
-string k = "EMA|" + sym + "|" + IntegerToString((int)tf) + "|" + IntegerToString(period);
-int h = GOM_GetCachedHandle(k);
-if(h == INVALID_HANDLE)
-   h = GOM_SetCachedHandle(k, iMA(sym, tf, period, 0, MODE_EMA, PRICE_CLOSE));
-return GOM_IndicatorCopyRelease(h, 0);
-}
-
-double GOM_RSIValue(const string sym, const ENUM_TIMEFRAMES tf, const int period)
-{
-string k = "RSI|" + sym + "|" + IntegerToString((int)tf) + "|" + IntegerToString(period);
-int h = GOM_GetCachedHandle(k);
-if(h == INVALID_HANDLE)
-   h = GOM_SetCachedHandle(k, iRSI(sym, tf, period, PRICE_CLOSE));
-return GOM_IndicatorCopyRelease(h, 0);
-}
-
-void GOM_UpdateAdvancedTrendMetrics(const double bid)
-{
-GOM_GlobalSetForScript("TV_SUPERTREND_DIR", 0.0);
-GOM_GlobalSetForScript("TV_KELTNER_POS", 0.0);
-GOM_GlobalSetForScript("TV_DONCHIAN_SIG", 0.0);
-if(!EnableAdvancedIndicators || bid <= 0.0) return;
-
-static datetime s_lastAdvancedUpdate = 0;
-datetime now = TimeCurrent();
-if(s_lastAdvancedUpdate > 0 && (now - s_lastAdvancedUpdate) < MathMax(1, AdvancedIndicatorsRefreshSeconds))
-   return;
-s_lastAdvancedUpdate = now;
-
-ENUM_TIMEFRAMES tf = AdvancedIndicatorsTF;
-int n = MathMax(35, DonchianPeriod + 5);
-MqlRates rr[];
-ArraySetAsSeries(rr, true);
-int copied = CopyRates(_Symbol, tf, 0, n, rr);
-if(copied < MathMax(20, DonchianPeriod + 2)) return;
-
-double atr = GOM_ATRValue(_Symbol, tf, MathMax(5, SupertrendAtrPeriod));
-double ema = GOM_EMAValue(_Symbol, tf, MathMax(5, KeltnerEmaPeriod));
-if(atr <= 0.0 || ema <= 0.0) return;
-
-// Supertrend (version légère): direction selon close vs bandes ATR autour de hl2.
-double hl2 = (rr[1].high + rr[1].low) * 0.5;
-double stUpper = hl2 + SupertrendAtrMult * atr;
-double stLower = hl2 - SupertrendAtrMult * atr;
-double stDir = 0.0;
-double c1 = rr[1].close;
-if(c1 > stUpper) stDir = 1.0;
-else if(c1 < stLower) stDir = -1.0;
-else stDir = (c1 >= ema ? 0.5 : -0.5);
-GOM_GlobalSetForScript("TV_SUPERTREND_DIR", stDir);
-
-// Keltner position: -1..+1, prix vs canal.
-double kcUpper = ema + KeltnerAtrMult * atr;
-double kcLower = ema - KeltnerAtrMult * atr;
-double kcPos = 0.0;
-if(kcUpper > kcLower)
-   kcPos = ((c1 - kcLower) / (kcUpper - kcLower)) * 2.0 - 1.0;
-if(kcPos > 1.5) kcPos = 1.5;
-if(kcPos < -1.5) kcPos = -1.5;
-GOM_GlobalSetForScript("TV_KELTNER_POS", kcPos);
-
-// Donchian breakout signal.
-int dcN = MathMax(5, DonchianPeriod);
-double hh = rr[1].high, ll = rr[1].low;
-for(int i = 1; i <= dcN && i < copied; i++)
-{
-   if(rr[i].high > hh) hh = rr[i].high;
-   if(rr[i].low < ll) ll = rr[i].low;
-}
-double dcSig = 0.0;
-if(c1 > hh - atr * 0.05) dcSig = 1.0;
-else if(c1 < ll + atr * 0.05) dcSig = -1.0;
-GOM_GlobalSetForScript("TV_DONCHIAN_SIG", dcSig);
-}
-
-void GOM_AddAdvancedIndicatorsVerdictBias(double &techBuy, double &techSell)
-{
-if(!EnableAdvancedIndicators || !AdvancedIndicatorsInfluenceVerdict) return;
-double w = AdvancedIndicatorsVerdictWeight;
-if(w <= 0.0) return;
-
-double st = GOM_GlobalGetForScript("TV_SUPERTREND_DIR", 0.0);
-double kc = GOM_GlobalGetForScript("TV_KELTNER_POS", 0.0);
-double dc = GOM_GlobalGetForScript("TV_DONCHIAN_SIG", 0.0);
-
-if(st > 0.0) techBuy += 0.20 * w * MathAbs(st);
-else if(st < 0.0) techSell += 0.20 * w * MathAbs(st);
-
-if(kc > 0.10) techBuy += 0.22 * w * MathMin(1.0, MathAbs(kc));
-else if(kc < -0.10) techSell += 0.22 * w * MathMin(1.0, MathAbs(kc));
-
-if(dc > 0.0) techBuy += 0.24 * w;
-else if(dc < 0.0) techSell += 0.24 * w;
-}
-
-double GOM_CombinedTradeConfidence(const double filterQuality, const double spikeProb)
-{
-double c = ReadGVDirect("SMC_UNIVERSAL_" + _Symbol + "_SERVER_AI_CONF", 0.0);
-if(c > 1.0) c /= 100.0;
-double ext = g_lastExtAiConf;
-if(ext > 1.0) ext /= 100.0;
-double fq = filterQuality;
-if(fq < 0.0) fq = 0.0;
-if(fq > 1.0) fq = 1.0;
-double sp = spikeProb;
-if(sp < 0.0) sp = 0.0;
-if(sp > 1.0) sp = 1.0;
-double m = MathMax(MathMax(c, ext), MathMax(fq, sp));
-if(m > 1.0) m = 1.0;
-return m;
-}
-
-void GOM_AddEmaRibbonScriptTfBias(const double bid, double &techBuy, double &techSell)
-{
-int ribbonPeriods[4] = {9, 21, 13, 50};
-int nAbove = 0;
-for(int ri = 0; ri < 4; ri++)
-{
-double em = GOM_EMAValue(_Symbol, ScriptEmaTF, ribbonPeriods[ri]);
-if(em <= 0.0) continue;
-if(bid > em)
-{
-techBuy += 0.15;
-nAbove++;
-}
-else techSell += 0.15;
-}
-if(nAbove >= 4) techBuy += 0.25;
-else if(nAbove <= 0) techSell += 0.25;
-}
-
-// Met à jour les GV pour BB/VWAP (partagé: dessin + verdict + spike squeeze).
-void GOM_UpdateBollingerVwapMetrics(const double bid)
-{
-GOM_GlobalSetForScript("VWAP", 0.0);
-GOM_GlobalSetForScript("VWAP_DIST_PCT", 0.0);
-GOM_GlobalSetForScript("BB_UPPER", 0.0);
-GOM_GlobalSetForScript("BB_MID", 0.0);
-GOM_GlobalSetForScript("BB_LOWER", 0.0);
-GOM_GlobalSetForScript("BB_PCTB", 0.5);
-GOM_GlobalSetForScript("BB_WIDTH_PCT", 0.0);
-GOM_GlobalSetForScript("BB_SQUEEZE", 0.0);
-if(bid <= 0.0) return;
-
-double vwap = 0.0;
-if(ShowSessionVWAP)
-{
-MqlRates rv[];
-int nv = CopyRates(_Symbol, PERIOD_M1, 0, MathMin(3000, MathMax(100, VWAPCurveBars)), rv);
-if(nv >= 3)
-{
-ArraySetAsSeries(rv, true);
-datetime day0 = StringToTime(TimeToString(TimeCurrent(), TIME_DATE));
-double sumPV = 0.0, sumV = 0.0;
-for(int i = 0; i < nv; i++)
-{
-if(rv[i].time < day0) break;
-double tp = (rv[i].high + rv[i].low + rv[i].close) / 3.0;
-double vv = (double)rv[i].tick_volume;
-if(vv < 1.0) vv = 1.0;
-sumPV += tp * vv;
-sumV += vv;
-}
-if(sumV > 0.0)
-{
-vwap = sumPV / sumV;
-GOM_GlobalSetForScript("VWAP", vwap);
-double distPct = (vwap > 0.0) ? ((bid - vwap) / vwap * 100.0) : 0.0;
-GOM_GlobalSetForScript("VWAP_DIST_PCT", distPct);
-}
-}
-}
-
-string kBB = "BB|" + _Symbol + "|" + IntegerToString((int)BollingerTF) + "|" + IntegerToString(BollingerPeriod) + "|" + DoubleToString(BollingerDeviation, 2);
-int hB = GOM_GetCachedHandle(kBB);
-if(hB == INVALID_HANDLE)
-   hB = GOM_SetCachedHandle(kBB, iBands(_Symbol, BollingerTF, BollingerPeriod, 0, BollingerDeviation, PRICE_CLOSE));
-if(hB != INVALID_HANDLE)
-{
-double bu[], bm[], bl[];
-ArrayResize(bu, 1);
-ArrayResize(bm, 1);
-ArrayResize(bl, 1);
-ArraySetAsSeries(bu, true);
-ArraySetAsSeries(bm, true);
-ArraySetAsSeries(bl, true);
-bool ok = (CopyBuffer(hB, 1, 0, 1, bu) >= 1 && CopyBuffer(hB, 0, 0, 1, bm) >= 1 && CopyBuffer(hB, 2, 0, 1, bl) >= 1);
-if(ok && bm[0] > 0.0 && bu[0] > bl[0])
-{
-double U = bu[0], M = bm[0], L = bl[0];
-GOM_GlobalSetForScript("BB_UPPER", U);
-GOM_GlobalSetForScript("BB_MID", M);
-GOM_GlobalSetForScript("BB_LOWER", L);
-double pctB = (bid - L) / (U - L);
-if(pctB < 0.0) pctB = 0.0;
-if(pctB > 1.0) pctB = 1.0;
-GOM_GlobalSetForScript("BB_PCTB", pctB);
-double widthPct = (U - L) / M * 100.0;
-GOM_GlobalSetForScript("BB_WIDTH_PCT", widthPct);
-double atrBb = GOM_ATRValue(_Symbol, BollingerTF, 14);
-if(atrBb > 0.0 && (U - L) < atrBb * 1.28)
-GOM_GlobalSetForScript("BB_SQUEEZE", 1.0);
-}
-}
-}
-
-void GOM_AddBollingerVwapVerdictBias(const double bid, const bool isBoom, const bool isCrash,
-   double &techBuy, double &techSell)
-{
-if(!BollingerVwapInfluenceVerdict || bid <= 0.0) return;
-double w = BollingerVwapVerdictWeight;
-if(w <= 0.0) return;
-
-double vwap = GOM_GlobalGetForScript("VWAP", 0.0);
-if(vwap > 0.0 && ShowSessionVWAP)
-{
-double bp = (bid - vwap) / vwap;
-double mag = MathMin(1.0, MathAbs(bp) / 0.0025);
-if(bp > 0.00025)
-techBuy += 0.24 * w * mag;
-else if(bp < -0.00025)
-techSell += 0.24 * w * mag;
-}
-
-double pctB = GOM_GlobalGetForScript("BB_PCTB", 0.5);
-double sq = GOM_GlobalGetForScript("BB_SQUEEZE", 0.0);
-if(sq > 0.5)
-{
-if(isBoom) techBuy += 0.14 * w;
-if(isCrash) techSell += 0.14 * w;
-if(!isBoom && !isCrash)
-{
-techBuy += 0.06 * w;
-techSell += 0.06 * w;
-}
-}
-
-if(isBoom)
-{
-if(pctB < 0.14) techBuy += 0.22 * w;
-else if(pctB > 0.86) techBuy += 0.12 * w;
-else if(pctB >= 0.42 && pctB <= 0.58) techBuy += 0.08 * w;
-}
-else if(isCrash)
-{
-if(pctB > 0.86) techSell += 0.22 * w;
-else if(pctB < 0.14) techSell += 0.12 * w;
-else if(pctB >= 0.42 && pctB <= 0.58) techSell += 0.08 * w;
-}
-else
-{
-if(pctB < 0.22) techBuy += 0.16 * w;
-else if(pctB > 0.78) techSell += 0.16 * w;
-}
-}
-
-// Score 0..1 : marge de gap, spike aligné, confluence KOLA, alignement MTF, qualité filtres.
-double GOM_ComputeEntryQualityScore(const string dir, const double gap, const double gapTh,
-   const string spikeDir, const double spikeProb, const bool spikeOpp,
-   const double filterQuality, const double levelConfluence,
-   const int bM15, const int bM30, const int bH1, const int bH4)
-{
-double wSum = 0.0, wTot = 0.0;
-double gt = MathMax(1e-6, gapTh);
-
-double gapN = 0.0;
-if(dir == "BUY" && gap > gt)
-gapN = MathMin(1.0, (gap - gt) / (gt * 2.5));
-else if(dir == "SELL" && gap < -gt)
-gapN = MathMin(1.0, (-gap - gt) / (gt * 2.5));
-wSum += 0.20 * gapN;
-wTot += 0.20;
-
-bool spAl = (dir == "BUY" && spikeDir == "BUY") || (dir == "SELL" && spikeDir == "SELL");
-double spN = 0.0;
-if(spAl)
-{
-spN = MathMin(1.0, spikeProb / 0.72);
-if(spikeOpp) spN = MathMax(spN, 0.74);
-}
-else if(spikeProb > 0.0)
-spN = 0.14 * MathMin(1.0, spikeProb / 0.55);
-wSum += 0.30 * spN;
-wTot += 0.30;
-
-double lcN = MathMin(1.0, levelConfluence / 0.72);
-wSum += 0.24 * lcN;
-wTot += 0.24;
-
-double mtfN = 0.0;
-if(dir == "BUY")
-{
-if(bM15 > 0) mtfN += 0.25;
-else if(bM15 == 0) mtfN += 0.12;
-if(bM30 > 0) mtfN += 0.25;
-else if(bM30 == 0) mtfN += 0.12;
-if(bH1 > 0) mtfN += 0.25;
-else if(bH1 == 0) mtfN += 0.12;
-if(bH4 > 0) mtfN += 0.25;
-else if(bH4 == 0) mtfN += 0.12;
-}
-else if(dir == "SELL")
-{
-if(bM15 < 0) mtfN += 0.25;
-else if(bM15 == 0) mtfN += 0.12;
-if(bM30 < 0) mtfN += 0.25;
-else if(bM30 == 0) mtfN += 0.12;
-if(bH1 < 0) mtfN += 0.25;
-else if(bH1 == 0) mtfN += 0.12;
-if(bH4 < 0) mtfN += 0.25;
-else if(bH4 == 0) mtfN += 0.12;
-}
-mtfN = MathMin(1.0, mtfN);
-wSum += 0.16 * mtfN;
-wTot += 0.16;
-
-double fq = filterQuality;
-if(fq < 0.0) fq = 0.0;
-if(fq > 1.0) fq = 1.0;
-wSum += 0.10 * fq;
-wTot += 0.10;
-
-if(wTot <= 1e-9) return 0.0;
-return wSum / wTot;
-}
-
-bool GOM_EntryQualityRelaxed(const string dir, const string spikeDir, const double spikeProb,
-   const bool spikeOpp, const double levelConfluence)
-{
-bool spAl = (dir == "BUY" && spikeDir == "BUY") || (dir == "SELL" && spikeDir == "SELL");
-if(EntryQualityRelaxOnSpikeSetup && spAl && spikeOpp &&
-   spikeProb + 1e-9 >= SpikeAlertMinProbability)
-return true;
-if(EntryQualityRelaxOnHighConfluence && levelConfluence + 1e-9 >= EntryQualityConfluenceRelaxMin)
-return true;
-return false;
-}
-
-void GOM_DeleteObjectsByPrefixIfExists(const string prefix, const int maxObj)
-{
-for(int z = 0; z < maxObj; z++)
-ObjectDelete(0, prefix + IntegerToString(z));
-}
-
-void GOM_DrawBandSegment(const string prefix, const int k,
-   const datetime tOld, const double vOld, const datetime tNew, const double vNew,
-   const color clr, const int style, const int width, const bool back)
-{
-if(tOld <= 0 || tNew <= 0) return;
-if(vOld <= 0.0 || vNew <= 0.0) return;
-string nm = prefix + IntegerToString(k);
-if(ObjectFind(0, nm) < 0)
-ObjectCreate(0, nm, OBJ_TREND, 0, tOld, vOld, tNew, vNew);
-else
-{
-ObjectMove(0, nm, 0, tOld, vOld);
-ObjectMove(0, nm, 1, tNew, vNew);
-}
-ObjectSetInteger(0, nm, OBJPROP_COLOR, clr);
-ObjectSetInteger(0, nm, OBJPROP_STYLE, style);
-ObjectSetInteger(0, nm, OBJPROP_WIDTH, width);
-ObjectSetInteger(0, nm, OBJPROP_RAY_RIGHT, false);
-ObjectSetInteger(0, nm, OBJPROP_RAY_LEFT, false);
-ObjectSetInteger(0, nm, OBJPROP_BACK, back);
-ObjectSetInteger(0, nm, OBJPROP_SELECTABLE, false);
-ObjectSetInteger(0, nm, OBJPROP_HIDDEN, false);
-}
-
-void DrawAndPublishBollingerVWAP()
-{
-GOM_DeleteObjectsByPrefixIfExists("GOM_BB_UX_", 2100);
-GOM_DeleteObjectsByPrefixIfExists("GOM_BB_MX_", 2100);
-GOM_DeleteObjectsByPrefixIfExists("GOM_BB_LX_", 2100);
-GOM_DeleteObjectsByPrefixIfExists("GOM_VWAPX_", 3200);
-
-int nSeg = BollingerCurveBars;
-if(nSeg < 20) nSeg = 20;
-if(nSeg > 2000) nSeg = 2000;
-
-if(ShowBollingerBands)
-{
-int barsTf = iBars(_Symbol, BollingerTF);
-if(barsTf >= 3)
-{
-if(nSeg > barsTf - 1) nSeg = barsTf - 1;
-int hB = iBands(_Symbol, BollingerTF, BollingerPeriod, 0, BollingerDeviation, PRICE_CLOSE);
-if(hB != INVALID_HANDLE)
-{
-double bu[], bm[], bl[];
-int need = nSeg + 1;
-ArrayResize(bu, need);
-ArrayResize(bm, need);
-ArrayResize(bl, need);
-ArraySetAsSeries(bu, true);
-ArraySetAsSeries(bm, true);
-ArraySetAsSeries(bl, true);
-int nc = CopyBuffer(hB, 1, 0, need, bu);
-CopyBuffer(hB, 0, 0, need, bm);
-CopyBuffer(hB, 2, 0, need, bl);
-IndicatorRelease(hB);
-if(nc >= 2)
-{
-for(int k = 0; k < nc - 1; k++)
-{
-datetime tNew = iTime(_Symbol, BollingerTF, k);
-datetime tOld = iTime(_Symbol, BollingerTF, k + 1);
-if(tNew <= 0 || tOld <= 0) continue;
-GOM_DrawBandSegment("GOM_BB_UX_", k, tOld, bu[k + 1], tNew, bu[k], BollingerUpperColor, STYLE_SOLID, 1, true);
-GOM_DrawBandSegment("GOM_BB_MX_", k, tOld, bm[k + 1], tNew, bm[k], BollingerMidColor, STYLE_DOT, 1, true);
-GOM_DrawBandSegment("GOM_BB_LX_", k, tOld, bl[k + 1], tNew, bl[k], BollingerLowerColor, STYLE_SOLID, 1, true);
-}
-}
-}
-}
-}
-
-if(ShowSessionVWAP)
-{
-MqlRates rv[];
-int nv = CopyRates(_Symbol, PERIOD_M1, 0, MathMin(3000, MathMax(120, VWAPCurveBars)), rv);
-if(nv >= 5)
-{
-ArraySetAsSeries(rv, true);
-datetime day0 = StringToTime(TimeToString(TimeCurrent(), TIME_DATE));
-int imax = nv;
-for(int i = 0; i < nv; i++)
-{
-if(rv[i].time < day0)
-{
-imax = i;
-break;
-}
-}
-int segLim = MathMin(imax * 2 + 8, 3200);
-double cumPV = 0.0, cumV = 0.0;
-datetime tPrev = 0;
-double vwPrev = 0.0;
-int segIdx = 0;
-for(int j = imax - 1; j >= 0; j--)
-{
-double tp = (rv[j].high + rv[j].low + rv[j].close) / 3.0;
-double vol = (double)rv[j].tick_volume;
-if(vol < 1.0) vol = 1.0;
-cumPV += tp * vol;
-cumV += vol;
-if(cumV <= 0.0) continue;
-double vwNow = cumPV / cumV;
-datetime tNow = rv[j].time;
-if(tPrev > 0 && vwPrev > 0.0 && segIdx < segLim && segLim >= 2)
-GOM_DrawBandSegment("GOM_VWAPX_", segIdx++, tPrev, vwPrev, tNow, vwNow, VWAPLineColor, STYLE_SOLID, 2, false);
-tPrev = tNow;
-vwPrev = vwNow;
-}
-}
-}
-}
-
-// tag: 0=aucun niveau, 1=M5, 2=H1, 3=M30, 4=M15, 5=H4, -1=prix trop loin de toutes les zones (> maxNear)
-void GOM_ResolveKolaAnchorBuy(const double bid, const double atr,
-   const double m5, const double h1, const double m30, const double m15, const double h4,
-   const double maxNearAtrMult, int &tagOut, double &levelOut)
-{
-tagOut = 0;
-levelOut = 0.0;
-if(bid <= 0.0) return;
-double atrU = (atr > 0.0) ? atr : bid * 0.0015;
-double maxNear = atrU * MathMax(0.35, maxNearAtrMult);
-double minD = DBL_MAX;
-double lv[6];
-lv[1] = m5; lv[2] = h1; lv[3] = m30; lv[4] = m15; lv[5] = h4;
-for(int t = 1; t <= 5; t++)
-{
-if(lv[t] <= 0.0) continue;
-double d = MathAbs(bid - lv[t]);
-if(d < minD) minD = d;
-}
-if(minD >= DBL_MAX * 0.5) return;
-if(minD > maxNear) { tagOut = -1; return; }
-double eps = atrU * 0.035;
-for(int t2 = 1; t2 <= 5; t2++)
-{
-if(lv[t2] <= 0.0) continue;
-if(MathAbs(MathAbs(bid - lv[t2]) - minD) <= eps)
-{
-tagOut = t2;
-levelOut = lv[t2];
-return;
-}
-}
-}
-
-void GOM_ResolveKolaAnchorSell(const double bid, const double atr,
-   const double m5, const double h1, const double m30, const double m15, const double h4,
-   const double maxNearAtrMult, int &tagOut, double &levelOut)
-{
-GOM_ResolveKolaAnchorBuy(bid, atr, m5, h1, m30, m15, h4, maxNearAtrMult, tagOut, levelOut);
-}
-
-string GOM_KolaAnchorTagToStr(const int tag)
-{
-if(tag == 1) return "M5";
-if(tag == 2) return "H1";
-if(tag == 3) return "M30";
-if(tag == 4) return "M15";
-if(tag == 5) return "H4";
-if(tag == -1) return "FAR";
-return "NONE";
-}
-
-double GOM_SpikeBlinkEffectiveTh(const double baseTh)
-{
-double th = MathMax(0.22, MathMin(0.92, baseTh));
-double lead = GOM_GlobalGetForScript("SPIKE_LEAD_RAW", 0.0);
-double cap = MathMax(0.0, MathMin(0.22, SpikeBlinkLeadThAdjMax));
-double adj = MathMax(0.0, lead - 0.30) * 0.32;
-if(adj > cap) adj = cap;
-th -= adj;
-if(th < 0.20) th = 0.20;
-return th;
-}
-
-double GOM_ADXValue(const string sym, const ENUM_TIMEFRAMES tf, const int adxPeriod)
-{
-return GOM_IndicatorCopyRelease(iADX(sym, tf, adxPeriod), 0);
-}
-
-double GOM_StochMain(const string sym, const ENUM_TIMEFRAMES tf, const int k, const int d, const int slowing)
-{
-return GOM_IndicatorCopyRelease(iStochastic(sym, tf, k, d, slowing, MODE_SMA, STO_LOWHIGH), 0);
-}
-
-int GOM_SecondsToBarClose(const string sym, const ENUM_TIMEFRAMES tf)
-{
-datetime t0 = iTime(sym, tf, 0);
-if(t0 <= 0) return 0;
-int sec = (int)PeriodSeconds(tf);
-return (int)(t0 + (datetime)sec - TimeCurrent());
-}
-
-double GOM_SpreadPoints(void)
-{
-double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-double pt = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
-if(pt <= 0.0 || bid <= 0.0 || ask <= 0.0) return 0.0;
-return (ask - bid) / pt;
-}
-
-string GOM_FormatSpreadForDash()
-{
-double sp = GOM_SpreadPoints();
-if(sp <= 0.0) return "--";
-if(sp >= 10000.0) return DoubleToString(sp / 1000.0, 1) + "k";
-if(sp >= 1000.0)  return DoubleToString(sp, 0);
-if(sp >= 100.0)   return DoubleToString(sp, 1);
-return DoubleToString(sp, 2);
-}
-
-bool GOM_MACDMainAboveSignal(const string sym, const ENUM_TIMEFRAMES tf, bool &mainAboveSignal)
-{
-int h = iMACD(sym, tf, 12, 26, 9, PRICE_CLOSE);
-if(h == INVALID_HANDLE) return false;
-double m0[], m1[];
-ArrayResize(m0, 1);
-ArrayResize(m1, 1);
-ArraySetAsSeries(m0, true);
-ArraySetAsSeries(m1, true);
-bool ok = (CopyBuffer(h, 0, 0, 1, m0) >= 1 && CopyBuffer(h, 1, 0, 1, m1) >= 1);
-IndicatorRelease(h);
-if(!ok) return false;
-mainAboveSignal = (m0[0] >= m1[0]);
-return true;
-}
-
-// Score technique identique a la couche Python "decision_simplified" (avant enhance_decision_with_ml).
-void GOM_ComputeServerStyleTechScores(const double rsi,
-   const double ef_m1, const double es_m1,
-   const double ef_m5, const double es_m5,
-   const double ef_h1, const double es_h1,
-   double &buyScore, double &sellScore)
-{
-buyScore = 0.0;
-sellScore = 0.0;
-if(rsi > 0.0)
-{
-if(rsi < 30.0) buyScore += 0.15;
-else if(rsi > 70.0) sellScore += 0.15;
-else if(rsi >= 30.0 && rsi <= 40.0) buyScore += 0.08;
-else if(rsi >= 60.0 && rsi <= 70.0) sellScore += 0.08;
-}
-if(es_m1 > 0.0 && ef_m1 > 0.0)
-{
-double d = ef_m1 - es_m1;
-double st = MathAbs(d) / es_m1;
-if(d > 0.0) buyScore += 0.20 * MathMin(1.0, st * 100.0);
-else if(d < 0.0) sellScore += 0.20 * MathMin(1.0, st * 100.0);
-}
-if(es_h1 > 0.0 && ef_h1 > 0.0)
-{
-double d = ef_h1 - es_h1;
-double st = MathAbs(d) / es_h1;
-if(d > 0.0) buyScore += 0.35 * MathMin(1.0, st * 50.0);
-else if(d < 0.0) sellScore += 0.35 * MathMin(1.0, st * 50.0);
-}
-if(es_m5 > 0.0 && ef_m5 > 0.0)
-{
-double d = ef_m5 - es_m5;
-double st = MathAbs(d) / es_m5;
-if(d > 0.0) buyScore += 0.25 * MathMin(1.0, st * 75.0);
-else if(d < 0.0) sellScore += 0.25 * MathMin(1.0, st * 75.0);
-}
-}
-
-string GOM_EmaBiasTag(const double ef, const double es)
-{
-if(ef <= 0.0 || es <= 0.0) return "--";
-if(ef > es) return "bull";
-if(ef < es) return "bear";
-return "flat";
-}
-
-void GOM_PublishMLFeatureGlobals()
-{
-const string legacyBg = "GOM_MLFP_BG";
-const string legacyTxt = "GOM_MLFP_TXT";
-ObjectDelete(0, legacyBg);
-ObjectDelete(0, legacyTxt);
-
-double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-if(bid <= 0.0) bid = iClose(_Symbol, PERIOD_CURRENT, 0);
-if(ask <= 0.0) ask = bid;
-
-double rsi = GOM_RSIValue(_Symbol, PERIOD_M1, 14);
-double atr = GOM_ATRValue(_Symbol, PERIOD_M1, 14);
-double ef1 = GOM_EMAValue(_Symbol, PERIOD_M1, 9);
-double es1 = GOM_EMAValue(_Symbol, PERIOD_M1, 21);
-double ef5 = GOM_EMAValue(_Symbol, PERIOD_M5, 9);
-double es5 = GOM_EMAValue(_Symbol, PERIOD_M5, 21);
-double efh = GOM_EMAValue(_Symbol, PERIOD_H1, 9);
-double esh = GOM_EMAValue(_Symbol, PERIOD_H1, 21);
-
-double buySc = 0.0, sellSc = 0.0;
-GOM_ComputeServerStyleTechScores(rsi, ef1, es1, ef5, es5, efh, esh, buySc, sellSc);
-
-GOM_GlobalSetForScript("FEAT_BID", bid);
-GOM_GlobalSetForScript("FEAT_ASK", ask);
-GOM_GlobalSetForScript("FEAT_RSI_M1_14", rsi);
-GOM_GlobalSetForScript("FEAT_ATR_M1_14", atr);
-GOM_GlobalSetForScript("FEAT_EMA_FAST_M1", ef1);
-GOM_GlobalSetForScript("FEAT_EMA_SLOW_M1", es1);
-GOM_GlobalSetForScript("FEAT_EMA_FAST_M5", ef5);
-GOM_GlobalSetForScript("FEAT_EMA_SLOW_M5", es5);
-GOM_GlobalSetForScript("FEAT_EMA_FAST_H1", efh);
-GOM_GlobalSetForScript("FEAT_EMA_SLOW_H1", esh);
-GOM_GlobalSetForScript("TECH_SERVER_BUY_SCORE", buySc);
-GOM_GlobalSetForScript("TECH_SERVER_SELL_SCORE", sellSc);
-double hint = 0.0;
-if(buySc > sellSc + 1e-8) hint = 1.0;
-else if(sellSc > buySc + 1e-8) hint = -1.0;
-GOM_GlobalSetForScript("TECH_SERVER_HINT_NUM", hint);
-}
-
-// Label multi-ligne bas-droite (si pas de cellules dédiées sur la grille).
-void GOM_DrawMLInfoFloatingLabel()
-{
-const string brName = "GOM_MLINFO_BR";
-if(!ShowMLFeatureInfo)
-{
-ObjectDelete(0, brName);
-return;
-}
-
-double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-if(bid <= 0.0) bid = iClose(_Symbol, PERIOD_CURRENT, 0);
-if(ask <= 0.0) ask = bid;
-double rsi = GOM_RSIValue(_Symbol, PERIOD_M1, 14);
-double atr = GOM_ATRValue(_Symbol, PERIOD_M1, 14);
-double ef1 = GOM_EMAValue(_Symbol, PERIOD_M1, 9);
-double es1 = GOM_EMAValue(_Symbol, PERIOD_M1, 21);
-double ef5 = GOM_EMAValue(_Symbol, PERIOD_M5, 9);
-double es5 = GOM_EMAValue(_Symbol, PERIOD_M5, 21);
-double efh = GOM_EMAValue(_Symbol, PERIOD_H1, 9);
-double esh = GOM_EMAValue(_Symbol, PERIOD_H1, 21);
-double buySc = GOM_GlobalGetForScript("TECH_SERVER_BUY_SCORE", 0.0);
-double sellSc = GOM_GlobalGetForScript("TECH_SERVER_SELL_SCORE", 0.0);
-string biasFeat = "HOLD";
-if(buySc > sellSc + 1e-8) biasFeat = "BUY";
-else if(sellSc > buySc + 1e-8) biasFeat = "SELL";
-
-double srvConf = ReadGVDirect("SMC_UNIVERSAL_" + _Symbol + "_SERVER_AI_CONF", 0.0);
-double srvTs = ReadGVDirect("SMC_UNIVERSAL_" + _Symbol + "_SERVER_AI_LAST_TS", 0.0);
-double srvAct = ReadGVDirect("SMC_UNIVERSAL_" + _Symbol + "_SERVER_AI_ACTION_NUM", 0.0);
-double srvValid = ReadGVDirect("SMC_UNIVERSAL_" + _Symbol + "_SERVER_AI_VALID", 0.0);
-if(srvConf > 1.0) srvConf /= 100.0;
-
-string srvDir = (srvAct > 0.5 ? "BUY" : (srvAct < -0.5 ? "SELL" : "-"));
-
-string srvAgeTxt = "--";
-if(srvTs > 0.0) {
-   int sa = (int)(TimeCurrent() - (datetime)srvTs);
-   if(sa >= 0 && sa < 864000) srvAgeTxt = IntegerToString(sa) + "s";
-}
-
-int atrDg = (atr > 0.0 && atr < 1.0) ? 5 : _Digits;
-string txt = "SRV /decision: " + srvDir + " " + DoubleToString(srvConf * 100.0, 1) + "%";
-txt += (srvValid > 0.5 ? " OK " : " -- ");
-txt += srvAgeTxt + "\n";
-txt += "BA " + DoubleToString(bid, _Digits) + "/" + DoubleToString(ask, _Digits);
-txt += "  RSI " + DoubleToString(rsi, 1) + " ATR " + DoubleToString(atr, atrDg) + "\n";
-txt += "EMA M1:" + GOM_EmaBiasTag(ef1, es1) + " M5:" + GOM_EmaBiasTag(ef5, es5);
-txt += " H1:" + GOM_EmaBiasTag(efh, esh) + "\n";
-txt += "Pre-ML B/S " + DoubleToString(buySc, 2) + " / " + DoubleToString(sellSc, 2) + " => " + biasFeat;
-
-if(ObjectFind(0, brName) < 0)
-ObjectCreate(0, brName, OBJ_LABEL, 0, 0, 0);
-ObjectSetInteger(0, brName, OBJPROP_CORNER, CORNER_RIGHT_LOWER);
-ObjectSetInteger(0, brName, OBJPROP_ANCHOR, ANCHOR_RIGHT_LOWER);
-ObjectSetInteger(0, brName, OBJPROP_XDISTANCE, MathMax(4, MLFeatureInfoMarginRight));
-ObjectSetInteger(0, brName, OBJPROP_YDISTANCE, MathMax(4, MLFeatureInfoMarginBottom));
-ObjectSetInteger(0, brName, OBJPROP_COLOR, clrGainsboro);
-ObjectSetInteger(0, brName, OBJPROP_FONTSIZE, MathMax(7, MLFeatureFontSize));
-ObjectSetString(0, brName, OBJPROP_FONT, "Consolas");
-ObjectSetString(0, brName, OBJPROP_TEXT, txt);
-ObjectSetInteger(0, brName, OBJPROP_BACK, false);
-ObjectSetInteger(0, brName, OBJPROP_SELECTABLE, false);
-ObjectSetInteger(0, brName, OBJPROP_HIDDEN, false);
-ObjectSetInteger(0, brName, OBJPROP_ZORDER, MLFeatureInfoZOrder);
-}
-
-color GOM_VerdictCellColor(const string quality)
-{
-if(quality == "PERFECT BUY") return (color)0x1E7A3A;
-if(quality == "PERFECT SELL") return (color)0x8B2020;
-if(quality == "GOOD BUY") return (color)0x3FAE63;
-if(quality == "GOOD SELL") return (color)0xB54552;
-if(quality == "BUY") return (color)0x58B874;
-if(quality == "SELL") return (color)0xC35A64;
-return (color)0x4D4D4D;
-}
-
-double GOM_VerdictNumFromQuality(const string quality)
-{
-if(quality == "PERFECT BUY") return 3.0;
-if(quality == "GOOD BUY") return 2.0;
-if(quality == "BUY") return 1.0;
-if(quality == "PERFECT SELL") return -3.0;
-if(quality == "GOOD SELL") return -2.0;
-if(quality == "SELL") return -1.0;
-return 0.0;
-}
-
-void GOM_DeleteChartObjectsByPrefix(const string prefix)
-{
-const int total = ObjectsTotal(0, -1, -1);
-for(int i = total - 1; i >= 0; i--)
-{
-string nm = ObjectName(0, i, -1, -1);
-if(nm == "") continue;
-if(StringFind(nm, prefix) != 0) continue;
-ObjectDelete(0, nm);
-}
-}
-
-bool GOM_PriceNearLevel(const double price, const double level, const double atrVal, const double atrMult)
-{
-if(price <= 0.0 || level <= 0.0 || atrVal <= 0.0) return false;
-return (MathAbs(price - level) <= atrVal * atrMult);
-}
-
-// true si le prix touche la ligne M5 KOLA opposée à la direction (zone correction) — utilisé pour bloquer entrées et pour fermer positions.
-bool GOM_IsPriceNearOppositeM5KolaLine(const string direction, const string sym, const double bid, const double ask, double atrHint)
-{
-   if(bid <= 0.0 || ask <= 0.0) return false;
-
-   ENUM_SYMBOL_CATEGORY cat = SMC_GetSymbolCategory(sym);
-   if(OppositeM5LineBlockBoomCrashOnly)
-   {
-      if(cat != SYM_BOOM_CRASH && !(OppositeM5LineBlockIncludeVolatility && cat == SYM_VOLATILITY))
-         return false;
-   }
-
-   string d = direction;
-   StringToUpper(d);
-   if(d != "BUY" && d != "SELL") return false;
-
-   if(atrHint <= 0.0 || !MathIsValidNumber(atrHint))
-   {
-      int h = iATR(sym, PERIOD_M15, 14);
-      if(h != INVALID_HANDLE)
-      {
-         double ab[];
-         ArraySetAsSeries(ab, true);
-         if(CopyBuffer(h, 0, 0, 1, ab) >= 1)
-            atrHint = ab[0];
-         IndicatorRelease(h);
-      }
-   }
-   if(atrHint <= 0.0 || !MathIsValidNumber(atrHint))
-      atrHint = MathMax(bid * 0.0015, SymbolInfoDouble(sym, SYMBOL_POINT) * 100.0);
-
-   const double m5Buy = ReadGVDirect("GOM_KOLA_" + sym + "_M5_BUY", 0.0);
-   const double m5Sell = ReadGVDirect("GOM_KOLA_" + sym + "_M5_SELL", 0.0);
-   const double mult = OppositeM5LineBlockMaxAtrMult;
-
-   if(d == "BUY" && m5Sell > 0.0 && MathIsValidNumber(m5Sell) && GOM_PriceNearLevel(ask, m5Sell, atrHint, mult))
-      return true;
-   if(d == "SELL" && m5Buy > 0.0 && MathIsValidNumber(m5Buy) && GOM_PriceNearLevel(bid, m5Buy, atrHint, mult))
-      return true;
-   return false;
-}
-
-// true = ne pas ouvrir : entrée « correction » contre la ligne M5 KOLA opposée (épaisse sur graphique).
-bool GOM_ShouldAbortEntryForOppositeM5Line(const string direction, const string sym, const double bid, const double ask, double atrHint)
-{
-   if(!BlockEntryIfNearOppositeM5KolaLine) return false;
-   return GOM_IsPriceNearOppositeM5KolaLine(direction, sym, bid, ask, atrHint);
-}
-
-// Ferme les positions ouvertes si le prix rejoint la ligne M5 KOLA opposée (correction contre le sens du trade).
-bool GOM_IsPriceNearOppositeM5FromChartObjects(const string sym, const string direction, const double bid, const double ask, double atrHint)
-{
-   if(!ClosePositionWhenTouchesDrawnM5EntryOpposite) return false;
-   if(sym != _Symbol) return false;
-
-   string d = direction;
-   StringToUpper(d);
-   if(d != "BUY" && d != "SELL") return false;
-
-   if(atrHint <= 0.0 || !MathIsValidNumber(atrHint))
-   {
-      int h = iATR(sym, PERIOD_M15, 14);
-      if(h != INVALID_HANDLE)
-      {
-         double ab[];
-         ArraySetAsSeries(ab, true);
-         if(CopyBuffer(h, 0, 0, 1, ab) >= 1)
-            atrHint = ab[0];
-         IndicatorRelease(h);
-      }
-   }
-   if(atrHint <= 0.0 || !MathIsValidNumber(atrHint))
-      atrHint = MathMax(bid * 0.0015, SymbolInfoDouble(sym, SYMBOL_POINT) * 100.0);
-
-   const double mult = OppositeM5LineBlockMaxAtrMult;
-
-   if(d == "BUY")
-   {
-      if(ObjectFind(0, "M5_ENTRY_SELL_LINE") < 0) return false;
-      const double lv = ObjectGetDouble(0, "M5_ENTRY_SELL_LINE", OBJPROP_PRICE, 0);
-      if(lv <= 0.0 || !MathIsValidNumber(lv)) return false;
-      return GOM_PriceNearLevel(ask, lv, atrHint, mult);
-   }
-   if(ObjectFind(0, "M5_ENTRY_BUY_LINE") < 0) return false;
-   const double lv = ObjectGetDouble(0, "M5_ENTRY_BUY_LINE", OBJPROP_PRICE, 0);
-   if(lv <= 0.0 || !MathIsValidNumber(lv)) return false;
-   return GOM_PriceNearLevel(bid, lv, atrHint, mult);
-}
-
-void GOM_ManageExitOpenPositionsNearOppositeM5Kola()
-{
-   if(!ClosePositionWhenPriceHitsOppositeM5KolaLine && !ClosePositionWhenTouchesDrawnM5EntryOpposite) return;
-   if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) || !MQLInfoInteger(MQL_TRADE_ALLOWED)) return;
-
-   for(int i = PositionsTotal() - 1; i >= 0; i--)
-   {
-      if(!posInfo.SelectByIndex(i)) continue;
-      if(posInfo.Magic() != InpMagicNumber) continue;
-
-      const string sym = posInfo.Symbol();
-      int ageSec = (int)(TimeCurrent() - posInfo.Time());
-      if(ageSec < MathMax(0, OppositeM5LineExitMinHoldSec)) continue;
-
-      const double bid = SymbolInfoDouble(sym, SYMBOL_BID);
-      const double ask = SymbolInfoDouble(sym, SYMBOL_ASK);
-      string dir = (posInfo.PositionType() == POSITION_TYPE_BUY) ? "BUY" : "SELL";
-
-      const bool nearOppKola = (ClosePositionWhenPriceHitsOppositeM5KolaLine &&
-                                 GOM_IsPriceNearOppositeM5KolaLine(dir, sym, bid, ask, 0.0));
-      const bool nearOppChart = GOM_IsPriceNearOppositeM5FromChartObjects(sym, dir, bid, ask, 0.0);
-      if(!nearOppKola && !nearOppChart) continue;
-
-      ulong ticket = posInfo.Ticket();
-      double net = posInfo.Profit() + posInfo.Swap() + posInfo.Commission();
-      if(!PositionSelectByTicket(ticket)) continue;
-      if(PositionCloseWithLog(ticket, "Exit: prix sur M5 opposé (KOLA ou ENTRY — zone correction)"))
-      {
-         Print("?? FERMETURE zone correction M5 opposé | ", sym, " | ", dir, " | ticket=", ticket,
-               " | net=", DoubleToString(net, 2), "$ | kola=", (nearOppKola ? "OUI" : "NON"),
-               " | chartM5=", (nearOppChart ? "OUI" : "NON"));
-         if(UseNotifications)
-            SendNotification("Correction M5: fermé " + sym + " " + dir + " | " + DoubleToString(net, 2) + "$");
-      }
-   }
-}
-
-bool GOM_IsSpikeOpportunity(const bool isBoom, const bool isCrash, const string spikeDir, const double spikeProb)
-{
-if(spikeProb < MathMax(0.0, SpikeBypassMinProbability)) return false;
-if(isBoom && spikeDir == "BUY") return true;
-if(isCrash && spikeDir == "SELL") return true;
-return false;
-}
-
-int GOM_CountSpikeNearM5Pending(const string sym, const long magic, const string commentKey)
-{
-int n = 0;
-for(int i = OrdersTotal() - 1; i >= 0; i--)
-{
-ulong ticket = OrderGetTicket(i);
-if(ticket == 0) continue;
-if(!OrderSelect(ticket)) continue;
-if(OrderGetString(ORDER_SYMBOL) != sym) continue;
-if((long)OrderGetInteger(ORDER_MAGIC) != magic) continue;
-if(StringFind(OrderGetString(ORDER_COMMENT), commentKey) < 0) continue;
-const int t = (int)OrderGetInteger(ORDER_TYPE);
-if(t == ORDER_TYPE_BUY_LIMIT || t == ORDER_TYPE_BUY_STOP || t == ORDER_TYPE_SELL_LIMIT || t == ORDER_TYPE_SELL_STOP)
-   n++;
-}
-return n;
-}
-
-int GOM_CountOpenPositionsByMagicComment(const string sym, const long magic, const string commentKey)
-{
-int n = 0;
-const int total = PositionsTotal();
-for(int i = 0; i < total; i++)
-{
-ulong ticket = PositionGetTicket(i);
-if(ticket == 0) continue;
-if(!PositionSelectByTicket(ticket)) continue;
-if(PositionGetString(POSITION_SYMBOL) != sym) continue;
-if(magic != 0 && PositionGetInteger(POSITION_MAGIC) != magic) continue;
-if(StringFind(PositionGetString(POSITION_COMMENT), commentKey) < 0) continue;
-n++;
-}
-return n;
-}
-
-void GOM_AdjustPendingStopsForBroker(const ENUM_ORDER_TYPE otype, const double openPrice,
-                                    double &sl, double &tp1, const double pt, const int stopsPts)
-{
-if(stopsPts <= 0 || openPrice <= 0.0 || pt <= 0.0) return;
-const double minD = (double)stopsPts * pt;
-const int dg = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
-if(sl > 0.0)
-{
-if(otype == ORDER_TYPE_BUY_LIMIT || otype == ORDER_TYPE_BUY_STOP || otype == ORDER_TYPE_BUY)
-{
-if(openPrice - sl < minD)
-   sl = NormalizeDouble(openPrice - minD, dg);
-}
-else
-{
-if(sl - openPrice < minD)
-   sl = NormalizeDouble(openPrice + minD, dg);
-}
-}
-if(tp1 > 0.0)
-{
-if(otype == ORDER_TYPE_BUY_LIMIT || otype == ORDER_TYPE_BUY_STOP || otype == ORDER_TYPE_BUY)
-{
-if(tp1 - openPrice < minD)
-   tp1 = NormalizeDouble(openPrice + minD, dg);
-}
-else
-{
-if(openPrice - tp1 < minD)
-   tp1 = NormalizeDouble(openPrice - minD, dg);
-}
-}
-}
-
-void GOM_MaybePlaceSpikeNearM5Pending(const bool isBoom, const bool isCrash,
-                                     const string spikeDir, const double spikeProb, const bool spikeOpportunity,
-                                     const bool blockBuySpike, const bool blockSellSpike,
-                                     const double bid, const double ask, const double atr,
-                                     const double m5Buy, const double m5Sell)
-{
-if(!EnableSpikeNearM5AutoPending) return;
-if(SpikeNearM5DeferToArrowFirstPending && EnableSpikeImminentFirstAutoPending) return;
-if(!EnableSpikePrediction) return;
-if(!GOM_IsSyntheticBoomCrashFamily()) return;
-if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED)) return;
-if(!MQLInfoInteger(MQL_TRADE_ALLOWED)) return;
-if(bid <= 0.0 || ask <= 0.0) return;
-
-if(GomPlanArrowRespectSmcSweepConflict)
-{
-   if(isBoom && spikeDir == "BUY" && GOM_BoomBuyBlockedByOppositeSmcSweep(GomPlanArrowSweepConflictMaxAgeSec)) return;
-   if(isCrash && spikeDir == "SELL" && GOM_CrashSellBlockedByOppositeSmcSweep(GomPlanArrowSweepConflictMaxAgeSec)) return;
-}
-
-const double minProb = (SpikeNearM5MinSpikeProb > 1e-9) ? SpikeNearM5MinSpikeProb : SpikeAlertMinProbability;
-if(spikeProb + 1e-9 < minProb) return;
-
-const int cd = MathMax(0, SpikeNearM5CooldownSec);
-if(cd > 0 && g_gomLastSpikeM5PendingTime > 0 && (TimeCurrent() - g_gomLastSpikeM5PendingTime) < cd)
-   return;
-
-const string cmtKey = (SpikeNearM5Comment == "") ? "GOM_SKM5" : SpikeNearM5Comment;
-if(GOM_CountSpikeNearM5Pending(_Symbol, SpikeNearM5Magic, cmtKey) >= MathMax(1, SpikeNearM5MaxSamePending))
-   return;
-
-double pt = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
-if(pt <= 0.0) pt = 0.1;
-const int dg = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
-const int stopsPts = (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
-const double off = (double)MathMax(0, SpikeNearM5OffsetPoints) * pt;
-
-double vmin = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
-double vmax = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
-double vstep = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
-if(vmin <= 0.0) vmin = 0.01;
-if(vmax <= 0.0) vmax = 100.0;
-if(vstep <= 0.0) vstep = 0.01;
-double vol = SpikeNearM5Lots;
-vol = MathMax(vol, vmin);
-vol = MathMin(vol, vmax);
-vol = NormalizeDouble(MathFloor(vol / vstep + 1e-12) * vstep, 8);
-
-g_gomSpikeTrade.SetExpertMagicNumber(SpikeNearM5Magic);
-g_gomSpikeTrade.SetDeviationInPoints(120);
-g_gomSpikeTrade.SetTypeFilling(ORDER_FILLING_IOC);
-
-const double atrUse = (atr > 0.0) ? atr : bid * 0.0015;
-const double slBuf = atrUse * 0.55;
-const double tpScalp = atrUse * 0.88;
-const datetime expGtc = (datetime)0;
-
-if(isBoom && spikeDir == "BUY" && m5Buy > 0.0 && GOM_PriceNearLevel(bid, m5Buy, atrUse, 0.4))
-{
-bool dsHold = (GOM_GlobalGetForScript("DOUBLE_SPIKE_HOLD", 0.0) > 0.5 || GOM_GlobalGetForScript("DOUBLE_SPIKE_PHASE", 0.0) >= 1.0);
-if(SpikeNearM5SkipIfSpikeExhausted && blockBuySpike && !(spikeOpportunity && SpikeModeBypassStrict) && !dsHold)
-   return;
-double px = NormalizeDouble(m5Buy + off, dg);
-ENUM_ORDER_TYPE otype;
-if(px < ask)
-   otype = ORDER_TYPE_BUY_LIMIT;
-else
-{
-otype = ORDER_TYPE_BUY_STOP;
-if(px <= ask)
-   px = NormalizeDouble(ask + MathMax(pt * 2.0, off > 0.0 ? off : pt * 2.0), dg);
-}
-if(otype == ORDER_TYPE_BUY_LIMIT && !IsGoodOrPerfectVerdictQuality(g_lastPlanQuality))
-   return;
-double sl = m5Buy - MathMax(atrUse * 0.28, slBuf * 0.65);
-double tp1 = px + MathMax(atrUse * 0.72, tpScalp);
-GOM_AdjustPendingStopsForBroker(otype, px, sl, tp1, pt, stopsPts);
-bool ok = false;
-if(otype == ORDER_TYPE_BUY_LIMIT)
-   ok = g_gomSpikeTrade.BuyLimit(vol, px, _Symbol, sl, tp1, ORDER_TIME_GTC, expGtc, cmtKey);
-else
-   ok = g_gomSpikeTrade.BuyStop(vol, px, _Symbol, sl, tp1, ORDER_TIME_GTC, expGtc, cmtKey);
-if(ok)
-{
-g_gomLastSpikeM5PendingTime = TimeCurrent();
-Print("GOM auto pending BUY ", EnumToString(otype), " @", DoubleToString(px, dg),
-      " SL=", DoubleToString(sl, dg), " TP1=", DoubleToString(tp1, dg), " lot=", DoubleToString(vol, 2));
-if(NotifyOnSpikeAutoPendingOk)
-GOM_AlertPush("GOM spike pending OK", EnumToString(otype) + " BUY @" + DoubleToString(px, dg), NotifySoundSpike);
-}
-else
-Print("GOM auto pending BUY échoué: ", g_gomSpikeTrade.ResultRetcodeDescription());
-return;
-}
-
-if(isCrash && spikeDir == "SELL" && m5Sell > 0.0 && GOM_PriceNearLevel(bid, m5Sell, atrUse, 0.4))
-{
-bool dsHold = (GOM_GlobalGetForScript("DOUBLE_SPIKE_HOLD", 0.0) > 0.5 || GOM_GlobalGetForScript("DOUBLE_SPIKE_PHASE", 0.0) >= 1.0);
-if(SpikeNearM5SkipIfSpikeExhausted && blockSellSpike && !(spikeOpportunity && SpikeModeBypassStrict) && !dsHold)
-   return;
-double px = NormalizeDouble(m5Sell - off, dg);
-ENUM_ORDER_TYPE otype;
-if(px > bid)
-   otype = ORDER_TYPE_SELL_LIMIT;
-else
-{
-otype = ORDER_TYPE_SELL_STOP;
-if(px >= bid)
-   px = NormalizeDouble(bid - MathMax(pt * 2.0, off > 0.0 ? off : pt * 2.0), dg);
-}
-if(otype == ORDER_TYPE_SELL_LIMIT && !IsGoodOrPerfectVerdictQuality(g_lastPlanQuality))
-   return;
-double sl = m5Sell + MathMax(atrUse * 0.28, slBuf * 0.65);
-double tp1 = px - MathMax(atrUse * 0.72, tpScalp);
-GOM_AdjustPendingStopsForBroker(otype, px, sl, tp1, pt, stopsPts);
-bool ok = false;
-if(otype == ORDER_TYPE_SELL_LIMIT)
-   ok = g_gomSpikeTrade.SellLimit(vol, px, _Symbol, sl, tp1, ORDER_TIME_GTC, expGtc, cmtKey);
-else
-   ok = g_gomSpikeTrade.SellStop(vol, px, _Symbol, sl, tp1, ORDER_TIME_GTC, expGtc, cmtKey);
-if(ok)
-{
-g_gomLastSpikeM5PendingTime = TimeCurrent();
-Print("GOM auto pending SELL ", EnumToString(otype), " @", DoubleToString(px, dg),
-      " SL=", DoubleToString(sl, dg), " TP1=", DoubleToString(tp1, dg), " lot=", DoubleToString(vol, 2));
-if(NotifyOnSpikeAutoPendingOk)
-GOM_AlertPush("GOM spike pending OK", EnumToString(otype) + " SELL @" + DoubleToString(px, dg), NotifySoundSpike);
-}
-else
-Print("GOM auto pending SELL échoué: ", g_gomSpikeTrade.ResultRetcodeDescription());
-}
-}
-
-void GOM_TrySpikeImminentFirstPending(const bool isBoom, const bool isCrash,
-                                      const string spikeDir, const double spikeProb,
-                                      const double bid, const double ask, const double atr,
-                                      const double m5Buy, const double m5Sell)
-{
-if(!EnableSpikeImminentFirstAutoPending) return;
-if(!EnableSpikePrediction) return;
-if(!GOM_IsSyntheticBoomCrashFamily()) return;
-if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED)) return;
-if(!MQLInfoInteger(MQL_TRADE_ALLOWED)) return;
-if(bid <= 0.0 || ask <= 0.0) return;
-
-if(SpikeImminentFirstSkipDoubleSpikePhase2 && EnableDoubleSpikeCapture)
-{
-const double phDs = GOM_GlobalGetForScript("DOUBLE_SPIKE_PHASE", 0.0);
-if(phDs >= 2.0 - 1e-9) return;
-}
-
-double th = GOM_SpikeBlinkEffectiveTh(SpikeBlinkMinProbability);
-if(spikeProb + 1e-12 < th) return;
-
-if(isBoom && spikeDir != "BUY") return;
-if(isCrash && spikeDir != "SELL") return;
-if(!isBoom && !isCrash) return;
-
-const int cdImm = MathMax(0, SpikeImminentFirstCooldownSec);
-if(cdImm > 0 && g_gomLastSpikeImminentFirstTime > 0 &&
-   (TimeCurrent() - g_gomLastSpikeImminentFirstTime) < cdImm)
-   return;
-
-const string cmtImm = (SpikeImminentFirstComment == "") ? "GOM_SKIM" : SpikeImminentFirstComment;
-if(GOM_CountSpikeNearM5Pending(_Symbol, SpikeImminentFirstMagic, cmtImm) >= 1)
-   return;
-if(SpikeImminentFirstUseMarketOrder &&
-   GOM_CountOpenPositionsByMagicComment(_Symbol, SpikeImminentFirstMagic, cmtImm) >= 1)
-   return;
-
-const double atrUse = (atr > 0.0) ? atr : bid * 0.0015;
-if(SpikeImminentPendingRequireNearM5)
-{
-if(isBoom && (m5Buy <= 0.0 || !GOM_PriceNearLevel(bid, m5Buy, atrUse, 0.4))) return;
-if(isCrash && (m5Sell <= 0.0 || !GOM_PriceNearLevel(bid, m5Sell, atrUse, 0.4))) return;
-}
-
-double pt = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
-if(pt <= 0.0) pt = 0.1;
-const int dg = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
-const int stopsPts = (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
-const double off = (double)MathMax(0, SpikeNearM5OffsetPoints) * pt;
-const double slBuf = atrUse * 0.55;
-const double tpScalp = atrUse * 0.88;
-const datetime expGtc = (datetime)0;
-
-double vmin = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
-double vmax = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
-double vstep = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
-if(vmin <= 0.0) vmin = 0.01;
-if(vmax <= 0.0) vmax = 100.0;
-if(vstep <= 0.0) vstep = 0.01;
-double vol = SpikeNearM5Lots;
-vol = MathMax(vol, vmin);
-vol = MathMin(vol, vmax);
-vol = NormalizeDouble(MathFloor(vol / vstep + 1e-12) * vstep, 8);
-
-g_gomSpikeTrade.SetExpertMagicNumber(SpikeImminentFirstMagic);
-g_gomSpikeTrade.SetDeviationInPoints(120);
-g_gomSpikeTrade.SetTypeFilling(ORDER_FILLING_IOC);
-
-if(isBoom && spikeDir == "BUY")
-{
-double px = 0.0, sl = 0.0, tp1 = 0.0;
-ENUM_ORDER_TYPE otype = ORDER_TYPE_BUY_STOP;
-if(m5Buy > 0.0)
-{
-px = NormalizeDouble(m5Buy + off, dg);
-if(SpikeImminentFirstForceLimitOnly)
-{
-otype = ORDER_TYPE_BUY_LIMIT;
-const double limMaxPx = ask - MathMax((double)stopsPts * pt, pt * 3.0);
-if(px >= limMaxPx)
-   px = NormalizeDouble(limMaxPx - pt, dg);
-}
-else if(px < ask)
-   otype = ORDER_TYPE_BUY_LIMIT;
-else
-{
-otype = ORDER_TYPE_BUY_STOP;
-if(px <= ask)
-   px = NormalizeDouble(ask + MathMax(pt * 2.0, off > 0.0 ? off : pt * 2.0), dg);
-}
-sl = m5Buy - MathMax(atrUse * 0.28, slBuf * 0.65);
-tp1 = px + MathMax(atrUse * 0.72, tpScalp);
-}
-else
-{
-otype = ORDER_TYPE_BUY_STOP;
-px = NormalizeDouble(ask + MathMax(off, pt * 3.0), dg);
-if(px <= ask)
-   px = NormalizeDouble(ask + pt * 3.0, dg);
-sl = NormalizeDouble(bid - MathMax(atrUse * 0.35, slBuf * 0.75), dg);
-tp1 = NormalizeDouble(px + MathMax(atrUse * 0.72, tpScalp), dg);
-}
-if(SpikeImminentFirstUseMarketOrder)
-{
-if(m5Buy > 0.0)
-{
-sl = m5Buy - MathMax(atrUse * 0.28, slBuf * 0.65);
-tp1 = NormalizeDouble(ask + MathMax(atrUse * 0.72, tpScalp), dg);
-}
-else
-{
-sl = NormalizeDouble(bid - MathMax(atrUse * 0.35, slBuf * 0.75), dg);
-tp1 = NormalizeDouble(ask + MathMax(atrUse * 0.72, tpScalp), dg);
-}
-GOM_AdjustPendingStopsForBroker(ORDER_TYPE_BUY, ask, sl, tp1, pt, stopsPts);
-bool okM = g_gomSpikeTrade.Buy(vol, _Symbol, 0.0, sl, tp1, cmtImm);
-if(okM)
-{
-g_gomLastSpikeImminentFirstTime = TimeCurrent();
-Print("GOM spike-imminent MARKET BUY ask=", DoubleToString(ask, dg), " SL=", DoubleToString(sl, dg), " TP=", DoubleToString(tp1, dg));
-if(NotifyOnSpikeAutoPendingOk)
-GOM_AlertPush("GOM spike imminent OK", "MARKET BUY @" + DoubleToString(ask, dg), NotifySoundSpike);
-}
-else
-Print("GOM spike-imminent MARKET BUY échoué: ", g_gomSpikeTrade.ResultRetcodeDescription());
-return;
-}
-if(otype == ORDER_TYPE_BUY_LIMIT && !IsGoodOrPerfectVerdictQuality(g_lastPlanQuality))
-   return;
-GOM_AdjustPendingStopsForBroker(otype, px, sl, tp1, pt, stopsPts);
-bool okImm = false;
-if(otype == ORDER_TYPE_BUY_LIMIT)
-   okImm = g_gomSpikeTrade.BuyLimit(vol, px, _Symbol, sl, tp1, ORDER_TIME_GTC, expGtc, cmtImm);
-else
-   okImm = g_gomSpikeTrade.BuyStop(vol, px, _Symbol, sl, tp1, ORDER_TIME_GTC, expGtc, cmtImm);
-if(okImm)
-{
-g_gomLastSpikeImminentFirstTime = TimeCurrent();
-Print("GOM spike-imminent 1er front BUY ", EnumToString(otype), " @", DoubleToString(px, dg));
-if(NotifyOnSpikeAutoPendingOk)
-GOM_AlertPush("GOM spike imminent OK", EnumToString(otype) + " BUY @" + DoubleToString(px, dg), NotifySoundSpike);
-}
-else
-Print("GOM spike-imminent BUY échoué: ", g_gomSpikeTrade.ResultRetcodeDescription());
-return;
-}
-
-if(isCrash && spikeDir == "SELL")
-{
-double px = 0.0, sl = 0.0, tp1 = 0.0;
-ENUM_ORDER_TYPE otype = ORDER_TYPE_SELL_STOP;
-if(m5Sell > 0.0)
-{
-px = NormalizeDouble(m5Sell - off, dg);
-if(SpikeImminentFirstForceLimitOnly)
-{
-otype = ORDER_TYPE_SELL_LIMIT;
-const double limMinPx = bid + MathMax((double)stopsPts * pt, pt * 3.0);
-if(px <= limMinPx)
-   px = NormalizeDouble(limMinPx + pt, dg);
-}
-else if(px > bid)
-   otype = ORDER_TYPE_SELL_LIMIT;
-else
-{
-otype = ORDER_TYPE_SELL_STOP;
-if(px >= bid)
-   px = NormalizeDouble(bid - MathMax(pt * 2.0, off > 0.0 ? off : pt * 2.0), dg);
-}
-sl = m5Sell + MathMax(atrUse * 0.28, slBuf * 0.65);
-tp1 = px - MathMax(atrUse * 0.72, tpScalp);
-}
-else
-{
-otype = ORDER_TYPE_SELL_STOP;
-px = NormalizeDouble(bid - MathMax(off, pt * 3.0), dg);
-if(px >= bid)
-   px = NormalizeDouble(bid - pt * 3.0, dg);
-sl = NormalizeDouble(ask + MathMax(atrUse * 0.35, slBuf * 0.75), dg);
-tp1 = NormalizeDouble(px - MathMax(atrUse * 0.72, tpScalp), dg);
-}
-if(SpikeImminentFirstUseMarketOrder)
-{
-if(m5Sell > 0.0)
-{
-sl = m5Sell + MathMax(atrUse * 0.28, slBuf * 0.65);
-tp1 = NormalizeDouble(bid - MathMax(atrUse * 0.72, tpScalp), dg);
-}
-else
-{
-sl = NormalizeDouble(ask + MathMax(atrUse * 0.35, slBuf * 0.75), dg);
-tp1 = NormalizeDouble(bid - MathMax(atrUse * 0.72, tpScalp), dg);
-}
-GOM_AdjustPendingStopsForBroker(ORDER_TYPE_SELL, bid, sl, tp1, pt, stopsPts);
-bool okM2 = g_gomSpikeTrade.Sell(vol, _Symbol, 0.0, sl, tp1, cmtImm);
-if(okM2)
-{
-g_gomLastSpikeImminentFirstTime = TimeCurrent();
-Print("GOM spike-imminent MARKET SELL bid=", DoubleToString(bid, dg), " SL=", DoubleToString(sl, dg), " TP=", DoubleToString(tp1, dg));
-if(NotifyOnSpikeAutoPendingOk)
-GOM_AlertPush("GOM spike imminent OK", "MARKET SELL @" + DoubleToString(bid, dg), NotifySoundSpike);
-}
-else
-Print("GOM spike-imminent MARKET SELL échoué: ", g_gomSpikeTrade.ResultRetcodeDescription());
-return;
-}
-if(otype == ORDER_TYPE_SELL_LIMIT && !IsGoodOrPerfectVerdictQuality(g_lastPlanQuality))
-   return;
-GOM_AdjustPendingStopsForBroker(otype, px, sl, tp1, pt, stopsPts);
-bool okImm2 = false;
-if(otype == ORDER_TYPE_SELL_LIMIT)
-   okImm2 = g_gomSpikeTrade.SellLimit(vol, px, _Symbol, sl, tp1, ORDER_TIME_GTC, expGtc, cmtImm);
-else
-   okImm2 = g_gomSpikeTrade.SellStop(vol, px, _Symbol, sl, tp1, ORDER_TIME_GTC, expGtc, cmtImm);
-if(okImm2)
-{
-g_gomLastSpikeImminentFirstTime = TimeCurrent();
-Print("GOM spike-imminent 1er front SELL ", EnumToString(otype), " @", DoubleToString(px, dg));
-if(NotifyOnSpikeAutoPendingOk)
-GOM_AlertPush("GOM spike imminent OK", EnumToString(otype) + " SELL @" + DoubleToString(px, dg), NotifySoundSpike);
-}
-else
-Print("GOM spike-imminent SELL échoué: ", g_gomSpikeTrade.ResultRetcodeDescription());
-}
-}
-
-//+------------------------------------------------------------------+
-//| FILTRES DE CONFIRMATION DES SIGNAUX                              |
-//+------------------------------------------------------------------+
-
-// Structure pour stocker les résultats des filtres
-struct FilterResults
-{
-bool volumePass;           // Filtre Volume
-bool momentumPass;         // Filtre Momentum
-bool rsiDivergencePass;   // Filtre Divergence RSI
-bool mtfPass;             // Filtre Multi-Timeframe
-bool structurePass;       // Filtre Structure
-bool volatilityPass;      // Filtre Volatilité
-int  passCount;           // Nombre de filtres passés
-int  totalFilters;        // Nombre total de filtres actifs
-string failReason;        // Raison de l'échec principal
-};
-
-// Filtre Volume: vérifie que le volume actuel est au-dessus de la moyenne
-bool CheckVolumeFilter(const ENUM_TIMEFRAMES tf, const int lookback, double &avgVolOut)
-{
-if(!EnableVolumeFilter) return true;
-
-MqlRates rates[];
-ArraySetAsSeries(rates, true);
-int copied = CopyRates(_Symbol, tf, 0, lookback + 1, rates);
-if(copied < lookback + 1) return true; // Pas assez de données, on passe
-
-double sumVol = 0.0;
-for(int i = 1; i <= lookback; i++)
-sumVol += (double)rates[i].tick_volume;
-
-avgVolOut = sumVol / (double)lookback;
-if(avgVolOut <= 0.0) return true;
-
-double currentVol = (double)rates[0].tick_volume;
-return (currentVol >= avgVolOut * VolumeMinRatio);
-}
-
-// Filtre Momentum: vérifie l'alignement EMA 9/21 et la direction
-bool CheckMomentumFilter(const ENUM_TIMEFRAMES tf, const string direction)
-{
-if(!EnableMomentumFilter) return true;
-
-double ema9 = GOM_EMAValue(_Symbol, tf, 9);
-double ema21 = GOM_EMAValue(_Symbol, tf, 21);
-
-if(ema9 <= 0.0 || ema21 <= 0.0) return true;
-
-double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-if(bid <= 0.0) bid = iClose(_Symbol, tf, 0);
-
-if(direction == "BUY")
-return (ema9 >= ema21 && bid >= ema9);
-else if(direction == "SELL")
-return (ema9 <= ema21 && bid <= ema9);
-
-return true;
-}
-
-// Filtre Divergence RSI: détecte les divergences prix/RSI
-bool CheckRSIDivergenceFilter(const ENUM_TIMEFRAMES tf, const string direction, string &divergenceType)
-{
-if(!EnableRSIDivergenceFilter) return true;
-
-divergenceType = "NONE";
-
-MqlRates rates[];
-ArraySetAsSeries(rates, true);
-int copied = CopyRates(_Symbol, tf, 0, RSIDivergenceLookback + 5, rates);
-if(copied < RSIDivergenceLookback + 3) return true;
-
-double rsi[];
-ArraySetAsSeries(rsi, true);
-int hRSI = iRSI(_Symbol, tf, 14, PRICE_CLOSE);
-if(hRSI == INVALID_HANDLE) return true;
-
-if(CopyBuffer(hRSI, 0, 0, RSIDivergenceLookback + 5, rsi) < RSIDivergenceLookback + 3)
-{
-IndicatorRelease(hRSI);
-return true;
-}
-IndicatorRelease(hRSI);
-
-// Divergence haussière: prix fait un plus bas, RSI fait un plus haut
-if(direction == "BUY")
-{
-double priceLow1 = rates[0].low;
-double priceLow2 = rates[RSIDivergenceLookback].low;
-double rsiLow1 = rsi[0];
-double rsiLow2 = rsi[RSIDivergenceLookback];
-
-// Prix plus bas mais RSI plus haut = divergence haussière
-if(priceLow1 < priceLow2 && rsiLow1 > rsiLow2 + RSIDivergenceThreshold)
-{
-   divergenceType = "BULLISH";
-   return true; // Divergence haussière confirme le BUY
-}
-}
-// Divergence baissière: prix fait un plus haut, RSI fait un plus bas
-else if(direction == "SELL")
-{
-double priceHigh1 = rates[0].high;
-double priceHigh2 = rates[RSIDivergenceLookback].high;
-double rsiHigh1 = rsi[0];
-double rsiHigh2 = rsi[RSIDivergenceLookback];
-
-// Prix plus haut mais RSI plus bas = divergence baissière
-if(priceHigh1 > priceHigh2 && rsiHigh1 < rsiHigh2 - RSIDivergenceThreshold)
-{
-   divergenceType = "BEARISH";
-   return true; // Divergence baissière confirme le SELL
-}
-}
-
-// Pas de divergence, on ne bloque pas le signal
-return true;
-}
-
-// Filtre Multi-Timeframe: vérifie l'alignement sur plusieurs TF
-bool CheckMTFFilter(const string direction, string &mtfStatus)
-{
-if(!EnableMTFFilter) return true;
-
-mtfStatus = "";
-
-ENUM_TIMEFRAMES tfs[] = {PERIOD_M5, PERIOD_M15, PERIOD_H1};
-string tfNames[] = {"M5", "M15", "H1"};
-int alignedCount = 0;
-
-for(int i = 0; i < 3; i++)
-{
-int bias = GetTFBias(tfs[i]);
-bool aligned = (direction == "BUY" && bias > 0) || (direction == "SELL" && bias < 0);
-
-if(aligned)
-{
-   alignedCount++;
-   mtfStatus += tfNames[i] + "+ ";
-}
-else
-{
-   mtfStatus += tfNames[i] + "- ";
-}
-}
-
-// Au moins 2 TF sur 3 alignés
-return (alignedCount >= 2);
-}
-
-// Filtre Structure: vérifie la proximité des niveaux clés
-bool CheckStructureFilter(const string direction, const double atrVal, string &structureStatus)
-{
-if(!EnableStructureFilter) return true;
-
-structureStatus = "OK";
-
-double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-if(bid <= 0.0) bid = iClose(_Symbol, PERIOD_CURRENT, 0);
-
-double m5Buy = ReadGV("GOM_KOLA", "M5", "BUY");
-double m5Sell = ReadGV("GOM_KOLA", "M5", "SELL");
-double m15Buy = ReadGV("GOM_KOLA", "M15", "BUY");
-double m15Sell = ReadGV("GOM_KOLA", "M15", "SELL");
-double h1Buy = ReadGV("GOM_KOLA", "H1", "BUY");
-double h1Sell = ReadGV("GOM_KOLA", "H1", "SELL");
-
-double zone = atrVal * StructureATRMultiplier;
-bool nearLevel = false;
-
-if(direction == "BUY")
-{
-if(m5Buy > 0.0 && MathAbs(bid - m5Buy) <= zone) { nearLevel = true; structureStatus = "M5"; }
-else if(m15Buy > 0.0 && MathAbs(bid - m15Buy) <= zone) { nearLevel = true; structureStatus = "M15"; }
-else if(h1Buy > 0.0 && MathAbs(bid - h1Buy) <= zone) { nearLevel = true; structureStatus = "H1"; }
-}
-else if(direction == "SELL")
-{
-if(m5Sell > 0.0 && MathAbs(bid - m5Sell) <= zone) { nearLevel = true; structureStatus = "M5"; }
-else if(m15Sell > 0.0 && MathAbs(bid - m15Sell) <= zone) { nearLevel = true; structureStatus = "M15"; }
-else if(h1Sell > 0.0 && MathAbs(bid - h1Sell) <= zone) { nearLevel = true; structureStatus = "H1"; }
-}
-
-if(!nearLevel) structureStatus = "FAR";
-return nearLevel;
-}
-
-// Filtre Volatilité: vérifie que l'ATR est suffisant
-bool CheckVolatilityFilter(const double atrVal, const double bid)
-{
-if(!EnableVolatilityFilter) return true;
-
-if(atrVal <= 0.0 || bid <= 0.0) return true;
-
-double atrPct = (atrVal / bid) * 100.0;
-return (atrPct >= VolatilityMinATRPct * 100.0);
-}
-
-// Fonction principale: applique tous les filtres et retourne les résultats
-FilterResults ApplyAllFilters(const string direction, const double atrVal)
-{
-FilterResults result;
-result.volumePass = true;
-result.momentumPass = true;
-result.rsiDivergencePass = true;
-result.mtfPass = true;
-result.structurePass = true;
-result.volatilityPass = true;
-result.passCount = 0;
-result.totalFilters = 0;
-result.failReason = "";
-
-double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-if(bid <= 0.0) bid = iClose(_Symbol, PERIOD_CURRENT, 0);
-
-// Filtre Volume
-if(EnableVolumeFilter)
-{
-result.totalFilters++;
-double avgVol = 0.0;
-result.volumePass = CheckVolumeFilter(PERIOD_M1, VolumeLookback, avgVol);
-if(result.volumePass) result.passCount++;
-else result.failReason = "VOLUME";
-}
-
-// Filtre Momentum
-if(EnableMomentumFilter)
-{
-result.totalFilters++;
-result.momentumPass = CheckMomentumFilter(PERIOD_M1, direction);
-if(result.momentumPass) result.passCount++;
-else if(result.failReason == "") result.failReason = "MOMENTUM";
-}
-
-// Filtre Divergence RSI
-if(EnableRSIDivergenceFilter)
-{
-result.totalFilters++;
-string divType = "";
-result.rsiDivergencePass = CheckRSIDivergenceFilter(PERIOD_M1, direction, divType);
-if(result.rsiDivergencePass) result.passCount++;
-else if(result.failReason == "") result.failReason = "RSI_DIV";
-}
-
-// Filtre Multi-Timeframe
-if(EnableMTFFilter)
-{
-result.totalFilters++;
-string mtfStatus = "";
-result.mtfPass = CheckMTFFilter(direction, mtfStatus);
-if(result.mtfPass) result.passCount++;
-else if(result.failReason == "") result.failReason = "MTF";
-}
-
-// Filtre Structure
-if(EnableStructureFilter)
-{
-result.totalFilters++;
-string structStatus = "";
-result.structurePass = CheckStructureFilter(direction, atrVal, structStatus);
-if(result.structurePass) result.passCount++;
-else if(result.failReason == "") result.failReason = "STRUCTURE";
-}
-
-// Filtre Volatilité
-if(EnableVolatilityFilter)
-{
-result.totalFilters++;
-result.volatilityPass = CheckVolatilityFilter(atrVal, bid);
-if(result.volatilityPass) result.passCount++;
-else if(result.failReason == "") result.failReason = "VOLATILITY";
-}
-
-return result;
-}
-
-// Fonction pour calculer le score de qualité basé sur les filtres
-double CalculateFilterQualityScore(const FilterResults &filters)
-{
-if(filters.totalFilters == 0) return 1.0;
-
-double ratio = (double)filters.passCount / (double)filters.totalFilters;
-
-// Bonus si tous les filtres passent
-if(filters.passCount == filters.totalFilters)
-ratio += 0.2;
-
-return MathMin(1.0, ratio);
-}
-
-// Fonction pour obtenir le texte de statut des filtres
-string GetFilterStatusText(const FilterResults &filters)
-{
-string txt = "";
-if(EnableVolumeFilter) txt += (filters.volumePass ? "VOL✓" : "VOL✗") + " ";
-if(EnableMomentumFilter) txt += (filters.momentumPass ? "MOM✓" : "MOM✗") + " ";
-if(EnableRSIDivergenceFilter) txt += (filters.rsiDivergencePass ? "RSI✓" : "RSI✗") + " ";
-if(EnableMTFFilter) txt += (filters.mtfPass ? "MTF✓" : "MTF✗") + " ";
-if(EnableStructureFilter) txt += (filters.structurePass ? "STR✓" : "STR✗") + " ";
-if(EnableVolatilityFilter) txt += (filters.volatilityPass ? "ATR✓" : "ATR✗");
-
-return txt;
-}
-
-// ---------- JSON minimal helpers (MQL5) ----------
-string GOM_JsonExtractString(const string json, const string key, const string defVal = "")
-{
-string kq = "\"" + key + "\"";
-int p = StringFind(json, kq);
-if(p < 0) return defVal;
-int c = StringFind(json, ":", p + StringLen(kq));
-if(c < 0) return defVal;
-int s = StringFind(json, "\"", c + 1);
-if(s < 0) return defVal;
-int e = StringFind(json, "\"", s + 1);
-if(e < 0) return defVal;
-return StringSubstr(json, s + 1, e - s - 1);
-}
-
-double GOM_JsonExtractNumber(const string json, const string key, const double defVal = 0.0)
-{
-string kq = "\"" + key + "\"";
-int p = StringFind(json, kq);
-if(p < 0) return defVal;
-int c = StringFind(json, ":", p + StringLen(kq));
-if(c < 0) return defVal;
-int i = c + 1;
-while(i < StringLen(json))
-{
-ushort ch = StringGetCharacter(json, i);
-if(ch != ' ' && ch != '\t' && ch != '\r' && ch != '\n') break;
-i++;
-}
-int j = i;
-while(j < StringLen(json))
-{
-ushort ch = StringGetCharacter(json, j);
-if((ch >= '0' && ch <= '9') || ch == '.' || ch == '-' || ch == '+') { j++; continue; }
-break;
-}
-if(j <= i) return defVal;
-string num = StringSubstr(json, i, j - i);
-return StringToDouble(num);
-}
-
-string GOM_JsonQuote(const string s)
-{
-string t = s;
-StringReplace(t, "\\", "\\\\");
-StringReplace(t, "\"", "\\\"");
-return "\"" + t + "\"";
-}
-
-string GOM_JsonNumberOrNull(const double v, const int digits = 8)
-{
-if(!MathIsValidNumber(v))
-return "null";
-if(v == DBL_MAX || v == -DBL_MAX)
-return "null";
-return DoubleToString(v, digits);
-}
-
-void GOM_UpdateExternalAI(const string symbol, const double bid, const double ask,
-                     const double atrM15, const double rsiM1,
-                     const double ema9M1, const double ema21M1,
-                     const double ema9M5, const double ema21M5,
-                     const double verdictNum,
-                     const double spikeProb, const int spikeDirNum,
-                     const double m5Buy, const double m5Sell,
-                     const double m15Buy, const double m15Sell,
-                     const double dtop, const double dbot)
-{
-if(!EnableExternalAIInterpretation) return;
-if(ExternalAIUrl == "") return;
-
-datetime now = TimeCurrent();
-int throttleSec = MathMax(1, ExternalAIThrottleMs / 1000);
-if(g_lastExtAiCall > 0 && (now - g_lastExtAiCall) < throttleSec)
-return;
-g_lastExtAiCall = now;
-
-string payload =
-"{" +
-"\"symbol\":" + GOM_JsonQuote(symbol) + "," +
-"\"bid\":" + GOM_JsonNumberOrNull(bid, _Digits) + "," +
-"\"ask\":" + GOM_JsonNumberOrNull(ask, _Digits) + "," +
-"\"atr_m15\":" + GOM_JsonNumberOrNull(atrM15, 8) + "," +
-"\"rsi_m1\":" + GOM_JsonNumberOrNull(rsiM1, 2) + "," +
-"\"ema9_m1\":" + GOM_JsonNumberOrNull(ema9M1, _Digits) + "," +
-"\"ema21_m1\":" + GOM_JsonNumberOrNull(ema21M1, _Digits) + "," +
-"\"ema9_m5\":" + GOM_JsonNumberOrNull(ema9M5, _Digits) + "," +
-"\"ema21_m5\":" + GOM_JsonNumberOrNull(ema21M5, _Digits) + "," +
-"\"verdict_num\":" + GOM_JsonNumberOrNull(verdictNum, 2) + "," +
-"\"spike_prob\":" + GOM_JsonNumberOrNull(spikeProb, 4) + "," +
-"\"spike_dir_num\":" + IntegerToString(spikeDirNum) + "," +
-"\"m5_buy\":" + GOM_JsonNumberOrNull(m5Buy, _Digits) + "," +
-"\"m5_sell\":" + GOM_JsonNumberOrNull(m5Sell, _Digits) + "," +
-"\"m15_buy\":" + GOM_JsonNumberOrNull(m15Buy, _Digits) + "," +
-"\"m15_sell\":" + GOM_JsonNumberOrNull(m15Sell, _Digits) + "," +
-"\"sido_dtop\":" + GOM_JsonNumberOrNull(dtop, _Digits) + "," +
-"\"sido_dbot\":" + GOM_JsonNumberOrNull(dbot, _Digits) +
-"}";
-
-char data[];
-StringToCharArray(payload, data, 0, StringLen(payload), CP_UTF8);
-char result[];
-string headers = "Content-Type: application/json\r\n";
-string result_headers = "";
-
-ResetLastError();
-int code = WebRequest("POST", ExternalAIUrl, headers, ExternalAITimeoutMs, data, result, result_headers);
-if(code != 200)
-{
-string errBody = CharArrayToString(result, 0, -1, CP_UTF8);
-int le = GetLastError();
-Print("⚠️ GOM /gom/interpret url=", ExternalAIUrl, " http=", code, " lastError=", le, " | body=", errBody);
-return;
-}
-
-string res = CharArrayToString(result, 0, -1, CP_UTF8);
-string act = GOM_JsonExtractString(res, "action", "");
-if(act == "") act = GOM_JsonExtractString(res, "ai_decision", "");
-double conf = GOM_JsonExtractNumber(res, "confidence", 0.0);
-if(conf <= 0.0) conf = GOM_JsonExtractNumber(res, "ai_confidence", 0.0);
-string reason = GOM_JsonExtractString(res, "reason", "");
-if(reason == "") reason = GOM_JsonExtractString(res, "ai_reasoning", "");
-
-if(act != "")
-{
-StringToUpper(act);
-g_lastExtAiAction = act;
-g_lastExtAiConf = conf;
-g_lastExtAiReason = reason;
-GOM_GlobalSetForScript("EXT_AI_ACTION_NUM", (act == "BUY") ? 1.0 : ((act == "SELL") ? -1.0 : 0.0));
-GOM_GlobalSetForScript("EXT_AI_CONF", conf);
-}
-}
-
-double GOM_PredictSpikeProbabilityM1(const bool isBoom, const bool isCrash, string &spikeDirOut)
-{
-spikeDirOut = "NONE";
-if(!EnableSpikePrediction || (!isBoom && !isCrash))
-return 0.0;
-
-int lb = MathMax(12, SpikeLookbackBarsM1);
-MqlRates r[];
-ArraySetAsSeries(r, true);
-int copied = CopyRates(_Symbol, PERIOD_M1, 0, lb + 5, r);
-if(copied < lb + 2)
-return 0.0;
-
-double sumRange = 0.0, sumVol = 0.0;
-int n = 0;
-for(int i = 2; i < copied && n < lb; i++, n++)
-{
-sumRange += MathMax(0.0, r[i].high - r[i].low);
-sumVol += (double)r[i].tick_volume;
-}
-if(n <= 0) return 0.0;
-double avgRange = sumRange / (double)n;
-double avgVol = sumVol / (double)n;
-if(avgRange <= 0.0) return 0.0;
-
-double range0 = MathMax(0.0, r[0].high - r[0].low);
-double range1 = MathMax(0.0, r[1].high - r[1].low);
-double body0 = MathAbs(r[0].close - r[0].open);
-double vol0 = (double)r[0].tick_volume;
-double close0 = r[0].close;
-
-// Moyenne des ranges « récents » (boucles 2..10) : phase compression avant spike
-int compN = 0;
-double compSum = 0.0;
-for(int j = 2; j <= MathMin(10, copied - 1); j++)
-{
-compSum += MathMax(0.0, r[j].high - r[j].low);
-compN++;
-}
-double avgRangeRecent = (compN > 0) ? compSum / (double)compN : avgRange;
-
-double ema9 = GOM_EMAValue(_Symbol, PERIOD_M1, 9);
-double ema21 = GOM_EMAValue(_Symbol, PERIOD_M1, 21);
-double rsi = GOM_RSIValue(_Symbol, PERIOD_M1, 14);
-double emaF = GOM_EMAValue(_Symbol, ScriptEmaTF, 9);
-double emaS = GOM_EMAValue(_Symbol, ScriptEmaTF, 21);
-
-double score = 0.0;
-
-bool compressionZone = (avgRangeRecent < avgRange * 0.90);
-bool stillQuiet = (range0 < avgRange * 1.02);
-bool earlyStretch = compressionZone && (range0 >= avgRange * 0.82) && (range0 < avgRange * 1.15);
-
-// --- Signal d’amorce (avant la grosse bougie) : évite la flèche seulement au pic ---
-if(compressionZone && stillQuiet)
-{
-score += 0.20;
-if(avgRangeRecent < avgRange * 0.76) score += 0.14;
-if(avgVol > 0.0 && vol0 > avgVol * 0.92 && vol0 < avgVol * 1.55) score += 0.12;
-}
-if(earlyStretch)
-score += 0.12;
-if(range1 < avgRange * 0.88) score += 0.10;
-
-// Confirmation tardive (moins pondérée qu’avant pour ne pas dominer)
-if(range0 > avgRange * 1.18) score += 0.10;
-if(body0 > avgRange * 0.52) score += 0.10;
-if(avgVol > 0.0 && vol0 > avgVol * 1.22) score += 0.10;
-
-bool bullMicro = (ema9 > 0.0 && ema21 > 0.0 && ema9 >= ema21 && rsi >= 50.0 && close0 >= ema9 * 0.9995);
-bool bearMicro = (ema9 > 0.0 && ema21 > 0.0 && ema9 < ema21 && rsi <= 50.0 && close0 <= ema9 * 1.0005);
-if(bullMicro) score += 0.12;
-if(bearMicro) score += 0.12;
-
-// Ruban EMA (même TF que les courbes affichées)
-if(emaF > 0.0 && emaS > 0.0)
-{
-if(isBoom && emaF >= emaS && close0 >= emaF * 0.999) score += 0.14;
-else if(isCrash && emaF < emaS && close0 <= emaF * 1.001) score += 0.14;
-else if(isBoom && close0 > emaF) score += 0.06;
-else if(isCrash && close0 < emaF) score += 0.06;
-}
-
-if(GOM_GlobalGetForScript("BB_SQUEEZE", 0.0) > 0.5)
-score += 0.10;
-
-double leadScore = score;
-GOM_GlobalSetForScript("SPIKE_LEAD_RAW", leadScore);
-
-if(isBoom)
-{
-score += 0.08;
-spikeDirOut = "BUY";
-if(bearMicro) score *= 0.90;
-}
-else if(isCrash)
-{
-score += 0.08;
-spikeDirOut = "SELL";
-if(bullMicro) score *= 0.90;
-}
-
-if(score > 1.0) score = 1.0;
-if(score < 0.0) score = 0.0;
-return score;
-}
-
-void UpdateScriptLastTs()
-{
-GOM_GlobalSetForScript("LAST_TS", (double)TimeCurrent());
-}
-
-void DrawScriptLiveLabel(const string labelName, const string text)
-{
-if(ObjectFind(0, labelName) < 0)
-ObjectCreate(0, labelName, OBJ_LABEL, 0, 0, 0);
-if(GomScriptLiveLabelAnchorRight)
-{
-ObjectSetInteger(0, labelName, OBJPROP_CORNER, CORNER_RIGHT_UPPER);
-ObjectSetInteger(0, labelName, OBJPROP_ANCHOR, ANCHOR_RIGHT_UPPER);
-ObjectSetInteger(0, labelName, OBJPROP_XDISTANCE, GomScriptLiveLabelMarginX);
-}
-else
-{
-ObjectSetInteger(0, labelName, OBJPROP_CORNER, CORNER_LEFT_UPPER);
-ObjectSetInteger(0, labelName, OBJPROP_ANCHOR, ANCHOR_LEFT_UPPER);
-ObjectSetInteger(0, labelName, OBJPROP_XDISTANCE, GomScriptLiveLabelMarginX);
-}
-ObjectSetInteger(0, labelName, OBJPROP_YDISTANCE, GomScriptLiveLabelY);
-ObjectSetInteger(0, labelName, OBJPROP_COLOR, clrWhite);
-ObjectSetInteger(0, labelName, OBJPROP_FONTSIZE, 9);
-ObjectSetString(0, labelName, OBJPROP_FONT, "Consolas");
-ObjectSetString(0, labelName, OBJPROP_TEXT, text);
-ObjectSetInteger(0, labelName, OBJPROP_BACK, false);
-ObjectSetInteger(0, labelName, OBJPROP_SELECTABLE, false);
-ObjectSetInteger(0, labelName, OBJPROP_HIDDEN, false);
-}
-
-void PublishLevel(const string moduleTag, const string tfTag, const string side, const double level)
-{
-GlobalVariableSet(GVKey(moduleTag, tfTag, side), level);
-}
-
-bool IsPivotHigh(const MqlRates &rates[], const int n, const int i, const int lb)
-{
-double v = rates[i].high;
-for(int k = 1; k <= lb; k++)
-if(i - k < 0 || i + k >= n || rates[i - k].high >= v || rates[i + k].high > v)
-   return false;
-return true;
-}
-
-bool IsPivotLow(const MqlRates &rates[], const int n, const int i, const int lb)
-{
-double v = rates[i].low;
-for(int k = 1; k <= lb; k++)
-if(i - k < 0 || i + k >= n || rates[i - k].low <= v || rates[i + k].low < v)
-   return false;
-return true;
-}
-
-int CalcTouches(const MqlRates &rates[], const int n, const double level, const double zone, const int barsLookback)
-{
-int touches = 0;
-int lim = MathMin(n - 1, barsLookback);
-for(int i = 0; i <= lim; i++)
-{
-double hi = rates[i].high;
-double lo = rates[i].low;
-if(MathAbs(hi - level) <= zone || MathAbs(lo - level) <= zone || (lo <= level && hi >= level))
-   touches++;
-}
-return touches;
-}
-
-int WidthFromTouches(const int touches)
-{
-int tMax = MathMax(1, TouchesForMaxWidth);
-double r = MathMin(1.0, (double)touches / (double)tMax);
-int w = (int)MathRound(MinLineWidth + (MaxLineWidth - MinLineWidth) * r);
-return (int)MathMax(MinLineWidth, MathMin(MaxLineWidth, w));
-}
-
-int EntryConfidencePercent(const int touches)
-{
-int tMax = MathMax(1, TouchesForMaxWidth);
-double r = MathMin(1.0, (double)touches / (double)tMax);
-int c = (int)MathRound(55.0 + r * 45.0); // 55..100%
-return (int)MathMax(0, MathMin(100, c));
-}
-
-void DrawKolaLevel(const string tfTag, const string side, const double level, const int touches, const color clr, const ENUM_TIMEFRAMES tf)
-{
-string nm = "GOM_KOLA_" + side + "_" + tfTag;
-if(ObjectFind(0, nm) < 0)
-ObjectCreate(0, nm, OBJ_HLINE, 0, 0, level);
-
-ObjectSetDouble(0, nm, OBJPROP_PRICE, level);
-ObjectSetInteger(0, nm, OBJPROP_COLOR, clr);
-ObjectSetInteger(0, nm, OBJPROP_STYLE, STYLE_SOLID);
-ObjectSetInteger(0, nm, OBJPROP_WIDTH, WidthFromTouches(touches));
-ObjectSetInteger(0, nm, OBJPROP_BACK, false);
-ObjectSetInteger(0, nm, OBJPROP_SELECTABLE, true);
-ObjectSetInteger(0, nm, OBJPROP_HIDDEN, false);
-
-string labelName = nm + "_LBL";
-if(!ShowLabels)
-{
-ObjectDelete(0, labelName);
-return;
-}
-
-int confPct = EntryConfidencePercent(MathMax(1, touches));
-string txt = tfTag + " " + side + " Entry (" + IntegerToString(confPct) + "%)";
-if(ShowTouchCount) txt += " (" + IntegerToString(touches) + ")";
-
-int visShift = MathMax(0, LabelShiftBars);
-datetime t = iTime(_Symbol, PERIOD_CURRENT, visShift);
-if(t <= 0) t = iTime(_Symbol, PERIOD_CURRENT, 0);
-if(ObjectFind(0, labelName) < 0)
-ObjectCreate(0, labelName, OBJ_TEXT, 0, t, level);
-
-ObjectMove(0, labelName, 0, t, level);
-ObjectSetString(0, labelName, OBJPROP_TEXT, txt);
-ObjectSetString(0, labelName, OBJPROP_FONT, "Arial");
-ObjectSetInteger(0, labelName, OBJPROP_COLOR, clr);
-ObjectSetInteger(0, labelName, OBJPROP_FONTSIZE, 8);
-ObjectSetInteger(0, labelName, OBJPROP_ANCHOR, ANCHOR_LEFT);
-ObjectSetInteger(0, labelName, OBJPROP_BACK, false);
-}
-
-void DrawSIDOPattern(const string tfTag, const string patternType, const int idxA, const int idxB, const double levelA, const double levelB, const color clr, const MqlRates &rates[])
-{
-string base = "GOM_SIDO_" + patternType + "_" + tfTag;
-string line = base + "_LN";
-string label = base + "_LBL";
-
-datetime tA = rates[idxA].time;
-datetime tB = rates[idxB].time;
-double y = (levelA + levelB) * 0.5;
-datetime tLabel = iTime(_Symbol, PERIOD_CURRENT, MathMax(0, LabelShiftBars));
-if(tLabel <= 0) tLabel = tB;
-
-if(ObjectFind(0, line) < 0)
-ObjectCreate(0, line, OBJ_TREND, 0, tA, levelA, tB, levelB);
-
-ObjectMove(0, line, 0, tA, levelA);
-ObjectMove(0, line, 1, tB, levelB);
-ObjectSetInteger(0, line, OBJPROP_COLOR, clr);
-ObjectSetInteger(0, line, OBJPROP_WIDTH, 2);
-ObjectSetInteger(0, line, OBJPROP_STYLE, STYLE_DASH);
-ObjectSetInteger(0, line, OBJPROP_RAY_RIGHT, false);
-ObjectSetInteger(0, line, OBJPROP_HIDDEN, false);
-
-if(!ShowSIDOLabels)
-{
-ObjectDelete(0, label);
-return;
-}
-
-if(ObjectFind(0, label) < 0)
-ObjectCreate(0, label, OBJ_TEXT, 0, tLabel, y);
-
-ObjectMove(0, label, 0, tLabel, y);
-ObjectSetString(0, label, OBJPROP_TEXT, tfTag + " " + patternType);
-ObjectSetString(0, label, OBJPROP_FONT, "Arial");
-ObjectSetInteger(0, label, OBJPROP_COLOR, clr);
-ObjectSetInteger(0, label, OBJPROP_FONTSIZE, 8);
-ObjectSetInteger(0, label, OBJPROP_ANCHOR, ANCHOR_LEFT_LOWER);
-ObjectSetInteger(0, label, OBJPROP_BACK, false);
-}
-
-void ClearTFObjects(const string tfTag)
-{
-ObjectDelete(0, "GOM_KOLA_BUY_" + tfTag);
-ObjectDelete(0, "GOM_KOLA_SELL_" + tfTag);
-ObjectDelete(0, "GOM_KOLA_BUY_" + tfTag + "_LBL");
-ObjectDelete(0, "GOM_KOLA_SELL_" + tfTag + "_LBL");
-
-ObjectDelete(0, "GOM_SIDO_DOUBLE_TOP_" + tfTag + "_LN");
-ObjectDelete(0, "GOM_SIDO_DOUBLE_TOP_" + tfTag + "_LBL");
-ObjectDelete(0, "GOM_SIDO_DOUBLE_BOTTOM_" + tfTag + "_LN");
-ObjectDelete(0, "GOM_SIDO_DOUBLE_BOTTOM_" + tfTag + "_LBL");
-}
-
-void ProcessKolaTF(const ENUM_TIMEFRAMES tf, const MqlRates &rates[], const int copied, const double atrVal)
-{
-string tfTag = TFTag(tf);
-if(tfTag == "UNK") return;
-
-int lb = MathMax(1, LineBreakPeriod);
-if(copied < (lb * 3 + 20))
-{
-PublishLevel("GOM_KOLA", tfTag, "BUY", 0.0);
-PublishLevel("GOM_KOLA", tfTag, "SELL", 0.0);
-return;
-}
-
-double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-if(bid <= 0.0) bid = rates[0].close;
-double zone = EnableTouchDetection ? (atrVal * (TouchZoneATRPercent / 100.0)) : 0.0;
-
-double bestBuy = 0.0, bestSell = 0.0;
-int bestBuyTouches = -1, bestSellTouches = -1;
-int maxIdx = MathMin(copied - lb - 1, MaxBarsToAnalyze);
-
-for(int i = lb + 1; i <= maxIdx; i++)
-{
-if(IsPivotLow(rates, copied, i, lb))
-{
-   double lvl = rates[i].low;
-   int touches = EnableTouchDetection ? CalcTouches(rates, copied, lvl, zone, BarsForTouchCount) : 1;
-   bool better = (lvl < bid) ? ((touches > bestBuyTouches) || (touches == bestBuyTouches && lvl > bestBuy))
-                              : (bestBuy <= 0.0 && touches > bestBuyTouches);
-   if(better) { bestBuy = lvl; bestBuyTouches = touches; }
-}
-
-if(IsPivotHigh(rates, copied, i, lb))
-{
-   double lvl = rates[i].high;
-   int touches = EnableTouchDetection ? CalcTouches(rates, copied, lvl, zone, BarsForTouchCount) : 1;
-   bool better = (lvl > bid) ? ((touches > bestSellTouches) || (touches == bestSellTouches && (bestSell <= 0.0 || lvl < bestSell)))
-                              : (bestSell <= 0.0 && touches > bestSellTouches);
-   if(better) { bestSell = lvl; bestSellTouches = touches; }
-}
-}
-
-// Guardrails symbole: pas de BUY sur Crash, pas de SELL sur Boom
-if(!GOM_IsDirectionAllowedForSymbol("BUY")) bestBuy = 0.0;
-if(!GOM_IsDirectionAllowedForSymbol("SELL")) bestSell = 0.0;
-
-if(bestBuy > 0.0) DrawKolaLevel(tfTag, "BUY", bestBuy, MathMax(1, bestBuyTouches), BuyLevelColor, tf);
-if(bestSell > 0.0) DrawKolaLevel(tfTag, "SELL", bestSell, MathMax(1, bestSellTouches), SellLevelColor, tf);
-
-PublishLevel("GOM_KOLA", tfTag, "BUY", bestBuy);
-PublishLevel("GOM_KOLA", tfTag, "SELL", bestSell);
-}
-
-void ProcessSIDOTF(const ENUM_TIMEFRAMES tf, const MqlRates &rates[], const int copied, const double atrVal)
-{
-string tfTag = TFTag(tf);
-if(tfTag == "UNK") return;
-
-if(!EnableSIDO)
-{
-PublishLevel("GOM_SIDO", tfTag, "DOUBLE_TOP", 0.0);
-PublishLevel("GOM_SIDO", tfTag, "DOUBLE_BOTTOM", 0.0);
-return;
-}
-
-int lb = MathMax(1, SIDOPivotLookback);
-if(copied < (lb * 3 + 20))
-{
-PublishLevel("GOM_SIDO", tfTag, "DOUBLE_TOP", 0.0);
-PublishLevel("GOM_SIDO", tfTag, "DOUBLE_BOTTOM", 0.0);
-return;
-}
-
-double tol = atrVal * (SIDOToleranceATRPercent / 100.0);
-int maxIdx = MathMin(copied - lb - 1, SIDOBarsToAnalyze);
-
-int lastHigh1 = -1, lastHigh2 = -1, lastLow1 = -1, lastLow2 = -1;
-for(int i = lb + 1; i <= maxIdx; i++)
-{
-if(IsPivotHigh(rates, copied, i, lb))
-{
-   lastHigh2 = lastHigh1;
-   lastHigh1 = i;
-}
-if(IsPivotLow(rates, copied, i, lb))
-{
-   lastLow2 = lastLow1;
-   lastLow1 = i;
-}
-}
-
-bool hasDoubleTop = false, hasDoubleBottom = false;
-double topLevel = 0.0, bottomLevel = 0.0;
-
-if(lastHigh1 >= 0 && lastHigh2 >= 0)
-{
-int barsGap = MathAbs(lastHigh1 - lastHigh2);
-double a = rates[lastHigh1].high;
-double b = rates[lastHigh2].high;
-if(barsGap <= SIDOMaxBarsBetweenSwings && MathAbs(a - b) <= tol)
-{
-   hasDoubleTop = true;
-   topLevel = (a + b) * 0.5;
-   DrawSIDOPattern(tfTag, "DOUBLE_TOP", lastHigh2, lastHigh1, b, a, SIDODoubleTopColor, rates);
-}
-}
-
-if(lastLow1 >= 0 && lastLow2 >= 0)
-{
-int barsGap = MathAbs(lastLow1 - lastLow2);
-double a = rates[lastLow1].low;
-double b = rates[lastLow2].low;
-if(barsGap <= SIDOMaxBarsBetweenSwings && MathAbs(a - b) <= tol)
-{
-   hasDoubleBottom = true;
-   bottomLevel = (a + b) * 0.5;
-   DrawSIDOPattern(tfTag, "DOUBLE_BOTTOM", lastLow2, lastLow1, b, a, SIDODoubleBottomColor, rates);
-}
-}
-
-if(!hasDoubleTop)
-{
-ObjectDelete(0, "GOM_SIDO_DOUBLE_TOP_" + tfTag + "_LN");
-ObjectDelete(0, "GOM_SIDO_DOUBLE_TOP_" + tfTag + "_LBL");
-}
-if(!hasDoubleBottom)
-{
-ObjectDelete(0, "GOM_SIDO_DOUBLE_BOTTOM_" + tfTag + "_LN");
-ObjectDelete(0, "GOM_SIDO_DOUBLE_BOTTOM_" + tfTag + "_LBL");
-}
-
-PublishLevel("GOM_SIDO", tfTag, "DOUBLE_TOP", topLevel);
-PublishLevel("GOM_SIDO", tfTag, "DOUBLE_BOTTOM", bottomLevel);
-}
-
-void ProcessTF(const ENUM_TIMEFRAMES tf)
-{
-int barsNeeded = MathMax(80, MathMax(MaxBarsToAnalyze, SIDOBarsToAnalyze) + MathMax(LineBreakPeriod, SIDOPivotLookback) * 4);
-MqlRates rates[];
-ArraySetAsSeries(rates, true);
-int copied = CopyRates(_Symbol, tf, 0, barsNeeded, rates);
-if(copied <= 0) return;
-
-double atrVal = GOM_ATRValue(_Symbol, tf, 14);
-if(atrVal <= 0.0)
-{
-double fallback = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-if(fallback <= 0.0) fallback = rates[0].close;
-atrVal = fallback * 0.001;
-}
-
-ProcessKolaTF(tf, rates, copied, atrVal);
-ProcessSIDOTF(tf, rates, copied, atrVal);
-}
-
-void ProcessOrClear(const ENUM_TIMEFRAMES tf, const bool enabled)
-{
-string tag = TFTag(tf);
-if(enabled) ProcessTF(tf);
-else
-{
-ClearTFObjects(tag);
-PublishLevel("GOM_KOLA", tag, "BUY", 0.0);
-PublishLevel("GOM_KOLA", tag, "SELL", 0.0);
-PublishLevel("GOM_SIDO", tag, "DOUBLE_TOP", 0.0);
-PublishLevel("GOM_SIDO", tag, "DOUBLE_BOTTOM", 0.0);
-}
-}
-
-// Projection locale « 500 prochaines bougies M1 » : extrapolation linéaire (tendance récente) + plafond ; publiée en GOM_SCRIPT_*.
-void GOM_UpdateM1Forecast500Globals(const double refPx)
-{
-GOM_GlobalSetForScript("M1_F500_VALID", 0.0);
-GOM_GlobalSetForScript("M1_F500_PRED_PX", 0.0);
-GOM_GlobalSetForScript("M1_F500_RET_PCT", 0.0);
-GOM_GlobalSetForScript("M1_F500_DIR", 0.0);
-GOM_GlobalSetForScript("M1_F500_SLOPE", 0.0);
-GOM_GlobalSetForScript("M1_F500_REF_CLOSE", 0.0);
-if(refPx <= 0.0) return;
-
-MqlRates r[];
-ArraySetAsSeries(r, true);
-int n = CopyRates(_Symbol, PERIOD_M1, 0, 620, r);
-int m = MathMin(MathMax(80, M1ForecastRegressionBars), n - 2);
-if(m < 80) return;
-
-double sumX = 0.0, sumY = 0.0, sumXY = 0.0, sumX2 = 0.0;
-int cnt = 0;
-for(int i = 0; i < m; i++)
-{
-double yi = r[i].close;
-if(yi <= 0.0) continue;
-double xi = (double)i;
-sumX += xi;
-sumY += yi;
-sumXY += xi * yi;
-sumX2 += xi * xi;
-cnt++;
-}
-if(cnt < 60) return;
-double denom = (double)cnt * sumX2 - sumX * sumX;
-if(MathAbs(denom) < 1e-24) return;
-double b = ((double)cnt * sumXY - sumX * sumY) / denom;
-double a = (sumY - b * sumX) / (double)cnt;
-double predPx = a + b * (-500.0);
-double retPct = ((predPx - refPx) / refPx) * 100.0;
-if(retPct > M1ForecastMaxAbsPct) retPct = M1ForecastMaxAbsPct;
-if(retPct < -M1ForecastMaxAbsPct) retPct = -M1ForecastMaxAbsPct;
-
-double atr1 = GOM_ATRValue(_Symbol, PERIOD_M1, 14);
-if(atr1 > 0.0 && MathAbs(predPx - refPx) > atr1 * 80.0)
-{
-predPx = refPx + ((predPx > refPx) ? 1.0 : -1.0) * atr1 * 80.0;
-retPct = ((predPx - refPx) / refPx) * 100.0;
-if(retPct > M1ForecastMaxAbsPct) retPct = M1ForecastMaxAbsPct;
-if(retPct < -M1ForecastMaxAbsPct) retPct = -M1ForecastMaxAbsPct;
-}
-
-double dirNum = 0.0;
-if(predPx > refPx * 1.0003) dirNum = 1.0;
-else if(predPx < refPx * 0.9997) dirNum = -1.0;
-
-GOM_GlobalSetForScript("M1_F500_PRED_PX", predPx);
-GOM_GlobalSetForScript("M1_F500_RET_PCT", retPct);
-GOM_GlobalSetForScript("M1_F500_DIR", dirNum);
-GOM_GlobalSetForScript("M1_F500_SLOPE", b);
-GOM_GlobalSetForScript("M1_F500_REF_CLOSE", r[0].close);
-GOM_GlobalSetForScript("M1_F500_VALID", 1.0);
-}
-
-void GOM_DeleteM1ForecastChartOverlay(void)
-{
-int n = ObjectsTotal(0);
-for(int i = n - 1; i >= 0; i--)
-{
-string nm = ObjectName(0, i);
-if(StringFind(nm, GOM_F500V_PREFIX) == 0)
-ObjectDelete(0, nm);
-}
-}
-
-// Projection visuelle : rectangles M1 + ligne (même droite que le bandeau M1×500).
-void GOM_DrawM1ForecastChartOverlay(const double bidFallback)
-{
-if(!ShowM1Forecast500ChartOverlay)
-{
-GOM_DeleteM1ForecastChartOverlay();
-return;
-}
-if(GOM_GlobalGetForScript("M1_F500_VALID", 0.0) < 0.5)
-{
-GOM_DeleteM1ForecastChartOverlay();
-return;
-}
-double predPx = GOM_GlobalGetForScript("M1_F500_PRED_PX", 0.0);
-double refC = GOM_GlobalGetForScript("M1_F500_REF_CLOSE", 0.0);
-if(refC <= 0.0) refC = iClose(_Symbol, PERIOD_M1, 0);
-if(refC <= 0.0) refC = bidFallback;
-if(refC <= 0.0 || predPx <= 0.0)
-{
-GOM_DeleteM1ForecastChartOverlay();
-return;
-}
-MqlRates rr[];
-ArraySetAsSeries(rr, true);
-if(CopyRates(_Symbol, PERIOD_M1, 0, 2, rr) < 1)
-{
-GOM_DeleteM1ForecastChartOverlay();
-return;
-}
-datetime t0 = rr[0].time;
-int sec = (int)PeriodSeconds(PERIOD_M1);
-if(sec < 1) sec = 60;
-int nb = MathMax(4, MathMin(M1ForecastChartBarsDraw, 120));
-double atr1 = GOM_ATRValue(_Symbol, PERIOD_M1, 14);
-if(atr1 <= 0.0) atr1 = refC * 0.00015;
-if(M1ForecastForceChartShift)
-{
-double shiftPct = M1ForecastChartShiftPct;
-if(shiftPct < 8.0) shiftPct = 8.0;
-if(shiftPct > 45.0) shiftPct = 45.0;
-ChartSetInteger(0, CHART_SHIFT, true);
-ChartSetDouble(0, CHART_SHIFT_SIZE, shiftPct / 100.0);
-}
-
-GOM_DeleteM1ForecastChartOverlay();
-
-double pt = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
-if(pt <= 0.0) pt = 0.00001;
-double minBody = MathMax(atr1 * 0.035, pt * 5.0);
-double cPrev = refC;
-for(int k = 1; k <= nb; k++)
-{
-double cNext = refC + (predPx - refC) * ((double)k / 500.0);
-double o = cPrev;
-double c = cNext;
-double drift = MathAbs(c - o);
-double wick = MathMax(atr1 * 0.09, drift * 0.45);
-double hi = MathMax(o, c) + wick;
-double lo = MathMin(o, c) - wick;
-if(hi - lo < minBody)
-{
-double mid = (o + c) * 0.5;
-hi = mid + minBody * 0.5;
-lo = mid - minBody * 0.5;
-}
-datetime tOpen = t0 + (datetime)((k - 1) * sec);
-datetime tClose = t0 + (datetime)(k * sec);
-if(tClose <= tOpen) tClose = tOpen + (datetime)sec;
-datetime tMid = tOpen + (datetime)(sec / 2);
-if(tMid <= tOpen) tMid = tOpen + 1;
-datetime tA = tOpen + (datetime)(sec / 5);
-datetime tB = tClose - (datetime)(sec / 5);
-if(tB <= tA) tB = tA + 1;
-string nmW = GOM_F500V_PREFIX + "W_" + IntegerToString(k);
-ObjectCreate(0, nmW, OBJ_TREND, 0, tMid, hi, tMid, lo);
-color body = (c >= o) ? clrLimeGreen : clrTomato;
-ObjectSetInteger(0, nmW, OBJPROP_COLOR, body);
-ObjectSetInteger(0, nmW, OBJPROP_WIDTH, 1);
-ObjectSetInteger(0, nmW, OBJPROP_SELECTABLE, false);
-ObjectSetInteger(0, nmW, OBJPROP_BACK, false);
-ObjectSetInteger(0, nmW, OBJPROP_HIDDEN, false);
-ObjectSetInteger(0, nmW, OBJPROP_ZORDER, 28);
-
-double bTop = MathMax(o, c);
-double bBot = MathMin(o, c);
-if(bTop - bBot < minBody * 0.55)
-{
-double bMid = (o + c) * 0.5;
-bTop = bMid + minBody * 0.275;
-bBot = bMid - minBody * 0.275;
-}
-string nmB = GOM_F500V_PREFIX + "B_" + IntegerToString(k);
-ObjectCreate(0, nmB, OBJ_RECTANGLE, 0, tA, bTop, tB, bBot);
-ObjectSetInteger(0, nmB, OBJPROP_COLOR, body);
-ObjectSetInteger(0, nmB, OBJPROP_STYLE, STYLE_SOLID);
-ObjectSetInteger(0, nmB, OBJPROP_WIDTH, 1);
-ObjectSetInteger(0, nmB, OBJPROP_FILL, true);
-ObjectSetInteger(0, nmB, OBJPROP_BACK, false);
-ObjectSetInteger(0, nmB, OBJPROP_SELECTABLE, false);
-ObjectSetInteger(0, nmB, OBJPROP_HIDDEN, false);
-ObjectSetInteger(0, nmB, OBJPROP_ZORDER, 30);
-cPrev = cNext;
-}
-}
-
-int GetTFBias(const ENUM_TIMEFRAMES tf)
-{
-int hFast = iMA(_Symbol, tf, 20, 0, MODE_EMA, PRICE_CLOSE);
-int hSlow = iMA(_Symbol, tf, 50, 0, MODE_EMA, PRICE_CLOSE);
-if(hFast == INVALID_HANDLE || hSlow == INVALID_HANDLE)
-{
-if(hFast != INVALID_HANDLE) IndicatorRelease(hFast);
-if(hSlow != INVALID_HANDLE) IndicatorRelease(hSlow);
-return 0;
-}
-
-double f[], s[];
-ArrayResize(f, 1);
-ArrayResize(s, 1);
-ArraySetAsSeries(f, true);
-ArraySetAsSeries(s, true);
-int c1 = CopyBuffer(hFast, 0, 0, 1, f);
-int c2 = CopyBuffer(hSlow, 0, 0, 1, s);
-IndicatorRelease(hFast);
-IndicatorRelease(hSlow);
-if(c1 < 1 || c2 < 1) return 0;
-if(f[0] > s[0]) return 1;
-if(f[0] < s[0]) return -1;
-return 0;
-}
-
-void GOM_PositionLabelInCell(const string txtName, const int x, const int y, const int w, const int h, const int fontPx, const string text)
-{
-ObjectSetInteger(0, txtName, OBJPROP_ANCHOR, ANCHOR_CENTER);
-ObjectSetInteger(0, txtName, OBJPROP_XDISTANCE, x + w / 2);
-ObjectSetInteger(0, txtName, OBJPROP_YDISTANCE, y + h / 2);
-}
-
-void DrawDashboardCellFont(const string name, const string text, const int x, const int y, const int w, const int h, const color bg, const color fg, const int fontPx, const bool useBold = false)
-{
-   string txtName = name + "_TXT";
-   
-   if(bg == clrNONE)
-   {
-      if(ObjectFind(0, name) >= 0)
-         ObjectDelete(0, name);
-   }
-   else
-   {
-      if(ObjectFind(0, name) < 0)
-         ObjectCreate(0, name, OBJ_RECTANGLE_LABEL, 0, 0, 0);
-
-      ObjectSetInteger(0, name, OBJPROP_CORNER, CORNER_LEFT_LOWER);
-      ObjectSetInteger(0, name, OBJPROP_XDISTANCE, x);
-      ObjectSetInteger(0, name, OBJPROP_YDISTANCE, y);
-      ObjectSetInteger(0, name, OBJPROP_XSIZE, w);
-      ObjectSetInteger(0, name, OBJPROP_YSIZE, h);
-      ObjectSetInteger(0, name, OBJPROP_BGCOLOR, bg);
-      ObjectSetInteger(0, name, OBJPROP_COLOR, DashboardCellBorderColor);
-      ObjectSetInteger(0, name, OBJPROP_BORDER_TYPE, BORDER_FLAT);
-      ObjectSetString(0, name, OBJPROP_TEXT, "");
-      ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
-      ObjectSetInteger(0, name, OBJPROP_ZORDER, MathMax(100, DashboardLabelZOrder - 1));
-   }
-
-   if(ObjectFind(0, txtName) < 0)
-      ObjectCreate(0, txtName, OBJ_LABEL, 0, 0, 0);
-
-   ObjectSetInteger(0, txtName, OBJPROP_CORNER, CORNER_LEFT_LOWER);
-   ObjectSetInteger(0, txtName, OBJPROP_COLOR, clrWhite); // Texte en blanc sur les cellules colorées
-   ObjectSetString(0, txtName, OBJPROP_FONT, "Segoe UI");
-   ObjectSetString(0, txtName, OBJPROP_TEXT, text);
-   int fsClamped = MathMax(9, fontPx);
-   ObjectSetInteger(0, txtName, OBJPROP_FONTSIZE, fsClamped);
-   GOM_PositionLabelInCell(txtName, x, y, w, h, fsClamped, text);
-   ObjectSetInteger(0, txtName, OBJPROP_SELECTABLE, false);
-   ObjectSetInteger(0, txtName, OBJPROP_SELECTED, false);
-   ObjectSetInteger(0, txtName, OBJPROP_HIDDEN, false);
-   ObjectSetInteger(0, txtName, OBJPROP_BACK, false);
-   ObjectSetInteger(0, txtName, OBJPROP_ZORDER, MathMax(101, DashboardLabelZOrder + 1));
-}
-
-void DrawDashboardCell(const string name, const string text, const int x, const int y, const int w, const int h, const color bg, const color fg)
-{
-int cellFs = MathMax(6, DashboardFontSize);
-DrawDashboardCellFont(name, text, x, y, w, h, bg, fg, cellFs);
-}
-
-// Cellule verdict: plus haute, police plus grande, bordure contrastée.
-void DrawDashboardVerdictCell(const string name, const string text, const int x, const int y, const int w, const int h, const color bg, const color borderClr, const color fg, const int fontPx)
-{
-   string txtName = name + "_TXT";
-   if(ObjectFind(0, name) < 0)
-      ObjectCreate(0, name, OBJ_RECTANGLE_LABEL, 0, 0, 0);
-
-   ObjectSetInteger(0, name, OBJPROP_CORNER, CORNER_LEFT_LOWER);
-   ObjectSetInteger(0, name, OBJPROP_XDISTANCE, x);
-   ObjectSetInteger(0, name, OBJPROP_YDISTANCE, y);
-   ObjectSetInteger(0, name, OBJPROP_XSIZE, w);
-   ObjectSetInteger(0, name, OBJPROP_YSIZE, h);
-   ObjectSetInteger(0, name, OBJPROP_BGCOLOR, bg);
-   ObjectSetInteger(0, name, OBJPROP_COLOR, borderClr);
-   ObjectSetInteger(0, name, OBJPROP_BORDER_TYPE, BORDER_FLAT);
-   ObjectSetString(0, name, OBJPROP_TEXT, "");
-   ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
-   ObjectSetInteger(0, name, OBJPROP_SELECTED, false);
-   ObjectSetInteger(0, name, OBJPROP_BACK, false);
-   ObjectSetInteger(0, name, OBJPROP_HIDDEN, false);
-   ObjectSetInteger(0, name, OBJPROP_ZORDER, MathMax(100, DashboardLabelZOrder - 1));
-
-   if(ObjectFind(0, txtName) < 0)
-      ObjectCreate(0, txtName, OBJ_LABEL, 0, 0, 0);
-
-   ObjectSetInteger(0, txtName, OBJPROP_CORNER, CORNER_LEFT_LOWER);
-   ObjectSetInteger(0, txtName, OBJPROP_COLOR, clrWhite);
-   ObjectSetInteger(0, txtName, OBJPROP_FONTSIZE, fontPx);
-   ObjectSetString(0, txtName, OBJPROP_FONT, "Segoe UI Bold"); // Belle police robuste
-   ObjectSetString(0, txtName, OBJPROP_TEXT, text);
-   GOM_PositionLabelInCell(txtName, x, y, w, h, fontPx, text);
-   ObjectSetInteger(0, txtName, OBJPROP_SELECTABLE, false);
-   ObjectSetInteger(0, txtName, OBJPROP_SELECTED, false);
-   ObjectSetInteger(0, txtName, OBJPROP_HIDDEN, false);
-   ObjectSetInteger(0, txtName, OBJPROP_BACK, false);
-   ObjectSetInteger(0, txtName, OBJPROP_ZORDER, MathMax(101, DashboardLabelZOrder + 1));
-}
-
-void DrawDashboardPanel(const string name, const int x, const int y, const int w, const int h, const color bg)
-{
-   if(ObjectFind(0, name) < 0)
-      ObjectCreate(0, name, OBJ_RECTANGLE_LABEL, 0, 0, 0);
-
-   ObjectSetInteger(0, name, OBJPROP_CORNER, CORNER_LEFT_LOWER);
-   ObjectSetInteger(0, name, OBJPROP_XDISTANCE, x);
-   ObjectSetInteger(0, name, OBJPROP_YDISTANCE, y);
-   ObjectSetInteger(0, name, OBJPROP_XSIZE, w);
-   ObjectSetInteger(0, name, OBJPROP_YSIZE, h);
-   ObjectSetInteger(0, name, OBJPROP_BGCOLOR, bg);
-   ObjectSetInteger(0, name, OBJPROP_COLOR, (color)0x242424);
-   ObjectSetInteger(0, name, OBJPROP_BORDER_TYPE, BORDER_FLAT);
-   ObjectSetString(0, name, OBJPROP_TEXT, "");
-   ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
-   ObjectSetInteger(0, name, OBJPROP_SELECTED, false);
-   ObjectSetInteger(0, name, OBJPROP_HIDDEN, false);
-   ObjectSetInteger(0, name, OBJPROP_ZORDER, MathMax(80, DashboardLabelZOrder - 3));
-}
-
-void GOM_DeleteDashboardFullStripObjects(void)
-{
-string tfs[6] = {"M5", "M15", "M30", "H1", "H4", "D1"};
-for(int i = 0; i < 6; i++)
-{
-ObjectDelete(0, DASH_PREFIX + "TOP_" + tfs[i]);
-ObjectDelete(0, DASH_PREFIX + "TOP_" + tfs[i] + "_TXT");
-ObjectDelete(0, DASH_PREFIX + "COMPACT_TF_" + tfs[i]);
-ObjectDelete(0, DASH_PREFIX + "COMPACT_TF_" + tfs[i] + "_TXT");
-}
-ObjectDelete(0, DASH_PREFIX + "TOP_VERDICT");
-ObjectDelete(0, DASH_PREFIX + "TOP_VERDICT_TXT");
-string botIds[] = {
-"BOT_BRAND", "BOT_LVL", "BOT_VOL", "BOT_ATR", "BOT_SIDO", "BOT_KOLA", "BOT_RSIMACD", "BOT_FILTERS",
-"BOT_EQ", "BOT_BB", "BOT_VWAP", "BOT_ADXST",
-"BOT_META_DIR", "BOT_META_SRV", "BOT_META_LLM", "BOT_META_PX", "BOT_META_SPR", "BOT_META_VER",
-"BOT_DIRMETA", "BOT_TV_SIDE", "BOT_TV_VER",
-"BOTB_M5", "BOTB_M15", "BOTB_M30", "BOTB_H1", "BOTB_H4", "BOTB_D1", "BOTB_END",
-"BOTF_FULL"
-};
-for(int j = 0; j < ArraySize(botIds); j++)
-{
-ObjectDelete(0, DASH_PREFIX + botIds[j]);
-ObjectDelete(0, DASH_PREFIX + botIds[j] + "_TXT");
-}
-}
-
-// Symboles direction / étoile : fallback ASCII si la police du terminal n’affiche pas le BMP.
-string GOM_UnicodeChar(const ushort code)
-{
-if(code == 0x25B2) return "^";
-if(code == 0x25BC) return "v";
-if(code == 0x25CB) return "o";
-if(code == 0x2605) return "*";
-ushort u[1];
-u[0] = code;
-return ShortArrayToString(u, 0, 1);
-}
-
-string BiasArrowSymbol(const int bias)
-{
-if(bias > 0) return GOM_UnicodeChar(0x25B2);
-if(bias < 0) return GOM_UnicodeChar(0x25BC);
-return "-";
-}
-
-string BiasText(const string tfName, const int bias)
-{
-return tfName + " " + BiasArrowSymbol(bias);
-}
-
-double ReadGV(const string moduleTag, const string tfTag, const string sideTag)
-{
-string k = GVKey(moduleTag, tfTag, sideTag);
-if(!GlobalVariableCheck(k)) return 0.0;
-return GlobalVariableGet(k);
-}
-
-double ReadGVDirect(const string key, const double defValue = 0.0)
-{
-if(!GlobalVariableCheck(key)) return defValue;
-return GlobalVariableGet(key);
-}
-
-string FmtPrice(const double v)
-{
-if(v <= 0.0) return "-";
-return DoubleToString(v, _Digits);
-}
-
-void DrawPriceTag(const string name, const string txt, const double price, const color clr)
-{
-datetime t = iTime(_Symbol, PERIOD_CURRENT, 0);
-if(t <= 0) t = TimeCurrent();
-int shift = MathMax(1, LabelShiftBars);
-datetime tx = t + (datetime)(shift * PeriodSeconds(PERIOD_CURRENT));
-
-if(ObjectFind(0, name) < 0)
-ObjectCreate(0, name, OBJ_TEXT, 0, tx, price);
-ObjectMove(0, name, 0, tx, price);
-ObjectSetString(0, name, OBJPROP_TEXT, txt);
-ObjectSetString(0, name, OBJPROP_FONT, "Arial Bold");
-ObjectSetInteger(0, name, OBJPROP_COLOR, clr);
-ObjectSetInteger(0, name, OBJPROP_FONTSIZE, 9);
-ObjectSetInteger(0, name, OBJPROP_ANCHOR, ANCHOR_LEFT);
-ObjectSetInteger(0, name, OBJPROP_BACK, false);
-}
-
-void DrawOrUpdateHLine(const string name, const double price, const color clr, const ENUM_LINE_STYLE style, const int width)
-{
-if(price <= 0.0) return;
-if(ObjectFind(0, name) < 0)
-ObjectCreate(0, name, OBJ_HLINE, 0, 0, price);
-ObjectSetDouble(0, name, OBJPROP_PRICE, price);
-ObjectSetInteger(0, name, OBJPROP_COLOR, clr);
-ObjectSetInteger(0, name, OBJPROP_STYLE, style);
-ObjectSetInteger(0, name, OBJPROP_WIDTH, width);
-ObjectSetInteger(0, name, OBJPROP_BACK, false);
-ObjectSetInteger(0, name, OBJPROP_HIDDEN, false);
-}
-
-void DrawAndPublishScriptEMAs()
-{
-int periods[10] = {9, 21, 13, 50, 100, 200, 66, 75, 123, 34};
-if(!ShowScriptEMAs)
-{
-GOM_DeleteChartObjectsByPrefix("GOM_EMAC_");
-for(int j = 0; j < 10; j++)
-ObjectDelete(0, "GOM_EMA_" + IntegerToString(periods[j]));
-return;
-}
-
-GOM_DeleteChartObjectsByPrefix("GOM_EMAC_");
-for(int j = 0; j < 10; j++)
-ObjectDelete(0, "GOM_EMA_" + IntegerToString(periods[j]));
-
-int barsTf = iBars(_Symbol, ScriptEmaTF);
-if(barsTf < 3) return;
-int nSeg = ScriptEmaCurveBars;
-if(nSeg < 20) nSeg = 20;
-if(nSeg > barsTf - 1) nSeg = barsTf - 1;
-if(nSeg > 2000) nSeg = 2000;
-
-color cols[10] = {clrDodgerBlue, clrOrange, clrDeepSkyBlue, clrLimeGreen, clrGold, clrRed, clrMagenta, clrMediumOrchid, clrAqua, clrSilver};
-
-for(int i = 0; i < 10; i++)
-{
-int p = periods[i];
-int h = iMA(_Symbol, ScriptEmaTF, p, 0, MODE_EMA, PRICE_CLOSE);
-if(h == INVALID_HANDLE) continue;
-double buf[];
-ArraySetAsSeries(buf, true);
-int need = nSeg + 1;
-int nc = CopyBuffer(h, 0, 0, need, buf);
-IndicatorRelease(h);
-if(nc < 2) continue;
-
-string gv = "GOM_SCRIPT_" + _Symbol + "_EMA_" + IntegerToString(p);
-if(buf[0] > 0.0)
-GlobalVariableSet(gv, buf[0]);
-
-const string pfx = "GOM_EMAC_" + IntegerToString(p) + "_";
-for(int k = 0; k < nc - 1; k++)
-{
-double vNew = buf[k];
-double vOld = buf[k + 1];
-if(vNew <= 0.0 || vOld <= 0.0) continue;
-datetime tNew = iTime(_Symbol, ScriptEmaTF, k);
-datetime tOld = iTime(_Symbol, ScriptEmaTF, k + 1);
-if(tNew <= 0 || tOld <= 0) continue;
-
-string segNm = pfx + IntegerToString(k);
-if(ObjectFind(0, segNm) < 0)
-ObjectCreate(0, segNm, OBJ_TREND, 0, tOld, vOld, tNew, vNew);
-else
-{
-ObjectMove(0, segNm, 0, tOld, vOld);
-ObjectMove(0, segNm, 1, tNew, vNew);
-}
-ObjectSetInteger(0, segNm, OBJPROP_COLOR, cols[i]);
-ObjectSetInteger(0, segNm, OBJPROP_STYLE, STYLE_SOLID);
-ObjectSetInteger(0, segNm, OBJPROP_WIDTH, 1);
-ObjectSetInteger(0, segNm, OBJPROP_RAY_RIGHT, false);
-ObjectSetInteger(0, segNm, OBJPROP_RAY_LEFT, false);
-ObjectSetInteger(0, segNm, OBJPROP_BACK, true);
-ObjectSetInteger(0, segNm, OBJPROP_SELECTABLE, false);
-ObjectSetInteger(0, segNm, OBJPROP_SELECTED, false);
-ObjectSetInteger(0, segNm, OBJPROP_HIDDEN, false);
-}
-}
-}
-
-void GOMScript_DrawSignalArrow(const string dir, const double entry)
-{
-   const string nm = "GOM_PLAN_ARROW";
-   if(dir != "BUY" && dir != "SELL")
-   {
-      ObjectDelete(0, nm);
-      return;
-   }
-   datetime t = iTime(_Symbol, PERIOD_CURRENT, 0);
-   if(t <= 0) t = TimeCurrent();
-   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
-   if(point <= 0.0) point = 0.1;
-   double y = (dir == "BUY") ? (entry - 12.0 * point) : (entry + 12.0 * point);
-   
-   if(ObjectFind(0, nm) < 0)
-      ObjectCreate(0, nm, OBJ_ARROW, 0, t, y);
-   ObjectMove(0, nm, 0, t, y);
-   ObjectSetInteger(0, nm, OBJPROP_ARROWCODE, (dir == "BUY") ? 241 : 242);
-   
-   // Logic clignotante pour signal actif
-   bool blinkOn = (((int)(GetTickCount() / 380)) % 2) == 0;
-   color cHi = (dir == "BUY") ? clrLime : clrTomato;
-   color cLo = (dir == "BUY") ? clrGreen : clrFireBrick;
-   ObjectSetInteger(0, nm, OBJPROP_COLOR, blinkOn ? cHi : cLo);
-   ObjectSetInteger(0, nm, OBJPROP_WIDTH, blinkOn ? 6 : 2);
-   ObjectSetInteger(0, nm, OBJPROP_BACK, false);
-}
-
-// Flèche clignotante « spike imminent » (Boom/Crash) quand le script est en WAIT mais probabilité élevée.
-bool DrawSpikeImminentArrow(const double bid, const double spikeProb, const double spDirNum,
-                            const bool isBoom, const bool isCrash, const string planDir)
-{
-const string nm = "GOM_SPIKE_IMMINENT";
-if(!EnableSpikePrediction || (!isBoom && !isCrash) || planDir != "WAIT")
-{
-ObjectDelete(0, nm);
-return false;
-}
-double th = GOM_SpikeBlinkEffectiveTh(SpikeBlinkMinProbability);
-if(spikeProb + 1e-12 < th)
-{
-ObjectDelete(0, nm);
-return false;
-}
-string sdir = "";
-if(spDirNum > 0.5) sdir = "BUY";
-else if(spDirNum < -0.5) sdir = "SELL";
-if(sdir == "")
-{
-ObjectDelete(0, nm);
-return false;
-}
-datetime t = iTime(_Symbol, PERIOD_CURRENT, 0);
-if(t <= 0) t = TimeCurrent();
-double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
-if(point <= 0.0) point = 0.1;
-double y = (sdir == "BUY") ? (bid - 22.0 * point) : (bid + 22.0 * point);
-
-if(ObjectFind(0, nm) < 0)
-ObjectCreate(0, nm, OBJ_ARROW, 0, t, y);
-ObjectMove(0, nm, 0, t, y);
-ObjectSetInteger(0, nm, OBJPROP_ARROWCODE, (sdir == "BUY") ? 241 : 242);
-bool blinkOn = (((int)(GetTickCount() / 380)) % 2) == 0;
-color cHi = (sdir == "BUY") ? clrLime : clrTomato;
-color cLo = (sdir == "BUY") ? clrGreen : clrFireBrick;
-ObjectSetInteger(0, nm, OBJPROP_COLOR, blinkOn ? cHi : cLo);
-ObjectSetInteger(0, nm, OBJPROP_WIDTH, blinkOn ? 5 : 2);
-ObjectSetInteger(0, nm, OBJPROP_BACK, false);
-ObjectSetInteger(0, nm, OBJPROP_SELECTABLE, false);
-ObjectSetInteger(0, nm, OBJPROP_HIDDEN, false);
-return true;
-}
-
-// Indices « spike » : fermeture auto sur franchissement ligne GOM — pas Forex ni métaux.
-bool GOM_IsSymSpikeStyleFamilyForGomAutoClose(const string symIn = "")
-{
-   string u;
-   GOM_SymbolToUpperKey(symIn, u);
-   if(GOM_IsSyntheticBoomCrashFamily(symIn)) return true;
-   if(StringFind(u, "PINCH") >= 0 || StringFind(u, "GAS") >= 0) return true;
-   if(StringFind(u, "STEP") >= 0) return true;
-   if(StringFind(u, "JUMP") >= 0) return true;
-   if(StringFind(u, "VOLATILITY") >= 0 || StringFind(u, "RANGE BREAK") >= 0 ||
-      StringFind(u, "FX VOL") >= 0 || StringFind(u, "SFX VOL") >= 0 ||
-      StringFind(u, "PAIN") >= 0 || StringFind(u, "GAIN") >= 0 || StringFind(u, "XEL") >= 0) return true;
-   return false;
-}
-
-// Commission liée à la position : POSITION_COMMISSION est déprécié — agrège DEAL_COMMISSION des deals de la chaîne.
-double SMC_PositionDealCommission(const ulong position_id)
-{
-   double sum = 0.0;
-   if(position_id == 0)
-      return 0.0;
-   if(!HistorySelectByPosition(position_id))
-      return 0.0;
-   const int n = HistoryDealsTotal();
-   for(int i = 0; i < n; i++)
-   {
-      const ulong deal = HistoryDealGetTicket(i);
-      if(deal == 0)
-         continue;
-      sum += HistoryDealGetDouble(deal, DEAL_COMMISSION);
-   }
-   return sum;
-}
-
-// Ferme au marché les positions alignées avec le spike capté (BUY si franchissement haussier, SELL si baissier).
-int GOM_ClosePositionsAfterSpikeCapture(const bool buySpikeCaptured, const bool sellSpikeCaptured)
-{
-   if(!EnableAutoClosePositionsOnSpikeCaptured)
-   {
-      Print("⚠️ GOM_ClosePositionsAfterSpikeCapture: EnableAutoClosePositionsOnSpikeCaptured = false");
-      return 0;
-   }
-   if(!buySpikeCaptured && !sellSpikeCaptured)
-      return 0;
-
-   if(!GOM_IsSymSpikeStyleFamilyForGomAutoClose())
-   {
-      Print("⚠️ GOM_ClosePositionsAfterSpikeCapture: Symbole ", _Symbol, " non reconnu comme famille spike (Boom/Crash/Volatility/etc.)");
-      return 0;
-   }
-
-   if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) || !MQLInfoInteger(MQL_TRADE_ALLOWED))
-   {
-      Print("⚠️ GOM_ClosePositionsAfterSpikeCapture: Trading non autorisé");
-      return 0;
-   }
-
-   // ✅ NOUVEAU: Vérifier qu'il s'agit d'un vrai spike Boom/Crash (mouvement rapide négatif → positif)
-   datetime now = TimeCurrent();
-   double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   bool isRealSpike = false;
-
-   // Détection spike rapide (5 dernières secondes max)
-   if(g_gomLastSpikeDetectionTime > 0 && (now - g_gomLastSpikeDetectionTime) <= 5)
-   {
-      if(g_gomLastPriceForSpikeDetection > 0.0)
-      {
-         double priceChange = currentPrice - g_gomLastPriceForSpikeDetection;
-         double priceChangePct = (priceChange / g_gomLastPriceForSpikeDetection) * 100.0;
-
-         // Boom: mouvement haussier rapide (min 0.3%)
-         if(buySpikeCaptured && StringFind(_Symbol, "Boom") >= 0 && priceChangePct >= 0.3)
-         {
-            isRealSpike = true;
-            Print("✅ SPIKE BOOM RÉEL détecté: +", DoubleToString(priceChangePct, 2), "% en ", (now - g_gomLastSpikeDetectionTime), "s");
-         }
-
-         // Crash: mouvement baissier rapide (min -0.3%)
-         if(sellSpikeCaptured && StringFind(_Symbol, "Crash") >= 0 && priceChangePct <= -0.3)
-         {
-            isRealSpike = true;
-            Print("✅ SPIKE CRASH RÉEL détecté: ", DoubleToString(priceChangePct, 2), "% en ", (now - g_gomLastSpikeDetectionTime), "s");
-         }
-
-         // Volatility / Step / Jump (sans nom Boom/Crash) : mouvement aligné sur le sens capté (seuil plus souple)
-         if(!isRealSpike && SMC_GetSymbolCategory(_Symbol) == SYM_VOLATILITY)
-         {
-            if(buySpikeCaptured && priceChangePct >= 0.15)
-            {
-               isRealSpike = true;
-               Print("✅ SPIKE VOL RÉEL (BUY): +", DoubleToString(priceChangePct, 2), "% en ", (now - g_gomLastSpikeDetectionTime), "s");
-            }
-            if(sellSpikeCaptured && priceChangePct <= -0.15)
-            {
-               isRealSpike = true;
-               Print("✅ SPIKE VOL RÉEL (SELL): ", DoubleToString(priceChangePct, 2), "% en ", (now - g_gomLastSpikeDetectionTime), "s");
-            }
-         }
-      }
-   }
-
-   // Mettre à jour le prix de référence pour la prochaine détection
-   g_gomLastPriceForSpikeDetection = currentPrice;
-   g_gomLastSpikeDetectionTime = now;
-
-   // Si pas de spike réel détecté ET qu'on exige un vrai spike, sortir
-   if(SpikeCapturedRequireRealSpike && !isRealSpike)
-   {
-      static datetime lastNoSpikeLog = 0;
-      if(now - lastNoSpikeLog >= 30)
-      {
-         Print("⚠️ Niveau GOM franchi mais pas de spike rapide détecté (variation < 0.3% en 5s) — fermeture annulée");
-         lastNoSpikeLog = now;
-      }
-      return 0;
-   }
-
-   // Vérifier cooldown de fermeture (évite fermetures multiples rapides)
-   if(g_gomLastSpikeCaptureCloseUtc > 0 && (now - g_gomLastSpikeCaptureCloseUtc) < 1)
-      return 0;
-
-   g_gomSpikeTrade.SetDeviationInPoints(SpikeCapturedCloseDeviation);
-   g_gomSpikeTrade.SetAsyncMode(false);
-
-   int closed = 0;
-   for(int i = PositionsTotal() - 1; i >= 0; i--)
-   {
-      ulong ticket = PositionGetTicket(i);
-      if(ticket == 0)
-         continue;
-      if(!PositionSelectByTicket(ticket))
-         continue;
-      if(PositionGetString(POSITION_SYMBOL) != _Symbol)
-         continue;
-      long mg = (long)PositionGetInteger(POSITION_MAGIC);
-      if(SpikeCapturedCloseMagicFilter != 0 && mg != SpikeCapturedCloseMagicFilter)
-         continue;
-
-      datetime openT = (datetime)PositionGetInteger(POSITION_TIME);
-      int ageSec = (openT > 0 ? (int)(now - openT) : 999999);
-      if(ageSec < MathMax(0, SpikeCapturedMinPositionAgeSec))
-         continue;
-
-      ENUM_POSITION_TYPE ptype = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
-      bool wantClose = (buySpikeCaptured && ptype == POSITION_TYPE_BUY) ||
-                       (sellSpikeCaptured && ptype == POSITION_TYPE_SELL);
-      if(!wantClose)
-         continue;
-
-      double net = PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP) +
-                   SMC_PositionDealCommission((ulong)PositionGetInteger(POSITION_IDENTIFIER));
-      bool profitOk = true;
-
-      // LOGIQUE AMÉLIORÉE: Si GomEntryCrossCloseMinProfitUSD = 0, ferme même en perte légère (spike capté = sortie prioritaire)
-      if(GomEntryCrossCloseMinProfitUSD <= 0.0)
-      {
-         // Ferme toute position alignée avec le spike, même en perte légère (max -1.0$)
-         profitOk = (net >= -1.0);
-      }
-      else
-      {
-         // Si seuil > 0, utilise la logique existante
-         if(GomSpikeCapturedCloseAnyProfit && net > 1e-8)
-            profitOk = true;
-         else
-            profitOk = (net + 1e-9 >= GomEntryCrossCloseMinProfitUSD);
-      }
-
-      if(!profitOk)
-      {
-         Print("⚠️ GOM spike capté mais position #", ticket, " non fermée: P/L=", DoubleToString(net, 2),
-               "$ < seuil=", DoubleToString(GomEntryCrossCloseMinProfitUSD, 2), "$");
-         continue;
-      }
-
-      if(g_gomSpikeTrade.PositionClose(ticket))
-      {
-         closed++;
-         Print("GOM niveau franchi → fermeture position #", ticket,
-               " | ", (ptype == POSITION_TYPE_BUY ? "BUY" : "SELL"),
-               " | magic=", mg, " | P/L=", DoubleToString(net, 2), "$");
-      }
-   }
-
-   if(closed > 0)
-   {
-      g_gomLastSpikeCaptureCloseUtc = now;
-      GOM_AlertPush("Spike capturé", IntegerToString(closed) + " position(s) fermée(s) au marché (GOM niveau franchi).", NotifySoundSpike);
-   }
-   return closed;
-}
-
-// Nettoyage automatique des flèches/signaux si le spike a été capturé (ou mouvement invalidé)
-void GOM_CheckCaptureSpikeAndCleanup(void)
-{
-   string prefix = "GOM_SCRIPT_" + _Symbol;
-   double buyE  = GlobalVariableGet(prefix + "_BUY_ENTRY");
-   double sellE = GlobalVariableGet(prefix + "_SELL_ENTRY");
-
-   if(buyE <= 0.0 && sellE <= 0.0) return;
-
-   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
-   if(point <= 0.0)
-      point = _Point;
-
-   const double capBufPts = 15.0;
-   bool buyCaptured = (buyE > 0.0 && ask > buyE + capBufPts * point);
-   bool sellCaptured = (sellE > 0.0 && bid < sellE - capBufPts * point);
-   bool captured = buyCaptured || sellCaptured;
-
-   // LOG DEBUG: Afficher l'état de la détection de spike
-   static datetime lastSpikeDebugLog = 0;
-   datetime nowDebug = TimeCurrent();
-   if(captured || (nowDebug - lastSpikeDebugLog >= 120))
-   {
-      if(captured)
-      {
-         Print("🎯 SPIKE CAPTÉ DÉTECTÉ | BUY=", (buyCaptured ? "OUI" : "NON"),
-               " | SELL=", (sellCaptured ? "OUI" : "NON"),
-               " | buyEntry=", DoubleToString(buyE, _Digits),
-               " | sellEntry=", DoubleToString(sellE, _Digits),
-               " | ask=", DoubleToString(ask, _Digits),
-               " | bid=", DoubleToString(bid, _Digits),
-               " | positions=", PositionsTotal());
-      }
-      lastSpikeDebugLog = nowDebug;
-   }
-
-   if(captured)
-   {
-      int closedN = GOM_ClosePositionsAfterSpikeCapture(buyCaptured, sellCaptured);
-
-      // ❌ CORRECTION: NE PAS notifier si aucune position fermée (pas de spike réel sur position ouverte)
-      // L'ancienne logique notifiait même sans position, ce qui créait des fausses alertes
-      if(closedN == 0)
-      {
-         // Log silencieux pour diagnostic, pas de notification push
-         Print("⚠️ GOM niveau franchi mais aucune position fermée | BUY=", (buyCaptured ? "OUI" : "NON"),
-               " | SELL=", (sellCaptured ? "OUI" : "NON"), " | positions=", PositionsTotal());
-      }
-
-      if(closedN > 0 || !GomEntryCrossKeepPlanIfNoClose)
-      {
-      GlobalVariableSet(prefix + "_BUY_ENTRY", 0.0);
-      GlobalVariableSet(prefix + "_SELL_ENTRY", 0.0);
-      GlobalVariableSet(prefix + "_VERDICT_NUM", 0.0);
-      ObjectDelete(0, "GOM_PLAN_ARROW");
-      ObjectDelete(0, "GOM_PLAN_ENTRY");
-      ObjectDelete(0, "GOM_PLAN_SL");
-      ObjectDelete(0, "GOM_PLAN_TP1");
-      ObjectDelete(0, "GOM_PLAN_TP2");
-      ObjectDelete(0, "GOM_PLAN_TP3");
-      ObjectDelete(0, "GOM_PLAN_ENTRY_TXT");
-      ObjectDelete(0, "GOM_PLAN_SL_TXT");
-      ObjectDelete(0, "GOM_PLAN_TP1_TXT");
-      ObjectDelete(0, "GOM_PLAN_TP2_TXT");
-      ObjectDelete(0, "GOM_PLAN_TP3_TXT");
-      }
-   }
-}
-
-void GOM_DrawPastFutureZone(void)
-{
-const string nmRect = "GOM_FUTURE_ZONE_RECT";
-const string nmV = "GOM_FUTURE_ZONE_VLINE";
-const string nmTxtFutur = "GOM_FUTURE_ZONE_TXT";
-const string nmTxtPasse = "GOM_PAST_ZONE_TXT";
-if(!ShowPastFutureSeparator || ChartsShowOnlyOteAndFibo)
-{
-ObjectDelete(0, nmRect);
-ObjectDelete(0, nmV);
-ObjectDelete(0, nmTxtFutur);
-ObjectDelete(0, nmTxtPasse);
-return;
-}
-
-   int sec = (int)PeriodSeconds(PERIOD_CURRENT);
-   if(sec < 1) sec = 60;
-   datetime t0 = iTime(_Symbol, PERIOD_CURRENT, 0);
-   if(t0 <= 0) t0 = TimeCurrent();
-   datetime tSep = t0 + (datetime)sec;
-   
-   // Calcul dynamique de la largeur zone future pour correspondre au shift (45%)
-   int visibleBars = (int)ChartGetInteger(0, CHART_VISIBLE_BARS);
-   if(visibleBars < 20) visibleBars = 100;
-   double shiftPct = ChartGetDouble(0, CHART_SHIFT_SIZE); // Devrait être 45.0
-   if(shiftPct < 2.0) shiftPct = 45.0; // Fallback
-   
-   // nBars = visibleBars * shiftPct / (100 - shiftPct)
-   int nBars = (int)(visibleBars * (shiftPct / (100.0 - shiftPct)));
-   if(nBars < 40) nBars = 40;
-   if(nBars > 1000) nBars = 1000;
-   
-   datetime tEnd = tSep + (datetime)(nBars * sec);
-   
-   double pMax = ChartGetDouble(0, CHART_PRICE_MAX);
-   double pMin = ChartGetDouble(0, CHART_PRICE_MIN);
-   if(pMax <= pMin)
-   {
-      double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-      if(bid <= 0.0) bid = iClose(_Symbol, PERIOD_CURRENT, 0);
-      pMax = bid * 1.05; // Plus large pour sécurité
-      pMin = bid * 0.95;
-   }
-
-   // Rectangle de la zone future: fond très sombre type TradingView
-   ObjectCreate(0, nmRect, OBJ_RECTANGLE, 0, tSep, pMax, tEnd, pMin);
-   ObjectSetInteger(0, nmRect, OBJPROP_COLOR, (color)0x303030); // Bordure discrète
-   ObjectSetInteger(0, nmRect, OBJPROP_BGCOLOR, (FutureZoneFillColor == clrNONE) ? (color)0x101010 : FutureZoneFillColor);
-   ObjectSetInteger(0, nmRect, OBJPROP_STYLE, STYLE_SOLID);
-   ObjectSetInteger(0, nmRect, OBJPROP_WIDTH, 1);
-   ObjectSetInteger(0, nmRect, OBJPROP_FILL, true);
-   ObjectSetInteger(0, nmRect, OBJPROP_BACK, true);
-   ObjectSetInteger(0, nmRect, OBJPROP_HIDDEN, false);
-   ObjectSetInteger(0, nmRect, OBJPROP_SELECTABLE, false);
-   ObjectSetInteger(0, nmRect, OBJPROP_ZORDER, 0); // Tout au fond
-
-   // Ligne verticale de séparation (plus esthétique)
-   ObjectCreate(0, nmV, OBJ_VLINE, 0, tSep, 0.0);
-   ObjectSetInteger(0, nmV, OBJPROP_COLOR, (color)0x404040);
-   ObjectSetInteger(0, nmV, OBJPROP_WIDTH, 1);
-   ObjectSetInteger(0, nmV, OBJPROP_STYLE, STYLE_SOLID);
-   ObjectSetInteger(0, nmV, OBJPROP_BACK, false);
-   ObjectSetInteger(0, nmV, OBJPROP_SELECTABLE, false);
-
-// Label ">>> FUTUR" en jaune bien visible
-if(ObjectFind(0, nmTxtFutur) < 0)
-ObjectCreate(0, nmTxtFutur, OBJ_TEXT, 0, tSep + (datetime)(sec * 2), pMax);
-ObjectMove(0, nmTxtFutur, 0, tSep + (datetime)(sec * 2), pMax);
-ObjectSetString(0, nmTxtFutur, OBJPROP_TEXT, ">>> FUTUR");
-ObjectSetString(0, nmTxtFutur, OBJPROP_FONT, "Arial Black");
-ObjectSetInteger(0, nmTxtFutur, OBJPROP_FONTSIZE, 12);
-ObjectSetInteger(0, nmTxtFutur, OBJPROP_COLOR, clrLightGray);
-ObjectSetInteger(0, nmTxtFutur, OBJPROP_ANCHOR, ANCHOR_LEFT_UPPER);
-ObjectSetInteger(0, nmTxtFutur, OBJPROP_BACK, false);
-ObjectSetInteger(0, nmTxtFutur, OBJPROP_HIDDEN, false);
-
-// Label "PASSE <<<" en jaune bien visible
-if(ObjectFind(0, nmTxtPasse) < 0)
-ObjectCreate(0, nmTxtPasse, OBJ_TEXT, 0, t0 - (datetime)(sec * 2), pMax);
-ObjectMove(0, nmTxtPasse, 0, t0 - (datetime)(sec * 2), pMax);
-ObjectSetString(0, nmTxtPasse, OBJPROP_TEXT, "PASSE <<<");
-ObjectSetString(0, nmTxtPasse, OBJPROP_FONT, "Arial Black");
-ObjectSetInteger(0, nmTxtPasse, OBJPROP_FONTSIZE, 12);
-ObjectSetInteger(0, nmTxtPasse, OBJPROP_COLOR, clrLightGray);
-ObjectSetInteger(0, nmTxtPasse, OBJPROP_ANCHOR, ANCHOR_RIGHT_UPPER);
-ObjectSetInteger(0, nmTxtPasse, OBJPROP_BACK, false);
-ObjectSetInteger(0, nmTxtPasse, OBJPROP_HIDDEN, false);
-ObjectSetInteger(0, nmTxtPasse, OBJPROP_SELECTABLE, false);
-ObjectSetInteger(0, nmTxtPasse, OBJPROP_ZORDER, 42);
-ObjectSetInteger(0, nmTxtFutur, OBJPROP_SELECTABLE, false);
-ObjectSetInteger(0, nmTxtFutur, OBJPROP_ZORDER, 42);
-}
-
-void GOM_UpdateDoubleSpikeState(const double bid, const double atr, const string spikeDir, const double spikeProb,
-                                const double m5Buy, const double m5Sell, const double m15Buy, const double m15Sell,
-                                const double h1Buy, const double h1Sell)
-{
-if(!EnableDoubleSpikeCapture)
-{
-GOM_GlobalSetForScript("DOUBLE_SPIKE_PHASE", 0.0);
-GOM_GlobalSetForScript("DOUBLE_SPIKE_HOLD", 0.0);
-GOM_GlobalSetForScript("DOUBLE_SPIKE_HOLD_UNTIL", 0.0);
-g_doubleSpikeFirstTs = 0;
-g_doubleSpikeDir = 0;
-return;
-}
-
-const datetime nowTs = TimeCurrent();
-const int winSec = MathMax(1, DoubleSpikeWindowBars) * 60;
-const double nearAtr = MathMax(0.20, DoubleSpikeNearLevelAtr);
-const bool dirBuy = (spikeDir == "BUY");
-const bool dirSell = (spikeDir == "SELL");
-const bool probOk = (spikeProb + 1e-9 >= MathMax(0.0, DoubleSpikeMinProb));
-bool nearLevel = false;
-if(atr > 0.0)
-{
-if(dirBuy)
-nearLevel = (GOM_PriceNearLevel(bid, m5Buy, atr, nearAtr) || GOM_PriceNearLevel(bid, m15Buy, atr, nearAtr) || GOM_PriceNearLevel(bid, h1Buy, atr, nearAtr));
-else if(dirSell)
-nearLevel = (GOM_PriceNearLevel(bid, m5Sell, atr, nearAtr) || GOM_PriceNearLevel(bid, m15Sell, atr, nearAtr) || GOM_PriceNearLevel(bid, h1Sell, atr, nearAtr));
-}
-
-double holdUntil = GOM_GlobalGetForScript("DOUBLE_SPIKE_HOLD_UNTIL", 0.0);
-bool holdNow = (holdUntil > (double)nowTs);
-if(holdNow)
-{
-GOM_GlobalSetForScript("DOUBLE_SPIKE_PHASE", 2.0);
-GOM_GlobalSetForScript("DOUBLE_SPIKE_HOLD", 1.0);
-// Dessiner label "2nd SPIKE" sur le chart
-string nm2s = "GOM_2ND_SPIKE_LABEL";
-double bid2 = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-if(ObjectFind(0, nm2s) < 0)
-ObjectCreate(0, nm2s, OBJ_TEXT, 0, TimeCurrent(), bid2);
-ObjectMove(0, nm2s, 0, TimeCurrent(), bid2);
-ObjectSetString(0, nm2s, OBJPROP_TEXT, "2nd SPIKE");
-ObjectSetString(0, nm2s, OBJPROP_FONT, "Arial Bold");
-ObjectSetInteger(0, nm2s, OBJPROP_FONTSIZE, 10);
-ObjectSetInteger(0, nm2s, OBJPROP_COLOR, clrLime);
-ObjectSetInteger(0, nm2s, OBJPROP_ANCHOR, ANCHOR_LEFT);
-ObjectSetInteger(0, nm2s, OBJPROP_BACK, false);
-ObjectSetInteger(0, nm2s, OBJPROP_SELECTABLE, false);
-ObjectSetInteger(0, nm2s, OBJPROP_ZORDER, 50);
-return;
-}
-
-if(g_doubleSpikeFirstTs > 0 && (nowTs - g_doubleSpikeFirstTs > winSec))
-{
-g_doubleSpikeFirstTs = 0;
-g_doubleSpikeDir = 0;
-}
-
-int spikeDirNum = dirBuy ? 1 : (dirSell ? -1 : 0);
-if(probOk && nearLevel && spikeDirNum != 0)
-{
-if(g_doubleSpikeFirstTs <= 0 || g_doubleSpikeDir != spikeDirNum)
-{
-g_doubleSpikeFirstTs = nowTs;
-g_doubleSpikeDir = spikeDirNum;
-GOM_GlobalSetForScript("DOUBLE_SPIKE_PHASE", 1.0);
-GOM_GlobalSetForScript("DOUBLE_SPIKE_HOLD", 0.0);
-GOM_GlobalSetForScript("DOUBLE_SPIKE_HOLD_UNTIL", 0.0);
-// Dessiner label "1st SPIKE" sur le chart
-string nm1s = "GOM_1ST_SPIKE_LABEL";
-double bid1 = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-if(ObjectFind(0, nm1s) < 0)
-ObjectCreate(0, nm1s, OBJ_TEXT, 0, TimeCurrent(), bid1);
-ObjectMove(0, nm1s, 0, TimeCurrent(), bid1);
-ObjectSetString(0, nm1s, OBJPROP_TEXT, "1st SPIKE");
-ObjectSetString(0, nm1s, OBJPROP_FONT, "Arial Bold");
-ObjectSetInteger(0, nm1s, OBJPROP_FONTSIZE, 10);
-ObjectSetInteger(0, nm1s, OBJPROP_COLOR, clrGold);
-ObjectSetInteger(0, nm1s, OBJPROP_ANCHOR, ANCHOR_LEFT);
-ObjectSetInteger(0, nm1s, OBJPROP_BACK, false);
-ObjectSetInteger(0, nm1s, OBJPROP_SELECTABLE, false);
-ObjectSetInteger(0, nm1s, OBJPROP_ZORDER, 50);
-}
-else
-{
-datetime untilTs = nowTs + (datetime)MathMax(30, DoubleSpikeHoldSeconds);
-GOM_GlobalSetForScript("DOUBLE_SPIKE_PHASE", 2.0);
-GOM_GlobalSetForScript("DOUBLE_SPIKE_HOLD", 1.0);
-GOM_GlobalSetForScript("DOUBLE_SPIKE_HOLD_UNTIL", (double)untilTs);
-// Dessiner label "2nd SPIKE" et supprimer "1st SPIKE"
-string nm2s2 = "GOM_2ND_SPIKE_LABEL";
-double bid2b = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-if(ObjectFind(0, nm2s2) < 0)
-ObjectCreate(0, nm2s2, OBJ_TEXT, 0, TimeCurrent(), bid2b);
-ObjectMove(0, nm2s2, 0, TimeCurrent(), bid2b);
-ObjectSetString(0, nm2s2, OBJPROP_TEXT, "2nd SPIKE");
-ObjectSetString(0, nm2s2, OBJPROP_FONT, "Arial Bold");
-ObjectSetInteger(0, nm2s2, OBJPROP_FONTSIZE, 10);
-ObjectSetInteger(0, nm2s2, OBJPROP_COLOR, clrLime);
-ObjectSetInteger(0, nm2s2, OBJPROP_ANCHOR, ANCHOR_LEFT);
-ObjectSetInteger(0, nm2s2, OBJPROP_BACK, false);
-ObjectSetInteger(0, nm2s2, OBJPROP_SELECTABLE, false);
-ObjectSetInteger(0, nm2s2, OBJPROP_ZORDER, 50);
-ObjectDelete(0, "GOM_1ST_SPIKE_LABEL");
-}
-}
-else
-{
-double ph = GOM_GlobalGetForScript("DOUBLE_SPIKE_PHASE", 0.0);
-if(ph < 1.0) GOM_GlobalSetForScript("DOUBLE_SPIKE_PHASE", 0.0);
-GOM_GlobalSetForScript("DOUBLE_SPIKE_HOLD", 0.0);
-// Nettoyer les labels spike quand plus en phase
-ObjectDelete(0, "GOM_1ST_SPIKE_LABEL");
-ObjectDelete(0, "GOM_2ND_SPIKE_LABEL");
-}
-}
-
-void GOM_PreparePlanLevels(const string dir, const double bid, double &entry, double &sl, double &tp1, double &tp2, double &tp3)
-{
-double pt = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
-if(pt <= 0.0) pt = 0.00001;
-int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
-if(digits < 0) digits = _Digits;
-double stopsPts = (double)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
-if(stopsPts < 0.0) stopsPts = 0.0;
-double freezePts = (double)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_FREEZE_LEVEL);
-if(freezePts < 0.0) freezePts = 0.0;
-double minDist = MathMax((stopsPts + freezePts + 4.0) * pt, 12.0 * pt);
-if(minDist <= 0.0) minDist = 12.0 * pt;
-
-if(entry <= 0.0) entry = bid;
-if(dir == "BUY")
-{
-if(sl <= 0.0 || sl >= entry - minDist) sl = entry - minDist;
-if(tp1 <= 0.0 || tp1 <= entry + minDist) tp1 = entry + minDist;
-if(tp2 <= 0.0 || tp2 <= tp1 + minDist * 0.40) tp2 = tp1 + minDist;
-if(tp3 <= 0.0 || tp3 <= tp2 + minDist * 0.40) tp3 = tp2 + minDist;
-}
-else if(dir == "SELL")
-{
-if(sl <= 0.0 || sl <= entry + minDist) sl = entry + minDist;
-if(tp1 <= 0.0 || tp1 >= entry - minDist) tp1 = entry - minDist;
-if(tp2 <= 0.0 || tp2 >= tp1 - minDist * 0.40) tp2 = tp1 - minDist;
-if(tp3 <= 0.0 || tp3 >= tp2 - minDist * 0.40) tp3 = tp2 - minDist;
-}
-
-entry = NormalizeDouble(entry, digits);
-sl = NormalizeDouble(sl, digits);
-tp1 = NormalizeDouble(tp1, digits);
-tp2 = NormalizeDouble(tp2, digits);
-tp3 = NormalizeDouble(tp3, digits);
-}
-
-void DrawTradePlanVisuals(string &dirOut, string &qualityOut)
-{
-double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-if(bid <= 0.0) bid = iClose(_Symbol, PERIOD_CURRENT, 0);
-if(bid <= 0.0) return;
-double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-if(ask <= 0.0) ask = bid;
-
-double atr = GOM_ATRValue(_Symbol, PERIOD_M15, 14);
-if(atr <= 0.0) atr = bid * 0.0015;
-
-GOM_UpdateBollingerVwapMetrics(bid);
-GOM_UpdateAdvancedTrendMetrics(bid);
-
-double m15Buy = ReadGV("GOM_KOLA", "M15", "BUY");
-double m15Sell = ReadGV("GOM_KOLA", "M15", "SELL");
-double m30Buy = ReadGV("GOM_KOLA", "M30", "BUY");
-double m30Sell = ReadGV("GOM_KOLA", "M30", "SELL");
-double m5Buy = ReadGV("GOM_KOLA", "M5", "BUY");
-double m5Sell = ReadGV("GOM_KOLA", "M5", "SELL");
-double m1Buy = ReadGV("GOM_KOLA", "M1", "BUY");
-double m1Sell = ReadGV("GOM_KOLA", "M1", "SELL");
-double h1Buy = ReadGV("GOM_KOLA", "H1", "BUY");
-double h1Sell = ReadGV("GOM_KOLA", "H1", "SELL");
-double h4Buy = ReadGV("GOM_KOLA", "H4", "BUY");
-double h4Sell = ReadGV("GOM_KOLA", "H4", "SELL");
-double dtop = ReadGV("GOM_SIDO", "M15", "DOUBLE_TOP");
-double dbot = ReadGV("GOM_SIDO", "M15", "DOUBLE_BOTTOM");
-
-// Indicateur de "live" (preuve que le script recalcule en temps réel)
-UpdateScriptLastTs();
-
-// Score technique combiné (KOLA + SIDO + MTF bias)
-double techBuy = 0.0;
-double techSell = 0.0;
-
-// Intégration SMC Hedge Fund
-GOM_DetectSMCSwings();
-if(m15Buy > 0.0 && bid <= m15Buy * 1.0010) techBuy += 1.2;
-if(m30Buy > 0.0 && bid <= m30Buy * 1.0011) techBuy += 1.05;
-if(h1Buy > 0.0 && bid <= h1Buy * 1.0015) techBuy += 1.1;
-if(h4Buy > 0.0 && bid <= h4Buy * 1.0020) techBuy += 0.9;
-if(m15Sell > 0.0 && bid >= m15Sell * 0.9990) techSell += 1.2;
-if(m30Sell > 0.0 && bid >= m30Sell * 0.9989) techSell += 1.05;
-if(h1Sell > 0.0 && bid >= h1Sell * 0.9985) techSell += 1.1;
-if(h4Sell > 0.0 && bid >= h4Sell * 0.9980) techSell += 0.9;
-if(dbot > 0.0) techBuy += 0.8;
-if(dtop > 0.0) techSell += 0.8;
-
-int bM15 = GetTFBias(PERIOD_M15), bM30 = GetTFBias(PERIOD_M30), bH1 = GetTFBias(PERIOD_H1), bH4 = GetTFBias(PERIOD_H4);
-if(bM15 > 0) techBuy += 0.4; else if(bM15 < 0) techSell += 0.4;
-if(bM30 > 0) techBuy += 0.38; else if(bM30 < 0) techSell += 0.38;
-if(bH1 > 0) techBuy += 0.6; else if(bH1 < 0) techSell += 0.6;
-if(bH4 > 0) techBuy += 0.5; else if(bH4 < 0) techSell += 0.5;
-
-// Confluence "distance au niveau" (ATR): bonus quand le prix est proche des zones d'entrée
-double atrZoneNear = atr * 0.35;
-if(atrZoneNear > 0.0)
-{
-if(m5Buy > 0.0 && MathAbs(bid - m5Buy) <= atrZoneNear) techBuy += 0.45;
-if(m15Buy > 0.0 && MathAbs(bid - m15Buy) <= atrZoneNear) techBuy += 0.30;
-if(m30Buy > 0.0 && MathAbs(bid - m30Buy) <= atrZoneNear) techBuy += 0.28;
-if(m5Sell > 0.0 && MathAbs(bid - m5Sell) <= atrZoneNear) techSell += 0.45;
-if(m15Sell > 0.0 && MathAbs(bid - m15Sell) <= atrZoneNear) techSell += 0.30;
-if(m30Sell > 0.0 && MathAbs(bid - m30Sell) <= atrZoneNear) techSell += 0.28;
-}
-
-if(ShowScriptEMAs)
-GOM_AddEmaRibbonScriptTfBias(bid, techBuy, techSell);
-
-// Renfort EMA complet (M1/M5): 9,21,13,50,100,200,66,75,123
-int emaPeriods[9] = {9, 21, 13, 50, 100, 200, 66, 75, 123};
-for(int e = 0; e < 9; e++)
-{
-int p = emaPeriods[e];
-double eM1 = GOM_EMAValue(_Symbol, PERIOD_M1, p);
-double eM5 = GOM_EMAValue(_Symbol, PERIOD_M5, p);
-if(eM1 > 0.0)
-{
-   if(bid > eM1) techBuy += 0.05;
-   else techSell += 0.05;
-}
-if(eM5 > 0.0)
-{
-   if(bid > eM5) techBuy += 0.08;
-   else techSell += 0.08;
-}
-}
-
-bool isBoom = GOM_IsBoomOrGainx();
-bool isCrash = GOM_IsCrashOrPainx();
-
-GOM_AddBollingerVwapVerdictBias(bid, isBoom, isCrash, techBuy, techSell);
-GOM_AddAdvancedIndicatorsVerdictBias(techBuy, techSell);
-
-string spikeDir = "NONE";
-double spikeProb = GOM_PredictSpikeProbabilityM1(isBoom, isCrash, spikeDir);
-bool spikeOpportunity = GOM_IsSpikeOpportunity(isBoom, isCrash, spikeDir, spikeProb);
-if(spikeProb >= SpikeAlertMinProbability)
-{
-if(spikeDir == "BUY") techBuy += 0.55 * spikeProb;
-else if(spikeDir == "SELL") techSell += 0.55 * spikeProb;
-}
-if(spikeOpportunity)
-{
-if(spikeDir == "BUY") techBuy += 0.90 * spikeProb;
-else if(spikeDir == "SELL") techSell += 0.90 * spikeProb;
-}
-// Influencer le verdict avec SMC Hedge Fund
-GOM_InfluenceVerdictWithSMC(techBuy, techSell);
-
-g_lastTechBuyScore = techBuy;
-g_lastTechSellScore = techSell;
-GOM_GlobalSetForScript("TECH_BUY_SCORE", techBuy);
-GOM_GlobalSetForScript("TECH_SELL_SCORE", techSell);
-GOM_GlobalSetForScript("SPIKE_PROB", spikeProb);
-GOM_GlobalSetForScript("SPIKE_DIR_NUM", (spikeDir == "BUY") ? 1.0 : ((spikeDir == "SELL") ? -1.0 : 0.0));
-GOM_UpdateDoubleSpikeState(bid, atr, spikeDir, spikeProb, m5Buy, m5Sell, m15Buy, m15Sell, h1Buy, h1Sell);
-
-// Appel IA externe (serveur) pour interprétation temps réel
-double ema9m1 = GOM_EMAValue(_Symbol, PERIOD_M1, 9);
-double ema21m1 = GOM_EMAValue(_Symbol, PERIOD_M1, 21);
-double ema9m5 = GOM_EMAValue(_Symbol, PERIOD_M5, 9);
-double ema21m5 = GOM_EMAValue(_Symbol, PERIOD_M5, 21);
-double rsiM1 = GOM_RSIValue(_Symbol, PERIOD_M1, 14);
-if(rsiM1 <= 0.0) rsiM1 = 50.0;
-double verdictNumNow = GOM_GlobalGetForScript("VERDICT_NUM", 0.0);
-GOM_UpdateExternalAI(_Symbol, bid, ask, atr, rsiM1, ema9m1, ema21m1, ema9m5, ema21m5,
-                  verdictNumNow, spikeProb, (int)GOM_GlobalGetForScript("SPIKE_DIR_NUM", 0.0),
-                  m5Buy, m5Sell, m15Buy, m15Sell, dtop, dbot);
-
-string dir = "WAIT";
-double gap = techBuy - techSell;
-double gapTh = (isBoom || isCrash) ? 0.28 : 0.45;
-if(gap >= gapTh) dir = "BUY";
-else if(gap <= -gapTh) dir = "SELL";
-
-// Micro-trend synthétiques (évite WAIT figé quand scores équilibrés)
-double ema9_m1 = 0.0, ema21_m1 = 0.0;
-double rsi_m1 = 50.0;
-double mom_m1 = 0.0;
-if(isBoom || isCrash)
-{
-ema9_m1 = GOM_EMAValue(_Symbol, PERIOD_M1, 9);
-ema21_m1 = GOM_EMAValue(_Symbol, PERIOD_M1, 21);
-rsi_m1 = GOM_RSIValue(_Symbol, PERIOD_M1, 14);
-if(rsi_m1 <= 0.0) rsi_m1 = 50.0;
-double o = iOpen(_Symbol, PERIOD_M1, 0);
-double c = iClose(_Symbol, PERIOD_M1, 0);
-if(o > 0.0 && c > 0.0) mom_m1 = (c - o);
-}
-if(dir == "WAIT")
-{
-if(isBoom && (techBuy >= techSell + 0.15) && (bM15 >= 0 || bH1 >= 0))
-   dir = "BUY";
-else if(isCrash && (techSell >= techBuy + 0.15) && (bM15 <= 0 || bH1 <= 0))
-   dir = "SELL";
-else if(techBuy >= techSell + 0.30)
-   dir = "BUY";
-else if(techSell >= techBuy + 0.30)
-   dir = "SELL";
-
-// Fallback directionnel pour synthétiques rapides (évite WAIT persistant)
-if(dir == "WAIT")
-{
-   // 1) micro-trend EMA9/21 M1 + RSI + momentum
-   if((isBoom || isCrash) && ema9_m1 > 0.0 && ema21_m1 > 0.0)
-   {
-      bool microBuy = (ema9_m1 >= ema21_m1) && (rsi_m1 >= 48.0 || mom_m1 > 0.0);
-      bool microSell = (ema9_m1 <  ema21_m1) && (rsi_m1 <= 52.0 || mom_m1 < 0.0);
-      if(isBoom && microBuy) dir = "BUY";
-      else if(isCrash && microSell) dir = "SELL";
-   }
-
-   // 2) si toujours WAIT, préférer le biais "naturel" de l'instrument
-   if(dir == "WAIT")
-   {
-      if(isBoom && (techSell - techBuy) < 0.85) dir = "BUY";
-      else if(isCrash && (techBuy - techSell) < 0.85) dir = "SELL";
-   }
-}
-}
-
-// Filtre anti-spike: évite d'entrer en plein pic sur synthétiques
-bool blockBuySpike = false, blockSellSpike = false;
-if(isBoom || isCrash)
-{
-double o1 = iOpen(_Symbol, PERIOD_M1, 0);
-double c1 = iClose(_Symbol, PERIOD_M1, 0);
-double h1c = iHigh(_Symbol, PERIOD_M1, 0);
-double l1c = iLow(_Symbol, PERIOD_M1, 0);
-double body = MathAbs(c1 - o1);
-double upW = h1c - MathMax(o1, c1);
-double dnW = MathMin(o1, c1) - l1c;
-double minBody = MathMax(body, atr * 0.02);
-if(upW > minBody * 2.2 && upW > atr * 0.10) blockBuySpike = true;   // spike haussier épuisé
-if(dnW > minBody * 2.2 && dnW > atr * 0.10) blockSellSpike = true;  // spike baissier épuisé
-}
-bool dsHoldNow = (GOM_GlobalGetForScript("DOUBLE_SPIKE_HOLD", 0.0) > 0.5 || GOM_GlobalGetForScript("DOUBLE_SPIKE_PHASE", 0.0) >= 1.0);
-if(dir == "BUY" && isBoom && blockBuySpike && !(spikeOpportunity && SpikeModeBypassStrict) && !dsHoldNow) dir = "WAIT";
-if(dir == "SELL" && isCrash && blockSellSpike && !(spikeOpportunity && SpikeModeBypassStrict) && !dsHoldNow) dir = "WAIT";
-
-// Verrou final direction/symbole: interdit BUY sur Crash, SELL sur Boom
-if(!GOM_IsDirectionAllowedForSymbol(dir)) dir = "WAIT";
-
-// === APPLICATION DES FILTRES DE CONFIRMATION ===
-string filterStatus = "";
-double filterQuality = 1.0;
-string filterFailReason = "";
-bool strictMtfPass = true;
-bool strictStructurePass = true;
-// Portée fonction entière (utilisé aussi pour strength / MTF strict après les filtres).
-bool hvSynth = (RelaxedFiltersHighVolSynth && GOM_IsVolatilityOrSimilarSynth());
-bool passNearKola = false;
-
-if(dir != "WAIT")
-{
-FilterResults filters = ApplyAllFilters(dir, atr);
-filterStatus = GetFilterStatusText(filters);
-filterQuality = CalculateFilterQualityScore(filters);
-filterFailReason = filters.failReason;
-strictMtfPass = filters.mtfPass;
-strictStructurePass = filters.structurePass;
-
-// Stocker les résultats des filtres dans les variables globales
-GOM_GlobalSetForScript("FILTER_PASS_COUNT", (double)filters.passCount);
-GOM_GlobalSetForScript("FILTER_TOTAL", (double)filters.totalFilters);
-GOM_GlobalSetForScript("FILTER_QUALITY", filterQuality);
-
-// Si trop de filtres échouent, on passe en WAIT (sauf mode assoupli synthèses volatiles).
-double passRatioCfg = StrictConfluenceMode ? MinFilterPassRatio : 0.33;
-if(hvSynth) passRatioCfg = MathMin(passRatioCfg, 0.34);
-passRatioCfg = MathMax(0.10, MathMin(1.00, passRatioCfg));
-int minPassFilters = MathMax(1, (int)MathRound(filters.totalFilters * passRatioCfg));
-if(spikeOpportunity && SpikeModeBypassStrict)
-   minPassFilters = MathMax(1, minPassFilters - 1);
-if(hvSynth && filters.totalFilters >= 4)
-   minPassFilters = MathMin(minPassFilters, MathMax(1, (int)MathCeil((double)filters.totalFilters * 0.25)));
-if(hvSynth)
-   minPassFilters = MathMin(minPassFilters, 2);
-bool passFilterCount = (filters.passCount >= minPassFilters);
-double qMin = hvSynth ? MinFilterQualityRelaxed : 0.50;
-bool passFilterQuality = (filterQuality + 1e-9 >= qMin);
-passNearKola = false;
-if(hvSynth && (dir == "BUY" || dir == "SELL"))
-{
-double m5b = ReadGV("GOM_KOLA", "M5", "BUY");
-double m5s = ReadGV("GOM_KOLA", "M5", "SELL");
-double h1b = ReadGV("GOM_KOLA", "H1", "BUY");
-double h1s = ReadGV("GOM_KOLA", "H1", "SELL");
-double b = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-if(b <= 0.0) b = bid;
-if(dir == "BUY" && ((m5b > 0.0 && MathAbs(b - m5b) <= atr * 0.55) || (h1b > 0.0 && MathAbs(b - h1b) <= atr * 0.65)))
-   passNearKola = true;
-if(dir == "SELL" && ((m5s > 0.0 && MathAbs(b - m5s) <= atr * 0.55) || (h1s > 0.0 && MathAbs(b - h1s) <= atr * 0.65)))
-   passNearKola = true;
-}
-if(!passFilterCount && !passFilterQuality && !(hvSynth && filters.passCount >= 1 && passNearKola))
-{
-   dir = "WAIT";
-   filterStatus += " | BLOCKED";
-}
-}
-else
-{
-filterStatus = "N/A";
-GOM_GlobalSetForScript("FILTER_PASS_COUNT", 0.0);
-GOM_GlobalSetForScript("FILTER_TOTAL", 0.0);
-GOM_GlobalSetForScript("FILTER_QUALITY", 0.0);
-}
-
-dirOut = dir;
-if(dir == "WAIT")
-{
-qualityOut = "WAIT";
-GOM_GlobalSetForScript("ENTRY_QUALITY", 0.0);
-GOM_GlobalSetForScript("ENTRY_QUALITY_BLOCK", 0.0);
-GOM_GlobalSetForScript("VERDICT_STRENGTH", 0.0);
-GlobalVariableSet("GOM_SCRIPT_" + _Symbol + "_BUY_ENTRY", 0.0);
-GlobalVariableSet("GOM_SCRIPT_" + _Symbol + "_SELL_ENTRY", 0.0);
-GlobalVariableSet("GOM_SCRIPT_" + _Symbol + "_VERDICT_NUM", 0.0);
-GlobalVariableSet("GOM_SCRIPT_" + _Symbol + "_SL", 0.0);
-GlobalVariableSet("GOM_SCRIPT_" + _Symbol + "_TP1", 0.0);
-GlobalVariableSet("GOM_SCRIPT_" + _Symbol + "_TP2", 0.0);
-GlobalVariableSet("GOM_SCRIPT_" + _Symbol + "_TP3", 0.0);
-GlobalVariableSet("GOM_SCRIPT_" + _Symbol + "_M1_ENTRY", 0.0);
-g_lastPlanDir = "WAIT";
-g_lastPlanQuality = "WAIT";
-g_lastPlanEntry = 0.0;
-g_lastPlanSL = 0.0;
-g_lastPlanTP1 = 0.0;
-g_lastPlanTP2 = 0.0;
-g_lastPlanTP3 = 0.0;
-GOMScript_DrawSignalArrow("WAIT", bid);
-
-// Supprimer TOUS les dessins de plan (évite TP/SL figés si on repasse en WAIT)
-ObjectDelete(0, "GOM_PLAN_ENTRY");
-ObjectDelete(0, "GOM_PLAN_SL");
-ObjectDelete(0, "GOM_PLAN_TP1");
-ObjectDelete(0, "GOM_PLAN_TP2");
-ObjectDelete(0, "GOM_PLAN_TP3");
-ObjectDelete(0, "GOM_PLAN_ARROW");
-
-ObjectDelete(0, "GOM_PLAN_ENTRY_TXT");
-ObjectDelete(0, "GOM_PLAN_SL_TXT");
-ObjectDelete(0, "GOM_PLAN_TP1_TXT");
-ObjectDelete(0, "GOM_PLAN_TP2_TXT");
-ObjectDelete(0, "GOM_PLAN_TP3_TXT");
-
-GOM_MaybePlaceSpikeNearM5Pending(isBoom, isCrash, spikeDir, spikeProb, spikeOpportunity,
-                                 blockBuySpike, blockSellSpike, bid, ask, atr, m5Buy, m5Sell);
-string waitReason = (filterFailReason != "") ? (" | " + filterFailReason) : "";
-DrawScriptLiveLabel("GOM_SCRIPT_LIVE_LABEL_" + _Symbol,
-                     "LIVE WAIT | SPIKE=" + spikeDir + " " + DoubleToString(spikeProb * 100.0, 0) + "%" +
-                     " | FILTERS=" + filterStatus + waitReason);
-return;
-}
-
-double entry = bid;
-double sl = 0.0, tp1 = 0.0, tp2 = 0.0, tp3 = 0.0;
-double levelConfluence = 0.0;
-if(dir == "BUY")
-{
-if(m5Buy > 0.0 && MathAbs(bid - m5Buy) <= atr * 0.35) levelConfluence += 0.35;
-if(h1Buy > 0.0 && MathAbs(bid - h1Buy) <= atr * 0.40) levelConfluence += 0.28;
-if(m30Buy > 0.0 && MathAbs(bid - m30Buy) <= atr * 0.42) levelConfluence += 0.24;
-if(m15Buy > 0.0 && MathAbs(bid - m15Buy) <= atr * 0.45) levelConfluence += 0.20;
-if(h4Buy > 0.0 && MathAbs(bid - h4Buy) <= atr * 0.50) levelConfluence += 0.18;
-}
-else if(dir == "SELL")
-{
-if(m5Sell > 0.0 && MathAbs(bid - m5Sell) <= atr * 0.35) levelConfluence += 0.35;
-if(h1Sell > 0.0 && MathAbs(bid - h1Sell) <= atr * 0.40) levelConfluence += 0.28;
-if(m30Sell > 0.0 && MathAbs(bid - m30Sell) <= atr * 0.42) levelConfluence += 0.24;
-if(m15Sell > 0.0 && MathAbs(bid - m15Sell) <= atr * 0.45) levelConfluence += 0.20;
-if(h4Sell > 0.0 && MathAbs(bid - h4Sell) <= atr * 0.50) levelConfluence += 0.18;
-}
-
-double gapThForQ = (isBoom || isCrash) ? 0.28 : 0.45;
-double entryQuality = GOM_ComputeEntryQualityScore(dir, gap, gapThForQ, spikeDir, spikeProb, spikeOpportunity,
-   filterQuality, levelConfluence, bM15, bM30, bH1, bH4);
-GOM_GlobalSetForScript("ENTRY_QUALITY", entryQuality);
-GOM_GlobalSetForScript("ENTRY_QUALITY_BLOCK", 0.0);
-bool synthFamQ = GOM_IsSyntheticBoomCrashFamily();
-bool applyEntryQGate = EnableEntryQualityGate && (MinEntryQualityScore > 1e-9) &&
-   (!EntryQualityGateSynthOnly || synthFamQ);
-if(applyEntryQGate &&
-   !GOM_EntryQualityRelaxed(dir, spikeDir, spikeProb, spikeOpportunity, levelConfluence) &&
-   entryQuality + 1e-9 < MinEntryQualityScore)
-{
-dirOut = "WAIT";
-dir = "WAIT";
-qualityOut = "WAIT";
-GOM_GlobalSetForScript("VERDICT_STRENGTH", 0.0);
-GOM_GlobalSetForScript("ENTRY_QUALITY_BLOCK", 1.0);
-GlobalVariableSet("GOM_SCRIPT_" + _Symbol + "_BUY_ENTRY", 0.0);
-GlobalVariableSet("GOM_SCRIPT_" + _Symbol + "_SELL_ENTRY", 0.0);
-GlobalVariableSet("GOM_SCRIPT_" + _Symbol + "_VERDICT_NUM", 0.0);
-GlobalVariableSet("GOM_SCRIPT_" + _Symbol + "_SL", 0.0);
-GlobalVariableSet("GOM_SCRIPT_" + _Symbol + "_TP1", 0.0);
-GlobalVariableSet("GOM_SCRIPT_" + _Symbol + "_TP2", 0.0);
-GlobalVariableSet("GOM_SCRIPT_" + _Symbol + "_TP3", 0.0);
-GlobalVariableSet("GOM_SCRIPT_" + _Symbol + "_M1_ENTRY", 0.0);
-g_lastPlanDir = "WAIT";
-g_lastPlanQuality = "WAIT";
-GOMScript_DrawSignalArrow("WAIT", bid);
-ObjectDelete(0, "GOM_PLAN_ENTRY");
-ObjectDelete(0, "GOM_PLAN_SL");
-ObjectDelete(0, "GOM_PLAN_TP1");
-ObjectDelete(0, "GOM_PLAN_TP2");
-ObjectDelete(0, "GOM_PLAN_TP3");
-ObjectDelete(0, "GOM_PLAN_ARROW");
-ObjectDelete(0, "GOM_PLAN_ENTRY_TXT");
-ObjectDelete(0, "GOM_PLAN_SL_TXT");
-ObjectDelete(0, "GOM_PLAN_TP1_TXT");
-ObjectDelete(0, "GOM_PLAN_TP2_TXT");
-ObjectDelete(0, "GOM_PLAN_TP3_TXT");
-GOM_MaybePlaceSpikeNearM5Pending(isBoom, isCrash, spikeDir, spikeProb, spikeOpportunity,
-                                 blockBuySpike, blockSellSpike, bid, ask, atr, m5Buy, m5Sell);
-DrawScriptLiveLabel("GOM_SCRIPT_LIVE_LABEL_" + _Symbol,
-   "LIVE WAIT | ENTRY_Q " + DoubleToString(entryQuality * 100.0, 0) + "% < " +
-   DoubleToString(MinEntryQualityScore * 100.0, 0) + "% | SPIKE=" + spikeDir +
-   " | CONF lvl=" + DoubleToString(levelConfluence, 2));
-return;
-}
-
-double strength = MathAbs(gap) + levelConfluence;
-// Bonus synthèses bruitées près des niveaux KOLA (aligné passNearKola — évite WAIT « force faible » alors que prix est sur zone).
-if(hvSynth && passNearKola)
-   strength += 0.40;
-
-// Ajuster la force selon qualité filtres : sur Step/Vol… ne pas écraser le score (ancien plancher 0.58 trop dur).
-double fqW = filterQuality;
-if(hvSynth)
-{
-fqW = MathMax(0.84, filterQuality + 0.10);
-if(fqW > 1.0) fqW = 1.0;
-}
-strength *= fqW;
-
-// Spike aligné (Boom+BUY / Crash+SELL) : le dash montre souvent SPIKE BUY mais la force restait sous MinStrength — assouplir.
-bool spikeDirMatchesTrade =
-   (isBoom && spikeDir == "BUY" && dir == "BUY") || (isCrash && spikeDir == "SELL" && dir == "SELL");
-bool spikeStrictEase = SpikeModeBypassStrict && spikeDirMatchesTrade && dir != "WAIT" &&
-   (spikeOpportunity || (spikeProb + 1e-9 >= SpikeAlertMinProbability));
-if(spikeStrictEase)
-   strength += 0.85;
-
-bool nearKolaBuySpike = false;
-bool nearKolaSellSpike = false;
-if(RelaxStrengthBoomCrashSpikeKola && SpikeModeBypassStrict)
-{
-const double spThRel = SpikeBypassMinProbability;
-if(isBoom && dir == "BUY" && spikeDir == "BUY" && (spikeOpportunity || spikeProb + 1e-9 >= spThRel))
-{
-if(m5Buy > 0.0 && GOM_PriceNearLevel(bid, m5Buy, atr, 0.52)) nearKolaBuySpike = true;
-else if(m15Buy > 0.0 && GOM_PriceNearLevel(bid, m15Buy, atr, 0.52)) nearKolaBuySpike = true;
-else if(m30Buy > 0.0 && GOM_PriceNearLevel(bid, m30Buy, atr, 0.55)) nearKolaBuySpike = true;
-else if(h1Buy > 0.0 && GOM_PriceNearLevel(bid, h1Buy, atr, 0.58)) nearKolaBuySpike = true;
-}
-if(isCrash && dir == "SELL" && spikeDir == "SELL" && (spikeOpportunity || spikeProb + 1e-9 >= spThRel))
-{
-if(m5Sell > 0.0 && GOM_PriceNearLevel(bid, m5Sell, atr, 0.52)) nearKolaSellSpike = true;
-else if(m15Sell > 0.0 && GOM_PriceNearLevel(bid, m15Sell, atr, 0.52)) nearKolaSellSpike = true;
-else if(m30Sell > 0.0 && GOM_PriceNearLevel(bid, m30Sell, atr, 0.55)) nearKolaSellSpike = true;
-else if(h1Sell > 0.0 && GOM_PriceNearLevel(bid, h1Sell, atr, 0.58)) nearKolaSellSpike = true;
-}
-}
-if(nearKolaBuySpike || nearKolaSellSpike)
-strength += RelaxStrengthSpikeKolaBonus;
-
-GOM_GlobalSetForScript("VERDICT_STRENGTH", strength);
-if(StrictConfluenceMode)
-{
-double minStrengthReq = MinStrengthForEntry;
-if(hvSynth) minStrengthReq *= 0.56;
-if(hvSynth && passNearKola) minStrengthReq *= 0.88;
-if(spikeStrictEase)
-   minStrengthReq = MathMin(minStrengthReq, 1.12);
-else if(spikeOpportunity && SpikeModeBypassStrict)
-   minStrengthReq = MathMax(1.35, minStrengthReq - 0.8);
-if(nearKolaBuySpike || nearKolaSellSpike)
-minStrengthReq = MathMin(minStrengthReq, RelaxStrengthSpikeKolaMinCap);
-if(strength < minStrengthReq)
-{
-dirOut = "WAIT";
-dir = "WAIT";
-qualityOut = "WAIT";
-GOM_GlobalSetForScript("VERDICT_STRENGTH", 0.0);
-GlobalVariableSet("GOM_SCRIPT_" + _Symbol + "_BUY_ENTRY", 0.0);
-GlobalVariableSet("GOM_SCRIPT_" + _Symbol + "_SELL_ENTRY", 0.0);
-GlobalVariableSet("GOM_SCRIPT_" + _Symbol + "_VERDICT_NUM", 0.0);
-GlobalVariableSet("GOM_SCRIPT_" + _Symbol + "_SL", 0.0);
-GlobalVariableSet("GOM_SCRIPT_" + _Symbol + "_TP1", 0.0);
-GlobalVariableSet("GOM_SCRIPT_" + _Symbol + "_TP2", 0.0);
-GlobalVariableSet("GOM_SCRIPT_" + _Symbol + "_TP3", 0.0);
-GlobalVariableSet("GOM_SCRIPT_" + _Symbol + "_M1_ENTRY", 0.0);
-g_lastPlanDir = "WAIT";
-g_lastPlanQuality = "WAIT";
-GOMScript_DrawSignalArrow("WAIT", bid);
-GOM_MaybePlaceSpikeNearM5Pending(isBoom, isCrash, spikeDir, spikeProb, spikeOpportunity,
-                                 blockBuySpike, blockSellSpike, bid, ask, atr, m5Buy, m5Sell);
-string kolaSpikeHint = "";
-if(nearKolaBuySpike || nearKolaSellSpike) kolaSpikeHint = " | setup spike+KOLA (bonus actif)";
-DrawScriptLiveLabel("GOM_SCRIPT_LIVE_LABEL_" + _Symbol,
-                     "LIVE WAIT | STRICT: force " + DoubleToString(strength, 2) +
-                     " < " + DoubleToString(minStrengthReq, 2) +
-                     (spikeStrictEase ? " (bonus spike déjà inclus)" : "") + kolaSpikeHint);
-return;
-}
-bool needMtfStruct = RequireMTFAndStructure && !(hvSynth && passNearKola);
-if(needMtfStruct && (!strictMtfPass || !strictStructurePass) && !(spikeOpportunity && SpikeModeBypassStrict) && !spikeStrictEase)
-{
-dirOut = "WAIT";
-dir = "WAIT";
-qualityOut = "WAIT";
-GOM_GlobalSetForScript("VERDICT_STRENGTH", 0.0);
-GlobalVariableSet("GOM_SCRIPT_" + _Symbol + "_BUY_ENTRY", 0.0);
-GlobalVariableSet("GOM_SCRIPT_" + _Symbol + "_SELL_ENTRY", 0.0);
-GlobalVariableSet("GOM_SCRIPT_" + _Symbol + "_VERDICT_NUM", 0.0);
-GlobalVariableSet("GOM_SCRIPT_" + _Symbol + "_SL", 0.0);
-GlobalVariableSet("GOM_SCRIPT_" + _Symbol + "_TP1", 0.0);
-GlobalVariableSet("GOM_SCRIPT_" + _Symbol + "_TP2", 0.0);
-GlobalVariableSet("GOM_SCRIPT_" + _Symbol + "_TP3", 0.0);
-GlobalVariableSet("GOM_SCRIPT_" + _Symbol + "_M1_ENTRY", 0.0);
-g_lastPlanDir = "WAIT";
-g_lastPlanQuality = "WAIT";
-GOMScript_DrawSignalArrow("WAIT", bid);
-GOM_MaybePlaceSpikeNearM5Pending(isBoom, isCrash, spikeDir, spikeProb, spikeOpportunity,
-                                 blockBuySpike, blockSellSpike, bid, ask, atr, m5Buy, m5Sell);
-DrawScriptLiveLabel("GOM_SCRIPT_LIVE_LABEL_" + _Symbol,
-                     "LIVE WAIT | STRICT: MTF/STRUCT requis");
-return;
-}
-}
-
-int kolaAnchTag = 0;
-double kolaAnchLvl = 0.0;
-if(dir == "BUY")
-GOM_ResolveKolaAnchorBuy(bid, atr, m5Buy, h1Buy, m30Buy, m15Buy, h4Buy, KolaClosestAnchorMaxAtr, kolaAnchTag, kolaAnchLvl);
-else if(dir == "SELL")
-GOM_ResolveKolaAnchorSell(bid, atr, m5Sell, h1Sell, m30Sell, m15Sell, h4Sell, KolaClosestAnchorMaxAtr, kolaAnchTag, kolaAnchLvl);
-GOM_GlobalSetForScript("KOLA_ANCHOR_TAG", (double)kolaAnchTag);
-GOM_GlobalSetForScript("KOLA_ANCHOR_PRICE", kolaAnchLvl);
-
-if(RequireMinConfidenceForHtfEntry && MinConfidenceHtfEntryPct > 1e-9 && (dir == "BUY" || dir == "SELL"))
-{
-bool needHtfConf = (kolaAnchTag >= 2 && kolaAnchTag <= 5);
-if(!needHtfConf && kolaAnchTag == -1)
-needHtfConf = (dir == "BUY" && m5Buy <= 0.0) || (dir == "SELL" && m5Sell <= 0.0);
-if(!needHtfConf && kolaAnchTag == 0)
-needHtfConf = (dir == "BUY" && m5Buy <= 0.0) || (dir == "SELL" && m5Sell <= 0.0);
-
-if(needHtfConf)
-{
-double ccomb = GOM_CombinedTradeConfidence(filterQuality, spikeProb);
-double cneed = MinConfidenceHtfEntryPct / 100.0;
-if(ccomb + 1e-9 < cneed)
-{
-dirOut = "WAIT";
-dir = "WAIT";
-qualityOut = "WAIT";
-GOM_GlobalSetForScript("VERDICT_STRENGTH", 0.0);
-GOM_GlobalSetForScript("COMBINED_CONF", ccomb);
-GlobalVariableSet("GOM_SCRIPT_" + _Symbol + "_BUY_ENTRY", 0.0);
-GlobalVariableSet("GOM_SCRIPT_" + _Symbol + "_SELL_ENTRY", 0.0);
-GlobalVariableSet("GOM_SCRIPT_" + _Symbol + "_VERDICT_NUM", 0.0);
-GlobalVariableSet("GOM_SCRIPT_" + _Symbol + "_SL", 0.0);
-GlobalVariableSet("GOM_SCRIPT_" + _Symbol + "_TP1", 0.0);
-GlobalVariableSet("GOM_SCRIPT_" + _Symbol + "_TP2", 0.0);
-GlobalVariableSet("GOM_SCRIPT_" + _Symbol + "_TP3", 0.0);
-GlobalVariableSet("GOM_SCRIPT_" + _Symbol + "_M1_ENTRY", 0.0);
-g_lastPlanDir = "WAIT";
-g_lastPlanQuality = "WAIT";
-GOMScript_DrawSignalArrow("WAIT", bid);
-ObjectDelete(0, "GOM_PLAN_ENTRY");
-ObjectDelete(0, "GOM_PLAN_SL");
-ObjectDelete(0, "GOM_PLAN_TP1");
-ObjectDelete(0, "GOM_PLAN_TP2");
-ObjectDelete(0, "GOM_PLAN_TP3");
-ObjectDelete(0, "GOM_PLAN_ARROW");
-ObjectDelete(0, "GOM_PLAN_ENTRY_TXT");
-ObjectDelete(0, "GOM_PLAN_SL_TXT");
-ObjectDelete(0, "GOM_PLAN_TP1_TXT");
-ObjectDelete(0, "GOM_PLAN_TP2_TXT");
-ObjectDelete(0, "GOM_PLAN_TP3_TXT");
-GOM_MaybePlaceSpikeNearM5Pending(isBoom, isCrash, spikeDir, spikeProb, spikeOpportunity,
-                                 blockBuySpike, blockSellSpike, bid, ask, atr, m5Buy, m5Sell);
-DrawScriptLiveLabel("GOM_SCRIPT_LIVE_LABEL_" + _Symbol,
-   "LIVE WAIT | Zone " + GOM_KolaAnchorTagToStr(kolaAnchTag) +
-   ": conf max " + DoubleToString(ccomb * 100.0, 1) + "% < " +
-   DoubleToString(MinConfidenceHtfEntryPct, 0) + "% | SPIKE=" + spikeDir);
-return;
-}
-}
-}
-
-double ccombOk = GOM_CombinedTradeConfidence(filterQuality, spikeProb);
-GOM_GlobalSetForScript("COMBINED_CONF", ccombOk);
-
-if(dir == "BUY")
-{
-// Niveau KOLA le plus proche du prix (dans KolaClosestAnchorMaxAtr×ATR) sinon ancienne prio M5>H1>M30>M15>H4.
-if(kolaAnchTag >= 1 && kolaAnchTag <= 5 && kolaAnchLvl > 0.0)
-entry = kolaAnchLvl;
-else
-{
-if(m5Buy > 0.0) entry = m5Buy;
-else if(h1Buy > 0.0) entry = h1Buy;
-else if(m30Buy > 0.0) entry = m30Buy;
-else if(m15Buy > 0.0) entry = m15Buy;
-else if(h4Buy > 0.0) entry = h4Buy;
-else entry = bid - atr * 0.15;
-}
-double m1Entry = (m1Buy > 0.0 ? m1Buy : (entry - atr * 0.05));
-double slBuf = atr * 0.55;
-double tpScalp = atr * 0.88;
-if(m5Buy > 0.0 && MathAbs(entry - m5Buy) < atr * 0.02)
-{
-sl = m5Buy - MathMax(atr * 0.28, slBuf * 0.65);
-tp1 = entry + MathMax(atr * 0.72, tpScalp);
-}
-else if(h1Buy > 0.0 && MathAbs(entry - h1Buy) < atr * 0.02)
-{
-sl = h1Buy - MathMax(atr * 0.38, slBuf * 0.85);
-tp1 = entry + MathMax(atr * 0.92, tpScalp * 1.05);
-}
-else if(m30Buy > 0.0 && MathAbs(entry - m30Buy) < atr * 0.02)
-{
-sl = m30Buy - MathMax(atr * 0.35, slBuf * 0.80);
-tp1 = entry + MathMax(atr * 0.88, tpScalp);
-}
-else if(m15Buy > 0.0 && MathAbs(entry - m15Buy) < atr * 0.02)
-{
-sl = m15Buy - MathMax(atr * 0.33, slBuf * 0.78);
-tp1 = entry + MathMax(atr * 0.85, tpScalp);
-}
-else if(h4Buy > 0.0 && MathAbs(entry - h4Buy) < atr * 0.02)
-{
-sl = h4Buy - MathMax(atr * 0.42, slBuf * 0.90);
-tp1 = entry + MathMax(atr * 0.95, tpScalp * 1.08);
-}
-else
-{
-double base = (h1Buy > 0.0) ? h1Buy : ((m5Buy > 0.0) ? m5Buy : ((m30Buy > 0.0) ? m30Buy : ((h4Buy > 0.0) ? h4Buy : (entry - atr))));
-sl = MathMin(base, entry - atr * 0.75);
-tp1 = entry + atr * 0.82;
-}
-tp2 = entry + atr * 1.6;
-tp3 = entry + atr * 2.4;
-GOM_PreparePlanLevels("BUY", bid, entry, sl, tp1, tp2, tp3);
-if(m1Entry <= 0.0) m1Entry = entry;
-if(m1Entry > entry) m1Entry = entry;
-m1Entry = NormalizeDouble(m1Entry, _Digits);
-
-// Qualité ajustée selon les filtres (sans Ollama)
-if(strength >= 3.6 && filterQuality >= 0.8) qualityOut = "PERFECT BUY";
-else if(strength >= 2.8 && filterQuality >= 0.6) qualityOut = "GOOD BUY";
-else qualityOut = "BUY";
-GlobalVariableSet("GOM_SCRIPT_" + _Symbol + "_BUY_ENTRY", entry);
-GlobalVariableSet("GOM_SCRIPT_" + _Symbol + "_SELL_ENTRY", 0.0);
-GlobalVariableSet("GOM_SCRIPT_" + _Symbol + "_SL", sl);
-GlobalVariableSet("GOM_SCRIPT_" + _Symbol + "_TP1", tp1);
-GlobalVariableSet("GOM_SCRIPT_" + _Symbol + "_TP2", tp2);
-GlobalVariableSet("GOM_SCRIPT_" + _Symbol + "_TP3", tp3);
-GlobalVariableSet("GOM_SCRIPT_" + _Symbol + "_M1_ENTRY", m1Entry);
-GOM_GlobalSetForScript("VERDICT_NUM", GOM_VerdictNumFromQuality(qualityOut));
-}
-else
-{
-if(kolaAnchTag >= 1 && kolaAnchTag <= 5 && kolaAnchLvl > 0.0)
-entry = kolaAnchLvl;
-else
-{
-if(m5Sell > 0.0) entry = m5Sell;
-else if(h1Sell > 0.0) entry = h1Sell;
-else if(m30Sell > 0.0) entry = m30Sell;
-else if(m15Sell > 0.0) entry = m15Sell;
-else if(h4Sell > 0.0) entry = h4Sell;
-else entry = bid + atr * 0.15;
-}
-double m1Entry = (m1Sell > 0.0 ? m1Sell : (entry + atr * 0.05));
-double slBuf = atr * 0.55;
-double tpScalp = atr * 0.88;
-if(m5Sell > 0.0 && MathAbs(entry - m5Sell) < atr * 0.02)
-{
-sl = m5Sell + MathMax(atr * 0.28, slBuf * 0.65);
-tp1 = entry - MathMax(atr * 0.72, tpScalp);
-}
-else if(h1Sell > 0.0 && MathAbs(entry - h1Sell) < atr * 0.02)
-{
-sl = h1Sell + MathMax(atr * 0.38, slBuf * 0.85);
-tp1 = entry - MathMax(atr * 0.92, tpScalp * 1.05);
-}
-else if(m30Sell > 0.0 && MathAbs(entry - m30Sell) < atr * 0.02)
-{
-sl = m30Sell + MathMax(atr * 0.35, slBuf * 0.80);
-tp1 = entry - MathMax(atr * 0.88, tpScalp);
-}
-else if(m15Sell > 0.0 && MathAbs(entry - m15Sell) < atr * 0.02)
-{
-sl = m15Sell + MathMax(atr * 0.33, slBuf * 0.78);
-tp1 = entry - MathMax(atr * 0.85, tpScalp);
-}
-else if(h4Sell > 0.0 && MathAbs(entry - h4Sell) < atr * 0.02)
-{
-sl = h4Sell + MathMax(atr * 0.42, slBuf * 0.90);
-tp1 = entry - MathMax(atr * 0.95, tpScalp * 1.08);
-}
-else
-{
-double base = (h1Sell > 0.0) ? h1Sell : ((m5Sell > 0.0) ? m5Sell : ((m30Sell > 0.0) ? m30Sell : ((h4Sell > 0.0) ? h4Sell : (entry + atr))));
-sl = MathMax(base, entry + atr * 0.75);
-tp1 = entry - atr * 0.82;
-}
-tp2 = entry - atr * 1.6;
-tp3 = entry - atr * 2.4;
-GOM_PreparePlanLevels("SELL", bid, entry, sl, tp1, tp2, tp3);
-if(m1Entry <= 0.0) m1Entry = entry;
-if(m1Entry < entry) m1Entry = entry;
-m1Entry = NormalizeDouble(m1Entry, _Digits);
-
-// Qualité ajustée selon les filtres (sans Ollama)
-if(strength >= 3.6 && filterQuality >= 0.8) qualityOut = "PERFECT SELL";
-else if(strength >= 2.8 && filterQuality >= 0.6) qualityOut = "GOOD SELL";
-else qualityOut = "SELL";
-GlobalVariableSet("GOM_SCRIPT_" + _Symbol + "_BUY_ENTRY", 0.0);
-GlobalVariableSet("GOM_SCRIPT_" + _Symbol + "_SELL_ENTRY", entry);
-GlobalVariableSet("GOM_SCRIPT_" + _Symbol + "_SL", sl);
-GlobalVariableSet("GOM_SCRIPT_" + _Symbol + "_TP1", tp1);
-GlobalVariableSet("GOM_SCRIPT_" + _Symbol + "_TP2", tp2);
-GlobalVariableSet("GOM_SCRIPT_" + _Symbol + "_TP3", tp3);
-GlobalVariableSet("GOM_SCRIPT_" + _Symbol + "_M1_ENTRY", m1Entry);
-GOM_GlobalSetForScript("VERDICT_NUM", GOM_VerdictNumFromQuality(qualityOut));
-}
-
-bool verdictChanged = (dir != g_lastPlanDir || qualityOut != g_lastPlanQuality || g_lastPlanEntry <= 0.0);
-if(verdictChanged)
-{
-g_lastPlanDir = dir;
-g_lastPlanQuality = qualityOut;
-g_lastPlanEntry = entry;
-g_lastPlanSL = sl;
-g_lastPlanTP1 = tp1;
-g_lastPlanTP2 = tp2;
-g_lastPlanTP3 = tp3;
-}
-else
-{
-// Garder plan stable tant que verdict inchangé (évite SL/TP qui bougent en permanence)
-entry = g_lastPlanEntry;
-sl = g_lastPlanSL;
-tp1 = g_lastPlanTP1;
-tp2 = g_lastPlanTP2;
-tp3 = g_lastPlanTP3;
-}
-
-DrawOrUpdateHLine("GOM_PLAN_ENTRY", entry, (dir == "BUY") ? clrLime : clrTomato, STYLE_DOT, 1);
-DrawOrUpdateHLine("GOM_PLAN_SL", sl, clrOrange, STYLE_SOLID, 1);
-DrawOrUpdateHLine("GOM_PLAN_TP1", tp1, clrWhite, STYLE_SOLID, 1);
-DrawOrUpdateHLine("GOM_PLAN_TP2", tp2, clrWhite, STYLE_SOLID, 1);
-DrawOrUpdateHLine("GOM_PLAN_TP3", tp3, clrWhite, STYLE_SOLID, 1);
-
-DrawPriceTag("GOM_PLAN_ENTRY_TXT", "Entry", entry, (dir == "BUY") ? clrLime : clrTomato);
-DrawPriceTag("GOM_PLAN_SL_TXT", "SL SWING", sl, clrOrange);
-DrawPriceTag("GOM_PLAN_TP1_TXT", "TP1", tp1, clrWhite);
-DrawPriceTag("GOM_PLAN_TP2_TXT", "TP2", tp2, clrWhite);
-DrawPriceTag("GOM_PLAN_TP3_TXT", "TP3", tp3, clrWhite);
-GOMScript_DrawSignalArrow(dir, entry);
-
-// Label live: prouve que le script calcule en continu + montre le verdict réel + statut des filtres
-string filterQualityTxt = (filterQuality > 0.0) ? (" | FQ=" + DoubleToString(filterQuality * 100.0, 0) + "%") : "";
-double vwapD = GOM_GlobalGetForScript("VWAP_DIST_PCT", 0.0);
-double bbPctB100 = GOM_GlobalGetForScript("BB_PCTB", 0.5) * 100.0;
-string bbBandTxt = " | VWAPΔ" + DoubleToString(vwapD, 2) + "% BB%" + DoubleToString(bbPctB100, 0) +
-   ((GOM_GlobalGetForScript("BB_SQUEEZE", 0.0) > 0.5) ? " SQZ" : "");
-double eqShow = GOM_GlobalGetForScript("ENTRY_QUALITY", 0.0);
-string eqTxt = (eqShow > 1e-6) ? (" | EQ=" + DoubleToString(eqShow * 100.0, 0) + "%") : "";
-DrawScriptLiveLabel("GOM_SCRIPT_LIVE_LABEL_" + _Symbol,
-                  "LIVE " + qualityOut +
-                  " | SPIKE=" + spikeDir + " " + DoubleToString(spikeProb * 100.0, 0) + "%" +
-                  " | FILTERS=" + filterStatus +
-                  filterQualityTxt + bbBandTxt + eqTxt +
-                  " | Entry=" + DoubleToString(entry, _Digits));
-}
-
-void DrawBottomDashboard()
-{
-// Toujours recalculer le plan / publier GOM_SCRIPT_* (l’EA dépend de ces GV même si l’affichage est masqué).
-string dirTxt = "WAIT";
-string qualityTxt = "WAIT";
-DrawTradePlanVisuals(dirTxt, qualityTxt);
-if(StringLen(dirTxt) < 2) dirTxt = "WAIT";
-if(StringLen(qualityTxt) < 2) qualityTxt = "WAIT";
-GOM_PublishMLFeatureGlobals();
-   if(EnableChartLeftShift)
-   {
-      double sh = ChartLeftShiftPct;
-      if(sh < 2.0) sh = 2.0;
-      if(sh > 50.0) sh = 50.0;
-      ChartSetInteger(0, CHART_SHIFT, true);
-      ChartSetDouble(0, CHART_SHIFT_SIZE, sh); // Utiliser la valeur brute (0-50%)
-   }
-   
-   // Forcer l'état de l'auto-scroll (False par défaut pour garder la zone futur visible)
-   ChartSetInteger(0, CHART_AUTOSCROLL, EnableChartAutoscroll);
-GOM_DrawPastFutureZone();
-
-int x0 = MathMax(2, DashboardLeftOffset - MathMax(0, DashboardNudgeLeftPx));
-const int colsTv = 7;
-   int y0 = MathMax(2, DashboardBottomOffset);
-   int gap = MathMax(2, DashboardCellGap);
-   int gapV = MathMax(2, DashboardTopRowExtraGap);
-   int hRow = MathMax(20, MathMax(DashboardCellHeight, MathMax(DashboardMetaRowHeight, DashboardVerdictRowHeight)));
-int chartPixW = (int)ChartGetInteger(0, CHART_WIDTH_IN_PIXELS);
-if(chartPixW < 200) chartPixW = 1200;
-int mL = MathMax(2, DashboardBarMarginLeft);
-int mR = MathMax(6, DashboardBarMarginRight);
-int barInnerW = chartPixW - mL - mR;
-if(barInnerW < colsTv * 40) barInnerW = colsTv * 40;
-int cellW = (barInnerW - (colsTv - 1) * gap) / colsTv;
-if(cellW < 34) cellW = 34;
-int firstStripW = colsTv * cellW + (colsTv - 1) * gap;
-int xBar = mL;
-if(!DashboardTvFullWidthBar)
-{
-int wfix = MathMax(72, DashboardCellWidth);
-cellW = wfix;
-firstStripW = colsTv * cellW + (colsTv - 1) * gap;
-int mrDash = MathMax(8, DashboardSecondaryRightMargin);
-xBar = x0 + MathMax(0, DashboardTopRowShiftRightPx);
-if(DashboardIndicatorsAnchorBottomRight)
-{
-const int xr = chartPixW - mrDash - firstStripW;
-if(xr >= 2) xBar = xr;
-}
-}
-int cw = MathMax(280, DashboardCompactWidth);
-int mrDash = MathMax(8, DashboardSecondaryRightMargin);
-int cx = x0 + MathMax(0, DashboardTopRowShiftRightPx);
-int compactX = cx;
-if(DashboardCompactVerdictOnly && DashboardCompactAnchorBottomRight && !DashboardCompactSpanChartWidth)
-{
-compactX = chartPixW - mrDash - cw;
-if(compactX < 2) compactX = 2;
-}
-if(DashboardCompactVerdictOnly && DashboardCompactSpanChartWidth)
-{
-compactX = mL;
-cw = barInnerW;
-if(cw < 260) cw = 260;
-}
-   // Inversion du Y : y1 est la ligne du BAS (Indicateurs), y2 est la ligne du HAUT (Timeframes)
-   int yInd = y0; // Ligne 1 : indicateurs (VOL, ATR, etc) en bas
-   int yDir = y0 + hRow + gapV; // Ligne 2 : Timeframes et Verdict en haut (TradingView style)
-   int yFc = y0 + 2 * (hRow + gapV);
-int stripFs = MathMax(7, DashboardFontSize - MathMax(0, DashboardStripFontDelta));
-int hMetaFull = MathMax(18, DashboardMetaRowHeight);
-int hMetaCompact = MathMax(14, DashboardCompactBottomMetaHeight);
-int hMeta = DashboardCompactVerdictOnly ? hMetaCompact : hMetaFull;
-int hVerRowCompact = (int)MathMin(34, MathMax(22, DashboardVerdictRowHeight));
-int compactMetaY = y0;
-int row2Y = y0 + hMeta + gapV;
-
-if(!ShowBottomDashboard)
-{
-ObjectDelete(0, "GOM_SPIKE_IMMINENT");
-ObjectDelete(0, DASH_PREFIX + "TOP_AI");
-ObjectDelete(0, DASH_PREFIX + "TOP_AI_TXT");
-ObjectDelete(0, DASH_PREFIX + "BOT_WAIT");
-ObjectDelete(0, DASH_PREFIX + "BOT_WAIT_TXT");
-double bidN = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-if(bidN <= 0.0) bidN = iClose(_Symbol, PERIOD_CURRENT, 0);
-GOM_UpdateM1Forecast500Globals(bidN);
-GOM_DrawM1ForecastChartOverlay(bidN);
-GOM_UpdateNotifyPositionAndSpike(bidN,
-   GOM_GlobalGetForScript("SPIKE_PROB", 0.0),
-   GOM_GlobalGetForScript("SPIKE_DIR_NUM", 0.0));
-if(ShowMLFeatureInfo && !UseEnhancedDashboard)
-GOM_DrawMLInfoFloatingLabel();
-else
-ObjectDelete(0, "GOM_MLINFO_BR");
-return;
-}
-
-ObjectDelete(0, DASH_PREFIX + "TOP_AI");
-ObjectDelete(0, DASH_PREFIX + "TOP_AI_TXT");
-ObjectDelete(0, DASH_PREFIX + "BOT_WAIT");
-ObjectDelete(0, DASH_PREFIX + "BOT_WAIT_TXT");
-
-if(DashboardCompactVerdictOnly)
-GOM_DeleteDashboardFullStripObjects();
-
-double atr = GOM_ATRValue(_Symbol, PERIOD_M15, 14);
-
-double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-if(bid <= 0.0) bid = iClose(_Symbol, PERIOD_CURRENT, 0);
-double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-if(ask <= 0.0) ask = bid;
-GOM_UpdateM1Forecast500Globals(bid);
-double atrPct = (bid > 0.0) ? (atr / bid) * 100.0 : 0.0;
-double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
-if(point <= 0.0) point = 0.1;
-double atrPts = atr / point;
-bool volOn = (atrPct + 1e-12 >= DashboardVolOnMinAtrPct);
-bool atrOk = (atrPct + 1e-12 >= DashboardAtrOkMinAtrPct);
-string volTxt = (volOn ? "VOL ON " : "VOL OFF ") + DoubleToString(atrPct, 2) + "%";
-color volBg = volOn ? (color)0x2F5F3F : (color)0x484848;
-string atrTxt = atrOk ? ("ATR OK " + DoubleToString(atrPts, 0) + "p") : ("ATR " + DoubleToString(atrPts, 0) + "p");
-color atrBg = atrOk ? (color)0x3A8C5A : (color)0x2F607C;
-
-color dirBg = (dirTxt == "BUY") ? (color)0x49A96B : ((dirTxt == "SELL") ? (color)0xB0303C : (color)0x666666);
-color verdictBg = GOM_VerdictCellColor(qualityTxt);
-
-double spProb = GOM_GlobalGetForScript("SPIKE_PROB", 0.0);
-double spDirNum = GOM_GlobalGetForScript("SPIKE_DIR_NUM", 0.0);
-string spTxt = "SPIKE --";
-color spBg = (color)0x353535;
-if(spProb > 0.0)
-{
-string sdir = (spDirNum > 0.5) ? "BUY" : ((spDirNum < -0.5) ? "SELL" : "WAIT");
-spTxt = "SPIKE " + sdir + " " + DoubleToString(spProb * 100.0, 0) + "%";
-if(spProb >= SpikeAlertMinProbability)
-   spBg = (sdir == "BUY") ? (color)0x2F7A45 : ((sdir == "SELL") ? (color)0x7A2F37 : (color)0x505050);
-else
-   spBg = (color)0x4A4A4A;
-}
-
-// Statut des filtres de confirmation
-double filterPassCount = GOM_GlobalGetForScript("FILTER_PASS_COUNT", 0.0);
-double filterTotal = GOM_GlobalGetForScript("FILTER_TOTAL", 0.0);
-double filterQuality = GOM_GlobalGetForScript("FILTER_QUALITY", 0.0);
-string filterTxt = "FILTERS --";
-color filterBg = (color)0x353535;
-if(filterTotal > 0.0)
-{
-int pass = (int)filterPassCount;
-int total = (int)filterTotal;
-double quality = filterQuality * 100.0;
-filterTxt = "FILT " + IntegerToString(pass) + "/" + IntegerToString(total) + " " + DoubleToString(quality, 0) + "%";
-
-// Couleur selon la qualité des filtres
-if(quality >= 80.0) filterBg = (color)0x2F7A45;      // Vert - Excellent
-else if(quality >= 60.0) filterBg = (color)0x4A7A3A;  // Vert clair - Bon
-else if(quality >= 40.0) filterBg = (color)0x6A6A2A;  // Jaune - Moyen
-else filterBg = (color)0x7A2F37;                     // Rouge - Faible
-}
-
-double dt = ReadGV("GOM_SIDO", "M15", "DOUBLE_TOP");
-double db = ReadGV("GOM_SIDO", "M15", "DOUBLE_BOTTOM");
-string sidoTxt = "NONE";
-if(dt > 0.0 && db > 0.0) sidoTxt = "DB+DT";
-else if(dt > 0.0) sidoTxt = "DTOP";
-else if(db > 0.0) sidoTxt = "DBOT";
-
-double m5b = ReadGV("GOM_KOLA", "M5", "BUY");
-double m5s = ReadGV("GOM_KOLA", "M5", "SELL");
-double m15Buy = ReadGV("GOM_KOLA", "M15", "BUY");
-double m15Sell = ReadGV("GOM_KOLA", "M15", "SELL");
-double m30BuyDash = ReadGV("GOM_KOLA", "M30", "BUY");
-double m30SellDash = ReadGV("GOM_KOLA", "M30", "SELL");
-string kolaTxt = "KOLA --";
-if(m5b > 0.0 && m5s > 0.0) kolaTxt = "K M5 B/S";
-else if(m5b > 0.0) kolaTxt = "K M5 BUY";
-else if(m5s > 0.0) kolaTxt = "K M5 SELL";
-else if(m15Buy > 0.0 && m15Sell > 0.0) kolaTxt = "K M15 B/S";
-else if(m15Buy > 0.0) kolaTxt = "K M15 BUY";
-else if(m15Sell > 0.0) kolaTxt = "K M15 SELL";
-else if(m30BuyDash > 0.0 && m30SellDash > 0.0) kolaTxt = "K M30 B/S";
-else if(m30BuyDash > 0.0) kolaTxt = "K M30 BUY";
-else if(m30SellDash > 0.0) kolaTxt = "K M30 SELL";
-
-double rsi1 = GOM_RSIValue(_Symbol, PERIOD_M1, 14);
-if(rsi1 <= 0.0) rsi1 = 50.0;
-bool macdBull = false;
-GOM_MACDMainAboveSignal(_Symbol, PERIOD_M5, macdBull);
-
-string lvlTxt = "--";
-double atrz = atr;
-if(atrz <= 0.0 && bid > 0.0) atrz = bid * 0.0015;
-if(atrz > 0.0)
-{
-if(m5b > 0.0 && GOM_PriceNearLevel(bid, m5b, atrz, 0.4)) lvlTxt = "NEAR M5+";
-else if(m5s > 0.0 && GOM_PriceNearLevel(bid, m5s, atrz, 0.4)) lvlTxt = "NEAR M5-";
-else if(m15Buy > 0.0 && GOM_PriceNearLevel(bid, m15Buy, atrz, 0.45)) lvlTxt = "NEAR M15+";
-else if(m15Sell > 0.0 && GOM_PriceNearLevel(bid, m15Sell, atrz, 0.45)) lvlTxt = "NEAR M15-";
-else if(m30BuyDash > 0.0 && GOM_PriceNearLevel(bid, m30BuyDash, atrz, 0.48)) lvlTxt = "NEAR M30+";
-else if(m30SellDash > 0.0 && GOM_PriceNearLevel(bid, m30SellDash, atrz, 0.48)) lvlTxt = "NEAR M30-";
-}
-
-double rsi5d = GOM_RSIValue(_Symbol, PERIOD_M5, 14);
-if(rsi5d <= 0.0) rsi5d = 50.0;
-double adx5d = GOM_ADXValue(_Symbol, PERIOD_M5, 14);
-double st5d = GOM_StochMain(_Symbol, PERIOD_M5, 5, 3, 3);
-string rsiDualTxt = "RSI " + DoubleToString(rsi1, 0) + "/" + DoubleToString(rsi5d, 0);
-color rsiDualBg = (rsi1 >= 50.0 && rsi5d >= 48.0) ? (color)0x3A5A8C : ((rsi1 <= 50.0 && rsi5d <= 52.0) ? (color)0x5A3A3A : (color)0x4B4B4B);
-string adxStTxt = "ADX " + DoubleToString(adx5d, 0) + " St " + DoubleToString(st5d, 0) + " M" + (macdBull ? "+" : "-");
-color adxStBg = (adx5d >= 22.0) ? (color)0x2B4A6E : (color)0x454545;
-
-double entryQDash = GOM_GlobalGetForScript("ENTRY_QUALITY", 0.0);
-string eqTxt = (entryQDash > 1e-6) ? ("EQ " + DoubleToString(entryQDash * 100.0, 0) + "%") : "EQ —";
-color eqBg = (color)0x3A3A5C;
-if(entryQDash + 1e-9 >= MinEntryQualityScore) eqBg = (color)0x2F5F4F;
-else if(entryQDash > 0.35) eqBg = (color)0x5A5A2A;
-
-double bbPctDash = GOM_GlobalGetForScript("BB_PCTB", 0.5) * 100.0;
-bool bbSq = (GOM_GlobalGetForScript("BB_SQUEEZE", 0.0) > 0.5);
-string bbTxt = "BB " + DoubleToString(bbPctDash, 0) + "%" + (bbSq ? " S" : "");
-color bbBg = bbSq ? (color)0x4A3A6A : (color)0x3C3C3C;
-
-double vwapDist = GOM_GlobalGetForScript("VWAP_DIST_PCT", 0.0);
-string vwTxt = (MathAbs(vwapDist) > 1e-6) ? ("VW " + DoubleToString(vwapDist, 2) + "%") : "VW —";
-color vwBg = (vwapDist > 0.02) ? (color)0x2F4F3F : ((vwapDist < -0.02) ? (color)0x5A3038 : (color)0x404040);
-
-int panelW = DashboardCompactVerdictOnly ? (cw + 8) : (firstStripW + 8);
-int panelH = 2 * hRow + gapV + 8;
-if(!DashboardCompactVerdictOnly && ShowM1Forecast500Strip)
-panelH = 3 * hRow + 2 * gapV + 8;
-if(DashboardCompactVerdictOnly)
-panelH = hMeta + gapV + hVerRowCompact + 8;
-if(ShowDashboardBackgroundBand)
-{
-if(DashboardCompactVerdictOnly)
-DrawDashboardPanel(DASH_PREFIX + "PANEL", compactX - 4, y0 - 4, cw + 8, panelH, clrNONE);
-else
-DrawDashboardPanel(DASH_PREFIX + "PANEL", xBar - 4, y0 - 4, firstStripW + 8, panelH, clrNONE);
-}
-else
-ObjectDelete(0, DASH_PREFIX + "PANEL");
-
-if(!DashboardCompactVerdictOnly)
-{
-string obsoleteStrip[] = {
-"BOT_META_DIR", "BOT_META_SRV", "BOT_META_LLM", "BOT_META_PX", "BOT_META_SPR", "BOT_META_VER",
-"BOT_DIRMETA", "BOT_SIDO", "BOT_KOLA", "BOT_RSIMACD", "BOT_FILTERS", "BOT_EQ", "BOT_BB", "BOT_VWAP", "BOT_ADXST",
-"BOT_BRAND", "BOT_LVL", "BOT_VOL", "BOT_ATR", "BOT_STAR", "BOT_TV_SIDE", "BOT_TV_VER"
-};
-for(int ob = 0; ob < ArraySize(obsoleteStrip); ob++)
-{
-ObjectDelete(0, DASH_PREFIX + obsoleteStrip[ob]);
-ObjectDelete(0, DASH_PREFIX + obsoleteStrip[ob] + "_TXT");
-}
-
-string topTf[6] = {"M5", "M15", "M30", "H1", "H4", "D1"};
-ENUM_TIMEFRAMES tfs[6] = {PERIOD_M5, PERIOD_M15, PERIOD_M30, PERIOD_H1, PERIOD_H4, PERIOD_D1};
-color upBg = (color)0x23D18C;
-color dnBg = (color)0xFF3B58;
-color flatBg = (color)0x787B86;
-for(int ti = 0; ti < 6; ti++)
-{
-int bb = GetTFBias(tfs[ti]);
-color tbg = (bb > 0) ? upBg : ((bb < 0) ? dnBg : flatBg);
-DrawDashboardCellFont(
-   DASH_PREFIX + "TOP_" + topTf[ti],
-   BiasText(topTf[ti], bb),
-   xBar + ti * (cellW + gap),
-   yDir,
-   cellW,
-   hRow,
-   tbg,
-   clrWhite,
-   stripFs,
-   true
-);
-}
-DrawDashboardCellFont(
-   DASH_PREFIX + "TOP_VERDICT",
-   qualityTxt,
-   xBar + 6 * (cellW + gap),
-   yDir,
-   cellW,
-   hRow,
-   verdictBg,
-   clrWhite,
-   stripFs + 1,
-   true
-);
-}
-else
-{
-int verX = compactX;
-int fullW = cw;
-int innerG = MathMax(2, gap);
-int verW = (int)MathMax(72, (int)(fullW * 0.14));
-if(verW > fullW / 2) verW = fullW / 2;
-int rem = fullW - verW - innerG;
-int tfCellW = (rem - 5 * innerG) / 6;
-if(tfCellW < 26)
-{
-verW = fullW - 6 * 26 - 5 * innerG - innerG;
-if(verW < 64) verW = 64;
-tfCellW = (fullW - verW - innerG - 5 * innerG) / 6;
-if(tfCellW < 24) tfCellW = 24;
-}
-int tfX0 = verX + verW + innerG;
-int verFont = (int)MathMin(15, MathMax(9, DashboardFontSize + 1));
-DrawDashboardVerdictCell(DASH_PREFIX + "TOP_VERDICT", qualityTxt, verX, row2Y, verW, hVerRowCompact, verdictBg, DashboardVerdictBorderColor, clrWhite, verFont);
-
-string topTf[6] = {"M5", "M15", "M30", "H1", "H4", "D1"};
-ENUM_TIMEFRAMES tfs[6] = {PERIOD_M5, PERIOD_M15, PERIOD_M30, PERIOD_H1, PERIOD_H4, PERIOD_D1};
-color upBg = (color)0x23D18C;
-color dnBg = (color)0xFF3B58;
-color flatBg = (color)0x787B86;
-int tfFs = (int)MathMax(7, MathMin(9, stripFs));
-for(int ti = 0; ti < 6; ti++)
-{
-int bb = GetTFBias(tfs[ti]);
-color tbg = (bb > 0) ? upBg : ((bb < 0) ? dnBg : flatBg);
-DrawDashboardCellFont(
-   DASH_PREFIX + "COMPACT_TF_" + topTf[ti],
-   topTf[ti] + ":" + (bb > 0 ? "↑" : (bb < 0 ? "↓" : "→")),
-   tfX0 + ti * (tfCellW + innerG),
-   row2Y,
-   tfCellW,
-   hVerRowCompact,
-   tbg,
-   clrWhite,
-   tfFs,
-   true
-);
-}
-}
-
-double srvConfDash = ReadGVDirect("SMC_UNIVERSAL_" + _Symbol + "_SERVER_AI_CONF", 0.0);
-if(srvConfDash > 1.0) srvConfDash /= 100.0;
-double confPctDash = srvConfDash * 100.0;
-if(confPctDash < 0.5)
-{
-double extc = g_lastExtAiConf;
-if(extc > 1.0) extc /= 100.0;
-confPctDash = extc * 100.0;
-}
-if(confPctDash < 0.5 && filterQuality > 0.0)
-confPctDash = filterQuality * 100.0;
-double combG = GOM_GlobalGetForScript("COMBINED_CONF", 0.0);
-if(combG > 1.0) combG /= 100.0;
-if(combG > 0.0)
-confPctDash = MathMax(confPctDash, combG * 100.0);
-
-string extraInd = "";
-if(ShowDashboardExtraIndicators)
-{
-int sec5d = GOM_SecondsToBarClose(_Symbol, PERIOD_M5);
-if(sec5d < 0) sec5d = 0;
-   extraInd = " | Sp:" + GOM_FormatSpreadForDash() + "pt ATR:" + DoubleToString(atrPct, 2) + "%";
-   extraInd += " M5:" + IntegerToString(sec5d) + "s RSI5:" + DoubleToString(rsi5d, 0);
-   extraInd += " ADX:" + DoubleToString(adx5d, 0) + " St:" + DoubleToString(st5d, 0);
-double stDir = GOM_GlobalGetForScript("TV_SUPERTREND_DIR", 0.0);
-double kcPos = GOM_GlobalGetForScript("TV_KELTNER_POS", 0.0);
-double dcSig = GOM_GlobalGetForScript("TV_DONCHIAN_SIG", 0.0);
-string stTxt = (stDir > 0.10) ? "UP" : ((stDir < -0.10) ? "DN" : "NEU");
-string dcTxt = (dcSig > 0.10) ? "B" : ((dcSig < -0.10) ? "S" : "-");
-extraInd += " | TV ST:" + stTxt + " KC:" + DoubleToString(kcPos, 2) + " DC:" + dcTxt;
-}
-if(DashboardCompactVerdictOnly && ShowDashboardExtraIndicators)
-{
-extraInd += " | " + spTxt + " SIDO " + sidoTxt + " " + kolaTxt + " " + filterTxt + " " + lvlTxt;
-}
-
-double srvCfW = ReadGVDirect("SMC_UNIVERSAL_" + _Symbol + "_SERVER_AI_CONF", 0.0);
-if(srvCfW > 1.0) srvCfW /= 100.0;
-double srvActW = ReadGVDirect("SMC_UNIVERSAL_" + _Symbol + "_SERVER_AI_ACTION_NUM", 0.0);
-string srvDW = (srvActW > 0.5) ? "B" : ((srvActW < -0.5) ? "S" : "-");
-string aiTail = " | SRV " + srvDW + " " + DoubleToString(srvCfW * 100.0, 0) + "%";
-double dsPhase = GOM_GlobalGetForScript("DOUBLE_SPIKE_PHASE", 0.0);
-double dsHold = GOM_GlobalGetForScript("DOUBLE_SPIKE_HOLD", 0.0);
-string dsTxt = (dsHold > 0.5) ? " DS2 HOLD" : ((dsPhase >= 1.0) ? " DS1 ARM" : " DS0");
-
-string botWideTxt =
-   dirTxt + " | conf " + DoubleToString(confPctDash, 0) + "% | " + FmtPrice(bid) + " | " + DashboardScriptVersion + dsTxt + aiTail + extraInd;
-
-if(!DashboardCompactVerdictOnly)
-{
-string volShort = volOn ? "VOL ON" : "VOL OFF";
-string atrShort = atrOk ? "ATR OK" : ("ATR " + IntegerToString((int)atrPts) + "p");
-
-double rM5 = GOM_RSIValue(_Symbol, PERIOD_M5, 14);
-double rM15 = GOM_RSIValue(_Symbol, PERIOD_M15, 14);
-double rM30 = GOM_RSIValue(_Symbol, PERIOD_M30, 14);
-double rH1 = GOM_RSIValue(_Symbol, PERIOD_H1, 14);
-double rH4 = GOM_RSIValue(_Symbol, PERIOD_H4, 14);
-double rD1 = GOM_RSIValue(_Symbol, PERIOD_D1, 14);
-if(rM5 <= 0.0) rM5 = 50.0;
-if(rM15 <= 0.0) rM15 = 50.0;
-if(rM30 <= 0.0) rM30 = 50.0;
-if(rH1 <= 0.0) rH1 = 50.0;
-if(rH4 <= 0.0) rH4 = 50.0;
-if(rD1 <= 0.0) rD1 = 50.0;
-
-   // Labels enrichis pour un dashboard plus complet
-   string s0 = "SPK " + ((spProb > 0.0) ? (DoubleToString(spProb * 100.0, 0) + "%") : "--") + " | " + volShort;
-   string s1 = "M15 RSI:" + DoubleToString(rM15, 0) + " | " + atrShort;
-   string s2 = "M30 RSI:" + DoubleToString(rM30, 0) + " | " + StringSubstr(bbTxt, 0, 9);
-   string s3 = "H1 RSI:" + DoubleToString(rH1, 0) + " | " + StringSubstr(vwTxt, 0, 9);
-   string fqPct = (filterTotal > 0.0) ? (IntegerToString((int)filterPassCount) + "/" + IntegerToString((int)filterTotal)) : "--";
-   string s4 = "H4 RSI:" + DoubleToString(rH4, 0) + " | FILT:" + fqPct;
-   string sidoStat = (sidoTxt == "NONE") ? "--" : sidoTxt;
-   string s5 = "D1 RSI:" + DoubleToString(rD1, 0) + " | SIDO:" + sidoStat;
-
-   string sideTxt = "WAIT";
-   color sideBg = (color)0x5A5A5A;
-   if(dirTxt == "BUY") { sideTxt = "LONG"; sideBg = (color)0x49A96B; }
-   else if(dirTxt == "SELL") { sideTxt = "SHORT"; sideBg = (color)0xB0303C; }
-
-   double dailyProfit = GlobalVariableGet("SMC_UNIVERSAL_PROFIT_DAILY");
-   string profitTxt = " | P/L:" + DoubleToString(dailyProfit, 1) + "$";
-   string sprTxt = " | Sp:" + GOM_FormatSpreadForDash() + "pt";
-   string end6 = sideTxt + " " + DoubleToString(confPctDash, 0) + "%" + sprTxt + profitTxt;
-
-   color subBg = (color)0x353535;
-   int fsSub = MathMax(6, stripFs - 1);
-   DrawDashboardCellFont(DASH_PREFIX + "BOTB_M5", s0, xBar + 0 * (cellW + gap), yInd, cellW, hRow, subBg, clrWhite, fsSub, true);
-   DrawDashboardCellFont(DASH_PREFIX + "BOTB_M15", s1, xBar + 1 * (cellW + gap), yInd, cellW, hRow, subBg, clrWhite, fsSub, true);
-   DrawDashboardCellFont(DASH_PREFIX + "BOTB_M30", s2, xBar + 2 * (cellW + gap), yInd, cellW, hRow, subBg, clrWhite, fsSub, true);
-   DrawDashboardCellFont(DASH_PREFIX + "BOTB_H1", s3, xBar + 3 * (cellW + gap), yInd, cellW, hRow, subBg, clrWhite, fsSub, true);
-   DrawDashboardCellFont(DASH_PREFIX + "BOTB_H4", s4, xBar + 4 * (cellW + gap), yInd, cellW, hRow, subBg, clrWhite, fsSub, true);
-   DrawDashboardCellFont(DASH_PREFIX + "BOTB_D1", s5, xBar + 5 * (cellW + gap), yInd, cellW, hRow, subBg, clrWhite, fsSub, true);
-   DrawDashboardCellFont(DASH_PREFIX + "BOTB_END", end6, xBar + 6 * (cellW + gap), yInd, cellW, hRow, sideBg, clrWhite, fsSub, true);
-
-if(ShowM1Forecast500Strip)
-{
-double fv = GOM_GlobalGetForScript("M1_F500_VALID", 0.0);
-string fLine = "M1×500 projection — données insuffisantes";
-color fbg = (color)0x3A3A50;
-if(fv > 0.5)
-{
-double rp = GOM_GlobalGetForScript("M1_F500_RET_PCT", 0.0);
-double dn = GOM_GlobalGetForScript("M1_F500_DIR", 0.0);
-string fArrow = (dn > 0.5) ? GOM_UnicodeChar(0x25B2) : ((dn < -0.5) ? GOM_UnicodeChar(0x25BC) : GOM_UnicodeChar(0x25CB));
-fLine = "M1×500 (extrap. tendance) " + fArrow + " " + (rp >= 0.0 ? "+" : "") + DoubleToString(rp, 2) + "% | régr. " + IntegerToString(MathMin(M1ForecastRegressionBars, 600)) + " clôtures";
-fbg = (dn > 0.5) ? (color)0x2F4A3F : ((dn < -0.5) ? (color)0x5A3038 : (color)0x3A3A50);
-}
-DrawDashboardCellFont(DASH_PREFIX + "BOTF_FULL", fLine, xBar, yFc, firstStripW, hRow, fbg, clrWhite, MathMax(6, stripFs - 1), true);
-}
-else
-{
-ObjectDelete(0, DASH_PREFIX + "BOTF_FULL");
-ObjectDelete(0, DASH_PREFIX + "BOTF_FULL_TXT");
-}
-}
-else
-{
-DrawDashboardCell(DASH_PREFIX + "BOT_DIRMETA", botWideTxt, compactX, compactMetaY, cw, hMeta, dirBg, clrWhite);
-string metaLbl2 = DASH_PREFIX + "BOT_DIRMETA_TXT";
-if(ObjectFind(0, metaLbl2) >= 0)
-{
-ObjectSetString(0, metaLbl2, OBJPROP_FONT, "Arial Bold");
-int metaFs2 = MathMax(10, DashboardFontSize + 1);
-if(StringLen(botWideTxt) > 95) metaFs2 = MathMax(8, DashboardFontSize);
-ObjectSetInteger(0, metaLbl2, OBJPROP_FONTSIZE, metaFs2);
-ObjectSetInteger(0, metaLbl2, OBJPROP_ANCHOR, ANCHOR_CENTER);
-ObjectSetInteger(0, metaLbl2, OBJPROP_XDISTANCE, compactX + cw / 2);
-ObjectSetInteger(0, metaLbl2, OBJPROP_YDISTANCE, compactMetaY + hMeta / 2);
-ObjectSetInteger(0, metaLbl2, OBJPROP_COLOR, clrWhite);
-}
-}
-
-bool isBoomD = GOM_IsBoomOrGainx();
-bool isCrashD = GOM_IsCrashOrPainx();
-static bool g_prevSpikeImminentOn = false;
-static bool g_prevPlanBlinkArrowActive = false;
-static bool g_prevPlanQualityGoodPerfect = false;
-bool imminentNow = DrawSpikeImminentArrow(bid, spProb, spDirNum, isBoomD, isCrashD, dirTxt);
-if(EnableSpikeImminentFirstAutoPending && imminentNow && !g_prevSpikeImminentOn)
-{
-string sdImm = (spDirNum > 0.5) ? "BUY" : ((spDirNum < -0.5) ? "SELL" : "NONE");
-if(sdImm != "NONE")
-   GOM_TrySpikeImminentFirstPending(isBoomD, isCrashD, sdImm, spProb, bid, ask, atr, m5b, m5s);
-}
-g_prevSpikeImminentOn = imminentNow;
-
-const bool planBlink = (dirTxt == "BUY" || dirTxt == "SELL");
-const bool planGoodPerfect = IsGoodOrPerfectVerdictQuality(qualityTxt);
-const bool planArrowRise = planBlink && !g_prevPlanBlinkArrowActive;
-const bool planQualityRiseGoodPerfect = planGoodPerfect && !g_prevPlanQualityGoodPerfect;
-if(!planBlink)
-   g_gomLastPlanArrowReattemptTime = 0;
-
-const int rsecPlan = MathMax(0, GomPlanArrowReattemptSec);
-const bool planMarketPeriodic = (EnableAutoMarketOnGomPlanArrow && planBlink && planGoodPerfect && rsecPlan > 0 && g_gomLastPlanArrowReattemptTime > 0 &&
-                                  (TimeCurrent() - g_gomLastPlanArrowReattemptTime) >= rsecPlan);
-const bool tryPlanMarketNow = (EnableAutoMarketOnGomPlanArrow && planBlink && planGoodPerfect &&
-                               (planArrowRise || planQualityRiseGoodPerfect || planMarketPeriodic));
-
-if(tryPlanMarketNow)
-{
-   GOM_TryMarketEntryOnPlanArrowRise(isBoomD, isCrashD, dirTxt, bid, ask, atr, spProb);
-   g_gomLastPlanArrowReattemptTime = TimeCurrent();
-}
-else if(planArrowRise && SpikeImminentFirstTriggerOnPlanArrowRise && EnableSpikeImminentFirstAutoPending)
-{
-   const string sdPl = (dirTxt == "BUY") ? "BUY" : "SELL";
-   if((isBoomD && sdPl == "BUY") || (isCrashD && sdPl == "SELL"))
-      GOM_TrySpikeImminentFirstPending(isBoomD, isCrashD, sdPl, spProb, bid, ask, atr, m5b, m5s);
-}
-g_prevPlanBlinkArrowActive = planBlink;
-g_prevPlanQualityGoodPerfect = planGoodPerfect;
-
-GOM_DrawM1ForecastChartOverlay(bid);
-GOM_UpdateNotifyPositionAndSpike(bid, spProb, spDirNum);
-
-ObjectDelete(0, DASH_PREFIX + "TOP_D1MARK_TXT");
-ObjectDelete(0, DASH_PREFIX + "TOP_D1MARK");
-ObjectDelete(0, DASH_PREFIX + "TOP_WAIT_TXT");
-ObjectDelete(0, DASH_PREFIX + "TOP_WAIT");
-
-bool showMlFloat = ShowMLFeatureInfo && DashboardCompactVerdictOnly;
-if(showMlFloat)
-GOM_DrawMLInfoFloatingLabel();
-else
-ObjectDelete(0, "GOM_MLINFO_BR");
-}
-
-#define TRADBOT_SCANNER_OWNER_GV "TradBOT_OpportunityScannerOwnerChartId"
-
-bool GOM_IsOpportunityScannerOwnerChart()
-{
-   if(!EnableOpportunityScanner)
-      return false;
-   if(!OpportunityScannerSingleChart)
-      return true;
-   const long myChart = (long)ChartID();
-   if(!GlobalVariableCheck(TRADBOT_SCANNER_OWNER_GV))
-   {
-      GlobalVariableSet(TRADBOT_SCANNER_OWNER_GV, (double)myChart);
-      return true;
-   }
-   return ((long)GlobalVariableGet(TRADBOT_SCANNER_OWNER_GV) == myChart);
-}
-
-void GOM_ReleaseOpportunityScannerOwnership()
-{
-   if(!GlobalVariableCheck(TRADBOT_SCANNER_OWNER_GV))
-      return;
-   if((long)GlobalVariableGet(TRADBOT_SCANNER_OWNER_GV) == (long)ChartID())
-      GlobalVariableDel(TRADBOT_SCANNER_OWNER_GV);
-}
-
-void GomKolaSidoEmbedded_RunOneShot()
-{
-   ProcessOrClear(PERIOD_M1, ShowM1Levels);
-   ProcessOrClear(PERIOD_M5, ShowM5Levels);
-   ProcessOrClear(PERIOD_M15, ShowM15Levels);
-   ProcessOrClear(PERIOD_M30, ShowM30Levels);
-   ProcessOrClear(PERIOD_H1, ShowH1Levels);
-   ProcessOrClear(PERIOD_H4, ShowH4Levels);
-   ProcessOrClear(PERIOD_D1, ShowD1Levels);
-   ProcessOrClear(PERIOD_W1, ShowW1Levels);
-   DrawAndPublishScriptEMAs();
-   DrawAndPublishBollingerVWAP();
-   GOM_CheckCaptureSpikeAndCleanup();
-   DrawBottomDashboard();
-   if(!GOM_SkipChartRedraw)
-      ChartRedraw(0);
-}
-
-// Appeler depuis l'EA (OnTick) : une passe par tick, throttles internes (pas de Sleep).
-void GomKolaSidoEmbedded_ProcessFrame()
-{
-   static bool s_oneShotDone = false;
-   if(!KeepScriptAttached)
-   {
-      if(s_oneShotDone)
-         return;
-      s_oneShotDone = true;
-      GomKolaSidoEmbedded_RunOneShot();
-      return;
-   }
-
-   datetime now = TimeCurrent();
-
-   static datetime s_lastSmc = 0;
-   if(GOM_ShouldRun(now, s_lastSmc, SMCProcessRefreshSeconds))
-   {
-      GOM_SMCProcess();
-   }
-
-   static datetime s_lastM1 = 0, s_lastM5 = 0, s_lastM15 = 0, s_lastM30 = 0, s_lastH1 = 0, s_lastH4 = 0, s_lastD1 = 0, s_lastW1 = 0;
-   if(ShowM1Levels  && GOM_ShouldRun(now, s_lastM1,  TfRefreshSeconds_M1))  { ProcessOrClear(PERIOD_M1,  true); }
-   if(ShowM5Levels  && GOM_ShouldRun(now, s_lastM5,  TfRefreshSeconds_M5))  { ProcessOrClear(PERIOD_M5,  true); }
-   if(ShowM15Levels && GOM_ShouldRun(now, s_lastM15, TfRefreshSeconds_M15)) { ProcessOrClear(PERIOD_M15, true); }
-   if(ShowM30Levels && GOM_ShouldRun(now, s_lastM30, TfRefreshSeconds_M30)) { ProcessOrClear(PERIOD_M30, true); }
-   if(ShowH1Levels  && GOM_ShouldRun(now, s_lastH1,  TfRefreshSeconds_H1))  { ProcessOrClear(PERIOD_H1,  true); }
-   if(ShowH4Levels  && GOM_ShouldRun(now, s_lastH4,  TfRefreshSeconds_H4))  { ProcessOrClear(PERIOD_H4,  true); }
-   if(ShowD1Levels  && GOM_ShouldRun(now, s_lastD1,  TfRefreshSeconds_D1))  { ProcessOrClear(PERIOD_D1,  true); }
-   if(ShowW1Levels  && GOM_ShouldRun(now, s_lastW1,  TfRefreshSeconds_W1))  { ProcessOrClear(PERIOD_W1,  true); }
-
-   static datetime s_lastEma = 0;
-   if(GOM_ShouldRun(now, s_lastEma, ScriptEmaRefreshSeconds))
-   {
-      DrawAndPublishScriptEMAs();
-   }
-   static datetime s_lastBbvwap = 0;
-   if(GOM_ShouldRun(now, s_lastBbvwap, BollingerVwapRefreshSeconds))
-   {
-      DrawAndPublishBollingerVWAP();
-   }
-
-   static datetime s_lastDash = 0;
-   if(GOM_ShouldRun(now, s_lastDash, DashboardRefreshSeconds))
-   {
-      GOM_CheckCaptureSpikeAndCleanup();
-      if(!UseEnhancedDashboard)
-         DrawBottomDashboard();
-      else
-         UpdateDashboard();
-      if(!GOM_SkipChartRedraw)
-         ChartRedraw(0);
-   }
-}
-
-void GomKolaSidoEmbedded_OnDeinit()
-{
-   GOM_ReleaseAllCachedHandles();
-}
-
-#endif // GOM_KOLA_SIDO_CORE_MQH
 
 //+------------------------------------------------------------------+
 //| MATÉRIALISATION DES SETUPS SMC SUR GRAPHIQUE                   |
@@ -6302,7 +326,6 @@ bool PositionCloseWithLog(ulong ticket, string reason = "")
 bool GetAISignalData();
 bool UpdateAIDecision(int timeoutMs = -1);
 void MaybeUpdateAIServerFromOnTick(datetime currentTime);
-void MaybeUpdateTradingAgentsFromOnTick(datetime currentTime);
 void UpdateMLMetricsDisplay();
 void DrawSwingHighLow();
 void DrawFVGOnChart();
@@ -6319,9 +342,6 @@ void DrawLiquidityZonesOnChart();
 void DrawHistoricalSwingPoints(MqlRates &rates[], int bars, double point);
 void DrawBookmarkLevels();
 void ManageBoomCrashSpikeClose();
-void GOM_ManageExitOpenPositionsNearOppositeM5Kola();
-void ManageSalvageBankDailyProtection();
-bool EA_IsBoomCrashOrGainxPainxForSpikeAutoClose(const string symbol);
 void CheckAndExecuteSecondSpikeReentry();
 void ManageDollarExits();
 void CloseWorstPositionIfTotalLossExceeded();
@@ -6360,9 +380,6 @@ bool SMC_IsStrictUTCTradingWindowOpen();
 string GetCurrentTrendDirection();
 void ValidateAndAdjustStopLossTakeProfit(string direction, double entryPrice, double &stopLoss, double &takeProfit);
 void EnforceMinBoomCrashStopLossDollarRisk(const string symbol, const string direction, const double entryPrice, const double volume, double &stopLoss);
-void EnforceMaxBoomCrashStopLossDollarRisk(const string symbol, const string direction, const double entryPrice, const double volume, double &stopLoss);
-void EnforceBoomCrashStopLossDollarRisk(const string symbol, const string direction, const double entryPrice, const double volume, double &stopLoss);
-double BoomCrashEffectiveMaxLossCloseUSD();
 void CleanupAllChartObjects();
 bool CheckDailyProfitPause();
 double CalculateDailyProfitFromHistory();
@@ -6387,10 +404,6 @@ bool GetSymbolStatsFromHistory(const string symbol, datetime fromTime, datetime 
 string FormatWLNet(int wins, int losses, double net);
 void DrawDashboardOnChart(const string &lines[], const color &colors[], int count);
 void RunCategoryStrategy();
-void GOM_InternalEngine_Update();
-bool GOM_MarketEntryBlockedByFinalWait(void);
-bool GOM_Internal_TradeGateAllows(const string directionUpper);
-bool IsGoodOrPerfectVerdictQuality(const string qIn);
 bool Forex_DetectBOSRetest(string &dirOut, double &entryOut, double &slOut, double &tpOut);
 void ExecuteForexBOSRetest();
 bool IsPriceNearEMAPullbackZone(const string direction, double currentPrice, double &ema21Out, double &ema31Out, double &distOut, double &maxDistOut);
@@ -6430,7 +443,6 @@ bool IsBoomCrashDirectionAllowedByIA(const string symbol, const string direction
 bool IsBoomCrashSmartEntryContextFresh(const string direction);
 bool IsBoomCrashEntryCooldownActive(const string contextTag);
 void RegisterBoomCrashMarketEntry();
-void GOM_TryMarketEntryOnPlanArrowRise(const bool isBoom, const bool isCrash, const string dirTxt, const double bid, const double ask, const double atr, const double spikeProb01);
 
 // Recovery exceptionnel Boom/Crash:
 // - Boom: après dernier spike BUY, armement sur touch SELL Entry M5 puis déclenchement après 4 petites bougies M1
@@ -6488,8 +500,6 @@ string ExtractJsonValue(string json, string key);
 string ExtractJsonDecisionRootSymbol(string json);
 string ExtractJsonDecisionRootConfidence(string json);
 string ExtractJsonDecisionRootAction(string json);
-bool RegisterTradingAgentsMt5SymbolOnServer();
-bool UpdateTradingAgentsSnapshot();
 
 void GetLatestConfirmedSwings(double &lastSH, datetime &lastSHTime, double &lastSL, datetime &lastSLTime);
 void DrawConfirmedSwingPoints();
@@ -6497,8 +507,6 @@ bool DetectBoomCrashSwingPoints();
 void UpdateSpikeWarningBlink();
 void CheckPredictedSwingTriggers();
 int  CountOpenLimitOrdersForSymbol(const string symbol);
-bool EA_SymbolsMatch(const string symA, const string symB);
-int  CountAllPositionsOnSymbolAnyMagic(const string symbol);
 int  CountChannelLimitOrdersForSymbol(const string symbol);
 bool GetRecentAndProjectedMLChannelIntersection(string direction, double &recentPrice, datetime &recentTime, double &projectedPrice, datetime &projectedTime);
 void CheckAndExecuteMLChannelBreakoutTrade();
@@ -6526,7 +534,6 @@ bool IsAcceleratingMomentum();
 bool IsSpikeImminentWithoutAI();
 void CheckAndExecuteSpikeTrade();
 void ExecuteSpikeTrade();
-bool PriceNearGomKolaM5OrH1ForDirection(const string symbol, const string direction, const double bid, const double ask, const double atr);
 
 // Fonctions utilitaires pour la détection de spikes
 bool IsNearSupport();
@@ -6763,18 +770,6 @@ struct FutureCandleData {
    double close;
    double confidence;
 };
-
-// ML Dashboard Signal Structure
-struct MLSignal {
-   string symbol;
-   string signal;        // "BUY", "SELL", "HOLD"
-   double confidence;
-   double accuracy;
-   string model_name;
-   string pattern_name;
-   datetime timestamp;
-};
-
 enum ENUM_SYMBOL_CATEGORY {
    SYM_BOOM_CRASH,
    SYM_VOLATILITY,
@@ -6783,277 +778,19 @@ enum ENUM_SYMBOL_CATEGORY {
    SYM_METAL,
    SYM_UNKNOWN
 };
-
-//+------------------------------------------------------------------+
-//| Classe de Détection de Spike Boom/Crash (Simple et Rapide)      |
-//+------------------------------------------------------------------+
-class CSpikeDetector
-{
-private:
-   string   m_symbol;
-   double   m_lastPrice;
-   datetime m_lastPriceTime;
-   double   m_spikeThreshold;    // 0.003 = 0.3%
-   int      m_spikeTimeWindow;   // 5 secondes
-
-public:
-   CSpikeDetector()
-   {
-      m_symbol = "";
-      m_spikeThreshold = 0.003;
-      m_spikeTimeWindow = 5;
-      m_lastPrice = 0.0;
-      m_lastPriceTime = 0;
-   }
-
-   void Init(string symbol, double threshold = 0.003, int timeWindow = 5)
-   {
-      m_symbol = symbol;
-      m_spikeThreshold = threshold;
-      m_spikeTimeWindow = timeWindow;
-      m_lastPrice = 0.0;
-      m_lastPriceTime = 0;
-   }
-
-   // Détection spike rapide (mouvement négatif → positif)
-   bool DetectSpike(string &direction, double &spikePercent)
-   {
-      if(m_symbol == "") return false;
-
-      datetime now = TimeCurrent();
-      double currentPrice = SymbolInfoDouble(m_symbol, SYMBOL_BID);
-
-      // Initialisation première fois
-      if(m_lastPriceTime == 0 || m_lastPrice <= 0.0)
-      {
-         m_lastPrice = currentPrice;
-         m_lastPriceTime = now;
-         return false;
-      }
-
-      // Vérifier fenêtre de temps
-      int elapsed = (int)(now - m_lastPriceTime);
-      if(elapsed > m_spikeTimeWindow || elapsed <= 0)
-      {
-         m_lastPrice = currentPrice;
-         m_lastPriceTime = now;
-         return false;
-      }
-
-      // Calculer variation %
-      double priceChange = currentPrice - m_lastPrice;
-      spikePercent = (priceChange / m_lastPrice) * 100.0;
-
-      bool detected = false;
-
-      // Détection Boom (spike haussier)
-      if(StringFind(m_symbol, "Boom") >= 0 && spikePercent >= m_spikeThreshold * 100.0)
-      {
-         direction = "BUY";
-         detected = true;
-      }
-
-      // Détection Crash (spike baissier)
-      if(StringFind(m_symbol, "Crash") >= 0 && spikePercent <= -m_spikeThreshold * 100.0)
-      {
-         direction = "SELL";
-         detected = true;
-      }
-
-      if(detected)
-      {
-         // Reset pour prochaine détection
-         m_lastPrice = currentPrice;
-         m_lastPriceTime = now;
-      }
-
-      return detected;
-   }
-};
-
-//+------------------------------------------------------------------+
-//| Classe Trailing Stop Spécial Boom/Crash (Spike-Aware)           |
-//+------------------------------------------------------------------+
-class CBoomCrashTrailingStop
-{
-private:
-   string   m_symbol;
-   ulong    m_positionTicket;
-   double   m_distanceInitial;    // 0.0015 = 0.15%
-   double   m_distanceSpike;      // 0.0010 = 0.10%
-   double   m_stepPercent;        // 0.0005 = 0.05%
-   double   m_minProfitUSD;       // 0.10 = 0.10$
-   double   m_highestPrice;       // Plus haut atteint (BUY)
-   double   m_lowestPrice;        // Plus bas atteint (SELL)
-   bool     m_spikeMode;          // Mode agressif activé
-   CTrade   m_trade;
-
-public:
-   ulong    positionTicket;       // Public pour vérification externe
-
-   CBoomCrashTrailingStop()
-   {
-      m_symbol = "";
-      m_positionTicket = 0;
-      positionTicket = 0;
-      m_distanceInitial = 0.0015;  // 0.15%
-      m_distanceSpike = 0.0010;    // 0.10%
-      m_stepPercent = 0.0005;      // 0.05%
-      m_minProfitUSD = 0.10;
-      m_highestPrice = 0.0;
-      m_lowestPrice = 0.0;
-      m_spikeMode = false;
-   }
-
-   void SetParameters(double distanceInitial, double distanceSpike, double step, double minProfit)
-   {
-      m_distanceInitial = distanceInitial;
-      m_distanceSpike = distanceSpike;
-      m_stepPercent = step;
-      m_minProfitUSD = minProfit;
-   }
-
-   void Init(ulong ticket, string symbol)
-   {
-      m_positionTicket = ticket;
-      positionTicket = ticket;
-      m_symbol = symbol;
-
-      if(!PositionSelectByTicket(ticket)) return;
-
-      ENUM_POSITION_TYPE ptype = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
-      double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
-
-      if(ptype == POSITION_TYPE_BUY)
-      {
-         m_highestPrice = openPrice;
-         m_lowestPrice = 0.0;
-      }
-      else
-      {
-         m_lowestPrice = openPrice;
-         m_highestPrice = 0.0;
-      }
-
-      m_spikeMode = false;
-   }
-
-   void Update(bool spikeDetected = false)
-   {
-      if(m_positionTicket == 0) return;
-      if(!PositionSelectByTicket(m_positionTicket)) return;
-
-      ENUM_POSITION_TYPE ptype = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
-      double currentPrice = (ptype == POSITION_TYPE_BUY) ?
-                           SymbolInfoDouble(m_symbol, SYMBOL_BID) :
-                           SymbolInfoDouble(m_symbol, SYMBOL_ASK);
-
-      double profit = PositionGetDouble(POSITION_PROFIT);
-      double swap = PositionGetDouble(POSITION_SWAP);
-      double netProfit = profit + swap;
-
-      // Activer mode spike si détecté ET profit > seuil
-      if(spikeDetected && netProfit >= m_minProfitUSD)
-      {
-         if(!m_spikeMode)
-         {
-            m_spikeMode = true;
-            Print("🚀 MODE SPIKE TRAILING activé | Ticket: ", m_positionTicket,
-                  " | Profit: ", DoubleToString(netProfit, 2), "$");
-         }
-      }
-
-      // Position BUY
-      if(ptype == POSITION_TYPE_BUY)
-      {
-         if(currentPrice > m_highestPrice || m_highestPrice == 0.0)
-            m_highestPrice = currentPrice;
-
-         double distance = m_spikeMode ? m_distanceSpike : m_distanceInitial;
-         double newSL = m_highestPrice * (1.0 - distance);
-
-         // Arrondir
-         double tickSize = SymbolInfoDouble(m_symbol, SYMBOL_TRADE_TICK_SIZE);
-         if(tickSize > 0)
-            newSL = MathRound(newSL / tickSize) * tickSize;
-
-         double currentSL = PositionGetDouble(POSITION_SL);
-         if(newSL > currentSL + m_stepPercent * currentPrice)
-         {
-            double tp = PositionGetDouble(POSITION_TP);
-            if(m_trade.PositionModify(m_positionTicket, newSL, tp))
-            {
-               static datetime lastLog = 0;
-               if(TimeCurrent() - lastLog >= 5)
-               {
-                  Print("✅ Boom/Crash Trailing BUY | Ticket: ", m_positionTicket,
-                        " | SL: ", DoubleToString(newSL, _Digits),
-                        " | Mode: ", (m_spikeMode ? "SPIKE" : "NORMAL"));
-                  lastLog = TimeCurrent();
-               }
-            }
-         }
-      }
-      // Position SELL
-      else
-      {
-         if(currentPrice < m_lowestPrice || m_lowestPrice == 0.0)
-            m_lowestPrice = currentPrice;
-
-         double distance = m_spikeMode ? m_distanceSpike : m_distanceInitial;
-         double newSL = m_lowestPrice * (1.0 + distance);
-
-         double tickSize = SymbolInfoDouble(m_symbol, SYMBOL_TRADE_TICK_SIZE);
-         if(tickSize > 0)
-            newSL = MathRound(newSL / tickSize) * tickSize;
-
-         double currentSL = PositionGetDouble(POSITION_SL);
-         if(currentSL == 0.0 || newSL < currentSL - m_stepPercent * currentPrice)
-         {
-            double tp = PositionGetDouble(POSITION_TP);
-            if(m_trade.PositionModify(m_positionTicket, newSL, tp))
-            {
-               static datetime lastLog = 0;
-               if(TimeCurrent() - lastLog >= 5)
-               {
-                  Print("✅ Boom/Crash Trailing SELL | Ticket: ", m_positionTicket,
-                        " | SL: ", DoubleToString(newSL, _Digits),
-                        " | Mode: ", (m_spikeMode ? "SPIKE" : "NORMAL"));
-                  lastLog = TimeCurrent();
-               }
-            }
-         }
-      }
-   }
-};
-
 ENUM_SYMBOL_CATEGORY SMC_GetSymbolCategory(string symbol)
 {
    string s = symbol;
    StringToUpper(s);
    if(StringFind(s, "BOOM") >= 0 || StringFind(s, "CRASH") >= 0) return SYM_BOOM_CRASH;
-   // Indices volatilité type R_75 / R_10 (1s) — nom court sans mot « VOLATILITY »
-   if(StringLen(s) >= 3 && StringFind(s, "R_") == 0) return SYM_VOLATILITY;
-   if(StringFind(s, "VOLATILITY") >= 0 || StringFind(s, "RANGE BREAK") >= 0 ||
+   if(StringFind(s, "VOLATILITY") >= 0 || StringFind(s, "RANGE BREAK") >= 0 || 
       StringFind(s, "FX VOL") >= 0 || StringFind(s, "SFX VOL") >= 0 ||
-      StringFind(s, "STEP") >= 0 || StringFind(s, "JUMP") >= 0 ||
-      StringFind(s, "PAINX") >= 0 || StringFind(s, "GAINX") >= 0 || StringFind(s, "XEL") >= 0) return SYM_VOLATILITY;
+      StringFind(s, "PAIN") >= 0 || StringFind(s, "GAIN") >= 0 || StringFind(s, "XEL") >= 0) return SYM_VOLATILITY;
    if(StringFind(s, "XAU") >= 0 || StringFind(s, "GOLD") >= 0) return SYM_METAL;
    if(StringFind(s, "XAG") >= 0 || StringFind(s, "SILVER") >= 0) return SYM_METAL;
    if(StringFind(s, "OIL") >= 0 || StringFind(s, "COPPER") >= 0) return SYM_COMMODITY;
    if(StringFind(s, "USD") >= 0 || StringFind(s, "EUR") >= 0 || StringFind(s, "GBP") >= 0 || StringFind(s, "JPY") >= 0) return SYM_FOREX;
    return SYM_UNKNOWN;
-}
-
-// Fermeture auto « spike » : Boom/Crash + volatilité (V75, Step, Jump…) + Gainx/Painx (aligné SMC_Universal_Enhanced).
-bool EA_IsBoomCrashOrGainxPainxForSpikeAutoClose(const string symbol)
-{
-   const ENUM_SYMBOL_CATEGORY cat = SMC_GetSymbolCategory(symbol);
-   if(cat == SYM_BOOM_CRASH || cat == SYM_VOLATILITY)
-      return true;
-   string s = symbol;
-   StringToUpper(s);
-   return (StringFind(s, "PAINX") >= 0 || StringFind(s, "GAINX") >= 0);
 }
 
 bool IsBoomSymbol(const string symbol)
@@ -7062,12 +799,6 @@ bool IsBoomSymbol(const string symbol)
    StringToUpper(s);
    return (StringFind(s, "BOOM") >= 0);
 }
-
-//+------------------------------------------------------------------+
-//| Instances Globales Spike Detector + Trailing Stop               |
-//+------------------------------------------------------------------+
-CSpikeDetector           g_spikeDetector;
-CBoomCrashTrailingStop   g_boomCrashTrailing;
 
 bool IsCrashSymbol(const string symbol)
 {
@@ -7113,77 +844,6 @@ bool IsOrderTypeAllowedForBoomCrash(const string symbol, const ENUM_ORDER_TYPE o
 // - Boom BUY  : refus si IA ≠ BUY (donc SELL ou HOLD bloqués)
 // - Crash SELL: refus si IA ≠ SELL (donc BUY ou HOLD bloqués)
 // Si UseAIServer=false, pas de filtre.
-bool SMC_IsTouchEntryArmedForDirection(const string direction)
-{
-   datetime now = TimeCurrent();
-   int maxAge = MathMax(30, FutureProtectTouchArmSeconds);
-   string d = direction;
-   StringToUpper(d);
-
-   if(d == "BUY" && IsBoomSymbol(_Symbol))
-   {
-      if(g_boomFutureProtectTouchTime > 0 && (now - g_boomFutureProtectTouchTime) <= maxAge)
-         return true;
-      if(g_boomSR20TouchTime > 0 && (now - g_boomSR20TouchTime) <= maxAge)
-         return true;
-   }
-   if(d == "SELL" && IsCrashSymbol(_Symbol))
-   {
-      if(g_crashFutureProtectTouchTime > 0 && (now - g_crashFutureProtectTouchTime) <= maxAge)
-         return true;
-      if(g_crashSR20TouchTime > 0 && (now - g_crashSR20TouchTime) <= maxAge)
-         return true;
-   }
-   return false;
-}
-
-double GetEffectiveMinAIConfidencePercent()
-{
-   ENUM_SYMBOL_CATEGORY cat = SMC_GetSymbolCategory(_Symbol);
-   if(cat == SYM_BOOM_CRASH)
-      return MathMax(40.0, MinAIConfidencePercentBoomCrash);
-   if(cat == SYM_VOLATILITY)
-      return MathMax(40.0, MinAIConfidencePercentVolatility);
-   return MathMax(40.0, MinAIConfidencePercent);
-}
-
-string GOM_TradeGateBlockReason(const string directionUpper)
-{
-   if(UseEmbeddedGomKolaSidoScript && g_lastPlanDir == "WAIT")
-      return "plan GOM WAIT (filtres/qualité — touch bypass si AllowDerivArrowDespiteGomWait)";
-
-   if(!UseInternalGOMEngine || !GOM_FilterOrdersByEngine)
-      return "moteur GOM inactif";
-
-   if(g_gomVerdictLabel == "OFF")
-      return "moteur GOM OFF (UseInternalGOMEngine=false)";
-
-   if(GOM_UseAtrVolatilityFilter && !g_gomAtrVolOk)
-      return "moteur GOM VOL_BLOCK (ATR instable)";
-
-   string d = directionUpper;
-   StringToUpper(d);
-   if(d == "BUY")
-   {
-      if(GOM_EnableHtfHierarchyFilter && !IsBullishHTF())
-         return "moteur GOM: HTF non haussier";
-      if(g_gomScoreBuy < GOM_VerdictGoodAbs)
-         return "moteur GOM: score BUY insuffisant";
-      if(g_gomBias != 1)
-         return "moteur GOM: bias non BUY";
-   }
-   else if(d == "SELL")
-   {
-      if(GOM_EnableHtfHierarchyFilter && !IsBearishHTF())
-         return "moteur GOM: HTF non baissier";
-      if(g_gomScoreSell < GOM_VerdictGoodAbs)
-         return "moteur GOM: score SELL insuffisant";
-      if(g_gomBias != -1)
-         return "moteur GOM: bias non SELL";
-   }
-   return "moteur GOM: " + g_gomVerdictLabel;
-}
-
 bool IsBoomCrashDirectionAllowedByIA(const string symbol, const string action)
 {
    if(!UseAIServer)
@@ -7197,18 +857,6 @@ bool IsBoomCrashDirectionAllowedByIA(const string symbol, const string action)
 
    string ia = g_lastAIAction;
    StringToUpper(ia);
-
-   if(BoomCrashTouchEntryBypassIA && symbol == _Symbol && SMC_IsTouchEntryArmedForDirection(a))
-   {
-      if(ia == "HOLD")
-      {
-         Print("🚫 TOUCH+IA - HOLD interdit sur ", symbol, " | touch armé mais IA=HOLD");
-         return false;
-      }
-      if(ia != a)
-         Print("⚡ TOUCH bypass IA: ", a, " autorisé sur ", symbol, " (IA=", g_lastAIAction, ", touch armé)");
-      return true;
-   }
 
    // RÈGLE STRICTE : Jamais de trade si IA = HOLD (quel que soit le symbole)
    if(ia == "HOLD")
@@ -7252,31 +900,6 @@ bool IsBoomCrashDirectionAllowedByIA(const string symbol, const string action)
    return true;
 }
 
-// Sweep ICT opposé au sens synthétique: fenêtre de blocage entrées (M15)
-bool SMC_ContextBlockBoomBuyFromBearSweep()
-{
-   if(BoomBlockBuyAfterBearSweepM15Bars <= 0)
-      return false;
-   if(!IsBoomSymbol(_Symbol))
-      return false;
-   if(g_smcBoomBearSweepContextTime <= 0)
-      return false;
-   int maxSec = BoomBlockBuyAfterBearSweepM15Bars * (int)PeriodSeconds(PERIOD_M15);
-   return ((TimeCurrent() - g_smcBoomBearSweepContextTime) <= maxSec);
-}
-
-bool SMC_ContextBlockCrashSellFromBullSweep()
-{
-   if(CrashBlockSellAfterBullSweepM15Bars <= 0)
-      return false;
-   if(!IsCrashSymbol(_Symbol))
-      return false;
-   if(g_smcCrashBullSweepContextTime <= 0)
-      return false;
-   int maxSec = CrashBlockSellAfterBullSweepM15Bars * (int)PeriodSeconds(PERIOD_M15);
-   return ((TimeCurrent() - g_smcCrashBullSweepContextTime) <= maxSec);
-}
-
 // --- Helpers IA (confiance en unité 0..1) ---
 double NormalizeAIConfidenceUnit()
 {
@@ -7284,59 +907,6 @@ double NormalizeAIConfidenceUnit()
    // Le serveur peut envoyer 0..1 ou 0..100 : normaliser en 0..1
    if(c > 1.0)
       c /= 100.0;
-   return c;
-}
-
-bool IsDirectionalTradeQuality(const string qIn)
-{
-   string q = qIn;
-   StringToUpper(q);
-   StringTrimLeft(q);
-   StringTrimRight(q);
-   return (q == "BUY" || q == "SELL" ||
-           q == "GOOD BUY" || q == "GOOD SELL" ||
-           q == "PERFECT BUY" || q == "PERFECT SELL");
-}
-
-// Verdict GOM (dashboard): placement d'ordres LIMIT par l'EA uniquement pour GOOD / PERFECT (pas BUY/SELL seuls ni WAIT).
-bool IsGoodOrPerfectVerdictQuality(const string qIn)
-{
-   string q = qIn;
-   StringToUpper(q);
-   StringTrimLeft(q);
-   StringTrimRight(q);
-   return (q == "GOOD BUY" || q == "GOOD SELL" ||
-           q == "PERFECT BUY" || q == "PERFECT SELL");
-}
-
-// Verdict dashboard GOM (g_lastPlanQuality) aligné avec la direction demandée.
-bool GOM_PlanQualityMatchesDirection(const string directionUpper)
-{
-   if(!IsGoodOrPerfectVerdictQuality(g_lastPlanQuality))
-      return false;
-   string q = g_lastPlanQuality;
-   StringToUpper(q);
-   string d = directionUpper;
-   StringToUpper(d);
-   if(d == "BUY")
-      return (StringFind(q, "BUY") >= 0);
-   if(d == "SELL")
-      return (StringFind(q, "SELL") >= 0);
-   return false;
-}
-
-bool GOM_BypassBoomCrashIAForGomPlan(const string direction)
-{
-   return (GomPlanArrowBypassBoomCrashIaAlignment && GOM_PlanQualityMatchesDirection(direction));
-}
-
-double NormalizeTradingAgentsConfidenceUnit()
-{
-   double c = g_lastTradingAgentsConfidence;
-   if(c > 1.0)
-      c /= 100.0;
-   if(c < 0.0) c = 0.0;
-   if(c > 1.0) c = 1.0;
    return c;
 }
 
@@ -7403,87 +973,13 @@ static datetime g_lastEntryTimeForSymbol = 0;
 
 bool IsSpreadAcceptable()
 {
+   if(MaxSpreadPoints <= 0) return true;
    long spread = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
-   ENUM_SYMBOL_CATEGORY cat = SMC_GetSymbolCategory(_Symbol);
-
-   if(cat == SYM_BOOM_CRASH || cat == SYM_VOLATILITY)
-   {
-      if(MaxSpreadPointsSynth > 0 && spread > MaxSpreadPointsSynth)
-      {
-         Print("🚫 ENTRÉE BLOQUÉE - Spread synth trop élevé: ", (int)spread,
-               " > ", MaxSpreadPointsSynth, " points | ", _Symbol);
-         return false;
-      }
-
-      if(MaxSpreadPctSynth > 0.0)
-      {
-         double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-         double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-         if(bid > 0.0 && ask > bid)
-         {
-            double spreadPct = (ask - bid) / bid * 100.0;
-            if(spreadPct <= MaxSpreadPctSynth)
-               return true;
-            Print("🚫 ENTRÉE BLOQUÉE - Spread % trop élevé: ", DoubleToString(spreadPct, 3),
-                  "% > ", DoubleToString(MaxSpreadPctSynth, 3), "% | pts=", (int)spread, " | ", _Symbol);
-            return false;
-         }
-      }
-
-      if(MaxSpreadPointsSynth <= 0 && MaxSpreadPctSynth <= 0.0)
-         return true;
-      return true;
-   }
-
-   if(MaxSpreadPoints <= 0)
-      return true;
    if(spread > MaxSpreadPoints)
    {
       Print("🚫 ENTRÉE BLOQUÉE - Spread trop élevé: ", (int)spread, " > ", MaxSpreadPoints, " points");
       return false;
    }
-   return true;
-}
-
-// Renforce les entrées quand la session est fragile (pertes/streak/spread/qualité filtres).
-bool IsProfitabilityGuardEntryAllowed(const string direction, const string contextTag)
-{
-   if(!EnableProfitabilityGuardMode) return true;
-
-   if(BlockAllEntriesIfSymbolPaused && IsSymbolPaused(_Symbol))
-   {
-      Print("🚫 ", contextTag, " BLOQUÉ - symbole en pause (streak pertes / verrou profit) | ", _Symbol);
-      return false;
-   }
-
-   if(!IsSpreadAcceptable())
-   {
-      Print("🚫 ", contextTag, " BLOQUÉ - spread (voir log IsSpreadAcceptable)");
-      return false;
-   }
-
-   double aiPct = NormalizeAIConfidenceUnit() * 100.0;
-   double minPct = GetEffectiveMinAIConfidencePercent();
-   ENUM_SYMBOL_CATEGORY cat = SMC_GetSymbolCategory(_Symbol);
-   double extra = MathMax(0.0, ProfitabilityGuardExtraConfPct);
-   if(cat == SYM_BOOM_CRASH || cat == SYM_VOLATILITY)
-      extra *= 0.5;
-   minPct += extra;
-   if(aiPct > 0.0 && aiPct + 1e-9 < minPct)
-   {
-      Print("🚫 ", contextTag, " BLOQUÉ - confiance IA ", DoubleToString(aiPct, 1),
-            "% < seuil strict ", DoubleToString(minPct, 1), "%");
-      return false;
-   }
-
-   double fq = GOM_GlobalGetForScript("FILTER_QUALITY", -1.0);
-   if(fq >= 0.0 && fq <= 1.0 && fq + 1e-9 < ProfitabilityGuardMinFilterQuality)
-   {
-      Print("🚫 ", contextTag, " BLOQUÉ - FILTER_QUALITY ",
-            DoubleToString(fq, 2), " < ", DoubleToString(ProfitabilityGuardMinFilterQuality, 2));
-      return false;
-   }
-
    return true;
 }
 
@@ -7504,27 +1000,24 @@ bool IsLastCandleConfirmingDirection(const string direction)
    if(!RequireConfirmationCandle) return true;
    MqlRates rates[];
    ArraySetAsSeries(rates, true);
-   // TEST OPTION 1: Désactiver vérification direction bougie M1 pour permettre plus de trades
-   if(false) {
-      if(CopyRates(_Symbol, PERIOD_M1, 1, 2, rates) < 2) return true;
-      double open0 = rates[0].open;
-      double close0 = rates[0].close;
-      string d = direction; StringToUpper(d);
-      if(d == "BUY")
+   if(CopyRates(_Symbol, PERIOD_M1, 1, 2, rates) < 2) return true; // pas de données = on autorise
+   double open0 = rates[0].open;
+   double close0 = rates[0].close;
+   string d = direction; StringToUpper(d);
+   if(d == "BUY")
+   {
+      if(close0 <= open0)
       {
-         if(close0 <= open0)
-         {
-            Print("🚫 ENTRÉE BLOQUÉE - Dernière bougie M1 non haussière (close=", DoubleToString(close0, _Digits), " <= open=", DoubleToString(open0, _Digits), ")");
-            return false;
-         }
+         Print("🚫 ENTRÉE BLOQUÉE - Dernière bougie M1 non haussière (close=", DoubleToString(close0, _Digits), " <= open=", DoubleToString(open0, _Digits), ")");
+         return false;
       }
-      else if(d == "SELL")
+   }
+   else if(d == "SELL")
+   {
+      if(close0 >= open0)
       {
-         if(close0 >= open0)
-         {
-            Print("🚫 ENTRÉE BLOQUÉE - Dernière bougie M1 non baissière (close=", DoubleToString(close0, _Digits), " >= open=", DoubleToString(open0, _Digits), ")");
-            return false;
-         }
+         Print("🚫 ENTRÉE BLOQUÉE - Dernière bougie M1 non baissière (close=", DoubleToString(close0, _Digits), " >= open=", DoubleToString(open0, _Digits), ")");
+         return false;
       }
    }
    return true;
@@ -7569,56 +1062,21 @@ bool IsMinimumProfitPotentialMet(double entryPrice, double tp, const string &dir
    return true;
 }
 
-// Comparaison symbole broker (casse).
-bool EA_SymbolsMatch(const string symA, const string symB)
-{
-   string a = symA;
-   string b = symB;
-   StringToUpper(a);
-   StringToUpper(b);
-   return (a == b);
-}
-
-// Toute position ouverte sur ce symbole (tout magic) — max 1 exposition Boom/Crash sur le ticker.
-int CountAllPositionsOnSymbolAnyMagic(const string symbol)
-{
-   int n = 0;
-   for(int i = PositionsTotal() - 1; i >= 0; i--)
-   {
-      if(!posInfo.SelectByIndex(i)) continue;
-      if(!EA_SymbolsMatch(posInfo.Symbol(), symbol)) continue;
-      n++;
-   }
-   return n;
-}
-
-// Toute position / pending de cet EA sur un symbole (magic principal + entrées spike GOM dédiées).
-bool EA_IsOurTradeMagic(const long magic)
-{
-   return (magic == (long)InpMagicNumber || magic == SpikeNearM5Magic || magic == SpikeImminentFirstMagic);
-}
-
 // Contrôle de duplication de position:
-// - Boom/Crash: une seule position par symbole (tout magic / tout script sur ce symbole broker)
+// - Boom/Crash: une seule position par symbole (jamais de duplication)
 // - Forex/Metal/Volatility: duplication autorisée une seule fois
 //   si profit symbole >= 1$ + IA alignée + confiance >= 85%
 bool CanOpenAdditionalPositionForSymbol(const string symbol, const string action)
 {
-   ENUM_SYMBOL_CATEGORY cat = SMC_GetSymbolCategory(symbol);
-   if(cat == SYM_BOOM_CRASH && CountAllPositionsOnSymbolAnyMagic(symbol) >= 1)
-      return false;
-
    int existing = CountPositionsForSymbol(symbol);
    if(existing <= 0)
-      return true; // première position « notre » EA
+      return true; // première position
 
-   if(OnePositionPerSymbol)
-      return false;
-
+   ENUM_SYMBOL_CATEGORY cat = SMC_GetSymbolCategory(symbol);
    string act = action;
    StringToUpper(act);
 
-   // Boom/Crash: déjà bloqué en tête (sécurité)
+   // Boom/Crash: interdiction stricte de duplication
    if(cat == SYM_BOOM_CRASH)
       return false;
 
@@ -7647,8 +1105,8 @@ bool CanOpenAdditionalPositionForSymbol(const string symbol, const string action
    for(int i = PositionsTotal() - 1; i >= 0; i--)
    {
       if(!posInfo.SelectByIndex(i)) continue;
-      if(!EA_IsOurTradeMagic(posInfo.Magic())) continue;
-      if(!EA_SymbolsMatch(posInfo.Symbol(), symbol)) continue;
+      if(posInfo.Magic() != InpMagicNumber) continue;
+      if(posInfo.Symbol() != symbol) continue;
 
       symbolProfit += posInfo.Profit() + posInfo.Swap() + posInfo.Commission();
       if(posInfo.PositionType() == POSITION_TYPE_BUY)  hasBuy  = true;
@@ -7676,8 +1134,8 @@ int CountPendingOrdersForSymbol(const string symbol)
       ulong ticket = OrderGetTicket(i);
       if(ticket == 0) continue;
       if(!OrderSelect(ticket)) continue;
-      if(!EA_IsOurTradeMagic(OrderGetInteger(ORDER_MAGIC))) continue;
-      if(!EA_SymbolsMatch(OrderGetString(ORDER_SYMBOL), symbol)) continue;
+      if(OrderGetInteger(ORDER_MAGIC) != InpMagicNumber) continue;
+      if(OrderGetString(ORDER_SYMBOL) != symbol) continue;
       ENUM_ORDER_TYPE t = (ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE);
       if(t == ORDER_TYPE_BUY_LIMIT || t == ORDER_TYPE_SELL_LIMIT ||
          t == ORDER_TYPE_BUY_STOP  || t == ORDER_TYPE_SELL_STOP  ||
@@ -7729,8 +1187,8 @@ int CountChannelLimitOrdersForSymbol(const string symbol)
    {
       ulong ticket = OrderGetTicket(i);
       if(ticket == 0) continue;
-      if(!EA_SymbolsMatch(OrderGetString(ORDER_SYMBOL), symbol)) continue;
-      if(!EA_IsOurTradeMagic(OrderGetInteger(ORDER_MAGIC))) continue;
+      if(OrderGetString(ORDER_SYMBOL) != symbol) continue;
+      if(OrderGetInteger(ORDER_MAGIC) != InpMagicNumber) continue;
       
       ENUM_ORDER_TYPE t = (ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE);
       if(t != ORDER_TYPE_BUY_LIMIT && t != ORDER_TYPE_SELL_LIMIT) continue;
@@ -7752,8 +1210,8 @@ void CancelAllPendingLimitOrdersForSymbol(const string symbol)
       if(ticket == 0) continue;
       if(!OrderSelect(ticket)) continue;
 
-      if(!EA_IsOurTradeMagic(OrderGetInteger(ORDER_MAGIC))) continue;
-      if(!EA_SymbolsMatch(OrderGetString(ORDER_SYMBOL), symbol)) continue;
+      if(OrderGetInteger(ORDER_MAGIC) != InpMagicNumber) continue;
+      if(OrderGetString(ORDER_SYMBOL) != symbol) continue;
 
       ENUM_ORDER_TYPE t = (ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE);
       if(t != ORDER_TYPE_BUY_LIMIT && t != ORDER_TYPE_SELL_LIMIT) continue;
@@ -7763,7 +1221,7 @@ void CancelAllPendingLimitOrdersForSymbol(const string symbol)
       req.action = TRADE_ACTION_REMOVE;
       req.order  = ticket;
       req.symbol = symbol;
-      req.magic  = (ulong)OrderGetInteger(ORDER_MAGIC);
+      req.magic  = InpMagicNumber;
 
       if(!OrderSend(req, res))
       {
@@ -7772,9 +1230,15 @@ void CancelAllPendingLimitOrdersForSymbol(const string symbol)
    }
 }
 
-// Anti-duplication pending LIMIT: garder uniquement 1 pending LIMIT par `symbol` (tous magics EA).
+// Anti-duplication pending LIMIT: garder uniquement 1 pending LIMIT par `symbol` (sur notre magic)
 void EnsureSinglePendingLimitOrderForSymbol(const string symbol)
 {
+   // Evite de spammer la suppression sur ticks rapides
+   static datetime lastEnforce = 0;
+   datetime now = TimeCurrent();
+   if(now - lastEnforce < 10) return;
+   lastEnforce = now;
+
    int totalLimits = CountOpenLimitOrdersForSymbol(symbol);
    if(totalLimits <= 1) return;
 
@@ -7788,8 +1252,8 @@ void EnsureSinglePendingLimitOrderForSymbol(const string symbol)
       if(ticket == 0) continue;
 
       if(!OrderSelect(ticket)) continue;
-      if(!EA_IsOurTradeMagic(OrderGetInteger(ORDER_MAGIC))) continue;
-      if(!EA_SymbolsMatch(OrderGetString(ORDER_SYMBOL), symbol)) continue;
+      if(OrderGetInteger(ORDER_MAGIC) != InpMagicNumber) continue;
+      if(OrderGetString(ORDER_SYMBOL) != symbol) continue;
 
       ENUM_ORDER_TYPE t = (ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE);
       if(t != ORDER_TYPE_BUY_LIMIT && t != ORDER_TYPE_SELL_LIMIT) continue;
@@ -7813,8 +1277,8 @@ void EnsureSinglePendingLimitOrderForSymbol(const string symbol)
       if(ticket == 0 || ticket == keepTicket) continue;
 
       if(!OrderSelect(ticket)) continue;
-      if(!EA_IsOurTradeMagic(OrderGetInteger(ORDER_MAGIC))) continue;
-      if(!EA_SymbolsMatch(OrderGetString(ORDER_SYMBOL), symbol)) continue;
+      if(OrderGetInteger(ORDER_MAGIC) != InpMagicNumber) continue;
+      if(OrderGetString(ORDER_SYMBOL) != symbol) continue;
 
       ENUM_ORDER_TYPE t = (ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE);
       if(t != ORDER_TYPE_BUY_LIMIT && t != ORDER_TYPE_SELL_LIMIT) continue;
@@ -7824,7 +1288,7 @@ void EnsureSinglePendingLimitOrderForSymbol(const string symbol)
       req.action = TRADE_ACTION_REMOVE;
       req.order  = ticket;
       req.symbol = symbol;
-      req.magic  = (ulong)OrderGetInteger(ORDER_MAGIC);
+      req.magic  = InpMagicNumber;
 
       if(!OrderSend(req, res))
       {
@@ -7983,7 +1447,7 @@ void UpdatePropiceTopSymbols()
    }
    
    // Test de connexion simple pour diagnostiquer (throttlé)
-   string testUrl = GOM_NormalizeAiServerBaseUrl((AI_ServerURL != "") ? AI_ServerURL : AI_ServerRender);
+   string testUrl = (AI_ServerURL != "") ? AI_ServerURL : AI_ServerRender;
    static datetime lastHealthCheck = 0;
    if(testUrl != "" && (now - lastHealthCheck) >= 600)
    {
@@ -8011,8 +1475,8 @@ void UpdatePropiceTopSymbols()
    g_propiceTopSymbolsText = "Chargement... (" + loadingTime + ")";
    g_propiceTopSymbolsStatus = "Requête en cours";
 
-   string baseUrl = GOM_AiServerBasePrimary();
-   string fallbackUrl = GOM_AiServerBaseFallback();
+   string baseUrl = UseRenderAsPrimary ? AI_ServerRender : AI_ServerURL;
+   string fallbackUrl = UseRenderAsPrimary ? AI_ServerURL : AI_ServerRender;
    string url = baseUrl + "/symbols/propice/top?timeframe=M1&lookback_days=14&n=" + IntegerToString(PropiceTopN);
 
    char post[], result[];
@@ -8021,8 +1485,8 @@ void UpdatePropiceTopSymbols()
    
    // Essayer le serveur primaire
    Print("🔍 PropiceTop - Tentative connexion à: ", url);
-   Print("   Serveur local (eff. WebRequest): ", GOM_NormalizeAiServerBaseUrl(AI_ServerURL));
-   Print("   Serveur Render (eff. WebRequest): ", GOM_NormalizeAiServerBaseUrl(AI_ServerRender));
+   Print("   Serveur local: ", AI_ServerURL);
+   Print("   Serveur Render: ", AI_ServerRender);
    Print("   UseRenderAsPrimary: ", UseRenderAsPrimary ? "true" : "false");
    
    int res = WebRequest("GET", url, "", 5000, post, result, resultHeaders);
@@ -8675,70 +2139,6 @@ bool SMC_IsHourInWindowUTC(const int hourUTC, const int startHourUTC, const int 
    return (hourUTC >= s || hourUTC < e); // traverse minuit
 }
 
-// 🆕 BROKER-ADAPTIVE UTC WINDOWS ================================================
-string SMC_DetectBroker()
-{
-   string brokerName = AccountInfoString(ACCOUNT_COMPANY);
-   if(StringFind(brokerName, "Deriv") >= 0) return "DERIV";
-   if(StringFind(brokerName, "Exness") >= 0) return "EXNESS";
-   return "GENERIC";
-}
-
-void SMC_ApplyBrokerAdaptiveWindows()
-{
-   if(!UseBrokerAdaptiveWindows) return;
-
-   string broker = SMC_DetectBroker();
-
-   if(broker == "DERIV") {
-      // DERIV: Synthetic indices trade best 8-16 UTC (liquid hours)
-      g_g_TradeWindow1StartUTC = 8;    // Optimal Deriv window: 8am UTC
-      g_g_TradeWindow1EndUTC = 16;     // To 4pm UTC
-      g_g_TradeWindow2StartUTC = 21;   // Evening peak: 9pm UTC
-      g_g_TradeWindow2EndUTC = 23;     // To 11pm UTC
-      g_g_TradeWindow3StartUTC = 0;    // Disabled
-      g_g_TradeWindow3EndUTC = 0;
-      if(DebugMode) Print("✅ Broker detected: DERIV - UTC windows optimized for synthetic indices");
-   }
-   else if(broker == "EXNESS") {
-      // EXNESS: Forex trades 24h, but best liquidity during UK/US overlap
-      g_g_TradeWindow1StartUTC = 3;    // London open
-      g_g_TradeWindow1EndUTC = 6;      // To midday
-      g_g_TradeWindow2StartUTC = 13;   // US open (NY)
-      g_g_TradeWindow2EndUTC = 17;     // To 5pm
-      g_g_TradeWindow3StartUTC = 20;   // Evening
-      g_g_TradeWindow3EndUTC = 23;     // To 11pm
-      if(DebugMode) Print("✅ Broker detected: EXNESS - UTC windows optimized for forex");
-   }
-}
-
-// 🆕 BROKER-ADAPTIVE THROTTLING (Performance optimization)
-int SMC_GetAdaptiveThrottleSeconds()
-{
-   // Dynamically adjust throttle based on spread and broker
-   string broker = SMC_DetectBroker();
-   int spread = (int)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
-
-   if(broker == "DERIV") {
-      // Deriv has wide spreads on synthetic indices
-      if(spread > 300) return 60;  // High spread: scan every 60s instead of 20s
-      if(spread > 150) return 40;  // Medium spread: 40s
-      return 30;  // Lower spread: 30s
-   }
-   // Exness and others: keep aggressive 20s throttle (tight spreads)
-   return 20;
-}
-
-// Call this to get the optimal throttle interval for current market conditions
-int SMC_GetOptimalMainThrottle()
-{
-   // Use broker-adaptive throttle if enabled, otherwise use configured value
-   if(UseBrokerAdaptiveWindows) {
-      return SMC_GetAdaptiveThrottleSeconds();
-   }
-   return GOM_OnTickMainThrottleSec;
-}
-
 bool SMC_IsStrictUTCTradingWindowOpen()
 {
    if(!UseStrictUTCTradeWindows) return true;
@@ -8763,9 +2163,9 @@ bool SMC_IsStrictUTCTradingWindowOpen()
    TimeToStruct(TimeGMT(), gmt);
    int h = gmt.hour;
 
-   if(SMC_IsHourInWindowUTC(h, g_TradeWindow1StartUTC, g_TradeWindow1EndUTC)) return true;
-   if(SMC_IsHourInWindowUTC(h, g_TradeWindow2StartUTC, g_TradeWindow2EndUTC)) return true;
-   if(SMC_IsHourInWindowUTC(h, g_TradeWindow3StartUTC, g_TradeWindow3EndUTC)) return true;
+   if(SMC_IsHourInWindowUTC(h, TradeWindow1StartUTC, TradeWindow1EndUTC)) return true;
+   if(SMC_IsHourInWindowUTC(h, TradeWindow2StartUTC, TradeWindow2EndUTC)) return true;
+   if(SMC_IsHourInWindowUTC(h, TradeWindow3StartUTC, TradeWindow3EndUTC)) return true;
    return false;
 }
 double SMC_GetATRMultiplier(ENUM_SYMBOL_CATEGORY cat)
@@ -8791,13 +2191,6 @@ datetime g_lastAIUpdate = 0;
 int g_lastAIDirRuleSent = 0; // Dernier dir_rule envoyé au serveur /decision
 // Entrée déclenchée par cassure canal ML (assouplit certains garde-fous dans ExecuteDerivArrowTrade)
 bool     g_channelBreakoutEntryContext = false;
-string   g_lastTradingAgentsAction = "HOLD";
-double   g_lastTradingAgentsConfidence = 0.0;
-string   g_lastTradingAgentsSummary = "";
-datetime g_lastTradingAgentsUpdate = 0;
-string   g_lastTradingAgentsNotifSig = "";
-double   g_lastOpportunityCostScore = 0.0;
-double   g_lastOpportunityCostPriceAtr = 0.0;
 
 // Probabilité de spike calculée / reçue depuis l'IA
 double   g_lastSpikeProbability = 0.0;
@@ -8853,8 +2246,7 @@ string   g_symbolStatsLastChecksum = "";
 
 // Variables de trading et positions
 double g_maxProfit = 0.0;
-// Prix de référence (dernier bid utile) pour logique spike Boom/Crash — doit rester en double (pas datetime).
-double g_lastBoomCrashPrice = 0.0;
+datetime g_lastBoomCrashPrice = 0;
 datetime g_lastBoomCrashMarketEntryTime = 0; // anti double entrée (tous chemins: Deriv, M5, spike, IA)
 double   g_symbolRealizedNetTodayUSD = 0.0;   // somme profit+swap+commission des deals fermés aujourd'hui (ce graphique / ce symbole)
 int      g_symbolRealizedNetTodayYMD = 0;    // YYYYMMDD — reset journalier
@@ -8872,11 +2264,6 @@ int    g_dailyEquityDate  = 0;   // YYYYMMDD
 datetime g_dailyPauseUntil = 0;     // Pause après gain cible (jusqu'à fin de journée)
 datetime g_dailyLossPauseUntil = 0; // Pause après perte journalière max (2h)
 
-// Salvage bank : protège le gain journalier (équité vs début de journée) après seuil +X $
-bool     g_salvageBankArmed = false;
-double   g_salvagePeakDailyProfitUSD = 0.0;
-int      g_salvageBankStateYmd = 0;
-
 // Perte cumulative sur trades consécutifs → pause
 double   g_cumulativeLossSuccessive = 0.0;
 datetime g_lossPauseUntil            = 0;
@@ -8889,57 +2276,41 @@ static const int RECENT_LOSS_WINDOW_SEC = 3600;  // 1 h
 //| INPUTS                                                            |
 input group "=== GÉNÉRAL ==="
 input bool   UseMinLotOnly     = true;   // Toujours lot minimum (le plus bas)
-input double InpLotSize         = 0.01;  // Taille de lot par défaut — ULTRA-CONSERVATEUR 20$ (lot minimum absolu)
+input double InpLotSize         = 0.2;   // Taille de lot par défaut
 input bool   EnableTrading      = true;   // Activer/Désactiver le trading
-input bool   UseEmbeddedGomKolaSidoScript = true; // Module GOM_KOLA_SIDO (niveaux, SIDO, dashboard, courbes…) dans l'EA
-input int    MaxPositionsTerminal = 5;   // Nombre max de positions (tout le terminal MT5) - augmenté pour plus de diversification
-input bool   OnePositionPerSymbol = true; // Une seule position par symbole (tous magics EA: principal + spikes GOM)
-input bool   PreferGomKolaM5OrH1ProximityBoomCrashEntries = true; // Boom/Crash: n'entrer que si prix proche d'un niveau KOLA M5 ou H1 (réduit les entrées multi-TF lointaines)
+input int    MaxPositionsTerminal = 2;   // Nombre max de positions (tout le terminal MT5) - LIMITÉ À 2 pour protéger le capital
+input bool   OnePositionPerSymbol = true; // Une seule position par symbole - MAINTENU pour éviter duplication
 input int    InpMagicNumber       = 202502; // Magic Number
-input double MaxTotalLossDollars = 3.0;    // Perte maximale totale en dollars avant de couper toutes les positions — 15% du capital 20$
-input double DailyProfitTarget = 2.0;      // Objectif de profit journalier en dollars — 10% du capital (réaliste avec 20$)
-input int    PauseAfterProfitHours = 6;    // Durée de la pause en heures après avoir atteint l'objectif de profit — plus long pour éviter le surtrading
-input double MaxLossPerSpikeTradeDollars = 0.20;  // Perte max par trade Spike Boom/Crash ($) - 1% du capital 20$
-input double MaxLossPerSymbolDollars = 0.40;   // Perte maximale par symbole avant blocage complet — 2% du capital
-input double MaxLossPerMetalSymbolDollars = 0.60; // Perte maximale pour SYMBOLES MÉTAUX — 3% du capital (plus volatile)
-input double MaxRiskPerTradePercent   = 1.0;  // Risque par trade (% de l'équité) — STRICT 1% max avec 20$
-input double MaxDailyDrawdownPercent  = 8.0;  // Drawdown max journalier (%) — stop à -1.60$ sur 20$
-input double DailyProfitTargetDollars = 5.0;  // Gain journalier max ($) — augmenté pour permettre plus de profits
-input double MaxDailyLossDollars      = 1.50; // Perte journalière max ($) — 7.5% du capital, discipline absolue
-input double CumulativeLossPauseThresholdDollars = 1.0; // Pertes consécutives cumulées ($) avant pause — 5% du capital
-input int    CumulativeLossPauseMinutes = 60; // Durée de pause après pertes consécutives (min) — pause longue pour calmer
-input bool   EnableProfitLock             = false; // TEST: Disabled to allow trades
-input double ProfitLockStartDollars       = 3.0;  // Active dès 3$ de gain — plus tolérant (3x)
-input double ProfitLockMaxGivebackDollars = 0.50;  // Giveback max 0.50$ depuis le pic — plus de marge
+input double MaxTotalLossDollars = 10.0;   // Perte maximale totale en dollars avant de couper toutes les positions
+input double DailyProfitTarget = 20.0;     // Objectif de profit journalier en dollars
+input int    PauseAfterProfitHours = 4;    // Durée de la pause en heures après avoir atteint l'objectif de profit la plus perdante
+input double MaxLossPerSpikeTradeDollars = 3.0;  // Perte max par trade Spike Boom/Crash ($) - lot réduit si dépassement
+input double MaxLossPerSymbolDollars = 4.0;   // Perte maximale par symbole avant blocage complet de ce symbole
+input double MaxLossPerMetalSymbolDollars = 8.0; // Perte maximale pour SYMBOLES MÉTAUX uniquement (Xageur, etc.) - RÉDUIT pour protection renforcée
+input double MaxRiskPerTradePercent   = 1.5;  // Risque normal par trade (% de l'équité)
+input double MaxDailyDrawdownPercent  = 10.0; // Drawdown max journalier (%) avant blocage des nouvelles entrées
+input double DailyProfitTargetDollars = 20.0; // Gain journalier max ($) - stop trading jusqu'à fin de journée
+input double MaxDailyLossDollars      = 6.0; // Perte journaliere max ($) - discipline stricte
+input double CumulativeLossPauseThresholdDollars = 5.0; // Pertes consécutives cumulées ($) avant pause
+input int    CumulativeLossPauseMinutes = 30; // Durée de pause après pertes consécutives (min)
+input bool   EnableProfitLock             = true;  // Stop si gros giveback après gros gain
+input double ProfitLockStartDollars       = 5.0;  // Active plus tot pour securiser les gains
+input double ProfitLockMaxGivebackDollars = 1.5;   // Giveback max depuis le pic d'equite (strict)
 input bool   ProfitLockClosePositions     = true;  // Fermer positions + supprimer pending lors du stop
-
-input group "=== SALVAGE BANK (sauvegarde gain jour ≥ 4.00$) ==="
-input bool   EnableSalvageBankDaily = true; // Arme une protection quand le gain journalier (équité - début journée) ≥ seuil
-input double SalvageBankTriggerDailyProfitUSD = 4.0; // Seuil ($) pour armer — augmenté (2.67x plus tolérant)
-input double SalvageBankAbsoluteFloorUSD = 0.80; // Si armé : fermeture si gain redescend sous 0.80$ (garder au moins 4% du capital)
-input double SalvageBankMaxGivebackFromPeakUSD = 0.50; // Si armé : fermeture si giveback ≥ 0.50$ depuis le pic du jour
-input bool   SalvageBankCloseAllOnTrigger = true; // Fermer toutes positions + pending EA au déclenchement
-input bool   SalvageBankPauseUntilDayEnd = true; // Pause nouvelles entrées jusqu'à fin de journée (g_dailyPauseUntil)
-input bool   SalvageBankBlockNewEntriesWhenArmed = false; // DÉSACTIVÉ : permet nouvelles entrées même quand armé
-
 input bool   UsePerSymbolDailyObjectiveOnly = true; // Objectif journée: pause par symbole uniquement (pas de stop global)
 input bool   UseHighConfidenceFilterWhenSomeSymbolsProfitLocked = true; // Quand des symboles sont déjà "verrouillés" par profit, exiger plus de probabilité
 input int    LockedSymbolsMinCountForFilter = 1; // Seuil du nombre de symboles déjà verrouillés pour activer le filtre
 input double ExtraMinAIConfidenceWhenLockedPercent = 10.0; // +% confiance minimale (en plus des seuils internes)
 input double ExtraMinSetupScoreWhenLocked = 10.0; // +score minimum setup (0-100) quand des symboles sont verrouillés
 input bool   EnableConsecutiveLossSymbolPause = true; // Mettre en pause un symbole après N pertes consécutives
-input int    ConsecutiveLossesToPause = 2;            // Nombre de pertes consécutives avant pause — 2 max avec 20$
-input int    ConsecutiveLossPauseMinutes = 90;        // Durée de la pause après streak de pertes — 1h30 (plus conservateur)
+input int    ConsecutiveLossesToPause = 2;            // Nombre de pertes consécutives avant pause
+input int    ConsecutiveLossPauseMinutes = 45;        // Durée de la pause après streak de pertes
 input bool   BlockAllEntriesIfSymbolPaused = true;    // Si le symbole est en pause (streak pertes, profit target, etc.) → lot 0 pour TOUTES entrées (y compris Boom/Crash)
-input double MaxDailyRealizedLossPerSymbolUSD = 0.40; // Plafond perte réalisée (jour, symbole) — 2% du capital 20$, pas de nouvelle entrée ce jour
-input bool   BlockTradingNonTopPropiceWhenLosing = false; // TEST OPTION 3: Disabled (was true) - allow trades even if not top propice symbol
+input double MaxDailyRealizedLossPerSymbolUSD = 3.0; // Plafond perte réalisée (jour, symbole) — au-delà, pas de nouvelle entrée ce jour sur ce symbole (0=désactivé)
+input bool   BlockTradingNonTopPropiceWhenLosing = true; // Multi-graph: si filtre propice actif et ce symbole n'est pas le plus propice → bloquer entrées (évite répéter pertes sur 2e/3e choix)
 input bool   BlockEquilibriumCorrectionTrades = true; // Bloquer les trades en zone de correction (autour de l'équilibre ICT)
 input bool   UseServerCorrectionZoneFilter = true;    // Bloquer aussi selon prédiction correction serveur/Supabase
 input double ServerCorrectionMinConfidence = 63.0;    // Seuil confiance (%) pour bloquer quand le serveur signale correction (plus bas = plus de blocage)
-input bool   EnableProfitabilityGuardMode = true;     // Renforce les conditions d'entrée en régime perdant (réduit overtrading)
-input double ProfitabilityGuardExtraConfPct = 8.0;    // +% confiance IA min (Forex/Metal/Commodity), moitié sur Boom/Crash/Volatility
-input double ProfitabilityGuardMaxSpreadFactor = 0.75;// Max spread dynamique = MaxSpreadPoints * facteur (plus strict si < 1)
-input double ProfitabilityGuardMinFilterQuality = 0.30; // Qualité filtres mini (0..1) — CONFIG STABLE DE DÉPART
 input double EquilibriumCorrectionBandPercent = 26.0; // Largeur zone correction (% Premium↔Discount) — plus large = moins de trades en zone chop
 input int    CorrectionRangeLookbackBarsM1 = 60;      // Lookback M1 pour détecter une correction (range)
 input double CorrectionMaxRangePctM1 = 0.15;          // Range max (%) M1 pour "correction" (plus haut = détection plus large)
@@ -8949,29 +2320,22 @@ input bool   CorrectionZoneStrictBlocking = true;     // true: dans la bande éq
 input bool   RecoveryLotOnlyHighConviction = true;    // Double lot "recovery" seulement si confiance + score setup très élevés
 input double RecoveryMinAIConfidencePercent = 92.0;   // Confiance IA min (%) pour appliquer le recovery lot (plus strict = moins de recovery)
 input double RecoveryMinSetupScore = 87.0;              // Score setup (0-100) min pour appliquer le recovery lot (plus strict = plus "très sûr")
-input double MinSetupScoreEntry      = 80.0;  // ↑ Score 80% minimum — ULTRA-STRICT (rejette setups médiocres)
-input double MinAIConfidencePercent   = 45.0;  // TEST OPTION 1: Baissé à 45% (était 62%) pour tester trades à faible confiance
-input double MinAIConfidencePercentBoomCrash = 40.0; // TEST OPTION 1: Baissé à 40% (était 58%)
-input double MinAIConfidencePercentVolatility = 35.0; // TEST OPTION 1: Baissé à 35% (était 55%)
+input double MinSetupScoreEntry      = 65.0;  // Score minimum (0-100) pour autoriser une nouvelle entrée
+input double MinAIConfidencePercent   = 75.0;  // Confiance IA minimum (%) pour executer un trade (strict)
 input bool   CloseOnlyOnAIHoldOrBrokerSLTP = true; // Empêche les fermetures actives (sauf IA=HOLD). Laisser SL/TP broker gérer le reste.
 input group "=== ENTRÉES PLUS POINTUES (fiabilité) ==="
-input int    MaxSpreadPoints          = 80;   // Spread max (points) Forex/CFD classiques
-input int    MaxSpreadPointsSynth     = 0;    // Boom/Crash/Vol: 0 = ignorer points, utiliser MaxSpreadPctSynth
-input double MaxSpreadPctSynth        = 0.15; // Spread max en % du prix (Boom 900: ~642 pts = OK si < 0.15%)
-input bool   AllowDerivArrowDespiteGomWait = true; // Touch SR20/future protect: autoriser même si plan GOM = WAIT
-input bool   BoomCrashTouchEntryBypassIA = true;   // Touch armé: autoriser BUY Boom même si IA=SELL (jamais si HOLD)
+input int    MaxSpreadPoints          = 80;   // Spread max (points) - éviter entrée si spread trop élevé
 input int    EntryCooldownSeconds     = 90;   // Cooldown min (sec) après dernière entrée sur ce symbole
 input bool   RequireConfirmationCandle = true; // Exiger 1 bougie M1 dans le sens (close>open BUY, close<open SELL)
-input double MinProfitPotentialUSD    = 0.10;  // Gain potentiel min ($) — réaliste avec lot 0.01 sur capital 20$
-input double InpRiskReward        = 3.0;   // Ratio Risque/Rendement pour TP (3.0 = 1:3) — bon ratio conservé
+input double MinProfitPotentialUSD    = 2.0;  // Gain potentiel min ($) - ex: 2$ pour capital 10$ = mouvement franc requis
+input double InpRiskReward        = 3.0;   // Ratio Risque/Rendement pour TP (3.0 = 1:3)
 
 // === DÉTECTION SPIKES SANS IA ===
 input bool   UseSpikeDetectionWithoutAI = true;   // true: trades spike même si IA < seuil (recommandé Boom/Crash)
-input int    SpikeDetectionMinSignals = 3;       // Signaux requis sur 6 (↑ = spike « sans IA » plus rare, moins de faux)
-input bool   BoomCrashSpikeAllowZoneBypass = false; // false = spike ExecuteSpikeTrade() seulement en discount/premium SMC
-input double BoomCrashSpikeMinProbZoneBypass = 0.72; // Si bypass réactivé: proba min (0–1) hors zone
-input double SpikeTradeMinModelProbability = 0.62; // ExecuteSpikeTrade: proba modèle min — relevé pour qualité (capital 20$)
-input double SpikeImminentAlertThreshold = 0.68; // Alerte / marqueur spike — relevé pour moins de fausses alertes
+input int    SpikeDetectionMinSignals = 2;       // Nombre minimum de signaux spike requis (sur 6)
+input bool   BoomCrashSpikeAllowZoneBypass = true; // Boom/Crash: si proba spike >= seuil, autoriser hors discount/premium
+input double BoomCrashSpikeMinProbZoneBypass = 0.58; // Seuil proba (0–1) pour bypass zone (CalculateSpikeProbability)
+input double SpikeImminentAlertThreshold = 0.62; // Alerte / marqueur spike (0–1), était 0.75 (trop rare)
 input double SpikeVolumeMultiplier = 2.0;       // Multiplicateur pour détecter spike de volume
 input double SpikePriceMultiplier = 1.5;        // Multiplicateur pour détecter spike de prix
 input double SpikeCompressionThreshold = 0.5;    // Seuil de compression ATR (0.5 = 50% de la moyenne)
@@ -8980,7 +2344,7 @@ input double SpikeMomentumChange = 5.0;         // Changement RSI minimum pour m
 input bool   DebugSpikeDetection = false;       // Logs détaillés de détection spike
 
 input bool   UseSessions       = true;   // Trader seulement LO/NYO
-input bool   ShowChartGraphics = false;  // FVG/OB/Fibo… : très lourd — false + GOM dashboard suffit
+input bool   ShowChartGraphics = true;   // FVG, OB, Fibo, EMA, Swing H/L sur le graphique
 input bool   ShowPremiumDiscount = true; // Zones Premium (vente) / Discount (achat) / Équilibre
 input bool   ShowSignalArrow     = true; // Flèche dynamique clignotante BUY/SELL
 input bool   RequireSMCDerivArrowForMarketOrders = true; // Avant tout ordre au marché, attendre SMC_DERIV_ARROW
@@ -8992,7 +2356,7 @@ input int    FutureProtectTouchArmSeconds = 120; // Fenêtre après touch pour a
 input double FutureProtectTouchToleranceATRMult = 0.4; // Tolérance de touch autour du niveau (x ATR M15)
 input int    FutureProtectTouchCheckIntervalSec = 2; // Throttle calcul touch (secondes)
 input bool   UseTouchProtectScalpExitOnDerivArrow = false; // true: fermeture dès flèche (risque churn si entrée aussi sur flèche)
-input int    TouchProtectScalpMinHoldSeconds = 5; // ✅ Délai min réduit 5s (était 45s — permet fermeture rapide spike Boom/Crash)
+input int    TouchProtectScalpMinHoldSeconds = 45; // Délai min avant fermeture scalp (évite entrée/sortie en boucle)
 input int    TouchProtectScalpReentryCooldownSeconds = 60; // Cooldown après sortie sur flèche (évite boucle entrée/sortie au même niveau)
 input bool   UseSR20TouchEntryForBoomCrashDerivArrow = true; // Boom/Crash: activer entrée sur support/résistance 20 bars
 input double SR20TouchToleranceATRMult = 0.5; // Tolérance autour de SR20 via ATR M1
@@ -9015,7 +2379,7 @@ input double AggressiveChannelMinConfidence = 65.0; // Confiance minimum pour en
 input int    AggressiveChannelLookback = 30; // Lookback plus court pour détection rapide (30 barres vs 60)
 input double AggressiveChannelMinSlope = 0.00015; // Pente minimum plus permissive (0.00015 vs 0.00025)
 input bool   DrawChannelEntrySignals = true; // Afficher des flèches sur les points d'entrée canal détectés
-input bool   DebugDerivArrowCapture = false;             // Logs flèche DERIV (désactivé = moins de charge)
+input bool   DebugDerivArrowCapture = true;              // Debug capture flèche SMC_DERIV_ARROW (logs)
 input bool   ShowPredictedSwing  = true; // SL/SH prédits (futurs) sur le canal
 input bool   ShowEMASupportResistance = true; // EMA M1, M5, H1 en support/résistance
 input bool   RequireEMATouchBeforeEntry = true;   // Exiger une retouche EMA (9/21/50/100/200) avant une nouvelle entrée
@@ -9023,64 +2387,25 @@ input int    EMATouchLookbackBarsM1 = 30;         // Nb bougies M1 max pour cons
 input double EMATouchMaxDistancePct = 0.03;       // Distance max (%) prix↔EMA pour valider la retouche (0.03 = 0.03%)
 input bool   DebugEMATouchFilter = false;         // Logs EMA-touch (throttlé)
 input bool   UltraLightMode      = false; // Mode ultra léger: pas de graphiques ni IA, exécution trading minimale
-input group "=== MOTEUR GOM INTERNE (analyse type Divine + Phantom, sans TradingView) ==="
-input bool   UseInternalGOMEngine = true; // ✅ ACTIVÉ — bloque trades si verdict GOM = WAIT (score < 0.35)
-input bool   GOM_InternalLightChart = false; // false = dessin SMC complet (FVG, OB, fibos, zones, canaux…)
-input bool   GOM_FilterOrdersByEngine = true; // Filtre les ordres marché si l'état interne n'est pas aligné
-input int    GOM_EngineUpdateIntervalSec = 5;   // Recalcul état (sec)
-input int    GOM_LineBreakPeriod = 3;         // Proxy "Three Line Break": comparatif closes (période de base)
-input bool   GOM_InternalUseH1 = true;
-input bool   GOM_InternalUseH4 = true;
-input bool   GOM_InternalUseD1 = true;
-input bool   GOM_InternalUseW1 = true;
-input bool   GOM_UseAtrVolatilityFilter = true; // ATR courant vs moyenne ATR(50) — trop haut = marché instable
-input double GOM_MaxAtrVs50Avg = 2.5;           // Bloquer si ratio > (comme Phantom "Max ATR vs 50-bar avg")
-input bool   GOM_UseEma50_100_200_Stack = true; // Close HTF au-dessus/en dessous pile EMA 50>100>200
-input bool   GOM_UseFvgConfluence = true;       // Bonus si FVG LTF détectée (UseFVG côté SMC)
-input int    GOM_FvgLookbackBars = 12;
-input bool   GOM_EnableHtfHierarchyFilter = true; // BUY exige IsBullishHTF(), SELL exige IsBearishHTF()
-input bool   GOM_UseDirectionalPinDojiPatterns = true; // Bonus pin/doji directionnel (bougie clôturée LTF)
-input bool   GOM_RequirePinDojiForMarket = false;      // true = pin/doji obligatoire (très strict)
-input double GOM_DojiMaxBodyPct = 15.0;
-input double GOM_DojiMinDirShadowPct = 40.0;
-input double GOM_PinMinDirTailPct = 60.0;
-input double GOM_PinMaxBodyPct = 35.0;
-input double GOM_PinMaxOppWickPct = 20.0;
-input bool   GOM_UseTouchLevelScoring = false; // Bonus touches près SR H1 (style zones Divine)
-input int    GOM_TouchLookbackBars = 200;
-input double GOM_TouchZonePctOfAtr = 25.0;    // Demi-zone de touch en % de l'ATR LTF
-input double GOM_VerdictGoodAbs = 0.45;       // ✅ Seuil "GOOD" relevé (était 0.35) — exige confirmation forte
-input double GOM_VerdictPerfectAbs = 0.70;    // ✅ Seuil "PERFECT" relevé (était 0.65) — seulement setups excellents
-input bool   GOM_DebugEngineLogs = false;
 input bool   BlockAllTrades      = false; // BLOQUER toutes les entrées/sorties (mode observation seul)
 input int    SpikePredictionOffsetMinutes = 60; // Décalage dans le futur pour afficher l'entrée de spike dans la zone prédite
 
 input group "=== SL/TP DYNAMIQUES (prudent / sécuriser gain) ==="
-input double SL_ATRMult        = 1.8;    // Stop Loss (x ATR) — resserré pour limiter perte $ avec 20$ capital
-input double TP_ATRMult        = 5.4;    // Take Profit (x ATR) — ratio 3:1 (TP/SL = 5.4/1.8 = 3.0x)
+input double SL_ATRMult        = 2.5;    // Stop Loss (x ATR) - prudent
+input double TP_ATRMult        = 5.0;    // Take Profit (x ATR) - ratio 2:1
 input group "=== TRAILING STOP (sécuriser les gains) ==="
 input bool   UseTrailingStop    = true;   // Activer le Trailing Stop automatique
-input double TrailingStop_ATRMult = 2.0;  // Distance Trailing Stop (x ATR) — plus serré pour sécuriser vite avec 20$
-input double TrailingStartProfitDollars = 0.05; // Trailing : activer dès 0.05$ de profit (capital 20$ = chaque centime compte)
+input double TrailingStop_ATRMult = 3.0;  // Distance Trailing Stop (x ATR) - moins agressif pour protéger les gains
+input double TrailingStartProfitDollars = 0.50; // Activer le trailing dès petit gain ($)
 input bool   DynamicSL_Enable = true;               // SL dynamique (BE + trailing + lock gain max)
-input double DynamicSL_StartProfitDollars = 0.05;   // Activer protection gain dès 0.05$ (lot 0.01 = très peu de marge)
-
-input group "=== TRAILING STOP AVANCÉ BOOM/CRASH (spike-aware) ==="
-input bool   EnableBoomCrashAdvancedTrailing = true;  // Activer trailing spécial Boom/Crash (détection spike)
-input double BoomCrashTrailingInitialPct = 0.10;      // Distance initiale % — resserré pour capital 20$ (sécuriser vite)
-input double BoomCrashTrailingSpikePct = 0.06;        // Distance spike % — ultra serré après spike (capturer le max)
-input double BoomCrashTrailingStepPct = 0.03;         // Step % — très fin pour suivre chaque mouvement de spike
-input double BoomCrashTrailingSpikeMinProfit = 0.03;  // Profit min $ pour mode spike — 0.03$ (avec lot 0.01 c'est réaliste)
-input double BoomCrashSpikeDetectionThreshold = 0.35; // Seuil détection spike % — plus sensible pour capturer les petits spikes
-input int    BoomCrashSpikeDetectionWindow = 4;       // Fenêtre détection spike (secondes) — légèrement réduit
-input double DynamicSL_LockPctOfMax = 0.80;         // Garder au moins 80% du pic de gain (capital 20$ = protéger chaque gain)
-input int    DynamicSL_BE_BufferPoints = 3;         // Marge break-even (points) — réduit pour BE plus rapide
+input double DynamicSL_StartProfitDollars = 0.50;   // Commencer à protéger à partir de ce profit ($)
+input double DynamicSL_LockPctOfMax = 0.50;         // Protéger au moins X% du gain max (0.50 = 50%)
+input int    DynamicSL_BE_BufferPoints = 5;         // Marge break-even (points)
 
 input group "=== GRAPHIQUES SMC (affichage visuel) ==="
-input int    ChartGraphicsUpdateIntervalSec = 45; // Secondes entre deux redessinages SMC (plus bas = plus de charge)
-input bool   ChartsShowOnlyOteAndFibo = true; // true = graphique allégé: uniquement Fibos SMC + zone OTE (pas FVG/OB/canal/bougies futures)
-input bool   ShowPredictionChannel = false; // Afficher le canal de prédiction ML
-input bool   ShowFutureCandlesM1 = false; // Afficher les chandeliers japonais futurs M1
+input int    ChartGraphicsUpdateIntervalSec = 45; // Secondes entre deux redessinages SMC (plus bas = plus lourd pour MT5)
+input bool   ShowPredictionChannel = true; // Afficher le canal de prédiction ML
+input bool   ShowFutureCandlesM1 = true; // Afficher les chandeliers japonais futurs M1
 input int    FutureCandlesCount = 200; // Nombre de bougies futures à projeter
 input int    FutureCandlesRefreshSeconds = 120; // TTL cache prédiction (s)
 input bool   AutoValidateFuturePredictions = true; // Envoyer validation prédictions vs réel au serveur
@@ -9089,12 +2414,9 @@ input bool   ShowBookmarkLevels    = true; // Lignes horizontales sur derniers S
 
 input group "=== TABLEAU DE BORD ET MÉTRIQUES ==="
 input bool   UseDashboard        = true;   // Afficher le tableau de bord avec métriques
-input bool   PreferGomDashboardWhenEmbedded = true; // Si GOM intégré: retirer le dashboard texte SMC (haut-gauche)
-input bool   ShowAiStatusOnGomEmbeddedChart = true; // Coin haut-droit: état serveur IA (visible même si dashboard texte SMC masqué)
-input bool   HideDailyStatsWhenGomEmbedded = true;  // Si GOM intégré: masquer le bloc stats journalières SMC (évite doublon visuel)
-input bool   DashboardSingleSourceMode = false; // false = affichages complémentaires (plus d'objets/labels possibles)
-input bool   ShowTop3NetProfitBottomRight = false; // Top 3 profit (désactivé = moins d'objets)
-input bool   ShowMLMetrics       = false;   // Métriques ML (désactivé = dashboard moins chargé)
+input bool   DashboardSingleSourceMode = true; // Eviter les doublons: infos texte uniquement via UpdateDashboard()
+input bool   ShowTop3NetProfitBottomRight = true; // Afficher en bas à droite le top 3 net profit + perf globale modèle
+input bool   ShowMLMetrics       = true;   // Afficher les métriques ML (entraînement modèle)
 input bool   AutoStartMLContinuousTraining = true; // Démarrer l'entraînement continu ML automatiquement
 input int    MLContinuousCheckIntervalSec  = 300;  // Vérifier/relancer continuous training (sec)
 input int    MLMetricsLabelYOffsetPixels   = 200;  // Décalage vertical (px) pour éviter la superposition - augmenté
@@ -9106,14 +2428,14 @@ input bool   UseDollarExits       = true;  // Fermetures basées sur $ (DÉSACTI
 input bool   UseIAHoldClose       = true;  // Fermer sur HOLD (désactivé=laisser SL/TP naturel, capturer le spike)
 input bool   UseDirectionConflictClose = true; // Fermer sur conflit direction (ACTIVÉ - permet rotation automatique)
 
-input group "=== AI SERVER (Render kolatradebot-7ofl + local) ==="
+input group "=== AI SERVER (confirmation signaux) ==="
 input bool   UseAIServer       = true;   // Utiliser le serveur IA pour confirmation
 input string AI_ServerURL       = "http://127.0.0.1:8000";  // URL du serveur IA local
-input string AI_ServerRender    = "https://kolatradebot-7ofl.onrender.com";  // Déploiement Render (Docker ai_server_cloud) — liste WebRequest MT5 obligatoire
-input int    AI_Timeout_ms     = 8000;   // Timeout WebRequest (ms) — Render cold start
+input string AI_ServerRender    = "https://kolatradebot.onrender.com";  // URL render en fallback
+input int    AI_Timeout_ms     = 5000;   // Timeout WebRequest (ms)
 input int    AI_UpdateInterval_Seconds = 120;  // Intervalle mise à jour IA (secondes)
 input int    AI_DecisionCacheSeconds = 30;       // Cache réponse POST /decision (0 = désactivé, debug live)
-input bool   BlockNewEntriesOnAIDisconnect = false; // true = bloque entrées si IA OFF (souvent 0 ordre limite M5 tant que le serveur ne répond pas)
+input bool   BlockNewEntriesOnAIDisconnect = true; // Bloquer nouvelles entrées si IA déconnectée/stale
 input int    AI_MaxSignalAgeSeconds = 180; // Age max du signal IA pour autoriser une entrée
 input bool   UsePropiceSymbolsFilter = true;  // ⚠️ IMPORTANT: Filtre horaire - Le robot trade UNIQUEMENT sur les symboles les plus "propices" selon l'heure actuelle (UTC)
                                             // Fonctionnement: Le serveur analyse les performances par tranche horaire et retourne le Top N des symboles les plus performants
@@ -9122,29 +2444,17 @@ input bool   UsePropiceSymbolsFilter = true;  // ⚠️ IMPORTANT: Filtre horair
 input int    PropiceTopN = 5;                // Top N symbols renvoyés par /symbols/propice/top
 input int    PropiceUpdateIntervalSec = 120;  // Refresh filtre propice (secondes) - scan plus fréquent
 input bool   PreferBestSymbolWithoutBlocking = true; // Prioriser le meilleur symbole sans bloquer les autres symboles attachés
-input bool   UseRenderAsPrimary = true; // true = appels IA d'abord sur Render puis fallback local (127.0.0.1)
+input bool   UseRenderAsPrimary = false; // Utiliser le serveur local en premier (Render en fallback)
 input string AI_ServerURL2      = "http://127.0.0.1:8000";  // URL serveur local
 input bool   PropiceAllowMarketOrdersOnAllPropiceSymbols = true; // Marché: autoriser sur tous les symboles propices (pas seulement le rang 0)
 input double PropiceNonTopExtraMinAIConfidencePercentPerRank = 5.0; // +% confiance minimale par rang (rang 1=2eme, etc.)
 input double PropiceNonTopExtraMinSetupScore = 5.0; // +score minimum si setupScore est utilisé (rangs >0)
-input double MinAIConfidence   = 0.85;   // ↑ Confiance IA min 85% — aligné avec MinAIConfidencePercent (ultra strict)
+input double MinAIConfidence   = 0.80;   // Confiance IA min pour executer (80% = mode strict)
 input int    AI_Timeout_ms2     = 10000;  // Timeout WebRequest (ms) - Render cold start
 input string AI_ModelName       = "SMC_Model";  // Nom du modèle IA
 input string AI_ModelVersion    = "1.0";  // Version du modèle IA
 input bool   AI_UseGPU          = true;   // Utiliser le GPU pour l'IA (si disponible)
 input bool   RequireAIConfirmation = true; // Exiger confirmation IA pour SMC (false = trader sans IA)
-input bool   EnableTradingAgentsInfluence = true; // Utiliser /tradingagents/realtime/run-once pour résumé + influence
-input int    TradingAgentsUpdateIntervalSeconds = 300; // Refresh TradingAgents (5 min)
-input double TradingAgentsMinConfidence = 0.60; // Confiance min pour influencer
-input bool   TradingAgentsBlockContradiction = true; // Bloquer trade si TradingAgents contredit fortement
-input bool   PushTradingAgentsSummary = true; // Notification push quand nouveau résumé
-input bool   TradingAgentsRegisterChartOnServer = true; // Pousser _Symbol vers ai_server (fusion si plusieurs graphiques MT5)
-input int    TradingAgentsRegisterIntervalSeconds = 0; // 0 = même période que TradingAgentsUpdateIntervalSeconds
-input bool   EnableOpportunityCostFilter = true; // Filtre qualité d'entrée (coût d'opportunité)
-input double OpportunityCostMinScore = 60.0; // Score mini [0..100]
-input double OpportunityCostMaxScore = 100.0; // Score maxi [0..100]
-input double OpportunityPriceAtrMin = 0.00; // Min |prix-référence| en ATR
-input double OpportunityPriceAtrMax = 1.20; // Max |prix-référence| en ATR
 input int    M5TouchArrowRecoveryWindowSec = 300; // Fenêtre de rattrapage après touch M5 raté (Boom BUY via flèche)
 input bool   EnableBoomCrashRecoveryTrades = false; // DÉSACTIVÉ: SELL Boom / BUY Crash (trade recovery exceptionnel)
 
@@ -9164,8 +2474,6 @@ input bool   ICTRequireNestedOBSequence = true; // Exiger OB principal + OB inte
 input bool   DrawICTChecklistGraphics = true; // Afficher la checklist de validation ICT sur graphique
 input bool   RequireStructureAfterSweep = true; // Smart Money: entrée après confirmation (LS+BOS/FVG/OB)
 input bool   NoEntryDuringSweep = true;  // Attendre 1+ barres après le sweep (jamais pendant panique)
-input int    BoomBlockBuyAfterBearSweepM15Bars = 12;  // Boom: pas de BUY si sweep sous liquidité (ICT «SELL») récent ; 0=désactivé
-input int    CrashBlockSellAfterBullSweepM15Bars = 12; // Crash: pas de SELL si sweep au-dessus récent ; 0=désactivé
 input bool   StopBeyondNewStructure = true; // Stop au-delà nouvelle structure (pas niveau évident)
 input bool   UseBOS            = true;   // Break Of Structure
 input bool   UseOTE            = true;   // Optimal Trade Entry (Fib 0.62-0.79)
@@ -9178,7 +2486,7 @@ input bool   OTE_UseLimitOrders = true; // Entrées OTE via limit (meilleure pr�
 input bool   OTE_UseFlexibleLogic    = true;  // Utiliser logique flexible SMC_OTE (plus de trades)
 input double OTE_MinRiskPoints       = 2.0;   // Risque minimum en points (2 = petits mouvements)
 input double OTE_ConfluenceTolerance = 0.3;   // Tolérance confluence FVG-OTE (30% = plus flexible)
-input int    OTE_MaxPositionsPerSymbol = 2;    // Max positions par symbole — augmenté pour permettre pyramidage modéré
+input int    OTE_MaxPositionsPerSymbol = 2;    // Max positions par symbole (1=strict, 2=flexible)
 input double OTE_MinConfidenceForex  = 55.0;  // Confiance IA minimum pour Forex (plus flexible)
 input double OTE_MinConfidenceOther  = 60.0;  // Confiance IA minimum pour autres symboles
 
@@ -9202,30 +2510,8 @@ input bool   M5Touch_RequireMinSetupScore = false; // Touch M5 (hors Boom/Crash)
 input double M5Touch_MinSetupScore = 72.0;          // Score setup min (0-100) pour validation touch M5
 input double M5Touch_MinOTEProbabilityForPreOTE = 75.0; // Probabilité OTE min (%) pour Pré-OTE (sinon ordre M5 marché)
 input bool   M5_RequireFiboOTEZoneForAutoEntry = true; // Touch M5: niveau dans zone OTE 62-78.6pct (swing LTF aligne sur Fibo)
-input bool   OB_RequireFiboOTERangeForDisplay = false; // false = dessiner tous les OB détectés (plus d'objets sur le graphique)
+input bool   OB_RequireFiboOTERangeForDisplay = true; // Graphique: ne dessiner que les OB validés Fibo OTE (sinon masquer les faux OB)
 input int    DrawOB_MaxRectangles = 6;        // Max rectangles OB sur le graphique (OB validés uniquement)
-
-//+------------------------------------------------------------------+
-//| Bases URL IA normalisées (liste WebRequest MT5 = chaîne exacte) |
-//+------------------------------------------------------------------+
-string GOM_NormalizeAiServerBaseUrl(const string urlRaw)
-{
-   string u = urlRaw;
-   StringTrimLeft(u);
-   StringTrimRight(u);
-   if(StringLen(u) == 0)
-      return u;
-   // Ancien hostname Render (sans suffixe) → instance déployée actuelle
-   if(u == "https://kolatradebot.onrender.com" || u == "http://kolatradebot.onrender.com")
-      return "https://kolatradebot-7ofl.onrender.com";
-   // localhost et 127.0.0.1 sont deux entrées distinctes dans MT5
-   StringReplace(u, "http://localhost:", "http://127.0.0.1:");
-   StringReplace(u, "https://localhost:", "https://127.0.0.1:");
-   return u;
-}
-
-string GOM_AiServerBasePrimary()   { return GOM_NormalizeAiServerBaseUrl(UseRenderAsPrimary ? AI_ServerRender : AI_ServerURL); }
-string GOM_AiServerBaseFallback() { return GOM_NormalizeAiServerBaseUrl(UseRenderAsPrimary ? AI_ServerURL : AI_ServerRender); }
 
 //+------------------------------------------------------------------+
 //| MODE ULTRA SÉLECTIF : VALIDATION AVANT ENTRÉE                  |
@@ -9428,13 +2714,6 @@ void RecordTradeInStatistics(ulong ticket, bool isOpening)
 void DisplayDailyStatisticsOnChart()
 {
    if(!EnableStatisticsTracking) return;
-   if(UseEmbeddedGomKolaSidoScript && HideDailyStatsWhenGomEmbedded)
-   {
-      ObjectDelete(0, "SMC_DailyStats_Label");
-      ObjectDelete(0, "SMC_DailyCap_BarBg");
-      ObjectDelete(0, "SMC_DailyCap_BarFill");
-      return;
-   }
 
    int effMax = GetEffectiveMaxDailyTrades();
    double eq = AccountInfoDouble(ACCOUNT_EQUITY);
@@ -9532,7 +2811,7 @@ void ForceCloseAllBoomCrashPositions()
    for(int i = PositionsTotal() - 1; i >= 0; i--)
    {
       if(!posInfo.SelectByIndex(i)) continue;
-      if(!EA_IsOurTradeMagic(posInfo.Magic())) continue;
+      if(posInfo.Magic() != InpMagicNumber) continue;
       
       string symbol = posInfo.Symbol();
       ENUM_SYMBOL_CATEGORY cat = SMC_GetSymbolCategory(symbol);
@@ -9570,7 +2849,7 @@ void CheckAndClosePositionsBeforeNewEntry()
    for(int i = 0; i < PositionsTotal(); i++)
    {
       if(!posInfo.SelectByIndex(i)) continue;
-      if(!EA_IsOurTradeMagic(posInfo.Magic())) continue;
+      if(posInfo.Magic() != InpMagicNumber) continue;
       
       string symbol = posInfo.Symbol();
       ENUM_SYMBOL_CATEGORY cat = SMC_GetSymbolCategory(symbol);
@@ -9672,26 +2951,26 @@ double CalculateOTESetupProbability(const string direction)
 
 // Paramètres de préservation des gains
 input bool   UseGainPreservationSystem     = true;  // Activer le système de préservation des gains
-input double DailyGainProtectionThreshold    = 3.0;   // Seuil de gain journalier pour activer la protection ($) — augmenté (3x plus tolérant)
-input double MaxDrawdownAfterProtection     = 0.30;  // Perte max autorisée après protection ($) — 1.5% du capital (ultra strict)
-input int    ProtectionCooldownMinutes       = 45;    // Temps de refroidissement après protection (minutes) — plus long
-input double MinExpectancyThreshold        = 0.25;  // Espérance mathématique minimum pour trader — plus exigeant
+input double DailyGainProtectionThreshold    = 4.0;   // Seuil de gain journalier pour activer la protection ($) - strict
+input double MaxDrawdownAfterProtection     = 1.0;   // Perte maximale autorisee apres protection ($) - strict
+input int    ProtectionCooldownMinutes       = 30;    // Temps de refroidissement après protection (minutes)
+input double MinExpectancyThreshold        = 0.15;  // Espérance mathématique minimum pour trader
 
 // NOUVEAUX PARAMÈTRES : ULTRA SÉLECTIF
 input bool   UseUltraSelectiveMode        = true;  // Mode ultra sélectif (uniquement trades gagnants sûrs)
-input double MinWinProbability          = 88.0;  // Probabilité de gain minimum (%) — strict pour 20$
-input int    MaxHoldingTimeSeconds       = 180;   // Temps de détention maximum (3 minutes) — scalp rapide
+input double MinWinProbability          = 85.0;  // Probabilite de gain minimum (%) - strict
+input int    MaxHoldingTimeSeconds       = 300;   // Temps de détention maximum (5 minutes)
 input bool   EnableStatisticsTracking     = true;  // Activer le suivi des statistiques journalières
-input int    MaxDailyTrades             = 10;    // Nombre maximum de trades par jour — augmenté pour plus de flexibilité
-input bool   UseEquityAdaptiveDailyTrades = true;  // ACTIVÉ : adapter le cap journalier à l'equity
-input double EquityReferenceLow         = 15.0;   // Equity de référence basse — correspond au capital minimum viable
-input double EquityReferenceHigh        = 50.0;   // Equity de référence haute — croissance progressive
-input int    MaxDailyTradesLowEquity    = 2;    // Cap journalier à equity basse (15$) = 2 trades max
-input int    MaxDailyTradesHighEquity   = 4;    // Cap journalier à equity haute (50$) = 4 trades max
+input int    MaxDailyTrades             = 6;    // Nombre maximum de trades par jour (plafond absolu, discipline stricte)
+input bool   UseEquityAdaptiveDailyTrades = false; // Adapter le cap journalier à l'equity (interpolation)
+input double EquityReferenceLow         = 500.0;  // Equity de référence basse (devise du compte)
+input double EquityReferenceHigh        = 5000.0; // Equity de référence haute (devise du compte)
+input int    MaxDailyTradesLowEquity    = 2;    // Cap journalier à EquityReferenceLow (borné par MaxDailyTrades)
+input int    MaxDailyTradesHighEquity   = 6;    // Cap journalier à EquityReferenceHigh (borné par MaxDailyTrades)
 input bool   ShowDailyCapProgressBarOnChart = true; // Barre de progression cap journalier sur le graphique
-input int    MinMinutesBetweenTrades    = 30;   // Espacement minimum entre deux trades — 30 min (anti surtrading avec 20$)
-input double MinProfitPerTrade           = 0.10;  // Profit minimum par trade ($) — réaliste avec lot 0.01 sur Boom/Crash
-input double MaxAllowedLossPerTrade      = 0.20;  // Perte maximale autorisée par trade ($) — 1% du capital 20$
+input int    MinMinutesBetweenTrades    = 20;   // Espacement minimum entre deux trades
+input double MinProfitPerTrade           = 1.0;   // Profit minimum par trade ($)
+input double MaxAllowedLossPerTrade      = 2.0;   // Perte maximale autorisee par trade ($) - strict
 input bool   UsePreOTEEntry                 = true;  // Entrer avant l'OTE pour capturer les spikes
 input double PreOTEEntryDistancePercent    = 0.3;   // Distance avant l'OTE pour entrer (0.3% = agressif)
 input bool   CancelOTEOnSetupInvalidation   = true;  // Annuler les ordres si le setup OTE disparaît
@@ -9826,13 +3105,12 @@ input int    NYOStart          = 13;     // New York Open début
 input int    NYOEnd            = 16;     // New York Open fin
 input group "=== FENETRES STRICTES UTC (AUTO-STOP HORS PLAGE) ==="
 input bool   UseStrictUTCTradeWindows = true; // Discipline horaire stricte (UTC)
-input bool   UseBrokerAdaptiveWindows = true; // 🆕 Auto-detect broker and use optimal windows
-input int    g_TradeWindow1StartUTC = 3;   // Zone 1 debut (UTC) - EXNESS: 3-6
-input int    g_TradeWindow1EndUTC   = 6;   // Zone 1 fin   (UTC, exclusif)
-input int    g_TradeWindow2StartUTC = 14;  // Zone 2 debut (UTC) - EXNESS/DERIV: 14-16 or 8-16
-input int    g_TradeWindow2EndUTC   = 16;  // Zone 2 fin   (UTC, exclusif) - DERIV: 8-16 OPTIMAL
-input int    g_TradeWindow3StartUTC = 21;  // Zone 3 debut (UTC) - EXNESS: 21-23
-input int    g_TradeWindow3EndUTC   = 23;  // Zone 3 fin   (UTC, exclusif)
+input int    TradeWindow1StartUTC = 3;   // Zone 1 debut (UTC)
+input int    TradeWindow1EndUTC   = 6;   // Zone 1 fin   (UTC, exclusif)
+input int    TradeWindow2StartUTC = 14;  // Zone 2 debut (UTC)
+input int    TradeWindow2EndUTC   = 16;  // Zone 2 fin   (UTC, exclusif)
+input int    TradeWindow3StartUTC = 21;  // Zone 3 debut (UTC)
+input int    TradeWindow3EndUTC   = 23;  // Zone 3 fin   (UTC, exclusif)
 
 input group "=== NOTIFICATIONS ==="
 input bool   UseNotifications  = true;   // Alert + notification push (signaux et trades)
@@ -10232,43 +3510,14 @@ void ExecutePreOTESpikeEntryFunction(string direction, double oteEntryPrice, dou
 {
    if(!UsePreOTEEntry) return;
 
-   string dirGate = direction;
-   StringToUpper(dirGate);
-   if(!GOM_Internal_TradeGateAllows(dirGate))
+   if(SMC_GetSymbolCategory(_Symbol) == SYM_BOOM_CRASH && !CanOpenAdditionalPositionForSymbol(_Symbol, direction))
    {
-      Print("🚫 PRÉ-OTE BLOQUÉ - verdict script WAIT / gate GOM | ", _Symbol);
-      return;
-   }
-
-   if(!CanOpenAdditionalPositionForSymbol(_Symbol, direction))
-   {
-      Print("🚫 PRÉ-OTE BLOQUÉ - Règle positions / symbole | dir=", direction, " | ", _Symbol);
+      Print("🚫 PRÉ-OTE BLOQUÉ - Déjà une position sur ", _Symbol, " (Boom/Crash: 1 max par symbole)");
       return;
    }
 
    if(SMC_GetSymbolCategory(_Symbol) == SYM_BOOM_CRASH && IsBoomCrashEntryCooldownActive("ExecutePreOTESpikeEntryFunction"))
       return;
-
-   if(SMC_GetSymbolCategory(_Symbol) == SYM_BOOM_CRASH && PreferGomKolaM5OrH1ProximityBoomCrashEntries)
-   {
-      double atrChk = 0.0;
-      if(atrHandle != INVALID_HANDLE)
-      {
-         double ab[];
-         ArraySetAsSeries(ab, true);
-         if(CopyBuffer(atrHandle, 0, 0, 1, ab) >= 1)
-            atrChk = ab[0];
-      }
-      if(atrChk <= 0.0)
-         atrChk = SymbolInfoDouble(_Symbol, SYMBOL_BID) * 0.002;
-      const double b0 = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-      const double a0 = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-      if(!PriceNearGomKolaM5OrH1ForDirection(_Symbol, direction, b0, a0, atrChk))
-      {
-         Print("🚫 PRÉ-OTE BLOQUÉ - Proximité GOM KOLA M5/H1 requise | dir=", direction, " | ", _Symbol);
-         return;
-      }
-   }
 
    if(!SMC_IsStrictUTCTradingWindowOpen())
    {
@@ -10377,16 +3626,6 @@ void ExecutePreOTESpikeEntryFunction(string direction, double oteEntryPrice, dou
    {
       Print("❌ ENTRÉE PRÉ-OTE BLOQUÉE - lot minimum indisponible");
       return;
-   }
-
-   {
-      const double bidPre = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-      const double askPre = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-      if(GOM_ShouldAbortEntryForOppositeM5Line(direction, _Symbol, bidPre, askPre, 0.0))
-      {
-         Print("🚫 ENTRÉE PRÉ-OTE annulée — correction (M5 KOLA opposé trop proche) | ", direction, " | ", _Symbol);
-         return;
-      }
    }
    
    // Exécuter l'ordre au marché
@@ -10656,29 +3895,11 @@ void ExecuteMarketOrderOnOTETouch(OTESetupTracker &setup)
       }
    }
    
-   string gomDir = setup.direction;
-   StringToUpper(gomDir);
-   if(!GOM_Internal_TradeGateAllows(gomDir))
-   {
-      Print("🚫 EXÉCUTION OTE TOUCH BLOQUÉE - moteur GOM interne: ", g_gomVerdictLabel);
-      return;
-   }
-   
    double lot = NormalizeVolumeForSymbol(GetMinLotForSymbol(_Symbol));
    if(lot <= 0.0)
    {
       Print("❌ EXÉCUTION OTE TOUCH BLOQUÉE - lot minimum indisponible");
       return;
-   }
-
-   {
-      const double bidOt = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-      const double askOt = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-      if(GOM_ShouldAbortEntryForOppositeM5Line(setup.direction, _Symbol, bidOt, askOt, 0.0))
-      {
-         Print("🚫 EXÉCUTION OTE TOUCH annulée — correction (M5 KOLA opposé trop proche) | ", setup.direction, " | ", _Symbol);
-         return;
-      }
    }
    
    // Exécuter l'ordre au marché
@@ -10761,41 +3982,27 @@ input group "=== BOOM/CRASH ==="
 input bool   BoomBuyOnly       = true;   // Boom: BUY uniquement
 input bool   CrashSellOnly     = true;   // Crash: SELL uniquement
 input bool   NoSLTP_BoomCrash  = false;  // Pas de SL/TP sur Boom/Crash (DÉSACTIVÉ - utilise SL/TP normal)
-input double BoomCrashSpikeTP  = 0.05;   // (Autres modules) Seuil $ historique ; fermeture spike EA voir SpikeTradeCapturedMinProfitUSD
-input double SpikeTradeCapturedMinProfitUSD = 0.03; // Boom/Crash + Gainx/Painx : P/L net min ($) pour fermer une position « SPIKE TRADE » (spike capté) si pas de mode « tout gain >0 »
+input double BoomCrashSpikeTP  = 0.05;   // Fermer dès spike capté, même gain très faible ($)
 input double BoomCrashSpikePct = 0.50;   // Pourcentage de mouvement pour détecter spike (50% - beaucoup plus élevé)
 input double BoomCrashSecondSpikeImminentProb = 0.85; // Si proba spike >= seuil, fermer quand même puis armer une réentrée
-input double TargetProfitBoomCrashUSD = 0.50; // Gain à capter ($) — 2.5% du capital, réaliste avec lot 0.01 sur spike
-input double MaxLossDollars    = 3.0;    // Fermer toute position si perte atteint ($) — 15% du capital 20$ (sécurité ultime)
-input double TakeProfitDollars = 0.50;   // Fermer si bénéfice atteint ($) — 2.5% du capital (Volatility/Forex/Commodity)
+input double TargetProfitBoomCrashUSD = 2.0; // Gain à capter ($) - fermer si profit >= ce seuil (Spike_Close)
+input double MaxLossDollars    = 15.0;   // Fermer toute position si perte atteint ($) - augmenté pour éviter fermetures prématurées
+input double TakeProfitDollars = 2.0;    // Fermer si bénéfice atteint ($) - Volatility/Forex/Commodity
 input bool   UseMaxLossBoomCrashPerTrade = true; // Boom/Crash: fermer si perte par position > seuil
-input double MaxLossBoomCrashPerTradeUSD = 0.20;  // Boom/Crash: perte max admise par trade ($) — 1% du capital 20$
-input double MaxLossBoomCrashCloseBufferUSD = 0.05; // Fermer avant le plafond (slippage spike) : seuil effectif = 0.15$
-input double SymbolProfitTargetUSD = 1.0; // Profit target individuel par symbole ($) — 5% du capital 20$
-// Fermeture « bank » avant TP sur synthètiques explosifs uniquement (Boom/Crash + symboles PAINX/GAINX broker)
-input bool   SynthSecureCloseAnyProfit = true;  // Activer fermeture automatique si P/L net > seuil-ci (sans attendre TP)
-input int    SynthSecureCloseMinHoldSec = 3;   // Âge minimum (secondes) — évite fermeture parasites au premier tick
-input double SynthSecureCloseMinNetUsd = 0.0;  // Seuil minimal en $ sur le P/L net (0 = tout gain strictement positif)
+input double MaxLossBoomCrashPerTradeUSD = 4.0;  // Boom/Crash: perte max admise par trade ($)
+input double SymbolProfitTargetUSD = 10.0; // Profit target individuel par symbole ($) - OR, ARGENT, etc.
 
 // Profil scalping « intelligent » : meilleur cadrage entrée + sorties courtes sur petits gains
 input bool   BoomCrash_UseSmartScalpProfile = true;   // Activer seuils de sortie rapide + filtre contexte entrée
-input double BoomCrash_ScalpTakeProfitUSD   = 0.03;   // Gain mini ($) pour fermeture auto — adapté lot 0.01 (0.03$ = 1 tick spike)
+input double BoomCrash_ScalpTakeProfitUSD   = 0.03;   // Gain mini ($) pour fermeture auto prioritaire (profil actif)
 input int    BoomCrash_ScalpBankProfitMaxSec = 90;    // Si profit>0 : forcer fermeture avant X secondes (0=désactivé)
 input double BoomCrash_ScalpFavorableMovePct = 0.025;// Si profit>0 : fermer si mouvement favorable >= X% (ex: 0.025=0.025%)
-// Si true : dès que le gain / le mouvement favorable remplissent déjà les critères scalping spike, on n'attend pas TouchProtectScalpMinHoldSeconds (sinon positions souvent laissées en gain après spike).
-input bool   BoomCrash_BypassMinHoldWhenExitCriteriaMet = true;
-// SPIKE TRADE : dès P/L net strictement positif → fermeture (même logique que « spike capturé » / bank immédiat).
-input bool   BoomCrash_SpikeTradeCloseAnyPositiveProfit = false; // ❌ DÉSACTIVÉ — Trailing Stop 20% utilisé à la place
-// Anti-traîne : ferme au marché si le trade reste ouvert longtemps sans atteindre un bank cible (évite 10–20+ min sans spike, pertes qui grossissent).
-input bool   BoomCrash_UseStaleTimeExit = true;
-input int    BoomCrash_StaleExitMaxSeconds = 240;   // Après N secondes (0=désactivé)
-input double BoomCrash_StaleExitBankUsd = 0.05;    // Si P/L net < 0.05$ à ce moment → sortie (capital 20$ = couper vite les positions stagnantes)
 input bool   BoomCrash_RequireContextBeforeEntry = true; // Spike/Deriv: exiger contexte frais (flèche, touch, ML ou SR20)
 input int    BoomCrash_ContextMaxAgeSec    = 90;     // Durée max (s) pour considérer armement touch / cohérence
 
 // Filtre basé sur la probabilité de spike issue du modèle ML
 input bool   UseSpikeMLFilter        = true;   // Utiliser la probabilité ML de spike pour filtrer les entrées
-input double SpikeML_MinProbability  = 0.78;   // Probabilité ML minimale de spike — 78% (plus strict pour 20$)
+input double SpikeML_MinProbability  = 0.75;   // Probabilité ML minimale de spike pour autoriser le trade (75%)
 input bool   SpikeUsePreSpikeOnlyForBoomCrash = true; // Boom/Crash: entrer dès le pattern pré-spike (avant le 1er spike)
 input bool   SpikeRequirePreSpikePattern = true; // Mode strict: exiger le pattern pré-spike EN PLUS d'un spike récent
 input double PreSpike_CompressionRatio   = 0.65;  // Pré-spike: range10 < range50 * ratio (plus haut = plus permissif)
@@ -10972,16 +4179,6 @@ CTrade trade;
 CPositionInfo posInfo;  // Local position info variable
 COrderInfo orderInfo;
 
-// Scanner d'opportunités multi-symboles
-// COpportunityScanner *g_OpportunityScanner = NULL;  // DISABLED: COpportunityScanner class not defined (SMC_OpportunityScanner.mqh missing)
-
-// ML Dashboard URLs and cache (TODO: reactivate when FetchMLSignal is fixed)
-// const string ML_LOCAL_URL = "http://127.0.0.1:8000";
-// const string ML_RENDER_URL = "https://kolatradebot-7ofl.onrender.com";
-// MLSignal g_LastMLSignal;
-// datetime g_LastMLSignalUpdate = 0;
-// int g_MLSignalCacheSeconds = 3;
-
 int atrHandle;
 int emaHandle = INVALID_HANDLE;
 int hEmaFast = INVALID_HANDLE;  // EMA rapide pour tendance
@@ -11014,16 +4211,6 @@ int ema31LTF = INVALID_HANDLE;
 int ema50LTF = INVALID_HANDLE;
 int ema100LTF = INVALID_HANDLE;
 int ema200LTF = INVALID_HANDLE;
-
-// État moteur interne GOM (synthèse multi-TF / volatilité / FVG / patterns)
-datetime g_gomLastUpdate = 0;
-double   g_gomScoreBuy = 0.0;
-double   g_gomScoreSell = 0.0;
-double   g_gomVerdict = 0.0;
-int      g_gomBias = 0;
-bool     g_gomAtrVolOk = true;
-string   g_gomVerdictLabel = "OFF";
-
 static datetime g_arrowBlinkTime = 0;
 static bool g_arrowVisible = true;
 static datetime g_spikeBlinkTime = 0;
@@ -11116,19 +4303,14 @@ int OnInit()
    trade.SetExpertMagicNumber(InpMagicNumber);
    trade.SetDeviationInPoints(20);
    trade.SetTypeFilling(ORDER_FILLING_IOC);
-
-   // 🆕 Apply broker-adaptive UTC trading windows
-   SMC_ApplyBrokerAdaptiveWindows();
-
+   
    // Nettoyer tous les anciens dessins sur le chart au démarrage (si activé)
    if(CleanChartOnStartup)
    {
       CleanupAllChartObjects();
       Print("🧹 Nettoyage complet des anciens dessins effectué au démarrage");
    }
-   if(DrawingsMaxAgeMinutes > 0)
-      // GOM_CleanExpiredDrawings(); // TODO: Fix parameter conflict with GOM_Enhanced_Dashboard
-
+   
    atrHandle = iATR(_Symbol, LTF, 14);
    emaHandle = iMA(_Symbol, LTF, 9, 0, MODE_EMA, PRICE_CLOSE);
    hEmaFast = iMA(_Symbol, LTF, 9, 0, MODE_EMA, PRICE_CLOSE);   // EMA rapide
@@ -11181,23 +4363,9 @@ int OnInit()
    }
    // Les indicateurs seront ajoutés dynamiquement si nécessaire pour éviter le détachement
    GlobalVariableSet("SMC_OPEN_LOCK_" + IntegerToString(InpMagicNumber), 0);
+   Print("?? SMC Universal + FVG_Kill PRO | 1 pos/symbole | Stratégie visible");
    Print("   Catégorie: ", EnumToString(SMC_GetSymbolCategory(_Symbol)));
-   if(UseAIServer)
-   {
-      string iaPrimary = GOM_AiServerBasePrimary();
-      string iaFallback = GOM_AiServerBaseFallback();
-      Print("   IA: ACTIF | primaire=", iaPrimary, " | fallback=", iaFallback,
-            " | UseRenderAsPrimary=", (UseRenderAsPrimary ? "true" : "false"));
-   }
-   else
-      Print("   IA: désactivé (UseAIServer=false)");
-   if(UseInternalGOMEngine)
-   {
-      Print("   GOM interne: ACTIF | graphique léger=", (GOM_InternalLightChart ? "oui" : "non"),
-            " | filtre ordres=", (GOM_FilterOrdersByEngine ? "oui" : "non"));
-   }
-   if(UseEmbeddedGomKolaSidoScript)
-      Print("   GOM_KOLA_SIDO: intégré dans l'EA (plus besoin du script sur le graphique)");
+   Print("   IA: ", UseAIServer ? AI_ServerURL : "Désactivé");
 
    // Diagnostiquer la connectivité Supabase au démarrage
    if(UseAIServer)
@@ -11210,8 +4378,7 @@ int OnInit()
    {
       EnsureMLContinuousTrainingRunning(true);
       UpdateMLMetricsDisplay();      // Remplir g_mlMetricsStr rapidement
-      if(!(UseEmbeddedGomKolaSidoScript && PreferGomDashboardWhenEmbedded))
-         DrawMLMetricsOnChart();        // Sinon doublon avec le bandeau ML du module GOM
+      DrawMLMetricsOnChart();        // Affichage immédiat sur le graphique
    }
    
    // Premier sync /decision au démarrage (évite « OFF » jusqu’à M1 + intervalle)
@@ -11222,51 +4389,6 @@ int OnInit()
       if(UseDashboard)
          UpdateDashboard();
    }
-
-   // Initialiser Spike Detector + Trailing Stop avancé Boom/Crash
-   if(EnableBoomCrashAdvancedTrailing)
-   {
-      g_spikeDetector.Init(_Symbol, BoomCrashSpikeDetectionThreshold / 100.0, BoomCrashSpikeDetectionWindow);
-      g_boomCrashTrailing.SetParameters(
-         BoomCrashTrailingInitialPct / 100.0,
-         BoomCrashTrailingSpikePct / 100.0,
-         BoomCrashTrailingStepPct / 100.0,
-         BoomCrashTrailingSpikeMinProfit
-      );
-      Print("✅ Trailing Stop Avancé Boom/Crash activé | Initial: ", BoomCrashTrailingInitialPct,
-            "% | Spike: ", BoomCrashTrailingSpikePct, "% | Seuil spike: ", BoomCrashSpikeDetectionThreshold, "%");
-   }
-
-   // Initialiser le scanner d'opportunités (un seul graphique si OpportunityScannerSingleChart)
-   // DÉSACTIVÉ: SMC_OpportunityScanner.mqh n'existe pas - classe COpportunityScanner non trouvée
-   // if(EnableOpportunityScanner && GOM_IsOpportunityScannerOwnerChart())
-   // {
-   //    g_OpportunityScanner = new COpportunityScanner();
-   //    if(g_OpportunityScanner != NULL)
-   //    {
-   //       g_OpportunityScanner.SetScanInterval(ScannerRefreshSeconds);
-   //       g_OpportunityScanner.SetPanelPosition(ScannerPanelX, ScannerPanelY);
-   //       g_OpportunityScanner.SetPanelWidth(ScannerPanelWidth);
-   //       g_OpportunityScanner.SetRowHeight(ScannerRowHeight);
-   //       g_OpportunityScanner.ShowPanel(ScannerShowPanel);
-   //       if(EnableScannerAutoTrading)
-   //       {
-   //          g_OpportunityScanner.EnableAutoTrading(true, AutoTradeMaxRiskDollars, ...);
-   //       }
-   //    }
-   // }
-
-   if(UseEnhancedDashboard)
-   {
-      PushEaResumeClockForMLDashboard();
-      UpdateDashboard();
-   }
-
-   ML_Scanner_Init();
-
-   // Set timer for 5-minute scanning (300 seconds)
-   EventSetTimer(300);
-
    return INIT_SUCCEEDED;
 }
 
@@ -11282,20 +4404,8 @@ bool TryAcquireOpenLock()
 }
 void ReleaseOpenLock() { GlobalVariableSet("SMC_OPEN_LOCK_" + IntegerToString(InpMagicNumber), 0); }
 
-//+------------------------------------------------------------------+
-//| OnTimer - Periodic 5-minute ML data collection                   |
-//+------------------------------------------------------------------+
-void OnTimer()
-{
-   if(ML_Scanner_IsTimeToScan())
-      ML_Scanner_ScanAllSymbols(AI_ServerURL, AI_ServerRender, UseRenderAsPrimary);
-}
-
 void OnDeinit(const int reason)
 {
-   // Kill the timer
-   EventKillTimer();
-
    // Diagnostic du détachement - identifier la cause exacte
    string reasonStr = "";
    switch(reason)
@@ -11315,22 +4425,6 @@ void OnDeinit(const int reason)
    Print("?? DÉTACHEMENT ROBOT SMC | ", _Symbol, " | Raison: ", reasonStr);
    if(reason == REASON_INITFAILED)
       Print("?? CAUSE: Erreur dans OnInit ou crash (indicateurs, mémoire, etc.)");
-
-   // Nettoyer le dashboard amélioré
-   if(UseEnhancedDashboard)
-      GOM_CleanEnhancedDashboard();
-
-   // Nettoyer le scanner d'opportunités
-   // DÉSACTIVÉ: Scanner non actif
-   // if(g_OpportunityScanner != NULL)
-   // {
-   //    delete g_OpportunityScanner;
-   //    g_OpportunityScanner = NULL;
-   // }
-   GOM_ReleaseOpportunityScannerOwnership();
-
-   if(UseEmbeddedGomKolaSidoScript)
-      GomKolaSidoEmbedded_OnDeinit();
 
    if(atrHandle != INVALID_HANDLE) { IndicatorRelease(atrHandle); atrHandle = INVALID_HANDLE; }
    if(emaHandle != INVALID_HANDLE) { IndicatorRelease(emaHandle); emaHandle = INVALID_HANDLE; }
@@ -11669,7 +4763,6 @@ void ExecuteFVGKillBuy()
    double sl = r[1].low - atr[0] * ATR_Mult;
    double tp = SymbolInfoDouble(_Symbol, SYMBOL_ASK) + (SymbolInfoDouble(_Symbol, SYMBOL_ASK) - sl) * 2.0;
    if(CountPositionsOurEA() >= MaxPositionsTerminal) return;
-   if(!GOM_Internal_TradeGateAllows("BUY")) return;
    if(!TryAcquireOpenLock()) return;
    
    // Règle duplication / IA avant ouverture d'une nouvelle position
@@ -11726,7 +4819,6 @@ void ExecuteFVGKillSell()
    double sl = r[1].high + atr[0] * ATR_Mult;
    double tp = SymbolInfoDouble(_Symbol, SYMBOL_BID) - (sl - SymbolInfoDouble(_Symbol, SYMBOL_BID)) * 2.0;
    if(CountPositionsOurEA() >= MaxPositionsTerminal) return;
-   if(!GOM_Internal_TradeGateAllows("SELL")) return;
    if(!TryAcquireOpenLock()) return;
    
    if(!CanOpenAdditionalPositionForSymbol(_Symbol, "SELL"))
@@ -11771,7 +4863,7 @@ int CountPositionsForSymbol(string symbol)
 {
    int n = 0;
    for(int i = PositionsTotal() - 1; i >= 0; i--)
-      if(posInfo.SelectByIndex(i) && EA_IsOurTradeMagic(posInfo.Magic()) && EA_SymbolsMatch(posInfo.Symbol(), symbol))
+      if(posInfo.SelectByIndex(i) && posInfo.Magic() == InpMagicNumber && posInfo.Symbol() == symbol)
          n++;
    return n;
 }
@@ -11783,7 +4875,7 @@ bool HasOpenSpikeTradeForSymbol(string symbol)
    {
       if(!posInfo.SelectByIndex(i)) 
          continue;
-      if(!EA_IsOurTradeMagic(posInfo.Magic())) 
+      if(posInfo.Magic() != InpMagicNumber) 
          continue;
       if(posInfo.Symbol() != symbol) 
          continue;
@@ -11799,7 +4891,7 @@ int CountPositionsOurEA()
 {
    int n = 0;
    for(int i = PositionsTotal() - 1; i >= 0; i--)
-      if(posInfo.SelectByIndex(i) && EA_IsOurTradeMagic(posInfo.Magic()))
+      if(posInfo.SelectByIndex(i) && posInfo.Magic() == InpMagicNumber)
          n++;
    return n;
 }
@@ -11999,7 +5091,7 @@ void CloseBoomCrashAfterSpike(ulong ticket, string symbol, double currentProfit)
       if(CloseBoomCrashPosition(ticket, symbol))
       {
          Print("? Boom/Crash fermé: bénéfice 2$ atteint (", DoubleToString(currentProfit, 2), "$) - ", symbol);
-         if(symbol == _Symbol) { g_lastBoomCrashPrice = 0.0; }
+         if(symbol == _Symbol) { g_lastBoomCrashPrice = 0; }
       }
       return;
    }
@@ -12010,13 +5102,13 @@ void CloseBoomCrashAfterSpike(ulong ticket, string symbol, double currentProfit)
       if(CloseBoomCrashPosition(ticket, symbol))
       {
          Print("?? Boom/Crash fermé (gain >= ", DoubleToString(TargetProfitBoomCrashUSD, 2), "$): ", DoubleToString(currentProfit, 2), "$) - ", symbol);
-         if(symbol == _Symbol) { g_lastBoomCrashPrice = 0.0; }
+         if(symbol == _Symbol) { g_lastBoomCrashPrice = 0; }
       }
       return;
    }
    
-   // Spike detection (si < 2$) — désactivée ici (logique active dans ManageBoomCrashSpikeClose + bypass minHold).
-   if(g_lastBoomCrashPrice > 0.0 && false)
+   // Spike detection (si < 2$) - DÉSACTIVÉ par défaut pour éviter fermetures prématurées
+   if(g_lastBoomCrashPrice > 0 && false) // false = DÉSACTIVÉ
    {
       double price = SymbolInfoDouble(symbol, SYMBOL_BID);
       double movePct = (price - g_lastBoomCrashPrice) / g_lastBoomCrashPrice * 100.0;
@@ -12025,7 +5117,7 @@ void CloseBoomCrashAfterSpike(ulong ticket, string symbol, double currentProfit)
          if(CloseBoomCrashPosition(ticket, symbol))
          {
             Print("?? Boom/Crash fermé (spike prix ", DoubleToString(currentProfit, 2), "$) - ", symbol);
-            g_lastBoomCrashPrice = 0.0;
+            g_lastBoomCrashPrice = 0;
             s_lastRefUpdate = 0;
          }
       }
@@ -12034,7 +5126,7 @@ void CloseBoomCrashAfterSpike(ulong ticket, string symbol, double currentProfit)
          if(CloseBoomCrashPosition(ticket, symbol))
          {
             Print("?? Boom/Crash fermé (spike prix ", DoubleToString(currentProfit, 2), "$) - ", symbol);
-            g_lastBoomCrashPrice = 0.0;
+            g_lastBoomCrashPrice = 0;
             s_lastRefUpdate = 0;
          }
       }
@@ -12115,16 +5207,7 @@ void ManageBoomCrashSpikeClose()
    }
    
    // OPTIMISATION: Sortir rapidement si aucune position
-   if(PositionsTotal() == 0)
-   {
-      // Nettoyer le tracker si plus aucune position
-      if(g_spikeTrailingStopCount > 0)
-         g_spikeTrailingStopCount = 0;
-      return;
-   }
-
-   // Nettoyer positions fermées du tracker trailing stop
-   CleanupClosedPositionsFromTracker();
+   if(PositionsTotal() == 0) return;
 
    bool touchExitMode = (UseTouchProtectScalpExitOnDerivArrow && RequireFutureProtectTouchForBoomCrashDerivArrow);
 
@@ -12143,11 +5226,9 @@ void ManageBoomCrashSpikeClose()
       
       string symbol = posInfo.Symbol();
       ENUM_SYMBOL_CATEGORY cat = SMC_GetSymbolCategory(symbol);
-      // Forex / métaux / matières : jamais la fermeture « Spike capté » de ce module (évite confusions avec indices).
-      if(cat == SYM_FOREX || cat == SYM_METAL || cat == SYM_COMMODITY)
-         continue;
-      // Boom/Crash + volatilité + Gainx/Painx (fermeture spike / scalp).
-      if(!EA_IsBoomCrashOrGainxPainxForSpikeAutoClose(symbol)) continue;
+      
+      // Uniquement sur Boom/Crash
+      if(cat != SYM_BOOM_CRASH) continue;
       
       // NOUVEAU: Distinguer les trades "SPIKE TRADE" des autres:
       // - SPIKE TRADE: fermeture possible immédiatement après spike capté
@@ -12177,99 +5258,12 @@ void ManageBoomCrashSpikeClose()
          continue;
       }
       
-      // ✅ CORRECTION CRITIQUE: SPIKE TRADE ferment IMMÉDIATEMENT dès gain positif (pas de délai 45s!)
-      // Les trades normaux Boom/Crash respectent le délai minimum pour éviter entrée/sortie en boucle.
+      // Délai anti-fermeture immédiate — y compris Boom/Crash (ne plus forcer minHold=0:
+      // sinon scalp/spike fermait en < 1 min malgré TouchProtectScalpMinHoldSeconds).
       int minHold = MathMax(1, TouchProtectScalpMinHoldSeconds);
-
-      // Boom/Crash (+ Gainx/Painx) : si les critères de sortie « bank » sont déjà remplis (gain mini ou impulsion favorable),
-      // ne pas attendre minHold — sinon le robot laissait souvent la position en gain après le spike.
-      bool scalpExitReady = false;
-
-      // ✅ TRAILING STOP SPIKE TRADE: Protège 80% du gain max (ferme si perte > 20%)
-      if(isSpikeTrade && EA_IsBoomCrashOrGainxPainxForSpikeAutoClose(symbol))
+      if(!isSpikeTrade && secondsSinceOpen < minHold)
       {
-         double pr = posInfo.Profit() + posInfo.Swap() + posInfo.Commission();
-         ulong ticket = posInfo.Ticket();
-
-         // Tracker profit maximum de cette position
-         double maxProfit = GetOrUpdateMaxProfit(ticket, pr);
-
-         // Si profit a atteint au moins 0.03$ (1 tick spike capté)
-         if(maxProfit >= 0.03)
-         {
-            // Calculer la chute depuis le max
-            double profitLoss = maxProfit - pr;
-            double lossPercent = (profitLoss / maxProfit) * 100.0;
-
-            // Si perte > 20% du gain max → Fermer pour protéger 80% du gain
-            if(lossPercent >= 20.0)
-            {
-               scalpExitReady = true;
-               Print("✅ TRAILING STOP ACTIVÉ - Spike perd 20% du max | Max: ", DoubleToString(maxProfit, 2),
-                     "$ | Actuel: ", DoubleToString(pr, 2), "$ | Perte: ", DoubleToString(lossPercent, 1),
-                     "% | Ticket: ", ticket);
-            }
-            else
-            {
-               // Log du suivi (réduit pour éviter spam)
-               static datetime lastTrailingLog = 0;
-               if(TimeCurrent() - lastTrailingLog >= 10)
-               {
-                  Print("📊 TRAILING - Max: ", DoubleToString(maxProfit, 2), "$ | Actuel: ", DoubleToString(pr, 2),
-                        "$ | Chute: ", DoubleToString(lossPercent, 1), "% | Protégé: ",
-                        DoubleToString(maxProfit * 0.8, 2), "$");
-                  lastTrailingLog = TimeCurrent();
-               }
-            }
-         }
-      }
-      // Trades normaux (pas SPIKE TRADE): vérifier critères de sortie bank
-      else if(BoomCrash_BypassMinHoldWhenExitCriteriaMet && UseSpikeAutoClose && !isSpikeTrade &&
-              EA_IsBoomCrashOrGainxPainxForSpikeAutoClose(symbol))
-      {
-         double op = posInfo.PriceOpen();
-         if(op > 0.0)
-         {
-            double cp = (posInfo.PositionType() == POSITION_TYPE_BUY) ? SymbolInfoDouble(symbol, SYMBOL_BID)
-                                                                       : SymbolInfoDouble(symbol, SYMBOL_ASK);
-            double pr = posInfo.Profit() + posInfo.Swap() + posInfo.Commission();
-            double mf = 0.0;
-            if(posInfo.PositionType() == POSITION_TYPE_BUY)
-               mf = (cp - op) / op * 100.0;
-            else
-               mf = (op - cp) / op * 100.0;
-
-            if(BoomCrash_UseSmartScalpProfile)
-            {
-               double scalpTarget = MathMax(0.01, BoomCrash_ScalpTakeProfitUSD);
-               if(pr + 1e-9 >= scalpTarget)
-                  scalpExitReady = true;
-               if(!scalpExitReady && BoomCrash_ScalpFavorableMovePct > 0.0 && pr > 0.0 &&
-                  mf + 1e-12 >= BoomCrash_ScalpFavorableMovePct)
-                  scalpExitReady = true;
-               if(!scalpExitReady && BoomCrash_ScalpBankProfitMaxSec > 0 && pr > 0.0 &&
-                  secondsSinceOpen >= BoomCrash_ScalpBankProfitMaxSec)
-                  scalpExitReady = true;
-            }
-            else
-            {
-               // Profil scalping désactivé : même logique « petit gain + impulsion » que les seuils scalping (évite d'attendre 0,10$).
-               double minPr = MathMax(0.01, BoomCrash_ScalpTakeProfitUSD);
-               double minMf = MathMax(0.005, BoomCrash_ScalpFavorableMovePct);
-               if(pr + 1e-9 >= minPr && mf + 1e-12 >= minMf)
-                  scalpExitReady = true;
-            }
-         }
-      }
-
-      if(!isSpikeTrade && secondsSinceOpen < minHold && !scalpExitReady)
-      {
-         static datetime lastSpikeRecentLog = 0;
-         if(TimeCurrent() - lastSpikeRecentLog >= 120)
-         {
-            Print("?? DEBUG - Spike Close - Trade trop récent (non SPIKE) - ", symbol, " | Ouvert il y a: ", secondsSinceOpen, "s");
-            lastSpikeRecentLog = TimeCurrent();
-         }
+         Print("?? DEBUG - Spike Close - Trade trop récent (non SPIKE) - ", symbol, " | Ouvert il y a: ", secondsSinceOpen, "s");
          continue;
       }
 
@@ -12280,18 +5274,9 @@ void ManageBoomCrashSpikeClose()
       {
          bool isBoomPos = (StringFind(symbol, "Boom") >= 0);
          bool isCrashPos = (StringFind(symbol, "Crash") >= 0);
-         const ENUM_SYMBOL_CATEGORY symCatArrow = SMC_GetSymbolCategory(symbol);
-         bool shouldCloseOnArrow = false;
-         if(isBoomPos)
-            shouldCloseOnArrow = (arrowDirection == "BUY" && posInfo.PositionType() == POSITION_TYPE_BUY);
-         else if(isCrashPos)
-            shouldCloseOnArrow = (arrowDirection == "SELL" && posInfo.PositionType() == POSITION_TYPE_SELL);
-         else if(symCatArrow == SYM_VOLATILITY)
-         {
-            shouldCloseOnArrow =
-               (arrowDirection == "BUY" && posInfo.PositionType() == POSITION_TYPE_BUY) ||
-               (arrowDirection == "SELL" && posInfo.PositionType() == POSITION_TYPE_SELL);
-         }
+         bool shouldCloseOnArrow =
+            (isBoomPos && arrowDirection == "BUY" && posInfo.PositionType() == POSITION_TYPE_BUY) ||
+            (isCrashPos && arrowDirection == "SELL" && posInfo.PositionType() == POSITION_TYPE_SELL);
 
          if(shouldCloseOnArrow)
          {
@@ -12321,25 +5306,6 @@ void ManageBoomCrashSpikeClose()
       double currentPrice = (posInfo.PositionType() == POSITION_TYPE_BUY) ? 
                           SymbolInfoDouble(symbol, SYMBOL_BID) : 
                           SymbolInfoDouble(symbol, SYMBOL_ASK);
-
-      // Sortie « anti-traîne » : éviter Boom/Crash (et synthèses spike) ouverts longtemps sans bank cible
-      if(BoomCrash_UseStaleTimeExit && BoomCrash_StaleExitMaxSeconds > 0 &&
-         secondsSinceOpen >= BoomCrash_StaleExitMaxSeconds &&
-         profit + 1e-9 < BoomCrash_StaleExitBankUsd)
-      {
-         ulong ticketSt = posInfo.Ticket();
-         if(PositionSelectByTicket(ticketSt))
-         {
-            if(PositionCloseWithLog(ticketSt, "Boom/Crash stale — temps max sans bank cible"))
-            {
-               Print("?? STALE EXIT | ", symbol, " | age=", secondsSinceOpen, "s | net=", DoubleToString(profit, 2),
-                     "$ | bank cible>=", DoubleToString(BoomCrash_StaleExitBankUsd, 2), "$");
-               if(UseNotifications)
-                  SendNotification("Spike/stale: fermeture " + symbol + " | net " + DoubleToString(profit, 2) + "$");
-            }
-         }
-         continue;
-      }
       
       // Calculer le pourcentage de profit/perte
       double priceChangePercent = MathAbs((currentPrice - openPrice) / openPrice) * 100;
@@ -12355,11 +5321,11 @@ void ManageBoomCrashSpikeClose()
          lastPositionDebugLog = TimeCurrent();
       }
       
-      // Fermer sur petit gain (profil scalping) — pas les « SPIKE TRADE » (sortie dédiée à SpikeTradeCapturedMinProfitUSD).
+      // Fermer sur petit gain (profil scalping) ou règle spike classique
       bool shouldClose = false;
       string closeReason = "";
       
-      if(BoomCrash_UseSmartScalpProfile && !isSpikeTrade)
+      if(BoomCrash_UseSmartScalpProfile)
       {
          double scalpTarget = MathMax(0.01, BoomCrash_ScalpTakeProfitUSD);
          if(profit >= scalpTarget)
@@ -12390,12 +5356,18 @@ void ManageBoomCrashSpikeClose()
       
       if(UseSpikeAutoClose && !shouldClose)
       {
-         // ❌ ANCIENNES RÈGLES DÉSACTIVÉES - Trailing Stop 20% utilisé à la place (voir lignes 11898-11928)
-         // La fermeture immédiate est remplacée par un trailing stop qui protège 80% du gain max.
-         // Le trailing stop est géré plus haut dans le code (section scalpExitReady).
+         // Fermer dès gain >= BoomCrashSpikeTP (ex. 0.05$), minimum 0.01$
+         double firstSpikeTarget = MathMax(0.01, BoomCrashSpikeTP);
 
-         // RÈGLE SÉVÈRE: Fermer aussi si perte légère (désactivable — évite faux « spike »)
-         if(SpikeAutoCloseAllowLightLossExit && !shouldClose && profit <= -0.5)
+         if(profit >= firstSpikeTarget)
+         {
+            shouldClose = true;
+            closeReason = "Spike capté - FERMETURE IMPÉRATIVE";
+            Print("?? FERMETURE OBLIGATOIRE - Spike détecté, fermeture immédiate avant tout autre trade");
+         }
+         
+         // RÈGLE SÉVÈRE: Fermer aussi si perte légère pour éviter drawdown
+         if(!shouldClose && profit <= -0.5)
          {
             shouldClose = true;
             closeReason = "Perte légère après spike - FERMETURE SÉCURITÉ";
@@ -12426,105 +5398,21 @@ void ManageBoomCrashSpikeClose()
             {
                g_secondSpikeReentryArmed = true;
                g_secondSpikeReentryArmTime = TimeCurrent();
-               string reDir = "SELL";
-               if(StringFind(symbol, "Boom") >= 0)
-                  reDir = "BUY";
-               else if(StringFind(symbol, "Crash") >= 0)
-                  reDir = "SELL";
-               else if(SMC_GetSymbolCategory(symbol) == SYM_VOLATILITY)
-                  reDir = (posInfo.PositionType() == POSITION_TYPE_BUY ? "BUY" : "SELL");
-               g_secondSpikeReentryDirection = reDir;
+               g_secondSpikeReentryDirection = (StringFind(symbol, "Boom") >= 0 ? "BUY" : "SELL");
                Print("🎯 2e spike imminent - réentrée armée | dir=", g_secondSpikeReentryDirection,
                      " | p=", DoubleToString(spikeProbArm * 100.0, 1), "%");
             }
             
             if(UseNotifications)
             {
-               double minSpikeLbl = MathMax(SpikeClosedNotifyMinProfitUSD,
-                                             MathMax(BoomCrashSpikeTP, SpikeTradeCapturedMinProfitUSD));
-               bool exactSpike = (StringFind(closeReason, "Spike capté") >= 0 && profit + 1e-9 >= minSpikeLbl);
-               string head;
-               if(SpikeClosedNotifyOnlyExactSpike)
-               {
-                  if(exactSpike)
-                     head = "Spike fermé (gain confirmé)";
-                  else if(StringFind(closeReason, "Spike capté") >= 0)
-                     head = "Synthèse: fermeture gain mini (pas spike confirmé)";
-                  else
-                     head = "Synthèse: fermeture scalp";
-               }
-               else
-                  head = "Spike / synthèse fermé";
-
-               string msg = head + " - " + symbol + " - " + closeReason +
-                            " | P/L " + DoubleToString(profit, 2) + "$";
-               Alert(msg);
-               SendNotification(msg);
+               Alert("?? Spike fermé - ", symbol, " - ", closeReason);
+               SendNotification("?? Spike fermé - " + symbol + " - " + closeReason);
             }
          }
          else
          {
             int err = GetLastError();
             Print("? EA ÉCHEC FERMETURE SPIKE - ", symbol, " | ticket=", ticket, " | code=", err);
-         }
-      }
-   }
-}
-
-// Fermeture prioritaire Boom/Crash + Gainx/Painx : tout petit profit net avant TP (indépendant de UseSpikeAutoClose).
-void ManageSynthSecureProfitClose()
-{
-   if(!SynthSecureCloseAnyProfit)
-      return;
-   int minHold = SynthSecureCloseMinHoldSec;
-   if(minHold < 0) minHold = 0;
-
-   datetime nowTick = TimeCurrent();
-   static datetime lastSynthCloseLogPrint = 0;
-
-   if(PositionsTotal() == 0)
-      return;
-
-   for(int i = PositionsTotal() - 1; i >= 0; i--)
-   {
-      if(!posInfo.SelectByIndex(i))
-         continue;
-      if(!EA_IsOurTradeMagic(posInfo.Magic()))
-         continue;
-
-      string symbol = posInfo.Symbol();
-      if(!EA_IsBoomCrashOrGainxPainxForSpikeAutoClose(symbol))
-         continue;
-
-      string comment = posInfo.Comment();
-      if(StringFind(comment, "EXC_RECOVERY_") >= 0)
-         continue;
-
-      int ageSec = (int)(nowTick - posInfo.Time());
-      if(ageSec < minHold)
-         continue;
-
-      double net = posInfo.Profit() + posInfo.Swap() + posInfo.Commission();
-      double need = SynthSecureCloseMinNetUsd;
-      bool inProfit = (need <= 0.0 ? (net > 1e-8) : (net + 1e-9 >= need));
-      if(!inProfit)
-         continue;
-
-      ulong ticket = posInfo.Ticket();
-      if(!PositionSelectByTicket(ticket))
-         continue;
-
-      string reason = "Synth secure — profit net avant TP";
-      if(PositionCloseWithLog(ticket, reason))
-      {
-         if(symbol == _Symbol)
-            g_lastBoomCrashPrice = 0.0;
-
-         if(nowTick - lastSynthCloseLogPrint >= 120)
-         {
-            Print("?? Synth sécurisé — fermé profit net | ", symbol, " ticket=", ticket,
-                  " net=", DoubleToString(net, 4), "$ | age=", ageSec, "s");
-            lastSynthCloseLogPrint = nowTick;
          }
       }
    }
@@ -12557,16 +5445,14 @@ void ManageDollarExits()
    
    for(int i = PositionsTotal() - 1; i >= 0; i--)
    {
-      ulong ticket = PositionGetTicket(i);
-      if(ticket == 0) continue;
-      if(!PositionSelectByTicket(ticket)) continue;
-
-      string symbol = PositionGetString(POSITION_SYMBOL);
+      string symbol = PositionGetSymbol(i);
       if(symbol == "") continue;
-
+      
+      ulong ticket = PositionGetInteger(POSITION_TICKET);
+      if(ticket == 0) continue;
       double profit = PositionGetDouble(POSITION_PROFIT);
       double swap = PositionGetDouble(POSITION_SWAP);
-      double commission = SMC_PositionDealCommission((ulong)PositionGetInteger(POSITION_IDENTIFIER));
+      double commission = PositionGetDouble(POSITION_SWAP); // Commission incluse dans le swap sur MT5
       double totalPnL = profit + swap + commission;
       ENUM_SYMBOL_CATEGORY cat = SMC_GetSymbolCategory(symbol);
       
@@ -12577,22 +5463,17 @@ void ManageDollarExits()
       if(secondsSinceOpen < 30) // Moins de 30 secondes
       {
          // Coupure d'urgence Boom/Crash même si trade trop récent
-         if(UseMaxLossBoomCrashPerTrade && cat == SYM_BOOM_CRASH && totalPnL <= -BoomCrashEffectiveMaxLossCloseUSD())
+         if(UseMaxLossBoomCrashPerTrade && cat == SYM_BOOM_CRASH && totalPnL <= -MaxLossBoomCrashPerTradeUSD)
          {
             Print("?? BOOM/CRASH MAX LOSS (urgence) - Fermeture même si trade récent | ", symbol,
                   " | PnL=", DoubleToString(totalPnL, 2), "$ | Seuil=-",
-                  DoubleToString(BoomCrashEffectiveMaxLossCloseUSD(), 2), "$ | age=", secondsSinceOpen, "s | ticket=", ticket);
+                  DoubleToString(MaxLossBoomCrashPerTradeUSD, 2), "$ | age=", secondsSinceOpen, "s | ticket=", ticket);
             if(PositionSelectByTicket(ticket))
                PositionCloseWithLog(ticket, "Boom/Crash max loss per trade (urgence)");
             continue;
          }
          
-         static datetime lastRecentTradeLog = 0;
-         if(TimeCurrent() - lastRecentTradeLog >= 120)
-         {
-            Print("?? DEBUG - Trade trop récent - ", symbol, " | Ouvert il y a: ", secondsSinceOpen, "s | Profit: ", DoubleToString(profit, 2), "$");
-            lastRecentTradeLog = TimeCurrent();
-         }
+         Print("?? DEBUG - Trade trop récent - ", symbol, " | Ouvert il y a: ", secondsSinceOpen, "s | Profit: ", DoubleToString(profit, 2), "$");
          continue; // Ignorer ce trade pour l'instant
       }
       
@@ -12614,11 +5495,11 @@ void ManageDollarExits()
       // Boom/Crash: perte max par trade (fermeture immédiate si dépassement)
       if(UseMaxLossBoomCrashPerTrade && cat == SYM_BOOM_CRASH)
       {
-         if(totalPnL <= -BoomCrashEffectiveMaxLossCloseUSD())
+         if(totalPnL <= -MaxLossBoomCrashPerTradeUSD)
          {
             Print("?? BOOM/CRASH MAX LOSS - Fermeture position | ", symbol,
                   " | PnL=", DoubleToString(totalPnL, 2), "$ | Seuil=-",
-                  DoubleToString(BoomCrashEffectiveMaxLossCloseUSD(), 2), "$ | ticket=", ticket);
+                  DoubleToString(MaxLossBoomCrashPerTradeUSD, 2), "$ | ticket=", ticket);
 
             if(PositionSelectByTicket(ticket))
             {
@@ -12689,7 +5570,7 @@ void ManageDollarExits()
             if(CloseBoomCrashPosition(ticket, symbol))
             {
                Print("?? EA Boom/Crash fermé après spike (gain > ", DoubleToString(BoomCrashSpikeTP, 2), "$): ", DoubleToString(profit, 2), "$ | ticket=", ticket, " - ", symbol);
-               if(symbol == _Symbol) { g_lastBoomCrashPrice = 0.0; }
+               if(symbol == _Symbol) { g_lastBoomCrashPrice = 0; }
             }
             continue;
          }
@@ -12868,9 +5749,7 @@ void DrawAllIndicatorGraphics()
 {
    // DÉTECTION ANTI-REPAINT DES SWING POINTS
    DetectNonRepaintingSwingPoints();
-   const bool gomLight = (UseInternalGOMEngine && GOM_InternalLightChart);
-   if(!gomLight)
-      DrawConfirmedSwingPoints();
+   DrawConfirmedSwingPoints();
    
    // DÉTECTION SPÉCIALE BOOM/CRASH (ANTI-SPIKE)
    if(StringFind(_Symbol, "Boom") >= 0 || StringFind(_Symbol, "Crash") >= 0)
@@ -12885,47 +5764,7 @@ void DrawAllIndicatorGraphics()
       // (objectif: aucune création BUY_LIMIT/SELL_LIMIT, uniquement market via touch M5).
       // CheckSMCChannelReturnMovements();
    }
-
-   // Mode graphique léger GOM : sinon on ne dessinait plus OTE+Fibo (zones invisibles).
-   if(gomLight)
-   {
-      if(ChartsShowOnlyOteAndFibo && ShowOTEImbalanceOnChart && UseOTE)
-      {
-         GOM_DeleteM1ForecastChartOverlay();
-         ObjectsDeleteAll(0, "SMC_FUT_CANDLE_");
-         ObjectsDeleteAll(0, "SMC_FUT_WICK_");
-         ObjectDelete(0, "SMC_FUT_CHAN_UPPER");
-         ObjectDelete(0, "SMC_FUT_CHAN_LOWER");
-         ObjectDelete(0, "SMC_FUT_STATUS");
-         ObjectsDeleteAll(0, "SMC_FVG_");
-         ObjectsDeleteAll(0, "SMC_IFVG_");
-         ObjectsDeleteAll(0, "SMC_OB_");
-         ObjectsDeleteAll(0, "SMC_Confirmed_SH_");
-         ObjectsDeleteAll(0, "SMC_Confirmed_SL_");
-         DrawFibonacciOnChart();
-         DrawOTEImbalanceOnChart();
-      }
-      return;
-   }
-
-   if(ChartsShowOnlyOteAndFibo)
-   {
-      GOM_DeleteM1ForecastChartOverlay();
-      ObjectsDeleteAll(0, "SMC_FUT_CANDLE_");
-      ObjectsDeleteAll(0, "SMC_FUT_WICK_");
-      ObjectDelete(0, "SMC_FUT_CHAN_UPPER");
-      ObjectDelete(0, "SMC_FUT_CHAN_LOWER");
-      ObjectDelete(0, "SMC_FUT_STATUS");
-      ObjectsDeleteAll(0, "SMC_FVG_");
-      ObjectsDeleteAll(0, "SMC_IFVG_");
-      ObjectsDeleteAll(0, "SMC_OB_");
-      ObjectsDeleteAll(0, "SMC_Confirmed_SH_");
-      ObjectsDeleteAll(0, "SMC_Confirmed_SL_");
-      DrawFibonacciOnChart();
-      DrawOTEImbalanceOnChart();
-      return;
-   }
-
+   
    // AFFICHAGE STATUT IA ET PRÉDICTIONS
    DrawAIStatusAndPredictions();
    
@@ -12962,557 +5801,13 @@ void DrawAllIndicatorGraphics()
    PredictFutureProtectedPoints();
 }
 
-//+------------------------------------------------------------------+
-//| Moteur interne GOM (proxy logique dashboards Divine / Phantom)   |
-//+------------------------------------------------------------------+
-int Gom_CountTouchesNearLevel(const string sym, const ENUM_TIMEFRAMES tf, const double level,
-                              const bool forBuySupport, const int lookback, const double zoneHalfWidth)
-{
-   if(level <= 0.0 || lookback < 5 || zoneHalfWidth <= 0.0)
-      return 0;
-   MqlRates r[];
-   ArraySetAsSeries(r, true);
-   int n = CopyRates(sym, tf, 0, lookback, r);
-   if(n < 5)
-      return 0;
-   int cnt = 0;
-   for(int i = 1; i < n; i++)
-   {
-      if(forBuySupport)
-      {
-         if(r[i].low <= level + zoneHalfWidth && r[i].low >= level - zoneHalfWidth)
-            cnt++;
-      }
-      else
-      {
-         if(r[i].high >= level - zoneHalfWidth && r[i].high <= level + zoneHalfWidth)
-            cnt++;
-      }
-   }
-   return cnt;
-}
-
-bool Gom_LtfClosedBarIsBullishPattern()
-{
-   double o = iOpen(_Symbol, LTF, 1);
-   double h = iHigh(_Symbol, LTF, 1);
-   double l = iLow(_Symbol, LTF, 1);
-   double c = iClose(_Symbol, LTF, 1);
-   double range = h - l;
-   if(range <= 0.0)
-      return false;
-   double bodyPct = MathAbs(c - o) / range * 100.0;
-   double lwPct = (MathMin(o, c) - l) / range * 100.0;
-   double uwPct = (h - MathMax(o, c)) / range * 100.0;
-   bool pin = (lwPct >= GOM_PinMinDirTailPct && bodyPct <= GOM_PinMaxBodyPct && uwPct <= GOM_PinMaxOppWickPct);
-   bool doji = (bodyPct <= GOM_DojiMaxBodyPct && lwPct >= GOM_DojiMinDirShadowPct);
-   return (pin || doji);
-}
-
-bool Gom_LtfClosedBarIsBearishPattern()
-{
-   double o = iOpen(_Symbol, LTF, 1);
-   double h = iHigh(_Symbol, LTF, 1);
-   double l = iLow(_Symbol, LTF, 1);
-   double c = iClose(_Symbol, LTF, 1);
-   double range = h - l;
-   if(range <= 0.0)
-      return false;
-   double bodyPct = MathAbs(c - o) / range * 100.0;
-   double lwPct = (MathMin(o, c) - l) / range * 100.0;
-   double uwPct = (h - MathMax(o, c)) / range * 100.0;
-   bool pin = (uwPct >= GOM_PinMinDirTailPct && bodyPct <= GOM_PinMaxBodyPct && lwPct <= GOM_PinMaxOppWickPct);
-   bool doji = (bodyPct <= GOM_DojiMaxBodyPct && uwPct >= GOM_DojiMinDirShadowPct);
-   return (pin || doji);
-}
-
-void GOM_InternalEngine_Update()
-{
-   if(!UseInternalGOMEngine)
-   {
-      g_gomVerdictLabel = "OFF";
-      return;
-   }
-   int interval = MathMax(3, GOM_EngineUpdateIntervalSec);
-   if(g_gomLastUpdate > 0 && (TimeCurrent() - g_gomLastUpdate) < interval)
-      return;
-   g_gomLastUpdate = TimeCurrent();
-
-   g_gomScoreBuy = 0.0;
-   g_gomScoreSell = 0.0;
-   g_gomBias = 0;
-   g_gomVerdict = 0.0;
-   g_gomAtrVolOk = true;
-
-   const string sym = _Symbol;
-
-   if(GOM_UseAtrVolatilityFilter && atrHandle != INVALID_HANDLE)
-   {
-      double ab[];
-      ArraySetAsSeries(ab, true);
-      if(CopyBuffer(atrHandle, 0, 0, 55, ab) >= 50)
-      {
-         double atr0 = ab[0];
-         double sum = 0.0;
-         for(int i = 0; i < 50; i++)
-            sum += ab[i];
-         double mean = sum / 50.0;
-         if(mean > 1e-12)
-         {
-            double ratio = atr0 / mean;
-            g_gomAtrVolOk = (ratio <= GOM_MaxAtrVs50Avg);
-            if(g_gomAtrVolOk)
-            {
-               g_gomScoreBuy += 0.15;
-               g_gomScoreSell += 0.15;
-            }
-         }
-         else
-         {
-            g_gomScoreBuy += 0.15;
-            g_gomScoreSell += 0.15;
-         }
-      }
-      else
-      {
-         g_gomScoreBuy += 0.15;
-         g_gomScoreSell += 0.15;
-      }
-   }
-   else
-   {
-      g_gomScoreBuy += 0.15;
-      g_gomScoreSell += 0.15;
-   }
-
-   ENUM_TIMEFRAMES tfs[4] = { PERIOD_H1, PERIOD_H4, PERIOD_D1, PERIOD_W1 };
-   bool useTf[4];
-   useTf[0] = GOM_InternalUseH1;
-   useTf[1] = GOM_InternalUseH4;
-   useTf[2] = GOM_InternalUseD1;
-   useTf[3] = GOM_InternalUseW1;
-   int lb = MathMax(2, GOM_LineBreakPeriod);
-   int sh = MathMax(lb * 3, 3);
-   int wBuy = 0, wSell = 0, wTot = 0;
-   for(int t = 0; t < 4; t++)
-   {
-      if(!useTf[t])
-         continue;
-      wTot++;
-      double c1 = iClose(sym, tfs[t], 1);
-      double c0 = iClose(sym, tfs[t], sh);
-      if(c1 > c0)
-         wBuy++;
-      else if(c1 < c0)
-         wSell++;
-   }
-   if(wTot > 0)
-   {
-      double alignBuy = (double)wBuy / (double)wTot;
-      double alignSell = (double)wSell / (double)wTot;
-      g_gomScoreBuy += 0.30 * alignBuy;
-      g_gomScoreSell += 0.30 * alignSell;
-   }
-
-   if(GOM_UseEma50_100_200_Stack)
-   {
-      int h100 = iMA(sym, HTF, 100, 0, MODE_EMA, PRICE_CLOSE);
-      double cht = iClose(sym, HTF, 1);
-      double b50[], b100[], b200[];
-      ArraySetAsSeries(b50, true);
-      ArraySetAsSeries(b100, true);
-      ArraySetAsSeries(b200, true);
-      bool ok = (ema50H != INVALID_HANDLE && ema200H != INVALID_HANDLE && h100 != INVALID_HANDLE);
-      if(ok && CopyBuffer(ema50H, 0, 0, 1, b50) >= 1 && CopyBuffer(h100, 0, 0, 1, b100) >= 1 && CopyBuffer(ema200H, 0, 0, 1, b200) >= 1)
-      {
-         if(cht > b50[0] && b50[0] > b100[0] && b100[0] > b200[0])
-            g_gomScoreBuy += 0.25;
-         if(cht < b50[0] && b50[0] < b100[0] && b100[0] < b200[0])
-            g_gomScoreSell += 0.25;
-      }
-      if(h100 != INVALID_HANDLE)
-         IndicatorRelease(h100);
-   }
-
-   if(GOM_UseFvgConfluence && UseFVG)
-   {
-      FVGData fvg;
-      if(SMC_DetectFVG(sym, LTF, GOM_FvgLookbackBars, fvg))
-      {
-         if(fvg.direction == 1)
-            g_gomScoreBuy += 0.15;
-         else if(fvg.direction == -1)
-            g_gomScoreSell += 0.15;
-      }
-   }
-
-   if(GOM_EnableHtfHierarchyFilter)
-   {
-      if(IsBullishHTF())
-         g_gomScoreBuy += 0.10;
-      if(IsBearishHTF())
-         g_gomScoreSell += 0.10;
-   }
-
-   if(GOM_UseDirectionalPinDojiPatterns)
-   {
-      if(Gom_LtfClosedBarIsBullishPattern())
-         g_gomScoreBuy += 0.05;
-      if(Gom_LtfClosedBarIsBearishPattern())
-         g_gomScoreSell += 0.05;
-   }
-
-   if(GOM_UseTouchLevelScoring && atrHandle != INVALID_HANDLE)
-   {
-      double ab2[];
-      ArraySetAsSeries(ab2, true);
-      double atrv = 0.0;
-      if(CopyBuffer(atrHandle, 0, 0, 1, ab2) >= 1)
-         atrv = ab2[0];
-      if(atrv > 0.0)
-      {
-         double zone = atrv * (GOM_TouchZonePctOfAtr / 100.0);
-         double sup = GetSupportLevelTF(PERIOD_H1, 20);
-         double res = GetResistanceLevelTF(PERIOD_H1, 20);
-         int tb = Gom_CountTouchesNearLevel(sym, LTF, sup, true, GOM_TouchLookbackBars, zone);
-         int ts = Gom_CountTouchesNearLevel(sym, LTF, res, false, GOM_TouchLookbackBars, zone);
-         g_gomScoreBuy += MathMin(0.10, 0.02 * tb);
-         g_gomScoreSell += MathMin(0.10, 0.02 * ts);
-      }
-   }
-
-   g_gomScoreBuy = MathMin(1.0, g_gomScoreBuy);
-   g_gomScoreSell = MathMin(1.0, g_gomScoreSell);
-
-   if(g_gomScoreBuy > g_gomScoreSell + 0.08)
-      g_gomBias = 1;
-   else if(g_gomScoreSell > g_gomScoreBuy + 0.08)
-      g_gomBias = -1;
-   else
-      g_gomBias = 0;
-
-   g_gomVerdict = MathMax(g_gomScoreBuy, g_gomScoreSell);
-
-   if(GOM_UseAtrVolatilityFilter && !g_gomAtrVolOk)
-      g_gomVerdictLabel = "VOL_BLOCK";
-   else if(g_gomVerdict < GOM_VerdictGoodAbs)
-      g_gomVerdictLabel = "WAIT";
-   else if(g_gomBias == 1 && g_gomScoreBuy >= GOM_VerdictPerfectAbs)
-      g_gomVerdictLabel = "PERFECT_BUY";
-   else if(g_gomBias == -1 && g_gomScoreSell >= GOM_VerdictPerfectAbs)
-      g_gomVerdictLabel = "PERFECT_SELL";
-   else if(g_gomBias == 1)
-      g_gomVerdictLabel = "GOOD_BUY";
-   else if(g_gomBias == -1)
-      g_gomVerdictLabel = "GOOD_SELL";
-   else
-      g_gomVerdictLabel = "MIXED";
-
-   if(GOM_DebugEngineLogs)
-   {
-      static datetime lastLog = 0;
-      if(TimeCurrent() - lastLog >= 30)
-      {
-         Print("GOM interne | ", sym, " | label=", g_gomVerdictLabel,
-               " | buy=", DoubleToString(g_gomScoreBuy, 3), " sell=", DoubleToString(g_gomScoreSell, 3),
-               " | bias=", g_gomBias, " | ATRok=", (g_gomAtrVolOk ? "1" : "0"));
-         lastLog = TimeCurrent();
-      }
-   }
-}
-
-// Aucune entrée au marché si le plan GOM embarqué est WAIT, ou (sans script embarqué) verdict interne WAIT/VOL_BLOCK.
-bool GOM_MarketEntryBlockedByFinalWait(const string forDirection = "")
-{
-   if(AllowDerivArrowDespiteGomWait && forDirection != "" &&
-      SMC_IsTouchEntryArmedForDirection(forDirection))
-      return false;
-
-   if(UseEmbeddedGomKolaSidoScript && g_lastPlanDir == "WAIT")
-      return true;
-   if(UseInternalGOMEngine && GOM_FilterOrdersByEngine && !UseEmbeddedGomKolaSidoScript &&
-      (g_gomVerdictLabel == "WAIT" || g_gomVerdictLabel == "VOL_BLOCK"))
-      return true;
-   return false;
-}
-
-bool GOM_Internal_TradeGateAllows(const string directionUpper)
-{
-   if(GOM_MarketEntryBlockedByFinalWait(directionUpper))
-      return false;
-
-   if(AllowDerivArrowDespiteGomWait && SMC_IsTouchEntryArmedForDirection(directionUpper))
-      return true;
-   if(!UseInternalGOMEngine || !GOM_FilterOrdersByEngine)
-      return true;
-   if(GOM_UseAtrVolatilityFilter && !g_gomAtrVolOk)
-      return false;
-
-   string d = directionUpper;
-   StringToUpper(d);
-   if(d == "BUY")
-   {
-      if(GOM_EnableHtfHierarchyFilter && !IsBullishHTF())
-         return false;
-      if(IsBoomSymbol(_Symbol) && SMC_ContextBlockBoomBuyFromBearSweep())
-         return false;
-      if(g_gomScoreBuy < GOM_VerdictGoodAbs)
-         return false;
-      if(g_gomBias != 1)
-         return false;
-      if(GOM_UseDirectionalPinDojiPatterns && GOM_RequirePinDojiForMarket && !Gom_LtfClosedBarIsBullishPattern())
-         return false;
-      return true;
-   }
-   if(d == "SELL")
-   {
-      if(GOM_EnableHtfHierarchyFilter && !IsBearishHTF())
-         return false;
-      if(IsCrashSymbol(_Symbol) && SMC_ContextBlockCrashSellFromBullSweep())
-         return false;
-      if(g_gomScoreSell < GOM_VerdictGoodAbs)
-         return false;
-      if(g_gomBias != -1)
-         return false;
-      if(GOM_UseDirectionalPinDojiPatterns && GOM_RequirePinDojiForMarket && !Gom_LtfClosedBarIsBearishPattern())
-         return false;
-      return true;
-   }
-   return false;
-}
-
-// Ouverture marché (magic InpMagicNumber) à la 1ère apparition du plan GOM = flèche GOM_PLAN_ARROW.
-void GOM_TryMarketEntryOnPlanArrowRise(const bool isBoom, const bool isCrash,
-                                      const string dirTxt, const double bid, const double ask, const double atr,
-                                      const double spikeProb01)
-{
-   if(!EnableAutoMarketOnGomPlanArrow) return;
-   if(!UseEmbeddedGomKolaSidoScript) return;
-   if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) || !MQLInfoInteger(MQL_TRADE_ALLOWED)) return;
-   if(BlockAllTrades) return;
-   if(bid <= 0.0 || ask <= 0.0) return;
-   if(dirTxt != "BUY" && dirTxt != "SELL") return;
-   if(!GOM_IsDirectionAllowedForSymbol(dirTxt)) return;
-   if(UseStrictUTCTradeWindows && !SMC_IsStrictUTCTradingWindowOpen()) return;
-   if(UsePropiceSymbolsFilter && !g_currentSymbolIsPropice && !GOM_PlanQualityMatchesDirection(dirTxt))
-   {
-      static datetime s_lastPropicePlanLog = 0;
-      if(TimeCurrent() - s_lastPropicePlanLog >= 120)
-      {
-         s_lastPropicePlanLog = TimeCurrent();
-         Print("GOM_PLAN_ARROW ignoré: symbole non propice (filtre horaire) | ", _Symbol, " | ", g_lastPlanQuality);
-      }
-      return;
-   }
-   if(!GOM_Internal_TradeGateAllows(dirTxt))
-   {
-      Print("GOM_PLAN_ARROW ignoré: gate moteur GOM (WAIT/VOL/score) | ", _Symbol, " | ", g_lastPlanQuality);
-      return;
-   }
-
-   if(GomPlanArrowRequireChartArrowObject && ObjectFind(0, "GOM_PLAN_ARROW") < 0) return;
-
-   if(isBoom && dirTxt != "BUY") return;
-   if(isCrash && dirTxt != "SELL") return;
-
-   if(GomPlanArrowRespectSmcSweepConflict)
-   {
-      if(isBoom && dirTxt == "BUY" && GOM_BoomBuyBlockedByOppositeSmcSweep(GomPlanArrowSweepConflictMaxAgeSec))
-      {
-         Print("GOM_PLAN_ARROW BUY ignoré (Boom): sweep SELL SMC récent ou conflit SMC_SWEEP_DIRECTION");
-         return;
-      }
-      if(isCrash && dirTxt == "SELL" && GOM_CrashSellBlockedByOppositeSmcSweep(GomPlanArrowSweepConflictMaxAgeSec))
-      {
-         Print("GOM_PLAN_ARROW SELL ignoré (Crash): sweep BUY SMC récent ou conflit SMC_SWEEP_DIRECTION");
-         return;
-      }
-   }
-
-   const double atrGate = (atr > 0.0 && MathIsValidNumber(atr)) ? atr : MathMax(bid * 0.0015, SymbolInfoDouble(_Symbol, SYMBOL_POINT) * 100.0);
-   const double ptGate = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
-   const int dgGate = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
-
-   if(GomPlanArrowRequireNearKolaM5Entry && atrGate > 0.0)
-   {
-      const string gvPx = "GOM_SCRIPT_" + _Symbol + "_";
-      const double m5BuyLv = ReadGVDirect("GOM_KOLA_" + _Symbol + "_M5_BUY", 0.0);
-      const double m5SellLv = ReadGVDirect("GOM_KOLA_" + _Symbol + "_M5_SELL", 0.0);
-      const double buyEntryGV = GlobalVariableGet(gvPx + "BUY_ENTRY");
-      const double sellEntryGV = GlobalVariableGet(gvPx + "SELL_ENTRY");
-      const double minAbsDist = MathMax(ptGate * 8.0, atrGate * 0.06);
-      double maxDist = atrGate * GomPlanArrowNearM5EntryMaxAtrMult;
-      if(GomPlanArrowNearEntrySpikeRelaxProb > 1e-9 && spikeProb01 >= GomPlanArrowNearEntrySpikeRelaxProb && GomPlanArrowNearEntrySpikeRelaxAtrMult > 1.0 + 1e-9)
-      {
-         if((dirTxt == "BUY" && isBoom) || (dirTxt == "SELL" && isCrash))
-            maxDist *= GomPlanArrowNearEntrySpikeRelaxAtrMult;
-      }
-      if(GomPlanArrowRelaxNearM5OnGoodPerfect && GOM_PlanQualityMatchesDirection(dirTxt))
-         maxDist *= 3.0;
-      if(maxDist < minAbsDist) maxDist = minAbsDist;
-
-      if(dirTxt == "BUY")
-      {
-         double refBuy = (buyEntryGV > 0.0 && MathIsValidNumber(buyEntryGV)) ? buyEntryGV : m5BuyLv;
-         if(refBuy <= 0.0 || !MathIsValidNumber(refBuy))
-         {
-            Print("GOM_PLAN_ARROW BUY ignoré: aucun BUY_ENTRY / M5_BUY valide pour contrôle distance");
-            return;
-         }
-         if(MathAbs(bid - refBuy) > maxDist)
-         {
-            Print("GOM_PLAN_ARROW BUY ignoré: bid trop loin du niveau d'entrée (|bid-ref|=",
-                  DoubleToString(MathAbs(bid - refBuy), dgGate), " max=", DoubleToString(maxDist, dgGate), ")");
-            return;
-         }
-         if(GomPlanArrowBuyCloserToBuySideM5 && isBoom && m5BuyLv > 0.0 && m5SellLv > 0.0)
-         {
-            const double dBuy = MathAbs(bid - m5BuyLv);
-            const double dSell = MathAbs(bid - m5SellLv);
-            const double tieEps = MathMax(ptGate * 5.0, atrGate * 0.02);
-            if(dSell + tieEps < dBuy)
-            {
-               Print("GOM_PLAN_ARROW BUY ignoré (Boom): prix plus proche du SELL M5 que du BUY M5 (zone vendeuse)");
-               return;
-            }
-         }
-      }
-      else if(dirTxt == "SELL")
-      {
-         double refSell = (sellEntryGV > 0.0 && MathIsValidNumber(sellEntryGV)) ? sellEntryGV : m5SellLv;
-         if(refSell <= 0.0 || !MathIsValidNumber(refSell))
-         {
-            Print("GOM_PLAN_ARROW SELL ignoré: aucun SELL_ENTRY / M5_SELL valide pour contrôle distance");
-            return;
-         }
-         if(MathAbs(ask - refSell) > maxDist)
-         {
-            Print("GOM_PLAN_ARROW SELL ignoré: ask trop loin du niveau d'entrée (|ask-ref|=",
-                  DoubleToString(MathAbs(ask - refSell), dgGate), " max=", DoubleToString(maxDist, dgGate), ")");
-            return;
-         }
-         if(GomPlanArrowSellCloserToSellSideM5 && isCrash && m5BuyLv > 0.0 && m5SellLv > 0.0)
-         {
-            const double dBuy = MathAbs(ask - m5BuyLv);
-            const double dSell = MathAbs(ask - m5SellLv);
-            const double tieEps = MathMax(ptGate * 5.0, atrGate * 0.02);
-            if(dBuy + tieEps < dSell)
-            {
-               Print("GOM_PLAN_ARROW SELL ignoré (Crash): prix plus proche du BUY M5 que du SELL M5 (zone acheteuse)");
-               return;
-            }
-         }
-      }
-   }
-
-   if(!GOM_BypassBoomCrashIAForGomPlan(dirTxt) && !IsBoomCrashDirectionAllowedByIA(_Symbol, dirTxt))
-   {
-      Print("GOM_PLAN_ARROW ignoré: IA incompatible (Boom/Crash) | ", _Symbol, " | IA=", g_lastAIAction, " | plan=", g_lastPlanQuality);
-      return;
-   }
-
-   const int cd = MathMax(0, GomPlanArrowMarketCooldownSec);
-   if(cd > 0 && g_gomLastPlanArrowMarketTime > 0 && (TimeCurrent() - g_gomLastPlanArrowMarketTime) < cd)
-      return;
-   if(!IsProfitabilityGuardEntryAllowed(dirTxt, "GOM_PLAN_ARROW")) return;
-
-   if(CountPositionsOurEA() >= MaxPositionsTerminal) return;
-   if(GomPlanArrowRespectMaxPositions)
-   {
-      if(SMC_GetSymbolCategory(_Symbol) == SYM_BOOM_CRASH)
-      {
-         if(CountAllPositionsOnSymbolAnyMagic(_Symbol) >= 1) return;
-      }
-      else if(CountPositionsForSymbol(_Symbol) >= 1)
-         return;
-   }
-   if(GOM_ShouldAbortEntryForOppositeM5Line(dirTxt, _Symbol, bid, ask, atr))
-   {
-      Print("🚫 GOM_PLAN_ARROW — entrée annulée (correction: ligne M5 KOLA opposée trop proche du prix) | ",
-            dirTxt, " | ", _Symbol);
-      return;
-   }
-   if(!CanOpenAdditionalPositionForSymbol(_Symbol, dirTxt)) return;
-   if(!TryAcquireOpenLock()) return;
-
-   const string gvPfx = "GOM_SCRIPT_" + _Symbol + "_";
-   double sl = GlobalVariableGet(gvPfx + "SL");
-   double tp1 = GlobalVariableGet(gvPfx + "TP1");
-   const double atrUse = (atr > 0.0) ? atr : bid * 0.0015;
-   if(sl <= 0.0 || !MathIsValidNumber(sl))
-   {
-      if(dirTxt == "BUY")
-         sl = NormalizeDouble(bid - MathMax(atrUse * 0.55, SymbolInfoDouble(_Symbol, SYMBOL_POINT) * 10.0), (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS));
-      else
-         sl = NormalizeDouble(ask + MathMax(atrUse * 0.55, SymbolInfoDouble(_Symbol, SYMBOL_POINT) * 10.0), (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS));
-   }
-   if(tp1 <= 0.0 || !MathIsValidNumber(tp1))
-   {
-      if(dirTxt == "BUY")
-         tp1 = NormalizeDouble(ask + MathMax(atrUse * 1.1, SymbolInfoDouble(_Symbol, SYMBOL_POINT) * 15.0), (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS));
-      else
-         tp1 = NormalizeDouble(bid - MathMax(atrUse * 1.1, SymbolInfoDouble(_Symbol, SYMBOL_POINT) * 15.0), (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS));
-   }
-
-   double pt = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
-   if(pt <= 0.0) pt = 0.1;
-   const int stopsPts = (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
-   if(dirTxt == "BUY")
-      GOM_AdjustPendingStopsForBroker(ORDER_TYPE_BUY, ask, sl, tp1, pt, stopsPts);
-   else
-      GOM_AdjustPendingStopsForBroker(ORDER_TYPE_SELL, bid, sl, tp1, pt, stopsPts);
-
-   double vmin = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
-   double vmax = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
-   double vstep = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
-   if(vmin <= 0.0) vmin = 0.01;
-   if(vmax <= 0.0) vmax = 100.0;
-   if(vstep <= 0.0) vstep = 0.01;
-   double vol = GomPlanArrowMarketLots;
-   vol = MathMax(vol, vmin);
-   vol = MathMin(vol, vmax);
-   vol = NormalizeDouble(MathFloor(vol / vstep + 1e-12) * vstep, 8);
-
-   trade.SetExpertMagicNumber(InpMagicNumber);
-   trade.SetDeviationInPoints(120);
-   trade.SetTypeFilling(ORDER_FILLING_IOC);
-
-   const string cmt = "GOM_PLAN_ARROW";
-   bool ok = false;
-   if(dirTxt == "BUY")
-      ok = trade.Buy(vol, _Symbol, 0.0, sl, tp1, cmt);
-   else
-      ok = trade.Sell(vol, _Symbol, 0.0, sl, tp1, cmt);
-
-   ReleaseOpenLock();
-
-   if(ok)
-   {
-      g_gomLastPlanArrowMarketTime = TimeCurrent();
-      if(SMC_GetSymbolCategory(_Symbol) == SYM_BOOM_CRASH)
-         RegisterBoomCrashMarketEntry();
-      Print("GOM_PLAN_ARROW -> marché ", dirTxt, " lot=", DoubleToString(vol, 2), " SL=", DoubleToString(sl, (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS)),
-            " TP1=", DoubleToString(tp1, (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS)));
-      if(NotifyOnNewPosition)
-         GOM_AlertPush("GOM plan arrow", dirTxt + " " + _Symbol + " lot " + DoubleToString(vol, 2), NotifySoundNewPosition);
-   }
-   else
-      Print("GOM_PLAN_ARROW marché échoué: ", trade.ResultRetcodeDescription());
-}
-
 // Dessine sur le graphique la confluence OTE(0.62-0.786) + Imbalance(FVG)
 // pour Forex/Metal/Commodity (style ICT visuel).
 void DrawOTEImbalanceOnChart()
 {
-   if(!ShowOTEImbalanceOnChart) return;
-   if(!UseOTE) return;
-
    ENUM_SYMBOL_CATEGORY cat = SMC_GetSymbolCategory(_Symbol);
-   if(!(cat == SYM_FOREX || cat == SYM_METAL || cat == SYM_COMMODITY ||
-        cat == SYM_BOOM_CRASH || cat == SYM_VOLATILITY)) return;
-   const bool oteVisualMinimal = ChartsShowOnlyOteAndFibo;
-   // Mode graphique complet sans FVG : pas de couche OTE+imbalance (évite rectangle sans imbalance).
-   if(!oteVisualMinimal && !UseFVG) return;
+   if(!(cat == SYM_FOREX || cat == SYM_METAL || cat == SYM_COMMODITY || cat == SYM_BOOM_CRASH)) return;
+   if(!UseFVG || !UseOTE) return;
 
    // Supprimer les anciens dessins OTE/Imbalance (pour ne pas saturer le chart)
    ObjectsDeleteAll(0, "SMC_OTEIMB_");
@@ -13585,8 +5880,7 @@ void DrawOTEImbalanceOnChart()
    double zoneLow = 0.0, zoneHigh = 0.0;
    bool confluenceOk = false;
 
-   // En mode « OTE+Fibo seul » on dessine aussi le FVG si UseFVG (sinon pas de confluence visuelle).
-   if(UseFVG && SMC_DetectFVG(_Symbol, LTF, 40, fvg))
+   if(SMC_DetectFVG(_Symbol, LTF, 40, fvg))
    {
       if((dir == "BUY" && fvg.direction == 1) || (dir == "SELL" && fvg.direction == -1))
       {
@@ -13668,162 +5962,23 @@ void DrawOTEImbalanceOnChart()
          ObjectSetInteger(0, nameTP, OBJPROP_WIDTH, 2);
       }
    }
-   else if(oteVisualMinimal && oteZHigh > oteZLow)
-   {
-      // Sans confluence FVG+OTE : repères Entry/SL/TP sur bord OTE + swing (mode graphique léger).
-      double entry = (dir == "BUY") ? oteZLow : oteZHigh;
-      double sl    = (dir == "BUY") ? lastSL : lastSH;
-      double risk  = (dir == "BUY") ? (entry - sl) : (sl - entry);
-      if(risk > SymbolInfoDouble(_Symbol, SYMBOL_POINT) * 5.0)
-      {
-         double tp = (dir == "BUY") ? (entry + (MathMax(3.0, InpRiskReward) * risk)) : (entry - (MathMax(3.0, InpRiskReward) * risk));
-
-         string nameEntry = "SMC_OTEIMB_ENTRY";
-         string nameSL    = "SMC_OTEIMB_SL";
-         string nameTP    = "SMC_OTEIMB_TP";
-
-         if(ObjectFind(0, nameEntry) < 0) ObjectCreate(0, nameEntry, OBJ_HLINE, 0, 0, entry);
-         ObjectSetDouble(0, nameEntry, OBJPROP_PRICE, entry);
-         ObjectSetInteger(0, nameEntry, OBJPROP_COLOR, clrDodgerBlue);
-         ObjectSetInteger(0, nameEntry, OBJPROP_STYLE, STYLE_DOT);
-         ObjectSetInteger(0, nameEntry, OBJPROP_WIDTH, 2);
-
-         if(ObjectFind(0, nameSL) < 0) ObjectCreate(0, nameSL, OBJ_HLINE, 0, 0, sl);
-         ObjectSetDouble(0, nameSL, OBJPROP_PRICE, sl);
-         ObjectSetInteger(0, nameSL, OBJPROP_COLOR, clrRed);
-         ObjectSetInteger(0, nameSL, OBJPROP_STYLE, STYLE_DASH);
-         ObjectSetInteger(0, nameSL, OBJPROP_WIDTH, 2);
-
-         if(ObjectFind(0, nameTP) < 0) ObjectCreate(0, nameTP, OBJ_HLINE, 0, 0, tp);
-         ObjectSetDouble(0, nameTP, OBJPROP_PRICE, tp);
-         ObjectSetInteger(0, nameTP, OBJPROP_COLOR, clrLimeGreen);
-         ObjectSetInteger(0, nameTP, OBJPROP_STYLE, STYLE_DOT);
-         ObjectSetInteger(0, nameTP, OBJPROP_WIDTH, 2);
-      }
-   }
-}
-
-//=== PRE-TRADE VALIDATION FUNCTIONS ============================================
-
-bool ValidateTradeMarketConditions(string symbol)
-{
-   // Check if market is open and price data is fresh
-   double ask = SymbolInfoDouble(symbol, SYMBOL_ASK);
-   double bid = SymbolInfoDouble(symbol, SYMBOL_BID);
-   double spread = ask - bid;
-   double avgSpread = SymbolInfoInteger(symbol, SYMBOL_SPREAD) * SymbolInfoDouble(symbol, SYMBOL_POINT);
-
-   // 1. Check spread is reasonable (not >3x normal)
-   if(avgSpread > 0 && spread > avgSpread * 3.0) {
-      if(DebugMode) Print("⚠️ SPREAD WARNING: ", spread, " > 3x normal (", avgSpread, ")");
-      return false;
-   }
-
-   // 2. Check price data freshness (within 5 seconds)
-   datetime lastTick = (datetime)SymbolInfoInteger(symbol, SYMBOL_TIME);
-   if(TimeCurrent() - lastTick > 5) {
-      if(DebugMode) Print("⚠️ STALE PRICE: ", TimeCurrent() - lastTick, " seconds old");
-      return false;
-   }
-
-   return true;
-}
-
-bool ValidateTradeRisk(double lotSize, double slPoints, double entryPrice)
-{
-   // Pre-trade validation: margin, spread, max loss
-
-   double marginRequired = 0;
-   if(!OrderCalcMargin(ORDER_TYPE_BUY, _Symbol, lotSize, entryPrice, marginRequired)) {
-      if(DebugMode) Print("❌ Cannot calculate margin requirement");
-      return false;
-   }
-
-   double freeMargin = AccountInfoDouble(ACCOUNT_MARGIN_FREE);
-   if(marginRequired > freeMargin * 0.9) { // Leave 10% safety buffer
-      if(DebugMode) Print("❌ Insufficient margin: required=", marginRequired, " available=", freeMargin);
-      return false;
-   }
-
-   // Check max loss per trade
-   if(slPoints > 0) {
-      double pointValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
-      double potentialLoss = slPoints * pointValue * lotSize;
-
-      // Use MT5_MAX_LOSS_PER_TRADE from environment or default 3.0
-      double maxLossUSD = 3.0;
-      if(potentialLoss > maxLossUSD) {
-         if(DebugMode) Print("❌ Potential loss too high: ", potentialLoss, " > ", maxLossUSD);
-         return false;
-      }
-   }
-
-   return true;
 }
 
 void OnTick()
 {
+   // Fermeture urgence perte excessive : uniquement cette boucle à chaque tick (léger).
+   ClosePositionsWithExcessiveLoss();
+
    static datetime lastProcess = 0;
    static datetime lastGraphicsUpdate = 0;
    static datetime lastDashboardUpdate = 0;
    static datetime lastPropiceInfoLog = 0;
    static datetime lastStatsUpdate = 0;
-   static datetime lastRiskCheck = 0;
-   static datetime lastCleanup = 0;
    datetime currentTime = TimeCurrent();
 
-   // GARBAGE COLLECTION: Clean expired drawings aggressively (every 10 seconds)
-   // TODO: Fix GOM_CleanExpiredDrawings parameter conflict
-   // if(DrawingsMaxAgeMinutes > 0 && (lastCleanup == 0 || (currentTime - lastCleanup) >= 10))
-   // {
-   //    lastCleanup = currentTime;
-   //    int maxAgeSec = DrawingsMaxAgeMinutes * 60; // Convert minutes to seconds
-   //    GOM_CleanExpiredDrawings(maxAgeSec);
-   // }
-
-   const int riskEvery = MathMax(1, OnTickRiskCheckIntervalSec);
-   const bool runRiskChecks = (lastRiskCheck == 0 || (currentTime - lastRiskCheck) >= riskEvery);
-   if(runRiskChecks)
-   {
-      lastRiskCheck = currentTime;
-      ClosePositionsWithExcessiveLoss();
-      if(!BlockAllTrades && (ClosePositionWhenPriceHitsOppositeM5KolaLine || ClosePositionWhenTouchesDrawnM5EntryOpposite))
-         GOM_ManageExitOpenPositionsNearOppositeM5Kola();
-      if(!BlockAllTrades && SynthSecureCloseAnyProfit)
-         ManageSynthSecureProfitClose();
-      if(!BlockAllTrades)
-      {
-         UpdateDailyEquityStats();
-         ActivateProfitLockIfNeeded();
-         ManageSalvageBankDailyProtection();
-      }
-   }
-
-   // Tout le reste throttlé — évite de saturer le CPU / l’interface MT5.
-   if(currentTime - lastProcess < MathMax(1, GOM_OnTickMainThrottleSec)) return;
+   // Tout le reste au plus toutes les 2 s — évite de saturer le CPU / l’interface MT5.
+   if(currentTime - lastProcess < 2) return;
    lastProcess = currentTime;
-
-   // Dashboard ML en premier (visible même si BlockAllTrades / pause / UltraLight)
-   if(UseEnhancedDashboard && currentTime - lastDashboardUpdate >= MathMax(5, DashboardRefreshSeconds))
-   {
-      lastDashboardUpdate = currentTime;
-      // Clean expired drawings before rendering fresh dashboard
-      if(DrawingsMaxAgeMinutes > 0)
-         // GOM_CleanExpiredDrawings(); // TODO: Fix parameter conflict with GOM_Enhanced_Dashboard
-      UpdateDashboard();
-
-      // Afficher signal ML du dashboard (TODO: réactiver après fix)
-      // DisplayMLSignal();
-   }
-
-   MaybeUpdateTradingAgentsFromOnTick(currentTime);
-
-   // DISABLED: COpportunityScanner not defined
-   // if(EnableOpportunityScanner && g_OpportunityScanner != NULL && GOM_IsOpportunityScannerOwnerChart())
-   //    g_OpportunityScanner.ScanMarkets(ScannerSymbolsList);
-
-   if(UseEmbeddedGomKolaSidoScript && !UltraLightMode)
-      GomKolaSidoEmbedded_ProcessFrame();
 
    int gfxEvery = ChartGraphicsUpdateIntervalSec;
    if(gfxEvery < 5) gfxEvery = 5;
@@ -13923,14 +6078,8 @@ void OnTick()
       return; // Sortir - aucun trading pendant la pause
    }
 
-   // MOTEUR GOM - Doit s'exécuter TOUJOURS pour maintenir verdict à jour
-   GOM_InternalEngine_Update();
-
    if(!SMC_IsStrictUTCTradingWindowOpen())
    {
-      // Indiquer au dashboard que le robot est en pause UTC
-      GlobalVariableSet("EA_DASH_UTC_PAUSE", 1.0);
-
       static datetime lastUtcWindowPauseLog = 0;
       if(currentTime - lastUtcWindowPauseLog >= 60)
       {
@@ -13959,19 +6108,10 @@ void OnTick()
       }
       return; // Gestion risque déjà exécutée en début de OnTick
    }
-
-   GlobalVariableSet("EA_DASH_UTC_PAUSE", 0.0);
-
+   
    // STRATÉGIES PAR CATÉGORIE DE SYMBOLE (Boom/Crash, Volatility, Forex/Metals)
    // Anti-duplication immédiat: avant toute tentative de placement de LIMIT
    EnsureSinglePendingLimitOrderForSymbol(_Symbol);
-
-   // SNIPER MODULES - Mise à jour + voting system
-   LiquiditySniperModule_Update();
-   SniperRadarModule_Update();
-   SniperModules_ComputeVote();
-   SniperModules_DrawGraphics();
-
    RunCategoryStrategy();
    
    // Gestion des positions existantes (fermeture rapide après spike)
@@ -13979,25 +6119,30 @@ void OnTick()
    // Gestion des sorties en dollars (TP/SL globaux + BoomCrashSpikeTP)
    ManageDollarExits();
 
-   // Pause journalière (gain cible, profit lock, salvage bank, etc.)
-   if(IsDailyProfitPauseActive())
+   // Protection "profit lock": éviter de rendre un gros gain du jour
+   if(!UsePerSymbolDailyObjectiveOnly)
    {
-      // Comme hors fenêtre UTC / BlockAllTrades : ne pas figer l'affichage IA (sinon tableau de bord reste sans décision)
-      if(!UltraLightMode)
+      UpdateDailyEquityStats();
+      ActivateProfitLockIfNeeded();
+      if(IsDailyProfitPauseActive())
       {
-         MaybeUpdateAIServerFromOnTick(currentTime);
-         if(ShowChartGraphics && currentTime - lastGraphicsUpdate >= gfxEvery)
+         // Comme hors fenêtre UTC / BlockAllTrades : ne pas figer l'affichage IA (sinon tableau de bord reste sans décision)
+         if(!UltraLightMode)
          {
-            lastGraphicsUpdate = currentTime;
-            DrawAllIndicatorGraphics();
+            MaybeUpdateAIServerFromOnTick(currentTime);
+            if(ShowChartGraphics && currentTime - lastGraphicsUpdate >= gfxEvery)
+            {
+               lastGraphicsUpdate = currentTime;
+               DrawAllIndicatorGraphics();
+            }
+            if(UseDashboard && currentTime - lastDashboardUpdate >= 15)
+            {
+               lastDashboardUpdate = currentTime;
+               UpdateDashboard();
+            }
          }
-         if(UseDashboard && currentTime - lastDashboardUpdate >= 15)
-         {
-            lastDashboardUpdate = currentTime;
-            UpdateDashboard();
-         }
+         return;
       }
-      return;
    }
    
    // Modification SL dynamique OBLIGATOIRE (plus de condition)
@@ -14009,50 +6154,7 @@ void OnTick()
    }
    else
    {
-      // 🎯 NOUVEAU: Détection spike + Trailing Stop avancé Boom/Crash (avant trailing classique)
-      if(EnableBoomCrashAdvancedTrailing)
-      {
-         ENUM_SYMBOL_CATEGORY cat = SMC_GetSymbolCategory(_Symbol);
-         if(cat == SYM_BOOM_CRASH)
-         {
-            // 1. Détecter spike
-            string spikeDirection = "";
-            double spikePercent = 0.0;
-            bool spikeDetected = g_spikeDetector.DetectSpike(spikeDirection, spikePercent);
-
-            if(spikeDetected)
-            {
-               Print("🎯 SPIKE DÉTECTÉ ", _Symbol, " | ", spikeDirection, " | ",
-                     DoubleToString(spikePercent, 2), "% en ", BoomCrashSpikeDetectionWindow, "s");
-            }
-
-            // 2. Gérer trailing stop avancé sur positions Boom/Crash
-            for(int i = PositionsTotal() - 1; i >= 0; i--)
-            {
-               ulong ticket = PositionGetTicket(i);
-               if(ticket == 0) continue;
-
-               if(!PositionSelectByTicket(ticket)) continue;
-               if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
-
-               // Vérifier si c'est notre EA
-               long mg = (long)PositionGetInteger(POSITION_MAGIC);
-               if(mg != InpMagicNumber) continue;
-
-               // Initialiser trailing si nouvelle position
-               if(g_boomCrashTrailing.positionTicket != ticket)
-               {
-                  g_boomCrashTrailing.Init(ticket, _Symbol);
-                  Print("🎯 Trailing Boom/Crash initialisé pour position #", ticket);
-               }
-
-               // Mettre à jour trailing (mode spike si détecté)
-               g_boomCrashTrailing.Update(spikeDetected);
-            }
-         }
-      }
-
-      ManageTrailingStop(); // OBLIGATOIRE - s'exécute toujours (trailing classique pour autres symboles)
+      ManageTrailingStop(); // OBLIGATOIRE - s'exécute toujours
    }
    
    // Si on est en mode ultra léger: ne pas lancer l'IA ni mettre à jour les graphiques/dashboard
@@ -14154,32 +6256,25 @@ void OnTick()
       UpdateM5EntryLevelsAndLines();
    }
    
-   // BLOCAGE DES ORDRES AU MARCHÉ CLASSIQUES - TOUCH M5 OU ENTRY M1 (si verdict directionnel)
-   // Les ordres au marché sont autorisés si:
-   // - lignes M5 actives, OU
-   // - entry M1 disponible + verdict BUY/SELL/GOOD/PERFECT
-   bool verdictAllowsM1 = IsDirectionalTradeQuality(g_lastPlanQuality);
-   double m1BuyEntry = ReadGV("GOM_KOLA", "M1", "BUY");
-   double m1SellEntry = ReadGV("GOM_KOLA", "M1", "SELL");
-   bool hasM1Entry = verdictAllowsM1 && ((m1BuyEntry > 0.0) || (m1SellEntry > 0.0));
-
+   // BLOCAGE DES ORDRES AU MARCHÉ CLASSIQUES - SEULS LES TOUCH M5 SONT AUTORISÉS
+   // Les ordres au marché ne sont autorisés que si le prix touche les lignes BUY/SELL ENTRY M5
    if(UsePropiceSymbolsFilter && g_currentSymbolIsPropice)
    {
-      // Si aucune ligne M5 active ET pas d'entrée M1 valide, bloquer les ordres au marché classiques
-      if(!g_m5BuyLevelActive && !g_m5SellLevelActive && !hasM1Entry)
+      // Si aucune ligne M5 active, bloquer les ordres au marché classiques
+      if(!g_m5BuyLevelActive && !g_m5SellLevelActive)
       {
          static datetime lastM5NoLinesLog = 0;
          if(TimeCurrent() - lastM5NoLinesLog >= 120)
          {
             lastM5NoLinesLog = TimeCurrent();
-            Print("🚫 PAS DE LIGNES M5 NI ENTRY M1 - Ordres au marché bloqués sur ", _Symbol,
+            Print("🚫 PAS DE LIGNES M5 ACTIVES - Ordres au marché bloqués sur ", _Symbol,
                   " (log max 1x/120s — évite ralentissement MT5)");
-            Print("   💡 Autorisé: touch BUY/SELL ENTRY M5, ou ENTRY M1 si verdict BUY/SELL/GOOD/PERFECT");
+            Print("   💡 Seuls les trades au touch des lignes BUY/SELL ENTRY M5 sont autorisés");
          }
       }
       else
       {
-         // Autoriser ExecuteAIDecisionMarketOrder() si M5 actif OU M1 valide
+         // Autoriser ExecuteAIDecisionMarketOrder() uniquement si lignes M5 actives
          ExecuteAIDecisionMarketOrder();
       }
    }
@@ -14234,18 +6329,18 @@ void OnTick()
       }
    }
    
-   // RÈGLE STRICTE: PAS D'ORDRES LIMIT SI PAS DE TOUCH BUY/SELL ENTRY M5 ET PAS D'ENTRY M1 VALIDE
-   // Seuls les trades au touch M5 ou sur entry M1 (verdict directionnel) sont autorisés
+   // RÈGLE STRICTE: PAS D'ORDRES LIMIT SI PAS DE TOUCH BUY/SELL ENTRY M5
+   // Seuls les trades au touch des lignes M5 sont autorisés
    if(UsePropiceSymbolsFilter && g_currentSymbolIsPropice)
    {
-      // Vérifier si les lignes BUY/SELL ENTRY M5 sont actives, sinon fallback M1 si verdict directionnel
-      if(!g_m5BuyLevelActive && !g_m5SellLevelActive && !hasM1Entry)
+      // Vérifier si les lignes BUY/SELL ENTRY M5 sont actives
+      if(!g_m5BuyLevelActive && !g_m5SellLevelActive)
       {
          // Si aucune ligne M5 active, supprimer les ordres LIMIT existants
          if(CountOpenLimitOrdersForSymbol(_Symbol) > 0)
          {
-            Print("🚫 PAS DE LIGNES M5 NI ENTRY M1 - Suppression ordres LIMIT sur ", _Symbol);
-            Print("   💡 Les ordres LIMIT ne sont autorisés que si M5 actif ou ENTRY M1 avec verdict directionnel");
+            Print("🚫 PAS DE LIGNES M5 ACTIVES - Suppression ordres LIMIT sur ", _Symbol);
+            Print("   💡 Les ordres LIMIT ne sont autorisés que si BUY/SELL ENTRY M5 sont actives");
             
             // Supprimer tous les ordres LIMIT
             for(int i = OrdersTotal() - 1; i >= 0; i--)
@@ -14270,21 +6365,6 @@ void OnTick()
                }
             }
          }
-      }
-   }
-
-   // Ordres LIMIT (magie EA): autorisés seulement si le verdict plan GOM est GOOD ou PERFECT.
-   if(!IsGoodOrPerfectVerdictQuality(g_lastPlanQuality))
-   {
-      if(CountOpenLimitOrdersForSymbol(_Symbol) > 0)
-      {
-         static datetime s_lastVerdictLimitCancelLog = 0;
-         if(TimeCurrent() - s_lastVerdictLimitCancelLog >= 120)
-         {
-            s_lastVerdictLimitCancelLog = TimeCurrent();
-            Print("🚫 LIMIT EA annulés — verdict requis GOOD/PERFECT (actuel: ", g_lastPlanQuality, ") | ", _Symbol);
-         }
-         CancelAllPendingLimitOrdersForSymbol(_Symbol);
       }
    }
    
@@ -14314,182 +6394,22 @@ void OnTick()
    // Fermeture profit-only par symbole à 3$ (POSITION_PROFIT uniquement)
    CloseAllPositionsIfSymbolProfitReached(3.0);
 
-   // TABLEAU DE BORD legacy (mode non-ML uniquement)
-   if(!UseEnhancedDashboard && currentTime - lastDashboardUpdate >= MathMax(15, DashboardRefreshSeconds))
+   // TABLEAU DE BORD CONTRÔLÉ (toutes les 15 secondes)
+   if(currentTime - lastDashboardUpdate >= 15)
    {
       lastDashboardUpdate = currentTime;
       UpdateDashboard();
    }
 }
 
-// Ligne IA (réutilisée par le dashboard SMC complet et le coin GOM intégré).
-void GetAIDashboardStatus(string &aiStatus, color &aiLineCol)
-{
-   if(!UseAIServer)
-   {
-      aiStatus = "IA: désactivé (UseAIServer=false)";
-      aiLineCol = clrSilver;
-      return;
-   }
-   int ageSec = (g_lastAIUpdate > 0) ? (int)(TimeCurrent() - g_lastAIUpdate) : -1;
-   bool stale = (g_lastAIUpdate > 0 && ageSec > AI_MaxSignalAgeSeconds);
-   string agePart = (ageSec >= 0) ? (" | âge=" + IntegerToString(ageSec) + "s") : " | âge=?";
-   string primaryUrl = GOM_AiServerBasePrimary();
-   if(StringLen(primaryUrl) > 52)
-      primaryUrl = StringSubstr(primaryUrl, 0, 49) + "...";
-   string urlPart = " | " + primaryUrl;
-
-   aiLineCol = clrAqua;
-   if(g_lastAIAction != "")
-   {
-      string sig = g_lastAIAction;
-      if(sig == "BUY" || sig == "buy")
-      {
-         sig = "BUY";
-         aiLineCol = clrLimeGreen;
-      }
-      else if(sig == "SELL" || sig == "sell")
-      {
-         sig = "SELL";
-         aiLineCol = clrTomato;
-      }
-      else if(sig == "HOLD" || sig == "hold")
-      {
-         sig = "HOLD";
-         aiLineCol = clrSilver;
-      }
-      else
-         aiLineCol = clrAqua;
-
-      double confPct = NormalizeAIConfidenceUnit() * 100.0;
-      if(confPct > 100.0) confPct = 100.0;
-      if(confPct < 0.0) confPct = 0.0;
-      aiStatus = _Symbol + " | /decision: " + sig + " (" + DoubleToString(confPct, 1) + "%)" + agePart + urlPart;
-      if(stale)
-      {
-         aiStatus += " | STALE";
-         aiLineCol = clrOrange;
-      }
-      if(!g_aiConnected)
-      {
-         aiStatus += " | srv déconnecté";
-         aiLineCol = clrTomato;
-      }
-      if(EnableTradingAgentsInfluence && g_lastTradingAgentsUpdate > 0)
-      {
-         int taAge = (int)(TimeCurrent() - g_lastTradingAgentsUpdate);
-         double taConf = NormalizeTradingAgentsConfidenceUnit() * 100.0;
-         string taAct = g_lastTradingAgentsAction;
-         if(taAct == "") taAct = "HOLD";
-         aiStatus += " | TA=" + taAct + " " + DoubleToString(taConf, 0) + "% (" + IntegerToString(taAge) + "s)";
-      }
-   }
-   else if(g_aiConnected)
-   {
-      aiStatus = "IA[" + _Symbol + "]: connecté — action vide (parse?)" + agePart + urlPart;
-      aiLineCol = clrYellow;
-   }
-   else
-   {
-      aiStatus = "IA[" + _Symbol + "]: pas de décision / serveur OFF" + agePart + urlPart;
-      aiLineCol = clrTomato;
-   }
-}
-
-void GomEmbedded_UpdateAiCornerLabel(void)
-{
-   const string nm = "SMC_GOM_IA_STATUS";
-   if(!ShowAiStatusOnGomEmbeddedChart || UseEnhancedDashboard)
-   {
-      ObjectDelete(0, nm);
-      return;
-   }
-   string aiStatus;
-   color aiLineCol;
-   GetAIDashboardStatus(aiStatus, aiLineCol);
-   if(BlockNewEntriesOnAIDisconnect && UseAIServer && (!g_aiConnected || g_lastAIAction == ""))
-      aiStatus += " | Entrées: filtre IA actif";
-
-   if(ObjectFind(0, nm) < 0)
-      ObjectCreate(0, nm, OBJ_LABEL, 0, 0, 0);
-   ObjectSetInteger(0, nm, OBJPROP_CORNER, CORNER_RIGHT_UPPER);
-   ObjectSetInteger(0, nm, OBJPROP_ANCHOR, ANCHOR_RIGHT_UPPER);
-   ObjectSetInteger(0, nm, OBJPROP_XDISTANCE, 10);
-   ObjectSetInteger(0, nm, OBJPROP_YDISTANCE, 22);
-   ObjectSetString(0, nm, OBJPROP_FONT, "Segoe UI");
-   ObjectSetInteger(0, nm, OBJPROP_FONTSIZE, 8);
-   ObjectSetInteger(0, nm, OBJPROP_COLOR, aiLineCol);
-   ObjectSetString(0, nm, OBJPROP_TEXT, aiStatus);
-   ObjectSetInteger(0, nm, OBJPROP_SELECTABLE, false);
-   ObjectSetInteger(0, nm, OBJPROP_BACK, false);
-   ObjectSetInteger(0, nm, OBJPROP_HIDDEN, false);
-   ObjectSetInteger(0, nm, OBJPROP_ZORDER, MathMax(520, DashboardLabelZOrder + 5));
-}
-
-// Pousse vers GlobalVariables tout ce que le dashboard ML lit (reprise EA + stats jour SMC)
-void PushEaResumeClockForMLDashboard(void)
-{
-   datetime now = TimeCurrent();
-   datetime resume = 0;
-
-   if(g_dailyPauseUntil > now && g_dailyPauseUntil > resume)
-      resume = g_dailyPauseUntil;
-   if(g_dailyLossPauseUntil > now && g_dailyLossPauseUntil > resume)
-      resume = g_dailyLossPauseUntil;
-   if(g_lossPauseUntil > now && g_lossPauseUntil > resume)
-      resume = g_lossPauseUntil;
-
-   for(int i = 0; i < g_pauseCount; i++)
-   {
-      if(g_symbolPauses[i].symbol != _Symbol)
-         continue;
-      if(g_symbolPauses[i].pauseUntil > now && g_symbolPauses[i].pauseUntil > resume)
-         resume = g_symbolPauses[i].pauseUntil;
-   }
-
-   GlobalVariableSet("EA_DASH_RESUME_AT", (double)resume);
-   GlobalVariableSet("EA_DASH_ENABLE_TRADING", EnableTrading ? 1.0 : 0.0);
-   GlobalVariableSet("EA_DASH_UTC_PAUSE", SMC_IsStrictUTCTradingWindowOpen() ? 0.0 : 1.0);
-
-   // Aligner ROBOT_* avec l’état réel de l’EA (évite « STOPPED » uniquement à cause d’anciennes GV RDS)
-   GlobalVariableSet("ROBOT_ACTIVE", EnableTrading ? 1.0 : 0.0);
-   GlobalVariableSet("ROBOT_PAUSED", (resume > now) ? 1.0 : 0.0);
-   GlobalVariableSet("ROBOT_PAUSE_UNTIL", (double)resume);
-   double dailyNetUsd = g_dailyTotalProfit - g_dailyTotalLoss;
-   GlobalVariableSet("ROBOT_DAILY_PROFIT", dailyNetUsd);
-   GlobalVariableSet("EA_DASH_TRADES_DAY", (double)g_dailyTradeCount);
-   GlobalVariableSet("EA_DASH_WINS_DAY", (double)g_dailyWinCount);
-   GlobalVariableSet("EA_DASH_LOSSES_DAY", (double)g_dailyLossCount);
-   GlobalVariableSet("EA_DASH_EQUITY", AccountInfoDouble(ACCOUNT_EQUITY));
-   GlobalVariableSet("EA_DASH_BALANCE", AccountInfoDouble(ACCOUNT_BALANCE));
-}
-
 //| FONCTIONS DE GESTION DES PAUSES ET BLACKLIST TEMPORAIRE        |
 
 void UpdateDashboard()
 {
-   // Afficher le nouveau dashboard ML AWS RDS (prioritaire)
-   if(UseEnhancedDashboard)
-   {
-      PushEaResumeClockForMLDashboard();
-      GlobalVariableSet("EA_DASH_COMMENT_FALLBACK", DashboardMLCommentFallback ? 1.0 : 0.0);
-      if(!DashboardMLCommentFallback)
-         Comment("");
-      ObjectDelete(0, "SMC_GOM_IA_STATUS");
-      ObjectDelete(0, "GOM_MLINFO_BR");
+   // Afficher le tableau MTF (M1/M5/H1 + Verdict final)
+   DisplayMTFDashboard();
 
-      // 🆕 OPTIMIZATION: Clean expired drawings on EVERY dashboard refresh (not every 60s)
-      // This prevents object accumulation and memory leaks
-      if(DrawingsMaxAgeMinutes > 0)
-         GOM_CleanExpiredDrawings(DrawingsMaxAgeMinutes * 60);
-
-      GOM_DrawEnhancedDashboardV3(DashboardMLPosX, DashboardMLPosY, DashboardMLAnchorTop,
-                                  DashboardMLCellWidth, DashboardMLCellHeight, DashboardMLFontSize);
-      ChartRedraw(0);
-      return;
-   }
-
-   // Ancien système de nettoyage (fallback)
+   // Nettoyage périodique des objets graphiques pour éviter l'accumulation
    static datetime lastCleanupTime = 0;
    if(TimeCurrent() - lastCleanupTime >= 600) // Nettoyer toutes les 10 minutes
    {
@@ -14499,36 +6419,6 @@ void UpdateDashboard()
    }
 
    if(!UseDashboard) return;
-
-   // GOM KOLA/SIDO intégré : bandeau bas + cellules + niveaux ; on retire le mur de texte SMC redondant
-   if(UseEmbeddedGomKolaSidoScript && PreferGomDashboardWhenEmbedded)
-   {
-      CleanupDashboardObjects();
-      ObjectDelete(0, "SMC_DASH_UTC_STATUS");
-      ObjectDelete(0, "SMC_PROPICE_LINE");
-      ObjectDelete(0, "SMC_TOP_NET_RIGHT");
-      if(!DashboardUseCommentFallback)
-         Comment("");
-
-      if(ShowMLMetrics && (TimeCurrent() - g_lastMLMetricsUpdate) >= 30)
-         UpdateMLMetricsDisplay();
-
-      static datetime s_lastDashDataFetchGom = 0;
-      if(TimeCurrent() - s_lastDashDataFetchGom >= 30)
-      {
-         if(!FetchPredictionScoreFromServer())
-            g_predictionScoreSource = "N/A";
-         if(!FetchTopNetSummaryFromServer())
-            g_topNetSource = "N/A";
-         s_lastDashDataFetchGom = TimeCurrent();
-      }
-      EnsureLocalSymbolStatsUpToDate();
-      GomEmbedded_UpdateAiCornerLabel();
-      return;
-   }
-
-   ObjectDelete(0, "SMC_GOM_IA_STATUS");
-
    string catStr = "UNKNOWN";
    switch(SMC_GetSymbolCategory(_Symbol))
    {
@@ -14571,11 +6461,11 @@ void UpdateDashboard()
    TimeToStruct(TimeGMT(), gmt);
    int hourUTC = gmt.hour;
    string utcZone = "OFF_ZONE";
-   if(SMC_IsHourInWindowUTC(hourUTC, g_TradeWindow1StartUTC, g_TradeWindow1EndUTC))
+   if(SMC_IsHourInWindowUTC(hourUTC, TradeWindow1StartUTC, TradeWindow1EndUTC))
       utcZone = "ZONE1 03-06";
-   else if(SMC_IsHourInWindowUTC(hourUTC, g_TradeWindow2StartUTC, g_TradeWindow2EndUTC))
+   else if(SMC_IsHourInWindowUTC(hourUTC, TradeWindow2StartUTC, TradeWindow2EndUTC))
       utcZone = "ZONE2 14-16";
-   else if(SMC_IsHourInWindowUTC(hourUTC, g_TradeWindow3StartUTC, g_TradeWindow3EndUTC))
+   else if(SMC_IsHourInWindowUTC(hourUTC, TradeWindow3StartUTC, TradeWindow3EndUTC))
       utcZone = "ZONE3 21-23";
    bool utcTradingOpen = SMC_IsStrictUTCTradingWindowOpen();
    string robotStatus = utcTradingOpen ? "TRADING ACTIF" : "ARRET AUTO";
@@ -14603,7 +6493,64 @@ void UpdateDashboard()
    n++;
    string aiStatus;
    color aiLineCol = clrAqua;
-   GetAIDashboardStatus(aiStatus, aiLineCol);
+   if(!UseAIServer)
+   {
+      aiStatus = "IA: désactivé (UseAIServer=false)";
+      aiLineCol = clrSilver;
+   }
+   else
+   {
+      int ageSec = (g_lastAIUpdate > 0) ? (int)(TimeCurrent() - g_lastAIUpdate) : -1;
+      bool stale = (g_lastAIUpdate > 0 && ageSec > AI_MaxSignalAgeSeconds);
+      string agePart = (ageSec >= 0) ? (" | âge=" + IntegerToString(ageSec) + "s") : " | âge=?";
+      if(g_lastAIAction != "")
+      {
+         // Affichage aligné sur le serveur : uniquement BUY, SELL ou HOLD + confiance (0–100 %)
+         string sig = g_lastAIAction;
+         if(sig == "BUY" || sig == "buy")
+         {
+            sig = "BUY";
+            aiLineCol = clrLimeGreen;
+         }
+         else if(sig == "SELL" || sig == "sell")
+         {
+            sig = "SELL";
+            aiLineCol = clrTomato;
+         }
+         else if(sig == "HOLD" || sig == "hold")
+         {
+            sig = "HOLD";
+            aiLineCol = clrSilver;
+         }
+         else
+            aiLineCol = clrAqua;
+
+         double confPct = NormalizeAIConfidenceUnit() * 100.0;
+         if(confPct > 100.0) confPct = 100.0;
+         if(confPct < 0.0) confPct = 0.0;
+         aiStatus = _Symbol + " | /decision: " + sig + " (" + DoubleToString(confPct, 1) + "%)" + agePart;
+         if(stale)
+         {
+            aiStatus += " | STALE";
+            aiLineCol = clrOrange;
+         }
+         if(!g_aiConnected)
+         {
+            aiStatus += " | srv déconnecté";
+            aiLineCol = clrTomato;
+         }
+      }
+      else if(g_aiConnected)
+      {
+         aiStatus = "IA[" + _Symbol + "]: connecté — action vide (parse?)" + agePart;
+         aiLineCol = clrYellow;
+      }
+      else
+      {
+         aiStatus = "IA[" + _Symbol + "]: pas de décision / serveur OFF" + agePart;
+         aiLineCol = clrTomato;
+      }
+   }
    // Deux lignes: évite la troncature horizontale des labels MT5 (texte coupé sur "confiance...")
    lines[n] = catStr + " | " + bcStr; cols[n] = aiLineCol; n++;
    lines[n] = aiStatus; cols[n] = aiLineCol; n++;
@@ -14956,7 +6903,7 @@ void UpdateMLMetricsDisplay()
    g_lastMLMetricsUpdate = TimeCurrent();
    string symEnc = _Symbol;
    StringReplace(symEnc, " ", "%20");
-   string baseUrl = GOM_AiServerBasePrimary();
+   string baseUrl = UseRenderAsPrimary ? AI_ServerRender : AI_ServerURL;
    string pathMetrics = "/ml/metrics?symbol=" + symEnc + "&timeframe=M1";
    string pathStatus = "/ml/continuous/status";
    string headers = "";
@@ -14969,7 +6916,7 @@ void UpdateMLMetricsDisplay()
    int res = WebRequest("GET", baseUrl + pathMetrics, headers, AI_Timeout_ms, post, result, resultHeaders);
    if(res != 200)
    {
-      string fallbackUrl = GOM_AiServerBaseFallback();
+      string fallbackUrl = UseRenderAsPrimary ? AI_ServerURL : AI_ServerRender;
       Print("?? DEBUG - Fallback ML metrics vers: ", fallbackUrl, pathMetrics);
       res = WebRequest("GET", fallbackUrl + pathMetrics, headers, AI_Timeout_ms2, post, result, resultHeaders);
    }
@@ -15051,7 +6998,7 @@ void UpdateMLMetricsDisplay()
    int resStatus = WebRequest("GET", baseUrl + pathStatus, headers, AI_Timeout_ms, post, result, resultHeaders);
    if(resStatus != 200)
    {
-      string fallbackUrl2 = GOM_AiServerBaseFallback();
+      string fallbackUrl2 = UseRenderAsPrimary ? AI_ServerURL : AI_ServerRender;
       resStatus = WebRequest("GET", fallbackUrl2 + pathStatus, headers, AI_Timeout_ms2, post, result, resultHeaders);
    }
    
@@ -15204,7 +7151,7 @@ bool UpdateAIDecision_Legacy(int timeoutMs = -1)
    StringReplace(symEnc, " ", "%20");
    
    // Utiliser Render en premier si configuré
-   string baseUrl = GOM_AiServerBasePrimary();
+   string baseUrl = UseRenderAsPrimary ? AI_ServerRender : AI_ServerURL;
    string path = "/ml/decision?symbol=" + symEnc + "&timeframe=M1";
    string headers = "";
    char post[], result[];
@@ -15215,7 +7162,7 @@ bool UpdateAIDecision_Legacy(int timeoutMs = -1)
    if(res != 200)
    {
       // Fallback vers l'autre URL si échec
-      string fallbackUrl = GOM_AiServerBaseFallback();
+      string fallbackUrl = UseRenderAsPrimary ? AI_ServerURL : AI_ServerRender;
       res = WebRequest("GET", fallbackUrl + path, headers, timeoutMs > 0 ? timeoutMs : AI_Timeout_ms, post, result, resultHeaders);
       
       if(res != 200)
@@ -15237,7 +7184,7 @@ string GetAISignalData_Legacy(string symbol, string timeframe)
    string symEnc = symbol;
    StringReplace(symEnc, " ", "%20");
    
-   string baseUrl = GOM_AiServerBasePrimary();
+   string baseUrl = UseRenderAsPrimary ? AI_ServerRender : AI_ServerURL;
    string path = "/ml/signal?symbol=" + symEnc + "&timeframe=" + timeframe;
    string headers = "";
    char post[], result[];
@@ -15258,7 +7205,7 @@ string GetTrendAlignmentData_Legacy(string symbol)
    string symEnc = symbol;
    StringReplace(symEnc, " ", "%20");
    
-   string baseUrl = GOM_AiServerBasePrimary();
+   string baseUrl = UseRenderAsPrimary ? AI_ServerRender : AI_ServerURL;
    string path = "/ml/trend_alignment?symbol=" + symEnc;
    string headers = "";
    char post[], result[];
@@ -15279,7 +7226,7 @@ string GetCoherentAnalysisData_Legacy(string symbol)
    string symEnc = symbol;
    StringReplace(symEnc, " ", "%20");
    
-   string baseUrl = GOM_AiServerBasePrimary();
+   string baseUrl = UseRenderAsPrimary ? AI_ServerRender : AI_ServerURL;
    string path = "/ml/coherent_analysis?symbol=" + symEnc;
    string headers = "";
    char post[], result[];
@@ -15405,8 +7352,8 @@ int CountOpenLimitOrdersForSymbol(const string symbol)
    {
       ulong ticket = OrderGetTicket(i);
       if(ticket == 0) continue;
-      if(!EA_SymbolsMatch(OrderGetString(ORDER_SYMBOL), symbol)) continue;
-      if(!EA_IsOurTradeMagic(OrderGetInteger(ORDER_MAGIC))) continue;
+      if(OrderGetString(ORDER_SYMBOL) != symbol) continue;
+      if(OrderGetInteger(ORDER_MAGIC) != InpMagicNumber) continue;
       
       ENUM_ORDER_TYPE t = (ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE);
       if(t == ORDER_TYPE_BUY_LIMIT || t == ORDER_TYPE_SELL_LIMIT)
@@ -16220,9 +8167,6 @@ void PlaceHistoricalBasedScalpingOrders(MqlRates &rates[], int futureBars, doubl
 
 void DetectAndPlaceBoomCrashSpikeOrders(MqlRates &rates[], double currentPrice, double currentATR, bool isBoom, int existingLimitOrders)
 {
-   if(!IsGoodOrPerfectVerdictQuality(g_lastPlanQuality))
-      return;
-
    // VÉRIFICATION ANTI-DUPLICATION - Si position déjà en cours, ne pas placer d'ordres
    int existingPositionsOnSymbol = CountPositionsForSymbol(_Symbol);
    if(existingPositionsOnSymbol > 0)
@@ -16418,9 +8362,6 @@ void DetectAndPlaceBoomCrashSpikeOrders(MqlRates &rates[], double currentPrice, 
 
 void PlaceNormalScalpingOrders(MqlRates &rates[], int futureBars, double currentPrice, double currentATR, double trendSlope)
 {
-   if(!IsGoodOrPerfectVerdictQuality(g_lastPlanQuality))
-      return;
-
    // VÉRIFICATION ANTI-DUPLICATION - Si position déjà en cours, ne pas placer d'ordres
    int existingPositionsOnSymbol = CountPositionsForSymbol(_Symbol);
    if(existingPositionsOnSymbol > 0)
@@ -17074,14 +9015,6 @@ void ExecuteFutureOTETrade(string direction, double entryPrice, double swingLow,
       return;
    }
 
-   string dirGate = direction;
-   StringToUpper(dirGate);
-   if(!GOM_Internal_TradeGateAllows(dirGate))
-   {
-      Print("🚫 OTE FUTURE BLOQUÉ - verdict script WAIT / gate GOM | ", _Symbol);
-      return;
-   }
-
    // Anti-épuisement OTE sur Boom/Crash: éviter BUY déjà en zone premium et SELL déjà trop bas.
    if(OTE_BlockExhaustionNearPremium)
    {
@@ -17151,16 +9084,6 @@ void ExecuteFutureOTETrade(string direction, double entryPrice, double swingLow,
    {
       Print("🚫 OTE FUTURE BLOQUÉ - Espérance finale: ", DoubleToString(expectancy, 3), " < ", DoubleToString(MinExpectancyThreshold, 3));
       return;
-   }
-   
-   {
-      const double bidFt = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-      const double askFt = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-      if(GOM_ShouldAbortEntryForOppositeM5Line(direction, _Symbol, bidFt, askFt, 0.0))
-      {
-         Print("🚫 OTE FUTURE annulé — correction (M5 KOLA opposé trop proche) | ", direction, " | ", _Symbol);
-         return;
-      }
    }
    
    // AJOUT: Vérifier si on doit faire une entrée avant l'OTE pour capturer les spikes
@@ -17381,71 +9304,6 @@ void EnforceMinBoomCrashStopLossDollarRisk(const string symbol, const string dir
    }
 
    stopLoss = sl;
-}
-
-// Plafonne le SL pour que la perte au stop ne dépasse pas MaxLossBoomCrashPerTradeUSD (évite SL ATR trop large → -4$+)
-void EnforceMaxBoomCrashStopLossDollarRisk(const string symbol, const string direction, const double entryPrice, const double volume, double &stopLoss)
-{
-   if(volume <= 0.0) return;
-   if(StringFind(symbol, "Boom") < 0 && StringFind(symbol, "Crash") < 0) return;
-
-   double targetLoss = MaxLossBoomCrashPerTradeUSD;
-   if(targetLoss <= 0.0) return;
-
-   double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
-   double tickSize = SymbolInfoDouble(symbol, SYMBOL_TRADE_TICK_SIZE);
-   if(point <= 0.0) point = _Point;
-   if(tickSize <= 0.0) tickSize = point;
-   if(point <= 0.0 || tickSize <= 0.0) return;
-
-   ENUM_ORDER_TYPE orderType = (direction == "BUY") ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
-   double sl = stopLoss;
-
-   for(int attempt = 0; attempt < 6; attempt++)
-   {
-      double pnlAtSL = 0.0;
-      if(!OrderCalcProfit(orderType, symbol, volume, entryPrice, sl, pnlAtSL))
-         break;
-
-      double absLoss = MathAbs(MathMin(0.0, pnlAtSL));
-      if(absLoss <= targetLoss + 0.05)
-         break;
-
-      double scale = targetLoss / MathMax(absLoss, 0.01);
-      scale = MathMin(1.0, MathMax(0.25, scale));
-      double dist = MathAbs(entryPrice - sl) * scale;
-      dist = MathMax(dist, 20.0 * tickSize);
-
-      if(direction == "BUY")
-         sl = entryPrice - dist;
-      else
-         sl = entryPrice + dist;
-
-      if(direction == "BUY")
-         sl = MathFloor(sl / tickSize) * tickSize;
-      else
-         sl = MathCeil(sl / tickSize) * tickSize;
-
-      sl = NormalizeDouble(sl, _Digits);
-   }
-
-   stopLoss = sl;
-}
-
-void EnforceBoomCrashStopLossDollarRisk(const string symbol, const string direction, const double entryPrice, const double volume, double &stopLoss)
-{
-   EnforceMaxBoomCrashStopLossDollarRisk(symbol, direction, entryPrice, volume, stopLoss);
-   EnforceMinBoomCrashStopLossDollarRisk(symbol, direction, entryPrice, volume, stopLoss);
-   EnforceMaxBoomCrashStopLossDollarRisk(symbol, direction, entryPrice, volume, stopLoss);
-}
-
-double BoomCrashEffectiveMaxLossCloseUSD()
-{
-   double cap = MaxLossBoomCrashPerTradeUSD;
-   if(cap <= 0.0) return 0.0;
-   double buf = MathMax(0.0, MaxLossBoomCrashCloseBufferUSD);
-   if(buf >= cap) buf = cap * 0.5;
-   return cap - buf;
 }
 
 // Valider et ajuster le SL pour les modifications de position
@@ -18718,8 +10576,8 @@ void DrawPredictionChannel()
    string symEnc = _Symbol;
    StringReplace(symEnc, " ", "%20");
    string pathCh = "/prediction-channel?symbol=" + symEnc + "&timeframe=M1&future_bars=" + IntegerToString(PredictionChannelBars);
-   string url1 = GOM_AiServerBasePrimary() + pathCh;
-   string url2 = GOM_AiServerBaseFallback() + pathCh;
+   string url1 = UseRenderAsPrimary ? (AI_ServerRender + pathCh) : (AI_ServerURL + pathCh);
+   string url2 = UseRenderAsPrimary ? (AI_ServerURL + pathCh) : (AI_ServerRender + pathCh);
    string headers = "";
    char post[];
    char result[];
@@ -18983,8 +10841,8 @@ bool FetchFutureCandlesFromServer(int horizon)
    char post[], result[];
    string resultHeaders;
 
-   string url1 = GOM_AiServerBasePrimary() + path;
-   string url2 = GOM_AiServerBaseFallback() + path;
+   string url1 = UseRenderAsPrimary ? (AI_ServerRender + path) : (AI_ServerURL + path);
+   string url2 = UseRenderAsPrimary ? (AI_ServerURL + path) : (AI_ServerRender + path);
    int timeout = MathMax(1500, AI_Timeout_ms);
 
    static datetime lastFutureErrLog = 0;
@@ -19075,8 +10933,8 @@ bool ValidateFuturePredictionRunToServer(int minReadyBars = 30)
    string result_headers;
    StringToCharArray(payload, post_data, 0, StringLen(payload));
 
-   string url1 = GOM_AiServerBasePrimary() + "/robot/prediction/validate-run";
-   string url2 = GOM_AiServerBaseFallback() + "/robot/prediction/validate-run";
+   string url1 = UseRenderAsPrimary ? (AI_ServerRender + "/robot/prediction/validate-run") : (AI_ServerURL + "/robot/prediction/validate-run");
+   string url2 = UseRenderAsPrimary ? (AI_ServerURL + "/robot/prediction/validate-run") : (AI_ServerRender + "/robot/prediction/validate-run");
    int http_result = WebRequest("POST", url1, headers, AI_Timeout_ms, post_data, result_data, result_headers);
    if(http_result != 200)
       http_result = WebRequest("POST", url2, headers, AI_Timeout_ms2, post_data, result_data, result_headers);
@@ -19100,8 +10958,8 @@ bool FetchPredictionScoreFromServer()
    char post[], result[];
    string resultHeaders;
 
-   string url1 = GOM_AiServerBasePrimary() + path;
-   string url2 = GOM_AiServerBaseFallback() + path;
+   string url1 = UseRenderAsPrimary ? (AI_ServerRender + path) : (AI_ServerURL + path);
+   string url2 = UseRenderAsPrimary ? (AI_ServerURL + path) : (AI_ServerRender + path);
 
    int res = WebRequest("GET", url1, headers, MathMax(1500, AI_Timeout_ms), post, result, resultHeaders);
    if(res != 200)
@@ -19135,8 +10993,8 @@ bool FetchTopNetSummaryFromServer()
    string headers = "";
    char post[], result[];
    string resultHeaders;
-   string url1 = GOM_AiServerBasePrimary() + path;
-   string url2 = GOM_AiServerBaseFallback() + path;
+   string url1 = UseRenderAsPrimary ? (AI_ServerRender + path) : (AI_ServerURL + path);
+   string url2 = UseRenderAsPrimary ? (AI_ServerURL + path) : (AI_ServerRender + path);
    int res = WebRequest("GET", url1, headers, MathMax(2000, AI_Timeout_ms), post, result, resultHeaders);
    if(res != 200)
       res = WebRequest("GET", url2, headers, MathMax(3000, AI_Timeout_ms2), post, result, resultHeaders);
@@ -19236,8 +11094,8 @@ bool IsInServerPredictedCorrectionZone()
                                  _Symbol, DoubleToString(mid, _Digits), trend);
    StringToCharArray(payload, post, 0, StringLen(payload));
 
-   string url1 = GOM_AiServerBasePrimary() + path;
-   string url2 = GOM_AiServerBaseFallback() + path;
+   string url1 = UseRenderAsPrimary ? (AI_ServerRender + path) : (AI_ServerURL + path);
+   string url2 = UseRenderAsPrimary ? (AI_ServerURL + path) : (AI_ServerRender + path);
    int res = WebRequest("POST", url1, headers, MathMax(2000, AI_Timeout_ms), post, result, resultHeaders);
    if(res != 200)
       res = WebRequest("POST", url2, headers, MathMax(3000, AI_Timeout_ms2), post, result, resultHeaders);
@@ -20071,15 +11929,6 @@ void ExecuteSignal(SMC_Signal &sig)
       ReleaseOpenLock();
       return;
    }
-
-   string actGate = sig.action;
-   StringToUpper(actGate);
-   if(!GOM_Internal_TradeGateAllows(actGate))
-   {
-      Print("? Signal SMC bloqué - verdict script WAIT / gate GOM | ", _Symbol);
-      ReleaseOpenLock();
-      return;
-   }
    
    // Exiger une décision IA forte + modèle suffisamment précis pour tous les marchés non Boom/Crash
    if(!IsAITradeAllowedForDirection(sig.action) || !IsMLModelTrustedForCurrentSymbol(sig.action))
@@ -20211,18 +12060,6 @@ double CalculateLotSize()
    // Mettre à jour les stats de drawdown journalier
    UpdateDailyEquityStats();
 
-   if(EnableSalvageBankDaily && SalvageBankBlockNewEntriesWhenArmed && g_salvageBankArmed)
-   {
-      static datetime s_lastSalvageArmLotLog = 0;
-      if(TimeCurrent() - s_lastSalvageArmLotLog >= 60)
-      {
-         Print("⏸ Lot=0 — SALVAGE BANK armé (blocage entrées) | seuil armement ",
-               DoubleToString(SalvageBankTriggerDailyProfitUSD, 2), "$");
-         s_lastSalvageArmLotLog = TimeCurrent();
-      }
-      return 0.0;
-   }
-
    // Discipline horaire stricte: aucune nouvelle entrée hors fenêtres UTC.
    if(!SMC_IsStrictUTCTradingWindowOpen())
    {
@@ -20305,15 +12142,10 @@ double CalculateLotSize()
       return 0.0;
    }
 
-   // Si le gain journalier cible est atteint (ou pause active : profit lock / salvage), bloquer nouvelles entrées
-   if(IsDailyProfitPauseActive())
+   // Si le gain journalier cible est atteint, bloquer toute nouvelle entrée jusqu'à fin de journée
+   if(!UsePerSymbolDailyObjectiveOnly && IsDailyProfitPauseActive())
    {
-      static datetime s_lastPauseLotLog = 0;
-      if(TimeCurrent() - s_lastPauseLotLog >= 45)
-      {
-         Print("⏸ Nouvelle entrée bloquée - pause journalière active (gain cible / profit lock / salvage bank).");
-         s_lastPauseLotLog = TimeCurrent();
-      }
+      Print("⏸ Nouvelle entrée bloquée - gain journalier cible atteint (fin de journée).");
       return 0.0;
    }
 
@@ -20416,9 +12248,6 @@ double CalculateLotSize()
 double CalculateLotSizeForPendingOrders()
 {
    UpdateDailyEquityStats();
-
-   if(EnableSalvageBankDaily && SalvageBankBlockNewEntriesWhenArmed && g_salvageBankArmed)
-      return 0.0;
 
    if(IsDailyLossPauseActive() || IsDailyProfitPauseActive() || IsCumulativeLossPauseActive() || IsDailyDrawdownExceeded())
       return 0.0;
@@ -20704,14 +12533,10 @@ bool IsInEquilibriumCorrectionZone()
 // Gain journalier cible atteint → stop trading jusqu'à fin de journée
 bool IsDailyProfitPauseActive()
 {
-   if(g_dailyStartEquity <= 0.0) return false;
+   if(DailyProfitTargetDollars <= 0.0 || g_dailyStartEquity <= 0.0) return false;
 
    datetime now = TimeCurrent();
-   // Pause déjà posée (gain cible, profit lock, salvage bank, etc.) — doit bloquer les entrées même si DailyProfitTargetDollars=0
-   if(g_dailyPauseUntil > now)
-      return true;
-
-   if(DailyProfitTargetDollars <= 0.0) return false;
+   if(g_dailyPauseUntil > now) return true;
 
    double equity = AccountInfoDouble(ACCOUNT_EQUITY);
    double dailyProfit = equity - g_dailyStartEquity;
@@ -20801,74 +12626,6 @@ void ActivateProfitLockIfNeeded()
 
    if(ProfitLockClosePositions)
       CloseAllPositionsAndPendingOurEA("PROFIT LOCK - giveback");
-}
-
-// Gain jour = équité - équité début journée. Arme au-delà de SalvageBankTriggerDailyProfitUSD, puis protège plancher / giveback depuis pic.
-void ManageSalvageBankDailyProtection()
-{
-   if(!EnableSalvageBankDaily) return;
-   if(BlockAllTrades) return;
-
-   UpdateDailyEquityStats();
-   if(g_dailyStartEquity <= 0.0) return;
-
-   MqlDateTime dt;
-   TimeCurrent(dt);
-   const int ymd = dt.year * 10000 + dt.mon * 100 + dt.day;
-   if(ymd != g_salvageBankStateYmd)
-   {
-      g_salvageBankStateYmd = ymd;
-      g_salvageBankArmed = false;
-      g_salvagePeakDailyProfitUSD = 0.0;
-   }
-
-   const double equity = AccountInfoDouble(ACCOUNT_EQUITY);
-   const double dailyProfit = equity - g_dailyStartEquity;
-
-   if(!g_salvageBankArmed)
-   {
-      if(SalvageBankTriggerDailyProfitUSD > 0.0 && dailyProfit >= SalvageBankTriggerDailyProfitUSD)
-      {
-         g_salvageBankArmed = true;
-         g_salvagePeakDailyProfitUSD = dailyProfit;
-         Print("[SALVAGE BANK] armé | gain jour ≈ ", DoubleToString(dailyProfit, 2),
-               "$ (seuil ", DoubleToString(SalvageBankTriggerDailyProfitUSD, 2), "$) — plancher / giveback actifs");
-      }
-      return;
-   }
-
-   if(dailyProfit > g_salvagePeakDailyProfitUSD)
-      g_salvagePeakDailyProfitUSD = dailyProfit;
-
-   const bool hitFloor = (SalvageBankAbsoluteFloorUSD > 0.0 && dailyProfit + 1e-8 < SalvageBankAbsoluteFloorUSD);
-   const bool hitGiveback = (SalvageBankMaxGivebackFromPeakUSD > 0.0 &&
-                             (g_salvagePeakDailyProfitUSD - dailyProfit) + 1e-8 >= SalvageBankMaxGivebackFromPeakUSD);
-
-   if(!hitFloor && !hitGiveback)
-      return;
-
-   Print("[SALVAGE BANK] DÉCLENCHÉ | gain jour=", DoubleToString(dailyProfit, 2), "$ | pic=",
-         DoubleToString(g_salvagePeakDailyProfitUSD, 2), "$ | floor=", (hitFloor ? "OUI" : "NON"),
-         " | giveback=", (hitGiveback ? "OUI" : "NON"));
-
-   if(SalvageBankCloseAllOnTrigger)
-      CloseAllPositionsAndPendingOurEA("SALVAGE BANK protection gain jour");
-
-   if(SalvageBankPauseUntilDayEnd)
-   {
-      MqlDateTime dt2;
-      TimeCurrent(dt2);
-      dt2.hour = 23;
-      dt2.min = 59;
-      dt2.sec = 59;
-      g_dailyPauseUntil = StructToTime(dt2);
-   }
-
-   g_salvageBankArmed = false;
-   g_salvagePeakDailyProfitUSD = 0.0;
-
-   if(UseNotifications)
-      SendNotification("TradBOT SALVAGE BANK: fermeture / pause journée (gain protégé)");
 }
 
 // Vérifie si le modèle ML courant est suffisamment fiable pour autoriser un trade sur ce symbole/catégorie
@@ -21095,9 +12852,6 @@ bool ShouldReplaceLimitOrder(ENUM_ORDER_TYPE orderType, string orderComment, dou
 // Remplace un ordre limite par un nouvel ordre aligné avec l'IA
 bool ReplaceLimitOrder(ENUM_ORDER_TYPE oldOrderType, double oldOrderPrice, string oldOrderComment)
 {
-   if(!IsGoodOrPerfectVerdictQuality(g_lastPlanQuality))
-      return false;
-
    if(!UseAIServer) return false;
    
    string ia = g_lastAIAction;
@@ -21366,8 +13120,8 @@ bool EnsureMLContinuousTrainingRunning(bool forceStart = false)
       return true;
    lastCheck = now;
 
-   string baseUrl = GOM_AiServerBasePrimary();
-   string fallbackUrl = GOM_AiServerBaseFallback();
+   string baseUrl = UseRenderAsPrimary ? AI_ServerRender : AI_ServerURL;
+   string fallbackUrl = UseRenderAsPrimary ? AI_ServerURL : AI_ServerRender;
    string headers = "Content-Type: application/json\r\n";
    char post[], result[];
    string resultHeaders;
@@ -21471,7 +13225,6 @@ void CleanupDashboardObjects()
    
    // Méthode 1: Nettoyer par préfixes connus
    string prefixes[] = {"SMC_DASHBOARD_LABEL", "SMC_DASH_LINE_", "SMC_ML_METRICS_LABEL", "SMC_PROPICE_LINE", "DASH_", "ML_"};
-   // Ne pas supprimer MLDASH_* (dashboard ML actif)
    
    for(int p = 0; p < ArraySize(prefixes); p++)
    {
@@ -21514,9 +13267,7 @@ void CleanupDashboardObjects()
    {
       string objName = ObjectName(0, i);
       
-      // Supprimer tous les objets avec ces préfixes (hors dashboard ML MLDASH_)
-      if(StringFind(objName, "MLDASH_") == 0)
-         continue;
+      // Supprimer tous les objets avec ces préfixes
       if(StringFind(objName, "SMC_DASH_") == 0 ||
          StringFind(objName, "SMC_DASHBOARD_LABEL") == 0 ||
          StringFind(objName, "SMC_ML_") == 0 ||
@@ -21541,10 +13292,6 @@ void CleanupAllChartObjects()
    // Préfixes de tous les objets SMC à nettoyer
    string prefixes[] = {
       "SMC_",           // Tous les objets SMC
-      "GOM_",           // Module GOM intégré
-      "KOLA_",          // Niveaux KOLA
-      "SIDO_",          // Figures SIDO
-      "OTE_SETUP_",     // Setups OTE graphiques
       "FVG_",           // Fair Value Gaps
       "OB_",            // Order Blocks
       "BOS_",           // Break of Structure
@@ -21563,7 +13310,7 @@ void CleanupAllChartObjects()
       "ZONE_",          // Zones (Premium/Discount)
       "PROPICE_",       // Propice symbols
       "ML_",            // ML metrics
-      "DASH_",          // Ancien dashboard (pas MLDASH_ — protégé ci-dessous)
+      "DASH_",          // Dashboard
       "SIGNAL_",        // Signal arrows
       "WARNING_"        // Warnings
    };
@@ -21578,8 +13325,6 @@ void CleanupAllChartObjects()
       for(int i = ObjectsTotal(0) - 1; i >= 0; i--)
       {
          string objName = ObjectName(0, i);
-         if(StringFind(objName, "MLDASH_") == 0)
-            continue;
          if(StringFind(objName, prefix) == 0)  // Commence par le préfixe
          {
             if(ObjectDelete(0, objName))
@@ -22852,12 +14597,6 @@ void ExecuteForexBOSRetest()
       return;
    }
 
-   if(!GOM_Internal_TradeGateAllows(d))
-   {
-      Print("⛔ FOREX BOS+Retest bloqué - moteur GOM interne: ", g_gomVerdictLabel, " | ", _Symbol);
-      return;
-   }
-
    // Lock terminal-level (éviter doubles opens simultanés)
    if(!TryAcquireOpenLock()) return;
 
@@ -23090,8 +14829,8 @@ void TestSupabaseConnectivity()
    
    Print("🔍 TEST CONNECTIVITÉ SUPABASE...");
    
-   string url1 = GOM_AiServerBasePrimary() + "/health";
-   string url2 = GOM_AiServerBaseFallback() + "/health";
+   string url1 = UseRenderAsPrimary ? (AI_ServerRender + "/health") : (AI_ServerURL + "/health");
+   string url2 = UseRenderAsPrimary ? (AI_ServerURL + "/health") : (AI_ServerRender + "/health");
    
    string headers = "Content-Type: application/json\r\n";
    char post_data[], result_data[];
@@ -23140,7 +14879,7 @@ void SyncSymbolTradeStatsToServer()
    }
    
    g_symbolStatsLastSyncAttempt = TimeGMT();
-   Print("🔄 TENTATIVE SYNC SUPABASE - ", _Symbol, " | Serveur: ", GOM_AiServerBasePrimary());
+   Print("🔄 TENTATIVE SYNC SUPABASE - ", _Symbol, " | Serveur: ", UseRenderAsPrimary ? AI_ServerRender : AI_ServerURL);
 
    datetime nowUtc = TimeGMT();
    MqlDateTime dt;
@@ -23208,8 +14947,8 @@ void SyncSymbolTradeStatsToServer()
       _Symbol, monthDate, tcMonth, wMonth, lMonth, netMonth, gpMonth, glMonth, lastMonthMs
    );
 
-   string url1 = GOM_AiServerBasePrimary() + "/mt5/symbol-trade-stats-upload";
-   string url2 = GOM_AiServerBaseFallback() + "/mt5/symbol-trade-stats-upload";
+   string url1 = UseRenderAsPrimary ? (AI_ServerRender + "/mt5/symbol-trade-stats-upload") : (AI_ServerURL + "/mt5/symbol-trade-stats-upload");
+   string url2 = UseRenderAsPrimary ? (AI_ServerURL + "/mt5/symbol-trade-stats-upload") : (AI_ServerRender + "/mt5/symbol-trade-stats-upload");
 
    string headers = "Content-Type: application/json\r\n";
    char post_data[];
@@ -23651,7 +15390,8 @@ void ManageTrailingStop()
       if(!posInfo.SelectByIndex(i)) continue;
       if(posInfo.Magic() != InpMagicNumber) continue;
       
-      // SL dynamique / trailing : Forex, volatilité, métaux, etc. — exclu uniquement Boom/Crash.
+      // Appliquer la modification dynamique des SL à TOUS les symboles tradés
+      // Boom/Crash, Volatility Index, Forex, Métaux - tous éligibles (aucune exclusion)
       string symbol = posInfo.Symbol();
       ENUM_SYMBOL_CATEGORY cat = SMC_GetSymbolCategory(symbol);
       if(cat == SYM_BOOM_CRASH)
@@ -24421,8 +16161,8 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
                   );
 
                   // Envoyer à l'IA server (essayer primaire puis secondaire)
-                  string url1 = GOM_AiServerBasePrimary() + "/trades/feedback";
-                  string url2 = GOM_AiServerBaseFallback() + "/trades/feedback";
+                  string url1 = UseRenderAsPrimary ? (AI_ServerRender + "/trades/feedback") : (AI_ServerURL + "/trades/feedback");
+                  string url2 = UseRenderAsPrimary ? (AI_ServerURL + "/trades/feedback") : (AI_ServerRender + "/trades/feedback");
                   
                   Print("?? ENVOI FEEDBACK IA - URL1: ", url1);
                   Print("?? ENVOI FEEDBACK IA - URL2: ", url2);
@@ -24467,7 +16207,7 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
 // Empreinte cache /decision : symbole + priorité serveur + URLs (invalidation si changement de graphique ou paramètres)
 string AIDecisionCacheFingerprint()
 {
-   return _Symbol + "|" + (UseRenderAsPrimary ? "1" : "0") + "|" + GOM_NormalizeAiServerBaseUrl(AI_ServerURL) + "|" + GOM_NormalizeAiServerBaseUrl(AI_ServerRender);
+   return _Symbol + "|" + (UseRenderAsPrimary ? "1" : "0") + "|" + AI_ServerURL + "|" + AI_ServerRender;
 }
 
 // true si le symbole renvoyé dans JSON /decision correspond au graphique (espaces / casse)
@@ -24529,7 +16269,7 @@ bool GetAISignalData()
    }
    
    // Endpoint POST /decision sur Render ou serveur local
-   string base = GOM_AiServerBasePrimary();
+   string base = UseRenderAsPrimary ? AI_ServerRender : AI_ServerURL;
    string url  = base + "/decision";
    string headers = "Content-Type: application/json\r\n";
    string responseHeaders = ""; // Ne pas réutiliser `headers` : WebRequest écrase le dernier paramètre (retry POST invalide sinon)
@@ -24714,7 +16454,7 @@ bool GetAISignalData()
    // Retry sur le serveur alternatif si le primaire échoue (ex: 127.0.0.1 KO, HTTP -1)
    if(res != 200)
    {
-      string altBase = GOM_AiServerBaseFallback();
+      string altBase = UseRenderAsPrimary ? AI_ServerURL : AI_ServerRender;
       string altUrl  = altBase + "/decision";
       Print("?? ERREUR IA (primaire) HTTP ", res, " | timeout=", tPrimary, "ms | retry: ", altUrl);
       
@@ -25451,8 +17191,8 @@ void CheckAndExecuteDerivArrowTrade()
       return; // Ignorer les autres symboles
    }
 
-   // Boom/Crash: une seule position ouverte par symbole (tout magic — pas de pyramide / pas de 2e entrée flèche).
-   if(isBoomCrash && CountAllPositionsOnSymbolAnyMagic(_Symbol) >= 1)
+   // Boom/Crash: une seule position ouverte par symbole (pas de pyramide / pas de 2e entrée flèche).
+   if(isBoomCrash && CountPositionsForSymbol(_Symbol) >= 1)
    {
       Print("?? DERIV ARROW - Boom/Crash: 1 position max par symbole sur ", _Symbol, " -> skip");
       return;
@@ -25641,26 +17381,24 @@ void CheckAndExecuteDerivArrowTrade()
          if(!HasAnyExposureForSymbol(_Symbol))
          {
             string dir = armedBoom ? "BUY" : "SELL";
-            int posBeforeTouch = CountAllPositionsOnSymbolAnyMagic(_Symbol);
             Print("?? TOUCH (future protect / SR20) => entrée marché immédiate (", dir, ") sur ", _Symbol,
                   " | level=", armedBoom
                                  ? DoubleToString((armedBoomFuture ? g_boomFutureProtectTouchLevel : g_boomSR20TouchLevel), _Digits)
                                  : DoubleToString((armedCrashFuture ? g_crashFutureProtectTouchLevel : g_crashSR20TouchLevel), _Digits));
-            ExecuteDerivArrowTrade(dir);
-
-            if(CountAllPositionsOnSymbolAnyMagic(_Symbol) > posBeforeTouch)
-            {
-               g_boomFutureProtectTouchTime = 0;
-               g_crashFutureProtectTouchTime = 0;
-               g_boomFutureProtectTouchLevel = 0.0;
-               g_crashFutureProtectTouchLevel = 0.0;
-               g_boomSR20TouchTime = 0;
-               g_crashSR20TouchTime = 0;
-               g_boomSR20TouchLevel = 0.0;
-               g_crashSR20TouchLevel = 0.0;
-            }
+            ExecuteDerivArrowTrade(dir); // garde toutes les validations existantes (IA/ML/zones/anti-dup)
          }
       }
+
+      // Consommer l'arm: attendre un nouveau touch pour une nouvelle entrée
+      g_boomFutureProtectTouchTime = 0;
+      g_crashFutureProtectTouchTime = 0;
+      g_boomFutureProtectTouchLevel = 0.0;
+      g_crashFutureProtectTouchLevel = 0.0;
+
+      g_boomSR20TouchTime = 0;
+      g_crashSR20TouchTime = 0;
+      g_boomSR20TouchLevel = 0.0;
+      g_crashSR20TouchLevel = 0.0;
 
       return;
    }
@@ -25759,7 +17497,7 @@ void CheckAndExecuteDerivArrowTrade()
    bool inDiscount = IsInDiscountZone();
    bool inPremium  = IsInPremiumZone();
    
-   double requiredConfidence = GetEffectiveMinAIConfidencePercent() / 100.0;
+   double requiredConfidence = MinAIConfidencePercent / 100.0;
    
    if(isBoomCrash)
    {
@@ -25998,17 +17736,17 @@ void CheckAndExecuteDerivArrowTrade()
       }
    }
 
-   // Protection capital: en zone d'achat au bord inférieur ? SELL seulement si confiance IA >= 85%
-   if(direction == "SELL" && IsAtDiscountLowerEdge() && g_lastAIConfidence < 0.85)
+   // Protection capital: en zone d'achat au bord inférieur ? SELL seulement si confiance IA >= 70%
+   if(direction == "SELL" && IsAtDiscountLowerEdge() && g_lastAIConfidence < 0.70)
    {
-      Print("?? TRADE BLOQUÉ - Zone Discount au bord inférieur: SELL autorisé seulement si confiance IA ? 85% (actuel: ",
+      Print("?? TRADE BLOQUÉ - Zone Discount au bord inférieur: SELL autorisé seulement si confiance IA ≥ 70% (actuel: ",
             DoubleToString(NormalizeAIConfidenceUnit()*100, 1), "%)");
       return;
    }
-   // Protection capital: en zone premium au bord supérieur (Boom) ? BUY seulement si confiance IA >= 85%
-   if(direction == "BUY" && isBoom && IsAtPremiumUpperEdge() && g_lastAIConfidence < 0.85)
+   // Protection capital: en zone premium au bord supérieur (Boom) ? BUY seulement si confiance IA >= 70%
+   if(direction == "BUY" && isBoom && IsAtPremiumUpperEdge() && g_lastAIConfidence < 0.70)
    {
-      Print("?? TRADE BLOQUÉ - Zone Premium au bord supérieur (Boom): BUY autorisé seulement si confiance IA ? 85% (actuel: ",
+      Print("?? TRADE BLOQUÉ - Zone Premium au bord supérieur (Boom): BUY autorisé seulement si confiance IA ≥ 70% (actuel: ",
             DoubleToString(NormalizeAIConfidenceUnit()*100, 1), "%)");
       return;
    }
@@ -26493,9 +18231,6 @@ static datetime g_lastHoldCloseTime = 0;
 //| PLACER ORDRE LIMIT POST-HOLD APRÈS PERTE 2,0$ |
 void PlacePostHoldLimitOrder(string closedSymbol, ENUM_POSITION_TYPE closedType, double closedProfit)
 {
-   if(!IsGoodOrPerfectVerdictQuality(g_lastPlanQuality))
-      return;
-
    Print("?? DEBUG POST-HOLD - Début fonction");
    Print("   ?? Symbole: ", closedSymbol, " | Type: ", (closedType == POSITION_TYPE_BUY ? "BUY" : "SELL"), " | Profit: ", DoubleToString(closedProfit, 2), "$");
    
@@ -26955,39 +18690,12 @@ void ExecuteDerivArrowTrade(string direction)
       return;
    }
 
-   string dirUpSweep = direction;
-   StringToUpper(dirUpSweep);
-   if(dirUpSweep == "BUY" && SMC_ContextBlockBoomBuyFromBearSweep())
-   {
-      Print("🚫 DERIV ARROW BLOQUÉ - Boom: sweep sous liquidité récent (attendre meilleure structure BUY) | ", _Symbol);
-      return;
-   }
-   if(dirUpSweep == "SELL" && SMC_ContextBlockCrashSellFromBullSweep())
-   {
-      Print("🚫 DERIV ARROW BLOQUÉ - Crash: sweep au-dessus liquidité récent (attendre meilleure structure SELL) | ", _Symbol);
-      return;
-   }
-
    if(SMC_GetSymbolCategory(_Symbol) == SYM_BOOM_CRASH && IsBoomCrashEntryCooldownActive("ExecuteDerivArrowTrade"))
       return;
 
-   // TEST OPTION 2: Disable AI direction check to allow trades regardless of AI direction
-   if(false) { // DISABLED FOR TESTING
-      if(!GOM_BypassBoomCrashIAForGomPlan(direction) && !IsBoomCrashDirectionAllowedByIA(_Symbol, direction))
-      {
-         Print("🚫 DERIV ARROW BLOQUÉ - Direction vs IA (Boom/Crash) sur ", _Symbol, " : ", direction,
-               " | plan=", g_lastPlanQuality, " | IA=", g_lastAIAction);
-         return;
-      }
-   }
-   Print("✅ TEST OPTION 2: Direction check DISABLED - allowing trade regardless of IA agreement");
-
-   string gomDir0 = direction;
-   StringToUpper(gomDir0);
-   if(!GOM_Internal_TradeGateAllows(gomDir0))
+   if(!IsBoomCrashDirectionAllowedByIA(_Symbol, direction))
    {
-      Print("🚫 DERIV ARROW BLOQUÉ - ", GOM_TradeGateBlockReason(gomDir0), " | ", _Symbol,
-            " | plan=", g_lastPlanDir, " | IA=", g_lastAIAction);
+      Print("🚫 DERIV ARROW BLOQUÉ - Direction vs IA (Boom/Crash) sur ", _Symbol, " : ", direction);
       return;
    }
 
@@ -27003,7 +18711,6 @@ void ExecuteDerivArrowTrade(string direction)
    if(!IsSpreadAcceptable()) return;
    if(IsEntryCooldownActive()) return;
    if(!IsLastCandleConfirmingDirection(direction)) return;
-   if(!IsProfitabilityGuardEntryAllowed(direction, "DERIV ARROW")) return;
    
    // NOUVEAU: VÉRIFICATION PROTECTION CAPITAL - MAX 2 POSITIONS
    if(IsMaxPositionsReached())
@@ -27029,13 +18736,10 @@ void ExecuteDerivArrowTrade(string direction)
       Print("⚡ DERIV ARROW recovery bypass autorisé - IA compatible: BUY");
    }
 
-   // Règle globale 75% — sauf cassure canal ML ou verdict GOM GOOD/PERFECT aligné
-   if(!g_channelBreakoutEntryContext && !GOM_BypassBoomCrashIAForGomPlan(direction))
+   // Règle globale 75% — sauf entrée « cassure canal ML » (seuil dédié, déjà filtré en amont)
+   if(!g_channelBreakoutEntryContext)
    {
-      double minConfUnit = GetEffectiveMinAIConfidencePercent() / 100.0;
-      if(SMC_IsTouchEntryArmedForDirection(direction))
-         minConfUnit = MathMin(minConfUnit, MinAIConfidencePercentBoomCrash / 100.0);
-      if(!IsAIConfidenceAtLeast(minConfUnit, "DERIV ARROW"))
+      if(!IsAIConfidenceAtLeast(0.75, "DERIV ARROW"))
          return;
    }
    else if(!IsAISignalFreshForTrading("DERIV ARROW canal ML"))
@@ -27068,7 +18772,7 @@ void ExecuteDerivArrowTrade(string direction)
                extra /= 100.0;
             minAiConfUnit += extra;
          }
-         minAiConfUnit = MathMax(minAiConfUnit, 0.50);
+         minAiConfUnit = MathMax(minAiConfUnit, 0.75);
       }
 
       Print("?? Vérification IA - Confiance: ", DoubleToString(aiConfidenceUnit * 100.0, 1),
@@ -27172,17 +18876,17 @@ void ExecuteDerivArrowTrade(string direction)
    else
       Print("? Zone SMC OK (Discount ou Premium)");
    
-   // Protection capital: zone d'achat au bord inférieur ? SELL seulement si confiance IA >= 85%
-   if(!g_channelBreakoutEntryContext && direction == "SELL" && IsAtDiscountLowerEdge() && g_lastAIConfidence < 0.85)
+   // Protection capital: zone d'achat au bord inférieur ? SELL seulement si confiance IA >= 70%
+   if(!g_channelBreakoutEntryContext && direction == "SELL" && IsAtDiscountLowerEdge() && g_lastAIConfidence < 0.70)
    {
-      Print("?? FLÈCHE DERIV ARROW BLOQUÉE - Zone Discount au bord inférieur: SELL autorisé seulement si confiance IA ? 85% (actuel: ",
+      Print("?? FLÈCHE DERIV ARROW BLOQUÉE - Zone Discount au bord inférieur: SELL autorisé seulement si confiance IA ≥ 70% (actuel: ",
             DoubleToString(NormalizeAIConfidenceUnit()*100, 1), "%)");
       return;
    }
-   // Protection capital: zone premium au bord supérieur (Boom) ? BUY seulement si confiance IA >= 85%
-   if(!g_channelBreakoutEntryContext && direction == "BUY" && isBoom && IsAtPremiumUpperEdge() && g_lastAIConfidence < 0.85)
+   // Protection capital: zone premium au bord supérieur (Boom) ? BUY seulement si confiance IA >= 70%
+   if(!g_channelBreakoutEntryContext && direction == "BUY" && isBoom && IsAtPremiumUpperEdge() && g_lastAIConfidence < 0.70)
    {
-      Print("?? FLÈCHE DERIV ARROW BLOQUÉE - Zone Premium au bord supérieur (Boom): BUY autorisé seulement si confiance IA ? 85% (actuel: ",
+      Print("?? FLÈCHE DERIV ARROW BLOQUÉE - Zone Premium au bord supérieur (Boom): BUY autorisé seulement si confiance IA ≥ 70% (actuel: ",
             DoubleToString(NormalizeAIConfidenceUnit()*100, 1), "%)");
       return;
    }
@@ -27243,18 +18947,17 @@ void ExecuteDerivArrowTrade(string direction)
    // - pending existant => toujours bloqué
    // - position existante => ouverture possible seulement si CanOpenAdditionalPositionForSymbol autorise
    int pendingExp = CountPendingOrdersForSymbol(_Symbol);
+   int existingExp = CountPositionsForSymbol(_Symbol);
    if(pendingExp > 0)
    {
       Print("?? FLÈCHE DERIV ARROW BLOQUÉE - pending déjà existant sur ", _Symbol);
       ReleaseOpenLock();
       return;
    }
-   if(!CanOpenAdditionalPositionForSymbol(_Symbol, direction))
+   if(existingExp > 0 && !CanOpenAdditionalPositionForSymbol(_Symbol, direction))
    {
-      Print("?? FLÈCHE DERIV ARROW BLOQUÉE - duplication / exposition interdite sur ", _Symbol,
-            " | ourPos=", CountPositionsForSymbol(_Symbol),
-            " | anyPos=", CountAllPositionsOnSymbolAnyMagic(_Symbol),
-            " | dir=", direction);
+      Print("?? FLÈCHE DERIV ARROW BLOQUÉE - duplication interdite sur ", _Symbol,
+            " | existing=", existingExp, " | dir=", direction);
       ReleaseOpenLock();
       return;
    }
@@ -27438,7 +19141,7 @@ void ExecuteDerivArrowTrade(string direction)
       return;
    }
    request.price = (direction == "BUY") ? askPrice : bidPrice;
-   EnforceBoomCrashStopLossDollarRisk(_Symbol, direction, request.price, request.volume, stopLoss);
+   EnforceMinBoomCrashStopLossDollarRisk(_Symbol, direction, request.price, request.volume, stopLoss);
    request.sl = stopLoss;
    request.tp = takeProfit;
    request.deviation = 20;
@@ -27447,13 +19150,6 @@ void ExecuteDerivArrowTrade(string direction)
    
    if(!IsMinimumProfitPotentialMet(request.price, takeProfit, direction, lotToTrade))
    {
-      ReleaseOpenLock();
-      return;
-   }
-
-   if(GOM_ShouldAbortEntryForOppositeM5Line(direction, _Symbol, bidPrice, askPrice, 0.0))
-   {
-      Print("🚫 DERIV ARROW — entrée annulée (correction: M5 KOLA opposé trop proche) | ", direction, " | ", _Symbol);
       ReleaseOpenLock();
       return;
    }
@@ -27661,12 +19357,6 @@ void ExecuteOTEImbalanceTrade()
                " (acc=", DoubleToString(g_mlLastAccuracy * 100.0, 1), "%)");
          return;
       }
-   }
-
-   if(!GOM_Internal_TradeGateAllows(d))
-   {
-      Print("⛔ OTE+Imbalance bloqué - moteur GOM interne: ", g_gomVerdictLabel, " | ", _Symbol);
-      return;
    }
 
    if(!TryAcquireOpenLock()) return;
@@ -28431,21 +20121,6 @@ void ExecuteAIDecisionMarketOrder()
    {
       return;
    }
-
-   if(EnableTradingAgentsInfluence && TradingAgentsBlockContradiction &&
-      g_lastTradingAgentsUpdate > 0 &&
-      NormalizeTradingAgentsConfidenceUnit() + 1e-9 >= TradingAgentsMinConfidence)
-   {
-      bool taContradict = (g_lastAIAction == "BUY" && g_lastTradingAgentsAction == "SELL") ||
-                          (g_lastAIAction == "SELL" && g_lastTradingAgentsAction == "BUY");
-      if(taContradict)
-      {
-         Print("🚫 TRADE BLOQUÉ (TradingAgents contradiction) | IA=", g_lastAIAction,
-               " | TA=", g_lastTradingAgentsAction,
-               " | TA conf=", DoubleToString(NormalizeTradingAgentsConfidenceUnit() * 100.0, 1), "%");
-         return;
-      }
-   }
    
    // NOUVEAU: Obtenir les prédictions de Protected Points futurs
    double futureSupport = 0.0, futureResistance = 0.0;
@@ -28560,48 +20235,6 @@ void ExecuteAIDecisionMarketOrder()
    }
       return;
    }
-
-   if(EnableOpportunityCostFilter)
-   {
-      double aiConfU = NormalizeAIConfidenceUnit();
-      double taConfU = NormalizeTradingAgentsConfidenceUnit();
-      double taAlign = 0.5;
-      if(g_lastTradingAgentsAction == g_lastAIAction) taAlign = 1.0;
-      else if(g_lastTradingAgentsAction == "HOLD") taAlign = 0.6;
-      else taAlign = 0.0;
-      double score = (aiConfU * 45.0) + (MathMin(100.0, setupScore) * 0.35) + (taConfU * 20.0 * taAlign);
-      if(score < 0.0) score = 0.0;
-      if(score > 100.0) score = 100.0;
-      g_lastOpportunityCostScore = score;
-
-      if(score + 1e-9 < OpportunityCostMinScore || score - 1e-9 > OpportunityCostMaxScore)
-      {
-         Print("🚫 OPP-COST: score hors intervalle [",
-               DoubleToString(OpportunityCostMinScore, 1), ",",
-               DoubleToString(OpportunityCostMaxScore, 1), "] | score=", DoubleToString(score, 1));
-         return;
-      }
-
-      double atrGate = GetATRValue(PERIOD_M15, 14);
-      if(atrGate > 1e-9)
-      {
-         double refLevel = 0.0;
-         if(g_lastAIAction == "BUY" && futureSupport > 0.0) refLevel = futureSupport;
-         else if(g_lastAIAction == "SELL" && futureResistance > 0.0) refLevel = futureResistance;
-         if(refLevel <= 0.0) refLevel = currentPrice;
-
-         double priceDevAtr = MathAbs(currentPrice - refLevel) / atrGate;
-         g_lastOpportunityCostPriceAtr = priceDevAtr;
-         if(priceDevAtr + 1e-9 < OpportunityPriceAtrMin || priceDevAtr - 1e-9 > OpportunityPriceAtrMax)
-         {
-            Print("🚫 OPP-COST: distance prix hors intervalle ATR [",
-                  DoubleToString(OpportunityPriceAtrMin, 2), ",",
-                  DoubleToString(OpportunityPriceAtrMax, 2), "] | devATR=",
-                  DoubleToString(priceDevAtr, 2));
-            return;
-         }
-      }
-   }
    
    Print("? ORDRES MARCHÉ AUTORISÉS - IA: ", g_lastAIAction,
          " | SetupScore=", DoubleToString(setupScore, 1));
@@ -28686,15 +20319,6 @@ void ExecuteAIDecisionMarketOrder()
    
    // Vérifier le lock pour éviter les doublons
    if(!TryAcquireOpenLock()) return;
-
-   string iaDirGate = g_lastAIAction;
-   StringToUpper(iaDirGate);
-   if(!GOM_Internal_TradeGateAllows(iaDirGate))
-   {
-      Print("🚫 ORDRE IA PRÉCIS BLOQUÉ - verdict script WAIT / gate GOM | ", _Symbol);
-      ReleaseOpenLock();
-      return;
-   }
    
    // Règle Boom/Crash: pas de SELL sur Boom, pas de BUY sur Crash
    if(!IsDirectionAllowedForBoomCrash(_Symbol, g_lastAIAction))
@@ -29351,129 +20975,6 @@ void MaybeUpdateAIServerFromOnTick(datetime currentTime)
    UpdateAIDecision(AI_Timeout_ms);
 }
 
-void MaybeUpdateTradingAgentsFromOnTick(datetime currentTime)
-{
-   if(!EnableTradingAgentsInfluence || UltraLightMode)
-      return;
-
-   static datetime s_lastTaAttempt = 0;
-   int periodSec = MathMax(30, TradingAgentsUpdateIntervalSeconds);
-   if((currentTime - s_lastTaAttempt) < periodSec)
-      return;
-   s_lastTaAttempt = currentTime;
-   UpdateTradingAgentsSnapshot();
-}
-
-bool RegisterTradingAgentsMt5SymbolOnServer()
-{
-   if(!TradingAgentsRegisterChartOnServer || !EnableTradingAgentsInfluence || !UseAIServer)
-      return true;
-
-   static datetime s_lastReg = 0;
-   int regIntv = TradingAgentsRegisterIntervalSeconds;
-   if(regIntv <= 0)
-      regIntv = MathMax(30, TradingAgentsUpdateIntervalSeconds);
-   datetime now = TimeCurrent();
-   if(s_lastReg > 0 && (now - s_lastReg) < regIntv)
-      return true;
-   s_lastReg = now;
-
-   string symJson = _Symbol;
-   StringReplace(symJson, "\\", "\\\\");
-   StringReplace(symJson, "\"", "\\\"");
-   StringReplace(symJson, "\r", "");
-   StringReplace(symJson, "\n", "");
-
-   string body = "{\"merge\":true,\"symbols\":[\"" + symJson + "\"]}";
-
-   char post[];
-   int n = StringToCharArray(body, post, 0, WHOLE_ARRAY, CP_UTF8);
-   if(n > 0)
-      ArrayResize(post, n - 1);
-
-   string headers = "Content-Type: application/json\r\n";
-   uchar result[];
-   string resultHeaders = "";
-
-   string url1 = GOM_AiServerBasePrimary() + "/tradingagents/realtime/mt5-symbols";
-   string url2 = GOM_AiServerBaseFallback() + "/tradingagents/realtime/mt5-symbols";
-
-   int res = WebRequest("POST", url1, headers, MathMax(3000, AI_Timeout_ms), post, result, resultHeaders);
-   if(res != 200)
-   {
-      resultHeaders = "";
-      ArrayResize(result, 0);
-      res = WebRequest("POST", url2, headers, MathMax(3000, AI_Timeout_ms2), post, result, resultHeaders);
-   }
-   return (res == 200);
-}
-
-bool UpdateTradingAgentsSnapshot()
-{
-   RegisterTradingAgentsMt5SymbolOnServer();
-
-   string symbolEnc = _Symbol;
-   StringReplace(symbolEnc, " ", "%20");
-
-   string primary = GOM_AiServerBasePrimary() + "/tradingagents/realtime/run-once?symbol=" + symbolEnc;
-   string fallback = GOM_AiServerBaseFallback() + "/tradingagents/realtime/run-once?symbol=" + symbolEnc;
-   string headers = "Content-Type: application/json\r\n";
-   char post[];
-   uchar result[];
-   string resultHeaders = "";
-   ArrayResize(post, 0);
-
-   int res = WebRequest("POST", primary, headers, MathMax(3000, AI_Timeout_ms), post, result, resultHeaders);
-   if(res != 200)
-   {
-      resultHeaders = "";
-      ArrayResize(result, 0);
-      res = WebRequest("POST", fallback, headers, MathMax(3000, AI_Timeout_ms2), post, result, resultHeaders);
-      if(res != 200)
-         return false;
-   }
-
-   string json = CharArrayToString(result);
-   if(StringLen(json) <= 0)
-      return false;
-
-   string action = ExtractJsonValue(json, "recommendation");
-   if(action == "")
-      action = ExtractJsonValue(json, "action");
-   StringToUpper(action);
-   if(action == "LONG") action = "BUY";
-   if(action == "SHORT") action = "SELL";
-   if(action != "BUY" && action != "SELL" && action != "HOLD")
-      action = "HOLD";
-
-   string confStr = ExtractJsonValue(json, "confidence");
-   double conf = StringToDouble(confStr);
-   if(conf > 1.0) conf /= 100.0;
-   if(conf < 0.0) conf = 0.0;
-   if(conf > 1.0) conf = 1.0;
-
-   string summary = ExtractJsonValue(json, "reasoning");
-   if(summary == "") summary = ExtractJsonValue(json, "summary");
-
-   g_lastTradingAgentsAction = action;
-   g_lastTradingAgentsConfidence = conf;
-   g_lastTradingAgentsSummary = summary;
-   g_lastTradingAgentsUpdate = TimeCurrent();
-
-   if(PushTradingAgentsSummary && EnableGomNotifyAlerts && TerminalInfoInteger(TERMINAL_NOTIFICATIONS_ENABLED))
-   {
-      string sig = action + "|" + DoubleToString(conf * 100.0, 0) + "|" + summary;
-      if(sig != g_lastTradingAgentsNotifSig && summary != "")
-      {
-         g_lastTradingAgentsNotifSig = sig;
-         SendNotification("🧭 TradingAgents " + _Symbol + "\n" +
-                          action + " (" + DoubleToString(conf * 100.0, 0) + "%)\n" + summary);
-      }
-   }
-
-   return true;
-}
-
 bool UpdateAIDecision(int timeoutMs = -1)
 {
    // Déporter toute la logique réseau sur GetAISignalData()
@@ -29526,7 +21027,7 @@ string GetAISignalData(string symbol, string timeframe)
    string symEnc = symbol;
    StringReplace(symEnc, " ", "%20");
    
-   string baseUrl = GOM_AiServerBasePrimary();
+   string baseUrl = UseRenderAsPrimary ? AI_ServerRender : AI_ServerURL;
    string path = "/ml/signal?symbol=" + symEnc + "&timeframe=" + timeframe;
    string headers = "";
    char post[], result[];
@@ -29547,7 +21048,7 @@ string GetTrendAlignmentData(string symbol)
    string symEnc = symbol;
    StringReplace(symEnc, " ", "%20");
    
-   string baseUrl = GOM_AiServerBasePrimary();
+   string baseUrl = UseRenderAsPrimary ? AI_ServerRender : AI_ServerURL;
    string path = "/ml/trend_alignment?symbol=" + symEnc;
    string headers = "";
    char post[], result[];
@@ -29568,7 +21069,7 @@ string GetCoherentAnalysisData(string symbol)
    string symEnc = symbol;
    StringReplace(symEnc, " ", "%20");
    
-   string baseUrl = GOM_AiServerBasePrimary();
+   string baseUrl = UseRenderAsPrimary ? AI_ServerRender : AI_ServerURL;
    string path = "/ml/coherent_analysis?symbol=" + symEnc;
    string headers = "";
    char post[], result[];
@@ -30409,9 +21910,6 @@ void CheckSMCChannelReturnMovements()
 //| PLACEMENT D'ORDRE LIMITE POUR MOUVEMENT DE RETOUR               |
 void PlaceReturnMovementLimitOrder(string direction, double currentPrice, double channelPrice, double atrVal, double strength)
 {
-   if(!IsGoodOrPerfectVerdictQuality(g_lastPlanQuality))
-      return;
-
    if(!IsDirectionAllowedForBoomCrash(_Symbol, direction))
    {
       Print("🚫 RETURN LIMIT BLOQUÉ - Direction interdite sur ", _Symbol, " : ", direction);
@@ -31704,26 +23202,6 @@ bool IsPriceInEntryZone(double price, double imbalanceTop, double imbalanceBotto
 void ExecuteSMC_OTETrade(string direction, double entry, double sl, double tp)
 {
    if(!TryAcquireOpenLock()) return;
-
-   string dirOte = direction;
-   StringToUpper(dirOte);
-   if(!GOM_Internal_TradeGateAllows(dirOte))
-   {
-      Print("🚫 SMC_OTE BLOQUÉ - verdict script WAIT / gate GOM | ", _Symbol);
-      ReleaseOpenLock();
-      return;
-   }
-
-   {
-      const double bidOte = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-      const double askOte = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-      if(GOM_ShouldAbortEntryForOppositeM5Line(direction, _Symbol, bidOte, askOte, GetATRValue(PERIOD_M15, 14)))
-      {
-         Print("🚫 SMC_OTE annulé — correction (M5 KOLA opposé trop proche du prix) | ", direction, " | ", _Symbol);
-         ReleaseOpenLock();
-         return;
-      }
-   }
    
    // NOUVEAU: Obtenir les prédictions de Protected Points futurs pour validation
    double futureSupport = 0.0, futureResistance = 0.0;
@@ -32077,46 +23555,6 @@ bool DetectRecentSpike()
    return finalSpike;
 }
 
-// Exige que le prix soit proche d'un niveau GOM KOLA M5 ou H1 (réduit les exécutions sur signaux « multi-TF » loin des niveaux privilégiés).
-bool PriceNearGomKolaM5OrH1ForDirection(const string symbol, const string direction,
-                                        const double bid, const double ask, const double atr)
-{
-   if(!PreferGomKolaM5OrH1ProximityBoomCrashEntries)
-      return true;
-   if(atr <= 0.0 || !MathIsValidNumber(atr))
-      return true;
-
-   string d = direction;
-   StringToUpper(d);
-
-   const double m5Buy  = ReadGVDirect("GOM_KOLA_" + symbol + "_M5_BUY", 0.0);
-   const double m5Sell = ReadGVDirect("GOM_KOLA_" + symbol + "_M5_SELL", 0.0);
-   const double h1Buy  = ReadGVDirect("GOM_KOLA_" + symbol + "_H1_BUY", 0.0);
-   const double h1Sell = ReadGVDirect("GOM_KOLA_" + symbol + "_H1_SELL", 0.0);
-
-   const double pt = SymbolInfoDouble(symbol, SYMBOL_POINT);
-   const double epsM5 = MathMax(atr * 0.42, pt * 10.0);
-   const double epsH1 = MathMax(atr * 0.52, pt * 14.0);
-
-   if(d == "BUY")
-   {
-      const double px = ask;
-      if(m5Buy  > 0.0 && MathAbs(px - m5Buy)  <= epsM5) return true;
-      if(h1Buy  > 0.0 && MathAbs(px - h1Buy)  <= epsH1) return true;
-   }
-   else if(d == "SELL")
-   {
-      const double px = bid;
-      if(m5Sell > 0.0 && MathAbs(px - m5Sell) <= epsM5) return true;
-      if(h1Sell > 0.0 && MathAbs(px - h1Sell) <= epsH1) return true;
-   }
-
-   if(m5Buy <= 0.0 && m5Sell <= 0.0 && h1Buy <= 0.0 && h1Sell <= 0.0)
-      return true;
-
-   return false;
-}
-
 //| EXÉCUTER UN TRADE BASÉ SUR SPIKE                                  |
 void ExecuteSpikeTrade(string direction)
 {
@@ -32141,8 +23579,6 @@ void ExecuteSpikeTrade(string direction)
    if(!IsSpreadAcceptable()) return;
    if(IsEntryCooldownActive()) return;
    if(!IsLastCandleConfirmingDirection(direction)) return;
-   if(!IsProfitabilityGuardEntryAllowed(direction, "SPIKE DETECT")) return;
-   if(!IsProfitabilityGuardEntryAllowed(direction, "SPIKE TRADE")) return;
 
    if(SMC_GetSymbolCategory(_Symbol) == SYM_BOOM_CRASH && IsBoomCrashEntryCooldownActive("ExecuteSpikeTrade(dir)"))
       return;
@@ -32156,7 +23592,7 @@ void ExecuteSpikeTrade(string direction)
    }
 
    // Confiance IA minimum globale (75%)
-   if(!IsAIConfidenceAtLeast(0.50, "SPIKE TRADE"))
+   if(!IsAIConfidenceAtLeast(0.75, "SPIKE TRADE"))
       return;
 
    // Spike trades réservés aux symboles Boom/Crash et seulement si le modèle ML est fiable
@@ -32213,17 +23649,6 @@ void ExecuteSpikeTrade(string direction)
       return;
    }
 
-   if(SMC_GetSymbolCategory(_Symbol) == SYM_BOOM_CRASH)
-   {
-      const double spGate = CalculateSpikeProbability();
-      if(spGate + 1e-9 < SpikeTradeMinModelProbability)
-      {
-         Print("🚫 SPIKE TRADE BLOQUÉ - Proba modèle ", DoubleToString(spGate * 100.0, 1), "% < ",
-               DoubleToString(SpikeTradeMinModelProbability * 100.0, 1), "% | ", _Symbol, " | dir=", direction);
-         return;
-      }
-   }
-
    // Calculer lot size (recovery: doubler le lot min sur un autre symbole après une perte)
    double lot = CalculateLotSize();
    lot = ApplyRecoveryLot(lot, direction);
@@ -32275,36 +23700,6 @@ void ExecuteSpikeTrade(string direction)
    }
    else
       Print("? Perte potentielle VALIDÉE: ", DoubleToString(potentialLoss, 2), "$ <= ", MaxLossPerSpikeTradeDollars, "$");
-
-   if(PreferGomKolaM5OrH1ProximityBoomCrashEntries && SMC_GetSymbolCategory(_Symbol) == SYM_BOOM_CRASH)
-   {
-      const double bd = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-      const double ak = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-      if(!PriceNearGomKolaM5OrH1ForDirection(_Symbol, direction, bd, ak, atrValue))
-      {
-         Print("🚫 SPIKE TRADE BLOQUÉ - Prix pas assez proche d'un niveau GOM KOLA M5/H1 | dir=", direction, " | ", _Symbol);
-         return;
-      }
-   }
-   
-   string dirGateSt = direction;
-   StringToUpper(dirGateSt);
-   if(!GOM_Internal_TradeGateAllows(dirGateSt))
-   {
-      Print("🚫 SPIKE TRADE BLOQUÉ - verdict script WAIT / gate GOM | ", _Symbol);
-      return;
-   }
-
-   {
-      const double bidSpk = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-      const double askSpk = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-      if(GOM_ShouldAbortEntryForOppositeM5Line(direction, _Symbol, bidSpk, askSpk, atrValue))
-      {
-         Print("🚫 SPIKE TRADE BLOQUÉ — correction (ligne M5 KOLA opposée trop proche du prix) | ",
-               direction, " | ", _Symbol);
-         return;
-      }
-   }
    
    // Envoyer notification
    double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
@@ -32440,12 +23835,9 @@ void ExecuteSpikeTrade(string direction)
 //| SURVEILLER ET FERMER LA POSITION SPIKE EN GAIN POSITIF           |
 void StartSpikePositionMonitoring(string direction)
 {
-   // La fermeture immédiate après exécution SPIKE TRADE est gérée à chaque tick par ManageBoomCrashSpikeClose
-   // (BoomCrash_SpikeTradeCloseAnyPositiveProfit + SpikeTradeCapturedMinProfitUSD). Ne pas bloquer le thread avec Sleep.
-   if(BoomCrash_SpikeTradeCloseAnyPositiveProfit && UseSpikeAutoClose)
-      Print("?? SPIKE TRADE ouvert — surveillance continue (fermeture dès gain net > 0 si activé) | dir=", direction, " | ", _Symbol);
-   else
-      Print("?? SPIKE TRADE ouvert — fermeture pilotée par ManageBoomCrashSpikeClose (seuils spike) | ", _Symbol);
+   // DÉSACTIVÉ - Cette fonction fermait les positions trop rapidement
+   // Laisser ManageBoomCrashSpikeClose() gérer les fermetures
+   Print("?? SURVEILLANCE SPIKE DÉSACTIVÉE - Laisser le trade respirer");
    return;
    
    /* 
@@ -32846,28 +24238,14 @@ void ExecuteSpikeTrade()
       
       if(isBoom && ia != "BUY")
       {
-         if(BoomCrashTouchEntryBypassIA && (SMC_IsTouchEntryArmedForDirection("BUY") || UseSpikeDetectionWithoutAI))
-         {
-            Print("⚡ SPIKE Boom — bypass IA (touch/spike path) | IA=", g_lastAIAction, " | ", _Symbol);
-         }
-         else
-         {
-            Print("🚫 SPIKE ANNULÉ - IA incompatible sur Boom ", _Symbol, " | IA=", g_lastAIAction, " (requis: BUY)");
-            return;
-         }
+         Print("🚫 SPIKE ANNULÉ - IA incompatible sur Boom ", _Symbol, " | IA=", g_lastAIAction, " (requis: BUY)");
+         return;
       }
       
       if(isCrash && ia != "SELL")
       {
-         if(BoomCrashTouchEntryBypassIA && (SMC_IsTouchEntryArmedForDirection("SELL") || UseSpikeDetectionWithoutAI))
-         {
-            Print("⚡ SPIKE Crash — bypass IA (touch/spike path) | IA=", g_lastAIAction, " | ", _Symbol);
-         }
-         else
-         {
-            Print("🚫 SPIKE ANNULÉ - IA incompatible sur Crash ", _Symbol, " | IA=", g_lastAIAction, " (requis: SELL)");
-            return;
-         }
+         Print("🚫 SPIKE ANNULÉ - IA incompatible sur Crash ", _Symbol, " | IA=", g_lastAIAction, " (requis: SELL)");
+         return;
       }
       
       Print("✅ SPIKE - IA validée: ", ia, " sur ", _Symbol);
@@ -32912,13 +24290,6 @@ void ExecuteSpikeTrade()
       return;
    }
 
-   if(spikeProbNow + 1e-9 < SpikeTradeMinModelProbability)
-   {
-      Print("🚫 SPIKE ANNULÉ - Probabilité modèle ", DoubleToString(spikeProbNow * 100.0, 1), "% < ",
-            DoubleToString(SpikeTradeMinModelProbability * 100.0, 1), "% | ", _Symbol);
-      return;
-   }
-
    if(!IsDirectionAllowedForBoomCrash(_Symbol, direction))
    {
       Print("🚫 SPIKE ANNULÉ - Direction interdite sur ", _Symbol, " : ", direction);
@@ -32928,12 +24299,6 @@ void ExecuteSpikeTrade()
    if(!IsBoomCrashDirectionAllowedByIA(_Symbol, direction))
    {
       Print("🚫 SPIKE ANNULÉ - Direction vs IA (Boom/Crash) sur ", _Symbol, " : ", direction);
-      return;
-   }
-
-   if(!GOM_Internal_TradeGateAllows(direction))
-   {
-      Print("🚫 SPIKE ANNULÉ - verdict script WAIT / gate GOM | ", _Symbol);
       return;
    }
 
@@ -32969,46 +24334,7 @@ void ExecuteSpikeTrade()
       Print("🚫 SPIKE ANNULÉ - duplication interdite sur ", _Symbol, " | dir=", direction);
       return;
    }
-
-   if(PreferGomKolaM5OrH1ProximityBoomCrashEntries && SMC_GetSymbolCategory(_Symbol) == SYM_BOOM_CRASH)
-   {
-      double atrV = 0.0;
-      if(atrHandle != INVALID_HANDLE)
-      {
-         double ab[];
-         ArraySetAsSeries(ab, true);
-         if(CopyBuffer(atrHandle, 0, 0, 1, ab) >= 1)
-            atrV = ab[0];
-      }
-      if(atrV <= 0.0)
-         atrV = SymbolInfoDouble(_Symbol, SYMBOL_BID) * 0.002;
-      const double bd = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-      const double ak = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-      if(!PriceNearGomKolaM5OrH1ForDirection(_Symbol, direction, bd, ak, atrV))
-      {
-         Print("🚫 SPIKE ANNULÉ - Proximité GOM KOLA M5/H1 requise | ", _Symbol);
-         return;
-      }
-   }
    
-   {
-      const double bdSp = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-      const double akSp = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-      double atrSp = 0.0;
-      if(atrHandle != INVALID_HANDLE)
-      {
-         double abx[];
-         ArraySetAsSeries(abx, true);
-         if(CopyBuffer(atrHandle, 0, 0, 1, abx) >= 1)
-            atrSp = abx[0];
-      }
-      if(GOM_ShouldAbortEntryForOppositeM5Line(direction, _Symbol, bdSp, akSp, atrSp))
-      {
-         Print("🚫 SPIKE ANNULÉ — correction (ligne M5 KOLA opposée trop proche) | ", direction, " | ", _Symbol);
-         return;
-      }
-   }
-
    // Exécuter ordre au marché
    MqlTradeRequest req = {};
    MqlTradeResult  res = {};
@@ -33039,7 +24365,7 @@ void ExecuteSpikeTrade()
       double sl = req.sl;
       double tp = req.tp;
       ValidateAndAdjustStopLossTakeProfit(direction, req.price, sl, tp);
-      EnforceBoomCrashStopLossDollarRisk(_Symbol, direction, req.price, req.volume, sl);
+      EnforceMinBoomCrashStopLossDollarRisk(_Symbol, direction, req.price, req.volume, sl);
       sl = NormalizeDouble(sl, _Digits);
       tp = NormalizeDouble(tp, _Digits);
 
@@ -33221,7 +24547,7 @@ bool ExecuteExceptionalBoomCrashRecoveryOrder(const string direction, const stri
    }
 
    // Confiance IA minimum globale (75%)
-   if(!IsAIConfidenceAtLeast(0.50, commentTag))
+   if(!IsAIConfidenceAtLeast(0.75, commentTag))
       return false;
 
    // Anti-duplication sécurité
@@ -33231,13 +24557,6 @@ bool ExecuteExceptionalBoomCrashRecoveryOrder(const string direction, const stri
 
    double lot = GetOptimalLotSize();
    if(lot <= 0.0) { ReleaseOpenLock(); return false; }
-
-   if(!GOM_Internal_TradeGateAllows(direction))
-   {
-      Print("🚫 EXC_RECOVERY BLOQUÉ - verdict script WAIT / gate GOM | ", _Symbol, " | ", commentTag);
-      ReleaseOpenLock();
-      return false;
-   }
 
    double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
    double price = (direction == "BUY") ? SymbolInfoDouble(_Symbol, SYMBOL_ASK) : SymbolInfoDouble(_Symbol, SYMBOL_BID);
@@ -33257,7 +24576,7 @@ bool ExecuteExceptionalBoomCrashRecoveryOrder(const string direction, const stri
    // IMPORTANT: corrige les distances SL/TP selon le stop-level broker.
    // Sinon on obtient souvent "Invalid stops" sur certains synth indices.
    ValidateAndAdjustStopLossTakeProfit(direction, price, sl, tp);
-   EnforceBoomCrashStopLossDollarRisk(_Symbol, direction, price, lot, sl);
+   EnforceMinBoomCrashStopLossDollarRisk(_Symbol, direction, price, lot, sl);
    sl = NormalizeDouble(sl, _Digits);
    tp = NormalizeDouble(tp, _Digits);
 
@@ -33585,8 +24904,6 @@ void UpdateM5EntryLevelsAndLines()
       if(CopyBuffer(ema9Handle, 0, 0, 1, ema9Buf) >= 1) ema9M5 = ema9Buf[0];
       if(CopyBuffer(ema21Handle, 0, 0, 1, ema21Buf) >= 1) ema21M5 = ema21Buf[0];
    }
-   if(ema9Handle != INVALID_HANDLE) IndicatorRelease(ema9Handle);
-   if(ema21Handle != INVALID_HANDLE) IndicatorRelease(ema21Handle);
    
    double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    
@@ -33625,13 +24942,8 @@ void UpdateM5EntryLevelsAndLines()
    
    g_m5LevelsLastUpdate = currentTime;
    
-   static datetime lastM5LevelsPrint = 0;
-   if(currentTime - lastM5LevelsPrint >= 300)
-   {
-      Print("📊 NIVEAUX M5 MIS À JOUR - Buy: ", DoubleToString(g_m5BuyEntryLevel, _Digits),
-            " | Sell: ", DoubleToString(g_m5SellEntryLevel, _Digits));
-      lastM5LevelsPrint = currentTime;
-   }
+   Print("📊 NIVEAUX M5 MIS À JOUR - Buy: ", DoubleToString(g_m5BuyEntryLevel, _Digits), 
+         " | Sell: ", DoubleToString(g_m5SellEntryLevel, _Digits));
 }
 
 //+------------------------------------------------------------------+
@@ -34046,29 +25358,18 @@ bool ExecuteM5TouchOrder(string direction)
    }
 
    // Confiance IA minimum globale (75%)
-   if(!IsAIConfidenceAtLeast(0.50, "M5 TOUCH"))
+   if(!IsAIConfidenceAtLeast(0.75, "M5 TOUCH"))
       return false;
 
    if(!IsSpreadAcceptable()) return false;
    if(IsEntryCooldownActive()) return false;
    if(!IsLastCandleConfirmingDirection(direction)) return false;
-   if(!IsProfitabilityGuardEntryAllowed(direction, "M5 TOUCH")) return false;
 
    if(!CanOpenAdditionalPositionForSymbol(_Symbol, direction))
    {
       Print("🚫 M5 TOUCH annulé - position déjà ouverte ou duplication interdite | ", _Symbol,
             " | dir=", direction, " | n=", CountPositionsForSymbol(_Symbol));
       return false;
-   }
-
-   {
-      const double bidM5 = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-      const double askM5 = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-      if(GOM_ShouldAbortEntryForOppositeM5Line(direction, _Symbol, bidM5, askM5, 0.0))
-      {
-         Print("🚫 M5 TOUCH annulé — correction (ligne M5 KOLA opposée trop proche) | ", direction, " | ", _Symbol);
-         return false;
-      }
    }
 
    double lotSize = GetOptimalLotSize();
@@ -34092,7 +25393,7 @@ bool ExecuteM5TouchOrder(string direction)
 
    // Respect du stop-level broker (évite [Invalid stops] sur certains synth indices)
    ValidateAndAdjustStopLossTakeProfit(direction, price, stopLoss, takeProfit);
-   EnforceBoomCrashStopLossDollarRisk(_Symbol, direction, price, lotSize, stopLoss);
+   EnforceMinBoomCrashStopLossDollarRisk(_Symbol, direction, price, lotSize, stopLoss);
    stopLoss = NormalizeDouble(stopLoss, _Digits);
    takeProfit = NormalizeDouble(takeProfit, _Digits);
 
@@ -34146,27 +25447,12 @@ bool ExecuteM5TouchOrder(string direction)
    request.magic = InpMagicNumber; // alignement pour profit/duplication par symbole
    request.comment = "M5_TOUCH_ENTRY_" + direction;
 
-   if(!TryAcquireOpenLock())
-   {
-      Print("🚫 M5 TOUCH - lock indisponible (anti-duplication tick) | ", _Symbol);
-      return false;
-   }
-   if(!CanOpenAdditionalPositionForSymbol(_Symbol, direction))
-   {
-      Print("🚫 M5 TOUCH annulé - re-check post-lock | ", _Symbol,
-            " | dir=", direction, " | our=", CountPositionsForSymbol(_Symbol),
-            " | any=", CountAllPositionsOnSymbolAnyMagic(_Symbol));
-      ReleaseOpenLock();
-      return false;
-   }
    if(!IsMinimumProfitPotentialMet(price, takeProfit, direction, lotSize))
-   {
-      ReleaseOpenLock();
       return false;
-   }
-
+   
+   // Exécuter l'ordrez
    bool success = OrderSend(request, result);
-
+   
    if(success && result.retcode == TRADE_RETCODE_DONE)
    {
       g_lastEntryTimeForSymbol = TimeCurrent();
@@ -34182,7 +25468,6 @@ bool ExecuteM5TouchOrder(string direction)
       
       // Envoyer une notification mobile
       SendNotification("🎯 M5 TOUCH - " + direction + " " + _Symbol + " | Ticket: " + IntegerToString(result.order));
-      ReleaseOpenLock();
       return true;
    }
    else
@@ -34202,19 +25487,11 @@ bool ExecuteM5TouchOrder(string direction)
          request.sl = retrySL;
          request.tp = retryTP;
 
-         if(!CanOpenAdditionalPositionForSymbol(_Symbol, direction))
-         {
-            Print("🚫 M5 TOUCH RETRY annulé - re-check avant envoi | ", _Symbol);
-            ReleaseOpenLock();
-            return false;
-         }
-
          MqlTradeResult retryResult = {};
          bool retryOk = OrderSend(request, retryResult);
          if(retryOk && retryResult.retcode == TRADE_RETCODE_DONE)
          {
             g_lastEntryTimeForSymbol = TimeCurrent();
-            RegisterBoomCrashMarketEntry();
             Print("✅ ORDRE M5 TOUCH EXÉCUTÉ APRÈS RETRY STOPS - ", direction, " sur ", _Symbol,
                   " | Ticket: ", retryResult.order,
                   " | SL: ", DoubleToString(retrySL, _Digits),
@@ -34224,12 +25501,10 @@ bool ExecuteM5TouchOrder(string direction)
                Alert("✅ POSITION OUVERTE - M5 TOUCH (RETRY) ", direction, " ", _Symbol, " | Ticket: ", retryResult.order);
                SendNotification("🎯 M5 TOUCH RETRY - " + direction + " " + _Symbol + " | Ticket: " + IntegerToString(retryResult.order));
             }
-            ReleaseOpenLock();
             return true;
          }
          Print("❌ RETRY M5 TOUCH ÉCHEC - Erreur: ", retryResult.retcode, " | ", retryResult.comment);
       }
-      ReleaseOpenLock();
       return false;
    }
 }
@@ -34352,396 +25627,137 @@ double GetResistanceLevelTF(ENUM_TIMEFRAMES tf, int bars)
    return resistance;
 }
 
-//=== SNIPER MODULES INTÉGRÉS ==================================================
-//| Fusion: Liquidity Sniper + Sniper Radar + Voting System
-//| Implémentation complète pour éviter dépendances externes
-
-struct SniperVote
+//+------------------------------------------------------------------+
+//| DASHBOARD MULTI-TIMEFRAME - Affiche directions M1/M5/H1 + Verdict
+//+------------------------------------------------------------------+
+void DisplayMTFDashboard()
 {
-   bool   liquiditySweptDetected;
-   int    confluenceScore;
-   bool   radarBOSDetected;
-   double levelPrice;
-   string levelType;
-   int    totalSignalStrength;
-};
+   if(!ShowBottomDashboard) return;
 
-struct LiquidityLevel
-{
-   double price;
-   int touches;
-   bool isBSL;
-   bool swept;
-   int bar;
-};
+   int x0 = 10;
+   int y0 = 25;
+   int cellW = 80;
+   int cellH = 25;
+   int gap = 5;
 
-struct MarketStructure
-{
-   bool bullish;
-   bool bearish;
-   bool bosDetected;
-   bool mssDetected;
-   double bosLevel;
-};
+   // Titre
+   string titleName = "SMC_MTF_TITLE";
+   string titleTxt = "📊 MULTI-TIMEFRAME VERDICT";
+   color titleColor = clrWhite;
+   color titleBg = 0x1a1a1a;
 
-// 🆕 OHLC PRICE CACHE (Optimization: replace 96 individual iHigh/iLow calls)
-struct PriceCache
-{
-   MqlRates rates[100];
-   datetime lastUpdate;
-};
+   // Afficher titre
+   if(!ObjectCreate(0, titleName, OBJ_RECTANGLE_LABEL, 0, 0, 0))
+      ObjectDelete(0, titleName);
+   ObjectCreate(0, titleName, OBJ_RECTANGLE_LABEL, 0, 0, 0);
+   ObjectSetInteger(0, titleName, OBJPROP_XDISTANCE, x0);
+   ObjectSetInteger(0, titleName, OBJPROP_YDISTANCE, y0);
+   ObjectSetInteger(0, titleName, OBJPROP_XSIZE, cellW * 4 + gap * 3);
+   ObjectSetInteger(0, titleName, OBJPROP_YSIZE, cellH);
+   ObjectSetInteger(0, titleName, OBJPROP_BGCOLOR, titleBg);
+   ObjectSetInteger(0, titleName, OBJPROP_BORDER_TYPE, BORDER_FLAT);
+   ObjectSetInteger(0, titleName, OBJPROP_BORDER_COLOR, 0x444444);
+   ObjectSetInteger(0, titleName, OBJPROP_BORDER_WIDTH, 1);
+   ObjectSetInteger(0, titleName, OBJPROP_ZORDER, 520);
+   ObjectSetString(0, titleName, OBJPROP_TEXT, titleTxt);
+   ObjectSetInteger(0, titleName, OBJPROP_FONTSIZE, 10);
+   ObjectSetString(0, titleName, OBJPROP_FONT, "Arial");
+   ObjectSetInteger(0, titleName, OBJPROP_TEXT_COLOR, titleColor);
 
-SniperVote     g_CurrentVote;
-LiquidityLevel g_LiquidityLevels[];
-int            g_LiquidityLevelCount = 0;
-MarketStructure g_SR_MS_HTF, g_SR_MS_Current;
-PriceCache     g_priceCache;
-datetime       g_LastSniperUpdate = 0;
-datetime       g_LastSniperBarTime = 0;  // Bar-boundary throttle
-datetime       g_LastStructureUpdateTime = 0;  // Cache market structure until new bar
+   // Récupérer directions calculées
+   double emaM1Fast = iMA(_Symbol, PERIOD_M1, 9, 0, MODE_EMA, PRICE_CLOSE);
+   double emaM1Slow = iMA(_Symbol, PERIOD_M1, 21, 0, MODE_EMA, PRICE_CLOSE);
+   string dirM1 = (emaM1Fast > emaM1Slow) ? "BUY" : "SELL";
+   color bgM1 = (emaM1Fast > emaM1Slow) ? (color)0x4CAF50 : (color)0xF44336;
 
-// 🆕 PRICE CACHE REFRESH (OHLC optimization)
-void RefreshPriceCache()
-{
-   datetime now = TimeCurrent();
-   // Refresh every 20 seconds or more
-   if(now - g_priceCache.lastUpdate < 20)
-      return;  // Cache still valid
+   double emaM5Fast = iMA(_Symbol, PERIOD_M5, 9, 0, MODE_EMA, PRICE_CLOSE);
+   double emaM5Slow = iMA(_Symbol, PERIOD_M5, 21, 0, MODE_EMA, PRICE_CLOSE);
+   string dirM5 = (emaM5Fast > emaM5Slow) ? "BUY" : "SELL";
+   color bgM5 = (emaM5Fast > emaM5Slow) ? (color)0x4CAF50 : (color)0xF44336;
 
-   CopyRates(_Symbol, _Period, 0, 100, g_priceCache.rates);
-   g_priceCache.lastUpdate = now;
-}
+   double emaH1Fast = iMA(_Symbol, PERIOD_H1, 9, 0, MODE_EMA, PRICE_CLOSE);
+   double emaH1Slow = iMA(_Symbol, PERIOD_H1, 21, 0, MODE_EMA, PRICE_CLOSE);
+   string dirH1 = (emaH1Fast > emaH1Slow) ? "BUY" : "SELL";
+   color bgH1 = (emaH1Fast > emaH1Slow) ? (color)0x4CAF50 : (color)0xF44336;
 
-//--- MODULE 1: LIQUIDITY SNIPER (Optimized: runs only on new bar + uses cached prices)
-void LiquiditySniperModule_Update()
-{
-   if(!EnableLiquiditySniperModule)
-      return;
+   // Déterminer verdict final (alignement)
+   int alignment = 0;
+   if(dirM1 == dirM5) alignment++;
+   if(dirM5 == dirH1) alignment++;
+   if(dirM1 == dirH1) alignment++;
 
-   // OPTIMIZATION: Only scan on new M1 bar (reduces CPU by 3x)
-   datetime currentBarTime = iTime(_Symbol, PERIOD_M1, 0);
-   if(currentBarTime == g_LastSniperBarTime)
-      return;  // Same bar, skip scan
-   g_LastSniperBarTime = currentBarTime;
+   string verdict = "MIXED";
+   color verdictBg = 0x757575; // Gris
 
-   // OPTIMIZATION: Refresh price cache once per scan (replaces 96 individual API calls)
-   RefreshPriceCache();
-
-   // OPTIMIZATION: Pre-allocate array (avoid +1 growth per element)
-   ArrayResize(g_LiquidityLevels, 20);  // Pre-allocate for typical 5-10 sweeps
-   g_LiquidityLevelCount = 0;
-
-   double tolPips = LS_EqualPips * SymbolInfoDouble(_Symbol, SYMBOL_POINT);
-
-   // OPTIMIZATION: Use cached prices instead of individual iHigh/iLow calls
-   for(int i = 2; i <= MathMin(LS_LookbackBars - 2, 98); i++)
+   if(alignment == 3) // Tous alignés
    {
-      double hi = g_priceCache.rates[i].high;
-      double lo = g_priceCache.rates[i].low;
-
-      if(hi > g_priceCache.rates[i-1].high &&
-         hi > g_priceCache.rates[i+1].high &&
-         hi > g_priceCache.rates[i-2].high &&
-         hi > g_priceCache.rates[i+2].high)
-      {
-         int touches = LS_CountTouches(hi, true, tolPips, i);
-         if(touches >= LS_MinTouches)
-         {
-            bool swept = LS_IsSwept(hi, true);
-            if(swept)
-            {
-               if(g_LiquidityLevelCount < 20) {  // Don't exceed pre-allocated size
-                  g_LiquidityLevels[g_LiquidityLevelCount].price = hi;
-                  g_LiquidityLevels[g_LiquidityLevelCount].isBSL = true;
-                  g_LiquidityLevels[g_LiquidityLevelCount].swept = true;
-                  g_LiquidityLevelCount++;
-               }
-            }
-         }
-      }
-
-      if(lo < g_priceCache.rates[i-1].low &&
-         lo < g_priceCache.rates[i+1].low &&
-         lo < g_priceCache.rates[i-2].low &&
-         lo < g_priceCache.rates[i+2].low)
-      {
-         int touches = LS_CountTouches(lo, false, tolPips, i);
-         if(touches >= LS_MinTouches)
-         {
-            bool swept = LS_IsSwept(lo, false);
-            if(swept)
-            {
-               if(g_LiquidityLevelCount < 20) {  // Don't exceed pre-allocated size
-                  g_LiquidityLevels[g_LiquidityLevelCount].price = lo;
-                  g_LiquidityLevels[g_LiquidityLevelCount].isBSL = false;
-                  g_LiquidityLevels[g_LiquidityLevelCount].swept = true;
-                  g_LiquidityLevelCount++;
-               }
-            }
-         }
-      }
+      verdict = (dirM1 == "BUY") ? "STRONG BUY" : "STRONG SELL";
+      verdictBg = (dirM1 == "BUY") ? (color)0x1B5E20 : (color)0xB71C1C;
    }
-   // OPTIMIZATION: Resize to actual count (avoid memory waste)
-   ArrayResize(g_LiquidityLevels, g_LiquidityLevelCount);
-}
-
-int LS_CountTouches(double level, bool isHigh, double tol, int startBar)
-{
-   int touches = 0;
-   for(int i = startBar; i <= LS_LookbackBars; i++)
+   else if(alignment == 2) // 2 sur 3 alignés
    {
-      double price = isHigh ? iHigh(_Symbol, _Period, i) : iLow(_Symbol, _Period, i);
-      if(MathAbs(price - level) <= tol) touches++;
+      if(dirM1 == dirM5) verdict = (dirM1 == "BUY") ? "BUY (M1/M5)" : "SELL (M1/M5)";
+      else if(dirM5 == dirH1) verdict = (dirM5 == "BUY") ? "BUY (M5/H1)" : "SELL (M5/H1)";
+      else verdict = (dirM1 == "BUY") ? "BUY (M1/H1)" : "SELL (M1/H1)";
+      verdictBg = (verdict[0] == 'B') ? (color)0x2E7D32 : (color)0xC62828;
    }
-   return touches;
-}
-
-bool LS_IsSwept(double level, bool isBSL)
-{
-   double currentHigh = iHigh(_Symbol, _Period, 1);
-   double currentLow = iLow(_Symbol, _Period, 1);
-
-   if(isBSL)
-      return (currentHigh > level && currentLow < level);
-   else
-      return (currentLow < level && currentHigh > level);
-}
-
-//--- MODULE 2: SNIPER RADAR
-void SniperRadarModule_Update()
-{
-   if(!EnableSniperRadarModule)
-      return;
-
-   // OPTIMIZATION: Cache market structure until new bar (50% reduction in analysis calls)
-   datetime currentBarTime = iTime(_Symbol, _Period, 0);
-   if(currentBarTime == g_LastStructureUpdateTime)
-      return;  // Same bar, use cached structure
-   g_LastStructureUpdateTime = currentBarTime;
-
-   SR_AnalyzeStructure(SR_HTF, g_SR_MS_HTF);
-   SR_AnalyzeStructure(_Period, g_SR_MS_Current);
-}
-
-void SR_AnalyzeStructure(ENUM_TIMEFRAMES tf, MarketStructure &ms)
-{
-   double lastHigh = 0, prevHigh = 0;
-   double lastLow = DBL_MAX, prevLow = DBL_MAX;
-
-   for(int i = 1; i <= SR_SwingLookback; i++)
+   else // Divergence
    {
-      double hi = iHigh(_Symbol, tf, i);
-      double lo = iLow(_Symbol, tf, i);
-
-      if(hi > lastHigh) { prevHigh = lastHigh; lastHigh = hi; }
-      if(lo < lastLow) { prevLow = lastLow; lastLow = lo; }
+      verdict = "DIVERGENCE";
+      verdictBg = (color)0xF57F17; // Orange
    }
 
-   ms.bullish = (lastHigh > prevHigh && lastLow > prevLow);
-   ms.bearish = (lastHigh < prevHigh && lastLow < prevLow);
+   // Afficher cellules M1/M5/H1/VERDICT
+   int yRow = y0 + cellH + gap;
 
-   double currentClose = iClose(_Symbol, tf, 1);
-   ms.bosDetected = false;
+   // M1
+   DrawDashboardCell("SMC_MTF_M1", x0, yRow, cellW, cellH, "M1", dirM1, bgM1);
 
-   if(ms.bullish && currentClose > lastHigh)
-   {
-      ms.bosDetected = true;
-      ms.bosLevel = lastHigh;
-   }
-   if(ms.bearish && currentClose < lastLow)
-   {
-      ms.bosDetected = true;
-      ms.bosLevel = lastLow;
-   }
-}
+   // M5
+   DrawDashboardCell("SMC_MTF_M5", x0 + cellW + gap, yRow, cellW, cellH, "M5", dirM5, bgM5);
 
-//--- MODULE 3: VOTING SYSTEM
-void SniperModules_ComputeVote()
-{
-   g_CurrentVote.liquiditySweptDetected = false;
-   g_CurrentVote.confluenceScore = 0;
-   g_CurrentVote.radarBOSDetected = false;
-   g_CurrentVote.totalSignalStrength = 0;
+   // H1
+   DrawDashboardCell("SMC_MTF_H1", x0 + 2*cellW + 2*gap, yRow, cellW, cellH, "H1", dirH1, bgH1);
 
-   if(!EnableLiquiditySniperModule && !EnableSniperRadarModule)
-      return;
+   // VERDICT
+   int verdictW = cellW + gap / 2;
+   DrawDashboardCell("SMC_MTF_VERDICT", x0 + 3*cellW + 3*gap, yRow, verdictW, cellH, "VERDICT", verdict, verdictBg);
 
-   if(EnableLiquiditySniperModule && g_LiquidityLevelCount > 0)
-   {
-      g_CurrentVote.liquiditySweptDetected = true;
-      g_CurrentVote.levelType = g_LiquidityLevels[0].isBSL ? "SWEEP_BSL" : "SWEEP_SSL";
-      g_CurrentVote.levelPrice = g_LiquidityLevels[0].price;
-      g_CurrentVote.totalSignalStrength += 3;
-   }
+   // IA Confiance
+   int yRow2 = yRow + cellH + gap;
+   string iaConfTxt = "IA: " + DoubleToString(g_lastAIConfidence * 100, 0) + "%";
+   string iaActTxt = g_lastAIAction;
+   color iaBg = (g_lastAIAction == "BUY") ? (color)0x1976D2 : ((g_lastAIAction == "SELL") ? (color)0xD32F2F : (color)0x616161);
 
-   if(EnableSniperRadarModule)
-   {
-      int score = 0;
-
-      if(g_SR_MS_Current.bosDetected) score += 2;
-      if(g_SR_MS_HTF.bullish && g_SR_MS_Current.bullish) score += 1;
-      if(g_SR_MS_HTF.bearish && g_SR_MS_Current.bearish) score += 1;
-      if(g_SR_MS_Current.mssDetected) score += 1;
-
-      g_CurrentVote.confluenceScore = MathMin(5, score);
-      g_CurrentVote.radarBOSDetected = g_SR_MS_Current.bosDetected;
-
-      g_CurrentVote.totalSignalStrength += g_CurrentVote.confluenceScore;
-   }
-}
-
-bool SniperModules_ShouldTrade(string direction)
-{
-   if(g_CurrentVote.totalSignalStrength < 3)
-   {
-      if(DebugSniperModules)
-         Print("🚫 SNIPER: Signal faible (", g_CurrentVote.totalSignalStrength, "/10) - SKIP");
-      return false;
-   }
-
-   int qualityScore = CalculateSignalQualityScore();
-   if(qualityScore < 50)
-   {
-      if(DebugSniperModules)
-         Print("🚫 SNIPER: Qualité insuffisante (", qualityScore, "/100) - confluence:", g_CurrentVote.confluenceScore);
-      return false;
-   }
-
-   if(g_CurrentVote.confluenceScore < 3)
-   {
-      if(DebugSniperModules)
-         Print("🚫 SNIPER: Confluence faible (", g_CurrentVote.confluenceScore, "/5) - SKIP");
-      return false;
-   }
-
-   if(g_CurrentVote.radarBOSDetected)
-   {
-      bool bosHaussier = (g_SR_MS_Current.bullish);
-
-      if(direction == "BUY" && !bosHaussier)
-      {
-         if(DebugSniperModules)
-            Print("⚠️ SNIPER: Conflit direction (BUY vs BOS bearish)");
-         return false;
-      }
-      if(direction == "SELL" && bosHaussier)
-      {
-         if(DebugSniperModules)
-            Print("⚠️ SNIPER: Conflit direction (SELL vs BOS bullish)");
-         return false;
-      }
-   }
-
-   if(DebugSniperModules)
-      Print("✅ SNIPER VOTE: ", g_CurrentVote.totalSignalStrength, "/10 | Quality:", qualityScore, "/100 | Type:",
-            g_CurrentVote.levelType, " @ ", g_CurrentVote.levelPrice);
-
-   return true;
-}
-
-int CalculateSignalQualityScore()
-{
-   int score = 0;
-
-   if(g_CurrentVote.confluenceScore > 0)
-      score += (g_CurrentVote.confluenceScore * 15);
-
-   if(g_CurrentVote.liquiditySweptDetected)
-      score += 20;
-
-   if(g_CurrentVote.radarBOSDetected)
-      score += 15;
-
-   score = MathMin(score, 100);
-   return score;
-}
-
-void SniperModules_DrawGraphics()
-{
-   if(!ShowSniperGraphics)
-      return;
-
-   int total = ObjectsTotal(0, 0, -1);
-   for(int i = total - 1; i >= 0; i--)
-   {
-      string name = ObjectName(0, i, 0, -1);
-      if(StringFind(name, "SNIPER_") == 0)
-         ObjectDelete(0, name);
-   }
-
-   if(EnableLiquiditySniperModule && g_LiquidityLevelCount > 0)
-   {
-      for(int i = 0; i < g_LiquidityLevelCount; i++)
-      {
-         string objName = StringFormat("SNIPER_LS_SWEEP_%d", i);
-         color col = g_LiquidityLevels[i].isBSL ? clrRed : clrGreen;
-
-         ObjectCreate(0, objName, OBJ_HLINE, 0, 0, g_LiquidityLevels[i].price);
-         ObjectSetInteger(0, objName, OBJPROP_COLOR, col);
-         ObjectSetInteger(0, objName, OBJPROP_WIDTH, 3);
-         ObjectSetInteger(0, objName, OBJPROP_STYLE, STYLE_DASHDOT);
-      }
-   }
-
-   if(EnableSniperRadarModule)
-   {
-      if(g_SR_MS_Current.bosDetected)
-      {
-         string bosName = StringFormat("SNIPER_BOS_%lld", iTime(_Symbol, _Period, 0));
-         ObjectCreate(0, bosName, OBJ_HLINE, 0, 0, g_SR_MS_Current.bosLevel);
-         ObjectSetInteger(0, bosName, OBJPROP_COLOR, clrCyan);
-         ObjectSetInteger(0, bosName, OBJPROP_WIDTH, 2);
-         ObjectSetInteger(0, bosName, OBJPROP_STYLE, STYLE_SOLID);
-      }
-
-      FVGData currentFVG;
-      if(SMC_DetectFVG(_Symbol, _Period, 50, currentFVG))
-      {
-         string fvgName = StringFormat("SNIPER_FVG_%lld", iTime(_Symbol, _Period, 0));
-         datetime barTime = iTime(_Symbol, _Period, currentFVG.barIndex);
-         datetime barTimePrev = iTime(_Symbol, _Period, currentFVG.barIndex + 3);
-
-         ObjectCreate(0, fvgName, OBJ_RECTANGLE, 0, barTimePrev, currentFVG.top, barTime, currentFVG.bottom);
-         ObjectSetInteger(0, fvgName, OBJPROP_COLOR, C'100,200,255');
-         ObjectSetInteger(0, fvgName, OBJPROP_FILL, true);
-         ObjectSetInteger(0, fvgName, OBJPROP_WIDTH, 1);
-      }
-
-      OrderBlockData currentOB;
-      if(SMC_DetectOrderBlock(_Symbol, _Period, currentOB))
-      {
-         string obName = StringFormat("SNIPER_OB_%lld", iTime(_Symbol, _Period, 0));
-         datetime barTime = iTime(_Symbol, _Period, currentOB.barIndex);
-         datetime barTimePrev = iTime(_Symbol, _Period, currentOB.barIndex + 5);
-
-         color obCol = (currentOB.direction > 0) ? clrYellow : clrOrange;
-
-         ObjectCreate(0, obName, OBJ_RECTANGLE, 0, barTimePrev, currentOB.high, barTime, currentOB.low);
-         ObjectSetInteger(0, obName, OBJPROP_COLOR, obCol);
-         ObjectSetInteger(0, obName, OBJPROP_FILL, true);
-         ObjectSetInteger(0, obName, OBJPROP_WIDTH, 1);
-      }
-
-      if(g_CurrentVote.confluenceScore > 0)
-      {
-         string scoreText = StringFormat("CONFLUENCE: %d/5 | STRENGTH: %d%%",
-            g_CurrentVote.confluenceScore,
-            (int)(g_CurrentVote.totalSignalStrength * 100 / 10));
-         string labelName = "SNIPER_CONFLUENCE_TEXT";
-
-         ObjectCreate(0, labelName, OBJ_LABEL, 0, 0, 0);
-         ObjectSetString(0, labelName, OBJPROP_TEXT, scoreText);
-
-         color labelCol = (g_CurrentVote.confluenceScore >= 4) ? clrLimeGreen : clrYellow;
-         ObjectSetInteger(0, labelName, OBJPROP_COLOR, labelCol);
-         ObjectSetInteger(0, labelName, OBJPROP_FONTSIZE, 11);
-         ObjectSetInteger(0, labelName, OBJPROP_XDISTANCE, 50);
-         ObjectSetInteger(0, labelName, OBJPROP_YDISTANCE, 50);
-         ObjectSetInteger(0, labelName, OBJPROP_CORNER, CORNER_LEFT_UPPER);
-      }
-   }
+   DrawDashboardCell("SMC_IA_CONF", x0, yRow2, cellW, cellH, "CONF", iaConfTxt, iaBg);
+   DrawDashboardCell("SMC_IA_ACT", x0 + cellW + gap, yRow2, cellW * 3 + 2*gap, cellH, "IA ACTION", iaActTxt, iaBg);
 
    ChartRedraw(0);
+}
+
+//+------------------------------------------------------------------+
+//| Helper: Dessiner une cellule du dashboard
+//+------------------------------------------------------------------+
+void DrawDashboardCell(string name, int x, int y, int w, int h, string label, string value, color bg)
+{
+   if(ObjectFind(0, name) >= 0) ObjectDelete(0, name);
+
+   ObjectCreate(0, name, OBJ_RECTANGLE_LABEL, 0, 0, 0);
+   ObjectSetInteger(0, name, OBJPROP_XDISTANCE, x);
+   ObjectSetInteger(0, name, OBJPROP_YDISTANCE, y);
+   ObjectSetInteger(0, name, OBJPROP_XSIZE, w);
+   ObjectSetInteger(0, name, OBJPROP_YSIZE, h);
+   ObjectSetInteger(0, name, OBJPROP_BGCOLOR, bg);
+   ObjectSetInteger(0, name, OBJPROP_BORDER_TYPE, BORDER_FLAT);
+   ObjectSetInteger(0, name, OBJPROP_BORDER_COLOR, 0x303030);
+   ObjectSetInteger(0, name, OBJPROP_BORDER_WIDTH, 1);
+   ObjectSetInteger(0, name, OBJPROP_ZORDER, 520);
+
+   string txt = label + "\n" + value;
+   ObjectSetString(0, name, OBJPROP_TEXT, txt);
+   ObjectSetInteger(0, name, OBJPROP_FONTSIZE, 9);
+   ObjectSetString(0, name, OBJPROP_FONT, "Arial");
+   ObjectSetInteger(0, name, OBJPROP_TEXT_COLOR, clrWhite);
 }
 
 //| END OF PROGRAM                                                  |
