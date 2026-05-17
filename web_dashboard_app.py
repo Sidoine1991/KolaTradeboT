@@ -168,6 +168,18 @@ async def get_dashboard():
                 const signal = m.signal || {};
                 const action = (signal.signal || "HOLD").toUpperCase();
                 const conf = ((signal.confidence || 0) * 100).toFixed(0);
+                const accuracy = (signal.accuracy || "N/A");
+                const modelName = signal.model_name || "N/A";
+                const pattern = signal.chart_pattern || {};
+                const patternName = pattern.pattern_name || "NONE";
+                const samples = signal.total_samples || 0;
+
+                // Construire une raison basée sur les données disponibles
+                let reason = `${patternName} | Samples: ${samples}`;
+                if (pattern.score > 0) {
+                    reason = `${patternName} (${pattern.score.toFixed(2)}) | Samples: ${samples}`;
+                }
+
                 const actionClass = "action-" + action.toLowerCase();
 
                 html += `
@@ -181,12 +193,16 @@ async def get_dashboard():
                             <span class="value">${conf}%</span>
                         </div>
                         <div class="row">
-                            <span class="label">Model</span>
-                            <span class="value">${signal.model_used || "N/A"}</span>
+                            <span class="label">Accuracy</span>
+                            <span class="value">${accuracy}${typeof accuracy === 'number' ? '%' : ''}</span>
                         </div>
                         <div class="row">
-                            <span class="label">Reason</span>
-                            <span class="value" style="font-size: 10px;">${(signal.reason || "N/A").substring(0, 40)}</span>
+                            <span class="label">Model</span>
+                            <span class="value">${modelName}</span>
+                        </div>
+                        <div class="row">
+                            <span class="label">Pattern</span>
+                            <span class="value" style="font-size: 10px;">${reason.substring(0, 50)}</span>
                         </div>
                     </div>
                 `;
