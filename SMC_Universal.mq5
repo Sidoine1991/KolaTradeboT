@@ -417,6 +417,7 @@ string GetMostPropiceSymbol();
 bool CheckSymbolLossProtection();
 void ResetSymbolProtection();
 void PredictFutureProtectedPoints();
+void ClosePositionsOnSpikeScalp();  // Fermer positions après spike capture (scalping)
 bool GetFutureProtectedPointLevels(double &futureSupportOut, double &futureResistanceOut);
 bool GetSuperTrendLevel(ENUM_TIMEFRAMES tf, double &supportOut, double &resistanceOut);
 double GetClosestBuyLevel(double currentPrice, double atr, double maxDistATR, string &sourceOut);
@@ -2305,13 +2306,15 @@ input bool   UltraLightMode      = false; // Mode ultra léger: pas de graphique
 input bool   BlockAllTrades      = false; // BLOQUER toutes les entrées/sorties (mode observation seul)
 input int    SpikePredictionOffsetMinutes = 60; // Décalage dans le futur pour afficher l'entrée de spike dans la zone prédite
 
-input group "=== SL/TP DYNAMIQUES (prudent / sécuriser gain) ==="
-input double SL_ATRMult        = 2.5;    // Stop Loss (x ATR) - prudent
-input double TP_ATRMult        = 5.0;    // Take Profit (x ATR) - ratio 2:1
+input group "=== SL/TP SCALPING AGRESSIF (spike capture) ==="
+input double SL_ATRMult        = 0.8;    // Stop Loss (x ATR) - très serré pour scalping
+input double TP_ATRMult        = 1.2;    // Take Profit (x ATR) - proche, capture spike rapide
+input bool   EnableSpikeScalping = true;  // Scalping agressif sur Boom/Crash/PAINX/GAINX
+input double SpikeCloseProfitPct = 0.5;   // Fermer position à X% de gain après spike (ex: 0.5 = fermé à 50% du gain cible)
 input group "=== TRAILING STOP (sécuriser les gains) ==="
 input bool   UseTrailingStop    = true;   // Activer le Trailing Stop automatique
-input double TrailingStop_ATRMult = 3.0;  // Distance Trailing Stop (x ATR) - moins agressif pour protéger les gains
-input double TrailingStartProfitDollars = 0.50; // Activer le trailing dès petit gain ($)
+input double TrailingStop_ATRMult = 1.5;  // Distance Trailing Stop (x ATR) - serré pour garder gains
+input double TrailingStartProfitDollars = 0.10; // Activer le trailing dès petit gain ($)
 input bool   DynamicSL_Enable = true;               // SL dynamique (BE + trailing + lock gain max)
 input double DynamicSL_StartProfitDollars = 0.50;   // Commencer à protéger à partir de ce profit ($)
 input double DynamicSL_LockPctOfMax = 0.50;         // Protéger au moins X% du gain max (0.50 = 50%)
@@ -5874,6 +5877,85 @@ void ClosePositionsOnDirectionConflict()
    }
 }
 
+// Scalping agressif: fermer positions après capture de spike sur Boom/Crash et PAINX/GAINX
+void ClosePositionsOnSpikeScalp()
+{
+   if(!EnableSpikeScalping)
+      return;
+
+   string sym = _Symbol;
+   ENUM_SYMBOL_CATEGORY symCat = SMC_GetSymbolCategory(sym);
+
+   // Ne s'applique que sur Boom/Crash et PAINX/GAINX
+   bool isScalpableSymbol = (symCat == SYM_BOOM_CRASH ||
+                              symCat == SYM_VOLATILITY);
+
+   if(!isScalpableSymbol)
+      return;
+
+   // Parcourir toutes les positions ouvertes
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0)
+         continue;
+
+      if(!PositionSelectByTicket(ticket))
+         continue;
+
+      string psym = PositionGetString(POSITION_SYMBOL);
+      ulong pmagic = (ulong)PositionGetInteger(POSITION_MAGIC);
+
+      // Vérifier que c'est notre EA et le bon symbole
+      if(psym != sym || pmagic != InpMagicNumber)
+         continue;
+
+      double profit = PositionGetDouble(POSITION_PROFIT);
+      double volumeLots = PositionGetDouble(POSITION_VOLUME);
+      double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+      ENUM_POSITION_TYPE ptype = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+      string cmt = PositionGetString(POSITION_COMMENT);
+
+      // Calculer le profit cible (X% du TP initial)
+      // On clôt dès qu'on atteint SpikeCloseProfitPct du profit potentiel
+      double tickValue = SymbolInfoDouble(psym, SYMBOL_TRADE_TICK_VALUE);
+      double tickSize = SymbolInfoDouble(psym, SYMBOL_TRADE_TICK_SIZE);
+      double pointValue = tickValue / tickSize;
+
+      // Estimation du profit cible: calculer depuis les niveaux TP/SL
+      // Si profit >= 50% du gain cible → fermer (capture du spike)
+      double currentPrice = SymbolInfoDouble(psym, SYMBOL_BID);
+
+      // Déterminer le seuil de fermeture
+      double currentATR = iATR(psym, PERIOD_M1, 14);
+      if(currentATR <= 0) continue;  // Skip si ATR invalide
+
+      double closeProfitThreshold = SpikeCloseProfitPct * (TP_ATRMult * currentATR) * pointValue * volumeLots;
+      closeProfitThreshold = MathMax(closeProfitThreshold, 0.5);  // Minimum $0.50 profit pour fermer (realistic)
+
+      // SCALPING: Si profit POSITIF et >= seuil, fermer position (capture spike réussie)
+      // JAMAIS fermer sur perte!
+      if(profit > 0 && profit >= closeProfitThreshold)
+      {
+         CTrade trade;
+         trade.PositionClose(ticket);
+
+         if(trade.ResultRetcode() == TRADE_RETCODE_DONE)
+         {
+            Print("✅ SPIKE SCALP CLOSED | Symbol=", psym,
+                  " | Type=", (ptype == POSITION_TYPE_BUY ? "BUY" : "SELL"),
+                  " | Volume=", volumeLots,
+                  " | Entry=", DoubleToString(openPrice, _Digits),
+                  " | Profit=", DoubleToString(profit, 2), "$ | Threshold=", DoubleToString(closeProfitThreshold, 2), "$");
+         }
+         else
+         {
+            Print("? SPIKE SCALP CLOSE FAILED | Ticket=", ticket, " | Error=", trade.ResultRetcode());
+         }
+      }
+   }
+}
+
 // Ferme toutes les positions de l'EA quand l'IA passe en HOLD
 void ClosePositionsOnIAHold()
 {
@@ -6374,7 +6456,11 @@ void OnTick()
    
    // NOUVEAU: Vérifier les conflits de direction sur Boom/Crash
    ClosePositionsOnDirectionConflict();
-   
+
+   // SCALPING: Fermer positions après spike capture (Boom/Crash + PAINX/GAINX)
+   if(EnableSpikeScalping)
+      ClosePositionsOnSpikeScalp();
+
    // NOUVEAU: Vérifier le toucher des niveaux OTE pour exécution au marché
    CheckAndExecuteMarketOnOTETouch();
    
