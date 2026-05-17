@@ -913,10 +913,22 @@ static datetime g_lastEntryTimeForSymbol = 0;
 bool IsSpreadAcceptable()
 {
    if(MaxSpreadPoints <= 0) return true;
+
    long spread = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
-   if(spread > MaxSpreadPoints)
+
+   // Boom/Crash synthetic indices have naturally higher spreads (10k-20k points)
+   // Allow higher threshold for these symbols
+   int allowedSpread = MaxSpreadPoints;
+   ENUM_SYMBOL_CATEGORY cat = SMC_GetSymbolCategory(_Symbol);
+   if(cat == SYM_BOOM_CRASH)
    {
-      Print("🚫 ENTRÉE BLOQUÉE - Spread trop élevé: ", (int)spread, " > ", MaxSpreadPoints, " points");
+      // For synthetic indices: allow up to 30000 points (typical spread 10k-20k)
+      allowedSpread = 30000;
+   }
+
+   if(spread > allowedSpread)
+   {
+      Print("🚫 ENTRÉE BLOQUÉE - Spread trop élevé: ", (int)spread, " > ", allowedSpread, " points (Symbol: ", _Symbol, ")");
       return false;
    }
    return true;
