@@ -6763,6 +6763,18 @@ struct FutureCandleData {
    double close;
    double confidence;
 };
+
+// ML Dashboard Signal Structure
+struct MLSignal {
+   string symbol;
+   string signal;        // "BUY", "SELL", "HOLD"
+   double confidence;
+   double accuracy;
+   string model_name;
+   string pattern_name;
+   datetime timestamp;
+};
+
 enum ENUM_SYMBOL_CATEGORY {
    SYM_BOOM_CRASH,
    SYM_VOLATILITY,
@@ -10963,6 +10975,13 @@ COrderInfo orderInfo;
 // Scanner d'opportunités multi-symboles
 COpportunityScanner *g_OpportunityScanner = NULL;
 
+// ML Dashboard URLs and cache
+const string ML_LOCAL_URL = "http://127.0.0.1:8000";
+const string ML_RENDER_URL = "https://kolatradebot-7ofl.onrender.com";
+MLSignal g_LastMLSignal;
+datetime g_LastMLSignalUpdate = 0;
+int g_MLSignalCacheSeconds = 3;
+
 int atrHandle;
 int emaHandle = INVALID_HANDLE;
 int hEmaFast = INVALID_HANDLE;  // EMA rapide pour tendance
@@ -13817,13 +13836,8 @@ void OnTick()
          // GOM_CleanExpiredDrawings(); // TODO: Fix parameter conflict with GOM_Enhanced_Dashboard
       UpdateDashboard();
 
-      // TODO: Récupérer signal ML du dashboard pour le symbole actuel
-      // MLSignal ml_sig;
-      // if(GetMLSignal(_Symbol, ml_sig))
-      // {
-      //    Comment("ML Signal: ", ml_sig.signal, " (", (int)(ml_sig.confidence * 100), "%)",
-      //            " | Model: ", ml_sig.model_name, " | Pattern: ", ml_sig.pattern_name);
-      // }
+      // Afficher signal ML du dashboard
+      DisplayMLSignal();
    }
 
    MaybeUpdateTradingAgentsFromOnTick(currentTime);
@@ -34751,6 +34765,101 @@ void SniperModules_DrawGraphics()
    }
 
    ChartRedraw(0);
+}
+
+//| ML Dashboard Signal Functions                                   |
+//| Récupère et affiche les signaux ML du serveur                   |
+
+// Récupère le signal ML depuis le serveur
+bool FetchMLSignal(string symbol, MLSignal &sig) {
+   // Vérifier cache (3 secondes)
+   if(TimeCurrent() - g_LastMLSignalUpdate < g_MLSignalCacheSeconds && g_LastMLSignal.symbol == symbol) {
+      sig = g_LastMLSignal;
+      return true;
+   }
+
+   char response[];
+   string url = ML_LOCAL_URL + "/ml/signal?symbol=" + symbol + "&timeframe=M1";
+
+   // Essayer le serveur local d'abord
+   int res = WebRequest("GET", url, "", NULL, 500, response, NULL);
+
+   if(res != 200) {
+      // Fallback vers Render
+      url = ML_RENDER_URL + "/ml/signal?symbol=" + symbol + "&timeframe=M1";
+      res = WebRequest("GET", url, "", NULL, 500, response, NULL);
+   }
+
+   if(res == 200) {
+      string response_str = CharArrayToString(response);
+
+      sig.symbol = symbol;
+      sig.signal = ExtractJsonString(response_str, "\"signal\":\"");
+      sig.confidence = StringToDouble(ExtractJsonValue(response_str, "\"confidence\":"));
+      sig.accuracy = StringToDouble(ExtractJsonValue(response_str, "\"accuracy\":"));
+      sig.model_name = ExtractJsonString(response_str, "\"model_name\":\"");
+      sig.pattern_name = ExtractJsonString(response_str, "\"pattern_name\":\"");
+      sig.timestamp = TimeCurrent();
+
+      // Mettre en cache
+      g_LastMLSignal = sig;
+      g_LastMLSignalUpdate = TimeCurrent();
+
+      return true;
+   }
+
+   return false;
+}
+
+// Extrait une valeur string JSON
+string ExtractJsonString(string json, string key) {
+   int pos = StringFind(json, key);
+   if(pos == -1) return "";
+
+   pos += StringLen(key);
+   int end = StringFind(json, "\"", pos);
+   if(end == -1) return "";
+
+   return StringSubstr(json, pos, end - pos);
+}
+
+// Extrait une valeur numérique JSON
+string ExtractJsonValue(string json, string key) {
+   int pos = StringFind(json, key);
+   if(pos == -1) return "";
+
+   pos += StringLen(key);
+   int end = StringFind(json, ",", pos);
+   if(end == -1) end = StringFind(json, "}", pos);
+   if(end == -1) return "";
+
+   return StringSubstr(json, pos, end - pos);
+}
+
+// Affiche le signal ML sur le graphique
+void DisplayMLSignal() {
+   MLSignal sig;
+
+   if(!FetchMLSignal(_Symbol, sig)) {
+      return;
+   }
+
+   // Couleur par signal
+   color signal_color = clrYellow;
+   if(sig.signal == "BUY") signal_color = clrLimeGreen;
+   else if(sig.signal == "SELL") signal_color = clrRed;
+   else if(sig.signal == "HOLD") signal_color = clrOrange;
+
+   // Mettre à jour le Comment
+   Comment(
+      "═══════════════════════════════\n",
+      "📊 ML SIGNAL: ", sig.signal, "\n",
+      "═══════════════════════════════\n",
+      "Confidence: ", DoubleToString(sig.confidence * 100, 1), "%\n",
+      "Accuracy:   ", DoubleToString(sig.accuracy, 1), "%\n",
+      "Model:      ", sig.model_name, "\n",
+      "Pattern:    ", sig.pattern_name
+   );
 }
 
 //| END OF PROGRAM                                                  |
