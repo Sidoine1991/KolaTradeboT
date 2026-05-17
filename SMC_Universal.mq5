@@ -25836,7 +25836,7 @@ void CheckAndExecuteOTEEntry()
 //+------------------------------------------------------------------+
 void DisplayComprehensiveVerdict(bool bullM1, bool bullM5, bool bullH1)
 {
-   int cornerX = (int)ChartGetInteger(0, CHART_WIDTH_IN_PIXELS) - 350;
+   int cornerX = (int)ChartGetInteger(0, CHART_WIDTH_IN_PIXELS) - 200;  // Moved left (was 350)
    int cornerY = (int)ChartGetInteger(0, CHART_HEIGHT_IN_PIXELS) - 280;
 
    // Calculer analyse complète
@@ -25899,7 +25899,7 @@ void DisplayComprehensiveVerdict(bool bullM1, bool bullM5, bool bullH1)
    if(ObjectFind(0, titleName) >= 0) ObjectDelete(0, titleName);
    ObjectCreate(0, titleName, OBJ_LABEL, 0, 0, 0);
    ObjectSetInteger(0, titleName, OBJPROP_CORNER, CORNER_RIGHT_LOWER);
-   ObjectSetInteger(0, titleName, OBJPROP_XDISTANCE, 20);
+   ObjectSetInteger(0, titleName, OBJPROP_XDISTANCE, 150);
    ObjectSetInteger(0, titleName, OBJPROP_YDISTANCE, 270);
    ObjectSetString(0, titleName, OBJPROP_TEXT, "⚙️ DÉCISION FINALE");
    ObjectSetInteger(0, titleName, OBJPROP_FONTSIZE, 10);
