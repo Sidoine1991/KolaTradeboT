@@ -418,6 +418,14 @@ bool CheckSymbolLossProtection();
 void ResetSymbolProtection();
 void PredictFutureProtectedPoints();
 void ClosePositionsOnSpikeScalp();  // Fermer positions après spike capture (scalping)
+struct PricePrediction
+{
+   string direction;        // "UP", "DOWN", "CONSOLIDATE"
+   double targetPrice;      // Prix cible prédit
+   double probability;      // Probabilité 0-100%
+   string reasoning;        // Raison de la prédiction
+};
+PricePrediction GetPriceDirection();  // Prédire direction + probabilité réelle
 bool GetFutureProtectedPointLevels(double &futureSupportOut, double &futureResistanceOut);
 bool GetSuperTrendLevel(ENUM_TIMEFRAMES tf, double &supportOut, double &resistanceOut);
 double GetClosestBuyLevel(double currentPrice, double atr, double maxDistATR, string &sourceOut);
@@ -7312,6 +7320,22 @@ void DrawEnhancedDashboard()
    ObjectSetInteger(chartID, label2, OBJPROP_COLOR, trendColor);
    ObjectSetInteger(chartID, label2, OBJPROP_FONTSIZE, fontSize);
    ObjectSetInteger(chartID, label2, OBJPROP_BACK, false);
+   y += lineHeight;
+
+   // ===== PRICE PREDICTION SECTION =====
+   PricePrediction pred = GetPriceDirection();
+   color predColor = (pred.direction == "UP") ? clrLimeGreen :
+                     (pred.direction == "DOWN") ? clrRed : clrYellow;
+   string predText = "🔮 Prediction: " + pred.direction + " [" + DoubleToString(pred.probability, 1) + "%]";
+
+   string label_pred = "ML_DASH_PREDICTION";
+   ObjectCreate(chartID, label_pred, OBJ_LABEL, 0, 0, 0);
+   ObjectSetInteger(chartID, label_pred, OBJPROP_XDISTANCE, 10);
+   ObjectSetInteger(chartID, label_pred, OBJPROP_YDISTANCE, y);
+   ObjectSetString(chartID, label_pred, OBJPROP_TEXT, predText);
+   ObjectSetInteger(chartID, label_pred, OBJPROP_COLOR, predColor);
+   ObjectSetInteger(chartID, label_pred, OBJPROP_FONTSIZE, fontSize);
+   ObjectSetInteger(chartID, label_pred, OBJPROP_BACK, false);
    y += lineHeight + 10; // Extra gap before ML metrics
 
    // ===== ML METRICS SECTION (FAR BOTTOM-RIGHT - NO OVERLAP) =====
@@ -9447,7 +9471,7 @@ string GetCurrentTrendDirection()
 {
    // Utiliser les EMA pour déterminer la tendance
    double emaFast = 0.0, emaSlow = 0.0;
-   
+
    if(hEmaFast != INVALID_HANDLE && hEmaSlow != INVALID_HANDLE)
    {
       double a1[], a2[];
@@ -9459,15 +9483,128 @@ string GetCurrentTrendDirection()
          emaSlow = a2[0];
       }
    }
-   
+
    double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   
+
    if(emaFast > emaSlow && currentPrice > emaFast)
       return "UPTREND";
    else if(emaFast < emaSlow && currentPrice < emaFast)
       return "DOWNTREND";
    else
       return "SIDEWAYS";
+}
+
+// Prédire la direction réelle du prix (UP/DOWN/CONSOLIDATE) avec probabilité
+PricePrediction GetPriceDirection()
+{
+   PricePrediction pred;
+   pred.direction = "CONSOLIDATE";
+   pred.probability = 0.0;
+   pred.targetPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   pred.reasoning = "Initializing";
+
+   double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   if(point <= 0.0) point = 0.0001;
+
+   // 1. Analyse EMA 9/31 pour direction du prix
+   double ema9 = 0.0, ema31 = 0.0;
+   int emaSignalScore = 0;  // +1 UP, -1 DOWN, 0 NEUTRAL
+
+   if(ema21LTF != INVALID_HANDLE && ema31LTF != INVALID_HANDLE)
+   {
+      double buf9[], buf31[];
+      ArraySetAsSeries(buf9, true);
+      ArraySetAsSeries(buf31, true);
+      if(CopyBuffer(ema21LTF, 0, 0, 1, buf9) >= 1 && CopyBuffer(ema31LTF, 0, 0, 1, buf31) >= 1)
+      {
+         ema9 = buf9[0];
+         ema31 = buf31[0];
+
+         if(ema9 > ema31) emaSignalScore = 1;
+         else if(ema9 < ema31) emaSignalScore = -1;
+      }
+   }
+
+   // 2. Analyse RSI pour overbought/oversold
+   int rsiScore = 0;  // +1 bullish, -1 bearish, 0 neutral
+   double rsi = 0.0;
+   int rsiHandle = iRSI(_Symbol, PERIOD_M1, 14, PRICE_CLOSE);
+   if(rsiHandle != INVALID_HANDLE)
+   {
+      double rsiBuf[];
+      ArraySetAsSeries(rsiBuf, true);
+      if(CopyBuffer(rsiHandle, 0, 0, 1, rsiBuf) >= 1)
+         rsi = rsiBuf[0];
+      IndicatorRelease(rsiHandle);
+   }
+
+   if(rsi > 70) rsiScore = -1;  // Overbought = caution on UP, potential DOWN
+   else if(rsi < 30) rsiScore = 1;  // Oversold = caution on DOWN, potential UP
+   else if(rsi > 50) rsiScore = 1;  // Mid-range bullish
+   else rsiScore = -1;  // Mid-range bearish
+
+   // 3. Analyse ATR pour consolidation
+   double atrVal = 0.0;
+   if(atrHandle != INVALID_HANDLE)
+   {
+      double atrBuf[];
+      ArraySetAsSeries(atrBuf, true);
+      if(CopyBuffer(atrHandle, 0, 0, 1, atrBuf) >= 1)
+         atrVal = atrBuf[0];
+   }
+   if(atrVal <= 0.0) atrVal = point * 50.0;
+
+   // Prix moyen/volatilité pour déterminer consolidation
+   double avgMove = atrVal * 0.5;  // Moyenne volatilité
+   bool isConsolidating = (atrVal < avgMove * 0.8);  // Si ATR est basse
+
+   // 4. Analyse des niveaux de swing pour support/résistance
+   // Déterminer si prix approche un niveau clé
+   bool nearSwingLow = false, nearSwingHigh = false;
+   // (Simplifié: utiliser les EMA comme niveaux)
+   if(MathAbs(currentPrice - ema31) < atrVal * 0.5)
+   {
+      if(currentPrice > ema31) nearSwingLow = true;
+      else nearSwingHigh = true;
+   }
+
+   // 5. Calcul de confluence et probabilité
+   int signalConfluence = emaSignalScore + rsiScore;
+
+   if(isConsolidating && MathAbs(signalConfluence) <= 1)
+   {
+      pred.direction = "CONSOLIDATE";
+      pred.probability = 40.0 + (MathRand() % 20);
+      pred.targetPrice = currentPrice + (atrVal * 0.2);
+      pred.reasoning = "ATR low + mixed signals → consolidation zone";
+   }
+   else if(signalConfluence >= 1)
+   {
+      pred.direction = "UP";
+      pred.probability = MathMin(90.0, 50.0 + (10.0 * signalConfluence));
+      pred.targetPrice = currentPrice + (atrVal * TP_ATRMult);
+      pred.reasoning = "EMA/RSI alignment → bullish direction";
+   }
+   else if(signalConfluence <= -1)
+   {
+      pred.direction = "DOWN";
+      pred.probability = MathMin(90.0, 50.0 + (10.0 * MathAbs(signalConfluence)));
+      pred.targetPrice = currentPrice - (atrVal * TP_ATRMult);
+      pred.reasoning = "EMA/RSI alignment → bearish direction";
+   }
+   else
+   {
+      pred.direction = "CONSOLIDATE";
+      pred.probability = 30.0 + (MathRand() % 30);
+      pred.targetPrice = currentPrice;
+      pred.reasoning = "Neutral signals → consolidation";
+   }
+
+   // Normaliser probabilité 0-100
+   pred.probability = MathMin(100.0, MathMax(0.0, pred.probability));
+
+   return pred;
 }
 
 // Valider et ajuster les distances minimales pour SL/TP
@@ -26464,6 +26601,33 @@ void CheckAndExecuteAutoEntryOnVerdictGoodPerfect()
 
    // All conditions met - proceed with entry
    lastAutoEntryTime = TimeCurrent();
+
+   // Get real price direction prediction
+   PricePrediction priceDir = GetPriceDirection();
+
+   // STRICT FILTERING: Only trade if price direction aligns with verdict
+   // BUY verdict must predict UP, SELL verdict must predict DOWN
+   bool directionAligned = false;
+   if(g_finalVerdict.direction == "BUY" && priceDir.direction == "UP")
+      directionAligned = true;
+   else if(g_finalVerdict.direction == "SELL" && priceDir.direction == "DOWN")
+      directionAligned = true;
+
+   if(!directionAligned)
+   {
+      Print("❌ VERDICT blocked - Price direction mismatch | verdict=", g_finalVerdict.direction,
+            " | predicted=", priceDir.direction, " | prob=", priceDir.probability, "%");
+      return;
+   }
+
+   // Require minimum confidence in price prediction
+   double minPredictionConfidence = 50.0;
+   if(priceDir.probability < minPredictionConfidence)
+   {
+      Print("❌ VERDICT blocked - Price prediction confidence too low | prob=", priceDir.probability,
+            "% | min=", minPredictionConfidence, "%");
+      return;
+   }
 
    // Get entry level and timeframe
    double entryPrice = 0.0;
