@@ -26554,19 +26554,19 @@ void CheckAndExecuteAutoEntryOnVerdictGoodPerfect()
    SendNotification(notificationMsg);
    Print("📲 NOTIFICATION SENT - " + g_finalVerdict.verdictLabel);
 
-   // Place the order
+   // Place LIMIT ORDER - Wait for price to touch entry level, don't trade immediately
+   // This ensures we only trade when price reaches the exact support/resistance level
    MqlTradeRequest request = {};
    MqlTradeResult result = {};
-   request.action = TRADE_ACTION_DEAL;
+   request.action = TRADE_ACTION_PENDING;  // LIMIT order, not market
    request.symbol = _Symbol;
    request.volume = lotSize;
-   request.type = (g_finalVerdict.direction == "BUY") ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
-   request.price = entryPrice;
+   request.type = (g_finalVerdict.direction == "BUY") ? ORDER_TYPE_BUY_LIMIT : ORDER_TYPE_SELL_LIMIT;
+   request.price = entryPrice;  // Wait for price to touch this level
    request.sl = stopLoss;
    request.tp = takeProfit;
-   request.deviation = 10;
    request.magic = InpMagicNumber;
-   request.comment = "AUTO_" + g_finalVerdict.verdictLabel + "_" + entryTf;
+   request.comment = "AUTO_LIMIT_" + g_finalVerdict.verdictLabel + "_" + entryTf;
 
    if(!OrderSend(request, result))
    {
