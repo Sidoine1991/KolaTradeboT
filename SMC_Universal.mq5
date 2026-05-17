@@ -425,7 +425,18 @@ struct PricePrediction
    double probability;      // Probabilité 0-100%
    string reasoning;        // Raison de la prédiction
 };
+
+// Structure to hold detailed probability analysis
+struct ProbabilityAnalysis
+{
+   double emaScore;        // EMA alignment: 0-100
+   double rsiScore;        // RSI signal: 0-100
+   double atrScore;        // ATR volatility: 0-100
+   double overallScore;    // Combined: 0-100
+};
+
 PricePrediction GetPriceDirection();  // Prédire direction + probabilité réelle
+ProbabilityAnalysis GetProbabilityBreakdown();  // Calculer scores individuels des signaux
 bool GetFutureProtectedPointLevels(double &futureSupportOut, double &futureResistanceOut);
 bool GetSuperTrendLevel(ENUM_TIMEFRAMES tf, double &supportOut, double &resistanceOut);
 double GetClosestBuyLevel(double currentPrice, double atr, double maxDistATR, string &sourceOut);
@@ -9523,15 +9534,6 @@ string GetCurrentTrendDirection()
    else
       return "SIDEWAYS";
 }
-
-// Structure to hold detailed probability analysis
-struct ProbabilityAnalysis
-{
-   double emaScore;        // EMA alignment: 0-100
-   double rsiScore;        // RSI signal: 0-100
-   double atrScore;        // ATR volatility: 0-100
-   double overallScore;    // Combined: 0-100
-};
 
 // Get detailed probability breakdown (for dashboard enrichment)
 ProbabilityAnalysis GetProbabilityBreakdown()
