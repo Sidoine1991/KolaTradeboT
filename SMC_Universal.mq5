@@ -418,6 +418,7 @@ bool CheckSymbolLossProtection();
 void ResetSymbolProtection();
 void PredictFutureProtectedPoints();
 void ClosePositionsOnSpikeScalp();  // Fermer positions après spike capture (scalping)
+
 struct PricePrediction
 {
    string direction;        // "UP", "DOWN", "CONSOLIDATE"
@@ -435,8 +436,10 @@ struct ProbabilityAnalysis
    double overallScore;    // Combined: 0-100
 };
 
-PricePrediction GetPriceDirection();  // Prédire direction + probabilité réelle
-ProbabilityAnalysis GetProbabilityBreakdown();  // Calculer scores individuels des signaux
+// Forward declarations for probability functions (defined later in file)
+PricePrediction GetPriceDirection();
+ProbabilityAnalysis GetProbabilityBreakdown();
+
 bool GetFutureProtectedPointLevels(double &futureSupportOut, double &futureResistanceOut);
 bool GetSuperTrendLevel(ENUM_TIMEFRAMES tf, double &supportOut, double &resistanceOut);
 double GetClosestBuyLevel(double currentPrice, double atr, double maxDistATR, string &sourceOut);
