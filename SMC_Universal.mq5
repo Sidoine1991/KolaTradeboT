@@ -7341,9 +7341,10 @@ void DrawEnhancedDashboard()
       y += lineHeight;
    }
 
-   y += 10; // Extra gap before ML metrics
+   // ===== ML METRICS SECTION (FAR BOTTOM-RIGHT - NO OVERLAP) =====
+   // Position ML metrics in bottom-left corner, well below all other dashboards
+   // This prevents any overlap with the verdict dashboard and entry levels
 
-   // ===== ML METRICS SECTION (BOTTOM) =====
    string mlAccuracy = DoubleToString(g_mlLastAccuracy, 1);
    string mlModel = g_mlLastModelName;
    string mlText = "📊 ML: " + mlAccuracy + "% | " + mlModel;
@@ -7351,7 +7352,7 @@ void DrawEnhancedDashboard()
    string label_ml = "ML_DASH_METRICS";
    ObjectCreate(chartID, label_ml, OBJ_LABEL, 0, 0, 0);
    ObjectSetInteger(chartID, label_ml, OBJPROP_XDISTANCE, 10);
-   ObjectSetInteger(chartID, label_ml, OBJPROP_YDISTANCE, y);
+   ObjectSetInteger(chartID, label_ml, OBJPROP_YDISTANCE, 500);  // MOVED TO BOTTOM - Well below all other UI
    ObjectSetString(chartID, label_ml, OBJPROP_TEXT, mlText);
    ObjectSetInteger(chartID, label_ml, OBJPROP_COLOR, clrSkyBlue);
    ObjectSetInteger(chartID, label_ml, OBJPROP_FONTSIZE, 9);
