@@ -10975,12 +10975,12 @@ COrderInfo orderInfo;
 // Scanner d'opportunités multi-symboles
 COpportunityScanner *g_OpportunityScanner = NULL;
 
-// ML Dashboard URLs and cache
-const string ML_LOCAL_URL = "http://127.0.0.1:8000";
-const string ML_RENDER_URL = "https://kolatradebot-7ofl.onrender.com";
-MLSignal g_LastMLSignal;
-datetime g_LastMLSignalUpdate = 0;
-int g_MLSignalCacheSeconds = 3;
+// ML Dashboard URLs and cache (TODO: reactivate when FetchMLSignal is fixed)
+// const string ML_LOCAL_URL = "http://127.0.0.1:8000";
+// const string ML_RENDER_URL = "https://kolatradebot-7ofl.onrender.com";
+// MLSignal g_LastMLSignal;
+// datetime g_LastMLSignalUpdate = 0;
+// int g_MLSignalCacheSeconds = 3;
 
 int atrHandle;
 int emaHandle = INVALID_HANDLE;
@@ -11276,8 +11276,8 @@ int OnInit()
       UpdateDashboard();
    }
 
-   // Initialize ML Scanner for 5-minute data collection
-   OnInit_ML_Scanner();
+   // Initialize ML Scanner for 5-minute data collection (TODO: fix compilation)
+   // OnInit_ML_Scanner();
 
    // Set timer for 5-minute scanning (300 seconds)
    EventSetTimer(300);
@@ -34767,76 +34767,6 @@ void SniperModules_DrawGraphics()
    }
 
    ChartRedraw(0);
-}
-
-//| ML Dashboard Signal Functions                                   |
-//| Récupère et affiche les signaux ML du serveur                   |
-
-// Récupère le signal ML depuis le serveur
-bool FetchMLSignal(string symbol, MLSignal &sig) {
-   // Vérifier cache (3 secondes)
-   if(TimeCurrent() - g_LastMLSignalUpdate < g_MLSignalCacheSeconds && g_LastMLSignal.symbol == symbol) {
-      sig = g_LastMLSignal;
-      return true;
-   }
-
-   char response[];
-   string url = ML_LOCAL_URL + "/ml/signal?symbol=" + symbol + "&timeframe=M1";
-
-   // Essayer le serveur local d'abord
-   int res = WebRequest("GET", url, "", NULL, 500, response, NULL);
-
-   if(res != 200) {
-      // Fallback vers Render
-      url = ML_RENDER_URL + "/ml/signal?symbol=" + symbol + "&timeframe=M1";
-      res = WebRequest("GET", url, "", NULL, 500, response, NULL);
-   }
-
-   if(res == 200) {
-      string response_str = CharArrayToString(response);
-
-      sig.symbol = symbol;
-      sig.signal = ExtractJsonString(response_str, "\"signal\":\"");
-      sig.confidence = StringToDouble(ExtractJsonValue(response_str, "\"confidence\":"));
-      sig.accuracy = StringToDouble(ExtractJsonValue(response_str, "\"accuracy\":"));
-      sig.model_name = ExtractJsonString(response_str, "\"model_name\":\"");
-      sig.pattern_name = ExtractJsonString(response_str, "\"pattern_name\":\"");
-      sig.timestamp = TimeCurrent();
-
-      // Mettre en cache
-      g_LastMLSignal = sig;
-      g_LastMLSignalUpdate = TimeCurrent();
-
-      return true;
-   }
-
-   return false;
-}
-
-// Affiche le signal ML sur le graphique
-void DisplayMLSignal() {
-   MLSignal sig;
-
-   if(!FetchMLSignal(_Symbol, sig)) {
-      return;
-   }
-
-   // Couleur par signal
-   color signal_color = clrYellow;
-   if(sig.signal == "BUY") signal_color = clrLimeGreen;
-   else if(sig.signal == "SELL") signal_color = clrRed;
-   else if(sig.signal == "HOLD") signal_color = clrOrange;
-
-   // Mettre à jour le Comment
-   Comment(
-      "═══════════════════════════════\n",
-      "📊 ML SIGNAL: ", sig.signal, "\n",
-      "═══════════════════════════════\n",
-      "Confidence: ", DoubleToString(sig.confidence * 100, 1), "%\n",
-      "Accuracy:   ", DoubleToString(sig.accuracy, 1), "%\n",
-      "Model:      ", sig.model_name, "\n",
-      "Pattern:    ", sig.pattern_name
-   );
 }
 
 //| END OF PROGRAM                                                  |
