@@ -370,6 +370,7 @@ void DrawEMACurveOnChart();
 void DrawLiquidityZonesOnChart();
 //void PlaceScalpingLimitOrders(MqlRates &rates[], int futureBars, double currentPrice, double currentATR, double trendSlope); // SUPPRIMÉ - Plus d'ordres limit
 void DrawHistoricalSwingPoints(MqlRates &rates[], int bars, double point);
+void UpdateBoomCrashDynamicSL();  // Update SL to -$3.50
 void ManageBoomCrashSpikeClose();
 void CheckAndExecuteSecondSpikeReentry();
 void ManageDollarExits();
@@ -5415,6 +5416,102 @@ bool IsBoomCrashSmartEntryContextFresh(const string direction)
 }
 
 // Parcourt toutes les positions et ferme Boom/Crash rapidement après spike
+//+------------------------------------------------------------------+
+//| Dynamic SL Update - Modify SL to -$3.50 for Boom/Crash positions |
+//+------------------------------------------------------------------+
+void UpdateBoomCrashDynamicSL()
+{
+   const double SL_DOLLAR_LOSS = 3.50;  // SL = -$3.50 loss threshold
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      if(!posInfo.SelectByIndex(i)) continue;
+      if(posInfo.Magic() != InpMagicNumber) continue;
+
+      string symbol = posInfo.Symbol();
+      ENUM_SYMBOL_CATEGORY cat = SMC_GetSymbolCategory(symbol);
+
+      // Only manage Boom/Crash positions
+      if(cat != SYM_BOOM_CRASH) continue;
+
+      ulong ticket = posInfo.Ticket();
+      if(!PositionSelectByTicket(ticket)) continue;
+
+      double currentSL = posInfo.StopLoss();
+      double openPrice = posInfo.PriceOpen();
+      double bid = SymbolInfoDouble(symbol, SYMBOL_BID);
+      double ask = SymbolInfoDouble(symbol, SYMBOL_ASK);
+      ENUM_POSITION_TYPE posType = posInfo.PositionType();
+
+      // Calculate new SL based on -$3.50 dollar loss
+      double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
+      double tickValue = SymbolInfoDouble(symbol, SYMBOL_TRADE_TICK_VALUE);
+      if(tickValue <= 0) tickValue = 1.0;
+
+      double lotSize = posInfo.Volume();
+      double dollarRiskPerTick = tickValue * lotSize;
+      if(dollarRiskPerTick <= 0) dollarRiskPerTick = 1.0;
+
+      double ticksForSL = SL_DOLLAR_LOSS / dollarRiskPerTick;
+      double newSL = 0.0;
+
+      if(posType == POSITION_TYPE_BUY)
+      {
+         // For BUY: SL below open price
+         newSL = openPrice - (ticksForSL * point);
+      }
+      else if(posType == POSITION_TYPE_SELL)
+      {
+         // For SELL: SL above open price
+         newSL = openPrice + (ticksForSL * point);
+      }
+
+      // Validate and normalize SL
+      newSL = NormalizeDouble(newSL, _Digits);
+
+      // Only modify if different from current SL
+      if(MathAbs(currentSL - newSL) < point * 10)
+         continue;
+
+      // Check stop-level broker constraints
+      double stopLevel = SymbolInfoInteger(symbol, SYMBOL_TRADE_STOPS_LEVEL) * point;
+      double currentPrice = (posType == POSITION_TYPE_BUY) ? bid : ask;
+      double distance = MathAbs(newSL - currentPrice);
+
+      if(distance < stopLevel)
+      {
+         // Adjust SL to respect broker's stop level
+         if(posType == POSITION_TYPE_BUY)
+            newSL = currentPrice - stopLevel;
+         else
+            newSL = currentPrice + stopLevel;
+         newSL = NormalizeDouble(newSL, _Digits);
+      }
+
+      // Modify position with new SL
+      MqlTradeRequest request = {};
+      MqlTradeResult result = {};
+      request.action = TRADE_ACTION_SLTP;
+      request.symbol = symbol;
+      request.position = ticket;
+      request.sl = newSL;
+      request.tp = posInfo.TakeProfit();
+
+      if(!OrderSend(request, result))
+      {
+         Print("❌ Failed to update SL for ", symbol, " ticket=", ticket,
+               " | NewSL=", DoubleToString(newSL, _Digits), " | Error=", result.retcode);
+      }
+      else
+      {
+         Print("✅ SL updated for ", symbol, " ticket=", ticket,
+               " | OldSL=", DoubleToString(currentSL, _Digits),
+               " | NewSL=", DoubleToString(newSL, _Digits),
+               " | Target=-$3.50");
+      }
+   }
+}
+
 void ManageBoomCrashSpikeClose()
 {
    // DEBUG: Log pour voir si cette fonction est appelée
@@ -6243,6 +6340,7 @@ void OnTick()
    UpdateGainPreservationSystem();
    ManagePositionsAgainstTrendCorrection();
    ManageMaximumHoldingTime();
+   UpdateBoomCrashDynamicSL();  // Update SL to -$3.50 for Boom/Crash positions
 
    if(EnableStatisticsTracking && TimeCurrent() - lastStatsUpdate >= 60)
    {
