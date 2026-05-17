@@ -5552,55 +5552,24 @@ void ManageBoomCrashSpikeClose()
       bool shouldClose = false;
       string closeReason = "";
       
-      if(BoomCrash_UseSmartScalpProfile)
-      {
-         double scalpTarget = MathMax(0.01, BoomCrash_ScalpTakeProfitUSD);
-         if(profit >= scalpTarget)
-         {
-            shouldClose = true;
-            closeReason = "Profil scalping - gain mini atteint";
-         }
-         if(!shouldClose && BoomCrash_ScalpBankProfitMaxSec > 0 && profit > 0.0 &&
-            secondsSinceOpen >= BoomCrash_ScalpBankProfitMaxSec)
-         {
-            shouldClose = true;
-            closeReason = "Profil scalping - banque sur délai (gain>0)";
-         }
-         if(!shouldClose && BoomCrash_ScalpFavorableMovePct > 0.0 && profit > 0.0)
-         {
-            double moveFavPct = 0.0;
-            if(posInfo.PositionType() == POSITION_TYPE_BUY)
-               moveFavPct = (currentPrice - openPrice) / openPrice * 100.0;
-            else
-               moveFavPct = (openPrice - currentPrice) / openPrice * 100.0;
-            if(moveFavPct >= BoomCrash_ScalpFavorableMovePct)
-            {
-               shouldClose = true;
-               closeReason = "Profil scalping - mouvement favorable capté";
-            }
-         }
-      }
-      
-      if(UseSpikeAutoClose && !shouldClose)
-      {
-         // Fermer dès gain >= BoomCrashSpikeTP (ex. 0.05$), minimum 0.01$
-         double firstSpikeTarget = MathMax(0.01, BoomCrashSpikeTP);
+      // STRICT MODE: Fermer SEULEMENT si TP=$3.50 ou SL=-$3.50 atteint
+      // Ignorer tous les autres critères de fermeture (scalp, délai, mouvement, etc.)
+      double TP_THRESHOLD = 3.50;   // Profit target: $3.50 = spike capté
+      double SL_THRESHOLD = -3.50;  // Stop loss: -$3.50 = perte max
 
-         if(profit >= firstSpikeTarget)
-         {
-            shouldClose = true;
-            closeReason = "Spike capté - FERMETURE IMPÉRATIVE";
-            Print("?? FERMETURE OBLIGATOIRE - Spike détecté, fermeture immédiate avant tout autre trade");
-         }
-         
-         // RÈGLE SÉVÈRE: Fermer aussi si perte légère pour éviter drawdown
-         if(!shouldClose && profit <= -0.5)
-         {
-            shouldClose = true;
-            closeReason = "Perte légère après spike - FERMETURE SÉCURITÉ";
-            Print("?? FERMETURE SÉCURITÉ - Perte détectée, fermeture avant aggravation");
-         }
+      if(profit >= TP_THRESHOLD)
+      {
+         shouldClose = true;
+         closeReason = "TP SPIKE ATTEINT ($3.50+) - Fermeture immédiate";
+         Print("✅ SPIKE CAPTÉ - Position fermée sur TP=$3.50 - Profit: ", DoubleToString(profit, 2), "$");
       }
+      else if(profit <= SL_THRESHOLD)
+      {
+         shouldClose = true;
+         closeReason = "SL ATTEINT (-$3.50) - Fermeture immédiate";
+         Print("🛑 SL HIT - Position fermée sur perte=$3.50 - Profit: ", DoubleToString(profit, 2), "$");
+      }
+      // SINON: Ne pas fermer, laisser le robot traider
       
       if(shouldClose)
       {
