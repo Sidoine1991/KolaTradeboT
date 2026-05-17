@@ -6683,9 +6683,41 @@ async def decision_simplified(request: DecisionRequest):
         confidence = max(confidence, funnel_conf * 0.95)
         reason += f" [Funnel MTF a déclenché {funnel_action.upper()}]"
     elif action in ("buy", "sell") and funnel_action == "hold":
-        action = "hold"
-        confidence = max(0.45, min(confidence, funnel_conf))
-        reason += " [Funnel MTF: conflit inter-TF -> HOLD]"
+        sym_l_fc = str(request.symbol or "").lower()
+        skip_funnel_hold = False
+        if is_boom_crash_symbol(str(request.symbol)):
+            if "boom" in sym_l_fc and action == "buy":
+                m1u = (
+                    request.ema_fast_m1 is not None
+                    and request.ema_slow_m1 is not None
+                    and float(request.ema_fast_m1) > float(request.ema_slow_m1)
+                )
+                m5u = (
+                    request.ema_fast_m5 is not None
+                    and request.ema_slow_m5 is not None
+                    and float(request.ema_fast_m5) > float(request.ema_slow_m5)
+                )
+                if m1u or m5u:
+                    skip_funnel_hold = True
+                    reason += " [Funnel MTF ignoré: Boom M1/M5 haussiers]"
+            elif "crash" in sym_l_fc and action == "sell":
+                m1d = (
+                    request.ema_fast_m1 is not None
+                    and request.ema_slow_m1 is not None
+                    and float(request.ema_fast_m1) < float(request.ema_slow_m1)
+                )
+                m5d = (
+                    request.ema_fast_m5 is not None
+                    and request.ema_slow_m5 is not None
+                    and float(request.ema_fast_m5) < float(request.ema_slow_m5)
+                )
+                if m1d or m5d:
+                    skip_funnel_hold = True
+                    reason += " [Funnel MTF ignoré: Crash M1/M5 baissiers]"
+        if not skip_funnel_hold:
+            action = "hold"
+            confidence = max(0.45, min(confidence, funnel_conf))
+            reason += " [Funnel MTF: conflit inter-TF -> HOLD]"
     elif action != funnel_action and funnel_action in ("buy", "sell"):
         action = "hold"
         confidence = max(0.45, min(confidence, funnel_conf))
@@ -7036,6 +7068,18 @@ async def decision_simplified(request: DecisionRequest):
             asyncio.create_task(_insert_stair_detection_supabase(payload_st))
     
     # 13. Créer la réponse enrichie
+    hold_diagnostic = ""
+    if action == "hold":
+        hold_diagnostic = (reason or "")[:280]
+        logger.info(
+            "⏸️ HOLD %s | buy=%.3f sell=%.3f | funnel=%s | ml=%s",
+            request.symbol,
+            buy_score,
+            sell_score,
+            funnel.get("action", "?"),
+            ml_result.get("ml_reason", ""),
+        )
+
     meta_out = {
         "original_decision": ml_result["original_decision"],
         "original_confidence": ml_result["original_confidence"],
@@ -7052,6 +7096,7 @@ async def decision_simplified(request: DecisionRequest):
         "funnel_mtf": funnel,
         "qwen_blend": qwen_meta,
         "final_decision": {"action": action, "confidence": confidence_percentage},
+        "hold_diagnostic": hold_diagnostic,
     }
     if confluence_detail:
         meta_out["indicator_confluence"] = confluence_detail
@@ -7075,9 +7120,9 @@ async def decision_simplified(request: DecisionRequest):
         coherence=coherence,
         metadata=meta_out
     )
-    
+
     set_simplified_tf_cached_decision(request, response)
-    
+
     # 11. Sauvegarder la décision dans Supabase (local OU cloud) si les clés sont disponibles
     try:
         await save_decision_to_supabase(request, response, ml_result)
@@ -9486,6 +9531,11 @@ async def decision(req: Request):
                 d["confidence"] = 0.5
             d["trade_allowed"] = (au != "HOLD")
             d["source"] = "DECISION_UNIFIED_CLASSIC_SIMPLIFIED"
+            meta = d.get("metadata") if isinstance(d.get("metadata"), dict) else {}
+            if au == "HOLD":
+                hd = meta.get("hold_diagnostic") or (d.get("reason") or "")[:280]
+                if hd:
+                    d["hold_diagnostic"] = hd
             return JSONResponse(d)
         
         # MODE COMPLET - Analyse avancée
