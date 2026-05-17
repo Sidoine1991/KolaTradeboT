@@ -332,6 +332,7 @@ void DrawFVGOnChart();
 void DrawFibonacciOnChart();
 void DrawConfirmedOBWithCHOCH();
 void CheckAndExecuteOTEEntry();
+void CheckAndExecuteAutoEntryOnVerdictGoodPerfect();  // Auto-entry when verdict GOOD/PERFECT + IA aligned
 void DisplayComprehensiveVerdict(bool bullM1, bool bullM5, bool bullH1);
 void SMC_ComputeAndStoreFinalVerdict();
 void CheckAndExecuteVerdictAutoEntry();
@@ -2133,7 +2134,7 @@ bool DebugMode = false;
 string   g_propiceTopSymbols = "";
 bool     g_symbolIsPropice   = false;
 datetime g_lastPropiceUpdate = 0;
-// Stats symboles (source serveur/Supabase) pour affichage cohérent MT5 = Excel = Supabase
+// Stats symboles (source serveur/AWS RDS) pour affichage cohérent MT5 = Excel = Database
 int    g_dayWins = 0, g_dayLosses = 0, g_monthWins = 0, g_monthLosses = 0;
 double g_dayNetProfit = 0.0, g_monthNetProfit = 0.0;
 datetime g_symbolStatsLastLocalUpdate = 0;
@@ -2207,7 +2208,7 @@ input bool   BlockAllEntriesIfSymbolPaused = true;    // Si le symbole est en pa
 input double MaxDailyRealizedLossPerSymbolUSD = 3.0; // Plafond perte réalisée (jour, symbole) — au-delà, pas de nouvelle entrée ce jour sur ce symbole (0=désactivé)
 input bool   BlockTradingNonTopPropiceWhenLosing = true; // Multi-graph: si filtre propice actif et ce symbole n'est pas le plus propice → bloquer entrées (évite répéter pertes sur 2e/3e choix)
 input bool   BlockEquilibriumCorrectionTrades = true; // Bloquer les trades en zone de correction (autour de l'équilibre ICT)
-input bool   UseServerCorrectionZoneFilter = true;    // Bloquer aussi selon prédiction correction serveur/Supabase
+input bool   UseServerCorrectionZoneFilter = true;    // Bloquer aussi selon prédiction correction serveur/AWS RDS
 input double ServerCorrectionMinConfidence = 63.0;    // Seuil confiance (%) pour bloquer quand le serveur signale correction (plus bas = plus de blocage)
 input double EquilibriumCorrectionBandPercent = 26.0; // Largeur zone correction (% Premium↔Discount) — plus large = moins de trades en zone chop
 input int    CorrectionRangeLookbackBarsM1 = 60;      // Lookback M1 pour détecter une correction (range)
@@ -2222,7 +2223,7 @@ input double MinSetupScoreEntry      = 65.0;  // Score minimum (0-100) pour auto
 input double MinAIConfidencePercent   = 75.0;  // Confiance IA minimum (%) pour executer un trade (strict)
 input bool   CloseOnlyOnAIHoldOrBrokerSLTP = true; // Empêche les fermetures actives (sauf IA=HOLD). Laisser SL/TP broker gérer le reste.
 input group "=== ENTRÉES PLUS POINTUES (fiabilité) ==="
-input int    MaxSpreadPoints          = 80;   // Spread max (points) - éviter entrée si spread trop élevé
+input int    MaxSpreadPoints          = 1500;   // Spread max (points) - ajusté pour indices synthétiques Deriv (spreads typiques: 500-1200)
 input int    EntryCooldownSeconds     = 90;   // Cooldown min (sec) après dernière entrée sur ce symbole
 input bool   RequireConfirmationCandle = true; // Exiger 1 bougie M1 dans le sens (close>open BUY, close<open SELL)
 input double MinProfitPotentialUSD    = 2.0;  // Gain potentiel min ($) - ex: 2$ pour capital 10$ = mouvement franc requis
@@ -2335,11 +2336,11 @@ input bool   EnableVerdictEntryLimit = false; // LIMIT verdict (désactivé si e
 input int    VerdictLimitRefreshSec = 45; // Recalcul / repositionnement LIMIT verdict (sec)
 input bool   AI_VerboseDecisionLogs = false; // Logs détaillés POST /decision (désactivé = moins de spam)
 input bool   DashboardSingleSourceMode = true; // Eviter les doublons: infos texte uniquement via UpdateDashboard()
-input bool   ShowTop3NetProfitBottomRight = true; // Afficher en bas à droite le top 3 net profit + perf globale modèle
+input bool   ShowTop3NetProfitBottomRight = false; // Afficher en bas à droite le top 3 net profit + perf globale modèle - DISABLED TO PREVENT CLUTTER
 input bool   ShowMLMetrics       = true;   // Afficher les métriques ML (entraînement modèle)
 input bool   AutoStartMLContinuousTraining = true; // Démarrer l'entraînement continu ML automatiquement
 input int    MLContinuousCheckIntervalSec  = 300;  // Vérifier/relancer continuous training (sec)
-input int    MLMetricsLabelYOffsetPixels   = 200;  // Décalage vertical (px) pour éviter la superposition - augmenté
+input int    MLMetricsLabelYOffsetPixels   = 5;    // Décalage vertical (px) - Fixed at top-left to avoid GOM dashboard
 input int    DashboardLabelXOffsetPixels   = 10;   // Offset X dashboard (px)
 input int    DashboardLabelYStartPixels    = 18;   // Début Y dashboard (px)
 input int    DashboardLabelLineHeightPixels= 22;   // Hauteur ligne dashboard (px) - augmenté pour éviter la superposition
@@ -4415,11 +4416,24 @@ int OnInit()
    trade.SetDeviationInPoints(20);
    trade.SetTypeFilling(ORDER_FILLING_IOC);
    
-   // Nettoyer tous les anciens dessins sur le chart au démarrage (si activé)
+   // Nettoyer tous les anciens dessins sur le chart au démarrage
+   // ALWAYS clean up stale objects on startup to prevent EA detachment
+   ObjectDelete(0, "SMC_TOP_NET_RIGHT");  // Remove Top3 dashboard
+   ObjectDelete(0, "SMC_TOP_NET_LEFT");
+   ObjectsDeleteAll(0, "SMC_TOP3_");      // Remove any old Top3 objects
+   ObjectsDeleteAll(0, "SMC_Limit_");     // Remove old S/R lines
+   ObjectsDeleteAll(0, "SMC_FVG_");       // Remove FVG zones
+   ObjectsDeleteAll(0, "SMC_IFVG_");      // Remove IFVG zones
+   ObjectsDeleteAll(0, "SMC_EMA_");       // Remove old EMA lines
+
    if(CleanChartOnStartup)
    {
       CleanupAllChartObjects();
       Print("🧹 Nettoyage complet des anciens dessins effectué au démarrage");
+   }
+   else
+   {
+      Print("🧹 Nettoyage partiel des objets stale effectué au démarrage");
    }
    
    atrHandle = iATR(_Symbol, LTF, 14);
@@ -5946,31 +5960,23 @@ void DrawAllIndicatorGraphics()
    DrawFibonacciOnChart();
    DrawConfirmedOBWithCHOCH();  // OB + CHOCH confirmation (1 rectangle)
    CheckAndExecuteOTEEntry();    // OTE confirmation → position entry SL + TP1/TP2/TP3
+   CheckAndExecuteAutoEntryOnVerdictGoodPerfect();  // Auto-entry when verdict GOOD/PERFECT + IA aligned (with push notification)
    DrawEMACurveOnChart();
    DrawLiquidityZonesOnChart();
    
-   // Zones Premium/Discount et équilibre
-   if(ShowPremiumDiscount) DrawPremiumDiscountZones();
-   
-   // Autres graphiques optionnels
-   if(ShowSignalArrow) { DrawSignalArrow(); UpdateSignalArrowBlink(); }
-   
-   // Avertisseur visuel des spikes imminents sur Boom/Crash
-   UpdateSpikeWarningBlink();
-   
-   if(ShowPredictedSwing) DrawPredictedSwingPoints();
-   if(ShowEMASupportResistance) DrawEMASupportResistance();
-   if(ShowPredictionChannel) DrawPredictionChannel();
-   if(ShowFutureCandlesM1) DrawFutureCandlesM1();
-   if(ShowSMCChannelsMultiTF) DrawSMCChannelsMultiTF();
-   if(ShowEMASupertrendMultiTF) DrawEMASupertrendMultiTF();
-   //if(ShowLimitOrderLevels) DrawLimitOrderLevels(); // SUPPRIMÉ - Plus d'affichage ordres limit
+   // ✅ AFFICHAGE ESSENTIEL: Dashboard ML + Données AI
+   UpdateMLMetricsDisplay();  // Affiche précision %, modèle, samples
 
-   if(ShowOTEImbalanceOnChart) DrawOTEImbalanceOnChart();
-   if(ShowConfirmedChartPatterns) DrawConfirmedSIDOPatternsOnChart();
-   
-   // NOUVEAU: Prédiction des Protected High/Low Points futurs
-   PredictFutureProtectedPoints();
+   // ⚠️ TOUS LES AUTRES DESSINS SUPPRIMÉS
+   // - Premium/Discount zones
+   // - Signal arrows
+   // - Predicted swing points
+   // - EMA support/resistance lines
+   // - Prediction channels
+   // - Future candles
+   // - SMC multi-TF channels
+   // - OTE imbalance zones
+   // - Protected high/low predictions
 }
 
 // Dessine sur le graphique la confluence OTE(0.62-0.786) + Imbalance(FVG)
@@ -6282,9 +6288,10 @@ void OnTick()
    }
    
    // STRATÉGIES PAR CATÉGORIE DE SYMBOLE (Boom/Crash, Volatility, Forex/Metals)
+   // DISABLED: Real-time scanner removed per user request
    // Anti-duplication immédiat: avant toute tentative de placement de LIMIT
    EnsureSinglePendingLimitOrderForSymbol(_Symbol);
-   RunCategoryStrategy();
+   // RunCategoryStrategy();  // DISABLED - Real-time scanner removed
    
    // Gestion des positions existantes (fermeture rapide après spike)
    ManageBoomCrashSpikeClose();
@@ -6589,11 +6596,13 @@ void UpdateDashboard()
 
    // Nettoyage périodique des objets graphiques pour éviter l'accumulation
    static datetime lastCleanupTime = 0;
-   if(TimeCurrent() - lastCleanupTime >= 600) // Nettoyer toutes les 10 minutes
+   if(TimeCurrent() - lastCleanupTime >= 120) // Nettoyer toutes les 2 minutes (MORE AGGRESSIVE)
    {
       CleanupDashboardObjects();
+      CleanupExpiredDashboardObjects(600); // Remove ALL temporary objects immediately
       lastCleanupTime = TimeCurrent();
-      Print("?? Nettoyage périodique des objets dashboard effectué");
+      if(DebugMode)
+         Print("✅ Nettoyage périodique des objets dashboard effectué");
    }
 
    if(!UseDashboard) return;
@@ -6662,9 +6671,7 @@ void UpdateDashboard()
    string lines[40]; // Lignes dashboard (+ ligne IA séparée pour éviter troncature MT5)
    color  cols[40];
    int n = 0;
-   lines[n] = "[Contexte] SMC Universal + FVG_Kill PRO"; cols[n] = clrWhite; n++;
-   lines[n] = "Stratégie: SMC(FVG|OB|LS|BOS) + FVG_Kill(EMA HTF + LS)"; cols[n] = clrSilver; n++;
-   lines[n] = "Trend HTF: " + trendHTF + " | LS: " + lsStr + " | KillZone: " + killStr; cols[n] = clrWhite; n++;
+   // Keep only ESSENTIAL trading info - remove context/strategy lines to declutter
    lines[n] = "UTC: " + IntegerToString(hourUTC) + "h | Zone: " + utcZone + " | Statut: " + robotStatus;
    cols[n] = (utcTradingOpen ? clrLimeGreen : clrOrange);
    n++;
@@ -6728,51 +6735,10 @@ void UpdateDashboard()
          aiLineCol = clrTomato;
       }
    }
-   // Deux lignes: évite la troncature horizontale des labels MT5 (texte coupé sur "confiance...")
-   lines[n] = catStr + " | " + bcStr; cols[n] = aiLineCol; n++;
+   // ESSENTIAL: AI Status + Position info only
    lines[n] = aiStatus; cols[n] = aiLineCol; n++;
-   lines[n] = "Positions: " + IntegerToString(totalPos) + "/" + IntegerToString(MaxPositionsTerminal) + " | " + _Symbol + ": " + IntegerToString(posCount) + "/1"; cols[n] = clrWhite; n++;
-   lines[n] = "LIMIT: total=" + IntegerToString(totalLimits) + " | canal=" + IntegerToString(channelLimits) + " | autres=" + IntegerToString(otherLimits); cols[n] = clrKhaki; n++;
-   if(isBoomCrash)
-      lines[n] = "Rule: Boom=BUY only | Crash=SELL only";
-   else
-      lines[n] = "Rule: Following IA Signal (BUY/SELL)";
-   cols[n] = clrAqua; n++;
-   lines[n] = "P/L: " + DoubleToString(totalPL, 2) + "$ (max " + DoubleToString(MaxTotalLossDollars, 0) + "$) | Swing:" + swingStr; cols[n] = (totalPL >= 0 ? clrLime : clrTomato); n++;
-   lines[n] = "ATR: " + DoubleToString(atrVal, _Digits) + " | EMA(9): " + DoubleToString(emaVal, _Digits) + " | Canal ML: " + string(g_channelValid ? "OK" : "—"); cols[n] = clrWhite; n++;
-   if(ShowFutureCandlesM1 && n < 28)
-   {
-      string src = (g_futureCandlesSource == "" ? "NONE" : g_futureCandlesSource);
-      lines[n] = "[IA/Prediction] Future M1: " + IntegerToString(FutureCandlesCount) + " candles | SourcePred: " + src;
-      cols[n] = (src == "SERVER" ? clrLimeGreen : (src == "FALLBACK" ? clrYellow : clrTomato));
-      n++;
-   }
-   if(n < 28)
-   {
-      string scoreTxt = (g_predictionScore >= 0.0 ? DoubleToString(g_predictionScore, 3) : "N/A");
-      lines[n] = "PredScore M1(7d): " + scoreTxt + " | Samples: " + IntegerToString(g_predictionSamples) +
-                 " | Source: " + g_predictionScoreSource;
-      cols[n] = (g_predictionScore >= 0.70 ? clrLimeGreen : (g_predictionScore >= 0.0 ? clrYellow : clrSilver));
-      n++;
-   }
-   if(n < 28)
-   {
-      bool corrActive = IsInServerPredictedCorrectionZone();
-      lines[n] = "CorrZone(srv): " + string(corrActive ? "ACTIVE" : "OFF") +
-                 " | score corr.=" + DoubleToString(g_serverCorrectionConfidence, 1) +
-                 "% (≠ conf. IA /decision) | " + g_serverCorrectionAction;
-      cols[n] = (corrActive ? clrTomato : clrSilver);
-      n++;
-   }
-   if(n < 28)
-   {
-      string localState = (g_symbolStatsLastLocalUpdate > 0 && (TimeGMT() - g_symbolStatsLastLocalUpdate) <= 30) ? "OK" : "STALE";
-      string syncState = g_symbolStatsSyncOk ? "OK" : "FAIL";
-      string syncAt = (g_symbolStatsLastSyncOk > 0) ? TimeToString(g_symbolStatsLastSyncOk, TIME_DATE|TIME_SECONDS) : "N/A";
-      lines[n] = "DataStatus: MT5_LOCAL=" + localState + " | SYNC_SUPABASE=" + syncState + " | LAST_SYNC=" + syncAt;
-      cols[n] = (g_symbolStatsSyncOk ? clrSilver : clrTomato);
-      n++;
-   }
+   lines[n] = "📊 Positions: " + IntegerToString(totalPos) + "/" + IntegerToString(MaxPositionsTerminal) + " | " + _Symbol + ": " + IntegerToString(posCount) + "/1"; cols[n] = clrWhite; n++;
+   lines[n] = "💰 P/L: " + DoubleToString(totalPL, 2) + "$ | Risk: " + DoubleToString(MaxTotalLossDollars, 0) + "$"; cols[n] = (totalPL >= 0 ? clrLime : clrTomato); n++;
    
    // Afficher l'état de la pause après profit journalier (basé sur l'historique)
    if(g_dailyProfitTargetReached && g_dailyProfitPauseStartTime > 0)
@@ -6795,14 +6761,10 @@ void UpdateDashboard()
       lines[n] = "💰 Profit jour: " + DoubleToString(g_dayNetProfit, 2) + "$ / " + DoubleToString(DailyProfitTarget, 2) + "$"; cols[n] = clrWhite; n++;
    }
    // ML metrics affichées séparément dans DrawMLMetricsOnChart() pour éviter les doublons
-   // Stats agrégées côté serveur à partir des données issues MT5 (trade_feedback) puis stockées dans Supabase `symbol_trade_stats` (UTC)
-   // Si les stats serveur sont encore à 0, compléter via historique local MT5
+   // Stats agrégées côté serveur à partir des données issues MT5 (trade_feedback) puis stockées dans AWS RDS `symbol_trade_stats` (UTC)
    EnsureLocalSymbolStatsUpToDate();
    string dayStr = FormatWLNet(g_dayWins, g_dayLosses, g_dayNetProfit);
-   string monthStr = FormatWLNet(g_monthWins, g_monthLosses, g_monthNetProfit);
-   // Lignes compactes (évite que \"Net=xx$\" soit coupé à droite)
-   lines[n] = "[Performance] StatsJ UTC(MT5): " + dayStr; cols[n] = clrWhite; n++;
-   lines[n] = "StatsM UTC(MT5): " + monthStr; cols[n] = clrWhite; n++;
+   lines[n] = "📈 Performance (Jour): " + dayStr; cols[n] = clrWhite; n++;
    
    // Ligne: État de protection par symbole
    string protectionStatus = "";
@@ -6876,41 +6838,11 @@ void UpdateDashboard()
       lines[n] = predictionStatus; cols[n] = predictionColor; n++;
    }
 
-   // --- Afficher les LIMIT pending réellement en place (BUY_LIMIT/SELL_LIMIT) ---
-   // Utile pour confirmer que les prédictions futures ont bien été transformées en ordres.
-   int shownPending = 0;
-   for(int oi = OrdersTotal() - 1; oi >= 0 && shownPending < 2; oi--)
+   // Show pending orders count only (essential trading info)
+   if(totalLimits > 0)
    {
-      ulong oticket = OrderGetTicket(oi);
-      if(oticket == 0) continue;
-      if(OrderGetInteger(ORDER_MAGIC) != InpMagicNumber) continue;
-      if(OrderGetString(ORDER_SYMBOL) != _Symbol) continue;
-
-      ENUM_ORDER_TYPE ot = (ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE);
-      if(ot != ORDER_TYPE_BUY_LIMIT && ot != ORDER_TYPE_SELL_LIMIT) continue;
-
-      double op = OrderGetDouble(ORDER_PRICE_OPEN);
-      double osl = OrderGetDouble(ORDER_SL);
-      double otp = OrderGetDouble(ORDER_TP);
-
-      string side = (ot == ORDER_TYPE_BUY_LIMIT ? "BUY_LIMIT" : "SELL_LIMIT");
-      string slStr = (osl > 0 ? DoubleToString(osl, _Digits) : "—");
-      string tpStr = (otp > 0 ? DoubleToString(otp, _Digits) : "—");
-
-      if(n < 28) // garder de la place pour le reste
-      {
-         lines[n] = "📌 PENDING " + side + " @ " + DoubleToString(op, _Digits) + " SL " + slStr + " TP " + tpStr;
-         cols[n] = (ot == ORDER_TYPE_BUY_LIMIT ? clrLime : clrTomato);
-         n++;
-      }
-      shownPending++;
-   }
-
-   // Si on a une prédiction mais aucun pending limit, on loggue une indication rapide côté dashboard.
-   if(hasFutureLevels && totalLimits == 0 && n < 28)
-   {
-      lines[n] = "⚠️ Prédiction future active mais aucun LIMIT pending envoyé";
-      cols[n] = clrYellow;
+      lines[n] = "📌 PENDING ORDERS: " + IntegerToString(totalLimits) + " (canal: " + IntegerToString(channelLimits) + ")";
+      cols[n] = clrKhaki;
       n++;
    }
    
@@ -8735,71 +8667,10 @@ void DrawHistoricalSwingPoints(MqlRates &rates[], int bars, double point)
 
 void DrawFVGOnChart()
 {
-   MqlRates rates[];
-   ArraySetAsSeries(rates, true);
-   int bars = 80;
-   if(CopyRates(_Symbol, LTF, 0, bars, rates) < bars) return;
+   // FVG drawing DISABLED - keeping chart clean
+   // Only essential drawings kept: OTE, FIBO, Support/Resistance, Entry Levels
    ObjectsDeleteAll(0, "SMC_FVG_");
    ObjectsDeleteAll(0, "SMC_IFVG_");
-   int cnt = 0;
-   for(int fvgIndex = 2; fvgIndex < bars - 2 && cnt < 15; fvgIndex++)
-   {
-      if(rates[fvgIndex].close > rates[fvgIndex].open && rates[fvgIndex+1].high < rates[fvgIndex-1].low)
-      {
-         double top = rates[fvgIndex-1].low, bot = rates[fvgIndex+1].high;
-         datetime t1 = rates[fvgIndex+1].time, t2 = TimeCurrent() + PeriodSeconds(LTF)*20;
-         string name = "SMC_FVG_Bull_" + IntegerToString(fvgIndex);
-         if(ObjectCreate(0, name, OBJ_RECTANGLE, 0, t1, bot, t2, top))
-         {
-            ObjectSetInteger(0, name, OBJPROP_COLOR, clrGreen);
-            ObjectSetInteger(0, name, OBJPROP_WIDTH, 2);
-            ObjectSetInteger(0, name, OBJPROP_BACK, true);
-            ObjectSetInteger(0, name, OBJPROP_FILL, true);
-            ObjectSetInteger(0, name, OBJPROP_ZORDER, 50);
-            cnt++;
-         }
-      }
-      if(rates[fvgIndex].close < rates[fvgIndex].open && rates[fvgIndex+1].low > rates[fvgIndex-1].high)
-      {
-         double top = rates[fvgIndex+1].low, bot = rates[fvgIndex-1].high;
-         datetime t1 = rates[fvgIndex+1].time, t2 = TimeCurrent() + PeriodSeconds(LTF)*20;
-         string name = "SMC_FVG_Bear_" + IntegerToString(fvgIndex);
-         if(ObjectCreate(0, name, OBJ_RECTANGLE, 0, t1, bot, t2, top))
-         {
-            ObjectSetInteger(0, name, OBJPROP_COLOR, clrRed);
-            ObjectSetInteger(0, name, OBJPROP_WIDTH, 2);
-            ObjectSetInteger(0, name, OBJPROP_BACK, true);
-            ObjectSetInteger(0, name, OBJPROP_FILL, true);
-            ObjectSetInteger(0, name, OBJPROP_ZORDER, 50);
-            cnt++;
-         }
-      }
-   }
-
-   FVGData ifvgSell, ifvgBuy;
-   datetime t2ifvg = TimeCurrent() + PeriodSeconds(LTF)*20;
-   if(ICT_DetectInvertedFVG(_Symbol, LTF, -1, MathMax(80, ICTLookbackBars), ifvgSell))
-   {
-      string n1 = "SMC_IFVG_SELL";
-      if(ObjectCreate(0, n1, OBJ_RECTANGLE, 0, ifvgSell.time, ifvgSell.bottom, t2ifvg, ifvgSell.top))
-      {
-         ObjectSetInteger(0, n1, OBJPROP_COLOR, clrTomato);
-         ObjectSetInteger(0, n1, OBJPROP_WIDTH, 2);
-         ObjectSetInteger(0, n1, OBJPROP_STYLE, STYLE_DASHDOT);
-         ObjectSetInteger(0, n1, OBJPROP_FILL, false);
-      }
-   }
-   if(ICT_DetectInvertedFVG(_Symbol, LTF, 1, MathMax(80, ICTLookbackBars), ifvgBuy))
-   {
-      string n2 = "SMC_IFVG_BUY";
-      if(ObjectCreate(0, n2, OBJ_RECTANGLE, 0, ifvgBuy.time, ifvgBuy.bottom, t2ifvg, ifvgBuy.top))
-      {
-         ObjectSetInteger(0, n2, OBJPROP_COLOR, clrLimeGreen);
-         ObjectSetInteger(0, n2, OBJPROP_WIDTH, 2);
-         ObjectSetInteger(0, n2, OBJPROP_STYLE, STYLE_DASHDOT);
-         ObjectSetInteger(0, n2, OBJPROP_FILL, false);
-      }
-   }
 }
 
 // SUPPRIMÉ: DrawOBOnChart() - Tous les dessins OB enlevés
@@ -10412,28 +10283,14 @@ void DrawEMASupertrendMultiTF()
 
 void DrawEMASupportResistance()
 {
-   if(emaM1H == INVALID_HANDLE || emaM5H == INVALID_HANDLE || emaH1H == INVALID_HANDLE) return;
-   double emaM1[], emaM5[], emaH1[];
-   ArraySetAsSeries(emaM1, true); ArraySetAsSeries(emaM5, true); ArraySetAsSeries(emaH1, true);
-   if(CopyBuffer(emaM1H, 0, 0, 1, emaM1) < 1 || CopyBuffer(emaM5H, 0, 0, 1, emaM5) < 1 || CopyBuffer(emaH1H, 0, 0, 1, emaH1) < 1) return;
+   // Support/Resistance values are now displayed as TEXT LABELS (via DrawEntryLevelLines)
+   // Lines are removed - keeping chart clean with only OTE + FIBO essentials
+   // Information is still available in entry levels displayed by timeframe
+
+   // Clean up old horizontal lines (keeping chart clean)
    ObjectDelete(0, "SMC_EMA_M1");
    ObjectDelete(0, "SMC_EMA_M5");
    ObjectDelete(0, "SMC_EMA_H1");
-   ObjectCreate(0, "SMC_EMA_M1", OBJ_HLINE, 0, 0, emaM1[0]);
-   ObjectSetInteger(0, "SMC_EMA_M1", OBJPROP_COLOR, clrLime);
-   ObjectSetInteger(0, "SMC_EMA_M1", OBJPROP_STYLE, STYLE_DOT);
-   ObjectSetInteger(0, "SMC_EMA_M1", OBJPROP_WIDTH, 1);
-   ObjectSetString(0, "SMC_EMA_M1", OBJPROP_TOOLTIP, "EMA M1 (support/resistance)");
-   ObjectCreate(0, "SMC_EMA_M5", OBJ_HLINE, 0, 0, emaM5[0]);
-   ObjectSetInteger(0, "SMC_EMA_M5", OBJPROP_COLOR, clrDodgerBlue);
-   ObjectSetInteger(0, "SMC_EMA_M5", OBJPROP_STYLE, STYLE_DASH);
-   ObjectSetInteger(0, "SMC_EMA_M5", OBJPROP_WIDTH, 2);
-   ObjectSetString(0, "SMC_EMA_M5", OBJPROP_TOOLTIP, "EMA M5 (support/resistance)");
-   ObjectCreate(0, "SMC_EMA_H1", OBJ_HLINE, 0, 0, emaH1[0]);
-   ObjectSetInteger(0, "SMC_EMA_H1", OBJPROP_COLOR, clrOrange);
-   ObjectSetInteger(0, "SMC_EMA_H1", OBJPROP_STYLE, STYLE_SOLID);
-   ObjectSetInteger(0, "SMC_EMA_H1", OBJPROP_WIDTH, 2);
-   ObjectSetString(0, "SMC_EMA_H1", OBJPROP_TOOLTIP, "EMA H1 (support/resistance)");
 }
 
 //| Retourne le niveau SuperTrend actuel (support ou résistance) pour un TF |
@@ -10658,49 +10515,12 @@ double GetClosestSellLevel(double currentPrice, double atr, double maxDistATR, s
    return best;
 }
 
-//| Affiche sur le graphique: Support, Résistance, EMA M1/M5/H1, SuperTrend M5/H1, niveaux limite choisis |
+//| DISABLED: DrawLimitOrderLevels() - Lines removed to keep chart clean
+//| Support/Resistance info is now displayed as TEXT via OTE + FIBO entry levels
 void DrawLimitOrderLevels()
 {
+   // Clean up old horizontal lines - now using OTE + FIBO labels instead
    ObjectsDeleteAll(0, "SMC_Limit_");
-   MqlRates rates[];
-   ArraySetAsSeries(rates, true);
-   if(CopyRates(_Symbol, PERIOD_CURRENT, 0, 30, rates) < 20) return;
-   double support = rates[0].low, resistance = rates[0].high;
-   for(int i = 1; i < 20; i++) { if(rates[i].low < support) support = rates[i].low; if(rates[i].high > resistance) resistance = rates[i].high; }
-   double price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   double atrVal = 0;
-   if(atrHandle != INVALID_HANDLE) { double atr[]; ArraySetAsSeries(atr, true); if(CopyBuffer(atrHandle, 0, 0, 1, atr) >= 1) atrVal = atr[0]; }
-   if(atrVal <= 0) atrVal = (resistance - support) * 0.1;
-   string srcBuy = "", srcSell = "";
-   double buyLevel = GetClosestBuyLevel(price, atrVal, MaxDistanceLimitATR, srcBuy);
-   double sellLevel = GetClosestSellLevel(price, atrVal, MaxDistanceLimitATR, srcSell);
-   ObjectCreate(0, "SMC_Limit_Support", OBJ_HLINE, 0, 0, support);
-   ObjectSetInteger(0, "SMC_Limit_Support", OBJPROP_COLOR, clrDarkGreen);
-   ObjectSetInteger(0, "SMC_Limit_Support", OBJPROP_STYLE, STYLE_DOT);
-   ObjectSetInteger(0, "SMC_Limit_Support", OBJPROP_WIDTH, 2);
-   ObjectSetString(0, "SMC_Limit_Support", OBJPROP_TOOLTIP, "Support (20 bars)");
-   ObjectCreate(0, "SMC_Limit_Resistance", OBJ_HLINE, 0, 0, resistance);
-   ObjectSetInteger(0, "SMC_Limit_Resistance", OBJPROP_COLOR, clrDarkRed);
-   ObjectSetInteger(0, "SMC_Limit_Resistance", OBJPROP_STYLE, STYLE_DOT);
-   ObjectSetInteger(0, "SMC_Limit_Resistance", OBJPROP_WIDTH, 2);
-   ObjectSetString(0, "SMC_Limit_Resistance", OBJPROP_TOOLTIP, "Résistance (20 bars)");
-   double stM5s = 0, stM5r = 0, stH1s = 0, stH1r = 0;
-   if(GetSuperTrendLevel(PERIOD_M5, stM5s, stM5r))
-   {
-      if(stM5s > 0) { ObjectCreate(0, "SMC_Limit_ST_M5", OBJ_HLINE, 0, 0, stM5s); ObjectSetInteger(0, "SMC_Limit_ST_M5", OBJPROP_COLOR, clrAqua); ObjectSetString(0, "SMC_Limit_ST_M5", OBJPROP_TOOLTIP, "SuperTrend M5 (support)"); }
-      else if(stM5r > 0) { ObjectCreate(0, "SMC_Limit_ST_M5", OBJ_HLINE, 0, 0, stM5r); ObjectSetInteger(0, "SMC_Limit_ST_M5", OBJPROP_COLOR, clrMagenta); ObjectSetString(0, "SMC_Limit_ST_M5", OBJPROP_TOOLTIP, "SuperTrend M5 (résistance)"); }
-   }
-   if(GetSuperTrendLevel(PERIOD_H1, stH1s, stH1r))
-   {
-      if(stH1s > 0) { ObjectCreate(0, "SMC_Limit_ST_H1", OBJ_HLINE, 0, 0, stH1s); ObjectSetInteger(0, "SMC_Limit_ST_H1", OBJPROP_COLOR, clrDodgerBlue); ObjectSetString(0, "SMC_Limit_ST_H1", OBJPROP_TOOLTIP, "SuperTrend H1 (support)"); }
-      else if(stH1r > 0) { ObjectCreate(0, "SMC_Limit_ST_H1", OBJ_HLINE, 0, 0, stH1r); ObjectSetInteger(0, "SMC_Limit_ST_H1", OBJPROP_COLOR, clrOrange); ObjectSetString(0, "SMC_Limit_ST_H1", OBJPROP_TOOLTIP, "SuperTrend H1 (résistance)"); }
-   }
-   if(ObjectFind(0, "SMC_Limit_ST_M5") >= 0) ObjectSetInteger(0, "SMC_Limit_ST_M5", OBJPROP_WIDTH, 3);
-   if(ObjectFind(0, "SMC_Limit_ST_H1") >= 0) ObjectSetInteger(0, "SMC_Limit_ST_H1", OBJPROP_WIDTH, 3);
-   if(g_lastSwingLow > 0) { ObjectCreate(0, "SMC_Limit_SwingLow", OBJ_HLINE, 0, 0, g_lastSwingLow); ObjectSetInteger(0, "SMC_Limit_SwingLow", OBJPROP_COLOR, clrLime); ObjectSetInteger(0, "SMC_Limit_SwingLow", OBJPROP_STYLE, STYLE_DASH); ObjectSetString(0, "SMC_Limit_SwingLow", OBJPROP_TOOLTIP, "Swing Low (PML)"); }
-   if(g_lastSwingHigh > 0) { ObjectCreate(0, "SMC_Limit_SwingHigh", OBJ_HLINE, 0, 0, g_lastSwingHigh); ObjectSetInteger(0, "SMC_Limit_SwingHigh", OBJPROP_COLOR, clrTomato); ObjectSetInteger(0, "SMC_Limit_SwingHigh", OBJPROP_STYLE, STYLE_DASH); ObjectSetString(0, "SMC_Limit_SwingHigh", OBJPROP_TOOLTIP, "Swing High (PML)"); }
-   if(buyLevel > 0) { ObjectCreate(0, "SMC_Limit_BuyLevel", OBJ_HLINE, 0, 0, buyLevel); ObjectSetInteger(0, "SMC_Limit_BuyLevel", OBJPROP_COLOR, clrLime); ObjectSetInteger(0, "SMC_Limit_BuyLevel", OBJPROP_WIDTH, 3); ObjectSetString(0, "SMC_Limit_BuyLevel", OBJPROP_TOOLTIP, "Niveau BUY LIMIT (" + srcBuy + ")"); }
-   if(sellLevel > 0) { ObjectCreate(0, "SMC_Limit_SellLevel", OBJ_HLINE, 0, 0, sellLevel); ObjectSetInteger(0, "SMC_Limit_SellLevel", OBJPROP_COLOR, clrRed); ObjectSetInteger(0, "SMC_Limit_SellLevel", OBJPROP_WIDTH, 3); ObjectSetString(0, "SMC_Limit_SellLevel", OBJPROP_TOOLTIP, "Niveau SELL LIMIT (" + srcSell + ")"); }
 }
 
 void DrawPredictionChannel()
@@ -13339,9 +13159,10 @@ void DrawMLMetricsOnChart()
       ObjectSetInteger(0, name, OBJPROP_BACK, false);  // Premier plan pour visibilité
    }
 
-   // Calculer la position Y pour éviter la superposition avec le dashboard
-   int y = MathMax(MLMetricsLabelYOffsetPixels, g_dashboardBottomY + 45);  // 45px d'espace sous le dashboard (augmenté)
-   
+   // Position ML metrics at TOP-LEFT, above dashboard (not below)
+   // This ensures ML metrics are always visible and not hidden by GOM dashboard
+   int y = 5;  // 5 pixels from top
+
    ObjectSetInteger(0, name, OBJPROP_YDISTANCE, y);
 
    // Catégorie de symbole pour rendre explicite le type de modèle utilisé
@@ -13356,10 +13177,30 @@ void DrawMLMetricsOnChart()
       case SYM_METAL:       catStr = "Metal"; break;
    }
 
-   string txt = "ML (" + catStr + ", " + _Symbol + "): " + (g_mlMetricsStr == "" ? "En attente..." : g_mlMetricsStr);
-   txt += " | Canal: " + (g_channelValid ? "OK" : "—");
+   // Build comprehensive ML metrics line with symbol
+   string txt = "🤖 ML [" + _Symbol + "]: ";
+
+   if(g_mlMetricsStr == "")
+   {
+      txt += "⏳ En attente...";
+   }
+   else
+   {
+      txt += g_mlMetricsStr;
+   }
+
+   // Add channel status
+   txt += " | CH:" + (g_channelValid ? "✅" : "⚠️");
+
    ObjectSetString(0, name, OBJPROP_TEXT, txt);
-   ObjectSetInteger(0, name, OBJPROP_COLOR, g_channelValid ? clrLime : clrYellow);
+
+   // Color based on channel health
+   color displayColor = g_channelValid ? clrLime : clrYellow;
+   // If metrics show low confidence, add warning color
+   if(StringFind(g_mlMetricsStr, "50") >= 0 || StringFind(g_mlMetricsStr, "collecting") >= 0)
+      displayColor = clrOrange;
+
+   ObjectSetInteger(0, name, OBJPROP_COLOR, displayColor);
    
    // Log de débogage pour vérifier le positionnement
    static datetime lastMLDebugLog = 0;
@@ -13375,11 +13216,23 @@ bool SMC_IsProtectedChartObject(const string objName)
 {
    if(StringLen(objName) < 3) return false;
    string prefixes[] = {
-      "SMC_MTF_", "SMC_FVG_", "SMC_IFVG_", "SMC_OTEIMB_", "SMC_OTE_BUY_", "SMC_OTE_SELL_",
-      "OTE_SETUP_", "M5_ENTRY_", "SMC_EntryLevel_", "SMC_OB_", "SMC_OB_CONFIRMED_",
-      "SMC_SWING_", "SMC_SH_", "SMC_SL_", "SMC_FIB_", "SMC_LIQ_", "SMC_PD_", "SMC_CHAN_",
-      "SMC_PRED_", "SMC_SPIKE_", "SMC_ARROW_", "SMC_SIGNAL_", "GOM_SIDO_", "GOM_KOLA_",
-      "GOM_SCRIPT_", "GOM_DASH_", "GOM_SPIKE_", "GOM_MLINFO"
+      // ESSENTIAL DRAWINGS KEPT:
+      "SMC_MTF_",           // Dashboard cells (M1, M5, H1, IA, VERDICT)
+      "SMC_OTEIMB_",        // OTE + Imbalance zones
+      "SMC_OTE_BUY_", "SMC_OTE_SELL_",  // OTE entry points
+      "OTE_SETUP_",         // OTE setup zones
+      "M5_ENTRY_",          // M5 entry levels
+      "SMC_EntryLevel_",    // Entry levels by timeframe (M1, M5, H1)
+      "SMC_FIB_",           // Fibonacci levels
+      "SMC_Limit_",         // Support/Resistance levels
+      "SMC_LIQ_",           // Liquidity zones
+      "SMC_SWING_", "SMC_SH_", "SMC_SL_",  // Swing points
+      "SMC_CHAN_",          // Channels
+      "SMC_SIGNAL_",        // Signal arrows
+      "SMC_ARROW_",         // Trading arrows
+      "GOM_SIDO_", "GOM_KOLA_",  // GOM patterns
+      "GOM_SCRIPT_", "GOM_DASH_", "GOM_SPIKE_", "GOM_MLINFO"  // GOM info
+      // NOTE: SMC_FVG_ and SMC_IFVG_ are NOT protected - they will be deleted
    };
    for(int p = 0; p < ArraySize(prefixes); p++)
    {
@@ -13401,8 +13254,7 @@ void CleanupDashboardObjects()
       if(SMC_IsProtectedChartObject(objName))
          continue;
 
-      if(StringFind(objName, "SMC_MTF_") == 0 ||
-         StringFind(objName, "SMC_DASH_LINE_") == 0 ||
+      if(StringFind(objName, "SMC_DASH_LINE_") == 0 ||
          StringFind(objName, "SMC_DASH_") == 0 ||
          StringFind(objName, "SMC_DASHBOARD") == 0 ||
          StringFind(objName, "SMC_ML_METRICS") == 0 ||
@@ -13497,6 +13349,75 @@ void CleanupAllChartObjects()
    {
       Print("🧹 NETTOYAGE COMPLET - ", totalDeleted, " objets graphiques supprimés du chart");
    }
+}
+
+// Aggressive cleanup of expired and stale drawing objects
+void CleanupExpiredDashboardObjects(int maxAgeSeconds = 3600)
+{
+   int totalDeleted = 0;
+
+   // AGGRESSIVE CLEANUP: Delete temporary objects that can accumulate
+   // Keep only essential protected objects
+
+   // Delete ALL temporary/expired objects immediately
+   string tempPrefixes[] = {
+      "SMC_TOP_NET_",        // Top3 net profit (causes clutter)
+      "SMC_TOP3_",           // Top3 symbols
+      "OTE_SETUP_OLD_",      // Old OTE setups
+      "SMC_ARROW_",          // Old arrows
+      "SMC_LEVEL_",          // Old levels
+      "SMC_SIGNAL_",         // Old signals
+      "TEMP_",               // Temporary objects
+      "SPIKE_",              // Spike warnings
+      "WARNING_",            // Warnings
+      "SMC_Limit_",          // Support/Resistance (now text only)
+      "SMC_EntryLevel_",     // Old entry level lines (keep labels)
+      "SMC_EMA_",            // Old EMA lines (now text only)
+      "SMC_IFVG_",           // Inverted FVG
+      "SMC_FVG_"             // FVG zones
+   };
+
+   for(int p = 0; p < ArraySize(tempPrefixes); p++)
+   {
+      for(int i = ObjectsTotal(0) - 1; i >= 0; i--)
+      {
+         string objName = ObjectName(0, i);
+         if(StringFind(objName, tempPrefixes[p]) == 0)
+         {
+            if(ObjectDelete(0, objName))
+               totalDeleted++;
+         }
+      }
+   }
+
+   // Cleanup stale objects from 30+ minutes ago (may detach EA)
+   for(int i = ObjectsTotal(0) - 1; i >= 0; i--)
+   {
+      string objName = ObjectName(0, i);
+
+      // Skip critical objects
+      if(StringFind(objName, "SMC_DASH_LINE_") == 0) continue;
+      if(StringFind(objName, "SMC_MTF_") == 0) continue;
+      if(StringFind(objName, "SMC_ML_METRICS") == 0) continue;
+      if(StringFind(objName, "M5_ENTRY_") == 0) continue;
+      if(StringFind(objName, "SMC_OB_CONFIRMED_") == 0) continue;
+      if(StringFind(objName, "SMC_OTE") == 0) continue;
+      if(StringFind(objName, "SMC_FIB_") == 0) continue;
+      if(StringFind(objName, "SMC_CHAN_") == 0) continue;
+      if(StringFind(objName, "SMC_OTEIMB_") == 0) continue;
+      if(StringFind(objName, "GOM_") == 0) continue;
+      if(SMC_IsProtectedChartObject(objName)) continue;
+
+      // Everything else: delete it (stale objects)
+      if(StringFind(objName, "SMC_") == 0 || StringFind(objName, "OTE_") == 0)
+      {
+         if(ObjectDelete(0, objName))
+            totalDeleted++;
+      }
+   }
+
+   if(totalDeleted > 0)
+      Print("🧹 Aggressive cleanup - ", totalDeleted, " expired objects deleted");
 }
 
 // Fonction pour vérifier et gérer la pause après avoir atteint l'objectif de profit journalier
@@ -13875,7 +13796,8 @@ void PredictFutureProtectedPoints()
          futureHighs[i] = projectedBasePrice + (avgHighDistance * (i + 1)) + trendProjection + volatilityAdjustment;
          
          // Projection temporelle améliorée - basée sur la vitesse historique
-         int timeBars = 15 + (i * 10) + (int)(avgHighDistance / atr * 5); // 15, 25, 35+ bougies
+         int timeBars = 15 + (i * 10);
+         if(atr > 0) timeBars += (int)(avgHighDistance / atr * 5);
          datetime futureTime = currentTime + (PeriodSeconds(PERIOD_M15) * timeBars);
          
          // Créer une ligne plus longue dans le futur pour meilleure visualisation
@@ -14006,7 +13928,8 @@ void PredictFutureProtectedPoints()
          futureLows[i] = projectedBaseLow - (avgLowDistance * (i + 1)) - trendProjection - volatilityAdjustment;
          
          // Projection temporelle améliorée - basée sur la vitesse historique
-         int timeBars = 15 + (i * 10) + (int)(avgLowDistance / atr * 5); // 15, 25, 35+ bougies
+         int timeBars = 15 + (i * 10);
+         if(atr > 0) timeBars += (int)(avgLowDistance / atr * 5);
          datetime futureTime = currentTime + (PeriodSeconds(PERIOD_M15) * timeBars);
          
          // Créer une ligne plus longue dans le futur pour meilleure visualisation
@@ -26171,6 +26094,191 @@ void CheckAndExecuteVerdictAutoEntry()
    ExecuteVerdictMarketOrder(g_finalVerdict.direction, entryTf);
 }
 
+// Auto-entry with push notification when verdict is GOOD/PERFECT + IA is aligned (not HOLD)
+void CheckAndExecuteAutoEntryOnVerdictGoodPerfect()
+{
+   // Exit early if verdict conditions not met
+   if(g_finalVerdict.updated <= 0) return;
+   if(g_finalVerdict.verdictLabel == "" || g_finalVerdict.verdictLabel == "WAIT") return;
+
+   // Check if verdict is GOOD or PERFECT level
+   bool isGoodOrPerfect = (StringFind(g_finalVerdict.verdictLabel, "GOOD") >= 0 ||
+                           StringFind(g_finalVerdict.verdictLabel, "PERFECT") >= 0);
+   if(!isGoodOrPerfect) return;
+
+   // Direction must be BUY or SELL
+   if(g_finalVerdict.direction != "BUY" && g_finalVerdict.direction != "SELL") return;
+
+   // PROTECTION: Interdire BUY sur Crash et SELL sur Boom
+   if(!IsDirectionAllowedForBoomCrash(_Symbol, g_finalVerdict.direction))
+   {
+      Print("❌ Auto-Entry BLOCKED on ", _Symbol, " | Direction: ", g_finalVerdict.direction, " not allowed");
+      return;
+   }
+
+   // Check trading window
+   if(!SMC_IsStrictUTCTradingWindowOpen()) return;
+
+   // Check position limit
+   if(CountPositionsForSymbol(_Symbol) > 0) return;
+   if(HasAnyExposureForSymbol(_Symbol)) return;
+
+   // Check daily cap
+   if(ShouldBlockNewTradeDueToDailyCap()) return;
+
+   // Check spread
+   if(!IsSpreadAcceptable()) return;
+
+   // Check cooldown to avoid duplicate entries
+   static datetime lastAutoEntryTime = 0;
+   int cooldownSec = 15; // 15 second cooldown between auto-entries on same symbol
+   if(TimeCurrent() - lastAutoEntryTime < cooldownSec) return;
+
+   // PROTECTION: Check trend direction - NO TRADES AGAINST TREND
+   string trendDir = GetCurrentTrendDirection();
+   if(g_finalVerdict.direction == "BUY" && trendDir == "DOWNTREND")
+   {
+      Print("❌ AUTO-ENTRY BLOCKED - BUY against DOWNTREND on ", _Symbol);
+      return;
+   }
+   if(g_finalVerdict.direction == "SELL" && trendDir == "UPTREND")
+   {
+      Print("❌ AUTO-ENTRY BLOCKED - SELL against UPTREND on ", _Symbol);
+      return;
+   }
+
+   // Check AI alignment (IA must NOT be HOLD, or must be aligned with direction)
+   if(UseAIServer)
+   {
+      if(!IsAISignalFreshForTrading("AUTO_VERDICT_ENTRY")) return;
+
+      string iaDir = SMC_NormalizeAIDirectionLabel();
+
+      // If IA says HOLD, we need special permission to proceed
+      if(iaDir == "HOLD")
+      {
+         if(!SMC_AllowDirectionDespiteAIHold(g_finalVerdict.direction))
+            return; // IA is HOLD and verdict not strong enough to override
+      }
+      else if(iaDir != "OFF")
+      {
+         // IA is not HOLD - it must align with verdict direction
+         if(iaDir != g_finalVerdict.direction)
+            return; // IA disagrees with verdict direction
+      }
+   }
+
+   // All conditions met - proceed with entry
+   lastAutoEntryTime = TimeCurrent();
+
+   // Get entry level and timeframe
+   double entryPrice = 0.0;
+   string entryTf = "";
+   if(!SMC_PickVerdictEntryLevel(g_finalVerdict.direction, entryPrice, entryTf))
+      return;
+
+   if(entryPrice <= 0.0) return;
+
+   // Get current ATR for SL/TP calculation
+   double atrVal = 0.0;
+   double atrBuf[];
+   ArraySetAsSeries(atrBuf, true);
+   if(atrHandle != INVALID_HANDLE && CopyBuffer(atrHandle, 0, 0, 1, atrBuf) > 0)
+      atrVal = atrBuf[0];
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   if(point <= 0.0) point = 0.0001;
+   if(atrVal <= 0.0) atrVal = point * 50.0;
+
+   // Calculate SL: OB boundary ± 20 pips
+   double stopLoss = 0.0;
+   if(g_finalVerdict.direction == "BUY")
+   {
+      // For BUY: SL below entry at OB boundary - 20 pips
+      stopLoss = entryPrice - (atrVal * SL_ATRMult);
+   }
+   else
+   {
+      // For SELL: SL above entry at OB boundary + 20 pips
+      stopLoss = entryPrice + (atrVal * SL_ATRMult);
+   }
+
+   // Calculate TP: ATR-scaled multi-level TP
+   double takeProfit = 0.0;
+   if(g_finalVerdict.direction == "BUY")
+   {
+      takeProfit = entryPrice + (atrVal * TP_ATRMult);
+   }
+   else
+   {
+      takeProfit = entryPrice - (atrVal * TP_ATRMult);
+   }
+
+   // Validate and adjust SL/TP
+   ValidateAndAdjustStopLossTakeProfit(g_finalVerdict.direction, entryPrice, stopLoss, takeProfit);
+   EnforceMinBoomCrashStopLossDollarRisk(_Symbol, g_finalVerdict.direction, entryPrice, GetOptimalLotSize(), stopLoss);
+
+   stopLoss = NormalizeDouble(stopLoss, _Digits);
+   takeProfit = NormalizeDouble(takeProfit, _Digits);
+
+   // Get lot size
+   double lotSize = GetOptimalLotSize();
+   if(lotSize <= 0.0) return;
+
+   // Check minimum profit potential
+   if(!IsMinimumProfitPotentialMet(entryPrice, takeProfit, g_finalVerdict.direction, lotSize))
+      return;
+
+   // Send PUSH NOTIFICATION before placing order
+   string notificationMsg = "🎯 AUTO ENTRY - " + g_finalVerdict.verdictLabel +
+                           "\n" + _Symbol +
+                           "\n" + g_finalVerdict.direction +
+                           " @ " + DoubleToString(entryPrice, _Digits) +
+                           "\nSL: " + DoubleToString(stopLoss, _Digits) +
+                           "\nTP: " + DoubleToString(takeProfit, _Digits) +
+                           "\nConf: " + DoubleToString(g_finalVerdict.finalConfPct, 1) + "%";
+   SendNotification(notificationMsg);
+   Print("📲 NOTIFICATION SENT - " + g_finalVerdict.verdictLabel);
+
+   // Place the order
+   MqlTradeRequest request = {};
+   MqlTradeResult result = {};
+   request.action = TRADE_ACTION_DEAL;
+   request.symbol = _Symbol;
+   request.volume = lotSize;
+   request.type = (g_finalVerdict.direction == "BUY") ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+   request.price = entryPrice;
+   request.sl = stopLoss;
+   request.tp = takeProfit;
+   request.deviation = 10;
+   request.magic = InpMagicNumber;
+   request.comment = "AUTO_" + g_finalVerdict.verdictLabel + "_" + entryTf;
+
+   if(!OrderSend(request, result))
+   {
+      Print("❌ AUTO ENTRY FAILED | ", _Symbol, " | error=", result.retcode);
+      return;
+   }
+
+   if(result.retcode != TRADE_RETCODE_DONE)
+   {
+      Print("❌ AUTO ENTRY REJECTED | ", _Symbol, " | retcode=", result.retcode);
+      return;
+   }
+
+   // Success - log the entry
+   Print("✅ AUTO ENTRY PLACED | ", _Symbol,
+         " | verdict=", g_finalVerdict.verdictLabel,
+         " | dir=", g_finalVerdict.direction,
+         " | entry=", DoubleToString(entryPrice, _Digits),
+         " | SL=", DoubleToString(stopLoss, _Digits),
+         " | TP=", DoubleToString(takeProfit, _Digits),
+         " | lot=", DoubleToString(lotSize, 2),
+         " | conf=", DoubleToString(g_finalVerdict.finalConfPct, 1), "%");
+
+   g_lastEntryTimeForSymbol = TimeCurrent();
+   RegisterBoomCrashMarketEntry();
+}
+
 // Un seul BUY_LIMIT ou SELL_LIMIT par symbole sur le niveau d'entrée du verdict fort
 void ManageVerdictEntryLimitOrder()
 {
@@ -26201,7 +26309,10 @@ void ManageVerdictEntryLimitOrder()
          rq.action = TRADE_ACTION_REMOVE;
          rq.order = t;
          rq.symbol = _Symbol;
-         OrderSend(rq, rs);
+         if(!OrderSend(rq, rs))
+         {
+            Print("⚠️ Failed to cancel verdict limit order ", t);
+         }
       }
       return;
    }
@@ -26373,7 +26484,8 @@ void DisplayMTFDashboard()
    if(barInnerW < cols * 28) barInnerW = cols * 28;
    int cellW = (barInnerW - (cols - 1) * gap) / cols;
    if(cellW < 28) cellW = 28;
-   int xBar = mL;
+   int totalDashboardWidth = cols * cellW + (cols - 1) * gap;
+   int xBar = chartPixW - mR - totalDashboardWidth;  // Position on right side
 
    string iaDir = SMC_NormalizeAIDirectionLabel();
    double iaPct = NormalizeAIConfidenceUnit() * 100.0;
@@ -26450,36 +26562,30 @@ void DrawDashboardCell(string name, int x, int y, int w, int h, string text, col
 //+------------------------------------------------------------------+
 void DrawEntryLevelLines(bool isBullish, double emaFast, string tfLabel)
 {
-   // Ligne pour EMA Fast (niveau d'entrée principal)
+   // ENTRY LEVELS: Display only TEXT labels with price info (OTE + FIBO)
+   // No horizontal lines - keeping chart clean
    string lineName = "SMC_EntryLevel_" + tfLabel;
 
+   // Clean up old horizontal lines
    if(ObjectFind(0, lineName) >= 0)
       ObjectDelete(0, lineName);
 
-   // Couleur selon direction
    if(emaFast <= 0.0) return;
 
    color lineColor = isBullish ? clrLimeGreen : clrRed;
-   int lineWidth = (tfLabel == "M5") ? 3 : 2;
+   string direction = isBullish ? "BUY" : "SELL";
 
-   if(ObjectFind(0, lineName) < 0)
-      ObjectCreate(0, lineName, OBJ_HLINE, 0, 0, emaFast);
-   ObjectSetDouble(0, lineName, OBJPROP_PRICE, emaFast);
-   ObjectSetInteger(0, lineName, OBJPROP_COLOR, lineColor);
-   ObjectSetInteger(0, lineName, OBJPROP_WIDTH, lineWidth);
-   ObjectSetInteger(0, lineName, OBJPROP_STYLE, STYLE_SOLID);
-   ObjectSetInteger(0, lineName, OBJPROP_BACK, false);
-   ObjectSetInteger(0, lineName, OBJPROP_ZORDER, 100 + (tfLabel == "M1" ? 0 : tfLabel == "M5" ? 1 : 2));
-
-   // Ajouter label avec TF pour identifier les lignes
+   // Display ONLY text label with price information
    string labelName = lineName + "_Label";
    if(ObjectFind(0, labelName) >= 0)
       ObjectDelete(0, labelName);
 
+   // Create text label showing entry level by timeframe
+   string textLabel = tfLabel + " Entry: " + DoubleToString(emaFast, (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS)) + " (" + direction + ")";
    ObjectCreate(0, labelName, OBJ_TEXT, 0, iTime(_Symbol, PERIOD_M1, 0), emaFast);
-   ObjectSetString(0, labelName, OBJPROP_TEXT, tfLabel + " Entry");
-   ObjectSetInteger(0, labelName, OBJPROP_FONTSIZE, 8);
-   ObjectSetString(0, labelName, OBJPROP_FONT, "Arial");
+   ObjectSetString(0, labelName, OBJPROP_TEXT, textLabel);
+   ObjectSetInteger(0, labelName, OBJPROP_FONTSIZE, 9);
+   ObjectSetString(0, labelName, OBJPROP_FONT, "Consolas");
    ObjectSetInteger(0, labelName, OBJPROP_COLOR, lineColor);
    ObjectSetInteger(0, labelName, OBJPROP_ZORDER, 100 + (tfLabel == "M1" ? 0 : tfLabel == "M5" ? 1 : 2));
 }
@@ -26563,6 +26669,18 @@ bool DetectConfirmedOBWithCHOCH(const MqlRates &rates[], int bars, double point,
 void CheckAndExecuteOTEEntry()
 {
    if(g_confirmedOB.direction == 0) return;  // Pas d'OB confirmée
+
+   // PROTECTION: Interdire BUY sur Crash et SELL sur Boom
+   if(g_confirmedOB.direction > 0 && !IsDirectionAllowedForBoomCrash(_Symbol, "BUY"))
+   {
+      Print("❌ OTE Entry BUY BLOCKED on ", _Symbol, " (Crash symbol - only SELL allowed)");
+      return;
+   }
+   if(g_confirmedOB.direction < 0 && !IsDirectionAllowedForBoomCrash(_Symbol, "SELL"))
+   {
+      Print("❌ OTE Entry SELL BLOCKED on ", _Symbol, " (Boom symbol - only BUY allowed)");
+      return;
+   }
 
    double emaM1Fast = iMA(_Symbol, PERIOD_M1, 9, 0, MODE_EMA, PRICE_CLOSE);
    double emaM5Fast = iMA(_Symbol, PERIOD_M5, 9, 0, MODE_EMA, PRICE_CLOSE);
