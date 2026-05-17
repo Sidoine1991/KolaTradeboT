@@ -5916,22 +5916,9 @@ void ClosePositionsOnSpikeScalp()
       ENUM_POSITION_TYPE ptype = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
       string cmt = PositionGetString(POSITION_COMMENT);
 
-      // Calculer le profit cible (X% du TP initial)
-      // On clôt dès qu'on atteint SpikeCloseProfitPct du profit potentiel
-      double tickValue = SymbolInfoDouble(psym, SYMBOL_TRADE_TICK_VALUE);
-      double tickSize = SymbolInfoDouble(psym, SYMBOL_TRADE_TICK_SIZE);
-      double pointValue = tickValue / tickSize;
-
-      // Estimation du profit cible: calculer depuis les niveaux TP/SL
-      // Si profit >= 50% du gain cible → fermer (capture du spike)
-      double currentPrice = SymbolInfoDouble(psym, SYMBOL_BID);
-
-      // Déterminer le seuil de fermeture
-      double currentATR = iATR(psym, PERIOD_M1, 14);
-      if(currentATR <= 0) continue;  // Skip si ATR invalide
-
-      double closeProfitThreshold = SpikeCloseProfitPct * (TP_ATRMult * currentATR) * pointValue * volumeLots;
-      closeProfitThreshold = MathMax(closeProfitThreshold, 0.5);  // Minimum $0.50 profit pour fermer (realistic)
+      // Seuil de fermeture SIMPLE: fermer dès qu'on a un petit gain positif
+      // Sur scalping spike, on ne cherche pas un gain spécifique - juste à capturer le spike et sortir vite
+      double closeProfitThreshold = 0.30;  // Minimum $0.30 profit pour fermer (aggressive spike scalping)
 
       // SCALPING: Si profit POSITIF et >= seuil, fermer position (capture spike réussie)
       // JAMAIS fermer sur perte!
@@ -7254,7 +7241,8 @@ void DrawEnhancedDashboard()
    string priceText = "💲 Price: " + DoubleToString(currentPrice, digits);
 
    int y = 20;
-   int lineHeight = 22;
+   int lineHeight = 26;  // INCREASED for better spacing
+   int fontSize = 9;    // UNIFORM font size across all dashboard
 
    // Draw top dashboard (AI, Trend, Price)
    string label1 = "ML_DASH_AI";
@@ -7263,7 +7251,7 @@ void DrawEnhancedDashboard()
    ObjectSetInteger(chartID, label1, OBJPROP_YDISTANCE, y);
    ObjectSetString(chartID, label1, OBJPROP_TEXT, aiText);
    ObjectSetInteger(chartID, label1, OBJPROP_COLOR, aiColor);
-   ObjectSetInteger(chartID, label1, OBJPROP_FONTSIZE, 10);
+   ObjectSetInteger(chartID, label1, OBJPROP_FONTSIZE, fontSize);
    ObjectSetInteger(chartID, label1, OBJPROP_BACK, false);
    y += lineHeight;
 
@@ -7273,7 +7261,7 @@ void DrawEnhancedDashboard()
    ObjectSetInteger(chartID, label2, OBJPROP_YDISTANCE, y);
    ObjectSetString(chartID, label2, OBJPROP_TEXT, trendText);
    ObjectSetInteger(chartID, label2, OBJPROP_COLOR, trendColor);
-   ObjectSetInteger(chartID, label2, OBJPROP_FONTSIZE, 10);
+   ObjectSetInteger(chartID, label2, OBJPROP_FONTSIZE, fontSize);
    ObjectSetInteger(chartID, label2, OBJPROP_BACK, false);
    y += lineHeight;
 
@@ -7283,9 +7271,9 @@ void DrawEnhancedDashboard()
    ObjectSetInteger(chartID, label3, OBJPROP_YDISTANCE, y);
    ObjectSetString(chartID, label3, OBJPROP_TEXT, priceText);
    ObjectSetInteger(chartID, label3, OBJPROP_COLOR, clrWhite);
-   ObjectSetInteger(chartID, label3, OBJPROP_FONTSIZE, 10);
+   ObjectSetInteger(chartID, label3, OBJPROP_FONTSIZE, fontSize);
    ObjectSetInteger(chartID, label3, OBJPROP_BACK, false);
-   y += lineHeight + 10; // Extra gap
+   y += lineHeight + 5; // Small extra gap
 
    // ===== ENTRY LEVELS SECTION =====
 
@@ -7304,7 +7292,7 @@ void DrawEnhancedDashboard()
       ObjectSetInteger(chartID, label_buy, OBJPROP_YDISTANCE, y);
       ObjectSetString(chartID, label_buy, OBJPROP_TEXT, buyText);
       ObjectSetInteger(chartID, label_buy, OBJPROP_COLOR, clrLimeGreen);
-      ObjectSetInteger(chartID, label_buy, OBJPROP_FONTSIZE, 10);
+      ObjectSetInteger(chartID, label_buy, OBJPROP_FONTSIZE, fontSize);  // UNIFORM
       ObjectSetInteger(chartID, label_buy, OBJPROP_BACK, false);
 
       // Draw GREEN horizontal line for BUY level
@@ -7327,7 +7315,7 @@ void DrawEnhancedDashboard()
       ObjectSetInteger(chartID, label_sell, OBJPROP_YDISTANCE, y);
       ObjectSetString(chartID, label_sell, OBJPROP_TEXT, sellText);
       ObjectSetInteger(chartID, label_sell, OBJPROP_COLOR, clrRed);
-      ObjectSetInteger(chartID, label_sell, OBJPROP_FONTSIZE, 10);
+      ObjectSetInteger(chartID, label_sell, OBJPROP_FONTSIZE, fontSize);  // UNIFORM
       ObjectSetInteger(chartID, label_sell, OBJPROP_BACK, false);
 
       // Draw RED horizontal line for SELL level
@@ -7355,7 +7343,7 @@ void DrawEnhancedDashboard()
    ObjectSetInteger(chartID, label_ml, OBJPROP_YDISTANCE, 500);  // MOVED TO BOTTOM - Well below all other UI
    ObjectSetString(chartID, label_ml, OBJPROP_TEXT, mlText);
    ObjectSetInteger(chartID, label_ml, OBJPROP_COLOR, clrSkyBlue);
-   ObjectSetInteger(chartID, label_ml, OBJPROP_FONTSIZE, 9);
+   ObjectSetInteger(chartID, label_ml, OBJPROP_FONTSIZE, fontSize);  // UNIFORM with rest of dashboard
    ObjectSetInteger(chartID, label_ml, OBJPROP_BACK, false);
 }
 
