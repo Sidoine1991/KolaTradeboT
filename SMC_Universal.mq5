@@ -13,6 +13,20 @@
 #include <Trade/HistoryOrderInfo.mqh>
 // #include "SMC_Setups_Display.mqh" // Désactivé pour éviter l'erreur de fichier non trouvé
 
+// Line style constants for MQL5 compatibility
+#ifndef STYLE_SOLID
+#define STYLE_SOLID 0
+#endif
+#ifndef STYLE_DASH
+#define STYLE_DASH 1
+#endif
+#ifndef STYLE_DOT
+#define STYLE_DOT 3
+#endif
+#ifndef STYLE_DASHDOT
+#define STYLE_DASHDOT 2
+#endif
+
 //+------------------------------------------------------------------+
 //| MATÉRIALISATION DES SETUPS SMC SUR GRAPHIQUE                   |
 //+------------------------------------------------------------------+
@@ -7211,7 +7225,7 @@ void DrawEnhancedDashboard()
       string buyLine = "ENTRY_LVL_BUY";
       ObjectCreate(chartID, buyLine, OBJ_HLINE, 0, 0, buyLevel);
       ObjectSetInteger(chartID, buyLine, OBJPROP_COLOR, clrLimeGreen);
-      ObjectSetInteger(chartID, buyLine, OBJPROP_STYLE, STYLE_DASHES);
+      ObjectSetInteger(chartID, buyLine, OBJPROP_STYLE, STYLE_DASH);
       ObjectSetInteger(chartID, buyLine, OBJPROP_WIDTH, 2);
       ObjectSetInteger(chartID, buyLine, OBJPROP_BACK, true);
 
@@ -7234,7 +7248,7 @@ void DrawEnhancedDashboard()
       string sellLine = "ENTRY_LVL_SELL";
       ObjectCreate(chartID, sellLine, OBJ_HLINE, 0, 0, sellLevel);
       ObjectSetInteger(chartID, sellLine, OBJPROP_COLOR, clrRed);
-      ObjectSetInteger(chartID, sellLine, OBJPROP_STYLE, STYLE_DASHES);
+      ObjectSetInteger(chartID, sellLine, OBJPROP_STYLE, STYLE_DASH);
       ObjectSetInteger(chartID, sellLine, OBJPROP_WIDTH, 2);
       ObjectSetInteger(chartID, sellLine, OBJPROP_BACK, true);
 
