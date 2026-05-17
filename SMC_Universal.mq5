@@ -7336,6 +7336,36 @@ void DrawEnhancedDashboard()
    ObjectSetInteger(chartID, label_pred, OBJPROP_COLOR, predColor);
    ObjectSetInteger(chartID, label_pred, OBJPROP_FONTSIZE, fontSize);
    ObjectSetInteger(chartID, label_pred, OBJPROP_BACK, false);
+   y += lineHeight;
+
+   // ===== PROBABILITY DETAILS SECTION =====
+   // Display probability reason
+   string probReasonText = "  └─ " + pred.reasoning;
+
+   string label_prob_reason = "ML_DASH_PROB_REASON";
+   ObjectCreate(chartID, label_prob_reason, OBJ_LABEL, 0, 0, 0);
+   ObjectSetInteger(chartID, label_prob_reason, OBJPROP_XDISTANCE, 10);
+   ObjectSetInteger(chartID, label_prob_reason, OBJPROP_YDISTANCE, y);
+   ObjectSetString(chartID, label_prob_reason, OBJPROP_TEXT, probReasonText);
+   ObjectSetInteger(chartID, label_prob_reason, OBJPROP_COLOR, clrDarkGray);
+   ObjectSetInteger(chartID, label_prob_reason, OBJPROP_FONTSIZE, 8);  // Slightly smaller
+   ObjectSetInteger(chartID, label_prob_reason, OBJPROP_BACK, false);
+   y += lineHeight;
+
+   // Display detailed probability breakdown (EMA | RSI | ATR)
+   ProbabilityAnalysis probAnalysis = GetProbabilityBreakdown();
+   string detailedProbText = "  EMA:" + DoubleToString(probAnalysis.emaScore, 0) + "% | RSI:" +
+                             DoubleToString(probAnalysis.rsiScore, 0) + "% | ATR:" +
+                             DoubleToString(probAnalysis.atrScore, 0) + "%";
+
+   string label_prob_detail = "ML_DASH_PROB_DETAIL";
+   ObjectCreate(chartID, label_prob_detail, OBJ_LABEL, 0, 0, 0);
+   ObjectSetInteger(chartID, label_prob_detail, OBJPROP_XDISTANCE, 10);
+   ObjectSetInteger(chartID, label_prob_detail, OBJPROP_YDISTANCE, y);
+   ObjectSetString(chartID, label_prob_detail, OBJPROP_TEXT, detailedProbText);
+   ObjectSetInteger(chartID, label_prob_detail, OBJPROP_COLOR, C'150,150,150');  // Medium gray for details
+   ObjectSetInteger(chartID, label_prob_detail, OBJPROP_FONTSIZE, 8);
+   ObjectSetInteger(chartID, label_prob_detail, OBJPROP_BACK, false);
    y += lineHeight + 10; // Extra gap before ML metrics
 
    // ===== ML METRICS SECTION (FAR BOTTOM-RIGHT - NO OVERLAP) =====
@@ -9494,6 +9524,80 @@ string GetCurrentTrendDirection()
       return "SIDEWAYS";
 }
 
+// Structure to hold detailed probability analysis
+struct ProbabilityAnalysis
+{
+   double emaScore;        // EMA alignment: 0-100
+   double rsiScore;        // RSI signal: 0-100
+   double atrScore;        // ATR volatility: 0-100
+   double overallScore;    // Combined: 0-100
+};
+
+// Get detailed probability breakdown (for dashboard enrichment)
+ProbabilityAnalysis GetProbabilityBreakdown()
+{
+   ProbabilityAnalysis analysis;
+   analysis.emaScore = 0.0;
+   analysis.rsiScore = 0.0;
+   analysis.atrScore = 0.0;
+
+   // EMA Score (0-100)
+   double ema9 = 0.0, ema31 = 0.0;
+   if(ema21LTF != INVALID_HANDLE && ema31LTF != INVALID_HANDLE)
+   {
+      double buf9[], buf31[];
+      ArraySetAsSeries(buf9, true);
+      ArraySetAsSeries(buf31, true);
+      if(CopyBuffer(ema21LTF, 0, 0, 1, buf9) >= 1 && CopyBuffer(ema31LTF, 0, 0, 1, buf31) >= 1)
+      {
+         ema9 = buf9[0];
+         ema31 = buf31[0];
+         if(ema9 > ema31) analysis.emaScore = 75.0;  // Strong bullish
+         else if(ema9 < ema31) analysis.emaScore = 25.0;  // Strong bearish
+         else analysis.emaScore = 50.0;  // Neutral
+      }
+   }
+
+   // RSI Score (0-100)
+   double rsi = 0.0;
+   int rsiHandle = iRSI(_Symbol, PERIOD_M1, 14, PRICE_CLOSE);
+   if(rsiHandle != INVALID_HANDLE)
+   {
+      double rsiBuf[];
+      ArraySetAsSeries(rsiBuf, true);
+      if(CopyBuffer(rsiHandle, 0, 0, 1, rsiBuf) >= 1)
+      {
+         rsi = rsiBuf[0];
+         if(rsi > 70) analysis.rsiScore = 30.0;  // Overbought - risky for UP
+         else if(rsi < 30) analysis.rsiScore = 70.0;  // Oversold - risky for DOWN
+         else if(rsi > 50) analysis.rsiScore = 70.0;  // Bullish mid-range
+         else analysis.rsiScore = 30.0;  // Bearish mid-range
+      }
+      IndicatorRelease(rsiHandle);
+   }
+
+   // ATR Score (0-100: 100=high volatility, 0=low/consolidation)
+   double atrVal = 0.0;
+   if(atrHandle != INVALID_HANDLE)
+   {
+      double atrBuf[];
+      ArraySetAsSeries(atrBuf, true);
+      if(CopyBuffer(atrHandle, 0, 0, 1, atrBuf) >= 1)
+         atrVal = atrBuf[0];
+   }
+   if(atrVal <= 0.0) atrVal = SymbolInfoDouble(_Symbol, SYMBOL_POINT) * 50.0;
+
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   double avgVolatility = atrVal * 0.5;
+   if(atrVal > avgVolatility) analysis.atrScore = 80.0;  // High volatility - good for trends
+   else analysis.atrScore = 40.0;  // Low volatility - consolidation
+
+   // Overall score (weighted average)
+   analysis.overallScore = (analysis.emaScore * 0.4) + (analysis.rsiScore * 0.35) + (analysis.atrScore * 0.25);
+
+   return analysis;
+}
+
 // Prédire la direction réelle du prix (UP/DOWN/CONSOLIDATE) avec probabilité
 PricePrediction GetPriceDirection()
 {
@@ -9572,33 +9676,38 @@ PricePrediction GetPriceDirection()
    // 5. Calcul de confluence et probabilité
    int signalConfluence = emaSignalScore + rsiScore;
 
+   // Build detailed reasoning string
+   string emaStatus = (emaSignalScore > 0) ? "EMA↑" : (emaSignalScore < 0) ? "EMA↓" : "EMA→";
+   string rsiStatus = (rsiScore > 0) ? "RSI↑" : "RSI↓";
+   string atrStatus = isConsolidating ? "ATR-low" : "ATR-high";
+
    if(isConsolidating && MathAbs(signalConfluence) <= 1)
    {
       pred.direction = "CONSOLIDATE";
       pred.probability = 40.0 + (MathRand() % 20);
       pred.targetPrice = currentPrice + (atrVal * 0.2);
-      pred.reasoning = "ATR low + mixed signals → consolidation zone";
+      pred.reasoning = atrStatus + " + mixed(" + emaStatus + "/" + rsiStatus + ")";
    }
    else if(signalConfluence >= 1)
    {
       pred.direction = "UP";
       pred.probability = MathMin(90.0, 50.0 + (10.0 * signalConfluence));
       pred.targetPrice = currentPrice + (atrVal * TP_ATRMult);
-      pred.reasoning = "EMA/RSI alignment → bullish direction";
+      pred.reasoning = "Strong " + emaStatus + " + " + rsiStatus + " | Conf=" + IntegerToString(signalConfluence);
    }
    else if(signalConfluence <= -1)
    {
       pred.direction = "DOWN";
       pred.probability = MathMin(90.0, 50.0 + (10.0 * MathAbs(signalConfluence)));
       pred.targetPrice = currentPrice - (atrVal * TP_ATRMult);
-      pred.reasoning = "EMA/RSI alignment → bearish direction";
+      pred.reasoning = "Strong " + emaStatus + " + " + rsiStatus + " | Conf=" + IntegerToString(signalConfluence);
    }
    else
    {
       pred.direction = "CONSOLIDATE";
       pred.probability = 30.0 + (MathRand() % 30);
       pred.targetPrice = currentPrice;
-      pred.reasoning = "Neutral signals → consolidation";
+      pred.reasoning = "Neutral " + emaStatus + "/" + rsiStatus + " | Low confluence";
    }
 
    // Normaliser probabilité 0-100
