@@ -7248,6 +7248,7 @@ void DrawEnhancedDashboard()
    ObjectsDeleteAll(0, "ML_DASH_");
    ObjectsDeleteAll(0, "DASH_");
    ObjectsDeleteAll(0, "ENTRY_LVL_");
+   // Fixed: Use aiText and aiColor from local scope
 
    long chartID = ChartID();
    double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
