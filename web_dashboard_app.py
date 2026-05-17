@@ -109,7 +109,7 @@ async def get_dashboard():
             for (const symbol in metrics) {
                 const m = metrics[symbol];
                 const signal = m.signal || {};
-                const action = (signal.action || "HOLD").toUpperCase();
+                const action = (signal.signal || "HOLD").toUpperCase();
                 const conf = ((signal.confidence || 0) * 100).toFixed(0);
                 const actionClass = "action-" + action.toLowerCase();
 
