@@ -4370,11 +4370,9 @@ int OnInit()
    Print("   Catégorie: ", EnumToString(SMC_GetSymbolCategory(_Symbol)));
    Print("   IA: ", UseAIServer ? AI_ServerURL : "Désactivé");
 
-   // Diagnostiquer la connectivité Supabase au démarrage
-   if(UseAIServer)
-   {
-      TestSupabaseConnectivity();
-   }
+   // Initialiser IA server au démarrage (serveur local/Render + fallback autonome)
+   // if(UseAIServer)
+   //    TestSupabaseConnectivity();  // Désactivé - non essentiel pour trading
 
    // Démarrer/relancer l'apprentissage continu côté backend (si activé)
    if(ShowMLMetrics && AutoStartMLContinuousTraining)
@@ -6481,9 +6479,8 @@ void UpdateDashboard()
    // NETTOYAGE AGRESSIF des anciens objets dashboard avant de créer les nouveaux
    CleanupDashboardObjects();
    
-   // Nettoyer l'ancien Comment() pour éviter les superpositions avec les labels
-   if(!DashboardUseCommentFallback)
-      Comment("");
+   // Nettoyer COMPLÈTEMENT le Comment() pour éviter superpositions avec dashboard GOM_SIDO
+   Comment("");  // Toujours vider pour que dashboard soit visible
 
    string lines[40]; // Lignes dashboard (+ ligne IA séparée pour éviter troncature MT5)
    color  cols[40];
@@ -13223,69 +13220,60 @@ void DrawMLMetricsOnChart()
 // Fonction de nettoyage global des objets graphiques du dashboard
 void CleanupDashboardObjects()
 {
-   // Nettoyer TOUS les objets dashboard existants - méthode plus agressive
+   // Nettoyer TOUS les anciens objets dashboard + graphiques expirés
    int totalDeleted = 0;
-   
-   // Méthode 1: Nettoyer par préfixes connus
-   string prefixes[] = {"SMC_DASHBOARD_LABEL", "SMC_DASH_LINE_", "SMC_ML_METRICS_LABEL", "SMC_PROPICE_LINE", "DASH_", "ML_"};
-   
-   for(int p = 0; p < ArraySize(prefixes); p++)
+
+   // Parcourir TOUS les objets du chart
+   for(int i = ObjectsTotal(0) - 1; i >= 0; i--)
    {
-      string prefix = prefixes[p];
-      
-      // Pour les préfixes de lignes, tester plusieurs numéros
-      if(prefix == "SMC_DASH_LINE_")
+      string objName = ObjectName(0, i, 0, -1);
+
+      // Protéger les nouveaux objets GOM_SIDO
+      if(StringFind(objName, "SMC_MTF_") == 0 ||     // M1/M5/H1 dashboard
+         StringFind(objName, "SMC_TITLE") == 0 ||
+         StringFind(objName, "SMC_IACONF") == 0 ||
+         StringFind(objName, "SMC_VERDICT") == 0 ||
+         StringFind(objName, "SMC_M1") == 0 ||
+         StringFind(objName, "SMC_M5") == 0 ||
+         StringFind(objName, "SMC_H1") == 0 ||
+         StringFind(objName, "_TXT") > 0)             // Labels texte
+         continue;
+
+      // Supprimer anciens dashboards/infos
+      if(StringFind(objName, "SMC_DASH_") == 0 ||
+         StringFind(objName, "SMC_DASHBOARD") == 0 ||
+         StringFind(objName, "SMC_ML_METRICS") == 0 ||
+         StringFind(objName, "SMC_PROPICE") == 0 ||
+         StringFind(objName, "SMC_FUT_STATUS") == 0 ||
+         StringFind(objName, "SMC_Chan_") == 0 ||
+         StringFind(objName, "SMC_ICT_") == 0 ||
+         StringFind(objName, "DASH_") == 0 ||
+         StringFind(objName, "ML_") == 0 ||
+         StringFind(objName, "GOM_MLINFO") == 0 ||
+         StringFind(objName, "GOM_SPIKE") == 0)
       {
-         for(int i = 0; i < 200; i++)
-         {
-            string name = prefix + IntegerToString(i);
-            if(ObjectFind(0, name) >= 0)
-            {
-               if(ObjectDelete(0, name))
-                  totalDeleted++;
-            }
-         }
+         if(ObjectDelete(0, objName))
+            totalDeleted++;
       }
-      else
+
+      // Supprimer dessins expiés (chandeliers/lignes/rectangles anciennes)
+      long objType = (long)ObjectGetInteger(0, objName, OBJPROP_TYPE);
+      if(objType == OBJ_HLINE || objType == OBJ_TREND || objType == OBJ_RECTANGLE)
       {
-         // Pour les objets uniques, essayer directement
-         if(ObjectFind(0, prefix) >= 0)
+         // Vérifier si le dessin a une date d'expiration
+         datetime expiration = (datetime)ObjectGetInteger(0, objName, OBJPROP_EXPIRATION);
+         if(expiration > 0 && expiration < TimeCurrent())
          {
-            if(ObjectDelete(0, prefix))
+            if(ObjectDelete(0, objName))
                totalDeleted++;
          }
       }
    }
 
-   // Nettoyage ciblé des labels d'information susceptibles de rester obsolètes
-   string staleLabels[] = {"SMC_FUT_STATUS", "SMC_Chan_Label", "SMC_Chan_Status", "SMC_ICT_SIG_CHECKLIST", "SMC_TOP_NET_RIGHT"};
-   for(int s = 0; s < ArraySize(staleLabels); s++)
-   {
-      if(ObjectFind(0, staleLabels[s]) >= 0 && ObjectDelete(0, staleLabels[s]))
-         totalDeleted++;
-   }
-   
-   // Méthode 2: Parcourir TOUS les objets sur le chart et supprimer ceux qui correspondent
-   for(int i = ObjectsTotal(0) - 1; i >= 0; i--)
-   {
-      string objName = ObjectName(0, i);
-      
-      // Supprimer tous les objets avec ces préfixes
-      if(StringFind(objName, "SMC_DASH_") == 0 ||
-         StringFind(objName, "SMC_DASHBOARD_LABEL") == 0 ||
-         StringFind(objName, "SMC_ML_") == 0 ||
-         StringFind(objName, "SMC_PROPICE_") == 0 ||
-         StringFind(objName, "DASH_") == 0 ||
-         StringFind(objName, "ML_METRICS") == 0)
-      {
-         if(ObjectDelete(0, objName))
-            totalDeleted++;
-      }
-   }
-   
    if(totalDeleted > 0)
    {
-      Print("🧹 NETTOYAGE DASHBOARD - ", totalDeleted, " objets supprimés");
+      Print("🧹 NETTOYAGE COMPLET - ", totalDeleted, " objets supprimés (anciens dashboards + dessins expirés)");
+      ChartRedraw(0);
    }
 }
 
@@ -25751,12 +25739,13 @@ void DisplayMTFDashboard()
 }
 
 //+------------------------------------------------------------------+
-//| Helper: Dessiner cellule avec fond coloré
+//| Helper: Dessiner cellule avec fond coloré (OBJ_RECTANGLE_LABEL)
 //+------------------------------------------------------------------+
 void DrawDashboardCell(string name, int x, int y, int w, int h, string label, string value, color bg)
 {
    if(ObjectFind(0, name) >= 0) ObjectDelete(0, name);
 
+   // Créer rectangle de fond
    ObjectCreate(0, name, OBJ_RECTANGLE_LABEL, 0, 0, 0);
    ObjectSetInteger(0, name, OBJPROP_XDISTANCE, x);
    ObjectSetInteger(0, name, OBJPROP_YDISTANCE, y);
@@ -25765,15 +25754,22 @@ void DrawDashboardCell(string name, int x, int y, int w, int h, string label, st
    ObjectSetInteger(0, name, OBJPROP_BGCOLOR, bg);
    ObjectSetInteger(0, name, OBJPROP_BORDER_TYPE, BORDER_FLAT);
    ObjectSetInteger(0, name, OBJPROP_BORDER_COLOR, 0x222222);
-   ObjectSetInteger(0, name, OBJPROP_BORDER_WIDTH, 1);
    ObjectSetInteger(0, name, OBJPROP_ZORDER, 520);
 
+   // Créer label texte par-dessus
+   string textName = name + "_TXT";
+   if(ObjectFind(0, textName) >= 0) ObjectDelete(0, textName);
+
+   ObjectCreate(0, textName, OBJ_LABEL, 0, 0, 0);
+   ObjectSetInteger(0, textName, OBJPROP_XDISTANCE, x + 5);
+   ObjectSetInteger(0, textName, OBJPROP_YDISTANCE, y + 2);
+   ObjectSetInteger(0, textName, OBJPROP_ZORDER, 521);
+
    string txt = (StringLen(label) > 0) ? (label + "\n" + value) : value;
-   ObjectSetString(0, name, OBJPROP_TEXT, txt);
-   ObjectSetInteger(0, name, OBJPROP_FONTSIZE, 8);
-   ObjectSetString(0, name, OBJPROP_FONT, "Arial");
-   ObjectSetInteger(0, name, OBJPROP_TEXT_COLOR, clrWhite);
-   ObjectSetInteger(0, name, OBJPROP_TEXT_ALIGN, ALIGN_CENTER);
+   ObjectSetString(0, textName, OBJPROP_TEXT, txt);
+   ObjectSetInteger(0, textName, OBJPROP_FONTSIZE, 8);
+   ObjectSetString(0, textName, OBJPROP_FONT, "Arial");
+   ObjectSetInteger(0, textName, OBJPROP_COLOR, clrWhite);
 }
 
 //| END OF PROGRAM                                                  |

@@ -18577,7 +18577,7 @@ if __name__ == "__main__":
     logger.info("🌟 Lancement du serveur IA TradBOT avec système ML intégré")
     logger.info("📡 Endpoints disponibles:")
     logger.info("   • /health - Santé du serveur")
-    logger.info("   • /decision - Décisions de trading")  
+    logger.info("   • /decision - Décisions de trading")
     logger.info("   • /analyze/ollama - Analyse approfondie LLM local")
     logger.info("   • /ml/metrics - Métriques ML en temps réel")
     logger.info("   • /ml/start - Démarrer entraînement ML")
@@ -18585,7 +18585,232 @@ if __name__ == "__main__":
     logger.info("   • /ml/retrain - Forcer réentraînement")
     logger.info("   • /ml_stats - Statistiques ML détaillées")
     logger.info("   • /ui - Dashboard web (interface graphique)")
-    
+
+# ========== 3 ENDPOINTS MANQUANTS POUR SMC_Universal.mq5 ==========
+
+@app.get("/ml/decision")
+async def ml_decision(symbol: str = Query(..., description="Symbol (ex: Boom 1000 Index)"),
+                     timeframe: str = Query("M1", description="Timeframe: M1, M5, H1, etc.")):
+    """
+    Endpoint léger pour décision ML - retour rapide du dernier signal /decision en cache.
+    Appelé par SMC_Universal ligne 7152.
+    """
+    try:
+        if not validate_symbol(symbol):
+            return {
+                "action": "hold",
+                "confidence": 0.0,
+                "reason": f"Symbole invalide: {symbol}"
+            }
+
+        # Chercher dans cache_simplified (si disponible)
+        cache_key = decision_simplified_cache_key(DecisionRequest(symbol=symbol, timeframe=timeframe))
+        cached = get_simplified_tf_cached_decision(DecisionRequest(symbol=symbol, timeframe=timeframe))
+
+        if cached:
+            logger.info(f"✅ /ml/decision: {symbol} trouvé en cache")
+            return {
+                "action": cached.action,
+                "confidence": cached.confidence,
+                "reason": cached.reason,
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            }
+
+        logger.warning(f"⚠️ /ml/decision: {symbol} pas en cache, retour HOLD neutre")
+        return {
+            "action": "hold",
+            "confidence": 0.50,
+            "reason": f"Pas de signal en cache pour {symbol} - En attente de données"
+        }
+
+    except Exception as e:
+        logger.error(f"❌ /ml/decision error: {e}", exc_info=True)
+        return {
+            "action": "hold",
+            "confidence": 0.0,
+            "reason": f"Erreur serveur: {str(e)}"
+        }
+
+
+@app.get("/ml/trend_alignment")
+async def ml_trend_alignment(symbol: str = Query(..., description="Symbol (ex: Boom 1000 Index)")):
+    """
+    Vérifier l'alignement des tendances sur M1/M5/H1.
+    Appelé par SMC_Universal ligne 7206.
+    Retourne: {"aligned": bool, "direction": "UP/DOWN/NEUTRAL", "confidence": 0.0-1.0}
+    """
+    try:
+        if not validate_symbol(symbol):
+            return {
+                "aligned": False,
+                "direction": "NEUTRAL",
+                "confidence": 0.0,
+                "reason": f"Symbole invalide: {symbol}"
+            }
+
+        # Récupérer tendances M1, M5, H1 depuis _get_trend_data (si disponible)
+        df_m1 = _get_trend_data(symbol, "M1", 100)
+        df_m5 = _get_trend_data(symbol, "M5", 50)
+        df_h1 = _get_trend_data(symbol, "H1", 20)
+
+        if df_m1 is None or df_m5 is None or df_h1 is None:
+            logger.warning(f"⚠️ /ml/trend_alignment: données partielles pour {symbol}")
+            return {
+                "aligned": False,
+                "direction": "NEUTRAL",
+                "confidence": 0.0,
+                "reason": f"Données historiques partielles"
+            }
+
+        # Calculer tendance = comparaison close[-1] vs close[-2]
+        def get_trend(df):
+            if len(df) < 2:
+                return "NEUTRAL"
+            latest = df["close"].iloc[-1]
+            previous = df["close"].iloc[-2]
+            if latest > previous:
+                return "UP"
+            elif latest < previous:
+                return "DOWN"
+            return "NEUTRAL"
+
+        trend_m1 = get_trend(df_m1)
+        trend_m5 = get_trend(df_m5)
+        trend_h1 = get_trend(df_h1)
+
+        # Alignement = au moins 2 tendances d'accord
+        up_count = sum([t == "UP" for t in [trend_m1, trend_m5, trend_h1]])
+        down_count = sum([t == "DOWN" for t in [trend_m1, trend_m5, trend_h1]])
+
+        if up_count >= 2:
+            direction = "UP"
+            aligned = True
+            confidence = min(0.95, 0.60 + (up_count * 0.15))
+        elif down_count >= 2:
+            direction = "DOWN"
+            aligned = True
+            confidence = min(0.95, 0.60 + (down_count * 0.15))
+        else:
+            direction = "NEUTRAL"
+            aligned = False
+            confidence = 0.50
+
+        reason = f"M1={trend_m1} | M5={trend_m5} | H1={trend_h1}"
+        logger.info(f"✅ /ml/trend_alignment: {symbol} → {direction} (conf={confidence:.2f})")
+
+        return {
+            "aligned": aligned,
+            "direction": direction,
+            "confidence": confidence,
+            "reason": reason,
+            "m1_trend": trend_m1,
+            "m5_trend": trend_m5,
+            "h1_trend": trend_h1,
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+
+    except Exception as e:
+        logger.error(f"❌ /ml/trend_alignment error: {e}", exc_info=True)
+        return {
+            "aligned": False,
+            "direction": "NEUTRAL",
+            "confidence": 0.0,
+            "reason": f"Erreur serveur: {str(e)}"
+        }
+
+
+@app.get("/ml/coherent_analysis")
+async def ml_coherent_analysis(symbol: str = Query(..., description="Symbol (ex: Boom 1000 Index)")):
+    """
+    Analyse de cohérence multi-timeframe (M1, M5, H1).
+    Appelé par SMC_Universal ligne 7227.
+    Retourne: {"coherence_score": 0.0-1.0, "consensus": "STRONG_UP/UP/NEUTRAL/DOWN/STRONG_DOWN", ...}
+    """
+    try:
+        if not validate_symbol(symbol):
+            return {
+                "coherence_score": 0.0,
+                "consensus": "NEUTRAL",
+                "reason": f"Symbole invalide: {symbol}"
+            }
+
+        # Récupérer tendances + EMA alignment
+        df_m1 = _get_trend_data(symbol, "M1", 100)
+        df_m5 = _get_trend_data(symbol, "M5", 50)
+        df_h1 = _get_trend_data(symbol, "H1", 20)
+
+        if df_m1 is None or df_m5 is None or df_h1 is None:
+            logger.warning(f"⚠️ /ml/coherent_analysis: données partielles pour {symbol}")
+            return {
+                "coherence_score": 0.0,
+                "consensus": "NEUTRAL",
+                "reason": "Données historiques partielles"
+            }
+
+        def calculate_trend(df):
+            if len(df) < 2:
+                return "NEUTRAL", 0.0
+            latest = df["close"].iloc[-1]
+            previous = df["close"].iloc[-2]
+            if latest > previous:
+                return "UP", (latest - previous) / previous * 100
+            elif latest < previous:
+                return "DOWN", (previous - latest) / previous * 100
+            return "NEUTRAL", 0.0
+
+        trend_m1, change_m1 = calculate_trend(df_m1)
+        trend_m5, change_m5 = calculate_trend(df_m5)
+        trend_h1, change_h1 = calculate_trend(df_h1)
+
+        up_count = sum([t == "UP" for t in [trend_m1, trend_m5, trend_h1]])
+        down_count = sum([t == "DOWN" for t in [trend_m1, trend_m5, trend_h1]])
+
+        # Consensus
+        if up_count == 3:
+            consensus = "STRONG_UP"
+            coherence_score = 0.95
+        elif up_count == 2:
+            consensus = "UP"
+            coherence_score = 0.75
+        elif down_count == 3:
+            consensus = "STRONG_DOWN"
+            coherence_score = 0.95
+        elif down_count == 2:
+            consensus = "DOWN"
+            coherence_score = 0.75
+        else:
+            consensus = "NEUTRAL"
+            coherence_score = 0.50
+
+        # Enrichir avec volatility + patterns si disponibles
+        volatility_m1 = abs(change_m1) if change_m1 else 0.0
+        volatility_m5 = abs(change_m5) if change_m5 else 0.0
+        volatility_regime = "HIGH" if (volatility_m1 + volatility_m5) / 2 > 1.0 else "NORMAL"
+
+        logger.info(f"✅ /ml/coherent_analysis: {symbol} → {consensus} (cohérence={coherence_score:.2f})")
+
+        return {
+            "coherence_score": coherence_score,
+            "consensus": consensus,
+            "m1_trend": trend_m1,
+            "m5_trend": trend_m5,
+            "h1_trend": trend_h1,
+            "m1_change_pct": round(change_m1, 2),
+            "m5_change_pct": round(change_m5, 2),
+            "h1_change_pct": round(change_h1, 2),
+            "volatility_regime": volatility_regime,
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+
+    except Exception as e:
+        logger.error(f"❌ /ml/coherent_analysis error: {e}", exc_info=True)
+        return {
+            "coherence_score": 0.0,
+            "consensus": "NEUTRAL",
+            "reason": f"Erreur serveur: {str(e)}"
+        }
+
+
     uvicorn.run(
         "ai_server:app",
         host=HOST,
