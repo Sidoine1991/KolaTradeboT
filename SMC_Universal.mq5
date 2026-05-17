@@ -7346,7 +7346,7 @@ void DrawEnhancedDashboard()
    string label_ml = "ML_DASH_METRICS";
    ObjectCreate(chartID, label_ml, OBJ_LABEL, 0, 0, 0);
    ObjectSetInteger(chartID, label_ml, OBJPROP_XDISTANCE, 10);
-   ObjectSetInteger(chartID, label_ml, OBJPROP_YDISTANCE, 500);  // MOVED TO BOTTOM - Well below all other UI
+   ObjectSetInteger(chartID, label_ml, OBJPROP_YDISTANCE, 650);  // VERY BOTTOM - No overlap with any other info
    ObjectSetString(chartID, label_ml, OBJPROP_TEXT, mlText);
    ObjectSetInteger(chartID, label_ml, OBJPROP_COLOR, clrSkyBlue);
    ObjectSetInteger(chartID, label_ml, OBJPROP_FONTSIZE, fontSize);  // UNIFORM with rest of dashboard
