@@ -330,6 +330,8 @@ void UpdateMLMetricsDisplay();
 void DrawSwingHighLow();
 void DrawFVGOnChart();
 void DrawFibonacciOnChart();
+void DrawConfirmedOBWithCHOCH();
+void CheckAndExecuteOTEEntry();
 bool GetChartSwingHighLowForFibo(double &swingHighOut, double &swingLowOut);
 bool PriceLevelInFiboOTEZone(const string direction, double price, double swingHigh, double swingLow);
 bool IsStrongOTEFVGConfluence(double price, string direction);
@@ -4138,6 +4140,11 @@ static datetime g_lastChannelUpdate = 0;
 static double g_chUpperStart = 0, g_chUpperEnd = 0, g_chLowerStart = 0, g_chLowerEnd = 0;
 static datetime g_chTimeStart = 0, g_chTimeEnd = 0;
 
+// OB + OTE Tracking
+OrderBlockData g_confirmedOB;
+double g_lastTP2 = 0;
+double g_lastTP3 = 0;
+
 //| VARIABLES GLOBALES POUR GESTION DES PAUSES ET BLACKLIST          |
 struct SymbolPauseInfo {
    string symbol;
@@ -5651,6 +5658,8 @@ void DrawAllIndicatorGraphics()
    DrawSwingHighLow();
    DrawFVGOnChart();
    DrawFibonacciOnChart();
+   DrawConfirmedOBWithCHOCH();  // OB + CHOCH confirmation (1 rectangle)
+   CheckAndExecuteOTEEntry();    // OTE confirmation → position entry SL + TP1/TP2/TP3
    DrawEMACurveOnChart();
    DrawLiquidityZonesOnChart();
    
@@ -25649,6 +25658,177 @@ void DrawEntryLevelLines(bool isBullish, double emaFast, double emaSlow, string 
    ObjectSetString(0, labelName, OBJPROP_FONT, "Arial");
    ObjectSetInteger(0, labelName, OBJPROP_COLOR, lineColor);
    ObjectSetInteger(0, labelName, OBJPROP_ZORDER, 100 + (tfLabel == "M1" ? 0 : tfLabel == "M5" ? 1 : 2));
+}
+
+//+------------------------------------------------------------------+
+//| OB Confirmé + CHOCH - Affiche une seule OB avec rupture confirmée
+//+------------------------------------------------------------------+
+void DrawConfirmedOBWithCHOCH()
+{
+   ObjectsDeleteAll(0, "SMC_OB_CONFIRMED_");
+
+   MqlRates rates[];
+   ArraySetAsSeries(rates, true);
+   if(CopyRates(_Symbol, LTF, 0, 80, rates) < 80) return;
+
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   OrderBlockData ob;
+
+   // Chercher OB confirmée avec CHOCH
+   if(!DetectConfirmedOBWithCHOCH(rates, 80, point, ob))
+      return;
+
+   datetime t2 = TimeCurrent() + PeriodSeconds(LTF) * 30;
+   string name = "SMC_OB_CONFIRMED_" + IntegerToString((int)TimeCurrent());
+
+   if(ObjectCreate(0, name, OBJ_RECTANGLE, 0, ob.time, ob.low, t2, ob.high))
+   {
+      color obColor = (ob.direction > 0) ? clrDodgerBlue : clrCrimson;
+      ObjectSetInteger(0, name, OBJPROP_COLOR, obColor);
+      ObjectSetInteger(0, name, OBJPROP_WIDTH, 2);
+      ObjectSetInteger(0, name, OBJPROP_BACK, true);
+      ObjectSetInteger(0, name, OBJPROP_FILL, false);
+      ObjectSetString(0, name, OBJPROP_TOOLTIP, "OB Confirmée + CHOCH");
+
+      // Sauvegarder pour usage dans CheckAndExecuteOTEEntry
+      g_confirmedOB = ob;
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Détecte OB confirmée par CHOCH (rupture de structure)
+//+------------------------------------------------------------------+
+bool DetectConfirmedOBWithCHOCH(const MqlRates &rates[], int bars, double point, OrderBlockData &obOut)
+{
+   obOut.high = 0; obOut.low = 0; obOut.direction = 0;
+
+   for(int i = 5; i < bars - 10; i++)
+   {
+      // CHOCH haussière: cassure de HH (swing high)
+      if(rates[i].close > rates[i+1].high && rates[i+1].close > rates[i+2].high)
+      {
+         // OB précédente = range de la barre d'inversion
+         obOut.high = rates[i+2].high;
+         obOut.low = rates[i+2].low;
+         obOut.direction = 1;  // Bullish
+         obOut.time = rates[i+2].time;
+         obOut.barIndex = i+2;
+         obOut.type = "OB+CHOCH";
+         return true;
+      }
+
+      // CHOCH baissière: cassure de LL (swing low)
+      if(rates[i].close < rates[i+1].low && rates[i+1].close < rates[i+2].low)
+      {
+         // OB précédente = range de la barre d'inversion
+         obOut.high = rates[i+2].high;
+         obOut.low = rates[i+2].low;
+         obOut.direction = -1;  // Bearish
+         obOut.time = rates[i+2].time;
+         obOut.barIndex = i+2;
+         obOut.type = "OB+CHOCH";
+         return true;
+      }
+   }
+   return false;
+}
+
+//+------------------------------------------------------------------+
+//| OTE Confirmation → Position Entry avec SL + TP1/TP2/TP3
+//+------------------------------------------------------------------+
+void CheckAndExecuteOTEEntry()
+{
+   if(g_confirmedOB.direction == 0) return;  // Pas d'OB confirmée
+
+   MqlRates rates[];
+   ArraySetAsSeries(rates, true);
+   if(CopyRates(_Symbol, LTF, 0, 50, rates) < 50) return;
+
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+
+   // Zones Fibonacci OTE: 61.8% et 78.6% du retracement
+   double fibHigh = MathMax(g_confirmedOB.high, g_confirmedOB.low);
+   double fibLow = MathMin(g_confirmedOB.high, g_confirmedOB.low);
+   double fib618 = fibLow + (fibHigh - fibLow) * 0.618;
+   double fib786 = fibLow + (fibHigh - fibLow) * 0.786;
+
+   bool isOTEConfirmed = false;
+   double entryPrice = 0;
+
+   // OTE confirmée: prix dans la zone 61.8%-78.6%
+   if(g_confirmedOB.direction > 0)  // Bullish OB
+   {
+      if(bid >= fib618 && bid <= fib786)
+      {
+         isOTEConfirmed = true;
+         entryPrice = ask;
+      }
+   }
+   else  // Bearish OB
+   {
+      if(bid >= fib618 && bid <= fib786)
+      {
+         isOTEConfirmed = true;
+         entryPrice = bid;
+      }
+   }
+
+   if(!isOTEConfirmed) return;
+
+   // --- POSITION ENTRY ---
+   double sl, tp1, tp2, tp3;
+   double riskPips = 20;  // Risk en pips
+   double riskDollars = 10;  // Risk en dollars
+
+   if(g_confirmedOB.direction > 0)  // BUY
+   {
+      sl = g_confirmedOB.low - riskPips * point;
+      double atr = iATR(_Symbol, LTF, 14);
+      tp1 = entryPrice + atr * 0.5;
+      tp2 = entryPrice + atr * 1.0;
+      tp3 = entryPrice + atr * 1.5;
+
+      double lotSize = GetOptimalLotSize();
+      if(trade.Buy(lotSize, _Symbol, ask, sl, tp1, "OTE BUY Setup | TP1"))
+      {
+         Print("✅ OTE BUY Entry | Entry: ", DoubleToString(entryPrice, digits),
+               " | SL: ", DoubleToString(sl, digits),
+               " | TP1: ", DoubleToString(tp1, digits),
+               " | TP2: ", DoubleToString(tp2, digits),
+               " | TP3: ", DoubleToString(tp3, digits));
+
+         // Sauvegarder les niveaux pour gestion multi-TP
+         g_lastTP2 = tp2;
+         g_lastTP3 = tp3;
+      }
+   }
+   else  // SELL
+   {
+      sl = g_confirmedOB.high + riskPips * point;
+      double atr = iATR(_Symbol, LTF, 14);
+      tp1 = entryPrice - atr * 0.5;
+      tp2 = entryPrice - atr * 1.0;
+      tp3 = entryPrice - atr * 1.5;
+
+      double lotSize = GetOptimalLotSize();
+      if(trade.Sell(lotSize, _Symbol, bid, sl, tp1, "OTE SELL Setup | TP1"))
+      {
+         Print("✅ OTE SELL Entry | Entry: ", DoubleToString(entryPrice, digits),
+               " | SL: ", DoubleToString(sl, digits),
+               " | TP1: ", DoubleToString(tp1, digits),
+               " | TP2: ", DoubleToString(tp2, digits),
+               " | TP3: ", DoubleToString(tp3, digits));
+
+         g_lastTP2 = tp2;
+         g_lastTP3 = tp3;
+      }
+   }
+
+   // Réinitialiser après entrée
+   g_confirmedOB.direction = 0;
 }
 
 //| END OF PROGRAM                                                  |
