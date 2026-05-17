@@ -15,9 +15,9 @@
 #include "SMC_OpportunityScanner.mqh"  // inclut SMC_AutoTrader.mqh + g_SmcOpportunityScannerAutoTrader
 // Dashboard ML : métriques broker dans GOM_Enhanced_Dashboard.mqh ; PushEaResumeClockForMLDashboard() publie EA_DASH_* / ROBOT_* depuis cet EA
 #include "GOM_Enhanced_Dashboard.mqh"
-// ML Data Collection & Scanning (Phase 1: 5-minute multi-symbol scanning)
-#include "ML_DataCollector.mqh"
-#include "ML_Scanner.mqh"
+// ML Data Collection & Scanning (Phase 1: 5-minute multi-symbol scanning) - TODO: fix compilation
+// #include "ML_DataCollector.mqh"
+// #include "ML_Scanner.mqh"
 // Dashboard sync - Récupère signaux ML et envoie infos EA (TODO: activer après fix compilation)
 // #include "EA_Dashboard_Sync.mqh"
 // #include "SMC_Setups_Display.mqh" // Désactivé pour éviter l'erreur de fichier non trouvé
