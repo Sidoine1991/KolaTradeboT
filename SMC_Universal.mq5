@@ -329,7 +329,6 @@ void MaybeUpdateAIServerFromOnTick(datetime currentTime);
 void UpdateMLMetricsDisplay();
 void DrawSwingHighLow();
 void DrawFVGOnChart();
-void DrawOBOnChart();
 void DrawFibonacciOnChart();
 bool GetChartSwingHighLowForFibo(double &swingHighOut, double &swingLowOut);
 bool PriceLevelInFiboOTEZone(const string direction, double price, double swingHigh, double swingLow);
@@ -340,7 +339,6 @@ void DrawEMACurveOnChart();
 void DrawLiquidityZonesOnChart();
 //void PlaceScalpingLimitOrders(MqlRates &rates[], int futureBars, double currentPrice, double currentATR, double trendSlope); // SUPPRIMÉ - Plus d'ordres limit
 void DrawHistoricalSwingPoints(MqlRates &rates[], int bars, double point);
-void DrawBookmarkLevels();
 void ManageBoomCrashSpikeClose();
 void CheckAndExecuteSecondSpikeReentry();
 void ManageDollarExits();
@@ -573,124 +571,7 @@ void DrawSwingHighLow()
 }
 
 // Lignes horizontales "Bookmark" + bande verticale droite sur les derniers Swing High/Low confirmés (vue ICT)
-void DrawBookmarkLevels()
-{
-   // Nom commun pour la bande verticale à droite + panneau d'info
-   string bandName  = "SMC_Bookmark_Band_"  + _Symbol;
-   string panelName = "SMC_Bookmark_Info_" + _Symbol;
-
-   // Si l'affichage est désactivé, tout nettoyer et sortir
-   if(!ShowBookmarkLevels)
-   {
-      ObjectDelete(0, bandName);
-      ObjectDelete(0, "SMC_Bookmark_SH_" + _Symbol);
-      ObjectDelete(0, "SMC_Bookmark_SL_" + _Symbol);
-      ObjectDelete(0, panelName);
-      return;
-   }
-   
-   // Utilise les variables globales g_lastSwingHigh / g_lastSwingLow mises à jour par la détection SMC
-   double lastSH = g_lastSwingHigh;
-   double lastSL = g_lastSwingLow;
-   if(lastSH <= 0 && lastSL <= 0)
-   {
-      // Aucun bookmark valide -> supprimer la bande et sortir
-      ObjectDelete(0, bandName);
-      ObjectDelete(0, "SMC_Bookmark_SH_" + _Symbol);
-      ObjectDelete(0, "SMC_Bookmark_SL_" + _Symbol);
-      ObjectDelete(0, panelName);
-      return;
-   }
-   
-   datetime now = TimeCurrent();
-   datetime future = now + PeriodSeconds(PERIOD_CURRENT) * 500; // projeter la ligne assez loin dans le futur
-   
-   // Supprimer d'anciens bookmarks horizontaux pour ce symbole
-   string shName = "SMC_Bookmark_SH_" + _Symbol;
-   string slName = "SMC_Bookmark_SL_" + _Symbol;
-   ObjectDelete(0, shName);
-   ObjectDelete(0, slName);
-   
-   // Swing High bookmark (rouge pointillé)
-   bool hasSH = (lastSH > 0.0);
-   if(hasSH)
-   {
-      if(ObjectCreate(0, shName, OBJ_TREND, 0, now, lastSH, future, lastSH))
-      {
-         ObjectSetInteger(0, shName, OBJPROP_COLOR, clrRed);
-         ObjectSetInteger(0, shName, OBJPROP_WIDTH, 1);
-         ObjectSetInteger(0, shName, OBJPROP_STYLE, STYLE_DASHDOT);
-         ObjectSetString(0, shName, OBJPROP_TEXT, "Bookmark SH");
-      }
-   }
-   
-   // Swing Low bookmark (vert pointillé)
-   bool hasSL = (lastSL > 0.0);
-   if(hasSL)
-   {
-      if(ObjectCreate(0, slName, OBJ_TREND, 0, now, lastSL, future, lastSL))
-      {
-         ObjectSetInteger(0, slName, OBJPROP_COLOR, clrLime);
-         ObjectSetInteger(0, slName, OBJPROP_WIDTH, 1);
-         ObjectSetInteger(0, slName, OBJPROP_STYLE, STYLE_DASHDOT);
-         ObjectSetString(0, slName, OBJPROP_TEXT, "Bookmark SL");
-      }
-   }
-
-   // Dessin de la bande verticale sur le bord droit du graphique (haut en bas)
-   // Couleur selon le type de dernier bookmark disponible
-   color bandColor = clrYellow;
-   if(hasSH && !hasSL)
-      bandColor = clrRed;
-   else if(hasSL && !hasSH)
-      bandColor = clrLime;
-
-   // Récupérer les dimensions du graphique en pixels
-   int chartWidthPixels  = (int)ChartGetInteger(0, CHART_WIDTH_IN_PIXELS, 0);
-   int chartHeightPixels = (int)ChartGetInteger(0, CHART_HEIGHT_IN_PIXELS, 0);
-   if(chartWidthPixels <= 0 || chartHeightPixels <= 0)
-      return;
-
-   int bandWidth = 10; // largeur en pixels de la bande
-
-   // Créer ou mettre à jour un OBJ_RECTANGLE_LABEL ancré en haut à droite
-   if(ObjectFind(0, bandName) == -1)
-   {
-      if(!ObjectCreate(0, bandName, OBJ_RECTANGLE_LABEL, 0, 0, 0))
-         return;
-   }
-
-   ObjectSetInteger(0, bandName, OBJPROP_CORNER, CORNER_RIGHT_UPPER);
-   ObjectSetInteger(0, bandName, OBJPROP_XDISTANCE, 0);          // collé au bord droit
-   ObjectSetInteger(0, bandName, OBJPROP_YDISTANCE, 0);          // depuis le haut
-   ObjectSetInteger(0, bandName, OBJPROP_XSIZE, bandWidth);      // largeur bande
-   ObjectSetInteger(0, bandName, OBJPROP_YSIZE, chartHeightPixels); // hauteur totale
-   ObjectSetInteger(0, bandName, OBJPROP_COLOR, bandColor);
-   ObjectSetInteger(0, bandName, OBJPROP_BACK, true);            // en arrière-plan
-   ObjectSetInteger(0, bandName, OBJPROP_STYLE, STYLE_SOLID);
-   ObjectSetInteger(0, bandName, OBJPROP_WIDTH, 1);
-
-   // Panneau d'information "Bookmark" fixé sur le bord droit du graphique
-   if(ObjectFind(0, panelName) == -1)
-   {
-      if(!ObjectCreate(0, panelName, OBJ_LABEL, 0, 0, 0))
-         return;
-   }
-
-   string txt = "BOOKMARK";
-   if(hasSH)
-      txt += "\nSH: " + DoubleToString(lastSH, _Digits);
-   if(hasSL)
-      txt += "\nSL: " + DoubleToString(lastSL, _Digits);
-
-   ObjectSetInteger(0, panelName, OBJPROP_CORNER, CORNER_RIGHT_UPPER);
-   ObjectSetInteger(0, panelName, OBJPROP_XDISTANCE, bandWidth + 4); // juste à gauche de la bande verticale
-   ObjectSetInteger(0, panelName, OBJPROP_YDISTANCE, 10);
-   ObjectSetString(0,  panelName, OBJPROP_TEXT, txt);
-   ObjectSetInteger(0, panelName, OBJPROP_FONTSIZE, 8);
-   ObjectSetInteger(0, panelName, OBJPROP_COLOR, clrWhite);
-   ObjectSetString(0,  panelName, OBJPROP_FONT, "Arial");
-}
+// SUPPRIMÉ: DrawBookmarkLevels() - Tous les dessins OB et ICT enlevés
 
 // Nettoyage global des objets graphiques du robot (anciens dessins obsolètes).
 // Ne supprime que les objets dont le nom commence par "SMC_" (sécurité: ne touche pas aux dessins manuels).
@@ -702,8 +583,6 @@ void CleanupSMCChartObjects()
       "SMC_PROPICE_",
       "SMC_FVG_",
       "SMC_IFVG_",
-      "SMC_OB_",
-      "SMC_ICT_SIG_",
       "SMC_FUT_",
       "SMC_Fib_",
       "SMC_Liq_",
@@ -720,7 +599,6 @@ void CleanupSMCChartObjects()
       "SMC_Bookmark_",
       "SMC_CH_",
       "SMC_EMA_",
-      "SMC_ICT_",
       "SMC_Spike_",
       "SMC_Last_"
    };
@@ -2410,7 +2288,7 @@ input int    FutureCandlesCount = 200; // Nombre de bougies futures à projeter
 input int    FutureCandlesRefreshSeconds = 120; // TTL cache prédiction (s)
 input bool   AutoValidateFuturePredictions = true; // Envoyer validation prédictions vs réel au serveur
 input int    FuturePredictionMinBarsToValidate = 30; // Nb min de bougies réelles closes avant envoi validation
-input bool   ShowBookmarkLevels    = true; // Lignes horizontales sur derniers Swing High/Low (bookmark ICT)
+input bool   ShowBookmarkLevels    = false; // Lignes horizontales sur derniers Swing High/Low (bookmark ICT) - DÉSACTIVÉ
 
 input group "=== TABLEAU DE BORD ET MÉTRIQUES ==="
 input bool   UseDashboard        = true;   // Afficher le tableau de bord avec métriques
@@ -5771,10 +5649,7 @@ void DrawAllIndicatorGraphics()
    
    // Graphiques essentiels et zones Premium/Discount
    DrawSwingHighLow();
-   DrawBookmarkLevels();
    DrawFVGOnChart();
-   DrawOBOnChart();
-   if(DrawICTChecklistGraphics) DrawICTValidationGraphics();
    DrawFibonacciOnChart();
    DrawEMACurveOnChart();
    DrawLiquidityZonesOnChart();
@@ -8623,43 +8498,7 @@ void DrawFVGOnChart()
    }
 }
 
-void DrawOBOnChart()
-{
-   MqlRates rates[];
-   ArraySetAsSeries(rates, true);
-   int bars = 80;
-   if(CopyRates(_Symbol, LTF, 0, bars, rates) < bars) return;
-   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
-   double tol = MathMax(point, ICTSweepTolerancePoints * point);
-   double shF = 0.0, slF = 0.0;
-   bool haveFiboSwing = GetChartSwingHighLowForFibo(shF, slF);
-   ObjectsDeleteAll(0, "SMC_OB_");
-   // Sans swing Fibo fiable, ne rien tracer (évite les faux OB hors retracement)
-   if(OB_RequireFiboOTERangeForDisplay && !haveFiboSwing)
-      return;
-   int cnt = 0;
-   int maxOb = MathMax(1, DrawOB_MaxRectangles);
-   OrderBlockData ob;
-   // Même critère que SMC_FindOrderBlockInOTEZone — évite les « faux OB » sur le graphique
-   for(int i = 3; i < bars - 3 && cnt < maxOb; i++)
-   {
-      if(!SMC_TestOrderBlockAtIndex(rates, bars, i, point, tol, ob)) continue;
-      int obSign = ob.direction;
-      if(OB_RequireFiboOTERangeForDisplay && haveFiboSwing &&
-         !SMC_OrderBlockOverlapsOTEZone(ob, slF, shF, (obSign > 0)))
-         continue;
-      datetime t2 = TimeCurrent() + PeriodSeconds(LTF) * 30;
-      string name = (obSign > 0) ? ("SMC_OB_Bull_" + IntegerToString(i)) : ("SMC_OB_Bear_" + IntegerToString(i));
-      if(ObjectCreate(0, name, OBJ_RECTANGLE, 0, ob.time, ob.low, t2, ob.high))
-      {
-         ObjectSetInteger(0, name, OBJPROP_COLOR, (obSign > 0) ? clrDodgerBlue : clrCrimson);
-         ObjectSetInteger(0, name, OBJPROP_WIDTH, 1);
-         ObjectSetInteger(0, name, OBJPROP_BACK, true);
-         ObjectSetInteger(0, name, OBJPROP_FILL, false);
-         cnt++;
-      }
-   }
-}
+// SUPPRIMÉ: DrawOBOnChart() - Tous les dessins OB enlevés
 
 void DrawFibonacciOnChart()
 {
@@ -25648,6 +25487,11 @@ void DisplayMTFDashboard()
    bool bullM5 = (emaM5Fast > emaM5Slow);
    bool bullH1 = (emaH1Fast > emaH1Slow);
 
+   // Afficher les niveaux d'entrée M1/M5/H1 sur le graphique
+   DrawEntryLevelLines(bullM1, emaM1Fast, emaM1Slow, "M1");
+   DrawEntryLevelLines(bullM5, emaM5Fast, emaM5Slow, "M5");
+   DrawEntryLevelLines(bullH1, emaH1Fast, emaH1Slow, "H1");
+
    // Compter alignements (0 = bearish, 1 = mixed, 2 = mixed, 3 = bullish)
    int alignmentCount = (bullM1 ? 1 : 0) + (bullM5 ? 1 : 0) + (bullH1 ? 1 : 0);
 
@@ -25770,6 +25614,41 @@ void DrawDashboardCell(string name, int x, int y, int w, int h, string label, st
    ObjectSetInteger(0, textName, OBJPROP_FONTSIZE, 8);
    ObjectSetString(0, textName, OBJPROP_FONT, "Arial");
    ObjectSetInteger(0, textName, OBJPROP_COLOR, clrWhite);
+}
+
+//+------------------------------------------------------------------+
+//| Affiche les niveaux d'entrée (EMA Fast) pour chaque TF           |
+//+------------------------------------------------------------------+
+void DrawEntryLevelLines(bool isBullish, double emaFast, double emaSlow, string tfLabel)
+{
+   // Ligne pour EMA Fast (niveau d'entrée principal)
+   string lineName = "SMC_EntryLevel_" + tfLabel;
+
+   if(ObjectFind(0, lineName) >= 0)
+      ObjectDelete(0, lineName);
+
+   // Couleur selon direction
+   color lineColor = isBullish ? clrLimeGreen : clrRed;
+   ENUM_LINE_STYLE lineStyle = isBullish ? STYLE_SOLID : STYLE_SOLID;
+   int lineWidth = 2;
+
+   ObjectCreate(0, lineName, OBJ_HLINE, 0, 0, emaFast);
+   ObjectSetInteger(0, lineName, OBJPROP_COLOR, lineColor);
+   ObjectSetInteger(0, lineName, OBJPROP_WIDTH, lineWidth);
+   ObjectSetInteger(0, lineName, OBJPROP_STYLE, lineStyle);
+   ObjectSetInteger(0, lineName, OBJPROP_ZORDER, 100 + (tfLabel == "M1" ? 0 : tfLabel == "M5" ? 1 : 2));
+
+   // Ajouter label avec TF pour identifier les lignes
+   string labelName = lineName + "_Label";
+   if(ObjectFind(0, labelName) >= 0)
+      ObjectDelete(0, labelName);
+
+   ObjectCreate(0, labelName, OBJ_TEXT, 0, iTime(_Symbol, PERIOD_M1, 0), emaFast);
+   ObjectSetString(0, labelName, OBJPROP_TEXT, tfLabel + " Entry");
+   ObjectSetInteger(0, labelName, OBJPROP_FONTSIZE, 8);
+   ObjectSetString(0, labelName, OBJPROP_FONT, "Arial");
+   ObjectSetInteger(0, labelName, OBJPROP_COLOR, lineColor);
+   ObjectSetInteger(0, labelName, OBJPROP_ZORDER, 100 + (tfLabel == "M1" ? 0 : tfLabel == "M5" ? 1 : 2));
 }
 
 //| END OF PROGRAM                                                  |
