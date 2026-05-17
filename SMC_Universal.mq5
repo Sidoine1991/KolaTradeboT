@@ -21844,43 +21844,88 @@ void ProcessAIDecision(string jsonData)
       return;
    }
    
-   // Action : racine (troncature metadata) puis repli 1er "action": du JSON (évite OFF si parse strict échoue)
+   // Action : multiple parsing methods to ensure accurate extraction
    {
-      string action = ExtractJsonDecisionRootAction(jsonData);
+      string action = "";
+
+      // Method 1: Extract root action (before metadata)
+      action = ExtractJsonDecisionRootAction(jsonData);
+      if(action != "")
+      {
+         if(AI_VerboseDecisionLogs && SMC_LogThrottle("parse_act_m1_" + _Symbol, 60))
+            Print("?? ACTION PARSE (Root): ", action);
+      }
+
+      // Method 2: Try ExtractJsonValue fallback if Method 1 failed
       if(action == "")
       {
          string fb = ExtractJsonValue(jsonData, "action");
          if(fb != "" && fb != "N/A")
+         {
             action = fb;
+            if(AI_VerboseDecisionLogs && SMC_LogThrottle("parse_act_m2_" + _Symbol, 60))
+               Print("?? ACTION PARSE (action field): ", action);
+         }
       }
+
+      // Method 3: Try signal field as last resort
       if(action == "")
       {
          string sg = ExtractJsonValue(jsonData, "signal");
          if(sg != "" && sg != "N/A")
+         {
             action = sg;
+            if(AI_VerboseDecisionLogs && SMC_LogThrottle("parse_act_m3_" + _Symbol, 60))
+               Print("?? ACTION PARSE (signal field): ", action);
+         }
       }
+
       if(action != "")
       {
          g_lastAIAction = action;
          StringToUpper(g_lastAIAction);
+         if(AI_VerboseDecisionLogs && SMC_LogThrottle("act_final_" + _Symbol, 60))
+            Print("?? ACTION FINAL: ", g_lastAIAction);
       }
    }
    
-   // Confiance : racine puis repli ExtractJsonValue (même ordre de champs que le serveur FastAPI)
+   // Confiance : Try multiple parsing methods to ensure accurate extraction
    {
-      string confStr = ExtractJsonDecisionRootConfidence(jsonData);
-      if(confStr == "" || confStr == "N/A")
-      {
-         string fb = ExtractJsonValue(jsonData, "confidence");
-         if(fb != "" && fb != "N/A")
-            confStr = fb;
-      }
+      double parsedConf = -1.0;
+      string confStr = "";
+
+      // Method 1: Extract root confidence (before metadata)
+      confStr = ExtractJsonDecisionRootConfidence(jsonData);
       if(confStr != "" && confStr != "N/A")
       {
-         double rawConf = StringToDouble(confStr);
-         if(rawConf > 1.0)
-            rawConf /= 100.0;
-         g_lastAIConfidence = rawConf;
+         parsedConf = StringToDouble(confStr);
+         if(AI_VerboseDecisionLogs && SMC_LogThrottle("parse_conf_m1_" + _Symbol, 60))
+            Print("?? CONF PARSE (Root): ", confStr, " → ", DoubleToString(parsedConf, 4));
+      }
+
+      // Method 2: Try ExtractJsonValue fallback if Method 1 failed
+      if(parsedConf < 0.0)
+      {
+         confStr = ExtractJsonValue(jsonData, "confidence");
+         if(confStr != "" && confStr != "N/A")
+         {
+            parsedConf = StringToDouble(confStr);
+            if(AI_VerboseDecisionLogs && SMC_LogThrottle("parse_conf_m2_" + _Symbol, 60))
+               Print("?? CONF PARSE (Fallback): ", confStr, " → ", DoubleToString(parsedConf, 4));
+         }
+      }
+
+      // Normalize: if > 1.0, treat as percentage
+      if(parsedConf > 0.0)
+      {
+         if(parsedConf > 1.0)
+            parsedConf /= 100.0;
+         // Clamp to valid range [0, 1]
+         parsedConf = MathMax(0.0, MathMin(1.0, parsedConf));
+         g_lastAIConfidence = parsedConf;
+
+         if(AI_VerboseDecisionLogs && SMC_LogThrottle("conf_final_" + _Symbol, 60))
+            Print("?? CONF FINAL: ", DoubleToString(g_lastAIConfidence * 100, 1), "%");
       }
    }
    
