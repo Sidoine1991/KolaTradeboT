@@ -32179,7 +32179,7 @@ void ExecuteSpikeTrade(string direction)
    }
 
    // Confiance IA minimum globale (75%)
-   if(!IsAIConfidenceAtLeast(0.75, "SPIKE TRADE"))
+   if(!IsAIConfidenceAtLeast(0.50, "SPIKE TRADE"))
       return;
 
    // Spike trades réservés aux symboles Boom/Crash et seulement si le modèle ML est fiable
@@ -33244,7 +33244,7 @@ bool ExecuteExceptionalBoomCrashRecoveryOrder(const string direction, const stri
    }
 
    // Confiance IA minimum globale (75%)
-   if(!IsAIConfidenceAtLeast(0.75, commentTag))
+   if(!IsAIConfidenceAtLeast(0.50, commentTag))
       return false;
 
    // Anti-duplication sécurité
@@ -34069,7 +34069,7 @@ bool ExecuteM5TouchOrder(string direction)
    }
 
    // Confiance IA minimum globale (75%)
-   if(!IsAIConfidenceAtLeast(0.75, "M5 TOUCH"))
+   if(!IsAIConfidenceAtLeast(0.50, "M5 TOUCH"))
       return false;
 
    if(!IsSpreadAcceptable()) return false;
