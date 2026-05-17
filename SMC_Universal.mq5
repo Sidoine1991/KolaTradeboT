@@ -26593,6 +26593,33 @@ void CheckAndExecuteAutoEntryOnVerdictGoodPerfect()
 void ManageVerdictEntryLimitOrder()
 {
    if(!EnableVerdictEntryLimit) return;
+
+   // BLOCAGE COMPLET: Pas d'ordres LIMIT sur symboles CRASH (ATR calcul faux)
+   // Crash + LIMIT orders = prix invalides et ordres qui échouent continuellement
+   if(IsCrashSymbol(_Symbol))
+   {
+      // Supprimer tous les ordres LIMIT existants sur Crash
+      for(int j = OrdersTotal() - 1; j >= 0; j--)
+      {
+         ulong t = OrderGetTicket(j);
+         if(t == 0 || !OrderSelect(t)) continue;
+         if(OrderGetInteger(ORDER_MAGIC) != InpMagicNumber) continue;
+         if(OrderGetString(ORDER_SYMBOL) != _Symbol) continue;
+
+         ENUM_ORDER_TYPE ot = (ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE);
+         if(ot == ORDER_TYPE_BUY_LIMIT || ot == ORDER_TYPE_SELL_LIMIT)
+         {
+            MqlTradeRequest rq = {};
+            MqlTradeResult rs = {};
+            rq.action = TRADE_ACTION_REMOVE;
+            rq.order = t;
+            rq.symbol = _Symbol;
+            OrderSend(rq, rs);  // Cancel
+         }
+      }
+      return;  // Don't place any new LIMIT orders on Crash
+   }
+
    if(ShouldBlockNewTradeDueToDailyCap()) return;
    if(!SMC_IsStrictUTCTradingWindowOpen()) return;
    if(CountPositionsForSymbol(_Symbol) > 0) return;
