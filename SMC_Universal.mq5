@@ -5649,16 +5649,18 @@ void ManageBoomCrashSpikeClose()
       bool shouldClose = false;
       string closeReason = "";
       
-      // STRICT MODE: Fermer SEULEMENT si TP=$3.50 ou SL=-$3.50 atteint
-      // Ignorer tous les autres critères de fermeture (scalp, délai, mouvement, etc.)
-      double TP_THRESHOLD = 3.50;   // Profit target: $3.50 = spike capté
-      double SL_THRESHOLD = -3.50;  // Stop loss: -$3.50 = perte max
+      // SPIKE MODE: Fermer dès ANY GAIN (spike = mouvement favorable capté)
+      // Même un spike minimal ($0.01+) = fermeture
+      // Sinon: SL=-$3.50 atteint = fermeture
+      double SPIKE_MIN_GAIN = 0.01;   // Minimum gain to consider as spike captured
+      double SL_THRESHOLD = -3.50;    // Stop loss: -$3.50 = perte max
 
-      if(profit >= TP_THRESHOLD)
+      if(profit >= SPIKE_MIN_GAIN)
       {
+         // ANY positive gain = spike capté
          shouldClose = true;
-         closeReason = "TP SPIKE ATTEINT ($3.50+) - Fermeture immédiate";
-         Print("✅ SPIKE CAPTÉ - Position fermée sur TP=$3.50 - Profit: ", DoubleToString(profit, 2), "$");
+         closeReason = "SPIKE CAPTÉ - Gain même minimal ($" + DoubleToString(profit, 2) + ")";
+         Print("✅ SPIKE CAPTÉ - Position fermée sur gain - Profit: ", DoubleToString(profit, 2), "$");
       }
       else if(profit <= SL_THRESHOLD)
       {
