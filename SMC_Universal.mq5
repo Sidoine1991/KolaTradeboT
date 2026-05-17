@@ -5916,9 +5916,10 @@ void ClosePositionsOnSpikeScalp()
       ENUM_POSITION_TYPE ptype = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
       string cmt = PositionGetString(POSITION_COMMENT);
 
-      // Seuil de fermeture SIMPLE: fermer dès qu'on a un petit gain positif
-      // Sur scalping spike, on ne cherche pas un gain spécifique - juste à capturer le spike et sortir vite
-      double closeProfitThreshold = 0.30;  // Minimum $0.30 profit pour fermer (aggressive spike scalping)
+      // Seuil de fermeture adapté au symbole
+      // Boom/Crash: $3.50 (secured profit on volatile instruments)
+      // Autres volatility: $1.00 (smaller threshold)
+      double closeProfitThreshold = (symCat == SYM_BOOM_CRASH) ? 3.50 : 1.00;
 
       // SCALPING: Si profit POSITIF et >= seuil, fermer position (capture spike réussie)
       // JAMAIS fermer sur perte!
@@ -7285,7 +7286,7 @@ void DrawEnhancedDashboard()
 
    if(buyLevel > 0)
    {
-      string buyText = "🟢 BUY @ " + DoubleToString(buyLevel, digits);
+      string buyText = "🟢 BUY";  // Show only BUY, not the price
       string label_buy = "ML_DASH_BUY";
       ObjectCreate(chartID, label_buy, OBJ_LABEL, 0, 0, 0);
       ObjectSetInteger(chartID, label_buy, OBJPROP_XDISTANCE, 10);
@@ -7308,7 +7309,7 @@ void DrawEnhancedDashboard()
 
    if(sellLevel > 0)
    {
-      string sellText = "🔴 SELL @ " + DoubleToString(sellLevel, digits);
+      string sellText = "🔴 SELL";  // Show only SELL, not the price
       string label_sell = "ML_DASH_SELL";
       ObjectCreate(chartID, label_sell, OBJ_LABEL, 0, 0, 0);
       ObjectSetInteger(chartID, label_sell, OBJPROP_XDISTANCE, 10);
