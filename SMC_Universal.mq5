@@ -28913,17 +28913,26 @@ void DisplayMTFDashboard()
    int totalDashboardWidth = cols * cellW + (cols - 1) * gap;
    int xBar = chartPixW - mR - totalDashboardWidth;  // Position on right side
 
-   string iaDir = SMC_NormalizeAIDirectionLabel();
+   // === Cellule IA : source identique au panneau "IA Statut" du haut ===
+   // On lit g_lastAIAction / g_lastAIConfidence directement (même source que UpdateDashboard)
+   string iaRaw = g_lastAIAction;
+   StringToUpper(iaRaw);
+   string iaDisplayDir = "";
+   if(iaRaw == "BUY")       iaDisplayDir = "BUY";
+   else if(iaRaw == "SELL") iaDisplayDir = "SELL";
+   else if(iaRaw == "HOLD") iaDisplayDir = "HOLD";
+   else                     iaDisplayDir = (g_aiConnected ? "HOLD" : "OFF");
+
    double iaPct = NormalizeAIConfidenceUnit() * 100.0;
    if(iaPct > 100.0) iaPct = 100.0;
-   if(iaPct < 0.0) iaPct = 0.0;
+   if(iaPct < 0.0)   iaPct = 0.0;
 
    string m1Text = "M1:" + (g_finalVerdict.bullM1 ? "BUY" : "SELL");
    string m4Text = "M4:" + (g_finalVerdict.bullM4 ? "BUY" : "SELL");
    string m5Text = "M5:" + (g_finalVerdict.bullM5 ? "BUY" : "SELL");
    string h1Text = "H1:" + (g_finalVerdict.bullH1 ? "BUY" : "SELL");
    string d1Text = "D1:" + (g_finalVerdict.bullD1 ? "BUY" : "SELL");
-   string iaText = iaDir + " " + DoubleToString(iaPct, 0) + "%";
+   string iaText = "IA:" + iaDisplayDir + " " + DoubleToString(iaPct, 0) + "%";
    string verdictText = g_finalVerdict.verdictLabel + " " + DoubleToString(g_finalVerdict.finalConfPct, 0) + "%";
 
    color m1Bg = g_finalVerdict.bullM1 ? (color)0x26A69A : (color)0xEF5350;
@@ -28932,9 +28941,9 @@ void DisplayMTFDashboard()
    color h1Bg = g_finalVerdict.bullH1 ? (color)0x26A69A : (color)0xEF5350;
    color d1Bg = g_finalVerdict.bullD1 ? (color)0x26A69A : (color)0xEF5350;
    color iaBg = (color)0x616161;
-   if(iaDir == "BUY") iaBg = (color)0x1976D2;
-   else if(iaDir == "SELL") iaBg = (color)0xC62828;
-   else if(iaDir == "HOLD") iaBg = (color)0x757575;
+   if(iaDisplayDir == "BUY")  iaBg = (color)0x1976D2;
+   else if(iaDisplayDir == "SELL") iaBg = (color)0xC62828;
+   else if(iaDisplayDir == "HOLD") iaBg = (color)0x757575;
 
    color verdictBg = 0x424242;
    if(g_finalVerdict.direction == "BUY")
