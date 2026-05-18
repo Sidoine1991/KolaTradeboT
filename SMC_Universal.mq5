@@ -892,14 +892,25 @@ bool IsAISignalFreshForTrading(const string contextTag)
 
    if(!g_aiConnected)
    {
-      // Si on a une décision récente (ex: fallback après échec WebRequest),
-      // on autorise temporairement les entrées même si le serveur IA est "down".
+      // Signal récent conservé en cache → autoriser
       if(g_lastAIUpdate > 0 && (now - g_lastAIUpdate) <= allowedAge)
          return true;
 
+      // IA hors ligne mais verdict local fort → fail-open si AllowTradeWhenAIHoldIfVerdictStrong
+      if(AllowTradeWhenAIHoldIfVerdictStrong && SMC_VerdictStrongEnoughForEntry())
+      {
+         if(SMC_LogThrottle("ai_disc_verdict_" + _Symbol, 60))
+            Print("⚠️ ", contextTag, " - IA hors ligne mais verdict fort (",
+                  g_finalVerdict.verdictLabel, " ", DoubleToString(g_finalVerdict.finalConfPct,1),
+                  "%) → entrée autorisée | ", _Symbol);
+         return true;
+      }
+
       if(now - g_lastAIStaleLog >= 30)
       {
-         Print("🚫 ", contextTag, " - Entrée bloquée: serveur IA déconnecté");
+         Print("🚫 ", contextTag, " - Entrée bloquée: serveur IA déconnecté (signal âge=",
+               (g_lastAIUpdate > 0 ? IntegerToString((int)(now-g_lastAIUpdate)) : "?"),
+               "s, max=", IntegerToString(allowedAge), "s)");
          g_lastAIStaleLog = now;
       }
       return false;
@@ -2571,7 +2582,7 @@ input int    AI_Timeout_ms     = 5000;   // Timeout WebRequest (ms)
 input int    AI_UpdateInterval_Seconds = 120;  // Intervalle mise à jour IA (secondes)
 input int    AI_DecisionCacheSeconds = 30;       // Cache réponse POST /decision (0 = désactivé, debug live)
 input bool   BlockNewEntriesOnAIDisconnect = true; // Bloquer nouvelles entrées si IA déconnectée/stale
-input int    AI_MaxSignalAgeSeconds = 180; // Age max du signal IA pour autoriser une entrée
+input int    AI_MaxSignalAgeSeconds = 300; // Age max du signal IA pour autoriser une entrée (5 min)
 input bool   UsePropiceSymbolsFilter = true;  // ⚠️ IMPORTANT: Filtre horaire - Le robot trade UNIQUEMENT sur les symboles les plus "propices" selon l'heure actuelle (UTC)
                                             // Fonctionnement: Le serveur analyse les performances par tranche horaire et retourne le Top N des symboles les plus performants
                                             // Si le symbole actuel n'est pas dans ce Top, le robot BLOQUE tous les trades (même si signal IA/SMC valide)
