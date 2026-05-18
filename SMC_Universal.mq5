@@ -371,6 +371,8 @@ double SMC_GOMGlobalGet(const string keySuffix, const double defVal = 0.0);
 bool SMC_TryPickGOMEntryLevel(const string direction, double &levelOut, string &tfOut);
 void DrawGOMEntryLevelsOnChart();
 void CheckAndExecuteGOMTouchEntry();
+void EvaluateSetupHistorical(const int barsLookback = 200, const int holdBars = 5);
+string SMC_SetupEvalDashLine();
 bool ExecuteGOMTouchOrder(const string direction);
 bool SMC_IsVerdictDirectional();
 bool SMC_VerdictStrongEnoughForEntry();
@@ -7009,6 +7011,7 @@ void OnTick()
    CloseAllPositionsIfSymbolLossReached(VerdictMaxLossUSD);
    
    SMC_ComputeAndStoreFinalVerdict();
+   EvaluateSetupHistorical(200, 5);
    CheckAndExecuteVerdictAutoEntry();
    if(EnableVerdictEntryLimit && !VerdictAutoMarketOnGoodPerfect)
       ManageVerdictEntryLimitOrder();
@@ -7459,7 +7462,21 @@ void UpdateDashboard()
       n++;
    }
    
-  DrawDashboardOnChart(lines, cols, n);
+   // Évaluation historique setup sur 200 bougies
+   if(n < 38)
+   {
+      string evalLine = SMC_SetupEvalDashLine();
+      color  evalCol  = clrSilver;
+      if(g_setupEval.total > 0)
+      {
+         if(g_setupEval.winRatePct >= 65.0)      evalCol = clrLimeGreen;
+         else if(g_setupEval.winRatePct >= 50.0) evalCol = clrYellow;
+         else                                    evalCol = clrTomato;
+      }
+      lines[n] = "📐 " + evalLine; cols[n] = evalCol; n++;
+   }
+
+   DrawDashboardOnChart(lines, cols, n);
 
   // Notification compacte en bas à gauche: zone UTC + statut robot
   // Indépendante du dashboard principal pour rester visible en permanence.
@@ -22104,6 +22121,153 @@ double ComputeSetupScore(const string direction)
          " (Conf=", DoubleToString(confPct,1), "% Align=", DoubleToString(alignPct,1),
          "% Coh=", DoubleToString(cohPct,1), "%)");
    return score;
+}
+
+//+------------------------------------------------------------------+
+//| ÉVALUATION HISTORIQUE DU SETUP — 200 DERNIÈRES BOUGIES M1       |
+//| Critères testés à chaque barre (même règles que l'entrée live) : |
+//|  1. Trend M1 aligné (EMA9 > EMA21 pour BUY, inverse pour SELL)  |
+//|  2. Trend M5 ou H1 aligné dans la même direction                 |
+//|  3. Verdict GOOD ou PERFECT (score MTF >= seuil GOOD)            |
+//|  4. Résultat : prix +ATR dans la direction N bougies après        |
+//+------------------------------------------------------------------+
+struct SetupEvalResult
+{
+   int    total;         // Nombre de setups BUY + SELL détectés
+   int    wins;          // Setups gagnants (prix a avancé dans la bonne direction)
+   double winRatePct;    // Taux de réussite (%)
+   int    buyTotal;
+   int    buyWins;
+   int    sellTotal;
+   int    sellWins;
+   datetime lastEval;
+};
+static SetupEvalResult g_setupEval;
+static datetime        g_setupEvalLastRun = 0;
+
+// Copie une EMA d'un TF spécifique sur une barre décalée (shift)
+bool SMC_EvalGetEMA(const ENUM_TIMEFRAMES tf, const int period, const int shift, double &out)
+{
+   int h = iMA(_Symbol, tf, period, 0, MODE_EMA, PRICE_CLOSE);
+   if(h == INVALID_HANDLE) return false;
+   double buf[1];
+   if(CopyBuffer(h, 0, shift, 1, buf) < 1) return false;
+   out = buf[0];
+   return (out > 0.0);
+}
+
+// Évalue le setup sur les 200 dernières bougies M1 et stocke dans g_setupEval
+// N'est relancé que toutes les 5 minutes pour ne pas charger le CPU
+void EvaluateSetupHistorical(const int barsLookback = 200, const int holdBars = 5)
+{
+   if(TimeCurrent() - g_setupEvalLastRun < 300) return; // refresh toutes les 5 min
+   g_setupEvalLastRun = TimeCurrent();
+
+   SetupEvalResult res;
+   res.total = 0; res.wins = 0;
+   res.buyTotal = 0; res.buyWins = 0;
+   res.sellTotal = 0; res.sellWins = 0;
+   res.winRatePct = 0.0;
+   res.lastEval = TimeCurrent();
+
+   MqlRates r1[];
+   ArraySetAsSeries(r1, true);
+   int copied = CopyRates(_Symbol, PERIOD_M1, 0, barsLookback + holdBars + 10, r1);
+   if(copied < holdBars + 20)
+   {
+      g_setupEval = res;
+      return;
+   }
+
+   double atrBuf[];
+   ArraySetAsSeries(atrBuf, true);
+   int atrH = iATR(_Symbol, PERIOD_M1, 14);
+   int atrCopied = (atrH != INVALID_HANDLE) ? CopyBuffer(atrH, 0, 0, barsLookback + holdBars + 5, atrBuf) : 0;
+
+   // Seuils verdict (identiques à SMC_ComputeAndStoreFinalVerdict)
+   const double GOOD_THRESH = VerdictThresholdGOOD;
+
+   for(int i = holdBars + 2; i < MathMin(copied - 5, barsLookback + holdBars); i++)
+   {
+      // --- Condition 1 : EMA M1 (9 vs 21) au moment de la barre i ---
+      double ema9m1  = 0.0, ema21m1  = 0.0;
+      double ema9m5  = 0.0, ema21m5  = 0.0;
+      double ema9h1  = 0.0, ema21h1  = 0.0;
+      if(!SMC_EvalGetEMA(PERIOD_M1, 9,  i, ema9m1))  continue;
+      if(!SMC_EvalGetEMA(PERIOD_M1, 21, i, ema21m1)) continue;
+      if(!SMC_EvalGetEMA(PERIOD_M5, 9,  i/5, ema9m5))  { ema9m5 = 0.0; ema21m5 = 0.0; }
+      SMC_EvalGetEMA(PERIOD_M5, 21, i/5, ema21m5);
+      if(!SMC_EvalGetEMA(PERIOD_H1, 9,  i/60, ema9h1)) { ema9h1 = 0.0; ema21h1 = 0.0; }
+      SMC_EvalGetEMA(PERIOD_H1, 21, i/60, ema21h1);
+
+      bool bullM1 = (ema9m1 > ema21m1);
+      bool bearM1 = (ema9m1 < ema21m1);
+      bool bullM5 = (ema9m5 > 0.0 && ema21m5 > 0.0 && ema9m5 > ema21m5);
+      bool bearM5 = (ema9m5 > 0.0 && ema21m5 > 0.0 && ema9m5 < ema21m5);
+      bool bullH1 = (ema9h1 > 0.0 && ema21h1 > 0.0 && ema9h1 > ema21h1);
+      bool bearH1 = (ema9h1 > 0.0 && ema21h1 > 0.0 && ema9h1 < ema21h1);
+
+      // --- Condition 2 : MTF alignment score (verdict GOOD/PERFECT) ---
+      int bullCount = (bullM1?1:0) + (bullM5?1:0) + (bullH1?1:0);
+      int bearCount = (bearM1?1:0) + (bearM5?1:0) + (bearH1?1:0);
+      // Score simplifié sur 3 TF (M1+M5+H1)
+      double confBull = (double)bullCount / 3.0;
+      double confBear = (double)bearCount / 3.0;
+
+      // --- Déterminer direction du setup ---
+      string dir = "";
+      double confScore = 0.0;
+      if(confBull >= GOOD_THRESH && bullCount >= 2 && bullM1)
+         { dir = "BUY";  confScore = confBull; }
+      else if(confBear >= GOOD_THRESH && bearCount >= 2 && bearM1)
+         { dir = "SELL"; confScore = confBear; }
+      if(dir == "") continue;
+
+      // --- Condition 3 : ATR disponible ---
+      double atrVal = (atrCopied > i) ? atrBuf[i] : 0.0;
+      if(atrVal <= 0.0) continue;
+
+      // --- Résultat : le prix a-t-il avancé dans la bonne direction après holdBars bougies ? ---
+      double entryClose = r1[i].close;
+      double futureHigh = 0.0, futureLow = 1e15;
+      for(int j = 1; j <= holdBars && (i - j) >= 0; j++)
+      {
+         futureHigh = MathMax(futureHigh, r1[i-j].high);
+         futureLow  = MathMin(futureLow,  r1[i-j].low);
+      }
+      double target = atrVal * 0.8; // Cible = 0.8 ATR dans la direction
+
+      bool win = false;
+      if(dir == "BUY")
+         win = (futureHigh >= entryClose + target);
+      else
+         win = (futureLow  <= entryClose - target);
+
+      res.total++;
+      if(win) res.wins++;
+      if(dir == "BUY")  { res.buyTotal++;  if(win) res.buyWins++;  }
+      else              { res.sellTotal++; if(win) res.sellWins++; }
+   }
+
+   res.winRatePct = (res.total > 0) ? ((double)res.wins / res.total * 100.0) : 0.0;
+   g_setupEval = res;
+
+   Print("📊 EVAL SETUP 200 bougies | Total=", res.total, " Wins=", res.wins,
+         " WR=", DoubleToString(res.winRatePct, 1), "%",
+         " | BUY=", res.buyWins, "/", res.buyTotal,
+         " | SELL=", res.sellWins, "/", res.sellTotal);
+}
+
+// Retourne le texte compact pour le dashboard (ex: "Setup(200) BUY 71% SELL 68% global 70%")
+string SMC_SetupEvalDashLine()
+{
+   if(g_setupEval.total == 0)
+      return "Setup eval: en cours...";
+   string buyStr  = (g_setupEval.buyTotal  > 0) ? DoubleToString((double)g_setupEval.buyWins  / g_setupEval.buyTotal  * 100.0, 0) + "%" : "N/A";
+   string sellStr = (g_setupEval.sellTotal > 0) ? DoubleToString((double)g_setupEval.sellWins / g_setupEval.sellTotal * 100.0, 0) + "%" : "N/A";
+   return "Setup(200) BUY " + buyStr + " | SELL " + sellStr +
+          " | Global " + DoubleToString(g_setupEval.winRatePct, 0) + "%" +
+          " (" + IntegerToString(g_setupEval.total) + " setups)";
 }
 
 //| MÉTRIQUES ML FALLBACK - SI SERVEUR IA INDISPONIBLE          |
