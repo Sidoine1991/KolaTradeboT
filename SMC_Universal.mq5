@@ -7203,6 +7203,80 @@ void OnTick()
    }
 }
 
+//+------------------------------------------------------------------+
+//| DÉCOMPTE DES ARRÊTS AUTO — affichage dashboard                  |
+//+------------------------------------------------------------------+
+
+string SMC_FmtCountdown(const int secRemain)
+{
+   if(secRemain <= 0) return "maintenant";
+   int h = secRemain / 3600;
+   int m = (secRemain % 3600) / 60;
+   int s = secRemain % 60;
+   string r = "";
+   if(h > 0) r += IntegerToString(h) + "h ";
+   if(h > 0 || m > 0) r += IntegerToString(m) + "m ";
+   r += IntegerToString(s) + "s";
+   return r;
+}
+
+datetime SMC_NextUTCWindowOpen()
+{
+   MqlDateTime gmt;
+   TimeToStruct(TimeGMT(), gmt);
+   int h = gmt.hour;
+   int starts[3] = {TradeWindow1StartUTC, TradeWindow2StartUTC, TradeWindow3StartUTC};
+   int bestHours = 25;
+   for(int i = 0; i < 3; i++)
+   {
+      int diff = starts[i] - h;
+      if(diff <= 0) diff += 24;
+      if(diff < bestHours) bestHours = diff;
+   }
+   return TimeCurrent() + (datetime)(bestHours * 3600);
+}
+
+string SMC_GetStopReasonWithCountdown()
+{
+   datetime now = TimeCurrent();
+   string reasons = "";
+
+   if(g_dailyPauseUntil > now)
+   {
+      int rem = (int)(g_dailyPauseUntil - now);
+      reasons += "Profit target ✅ | Reprise dans: " + SMC_FmtCountdown(rem);
+   }
+
+   if(g_dailyLossPauseUntil > now)
+   {
+      if(StringLen(reasons) > 0) reasons += "\n";
+      int rem = (int)(g_dailyLossPauseUntil - now);
+      reasons += "Perte journalière max | Reprise dans: " + SMC_FmtCountdown(rem);
+   }
+
+   if(g_lossPauseUntil > now)
+   {
+      if(StringLen(reasons) > 0) reasons += "\n";
+      int rem = (int)(g_lossPauseUntil - now);
+      reasons += "Pertes consécutives | Reprise dans: " + SMC_FmtCountdown(rem);
+   }
+
+   if(g_symbolTradingBlocked)
+   {
+      if(StringLen(reasons) > 0) reasons += "\n";
+      reasons += "Symbole bloqué (perte max) | Reprise: manuelle";
+   }
+
+   if(!SMC_IsStrictUTCTradingWindowOpen() && reasons == "")
+   {
+      datetime resume = SMC_NextUTCWindowOpen();
+      int rem = (int)(resume - now);
+      reasons += "Hors zone UTC | Reprise dans: " + SMC_FmtCountdown(rem);
+   }
+
+   return reasons;
+}
+
 //| FONCTIONS DE GESTION DES PAUSES ET BLACKLIST TEMPORAIRE        |
 
 void UpdateDashboard()
@@ -7271,7 +7345,6 @@ void UpdateDashboard()
    else if(SMC_IsHourInWindowUTC(hourUTC, TradeWindow3StartUTC, TradeWindow3EndUTC))
       utcZone = "ZONE3 21-23";
    bool utcTradingOpen = SMC_IsStrictUTCTradingWindowOpen();
-   string robotStatus = utcTradingOpen ? "TRADING ACTIF" : "ARRET AUTO";
    string bcStr = IsBoomSymbol(_Symbol) ? "BOOM" : (IsCrashSymbol(_Symbol) ? "CRASH" : catStr);
    bool isBoomCrash = (SMC_GetSymbolCategory(_Symbol) == SYM_BOOM_CRASH);
    int totalLimits = CountOpenLimitOrdersForSymbol(_Symbol);
@@ -7287,10 +7360,21 @@ void UpdateDashboard()
    string lines[40]; // Lignes dashboard (+ ligne IA séparée pour éviter troncature MT5)
    color  cols[40];
    int n = 0;
-   // Keep only ESSENTIAL trading info - remove context/strategy lines to declutter
-   lines[n] = "UTC: " + IntegerToString(hourUTC) + "h | Zone: " + utcZone + " | Statut: " + robotStatus;
-   cols[n] = (utcTradingOpen ? clrLimeGreen : clrOrange);
-   n++;
+   // Ligne 1 : statut UTC + décompte si arrêt actif
+   string stopInfo = SMC_GetStopReasonWithCountdown();
+   bool isFullyStopped = (StringLen(stopInfo) > 0);
+   if(isFullyStopped)
+   {
+      lines[n] = "⏸ ARRÊT AUTO | UTC: " + IntegerToString(hourUTC) + "h | " + stopInfo;
+      cols[n] = clrOrange;
+      n++;
+   }
+   else
+   {
+      lines[n] = "✅ TRADING ACTIF | UTC: " + IntegerToString(hourUTC) + "h | Zone: " + utcZone;
+      cols[n] = clrLimeGreen;
+      n++;
+   }
    string aiStatus;
    color aiLineCol = clrAqua;
    if(!UseAIServer)
