@@ -370,6 +370,10 @@ bool SMC_PickVerdictEntryLevel(const string direction, double &levelOut, string 
 double SMC_GOMGlobalGet(const string keySuffix, const double defVal = 0.0);
 bool SMC_TryPickGOMEntryLevel(const string direction, double &levelOut, string &tfOut);
 void DrawGOMEntryLevelsOnChart();
+void SMC_ClearSLTPLines();
+void SMC_DrawHLine(const string name, const double price, const color clr,
+                   const ENUM_LINE_STYLE style, const int width,
+                   const string labelTxt, const ENUM_ANCHOR_POINT anchor = ANCHOR_LEFT_LOWER);
 void CheckAndExecuteGOMTouchEntry();
 void EvaluateSetupHistorical(const int barsLookback = 200, const int holdBars = 5);
 string SMC_SetupEvalDashLine();
@@ -4648,8 +4652,11 @@ bool SMC_TryPickGOMEntryLevel(const string direction, double &levelOut, string &
 
 void DrawGOMEntryLevelsOnChart()
 {
-   if(!UseGOMEntryLevels || !ShowChartGraphics)
-      return;
+   if(!ShowChartGraphics) return;
+
+   // Nettoyer les anciens objets legacy à nom fixe
+   ObjectDelete(0, "GOM_EA_BUY_ENTRY_LN");
+   ObjectDelete(0, "GOM_EA_SELL_ENTRY_LN");
 
    double atrVal = 0.0;
    double atrBuf[];
@@ -4660,59 +4667,169 @@ void DrawGOMEntryLevelsOnChart()
    if(point <= 0.0) point = 0.0001;
    if(atrVal <= 0.0) atrVal = point * 50.0;
 
-   // Efface les anciennes lignes EA GOM
-   ObjectDelete(0, "GOM_EA_BUY_ENTRY_LN");
-   ObjectDelete(0, "GOM_EA_SELL_ENTRY_LN");
+   bool isGoodOrPerfect = SMC_IsGoodOrPerfectVerdict();
+   bool verdictBuy      = (g_finalVerdict.direction == "BUY");
+   bool verdictSell     = (g_finalVerdict.direction == "SELL");
 
-   string tfTags[] = {"M1", "M5", "M15", "M30", "H1", "H4"};
+   // === 1. Niveaux GOM_KOLA par TF (support/résistance pivots) ===
+   string tfTags[] = {"M1", "M5", "M15", "M30", "H1", "H4", "D1"};
    string sides[]  = {"BUY", "SELL"};
 
    for(int s = 0; s < 2; s++)
    {
-      string side = sides[s];
-      color  lineClr = (side == "BUY") ? clrDodgerBlue : clrOrangeRed;
+      string side     = sides[s];
+      bool   isActive = isGoodOrPerfect && ((side == "BUY" && verdictBuy) || (side == "SELL" && verdictSell));
+      color  baseClr  = (side == "BUY") ? clrDodgerBlue : clrOrangeRed;
+      color  activeClr= (side == "BUY") ? clrLimeGreen  : clrTomato;
+      color  lineClr  = isActive ? activeClr : baseClr;
 
       for(int i = 0; i < ArraySize(tfTags); i++)
       {
+         string lnName  = "GOM_EA_" + side + "_" + tfTags[i] + "_LN";
+
          double lvl = SMC_GOMKolaGet(tfTags[i], side);
          if(lvl <= 0.0)
          {
-            ObjectDelete(0, "GOM_EA_" + side + "_" + tfTags[i] + "_LN");
-            ObjectDelete(0, "GOM_EA_" + side + "_" + tfTags[i] + "_PCT");
+            ObjectDelete(0, lnName);
+            ObjectDelete(0, lnName + "_LBL");
             continue;
          }
 
          int touches = SMC_CountLevelTouches(lvl, atrVal);
-         int confPct  = SMC_GOMConfidencePct(touches);
-
-         // Ligne horizontale
-         string lnName = "GOM_EA_" + side + "_" + tfTags[i] + "_LN";
-         if(ObjectFind(0, lnName) < 0)
-            ObjectCreate(0, lnName, OBJ_HLINE, 0, 0, lvl);
-         ObjectSetDouble(0, lnName, OBJPROP_PRICE, lvl);
-         ObjectSetInteger(0, lnName, OBJPROP_COLOR, lineClr);
-         ObjectSetInteger(0, lnName, OBJPROP_STYLE, STYLE_DASH);
-         ObjectSetInteger(0, lnName, OBJPROP_WIDTH, MathMax(1, MathMin(3, touches / 3)));
-         ObjectSetInteger(0, lnName, OBJPROP_BACK, false);
-         ObjectSetInteger(0, lnName, OBJPROP_HIDDEN, false);
-
-         // Label avec TF + % de confiance (touches)
-         string lblName = "GOM_EA_" + side + "_" + tfTags[i] + "_PCT";
-         datetime labelT = iTime(_Symbol, PERIOD_CURRENT, 0);
-         if(labelT <= 0) labelT = TimeCurrent();
-         labelT += (datetime)(PeriodSeconds(PERIOD_CURRENT) * 3);
+         int confPct = SMC_GOMConfidencePct(touches);
+         int width   = isActive ? 2 : MathMax(1, MathMin(2, touches / 4));
+         ENUM_LINE_STYLE style = isActive ? STYLE_SOLID : STYLE_DASH;
 
          string txt = tfTags[i] + " " + side + " " + IntegerToString(confPct) + "%";
-         if(ObjectFind(0, lblName) < 0)
-            ObjectCreate(0, lblName, OBJ_TEXT, 0, labelT, lvl);
-         ObjectMove(0, lblName, 0, labelT, lvl);
-         ObjectSetString(0, lblName, OBJPROP_TEXT, txt);
-         ObjectSetString(0, lblName, OBJPROP_FONT, "Arial Bold");
-         ObjectSetInteger(0, lblName, OBJPROP_FONTSIZE, 8);
-         ObjectSetInteger(0, lblName, OBJPROP_COLOR, lineClr);
-         ObjectSetInteger(0, lblName, OBJPROP_ANCHOR, ANCHOR_LEFT_LOWER);
-         ObjectSetInteger(0, lblName, OBJPROP_BACK, false);
+         SMC_DrawHLine(lnName, lvl, lineClr, style, width, txt);
       }
+   }
+
+   // === 2. SL / TP1 / TP2 / TP3 uniquement si GOOD ou PERFECT ===
+   if(!isGoodOrPerfect) { SMC_ClearSLTPLines(); return; }
+
+   // Calculer SL et TPs depuis les swings + OTE + FIBO
+   double swingHigh = 0.0, swingLow = 0.0;
+   datetime tSH, tSL;
+   string verdictDir = g_finalVerdict.direction;
+
+   // Récupérer swings récents M1
+   MqlRates r[];
+   ArraySetAsSeries(r, true);
+   if(CopyRates(_Symbol, PERIOD_M1, 0, 100, r) >= 20)
+   {
+      for(int i = 2; i < 98; i++)
+      {
+         if(swingHigh <= 0.0 && r[i].high > r[i-1].high && r[i].high > r[i+1].high)
+            { swingHigh = r[i].high; tSH = r[i].time; }
+         if(swingLow  <= 0.0 && r[i].low  < r[i-1].low  && r[i].low  < r[i+1].low)
+            { swingLow  = r[i].low;  tSL = r[i].time; }
+         if(swingHigh > 0.0 && swingLow > 0.0) break;
+      }
+   }
+
+   if(swingHigh <= 0.0 || swingLow <= 0.0) { SMC_ClearSLTPLines(); return; }
+
+   double range  = swingHigh - swingLow;
+   if(range <= point * 10) { SMC_ClearSLTPLines(); return; }
+
+   double entryPx = (verdictDir == "BUY") ? SymbolInfoDouble(_Symbol, SYMBOL_ASK)
+                                           : SymbolInfoDouble(_Symbol, SYMBOL_BID);
+
+   // OTE zone (61.8%–78.6% Fibonacci)
+   double oteLow, oteHigh, oteOptimal;
+   if(verdictDir == "BUY")
+   {
+      oteLow     = swingLow + range * 0.618;
+      oteHigh    = swingLow + range * 0.786;
+      oteOptimal = swingLow + range * 0.705; // Midpoint OTE
+   }
+   else
+   {
+      oteHigh    = swingHigh - range * 0.618;
+      oteLow     = swingHigh - range * 0.786;
+      oteOptimal = swingHigh - range * 0.705;
+   }
+   if(oteLow > oteHigh) { double tmp = oteLow; oteLow = oteHigh; oteHigh = tmp; }
+
+   // Utiliser l'optimal OTE comme entrée si prix dans la zone, sinon prix courant
+   bool inOTE = (entryPx >= oteLow - atrVal*0.1 && entryPx <= oteHigh + atrVal*0.1);
+   double entry = inOTE ? oteOptimal : entryPx;
+
+   double sl = 0.0, buf = MathMax(point * 15.0, range * 0.05);
+   double risk = 0.0;
+   if(verdictDir == "BUY")
+   {
+      sl   = swingLow - buf;
+      risk = entry - sl;
+   }
+   else
+   {
+      sl   = swingHigh + buf;
+      risk = sl - entry;
+   }
+   if(risk <= point * 5) { SMC_ClearSLTPLines(); return; }
+
+   // TP1 = 1R, TP2 = 2R, TP3 = 3R (multiples du risque)
+   double tp1, tp2, tp3;
+   if(verdictDir == "BUY")
+   {
+      tp1 = entry + risk * 1.0;
+      tp2 = entry + risk * 2.0;
+      tp3 = entry + risk * 3.0;
+   }
+   else
+   {
+      tp1 = entry - risk * 1.0;
+      tp2 = entry - risk * 2.0;
+      tp3 = entry - risk * 3.0;
+   }
+
+   bool isPerfect = (StringFind(g_finalVerdict.verdictLabel, "PERFECT") >= 0);
+   color entryClr = verdictBuy  ? clrLimeGreen : clrTomato;
+   color slClr    = clrOrangeRed;
+   color tp1Clr   = (color)0xFFD700;  // Gold
+   color tp2Clr   = (color)0x00BFFF;  // DeepSkyBlue
+   color tp3Clr   = (color)0x7CFC00;  // LawnGreen
+
+   string oteInfo = " OTE " + DoubleToString(oteOptimal, _Digits) +
+                    " [" + DoubleToString(oteLow, _Digits) + "-" + DoubleToString(oteHigh, _Digits) + "]";
+   string rr = DoubleToString(risk > 0 ? 3.0 : 0.0, 1) + "R";
+
+   SMC_DrawHLine("SMC_ENTRY_OTE",  entry, entryClr, STYLE_SOLID, 2,
+                 (isPerfect ? "⭐ PERFECT " : "✅ GOOD ") + verdictDir + oteInfo);
+   SMC_DrawHLine("SMC_OTE_LOW",    oteLow,  clrYellow, STYLE_DOT, 1, "OTE Low (61.8%)");
+   SMC_DrawHLine("SMC_OTE_HIGH",   oteHigh, clrYellow, STYLE_DOT, 1, "OTE High (78.6%)");
+   SMC_DrawHLine("SMC_TRADE_SL",   sl,  slClr,  STYLE_DASH, 2, "SL  " + DoubleToString(sl, _Digits));
+   SMC_DrawHLine("SMC_TRADE_TP1",  tp1, tp1Clr, STYLE_DASH, 1, "TP1 " + DoubleToString(tp1, _Digits) + "  (1R)");
+   SMC_DrawHLine("SMC_TRADE_TP2",  tp2, tp2Clr, STYLE_DASH, 1, "TP2 " + DoubleToString(tp2, _Digits) + "  (2R)");
+   SMC_DrawHLine("SMC_TRADE_TP3",  tp3, tp3Clr, STYLE_DASH, 1, "TP3 " + DoubleToString(tp3, _Digits) + "  (3R) " + rr);
+
+   // Zone OTE (rectangle semi-transparent)
+   string zoneName = "SMC_OTE_ZONE";
+   datetime tNow = iTime(_Symbol, PERIOD_CURRENT, 0);
+   datetime tFut = tNow + (datetime)(PeriodSeconds(PERIOD_CURRENT) * 40);
+   if(ObjectFind(0, zoneName) < 0)
+      ObjectCreate(0, zoneName, OBJ_RECTANGLE, 0, tNow, oteLow, tFut, oteHigh);
+   ObjectMove(0, zoneName, 0, tNow, oteLow);
+   ObjectMove(0, zoneName, 1, tFut, oteHigh);
+   ObjectSetInteger(0, zoneName, OBJPROP_COLOR,   clrYellow);
+   ObjectSetInteger(0, zoneName, OBJPROP_BGCOLOR,
+                    verdictBuy ? (color)0x0A2A0A : (color)0x2A0A0A);
+   ObjectSetInteger(0, zoneName, OBJPROP_FILL,    true);
+   ObjectSetInteger(0, zoneName, OBJPROP_BACK,    true);
+   ObjectSetInteger(0, zoneName, OBJPROP_STYLE,   STYLE_DOT);
+   ObjectSetInteger(0, zoneName, OBJPROP_WIDTH,   1);
+}
+
+void SMC_ClearSLTPLines()
+{
+   string toClean[] = {"SMC_ENTRY_OTE","SMC_OTE_LOW","SMC_OTE_HIGH","SMC_OTE_ZONE",
+                       "SMC_TRADE_SL","SMC_TRADE_TP1","SMC_TRADE_TP2","SMC_TRADE_TP3"};
+   for(int i = 0; i < ArraySize(toClean); i++)
+   {
+      ObjectDelete(0, toClean[i]);
+      ObjectDelete(0, toClean[i] + "_LBL");
    }
 }
 
@@ -28993,36 +29110,78 @@ void DrawDashboardCell(string name, int x, int y, int w, int h, string text, col
 }
 
 //+------------------------------------------------------------------+
-//| Affiche les niveaux d'entrée (EMA Fast) pour chaque TF           |
+//| Trace une ligne horizontale + label sur le graphique             |
+//+------------------------------------------------------------------+
+void SMC_DrawHLine(const string name, const double price, const color clr,
+                   const ENUM_LINE_STYLE style, const int width,
+                   const string labelTxt, const ENUM_ANCHOR_POINT anchor = ANCHOR_LEFT_LOWER)
+{
+   if(price <= 0.0) { ObjectDelete(0, name); ObjectDelete(0, name + "_LBL"); return; }
+
+   if(ObjectFind(0, name) < 0) ObjectCreate(0, name, OBJ_HLINE, 0, 0, price);
+   ObjectSetDouble(0,  name, OBJPROP_PRICE,  price);
+   ObjectSetInteger(0, name, OBJPROP_COLOR,  clr);
+   ObjectSetInteger(0, name, OBJPROP_STYLE,  style);
+   ObjectSetInteger(0, name, OBJPROP_WIDTH,  width);
+   ObjectSetInteger(0, name, OBJPROP_BACK,   false);
+   ObjectSetInteger(0, name, OBJPROP_HIDDEN, false);
+   ObjectSetInteger(0, name, OBJPROP_ZORDER, 110);
+
+   string lbl = name + "_LBL";
+   datetime lt = iTime(_Symbol, PERIOD_CURRENT, 0);
+   if(lt <= 0) lt = TimeCurrent();
+   lt += (datetime)(PeriodSeconds(PERIOD_CURRENT) * 2);
+   if(ObjectFind(0, lbl) < 0) ObjectCreate(0, lbl, OBJ_TEXT, 0, lt, price);
+   ObjectMove(0, lbl, 0, lt, price);
+   ObjectSetString(0,  lbl, OBJPROP_TEXT,     labelTxt);
+   ObjectSetString(0,  lbl, OBJPROP_FONT,     "Arial Bold");
+   ObjectSetInteger(0, lbl, OBJPROP_FONTSIZE, 8);
+   ObjectSetInteger(0, lbl, OBJPROP_COLOR,    clr);
+   ObjectSetInteger(0, lbl, OBJPROP_ANCHOR,   anchor);
+   ObjectSetInteger(0, lbl, OBJPROP_BACK,     false);
+   ObjectSetInteger(0, lbl, OBJPROP_ZORDER,   111);
+}
+
+//+------------------------------------------------------------------+
+//| Lignes d'entrée TF unifiées (EMA + GOM) + SL/TP1/TP2/TP3        |
+//| appelée depuis DrawGOMEntryLevelsOnChart et DrawEntryLevelLines  |
 //+------------------------------------------------------------------+
 void DrawEntryLevelLines(bool isBullish, double emaFast, string tfLabel)
 {
-   // ENTRY LEVELS: Display only TEXT labels with price info (OTE + FIBO)
-   // No horizontal lines - keeping chart clean
-   string lineName = "SMC_EntryLevel_" + tfLabel;
+   if(!ShowChartGraphics) return;
+   string base   = "SMC_EntryLevel_" + tfLabel;
+   string dir    = isBullish ? "BUY" : "SELL";
 
-   // Clean up old horizontal lines
-   if(ObjectFind(0, lineName) >= 0)
-      ObjectDelete(0, lineName);
+   // Vieux objets texte seul (ancienne version) — nettoyer
+   ObjectDelete(0, base);
+   ObjectDelete(0, base + "_Label");
 
-   if(emaFast <= 0.0) return;
+   if(emaFast <= 0.0)
+   {
+      ObjectDelete(0, base + "_LN");
+      ObjectDelete(0, base + "_LN_LBL");
+      return;
+   }
 
-   color lineColor = isBullish ? clrLimeGreen : clrRed;
-   string direction = isBullish ? "BUY" : "SELL";
+   // Couleur selon direction ET verdict (vif si GOOD/PERFECT, pastel sinon)
+   bool isGoodOrPerfect = SMC_IsGoodOrPerfectVerdict() &&
+                          ((isBullish && g_finalVerdict.direction == "BUY") ||
+                           (!isBullish && g_finalVerdict.direction == "SELL"));
 
-   // Display ONLY text label with price information
-   string labelName = lineName + "_Label";
-   if(ObjectFind(0, labelName) >= 0)
-      ObjectDelete(0, labelName);
+   color lineClr;
+   if(isBullish)
+      lineClr = isGoodOrPerfect ? clrLimeGreen : (color)0x1A6B3C;   // vert vif / vert sombre
+   else
+      lineClr = isGoodOrPerfect ? clrTomato    : (color)0x7A1A1A;   // rouge vif / rouge sombre
 
-   // Create text label showing entry level by timeframe
-   string textLabel = tfLabel + " Entry: " + DoubleToString(emaFast, (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS)) + " (" + direction + ")";
-   ObjectCreate(0, labelName, OBJ_TEXT, 0, iTime(_Symbol, PERIOD_M1, 0), emaFast);
-   ObjectSetString(0, labelName, OBJPROP_TEXT, textLabel);
-   ObjectSetInteger(0, labelName, OBJPROP_FONTSIZE, 9);
-   ObjectSetString(0, labelName, OBJPROP_FONT, "Consolas");
-   ObjectSetInteger(0, labelName, OBJPROP_COLOR, lineColor);
-   ObjectSetInteger(0, labelName, OBJPROP_ZORDER, 100 + (tfLabel == "M1" ? 0 : tfLabel == "M5" ? 1 : 2));
+   int width = isGoodOrPerfect ? 2 : 1;
+   ENUM_LINE_STYLE style = isGoodOrPerfect ? STYLE_SOLID : STYLE_DOT;
+
+   int touches = SMC_CountLevelTouches(emaFast, 0.0);
+   int confPct  = SMC_GOMConfidencePct(touches);
+
+   string txt = tfLabel + " " + dir + " " + DoubleToString(emaFast, _Digits) + " (" + IntegerToString(confPct) + "%)";
+   SMC_DrawHLine(base + "_LN", emaFast, lineClr, style, width, txt);
 }
 
 //+------------------------------------------------------------------+
