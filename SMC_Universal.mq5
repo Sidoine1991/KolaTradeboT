@@ -4547,15 +4547,54 @@ bool SMC_IsGoodOrPerfectVerdict()
            StringFind(g_finalVerdict.verdictLabel, "PERFECT") >= 0);
 }
 
-// Niveaux publiés par GOM_KOLA_SIDO_Script via GlobalVariables (GOM_SCRIPT_<symbole>_<clé>)
-double SMC_GOMGlobalGet(const string keySuffix, const double defVal)
+// Lit un niveau GOM_KOLA publié par GOM_KOLA_SIDO_Script
+// Clé réelle: GOM_KOLA_<SYMBOL>_<TF>_<SIDE>  (ex: GOM_KOLA_1HZ100V_M1_BUY)
+double SMC_GOMKolaGet(const string tfTag, const string side)
 {
-   string k = "GOM_SCRIPT_" + _Symbol + "_" + keySuffix;
-   if(!GlobalVariableCheck(k))
-      return defVal;
+   string k = "GOM_KOLA_" + _Symbol + "_" + tfTag + "_" + side;
+   if(!GlobalVariableCheck(k)) return 0.0;
    return GlobalVariableGet(k);
 }
 
+// Compat legacy (ancienne clé GOM_SCRIPT_) — gardée pour backward compat
+double SMC_GOMGlobalGet(const string keySuffix, const double defVal = 0.0)
+{
+   string k = "GOM_SCRIPT_" + _Symbol + "_" + keySuffix;
+   if(!GlobalVariableCheck(k)) return defVal;
+   return GlobalVariableGet(k);
+}
+
+// Calcule le pourcentage de confiance GOM depuis le nombre de touches (55..100%)
+// Reproduit la même formule que EntryConfidencePercent() dans GOM_KOLA_SIDO_Script
+int SMC_GOMConfidencePct(const int touches, const int touchesForMax = 8)
+{
+   int tMax = MathMax(1, touchesForMax);
+   double r = MathMin(1.0, (double)MathMax(1, touches) / (double)tMax);
+   return (int)MathRound(55.0 + r * 45.0);
+}
+
+// Compte le nombre de touches d'un niveau sur les barres M1 récentes
+int SMC_CountLevelTouches(const double level, const double atrVal, const int barsLookback = 150)
+{
+   if(level <= 0.0 || atrVal <= 0.0) return 1;
+   MqlRates r[];
+   ArraySetAsSeries(r, true);
+   int copied = CopyRates(_Symbol, PERIOD_M1, 0, barsLookback + 1, r);
+   if(copied < 2) return 1;
+   double zone = atrVal * 0.30;
+   int touches = 0;
+   int lim = MathMin(copied - 1, barsLookback);
+   for(int i = 0; i <= lim; i++)
+   {
+      double hi = r[i].high, lo = r[i].low;
+      if(MathAbs(hi - level) <= zone || MathAbs(lo - level) <= zone || (lo <= level && hi >= level))
+         touches++;
+   }
+   return MathMax(1, touches);
+}
+
+// Cherche le meilleur niveau GOM parmi tous les TF actifs
+// Retourne vrai si un niveau dans la tolérance ATR est trouvé
 bool SMC_TryPickGOMEntryLevel(const string direction, double &levelOut, string &tfOut)
 {
    levelOut = 0.0;
@@ -4563,19 +4602,10 @@ bool SMC_TryPickGOMEntryLevel(const string direction, double &levelOut, string &
    if(!UseGOMEntryLevels)
       return false;
 
-   double gomLvl = 0.0;
-   if(direction == "BUY")
-      gomLvl = SMC_GOMGlobalGet("BUY_ENTRY");
-   else if(direction == "SELL")
-      gomLvl = SMC_GOMGlobalGet("SELL_ENTRY");
-   if(gomLvl <= 0.0)
-      return false;
-
    double refPx = (direction == "BUY")
                   ? SymbolInfoDouble(_Symbol, SYMBOL_ASK)
                   : SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   if(refPx <= 0.0)
-      return false;
+   if(refPx <= 0.0) return false;
 
    double atrVal = 0.0;
    double atrBuf[];
@@ -4583,17 +4613,34 @@ bool SMC_TryPickGOMEntryLevel(const string direction, double &levelOut, string &
    if(atrHandle != INVALID_HANDLE && CopyBuffer(atrHandle, 0, 0, 1, atrBuf) > 0)
       atrVal = atrBuf[0];
    double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
-   if(point <= 0.0)
-      point = 0.0001;
-   if(atrVal <= 0.0)
-      atrVal = point * 50.0;
-
+   if(point <= 0.0) point = 0.0001;
+   if(atrVal <= 0.0) atrVal = point * 50.0;
    double maxDist = atrVal * MathMax(0.3, SMC_EffGOMEntryNearATRMult());
-   if(MathAbs(refPx - gomLvl) > maxDist)
-      return false;
 
-   levelOut = gomLvl;
-   tfOut = "GOM";
+   // TF priorité: M1 d'abord pour PERFECT, M5/M15/H1 pour GOOD
+   // On parcourt tous les TF et on garde le plus proche dans la tolérance
+   string tfTags[] = {"M1", "M5", "M15", "M30", "H1", "H4"};
+   double bestLvl = 0.0;
+   double bestDist = 1e100;
+   string bestTf = "";
+
+   for(int i = 0; i < ArraySize(tfTags); i++)
+   {
+      double lvl = SMC_GOMKolaGet(tfTags[i], direction == "BUY" ? "BUY" : "SELL");
+      if(lvl <= 0.0) continue;
+      double d = MathAbs(refPx - lvl);
+      if(d <= maxDist && d < bestDist)
+      {
+         bestDist = d;
+         bestLvl = lvl;
+         bestTf = tfTags[i];
+      }
+   }
+
+   if(bestLvl <= 0.0) return false;
+
+   levelOut = bestLvl;
+   tfOut = "GOM_" + bestTf;
    return true;
 }
 
@@ -4602,43 +4649,68 @@ void DrawGOMEntryLevelsOnChart()
    if(!UseGOMEntryLevels || !ShowChartGraphics)
       return;
 
-   double buyLvl = SMC_GOMGlobalGet("BUY_ENTRY");
-   double sellLvl = SMC_GOMGlobalGet("SELL_ENTRY");
-   if(buyLvl <= 0.0 && sellLvl <= 0.0)
-      return;
+   double atrVal = 0.0;
+   double atrBuf[];
+   ArraySetAsSeries(atrBuf, true);
+   if(atrHandle != INVALID_HANDLE && CopyBuffer(atrHandle, 0, 0, 1, atrBuf) > 0)
+      atrVal = atrBuf[0];
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   if(point <= 0.0) point = 0.0001;
+   if(atrVal <= 0.0) atrVal = point * 50.0;
 
-   datetime t2 = TimeCurrent() + PeriodSeconds(PERIOD_CURRENT) * 80;
-   datetime t1 = iTime(_Symbol, PERIOD_CURRENT, 20);
-   if(t1 <= 0)
-      t1 = TimeCurrent() - PeriodSeconds(PERIOD_CURRENT) * 20;
+   // Efface les anciennes lignes EA GOM
+   ObjectDelete(0, "GOM_EA_BUY_ENTRY_LN");
+   ObjectDelete(0, "GOM_EA_SELL_ENTRY_LN");
 
-   if(buyLvl > 0.0)
+   string tfTags[] = {"M1", "M5", "M15", "M30", "H1", "H4"};
+   string sides[]  = {"BUY", "SELL"};
+
+   for(int s = 0; s < 2; s++)
    {
-      string ln = "GOM_EA_BUY_ENTRY_LN";
-      if(ObjectFind(0, ln) < 0)
-         ObjectCreate(0, ln, OBJ_TREND, 0, t1, buyLvl, t2, buyLvl);
-      else
+      string side = sides[s];
+      color  lineClr = (side == "BUY") ? clrDodgerBlue : clrOrangeRed;
+
+      for(int i = 0; i < ArraySize(tfTags); i++)
       {
-         ObjectMove(0, ln, 0, t1, buyLvl);
-         ObjectMove(0, ln, 1, t2, buyLvl);
+         double lvl = SMC_GOMKolaGet(tfTags[i], side);
+         if(lvl <= 0.0)
+         {
+            ObjectDelete(0, "GOM_EA_" + side + "_" + tfTags[i] + "_LN");
+            ObjectDelete(0, "GOM_EA_" + side + "_" + tfTags[i] + "_PCT");
+            continue;
+         }
+
+         int touches = SMC_CountLevelTouches(lvl, atrVal);
+         int confPct  = SMC_GOMConfidencePct(touches);
+
+         // Ligne horizontale
+         string lnName = "GOM_EA_" + side + "_" + tfTags[i] + "_LN";
+         if(ObjectFind(0, lnName) < 0)
+            ObjectCreate(0, lnName, OBJ_HLINE, 0, 0, lvl);
+         ObjectSetDouble(0, lnName, OBJPROP_PRICE, lvl);
+         ObjectSetInteger(0, lnName, OBJPROP_COLOR, lineClr);
+         ObjectSetInteger(0, lnName, OBJPROP_STYLE, STYLE_DASH);
+         ObjectSetInteger(0, lnName, OBJPROP_WIDTH, MathMax(1, MathMin(3, touches / 3)));
+         ObjectSetInteger(0, lnName, OBJPROP_BACK, false);
+         ObjectSetInteger(0, lnName, OBJPROP_HIDDEN, false);
+
+         // Label avec TF + % de confiance (touches)
+         string lblName = "GOM_EA_" + side + "_" + tfTags[i] + "_PCT";
+         datetime labelT = iTime(_Symbol, PERIOD_CURRENT, 0);
+         if(labelT <= 0) labelT = TimeCurrent();
+         labelT += (datetime)(PeriodSeconds(PERIOD_CURRENT) * 3);
+
+         string txt = tfTags[i] + " " + side + " " + IntegerToString(confPct) + "%";
+         if(ObjectFind(0, lblName) < 0)
+            ObjectCreate(0, lblName, OBJ_TEXT, 0, labelT, lvl);
+         ObjectMove(0, lblName, 0, labelT, lvl);
+         ObjectSetString(0, lblName, OBJPROP_TEXT, txt);
+         ObjectSetString(0, lblName, OBJPROP_FONT, "Arial Bold");
+         ObjectSetInteger(0, lblName, OBJPROP_FONTSIZE, 8);
+         ObjectSetInteger(0, lblName, OBJPROP_COLOR, lineClr);
+         ObjectSetInteger(0, lblName, OBJPROP_ANCHOR, ANCHOR_LEFT_LOWER);
+         ObjectSetInteger(0, lblName, OBJPROP_BACK, false);
       }
-      ObjectSetInteger(0, ln, OBJPROP_COLOR, clrDodgerBlue);
-      ObjectSetInteger(0, ln, OBJPROP_WIDTH, 3);
-      ObjectSetInteger(0, ln, OBJPROP_RAY_RIGHT, true);
-   }
-   if(sellLvl > 0.0)
-   {
-      string ln = "GOM_EA_SELL_ENTRY_LN";
-      if(ObjectFind(0, ln) < 0)
-         ObjectCreate(0, ln, OBJ_TREND, 0, t1, sellLvl, t2, sellLvl);
-      else
-      {
-         ObjectMove(0, ln, 0, t1, sellLvl);
-         ObjectMove(0, ln, 1, t2, sellLvl);
-      }
-      ObjectSetInteger(0, ln, OBJPROP_COLOR, clrOrangeRed);
-      ObjectSetInteger(0, ln, OBJPROP_WIDTH, 3);
-      ObjectSetInteger(0, ln, OBJPROP_RAY_RIGHT, true);
    }
 }
 
