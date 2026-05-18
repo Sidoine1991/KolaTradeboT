@@ -7577,7 +7577,7 @@ void UpdateDashboard()
   }
   if(ObjectFind(0, utcStatusName) >= 0)
   {
-     string utcStatusText = "UTC: " + IntegerToString(hourUTC) + "h | Zone: " + utcZone + " | Statut: " + robotStatus;
+     string utcStatusText = "UTC: " + IntegerToString(hourUTC) + "h | Zone: " + utcZone + " | Statut: " + (utcTradingOpen ? "TRADING ACTIF" : "ARRET AUTO");
      ObjectSetInteger(0, utcStatusName, OBJPROP_XDISTANCE, MathMax(0, DashboardLabelXOffsetPixels));
      ObjectSetInteger(0, utcStatusName, OBJPROP_YDISTANCE, 8);
      ObjectSetInteger(0, utcStatusName, OBJPROP_COLOR, (utcTradingOpen ? clrLimeGreen : clrOrange));
