@@ -3286,11 +3286,11 @@ input int    NYOStart          = 13;     // New York Open début
 input int    NYOEnd            = 16;     // New York Open fin
 input group "=== FENETRES STRICTES UTC (AUTO-STOP HORS PLAGE) ==="
 input bool   UseStrictUTCTradeWindows = true; // Discipline horaire stricte (UTC)
-input int    TradeWindow1StartUTC = 3;   // Zone 1 debut (UTC)
+input int    TradeWindow1StartUTC = 3;   // Zone 1 debut (UTC) — Asian session
 input int    TradeWindow1EndUTC   = 6;   // Zone 1 fin   (UTC, exclusif)
-input int    TradeWindow2StartUTC = 14;  // Zone 2 debut (UTC)
+input int    TradeWindow2StartUTC = 12;  // Zone 2 debut (UTC) — Deriv spikes midday + London midday
 input int    TradeWindow2EndUTC   = 16;  // Zone 2 fin   (UTC, exclusif)
-input int    TradeWindow3StartUTC = 21;  // Zone 3 debut (UTC)
+input int    TradeWindow3StartUTC = 21;  // Zone 3 debut (UTC) — Asian open
 input int    TradeWindow3EndUTC   = 23;  // Zone 3 fin   (UTC, exclusif)
 
 input group "=== NOTIFICATIONS ==="
@@ -7774,18 +7774,25 @@ void UpdateMLMetricsDisplay()
       resStatus = WebRequest("GET", fallbackUrl2 + pathStatus, headers, AI_Timeout_ms2, post, result, resultHeaders);
    }
    
-   Print("?? DEBUG - WebRequest ML status - Code: ", resStatus);
-   
    if(resStatus == 200)
    {
       string statusData = CharArrayToString(result);
-      g_channelValid = (StringFind(statusData, "\"valid\": true") >= 0);
-      Print("? DEBUG - Canal ML valide: ", g_channelValid ? "OUI" : "NON");
+      // /ml/continuous/status renvoie {"enabled":true/false,...} — pas de champ "valid"
+      // Canal valide si enabled=true OU si au moins une feedback_key existe (modèle actif)
+      bool enabled  = (StringFind(statusData, "\"enabled\": true") >= 0 ||
+                       StringFind(statusData, "\"enabled\":true")  >= 0);
+      string fbStr  = ExtractJsonValue(statusData, "feedback_keys");
+      int    fbKeys = (StringLen(fbStr) > 0) ? (int)StringToInteger(fbStr) : 0;
+      g_channelValid = enabled || (fbKeys > 0);
+      if(SMC_LogThrottle("ML_CHANNEL_STATUS", 120))
+         Print("ℹ ML canal - enabled=", enabled, " feedback_keys=", fbKeys,
+               " → valide: ", g_channelValid ? "OUI" : "NON");
    }
    else
    {
       g_channelValid = false;
-      Print("? DEBUG - Erreur WebRequest ML status: ", resStatus);
+      if(SMC_LogThrottle("ML_CHANNEL_ERR", 60))
+         Print("⚠ ML /ml/continuous/status HTTP=", resStatus);
    }
 }
 
