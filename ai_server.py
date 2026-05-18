@@ -6497,18 +6497,23 @@ async def decision_simplified(request: DecisionRequest):
     except Exception:
         pass
 
-    # 5. Décision technique de base
+    # 5. Décision technique de base with DYNAMIC CONFIDENCE
     # Sur Boom/Crash, l'EA ne trade qu'un seul sens. Si on élit "buy" sur Crash (ex. H1 haussier qui pèse 35 %),
     # enforce_ea_boom_crash_direction ramène tout en HOLD : l'utilisateur voit des spikes baissiers mais IA=HOLD.
     sym_l = str(request.symbol or "").lower()
     is_crash_sc = is_boom_crash_symbol(str(request.symbol)) and "crash" in sym_l
     is_boom_sc = is_boom_crash_symbol(str(request.symbol)) and "boom" in sym_l
 
+    # Calculate score spread for dynamic confidence variance
+    score_diff = abs(buy_score - sell_score)
+    total_score = buy_score + sell_score
+
     if is_crash_sc:
         if sell_score >= buy_score:
             base_action = "sell"
-            base_confidence = 0.5 + (sell_score - buy_score) / 2
-            reason += "[Crash: score SELL≥BUY] "
+            # Confidence scales with score difference: 0.55-0.95
+            base_confidence = 0.55 + min(0.40, score_diff * 0.45)
+            reason += f"[Crash: SELL score {sell_score:.2f} ≥ BUY {buy_score:.2f}] "
         else:
             m1b = (
                 request.ema_fast_m1 is not None
@@ -6522,17 +6527,18 @@ async def decision_simplified(request: DecisionRequest):
             )
             if m1b or m5b:
                 base_action = "sell"
-                base_confidence = max(0.58, 0.52 + sell_score * 0.45)
-                reason += "[Crash: H1/pondération haussière mais M1/M5 baissiers (spikes) → SELL] "
+                base_confidence = max(0.62, min(0.90, 0.62 + sell_score * 0.35))
+                reason += f"[Crash: M1/M5 bearish spikes → SELL, conf={base_confidence:.2f}] "
             else:
                 base_action = "hold"
-                base_confidence = min(0.62, 0.48 + abs(buy_score - sell_score) * 0.15)
-                reason += "[Crash: pas de base BUY (interdit EA) — HOLD si pas de M1/M5 baissiers] "
+                base_confidence = 0.45 + min(0.25, score_diff * 0.10)
+                reason += f"[Crash: no M1/M5 bearish - HOLD] "
     elif is_boom_sc:
         if buy_score >= sell_score:
             base_action = "buy"
-            base_confidence = 0.5 + (buy_score - sell_score) / 2
-            reason += "[Boom: score BUY≥SELL] "
+            # Confidence scales with score difference: 0.55-0.95
+            base_confidence = 0.55 + min(0.40, score_diff * 0.45)
+            reason += f"[Boom: BUY score {buy_score:.2f} ≥ SELL {sell_score:.2f}] "
         else:
             m1u = (
                 request.ema_fast_m1 is not None
@@ -6546,21 +6552,23 @@ async def decision_simplified(request: DecisionRequest):
             )
             if m1u or m5u:
                 base_action = "buy"
-                base_confidence = max(0.58, 0.52 + buy_score * 0.45)
-                reason += "[Boom: H1/pondération baissière mais M1/M5 haussiers → BUY] "
+                base_confidence = max(0.62, min(0.90, 0.62 + buy_score * 0.35))
+                reason += f"[Boom: M1/M5 bullish spikes → BUY, conf={base_confidence:.2f}] "
             else:
                 base_action = "hold"
-                base_confidence = min(0.62, 0.48 + abs(buy_score - sell_score) * 0.15)
-                reason += "[Boom: pas de base SELL (interdit EA) — HOLD si pas de M1/M5 haussiers] "
+                base_confidence = 0.45 + min(0.25, score_diff * 0.10)
+                reason += f"[Boom: no M1/M5 bullish - HOLD] "
     elif buy_score > sell_score:
         base_action = "buy"
-        base_confidence = 0.5 + (buy_score - sell_score) / 2
+        # Wider confidence range for non-BC symbols: 0.45-0.92
+        base_confidence = 0.45 + min(0.47, score_diff * 0.50)
     elif sell_score > buy_score:
         base_action = "sell"
-        base_confidence = 0.5 + (sell_score - buy_score) / 2
+        # Wider confidence range for non-BC symbols: 0.45-0.92
+        base_confidence = 0.45 + min(0.47, score_diff * 0.50)
     else:
         base_action = "hold"
-        base_confidence = 0.5
+        base_confidence = 0.40 + min(0.15, total_score * 0.15)  # HOLD: 0.40-0.55 range
     
     # 6. AMÉLIORATION AVEC ML
     market_data = {
