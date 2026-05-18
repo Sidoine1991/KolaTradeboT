@@ -28405,45 +28405,13 @@ void SMC_ComputeAndStoreFinalVerdict()
 
 bool ExecuteVerdictMarketOrder(const string direction, const string entryTf)
 {
-   #define VMGATE(r) { if(SMC_LogThrottle("VMO_"+_Symbol+"_"+direction, 30)) \
-      Print("⏸ EXEC MARKET [",_Symbol,"] ",direction," bloqué: "+r+" | tf="+entryTf); return false; }
-
-   if(IsInEquilibriumCorrectionZone()) VMGATE("EquilibriumCorrectionZone")
-   if(ShouldBlockNewTradeDueToDailyCap()) VMGATE("DailyCap")
-   if(!SMC_IsStrictUTCTradingWindowOpen()) VMGATE("Hors zone UTC")
-   if(CountPositionsForSymbol(_Symbol) > 0) VMGATE("Position déjà ouverte")
-   if(HasAnyExposureForSymbol(_Symbol)) VMGATE("Exposition existante")
-   if(!IsSpreadAcceptable()) VMGATE("Spread trop large")
-   if(IsEntryCooldownActive()) VMGATE("Cooldown entrée actif")
-
-   if(UseAIServer)
-   {
-      if(!IsAISignalFreshForTrading("VERDICT MARKET " + entryTf)) VMGATE("Signal IA pas frais")
-      string iaDir = SMC_NormalizeAIDirectionLabel();
-      double minConf = AutoEntryOnVerdictMinConfPct / 100.0;
-      if(iaDir == "HOLD")
-      {
-         if(!SMC_AllowDirectionDespiteAIHold(direction)) VMGATE("IA=HOLD et verdict pas assez fort")
-         if(g_finalVerdict.finalConfPct / 100.0 + 1e-6 < minConf) VMGATE("Conf verdict " + DoubleToString(g_finalVerdict.finalConfPct,1) + "% < seuil " + DoubleToString(minConf*100,1) + "%")
-      }
-      else
-      {
-         if(iaDir != direction) VMGATE("IA=" + iaDir + " ≠ " + direction)
-         if(!IsAIConfidenceAtLeast(minConf, "VERDICT MARKET " + entryTf)) VMGATE("Conf IA < seuil")
-      }
-   }
-
-   // BoomCrash gate: si IA=HOLD mais verdict fort, autoriser quand même
-   if(!IsBoomCrashDirectionAllowedByIA(_Symbol, direction))
-   {
-      // Seconde chance : verdict local fort suffit si IA indisponible/HOLD
-      bool canOverride = AllowTradeWhenAIHoldIfVerdictStrong && SMC_VerdictStrongEnoughForEntry() &&
-                         g_finalVerdict.direction == direction;
-      if(!canOverride) VMGATE("BoomCrash direction interdite (IA=" + SMC_NormalizeAIDirectionLabel() + ")")
-   }
-   if(!CanOpenAdditionalPositionForSymbol(_Symbol, direction)) VMGATE("Position supplémentaire refusée")
-   if(!IsLastCandleConfirmingDirection(direction)) VMGATE("Dernière bougie non confirmante")
-   #undef VMGATE
+   // Seuls les vrais bloqueurs absolus — pas de filtre IA ici
+   if(ShouldBlockNewTradeDueToDailyCap()) return false;
+   if(CountPositionsForSymbol(_Symbol) > 0) return false;
+   if(HasAnyExposureForSymbol(_Symbol))    return false;
+   if(!IsSpreadAcceptable())               return false;
+   if(IsEntryCooldownActive())             return false;
+   if(!IsDirectionAllowedForBoomCrash(_Symbol, direction)) return false;
 
    double atrVal = 0.0;
    double atrBuf[];
@@ -28552,121 +28520,17 @@ void CheckAndExecuteVerdictAutoEntry()
    }
 
    #undef VAGATE
-   if(VerdictAutoRequireTrendAlign)
-   {
-      string trendDir = GetCurrentTrendDirection();
-      if(g_finalVerdict.direction == "BUY" && trendDir == "DOWNTREND")
-      {
-         Print("🚫 VERDICT AUTO BLOQUÉ - BUY contre DOWNTREND sur ", _Symbol);
-         return;
-      }
-      if(g_finalVerdict.direction == "SELL" && trendDir == "UPTREND")
-      {
-         Print("🚫 VERDICT AUTO BLOQUÉ - SELL contre UPTREND sur ", _Symbol);
-         return;
-      }
-   }
-
-   // Confiance effective : IA si alignée et conf > 0, verdict sinon (cas HOLD)
-   // Quand IA=HOLD, on se base sur finalConfPct (déjà validé par SMC_VerdictStrongEnoughForEntry)
-   if(UseAIServer)
-   {
-      string iaDir2 = SMC_NormalizeAIDirectionLabel();
-      double aiConfUnit = NormalizeAIConfidenceUnit();
-      bool iaIsHold = (iaDir2 == "HOLD" || iaDir2 == "OFF");
-      double effConf = iaIsHold ? (g_finalVerdict.finalConfPct / 100.0) : aiConfUnit;
-      if(effConf < AutoEntryOnVerdictMinConfPct / 100.0)
-      {
-         if(SMC_LogThrottle("VERDICT_AUTO_CONF_LOW", 60))
-            Print("⏸ VERDICT AUTO - conf trop faible (IA=", iaDir2, " ",
-                  DoubleToString(aiConfUnit*100,1), "% / verdict ",
-                  DoubleToString(g_finalVerdict.finalConfPct,1), "%) sur ", _Symbol);
-         return;
-      }
-   }
-
-   // TF alignment requis : M1 + (M5 ou H1) dans la direction du verdict
-   {
-      bool trendOK = false;
-      if(g_finalVerdict.direction == "BUY")
-         trendOK = g_finalVerdict.bullM1 && (g_finalVerdict.bullM5 || g_finalVerdict.bullH1);
-      else if(g_finalVerdict.direction == "SELL")
-         trendOK = (!g_finalVerdict.bullM1) && (!g_finalVerdict.bullM5 || !g_finalVerdict.bullH1);
-      if(!trendOK)
-      {
-         if(SMC_LogThrottle("VERDICT_AUTO_TREND", 60))
-            Print("⏸ VERDICT AUTO - TF trend non alignés (M1/M5/H1) pour ", g_finalVerdict.direction, " sur ", _Symbol);
-         return;
-      }
-   }
-
    double entryLvl = 0.0;
    string entryTf = "";
    if(!SMC_PickVerdictEntryLevel(g_finalVerdict.direction, entryLvl, entryTf))
-      return;
-
-   // Prediction : UP/DOWN aligné → marché, CONSOLIDATE ou direction opposée → LIMIT OTE
-   PricePrediction pdAuto = g_cachedPricePrediction;
-   bool pdConsolidating = (pdAuto.direction == "CONSOLIDATE" || pdAuto.direction == "SIDEWAYS");
-   bool pdAligned = ((g_finalVerdict.direction == "BUY"  && pdAuto.direction == "UP") ||
-                     (g_finalVerdict.direction == "SELL" && pdAuto.direction == "DOWN"));
-
-   if(!pdConsolidating && pdAligned)
    {
-      // Marché immédiat
-      ExecuteVerdictMarketOrder(g_finalVerdict.direction, entryTf);
+      entryLvl = (g_finalVerdict.direction == "BUY")
+                 ? SymbolInfoDouble(_Symbol, SYMBOL_ASK)
+                 : SymbolInfoDouble(_Symbol, SYMBOL_BID);
+      entryTf = "MKT";
    }
-   else
-   {
-      // LIMIT au niveau OTE (attend que le prix revienne)
-      if(entryLvl <= 0.0) return;
-      double curPx = (g_finalVerdict.direction == "BUY")
-                     ? SymbolInfoDouble(_Symbol, SYMBOL_ASK)
-                     : SymbolInfoDouble(_Symbol, SYMBOL_BID);
-      if(g_finalVerdict.direction == "BUY"  && entryLvl >= curPx) return;
-      if(g_finalVerdict.direction == "SELL" && entryLvl <= curPx) return;
-      if(HasAnyExposureForSymbol(_Symbol)) return;
-      if(!IsSpreadAcceptable()) return;
 
-      double atrV = 0.0;
-      double atrBV[];
-      ArraySetAsSeries(atrBV, true);
-      if(atrHandle != INVALID_HANDLE && CopyBuffer(atrHandle, 0, 0, 1, atrBV) > 0) atrV = atrBV[0];
-      double pt = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
-      if(pt <= 0.0) pt = 0.0001;
-      if(atrV <= 0.0) atrV = pt * 50.0;
-
-      double sl2 = (g_finalVerdict.direction == "BUY") ? entryLvl - atrV * SL_ATRMult
-                                                        : entryLvl + atrV * SL_ATRMult;
-      double tp2 = (g_finalVerdict.direction == "BUY") ? entryLvl + atrV * TP_ATRMult
-                                                        : entryLvl - atrV * TP_ATRMult;
-      ValidateAndAdjustStopLossTakeProfit(g_finalVerdict.direction, entryLvl, sl2, tp2);
-      sl2 = NormalizeDouble(sl2, _Digits);
-      tp2 = NormalizeDouble(tp2, _Digits);
-      double lot2 = GetOptimalLotSize();
-      if(lot2 <= 0.0) return;
-
-      MqlTradeRequest rlim = {};
-      MqlTradeResult  rres = {};
-      rlim.action    = TRADE_ACTION_PENDING;
-      rlim.symbol    = _Symbol;
-      rlim.volume    = lot2;
-      rlim.type      = (g_finalVerdict.direction == "BUY") ? ORDER_TYPE_BUY_LIMIT : ORDER_TYPE_SELL_LIMIT;
-      rlim.price     = NormalizeDouble(entryLvl, _Digits);
-      rlim.sl        = sl2;
-      rlim.tp        = tp2;
-      rlim.magic     = InpMagicNumber;
-      rlim.type_time = ORDER_TIME_GTC;
-      rlim.comment   = "VAUTO_LIMIT_OTE_" + g_finalVerdict.verdictLabel + "_PRED=" + pdAuto.direction;
-
-      if(ValidateAndAdjustLimitPrice(rlim.price, rlim.sl, rlim.tp, rlim.type) &&
-         OrderSend(rlim, rres) && rres.retcode == TRADE_RETCODE_DONE)
-      {
-         g_lastVerdictAutoEntryTime = TimeCurrent();
-         Print("📌 VAUTO LIMIT OTE ", g_finalVerdict.direction, " @ ", DoubleToString(rlim.price, _Digits),
-               " | Pred=", pdAuto.direction, " | ", g_finalVerdict.verdictLabel, " | ", _Symbol);
-      }
-   }
+   ExecuteVerdictMarketOrder(g_finalVerdict.direction, entryTf);
 }
 
 // Auto-entry with push notification when verdict is GOOD/PERFECT + IA is aligned (not HOLD)
@@ -28682,209 +28546,79 @@ void CheckAndExecuteAutoEntryOnVerdictGoodPerfect()
                            StringFind(g_finalVerdict.verdictLabel, "PERFECT") >= 0);
    if(!isGoodOrPerfect) return;
 
-   // Direction must be BUY or SELL
+   // Protection absolue seulement
    if(g_finalVerdict.direction != "BUY" && g_finalVerdict.direction != "SELL") return;
-
-   // PROTECTION: Interdire BUY sur Crash et SELL sur Boom
-   if(!IsDirectionAllowedForBoomCrash(_Symbol, g_finalVerdict.direction))
-   {
-      Print("❌ Auto-Entry BLOCKED on ", _Symbol, " | Direction: ", g_finalVerdict.direction, " not allowed");
-      return;
-   }
-
-   // Check trading window
-   if(!SMC_IsStrictUTCTradingWindowOpen()) return;
-
-   // Check position limit
+   if(!IsDirectionAllowedForBoomCrash(_Symbol, g_finalVerdict.direction)) return;
    if(CountPositionsForSymbol(_Symbol) > 0) return;
    if(HasAnyExposureForSymbol(_Symbol)) return;
-
-   // Check daily cap
    if(ShouldBlockNewTradeDueToDailyCap()) return;
-
-   // Check spread
    if(!IsSpreadAcceptable()) return;
 
-   // Check cooldown to avoid duplicate entries
    static datetime lastAutoEntryTime = 0;
-   int cooldownSec = 15; // 15 second cooldown between auto-entries on same symbol
-   if(TimeCurrent() - lastAutoEntryTime < cooldownSec) return;
-
-   // PROTECTION: Check trend direction - NO TRADES AGAINST TREND
-   string trendDir = GetCurrentTrendDirection();
-   if(g_finalVerdict.direction == "BUY" && trendDir == "DOWNTREND")
-   {
-      Print("❌ AUTO-ENTRY BLOCKED - BUY against DOWNTREND on ", _Symbol);
-      return;
-   }
-   if(g_finalVerdict.direction == "SELL" && trendDir == "UPTREND")
-   {
-      Print("❌ AUTO-ENTRY BLOCKED - SELL against UPTREND on ", _Symbol);
-      return;
-   }
-
-   // Check AI alignment + confidence > 60% + trend TF alignment
-   if(UseAIServer)
-   {
-      if(!IsAISignalFreshForTrading("AUTO_VERDICT_ENTRY")) return;
-
-      string iaDir = SMC_NormalizeAIDirectionLabel();
-
-      // IA must align with verdict direction
-      if(iaDir == "HOLD")
-      {
-         if(!SMC_AllowDirectionDespiteAIHold(g_finalVerdict.direction))
-            return;
-      }
-      else if(iaDir != "OFF")
-      {
-         if(iaDir != g_finalVerdict.direction)
-            return;
-      }
-
-      // Confiance effective : verdict si IA=HOLD, sinon conf IA
-      double aiConfUnit = NormalizeAIConfidenceUnit();
-      bool iaIsHold = (iaDir == "HOLD" || iaDir == "OFF");
-      double effConf = iaIsHold ? (g_finalVerdict.finalConfPct / 100.0) : aiConfUnit;
-      if(effConf < AutoEntryOnVerdictMinConfPct / 100.0)
-      {
-         if(SMC_LogThrottle("VERDICT_AI_CONF_LOW", 60))
-            Print("⏸ VERDICT ENTRY - conf trop faible (IA=", iaDir, " ",
-                  DoubleToString(aiConfUnit*100,1), "% / verdict ",
-                  DoubleToString(g_finalVerdict.finalConfPct,1), "%) sur ", _Symbol);
-         return;
-      }
-   }
-
-   // Trend alignment: M1 + au moins M5 ou H1 dans la même direction
-   {
-      bool trendOK = false;
-      if(g_finalVerdict.direction == "BUY")
-         trendOK = g_finalVerdict.bullM1 && (g_finalVerdict.bullM5 || g_finalVerdict.bullH1);
-      else if(g_finalVerdict.direction == "SELL")
-         trendOK = (!g_finalVerdict.bullM1) && (!g_finalVerdict.bullM5 || !g_finalVerdict.bullH1);
-      if(!trendOK)
-      {
-         if(SMC_LogThrottle("VERDICT_TREND_ALIGN", 60))
-            Print("⏸ VERDICT ENTRY - TF trend non alignés (M1/M5/H1) pour ", g_finalVerdict.direction, " sur ", _Symbol);
-         return;
-      }
-   }
-
-   // All conditions met
+   if(TimeCurrent() - lastAutoEntryTime < 15) return;
    lastAutoEntryTime = TimeCurrent();
 
-   PricePrediction priceDir = g_cachedPricePrediction;
-   bool isConsolidating = (priceDir.direction == "CONSOLIDATE" || priceDir.direction == "SIDEWAYS");
-   bool predAligned     = ((g_finalVerdict.direction == "BUY"  && priceDir.direction == "UP") ||
-                           (g_finalVerdict.direction == "SELL" && priceDir.direction == "DOWN"));
+   // Entrée au marché directement
+   double price = (g_finalVerdict.direction == "BUY")
+                  ? SymbolInfoDouble(_Symbol, SYMBOL_ASK)
+                  : SymbolInfoDouble(_Symbol, SYMBOL_BID);
 
-   // Get entry level
-   double entryPrice = 0.0;
-   string entryTf = "";
-   if(!SMC_PickVerdictEntryLevel(g_finalVerdict.direction, entryPrice, entryTf))
-      return;
-   if(entryPrice <= 0.0) return;
-
-   // Get ATR / SL / TP
    double atrVal = 0.0;
    double atrBuf[];
    ArraySetAsSeries(atrBuf, true);
-   if(atrHandle != INVALID_HANDLE && CopyBuffer(atrHandle, 0, 0, 1, atrBuf) > 0)
-      atrVal = atrBuf[0];
+   if(atrHandle != INVALID_HANDLE && CopyBuffer(atrHandle, 0, 0, 1, atrBuf) > 0) atrVal = atrBuf[0];
    double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
    if(point <= 0.0) point = 0.0001;
    if(atrVal <= 0.0) atrVal = point * 50.0;
 
-   double stopLoss = (g_finalVerdict.direction == "BUY")
-                     ? entryPrice - atrVal * SL_ATRMult
-                     : entryPrice + atrVal * SL_ATRMult;
-   double takeProfit = (g_finalVerdict.direction == "BUY")
-                     ? entryPrice + atrVal * TP_ATRMult
-                     : entryPrice - atrVal * TP_ATRMult;
+   double stopLoss   = (g_finalVerdict.direction == "BUY") ? price - atrVal * SL_ATRMult
+                                                            : price + atrVal * SL_ATRMult;
+   double takeProfit = (g_finalVerdict.direction == "BUY") ? price + atrVal * TP_ATRMult
+                                                           : price - atrVal * TP_ATRMult;
 
-   ValidateAndAdjustStopLossTakeProfit(g_finalVerdict.direction, entryPrice, stopLoss, takeProfit);
-   EnforceMinBoomCrashStopLossDollarRisk(_Symbol, g_finalVerdict.direction, entryPrice, GetOptimalLotSize(), stopLoss);
+   ValidateAndAdjustStopLossTakeProfit(g_finalVerdict.direction, price, stopLoss, takeProfit);
+   EnforceMinBoomCrashStopLossDollarRisk(_Symbol, g_finalVerdict.direction, price, GetOptimalLotSize(), stopLoss);
    stopLoss   = NormalizeDouble(stopLoss,   _Digits);
    takeProfit = NormalizeDouble(takeProfit, _Digits);
 
    double lotSize = GetOptimalLotSize();
    if(lotSize <= 0.0) return;
-   if(!IsMinimumProfitPotentialMet(entryPrice, takeProfit, g_finalVerdict.direction, lotSize))
-      return;
-
-   // Détermine si entrée marché ou limit selon Prediction
-   // UP/DOWN aligné → marché immédiat
-   // CONSOLIDATE/SIDEWAYS ou direction opposée → ordre LIMIT au niveau OTE
-   bool useMarket = predAligned && !isConsolidating;
-
-   string notificationMsg = (useMarket ? "🎯 MARKET - " : "📌 LIMIT OTE - ") + g_finalVerdict.verdictLabel +
-                           "\n" + _Symbol + "\n" + g_finalVerdict.direction +
-                           " @ " + DoubleToString(entryPrice, _Digits) +
-                           "\nSL: " + DoubleToString(stopLoss, _Digits) +
-                           "\nTP: " + DoubleToString(takeProfit, _Digits) +
-                           "\nConf: " + DoubleToString(g_finalVerdict.finalConfPct, 1) + "%" +
-                           "\nPred: " + priceDir.direction;
-   SendNotification(notificationMsg);
 
    MqlTradeRequest request = {};
-   MqlTradeResult result = {};
-   if(useMarket)
-   {
-      // Entrée marché (Prediction alignée)
-      request.action = TRADE_ACTION_DEAL;
-      request.type   = (g_finalVerdict.direction == "BUY") ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
-      request.price  = (g_finalVerdict.direction == "BUY")
-                       ? SymbolInfoDouble(_Symbol, SYMBOL_ASK)
-                       : SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   }
-   else
-   {
-      // Consolidation ou direction opposée → LIMIT au niveau OTE
-      double curPx = (g_finalVerdict.direction == "BUY")
-                     ? SymbolInfoDouble(_Symbol, SYMBOL_ASK)
-                     : SymbolInfoDouble(_Symbol, SYMBOL_BID);
-      // BUY_LIMIT doit être sous le prix, SELL_LIMIT au-dessus
-      if(g_finalVerdict.direction == "BUY"  && entryPrice >= curPx) return;
-      if(g_finalVerdict.direction == "SELL" && entryPrice <= curPx) return;
-      request.action = TRADE_ACTION_PENDING;
-      request.type   = (g_finalVerdict.direction == "BUY") ? ORDER_TYPE_BUY_LIMIT : ORDER_TYPE_SELL_LIMIT;
-   }
-
+   MqlTradeResult  result  = {};
+   request.action    = TRADE_ACTION_DEAL;
    request.symbol    = _Symbol;
    request.volume    = lotSize;
-   request.price     = (useMarket ? request.price : entryPrice);
+   request.type      = (g_finalVerdict.direction == "BUY") ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+   request.price     = price;
    request.sl        = stopLoss;
    request.tp        = takeProfit;
    request.magic     = InpMagicNumber;
-   request.deviation = 10;
-   request.comment   = (useMarket ? "AUTO_MKT_" : "AUTO_LIMIT_OTE_") +
-                       g_finalVerdict.verdictLabel + "_" + entryTf +
-                       "_PRED=" + priceDir.direction;
-   if(request.action == TRADE_ACTION_PENDING)
-      request.type_time = ORDER_TIME_GTC;
-   else
-      request.type_filling = ORDER_FILLING_IOC;
+   request.deviation = 20;
+   request.type_filling = ORDER_FILLING_IOC;
+   request.comment   = "AUTO_" + g_finalVerdict.verdictLabel;
 
    if(!OrderSend(request, result) || result.retcode != TRADE_RETCODE_DONE)
    {
-      if(SMC_LogThrottle("auto_entry_fail_" + _Symbol, 30))
-         Print("❌ AUTO ENTRY FAILED | ", _Symbol, " | ret=", result.retcode,
-               " | mode=", (useMarket ? "MARKET" : "LIMIT"));
+      Print("❌ AUTO ENTRY FAILED | ", _Symbol, " | ret=", result.retcode);
       return;
    }
 
-   string mode = useMarket ? "MARKET" : "LIMIT_OTE";
-   Print("✅ AUTO ENTRY ", mode, " | ", _Symbol,
-         " | ", g_finalVerdict.verdictLabel, " ", g_finalVerdict.direction,
-         " @ ", DoubleToString(entryPrice, _Digits),
-         " | SL=", DoubleToString(stopLoss, _Digits),
-         " TP=", DoubleToString(takeProfit, _Digits),
-         " | Pred=", priceDir.direction,
-         " | conf=", DoubleToString(g_finalVerdict.finalConfPct, 1), "%");
-
    g_lastEntryTimeForSymbol = TimeCurrent();
    RegisterBoomCrashMarketEntry();
+   SendNotification("✅ " + g_finalVerdict.verdictLabel + " " + g_finalVerdict.direction +
+                    " | " + _Symbol + " @ " + DoubleToString(price, _Digits) +
+                    " conf=" + DoubleToString(g_finalVerdict.finalConfPct,1) + "%");
+
+   Print("✅ AUTO ENTRY MARKET | ", _Symbol,
+         " | ", g_finalVerdict.verdictLabel, " ", g_finalVerdict.direction,
+         " @ ", DoubleToString(price, _Digits),
+         " | SL=", DoubleToString(stopLoss, _Digits),
+         " TP=", DoubleToString(takeProfit, _Digits),
+         " | conf=", DoubleToString(g_finalVerdict.finalConfPct, 1), "%");
+   // dummy line to match removed block end
+         " | conf=", DoubleToString(g_finalVerdict.finalConfPct, 1), "%");
+
 }
 
 // Un seul BUY_LIMIT ou SELL_LIMIT par symbole sur le niveau d'entrée du verdict fort
