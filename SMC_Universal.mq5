@@ -2575,7 +2575,7 @@ input group "=== AI SERVER (confirmation signaux) ==="
 input bool   UseAIServer       = true;   // Utiliser le serveur IA pour confirmation
 input string AI_ServerURL       = "http://127.0.0.1:8000";  // URL du serveur IA local
 input string AI_ServerRender    = "https://kolatradebot.onrender.com";  // URL render en fallback
-input int    AI_Timeout_ms     = 5000;   // Timeout WebRequest (ms)
+input int    AI_Timeout_ms     = 3000;   // Timeout WebRequest primaire (ms) — basculer vite sur fallback
 input int    AI_UpdateInterval_Seconds = 120;  // Intervalle mise à jour IA (secondes)
 input int    AI_DecisionCacheSeconds = 30;       // Cache réponse POST /decision (0 = désactivé, debug live)
 input bool   BlockNewEntriesOnAIDisconnect = true; // Bloquer nouvelles entrées si IA déconnectée/stale
@@ -28324,6 +28324,15 @@ void SMC_ComputeAndStoreFinalVerdict()
    finalScore = MathMax(-1.0, MathMin(1.0, finalScore));
    g_finalVerdict.finalScore = finalScore;
 
+   // Forcer la direction selon la contrainte Boom/Crash avant d'évaluer le verdict
+   // Crash = SELL uniquement, Boom = BUY uniquement
+   bool isBoomSym  = IsBoomSymbol(_Symbol);
+   bool isCrashSym = IsCrashSymbol(_Symbol);
+   if(isBoomSym && finalScore < 0.0)
+      finalScore = MathAbs(finalScore) * 0.50; // atténuer le signal SELL en territoire neutre
+   if(isCrashSym && finalScore > 0.0)
+      finalScore = -MathAbs(finalScore) * 0.50; // atténuer le signal BUY et l'inverser
+
    string verdict = "WAIT";
    string direction = "WAIT";
    if(MathAbs(finalScore) < GOOD_THRESHOLD)
@@ -28341,6 +28350,10 @@ void SMC_ComputeAndStoreFinalVerdict()
       direction = "SELL";
       verdict = (finalScore <= -PERFECT_THRESHOLD) ? "PERFECT SELL" : "GOOD SELL";
    }
+
+   // Garde-fou final : jamais BUY sur Crash ni SELL sur Boom
+   if(isBoomSym  && direction == "SELL") { direction = "WAIT"; verdict = "WAIT"; }
+   if(isCrashSym && direction == "BUY")  { direction = "WAIT"; verdict = "WAIT"; }
 
    g_finalVerdict.direction = direction;
    g_finalVerdict.verdictLabel = verdict;
