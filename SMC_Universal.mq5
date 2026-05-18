@@ -4667,6 +4667,10 @@ bool SMC_PickVerdictEntryLevel(const string direction, double &levelOut, string 
                   : SymbolInfoDouble(_Symbol, SYMBOL_BID);
    if(refPx <= 0.0) return false;
 
+   // PERFECT verdict → priorité M1 pour capter les spikes
+   // GOOD verdict   → priorité M5 et M30 (mouvement plus large)
+   bool isPerfect = (StringFind(g_finalVerdict.verdictLabel, "PERFECT") >= 0);
+
    string tfs[];
    double lvls[];
    ArrayResize(tfs, 0);
@@ -4674,12 +4678,13 @@ bool SMC_PickVerdictEntryLevel(const string direction, double &levelOut, string 
 
    if(direction == "BUY")
    {
-      if(AutoEntryPreferM5OverM1)
+      if(isPerfect)
       {
-         if(g_finalVerdict.m5BuyActive && g_finalVerdict.m5BuyEntryLevel > 0.0)
-         { int n=ArraySize(tfs); ArrayResize(tfs,n+1); ArrayResize(lvls,n+1); tfs[n]="M5"; lvls[n]=g_finalVerdict.m5BuyEntryLevel; }
+         // PERFECT BUY : M1 d'abord pour spike Boom immédiat
          if(g_finalVerdict.m1EntryLevel > 0.0)
          { int n=ArraySize(tfs); ArrayResize(tfs,n+1); ArrayResize(lvls,n+1); tfs[n]="M1"; lvls[n]=g_finalVerdict.m1EntryLevel; }
+         if(g_finalVerdict.m5BuyActive && g_finalVerdict.m5BuyEntryLevel > 0.0)
+         { int n=ArraySize(tfs); ArrayResize(tfs,n+1); ArrayResize(lvls,n+1); tfs[n]="M5"; lvls[n]=g_finalVerdict.m5BuyEntryLevel; }
          if(g_finalVerdict.m30EntryLevel > 0.0)
          { int n=ArraySize(tfs); ArrayResize(tfs,n+1); ArrayResize(lvls,n+1); tfs[n]="M30"; lvls[n]=g_finalVerdict.m30EntryLevel; }
          if(g_finalVerdict.h1EntryLevel > 0.0)
@@ -4687,24 +4692,26 @@ bool SMC_PickVerdictEntryLevel(const string direction, double &levelOut, string 
       }
       else
       {
-         if(g_finalVerdict.m1EntryLevel > 0.0)
-         { int n=ArraySize(tfs); ArrayResize(tfs,n+1); ArrayResize(lvls,n+1); tfs[n]="M1"; lvls[n]=g_finalVerdict.m1EntryLevel; }
+         // GOOD BUY : M5/M30 d'abord pour mouvement haussier confirmé
          if(g_finalVerdict.m5BuyActive && g_finalVerdict.m5BuyEntryLevel > 0.0)
          { int n=ArraySize(tfs); ArrayResize(tfs,n+1); ArrayResize(lvls,n+1); tfs[n]="M5"; lvls[n]=g_finalVerdict.m5BuyEntryLevel; }
          if(g_finalVerdict.m30EntryLevel > 0.0)
          { int n=ArraySize(tfs); ArrayResize(tfs,n+1); ArrayResize(lvls,n+1); tfs[n]="M30"; lvls[n]=g_finalVerdict.m30EntryLevel; }
+         if(g_finalVerdict.m1EntryLevel > 0.0)
+         { int n=ArraySize(tfs); ArrayResize(tfs,n+1); ArrayResize(lvls,n+1); tfs[n]="M1"; lvls[n]=g_finalVerdict.m1EntryLevel; }
          if(g_finalVerdict.h1EntryLevel > 0.0)
          { int n=ArraySize(tfs); ArrayResize(tfs,n+1); ArrayResize(lvls,n+1); tfs[n]="H1"; lvls[n]=g_finalVerdict.h1EntryLevel; }
       }
    }
    else
    {
-      if(AutoEntryPreferM5OverM1)
+      if(isPerfect)
       {
-         if(g_finalVerdict.m5SellActive && g_finalVerdict.m5SellEntryLevel > 0.0)
-         { int n=ArraySize(tfs); ArrayResize(tfs,n+1); ArrayResize(lvls,n+1); tfs[n]="M5"; lvls[n]=g_finalVerdict.m5SellEntryLevel; }
+         // PERFECT SELL : M1 d'abord pour spike Crash immédiat
          if(g_finalVerdict.m1EntryLevel > 0.0)
          { int n=ArraySize(tfs); ArrayResize(tfs,n+1); ArrayResize(lvls,n+1); tfs[n]="M1"; lvls[n]=g_finalVerdict.m1EntryLevel; }
+         if(g_finalVerdict.m5SellActive && g_finalVerdict.m5SellEntryLevel > 0.0)
+         { int n=ArraySize(tfs); ArrayResize(tfs,n+1); ArrayResize(lvls,n+1); tfs[n]="M5"; lvls[n]=g_finalVerdict.m5SellEntryLevel; }
          if(g_finalVerdict.m30EntryLevel > 0.0)
          { int n=ArraySize(tfs); ArrayResize(tfs,n+1); ArrayResize(lvls,n+1); tfs[n]="M30"; lvls[n]=g_finalVerdict.m30EntryLevel; }
          if(g_finalVerdict.h1EntryLevel > 0.0)
@@ -4712,12 +4719,13 @@ bool SMC_PickVerdictEntryLevel(const string direction, double &levelOut, string 
       }
       else
       {
-         if(g_finalVerdict.m1EntryLevel > 0.0)
-         { int n=ArraySize(tfs); ArrayResize(tfs,n+1); ArrayResize(lvls,n+1); tfs[n]="M1"; lvls[n]=g_finalVerdict.m1EntryLevel; }
+         // GOOD SELL : M5/M30 d'abord pour mouvement baissier confirmé
          if(g_finalVerdict.m5SellActive && g_finalVerdict.m5SellEntryLevel > 0.0)
          { int n=ArraySize(tfs); ArrayResize(tfs,n+1); ArrayResize(lvls,n+1); tfs[n]="M5"; lvls[n]=g_finalVerdict.m5SellEntryLevel; }
          if(g_finalVerdict.m30EntryLevel > 0.0)
          { int n=ArraySize(tfs); ArrayResize(tfs,n+1); ArrayResize(lvls,n+1); tfs[n]="M30"; lvls[n]=g_finalVerdict.m30EntryLevel; }
+         if(g_finalVerdict.m1EntryLevel > 0.0)
+         { int n=ArraySize(tfs); ArrayResize(tfs,n+1); ArrayResize(lvls,n+1); tfs[n]="M1"; lvls[n]=g_finalVerdict.m1EntryLevel; }
          if(g_finalVerdict.h1EntryLevel > 0.0)
          { int n=ArraySize(tfs); ArrayResize(tfs,n+1); ArrayResize(lvls,n+1); tfs[n]="H1"; lvls[n]=g_finalVerdict.h1EntryLevel; }
       }
@@ -28070,6 +28078,33 @@ void CheckAndExecuteVerdictAutoEntry()
       }
    }
 
+   // IA confidence > 60% requise pour entrées à fort potentiel de spike
+   if(UseAIServer)
+   {
+      double aiConfUnit = NormalizeAIConfidenceUnit();
+      if(aiConfUnit < 0.60)
+      {
+         if(SMC_LogThrottle("VERDICT_AUTO_CONF_LOW", 60))
+            Print("⏸ VERDICT AUTO - IA conf trop faible (", DoubleToString(aiConfUnit*100,1), "% < 60%) sur ", _Symbol);
+         return;
+      }
+   }
+
+   // TF alignment requis : M1 + (M5 ou H1) dans la direction du verdict
+   {
+      bool trendOK = false;
+      if(g_finalVerdict.direction == "BUY")
+         trendOK = g_finalVerdict.bullM1 && (g_finalVerdict.bullM5 || g_finalVerdict.bullH1);
+      else if(g_finalVerdict.direction == "SELL")
+         trendOK = (!g_finalVerdict.bullM1) && (!g_finalVerdict.bullM5 || !g_finalVerdict.bullH1);
+      if(!trendOK)
+      {
+         if(SMC_LogThrottle("VERDICT_AUTO_TREND", 60))
+            Print("⏸ VERDICT AUTO - TF trend non alignés (M1/M5/H1) pour ", g_finalVerdict.direction, " sur ", _Symbol);
+         return;
+      }
+   }
+
    double entryLvl = 0.0;
    string entryTf = "";
    if(!SMC_PickVerdictEntryLevel(g_finalVerdict.direction, entryLvl, entryTf))
@@ -28132,24 +28167,47 @@ void CheckAndExecuteAutoEntryOnVerdictGoodPerfect()
       return;
    }
 
-   // Check AI alignment (IA must NOT be HOLD, or must be aligned with direction)
+   // Check AI alignment + confidence > 60% + trend TF alignment
    if(UseAIServer)
    {
       if(!IsAISignalFreshForTrading("AUTO_VERDICT_ENTRY")) return;
 
       string iaDir = SMC_NormalizeAIDirectionLabel();
 
-      // If IA says HOLD, we need special permission to proceed
+      // IA must align with verdict direction
       if(iaDir == "HOLD")
       {
          if(!SMC_AllowDirectionDespiteAIHold(g_finalVerdict.direction))
-            return; // IA is HOLD and verdict not strong enough to override
+            return;
       }
       else if(iaDir != "OFF")
       {
-         // IA is not HOLD - it must align with verdict direction
          if(iaDir != g_finalVerdict.direction)
-            return; // IA disagrees with verdict direction
+            return;
+      }
+
+      // IA confidence must exceed 60% for spike-prone entries
+      double aiConfUnit = NormalizeAIConfidenceUnit();
+      if(aiConfUnit < 0.60)
+      {
+         if(SMC_LogThrottle("VERDICT_AI_CONF_LOW", 60))
+            Print("⏸ VERDICT ENTRY - IA conf trop faible (", DoubleToString(aiConfUnit*100,1), "% < 60%) sur ", _Symbol);
+         return;
+      }
+   }
+
+   // Trend alignment: M1 + au moins M5 ou H1 dans la même direction
+   {
+      bool trendOK = false;
+      if(g_finalVerdict.direction == "BUY")
+         trendOK = g_finalVerdict.bullM1 && (g_finalVerdict.bullM5 || g_finalVerdict.bullH1);
+      else if(g_finalVerdict.direction == "SELL")
+         trendOK = (!g_finalVerdict.bullM1) && (!g_finalVerdict.bullM5 || !g_finalVerdict.bullH1);
+      if(!trendOK)
+      {
+         if(SMC_LogThrottle("VERDICT_TREND_ALIGN", 60))
+            Print("⏸ VERDICT ENTRY - TF trend non alignés (M1/M5/H1) pour ", g_finalVerdict.direction, " sur ", _Symbol);
+         return;
       }
    }
 
