@@ -48,7 +48,10 @@ from slowapi import Limiter
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 
-# Load environment variables from .env
+# Load environment variables (.env racine + python/.env pour RDS)
+_root_dir = Path(__file__).resolve().parent
+load_dotenv(_root_dir / "python" / ".env")
+load_dotenv(_root_dir / ".env")
 load_dotenv()
 
 # === ENVIRONMENT VALIDATION ===
@@ -7453,6 +7456,43 @@ async def health_check():
         "CACHE_DURATION_SECONDS": CACHE_DURATION,
     }
 
+
+@app.get("/health/rds")
+async def health_rds():
+    """Diagnostic connexion AWS RDS (Render + local → même base)."""
+    host = os.getenv("AWS_RDS_HOST") or os.getenv("RDS_HOST")
+    database = os.getenv("AWS_RDS_DATABASE") or os.getenv("RDS_DATABASE")
+    out = {
+        "rds_configured": bool(host and database),
+        "host": host or "",
+        "database": database or "",
+        "aws_rds_module": AWS_RDS_AVAILABLE,
+        "use_supabase": _env_bool("USE_SUPABASE", False),
+        "ping_ok": False,
+        "tables": {},
+    }
+    if not AWS_RDS_AVAILABLE or not host:
+        out["error"] = "RDS non configuré (voir python/.env ou .env)"
+        return out
+    try:
+        ping = await asyncio.to_thread(
+            aws_rds_client.execute_query, "SELECT 1 AS ok", ()
+        )
+        out["ping_ok"] = bool(ping)
+        for table in ("trade_feedback", "model_metrics", "symbol_trade_stats"):
+            try:
+                rows = await asyncio.to_thread(
+                    aws_rds_client.execute_query,
+                    f"SELECT COUNT(*)::int AS c FROM {table}",
+                    (),
+                )
+                out["tables"][table] = int(rows[0]["c"]) if rows else -1
+            except Exception as te:
+                out["tables"][table] = f"missing: {str(te)[:80]}"
+    except Exception as e:
+        out["error"] = str(e)[:200]
+    return out
+
 @app.post("/ml/start")
 async def start_ml_trainer():
     """Démarre le système d'entraînement continu"""
@@ -8164,7 +8204,22 @@ def _fetch_ml_metrics_for_symbol_from_rds(symbol: str, timeframe: str = "M1") ->
     fb_total = int(fb.get("feedback_total") or 0)
 
     if not row and fb_total == 0:
-        return None
+        return {
+            "symbol": symbol,
+            "timeframe": tf,
+            "accuracy": "0.0",
+            "model_name": "awaiting_rds_data",
+            "total_samples": "0",
+            "training_samples": 0,
+            "feedback_wins": 0,
+            "feedback_losses": 0,
+            "status": "collecting_data",
+            "best_model": "random_forest",
+            "last_update": datetime.utcnow().isoformat(),
+            "data_source": "aws_rds",
+            "rds_connected": True,
+            "supabase_connected": False,
+        }
 
     meta: Dict[str, Any] = {}
     acc_pct = 70.0
