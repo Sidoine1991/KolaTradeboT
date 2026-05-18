@@ -28593,32 +28593,73 @@ void CheckAndExecuteVerdictAutoEntry()
       }
    }
 
-   // Filtre Prediction final : CONSOLIDATE/SIDEWAYS → pas de trade, UP/DOWN → valider
-   {
-      PricePrediction pdAuto = g_cachedPricePrediction;
-      if(pdAuto.direction == "CONSOLIDATE" || pdAuto.direction == "SIDEWAYS")
-      {
-         if(SMC_LogThrottle("VAUTO_PRED_CONSOL_" + _Symbol, 30))
-            Print("⏸ VERDICT AUTO bloqué - Prediction=", pdAuto.direction, " | ", _Symbol);
-         return;
-      }
-      bool autoAligned = ((g_finalVerdict.direction == "BUY"  && pdAuto.direction == "UP") ||
-                          (g_finalVerdict.direction == "SELL" && pdAuto.direction == "DOWN"));
-      if(!autoAligned)
-      {
-         if(SMC_LogThrottle("VAUTO_PRED_DIR_" + _Symbol, 30))
-            Print("⏸ VERDICT AUTO bloqué - Prediction=", pdAuto.direction,
-                  " ≠ ", g_finalVerdict.direction, " | ", _Symbol);
-         return;
-      }
-   }
-
    double entryLvl = 0.0;
    string entryTf = "";
    if(!SMC_PickVerdictEntryLevel(g_finalVerdict.direction, entryLvl, entryTf))
       return;
 
-   ExecuteVerdictMarketOrder(g_finalVerdict.direction, entryTf);
+   // Prediction : UP/DOWN aligné → marché, CONSOLIDATE ou direction opposée → LIMIT OTE
+   PricePrediction pdAuto = g_cachedPricePrediction;
+   bool pdConsolidating = (pdAuto.direction == "CONSOLIDATE" || pdAuto.direction == "SIDEWAYS");
+   bool pdAligned = ((g_finalVerdict.direction == "BUY"  && pdAuto.direction == "UP") ||
+                     (g_finalVerdict.direction == "SELL" && pdAuto.direction == "DOWN"));
+
+   if(!pdConsolidating && pdAligned)
+   {
+      // Marché immédiat
+      ExecuteVerdictMarketOrder(g_finalVerdict.direction, entryTf);
+   }
+   else
+   {
+      // LIMIT au niveau OTE (attend que le prix revienne)
+      if(entryLvl <= 0.0) return;
+      double curPx = (g_finalVerdict.direction == "BUY")
+                     ? SymbolInfoDouble(_Symbol, SYMBOL_ASK)
+                     : SymbolInfoDouble(_Symbol, SYMBOL_BID);
+      if(g_finalVerdict.direction == "BUY"  && entryLvl >= curPx) return;
+      if(g_finalVerdict.direction == "SELL" && entryLvl <= curPx) return;
+      if(HasAnyExposureForSymbol(_Symbol)) return;
+      if(!IsSpreadAcceptable()) return;
+
+      double atrV = 0.0;
+      double atrBV[];
+      ArraySetAsSeries(atrBV, true);
+      if(atrHandle != INVALID_HANDLE && CopyBuffer(atrHandle, 0, 0, 1, atrBV) > 0) atrV = atrBV[0];
+      double pt = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+      if(pt <= 0.0) pt = 0.0001;
+      if(atrV <= 0.0) atrV = pt * 50.0;
+
+      double sl2 = (g_finalVerdict.direction == "BUY") ? entryLvl - atrV * SL_ATRMult
+                                                        : entryLvl + atrV * SL_ATRMult;
+      double tp2 = (g_finalVerdict.direction == "BUY") ? entryLvl + atrV * TP_ATRMult
+                                                        : entryLvl - atrV * TP_ATRMult;
+      ValidateAndAdjustStopLossTakeProfit(g_finalVerdict.direction, entryLvl, sl2, tp2);
+      sl2 = NormalizeDouble(sl2, _Digits);
+      tp2 = NormalizeDouble(tp2, _Digits);
+      double lot2 = GetOptimalLotSize();
+      if(lot2 <= 0.0) return;
+
+      MqlTradeRequest rlim = {};
+      MqlTradeResult  rres = {};
+      rlim.action    = TRADE_ACTION_PENDING;
+      rlim.symbol    = _Symbol;
+      rlim.volume    = lot2;
+      rlim.type      = (g_finalVerdict.direction == "BUY") ? ORDER_TYPE_BUY_LIMIT : ORDER_TYPE_SELL_LIMIT;
+      rlim.price     = NormalizeDouble(entryLvl, _Digits);
+      rlim.sl        = sl2;
+      rlim.tp        = tp2;
+      rlim.magic     = InpMagicNumber;
+      rlim.type_time = ORDER_TIME_GTC;
+      rlim.comment   = "VAUTO_LIMIT_OTE_" + g_finalVerdict.verdictLabel + "_PRED=" + pdAuto.direction;
+
+      if(ValidateAndAdjustLimitPrice(rlim.price, rlim.sl, rlim.tp, rlim.type) &&
+         OrderSend(rlim, rres) && rres.retcode == TRADE_RETCODE_DONE)
+      {
+         g_lastVerdictAutoEntryTime = TimeCurrent();
+         Print("📌 VAUTO LIMIT OTE ", g_finalVerdict.direction, " @ ", DoubleToString(rlim.price, _Digits),
+               " | Pred=", pdAuto.direction, " | ", g_finalVerdict.verdictLabel, " | ", _Symbol);
+      }
+   }
 }
 
 // Auto-entry with push notification when verdict is GOOD/PERFECT + IA is aligned (not HOLD)
@@ -28723,41 +28764,22 @@ void CheckAndExecuteAutoEntryOnVerdictGoodPerfect()
       }
    }
 
-   // All conditions met - proceed with entry
+   // All conditions met
    lastAutoEntryTime = TimeCurrent();
 
-   // Filtre Prediction : CONSOLIDATE/SIDEWAYS → pas de trade
-   // UP ou DOWN → valider quelle que soit la probabilité (règle déterminante finale)
    PricePrediction priceDir = g_cachedPricePrediction;
-   if(priceDir.direction == "CONSOLIDATE" || priceDir.direction == "SIDEWAYS")
-   {
-      if(SMC_LogThrottle("VERDICT_PRED_CONSOL_" + _Symbol, 30))
-         Print("⏸ VERDICT bloqué - Prediction=", priceDir.direction,
-               " (Sideways/Consolidation) | verdict=", g_finalVerdict.verdictLabel,
-               " | ", _Symbol);
-      return;
-   }
-   // Vérifier alignement direction
-   bool predAligned = ((g_finalVerdict.direction == "BUY"  && priceDir.direction == "UP") ||
-                       (g_finalVerdict.direction == "SELL" && priceDir.direction == "DOWN"));
-   if(!predAligned)
-   {
-      if(SMC_LogThrottle("VERDICT_PRED_DIR_" + _Symbol, 30))
-         Print("⏸ VERDICT bloqué - Prediction=", priceDir.direction,
-               " ≠ verdict=", g_finalVerdict.direction, " | ", _Symbol);
-      return;
-   }
-   // UP ou DOWN aligné → pas de filtre de probabilité (toutes validées)
+   bool isConsolidating = (priceDir.direction == "CONSOLIDATE" || priceDir.direction == "SIDEWAYS");
+   bool predAligned     = ((g_finalVerdict.direction == "BUY"  && priceDir.direction == "UP") ||
+                           (g_finalVerdict.direction == "SELL" && priceDir.direction == "DOWN"));
 
-   // Get entry level and timeframe
+   // Get entry level
    double entryPrice = 0.0;
    string entryTf = "";
    if(!SMC_PickVerdictEntryLevel(g_finalVerdict.direction, entryPrice, entryTf))
       return;
-
    if(entryPrice <= 0.0) return;
 
-   // Get current ATR for SL/TP calculation
+   // Get ATR / SL / TP
    double atrVal = 0.0;
    double atrBuf[];
    ArraySetAsSeries(atrBuf, true);
@@ -28767,90 +28789,91 @@ void CheckAndExecuteAutoEntryOnVerdictGoodPerfect()
    if(point <= 0.0) point = 0.0001;
    if(atrVal <= 0.0) atrVal = point * 50.0;
 
-   // Calculate SL: OB boundary ± 20 pips
-   double stopLoss = 0.0;
-   if(g_finalVerdict.direction == "BUY")
-   {
-      // For BUY: SL below entry at OB boundary - 20 pips
-      stopLoss = entryPrice - (atrVal * SL_ATRMult);
-   }
-   else
-   {
-      // For SELL: SL above entry at OB boundary + 20 pips
-      stopLoss = entryPrice + (atrVal * SL_ATRMult);
-   }
+   double stopLoss = (g_finalVerdict.direction == "BUY")
+                     ? entryPrice - atrVal * SL_ATRMult
+                     : entryPrice + atrVal * SL_ATRMult;
+   double takeProfit = (g_finalVerdict.direction == "BUY")
+                     ? entryPrice + atrVal * TP_ATRMult
+                     : entryPrice - atrVal * TP_ATRMult;
 
-   // Calculate TP: ATR-scaled multi-level TP
-   double takeProfit = 0.0;
-   if(g_finalVerdict.direction == "BUY")
-   {
-      takeProfit = entryPrice + (atrVal * TP_ATRMult);
-   }
-   else
-   {
-      takeProfit = entryPrice - (atrVal * TP_ATRMult);
-   }
-
-   // Validate and adjust SL/TP
    ValidateAndAdjustStopLossTakeProfit(g_finalVerdict.direction, entryPrice, stopLoss, takeProfit);
    EnforceMinBoomCrashStopLossDollarRisk(_Symbol, g_finalVerdict.direction, entryPrice, GetOptimalLotSize(), stopLoss);
-
-   stopLoss = NormalizeDouble(stopLoss, _Digits);
+   stopLoss   = NormalizeDouble(stopLoss,   _Digits);
    takeProfit = NormalizeDouble(takeProfit, _Digits);
 
-   // Get lot size
    double lotSize = GetOptimalLotSize();
    if(lotSize <= 0.0) return;
-
-   // Check minimum profit potential
    if(!IsMinimumProfitPotentialMet(entryPrice, takeProfit, g_finalVerdict.direction, lotSize))
       return;
 
-   // Send PUSH NOTIFICATION before placing order
-   string notificationMsg = "🎯 AUTO ENTRY - " + g_finalVerdict.verdictLabel +
-                           "\n" + _Symbol +
-                           "\n" + g_finalVerdict.direction +
+   // Détermine si entrée marché ou limit selon Prediction
+   // UP/DOWN aligné → marché immédiat
+   // CONSOLIDATE/SIDEWAYS ou direction opposée → ordre LIMIT au niveau OTE
+   bool useMarket = predAligned && !isConsolidating;
+
+   string notificationMsg = (useMarket ? "🎯 MARKET - " : "📌 LIMIT OTE - ") + g_finalVerdict.verdictLabel +
+                           "\n" + _Symbol + "\n" + g_finalVerdict.direction +
                            " @ " + DoubleToString(entryPrice, _Digits) +
                            "\nSL: " + DoubleToString(stopLoss, _Digits) +
                            "\nTP: " + DoubleToString(takeProfit, _Digits) +
-                           "\nConf: " + DoubleToString(g_finalVerdict.finalConfPct, 1) + "%";
+                           "\nConf: " + DoubleToString(g_finalVerdict.finalConfPct, 1) + "%" +
+                           "\nPred: " + priceDir.direction;
    SendNotification(notificationMsg);
-   Print("📲 NOTIFICATION SENT - " + g_finalVerdict.verdictLabel);
 
-   // Place LIMIT ORDER - Wait for price to touch entry level, don't trade immediately
-   // This ensures we only trade when price reaches the exact support/resistance level
    MqlTradeRequest request = {};
    MqlTradeResult result = {};
-   request.action = TRADE_ACTION_PENDING;  // LIMIT order, not market
-   request.symbol = _Symbol;
-   request.volume = lotSize;
-   request.type = (g_finalVerdict.direction == "BUY") ? ORDER_TYPE_BUY_LIMIT : ORDER_TYPE_SELL_LIMIT;
-   request.price = entryPrice;  // Wait for price to touch this level
-   request.sl = stopLoss;
-   request.tp = takeProfit;
-   request.magic = InpMagicNumber;
-   request.comment = "AUTO_LIMIT_" + g_finalVerdict.verdictLabel + "_" + entryTf;
-
-   if(!OrderSend(request, result))
+   if(useMarket)
    {
-      Print("❌ AUTO ENTRY FAILED | ", _Symbol, " | error=", result.retcode);
+      // Entrée marché (Prediction alignée)
+      request.action = TRADE_ACTION_DEAL;
+      request.type   = (g_finalVerdict.direction == "BUY") ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+      request.price  = (g_finalVerdict.direction == "BUY")
+                       ? SymbolInfoDouble(_Symbol, SYMBOL_ASK)
+                       : SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   }
+   else
+   {
+      // Consolidation ou direction opposée → LIMIT au niveau OTE
+      double curPx = (g_finalVerdict.direction == "BUY")
+                     ? SymbolInfoDouble(_Symbol, SYMBOL_ASK)
+                     : SymbolInfoDouble(_Symbol, SYMBOL_BID);
+      // BUY_LIMIT doit être sous le prix, SELL_LIMIT au-dessus
+      if(g_finalVerdict.direction == "BUY"  && entryPrice >= curPx) return;
+      if(g_finalVerdict.direction == "SELL" && entryPrice <= curPx) return;
+      request.action = TRADE_ACTION_PENDING;
+      request.type   = (g_finalVerdict.direction == "BUY") ? ORDER_TYPE_BUY_LIMIT : ORDER_TYPE_SELL_LIMIT;
+   }
+
+   request.symbol    = _Symbol;
+   request.volume    = lotSize;
+   request.price     = (useMarket ? request.price : entryPrice);
+   request.sl        = stopLoss;
+   request.tp        = takeProfit;
+   request.magic     = InpMagicNumber;
+   request.deviation = 10;
+   request.comment   = (useMarket ? "AUTO_MKT_" : "AUTO_LIMIT_OTE_") +
+                       g_finalVerdict.verdictLabel + "_" + entryTf +
+                       "_PRED=" + priceDir.direction;
+   if(request.action == TRADE_ACTION_PENDING)
+      request.type_time = ORDER_TIME_GTC;
+   else
+      request.type_filling = ORDER_FILLING_IOC;
+
+   if(!OrderSend(request, result) || result.retcode != TRADE_RETCODE_DONE)
+   {
+      if(SMC_LogThrottle("auto_entry_fail_" + _Symbol, 30))
+         Print("❌ AUTO ENTRY FAILED | ", _Symbol, " | ret=", result.retcode,
+               " | mode=", (useMarket ? "MARKET" : "LIMIT"));
       return;
    }
 
-   if(result.retcode != TRADE_RETCODE_DONE)
-   {
-      Print("❌ AUTO ENTRY REJECTED | ", _Symbol, " | retcode=", result.retcode);
-      return;
-   }
-
-   // Success - log the entry
-   Print("✅ AUTO ENTRY PLACED | ", _Symbol,
-         " | verdict=", g_finalVerdict.verdictLabel,
-         " | dir=", g_finalVerdict.direction,
-         " | entry=", DoubleToString(entryPrice, _Digits),
+   string mode = useMarket ? "MARKET" : "LIMIT_OTE";
+   Print("✅ AUTO ENTRY ", mode, " | ", _Symbol,
+         " | ", g_finalVerdict.verdictLabel, " ", g_finalVerdict.direction,
+         " @ ", DoubleToString(entryPrice, _Digits),
          " | SL=", DoubleToString(stopLoss, _Digits),
-         " | TP=", DoubleToString(takeProfit, _Digits),
-         " | lot=", DoubleToString(lotSize, 2),
+         " TP=", DoubleToString(takeProfit, _Digits),
+         " | Pred=", priceDir.direction,
          " | conf=", DoubleToString(g_finalVerdict.finalConfPct, 1), "%");
 
    g_lastEntryTimeForSymbol = TimeCurrent();
