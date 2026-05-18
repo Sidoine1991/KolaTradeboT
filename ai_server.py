@@ -4103,6 +4103,16 @@ async def startup_event():
     else:
         logger.info("ℹ️ Boucle stats symboles désactivée (AI_ENABLE_SYMBOL_STATS_LOOP=false)")
 
+    if AWS_RDS_AVAILABLE and not _env_bool("USE_SUPABASE", False):
+        try:
+            ping = aws_rds_client.execute_query("SELECT 1 AS ok", ())
+            if ping:
+                logger.info("✅ AWS RDS OK — source ML partagée (Render + local → RDS)")
+        except Exception as e:
+            logger.warning("⚠️ AWS RDS ping échoué au démarrage: %s", str(e)[:120])
+    elif _env_bool("USE_SUPABASE", False):
+        logger.info("ℹ️ USE_SUPABASE=true — métriques via Supabase (pas RDS prioritaire)")
+
     global _continuous_learning_bg_task
     if AI_ENABLE_CONTINUOUS_LEARNING_LOOP and CONTINUOUS_LEARNING_AVAILABLE and continuous_learner:
         if _continuous_learning_bg_task is None or _continuous_learning_bg_task.done():
@@ -8062,6 +8072,178 @@ async def _fetch_ml_metrics_for_symbol_from_supabase(symbol: str, timeframe: str
     except Exception as e:
         logger.debug("ml metrics persist for %s: %s", symbol, str(e)[:60])
         return None
+
+
+def _symbol_lookup_variants(symbol: str) -> List[str]:
+    """Alias symboles MT5 (espaces vs underscores) pour requêtes RDS."""
+    variants: List[str] = []
+    for s in (symbol, symbol.replace(" ", "_"), symbol.replace("_", " ")):
+        s = (s or "").strip()
+        if s and s not in variants:
+            variants.append(s)
+    return variants or [symbol]
+
+
+def _parse_json_field(value: Any) -> Dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = json.loads(value)
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            return {}
+    return {}
+
+
+def _fetch_trade_feedback_stats_from_rds(symbol: str, timeframe: str = "M1") -> Dict[str, int]:
+    """Compte wins/losses depuis AWS RDS trade_feedback (source partagée Render + local)."""
+    if not AWS_RDS_AVAILABLE:
+        return {"feedback_wins": 0, "feedback_losses": 0, "feedback_total": 0}
+    wins = losses = 0
+    try:
+        for sym in _symbol_lookup_variants(symbol):
+            rows = aws_rds_client.execute_query(
+                """
+                SELECT is_win
+                FROM trade_feedback
+                WHERE symbol = %s
+                ORDER BY created_at DESC NULLS LAST
+                LIMIT 5000
+                """,
+                (sym,),
+            )
+            if not rows:
+                continue
+            for row in rows:
+                if bool(row.get("is_win")):
+                    wins += 1
+                else:
+                    losses += 1
+            break
+    except Exception as e:
+        logger.debug("RDS trade_feedback stats %s: %s", symbol, str(e)[:80])
+    return {
+        "feedback_wins": wins,
+        "feedback_losses": losses,
+        "feedback_total": wins + losses,
+    }
+
+
+def _fetch_ml_metrics_for_symbol_from_rds(symbol: str, timeframe: str = "M1") -> Optional[Dict[str, Any]]:
+    """
+    Métriques ML depuis AWS RDS (vérité partagée Render + serveur local).
+    Combine model_metrics + agrégats trade_feedback.
+    """
+    if not AWS_RDS_AVAILABLE or _env_bool("USE_SUPABASE", False):
+        return None
+    tf = str(timeframe or "M1").upper()
+    row = None
+    try:
+        for sym in _symbol_lookup_variants(symbol):
+            rows = aws_rds_client.execute_query(
+                """
+                SELECT symbol, timeframe, model_type, accuracy, training_date, metadata
+                FROM model_metrics
+                WHERE symbol = %s AND timeframe = %s
+                ORDER BY training_date DESC NULLS LAST
+                LIMIT 1
+                """,
+                (sym, tf),
+            )
+            if rows:
+                row = rows[0]
+                break
+    except Exception as e:
+        logger.debug("RDS model_metrics %s: %s", symbol, str(e)[:80])
+        return None
+
+    fb = _fetch_trade_feedback_stats_from_rds(symbol, tf)
+    fb_wins = int(fb.get("feedback_wins") or 0)
+    fb_losses = int(fb.get("feedback_losses") or 0)
+    fb_total = int(fb.get("feedback_total") or 0)
+
+    if not row and fb_total == 0:
+        return None
+
+    meta: Dict[str, Any] = {}
+    acc_pct = 70.0
+    model_name = "random_forest"
+    samples = fb_total
+    training_date = ""
+
+    if row:
+        meta = _parse_json_field(row.get("metadata"))
+        try:
+            acc_raw = float(row.get("accuracy", 0.5) or 0.5)
+            acc_pct = (acc_raw * 100.0) if acc_raw <= 1.0 else acc_raw
+        except Exception:
+            acc_pct = 70.0
+        model_name = (
+            meta.get("best_model")
+            or meta.get("model_type")
+            or row.get("model_type")
+            or "random_forest"
+        )
+        try:
+            samples = int(meta.get("training_samples") or fb_total or 0)
+        except Exception:
+            samples = fb_total
+        training_date = str(row.get("training_date") or "")
+
+    status = "trained" if samples >= 25 or fb_total >= 10 else "collecting_data"
+    if samples == 0 and fb_total == 0:
+        status = "collecting_data"
+
+    return {
+        "symbol": symbol,
+        "timeframe": tf,
+        "accuracy": f"{acc_pct:.1f}",
+        "model_name": str(model_name),
+        "total_samples": str(samples),
+        "training_samples": int(samples),
+        "feedback_wins": fb_wins,
+        "feedback_losses": fb_losses,
+        "status": status,
+        "best_model": str(model_name),
+        "last_update": training_date or datetime.utcnow().isoformat(),
+        "data_source": "aws_rds",
+        "rds_connected": True,
+        "supabase_connected": False,
+    }
+
+
+async def _fetch_ml_metrics_for_symbol_from_rds_async(symbol: str, timeframe: str = "M1") -> Optional[Dict[str, Any]]:
+    return await asyncio.to_thread(_fetch_ml_metrics_for_symbol_from_rds, symbol, timeframe)
+
+
+async def _merge_ml_metrics_with_rds_priority(
+    symbol: str, timeframe: str = "M1"
+) -> Dict[str, Any]:
+    """
+    Fusionne métriques pour MT5 : RDS d'abord, puis Supabase, puis trainer local, puis computed.
+  Render et local écrivent tous deux dans RDS — évite le 70% baseline vide en mémoire.
+    """
+    computed = _compute_ml_metrics(symbol, timeframe)
+
+    rds_data = await _fetch_ml_metrics_for_symbol_from_rds_async(symbol, timeframe)
+    if rds_data:
+        return {**computed, **rds_data, "data_source": "aws_rds", "rds_connected": True}
+
+    supabase_data = await _fetch_ml_metrics_for_symbol_from_supabase(symbol, timeframe)
+    if supabase_data:
+        return {**computed, **supabase_data, "data_source": "supabase", "rds_connected": AWS_RDS_AVAILABLE}
+
+    model_key = f"{symbol}_{timeframe}"
+    if ML_TRAINER_AVAILABLE and ml_trainer is not None:
+        tm = getattr(ml_trainer, "current_metrics", {}).get(model_key)
+        if not tm:
+            key_us = f"{symbol.replace(' ', '_')}_{timeframe}"
+            tm = getattr(ml_trainer, "current_metrics", {}).get(key_us)
+        if tm and tm.get("training_samples"):
+            return {**computed, "data_source": "ml_trainer", "rds_connected": AWS_RDS_AVAILABLE}
+
+    return {**computed, "data_source": "computed", "rds_connected": AWS_RDS_AVAILABLE}
 
 
 @app.get("/dashboard")
@@ -13599,6 +13781,39 @@ async def upload_mt5_deals(request: MT5DealsUploadRequest):
 
         logger.info(f"📥 /mt5/deals-upload received={len(deals)} kept={len(rows)} skipped={skipped}")
 
+        # Priorité AWS RDS (Render + local → même base)
+        rds_inserted = 0
+        if AWS_RDS_AVAILABLE and not _env_bool("USE_SUPABASE", False):
+            for row in rows:
+                rds_row = {
+                    "symbol": row.get("symbol"),
+                    "open_time": row.get("open_time"),
+                    "close_time": row.get("close_time"),
+                    "entry_price": float(row.get("entry_price") or 0),
+                    "exit_price": float(row.get("exit_price") or 0),
+                    "profit": float(row.get("profit") or 0),
+                    "ai_confidence": row.get("ai_confidence"),
+                    "coherent_confidence": row.get("coherent_confidence"),
+                    "decision": row.get("decision") or "UNKNOWN",
+                    "is_win": bool(row.get("is_win")),
+                }
+                try:
+                    if aws_rds_client.insert("trade_feedback", rds_row):
+                        rds_inserted += 1
+                except Exception as e:
+                    logger.debug("RDS deals-upload row skip: %s", str(e)[:80])
+            if rds_inserted:
+                logger.info("✅ /mt5/deals-upload → AWS RDS: %s lignes trade_feedback", rds_inserted)
+                asyncio.create_task(_refresh_symbol_trade_stats("M1"))
+                return {
+                    "ok": True,
+                    "received": len(deals),
+                    "kept": len(rows),
+                    "skipped": skipped,
+                    "upsert_attempted": rds_inserted,
+                    "data_source": "aws_rds",
+                }
+
         import httpx
         headers = {
             "apikey": supabase_key,
@@ -14880,19 +15095,7 @@ async def trades_feedback(request: TradeFeedbackRequest):
 @app.get("/ml/metrics")
 async def ml_metrics(symbol: str, timeframe: str = "M1"):
     """Métriques pour le graphique MT5 - format plat (accuracy, model_name, total_samples, status, data_source)."""
-    computed = _compute_ml_metrics(symbol, timeframe)
-    # Si le trainer a des données réelles, les utiliser
-    model_key = f"{symbol}_{timeframe}"
-    if ML_TRAINER_AVAILABLE and ml_trainer is not None:
-        tm = getattr(ml_trainer, "current_metrics", {}).get(model_key)
-        if tm and tm.get("training_samples"):
-            return {**computed, "data_source": "ml_trainer"}
-    # Sinon: fallback Supabase pour afficher le résumé d'entraînement sur le graphique
-    supabase_data = await _fetch_ml_metrics_for_symbol_from_supabase(symbol, timeframe)
-    if supabase_data:
-        base = {**computed, **supabase_data, "data_source": "supabase"}
-    else:
-        base = {**computed, "data_source": "computed"}
+    base = await _merge_ml_metrics_with_rds_priority(symbol, timeframe)
 
     # Ajouter stats discipline (jour/mois) si dispo
     st = _symbol_stats_cache.get(symbol) or {}
@@ -14925,8 +15128,12 @@ async def api_ml_metrics(symbol: str, timeframe: str = "M1"):
     tf = str(timeframe or "M1").upper()
     sym = symbol
 
-    # Essayer d'abord Supabase (métriques d'entraînement persistées)
-    sup = await _fetch_ml_metrics_for_symbol_from_supabase(sym, tf)
+    merged = await _merge_ml_metrics_with_rds_priority(sym, tf)
+    sup = merged if merged.get("data_source") in ("aws_rds", "supabase") else None
+    if not sup:
+        sup = await _fetch_ml_metrics_for_symbol_from_supabase(sym, tf)
+        if sup:
+            merged = {**merged, **sup, "data_source": "supabase"}
 
     # Helpers
     def _training_level(samples_int: int) -> str:
@@ -14938,23 +15145,24 @@ async def api_ml_metrics(symbol: str, timeframe: str = "M1"):
             return "🟢 AVANCÉ"
         return "🔵 EXPERT"
 
-    if sup:
-        # `sup["accuracy"]` est un pourcentage string ("78.2") → convertir en ratio (0..1) pour l'EA
+    if sup or merged.get("accuracy"):
+        use = sup if sup else merged
+        # `accuracy` est un pourcentage string ("78.2") → convertir en ratio (0..1) pour l'EA
         acc_pct = 0.0
         try:
-            acc_pct = float(sup.get("accuracy", 0.0))
+            acc_pct = float(use.get("accuracy", 0.0))
         except Exception:
             acc_pct = 0.0
         acc_ratio = acc_pct / 100.0 if acc_pct > 1.0 else acc_pct
 
         samples_used = 0
         try:
-            samples_used = int(float(sup.get("total_samples", 0) or 0))
+            samples_used = int(float(use.get("total_samples", 0) or use.get("training_samples", 0) or 0))
         except Exception:
             samples_used = 0
 
-        model_type = sup.get("model_name") or sup.get("best_model") or "unknown"
-        created_at = sup.get("last_update") or ""
+        model_type = use.get("model_name") or use.get("best_model") or "unknown"
+        created_at = use.get("last_update") or ""
 
         cal = get_symbol_calibration(sym, tf)
         # Normaliser les champs calibration attendus par l'EA
@@ -14980,15 +15188,16 @@ async def api_ml_metrics(symbol: str, timeframe: str = "M1"):
             "accuracy": acc_ratio,          # 0..1
             "f1_score": acc_ratio,          # 0..1 (fallback)
             # Optionnel: vraies métriques si disponibles (provenant de metadata model_metrics)
-            "precision": sup.get("precision", None),
-            "recall": sup.get("recall", None),
+            "precision": use.get("precision", None),
+            "recall": use.get("recall", None),
             "samples_used": samples_used,
             "model_type": model_type,
             "created_at": created_at,
             "top_features": [],
             "calibration": calibration,
             "ml_response": ml_response,
-            "data_source": "supabase_model_metrics",
+            "data_source": use.get("data_source", "supabase_model_metrics"),
+            "rds_connected": use.get("rds_connected", AWS_RDS_AVAILABLE),
         }
 
     # Fallback: métriques computed (peut être "live" sans Supabase)

@@ -357,6 +357,11 @@ bool ExecuteVerdictMarketOrder(const string direction, const string entryTf);
 void CloseAllPositionsIfSymbolLossReached(double targetLossUSD);
 bool SMC_IsGoodOrPerfectVerdict();
 bool SMC_PickVerdictEntryLevel(const string direction, double &levelOut, string &tfOut);
+double SMC_GOMGlobalGet(const string keySuffix, const double defVal = 0.0);
+bool SMC_TryPickGOMEntryLevel(const string direction, double &levelOut, string &tfOut);
+void DrawGOMEntryLevelsOnChart();
+void CheckAndExecuteGOMTouchEntry();
+bool ExecuteGOMTouchOrder(const string direction);
 bool SMC_IsVerdictDirectional();
 bool SMC_VerdictStrongEnoughForEntry();
 bool SMC_AllowDirectionDespiteAIHold(const string direction);
@@ -2153,6 +2158,8 @@ datetime g_lastMLMetricsUpdate = 0;
 bool g_channelValid = false;
 double g_mlLastAccuracy = -1.0;
 string g_mlLastModelName = "";
+int    g_mlLastTotalSamples = -1;
+string g_mlLastStatus = "";
 FutureCandleData g_futureCandles[];
 int      g_futureCandlesCount = 0;
 datetime g_futureCandlesLastUpdate = 0;
@@ -2345,7 +2352,9 @@ input group "=== SL/TP SCALPING AGRESSIF (spike capture) ==="
 input double SL_ATRMult        = 0.8;    // Stop Loss (x ATR) - très serré pour scalping
 input double TP_ATRMult        = 1.2;    // Take Profit (x ATR) - proche, capture spike rapide
 input bool   EnableSpikeScalping = true;  // Scalping agressif sur Boom/Crash/PAINX/GAINX
+input double SpikeScalpCloseMinProfitUSD = 0.50; // Seuil unique fermeture spike/scalp ($) — aligné ManageBoomCrash + ClosePositionsOnSpikeScalp
 input double SpikeCloseProfitPct = 0.5;   // Fermer position à X% de gain après spike (ex: 0.5 = fermé à 50% du gain cible)
+input bool   BoomCrash_EnableTrailingStop = true; // Trailing / SL dynamique aussi sur SPIKE TRADE, GOM, M5 (Boom/Crash)
 input group "=== TRAILING STOP (sécuriser les gains) ==="
 input bool   UseTrailingStop    = true;   // Activer le Trailing Stop automatique
 input double TrailingStop_ATRMult = 1.5;  // Distance Trailing Stop (x ATR) - serré pour garder gains
@@ -2419,7 +2428,13 @@ input bool   UsePropiceSymbolsFilter = true;  // ⚠️ IMPORTANT: Filtre horair
 input int    PropiceTopN = 5;                // Top N symbols renvoyés par /symbols/propice/top
 input int    PropiceUpdateIntervalSec = 120;  // Refresh filtre propice (secondes) - scan plus fréquent
 input bool   PreferBestSymbolWithoutBlocking = true; // Prioriser le meilleur symbole sans bloquer les autres symboles attachés
-input bool   UseRenderAsPrimary = false; // Utiliser le serveur local en premier (Render en fallback)
+input bool   UseRenderAsPrimary = true; // true = Render d'abord, local en fallback (les deux écrivent dans AWS RDS)
+input bool   ML_MergeMetricsFromRenderAndLocal = true; // Interroger Render + local, garder la réponse la plus fiable (priorité aws_rds)
+input int    ML_MinSamplesToEnforceAccuracy = 25; // Bloquer par précision ML seulement si >= N échantillons entraînés
+input bool   ML_BlockWhenMetricsMissing = false; // false = ne pas bloquer si métriques ML absentes (collecte RDS)
+input group "=== ENTRÉES GOM (script GOM_KOLA_SIDO) ==="
+input bool   UseGOMEntryLevels = true; // Prioriser niveaux GOM_SCRIPT_* (GlobalVariables du script GOM)
+input double GOMEntryNearATRMult = 1.8; // Distance max prix ↔ niveau GOM pour entrée (x ATR)
 input string AI_ServerURL2      = "http://127.0.0.1:8000";  // URL serveur local
 input bool   PropiceAllowMarketOrdersOnAllPropiceSymbols = true; // Marché: autoriser sur tous les symboles propices (pas seulement le rang 0)
 input double PropiceNonTopExtraMinAIConfidencePercentPerRank = 5.0; // +% confiance minimale par rang (rang 1=2eme, etc.)
@@ -4342,11 +4357,109 @@ bool SMC_IsGoodOrPerfectVerdict()
            StringFind(g_finalVerdict.verdictLabel, "PERFECT") >= 0);
 }
 
-// Choisit le niveau d'entrée MTF le plus proche du prix (M5, M1, M30, H1) dans la tolérance ATR
+// Niveaux publiés par GOM_KOLA_SIDO_Script via GlobalVariables (GOM_SCRIPT_<symbole>_<clé>)
+double SMC_GOMGlobalGet(const string keySuffix, const double defVal)
+{
+   string k = "GOM_SCRIPT_" + _Symbol + "_" + keySuffix;
+   if(!GlobalVariableCheck(k))
+      return defVal;
+   return GlobalVariableGet(k);
+}
+
+bool SMC_TryPickGOMEntryLevel(const string direction, double &levelOut, string &tfOut)
+{
+   levelOut = 0.0;
+   tfOut = "";
+   if(!UseGOMEntryLevels)
+      return false;
+
+   double gomLvl = 0.0;
+   if(direction == "BUY")
+      gomLvl = SMC_GOMGlobalGet("BUY_ENTRY");
+   else if(direction == "SELL")
+      gomLvl = SMC_GOMGlobalGet("SELL_ENTRY");
+   if(gomLvl <= 0.0)
+      return false;
+
+   double refPx = (direction == "BUY")
+                  ? SymbolInfoDouble(_Symbol, SYMBOL_ASK)
+                  : SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   if(refPx <= 0.0)
+      return false;
+
+   double atrVal = 0.0;
+   double atrBuf[];
+   ArraySetAsSeries(atrBuf, true);
+   if(atrHandle != INVALID_HANDLE && CopyBuffer(atrHandle, 0, 0, 1, atrBuf) > 0)
+      atrVal = atrBuf[0];
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   if(point <= 0.0)
+      point = 0.0001;
+   if(atrVal <= 0.0)
+      atrVal = point * 50.0;
+
+   double maxDist = atrVal * MathMax(0.3, GOMEntryNearATRMult);
+   if(MathAbs(refPx - gomLvl) > maxDist)
+      return false;
+
+   levelOut = gomLvl;
+   tfOut = "GOM";
+   return true;
+}
+
+void DrawGOMEntryLevelsOnChart()
+{
+   if(!UseGOMEntryLevels || !ShowChartGraphics)
+      return;
+
+   double buyLvl = SMC_GOMGlobalGet("BUY_ENTRY");
+   double sellLvl = SMC_GOMGlobalGet("SELL_ENTRY");
+   if(buyLvl <= 0.0 && sellLvl <= 0.0)
+      return;
+
+   datetime t2 = TimeCurrent() + PeriodSeconds(PERIOD_CURRENT) * 80;
+   datetime t1 = iTime(_Symbol, PERIOD_CURRENT, 20);
+   if(t1 <= 0)
+      t1 = TimeCurrent() - PeriodSeconds(PERIOD_CURRENT) * 20;
+
+   if(buyLvl > 0.0)
+   {
+      string ln = "GOM_EA_BUY_ENTRY_LN";
+      if(ObjectFind(0, ln) < 0)
+         ObjectCreate(0, ln, OBJ_TREND, 0, t1, buyLvl, t2, buyLvl);
+      else
+      {
+         ObjectMove(0, ln, 0, t1, buyLvl);
+         ObjectMove(0, ln, 1, t2, buyLvl);
+      }
+      ObjectSetInteger(0, ln, OBJPROP_COLOR, clrDodgerBlue);
+      ObjectSetInteger(0, ln, OBJPROP_WIDTH, 3);
+      ObjectSetInteger(0, ln, OBJPROP_RAY_RIGHT, true);
+   }
+   if(sellLvl > 0.0)
+   {
+      string ln = "GOM_EA_SELL_ENTRY_LN";
+      if(ObjectFind(0, ln) < 0)
+         ObjectCreate(0, ln, OBJ_TREND, 0, t1, sellLvl, t2, sellLvl);
+      else
+      {
+         ObjectMove(0, ln, 0, t1, sellLvl);
+         ObjectMove(0, ln, 1, t2, sellLvl);
+      }
+      ObjectSetInteger(0, ln, OBJPROP_COLOR, clrOrangeRed);
+      ObjectSetInteger(0, ln, OBJPROP_WIDTH, 3);
+      ObjectSetInteger(0, ln, OBJPROP_RAY_RIGHT, true);
+   }
+}
+
+// Choisit le niveau d'entrée MTF le plus proche du prix (GOM, M5, M1, M30, H1) dans la tolérance ATR
 bool SMC_PickVerdictEntryLevel(const string direction, double &levelOut, string &tfOut)
 {
    levelOut = 0.0;
    tfOut = "";
+
+   if(SMC_TryPickGOMEntryLevel(direction, levelOut, tfOut))
+      return true;
 
    double atrVal = 0.0;
    double atrBuf[];
@@ -5664,10 +5777,10 @@ void ManageBoomCrashSpikeClose()
       // SPIKE MODE: Fermer dès ANY GAIN (spike = mouvement favorable capté)
       // Même un spike minimal ($0.01+) = fermeture
       // Sinon: SL=-$3.50 atteint = fermeture
-      double SPIKE_MIN_GAIN = 0.01;   // Minimum gain to consider as spike captured
+      double spikeMinGain = isSpikeTrade ? 0.01 : MathMax(0.01, SpikeScalpCloseMinProfitUSD);
       double SL_THRESHOLD = -3.50;    // Stop loss: -$3.50 = perte max
 
-      if(profit >= SPIKE_MIN_GAIN)
+      if(profit >= spikeMinGain)
       {
          // ANY positive gain = spike capté
          shouldClose = true;
@@ -6022,10 +6135,7 @@ void ClosePositionsOnSpikeScalp()
       ENUM_POSITION_TYPE ptype = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
       string cmt = PositionGetString(POSITION_COMMENT);
 
-      // Seuil de fermeture adapté au symbole
-      // Boom/Crash: $3.50 (secured profit on volatile instruments)
-      // Autres volatility: $1.00 (smaller threshold)
-      double closeProfitThreshold = (symCat == SYM_BOOM_CRASH) ? 3.50 : 1.00;
+      double closeProfitThreshold = MathMax(0.01, SpikeScalpCloseMinProfitUSD);
 
       // SCALPING: Si profit POSITIF et >= seuil, fermer position (capture spike réussie)
       // JAMAIS fermer sur perte!
@@ -6150,6 +6260,9 @@ void DrawAllIndicatorGraphics()
    DrawSwingHighLow();
    DrawFVGOnChart();
    DrawFibonacciOnChart();
+   if(ShowOTEImbalanceOnChart)
+      DrawOTEImbalanceOnChart();
+   DrawGOMEntryLevelsOnChart();
    DrawConfirmedOBWithCHOCH();  // OB + CHOCH confirmation (1 rectangle)
    CheckAndExecuteOTEEntry();    // OTE confirmation → position entry SL + TP1/TP2/TP3
    CheckAndExecuteAutoEntryOnVerdictGoodPerfect();  // Auto-entry when verdict GOOD/PERFECT + IA aligned (with push notification)
@@ -6598,6 +6711,7 @@ void OnTick()
 
    // Touch M5 classique (ignoré si entrée auto verdict déjà faite récemment)
    CheckAndExecuteM5TouchEntryTrade();
+   CheckAndExecuteGOMTouchEntry();
    
    // NOUVEAU: Recovery exceptionnel Boom/Crash (touch M5 + 4 petites bougies M1)
    CheckAndExecuteExceptionalBoomCrashRecoveryEntries();
@@ -7186,112 +7300,160 @@ void UpdateDashboard()
    }
 }
 
-void UpdateMLMetricsDisplay()
+int SMC_MLMetricsPayloadScore(const string metricsData)
 {
-   // Réduire la fréquence des logs DEBUG pour éviter la surcharge
-   static datetime lastDebugLog = 0;
-   if(TimeCurrent() - lastDebugLog >= 60) // Log toutes les 60 secondes maximum
-   {
-      Print("?? DEBUG - UpdateMLMetricsDisplay appelée pour: ", _Symbol);
-      lastDebugLog = TimeCurrent();
-   }
-   
-   // Protection contre les appels excessifs - minimum 30 s entre les appels
-   if((TimeCurrent() - g_lastMLMetricsUpdate) < 30)
-   {
-      Print("?? DEBUG - UpdateMLMetricsDisplay ignorée (trop récent)");
-      return;
-   }
-   
-   g_lastMLMetricsUpdate = TimeCurrent();
-   string symEnc = _Symbol;
-   StringReplace(symEnc, " ", "%20");
-   string baseUrl = UseRenderAsPrimary ? AI_ServerRender : AI_ServerURL;
-   string pathMetrics = "/ml/metrics?symbol=" + symEnc + "&timeframe=M1";
-   string pathStatus = "/ml/continuous/status";
+   if(metricsData == "" || StringFind(metricsData, "accuracy") < 0)
+      return -1;
+   int score = 0;
+   string ds = ExtractJsonValue(metricsData, "data_source");
+   if(ds == "aws_rds") score = 100;
+   else if(ds == "supabase") score = 80;
+   else if(ds == "ml_trainer") score = 40;
+   else if(ds == "computed") score = 15;
+   else score = 10;
+   string samples = ExtractJsonValue(metricsData, "total_samples");
+   int n = (samples != "N/A" && samples != "") ? (int)StringToInteger(samples) : 0;
+   if(n < 0) n = 0;
+   score += MathMin(n, 50);
+   return score;
+}
+
+bool SMC_ApplyMLMetricsJson(const string metricsData)
+{
+   if(metricsData == "" || StringFind(metricsData, "accuracy") < 0)
+      return false;
+
+   string acc = ExtractJsonValue(metricsData, "accuracy");
+   string model = ExtractJsonValue(metricsData, "model_name");
+   string samples = ExtractJsonValue(metricsData, "total_samples");
+   string status = ExtractJsonValue(metricsData, "status");
+   string wins = ExtractJsonValue(metricsData, "feedback_wins");
+   string losses = ExtractJsonValue(metricsData, "feedback_losses");
+   string dataSource = ExtractJsonValue(metricsData, "data_source");
+   string rdsConn = ExtractJsonValue(metricsData, "rds_connected");
+
+   g_mlMetricsStr = "Précision: " + acc + "% | Modèle: " + model + " | Samples: " + samples;
+   g_mlLastAccuracy = (StringLen(acc) > 0 && acc != "N/A") ? StringToDouble(acc) : -1.0;
+   g_mlLastModelName = model;
+   if(samples != "N/A" && samples != "")
+      g_mlLastTotalSamples = (int)StringToInteger(samples);
+   if(status != "N/A")
+      g_mlLastStatus = status;
+   if(wins != "N/A" && losses != "N/A")
+      g_mlMetricsStr += " | Feedback: " + wins + "W/" + losses + "L";
+   if(status != "N/A" && status != "trained")
+      g_mlMetricsStr += " | " + (status == "collecting_data" ? "Collecte RDS..." : status);
+   if(dataSource != "N/A")
+      g_mlMetricsStr += " | Source: " + dataSource;
+   else if(rdsConn == "true")
+      g_mlMetricsStr += " | Source: aws_rds";
+
+   string sDW = ExtractJsonValue(metricsData, "day_wins");
+   string sDL = ExtractJsonValue(metricsData, "day_losses");
+   string sDNP = ExtractJsonValue(metricsData, "day_net_profit");
+   string sMW = ExtractJsonValue(metricsData, "month_wins");
+   string sML = ExtractJsonValue(metricsData, "month_losses");
+   string sMNP = ExtractJsonValue(metricsData, "month_net_profit");
+   if(sDW != "N/A") g_dayWins = (int)StringToInteger(sDW);
+   if(sDL != "N/A") g_dayLosses = (int)StringToInteger(sDL);
+   if(sDNP != "N/A") g_dayNetProfit = StringToDouble(sDNP);
+   if(sMW != "N/A") g_monthWins = (int)StringToInteger(sMW);
+   if(sML != "N/A") g_monthLosses = (int)StringToInteger(sML);
+   if(sMNP != "N/A") g_monthNetProfit = StringToDouble(sMNP);
+   return true;
+}
+
+int SMC_FetchMLMetricsFromUrl(const string baseUrl, const string pathMetrics, string &metricsOut)
+{
+   metricsOut = "";
    string headers = "";
    char post[], result[];
    string resultHeaders;
-   
-   Print("?? DEBUG - Requête ML vers: ", baseUrl, pathMetrics);
-   
-   // Récupérer les métriques ML (primaire puis fallback)
+   ResetLastError();
    int res = WebRequest("GET", baseUrl + pathMetrics, headers, AI_Timeout_ms, post, result, resultHeaders);
    if(res != 200)
-   {
-      string fallbackUrl = UseRenderAsPrimary ? AI_ServerURL : AI_ServerRender;
-      Print("?? DEBUG - Fallback ML metrics vers: ", fallbackUrl, pathMetrics);
-      res = WebRequest("GET", fallbackUrl + pathMetrics, headers, AI_Timeout_ms2, post, result, resultHeaders);
-   }
-   
-   Print("?? DEBUG - WebRequest ML metrics - Code: ", res, " | Taille: ", ArraySize(result));
-   
-   if(res == 200)
-   {
-      string metricsData = CharArrayToString(result);
-      Print("?? DEBUG - Données ML reçues: ", StringSubstr(metricsData, 0, MathMin(200, StringLen(metricsData))));
-      
-      // Parser les métriques et les afficher (clés plates: accuracy, model_name, total_samples, status, feedback_wins, feedback_losses)
-      if(StringFind(metricsData, "accuracy") >= 0)
-      {
-         string acc = ExtractJsonValue(metricsData, "accuracy");
-         string model = ExtractJsonValue(metricsData, "model_name");
-         string samples = ExtractJsonValue(metricsData, "total_samples");
-         string status = ExtractJsonValue(metricsData, "status");
-         string wins = ExtractJsonValue(metricsData, "feedback_wins");
-         string losses = ExtractJsonValue(metricsData, "feedback_losses");
-         string dataSource = ExtractJsonValue(metricsData, "data_source");
-         string sbConn = ExtractJsonValue(metricsData, "supabase_connected");
-         string sbSync = ExtractJsonValue(metricsData, "last_supabase_sync");
-         g_mlMetricsStr = "Précision: " + acc + "% | Modèle: " + model + " | Samples: " + samples;
-         // Mettre à jour les variables numériques pour gating par catégorie
-         g_mlLastAccuracy = (StringLen(acc) > 0 && acc != "N/A") ? StringToDouble(acc) : -1.0;
-         g_mlLastModelName = model;
-         if(wins != "N/A" && losses != "N/A")
-            g_mlMetricsStr += " | Feedback: " + wins + "W/" + losses + "L";
-         if(status != "N/A" && status != "trained")
-            g_mlMetricsStr += " | " + (status == "collecting_data" ? "Collecte données..." : status);
-         if(dataSource != "N/A")
-            g_mlMetricsStr += " | Source: " + dataSource;
-         else if(sbConn != "N/A")
-            g_mlMetricsStr += " | Supabase: " + sbConn;
-         if(sbSync != "N/A")
-            g_mlMetricsStr += " | Sync: " + sbSync;
-         Print("? DEBUG - Métriques ML mises à jour: ", g_mlMetricsStr);
-      }
-      else if(StringFind(metricsData, "status") >= 0)
-      {
-         string status = ExtractJsonValue(metricsData, "status");
-         g_mlMetricsStr = (status == "collecting_data") ? "ML: Collecte de données en cours..." : "ML: " + status;
-      }
-      else
-      {
-         g_mlMetricsStr = "ML: En attente de données...";
-         Print("?? DEBUG - Pas de métriques trouvées");
-      }
+      return res;
+   metricsOut = CharArrayToString(result);
+   return res;
+}
 
-      // Extraire aussi les stats jour/mois par symbole (source serveur/Supabase) si présentes
-      // (clés attendues: day_wins, day_losses, day_net_profit, month_wins, month_losses, month_net_profit)
-      string sDW = ExtractJsonValue(metricsData, "day_wins");
-      string sDL = ExtractJsonValue(metricsData, "day_losses");
-      string sDNP = ExtractJsonValue(metricsData, "day_net_profit");
-      string sMW = ExtractJsonValue(metricsData, "month_wins");
-      string sML = ExtractJsonValue(metricsData, "month_losses");
-      string sMNP = ExtractJsonValue(metricsData, "month_net_profit");
-      if(sDW != "N/A") g_dayWins = (int)StringToInteger(sDW);
-      if(sDL != "N/A") g_dayLosses = (int)StringToInteger(sDL);
-      if(sDNP != "N/A") g_dayNetProfit = StringToDouble(sDNP);
-      if(sMW != "N/A") g_monthWins = (int)StringToInteger(sMW);
-      if(sML != "N/A") g_monthLosses = (int)StringToInteger(sML);
-      if(sMNP != "N/A") g_monthNetProfit = StringToDouble(sMNP);
+void UpdateMLMetricsDisplay()
+{
+   static datetime lastDebugLog = 0;
+   if(TimeCurrent() - lastDebugLog >= 60)
+   {
+      Print("?? DEBUG - UpdateMLMetricsDisplay pour: ", _Symbol,
+            " | RenderPrimary=", UseRenderAsPrimary ? "1" : "0");
+      lastDebugLog = TimeCurrent();
+   }
+
+   if((TimeCurrent() - g_lastMLMetricsUpdate) < 30)
+      return;
+
+   g_lastMLMetricsUpdate = TimeCurrent();
+   string symEnc = _Symbol;
+   StringReplace(symEnc, " ", "%20");
+   string pathMetrics = "/ml/metrics?symbol=" + symEnc + "&timeframe=M1";
+   string pathStatus = "/ml/continuous/status";
+
+   string primaryUrl = UseRenderAsPrimary ? AI_ServerRender : AI_ServerURL;
+   string fallbackUrl = UseRenderAsPrimary ? AI_ServerURL : AI_ServerRender;
+
+   string bestMetrics = "";
+   int bestScore = -1;
+   string usedUrl = "";
+
+   string payloadA = "";
+   int resA = SMC_FetchMLMetricsFromUrl(primaryUrl, pathMetrics, payloadA);
+   if(resA == 200)
+   {
+      int sc = SMC_MLMetricsPayloadScore(payloadA);
+      if(sc > bestScore) { bestScore = sc; bestMetrics = payloadA; usedUrl = primaryUrl; }
+   }
+
+   if(ML_MergeMetricsFromRenderAndLocal)
+   {
+      string payloadB = "";
+      int resB = SMC_FetchMLMetricsFromUrl(fallbackUrl, pathMetrics, payloadB);
+      if(resB == 200)
+      {
+         int sc = SMC_MLMetricsPayloadScore(payloadB);
+         if(sc > bestScore) { bestScore = sc; bestMetrics = payloadB; usedUrl = fallbackUrl; }
+      }
+   }
+   else if(resA != 200)
+   {
+      string payloadB = "";
+      int resB = SMC_FetchMLMetricsFromUrl(fallbackUrl, pathMetrics, payloadB);
+      if(resB == 200)
+      {
+         bestMetrics = payloadB;
+         usedUrl = fallbackUrl;
+         bestScore = SMC_MLMetricsPayloadScore(payloadB);
+      }
+   }
+
+   if(bestMetrics != "" && SMC_ApplyMLMetricsJson(bestMetrics))
+   {
+      Print("? ML metrics OK | url=", usedUrl, " | score=", bestScore,
+            " | ", StringSubstr(g_mlMetricsStr, 0, MathMin(120, StringLen(g_mlMetricsStr))));
+   }
+   else if(StringFind(bestMetrics, "status") >= 0)
+   {
+      string status = ExtractJsonValue(bestMetrics, "status");
+      g_mlMetricsStr = (status == "collecting_data") ? "ML: Collecte RDS..." : "ML: " + status;
    }
    else
    {
-      // Fallback (serveur indisponible)
       GenerateFallbackMLMetrics();
-      g_mlMetricsStr = "ML: stats indisponibles (IA /decision inchangée)";
-      Print("? DEBUG - Erreur WebRequest ML metrics: ", res);
+      g_mlMetricsStr = "ML: stats indisponibles (Render/local)";
+      Print("? ML metrics HTTP échec | primary=", resA, " | ", primaryUrl);
    }
+
+   string headers = "";
+   char post[], result[];
+   string resultHeaders;
+   string baseUrl = (usedUrl != "") ? usedUrl : primaryUrl;
    
    // S'assurer que l'entraînement continu tourne (si activé)
    if(AutoStartMLContinuousTraining)
@@ -13273,7 +13435,15 @@ void ActivateProfitLockIfNeeded()
 bool IsMLModelTrustedForCurrentSymbol(const string direction)
 {
    if(!UseAIServer) return true; // pas de filtrage si IA désactivée
-   if(g_mlLastAccuracy <= 0.0) return false; // pas de métriques utilisables
+
+   if(g_mlLastTotalSamples >= 0 && g_mlLastTotalSamples < ML_MinSamplesToEnforceAccuracy)
+   {
+      if(g_mlLastStatus == "collecting_data" || g_mlLastStatus == "no_model" || g_mlLastStatus == "")
+         return true;
+   }
+
+   if(g_mlLastAccuracy <= 0.0)
+      return !ML_BlockWhenMetricsMissing;
 
    ENUM_SYMBOL_CATEGORY cat = SMC_GetSymbolCategory(_Symbol);
    double minAcc = 0.0;
@@ -16124,7 +16294,7 @@ void ManageTrailingStop()
       ENUM_SYMBOL_CATEGORY cat = SMC_GetSymbolCategory(symbol);
       string posCmt = posInfo.Comment();
       bool isVerdictPos = (StringFind(posCmt, "VERDICT_") >= 0);
-      if(cat == SYM_BOOM_CRASH && !(VerdictApplyDynamicSL && isVerdictPos))
+      if(cat == SYM_BOOM_CRASH && !BoomCrash_EnableTrailingStop && !(VerdictApplyDynamicSL && isVerdictPos))
          continue;
       
       ulong  ticket = posInfo.Ticket();
@@ -23617,17 +23787,19 @@ void ExecuteSMC_OTEStrategy()
    if(!UseSMC_OTEStrategy) return;
 
    ENUM_SYMBOL_CATEGORY cat = SMC_GetSymbolCategory(_Symbol);
-   if(!(cat == SYM_FOREX || cat == SYM_METAL || cat == SYM_COMMODITY))
+   if(!(cat == SYM_FOREX || cat == SYM_METAL || cat == SYM_COMMODITY ||
+        cat == SYM_BOOM_CRASH || cat == SYM_VOLATILITY))
       return;
 
    // Vérifier le nombre de positions
    int currentPositions = CountPositionsForSymbol(_Symbol);
-   if(currentPositions >= 2)
+   int maxOtePos = (cat == SYM_BOOM_CRASH || cat == SYM_VOLATILITY) ? 1 : OTE_MaxPositionsPerSymbol;
+   if(currentPositions >= maxOtePos)
    {
       static datetime lastBlockLog = 0;
       if(TimeCurrent() - lastBlockLog >= 60)
       {
-         Print("🛡️ SMC_OTE - 2 positions déjà ouvertes sur ", _Symbol, " - Nouveaux trades bloqués");
+         Print("🛡️ SMC_OTE - max positions (", maxOtePos, ") sur ", _Symbol, " - Nouveaux trades bloqués");
          lastBlockLog = TimeCurrent();
       }
       return;
@@ -26317,6 +26489,140 @@ bool ExecuteM5TouchOrder(string direction, double minAiConfOverride)
    }
 }
 
+bool ExecuteGOMTouchOrder(const string direction)
+{
+   if(!UseGOMEntryLevels)
+      return false;
+   if(IsInEquilibriumCorrectionZone())
+      return false;
+   if(SMC_GetSymbolCategory(_Symbol) == SYM_BOOM_CRASH && IsBoomCrashEntryCooldownActive("ExecuteGOMTouchOrder"))
+      return false;
+   if(!IsBoomCrashDirectionAllowedByIA(_Symbol, direction))
+      return false;
+
+   double minConf = 0.70;
+   if(SMC_AllowDirectionDespiteAIHold(direction))
+   {
+      if(g_finalVerdict.finalConfPct / 100.0 + 1e-6 < minConf)
+         return false;
+   }
+   else if(!IsAIConfidenceAtLeast(minConf, "GOM TOUCH"))
+      return false;
+
+   if(!IsSpreadAcceptable() || IsEntryCooldownActive())
+      return false;
+   if(!IsLastCandleConfirmingDirection(direction))
+      return false;
+   if(!CanOpenAdditionalPositionForSymbol(_Symbol, direction))
+      return false;
+
+   double lotSize = GetOptimalLotSize();
+   if(lotSize <= 0.0)
+      return false;
+
+   double price = (direction == "BUY") ? SymbolInfoDouble(_Symbol, SYMBOL_ASK) : SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   if(point <= 0.0)
+      point = 0.0001;
+
+   double stopLoss = SMC_GOMGlobalGet("SL");
+   double takeProfit = SMC_GOMGlobalGet("TP1");
+   if(takeProfit <= 0.0)
+      takeProfit = SMC_GOMGlobalGet("TP2");
+
+   if(stopLoss <= 0.0 || takeProfit <= 0.0)
+   {
+      if(direction == "BUY")
+      {
+         if(stopLoss <= 0.0) stopLoss = price - (300 * point);
+         if(takeProfit <= 0.0) takeProfit = price + (600 * point);
+      }
+      else
+      {
+         if(stopLoss <= 0.0) stopLoss = price + (300 * point);
+         if(takeProfit <= 0.0) takeProfit = price - (600 * point);
+      }
+   }
+
+   ValidateAndAdjustStopLossTakeProfit(direction, price, stopLoss, takeProfit);
+   EnforceMinBoomCrashStopLossDollarRisk(_Symbol, direction, price, lotSize, stopLoss);
+   stopLoss = NormalizeDouble(stopLoss, _Digits);
+   takeProfit = NormalizeDouble(takeProfit, _Digits);
+
+   MqlTradeRequest request = {};
+   MqlTradeResult result = {};
+   request.action = TRADE_ACTION_DEAL;
+   request.symbol = _Symbol;
+   request.volume = lotSize;
+   request.type = (direction == "BUY") ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+   request.price = price;
+   request.sl = stopLoss;
+   request.tp = takeProfit;
+   request.deviation = 10;
+   request.magic = InpMagicNumber;
+   request.comment = "GOM_TOUCH_ENTRY_" + direction;
+
+   if(!IsMinimumProfitPotentialMet(price, takeProfit, direction, lotSize))
+      return false;
+
+   if(!OrderSend(request, result) || result.retcode != TRADE_RETCODE_DONE)
+   {
+      Print("❌ GOM TOUCH échoué | ", _Symbol, " | ret=", result.retcode);
+      return false;
+   }
+
+   g_lastEntryTimeForSymbol = TimeCurrent();
+   RegisterBoomCrashMarketEntry();
+   Print("✅ GOM TOUCH — ", direction, " @", DoubleToString(price, _Digits),
+         " | SL=", DoubleToString(stopLoss, _Digits), " | TP=", DoubleToString(takeProfit, _Digits));
+   return true;
+}
+
+void CheckAndExecuteGOMTouchEntry()
+{
+   if(!UseGOMEntryLevels || ShouldBlockNewTradeDueToDailyCap())
+      return;
+   if(!SMC_IsStrictUTCTradingWindowOpen())
+      return;
+
+   double buyLvl = SMC_GOMGlobalGet("BUY_ENTRY");
+   double sellLvl = SMC_GOMGlobalGet("SELL_ENTRY");
+   if(buyLvl <= 0.0 && sellLvl <= 0.0)
+      return;
+
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   if(point <= 0.0)
+      point = 0.0001;
+
+   double atrVal = 0.0;
+   double atrBuf[];
+   ArraySetAsSeries(atrBuf, true);
+   if(atrHandle != INVALID_HANDLE && CopyBuffer(atrHandle, 0, 0, 1, atrBuf) > 0)
+      atrVal = atrBuf[0];
+   if(atrVal <= 0.0)
+      atrVal = point * 50.0;
+   double touchTolerance = MathMax(point * 5.0, atrVal * 0.08);
+
+   if(buyLvl > 0.0 && MathAbs(ask - buyLvl) <= touchTolerance)
+   {
+      if(!IsDirectionAllowedForBoomCrash(_Symbol, "BUY"))
+         return;
+      CheckAndClosePositionsBeforeNewEntry();
+      if(ExecuteGOMTouchOrder("BUY"))
+         SendNotification("🎯 GOM BUY touch — " + _Symbol);
+   }
+   else if(sellLvl > 0.0 && MathAbs(bid - sellLvl) <= touchTolerance)
+   {
+      if(!IsDirectionAllowedForBoomCrash(_Symbol, "SELL"))
+         return;
+      CheckAndClosePositionsBeforeNewEntry();
+      if(ExecuteGOMTouchOrder("SELL"))
+         SendNotification("🎯 GOM SELL touch — " + _Symbol);
+   }
+}
+
 //+------------------------------------------------------------------+
 //| Dessine un marqueur au point de touch M5                          |
 //+------------------------------------------------------------------+
@@ -26744,15 +27050,25 @@ bool ExecuteVerdictMarketOrder(const string direction, const string entryTf)
 
    double price = (direction == "BUY") ? SymbolInfoDouble(_Symbol, SYMBOL_ASK) : SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double stopLoss = 0.0, takeProfit = 0.0;
-   if(direction == "BUY")
+   if(entryTf == "GOM" && UseGOMEntryLevels)
    {
-      stopLoss = price - atrVal * SL_ATRMult;
-      takeProfit = price + atrVal * TP_ATRMult;
+      stopLoss = SMC_GOMGlobalGet("SL");
+      takeProfit = SMC_GOMGlobalGet("TP1");
+      if(takeProfit <= 0.0)
+         takeProfit = SMC_GOMGlobalGet("TP2");
    }
-   else
+   if(stopLoss <= 0.0 || takeProfit <= 0.0)
    {
-      stopLoss = price + atrVal * SL_ATRMult;
-      takeProfit = price - atrVal * TP_ATRMult;
+      if(direction == "BUY")
+      {
+         if(stopLoss <= 0.0) stopLoss = price - atrVal * SL_ATRMult;
+         if(takeProfit <= 0.0) takeProfit = price + atrVal * TP_ATRMult;
+      }
+      else
+      {
+         if(stopLoss <= 0.0) stopLoss = price + atrVal * SL_ATRMult;
+         if(takeProfit <= 0.0) takeProfit = price - atrVal * TP_ATRMult;
+      }
    }
 
    ValidateAndAdjustStopLossTakeProfit(direction, price, stopLoss, takeProfit);
@@ -26771,7 +27087,9 @@ bool ExecuteVerdictMarketOrder(const string direction, const string entryTf)
    request.tp = takeProfit;
    request.deviation = 10;
    request.magic = InpMagicNumber;
-   request.comment = "VERDICT_" + g_finalVerdict.verdictLabel + "_" + entryTf;
+   request.comment = (entryTf == "GOM")
+                     ? ("GOM_TOUCH_VERDICT_" + g_finalVerdict.verdictLabel)
+                     : ("VERDICT_" + g_finalVerdict.verdictLabel + "_" + entryTf);
 
    if(!IsMinimumProfitPotentialMet(price, takeProfit, direction, lotSize))
       return false;

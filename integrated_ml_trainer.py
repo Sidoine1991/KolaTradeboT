@@ -632,8 +632,55 @@ class IntegratedMLTrainer:
             logger.debug(f"Erreur prédiction ML {key}: {e}")
             return None
     
+    async def save_metrics_to_rds(self, metrics: Dict[str, Any]) -> bool:
+        """Sauvegarde model_metrics dans AWS RDS (source partagée Render + local)."""
+        try:
+            from aws_rds_helper import aws_rds_client
+        except ImportError:
+            return False
+        import json as _json
+        import os as _os
+        if _os.getenv("USE_SUPABASE", "false").strip().lower() in {"1", "true", "yes", "on"}:
+            return False
+        try:
+            best = metrics.get("best_model", "random_forest")
+            mt = metrics.get("metrics", {}).get(best) or metrics.get("metrics", {}).get("random_forest", {})
+            acc = float(mt.get("accuracy", 0.0))
+            acc_dec = acc if acc <= 1.0 else acc / 100.0
+            meta = {
+                "model_type": best,
+                "precision": mt.get("precision"),
+                "recall": mt.get("recall"),
+                "f1_score": mt.get("f1_score"),
+                "per_class": mt.get("per_class", {}),
+                "reliability_score": mt.get("reliability_score"),
+                "training_samples": metrics.get("training_samples"),
+                "feature_importance": mt.get("feature_importance", {}),
+                "best_model": best,
+            }
+            payload = {
+                "symbol": metrics["symbol"],
+                "timeframe": metrics.get("timeframe", "M1"),
+                "model_type": best,
+                "accuracy": acc_dec,
+                "metadata": _json.dumps(meta),
+            }
+            rid = aws_rds_client.insert("model_metrics", payload)
+            if rid:
+                logger.info(
+                    "✅ Métriques RDS pour %s %s (samples=%s)",
+                    metrics["symbol"],
+                    metrics.get("timeframe", "M1"),
+                    metrics.get("training_samples"),
+                )
+                return True
+        except Exception as e:
+            logger.debug("save_metrics_to_rds: %s", e)
+        return False
+
     async def save_metrics_to_supabase(self, metrics: Dict[str, Any]):
         """Sauvegarde les métriques dans Supabase - schéma: symbol, timeframe, accuracy (0-1), training_date, metadata."""
+        await self.save_metrics_to_rds(metrics)
         if not self._supabase_writes_allowed():
             return
         headers = {
