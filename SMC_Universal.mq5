@@ -28515,14 +28515,20 @@ void CheckAndExecuteVerdictAutoEntry()
       }
    }
 
-   // IA confidence > 60% requise pour entrées à fort potentiel de spike
+   // Confiance effective : IA si alignée et conf > 0, verdict sinon (cas HOLD)
+   // Quand IA=HOLD, on se base sur finalConfPct (déjà validé par SMC_VerdictStrongEnoughForEntry)
    if(UseAIServer)
    {
+      string iaDir2 = SMC_NormalizeAIDirectionLabel();
       double aiConfUnit = NormalizeAIConfidenceUnit();
-      if(aiConfUnit < 0.60)
+      bool iaIsHold = (iaDir2 == "HOLD" || iaDir2 == "OFF");
+      double effConf = iaIsHold ? (g_finalVerdict.finalConfPct / 100.0) : aiConfUnit;
+      if(effConf < 0.60)
       {
          if(SMC_LogThrottle("VERDICT_AUTO_CONF_LOW", 60))
-            Print("⏸ VERDICT AUTO - IA conf trop faible (", DoubleToString(aiConfUnit*100,1), "% < 60%) sur ", _Symbol);
+            Print("⏸ VERDICT AUTO - conf trop faible (IA=", iaDir2, " ",
+                  DoubleToString(aiConfUnit*100,1), "% / verdict ",
+                  DoubleToString(g_finalVerdict.finalConfPct,1), "%) sur ", _Symbol);
          return;
       }
    }
@@ -28623,12 +28629,16 @@ void CheckAndExecuteAutoEntryOnVerdictGoodPerfect()
             return;
       }
 
-      // IA confidence must exceed 60% for spike-prone entries
+      // Confiance effective : verdict si IA=HOLD, sinon conf IA
       double aiConfUnit = NormalizeAIConfidenceUnit();
-      if(aiConfUnit < 0.60)
+      bool iaIsHold = (iaDir == "HOLD" || iaDir == "OFF");
+      double effConf = iaIsHold ? (g_finalVerdict.finalConfPct / 100.0) : aiConfUnit;
+      if(effConf < 0.60)
       {
          if(SMC_LogThrottle("VERDICT_AI_CONF_LOW", 60))
-            Print("⏸ VERDICT ENTRY - IA conf trop faible (", DoubleToString(aiConfUnit*100,1), "% < 60%) sur ", _Symbol);
+            Print("⏸ VERDICT ENTRY - conf trop faible (IA=", iaDir, " ",
+                  DoubleToString(aiConfUnit*100,1), "% / verdict ",
+                  DoubleToString(g_finalVerdict.finalConfPct,1), "%) sur ", _Symbol);
          return;
       }
    }
