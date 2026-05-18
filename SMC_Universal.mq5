@@ -28433,7 +28433,14 @@ bool ExecuteVerdictMarketOrder(const string direction, const string entryTf)
       }
    }
 
-   if(!IsBoomCrashDirectionAllowedByIA(_Symbol, direction)) VMGATE("BoomCrash direction interdite")
+   // BoomCrash gate: si IA=HOLD mais verdict fort, autoriser quand même
+   if(!IsBoomCrashDirectionAllowedByIA(_Symbol, direction))
+   {
+      // Seconde chance : verdict local fort suffit si IA indisponible/HOLD
+      bool canOverride = AllowTradeWhenAIHoldIfVerdictStrong && SMC_VerdictStrongEnoughForEntry() &&
+                         g_finalVerdict.direction == direction;
+      if(!canOverride) VMGATE("BoomCrash direction interdite (IA=" + SMC_NormalizeAIDirectionLabel() + ")")
+   }
    if(!CanOpenAdditionalPositionForSymbol(_Symbol, direction)) VMGATE("Position supplémentaire refusée")
    if(!IsLastCandleConfirmingDirection(direction)) VMGATE("Dernière bougie non confirmante")
    #undef VMGATE
@@ -28568,7 +28575,7 @@ void CheckAndExecuteVerdictAutoEntry()
       double aiConfUnit = NormalizeAIConfidenceUnit();
       bool iaIsHold = (iaDir2 == "HOLD" || iaDir2 == "OFF");
       double effConf = iaIsHold ? (g_finalVerdict.finalConfPct / 100.0) : aiConfUnit;
-      if(effConf < 0.60)
+      if(effConf < AutoEntryOnVerdictMinConfPct / 100.0)
       {
          if(SMC_LogThrottle("VERDICT_AUTO_CONF_LOW", 60))
             Print("⏸ VERDICT AUTO - conf trop faible (IA=", iaDir2, " ",
@@ -28739,7 +28746,7 @@ void CheckAndExecuteAutoEntryOnVerdictGoodPerfect()
       double aiConfUnit = NormalizeAIConfidenceUnit();
       bool iaIsHold = (iaDir == "HOLD" || iaDir == "OFF");
       double effConf = iaIsHold ? (g_finalVerdict.finalConfPct / 100.0) : aiConfUnit;
-      if(effConf < 0.60)
+      if(effConf < AutoEntryOnVerdictMinConfPct / 100.0)
       {
          if(SMC_LogThrottle("VERDICT_AI_CONF_LOW", 60))
             Print("⏸ VERDICT ENTRY - conf trop faible (IA=", iaDir, " ",
