@@ -5070,6 +5070,7 @@ int OnInit()
       if(UseDashboard)
          UpdateDashboard();
    }
+   SMC_ReplayRecentDeals(50); // Repeuple les flèches des 50 derniers deals sur le graphique
    return INIT_SUCCEEDED;
 }
 
@@ -6039,8 +6040,6 @@ void ManageBoomCrashSpikeClose()
    static datetime lastDebugLog = 0;
    if(TimeCurrent() - lastDebugLog >= 60) // Log toutes les 60 secondes maximum
    {
-      Print("?? DEBUG - ManageBoomCrashSpikeClose appelée | UseSpikeAutoClose: ", UseSpikeAutoClose ? "OUI" : "NON",
-            " | ProfilScalp: ", BoomCrash_UseSmartScalpProfile ? "OUI" : "NON");
       lastDebugLog = TimeCurrent();
    }
    
@@ -6107,7 +6106,6 @@ void ManageBoomCrashSpikeClose()
       int minHold = MathMax(1, TouchProtectScalpMinHoldSeconds);
       if(!isSpikeTrade && secondsSinceOpen < minHold)
       {
-         Print("?? DEBUG - Spike Close - Trade trop récent (non SPIKE) - ", symbol, " | Ouvert il y a: ", secondsSinceOpen, "s");
          continue;
       }
 
@@ -6158,10 +6156,6 @@ void ManageBoomCrashSpikeClose()
       static datetime lastPositionDebugLog = 0;
       if(TimeCurrent() - lastPositionDebugLog >= 120) // Log toutes les 2 minutes maximum
       {
-         Print("?? DEBUG - Position Spike Close - ", symbol, 
-               " | Profit: ", DoubleToString(profit, 2), "$",
-               " | Changement: ", DoubleToString(priceChangePercent, 3), "%",
-               " | Type: ", (posInfo.PositionType() == POSITION_TYPE_BUY ? "BUY" : "SELL"));
          lastPositionDebugLog = TimeCurrent();
       }
       
@@ -6241,7 +6235,6 @@ void ManageDollarExits()
       static datetime lastLog = 0;
       if(TimeCurrent() - lastLog >= 30) // Log toutes les 30 secondes maximum
       {
-         Print("?? DEBUG - ManageDollarExits DÉSACTIVÉE - laisse SL/TP normal fonctionner");
          lastLog = TimeCurrent();
       }
       return;
@@ -6252,7 +6245,6 @@ void ManageDollarExits()
    static datetime lastDebugLog = 0;
    if(TimeCurrent() - lastDebugLog >= 120) // Log toutes les 2 minutes maximum
    {
-      Print("?? DEBUG - ManageDollarExits appelée | MaxLossDollars: ", MaxLossDollars, " | BoomCrashSpikeTP: ", BoomCrashSpikeTP);
       lastDebugLog = TimeCurrent();
    }
 
@@ -6288,7 +6280,6 @@ void ManageDollarExits()
             continue;
          }
          
-         Print("?? DEBUG - Trade trop récent - ", symbol, " | Ouvert il y a: ", secondsSinceOpen, "s | Profit: ", DoubleToString(profit, 2), "$");
          continue; // Ignorer ce trade pour l'instant
       }
       
@@ -6296,7 +6287,6 @@ void ManageDollarExits()
       static datetime lastPositionDebugLog = 0;
       if(TimeCurrent() - lastPositionDebugLog >= 120) // Log toutes les 2 minutes maximum
       {
-         Print("?? DEBUG - Position analysée - ", symbol, " | Profit: ", DoubleToString(profit, 2), "$ | Ticket: ", ticket, " | Catégorie: ", (cat == SYM_BOOM_CRASH ? "BOOM_CRASH" : "AUTRE"), " | Âge: ", secondsSinceOpen, "s");
          lastPositionDebugLog = TimeCurrent();
       }
       
@@ -7082,7 +7072,6 @@ void OnTick()
    static datetime lastDebugLog = 0;
    if(TimeCurrent() - lastDebugLog >= 120) // Log toutes les 2 minutes maximum
    {
-      Print("?? DEBUG - Vérification IA HOLD | g_lastAIAction: '", g_lastAIAction, "' | UseAIServer: ", UseAIServer);
       lastDebugLog = TimeCurrent();
    }
    // SCALPING PRIORITY: Close spike positions FIRST before other position management
@@ -7774,7 +7763,6 @@ void UpdateDashboard()
       static datetime lastPropiceDebugLog = 0;
       if(TimeCurrent() - lastPropiceDebugLog >= 300) // Toutes les 5 minutes
       {
-         Print("?? DEBUG Propice - y=", propiceY, " | dashboardBottom=", g_dashboardBottomY);
          lastPropiceDebugLog = TimeCurrent();
       }
    }
@@ -7907,8 +7895,6 @@ void UpdateMLMetricsDisplay()
    static datetime lastDebugLog = 0;
    if(TimeCurrent() - lastDebugLog >= 60)
    {
-      Print("?? DEBUG - UpdateMLMetricsDisplay pour: ", _Symbol,
-            " | RenderPrimary=", UseRenderAsPrimary ? "1" : "0");
       lastDebugLog = TimeCurrent();
    }
 
@@ -13850,17 +13836,6 @@ bool IsInEquilibriumCorrectionZone()
       datetime now = TimeCurrent();
       if(now - lastDbg >= 15)
       {
-         Print("CORR DEBUG ", _Symbol,
-               " | inEqBand=YES",
-               " | eq=", DoubleToString(eq, _Digits),
-               " | mid=", DoubleToString(mid, _Digits),
-               " | bandHalf=", DoubleToString(half, _Digits),
-               " | rangePctM1=", DoubleToString(rangePct, 4),
-               " (max ", DoubleToString(CorrectionMaxRangePctM1, 4), ")",
-               " | atrPctM1=", DoubleToString(atrPct, 4),
-               " (max ", DoubleToString(CorrectionMaxAtrPctM1, 4), ")",
-               " | tightRange=", (isTightRange ? "YES" : "NO"),
-               " | lowAtr=", (isLowAtr ? "YES" : "NO"));
          lastDbg = now;
       }
    }
@@ -14571,7 +14546,6 @@ void DrawMLMetricsOnChart()
    static datetime lastMLDebugLog = 0;
    if(TimeCurrent() - lastMLDebugLog >= 300) // Toutes les 5 minutes
    {
-      Print("?? DEBUG ML Metrics - y=", y, " | dashboardBottom=", g_dashboardBottomY);
       lastMLDebugLog = TimeCurrent();
    }
 }
@@ -15648,7 +15622,6 @@ void DrawDashboardOnChart(const string &lines[], const color &colors[], int coun
    static datetime lastDebugLog = 0;
    if(TimeCurrent() - lastDebugLog >= 300) // Toutes les 5 minutes
    {
-      Print("?? DEBUG Dashboard - x=", x, " | y0=", y0, " | lineHeight=", lh, " | lines=", maxLines);
       lastDebugLog = TimeCurrent();
    }
 
@@ -15679,7 +15652,6 @@ void DrawDashboardOnChart(const string &lines[], const color &colors[], int coun
       // Log de débogage pour les premières lignes seulement
       if(i < 3 && TimeCurrent() - lastDebugLog >= 300)
       {
-         Print("?? DEBUG Line ", i, " - yPos=", yPos, " | text=", StringSubstr(lines[i], 0, 30));
       }
    }
 
@@ -16902,15 +16874,11 @@ void ManageTrailingStop()
                if(newSL < lockSL) newSL = lockSL;
             }
             
-            Print("🔍 DEBUG BUY SL: Open=", DoubleToString(openPrice, _Digits), " | Bid=", DoubleToString(bid, _Digits), " | CurrentSL=", DoubleToString(currentSL, _Digits), " | NewSL=", DoubleToString(newSL, _Digits), " | BeSL=", DoubleToString(beSL, _Digits));
-            
             // Valider le SL avant modification
             if(ValidateStopLossForModification(symbol, "BUY", bid, newSL))
             {
                // Only move SL if it improves the current SL and is above open price
                bool shouldModify = (newSL > currentSL && newSL > openPrice);
-               Print("🔍 DEBUG BUY Modify: ShouldModify=", shouldModify ? "YES" : "NO", " | NewSL>CurrentSL=", (newSL > currentSL) ? "YES" : "NO", " | NewSL>OpenPrice=", (newSL > openPrice) ? "YES" : "NO");
-               
                if(shouldModify)
                {
                   if(trade.PositionModify(ticket, newSL, currentTP))
@@ -16925,7 +16893,6 @@ void ManageTrailingStop()
             }
             else
             {
-               Print("🔍 DEBUG BUY SL Validation FAILED");
             }
          }
          else if(posInfo.PositionType() == POSITION_TYPE_SELL)
@@ -16941,15 +16908,11 @@ void ManageTrailingStop()
                if(newSL > lockSL) newSL = lockSL;
             }
             
-            Print("🔍 DEBUG SELL SL: Open=", DoubleToString(openPrice, _Digits), " | Ask=", DoubleToString(ask, _Digits), " | CurrentSL=", DoubleToString(currentSL, _Digits), " | NewSL=", DoubleToString(newSL, _Digits), " | BeSL=", DoubleToString(beSL, _Digits));
-            
             // Valider le SL avant modification
             if(ValidateStopLossForModification(symbol, "SELL", ask, newSL))
             {
                // Only move SL if it improves the current SL and is below open price
                bool shouldModify = ((newSL < currentSL || currentSL == 0) && newSL < openPrice);
-               Print("🔍 DEBUG SELL Modify: ShouldModify=", shouldModify ? "YES" : "NO", " | NewSL<CurrentSL=", (newSL < currentSL || currentSL == 0) ? "YES" : "NO", " | NewSL<OpenPrice=", (newSL < openPrice) ? "YES" : "NO");
-               
                if(shouldModify)
                {
                   if(trade.PositionModify(ticket, newSL, currentTP))
@@ -16964,7 +16927,6 @@ void ManageTrailingStop()
             }
             else
             {
-               Print("🔍 DEBUG SELL SL Validation FAILED");
             }
          }
       }
@@ -17474,10 +17436,100 @@ void CheckTotalLossAndClose()
 }
 
 //| ENVOI DE FEEDBACK DE TRADES À L'IA SERVER                        |
+// Dessine une flèche d'entrée/sortie sur le graphique au moment du deal
+void SMC_DrawDealArrow(const ulong dealTicket)
+{
+   if(!ShowChartGraphics) return;
+   if(!HistoryDealSelect(dealTicket)) return;
+
+   string   sym    = HistoryDealGetString(dealTicket, DEAL_SYMBOL);
+   if(sym != _Symbol) return;
+
+   long     magic  = HistoryDealGetInteger(dealTicket, DEAL_MAGIC);
+   if(magic != InpMagicNumber) return;
+
+   ENUM_DEAL_TYPE dtype = (ENUM_DEAL_TYPE)HistoryDealGetInteger(dealTicket, DEAL_TYPE);
+   ENUM_DEAL_ENTRY dentry= (ENUM_DEAL_ENTRY)HistoryDealGetInteger(dealTicket, DEAL_ENTRY);
+   double   price  = HistoryDealGetDouble(dealTicket, DEAL_PRICE);
+   datetime dtime  = (datetime)HistoryDealGetInteger(dealTicket, DEAL_TIME);
+   double   profit = HistoryDealGetDouble(dealTicket, DEAL_PROFIT)
+                   + HistoryDealGetDouble(dealTicket, DEAL_SWAP)
+                   + HistoryDealGetDouble(dealTicket, DEAL_COMMISSION);
+
+   if(price <= 0.0 || dtime <= 0) return;
+
+   bool isBuy  = (dtype == DEAL_TYPE_BUY);
+   bool isOpen = (dentry == DEAL_ENTRY_IN);
+   bool isWin  = (profit > 0.0);
+
+   string name = "SMC_DEAL_" + IntegerToString(dealTicket);
+   if(ObjectFind(0, name) >= 0) return; // déjà dessiné
+
+   // Flèche : entrée BUY = flèche haut verte, entrée SELL = flèche bas rouge
+   // Sortie gagnante = ✓ vert, perdante = ✗ rouge
+   int arrowCode;
+   color arrowClr;
+   string labelTxt;
+
+   if(isOpen)
+   {
+      arrowCode = isBuy ? 233 : 234;                    // ▲ ou ▼
+      arrowClr  = isBuy ? clrLimeGreen : clrTomato;
+      labelTxt  = (isBuy ? "BUY" : "SELL") + " @ " + DoubleToString(price, _Digits);
+   }
+   else
+   {
+      arrowCode = isWin ? 251 : 252;                    // ✓ ou ✗
+      arrowClr  = isWin ? clrAqua : clrOrangeRed;
+      labelTxt  = (isWin ? "WIN " : "LOSS ") + DoubleToString(profit, 2) + "$";
+   }
+
+   ObjectCreate(0, name, OBJ_ARROW, 0, dtime, price);
+   ObjectSetInteger(0, name, OBJPROP_ARROWCODE, arrowCode);
+   ObjectSetInteger(0, name, OBJPROP_COLOR,     arrowClr);
+   ObjectSetInteger(0, name, OBJPROP_WIDTH,     2);
+   ObjectSetInteger(0, name, OBJPROP_BACK,      false);
+   ObjectSetInteger(0, name, OBJPROP_ZORDER,    200);
+
+   // Label texte à côté de la flèche
+   string lblName = name + "_LBL";
+   ObjectCreate(0, lblName, OBJ_TEXT, 0, dtime, price);
+   ObjectSetString(0,  lblName, OBJPROP_TEXT,     labelTxt);
+   ObjectSetString(0,  lblName, OBJPROP_FONT,     "Arial Bold");
+   ObjectSetInteger(0, lblName, OBJPROP_FONTSIZE, 7);
+   ObjectSetInteger(0, lblName, OBJPROP_COLOR,    arrowClr);
+   ObjectSetInteger(0, lblName, OBJPROP_ANCHOR,   isBuy ? ANCHOR_LEFT_UPPER : ANCHOR_LEFT_LOWER);
+   ObjectSetInteger(0, lblName, OBJPROP_BACK,     false);
+   ObjectSetInteger(0, lblName, OBJPROP_ZORDER,   201);
+
+   ChartRedraw(0);
+}
+
+// Rejoue les deals récents au démarrage (les 50 derniers) pour repeupler le graphique
+void SMC_ReplayRecentDeals(const int maxDeals = 50)
+{
+   if(!ShowChartGraphics) return;
+   datetime from = TimeCurrent() - 7 * 86400; // 7 jours
+   if(!HistorySelect(from, TimeCurrent())) return;
+   int total = HistoryDealsTotal();
+   int start = MathMax(0, total - maxDeals);
+   for(int i = start; i < total; i++)
+   {
+      ulong ticket = HistoryDealGetTicket(i);
+      if(ticket > 0) SMC_DrawDealArrow(ticket);
+   }
+}
+
 void OnTradeTransaction(const MqlTradeTransaction &trans,
                         const MqlTradeRequest &request,
                         const MqlTradeResult &result)
 {
+   // Dessiner les flèches d'ordre dès qu'un deal est exécuté
+   if(trans.type == TRADE_TRANSACTION_DEAL_ADD)
+   {
+      SMC_DrawDealArrow(trans.deal);
+   }
+
    // Ne traiter que les transactions de clôture de positions
    if(trans.type != TRADE_TRANSACTION_POSITION)
       return;
@@ -18117,11 +18169,6 @@ void GenerateFallbackAIDecision()
 // Petit helper de debug pour inspecter rapidement la dernière décision IA
 void DebugPrintAIDecision()
 {
-   Print("?? DEBUG IA - Symbole: ", _Symbol,
-         " | Action: ", g_lastAIAction,
-         " | Confiance: ", DoubleToString(NormalizeAIConfidenceUnit()*100.0, 1), "%",
-         " | Alignement: ", g_lastAIAlignment,
-         " | Cohérence: ", g_lastAICoherence);
 }
 
 //| DÉTECTION SWING HIGH/LOW SPÉCIALE BOOM/CRASH (LOGIQUE TRADING) |
@@ -18582,7 +18629,6 @@ void CheckAndExecuteDerivArrowTrade()
    static datetime lastLog = 0;
    if(TimeCurrent() - lastLog >= 10) // Log toutes les 10 secondes maximum
    {
-      Print("?? DEBUG - CheckAndExecuteDerivArrowTrade appelée pour: ", _Symbol, " | Time: ", TimeToString(TimeCurrent(), TIME_SECONDS));
       lastLog = TimeCurrent();
    }
    
@@ -19051,17 +19097,6 @@ void CheckAndExecuteDerivArrowTrade()
          shouldTrade = false;
       }
       
-      Print("?? DEBUG - Boom/Crash SNIPER - PreSpike: ", preSpike ? "OUI" : "NON",
-            " | Spike récent: ", spikeDetected ? "OUI" : "NON",
-            " | Proba ML spike: ",
-            (spikeProbML > 0.0 ? DoubleToString(spikeProbML*100.0, 1) + "%" : "N/A"),
-            " (min ",
-            (UseSpikeMLFilter ? DoubleToString(SpikeML_MinProbability*100.0, 1) + "%" : "N/A"),
-            ")",
-            " | Mode pré-spike only: ", SpikeUsePreSpikeOnlyForBoomCrash ? "OUI" : "NON",
-            " | Mode pré-spike strict: ", SpikeRequirePreSpikePattern ? "OUI" : "NON",
-            " | Mode Trend Staircase: ", UseAggressiveChannelEntry ? "OUI" : "NON",
-            " | Autorisé: ", shouldTrade ? "OUI" : "NON");
    }
    else if(isVolatility)
    {
@@ -19069,7 +19104,6 @@ void CheckAndExecuteDerivArrowTrade()
       spikeDetected = false; // Non applicable
       shouldTrade = true; // Trade autorisé si IA forte (déjà validé ci-dessus)
       
-      Print("?? DEBUG - Volatility - Trade autorisé (confiance IA: ", DoubleToString(NormalizeAIConfidenceUnit()*100, 1), "%)");
    }
    
    if(!shouldTrade)
@@ -19145,9 +19179,6 @@ void CheckAndExecuteDerivArrowTrade()
    // Vérifier l'alignement avec les indicateurs techniques classiques (TradingView-like)
    string classicSummary;
    bool classicOk = IsClassicIndicatorsAligned(direction, classicSummary);
-
-   Print("?? DEBUG - Indicateurs classiques (", direction, ") => ", classicOk ? "ALIGNÉS" : "NON ALIGNÉS",
-         " | ", classicSummary);
 
    if(!classicOk)
    {
@@ -19654,9 +19685,6 @@ static datetime g_lastHoldCloseTime = 0;
 //| PLACER ORDRE LIMIT POST-HOLD APRÈS PERTE 2,0$ |
 void PlacePostHoldLimitOrder(string closedSymbol, ENUM_POSITION_TYPE closedType, double closedProfit)
 {
-   Print("?? DEBUG POST-HOLD - Début fonction");
-   Print("   ?? Symbole: ", closedSymbol, " | Type: ", (closedType == POSITION_TYPE_BUY ? "BUY" : "SELL"), " | Profit: ", DoubleToString(closedProfit, 2), "$");
-   
    // Vérifier si la fermeture était bien due à HOLD avec perte ? 2,0$
    if(closedProfit > -2.0)
    {
@@ -20482,14 +20510,6 @@ void ExecuteDerivArrowTrade(string direction)
       stopLoss = currentPrice + safeDistance;
       takeProfit = currentPrice - (safeDistance * 2.0);
    }
-   
-   Print("?? DEBUG SL/TP - ", _Symbol, " ", direction, 
-         " | Prix: ", DoubleToString(currentPrice, _Digits),
-         " | Courtier StopsLevel: ", stopsLevel,
-         " | MinDistance: ", DoubleToString(minStopDistance, _Digits),
-         " | SafeDistance: ", DoubleToString(safeDistance, _Digits),
-         " | SL: ", DoubleToString(stopLoss, _Digits),
-         " | TP: ", DoubleToString(takeProfit, _Digits));
    
    // VALIDATION FINALE DES DISTANCES
    double askPrice = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
@@ -21580,7 +21600,6 @@ void ExecuteAIDecisionMarketOrder()
    static datetime lastDebugHoldLog = 0;
    if(TimeCurrent() - lastDebugHoldLog >= 120) // Log toutes les 2 minutes maximum
    {
-      Print("?? DEBUG HOLD (Market): g_lastAIAction = '", g_lastAIAction, "' | g_lastAIConfidence = ", DoubleToString(NormalizeAIConfidenceUnit()*100, 1), "%");
       lastDebugHoldLog = TimeCurrent();
    }
    
@@ -25763,8 +25782,6 @@ void DrawAIStatusAndPredictions()
 //| DÉTECTER UN SPIKE RÉCENT sur Boom/Crash                           |
 bool DetectRecentSpike()
 {
-   Print("?? DEBUG - Détection de spike pour: ", _Symbol);
-   
    // Vérifier les 5 dernières bougies pour un spike significatif
    MqlRates rates[];
    ArraySetAsSeries(rates, true);
@@ -25797,12 +25814,6 @@ bool DetectRecentSpike()
    
    bool isSpike = lastMovement > spikeThreshold;
    
-   Print("?? DEBUG - Analyse spike - Mouvement actuel: ", DoubleToString(lastMovement, _Digits), 
-         " | Moyenne: ", DoubleToString(avgMovement, _Digits), 
-         " | Seuil: ", DoubleToString(spikeThreshold, _Digits), 
-         " | Ratio: ", DoubleToString(lastMovement/avgMovement, 1),
-         " | Spike: ", isSpike ? "OUI" : "NON");
-   
    // Ajouter une détection alternative basée sur le prix
    double priceChange = MathAbs(rates[0].close - rates[1].close) / rates[1].close;
    
@@ -25814,8 +25825,6 @@ bool DetectRecentSpike()
    }
    
    bool priceSpike = priceChange > priceThreshold;
-   
-   Print("?? DEBUG - Spike prix - Changement: ", DoubleToString(priceChange*100, 4), "% | Seuil: ", DoubleToString(priceThreshold*100, 4), "% | Spike: ", priceSpike ? "OUI" : "NON");
    
    // Ajouter une détection basée sur le volume pour Boom/Crash
    bool volumeSpike = false;
@@ -25829,9 +25838,6 @@ bool DetectRecentSpike()
          double avgVolume = ((double)volume[1] + (double)volume[2]) / 2.0;
          volumeSpike = recentVolume > avgVolume * 1.3; // 30% plus élevé
          
-         Print("?? DEBUG - Spike volume - Récent: ", DoubleToString(recentVolume, 0), 
-               " | Moyenne: ", DoubleToString(avgVolume, 0), 
-               " | Spike: ", volumeSpike ? "OUI" : "NON");
       }
    }
    
@@ -25984,8 +25990,6 @@ void ExecuteSpikeTrade(string direction)
    
    if(atrValue == 0) atrValue = SymbolInfoDouble(_Symbol, SYMBOL_BID) * 0.002; // 0.2% par défaut
    
-   Print("?? DEBUG - ATR pour SL/TP: ", DoubleToString(atrValue, _Digits), " | Symbol: ", _Symbol);
-   
    // Perte max par trade (3$): perte en $ = (SL en prix) * (tickValue/tickSize) * lot
    double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
    double tickVal  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
@@ -26035,9 +26039,6 @@ void ExecuteSpikeTrade(string direction)
    // Exécuter l'ordre
    bool orderExecuted = false;
    
-   // DEBUG: Vérifier l'option NoSLTP_BoomCrash
-   Print("?? DEBUG - NoSLTP_BoomCrash: ", NoSLTP_BoomCrash ? "OUI" : "NON", " | Catégorie: ", (SMC_GetSymbolCategory(_Symbol) == SYM_BOOM_CRASH ? "BOOM_CRASH" : "AUTRE"));
-   
    if(direction == "BUY")
    {
       if(!HasRecentSMCDerivArrowForDirection("BUY"))
@@ -26055,9 +26056,6 @@ void ExecuteSpikeTrade(string direction)
          tp = ask + atrValue * 3.0;  // Pour BUY: TP au-dessus (plus haut)
       }
       
-      Print("?? DEBUG - BUY - Ask: ", DoubleToString(ask, _Digits), " | SL: ", DoubleToString(sl, _Digits), " | TP: ", DoubleToString(tp, _Digits));
-      Print("?? DEBUG - Vérification SL/TP BUY - SL < Ask: ", (sl < ask || sl == 0) ? "OK" : "ERREUR", " | TP > Ask: ", (tp > ask || tp == 0) ? "OK" : "ERREUR");
-      
       if(!IsMinimumProfitPotentialMet(ask, tp, "BUY", lot)) return;
       
       if(trade.Buy(lot, _Symbol, 0.0, sl, tp, "SPIKE TRADE BUY"))
@@ -26065,7 +26063,6 @@ void ExecuteSpikeTrade(string direction)
          orderExecuted = true;
          g_lastEntryTimeForSymbol = TimeCurrent();
          Print("? SPIKE TRADE BUY EXÉCUTÉ - ", _Symbol, " @", DoubleToString(ask, _Digits), " | Lot: ", DoubleToString(lot, 2), " | Magic: ", trade.RequestMagic());
-         Print("?? DEBUG - Ticket d'ordre: ", trade.ResultOrder());
       }
       else
       {
@@ -26089,15 +26086,11 @@ void ExecuteSpikeTrade(string direction)
          tp = bid - atrValue * 3.0;  // Pour SELL: TP en-dessous (plus bas)
       }
       
-      Print("?? DEBUG - SELL - Bid: ", DoubleToString(bid, _Digits), " | SL: ", DoubleToString(sl, _Digits), " | TP: ", DoubleToString(tp, _Digits));
-      Print("?? DEBUG - Vérification SL/TP SELL - SL > Bid: ", (sl > bid || sl == 0) ? "OK" : "ERREUR", " | TP < Bid: ", (tp < bid || tp == 0) ? "OK" : "ERREUR");
-      
       if(trade.Sell(lot, _Symbol, 0.0, sl, tp, "SPIKE TRADE SELL"))
       {
          orderExecuted = true;
          g_lastEntryTimeForSymbol = TimeCurrent();
          Print("? SPIKE TRADE SELL EXÉCUTÉ - ", _Symbol, " @", DoubleToString(bid, _Digits), " | Lot: ", DoubleToString(lot, 2), " | Magic: ", trade.RequestMagic());
-         Print("?? DEBUG - Ticket d'ordre: ", trade.ResultOrder());
       }
       else
       {
