@@ -2421,7 +2421,7 @@ input int    ConsecutiveLossPauseMinutes = 45;        // Durée de la pause apr�
 input bool   BlockAllEntriesIfSymbolPaused = true;    // Si le symbole est en pause (streak pertes, profit target, etc.) → lot 0 pour TOUTES entrées (y compris Boom/Crash)
 input double MaxDailyRealizedLossPerSymbolUSD = 3.0; // Plafond perte réalisée (jour, symbole) — au-delà, pas de nouvelle entrée ce jour sur ce symbole (0=désactivé)
 input bool   BlockTradingNonTopPropiceWhenLosing = true; // Multi-graph: si filtre propice actif et ce symbole n'est pas le plus propice → bloquer entrées (évite répéter pertes sur 2e/3e choix)
-input bool   BlockEquilibriumCorrectionTrades = true; // Bloquer les trades en zone de correction (autour de l'équilibre ICT)
+input bool   BlockEquilibriumCorrectionTrades = false; // false = ne pas bloquer en zone d'équilibre ICT
 input bool   UseServerCorrectionZoneFilter = true;    // Bloquer aussi selon prédiction correction serveur/AWS RDS
 input double ServerCorrectionMinConfidence = 63.0;    // Seuil confiance (%) pour bloquer quand le serveur signale correction (plus bas = plus de blocage)
 input double EquilibriumCorrectionBandPercent = 26.0; // Largeur zone correction (% Premium↔Discount) — plus large = moins de trades en zone chop
@@ -2542,7 +2542,7 @@ input int    DashboardVerdictCellHeight = 28; // Hauteur cellules bandeau verdic
 input double VerdictThresholdGOOD = 0.35;  // Seuil pour GOOD BUY/SELL (absolu)
 input double VerdictThresholdPERFECT = 0.65; // Seuil pour PERFECT BUY/SELL (absolu)
 input bool   EnableAutoEntryOnStrongVerdict = true; // Entrée auto sur GOOD/PERFECT BUY/SELL
-input double AutoEntryOnVerdictMinConfPct = 70.0; // Confiance verdict min (%) pour entrée auto
+input double AutoEntryOnVerdictMinConfPct = 55.0; // Confiance verdict min (%) pour entrée auto
 input bool   AutoEntryPreferM5OverM1 = true; // Priorité M5 > M1 > M30 > H1 pour le niveau d'entrée
 input int    VerdictAutoEntryCooldownSec = 45; // Délai min entre 2 entrées auto verdict
 input bool   AllowTradeWhenAIHoldIfVerdictStrong = true; // Trader si verdict BUY/SELL fort même si IA=HOLD
@@ -2620,7 +2620,7 @@ input bool   UseFVG            = true;   // Fair Value Gap
 input bool   UseOrderBlocks    = true;   // Order Blocks
 input bool   UseLiquiditySweep = true;   // Liquidity Sweep (LS)
 input bool   UseICTEvidenceSequence = true; // Exiger une séquence de confirmations ICT avant entrée
-input int    ICTMinSignatures  = 3;      // Signatures minimales requises (OB/IFVG/Breaker/BOS)
+input int    ICTMinSignatures  = 1;      // Signatures minimales requises (réduit pour plus d'entrées)
 input bool   ICT_RequireOBInOTEZone = false; // Si true: le point OB ICT exige OB dans zone Fibo OTE (SMC_FindOrderBlockInOTEZone)
 input int    ICTLookbackBars   = 120;    // Fenêtre historique pour validation ICT
 input double ICTSweepTolerancePoints = 8.0; // Tolérance sweep/liquidité en points
@@ -2661,8 +2661,8 @@ input double OTE_BoomBuyMaxPosInSwingRange = 0.70; // Boom BUY: position max aut
 input double OTE_CrashSellMinPosInSwingRange = 0.30; // Crash SELL: position min requise dans le swing [Low..High]
 
 // Confluence OB + Fibo OTE (même logique que SMC_DetectOrderBlock) — entrées « sûres »
-input bool   OTE_RequireOBInFibZone = true;   // OTE+FVG: exiger un OB validé chevauchant la zone 62–78.6 % du swing
-input bool   OTE_RequireMinSetupScore = true; // SMC_OTE: exiger ComputeSetupScoreValue >= seuil (setups plus sûrs)
+input bool   OTE_RequireOBInFibZone = false;  // false = OTE sans exiger OB dans la zone Fibo (plus d'entrées)
+input bool   OTE_RequireMinSetupScore = false; // false = entrée OTE sans seuil de score (plus d'entrées)
 input double OTE_MinSetupScoreForEntry = 72.0; // Score min (0-100) pour ExecuteSMC_OTEStrategy
 
 input group "=== PROTOCOLE OTE ICT (7 étapes) ==="
@@ -2671,8 +2671,8 @@ input bool   OTE_UseStructuralMidForEntry          = true;   // Entrer au 70.5% 
 input int    OTE_TouchBufferPoints                 = 5;
 input bool   OTE_RequireM1CandleConfirmationOnTouch = true;
 input int    OTEConfirmBarsRequired                = 2;      // Bougies M1 de confirmation (min 2)
-input bool   RequireBOSBeforeOTE                   = true;
-input double OTE_MinProbabilityToEnter             = 72.0;
+input bool   RequireBOSBeforeOTE                   = false; // false = pas besoin de BOS avant OTE
+input double OTE_MinProbabilityToEnter             = 55.0; // Seuil réduit pour plus d'entrées
 input int    OTE_MinRangePoints                    = 50;     // Range swing min (points)
 input int    OTE_SwingLookbackBars                 = 120;    // Lookback swings structurels
 input int    OTE_NewsBlockMinutesAhead             = 30;     // Bloquer si news haute importance (min)
@@ -2695,7 +2695,7 @@ input double PA_SL_ATRMult                         = 1.2;
 input double PA_TP_RRMult                          = 2.5;
 
 input group "=== MODE STRATÉGIE UNIQUE OTE ICT ==="
-input bool   UseOnlyICTOTEProtocol = true; // true = SEUL le protocole OTE ICT (7 étapes) ouvre des trades
+input bool   UseOnlyICTOTEProtocol = false; // false = toutes stratégies actives (verdict, OB+CHOCH, OTE, M5)
 
 input bool   M5Touch_RequireOBInFibZone = true; // Touch Entry M5 (hors Boom/Crash): OB SMC chevauchant zone OTE Fibo
 input bool   M5Touch_RequireMinSetupScore = false; // Touch M5 (hors Boom/Crash): exiger ComputeSetupScoreValue >= M5Touch_MinSetupScore
