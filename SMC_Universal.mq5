@@ -28480,26 +28480,36 @@ bool ExecuteVerdictMarketOrder(const string direction, const string entryTf)
 
 void CheckAndExecuteVerdictAutoEntry()
 {
-   if(SMC_NonOTEEntriesBlocked()) return;
-   if(!EnableAutoEntryOnStrongVerdict) return;
-   if(!VerdictAutoMarketOnGoodPerfect) return;
-   if(ShouldBlockNewTradeDueToDailyCap()) return;
-   if(!SMC_IsStrictUTCTradingWindowOpen()) return;
-   if(g_finalVerdict.updated <= 0) return;
+   // Diagnostic throttlé — affiche la raison du blocage toutes les 30s
+   #define VAGATE(reason) { if(SMC_LogThrottle("VAE_GATE_" + _Symbol, 30)) \
+      Print("⏸ VERDICT AUTO [", _Symbol, "] bloqué: " + reason + \
+            " | verdict=", g_finalVerdict.verdictLabel, " ", \
+            DoubleToString(g_finalVerdict.finalConfPct,1), "%"); return; }
 
-   if(!SMC_IsGoodOrPerfectVerdict()) return;
-   if(g_finalVerdict.direction != "BUY" && g_finalVerdict.direction != "SELL") return;
-   if(g_finalVerdict.finalConfPct + 1e-6 < AutoEntryOnVerdictMinConfPct) return;
+   if(SMC_NonOTEEntriesBlocked())            VAGATE("UseOnlyICTOTEProtocol=true")
+   if(!EnableAutoEntryOnStrongVerdict)       VAGATE("EnableAutoEntryOnStrongVerdict=false")
+   if(!VerdictAutoMarketOnGoodPerfect)       VAGATE("VerdictAutoMarketOnGoodPerfect=false")
+   if(ShouldBlockNewTradeDueToDailyCap())    VAGATE("Daily cap atteint")
+   if(!SMC_IsStrictUTCTradingWindowOpen())   VAGATE("Hors zone UTC")
+   if(g_finalVerdict.updated <= 0)           VAGATE("Verdict non initialisé")
 
-   if(TimeCurrent() - g_lastVerdictAutoEntryTime < VerdictAutoEntryCooldownSec) return;
-   if(CountPositionsForSymbol(_Symbol) > 0) return;
-   if(HasAnyExposureForSymbol(_Symbol)) return;
+   if(!SMC_IsGoodOrPerfectVerdict())         VAGATE("Verdict=" + g_finalVerdict.verdictLabel)
+   if(g_finalVerdict.direction != "BUY" && g_finalVerdict.direction != "SELL") VAGATE("Direction WAIT")
+   if(g_finalVerdict.finalConfPct + 1e-6 < AutoEntryOnVerdictMinConfPct)
+      VAGATE("Conf " + DoubleToString(g_finalVerdict.finalConfPct,1) + "% < seuil " + DoubleToString(AutoEntryOnVerdictMinConfPct,1) + "%")
+
+   if(TimeCurrent() - g_lastVerdictAutoEntryTime < VerdictAutoEntryCooldownSec)
+      VAGATE("Cooldown " + IntegerToString(VerdictAutoEntryCooldownSec - (int)(TimeCurrent()-g_lastVerdictAutoEntryTime)) + "s restantes")
+   if(CountPositionsForSymbol(_Symbol) > 0)  VAGATE("Position déjà ouverte")
+   if(HasAnyExposureForSymbol(_Symbol))       VAGATE("Exposition existante")
 
    if(!IsDirectionAllowedForBoomCrash(_Symbol, g_finalVerdict.direction))
    {
       Print("🚫 VERDICT AUTO BLOQUÉ - direction ", g_finalVerdict.direction, " interdite sur ", _Symbol);
       return;
    }
+
+   #undef VAGATE
    if(VerdictAutoRequireTrendAlign)
    {
       string trendDir = GetCurrentTrendDirection();
