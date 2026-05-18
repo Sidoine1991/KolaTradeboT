@@ -4706,7 +4706,7 @@ void DrawGOMEntryLevelsOnChart()
          int touches = SMC_CountLevelTouches(lvl, atrVal);
          int confPct = SMC_GOMConfidencePct(touches);
          int width   = isActive ? 2 : MathMax(1, MathMin(2, touches / 4));
-         ENUM_LINE_STYLE style = isActive ? STYLE_SOLID : STYLE_DASH;
+         ENUM_LINE_STYLE style = isActive ? (ENUM_LINE_STYLE)STYLE_SOLID : (ENUM_LINE_STYLE)STYLE_DASH;
 
          string txt = tfTags[i] + " " + side + " " + IntegerToString(confPct) + "%";
          SMC_DrawHLine(lnName, lvl, lineClr, style, width, txt);
@@ -28616,9 +28616,6 @@ void CheckAndExecuteAutoEntryOnVerdictGoodPerfect()
          " | SL=", DoubleToString(stopLoss, _Digits),
          " TP=", DoubleToString(takeProfit, _Digits),
          " | conf=", DoubleToString(g_finalVerdict.finalConfPct, 1), "%");
-   // dummy line to match removed block end
-         " | conf=", DoubleToString(g_finalVerdict.finalConfPct, 1), "%");
-
 }
 
 // Un seul BUY_LIMIT ou SELL_LIMIT par symbole sur le niveau d'entrée du verdict fort
@@ -28825,7 +28822,8 @@ void ManageVerdictEntryLimitOrder()
       rem.action = TRADE_ACTION_REMOVE;
       rem.order  = keepTicket;
       rem.symbol = _Symbol;
-      OrderSend(rem, remr);
+      if(!OrderSend(rem, remr))
+         Print("⚠ OTE limit cancel failed: ", remr.retcode);
    }
 
    // Annuler tout autre ordre limit orphelin sur ce symbole
@@ -29067,7 +29065,7 @@ void DrawEntryLevelLines(bool isBullish, double emaFast, string tfLabel)
       lineClr = isGoodOrPerfect ? clrTomato    : (color)0x7A1A1A;   // rouge vif / rouge sombre
 
    int width = isGoodOrPerfect ? 2 : 1;
-   ENUM_LINE_STYLE style = isGoodOrPerfect ? STYLE_SOLID : STYLE_DOT;
+   ENUM_LINE_STYLE style = isGoodOrPerfect ? (ENUM_LINE_STYLE)STYLE_SOLID : (ENUM_LINE_STYLE)STYLE_DOT;
 
    int touches = SMC_CountLevelTouches(emaFast, 0.0);
    int confPct  = SMC_GOMConfidencePct(touches);
