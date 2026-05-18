@@ -1082,28 +1082,22 @@ bool IsLastCandleConfirmingDirection(const string direction)
 {
    if(!RequireConfirmationCandle) return true;
    if(SMC_IsM5AggressiveCapturePresetActive()) return true;
+   // Synthétiques (Boom/Crash/Volatility/Step/Jump) : pas de filtre bougie
+   // car les bougies ne confirment pas la direction sur ces indices
+   ENUM_SYMBOL_CATEGORY cat = SMC_GetSymbolCategory(_Symbol);
+   if(cat == SYM_BOOM_CRASH || cat == SYM_VOLATILITY) return true;
+
    MqlRates rates[];
    ArraySetAsSeries(rates, true);
-   if(CopyRates(_Symbol, PERIOD_M1, 1, 2, rates) < 2) return true; // pas de données = on autorise
+   if(CopyRates(_Symbol, PERIOD_M1, 1, 2, rates) < 2) return true;
    double open0 = rates[0].open;
    double close0 = rates[0].close;
    string d = direction; StringToUpper(d);
-   if(d == "BUY")
-   {
-      if(close0 <= open0)
-      {
-         Print("🚫 ENTRÉE BLOQUÉE - Dernière bougie M1 non haussière (close=", DoubleToString(close0, _Digits), " <= open=", DoubleToString(open0, _Digits), ")");
-         return false;
-      }
-   }
-   else if(d == "SELL")
-   {
-      if(close0 >= open0)
-      {
-         Print("🚫 ENTRÉE BLOQUÉE - Dernière bougie M1 non baissière (close=", DoubleToString(close0, _Digits), " >= open=", DoubleToString(open0, _Digits), ")");
-         return false;
-      }
-   }
+   // Tolérance 20% : la bougie doit être dans la bonne direction d'au moins 20% de son range
+   double range = MathAbs(rates[0].high - rates[0].low);
+   double minBody = range * 0.20;
+   if(d == "BUY"  && (close0 - open0) < minBody) return false;
+   if(d == "SELL" && (open0 - close0) < minBody) return false;
    return true;
 }
 
@@ -29373,156 +29367,159 @@ void CheckAndExecuteOTEEntry()
       return;
    }
 
-   double emaM1Fast = iMA(_Symbol, PERIOD_M1, 9, 0, MODE_EMA, PRICE_CLOSE);
-   double emaM5Fast = iMA(_Symbol, PERIOD_M5, 9, 0, MODE_EMA, PRICE_CLOSE);
-   double emaH1Fast = iMA(_Symbol, PERIOD_H1, 9, 0, MODE_EMA, PRICE_CLOSE);
-   double emaM1Slow = iMA(_Symbol, PERIOD_M1, 21, 0, MODE_EMA, PRICE_CLOSE);
-   double emaM5Slow = iMA(_Symbol, PERIOD_M5, 21, 0, MODE_EMA, PRICE_CLOSE);
-   double emaH1Slow = iMA(_Symbol, PERIOD_H1, 21, 0, MODE_EMA, PRICE_CLOSE);
-
-   // Directions par TF
-   bool bullM1 = (emaM1Fast > emaM1Slow);
-   bool bullM5 = (emaM5Fast > emaM5Slow);
-   bool bullH1 = (emaH1Fast > emaH1Slow);
-
-   // Calculer verdict
-   int alignmentCount = (bullM1 ? 1 : 0) + (bullM5 ? 1 : 0) + (bullH1 ? 1 : 0);
-   double confluenceScore = (double)alignmentCount / 3.0;
-   double iaScore = (g_lastAIAction == "BUY") ? g_lastAIConfidence : (g_lastAIAction == "SELL") ? -g_lastAIConfidence : 0.0;
-   double finalScore = (confluenceScore - 0.5) * 2.0 * 0.8 + iaScore * 0.2;
-   finalScore = MathMax(-1.0, MathMin(1.0, finalScore));
-
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
    int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
 
-   // Déterminer niveau d'entrée selon le verdict et la direction
-   double limitEntryPrice = 0;
-   bool shouldPlace = false;
+   // Vérification de base : verdict GOOD/PERFECT requis
+   if(!SMC_IsGoodOrPerfectVerdict()) return;
 
-   // CONDITIONS POUR PLACER LIMIT ORDER:
-   // BUY: M1/M5 (GOOD/PERFECT) + H1 (BUY/SELL) → Placer LIMIT BUY à EMA M1 Fast
-   // SELL: M1/M5 (GOOD/PERFECT) + H1 (BUY/SELL) → Placer LIMIT SELL à EMA M1 Fast
+   // Alignement direction OB avec verdict
+   string obDir = (g_confirmedOB.direction > 0) ? "BUY" : "SELL";
+   if(obDir != g_finalVerdict.direction) return;
 
-   if(g_confirmedOB.direction > 0)  // OB Bullish → BUY
+   // === Prix dans le rectangle OB (±ATR*0.3) → entrée au marché ===
+   double atrOB = 0.0;
+   double atrBufOB[];
+   ArraySetAsSeries(atrBufOB, true);
+   if(atrHandle != INVALID_HANDLE && CopyBuffer(atrHandle, 0, 0, 1, atrBufOB) > 0)
+      atrOB = atrBufOB[0];
+   if(atrOB <= 0.0) atrOB = point * 50.0;
+
+   double obLow  = MathMin(g_confirmedOB.low,  g_confirmedOB.high);
+   double obHigh = MathMax(g_confirmedOB.low,  g_confirmedOB.high);
+   double touchBuf = atrOB * 0.30;
+   double curPx = (obDir == "BUY") ? ask : bid;
+
+   bool priceInOB = (curPx >= obLow - touchBuf && curPx <= obHigh + touchBuf);
+   if(!priceInOB)
    {
-      // Vérifier: M1 ou M5 en GOOD/PERFECT, H1 donne direction
-      if((bullM1 || bullM5) && (MathAbs(finalScore) >= VerdictThresholdGOOD))
+      // Prix pas dans l'OB → placer un LIMIT au niveau le plus proche du rectangle
+      // (OB low pour BUY, OB high pour SELL)
+      double limitAt = (obDir == "BUY") ? obLow : obHigh;
+      // Vérifier si un ordre OB limit existe déjà proche
+      for(int io = OrdersTotal()-1; io >= 0; io--)
       {
-         if(bullH1)  // H1 confirme bullish
-         {
-            // Placer LIMIT BUY à EMA M1 Fast
-            limitEntryPrice = emaM1Fast;
-            shouldPlace = true;
-         }
+         ulong tck = OrderGetTicket(io);
+         if(!OrderSelect(tck)) continue;
+         if(OrderGetInteger(ORDER_MAGIC) != InpMagicNumber) continue;
+         if(OrderGetString(ORDER_SYMBOL) != _Symbol) continue;
+         string cmt = OrderGetString(ORDER_COMMENT);
+         if(StringFind(cmt, "SMC_OB_CHOCH") >= 0 && MathAbs(OrderGetDouble(ORDER_PRICE_OPEN) - limitAt) <= point*5)
+            return; // ordre déjà en place
       }
-   }
-   else if(g_confirmedOB.direction < 0)  // OB Bearish → SELL
-   {
-      // Vérifier: M1 ou M5 en GOOD/PERFECT, H1 donne direction
-      if((!bullM1 || !bullM5) && (MathAbs(finalScore) >= VerdictThresholdGOOD))
+      // Pas d'ordre : en créer un LIMIT au niveau OB
+      // (on laisse les autres gates du bas gérer SL/TP)
+      double limitSL = (obDir == "BUY") ? obLow - atrOB * SL_ATRMult
+                                        : obHigh + atrOB * SL_ATRMult;
+      double limitTP = (obDir == "BUY") ? limitAt + atrOB * TP_ATRMult
+                                        : limitAt - atrOB * TP_ATRMult;
+      double limitLot = GetOptimalLotSize();
+      if(limitLot > 0.0 && IsSpreadAcceptable() && !HasAnyExposureForSymbol(_Symbol))
       {
-         if(!bullH1)  // H1 confirme bearish
-         {
-            // Placer LIMIT SELL à EMA M1 Fast
-            limitEntryPrice = emaM1Fast;
-            shouldPlace = true;
-         }
+         MqlTradeRequest lreq = {};
+         MqlTradeResult  lres = {};
+         lreq.action  = TRADE_ACTION_PENDING;
+         lreq.symbol  = _Symbol;
+         lreq.volume  = limitLot;
+         lreq.type    = (obDir == "BUY") ? ORDER_TYPE_BUY_LIMIT : ORDER_TYPE_SELL_LIMIT;
+         lreq.price   = NormalizeDouble(limitAt, digits);
+         lreq.sl      = NormalizeDouble(limitSL, digits);
+         lreq.tp      = NormalizeDouble(limitTP, digits);
+         lreq.magic   = InpMagicNumber;
+         lreq.comment = "SMC_OB_CHOCH_" + obDir;
+         if(ValidateAndAdjustLimitPrice(lreq.price, lreq.sl, lreq.tp, lreq.type) && OrderSend(lreq, lres))
+            Print("📌 OB+CHOCH LIMIT ", obDir, " @ ", DoubleToString(lreq.price, digits),
+                  " | SL=", DoubleToString(lreq.sl, digits), " TP=", DoubleToString(lreq.tp, digits),
+                  " | ", _Symbol);
       }
+      return;
    }
 
-   if(!shouldPlace) return;
+   // Prix DANS le rectangle OB → entrée marché immédiate
+   if(HasAnyExposureForSymbol(_Symbol)) return;
+   if(!IsSpreadAcceptable()) return;
+   if(IsEntryCooldownActive()) return;
+   if(ShouldBlockNewTradeDueToDailyCap()) return;
 
-   // Zones Fibonacci OTE pour validation
-   double fibHigh = MathMax(g_confirmedOB.high, g_confirmedOB.low);
-   double fibLow = MathMin(g_confirmedOB.high, g_confirmedOB.low);
+   // Zones Fibonacci OTE pour SL/TP
+   double fibHigh = obHigh;
+   double fibLow  = obLow;
    double fib618 = fibLow + (fibHigh - fibLow) * 0.618;
    double fib786 = fibLow + (fibHigh - fibLow) * 0.786;
 
-   // Calculer SL/TP
-   double sl, tp1, tp2, tp3;
-   double riskPips = 20;
+   // Mode d'entrée : au marché (prix dans OB)
+   double limitEntryPrice = curPx;
+   bool shouldPlace = true;
 
-   if(g_confirmedOB.direction > 0)  // BUY
+   // Calcul SL/TP via ATR (1R/2R/3R)
+   double atr = iATR(_Symbol, LTF, 14);
+   if(atr <= 0.0) atr = point * 50.0;
+
+   double sl = 0.0, tp1 = 0.0, tp2 = 0.0, tp3 = 0.0;
+   if(obDir == "BUY")
    {
-      sl = g_confirmedOB.low - riskPips * point;
-      double atr = iATR(_Symbol, LTF, 14);
-      tp1 = limitEntryPrice + atr * 0.5;
-      tp2 = limitEntryPrice + atr * 1.0;
-      tp3 = limitEntryPrice + atr * 1.5;
-
-      // Placer LIMIT BUY à EMA M1 Fast
-      double lotSize = GetOptimalLotSize();
-      MqlTradeRequest request;
-      MqlTradeResult result;
-      ZeroMemory(request);
-      request.action = TRADE_ACTION_PENDING;
-      request.type = ORDER_TYPE_BUY_LIMIT;
-      request.symbol = _Symbol;
-      request.volume = lotSize;
-      request.price = limitEntryPrice;
-      request.sl = sl;
-      request.tp = tp1;
-      request.comment = "LIMIT BUY @ EMA M1 | OB+OTE Setup";
-      request.type_filling = ORDER_FILLING_IOC;
-
-      if(OrderSend(request, result))
-      {
-         Print("✅ LIMIT BUY Order Placed | Level: ", DoubleToString(limitEntryPrice, digits),
-               " | SL: ", DoubleToString(sl, digits),
-               " | TP1: ", DoubleToString(tp1, digits),
-               " | TP2: ", DoubleToString(tp2, digits),
-               " | TP3: ", DoubleToString(tp3, digits));
-         g_lastTP2 = tp2;
-         g_lastTP3 = tp3;
-      }
-      else
-      {
-         Print("❌ LIMIT BUY Failed: ", GetLastError());
-      }
+      sl  = obLow  - atr * SL_ATRMult;
+      double risk = limitEntryPrice - sl;
+      if(risk <= point * 5) return;
+      tp1 = limitEntryPrice + risk * 1.0;
+      tp2 = limitEntryPrice + risk * 2.0;
+      tp3 = limitEntryPrice + risk * 3.0;
    }
-   else  // SELL
+   else
    {
-      sl = g_confirmedOB.high + riskPips * point;
-      double atr = iATR(_Symbol, LTF, 14);
-      tp1 = limitEntryPrice - atr * 0.5;
-      tp2 = limitEntryPrice - atr * 1.0;
-      tp3 = limitEntryPrice - atr * 1.5;
-
-      // Placer LIMIT SELL à EMA M1 Fast
-      double lotSize = GetOptimalLotSize();
-      MqlTradeRequest request;
-      MqlTradeResult result;
-      ZeroMemory(request);
-      request.action = TRADE_ACTION_PENDING;
-      request.type = ORDER_TYPE_SELL_LIMIT;
-      request.symbol = _Symbol;
-      request.volume = lotSize;
-      request.price = limitEntryPrice;
-      request.sl = sl;
-      request.tp = tp1;
-      request.comment = "LIMIT SELL @ EMA M1 | OB+OTE Setup";
-      request.type_filling = ORDER_FILLING_IOC;
-
-      if(OrderSend(request, result))
-      {
-         Print("✅ LIMIT SELL Order Placed | Level: ", DoubleToString(limitEntryPrice, digits),
-               " | SL: ", DoubleToString(sl, digits),
-               " | TP1: ", DoubleToString(tp1, digits),
-               " | TP2: ", DoubleToString(tp2, digits),
-               " | TP3: ", DoubleToString(tp3, digits));
-         g_lastTP2 = tp2;
-         g_lastTP3 = tp3;
-      }
-      else
-      {
-         Print("❌ LIMIT SELL Failed: ", GetLastError());
-      }
+      sl  = obHigh + atr * SL_ATRMult;
+      double risk = sl - limitEntryPrice;
+      if(risk <= point * 5) return;
+      tp1 = limitEntryPrice - risk * 1.0;
+      tp2 = limitEntryPrice - risk * 2.0;
+      tp3 = limitEntryPrice - risk * 3.0;
    }
 
-   // Réinitialiser après placement
-   g_confirmedOB.direction = 0;
+   ValidateAndAdjustStopLossTakeProfit(obDir, limitEntryPrice, sl, tp1);
+   EnforceMinBoomCrashStopLossDollarRisk(_Symbol, obDir, limitEntryPrice, GetOptimalLotSize(), sl);
+   sl  = NormalizeDouble(sl, digits);
+   tp1 = NormalizeDouble(tp1, digits);
+   tp2 = NormalizeDouble(tp2, digits);
+   tp3 = NormalizeDouble(tp3, digits);
+
+   double lotSize = GetOptimalLotSize();
+   if(lotSize <= 0.0) return;
+   if(!IsMinimumProfitPotentialMet(limitEntryPrice, tp1, obDir, lotSize)) return;
+
+   // Entrée AU MARCHÉ (prix dans OB rectangle)
+   MqlTradeRequest request;
+   MqlTradeResult  result;
+   ZeroMemory(request);
+   request.action   = TRADE_ACTION_DEAL;
+   request.type     = (obDir == "BUY") ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+   request.symbol   = _Symbol;
+   request.volume   = lotSize;
+   request.price    = limitEntryPrice;
+   request.sl       = sl;
+   request.tp       = tp1;
+   request.magic    = InpMagicNumber;
+   request.comment  = "OB_CHOCH_" + obDir + "_" + g_finalVerdict.verdictLabel;
+   request.type_filling = ORDER_FILLING_IOC;
+   request.deviation = 10;
+
+   if(OrderSend(request, result) && result.retcode == TRADE_RETCODE_DONE)
+   {
+      g_lastTP2 = tp2;
+      g_lastTP3 = tp3;
+      g_lastEntryTimeForSymbol = TimeCurrent();
+      RegisterBoomCrashMarketEntry();
+      Print("✅ OB+CHOCH MARKET ", obDir, " @ ", DoubleToString(limitEntryPrice, digits),
+            " | SL=", DoubleToString(sl, digits),
+            " TP1=", DoubleToString(tp1, digits),
+            " TP2=", DoubleToString(tp2, digits),
+            " TP3=", DoubleToString(tp3, digits),
+            " | ", g_finalVerdict.verdictLabel, " | ", _Symbol);
+      g_confirmedOB.direction = 0; // Consommé
+   }
+   else if(result.retcode != TRADE_RETCODE_DONE)
+      Print("❌ OB+CHOCH MARKET failed: ", result.retcode, " | ", _Symbol);
 }
 
 //+------------------------------------------------------------------+
