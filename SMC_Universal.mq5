@@ -28899,41 +28899,101 @@ void ManageVerdictEntryLimitOrder()
    if(!IsBoomCrashDirectionAllowedByIA(_Symbol, dir)) return;
    if(!IsSpreadAcceptable()) return;
 
-   double entry = 0.0;
-   ENUM_ORDER_TYPE orderType = ORDER_TYPE_BUY_LIMIT;
-   if(dir == "BUY")
+   // === Calcul du prix OTE (Optimal Trade Entry) : zone Fibonacci 61.8–78.6% ===
+   // Récupérer les swings récents M1 pour construire la zone Fibo
+   MqlRates rOTE[];
+   ArraySetAsSeries(rOTE, true);
+   double swH = 0.0, swL = 0.0;
+   if(CopyRates(_Symbol, PERIOD_M1, 0, 100, rOTE) >= 20)
    {
-      orderType = ORDER_TYPE_BUY_LIMIT;
-      if(AutoEntryPreferM5OverM1 && g_finalVerdict.m5BuyActive && g_finalVerdict.m5BuyEntryLevel > 0.0)
-         entry = g_finalVerdict.m5BuyEntryLevel;
-      else if(g_finalVerdict.m1EntryLevel > 0.0)
-         entry = g_finalVerdict.m1EntryLevel;
-      else if(g_finalVerdict.m5BuyEntryLevel > 0.0)
-         entry = g_finalVerdict.m5BuyEntryLevel;
-      else
-         return;
+      for(int k = 2; k < 98; k++)
+      {
+         if(swH <= 0.0 && rOTE[k].high > rOTE[k-1].high && rOTE[k].high > rOTE[k+1].high)
+            swH = rOTE[k].high;
+         if(swL <= 0.0 && rOTE[k].low  < rOTE[k-1].low  && rOTE[k].low  < rOTE[k+1].low)
+            swL = rOTE[k].low;
+         if(swH > 0.0 && swL > 0.0) break;
+      }
    }
-   else if(dir == "SELL")
-   {
-      orderType = ORDER_TYPE_SELL_LIMIT;
-      if(AutoEntryPreferM5OverM1 && g_finalVerdict.m5SellActive && g_finalVerdict.m5SellEntryLevel > 0.0)
-         entry = g_finalVerdict.m5SellEntryLevel;
-      else if(g_finalVerdict.m1EntryLevel > 0.0)
-         entry = g_finalVerdict.m1EntryLevel;
-      else if(g_finalVerdict.m5SellEntryLevel > 0.0)
-         entry = g_finalVerdict.m5SellEntryLevel;
-      else
-         return;
-   }
-   else
-      return;
 
    double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
    if(point <= 0.0) point = 0.0001;
 
+   double entry = 0.0;
+   double sl = 0.0, tp = 0.0;
+   ENUM_ORDER_TYPE orderType;
+   string oteTf = "OTE_M1";
+
+   double atrVal = 0.0;
+   double atrBuf[];
+   ArraySetAsSeries(atrBuf, true);
+   if(atrHandle != INVALID_HANDLE && CopyBuffer(atrHandle, 0, 0, 1, atrBuf) > 0)
+      atrVal = atrBuf[0];
+   if(atrVal <= 0.0) atrVal = point * 100.0;
+
+   if(swH > 0.0 && swL > 0.0 && swH > swL)
+   {
+      double range = swH - swL;
+      double buf   = MathMax(point * 15.0, range * 0.05);
+
+      if(dir == "BUY")
+      {
+         // Zone OTE BUY : 61.8%–78.6% au-dessus du swing low (retracement haussier)
+         double oteL = swL + range * 0.618;
+         double oteH = swL + range * 0.786;
+         entry = (oteL + oteH) / 2.0; // point médian OTE
+         sl    = swL - buf;
+         double risk = entry - sl;
+         tp    = entry + risk * MathMax(2.0, InpRiskReward);
+         orderType = ORDER_TYPE_BUY_LIMIT;
+         oteTf = "OTE_BUY_" + DoubleToString(entry, _Digits);
+      }
+      else
+      {
+         // Zone OTE SELL : 61.8%–78.6% en-dessous du swing high (retracement baissier)
+         double oteH = swH - range * 0.618;
+         double oteL = swH - range * 0.786;
+         entry = (oteL + oteH) / 2.0;
+         sl    = swH + buf;
+         double risk = sl - entry;
+         tp    = entry - risk * MathMax(2.0, InpRiskReward);
+         orderType = ORDER_TYPE_SELL_LIMIT;
+         oteTf = "OTE_SELL_" + DoubleToString(entry, _Digits);
+      }
+   }
+   else
+   {
+      // Fallback : EMA M1 si swings indisponibles
+      if(dir == "BUY")
+      {
+         entry = (g_finalVerdict.m1EntryLevel > 0.0) ? g_finalVerdict.m1EntryLevel
+               : (g_finalVerdict.m5BuyActive ? g_finalVerdict.m5BuyEntryLevel : 0.0);
+         orderType = ORDER_TYPE_BUY_LIMIT;
+         sl = entry - atrVal * SL_ATRMult;
+         tp = entry + atrVal * TP_ATRMult;
+      }
+      else
+      {
+         entry = (g_finalVerdict.m1EntryLevel > 0.0) ? g_finalVerdict.m1EntryLevel
+               : (g_finalVerdict.m5SellActive ? g_finalVerdict.m5SellEntryLevel : 0.0);
+         orderType = ORDER_TYPE_SELL_LIMIT;
+         sl = entry + atrVal * SL_ATRMult;
+         tp = entry - atrVal * TP_ATRMult;
+      }
+      oteTf = "EMA_FALLBACK";
+   }
+
+   if(entry <= 0.0 || sl <= 0.0 || tp <= 0.0) return;
+
+   // Vérifier que le prix est encore pertinent (pas déjà dépassé)
+   double curPrice = (dir == "BUY") ? SymbolInfoDouble(_Symbol, SYMBOL_ASK)
+                                    : SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   if(dir == "BUY"  && entry >= curPrice) return; // BUY_LIMIT doit être sous le prix courant
+   if(dir == "SELL" && entry <= curPrice) return; // SELL_LIMIT doit être au-dessus
+
+   // === Un seul ordre LIMIT par symbole — supprimer tout ordre SMC_VERDICT_LIMIT existant ===
    ulong keepTicket = 0;
    double keepPrice = 0.0;
-   ENUM_ORDER_TYPE keepType = orderType;
    for(int i = OrdersTotal() - 1; i >= 0; i--)
    {
       ulong ticket = OrderGetTicket(i);
@@ -28945,68 +29005,72 @@ void ManageVerdictEntryLimitOrder()
       string cmt = OrderGetString(ORDER_COMMENT);
       if(StringFind(cmt, "SMC_VERDICT_LIMIT") < 0) continue;
       keepTicket = ticket;
-      keepPrice = OrderGetDouble(ORDER_PRICE_OPEN);
-      keepType = t;
+      keepPrice  = OrderGetDouble(ORDER_PRICE_OPEN);
       break;
    }
 
+   // Si l'ordre existant est déjà au bon prix (±3 points), ne rien faire
+   if(keepTicket > 0 && MathAbs(keepPrice - entry) <= point * 5.0)
+      return;
+
+   // Annuler l'ancien ordre (déplacé ou mauvaise direction)
    if(keepTicket > 0)
    {
-      if(keepType == orderType && MathAbs(keepPrice - entry) <= point * 3.0)
-         return;
       MqlTradeRequest rem = {};
       MqlTradeResult remr = {};
       rem.action = TRADE_ACTION_REMOVE;
-      rem.order = keepTicket;
+      rem.order  = keepTicket;
       rem.symbol = _Symbol;
-      if(!OrderSend(rem, remr))
-         return;
+      OrderSend(rem, remr);
    }
 
+   // Annuler tout autre ordre limit orphelin sur ce symbole
    if(CountOpenLimitOrdersForSymbol(_Symbol) >= 1)
       CancelAllPendingLimitOrdersForSymbol(_Symbol);
 
-   double atrVal = 0.0;
-   double atrBuf[];
-   ArraySetAsSeries(atrBuf, true);
-   if(atrHandle != INVALID_HANDLE && CopyBuffer(atrHandle, 0, 0, 1, atrBuf) > 0)
-      atrVal = atrBuf[0];
-   if(atrVal <= 0.0)
-      atrVal = point * 100.0;
+   // Normalisation SL/TP
+   ValidateAndAdjustStopLossTakeProfit(dir, entry, sl, tp);
+   EnforceMinBoomCrashStopLossDollarRisk(_Symbol, dir, entry, GetOptimalLotSize(), sl);
+   sl = NormalizeDouble(sl, _Digits);
+   tp = NormalizeDouble(tp, _Digits);
+   entry = NormalizeDouble(entry, _Digits);
 
-   double sl = 0.0, tp = 0.0;
-   if(orderType == ORDER_TYPE_BUY_LIMIT)
-   {
-      sl = entry - atrVal * SL_ATRMult;
-      tp = entry + atrVal * TP_ATRMult;
-   }
-   else
-   {
-      sl = entry + atrVal * SL_ATRMult;
-      tp = entry - atrVal * TP_ATRMult;
-   }
+   double lot = GetOptimalLotSize();
+   if(lot <= 0.0) return;
+
+   if(!IsMinimumProfitPotentialMet(entry, tp, dir, lot)) return;
 
    MqlTradeRequest req = {};
-   MqlTradeResult res = {};
-   req.action = TRADE_ACTION_PENDING;
-   req.symbol = _Symbol;
-   req.volume = GetOptimalLotSize();
-   if(req.volume <= 0.0) return;
-   req.type = orderType;
-   req.price = entry;
-   req.sl = sl;
-   req.tp = tp;
-   req.magic = InpMagicNumber;
-   req.comment = "SMC_VERDICT_LIMIT " + dir;
+   MqlTradeResult  res = {};
+   req.action  = TRADE_ACTION_PENDING;
+   req.symbol  = _Symbol;
+   req.volume  = lot;
+   req.type    = orderType;
+   req.price   = entry;
+   req.sl      = sl;
+   req.tp      = tp;
+   req.magic   = InpMagicNumber;
+   req.comment = "SMC_VERDICT_LIMIT " + dir + "_" + oteTf;
 
    if(!ValidateAndAdjustLimitPrice(req.price, req.sl, req.tp, orderType))
       return;
 
-   if(OrderSend(req, res))
+   if(OrderSend(req, res) && res.retcode == TRADE_RETCODE_DONE)
    {
-      if(SMC_LogThrottle("verdict_limit_ok_" + _Symbol, 90))
-         Print("📌 LIMIT verdict ", dir, " @ ", DoubleToString(req.price, _Digits),
-               " | conf ", DoubleToString(g_finalVerdict.finalConfPct, 1), "% | ", _Symbol);
+      double risk = (dir == "BUY") ? (entry - sl) : (sl - entry);
+      double rr   = (risk > 0) ? MathAbs(tp - entry) / risk : 0.0;
+      Print("📌 OTE LIMIT ", dir, " @ ", DoubleToString(entry, _Digits),
+            " | SL=", DoubleToString(sl, _Digits),
+            " TP=", DoubleToString(tp, _Digits),
+            " RR=", DoubleToString(rr, 1), "R",
+            " | ", oteTf,
+            " | conf ", DoubleToString(g_finalVerdict.finalConfPct, 1), "%",
+            " | ", _Symbol);
+   }
+   else if(res.retcode != TRADE_RETCODE_DONE)
+   {
+      if(SMC_LogThrottle("ote_limit_fail_" + _Symbol, 60))
+         Print("❌ OTE LIMIT échoué: ret=", res.retcode, " | ", _Symbol);
    }
 }
 
