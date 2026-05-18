@@ -1638,7 +1638,10 @@ void UpdatePropiceTopSymbols()
    int n = ParsePropiceTopSymbolsJson(json, outText, outCsv, hourUtc);
    if(n <= 0)
    {
-      Print("⚠️ PropiceTop - Réponse vide ou invalide");
+      // Log 60 premiers chars du JSON pour diagnostic structure
+      if(SMC_LogThrottle("propice_invalid_json", 120))
+         Print("⚠️ PropiceTop - JSON invalide (", StringLen(json), " chars): ",
+               StringSubstr(json, 0, MathMin(120, StringLen(json))));
       g_propiceTopSymbolsStatus = "Données invalides";
       g_propiceTopSymbolsText = "Mode dégradé - Filtre désactivé";
       
@@ -2556,7 +2559,7 @@ input bool   UseM5AggressiveCapturePreset = true; // true + graphique M5: captur
 input double VerdictTakeProfitUSD = 3.0; // Fermeture symbole si profit >= ($)
 input double VerdictMaxLossUSD = 2.0; // Fermeture symbole si perte >= ($)
 input bool   VerdictApplyDynamicSL = true; // Trailing + SL dynamique sur positions VERDICT_*
-input bool   EnableVerdictEntryLimit = false; // LIMIT verdict (désactivé si entrée marché active)
+input bool   EnableVerdictEntryLimit = true; // LIMIT OTE verdict (actif indépendamment du mode marché)
 input int    VerdictLimitRefreshSec = 45; // Recalcul / repositionnement LIMIT verdict (sec)
 input bool   AI_VerboseDecisionLogs = false; // Logs détaillés POST /decision (désactivé = moins de spam)
 input bool   DashboardSingleSourceMode = true; // Eviter les doublons: infos texte uniquement via UpdateDashboard()
@@ -7130,7 +7133,8 @@ void OnTick()
    SMC_ComputeAndStoreFinalVerdict();
    EvaluateSetupHistorical(200, 5);
    CheckAndExecuteVerdictAutoEntry();
-   if(EnableVerdictEntryLimit && !VerdictAutoMarketOnGoodPerfect)
+   // OTE Limit : toujours actif si EnableVerdictEntryLimit (indépendant du mode marché)
+   if(EnableVerdictEntryLimit)
       ManageVerdictEntryLimitOrder();
 
    // Touch M5 classique (ignoré si entrée auto verdict déjà faite récemment)
@@ -28385,34 +28389,38 @@ void SMC_ComputeAndStoreFinalVerdict()
 
 bool ExecuteVerdictMarketOrder(const string direction, const string entryTf)
 {
-   if(IsInEquilibriumCorrectionZone()) return false;
-   if(ShouldBlockNewTradeDueToDailyCap()) return false;
-   if(!SMC_IsStrictUTCTradingWindowOpen()) return false;
-   if(CountPositionsForSymbol(_Symbol) > 0) return false;
-   if(HasAnyExposureForSymbol(_Symbol)) return false;
-   if(!IsSpreadAcceptable()) return false;
-   if(IsEntryCooldownActive()) return false;
+   #define VMGATE(r) { if(SMC_LogThrottle("VMO_"+_Symbol+"_"+direction, 30)) \
+      Print("⏸ EXEC MARKET [",_Symbol,"] ",direction," bloqué: "+r+" | tf="+entryTf); return false; }
+
+   if(IsInEquilibriumCorrectionZone()) VMGATE("EquilibriumCorrectionZone")
+   if(ShouldBlockNewTradeDueToDailyCap()) VMGATE("DailyCap")
+   if(!SMC_IsStrictUTCTradingWindowOpen()) VMGATE("Hors zone UTC")
+   if(CountPositionsForSymbol(_Symbol) > 0) VMGATE("Position déjà ouverte")
+   if(HasAnyExposureForSymbol(_Symbol)) VMGATE("Exposition existante")
+   if(!IsSpreadAcceptable()) VMGATE("Spread trop large")
+   if(IsEntryCooldownActive()) VMGATE("Cooldown entrée actif")
 
    if(UseAIServer)
    {
-      if(!IsAISignalFreshForTrading("VERDICT MARKET " + entryTf)) return false;
+      if(!IsAISignalFreshForTrading("VERDICT MARKET " + entryTf)) VMGATE("Signal IA pas frais")
       string iaDir = SMC_NormalizeAIDirectionLabel();
       double minConf = AutoEntryOnVerdictMinConfPct / 100.0;
       if(iaDir == "HOLD")
       {
-         if(!SMC_AllowDirectionDespiteAIHold(direction)) return false;
-         if(g_finalVerdict.finalConfPct / 100.0 + 1e-6 < minConf) return false;
+         if(!SMC_AllowDirectionDespiteAIHold(direction)) VMGATE("IA=HOLD et verdict pas assez fort")
+         if(g_finalVerdict.finalConfPct / 100.0 + 1e-6 < minConf) VMGATE("Conf verdict " + DoubleToString(g_finalVerdict.finalConfPct,1) + "% < seuil " + DoubleToString(minConf*100,1) + "%")
       }
       else
       {
-         if(iaDir != direction) return false;
-         if(!IsAIConfidenceAtLeast(minConf, "VERDICT MARKET " + entryTf)) return false;
+         if(iaDir != direction) VMGATE("IA=" + iaDir + " ≠ " + direction)
+         if(!IsAIConfidenceAtLeast(minConf, "VERDICT MARKET " + entryTf)) VMGATE("Conf IA < seuil")
       }
    }
 
-   if(!IsBoomCrashDirectionAllowedByIA(_Symbol, direction)) return false;
-   if(!CanOpenAdditionalPositionForSymbol(_Symbol, direction)) return false;
-   if(!IsLastCandleConfirmingDirection(direction)) return false;
+   if(!IsBoomCrashDirectionAllowedByIA(_Symbol, direction)) VMGATE("BoomCrash direction interdite")
+   if(!CanOpenAdditionalPositionForSymbol(_Symbol, direction)) VMGATE("Position supplémentaire refusée")
+   if(!IsLastCandleConfirmingDirection(direction)) VMGATE("Dernière bougie non confirmante")
+   #undef VMGATE
 
    double atrVal = 0.0;
    double atrBuf[];
