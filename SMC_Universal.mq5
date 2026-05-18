@@ -7125,6 +7125,7 @@ void OnTick()
    CloseAllPositionsIfSymbolLossReached(VerdictMaxLossUSD);
    
    SMC_ComputeAndStoreFinalVerdict();
+   g_cachedPricePrediction = GetPriceDirection(); // rafraîchi à chaque tick pour le filtre Prediction
    EvaluateSetupHistorical(200, 5);
    CheckAndExecuteVerdictAutoEntry();
    // OTE Limit : toujours actif si EnableVerdictEntryLimit (indépendant du mode marché)
@@ -10488,9 +10489,17 @@ PricePrediction GetPriceDirection()
    }
    if(atrVal <= 0.0) atrVal = point * 50.0;
 
-   // Prix moyen/volatilité pour déterminer consolidation
-   double avgMove = atrVal * 0.5;  // Moyenne volatilité
-   bool isConsolidating = (atrVal < avgMove * 0.8);  // Si ATR est basse
+   // Consolidation : comparer ATR courant à la moyenne des 20 dernières barres
+   double atrArr20[];
+   ArraySetAsSeries(atrArr20, true);
+   double atrAvg20 = atrVal;
+   if(atrHandle != INVALID_HANDLE && CopyBuffer(atrHandle, 0, 0, 20, atrArr20) >= 20)
+   {
+      double sum = 0.0;
+      for(int _k = 0; _k < 20; _k++) sum += atrArr20[_k];
+      atrAvg20 = sum / 20.0;
+   }
+   bool isConsolidating = (atrAvg20 > 0.0 && atrVal < atrAvg20 * 0.60);
 
    // 4. Analyse des niveaux de swing pour support/résistance
    // Déterminer si prix approche un niveau clé
@@ -28584,6 +28593,26 @@ void CheckAndExecuteVerdictAutoEntry()
       }
    }
 
+   // Filtre Prediction final : CONSOLIDATE/SIDEWAYS → pas de trade, UP/DOWN → valider
+   {
+      PricePrediction pdAuto = g_cachedPricePrediction;
+      if(pdAuto.direction == "CONSOLIDATE" || pdAuto.direction == "SIDEWAYS")
+      {
+         if(SMC_LogThrottle("VAUTO_PRED_CONSOL_" + _Symbol, 30))
+            Print("⏸ VERDICT AUTO bloqué - Prediction=", pdAuto.direction, " | ", _Symbol);
+         return;
+      }
+      bool autoAligned = ((g_finalVerdict.direction == "BUY"  && pdAuto.direction == "UP") ||
+                          (g_finalVerdict.direction == "SELL" && pdAuto.direction == "DOWN"));
+      if(!autoAligned)
+      {
+         if(SMC_LogThrottle("VAUTO_PRED_DIR_" + _Symbol, 30))
+            Print("⏸ VERDICT AUTO bloqué - Prediction=", pdAuto.direction,
+                  " ≠ ", g_finalVerdict.direction, " | ", _Symbol);
+         return;
+      }
+   }
+
    double entryLvl = 0.0;
    string entryTf = "";
    if(!SMC_PickVerdictEntryLevel(g_finalVerdict.direction, entryLvl, entryTf))
@@ -28697,32 +28726,28 @@ void CheckAndExecuteAutoEntryOnVerdictGoodPerfect()
    // All conditions met - proceed with entry
    lastAutoEntryTime = TimeCurrent();
 
-   // Get real price direction prediction
-   PricePrediction priceDir = GetPriceDirection();
-
-   // STRICT FILTERING: Only trade if price direction aligns with verdict
-   // BUY verdict must predict UP, SELL verdict must predict DOWN
-   bool directionAligned = false;
-   if(g_finalVerdict.direction == "BUY" && priceDir.direction == "UP")
-      directionAligned = true;
-   else if(g_finalVerdict.direction == "SELL" && priceDir.direction == "DOWN")
-      directionAligned = true;
-
-   if(!directionAligned)
+   // Filtre Prediction : CONSOLIDATE/SIDEWAYS → pas de trade
+   // UP ou DOWN → valider quelle que soit la probabilité (règle déterminante finale)
+   PricePrediction priceDir = g_cachedPricePrediction;
+   if(priceDir.direction == "CONSOLIDATE" || priceDir.direction == "SIDEWAYS")
    {
-      Print("❌ VERDICT blocked - Price direction mismatch | verdict=", g_finalVerdict.direction,
-            " | predicted=", priceDir.direction, " | prob=", priceDir.probability, "%");
+      if(SMC_LogThrottle("VERDICT_PRED_CONSOL_" + _Symbol, 30))
+         Print("⏸ VERDICT bloqué - Prediction=", priceDir.direction,
+               " (Sideways/Consolidation) | verdict=", g_finalVerdict.verdictLabel,
+               " | ", _Symbol);
       return;
    }
-
-   // Require minimum confidence in price prediction
-   double minPredictionConfidence = 50.0;
-   if(priceDir.probability < minPredictionConfidence)
+   // Vérifier alignement direction
+   bool predAligned = ((g_finalVerdict.direction == "BUY"  && priceDir.direction == "UP") ||
+                       (g_finalVerdict.direction == "SELL" && priceDir.direction == "DOWN"));
+   if(!predAligned)
    {
-      Print("❌ VERDICT blocked - Price prediction confidence too low | prob=", priceDir.probability,
-            "% | min=", minPredictionConfidence, "%");
+      if(SMC_LogThrottle("VERDICT_PRED_DIR_" + _Symbol, 30))
+         Print("⏸ VERDICT bloqué - Prediction=", priceDir.direction,
+               " ≠ verdict=", g_finalVerdict.direction, " | ", _Symbol);
       return;
    }
+   // UP ou DOWN aligné → pas de filtre de probabilité (toutes validées)
 
    // Get entry level and timeframe
    double entryPrice = 0.0;
