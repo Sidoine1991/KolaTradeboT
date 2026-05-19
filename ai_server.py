@@ -5460,10 +5460,10 @@ if MT5_AVAILABLE:
     except Exception as e:
         logger.error(f"Erreur lors de l'initialisation MT5: {e}")
 
-# Initialisation des prédicteurs ML si disponibles
+# Initialisation des prédicteurs ML si disponibles (classes peuvent être None sur Render/Linux)
 ml_predictor = None
 spike_predictor = None
-if BACKEND_AVAILABLE:
+if BACKEND_AVAILABLE and callable(AdvancedMLPredictor) and callable(AdvancedSpikePredictor):
     try:
         ml_predictor = AdvancedMLPredictor()
         spike_predictor = AdvancedSpikePredictor()
@@ -7420,8 +7420,9 @@ async def fetch_supabase_ml_context(symbol: str, timeframe: str = "M1") -> Dict[
 
 
 
+@app.api_route("/", methods=["GET", "HEAD"])
 async def root():
-    """Endpoint racine pour vérifier que le serveur fonctionne"""
+    """Endpoint racine — healthcheck Render (HEAD /) et info serveur (GET /)."""
     return {
         "status": "running",
         "service": "TradBOT AI Server",
