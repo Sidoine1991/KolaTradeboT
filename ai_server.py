@@ -298,8 +298,8 @@ else:
 # ========== CONFIGURATIONS AMÉLIORATIONS PRIORITAIRES ==========
 # Seuils de confiance minimum pour éviter les signaux trop faibles
 # ULTRA-CONSERVATEUR : Capital 20$ — uniquement les signaux très fiables
-MIN_CONFIDENCE_THRESHOLD = 0.72  # 72% minimum — strict pour protéger capital 20$
-FORCE_HOLD_THRESHOLD = 0.60      # Force HOLD si confiance < 60% — pas de trade incertain avec 20$
+MIN_CONFIDENCE_THRESHOLD = 0.75  # 75% minimum — aligné EA (MinAIConfidence)
+FORCE_HOLD_THRESHOLD = 0.75      # Force HOLD si confiance < 75%
 
 # Prompt système amélioré pour Boom/Crash
 BOOM_CRASH_SYSTEM_PROMPT = """
@@ -523,7 +523,7 @@ class SymbolConfigOut(BaseModel):
     enabled: bool = True
     max_open_positions: int = 1
     min_expectancy: float = 0.20  # Espérance min 20% — ultra-conservateur pour capital 20$
-    min_ai_confidence: float = 0.72  # Confiance min 72% — aligné avec MIN_CONFIDENCE_THRESHOLD
+    min_ai_confidence: float = 0.75  # Confiance min 75% — aligné avec MIN_CONFIDENCE_THRESHOLD
     max_daily_loss_usd: Optional[float] = 0.40  # Perte max/jour/symbole: 2% du capital 20$
     max_symbol_loss_usd: Optional[float] = 0.40  # Perte max cumulée/symbole: 2% du capital
     max_consecutive_losses: Optional[int] = 2  # Max 2 pertes consécutives avant pause
@@ -636,21 +636,21 @@ class SnapshotStorageResponse(BaseModel):
 def apply_confidence_thresholds(action: str, confidence: float, reason: str) -> tuple:
     """
     Applique les seuils de confiance minimum pour protéger le capital 20$.
-    Force HOLD si confiance < 72%, applique plancher 75% pour les signaux buy/sell.
+    Force HOLD si confiance < 75% (aligné EA MinAIConfidencePercent).
     ULTRA-CONSERVATEUR : chaque signal doit être de haute qualité.
     """
     # Si action est hold, retourner directement (pas de plancher nécessaire)
     if action == "hold":
         return action, max(confidence, 0.50), reason
 
-    # Forcer HOLD si confiance < 72% (seuil minimum pour capital 20$)
-    if confidence < 0.72:
-        return "hold", confidence, f"{reason} (confiance {confidence:.0%} < 72% → HOLD forcé, capital 20$ protégé)"
+    # Forcer HOLD si confiance < 75%
+    if confidence < MIN_CONFIDENCE_THRESHOLD:
+        return "hold", confidence, f"{reason} (confiance {confidence:.0%} < 75% → HOLD forcé)"
 
-    # Forcer un plancher de confiance à 75% pour les signaux buy/sell actifs
+    # Plancher 75% pour les signaux buy/sell actifs
     if action != "hold" and confidence < 0.75:
         confidence = 0.75
-        reason += f" (confiance plancher 75% appliqué — mode ultra-conservateur 20$)"
+        reason += " (confiance plancher 75% appliqué)"
 
     # Limiter la confiance max à 95% (éviter surconfiance)
     confidence = min(confidence, 0.95)
