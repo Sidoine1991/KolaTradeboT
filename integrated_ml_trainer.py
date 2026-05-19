@@ -135,6 +135,13 @@ class IntegratedMLTrainer:
         self.models = {}
         logger.info(f"Chargement initial des modèles ML depuis {self.models_dir}...")
         self.models = self.load_existing_models()
+        # Peupler current_metrics depuis les fichiers _metrics.json sauvegardés,
+        # sinon _compute_ml_metrics retourne 70% baseline pour tous les symboles au démarrage.
+        for model_key, m in self.models.items():
+            saved = m.get("metrics") or {}
+            if saved and saved.get("training_samples"):
+                self.current_metrics[model_key] = saved
+                logger.info(f"[ML] Métriques restaurées: {model_key} acc={saved.get('metrics', {}).get(saved.get('best_model','random_forest'), {}).get('accuracy', '?')}")
 
     def _disable_supabase_writes_if_402(self, status: int) -> None:
         if status != 402:
@@ -205,142 +212,186 @@ class IntegratedMLTrainer:
         return models
     
     async def fetch_training_data_simple(self, symbol: str, timeframe: str = "M1", limit: int = 1000) -> Optional[pd.DataFrame]:
-        """Récupère les données d'entraînement depuis Supabase (version simplifiée)"""
-        # Vérifier le cache
+        """
+        Source primaire : AWS RDS trade_feedback (résultats réels win/loss).
+        Fallback       : Supabase predictions (si RDS vide ou indisponible).
+        On n'entraîne jamais sur des données factices — elles produisent une
+        accuracy de ~70 % identique pour tous les symboles (biais tautologique).
+        """
         cache_key = f"{symbol}_{timeframe}"
         current_time = time.time()
-        
         if cache_key in self.data_cache:
-            cache_age = current_time - self.cache_timestamps.get(cache_key, 0)
-            if cache_age < self.cache_duration:
+            if current_time - self.cache_timestamps.get(cache_key, 0) < self.cache_duration:
                 logger.debug(f"✅ Cache utilisé pour {cache_key}")
                 return self.data_cache[cache_key]
-        
+
+        # --- Source primaire : trade_feedback RDS ---
+        df = await asyncio.to_thread(self._fetch_from_rds_trade_feedback, symbol, timeframe, limit)
+        if df is not None and len(df) >= self.min_samples_for_retraining:
+            self.data_cache[cache_key] = df
+            self.cache_timestamps[cache_key] = current_time
+            logger.info(f"📊 RDS trade_feedback: {len(df)} trades réels pour {symbol} {timeframe}")
+            return df
+
+        rds_count = len(df) if df is not None else 0
+        logger.info(f"ℹ️ RDS trade_feedback: {rds_count} trades pour {symbol} (seuil={self.min_samples_for_retraining}) — fallback Supabase predictions")
+
+        # --- Fallback : Supabase predictions ---
+        symbol_for_query = (symbol or "").replace("_", " ").strip()
         headers = {
             "apikey": self.supabase_key,
             "Authorization": f"Bearer {self.supabase_key}",
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
         }
-        
         try:
-            async with httpx.AsyncClient() as client:
-                # Récupérer les prédictions récentes avec une requête plus simple
-                predictions_url = f"{self.supabase_url}/rest/v1/predictions"
-
-                # Supabase stocke en général les indices avec espaces (ex: "Boom 600 Index")
-                # alors que les fichiers modèles contiennent souvent des "_" (ex: "Boom_600_Index").
-                symbol_for_query = (symbol or "").replace("_", " ").strip()
-                
-                # Utiliser une requête plus simple
+            async with httpx.AsyncClient(timeout=15.0) as client:
                 pred_resp = await client.get(
-                    predictions_url, 
-                    # Utiliser `params` en dict (sinon httpx peut ne pas encoder correctement la requête).
-                    # httpx encode ensuite les espaces proprement dans l'URL.
-                    params={
-                        "symbol": f"eq.{symbol_for_query}",
-                        "timeframe": f"eq.{timeframe}",
-                        "limit": limit,
-                        "order": "created_at.desc",
-                    },
-                    headers=headers
+                    f"{self.supabase_url}/rest/v1/predictions",
+                    params={"symbol": f"eq.{symbol_for_query}", "timeframe": f"eq.{timeframe}",
+                            "limit": limit, "order": "created_at.desc"},
+                    headers=headers,
                 )
-                
                 if pred_resp.status_code != 200:
                     self._disable_supabase_writes_if_402(pred_resp.status_code)
                     if pred_resp.status_code != 402:
-                        logger.warning(f"⚠️ Pas de données pour {symbol} (status: {pred_resp.status_code})")
-                    # Créer des données factices pour éviter "Samples: 0"
-                    dummy_data = self._create_dummy_training_data(symbol, timeframe)
-                    if dummy_data is not None:
-                        self.data_cache[cache_key] = dummy_data
-                        self.cache_timestamps[cache_key] = current_time
-                        logger.info(f"📊 Données factices créées pour {symbol}: {len(dummy_data)} échantillons")
-                    return dummy_data
-                
-                predictions_data = pred_resp.json()
-                
-                # Créer un DataFrame simple avec les données disponibles
-                df = self.prepare_simple_training_data(predictions_data)
-                
-                if df is not None and len(df) > 0:
-                    # Mettre en cache
-                    self.data_cache[cache_key] = df
+                        logger.warning(f"⚠️ Supabase predictions {symbol}: HTTP {pred_resp.status_code}")
+                    return None
+
+                df_sup = self.prepare_simple_training_data(pred_resp.json())
+                if df_sup is not None and len(df_sup) >= self.min_samples_for_retraining:
+                    self.data_cache[cache_key] = df_sup
                     self.cache_timestamps[cache_key] = current_time
-                    logger.info(f"📊 {len(df)} échantillons récupérés pour {symbol} {timeframe}")
-                else:
-                    logger.warning(f"⚠️ Données vides pour {symbol} après préparation")
-                    # Créer des données factices
-                    dummy_data = self._create_dummy_training_data(symbol, timeframe)
-                    if dummy_data is not None:
-                        self.data_cache[cache_key] = dummy_data
-                        self.cache_timestamps[cache_key] = current_time
-                        logger.info(f"📊 Données factices créées pour {symbol}: {len(dummy_data)} échantillons")
-                    return dummy_data
-                
-                return df
-                
+                    logger.info(f"📊 Supabase predictions: {len(df_sup)} rows pour {symbol} {timeframe}")
+                    return df_sup
+
+                logger.warning(f"⚠️ Pas assez de données réelles pour {symbol} ({len(df_sup) if df_sup is not None else 0} rows) — entraînement reporté")
+                return None
+
         except Exception as e:
-            logger.error(f"❌ Erreur récupération données {symbol}: {e}")
-            # Créer des données factices même en cas d'erreur
-            dummy_data = self._create_dummy_training_data(symbol, timeframe)
-            if dummy_data is not None:
-                self.data_cache[cache_key] = dummy_data
-                self.cache_timestamps[cache_key] = current_time
-                logger.info(f"📊 Données factices créées (erreur) pour {symbol}: {len(dummy_data)} échantillons")
-            return dummy_data
+            logger.error(f"❌ Erreur fetch données {symbol}: {e}")
+            return None
+
+    def _fetch_from_rds_trade_feedback(self, symbol: str, timeframe: str, limit: int) -> Optional[pd.DataFrame]:
+        """
+        Récupère les trades réels depuis trade_feedback RDS et construit un DataFrame
+        avec les features dashboard (ai_confidence, coherent_confidence, decision, side)
+        et le label réel is_win.
+        """
+        try:
+            from aws_rds_helper import aws_rds_client
+        except ImportError:
+            return None
+        try:
+            # Essayer les deux variantes de nom (espaces / underscores)
+            sym_space = (symbol or "").replace("_", " ").strip()
+            sym_under = sym_space.replace(" ", "_")
+            rows = aws_rds_client.execute_query(
+                """
+                SELECT symbol, timeframe, is_win, profit,
+                       ai_confidence, coherent_confidence, decision, side,
+                       entry_price, exit_price, open_time, close_time
+                FROM trade_feedback
+                WHERE symbol IN (%s, %s)
+                  AND timeframe = %s
+                ORDER BY close_time DESC
+                LIMIT %s
+                """,
+                (sym_space, sym_under, timeframe, limit),
+            )
+        except Exception as e:
+            logger.debug(f"RDS trade_feedback fetch {symbol}: {e}")
+            return None
+
+        if not rows:
+            return None
+
+        records = []
+        for r in rows:
+            try:
+                entry = float(r.get("entry_price") or 0.0)
+                exit_p = float(r.get("exit_price") or 0.0)
+                records.append({
+                    # Features disponibles dans trade_feedback
+                    "ai_confidence":       float(r.get("ai_confidence") or 0.5),
+                    "coherent_confidence": float(r.get("coherent_confidence") or 0.5),
+                    # Encoder decision (BUY=1, SELL=0, HOLD=2)
+                    "decision_encoded":    1 if str(r.get("decision", "")).upper() == "BUY"
+                                           else (0 if str(r.get("decision", "")).upper() == "SELL" else 2),
+                    # Encoder side
+                    "side_encoded":        1 if str(r.get("side", "")).lower() == "buy"
+                                           else (0 if str(r.get("side", "")).lower() == "sell" else 2),
+                    # Mouvement prix (proxy ATR / momentum)
+                    "price_move_pct":      abs(exit_p - entry) / entry if entry > 0 else 0.0,
+                    "price_direction":     1.0 if exit_p > entry else (-1.0 if exit_p < entry else 0.0),
+                    # Label : résultat réel
+                    "target":              1 if r.get("is_win") else 0,
+                })
+            except Exception:
+                continue
+
+        if not records:
+            return None
+
+        df = pd.DataFrame(records)
+        logger.info(f"[RDS] {len(df)} trades réels chargés pour {symbol} {timeframe} "
+                    f"| win_rate={df['target'].mean():.1%}")
+        return df
     
     def prepare_simple_training_data(self, predictions: List[Dict]) -> pd.DataFrame:
-        """Prépare les données d'entraînement (version simplifiée)"""
+        """
+        Fallback Supabase : transforme des rows `predictions` en DataFrame entraînable.
+        Label priorité : is_win (metadata) > profit > prediction IA (tautologique, à éviter).
+        Source préférée : _fetch_from_rds_trade_feedback (résultats réels).
+        """
         training_data = []
-        
+
         for pred in predictions:
             try:
-                # Extraire les données de base
-                metadata = pred.get('metadata', {})
-                request_data = metadata.get('request_data', {})
-                
-                # Features de base toujours disponibles
+                metadata = pred.get('metadata', {}) or {}
+                request_data = metadata.get('request_data', {}) or {}
+
                 features = {
-                    'rsi': float(request_data.get('rsi', 50)),
-                    'atr': float(request_data.get('atr', 0.001)),
-                    'bid': float(pred.get('bid', 1.0)),
-                    'ask': float(pred.get('ask', 1.0)),
-                    'confidence': float(pred.get('confidence', 0.5))
+                    'rsi':        float(request_data.get('rsi', 50)),
+                    'atr':        float(request_data.get('atr', 0.001)),
+                    'bid':        float(pred.get('bid', 1.0)),
+                    'ask':        float(pred.get('ask', 1.0)),
+                    'confidence': float(pred.get('confidence', 0.5)),
                 }
-                
-                # Features techniques si disponibles
+
                 if 'ema_fast_m1' in request_data:
                     features['ema_fast_m1'] = float(request_data['ema_fast_m1'])
                     features['ema_slow_m1'] = float(request_data.get('ema_slow_m1', 1.0))
                     features['ema_diff_m1'] = features['ema_fast_m1'] - features['ema_slow_m1']
-                
+
                 if 'ema_fast_h1' in request_data:
                     features['ema_fast_h1'] = float(request_data['ema_fast_h1'])
                     features['ema_slow_h1'] = float(request_data.get('ema_slow_h1', 1.0))
                     features['ema_diff_h1'] = features['ema_fast_h1'] - features['ema_slow_h1']
-                
-                # Déterminer le label
-                prediction = pred.get('prediction', 'hold')
-                if prediction == 'buy':
-                    label = 1
-                elif prediction == 'sell':
-                    label = 0
+
+                # Label : utiliser le résultat réel si disponible dans metadata
+                is_win = metadata.get('is_win')
+                profit = metadata.get('profit')
+                if is_win is not None:
+                    label = 1 if is_win else 0
+                elif profit is not None:
+                    label = 1 if float(profit) > 0 else 0
                 else:
-                    label = 2  # hold
-                
+                    # Fallback tautologique — label = ce que l'IA a dit (qualité limitée)
+                    p = pred.get('prediction', 'hold')
+                    label = 1 if p == 'buy' else (0 if p == 'sell' else 2)
+
                 features['target'] = label
                 features['prediction_id'] = pred.get('id', '')
                 features['timestamp'] = pred.get('created_at', datetime.now().isoformat())
-                
                 training_data.append(features)
-                
+
             except Exception as e:
                 logger.warning(f"⚠️ Erreur préparation feature: {e}")
                 continue
-        
+
         if not training_data:
             return None
-            
+
         return pd.DataFrame(training_data)
     
     def _create_model(self, model_type: str):
@@ -442,32 +493,30 @@ class IntegratedMLTrainer:
         joblib.dump(model_obj, model_path)
         joblib.dump(scaler, scaler_path)
         
+        model_metrics_entry = {
+            "accuracy": float(accuracy),
+            "precision": float(precision),
+            "recall": float(recall),
+            "f1_score": float(f1),
+            "per_class": per_class,
+            "reliability_score": reliability_score,
+            "feature_importance": feature_importance,
+        }
+        # Stocker sous la clé du vrai modèle entraîné.
+        # Ajouter "random_forest" comme alias uniquement si un autre type a été utilisé,
+        # pour que les lecteurs qui cherchent toujours "random_forest" trouvent la valeur réelle
+        # sans masquer l'identité du modèle.
+        metrics_by_model: Dict[str, Any] = {model_type: model_metrics_entry}
+        if model_type != "random_forest":
+            metrics_by_model["random_forest"] = model_metrics_entry
+
         metrics = {
             "symbol": symbol,
             "timeframe": timeframe,
             "training_date": datetime.now().isoformat(),
             "category": category,
             "model_type": model_type,
-            "metrics": {
-                model_type: {
-                    "accuracy": float(accuracy),
-                    "precision": float(precision),
-                    "recall": float(recall),
-                    "f1_score": float(f1),
-                    "per_class": per_class,
-                    "reliability_score": reliability_score,
-                    "feature_importance": feature_importance
-                },
-                "random_forest": {
-                    "accuracy": float(accuracy),
-                    "precision": float(precision),
-                    "recall": float(recall),
-                    "f1_score": float(f1),
-                    "per_class": per_class,
-                    "reliability_score": reliability_score,
-                    "feature_importance": feature_importance
-                }
-            },
+            "metrics": metrics_by_model,
             "best_model": model_type,
             "features_used": feature_columns,
             "training_samples": len(df),
@@ -917,7 +966,15 @@ class IntegratedMLTrainer:
             pairs.append(k)
 
         # 2) Symboles explicitement demandés (même si aucun modèle n'existe encore localement)
-        symbols_str = os.getenv("ML_SYMBOLS", "Boom 300 Index,Boom 600 Index,Crash 600 Index,EURUSD,GBPUSD")
+        # Défaut = tous les symboles actifs (aligné avec ALL_ACTIVE_SYMBOLS dans ai_server.py)
+        default_symbols = (
+            "Boom 300 Index,Boom 500 Index,Boom 600 Index,Boom 900 Index,Boom 1000 Index,"
+            "Crash 300 Index,Crash 500 Index,Crash 600 Index,Crash 900 Index,Crash 1000 Index,"
+            "Step Index,Volatility 30 (1s) Index,"
+            "EURUSD,GBPUSD,USDJPY,USDCAD,AUDUSD,"
+            "XAUUSD,XAUEUR,US30_x10,BTCUSD,ETHUSD"
+        )
+        symbols_str = os.getenv("ML_SYMBOLS", default_symbols)
         symbols = [s.strip() for s in (symbols_str or "").split(",") if s.strip()]
         for sym in symbols:
             k = (sym, "M1")

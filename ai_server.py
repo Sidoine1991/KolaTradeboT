@@ -199,6 +199,26 @@ try:
 except ImportError:
     WELTRADE_STARTUP_TRAIN_SYMBOLS = ()
 
+# Liste canonique de tous les symboles actifs — utilisée par le training ML et le continuous loop.
+# Surcharge possible via ML_SYMBOLS (variable d'environnement, CSV).
+ALL_ACTIVE_SYMBOLS: tuple = (
+    # Boom/Crash Deriv
+    "Boom 300 Index", "Boom 500 Index", "Boom 600 Index",
+    "Boom 900 Index", "Boom 1000 Index",
+    "Crash 300 Index", "Crash 500 Index", "Crash 600 Index",
+    "Crash 900 Index", "Crash 1000 Index",
+    # Volatility / Step
+    "Step Index", "Volatility 30 (1s) Index",
+    # Forex majeurs
+    "EURUSD", "GBPUSD", "USDJPY", "USDCAD", "AUDUSD",
+    # Métaux
+    "XAUUSD", "XAUEUR",
+    # Indices / actions
+    "US30_x10",
+    # Crypto
+    "BTCUSD", "ETHUSD",
+)
+
 try:
     from backend.indicator_confluence import apply_core_indicator_confluence
     INDICATOR_CONFLUENCE_AVAILABLE = True
@@ -4216,27 +4236,21 @@ async def train_models_background():
     
     logger.info("🔄 Début de l'entraînement des modèles ML en arrière-plan...")
     
-    # Symboles principaux + indices Weltrade (PainX / GainX) — même logique que train_adaptive_models / integrated_ml_trainer
-    base_priority = [
-        "EURUSD", "GBPUSD",
-        "Boom 300 Index", "Boom 600 Index",
-    ]
-    wt_env = (os.getenv("AI_WELTRADE_STARTUP_SYMBOLS") or "").strip()
-    if wt_env:
-        weltrade_list = [s.strip() for s in wt_env.split(",") if s.strip()]
+    # Tous les symboles actifs + Weltrade optionnels
+    env_override = (os.getenv("ML_SYMBOLS") or "").strip()
+    if env_override:
+        base_priority = [s.strip() for s in env_override.split(",") if s.strip()]
     else:
-        weltrade_list = list(WELTRADE_STARTUP_TRAIN_SYMBOLS)
+        base_priority = list(ALL_ACTIVE_SYMBOLS)
+    wt_env = (os.getenv("AI_WELTRADE_STARTUP_SYMBOLS") or "").strip()
+    weltrade_list = [s.strip() for s in wt_env.split(",") if s.strip()] if wt_env else list(WELTRADE_STARTUP_TRAIN_SYMBOLS)
     seen: Set[str] = set()
     priority_symbols: List[str] = []
     for s in base_priority + weltrade_list:
         if s not in seen:
             seen.add(s)
             priority_symbols.append(s)
-    if weltrade_list:
-        logger.info(
-            "📌 Entraînement startup: %d symbole(s) Weltrade (PainX/GainX) ajouté(s) à la file",
-            len(weltrade_list),
-        )
+    logger.info("📌 Entraînement startup: %d symboles → %s", len(priority_symbols), ", ".join(priority_symbols))
     
     timeframes = ["M1", "M5"]  # Timeframes réduits
     
@@ -15486,7 +15500,7 @@ async def ml_continuous_start(symbols: Optional[str] = None, timeframe: str = "M
     if _continuous_enabled and _continuous_task and not _continuous_task.done():
         return {"status": "already_running"}
     
-    syms = [s.strip() for s in (symbols or os.getenv("ML_SYMBOLS", "EURUSD,GBPUSD,USDJPY,USDCAD,AUDUSD,NZDUSD,EURJPY")).split(",") if s.strip()]
+    syms = [s.strip() for s in (symbols or os.getenv("ML_SYMBOLS", ",".join(ALL_ACTIVE_SYMBOLS))).split(",") if s.strip()]
     requested_interval = interval_sec if interval_sec is not None else AI_CONTINUOUS_DEFAULT_INTERVAL_SEC
     safe_interval = max(int(requested_interval), AI_CONTINUOUS_MIN_INTERVAL_SEC)
     _continuous_enabled = True
