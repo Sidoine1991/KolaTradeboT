@@ -239,7 +239,7 @@ class MLTradingSystem:
         """Obtenir une décision influencée par le ML"""
         
         if symbol not in self.symbol_models:
-            logger.warning(f"⚠️ Pas de modèle ML pour {symbol}")
+            logger.debug(f"Pas de modèle ml_trading_system pour {symbol} — fallback décision de base")
             return base_decision, confidence, "no_model"
         
         model = self.symbol_models[symbol]

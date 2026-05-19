@@ -8272,22 +8272,39 @@ async def _fetch_ml_metrics_for_symbol_from_rds_async(symbol: str, timeframe: st
     return await asyncio.to_thread(_fetch_ml_metrics_for_symbol_from_rds, symbol, timeframe)
 
 
+# Cache partagé pour _merge_ml_metrics — évite N connexions RDS simultanées depuis N graphiques MT5.
+_ml_merge_cache: Dict[str, Any] = {}          # key → résultat fusionné
+_ml_merge_cache_ts: Dict[str, float] = {}     # key → timestamp (epoch)
+_ML_MERGE_CACHE_TTL = 30.0                    # secondes
+
+
 async def _merge_ml_metrics_with_rds_priority(
     symbol: str, timeframe: str = "M1"
 ) -> Dict[str, Any]:
     """
     Fusionne métriques pour MT5 : RDS d'abord, puis Supabase, puis trainer local, puis computed.
-  Render et local écrivent tous deux dans RDS — évite le 70% baseline vide en mémoire.
+    Résultat mis en cache 30s pour éviter N requêtes RDS simultanées depuis N graphiques MT5.
     """
+    cache_key = f"{symbol}:{timeframe}"
+    now = time.time()
+    if cache_key in _ml_merge_cache and (now - _ml_merge_cache_ts.get(cache_key, 0)) < _ML_MERGE_CACHE_TTL:
+        return _ml_merge_cache[cache_key]
+
     computed = _compute_ml_metrics(symbol, timeframe)
 
     rds_data = await _fetch_ml_metrics_for_symbol_from_rds_async(symbol, timeframe)
     if rds_data:
-        return {**computed, **rds_data, "data_source": "aws_rds", "rds_connected": True}
+        result = {**computed, **rds_data, "data_source": "aws_rds", "rds_connected": True}
+        _ml_merge_cache[cache_key] = result
+        _ml_merge_cache_ts[cache_key] = now
+        return result
 
     supabase_data = await _fetch_ml_metrics_for_symbol_from_supabase(symbol, timeframe)
     if supabase_data:
-        return {**computed, **supabase_data, "data_source": "supabase", "rds_connected": AWS_RDS_AVAILABLE}
+        result = {**computed, **supabase_data, "data_source": "supabase", "rds_connected": AWS_RDS_AVAILABLE}
+        _ml_merge_cache[cache_key] = result
+        _ml_merge_cache_ts[cache_key] = now
+        return result
 
     model_key = f"{symbol}_{timeframe}"
     if ML_TRAINER_AVAILABLE and ml_trainer is not None:
@@ -8296,9 +8313,15 @@ async def _merge_ml_metrics_with_rds_priority(
             key_us = f"{symbol.replace(' ', '_')}_{timeframe}"
             tm = getattr(ml_trainer, "current_metrics", {}).get(key_us)
         if tm and tm.get("training_samples"):
-            return {**computed, "data_source": "ml_trainer", "rds_connected": AWS_RDS_AVAILABLE}
+            result = {**computed, "data_source": "ml_trainer", "rds_connected": AWS_RDS_AVAILABLE}
+            _ml_merge_cache[cache_key] = result
+            _ml_merge_cache_ts[cache_key] = now
+            return result
 
-    return {**computed, "data_source": "computed", "rds_connected": AWS_RDS_AVAILABLE}
+    result = {**computed, "data_source": "computed", "rds_connected": AWS_RDS_AVAILABLE}
+    _ml_merge_cache[cache_key] = result
+    _ml_merge_cache_ts[cache_key] = now
+    return result
 
 
 @app.get("/dashboard")
