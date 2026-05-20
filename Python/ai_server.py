@@ -48,7 +48,11 @@ from slowapi import Limiter
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 
-# Load environment variables from .env
+# Load environment variables from .env (python/.env puis racine)
+from pathlib import Path as _Path
+_TRADBOT_ROOT = _Path(__file__).resolve().parent.parent
+load_dotenv(_TRADBOT_ROOT / "python" / ".env")
+load_dotenv(_TRADBOT_ROOT / ".env")
 load_dotenv()
 
 # === ENVIRONMENT VALIDATION ===
@@ -7190,6 +7194,44 @@ async def health_check():
         "CACHE_DURATION_SECONDS": CACHE_DURATION,
     }
 
+
+@app.get("/health/rds")
+async def health_rds():
+    """Diagnostic connexion AWS RDS (Render + local → même base)."""
+    host = os.getenv("AWS_RDS_HOST") or os.getenv("RDS_HOST")
+    database = os.getenv("AWS_RDS_DATABASE") or os.getenv("RDS_DATABASE")
+    out = {
+        "rds_configured": bool(host and database),
+        "host": host or "",
+        "database": database or "",
+        "aws_rds_module": AWS_RDS_AVAILABLE,
+        "use_supabase": _env_bool("USE_SUPABASE", False),
+        "ping_ok": False,
+        "tables": {},
+    }
+    if not AWS_RDS_AVAILABLE or not host:
+        out["error"] = "RDS non configuré (voir python/.env ou .env)"
+        return out
+    try:
+        ping = await asyncio.to_thread(
+            aws_rds_client.execute_query, "SELECT 1 AS ok", ()
+        )
+        out["ping_ok"] = bool(ping)
+        for table in ("trade_feedback", "model_metrics", "symbol_trade_stats"):
+            try:
+                rows = await asyncio.to_thread(
+                    aws_rds_client.execute_query,
+                    f"SELECT COUNT(*)::int AS c FROM {table}",
+                    (),
+                )
+                out["tables"][table] = int(rows[0]["c"]) if rows else -1
+            except Exception as te:
+                out["tables"][table] = f"missing: {str(te)[:80]}"
+    except Exception as e:
+        out["error"] = str(e)[:200]
+    return out
+
+
 @app.post("/ml/start")
 async def start_ml_trainer():
     """Démarre le système d'entraînement continu"""
@@ -12882,6 +12924,132 @@ async def validate_prediction_run(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ── M15 PREDICTION FEEDBACK LOOP ─────────────────────────────────────────
+# L'EA enregistre chaque prédiction M15 puis son résultat (hit/miss).
+# Ces données alimentent le réentraînement du modèle GetPriceDirection.
+
+_m15_predictions: Dict[str, Dict[str, Any]] = {}   # pred_id -> prediction
+_m15_pred_lock = asyncio.Lock()
+
+
+@app.post("/m15/prediction/log")
+async def m15_prediction_log(payload: Dict[str, Any] = Body(...)):
+    """
+    L'EA envoie une prédiction M15 au moment où elle est calculée.
+    Stocke en mémoire et en RDS (table m15_prediction_log).
+    """
+    pred_id  = str(payload.get("pred_id", "")).strip()
+    symbol   = str(payload.get("symbol", "")).strip().upper()
+    direction = str(payload.get("direction", "")).strip().upper()
+    target   = float(payload.get("target_price", 0) or 0)
+    prob     = float(payload.get("probability", 0) or 0)
+    price_at = float(payload.get("price_at_prediction", 0) or 0)
+    bar_open = str(payload.get("bar_open_time", "")).strip()
+    reasoning = str(payload.get("reasoning", ""))[:200]
+
+    if not pred_id or not symbol or direction not in ("UP", "DOWN", "CONSOLIDATE"):
+        raise HTTPException(status_code=400, detail="pred_id, symbol, direction requis")
+
+    entry = {
+        "pred_id": pred_id,
+        "symbol": symbol,
+        "direction": direction,
+        "target_price": target,
+        "probability": prob,
+        "price_at_prediction": price_at,
+        "bar_open_time": bar_open,
+        "reasoning": reasoning,
+        "ts": time.time(),
+        "outcome": None,   # rempli par /m15/prediction/outcome
+        "price_at_close": None,
+        "hit": None,
+    }
+    async with _m15_pred_lock:
+        _m15_predictions[pred_id] = entry
+
+    # Sauvegarder en RDS si disponible
+    try:
+        supabase_url, supabase_key = _get_supabase_config(strict=False)
+        if supabase_url and supabase_key:
+            import httpx
+            headers = {"apikey": supabase_key, "Authorization": f"Bearer {supabase_key}",
+                       "Content-Type": "application/json", "Prefer": "return=minimal"}
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                await client.post(f"{supabase_url}/rest/v1/m15_prediction_log",
+                                  headers=headers, json=entry)
+    except Exception as e:
+        logger.debug("m15 prediction log RDS: %s", e)
+
+    logger.info("📊 Pred M15 enregistrée: %s %s %s → %s prob=%s%%",
+                pred_id[:8], symbol, direction, target, prob)
+    return {"ok": True, "pred_id": pred_id}
+
+
+@app.post("/m15/prediction/outcome")
+async def m15_prediction_outcome(payload: Dict[str, Any] = Body(...)):
+    """
+    L'EA envoie le résultat d'une prédiction M15 après la fermeture de la bougie.
+    hit=true si le prix a atteint/dépassé le niveau cible dans la direction prédite.
+    Ces données alimentent le réentraînement du modèle.
+    """
+    pred_id      = str(payload.get("pred_id", "")).strip()
+    price_close  = float(payload.get("price_at_close", 0) or 0)
+    hit          = bool(payload.get("hit", False))
+    direction_ok = bool(payload.get("direction_correct", False))
+
+    async with _m15_pred_lock:
+        if pred_id in _m15_predictions:
+            _m15_predictions[pred_id]["outcome"]       = "hit" if hit else "miss"
+            _m15_predictions[pred_id]["price_at_close"] = price_close
+            _m15_predictions[pred_id]["hit"]            = hit
+            _m15_predictions[pred_id]["direction_ok"]   = direction_ok
+            entry = dict(_m15_predictions[pred_id])
+        else:
+            entry = payload
+
+    # Sauvegarder en RDS
+    try:
+        supabase_url, supabase_key = _get_supabase_config(strict=False)
+        if supabase_url and supabase_key:
+            import httpx
+            headers = {"apikey": supabase_key, "Authorization": f"Bearer {supabase_key}",
+                       "Content-Type": "application/json", "Prefer": "return=minimal"}
+            update = {"outcome": entry.get("outcome"), "price_at_close": price_close,
+                      "hit": hit, "direction_ok": direction_ok}
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                await client.patch(
+                    f"{supabase_url}/rest/v1/m15_prediction_log?pred_id=eq.{pred_id}",
+                    headers=headers, json=update)
+    except Exception as e:
+        logger.debug("m15 outcome RDS: %s", e)
+
+    logger.info("✅ Pred M15 outcome: %s | hit=%s direction_ok=%s close=%.5f",
+                pred_id[:8], hit, direction_ok, price_close)
+    return {"ok": True, "pred_id": pred_id, "hit": hit}
+
+
+@app.get("/m15/prediction/stats")
+async def m15_prediction_stats(symbol: Optional[str] = None):
+    """Statistiques de précision des prédictions M15 en mémoire."""
+    async with _m15_pred_lock:
+        preds = [v for v in _m15_predictions.values()
+                 if v.get("outcome") is not None]
+    if symbol:
+        preds = [p for p in preds if p.get("symbol") == symbol.upper()]
+    total = len(preds)
+    if total == 0:
+        return {"total": 0, "hit_rate": 0, "direction_rate": 0}
+    hits = sum(1 for p in preds if p.get("hit"))
+    dir_ok = sum(1 for p in preds if p.get("direction_ok"))
+    return {
+        "total": total,
+        "hits": hits,
+        "hit_rate": round(hits / total * 100, 1),
+        "direction_correct": dir_ok,
+        "direction_rate": round(dir_ok / total * 100, 1),
+    }
+
+
 @app.get("/prediction/accuracy/{symbol}")
 async def get_prediction_accuracy(symbol: str):
     """
@@ -14619,22 +14787,192 @@ async def trades_feedback(request: TradeFeedbackRequest):
         logger.error(f"Erreur /trades/feedback: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/ml/metrics")
-async def ml_metrics(symbol: str, timeframe: str = "M1"):
-    """Métriques pour le graphique MT5 - format plat (accuracy, model_name, total_samples, status, data_source)."""
+
+def _symbol_lookup_variants(symbol: str) -> List[str]:
+    """Alias symboles MT5 (espaces vs underscores) pour requêtes RDS."""
+    variants: List[str] = []
+    for s in (symbol, symbol.replace(" ", "_"), symbol.replace("_", " ")):
+        s = (s or "").strip()
+        if s and s not in variants:
+            variants.append(s)
+    return variants or [symbol]
+
+
+def _parse_json_field(value: Any) -> Dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = json.loads(value)
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            return {}
+    return {}
+
+
+def _fetch_trade_feedback_stats_from_rds(symbol: str, timeframe: str = "M1") -> Dict[str, int]:
+    """Compte wins/losses depuis AWS RDS trade_feedback (source partagée Render + local)."""
+    if not AWS_RDS_AVAILABLE:
+        return {"feedback_wins": 0, "feedback_losses": 0, "feedback_total": 0}
+    wins = losses = 0
+    try:
+        for sym in _symbol_lookup_variants(symbol):
+            rows = aws_rds_client.execute_query(
+                """
+                SELECT is_win
+                FROM trade_feedback
+                WHERE symbol = %s
+                ORDER BY created_at DESC NULLS LAST
+                LIMIT 5000
+                """,
+                (sym,),
+            )
+            if not rows:
+                continue
+            for row in rows:
+                if bool(row.get("is_win")):
+                    wins += 1
+                else:
+                    losses += 1
+            break
+    except Exception as e:
+        logger.debug("RDS trade_feedback stats %s: %s", symbol, str(e)[:80])
+    return {
+        "feedback_wins": wins,
+        "feedback_losses": losses,
+        "feedback_total": wins + losses,
+    }
+
+
+def _fetch_ml_metrics_for_symbol_from_rds(symbol: str, timeframe: str = "M1") -> Optional[Dict[str, Any]]:
+    """Métriques ML depuis AWS RDS (vérité partagée Render + serveur local)."""
+    if not AWS_RDS_AVAILABLE or _env_bool("USE_SUPABASE", False):
+        return None
+    tf = str(timeframe or "M1").upper()
+    row = None
+    try:
+        for sym in _symbol_lookup_variants(symbol):
+            rows = aws_rds_client.execute_query(
+                """
+                SELECT symbol, timeframe, model_type, accuracy, training_date, metadata
+                FROM model_metrics
+                WHERE symbol = %s AND timeframe = %s
+                ORDER BY training_date DESC NULLS LAST
+                LIMIT 1
+                """,
+                (sym, tf),
+            )
+            if rows:
+                row = rows[0]
+                break
+    except Exception as e:
+        logger.debug("RDS model_metrics %s: %s", symbol, str(e)[:80])
+        return None
+
+    fb = _fetch_trade_feedback_stats_from_rds(symbol, tf)
+    fb_wins = int(fb.get("feedback_wins") or 0)
+    fb_losses = int(fb.get("feedback_losses") or 0)
+    fb_total = int(fb.get("feedback_total") or 0)
+
+    if not row and fb_total == 0:
+        return {
+            "symbol": symbol,
+            "timeframe": tf,
+            "accuracy": "0.0",
+            "model_name": "awaiting_rds_data",
+            "total_samples": "0",
+            "training_samples": 0,
+            "feedback_wins": 0,
+            "feedback_losses": 0,
+            "status": "collecting_data",
+            "best_model": "random_forest",
+            "last_update": datetime.utcnow().isoformat(),
+            "data_source": "aws_rds",
+            "rds_connected": True,
+            "supabase_connected": False,
+        }
+
+    meta: Dict[str, Any] = {}
+    acc_pct = 70.0
+    model_name = "random_forest"
+    samples = fb_total
+    training_date = ""
+
+    if row:
+        meta = _parse_json_field(row.get("metadata"))
+        try:
+            acc_raw = float(row.get("accuracy", 0.5) or 0.5)
+            acc_pct = (acc_raw * 100.0) if acc_raw <= 1.0 else acc_raw
+        except Exception:
+            acc_pct = 70.0
+        model_name = (
+            meta.get("best_model")
+            or meta.get("model_type")
+            or row.get("model_type")
+            or "random_forest"
+        )
+        try:
+            samples = int(meta.get("training_samples") or fb_total or 0)
+        except Exception:
+            samples = fb_total
+        training_date = str(row.get("training_date") or "")
+
+    status = "trained" if samples >= 25 or fb_total >= 10 else "collecting_data"
+    if samples == 0 and fb_total == 0:
+        status = "collecting_data"
+
+    return {
+        "symbol": symbol,
+        "timeframe": tf,
+        "accuracy": f"{acc_pct:.1f}",
+        "model_name": str(model_name),
+        "total_samples": str(samples),
+        "training_samples": int(samples),
+        "feedback_wins": fb_wins,
+        "feedback_losses": fb_losses,
+        "status": status,
+        "best_model": str(model_name),
+        "last_update": training_date or datetime.utcnow().isoformat(),
+        "data_source": "aws_rds",
+        "rds_connected": True,
+        "supabase_connected": False,
+    }
+
+
+async def _fetch_ml_metrics_for_symbol_from_rds_async(symbol: str, timeframe: str = "M1") -> Optional[Dict[str, Any]]:
+    return await asyncio.to_thread(_fetch_ml_metrics_for_symbol_from_rds, symbol, timeframe)
+
+
+async def _merge_ml_metrics_with_rds_priority(
+    symbol: str, timeframe: str = "M1"
+) -> Dict[str, Any]:
+    """RDS d'abord, puis Supabase, puis trainer local, puis computed."""
     computed = _compute_ml_metrics(symbol, timeframe)
-    # Si le trainer a des données réelles, les utiliser
+
+    rds_data = await _fetch_ml_metrics_for_symbol_from_rds_async(symbol, timeframe)
+    if rds_data:
+        return {**computed, **rds_data, "data_source": "aws_rds", "rds_connected": True}
+
+    supabase_data = await _fetch_ml_metrics_for_symbol_from_supabase(symbol, timeframe)
+    if supabase_data:
+        return {**computed, **supabase_data, "data_source": "supabase", "rds_connected": AWS_RDS_AVAILABLE}
+
     model_key = f"{symbol}_{timeframe}"
     if ML_TRAINER_AVAILABLE and ml_trainer is not None:
         tm = getattr(ml_trainer, "current_metrics", {}).get(model_key)
+        if not tm:
+            key_us = f"{symbol.replace(' ', '_')}_{timeframe}"
+            tm = getattr(ml_trainer, "current_metrics", {}).get(key_us)
         if tm and tm.get("training_samples"):
-            return {**computed, "data_source": "ml_trainer"}
-    # Sinon: fallback Supabase pour afficher le résumé d'entraînement sur le graphique
-    supabase_data = await _fetch_ml_metrics_for_symbol_from_supabase(symbol, timeframe)
-    if supabase_data:
-        base = {**computed, **supabase_data, "data_source": "supabase"}
-    else:
-        base = {**computed, "data_source": "computed"}
+            return {**computed, "data_source": "ml_trainer", "rds_connected": AWS_RDS_AVAILABLE}
+
+    return {**computed, "data_source": "computed", "rds_connected": AWS_RDS_AVAILABLE}
+
+
+@app.get("/ml/metrics")
+async def ml_metrics(symbol: str, timeframe: str = "M1"):
+    """Métriques pour le graphique MT5 - format plat (accuracy, model_name, total_samples, status, data_source)."""
+    base = await _merge_ml_metrics_with_rds_priority(symbol, timeframe)
 
     # Ajouter stats discipline (jour/mois) si dispo
     st = _symbol_stats_cache.get(symbol) or {}
@@ -18570,21 +18908,187 @@ async def tradingagents_realtime_run_once(symbol: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ========== PENDING ORDER QUEUE (CLI bridge → MT5) — persistante fichier ==========
+# L'EA poll GET /pending-order, exécute l'ordre, puis DELETE /pending-order/<id>
+# La queue survit aux redémarrages serveur (fichier JSON sur disque).
+
+import uuid as _uuid
+import json as _json
+
+_PENDING_ORDERS_FILE = _Path(os.getenv("PENDING_ORDERS_FILE",
+    str(_Path(__file__).resolve().parent / "pending_orders.json")))
+
+_pending_orders: Dict[str, Dict[str, Any]] = {}
+_pending_orders_lock = asyncio.Lock()
+
+
+def _pending_orders_load() -> None:
+    """Charge la queue depuis le fichier au démarrage."""
+    global _pending_orders
+    if _PENDING_ORDERS_FILE.exists():
+        try:
+            data = _json.loads(_PENDING_ORDERS_FILE.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                _pending_orders = data
+                n = sum(1 for o in data.values() if o.get("status") == "pending")
+                logger.info("📋 Queue pending chargée: %d ordres (%d pending)", len(data), n)
+        except Exception as e:
+            logger.warning("Queue pending illisible, reset: %s", e)
+            _pending_orders = {}
+
+
+def _pending_orders_save() -> None:
+    """Persiste la queue sur disque (appel synchrone sous lock)."""
+    try:
+        _PENDING_ORDERS_FILE.write_text(
+            _json.dumps(_pending_orders, ensure_ascii=False, indent=2),
+            encoding="utf-8"
+        )
+    except Exception as e:
+        logger.warning("Erreur sauvegarde queue pending: %s", e)
+
+
+# Charger au démarrage du module
+_pending_orders_load()
+
+
+class PendingOrderBody(BaseModel):
+    symbol: str
+    action: str = Field(..., description="buy | sell")
+    execution_type: Optional[str] = Field(default="market", description="market | limit | stop | stop_limit")
+    entry_price: Optional[float] = None
+    stop_loss: Optional[float] = None
+    take_profit: Optional[float] = None
+    lot: Optional[float] = None
+    confidence: float = Field(default=0.75, ge=0.0, le=1.0)
+    source: str = "cli"
+    comment: str = "TA_BRIDGE"  # commentaire MT5 — protège l'ordre contre annulation EA
+
+
+@app.post("/pending-order", status_code=201)
+async def create_pending_order(body: PendingOrderBody):
+    """Enregistre un ordre à placer côté MT5 (bridge CLI TradingAgents → EA)."""
+    sym = (body.symbol or "").strip().upper()
+    if not sym:
+        raise HTTPException(status_code=400, detail="symbol requis")
+    action = (body.action or "").strip().lower()
+    if action not in ("buy", "sell"):
+        raise HTTPException(status_code=422, detail="action doit être buy ou sell")
+    order_id = str(_uuid.uuid4())
+    entry: Dict[str, Any] = {
+        "order_id": order_id,
+        "ts": time.time(),
+        "symbol": sym,
+        "action": action,
+        "execution_type": (body.execution_type or "market").lower(),
+        "entry_price": body.entry_price,
+        "stop_loss": body.stop_loss,
+        "take_profit": body.take_profit,
+        "lot": body.lot,
+        "confidence": body.confidence,
+        "source": body.source,
+        "comment": (body.comment or "TA_BRIDGE"),
+        "status": "pending",
+    }
+    async with _pending_orders_lock:
+        _pending_orders[order_id] = entry
+        _pending_orders_save()
+    logger.info("📋 Ordre pending enregistré: %s %s @ %s sl=%s tp=%s id=%s",
+                sym, action.upper(), body.entry_price, body.stop_loss, body.take_profit, order_id)
+    return {"ok": True, "order_id": order_id, "symbol": sym}
+
+
+# ── ALERT LEVELS — niveaux surveilles par l'EA pour notifications push ──
+_alert_levels: Dict[str, Dict[str, Any]] = {}
+_alert_levels_lock = asyncio.Lock()
+
+
+class AlertLevelBody(BaseModel):
+    symbol: str
+    buy_level: Optional[float] = None
+    sell_level: Optional[float] = None
+    buy_reason: Optional[str] = None
+    sell_reason: Optional[str] = None
+
+
+@app.post("/alert-levels", status_code=201)
+async def set_alert_levels(body: AlertLevelBody):
+    """Enregistre les niveaux a surveiller pour un symbole (bridge -> EA -> push MT5)."""
+    sym = (body.symbol or "").strip().upper()
+    if not sym:
+        raise HTTPException(status_code=400, detail="symbol requis")
+    entry: Dict[str, Any] = {
+        "symbol": sym,
+        "buy_level":   body.buy_level,
+        "sell_level":  body.sell_level,
+        "buy_reason":  (body.buy_reason  or "")[:200],
+        "sell_reason": (body.sell_reason or "")[:200],
+        "ts": time.time(),
+    }
+    async with _alert_levels_lock:
+        _alert_levels[sym] = entry
+    logger.info("🔔 Alert levels enregistres: %s BUY@%s SELL@%s",
+                sym, body.buy_level, body.sell_level)
+    return {"ok": True, "symbol": sym}
+
+
+@app.get("/alert-levels")
+async def get_alert_levels(symbol: Optional[str] = None):
+    """Retourne les niveaux d'alerte pour un symbole (poll par l'EA)."""
+    async with _alert_levels_lock:
+        if symbol:
+            sym = symbol.strip().upper()
+            data = _alert_levels.get(sym, {})
+        else:
+            data = dict(_alert_levels)
+    return data
+
+
+@app.delete("/alert-levels/{symbol}")
+async def delete_alert_levels(symbol: str):
+    """Supprime les niveaux d'alerte pour un symbole."""
+    sym = symbol.strip().upper()
+    async with _alert_levels_lock:
+        _alert_levels.pop(sym, None)
+    return {"ok": True, "symbol": sym}
+
+
+@app.get("/pending-order")
+async def get_pending_orders(symbol: Optional[str] = None):
+    """Retourne les ordres pending en attente d'exécution par MT5."""
+    async with _pending_orders_lock:
+        orders = list(_pending_orders.values())
+    if symbol:
+        sym = symbol.strip().upper()
+        orders = [o for o in orders if o["symbol"] == sym]
+    orders = [o for o in orders if o.get("status") == "pending"]
+    return {"orders": orders, "count": len(orders)}
+
+
+@app.delete("/pending-order/{order_id}")
+async def ack_pending_order(order_id: str, status: str = "executed"):
+    """MT5 confirme l'exécution (ou annulation) d'un ordre pending."""
+    async with _pending_orders_lock:
+        if order_id not in _pending_orders:
+            raise HTTPException(status_code=404, detail="order_id introuvable")
+        _pending_orders[order_id]["status"] = status
+        _pending_orders[order_id]["ack_ts"] = time.time()
+        _pending_orders_save()
+    logger.info("✅ Ordre pending %s -> %s", order_id, status)
+    return {"ok": True, "order_id": order_id, "status": status}
+
+
 if __name__ == "__main__":
-    import uvicorn
-    
-    # Démarrer le serveur avec gestion des événements de vie
-    logger.info("🌟 Lancement du serveur IA TradBOT avec système ML intégré")
-    logger.info("📡 Endpoints disponibles:")
-    logger.info("   • /health - Santé du serveur")
-    logger.info("   • /decision - Décisions de trading")
-    logger.info("   • /analyze/ollama - Analyse approfondie LLM local")
-    logger.info("   • /ml/metrics - Métriques ML en temps réel")
-    logger.info("   • /ml/start - Démarrer entraînement ML")
-    logger.info("   • /ml/stop - Arrêter entraînement ML")
-    logger.info("   • /ml/retrain - Forcer réentraînement")
-    logger.info("   • /ml_stats - Statistiques ML détaillées")
-    logger.info("   • /ui - Dashboard web (interface graphique)")
+    # Délègue au serveur racine (RDS + /health/rds + ml/metrics priorité RDS)
+    import runpy
+    import sys
+
+    _root = _Path(__file__).resolve().parent.parent
+    if str(_root) not in sys.path:
+        sys.path.insert(0, str(_root))
+    logger.info("Redirection vers %s/ai_server.py (RDS, /health/rds)", _root)
+    runpy.run_path(str(_root / "ai_server.py"), run_name="__main__")
+    raise SystemExit(0)
 
 # ========== 3 ENDPOINTS MANQUANTS POUR SMC_Universal.mq5 ==========
 
@@ -18810,14 +19314,6 @@ async def ml_coherent_analysis(symbol: str = Query(..., description="Symbol (ex:
             "reason": f"Erreur serveur: {str(e)}"
         }
 
-
-    uvicorn.run(
-        "ai_server:app",
-        host=HOST,
-        port=API_PORT,
-        reload=False,
-        log_level="info"
-    )
 
 @app.get("/fallback-status")
 async def get_fallback_status():
