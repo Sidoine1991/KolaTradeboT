@@ -63,8 +63,14 @@ Thumbs.db
 *.csv
 *.xlsx
 *.json
-data/
 backtest_results/
+
+# Agentic OS data layer — keep decisions and state, ignore daily logs and inbox
+data/logs/
+data/inbox/
+!data/state/
+!data/decisions/
+!data/**/.gitkeep
 
 # Modèles ML volumineux non versionnés
 backend/trend_model.pkl
@@ -74,3 +80,9 @@ models/
 
 # Streamlit
 .streamlit/
+
+# MQL5 EA — ne pas exposer sur le dépôt distant
+SMC_Universal.mq5
+SMC_Universal.ex5
+*.mq5
+*.ex5

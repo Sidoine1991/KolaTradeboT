@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>TradBOT Dashboard</title>
+  <style>
+    :root {
+      --bg:    #0d1117;
+      --card:  #161b22;
+      --border:#30363d;
+      --text:  #e6edf3;
+      --muted: #8b949e;
+      --green: #3fb950;
+      --red:   #f85149;
+      --blue:  #58a6ff;
+      --gold:  #e3b341;
+      --purple:#bc8cff;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: var(--bg); color: var(--text); font-family: -apple-system, 'Segoe UI', sans-serif; font-size: 14px; }
+
+    header { background: var(--card); border-bottom: 1px solid var(--border); padding: 1rem 1.5rem; display: flex; align-items: center; justify-content: space-between; }
+    header h1 { font-size: 1.2rem; font-weight: 600; }
+    header h1 span { color: var(--blue); }
+    .server-status { display: flex; align-items: center; gap: 0.5rem; font-size: 0.8rem; color: var(--muted); }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--red); }
+    .dot.ok { background: var(--green); }
+
+    .container { max-width: 1400px; margin: 0 auto; padding: 1.5rem; }
+
+    /* KPI row */
+    .kpi-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 1rem; margin-bottom: 1.5rem; }
+    .kpi { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 1rem; }
+    .kpi-label { font-size: 0.75rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.4rem; }
+    .kpi-value { font-size: 1.8rem; font-weight: 700; line-height: 1; }
+    .kpi-sub { font-size: 0.75rem; color: var(--muted); margin-top: 0.3rem; }
+    .kpi.green .kpi-value { color: var(--green); }
+    .kpi.red   .kpi-value { color: var(--red); }
+    .kpi.blue  .kpi-value { color: var(--blue); }
+    .kpi.gold  .kpi-value { color: var(--gold); }
+    .kpi.purple .kpi-value { color: var(--purple); }
+
+    /* Grid 2 cols */
+    .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-bottom: 1rem; }
+    @media (max-width: 900px) { .grid2 { grid-template-columns: 1fr; } }
+
+    /* Cards */
+    .card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+    .card-head { padding: 0.75rem 1rem; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; }
+    .card-head h2 { font-size: 0.9rem; font-weight: 600; }
+    .card-body { padding: 1rem; }
+
+    /* Table */
+    table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
+    th { text-align: left; padding: 0.5rem 0.75rem; color: var(--muted); font-weight: 500; font-size: 0.75rem; text-transform: uppercase; border-bottom: 1px solid var(--border); }
+    td { padding: 0.6rem 0.75rem; border-bottom: 1px solid rgba(48,54,61,0.5); }
+    tr:last-child td { border-bottom: none; }
+    tr:hover td { background: rgba(255,255,255,0.03); }
+
+    /* Badges */
+    .badge { display: inline-block; padding: 0.15em 0.5em; border-radius: 4px; font-size: 0.72rem; font-weight: 600; }
+    .badge-sell { background: rgba(248,81,73,0.15); color: var(--red); }
+    .badge-buy  { background: rgba(63,185,80,0.15);  color: var(--green); }
+    .badge-hold { background: rgba(139,148,158,0.15); color: var(--muted); }
+    .badge-hit  { background: rgba(63,185,80,0.12);  color: var(--green); }
+    .badge-miss { background: rgba(248,81,73,0.12);  color: var(--red); }
+    .badge-pending { background: rgba(88,166,255,0.12); color: var(--blue); }
+
+    /* Progress bar */
+    .bar-wrap { background: rgba(255,255,255,0.06); border-radius: 4px; height: 6px; overflow: hidden; margin-top: 0.3rem; }
+    .bar-fill  { height: 100%; border-radius: 4px; transition: width 0.5s; }
+    .bar-green { background: var(--green); }
+    .bar-red   { background: var(--red); }
+    .bar-blue  { background: var(--blue); }
+
+    /* Reports list */
+    .report-item { display: flex; align-items: center; justify-content: space-between; padding: 0.6rem 0; border-bottom: 1px solid rgba(48,54,61,0.5); }
+    .report-item:last-child { border-bottom: none; }
+    .report-name { font-size: 0.85rem; }
+    .report-meta { font-size: 0.75rem; color: var(--muted); margin-top: 0.1rem; }
+    .btn-sm { padding: 0.25rem 0.6rem; background: rgba(88,166,255,0.1); border: 1px solid rgba(88,166,255,0.3); color: var(--blue); border-radius: 4px; font-size: 0.75rem; cursor: pointer; text-decoration: none; }
+    .btn-sm:hover { background: rgba(88,166,255,0.2); }
+
+    /* Pred stats per symbol */
+    .sym-row { display: flex; align-items: center; gap: 0.75rem; padding: 0.5rem 0; border-bottom: 1px solid rgba(48,54,61,0.4); }
+    .sym-row:last-child { border-bottom: none; }
+    .sym-name { width: 160px; font-size: 0.82rem; flex-shrink: 0; }
+    .sym-bars { flex: 1; }
+    .sym-label { font-size: 0.72rem; color: var(--muted); margin-bottom: 0.15rem; }
+    .sym-pct { font-size: 0.72rem; color: var(--muted); width: 40px; text-align: right; flex-shrink: 0; }
+
+    /* Refresh button */
+    .refresh-btn { background: none; border: 1px solid var(--border); color: var(--muted); padding: 0.3rem 0.7rem; border-radius: 5px; cursor: pointer; font-size: 0.78rem; }
+    .refresh-btn:hover { color: var(--text); border-color: var(--blue); }
+
+    /* Empty state */
+    .empty { text-align: center; padding: 2rem; color: var(--muted); font-size: 0.85rem; }
+
+    /* Spinner */
+    .spin { display: inline-block; width: 12px; height: 12px; border: 2px solid rgba(88,166,255,0.3); border-top-color: var(--blue); border-radius: 50%; animation: spin 0.8s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>Trad<span>BOT</span> Dashboard</h1>
+  <div class="server-status">
+    <div class="dot" id="dot"></div>
+    <span id="srv-label">Connexion…</span>
+    <button class="refresh-btn" onclick="loadAll()">&#8635; Actualiser</button>
+  </div>
+</header>
+
+<div class="container">
+
+  <!-- KPIs -->
+  <div class="kpi-row" id="kpis">
+    <div class="kpi blue"><div class="kpi-label">Analyses</div><div class="kpi-value" id="k-analyses">—</div><div class="kpi-sub">rapports Word</div></div>
+    <div class="kpi green"><div class="kpi-label">Direction M15</div><div class="kpi-value" id="k-dir">—</div><div class="kpi-sub" id="k-dir-sub">sur — signaux</div></div>
+    <div class="kpi gold"><div class="kpi-label">Hit rate M15</div><div class="kpi-value" id="k-hit">—</div><div class="kpi-sub">cible atteinte</div></div>
+    <div class="kpi purple"><div class="kpi-label">Ordres pending</div><div class="kpi-value" id="k-orders">—</div><div class="kpi-sub">en attente MT5</div></div>
+    <div class="kpi blue"><div class="kpi-label">Serveur IA</div><div class="kpi-value" id="k-srv" style="font-size:1rem;padding-top:0.3rem">—</div><div class="kpi-sub" id="k-srv-sub"></div></div>
+  </div>
+
+  <div class="grid2">
+
+    <!-- Ordres pending -->
+    <div class="card">
+      <div class="card-head">
+        <h2>Ordres en attente MT5</h2>
+        <span id="orders-spin" class="spin" style="display:none"></span>
+      </div>
+      <div class="card-body" style="padding:0">
+        <table id="orders-table">
+          <thead><tr><th>Symbole</th><th>Direction</th><th>Type</th><th>Entrée</th><th>SL</th><th>TP</th><th>Statut</th></tr></thead>
+          <tbody id="orders-body"><tr><td colspan="7" class="empty">Chargement…</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Statistiques prédiction M15 -->
+    <div class="card">
+      <div class="card-head">
+        <h2>Précision prédiction M15</h2>
+        <span id="pred-spin" class="spin" style="display:none"></span>
+      </div>
+      <div class="card-body" id="pred-body">
+        <div class="empty">Chargement…</div>
+      </div>
+    </div>
+
+  </div>
+
+  <div class="grid2">
+
+    <!-- Historique analyses -->
+    <div class="card">
+      <div class="card-head"><h2>Historique analyses (rapports Word)</h2></div>
+      <div class="card-body" id="reports-body" style="max-height:320px;overflow-y:auto">
+        <div class="empty">Chargement…</div>
+      </div>
+    </div>
+
+    <!-- Statut serveur IA -->
+    <div class="card">
+      <div class="card-head"><h2>Statut TradingAgents</h2></div>
+      <div class="card-body">
+        <table>
+          <tbody id="srv-body"><tr><td colspan="2" class="empty">Chargement…</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- Table prédictions récentes -->
+  <div class="card" style="margin-bottom:1rem">
+    <div class="card-head"><h2>Dernières prédictions M15 enregistrées</h2></div>
+    <div class="card-body" style="padding:0;overflow-x:auto">
+      <table id="preds-table">
+        <thead><tr><th>Symbole</th><th>Direction</th><th>Cible</th><th>Confiance</th><th>Résultat</th><th>Hit</th><th>Date</th></tr></thead>
+        <tbody id="preds-body"><tr><td colspan="7" class="empty">Chargement…</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+</div>
+
+<script>
+  const API = "http://127.0.0.1:8000";
+  let reportsData = [];
+
+  async function get(path) {
+    const r = await fetch(API + path);
+    if (!r.ok) throw new Error(r.status);
+    return r.json();
+  }
+
+  function fmt(v) {
+    if (v == null) return "—";
+    if (typeof v === "number") return v.toLocaleString("fr-FR", {maximumFractionDigits: 3});
+    return v;
+  }
+
+  function badge(action) {
+    const a = (action || "").toUpperCase();
+    if (a === "SELL") return `<span class="badge badge-sell">SELL</span>`;
+    if (a === "BUY")  return `<span class="badge badge-buy">BUY</span>`;
+    if (a === "DOWN") return `<span class="badge badge-sell">DOWN</span>`;
+    if (a === "UP")   return `<span class="badge badge-buy">UP</span>`;
+    return `<span class="badge badge-hold">${a||"—"}</span>`;
+  }
+
+  // ── Serveur health ──
+  async function loadHealth() {
+    try {
+      const h = await get("/health");
+      document.getElementById("dot").className = "dot ok";
+      document.getElementById("srv-label").textContent = "Connecté";
+      document.getElementById("k-srv").textContent = h.status || "OK";
+      document.getElementById("k-srv-sub").textContent = "v" + (h.version || "?");
+    } catch {
+      document.getElementById("dot").className = "dot";
+      document.getElementById("srv-label").textContent = "Hors ligne";
+      document.getElementById("k-srv").textContent = "OFF";
+    }
+  }
+
+  // ── Ordres pending ──
+  async function loadOrders() {
+    document.getElementById("orders-spin").style.display = "inline-block";
+    try {
+      const d = await get("/pending-order");
+      document.getElementById("k-orders").textContent = d.count || 0;
+      const tb = document.getElementById("orders-body");
+      if (!d.orders || d.orders.length === 0) {
+        tb.innerHTML = `<tr><td colspan="7" class="empty">Aucun ordre en attente</td></tr>`;
+      } else {
+        tb.innerHTML = d.orders.map(o => `
+          <tr>
+            <td><strong>${o.symbol}</strong></td>
+            <td>${badge(o.action)}</td>
+            <td style="font-size:0.78rem;color:var(--muted)">${o.execution_type || "market"}</td>
+            <td>${fmt(o.entry_price)}</td>
+            <td style="color:var(--red)">${fmt(o.stop_loss)}</td>
+            <td style="color:var(--green)">${fmt(o.take_profit)}</td>
+            <td><span class="badge badge-pending">${o.status}</span></td>
+          </tr>`).join("");
+      }
+    } catch { document.getElementById("orders-body").innerHTML = `<tr><td colspan="7" class="empty">Erreur chargement</td></tr>`; }
+    document.getElementById("orders-spin").style.display = "none";
+  }
+
+  // ── Stats prédiction M15 ──
+  async function loadPredStats() {
+    document.getElementById("pred-spin").style.display = "inline-block";
+    try {
+      const d = await get("/m15/prediction/stats");
+      const total = d.total || 0;
+      const dirRate = d.direction_rate || 0;
+      const hitRate = d.hit_rate || 0;
+
+      document.getElementById("k-dir").textContent = dirRate.toFixed(1) + "%";
+      document.getElementById("k-dir-sub").textContent = `sur ${total} signaux`;
+      document.getElementById("k-hit").textContent = hitRate.toFixed(1) + "%";
+
+      // Couleur selon performance
+      const dirEl = document.getElementById("k-dir").closest(".kpi");
+      dirEl.className = "kpi " + (dirRate >= 60 ? "green" : dirRate >= 50 ? "gold" : "red");
+
+      const hitEl = document.getElementById("k-hit").closest(".kpi");
+      hitEl.className = "kpi " + (hitRate >= 50 ? "green" : hitRate >= 35 ? "gold" : "red");
+
+      // Affichage barres
+      const pb = document.getElementById("pred-body");
+
+      // Stats par symbole si disponibles
+      if (d.stats && Array.isArray(d.stats)) {
+        pb.innerHTML = d.stats.slice(0, 10).map(s => `
+          <div class="sym-row">
+            <div class="sym-name">${s.symbol}</div>
+            <div class="sym-bars">
+              <div class="sym-label">Direction ${s.direction_rate_pct}% sur ${s.total} signaux</div>
+              <div class="bar-wrap"><div class="bar-fill ${s.direction_rate_pct >= 60 ? 'bar-green' : s.direction_rate_pct >= 50 ? 'bar-blue' : 'bar-red'}" style="width:${Math.min(100,s.direction_rate_pct)}%"></div></div>
+            </div>
+            <div class="sym-pct">${s.direction_rate_pct}%</div>
+          </div>`).join("");
+      } else {
+        pb.innerHTML = `
+          <div style="margin-bottom:1rem">
+            <div class="sym-label">Direction correcte — ${total} signaux</div>
+            <div style="display:flex;align-items:center;gap:0.75rem;margin-top:0.3rem">
+              <div class="bar-wrap" style="flex:1"><div class="bar-fill ${dirRate>=60?'bar-green':dirRate>=50?'bar-blue':'bar-red'}" style="width:${dirRate}%"></div></div>
+              <span style="font-size:0.85rem;font-weight:600;color:${dirRate>=60?'var(--green)':dirRate>=50?'var(--blue)':'var(--red)'}">${dirRate.toFixed(1)}%</span>
+            </div>
+          </div>
+          <div>
+            <div class="sym-label">Hit rate (cible atteinte)</div>
+            <div style="display:flex;align-items:center;gap:0.75rem;margin-top:0.3rem">
+              <div class="bar-wrap" style="flex:1"><div class="bar-fill ${hitRate>=50?'bar-green':'bar-red'}" style="width:${hitRate}%"></div></div>
+              <span style="font-size:0.85rem;font-weight:600;color:${hitRate>=50?'var(--green)':'var(--red)'}">${hitRate.toFixed(1)}%</span>
+            </div>
+          </div>`;
+      }
+    } catch(e) {
+      document.getElementById("pred-body").innerHTML = `<div class="empty">Stats non disponibles</div>`;
+    }
+    document.getElementById("pred-spin").style.display = "none";
+  }
+
+  // ── Rapports Word ──
+  async function loadReports() {
+    const rb = document.getElementById("reports-body");
+    try {
+      const r = await get("/reports/list");
+      reportsData = r.reports || [];
+      document.getElementById("k-analyses").textContent = reportsData.length;
+      if (reportsData.length === 0) { rb.innerHTML = `<div class="empty">Aucun rapport</div>`; return; }
+      rb.innerHTML = reportsData.slice(0,20).map(rep => `
+        <div class="report-item">
+          <div>
+            <div class="report-name">${rep.symbol} <span class="badge ${rep.signal === 'SELL' ? 'badge-sell' : rep.signal === 'BUY' ? 'badge-buy' : 'badge-hold'}">${rep.signal || '—'}</span></div>
+            <div class="report-meta">${rep.date} · ${rep.filename}</div>
+          </div>
+          <a class="btn-sm" href="${API}/reports/download/${encodeURIComponent(rep.path)}" download>&#8595; .docx</a>
+        </div>`).join("");
+    } catch {
+      // Fallback : lire depuis le filesystem via endpoint qui n'existe pas encore
+      rb.innerHTML = `<div class="empty">Endpoint /reports/list non disponible — <a href="#" onclick="loadReportsFallback()" style="color:var(--blue)">charger manuellement</a></div>`;
+      document.getElementById("k-analyses").textContent = "?";
+    }
+  }
+
+  // ── Statut TradingAgents ──
+  async function loadTAStatus() {
+    try {
+      const d = await get("/tradingagents/realtime/status");
+      const rows = [
+        ["Auto loop", d.auto_loop_enabled ? "✓ Actif" : "✗ Désactivé"],
+        ["Manual reports en cache", d.manual_reports_cached],
+        ["Symboles MT5 push", (d.symbols_mt5_push || []).join(", ") || "—"],
+        ["TTL rapport manuel", d.manual_report_ttl_sec + "s"],
+        ["Tâche RT", d.task_running ? "En cours" : "Arrêtée"],
+        ["Dernière erreur", d.last_error || "—"],
+      ];
+      document.getElementById("srv-body").innerHTML = rows.map(([k,v]) =>
+        `<tr><td style="color:var(--muted);width:50%">${k}</td><td>${v}</td></tr>`).join("");
+    } catch {
+      document.getElementById("srv-body").innerHTML = `<tr><td colspan="2" class="empty">Non disponible</td></tr>`;
+    }
+  }
+
+  // ── Dernières prédictions M15 ──
+  async function loadRecentPreds() {
+    try {
+      // Endpoint RDS direct
+      const d = await get("/m15/prediction/recent?limit=20");
+      const tb = document.getElementById("preds-body");
+      if (!d.rows || d.rows.length === 0) { tb.innerHTML = `<tr><td colspan="7" class="empty">Aucune prédiction enregistrée</td></tr>`; return; }
+      tb.innerHTML = d.rows.map(p => `
+        <tr>
+          <td><strong>${p.symbol}</strong></td>
+          <td>${badge(p.direction)}</td>
+          <td>${fmt(p.target_price)}</td>
+          <td>
+            <div>${(p.probability || 0).toFixed(0)}%</div>
+            <div class="bar-wrap"><div class="bar-fill bar-blue" style="width:${p.probability||0}%"></div></div>
+          </td>
+          <td>${p.outcome ? `<span class="badge ${p.outcome==='hit'?'badge-hit':'badge-miss'}">${p.outcome}</span>` : `<span style="color:var(--muted);font-size:0.75rem">en attente</span>`}</td>
+          <td>${p.hit === true ? '✅' : p.hit === false ? '❌' : '—'}</td>
+          <td style="color:var(--muted);font-size:0.75rem">${p.bar_open_time ? p.bar_open_time.slice(0,16) : '—'}</td>
+        </tr>`).join("");
+    } catch {
+      document.getElementById("preds-body").innerHTML = `<tr><td colspan="7" class="empty">Endpoint /m15/prediction/recent non disponible</td></tr>`;
+    }
+  }
+
+  async function loadAll() {
+    await Promise.all([loadHealth(), loadOrders(), loadPredStats(), loadReports(), loadTAStatus(), loadRecentPreds()]);
+  }
+
+  // Auto-refresh toutes les 30s
+  loadAll();
+  setInterval(loadAll, 30000);
+</script>
+</body>
+</html>

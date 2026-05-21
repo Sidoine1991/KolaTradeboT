@@ -12967,18 +12967,19 @@ async def m15_prediction_log(payload: Dict[str, Any] = Body(...)):
     async with _m15_pred_lock:
         _m15_predictions[pred_id] = entry
 
-    # Sauvegarder en RDS si disponible
+    # Sauvegarder en AWS RDS PostgreSQL
     try:
-        supabase_url, supabase_key = _get_supabase_config(strict=False)
-        if supabase_url and supabase_key:
-            import httpx
-            headers = {"apikey": supabase_key, "Authorization": f"Bearer {supabase_key}",
-                       "Content-Type": "application/json", "Prefer": "return=minimal"}
-            async with httpx.AsyncClient(timeout=5.0) as client:
-                await client.post(f"{supabase_url}/rest/v1/m15_prediction_log",
-                                  headers=headers, json=entry)
+        rds = aws_rds_client
+        rds.execute_update("""
+            INSERT INTO m15_prediction_log
+                (pred_id, symbol, direction, target_price, probability,
+                 price_at_prediction, bar_open_time, reasoning, ts)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            ON CONFLICT (pred_id) DO NOTHING
+        """, (pred_id, symbol, direction, target, prob,
+              price_at, bar_open or None, reasoning, time.time()))
     except Exception as e:
-        logger.debug("m15 prediction log RDS: %s", e)
+        logger.debug("m15 prediction log RDS insert: %s", e)
 
     logger.info("📊 Pred M15 enregistrée: %s %s %s → %s prob=%s%%",
                 pred_id[:8], symbol, direction, target, prob)
@@ -13007,21 +13008,16 @@ async def m15_prediction_outcome(payload: Dict[str, Any] = Body(...)):
         else:
             entry = payload
 
-    # Sauvegarder en RDS
+    # Mettre à jour en AWS RDS PostgreSQL
     try:
-        supabase_url, supabase_key = _get_supabase_config(strict=False)
-        if supabase_url and supabase_key:
-            import httpx
-            headers = {"apikey": supabase_key, "Authorization": f"Bearer {supabase_key}",
-                       "Content-Type": "application/json", "Prefer": "return=minimal"}
-            update = {"outcome": entry.get("outcome"), "price_at_close": price_close,
-                      "hit": hit, "direction_ok": direction_ok}
-            async with httpx.AsyncClient(timeout=5.0) as client:
-                await client.patch(
-                    f"{supabase_url}/rest/v1/m15_prediction_log?pred_id=eq.{pred_id}",
-                    headers=headers, json=update)
+        rds = aws_rds_client
+        rds.execute_update("""
+            UPDATE m15_prediction_log
+            SET outcome=%s, price_at_close=%s, hit=%s, direction_ok=%s
+            WHERE pred_id=%s
+        """, ("hit" if hit else "miss", price_close, hit, direction_ok, pred_id))
     except Exception as e:
-        logger.debug("m15 outcome RDS: %s", e)
+        logger.debug("m15 outcome RDS update: %s", e)
 
     logger.info("✅ Pred M15 outcome: %s | hit=%s direction_ok=%s close=%.5f",
                 pred_id[:8], hit, direction_ok, price_close)
@@ -13030,24 +13026,326 @@ async def m15_prediction_outcome(payload: Dict[str, Any] = Body(...)):
 
 @app.get("/m15/prediction/stats")
 async def m15_prediction_stats(symbol: Optional[str] = None):
-    """Statistiques de précision des prédictions M15 en mémoire."""
+    """Statistiques de précision des prédictions M15 depuis RDS."""
+    try:
+        rds = aws_rds_client
+        if symbol:
+            rows = rds.execute_query(
+                "SELECT * FROM m15_prediction_accuracy WHERE symbol = %s",
+                (symbol.strip().upper(),)
+            )
+        else:
+            rows = rds.execute_query("SELECT * FROM m15_prediction_accuracy LIMIT 20")
+        if rows:
+            return {"stats": rows, "source": "rds"}
+    except Exception as e:
+        logger.debug("m15 stats RDS: %s", e)
+
+    # Fallback mémoire
     async with _m15_pred_lock:
-        preds = [v for v in _m15_predictions.values()
-                 if v.get("outcome") is not None]
+        preds = [v for v in _m15_predictions.values() if v.get("outcome") is not None]
     if symbol:
         preds = [p for p in preds if p.get("symbol") == symbol.upper()]
     total = len(preds)
     if total == 0:
-        return {"total": 0, "hit_rate": 0, "direction_rate": 0}
-    hits = sum(1 for p in preds if p.get("hit"))
+        return {"total": 0, "hit_rate": 0, "direction_rate": 0, "source": "memory"}
+    hits   = sum(1 for p in preds if p.get("hit"))
     dir_ok = sum(1 for p in preds if p.get("direction_ok"))
     return {
-        "total": total,
-        "hits": hits,
+        "total": total, "hits": hits,
         "hit_rate": round(hits / total * 100, 1),
         "direction_correct": dir_ok,
         "direction_rate": round(dir_ok / total * 100, 1),
+        "source": "memory",
     }
+
+
+@app.get("/m15/prediction/weights")
+async def m15_prediction_weights(symbol: Optional[str] = None):
+    """
+    Calcule les poids optimaux des indicateurs M15 par symbole
+    en analysant quels indicateurs ont le mieux predit la direction.
+    Retourne les poids ajustes pour GetPriceDirection() dans l EA.
+    """
+    try:
+        rds = aws_rds_client
+        sym_filter = f"AND symbol = '{symbol.strip().upper()}'" if symbol else ""
+        rows = rds.execute_query(f"""
+            SELECT
+                symbol,
+                COUNT(*) AS total,
+                ROUND(AVG(CASE WHEN direction_ok THEN 1.0 ELSE 0.0 END) * 100, 1) AS dir_rate,
+                ROUND(AVG(CASE WHEN hit THEN 1.0 ELSE 0.0 END) * 100, 1) AS hit_rate,
+                ROUND(AVG(probability), 1) AS avg_confidence,
+                -- Analyser reasoning pour identifier quels indicateurs correlent avec succes
+                COUNT(*) FILTER (WHERE direction_ok AND reasoning LIKE '%EMA9>EMA21%') AS ema_up_correct,
+                COUNT(*) FILTER (WHERE direction_ok AND reasoning LIKE '%EMA9<EMA21%') AS ema_down_correct,
+                COUNT(*) FILTER (WHERE direction_ok AND reasoning LIKE '%RSI%') AS rsi_correct,
+                COUNT(*) FILTER (WHERE direction_ok AND reasoning LIKE '%MACD+%') AS macd_up_correct,
+                COUNT(*) FILTER (WHERE direction_ok AND reasoning LIKE '%Slope%') AS slope_correct,
+                COUNT(*) FILTER (WHERE reasoning LIKE '%EMA9>EMA21%' OR reasoning LIKE '%EMA9<EMA21%') AS ema_total,
+                COUNT(*) FILTER (WHERE reasoning LIKE '%RSI%') AS rsi_total,
+                COUNT(*) FILTER (WHERE reasoning LIKE '%MACD%') AS macd_total,
+                COUNT(*) FILTER (WHERE reasoning LIKE '%Slope%') AS slope_total
+            FROM m15_prediction_log
+            WHERE outcome IS NOT NULL {sym_filter}
+            GROUP BY symbol
+            HAVING COUNT(*) >= 10
+            ORDER BY dir_rate DESC
+        """)
+
+        weights = []
+        for r in rows:
+            total = r.get("total", 0)
+            if total < 10:
+                continue
+            # Calcul du taux de succes de chaque indicateur
+            def safe_rate(correct, tot):
+                return round(correct / max(1, tot) * 100, 1)
+
+            ema_rate   = safe_rate(r.get("ema_up_correct",0) + r.get("ema_down_correct",0), r.get("ema_total",1))
+            rsi_rate   = safe_rate(r.get("rsi_correct",0), r.get("rsi_total",1))
+            macd_rate  = safe_rate(r.get("macd_up_correct",0), r.get("macd_total",1))
+            slope_rate = safe_rate(r.get("slope_correct",0), r.get("slope_total",1))
+
+            # Poids normalise : indicateurs avec >55% -> weight+, <45% -> weight-
+            def weight(rate):
+                if rate >= 65: return 2    # Tres fiable -> double poids
+                if rate >= 55: return 1    # Fiable -> poids normal
+                if rate >= 45: return 0    # Neutre -> ignorer
+                return -1                  # Contre-productif -> inverser
+
+            dir_rate = float(r.get("dir_rate", 50))
+            # Conseil pour GetPriceDirection
+            advice = "RELIABLE" if dir_rate >= 60 else ("WEAK" if dir_rate >= 50 else "UNRELIABLE")
+
+            weights.append({
+                "symbol":      r["symbol"],
+                "total":       total,
+                "dir_rate":    dir_rate,
+                "hit_rate":    float(r.get("hit_rate", 0)),
+                "advice":      advice,
+                "indicator_weights": {
+                    "ema_cross":  {"rate": ema_rate,   "weight": weight(ema_rate)},
+                    "rsi":        {"rate": rsi_rate,   "weight": weight(rsi_rate)},
+                    "macd":       {"rate": macd_rate,  "weight": weight(macd_rate)},
+                    "slope":      {"rate": slope_rate, "weight": weight(slope_rate)},
+                },
+                "recommendation": (
+                    f"Sur {total} signaux: direction correcte {dir_rate}%. "
+                    + ("Indicateurs fiables — conserver la prediction." if advice == "RELIABLE"
+                       else "Direction aleatoire — afficher CONSOLIDATE si <20 signaux valides.")
+                )
+            })
+
+        return {"weights": weights, "symbols_analyzed": len(weights)}
+
+    except Exception as e:
+        logger.error("m15 weights: %s", e)
+        return {"weights": [], "error": str(e)}
+
+
+@app.get("/projection/smart")
+async def smart_projection(symbol: str, current_price: float = 0.0, atr: float = 0.0):
+    """
+    Calcule les segments de projection futurs pondérés par les données historiques RDS :
+    - win_rate du symbole (symbol_calibration)
+    - profit moyen des trades passés (trade_feedback)
+    - taux de direction correcte prédiction M15 (m15_prediction_log)
+
+    Retourne 3 niveaux de prix pour les zones de projection sur le graphique.
+    """
+    sym = symbol.strip().upper()
+    result = {
+        "symbol": sym,
+        "current_price": current_price,
+        "atr": atr,
+        "win_rate": 0.5,
+        "direction_bias": "NEUTRAL",
+        "confidence": 0.5,
+        "proj_near":  None,  # +/- 0.5 ATR (zone proche)
+        "proj_mid":   None,  # +/- 1.0 ATR (zone intermédiaire)
+        "proj_far":   None,  # +/- 2.0 ATR (zone lointaine)
+        "spike_prob": 0.5,
+        "source": "default",
+        "reasoning": [],
+    }
+    if current_price <= 0 or atr <= 0:
+        return result
+
+    reasoning = []
+    win_rate = 0.5
+    avg_profit = 0.0
+    dir_rate = 0.5
+    n_trades = 0
+
+    try:
+        rds = aws_rds_client
+
+        # 1. Win rate historique du symbole
+        cal = rds.execute_query(
+            "SELECT wins, losses, total, win_rate FROM symbol_calibration WHERE symbol=%s AND timeframe='M1' LIMIT 1",
+            (sym,)
+        )
+        if cal:
+            win_rate = float(cal[0].get("win_rate") or 0.5)
+            n_trades = int(cal[0].get("total") or 0)
+            reasoning.append(f"Calibration: win_rate={win_rate:.1%} sur {n_trades} trades")
+
+        # 2. Profit moyen + direction dominante (trade_feedback)
+        fb = rds.execute_query(
+            """SELECT AVG(profit) as avg_profit,
+                      COUNT(*) FILTER (WHERE is_win=true) as wins,
+                      COUNT(*) as total,
+                      AVG(ai_confidence) as avg_conf
+               FROM trade_feedback
+               WHERE symbol=%s AND timeframe='M1'
+               AND created_at > NOW() - INTERVAL '30 days'""",
+            (sym,)
+        )
+        if fb and fb[0].get("total"):
+            avg_profit = float(fb[0].get("avg_profit") or 0)
+            fb_wins = int(fb[0].get("wins") or 0)
+            fb_total = int(fb[0].get("total") or 0)
+            fb_winrate = fb_wins / max(1, fb_total)
+            if fb_total >= 5:
+                win_rate = (win_rate + fb_winrate) / 2  # Moyenne pondérée
+                reasoning.append(f"Feedback 30j: {fb_wins}/{fb_total} wins, avg_profit=${avg_profit:.2f}")
+
+        # 3. Direction M15 correcte (m15_prediction_log)
+        m15 = rds.execute_query(
+            """SELECT
+                 COUNT(*) FILTER (WHERE direction_ok=true) as dir_ok,
+                 COUNT(*) FILTER (WHERE direction='UP' AND direction_ok=true) as up_ok,
+                 COUNT(*) FILTER (WHERE direction='DOWN' AND direction_ok=true) as down_ok,
+                 COUNT(*) FILTER (WHERE direction='UP') as up_total,
+                 COUNT(*) FILTER (WHERE direction='DOWN') as down_total,
+                 COUNT(*) as total
+               FROM m15_prediction_log
+               WHERE symbol=%s AND outcome IS NOT NULL""",
+            (sym,)
+        )
+        if m15 and m15[0].get("total") and int(m15[0]["total"]) >= 5:
+            m15r = m15[0]
+            total_m15 = int(m15r["total"])
+            dir_ok = int(m15r["dir_ok"] or 0)
+            dir_rate = dir_ok / max(1, total_m15)
+            up_ok = int(m15r["up_ok"] or 0); up_tot = int(m15r["up_total"] or 1)
+            down_ok = int(m15r["down_ok"] or 0); down_tot = int(m15r["down_total"] or 1)
+            up_rate   = up_ok   / max(1, up_tot)
+            down_rate = down_ok / max(1, down_tot)
+            reasoning.append(f"M15 pred: dir={dir_rate:.1%} ({total_m15} sig), UP={up_rate:.1%}, DOWN={down_rate:.1%}")
+        result["source"] = "rds"
+
+    except Exception as e:
+        reasoning.append(f"RDS indisponible: {e}")
+
+    # ── Calcul de la direction dominante et des niveaux ──
+    # Score composite : win_rate + dir_rate + signe du profit moyen
+    composite = (win_rate * 0.4) + (dir_rate * 0.4) + (0.1 if avg_profit > 0 else -0.1 if avg_profit < 0 else 0) + 0.1
+
+    # Pour Boom : composite > 0.55 → bias UP → projections SOUS le prix (zone rebond)
+    # Pour Crash: composite < 0.45 → bias DOWN → projections AU-DESSUS (zone chute)
+    is_boom  = "BOOM"  in sym
+    is_crash = "CRASH" in sym
+
+    # Direction bias
+    if composite >= 0.60:
+        direction_bias = "UP"
+    elif composite <= 0.40:
+        direction_bias = "DOWN"
+    else:
+        direction_bias = "NEUTRAL"
+
+    # Pondération ATR par le win_rate (plus fiable = distance plus grande)
+    atr_mult = 0.3 + (win_rate * 0.7)  # 0.3 à 1.0 selon win_rate
+
+    # Calcul niveaux selon type symbole
+    if is_boom:
+        # Boom : projections SOUS le prix
+        sign = -1
+    elif is_crash:
+        # Crash : projections AU-DESSUS du prix
+        sign = +1
+    else:
+        # Forex/autres : selon la direction bias
+        sign = +1 if direction_bias == "UP" else -1
+
+    result.update({
+        "win_rate":       round(win_rate, 4),
+        "direction_bias": direction_bias,
+        "confidence":     round(composite, 4),
+        "proj_near":      round(current_price + sign * atr * 0.5 * atr_mult, 5),
+        "proj_mid":       round(current_price + sign * atr * 1.0 * atr_mult, 5),
+        "proj_far":       round(current_price + sign * atr * 2.0 * atr_mult, 5),
+        "spike_prob":     round(win_rate, 4),
+        "n_trades":       n_trades,
+        "reasoning":      reasoning,
+    })
+    return result
+
+
+@app.get("/m15/prediction/recent")
+async def m15_prediction_recent(limit: int = 20):
+    """Retourne les dernières prédictions M15 depuis RDS pour le dashboard."""
+    try:
+        rds = aws_rds_client
+        rows = rds.execute_query(
+            """SELECT pred_id, symbol, direction, target_price, probability,
+                      price_at_prediction, bar_open_time, reasoning,
+                      outcome, hit, direction_ok, created_at
+               FROM m15_prediction_log
+               ORDER BY created_at DESC
+               LIMIT %s""",
+            (min(limit, 100),)
+        )
+        # Convertir les datetime en string pour JSON
+        for r in rows:
+            if r.get("bar_open_time"):
+                r["bar_open_time"] = str(r["bar_open_time"])
+            if r.get("created_at"):
+                r["created_at"] = str(r["created_at"])
+        return {"rows": rows, "total": len(rows)}
+    except Exception as e:
+        # Fallback mémoire
+        async with _m15_pred_lock:
+            preds = sorted(_m15_predictions.values(),
+                           key=lambda x: x.get("ts", 0), reverse=True)[:limit]
+        return {"rows": list(preds), "total": len(preds)}
+
+
+@app.get("/reports/list")
+async def list_reports():
+    """Liste tous les rapports Word générés par le bridge."""
+    reports_dir = _Path(os.getenv("TRADBOT_ROOT", str(_Path(__file__).resolve().parent.parent))) / "reports"
+    reports = []
+    if reports_dir.exists():
+        for docx in sorted(reports_dir.rglob("*.docx"), key=lambda p: p.stat().st_mtime, reverse=True):
+            parts = docx.stem.split("_")
+            date_str = parts[0] if parts else ""
+            signal = parts[-1] if parts else ""
+            symbol = docx.parent.name.replace("_", " ")
+            reports.append({
+                "filename": docx.name,
+                "symbol":   symbol,
+                "date":     date_str,
+                "signal":   signal.upper(),
+                "path":     str(docx.relative_to(reports_dir)),
+                "size_kb":  round(docx.stat().st_size / 1024, 1),
+            })
+    return {"reports": reports, "total": len(reports)}
+
+
+@app.get("/reports/download/{path:path}")
+async def download_report(path: str):
+    """Télécharge un rapport Word."""
+    from fastapi.responses import FileResponse
+    reports_dir = _Path(os.getenv("TRADBOT_ROOT", str(_Path(__file__).resolve().parent.parent))) / "reports"
+    full_path = reports_dir / path
+    if not full_path.exists() or not full_path.suffix == ".docx":
+        raise HTTPException(status_code=404, detail="Rapport introuvable")
+    return FileResponse(str(full_path), media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                        filename=full_path.name)
 
 
 @app.get("/prediction/accuracy/{symbol}")
@@ -19060,7 +19358,11 @@ async def get_pending_orders(symbol: Optional[str] = None):
         orders = list(_pending_orders.values())
     if symbol:
         sym = symbol.strip().upper()
-        orders = [o for o in orders if o["symbol"] == sym]
+        # Matching insensible à la casse ET aux espaces multiples
+        # Ex: "Crash 150 Index" (MT5) == "CRASH 150 INDEX" (bridge)
+        orders = [o for o in orders
+                  if o["symbol"].strip().upper() == sym or
+                  " ".join(o["symbol"].strip().upper().split()) == " ".join(sym.split())]
     orders = [o for o in orders if o.get("status") == "pending"]
     return {"orders": orders, "count": len(orders)}
 
