@@ -1,0 +1,2793 @@
+"""
+TradBOT Bridge - TradingAgents CLI -> ai_server -> SMC_Universal.mq5
+
+LANCEMENT : utiliser le wrapper qui active le bon venv
+  .\bridge.bat                          # wizard interactif complet (tous les choix TA)
+  .\bridge.bat --symbol EURUSD          # mode rapide (skip wizard ticker/date)
+  .\bridge.bat --symbol EURUSD --auto   # pas de confirmation avant envoi
+  .\bridge.bat --symbol EURUSD --no-pending  # rapport seulement, pas d'ordre MT5
+
+Venv requis : D:\Dev\Depot Github\TradingAgents-main\.venv\Scripts\python.exe
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import re as _re
+import sys
+from datetime import date
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+# ---------------------------------------------------------------------------
+# Chemins & env
+# ---------------------------------------------------------------------------
+
+_HERE = Path(__file__).resolve().parent
+_TRADBOT_ROOT = _HERE.parent
+_TA_REPO = Path(
+    os.getenv("AI_TRADINGAGENTS_REPO_PATH",
+              r"D:\Dev\Depot Github\TradingAgents-main")
+)
+
+# Charge .env TradBOT en premier (prioritaire), puis .env TA sans ecraser
+try:
+    from dotenv import load_dotenv
+    load_dotenv(_TRADBOT_ROOT / ".env", override=True)
+    if (_TA_REPO / ".env").exists():
+        load_dotenv(_TA_REPO / ".env", override=False)
+except ImportError:
+    pass  # python-dotenv absent du venv TA ? peu probable
+
+# Si le provider est Bedrock, charger les credentials du profil AWS default
+# (meme compte que Claude Code local) via le fichier ~/.aws/credentials.
+# Cela evite que les cles hardcodees du .env TA (Legacy) prennent le dessus.
+if os.getenv("TRADINGAGENTS_LLM_PROVIDER", "").lower() == "bedrock":
+    import configparser as _cp
+    _aws_creds_file = Path.home() / ".aws" / "credentials"
+    _aws_profile = os.getenv("AWS_PROFILE", "default")
+    if _aws_creds_file.exists():
+        _cp_parser = _cp.ConfigParser()
+        _cp_parser.read(str(_aws_creds_file))
+        if _aws_profile in _cp_parser:
+            _sec = _cp_parser[_aws_profile]
+            _key_id = _sec.get("aws_access_key_id", "")
+            _secret = _sec.get("aws_secret_access_key", "")
+            if _key_id and _secret:
+                os.environ["AWS_ACCESS_KEY_ID"]     = _key_id
+                os.environ["AWS_SECRET_ACCESS_KEY"] = _secret
+                os.environ["AWS_REGION"] = os.getenv("AWS_REGION", "us-east-1")
+                # Supprimer le token Bearer Bedrock pour forcer l'auth IAM SigV4
+                os.environ.pop("AWS_BEARER_TOKEN_BEDROCK", None)
+                print(f"[bridge] AWS profile '{_aws_profile}' charge: {_key_id[:8]}...")
+
+import requests  # noqa: E402  (apres dotenv pour avoir les vars)
+
+_SERVER_URL = os.getenv("AI_SERVER_URL", "http://127.0.0.1:8000").rstrip("/")
+
+# ---------------------------------------------------------------------------
+# Import TradingAgents
+# ---------------------------------------------------------------------------
+
+if str(_TA_REPO) not in sys.path:
+    sys.path.insert(0, str(_TA_REPO))
+
+try:
+    from tradingagents.graph.trading_graph import TradingAgentsGraph       # type: ignore
+    from tradingagents.default_config import DEFAULT_CONFIG as _TA_DEFAULT  # type: ignore
+    from tradingagents.dataflows.vendor_selection import build_runtime_config  # type: ignore
+    from cli.main import get_user_selections                                 # type: ignore
+    from cli.stream_pipeline import ANALYST_ORDER                            # type: ignore
+    _TA_CLI_AVAILABLE = True
+except ImportError as _e:
+    _TA_CLI_AVAILABLE = False
+    _TA_IMPORT_ERR = str(_e)
+
+# ---------------------------------------------------------------------------
+# Mapping MT5 -> yfinance
+# ---------------------------------------------------------------------------
+
+# Mapping MT5 -> ticker TradingAgents
+# Deriv synthetiques : passer le nom court (BOOM900, CRASH300...)
+# TradingAgents detecte automatiquement vendor=deriv pour BOOM*/CRASH*
+_MT5_MAP: Dict[str, str] = {
+    # Metaux / Futures
+    "XAUUSD": "GC=F",
+    "XAGUSD": "SI=F",
+    # Forex
+    "EURUSD": "EURUSD=X",
+    "GBPUSD": "GBPUSD=X",
+    "USDJPY": "JPY=X",
+    "USDCHF": "CHF=X",
+    "AUDUSD": "AUDUSD=X",
+    "USDCAD": "CAD=X",
+    "NZDUSD": "NZDUSD=X",
+    "EURGBP": "EURGBP=X",
+    "EURJPY": "EURJPY=X",
+    "GBPJPY": "GBPJPY=X",
+    # Indices
+    "US30":  "^DJI",
+    "US500": "^GSPC",
+    "USTEC": "^IXIC",
+    "DE40":  "^GDAXI",
+    # Deriv Boom — nom court reconnu par infer_stock_data_vendor()
+    "BOOM 300 INDEX":   "BOOM300",
+    "BOOM 500 INDEX":   "BOOM500",
+    "BOOM 600 INDEX":   "BOOM600",
+    "BOOM 900 INDEX":   "BOOM900",
+    "BOOM 1000 INDEX":  "BOOM1000",
+    # Deriv Crash
+    "CRASH 300 INDEX":  "CRASH300",
+    "CRASH 500 INDEX":  "CRASH500",
+    "CRASH 600 INDEX":  "CRASH600",
+    "CRASH 900 INDEX":  "CRASH900",
+    "CRASH 1000 INDEX": "CRASH1000",
+}
+
+_DERIV_PREFIXES = ("BOOM", "CRASH", "STEP", "RDBULL", "RDBEAR", "JUMP", "RANGE", "VOL")
+
+
+def _mt5_to_yfinance(symbol: str) -> str:
+    """Convertit un symbole MT5 en ticker TradingAgents.
+    Pour les synthetiques Deriv, retourne le nom court (BOOM900)
+    afin que TradingAgents choisisse automatiquement vendor=deriv.
+    """
+    up = symbol.strip().upper()
+    if up in _MT5_MAP:
+        return _MT5_MAP[up]
+    # Supprimer "INDEX" ou "INDX" en suffixe (ex: BOOM900INDEX -> BOOM900)
+    for suffix in (" INDEX", " INDX", "INDEX", "INDX"):
+        if up.endswith(suffix):
+            up = up[: -len(suffix)].strip()
+            break
+    nospace = up.replace(" ", "")
+    for p in _DERIV_PREFIXES:
+        if nospace.startswith(p):
+            return nospace  # BOOM900, CRASH600, etc.
+    if len(up) == 6 and up.isalpha():
+        return up + "=X"
+    return up
+
+
+# ---------------------------------------------------------------------------
+# Selecteur interactif de symbole par categorie de broker
+# ---------------------------------------------------------------------------
+
+# Catalogue yfinance — symboles les plus tradés
+_YFINANCE_CATALOG = {
+    "Forex majeurs": [
+        ("EURUSD=X", "EUR/USD"), ("GBPUSD=X", "GBP/USD"), ("JPY=X", "USD/JPY"),
+        ("CHF=X", "USD/CHF"), ("AUDUSD=X", "AUD/USD"), ("CAD=X", "USD/CAD"),
+        ("NZDUSD=X", "NZD/USD"), ("EURGBP=X", "EUR/GBP"), ("EURJPY=X", "EUR/JPY"),
+    ],
+    "Metaux / Commodites": [
+        ("GC=F", "Or — XAUUSD"), ("SI=F", "Argent — XAGUSD"),
+        ("CL=F", "Petrole WTI"), ("NG=F", "Gaz naturel"),
+    ],
+    "Indices boursiers": [
+        ("^DJI", "Dow Jones — US30"), ("^GSPC", "S&P 500 — US500"),
+        ("^IXIC", "Nasdaq — USTEC"), ("^GDAXI", "DAX — DE40"),
+        ("^FTSE", "FTSE 100"), ("^N225", "Nikkei 225"),
+    ],
+    "Actions US": [
+        ("AAPL", "Apple"), ("MSFT", "Microsoft"), ("NVDA", "NVIDIA"),
+        ("TSLA", "Tesla"), ("AMZN", "Amazon"), ("GOOGL", "Alphabet"),
+    ],
+    "Crypto (yfinance)": [
+        ("BTC-USD", "Bitcoin"), ("ETH-USD", "Ethereum"),
+        ("BNB-USD", "BNB"), ("SOL-USD", "Solana"),
+    ],
+}
+
+# Catalogue Deriv — directement depuis deriv_catalog
+try:
+    from tradingagents.dataflows.deriv_catalog import (  # type: ignore
+        DERIV_BOOM_CRASH, DERIV_FX_METALS, DERIV_VOLATILITY
+    )
+    _DERIV_CATALOG = {
+        "Boom & Crash (synthetiques)": [(sid, lbl) for sid, lbl in DERIV_BOOM_CRASH],
+        "Forex & Metaux Deriv":        [(sid, lbl) for sid, lbl in DERIV_FX_METALS],
+        "Volatility Index":            [(sid, lbl) for sid, lbl in DERIV_VOLATILITY],
+    }
+except ImportError:
+    _DERIV_CATALOG = {
+        "Boom & Crash": [
+            ("BOOM1000","Boom 1000"), ("BOOM900","Boom 900"), ("BOOM600","Boom 600"),
+            ("CRASH1000","Crash 1000"), ("CRASH900","Crash 900"), ("CRASH600","Crash 600"),
+        ],
+    }
+
+# Catalogue Weltrade — broker standard MetaTrader 5
+# Symboles compatibles yfinance pour l'analyse (meme donnees, differents spreads)
+_WELTRADE_CATALOG = {
+    "Forex Majeurs": [
+        ("EURUSD=X", "EUR/USD"), ("GBPUSD=X", "GBP/USD"), ("USDJPY=X", "USD/JPY"),
+        ("USDCHF=X", "USD/CHF"), ("AUDUSD=X", "AUD/USD"), ("USDCAD=X", "USD/CAD"),
+        ("NZDUSD=X", "NZD/USD"), ("EURGBP=X", "EUR/GBP"), ("EURJPY=X", "EUR/JPY"),
+        ("GBPJPY=X", "GBP/JPY"), ("EURAUD=X", "EUR/AUD"), ("EURCHF=X", "EUR/CHF"),
+    ],
+    "Forex Mineurs & Exotiques": [
+        ("USDMXN=X", "USD/MXN"), ("USDZAR=X", "USD/ZAR"), ("USDTRY=X", "USD/TRY"),
+        ("USDSGD=X", "USD/SGD"), ("USDHKD=X", "USD/HKD"), ("USDNOK=X", "USD/NOK"),
+        ("USDSEK=X", "USD/SEK"),
+    ],
+    "Metaux Precieux": [
+        ("GC=F", "Or — XAU/USD"), ("SI=F", "Argent — XAG/USD"),
+        ("PL=F", "Platine — XPT/USD"), ("PA=F", "Palladium — XPD/USD"),
+    ],
+    "Indices CFD": [
+        ("^DJI",  "US30 — Dow Jones"), ("^GSPC", "US500 — S&P 500"),
+        ("^IXIC", "USTEC — Nasdaq"),   ("^GDAXI","DE40 — DAX"),
+        ("^FTSE", "UK100 — FTSE"),     ("^N225", "JP225 — Nikkei"),
+        ("^FCHI", "FR40 — CAC 40"),    ("^STOXX50E", "EU50 — Euro Stoxx"),
+    ],
+    "Energie & Matieres Premieres": [
+        ("CL=F", "Petrole WTI"), ("BZ=F", "Petrole Brent"),
+        ("NG=F", "Gaz naturel"), ("ZC=F", "Mais"), ("ZW=F", "Ble"),
+    ],
+    "Crypto CFD": [
+        ("BTC-USD", "Bitcoin / USD"), ("ETH-USD", "Ethereum / USD"),
+        ("LTC-USD", "Litecoin / USD"), ("XRP-USD", "Ripple / USD"),
+    ],
+}
+
+# Catalogue Exness — broker MT5 avec tres faibles spreads
+# Exness propose les memes paires forex/metaux + indices
+_EXNESS_CATALOG = {
+    "Forex Majeurs (spread ultra-faible)": [
+        ("EURUSD=X", "EUR/USD"), ("GBPUSD=X", "GBP/USD"), ("USDJPY=X", "USD/JPY"),
+        ("USDCHF=X", "USD/CHF"), ("AUDUSD=X", "AUD/USD"), ("USDCAD=X", "USD/CAD"),
+        ("NZDUSD=X", "NZD/USD"),
+    ],
+    "Croisees Majeures": [
+        ("EURGBP=X", "EUR/GBP"), ("EURJPY=X", "EUR/JPY"), ("GBPJPY=X", "GBP/JPY"),
+        ("EURAUD=X", "EUR/AUD"), ("GBPAUD=X", "GBP/AUD"), ("AUDJPY=X", "AUD/JPY"),
+        ("CADJPY=X", "CAD/JPY"), ("CHFJPY=X", "CHF/JPY"),
+    ],
+    "Metaux & Energie": [
+        ("GC=F", "XAU/USD — Or"),   ("SI=F", "XAG/USD — Argent"),
+        ("CL=F", "WTI Petrole"),    ("BZ=F", "Brent Petrole"),
+    ],
+    "Indices Boursiers": [
+        ("^GSPC",  "US500 — S&P 500"), ("^DJI",   "US30 — Dow Jones"),
+        ("^IXIC",  "USTEC — Nasdaq"),  ("^GDAXI", "GER40 — DAX"),
+        ("^FTSE",  "UK100 — FTSE"),    ("^HSI",   "HK50 — Hang Seng"),
+        ("^N225",  "JP225 — Nikkei"),
+    ],
+    "Crypto (Exness propose BTC etc.)": [
+        ("BTC-USD", "Bitcoin"), ("ETH-USD", "Ethereum"),
+        ("SOL-USD", "Solana"),  ("BNB-USD", "BNB"),
+        ("XRP-USD", "XRP"),     ("DOGE-USD","Dogecoin"),
+    ],
+}
+
+# Vendor mapping par broker
+_BROKER_VENDOR = {
+    "Deriv (synthetiques + forex)":          "deriv",
+    "yfinance (Forex / Indices / Actions)":  "yfinance",
+    "Weltrade (MT5 — Forex / Indices / Crypto)": "yfinance",
+    "Exness (MT5 — Forex / Metaux / Crypto)":    "yfinance",
+}
+
+_ALL_BROKERS = {
+    "Deriv (synthetiques + forex)":              _DERIV_CATALOG,
+    "Weltrade (MT5 — Forex / Indices / Crypto)": _WELTRADE_CATALOG,
+    "Exness (MT5 — Forex / Metaux / Crypto)":    _EXNESS_CATALOG,
+    "yfinance (Forex / Indices / Actions)":       _YFINANCE_CATALOG,
+}
+
+
+def select_symbol_interactive() -> tuple:
+    """
+    Menu interactif en 3 niveaux : broker -> categorie -> symbole.
+    Retourne (symbol_display, ticker_ta, vendor) ou leve SystemExit si annule.
+    """
+    print("\n" + "=" * 60)
+    print("  SELECTION DU SYMBOLE A ANALYSER")
+    print("=" * 60)
+
+    # Niveau 1 : broker
+    brokers = list(_ALL_BROKERS.keys())
+    print("\n  Broker / Source de donnees :")
+    for i, b in enumerate(brokers, 1):
+        print(f"    [{i}] {b}")
+    print("    [0] Saisir manuellement un ticker")
+    raw = input("\n  Choix : ").strip()
+
+    if raw == "0":
+        ticker = input("  Ticker (ex: EURUSD=X, BOOM900, AAPL): ").strip()
+        if not ticker:
+            sys.exit("[bridge] Aucun symbole saisi.")
+        vendor = "deriv" if any(ticker.upper().startswith(p) for p in ("BOOM","CRASH","1HZ","R_","FRX")) else "yfinance"
+        return ticker, ticker, vendor
+
+    try:
+        broker_idx = int(raw) - 1
+        broker_name = brokers[broker_idx]
+    except (ValueError, IndexError):
+        sys.exit("[bridge] Choix invalide.")
+
+    categories = list(_ALL_BROKERS[broker_name].keys())
+    vendor = _BROKER_VENDOR.get(broker_name, "yfinance")
+
+    # Niveau 2 : categorie
+    print(f"\n  Categorie ({broker_name}) :")
+    for i, c in enumerate(categories, 1):
+        print(f"    [{i}] {c}")
+    raw2 = input("\n  Choix : ").strip()
+    try:
+        cat_idx = int(raw2) - 1
+        cat_name = categories[cat_idx]
+    except (ValueError, IndexError):
+        sys.exit("[bridge] Choix invalide.")
+
+    symbols = _ALL_BROKERS[broker_name][cat_name]
+
+    # Niveau 3 : symbole
+    print(f"\n  Symbole ({cat_name}) :")
+    for i, (sid, lbl) in enumerate(symbols, 1):
+        print(f"    [{i:2}] {lbl:35} ({sid})")
+    raw3 = input("\n  Choix : ").strip()
+    try:
+        sym_idx = int(raw3) - 1
+        ticker_id, sym_label = symbols[sym_idx]
+    except (ValueError, IndexError):
+        sys.exit("[bridge] Choix invalide.")
+
+    print(f"\n  [OK] Symbole selectionne : {sym_label} ({ticker_id}) | vendor={vendor}")
+    return sym_label, ticker_id, vendor
+
+
+# ---------------------------------------------------------------------------
+# Rating 5-tier -> BUY / SELL / HOLD
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# System prompt dynamique par catégorie de symbole (TradBOT Signal Engine v2.0)
+# ---------------------------------------------------------------------------
+
+def _get_symbol_category(symbol: str) -> str:
+    """Catégorise le symbole : CRASH | BOOM | GOLD | FOREX | INDEX | VOLATILITY"""
+    up = symbol.strip().upper()
+    if "CRASH" in up: return "CRASH"
+    if "BOOM"  in up: return "BOOM"
+    if "XAU" in up or "GOLD" in up or up in ("GC=F",): return "GOLD"
+    if any(up.startswith(p) for p in ("1HZ","R_","VOL","STEP","JUMP","RANGE")): return "VOLATILITY"
+    if any(up in (f,) for f in ("^DJI","^GSPC","^IXIC","^GDAXI","^FTSE","US30","US500","USTEC","DE40")): return "INDEX"
+    return "FOREX"
+
+
+def _build_system_prompt(symbol: str, category: str, indicators: Optional[Dict]) -> str:
+    """
+    Construit le system prompt TradBOT Signal Engine v2.0 adapté à la catégorie.
+    Injecte les données techniques réelles si disponibles.
+    """
+    price   = indicators.get("current_price", "?") if indicators else "?"
+    atr_raw = indicators.get("atr", None)           if indicators else None
+    atr     = atr_raw if atr_raw else "?"
+    rsi     = indicators.get("rsi", "?")            if indicators else "?"
+    macd    = indicators.get("macd", "?")           if indicators else "?"
+    sma20   = indicators.get("sma_20", "?")         if indicators else "?"
+    sma50   = indicators.get("sma_50", "?")         if indicators else "?"
+    sma200  = indicators.get("sma_200", "?")        if indicators else "?"
+    bb_up   = indicators.get("bb_upper", "?")       if indicators else "?"
+    bb_low  = indicators.get("bb_lower", "?")       if indicators else "?"
+
+    # Calcul des zones de spike avec le prix réel
+    # LOT MINIMUM DERIV :
+    #   Boom/Crash synthétiques : 0.2
+    #   XAUUSD, Forex, Volatility, Index : 0.01
+    lot_min = 0.2 if category in ("BOOM", "CRASH") else 0.01
+    capital = 20.0  # Capital cible scalping
+    risk_pct = 0.02
+    risk_amt = capital * risk_pct  # $0.40
+
+    # Zones de prix spike si données disponibles
+    spike_zones_txt = ""
+    if price != "?" and atr_raw:
+        try:
+            p = float(price)
+            a = float(atr_raw)
+            if category == "BOOM":
+                z1 = round(p - a * 0.5, 3)   # Zone rebond proche
+                z2 = round(p - a * 1.0, 3)   # Zone rebond modérée
+                z3 = round(p - a * 2.0, 3)   # Zone rebond agressive
+                sl1 = round(z1 - a * 1.0, 3)
+                tp1 = round(z1 + a * 2.0, 3)
+                tp2 = round(z1 + a * 3.5, 3)
+                # Risque avec lot 0.2 : lot × SL_pts (approximation)
+                sl_pts1 = round(abs(z1 - sl1), 3)
+                risk_est = round(lot_min * sl_pts1 * 0.01, 3)  # ~$0.01 par lot par point
+                spike_zones_txt = f"""
+ZONES DE SPIKE CALCULEES (prix actuel = {p}, ATR = {a}) :
+  Zone rebond Z1 (proche)   : {z1}  (-{round(p-z1,1)} pts)
+  Zone rebond Z2 (moderee)  : {z2}  (-{round(p-z2,1)} pts)
+  Zone rebond Z3 (agressive): {z3}  (-{round(p-z3,1)} pts)
+
+  SIGNAL BUY SNIPER (entrée Z1) :
+  Entrée : {z1}  |  SL : {sl1}  |  TP1 : {tp1}  |  TP2 : {tp2}
+  Lot minimum Deriv : {lot_min} | Risque estimé : ~${risk_est} sur capital ${capital}
+  Si risque > $0.40 (2% de $20) avec lot {lot_min} → EVITER ce trade"""
+            elif category == "CRASH":
+                z1 = round(p + a * 0.5, 3)
+                z2 = round(p + a * 1.0, 3)
+                z3 = round(p + a * 2.0, 3)
+                sl1 = round(z1 + a * 1.0, 3)
+                tp1 = round(z1 - a * 2.0, 3)
+                tp2 = round(z1 - a * 3.5, 3)
+                sl_pts1 = round(abs(z1 - sl1), 3)
+                risk_est = round(lot_min * sl_pts1 * 0.01, 3)
+                spike_zones_txt = f"""
+ZONES DE SPIKE CALCULEES (prix actuel = {p}, ATR = {a}) :
+  Zone chute Z1 (proche)    : {z1}  (+{round(z1-p,1)} pts)
+  Zone chute Z2 (moderee)   : {z2}  (+{round(z2-p,1)} pts)
+  Zone chute Z3 (agressive) : {z3}  (+{round(z3-p,1)} pts)
+
+  SIGNAL SELL SNIPER (entrée Z1) :
+  Entrée : {z1}  |  SL : {sl1}  |  TP1 : {tp1}  |  TP2 : {tp2}
+  Lot minimum Deriv : {lot_min} | Risque estimé : ~${risk_est} sur capital ${capital}
+  Si risque > $0.40 (2% de $20) avec lot {lot_min} → EVITER ce trade"""
+        except Exception:
+            pass
+
+    # Contexte technique commun
+    tech_ctx = f"""
+DONNEES TECHNIQUES ACTUELLES ({symbol}) :
+  Prix      : {price}
+  ATR       : {atr}
+  RSI(14)   : {rsi}
+  MACD      : {macd}
+  SMA 20    : {sma20} | SMA 50 : {sma50} | SMA 200 : {sma200}
+  BB Upper  : {bb_up} | BB Lower : {bb_low}
+
+CONTRAINTES BROKER/CAPITAL :
+  Lot minimum Deriv ({category}) : {lot_min}
+  Capital scalping cible         : ${capital}
+  Risque max par trade           : {risk_pct*100:.0f}% = ${risk_amt:.2f}
+  REGLE : Si SL × lot_min × pip_value > ${risk_amt:.2f} → SKIP ce trade ou ajuster SL
+{spike_zones_txt}
+"""
+
+    # Règles anti-contradiction communes
+    rules_common = """
+REGLES OBLIGATOIRES :
+1. Un seul signal final (pas de double signal contradictoire)
+2. Si agents internes divergent, choisir UN camp et expliquer en 2 lignes
+3. Sizing cohérent avec le stop loss
+4. Si ATR > 2% du prix : étiqueter HAUTE VOLATILITE - TAILLE REDUITE OBLIGATOIRE
+5. Ratio R:R minimum 1:1.5 — sinon écrire SETUP SOUS-OPTIMAL - ATTENDRE
+6. Si setup défavorable : ecrire clairement AUCUN SIGNAL — Raison : [X]. Revenez quand : [condition]
+
+FORMAT DE SORTIE OBLIGATOIRE :
+
+SECTION 1 — CONTEXTE CHRONOLOGIQUE (5-10 lignes narrative)
+SECTION 2 — SIGNAL :
+  INSTRUMENT : | CATEGORIE : | DIRECTION : BUY/SELL/ATTENDRE
+  CONVICTION : [1-10] + justification 1 ligne
+  ENTREE : | STOP LOSS : ([X] pips) | TP1 : | TP2 :
+  TAILLE : Compte $10 = [X] lot | Compte $50 = [X] lot
+  INVALIDATION : [condition]
+SECTION 3 — RISQUES SPECIFIQUES (2-3 risques concrets)
+SECTION 4 — CONDITION DE SKIP si applicable
+"""
+
+    # Extraire le nombre de ticks théorique depuis le nom du symbole
+    import re as _re2
+    tick_num = "500"
+    m_tick = _re2.search(r'(\d+)', symbol)
+    if m_tick: tick_num = m_tick.group(1)
+
+    # Seuils de probabilité selon la fréquence
+    try:
+        freq = int(tick_num)
+        zone_froide   = freq // 2
+        zone_neutre   = int(freq * 0.75)
+        zone_chaude   = int(freq * 0.85)
+        zone_critique = freq
+    except Exception:
+        zone_froide, zone_neutre, zone_chaude, zone_critique = 250, 375, 425, 500
+
+    if category == "CRASH":
+        specific = f"""
+══════════════════════════════════════════════════════
+REGLE 0 — VERIFICATION OBLIGATOIRE (PRIORITE ABSOLUE)
+══════════════════════════════════════════════════════
+INSTRUMENT CRASH DETECTE : {symbol}
+DIRECTION AUTORISEE : SELL UNIQUEMENT
+TOUT SIGNAL BUY ENTRANT EST INVALIDE ET DOIT ETRE REJETE.
+Si TradingAgents propose BUY sur cet instrument, signaler :
+"CONFLIT DETECTE : TradingAgents propose BUY sur CRASH. Signal invalide par nature de l'instrument. IGNORE."
+Reconstruire l'analyse en SELL uniquement.
+══════════════════════════════════════════════════════
+
+NATURE DU CRASH INDEX ({symbol}) :
+Indice synthetique Deriv generant des spikes BAISSIERS a frequence statistique ~1 spike / {tick_num} ticks.
+Entre les spikes, le prix derive LEGEREMENT a la HAUSSE — c'est la phase d'accumulation. Ce trend haussier
+N'EST PAS un signal BUY. Les patterns haussiers (golden cross, RSI>50, MACD+) sur un Crash sont des
+ARTEFACTS de la derive normale entre deux spikes. Les analyser comme une action ordinaire est une erreur fondamentale.
+
+ZONES DE PROBABILITE SPIKE BAISSIER :
+→ < {zone_froide} ticks depuis dernier spike : Zone FROIDE — attendre
+→ {zone_froide}-{zone_neutre} ticks          : Zone NEUTRE — vigilance
+→ {zone_neutre}-{zone_chaude} ticks          : Zone CHAUDE — probabilite elevee
+→ > {zone_chaude} ticks                      : Zone CRITIQUE — spike imminent probable
+→ > {zone_critique} ticks                    : ALERTE MAXIMALE
+
+ANALYSE REQUISE :
+1. Identifier le dernier spike baissier visible (bougie avec mèche basse disproportionnee)
+   → Date/heure dernier spike : [X] | Prix : [X]
+2. Estimer les ticks ecoulés depuis (nombre de bougies × ticks/bougie moyen)
+   → Ticks estimes : [X] | Zone : [froide/neutre/chaude/critique]
+3. Position du prix dans sa range recente (50 dernieres bougies) :
+   → Prix dans les 20% HAUTS = IDEAL pour SELL (plus d'espace a la baisse)
+   → Prix au milieu = acceptable | Prix dans les 20% bas = EVITER
+4. Bollinger Bands : bandes qui se resserrent = spike imminent potentiel
+5. SELL LIMIT se place AU-DESSUS du prix actuel (resistance)
+
+FORMAT SIGNAL FINAL CRASH :
+  INSTRUMENT : {symbol} | CATEGORIE : CRASH INDEX — SELL UNIQUEMENT
+  TICKS DEPUIS DERNIER SPIKE : [X] | ZONE : [froide/neutre/chaude/critique]
+  POSITION DANS LA RANGE : [haut/milieu/bas]
+  DIRECTION : SELL | CONVICTION : [1-10]
+  ENTREE : [prix — en haut de range] | STOP : [prix +1.5xATR au-dessus]
+  TP1 : [prochain support] | TP2 : [spike complet estime]
+  Compte $10 = [X] lot (risque 2% = $0.20) | Compte $50 = [X] lot (risque 2% = $1.00)
+  STRATEGIE : Entrer en SELL LIMIT en haut de range, attendre le spike baissier.
+  Ne pas paniquer sur les micro-hausses entre ticks — c'est la derive normale.
+  INVALIDATION : Si prix casse la resistance avec > 2xATR sans spike
+"""
+    elif category == "BOOM":
+        specific = f"""
+══════════════════════════════════════════════════════
+REGLE 0 — VERIFICATION OBLIGATOIRE (PRIORITE ABSOLUE)
+══════════════════════════════════════════════════════
+INSTRUMENT BOOM DETECTE : {symbol}
+DIRECTION AUTORISEE : BUY UNIQUEMENT
+TOUT SIGNAL SELL ENTRANT EST INVALIDE ET DOIT ETRE REJETE.
+Si TradingAgents propose SELL sur cet instrument, signaler :
+"CONFLIT DETECTE : TradingAgents propose SELL sur BOOM. Signal invalide par nature de l'instrument. IGNORE."
+Reconstruire l'analyse en BUY uniquement.
+══════════════════════════════════════════════════════
+
+NATURE DU BOOM INDEX ({symbol}) :
+Indice synthetique Deriv generant des spikes HAUSSIERS a frequence statistique ~1 spike / {tick_num} ticks.
+Entre les spikes, le prix derive LEGEREMENT a la BAISSE — c'est la phase d'accumulation.
+Ce trend baissier N'EST PAS un signal SELL. Les patterns baissiers (death cross, MACD-, triangle
+descendant) sur un Boom sont des ARTEFACTS de la derive naturelle entre deux spikes.
+Les analyser comme une action ordinaire est une erreur fondamentale.
+
+ZONES DE PROBABILITE SPIKE HAUSSIER :
+→ < {zone_froide} ticks depuis dernier spike : Zone FROIDE — attendre
+→ {zone_froide}-{zone_neutre} ticks          : Zone NEUTRE — vigilance
+→ {zone_neutre}-{zone_chaude} ticks          : Zone CHAUDE — probabilite elevee
+→ > {zone_chaude} ticks                      : Zone CRITIQUE — spike imminent probable
+→ > {zone_critique} ticks                    : ALERTE MAXIMALE
+
+ANALYSE REQUISE :
+1. Identifier le dernier spike haussier visible (bougie avec mèche haute disproportionnee)
+   → Date/heure dernier spike : [X] | Prix : [X]
+2. Estimer les ticks ecoulés depuis
+   → Ticks estimes : [X] | Zone : [froide/neutre/chaude/critique]
+3. Position du prix dans sa range recente (50 dernieres bougies) :
+   → Prix dans les 20% BAS = IDEAL pour BUY (spike aura plus d'espace)
+   → Prix au milieu = acceptable | Prix dans les 20% hauts = EVITER
+4. Bollinger Bands : bandes qui se resserrent = energie accumulee, breakout imminent
+5. BUY LIMIT se place EN DESSOUS du prix actuel (support)
+
+FORMAT SIGNAL FINAL BOOM :
+  INSTRUMENT : {symbol} | CATEGORIE : BOOM INDEX — BUY UNIQUEMENT
+  TICKS DEPUIS DERNIER SPIKE : [X] | ZONE : [froide/neutre/chaude/critique]
+  POSITION DANS LA RANGE : [bas/milieu/haut]
+  DIRECTION : BUY | CONVICTION : [1-10]
+  ENTREE : [prix — en bas de range] | STOP : [prix -1.5xATR en dessous]
+  TP1 : [+50 a +100 pips spike minimum] | TP2 : [+150 a +300 pips spike complet]
+  Compte $10 = [X] lot (risque 2% = $0.20) | Compte $50 = [X] lot (risque 2% = $1.00)
+  STRATEGIE : Entrer en BUY LIMIT en bas de range, tenir la position.
+  Les micro-baisses entre ticks sont NORMALES — ne pas sortir prematurément.
+  Sortir manuellement sur la mèche du spike.
+  INVALIDATION : Si prix casse sous le support critique avec > 2xATR sans rebond
+"""
+    elif category == "GOLD":
+        specific = """
+TU ANALYSES L'OR (XAUUSD).
+
+LOGIQUE FONDAMENTALE : Price Action + Structure HTF → LTF
+
+NARRATIVE CHRONOLOGIQUE 30 JOURS OBLIGATOIRE :
+Format : "[Date] : Prix a atteint [X] → rejet → formation de [structure]"
+        "[Date] : Cassure de [niveau] → confirmation → bias devient [bull/bear]"
+        "Aujourd'hui : Prix à [X], dernier retest du niveau [Y] date du [Z]"
+
+NIVEAUX CLES A IDENTIFIER :
+- Dernier Higher High / Lower Low significatif
+- Zone de liquidité (equal highs/lows)
+- Imbalance FVG la plus proche
+- Niveau psychologique le plus proche (round number)
+
+REGLES OR :
+- Entrée SUR structure confirmée (pas en milieu de range)
+- Stop : sous/sur le dernier swing significatif
+- TP1 : prochain niveau de liquidité
+- TP2 : prochain FVG ou résistance majeure
+- Confirmation requise : bougie de rejet OU engulfing sur niveau clé
+- Sans confirmation → écrire ATTENDRE SETUP
+"""
+    elif category == "FOREX":
+        specific = f"""
+TU ANALYSES UNE PAIRE FOREX ({symbol}).
+
+ANALYSE REQUISE :
+1. SESSION ACTIVE : London / New York / Asia / Overlap ?
+2. STRUCTURE : Tendance H4 → H1 → M15 alignées ?
+3. NIVEAU D'ENTREE :
+   - Support/Résistance testés minimum 2 fois
+   - Zone de valeur (38.2% à 61.8% Fibonacci du dernier swing)
+   - Confirmation : Pin bar, Engulfing, Inside bar
+4. NE PAS entrer en plein milieu d'une range sans confirmation
+5. Sessions haute liquidité préférées : London Open (08h-10h UTC), NY Open (13h-15h UTC)
+"""
+    elif category == "VOLATILITY":
+        # Extraire les données actuelles pour la logique mean reversion
+        rsi_val  = float(indicators.get("rsi", 50))  if indicators else 50.0
+        bb_up_v  = float(indicators.get("bb_upper", 0)) if indicators else 0.0
+        bb_low_v = float(indicators.get("bb_lower", 0)) if indicators else 0.0
+        price_v  = float(indicators.get("current_price", 0)) if indicators else 0.0
+        atr_v    = float(indicators.get("atr", 0)) if indicators else 0.0
+
+        # Déterminer la direction correcte par mean reversion
+        mr_direction = "SKIP"
+        mr_reason = ""
+        if rsi_val < 30:
+            mr_direction = "BUY"
+            mr_reason = f"RSI={rsi_val:.1f} SURVENDU (< 30) → mean reversion haussière attendue"
+        elif rsi_val > 70:
+            mr_direction = "SELL"
+            mr_reason = f"RSI={rsi_val:.1f} SURACHETÉ (> 70) → mean reversion baissière attendue"
+        elif price_v > 0 and bb_low_v > 0 and price_v <= bb_low_v * 1.005:
+            mr_direction = "BUY"
+            mr_reason = f"Prix proche BB inférieure ({bb_low_v:.3f}) → extension baissière, rebond probable"
+        elif price_v > 0 and bb_up_v > 0 and price_v >= bb_up_v * 0.995:
+            mr_direction = "SELL"
+            mr_reason = f"Prix proche BB supérieure ({bb_up_v:.3f}) → extension haussière, recul probable"
+        else:
+            mr_reason = f"RSI={rsi_val:.1f} en zone neutre (30-70), prix au milieu des BB → SKIP"
+
+        specific = f"""
+══════════════════════════════════════════════════════
+REGLE 0 — VOLATILITY INDEX : MEAN REVERSION UNIQUEMENT
+══════════════════════════════════════════════════════
+INSTRUMENT : {symbol}
+DIRECTION CALCULEE PAR MEAN REVERSION : {mr_direction}
+RAISON : {mr_reason}
+
+Si TradingAgents propose une direction OPPOSEE, signaler :
+"CONFLIT DETECTE : TradingAgents propose [X] mais la mean reversion indique [Y].
+Sur un Volatility Index, la mean reversion PRIME pour le scalping. Signal TradingAgents IGNORE."
+══════════════════════════════════════════════════════
+
+NATURE DU VOLATILITY INDEX ({symbol}) :
+Simule une volatilité CONSTANTE dans les deux sens. Aucun spike directionnel prévisible.
+Le prix oscille autour d'une moyenne avec des extensions périodiques.
+
+ERREUR CLASSIQUE À ÉVITER :
+Voir une tendance baissière forte et conclure SELL. Sur un Volatility Index, les extensions
+extrêmes (RSI < 30 ou > 70) sont les MEILLEURES opportunités dans la direction OPPOSEE.
+Suivre la tendance de fond sur un Volatility Index est une erreur fondamentale pour le scalping.
+
+STRATÉGIE CORRECTE : MEAN REVERSION
+→ RSI < 30 + prix proche BB inférieure → BUY (rebond vers la moyenne)
+→ RSI > 70 + prix proche BB supérieure → SELL (recul vers la moyenne)
+→ RSI 30-70 + prix au centre des BB    → SKIP (pas de setup)
+→ Jamais entrer en milieu de range — attendre les extrêmes
+
+SIZING STRICT (REGLE ABSOLUE) :
+  Compte $10 → risque MAX 2% = $0.20 | lot MIN = 0.01
+  Compte $50 → risque MAX 2% = $1.00 | lot MIN = 0.01
+  CALCUL : lot = risque_max / (SL_en_points × pip_value)
+  NE JAMAIS inverser : lot fixe PUIS calcul risque → DANGEREUX
+
+REGLE ANTI-CONTRADICTION RÉSUMÉ :
+  Le résumé DOIT reprendre la même direction que l'analyse scalping.
+  Si TradingAgents dit SELL mais mean reversion dit BUY → le résumé dit BUY.
+  Le scalping court terme prime TOUJOURS sur le signal fondamental.
+
+FORMAT SIGNAL VOLATILITY :
+  DIRECTION : {mr_direction} (mean reversion) — {"CONFIRME" if mr_direction != "SKIP" else "PAS DE SETUP ACTUELLEMENT"}
+  Entrée : [prix BB inférieure/supérieure ou RSI extrême]
+  Stop   : [0.8x ATR — serré car mean reversion rapide]
+  TP     : [SMA20 ou centre des BB — 1.5x ATR max]
+  Compte $10 = 0.01 lot (risque ~$[X]) | Compte $50 = 0.01-0.05 lot
+"""
+    else:  # INDEX
+        specific = f"""
+TU ANALYSES UN INDICE BOURSIER ({symbol}).
+
+LOGIQUE :
+- Suivre la tendance macro (données économiques, sentiment de marché)
+- Structure Daily/H4 pour le biais directionnel
+- Entrées sur pullbacks vers EMA50 ou zones de demande/offre
+- News économiques majeures = éviter les entrées 30min avant/après
+"""
+
+    return f"""Tu es TradBOT Signal Engine v2.0 — expert trading sur Deriv et marchés financiers.
+
+CATEGORIE IDENTIFIEE : {category} ({symbol})
+{tech_ctx}
+{specific}
+{rules_common}"""
+
+
+_RATING_MAP = {
+    "BUY": "BUY", "OVERWEIGHT": "BUY",
+    "HOLD": "HOLD", "NEUTRAL": "HOLD",
+    "UNDERWEIGHT": "SELL", "SELL": "SELL",
+}
+
+
+def _normalize_rating(raw: str) -> str:
+    return _RATING_MAP.get(str(raw).strip().upper(), "HOLD")
+
+
+# ---------------------------------------------------------------------------
+# Parse entry/SL/TP du markdown TraderProposal
+# ---------------------------------------------------------------------------
+
+def _parse_float_md(text: str, label: str) -> Optional[float]:
+    m = _re.search(rf"\*\*{label}\*\*[:\s]+([0-9]+(?:\.[0-9]+)?)", text, _re.IGNORECASE)
+    if m:
+        try:
+            return float(m.group(1))
+        except ValueError:
+            pass
+    return None
+
+
+def _extract_order_params(final_state: Dict[str, Any]) -> Dict[str, Optional[float]]:
+    combined = (str(final_state.get("trader_investment_plan") or "") + "\n"
+                + str(final_state.get("final_trade_decision") or ""))
+    return {
+        "entry_price": _parse_float_md(combined, "Entry Price"),
+        "stop_loss":   _parse_float_md(combined, "Stop Loss"),
+        "take_profit": _parse_float_md(combined, "Take Profit"),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Mode 1 : wizard complet (reutilise get_user_selections du CLI TA)
+# ---------------------------------------------------------------------------
+
+def run_with_wizard() -> Dict[str, Any]:
+    """Lance le wizard interactif complet du CLI TradingAgents, puis analyse."""
+    if not _TA_CLI_AVAILABLE:
+        sys.exit(f"[bridge] CLI TradingAgents inaccessible: {_TA_IMPORT_ERR}")
+
+    print("\n[bridge] Lancement du wizard TradingAgents...\n")
+    selections = get_user_selections()
+
+    config = build_runtime_config(selections, checkpoint=False)
+
+    # Normaliser la liste des analystes dans l'ordre fixe
+    selected_set = {a.value for a in selections["analysts"]}
+    selected_analyst_keys: List[str] = [a for a in ANALYST_ORDER if a in selected_set]
+
+    ticker     = selections["ticker"]
+    trade_date = selections["analysis_date"]
+
+    print(f"\n[bridge] Analyse: {ticker} | {trade_date} | analystes: {selected_analyst_keys}")
+
+    graph = TradingAgentsGraph(
+        selected_analysts=selected_analyst_keys,
+        config=config,
+        debug=False,
+    )
+    final_state, signal_rating = graph.propagate(ticker, trade_date)
+
+    return {
+        "symbol": ticker,
+        "data_ticker": ticker,
+        "signal_rating": signal_rating,
+        "final_state": final_state,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Calcul des indicateurs techniques directement depuis OHLC Deriv
+# (quand ai_server n'a pas de donnees temps reel pour le symbole)
+# ---------------------------------------------------------------------------
+
+def compute_indicators_from_deriv(ticker: str) -> Optional[Dict[str, Any]]:
+    """
+    Telecharge les OHLC Deriv et calcule RSI, MACD, ATR, SMA, Bollinger.
+    Retourne un dict d indicateurs ou None si echec.
+    """
+    try:
+        import sys as _sys
+        if str(_TA_REPO) not in _sys.path:
+            _sys.path.insert(0, str(_TA_REPO))
+
+        from tradingagents.dataflows.deriv_market import fetch_deriv_daily_ohlcv, resolve_deriv_symbol  # type: ignore
+        from tradingagents.dataflows.stockstats_utils import _clean_dataframe  # type: ignore
+        from stockstats import StockDataFrame  # type: ignore
+        import pandas as pd
+
+        deriv_sym = resolve_deriv_symbol(ticker)
+        end_date  = str(date.today())
+        start_date = str(date.today().replace(year=date.today().year - 1))
+
+        df = fetch_deriv_daily_ohlcv(deriv_sym, start_date, end_date)
+        if df is None or len(df) < 20:
+            return None
+
+        df = _clean_dataframe(df)
+        sdf = StockDataFrame.retype(df.copy())
+
+        def _safe(key):
+            try:
+                v = sdf[key].iloc[-1]
+                return None if (v != v) else round(float(v), 5)
+            except Exception:
+                return None
+
+        current_price = _safe("close")
+        if not current_price:
+            return None
+
+        result = {
+            "current_price": current_price,
+            "open":    _safe("open"),
+            "high":    _safe("high"),
+            "low":     _safe("low"),
+            "close":   current_price,
+            "rsi":     _safe("rsi_14"),
+            "atr":     _safe("atr_14"),
+            "macd":    _safe("macd"),
+            "sma_20":  _safe("close_20_sma"),
+            "sma_50":  _safe("close_50_sma"),
+            "sma_200": _safe("close_200_sma"),
+            "bb_upper":_safe("boll_ub"),
+            "bb_lower":_safe("boll_lb"),
+            "source":  "deriv_ohlc",
+            "rows":    len(df),
+        }
+        print(f"[bridge] Indicateurs calcules depuis {len(df)} jours OHLC Deriv ({deriv_sym})")
+        return result
+
+    except Exception as e:
+        print(f"[bridge] Indicateurs Deriv non disponibles: {e}")
+        return None
+
+
+def build_deriv_technical_context(ticker: str, symbol: str,
+                                   ind: Dict[str, Any]) -> str:
+    """Formate les indicateurs Deriv en texte pour injection dans past_context."""
+    price = ind.get("current_price", "?")
+    rsi   = ind.get("rsi", "?")
+    atr   = ind.get("atr", "?")
+    macd  = ind.get("macd", "?")
+    sma20 = ind.get("sma_20", "?")
+    sma50 = ind.get("sma_50", "?")
+    sma200= ind.get("sma_200","?")
+    bbu   = ind.get("bb_upper","?")
+    bbl   = ind.get("bb_lower","?")
+    rows  = ind.get("rows", 0)
+
+    # Tendances simples
+    trend_50  = "HAUSSIER" if (price and sma50  and float(price) > float(sma50))  else "BAISSIER"
+    trend_200 = "HAUSSIER" if (price and sma200 and float(price) > float(sma200)) else "BAISSIER"
+    rsi_state = ""
+    if rsi and rsi != "?":
+        rv = float(rsi)
+        rsi_state = "SURACHETÉ (attention retournement)" if rv > 70 else \
+                    "SURVENDU (opportunite achat)" if rv < 30 else "NEUTRE"
+
+    return f"""
+{'='*60}
+DONNEES TECHNIQUES REELLES — {symbol} ({ticker})
+Source : API Deriv WebSocket — {rows} bougies journalieres
+{'='*60}
+
+=== PRIX & INDICATEURS CLES ===
+Prix actuel    : {price}
+Open / High / Low : {ind.get('open','?')} / {ind.get('high','?')} / {ind.get('low','?')}
+ATR(14)        : {atr}  <- amplitude moyenne journaliere, essentiel pour SL/TP
+RSI(14)        : {rsi}  {rsi_state}
+MACD           : {macd}
+
+=== MOYENNES MOBILES ===
+SMA 20         : {sma20}
+SMA 50         : {sma50}   <- Prix {trend_50} par rapport a SMA50
+SMA 200        : {sma200}  <- Tendance longue : {trend_200}
+
+=== BOLLINGER BANDS ===
+Bande haute    : {bbu}
+Bande basse    : {bbl}
+
+=== CONTEXTE CRASH/BOOM ===
+Cet instrument est un indice synthetique Deriv. Contrairement aux actions,
+il possede des DONNEES HISTORIQUES REELLES telechargees via l API Deriv.
+Les indicateurs ci-dessus sont calcules sur {rows} jours de vrais prix de marche.
+L ATR de {atr} points represente la distance recommandee pour placer les stops.
+Pour un CRASH : SELL LIMIT se place AU-DESSUS du prix actuel.
+Pour un BOOM  : BUY  LIMIT se place EN DESSOUS du prix actuel.
+"""
+
+
+# ---------------------------------------------------------------------------
+# Collecte du contexte technique depuis ai_server (indicateurs, verdict, niveaux)
+# ---------------------------------------------------------------------------
+
+def fetch_tradbot_context(symbol: str) -> str:
+    """
+    Interroge ai_server pour recuperer les donnees techniques du symbole
+    et les formate en texte structure pour enrichir l'analyse TradingAgents.
+    Retourne une chaine vide si le serveur est inaccessible.
+    """
+    sym_enc = symbol.replace(" ", "%20")
+    sections: List[str] = []
+
+    def _get(path: str) -> Optional[dict]:
+        try:
+            r = requests.get(f"{_SERVER_URL}{path}", timeout=5)
+            if r.status_code == 200:
+                return r.json()
+        except Exception:
+            pass
+        return None
+
+    # 1. Trend alignment M1/M5/H1
+    d = _get(f"/ml/coherent_analysis?symbol={sym_enc}")
+    if d:
+        sections.append(
+            f"=== ALIGNEMENT TENDANCE (TradBOT) ===\n"
+            f"Consensus: {d.get('consensus','?')} | Score coherence: {d.get('coherence_score','?')}\n"
+            f"M1: {d.get('m1_trend','?')} ({d.get('m1_change_pct','?')}%) | "
+            f"M5: {d.get('m5_trend','?')} ({d.get('m5_change_pct','?')}%) | "
+            f"H1: {d.get('h1_trend','?')} ({d.get('h1_change_pct','?')}%)\n"
+            f"Regime volatilite: {d.get('volatility_regime','?')}"
+        )
+
+    # 2. Signal ML
+    d = _get(f"/ml/signal?symbol={sym_enc}&timeframe=M1")
+    if d:
+        sections.append(
+            f"=== SIGNAL ML (TradBOT) ===\n"
+            f"Signal: {d.get('signal','?')} | Confiance: {d.get('confidence','?')} | "
+            f"Precision modele: {d.get('accuracy','?')} | Echantillons: {d.get('total_samples','?')}\n"
+            f"Pattern graphique detecte: {d.get('chart_pattern','aucun')}"
+        )
+
+    # 3. Indicateurs techniques (prix + RSI + MACD + Bollinger)
+    d = _get(f"/trading/indicators/{sym_enc}/M1")
+    if d and d.get("indicators"):
+        ind = d["indicators"]
+        sections.append(
+            f"=== INDICATEURS TECHNIQUES M1 (TradBOT) ===\n"
+            f"Prix actuel: {ind.get('current_price','?')} | "
+            f"High: {ind.get('high','?')} | Low: {ind.get('low','?')}\n"
+            f"SMA20: {ind.get('sma_20','?')} | SMA50: {ind.get('sma_50','?')} | SMA200: {ind.get('sma_200','?')}\n"
+            f"RSI: {ind.get('rsi','?')} | ATR: {ind.get('atr','?')} | MACD: {ind.get('macd','?')}\n"
+            f"Bollinger Upper: {ind.get('bb_upper','?')} | Lower: {ind.get('bb_lower','?')}"
+        )
+
+    # 4. Recommendation ML (verdict + opportunite)
+    d = _get(f"/ml/recommendations/{sym_enc}")
+    if d:
+        sections.append(
+            f"=== RECOMMANDATION ML (TradBOT) ===\n"
+            f"Action: {d.get('action','?')} | Confiance: {d.get('confidence','?')} | "
+            f"Niveau opportunite: {d.get('opportunity_level','?')} (score: {d.get('opportunity_score','?')})\n"
+            f"Niveau risque: {d.get('risk_level','?')} | Doit trader: {d.get('should_trade','?')}\n"
+            f"Raison: {str(d.get('reason',''))[:300]}"
+        )
+
+    # 5. AutoScan signals (supports/resistances + signaux detectes)
+    d = _get(f"/autoscan/signals?symbol={sym_enc}")
+    if d and d.get("signals"):
+        sigs = d["signals"][:5]  # max 5
+        lines = []
+        for s in sigs:
+            lines.append(
+                f"  [{s.get('action','?')}] Entry:{s.get('entry_price','?')} "
+                f"SL:{s.get('stop_loss','?')} TP:{s.get('take_profit','?')} "
+                f"conf:{s.get('confidence','?')} — {str(s.get('reason',''))[:100]}"
+            )
+        sections.append(
+            f"=== SIGNAUX AUTOSCAN (TradBOT) ===\n" + "\n".join(lines)
+        )
+
+    # 6. Fibonacci levels
+    d = _get(f"/indicators/fibonacci/{sym_enc}?timeframe=H1")
+    if d and d.get("fib_levels"):
+        fibs = d["fib_levels"]
+        fib_str = " | ".join([f"{k}: {v}" for k, v in list(fibs.items())[:6]])
+        sections.append(f"=== NIVEAUX FIBONACCI H1 (TradBOT) ===\n{fib_str}")
+
+    # 7. Order blocks (zones OB SMC)
+    d = _get(f"/indicators/order-blocks/{sym_enc}?timeframe=H1&lookback=50")
+    if d and d.get("order_blocks"):
+        obs = d["order_blocks"][:3]
+        lines = [
+            f"  {o.get('type','?')} @ {o.get('price','?')} force:{o.get('strength','?')}"
+            for o in obs
+        ]
+        sections.append(
+            f"=== ORDER BLOCKS H1 (TradBOT / SMC) ===\n" + "\n".join(lines)
+        )
+
+    # 8. Zones de liquidite
+    d = _get(f"/indicators/liquidity-zones/{sym_enc}?timeframe=H1")
+    if d and d.get("liquidity_zones"):
+        zones = d["liquidity_zones"][:4]
+        lines = [
+            f"  {z.get('type','?')} @ {z.get('price','?')} force:{z.get('strength','?')}"
+            for z in zones
+        ]
+        sections.append(
+            f"=== ZONES DE LIQUIDITE H1 (TradBOT / SMC) ===\n" + "\n".join(lines)
+        )
+
+    # 9. Metriques ML performances
+    d = _get(f"/ml/metrics?symbol={sym_enc}&timeframe=M1")
+    if d:
+        sections.append(
+            f"=== METRIQUES ML (TradBOT) ===\n"
+            f"Precision: {d.get('accuracy','?')} | F1: {d.get('f1_score','?')} | "
+            f"Echantillons: {d.get('total_samples','?')}\n"
+            f"Wins jour: {d.get('day_wins','?')} | Losses jour: {d.get('day_losses','?')} | "
+            f"PnL jour: {d.get('day_net_profit','?')}$"
+        )
+
+    if not sections:
+        return ""
+
+    header = (
+        f"\n{'='*60}\n"
+        f"CONTEXTE TECHNIQUE TRADBOT — {symbol}\n"
+        f"Source: ai_server local ({_SERVER_URL})\n"
+        f"{'='*60}\n\n"
+    )
+    return header + "\n\n".join(sections) + "\n"
+
+
+# ---------------------------------------------------------------------------
+# Calcul lot size pour compte $10 et $50 (scalping, risque 1-2%)
+# ---------------------------------------------------------------------------
+
+def compute_lot_sizes(entry: float, sl: float,
+                      accounts: List[float] = None) -> Dict[str, Any]:
+    """
+    Calcule les lots pour chaque taille de compte en limitant le risque a 1%.
+    Pour les indices Deriv (prix > 1000) : 1 lot = 1 unite, valeur pip = 1.
+    Retourne un dict {account_size: {lot, risk_usd, risk_pct}}.
+    """
+    if accounts is None:
+        accounts = [10.0, 50.0]
+    if not entry or not sl or entry <= 0:
+        return {}
+
+    sl_dist = abs(entry - sl)
+    if sl_dist <= 0:
+        return {}
+
+    pip_val  = _pip_value(entry)
+    sl_pips  = sl_dist / pip_val
+
+    result = {}
+    for acc in accounts:
+        # Risque max 1% du compte
+        risk_usd = acc * 0.01
+        # Valeur d un pip pour Deriv synthetics : ~$0.01 par pip pour lot 0.01
+        # Pour CRASH50 a ~97000 : 1 pip = 1 point, lot min = 0.01
+        # pip_value_per_lot = 1.0 pour indices Deriv (simplifie)
+        pip_value_per_lot = 1.0 if entry > 1000 else (0.1 if entry > 10 else 1.0)
+        lot = risk_usd / (sl_pips * pip_value_per_lot)
+        lot = max(0.01, round(lot, 2))
+        actual_risk = lot * sl_pips * pip_value_per_lot
+        result[f"${acc:.0f}"] = {
+            "lot":       lot,
+            "risk_usd":  round(actual_risk, 3),
+            "risk_pct":  round(actual_risk / acc * 100, 2),
+            "sl_pips":   round(sl_pips, 1),
+        }
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Analyse expert Claude (scalping haute confiance 15min)
+# ---------------------------------------------------------------------------
+
+def claude_expert_analysis(symbol: str, action: str,
+                            indicators: Dict[str, Any],
+                            signals: List[Dict],
+                            ta_summary: str) -> str:
+    """
+    Analyse experte Claude independante : synthetise toutes les donnees
+    et propose 1-2 trades scalping 15min haute confiance avec lots $10/$50.
+    """
+    try:
+        import anthropic as _anthropic
+    except ImportError:
+        return ""
+
+    price      = indicators.get("current_price", "?")
+    atr        = indicators.get("atr", "?")
+    rsi        = indicators.get("rsi", "?")
+    macd       = indicators.get("macd", "?")
+    sma20      = indicators.get("sma_20", "?")
+    sma50      = indicators.get("sma_50", "?")
+    bb_upper   = indicators.get("bb_upper", "?")
+    bb_lower   = indicators.get("bb_lower", "?")
+    src        = indicators.get("source", "ai_server")
+
+    sig_text = ""
+    for s in signals[:2]:
+        lots = compute_lot_sizes(s.get("entry_price"), s.get("stop_loss"))
+        lot_str = "  ".join([f"{k}: lot={v['lot']} (risque ${v['risk_usd']})"
+                              for k, v in lots.items()])
+        sig_text += (f"\n  Signal {s.get('label','?')}: {s.get('exec_type','?').upper()}"
+                     f" @ {s.get('entry_price','?')}"
+                     f"  SL:{s.get('stop_loss','?')} (-{s.get('pips_sl','?')} pips)"
+                     f"  TP:{s.get('take_profit','?')} (+{s.get('pips_tp','?')} pips)"
+                     f"  RR 1:{s.get('rr','?')}"
+                     f"\n    Lots: {lot_str}")
+
+    # Utiliser le system prompt adapté à la catégorie
+    category = _get_symbol_category(symbol)
+    system_prompt_ctx = _build_system_prompt(symbol, category, indicators)
+
+    prompt = f"""{system_prompt_ctx}
+
+MISSION SCALPING 15 MINUTES :
+Analyse les donnees ci-dessus pour {symbol} et fournis 1 signal de SCALPING (duree max 15 minutes).
+Respecte STRICTEMENT le format de sortie et les regles anti-contradiction du system prompt.
+
+DONNEES ACTUELLES (source: {src}):
+- Prix actuel : {price}
+- ATR(14)     : {atr}  <- amplitude journaliere moyenne
+- RSI(14)     : {rsi}
+- MACD        : {macd}
+- SMA 20      : {sma20}
+- SMA 50      : {sma50}
+- Bollinger Upper : {bb_upper}
+- Bollinger Lower : {bb_lower}
+
+SIGNAUX CALCULES PAR LE BRIDGE:
+{sig_text}
+
+ANALYSE DE L'AGENT TRADINGAGENTS (resume):
+{ta_summary[:800]}
+
+CONTRAINTES SCALPING 15 MINUTES :
+- Comptes cibles : $10 et $50 | Risque max : 1% par trade
+- Respecter les regles de direction de la categorie {category} (CRASH=SELL, BOOM=BUY)
+- Taille : adapte au compte ($10 = lot minimal, $50 = proportionnel)
+- Format sortie : utiliser les 4 sections du system prompt
+
+Sois direct, precis sur les niveaux de prix. Un seul signal final."""
+
+    try:
+        client = _anthropic.AnthropicBedrock(
+            aws_region=os.getenv("AWS_REGION", "us-east-1"),
+        )
+        msg = client.messages.create(
+            model="us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+            max_tokens=1500,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return msg.content[0].text if msg.content else ""
+    except Exception as e:
+        # Fallback: analyse locale sans API
+        return _local_scalp_analysis(symbol, action, indicators, signals)
+
+
+def _local_scalp_analysis(symbol: str, action: str,
+                           indicators: Dict[str, Any],
+                           signals: List[Dict]) -> str:
+    """Analyse scalping locale (sans API) basee sur les regles techniques."""
+    price  = float(indicators.get("current_price") or 0)
+    atr    = float(indicators.get("atr") or 0)
+    rsi    = float(indicators.get("rsi") or 50)
+    macd   = float(indicators.get("macd") or 0)
+    bb_low = float(indicators.get("bb_lower") or 0)
+    bb_up  = float(indicators.get("bb_upper") or 0)
+    sma20  = float(indicators.get("sma_20") or 0)
+
+    if price <= 0 or atr <= 0:
+        return "  [Analyse locale] Donnees insuffisantes pour le scalping."
+
+    is_crash = _is_crash(symbol)
+    is_boom  = _is_boom(symbol)
+
+    # Score de confiance scalping
+    score = 50
+    reasons = []
+
+    if action == "SELL":
+        if rsi > 60: score += 15; reasons.append(f"RSI suracheté ({rsi:.1f})")
+        if macd < 0: score += 10; reasons.append("MACD négatif")
+        if price > sma20 > 0: score += 10; reasons.append("prix>SMA20 (rebond depuis résistance)")
+        if bb_up > 0 and price >= bb_up * 0.998: score += 15; reasons.append("prix près BB haute")
+    elif action == "BUY":
+        if rsi < 40: score += 15; reasons.append(f"RSI survendu ({rsi:.1f})")
+        if macd > 0: score += 10; reasons.append("MACD positif")
+        if bb_low > 0 and price <= bb_low * 1.002: score += 15; reasons.append("prix près BB basse")
+
+    score = min(95, score)
+
+    # Scalp SL/TP adaptes 15min (0.3x ATR SL, 0.5x ATR TP)
+    sl_dist = round(atr * 0.3, 3)
+    tp_dist = round(atr * 0.5, 3)
+    pip = _pip_value(price)
+
+    if action == "SELL":
+        if is_crash:
+            entry = round(price + atr * 0.2, 3)  # SELL LIMIT au-dessus
+        else:
+            entry = round(price, 3)
+        sl = round(entry + sl_dist, 3)
+        tp = round(entry - tp_dist, 3)
+    else:
+        if is_boom:
+            entry = round(price - atr * 0.2, 3)  # BUY LIMIT en dessous
+        else:
+            entry = round(price, 3)
+        sl = round(entry - sl_dist, 3)
+        tp = round(entry + tp_dist, 3)
+
+    pips_sl = round(sl_dist / pip, 1)
+    pips_tp = round(tp_dist / pip, 1)
+    lots    = compute_lot_sizes(entry, sl)
+
+    lot_str = "\n".join([f"    Compte {k}: lot={v['lot']} | risque ${v['risk_usd']} ({v['risk_pct']}%)"
+                          for k, v in lots.items()])
+
+    return f"""
+=== ANALYSE EXPERT SCALPING 15min ===
+Instrument    : {symbol}
+Direction     : {action}
+Score confiance: {score}%
+Raisons       : {', '.join(reasons) if reasons else 'setup de base'}
+
+SETUP SCALPING (duree cible: 5-15 minutes):
+  Type          : {"SELL LIMIT" if (action=="SELL" and is_crash) else ("BUY LIMIT" if (action=="BUY" and is_boom) else action+" MARKET")}
+  Entree        : {entry}
+  Stop Loss     : {sl}  (-{pips_sl} pips | -{round(sl_dist,1)} pts)
+  Take Profit   : {tp}  (+{pips_tp} pips | +{round(tp_dist,1)} pts)
+  Ratio R/R     : 1:{round(pips_tp/pips_sl,2) if pips_sl>0 else '?'}
+
+SIZING PAR COMPTE (risque 1%):
+{lot_str}
+
+{"CONDITIONS FAVORABLES AU SCALPING." if score >= 65 else "CONDITIONS MOYENNES — attendre meilleure confirmation."}
+"""
+
+
+# ---------------------------------------------------------------------------
+# Calcul Entry / SL / TP depuis donnees temps reel ai_server
+# ---------------------------------------------------------------------------
+
+def _is_boom(symbol: str) -> bool:
+    return "BOOM" in symbol.upper()
+
+def _is_crash(symbol: str) -> bool:
+    return "CRASH" in symbol.upper()
+
+def _is_deriv_synthetic(symbol: str) -> bool:
+    up = symbol.upper()
+    return any(up.startswith(p) for p in ("BOOM","CRASH","1HZ","R_","STEP","JUMP","RANGE"))
+
+def _pip_value(price: float) -> float:
+    """Valeur d un pip selon le prix (indices Deriv = points entiers)."""
+    if price > 100:
+        return 1.0   # indices Deriv, US30, etc. : 1 pip = 1 point
+    elif price > 10:
+        return 0.01
+    else:
+        return 0.0001  # forex standard
+
+
+def compute_signals(symbol: str, action: str,
+                    current_price: float = 0.0,
+                    atr: float = 0.0) -> List[Dict[str, Any]]:
+    """
+    Calcule 2 signaux (conservateur + agressif) avec les regles correctes :
+
+    Regles Boom/Crash :
+      - BOOM  : seul BUY valide. BUY LIMIT se place EN BAS du prix actuel.
+      - CRASH : seul SELL valide. SELL LIMIT se place EN HAUT du prix actuel.
+
+    Regles Forex / autres :
+      - BUY  LIMIT : entry < prix actuel (on attend un repli)
+      - SELL LIMIT : entry > prix actuel (on attend un rebond)
+
+    Retourne une liste de 2 dicts avec entry, sl, tp, pips_sl, pips_tp, rr, exec_type.
+    """
+    if current_price <= 0 or atr <= 0:
+        return []
+
+    act = action.upper()
+    is_boom  = _is_boom(symbol)
+    is_crash = _is_crash(symbol)
+    pip = _pip_value(current_price)
+
+    signals = []
+
+    # ------------------------------------------------------------------ #
+    # Signal 1 — Conservateur (RR 1:2, SL 1.0xATR, entrée au marché)
+    # Signal 2 — Agressif / Limite (RR 1:3, SL 0.8xATR, entrée limite)
+    # ------------------------------------------------------------------ #
+
+    for i, (sl_mult, tp_mult, label) in enumerate([
+        (1.0, 2.0, "Conservateur — Ordre Marche"),
+        (0.8, 2.5, "Agressif    — Ordre Limite"),
+    ]):
+        sl_dist = round(atr * sl_mult, 5)
+        tp_dist = round(atr * tp_mult, 5)
+
+        exec_type = "market" if i == 0 else "limit"
+
+        if act == "BUY":
+            if is_boom and i == 1:
+                # BUY LIMIT Boom : entree EN BAS (on attend le repli vers support)
+                entry = round(current_price - atr * 0.5, 5)
+                exec_type = "limit"
+            else:
+                entry = round(current_price, 5)
+            sl = round(entry - sl_dist, 5)
+            tp = round(entry + tp_dist, 5)
+
+        elif act == "SELL":
+            if is_crash and i == 1:
+                # SELL LIMIT Crash : entree EN HAUT (on attend le rebond vers resistance)
+                entry = round(current_price + atr * 0.5, 5)
+                exec_type = "limit"
+            else:
+                entry = round(current_price, 5)
+            sl = round(entry + sl_dist, 5)
+            tp = round(entry - tp_dist, 5)
+        else:
+            continue
+
+        pips_sl = round(abs(entry - sl) / pip, 1)
+        pips_tp = round(abs(entry - tp) / pip, 1)
+        rr      = round(pips_tp / pips_sl, 2) if pips_sl > 0 else 0
+
+        signals.append({
+            "label":        label,
+            "action":       act,
+            "exec_type":    exec_type,
+            "entry_price":  entry,
+            "stop_loss":    sl,
+            "take_profit":  tp,
+            "pips_sl":      pips_sl,
+            "pips_tp":      pips_tp,
+            "rr":           rr,
+            "current_price": current_price,
+            "atr":          atr,
+        })
+
+    return signals
+
+
+def compute_entry_levels(symbol: str, action: str) -> Dict[str, Optional[float]]:
+    """
+    Recupere le prix actuel + ATR depuis ai_server et calcule les niveaux.
+    Retourne le premier signal (conservateur) pour compatibilite avec le reste du code.
+    """
+    result = {"entry_price": None, "stop_loss": None, "take_profit": None,
+              "current_price": None, "atr": None, "signals": []}
+    try:
+        sym_enc = symbol.replace(" ", "%20")
+        r = requests.get(f"{_SERVER_URL}/trading/indicators/{sym_enc}/M1", timeout=5)
+        if r.status_code != 200:
+            # Essayer avec le ticker MT5 brut
+            sym_enc2 = _mt5_to_yfinance(symbol).replace(" ", "%20")
+            r = requests.get(f"{_SERVER_URL}/trading/indicators/{sym_enc2}/M1", timeout=5)
+        if r.status_code != 200:
+            return result
+        d = r.json().get("indicators", {})
+        price = float(d.get("current_price") or 0)
+        atr   = float(d.get("atr") or 0)
+        if price <= 0 or atr <= 0:
+            return result
+
+        result["current_price"] = price
+        result["atr"] = atr
+
+        signals = compute_signals(symbol, action, price, atr)
+        result["signals"] = signals
+
+        if signals:
+            s0 = signals[0]
+            result["entry_price"] = s0["entry_price"]
+            result["stop_loss"]   = s0["stop_loss"]
+            result["take_profit"] = s0["take_profit"]
+    except Exception:
+        pass
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Sauvegarde rapport Word professionnel (.docx) avec graphiques
+# ---------------------------------------------------------------------------
+
+_REPORTS_DIR = _TRADBOT_ROOT / "reports"
+
+
+def _make_gauge_chart(value: float, label: str, color: str) -> "Path":
+    """Graphique demi-cercle (jauge) pour confiance / score. Retourne le chemin PNG temp."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import matplotlib.patches as mpatches
+    import numpy as np, tempfile
+
+    fig, ax = plt.subplots(figsize=(3, 1.8), subplot_kw={"aspect": "equal"})
+    ax.axis("off")
+    theta = np.linspace(np.pi, 0, 200)
+    # Fond gris
+    ax.fill_between(np.cos(theta), np.sin(theta),
+                    np.cos(theta) * 0.55, np.sin(theta) * 0.55,
+                    color="#e0e0e0")
+    # Valeur
+    end = np.pi - value * np.pi
+    theta2 = np.linspace(np.pi, end, 200)
+    ax.fill_between(np.cos(theta2), np.sin(theta2),
+                    np.cos(theta2) * 0.55, np.sin(theta2) * 0.55,
+                    color=color)
+    ax.text(0, 0.1, f"{int(value*100)}%", ha="center", va="center",
+            fontsize=16, fontweight="bold", color=color)
+    ax.text(0, -0.2, label, ha="center", va="center", fontsize=8, color="#555")
+    tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+    fig.savefig(tmp.name, dpi=120, bbox_inches="tight", transparent=True)
+    plt.close(fig)
+    return Path(tmp.name)
+
+
+def _make_indicator_bar_chart(indicators: dict) -> "Path":
+    """Graphique a barres horizontales pour RSI, confiance ML, coherence."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import tempfile
+
+    items = []
+    for key, label, vmin, vmax in [
+        ("rsi",       "RSI",         0, 100),
+        ("macd",      "MACD",     -0.01, 0.01),
+        ("atr",       "ATR",         0,  None),
+    ]:
+        v = indicators.get(key)
+        if v is not None:
+            try:
+                items.append((label, float(v), vmin, vmax))
+            except Exception:
+                pass
+    if not items:
+        return None
+
+    fig, axes = plt.subplots(len(items), 1, figsize=(5, 1.2 * len(items)))
+    if len(items) == 1:
+        axes = [axes]
+    colors = {"RSI": "#3498db", "MACD": "#e74c3c", "ATR": "#2ecc71"}
+    for ax, (label, val, vmin, vmax) in zip(axes, items):
+        vmax_eff = vmax if vmax else abs(val) * 2 or 1
+        norm_val = max(0, min(1, (val - vmin) / (vmax_eff - vmin))) if vmax_eff != vmin else 0.5
+        ax.barh(0, norm_val, color=colors.get(label, "#95a5a6"), height=0.5)
+        ax.set_xlim(0, 1)
+        ax.set_yticks([])
+        ax.set_xticks([])
+        ax.text(-0.02, 0, label, ha="right", va="center", fontsize=8, fontweight="bold")
+        ax.text(norm_val + 0.02, 0, f"{val:.4f}", ha="left", va="center", fontsize=8)
+        for spine in ax.spines.values():
+            spine.set_visible(False)
+    fig.tight_layout(pad=0.5)
+    tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+    fig.savefig(tmp.name, dpi=120, bbox_inches="tight", transparent=True)
+    plt.close(fig)
+    return Path(tmp.name)
+
+
+def _make_price_level_chart(entry: float, sl: float, tp: float,
+                             current: float, symbol: str, action: str) -> "Path":
+    """Graphique niveaux Entry / SL / TP sur axe prix vertical."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import tempfile
+
+    levels = {
+        "TP": (tp,    "#27ae60", "--"),
+        "Entry": (entry, "#2980b9", "-"),
+        "Current": (current, "#7f8c8d", ":"),
+        "SL": (sl,    "#e74c3c", "--"),
+    }
+    prices = [v for _, (v, _, _) in levels.items() if v]
+    if not prices:
+        return None
+
+    fig, ax = plt.subplots(figsize=(4, 3))
+    ymin = min(prices) * 0.9995
+    ymax = max(prices) * 1.0005
+    ax.set_ylim(ymin, ymax)
+    ax.set_xlim(0, 1)
+    ax.set_xticks([])
+    ax.set_title(f"{symbol} — Niveaux {action}", fontsize=10, fontweight="bold")
+
+    for label, (price, color, ls) in levels.items():
+        if price:
+            ax.axhline(price, color=color, linestyle=ls, linewidth=1.5)
+            ax.text(0.02, price, f"{label}: {price:.5f}",
+                    va="bottom", ha="left", fontsize=8, color=color, fontweight="bold")
+
+    ax.set_ylabel("Prix", fontsize=9)
+    fig.tight_layout()
+    tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+    fig.savefig(tmp.name, dpi=120, bbox_inches="tight")
+    plt.close(fig)
+    return Path(tmp.name)
+
+
+def _generate_executive_summary(symbol: str, rec: str,
+                                  final_state: Dict[str, Any],
+                                  signals: List[Dict],
+                                  indicators: Optional[Dict]) -> str:
+    """
+    Genere un resume executif en 5 points via Claude (ou localement si API indispo).
+    Ce resume extrait l'essentiel de tout le rapport pour une lecture rapide.
+    """
+    # Collecter les donnees cles
+    decision_text = str(final_state.get("final_trade_decision") or "")[:600]
+    trader_text   = str(final_state.get("trader_investment_plan") or "")[:400]
+    market_text   = str(final_state.get("market_report") or "")[:400]
+    expert_text   = str(final_state.get("expert_scalp_analysis") or "")[:400]
+
+    price = indicators.get("current_price", "?") if indicators else "?"
+    atr   = indicators.get("atr", "?") if indicators else "?"
+    rsi   = indicators.get("rsi", "?") if indicators else "?"
+
+    sig_lines = ""
+    for s in signals[:2]:
+        lots = compute_lot_sizes(s.get("entry_price"), s.get("stop_loss"))
+        lot_str = " | ".join([f"{k}:lot={v['lot']}" for k, v in lots.items()])
+        sig_lines += (f"\n  - {s.get('label')}: {s.get('action')} {s.get('exec_type','').upper()}"
+                      f" @ {s.get('entry_price')} SL:{s.get('stop_loss')} TP:{s.get('take_profit')}"
+                      f" RR 1:{s.get('rr')} | {lot_str}")
+
+    # Déterminer la catégorie pour les règles spécifiques
+    cat = _get_symbol_category(symbol)
+
+    # Règles de priorité pour le résumé
+    priority_rules = ""
+    if cat == "VOLATILITY":
+        rsi_num = float(rsi) if rsi != "?" else 50.0
+        mr_dir = "BUY" if rsi_num < 30 else ("SELL" if rsi_num > 70 else "NEUTRE")
+        priority_rules = f"""
+REGLE CRITIQUE VOLATILITY INDEX :
+RSI actuel = {rsi}. Direction mean reversion = {mr_dir}.
+Le resume DOIT utiliser la direction de l'analyse scalping ({mr_dir}), PAS celle de TradingAgents.
+Si TradingAgents dit SELL et scalping dit BUY → le resume dit BUY.
+Le scalping court terme prime sur le signal fondamental pour les Volatility Index.
+"""
+    elif cat == "BOOM":
+        priority_rules = "REGLE : Boom Index = BUY UNIQUEMENT. Si TradingAgents propose SELL, ignorer et dire BUY."
+    elif cat == "CRASH":
+        priority_rules = "REGLE : Crash Index = SELL UNIQUEMENT. Si TradingAgents propose BUY, ignorer et dire SELL."
+
+    # Calcul lot correct pour le sizing
+    lot_min = 0.2 if cat in ("BOOM", "CRASH") else 0.01
+    capital = 20.0
+    risk_amt = capital * 0.02  # $0.40 max
+
+    prompt = f"""Tu es un assistant trading expert. Redige un RESUME EXECUTIF de 6 points.
+REGLE ABSOLUE SIZING : lot minimum = {lot_min} | capital = ${capital} | risque max = ${ risk_amt} (2%)
+Ne jamais proposer un risque > ${ risk_amt} sur ce capital.
+
+{priority_rules}
+
+SYMBOLE: {symbol} | CATEGORIE: {cat} | PRIX: {price} | ATR: {atr} | RSI: {rsi}
+
+DECISION TRADINGAGENTS (signal fondamental — peut etre ignore si contradictoire avec scalping):
+{decision_text}
+
+PLAN TRADER:
+{trader_text}
+
+SIGNAUX CALCULES (lot min={lot_min}):
+{sig_lines}
+
+ANALYSE SCALPING (prioritaire pour le resume si Volatility/context court terme):
+{expert_text}
+
+FORMAT REQUIS (respecter exactement):
+1. **Contexte de marche** : [tendance actuelle + RSI en 1 phrase]
+2. **Signal principal** : [BUY/SELL/HOLD — doit etre coherent avec scalping si Volatility]
+3. **Niveaux critiques** : [Entry, SL, TP avec distances en pips]
+4. **Sizing CORRECT** : lot={lot_min} (minimum broker Deriv) | risque=$[X] sur ${ capital} — JAMAIS plus de ${ risk_amt}
+5. **Condition d'entree** : [quand exactement entrer - immediat ou attendre quel niveau]
+6. **Risques principaux** : [1-2 risques concrets, pas generiques]
+
+INTERDICTION ABSOLUE : Ne jamais proposer un risque > ${ risk_amt} ni un lot < {lot_min}."""
+
+    try:
+        import anthropic as _anth
+        client = _anth.AnthropicBedrock(aws_region=os.getenv("AWS_REGION", "us-east-1"))
+        msg = client.messages.create(
+            model="us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+            max_tokens=600,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return msg.content[0].text if msg.content else ""
+    except Exception:
+        # Fallback local si API indisponible
+        lines = []
+        lines.append(f"1. **Contexte de marche** : {symbol} en tendance {'baissiere' if rec=='SELL' else 'haussiere' if rec=='BUY' else 'neutre'}. RSI={rsi}, ATR={atr}.")
+        lines.append(f"2. **Signal principal** : {rec} avec les indicateurs techniques alignes dans cette direction.")
+        if signals:
+            s0 = signals[0]
+            lines.append(f"3. **Niveaux critiques** : Entree {s0.get('entry_price')} | SL {s0.get('stop_loss')} (-{s0.get('pips_sl')} pips) | TP {s0.get('take_profit')} (+{s0.get('pips_tp')} pips).")
+            lots = compute_lot_sizes(s0.get("entry_price"), s0.get("stop_loss"))
+            lot_str = " | ".join([f"{k}: lot {v['lot']} (risque ${v['risk_usd']})" for k, v in lots.items()])
+            lines.append(f"4. **Sizing recommande** : {lot_str}.")
+        lines.append(f"5. **Condition d'entree** : {'Entree immediate au marche possible.' if signals and signals[0].get('exec_type')=='market' else 'Attendre le retour sur le niveau limite propose.'}")
+        lines.append(f"6. **Risques principaux** : Volatilite elevee (ATR={atr}). Surveiller les nouvelles macro et les niveaux cles de support/resistance.")
+        return "\n\n".join(lines)
+
+
+def save_report_word(symbol: str, trade_date: str, signal_rating: str,
+                     final_state: Dict[str, Any],
+                     params: Dict[str, Optional[float]],
+                     confirmed: Optional[Dict[str, Any]] = None,
+                     indicators: Optional[Dict] = None) -> Optional[Path]:
+    """Genere un rapport Word professionnel avec graphiques et niveaux calcules."""
+    try:
+        from docx import Document
+        from docx.shared import Pt, RGBColor, Inches, Cm
+        from docx.enum.text import WD_ALIGN_PARAGRAPH
+        from docx.enum.table import WD_TABLE_ALIGNMENT
+        from docx.oxml.ns import qn
+        from docx.oxml import OxmlElement
+        import tempfile, os as _os
+    except ImportError:
+        print("  [!] python-docx absent.")
+        return None
+
+    rec = _normalize_rating(signal_rating)
+    sig_color = {"BUY": RGBColor(0, 150, 60), "SELL": RGBColor(180, 30, 30), "HOLD": RGBColor(180, 120, 0)}.get(rec, RGBColor(0,0,0))
+    mpl_color = {"BUY": "#27ae60", "SELL": "#e74c3c", "HOLD": "#f39c12"}.get(rec, "#555")
+
+    # Calculer signaux depuis ai_server
+    entry  = params.get("entry_price")
+    sl_val = params.get("stop_loss")
+    tp_val = params.get("take_profit")
+    current_price = None
+    computed_signals: List[Dict] = []
+
+    if indicators:
+        current_price = indicators.get("current_price")
+        atr_val = indicators.get("atr")
+        if current_price and atr_val and rec in ("BUY","SELL"):
+            computed_signals = compute_signals(symbol, rec,
+                                               float(current_price), float(atr_val))
+
+    if not computed_signals and rec in ("BUY", "SELL"):
+        computed = compute_entry_levels(symbol, rec)
+        computed_signals = computed.get("signals", [])
+        if not current_price:
+            current_price = computed.get("current_price")
+
+    # Utiliser le signal 1 (conservateur) si pas de params fournis
+    if computed_signals and (not entry or not sl_val or not tp_val):
+        s0 = computed_signals[0]
+        entry  = entry  or s0.get("entry_price")
+        sl_val = sl_val or s0.get("stop_loss")
+        tp_val = tp_val or s0.get("take_profit")
+
+    def _fmt(v):
+        if v is None: return "—"
+        return f"{v:.5f}" if abs(float(v)) < 1000 else f"{float(v):,.3f}"
+
+    def _pips(a, b):
+        if not a or not b: return "—"
+        diff = abs(float(a) - float(b))
+        p = _pip_value(float(a))
+        return f"{diff/p:,.1f} pips"
+
+    doc = Document()
+
+    # --- Style global ---
+    style = doc.styles["Normal"]
+    style.font.name = "Calibri"
+    style.font.size = Pt(11)
+
+    def _set_para_justify(para):
+        para.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+
+    def _colored_heading(text, level, color_rgb):
+        h = doc.add_heading(text, level=level)
+        h.alignment = WD_ALIGN_PARAGRAPH.LEFT
+        for run in h.runs:
+            run.font.color.rgb = color_rgb
+        return h
+
+    def _add_separator():
+        p = doc.add_paragraph()
+        pPr = p._p.get_or_add_pPr()
+        pBdr = OxmlElement("w:pBdr")
+        bottom = OxmlElement("w:bottom")
+        bottom.set(qn("w:val"), "single")
+        bottom.set(qn("w:sz"), "6")
+        bottom.set(qn("w:space"), "1")
+        bottom.set(qn("w:color"), "CCCCCC")
+        pBdr.append(bottom)
+        pPr.append(pBdr)
+
+    # ── PAGE DE TITRE ──────────────────────────────────────────────
+    doc.add_paragraph()
+    title = doc.add_heading(f"Rapport d'Analyse — {symbol}", level=1)
+    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    for run in title.runs:
+        run.font.color.rgb = RGBColor(30, 60, 120)
+        run.font.size = Pt(20)
+
+    sub = doc.add_paragraph(f"Date d'analyse : {trade_date}    |    Généré le : {date.today()}")
+    sub.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    sub.runs[0].font.color.rgb = RGBColor(100, 100, 100)
+    sub.runs[0].font.size = Pt(10)
+
+    doc.add_paragraph()
+
+    # ── SIGNAL PRINCIPAL ──────────────────────────────────────────
+    _colored_heading("Signal TradingAgents", 2, RGBColor(30, 60, 120))
+
+    # Tableau signal + niveaux
+    # Tableau récapitulatif signal
+    tbl = doc.add_table(rows=4, cols=2)
+    tbl.style = "Table Grid"
+    tbl.alignment = WD_TABLE_ALIGNMENT.CENTER
+    rows_data_main = [
+        ("Rating brut",   signal_rating),
+        ("Décision",      rec),
+        ("Prix actuel",   _fmt(current_price)),
+        ("ATR (volatilité)", _fmt(indicators.get("atr") if indicators else None)),
+    ]
+    for i, (label, value) in enumerate(rows_data_main):
+        cell_l = tbl.rows[i].cells[0]
+        cell_r = tbl.rows[i].cells[1]
+        cell_l.text = label
+        cell_r.text = str(value)
+        cell_l.paragraphs[0].runs[0].bold = True
+        cell_l.paragraphs[0].runs[0].font.color.rgb = RGBColor(60, 60, 60)
+        if label == "Décision":
+            cell_r.paragraphs[0].runs[0].bold = True
+            cell_r.paragraphs[0].runs[0].font.color.rgb = sig_color
+            cell_r.paragraphs[0].runs[0].font.size = Pt(13)
+        if i % 2 == 0:
+            for cell in (cell_l, cell_r):
+                tc = cell._tc
+                tcPr = tc.get_or_add_tcPr()
+                shd = OxmlElement("w:shd")
+                shd.set(qn("w:val"), "clear")
+                shd.set(qn("w:color"), "auto")
+                shd.set(qn("w:fill"), "EEF2FF")
+                tcPr.append(shd)
+
+    doc.add_paragraph()
+
+    # ── SIGNAUX DE TRADING (2 propositions) ───────────────────────
+    if computed_signals and rec in ("BUY", "SELL"):
+        _colored_heading("Signaux de Trading Proposes", 2, sig_color)
+
+        sig_colors_fill = ["DFFFD6", "FFF3CD"]  # vert clair, jaune clair
+
+        for idx, sig in enumerate(computed_signals[:2]):
+            p_lbl = doc.add_paragraph()
+            r_lbl = p_lbl.add_run(f"  Signal {idx+1} — {sig['label']}")
+            r_lbl.bold = True
+            r_lbl.font.size = Pt(11)
+            r_lbl.font.color.rgb = sig_color
+
+            tbl_s = doc.add_table(rows=7, cols=2)
+            tbl_s.style = "Table Grid"
+
+            fill_hex = sig_colors_fill[idx % 2]
+            sig_rows = [
+                ("Type d'ordre",  sig["exec_type"].upper()),
+                ("Direction",     sig["action"]),
+                ("Prix d'entrée", _fmt(sig["entry_price"])),
+                ("Stop Loss",     f"{_fmt(sig['stop_loss'])}  ({_pips(sig['entry_price'], sig['stop_loss'])} de risque)"),
+                ("Take Profit",   f"{_fmt(sig['take_profit'])}  ({_pips(sig['entry_price'], sig['take_profit'])} de gain)"),
+                ("Ratio R/R",     f"1 : {sig['rr']}"),
+                ("Prix actuel",   _fmt(sig["current_price"])),
+            ]
+            for j, (lbl, val) in enumerate(sig_rows):
+                cl = tbl_s.rows[j].cells[0]
+                cr = tbl_s.rows[j].cells[1]
+                cl.text = lbl
+                cr.text = str(val)
+                cl.paragraphs[0].runs[0].bold = True
+                # Colorier le fond
+                for cell in (cl, cr):
+                    tc = cell._tc
+                    tcPr = tc.get_or_add_tcPr()
+                    shd = OxmlElement("w:shd")
+                    shd.set(qn("w:val"), "clear")
+                    shd.set(qn("w:color"), "auto")
+                    shd.set(qn("w:fill"), fill_hex)
+                    tcPr.append(shd)
+
+            doc.add_paragraph()
+
+        _add_separator()
+
+    doc.add_paragraph()
+
+    # Graphiques côte à côte : jauge confiance + niveaux prix
+    tmp_files = []
+    row_imgs = doc.add_paragraph()
+    row_imgs.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+    # Jauge confiance
+    confidence_val = 0.75
+    if confirmed:
+        confidence_val = float(confirmed.get("confidence", 0.75))
+    gauge_path = _make_gauge_chart(confidence_val, "Confiance", mpl_color)
+    if gauge_path:
+        tmp_files.append(gauge_path)
+        run_g = row_imgs.add_run()
+        run_g.add_picture(str(gauge_path), width=Inches(2.2))
+        row_imgs.add_run("    ")
+
+    # Graphique niveaux
+    if entry and sl_val and tp_val and current_price:
+        levels_path = _make_price_level_chart(
+            entry, sl_val, tp_val, current_price, symbol, rec)
+        if levels_path:
+            tmp_files.append(levels_path)
+            run_l = row_imgs.add_run()
+            run_l.add_picture(str(levels_path), width=Inches(3.0))
+
+    _add_separator()
+
+    # Graphique indicateurs si dispo
+    if indicators:
+        ind_path = _make_indicator_bar_chart(indicators)
+        if ind_path:
+            tmp_files.append(ind_path)
+            _colored_heading("Indicateurs Techniques (TradBOT — M1)", 2, RGBColor(30, 60, 120))
+            p_ind = doc.add_paragraph()
+            p_ind.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            p_ind.add_run().add_picture(str(ind_path), width=Inches(4.5))
+            doc.add_paragraph()
+            _add_separator()
+
+    # ── SECTIONS RAPPORT ─────────────────────────────────────────
+    sections_map = [
+        ("Décision Portfolio Manager", "final_trade_decision",  RGBColor(30, 60, 120)),
+        ("Plan Trader",               "trader_investment_plan", RGBColor(30, 100, 60)),
+        ("Rapport Marché",            "market_report",          RGBColor(80, 40, 120)),
+        ("Rapport Sentiment / Social","sentiment_report",       RGBColor(120, 60, 0)),
+        ("Rapport News",              "news_report",            RGBColor(0, 80, 120)),
+        ("Rapport Fondamentaux",      "fundamentals_report",    RGBColor(60, 80, 0)),
+    ]
+
+    def _strip_emoji(text: str) -> str:
+        """Supprime les emojis pour eviter les problemes d encodage Word."""
+        return _re.sub(r'[\U00010000-\U0010ffff\U00002600-\U000027BF\U0001F300-\U0001FAFF]',
+                       '', text, flags=_re.UNICODE).strip()
+
+    def _clean_md(text: str) -> str:
+        """Nettoie le markdown brut pour affichage Word : emojis, tirets longs, etc."""
+        text = _strip_emoji(text)
+        text = text.replace('—', '-').replace('–', '-')  # em/en dash
+        text = text.replace('’', "'").replace('“', '"').replace('”', '"')
+        return text.strip()
+
+    def _set_cell_fill(cell, hex_color: str) -> None:
+        """Applique une couleur de fond a une cellule de tableau."""
+        tc = cell._tc
+        tcPr = tc.get_or_add_tcPr()
+        shd = OxmlElement("w:shd")
+        shd.set(qn("w:val"), "clear")
+        shd.set(qn("w:color"), "auto")
+        shd.set(qn("w:fill"), hex_color)
+        tcPr.append(shd)
+
+    def _render_inline(para, text: str, color: "RGBColor", base_size: int = 11) -> None:
+        """Ajoute du texte dans un paragraphe en gerant **bold**, *italic* et liens inline."""
+        text = _clean_md(text)
+        # Splitter sur **bold**, *italic*, `code`
+        parts = _re.split(r'(\*\*[^*]+\*\*|\*[^*]+\*|`[^`]+`)', text)
+        for part in parts:
+            if not part:
+                continue
+            if part.startswith('**') and part.endswith('**') and len(part) > 4:
+                run = para.add_run(part[2:-2])
+                run.bold = True
+                run.font.size = Pt(base_size)
+            elif part.startswith('*') and part.endswith('*') and len(part) > 2:
+                run = para.add_run(part[1:-1])
+                run.italic = True
+                run.font.size = Pt(base_size)
+            elif part.startswith('`') and part.endswith('`') and len(part) > 2:
+                run = para.add_run(part[1:-1])
+                run.font.name = 'Courier New'
+                run.font.size = Pt(base_size - 1)
+            else:
+                clean = part.replace('**', '').replace('*', '').replace('`', '')
+                if clean:
+                    run = para.add_run(clean)
+                    run.font.size = Pt(base_size)
+
+    def _render_markdown_block(block: str, section_color: "RGBColor") -> None:
+        """Convertit un bloc markdown en elements Word correctement formates."""
+        block = block.strip()
+        if not block:
+            return
+
+        lines_in_block = block.split("\n")
+
+        # ── Ligne horizontale --- ──
+        if _re.match(r'^-{3,}$', block):
+            _add_separator()
+            return
+
+        # ── Titre # / ## / ### ──
+        heading_m = _re.match(r'^(#{1,4})\s+(.*)', block)
+        if heading_m:
+            level_str = heading_m.group(1)
+            title_text = _clean_md(heading_m.group(2))
+            lvl = min(4, len(level_str) + 1)  # # -> h2, ## -> h3, ### -> h4
+            h = doc.add_heading(title_text, level=lvl)
+            h.alignment = WD_ALIGN_PARAGRAPH.LEFT
+            sz = {2: Pt(14), 3: Pt(12), 4: Pt(11)}.get(lvl, Pt(11))
+            for run in h.runs:
+                run.font.color.rgb = section_color
+                run.font.size = sz
+            return
+
+        # ── Tableau markdown | col1 | col2 | ──
+        table_lines = [l for l in lines_in_block if '|' in l and l.strip().startswith('|')]
+        if len(table_lines) >= 2:
+            sep_re = _re.compile(r'^\|[\s\-:| ]+\|$')
+            content_lines = [l for l in table_lines if not sep_re.match(l.strip())]
+            if len(content_lines) >= 1:
+                cols_raw = [_clean_md(c) for c in content_lines[0].strip('|').split('|')]
+                cols_raw = [c for c in cols_raw if c]
+                n_cols = len(cols_raw)
+                if n_cols > 0:
+                    data_rows_raw = []
+                    for l in content_lines[1:]:
+                        cells = [_clean_md(c) for c in l.strip('|').split('|')]
+                        while len(cells) < n_cols:
+                            cells.append('')
+                        data_rows_raw.append(cells[:n_cols])
+
+                    tbl = doc.add_table(rows=1 + len(data_rows_raw), cols=n_cols)
+                    tbl.style = 'Table Grid'
+                    tbl.alignment = WD_TABLE_ALIGNMENT.LEFT
+                    # Header
+                    for j, col_name in enumerate(cols_raw):
+                        cell = tbl.rows[0].cells[j]
+                        cell.text = ''
+                        p_h = cell.paragraphs[0]
+                        run_h = p_h.add_run(col_name)
+                        run_h.bold = True
+                        run_h.font.size = Pt(9)
+                        run_h.font.color.rgb = RGBColor(255, 255, 255)
+                        _set_cell_fill(cell, '1F3C78')  # fond bleu foncé
+                    # Données
+                    for i, dr in enumerate(data_rows_raw):
+                        fill = 'EEF4FF' if i % 2 == 0 else 'FFFFFF'
+                        for j, val in enumerate(dr):
+                            cell = tbl.rows[i + 1].cells[j]
+                            cell.text = ''
+                            p_d = cell.paragraphs[0]
+                            # Detecter si val est en gras (**val**)
+                            if val.startswith('**') and val.endswith('**'):
+                                run_d = p_d.add_run(val[2:-2])
+                                run_d.bold = True
+                            else:
+                                run_d = p_d.add_run(_clean_md(val))
+                            run_d.font.size = Pt(9)
+                            _set_cell_fill(cell, fill)
+                    doc.add_paragraph()
+                    return
+
+        # ── Liste a puces / numerotee ──
+        list_pattern = _re.compile(r'^(\s*)([-*•✅⚠️✓→]|\d+\.)\s+(.*)')
+        if all(list_pattern.match(l) or not l.strip() for l in lines_in_block if l.strip()):
+            for line in lines_in_block:
+                line_s = line.strip()
+                if not line_s:
+                    continue
+                m = list_pattern.match(line)
+                if m:
+                    bullet_char = m.group(2)
+                    text_item   = m.group(3)
+                    is_num = bool(_re.match(r'\d+\.', bullet_char))
+                    try:
+                        style_name = 'List Number' if is_num else 'List Bullet'
+                        p = doc.add_paragraph(style=style_name)
+                    except Exception:
+                        p = doc.add_paragraph()
+                    _render_inline(p, text_item, section_color, base_size=10)
+                else:
+                    p = doc.add_paragraph()
+                    _render_inline(p, line_s, section_color, base_size=10)
+            return
+
+        # ── Paragraphe multi-lignes : rendre ligne par ligne ──
+        if len(lines_in_block) > 1:
+            for line in lines_in_block:
+                line_s = line.strip()
+                if not line_s:
+                    doc.add_paragraph()
+                    continue
+                # Sous-titre inline (ligne toute en **bold**)
+                if _re.match(r'^\*\*[^*]+\*\*:?$', line_s):
+                    p = doc.add_paragraph()
+                    _render_inline(p, line_s, section_color, base_size=10)
+                    continue
+                p = doc.add_paragraph()
+                _set_para_justify(p)
+                _render_inline(p, line_s, section_color, base_size=10)
+            return
+
+        # ── Paragraphe simple ──
+        p = doc.add_paragraph()
+        _set_para_justify(p)
+        sz = 10 if len(block) > 300 else 11
+        _render_inline(p, block, section_color, base_size=sz)
+
+
+
+
+    for title_sec, key, color in sections_map:
+        text = str(final_state.get(key) or "").strip()
+        if not text:
+            continue
+        _colored_heading(title_sec, 2, color)
+
+        # Decouper par blocs (double saut de ligne) en preservant les tableaux multi-lignes
+        blocks: List[str] = []
+        current = []
+        in_table = False
+        for line in text.split("\n"):
+            if "|" in line and line.strip().startswith("|"):
+                in_table = True
+                current.append(line)
+            elif in_table and not line.strip():
+                # Fin du tableau
+                blocks.append("\n".join(current))
+                current = []
+                in_table = False
+            elif not line.strip() and not in_table:
+                if current:
+                    blocks.append("\n".join(current))
+                    current = []
+            else:
+                current.append(line)
+        if current:
+            blocks.append("\n".join(current))
+
+        for block in blocks:
+            _render_markdown_block(block, color)
+
+        _add_separator()
+
+    # ── ANALYSE EXPERT SCALPING CLAUDE ───────────────────────────
+    expert_text = str(final_state.get("expert_scalp_analysis") or "").strip()
+    if expert_text:
+        _colored_heading("Analyse Expert Scalping — Claude ($10 / $50)", 2,
+                         RGBColor(80, 0, 100))
+        # Utiliser le meme renderer markdown que les autres sections
+        expert_color = RGBColor(80, 0, 100)
+        expert_blocks: List[str] = []
+        current_exp: List[str] = []
+        in_tbl_exp = False
+        for line in expert_text.split("\n"):
+            if "|" in line and line.strip().startswith("|"):
+                in_tbl_exp = True
+                current_exp.append(line)
+            elif in_tbl_exp and not line.strip():
+                expert_blocks.append("\n".join(current_exp))
+                current_exp = []
+                in_tbl_exp = False
+            elif not line.strip() and not in_tbl_exp:
+                if current_exp:
+                    expert_blocks.append("\n".join(current_exp))
+                    current_exp = []
+            else:
+                current_exp.append(line)
+        if current_exp:
+            expert_blocks.append("\n".join(current_exp))
+
+        for blk in expert_blocks:
+            _render_markdown_block(blk, expert_color)
+        _add_separator()
+
+    # ── RESUME EXECUTIF FINAL ─────────────────────────────────────
+    # Genere par Claude a partir de toutes les sections du rapport
+    resume_text = _generate_executive_summary(symbol, rec, final_state,
+                                               computed_signals,
+                                               indicators)
+    if resume_text:
+        _colored_heading("RESUME — Ce qu'il faut retenir", 1, RGBColor(20, 40, 100))
+        resume_color = RGBColor(20, 40, 100)
+        for block in resume_text.split("\n\n"):
+            _render_markdown_block(block, resume_color)
+        _add_separator()
+
+    # ── PIED DE PAGE ──────────────────────────────────────────────
+    doc.add_paragraph()
+    footer_p = doc.add_paragraph(
+        f"TradBOT — Rapport généré automatiquement par le bridge TradingAgents | {date.today()}"
+    )
+    footer_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    footer_p.runs[0].font.size = Pt(8)
+    footer_p.runs[0].font.color.rgb = RGBColor(150, 150, 150)
+
+    # Sauvegarder
+    sym_safe = symbol.replace(" ", "_").replace("/", "-")
+    out_dir = _REPORTS_DIR / sym_safe
+    out_dir.mkdir(parents=True, exist_ok=True)
+    filename = f"{trade_date}_{sym_safe}_{rec}.docx"
+    out_path = out_dir / filename
+    doc.save(str(out_path))
+    print(f"  [OK] Rapport Word sauvegarde : {out_path}")
+
+    # Nettoyer les fichiers temporaires
+    for f in tmp_files:
+        try:
+            f.unlink()
+        except Exception:
+            pass
+
+    return out_path
+
+
+# ---------------------------------------------------------------------------
+# Mode 2 : mode rapide (symbol/date en args, config depuis .env)
+# ---------------------------------------------------------------------------
+
+def run_quick(symbol: str, trade_date: str,
+             analysts: List[str] = None,
+             data_ticker: str = None,
+             vendor: str = None) -> Dict[str, Any]:
+    """
+    Analyse rapide sans wizard.
+    symbol      : nom affichage (ex: 'Boom 900 Index')
+    data_ticker : ticker passe a TradingAgents (ex: 'BOOM900')
+    vendor      : 'deriv' | 'yfinance' | None (auto-detecte)
+    """
+    if not _TA_CLI_AVAILABLE:
+        sys.exit(f"[bridge] TradingAgents inaccessible: {_TA_IMPORT_ERR}")
+
+    if analysts is None:
+        analysts = ["market", "social"]
+
+    # Ticker et vendor : utiliser ceux fournis, sinon auto-detecter
+    if data_ticker is None:
+        data_ticker = _mt5_to_yfinance(symbol)
+
+    # Pour les symboles Deriv, s'assurer que data_ticker est le nom court
+    # (ex: CRASH1000, BOOM900) — jamais le nom long avec espaces
+    if vendor == "deriv" or any(data_ticker.upper().startswith(p)
+                                for p in ("BOOM","CRASH","1HZ","R_","FRX")):
+        try:
+            from tradingagents.dataflows.deriv_market import resolve_deriv_symbol  # type: ignore
+            data_ticker = resolve_deriv_symbol(data_ticker)
+        except ImportError:
+            pass
+
+    print(f"\n[bridge] Analyse : {symbol}")
+    print(f"[bridge] Ticker  : {data_ticker} | Vendor: {vendor or 'auto'}")
+    print(f"[bridge] Analystes: {', '.join(analysts)}")
+
+    # Collecter les donnees techniques depuis ai_server
+    print(f"[bridge] Collecte contexte technique depuis {_SERVER_URL} ...")
+    tradbot_ctx = fetch_tradbot_context(symbol)
+
+    # Pour les synthétiques Deriv : calculer les indicateurs depuis OHLC si ai_server n'a pas de données
+    deriv_indicators: Optional[Dict[str, Any]] = None
+    if vendor == "deriv" or _is_deriv_synthetic(data_ticker):
+        deriv_indicators = compute_indicators_from_deriv(data_ticker)
+        if deriv_indicators:
+            deriv_ctx = build_deriv_technical_context(data_ticker, symbol, deriv_indicators)
+            tradbot_ctx = (tradbot_ctx + "\n\n" + deriv_ctx) if tradbot_ctx else deriv_ctx
+
+    # Construire le system prompt adapté à la catégorie du symbole
+    category = _get_symbol_category(symbol)
+    ind_for_prompt = deriv_indicators or {}
+    # Essayer ai_server si pas d'indicateurs Deriv
+    if not ind_for_prompt:
+        try:
+            r_ind = requests.get(
+                f"{_SERVER_URL}/trading/indicators/{data_ticker.replace(' ','%20')}/M1", timeout=5)
+            if r_ind.status_code == 200:
+                ind_for_prompt = r_ind.json().get("indicators", {})
+        except Exception:
+            pass
+
+    system_prompt = _build_system_prompt(symbol, category, ind_for_prompt if ind_for_prompt else None)
+    print(f"[bridge] Categorie : {category} | System prompt construit ({len(system_prompt)} chars)")
+
+    # Injecter le system prompt + contexte technique dans past_context
+    full_ctx = system_prompt
+    if tradbot_ctx:
+        full_ctx += "\n\n" + tradbot_ctx
+        print(f"[bridge] Contexte technique injecte ({len(tradbot_ctx)} chars)")
+    else:
+        print(f"[bridge] Serveur inaccessible — analyse avec system prompt uniquement")
+
+    cfg = dict(_TA_DEFAULT)
+    provider = (os.getenv("TRADINGAGENTS_LLM_PROVIDER")
+                or cfg.get("llm_provider", "openai"))
+    cfg["llm_provider"] = provider
+    for env_k, cfg_k in [
+        ("TRADINGAGENTS_QUICK_THINK_LLM", "quick_think_llm"),
+        ("TRADINGAGENTS_DEEP_THINK_LLM",  "deep_think_llm"),
+        ("TRADINGAGENTS_OUTPUT_LANGUAGE",  "output_language"),
+    ]:
+        v = os.getenv(env_k)
+        if v:
+            cfg[cfg_k] = v
+
+    # Appliquer le vendor explicitement dans la config si fourni
+    if vendor:
+        try:
+            from tradingagents.dataflows.deriv_catalog import apply_stock_data_vendor_to_config  # type: ignore
+            apply_stock_data_vendor_to_config(cfg, vendor)
+        except ImportError:
+            pass
+
+    graph = TradingAgentsGraph(
+        selected_analysts=analysts,
+        config=cfg,
+        debug=False,
+    )
+
+    # Injecter system prompt + contexte technique dans past_context
+    # Le Portfolio Manager reçoit ainsi les règles spécifiques à la catégorie
+    original_get_past = graph.memory_log.get_past_context
+    def _patched_get_past(ticker):
+        base = original_get_past(ticker)
+        return (base + "\n\n" + full_ctx) if base else full_ctx
+        graph.memory_log.get_past_context = _patched_get_past
+
+    final_state, signal_rating = graph.propagate(data_ticker, trade_date)
+
+    # Indicateurs pour les graphiques du rapport
+    # Priorité : ai_server (temps réel) -> OHLC Deriv calculé -> None
+    indicators_raw = None
+    try:
+        r2 = requests.get(f"{_SERVER_URL}/trading/indicators/{data_ticker.replace(' ','%20')}/M1", timeout=5)
+        if r2.status_code == 200:
+            ind2 = r2.json().get("indicators")
+            if ind2 and ind2.get("current_price"):
+                indicators_raw = ind2
+    except Exception:
+        pass
+    # Fallback : indicateurs calcules depuis OHLC Deriv
+    if not indicators_raw and deriv_indicators:
+        indicators_raw = deriv_indicators
+
+    # Analyse expert Claude (scalping 15min + lots $10/$50)
+    expert_analysis = ""
+    if indicators_raw:
+        rec_tmp = _normalize_rating(signal_rating)
+        ta_summary = (str(final_state.get("final_trade_decision") or "")[:400] +
+                      str(final_state.get("market_report") or "")[:400])
+        sigs_tmp = []
+        if rec_tmp in ("BUY","SELL"):
+            cp = indicators_raw.get("current_price")
+            at = indicators_raw.get("atr")
+            if cp and at:
+                sigs_tmp = compute_signals(symbol, rec_tmp, float(cp), float(at))
+        print(f"[bridge] Analyse expert Claude scalping...")
+        expert_analysis = claude_expert_analysis(
+            symbol, rec_tmp, indicators_raw, sigs_tmp, ta_summary)
+
+    return {
+        "symbol":          symbol,
+        "data_ticker":     data_ticker,
+        "signal_rating":   signal_rating,
+        "final_state":     final_state,
+        "indicators":      indicators_raw,
+        "expert_analysis": expert_analysis,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Affichage du rapport
+# ---------------------------------------------------------------------------
+
+_DIV = "-" * 72
+
+
+def print_report(symbol: str, signal_rating: str,
+                 final_state: Dict[str, Any],
+                 params: Dict[str, Optional[float]]) -> None:
+    rec   = _normalize_rating(signal_rating)
+    color = {"BUY": "\033[92m", "SELL": "\033[91m", "HOLD": "\033[93m"}.get(rec, "")
+    reset = "\033[0m"
+
+    print(f"\n{_DIV}")
+    print(f"  SIGNAL TradingAgents  --  {symbol}")
+    print(_DIV)
+    print(f"  Rating brut  : {signal_rating}")
+    print(f"  Decision     : {color}{rec}{reset}")
+    for lbl, val in [("Entry price", params["entry_price"]),
+                     ("Stop Loss  ", params["stop_loss"]),
+                     ("Take Profit", params["take_profit"])]:
+        print(f"  {lbl} : {val if val is not None else 'non fourni'}")
+
+    for section, title in [
+        ("final_trade_decision",  "Decision Portfolio Manager"),
+        ("trader_investment_plan","Plan Trader"),
+    ]:
+        text = str(final_state.get(section) or "")
+        if text:
+            print(f"\n{_DIV}\n  {title} :\n{_DIV}")
+            print(text[:2000])
+    print(_DIV)
+
+
+# ---------------------------------------------------------------------------
+# Confirmation interactive
+# ---------------------------------------------------------------------------
+
+def _ask_float(prompt: str, default: Optional[float]) -> Optional[float]:
+    sfx = f" [{default}]" if default is not None else " [vide=ignorer]"
+    raw = input(f"  {prompt}{sfx}: ").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        print("  [!] Valeur invalide ignoree.")
+        return default
+
+
+def interactive_confirm(rec: str,
+                        params: Dict[str, Optional[float]],
+                        signals: List[Dict] = None) -> Optional[Dict[str, Any]]:
+    """Dialogue de confirmation avec choix entre les 2 signaux calcules."""
+
+    _DIV2 = "-" * 60
+
+    # Afficher les signaux proposes
+    if signals and rec in ("BUY", "SELL"):
+        print(f"\n{_DIV2}")
+        print(f"  SIGNAUX PROPOSES — {rec}")
+        print(_DIV2)
+        for i, sig in enumerate(signals[:2], 1):
+            print(f"\n  [{i}] {sig['label']}")
+            print(f"      Type      : {sig['exec_type'].upper()}")
+            print(f"      Entree    : {sig['entry_price']:.5f}  (prix actuel: {sig['current_price']:.5f})")
+            print(f"      Stop Loss : {sig['stop_loss']:.5f}  (-{sig['pips_sl']} pips)")
+            print(f"      Take Prof : {sig['take_profit']:.5f}  (+{sig['pips_tp']} pips)")
+            print(f"      Ratio R/R : 1 : {sig['rr']}")
+        print(f"\n  [3] Saisir des niveaux manuels")
+        print(f"  [4] Annuler")
+        print(_DIV2)
+
+        choice = input("\n  Choisir le signal a envoyer [1/2/3/4] : ").strip()
+
+        if choice == "4":
+            print("  <- Annule.")
+            return None
+
+        if choice in ("1", "2"):
+            idx = int(choice) - 1
+            sig = signals[idx]
+            lot_raw = input("  Lot size [vide=defaut EA]: ").strip()
+            lot = float(lot_raw) if lot_raw else None
+            conf_raw = input("  Confiance 0-100% [defaut=75]: ").strip()
+            try:
+                confidence = float(conf_raw) / 100.0 if conf_raw else 0.75
+            except ValueError:
+                confidence = 0.75
+            return {
+                "recommendation": rec,
+                "confidence": max(0.0, min(1.0, confidence)),
+                "entry_price":   sig["entry_price"],
+                "stop_loss":     sig["stop_loss"],
+                "take_profit":   sig["take_profit"],
+                "execution_type": sig["exec_type"],
+                "lot": lot,
+            }
+
+    # Pas de signaux calcules ou choix manuel (option 3)
+    print("\n  Saisie manuelle des parametres.")
+    d = input(f"  Direction [{rec}] (BUY/SELL/HOLD): ").strip().upper()
+    rec = d if d in ("BUY", "SELL", "HOLD") else rec
+    p = dict(params)
+    p["entry_price"] = _ask_float("Entry price", p.get("entry_price"))
+    p["stop_loss"]   = _ask_float("Stop Loss  ", p.get("stop_loss"))
+    p["take_profit"] = _ask_float("Take Profit", p.get("take_profit"))
+
+    lot_raw = input("  Lot size [vide=defaut EA]: ").strip()
+    lot = float(lot_raw) if lot_raw else None
+
+    exec_type = "market"
+    if p.get("entry_price"):
+        et = input("  Type [limit/stop/market, defaut=limit]: ").strip().lower()
+        exec_type = et if et in ("limit", "stop", "market") else "limit"
+
+    conf_raw = input("  Confiance 0-100% [defaut=75]: ").strip()
+    try:
+        confidence = float(conf_raw) / 100.0 if conf_raw else 0.75
+    except ValueError:
+        confidence = 0.75
+
+    return {
+        "recommendation": rec,
+        "confidence": max(0.0, min(1.0, confidence)),
+        "entry_price":   p.get("entry_price"),
+        "stop_loss":     p.get("stop_loss"),
+        "take_profit":   p.get("take_profit"),
+        "execution_type": exec_type if p.get("entry_price") else "market",
+        "lot": lot,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Extraction des niveaux d'alerte depuis l'analyse Claude
+# ---------------------------------------------------------------------------
+
+def extract_alert_levels(expert_analysis: str) -> Dict[str, Any]:
+    """
+    Parse le texte de l'analyse Claude pour extraire les niveaux BUY/SELL
+    a surveiller (ex: 'Si prix descend a 4480-4485' ou 'sur rebond a 4555-4560').
+    Retourne {buy_level, sell_level, buy_reason, sell_reason}.
+    """
+    result: Dict[str, Any] = {
+        "buy_level": None, "sell_level": None,
+        "buy_reason": None, "sell_reason": None,
+    }
+    if not expert_analysis:
+        return result
+
+    # Recherche patterns numeriques apres mots-cles
+    buy_patterns  = [
+        r'(?:BUY|achat|support|descend.*?)\D*([0-9]{3,6}(?:[.,][0-9]{1,5})?)',
+        r'([0-9]{3,6}(?:[.,][0-9]{1,5})?)\s*(?:BB|boll|support|inferieure)',
+    ]
+    sell_patterns = [
+        r'(?:SELL|vente|resistance|remonte.*?|rebond.*?)\D*([0-9]{3,6}(?:[.,][0-9]{1,5})?)',
+        r'([0-9]{3,6}(?:[.,][0-9]{1,5})?)\s*(?:SMA|resistance|superieure|rejet)',
+    ]
+
+    # Chercher dans les lignes contenant BUY/SELL
+    for line in expert_analysis.split("\n"):
+        line_up = line.upper()
+        for pat in buy_patterns:
+            m = _re.search(pat, line, _re.IGNORECASE)
+            if m and result["buy_level"] is None:
+                try:
+                    v = float(m.group(1).replace(",", "."))
+                    if v > 10:
+                        result["buy_level"]  = v
+                        result["buy_reason"] = line.strip()[:100]
+                except ValueError:
+                    pass
+        for pat in sell_patterns:
+            m = _re.search(pat, line, _re.IGNORECASE)
+            if m and result["sell_level"] is None:
+                try:
+                    v = float(m.group(1).replace(",", "."))
+                    if v > 10:
+                        result["sell_level"]  = v
+                        result["sell_reason"] = line.strip()[:100]
+                except ValueError:
+                    pass
+
+    return result
+
+
+def push_alert_levels(symbol: str, expert_analysis: str,
+                      buy_level: Optional[float] = None,
+                      sell_level: Optional[float] = None,
+                      buy_reason: str = "",
+                      sell_reason: str = "") -> bool:
+    """Enregistre les niveaux d'alerte sur le serveur (EA les poll et envoie push MT5)."""
+    # Si pas de niveaux fournis, les extraire de l'analyse Claude
+    if buy_level is None or sell_level is None:
+        extracted = extract_alert_levels(expert_analysis)
+        buy_level  = buy_level  or extracted.get("buy_level")
+        sell_level = sell_level or extracted.get("sell_level")
+        buy_reason  = buy_reason  or extracted.get("buy_reason", "")
+        sell_reason = sell_reason or extracted.get("sell_reason", "")
+
+    if not buy_level and not sell_level:
+        return False
+
+    payload = {
+        "symbol":      symbol,
+        "buy_level":   buy_level,
+        "sell_level":  sell_level,
+        "buy_reason":  buy_reason  or "Niveau support bridge",
+        "sell_reason": sell_reason or "Niveau resistance bridge",
+    }
+    try:
+        r = requests.post(f"{_SERVER_URL}/alert-levels", json=payload, timeout=10)
+        r.raise_for_status()
+        print(f"  [OK] Alertes niveaux: BUY@{buy_level} SELL@{sell_level} -> MT5 push active")
+        return True
+    except Exception as e:
+        print(f"  [!] /alert-levels : {e}")
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Push vers ai_server
+# ---------------------------------------------------------------------------
+
+def _clean_symbol_for_server(symbol: str) -> str:
+    """
+    Nettoie le nom d affichage du symbole pour l envoyer au serveur MT5.
+    Ex: 'Or — XAUUSD (-> frxXAUUSD)' -> 'XAUUSD'
+        'Crash 150 Index' -> 'CRASH 150 INDEX'
+        'EURUSD=X' -> 'EURUSD'
+    """
+    s = symbol.strip().upper()
+    # Supprimer les parties entre parentheses et apres les tirets longs
+    import re as _re2
+    s = _re2.sub(r'\(.*?\)', '', s).strip()
+    s = _re2.sub(r'[—–→].*', '', s).strip()
+    s = _re2.sub(r'\s+', ' ', s).strip()
+    # Supprimer suffixes yfinance
+    s = s.replace('=X', '').replace('=F', '').strip()
+    # Si vide apres nettoyage, garder l original en majuscules
+    return s if s else symbol.strip().upper()
+
+
+def push_manual_report(symbol: str, data: Dict[str, Any], reasoning: str) -> bool:
+    payload = {
+        "symbol": _clean_symbol_for_server(symbol),
+        "recommendation": data["recommendation"],
+        "confidence": data["confidence"],
+        "reasoning": reasoning[:4000],
+        "execution_type": data.get("execution_type"),
+        "entry_price": data.get("entry_price"),
+        "stop_loss":   data.get("stop_loss"),
+        "take_profit": data.get("take_profit"),
+    }
+    try:
+        r = requests.post(f"{_SERVER_URL}/tradingagents/manual-report",
+                          json=payload, timeout=10)
+        r.raise_for_status()
+        print(f"  [OK] Manuel report envoye : {r.json()}")
+        return True
+    except Exception as e:
+        print(f"  [ERR] manual-report : {e}")
+        return False
+
+
+def push_pending_order(symbol: str, data: Dict[str, Any]) -> bool:
+    sym_clean = _clean_symbol_for_server(symbol)
+    action    = data["recommendation"].upper()
+    cat       = _get_symbol_category(symbol)
+
+    # ── Règle 0 : BOOM = BUY uniquement, CRASH = SELL uniquement ──
+    if cat == "BOOM" and action == "SELL":
+        print(f"  [!] Règle 0 BOOM: SELL rejeté sur {sym_clean} → forcé en BUY")
+        action = "BUY"
+    elif cat == "CRASH" and action == "BUY":
+        print(f"  [!] Règle 0 CRASH: BUY rejeté sur {sym_clean} → forcé en SELL")
+        action = "SELL"
+
+    # ── Calcul lot minimum si non fourni ──
+    lot = data.get("lot")
+    if lot is None:
+        # Lot minimum par catégorie (Deriv)
+        # Boom/Crash synthétiques : 0.2
+        # XAUUSD (Gold), Forex, Volatility, Index : 0.01
+        if cat in ("BOOM", "CRASH"):
+            lot_min = 0.2
+        else:
+            lot_min = 0.01  # XAUUSD, EURUSD, Volatility, indices
+        # Calcul risque 2% sur capital cible $20
+        capital  = 20.0
+        risk_amt = capital * 0.02  # $0.40
+        entry    = data.get("entry_price")
+        sl       = data.get("stop_loss")
+        if entry and sl and abs(float(entry) - float(sl)) > 0:
+            sl_dist     = abs(float(entry) - float(sl))
+            pip_val_est = 0.01  # valeur approximative pip/lot pour synthétiques
+            calc_lot    = risk_amt / (sl_dist * pip_val_est)
+            lot = max(lot_min, round(calc_lot - (calc_lot % lot_min), 2))
+        else:
+            lot = lot_min
+        print(f"  [bridge] Lot calculé: {lot} (min={lot_min}, risque ~${lot*0.01:.3f})")
+
+    # ── TP obligatoire pour Boom/Crash (spike = sortie rapide) ──
+    tp = data.get("take_profit")
+    entry = data.get("entry_price")
+    sl    = data.get("stop_loss")
+    if tp is None and entry and sl:
+        sl_dist = abs(float(entry) - float(sl))
+        if action == "BUY":
+            tp = round(float(entry) + sl_dist * 2.0, 5)  # RR 1:2
+        else:
+            tp = round(float(entry) - sl_dist * 2.0, 5)
+        print(f"  [bridge] TP calcule automatiquement: {tp} (RR 1:2)")
+
+    payload = {
+        "symbol":         sym_clean,
+        "action":         action.lower(),
+        "execution_type": data.get("execution_type", "market"),
+        "entry_price":    entry,
+        "stop_loss":      sl,
+        "take_profit":    tp,
+        "lot":            lot,
+        "confidence":     data.get("confidence", 0.75),
+        "source":         "tradingagents_cli",
+        "comment":        "TA_BRIDGE",
+    }
+    try:
+        r = requests.post(f"{_SERVER_URL}/pending-order", json=payload, timeout=10)
+        r.raise_for_status()
+        resp = r.json()
+        print(f"  [OK] Ordre en queue : id={resp.get('order_id')} | "
+              f"{payload['action'].upper()} @ {payload.get('entry_price')} "
+              f"SL={payload.get('stop_loss')} TP={payload.get('take_profit')} "
+              f"lot={lot}")
+        return True
+    except Exception as e:
+        print(f"  [ERR] /pending-order : {e}")
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="TradBOT Bridge - TradingAgents -> MT5",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Exemples:
+  .\bridge.bat                        # wizard complet (symbol, date, analystes, LLM...)
+  .\bridge.bat --symbol EURUSD        # rapide : symbol fixe, reste depuis .env
+  .\bridge.bat --symbol XAUUSD --auto # rapide + pas de confirmation
+  .\bridge.bat --symbol EURUSD --no-pending  # rapport seul, pas d ordre MT5
+        """,
+    )
+    parser.add_argument("--symbol", "-s", default=None,
+                        help="Symbole MT5. Si absent: wizard complet lance")
+    parser.add_argument("--date", "-d", default=str(date.today()),
+                        help="Date YYYY-MM-DD (mode rapide seulement)")
+    parser.add_argument("--analysts", "-a", default="market,sentiment",
+                        help="Analystes separes par virgule (defaut: market,social). "
+                             "Choix: market, social, news, fundamentals")
+    parser.add_argument("--no-pending", action="store_true",
+                        help="N'envoie pas d'ordre pending, rapport manuel seulement")
+    parser.add_argument("--auto", action="store_true",
+                        help="Pas de confirmation interactive avant envoi")
+    args = parser.parse_args()
+
+    # Valider les analystes (noms exacts TradingAgents)
+    _valid = {"market", "social", "news", "fundamentals"}
+    analysts = [a.strip().lower() for a in args.analysts.split(",") if a.strip()]
+    # Alias : sentiment -> social
+    analysts = ["social" if a == "sentiment" else a for a in analysts]
+    analysts = [a for a in analysts if a in _valid] or ["market", "social"]
+
+    # --- Choisir le mode ---
+    if args.symbol is None:
+        # Mode 1 : selecteur interactif par categorie de broker
+        sym_label, ticker_id, vendor = select_symbol_interactive()
+        result = run_quick(sym_label, args.date,
+                           analysts=analysts,
+                           data_ticker=ticker_id,
+                           vendor=vendor)
+    else:
+        # Mode 2 : symbol fourni en argument (auto-detection vendor)
+        sym = args.symbol.strip()
+        ticker_id = _mt5_to_yfinance(sym)
+        vendor = "deriv" if any(ticker_id.upper().startswith(p)
+                                for p in ("BOOM","CRASH","1HZ","R_","FRX")) else "yfinance"
+        result = run_quick(sym, args.date,
+                           analysts=analysts,
+                           data_ticker=ticker_id,
+                           vendor=vendor)
+
+    symbol          = result["symbol"]
+    signal_rating   = result["signal_rating"]
+    final_state     = result["final_state"]
+    indicators      = result.get("indicators")
+    expert_analysis = result.get("expert_analysis", "")
+    rec             = _normalize_rating(signal_rating)
+    params          = _extract_order_params(final_state)
+
+    # Calculer les 2 signaux depuis ai_server
+    computed_signals: List[Dict] = []
+    current_price_main = None
+    if indicators and rec in ("BUY", "SELL"):
+        cp = indicators.get("current_price")
+        at = indicators.get("atr")
+        if cp and at:
+            current_price_main = float(cp)
+            computed_signals = compute_signals(symbol, rec, float(cp), float(at))
+    if not computed_signals and rec in ("BUY", "SELL"):
+        lvl = compute_entry_levels(symbol, rec)
+        computed_signals = lvl.get("signals", [])
+        if not current_price_main:
+            current_price_main = lvl.get("current_price")
+
+    # Afficher le rapport terminal
+    print_report(symbol, signal_rating, final_state, params)
+
+    # Afficher les signaux calcules dans le terminal
+    if computed_signals:
+        print(f"\n  Prix actuel : {current_price_main}")
+        for sig in computed_signals[:2]:
+            lots = compute_lot_sizes(sig.get("entry_price"), sig.get("stop_loss"))
+            lot_str = "  ".join([f"{k}:lot={v['lot']}" for k, v in lots.items()])
+            print(f"  [{sig['label']}] {sig['action']} {sig['exec_type'].upper()}"
+                  f" @ {sig['entry_price']}  SL:{sig['stop_loss']} (-{sig['pips_sl']} pips)"
+                  f"  TP:{sig['take_profit']} (+{sig['pips_tp']} pips)  RR 1:{sig['rr']}"
+                  f"  | {lot_str}")
+
+    # Afficher l'analyse expert Claude
+    if expert_analysis:
+        print(f"\n{'='*60}")
+        print("  ANALYSE EXPERT SCALPING (Claude)")
+        print('='*60)
+        print(expert_analysis)
+
+    reasoning = (str(final_state.get("final_trade_decision") or "") + "\n\n"
+                 + str(final_state.get("trader_investment_plan") or ""))
+
+    if args.auto:
+        sig0 = computed_signals[0] if computed_signals else {}
+        confirmed = {
+            "recommendation": rec,
+            "confidence": 0.75,
+            "entry_price":   sig0.get("entry_price") or params.get("entry_price"),
+            "stop_loss":     sig0.get("stop_loss")   or params.get("stop_loss"),
+            "take_profit":   sig0.get("take_profit") or params.get("take_profit"),
+            "execution_type": sig0.get("exec_type", "market"),
+            "lot": None,
+        }
+    else:
+        confirmed = interactive_confirm(rec, params, signals=computed_signals)
+
+    # Sauvegarder le rapport Word (meme si signal annule)
+    trade_date = args.date if args.symbol else str(date.today())
+    # Injecter l'analyse expert dans final_state pour l'inclure dans le Word
+    if expert_analysis:
+        final_state = dict(final_state)
+        final_state["expert_scalp_analysis"] = expert_analysis
+    save_report_word(symbol, trade_date, signal_rating, final_state, params,
+                     confirmed=confirmed if confirmed else None,
+                     indicators=indicators)
+
+    if confirmed is None:
+        print("\n[bridge] Signal annule. Rapport Word sauvegarde.")
+        return
+
+    print(f"\n[bridge] Envoi vers {_SERVER_URL} ...")
+    push_manual_report(symbol, confirmed, reasoning)
+
+    # Enregistrer les niveaux d'alerte (extrait de l'analyse Claude)
+    # L'EA MT5 surveille ces niveaux et envoie une notification push quand atteints
+    if expert_analysis:
+        push_alert_levels(symbol, expert_analysis)
+
+    if not args.no_pending and confirmed["recommendation"] in ("BUY", "SELL"):
+        push_pending_order(symbol, confirmed)
+
+    print("\n[bridge] OK. L'EA MT5 recevra le signal au prochain appel /decision.")
+    print(f"  Status  : GET {_SERVER_URL}/tradingagents/realtime/status")
+    print(f"  Ordres  : GET {_SERVER_URL}/pending-order")
+    print(f"  Rapports: {_REPORTS_DIR}\n")
+
+
+if __name__ == "__main__":
+    main()
