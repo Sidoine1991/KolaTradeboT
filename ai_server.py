@@ -50,9 +50,28 @@ from slowapi.errors import RateLimitExceeded
 
 # Load environment variables (.env racine + python/.env pour RDS)
 _root_dir = Path(__file__).resolve().parent
+_python_dir = _root_dir / "python"
+if str(_python_dir) not in sys.path:
+    sys.path.insert(0, str(_python_dir))
 load_dotenv(_root_dir / "python" / ".env")
 load_dotenv(_root_dir / ".env")
 load_dotenv()
+
+try:
+    from divergence_strategy import (
+        candles_to_dataframe,
+        evaluate_live_signal,
+        merge_divergence_into_decision,
+        DEFAULT_PARAMS as DIVERGENCE_DEFAULT_PARAMS,
+    )
+
+    DIVERGENCE_STRATEGY_AVAILABLE = True
+except ImportError as _div_imp_err:
+    DIVERGENCE_STRATEGY_AVAILABLE = False
+    candles_to_dataframe = None  # type: ignore
+    evaluate_live_signal = None  # type: ignore
+    merge_divergence_into_decision = None  # type: ignore
+    DIVERGENCE_DEFAULT_PARAMS = {}
 
 # === ENVIRONMENT VALIDATION ===
 def _env_bool_early(name: str, default: bool = False) -> bool:
@@ -894,6 +913,106 @@ def enforce_ea_boom_crash_direction(symbol: str, action: str, confidence: float,
     if is_weltrade_gain_synth(str(symbol)) and a == "sell":
         return "hold", min(float(confidence), 0.55), reason + "[GainX: SELL incompatible EA → HOLD] "
     return action, confidence, reason
+
+
+def is_deriv_synthetic_symbol(symbol: str) -> bool:
+    """Indices synthétiques Deriv (Boom/Crash, Volatility, Step, Jump, Range, 1HZ, etc.)."""
+    if not symbol:
+        return False
+    s_raw = str(symbol).lower()
+    s = s_raw.replace(" ", "").replace("_", "")
+    if is_boom_crash_symbol(symbol):
+        return True
+    markers = (
+        "volatility",
+        "step",
+        "jump",
+        "range",
+        "dex",
+        "1hz",
+        "boom",
+        "crash",
+        "gain",
+        "pain",
+        "painx",
+        "gainx",
+    )
+    if any(m in s_raw for m in markers):
+        return True
+    if s.startswith("r_") or s.startswith("1hz"):
+        return True
+    return False
+
+
+def apply_divergence_strategy_to_decision(
+    request: "DecisionRequest",
+    action: str,
+    confidence: float,
+    reason: str,
+    stop_loss: Optional[float],
+    take_profit: Optional[float],
+) -> Tuple[str, float, str, Optional[float], Optional[float], Dict[str, Any]]:
+    """
+    Stratégie Divergence (div F̄) pour symboles Deriv — nécessite recent_candles depuis MT5.
+    """
+    empty_meta: Dict[str, Any] = {}
+    if not DIVERGENCE_STRATEGY_AVAILABLE or not _env_bool("ENABLE_DIVERGENCE_STRATEGY", True):
+        return action, confidence, reason, stop_loss, take_profit, empty_meta
+    if not is_deriv_synthetic_symbol(str(request.symbol or "")):
+        return action, confidence, reason, stop_loss, take_profit, empty_meta
+
+    candles = getattr(request, "recent_candles", None) or []
+    if not candles or len(candles) < int(os.getenv("DIVERGENCE_MIN_CANDLES", "80")):
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "Divergence skip %s: recent_candles=%s (min %s)",
+                request.symbol,
+                len(candles) if candles else 0,
+                os.getenv("DIVERGENCE_MIN_CANDLES", "80"),
+            )
+        return action, confidence, reason, stop_loss, take_profit, empty_meta
+
+    try:
+        df = candles_to_dataframe(list(candles))
+        params = dict(DIVERGENCE_DEFAULT_PARAMS)
+        params["div_long"] = float(os.getenv("DIVERGENCE_DIV_LONG", str(params.get("div_long", 0.15))))
+        params["div_short"] = float(os.getenv("DIVERGENCE_DIV_SHORT", str(params.get("div_short", -0.15))))
+        params["stop_mult"] = float(os.getenv("DIVERGENCE_STOP_ATR", str(params.get("stop_mult", 1.5))))
+        params["tp_mult"] = float(os.getenv("DIVERGENCE_TP_ATR", str(params.get("tp_mult", 2.5))))
+        params["min_confidence"] = float(os.getenv("DIVERGENCE_MIN_CONFIDENCE", "0.55"))
+
+        signal = evaluate_live_signal(
+            df,
+            bid=float(request.bid) if request.bid else None,
+            ask=float(request.ask) if request.ask else None,
+            params=params,
+        )
+        override_hold = _env_bool("DIVERGENCE_OVERRIDE_HOLD", True)
+        prefer_conflict = _env_bool("DIVERGENCE_PREFER_ON_CONFLICT", False)
+        action, confidence, reason, stop_loss, take_profit, div_meta = merge_divergence_into_decision(
+            action,
+            confidence,
+            reason,
+            stop_loss,
+            take_profit,
+            signal,
+            override_hold=override_hold,
+            prefer_on_conflict=prefer_conflict,
+        )
+        if signal.action in ("buy", "sell"):
+            logger.info(
+                "📐 Divergence %s: %s conf=%.2f div=%.3f SL=%s TP=%s",
+                request.symbol,
+                signal.action.upper(),
+                confidence,
+                signal.div_score,
+                stop_loss,
+                take_profit,
+            )
+        return action, confidence, reason, stop_loss, take_profit, div_meta
+    except Exception as e:
+        logger.warning("Divergence strategy error (%s): %s", request.symbol, e)
+        return action, confidence, reason, stop_loss, take_profit, empty_meta
 
 
 def synth_stair_direction_for_symbol(symbol: str) -> Optional[str]:
@@ -6990,6 +7109,22 @@ async def decision_simplified(request: DecisionRequest):
         atr = request.atr if request.atr and request.atr > 0 else 0.0020
         stop_loss = request.ask + atr * 2
         take_profit = request.ask - atr * 3
+
+    # 10b. Stratégie Divergence (indices Deriv) — div F̄ + trend + ATR SL/TP
+    divergence_meta: Dict[str, Any] = {}
+    try:
+        action, confidence, reason, stop_loss, take_profit, divergence_meta = (
+            apply_divergence_strategy_to_decision(
+                request, action, confidence, reason, stop_loss, take_profit
+            )
+        )
+        action, confidence, reason = enforce_ea_boom_crash_direction(
+            request.symbol, action, confidence, reason
+        )
+        if divergence_meta and action in ("buy", "sell"):
+            reason += " [Div→MT5 market]"
+    except Exception as div_err:
+        logger.debug("divergence merge (simplified): %s", div_err)
     
     # 11. Préparer les prédictions (simuler une tendance basée sur RSI/EMA si pas de modèle ML complexe)
     predicted_prices = []
@@ -7127,11 +7262,17 @@ async def decision_simplified(request: DecisionRequest):
     }
     if confluence_detail:
         meta_out["indicator_confluence"] = confluence_detail
+    if divergence_meta:
+        meta_out["divergence_strategy"] = divergence_meta
     if entry_price_out is not None or execution_type_out:
         meta_out["tradingagents_execution"] = {
             "entry_price": entry_price_out,
             "execution_type": execution_type_out,
         }
+    exec_type_final = execution_type_out
+    if divergence_meta and action in ("buy", "sell"):
+        exec_type_final = "market"
+
     response = DecisionResponse(
         action=action,
         confidence=confidence_percentage,  # Décimale 0-1 (MT5 affiche *100)
@@ -7139,9 +7280,13 @@ async def decision_simplified(request: DecisionRequest):
         stop_loss=stop_loss,
         take_profit=take_profit,
         entry_price=entry_price_out,
-        execution_type=execution_type_out,
+        execution_type=exec_type_final,
         timestamp=datetime.now().isoformat(),
-        model_used="technical_ml_qwen_blend",
+        model_used=(
+            "technical_ml_divergence_blend"
+            if divergence_meta
+            else "technical_ml_qwen_blend"
+        ),
         predicted_prices=predicted_prices,
         alignment=alignment,
         coherence=coherence,
@@ -19031,6 +19176,27 @@ async def tradingagents_set_mt5_symbols(body: TradingAgentsMt5SymbolsBody):
     eff = out if out else list(AI_TRADINGAGENTS_SYMBOLS)
     logger.info("🧭 TradingAgents symboles MT5 mis à jour: %s (effectif boucle: %s)", out, eff)
     return {"ok": True, "symbols_mt5_push": out, "symbols_effective": eff, "merge": body.merge}
+
+
+@app.get("/strategies/divergence/evaluate")
+async def divergence_evaluate(
+    symbol: str = Query(..., min_length=2),
+    bid: Optional[float] = None,
+    ask: Optional[float] = None,
+):
+    """
+    Évalue la stratégie Divergence sur les bougies M1 en cache serveur (requiert recent_candles via POST /decision).
+    Test rapide: POST /decision avec recent_candles puis comparer metadata.divergence_strategy.
+    """
+    if not DIVERGENCE_STRATEGY_AVAILABLE:
+        raise HTTPException(status_code=503, detail="divergence_strategy module unavailable")
+    return {
+        "symbol": symbol,
+        "deriv_synthetic": is_deriv_synthetic_symbol(symbol),
+        "enabled": _env_bool("ENABLE_DIVERGENCE_STRATEGY", True),
+        "default_params": DIVERGENCE_DEFAULT_PARAMS,
+        "hint": "Envoyez recent_candles (≥80 barres M1) dans POST /decision depuis SMC_Universal.",
+    }
 
 
 @app.get("/deriv/active-symbols")

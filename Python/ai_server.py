@@ -13145,6 +13145,10 @@ async def m15_prediction_weights(symbol: Optional[str] = None):
         return {"weights": [], "error": str(e)}
 
 
+_proj_smart_cache: Dict[str, Any] = {}
+_proj_smart_cache_ts: Dict[str, float] = {}
+_PROJ_CACHE_TTL = 300  # 5 minutes
+
 @app.get("/projection/smart")
 async def smart_projection(symbol: str, current_price: float = 0.0, atr: float = 0.0):
     """
@@ -13156,6 +13160,29 @@ async def smart_projection(symbol: str, current_price: float = 0.0, atr: float =
     Retourne 3 niveaux de prix pour les zones de projection sur le graphique.
     """
     sym = symbol.strip().upper()
+
+    # Cache 5 minutes — les stats RDS ne changent pas à chaque tick
+    cache_key = sym
+    now_ts = time.time()
+    if cache_key in _proj_smart_cache and (now_ts - _proj_smart_cache_ts.get(cache_key, 0)) < _PROJ_CACHE_TTL:
+        cached = dict(_proj_smart_cache[cache_key])
+        # Recalculer les niveaux de prix avec le prix actuel (prix change, stats non)
+        if current_price > 0 and atr > 0:
+            win_rate = cached.get("win_rate", 0.5)
+            atr_mult = 0.3 + (win_rate * 0.7)
+            is_boom  = "BOOM"  in sym
+            is_crash = "CRASH" in sym
+            sign = -1 if is_boom else (1 if is_crash else (1 if cached.get("direction_bias") == "UP" else -1))
+            cached.update({
+                "current_price": current_price,
+                "atr": atr,
+                "proj_near": round(current_price + sign * atr * 0.5 * atr_mult, 5),
+                "proj_mid":  round(current_price + sign * atr * 1.0 * atr_mult, 5),
+                "proj_far":  round(current_price + sign * atr * 2.0 * atr_mult, 5),
+                "source": "cache",
+            })
+        return cached
+
     result = {
         "symbol": sym,
         "current_price": current_price,
@@ -13282,6 +13309,9 @@ async def smart_projection(symbol: str, current_price: float = 0.0, atr: float =
         "n_trades":       n_trades,
         "reasoning":      reasoning,
     })
+    # Mettre en cache les stats (pas le prix — recalculé à chaque appel)
+    _proj_smart_cache[cache_key] = dict(result)
+    _proj_smart_cache_ts[cache_key] = now_ts
     return result
 
 
