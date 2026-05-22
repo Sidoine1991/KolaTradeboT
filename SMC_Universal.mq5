@@ -29597,6 +29597,38 @@ void CheckAndExecuteSpikeTrade()
    if(SMC_NonOTEEntriesBlocked()) return;
    if(ShouldBlockNewTradeDueToDailyCap()) return;
 
+   // === SPIKE GATES - Apply same filtering as verdict entry ===
+   double mlAccuracy = g_lastAIConfidence * 100.0;
+   MqlDateTime timeStruct;
+   TimeToStruct(TimeCurrent(), timeStruct);
+   int currentHour = timeStruct.hour;
+
+   // Gate: Market hours (no Asian session)
+   if(currentHour >= 22 || currentHour < 8)
+   {
+      if(SMC_LogThrottle("SPIKE_GATE_ASIAN_" + _Symbol, 60))
+         Print("🚫 SPIKE BLOQUÉ: Session Asiatique (hour=", currentHour, ")");
+      return;
+   }
+
+   // Gate: ML accuracy minimum
+   if(mlAccuracy > 0 && mlAccuracy < 72.0)
+   {
+      if(SMC_LogThrottle("SPIKE_GATE_ML_" + _Symbol, 30))
+         Print("🚫 SPIKE BLOQUÉ: ML accuracy ", DoubleToString(mlAccuracy, 1), "% < 72%");
+      return;
+   }
+
+   // Gate: Volatility check
+   double atrValue = iATR(_Symbol, PERIOD_H1, 14);
+   double minATR = 0.0005 * _Point;
+   if(atrValue < minATR && atrValue > 0)
+   {
+      if(SMC_LogThrottle("SPIKE_GATE_VOL_" + _Symbol, 30))
+         Print("🚫 SPIKE BLOQUÉ: Volatilité insuffisante (ATR ", DoubleToString(atrValue, 5), ")");
+      return;
+   }
+
    // Ne pas utiliser une confiance IA "figée" si la dernière décision `/decision`
    // n'est pas fraîche (sinon on obtient la même valeur partout, ex: 34.9%).
    bool aiConfFresh = false;
@@ -29617,8 +29649,8 @@ void CheckAndExecuteSpikeTrade()
    if(confPct >= SMC_EffMinAIConfidencePercent())
    {
       if(DebugSpikeDetection)
-         Print("🤖 IA FORTE - Utilisation logique IA normale (", 
-               NormalizeDouble(confPct, 1), "% ≥ ", 
+         Print("🤖 IA FORTE - Utilisation logique IA normale (",
+               NormalizeDouble(confPct, 1), "% ≥ ",
                NormalizeDouble(SMC_EffMinAIConfidencePercent(), 1), "%)");
       return; // Utiliser logique IA normale
    }
@@ -32072,6 +32104,62 @@ void CheckAndExecuteVerdictAutoEntry()
             " | EnableTrading=", EnableTrading,
             " | EnableAutoEntry=", EnableAutoEntryOnStrongVerdict,
             " | VerdictAutoMarketOnGP=", VerdictAutoMarketOnGoodPerfect);
+
+   // === ÉTAPE 1: GATE ML ACCURACY ===
+   double mlAccuracy = g_lastAIConfidence * 100.0;  // Convertir de 0..1 en 0..100%
+   if(mlAccuracy > 0 && mlAccuracy < 75.0)
+   {
+      if(SMC_LogThrottle("GATE1_ML_ACC_" + _Symbol, 30))
+         Print("🔴 GATE 1 BLOQUÉ: ML accuracy ", DoubleToString(mlAccuracy, 1), "% < 75% (confiance IA insuffisante)");
+      return;
+   }
+
+   // === ÉTAPE 2: GATE CONFIDENCE THRESHOLD ===
+   double currentConfidence = g_finalVerdict.finalConfPct;
+   if(currentConfidence < 80.0)
+   {
+      if(SMC_LogThrottle("GATE2_CONF_" + _Symbol, 30))
+         Print("🔴 GATE 2 BLOQUÉ: Confidence ", DoubleToString(currentConfidence, 1), "% < 80% (signal trop faible)");
+      return;
+   }
+
+   // === ÉTAPE 3: GATE MARKET STATE (ASIAN HOURS) ===
+   MqlDateTime timeStruct;
+   TimeToStruct(TimeCurrent(), timeStruct);
+   int currentHour = timeStruct.hour;
+   if(currentHour >= 22 || currentHour < 8)
+   {
+      if(SMC_LogThrottle("GATE3_ASIAN_" + _Symbol, 60))
+         Print("🔴 GATE 3 BLOQUÉ: Session Asiatique (hour=", currentHour, ") - trading suspendu (22h-8h Londres)");
+      return;
+   }
+
+   // === ÉTAPE 4: GATE VOLATILITY CHECK ===
+   double atrValue = iATR(_Symbol, PERIOD_H1, 14);
+   double minATR = 0.0005 * _Point;  // Seuil minimum volatilité
+   if(atrValue < minATR && atrValue > 0)
+   {
+      if(SMC_LogThrottle("GATE4_VOL_" + _Symbol, 30))
+         Print("🔴 GATE 4 BLOQUÉ: Volatilité insuffisante (ATR ", DoubleToString(atrValue, 5), " < seuil ", DoubleToString(minATR, 5), ")");
+      return;
+   }
+
+   // === ÉTAPE 5: SIGNAL QUALITY SCORE ===
+   double signalQuality = (currentConfidence * 0.40) +
+                         (g_finalVerdict.finalScore >= 0.5 ? 25.0 : 15.0) +
+                         (mlAccuracy >= 72.0 ? 20.0 : 10.0) +
+                         (atrValue > minATR ? 15.0 : 5.0);
+
+   if(signalQuality < 75.0)
+   {
+      if(SMC_LogThrottle("GATE5_QUALITY_" + _Symbol, 30))
+         Print("🔴 GATE 5 BLOQUÉ: Signal quality score ", DoubleToString(signalQuality, 1), "% < 75% (setup faible)");
+      return;
+   }
+
+   // === TOUS LES GATES PASSÉS - SIGNAL QUALIFIÉ ===
+   if(SMC_LogThrottle("GATES_PASS_" + _Symbol, 60))
+      Print("✅ TOUS LES GATES PASSÉS - Signal qualifié (quality=", DoubleToString(signalQuality, 1), "%)");
 
    if(SMC_IsConsolidateBlocked())             VAGATE("Prediction=CONSOLIDATE → attendre UP/DOWN")
    if(!EnableTrading)                        VAGATE("EnableTrading=false")

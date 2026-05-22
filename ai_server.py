@@ -102,10 +102,10 @@ def validate_required_env_vars():
 
     if missing:
         raise EnvironmentError(
-            f"❌ CRITICAL: Missing required environment variables: {', '.join(missing)}\n"
+            f"[ERROR] CRITICAL: Missing required environment variables: {', '.join(missing)}\n"
             f"Configure-les dans le dashboard Render (Environment) ou dans votre fichier .env"
         )
-    print("✅ Required environment variables configured for current deployment mode")
+    print("[OK] Required environment variables configured for current deployment mode")
 
 # === INPUT VALIDATION ===
 VALID_SYMBOL_PATTERN = re.compile(r'^[A-Z0-9_]{2,20}$')
@@ -7615,6 +7615,44 @@ async def health_check():
         "simplified_tf_cache_entries": len(simplified_tf_cache),
         "CACHE_DURATION_SECONDS": CACHE_DURATION,
     }
+
+
+@app.get("/projection/smart")
+async def projection_smart(symbol: str = Query("XAUUSD"), current_price: float = Query(0.0), atr: float = Query(0.0)):
+    """Projection intelligente des niveaux de prix (fallback safe)"""
+    try:
+        if not symbol or current_price <= 0:
+            return {
+                "proj_near": current_price,
+                "proj_mid": current_price,
+                "proj_far": current_price,
+                "direction_bias": "NEUTRAL",
+                "win_rate": 0.5,
+                "source": "fallback_default"
+            }
+
+        safe_atr = max(atr, 0.01) if atr > 0 else current_price * 0.001
+
+        return {
+            "proj_near": round(current_price + safe_atr, 5),
+            "proj_mid": round(current_price + safe_atr * 2, 5),
+            "proj_far": round(current_price + safe_atr * 3, 5),
+            "direction_bias": "UP",
+            "win_rate": 0.5,
+            "source": "fallback_atr_based",
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        logging.error(f"Erreur /projection/smart: {e}")
+        return {
+            "proj_near": current_price,
+            "proj_mid": current_price,
+            "proj_far": current_price,
+            "direction_bias": "NEUTRAL",
+            "win_rate": 0.0,
+            "error": str(e),
+            "source": "fallback_error"
+        }
 
 
 @app.get("/health/rds")
