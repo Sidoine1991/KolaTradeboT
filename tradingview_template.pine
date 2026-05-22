@@ -1,0 +1,84 @@
+// TradBOT Signal Sender - Strategy Template
+// Copy this to TradingView Pine Script Editor and adapt your logic
+
+//@version=5
+strategy("TradBOT Signal Sender", overlay=true, margin_long=100, margin_short=100)
+
+// ===== USER INPUTS =====
+atrPeriod = input.int(14, "ATR Period", minval=1)
+rsiPeriod = input.int(14, "RSI Period", minval=1)
+rsiOversold = input.int(30, "RSI Oversold", minval=10, maxval=50)
+rsiOverbought = input.int(70, "RSI Overbought", minval=50, maxval=90)
+
+// ===== INDICATORS =====
+atrValue = ta.atr(atrPeriod)
+rsiValue = ta.rsi(close, rsiPeriod)
+
+// ===== SIGNAL LOGIC =====
+// Replace this with your actual strategy logic
+
+// Buy Signal: RSI oversold + price above MA
+buySignal = rsiValue < rsiOversold and close > ta.sma(close, 20)
+
+// Sell Signal: RSI overbought + price below MA
+sellSignal = rsiValue > rsiOverbought and close < ta.sma(close, 20)
+
+// ===== TRADBOT WEBHOOK MESSAGE =====
+// Format: JSON payload for TradBOT webhook
+
+if buySignal
+    // Build JSON message for BUY signal
+    msg = json.stringify({
+        "symbol": syminfo.prefix + syminfo.basecurrency,
+        "timeframe": timeframe.period,
+        "action": "BUY",
+        "confidence": 0.85,
+        "price": close,
+        "stop_loss": close - (atrValue * 2),
+        "take_profit": close + (atrValue * 3),
+        "reason": "RSI oversold + MA bullish cross"
+    })
+    alert(msg)
+    strategy.entry("long", strategy.long)
+
+if sellSignal
+    // Build JSON message for SELL signal
+    msg = json.stringify({
+        "symbol": syminfo.prefix + syminfo.basecurrency,
+        "timeframe": timeframe.period,
+        "action": "SELL",
+        "confidence": 0.85,
+        "price": close,
+        "stop_loss": close + (atrValue * 2),
+        "take_profit": close - (atrValue * 3),
+        "reason": "RSI overbought + MA bearish cross"
+    })
+    alert(msg)
+    strategy.entry("short", strategy.short)
+
+// Exit logic
+if strategy.position_size > 0 and close < ta.lowest(low, 20)
+    msg = json.stringify({
+        "symbol": syminfo.prefix + syminfo.basecurrency,
+        "timeframe": timeframe.period,
+        "action": "CLOSE",
+        "confidence": 0.75,
+        "reason": "Stop loss triggered"
+    })
+    alert(msg)
+    strategy.close("long")
+
+if strategy.position_size < 0 and close > ta.highest(high, 20)
+    msg = json.stringify({
+        "symbol": syminfo.prefix + syminfo.basecurrency,
+        "timeframe": timeframe.period,
+        "action": "CLOSE",
+        "confidence": 0.75,
+        "reason": "Stop loss triggered"
+    })
+    alert(msg)
+    strategy.close("short")
+
+// ===== VISUAL MARKERS =====
+plotshape(buySignal, location=location.belowbar, color=color.green, style=shape.labelup, title="Buy Signal")
+plotshape(sellSignal, location=location.abovebar, color=color.red, style=shape.labeldown, title="Sell Signal")

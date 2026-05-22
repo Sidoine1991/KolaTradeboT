@@ -9551,11 +9551,11 @@ async def get_logs(limit: int = 100):
     try:
         if not LOG_FILE.exists():
             return {"logs": [], "message": "Aucun log disponible"}
-        
+
         with open(LOG_FILE, "r", encoding="utf-8") as f:
             lines = f.readlines()
             recent_lines = lines[-limit:] if len(lines) > limit else lines
-        
+
         return {
             "logs": [line.strip() for line in recent_lines],
             "total_lines": len(lines),
@@ -9564,6 +9564,225 @@ async def get_logs(limit: int = 100):
     except Exception as e:
         logger.error(f"Erreur lecture logs: {e}")
         return {"logs": [], "error": str(e)}
+
+
+# ===== TRADINGVIEW WEBHOOK INTEGRATION =====
+
+class TradingViewSignal(BaseModel):
+    """Modèle pour les signaux TradingView reçus via webhook"""
+    symbol: str = Field(..., description="Symbole du trading pair (ex: EURUSD)")
+    timeframe: str = Field("M1", description="Timeframe (M1, M5, M15, M30, H1, H4, D1)")
+    action: str = Field(..., description="Action: BUY, SELL, ou CLOSE")
+    confidence: float = Field(default=0.75, ge=0.0, le=1.0, description="Confiance du signal (0-1)")
+    price: Optional[float] = Field(None, description="Prix actuel de déclenchement")
+    stop_loss: Optional[float] = Field(None, description="Stop Loss sugéré")
+    take_profit: Optional[float] = Field(None, description="Take Profit suggéré")
+    reason: Optional[str] = Field(None, description="Raison/analyse du signal")
+    alert_message: Optional[str] = Field(None, description="Message brut de l'alerte TradingView")
+    custom_data: Optional[Dict[str, Any]] = Field(None, description="Données personnalisées additionnelles")
+
+
+@app.post("/webhook/tradingview")
+async def webhook_tradingview(signal: TradingViewSignal):
+    """
+    Endpoint webhook pour recevoir les signaux TradingView.
+
+    Usage dans TradingView Pine Script:
+    ```
+    alertmessage = json.stringify({
+        "symbol": syminfo.prefix + syminfo.basecurrency,
+        "timeframe": timeframe.period,
+        "action": "BUY",
+        "confidence": 0.85,
+        "price": close,
+        "stop_loss": close - (atr * 2),
+        "take_profit": close + (atr * 3),
+        "reason": "PERFECT Signal - FVG + OB Breakout"
+    })
+    alert(alertmessage)
+    ```
+    """
+    try:
+        start_time = time.time()
+
+        # Validation
+        symbol = (signal.symbol or "").strip().upper()
+        if not validate_symbol(symbol):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Symbole invalide: {symbol}. Format: [A-Z0-9_]{{2,20}}"
+            )
+
+        timeframe = (signal.timeframe or "M1").strip().upper()
+        if not validate_timeframe(timeframe):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Timeframe non supportée: {timeframe}. Supportés: {VALID_TIMEFRAMES}"
+            )
+
+        action = (signal.action or "").strip().upper()
+        if action not in ("BUY", "SELL", "CLOSE"):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Action invalide: {action}. Doit être: BUY, SELL, CLOSE"
+            )
+
+        confidence = float(signal.confidence or 0.75)
+        confidence = max(0.0, min(1.0, confidence))
+
+        logger.info(
+            f"📊 TradingView Signal reçu: {symbol} {timeframe} {action} "
+            f"(confiance: {confidence:.0%}, prix: {signal.price})"
+        )
+
+        # Construire le payload d'analyse compatible avec la pipeline existante
+        analysis_payload = {
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "direction": action,
+            "action": action,
+            "confidence": confidence,
+            "current_price": signal.price or 0.0,
+            "stop_loss": signal.stop_loss or 0.0,
+            "take_profit": signal.take_profit or 0.0,
+            "reason": signal.reason or "TradingView Signal",
+            "source": "tradingview_webhook",
+            "timestamp": datetime.utcnow().isoformat(),
+        }
+
+        if signal.custom_data:
+            analysis_payload.update(signal.custom_data)
+
+        # Validation du verdict avec la logique SMC existante
+        decision_request = DecisionRequest(
+            symbol=symbol,
+            timeframe=timeframe,
+            timestamp=datetime.utcnow().isoformat(),
+            data=analysis_payload,
+            rsi=None,
+            macd=None,
+            atr=None,
+        )
+
+        # Traiter via la pipeline décision360 existante
+        result = await process_analysis_360(analysis_payload)
+
+        process_time = time.time() - start_time
+
+        # Logger le résultat
+        logger.info(
+            f"✅ TradingView Signal traité: {symbol} → {result.get('status')} "
+            f"(temps: {process_time:.3f}s)"
+        )
+
+        # Retourner la décision avec métadonnées
+        return {
+            "status": "SUCCESS",
+            "symbol": symbol,
+            "action": action,
+            "timeframe": timeframe,
+            "confidence": confidence,
+            "decision": result,
+            "source": "tradingview",
+            "processed_at": datetime.utcnow().isoformat(),
+            "processing_time_ms": int(process_time * 1000),
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Erreur webhook TradingView: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Erreur traitement webhook TradingView: {str(e)[:100]}"
+        )
+
+
+@app.get("/webhook/tradingview/test")
+async def test_tradingview_webhook():
+    """
+    Endpoint de test pour valider la configuration du webhook TradingView.
+    Envoie un signal de test pour vérifier la connectivité.
+    """
+    test_signal = TradingViewSignal(
+        symbol="EURUSD",
+        timeframe="M5",
+        action="BUY",
+        confidence=0.85,
+        price=1.0850,
+        stop_loss=1.0830,
+        take_profit=1.0900,
+        reason="Test signal - SMC Perfect Setup detected"
+    )
+
+    return await webhook_tradingview(test_signal)
+
+
+@app.get("/webhook/tradingview/docs")
+async def tradingview_webhook_docs():
+    """
+    Documentation pour intégrer TradingView à TradBOT via webhook.
+    """
+    return {
+        "endpoint": "/webhook/tradingview",
+        "method": "POST",
+        "description": "Recoit les signaux TradingView et les traite via la pipeline SMC",
+        "webhook_url": f"{os.getenv('SERVER_URL', 'http://localhost:8000')}/webhook/tradingview",
+        "test_url": f"{os.getenv('SERVER_URL', 'http://localhost:8000')}/webhook/tradingview/test",
+        "request_model": {
+            "symbol": "string (ex: EURUSD)",
+            "timeframe": "string (M1, M5, M15, M30, H1, H4, D1)",
+            "action": "string (BUY, SELL, CLOSE)",
+            "confidence": "float (0.0 - 1.0)",
+            "price": "float (prix actuel optionnel)",
+            "stop_loss": "float (SL optionnel)",
+            "take_profit": "float (TP optionnel)",
+            "reason": "string (raison du signal optionnelle)",
+            "alert_message": "string (message brut optionnel)",
+            "custom_data": "object (données additionnelles optionnelles)"
+        },
+        "pine_script_example": """
+// TradingView Pine Script Alert Example
+strategy("TradBOT Signal Sender", overlay=true)
+
+// ... votre logique de stratégie ...
+
+if (buySignalDetected)
+    msg = json.stringify({
+        "symbol": syminfo.prefix + syminfo.basecurrency,
+        "timeframe": timeframe.period,
+        "action": "BUY",
+        "confidence": 0.85,
+        "price": close,
+        "stop_loss": ta.lowest(low, 10),
+        "take_profit": close + (ta.atr(14) * 2),
+        "reason": "FVG Breakout avec OB Support"
+    })
+    alert(msg)
+        """,
+        "webhook_setup_steps": [
+            "1. Créer une stratégie/indicateur dans TradingView",
+            "2. Ajouter une alerte via Alert() avec le JSON du signal",
+            "3. Configurer le webhook: Manage Alerts → Configure webhook",
+            "4. URL du webhook: /webhook/tradingview",
+            "5. Tester avec: /webhook/tradingview/test"
+        ],
+        "response_example": {
+            "status": "SUCCESS",
+            "symbol": "EURUSD",
+            "action": "BUY",
+            "timeframe": "M5",
+            "confidence": 0.85,
+            "decision": {
+                "status": "SIGNAL",
+                "verdict": "PERFECT",
+                "score": 0.92
+            },
+            "source": "tradingview",
+            "processed_at": "2026-05-22T14:30:45.123Z",
+            "processing_time_ms": 145
+        }
+    }
 
 @app.post("/decisionGemma", response_model=DecisionResponse)
 async def decision_gemma(request: DecisionRequest):
