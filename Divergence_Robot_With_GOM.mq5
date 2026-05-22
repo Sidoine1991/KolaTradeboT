@@ -142,7 +142,10 @@ int OnInit()
       return INIT_FAILED;
    }
 
-   Print("✅ Divergence Robot initialisé");
+   Print("✅ Divergence Robot initialisé sur ", _Symbol);
+   Print("   Timeframe: H1");
+   Print("   Magic: ", InpMagicNumber);
+   Print("   Auto Trading: ", EnableAutoTrading);
    return INIT_SUCCEEDED;
 }
 
@@ -150,22 +153,38 @@ int OnInit()
 void OnTick()
 {
    static datetime lastTradeTime = 0;
+   static int barCounter = 0;
    datetime currentTime = TimeCurrent();
 
    // Check once per bar
    if(iTime(_Symbol, PERIOD_H1, 0) == lastTradeTime) return;
    lastTradeTime = iTime(_Symbol, PERIOD_H1, 0);
+   barCounter++;
+
+   // Log every 5 bars
+   if(barCounter % 5 == 0)
+      Print("[BAR ", barCounter, "] Scanning for divergence signals...");
 
    // Detect GOM levels, Order Blocks, SIDO patterns
    DetectGOMEntryLevels();
+   if(gomLevelCount > 0 && barCounter % 5 == 0)
+      Print("   GOM Levels found: ", gomLevelCount);
+
    DetectOrderBlocks();
+   if(detectedOB.confirmed && barCounter % 5 == 0)
+      Print("   Order Block: ", detectedOB.direction, " [", detectedOB.low, "-", detectedOB.high, "]");
+
    DetectSIDOPatterns();
+   if(detectedSIDO.confirmed && barCounter % 5 == 0)
+      Print("   SIDO Pattern: ", detectedSIDO.patternType);
 
    // Update dashboard
    UpdateDashboard();
 
    // Calculate divergence signal
    DivergenceSignal sig = CalculateDivergenceSignal();
+   if(barCounter % 5 == 0)
+      Print("   Signal: ", sig.direction, " | Score: ", sig.confluenceScore, " | Conf: ", sig.confidence, "%");
 
    // Enhance signal with GOM levels
    if(sig.direction != "")
@@ -179,9 +198,18 @@ void OnTick()
    }
 
    // Check entry conditions
-   if(sig.direction != "" && EnableAutoTrading)
+   if(sig.direction != "")
    {
-      CheckAndExecuteEntry(sig);
+      if(EnableAutoTrading)
+      {
+         Print(">> DIVERGENCE SIGNAL DETECTED: ", sig.direction);
+         Print("   Confidence: ", sig.confidence, "% | Score: ", sig.confluenceScore);
+         CheckAndExecuteEntry(sig);
+      }
+      else
+      {
+         Print(">> Signal detected but AUTO TRADING disabled");
+      }
    }
 
    // Manage open positions
@@ -201,22 +229,35 @@ DivergenceSignal CalculateDivergenceSignal()
    double atrBuf[];
    ArraySetAsSeries(atrBuf, true);
    if(CopyBuffer(atrHandle, 0, 0, DivWindow+5, atrBuf) <= 0)
+   {
+      Print("ERROR: Could not copy ATR buffer");
       return sig;
+   }
 
    double atr = atrBuf[0];
-   if(atr <= 0) return sig;
+   if(atr <= 0)
+   {
+      Print("ERROR: ATR is zero or negative");
+      return sig;
+   }
 
    // Get RSI values
    double rsiBuf[];
    ArraySetAsSeries(rsiBuf, true);
    if(CopyBuffer(rsiHandle, 0, 0, DivWindow+5, rsiBuf) <= 0)
+   {
+      Print("ERROR: Could not copy RSI buffer");
       return sig;
+   }
 
    // Get price data
    MqlRates rates[];
    ArraySetAsSeries(rates, true);
    if(CopyRates(_Symbol, PERIOD_H1, 0, DivWindow+5, rates) <= 0)
+   {
+      Print("ERROR: Could not copy rates");
       return sig;
+   }
 
    // === CALCULATE DIVERGENCE VECTOR ===
    // Component 1: Price momentum (dP/dx)
@@ -425,27 +466,36 @@ void UpdateTrailingStops()
 // ===== DASHBOARD =====
 void UpdateDashboard()
 {
-   string dashText = "═ DIVERGENCE ROBOT v2.0 + GOM ═\n";
-   dashText += "Strategy: Divergence v5 + Multi-TF GOM\n";
-   dashText += "Timeframe: H1 Entry | M1-H1 GOM Levels\n";
-   dashText += "───────────────────────────────────\n";
+   string dashText = "";
+   dashText += "[DIVERGENCE ROBOT v2.0 + GOM]\n";
+   dashText += "Symbol: " + _Symbol + " | TF: H1\n";
+   dashText += "Status: ACTIVE\n";
+   dashText += "AutoTrading: " + (EnableAutoTrading ? "ON" : "OFF") + "\n";
+   dashText += "---\n";
    dashText += "Positions: " + IntegerToString(CountPositions()) + "/" + IntegerToString(MaxPositionsAllowed) + "\n";
    dashText += "Trades Today: " + IntegerToString(CountTradesForToday()) + "/" + IntegerToString(MaxTradesPerDay) + "\n";
-   dashText += "\nLast Signal: " + lastSignal.direction + " @ " + DoubleToString(lastSignal.priceLevel, _Digits) + "\n";
-   dashText += "Confidence: " + DoubleToString(lastSignal.confidence, 1) + "%\n";
-   dashText += "Score: " + IntegerToString(lastSignal.confluenceScore) + "/" + IntegerToString(ConfluenceMin) + "\n";
+   dashText += "---\n";
 
-   if(lastSignal.gomEntryLevel > 0)
-      dashText += "GOM Entry: " + DoubleToString(lastSignal.gomEntryLevel, _Digits) + " (" + lastSignal.gomTimeframe + ")\n";
+   if(lastSignal.direction != "")
+   {
+      dashText += "Last Signal: " + lastSignal.direction + "\n";
+      dashText += "Entry: " + DoubleToString(lastSignal.priceLevel, _Digits) + "\n";
+      dashText += "Confidence: " + DoubleToString(lastSignal.confidence, 1) + "%\n";
+      dashText += "Score: " + IntegerToString(lastSignal.confluenceScore) + "/" + IntegerToString(ConfluenceMin) + "\n";
+   }
+   else
+   {
+      dashText += "Last Signal: NONE YET\n";
+   }
 
-   if(gomLevelCount > 0)
-      dashText += "Active GOM Levels: " + IntegerToString(gomLevelCount) + "\n";
+   dashText += "---\n";
+   dashText += "GOM Levels: " + IntegerToString(gomLevelCount) + "\n";
 
    if(detectedOB.confirmed)
-      dashText += "Order Block: " + detectedOB.direction + " [" + DoubleToString(detectedOB.low, _Digits) + "-" + DoubleToString(detectedOB.high, _Digits) + "]\n";
+      dashText += "OB: " + detectedOB.direction + " @ " + DoubleToString(detectedOB.low, _Digits) + "\n";
 
    if(detectedSIDO.confirmed)
-      dashText += "SIDO Pattern: " + detectedSIDO.patternType + "\n";
+      dashText += "SIDO: " + detectedSIDO.patternType + "\n";
 
    Comment(dashText);
 }
