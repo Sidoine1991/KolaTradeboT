@@ -32064,6 +32064,15 @@ void CheckAndExecuteVerdictAutoEntry()
             " | verdict=", g_finalVerdict.verdictLabel, " ", \
             DoubleToString(g_finalVerdict.finalConfPct,1), "%"); return; }
 
+   // Log current verdict status for debugging
+   if(SMC_LogThrottle("VAE_DEBUG_" + _Symbol, 60))
+      Print("🔍 VERDICT AUTO DEBUG [", _Symbol, "]: verdict=", g_finalVerdict.verdictLabel,
+            " | conf=", DoubleToString(g_finalVerdict.finalConfPct,1), "%",
+            " | dir=", g_finalVerdict.direction,
+            " | EnableTrading=", EnableTrading,
+            " | EnableAutoEntry=", EnableAutoEntryOnStrongVerdict,
+            " | VerdictAutoMarketOnGP=", VerdictAutoMarketOnGoodPerfect);
+
    if(SMC_IsConsolidateBlocked())             VAGATE("Prediction=CONSOLIDATE → attendre UP/DOWN")
    if(!EnableTrading)                        VAGATE("EnableTrading=false")
    if(!EnableAutoEntryOnStrongVerdict)       VAGATE("EnableAutoEntryOnStrongVerdict=false")
@@ -32077,11 +32086,12 @@ void CheckAndExecuteVerdictAutoEntry()
    if(!SMC_VerdictStrongEnoughForEntry())
       VAGATE("Verdict pas assez fort (conf " + DoubleToString(g_finalVerdict.finalConfPct, 1) + "%)")
 
-   // === ORDRE MARCHÉ : seulement sur PERFECT BUY/SELL + prediction UP/DOWN ===
+   // === ORDRE MARCHÉ : PERFECT et GOOD verdicts exécutés automatiquement ===
    {
       bool isPerfect = (StringFind(g_finalVerdict.verdictLabel, "PERFECT") >= 0);
-      if(!isPerfect)
-         VAGATE("Marché réservé aux PERFECT (verdict=" + g_finalVerdict.verdictLabel + ") → attendre touche niveau")
+      bool isGood = (StringFind(g_finalVerdict.verdictLabel, "GOOD") >= 0);
+      if(!isPerfect && !isGood)
+         VAGATE("Marché réservé aux PERFECT/GOOD (verdict=" + g_finalVerdict.verdictLabel + ")")
       if(g_cachedPricePrediction.direction == "CONSOLIDATE")
          VAGATE("Prediction=CONSOLIDATE → pas d'ordre marché")
       if(!SMC_SetupEvalDirectionAllowed(g_finalVerdict.direction))
@@ -32131,6 +32141,13 @@ void CheckAndExecuteVerdictAutoEntry()
       entryTf = "MKT";
    }
 
+   // Log when executing PERFECT/GOOD verdict
+   Print("🚀 EXÉCUTION VERDICT AUTO [", _Symbol, "] ", g_finalVerdict.verdictLabel,
+         " ", g_finalVerdict.direction,
+         " | confiance=", DoubleToString(g_finalVerdict.finalConfPct,1), "%",
+         " | niveau=", entryTf,
+         " | prix=", DoubleToString(entryLvl, _Digits));
+
    // Bonus canal multi-TF : log uniquement (ne bloque pas, renforce la conviction)
    if(SMC_IsChannelBonusActive(g_finalVerdict.direction))
       Print("🏆 BONUS CANAL [", _Symbol, "] VERDICT ", g_finalVerdict.direction,
@@ -32138,7 +32155,15 @@ void CheckAndExecuteVerdictAutoEntry()
             " | entry=", entryTf);
 
    if(!ExecuteVerdictMarketOrder(g_finalVerdict.direction, entryTf))
+   {
+      Print("❌ EXÉCUTION ÉCHOUÉE [", _Symbol, "] verdict=", g_finalVerdict.verdictLabel,
+            " | direction=", g_finalVerdict.direction);
       SMC_LogGoodPerfectEntryDiagnostics("EXEC_FAIL");
+   }
+   else
+   {
+      Print("✅ EXÉCUTION RÉUSSIE [", _Symbol, "] verdict=", g_finalVerdict.verdictLabel);
+   }
 }
 
 // Touche entry level (m1/m5/m30/h1) → ordre marché pour capter le spike
