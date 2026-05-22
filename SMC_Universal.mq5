@@ -32835,7 +32835,41 @@ void CheckAndExecuteOTEEntry()
    #define OTE_GATE(reason) { if(SMC_LogThrottle("OTE_OB_GATE_" + _Symbol, 45)) \
       Print("⏸ OB+CHOCH/OTE [", _Symbol, "] ", reason, " | verdict=", g_finalVerdict.verdictLabel); return; }
 
-   if(g_confirmedOB.direction == 0) return;  // Pas d'OB confirmée
+   // === ALLOW OTE EXECUTION WITHOUT OB IF PERFECT/GOOD OTE VERDICT ===
+   // If no OB confirmed, try to execute OTE verdict as market order using GOM entry level
+   if(g_confirmedOB.direction == 0)
+   {
+      // Check if we have a PERFECT/GOOD OTE verdict
+      if(!SMC_IsGoodOrPerfectVerdict()) return;  // No OB, no verdict → exit
+
+      // Log for debugging
+      if(SMC_LogThrottle("OTE_NO_OB_VERDICT_" + _Symbol, 60))
+         Print("🔍 OTE VERDICT without OB: ", g_finalVerdict.verdictLabel, " ", g_finalVerdict.direction, " [", _Symbol, "]");
+
+      // Try to execute as market order using GOM entry level (like PERFECT/GOOD verdicts)
+      double entryLvl = 0.0;
+      string entryTf = "";
+      if(!SMC_PickVerdictEntryLevel(g_finalVerdict.direction, entryLvl, entryTf))
+      {
+         entryLvl = (g_finalVerdict.direction == "BUY")
+                    ? SymbolInfoDouble(_Symbol, SYMBOL_ASK)
+                    : SymbolInfoDouble(_Symbol, SYMBOL_BID);
+         entryTf = "MKT";
+      }
+
+      Print("🚀 OTE MARKET EXECUTION [", _Symbol, "] ", g_finalVerdict.verdictLabel,
+            " ", g_finalVerdict.direction, " | niveau=", entryTf, " | prix=", DoubleToString(entryLvl, _Digits));
+
+      if(ExecuteVerdictMarketOrder(g_finalVerdict.direction, entryTf))
+      {
+         Print("✅ OTE MARKET EXÉCUTÉ [", _Symbol, "] ", g_finalVerdict.verdictLabel);
+      }
+      else
+      {
+         Print("❌ OTE MARKET ÉCHOUÉ [", _Symbol, "] ", g_finalVerdict.verdictLabel);
+      }
+      return;  // Exit - execution attempted (with or without OB)
+   }
 
    // PROTECTION: Interdire BUY sur Crash et SELL sur Boom
    if(g_confirmedOB.direction > 0 && !IsDirectionAllowedForBoomCrash(_Symbol, "BUY"))
