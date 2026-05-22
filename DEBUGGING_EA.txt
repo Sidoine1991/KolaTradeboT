@@ -1,0 +1,239 @@
+================================================================================
+                    DEBUGGING DIVERGENCE ROBOT v2.0
+================================================================================
+
+Date: 2026-05-22
+Issue: No drawings on chart, no trades, no logs visible
+
+================================================================================
+ENHANCED LOGGING ADDED
+================================================================================
+
+The EA now has detailed logging at every step:
+
+1. OnInit() logs:
+   - Robot initialization on symbol
+   - Timeframe (H1)
+   - Magic number
+   - Auto-trading status
+
+2. OnTick() logs (every 5 bars):
+   - Bar counter
+   - GOM levels found (count)
+   - Order Blocks detected
+   - SIDO patterns found
+   - Signal detection status
+
+3. Divergence signal logs:
+   - Direction, confidence, score
+   - Error messages if calculation fails
+
+================================================================================
+STEP 1: RECOMPILE THE EA
+================================================================================
+
+1. Open MetaTrader 5
+2. Tools → Compile (F7)
+3. File: Divergence_Robot_With_GOM.mq5
+4. Expected: 0 errors, 0 warnings
+
+Check Output panel for any errors.
+
+
+================================================================================
+STEP 2: ATTACH EA TO CHART
+================================================================================
+
+1. Open EURUSD H1 chart
+2. Expert Advisors → Divergence_Robot_With_GOM → Properties
+3. Check inputs:
+   [REQUIRED] EnableAutoTrading = true (checked)
+   [REQUIRED] EnableGOMEntryLevels = true (checked)
+   [REQUIRED] EnableOrderBlockDetection = true (checked)
+   [REQUIRED] EnableSIDO = true (checked)
+
+4. Click OK to attach
+
+
+================================================================================
+STEP 3: MONITOR THE LOGS
+================================================================================
+
+Open MT5 Experts tab (View → Experts or Alt+L).
+
+You should see logs like:
+
+   ✅ Divergence Robot initialisé sur EURUSD
+      Timeframe: H1
+      Magic: 123456
+      Auto Trading: 1
+
+Then after a few bars:
+
+   [BAR 5] Scanning for divergence signals...
+      GOM Levels found: 3
+      Signal:  | Score: 0 | Conf: 0%
+
+   [BAR 10] Scanning for divergence signals...
+      Order Block: BUY [1.0840-1.0860]
+      Signal: BUY | Score: 4 | Conf: 87.5%
+
+   >> DIVERGENCE SIGNAL DETECTED: BUY
+      Confidence: 87.5% | Score: 4
+
+
+================================================================================
+STEP 4: CHECK THE DASHBOARD
+================================================================================
+
+On the chart, at the bottom-left corner, you should see:
+
+   [DIVERGENCE ROBOT v2.0 + GOM]
+   Symbol: EURUSD | TF: H1
+   Status: ACTIVE
+   AutoTrading: ON
+   ---
+   Positions: 0/3
+   Trades Today: 0/5
+   ---
+   Last Signal: NONE YET
+   ---
+   GOM Levels: 3
+   OB: BUY @ 1.0840
+
+
+================================================================================
+TROUBLESHOOTING: What Each Log Means
+================================================================================
+
+IF YOU SEE:
+   [BAR 5] Scanning for divergence signals...
+   (nothing after)
+
+→ GOM levels not detected. Possible causes:
+   - Not enough historical data yet
+   - No clear support/resistance in this market
+   - Touch detection threshold too strict
+
+FIX: Wait more bars, or increase BarsForTouchCount to 300
+
+
+---
+
+IF YOU SEE:
+   ERROR: Could not copy ATR buffer
+   ERROR: Could not copy RSI buffer
+   ERROR: Could not copy rates
+
+→ Indicator handles not initialized properly
+
+FIX: Restart the EA (detach and reattach)
+   Or check if enough bars are loaded on chart
+
+
+---
+
+IF YOU SEE:
+   Signal: BUY | Score: 0 | Conf: 0%
+
+→ No confluences detected, but calculation ran
+
+FIX: Check market - might be too choppy
+   Or adjust DivThreshold to 0.15 (lower threshold)
+
+
+---
+
+IF YOU SEE:
+   >> DIVERGENCE SIGNAL DETECTED: BUY
+   But no "Position opens" after
+
+→ Entry gates failing (not enough money, spread too wide, etc.)
+
+FIX: Check AutoTrading is ON in inputs
+   Or check that EnableAutoTrading = true
+
+
+================================================================================
+QUICK DIAGNOSTICS: What to Check
+================================================================================
+
+1. Is the EA attached?
+   → Chart title shows "Expert Advisors: Divergence_Robot_With_GOM"
+
+2. Is AutoTrading enabled in MT5?
+   → Tools → Options → Expert Advisors → "Allow Live Trading" checked
+
+3. Are there any compile errors?
+   → Experts tab should show clean initialization logs
+
+4. Is the chart updating?
+   → New H1 bars should form every hour
+   → Bar counter should increment every hour
+
+5. Is GOM detection working?
+   → Should see "GOM Levels found: N" every 5 bars after some time
+
+
+================================================================================
+EXPECTED BEHAVIOR TIMELINE
+================================================================================
+
+Bar 1-10: Initialization
+   Logs: Robot initialized
+   Dashboard: Status ACTIVE, no signals yet
+
+Bar 11-50: Data collection
+   Logs: GOM Levels found: 2-5
+   Logs: Scanning for divergence signals...
+   Dashboard: GOM Levels counter updates
+
+Bar 50+: First signals possible
+   Logs: Signal: BUY | Score: 2 | Conf: 40%
+   Logs: >> DIVERGENCE SIGNAL DETECTED: BUY
+   Dashboard: Last Signal shows direction
+
+
+================================================================================
+IF STILL NO SIGNALS AFTER 48 HOURS
+================================================================================
+
+1. Check market conditions
+   - Very strong trends = fewer divergence signals
+   - Consolidation markets = more signals
+
+2. Adjust parameters:
+   DivThreshold: 0.18 → 0.15 (more sensitive)
+   ConfluenceMin: 3 → 2 (lower minimum score)
+
+3. Check GOM detection working:
+   Add temporary log in DetectGOMEntryLevels():
+   Print("Scanning ", BarsForTouchCount, " bars for GOM levels...");
+
+4. Contact support with logs from:
+   Experts tab (full session)
+
+
+================================================================================
+FILES TO CHECK
+================================================================================
+
+Divergence_Robot_With_GOM.mq5 - Latest version with enhanced logging
+.env - Server config (shouldn't affect EA)
+ai_server.py - Backend (EA is standalone, doesn't need server for basic trading)
+
+
+================================================================================
+NEXT STEPS
+================================================================================
+
+1. Recompile the EA
+2. Detach and reattach to chart
+3. Wait 5-10 bars
+4. Check Experts log for "✅ Divergence Robot initialisé"
+5. If you see logs, you're ready to trade!
+6. If no logs appear, check compilation was successful
+
+Good luck! The EA should show tons of detail now. 🚀
+
+================================================================================
