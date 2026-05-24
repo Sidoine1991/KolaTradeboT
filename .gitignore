@@ -86,3 +86,47 @@ SMC_Universal.mq5
 SMC_Universal.ex5
 *.mq5
 *.ex5
+
+# Archives lourdes
+_archive/
+
+# Fichiers binaires / docs générés
+*.zip
+*.docx
+*.ex5
+
+# Logs de compilation
+compile_*.txt
+compile_*.bat
+compile_*.py
+
+# Scripts de backtest locaux
+backtest_*.py
+optimize_*.py
+generate_rapport*.py
+generate_report*.py
+regime_classifier.py
+gold_lstm_filter.py
+migrate_spike_events.py
+
+# Notebooks Jupyter
+*.ipynb
+
+# Données historiques locales
+data/hist_*/
+XAUUSD_data.zip
+
+# Fichiers de statut/docs de session
+DECISION_MANAGER_*.md
+DECISION_TREE.html
+GOLD_DIVERGENCE_*.md
+PHASE*.md
+RESTRUCTURING_PROGRESS.md
+*_COMPLETE.md
+*_GUIDE.md
+*_CHECKLIST.md
+*_READY_TO_COMPILE.md
+
+# Rapports générés
+reports/
+Backtest_report/
