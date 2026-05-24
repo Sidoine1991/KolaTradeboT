@@ -19848,3 +19848,75 @@ async def test_fallback_endpoint(symbol: str = "EURUSD", rsi: float = 65, macd: 
             }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ══════════════════════════════════════════════════════════════════════
+# GOLD LSTM FILTER — Biais directionnel D1 pour GoldSMC_EA
+# Endpoints : GET /gold/lstm-bias  |  GET /gold/lstm-status
+#             POST /gold/lstm-train
+# ══════════════════════════════════════════════════════════════════════
+
+try:
+    from gold_lstm_filter import predict_bias as _lstm_predict_bias
+    from gold_lstm_filter import get_model_status as _lstm_model_status
+    from gold_lstm_filter import train_lstm as _lstm_train
+    _LSTM_AVAILABLE = True
+    logger.info("[LSTM] Module gold_lstm_filter charge avec succes")
+except ImportError as _e:
+    _LSTM_AVAILABLE = False
+    logger.warning(f"[LSTM] Module non disponible: {_e}")
+
+
+@app.get("/gold/lstm-bias")
+async def gold_lstm_bias():
+    """
+    Retourne le biais directionnel LSTM D1 pour XAUUSD.
+    Utilise par GoldSMC_EA comme filtre de confirmation contextuel.
+
+    Response:
+      action      : BUY | SELL | NEUTRAL
+      confidence  : 0.0 - 1.0
+      prob_up     : probabilite brute de hausse
+      trend_htf   : UP | DOWN (SMA20 vs SMA50)
+      source      : lstm_d1 | no_model | error
+    """
+    if not _LSTM_AVAILABLE:
+        return {
+            "action": "NEUTRAL",
+            "confidence": 0.0,
+            "source": "module_unavailable",
+            "message": "Module gold_lstm_filter non installe — pip install tensorflow yfinance"
+        }
+    try:
+        result = _lstm_predict_bias()
+        return result
+    except Exception as e:
+        logger.error(f"[LSTM] /gold/lstm-bias error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/gold/lstm-status")
+async def gold_lstm_status():
+    """Statut du modele LSTM : entraine, date, accuracy, taille."""
+    if not _LSTM_AVAILABLE:
+        return {"trained": False, "module": "unavailable"}
+    return _lstm_model_status()
+
+
+@app.post("/gold/lstm-train")
+async def gold_lstm_train(force: bool = False):
+    """
+    Lance l'entrainement du LSTM en arriere-plan.
+    force=true pour re-entrainer meme si modele existant.
+    """
+    if not _LSTM_AVAILABLE:
+        raise HTTPException(status_code=503,
+                            detail="Module gold_lstm_filter non disponible")
+    import asyncio
+    loop = asyncio.get_event_loop()
+    loop.run_in_executor(None, lambda: _lstm_train(force=force))
+    return {
+        "status": "started",
+        "force":  force,
+        "message": "Entrainement lance en arriere-plan — verifier /gold/lstm-status"
+    }
