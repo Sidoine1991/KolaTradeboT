@@ -15298,6 +15298,84 @@ async def spike_realtime(symbol: str):
         last_spike_time=last_time_str,
     )
 
+# Cache /spike/levels — TTL 1h, évite 12 requêtes RDS simultanées au changement d'heure
+_spike_levels_cache: Dict[str, Any] = {}
+_spike_levels_ts:    Dict[str, float] = {}
+_SPIKE_LEVELS_TTL = 3600.0  # 1h
+
+@app.get("/spike/levels")
+async def spike_levels(symbol: str, limit: int = 30):
+    """
+    Retourne les N derniers spikes historiques pour un symbole depuis AWS RDS.
+    Cache TTL=1h pour éviter la surcharge lors des requêtes simultanées de 12 EAs.
+    """
+    sym_raw  = (symbol or "").strip()
+    sym_db   = sym_raw.replace(" Index", "").replace(" ", "")
+    cache_key = f"{sym_db}_{limit}"
+    now_ts   = time.time()
+
+    # Servir depuis le cache si encore valide
+    if (cache_key in _spike_levels_cache and
+            now_ts - _spike_levels_ts.get(cache_key, 0) < _SPIKE_LEVELS_TTL):
+        cached = _spike_levels_cache[cache_key]
+        return {**cached, "source": cached.get("source", "rds") + "_cache"}
+
+    if not AWS_RDS_AVAILABLE:
+        return {"symbol": sym_raw, "spikes": [], "hot_hours": [], "source": "no_rds"}
+
+    try:
+        # Une seule connexion RDS pour les deux requêtes
+        with aws_rds_client.get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT detected_at, direction, profit_captured, atr_multiplier
+                    FROM spike_detection_events
+                    WHERE symbol = %s
+                    ORDER BY detected_at DESC
+                    LIMIT %s
+                """, (sym_db, int(limit)))
+                spike_rows = cur.fetchall()
+                cols = [d[0] for d in cur.description]
+
+                cur.execute("""
+                    SELECT hour_utc, SUM(total_spikes) as n, AVG(capture_rate_pct) as cap
+                    FROM v_spike_quality_by_hour
+                    WHERE symbol = %s
+                    GROUP BY hour_utc ORDER BY n DESC LIMIT 5
+                """, (sym_db,))
+                hour_rows = cur.fetchall()
+                hour_cols = [d[0] for d in cur.description]
+
+        spikes = []
+        for row in spike_rows:
+            r = dict(zip(cols, row))
+            dt = r.get("detected_at")
+            spikes.append({
+                "ts":        dt.isoformat() if dt else None,
+                "direction": r.get("direction"),
+                "captured":  bool(r.get("profit_captured")),
+                "atr_mult":  float(r.get("atr_multiplier") or 1.8),
+            })
+
+        hot_hours = []
+        for row in hour_rows:
+            r = dict(zip(hour_cols, row))
+            hot_hours.append({
+                "hour":        int(r.get("hour_utc") or 0),
+                "spikes":      int(r.get("n") or 0),
+                "capture_pct": float(r.get("cap") or 0),
+            })
+
+        result = {"symbol": sym_raw, "spikes": spikes, "hot_hours": hot_hours, "source": "rds"}
+        _spike_levels_cache[cache_key] = result
+        _spike_levels_ts[cache_key]    = now_ts
+        return result
+
+    except Exception as e:
+        logger.error(f"/spike/levels error: {e}", exc_info=True)
+        return {"symbol": sym_raw, "spikes": [], "hot_hours": [], "source": f"error:{str(e)[:60]}"}
+
+
 # ===== ML FEEDBACK + METRICS (ENTRAÎNEMENT CONTINU) =====
 # Système de feedback léger en mémoire pour apprentissage online
 class TradeFeedbackRequest(BaseModel):
