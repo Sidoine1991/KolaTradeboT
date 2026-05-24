@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 Serveur IA pour TradBOT - Gestion des prédictions et analyses de marché
 Version: 2.1.0 - STABILISÉ
@@ -2463,11 +2464,18 @@ async def _peek_manual_tradingagents_report(symbol: str) -> Optional[Dict[str, A
         return None
     now = time.time()
     async with _tradingagents_manual_lock:
+        # Chercher avec le symbole brut ET le symbole résolu (ex: BTCUSD → BITCOIN)
         row = _tradingagents_manual_reports.get(sym)
+        if not row:
+            resolved = _resolve_symbol(sym)
+            if resolved != sym:
+                row = _tradingagents_manual_reports.get(resolved)
         if not row:
             return None
         if now - float(row.get("ts", 0)) > AI_TRADINGAGENTS_MANUAL_TTL_SEC:
-            del _tradingagents_manual_reports[sym]
+            key = row.get("symbol", sym)
+            _tradingagents_manual_reports.pop(key, None)
+            _tradingagents_manual_reports.pop(sym, None)
             return None
         return dict(row)
 
@@ -4425,7 +4433,7 @@ parser.add_argument('--port', type=int, default=8000, help='Port sur lequel dém
 parser.add_argument(
     '--host', 
     type=str, 
-    default='127.0.0.1', 
+    default='0.0.0.0',
     help='Adresse IP sur laquelle écouter'
 )
 args = parser.parse_args()
@@ -4815,42 +4823,27 @@ async def _compute_propice_top_from_trade_feedback(
     Approche: pour l'heure UTC courante, agréger (wins/losses/net_profit/samples) sur les trades clôturés
     et produire un propice_score 0..1.
     """
-    if not _supabase_credentials_ready():
-        return {"rows": [], "source": "none", "note": "persistence_off"}
-    supabase_url, supabase_key = _get_supabase_config(strict=True)
-    import httpx
+    if not AWS_RDS_AVAILABLE:
+        return {"rows": [], "source": "none", "note": "rds_unavailable"}
     from datetime import timezone
 
-    headers = {
-        "apikey": supabase_key,
-        "Authorization": f"Bearer {supabase_key}",
-    }
-
-    # Fenêtre de lookback sur close_time
     dt_from = datetime.utcnow().replace(tzinfo=timezone.utc) - timedelta(days=int(lookback_days or 14))
-    iso_from = dt_from.isoformat()
-
-    # Télécharger les trades clôturés récents (on agrège en Python)
-    # NOTE: PostgREST group-by n'est pas toujours disponible -> on agrège client-side
-    params = {
-        "timeframe": f"eq.{timeframe}",
-        "close_time": f"gte.{iso_from}",
-        "select": "symbol,close_time,profit,is_win",
-        "order": "close_time.desc",
-        "limit": "5000",  # garde-fou
-    }
 
     try:
-        async with httpx.AsyncClient(timeout=12.0) as client:
-            r = await client.get(f"{supabase_url}/rest/v1/trade_feedback", headers=headers, params=params)
-    except httpx.RequestError:
-        return {"rows": [], "source": "supabase_trade_feedback", "note": "network_error"}
-    if r.status_code not in (200, 206):
-        raise RuntimeError(f"Supabase trade_feedback HTTP {r.status_code}: {r.text[:200]}")
+        rds_rows = aws_rds_client.execute_query("""
+            SELECT symbol, close_time, profit, is_win
+            FROM trade_feedback
+            WHERE timeframe = %s
+              AND close_time >= %s
+            ORDER BY close_time DESC
+            LIMIT 5000
+        """, (timeframe, dt_from))
+    except Exception as e:
+        return {"rows": [], "source": "aws_rds_trade_feedback", "note": f"rds_error:{str(e)[:80]}"}
 
-    rows = r.json() if r.text else []
+    rows = rds_rows if rds_rows else []
     if not rows:
-        return {"rows": [], "source": "supabase_trade_feedback", "note": "no_rows"}
+        return {"rows": [], "source": "aws_rds_trade_feedback", "note": "no_rows"}
 
     # Agréger par symbole pour l'heure UTC courante
     agg: Dict[str, Dict[str, Any]] = {}
@@ -4862,12 +4855,15 @@ async def _compute_propice_top_from_trade_feedback(
         if not ct:
             continue
         try:
-            ct_dt = pd.to_datetime(ct, utc=True, errors="coerce")
+            # RDS retourne un objet datetime, Supabase retournait une string ISO
+            if hasattr(ct, "hour"):
+                ct_hour = ct.hour
+            else:
+                ct_dt = pd.to_datetime(ct, utc=True, errors="coerce")
+                ct_hour = int(getattr(ct_dt, "hour", -1)) if ct_dt is not None and not pd.isna(ct_dt) else -1
         except Exception:
-            ct_dt = None
-        if ct_dt is None or pd.isna(ct_dt):
-            continue
-        if int(getattr(ct_dt, "hour", -1)) != int(now_hour_utc):
+            ct_hour = -1
+        if ct_hour != int(now_hour_utc):
             continue
 
         profit = rr.get("profit")
@@ -4890,44 +4886,10 @@ async def _compute_propice_top_from_trade_feedback(
             a["losses"] += 1
 
     if not agg:
-        return {"rows": [], "source": "supabase_trade_feedback", "note": "no_rows_for_hour"}
+        return {"rows": [], "source": "aws_rds_trade_feedback", "note": "no_rows_for_hour"}
 
-    # Charger la fiabilité ML (reliability_score) par symbole pour pondérer le score "propice"
+    # reliability_score non disponible sur RDS — neutralisé (pas d'impact sur le score)
     reliability_by_symbol: Dict[str, float] = {}
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            rm = await client.get(
-                f"{supabase_url}/rest/v1/model_metrics",
-                headers=headers,
-                params={
-                    "timeframe": f"eq.{timeframe}",
-                    "select": "symbol,training_date,metadata",
-                    "order": "training_date.desc",
-                    "limit": "500",
-                },
-            )
-        if rm.status_code in (200, 206) and rm.text:
-            rowsm = rm.json()
-            for row in rowsm:
-                sym = (row.get("symbol") or "").strip()
-                if not sym or sym in reliability_by_symbol:
-                    continue
-                meta = row.get("metadata") or {}
-                if isinstance(meta, str):
-                    try:
-                        meta = json.loads(meta)
-                    except Exception:
-                        meta = {}
-                rel = meta.get("reliability_score")
-                try:
-                    relf = float(rel)
-                    relf = max(0.0, min(1.0, relf))
-                except Exception:
-                    relf = None  # type: ignore
-                if relf is not None:
-                    reliability_by_symbol[sym] = float(relf)
-    except Exception:
-        reliability_by_symbol = {}
 
     # Score: win_rate (0..1) + profit contribution (tanh normalized) + sample bonus
     out = []
@@ -5898,6 +5860,68 @@ class TradeFeedback(BaseModel):
     is_win: bool
 
 
+def _calc_risk_info(
+    action: str,
+    entry: Optional[float],
+    stop_loss: Optional[float],
+    atr: Optional[float],
+    symbol: str,
+    capital: float = 50.0,
+    risk_pct: float = 2.0,
+) -> Dict[str, Any]:
+    """Calcule le lot recommandé et la perte max $ pour un trade sur $50 / 2% risque."""
+    risk_usd = capital * (risk_pct / 100.0)  # $1.00 pour $50/2%
+    info: Dict[str, Any] = {
+        "capital_usd": capital,
+        "risk_pct": risk_pct,
+        "risk_usd": round(risk_usd, 2),
+        "entry": entry,
+        "stop_loss": stop_loss,
+        "atr_used": None,
+        "sl_distance": None,
+        "pip_value_usd": None,
+        "recommended_lot": None,
+        "max_loss_usd": round(risk_usd, 2),
+    }
+    try:
+        sym_up = (symbol or "").upper()
+        # Pip value heuristics (USD per pip per 0.01 lot)
+        if "XAU" in sym_up or "GOLD" in sym_up:
+            pip_value_per_001 = 0.01   # 1 pip = $0.01 pour 0.01 lot
+            pip_size = 0.1
+        elif "BTC" in sym_up:
+            pip_value_per_001 = 0.01
+            pip_size = 1.0
+        elif "JPY" in sym_up:
+            pip_value_per_001 = 0.00709
+            pip_size = 0.01
+        else:
+            pip_value_per_001 = 0.0001 * 100 * 0.01  # forex majeur
+            pip_size = 0.0001
+
+        # Calcul distance SL en pips
+        sl_dist = None
+        if entry and stop_loss and entry > 0 and stop_loss > 0:
+            sl_dist = abs(entry - stop_loss) / pip_size
+        elif atr and atr > 0:
+            sl_dist = (atr * 2.0) / pip_size
+            info["atr_used"] = round(atr, 5)
+
+        if sl_dist and sl_dist > 0:
+            info["sl_distance"] = round(sl_dist, 2)
+            # lot = risk_usd / (sl_pips * pip_value_per_001 * 100)
+            # pip_value_per_001 * 100 = value per 1.0 lot per pip
+            lot = risk_usd / (sl_dist * pip_value_per_001 * 100)
+            # Arrondi au 0.01 le plus proche, min 0.01
+            lot = max(0.01, round(lot / 0.01) * 0.01)
+            info["pip_value_usd"] = round(pip_value_per_001 * 100, 4)
+            info["recommended_lot"] = lot
+            info["max_loss_usd"] = round(lot * sl_dist * pip_value_per_001 * 100, 2)
+    except Exception as e:
+        info["calc_error"] = str(e)
+    return info
+
+
 class DecisionResponse(BaseModel):
     action: str  # "buy", "sell", "hold"
     confidence: float  # 0.0-1.0
@@ -5926,6 +5950,9 @@ class DecisionResponse(BaseModel):
     metadata: Dict[str, Any] = Field(default_factory=dict)
     gemma_analysis: Optional[str] = None  # Analyse complète Gemma+Gemini
     metadata: Optional[Dict[str, Any]] = None  # Métadonnées enrichies (RSI, EMA, ATR, etc.)
+    recommended_lot: Optional[float] = None   # Lot recommandé pour capital $50 / 2% risque
+    max_loss_usd: Optional[float] = None      # Perte max en $ pour ce trade
+    risk_info: Optional[Dict[str, Any]] = None  # Détail calcul risque pour rapport
 
 
 # === MODÈLES OLLAMA LOCAL (Analyse approfondie par LLM local) ===
@@ -6611,6 +6638,9 @@ async def decision_simplified(request: DecisionRequest):
         pass
 
     # 4d. Rapport manuel CLI TradingAgents → pondération buy/sell (fusion avec analyse technique)
+    # Si AI_TRADINGAGENTS_OVERRIDE=true : TradingAgents décide seul (bypass technique)
+    _ta_override_enabled = _env_bool("AI_TRADINGAGENTS_OVERRIDE", default=False)
+    _ta_manual_override: Optional[Dict] = None
     try:
         manual = await _peek_manual_tradingagents_report(str(request.symbol))
         if manual:
@@ -6618,15 +6648,20 @@ async def decision_simplified(request: DecisionRequest):
             mc = float(manual.get("confidence") or 0.0)
             if mc > 1.0:
                 mc = min(1.0, mc / 100.0)
-            w = float(os.getenv("AI_TRADINGAGENTS_CLI_WEIGHT", "0.28"))
-            if rec == "BUY" and mc >= 0.45:
-                buy_score += w * mc
-                reason += f"[CLI TradingAgents: BUY {int(mc * 100)}%] "
-            elif rec == "SELL" and mc >= 0.45:
-                sell_score += w * mc
-                reason += f"[CLI TradingAgents: SELL {int(mc * 100)}%] "
-            elif rec in ("HOLD", "NEUTRAL", "WAIT"):
-                reason += "[CLI TradingAgents: HOLD] "
+            if _ta_override_enabled and rec in ("BUY", "SELL") and mc >= 0.45:
+                # Override direct: TradingAgents décide seul
+                _ta_manual_override = {"action": rec.lower(), "confidence": mc, "rec": rec, "mc": mc}
+                reason += f"[CLI TradingAgents OVERRIDE: {rec} {int(mc * 100)}%] "
+            else:
+                w = float(os.getenv("AI_TRADINGAGENTS_CLI_WEIGHT", "0.28"))
+                if rec == "BUY" and mc >= 0.45:
+                    buy_score += w * mc
+                    reason += f"[CLI TradingAgents: BUY {int(mc * 100)}%] "
+                elif rec == "SELL" and mc >= 0.45:
+                    sell_score += w * mc
+                    reason += f"[CLI TradingAgents: SELL {int(mc * 100)}%] "
+                elif rec in ("HOLD", "NEUTRAL", "WAIT"):
+                    reason += "[CLI TradingAgents: HOLD] "
     except Exception:
         pass
 
@@ -6694,7 +6729,13 @@ async def decision_simplified(request: DecisionRequest):
     else:
         base_action = "hold"
         base_confidence = 0.5
-    
+
+    # Override TradingAgents: bypasse la fusion technique si AI_TRADINGAGENTS_OVERRIDE=true
+    if _ta_manual_override:
+        base_action = _ta_manual_override["action"]
+        base_confidence = max(0.55, _ta_manual_override["confidence"])
+        logger.info("🤖 TradingAgents OVERRIDE actif: %s %.0f%%", base_action.upper(), base_confidence * 100)
+
     # 6. AMÉLIORATION AVEC ML
     market_data = {
         "symbol": request.symbol,
@@ -6792,8 +6833,9 @@ async def decision_simplified(request: DecisionRequest):
         logger.debug("apply_stair_history_to_decision: %s", e)
     
     # 7c. Validation finale RSI / MACD / Ichimoku (confluence)
+    # Skippé si TradingAgents override actif (TA décide seul)
     confluence_detail: Dict[str, Any] = {}
-    if INDICATOR_CONFLUENCE_AVAILABLE and apply_core_indicator_confluence and _env_bool(
+    if _ta_manual_override is None and INDICATOR_CONFLUENCE_AVAILABLE and apply_core_indicator_confluence and _env_bool(
         "ENABLE_CORE_INDICATOR_CONFLUENCE", True
     ):
         try:
@@ -6818,8 +6860,11 @@ async def decision_simplified(request: DecisionRequest):
         confidence = max(0.1, confidence)
 
     # 8b. Entonnoir MTF (W1/D1/H4 -> H1/M30 -> M15 -> M5/M1) pour décision finale.
+    # Skippé si TradingAgents override actif
+    if _ta_manual_override is not None:
+        reason += f" [Funnel MTF ignoré: TradingAgents OVERRIDE {action.upper()}]"
     funnel = compute_mtf_funnel_decision(request)
-    funnel_action = funnel.get("action", "hold")
+    funnel_action = funnel.get("action", "hold") if _ta_manual_override is None else action
     funnel_conf = float(funnel.get("confidence", 0.5))
     if funnel_action == action:
         confidence = max(confidence, funnel_conf)
@@ -7273,6 +7318,18 @@ async def decision_simplified(request: DecisionRequest):
     if divergence_meta and action in ("buy", "sell"):
         exec_type_final = "market"
 
+    # Calcul risque pour $50 capital / 2% par trade
+    _risk = _calc_risk_info(
+        action=action,
+        entry=entry_price_out or getattr(request, "ask", None) or getattr(request, "bid", None),
+        stop_loss=stop_loss,
+        atr=getattr(request, "atr", None),
+        symbol=request.symbol,
+        capital=50.0,
+        risk_pct=2.0,
+    )
+    meta_out["risk_info"] = _risk
+
     response = DecisionResponse(
         action=action,
         confidence=confidence_percentage,  # Décimale 0-1 (MT5 affiche *100)
@@ -7290,7 +7347,10 @@ async def decision_simplified(request: DecisionRequest):
         predicted_prices=predicted_prices,
         alignment=alignment,
         coherence=coherence,
-        metadata=meta_out
+        metadata=meta_out,
+        recommended_lot=_risk.get("recommended_lot"),
+        max_loss_usd=_risk.get("max_loss_usd"),
+        risk_info=_risk,
     )
 
     set_simplified_tf_cached_decision(request, response)
@@ -15117,6 +15177,98 @@ async def log_decision_accuracy(request: DecisionAccuracyRequest):
         raise HTTPException(status_code=500, detail=f"Erreur lors de l'enregistrement de la précision: {str(e)}")
 
 
+# ── Cache prior horaire (AWS RDS) ──────────────────────────────────────────────
+_spike_hour_prior_cache: Dict[str, Any] = {}   # key = symbol
+_spike_hour_prior_ts:    Dict[str, float] = {}  # last fetch timestamp
+_SPIKE_HOUR_PRIOR_TTL = 3600.0                  # 1 h — rafraîchir au début de chaque heure
+
+@app.get("/spike/hour-prior")
+async def spike_hour_prior(symbol: str):
+    """
+    Retourne le prior horaire pour un symbole Boom/Crash depuis v_spike_quality_by_hour (AWS RDS).
+    Champs utiles :
+      - capture_rate     : taux de capture par l'EA cette heure-ci
+      - avg_atr_mult     : multiplicateur ATR moyen des spikes cette heure-ci
+      - sample_count     : nombre de spikes observés
+      - hour_utc         : heure UTC courante
+      - atr_threshold    : seuil ATR adaptatif recommandé (= max(1.5, avg_atr_mult * 0.6))
+      - favorable        : true si capture_rate >= 0.30 et sample_count >= 5
+    Cache TTL = 1h (ne requête la DB qu'une fois par heure).
+    """
+    sym = (symbol or "").strip()
+    if not sym:
+        raise HTTPException(status_code=400, detail="symbol required")
+
+    # Normalise "Crash 500 Index" -> "Crash500" pour correspondre à la DB
+    sym_db = sym.replace(" Index", "").replace(" ", "")
+
+    hour_utc = datetime.now(timezone.utc).hour
+    cache_key = f"{sym_db}_{hour_utc}"
+    now_ts = time.time()
+
+    # Servir depuis le cache si encore valide
+    if (cache_key in _spike_hour_prior_cache and
+            now_ts - _spike_hour_prior_ts.get(cache_key, 0) < _SPIKE_HOUR_PRIOR_TTL):
+        return _spike_hour_prior_cache[cache_key]
+
+    default_resp = {
+        "symbol": sym,
+        "hour_utc": hour_utc,
+        "capture_rate": 0.5,
+        "avg_atr_mult": 2.5,
+        "sample_count": 0,
+        "atr_threshold": 1.5,
+        "favorable": True,
+        "source": "default",
+    }
+
+    if not AWS_RDS_AVAILABLE:
+        return {**default_resp, "source": "no_rds"}
+
+    try:
+        rows = aws_rds_client.get_spike_quality_by_hour(symbol=sym_db)
+        # Filtrer sur l'heure courante (toutes directions confondues pour le prior global)
+        hour_rows = [r for r in rows if r.get("hour_utc") == hour_utc]
+
+        if not hour_rows:
+            result = {**default_resp, "source": "no_data"}
+        else:
+            # Agréger toutes directions pour avoir une vue globale de l'heure
+            total_spikes  = sum(int(r.get("total_spikes") or 0) for r in hour_rows)
+            avg_atr_mult  = float(
+                sum(float(r.get("avg_atr_mult") or 2.5) * int(r.get("total_spikes") or 1)
+                    for r in hour_rows)
+                / max(total_spikes, 1)
+            )
+            # capture_rate_pct est en % (0-100), on le convertit en ratio 0-1
+            capture_rate  = float(
+                sum(float(r.get("capture_rate_pct") or 50.0) * int(r.get("total_spikes") or 1)
+                    for r in hour_rows)
+                / max(total_spikes, 1)
+            ) / 100.0
+            # Seuil adaptatif : 60% du multiplicateur moyen observé, plancher à 1.5
+            atr_threshold = max(1.5, round(avg_atr_mult * 0.6, 2))
+            favorable     = capture_rate >= 0.30 and total_spikes >= 5
+            result = {
+                "symbol":        sym,
+                "hour_utc":      hour_utc,
+                "capture_rate":  round(capture_rate, 4),
+                "avg_atr_mult":  round(avg_atr_mult, 4),
+                "sample_count":  total_spikes,
+                "atr_threshold": atr_threshold,
+                "favorable":     favorable,
+                "source":        "rds",
+            }
+
+        _spike_hour_prior_cache[cache_key] = result
+        _spike_hour_prior_ts[cache_key]    = now_ts
+        return result
+
+    except Exception as e:
+        logger.error(f"/spike/hour-prior error: {e}", exc_info=True)
+        return {**default_resp, "source": f"error:{str(e)[:80]}"}
+
+
 @app.get("/spike/realtime", response_model=SpikeStatus)
 async def spike_realtime(symbol: str):
     """
@@ -19545,6 +19697,16 @@ async def tradingagents_manual_report(body: TradingAgentsManualReportBody):
     if conf > 1.0:
         conf = min(1.0, conf / 100.0)
     conf = max(0.0, min(1.0, conf))
+    # Calcul risque $50 / 2%
+    _risk = _calc_risk_info(
+        action=rec_norm,
+        entry=body.entry_price,
+        stop_loss=body.stop_loss,
+        atr=None,
+        symbol=sym,
+        capital=50.0,
+        risk_pct=2.0,
+    )
     entry = {
         "ts": time.time(),
         "recommendation": rec_norm,
@@ -19555,11 +19717,26 @@ async def tradingagents_manual_report(body: TradingAgentsManualReportBody):
         "entry_price": body.entry_price,
         "stop_loss": body.stop_loss,
         "take_profit": body.take_profit,
+        "risk_info": _risk,
+        "recommended_lot": _risk.get("recommended_lot"),
+        "max_loss_usd": _risk.get("max_loss_usd"),
     }
     async with _tradingagents_manual_lock:
         _tradingagents_manual_reports[sym] = entry
-    logger.info("📝 TradingAgents manual report enregistré: %s %s conf=%.2f", sym, entry["recommendation"], conf)
-    return {"ok": True, "symbol": sym, "ttl_sec": AI_TRADINGAGENTS_MANUAL_TTL_SEC}
+    logger.info(
+        "📝 TradingAgents manual report: %s %s conf=%.2f | lot=%.2f max_loss=$%.2f",
+        sym, entry["recommendation"], conf,
+        _risk.get("recommended_lot") or 0.0,
+        _risk.get("max_loss_usd") or 0.0,
+    )
+    return {
+        "ok": True,
+        "symbol": sym,
+        "ttl_sec": AI_TRADINGAGENTS_MANUAL_TTL_SEC,
+        "risk_info": _risk,
+        "recommended_lot": _risk.get("recommended_lot"),
+        "max_loss_usd": _risk.get("max_loss_usd"),
+    }
 
 
 @app.get("/tradingagents/realtime/status")
@@ -19735,29 +19912,77 @@ async def tradingagents_realtime_run_once(symbol: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-if __name__ == "__main__":
-    import uvicorn
-    
-    # Démarrer le serveur avec gestion des événements de vie
-    logger.info("🌟 Lancement du serveur IA TradBOT avec système ML intégré")
-    logger.info("📡 Endpoints disponibles:")
-    logger.info("   • /health - Santé du serveur")
-    logger.info("   • /decision - Décisions de trading")  
-    logger.info("   • /analyze/ollama - Analyse approfondie LLM local")
-    logger.info("   • /ml/metrics - Métriques ML en temps réel")
-    logger.info("   • /ml/start - Démarrer entraînement ML")
-    logger.info("   • /ml/stop - Arrêter entraînement ML")
-    logger.info("   • /ml/retrain - Forcer réentraînement")
-    logger.info("   • /ml_stats - Statistiques ML détaillées")
-    logger.info("   • /ui - Dashboard web (interface graphique)")
-    
-    uvicorn.run(
-        "ai_server:app",
-        host=HOST,
-        port=API_PORT,
-        reload=False,
-        log_level="info"
-    )
+# ===========================================================================
+# GOLD LSTM FILTER - Biais directionnel D1 pour GoldSMC_EA
+# Endpoints : GET /gold/lstm-bias  |  GET /gold/lstm-status
+#             POST /gold/lstm-train
+# ===========================================================================
+
+try:
+    from gold_lstm_filter import predict_bias as _lstm_predict_bias
+    from gold_lstm_filter import get_model_status as _lstm_model_status
+    from gold_lstm_filter import train_lstm as _lstm_train
+    _LSTM_AVAILABLE = True
+    logger.info("[LSTM] Module gold_lstm_filter charge avec succes")
+except Exception as _e:
+    _LSTM_AVAILABLE = False
+    logger.warning(f"[LSTM] Module non disponible: {type(_e).__name__}: {_e}")
+
+
+@app.get("/gold/lstm-bias")
+async def gold_lstm_bias():
+    """
+    Retourne le biais directionnel LSTM D1 pour XAUUSD.
+    Utilise par GoldSMC_EA comme filtre de confirmation contextuel.
+
+    Response:
+      action      : BUY | SELL | NEUTRAL
+      confidence  : 0.0 - 1.0
+      prob_up     : probabilite brute de hausse
+      trend_htf   : UP | DOWN (SMA20 vs SMA50)
+      source      : lstm_d1 | no_model | error
+    """
+    if not _LSTM_AVAILABLE:
+        return {
+            "action": "NEUTRAL",
+            "confidence": 0.0,
+            "source": "module_unavailable",
+            "message": "Module gold_lstm_filter non installe - pip install tensorflow yfinance"
+        }
+    try:
+        result = _lstm_predict_bias()
+        return result
+    except Exception as e:
+        logger.error(f"[LSTM] /gold/lstm-bias error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/gold/lstm-status")
+async def gold_lstm_status():
+    """Statut du modele LSTM : entraine, date, accuracy, taille."""
+    if not _LSTM_AVAILABLE:
+        return {"trained": False, "module": "unavailable"}
+    return _lstm_model_status()
+
+
+@app.post("/gold/lstm-train")
+async def gold_lstm_train(force: bool = False):
+    """
+    Lance l'entrainement du LSTM en arriere-plan.
+    force=true pour re-entrainer meme si modele existant.
+    """
+    if not _LSTM_AVAILABLE:
+        raise HTTPException(status_code=503,
+                            detail="Module gold_lstm_filter non disponible")
+    import asyncio
+    loop = asyncio.get_event_loop()
+    loop.run_in_executor(None, lambda: _lstm_train(force=force))
+    return {
+        "status": "started",
+        "force":  force,
+        "message": "Entrainement lance en arriere-plan - verifier /gold/lstm-status"
+    }
+
 
 @app.get("/symbols")
 async def get_symbols():
@@ -19850,73 +20075,520 @@ async def test_fallback_endpoint(symbol: str = "EURUSD", rsi: float = 65, macd: 
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ══════════════════════════════════════════════════════════════════════
-# GOLD LSTM FILTER — Biais directionnel D1 pour GoldSMC_EA
-# Endpoints : GET /gold/lstm-bias  |  GET /gold/lstm-status
-#             POST /gold/lstm-train
-# ══════════════════════════════════════════════════════════════════════
+# ===========================================================================
+# REGIME CLASSIFIER — Qualite du setup SMC XAUUSD
+# ===========================================================================
 
-try:
-    from gold_lstm_filter import predict_bias as _lstm_predict_bias
-    from gold_lstm_filter import get_model_status as _lstm_model_status
-    from gold_lstm_filter import train_lstm as _lstm_train
-    _LSTM_AVAILABLE = True
-    logger.info("[LSTM] Module gold_lstm_filter charge avec succes")
-except ImportError as _e:
-    _LSTM_AVAILABLE = False
-    logger.warning(f"[LSTM] Module non disponible: {_e}")
+# Chargement unique du modele au demarrage (evite les IO repetes)
+_REGIME_MODEL_PAYLOAD: dict = {}
+_REGIME_MODEL_LOADED: bool = False
+
+def _load_regime_model() -> bool:
+    """Charge models/regime_classifier.pkl une seule fois en memoire globale."""
+    global _REGIME_MODEL_PAYLOAD, _REGIME_MODEL_LOADED
+    if _REGIME_MODEL_LOADED:
+        return True
+    model_path = MODELS_DIR / "regime_classifier.pkl"
+    try:
+        _REGIME_MODEL_PAYLOAD = joblib.load(model_path)
+        _REGIME_MODEL_LOADED = True
+        logger.info(f"[RegimeClassifier] Modele charge depuis {model_path}")
+        return True
+    except FileNotFoundError:
+        logger.warning(
+            "[RegimeClassifier] models/regime_classifier.pkl introuvable — "
+            "lancez regime_classifier.py pour l'entrainer."
+        )
+        return False
+    except Exception as exc:
+        logger.error(f"[RegimeClassifier] Erreur chargement modele : {exc}")
+        return False
 
 
-@app.get("/gold/lstm-bias")
-async def gold_lstm_bias():
+# Tentative de chargement au demarrage du serveur
+_load_regime_model()
+
+
+def _build_regime_features(df_h1: pd.DataFrame) -> dict:
     """
-    Retourne le biais directionnel LSTM D1 pour XAUUSD.
-    Utilise par GoldSMC_EA comme filtre de confirmation contextuel.
+    Calcule les 8 features du regime classifier sur la derniere bougie H1.
+    Retourne un dict {feature_name: value} et un array np pour la prediction.
+    """
+    c = df_h1["close"]
+    high = df_h1["high"]
+    low = df_h1["low"]
+
+    # ATR
+    hi_lo = high - low
+    hi_cl = (high - c.shift()).abs()
+    lo_cl = (low - c.shift()).abs()
+    tr = pd.concat([hi_lo, hi_cl, lo_cl], axis=1).max(axis=1)
+    atr = tr.ewm(span=14, adjust=False).mean()
+    atr_ma = atr.rolling(20).mean()
+    atr_compression = float((atr / atr_ma.replace(0, np.nan)).iloc[-1])
+
+    # RSI
+    delta = c.diff()
+    gain = delta.clip(lower=0).ewm(alpha=1 / 14, adjust=False).mean()
+    loss = (-delta.clip(upper=0)).ewm(alpha=1 / 14, adjust=False).mean()
+    rs = gain / loss.replace(0, np.nan)
+    rsi_series = 100 - 100 / (1 + rs)
+    rsi_val = float(rsi_series.iloc[-1])
+
+    # RSI divergence sur les 5 dernieres bougies
+    lookback = 5
+    rsi_div = 0
+    if len(c) > lookback:
+        pc, cc = float(c.iloc[-1 - lookback]), float(c.iloc[-1])
+        pr, cr = float(rsi_series.iloc[-1 - lookback]), float(rsi_series.iloc[-1])
+        if cc < pc and cr > pr:
+            rsi_div = 1
+        elif cc > pc and cr < pr:
+            rsi_div = -1
+
+    # MACD histogram
+    ema12 = c.ewm(span=12, adjust=False).mean()
+    ema26 = c.ewm(span=26, adjust=False).mean()
+    macd_line = ema12 - ema26
+    macd_sig = macd_line.ewm(span=9, adjust=False).mean()
+    macd_hist_val = float((macd_line - macd_sig).iloc[-1])
+
+    # Tendance H1
+    ema20 = c.ewm(span=20, adjust=False).mean()
+    ema50 = c.ewm(span=50, adjust=False).mean()
+    ema200 = c.ewm(span=200, adjust=False).mean()
+    e20, e50, e200 = float(ema20.iloc[-1]), float(ema50.iloc[-1]), float(ema200.iloc[-1])
+    if e20 > e50 > e200:
+        trend_h1 = 1
+    elif e20 < e50 < e200:
+        trend_h1 = -1
+    else:
+        trend_h1 = 0
+
+    # Bollinger position
+    sma20 = c.rolling(20).mean()
+    std20 = c.rolling(20).std()
+    bb_up = sma20 + 2 * std20
+    bb_lo = sma20 - 2 * std20
+    band = (bb_up - bb_lo).replace(0, np.nan)
+    bb_pos = float(((c - bb_lo) / band).iloc[-1])
+
+    # Session (heure UTC de la derniere bougie)
+    last_dt = df_h1["dt"].iloc[-1] if "dt" in df_h1.columns else pd.Timestamp.utcnow()
+    h = last_dt.hour if hasattr(last_dt, "hour") else 12
+    if 7 <= h <= 11:
+        session = 1
+    elif h == 12:
+        session = 3
+    elif 13 <= h <= 17:
+        session = 2
+    elif 0 <= h <= 6:
+        session = 0
+    else:
+        session = 4
+
+    # Signal direction (proxy EMA-cross)
+    ema9 = c.ewm(span=9, adjust=False).mean()
+    ema21 = c.ewm(span=21, adjust=False).mean()
+    rsi_score = (rsi_val - 50) / 50
+    macd_cross = 1.0 if macd_hist_val > 0 else 0.0
+    bull_fast = 1.0 if float(ema9.iloc[-1]) > float(ema21.iloc[-1]) else 0.0
+    sig_score = (bull_fast * 40 + float(np.clip(rsi_score, -1, 1)) * 35 + macd_cross * 25)
+    if sig_score >= 55:
+        signal_dir = 1
+    elif sig_score <= 45:
+        signal_dir = -1
+    else:
+        signal_dir = 0
+
+    features = {
+        "atr_compression": round(atr_compression, 4),
+        "session": session,
+        "rsi": round(rsi_val, 2),
+        "rsi_divergence": rsi_div,
+        "macd_hist": round(macd_hist_val, 6),
+        "trend_h1": trend_h1,
+        "bb_position": round(bb_pos, 4),
+        "signal_dir": signal_dir,
+    }
+    feature_array = np.array([[
+        atr_compression, session, rsi_val, rsi_div,
+        macd_hist_val, trend_h1, bb_pos, signal_dir,
+    ]])
+    return features, feature_array
+
+
+def _get_recent_h1_bars(n: int = 250) -> pd.DataFrame:
+    """
+    Retourne un DataFrame H1 synthetique base sur le dernier historique disponible.
+    En production, ceci serait remplace par un appel MT5 reel.
+    Ici, on utilise un historique en cache ou on simule des donnees recentes.
+    """
+    cache_key = "regime_h1_cache"
+    now = datetime.utcnow()
+
+    # Si un cache recente existe (< 60 min), le reutiliser
+    cached = prediction_cache.get(cache_key)
+    if cached and (now - last_updated.get(cache_key, datetime.min)).total_seconds() < 3600:
+        return cached
+
+    # Sinon, construire un dataset synthetique minimaliste base sur des prix realistes
+    # (en production, remplacer par des donnees MT5 reelles)
+    try:
+        zip_path = ROOT_DIR / "XAUUSD_data.zip" if "ROOT_DIR" in dir() else Path("XAUUSD_data.zip")
+        if not zip_path.exists():
+            zip_path = Path(__file__).parent / "XAUUSD_data.zip"
+
+        if zip_path.exists():
+            import zipfile, tempfile
+            tmp_csv = os.path.join(tempfile.gettempdir(), "xauusd_regime_live.csv")
+            with zipfile.ZipFile(zip_path, "r") as z:
+                csv_name = next(fn for fn in z.namelist() if fn.endswith(".csv"))
+                with z.open(csv_name) as fin:
+                    with open(tmp_csv, "wb") as fout:
+                        fout.write(fin.read())
+            df_raw = pd.read_csv(tmp_csv)
+            df_raw["time"] = pd.to_datetime(df_raw["time"])
+            df_raw = df_raw.rename(columns={"time": "dt"}).sort_values("dt").set_index("dt")
+            df_h1 = (
+                df_raw[["open", "high", "low", "close"]]
+                .resample("1h")
+                .agg({"open": "first", "high": "max", "low": "min", "close": "last"})
+                .dropna()
+                .tail(n)
+                .reset_index()
+            )
+            df_h1.columns = ["dt", "open", "high", "low", "close"]
+            prediction_cache[cache_key] = df_h1
+            last_updated[cache_key] = now
+            return df_h1
+    except Exception as exc:
+        logger.warning(f"[RegimeClassifier] Impossible de lire les donnees H1: {exc}")
+
+    return pd.DataFrame()
+
+
+@app.get("/gold/regime-quality")
+async def get_regime_quality(symbol: str = "XAUUSD"):
+    """
+    Retourne la qualite du setup SMC courant pour XAUUSD.
 
     Response:
-      action      : BUY | SELL | NEUTRAL
-      confidence  : 0.0 - 1.0
-      prob_up     : probabilite brute de hausse
-      trend_htf   : UP | DOWN (SMA20 vs SMA50)
-      source      : lstm_d1 | no_model | error
+      quality  : HIGH | MEDIUM | LOW
+      score    : 0.0 - 1.0 (probabilite classe 1 = winner)
+      features : dict des features calculees
+      source   : model | fallback
     """
-    if not _LSTM_AVAILABLE:
-        return {
-            "action": "NEUTRAL",
-            "confidence": 0.0,
-            "source": "module_unavailable",
-            "message": "Module gold_lstm_filter non installe — pip install tensorflow yfinance"
-        }
+    if not _REGIME_MODEL_LOADED:
+        if not _load_regime_model():
+            return {
+                "success": False,
+                "data": {
+                    "quality": "MEDIUM",
+                    "score": 0.5,
+                    "features": {},
+                    "source": "fallback_no_model",
+                },
+                "error": "Modele non entraine — lancez regime_classifier.py",
+            }
+
     try:
-        result = _lstm_predict_bias()
-        return result
-    except Exception as e:
-        logger.error(f"[LSTM] /gold/lstm-bias error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        df_h1 = _get_recent_h1_bars(250)
+        if df_h1.empty or len(df_h1) < 50:
+            return {
+                "success": False,
+                "data": {"quality": "MEDIUM", "score": 0.5, "features": {}, "source": "no_data"},
+                "error": "Donnees H1 insuffisantes",
+            }
+
+        features_dict, X = _build_regime_features(df_h1)
+
+        # Remplacer NaN eventuels par 0
+        if np.isnan(X).any():
+            X = np.nan_to_num(X, nan=0.0)
+
+        model = _REGIME_MODEL_PAYLOAD["model"]
+        score = float(model.predict_proba(X)[0, 1])
+
+        if score >= 0.65:
+            quality = "HIGH"
+        elif score >= 0.45:
+            quality = "MEDIUM"
+        else:
+            quality = "LOW"
+
+        return {
+            "success": True,
+            "data": {
+                "quality": quality,
+                "score": round(score, 4),
+                "features": features_dict,
+                "source": "model",
+                "symbol": symbol,
+                "timestamp": datetime.utcnow().isoformat(),
+            },
+            "error": None,
+        }
+
+    except Exception as exc:
+        logger.error(f"[RegimeClassifier] /gold/regime-quality error: {exc}")
+        return {
+            "success": False,
+            "data": {"quality": "MEDIUM", "score": 0.5, "features": {}, "source": "error"},
+            "error": str(exc),
+        }
 
 
-@app.get("/gold/lstm-status")
-async def gold_lstm_status():
-    """Statut du modele LSTM : entraine, date, accuracy, taille."""
-    if not _LSTM_AVAILABLE:
-        return {"trained": False, "module": "unavailable"}
-    return _lstm_model_status()
+# ===========================================================================
+# SESSION BIAS — Biais directionnel TradingAgents
+# ===========================================================================
+
+_SESSION_BIAS_FILE = Path(__file__).parent / "data" / "state" / "session_bias.json"
 
 
-@app.post("/gold/lstm-train")
-async def gold_lstm_train(force: bool = False):
+def _read_session_bias_store() -> dict:
+    """Lit le fichier JSON de biais de session ou retourne un dict vide."""
+    try:
+        if _SESSION_BIAS_FILE.exists():
+            with open(_SESSION_BIAS_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+    except Exception as exc:
+        logger.warning(f"[SessionBias] Lecture fichier echouee: {exc}")
+    return {}
+
+
+def _write_session_bias_store(data: dict) -> None:
+    """Persiste le biais de session dans le fichier JSON."""
+    try:
+        _SESSION_BIAS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(_SESSION_BIAS_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+    except Exception as exc:
+        logger.error(f"[SessionBias] Ecriture fichier echouee: {exc}")
+
+
+class SessionBiasPayload(BaseModel):
+    symbol: str = Field("XAUUSD", description="Symbole (ex: XAUUSD)")
+    direction: str = Field(..., description="BUY | SELL | NEUTRAL")
+    confidence: float = Field(..., ge=0.0, le=1.0, description="Confiance 0.0-1.0")
+    timestamp: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
+    expires_hours: int = Field(24, ge=1, le=168, description="Duree de validite en heures")
+
+
+@app.post("/session-bias")
+async def set_session_bias(payload: SessionBiasPayload):
     """
-    Lance l'entrainement du LSTM en arriere-plan.
-    force=true pour re-entrainer meme si modele existant.
+    Stocke le biais directionnel emis par TradingAgents.
+    Appele par bridge.bat apres analyse des marches.
+
+    Response:
+      success : bool
+      data    : le biais enregistre
+      error   : null si ok
     """
-    if not _LSTM_AVAILABLE:
-        raise HTTPException(status_code=503,
-                            detail="Module gold_lstm_filter non disponible")
-    import asyncio
-    loop = asyncio.get_event_loop()
-    loop.run_in_executor(None, lambda: _lstm_train(force=force))
-    return {
-        "status": "started",
-        "force":  force,
-        "message": "Entrainement lance en arriere-plan — verifier /gold/lstm-status"
+    direction = payload.direction.upper()
+    if direction not in {"BUY", "SELL", "NEUTRAL"}:
+        raise HTTPException(
+            status_code=422,
+            detail=f"direction doit etre BUY, SELL ou NEUTRAL (recu: {payload.direction})",
+        )
+
+    symbol = payload.symbol.upper()
+    store = _read_session_bias_store()
+    store[symbol] = {
+        "symbol": symbol,
+        "direction": direction,
+        "confidence": payload.confidence,
+        "timestamp": payload.timestamp,
+        "expires_hours": payload.expires_hours,
+        "stored_at": datetime.utcnow().isoformat(),
     }
+    _write_session_bias_store(store)
+
+    logger.info(
+        f"[SessionBias] {symbol} -> {direction} (conf={payload.confidence:.2f}, "
+        f"expires={payload.expires_hours}h)"
+    )
+    return {
+        "success": True,
+        "data": store[symbol],
+        "error": None,
+    }
+
+
+@app.get("/session-bias")
+async def get_session_bias(symbol: str = "XAUUSD"):  # noqa: F811
+    """
+    Retourne le biais de session stocke pour un symbole.
+    Retourne NEUTRAL si le biais est expire, absent ou invalide.
+    Lu par GoldSMC_EA a chaque ouverture de session.
+
+    Response:
+      direction   : BUY | SELL | NEUTRAL
+      confidence  : float 0.0-1.0
+      age_hours   : float (age en heures depuis stored_at)
+      valid       : bool (False si expire ou absent)
+    """
+    sym = _resolve_symbol(symbol)
+    store = _read_session_bias_store()
+    entry = store.get(sym)
+
+    neutral_response = {
+        "success": True,
+        "data": {
+            "symbol": sym,
+            "direction": "NEUTRAL",
+            "confidence": 0.0,
+            "age_hours": 0.0,
+            "valid": False,
+            "reason": "absent",
+        },
+        "error": None,
+    }
+
+    if not entry:
+        return neutral_response
+
+    try:
+        stored_at = datetime.fromisoformat(entry.get("stored_at", ""))
+        now_utc = datetime.utcnow()
+        age_hours = (now_utc - stored_at).total_seconds() / 3600.0
+        expires_hours = int(entry.get("expires_hours", 24))
+        is_valid = age_hours <= expires_hours
+
+        if not is_valid:
+            neutral_response["data"]["reason"] = "expired"
+            neutral_response["data"]["age_hours"] = round(age_hours, 2)
+            return neutral_response
+
+        return {
+            "success": True,
+            "data": {
+                "symbol": sym,
+                "direction": entry.get("direction", "NEUTRAL"),
+                "confidence": float(entry.get("confidence", 0.0)),
+                "age_hours": round(age_hours, 2),
+                "valid": True,
+                "expires_in_hours": round(expires_hours - age_hours, 2),
+                "timestamp": entry.get("timestamp"),
+            },
+            "error": None,
+        }
+    except Exception as exc:
+        logger.error(f"[SessionBias] Erreur parsing entree {sym}: {exc}")
+        neutral_response["data"]["reason"] = "parse_error"
+        return neutral_response
+
+
+# ---------------------------------------------------------------------------
+# Normalisation des symboles MT5 -> clé serveur
+# L'EA envoie _Symbol brut (BTCUSD, XAUUSD...), le bridge stocke le display name (BITCOIN, OR...)
+# ---------------------------------------------------------------------------
+_SYMBOL_ALIASES: dict = {
+    "BTCUSD":  "BITCOIN", "BTC-USD": "BITCOIN", "BTC.X":   "BITCOIN",
+    "ETHUSD":  "ETHEREUM","ETH-USD": "ETHEREUM","ETH.X":   "ETHEREUM",
+    "XAUUSD":  "OR",      "GOLD":    "OR",       "GC=F":    "OR",
+    "XAGUSD":  "ARGENT",  "SI=F":    "ARGENT",
+    "SOLUSD":  "SOLANA",  "SOL-USD": "SOLANA",
+    "BNBUSD":  "BNB",     "BNB-USD": "BNB",
+    "EURUSD":  "EURUSD",  "GBPUSD":  "GBPUSD",
+}
+
+def _resolve_symbol(raw: str) -> str:
+    """Résout un symbole MT5 brut vers la clé utilisée dans les stores serveur."""
+    up = raw.strip().upper().replace("=X","").replace("=F","")
+    return _SYMBOL_ALIASES.get(up, up)
+
+
+# ---------------------------------------------------------------------------
+# Pending order — stockage du signal TradingAgents pour l'EA MT5
+# ---------------------------------------------------------------------------
+_PENDING_ORDER_STORE: dict = {}
+
+class PendingOrderPayload(BaseModel):
+    model_config = {"extra": "allow"}   # accepte les champs inconnus (source, comment…)
+    symbol: str
+    # bridge envoie "action", anciens clients envoient "recommendation" — on accepte les deux
+    action: Optional[str] = None
+    recommendation: Optional[str] = None
+    entry_price: Optional[float] = None
+    stop_loss: Optional[float] = None
+    take_profit: Optional[float] = None
+    lot: Optional[float] = None
+    execution_type: Optional[str] = "market"
+    confidence: Optional[float] = 0.75
+    reasoning: Optional[str] = None
+
+@app.post("/pending-order")
+async def set_pending_order(payload: PendingOrderPayload):
+    direction = (payload.action or payload.recommendation or "NEUTRAL").upper()
+    _PENDING_ORDER_STORE[payload.symbol.upper()] = {
+        "symbol":         payload.symbol.upper(),
+        "recommendation": direction,
+        "action":         direction,
+        "entry_price":    payload.entry_price,
+        "stop_loss":      payload.stop_loss,
+        "take_profit":    payload.take_profit,
+        "lot":            payload.lot,
+        "execution_type": payload.execution_type,
+        "confidence":     payload.confidence,
+        "reasoning":      payload.reasoning,
+        "timestamp":      datetime.utcnow().isoformat(),
+    }
+    logger.info(f"[PendingOrder] Stocke : {payload.symbol} {direction}")
+    return {"ok": True, "symbol": payload.symbol.upper(), "order_id": payload.symbol.upper()}
+
+@app.get("/pending-order")
+async def get_pending_order(symbol: str = "XAUUSD"):
+    sym = _resolve_symbol(symbol)
+    order = _PENDING_ORDER_STORE.get(sym)
+    if not order:
+        return {"ok": False, "symbol": sym, "order": None, "message": "Aucun ordre pending"}
+    return {"ok": True, "symbol": sym, "order": order}
+
+@app.delete("/pending-order")
+async def delete_pending_order(symbol: str = "XAUUSD"):
+    sym = _resolve_symbol(symbol)
+    removed = _PENDING_ORDER_STORE.pop(sym, None)
+    return {"ok": True, "symbol": sym, "removed": removed is not None}
+
+
+# ---------------------------------------------------------------------------
+# Alert levels — niveaux de prix à surveiller par l'EA MT5
+# ---------------------------------------------------------------------------
+_ALERT_LEVELS_STORE: dict = {}
+
+@app.post("/alert-levels")
+async def set_alert_levels(payload: dict):
+    symbol = payload.get("symbol", "XAUUSD").upper()
+    _ALERT_LEVELS_STORE[symbol] = {
+        "symbol":    symbol,
+        "levels":    payload.get("levels", []),
+        "timestamp": datetime.utcnow().isoformat(),
+    }
+    logger.info(f"[AlertLevels] Stocke : {symbol} {len(payload.get('levels', []))} niveaux")
+    return {"ok": True, "symbol": symbol}
+
+@app.get("/alert-levels")
+async def get_alert_levels(symbol: str = "XAUUSD"):
+    sym = symbol.upper()
+    data = _ALERT_LEVELS_STORE.get(sym)
+    if not data:
+        return {"ok": False, "symbol": sym, "levels": [], "message": "Aucun niveau stocke"}
+    return {"ok": True, "symbol": sym, "levels": data.get("levels", []),
+            "timestamp": data.get("timestamp")}
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    # Démarrer le serveur avec gestion des événements de vie
+    logger.info("Lancement du serveur IA TradBOT avec systeme ML integre")
+
+    uvicorn.run(
+        app,
+        host=HOST,
+        port=API_PORT,
+        reload=False,
+        log_level="info"
+    )
