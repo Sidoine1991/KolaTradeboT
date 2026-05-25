@@ -74,6 +74,24 @@ except ImportError as _div_imp_err:
     merge_divergence_into_decision = None  # type: ignore
     DIVERGENCE_DEFAULT_PARAMS = {}
 
+# Import Scalping Engine pour signaux micro-capital
+try:
+    import scalping_engine
+    from scalping_engine import (
+        generate_scalping_signal,
+        get_scalping_signals_from_tradingagents,
+        format_scalping_report,
+        can_generate_scalping_signal,
+        get_daily_signal_count,
+        ScalpingSignal,
+    )
+    SCALPING_ENGINE_AVAILABLE = True
+    logger.info("✅ Scalping Engine chargé (max 3 trades/jour, SL=$5 TP=$10-15)")
+except ImportError as _scalp_err:
+    SCALPING_ENGINE_AVAILABLE = False
+    scalping_engine = None  # type: ignore
+    logger.warning(f"⚠️ Scalping Engine non disponible: {_scalp_err}")
+
 # === ENVIRONMENT VALIDATION ===
 def _env_bool_early(name: str, default: bool = False) -> bool:
     val = os.getenv(name)
@@ -5795,6 +5813,8 @@ class DecisionRequest(BaseModel):
     atr: Optional[float] = 0.0
     dir_rule: int = 0  # 0 = neutre par défaut
     is_spike_mode: bool = False
+    scalping_mode: bool = False  # Mode scalping : SL=$5 TP=$10-15 (max 3/jour)
+    capital_usd: Optional[float] = 20.0  # Capital pour calcul lot scalping
     vwap: Optional[float] = None
     vwap_distance: Optional[float] = None
     above_vwap: Optional[bool] = None
@@ -9563,6 +9583,158 @@ async def post_coherent_analysis(request: CoherentAnalysisRequest):
     """Endpoint POST pour l'analyse cohérente multi-TF"""
     return build_coherent_analysis(request.symbol, request.timeframes)
 
+def calculate_enhanced_trend_direction(symbol: str, timeframe: str = "M1") -> Dict[str, Any]:
+    """Calcule la direction de tendance avec analyse multi-indicateurs"""
+    try:
+        df = get_market_data(symbol, timeframe, 100)
+        if df.empty or len(df) < 50:
+            hour = datetime.now().hour
+            direction = "buy" if hour % 2 == 0 else "sell"
+            return {"direction": direction, "confidence": 65.0, "signals": ["fallback_hour"]}
+
+        current_price = df['close'].iloc[-1]
+        current_volume = df['volume'].iloc[-1]
+
+        sma_20 = df['close'].rolling(window=20).mean().iloc[-1]
+        sma_50 = df['close'].rolling(window=50).mean().iloc[-1]
+        ema_9 = df['close'].ewm(span=9).mean().iloc[-1]
+        ema_21 = df['close'].ewm(span=21).mean().iloc[-1]
+
+        delta = df['close'].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+        rs = gain / loss
+        current_rsi = (100 - (100 / (1 + rs))).iloc[-1]
+
+        ema_12 = df['close'].ewm(span=12).mean()
+        ema_26 = df['close'].ewm(span=26).mean()
+        macd_line = ema_12 - ema_26
+        signal_line = macd_line.ewm(span=9).mean()
+        current_histogram = (macd_line - signal_line).iloc[-1]
+        current_macd = macd_line.iloc[-1]
+        current_signal = signal_line.iloc[-1]
+
+        bb_period = 20
+        bb_middle = df['close'].rolling(window=bb_period).mean()
+        bb_std_val = df['close'].rolling(window=bb_period).std()
+        current_bb_upper = (bb_middle + bb_std_val * 2).iloc[-1]
+        current_bb_lower = (bb_middle - bb_std_val * 2).iloc[-1]
+
+        volume_sma = df['volume'].rolling(window=20).mean()
+        volume_ratio = current_volume / volume_sma.iloc[-1] if volume_sma.iloc[-1] > 0 else 1.0
+
+        high_low = df['high'] - df['low']
+        high_close = (df['high'] - df['close'].shift()).abs()
+        low_close = (df['low'] - df['close'].shift()).abs()
+        true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+        current_atr = true_range.rolling(window=14).mean().iloc[-1]
+        atr_percentage = (current_atr / current_price) * 100
+
+        trend_score = 0.0
+        signals = []
+
+        if current_price > sma_20 > sma_50:
+            trend_score += 2.0; signals.append("price_above_sma")
+        elif current_price < sma_20 < sma_50:
+            trend_score -= 2.0; signals.append("price_below_sma")
+
+        if ema_9 > ema_21:
+            trend_score += 1.5; signals.append("ema_bullish")
+        elif ema_9 < ema_21:
+            trend_score -= 1.5; signals.append("ema_bearish")
+
+        if 55 < current_rsi < 75:
+            trend_score += 1.0; signals.append("rsi_bullish")
+        elif 25 < current_rsi < 45:
+            trend_score -= 1.0; signals.append("rsi_bearish")
+        elif current_rsi >= 75:
+            trend_score -= 0.5; signals.append("rsi_overbought")
+        elif current_rsi <= 25:
+            trend_score += 0.5; signals.append("rsi_oversold")
+
+        if current_macd > current_signal and current_histogram > 0:
+            trend_score += 1.0; signals.append("macd_bullish")
+        elif current_macd < current_signal and current_histogram < 0:
+            trend_score -= 1.0; signals.append("macd_bearish")
+
+        if current_price > current_bb_upper:
+            trend_score -= 0.5; signals.append("above_bb_upper")
+        elif current_price < current_bb_lower:
+            trend_score += 0.5; signals.append("below_bb_lower")
+
+        if volume_ratio > 1.2:
+            trend_score *= 1.2; signals.append("high_volume")
+        elif volume_ratio < 0.8:
+            trend_score *= 0.9; signals.append("low_volume")
+
+        base_confidence = 50.0 + abs(trend_score) * 8
+        if atr_percentage > 2.0:
+            base_confidence *= 0.85; signals.append("high_volatility")
+        elif atr_percentage < 0.5:
+            base_confidence *= 0.90; signals.append("low_volatility")
+
+        final_confidence = min(95.0, max(40.0, base_confidence))
+
+        if trend_score >= 3.0:
+            direction = "buy"
+            final_confidence = min(90.0, final_confidence + 5)
+        elif trend_score <= -3.0:
+            direction = "sell"
+            final_confidence = min(90.0, final_confidence + 5)
+        else:
+            direction = "neutral"
+            final_confidence = max(45.0, final_confidence - 10)
+
+        return {
+            "direction": direction,
+            "confidence": round(final_confidence, 1),
+            "trend_score": round(trend_score, 2),
+            "signals": signals,
+            "rsi": round(current_rsi, 1),
+            "macd": round(current_histogram, 4),
+            "volume_ratio": round(volume_ratio, 2),
+            "atr_percentage": round(atr_percentage, 2)
+        }
+    except Exception as e:
+        logger.error(f"Erreur calcul tendance avancée pour {symbol} ({timeframe}): {e}")
+        return {"direction": "neutral", "confidence": 50.0, "signals": ["error"]}
+
+
+def calculate_trend_direction(symbol: str, timeframe: str = "M1") -> str:
+    """Wrapper retournant la direction sous forme de string"""
+    try:
+        return calculate_enhanced_trend_direction(symbol, timeframe).get("direction", "neutral")
+    except Exception as e:
+        logger.error(f"Erreur calculate_trend_direction {symbol}: {e}")
+        return "neutral"
+
+
+def calculate_trend_confidence(symbol: str, timeframe: str = "M1") -> float:
+    """Retourne la confiance (0-100) de la tendance"""
+    try:
+        result = calculate_enhanced_trend_direction(symbol, timeframe)
+        return float(result.get("confidence", 50.0))
+    except Exception as e:
+        logger.error(f"Erreur calculate_trend_confidence {symbol}: {e}")
+        return 50.0
+
+
+def calculate_market_state(symbol: str, timeframe: str = "M1") -> Dict[str, str]:
+    """Retourne l'état du marché (fallback quand MT5 non dispo)"""
+    try:
+        result = calculate_enhanced_trend_direction(symbol, timeframe)
+        direction = result.get("direction", "neutral")
+        if direction == "buy":
+            return {"market_state": "HAUSSIER", "market_trend": "UP"}
+        elif direction == "sell":
+            return {"market_state": "BAISSIER", "market_trend": "DOWN"}
+        else:
+            return {"market_state": "NEUTRE", "market_trend": "NEUTRAL"}
+    except Exception as e:
+        logger.error(f"Erreur calculate_market_state {symbol}: {e}")
+        return {"market_state": "DONNEES_INSUFFISANTES", "market_trend": "NEUTRE"}
+
+
 @app.get("/angelofspike/trend")
 async def get_angelofspike_trend(symbol: str = "Boom 1000 Index", timeframe: str = "M1"):
     """Endpoint spécifique pour AngelOfSpike avec état du marché inclus"""
@@ -10583,6 +10755,80 @@ async def decision(req: Request):
         if str(pattern_ctx.get("pattern_name")) != "NONE":
             reason += f" [Pattern {pattern_ctx.get('pattern_name')} {pattern_ctx.get('direction')}]"
 
+        # === MODE SCALPING : Génération signaux SL=$5 TP=$10-15 ===
+        scalping_signals: List[Dict[str, Any]] = []
+        metadata_scalping: Dict[str, Any] = {}
+
+        if request.scalping_mode and SCALPING_ENGINE_AVAILABLE:
+            logger.info(f"🎯 Mode SCALPING activé pour {request.symbol}")
+
+            # Préparer les données pour le générateur scalping
+            mid_price = (request.bid + request.ask) / 2 if request.bid and request.ask else request.bid or request.ask or 0
+
+            # Déterminer trend depuis EMA
+            trend = "neutral"
+            if request.ema_fast_h1 and request.ema_slow_h1:
+                if request.ema_fast_h1 > request.ema_slow_h1 * 1.001:
+                    trend = "bullish"
+                elif request.ema_fast_h1 < request.ema_slow_h1 * 0.999:
+                    trend = "bearish"
+
+            # Support/Resistance depuis chart_levels si disponible
+            support = None
+            resistance = None
+            if request.chart_levels and isinstance(request.chart_levels, dict):
+                support = request.chart_levels.get("support")
+                resistance = request.chart_levels.get("resistance")
+
+            # Générer signal scalping si conditions OK
+            scalp_signal = generate_scalping_signal(
+                symbol=request.symbol or "UNKNOWN",
+                current_price=mid_price,
+                trend=trend,
+                support=support,
+                resistance=resistance,
+                atr=request.atr,
+                session="auto",  # Déterminé par heure UTC
+                capital=request.capital_usd or 20.0,
+                tradingagents_analysis={
+                    "direction": action.upper(),
+                    "confidence": confidence,
+                }
+            )
+
+            if scalp_signal:
+                scalping_signals.append(scalp_signal.to_dict())
+                logger.info(
+                    f"✅ Signal scalping généré ({get_daily_signal_count()}/3): "
+                    f"{scalp_signal.direction} {scalp_signal.symbol} @ {scalp_signal.entry_price}"
+                )
+
+                # Injecter dans la réponse principale
+                action = scalp_signal.direction.lower()
+                confidence = scalp_signal.confidence
+                reason = f"SCALPING: {'; '.join(scalp_signal.reasoning)}"
+                stop_loss = scalp_signal.stop_loss
+                take_profit = scalp_signal.take_profit_1  # Utiliser TP1 par défaut
+
+                # Ajouter métadata scalping
+                metadata_scalping = {
+                    "scalping_mode": True,
+                    "scalp_signal": scalp_signal.to_dict(),
+                    "daily_count": get_daily_signal_count(),
+                    "max_daily": 3,
+                }
+            else:
+                logger.info(f"❌ Pas de signal scalping valide (ou limit 3/jour atteinte)")
+                # En mode scalping sans signal → forcer HOLD
+                action = "hold"
+                confidence = 0.0
+                reason = f"SCALPING: Pas de setup valide (signaux aujourd'hui: {get_daily_signal_count()}/3)"
+                metadata_scalping = {
+                    "scalping_mode": True,
+                    "daily_count": get_daily_signal_count(),
+                    "max_daily": 3,
+                }
+
         # Créer la réponse
         ta = {
             "rsi": request.rsi,
@@ -10596,17 +10842,24 @@ async def decision(req: Request):
         }
         if conv_meta:
             ta["indicator_confluence"] = conv_meta
+
+        # Fusionner metadata scalping si disponible
+        final_metadata = ta.copy()
+        if metadata_scalping:
+            final_metadata.update(metadata_scalping)
+
         response = DecisionResponse(
             action=action,
             confidence=confidence,
             reason=reason[:200],
             spike_prediction=False,
             spike_zone_price=None,
-            stop_loss=None,
-            take_profit=None,
+            stop_loss=stop_loss if request.scalping_mode else None,
+            take_profit=take_profit if request.scalping_mode else None,
             timestamp=datetime.now().isoformat(),
-            model_used="Technical+Multi-TF",
-            technical_analysis=ta
+            model_used="Scalping+Multi-TF" if request.scalping_mode else "Technical+Multi-TF",
+            technical_analysis=ta,
+            metadata=final_metadata
         )
         
         # Mettre en cache
@@ -19814,6 +20067,38 @@ async def tradingagents_manual_report(body: TradingAgentsManualReportBody):
         "risk_info": _risk,
         "recommended_lot": _risk.get("recommended_lot"),
         "max_loss_usd": _risk.get("max_loss_usd"),
+    }
+
+
+@app.get("/scalping/report")
+async def get_scalping_daily_report():
+    """
+    Retourne le rapport quotidien des signaux scalping générés.
+
+    Max 3 signaux/jour avec SL=$5 et TP=$10-15.
+    Idéal pour petit capital ($10-20).
+
+    Returns:
+        JSON avec liste des signaux + formatage markdown
+    """
+    if not SCALPING_ENGINE_AVAILABLE:
+        raise HTTPException(
+            status_code=503,
+            detail="Scalping Engine non disponible sur ce serveur"
+        )
+
+    count = get_daily_signal_count()
+    signals_list = [sig.to_dict() for sig in scalping_engine._SCALPING_SIGNALS_TODAY]
+    report_md = format_scalping_report(scalping_engine._SCALPING_SIGNALS_TODAY)
+
+    return {
+        "status": "OK",
+        "daily_count": count,
+        "max_daily": 3,
+        "remaining": max(0, 3 - count),
+        "signals": signals_list,
+        "report_markdown": report_md,
+        "timestamp": datetime.utcnow().isoformat(),
     }
 
 
