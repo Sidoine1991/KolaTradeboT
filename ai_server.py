@@ -58,6 +58,13 @@ load_dotenv(_root_dir / "python" / ".env")
 load_dotenv(_root_dir / ".env")
 load_dotenv()
 
+# === EARLY LOGGER INIT ===
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger("tradbot_ai")
+
 try:
     from divergence_strategy import (
         candles_to_dataframe,
@@ -181,9 +188,6 @@ def _supabase_credentials_ready() -> bool:
     ).strip()
     return bool(url and key)
 
-
-# Configurer le logger avant les imports d'améliorations
-logger = logging.getLogger("tradbot_ai")
 
 # Import du système de fallback Qwen pour trading rapide
 try:
@@ -20881,12 +20885,94 @@ class PendingOrderPayload(BaseModel):
     execution_type: Optional[str] = "market"
     confidence: Optional[float] = 0.75
     reasoning: Optional[str] = None
+    # Verdict GOM KOLA Pine — optionnel, injecté par MCP TradingView
+    gom_verdict: Optional[str] = None      # "BUY" | "SELL" | "WAIT"
+    gom_score_buy: Optional[float] = None
+    gom_score_sell: Optional[float] = None
+    gom_spike_pct: Optional[float] = None
+
+# Stockage du dernier verdict GOM par symbole (mis à jour par /gom-verdict ou /pending-order)
+_GOM_VERDICT_STORE: dict = {}
+
+def _validate_gom_confluence(symbol: str, direction: str, gom_verdict: Optional[str],
+                               gom_score_buy: Optional[float], gom_score_sell: Optional[float]) -> dict:
+    """
+    Valide la confluence entre la direction du signal et le verdict GOM KOLA.
+    Règles :
+      - Signal SELL + GOM BUY  → correction probable, réduire confiance, warning
+      - Signal BUY  + GOM SELL → correction probable, réduire confiance, warning
+      - Signal aligné avec GOM → boost confiance +10%
+      - GOM WAIT               → neutre, pas de modification
+    """
+    stored = _GOM_VERDICT_STORE.get(symbol.upper(), {})
+    verdict = (gom_verdict or stored.get("verdict") or "UNKNOWN").upper()
+    score_buy  = gom_score_buy  if gom_score_buy  is not None else stored.get("score_buy",  0.0)
+    score_sell = gom_score_sell if gom_score_sell is not None else stored.get("score_sell", 0.0)
+
+    result = {"gom_verdict": verdict, "gom_action": "NONE", "gom_warning": None, "confidence_delta": 0.0}
+
+    if verdict == "UNKNOWN" or verdict == "WAIT":
+        result["gom_action"] = "NEUTRAL"
+        return result
+
+    # Conflit : signal opposé au verdict GOM
+    if direction == "SELL" and verdict == "BUY":
+        gap = score_buy - score_sell
+        result["gom_action"]     = "CONFLICT"
+        result["confidence_delta"] = -0.15 if gap >= 2.0 else -0.08
+        result["gom_warning"]    = (
+            f"⚠️ CONFLIT GOM : signal SELL mais verdict GOM=BUY (buy={score_buy:.1f} sell={score_sell:.1f}). "
+            f"Probable correction — réduire lot, élargir SL ou attendre retest OB baissier."
+        )
+    elif direction == "BUY" and verdict == "SELL":
+        gap = score_sell - score_buy
+        result["gom_action"]     = "CONFLICT"
+        result["confidence_delta"] = -0.15 if gap >= 2.0 else -0.08
+        result["gom_warning"]    = (
+            f"⚠️ CONFLIT GOM : signal BUY mais verdict GOM=SELL (sell={score_sell:.1f} buy={score_buy:.1f}). "
+            f"Probable correction — réduire lot, élargir SL ou attendre retest OB haussier."
+        )
+    # Alignement : signal = verdict GOM → boost
+    elif direction == verdict:
+        result["gom_action"]     = "ALIGNED"
+        result["confidence_delta"] = 0.10
+        result["gom_warning"]    = None
+
+    return result
 
 @app.post("/pending-order")
 async def set_pending_order(payload: PendingOrderPayload):
     direction = (payload.action or payload.recommendation or "NEUTRAL").upper()
-    _PENDING_ORDER_STORE[payload.symbol.upper()] = {
-        "symbol":         payload.symbol.upper(),
+    sym = payload.symbol.upper()
+
+    # Validation croisée GOM KOLA
+    gom_check = _validate_gom_confluence(
+        sym, direction,
+        payload.gom_verdict, payload.gom_score_buy, payload.gom_score_sell
+    )
+    base_conf = payload.confidence or 0.75
+    final_conf = max(0.0, min(1.0, base_conf + gom_check["confidence_delta"]))
+
+    if gom_check["gom_warning"]:
+        logger.warning(f"[PendingOrder] {sym} {gom_check['gom_warning']}")
+
+    # Mise à jour store verdict GOM si fourni dans ce payload
+    if payload.gom_verdict:
+        _GOM_VERDICT_STORE[sym] = {
+            "verdict":    payload.gom_verdict.upper(),
+            "score_buy":  payload.gom_score_buy  or 0.0,
+            "score_sell": payload.gom_score_sell or 0.0,
+            "spike_pct":  payload.gom_spike_pct  or 0.0,
+            "timestamp":  datetime.utcnow().isoformat(),
+        }
+
+    reasoning_enriched = (payload.reasoning or "") + (
+        f" | GOM={gom_check['gom_verdict']} ({gom_check['gom_action']})" +
+        (f" | {gom_check['gom_warning']}" if gom_check["gom_warning"] else "")
+    )
+
+    _PENDING_ORDER_STORE[sym] = {
+        "symbol":         sym,
         "recommendation": direction,
         "action":         direction,
         "entry_price":    payload.entry_price,
@@ -20894,12 +20980,84 @@ async def set_pending_order(payload: PendingOrderPayload):
         "take_profit":    payload.take_profit,
         "lot":            payload.lot,
         "execution_type": payload.execution_type,
-        "confidence":     payload.confidence,
-        "reasoning":      payload.reasoning,
+        "confidence":     final_conf,
+        "reasoning":      reasoning_enriched,
+        "gom_verdict":    gom_check["gom_verdict"],
+        "gom_action":     gom_check["gom_action"],
+        "gom_warning":    gom_check["gom_warning"],
         "timestamp":      datetime.utcnow().isoformat(),
     }
-    logger.info(f"[PendingOrder] Stocke : {payload.symbol} {direction}")
-    return {"ok": True, "symbol": payload.symbol.upper(), "order_id": payload.symbol.upper()}
+    logger.info(f"[PendingOrder] Stocke : {sym} {direction} conf={final_conf:.2f} gom={gom_check['gom_action']}")
+    return {
+        "ok": True,
+        "symbol": sym,
+        "order_id": sym,
+        "gom_action": gom_check["gom_action"],
+        "gom_warning": gom_check["gom_warning"],
+        "confidence_adjusted": final_conf,
+    }
+
+
+class GomVerdictPayload(BaseModel):
+    symbol: str
+    verdict: str            # BUY | SELL | WAIT
+    score_buy: float = 0.0
+    score_sell: float = 0.0
+    spike_pct: float = 0.0
+    # Indicateurs TradingView (envoyés par l'alerte Pine)
+    vwap: Optional[float] = None
+    bb_up: Optional[float] = None
+    bb_mid: Optional[float] = None
+    bb_dn: Optional[float] = None
+    st_line: Optional[float] = None
+    st_dir: Optional[int] = None     # 1=haussier, -1=baissier
+    fib_0: Optional[float] = None
+    fib_236: Optional[float] = None
+    fib_382: Optional[float] = None
+    fib_500: Optional[float] = None
+    fib_618: Optional[float] = None
+    fib_786: Optional[float] = None
+    fib_100: Optional[float] = None
+    rsi: Optional[float] = None
+    price: Optional[float] = None
+
+@app.post("/gom-verdict")
+async def set_gom_verdict(payload: GomVerdictPayload):
+    """Endpoint dédié pour MCP TradingView — stocke le verdict GOM KOLA + indicateurs en temps réel."""
+    sym = payload.symbol.upper()
+    _GOM_VERDICT_STORE[sym] = {
+        "verdict":    payload.verdict.upper(),
+        "score_buy":  payload.score_buy,
+        "score_sell": payload.score_sell,
+        "spike_pct":  payload.spike_pct,
+        "vwap":       payload.vwap,
+        "bb_up":      payload.bb_up,
+        "bb_mid":     payload.bb_mid,
+        "bb_dn":      payload.bb_dn,
+        "st_line":    payload.st_line,
+        "st_dir":     payload.st_dir,
+        "fib_0":      payload.fib_0,
+        "fib_236":    payload.fib_236,
+        "fib_382":    payload.fib_382,
+        "fib_500":    payload.fib_500,
+        "fib_618":    payload.fib_618,
+        "fib_786":    payload.fib_786,
+        "fib_100":    payload.fib_100,
+        "rsi":        payload.rsi,
+        "price":      payload.price,
+        "timestamp":  datetime.utcnow().isoformat(),
+    }
+    logger.info(f"[GomVerdict] {sym} verdict={payload.verdict.upper()} buy={payload.score_buy:.1f} sell={payload.score_sell:.1f}")
+    return {"ok": True, "symbol": sym, "verdict": payload.verdict.upper()}
+
+@app.get("/gom-verdict")
+async def get_gom_verdict(symbol: str = "XAUUSD"):
+    """Retourne le dernier verdict GOM stocké pour un symbole."""
+    sym = _resolve_symbol(symbol)
+    verdict = _GOM_VERDICT_STORE.get(sym)
+    if not verdict:
+        return {"ok": False, "symbol": sym, "verdict": None, "message": "Aucun verdict GOM stocké"}
+    return {"ok": True, "symbol": sym, **verdict}
 
 @app.get("/pending-order")
 async def get_pending_order(symbol: str = "XAUUSD"):
@@ -20940,6 +21098,114 @@ async def get_alert_levels(symbol: str = "XAUUSD"):
         return {"ok": False, "symbol": sym, "levels": [], "message": "Aucun niveau stocke"}
     return {"ok": True, "symbol": sym, "levels": data.get("levels", []),
             "timestamp": data.get("timestamp")}
+
+
+# ---------------------------------------------------------------------------
+# Notify WhatsApp — appelé par MT5 WebRequest pour alertes trading spéciales
+# ---------------------------------------------------------------------------
+PSYCHOBOT_URL = os.getenv("PSYCHOBOT_URL", "https://psychobot-1si7.onrender.com")
+WHATSAPP_PHONE = os.getenv("WHATSAPP_PHONE") or os.getenv("WHATSAPP_PHONE_NUMBER", "")
+
+class WaNotifyRequest(BaseModel):
+    event: str          # "ENTRY_HIT" | "TP1_HIT" | "SL_HIT" | "ORDER_EXECUTED" | "CUSTOM"
+    symbol: str
+    price: Optional[float] = None
+    profit: Optional[float] = None
+    direction: Optional[str] = None
+    entry_price: Optional[float] = None
+    sl: Optional[float] = None
+    tp1: Optional[float] = None
+    lot: Optional[float] = None
+    message: Optional[str] = None
+
+@app.post("/notify-whatsapp")
+async def notify_whatsapp(req: WaNotifyRequest):
+    """MT5 envoie ici les événements trading spéciaux → PsychoBot WhatsApp."""
+    phone = WHATSAPP_PHONE
+    if not phone:
+        return {"ok": False, "error": "WHATSAPP_PHONE non configuré"}
+
+    ts = datetime.utcnow().strftime("%H:%M UTC")
+    event_icons = {
+        "ENTRY_HIT":       "🎯",
+        "TP1_HIT":         "✅",
+        "SL_HIT":          "🛑",
+        "ORDER_EXECUTED":  "📥",
+        "CUSTOM":          "📢",
+    }
+    icon = event_icons.get(req.event, "📢")
+
+    if req.event == "ORDER_EXECUTED":
+        body = (f"{icon} ORDRE EXÉCUTÉ [{ts}]\n"
+                f"Symbole : {req.symbol}\n"
+                f"Direction : {req.direction or '?'}\n"
+                f"Prix entrée : {req.entry_price or req.price or '?'}\n"
+                f"SL : {req.sl or '?'} | TP1 : {req.tp1 or '?'}\n"
+                f"Lot : {req.lot or '?'}")
+    elif req.event == "ENTRY_HIT":
+        body = (f"{icon} NIVEAU D'ENTRÉE ATTEINT [{ts}]\n"
+                f"Symbole : {req.symbol}\n"
+                f"Prix : {req.price or '?'}\n"
+                f"Direction : {req.direction or '?'}\n"
+                f"Entrée cible : {req.entry_price or '?'}")
+    elif req.event == "TP1_HIT":
+        profit_str = f"+${req.profit:.2f}" if req.profit is not None else "?"
+        body = (f"{icon} TP1 ATTEINT [{ts}]\n"
+                f"Symbole : {req.symbol}\n"
+                f"Prix : {req.price or '?'}\n"
+                f"Profit : {profit_str}")
+    elif req.event == "SL_HIT":
+        profit_str = f"-${abs(req.profit):.2f}" if req.profit is not None else "?"
+        body = (f"{icon} STOP LOSS TOUCHÉ [{ts}]\n"
+                f"Symbole : {req.symbol}\n"
+                f"Prix : {req.price or '?'}\n"
+                f"Perte : {profit_str}")
+    else:
+        body = f"{icon} TradBOT [{ts}]\n{req.symbol}\n{req.message or req.event}"
+
+    full_msg = f"🤖 TradBOT ALERT [{ts}]\n\n{body}"
+    try:
+        resp = requests.post(
+            f"{PSYCHOBOT_URL}/send-message",
+            json={"phone": phone, "message": full_msg},
+            timeout=20,
+        )
+        ok = resp.status_code == 200 and resp.json().get("success", False)
+        logger.info(f"[WA Notify] {req.event} {req.symbol} → {'OK' if ok else 'FAIL'} ({resp.status_code})")
+        return {"ok": ok, "event": req.event, "symbol": req.symbol}
+    except Exception as e:
+        logger.error(f"[WA Notify] Erreur PsychoBot: {e}")
+        return {"ok": False, "error": str(e)}
+
+
+# ---------------------------------------------------------------------------
+# Bridge unifié TA + TradingView MCP — état pour suivi WhatsApp 10 min
+# ---------------------------------------------------------------------------
+_UNIFIED_SIGNAL_STORE: dict = {}
+
+
+@app.post("/bridge/unified-signal")
+async def set_unified_signal(payload: dict):
+    symbol = _resolve_symbol(str(payload.get("symbol", "XAUUSD")))
+    _UNIFIED_SIGNAL_STORE[symbol] = {
+        "symbol": symbol,
+        "confirmed": payload.get("confirmed"),
+        "tv_summary": payload.get("tv_summary"),
+        "comparison": payload.get("comparison"),
+        "updated_at": payload.get("updated_at") or datetime.utcnow().isoformat(),
+    }
+    logger.info("[UnifiedSignal] Stocke %s verdict=%s", symbol,
+                (payload.get("comparison") or {}).get("verdict"))
+    return {"ok": True, "symbol": symbol}
+
+
+@app.get("/bridge/unified-signal")
+async def get_unified_signal(symbol: str = "XAUUSD"):
+    sym = _resolve_symbol(symbol)
+    data = _UNIFIED_SIGNAL_STORE.get(sym)
+    if not data:
+        return {"ok": False, "symbol": sym, "data": None}
+    return {"ok": True, "symbol": sym, "data": data}
 
 
 if __name__ == "__main__":
