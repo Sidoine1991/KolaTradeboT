@@ -20074,6 +20074,43 @@ async def tradingagents_manual_report(body: TradingAgentsManualReportBody):
     }
 
 
+@app.get("/tradingagents/report-status")
+async def tradingagents_report_status(symbol: str = "XAUUSD"):
+    """Statut du dernier rapport TradingAgents manuel en mémoire (pour le monitor WhatsApp)."""
+    sym = _resolve_symbol(symbol.strip().upper())
+    now = time.time()
+    async with _tradingagents_manual_lock:
+        row = _tradingagents_manual_reports.get(sym)
+    if not row:
+        return {
+            "ok": False, "symbol": sym, "direction": "NONE",
+            "confidence": 0.0, "age_minutes": 0.0, "expires_in_minutes": 0.0,
+            "entry_price": None, "stop_loss": None, "take_profit": None,
+            "reasoning_snippet": "",
+        }
+    age_sec = now - float(row.get("ts", now))
+    if age_sec > AI_TRADINGAGENTS_MANUAL_TTL_SEC:
+        return {
+            "ok": False, "symbol": sym, "direction": "NONE",
+            "confidence": 0.0, "age_minutes": round(age_sec / 60, 1), "expires_in_minutes": 0.0,
+            "entry_price": None, "stop_loss": None, "take_profit": None,
+            "reasoning_snippet": "",
+        }
+    remaining = AI_TRADINGAGENTS_MANUAL_TTL_SEC - age_sec
+    return {
+        "ok": True,
+        "symbol": sym,
+        "direction": row.get("recommendation", "HOLD"),
+        "confidence": round(float(row.get("confidence", 0.0)), 3),
+        "age_minutes": round(age_sec / 60, 1),
+        "expires_in_minutes": round(remaining / 60, 1),
+        "entry_price": row.get("entry_price"),
+        "stop_loss": row.get("stop_loss"),
+        "take_profit": row.get("take_profit"),
+        "reasoning_snippet": (row.get("reasoning") or "")[:200],
+    }
+
+
 @app.get("/scalping/report")
 async def get_scalping_daily_report():
     """
@@ -20890,6 +20927,7 @@ class PendingOrderPayload(BaseModel):
     gom_score_buy: Optional[float] = None
     gom_score_sell: Optional[float] = None
     gom_spike_pct: Optional[float] = None
+    status: Optional[str] = "ready"  # "ready" | "CONFLICT_PENDING"
 
 # Stockage du dernier verdict GOM par symbole (mis à jour par /gom-verdict ou /pending-order)
 _GOM_VERDICT_STORE: dict = {}
@@ -20971,6 +21009,7 @@ async def set_pending_order(payload: PendingOrderPayload):
         (f" | {gom_check['gom_warning']}" if gom_check["gom_warning"] else "")
     )
 
+    _raw_status = (payload.status or "ready").lower()
     _PENDING_ORDER_STORE[sym] = {
         "symbol":         sym,
         "recommendation": direction,
@@ -20985,6 +21024,7 @@ async def set_pending_order(payload: PendingOrderPayload):
         "gom_verdict":    gom_check["gom_verdict"],
         "gom_action":     gom_check["gom_action"],
         "gom_warning":    gom_check["gom_warning"],
+        "status":         _raw_status if _raw_status in ("ready", "conflict_pending") else "ready",
         "timestamp":      datetime.utcnow().isoformat(),
     }
     logger.info(f"[PendingOrder] Stocke : {sym} {direction} conf={final_conf:.2f} gom={gom_check['gom_action']}")
@@ -21065,7 +21105,30 @@ async def get_pending_order(symbol: str = "XAUUSD"):
     order = _PENDING_ORDER_STORE.get(sym)
     if not order:
         return {"ok": False, "symbol": sym, "order": None, "message": "Aucun ordre pending"}
+    if order.get("status", "ready") == "conflict_pending":
+        return {"ok": False, "symbol": sym, "order": None, "message": "Ordre en attente résolution conflit TA/TV"}
     return {"ok": True, "symbol": sym, "order": order}
+
+
+@app.get("/pending-orders")
+async def list_pending_orders():
+    """Liste tous les ordres status=ready (TradeManager poll multi-symboles)."""
+    ready = [
+        o for o in _PENDING_ORDER_STORE.values()
+        if (o.get("status") or "ready").lower() in ("ready",)
+    ]
+    return {"ok": True, "count": len(ready), "orders": ready}
+
+@app.post("/pending-order/resolve")
+async def resolve_pending_order(payload: dict = Body(...)):
+    """Promeut un ordre CONFLICT_PENDING en ready — appelé par le bridge quand TV s'aligne."""
+    sym = _resolve_symbol((payload.get("symbol") or "XAUUSD").strip().upper())
+    order = _PENDING_ORDER_STORE.get(sym)
+    if not order:
+        return {"ok": False, "symbol": sym, "message": "Aucun ordre pending"}
+    order["status"] = "ready"
+    logger.info(f"[PendingOrder] {sym} conflit résolu → status=ready")
+    return {"ok": True, "symbol": sym, "status": "ready"}
 
 @app.delete("/pending-order")
 async def delete_pending_order(symbol: str = "XAUUSD"):
@@ -21176,6 +21239,100 @@ async def notify_whatsapp(req: WaNotifyRequest):
     except Exception as e:
         logger.error(f"[WA Notify] Erreur PsychoBot: {e}")
         return {"ok": False, "error": str(e)}
+
+
+# ---------------------------------------------------------------------------
+# TradingView bias pour EA MT5 (cache + refresh via MCP Kola / CDP)
+# ---------------------------------------------------------------------------
+_TV_BIAS_CACHE: dict = {}
+_TV_BIAS_CACHE_TTL_SEC = int(os.getenv("TV_BIAS_CACHE_TTL_SEC", "90"))
+
+
+def _tv_bias_from_summary(summary: dict) -> dict:
+    if not summary:
+        return {"ok": False, "direction": "NEUTRAL"}
+    return {
+        "ok": bool(summary.get("success")),
+        "direction": (summary.get("direction") or "NEUTRAL").upper(),
+        "structure_m15": summary.get("structure_m15"),
+        "structure_h1": summary.get("structure_h1"),
+        "bias_score": summary.get("bias_score"),
+        "confluence_score": summary.get("confluence_score"),
+        "current_price": summary.get("current_price"),
+        "spike_detected": summary.get("spike_detected", False),
+        "spike_direction": summary.get("spike_direction"),
+        "error": summary.get("error"),
+    }
+
+
+@app.get("/mt5/tv-bias")
+async def mt5_tv_bias(symbol: str = "XAUUSD", refresh: bool = False):
+    """
+    Biais chart TradingView (SMC M15/H1 + direction) pour validation EA.
+    Utilise le cache bridge, sinon analyse live via tradingview-mcp_kola (CDP 9222).
+    """
+    sym = _resolve_symbol(symbol.upper())
+    now = datetime.utcnow()
+
+    if not refresh:
+        uni = _UNIFIED_SIGNAL_STORE.get(sym)
+        if uni and uni.get("tv_summary"):
+            return {
+                "ok": True,
+                "symbol": sym,
+                "source": "bridge_unified",
+                "updated_at": uni.get("updated_at"),
+                **_tv_bias_from_summary(uni["tv_summary"]),
+            }
+        cached = _TV_BIAS_CACHE.get(sym)
+        if cached:
+            age = (now - cached["ts"]).total_seconds()
+            if age < _TV_BIAS_CACHE_TTL_SEC:
+                out = dict(cached["data"])
+                out["ok"] = True
+                out["symbol"] = sym
+                out["source"] = "cache"
+                out["age_sec"] = int(age)
+                return out
+
+    summary = None
+    err = None
+    try:
+        import sys
+        from pathlib import Path
+        py_dir = Path(__file__).resolve().parent / "python"
+        if str(py_dir) not in sys.path:
+            sys.path.insert(0, str(py_dir))
+        from tv_mcp_client import fetch_tradingview_analysis, summarize_tv_analysis
+
+        cat = sym.upper()
+        mode = "both" if ("BOOM" in cat or "CRASH" in cat) else "smc"
+        raw = fetch_tradingview_analysis(symbol, mode=mode)
+        summary = summarize_tv_analysis(raw)
+        if not summary.get("success"):
+            err = summary.get("error") or raw.get("error") or "tv_analysis_failed"
+    except Exception as exc:
+        err = str(exc)
+        logger.warning("[TV-Bias] %s: %s", sym, err)
+
+    if summary and summary.get("success"):
+        payload = {
+            "ts": now,
+            "data": {
+                **_tv_bias_from_summary(summary),
+                "updated_at": now.isoformat(),
+            },
+        }
+        _TV_BIAS_CACHE[sym] = payload
+        return {"ok": True, "symbol": sym, "source": "live_mcp", **payload["data"]}
+
+    return {
+        "ok": False,
+        "symbol": sym,
+        "direction": "NEUTRAL",
+        "error": err or "no_tv_data",
+        "hint": "Lancer TradingView avec launch_tradingview_cdp.bat puis bridge ou refresh=1",
+    }
 
 
 # ---------------------------------------------------------------------------

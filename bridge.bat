@@ -16,10 +16,10 @@ IF NOT EXIST "%TA_PYTHON%" (
     exit /b 1
 )
 
-REM Injecter --analysts market,social si non fourni par l'utilisateur
+REM Injecter --analysts market,social,news,fundamentals si non fourni par l'utilisateur
 echo %* | findstr /i "analysts" >nul 2>&1
 if errorlevel 1 (
-    "%TA_PYTHON%" "%BRIDGE%" %* --analysts market,social
+    "%TA_PYTHON%" "%BRIDGE%" %* --analysts market,social,news,fundamentals
 ) else (
     "%TA_PYTHON%" "%BRIDGE%" %*
 )

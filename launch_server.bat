@@ -12,15 +12,18 @@ echo   TradBOT IA Server Launcher
 echo ========================================
 echo.
 
+set PYTHON=D:\Dev\TradBOT\venv\Scripts\python.exe
+
 REM Charger dotenv
-python -c "from dotenv import load_dotenv; from pathlib import Path; r=Path(r'D:\Dev\TradBOT'); load_dotenv(r/'python'/'.env'); load_dotenv(r/'.env'); print('OK: Environment loaded')" 2>nul
+%PYTHON% -c "from dotenv import load_dotenv; from pathlib import Path; r=Path(r'D:\Dev\TradBOT'); load_dotenv(r/'python'/'.env'); load_dotenv(r/'.env'); print('OK: Environment loaded')" 2>nul
 
 echo.
 echo Starting ai_server.py on http://localhost:8000
 echo API Docs: http://localhost:8000/docs
+echo Python: %PYTHON%
 echo.
 
 REM Lancer le serveur
-python ai_server.py --port 8000
+%PYTHON% ai_server.py --port 8000
 
 pause

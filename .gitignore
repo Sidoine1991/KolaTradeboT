@@ -81,11 +81,13 @@ models/
 # Streamlit
 .streamlit/
 
-# MQL5 EA — ne pas exposer sur le dépôt distant
+# MQL5 EA — ne pas exposer sur le dépôt distant (exceptions dispositif bridge/TV)
 SMC_Universal.mq5
 SMC_Universal.ex5
 *.mq5
 *.ex5
+!TradeManager.mq5
+!SpikeRiderEA.mq5
 
 # Archives lourdes
 _archive/

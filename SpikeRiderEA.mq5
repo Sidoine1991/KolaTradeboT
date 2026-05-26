@@ -1,0 +1,2534 @@
+//+------------------------------------------------------------------+
+//|                                                  SpikeRiderEA.mq5 |
+//|   EA spécialisé détection et capture de spikes Boom/Crash/PAIN/GAIN|
+//|   Logique : Z-Score + ATR + RSI + Stair + Compteur inter-spike   |
+//|   Sortie   : TP fixe ATR × mult + trailing stop dès activation   |
+//|   Symboles : Boom 300/500/600/900/1000, Crash 300/500/600/900/1000|
+//|              PAINx / GAINx (Weltrade synthetics)                  |
+//|   v5 : stratégie SMC spike — BOS + CHOCH + Fib OTE + spike Z      |
+//|        entrée uniquement sur setup confirmé (plus imminence seule)|
+//+------------------------------------------------------------------+
+#property copyright "TradBOT"
+#property version   "5.01"
+#property strict
+
+#include <Trade/Trade.mqh>
+#include <SpikeRider_SMC.mqh>
+
+//+------------------------------------------------------------------+
+//| INPUTS                                                           |
+//+------------------------------------------------------------------+
+input group "=== GESTION DU RISQUE ==="
+input double InpFixedLot         = 0.0;   // 0 = lot MIN broker | >0 = lot fixe (>= min)
+input double InpMaxDailyLossPct  = 5.0;   // Arrêt journalier si perte > X% solde
+
+input group "=== DÉTECTION SPIKE ==="
+input ENUM_TIMEFRAMES InpTF      = PERIOD_M1;  // Timeframe analyse
+input int    InpLookback         = 20;          // Bougies historique pour Z-Score (réduit pour réactivité)
+input double InpZScoreMin        = 1.5;         // Z-Score minimum (abaissé pour capter plus de spikes)
+input double InpMinMoveMult      = 2.0;         // Mouvement min = X × mouvement moyen (abaissé)
+input int    InpRSIPeriod        = 14;          // Période RSI
+input double InpRSIBoomMax       = 55.0;        // RSI max Boom — élargi (spikes arrivent souvent de RSI neutre)
+input double InpRSICrashMin      = 45.0;        // RSI min Crash — élargi
+input bool   InpRequireRSI       = false;       // RSI désactivé — bloquait 80% des spikes valides
+input int    InpStairBars        = 3;           // Escalier réduit à 3 bougies (plus sensible)
+input double InpStairMinPct      = 0.0;         // Escalier désactivé comme filtre bloquant
+
+input group "=== PRÉ-SPIKE (désactivé v5 — setup SMC obligatoire) ==="
+input bool   InpPreSpikeEnabled  = false;       // OFF : plus d'entrée sur imminence seule
+input bool   InpPreSpikeUseMarket= true;        // true = marché (recommandé Boom/Crash)
+input int    InpSpikeFrequency   = 0;           // 0 = auto depuis nom symbole (ex. Boom 600 → 600)
+input double InpImminenceThresh  = 25.0;        // Seuil imminence (abaissé pour plus d'entrées)
+input bool   InpRequirePriorFavorable = false;  // false = prior informatif seulement (ne bloque pas)
+input double InpPendingOffsetATR = 0.2;         // Offset pending = X×ATR au-dessus ask (Boom)
+input int    InpPendingMaxAgeSec = 60;          // Durée pending réduite (spike = rapide)
+input double InpAtrCompressRatio = 0.80;        // Seuil compression élargi
+
+input group "=== SMC SPIKE (BOS / CHOCH / OTE) ==="
+input bool   InpRequireSMC       = true;        // Exiger structure SMC avant entrée
+input bool   InpRequireBOS       = true;        // Break of Structure requis
+input bool   InpRequireCHOCH     = false;       // CHOCH requis (sinon BOS OU CHOCH)
+input bool   InpRequireOTE       = true;        // Prix en zone OTE 61.8–78.6 (sauf spike Z fort)
+input int    InpSwingLookback    = 40;         // Lookback pivots swing / Fib
+input bool   InpDrawSMCLevels    = true;        // Afficher Fib + OTE sur graphique
+
+input group "=== GESTION DE POSITION ==="
+input int    InpATRPeriod        = 14;          // Période ATR
+input double InpSL_ATR           = 1.0;         // SL = 1×ATR
+input double InpTP_ATR           = 2.0;         // TP = 2×ATR
+input bool   InpUseChartStops    = true;        // true = TOUJOURS placer SL/TP broker
+input bool   InpUseTrailing      = false;       // false = pas de modify SL (Invalid stops)
+input double InpTrailActivation  = 0.5;         // Trailing activé dès 0.5×ATR de profit
+input double InpTrailStep        = 0.5;         // Pas trailing >= distance broker
+input int    InpCooldownSec      = 15;          // Cooldown réduit à 15s — scalping
+
+input group "=== SERVEUR AI ==="
+input bool   InpUsePrior         = true;                         // Activer prior horaire
+input string InpAIServerURL      = "http://127.0.0.1:8000";      // URL du serveur AI
+input int    InpPriorTimeoutMs   = 2000;                         // Timeout requête HTTP (ms)
+input bool   InpUseAngelOfSpike  = false;       // Désactivé — Angel=HOLD bloquait toutes les entrées
+input bool   InpUseZonePrior     = false;       // Désactivé — ZonePrior=0 bloquait toutes les entrées
+input bool   InpUseRealtimeCross = true;                         // Consulter /spike/realtime cross-chart
+input bool   InpSendFeedback     = true;                         // Envoyer résultat trade /trades/feedback
+input bool   InpSendStairDetect  = false;       // Désactivé — réduit les WebRequests
+input bool   InpSendInfluence    = false;       // Désactivé — réduit les WebRequests
+
+input group "=== FILTRES TENDANCE / CONFIRMATION ==="
+input bool   InpRequireTrendAlign   = true;      // Bloquer BUY Boom en forte baisse / SELL Crash en forte hausse
+input int    InpTrendBars           = 6;         // Bougies pour mesurer la poussée récente
+input double InpTrendStrongATR      = 0.28;     // Corps cumulés >= X×ATR = tendance opposée (plus strict)
+input int    InpConfirmBars         = 2;         // Bougies fermées dans le sens du spike requises
+input bool   InpPreSpikeNeedConfirm = true;      // Pré-spike : exiger confirmation (pas imminence seule)
+input int    InpEMAFast             = 9;         // EMA rapide (structure)
+input int    InpEMASlow             = 21;        // EMA lente (structure)
+input bool   InpRequireM1PushAlign  = true;      // Boom: exiger poussée M1 non baissière avant BUY
+
+input group "=== CONFIRMATION TRADINGVIEW (via ai_server) ==="
+input bool   InpUseTVConfirm        = true;      // Consulter indicateurs/TV avant ordre
+input int    InpTVConfirmIntervalSec= 45;        // Refresh max (évite spam WebRequest)
+input int    InpTVConfirmMaxAgeSec  = 120;       // Biais TV trop vieux → refus entrée
+
+input group "=== SORTIE RAPIDE (anti micro-pertes) ==="
+input bool   InpUseQuickExit        = true;      // Sortie rapide activée
+input int    InpMinHoldSec           = 50;        // Durée min avant toute sortie (Boom 600)
+input double InpQuickExitMinProfitUSD= 0.12;    // Profit min $ avant sortie (pas 0.01)
+input double InpQuickExitMinProfitBoom600= 0.20; // Profit min $ sur Boom 600
+input bool   InpExitOnSameSpikeBar  = false;     // false = ne pas fermer sur le spike d'entrée
+
+input group "=== FILTRES ==="
+input bool   InpCheckNewBar      = false;       // DÉSACTIVÉ — entrée immédiate sur spike live
+input int    InpMaxSpreadPoints  = 500;         // Spread élargi (synthétiques ont spreads larges)
+
+input group "=== AFFICHAGE ==="
+input bool   InpShowDashboard    = true;
+input bool   InpDebug            = false;
+input ulong  InpMagic            = 20260524;
+
+//+------------------------------------------------------------------+
+//| TYPES INTERNES                                                   |
+//+------------------------------------------------------------------+
+enum ESpikeType { SPIKE_NONE, SPIKE_BUY, SPIKE_SELL };
+
+struct SpikeResult
+{
+   ESpikeType type;
+   double     zScore;
+   double     rsi;
+   double     atr;
+   double     stairScore;
+};
+
+//+------------------------------------------------------------------+
+//| VARIABLES GLOBALES                                               |
+//+------------------------------------------------------------------+
+CTrade      g_trade;
+int         g_hATR            = INVALID_HANDLE;
+int         g_hRSI            = INVALID_HANDLE;
+int         g_hEMAFast        = INVALID_HANDLE;
+int         g_hEMASlow        = INVALID_HANDLE;
+datetime    g_lastBar         = 0;
+datetime    g_lastTrade       = 0;
+datetime    g_lastEntryFail   = 0;   // anti-spam après Invalid stops
+datetime    g_lastEntryBarTime = 0;  // bougie d'entrée (évite sortie même spike)
+double      g_dayStartBalance = 0.0;
+datetime    g_dayTag          = 0;
+
+// Compteur inter-spike
+int         g_barsSinceLastSpike = 0;
+datetime    g_lastSpikeBar       = 0;
+
+// Ordre pending pré-spike
+ulong       g_pendingTicket      = 0;
+datetime    g_pendingPlacedAt    = 0;
+
+// Contexte SMC (BOS / CHOCH / OTE)
+SR_SMCSetup g_smc;
+datetime    g_lastSMCBar         = 0;
+
+// Prior horaire AWS RDS  (/spike/hour-prior)
+double      g_priorCaptureRate   = 0.5;
+double      g_priorAtrMult       = 2.5;
+double      g_priorAtrThreshold  = 1.8;
+bool        g_priorFavorable     = true;
+int         g_priorSampleCount   = 0;
+string      g_priorSource        = "init";
+datetime    g_lastPriorFetch     = 0;
+datetime    g_lastPriorAttempt   = 0;
+int         g_lastPriorHour      = -1;
+
+// Zone prior (/mt5/spike-zone-prior)
+double      g_zonePrior          = 0.5;   // score combiné spike_rate + propice_score
+double      g_zoneSpikeRate      = 0.0;
+double      g_zonePropiceScore   = 0.0;
+int         g_zoneSamples        = 0;
+datetime    g_lastZoneFetch      = 0;
+datetime    g_lastZoneAttempt    = 0;
+int         g_lastZoneHour       = -1;
+
+// Angel of Spike (/angelofspike/trend)
+string      g_angelSignal        = "HOLD"; // "BUY" | "SELL" | "HOLD"
+double      g_angelConfidence    = 0.0;
+string      g_angelMarketState   = "";
+datetime    g_lastAngelFetch     = 0;
+datetime    g_lastAngelAttempt   = 0;
+int         g_lastAngelHour      = -1;
+
+// Realtime cross-chart (/spike/realtime)
+bool        g_realtimeSpikeActive   = false;
+string      g_realtimeSpikeDir      = "";
+datetime    g_lastRealtimeFetch     = 0;
+
+// TradingView bias (/mt5/tv-bias)
+string      g_tvDirection           = "NEUTRAL";
+string      g_tvStructureM15        = "";
+string      g_tvStructureH1         = "";
+double      g_tvBiasScore           = 0.0;
+datetime    g_lastTVFetch           = 0;
+datetime    g_lastTVAttempt         = 0;
+
+// Stair detection — ID pour feedback ultérieur
+string      g_lastStairEventId      = "";   // uuid retourné par /stair/detect
+string      g_lastStairClientId     = "";   // client_event_id généré par l'EA
+
+// Suivi positions pour feedback
+struct TradeRecord
+{
+   ulong    ticket;
+   ESpikeType spikeType;
+   double   entryPrice;
+   datetime openTime;
+   double   imminenceAtEntry;
+   double   zScoreAtEntry;
+   double   rsiAtEntry;
+   double   stairAtEntry;
+   double   zonePriorAtEntry;
+   double   angelConfAtEntry;
+   string   stairEventId;
+   string   stairClientId;
+};
+TradeRecord g_openTrades[10];
+int         g_openTradesCount = 0;
+
+//+------------------------------------------------------------------+
+//| DÉTECTION SYMBOLE                                                |
+//+------------------------------------------------------------------+
+bool IsBoom(const string s)
+{
+   return StringFind(s,"Boom",0)>=0 || StringFind(s,"boom",0)>=0 ||
+          StringFind(s,"GAIN",0)>=0 || StringFind(s,"gain",0)>=0;
+}
+bool IsCrash(const string s)
+{
+   return StringFind(s,"Crash",0)>=0 || StringFind(s,"crash",0)>=0 ||
+          StringFind(s,"PAIN",0)>=0  || StringFind(s,"pain",0)>=0;
+}
+bool IsSupportedSymbol(const string s) { return IsBoom(s) || IsCrash(s); }
+
+// Fréquence spike : 0 = déduire du nom (Boom 600 Index → 600), sinon input manuel
+int GetEffectiveSpikeFrequency()
+{
+   if(InpSpikeFrequency > 0) return InpSpikeFrequency;
+   const string nums[] = {"1000","900","600","500","300"};
+   for(int i = 0; i < ArraySize(nums); i++)
+      if(StringFind(_Symbol, nums[i]) >= 0)
+         return (int)StringToInteger(nums[i]);
+   return 600;
+}
+
+//+------------------------------------------------------------------+
+//| LECTURE ATR / RSI                                                |
+//+------------------------------------------------------------------+
+double GetATR()
+{
+   if(g_hATR == INVALID_HANDLE) return 0.0;
+   double buf[];
+   ArraySetAsSeries(buf, true);
+   if(CopyBuffer(g_hATR, 0, 0, 3, buf) < 3) return 0.0;
+   return buf[1];
+}
+double GetRSI()
+{
+   if(g_hRSI == INVALID_HANDLE) return 50.0;
+   double buf[];
+   ArraySetAsSeries(buf, true);
+   if(CopyBuffer(g_hRSI, 0, 0, 3, buf) < 3) return 50.0;
+   return buf[1];
+}
+
+// Somme des corps des N dernières bougies fermées (shift 1+)
+double GetRecentBodySum(const int bars, const int shiftStart = 1)
+{
+   if(bars <= 0) return 0.0;
+   MqlRates r[];
+   ArraySetAsSeries(r, true);
+   if(CopyRates(_Symbol, InpTF, shiftStart, bars, r) < bars) return 0.0;
+   double sum = 0.0;
+   for(int i = 0; i < bars; i++)
+      sum += r[i].close - r[i].open;
+   return sum;
+}
+
+// +1 poussée haussière, -1 baissière, 0 neutre
+int GetMicroTrendPush(const int bars)
+{
+   double atr = GetATR();
+   if(atr <= 0.0) return 0;
+   double sum = GetRecentBodySum(bars, 1);
+   if(sum >= atr * InpTrendStrongATR) return 1;
+   if(sum <= -atr * InpTrendStrongATR) return -1;
+   return 0;
+}
+
+bool HasDirectionConfirmation(const ESpikeType dir)
+{
+   if(InpConfirmBars <= 0) return true;
+   MqlRates r[];
+   ArraySetAsSeries(r, true);
+   if(CopyRates(_Symbol, InpTF, 1, InpConfirmBars, r) < InpConfirmBars) return false;
+   int ok = 0;
+   for(int i = 0; i < InpConfirmBars; i++)
+   {
+      double body = r[i].close - r[i].open;
+      if(dir == SPIKE_BUY  && body > 0.0) ok++;
+      if(dir == SPIKE_SELL && body < 0.0) ok++;
+   }
+   return (ok >= InpConfirmBars);
+}
+
+bool IsStrongCounterTrend(const ESpikeType dir)
+{
+   if(!InpRequireTrendAlign) return false;
+   int push = GetMicroTrendPush(InpTrendBars);
+   if(dir == SPIKE_BUY  && push < 0) return true;
+   if(dir == SPIKE_SELL && push > 0) return true;
+
+   double ef[], es[];
+   if(g_hEMAFast != INVALID_HANDLE && g_hEMASlow != INVALID_HANDLE &&
+      CopyBuffer(g_hEMAFast, 0, 1, 1, ef) >= 1 && CopyBuffer(g_hEMASlow, 0, 1, 1, es) >= 1)
+   {
+      MqlRates c[];
+      if(CopyRates(_Symbol, InpTF, 1, 1, c) >= 1)
+      {
+         if(dir == SPIKE_BUY  && ef[0] < es[0] && c[0].close < es[0] && push <= 0) return true;
+         if(dir == SPIKE_SELL && ef[0] > es[0] && c[0].close > es[0] && push >= 0) return true;
+      }
+   }
+   return false;
+}
+
+void UpdateSMCContext()
+{
+   double px = IsBoom(_Symbol) ? SymbolInfoDouble(_Symbol, SYMBOL_ASK)
+                                 : SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   SR_BuildSMCSetup(_Symbol, InpTF, IsBoom(_Symbol), px, InpSwingLookback, g_smc);
+}
+
+bool CanEnterInDirection(const ESpikeType dir, const bool isPreSpike,
+                         const SpikeResult &spike, string &reason)
+{
+   reason = "";
+   if(IsBoom(_Symbol)  && dir != SPIKE_BUY)  { reason = "Boom → BUY uniquement"; return false; }
+   if(IsCrash(_Symbol) && dir != SPIKE_SELL) { reason = "Crash → SELL uniquement"; return false; }
+
+   if(isPreSpike)
+   {
+      reason = "pré-spike désactivé (v5: setup SMC + spike)";
+      return false;
+   }
+
+   if(IsStrongCounterTrend(dir))
+   {
+      reason = StringFormat("tendance opposée (%d bar, push=%d)", InpTrendBars, GetMicroTrendPush(InpTrendBars));
+      return false;
+   }
+
+   if(InpRequireM1PushAlign && IsBoom(_Symbol) && dir == SPIKE_BUY)
+   {
+      int push = GetMicroTrendPush(InpTrendBars);
+      if(push < 0)
+      {
+         reason = StringFormat("M1 en poussée baissière (push=%d) — pas de BUY", push);
+         return false;
+      }
+   }
+
+   if(InpRequireM1PushAlign && IsCrash(_Symbol) && dir == SPIKE_SELL)
+   {
+      int push = GetMicroTrendPush(InpTrendBars);
+      if(push > 0)
+      {
+         reason = StringFormat("M1 en poussée haussière (push=%d) — pas de SELL", push);
+         return false;
+      }
+   }
+
+   if(InpUseTVConfirm)
+   {
+      string tvWhy;
+      if(!TVChartConfirmsEntry(dir, tvWhy))
+      {
+         reason = tvWhy;
+         return false;
+      }
+   }
+
+   if(spike.type == SPIKE_NONE || spike.type != dir)
+   {
+      reason = "spike non confirmé dans le sens";
+      return false;
+   }
+
+   if(!HasDirectionConfirmation(dir) && spike.zScore < InpZScoreMin + 0.75)
+   {
+      reason = "bougies non alignées + Z faible";
+      return false;
+   }
+
+   UpdateSMCContext();
+   if(InpRequireSMC)
+   {
+      if(!SR_SMCAllowsEntry(g_smc, IsBoom(_Symbol), InpRequireBOS, InpRequireCHOCH,
+                            InpRequireOTE, true, spike.zScore, InpZScoreMin, reason))
+         return false;
+   }
+
+   reason = StringFormat("OK %s | Z=%.2f | %s", (dir == SPIKE_BUY ? "BUY" : "SELL"),
+                         spike.zScore, g_smc.tag);
+   return true;
+}
+double GetATRMean()
+{
+   if(g_hATR == INVALID_HANDLE) return 0.0;
+   double buf[];
+   ArraySetAsSeries(buf, true);
+   int n = InpLookback + 2;
+   if(CopyBuffer(g_hATR, 0, 0, n, buf) < n) return 0.0;
+   double sum = 0.0;
+   for(int i = 1; i <= InpLookback; i++) sum += buf[i];
+   return sum / InpLookback;
+}
+
+//+------------------------------------------------------------------+
+//| UUID simple (timestamp + pseudo-random suffix)                   |
+//+------------------------------------------------------------------+
+string GenerateClientEventId()
+{
+   MathSrand((int)(TimeCurrent() * 1000 + MathRand()));
+   return StringFormat("sr_%d_%04x%04x",
+                       (int)TimeCurrent(), MathRand(), MathRand());
+}
+
+//+------------------------------------------------------------------+
+//| JSON HELPERS                                                     |
+//+------------------------------------------------------------------+
+double JsonExtractDouble(const string &body, const string key)
+{
+   string search = "\"" + key + "\":";
+   int pos = StringFind(body, search);
+   if(pos < 0) return -1.0;
+   pos += StringLen(search);
+   while(pos < StringLen(body) && StringGetCharacter(body, pos) == ' ') pos++;
+   string sub = StringSubstr(body, pos, 24);
+   int end = 0;
+   while(end < StringLen(sub))
+   {
+      ushort c = StringGetCharacter(sub, end);
+      if(c == ',' || c == '}' || c == ' ' || c == '\n' || c == '\r') break;
+      end++;
+   }
+   return StringToDouble(StringSubstr(sub, 0, end));
+}
+bool JsonExtractBool(const string &body, const string key)
+{
+   string search = "\"" + key + "\":";
+   int pos = StringFind(body, search);
+   if(pos < 0) return true;
+   pos += StringLen(search);
+   while(pos < StringLen(body) && StringGetCharacter(body, pos) == ' ') pos++;
+   return (StringGetCharacter(body, pos) == 't');
+}
+string JsonExtractString(const string &body, const string key)
+{
+   string search = "\"" + key + "\":\"";
+   int pos = StringFind(body, search);
+   if(pos < 0) return "";
+   pos += StringLen(search);
+   int end = StringFind(body, "\"", pos);
+   if(end < 0) return "";
+   return StringSubstr(body, pos, end - pos);
+}
+
+//+------------------------------------------------------------------+
+//| HTTP POST helper (fire-and-forget, pas de lecture réponse)       |
+//+------------------------------------------------------------------+
+bool HttpPost(const string url, const string jsonBody)
+{
+   char   postData[];
+   char   result[];
+   string headers = "Content-Type: application/json\r\n";
+   string respH;
+   StringToCharArray(jsonBody, postData, 0, StringLen(jsonBody));
+   ArrayResize(postData, StringLen(jsonBody));  // sans \0 final
+   int code = WebRequest("POST", url, headers, InpPriorTimeoutMs, postData, result, respH);
+   if(InpDebug)
+      PrintFormat("[SpikeRider][HTTP] POST %s -> code=%d body=%s",
+                  url, code, StringSubstr(jsonBody, 0, 120));
+   return (code >= 200 && code < 300);
+}
+
+bool HttpGet(const string url, string &bodyOut)
+{
+   char   postData[];
+   char   result[];
+   string headers = "Content-Type: application/json\r\n";
+   string respH;
+   int code = WebRequest("GET", url, headers, InpPriorTimeoutMs, postData, result, respH);
+   if(code != 200)
+   {
+      if(InpDebug) PrintFormat("[SpikeRider][HTTP] GET %s -> code=%d", url, code);
+      return false;
+   }
+   bodyOut = CharArrayToString(result, 0, WHOLE_ARRAY, CP_UTF8);
+   return true;
+}
+
+//+------------------------------------------------------------------+
+//| TradingView — /mt5/tv-bias (MCP Kola via ai_server)              |
+//+------------------------------------------------------------------+
+bool FetchTVChartBias(const bool forceRefresh = false)
+{
+   if(!InpUseTVConfirm) return true;
+   if(!forceRefresh && g_lastTVFetch != 0 &&
+      TimeCurrent() - g_lastTVFetch < InpTVConfirmIntervalSec)
+      return (g_tvDirection != "" && g_tvDirection != "UNKNOWN");
+
+   if(g_lastTVAttempt != 0 && TimeCurrent() - g_lastTVAttempt < 15)
+      return (g_lastTVFetch != 0);
+   g_lastTVAttempt = TimeCurrent();
+
+   string sym_enc = _Symbol;
+   StringReplace(sym_enc, " ", "%20");
+   string url = InpAIServerURL + "/mt5/tv-bias?symbol=" + sym_enc;
+   if(forceRefresh) url += "&refresh=true";
+
+   string body;
+   if(!HttpGet(url, body))
+   {
+      PrintFormat("[SpikeRider] ⚠️ TV bias indisponible (ai_server / CDP?)");
+      return false;
+   }
+
+   bool ok = JsonExtractBool(body, "ok");
+   string dir = JsonExtractString(body, "direction");
+   if(StringLen(dir) > 0) g_tvDirection = dir;
+   string m15 = JsonExtractString(body, "structure_m15");
+   string h1  = JsonExtractString(body, "structure_h1");
+   if(StringLen(m15) > 0) g_tvStructureM15 = m15;
+   if(StringLen(h1) > 0)  g_tvStructureH1  = h1;
+   g_tvBiasScore = JsonExtractDouble(body, "bias_score");
+   g_lastTVFetch = TimeCurrent();
+
+   if(ok)
+      PrintFormat("[SpikeRider] TV: %s | M15=%s H1=%s score=%.0f",
+                  g_tvDirection, g_tvStructureM15, g_tvStructureH1, g_tvBiasScore);
+   return ok;
+}
+
+bool TVChartConfirmsEntry(const ESpikeType dir, string &reason)
+{
+   if(!InpUseTVConfirm) return true;
+
+   if(g_lastTVFetch == 0 || TimeCurrent() - g_lastTVFetch > InpTVConfirmMaxAgeSec)
+   {
+      if(!FetchTVChartBias(true))
+      {
+         reason = "TradingView: pas de données (lancer CDP + ai_server)";
+         return false;
+      }
+   }
+
+   string tv = g_tvDirection;
+   StringToUpper(tv);
+
+   if(dir == SPIKE_BUY)
+   {
+      if(tv == "SELL")
+      {
+         reason = "TV oppose: direction SELL (M15/H1 bearish)";
+         return false;
+      }
+      if(g_tvStructureM15 == "bearish" || g_tvStructureH1 == "bearish")
+      {
+         reason = "TV downtrend M15=" + g_tvStructureM15 + " H1=" + g_tvStructureH1
+                  + " - pas de BUY Boom";
+         return false;
+      }
+      if(tv == "NEUTRAL" && g_tvBiasScore < 0.0)
+      {
+         reason = "TV neutre mais score biais négatif";
+         return false;
+      }
+   }
+   else if(dir == SPIKE_SELL)
+   {
+      if(tv == "BUY")
+      {
+         reason = "TV oppose: direction BUY";
+         return false;
+      }
+      if(g_tvStructureM15 == "bullish" || g_tvStructureH1 == "bullish")
+      {
+         reason = "TV uptrend M15=" + g_tvStructureM15 + " H1=" + g_tvStructureH1
+                  + " - pas de SELL Crash";
+         return false;
+      }
+   }
+
+   reason = "TV OK " + tv + " | M15=" + g_tvStructureM15 + " H1=" + g_tvStructureH1;
+   return true;
+}
+
+//+------------------------------------------------------------------+
+//| 1. PRIOR HORAIRE : /spike/hour-prior                            |
+//+------------------------------------------------------------------+
+void FetchHourlyPrior()
+{
+   if(!InpUsePrior) return;
+   MqlDateTime utc; TimeToStruct(TimeGMT(), utc);
+   int hourNow = utc.hour;
+   if(hourNow == g_lastPriorHour && g_lastPriorFetch != 0) return;
+   if(g_lastPriorAttempt != 0 && TimeCurrent() - g_lastPriorAttempt < 60) return;
+   g_lastPriorAttempt = TimeCurrent();
+
+   string url = InpAIServerURL + "/spike/hour-prior?symbol=" + _Symbol;
+   string headers = "Content-Type: application/json\r\n";
+   char post[], result[]; string respH;
+   int code = WebRequest("GET", url, headers, InpPriorTimeoutMs, post, result, respH);
+   if(code != 200)
+   {
+      PrintFormat("[SpikeRider] ⚠️ hour-prior code=%d | %s", code, url);
+      return;
+   }
+   string body = CharArrayToString(result, 0, WHOLE_ARRAY, CP_UTF8);
+   double cr = JsonExtractDouble(body, "capture_rate");
+   double am = JsonExtractDouble(body, "avg_atr_mult");
+   double at = JsonExtractDouble(body, "atr_threshold");
+   double sc = JsonExtractDouble(body, "sample_count");
+   bool   fav = JsonExtractBool(body,  "favorable");
+   string src = JsonExtractString(body,"source");
+   if(cr  > 0.0) g_priorCaptureRate  = cr;
+   if(am  > 0.0) g_priorAtrMult      = am;
+   if(at  > 0.0) g_priorAtrThreshold = at;
+   if(sc >= 0.0) g_priorSampleCount  = (int)sc;
+   g_priorFavorable = fav;
+   g_priorSource    = (StringLen(src)>0) ? src : "unknown";
+   g_lastPriorFetch = TimeCurrent();
+   g_lastPriorHour  = hourNow;
+   PrintFormat("[SpikeRider] Prior %02d:00UTC capture=%.0f%% avg_atr=%.2f thresh=%.2f n=%d fav=%s [%s]",
+               hourNow, g_priorCaptureRate*100, g_priorAtrMult, g_priorAtrThreshold,
+               g_priorSampleCount, (g_priorFavorable?"OUI":"NON"), g_priorSource);
+}
+
+//+------------------------------------------------------------------+
+//| 2. ZONE PRIOR : /mt5/spike-zone-prior                           |
+//+------------------------------------------------------------------+
+void FetchZonePrior()
+{
+   if(!InpUseZonePrior) return;
+   MqlDateTime utc; TimeToStruct(TimeGMT(), utc);
+   int hourNow = utc.hour;
+   if(hourNow == g_lastZoneHour && g_lastZoneFetch != 0) return;
+   if(g_lastZoneAttempt != 0 && TimeCurrent() - g_lastZoneAttempt < 60) return;
+   g_lastZoneAttempt = TimeCurrent();
+
+   string url = InpAIServerURL + "/mt5/spike-zone-prior?symbol=" + _Symbol + "&timeframe=M1";
+   string headers = "Content-Type: application/json\r\n";
+   char post[], result[]; string respH;
+   int code = WebRequest("GET", url, headers, InpPriorTimeoutMs, post, result, respH);
+   if(code != 200)
+   {
+      if(InpDebug) PrintFormat("[SpikeRider] zone-prior code=%d", code);
+      return;
+   }
+   string body = CharArrayToString(result, 0, WHOLE_ARRAY, CP_UTF8);
+   double prior = JsonExtractDouble(body, "prior");
+   double sr    = JsonExtractDouble(body, "spike_rate");
+   double ps    = JsonExtractDouble(body, "propice_score");
+   double samp  = JsonExtractDouble(body, "samples");
+   if(prior >= 0.0) g_zonePrior        = prior;
+   if(sr    >= 0.0) g_zoneSpikeRate    = sr;
+   if(ps    >= 0.0) g_zonePropiceScore = ps;
+   if(samp  >= 0.0) g_zoneSamples      = (int)samp;
+   g_lastZoneFetch = TimeCurrent();
+   g_lastZoneHour  = hourNow;
+   PrintFormat("[SpikeRider] ZonePrior %02d:00UTC prior=%.2f spike_rate=%.2f propice=%.2f n=%d",
+               hourNow, g_zonePrior, g_zoneSpikeRate, g_zonePropiceScore, g_zoneSamples);
+}
+
+//+------------------------------------------------------------------+
+//| 3. ANGEL OF SPIKE : /angelofspike/trend                         |
+//+------------------------------------------------------------------+
+void FetchAngelOfSpike()
+{
+   if(!InpUseAngelOfSpike) return;
+   MqlDateTime utc; TimeToStruct(TimeGMT(), utc);
+   int hourNow = utc.hour;
+   // Refresh toutes les heures (même logique que prior)
+   if(hourNow == g_lastAngelHour && g_lastAngelFetch != 0) return;
+   if(g_lastAngelAttempt != 0 && TimeCurrent() - g_lastAngelAttempt < 60) return;
+   g_lastAngelAttempt = TimeCurrent();
+
+   string sym_enc = _Symbol;
+   StringReplace(sym_enc, " ", "%20");
+   string url = InpAIServerURL + "/angelofspike/trend?symbol=" + sym_enc + "&timeframe=M1";
+   string headers = "Content-Type: application/json\r\n";
+   char post[], result[]; string respH;
+   int code = WebRequest("GET", url, headers, InpPriorTimeoutMs, post, result, respH);
+   if(code != 200)
+   {
+      if(InpDebug) PrintFormat("[SpikeRider] angelofspike code=%d", code);
+      return;
+   }
+   string body = CharArrayToString(result, 0, WHOLE_ARRAY, CP_UTF8);
+   string sig  = JsonExtractString(body, "signal");       // "BUY"|"SELL"|"HOLD"
+   double conf = JsonExtractDouble(body, "confidence");
+   string mst  = JsonExtractString(body, "market_state");
+   if(StringLen(sig) > 0) g_angelSignal      = sig;
+   if(conf >= 0.0)        g_angelConfidence  = conf;
+   if(StringLen(mst)> 0)  g_angelMarketState = mst;
+   g_lastAngelFetch = TimeCurrent();
+   g_lastAngelHour  = hourNow;
+   PrintFormat("[SpikeRider] Angel %02d:00UTC signal=%s conf=%.1f%% state=%s",
+               hourNow, g_angelSignal, g_angelConfidence, g_angelMarketState);
+}
+
+//+------------------------------------------------------------------+
+//| 4. REALTIME CROSS-CHART : /spike/realtime                       |
+//+------------------------------------------------------------------+
+void FetchRealtimeSpike()
+{
+   if(!InpUseRealtimeCross) return;
+   // Toutes les 5 secondes max
+   if(TimeCurrent() - g_lastRealtimeFetch < 5) return;
+   g_lastRealtimeFetch = TimeCurrent();
+
+   string sym_enc = _Symbol;
+   StringReplace(sym_enc, " ", "%20");
+   string url = InpAIServerURL + "/spike/realtime?symbol=" + sym_enc;
+   string headers = "Content-Type: application/json\r\n";
+   char post[], result[]; string respH;
+   int code = WebRequest("GET", url, headers, InpPriorTimeoutMs, post, result, respH);
+   if(code != 200) return;
+
+   string body = CharArrayToString(result, 0, WHOLE_ARRAY, CP_UTF8);
+   bool   spk  = JsonExtractBool(body,   "spike");
+   string dir  = JsonExtractString(body, "direction");
+   g_realtimeSpikeActive = spk;
+   if(StringLen(dir) > 0) g_realtimeSpikeDir = dir;
+   if(InpDebug && spk)
+      PrintFormat("[SpikeRider] Realtime cross-chart: SPIKE dir=%s", dir);
+}
+
+//+------------------------------------------------------------------+
+//| 5. STAIR/DETECT : poster l'escalier détecté en DB               |
+//+------------------------------------------------------------------+
+void PostStairDetect(double stairScore, double imminence, double atr)
+{
+   if(!InpSendStairDetect) return;
+   if(stairScore < InpStairMinPct) return;
+
+   g_lastStairClientId = GenerateClientEventId();
+   bool isBoom = IsBoom(_Symbol);
+   string dir  = isBoom ? "buy" : "sell";
+
+   string json = StringFormat(
+      "{\"client_event_id\":\"%s\","
+      "\"symbol\":\"%s\","
+      "\"category\":\"boomcrash\","
+      "\"direction\":\"%s\","
+      "\"timeframe\":\"M1\","
+      "\"pattern_kinds\":\"stair\","
+      "\"source\":\"ea\","
+      "\"features\":{"
+        "\"stair_score\":%.4f,"
+        "\"imminence\":%.2f,"
+        "\"atr\":%.5f,"
+        "\"bars_since_spike\":%d,"
+        "\"spike_frequency\":%d,"
+        "\"zone_prior\":%.4f,"
+        "\"angel_signal\":\"%s\","
+        "\"angel_conf\":%.2f"
+      "}}",
+      g_lastStairClientId, _Symbol, dir,
+      stairScore, imminence, atr,
+      g_barsSinceLastSpike, GetEffectiveSpikeFrequency(),
+      g_zonePrior, g_angelSignal, g_angelConfidence
+   );
+
+   string url = InpAIServerURL + "/stair/detect";
+   char postData[], result[]; string respH;
+   StringToCharArray(json, postData, 0, StringLen(json));
+   ArrayResize(postData, StringLen(json));
+   string headers = "Content-Type: application/json\r\n";
+   int code = WebRequest("POST", url, headers, InpPriorTimeoutMs, postData, result, respH);
+   if(code >= 200 && code < 300)
+   {
+      // Extraire l'ID retourné par le serveur
+      string body = CharArrayToString(result, 0, WHOLE_ARRAY, CP_UTF8);
+      string rid  = JsonExtractString(body, "id");
+      if(StringLen(rid) > 0) g_lastStairEventId = rid;
+      if(InpDebug) PrintFormat("[SpikeRider] stair/detect OK id=%s client=%s",
+                                g_lastStairEventId, g_lastStairClientId);
+   }
+   else if(InpDebug)
+      PrintFormat("[SpikeRider] stair/detect code=%d", code);
+}
+
+//+------------------------------------------------------------------+
+//| 6. SPIKE-INFLUENCE-EVENT : snapshot zone d'imminence            |
+//+------------------------------------------------------------------+
+void PostSpikeInfluenceEvent(double imminence, double atr)
+{
+   if(!InpSendInfluence) return;
+
+   MqlDateTime utc; TimeToStruct(TimeGMT(), utc);
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double band = atr * 2.0;
+
+   string json = StringFormat(
+      "{\"symbol\":\"%s\","
+      "\"timeframe\":\"M1\","
+      "\"hour_utc\":%d,"
+      "\"local_probability\":%.4f,"
+      "\"combined_score\":%.4f,"
+      "\"mass_level\":%d,"
+      "\"prior_server\":%.4f,"
+      "\"window_seconds\":%d,"
+      "\"price_band_low\":%.5f,"
+      "\"price_band_high\":%.5f,"
+      "\"source\":\"spikerider\","
+      "\"features\":{"
+        "\"bars_since_spike\":%d,"
+        "\"zone_prior\":%.4f,"
+        "\"angel_signal\":\"%s\","
+        "\"realtime_spike\":%s"
+      "}}",
+      _Symbol, utc.hour,
+      imminence/100.0, (imminence/100.0 + g_zonePrior) / 2.0,
+      (imminence >= 90.0 ? 3 : imminence >= 75.0 ? 2 : 1),
+      g_zonePrior, InpPendingMaxAgeSec,
+      ask - band, ask + band,
+      g_barsSinceLastSpike, g_zonePrior,
+      g_angelSignal, (g_realtimeSpikeActive ? "true" : "false")
+   );
+
+   HttpPost(InpAIServerURL + "/mt5/spike-influence-event", json);
+}
+
+//+------------------------------------------------------------------+
+//| 7. FEEDBACK TRADE : /trades/feedback                            |
+//+------------------------------------------------------------------+
+void PostTradeFeedback(const TradeRecord &rec, double exitPrice, double profit)
+{
+   if(!InpSendFeedback) return;
+   bool isWin  = (profit > 0.0);
+   string side = (rec.spikeType == SPIKE_BUY) ? "buy" : "sell";
+
+   string json = StringFormat(
+      "{\"symbol\":\"%s\","
+      "\"timeframe\":\"M1\","
+      "\"side\":\"%s\","
+      "\"profit\":%.4f,"
+      "\"is_win\":%s,"
+      "\"entry_price\":%.5f,"
+      "\"exit_price\":%.5f,"
+      "\"open_time\":%d,"
+      "\"close_time\":%d,"
+      "\"ai_confidence\":%.4f,"
+      "\"stair_detection_id\":\"%s\","
+      "\"stair_client_event_id\":\"%s\"}",
+      _Symbol, side, profit,
+      (isWin ? "true" : "false"),
+      rec.entryPrice, exitPrice,
+      (int)rec.openTime, (int)TimeCurrent(),
+      rec.imminenceAtEntry / 100.0,
+      rec.stairEventId, rec.stairClientId
+   );
+
+   bool ok = HttpPost(InpAIServerURL + "/trades/feedback", json);
+   PrintFormat("[SpikeRider] Feedback %s %.2f$ %s | stair=%s",
+               (isWin ? "WIN" : "LOSS"), profit, side,
+               (ok ? "OK" : "ERR"));
+}
+
+//+------------------------------------------------------------------+
+//| Enregistrement d'un trade ouvert                                 |
+//+------------------------------------------------------------------+
+void RegisterOpenTrade(ulong ticket, ESpikeType t, double entry,
+                       datetime openTime, double imminence,
+                       double zScore, double rsi, double stair)
+{
+   if(g_openTradesCount >= 10) return;
+   int idx = g_openTradesCount++;
+   g_openTrades[idx].ticket             = ticket;
+   g_openTrades[idx].spikeType          = t;
+   g_openTrades[idx].entryPrice         = entry;
+   g_openTrades[idx].openTime           = openTime;
+   g_openTrades[idx].imminenceAtEntry   = imminence;
+   g_openTrades[idx].zScoreAtEntry      = zScore;
+   g_openTrades[idx].rsiAtEntry         = rsi;
+   g_openTrades[idx].stairAtEntry       = stair;
+   g_openTrades[idx].zonePriorAtEntry   = g_zonePrior;
+   g_openTrades[idx].angelConfAtEntry   = g_angelConfidence;
+   g_openTrades[idx].stairEventId       = g_lastStairEventId;
+   g_openTrades[idx].stairClientId      = g_lastStairClientId;
+   g_lastEntryBarTime                    = iTime(_Symbol, InpTF, 0);
+}
+
+int FindOpenTradeIdx(ulong ticket)
+{
+   for(int i = 0; i < g_openTradesCount; i++)
+      if(g_openTrades[i].ticket == ticket) return i;
+   return -1;
+}
+
+void RemoveOpenTradeAt(int idx)
+{
+   if(idx < 0 || idx >= g_openTradesCount) return;
+   for(int i = idx; i < g_openTradesCount - 1; i++)
+      g_openTrades[i] = g_openTrades[i+1];
+   g_openTradesCount--;
+}
+
+//+------------------------------------------------------------------+
+//| CALCUL LOT — lot minimum broker (synthétiques : pas de % risque)  |
+//+------------------------------------------------------------------+
+int SR_VolumeDigits(const double step)
+{
+   if(step <= 0.0) return 2;
+   if(step >= 1.0) return 0;
+   return (int)MathMax(0, MathRound(-MathLog10(step)));
+}
+
+double CalcLot(double atr)
+{
+   const double minLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   const double maxLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+   double step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+   if(step <= 0.0) step = minLot > 0.0 ? minLot : 0.01;
+
+   // Règle absolue : lot le plus bas proposé par le broker sur ce symbole
+   double lot = minLot;
+   if(InpFixedLot > 0.0)
+      lot = MathMax(minLot, MathMin(maxLot, InpFixedLot));
+
+   lot = MathFloor(lot / step + 0.5) * step;
+   lot = MathMax(minLot, MathMin(maxLot, lot));
+   return NormalizeDouble(lot, SR_VolumeDigits(step));
+}
+
+//+------------------------------------------------------------------+
+//| Normalisation prix (tick size broker — évite Invalid price)       |
+//+------------------------------------------------------------------+
+double SR_NormalizeToTick(const double price, const bool roundUp)
+{
+   const int    dg   = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+   const double tick = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+   if(tick <= 0.0) return NormalizeDouble(price, dg);
+   double n = price / tick;
+   n = roundUp ? MathCeil(n - 1e-12) : MathFloor(n + 1e-12);
+   return NormalizeDouble(n * tick, dg);
+}
+
+bool SR_AdjustStopsForOrder(const ENUM_ORDER_TYPE otype, const double openPrice,
+                            double &sl, double &tp, const double minDistExtra = 0.0)
+{
+   if(openPrice <= 0.0) return false;
+   const double pt    = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   const int    stops = (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
+   const int    freeze= (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_FREEZE_LEVEL);
+   double minD  = (double)MathMax(stops + freeze + 5, 10) * pt;
+   if(minDistExtra > 0.0)
+      minD = MathMax(minD, minDistExtra);
+
+   const bool isBuy = (otype == ORDER_TYPE_BUY || otype == ORDER_TYPE_BUY_STOP ||
+                       otype == ORDER_TYPE_BUY_LIMIT);
+   if(sl > 0.0)
+   {
+      if(isBuy && openPrice - sl < minD)
+         sl = SR_NormalizeToTick(openPrice - minD, false);
+      if(!isBuy && sl - openPrice < minD)
+         sl = SR_NormalizeToTick(openPrice + minD, true);
+   }
+   if(tp > 0.0)
+   {
+      if(isBuy && tp - openPrice < minD)
+         tp = SR_NormalizeToTick(openPrice + minD, true);
+      if(!isBuy && openPrice - tp < minD)
+         tp = SR_NormalizeToTick(openPrice - minD, false);
+   }
+   if(isBuy && sl > 0.0 && sl >= openPrice) return false;
+   if(!isBuy && sl > 0.0 && sl <= openPrice) return false;
+   if(isBuy && tp > 0.0 && tp <= openPrice) return false;
+   if(!isBuy && tp > 0.0 && tp >= openPrice) return false;
+   return true;
+}
+
+// Réduit la distance SL/TP (pas les prix bruts × facteur — évite Invalid stops)
+void SR_ScaleStopDistances(const ENUM_ORDER_TYPE otype, const double entry,
+                           const double slOrig, const double tpOrig,
+                           const double factor, double &sl, double &tp)
+{
+   const bool isBuy = (otype == ORDER_TYPE_BUY || otype == ORDER_TYPE_BUY_STOP ||
+                       otype == ORDER_TYPE_BUY_LIMIT);
+   sl = slOrig;
+   tp = tpOrig;
+   if(entry <= 0.0 || factor <= 0.0) return;
+   if(isBuy)
+   {
+      if(slOrig > 0.0 && slOrig < entry)
+         sl = SR_NormalizeToTick(entry - (entry - slOrig) * factor, false);
+      if(tpOrig > 0.0 && tpOrig > entry)
+         tp = SR_NormalizeToTick(entry + (tpOrig - entry) * factor, true);
+   }
+   else
+   {
+      if(slOrig > 0.0 && slOrig > entry)
+         sl = SR_NormalizeToTick(entry + (slOrig - entry) * factor, true);
+      if(tpOrig > 0.0 && tpOrig < entry)
+         tp = SR_NormalizeToTick(entry - (entry - tpOrig) * factor, false);
+   }
+}
+
+bool SR_OrderCheckMarket(const ENUM_ORDER_TYPE otype, const double lot,
+                         const double sl, const double tp)
+{
+   MqlTradeRequest     req;
+   MqlTradeCheckResult chk;
+   ZeroMemory(req);
+   ZeroMemory(chk);
+   req.action    = TRADE_ACTION_DEAL;
+   req.symbol    = _Symbol;
+   req.volume    = lot;
+   req.type      = otype;
+   req.price     = (otype == ORDER_TYPE_BUY)
+                   ? SymbolInfoDouble(_Symbol, SYMBOL_ASK)
+                   : SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   req.sl        = sl;
+   req.tp        = tp;
+   req.deviation = 30;
+   req.magic     = InpMagic;
+   return OrderCheck(req, chk);
+}
+
+// Recalcule SL/TP au prix marché actuel + vérifie broker
+bool SR_PrepareMarketStops(const ENUM_ORDER_TYPE otype, const double atr,
+                           const double lot, double &sl, double &tp)
+{
+   const double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   const double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   const double px  = (otype == ORDER_TYPE_BUY) ? ask : bid;
+   if(px <= 0.0 || atr <= 0.0) return false;
+
+   const double minExtra = atr * 0.35;
+   if(otype == ORDER_TYPE_BUY)
+   {
+      sl = SR_NormalizeToTick(px - atr * InpSL_ATR, false);
+      tp = SR_NormalizeToTick(px + atr * InpTP_ATR, true);
+   }
+   else
+   {
+      sl = SR_NormalizeToTick(px + atr * InpSL_ATR, true);
+      tp = SR_NormalizeToTick(px - atr * InpTP_ATR, false);
+   }
+   if(!SR_AdjustStopsForOrder(otype, px, sl, tp, minExtra))
+      return false;
+   return SR_OrderCheckMarket(otype, lot, sl, tp);
+}
+
+// Distance minimale SL/TP par rapport au prix marché courant (modify position)
+double SR_MinStopDistance()
+{
+   const double pt = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   if(pt <= 0.0) return 0.0;
+   const int stops  = (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
+   const int freeze = (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_FREEZE_LEVEL);
+   double minD = (double)MathMax(stops + freeze + 5, 10) * pt;
+   double atr  = GetATR();
+   if(atr > 0.0)
+      minD = MathMax(minD, atr * 0.5);
+   return minD;
+}
+
+bool SR_ClampStopsForModify(const long posType, const double marketPx, double &sl, double &tp)
+{
+   const double minD = SR_MinStopDistance();
+   const double pt   = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   if(minD <= 0.0 || marketPx <= 0.0) return true;
+
+   if(posType == POSITION_TYPE_BUY)
+   {
+      if(sl > 0.0)
+      {
+         const double maxSl = marketPx - minD;
+         if(sl > maxSl) sl = SR_NormalizeToTick(maxSl, false);
+         if(pt > 0.0 && sl >= marketPx - pt * 0.5) return false;
+      }
+      if(tp > 0.0)
+      {
+         const double minTp = marketPx + minD;
+         if(tp <= marketPx)
+            tp = 0.0;
+         else if(tp < minTp)
+            tp = SR_NormalizeToTick(minTp, true);
+      }
+   }
+   else
+   {
+      if(sl > 0.0)
+      {
+         const double minSl = marketPx + minD;
+         if(sl < minSl) sl = SR_NormalizeToTick(minSl, true);
+         if(pt > 0.0 && sl <= marketPx + pt * 0.5) return false;
+      }
+      if(tp > 0.0)
+      {
+         const double maxTp = marketPx - minD;
+         if(tp >= marketPx)
+            tp = 0.0;
+         else if(tp > maxTp)
+            tp = SR_NormalizeToTick(maxTp, false);
+      }
+   }
+   return true;
+}
+
+// Vérifie SL/TP via OrderCheck avant PositionModify (évite Invalid stops en journal)
+bool SR_SafePositionModify(const ulong ticket, double sl, double tp)
+{
+   if(ticket == 0 || !PositionSelectByTicket(ticket)) return false;
+
+   MqlTradeRequest     req;
+   MqlTradeCheckResult chk;
+   ZeroMemory(req);
+   ZeroMemory(chk);
+   req.action   = TRADE_ACTION_SLTP;
+   req.position = ticket;
+   req.symbol   = _Symbol;
+   req.magic    = InpMagic;
+   req.sl       = sl;
+   req.tp       = tp;
+
+   if(OrderCheck(req, chk))
+      return g_trade.PositionModify(ticket, sl, tp);
+
+   if(tp > 0.0)
+   {
+      req.tp = 0.0;
+      if(OrderCheck(req, chk))
+         return g_trade.PositionModify(ticket, sl, 0.0);
+   }
+   return false;
+}
+
+//+------------------------------------------------------------------+
+//| SCORE STAIR                                                      |
+//+------------------------------------------------------------------+
+double CalcStairScore(bool isBoom)
+{
+   if(InpStairBars <= 0) return 1.0;
+   MqlRates r[];
+   int need = InpStairBars + 2;
+   if(CopyRates(_Symbol, InpTF, 1, need, r) < need) return 0.5;
+   int aligned = 0;
+   for(int i = 0; i < InpStairBars; i++)
+   {
+      double body = r[i+1].close - r[i+1].open;
+      if(isBoom  && body < 0) aligned++;
+      if(!isBoom && body > 0) aligned++;
+   }
+   return (double)aligned / InpStairBars;
+}
+
+//+------------------------------------------------------------------+
+//| SCORE D'IMMINENCE (5 facteurs + zone prior + angel)             |
+//+------------------------------------------------------------------+
+double CalcImminenceScore(double atr, double rsi, double stair)
+{
+   bool isBoom   = IsBoom(_Symbol);
+   bool hasPrior = (InpUsePrior && g_lastPriorFetch != 0);
+   bool hasZone  = (InpUseZonePrior && g_lastZoneFetch != 0 && g_zoneSamples >= 3);
+   double score  = 0.0;
+
+   // 1. Compteur inter-spike : 25% (avec zone) / 30% (sans)
+   double w1 = hasZone ? 25.0 : (hasPrior ? 30.0 : 35.0);
+   int spikeFreq = GetEffectiveSpikeFrequency();
+   if(spikeFreq > 0)
+   {
+      // Compteur utile dès ~25% de la fréquence (ex. 150 bar M1 sur Boom 600)
+      double ratio    = (double)g_barsSinceLastSpike / (double)spikeFreq;
+      double cntScore = (ratio >= 0.25) ? MathMin((ratio - 0.25) / 0.75, 1.0) : 0.0;
+      score += cntScore * w1;
+   }
+
+   // 2. Compression ATR : 20%
+   double atrMean = GetATRMean();
+   if(atr > 0 && atrMean > 0)
+   {
+      double compRatio = atr / atrMean;
+      if(compRatio <= InpAtrCompressRatio)
+      {
+         double compScore = MathMin((InpAtrCompressRatio - compRatio) / InpAtrCompressRatio, 1.0);
+         score += compScore * 20.0;
+      }
+   }
+
+   // 3. Stair score : 15%
+   score += stair * 15.0;
+
+   // 4. RSI extrême : 10%
+   if(isBoom)
+   {
+      if(rsi <= 30.0)      score += 10.0;
+      else if(rsi < 40.0)  score += (40.0 - rsi) / 10.0 * 10.0;
+   }
+   else
+   {
+      if(rsi >= 70.0)      score += 10.0;
+      else if(rsi > 60.0)  score += (rsi - 60.0) / 10.0 * 10.0;
+   }
+
+   // 5. Prior RDS (capture_rate + avg_atr_mult) : 15%
+   if(hasPrior && g_priorSampleCount >= 5)
+   {
+      double cr = g_priorCaptureRate;
+      double ps = 0.0;
+      if(cr >= 0.70)      ps = 1.0;
+      else if(cr >= 0.30) ps = (cr - 0.30) / 0.40;
+      if(g_priorAtrMult >= 3.0)       ps = MathMin(ps + 0.2, 1.0);
+      else if(g_priorAtrMult >= 2.5)  ps = MathMin(ps + 0.1, 1.0);
+      score += ps * 15.0;
+   }
+
+   // 6. Zone prior (/mt5/spike-zone-prior) : +10% bonus si disponible
+   if(hasZone)
+      score += g_zonePrior * 10.0;
+
+   // 7. Angel of Spike (/angelofspike/trend) : +5% si aligné, -5% si opposé
+   if(InpUseAngelOfSpike && g_lastAngelFetch != 0)
+   {
+      bool aligned = (isBoom  && g_angelSignal == "BUY") ||
+                     (!isBoom && g_angelSignal == "SELL");
+      bool opposed = (isBoom  && g_angelSignal == "SELL") ||
+                     (!isBoom && g_angelSignal == "BUY");
+      if(aligned) score += g_angelConfidence / 100.0 * 5.0;
+      if(opposed) score -= g_angelConfidence / 100.0 * 5.0;
+   }
+
+   // 8. Realtime cross-chart : +5% si spike actif dans la bonne direction
+   if(InpUseRealtimeCross && g_realtimeSpikeActive)
+   {
+      bool aligned = (isBoom  && (g_realtimeSpikeDir == "up"  || g_realtimeSpikeDir == "BUY")) ||
+                     (!isBoom && (g_realtimeSpikeDir == "down"|| g_realtimeSpikeDir == "SELL"));
+      if(aligned) score += 5.0;
+   }
+
+   // 9. Proximité zone spike historique RDS : +15% bonus si prix dans rayon 1×ATR
+   //    d'un niveau où un spike s'est déjà produit (capturé avec profit)
+   //    C'est le facteur clé : les spikes Boom/Crash reviennent souvent aux mêmes zones
+   if(g_spikeCount > 0 && atr > 0)
+   {
+      double px      = isBoom ? SymbolInfoDouble(_Symbol, SYMBOL_ASK)
+                               : SymbolInfoDouble(_Symbol, SYMBOL_BID);
+      double radius  = atr * 1.5;   // tolérance = 1.5× ATR autour du prix historique
+      int    hits    = 0;
+      int    hitsCap = 0;
+      for(int k = 0; k < g_spikeCount; k++)
+      {
+         // On retrouve le prix MT5 au timestamp du spike historique
+         MqlRates sr[];
+         if(CopyRates(_Symbol, InpTF, g_spikeTs[k], 1, sr) < 1) continue;
+         double spikePx = (g_spikeDirs[k] == "BUY") ? sr[0].low : sr[0].high;
+         if(spikePx <= 0) continue;
+         if(MathAbs(px - spikePx) <= radius)
+         {
+            hits++;
+            if(g_spikeCaptured[k]) hitsCap++;
+         }
+      }
+      if(hits > 0)
+      {
+         // Plus il y a eu de spikes capturés dans cette zone, plus le bonus est fort
+         double zoneBonus = MathMin((double)hitsCap / MathMax(hits, 1), 1.0) * 15.0;
+         zoneBonus = MathMax(zoneBonus, hits > 1 ? 5.0 : 2.0);  // bonus minimal si hits > 0
+         score += zoneBonus;
+         if(InpDebug) PrintFormat("[SpikeRider] Zone RDS: %d hits (%d cap) bonus=%.0f",
+                                   hits, hitsCap, zoneBonus);
+      }
+   }
+
+   return MathMax(0.0, MathMin(score, 100.0));
+}
+
+//+------------------------------------------------------------------+
+//| GESTION ORDRE PENDING PRÉ-SPIKE                                 |
+//+------------------------------------------------------------------+
+bool HasPendingOrder()
+{
+   if(g_pendingTicket == 0) return false;
+   if(OrderSelect(g_pendingTicket)) return true;
+   g_pendingTicket = 0;
+   return false;
+}
+void CancelPendingOrder(const string reason)
+{
+   if(g_pendingTicket == 0) return;
+   if(OrderSelect(g_pendingTicket))
+   {
+      g_trade.OrderDelete(g_pendingTicket);
+      if(InpDebug) PrintFormat("[SpikeRider] Pending annulé (%s) ticket=%llu", reason, g_pendingTicket);
+   }
+   g_pendingTicket   = 0;
+   g_pendingPlacedAt = 0;
+}
+void ManagePendingAge()
+{
+   if(g_pendingTicket == 0 || InpPendingMaxAgeSec <= 0) return;
+   if((int)(TimeCurrent() - g_pendingPlacedAt) >= InpPendingMaxAgeSec)
+      CancelPendingOrder("expiré");
+}
+bool PlacePreSpikePending(double atr, double imminence)
+{
+   if(atr <= 0.0) return false;
+
+   // Marché par défaut — évite Invalid price sur synthétiques (Boom/Crash)
+   if(InpPreSpikeUseMarket)
+   {
+      SpikeResult pre;
+      pre.type       = IsBoom(_Symbol) ? SPIKE_BUY : SPIKE_SELL;
+      pre.zScore     = 0.0;
+      pre.rsi        = GetRSI();
+      pre.atr        = atr;
+      pre.stairScore = CalcStairScore(IsBoom(_Symbol));
+      CancelPendingOrder("pré-spike marché");
+      return EnterSpikeTrade(pre, imminence, true);
+   }
+
+   bool isBoom  = IsBoom(_Symbol);
+   double ask   = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double bid   = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   if(ask <= 0.0 || bid <= 0.0) return false;
+
+   const double pt     = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   const int    stops  = (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
+   const int    freeze = (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_FREEZE_LEVEL);
+   const double minGap = (double)(stops + freeze + 3) * (pt > 0.0 ? pt : 0.01);
+   const double offset = MathMax(atr * InpPendingOffsetATR, minGap);
+   const double lot    = CalcLot(atr);
+
+   double price, sl, tp;
+   ENUM_ORDER_TYPE otype;
+   if(isBoom)
+   {
+      otype = ORDER_TYPE_BUY_STOP;
+      price = SR_NormalizeToTick(ask + offset, true);
+      if(price <= ask)
+         price = SR_NormalizeToTick(ask + minGap, true);
+      if(price <= ask)
+      {
+         if(InpDebug) PrintFormat("[SpikeRider] BUY_STOP invalide ask=%.5f price=%.5f → marché", ask, price);
+         SpikeResult pre; pre.type = SPIKE_BUY; pre.rsi = GetRSI(); pre.atr = atr;
+         pre.stairScore = CalcStairScore(true); pre.zScore = 0.0;
+         return EnterSpikeTrade(pre, imminence, true);
+      }
+      sl = SR_NormalizeToTick(price - atr * InpSL_ATR, false);
+      tp = SR_NormalizeToTick(price + atr * InpTP_ATR, true);
+   }
+   else
+   {
+      otype = ORDER_TYPE_SELL_STOP;
+      price = SR_NormalizeToTick(bid - offset, false);
+      if(price >= bid)
+         price = SR_NormalizeToTick(bid - minGap, false);
+      if(price >= bid)
+      {
+         if(InpDebug) PrintFormat("[SpikeRider] SELL_STOP invalide bid=%.5f price=%.5f → marché", bid, price);
+         SpikeResult pre; pre.type = SPIKE_SELL; pre.rsi = GetRSI(); pre.atr = atr;
+         pre.stairScore = CalcStairScore(false); pre.zScore = 0.0;
+         return EnterSpikeTrade(pre, imminence, true);
+      }
+      sl = SR_NormalizeToTick(price + atr * InpSL_ATR, true);
+      tp = SR_NormalizeToTick(price - atr * InpTP_ATR, false);
+   }
+
+   const double minExtraPend = atr * 0.35;
+   if(!SR_AdjustStopsForOrder(otype, price, sl, tp, minExtraPend))
+   {
+      SpikeResult pre;
+      pre.type = isBoom ? SPIKE_BUY : SPIKE_SELL;
+      pre.rsi = GetRSI(); pre.atr = atr; pre.stairScore = CalcStairScore(isBoom); pre.zScore = 0.0;
+      return EnterSpikeTrade(pre, imminence, true);
+   }
+
+   g_trade.SetExpertMagicNumber(InpMagic);
+   g_trade.SetDeviationInPoints(30);
+   datetime expiry = TimeCurrent() + InpPendingMaxAgeSec;
+   bool ok = g_trade.OrderOpen(_Symbol, otype, lot, 0, price, sl, tp,
+                                ORDER_TIME_SPECIFIED, expiry,
+                                "SpikeRider|PRE-SPIKE");
+   if(ok)
+   {
+      g_pendingTicket   = g_trade.ResultOrder();
+      g_pendingPlacedAt = TimeCurrent();
+      PrintFormat("[SpikeRider] ⏳ Pending %s prix=%.5f ask=%.5f SL=%.5f TP=%.5f lot=%.2f",
+                  (isBoom ? "BUY_STOP" : "SELL_STOP"), price, ask, sl, tp, lot);
+      PostSpikeInfluenceEvent(imminence, atr);
+   }
+   else
+   {
+      PrintFormat("[SpikeRider] ❌ Pending %d %s | ask=%.5f bid=%.5f px=%.5f → fallback marché",
+                  g_trade.ResultRetcode(), g_trade.ResultRetcodeDescription(), ask, bid, price);
+      SpikeResult pre;
+      pre.type = isBoom ? SPIKE_BUY : SPIKE_SELL;
+      pre.rsi = GetRSI(); pre.atr = atr; pre.stairScore = CalcStairScore(isBoom); pre.zScore = 0.0;
+      ok = EnterSpikeTrade(pre, imminence, true);
+   }
+   return ok;
+}
+
+//+------------------------------------------------------------------+
+//| DÉTECTION SPIKE CONFIRMÉ (bougie fermée)                        |
+//+------------------------------------------------------------------+
+SpikeResult DetectSpike()
+{
+   SpikeResult res;
+   res.type       = SPIKE_NONE;
+   res.zScore     = 0.0;
+   res.rsi        = GetRSI();
+   res.atr        = GetATR();
+   res.stairScore = 0.0;
+
+   int need = InpLookback + 2;
+   MqlRates rates[];
+   ArraySetAsSeries(rates, true);
+   if(CopyRates(_Symbol, InpTF, 0, need, rates) < need) return res;
+
+   double moves[];
+   ArrayResize(moves, InpLookback);
+   double sum = 0.0;
+   for(int i = 0; i < InpLookback; i++)
+   {
+      moves[i] = MathAbs(rates[i+1].close - rates[i+2].close);
+      sum += moves[i];
+   }
+   double mean = sum / InpLookback;
+   if(mean <= 0.0) return res;
+
+   double var = 0.0;
+   for(int i = 0; i < InpLookback; i++) var += MathPow(moves[i] - mean, 2);
+   double sd = MathSqrt(var / InpLookback);
+   if(sd <= 0.0) sd = mean * 0.1;
+
+   // Vérifier la bougie [1] (fermée) ET la bougie [0] (en cours) pour capter le spike live
+   double moveClosed  = MathAbs(rates[1].close - rates[1].open);
+   double moveLive    = MathAbs(rates[0].close - rates[0].open);
+   double curMove     = MathMax(moveClosed, moveLive);  // le plus grand des deux
+   bool   useLive     = (moveLive > moveClosed);         // on est sur la bougie live
+
+   double z = (curMove - mean) / sd;
+   res.zScore = z;
+
+   // Ne jamais durcir le seuil via le prior RDS (évite 0 trade quand atr_threshold > 2.0)
+   double zThresh = InpZScoreMin;
+   bool isSpike = (z >= zThresh) || (curMove >= mean * InpMinMoveMult);
+   if(!isSpike) return res;
+
+   // Direction depuis la bougie qui produit le signal
+   bool up      = useLive ? (rates[0].close > rates[0].open) : (rates[1].close > rates[1].open);
+   bool isBoom  = IsBoom(_Symbol);
+   bool isCrash = IsCrash(_Symbol);
+   if(isBoom  && !up) return res;
+   if(isCrash && up)  return res;
+
+   // Spike confirmé : refuser si poussée récente fortement opposée
+   ESpikeType want = isBoom ? SPIKE_BUY : SPIKE_SELL;
+   if(IsStrongCounterTrend(want))
+   {
+      if(InpDebug) Print("[SpikeRider] Spike Z OK mais tendance opposée — ignoré");
+      return res;
+   }
+
+   if(InpRequireRSI)
+   {
+      if(isBoom  && res.rsi > InpRSIBoomMax)  return res;
+      if(isCrash && res.rsi < InpRSICrashMin) return res;
+   }
+
+   // Filtre Angel of Spike : bloquer si signal opposé avec forte confiance
+   if(InpUseAngelOfSpike && g_lastAngelFetch != 0 && g_angelConfidence >= 70.0)
+   {
+      bool opposed = (isBoom  && g_angelSignal == "SELL") ||
+                     (!isBoom && g_angelSignal == "BUY");
+      if(opposed)
+      {
+         if(InpDebug) PrintFormat("[SpikeRider] Spike bloqué par Angel (%s conf=%.0f%%)",
+                                   g_angelSignal, g_angelConfidence);
+         return res;
+      }
+   }
+
+   double stair   = CalcStairScore(isBoom);
+   res.stairScore = stair;
+   if(InpStairMinPct > 0.0 && stair < InpStairMinPct) return res;
+
+   res.type = up ? SPIKE_BUY : SPIKE_SELL;
+   return res;
+}
+
+//+------------------------------------------------------------------+
+//| POSITION OUVERTE                                                 |
+//+------------------------------------------------------------------+
+
+// Retourne le nombre de positions ouvertes par cet EA sur ce symbole
+int CountOurPositions()
+{
+   int count = 0;
+   for(int i = PositionsTotal()-1; i >= 0; i--)
+   {
+      ulong t = PositionGetTicket(i);
+      if(t == 0 || !PositionSelectByTicket(t)) continue;
+      if(PositionGetInteger(POSITION_MAGIC) == (long)InpMagic &&
+         PositionGetString(POSITION_SYMBOL) == _Symbol)
+         count++;
+   }
+   return count;
+}
+
+bool HasPosition()        { return CountOurPositions() > 0; }
+
+// 1 seule position à la fois — scalping spike
+bool MaxPositionsReached() { return CountOurPositions() >= 1; }
+ulong GetOpenTicket()
+{
+   for(int i = PositionsTotal()-1; i >= 0; i--)
+   {
+      ulong t = PositionGetTicket(i);
+      if(t == 0 || !PositionSelectByTicket(t)) continue;
+      if(PositionGetInteger(POSITION_MAGIC) == (long)InpMagic &&
+         PositionGetString(POSITION_SYMBOL) == _Symbol)
+         return t;
+   }
+   return 0;
+}
+bool SpreadOK()
+{
+   long spread = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
+   return (InpMaxSpreadPoints <= 0 || spread <= InpMaxSpreadPoints);
+}
+
+//+------------------------------------------------------------------+
+//| LIMITE JOURNALIÈRE                                               |
+//+------------------------------------------------------------------+
+void ResetDayIfNeeded()
+{
+   MqlDateTime dt; TimeToStruct(TimeCurrent(), dt);
+   dt.hour = 0; dt.min = 0; dt.sec = 0;
+   datetime today = StructToTime(dt);
+   if(today != g_dayTag)
+   {
+      g_dayTag          = today;
+      g_dayStartBalance = AccountInfoDouble(ACCOUNT_BALANCE);
+   }
+}
+bool DailyLimitHit()
+{
+   if(InpMaxDailyLossPct <= 0.0) return false;
+   double bal  = AccountInfoDouble(ACCOUNT_BALANCE);
+   double loss = g_dayStartBalance - bal;
+   return (loss >= g_dayStartBalance * InpMaxDailyLossPct / 100.0);
+}
+
+//+------------------------------------------------------------------+
+//| ENTRÉE MARCHÉ (spike confirmé)                                   |
+//+------------------------------------------------------------------+
+bool EnterSpikeTrade(const SpikeResult &spike, double imminence, const bool isPreSpike = false)
+{
+   string blockReason;
+   if(!CanEnterInDirection(spike.type, isPreSpike, spike, blockReason))
+   {
+      if(InpDebug)
+         PrintFormat("[SpikeRider] %s %s bloqué: %s",
+                     (isPreSpike ? "Pré-spike" : "Spike"),
+                     (spike.type == SPIKE_BUY ? "BUY" : "SELL"), blockReason);
+      return false;
+   }
+
+   double atr = spike.atr;
+   if(atr <= 0.0) return false;
+   double lot   = CalcLot(atr);
+   double ask   = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double bid   = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double price, sl = 0.0, tp = 0.0;
+   ENUM_ORDER_TYPE otype = (spike.type == SPIKE_BUY) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+   if(spike.type == SPIKE_BUY) price = ask;
+   else                        price = bid;
+
+   double slUse = 0.0, tpUse = 0.0;
+   if(spike.type == SPIKE_BUY)
+   {
+      sl = SR_NormalizeToTick(price - atr * InpSL_ATR, false);
+      tp = SR_NormalizeToTick(price + atr * InpTP_ATR, true);
+   }
+   else
+   {
+      sl = SR_NormalizeToTick(price + atr * InpSL_ATR, true);
+      tp = SR_NormalizeToTick(price - atr * InpTP_ATR, false);
+   }
+   slUse = sl;
+   tpUse = tp;
+
+   // Prix marché + OrderCheck (évite Invalid stops quand le prix bouge vite sur Boom)
+   const double minExtra = atr * 0.35;
+   bool stopsReady = false;
+   for(int pass = 0; pass < 3 && !stopsReady; pass++)
+   {
+      price = (spike.type == SPIKE_BUY)
+              ? SymbolInfoDouble(_Symbol, SYMBOL_ASK)
+              : SymbolInfoDouble(_Symbol, SYMBOL_BID);
+      if(pass == 0)
+      {
+         slUse = sl;
+         tpUse = tp;
+      }
+      else
+         SR_ScaleStopDistances(otype, price, sl, tp, (pass == 1 ? 0.85 : 0.70), slUse, tpUse);
+
+      if(!SR_AdjustStopsForOrder(otype, price, slUse, tpUse, minExtra))
+         continue;
+      if(!SR_OrderCheckMarket(otype, lot, slUse, tpUse))
+      {
+         if(InpDebug)
+            PrintFormat("[SpikeRider] OrderCheck refuse SL=%.5f TP=%.5f ask=%.5f (pass %d)",
+                        slUse, tpUse, price, pass);
+         continue;
+      }
+      stopsReady = true;
+   }
+   if(!stopsReady)
+   {
+      if(!SR_PrepareMarketStops(otype, atr, lot, slUse, tpUse))
+      {
+         g_lastEntryFail = TimeCurrent();
+         if(InpDebug)
+            PrintFormat("[SpikeRider] SL/TP impossibles ask=%.5f ATR=%.5f stops=%d",
+                        SymbolInfoDouble(_Symbol, SYMBOL_ASK), atr,
+                        (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL));
+         return false;
+      }
+   }
+
+   g_trade.SetExpertMagicNumber(InpMagic);
+   g_trade.SetDeviationInPoints(30);
+   string cmt = StringFormat("SRv5|%s|Z=%.2f|BOS%s|CH%s|OTE%s",
+                              (spike.type == SPIKE_BUY ? "BUY" : "SELL"),
+                              spike.zScore,
+                              (g_smc.bos ? "+" : "-"),
+                              (g_smc.choch ? "+" : "-"),
+                              (g_smc.inOTE ? "+" : "-"));
+   bool ok = (spike.type == SPIKE_BUY)
+             ? g_trade.Buy(lot,  _Symbol, 0, slUse, tpUse, cmt)
+             : g_trade.Sell(lot, _Symbol, 0, slUse, tpUse, cmt);
+   if(!ok)
+   {
+      g_lastEntryFail = TimeCurrent();
+      PrintFormat("[SpikeRider] ❌ Ordre échoué SL=%.5f TP=%.5f ask=%.5f | %d - %s",
+                  slUse, tpUse, SymbolInfoDouble(_Symbol, SYMBOL_ASK),
+                  g_trade.ResultRetcode(), g_trade.ResultRetcodeDescription());
+      return false;
+   }
+   if(ok)
+   {
+      g_lastTrade          = TimeCurrent();
+      g_barsSinceLastSpike = 0;
+      g_lastSpikeBar       = iTime(_Symbol, InpTF, 0);
+      ulong ticket         = g_trade.ResultOrder();
+      RegisterOpenTrade(ticket, spike.type, price, TimeCurrent(),
+                        imminence, spike.zScore, spike.rsi, spike.stairScore);
+      PrintFormat("[SpikeRider] ✅ %s lot=%.2f SL=%.5f TP=%.5f Z=%.2f imminence=%.0f%%",
+                  (spike.type==SPIKE_BUY?"BUY":"SELL"), lot, sl, tp,
+                  spike.zScore, imminence);
+   }
+   else
+      PrintFormat("[SpikeRider] ❌ %s échoué | %d - %s",
+                  (spike.type==SPIKE_BUY?"BUY":"SELL"),
+                  g_trade.ResultRetcode(), g_trade.ResultRetcodeDescription());
+   return ok;
+}
+
+//+------------------------------------------------------------------+
+//| SORTIE RAPIDE — anti micro-pertes (Boom 600)                     |
+//| Hold min + profit min $ + pas de sortie sur la bougie d'entrée   |
+//+------------------------------------------------------------------+
+void ManageQuickExit(const bool spikeActive = false)
+{
+   if(!InpUseQuickExit) return;
+
+   double minProfit = InpQuickExitMinProfitUSD;
+   if(StringFind(_Symbol, "600") >= 0)
+      minProfit = MathMax(minProfit, InpQuickExitMinProfitBoom600);
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0 || !PositionSelectByTicket(ticket)) continue;
+      if(PositionGetInteger(POSITION_MAGIC) != (long)InpMagic) continue;
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol)         continue;
+
+      double profit = PositionGetDouble(POSITION_PROFIT)
+                    + PositionGetDouble(POSITION_SWAP);
+      datetime openTime = (datetime)PositionGetInteger(POSITION_TIME);
+      int holdSec = (int)(TimeCurrent() - openTime);
+
+      // Anti micro-pertes : ne rien fermer trop tôt
+      if(holdSec < InpMinHoldSec)
+         continue;
+
+      datetime barNow = iTime(_Symbol, InpTF, 0);
+      bool sameSpikeBar = (!InpExitOnSameSpikeBar && g_lastEntryBarTime > 0 &&
+                           barNow <= g_lastEntryBarTime);
+
+      // Spike après entrée : seulement nouvelle bougie + profit suffisant
+      if(spikeActive && TimeCurrent() > openTime && !sameSpikeBar)
+      {
+         if(profit >= minProfit)
+         {
+            g_trade.PositionClose(ticket, 10);
+            PrintFormat("[SpikeRider] ⚡ Sortie spike (profit=$%.2f, hold=%ds) ticket=%llu",
+                        profit, holdSec, ticket);
+         }
+         continue;
+      }
+
+      if(profit >= minProfit)
+      {
+         g_trade.PositionClose(ticket, 10);
+         PrintFormat("[SpikeRider] ✅ Sortie objectif | profit=$%.2f hold=%ds ticket=%llu",
+                     profit, holdSec, ticket);
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| TRAILING STOP                                                    |
+//+------------------------------------------------------------------+
+void ManageTrailing()
+{
+   if(!InpUseTrailing) return;
+
+   ulong ticket = GetOpenTicket();
+   if(ticket == 0) return;
+   if(!PositionSelectByTicket(ticket)) return;
+   double atr = GetATR();
+   if(atr <= 0.0) return;
+   double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+   double currentSL = PositionGetDouble(POSITION_SL);
+   double currentTP = PositionGetDouble(POSITION_TP);
+   long   posType     = PositionGetInteger(POSITION_TYPE);
+   double ask         = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double bid         = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   const double pt    = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   const double minD  = SR_MinStopDistance();
+   const double activation = atr * InpTrailActivation;
+   const double trailDist  = MathMax(atr * InpTrailStep, minD);
+
+   static datetime s_lastTrailFailLog = 0;
+
+   if(posType == POSITION_TYPE_BUY)
+   {
+      if(bid - openPrice < activation) return;
+      double newSL = SR_NormalizeToTick(bid - trailDist, false);
+      if(currentSL > 0.0 && newSL <= currentSL + pt) return;
+      double tpUse = currentTP;
+      if(!SR_ClampStopsForModify(POSITION_TYPE_BUY, bid, newSL, tpUse)) return;
+      if(currentSL > 0.0 && newSL <= currentSL + pt) return;
+      if(!SR_SafePositionModify(ticket, newSL, tpUse))
+      {
+         if(InpDebug && TimeCurrent() - s_lastTrailFailLog >= 120)
+         {
+            s_lastTrailFailLog = TimeCurrent();
+            PrintFormat("[SpikeRider] Trailing BUY ignoré | bid=%.4f sl=%.4f tp=%.4f minD=%.4f",
+                        bid, newSL, tpUse, minD);
+         }
+      }
+   }
+   else if(posType == POSITION_TYPE_SELL)
+   {
+      if(openPrice - ask < activation) return;
+      double newSL = SR_NormalizeToTick(ask + trailDist, true);
+      if(currentSL > 0.0 && newSL >= currentSL - pt) return;
+      double tpUse = currentTP;
+      if(!SR_ClampStopsForModify(POSITION_TYPE_SELL, ask, newSL, tpUse)) return;
+      if(currentSL > 0.0 && newSL >= currentSL - pt) return;
+      if(!SR_SafePositionModify(ticket, newSL, tpUse))
+      {
+         if(InpDebug && TimeCurrent() - s_lastTrailFailLog >= 120)
+         {
+            s_lastTrailFailLog = TimeCurrent();
+            PrintFormat("[SpikeRider] Trailing SELL ignoré | ask=%.4f sl=%.4f tp=%.4f minD=%.4f",
+                        ask, newSL, tpUse, minD);
+         }
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| HELPERS OBJETS GRAPHIQUES                                        |
+//+------------------------------------------------------------------+
+string ObjName(string suffix) { return "SR_" + _Symbol + "_" + suffix; }
+
+void ObjDel(string suffix) { ObjectDelete(0, ObjName(suffix)); }
+
+void ObjHLine(string suffix, double price, color clr, ENUM_LINE_STYLE style, int width=1)
+{
+   string n = ObjName(suffix);
+   if(ObjectFind(0, n) < 0)
+      ObjectCreate(0, n, OBJ_HLINE, 0, 0, price);
+   ObjectSetDouble(0, n, OBJPROP_PRICE, price);
+   ObjectSetInteger(0, n, OBJPROP_COLOR, clr);
+   ObjectSetInteger(0, n, OBJPROP_STYLE, style);
+   ObjectSetInteger(0, n, OBJPROP_WIDTH, width);
+   ObjectSetInteger(0, n, OBJPROP_BACK, true);
+}
+
+void ObjArrow(string suffix, datetime t, double price, int arrowCode, color clr, int anchor)
+{
+   string n = ObjName(suffix);
+   ObjectDelete(0, n);
+   ObjectCreate(0, n, OBJ_ARROW, 0, t, price);
+   ObjectSetInteger(0, n, OBJPROP_ARROWCODE, arrowCode);
+   ObjectSetInteger(0, n, OBJPROP_COLOR, clr);
+   ObjectSetInteger(0, n, OBJPROP_WIDTH, 3);
+   ObjectSetInteger(0, n, OBJPROP_ANCHOR, anchor);
+}
+
+void ObjRect(string suffix, datetime t1, double p1, datetime t2, double p2, color clr, bool fill=true)
+{
+   string n = ObjName(suffix);
+   if(ObjectFind(0, n) < 0)
+      ObjectCreate(0, n, OBJ_RECTANGLE, 0, t1, p1, t2, p2);
+   ObjectSetInteger(0, n, OBJPROP_TIME, 0, t1);
+   ObjectSetDouble(0, n, OBJPROP_PRICE, 0, p1);
+   ObjectSetInteger(0, n, OBJPROP_TIME, 1, t2);
+   ObjectSetDouble(0, n, OBJPROP_PRICE, 1, p2);
+   ObjectSetInteger(0, n, OBJPROP_COLOR, clr);
+   ObjectSetInteger(0, n, OBJPROP_FILL, fill);
+   ObjectSetInteger(0, n, OBJPROP_BACK, true);
+}
+
+void ObjLabel(string suffix, string txt, int x, int y, color clr, int fontSize=9)
+{
+   string n = ObjName(suffix);
+   if(ObjectFind(0, n) < 0)
+      ObjectCreate(0, n, OBJ_LABEL, 0, 0, 0);
+   ObjectSetString(0, n, OBJPROP_TEXT, txt);
+   ObjectSetInteger(0, n, OBJPROP_XDISTANCE, x);
+   ObjectSetInteger(0, n, OBJPROP_YDISTANCE, y);
+   ObjectSetInteger(0, n, OBJPROP_COLOR, clr);
+   ObjectSetInteger(0, n, OBJPROP_FONTSIZE, fontSize);
+   ObjectSetInteger(0, n, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+   ObjectSetInteger(0, n, OBJPROP_BACK, false);
+}
+
+// Supprime tous les objets SR_ de ce symbole
+void ClearAllSRObjects()
+{
+   int total = ObjectsTotal(0);
+   string prefix = "SR_" + _Symbol + "_";
+   for(int i = total - 1; i >= 0; i--)
+   {
+      string nm = ObjectName(0, i);
+      if(StringFind(nm, prefix) == 0) ObjectDelete(0, nm);
+   }
+}
+
+// Données S/R historiques depuis RDS (chargées au démarrage + toutes les heures)
+double   g_srLevels[];        // prix des niveaux S/R multi-TF
+string   g_srLabels[];        // labels ("H1 R1", "D1 Pivot", etc.)
+color    g_srColors[];        // couleur de chaque niveau
+datetime g_lastSRFetch = 0;
+
+// Données spikes historiques depuis RDS
+datetime g_spikeTs[];         // timestamps des spikes passés
+string   g_spikeDirs[];       // "BUY" ou "SELL"
+bool     g_spikeCaptured[];   // profit capturé ou non
+int      g_spikeCount = 0;
+datetime g_lastSpikeLevelFetch = 0;
+
+//+------------------------------------------------------------------+
+//| CALCUL S/R MULTI-TF depuis bougies MT5                          |
+//| H1 : Pivot PP, R1, R2, S1, S2                                   |
+//| H4 : PP, R1, S1                                                 |
+//| D1 : PP, R1, S1                                                 |
+//+------------------------------------------------------------------+
+void CalcSRLevels()
+{
+   // Ne recalculer qu'une fois par heure
+   if(g_lastSRFetch != 0 && TimeCurrent() - g_lastSRFetch < 3600) return;
+   g_lastSRFetch = TimeCurrent();
+
+   // Supprimer les anciens niveaux
+   int total = ObjectsTotal(0);
+   string prefix = "SR_" + _Symbol + "_SR_";
+   for(int i = total - 1; i >= 0; i--)
+      if(StringFind(ObjectName(0, i), prefix) == 0) ObjectDelete(0, ObjectName(0, i));
+
+   ArrayResize(g_srLevels,  0);
+   ArrayResize(g_srLabels,  0);
+   ArrayResize(g_srColors,  0);
+
+   int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+
+   // Calcule pivots pour un TF donné
+   struct TFConfig { ENUM_TIMEFRAMES tf; string name; color clrR; color clrS; color clrP; };
+   TFConfig tfs[3];
+   tfs[0].tf=PERIOD_H1;  tfs[0].name="H1"; tfs[0].clrR=C'255,100,100'; tfs[0].clrS=C'100,200,100'; tfs[0].clrP=C'180,180,255';
+   tfs[1].tf=PERIOD_H4;  tfs[1].name="H4"; tfs[1].clrR=C'220,60,60';   tfs[1].clrS=C'60,180,60';   tfs[1].clrP=C'140,140,220';
+   tfs[2].tf=PERIOD_D1;  tfs[2].name="D1"; tfs[2].clrR=C'180,30,30';   tfs[2].clrS=C'30,150,30';   tfs[2].clrP=C'100,100,190';
+
+   for(int t = 0; t < 3; t++)
+   {
+      MqlRates r[];
+      ArraySetAsSeries(r, true);
+      if(CopyRates(_Symbol, tfs[t].tf, 1, 2, r) < 2) continue;
+
+      double H = r[1].high, L = r[1].low, C = r[1].close;
+      double PP = (H + L + C) / 3.0;
+      double R1 = 2*PP - L;
+      double R2 = PP + (H - L);
+      double S1 = 2*PP - H;
+      double S2 = PP - (H - L);
+
+      int    w  = (t == 0) ? 1 : (t == 1 ? 2 : 3);  // épaisseur selon TF
+      ENUM_LINE_STYLE stPivot = STYLE_DASHDOT;
+      ENUM_LINE_STYLE stRS    = STYLE_DOT;
+
+      // PP
+      string nPP = "SR_" + tfs[t].name + "_PP";
+      ObjHLine(nPP, NormalizeDouble(PP, digits), tfs[t].clrP, stPivot, w);
+      ObjectSetString(0, ObjName(nPP), OBJPROP_TEXT, tfs[t].name + " Pivot");
+
+      // R1, R2 (uniquement H4/D1 pour R2)
+      string nR1 = "SR_" + tfs[t].name + "_R1";
+      ObjHLine(nR1, NormalizeDouble(R1, digits), tfs[t].clrR, stRS, w);
+      ObjectSetString(0, ObjName(nR1), OBJPROP_TEXT, tfs[t].name + " R1");
+      if(t >= 1)
+      {
+         string nR2 = "SR_" + tfs[t].name + "_R2";
+         ObjHLine(nR2, NormalizeDouble(R2, digits), tfs[t].clrR, STYLE_DOT, w);
+         ObjectSetString(0, ObjName(nR2), OBJPROP_TEXT, tfs[t].name + " R2");
+      }
+
+      // S1, S2
+      string nS1 = "SR_" + tfs[t].name + "_S1";
+      ObjHLine(nS1, NormalizeDouble(S1, digits), tfs[t].clrS, stRS, w);
+      ObjectSetString(0, ObjName(nS1), OBJPROP_TEXT, tfs[t].name + " S1");
+      if(t >= 1)
+      {
+         string nS2 = "SR_" + tfs[t].name + "_S2";
+         ObjHLine(nS2, NormalizeDouble(S2, digits), tfs[t].clrS, STYLE_DOT, w);
+         ObjectSetString(0, ObjName(nS2), OBJPROP_TEXT, tfs[t].name + " S2");
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| FETCH SPIKES HISTORIQUES depuis RDS via /spike/levels           |
+//+------------------------------------------------------------------+
+void FetchSpikeLevels()
+{
+   if(!InpUsePrior) return;
+   if(g_lastSpikeLevelFetch != 0 && TimeCurrent() - g_lastSpikeLevelFetch < 3600) return;
+
+   string url = InpAIServerURL + "/spike/levels?symbol=" + _Symbol + "&limit=50";
+   string headers = "Content-Type: application/json\r\n";
+   char   post[], result[];
+   string respHeaders;
+
+   int code = WebRequest("GET", url, headers, InpPriorTimeoutMs * 3, post, result, respHeaders);
+   if(code != 200) return;
+
+   string body = CharArrayToString(result, 0, WHOLE_ARRAY, CP_UTF8);
+
+   // Parser le tableau "spikes" — chercher les champs ts, direction, captured
+   // Format: {"spikes":[{"ts":"2026-05-18T18:26:31+00:00","direction":"SELL","captured":true,"atr_mult":1.8},...]}
+   g_spikeCount = 0;
+   ArrayResize(g_spikeTs,       50);
+   ArrayResize(g_spikeDirs,     50);
+   ArrayResize(g_spikeCaptured, 50);
+
+   int pos = StringFind(body, "\"spikes\":[");
+   if(pos < 0) return;
+   pos += 10;
+
+   while(g_spikeCount < 50)
+   {
+      int objStart = StringFind(body, "{", pos);
+      int objEnd   = StringFind(body, "}", objStart);
+      if(objStart < 0 || objEnd < 0) break;
+
+      string obj   = StringSubstr(body, objStart, objEnd - objStart + 1);
+      string ts    = JsonExtractString(obj, "ts");
+      string dir   = JsonExtractString(obj, "direction");
+      bool   cap   = JsonExtractBool(obj, "captured");
+
+      if(StringLen(ts) >= 19)
+      {
+         // Convertir ISO "2026-05-18T18:26:31" en datetime MT5
+         string dtPart = StringSubstr(ts, 0, 19);
+         StringReplace(dtPart, "T", " ");
+         datetime dt = StringToTime(dtPart);
+         if(dt > 0)
+         {
+            g_spikeTs[g_spikeCount]       = dt;
+            g_spikeDirs[g_spikeCount]     = dir;
+            g_spikeCaptured[g_spikeCount] = cap;
+            g_spikeCount++;
+         }
+      }
+      pos = objEnd + 1;
+      if(StringGetCharacter(body, pos) == ']') break;
+   }
+
+   g_lastSpikeLevelFetch = TimeCurrent();
+   if(InpDebug) PrintFormat("[SpikeRider] %d niveaux spike chargés depuis RDS", g_spikeCount);
+}
+
+//+------------------------------------------------------------------+
+//| DESSIN DES MARQUEURS SPIKES HISTORIQUES                          |
+//+------------------------------------------------------------------+
+void DrawSpikeHistoryMarkers()
+{
+   if(g_spikeCount <= 0) return;
+
+   // Supprimer anciens marqueurs
+   int total = ObjectsTotal(0);
+   string prefix = "SR_" + _Symbol + "_SPK_";
+   for(int i = total - 1; i >= 0; i--)
+      if(StringFind(ObjectName(0, i), prefix) == 0) ObjectDelete(0, ObjectName(0, i));
+
+   for(int i = 0; i < g_spikeCount; i++)
+   {
+      datetime ts  = g_spikeTs[i];
+      string   dir = g_spikeDirs[i];
+      bool     cap = g_spikeCaptured[i];
+
+      // Retrouver le prix MT5 à ce timestamp
+      MqlRates r[];
+      if(CopyRates(_Symbol, InpTF, ts, 1, r) < 1) continue;
+      double px = (dir == "BUY") ? r[0].low : r[0].high;
+
+      // Couleur : vert = capturé, rouge = manqué
+      color clr  = cap ? C'0,200,100' : C'200,60,60';
+      int   code = (dir == "BUY") ? 233 : 234;
+      int   anchor = (dir == "BUY") ? ANCHOR_TOP : ANCHOR_BOTTOM;
+      double offset = (dir == "BUY") ? -r[0].low * 0.0005 : r[0].high * 0.0005;
+
+      string suf = "SPK_" + IntegerToString(i);
+      ObjArrow(suf, ts, px + offset, code, clr, anchor);
+      // Réduire la taille pour ne pas encombrer
+      ObjectSetInteger(0, ObjName(suf), OBJPROP_WIDTH, 1);
+   }
+}
+
+//+------------------------------------------------------------------+
+//| DESSIN GRAPHIQUE — Indicateurs visuels stratégie                 |
+//+------------------------------------------------------------------+
+void DrawChartIndicators(const SpikeResult &spike, double imminence)
+{
+   if(!InpShowDashboard) return;
+
+   bool   isBoom  = IsBoom(_Symbol);
+   double atr     = spike.atr;
+   double atrMean = GetATRMean();
+   double ask     = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double bid     = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double price   = isBoom ? ask : bid;
+   int    digits  = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+
+   // ── 1. S/R MULTI-TF (H1 / H4 / D1 pivots) ─────────────────────
+   CalcSRLevels();
+
+   // ── 2. MARQUEURS SPIKES HISTORIQUES RDS ────────────────────────
+   FetchSpikeLevels();
+   DrawSpikeHistoryMarkers();
+
+   // ── 3. FIB / OTE / BOS (SMC) ───────────────────────────────────
+   UpdateSMCContext();
+   if(InpDrawSMCLevels && g_smc.valid)
+   {
+      ObjHLine("FIB50",  NormalizeDouble(g_smc.fib50,  digits), clrGold,       STYLE_DASH, 1);
+      ObjHLine("FIB618", NormalizeDouble(g_smc.fib618, digits), clrOrange,    STYLE_SOLID, 2);
+      ObjHLine("FIB786", NormalizeDouble(g_smc.fib786, digits), clrOrangeRed, STYLE_SOLID, 2);
+      ObjHLine("OTEL",   NormalizeDouble(g_smc.oteLow,  digits), clrDodgerBlue, STYLE_DOT, 1);
+      ObjHLine("OTEH",   NormalizeDouble(g_smc.oteHigh, digits), clrDodgerBlue, STYLE_DOT, 1);
+      if(g_smc.breakLevel > 0.0)
+         ObjHLine("BOS", NormalizeDouble(g_smc.breakLevel, digits),
+                  g_smc.bos ? clrLime : clrGray, STYLE_SOLID, 2);
+      ObjRect("OTEZONE", iTime(_Symbol, InpTF, 8), g_smc.oteLow,
+              iTime(_Symbol, InpTF, 0) + PeriodSeconds(InpTF) * 3, g_smc.oteHigh,
+              C'30,60,120', true);
+   }
+   else
+   {
+      ObjDel("FIB50"); ObjDel("FIB618"); ObjDel("FIB786");
+      ObjDel("OTEL"); ObjDel("OTEH"); ObjDel("BOS"); ObjDel("OTEZONE");
+   }
+
+   // ── 4. SL / TP projetés (si chart stops) ───────────────────────
+   if(InpUseChartStops && atr > 0)
+   {
+      double slDist = atr * InpSL_ATR;
+      double tpDist = atr * InpTP_ATR;
+      if(isBoom)
+      {
+         ObjHLine("SL", NormalizeDouble(price - slDist, digits), clrTomato,    STYLE_DOT, 2);
+         ObjHLine("TP", NormalizeDouble(price + tpDist, digits), clrLimeGreen, STYLE_DOT, 2);
+      }
+      else
+      {
+         ObjHLine("SL", NormalizeDouble(price + slDist, digits), clrTomato,    STYLE_DOT, 2);
+         ObjHLine("TP", NormalizeDouble(price - tpDist, digits), clrLimeGreen, STYLE_DOT, 2);
+      }
+   }
+   else { ObjDel("SL"); ObjDel("TP"); }
+
+   // ── 4. ZONE ATR COMPRESSION ────────────────────────────────────
+   bool compressed = (atr > 0 && atrMean > 0 && atr < atrMean * InpAtrCompressRatio);
+   if(compressed)
+   {
+      MqlRates r[];
+      ArraySetAsSeries(r, true);
+      int nb = MathMin(InpLookback, 20);
+      if(CopyRates(_Symbol, InpTF, 0, nb + 1, r) >= nb)
+      {
+         datetime t1 = r[nb].time;
+         datetime t2 = r[0].time + PeriodSeconds(InpTF);
+         double lo = r[0].low, hi = r[0].high;
+         for(int i = 1; i < nb; i++) { lo = MathMin(lo, r[i].low); hi = MathMax(hi, r[i].high); }
+         ObjRect("CompressZone", t1, lo, t2, hi, C'40,40,60', true);
+      }
+   }
+   else ObjDel("CompressZone");
+
+   // ── 5. BOUGIES ESCALIER ─────────────────────────────────────────
+   {
+      MqlRates r[];
+      ArraySetAsSeries(r, true);
+      if(CopyRates(_Symbol, InpTF, 1, InpStairBars + 2, r) >= InpStairBars + 1)
+      {
+         for(int i = 0; i < InpStairBars; i++)
+         {
+            double body = r[i].close - r[i].open;
+            bool aligned = isBoom ? (body < 0) : (body > 0);
+            string suf = "Stair" + IntegerToString(i);
+            if(aligned)
+            {
+               color clr = isBoom ? C'60,100,180' : C'180,100,30';
+               ObjRect(suf, r[i].time, r[i].low, r[i].time + PeriodSeconds(InpTF), r[i].high, clr, false);
+            }
+            else ObjDel(suf);
+         }
+      }
+   }
+
+   // ── 6. FLÈCHE CLIGNOTANTE : pré-spike (alerte) + spike confirmé + trade ouvert ──
+   {
+      MqlRates r[];
+      ArraySetAsSeries(r, true);
+      bool hasBars = (CopyRates(_Symbol, InpTF, 0, 3, r) >= 3);
+      bool boomSide  = IsBoom(_Symbol);
+      bool hasPosition = HasPosition();
+
+      // Clignote si : imminence suffisante OU spike détecté OU trade ouvert
+      bool shouldBlink = hasBars && (imminence >= 40.0 || spike.type != SPIKE_NONE || hasPosition);
+
+      if(shouldBlink)
+      {
+         color  c1 = boomSide ? clrDeepSkyBlue : clrOrange;
+         color  c2 = boomSide ? clrDodgerBlue  : clrGold;
+         // Couleur plus vive pendant spike confirmé ou trade ouvert
+         if(spike.type != SPIKE_NONE || hasPosition)
+         {
+            c1 = boomSide ? clrAqua   : clrOrangeRed;
+            c2 = boomSide ? clrYellow : clrRed;
+         }
+         // Clignotement : alterner chaque seconde (modulo 2)
+         color  blinkClr = ((TimeCurrent() % 2) == 0) ? c1 : c2;
+         int    code     = boomSide ? 233 : 234;
+         int    anchor   = boomSide ? ANCHOR_TOP : ANCHOR_BOTTOM;
+         // Flèche sur la bougie courante (spike/trade) ou bougie future (pré-spike)
+         datetime arrowTime;
+         double   arrowPx;
+         int      arrowWidth;
+         // Flèche sur bougie COURANTE dès que l'imminence atteint le seuil d'action
+         // (pré-spike OU spike confirmé OU position ouverte)
+         bool actionNow = (spike.type != SPIKE_NONE || hasPosition ||
+                           imminence >= InpImminenceThresh);
+         if(actionNow)
+         {
+            arrowTime  = r[0].time;
+            arrowPx    = boomSide
+                         ? r[0].low  - atr * 0.6
+                         : r[0].high + atr * 0.6;
+            arrowWidth = (imminence >= 70.0 || spike.type != SPIKE_NONE || hasPosition) ? 5 : 3;
+         }
+         else
+         {
+            // Imminence basse (40-seuil) : alerte précoce sur bougie future, pas d'action
+            arrowTime  = r[0].time + PeriodSeconds(InpTF);
+            arrowPx    = boomSide
+                         ? r[0].low  - atr * (0.3 + imminence / 200.0)
+                         : r[0].high + atr * (0.3 + imminence / 200.0);
+            arrowWidth = (int)(2 + imminence / 33.0);
+         }
+         ObjArrow("SpikeArrow", arrowTime, arrowPx, code, blinkClr, anchor);
+         ObjectSetInteger(0, ObjName("SpikeArrow"), OBJPROP_WIDTH, arrowWidth);
+         ObjDel("PreSpikeArrow");  // une seule flèche unifiée
+      }
+      else
+      {
+         ObjDel("SpikeArrow");     // imminence trop basse — pas d'alerte
+         ObjDel("PreSpikeArrow");
+      }
+   }
+
+   // ── 7. BANDE ATR MOYENNE ────────────────────────────────────────
+   if(atrMean > 0 && price > 0)
+   {
+      ObjHLine("ATRHi", NormalizeDouble(price + atrMean, digits), C'70,70,110', STYLE_DASHDOT, 1);
+      ObjHLine("ATRLo", NormalizeDouble(price - atrMean, digits), C'70,70,110', STYLE_DASHDOT, 1);
+      ObjectSetString(0, ObjName("ATRHi"), OBJPROP_TEXT, "ATR+");
+      ObjectSetString(0, ObjName("ATRLo"), OBJPROP_TEXT, "ATR-");
+   }
+
+   // ── 8. PANEL DASHBOARD (coins haut-gauche, labels empilés) ──────
+   // Ligne de séparation + fond sombre
+   int yBase = 20;   // point de départ Y
+   int yStep = 16;   // espacement entre lignes
+
+   // Titre
+   ObjLabel("D_Title",  "-- SpikeRider v5 SMC -- " + _Symbol + " --", 8, yBase, clrWhite, 9);
+   yBase += yStep + 4;
+
+   // Compte
+   double bal  = AccountInfoDouble(ACCOUNT_BALANCE);
+   double eq   = AccountInfoDouble(ACCOUNT_EQUITY);
+   int    nPos = CountOurPositions();
+   double dayLoss = (g_dayStartBalance > 0) ? (g_dayStartBalance - bal) / g_dayStartBalance * 100.0 : 0.0;
+   color  balClr  = (dayLoss > 3.0) ? clrTomato : clrSilver;
+   ObjLabel("D_Acct", StringFormat("Bal $%.2f | Eq $%.2f | Pos:%d | DayLoss:%.1f%%",
+            bal, eq, nPos, dayLoss), 8, yBase, balClr, 9);
+   yBase += yStep;
+
+   // Signaux détection
+   color zClr = (MathAbs(spike.zScore) >= g_priorAtrThreshold) ? clrYellow : clrDimGray;
+   ObjLabel("D_Detect", StringFormat("Z=%.2f  RSI=%.0f  ATR=%.1f  Stair=%.0f%%  Compress=%s",
+            spike.zScore, spike.rsi, atr, spike.stairScore * 100,
+            compressed ? "OUI" : "non"), 8, yBase, zClr, 9);
+   yBase += yStep;
+
+   // Jauge imminence
+   color gaugeClr;
+   if(imminence >= 85.0)      gaugeClr = clrOrangeRed;
+   else if(imminence >= 70.0) gaugeClr = clrOrange;
+   else if(imminence >= 40.0) gaugeClr = clrGold;
+   else                       gaugeClr = clrDodgerBlue;
+   string bar = "";
+   int filled = (int)(imminence / 10.0);
+   for(int i = 0; i < 10; i++) bar += (i < filled ? "|" : ".");
+   ObjLabel("D_Gauge", StringFormat("Imminence [%s] %.0f%%", bar, imminence), 8, yBase, gaugeClr, 10);
+   yBase += yStep;
+
+   // Compteur inter-spike
+   int effFreq = GetEffectiveSpikeFrequency();
+   double progress = (effFreq > 0)
+                     ? MathMin((double)g_barsSinceLastSpike / (double)effFreq * 100.0, 100.0)
+                     : 0.0;
+   color  cntClr = (progress >= 80.0) ? clrYellow : clrDimGray;
+   ObjLabel("D_Counter", StringFormat("Barres: %d/%d (%.0f%%) | Spread: %d",
+            g_barsSinceLastSpike, effFreq, progress,
+            (int)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD)), 8, yBase, cntClr, 9);
+   yBase += yStep;
+
+   // Prior horaire RDS
+   if(InpUsePrior && g_lastPriorFetch != 0)
+   {
+      color  priorClr = g_priorFavorable ? clrLimeGreen : clrTomato;
+      ObjLabel("D_Prior", StringFormat("Prior %02d:00 | Cap=%.0f%% ATR=%.2f N=%d | %s [%s]",
+               g_lastPriorHour, g_priorCaptureRate * 100, g_priorAtrMult, g_priorSampleCount,
+               (g_priorFavorable ? "FAVORABLE" : "DEFAVOR"), g_priorSource), 8, yBase, priorClr, 9);
+      yBase += yStep;
+   }
+
+   // Angel + Zone + Realtime
+   color angelClr = (g_angelSignal == "HOLD") ? clrDimGray :
+                    ((IsBoom(_Symbol) && g_angelSignal == "BUY") ||
+                     (IsCrash(_Symbol) && g_angelSignal == "SELL")) ? clrLimeGreen : clrTomato;
+   ObjLabel("D_Angel", StringFormat("Angel=%s(%.0f%%) | Zone=%.2f | RT=%s",
+            g_angelSignal, g_angelConfidence, g_zonePrior,
+            g_realtimeSpikeActive ? "SPIKE!" : "---"), 8, yBase, angelClr, 9);
+   yBase += yStep;
+
+   // SL/TP en cours
+   if(atr > 0)
+   {
+      double slDist = atr * InpSL_ATR;
+      double tpDist = atr * InpTP_ATR;
+      ObjLabel("D_SLTP", StringFormat("SL=%.1f pts | TP=%.1f pts | RR=%.1f",
+               slDist / SymbolInfoDouble(_Symbol, SYMBOL_POINT),
+               tpDist / SymbolInfoDouble(_Symbol, SYMBOL_POINT),
+               InpTP_ATR / InpSL_ATR), 8, yBase, clrSilver, 9);
+      yBase += yStep;
+   }
+
+   // Légende spikes historiques
+   ObjLabel("D_HistLeg", StringFormat("Hist. RDS: %d spikes | vert=capturé  rouge=manqué", g_spikeCount),
+            8, yBase, C'140,140,140', 8);
+   yBase += yStep;
+
+   // Légende S/R
+   ObjLabel("D_SRLeg",
+            "S/R: H1(fin) H4(med) D1(epais)  PP=tiret-pt  R=rouge  S=vert",
+            8, yBase, C'120,120,120', 8);
+
+   ChartRedraw(0);
+}
+
+//+------------------------------------------------------------------+
+//| DASHBOARD (conservé pour compat — ne fait plus rien)            |
+//+------------------------------------------------------------------+
+void UpdateDashboard(const SpikeResult &spike, double imminence)
+{
+   // Tout est maintenant dans DrawChartIndicators (labels positionnés)
+   if(!InpShowDashboard) return;
+   bool isBoom  = IsBoom(_Symbol);
+   double bal   = AccountInfoDouble(ACCOUNT_BALANCE);
+   double eq    = AccountInfoDouble(ACCOUNT_EQUITY);
+   int    nPos  = CountOurPositions();
+   string pos   = StringFormat("%d/2%s", nPos, HasPendingOrder() ? "+PENDING" : "");
+   double dayLoss = (g_dayStartBalance > 0)
+                    ? (g_dayStartBalance - bal) / g_dayStartBalance * 100.0 : 0.0;
+
+   string bar = "";
+   int filled = (int)(imminence / 10.0);
+   for(int i=0; i<10; i++) bar += (i < filled ? "|" : ".");
+
+   UpdateSMCContext();
+   string l1 = StringFormat("[SpikeRider v5] %s | Bal=$%.2f | %s | push=%d",
+                              (isBoom?"BOOM":"CRASH"), bal, g_smc.tag, GetMicroTrendPush(3));
+   string l2 = StringFormat("Z=%.2f  RSI=%.1f  ATR=%.5f  Stair=%.2f",
+                              spike.zScore, spike.rsi, spike.atr, spike.stairScore);
+   string l3 = StringFormat("Imminence [%s] %.0f%%  | Barres depuis spike: %d/%d",
+                              bar, imminence, g_barsSinceLastSpike, GetEffectiveSpikeFrequency());
+   string l4 = StringFormat("Spread=%d | DayLoss=%.2f%% | Angel=%s(%.0f%%) Zone=%.2f RT=%s",
+                              (int)SymbolInfoInteger(_Symbol,SYMBOL_SPREAD), dayLoss,
+                              g_angelSignal, g_angelConfidence, g_zonePrior,
+                              (g_realtimeSpikeActive?"SPIKE!":"---"));
+   string l5 = "";
+   if(InpUsePrior && g_lastPriorFetch != 0)
+      l5 = StringFormat("Prior %02d:00UTC cap=%.0f%% atr=%.2f thr=%.2f n=%d [%s] %s",
+                         g_lastPriorHour, g_priorCaptureRate*100, g_priorAtrMult,
+                         g_priorAtrThreshold, g_priorSampleCount,
+                         (g_priorFavorable?"FAV":"DEF"), g_priorSource);
+   // Commentaire supprimé — affichage via labels OBJ_LABEL dans DrawChartIndicators
+}
+
+//+------------------------------------------------------------------+
+//| OnTradeTransaction : feedback immédiat à la fermeture           |
+//+------------------------------------------------------------------+
+void OnTradeTransaction(const MqlTradeTransaction &trans,
+                        const MqlTradeRequest &,
+                        const MqlTradeResult &)
+{
+   // On s'intéresse uniquement aux deals de fermeture de position
+   if(trans.type != TRADE_TRANSACTION_DEAL_ADD) return;
+   if(!HistoryDealSelect(trans.deal)) return;
+   if(HistoryDealGetInteger(trans.deal, DEAL_MAGIC) != (long)InpMagic) return;
+   if(HistoryDealGetString(trans.deal, DEAL_SYMBOL) != _Symbol) return;
+   ENUM_DEAL_ENTRY entry = (ENUM_DEAL_ENTRY)HistoryDealGetInteger(trans.deal, DEAL_ENTRY);
+   if(entry != DEAL_ENTRY_OUT && entry != DEAL_ENTRY_INOUT) return;
+
+   ulong posTicket = HistoryDealGetInteger(trans.deal, DEAL_POSITION_ID);
+   int idx = FindOpenTradeIdx(posTicket);
+
+   double profit    = HistoryDealGetDouble(trans.deal, DEAL_PROFIT)
+                    + HistoryDealGetDouble(trans.deal, DEAL_SWAP)
+                    + HistoryDealGetDouble(trans.deal, DEAL_COMMISSION);
+   double exitPrice = HistoryDealGetDouble(trans.deal, DEAL_PRICE);
+
+   // Si le pending a été rempli -> enregistrer le trade dans notre tableau
+   if(g_pendingTicket != 0 && idx < 0)
+   {
+      // Le pending a été rempli, rechercher par position
+      if(HistoryDealGetInteger(trans.deal, DEAL_ENTRY) == DEAL_ENTRY_IN)
+      {
+         // Ouverture via pending — on le note mais on n'envoie pas de feedback ici
+         g_pendingTicket = 0;
+         g_pendingPlacedAt = 0;
+         return;
+      }
+   }
+
+   if(idx < 0)
+   {
+      if(InpDebug) PrintFormat("[SpikeRider] OnTradeTransaction: deal %llu non suivi", trans.deal);
+      return;
+   }
+
+   TradeRecord rec = g_openTrades[idx];
+   RemoveOpenTradeAt(idx);
+
+   // Spike confirmé → réinitialiser compteur
+   g_barsSinceLastSpike = 0;
+   g_lastSpikeBar       = TimeCurrent();
+
+   PostTradeFeedback(rec, exitPrice, profit);
+}
+
+//+------------------------------------------------------------------+
+//| INIT                                                             |
+//+------------------------------------------------------------------+
+int OnInit()
+{
+   if(!IsSupportedSymbol(_Symbol))
+      Print("[SpikeRider] ⚠️ Symbole non supporté: ", _Symbol);
+
+   g_hATR = iATR(_Symbol, InpTF, InpATRPeriod);
+   g_hRSI = iRSI(_Symbol, InpTF, InpRSIPeriod, PRICE_CLOSE);
+   g_hEMAFast = iMA(_Symbol, InpTF, InpEMAFast, 0, MODE_EMA, PRICE_CLOSE);
+   g_hEMASlow = iMA(_Symbol, InpTF, InpEMASlow, 0, MODE_EMA, PRICE_CLOSE);
+   if(g_hATR == INVALID_HANDLE || g_hRSI == INVALID_HANDLE ||
+      g_hEMAFast == INVALID_HANDLE || g_hEMASlow == INVALID_HANDLE)
+   {
+      Print("[SpikeRider] ❌ Erreur création indicateurs");
+      return INIT_FAILED;
+   }
+
+   g_trade.SetExpertMagicNumber(InpMagic);
+   g_dayStartBalance    = AccountInfoDouble(ACCOUNT_BALANCE);
+   g_dayTag             = 0;
+   g_barsSinceLastSpike = 0;
+   g_lastSpikeBar       = 0;
+   g_pendingTicket      = 0;
+   g_openTradesCount    = 0;
+   g_lastPriorFetch     = 0; g_lastPriorAttempt   = 0; g_lastPriorHour   = -1;
+   g_lastZoneFetch      = 0; g_lastZoneAttempt    = 0; g_lastZoneHour    = -1;
+   g_lastAngelFetch     = 0; g_lastAngelAttempt   = 0; g_lastAngelHour   = -1;
+   g_lastRealtimeFetch  = 0;
+   g_lastStairEventId   = ""; g_lastStairClientId = "";
+
+   // Initialiser variables S/R et historique
+   g_lastSRFetch          = 0;
+   g_lastSpikeLevelFetch  = 0;
+   g_spikeCount           = 0;
+   ArrayResize(g_spikeTs,       0);
+   ArrayResize(g_spikeDirs,     0);
+   ArrayResize(g_spikeCaptured, 0);
+
+   // Fetches initiaux
+   FetchHourlyPrior();
+   FetchZonePrior();
+   FetchAngelOfSpike();
+   FetchSpikeLevels();
+
+   UpdateSMCContext();
+   if(InpUseTVConfirm)
+      FetchTVChartBias(true);
+
+   PrintFormat("[SpikeRider] ✅ Init v5.01 | %s | %s | SMC=%s TV=%s | hold>=%ds profit>$%.2f | Magic=%llu",
+               _Symbol, (IsBoom(_Symbol) ? "BUY only" : "SELL only"),
+               (InpRequireSMC ? "ON" : "OFF"),
+               (InpUseTVConfirm ? "ON" : "OFF"),
+               InpMinHoldSec, InpQuickExitMinProfitUSD, InpMagic);
+   return INIT_SUCCEEDED;
+}
+
+//+------------------------------------------------------------------+
+//| DEINIT                                                           |
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason)
+{
+   if(g_hATR != INVALID_HANDLE)     { IndicatorRelease(g_hATR);     g_hATR = INVALID_HANDLE; }
+   if(g_hRSI != INVALID_HANDLE)     { IndicatorRelease(g_hRSI);     g_hRSI = INVALID_HANDLE; }
+   if(g_hEMAFast != INVALID_HANDLE){ IndicatorRelease(g_hEMAFast); g_hEMAFast = INVALID_HANDLE; }
+   if(g_hEMASlow != INVALID_HANDLE){ IndicatorRelease(g_hEMASlow); g_hEMASlow = INVALID_HANDLE; }
+   CancelPendingOrder("deinit");
+   ClearAllSRObjects();
+   Comment("");
+   Print("[SpikeRider] Arrêté sur ", _Symbol);
+}
+
+//+------------------------------------------------------------------+
+//| TICK                                                             |
+//+------------------------------------------------------------------+
+void OnTick()
+{
+   if(!IsSupportedSymbol(_Symbol)) return;
+
+   ResetDayIfNeeded();
+   SpikeResult spikeLive = DetectSpike();
+   bool spikeNow = (spikeLive.type != SPIKE_NONE);
+   ManageQuickExit(spikeNow);   // hold min + profit min avant sortie
+   ManageTrailing();
+   ManagePendingAge();
+
+   // Refresh fetches si l'heure UTC a changé
+   MqlDateTime utc; TimeToStruct(TimeGMT(), utc);
+   if(InpUsePrior        && utc.hour != g_lastPriorHour) FetchHourlyPrior();
+   if(InpUseZonePrior    && utc.hour != g_lastZoneHour)  FetchZonePrior();
+   if(InpUseAngelOfSpike && utc.hour != g_lastAngelHour) FetchAngelOfSpike();
+
+   // Realtime cross-chart : toutes les 5 secondes
+   FetchRealtimeSpike();
+
+   // Incrémenter compteur inter-spike sur nouvelle bougie
+   // Note: on compte dès le départ (g_lastSpikeBar == 0) pour avoir un score utile immédiatement
+   datetime barTime = iTime(_Symbol, InpTF, 0);
+   bool newBar = (barTime != g_lastBar);
+   if(newBar)
+   {
+      g_lastBar = barTime;
+      g_barsSinceLastSpike++;  // compte toujours — sera reset à 0 après chaque spike
+   }
+
+   // Réutiliser spike déjà calculé en début de tick
+   SpikeResult spike = spikeLive;
+   double stairNow   = CalcStairScore(IsBoom(_Symbol));
+   double imminence  = CalcImminenceScore(spike.atr, spike.rsi, stairNow);
+   UpdateDashboard(spike, imminence);
+   DrawChartIndicators(spike, imminence);
+
+   if(DailyLimitHit()) return;
+   if(!SpreadOK())     return;
+
+   // ── Entrée : spike Z + structure SMC (BOS/CHOCH/OTE) ─────────────
+   if(spike.type != SPIKE_NONE && !MaxPositionsReached() &&
+      TimeCurrent() - g_lastTrade >= InpCooldownSec &&
+      TimeCurrent() - g_lastEntryFail >= InpCooldownSec)
+   {
+      if(InpUseTVConfirm)
+         FetchTVChartBias(false);
+
+      CancelPendingOrder("setup spike");
+      string why;
+      if(CanEnterInDirection(spike.type, false, spike, why))
+      {
+         PrintFormat("[SpikeRider] 🚀 SETUP SPIKE %s | Z=%.2f | %s | imm=%.0f",
+                     (spike.type == SPIKE_BUY ? "BUY" : "SELL"),
+                     spike.zScore, why, imminence);
+         EnterSpikeTrade(spike, imminence, false);
+      }
+      else if(InpDebug)
+         PrintFormat("[SpikeRider] Spike Z=%.2f bloqué: %s", spike.zScore, why);
+   }
+}

@@ -16,7 +16,7 @@ import argparse
 import os
 import re as _re
 import sys
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -64,6 +64,23 @@ if os.getenv("TRADINGAGENTS_LLM_PROVIDER", "").lower() == "bedrock":
 
 import requests  # noqa: E402  (apres dotenv pour avoir les vars)
 
+# Fusion TradingView MCP Kola (optionnel — CDP port 9222)
+try:
+    sys.path.insert(0, str(_HERE))
+    from unified_bridge import (  # type: ignore
+        compare_ta_and_tv,
+        format_unified_whatsapp,
+        merge_confirmed_with_tv,
+        push_unified_state,
+        resolve_conflict_loop,
+        run_tv_analysis_for_bridge,
+        send_unified_whatsapp,
+    )
+    _UNIFIED_BRIDGE_OK = True
+except ImportError as _ub_err:
+    _UNIFIED_BRIDGE_OK = False
+    _UNIFIED_BRIDGE_ERR = str(_ub_err)
+
 _SERVER_URL = os.getenv("AI_SERVER_URL", "http://127.0.0.1:8000").rstrip("/")
 
 # ---------------------------------------------------------------------------
@@ -87,6 +104,31 @@ except ImportError as _e:
 # ---------------------------------------------------------------------------
 # Mapping MT5 -> yfinance
 # ---------------------------------------------------------------------------
+
+# Mapping ticker Deriv -> ticker retail pour les analystes social/news/fundamentals
+# Permet à TradingAgents de trouver les données sur StockTwits, Reddit, Yahoo Finance
+_SOCIAL_TICKER_MAP: Dict[str, str] = {
+    # Deriv frx -> ticker retail pour social/news analysts
+    "frxXAUUSD": "GC=F",
+    "frxXAGUSD": "SI=F",
+    "frxEURUSD": "EURUSD=X",
+    "frxGBPUSD": "GBPUSD=X",
+    "frxUSDJPY":  "JPY=X",
+    "frxUSDCHF":  "CHF=X",
+    "frxAUDUSD": "AUDUSD=X",
+    "frxUSDCAD": "CAD=X",
+    # Crypto yfinance -> notation StockTwits (BTC.X, ETH.X...)
+    "BTC-USD":  "BTC.X",
+    "ETH-USD":  "ETH.X",
+    "BNB-USD":  "BNB.X",
+    "SOL-USD":  "SOL.X",
+    "XRP-USD":  "XRP.X",
+    "ADA-USD":  "ADA.X",
+    "DOGE-USD": "DOGE.X",
+    "AVAX-USD": "AVAX.X",
+    "DOT-USD":  "DOT.X",
+    "LTC-USD":  "LTC.X",
+}
 
 # Mapping MT5 -> ticker TradingAgents
 # Deriv synthetiques : passer le nom court (BOOM900, CRASH300...)
@@ -278,65 +320,101 @@ _ALL_BROKERS = {
 }
 
 
+def _prompt(label: str, back: bool = True, quit: bool = True) -> str:
+    """Affiche un prompt avec les options [B]ack et [Q]uit disponibles."""
+    hints = []
+    if back:
+        hints.append("B=retour")
+    hints.append("Q=quitter")
+    suffix = f"  ({', '.join(hints)})" if hints else ""
+    return input(f"\n  Choix{suffix} : ").strip()
+
+
 def select_symbol_interactive() -> tuple:
     """
     Menu interactif en 3 niveaux : broker -> categorie -> symbole.
-    Retourne (symbol_display, ticker_ta, vendor) ou leve SystemExit si annule.
+    Supporte [B] pour revenir au niveau precedent et [Q] pour quitter.
+    Retourne (symbol_display, ticker_ta, vendor).
     """
     print("\n" + "=" * 60)
     print("  SELECTION DU SYMBOLE A ANALYSER")
     print("=" * 60)
 
-    # Niveau 1 : broker
     brokers = list(_ALL_BROKERS.keys())
-    print("\n  Broker / Source de donnees :")
-    for i, b in enumerate(brokers, 1):
-        print(f"    [{i}] {b}")
-    print("    [0] Saisir manuellement un ticker")
-    raw = input("\n  Choix : ").strip()
 
-    if raw == "0":
-        ticker = input("  Ticker (ex: EURUSD=X, BOOM900, AAPL): ").strip()
-        if not ticker:
-            sys.exit("[bridge] Aucun symbole saisi.")
-        vendor = "deriv" if any(ticker.upper().startswith(p) for p in ("BOOM","CRASH","1HZ","R_","FRX")) else "yfinance"
-        return ticker, ticker, vendor
+    while True:
+        # ── Niveau 1 : broker ────────────────────────────────────────────
+        print("\n  Broker / Source de donnees :")
+        for i, b in enumerate(brokers, 1):
+            print(f"    [{i}] {b}")
+        print("    [0] Saisir manuellement un ticker")
+        raw = _prompt("Broker", back=False).upper()
 
-    try:
-        broker_idx = int(raw) - 1
-        broker_name = brokers[broker_idx]
-    except (ValueError, IndexError):
-        sys.exit("[bridge] Choix invalide.")
+        if raw == "Q":
+            sys.exit("[bridge] Annule.")
 
-    categories = list(_ALL_BROKERS[broker_name].keys())
-    vendor = _BROKER_VENDOR.get(broker_name, "yfinance")
+        if raw == "0":
+            ticker = input("  Ticker (ex: EURUSD=X, BOOM900, AAPL): ").strip()
+            if not ticker:
+                print("  [!] Aucun ticker saisi, retour au menu.")
+                continue
+            vendor = "deriv" if any(ticker.upper().startswith(p) for p in ("BOOM","CRASH","1HZ","R_","FRX")) else "yfinance"
+            return ticker, ticker, vendor
 
-    # Niveau 2 : categorie
-    print(f"\n  Categorie ({broker_name}) :")
-    for i, c in enumerate(categories, 1):
-        print(f"    [{i}] {c}")
-    raw2 = input("\n  Choix : ").strip()
-    try:
-        cat_idx = int(raw2) - 1
-        cat_name = categories[cat_idx]
-    except (ValueError, IndexError):
-        sys.exit("[bridge] Choix invalide.")
+        try:
+            broker_idx = int(raw) - 1
+            broker_name = brokers[broker_idx]
+        except (ValueError, IndexError):
+            print("  [!] Choix invalide.")
+            continue
 
-    symbols = _ALL_BROKERS[broker_name][cat_name]
+        categories = list(_ALL_BROKERS[broker_name].keys())
+        vendor = _BROKER_VENDOR.get(broker_name, "yfinance")
 
-    # Niveau 3 : symbole
-    print(f"\n  Symbole ({cat_name}) :")
-    for i, (sid, lbl) in enumerate(symbols, 1):
-        print(f"    [{i:2}] {lbl:35} ({sid})")
-    raw3 = input("\n  Choix : ").strip()
-    try:
-        sym_idx = int(raw3) - 1
-        ticker_id, sym_label = symbols[sym_idx]
-    except (ValueError, IndexError):
-        sys.exit("[bridge] Choix invalide.")
+        while True:
+            # ── Niveau 2 : categorie ──────────────────────────────────────
+            print(f"\n  Categorie  ({broker_name}) :")
+            for i, c in enumerate(categories, 1):
+                print(f"    [{i}] {c}")
+            raw2 = _prompt("Categorie").upper()
 
-    print(f"\n  [OK] Symbole selectionne : {sym_label} ({ticker_id}) | vendor={vendor}")
-    return sym_label, ticker_id, vendor
+            if raw2 == "Q":
+                sys.exit("[bridge] Annule.")
+            if raw2 == "B":
+                break  # retour niveau 1
+
+            try:
+                cat_idx = int(raw2) - 1
+                cat_name = categories[cat_idx]
+            except (ValueError, IndexError):
+                print("  [!] Choix invalide.")
+                continue
+
+            symbols = _ALL_BROKERS[broker_name][cat_name]
+
+            while True:
+                # ── Niveau 3 : symbole ────────────────────────────────────
+                print(f"\n  Symbole  ({cat_name}) :")
+                for i, (sid, lbl) in enumerate(symbols, 1):
+                    print(f"    [{i:2}] {lbl:35} ({sid})")
+                raw3 = _prompt("Symbole").upper()
+
+                if raw3 == "Q":
+                    sys.exit("[bridge] Annule.")
+                if raw3 == "B":
+                    break  # retour niveau 2
+
+                try:
+                    sym_idx = int(raw3) - 1
+                    ticker_id, sym_label = symbols[sym_idx]
+                except (ValueError, IndexError):
+                    print("  [!] Choix invalide.")
+                    continue
+
+                print(f"\n  [OK] Symbole selectionne : {sym_label} ({ticker_id}) | vendor={vendor}")
+                return sym_label, ticker_id, vendor
+            # fin while niveau 3 — B -> retour niveau 2
+        # fin while niveau 2 — B -> retour niveau 1
 
 
 # ---------------------------------------------------------------------------
@@ -348,13 +426,16 @@ def select_symbol_interactive() -> tuple:
 # ---------------------------------------------------------------------------
 
 def _get_symbol_category(symbol: str) -> str:
-    """Catégorise le symbole : CRASH | BOOM | GOLD | FOREX | INDEX | VOLATILITY"""
+    """Catégorise le symbole : CRASH | BOOM | GOLD | CRYPTO | INDEX | VOLATILITY | FOREX"""
     up = symbol.strip().upper()
     if "CRASH" in up: return "CRASH"
     if "BOOM"  in up: return "BOOM"
     if "XAU" in up or "GOLD" in up or up in ("GC=F",): return "GOLD"
     if any(up.startswith(p) for p in ("1HZ","R_","VOL","STEP","JUMP","RANGE")): return "VOLATILITY"
     if any(up in (f,) for f in ("^DJI","^GSPC","^IXIC","^GDAXI","^FTSE","US30","US500","USTEC","DE40")): return "INDEX"
+    _CRYPTO_BASES = ("BTC","ETH","BNB","SOL","XRP","ADA","DOT","DOGE","AVAX","MATIC","LTC","LINK")
+    if any(up.startswith(b) or up.endswith(b) for b in _CRYPTO_BASES): return "CRYPTO"
+    if "-USD" in up or "-USDT" in up or "-USDC" in up: return "CRYPTO"
     return "FOREX"
 
 
@@ -698,6 +779,30 @@ FORMAT SIGNAL VOLATILITY :
   Stop   : [0.8x ATR — serré car mean reversion rapide]
   TP     : [SMA20 ou centre des BB — 1.5x ATR max]
   Compte $10 = 0.01 lot (risque ~$[X]) | Compte $50 = 0.01-0.05 lot
+"""
+    elif category == "CRYPTO":
+        specific = f"""
+TU ANALYSES UNE CRYPTOMONNAIE ({symbol}).
+
+SPECIFICITES CRYPTO :
+1. Marché 24/7 — pas de sessions fixes, mais pics de liquidité 13h-17h UTC (overlap US)
+2. Volatilité élevée : ATR typiquement 2-5% du prix, stops plus larges que Forex
+3. Corrélation BTC dominante : BTC en baisse = altcoins amplifient la baisse (beta > 1)
+4. On-chain signals : flux ETF, volumes exchange, whale movements = catalyseurs majeurs
+5. Niveaux psychologiques ronds (50K, 60K, 70K, 80K...) = zones de support/résistance fortes
+
+ANALYSE REQUISE :
+1. STRUCTURE : Tendance D1 → H4 → H1 alignée ?
+2. DOMINANCE BTC : Si BTC < 50% dominance → altcoin season, sinon BTC leads
+3. NIVEAUX CLÉS : Supports/résistances psychologiques + EMA200 D1
+4. SENTIMENT : Fear & Greed Index, flux ETF spot Bitcoin, positions futures (funding rate)
+5. CATALYSEURS : Halvings, régulation, adoption institutionnelle, macroéconomie (Fed)
+
+RÈGLES GESTION DU RISQUE CRYPTO :
+- SL minimum : 2x ATR (volatilité élevée = stops serrés = liquidation)
+- Position max : 1-2% capital sur cryptos (vs 1% Forex)
+- Éviter entrées avant annonces macro US majeures (CPI, FOMC)
+- TP partiel à 1:1 recommandé vu la volatilité bidirectionnelle
 """
     else:  # INDEX
         specific = f"""
@@ -1639,7 +1744,9 @@ def save_report_word(symbol: str, trade_date: str, signal_rating: str,
                      final_state: Dict[str, Any],
                      params: Dict[str, Optional[float]],
                      confirmed: Optional[Dict[str, Any]] = None,
-                     indicators: Optional[Dict] = None) -> Optional[Path]:
+                     indicators: Optional[Dict] = None,
+                     tv_summary: Optional[Dict[str, Any]] = None,
+                     tv_comparison: Optional[Dict[str, Any]] = None) -> Optional[Path]:
     """Genere un rapport Word professionnel avec graphiques et niveaux calcules."""
     try:
         from docx import Document
@@ -1737,6 +1844,35 @@ def save_report_word(symbol: str, trade_date: str, signal_rating: str,
     sub.runs[0].font.size = Pt(10)
 
     doc.add_paragraph()
+
+    # ── TRADINGVIEW MCP KOLA ───────────────────────────────────────
+    if tv_summary is not None:
+        _colored_heading("Analyse TradingView (MCP Kola)", 2, RGBColor(30, 90, 140))
+        tv_p = doc.add_paragraph()
+        if tv_summary.get("success"):
+            tv_p.add_run(
+                f"Direction SMC: {tv_summary.get('direction', '—')}  |  "
+                f"Score biais: {tv_summary.get('bias_score', '—')}  |  "
+                f"H1: {tv_summary.get('structure_h1', '—')}  M15: {tv_summary.get('structure_m15', '—')}\n"
+            )
+            reasons = tv_summary.get("bias_reasons") or []
+            if reasons:
+                tv_p.add_run("Raisons: " + "; ".join(reasons[:6]) + "\n")
+            if tv_summary.get("spike_detected"):
+                tv_p.add_run(
+                    f"Spike Z={tv_summary.get('spike_z')} → {tv_summary.get('spike_direction')}\n"
+                )
+            if tv_summary.get("entry_valid"):
+                tv_p.add_run(
+                    f"Setup: entry={tv_summary.get('entry_price')} "
+                    f"SL={tv_summary.get('stop_loss')} TP={tv_summary.get('take_profit')}\n"
+                )
+        else:
+            tv_p.add_run(f"Indisponible: {tv_summary.get('error', 'CDP / TradingView')}\n")
+        if tv_comparison:
+            tv_p.add_run(f"\nConvergence: {tv_comparison.get('message', '—')}\n")
+        _set_para_justify(tv_p)
+        _add_separator()
 
     # ── SIGNAL PRINCIPAL ──────────────────────────────────────────
     _colored_heading("Signal TradingAgents", 2, RGBColor(30, 60, 120))
@@ -2129,13 +2265,20 @@ def save_report_word(symbol: str, trade_date: str, signal_rating: str,
     footer_p.runs[0].font.size = Pt(8)
     footer_p.runs[0].font.color.rgb = RGBColor(150, 150, 150)
 
-    # Sauvegarder
+    # Sauvegarder — si le fichier est déjà ouvert (Word), ajouter un suffixe unique
     sym_safe = symbol.replace(" ", "_").replace("/", "-")
     out_dir = _REPORTS_DIR / sym_safe
     out_dir.mkdir(parents=True, exist_ok=True)
     filename = f"{trade_date}_{sym_safe}_{rec}.docx"
     out_path = out_dir / filename
-    doc.save(str(out_path))
+    try:
+        doc.save(str(out_path))
+    except PermissionError:
+        import time as _time
+        suffix = _time.strftime("_%H%M%S")
+        out_path = out_dir / f"{trade_date}_{sym_safe}_{rec}{suffix}.docx"
+        doc.save(str(out_path))
+        print(f"  [!] Fichier verrouille — sauvegarde sous : {out_path.name}")
     print(f"  [OK] Rapport Word sauvegarde : {out_path}")
 
     # Nettoyer les fichiers temporaires
@@ -2166,7 +2309,7 @@ def run_quick(symbol: str, trade_date: str,
         sys.exit(f"[bridge] TradingAgents inaccessible: {_TA_IMPORT_ERR}")
 
     if analysts is None:
-        analysts = ["market", "social"]
+        analysts = ["market", "social", "news", "fundamentals"]
 
     # Ticker et vendor : utiliser ceux fournis, sinon auto-detecter
     if data_ticker is None:
@@ -2257,7 +2400,13 @@ def run_quick(symbol: str, trade_date: str,
         return (base + "\n\n" + full_ctx) if base else full_ctx
         graph.memory_log.get_past_context = _patched_get_past
 
-    final_state, signal_rating = graph.propagate(data_ticker, trade_date)
+    # Pour les tickers Deriv (ex: frxXAUUSD), substituer par le ticker retail
+    # afin que les analystes social/news/fundamentals trouvent les données
+    propagate_ticker = _SOCIAL_TICKER_MAP.get(data_ticker, data_ticker)
+    if propagate_ticker != data_ticker:
+        print(f"[bridge] Social ticker : {data_ticker} -> {propagate_ticker}")
+
+    final_state, signal_rating = graph.propagate(propagate_ticker, trade_date)
 
     # Indicateurs pour les graphiques du rapport
     # Priorité : ai_server (temps réel) -> OHLC Deriv calculé -> None
@@ -2567,7 +2716,32 @@ def push_manual_report(symbol: str, data: Dict[str, Any], reasoning: str) -> boo
         return False
 
 
-def push_pending_order(symbol: str, data: Dict[str, Any]) -> bool:
+def push_session_bias(symbol: str, direction: str, confidence: float,
+                      expires_hours: int = 8) -> bool:
+    """Stocke le biais de session TradingAgents dans ai_server (/session-bias).
+    L'EA MT5 lit ce biais toutes les heures et filtre les entrées en conséquence.
+    expires_hours=8 : couvre une session London+NY complète.
+    """
+    try:
+        payload = {
+            "symbol":       _clean_symbol_for_server(symbol),
+            "direction":    direction.upper(),   # BUY | SELL | NEUTRAL
+            "confidence":   round(confidence, 4),
+            "expires_hours": expires_hours,
+        }
+        r = requests.post(f"{_SERVER_URL}/session-bias", json=payload, timeout=5)
+        if r.status_code == 200:
+            print(f"[bridge] /session-bias stocké : {direction} conf={confidence:.0%} "
+                  f"(expire dans {expires_hours}h)")
+            return True
+        print(f"  [WARN] /session-bias HTTP {r.status_code}")
+        return False
+    except Exception as e:
+        print(f"  [WARN] /session-bias inaccessible : {e}")
+        return False
+
+
+def push_pending_order(symbol: str, data: Dict[str, Any], status: str = "ready") -> bool:
     sym_clean = _clean_symbol_for_server(symbol)
     action    = data["recommendation"].upper()
     cat       = _get_symbol_category(symbol)
@@ -2627,6 +2801,7 @@ def push_pending_order(symbol: str, data: Dict[str, Any]) -> bool:
         "confidence":     data.get("confidence", 0.75),
         "source":         "tradingagents_cli",
         "comment":        "TA_BRIDGE",
+        "status":         status,
     }
     try:
         r = requests.post(f"{_SERVER_URL}/pending-order", json=payload, timeout=10)
@@ -2662,13 +2837,19 @@ Exemples:
                         help="Symbole MT5. Si absent: wizard complet lance")
     parser.add_argument("--date", "-d", default=str(date.today()),
                         help="Date YYYY-MM-DD (mode rapide seulement)")
-    parser.add_argument("--analysts", "-a", default="market,sentiment",
-                        help="Analystes separes par virgule (defaut: market,social). "
+    parser.add_argument("--analysts", "-a", default="market,social,news,fundamentals",
+                        help="Analystes separes par virgule (defaut: tous). "
                              "Choix: market, social, news, fundamentals")
     parser.add_argument("--no-pending", action="store_true",
                         help="N'envoie pas d'ordre pending, rapport manuel seulement")
     parser.add_argument("--auto", action="store_true",
                         help="Pas de confirmation interactive avant envoi")
+    parser.add_argument("--no-tv", action="store_true",
+                        help="Desactive analyse TradingView MCP (TA seul)")
+    parser.add_argument("--no-whatsapp", action="store_true",
+                        help="Pas d'envoi WhatsApp unifie")
+    parser.add_argument("--followup", action="store_true",
+                        help="Lance le monitor de suivi 10 min en arriere-plan apres envoi")
     args = parser.parse_args()
 
     # Valider les analystes (noms exacts TradingAgents)
@@ -2764,9 +2945,51 @@ Exemples:
     if expert_analysis:
         final_state = dict(final_state)
         final_state["expert_scalp_analysis"] = expert_analysis
-    save_report_word(symbol, trade_date, signal_rating, final_state, params,
-                     confirmed=confirmed if confirmed else None,
-                     indicators=indicators)
+
+    # ── TradingView MCP Kola ─────────────────────────────────────
+    tv_raw: Dict[str, Any] = {}
+    tv_summary: Dict[str, Any] = {"success": False, "error": "skipped"}
+    tv_comparison: Dict[str, Any] = {"verdict": "SKIPPED", "allow_pending": True}
+
+    if not args.no_tv and _UNIFIED_BRIDGE_OK and confirmed is not None:
+        print("\n[bridge] Analyse TradingView (MCP Kola + CDP)...")
+        tv_raw, tv_summary = run_tv_analysis_for_bridge(symbol)
+        if tv_summary.get("success"):
+            print(f"  TV: {tv_summary.get('direction')} | "
+                  f"confluence={tv_summary.get('confluence_score')} | "
+                  f"prix={tv_summary.get('current_price')}")
+        else:
+            print(f"  [!] TV: {tv_summary.get('error', tv_raw.get('error', 'echec'))}")
+        tv_comparison = compare_ta_and_tv(rec, tv_summary)
+        print(f"  Convergence: {tv_comparison.get('message')}")
+        if tv_comparison.get("aligned"):
+            confirmed = merge_confirmed_with_tv(confirmed, tv_summary, tv_comparison)
+    elif not args.no_tv and not _UNIFIED_BRIDGE_OK:
+        print(f"  [!] unified_bridge: {_UNIFIED_BRIDGE_ERR}")
+
+    report_path = save_report_word(symbol, trade_date, signal_rating, final_state, params,
+                                   confirmed=confirmed if confirmed else None,
+                                   indicators=indicators,
+                                   tv_summary=tv_summary,
+                                   tv_comparison=tv_comparison)
+
+    # Envoi automatique du rapport Word en pièce jointe WhatsApp
+    if report_path and not args.no_whatsapp:
+        try:
+            sys.path.insert(0, str(_HERE))
+            from send_tradingagents_report import send_whatsapp_file  # type: ignore
+            rec_now = (confirmed or {}).get("recommendation", signal_rating) or signal_rating
+            caption = (
+                f"📊 *RAPPORT TRADINGAGENTS — {symbol}*\n"
+                f"Direction : *{rec_now}*\n"
+                f"Date : {trade_date}\n\n"
+                f"Rapport complet en pièce jointe 👇"
+            )
+            print(f"\n[bridge] Envoi rapport Word par WhatsApp → {report_path.name} ...")
+            ok = send_whatsapp_file(str(report_path), caption)
+            print(f"  {'✅ Rapport envoyé' if ok else '❌ Échec envoi rapport'}")
+        except Exception as _wa_err:
+            print(f"  [!] Envoi WhatsApp rapport : {_wa_err}")
 
     if confirmed is None:
         print("\n[bridge] Signal annule. Rapport Word sauvegarde.")
@@ -2775,13 +2998,71 @@ Exemples:
     print(f"\n[bridge] Envoi vers {_SERVER_URL} ...")
     push_manual_report(symbol, confirmed, reasoning)
 
-    # Enregistrer les niveaux d'alerte (extrait de l'analyse Claude)
-    # L'EA MT5 surveille ces niveaux et envoie une notification push quand atteints
+    bias_conf = confirmed.get("confidence") or 0.70
+    push_session_bias(symbol, rec, float(bias_conf))
+
     if expert_analysis:
         push_alert_levels(symbol, expert_analysis)
 
+    allow_pending = tv_comparison.get("allow_pending", True)
+    if not args.no_tv and _UNIFIED_BRIDGE_OK:
+        allow_pending = bool(tv_comparison.get("aligned"))
+
     if not args.no_pending and confirmed["recommendation"] in ("BUY", "SELL"):
-        push_pending_order(symbol, confirmed)
+        if allow_pending:
+            push_pending_order(symbol, confirmed)
+            push_unified_state(symbol, confirmed, tv_summary, tv_comparison)
+        elif (not args.no_tv and _UNIFIED_BRIDGE_OK
+              and tv_comparison.get("verdict") == "CONFLICT"):
+            # Conflit TA vs TV — pousser en CONFLICT_PENDING et boucle de résolution
+            conflict_conf = round(float(confirmed.get("confidence") or 0.75) * 0.7, 4)
+            conflict_data = dict(confirmed)
+            conflict_data["confidence"] = conflict_conf
+            push_pending_order(symbol, conflict_data, status="CONFLICT_PENDING")
+            push_unified_state(symbol, conflict_data, tv_summary, tv_comparison)
+            ta_dir = tv_comparison.get("ta_direction", rec)
+            tv_dir = tv_comparison.get("tv_direction", "?")
+            print(f"  [CONFLIT] TA={ta_dir} vs TV={tv_dir} — ordre CONFLICT_PENDING cree")
+            print(f"  [CONFLIT] Boucle resolution: 3 re-scans TV x 5min (15min max)")
+            wa_conflict = (
+                f"*CONFLIT SIGNAL* [{datetime.utcnow().strftime('%H:%M UTC')}]\n"
+                f"Symbole: *{symbol}*\n"
+                f"TradingAgents: *{ta_dir}* ({conflict_conf:.0%})\n"
+                f"TradingView MCP: *{tv_dir}* (confluence={tv_summary.get('confluence_score', '?')})\n"
+                f"---\n"
+                f"Situation: rebond TV court-terme vs tendance TA HTF\n"
+                f"Action: attente realignement TV - refresh auto toutes les 5min\n"
+                f"Delai max: 15min (3 tentatives)"
+            )
+            send_unified_whatsapp(wa_conflict)
+            resolve_conflict_loop(
+                symbol, ta_dir,
+                interval_sec=300,
+                max_retries=3,
+            )
+        else:
+            print("  [!] Pending NON envoye — pas de convergence TA/TV")
+
+    # WhatsApp unifie (un seul message)
+    if not args.no_whatsapp and _UNIFIED_BRIDGE_OK:
+        wa_msg = format_unified_whatsapp(
+            symbol, rec, float(bias_conf), confirmed,
+            tv_summary, tv_comparison,
+            expert_snippet=expert_analysis[:500] if expert_analysis else "",
+        )
+        send_unified_whatsapp(wa_msg)
+
+    if args.followup:
+        import subprocess
+        follow_script = _HERE / "bridge_followup_monitor.py"
+        if follow_script.exists():
+            subprocess.Popen(
+                [sys.executable, str(follow_script),
+                 "--symbol", symbol, "--interval", "600"],
+                cwd=str(_TRADBOT_ROOT),
+                creationflags=subprocess.CREATE_NEW_CONSOLE if sys.platform == "win32" else 0,
+            )
+            print("  [OK] Monitor suivi 10 min demarre en arriere-plan")
 
     print("\n[bridge] OK. L'EA MT5 recevra le signal au prochain appel /decision.")
     print(f"  Status  : GET {_SERVER_URL}/tradingagents/realtime/status")
