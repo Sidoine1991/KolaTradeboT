@@ -2253,15 +2253,15 @@ void DisplayGOMDashboard(const string &json)
    }
 
    // Extraire scores et indicateurs
-   double score_buy = JsonGetDouble(json, "score_buy", 0);
-   double score_sell = JsonGetDouble(json, "score_sell", 0);
-   int rsi = (int)JsonGetDouble(json, "rsi", 50);
-   double spike = JsonGetDouble(json, "spike", 0);
-   double force = JsonGetDouble(json, "force", 0);
-   double coherence = JsonGetDouble(json, "coherence", 0);
-   double quality = JsonGetDouble(json, "quality", 0);
-   double kola_buy = JsonGetDouble(json, "kola_buy", 0);
-   double kola_sell = JsonGetDouble(json, "kola_sell", 0);
+   double score_buy = GetJSONDouble(json, "score_buy");
+   double score_sell = GetJSONDouble(json, "score_sell");
+   int rsi = (int)GetJSONDouble(json, "rsi");
+   double spike = GetJSONDouble(json, "spike_pct");
+   double force = GetJSONDouble(json, "force");
+   double coherence = GetJSONDouble(json, "coherence_pct");
+   double quality = GetJSONDouble(json, "entry_quality");
+   double kola_buy = GetJSONDouble(json, "kola_buy");
+   double kola_sell = GetJSONDouble(json, "kola_sell");
 
    // Déterminer couleur du verdict
    color headerColor = ColorNeutral;
@@ -2364,6 +2364,7 @@ void RefreshDashboard()
    if(TimeCurrent() - g_lastDashboardUpdate < DashboardUpdateSec) return;
    g_lastDashboardUpdate = TimeCurrent();
 
+   // Try /gom-tableau first, fallback to /gom-verdict
    string url = AIServerURL + "/gom-tableau?symbol=" + _Symbol;
    string headers = "Content-Type: application/json\r\n";
    char data[];
@@ -2373,9 +2374,62 @@ void RefreshDashboard()
    if(res == 200)
    {
       string json = CharArrayToString(result);
+      if(StringLen(json) > 0 && StringFind(json, "\"ok\":true") > 0)
+      {
+         DisplayGOMDashboard(json);
+         return;
+      }
+   }
+
+   // Fallback to /gom-verdict
+   url = AIServerURL + "/gom-verdict?symbol=" + _Symbol;
+   ArrayFree(result);
+   res = WebRequest("GET", url, headers, 5000, data, result, headers);
+   if(res == 200)
+   {
+      string json = CharArrayToString(result);
       if(StringLen(json) > 0)
          DisplayGOMDashboard(json);
    }
+}
+
+//+------------------------------------------------------------------+
+//| JSON VALUE EXTRACTION HELPERS                                    |
+//+------------------------------------------------------------------+
+double GetJSONDouble(const string &json, const string &key)
+{
+   string search = "\"" + key + "\":";
+   int pos = StringFind(json, search);
+   if(pos < 0) return 0.0;
+
+   pos += StringLen(search);
+   while(pos < StringLen(json) && (StringGetCharacter(json, pos) == ' ' ||
+         StringGetCharacter(json, pos) == '"' || StringGetCharacter(json, pos) == '['))
+      pos++;
+
+   int end = pos;
+   while(end < StringLen(json))
+   {
+      ushort ch = StringGetCharacter(json, end);
+      if(ch == ',' || ch == '}' || ch == ']' || ch == '"') break;
+      end++;
+   }
+
+   string valStr = StringSubstr(json, pos, end - pos);
+   return StringToDouble(valStr);
+}
+
+string GetJSONString(const string &json, const string &key)
+{
+   string search = "\"" + key + "\":\"";
+   int pos = StringFind(json, search);
+   if(pos < 0) return "";
+
+   pos += StringLen(search);
+   int end = StringFind(json, "\"", pos);
+   if(end < 0) return "";
+
+   return StringSubstr(json, pos, end - pos);
 }
 
 //+------------------------------------------------------------------+
