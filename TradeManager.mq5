@@ -2321,7 +2321,6 @@ void DrawDashRow(string name, int x, int y, string text, color bgColor)
    ObjectSetInteger(0, bgName, OBJPROP_BGCOLOR, bgColor);
    ObjectSetInteger(0, bgName, OBJPROP_BORDER_TYPE, BORDER_FLAT);
    ObjectSetInteger(0, bgName, OBJPROP_BORDER_COLOR, ColorBorder);
-   ObjectSetInteger(0, bgName, OBJPROP_BORDER_WIDTH, 1);
    ObjectSetInteger(0, bgName, OBJPROP_CORNER, CORNER_LEFT_UPPER);
    ObjectSetInteger(0, bgName, OBJPROP_BACK, true);
    ObjectSetInteger(0, bgName, OBJPROP_SELECTABLE, false);
