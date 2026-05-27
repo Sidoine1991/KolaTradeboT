@@ -2407,23 +2407,41 @@ double GetJSONDouble(const string &json, const string &key)
 {
    string search = "\"" + key + "\":";
    int pos = StringFind(json, search);
-   if(pos < 0) return 0.0;
+   if(pos < 0) {
+      Print("[Dashboard] Key not found: ", key);
+      return 0.0;
+   }
 
    pos += StringLen(search);
-   while(pos < StringLen(json) && (StringGetCharacter(json, pos) == ' ' ||
-         StringGetCharacter(json, pos) == '"' || StringGetCharacter(json, pos) == '['))
+
+   // Skip spaces and quotes
+   while(pos < StringLen(json) && StringGetCharacter(json, pos) == ' ')
       pos++;
 
    int end = pos;
+   // Find end of value (comma, brace, bracket, or quote)
    while(end < StringLen(json))
    {
       ushort ch = StringGetCharacter(json, end);
-      if(ch == ',' || ch == '}' || ch == ']' || ch == '"') break;
+      if(ch == ',' || ch == '}' || ch == ']') break;
       end++;
    }
 
+   // Remove trailing spaces
+   while(end > pos && StringGetCharacter(json, end - 1) == ' ')
+      end--;
+
+   if(end <= pos) {
+      Print("[Dashboard] Empty value for: ", key);
+      return 0.0;
+   }
+
    string valStr = StringSubstr(json, pos, end - pos);
-   return StringToDouble(valStr);
+   double result = StringToDouble(valStr);
+
+   Print("[Dashboard] Parsed ", key, " = ", valStr, " -> ", DoubleToString(result, 2));
+
+   return result;
 }
 
 string GetJSONString(const string &json, const string &key)
