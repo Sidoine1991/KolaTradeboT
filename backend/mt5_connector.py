@@ -46,20 +46,48 @@ except ValueError:
 MT5_PASSWORD = os.getenv('MT5_PASSWORD', '')
 MT5_SERVER = os.getenv('MT5_SERVER', '')
 
-# Mapping des timeframes
-TIMEFRAME_MAPPING = {
-    '1m': mt5.TIMEFRAME_M1,
-    '5m': mt5.TIMEFRAME_M5,
-    '15m': mt5.TIMEFRAME_M15,
-    '30m': mt5.TIMEFRAME_M30,
-    '1h': mt5.TIMEFRAME_H1,
-    '4h': mt5.TIMEFRAME_H4,
-    '6h': mt5.TIMEFRAME_H6,
-    '8h': mt5.TIMEFRAME_H8,
-    '1d': mt5.TIMEFRAME_D1,
-    '1w': mt5.TIMEFRAME_W1,
-    '1M': mt5.TIMEFRAME_MN1
-}
+# Initialize MT5 first to access constants
+try:
+    if not mt5.initialize():
+        print("⚠️ MT5 initialization failed, using fallback TIMEFRAME constants")
+        mt5_initialized = False
+    else:
+        mt5_initialized = True
+except Exception as e:
+    print(f"⚠️ MT5 initialization error: {e}")
+    mt5_initialized = False
+
+# Mapping des timeframes — avec fallback si MT5 pas disponible
+if mt5_initialized and hasattr(mt5, 'TIMEFRAME_M1'):
+    TIMEFRAME_MAPPING = {
+        '1m': mt5.TIMEFRAME_M1,
+        '5m': mt5.TIMEFRAME_M5,
+        '15m': mt5.TIMEFRAME_M15,
+        '30m': mt5.TIMEFRAME_M30,
+        '1h': mt5.TIMEFRAME_H1,
+        '4h': mt5.TIMEFRAME_H4,
+        '6h': mt5.TIMEFRAME_H6,
+        '8h': mt5.TIMEFRAME_H8,
+        '1d': mt5.TIMEFRAME_D1,
+        '1w': mt5.TIMEFRAME_W1,
+        '1M': mt5.TIMEFRAME_MN1
+    }
+else:
+    # Fallback: numeric MT5 timeframe constants
+    TIMEFRAME_MAPPING = {
+        '1m': 1,
+        '5m': 5,
+        '15m': 15,
+        '30m': 30,
+        '1h': 60,
+        '4h': 240,
+        '6h': 360,
+        '8h': 480,
+        '1d': 1440,
+        '1w': 10080,
+        '1M': 43200
+    }
+    print("⚠️ Using fallback timeframe constants (MT5 not available)")
 
 # Catégories d'instruments
 INSTRUMENT_CATEGORIES = {

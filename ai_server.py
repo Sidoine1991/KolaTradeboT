@@ -20981,7 +20981,7 @@ def _validate_gom_confluence(symbol: str, direction: str, gom_verdict: Optional[
 @app.post("/pending-order")
 async def set_pending_order(payload: PendingOrderPayload):
     direction = (payload.action or payload.recommendation or "NEUTRAL").upper()
-    sym = payload.symbol.upper()
+    sym = payload.symbol.upper().strip()
 
     # Validation croisée GOM KOLA
     gom_check = _validate_gom_confluence(
@@ -21111,7 +21111,7 @@ async def get_gom_verdict(symbol: str = "XAUUSD"):
 
 @app.get("/pending-order")
 async def get_pending_order(symbol: str = "XAUUSD"):
-    sym = _resolve_symbol(symbol)
+    sym = symbol.upper().strip()
     order = _PENDING_ORDER_STORE.get(sym)
     if not order:
         return {"ok": False, "symbol": sym, "order": None, "message": "Aucun ordre pending"}
