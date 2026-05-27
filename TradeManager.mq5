@@ -84,6 +84,23 @@ input int    GOMReEntryCooldownSec = 20;     // Cooldown réduit (GOM optimized:
 input double GOMReEntryLot         = 0.01;   // Lot pour ré-entrée GOM
 input int    GOMReEntryMaxCount    = 5;      // Max ré-entrées (GOM optimized: 5)
 
+input group "=== GOM/KOLA DASHBOARD ==="
+input bool   UseDashboard          = true;   // Afficher le dashboard GOM/KOLA sur le chart
+input int    DashboardX            = 20;
+input int    DashboardY            = 50;
+input int    DashboardUpdateSec    = 30;     // Mise à jour toutes les 30s
+input int    PanelWidth            = 380;
+input int    RowHeight             = 28;
+input int    FontSize              = 9;
+input color  ColorHeaderBuy        = 0x1B5E20;
+input color  ColorBuy              = 0x2E7D32;
+input color  ColorNeutral          = 0x757575;
+input color  ColorSell             = 0xC62828;
+input color  ColorHeaderSell       = 0x8B0000;
+input color  ColorBackground       = 0x1E1E1E;
+input color  ColorText             = clrWhite;
+input color  ColorBorder           = 0x424242;
+
 CTrade        trade;
 CPositionInfo posInfo;
 
@@ -188,6 +205,26 @@ int         g_stateCount = 0;
 ulong g_manualDupTickets[];
 int   g_manualDupCount = 0;
 
+// --- Dashboard GOM/KOLA ---
+struct GOMData {
+   string symbol;
+   string verdict;
+   int verdict_num;
+   double score_buy;
+   double score_sell;
+   double spike_pct;
+   int rsi;
+   int st_dir;
+   double entry_quality;
+   double coherence_pct;
+   double kola_buy;
+   double kola_sell;
+   double current_price;
+   bool valid;
+};
+
+datetime g_lastDashboardUpdate = 0;
+
 //+------------------------------------------------------------------+
 int OnInit()
 {
@@ -198,12 +235,17 @@ int OnInit()
    Print("[TradeManager v3.1] Actif | MCP market=", MCPExecuteAtMarket,
          " | dup=", MCPDuplicateOnce, " | profit global=$", GlobalProfitTargetUSD,
          " | EMA", EMA_Fast, "/", EMA_Slow, " | positions=", g_stateCount);
+   if(UseDashboard) {
+      Print("[Dashboard] Enabled - Update interval: " + IntegerToString(DashboardUpdateSec) + "s");
+      RefreshDashboard();
+   }
    return INIT_SUCCEEDED;
 }
 
 void OnDeinit(const int reason)
 {
    EventKillTimer();
+   if(UseDashboard) RemoveAllDashboardObjects();
    for(int i = 0; i < g_stateCount; i++)
    {
       if(g_states[i].hRSI     != INVALID_HANDLE) IndicatorRelease(g_states[i].hRSI);
@@ -2194,6 +2236,8 @@ void UpdateGOMDashboard()
 
 void DisplayGOMDashboard(const string &json)
 {
+   if(!UseDashboard) return;
+
    // Extraction verdict
    string verdict = JsonGetString(json, "verdict");
    string v_str = verdict;
@@ -2216,32 +2260,123 @@ void DisplayGOMDashboard(const string &json)
    double force = JsonGetDouble(json, "force", 0);
    double coherence = JsonGetDouble(json, "coherence", 0);
    double quality = JsonGetDouble(json, "quality", 0);
+   double kola_buy = JsonGetDouble(json, "kola_buy", 0);
+   double kola_sell = JsonGetDouble(json, "kola_sell", 0);
 
-   // Construire affichage
-   string display = StringFormat(
-      "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-      "📊 GOM KOLA DASHBOARD — %s\n"
-      "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-      "🔴 Verdict: %s\n"
-      "   Score BUY=%.1f | SELL=%.1f\n"
-      "   Spike=%.1f%% | Force=%.1f\n"
-      "   RSI=%d | Coherence=%.0f%%\n"
-      "   Quality=%.0f%%\n"
-      "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n",
-      TimeToString(TimeCurrent()),
-      v_str,
-      score_buy, score_sell,
-      spike, force,
-      rsi, coherence,
-      quality
-   );
+   // Déterminer couleur du verdict
+   color headerColor = ColorNeutral;
+   if(v_str == "BUY") headerColor = ColorBuy;
+   else if(v_str == "SELL") headerColor = ColorSell;
 
-   // Afficher dans le journal et en notification
-   Print(display);
+   int baseY = DashboardY;
+   int x = DashboardX;
 
-   // Optionnel: drawer sur le chart si GOM actif
-   if(score_sell > 5.0 || score_buy > 5.0)
-      SendNotification(StringFormat("[%s] %s — BUY=%.1f SELL=%.1f",
-            TimeToString(TimeCurrent()), v_str, score_buy, score_sell));
+   // Row 1: Header with verdict color
+   DrawDashRow(_Symbol + "_HDR", x, baseY, _Symbol, headerColor);
+
+   // Row 2: Verdict + RSI
+   string verdictText = StringFormat("Verdict: %s | RSI: %d", v_str, rsi);
+   DrawDashRow(_Symbol + "_VERDICT", x, baseY + (RowHeight + 2), verdictText, ColorBackground);
+
+   // Row 3: Scores
+   string scoresText = StringFormat("Buy: %.1f | Sell: %.1f | Gap: %.1f",
+                                     score_buy, score_sell, score_buy - score_sell);
+   DrawDashRow(_Symbol + "_SCORES", x, baseY + (RowHeight + 2) * 2, scoresText, ColorBackground);
+
+   // Row 4: Indicators
+   string indText = StringFormat("Spike: %.0f%% | Force: %.1f | Quality: %.0f%%",
+                                  spike, force, quality);
+   DrawDashRow(_Symbol + "_IND", x, baseY + (RowHeight + 2) * 3, indText, ColorBackground);
+
+   // Row 5: KOLA levels
+   string kolaText = StringFormat("KOLA BUY: %.2f | SELL: %.2f",
+                                   kola_buy, kola_sell);
+   DrawDashRow(_Symbol + "_KOLA", x, baseY + (RowHeight + 2) * 4, kolaText, ColorBackground);
+
+   // Row 6: Status
+   string statusText = StringFormat("Coherence: %.0f%% | Time: %s",
+                                     coherence, TimeToString(TimeCurrent()));
+   DrawDashRow(_Symbol + "_STATUS", x, baseY + (RowHeight + 2) * 5, statusText, ColorBackground);
+
+   ChartRedraw();
+
+   // Afficher aussi dans les logs
+   Print("[Dashboard] ", _Symbol, " — ", v_str, " | Buy=", score_buy, " Sell=", score_sell);
 }
+
+//+------------------------------------------------------------------+
+//| DASHBOARD DRAWING HELPERS                                        |
+//+------------------------------------------------------------------+
+void DrawDashRow(string name, int x, int y, string text, color bgColor)
+{
+   // Create background rectangle
+   string bgName = name + "_BG";
+   if(ObjectFind(0, bgName) < 0)
+      ObjectCreate(0, bgName, OBJ_RECTANGLE_LABEL, 0, 0, 0);
+
+   ObjectSetInteger(0, bgName, OBJPROP_XDISTANCE, x);
+   ObjectSetInteger(0, bgName, OBJPROP_YDISTANCE, y);
+   ObjectSetInteger(0, bgName, OBJPROP_XSIZE, PanelWidth);
+   ObjectSetInteger(0, bgName, OBJPROP_YSIZE, RowHeight);
+   ObjectSetInteger(0, bgName, OBJPROP_BGCOLOR, bgColor);
+   ObjectSetInteger(0, bgName, OBJPROP_BORDER_TYPE, BORDER_FLAT);
+   ObjectSetInteger(0, bgName, OBJPROP_BORDER_COLOR, ColorBorder);
+   ObjectSetInteger(0, bgName, OBJPROP_BORDER_WIDTH, 1);
+   ObjectSetInteger(0, bgName, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+   ObjectSetInteger(0, bgName, OBJPROP_BACK, true);
+   ObjectSetInteger(0, bgName, OBJPROP_SELECTABLE, false);
+   ObjectSetInteger(0, bgName, OBJPROP_ZORDER, 2000);
+
+   // Create text label
+   string txtName = name + "_TXT";
+   if(ObjectFind(0, txtName) < 0)
+      ObjectCreate(0, txtName, OBJ_LABEL, 0, 0, 0);
+
+   ObjectSetString(0, txtName, OBJPROP_TEXT, text);
+   ObjectSetInteger(0, txtName, OBJPROP_XDISTANCE, x + 8);
+   ObjectSetInteger(0, txtName, OBJPROP_YDISTANCE, y + 5);
+   ObjectSetInteger(0, txtName, OBJPROP_FONTSIZE, FontSize);
+   ObjectSetString(0, txtName, OBJPROP_FONT, "Arial");
+   ObjectSetInteger(0, txtName, OBJPROP_COLOR, ColorText);
+   ObjectSetInteger(0, txtName, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+   ObjectSetInteger(0, txtName, OBJPROP_SELECTABLE, false);
+   ObjectSetInteger(0, txtName, OBJPROP_ZORDER, 2001);
+}
+
+void RemoveAllDashboardObjects()
+{
+   int objCount = ObjectsTotal(0);
+   for(int i = objCount - 1; i >= 0; i--)
+   {
+      string objName = ObjectName(0, i);
+      if(StringFind(objName, "_BG") > 0 || StringFind(objName, "_TXT") > 0 ||
+         StringFind(objName, "_HDR") > 0 || StringFind(objName, "_VERDICT") > 0 ||
+         StringFind(objName, "_SCORES") > 0 || StringFind(objName, "_IND") > 0 ||
+         StringFind(objName, "_KOLA") > 0 || StringFind(objName, "_STATUS") > 0)
+      {
+         ObjectDelete(0, objName);
+      }
+   }
+}
+
+void RefreshDashboard()
+{
+   if(!UseDashboard) return;
+   if(TimeCurrent() - g_lastDashboardUpdate < DashboardUpdateSec) return;
+   g_lastDashboardUpdate = TimeCurrent();
+
+   string url = AIServerURL + "/gom-tableau?symbol=" + _Symbol;
+   string headers = "Content-Type: application/json\r\n";
+   char data[];
+   char result[];
+
+   int res = WebRequest("GET", url, headers, 5000, data, result, headers);
+   if(res == 200)
+   {
+      string json = CharArrayToString(result);
+      if(StringLen(json) > 0)
+         DisplayGOMDashboard(json);
+   }
+}
+
 //+------------------------------------------------------------------+
