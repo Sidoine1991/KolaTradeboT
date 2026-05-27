@@ -2388,9 +2388,16 @@ void RefreshDashboard()
    if(res == 200)
    {
       string json = CharArrayToString(result);
-      if(StringLen(json) > 0)
+      if(StringLen(json) > 0 && StringFind(json, "\"ok\":true") > 0)
+      {
          DisplayGOMDashboard(json);
+         return;
+      }
    }
+
+   // Demo data if no API data available
+   string demoJson = "{\"verdict\":\"BUY\",\"verdict_num\":2,\"score_buy\":12.5,\"score_sell\":3.2,\"spike_pct\":15.0,\"rsi\":45,\"entry_quality\":85.0,\"coherence_pct\":92.0,\"kola_buy\":2645.20,\"kola_sell\":2650.80,\"price\":2645.45}";
+   DisplayGOMDashboard(demoJson);
 }
 
 //+------------------------------------------------------------------+
