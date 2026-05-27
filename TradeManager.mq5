@@ -2309,10 +2309,15 @@ void DisplayGOMDashboard(const string &json)
 //+------------------------------------------------------------------+
 void DrawDashRow(string name, int x, int y, string text, color bgColor)
 {
-   // Create background rectangle
+   // Create or update background rectangle
    string bgName = name + "_BG";
+   bool created = false;
+
    if(ObjectFind(0, bgName) < 0)
+   {
       ObjectCreate(0, bgName, OBJ_RECTANGLE_LABEL, 0, 0, 0);
+      created = true;
+   }
 
    ObjectSetInteger(0, bgName, OBJPROP_XDISTANCE, x);
    ObjectSetInteger(0, bgName, OBJPROP_YDISTANCE, y);
@@ -2322,24 +2327,25 @@ void DrawDashRow(string name, int x, int y, string text, color bgColor)
    ObjectSetInteger(0, bgName, OBJPROP_BORDER_TYPE, BORDER_FLAT);
    ObjectSetInteger(0, bgName, OBJPROP_BORDER_COLOR, ColorBorder);
    ObjectSetInteger(0, bgName, OBJPROP_CORNER, CORNER_LEFT_UPPER);
-   ObjectSetInteger(0, bgName, OBJPROP_BACK, true);
+   ObjectSetInteger(0, bgName, OBJPROP_BACK, false);
    ObjectSetInteger(0, bgName, OBJPROP_SELECTABLE, false);
-   ObjectSetInteger(0, bgName, OBJPROP_ZORDER, 2000);
 
-   // Create text label
+   // Create or update text label
    string txtName = name + "_TXT";
    if(ObjectFind(0, txtName) < 0)
       ObjectCreate(0, txtName, OBJ_LABEL, 0, 0, 0);
 
    ObjectSetString(0, txtName, OBJPROP_TEXT, text);
-   ObjectSetInteger(0, txtName, OBJPROP_XDISTANCE, x + 8);
-   ObjectSetInteger(0, txtName, OBJPROP_YDISTANCE, y + 5);
+   ObjectSetInteger(0, txtName, OBJPROP_XDISTANCE, x + 5);
+   ObjectSetInteger(0, txtName, OBJPROP_YDISTANCE, y + 3);
    ObjectSetInteger(0, txtName, OBJPROP_FONTSIZE, FontSize);
    ObjectSetString(0, txtName, OBJPROP_FONT, "Arial");
    ObjectSetInteger(0, txtName, OBJPROP_COLOR, ColorText);
    ObjectSetInteger(0, txtName, OBJPROP_CORNER, CORNER_LEFT_UPPER);
    ObjectSetInteger(0, txtName, OBJPROP_SELECTABLE, false);
-   ObjectSetInteger(0, txtName, OBJPROP_ZORDER, 2001);
+
+   if(created)
+      Print("[Dashboard] Created objects: ", bgName, " + ", txtName);
 }
 
 void RemoveAllDashboardObjects()
