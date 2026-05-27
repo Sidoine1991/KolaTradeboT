@@ -1,0 +1,293 @@
+================================================================================
+                    GOLD_DIVERGENCE.MQ5 - BOOKMARKS SYSTEM
+================================================================================
+
+Date: 2026-05-22
+Feature: Visual bookmarking system for trading events
+Status: ✅ IMPLEMENTED
+
+================================================================================
+WHAT IS THE BOOKMARKS SYSTEM
+================================================================================
+
+The bookmarks system automatically marks and visualizes all important trading
+events on the chart for easy review and analysis:
+
+   ✅ Divergence signals detected
+   ✅ Trade entries executed
+   ✅ Stop loss levels placed
+   ✅ Take profit targets set
+   ✅ Support/resistance levels
+
+Each bookmark is a visual marker on the chart that persists for analysis.
+
+================================================================================
+BOOKMARK TYPES & VISUAL INDICATORS
+================================================================================
+
+1. DIVERGENCE BOOKMARKS
+───────────────────────────────────────────────────────────────────────────────
+   Symbol: Arrow (233=UP, 234=DOWN)
+   Color: Green (BUY) or Red (SELL)
+   Tooltip: "DIV BUY" or "DIV SELL"
+   Represents: Where divergence was detected
+   Persistence: Kept for 24 hours
+
+2. ENTRY BOOKMARKS
+───────────────────────────────────────────────────────────────────────────────
+   Symbol: Arrow (108)
+   Color: Yellow
+   Tooltip: "ENTRY"
+   Represents: Exact price where trade was opened
+   Persistence: Kept for 24 hours
+
+3. STOP LOSS BOOKMARKS
+───────────────────────────────────────────────────────────────────────────────
+   Symbol: Arrow (115)
+   Color: Red
+   Tooltip: "SL"
+   Represents: Stop loss price level
+   Persistence: Kept for 24 hours
+
+4. TAKE PROFIT BOOKMARKS
+───────────────────────────────────────────────────────────────────────────────
+   Symbol: Arrow (114)
+   Color: Green
+   Tooltip: "TP"
+   Represents: Take profit price target
+   Persistence: Kept for 24 hours
+
+5. SUPPORT BOOKMARKS (Future)
+───────────────────────────────────────────────────────────────────────────────
+   Symbol: (Line or marker)
+   Color: Green
+   Tooltip: "SUPPORT"
+   Represents: Support levels identified
+   Persistence: Kept for 24 hours
+
+6. RESISTANCE BOOKMARKS (Future)
+───────────────────────────────────────────────────────────────────────────────
+   Symbol: (Line or marker)
+   Color: Red
+   Tooltip: "RESISTANCE"
+   Represents: Resistance levels identified
+   Persistence: Kept for 24 hours
+
+================================================================================
+HOW BOOKMARKS ARE CREATED
+================================================================================
+
+AUTOMATIC CREATION:
+
+When divergence detected:
+   → AddBookmark(time, price, "DIVERGENCE", direction)
+   → Appears on chart immediately with color-coded arrow
+
+When trade executed:
+   → AddBookmark(entry_price, "ENTRY", direction)
+   → AddBookmark(stop_loss, "SL", direction)
+   → AddBookmark(take_profit, "TP", direction)
+   → All 3 levels marked simultaneously with yellow/red/green arrows
+
+Every 5 minutes:
+   → ClearOldBookmarks() runs
+   → Removes bookmarks older than 24 hours
+   → Keeps chart clean but historical
+
+================================================================================
+CHART VISUALIZATION
+================================================================================
+
+On the XAUUSD H1 chart, you'll see:
+
+TIMELINE OF TRADING:
+   ↓
+   Time ----○---- Time ----○---- Time ----●---- Time
+          DIV    ENTRY    SL        TP
+        BUY    YELLOW    RED     GREEN
+
+Each ● or ○ represents a bookmark with tooltip:
+   • Hover over marker → Shows tooltip (DIV BUY, ENTRY, SL, TP)
+   • Color indicates purpose:
+     - Green: Bullish signals, take profits, support
+     - Red: Bearish signals, stops, resistance
+     - Yellow: Entry points
+     - White: Other bookmarks
+
+================================================================================
+BOOKMARK STORAGE & LIMITS
+================================================================================
+
+Memory Management:
+   • Max 100 bookmarks stored in memory
+   • When reaching 100, oldest bookmark is removed
+   • New bookmark added
+   • Result: Always showing most recent 100 events
+
+Persistence:
+   • Bookmarks kept for 24 hours
+   • After 24 hours, automatically deleted
+   • Can review entire day's trading history
+   • Prevents chart from getting cluttered
+
+Array Size:
+   • Starts with dynamic array
+   • Grows by 10 bookmarks each time needed
+   • Cleaned periodically to prevent memory bloat
+
+================================================================================
+DASHBOARD BOOKMARKS SECTION
+================================================================================
+
+The dashboard now shows a [BOOKMARKS] section with counts:
+
+Example output:
+───────────────────────────────────────────────────────────────────────────────
+[BOOKMARKS]
+ • Divergences: 12
+ • Entries: 8
+ • Stop Losses: 8
+ • Take Profits: 8
+ • Total: 36/100
+
+This helps you track:
+   ✓ How many divergences detected today
+   ✓ How many entries taken
+   ✓ How many stops hit
+   ✓ How many targets reached
+   ✓ Available bookmark slots remaining
+
+================================================================================
+USE CASES
+================================================================================
+
+1. REVIEWING TRADING DAY
+───────────────────────────────────────────────────────────────────────────────
+   After market closes, you can:
+   • Scroll left through chart
+   • See all bookmarks from the day
+   • Identify patterns in divergences
+   • Verify entry quality
+   • Check if SLs and TPs are logical
+
+2. DEBUGGING SIGNALS
+───────────────────────────────────────────────────────────────────────────────
+   If signal was poor:
+   • Find DIV bookmark on chart
+   • Check nearby ENTRY bookmark
+   • Verify SL/TP placement
+   • Understand why signal was generated
+   • Learn for next similar setup
+
+3. QUALITY ANALYSIS
+───────────────────────────────────────────────────────────────────────────────
+   High quality entries:
+   • DIV bookmark = divergence detected
+   • ENTRY bookmark close to DIV = good entry
+   • SL well below support = proper risk
+   • TP at resistance level = logical target
+
+   Low quality entries:
+   • DIV bookmark = divergence detected
+   • ENTRY bookmark far from DIV = poor follow-through
+   • SL too wide = excessive risk
+   • TP arbitrary = no confluence
+
+4. PERFORMANCE TRACKING
+───────────────────────────────────────────────────────────────────────────────
+   • Count TPs reached vs SLs hit
+   • Measure entry distance from divergence
+   • Check position sizing consistency
+   • Identify best divergence types
+   • Track trading throughout day
+
+================================================================================
+CODE STRUCTURE
+================================================================================
+
+Bookmark Struct:
+───────────────────────────────────────────────────────────────────────────────
+struct Bookmark
+{
+   datetime time;       // When bookmark was created
+   double price;        // Price level of bookmark
+   string type;         // DIVERGENCE, ENTRY, SL, TP, SUPPORT, RESISTANCE
+   string direction;    // BUY, SELL, NONE
+   int barIndex;        // (Reserved for future use)
+};
+
+Key Functions:
+───────────────────────────────────────────────────────────────────────────────
+AddBookmark(time, price, type, direction)
+   → Stores bookmark in array
+   → Automatically resizes array if needed
+   → Enforces 100 bookmark limit
+
+DrawBookmarks()
+   → Called every tick
+   → Draws all bookmarks on chart
+   → Creates arrow + tooltip for each
+   → Removed when OnDeinit
+
+ClearOldBookmarks()
+   → Called every 5 minutes
+   → Removes bookmarks > 24 hours old
+   → Keeps memory clean
+   → Prevents clutter
+
+================================================================================
+CUSTOMIZATION
+================================================================================
+
+To change bookmark colors (in DrawBookmarks function):
+
+Line ~600:
+   if(bookmarks[i].type == "DIVERGENCE")
+   {
+      bookmarkColor = (bookmarks[i].direction == "BUY") ? clrLimeGreen : clrRed;
+      // Change clrLimeGreen/clrRed to your preferred colors
+   }
+
+Available colors:
+   clrRed, clrGreen, clrBlue, clrYellow, clrCyan, clrMagenta,
+   clrLimeGreen, clrOrange, clrPurple, clrWhite, clrGray, clrBlack
+
+To change arrow codes (line ~602):
+   arrowCode = (signal.direction == "BUY") ? 233 : 234;
+   // 233 = up arrow, 234 = down arrow
+   // See MT5 arrow codes 217-241 for other options
+
+To change bookmark lifespan (in ClearOldBookmarks):
+   datetime oneDayAgo = TimeCurrent() - 86400;
+   // 86400 = 24 hours
+   // Change to 3600 for 1 hour, 604800 for 1 week, etc.
+
+================================================================================
+BENEFITS
+================================================================================
+
+✅ Visual history of all trading events
+✅ Easy identification of entry quality
+✅ Pattern recognition for divergences
+✅ SL/TP analysis and validation
+✅ Daily performance review capability
+✅ Learning resource for future trades
+✅ Automatic cleanup (no manual work)
+✅ Memory efficient (max 100 bookmarks)
+✅ Color-coded for quick recognition
+✅ Integrated into dashboard
+
+================================================================================
+NEXT STEPS
+================================================================================
+
+1. Compile (F7 in MT5)
+2. Attach to XAUUSD H1
+3. Let robot trade for 1 hour
+4. Watch chart for bookmarks
+5. Hover over bookmarks to see tooltips
+6. Check dashboard for bookmark counts
+7. Scroll left to see historical bookmarks
+8. Use for trading analysis and learning
+
+================================================================================

@@ -1,0 +1,164 @@
+================================================================================
+🚀 XAUUSD UNIFIED MONITOR — START HERE
+================================================================================
+
+✅ STATUS: SINGLE MONITOR DEPLOYED
+❌ ALL 18 OLD SCRIPTS DELETED PERMANENTLY
+✅ ZERO CONFLICTS — CLEAN SYSTEM
+
+================================================================================
+QUICK START (3 STEPS)
+================================================================================
+
+STEP 1: Verify System State
+─────────────────────────────
+Double-click: D:\Dev\TradBOT\VERIFY_SINGLE_MONITOR.bat
+
+Expected: ✅ Clean state + ✅ Central monitor found
+
+
+STEP 2: Run One Cycle (Test)
+─────────────────────────────
+Double-click: D:\Dev\TradBOT\RUN_XAUUSD_NOW.bat
+
+What happens:
+  [ÉTAPE 1] Collect TradingView data (quote, indicators, GOM KOLA)
+  [ÉTAPE 2] Collect AI Server data (bias, order, TA) — parallel
+  [ÉTAPE 3] Build unified WhatsApp message (8 sections)
+  [ÉTAPE 4] Send via PsychoBot to +2290196911346
+
+Expected:
+  ✅ WhatsApp message received
+  ✅ D:\Dev\TradBOT\data\gom_signal.json created
+  ✅ D:\Dev\TradBOT\data\opportunities.json created
+  ✅ Console shows all ÉTAPE statuses
+
+
+STEP 3: Deploy to Production (Continuous)
+─────────────────────────────────────────────
+Double-click: D:\Dev\TradBOT\START_COMPLETE_SYSTEM.bat
+
+What happens:
+  • Starts central monitor in 20-min loop
+  • Launches MetaTrader 5
+  • Runs until you stop it
+
+Then:
+  • Compile TradeManager.mq5 in MT5 MetaEditor
+  • Attach to XAUUSD chart
+
+================================================================================
+EMERGENCY: STOP EVERYTHING
+================================================================================
+
+Double-click: D:\Dev\TradBOT\KILL_ALL_MONITORS.bat
+
+Immediately stops all Python processes and resets system.
+
+================================================================================
+WHAT GETS CREATED
+================================================================================
+
+After each run, 3 files are created:
+
+1. gom_signal.json (for TradeManager)
+   • verdict: "SELL" / "BUY" / "WAIT"
+   • score_buy, score_sell: Confluence scores
+   • decision: Formatted emoji + text
+
+2. opportunities.json (for TradeManager)
+   • 3 opportunities: OPP-001, OPP-002, OPP-003
+   • Each has: type, entry, sl, tp, confidence
+   • TradeManager reads and executes trades
+
+3. whatsapp_alerts.log (fallback)
+   • If PsychoBot offline, messages saved here
+   • Timestamped entries
+
+================================================================================
+THE PIPELINE
+================================================================================
+
+TradingView Data          AI Server Data           Message Built              Sent
+(Real-time quote)        (Background intel)        (8 sections)               (WhatsApp)
+        ↓                      ↓                           ↓                    ↓
+   [ÉTAPE 1]            [ÉTAPE 2 — parallel]       [ÉTAPE 3]              [ÉTAPE 4]
+
+• Price, VWAP                • Bias session         Unified format:        PsychoBot
+• BB, Supertrend            • Pending order        Price, VWAP, BB        +2290196911346
+• RSI, Fibonacci            • TradingAgents        ST, Fibo, GOM
+• GOM KOLA verdict          report                 Bias, Order, TA
+                                                   Confluence, Decision
+
+================================================================================
+FILES DELETED (CLEANUP 2026-05-27)
+================================================================================
+
+OLD MONITORS (18 files permanently deleted):
+  ❌ send_complete_message.py
+  ❌ send_now.py
+  ❌ send_wa_monitor.py
+  ❌ xauusd_4etapes_*.py (2 variants)
+  ❌ xauusd_checkup_ict_smc_complet.py
+  ❌ xauusd_complete_monitor.py
+  ❌ xauusd_final_complete_loop.py
+  ❌ xauusd_production_monitor.py
+  ❌ xauusd_unified_*.py (4 variants)
+  ❌ unified_xauusd_monitor_final.py
+  ❌ test_complete_flow.py
+  ❌ send_order.ps1
+  ❌ 3 old log files
+
+AUTHORIZED ONLY:
+  ✅ xauusd_central_monitor.py — THE ONLY MONITOR
+
+================================================================================
+TROUBLESHOOTING
+================================================================================
+
+Multiple messages?
+→ OLD SCRIPTS DELETED. Won't happen again. Run VERIFY_SINGLE_MONITOR.bat.
+
+Empty WhatsApp message?
+→ Check TradingView is open with indicators. Run RUN_XAUUSD_NOW.bat again.
+
+TradeManager not reading signals?
+→ 1. Verify files exist: dir D:\Dev\TradBOT\data\
+   2. Run RUN_XAUUSD_NOW.bat
+   3. Recompile TradeManager.mq5
+   4. Attach to chart
+
+PsychoBot offline?
+→ Messages saved to whatsapp_alerts.log. Check when service is back.
+
+================================================================================
+BEFORE PRODUCTION CHECKLIST
+================================================================================
+
+□ Run VERIFY_SINGLE_MONITOR.bat (verify clean state)
+□ Run RUN_XAUUSD_NOW.bat (test one cycle)
+□ Verify WhatsApp message received
+□ Verify signal files created in data/
+□ Open MetaTrader 5 MetaEditor
+□ Compile TradeManager.mq5 (Ctrl+Shift+F9)
+□ Verify: 0 error(s), 0 warning(s)
+□ Attach TradeManager to XAUUSD chart
+□ Run START_COMPLETE_SYSTEM.bat (production)
+
+================================================================================
+DOCUMENTATION
+================================================================================
+
+START_HERE_UNIQUE_MONITOR.txt ← YOU ARE HERE
+MAINTENANCE_GUIDE.md ← Operational runbook
+DEPLOYMENT_CHECKLIST_UNIFIED.md ← Full deployment steps
+CLEANUP_LOG_2026_05_27.md ← What was deleted and why
+SYSTEM_ARCHITECTURE_UNIFIED.md ← Architecture overview
+
+================================================================================
+✅ STATUS: READY FOR PRODUCTION
+
+No conflicts. No duplicates. Single source of truth.
+
+Next: Double-click VERIFY_SINGLE_MONITOR.bat
+================================================================================

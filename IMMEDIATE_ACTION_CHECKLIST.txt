@@ -1,0 +1,255 @@
+================================================================================
+                    IMMEDIATE ACTION CHECKLIST
+                    Divergence Robot v2.0 Debugging
+================================================================================
+
+Date: 2026-05-22
+Status: Server running ✓ | EA enhanced with logging ✓ | Need: Recompile + Reattach
+
+================================================================================
+ISSUE SUMMARY
+================================================================================
+
+Current Status:
+✗ No drawings on chart
+✗ No trades executed
+✗ No logs appearing in MT5 Experts tab
+
+Expected After Fix:
+✓ Initialization message in Experts tab
+✓ Periodic scan logs every 5 bars
+✓ Dashboard showing on chart
+✓ GOM levels drawn
+✓ Divergence signals detected
+
+================================================================================
+STEP 1: VERIFY SERVER IS RUNNING (CHECK NOW)
+================================================================================
+
+Terminal command:
+   curl http://127.0.0.1:8000/health
+
+Expected response:
+   {"status":"healthy","service":"TradBOT AI Server",...}
+
+Status: ✓ VERIFIED - Server is running and responding
+
+If you see connection refused:
+   → Run: python ai_server.py --port 8000
+   → Or double-click: START_LIVE.bat
+
+================================================================================
+STEP 2: RECOMPILE THE EA (DO THIS NOW IN MT5)
+================================================================================
+
+Action sequence:
+1. Open MetaTrader 5
+2. File → Open Data Folder
+3. Navigate to: MQL5\Experts
+4. Verify you see: Divergence_Robot_With_GOM.mq5
+5. Tools → Compile (or press F7)
+6. Expected: 0 errors, 0 warnings
+
+Check Output panel for:
+   ✓ "0 errors, 0 warnings"
+   ✗ If you see any errors, STOP and report them
+
+================================================================================
+STEP 3: DETACH AND REATTACH EA (DO THIS NEXT)
+================================================================================
+
+Action sequence:
+1. Open a H1 chart (EURUSD recommended)
+2. If EA is attached: right-click → Expert Advisors → Remove
+3. Right-click → Expert Advisors → Divergence_Robot_With_GOM
+4. Double-click to open Properties dialog
+5. Check these inputs are ENABLED:
+   ☐ EnableAutoTrading = true (must be CHECKED)
+   ☐ EnableGOMEntryLevels = true (must be CHECKED)
+   ☐ EnableOrderBlockDetection = true (must be CHECKED)
+   ☐ EnableSIDO = true (must be CHECKED)
+   ☐ DivWindow = 5
+   ☐ DivThreshold = 0.18
+   ☐ ConfluenceMin = 3
+
+6. Click OK to attach
+
+Expected chart title: "Expert Advisors: Divergence_Robot_With_GOM"
+
+================================================================================
+STEP 4: MONITOR THE LOGS (DO THIS IMMEDIATELY)
+================================================================================
+
+Open MT5 Experts tab:
+   View → Experts  (or Alt+L)
+
+Within 10 seconds, you should see a line like:
+
+   2026.05.22 11:05:00.123  Divergence Robot initialisé sur EURUSD
+                            Timeframe: H1
+                            Magic: 123456
+                            Auto Trading: 1
+
+If you see this → SUCCESS! Robot is running. Continue to Step 5.
+If you don't see this → Go to TROUBLESHOOTING section.
+
+================================================================================
+STEP 5: WAIT FOR SCAN LOGS (5 BARS WORTH)
+================================================================================
+
+After attachment, wait 5 more H1 bars (approximately 5 hours in real time).
+
+You should see logs appearing like:
+
+   [BAR 5] Scanning for divergence signals...
+      GOM Levels found: 3
+      Signal: NONE | Score: 0 | Conf: 0%
+
+   [BAR 10] Scanning for divergence signals...
+      Order Block: BUY [1.0840-1.0860]
+      Signal: BUY | Score: 4 | Conf: 87.5%
+
+   [BAR 15] Scanning for divergence signals...
+      >> DIVERGENCE SIGNAL DETECTED: BUY
+         Confidence: 87.5% | Score: 4
+
+If you see these logs → Robot is working! Signals may take longer to appear.
+If you don't see ANY logs → Go to TROUBLESHOOTING section.
+
+================================================================================
+STEP 6: CHECK THE DASHBOARD (OPTIONAL)
+================================================================================
+
+On the chart, look at the bottom-left corner for text like:
+
+   ═ DIVERGENCE ROBOT v2.0 + GOM ═
+   Symbol: EURUSD | TF: H1
+   Status: ACTIVE
+   AutoTrading: ON
+   ---
+   Positions: 0/3
+   Trades Today: 0/5
+   ---
+   Last Signal: NONE YET
+   ---
+   GOM Levels: 3
+   OB: BUY @ 1.0840
+
+If you see this → Dashboard is rendering correctly.
+If you don't see it → May be off-screen or disabled.
+
+================================================================================
+TROUBLESHOOTING: IF NO INITIALIZATION LOG APPEARS
+================================================================================
+
+Problem: You don't see "Divergence Robot initialisé" message
+
+Possible Causes:
+
+1. EA didn't recompile successfully
+   Fix: Check Output panel for compile errors
+   Re-check that Divergence_Robot_With_GOM.mq5 exists in MQL5\Experts
+
+2. EA is not properly attached
+   Fix: Right-click chart → Expert Advisors → Verify the robot is checked
+   Try detaching (right-click Remove) and reattaching
+
+3. Not enough historical bars loaded
+   Fix: Wait 30 seconds for MT5 to load history
+   Try clicking on the chart to refresh
+
+4. EA crashed during initialization
+   Fix: Check MT5 Journal tab (not Experts) for any error messages
+   Look for "2026.05.22 11:05:00.123  Expert Advisors: ... error"
+
+Action Plan:
+   a) Check Experts tab ONE MORE TIME for any error message
+   b) If no error, wait another 30 seconds and refresh
+   c) If still nothing, restart MT5 completely
+   d) Recompile (F7) and reattach
+
+================================================================================
+TROUBLESHOOTING: IF INITIALIZATION APPEARS BUT NO SCAN LOGS
+================================================================================
+
+Problem: You see "Divergence Robot initialisé" but then nothing after that
+
+Possible Causes:
+
+1. H1 bars aren't updating
+   Fix: Check that the chart is live and updating
+   Watch for new H1 candles forming (should be every 1 hour)
+
+2. OnTick() isn't being called
+   Fix: This usually means the EA isn't running or chart is frozen
+   Refresh chart with F5
+
+3. Logging is being filtered
+   Fix: In MT5, check Tools → Options → Expert Advisors
+   Ensure "Allow logging" or similar is enabled
+
+Action Plan:
+   a) Verify you see the initialization log
+   b) Wait for the next H1 bar to close (look at chart time)
+   c) Check Experts tab again for [BAR 5] log
+   d) If still nothing after 2 new H1 bars, restart MT5
+
+================================================================================
+TROUBLESHOOTING: IF SCAN LOGS APPEAR BUT SIGNAL IS "NONE"
+================================================================================
+
+Problem: Robot is logging but showing "Signal: NONE | Score: 0"
+
+This is NORMAL in certain market conditions.
+
+Possible Reasons:
+
+1. Market is too choppy (no clear divergence pattern)
+2. Not enough historical data yet
+3. GOM levels not detecting (touch system too strict)
+4. Divergence threshold is too high (0.18 is default)
+
+Action Plan:
+   a) Wait longer - signals can take 24-48 hours to appear
+   b) Check if GOM levels are being found: "GOM Levels found: N"
+   c) If GOM levels are 0, increase BarsForTouchCount from 150 to 250
+   d) If still no signals after 48 hours, lower DivThreshold to 0.15
+
+================================================================================
+NEXT STEPS
+================================================================================
+
+IMMEDIATE (Now):
+   ☐ Run: curl http://127.0.0.1:8000/health (to verify server)
+   ☐ Recompile in MT5 (F7)
+   ☐ Detach and reattach EA to H1 chart
+   ☐ Wait 10 seconds, check Experts tab for initialization message
+
+TODAY (If initialization appears):
+   ☐ Wait 5 H1 bars, watch for scan logs
+   ☐ Note any GOM levels found
+   ☐ Look for signal patterns in logs
+
+THIS WEEK:
+   ☐ Wait for first divergence signal (may take 24-48 hours)
+   ☐ Monitor if signal triggers a trade
+   ☐ Adjust parameters if needed
+
+================================================================================
+CONTACT / SUPPORT
+================================================================================
+
+If you get stuck:
+
+1. Check DEBUGGING_EA.txt for detailed explanation of each log message
+2. Check the logs in MT5 Experts tab (copy-paste the error)
+3. Verify server is running: curl http://127.0.0.1:8000/health
+
+All files:
+   ✓ Divergence_Robot_With_GOM.mq5 - Robot (in MQL5\Experts)
+   ✓ ai_server.py - Backend (running on localhost:8000)
+   ✓ START_LIVE.bat - Launcher script
+   ✓ DEBUGGING_EA.txt - Detailed troubleshooting guide
+   ✓ GO_LIVE_NOW.txt - Deployment guide
+
+================================================================================

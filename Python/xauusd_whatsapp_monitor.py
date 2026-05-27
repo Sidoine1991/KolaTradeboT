@@ -2,7 +2,7 @@
 XAUUSD WhatsApp Monitor v2 — Analyse croisée TradingAgents × GOM KOLA
 ======================================================================
 
-Envoie toutes les 10 min une analyse complète :
+Envoie toutes les 20 min une analyse complète :
 - Prix live Deriv
 - Verdict GOM KOLA (OB, CHoCH, Fibo, Spike, Supertrend, BB, VWAP)
 - Biais session AI server
@@ -11,7 +11,7 @@ Envoie toutes les 10 min une analyse complète :
 - Alertes critiques sur changements d'état
 
 Usage:
-    python xauusd_whatsapp_monitor.py --phone "+2290196911346" --interval 600
+    python xauusd_whatsapp_monitor.py --phone "+2290196911346" --interval 1200
 """
 
 import asyncio
@@ -82,7 +82,7 @@ async def get_live_price() -> Optional[float]:
 
 def get_session_bias() -> Optional[Dict]:
     try:
-        r = requests.get(f"{AI_SERVER_URL}/session-bias", params={"symbol": SYMBOL}, timeout=5)
+        r = requests.get(f"{AI_SERVER_URL}/session-bias", params={"symbol": SYMBOL}, timeout=15)
         if r.status_code == 200:
             return r.json().get("data")
         return None
@@ -93,7 +93,7 @@ def get_session_bias() -> Optional[Dict]:
 
 def get_gom_verdict() -> Optional[Dict]:
     try:
-        r = requests.get(f"{AI_SERVER_URL}/gom-verdict", params={"symbol": SYMBOL}, timeout=5)
+        r = requests.get(f"{AI_SERVER_URL}/gom-verdict", params={"symbol": SYMBOL}, timeout=15)
         if r.status_code == 200 and r.json().get("ok"):
             return r.json()
         return None
@@ -104,12 +104,23 @@ def get_gom_verdict() -> Optional[Dict]:
 
 def get_pending_order() -> Optional[Dict]:
     try:
-        r = requests.get(f"{AI_SERVER_URL}/pending-order", params={"symbol": SYMBOL}, timeout=5)
+        r = requests.get(f"{AI_SERVER_URL}/pending-order", params={"symbol": SYMBOL}, timeout=15)
         if r.status_code == 200 and r.json().get("ok"):
             return r.json().get("order")
         return None
     except Exception as e:
         logger.error(f"❌ Pending order: {e}")
+        return None
+
+
+def get_ta_report_status() -> Optional[Dict]:
+    try:
+        r = requests.get(f"{AI_SERVER_URL}/tradingagents/report-status", params={"symbol": SYMBOL}, timeout=15)
+        if r.status_code == 200:
+            return r.json()
+        return None
+    except Exception as e:
+        logger.error(f"❌ TA report status: {e}")
         return None
 
 
@@ -169,12 +180,13 @@ def _fib_position(price: float, gom: Dict) -> str:
 
 
 def build_analysis_message(price: float, bias: Optional[Dict],
-                            gom: Optional[Dict], order: Optional[Dict]) -> str:
+                            gom: Optional[Dict], order: Optional[Dict],
+                            ta_report: Optional[Dict] = None) -> str:
     ts = datetime.utcnow().strftime("%d/%m %H:%M UTC")
     lines = []
 
     # ── HEADER ───────────────────────────────────────────────
-    lines.append(f"*XAUUSD — Suivi 10min* | {ts}")
+    lines.append(f"*XAUUSD — Suivi 20min* | {ts}")
     lines.append("━━━━━━━━━━━━━━━━━━━━")
 
     # ── PRIX & NIVEAUX CLÉS ──────────────────────────────────
@@ -278,6 +290,27 @@ def build_analysis_message(price: float, bias: Optional[Dict],
 
     lines.append("━━━━━━━━━━━━━━━━━━━━")
 
+    # ── RAPPORT TRADINGAGENTS ────────────────────────────────────
+    if ta_report and ta_report.get("ok"):
+        ta_dir   = ta_report.get("direction", "HOLD")
+        ta_conf  = (ta_report.get("confidence") or 0) * 100
+        ta_age   = ta_report.get("age_minutes", 0)
+        ta_exp   = ta_report.get("expires_in_minutes", 0)
+        ta_entry = ta_report.get("entry_price")
+        ta_sl    = ta_report.get("stop_loss")
+        ta_tp    = ta_report.get("take_profit")
+        ta_snip  = ta_report.get("reasoning_snippet", "")
+        ta_emoji = "🟢" if ta_dir == "BUY" else "🔴" if ta_dir == "SELL" else "🟡"
+        lines.append(f"{ta_emoji} *Rapport TradingAgents :* {ta_dir} {ta_conf:.0f}%")
+        lines.append(f"   Age : {ta_age:.0f}min | Expire dans : {ta_exp:.0f}min")
+        if ta_entry: lines.append(f"   Entrée TA : ${ta_entry:.2f}")
+        if ta_sl:    lines.append(f"   SL TA : ${ta_sl:.2f}")
+        if ta_tp:    lines.append(f"   TP TA : ${ta_tp:.2f}")
+        if ta_snip:  lines.append(f"   📝 {ta_snip[:120]}…")
+    else:
+        lines.append("🔘 *Rapport TradingAgents :* aucun rapport actif")
+    lines.append("━━━━━━━━━━━━━━━━━━━━")
+
     # ── ANALYSE CROISÉE ─────────────────────────────────────
     lines.append("🔬 *Analyse croisée*")
 
@@ -368,7 +401,7 @@ def build_analysis_message(price: float, bias: Optional[Dict],
 
     lines.append(f"  {decision_txt}")
     lines.append("━━━━━━━━━━━━━━━━━━━━")
-    lines.append("_Prochain check dans 10 min_")
+    lines.append("_Prochain check dans 20 min_")
 
     return "\n".join(lines)
 
@@ -440,7 +473,7 @@ def check_critical_alerts(phone: str, price: float, bias: Optional[Dict],
 # Boucle principale
 # ─────────────────────────────────────────────────────────────
 
-async def monitor_loop(phone: str, interval: int = 600) -> None:
+async def monitor_loop(phone: str, interval: int = 1200) -> None:
     global last_price, last_bias, last_gom, last_order
 
     logger.info(f"🚀 Monitor XAUUSD → {phone} | intervalle {interval}s")
@@ -458,10 +491,11 @@ async def monitor_loop(phone: str, interval: int = 600) -> None:
             logger.info(f"--- Check #{iteration} @ {datetime.utcnow().strftime('%H:%M:%S')} UTC ---")
 
             # Collecte parallèle
-            price = await get_live_price()
-            bias  = get_session_bias()
-            gom   = get_gom_verdict()
-            order = get_pending_order()
+            price     = await get_live_price()
+            bias      = get_session_bias()
+            gom       = get_gom_verdict()
+            order     = get_pending_order()
+            ta_report = get_ta_report_status()
 
             if not price:
                 logger.warning("⚠️ Prix non disponible, skip")
@@ -472,14 +506,15 @@ async def monitor_loop(phone: str, interval: int = 600) -> None:
                 f"Prix=${price:.2f} | "
                 f"Biais={bias.get('direction') if bias else 'N/A'} | "
                 f"GOM={gom.get('verdict') if gom else 'N/A'} | "
-                f"Ordre={'oui' if order else 'non'}"
+                f"Ordre={'oui' if order else 'non'} | "
+                f"TA={'actif' if (ta_report and ta_report.get('ok')) else 'aucun'}"
             )
 
             # Alertes critiques (changements d'état)
             check_critical_alerts(phone, price, bias, gom, order)
 
-            # Message de statut complet toutes les 10 min
-            msg = build_analysis_message(price, bias, gom, order)
+            # Message de statut complet (intervalle = paramètre --interval, défaut 20min)
+            msg = build_analysis_message(price, bias, gom, order, ta_report)
             send_whatsapp(phone, msg)
 
             # Mémoriser état
@@ -502,7 +537,7 @@ async def monitor_loop(phone: str, interval: int = 600) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Monitor XAUUSD — analyse croisée WhatsApp")
     parser.add_argument("--phone",    type=str, required=True, help="Numéro WhatsApp (+2290196911346)")
-    parser.add_argument("--interval", type=int, default=600,   help="Intervalle secondes (défaut=600)")
+    parser.add_argument("--interval", type=int, default=1200,  help="Intervalle secondes (défaut=1200 = 20min)")
     args = parser.parse_args()
 
     if not args.phone.startswith("+"):

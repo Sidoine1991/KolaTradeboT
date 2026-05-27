@@ -9,7 +9,7 @@
 //|        entrée uniquement sur setup confirmé (plus imminence seule)|
 //+------------------------------------------------------------------+
 #property copyright "TradBOT"
-#property version   "5.01"
+#property version   "5.02"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -35,7 +35,7 @@ input int    InpStairBars        = 3;           // Escalier réduit à 3 bougies
 input double InpStairMinPct      = 0.0;         // Escalier désactivé comme filtre bloquant
 
 input group "=== PRÉ-SPIKE (désactivé v5 — setup SMC obligatoire) ==="
-input bool   InpPreSpikeEnabled  = false;       // OFF : plus d'entrée sur imminence seule
+input bool   InpPreSpikeEnabled  = true;        // ON : entrée pré-spike (imminence + filtres)
 input bool   InpPreSpikeUseMarket= true;        // true = marché (recommandé Boom/Crash)
 input int    InpSpikeFrequency   = 0;           // 0 = auto depuis nom symbole (ex. Boom 600 → 600)
 input double InpImminenceThresh  = 25.0;        // Seuil imminence (abaissé pour plus d'entrées)
@@ -43,6 +43,11 @@ input bool   InpRequirePriorFavorable = false;  // false = prior informatif seul
 input double InpPendingOffsetATR = 0.2;         // Offset pending = X×ATR au-dessus ask (Boom)
 input int    InpPendingMaxAgeSec = 60;          // Durée pending réduite (spike = rapide)
 input double InpAtrCompressRatio = 0.80;        // Seuil compression élargi
+
+input group "=== STAIR-ONLY ENTRY (sans spike Z) ==="
+input bool   InpEnableStairOnlyEntry = true;    // Entrée possible même sans spike Z
+input double InpStairOnlyMinPct      = 0.67;    // Stair min (0.67 = 2/3 bougies alignées)
+input bool   InpStairOnlyNeedImminence = true;  // Exiger imminence >= seuil
 
 input group "=== SMC SPIKE (BOS / CHOCH / OTE) ==="
 input bool   InpRequireSMC       = true;        // Exiger structure SMC avant entrée
@@ -330,9 +335,9 @@ bool CanEnterInDirection(const ESpikeType dir, const bool isPreSpike,
    if(IsBoom(_Symbol)  && dir != SPIKE_BUY)  { reason = "Boom → BUY uniquement"; return false; }
    if(IsCrash(_Symbol) && dir != SPIKE_SELL) { reason = "Crash → SELL uniquement"; return false; }
 
-   if(isPreSpike)
+   if(isPreSpike && !InpPreSpikeEnabled)
    {
-      reason = "pré-spike désactivé (v5: setup SMC + spike)";
+      reason = "pré-spike désactivé";
       return false;
    }
 
@@ -372,13 +377,13 @@ bool CanEnterInDirection(const ESpikeType dir, const bool isPreSpike,
       }
    }
 
-   if(spike.type == SPIKE_NONE || spike.type != dir)
+   if(!isPreSpike && (spike.type == SPIKE_NONE || spike.type != dir))
    {
       reason = "spike non confirmé dans le sens";
       return false;
    }
 
-   if(!HasDirectionConfirmation(dir) && spike.zScore < InpZScoreMin + 0.75)
+   if(InpPreSpikeNeedConfirm && !HasDirectionConfirmation(dir) && spike.zScore < InpZScoreMin + 0.75)
    {
       reason = "bougies non alignées + Z faible";
       return false;
@@ -388,12 +393,13 @@ bool CanEnterInDirection(const ESpikeType dir, const bool isPreSpike,
    if(InpRequireSMC)
    {
       if(!SR_SMCAllowsEntry(g_smc, IsBoom(_Symbol), InpRequireBOS, InpRequireCHOCH,
-                            InpRequireOTE, true, spike.zScore, InpZScoreMin, reason))
+                            InpRequireOTE, !isPreSpike, spike.zScore, InpZScoreMin, reason))
          return false;
    }
 
-   reason = StringFormat("OK %s | Z=%.2f | %s", (dir == SPIKE_BUY ? "BUY" : "SELL"),
-                         spike.zScore, g_smc.tag);
+   reason = StringFormat("OK %s | Z=%.2f | stair=%.0f%% | %s",
+                        (dir == SPIKE_BUY ? "BUY" : "SELL"),
+                        spike.zScore, spike.stairScore * 100.0, g_smc.tag);
    return true;
 }
 double GetATRMean()
@@ -1143,9 +1149,10 @@ double CalcStairScore(bool isBoom)
    int aligned = 0;
    for(int i = 0; i < InpStairBars; i++)
    {
-      double body = r[i+1].close - r[i+1].open;
-      if(isBoom  && body < 0) aligned++;
-      if(!isBoom && body > 0) aligned++;
+      double body = r[i].close - r[i].open;
+      // Boom: escalier haussier (bougies vertes). Crash: escalier baissier (bougies rouges).
+      if(isBoom  && body > 0) aligned++;
+      if(!isBoom && body < 0) aligned++;
    }
    return (double)aligned / InpStairBars;
 }
@@ -2129,7 +2136,7 @@ void DrawChartIndicators(const SpikeResult &spike, double imminence)
          for(int i = 0; i < InpStairBars; i++)
          {
             double body = r[i].close - r[i].open;
-            bool aligned = isBoom ? (body < 0) : (body > 0);
+            bool aligned = isBoom ? (body > 0) : (body < 0);
             string suf = "Stair" + IntegerToString(i);
             if(aligned)
             {
@@ -2511,10 +2518,13 @@ void OnTick()
    if(DailyLimitHit()) return;
    if(!SpreadOK())     return;
 
-   // ── Entrée : spike Z + structure SMC (BOS/CHOCH/OTE) ─────────────
-   if(spike.type != SPIKE_NONE && !MaxPositionsReached() &&
-      TimeCurrent() - g_lastTrade >= InpCooldownSec &&
-      TimeCurrent() - g_lastEntryFail >= InpCooldownSec)
+   bool canTryEntry = (!MaxPositionsReached() &&
+                       TimeCurrent() - g_lastTrade >= InpCooldownSec &&
+                       TimeCurrent() - g_lastEntryFail >= InpCooldownSec);
+   bool entryDone = false;
+
+   // ── Entrée A : spike Z + structure SMC (BOS/CHOCH/OTE) ───────────
+   if(canTryEntry && spike.type != SPIKE_NONE)
    {
       if(InpUseTVConfirm)
          FetchTVChartBias(false);
@@ -2526,9 +2536,55 @@ void OnTick()
          PrintFormat("[SpikeRider] 🚀 SETUP SPIKE %s | Z=%.2f | %s | imm=%.0f",
                      (spike.type == SPIKE_BUY ? "BUY" : "SELL"),
                      spike.zScore, why, imminence);
-         EnterSpikeTrade(spike, imminence, false);
+         entryDone = EnterSpikeTrade(spike, imminence, false);
       }
       else if(InpDebug)
          PrintFormat("[SpikeRider] Spike Z=%.2f bloqué: %s", spike.zScore, why);
+   }
+
+   // ── Entrée B : pré-spike/imminence (option 1) ─────────────────────
+   if(canTryEntry && !entryDone && InpPreSpikeEnabled && imminence >= InpImminenceThresh)
+   {
+      SpikeResult pre;
+      pre.type       = IsBoom(_Symbol) ? SPIKE_BUY : SPIKE_SELL;
+      pre.zScore     = spike.zScore;
+      pre.rsi        = spike.rsi;
+      pre.atr        = spike.atr;
+      pre.stairScore = stairNow;
+
+      string whyPre;
+      if(CanEnterInDirection(pre.type, true, pre, whyPre))
+      {
+         PrintFormat("[SpikeRider] ⚡ PRE-SPIKE %s | imm=%.0f | %s",
+                     (pre.type == SPIKE_BUY ? "BUY" : "SELL"), imminence, whyPre);
+         entryDone = EnterSpikeTrade(pre, imminence, true);
+      }
+      else if(InpDebug)
+         PrintFormat("[SpikeRider] Pre-spike bloqué: %s", whyPre);
+   }
+
+   // ── Entrée C : stair-only sans spike Z (option 2) ─────────────────
+   if(canTryEntry && !entryDone && InpEnableStairOnlyEntry && spike.type == SPIKE_NONE)
+   {
+      if(stairNow >= InpStairOnlyMinPct &&
+         (!InpStairOnlyNeedImminence || imminence >= InpImminenceThresh))
+      {
+         SpikeResult st;
+         st.type       = IsBoom(_Symbol) ? SPIKE_BUY : SPIKE_SELL;
+         st.zScore     = spike.zScore;
+         st.rsi        = spike.rsi;
+         st.atr        = spike.atr;
+         st.stairScore = stairNow;
+
+         string whySt;
+         if(CanEnterInDirection(st.type, true, st, whySt))
+         {
+            PrintFormat("[SpikeRider] 🪜 STAIR-ONLY %s | stair=%.0f%% imm=%.0f | %s",
+                        (st.type == SPIKE_BUY ? "BUY" : "SELL"), stairNow * 100.0, imminence, whySt);
+            entryDone = EnterSpikeTrade(st, imminence, true);
+         }
+         else if(InpDebug)
+            PrintFormat("[SpikeRider] Stair-only bloqué: %s", whySt);
+      }
    }
 }

@@ -1,0 +1,13 @@
+// PARAMÈTRES ORDRES LIMIT - À COPIER DANS MT5
+
+=== ORDRES LIMITES (ACTIVÉ) ===
+UseClosestLevelForLimits = true;    // ACTIVÉ - Utiliser niveaux S/R pour ordres limit
+MaxDistanceLimitATR = 1.0;          // Distance max ordre limite (x ATR)
+ShowLimitOrderLevels = true;          // Afficher les niveaux limite sur graphique
+
+=== TOP SYMBOLS LIMIT ORDERS ===
+EnableTop3SymbolLimitOrders = true;   // ACTIVÉ - Ordres limit sur meilleurs symboles
+TopSymbols_Count = 3;               // Nombre de symboles à surveiller
+TopSymbols_RefreshSeconds = 300;     // Rafraîchir toutes les 5 minutes
+TopSymbols_MinScoreToPlace = 55.0;   // Score minimum pour placer ordre
+TopSymbols_OnlyBoomCrash = true;     // Limiter aux Boom/Crash

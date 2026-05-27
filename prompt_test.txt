@@ -1,0 +1,5 @@
+{
+  "model": "qwen3.5:4b",
+  "prompt": "Tu es un trader professionnel avec 15+ ans d'expérience en analyse technique multi-timeframes. Tu dois appliquer la méthodologie complète du script GOM (KOLA + SIDO) pour analyser EURUSD sur M1.\n\n=== PROCESSUS D'ANALYSE GOM COMPLET ===\nÉtape 1: Analyse de structure de marché (KOLA Three Line Break)\nÉtape 2: Détection des niveaux de confluence par touches multiples\nÉtape 3: Identification des figures chartistes (SIDO)\n\n=== DONNÉES DE MARCHÉ ===\nSymbole: EURUSD\nTimeframe: M1\nPrix actuel: Bid=1.08500 Ask=1.08505\nATR (volatilité): 0.00120\n\n=== INDICATEURS TECHNIQUES FONDAMENTAUX ===\nRSI(14): 65.00\nMACD Histogramme: 0.000015\n\nFournis une analyse structurée pour le robot TradBOT en format JSON.",
+  "stream": false
+}

@@ -1,0 +1,37 @@
+📊 TradBOT [20:07 UTC]
+
+*XAUUSD — Suivi 20min* | 26/05 20:07 UTC
+━━━━━━━━━━━━━━━━━━━━━━━━━
+💰 *Prix live :* $4508.02
+📍 EMA Stack : $4508.04 / $4504.25 / $4504.35
+   → Prix EN-DESSOUS EMA1 ✅
+📊 Range : $4507.99 - $4508.19 ($0.20)
+⚡ Supertrend : [données TradingView limitées]
+📐 Fibonacci : [données TradingView limitées]
+━━━━━━━━━━━━━━━━━━━━━━━━━
+🔴/🟢 *Verdict GOM KOLA : [table non disponible]*
+   Score: [indisponible]
+   RSI: [indisponible]
+━━━━━━━━━━━━━━━━━━━━━━━━━
+🔴/🟢 *Biais session :* SELL 50%
+   ✅ Valide | Expire dans 5.5h
+━━━━━━━━━━━━━━━━━━━━━━━━━
+📦 *Ordre EA :* ✅ Actif BUY
+   Entrée: $2650.0 | SL: $2645.0 | TP: $2660.0
+   Confiance: 75%
+━━━━━━━━━━━━━━━━━━━━━━━━━
+🔴/🟢 *Rapport TradingAgents :* NONE 0%
+   [Pas de TA actif]
+━━━━━━━━━━━━━━━━━━━━━━━━━
+🔬 *Analyse croisée*
+   Signaux en jeu: EA Ordre: BUY, Biais: SELL
+   ⚠️ CONFLIT DÉTECTÉ: BUY (EA) vs SELL (Biais)
+   Prix actuel $4508.02 >> Entrée $2650.0
+   → Position potentielle déjà très ITM
+
+🎯 *Décision scalping*
+   🟡 ATTENDRE clarification
+   Raison: Conflit biais/ordre, pas de confirmation TA
+   Action recommandée: Monitorer les niveaux
+━━━━━━━━━━━━━━━━━━━━━━━━━
+_Prochain check dans 20 min_

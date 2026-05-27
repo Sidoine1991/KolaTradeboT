@@ -1,0 +1,169 @@
+═══════════════════════════════════════════════════════════════════════════════
+                    UNIFIED DASHBOARD SYSTEM - FINAL SUMMARY
+═══════════════════════════════════════════════════════════════════════════════
+
+TWO-DASHBOARD ARCHITECTURE:
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ LEFT DASHBOARD (GOM_SIDO)          │  RIGHT DASHBOARD (Comprehensive)      │
+│ ================================   │  ===================================   │
+│ Position: Bottom-Left (10px, 25px) │  Position: Bottom-Right               │
+│                                    │                                       │
+│ Row 1: TITLE                       │  Title: ⚙️ DÉCISION FINALE            │
+│ ┌──────────────────────────────┐   │                                       │
+│ │ GOM_SIDO UNIFIED             │   │  Large Verdict (14pt):                │
+│ │ Score: 0.825                 │   │  🚀 PERFECT BUY                       │
+│ └──────────────────────────────┘   │                                       │
+│                                    │  Score: 0.825 | Align: 3/3            │
+│ Row 2: TIMEFRAME BREAKDOWN         │                                       │
+│ ┌──────┬──────┬──────┬──────┬──────┤  M1:↑ M5:↑ H1:↑                       │
+│ │ M1   │ M5   │ H1   │ IA % │ VERD │                                       │
+│ ├──────┼──────┼──────┼──────┼──────┤  IA: BUY (87%)                        │
+│ │ 🟢   │ 🟢   │ 🟢   │ 87%  │ PERF │                                       │
+│ │ BUY  │ BUY  │ BUY  │      │ BUY  │  RSI:65.2 ATR:12.5                    │
+│ └──────┴──────┴──────┴──────┴──────┘                                       │
+│                                    │  OB✓ OTE:BUY                          │
+│ Quick Reference                    │                                       │
+│ - Green = Bullish                  │  Positions: 2 | Price: 10346.82       │
+│ - Red = Bearish                    │                                       │
+│ - Useful for quick scanning        │  📊 80% Confluence + 20% IA            │
+│                                    │                                       │
+│ Perfect for: Speed reading         │  Perfect for: Detailed analysis        │
+└────────────────────────────────────┴───────────────────────────────────────┘
+
+═══════════════════════════════════════════════════════════════════════════════
+
+VERDICT SYSTEM - FIVE LEVELS:
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ SCORE RANGE         VERDICT              ICON    COLOR              ACTION  │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ |Score| < 0.35      ⏸ WAIT/HOLD          ⏸     Gray (0x424242)    HOLD   │
+│ 0.35 ≤ Score < 0.65 📈 GOOD BUY           📈     Green (0x2E7D32)  ENTER  │
+│ Score ≥ 0.65        🚀 PERFECT BUY        🚀     Dark Green(0x1B5E20) ENTER│
+│                                                                             │
+│ -0.65 ≤ Score < -0.35 📉 GOOD SELL        📉     Red (0xC62828)    ENTER  │
+│ Score ≤ -0.65       🔻 PERFECT SELL       🔻     Dark Red(0xB71C1C) ENTER │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+═══════════════════════════════════════════════════════════════════════════════
+
+FINAL SCORE CALCULATION:
+
+Formula:
+───────
+Final Score = (Confluence_Score - 0.5) × 2.0 × 0.80 + IA_Score × 0.20
+
+Components:
+───────────
+1. CONFLUENCE SCORE (80% weight)
+   = (M1_bullish + M5_bullish + H1_bullish) / 3
+   Range: 0.0 (all bearish) to 1.0 (all bullish)
+   Then scaled: (X - 0.5) × 2.0 → Range: -1.0 to +1.0
+
+2. IA SCORE (20% weight)
+   = ±AI_Confidence(-1.0 to +1.0)
+   BUY:  +0.87 (if confidence 87%)
+   SELL: -0.87 (if confidence 87%)
+   HOLD:  0.0 (no decision)
+
+Result: Blended decision from timeframe confluence + AI analysis
+
+Example:
+────────
+M1↑ M5↑ H1↑ + IA BUY 87%
+Confluence: (1+1+1)/3 = 1.0 → (1.0-0.5)×2.0 = 1.0
+IA: +0.87
+Final: 1.0 × 0.80 + 0.87 × 0.20 = 0.80 + 0.174 = 0.974 → PERFECT BUY ✅
+
+═══════════════════════════════════════════════════════════════════════════════
+
+COMPLETE ANALYSIS COMPONENTS:
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ ELEMENT              SOURCE              WEIGHT    PURPOSE                 │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ M1 Direction         EMA 9/21 M1         26.7%     Short-term trend       │
+│ M5 Direction         EMA 9/21 M5         26.7%     Medium-term trend      │
+│ H1 Direction         EMA 9/21 H1         26.7%     Long-term trend        │
+│ IA Decision          AI Server           20%       Machine learning       │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ RSI                  14-period RSI       Info      Overbought/Oversold    │
+│ ATR                  14-period ATR       Info      Volatility for SL/TP   │
+│ OB+CHOCH             Pattern detect      Info      Entry confirmation     │
+│ OTE Zone             Fibonacci 61.8-78.6% Info      Entry trigger zone    │
+│ Positions            Portfolio tracking  Info      Current exposure       │
+│ Price                Market data         Info      Real-time levels       │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+═══════════════════════════════════════════════════════════════════════════════
+
+TRADING WORKFLOW:
+
+1. CHECK VERDICT
+   └─ Look at right dashboard verdict (large, clear font)
+
+2. VERIFY COMPONENTS
+   └─ M1/M5/H1 alignment?
+   └─ IA agreement?
+   └─ RSI and ATR confirmation?
+
+3. CONFIRM SETUP
+   └─ Is OB+CHOCH detected?
+   └─ Is price in OTE zone?
+
+4. EXECUTE TRADE
+   └─ If all confirmations align: ENTER
+   └─ SL: Below OB + 20 pips
+   └─ TP1: ATR × 0.5
+   └─ TP2: ATR × 1.0
+   └─ TP3: ATR × 1.5
+
+5. MANAGE POSITION
+   └─ Monitor until SL/TP hit
+   └─ Watch for HOLD signal (close immediately)
+
+═══════════════════════════════════════════════════════════════════════════════
+
+KEY FEATURES:
+
+✅ Real-time Updates
+   - Dashboard refreshes every tick (1000s per second)
+   - All indicators live data
+   - Verdict changes instantly when conditions change
+
+✅ Complete Analysis
+   - Timeframe confluence (M1/M5/H1)
+   - AI server decision (20% weight)
+   - Technical confirmation (RSI/ATR)
+   - Setup validation (OB+CHOCH+OTE)
+   - Portfolio monitoring
+
+✅ Decision Clarity
+   - 5-level verdict system (Wait → Good → Perfect)
+   - Color-coded (Gray/Green/Red with intensity)
+   - Large, readable fonts
+   - Icons for quick recognition
+
+✅ Risk Management
+   - SL below OB + 20 pips
+   - Multi-TP system (TP1/TP2/TP3)
+   - ATR-scaled stops and targets
+   - Position limiting (max 5 open)
+
+═══════════════════════════════════════════════════════════════════════════════
+
+FILES & DOCUMENTATION:
+
+📄 SMC_Universal.mq5                   (26,016 lines - Main robot)
+📄 OTE_ENTRY_SYSTEM.md                 (Complete entry system guide)
+📄 COMPREHENSIVE_VERDICT_DASHBOARD.md  (Detailed dashboard reference)
+📄 DASHBOARD_SUMMARY.txt               (This file)
+
+═══════════════════════════════════════════════════════════════════════════════
+
+STATUS: ✅ COMPLETE & READY FOR DEPLOYMENT
+
+Generated: 2026-05-17
+Robot: SMC_Universal.mq5
+Version: Final Production Ready

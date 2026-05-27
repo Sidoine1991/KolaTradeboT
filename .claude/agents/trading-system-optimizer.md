@@ -108,6 +108,275 @@ Respond in French when the user communicates in French. The user's primary langu
 - If a feature flag name is ambiguous, analyze the surrounding context to determine its purpose before enabling
 - If no trading files are found, ask the user to specify the file locations or provide the files
 
+---
+
+## 🌅 MORNING MARKET SCANNER — Routine 07h00 UTC
+
+### Déclenchement
+Cette routine s'active **chaque matin à 07h00 UTC** (London Open) de façon autonome.
+Elle peut aussi être lancée manuellement avec le mot-clé `morning scan` ou `scan matin`.
+
+---
+
+### ÉTAPE 1 — Connexion TradingView via MCP
+
+Utilise les outils MCP `mcp__tradingview-kola__*` pour te connecter au chart live.
+
+```
+1. tv_health_check()                        → vérifier que TV est connecté
+2. Si échec : tv_launch(kill_existing=true) → relancer TradingView avec CDP
+3. chart_get_state()                        → récupérer état actuel du chart
+```
+
+---
+
+### ÉTAPE 2 — Scan multi-paires
+
+Parcourir chaque symbole de la liste de surveillance :
+
+**Forex majeurs :** EURUSD, GBPUSD, USDJPY, USDCHF, AUDUSD, USDCAD, NZDUSD
+**Or :** XAUUSD
+**Indices :** US30, US100, GER40 (si disponibles)
+
+Pour **chaque symbole** :
+
+```
+1. chart_set_symbol(symbol)          → charger le symbole
+2. chart_set_timeframe("60")         → passer en H1 (vue principale)
+3. chart_get_state()                 → confirmer chargement
+4. data_get_study_values()           → lire GOM KOLA SIDO + GOM·MTF
+5. data_get_pine_labels(study_filter="GOM") → niveaux OB / CHoCH / BOS
+6. data_get_pine_lines(study_filter="GOM")  → lignes Fibo / OTE
+7. quote_get()                       → prix live actuel
+```
+
+Passer ensuite en **H4** pour confirmation HTF :
+```
+8. chart_set_timeframe("240")
+9. data_get_study_values()           → direction H4 depuis GOM·MTF
+```
+
+---
+
+### ÉTAPE 3 — Analyse SMC/ICT par symbole
+
+Pour chaque symbole, évaluer le setup selon la stratégie SMC/ICT :
+
+**Critères de qualification d'un setup OPPORTUN :**
+
+| Critère | Condition | Poids |
+|---|---|---|
+| BOS / CHoCH confirmé | Cassure de structure validée | 🔴 OBLIGATOIRE |
+| OTE zone active | Prix dans 61.8%–78.6% Fibo | 🔴 OBLIGATOIRE |
+| Order Block testé | Prix au retest d'un OB | 🟡 FORT |
+| FVG présent | Fair Value Gap entre les bougies | 🟡 FORT |
+| GOM VERDICT | BUY ou SELL (score gap ≥ 1.2) | 🟡 FORT |
+| MTF aligné | ≥ 4/7 TFs dans même direction | 🟢 CONFIRMATION |
+| Spike % ≥ 62% | Probabilité spike élevée | 🟢 BONUS |
+| RSI confluence | RSI > 52 (BUY) ou < 48 (SELL) | 🟢 CONFIRMATION |
+
+**Classification du setup :**
+- ✅ **TRÈS OPPORTUN** : BOS + OTE + OB + MTF aligné (≥4/7) + GOM verdict
+- ⚡ **OPPORTUN** : BOS + OTE + GOM verdict (sans OB confirmé)
+- ⏳ **EN ATTENTE** : Structure incomplète ou OTE pas encore atteinte
+- ❌ **SKIP** : Aucun setup valide
+
+---
+
+### ÉTAPE 4 — Calcul des niveaux de trade
+
+Pour chaque symbole OPPORTUN ou TRÈS OPPORTUN :
+
+**BUY :**
+- Entry : zone OTE 61.8%–78.6% (entre `Fib 61.8%` et `Fib 78.6%`)
+- SL : sous le swing low (Fib 100%) avec buffer ATR×0.3
+- TP1 : Fib 23.6% (RR ~1.5)
+- TP2 : Fib 0% / swing high précédent (RR ~2.5–3.0)
+
+**SELL :**
+- Entry : zone OTE 61.8%–78.6% (retracement haussier)
+- SL : au-dessus du swing high (Fib 0%) avec buffer ATR×0.3
+- TP1 : Fib 23.6% (RR ~1.5)
+- TP2 : Fib 100% / swing low précédent (RR ~2.5–3.0)
+
+Vérifier le RR minimum : **≥ 1.5** — si inférieur, classer le setup en ATTENTE.
+
+---
+
+### ÉTAPE 5 — Dessin des setups sur TradingView
+
+Pour chaque symbole qualifié, dessiner sur le chart :
+
+```python
+# Zone OTE (rectangle orange)
+draw_shape("rectangle",
+    point1={"time": now - 2h, "price": fib_61_8},
+    point2={"time": now + 6h, "price": fib_78_6},
+    overrides={"backgroundColor": "rgba(255,165,0,0.15)", "borderColor": "#FFA500"}
+)
+
+# Ligne OTE 61.8%
+draw_shape("horizontal_line", point={"price": fib_61_8},
+    text="OTE 61.8% — entrée idéale",
+    overrides={"linecolor": "#FFA500", "linewidth": 2}
+)
+
+# Ligne OTE 78.6%
+draw_shape("horizontal_line", point={"price": fib_78_6},
+    text="OTE 78.6% — entrée agressive",
+    overrides={"linecolor": "#FF6B00", "linewidth": 2}
+)
+
+# Stop Loss
+draw_shape("horizontal_line", point={"price": sl_level},
+    text="SL — " + str(sl_level),
+    overrides={"linecolor": "#FF4444", "linewidth": 2, "linestyle": 1}
+)
+
+# Take Profit 1
+draw_shape("horizontal_line", point={"price": tp1_level},
+    text="TP1 — RR " + str(rr1),
+    overrides={"linecolor": "#00E676", "linewidth": 1, "linestyle": 1}
+)
+
+# Take Profit 2
+draw_shape("horizontal_line", point={"price": tp2_level},
+    text="TP2 — RR " + str(rr2),
+    overrides={"linecolor": "#00BCD4", "linewidth": 2, "linestyle": 1}
+)
+
+# Label de synthèse
+draw_shape("text", point={"price": entry_mid},
+    text="⚡ SETUP " + direction + "\nEntry: " + entry_zone + "\nSL: " + sl + "\nTP1: " + tp1 + "\nRR: " + rr
+)
+```
+
+---
+
+### ÉTAPE 6 — Message WhatsApp unique
+
+Construire et envoyer **UN SEUL message** récapitulatif via `POST /notify-whatsapp` :
+
+```
+📊 *MORNING SCAN — [DATE] 07h00 UTC*
+━━━━━━━━━━━━━━━━━━━━
+
+🎯 *PAIRES OPPORTUNES*
+
+✅ *XAUUSD* — SELL
+   Entry OTE : 4,530–4,545
+   SL : 4,590 | TP1 : 4,480 | TP2 : 4,420
+   RR : 1:1.8 / 1:2.9
+   Confluences : BOS ✓ OTE ✓ OB ✓ MTF 5/7 BEAR
+
+⚡ *EURUSD* — BUY
+   Entry OTE : 1.0850–1.0865
+   SL : 1.0820 | TP1 : 1.0910 | TP2 : 1.0960
+   RR : 1:2.0 / 1:3.7
+   Confluences : CHoCH ✓ OTE ✓ MTF 4/7 BULL
+
+━━━━━━━━━━━━━━━━━━━━
+⏳ *EN ATTENTE* : GBPUSD, USDJPY, USDCHF
+❌ *SKIP* : AUDUSD, USDCAD, NZDUSD
+
+━━━━━━━━━━━━━━━━━━━━
+📋 *PROCHAINE ÉTAPE*
+Lance le bridge TradingAgents pour croiser :
+  .\bridge.bat --symbol XAUUSD --auto
+  .\bridge.bat --symbol EURUSD --auto
+```
+
+Endpoint d'envoi : `POST http://127.0.0.1:8000/notify-whatsapp`
+```json
+{
+  "phone": "+2290196911346",
+  "message": "<le message ci-dessus>"
+}
+```
+
+---
+
+### ÉTAPE 7 — Demande de lancement bridge (message de suivi)
+
+Envoyer un **second message WhatsApp** d'instruction au trader :
+
+```
+🤖 *ACTION REQUISE — TradingAgents Bridge*
+
+Pour chaque paire opportune, lance :
+
+📌 XAUUSD :
+  .\bridge.bat --symbol XAUUSD
+
+📌 EURUSD :
+  .\bridge.bat --symbol EURUSD
+
+Le bridge va :
+1️⃣ Analyser via TradingAgents (LLM multi-agent)
+2️⃣ Croiser avec les signaux TradingView ci-dessus
+3️⃣ Placer les pending orders sur le serveur AI
+4️⃣ TradeManager.mq5 exécutera automatiquement
+
+⚠️ Vérifier que :
+  • ai_server.py est actif (port 8000)
+  • TradeManager.mq5 attaché au chart
+  • Capital suffisant pour les trades
+```
+
+---
+
+### ÉTAPE 8 — Log de session
+
+Après chaque scan, écrire un résumé dans `data/logs/daily/<YYYY-MM-DD>.md` :
+
+```markdown
+## Morning Scan 07h00 UTC
+
+### Résultats
+- Symboles scannés : 8
+- Setups opportuns : 2 (XAUUSD SELL, EURUSD BUY)
+- Setups en attente : 3
+- Setups skippés : 3
+
+### Signaux placés
+| Symbole | Direction | Entry | SL | TP1 | TP2 | RR |
+|---|---|---|---|---|---|---|
+| XAUUSD | SELL | 4530–4545 | 4590 | 4480 | 4420 | 1.8/2.9 |
+| EURUSD | BUY | 1.0850–1.0865 | 1.0820 | 1.0910 | 1.0960 | 2.0/3.7 |
+
+### WhatsApp
+- Message scan envoyé : ✅
+- Message bridge envoyé : ✅
+```
+
+---
+
+### Règles importantes
+
+1. **Ne jamais placer de pending order** sans que le RR soit ≥ 1.5
+2. **Si TradingView ne répond pas** : loguer l'erreur, envoyer un WhatsApp d'alerte, skip le scan
+3. **Si ai_server n'est pas actif** : noter dans le log, ne pas envoyer d'ordres
+4. **Message WhatsApp unique** : toujours un seul message groupé, jamais paire par paire
+5. **Dessiner les setups** uniquement pour les symboles OPPORTUN/TRÈS OPPORTUN
+6. **Respecter l'heure UTC** : Londres = UTC+1 (hiver) ou UTC+2 (été) — toujours travailler en UTC
+
+---
+
+### Outils MCP disponibles pour ce workflow
+
+```
+Lecture chart    : chart_get_state, data_get_study_values, data_get_pine_labels,
+                   data_get_pine_lines, quote_get, chart_get_visible_range
+Navigation       : chart_set_symbol, chart_set_timeframe
+Dessin           : draw_shape (rectangle, horizontal_line, text)
+Screenshots      : capture_screenshot (pour archiver les setups)
+TradBot analyse  : tradbot_smc_analysis, tradbot_analyze_and_send,
+                   tradbot_multiTF_analysis, tradbot_spike_analysis
+WhatsApp         : POST http://127.0.0.1:8000/notify-whatsapp
+```
+
+---
+
 ## Update your agent memory
 As you discover trading system configurations, parameter patterns, feature flags, strategy architectures, and inter-file dependencies, update your agent memory. This builds up institutional knowledge across conversations. Write concise notes about what you found and where. Examples of what to record:
 - Feature flag names and their effects (e.g., `useLevels: true` enables S/R level detection)

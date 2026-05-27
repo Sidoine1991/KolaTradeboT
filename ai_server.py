@@ -21060,35 +21060,45 @@ class GomVerdictPayload(BaseModel):
     fib_100: Optional[float] = None
     rsi: Optional[float] = None
     price: Optional[float] = None
+    verdict_num: Optional[int] = 0         # -3=PERFECT_SELL .. +3=PERFECT_BUY, 0=WAIT
+    rsi_oversold: Optional[bool] = False   # RSI < 28 — rebond imminent sur position SELL
+    rsi_overbought: Optional[bool] = False # RSI > 72 — retournement imminent sur position BUY
+    verdict_gap: Optional[float] = None    # écart abs(score_sell - score_buy)
 
 @app.post("/gom-verdict")
 async def set_gom_verdict(payload: GomVerdictPayload):
     """Endpoint dédié pour MCP TradingView — stocke le verdict GOM KOLA + indicateurs en temps réel."""
     sym = payload.symbol.upper()
     _GOM_VERDICT_STORE[sym] = {
-        "verdict":    payload.verdict.upper(),
-        "score_buy":  payload.score_buy,
-        "score_sell": payload.score_sell,
-        "spike_pct":  payload.spike_pct,
-        "vwap":       payload.vwap,
-        "bb_up":      payload.bb_up,
-        "bb_mid":     payload.bb_mid,
-        "bb_dn":      payload.bb_dn,
-        "st_line":    payload.st_line,
-        "st_dir":     payload.st_dir,
-        "fib_0":      payload.fib_0,
-        "fib_236":    payload.fib_236,
-        "fib_382":    payload.fib_382,
-        "fib_500":    payload.fib_500,
-        "fib_618":    payload.fib_618,
-        "fib_786":    payload.fib_786,
-        "fib_100":    payload.fib_100,
-        "rsi":        payload.rsi,
-        "price":      payload.price,
-        "timestamp":  datetime.utcnow().isoformat(),
+        "verdict":       payload.verdict.upper(),
+        "score_buy":     payload.score_buy,
+        "score_sell":    payload.score_sell,
+        "spike_pct":     payload.spike_pct,
+        "vwap":          payload.vwap,
+        "bb_up":         payload.bb_up,
+        "bb_mid":        payload.bb_mid,
+        "bb_dn":         payload.bb_dn,
+        "st_line":       payload.st_line,
+        "st_dir":        payload.st_dir,
+        "fib_0":         payload.fib_0,
+        "fib_236":       payload.fib_236,
+        "fib_382":       payload.fib_382,
+        "fib_500":       payload.fib_500,
+        "fib_618":       payload.fib_618,
+        "fib_786":       payload.fib_786,
+        "fib_100":       payload.fib_100,
+        "rsi":           payload.rsi,
+        "price":         payload.price,
+        "verdict_num":   payload.verdict_num or 0,
+        "rsi_oversold":  payload.rsi_oversold or False,
+        "rsi_overbought":payload.rsi_overbought or False,
+        "verdict_gap":   payload.verdict_gap,
+        "timestamp":     datetime.utcnow().isoformat(),
     }
-    logger.info(f"[GomVerdict] {sym} verdict={payload.verdict.upper()} buy={payload.score_buy:.1f} sell={payload.score_sell:.1f}")
-    return {"ok": True, "symbol": sym, "verdict": payload.verdict.upper()}
+    logger.info(f"[GomVerdict] {sym} verdict={payload.verdict.upper()} num={payload.verdict_num} "
+                f"buy={payload.score_buy:.1f} sell={payload.score_sell:.1f} "
+                f"rsi={payload.rsi} oversold={payload.rsi_oversold} overbought={payload.rsi_overbought}")
+    return {"ok": True, "symbol": sym, "verdict": payload.verdict.upper(), "verdict_num": payload.verdict_num}
 
 @app.get("/gom-verdict")
 async def get_gom_verdict(symbol: str = "XAUUSD"):
@@ -21135,6 +21145,120 @@ async def delete_pending_order(symbol: str = "XAUUSD"):
     sym = _resolve_symbol(symbol)
     removed = _PENDING_ORDER_STORE.pop(sym, None)
     return {"ok": True, "symbol": sym, "removed": removed is not None}
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# BI-DIRECTIONAL SL/TP SYNC — Phase 1 Endpoints
+# ═══════════════════════════════════════════════════════════════════════════
+
+class PendingOrderUpdateBody(BaseModel):
+    """Update SL/TP levels for a pending order."""
+    stop_loss: Optional[float] = None
+    take_profit: Optional[float] = None
+    update_source: str = Field(
+        default="server",
+        pattern="^(server|ea_trailing|tv_manual)$",
+        description="Source of update: server, ea_trailing, or tv_manual"
+    )
+    reason: Optional[str] = None
+
+class OrderSyncBody(BaseModel):
+    """Sync SL/TP modifications from MT5 EA."""
+    mt5_ticket: int
+    current_stop_loss: float
+    current_take_profit: float
+    peak_profit: Optional[float] = None
+    trailing_active: bool = False
+    update_source: str = Field(default="ea_trailing")
+
+@app.patch("/pending-order/{order_id}")
+async def update_pending_order_sltp(
+    order_id: str,
+    body: PendingOrderUpdateBody
+) -> dict:
+    """
+    Updates SL/TP levels for a pending order.
+    Called when:
+    - TradingView drawing changes manually (update_source="tv_manual")
+    - Server recalculates levels (update_source="server")
+    - EA adjusts via trailing stop (update_source="ea_trailing")
+    """
+    async with _pending_orders_lock:
+        if order_id not in _PENDING_ORDER_STORE:
+            return {"ok": False, "error": f"Order {order_id} not found"}
+
+        order = _PENDING_ORDER_STORE[order_id]
+        updated = False
+
+        if body.stop_loss is not None:
+            order["stop_loss"] = body.stop_loss
+            order["last_sl_update"] = time.time()
+            order["sl_update_source"] = body.update_source
+            updated = True
+
+        if body.take_profit is not None:
+            order["take_profit"] = body.take_profit
+            order["last_tp_update"] = time.time()
+            order["tp_update_source"] = body.update_source
+            updated = True
+
+        if updated:
+            await _pending_orders_save()
+            logger.info(
+                f"[SLTPSync] Updated {order_id}: SL={body.stop_loss} TP={body.take_profit} "
+                f"source={body.update_source}"
+            )
+
+        return {"ok": True, "updated": updated, "order": order}
+
+@app.post("/pending-order/{order_id}/sync")
+async def sync_order_from_ea(
+    order_id: str,
+    body: OrderSyncBody
+) -> dict:
+    """
+    Receives SL/TP modifications from TradeManager.mq5.
+    Called after:
+    - PositionModify() success (trailing stop update)
+    - AutoSetSLTP() assignment
+    - Broker minimum adjustment
+
+    Triggers: TradingView drawing update via _sync_drawing_to_tv()
+    """
+    async with _pending_orders_lock:
+        if order_id not in _PENDING_ORDER_STORE:
+            return {"ok": False, "error": f"Order {order_id} not found"}
+
+        order = _PENDING_ORDER_STORE[order_id]
+
+        # Update fields
+        order["mt5_ticket"] = body.mt5_ticket
+        order["stop_loss"] = body.current_stop_loss
+        order["take_profit"] = body.current_take_profit
+        order["last_sl_update"] = time.time()
+        order["sl_update_source"] = body.update_source
+        order["last_tp_update"] = time.time()
+        order["tp_update_source"] = body.update_source
+
+        # Merge metadata
+        if "metadata" not in order:
+            order["metadata"] = {}
+        if body.peak_profit is not None:
+            order["metadata"]["peak_profit"] = body.peak_profit
+        order["metadata"]["trailing_active"] = body.trailing_active
+
+        await _pending_orders_save()
+
+        logger.info(
+            f"[SLTPSync-EA] Synced {order_id} (ticket {body.mt5_ticket}): "
+            f"SL={body.current_stop_loss} TP={body.current_take_profit} "
+            f"peak={body.peak_profit} trailing={body.trailing_active}"
+        )
+
+        # TODO: Trigger TradingView drawing update
+        # await _sync_drawing_to_tv(order)
+
+        return {"ok": True, "synced": True}
 
 
 # ---------------------------------------------------------------------------

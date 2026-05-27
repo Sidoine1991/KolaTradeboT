@@ -51,7 +51,9 @@ input int    MCPMagicNumber         = 20260526; // Magic number ordres MCP
 input double MCPEntryTolerancePct   = 0.05;  // Tolérance entrée limit (% du prix)
 input bool   MCPExecuteAtMarket     = true;   // Exécuter au marché dès signal ready (recommandé)
 input bool   MCPBypassConsolidation = true;   // Ne pas bloquer MCP sur filtre consolidation
-input bool   MCPDuplicateOnce       = true;   // Dupliquer 1x la position après 1ère exécution
+input bool   MCPDuplicateOnce       = true;   // Dupliquer 1x la position après profit minimum
+input double MCPDuplicateMinProfit  = 2.0;    // Profit minimum (USD) avant duplication
+input bool   DuplicateManualOrders  = true;   // Dupliquer aussi les ordres manuels (magic=0)
 input string InpPollSymbols         = "Boom 600 Index,Boom 1000 Index,Crash 600 Index,Crash 1000 Index,XAUUSD";
 
 input group "=== NOTIFICATIONS WHATSAPP ==="
@@ -69,11 +71,42 @@ input int    ADX_Period             = 14;     // Période ADX
 input double ADX_MinTrend           = 20.0;  // ADX < seuil → consolidation (bloquer)
 input double ConsolidationATRRatio  = 0.65;  // ATR < ATR_SMA * ratio → consolidation
 
+input group "=== GOM SCALP LOOP ==="
+input bool   UseGOMScalp           = true;   // Coupe auto sur signal GOM opposé
+input int    GOMPollIntervalSec    = 5;      // Intervalle poll /gom-verdict (sec)
+input bool   GOMReEntryEnabled     = true;   // Re-entrer quand GOM réaligne
+input int    GOMReEntryCooldownSec = 30;     // Cooldown entre fermeture et ré-entrée
+input double GOMReEntryLot         = 0.01;   // Lot pour ré-entrée GOM
+input int    GOMReEntryMaxCount    = 3;      // Max ré-entrées par signal
+
 CTrade        trade;
 CPositionInfo posInfo;
 
 bool     g_globalCloseDone = false;
 datetime g_globalCloseTime = 0;
+
+// GOM Scalp Loop
+datetime g_lastGOMPoll       = 0;
+string   g_lastGOMVerdict    = "";
+int      g_lastGOMRSI        = 50;
+bool     g_gomRSIOversold    = false;
+bool     g_gomRSIOverbought  = false;
+int      g_lastGOMVerdictNum = 0;
+
+struct GOMReEntryState
+{
+   bool     active;
+   string   symbol;
+   int      direction;    // 1=BUY -1=SELL
+   double   entryPrice;
+   double   stopLoss;
+   double   takeProfit;
+   double   lot;
+   datetime closedAt;
+   int      reEntryCount;
+};
+GOMReEntryState g_gomReEntry[];
+int             g_gomReEntryCount = 0;
 
 // --- Signaux MCP TradingView ---
 struct MCPSignal
@@ -93,6 +126,8 @@ struct MCPSignal
    bool     entryNotifSent; // Alerte "prix touche entrée" déjà envoyée
    bool     tp1NotifSent;
    bool     slNotifSent;
+   string   orderId;        // UUID du pending order depuis AI server
+   int      failCount;      // Nb tentatives echouees (abandon apres 3)
 };
 
 MCPSignal g_mcpSignals[];
@@ -140,6 +175,10 @@ struct SymbolState
 SymbolState g_states[];
 int         g_stateCount = 0;
 
+// Tickets des positions manuelles déjà dupliquées (évite double-duplication)
+ulong g_manualDupTickets[];
+int   g_manualDupCount = 0;
+
 //+------------------------------------------------------------------+
 int OnInit()
 {
@@ -175,6 +214,9 @@ void OnTimer()
    if(UseReEntry)            CheckAllReEntries();
    if(UseMCPSignals)         PollMCPSignals();
    if(UseMCPSignals)         MonitorMCPPositions();
+   if(MCPDuplicateOnce)      MonitorManualDuplicates();
+   if(UseGOMScalp)           PollGOMScalpVerdict();
+   if(UseGOMScalp)           CheckGOMReEntry();
 }
 
 void OnTick()
@@ -189,6 +231,9 @@ void OnTick()
    if(UseReEntry)            CheckAllReEntries();
    if(UseMCPSignals)         PollMCPSignals();
    if(UseMCPSignals)         MonitorMCPPositions();
+   if(MCPDuplicateOnce)      MonitorManualDuplicates();
+   if(UseGOMScalp)           PollGOMScalpVerdict();
+   if(UseGOMScalp)           CheckGOMReEntry();
 }
 
 //+------------------------------------------------------------------+
@@ -247,6 +292,57 @@ void ScanAllPositions()
    }
 }
 
+//+------------------------------------------------------------------+
+//| Sync SL/TP vers AI server après modification position              |
+//+------------------------------------------------------------------+
+bool SyncSLTPToServer(ulong ticket, double newSL, double newTP, string source = "ea_auto")
+{
+   if(!UseMCPSignals) return true;
+
+   string orderId = "";
+   for(int i = 0; i < g_mcpCount; i++)
+   {
+      if(g_mcpSignals[i].ticket == ticket)
+      {
+         orderId = g_mcpSignals[i].orderId;
+         break;
+      }
+   }
+
+   if(StringLen(orderId) == 0)
+   {
+      Print("[TradeManager] ⚠️ SyncSLTPToServer: order_id not found for ticket ", ticket);
+      return false;
+   }
+
+   string url = AIServerURL + "/pending-order/" + orderId + "/sync";
+   string headers = "Content-Type: application/json\r\n";
+
+   // Construire JSON body
+   string body = StringFormat(
+      "{\"mt5_ticket\":%d,\"current_stop_loss\":%.2f,\"current_take_profit\":%.2f,\"update_source\":\"%s\"}",
+      (int)ticket, newSL, newTP, source
+   );
+
+   char post[];
+   char result[];
+   string respH;
+   StringToCharArray(body, post, 0, StringLen(body));
+   ArrayResize(post, StringLen(body));
+
+   int res = WebRequest("POST", url, headers, 10000, post, result, respH);
+   if(res == 200)
+   {
+      Print("[TradeManager] ✅ Synced SL/TP to server: orderId=", orderId, " SL=", DoubleToString(newSL, 5), " TP=", DoubleToString(newTP, 5));
+      return true;
+   }
+   else
+   {
+      Print("[TradeManager] ❌ Failed to sync SL/TP: HTTP ", res, " orderId=", orderId);
+      return false;
+   }
+}
+
 void AutoSetSLTP(int idx)
 {
    string sym = g_states[idx].symbol;
@@ -275,6 +371,7 @@ void AutoSetSLTP(int idx)
          g_states[idx].tpDist        = tpPts;
          g_states[idx].forceTrailing = false;
          Print(StringFormat("[TradeManager] ✅ AUTO SL/TP %s SL=%.5f TP=%.5f", sym, newSL, newTP));
+         SyncSLTPToServer(posInfo.Ticket(), newSL, newTP, "ea_auto");
       }
       else
       {
@@ -380,9 +477,12 @@ void ManageAllTrailing()
       if(!better) continue;
 
       if(trade.PositionModify(posInfo.Ticket(), newSL, posInfo.TakeProfit()))
+      {
          Print(StringFormat("[TradeManager] 📈 %s Trailing SL %.5f→%.5f (profit=$%.2f peak=$%.2f%s)",
                sym, curSL, newSL, curProfit, g_states[idx].peakProfit,
                g_states[idx].forceTrailing ? " FORCÉ" : ""));
+         SyncSLTPToServer(posInfo.Ticket(), newSL, posInfo.TakeProfit(), "ea_trailing");
+      }
    }
 }
 
@@ -836,6 +936,8 @@ void IngestPendingOrderForSymbol(const string sym, const string &body)
    g_mcpSignals[idx].entryNotifSent  = false;
    g_mcpSignals[idx].tp1NotifSent    = false;
    g_mcpSignals[idx].slNotifSent     = false;
+   g_mcpSignals[idx].orderId         = JsonGetString(orderBody, "order_id");
+   g_mcpSignals[idx].failCount       = 0;
 
    Print(StringFormat("[TradeManager] 📡 Pending ready: %s %s entry=%.5f SL=%.5f TP=%.5f lot=%.2f market=%s",
          action, sym, entry, sl, tp, lot, (atMarket ? "OUI" : "NON")));
@@ -932,6 +1034,13 @@ bool DuplicateMCPPosition(int idx, CTrade &mcpTrade)
 void TryExecuteMCPSignal(int idx)
 {
    if(!g_mcpSignals[idx].active || g_mcpSignals[idx].executed) return;
+   if(g_mcpSignals[idx].failCount >= 3)
+   {
+      Print(StringFormat("[TradeManager] Signal %s abandonne apres %d echecs",
+            g_mcpSignals[idx].symbol, g_mcpSignals[idx].failCount));
+      g_mcpSignals[idx].active = false;
+      return;
+   }
 
    string sym  = g_mcpSignals[idx].symbol;
    int    dir  = g_mcpSignals[idx].direction;
@@ -952,6 +1061,22 @@ void TryExecuteMCPSignal(int idx)
 
    bool execNow = g_mcpSignals[idx].marketExec || MCPExecuteAtMarket;
    if(!execNow && MathAbs(refPx - ep) > tol) return;  // limit: attendre le prix
+
+   // Sanity check: SL/TP doivent etre du bon cote du prix d'entree
+   double slChk = g_mcpSignals[idx].stopLoss;
+   double tpChk = g_mcpSignals[idx].takeProfit1;
+   if(slChk > 0 && tpChk > 0)
+   {
+      bool slOk = (dir == 1) ? (slChk < refPx) : (slChk > refPx);
+      bool tpOk = (dir == 1) ? (tpChk > refPx) : (tpChk < refPx);
+      if(!slOk || !tpOk)
+      {
+         Print(StringFormat("[TradeManager] INVALID SL/TP for %s %s: price=%.5f SL=%.5f TP=%.5f — signal supprime",
+               (dir==1?"BUY":"SELL"), sym, refPx, slChk, tpChk));
+         g_mcpSignals[idx].active = false;
+         return;
+      }
+   }
 
    // Filtre consolidation (désactivable pour signaux bridge)
    int sIdx = FindState(sym);
@@ -1022,7 +1147,7 @@ void TryExecuteMCPSignal(int idx)
       }
 
       ScanAllPositions();
-      DuplicateMCPPosition(idx, mcpTrade);
+      // Duplication différée — déclenchée par MonitorMCPPositions() quand profit >= MCPDuplicateMinProfit
 
       // Supprimer l'ordre pending du serveur
       string symEnc = sym;
@@ -1039,9 +1164,252 @@ void TryExecuteMCPSignal(int idx)
    }
    else
    {
-      Print(StringFormat("[TradeManager] ❌ MCP ORDER ÉCHOUÉ %s %s: %d %s",
+      g_mcpSignals[idx].failCount++;
+      Print(StringFormat("[TradeManager] MCP ORDER ECHOUE %s %s: %d %s (tentative %d/3)",
             (dir==1?"BUY":"SELL"), sym,
-            (int)mcpTrade.ResultRetcode(), mcpTrade.ResultRetcodeDescription()));
+            (int)mcpTrade.ResultRetcode(), mcpTrade.ResultRetcodeDescription(),
+            g_mcpSignals[idx].failCount));
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Duplique les positions manuelles (magic=0) quand profit >= $2    |
+//+------------------------------------------------------------------+
+void MonitorManualDuplicates()
+{
+   if(!MCPDuplicateOnce || !DuplicateManualOrders) return;
+
+   for(int pi = PositionsTotal() - 1; pi >= 0; pi--)
+   {
+      if(!posInfo.SelectByIndex(pi)) continue;
+
+      long magic = posInfo.Magic();
+      // Cibler uniquement magic=0 (manuel) ou MagicFilter si défini
+      if(magic != 0 && magic != (long)MagicFilter) continue;
+      // Exclure les positions déjà générées par TM (magic MCP ou duplicats TM)
+      if(magic == (long)MCPMagicNumber) continue;
+
+      ulong ticket = posInfo.Ticket();
+      double profit = posInfo.Profit();
+      if(profit < MCPDuplicateMinProfit) continue;
+
+      // Vérifier si déjà dupliqué
+      bool alreadyDup = false;
+      for(int k = 0; k < g_manualDupCount; k++)
+         if(g_manualDupTickets[k] == ticket) { alreadyDup = true; break; }
+      if(alreadyDup) continue;
+
+      // Dupliquer
+      string sym = posInfo.Symbol();
+      int    dir = (posInfo.PositionType() == POSITION_TYPE_BUY) ? 1 : -1;
+      double lot = posInfo.Volume();
+      double sl  = posInfo.StopLoss();
+      double tp  = posInfo.TakeProfit();
+
+      CTrade dupTrade;
+      dupTrade.SetExpertMagicNumber(MCPMagicNumber);
+      dupTrade.SetDeviationInPoints(30);
+      dupTrade.SetTypeFilling(ORDER_FILLING_IOC);
+
+      bool ok = (dir == 1) ? dupTrade.Buy(lot, sym, 0, sl, tp, "TM_MANUAL_DUP")
+                           : dupTrade.Sell(lot, sym, 0, sl, tp, "TM_MANUAL_DUP");
+      if(ok)
+      {
+         ArrayResize(g_manualDupTickets, g_manualDupCount + 1);
+         g_manualDupTickets[g_manualDupCount++] = ticket;
+         Print(StringFormat("[TradeManager] 📋 Duplication manuelle %s %s lot=%.2f profit=$%.2f",
+               (dir==1?"BUY":"SELL"), sym, lot, profit));
+         SendWAEvent("DUPLICATE", sym,
+                     (dir==1)?SymbolInfoDouble(sym,SYMBOL_ASK):SymbolInfoDouble(sym,SYMBOL_BID),
+                     profit, (dir==1?"BUY":"SELL"), posInfo.PriceOpen(), sl, tp, lot);
+      }
+      else
+         Print(StringFormat("[TradeManager] ⚠️ Dup manuelle échouée %s: %d", sym, (int)dupTrade.ResultRetcode()));
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Poll /gom-verdict et coupe positions si signal opposé            |
+//+------------------------------------------------------------------+
+void PollGOMScalpVerdict()
+{
+   if(!UseGOMScalp) return;
+   if((int)(TimeCurrent() - g_lastGOMPoll) < GOMPollIntervalSec) return;
+   g_lastGOMPoll = TimeCurrent();
+
+   // ── Fetch /gom-verdict ──────────────────────────────────────
+   string sym = _Symbol;
+   string symEnc = sym;
+   StringReplace(symEnc, " ", "%20");
+   string url = AIServerURL + "/gom-verdict?symbol=" + symEnc;
+   char post[], result[];
+   string headers = "Content-Type: application/json\r\n";
+   string respH;
+   int code = WebRequest("GET", url, headers, WATimeoutMs, post, result, respH);
+   if(code != 200) return;
+
+   string body = CharArrayToString(result, 0, WHOLE_ARRAY, CP_UTF8);
+   if(StringFind(body, "\"ok\":false") >= 0) return;
+
+   // Parser verdict
+   string verdict    = JsonGetString(body, "verdict");
+   int    rsi        = (int)JsonGetDouble(body, "rsi");
+   bool   oversold   = StringFind(body, "\"rsi_oversold\":true")  >= 0;
+   bool   overbought = StringFind(body, "\"rsi_overbought\":true") >= 0;
+   int    vnum       = (int)JsonGetDouble(body, "verdict_num");
+
+   g_lastGOMVerdict    = verdict;
+   g_lastGOMRSI        = rsi;
+   g_gomRSIOversold    = oversold;
+   g_gomRSIOverbought  = overbought;
+   g_lastGOMVerdictNum = vnum;
+
+   // ── Scanner positions ouvertes ──────────────────────────────
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      if(!posInfo.SelectByIndex(i)) continue;
+      string posSym = posInfo.Symbol();
+      if(posSym != sym) continue;
+
+      int    dir    = posInfo.PositionType() == POSITION_TYPE_BUY ? 1 : -1;
+      double profit = posInfo.Profit();
+      ulong  ticket = posInfo.Ticket();
+
+      bool   shouldClose = false;
+      string closeReason = "";
+
+      if(dir == -1) // Position SELL
+      {
+         // Couper si GOM dit BUY ou WAIT + profit ou RSI survente extrême + profit
+         if(vnum > 0)
+         {
+            shouldClose = true;
+            closeReason = StringFormat("GOM=%s -> microcorrection BUY", verdict);
+         }
+         else if(StringCompare(verdict, "WAIT") == 0 && profit > 0)
+         {
+            shouldClose = true;
+            closeReason = "GOM=WAIT + profit -> securisation";
+         }
+         else if(oversold && profit > 0)
+         {
+            shouldClose = true;
+            closeReason = StringFormat("RSI=%d SURVENTE + profit -> rebond imminent", rsi);
+         }
+      }
+      else if(dir == 1) // Position BUY
+      {
+         // Couper si GOM dit SELL ou WAIT + profit ou RSI surachat + profit
+         if(vnum < 0)
+         {
+            shouldClose = true;
+            closeReason = StringFormat("GOM=%s -> correction SELL", verdict);
+         }
+         else if(StringCompare(verdict, "WAIT") == 0 && profit > 0)
+         {
+            shouldClose = true;
+            closeReason = "GOM=WAIT + profit -> securisation";
+         }
+         else if(overbought && profit > 0)
+         {
+            shouldClose = true;
+            closeReason = StringFormat("RSI=%d SURACHAT + profit -> retournement imminent", rsi);
+         }
+      }
+
+      if(!shouldClose) continue;
+
+      // Fermer la position
+      CTrade closeTrade;
+      closeTrade.SetDeviationInPoints(50);
+      bool closed = closeTrade.PositionClose(ticket);
+
+      if(closed)
+      {
+         Print(StringFormat("[GOMScalp] Position %s %s fermee (profit=%.2f$) Raison: %s",
+               (dir==1?"BUY":"SELL"), posSym, profit, closeReason));
+
+         SendWAEvent("GOM_CLOSE", posSym, posInfo.PriceCurrent(), profit,
+                     (dir==1?"BUY":"SELL"), posInfo.PriceOpen(),
+                     posInfo.StopLoss(), posInfo.TakeProfit(), posInfo.Volume());
+
+         // Enregistrer état pour ré-entrée
+         if(GOMReEntryEnabled)
+         {
+            int idx = g_gomReEntryCount;
+            ArrayResize(g_gomReEntry, idx + 1);
+            g_gomReEntryCount++;
+            g_gomReEntry[idx].active       = true;
+            g_gomReEntry[idx].symbol       = posSym;
+            g_gomReEntry[idx].direction    = dir;
+            g_gomReEntry[idx].entryPrice   = posInfo.PriceOpen();
+            g_gomReEntry[idx].stopLoss     = posInfo.StopLoss();
+            g_gomReEntry[idx].takeProfit   = posInfo.TakeProfit();
+            g_gomReEntry[idx].lot          = GOMReEntryLot;
+            g_gomReEntry[idx].closedAt     = TimeCurrent();
+            g_gomReEntry[idx].reEntryCount = 0;
+         }
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Re-entrée GOM après correction                                   |
+//+------------------------------------------------------------------+
+void CheckGOMReEntry()
+{
+   if(!UseGOMScalp || !GOMReEntryEnabled) return;
+
+   for(int i = g_gomReEntryCount - 1; i >= 0; i--)
+   {
+      if(!g_gomReEntry[i].active) continue;
+      if(g_gomReEntry[i].reEntryCount >= GOMReEntryMaxCount)
+      {
+         g_gomReEntry[i].active = false;
+         continue;
+      }
+      if((int)(TimeCurrent() - g_gomReEntry[i].closedAt) < GOMReEntryCooldownSec) continue;
+
+      string posSym = g_gomReEntry[i].symbol;
+      int    dir    = g_gomReEntry[i].direction;
+      int    vnum   = g_lastGOMVerdictNum;
+
+      // Re-entrer seulement si GOM réaligne avec la direction originale
+      bool aligned = (dir == -1 && vnum <= -1) || (dir == 1 && vnum >= 1);
+      if(!aligned) continue;
+
+      // Vérifier qu'aucune position ouverte sur ce symbole dans cette direction
+      bool alreadyOpen = false;
+      for(int p = PositionsTotal() - 1; p >= 0; p--)
+      {
+         if(!posInfo.SelectByIndex(p)) continue;
+         if(posInfo.Symbol() != posSym) continue;
+         int pdir = posInfo.PositionType() == POSITION_TYPE_BUY ? 1 : -1;
+         if(pdir == dir) { alreadyOpen = true; break; }
+      }
+      if(alreadyOpen) { g_gomReEntry[i].active = false; continue; }
+
+      // Ouvrir re-entrée
+      CTrade reTrade;
+      reTrade.SetExpertMagicNumber(MCPMagicNumber);
+      reTrade.SetDeviationInPoints(30);
+      reTrade.SetTypeFilling(ORDER_FILLING_IOC);
+
+      double lot = g_gomReEntry[i].lot;
+      double sl  = g_gomReEntry[i].stopLoss;
+      double tp  = g_gomReEntry[i].takeProfit;
+      bool ok = (dir == 1) ? reTrade.Buy(lot, posSym, 0, sl, tp, "TM_GOM_REENTRY")
+                           : reTrade.Sell(lot, posSym, 0, sl, tp, "TM_GOM_REENTRY");
+      if(ok)
+      {
+         g_gomReEntry[i].reEntryCount++;
+         g_gomReEntry[i].closedAt = TimeCurrent();
+         Print(StringFormat("[GOMScalp] Re-entree #%d %s %s GOM=%s",
+               g_gomReEntry[i].reEntryCount, (dir==1?"BUY":"SELL"), posSym, g_lastGOMVerdict));
+         SendWAEvent("GOM_REENTRY", posSym,
+                     (dir==1)?SymbolInfoDouble(posSym,SYMBOL_ASK):SymbolInfoDouble(posSym,SYMBOL_BID),
+                     0, (dir==1?"BUY":"SELL"), g_gomReEntry[i].entryPrice, sl, tp, lot);
+      }
    }
 }
 
@@ -1074,6 +1442,17 @@ void MonitorMCPPositions()
       {
          posOpen = true;
          profit  = PositionGetDouble(POSITION_PROFIT);
+      }
+
+      // Duplication différée — dès que profit >= MCPDuplicateMinProfit
+      if(MCPDuplicateOnce && !g_mcpSignals[i].duplicated && posOpen
+         && profit >= MCPDuplicateMinProfit)
+      {
+         CTrade dupTrade;
+         dupTrade.SetExpertMagicNumber(MCPMagicNumber);
+         dupTrade.SetDeviationInPoints(30);
+         dupTrade.SetTypeFilling(ORDER_FILLING_IOC);
+         DuplicateMCPPosition(i, dupTrade);
       }
 
       // TP1 atteint (prix ou position fermée en profit)

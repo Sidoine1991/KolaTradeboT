@@ -1,0 +1,5 @@
+372: bool SMC_IsStrictUTCTradingWindowOpen();
+1986: bool SMC_IsStrictUTCTradingWindowOpen()
+378: double CalculateDailyProfitFromHistory();
+11514: void UpdateDailyEquityStats()
+12585: double CalculateDailyProfitFromHistory()

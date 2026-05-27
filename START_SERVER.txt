@@ -1,0 +1,142 @@
+================================================================================
+                    TradBOT IA Server - DÉMARRAGE RAPIDE
+================================================================================
+
+📍 LOCALISATION DES FICHIERS
+✅ Robot MQL5: D:\Dev\TradBOT\Divergence_Robot_With_GOM.mq5
+✅ Serveur: D:\Dev\TradBOT\ai_server.py
+✅ Configuration: D:\Dev\TradBOT\.env
+
+================================================================================
+🚀 POUR LANCER LE SERVEUR
+================================================================================
+
+OPTION 1 - Batch file (Windows)
+--------------------------------
+Double-clique sur:
+  D:\Dev\TradBOT\launch_server.bat
+
+Ou depuis PowerShell/CMD:
+  D:\Dev\TradBOT\launch_server.bat
+
+
+OPTION 2 - Command line
+------------------------
+cd D:\Dev\TradBOT
+python ai_server.py --port 8000
+
+
+OPTION 3 - Batch d'origine
+---------------------------
+D:\Dev\TradBOT\run_server.bat
+
+================================================================================
+📡 VÉRIFIER QUE LE SERVEUR FONCTIONNE
+================================================================================
+
+Une fois lancé, tu devrais voir:
+  - "Uvicorn running on http://0.0.0.0:8000"
+  - "Application startup complete"
+
+Ouvre dans le navigateur:
+  http://localhost:8000/docs   ← Swagger UI (test les endpoints)
+  http://localhost:8000/health ← Vérifier le statut
+
+================================================================================
+🧪 TESTER LES ENDPOINTS DIVERGENCE
+================================================================================
+
+POST /divergence/signal - Calcule les signaux divergence:
+  curl -X POST http://localhost:8000/divergence/signal \
+    -H "Content-Type: application/json" \
+    -d '{
+      "symbol": "EURUSD",
+      "candles": [
+        {"o": 1.0850, "h": 1.0860, "l": 1.0840, "c": 1.0855, "v": 1000},
+        {"o": 1.0855, "h": 1.0870, "l": 1.0850, "c": 1.0865, "v": 1100},
+        {"o": 1.0865, "h": 1.0875, "l": 1.0860, "c": 1.0870, "v": 1200},
+        {"o": 1.0870, "h": 1.0880, "l": 1.0865, "c": 1.0875, "v": 1300},
+        {"o": 1.0875, "h": 1.0885, "l": 1.0870, "c": 1.0880, "v": 1400},
+        {"o": 1.0880, "h": 1.0890, "l": 1.0875, "c": 1.0885, "v": 1500}
+      ],
+      "lookback": 5,
+      "threshold": 0.18,
+      "confluence_min": 3
+    }'
+
+Réponse attendue:
+  {
+    "ok": true,
+    "symbol": "EURUSD",
+    "direction": "BUY",
+    "confidence": 82.5,
+    "divergence_score": 4,
+    "entry_price": 1.0885,
+    "stop_loss": 1.0860,
+    "take_profit": 1.0920,
+    "reason": "..."
+  }
+
+
+GET /divergence/stats - Retourne les stats de la stratégie:
+  curl http://localhost:8000/divergence/stats
+
+================================================================================
+⚙️ INSTALLER LES DÉPENDANCES (si besoin)
+================================================================================
+
+Si tu as des erreurs d'import, installe les dépendances:
+
+cd D:\Dev\TradBOT
+pip install -r requirements.txt
+
+Ou installe manuellement:
+  pip install python-dotenv fastapi uvicorn pydantic pandas numpy requests joblib slowapi
+
+================================================================================
+❌ DÉPANNAGE
+================================================================================
+
+Erreur: "ModuleNotFoundError: No module named 'fastapi'"
+  → pip install fastapi uvicorn
+
+Erreur: "Could not connect to localhost:8000"
+  → Vérifie que le serveur est bien lancé
+  → Utilise un autre port: python ai_server.py --port 8001
+
+Erreur: "AttributeError: module 'numpy' has no attribute '__version__'"
+  → pip install --upgrade numpy pandas
+
+Port 8000 déjà utilisé?
+  → Tue le processus: taskkill /IM python.exe /F
+  → Ou utilise un autre port: python ai_server.py --port 9000
+
+================================================================================
+📚 DOCUMENTATION
+================================================================================
+
+Guides complets:
+  ✅ DIVERGENCE_ROBOT_DOCUMENTATION.md - Guide technique complet
+  ✅ DIVERGENCE_QUICK_START.md - Démarrage rapide (5 min)
+  ✅ DIVERGENCE_IMPLEMENTATION_SUMMARY.md - Architecture + détails
+
+API Swagger:
+  http://localhost:8000/docs
+
+Endpoints disponibles:
+  POST /divergence/signal      - Calcule signal divergence
+  GET /divergence/stats        - Stats stratégie
+  GET /health                  - Vérifier statut serveur
+
+================================================================================
+✅ PRÊT?
+================================================================================
+
+1. Lance le serveur: launch_server.bat (double-clique)
+2. Ouvre http://localhost:8000/docs dans le navigateur
+3. Teste les endpoints
+4. Attache le robot MQL5 à MT5
+
+Questions? Consulte la documentation complète 📖
+
+================================================================================
