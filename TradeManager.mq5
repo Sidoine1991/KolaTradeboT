@@ -12,8 +12,8 @@
 
 input group "=== TRAILING STOP ==="
 input bool   UseTrailing            = true;   // Activer trailing stop
-input double TrailActivatePct       = 0.3;    // Activer après X% du SL initial en profit
-input double TrailLockPct           = 0.25;   // Verrouiller X% du profit max depuis pic
+input double TrailActivateUSD       = 3.0;    // Activer dès que profit >= $3 USD (priorité absolue)
+input double TrailLockPct           = 0.30;   // Verrouiller 30% du profit max depuis pic (sécurité perte)
 
 input group "=== RE-ENTRÉE SUR EMA ==="
 input bool   UseReEntry             = true;   // Activer re-entrée automatique
@@ -22,7 +22,7 @@ input int    ReEntryCooldownSec     = 30;     // Cooldown minimal entre tentativ
 input int    EMA_Fast               = 8;      // EMA rapide M1 — 1ère cible
 input int    EMA_Slow               = 21;     // EMA lente M1 — 2ème cible
 input double EMATouch_Pct           = 0.5;   // Tolérance toucher EMA (% du spread)
-input bool   RequireCorrectSide     = true;   // Prix doit être du bon côté de l'EMA
+input bool   RequireCorrectSide     = false;  // 🔧 DÉSACTIVÉ: Bloquer prix "mauvais côté EMA" (fix log)
 
 input group "=== FILTRE RSI ==="
 input int    RSI_Period             = 14;
@@ -46,11 +46,11 @@ input bool   GlobalProfitMCPOnly    = true;   // Ne compter que les positions ma
 input group "=== SIGNAUX MCP TRADINGVIEW ==="
 input bool   UseMCPSignals          = true;   // Exécuter signaux bridge/WhatsApp (pending-order)
 input string AIServerURL            = "http://127.0.0.1:8000"; // URL AI server
-input int    MCPPollIntervalSec     = 10;     // Intervalle poll /pending-order (sec)
+input int    MCPPollIntervalSec     = 3;      // Intervalle poll /pending-order (GOM optimized: 3s)
 input int    MCPMagicNumber         = 20260526; // Magic number ordres MCP
 input double MCPEntryTolerancePct   = 0.05;  // Tolérance entrée limit (% du prix)
 input bool   MCPExecuteAtMarket     = true;   // Exécuter au marché dès signal ready (recommandé)
-input bool   MCPBypassConsolidation = true;   // Ne pas bloquer MCP sur filtre consolidation
+input bool   MCPBypassConsolidation = true;   // Ne pas bloquer MCP sur filtre consolidation (GOM: TRUE)
 input bool   MCPDuplicateOnce       = true;   // Dupliquer 1x la position après profit minimum
 input double MCPDuplicateMinProfit  = 2.0;    // Profit minimum (USD) avant duplication
 input bool   DuplicateManualOrders  = true;   // Dupliquer aussi les ordres manuels (magic=0)
@@ -61,23 +61,28 @@ input bool   UseWhatsApp            = true;   // Envoyer alertes WhatsApp
 input int    WATimeoutMs            = 8000;   // Timeout requête WhatsApp (ms)
 
 input group "=== ALIGNEMENT SIGNAL (TA + MCP) ==="
-input bool   RequireSignalAlign     = true;   // Bloquer re-entrée si direction oppose biais TA/MCP
+input bool   RequireSignalAlign     = false;  // 🔧 DÉSACTIVÉ: Trop de blocages (fix log)
 input int    SignalCacheAgeSec      = 300;    // Durée validité cache biais (sec, 0=désactivé)
 input double MinTAConfidence        = 0.55;   // Confiance TA minimum pour que le biais compte
 
 input group "=== FILTRE CONSOLIDATION ==="
-input bool   UseConsolidationFilter = true;   // Bloquer en zone de consolidation élevée
+input bool   UseConsolidationFilter = false;  // GOM gère consolidation → désactiver ce filtre (GOM mode)
 input int    ADX_Period             = 14;     // Période ADX
-input double ADX_MinTrend           = 20.0;  // ADX < seuil → consolidation (bloquer)
+input double ADX_MinTrend           = 0;      // ADX < seuil → N/A (GOM mode: 0)
 input double ConsolidationATRRatio  = 0.65;  // ATR < ATR_SMA * ratio → consolidation
 
+input group "=== FILTRES CORRECTION (BUG FIX) ==="
+input bool   UseEMAFilter           = false;  // 🔧 DÉSACTIVÉ: Bloquer prix "mauvais côté EMA" (fix log)
+input double MinMLConfidence        = 50.0;   // 🔧 ABAISSÉ: 75% → 50% (fix: conf faible)
+input int    MaxSignalFailCount     = 2;      // Rejeter ordre après N échecs
+
 input group "=== GOM SCALP LOOP ==="
-input bool   UseGOMScalp           = true;   // Coupe auto sur signal GOM opposé
-input int    GOMPollIntervalSec    = 5;      // Intervalle poll /gom-verdict (sec)
-input bool   GOMReEntryEnabled     = true;   // Re-entrer quand GOM réaligne
-input int    GOMReEntryCooldownSec = 30;     // Cooldown entre fermeture et ré-entrée
+input bool   UseGOMScalp           = true;   // 🎯 PRINCIPAL: Coupe auto sur signal GOM opposé
+input int    GOMPollIntervalSec    = 3;      // Intervalle poll /gom-verdict (GOM optimized: 3s)
+input bool   GOMReEntryEnabled     = true;   // 🎯 Re-entrer quand GOM réaligne (+ follow indicators)
+input int    GOMReEntryCooldownSec = 20;     // Cooldown réduit (GOM optimized: 20s)
 input double GOMReEntryLot         = 0.01;   // Lot pour ré-entrée GOM
-input int    GOMReEntryMaxCount    = 3;      // Max ré-entrées par signal
+input int    GOMReEntryMaxCount    = 5;      // Max ré-entrées (GOM optimized: 5)
 
 CTrade        trade;
 CPositionInfo posInfo;
@@ -92,6 +97,10 @@ int      g_lastGOMRSI        = 50;
 bool     g_gomRSIOversold    = false;
 bool     g_gomRSIOverbought  = false;
 int      g_lastGOMVerdictNum = 0;
+string   g_lastKOLAState     = "";  // "NEAR BUY" | "NEAR SELL" | "NEUTRAL"
+bool     g_isConsolidation   = false; // KOLA diverge du verdict
+double   g_lastGOMQuality    = 0.0; // entry_quality %
+double   g_lastGOMCoherence  = 0.0; // coherence_pct %
 
 struct GOMReEntryState
 {
@@ -217,6 +226,7 @@ void OnTimer()
    if(MCPDuplicateOnce)      MonitorManualDuplicates();
    if(UseGOMScalp)           PollGOMScalpVerdict();
    if(UseGOMScalp)           CheckGOMReEntry();
+   if(UseGOMScalp)           UpdateGOMDashboard();  // ⭐ Dashboard real-time
 }
 
 void OnTick()
@@ -299,28 +309,29 @@ bool SyncSLTPToServer(ulong ticket, double newSL, double newTP, string source = 
 {
    if(!UseMCPSignals) return true;
 
-   string orderId = "";
+   string symbol = "";
    for(int i = 0; i < g_mcpCount; i++)
    {
       if(g_mcpSignals[i].ticket == ticket)
       {
-         orderId = g_mcpSignals[i].orderId;
+         symbol = g_mcpSignals[i].symbol;
          break;
       }
    }
 
-   if(StringLen(orderId) == 0)
+   if(StringLen(symbol) == 0)
    {
-      Print("[TradeManager] ⚠️ SyncSLTPToServer: order_id not found for ticket ", ticket);
+      Print("[TradeManager] ⚠️ SyncSLTPToServer: symbol not found for ticket ", ticket);
       return false;
    }
 
-   string url = AIServerURL + "/pending-order/" + orderId + "/sync";
+   // Endpoint: POST /pending-order/{symbol}/sync
+   string url = AIServerURL + "/pending-order/" + symbol + "/sync";
    string headers = "Content-Type: application/json\r\n";
 
-   // Construire JSON body
+   // Construct JSON body matching OrderSyncBody schema
    string body = StringFormat(
-      "{\"mt5_ticket\":%d,\"current_stop_loss\":%.2f,\"current_take_profit\":%.2f,\"update_source\":\"%s\"}",
+      "{\"mt5_ticket\":%d,\"current_stop_loss\":%.5f,\"current_take_profit\":%.5f,\"update_source\":\"%s\"}",
       (int)ticket, newSL, newTP, source
    );
 
@@ -333,14 +344,91 @@ bool SyncSLTPToServer(ulong ticket, double newSL, double newTP, string source = 
    int res = WebRequest("POST", url, headers, 10000, post, result, respH);
    if(res == 200)
    {
-      Print("[TradeManager] ✅ Synced SL/TP to server: orderId=", orderId, " SL=", DoubleToString(newSL, 5), " TP=", DoubleToString(newTP, 5));
+      Print("[TradeManager] ✅ SL/TP synced to server: symbol=", symbol, " ticket=", ticket, " SL=", DoubleToString(newSL, 5), " TP=", DoubleToString(newTP, 5), " source=", source);
       return true;
    }
    else
    {
-      Print("[TradeManager] ❌ Failed to sync SL/TP: HTTP ", res, " orderId=", orderId);
+      Print("[TradeManager] ❌ Failed to sync SL/TP: HTTP ", res, " symbol=", symbol, " ticket=", ticket);
       return false;
    }
+}
+
+//+------------------------------------------------------------------+
+//| ReadGOMSignalFromServer — Fetch GOM KOLA verdict + niveaux       |
+//+------------------------------------------------------------------+
+struct GOMSignal
+{
+   string   verdict;      // "GOOD BUY", "GOOD SELL", "PERFECT BUY", "WAIT"
+   double   score_buy;
+   double   score_sell;
+   double   fib_high;     // Entry level ou TP
+   double   fib_low;      // SL level
+   double   st_line;      // Supertrend baseline
+   int      rsi;
+   int      coherence;
+   int      quality;
+   bool     valid;
+};
+
+bool FetchGOMFromServer(string symbol, GOMSignal &sig)
+{
+   // GET http://127.0.0.1:8000/gom-verdict?symbol=XAUUSD
+   string url = AIServerURL + "/gom-verdict?symbol=" + symbol;
+   string headers = "Content-Type: application/json\r\n";
+   char data[];
+   char result[];
+
+   int res = WebRequest("GET", url, headers, 5000, data, result, headers);
+   if(res != 200) return false;
+
+   // Parse JSON: "verdict", "score_buy", "score_sell", "fib_low", "fib_high", "st_line", "rsi", "coherence", "quality"
+   string jsonStr = CharArrayToString(result);
+
+   // Simple JSON parsing
+   int pos = 0;
+
+   // Extract verdict
+   int pos_v = StringFind(jsonStr, "\"verdict\":");
+   if(pos_v > 0)
+   {
+      pos_v = StringFind(jsonStr, "\"", pos_v + 10);
+      int pos_v2 = StringFind(jsonStr, "\"", pos_v + 1);
+      sig.verdict = StringSubstr(jsonStr, pos_v + 1, pos_v2 - pos_v - 1);
+   }
+
+   // Extract numeric fields (simplified)
+   sig.score_buy = ExtractJSONDouble(jsonStr, "score_buy");
+   sig.score_sell = ExtractJSONDouble(jsonStr, "score_sell");
+   sig.fib_high = ExtractJSONDouble(jsonStr, "fib_high");
+   sig.fib_low = ExtractJSONDouble(jsonStr, "fib_low");
+   sig.st_line = ExtractJSONDouble(jsonStr, "st_line");
+   sig.rsi = (int)ExtractJSONDouble(jsonStr, "rsi");
+   sig.coherence = (int)ExtractJSONDouble(jsonStr, "coherence");
+   sig.quality = (int)ExtractJSONDouble(jsonStr, "quality");
+
+   sig.valid = (sig.coherence >= 60 && sig.quality >= 40);
+
+   return sig.valid;
+}
+
+double ExtractJSONDouble(string json, string key)
+{
+   int pos = StringFind(json, "\"" + key + "\":");
+   if(pos < 0) return 0;
+
+   pos = StringFind(json, ":", pos) + 1;
+   while(pos < StringLen(json) && (json[pos] == ' ' || json[pos] == '\t'))
+      pos++;
+
+   int pos_end = StringFind(json, ",", pos);
+   if(pos_end < 0) pos_end = StringFind(json, "}", pos);
+
+   string value_str = StringSubstr(json, pos, pos_end - pos);
+   StringTrimLeft(value_str);
+   StringTrimRight(value_str);
+
+   return StringToDouble(value_str);
 }
 
 void AutoSetSLTP(int idx)
@@ -455,16 +543,32 @@ void ManageAllTrailing()
       double bid       = SymbolInfoDouble(sym, SYMBOL_BID);
       double profitPts = (dir == 1) ? (bid - ep) : (ep - bid);
 
-      // forceTrailing : activer dès le moindre profit positif (seuil 10% du slDist)
-      double activateThreshold = g_states[idx].forceTrailing ? (slDist * 0.1) : (slDist * TrailActivatePct);
-      if(profitPts < activateThreshold) continue;
-
-      // Nouveau SL = verrouiller % du pic de profit
+      // ⭐ ACTIVATION: USD OU pips (priorité USD pour rapidité)
+      // Calculer profit en USD
       double tickVal     = SymbolInfoDouble(sym, SYMBOL_TRADE_TICK_VALUE);
       double tickSz      = SymbolInfoDouble(sym, SYMBOL_TRADE_TICK_SIZE);
       double lot         = posInfo.Volume();
       double profitPerPt = (tickSz > 0) ? (tickVal / tickSz) * lot : lot;
-      if(profitPerPt <= 0) continue;
+      double profitUSD   = (profitPerPt > 0) ? (profitPts * profitPerPt) : curProfit;
+
+      // Activer dès que profit >= $3 USD (ou forceTrailing à 10% slDist)
+      bool shouldActivate = (profitUSD >= TrailActivateUSD) ||
+                            (g_states[idx].forceTrailing && profitPts >= slDist * 0.1);
+
+      // 🔍 LOG: Activation check
+      static datetime lastLog = 0;
+      if(TimeCurrent() - lastLog > 5)  // Log tous les 5s max pour ne pas spammer
+      {
+         Print(StringFormat("[TradeManager] 🔍 %s Trailing: profitUSD=$%.2f (seuil=$%.2f) → %s | profitPts=%.5f peak=$%.2f",
+               sym, profitUSD, TrailActivateUSD, (shouldActivate ? "✅ ACTIVER" : "⏳ Attendre"),
+               profitPts, g_states[idx].peakProfit));
+         lastLog = TimeCurrent();
+      }
+
+      if(!shouldActivate) continue;
+
+      // Nouveau SL = verrouiller % du pic de profit
+      if(profitPerPt <= 0) continue;  // déjà calculé plus haut
 
       double lockPct = g_states[idx].forceTrailing ? 0.5 : TrailLockPct;
       double lockPts = (g_states[idx].peakProfit * lockPct) / profitPerPt;
@@ -478,9 +582,10 @@ void ManageAllTrailing()
 
       if(trade.PositionModify(posInfo.Ticket(), newSL, posInfo.TakeProfit()))
       {
-         Print(StringFormat("[TradeManager] 📈 %s Trailing SL %.5f→%.5f (profit=$%.2f peak=$%.2f%s)",
-               sym, curSL, newSL, curProfit, g_states[idx].peakProfit,
-               g_states[idx].forceTrailing ? " FORCÉ" : ""));
+         Print(StringFormat("[TradeManager] ✅ %s Trailing SL ACTIVÉ: %.5f→%.5f | profit=$%.2f peak=$%.2f | verrouille=%.1f%% du pic",
+               sym, curSL, newSL, curProfit, g_states[idx].peakProfit, lockPct * 100));
+         Print(StringFormat("[TradeManager] 🛡️ %s Perte maximale acceptée: %.5f (%.1f%% sous entry)",
+               sym, (dir == 1 ? ep - newSL : newSL - ep), ((ep - newSL) / slDist * 100)));
          SyncSLTPToServer(posInfo.Ticket(), newSL, posInfo.TakeProfit(), "ea_trailing");
       }
    }
@@ -699,7 +804,10 @@ void TryReEntryOnEMA(int idx)
          if(posInfo.StopLoss() == 0 || posInfo.TakeProfit() == 0)
          {
             if(trade.PositionModify(posInfo.Ticket(), newSL, newTP))
+            {
                Print(StringFormat("[TradeManager] 🔧 %s SL/TP reposé après re-entrée SL=%.5f TP=%.5f", sym, newSL, newTP));
+               SyncSLTPToServer(posInfo.Ticket(), newSL, newTP, "ea_reentry");
+            }
             else
             {
                g_states[idx].forceTrailing = true;
@@ -873,13 +981,37 @@ void SendWAEvent(const string event, const string sym,
 }
 
 //+------------------------------------------------------------------+
-//| Symbole déjà dans la file MCP active/exécutée                    |
+//| Symbole déjà dans la file MCP active/exécutée (+ timeout vieux signaux)
 //+------------------------------------------------------------------+
 bool MCPHasSignalForSymbol(const string sym)
 {
+   datetime now = TimeCurrent();
    for(int k = 0; k < g_mcpCount; k++)
-      if(g_mcpSignals[k].symbol == sym && (g_mcpSignals[k].active || g_mcpSignals[k].executed))
+   {
+      if(g_mcpSignals[k].symbol != sym) continue;
+
+      // Vérifier l'âge du signal (timeout: 5 minutes = 300 sec)
+      int signalAge = (int)(now - g_mcpSignals[k].receivedAt);
+
+      // Si signal EXÉCUTÉ mais très vieux (>10 min), il peut être remplacé
+      if(g_mcpSignals[k].executed && signalAge > 600)
+      {
+         Print(StringFormat("[TradeManager] ⚠️ %s: Ancien signal exécuté (age=%d sec) → REMPLACEABLE", sym, signalAge));
+         continue;  // Ne le compte pas comme "ayant signal"
+      }
+
+      // Si signal ACTIF (pas exécuté) mais vieux (>5 min), le supprimer et remplacer
+      if(g_mcpSignals[k].active && !g_mcpSignals[k].executed && signalAge > 300)
+      {
+         Print(StringFormat("[TradeManager] 🔄 %s: Signal READY expiré après %d sec → REMPLACEMENT", sym, signalAge));
+         g_mcpSignals[k].active = false;  // Marquer comme inactif pour permettre nouveau signal
+         continue;
+      }
+
+      // Signal actif et jeune → compte comme "ayant signal"
+      if(g_mcpSignals[k].active || g_mcpSignals[k].executed)
          return true;
+   }
    return false;
 }
 
@@ -888,10 +1020,20 @@ bool MCPHasSignalForSymbol(const string sym)
 //+------------------------------------------------------------------+
 void IngestPendingOrderForSymbol(const string sym, const string &body)
 {
-   if(!JsonGetBool(body, "ok")) return;
+   bool isXau = (StringCompare(sym, "XAUUSD") == 0);
+
+   if(!JsonGetBool(body, "ok"))
+   {
+      if(isXau) Print(StringFormat("[TradeManager] ❌ %s: JSON 'ok'=false — IGNORE", sym));
+      return;
+   }
 
    int orderPos = StringFind(body, "\"order\":{");
-   if(orderPos < 0) return;
+   if(orderPos < 0)
+   {
+      if(isXau) Print(StringFormat("[TradeManager] ❌ %s: no 'order' field — IGNORE", sym));
+      return;
+   }
    string orderBody = StringSubstr(body, orderPos);
 
    string action = JsonGetString(orderBody, "action");
@@ -907,8 +1049,65 @@ void IngestPendingOrderForSymbol(const string sym, const string &body)
    StringToLower(execType);
    bool atMarket = MCPExecuteAtMarket || (execType == "market" || StringLen(execType) == 0);
 
-   if(StringLen(action) == 0) return;
-   if(action != "BUY" && action != "SELL") return;
+   if(StringLen(action) == 0)
+   {
+      if(isXau) Print(StringFormat("[TradeManager] ❌ %s: no action — IGNORE", sym));
+      return;
+   }
+   if(action != "BUY" && action != "SELL")
+   {
+      if(isXau) Print(StringFormat("[TradeManager] ❌ %s: action=%s (not BUY/SELL) — IGNORE", sym, action));
+      return;
+   }
+
+   if(isXau) Print(StringFormat("[TradeManager] ✅ %s: Found %s order (entry=%.2f SL=%.2f TP=%.2f lot=%.2f)",
+         sym, action, entry, sl, tp, lot));
+
+   // ⭐ PRIORITÉ GOM: Filtre STRICT — GOOD/PERFECT uniquement
+   if(UseGOMScalp && (TimeCurrent() - g_lastGOMPoll) < 300)  // GOM verdict valide si < 5min
+   {
+      int gomVnum = g_lastGOMVerdictNum;
+      // vnum: -3 (PERFECT SELL), -2 (GOOD SELL), 0 (WAIT), 1 (SIMPLE BUY), 2 (GOOD BUY), 3 (PERFECT BUY), -1 (SIMPLE SELL)
+      bool isGoodOrPerfect = (gomVnum == 2 || gomVnum == 3 || gomVnum == -2 || gomVnum == -3);
+      int gomDir = 0;
+      if(gomVnum >= 2) gomDir = 1;   // GOOD BUY ou PERFECT BUY
+      if(gomVnum <= -2) gomDir = -1; // GOOD SELL ou PERFECT SELL
+
+      int mcpDir = (action == "BUY") ? 1 : -1;
+
+      // ❌ Rejeter si verdict n'est pas GOOD/PERFECT
+      if(!isGoodOrPerfect)
+      {
+         if(isXau) Print(StringFormat("[TradeManager] 🔴 %s: GOM verdict=%s (vnum=%d) — NON GOOD/PERFECT → REJETÉ",
+               sym, g_lastGOMVerdict, gomVnum));
+         SendNotification(StringFormat("🔴 TradBOT: Ordre %s rejeté — GOM=%s (pas GOOD/PERFECT)", action, g_lastGOMVerdict));
+         return;
+      }
+
+      // ❌ Rejeter si direction oppose
+      if(gomDir != 0 && gomDir != mcpDir)
+      {
+         if(isXau) Print(StringFormat("[TradeManager] 🚫 %s: CONFLIT GOM: verdict=%s (dir=%d) vs ordre=%s (dir=%d) — REJETÉ",
+               sym, g_lastGOMVerdict, gomDir, action, mcpDir));
+         SendNotification(StringFormat("🚫 TradBOT: Ordre %s rejeté — conflit avec GOM %s", action, g_lastGOMVerdict));
+         return;
+      }
+
+      // 🔴 CONSOLIDATION DETECTION: KOLA diverge du verdict
+      if(g_isConsolidation)
+      {
+         if(isXau) Print(StringFormat("[TradeManager] 🟡 %s: CONSOLIDATION DÉTECTÉE — GOM=%s mais KOLA=%s (OB serrés M1) → ATTENDRE",
+               sym, g_lastGOMVerdict, g_lastKOLAState));
+         SendNotification(StringFormat("🟡 TradBOT: XAUUSD en consolidation — GOM=%s vs KOLA=%s. Attendre breakout",
+               g_lastGOMVerdict, g_lastKOLAState));
+         return;  // Rejeter signal jusqu'à sortie consolidation
+      }
+
+      if(isXau) Print(StringFormat("[TradeManager] ✅ %s: GOM check PASS — verdict=%s (GOOD/PERFECT) dir=%d matches action | KOLA=%s (pas consolidation)",
+            sym, g_lastGOMVerdict, gomDir, g_lastKOLAState));
+   }
+   else if(isXau && UseGOMScalp)
+      Print(StringFormat("[TradeManager] ⏭️ %s: GOM check SKIPPED (last GOM poll too old)", sym));
 
    double ask = SymbolInfoDouble(sym, SYMBOL_ASK);
    double bid = SymbolInfoDouble(sym, SYMBOL_BID);
@@ -916,7 +1115,76 @@ void IngestPendingOrderForSymbol(const string sym, const string &body)
       entry = (action == "BUY") ? ask : bid;
    if(entry <= 0) return;
 
-   if(MCPHasSignalForSymbol(sym)) return;
+   // 🔧 VALIDATION SL/TP + AUTO-CORRECTION (FIX: adjust invalid levels vs reject)
+   int dig = (int)SymbolInfoInteger(sym, SYMBOL_DIGITS);
+   int tradeStopsLevel = (int)SymbolInfoInteger(sym, SYMBOL_TRADE_STOPS_LEVEL);
+   double minSLDist = (double)tradeStopsLevel * SymbolInfoDouble(sym, SYMBOL_POINT);
+   if(minSLDist <= 0) minSLDist = 10 * SymbolInfoDouble(sym, SYMBOL_POINT);  // Fallback: 10 pts
+
+   if(sl > 0 && tp > 0)
+   {
+      bool slValid = false, tpValid = false;
+
+      if(action == "BUY")
+      {
+         slValid = (sl < bid);  // SL doit être EN-DESSOUS du bid
+         tpValid = (tp > ask);  // TP doit être AU-DESSUS du ask
+
+         // Auto-correction si invalide
+         if(!slValid)
+         {
+            double correctedSL = bid - minSLDist;
+            Print(StringFormat("[TradeManager] 🔧 %s BUY: SL=%.5f invalid (>= bid %.5f) → auto-correct to %.5f",
+                  sym, sl, bid, correctedSL));
+            sl = correctedSL;
+            slValid = true;
+         }
+         if(!tpValid)
+         {
+            double correctedTP = ask + minSLDist * 2;
+            Print(StringFormat("[TradeManager] 🔧 %s BUY: TP=%.5f invalid (<= ask %.5f) → auto-correct to %.5f",
+                  sym, tp, ask, correctedTP));
+            tp = correctedTP;
+            tpValid = true;
+         }
+
+         if(isXau) Print(StringFormat("[TradeManager] ✅ %s BUY validation: ask=%.5f bid=%.5f | SL=%.5f TP=%.5f (corrected if needed)",
+               sym, ask, bid, sl, tp));
+      }
+      else if(action == "SELL")
+      {
+         slValid = (sl > ask);  // SL doit être AU-DESSUS du ask
+         tpValid = (tp < bid);  // TP doit être EN-DESSOUS du bid
+
+         // Auto-correction si invalide
+         if(!slValid)
+         {
+            double correctedSL = ask + minSLDist;
+            Print(StringFormat("[TradeManager] 🔧 %s SELL: SL=%.5f invalid (<= ask %.5f) → auto-correct to %.5f",
+                  sym, sl, ask, correctedSL));
+            sl = correctedSL;
+            slValid = true;
+         }
+         if(!tpValid)
+         {
+            double correctedTP = bid - minSLDist * 2;
+            Print(StringFormat("[TradeManager] 🔧 %s SELL: TP=%.5f invalid (>= bid %.5f) → auto-correct to %.5f",
+                  sym, tp, bid, correctedTP));
+            tp = correctedTP;
+            tpValid = true;
+         }
+
+         if(isXau) Print(StringFormat("[TradeManager] ✅ %s SELL validation: ask=%.5f bid=%.5f | SL=%.5f TP=%.5f (corrected if needed)",
+               sym, ask, bid, sl, tp));
+      }
+   }
+   else if(isXau && (sl <= 0 || tp <= 0)) Print(StringFormat("[TradeManager] ⚠️ %s: SL/TP missing (SL=%.2f TP=%.2f) — skipping validation", sym, sl, tp));
+
+   if(MCPHasSignalForSymbol(sym))
+   {
+      if(isXau) Print(StringFormat("[TradeManager] ⏭️ %s: Signal already queued — SKIP", sym));
+      return;
+   }
 
    int idx = g_mcpCount;
    ArrayResize(g_mcpSignals, idx + 1);
@@ -937,7 +1205,9 @@ void IngestPendingOrderForSymbol(const string sym, const string &body)
    g_mcpSignals[idx].tp1NotifSent    = false;
    g_mcpSignals[idx].slNotifSent     = false;
    g_mcpSignals[idx].orderId         = JsonGetString(orderBody, "order_id");
-   g_mcpSignals[idx].failCount       = 0;
+   g_mcpSignals[idx].failCount       = 0;  // 🔧 Compteur d'échecs (rejeté après MaxSignalFailCount)
+
+   if(isXau) Print(StringFormat("[TradeManager] ✅ %s: Signal QUEUED (index %d) — now calling TryExecuteMCPSignal...", sym, idx));
 
    Print(StringFormat("[TradeManager] 📡 Pending ready: %s %s entry=%.5f SL=%.5f TP=%.5f lot=%.2f market=%s",
          action, sym, entry, sl, tp, lot, (atMarket ? "OUI" : "NON")));
@@ -952,6 +1222,10 @@ void PollMCPSignals()
 {
    if((int)(TimeCurrent() - g_lastMCPPoll) < MCPPollIntervalSec) return;
    g_lastMCPPoll = TimeCurrent();
+
+   // 🔍 LOG: Poll loop started
+   static int pollCount = 0;
+   pollCount++;
 
    string syms[];
    int nsyms = 0;
@@ -981,10 +1255,22 @@ void PollMCPSignals()
       if(syms[j] == _Symbol) { hasChart = true; break; }
    if(!hasChart) syms[nsyms++] = _Symbol;
 
+   PrintOnce(StringFormat("[TradeManager] 🔄 PollMCPSignals ENABLED (interval=%ds) | Monitoring %d symbols", MCPPollIntervalSec, nsyms), 300);
+
    for(int si = 0; si < nsyms; si++)
    {
       string sym = syms[si];
-      if(MCPHasSignalForSymbol(sym)) continue;
+
+      // 🔍 LOG: Polling symbol
+      if(StringCompare(sym, "XAUUSD") == 0)
+         Print(StringFormat("[TradeManager] 🔍 Poll #%d: %s → checking if already has signal...", pollCount, sym));
+
+      if(MCPHasSignalForSymbol(sym))
+      {
+         if(StringCompare(sym, "XAUUSD") == 0)
+            Print(StringFormat("[TradeManager] ⏭️ Poll #%d: %s — SKIP (signal already exists)", pollCount, sym));
+         continue;
+      }
 
       string symEnc = sym;
       StringReplace(symEnc, " ", "%20");
@@ -992,10 +1278,23 @@ void PollMCPSignals()
       char post[], result[];
       string headers = "Content-Type: application/json\r\n";
       string respH;
+
+      // 🔍 LOG: HTTP request
       int code = WebRequest("GET", url, headers, WATimeoutMs, post, result, respH);
-      if(code != 200) continue;
+      if(StringCompare(sym, "XAUUSD") == 0)
+         Print(StringFormat("[TradeManager] 📡 Poll #%d: %s → HTTP %d", pollCount, sym, code));
+
+      if(code != 200)
+      {
+         if(StringCompare(sym, "XAUUSD") == 0 && code != 0)
+            Print(StringFormat("[TradeManager] ❌ Poll #%d: %s → HTTP error %d", pollCount, sym, code));
+         continue;
+      }
 
       string body = CharArrayToString(result, 0, WHOLE_ARRAY, CP_UTF8);
+      if(StringCompare(sym, "XAUUSD") == 0)
+         Print(StringFormat("[TradeManager] ✅ Poll #%d: %s → Response (len=%d chars)", pollCount, sym, StringLen(body)));
+
       IngestPendingOrderForSymbol(sym, body);
    }
 }
@@ -1033,23 +1332,37 @@ bool DuplicateMCPPosition(int idx, CTrade &mcpTrade)
 //+------------------------------------------------------------------+
 void TryExecuteMCPSignal(int idx)
 {
-   if(!g_mcpSignals[idx].active || g_mcpSignals[idx].executed) return;
-   if(g_mcpSignals[idx].failCount >= 3)
+   string sym  = g_mcpSignals[idx].symbol;
+   bool isXau = (StringCompare(sym, "XAUUSD") == 0);
+
+   if(!g_mcpSignals[idx].active || g_mcpSignals[idx].executed)
    {
-      Print(StringFormat("[TradeManager] Signal %s abandonne apres %d echecs",
-            g_mcpSignals[idx].symbol, g_mcpSignals[idx].failCount));
+      if(isXau && !g_mcpSignals[idx].active) Print(StringFormat("[TradeManager] ⏭️ %s: Not active — SKIP", sym));
+      if(isXau && g_mcpSignals[idx].executed) Print(StringFormat("[TradeManager] ⏭️ %s: Already executed — SKIP", sym));
+      return;
+   }
+
+   if(g_mcpSignals[idx].failCount >= (int)MaxSignalFailCount)
+   {
+      Print(StringFormat("[TradeManager] 🚫 Signal %s abandonne apres %d echecs (max=%d)",
+            sym, g_mcpSignals[idx].failCount, (int)MaxSignalFailCount));
       g_mcpSignals[idx].active = false;
       return;
    }
 
-   string sym  = g_mcpSignals[idx].symbol;
    int    dir  = g_mcpSignals[idx].direction;
    double ep   = g_mcpSignals[idx].entryPrice;
    double ask  = SymbolInfoDouble(sym, SYMBOL_ASK);
    double bid  = SymbolInfoDouble(sym, SYMBOL_BID);
-   if(ask <= 0.0 || bid <= 0.0) return;
+   if(ask <= 0.0 || bid <= 0.0)
+   {
+      if(isXau) Print(StringFormat("[TradeManager] ⚠️ %s: Invalid prices (ask=%.5f bid=%.5f) — SKIP", sym, ask, bid));
+      return;
+   }
    double refPx = (dir == 1) ? ask : bid;
    double tol  = MathMax(ep * MCPEntryTolerancePct / 100.0, SymbolInfoDouble(sym, SYMBOL_POINT) * 5);
+
+   if(isXau) Print(StringFormat("[TradeManager] 🔍 %s TryExecute: dir=%d entry=%.5f refPx=%.5f tol=%.5f", sym, dir, ep, refPx, tol));
 
    // Alerte "niveau atteint" même si on n'exécute pas encore
    if(!g_mcpSignals[idx].entryNotifSent && MathAbs(refPx - ep) <= tol * 5)
@@ -1060,7 +1373,13 @@ void TryExecuteMCPSignal(int idx)
    }
 
    bool execNow = g_mcpSignals[idx].marketExec || MCPExecuteAtMarket;
-   if(!execNow && MathAbs(refPx - ep) > tol) return;  // limit: attendre le prix
+   double priceDistance = MathAbs(refPx - ep);
+   if(isXau) Print(StringFormat("[TradeManager] 🔍 %s: execNow=%s distance=%.5f tol=%.5f", sym, (execNow?"YES":"NO"), priceDistance, tol));
+   if(!execNow && priceDistance > tol)
+   {
+      if(isXau) Print(StringFormat("[TradeManager] ⏳ %s: Distance %.5f > tolerance %.5f — waiting for price", sym, priceDistance, tol));
+      return;  // limit: attendre le prix
+   }
 
    // Sanity check: SL/TP doivent etre du bon cote du prix d'entree
    double slChk = g_mcpSignals[idx].stopLoss;
@@ -1122,6 +1441,17 @@ void TryExecuteMCPSignal(int idx)
       sl = NormalizeDouble((dir==1) ? refPx - minDist : refPx + minDist, dg);
    if(tp > 0 && MathAbs(tp - refPx) < minDist)
       tp = NormalizeDouble((dir==1) ? refPx + minDist : refPx - minDist, dg);
+
+   // Vérifier après correction que SL/TP sont du bon côté du prix
+   bool slValid = (sl <= 0) || ((dir == 1) ? (sl < refPx) : (sl > refPx));
+   bool tpValid = (tp <= 0) || ((dir == 1) ? (tp > refPx) : (tp < refPx));
+   if(!slValid || !tpValid)
+   {
+      Print(StringFormat("[TradeManager] ❌ INVALID SL/TP after adjustment for %s %s: price=%.5f SL=%.5f TP=%.5f",
+            (dir==1?"BUY":"SELL"), sym, refPx, sl, tp));
+      g_mcpSignals[idx].active = false;
+      return;
+   }
 
    CTrade mcpTrade;
    mcpTrade.SetExpertMagicNumber(MCPMagicNumber);
@@ -1229,7 +1559,9 @@ void MonitorManualDuplicates()
 }
 
 //+------------------------------------------------------------------+
-//| Poll /gom-verdict et coupe positions si signal opposé            |
+//| Poll /gom-verdict — FILTRE STRICT: GOOD/PERFECT uniquement       |
+//| Dégradation verdict → fermer positions dupliquées ou toutes       |
+//| Indicateurs exploités: scores, RSI, Coherence, Quality            |
 //+------------------------------------------------------------------+
 void PollGOMScalpVerdict()
 {
@@ -1251,20 +1583,92 @@ void PollGOMScalpVerdict()
    string body = CharArrayToString(result, 0, WHOLE_ARRAY, CP_UTF8);
    if(StringFind(body, "\"ok\":false") >= 0) return;
 
-   // Parser verdict
-   string verdict    = JsonGetString(body, "verdict");
-   int    rsi        = (int)JsonGetDouble(body, "rsi");
-   bool   oversold   = StringFind(body, "\"rsi_oversold\":true")  >= 0;
-   bool   overbought = StringFind(body, "\"rsi_overbought\":true") >= 0;
-   int    vnum       = (int)JsonGetDouble(body, "verdict_num");
+   // Parser indicateurs GOM complets
+   string verdict       = JsonGetString(body, "verdict");
+   int    rsi           = (int)JsonGetDouble(body, "rsi");
+   double score_buy     = JsonGetDouble(body, "score_buy");
+   double score_sell    = JsonGetDouble(body, "score_sell");
+   double coherence     = JsonGetDouble(body, "coherence_pct");
+   double quality       = JsonGetDouble(body, "entry_quality");
+   bool   oversold      = StringFind(body, "\"rsi_oversold\":true")  >= 0;
+   bool   overbought    = StringFind(body, "\"rsi_overbought\":true") >= 0;
+   int    vnum          = (int)JsonGetDouble(body, "verdict_num");
+
+   // ⭐ NOUVEAU: Parser KOLA state (détecte consolidation)
+   string kolaState = "NEUTRAL";
+   if(StringFind(body, "\"kola\":\"NEAR BUY\"") >= 0 || StringFind(body, "\"kola_buy\"") >= 0)
+      kolaState = "NEAR BUY";
+   else if(StringFind(body, "\"kola\":\"NEAR SELL\"") >= 0 || StringFind(body, "\"kola_sell\"") >= 0)
+      kolaState = "NEAR SELL";
+
+   // 🔴 FILTRE CRITIQUE: Accepter UNIQUEMENT GOOD/PERFECT
+   //    vnum = -3 (PERFECT SELL), -2 (GOOD SELL), 0 (WAIT), +2 (GOOD BUY), +3 (PERFECT BUY)
+   bool isGoodOrPerfect = (vnum == 2 || vnum == 3 || vnum == -2 || vnum == -3);
+   bool isSimpleBuySell = (vnum == 1 || vnum == -1);  // "BUY"/"SELL" simples → ignorer
+   bool isWait         = (vnum == 0);                  // "WAIT" → attendre
+
+   // 🔴 DÉTECTION CONSOLIDATION: KOLA diverge du verdict
+   //    GOOD/PERFECT BUY mais KOLA=NEAR SELL → consolidation
+   //    GOOD/PERFECT SELL mais KOLA=NEAR BUY → consolidation
+   bool isConsolidation = false;
+   if(isGoodOrPerfect && vnum > 0 && StringCompare(kolaState, "NEAR SELL") == 0)
+   {
+      isConsolidation = true;  // Verdict BUY mais KOLA SELL → divergence
+   }
+   else if(isGoodOrPerfect && vnum < 0 && StringCompare(kolaState, "NEAR BUY") == 0)
+   {
+      isConsolidation = true;  // Verdict SELL mais KOLA BUY → divergence
+   }
 
    g_lastGOMVerdict    = verdict;
    g_lastGOMRSI        = rsi;
    g_gomRSIOversold    = oversold;
    g_gomRSIOverbought  = overbought;
    g_lastGOMVerdictNum = vnum;
+   g_lastKOLAState     = kolaState;
+   g_isConsolidation   = isConsolidation;
+   g_lastGOMQuality    = quality;
+   g_lastGOMCoherence  = coherence;
 
    // ── Scanner positions ouvertes ──────────────────────────────
+   // 🟡 Si CONSOLIDATION: Fermer positions si pas de profit significatif (fausse entrée)
+   if(isConsolidation)
+   {
+      for(int i = PositionsTotal() - 1; i >= 0; i--)
+      {
+         if(!posInfo.SelectByIndex(i)) continue;
+         string posSym = posInfo.Symbol();
+         if(posSym != sym) continue;
+
+         double profit = posInfo.Profit();
+         ulong  ticket = posInfo.Ticket();
+         int    dir    = posInfo.PositionType() == POSITION_TYPE_BUY ? 1 : -1;
+
+         // Fermer si profit < $5 USD (fausse entrée en consolidation)
+         if(profit < 5.0)
+         {
+            CTrade closeTrade;
+            closeTrade.SetDeviationInPoints(50);
+            if(closeTrade.PositionClose(ticket))
+            {
+               Print(StringFormat("[GOMScalp] 🟡 CONSOLIDATION DETECTED — Position %s fermée (profit=$%.2f < $5 seuil) — FAUSSE ENTRÉE",
+                     (dir==1?"BUY":"SELL"), profit));
+               SendWAEvent("CONSOLIDATION_CLOSE", posSym, posInfo.PriceCurrent(), profit,
+                           (dir==1?"BUY":"SELL"), posInfo.PriceOpen(),
+                           posInfo.StopLoss(), posInfo.TakeProfit(), posInfo.Volume());
+            }
+         }
+         else
+         {
+            // Profit > $5: Laisser tranquille (gain suffisant)
+            Print(StringFormat("[GOMScalp] 🟡 CONSOLIDATION — Position %s gardée (profit=$%.2f > $5) — trailing stop actif",
+                  (dir==1?"BUY":"SELL"), profit));
+         }
+      }
+      return;  // Sortir après gestion consolidation
+   }
+
+   int posCount = 0, dupCount = 0;
    for(int i = PositionsTotal() - 1; i >= 0; i--)
    {
       if(!posInfo.SelectByIndex(i)) continue;
@@ -1274,46 +1678,107 @@ void PollGOMScalpVerdict()
       int    dir    = posInfo.PositionType() == POSITION_TYPE_BUY ? 1 : -1;
       double profit = posInfo.Profit();
       ulong  ticket = posInfo.Ticket();
+      string comment = posInfo.Comment();
+      bool   isDuplicate = (StringFind(comment, "DUP") >= 0);
+
+      if(isDuplicate) dupCount++;
+      posCount++;
 
       bool   shouldClose = false;
       string closeReason = "";
 
-      if(dir == -1) // Position SELL
+      // 🎯 LOGIQUE DE DÉGRADATION: PERFECT → GOOD → WAIT/SIMPLE → fermer
+      if(dir == -1) // Position SELL en cours
       {
-         // Couper si GOM dit BUY ou WAIT + profit ou RSI survente extrême + profit
-         if(vnum > 0)
+         // Verdict dégradé de PERFECT/GOOD à WAIT/SIMPLE/BUY → fermer
+         if(isWait && profit >= 0)
          {
+            // WAIT: attendre avec patience, fermer si +profit sécurisation
             shouldClose = true;
-            closeReason = StringFormat("GOM=%s -> microcorrection BUY", verdict);
+            closeReason = "GOM=WAIT → calme attentif (verrouiller profit)";
          }
-         else if(StringCompare(verdict, "WAIT") == 0 && profit > 0)
+         else if(isSimpleBuySell && vnum > 0) // Verdict SELL dégradé en SIMPLE BUY
          {
             shouldClose = true;
-            closeReason = "GOM=WAIT + profit -> securisation";
+            closeReason = "GOM=SIMPLE BUY (dégradation SELL) → mouvement épuisé";
          }
-         else if(oversold && profit > 0)
+         else if(isGoodOrPerfect && vnum > 0) // GOOD/PERFECT BUY (opposé à SELL)
          {
+            // ⭐ Logique clé: si 2 positions et vnum > 0
+            if(isDuplicate)
+            {
+               shouldClose = true;  // Fermer SEULEMENT la position dupliquée
+               closeReason = "GOM=GOOD/PERFECT BUY (opposé) → fermer DUPLICATE seulement";
+            }
+            else if(dupCount == 0)  // Pas de duplicate, fermer position unique
+            {
+               shouldClose = true;
+               closeReason = "GOM=GOOD/PERFECT BUY (opposé) → fermer position unique";
+            }
+         }
+
+         // Indicateurs additionnels: RSI, Quality, Coherence
+         if(!shouldClose && score_sell > 0 && score_buy < score_sell - 1.5 && quality < 40)
+         {
+            // Qualité faible + SELL score dominé → risque, fermer si profit
+            if(profit > 0)
+            {
+               shouldClose = true;
+               closeReason = StringFormat("Quality faible (%.0f%%) + Coherence basse (%.0f%%) → sécurisation",
+                     quality, coherence);
+            }
+         }
+         else if(oversold && profit > 0 && !isGoodOrPerfect)
+         {
+            // RSI survente + pas de signal GOOD/PERFECT → rebond
             shouldClose = true;
-            closeReason = StringFormat("RSI=%d SURVENTE + profit -> rebond imminent", rsi);
+            closeReason = StringFormat("RSI=%d SURVENTE (rebond imminent)", rsi);
          }
       }
-      else if(dir == 1) // Position BUY
+      else if(dir == 1) // Position BUY en cours
       {
-         // Couper si GOM dit SELL ou WAIT + profit ou RSI surachat + profit
-         if(vnum < 0)
+         // Verdict dégradé de PERFECT/GOOD à WAIT/SIMPLE/SELL → fermer
+         if(isWait && profit >= 0)
          {
             shouldClose = true;
-            closeReason = StringFormat("GOM=%s -> correction SELL", verdict);
+            closeReason = "GOM=WAIT → calme attentif (verrouiller profit)";
          }
-         else if(StringCompare(verdict, "WAIT") == 0 && profit > 0)
+         else if(isSimpleBuySell && vnum < 0) // Verdict BUY dégradé en SIMPLE SELL
          {
             shouldClose = true;
-            closeReason = "GOM=WAIT + profit -> securisation";
+            closeReason = "GOM=SIMPLE SELL (dégradation BUY) → mouvement épuisé";
          }
-         else if(overbought && profit > 0)
+         else if(isGoodOrPerfect && vnum < 0) // GOOD/PERFECT SELL (opposé à BUY)
          {
+            // ⭐ Logique clé: si 2 positions et vnum < 0
+            if(isDuplicate)
+            {
+               shouldClose = true;  // Fermer SEULEMENT la position dupliquée
+               closeReason = "GOM=GOOD/PERFECT SELL (opposé) → fermer DUPLICATE seulement";
+            }
+            else if(dupCount == 0)  // Pas de duplicate, fermer position unique
+            {
+               shouldClose = true;
+               closeReason = "GOM=GOOD/PERFECT SELL (opposé) → fermer position unique";
+            }
+         }
+
+         // Indicateurs additionnels: RSI, Quality, Coherence
+         if(!shouldClose && score_buy > 0 && score_sell < score_buy - 1.5 && quality < 40)
+         {
+            // Qualité faible + BUY score dominé → risque, fermer si profit
+            if(profit > 0)
+            {
+               shouldClose = true;
+               closeReason = StringFormat("Quality faible (%.0f%%) + Coherence basse (%.0f%%) → sécurisation",
+                     quality, coherence);
+            }
+         }
+         else if(overbought && profit > 0 && !isGoodOrPerfect)
+         {
+            // RSI surachat + pas de signal GOOD/PERFECT → retournement
             shouldClose = true;
-            closeReason = StringFormat("RSI=%d SURACHAT + profit -> retournement imminent", rsi);
+            closeReason = StringFormat("RSI=%d SURACHAT (retournement imminent)", rsi);
          }
       }
 
@@ -1326,15 +1791,15 @@ void PollGOMScalpVerdict()
 
       if(closed)
       {
-         Print(StringFormat("[GOMScalp] Position %s %s fermee (profit=%.2f$) Raison: %s",
-               (dir==1?"BUY":"SELL"), posSym, profit, closeReason));
+         Print(StringFormat("[GOMScalp] Position %s %s fermée (profit=%.2f$ RSI=%d Quality=%.0f%% Score: BUY=%.1f SELL=%.1f) Raison: %s",
+               (dir==1?"BUY":"SELL"), posSym, profit, rsi, quality, score_buy, score_sell, closeReason));
 
          SendWAEvent("GOM_CLOSE", posSym, posInfo.PriceCurrent(), profit,
                      (dir==1?"BUY":"SELL"), posInfo.PriceOpen(),
                      posInfo.StopLoss(), posInfo.TakeProfit(), posInfo.Volume());
 
-         // Enregistrer état pour ré-entrée
-         if(GOMReEntryEnabled)
+         // Enregistrer état pour ré-entrée (SEULEMENT si GOOD/PERFECT reste valide)
+         if(GOMReEntryEnabled && isGoodOrPerfect)
          {
             int idx = g_gomReEntryCount;
             ArrayResize(g_gomReEntry, idx + 1);
@@ -1444,15 +1909,32 @@ void MonitorMCPPositions()
          profit  = PositionGetDouble(POSITION_PROFIT);
       }
 
-      // Duplication différée — dès que profit >= MCPDuplicateMinProfit
+      // 🔴 DUPLICATION — FILTRES STRICTS (pas pendant consolidation ou mauvais GOM)
       if(MCPDuplicateOnce && !g_mcpSignals[i].duplicated && posOpen
          && profit >= MCPDuplicateMinProfit)
       {
-         CTrade dupTrade;
-         dupTrade.SetExpertMagicNumber(MCPMagicNumber);
-         dupTrade.SetDeviationInPoints(30);
-         dupTrade.SetTypeFilling(ORDER_FILLING_IOC);
-         DuplicateMCPPosition(i, dupTrade);
+         // ❌ Rejeter duplication si consolidation active
+         if(g_isConsolidation)
+         {
+            Print(StringFormat("[TradeManager] 🟡 %s: Duplication BLOQUÉE — consolidation active (GOM=%s KOLA=%s)",
+                  sym, g_lastGOMVerdict, g_lastKOLAState));
+            // Pas de duplication jusqu'à sortie consolidation
+         }
+         // ❌ Rejeter si Quality trop faible (signal faible)
+         else if(g_lastGOMQuality < 50.0 || g_lastGOMCoherence < 60.0)
+         {
+            Print(StringFormat("[TradeManager] 🟡 %s: Duplication BLOQUÉE — Quality=%.0f%% (min 50%%) ou Coherence=%.0f%% (min 60%%)",
+                  sym, g_lastGOMQuality, g_lastGOMCoherence));
+         }
+         else
+         {
+            // ✅ Conditions OK → duplication acceptée
+            CTrade dupTrade;
+            dupTrade.SetExpertMagicNumber(MCPMagicNumber);
+            dupTrade.SetDeviationInPoints(30);
+            dupTrade.SetTypeFilling(ORDER_FILLING_IOC);
+            DuplicateMCPPosition(i, dupTrade);
+         }
       }
 
       // TP1 atteint (prix ou position fermée en profit)
@@ -1676,5 +2158,90 @@ void PrintOnce(string msg, int intervalSec)
    if(msg == s_lastMsg && (int)(TimeCurrent() - s_lastTs) < intervalSec) return;
    s_lastMsg = msg; s_lastTs = TimeCurrent();
    Print(msg);
+}
+
+//+------------------------------------------------------------------+
+//| GOM KOLA DASHBOARD — Affichage tableau en temps réel             |
+//+------------------------------------------------------------------+
+static datetime g_lastDashboardFetch = 0;
+static string g_lastGOMTableauJSON = "";
+
+void UpdateGOMDashboard()
+{
+   // Poll toutes les 10s pour ne pas surcharger
+   if((int)(TimeCurrent() - g_lastDashboardFetch) < 10) return;
+   g_lastDashboardFetch = TimeCurrent();
+
+   // GET /gom-tableau depuis AI server
+   string url = AIServerURL + "/gom-tableau?symbol=" + _Symbol;
+   string headers = "Content-Type: application/json\r\n";
+   char data[];
+   char result[];
+
+   int res = WebRequest("GET", url, headers, 5000, data, result, headers);
+   if(res != 200) return;
+
+   string json = CharArrayToString(result);
+   if(StringLen(json) == 0) return;
+
+   // Éviter les rafraîchissements redondants
+   if(json == g_lastGOMTableauJSON) return;
+   g_lastGOMTableauJSON = json;
+
+   // Parser et afficher
+   DisplayGOMDashboard(json);
+}
+
+void DisplayGOMDashboard(const string &json)
+{
+   // Extraction verdict
+   string verdict = JsonGetString(json, "verdict");
+   string v_str = verdict;
+   StringToUpper(v_str);
+
+   // Extraire verdict depuis nested object si nécessaire
+   int verdictPos = StringFind(json, "\"verdict\":{");
+   if(verdictPos >= 0)
+   {
+      string verdictObj = StringSubstr(json, verdictPos);
+      string v_field = JsonGetString(verdictObj, "verdict");
+      if(StringLen(v_field) > 0) v_str = v_field;
+   }
+
+   // Extraire scores et indicateurs
+   double score_buy = JsonGetDouble(json, "score_buy", 0);
+   double score_sell = JsonGetDouble(json, "score_sell", 0);
+   int rsi = (int)JsonGetDouble(json, "rsi", 50);
+   double spike = JsonGetDouble(json, "spike", 0);
+   double force = JsonGetDouble(json, "force", 0);
+   double coherence = JsonGetDouble(json, "coherence", 0);
+   double quality = JsonGetDouble(json, "quality", 0);
+
+   // Construire affichage
+   string display = StringFormat(
+      "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+      "📊 GOM KOLA DASHBOARD — %s\n"
+      "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+      "🔴 Verdict: %s\n"
+      "   Score BUY=%.1f | SELL=%.1f\n"
+      "   Spike=%.1f%% | Force=%.1f\n"
+      "   RSI=%d | Coherence=%.0f%%\n"
+      "   Quality=%.0f%%\n"
+      "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n",
+      TimeToString(TimeCurrent()),
+      v_str,
+      score_buy, score_sell,
+      spike, force,
+      rsi, coherence,
+      quality
+   );
+
+   // Afficher dans le journal et en notification
+   Print(display);
+
+   // Optionnel: drawer sur le chart si GOM actif
+   if(score_sell > 5.0 || score_buy > 5.0)
+      SendNotification(StringFormat("[%s] %s — BUY=%.1f SELL=%.1f",
+            TimeToString(TimeCurrent()), v_str, score_buy, score_sell));
 }
 //+------------------------------------------------------------------+
