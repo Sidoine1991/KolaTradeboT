@@ -268,7 +268,7 @@ void OnTimer()
    if(MCPDuplicateOnce)      MonitorManualDuplicates();
    if(UseGOMScalp)           PollGOMScalpVerdict();
    if(UseGOMScalp)           CheckGOMReEntry();
-   if(UseGOMScalp)           UpdateGOMDashboard();  // ⭐ Dashboard real-time
+   if(UseDashboard)          RefreshDashboard();  // ⭐ NEW Dashboard with colored boxes
 }
 
 void OnTick()
@@ -2208,7 +2208,8 @@ void PrintOnce(string msg, int intervalSec)
 static datetime g_lastDashboardFetch = 0;
 static string g_lastGOMTableauJSON = "";
 
-void UpdateGOMDashboard()
+// DEPRECATED: Use RefreshDashboard() instead
+void UpdateGOMDashboard_DISABLED()
 {
    // Poll toutes les 10s pour ne pas surcharger
    if((int)(TimeCurrent() - g_lastDashboardFetch) < 10) return;
