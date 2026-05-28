@@ -10,6 +10,11 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
+try:
+    import ssl_patch  # noqa: F401 — SSL Windows fix
+except ImportError:
+    import urllib3
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 from tv_mcp_client import fetch_tradingview_analysis, summarize_tv_analysis
 
@@ -192,6 +197,7 @@ def send_unified_whatsapp(message: str, phone: Optional[str] = None) -> bool:
             f"{_WHATSAPP_URL}/send-message",
             json={"phone": phone, "message": message},
             timeout=30,
+            verify=False,
         )
         if r.status_code == 200 and r.json().get("success"):
             print("  [OK] WhatsApp unifié envoyé")

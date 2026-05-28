@@ -5,11 +5,16 @@
 //|   Sortie   : TP fixe ATR × mult + trailing stop dès activation   |
 //|   Symboles : Boom 300/500/600/900/1000, Crash 300/500/600/900/1000|
 //|              PAINx / GAINx (Weltrade synthetics)                  |
-//|   v5 : stratégie SMC spike — BOS + CHOCH + Fib OTE + spike Z      |
-//|        entrée uniquement sur setup confirmé (plus imminence seule)|
+//|   v5.06 : panel2 coin bas-gauche (CORNER_LEFT_LOWER) — jamais     |
+//|           chevauché avec panel1 quelle que soit la hauteur chart  |
+//|   v5.05 : panel2 purge D2_* avant redessin — plus de chevauchement|
+//|   v5.04 : multi-symbole Market Watch, panel2 décalé, fermeture   |
+//|           immédiate sur spike en gain, notif pré-spike mobile     |
+//|   v5.03 : bridge TradingView /spike-tv-state (OB, EMA, sniper 80%%) |
+//|   v5    : stratégie SMC spike — BOS + CHOCH + Fib OTE + spike Z   |
 //+------------------------------------------------------------------+
 #property copyright "TradBOT"
-#property version   "5.02"
+#property version   "5.06"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -88,6 +93,14 @@ input int    InpEMAFast             = 9;         // EMA rapide (structure)
 input int    InpEMASlow             = 21;        // EMA lente (structure)
 input bool   InpRequireM1PushAlign  = true;      // Boom: exiger poussée M1 non baissière avant BUY
 
+input group "=== BRIDGE TRADINGVIEW (SpikeRider) ==="
+input bool   InpUseTVBridge         = true;      // Poll /spike-tv-state (comme TradeManager/GOM)
+input int    InpTVBridgePollSec     = 2;         // Intervalle poll TV (sec)
+input int    InpTVBridgeMaxAgeSec   = 20;        // Données TV expirées → pas d'entrée sniper
+input bool   InpRequireTVSniper     = false;     // true = entrées UNIQUEMENT si sniper TV >= seuil
+input double InpSniperMinConfidence = 80.0;      // Confiance min sniper (%%) — spike imminent
+input bool   InpBlockCounterTrendTV = true;      // Bloquer BUY Boom / SELL Crash si TV oppose
+
 input group "=== CONFIRMATION TRADINGVIEW (via ai_server) ==="
 input bool   InpUseTVConfirm        = true;      // Consulter indicateurs/TV avant ordre
 input int    InpTVConfirmIntervalSec= 45;        // Refresh max (évite spam WebRequest)
@@ -95,17 +108,24 @@ input int    InpTVConfirmMaxAgeSec  = 120;       // Biais TV trop vieux → refu
 
 input group "=== SORTIE RAPIDE (anti micro-pertes) ==="
 input bool   InpUseQuickExit        = true;      // Sortie rapide activée
-input int    InpMinHoldSec           = 50;        // Durée min avant toute sortie (Boom 600)
-input double InpQuickExitMinProfitUSD= 0.12;    // Profit min $ avant sortie (pas 0.01)
-input double InpQuickExitMinProfitBoom600= 0.20; // Profit min $ sur Boom 600
+input int    InpMinHoldSec           = 5;         // Durée min avant toute sortie (réduit: spike dure 2-5s)
+input double InpQuickExitMinProfitUSD= 0.05;    // Profit min $ avant sortie (abaissé pour capturer le spike)
+input double InpQuickExitMinProfitBoom600= 0.10; // Profit min $ sur Boom 600 (abaissé)
 input bool   InpExitOnSameSpikeBar  = false;     // false = ne pas fermer sur le spike d'entrée
 
 input group "=== FILTRES ==="
 input bool   InpCheckNewBar      = false;       // DÉSACTIVÉ — entrée immédiate sur spike live
 input int    InpMaxSpreadPoints  = 500;         // Spread élargi (synthétiques ont spreads larges)
 
+input group "=== FILTRE GLOBAL TF ==="
+input bool   InpRequireGlobalDir    = true;   // Exiger TF global dans la même direction (données fraîches uniquement)
+input int    InpGlobalMinConfidence = 70;     // Confiance TF global minimale (%)
+input double InpGlobalMinCoherence  = 60.0;  // Cohérence signal minimale (%)
+input double InpOTEBypassZScore     = 2.5;   // Z-Score fort → bypass OTE pour Boom/Crash (spike évident)
+
 input group "=== AFFICHAGE ==="
 input bool   InpShowDashboard    = true;
+input int    InpDashPanelWidth   = 420;  // Largeur zone panel (px depuis bord droit, CORNER_RIGHT_UPPER)
 input bool   InpDebug            = false;
 input ulong  InpMagic            = 20260524;
 
@@ -183,13 +203,32 @@ bool        g_realtimeSpikeActive   = false;
 string      g_realtimeSpikeDir      = "";
 datetime    g_lastRealtimeFetch     = 0;
 
-// TradingView bias (/mt5/tv-bias)
+// TradingView bias (/mt5/tv-bias + /spike-tv-state)
 string      g_tvDirection           = "NEUTRAL";
 string      g_tvStructureM15        = "";
 string      g_tvStructureH1         = "";
 double      g_tvBiasScore           = 0.0;
 datetime    g_lastTVFetch           = 0;
 datetime    g_lastTVAttempt         = 0;
+
+// Bridge SpikeRider — /spike-tv-state (OB, EMA, sniper)
+bool        g_spikeTVOk             = false;
+datetime    g_lastSpikeTVFetch      = 0;
+datetime    g_lastSpikeTVAttempt    = 0;
+double      g_tvImminencePct        = 0.0;
+double      g_tvSniperConfidence    = 0.0;
+bool        g_tvSniperReady         = false;
+bool        g_tvCounterTrend        = false;
+string      g_tvObBias              = "none";
+string      g_tvEmaTrend            = "neutral";
+string      g_tvSpikeDir            = "NEUTRAL";
+bool        g_tvSpikeDetected       = false;
+double      g_tvSpikeZ              = 0.0;
+bool        g_tvEntryValid          = false;
+// TF Global + cohérence (depuis /spike-tv-state — tf_global_dir/strength/coherence_pct)
+string      g_tvGlobalDir           = "";     // "BULL" | "BEAR" | "NEUT"
+int         g_tvGlobalStrength      = 0;      // 0-100 (confidence proxy)
+double      g_tvCoherencePct        = 0.0;    // 0-100
 
 // Stair detection — ID pour feedback ultérieur
 string      g_lastStairEventId      = "";   // uuid retourné par /stair/detect
@@ -213,6 +252,26 @@ struct TradeRecord
 };
 TradeRecord g_openTrades[10];
 int         g_openTradesCount = 0;
+
+// ══ MULTI-SYMBOLE — scan tous les Boom/Crash du Market Watch ════
+struct SymbolCtx
+{
+   string      sym;
+   bool        isBoom;
+   int         hATR, hRSI, hEMAFast, hEMASlow;
+   int         barsSince;
+   datetime    lastBar;
+   datetime    lastTrade;
+   datetime    lastEntryFail;
+   datetime    lastEntryBarTime;
+   SR_SMCSetup smc;
+};
+SymbolCtx g_syms[20];
+int       g_symCount = 0;
+
+// Anti-spam notifications pré-spike
+datetime  g_lastNotifTime = 0;
+double    g_lastNotifImm  = 0.0;
 
 //+------------------------------------------------------------------+
 //| DÉTECTION SYMBOLE                                                |
@@ -367,6 +426,23 @@ bool CanEnterInDirection(const ESpikeType dir, const bool isPreSpike,
       }
    }
 
+   if(InpUseTVBridge && InpBlockCounterTrendTV && g_spikeTVOk && g_tvCounterTrend)
+   {
+      reason = StringFormat("TV contre-tendance | EMA=%s OB=%s dir=%s",
+                            g_tvEmaTrend, g_tvObBias, g_tvDirection);
+      return false;
+   }
+
+   if(InpUseTVBridge && InpRequireTVSniper)
+   {
+      string snWhy;
+      if(!TVSniperAllowsEntry(dir, snWhy))
+      {
+         reason = snWhy;
+         return false;
+      }
+   }
+
    if(InpUseTVConfirm)
    {
       string tvWhy;
@@ -392,14 +468,61 @@ bool CanEnterInDirection(const ESpikeType dir, const bool isPreSpike,
    UpdateSMCContext();
    if(InpRequireSMC)
    {
+      // Sur Boom/Crash avec Z-score fort → bypass OTE (spike évident, pas besoin de retracement)
+      bool boomCrash  = IsBoom(_Symbol) || IsCrash(_Symbol);
+      bool zStrong    = spike.zScore >= InpOTEBypassZScore;
+      bool requireOTE = InpRequireOTE && !(boomCrash && zStrong);
       if(!SR_SMCAllowsEntry(g_smc, IsBoom(_Symbol), InpRequireBOS, InpRequireCHOCH,
-                            InpRequireOTE, !isPreSpike, spike.zScore, InpZScoreMin, reason))
+                            requireOTE, !isPreSpike, spike.zScore, InpZScoreMin, reason))
          return false;
    }
 
-   reason = StringFormat("OK %s | Z=%.2f | stair=%.0f%% | %s",
+   // Filtre TF global + cohérence — actif UNIQUEMENT si données TV fraîches et non-nulles
+   // (ne bloque pas quand le serveur est off ou données absentes)
+   bool globalDataValid = InpRequireGlobalDir && g_spikeTVOk
+                          && g_tvGlobalStrength > 0
+                          && StringLen(g_tvGlobalDir) > 0
+                          && (TimeCurrent() - g_lastSpikeTVFetch) < 120;
+   if(globalDataValid)
+   {
+      // 1. Cohérence minimale (seulement si valeur réelle disponible)
+      if(g_tvCoherencePct >= 5.0 && g_tvCoherencePct < InpGlobalMinCoherence)
+      {
+         reason = StringFormat("Cohérence insuffisante (%.0f%% < %.0f%%)",
+                               g_tvCoherencePct, InpGlobalMinCoherence);
+         return false;
+      }
+      // 2. Confiance TF global minimale
+      if(g_tvGlobalStrength < InpGlobalMinConfidence)
+      {
+         reason = StringFormat("TF global confiance insuffisante (%d%% < %d%%)",
+                               g_tvGlobalStrength, InpGlobalMinConfidence);
+         return false;
+      }
+      // 3. Direction TF global opposée = blocage (NEUT = pas de blocage)
+      if(g_tvGlobalDir != "NEUT" && g_tvGlobalDir != "NEUTRAL")
+      {
+         bool globalBull = (StringCompare(g_tvGlobalDir, "BULL") == 0);
+         bool globalBear = (StringCompare(g_tvGlobalDir, "BEAR") == 0);
+         if(dir == SPIKE_BUY && !globalBull)
+         {
+            reason = StringFormat("TF global=%s (%d%%) — BUY non autorisé",
+                                  g_tvGlobalDir, g_tvGlobalStrength);
+            return false;
+         }
+         if(dir == SPIKE_SELL && !globalBear)
+         {
+            reason = StringFormat("TF global=%s (%d%%) — SELL non autorisé",
+                                  g_tvGlobalDir, g_tvGlobalStrength);
+            return false;
+         }
+      }
+   }
+
+   reason = StringFormat("OK %s | Z=%.2f | stair=%.0f%% | %s | Global=%s(%d%%) Coh=%.0f%%",
                         (dir == SPIKE_BUY ? "BUY" : "SELL"),
-                        spike.zScore, spike.stairScore * 100.0, g_smc.tag);
+                        spike.zScore, spike.stairScore * 100.0, g_smc.tag,
+                        g_tvGlobalDir, g_tvGlobalStrength, g_tvCoherencePct);
    return true;
 }
 double GetATRMean()
@@ -548,8 +671,9 @@ bool TVChartConfirmsEntry(const ESpikeType dir, string &reason)
    {
       if(!FetchTVChartBias(true))
       {
-         reason = "TradingView: pas de données (lancer CDP + ai_server)";
-         return false;
+         // Fail-open : si TV indisponible, ne pas bloquer — laisser passer
+         reason = "TV indisponible — entrée autorisée sans confirmation TV";
+         return true;
       }
    }
 
@@ -591,6 +715,134 @@ bool TVChartConfirmsEntry(const ESpikeType dir, string &reason)
    }
 
    reason = "TV OK " + tv + " | M15=" + g_tvStructureM15 + " H1=" + g_tvStructureH1;
+   return true;
+}
+
+//+------------------------------------------------------------------+
+//| Bridge TradingView — /spike-tv-state (SpikeRider + TradeManager)  |
+//+------------------------------------------------------------------+
+bool PollSpikeTVState(const bool forceRefresh = false)
+{
+   if(!InpUseTVBridge) return true;
+
+   if(!forceRefresh && g_lastSpikeTVFetch != 0 &&
+      TimeCurrent() - g_lastSpikeTVFetch < InpTVBridgePollSec)
+      return g_spikeTVOk;
+
+   if(g_lastSpikeTVAttempt != 0 && TimeCurrent() - g_lastSpikeTVAttempt < 1)
+      return g_spikeTVOk;
+   g_lastSpikeTVAttempt = TimeCurrent();
+
+   string sym_enc = _Symbol;
+   StringReplace(sym_enc, " ", "%20");
+   string url = InpAIServerURL + "/spike-tv-state?symbol=" + sym_enc;
+   if(forceRefresh) url += "&refresh=true";
+
+   string body;
+   if(!HttpGet(url, body))
+   {
+      if(InpDebug) Print("[SpikeRider] ⚠️ /spike-tv-state indisponible");
+      return false;
+   }
+
+   g_spikeTVOk = JsonExtractBool(body, "ok");
+   if(!g_spikeTVOk && StringFind(body, "\"ok\":true") >= 0)
+      g_spikeTVOk = true;
+
+   string dir = JsonExtractString(body, "direction");
+   if(StringLen(dir) > 0) g_tvDirection = dir;
+
+   string m15 = JsonExtractString(body, "structure_m15");
+   string h1  = JsonExtractString(body, "structure_h1");
+   if(StringLen(m15) > 0) g_tvStructureM15 = m15;
+   if(StringLen(h1) > 0)  g_tvStructureH1  = h1;
+
+   g_tvBiasScore        = JsonExtractDouble(body, "bias_score");
+   g_tvImminencePct     = JsonExtractDouble(body, "imminence_pct");
+   g_tvSniperConfidence = JsonExtractDouble(body, "sniper_confidence");
+   g_tvSniperReady      = JsonExtractBool(body, "sniper_ready");
+   g_tvCounterTrend     = JsonExtractBool(body, "counter_trend");
+   g_tvSpikeDetected    = JsonExtractBool(body, "spike_detected");
+   g_tvEntryValid       = JsonExtractBool(body, "entry_valid");
+
+   string ob = JsonExtractString(body, "ob_bias");
+   if(StringLen(ob) > 0) g_tvObBias = ob;
+   string emaTr = JsonExtractString(body, "ema_trend");
+   if(StringLen(emaTr) > 0) g_tvEmaTrend = emaTr;
+   string spDir = JsonExtractString(body, "spike_direction");
+   if(StringLen(spDir) > 0) g_tvSpikeDir = spDir;
+
+   double z = JsonExtractDouble(body, "spike_z");
+   if(z >= 0) g_tvSpikeZ = z;
+
+   // TF Global + cohérence — nécessaires pour le filtre direction global
+   string gDir = JsonExtractString(body, "tf_global_dir");
+   if(StringLen(gDir) > 0) { g_tvGlobalDir = gDir; StringToUpper(g_tvGlobalDir); }
+   double gStr = JsonExtractDouble(body, "tf_global_strength");
+   if(gStr > 0) g_tvGlobalStrength = (int)gStr;
+   double coh = JsonExtractDouble(body, "coherence_pct");
+   if(coh > 0) g_tvCoherencePct = coh;
+
+   g_lastSpikeTVFetch = TimeCurrent();
+   g_lastTVFetch      = TimeCurrent();
+
+   if(InpDebug || forceRefresh)
+      PrintFormat("[SpikeRider] TV bridge %s | sniper=%s %.0f%% | imm=%.0f%% | %s | CT=%s | OB=%s EMA=%s",
+                  _Symbol, (g_tvSniperReady ? "READY" : "wait"),
+                  g_tvSniperConfidence, g_tvImminencePct, g_tvDirection,
+                  (g_tvCounterTrend ? "OUI" : "non"), g_tvObBias, g_tvEmaTrend);
+
+   return g_spikeTVOk;
+}
+
+bool TVSniperAllowsEntry(const ESpikeType dir, string &reason)
+{
+   if(!InpRequireTVSniper) return true;
+
+   if(g_lastSpikeTVFetch == 0 || TimeCurrent() - g_lastSpikeTVFetch > InpTVBridgeMaxAgeSec)
+   {
+      if(!PollSpikeTVState(true))
+      {
+         reason = "TV sniper: pas de données (poller + ai_server)";
+         return false;
+      }
+   }
+
+   if(g_tvCounterTrend)
+   {
+      reason = StringFormat("TV sniper bloqué — contre-tendance (EMA=%s OB=%s)",
+                            g_tvEmaTrend, g_tvObBias);
+      return false;
+   }
+
+   ESpikeType want = IsBoom(_Symbol) ? SPIKE_BUY : SPIKE_SELL;
+   if(dir != want)
+   {
+      reason = "direction EA != symbole synthétique";
+      return false;
+   }
+
+   if(!g_tvSniperReady || g_tvSniperConfidence < InpSniperMinConfidence)
+   {
+      reason = StringFormat("Sniper TV %.0f%% < %.0f%% (imm=%.0f%% spike=%s)",
+                            g_tvSniperConfidence, InpSniperMinConfidence,
+                            g_tvImminencePct, (g_tvSpikeDetected ? g_tvSpikeDir : "non"));
+      return false;
+   }
+
+   if(IsBoom(_Symbol) && g_tvSpikeDir == "SELL")
+   {
+      reason = "TV spike SELL — pas de BUY Boom";
+      return false;
+   }
+   if(IsCrash(_Symbol) && g_tvSpikeDir == "BUY")
+   {
+      reason = "TV spike BUY — pas de SELL Crash";
+      return false;
+   }
+
+   reason = StringFormat("SNIPER TV OK %.0f%% | imm=%.0f%% | Z=%.2f | OB=%s",
+                         g_tvSniperConfidence, g_tvImminencePct, g_tvSpikeZ, g_tvObBias);
    return true;
 }
 
@@ -1673,8 +1925,43 @@ bool EnterSpikeTrade(const SpikeResult &spike, double imminence, const bool isPr
 }
 
 //+------------------------------------------------------------------+
-//| SORTIE RAPIDE — anti micro-pertes (Boom 600)                     |
-//| Hold min + profit min $ + pas de sortie sur la bougie d'entrée   |
+//| NOTIFICATION PRÉ-SPIKE — alerte AVANT le spike (imminence)      |
+//+------------------------------------------------------------------+
+void CheckAndNotifyPreSpike(double imminence)
+{
+   // Seuils : alerte progressive selon imminence
+   bool alert70  = (imminence >= 70.0  && g_lastNotifImm < 70.0);
+   bool alert50  = (imminence >= 50.0  && g_lastNotifImm < 50.0);
+   bool alertNew = (alert70 || alert50);
+
+   // Anti-spam : 1 notification par tranche, cooldown 30s min
+   if(!alertNew) return;
+   if(TimeCurrent() - g_lastNotifTime < 30) return;
+
+   bool   boom   = IsBoom(_Symbol);
+   int    freq   = GetEffectiveSpikeFrequency();
+   double prog   = (freq > 0) ? MathMin((double)g_barsSinceLastSpike / freq * 100.0, 100.0) : 0.0;
+
+   string lvl    = (imminence >= 70.0) ? "🔥 IMMINENT" : "⚡ ALERTE";
+   string dir    = boom ? "BUY (hausse)" : "SELL (baisse)";
+   string msg    = StringFormat("%s %s | %s | Imm=%.0f%% Barres=%d/%d (%.0f%%)",
+                                lvl, _Symbol, dir, imminence,
+                                g_barsSinceLastSpike, freq, prog);
+
+   Alert(msg);
+   SendNotification(msg);   // notification mobile MT5
+   PrintFormat("[SpikeRider] 🔔 NOTIF: %s", msg);
+
+   g_lastNotifTime = TimeCurrent();
+   g_lastNotifImm  = imminence;
+}
+
+// Réinitialiser le seuil de notification après un spike
+void ResetNotifState() { g_lastNotifImm = 0.0; }
+
+//+------------------------------------------------------------------+
+//| SORTIE RAPIDE — fermeture immédiate dès spike capté en gain      |
+//| Priorité : spike en profit > hold minimum (scalping spike)       |
 //+------------------------------------------------------------------+
 void ManageQuickExit(const bool spikeActive = false)
 {
@@ -1696,32 +1983,89 @@ void ManageQuickExit(const bool spikeActive = false)
       datetime openTime = (datetime)PositionGetInteger(POSITION_TIME);
       int holdSec = (int)(TimeCurrent() - openTime);
 
-      // Anti micro-pertes : ne rien fermer trop tôt
-      if(holdSec < InpMinHoldSec)
-         continue;
-
       datetime barNow = iTime(_Symbol, InpTF, 0);
       bool sameSpikeBar = (!InpExitOnSameSpikeBar && g_lastEntryBarTime > 0 &&
                            barNow <= g_lastEntryBarTime);
 
-      // Spike après entrée : seulement nouvelle bougie + profit suffisant
-      if(spikeActive && TimeCurrent() > openTime && !sameSpikeBar)
+      // ── PRIORITÉ 1 : spike capté pendant position ouverte → fermer si gain ──
+      // Pas de hold minimum ici : le spike EST la sortie cible du scalping
+      if(spikeActive && !sameSpikeBar && profit > 0.0)
       {
-         if(profit >= minProfit)
-         {
-            g_trade.PositionClose(ticket, 10);
-            PrintFormat("[SpikeRider] ⚡ Sortie spike (profit=$%.2f, hold=%ds) ticket=%llu",
-                        profit, holdSec, ticket);
-         }
+         g_trade.PositionClose(ticket, 10);
+         ResetNotifState();
+         PrintFormat("[SpikeRider] ⚡ Sortie spike capturé (profit=$%.2f, hold=%ds) ticket=%llu",
+                     profit, holdSec, ticket);
          continue;
       }
+
+      // ── PRIORITÉ 1b : flèche clignotante ACTIVE (imminence >= seuil) + profit réalisé ──
+      // La flèche sur la bougie courante = signal que le spike est en cours → sortir
+      bool blinkActive = (g_barsSinceLastSpike > 0);  // barres écoulées = spike vraisemblable
+      if(blinkActive && !sameSpikeBar && holdSec >= 2 && profit > 0.0)
+      {
+         double px = IsBoom(_Symbol) ? SymbolInfoDouble(_Symbol, SYMBOL_BID)
+                                     : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+         double openPx = PositionGetDouble(POSITION_PRICE_OPEN);
+         bool   inProfit = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY)
+                           ? (px > openPx) : (px < openPx);
+         if(inProfit && profit >= InpQuickExitMinProfitUSD * 0.5)
+         {
+            g_trade.PositionClose(ticket, 10);
+            ResetNotifState();
+            PrintFormat("[SpikeRider] 🎯 Sortie flèche active (profit=$%.2f, hold=%ds) ticket=%llu",
+                        profit, holdSec, ticket);
+            continue;
+         }
+      }
+
+      // ── PRIORITÉ 2 : sortie objectif profit après hold minimum ──
+      if(holdSec < InpMinHoldSec) continue;
 
       if(profit >= minProfit)
       {
          g_trade.PositionClose(ticket, 10);
+         ResetNotifState();
          PrintFormat("[SpikeRider] ✅ Sortie objectif | profit=$%.2f hold=%ds ticket=%llu",
                      profit, holdSec, ticket);
       }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| FERMETURE GLOBALE — tous Boom/Crash en gain sur spike capté      |
+//| Appelée dès qu'un spike est détecté sur le chart courant.        |
+//| Ferme toutes les positions Boom/Crash (tout magic, tout symbole) |
+//| dès que profit + swap > 0, même infime.                          |
+//+------------------------------------------------------------------+
+void CloseAllBoomCrashOnSpike()
+{
+   if(!InpUseQuickExit) return;
+
+   int closed = 0;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0 || !PositionSelectByTicket(ticket)) continue;
+
+      string sym = PositionGetString(POSITION_SYMBOL);
+      if(!IsBoom(sym) && !IsCrash(sym)) continue;   // Boom/Crash uniquement
+
+      double profit = PositionGetDouble(POSITION_PROFIT)
+                    + PositionGetDouble(POSITION_SWAP);
+      if(profit <= 0.0) continue;                    // En gain même infime
+
+      bool ok = g_trade.PositionClose(ticket, 10);
+      if(ok)
+      {
+         closed++;
+         PrintFormat("[SpikeRider] ⚡ CloseAll SPIKE → %s profit=$%.2f ticket=%llu",
+                     sym, profit, ticket);
+      }
+   }
+   if(closed > 0)
+   {
+      ResetNotifState();
+      PrintFormat("[SpikeRider] ✅ %d position(s) fermée(s) sur spike global", closed);
    }
 }
 
@@ -1834,6 +2178,26 @@ void ObjRect(string suffix, datetime t1, double p1, datetime t2, double p2, colo
 
 void ObjLabel(string suffix, string txt, int x, int y, color clr, int fontSize=9)
 {
+   // CORNER_RIGHT_UPPER : XDISTANCE = distance depuis bord DROIT de l'écran.
+   // On convertit la marge gauche originale (x=8) en offset depuis la droite :
+   // le panneau commence à InpDashPanelWidth px du bord droit, la marge interne est x.
+   int xRight = MathMax(4, InpDashPanelWidth - x);
+   string n = ObjName(suffix);
+   if(ObjectFind(0, n) < 0)
+      ObjectCreate(0, n, OBJ_LABEL, 0, 0, 0);
+   ObjectSetString(0, n, OBJPROP_TEXT, txt);
+   ObjectSetInteger(0, n, OBJPROP_XDISTANCE, xRight);
+   ObjectSetInteger(0, n, OBJPROP_YDISTANCE, y);
+   ObjectSetInteger(0, n, OBJPROP_COLOR, clr);
+   ObjectSetInteger(0, n, OBJPROP_FONTSIZE, fontSize);
+   ObjectSetInteger(0, n, OBJPROP_CORNER, CORNER_RIGHT_UPPER);  // coin droit — ne chevauche pas SMC (gauche)
+   ObjectSetInteger(0, n, OBJPROP_ANCHOR, ANCHOR_LEFT_UPPER);   // texte s'étend vers la droite
+   ObjectSetInteger(0, n, OBJPROP_BACK, false);
+}
+
+// Panel 2 — coin BAS-GAUCHE, y compté depuis le bas
+void ObjLabel2(string suffix, string txt, int x, int y, color clr, int fontSize=8)
+{
    string n = ObjName(suffix);
    if(ObjectFind(0, n) < 0)
       ObjectCreate(0, n, OBJ_LABEL, 0, 0, 0);
@@ -1842,13 +2206,19 @@ void ObjLabel(string suffix, string txt, int x, int y, color clr, int fontSize=9
    ObjectSetInteger(0, n, OBJPROP_YDISTANCE, y);
    ObjectSetInteger(0, n, OBJPROP_COLOR, clr);
    ObjectSetInteger(0, n, OBJPROP_FONTSIZE, fontSize);
-   ObjectSetInteger(0, n, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+   ObjectSetInteger(0, n, OBJPROP_CORNER, CORNER_LEFT_LOWER);
    ObjectSetInteger(0, n, OBJPROP_BACK, false);
 }
 
-// Supprime tous les objets SR_ de ce symbole
+// Supprime tous les objets SR_ de ce symbole + labels panel 2
 void ClearAllSRObjects()
 {
+   // Panel 2 (coin bas-gauche) — noms sans préfixe SR_
+   ObjectDelete(0, ObjName("D2_Title"));
+   ObjectDelete(0, ObjName("D2_Empty"));
+   for(int si = 0; si < 20; si++)
+      ObjectDelete(0, ObjName("D2_Sym" + IntegerToString(si)));
+
    int total = ObjectsTotal(0);
    string prefix = "SR_" + _Symbol + "_";
    for(int i = total - 1; i >= 0; i--)
@@ -2219,7 +2589,11 @@ void DrawChartIndicators(const SpikeResult &spike, double imminence)
    }
 
    // ── 8. PANEL DASHBOARD (coins haut-gauche, labels empilés) ──────
-   // Ligne de séparation + fond sombre
+   // Supprimer les labels conditionnels à chaque cycle pour éviter le chevauchement
+   ObjDel("D_Prior");
+   ObjDel("D_TVBridge");
+   ObjDel("D_TVStruct");
+
    int yBase = 20;   // point de départ Y
    int yStep = 16;   // espacement entre lignes
 
@@ -2286,6 +2660,29 @@ void DrawChartIndicators(const SpikeResult &spike, double imminence)
             g_realtimeSpikeActive ? "SPIKE!" : "---"), 8, yBase, angelClr, 9);
    yBase += yStep;
 
+   // TradingView bridge (sniper / OB / EMA)
+   if(InpUseTVBridge)
+   {
+      color tvClr = g_tvSniperReady ? clrLimeGreen :
+                    (g_tvCounterTrend ? clrTomato : clrGold);
+      int ageTv = (g_lastSpikeTVFetch > 0) ? (int)(TimeCurrent() - g_lastSpikeTVFetch) : -1;
+      ObjLabel("D_TVBridge",
+               StringFormat("TV %s | Sniper %s %.0f%% | imm=%.0f%% | Z=%.2f | OB=%s EMA=%s | %ds",
+                            g_tvDirection,
+                            (g_tvSniperReady ? "READY" : "---"),
+                            g_tvSniperConfidence, g_tvImminencePct, g_tvSpikeZ,
+                            g_tvObBias, g_tvEmaTrend, ageTv),
+               8, yBase, tvClr, 9);
+      yBase += yStep;
+      ObjLabel("D_TVStruct",
+               StringFormat("M15=%s H1=%s | spike=%s | CT=%s",
+                            g_tvStructureM15, g_tvStructureH1,
+                            (g_tvSpikeDetected ? g_tvSpikeDir : "non"),
+                            (g_tvCounterTrend ? "BLOQUE" : "ok")),
+               8, yBase, tvClr, 8);
+      yBase += yStep;
+   }
+
    // SL/TP en cours
    if(atr > 0)
    {
@@ -2307,6 +2704,52 @@ void DrawChartIndicators(const SpikeResult &spike, double imminence)
    ObjLabel("D_SRLeg",
             "S/R: H1(fin) H4(med) D1(epais)  PP=tiret-pt  R=rouge  S=vert",
             8, yBase, C'120,120,120', 8);
+   yBase += yStep + 4;
+
+   // ── PANEL 2 : MULTI-SYMBOLE — coin BAS-GAUCHE ──────────────────
+   // Purger tous les anciens labels D2_* avant redessin
+   ObjDel("D2_Title");
+   ObjDel("D2_Empty");
+   for(int si = 0; si < 20; si++)
+      ObjDel("D2_Sym" + IntegerToString(si));
+
+   // y2 croît depuis le bas : ligne 0 = toute en bas, ligne 1 = au-dessus, etc.
+   // On commence par compter combien de lignes on va dessiner pour placer le titre en premier
+   int nLines   = (g_symCount > 0) ? g_symCount : 1;
+   int y2Step   = 14;
+   int y2Bottom = 8;   // marge basse
+
+   // Titre (ligne la plus haute du bloc = index le plus grand)
+   int y2Title = y2Bottom + (nLines + 1) * y2Step;
+   ObjLabel2("D2_Title", "--- Multi-Symboles Actifs ---", 8, y2Title, C'160,160,200', 8);
+
+   if(g_symCount == 0)
+   {
+      ObjLabel2("D2_Empty", "Aucun symbole Boom/Crash dans Market Watch",
+                8, y2Bottom + y2Step, clrDimGray, 8);
+   }
+   else
+   {
+      // Premier symbole = ligne tout en bas (y2Bottom + y2Step)
+      // Dernier symbole = juste sous le titre
+      for(int si = 0; si < g_symCount; si++)
+      {
+         string nm   = g_syms[si].sym;
+         bool   boom = g_syms[si].isBoom;
+         int    bars = g_syms[si].barsSince;
+         int    freq = 600;
+         const string nums[] = {"1000","900","600","500","300"};
+         for(int ni = 0; ni < 5; ni++)
+            if(StringFind(nm, nums[ni]) >= 0) { freq = (int)StringToInteger(nums[ni]); break; }
+         double pct  = (freq > 0) ? MathMin((double)bars / (double)freq * 100.0, 100.0) : 0.0;
+         color  sClr = (pct >= 80.0) ? clrYellow : (pct >= 50.0 ? clrGold : clrDimGray);
+         string symLbl = StringFormat("%-22s %s  %3d/%d (%.0f%%)",
+                                      nm, boom ? "BUY " : "SELL", bars, freq, pct);
+         // si=0 → y le plus bas, si=nLines-1 → y le plus haut (juste sous titre)
+         int yPos = y2Bottom + (si + 1) * y2Step;
+         ObjLabel2("D2_Sym" + IntegerToString(si), symLbl, 8, yPos, sClr, 8);
+      }
+   }
 
    ChartRedraw(0);
 }
@@ -2395,11 +2838,49 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
    TradeRecord rec = g_openTrades[idx];
    RemoveOpenTradeAt(idx);
 
-   // Spike confirmé → réinitialiser compteur
+   // Spike confirmé → réinitialiser compteur + notif
    g_barsSinceLastSpike = 0;
    g_lastSpikeBar       = TimeCurrent();
+   ResetNotifState();
+
+   // Reset aussi dans le contexte multi-symbole si le symbole correspond
+   for(int si = 0; si < g_symCount; si++)
+      if(g_syms[si].sym == _Symbol) g_syms[si].barsSince = 0;
 
    PostTradeFeedback(rec, exitPrice, profit);
+}
+
+//+------------------------------------------------------------------+
+//| SCAN MARKET WATCH — charger tous les Boom/Crash disponibles     |
+//+------------------------------------------------------------------+
+void ScanMarketWatchSymbols()
+{
+   g_symCount = 0;
+   int total = SymbolsTotal(true);  // true = Market Watch uniquement
+   for(int i = 0; i < total && g_symCount < 20; i++)
+   {
+      string s = SymbolName(i, true);
+      if(!IsSupportedSymbol(s)) continue;
+
+      // Vérifier que le symbole n'est pas déjà ajouté
+      bool dup = false;
+      for(int k = 0; k < g_symCount; k++) if(g_syms[k].sym == s) { dup = true; break; }
+      if(dup) continue;
+
+      g_syms[g_symCount].sym        = s;
+      g_syms[g_symCount].isBoom     = IsBoom(s);
+      g_syms[g_symCount].barsSince  = 0;
+      g_syms[g_symCount].lastBar    = 0;
+      g_syms[g_symCount].lastTrade  = 0;
+      g_syms[g_symCount].lastEntryFail  = 0;
+      g_syms[g_symCount].lastEntryBarTime = 0;
+      g_syms[g_symCount].hATR       = iATR(s, InpTF, InpATRPeriod);
+      g_syms[g_symCount].hRSI       = iRSI(s, InpTF, InpRSIPeriod, PRICE_CLOSE);
+      g_syms[g_symCount].hEMAFast   = iMA(s, InpTF, InpEMAFast, 0, MODE_EMA, PRICE_CLOSE);
+      g_syms[g_symCount].hEMASlow   = iMA(s, InpTF, InpEMASlow, 0, MODE_EMA, PRICE_CLOSE);
+      g_symCount++;
+   }
+   PrintFormat("[SpikeRider] %d symboles Boom/Crash détectés dans Market Watch", g_symCount);
 }
 
 //+------------------------------------------------------------------+
@@ -2408,7 +2889,7 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
 int OnInit()
 {
    if(!IsSupportedSymbol(_Symbol))
-      Print("[SpikeRider] ⚠️ Symbole non supporté: ", _Symbol);
+      Print("[SpikeRider] ⚠️ Symbole chart non supporté (normal si multi-symb): ", _Symbol);
 
    g_hATR = iATR(_Symbol, InpTF, InpATRPeriod);
    g_hRSI = iRSI(_Symbol, InpTF, InpRSIPeriod, PRICE_CLOSE);
@@ -2417,9 +2898,12 @@ int OnInit()
    if(g_hATR == INVALID_HANDLE || g_hRSI == INVALID_HANDLE ||
       g_hEMAFast == INVALID_HANDLE || g_hEMASlow == INVALID_HANDLE)
    {
-      Print("[SpikeRider] ❌ Erreur création indicateurs");
+      Print("[SpikeRider] ❌ Erreur création indicateurs chart principal");
       return INIT_FAILED;
    }
+
+   // Scanner tous les Boom/Crash du Market Watch
+   ScanMarketWatchSymbols();
 
    g_trade.SetExpertMagicNumber(InpMagic);
    g_dayStartBalance    = AccountInfoDouble(ACCOUNT_BALANCE);
@@ -2449,14 +2933,20 @@ int OnInit()
    FetchSpikeLevels();
 
    UpdateSMCContext();
-   if(InpUseTVConfirm)
+   if(InpUseTVBridge)
+      PollSpikeTVState(true);
+   else if(InpUseTVConfirm)
       FetchTVChartBias(true);
 
-   PrintFormat("[SpikeRider] ✅ Init v5.01 | %s | %s | SMC=%s TV=%s | hold>=%ds profit>$%.2f | Magic=%llu",
+   if(InpUseTVBridge)
+      EventSetTimer(MathMax(1, InpTVBridgePollSec));
+
+   PrintFormat("[SpikeRider] ✅ Init v5.03 | %s | %s | SMC=%s | TVbridge=%s sniper=%s | Magic=%llu",
                _Symbol, (IsBoom(_Symbol) ? "BUY only" : "SELL only"),
                (InpRequireSMC ? "ON" : "OFF"),
-               (InpUseTVConfirm ? "ON" : "OFF"),
-               InpMinHoldSec, InpQuickExitMinProfitUSD, InpMagic);
+               (InpUseTVBridge ? "ON" : "OFF"),
+               (InpRequireTVSniper ? "ON" : "OFF"),
+               InpMagic);
    return INIT_SUCCEEDED;
 }
 
@@ -2465,14 +2955,35 @@ int OnInit()
 //+------------------------------------------------------------------+
 void OnDeinit(const int reason)
 {
+   EventKillTimer();
    if(g_hATR != INVALID_HANDLE)     { IndicatorRelease(g_hATR);     g_hATR = INVALID_HANDLE; }
    if(g_hRSI != INVALID_HANDLE)     { IndicatorRelease(g_hRSI);     g_hRSI = INVALID_HANDLE; }
    if(g_hEMAFast != INVALID_HANDLE){ IndicatorRelease(g_hEMAFast); g_hEMAFast = INVALID_HANDLE; }
    if(g_hEMASlow != INVALID_HANDLE){ IndicatorRelease(g_hEMASlow); g_hEMASlow = INVALID_HANDLE; }
+
+   // Libérer les handles multi-symboles
+   for(int si = 0; si < g_symCount; si++)
+   {
+      if(g_syms[si].hATR    != INVALID_HANDLE) IndicatorRelease(g_syms[si].hATR);
+      if(g_syms[si].hRSI    != INVALID_HANDLE) IndicatorRelease(g_syms[si].hRSI);
+      if(g_syms[si].hEMAFast!= INVALID_HANDLE) IndicatorRelease(g_syms[si].hEMAFast);
+      if(g_syms[si].hEMASlow!= INVALID_HANDLE) IndicatorRelease(g_syms[si].hEMASlow);
+   }
+   g_symCount = 0;
+
    CancelPendingOrder("deinit");
    ClearAllSRObjects();
    Comment("");
    Print("[SpikeRider] Arrêté sur ", _Symbol);
+}
+
+//+------------------------------------------------------------------+
+//| TIMER — poll TradingView bridge                                  |
+//+------------------------------------------------------------------+
+void OnTimer()
+{
+   if(InpUseTVBridge)
+      PollSpikeTVState(false);
 }
 
 //+------------------------------------------------------------------+
@@ -2482,9 +2993,13 @@ void OnTick()
 {
    if(!IsSupportedSymbol(_Symbol)) return;
 
+   if(InpUseTVBridge && g_lastSpikeTVFetch == 0)
+      PollSpikeTVState(true);
+
    ResetDayIfNeeded();
    SpikeResult spikeLive = DetectSpike();
    bool spikeNow = (spikeLive.type != SPIKE_NONE);
+   if(spikeNow) CloseAllBoomCrashOnSpike();  // fermer tous Boom/Crash en gain sur spike
    ManageQuickExit(spikeNow);   // hold min + profit min avant sortie
    ManageTrailing();
    ManagePendingAge();
@@ -2512,6 +3027,25 @@ void OnTick()
    SpikeResult spike = spikeLive;
    double stairNow   = CalcStairScore(IsBoom(_Symbol));
    double imminence  = CalcImminenceScore(spike.atr, spike.rsi, stairNow);
+
+   // ── NOTIFICATION PRÉ-SPIKE : alerter AVANT le spike ─────────────
+   // Déclenché dès que l'imminence dépasse 50% ou 70%, avant toute entrée
+   if(!HasPosition())
+      CheckAndNotifyPreSpike(imminence);
+   else
+      ResetNotifState();   // position ouverte : réarmer pour le prochain cycle
+
+   // ── SCAN MULTI-SYMBOLE : mettre à jour barsSince pour le panel 2 ─
+   for(int si = 0; si < g_symCount; si++)
+   {
+      datetime bTime = iTime(g_syms[si].sym, InpTF, 0);
+      if(bTime != 0 && bTime != g_syms[si].lastBar)
+      {
+         g_syms[si].lastBar = bTime;
+         g_syms[si].barsSince++;
+      }
+   }
+
    UpdateDashboard(spike, imminence);
    DrawChartIndicators(spike, imminence);
 
@@ -2526,7 +3060,9 @@ void OnTick()
    // ── Entrée A : spike Z + structure SMC (BOS/CHOCH/OTE) ───────────
    if(canTryEntry && spike.type != SPIKE_NONE)
    {
-      if(InpUseTVConfirm)
+      if(InpUseTVBridge)
+         PollSpikeTVState(false);
+      else if(InpUseTVConfirm)
          FetchTVChartBias(false);
 
       CancelPendingOrder("setup spike");
@@ -2542,8 +3078,12 @@ void OnTick()
          PrintFormat("[SpikeRider] Spike Z=%.2f bloqué: %s", spike.zScore, why);
    }
 
-   // ── Entrée B : pré-spike/imminence (option 1) ─────────────────────
-   if(canTryEntry && !entryDone && InpPreSpikeEnabled && imminence >= InpImminenceThresh)
+   // ── Entrée B : pré-spike/imminence (option 1) — priorité TV si sniper actif ─
+   bool tvPreOk = (!InpUseTVBridge || !InpRequireTVSniper ||
+                   (g_tvSniperReady && g_tvImminencePct >= InpImminenceThresh));
+   if(canTryEntry && !entryDone && InpPreSpikeEnabled && tvPreOk &&
+      (imminence >= InpImminenceThresh ||
+       (InpUseTVBridge && g_tvImminencePct >= InpImminenceThresh)))
    {
       SpikeResult pre;
       pre.type       = IsBoom(_Symbol) ? SPIKE_BUY : SPIKE_SELL;

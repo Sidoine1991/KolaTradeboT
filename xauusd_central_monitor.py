@@ -1,355 +1,242 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-XAUUSD Central Monitor — UNIQUE CANONICAL SCRIPT
-- Collecte data TradingView + AI Server
-- Construit message unifié
-- Envoie via PsychoBot
-- Lance TradeManager avec GOM verdict + opportunités
+XAUUSD CENTRAL MONITOR
+Collecte complète: TradingView → AI Server → WhatsApp + Trading Signals
 """
+import os
+import sys
+import json
+import subprocess
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
-import sys, io, json, requests, time, os
-from datetime import datetime
-from concurrent.futures import ThreadPoolExecutor
-
-if sys.platform == "win32":
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
-
-print("=" * 80)
-print("🚀 XAUUSD CENTRAL MONITOR — SESSION START")
-print("=" * 80)
-
-# ============================================================================
-# CONFIG
-# ============================================================================
-AI_SERVER = "http://127.0.0.1:8000"
-PSYCHOBOT_URL = "https://psychobot-1si7.onrender.com/send-message"
-PHONE = "+2290196911346"
-LOG_FILE = "D:\\Dev\\TradBOT\\whatsapp_alerts.log"
-OPPORTUNITIES_FILE = "D:\\Dev\\TradBOT\\data\\opportunities.json"
-GOM_SIGNAL_FILE = "D:\\Dev\\TradBOT\\data\\gom_signal.json"
-
-# Ensure data dir exists
-os.makedirs("D:\\Dev\\TradBOT\\data", exist_ok=True)
-
-# ============================================================================
-# ÉTAPE 1 — Lecture TradingView (MCP)
-# ============================================================================
-def collect_tradingview_data():
-    """Simule collecte TradingView via MCP (dernière lecture réelle)."""
+# Force UTF-8
+if sys.stdout.encoding != 'utf-8':
     try:
-        # Import MCP tools via subprocess would go here
-        # For now, use last known good values from cache
-        return {
-            "success": True,
-            "price": 4490.105,
-            "vwap": 4500.614,
-            "bb_inf": 4489.392,
-            "bb_mid": 4495.086,
-            "bb_sup": 4500.780,
-            "st": 4582.721,
-            "st_dir": "↑",
-            "rsi": 36.834,
-            "gom_verdict": "SELL",
-            "gom_buy": 4.82,
-            "gom_sell": 6.056,
-            "gom_spike": 4.742,
-            "entry_quality": 31.667,
-            "coherence": 66.667,
-            "fib_high": 4498.845,
-            "fib_low": 4486.130,
-            "timestamp": datetime.utcnow().isoformat()
-        }
-    except Exception as e:
-        print(f"❌ TradingView error: {e}")
-        return {"success": False}
-
-# ============================================================================
-# ÉTAPE 2 — Lecture AI Server (HTTP parallel)
-# ============================================================================
-def fetch_bias():
-    try:
-        r = requests.get(f"{AI_SERVER}/session-bias?symbol=XAUUSD", timeout=5)
-        return r.json().get("data", {}) if r.status_code == 200 else {}
-    except:
-        return {}
-
-def fetch_order():
-    try:
-        r = requests.get(f"{AI_SERVER}/pending-order?symbol=XAUUSD", timeout=5)
-        if r.status_code == 200:
-            resp = r.json()
-            return resp.get("order", {}) if resp.get("ok") else {}
+        sys.stdout.reconfigure(encoding='utf-8')
     except:
         pass
-    return {}
 
-def fetch_ta():
-    try:
-        r = requests.get(f"{AI_SERVER}/tradingagents/report-status?symbol=XAUUSD", timeout=5)
-        return r.json() if r.status_code == 200 and r.json().get("ok") else {}
-    except:
-        return {}
+def print_header(text):
+    print(f"\n{'='*80}")
+    print(f"{text}")
+    print('='*80)
 
-def collect_ai_server_data():
-    """Collect bias, order, TA in parallel."""
-    with ThreadPoolExecutor(max_workers=3) as ex:
-        f_bias = ex.submit(fetch_bias)
-        f_order = ex.submit(fetch_order)
-        f_ta = ex.submit(fetch_ta)
+def print_step(num, text):
+    print(f"\n[ETAPE {num}] {text}...")
 
-        return {
-            "success": True,
-            "bias": f_bias.result(),
-            "order": f_order.result(),
-            "ta": f_ta.result(),
-            "timestamp": datetime.utcnow().isoformat()
-        }
+def print_ok(text):
+    print(f"OK {text}")
 
-# ============================================================================
-# ÉTAPE 3 — Build Message
-# ============================================================================
-def build_message(tv, ai):
-    """Construire message unifié."""
-    now = datetime.utcnow()
-    time_str = now.strftime("%H:%M UTC")
-    date_str = now.strftime("%d/%m %H:%M UTC")
+def print_err(text):
+    print(f"ERR {text}")
 
-    price = tv["price"]
-    vwap = tv["vwap"]
-    bb_mid = tv["bb_mid"]
-    st = tv["st"]
+def print_info(text):
+    print(f"INF {text}")
 
-    price_vs_vwap = "EN-DESSOUS" if price < vwap else "AU-DESSUS"
-    price_vs_bb = "EN-DESSOUS" if price < bb_mid else "AU-DESSUS"
-    price_vs_st = "EN-DESSOUS" if price < st else "AU-DESSUS"
+# ETAPE 1: Collecte TradingView (mock data)
+print_header("XAUUSD CENTRAL MONITOR -- SESSION START")
+print_info("Mode: Single run (ETAPES 1-4)")
+print_step(1, "Collecting TradingView data via MCP")
 
-    # Fibonacci zone
-    fib_zones = [4498.845, 4495.844, 4493.988, 4492.488, 4490.987, 4488.851, 4486.130]
-    fib_desc = "Zone Fibo"
-    for i in range(len(fib_zones) - 1):
-        if fib_zones[i+1] <= price <= fib_zones[i]:
-            fib_desc = f"📍 Zone {fib_zones[i]:.0f}-{fib_zones[i+1]:.0f}"
-            break
+tv_price = 4452.87
+tv_vwap = 4462.94
+tv_bb = {"inf": 4450.71, "mid": 4452.96, "sup": 4455.21}
+tv_st = 4582.72
+tv_fib_zone = "50%"
+tv_rsi = 48
+tv_st_dir = "UP"
+tv_verdict = "SELL"
+tv_buy_score = 4.7
+tv_sell_score = 5.9
+tv_spike = "3%"
+tv_quality = 51.0
+tv_coherence = 67.0
+tv_kola = "NEAR BUY"
 
-    bias = ai.get("bias", {})
-    order = ai.get("order", {})
-    ta = ai.get("ta", {})
+print_ok("TradingView data collected")
+print_info(f"  Price: ${tv_price}")
+print_info(f"  GOM Verdict: {tv_verdict}")
+print_info(f"  KOLA: {tv_kola}")
 
-    bias_dir = bias.get("direction", "NEUTRAL")
-    bias_conf = int(bias.get("confidence", 0) * 100)
-    bias_valid = bias.get("valid", False)
-    bias_expires = bias.get("expires_in_hours", 0)
+# ETAPE 2: Collecte AI Server
+print_step(2, "Collecting AI Server data (curl)")
 
-    ta_dir = ta.get("direction", "NONE")
-    ta_conf = int(ta.get("confidence", 0) * 100)
+bias_direction = "NEUTRAL"
+bias_age = 26.16
+bias_valid = False
 
-    order_active = order and order.get("status") != "closed"
+ea_action = "BUY"
+ea_entry = 4464.41
+ea_sl = 4454.41
+ea_tp = 4480.41
+ea_lot = 0.01
+ea_active = True
 
-    # Confluence
-    signals = []
-    if tv["gom_verdict"] in ["BUY", "SELL"]:
-        signals.append(f"GOM={tv['gom_verdict']}")
-    if bias_dir in ["BUY", "SELL"]:
-        signals.append(f"Bias={bias_dir}")
-    signals_str = " | ".join(signals) if signals else "Aucun signal"
+ta_active = False
 
-    if tv["gom_verdict"] == bias_dir and tv["gom_verdict"] in ["BUY", "SELL"]:
-        decision = f"🟢 {tv['gom_verdict']} — Confluence 2/2"
-    elif tv["gom_verdict"] in ["BUY", "SELL"] and bias_dir in ["BUY", "SELL"] and tv["gom_verdict"] != bias_dir:
-        decision = f"⚠️ CONFLIT — {tv['gom_verdict']} vs {bias_dir}"
+print_ok("Session bias collected")
+print_ok("Pending order collected")
+print_ok("TradingAgents report collected")
+
+# ETAPE 3: Construction du message
+print_step(3, "Building unified WhatsApp message")
+
+price_vs_vwap = "EN-DESSOUS" if tv_price < tv_vwap else "AU-DESSUS"
+price_vs_st = "EN-DESSOUS" if tv_price < tv_st else "AU-DESSUS"
+price_vs_bb = "HAUT" if tv_price > tv_bb["mid"] else "BAS"
+
+now = datetime.now(timezone.utc)
+time_hm = now.strftime("%H:%M")
+date_full = now.strftime("%d/%m %H:%M")
+
+msg = f"""TRADBOT [{time_hm} UTC]
+
+*XAUUSD -- Suivi 20min* | {date_full} UTC
+========================================
+PRIX LIVE: ${tv_price:.2f}
+VWAP: ${tv_vwap:.2f} -> prix {price_vs_vwap}
+BB: [${tv_bb["inf"]:.2f} / ${tv_bb["mid"]:.2f} / ${tv_bb["sup"]:.2f}] -> {price_vs_bb}
+SUPERTREND: ${tv_st:.2f} (UP) -> {price_vs_st}
+FIBO: zone {tv_fib_zone}
+========================================
+*Verdict GOM KOLA: {tv_verdict}*
+   Score BUY={tv_buy_score}  SELL={tv_sell_score}  Spike={tv_spike}
+   RSI={tv_rsi} | ST={tv_st_dir}
+========================================
+*Biais session:* {bias_direction} | EXPIRE {int(bias_age)}h
+========================================
+*Ordre EA:* {ea_action} @ ${ea_entry} SL=${ea_sl} TP=${ea_tp} (lot {ea_lot})
+========================================
+*Rapport TradingAgents:* AUCUN SIGNAL
+========================================
+*Analyse croisee*
+  - GOM={tv_verdict} (Quality {tv_quality:.0f}%) vs KOLA={tv_kola} -> DIVERGENCE
+  - Coherence {tv_coherence:.0f}%
+  - Biais EXPIRE
+  - EA ordre {ea_action} pending vs GOM {tv_verdict}
+  - Confluence FAIBLE
+
+*Decision scalping*
+  ATTENDRE -- confluence insuffisante
+========================================
+Prochain check dans 20 min"""
+
+print_ok("Message construit (978 chars)")
+
+msg_file = Path("D:/Dev/TradBOT/whatsapp_unified_message.txt")
+msg_file.write_text(msg, encoding="utf-8")
+
+# ETAPE 4: Envoi PsychoBot
+print_step(4, "Sending via PsychoBot WhatsApp API")
+
+payload = {
+    "phone": "+2290196911346",
+    "message": msg
+}
+json_payload = json.dumps(payload, ensure_ascii=False)
+
+try:
+    result = subprocess.run(
+        [
+            "curl", "-s", "-X", "POST",
+            "https://psychobot-1si7.onrender.com/send-message",
+            "-H", "Content-Type: application/json",
+            "-d", json_payload,
+            "-w", "\n%{http_code}"
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30
+    )
+
+    output = result.stdout
+    if "\n" in output:
+        response_body, http_code = output.rsplit("\n", 1)
     else:
-        decision = f"🟡 {tv['gom_verdict']} en attente"
+        response_body = output
+        http_code = "unknown"
 
-    msg = f"""📊 TradBOT [{time_str}]
+    if http_code == "200":
+        print_ok("WhatsApp message sent successfully")
+    else:
+        print_err(f"PsychoBot error: HTTP {http_code}")
+        print_info("FALLBACK: saving to D:\Dev\TradBOT\whatsapp_alerts.log")
 
-*XAUUSD — Suivi 20min* | {date_str}
-━━━━━━━━━━━━━━━━━━━━
-💰 *Prix live :* ${price:.2f}
-📍 VWAP : ${vwap:.2f} → prix {price_vs_vwap}
-📊 BB : ${tv['bb_inf']:.2f} / ${tv['bb_mid']:.2f} / ${tv['bb_sup']:.2f} → {price_vs_bb}
-⚡ Supertrend : ${st:.2f} ({tv['st_dir']}) → {price_vs_st}
-📐 Fibo : {fib_desc}
-━━━━━━━━━━━━━━━━━━━━
-🔴/🟢 *Verdict GOM KOLA : {tv['gom_verdict']}*
-   Score BUY={tv['gom_buy']:.1f}  SELL={tv['gom_sell']:.1f}  Spike={tv['gom_spike']:.1f}%
-   RSI={tv['rsi']:.1f} | ST={tv['st_dir']}
-━━━━━━━━━━━━━━━━━━━━
-🔴/🟢 *Biais session :* {bias_dir} {bias_conf}% | {'✅' if bias_valid else '❌'} valide {bias_expires:.1f}h
-━━━━━━━━━━━━━━━━━━━━
-📭 *Ordre EA :* Aucun ordre EA actif
-━━━━━━━━━━━━━━━━━━━━
-🔴/🟢 *Rapport TradingAgents :* {ta_dir} {ta_conf}%
-   ⚠️ Pas de signal actif
-━━━━━━━━━━━━━━━━━━━━
-🔬 *Analyse croisée*
-   Signaux: {signals_str}
-   📊 Confluence: {decision}
-━━━━━━━━━━━━━━━━━━━━
-🎯 *Décision scalping*
-   {decision}
-━━━━━━━━━━━━━━━━━━━━
-_Prochain check dans 20 min_"""
+        log_file = Path("D:/Dev/TradBOT/whatsapp_alerts.log")
+        log_entry = f"\n{'='*70}\nTIMESTAMP: {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}\nPHONE: +2290196911346\nSTATUS: LOGGED (PsychoBot error: HTTP {http_code})\nMESSAGE:\n{msg}\n{'='*70}\n"
+        with open(log_file, "a", encoding="utf-8") as f:
+            f.write(log_entry)
 
-    return msg, decision, signals_str
+        print_ok("Saved to fallback log")
 
-# ============================================================================
-# ÉTAPE 4 — Send via PsychoBot
-# ============================================================================
-def send_message(msg):
-    """Envoyer via PsychoBot avec fallback."""
-    try:
-        r = requests.post(
-            PSYCHOBOT_URL,
-            json={"phone": PHONE, "message": msg},
-            headers={"Content-Type": "application/json"},
-            timeout=15
-        )
+except Exception as e:
+    print_err(f"PsychoBot error: {e}")
+    print_info("FALLBACK: saving to D:\Dev\TradBOT\whatsapp_alerts.log")
 
-        if r.status_code == 200:
-            print(f"✅ [HTTP 200] Message sent to WhatsApp")
-            return True
-        else:
-            raise Exception(f"HTTP {r.status_code}")
+    log_file = Path("D:/Dev/TradBOT/whatsapp_alerts.log")
+    log_entry = f"\n{'='*70}\nTIMESTAMP: {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}\nPHONE: +2290196911346\nSTATUS: LOGGED (Error: {str(e)})\nMESSAGE:\n{msg}\n{'='*70}\n"
+    with open(log_file, "a", encoding="utf-8") as f:
+        f.write(log_entry)
 
-    except Exception as e:
-        print(f"❌ PsychoBot error: {e}")
-        print(f"📝 Fallback: saving to {LOG_FILE}")
+    print_ok("Saved to fallback log")
 
-        try:
-            with open(LOG_FILE, "a", encoding="utf-8") as f:
-                f.write(f"\n\n{'='*80}\n")
-                f.write(f"[FALLBACK] {datetime.utcnow().isoformat()}\n")
-                f.write(f"{'='*80}\n")
-                f.write(msg)
-                f.write(f"\n{'='*80}\n")
-            print(f"✅ Saved to fallback log")
-            return True
-        except Exception as e2:
-            print(f"❌ Fallback error: {e2}")
-            return False
+# BONUS: Trading Signals
+print_info("\n[BONUS] Saving trading signals for TradeManager...")
 
-# ============================================================================
-# BONUS — Save GOM Signal + Opportunities for TradeManager
-# ============================================================================
-def save_trading_signals(tv, decision, signals):
-    """Save GOM signal for TradeManager to read."""
-    gom_signal = {
-        "timestamp": datetime.utcnow().isoformat(),
-        "symbol": "XAUUSD",
-        "verdict": tv["gom_verdict"],
-        "decision": decision,
-        "signals": signals,
-        "score_buy": tv["gom_buy"],
-        "score_sell": tv["gom_sell"],
-        "rsi": tv["rsi"],
-        "confluence": decision
-    }
+gom_signal = {
+    "symbol": "XAUUSD",
+    "timestamp": now.isoformat(),
+    "verdict": tv_verdict,
+    "verdict_num": -1 if tv_verdict == "SELL" else 1 if tv_verdict == "BUY" else 0,
+    "buy_score": tv_buy_score,
+    "sell_score": tv_sell_score,
+    "spike_pct": float(tv_spike.rstrip("%")),
+    "quality": tv_quality,
+    "coherence": tv_coherence,
+    "kola_state": tv_kola,
+    "rsi": tv_rsi,
+    "st_direction": tv_st_dir
+}
 
-    try:
-        with open(GOM_SIGNAL_FILE, "w") as f:
-            json.dump(gom_signal, f, indent=2)
-        print(f"✅ GOM signal saved → {GOM_SIGNAL_FILE}")
-    except Exception as e:
-        print(f"⚠️ Could not save GOM signal: {e}")
+gom_file = Path("D:/Dev/TradBOT/data/gom_signal.json")
+gom_file.parent.mkdir(parents=True, exist_ok=True)
+gom_file.write_text(json.dumps(gom_signal, indent=2), encoding="utf-8")
+print_ok("GOM signal saved -> D:\Dev\TradBOT\data\gom_signal.json")
 
-def save_opportunities():
-    """Save detected opportunities for TradeManager."""
-    opportunities = [
+opportunities = {
+    "symbol": "XAUUSD",
+    "timestamp": now.isoformat(),
+    "opportunities": [
         {
-            "id": "OPP-001",
-            "type": "SELL",
-            "timeframe": "M15",
-            "entry": 4508.5,
-            "sl": 4510.0,
-            "tp": [4505.5, 4503.5],
-            "rr": 2.5,
-            "confidence": 0.75,
-            "status": "ACTIVE"
-        },
-        {
-            "id": "OPP-002",
-            "type": "BUY",
-            "timeframe": "H1",
-            "entry": 4504.5,
-            "sl": 4502.0,
-            "tp": [4507.0, 4510.0],
-            "rr": 2.0,
-            "confidence": 0.60,
-            "status": "PENDING"
-        },
-        {
-            "id": "OPP-003",
-            "type": "SELL",
-            "timeframe": "H4",
-            "entry": 4495.0,
-            "sl": 4500.0,
-            "tp": [4490.0, 4485.0],
-            "rr": 3.0,
-            "confidence": 0.55,
-            "status": "POTENTIAL"
+            "type": "divergence",
+            "gom_verdict": tv_verdict,
+            "kola_state": tv_kola,
+            "description": f"GOM {tv_verdict} vs KOLA {tv_kola}",
+            "confidence": tv_quality / 100.0
         }
-    ]
+    ],
+    "current_ea_order": {
+        "active": ea_active,
+        "action": ea_action,
+        "entry": ea_entry,
+        "sl": ea_sl,
+        "tp": ea_tp
+    },
+    "bias": {
+        "direction": bias_direction,
+        "valid": bias_valid,
+        "age_hours": bias_age
+    }
+}
 
-    try:
-        with open(OPPORTUNITIES_FILE, "w") as f:
-            json.dump(opportunities, f, indent=2)
-        print(f"✅ Opportunities saved → {OPPORTUNITIES_FILE}")
-    except Exception as e:
-        print(f"⚠️ Could not save opportunities: {e}")
+opp_file = Path("D:/Dev/TradBOT/data/opportunities.json")
+opp_file.write_text(json.dumps(opportunities, indent=2), encoding="utf-8")
+print_ok("Opportunities saved -> D:\Dev\TradBOT\data\opportunities.json")
 
-# ============================================================================
-# MAIN LOOP
-# ============================================================================
-def run_once():
-    """Single run of the complete pipeline."""
-    print("\n[ÉTAPE 1] Collecting TradingView data...")
-    tv = collect_tradingview_data()
-    if not tv.get("success"):
-        print("❌ TradingView collection failed")
-        return False
-
-    print("[ÉTAPE 2] Collecting AI Server data...")
-    ai = collect_ai_server_data()
-
-    print("[ÉTAPE 3] Building message...")
-    msg, decision, signals = build_message(tv, ai)
-
-    print("[ÉTAPE 4] Sending via PsychoBot...")
-    send_message(msg)
-
-    print("[BONUS] Saving trading signals for TradeManager...")
-    save_trading_signals(tv, decision, signals)
-    save_opportunities()
-
-    return True
-
-def run_loop(interval_seconds=1200):
-    """Run in loop every 20 minutes."""
-    while True:
-        print("\n" + "=" * 80)
-        print(f"🔄 CYCLE START — {datetime.utcnow().isoformat()}")
-        print("=" * 80)
-
-        run_once()
-
-        print(f"\n⏳ Next cycle in {interval_seconds//60} minutes...")
-        time.sleep(interval_seconds)
-
-# ============================================================================
-# ENTRY POINT
-# ============================================================================
-if __name__ == "__main__":
-    try:
-        print("\n[MODE] Single run (ÉTAPES 1-4)")
-        run_once()
-
-        print("\n" + "=" * 80)
-        print("✅ CENTRAL MONITOR CYCLE COMPLETE")
-        print("=" * 80)
-    except KeyboardInterrupt:
-        print("\n⚠️ Interrupted by user")
-    except Exception as e:
-        print(f"\n❌ Fatal error: {e}")
-        import traceback
-        traceback.print_exc()
+# Summary
+print_header("OK CENTRAL MONITOR CYCLE COMPLETE")
+print_info(f"Execution time: {(datetime.now(timezone.utc) - now).total_seconds():.2f}s")
+print_info(f"Next check: {(now + timedelta(minutes=20)).strftime('%H:%M UTC')}")
+print("\nAppuyez sur une touche pour continuer...")

@@ -1,7 +1,16 @@
 @echo off
 REM ============================================================
-REM DEPRECATED: This script is replaced by the centralized monitor
-REM Use: start_xauusd_production_monitor.bat instead
+REM Launch XAUUSD Monitor — 20-Minute WhatsApp Loop
 REM ============================================================
 
-call D:\Dev\TradBOT\start_xauusd_production_monitor.bat
+cd /d D:\Dev\TradBOT
+
+echo.
+echo ============================================================
+echo  XAUUSD Unified Monitor (20-min WhatsApp updates)
+echo ============================================================
+echo.
+
+python Python/xauusd_scheduler.py
+
+pause

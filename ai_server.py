@@ -29,7 +29,7 @@ from dotenv import load_dotenv
 
 from uuid import uuid4
 from dataclasses import dataclass, asdict
-from fastapi import FastAPI, HTTPException, Request, Body, status, Query
+from fastapi import FastAPI, HTTPException, Request, Body, status, Query, BackgroundTasks
 from fastapi.exceptions import RequestValidationError
 from starlette.requests import Request as StarletteRequest
 from fastapi.middleware.cors import CORSMiddleware
@@ -21451,8 +21451,19 @@ def _maybe_promote_gom_to_pending_order(sym: str, record: dict) -> None:
         return
 
     vnum = int(record.get("verdict_num") or 0)
+    buy = float(record.get("score_buy") or 0)
+    sell = float(record.get("score_sell") or 0)
+    gap_thr = float(os.getenv("GOM_STRONG_SCORE_GAP", "1.0"))
+
     if vnum not in (2, 3, -2, -3):
-        return
+        if sell - buy >= gap_thr:
+            vnum = -2
+            record = {**record, "verdict_num": vnum, "verdict": record.get("verdict") or "GOOD SELL"}
+        elif buy - sell >= gap_thr:
+            vnum = 2
+            record = {**record, "verdict_num": vnum, "verdict": record.get("verdict") or "GOOD BUY"}
+        else:
+            return
 
     quality = float(record.get("entry_quality") or 0)
     coherence = float(record.get("coherence_pct") or 0)
@@ -21462,10 +21473,12 @@ def _maybe_promote_gom_to_pending_order(sym: str, record: dict) -> None:
         return
 
     kola = (record.get("kola_state") or "---").upper()
-    if vnum > 0 and "NEAR SELL" in kola:
-        return
-    if vnum < 0 and "NEAR BUY" in kola:
-        return
+    strong_gap = abs(sell - buy) >= gap_thr
+    if not strong_gap:
+        if vnum > 0 and "NEAR SELL" in kola:
+            return
+        if vnum < 0 and "NEAR BUY" in kola:
+            return
 
     direction = "BUY" if vnum > 0 else "SELL"
     existing = _PENDING_ORDER_STORE.get(sym)
@@ -21500,6 +21513,22 @@ def _maybe_promote_gom_to_pending_order(sym: str, record: dict) -> None:
     )
 
 
+def _store_gom_verdict_payload_bg(payload: GomVerdictPayload) -> None:
+    """Exécuté en background — synchronise tableau et auto-trade sans bloquer le POST."""
+    try:
+        sym, record = _gom_verdict_record_from_payload(payload)
+        _sync_gom_tableau_from_verdict(sym, record)
+        _maybe_promote_gom_to_pending_order(sym, record)
+        logger.info(
+            f"[GomVerdict] {sym} verdict={record['verdict']} num={record['verdict_num']} "
+            f"buy={record['score_buy']:.1f} sell={record['score_sell']:.1f} "
+            f"rsi={record.get('rsi')} quality={record.get('entry_quality')}% "
+            f"coherence={record.get('coherence_pct')}%"
+        )
+    except Exception as e:
+        logger.error(f"[GomVerdict] background task error: {e}")
+
+
 def _store_gom_verdict_payload(payload: GomVerdictPayload) -> dict:
     sym, record = _gom_verdict_record_from_payload(payload)
     _GOM_VERDICT_STORE[sym] = record
@@ -21515,9 +21544,16 @@ def _store_gom_verdict_payload(payload: GomVerdictPayload) -> dict:
 
 
 @app.post("/gom-verdict")
-async def set_gom_verdict(payload: GomVerdictPayload):
-    """Stocke le verdict GOM KOLA + indicateurs (JSON MCP ou bridge)."""
-    return _store_gom_verdict_payload(payload)
+async def set_gom_verdict(payload: GomVerdictPayload, background_tasks: BackgroundTasks):
+    """Stocke le verdict GOM KOLA + indicateurs (JSON MCP ou bridge).
+    Répond immédiatement pour ne pas bloquer le poller — le reste en background."""
+    sym = _resolve_symbol(payload.symbol)
+    # Stockage synchrone minimal — juste le strict nécessaire pour que le GET soit à jour
+    sym_full, record = _gom_verdict_record_from_payload(payload)
+    _GOM_VERDICT_STORE[sym_full] = record
+    # Opérations lourdes (tableau sync, auto-trade) en arrière-plan
+    background_tasks.add_task(_store_gom_verdict_payload_bg, payload)
+    return {"ok": True, "symbol": sym_full, "verdict": record["verdict"], "verdict_num": record["verdict_num"]}
 
 
 @app.post("/gom-verdict/webhook")
@@ -21537,6 +21573,20 @@ async def get_gom_verdict(symbol: str = "XAUUSD"):
     verdict = _GOM_VERDICT_STORE.get(sym)
     if not verdict:
         return {"ok": False, "symbol": sym, "verdict": None, "message": "Aucun verdict GOM stocké"}
+    # Retourner ok:false si WAIT sans scores — poller non actif ou TV sans GOM visible
+    if (verdict.get("verdict_num", 0) == 0
+            and float(verdict.get("score_buy") or 0) == 0
+            and float(verdict.get("score_sell") or 0) == 0):
+        return {"ok": False, "symbol": sym, "verdict": "WAIT",
+                "message": "GOM stale — is gom_verdict_poller running?"}
+    # Refuser si données trop vieilles (> 2 min) — TV/poller déconnecté
+    try:
+        age = (datetime.utcnow() - datetime.fromisoformat(verdict["timestamp"])).total_seconds()
+        if age > 120:
+            return {"ok": False, "symbol": sym, "verdict": verdict.get("verdict"),
+                    "message": f"GOM stale ({int(age)}s) — relancer gom_verdict_poller.py"}
+    except Exception:
+        pass
     return {"ok": True, "symbol": sym, **verdict}
 
 @app.get("/pending-order")
@@ -22230,7 +22280,9 @@ async def get_spike_tv_state(symbol: str, refresh: bool = False):
             sys.path.insert(0, str(py_dir))
         from tv_mcp_client import fetch_tradingview_analysis, summarize_tv_analysis
 
-        raw = fetch_tradingview_analysis(sym, mode="both")
+        # Appel bloquant → thread pool pour ne pas bloquer l'event loop
+        loop = asyncio.get_event_loop()
+        raw = await loop.run_in_executor(None, lambda: fetch_tradingview_analysis(sym, mode="both"))
         summary = summarize_tv_analysis(raw)
         if not summary.get("success"):
             err = summary.get("error") or raw.get("error") or "tv_analysis_failed"
@@ -22420,6 +22472,30 @@ async def get_gom_tableau_complete(symbol: str = "XAUUSD"):
                 "error": "No GOM data available"
             }
 
+        # Rejeter si données trop vieilles (> 2 min) — TV/poller déconnecté
+        _ts_str = verdict_data.get("timestamp") or tableau_data.get("timestamp")
+        if _ts_str:
+            try:
+                _age = (datetime.utcnow() - datetime.fromisoformat(_ts_str)).total_seconds()
+                if _age > 120:
+                    return {
+                        "ok": False, "symbol": sym,
+                        "error": f"GOM stale ({int(_age)}s) — relancer gom_verdict_poller.py"
+                    }
+            except Exception:
+                pass
+
+        # Rejeter si le seul verdict stocké est WAIT avec scores à zéro — poller arrêté
+        v_num = verdict_data.get("verdict_num", 0)
+        v_buy = float(verdict_data.get("score_buy") or 0)
+        v_sell = float(verdict_data.get("score_sell") or 0)
+        if not tableau_data and v_num == 0 and v_buy == 0 and v_sell == 0:
+            return {
+                "ok": False,
+                "symbol": sym,
+                "error": "GOM data stale (WAIT with no scores — is gom_verdict_poller running?)"
+            }
+
         # Helper pour accéder nested dict en sécurité
         def safe_get(d, *keys, default=None):
             for key in keys:
@@ -22503,5 +22579,6 @@ if __name__ == "__main__":
         host=HOST,
         port=API_PORT,
         reload=False,
-        log_level="info"
+        log_level="info",
+        timeout_keep_alive=5,  # libérer les connexions idle plus vite
     )

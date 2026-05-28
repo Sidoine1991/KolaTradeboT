@@ -9,6 +9,10 @@ import sys
 import io
 import requests
 from pathlib import Path
+try:
+    import ssl_patch  # noqa: F401 — SSL Windows fix
+except ImportError:
+    pass
 
 # Fix Windows encoding
 if sys.platform == "win32":

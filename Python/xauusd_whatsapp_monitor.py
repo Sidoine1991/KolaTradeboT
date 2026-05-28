@@ -26,6 +26,10 @@ from typing import Optional, Dict, Any
 
 import requests
 import websockets
+try:
+    import ssl_patch  # noqa: F401 — SSL Windows fix
+except ImportError:
+    pass
 
 # ─────────────────────────────────────────────────────────────
 # Configuration
@@ -232,12 +236,23 @@ def build_analysis_message(price: float, bias: Optional[Dict],
         spike_pct  = gom.get("spike_pct", 0)
         rsi        = gom.get("rsi")
         gom_ts     = gom.get("timestamp", "")[:16].replace("T", " ")
+        tf_global_dir      = gom.get("tf_global_dir", "")
+        tf_global_strength = int(gom.get("tf_global_strength") or 0)
+        coherence  = gom.get("coherence_pct", 0)
+        ecart      = abs(score_buy - score_sell)
 
-        verdict_emoji = "🟢" if verdict == "BUY" else "🔴" if verdict == "SELL" else "🟡"
+        verdict_emoji = "🟢" if verdict in ("BUY","GOOD BUY","PERFECT BUY") else "🔴" if "SELL" in verdict else "🟡"
         lines.append(f"{verdict_emoji} *Verdict GOM KOLA : {verdict}*")
         lines.append(f"   Score BUY={score_buy:.1f}  SELL={score_sell:.1f}  Spike={spike_pct:.0f}%")
         if rsi:
-            lines.append(f"   RSI={rsi:.0f} | Mis à jour : {gom_ts}")
+            lines.append(f"   RSI={rsi:.0f} | ST={'↑' if gom.get('st_dir',0)==1 else '↓'} | écart={ecart:.2f} pts | coh={coherence:.0f}%")
+
+        # TF Global — direction macro du marché
+        if tf_global_dir:
+            tg_emoji = "🟢" if tf_global_dir == "BULL" else "🔴" if tf_global_dir == "BEAR" else "🟡"
+            lines.append(f"   {tg_emoji} TF Global : *{tf_global_dir}* (force {tf_global_strength}%)")
+        if gom_ts:
+            lines.append(f"   Mis à jour : {gom_ts}")
     else:
         lines.append("🟡 *Verdict GOM KOLA : non disponible*")
         lines.append("   (Lance Pine Script + crée alerte webhook)")
@@ -378,6 +393,28 @@ def build_analysis_message(price: float, bias: Optional[Dict],
     if not confluence_signals and not conflict_signals:
         lines.append("  🟡 Données insuffisantes pour confluence")
 
+    # ── BLOCAGE TRADEMANAGER (TF Global) ───────────────────
+    # Détecte si TradeManager va bloquer l'ordre à cause du filtre TF Global
+    tm_block_reason = None
+    if gom and order:
+        order_dir          = order.get("action", "")
+        tf_global_dir      = gom.get("tf_global_dir", "")
+        tf_global_strength = int(gom.get("tf_global_strength") or 0)
+        verdict_cur        = gom.get("verdict", "WAIT")
+        # TradeManager bloque SELL si TF Global=BULL (force > 55 par défaut)
+        if order_dir == "SELL" and tf_global_dir == "BULL" and tf_global_strength >= 55:
+            tm_block_reason = f"⛔ *Ordre SELL probable BLOQUÉ par TradeManager* — TF Global=BULL (force {tf_global_strength}%) contredit la direction. Attendre retournement Global BEAR."
+        elif order_dir == "BUY" and tf_global_dir == "BEAR" and tf_global_strength >= 55:
+            tm_block_reason = f"⛔ *Ordre BUY probable BLOQUÉ par TradeManager* — TF Global=BEAR (force {tf_global_strength}%) contredit la direction. Attendre retournement Global BULL."
+        # Avertissement si force faible (entre 40-55%)
+        elif order_dir == "SELL" and tf_global_dir == "BULL" and tf_global_strength >= 40:
+            tm_block_reason = f"⚠️ *Ordre SELL à risque* — TF Global=BULL (force {tf_global_strength}%) : TradeManager peut bloquer si seuil > {tf_global_strength}%."
+        elif order_dir == "BUY" and tf_global_dir == "BEAR" and tf_global_strength >= 40:
+            tm_block_reason = f"⚠️ *Ordre BUY à risque* — TF Global=BEAR (force {tf_global_strength}%) : TradeManager peut bloquer si seuil > {tf_global_strength}%."
+
+    if tm_block_reason:
+        conflict_signals.append(tm_block_reason)
+
     # ── DÉCISION SCALPING ──────────────────────────────────
     lines.append("━━━━━━━━━━━━━━━━━━━━")
     lines.append("🎯 *Décision scalping*")
@@ -388,9 +425,9 @@ def build_analysis_message(price: float, bias: Optional[Dict],
     if n_conflict > 0 and n_confluence <= 1:
         decision_txt = "🟡 ATTENDRE — signaux contradictoires"
     elif n_confluence >= 3 and n_conflict == 0:
-        if gom and gom.get("verdict") == "SELL":
+        if gom and "SELL" in gom.get("verdict", ""):
             decision_txt = "🔴 SELL — forte confluence baissière"
-        elif gom and gom.get("verdict") == "BUY":
+        elif gom and "BUY" in gom.get("verdict", ""):
             decision_txt = "🟢 BUY — forte confluence haussière"
         else:
             decision_txt = "🟡 WAIT — pas de direction claire"
@@ -400,6 +437,11 @@ def build_analysis_message(price: float, bias: Optional[Dict],
         decision_txt = "🟡 WAIT — pas assez de signaux"
 
     lines.append(f"  {decision_txt}")
+
+    # Répéter le blocage TradeManager en bas pour qu'il soit bien visible
+    if tm_block_reason:
+        lines.append(f"  {tm_block_reason}")
+
     lines.append("━━━━━━━━━━━━━━━━━━━━")
     lines.append("_Prochain check dans 20 min_")
 

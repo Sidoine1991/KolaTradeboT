@@ -64,6 +64,45 @@ if os.getenv("TRADINGAGENTS_LLM_PROVIDER", "").lower() == "bedrock":
 
 import requests  # noqa: E402  (apres dotenv pour avoir les vars)
 
+# ── Patch SSL global — certificat Windows non reconnu par httpcore/curl_cffi ──
+import ssl as _ssl
+_ssl._create_default_https_context = _ssl._create_unverified_context
+
+# 1) anthropic SDK — injecter http_client verify=False dans Anthropic.__init__
+try:
+    import httpx as _httpx
+    import anthropic as _anthropic
+
+    _orig_anth_init = _anthropic.Anthropic.__init__
+    def _p_anth_init(self, *a, **kw):
+        if "http_client" not in kw:
+            kw["http_client"] = _httpx.Client(verify=False)
+        _orig_anth_init(self, *a, **kw)
+    _anthropic.Anthropic.__init__ = _p_anth_init
+
+    _orig_anth_async_init = _anthropic.AsyncAnthropic.__init__
+    def _p_anth_async_init(self, *a, **kw):
+        if "http_client" not in kw:
+            kw["http_client"] = _httpx.AsyncClient(verify=False)
+        _orig_anth_async_init(self, *a, **kw)
+    _anthropic.AsyncAnthropic.__init__ = _p_anth_async_init
+except Exception:
+    pass
+
+# 2) curl_cffi (yfinance) — patché AVANT import yfinance
+try:
+    import curl_cffi.requests as _cr
+    _orig_cr_init = _cr.Session.__init__
+    def _p_cr_init(self, *a, **kw): kw["verify"] = False; _orig_cr_init(self, *a, **kw)
+    _cr.Session.__init__ = _p_cr_init
+except ImportError:
+    pass
+
+# 3) requests standard
+import urllib3 as _urllib3
+_urllib3.disable_warnings(_urllib3.exceptions.InsecureRequestWarning)
+requests.Session.verify = False
+
 # Fusion TradingView MCP Kola (optionnel — CDP port 9222)
 try:
     sys.path.insert(0, str(_HERE))
@@ -109,13 +148,14 @@ except ImportError as _e:
 # Permet à TradingAgents de trouver les données sur StockTwits, Reddit, Yahoo Finance
 _SOCIAL_TICKER_MAP: Dict[str, str] = {
     # Deriv frx -> ticker retail pour social/news analysts
+    # Proxies stables : futures ou indices plutôt que forex =X (souvent délisted)
     "frxXAUUSD": "GC=F",
     "frxXAGUSD": "SI=F",
-    "frxEURUSD": "EURUSD=X",
-    "frxGBPUSD": "GBPUSD=X",
+    "frxEURUSD": "EUR=X",
+    "frxGBPUSD": "GBP=X",
     "frxUSDJPY":  "JPY=X",
     "frxUSDCHF":  "CHF=X",
-    "frxAUDUSD": "AUDUSD=X",
+    "frxAUDUSD": "AUD=X",
     "frxUSDCAD": "CAD=X",
     # Crypto yfinance -> notation StockTwits (BTC.X, ETH.X...)
     "BTC-USD":  "BTC.X",
@@ -138,13 +178,13 @@ _MT5_MAP: Dict[str, str] = {
     "XAUUSD": "GC=F",
     "XAGUSD": "SI=F",
     # Forex
-    "EURUSD": "EURUSD=X",
-    "GBPUSD": "GBPUSD=X",
+    "EURUSD": "EUR=X",
+    "GBPUSD": "GBP=X",
     "USDJPY": "JPY=X",
     "USDCHF": "CHF=X",
-    "AUDUSD": "AUDUSD=X",
+    "AUDUSD": "AUD=X",
     "USDCAD": "CAD=X",
-    "NZDUSD": "NZDUSD=X",
+    "NZDUSD": "NZD=X",
     "EURGBP": "EURGBP=X",
     "EURJPY": "EURJPY=X",
     "GBPJPY": "GBPJPY=X",
