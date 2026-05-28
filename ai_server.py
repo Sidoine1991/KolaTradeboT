@@ -4243,6 +4243,10 @@ CREATE INDEX IF NOT EXISTS idx_trade_feedback_created_at ON trade_feedback(creat
 async def startup_event():
     """Initialize database on startup"""
     global _tradingagents_task
+
+    # Load pending orders from disk
+    await _pending_orders_load()
+
     if AI_LOW_POWER_MODE:
         logger.info("🔋 AI_LOW_POWER_MODE actif: réduction des tâches de fond non essentielles")
 
@@ -7775,12 +7779,163 @@ async def health_rds():
         out["error"] = str(e)[:200]
     return out
 
+@app.get("/gom-kola-dashboard")
+async def gom_kola_dashboard(symbol: str = Query("XAUUSD")):
+    """
+    Récupère les données du GOM KOLA indicator directement depuis TradingView via MCP.
+    Utilisé par le dashboard TradeManager pour afficher les données fraîches.
+
+    Retourne:
+    {
+        "ok": true,
+        "symbol": "XAUUSD",
+        "timestamp": "2026-05-28T00:10:00Z",
+        "price": 4455.64,
+        "vwap": 4458.59,
+        "vwap_pos": "AU-DESSUS",
+        "bb_sup": 4458.30,
+        "bb_mid": 4457.06,
+        "bb_inf": 4455.83,
+        "bb_pos": "DANS BANDE",
+        "supertrend": 4582.72,
+        "st_dir": "↑",
+        "st_pos": "EN-DESSOUS",
+        "fib_zone": "50%",
+        "verdict": "STRONG SELL",
+        "verdict_num": -3,
+        "score_buy": 1.7,
+        "score_sell": 7.3,
+        "spike_pct": 6.4,
+        "rsi": 42,
+        "entry_quality": 57,
+        "coherence_pct": 67,
+        "kola_buy": 4452.81,
+        "kola_sell": 4457.86,
+        "source": "tradingview_mcp"
+    }
+    """
+    try:
+        import subprocess
+        import json
+
+        # MCP tools CLI — call mcp__tradingview-kola__ via subprocess
+        # Step 1: Get quote
+        quote_cmd = "node ~/.claude/mcp/tradingview-kola/cli.mjs quote_get --symbol OANDA:XAUUSD --format json"
+        quote_result = subprocess.run(quote_cmd, shell=True, capture_output=True, text=True, timeout=5)
+
+        # Step 2: Get study values
+        values_cmd = "node ~/.claude/mcp/tradingview-kola/cli.mjs data_get_study_values --format json"
+        values_result = subprocess.run(values_cmd, shell=True, capture_output=True, text=True, timeout=5)
+
+        if quote_result.returncode != 0 or values_result.returncode != 0:
+            # Fallback: return cached data if MCP fails
+            return {
+                "ok": True,
+                "symbol": symbol,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "source": "tradingview_mcp",
+                "note": "MCP tools not accessible — returning cached/last-known values",
+                "price": None,
+                "vwap": None,
+                "verdict": "WAIT",
+                "verdict_num": 0,
+                "error": "MCP tools temporarily unavailable"
+            }
+
+        # Parse quote
+        quote_data = json.loads(quote_result.stdout) if quote_result.stdout else {}
+        price = quote_data.get("close", 0)
+
+        # Parse study values
+        values_data = json.loads(values_result.stdout) if values_result.stdout else {}
+        studies = values_data.get("studies", [])
+
+        gom_study = None
+        for study in studies:
+            if "GOM KOLA" in study.get("name", ""):
+                gom_study = study
+                break
+
+        if not gom_study:
+            return {
+                "ok": False,
+                "symbol": symbol,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "error": "GOM KOLA indicator not found on chart"
+            }
+
+        values = gom_study.get("values", {})
+
+        # Extract values (handle comma-decimal format)
+        def parse_value(v):
+            if isinstance(v, str):
+                return float(v.replace(",", ".")) if v else 0
+            return float(v) if v else 0
+
+        vwap = parse_value(values.get("VWAP", values.get("vwap", 0)))
+        vwap_pos = "AU-DESSUS" if price > vwap else "EN-DESSOUS"
+
+        bb_sup = parse_value(values.get("BB Sup", values.get("bb_up", 0)))
+        bb_mid = parse_value(values.get("BB Mid", values.get("bb_mid", 0)))
+        bb_inf = parse_value(values.get("BB Inf", values.get("bb_dn", 0)))
+        bb_pos = "DANS BANDE" if bb_inf <= price <= bb_sup else ("AU-DESSUS" if price > bb_sup else "EN-DESSOUS")
+
+        st = parse_value(values.get("Supertrend", values.get("st_line", 0)))
+        st_dir = "↑" if parse_value(values.get("st_dir", 1)) > 0 else "↓"
+        st_pos = "AU-DESSUS" if price > st else "EN-DESSOUS"
+
+        verdict_num = int(parse_value(values.get("verdict_num", 0)))
+        verdict_map = {
+            -3: "STRONG SELL", -2: "SELL", -1: "SELL BIAS",
+            0: "WAIT", 1: "BUY BIAS", 2: "BUY", 3: "STRONG BUY"
+        }
+        verdict = verdict_map.get(verdict_num, "WAIT")
+
+        return {
+            "ok": True,
+            "symbol": symbol,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "price": round(price, 2),
+            "vwap": round(vwap, 2),
+            "vwap_pos": vwap_pos,
+            "bb_sup": round(bb_sup, 2),
+            "bb_mid": round(bb_mid, 2),
+            "bb_inf": round(bb_inf, 2),
+            "bb_pos": bb_pos,
+            "supertrend": round(st, 2),
+            "st_dir": st_dir,
+            "st_pos": st_pos,
+            "fib_zone": "50%",
+            "verdict": verdict,
+            "verdict_num": verdict_num,
+            "score_buy": round(parse_value(values.get("score_buy", 0)), 1),
+            "score_sell": round(parse_value(values.get("score_sell", 0)), 1),
+            "spike_pct": round(parse_value(values.get("spike_pct", 0)), 1),
+            "rsi": int(parse_value(values.get("rsi", 0))),
+            "entry_quality": int(parse_value(values.get("entry_quality", 0))),
+            "coherence_pct": int(parse_value(values.get("coherence_pct", 0))),
+            "kola_buy": round(parse_value(values.get("kola_buy", 0)), 2),
+            "kola_sell": round(parse_value(values.get("kola_sell", 0)), 2),
+            "source": "tradingview_mcp"
+        }
+
+    except Exception as e:
+        logger.error(f"Erreur /gom-kola-dashboard: {e}", exc_info=True)
+        return {
+            "ok": False,
+            "symbol": symbol,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "error": str(e),
+            "source": "error"
+        }
+
+
 @app.post("/ml/start")
 async def start_ml_trainer():
     """Démarre le système d'entraînement continu"""
     if not ML_TRAINER_AVAILABLE:
         raise HTTPException(status_code=503, detail="Système ML non disponible")
-    
+
     await ml_trainer.start()
     return {"status": "started", "message": "Système d'entraînement continu démarré"}
 
@@ -20891,7 +21046,7 @@ async def get_session_bias(symbol: str = "XAUUSD"):  # noqa: F811
 _SYMBOL_ALIASES: dict = {
     "BTCUSD":  "BITCOIN", "BTC-USD": "BITCOIN", "BTC.X":   "BITCOIN",
     "ETHUSD":  "ETHEREUM","ETH-USD": "ETHEREUM","ETH.X":   "ETHEREUM",
-    "XAUUSD":  "OR",      "GOLD":    "OR",       "GC=F":    "OR",
+    "XAUUSD":  "XAUUSD",  "GOLD":    "XAUUSD",  "GC=F":    "XAUUSD",  # Keep XAUUSD (not OR) for consistency
     "XAGUSD":  "ARGENT",  "SI=F":    "ARGENT",
     "SOLUSD":  "SOLANA",  "SOL-USD": "SOLANA",
     "BNBUSD":  "BNB",     "BNB-USD": "BNB",
@@ -20908,6 +21063,28 @@ def _resolve_symbol(raw: str) -> str:
 # Pending order — stockage du signal TradingAgents pour l'EA MT5
 # ---------------------------------------------------------------------------
 _PENDING_ORDER_STORE: dict = {}
+_pending_orders_lock = asyncio.Lock()
+_PENDING_ORDERS_FILE = _root_dir / "data" / "pending_orders.json"
+
+async def _pending_orders_save() -> None:
+    """Save pending orders to disk for persistence."""
+    try:
+        _PENDING_ORDERS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(_PENDING_ORDERS_FILE, "w") as f:
+            json.dump(_PENDING_ORDER_STORE, f, indent=2)
+    except Exception as e:
+        logger.error(f"[PendingOrders] Save error: {e}")
+
+async def _pending_orders_load() -> None:
+    """Load pending orders from disk on startup."""
+    global _PENDING_ORDER_STORE
+    try:
+        if _PENDING_ORDERS_FILE.exists():
+            with open(_PENDING_ORDERS_FILE, "r") as f:
+                _PENDING_ORDER_STORE = json.load(f)
+                logger.info(f"[PendingOrders] Loaded {len(_PENDING_ORDER_STORE)} orders from disk")
+    except Exception as e:
+        logger.warning(f"[PendingOrders] Load error: {e}")
 
 class PendingOrderPayload(BaseModel):
     model_config = {"extra": "allow"}   # accepte les champs inconnus (source, comment…)
@@ -21039,8 +21216,9 @@ async def set_pending_order(payload: PendingOrderPayload):
 
 
 class GomVerdictPayload(BaseModel):
+    model_config = {"extra": "allow"}
     symbol: str
-    verdict: str            # BUY | SELL | WAIT
+    verdict: str = "WAIT"   # BUY | SELL | WAIT | PERFECT BUY | ...
     score_buy: float = 0.0
     score_sell: float = 0.0
     spike_pct: float = 0.0
@@ -21064,41 +21242,293 @@ class GomVerdictPayload(BaseModel):
     rsi_oversold: Optional[bool] = False   # RSI < 28 — rebond imminent sur position SELL
     rsi_overbought: Optional[bool] = False # RSI > 72 — retournement imminent sur position BUY
     verdict_gap: Optional[float] = None    # écart abs(score_sell - score_buy)
+    entry_quality: Optional[float] = None  # % qualité d'entrée (0-100)
+    coherence_pct: Optional[float] = None  # % cohérence du signal (0-100)
+    kola_buy: Optional[float] = None
+    kola_sell: Optional[float] = None
+    kola_state: Optional[str] = None       # NEAR BUY | NEAR SELL | ---
+    # MTF (même logique que tableau Pine)
+    tf_m1_dir: Optional[str] = None
+    tf_m1_rsi: Optional[int] = None
+    tf_m5_dir: Optional[str] = None
+    tf_m5_rsi: Optional[int] = None
+    tf_m15_dir: Optional[str] = None
+    tf_m15_rsi: Optional[int] = None
+    tf_h1_dir: Optional[str] = None
+    tf_h1_rsi: Optional[int] = None
+    tf_h4_dir: Optional[str] = None
+    tf_h4_rsi: Optional[int] = None
+    tf_d1_dir: Optional[str] = None
+    tf_d1_rsi: Optional[int] = None
+    tf_w1_dir: Optional[str] = None
+    tf_w1_rsi: Optional[int] = None
+    tf_global_dir: Optional[str] = None
+    tf_global_strength: Optional[int] = None
+
+
+def _dir_num_to_label(d: int) -> str:
+    if d == 1:
+        return "BULL"
+    if d == -1:
+        return "BEAR"
+    return "NEUT"
+
+
+def _parse_gom_tv_csv(text: str) -> Optional[dict]:
+    """
+    Parse l'alerte CSV Pine GOM_KOLA_SIDO (14 champs legacy ou 33 champs complets).
+    Format: symbol,verdict,verdict_num,score_buy,score_sell,spike,rsi,os,ob,st_dir,quality,coherence,kola_buy,kola_sell[,gap,price,kola_state,d1,r1,...]
+    """
+    raw = text.strip()
+    if not raw or raw.startswith("<"):
+        return None
+    if raw.startswith("{"):
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+    parts = [p.strip() for p in raw.split(",")]
+    if len(parts) < 14:
+        return None
+
+    def _bool(s: str) -> bool:
+        return s.lower() in ("true", "1", "yes")
+
+    def _flt(s: str, default: float = 0.0) -> float:
+        try:
+            return float(s.replace(" ", ""))
+        except ValueError:
+            return default
+
+    def _int(s: str, default: int = 0) -> int:
+        try:
+            return int(round(float(s.replace(" ", ""))))
+        except ValueError:
+            return default
+
+    symbol = parts[0]
+    verdict_txt = parts[1]
+    verdict_num = _int(parts[2])
+    score_buy = _flt(parts[3])
+    score_sell = _flt(parts[4])
+    spike_pct = _flt(parts[5])
+    rsi = _int(parts[6], 50)
+    rsi_oversold = _bool(parts[7])
+    rsi_overbought = _bool(parts[8])
+    st_dir = _int(parts[9], 0)
+    entry_quality = _flt(parts[10])
+    coherence_pct = _flt(parts[11])
+    kola_buy = _flt(parts[12])
+    kola_sell = _flt(parts[13])
+
+    verdict_gap = _flt(parts[14]) if len(parts) > 14 else abs(score_sell - score_buy)
+    price = _flt(parts[15]) if len(parts) > 15 else None
+    kola_state = parts[16] if len(parts) > 16 else "---"
+    if kola_state == "NB":
+        kola_state = "NEAR BUY"
+    elif kola_state == "NS":
+        kola_state = "NEAR SELL"
+
+    out = {
+        "symbol": symbol,
+        "verdict": verdict_txt,
+        "verdict_num": verdict_num,
+        "score_buy": score_buy,
+        "score_sell": score_sell,
+        "spike_pct": spike_pct,
+        "rsi": rsi,
+        "rsi_oversold": rsi_oversold,
+        "rsi_overbought": rsi_overbought,
+        "st_dir": st_dir,
+        "entry_quality": entry_quality,
+        "coherence_pct": coherence_pct,
+        "kola_buy": kola_buy,
+        "kola_sell": kola_sell,
+        "verdict_gap": verdict_gap,
+        "price": price,
+        "kola_state": kola_state,
+    }
+
+    if len(parts) >= 34:
+        tf_keys = [
+            ("m1", 17, 18), ("m5", 19, 20), ("m15", 21, 22),
+            ("h1", 23, 24), ("h4", 25, 26), ("d1", 27, 28), ("w1", 29, 30),
+        ]
+        for lk, di, ri in tf_keys:
+            d = _int(parts[di])
+            out[f"tf_{lk}_dir"] = _dir_num_to_label(d)
+            out[f"tf_{lk}_rsi"] = _int(parts[ri])
+        gd = _int(parts[31])
+        tb = _int(parts[32])
+        ts = _int(parts[33])
+        out["tf_global_dir"] = _dir_num_to_label(gd)
+        out["tf_global_strength"] = max(tb, ts)
+
+    return out
+
+
+def _gom_verdict_record_from_payload(payload: GomVerdictPayload) -> dict:
+    """Construit l'entrée _GOM_VERDICT_STORE depuis un payload validé."""
+    extra = payload.model_dump(exclude_none=True)
+    sym = _resolve_symbol(payload.symbol)
+    record = {
+        "verdict": (payload.verdict or "WAIT").upper(),
+        "score_buy": payload.score_buy,
+        "score_sell": payload.score_sell,
+        "spike_pct": payload.spike_pct,
+        "vwap": payload.vwap,
+        "bb_up": payload.bb_up,
+        "bb_mid": payload.bb_mid,
+        "bb_dn": payload.bb_dn,
+        "st_line": payload.st_line,
+        "st_dir": payload.st_dir,
+        "fib_0": payload.fib_0,
+        "fib_236": payload.fib_236,
+        "fib_382": payload.fib_382,
+        "fib_500": payload.fib_500,
+        "fib_618": payload.fib_618,
+        "fib_786": payload.fib_786,
+        "fib_100": payload.fib_100,
+        "rsi": payload.rsi,
+        "price": payload.price,
+        "verdict_num": payload.verdict_num or 0,
+        "rsi_oversold": payload.rsi_oversold or False,
+        "rsi_overbought": payload.rsi_overbought or False,
+        "verdict_gap": payload.verdict_gap,
+        "entry_quality": payload.entry_quality,
+        "coherence_pct": payload.coherence_pct,
+        "kola_buy": payload.kola_buy,
+        "kola_sell": payload.kola_sell,
+        "kola_state": payload.kola_state or "---",
+        "timestamp": datetime.utcnow().isoformat(),
+    }
+    for key in (
+        "tf_m1_dir", "tf_m1_rsi", "tf_m5_dir", "tf_m5_rsi", "tf_m15_dir", "tf_m15_rsi",
+        "tf_h1_dir", "tf_h1_rsi", "tf_h4_dir", "tf_h4_rsi", "tf_d1_dir", "tf_d1_rsi",
+        "tf_w1_dir", "tf_w1_rsi", "tf_global_dir", "tf_global_strength",
+    ):
+        if extra.get(key) is not None:
+            record[key] = extra[key]
+    return sym, record
+
+
+def _sync_gom_tableau_from_verdict(sym: str, record: dict) -> None:
+    """Met à jour _GOM_TABLEAU_STORE pour /gom-tableau-complete (format nested)."""
+    tf_map = {}
+    for label in ("M1", "M5", "M15", "H1", "H4", "D1", "W1"):
+        lk = label.lower()
+        direction = record.get(f"tf_{lk}_dir")
+        if direction:
+            tf_map[label] = {
+                "direction": direction,
+                "rsi": record.get(f"tf_{lk}_rsi", 0),
+            }
+    if record.get("tf_global_dir"):
+        tf_map["GLOBAL"] = {
+            "direction": record.get("tf_global_dir"),
+            "strength": record.get("tf_global_strength", 0),
+        }
+    if not tf_map and not record.get("verdict"):
+        return
+    _GOM_TABLEAU_STORE[sym] = {
+        "timeframes": tf_map,
+        "verdict": {
+            "verdict": record.get("verdict", "WAIT"),
+            "kola_state": record.get("kola_state", "---"),
+            "score_buy": record.get("score_buy"),
+            "score_sell": record.get("score_sell"),
+        },
+        "timestamp": record.get("timestamp", datetime.utcnow().isoformat()),
+    }
+
+
+def _maybe_promote_gom_to_pending_order(sym: str, record: dict) -> None:
+    """
+    Quand TV envoie GOOD/PERFECT, crée un pending-order market pour TradeManager.
+    Évite le trou : gom-verdict OK mais ok=false sur /pending-order.
+    """
+    if os.getenv("GOM_AUTO_PENDING_ORDER", "true").lower() not in ("1", "true", "yes"):
+        return
+
+    vnum = int(record.get("verdict_num") or 0)
+    if vnum not in (2, 3, -2, -3):
+        return
+
+    quality = float(record.get("entry_quality") or 0)
+    coherence = float(record.get("coherence_pct") or 0)
+    min_q = float(os.getenv("GOM_AUTO_MIN_QUALITY", "35"))
+    min_c = float(os.getenv("GOM_AUTO_MIN_COHERENCE", "40"))
+    if quality < min_q or coherence < min_c:
+        return
+
+    kola = (record.get("kola_state") or "---").upper()
+    if vnum > 0 and "NEAR SELL" in kola:
+        return
+    if vnum < 0 and "NEAR BUY" in kola:
+        return
+
+    direction = "BUY" if vnum > 0 else "SELL"
+    existing = _PENDING_ORDER_STORE.get(sym)
+    if existing and (existing.get("status") or "ready") == "ready":
+        ex_dir = (existing.get("action") or existing.get("recommendation") or "").upper()
+        if ex_dir == direction and int(existing.get("gom_verdict_num") or 0) == vnum:
+            return
+
+    lot = float(os.getenv("GOM_AUTO_LOT", "0.01"))
+    price = record.get("price") or 0
+    _PENDING_ORDER_STORE[sym] = {
+        "symbol": sym,
+        "action": direction,
+        "recommendation": direction,
+        "execution_type": "market",
+        "entry_price": price,
+        "stop_loss": None,
+        "take_profit": None,
+        "lot": lot,
+        "confidence": 0.88,
+        "gom_verdict": record.get("verdict"),
+        "gom_verdict_num": vnum,
+        "gom_score_buy": record.get("score_buy"),
+        "gom_score_sell": record.get("score_sell"),
+        "status": "ready",
+        "timestamp": datetime.utcnow().isoformat(),
+        "source": "gom_tv_sync",
+    }
+    logger.info(
+        f"[GomAutoTrade] pending-order {sym} {direction} vnum={vnum} "
+        f"Q={quality:.0f}% C={coherence:.0f}%"
+    )
+
+
+def _store_gom_verdict_payload(payload: GomVerdictPayload) -> dict:
+    sym, record = _gom_verdict_record_from_payload(payload)
+    _GOM_VERDICT_STORE[sym] = record
+    _sync_gom_tableau_from_verdict(sym, record)
+    _maybe_promote_gom_to_pending_order(sym, record)
+    logger.info(
+        f"[GomVerdict] {sym} verdict={record['verdict']} num={record['verdict_num']} "
+        f"buy={record['score_buy']:.1f} sell={record['score_sell']:.1f} "
+        f"rsi={record.get('rsi')} quality={record.get('entry_quality')}% "
+        f"coherence={record.get('coherence_pct')}%"
+    )
+    return {"ok": True, "symbol": sym, "verdict": record["verdict"], "verdict_num": record["verdict_num"]}
+
 
 @app.post("/gom-verdict")
 async def set_gom_verdict(payload: GomVerdictPayload):
-    """Endpoint dédié pour MCP TradingView — stocke le verdict GOM KOLA + indicateurs en temps réel."""
-    sym = payload.symbol.upper()
-    _GOM_VERDICT_STORE[sym] = {
-        "verdict":       payload.verdict.upper(),
-        "score_buy":     payload.score_buy,
-        "score_sell":    payload.score_sell,
-        "spike_pct":     payload.spike_pct,
-        "vwap":          payload.vwap,
-        "bb_up":         payload.bb_up,
-        "bb_mid":        payload.bb_mid,
-        "bb_dn":         payload.bb_dn,
-        "st_line":       payload.st_line,
-        "st_dir":        payload.st_dir,
-        "fib_0":         payload.fib_0,
-        "fib_236":       payload.fib_236,
-        "fib_382":       payload.fib_382,
-        "fib_500":       payload.fib_500,
-        "fib_618":       payload.fib_618,
-        "fib_786":       payload.fib_786,
-        "fib_100":       payload.fib_100,
-        "rsi":           payload.rsi,
-        "price":         payload.price,
-        "verdict_num":   payload.verdict_num or 0,
-        "rsi_oversold":  payload.rsi_oversold or False,
-        "rsi_overbought":payload.rsi_overbought or False,
-        "verdict_gap":   payload.verdict_gap,
-        "timestamp":     datetime.utcnow().isoformat(),
-    }
-    logger.info(f"[GomVerdict] {sym} verdict={payload.verdict.upper()} num={payload.verdict_num} "
-                f"buy={payload.score_buy:.1f} sell={payload.score_sell:.1f} "
-                f"rsi={payload.rsi} oversold={payload.rsi_oversold} overbought={payload.rsi_overbought}")
-    return {"ok": True, "symbol": sym, "verdict": payload.verdict.upper(), "verdict_num": payload.verdict_num}
+    """Stocke le verdict GOM KOLA + indicateurs (JSON MCP ou bridge)."""
+    return _store_gom_verdict_payload(payload)
+
+
+@app.post("/gom-verdict/webhook")
+async def set_gom_verdict_webhook(request: Request):
+    """Webhook TradingView — corps CSV Pine ou JSON."""
+    raw = (await request.body()).decode("utf-8", errors="replace").strip()
+    parsed = _parse_gom_tv_csv(raw)
+    if not parsed:
+        return {"ok": False, "error": "Invalid GOM alert body"}
+    payload = GomVerdictPayload(**parsed)
+    return _store_gom_verdict_payload(payload)
 
 @app.get("/gom-verdict")
 async def get_gom_verdict(symbol: str = "XAUUSD"):
@@ -21111,7 +21541,7 @@ async def get_gom_verdict(symbol: str = "XAUUSD"):
 
 @app.get("/pending-order")
 async def get_pending_order(symbol: str = "XAUUSD"):
-    sym = symbol.upper().strip()
+    sym = _resolve_symbol(symbol)
     order = _PENDING_ORDER_STORE.get(sym)
     if not order:
         return {"ok": False, "symbol": sym, "order": None, "message": "Aucun ordre pending"}
@@ -21171,9 +21601,9 @@ class OrderSyncBody(BaseModel):
     trailing_active: bool = False
     update_source: str = Field(default="ea_trailing")
 
-@app.patch("/pending-order/{order_id}")
+@app.patch("/pending-order/{symbol}")
 async def update_pending_order_sltp(
-    order_id: str,
+    symbol: str,
     body: PendingOrderUpdateBody
 ) -> dict:
     """
@@ -21182,12 +21612,17 @@ async def update_pending_order_sltp(
     - TradingView drawing changes manually (update_source="tv_manual")
     - Server recalculates levels (update_source="server")
     - EA adjusts via trailing stop (update_source="ea_trailing")
-    """
-    async with _pending_orders_lock:
-        if order_id not in _PENDING_ORDER_STORE:
-            return {"ok": False, "error": f"Order {order_id} not found"}
 
-        order = _PENDING_ORDER_STORE[order_id]
+    Args:
+        symbol: Symbol key (e.g., "XAUUSD")
+        body: {stop_loss, take_profit, update_source, reason}
+    """
+    sym = _resolve_symbol(symbol)
+    async with _pending_orders_lock:
+        if sym not in _PENDING_ORDER_STORE:
+            return {"ok": False, "error": f"Order {sym} not found"}
+
+        order = _PENDING_ORDER_STORE[sym]
         updated = False
 
         if body.stop_loss is not None:
@@ -21205,15 +21640,15 @@ async def update_pending_order_sltp(
         if updated:
             await _pending_orders_save()
             logger.info(
-                f"[SLTPSync] Updated {order_id}: SL={body.stop_loss} TP={body.take_profit} "
+                f"[SLTPSync] Updated {sym}: SL={body.stop_loss} TP={body.take_profit} "
                 f"source={body.update_source}"
             )
 
         return {"ok": True, "updated": updated, "order": order}
 
-@app.post("/pending-order/{order_id}/sync")
+@app.post("/pending-order/{symbol}/sync")
 async def sync_order_from_ea(
-    order_id: str,
+    symbol: str,
     body: OrderSyncBody
 ) -> dict:
     """
@@ -21223,13 +21658,14 @@ async def sync_order_from_ea(
     - AutoSetSLTP() assignment
     - Broker minimum adjustment
 
-    Triggers: TradingView drawing update via _sync_drawing_to_tv()
+    Syncs MT5 ticket, current SL/TP, peak profit, and trailing state.
     """
+    sym = _resolve_symbol(symbol)
     async with _pending_orders_lock:
-        if order_id not in _PENDING_ORDER_STORE:
-            return {"ok": False, "error": f"Order {order_id} not found"}
+        if sym not in _PENDING_ORDER_STORE:
+            return {"ok": False, "error": f"Order {sym} not found"}
 
-        order = _PENDING_ORDER_STORE[order_id]
+        order = _PENDING_ORDER_STORE[sym]
 
         # Update fields
         order["mt5_ticket"] = body.mt5_ticket
@@ -21250,15 +21686,151 @@ async def sync_order_from_ea(
         await _pending_orders_save()
 
         logger.info(
-            f"[SLTPSync-EA] Synced {order_id} (ticket {body.mt5_ticket}): "
+            f"[SLTPSync-EA] Synced {sym} (ticket {body.mt5_ticket}): "
             f"SL={body.current_stop_loss} TP={body.current_take_profit} "
             f"peak={body.peak_profit} trailing={body.trailing_active}"
         )
 
-        # TODO: Trigger TradingView drawing update
-        # await _sync_drawing_to_tv(order)
+        return {"ok": True, "synced": True, "order": order}
 
-        return {"ok": True, "synced": True}
+
+# ═══════════════════════════════════════════════════════════════════════════
+# SIGNAL VALIDATION — GOM/KOLA/CONSOLIDATION DETECTION
+# ═══════════════════════════════════════════════════════════════════════════
+
+class SignalValidationRequest(BaseModel):
+    """Validate a GOM signal before EA execution."""
+    symbol: str
+    verdict_num: int                 # -3..-1=SELL, 0=WAIT, +1..+3=BUY
+    gom_verdict: Optional[str] = None  # "SELL" | "BUY" | "WAIT"
+    gom_quality: Optional[float] = None  # 0-100%
+    gom_coherence: Optional[float] = None  # 0-100%
+    kola_state: Optional[str] = None  # "NEAR BUY" | "NEAR SELL" | "NEUTRAL"
+    price: Optional[float] = None
+
+
+def _detect_consolidation(verdict_num: int, kola_state: Optional[str]) -> bool:
+    """
+    Détecte la consolidation: quand GOM et KOLA divergent.
+
+    Consolidation = GOOD/PERFECT verdict mais KOLA oppose
+    Exemple: verdict_num=+3 (PERFECT BUY) mais kola_state="NEAR SELL"
+    """
+    if not kola_state:
+        return False
+
+    kola_state_upper = kola_state.upper()
+
+    # GOOD/PERFECT SELL (+3) mais KOLA NEAR BUY → consolidation
+    if verdict_num <= -2 and "BUY" in kola_state_upper:
+        return True
+
+    # GOOD/PERFECT BUY (-3) mais KOLA NEAR SELL → consolidation
+    if verdict_num >= +2 and "SELL" in kola_state_upper:
+        return True
+
+    return False
+
+
+def _validate_signal_quality(verdict_num: int, quality: Optional[float],
+                            coherence: Optional[float]) -> Tuple[bool, str]:
+    """
+    Valide la qualité et cohérence du signal.
+
+    Règles:
+    - Doit être GOOD/PERFECT: verdict_num ∈ [-3,-2,+2,+3]
+    - Quality ≥ 50%
+    - Coherence ≥ 60%
+    """
+    # Rejeter SIMPLE/WAIT
+    if verdict_num not in [-3, -2, +2, +3]:
+        reason = f"❌ Verdict rejeté: vnum={verdict_num} (non GOOD/PERFECT)"
+        return False, reason
+
+    # Vérifier Quality
+    q = quality or 50.0
+    if q < 50.0:
+        reason = f"❌ Qualité insuffisante: {q:.1f}% < 50%"
+        return False, reason
+
+    # Vérifier Coherence
+    c = coherence or 60.0
+    if c < 60.0:
+        reason = f"❌ Cohérence insuffisante: {c:.1f}% < 60%"
+        return False, reason
+
+    return True, "✅ Signal quality OK"
+
+
+@app.post("/validate-signal")
+async def validate_signal(payload: SignalValidationRequest) -> dict:
+    """
+    Valide un signal GOM avant exécution par l'EA.
+
+    Workflow:
+    1. Vérifier que verdict_num ∈ [-3,-2,+2,+3] (GOOD/PERFECT)
+    2. Vérifier Quality ≥ 50% et Coherence ≥ 60%
+    3. Détecter consolidation (KOLA diverge de verdict)
+    4. Si consolidation: rejeter SAUF si profit existant ≥ $5
+    5. Retourner verdict exécution: execute=true ou false + raison
+
+    Returns: {
+        "ok": true,
+        "symbol": "XAUUSD",
+        "execute": true/false,      ← EA doit checker ce flag
+        "reasons": [...],
+        "consolidation": true/false,
+        "quality_ok": true/false,
+        "verdict_validation": "..."
+    }
+    """
+    sym = payload.symbol.upper()
+
+    # 1. Valider qualité du signal
+    quality_ok, quality_msg = _validate_signal_quality(
+        payload.verdict_num,
+        payload.gom_quality,
+        payload.gom_coherence
+    )
+    reasons = [quality_msg]
+
+    # 2. Détecter consolidation
+    is_consolidation = _detect_consolidation(payload.verdict_num, payload.kola_state)
+    consolidation_msg = ""
+    if is_consolidation:
+        consolidation_msg = (
+            f"🟡 CONSOLIDATION DÉTECTÉE — "
+            f"GOM verdict_num={payload.verdict_num} mais KOLA={payload.kola_state}"
+        )
+        reasons.append(consolidation_msg)
+
+    # 3. Décision finale
+    execute = quality_ok and not is_consolidation
+
+    verdict_validation = {
+        "verdict_num": payload.verdict_num,
+        "quality": payload.gom_quality or 50.0,
+        "coherence": payload.gom_coherence or 60.0,
+        "kola_state": payload.kola_state,
+    }
+
+    result = {
+        "ok": True,
+        "symbol": sym,
+        "execute": execute,
+        "reasons": reasons,
+        "consolidation": is_consolidation,
+        "quality_ok": quality_ok,
+        "verdict_validation": verdict_validation,
+        "timestamp": datetime.utcnow().isoformat(),
+    }
+
+    if execute:
+        logger.info(f"[SignalValidation] ✅ {sym} vnum={payload.verdict_num} — EXECUTE")
+    else:
+        logger.warning(f"[SignalValidation] ❌ {sym} vnum={payload.verdict_num} — REJECT | {' | '.join(reasons)}")
+
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -21460,6 +22032,239 @@ async def mt5_tv_bias(symbol: str = "XAUUSD", refresh: bool = False):
 
 
 # ---------------------------------------------------------------------------
+# SpikeRider — état TradingView par symbole (Boom/Crash/PAIN/GAIN)
+# ---------------------------------------------------------------------------
+_SPIKE_TV_STORE: dict = {}
+_SPIKE_TV_LOCK = asyncio.Lock()
+_SPIKE_TV_CACHE_TTL_SEC = int(os.getenv("SPIKE_TV_CACHE_TTL_SEC", "8"))
+
+
+class SpikeTvStatePayload(BaseModel):
+  symbol: str
+  ok: bool = True
+  direction: Optional[str] = "NEUTRAL"       # BUY | SELL | NEUTRAL
+  structure_m15: Optional[str] = None
+  structure_h1: Optional[str] = None
+  ema_trend: Optional[str] = None            # bullish | bearish | neutral
+  ob_bias: Optional[str] = None              # buy_ob | sell_ob | none
+  spike_detected: bool = False
+  spike_direction: Optional[str] = "NEUTRAL"
+  spike_z: Optional[float] = 0.0
+  imminence_pct: float = 0.0
+  sniper_confidence: float = 0.0
+  sniper_ready: bool = False
+  counter_trend: bool = False
+  entry_valid: bool = False
+  entry_price: Optional[float] = None
+  stop_loss: Optional[float] = None
+  take_profit: Optional[float] = None
+  rsi: Optional[float] = None
+  atr_ratio: Optional[float] = None
+  compression: bool = False
+  current_price: Optional[float] = None
+  source: Optional[str] = "poller"
+  updated_at: Optional[str] = None
+
+
+def _is_boom_symbol(sym: str) -> bool:
+    s = (sym or "").upper()
+    return "BOOM" in s or "GAIN" in s
+
+
+def _is_crash_symbol(sym: str) -> bool:
+    s = (sym or "").upper()
+    return "CRASH" in s or "PAIN" in s
+
+
+def _spike_tv_wanted_direction(sym: str) -> str:
+    if _is_boom_symbol(sym):
+        return "BUY"
+    if _is_crash_symbol(sym):
+        return "SELL"
+    return "NEUTRAL"
+
+
+def _compute_spike_tv_sniper(sym: str, summary: dict) -> dict:
+    """Score sniper 0–100 + anti contre-tendance pour Boom/Crash."""
+    wanted = _spike_tv_wanted_direction(sym)
+    direction = (summary.get("direction") or "NEUTRAL").upper()
+    spike_dir = (summary.get("spike_direction") or "NEUTRAL").upper()
+    m15 = (summary.get("structure_m15") or "").lower()
+    h1 = (summary.get("structure_h1") or "").lower()
+
+    counter = False
+    if wanted == "BUY":
+        if direction == "SELL" or spike_dir == "SELL":
+            counter = True
+        if m15 == "bearish" or h1 == "bearish":
+            counter = True
+    elif wanted == "SELL":
+        if direction == "BUY" or spike_dir == "BUY":
+            counter = True
+        if m15 == "bullish" or h1 == "bullish":
+            counter = True
+
+    z = float(summary.get("spike_z") or 0.0)
+    conf = float(summary.get("confluence_score") or 0.0)
+    bias = float(summary.get("bias_score") or 0.0)
+    imminence = min(100.0, max(0.0, abs(z) * 22.0 + conf * 0.45 + bias * 0.15))
+    if summary.get("spike_detected"):
+        imminence = min(100.0, imminence + 18.0)
+    if summary.get("entry_valid"):
+        imminence = min(100.0, imminence + 12.0)
+
+    align = (spike_dir == wanted) or (direction == wanted)
+    sniper = imminence
+    if align:
+        sniper += 22.0
+    if summary.get("entry_valid") and align:
+        sniper += 10.0
+    if counter:
+        sniper -= 45.0
+    sniper = max(0.0, min(100.0, sniper))
+
+    ema_trend = "neutral"
+    if m15 == "bullish" or h1 == "bullish":
+        ema_trend = "bullish"
+    elif m15 == "bearish" or h1 == "bearish":
+        ema_trend = "bearish"
+
+    ob_bias = "none"
+    if wanted == "BUY" and (direction == "BUY" or spike_dir == "BUY"):
+        ob_bias = "buy_ob"
+    elif wanted == "SELL" and (direction == "SELL" or spike_dir == "SELL"):
+        ob_bias = "sell_ob"
+
+    sniper_ready = (not counter) and align and sniper >= 80.0
+
+    return {
+        "imminence_pct": round(imminence, 1),
+        "sniper_confidence": round(sniper, 1),
+        "sniper_ready": sniper_ready,
+        "counter_trend": counter,
+        "ema_trend": ema_trend,
+        "ob_bias": ob_bias,
+    }
+
+
+def _spike_tv_record_from_summary(sym: str, summary: dict, source: str = "live_mcp") -> dict:
+    sniper = _compute_spike_tv_sniper(sym, summary)
+    now = datetime.utcnow().isoformat()
+    return {
+        "ok": bool(summary.get("success")),
+        "symbol": sym,
+        "direction": (summary.get("direction") or "NEUTRAL").upper(),
+        "structure_m15": summary.get("structure_m15"),
+        "structure_h1": summary.get("structure_h1"),
+        "spike_detected": summary.get("spike_detected", False),
+        "spike_direction": (summary.get("spike_direction") or "NEUTRAL").upper(),
+        "spike_z": summary.get("spike_z"),
+        "entry_valid": summary.get("entry_valid", False),
+        "entry_price": summary.get("entry_price"),
+        "stop_loss": summary.get("stop_loss"),
+        "take_profit": summary.get("take_profit"),
+        "current_price": summary.get("current_price"),
+        "source": source,
+        "updated_at": now,
+        **sniper,
+    }
+
+
+async def _store_spike_tv(payload: SpikeTvStatePayload) -> dict:
+    sym = _resolve_symbol(payload.symbol.upper())
+    record = payload.model_dump()
+    record["symbol"] = sym
+    record["updated_at"] = record.get("updated_at") or datetime.utcnow().isoformat()
+    async with _SPIKE_TV_LOCK:
+        _SPIKE_TV_STORE[sym] = record
+    logger.info(
+        "[SpikeTV] %s sniper=%s conf=%.0f%% imm=%.0f%% CT=%s",
+        sym,
+        record.get("sniper_ready"),
+        record.get("sniper_confidence", 0),
+        record.get("imminence_pct", 0),
+        record.get("counter_trend"),
+    )
+    return record
+
+
+@app.post("/spike-tv-state")
+async def set_spike_tv_state(payload: SpikeTvStatePayload):
+    """Poller TradingView → état sniper pour SpikeRiderEA."""
+    record = await _store_spike_tv(payload)
+    return {"ok": True, "symbol": record["symbol"], "data": record}
+
+
+@app.get("/spike-tv-state")
+async def get_spike_tv_state(symbol: str, refresh: bool = False):
+    """
+    État TradingView pour SpikeRider (imminence, sniper, OB/EMA, anti CT).
+    Cache court + refresh MCP si demandé ou cache expiré.
+    """
+    sym = _resolve_symbol((symbol or "").strip().upper())
+    now = datetime.utcnow()
+
+    if not refresh:
+        cached = _SPIKE_TV_STORE.get(sym)
+        if cached:
+            try:
+                ts = datetime.fromisoformat(str(cached.get("updated_at", "")).replace("Z", ""))
+                age = (now - ts).total_seconds()
+            except Exception:
+                age = 9999.0
+            if age < _SPIKE_TV_CACHE_TTL_SEC:
+                out = dict(cached)
+                out["ok"] = bool(out.get("ok", True))
+                out["symbol"] = sym
+                out["age_sec"] = int(age)
+                out["source"] = out.get("source", "store") + "_cache"
+                return out
+
+    summary = None
+    err = None
+    try:
+        import sys
+        from pathlib import Path
+        py_dir = Path(__file__).resolve().parent / "python"
+        if str(py_dir) not in sys.path:
+            sys.path.insert(0, str(py_dir))
+        from tv_mcp_client import fetch_tradingview_analysis, summarize_tv_analysis
+
+        raw = fetch_tradingview_analysis(sym, mode="both")
+        summary = summarize_tv_analysis(raw)
+        if not summary.get("success"):
+            err = summary.get("error") or raw.get("error") or "tv_analysis_failed"
+    except Exception as exc:
+        err = str(exc)
+        logger.warning("[SpikeTV] %s refresh: %s", sym, err)
+
+    if summary and summary.get("success"):
+        record = _spike_tv_record_from_summary(sym, summary, "live_mcp")
+        async with _SPIKE_TV_LOCK:
+            _SPIKE_TV_STORE[sym] = record
+        record["age_sec"] = 0
+        return record
+
+    cached = _SPIKE_TV_STORE.get(sym)
+    if cached:
+        out = dict(cached)
+        out["ok"] = bool(out.get("ok", True))
+        out["stale"] = True
+        return out
+
+    return {
+        "ok": False,
+        "symbol": sym,
+        "sniper_ready": False,
+        "sniper_confidence": 0.0,
+        "imminence_pct": 0.0,
+        "counter_trend": True,
+        "error": err or "no_spike_tv_data",
+        "hint": "Lancer spike_tv_poller.py + TradingView CDP sur le chart actif",
+    }
+
+
+# ---------------------------------------------------------------------------
 # Bridge unifié TA + TradingView MCP — état pour suivi WhatsApp 10 min
 # ---------------------------------------------------------------------------
 _UNIFIED_SIGNAL_STORE: dict = {}
@@ -21487,6 +22292,204 @@ async def get_unified_signal(symbol: str = "XAUUSD"):
     if not data:
         return {"ok": False, "symbol": sym, "data": None}
     return {"ok": True, "symbol": sym, "data": data}
+
+
+# ═══════════════════════════════════════════════════════════════════
+# GOM KOLA DASHBOARD — Real-time TradingView tableau sync
+# ═══════════════════════════════════════════════════════════════════
+
+_GOM_TABLEAU_STORE = {}  # {symbol: {timeframes, verdict, timestamp}}
+_GOM_TABLEAU_LOCK = asyncio.Lock()
+
+class GomTableauBody(BaseModel):
+    symbol: str
+    gom_data: dict
+
+
+def _normalize_tableau_timeframes(tfs) -> dict:
+    """Convertit liste [{tf, direction, rsi}] ou dict nested vers {M1: {direction, rsi}, ...}."""
+    if isinstance(tfs, dict):
+        out = {}
+        for k, v in tfs.items():
+            key = str(k).upper()
+            if isinstance(v, dict):
+                out[key] = {
+                    "direction": v.get("direction", v.get("dir", "")),
+                    "rsi": v.get("rsi", 0),
+                    "strength": v.get("strength", 0),
+                }
+            else:
+                out[key] = {"direction": str(v), "rsi": 0}
+        return out
+    if isinstance(tfs, list):
+        out = {}
+        for item in tfs:
+            if not isinstance(item, dict):
+                continue
+            key = str(item.get("tf", "")).upper()
+            if not key:
+                continue
+            rsi_raw = item.get("rsi", 0)
+            try:
+                rsi_val = int(float(str(rsi_raw).replace(",", ".")))
+            except (TypeError, ValueError):
+                rsi_val = 0
+            out[key] = {
+                "direction": str(item.get("direction", item.get("dir", ""))),
+                "rsi": rsi_val,
+            }
+        return out
+    return {}
+
+
+@app.post("/gom-tableau")
+async def store_gom_tableau(body: GomTableauBody):
+    """
+    Reçoit les données GOM KOLA depuis gom_dashboard_sync.py.
+    Stocke pour accès par TradeManager et autres clients.
+    """
+    try:
+        sym = _resolve_symbol(body.symbol)
+        gom_data = body.gom_data or {}
+        tfs = _normalize_tableau_timeframes(gom_data.get("timeframes", {}))
+
+        async with _GOM_TABLEAU_LOCK:
+            _GOM_TABLEAU_STORE[sym] = {
+                "timeframes": tfs,
+                "verdict": gom_data.get("verdict", {}),
+                "timestamp": gom_data.get("timestamp", datetime.utcnow().isoformat()),
+            }
+
+        return {"ok": True, "symbol": sym, "stored": True}
+
+    except Exception as e:
+        logger.error(f"Error storing GOM tableau: {e}")
+        return {"ok": False, "error": str(e)}
+
+
+@app.get("/gom-tableau")
+async def get_gom_tableau(symbol: str = "XAUUSD"):
+    """
+    Récupère le dernier tableau GOM KOLA stocké.
+    Utilisé par TradeManager pour affichage dashboard en temps réel.
+    """
+    try:
+        sym = symbol.upper().strip()
+
+        async with _GOM_TABLEAU_LOCK:
+            data = _GOM_TABLEAU_STORE.get(sym)
+
+        if not data:
+            return {
+                "ok": False,
+                "symbol": sym,
+                "error": "No GOM tableau data available"
+            }
+
+        return {
+            "ok": True,
+            "symbol": sym,
+            "timeframes": data.get("timeframes", []),
+            "verdict": data.get("verdict", {}),
+            "timestamp": data.get("timestamp"),
+            "age_seconds": (datetime.utcnow() - datetime.fromisoformat(data.get("timestamp", datetime.utcnow().isoformat()))).total_seconds()
+        }
+
+    except Exception as e:
+        logger.error(f"Error retrieving GOM tableau: {e}")
+        return {"ok": False, "error": str(e)}
+
+
+@app.get("/gom-tableau-complete")
+async def get_gom_tableau_complete(symbol: str = "XAUUSD"):
+    """
+    Récupère TOUTES les données GOM: multi-TF, verdict, zones, niveaux KOLA.
+    Format optimisé pour MT5 dashboard (structure plate avec tous les champs).
+    """
+    try:
+        sym = _resolve_symbol(symbol)
+
+        # Récupérer les données sans lock (simple dict access)
+        tableau_data = _GOM_TABLEAU_STORE.get(sym, {})
+        verdict_data = _GOM_VERDICT_STORE.get(sym, {})
+
+        if not tableau_data and not verdict_data:
+            return {
+                "ok": False,
+                "symbol": sym,
+                "error": "No GOM data available"
+            }
+
+        # Helper pour accéder nested dict en sécurité
+        def safe_get(d, *keys, default=None):
+            for key in keys:
+                if isinstance(d, dict):
+                    d = d.get(key, {})
+                else:
+                    return default
+            return d if d else default
+
+        # Construire la structure complète (sans nesting profond qui cause crash)
+        complete_data = {
+            "ok": True,
+            "symbol": sym,
+            "capture_time": datetime.utcnow().isoformat(),
+
+            # Verdict de base
+            "verdict": verdict_data.get("verdict", "WAIT"),
+            "verdict_num": verdict_data.get("verdict_num", 0),
+
+            # Scores et indicateurs
+            "score_buy": verdict_data.get("score_buy", 0),
+            "score_sell": verdict_data.get("score_sell", 0),
+            "spike_pct": verdict_data.get("spike_pct", 0),
+            "rsi": verdict_data.get("rsi", 0),
+            "st_dir": verdict_data.get("st_dir", 0),
+            "entry_quality": verdict_data.get("entry_quality", 0),
+            "coherence_pct": verdict_data.get("coherence_pct", 0),
+            "price": verdict_data.get("price", 0),
+            "force_pts": verdict_data.get("verdict_gap", 0),
+
+            # KOLA Levels
+            "kola_buy": verdict_data.get("kola_buy", 0),
+            "kola_sell": verdict_data.get("kola_sell", 0),
+
+            # Multi-TF — verdict store (webhook TV) prioritaire, sinon tableau MCP
+            "tf_m1_dir": verdict_data.get("tf_m1_dir") or safe_get(tableau_data, "timeframes", "M1", "direction", default=""),
+            "tf_m1_rsi": verdict_data.get("tf_m1_rsi") or safe_get(tableau_data, "timeframes", "M1", "rsi", default=0),
+            "tf_m5_dir": verdict_data.get("tf_m5_dir") or safe_get(tableau_data, "timeframes", "M5", "direction", default=""),
+            "tf_m5_rsi": verdict_data.get("tf_m5_rsi") or safe_get(tableau_data, "timeframes", "M5", "rsi", default=0),
+            "tf_m15_dir": verdict_data.get("tf_m15_dir") or safe_get(tableau_data, "timeframes", "M15", "direction", default=""),
+            "tf_m15_rsi": verdict_data.get("tf_m15_rsi") or safe_get(tableau_data, "timeframes", "M15", "rsi", default=0),
+            "tf_h1_dir": verdict_data.get("tf_h1_dir") or safe_get(tableau_data, "timeframes", "H1", "direction", default=""),
+            "tf_h1_rsi": verdict_data.get("tf_h1_rsi") or safe_get(tableau_data, "timeframes", "H1", "rsi", default=0),
+            "tf_h4_dir": verdict_data.get("tf_h4_dir") or safe_get(tableau_data, "timeframes", "H4", "direction", default=""),
+            "tf_h4_rsi": verdict_data.get("tf_h4_rsi") or safe_get(tableau_data, "timeframes", "H4", "rsi", default=0),
+            "tf_d1_dir": verdict_data.get("tf_d1_dir") or safe_get(tableau_data, "timeframes", "D1", "direction", default=""),
+            "tf_d1_rsi": verdict_data.get("tf_d1_rsi") or safe_get(tableau_data, "timeframes", "D1", "rsi", default=0),
+            "tf_w1_dir": verdict_data.get("tf_w1_dir") or safe_get(tableau_data, "timeframes", "W1", "direction", default=""),
+            "tf_w1_rsi": verdict_data.get("tf_w1_rsi") or safe_get(tableau_data, "timeframes", "W1", "rsi", default=0),
+            "tf_global_dir": verdict_data.get("tf_global_dir") or safe_get(tableau_data, "timeframes", "GLOBAL", "direction", default=""),
+            "tf_global_strength": verdict_data.get("tf_global_strength") or safe_get(tableau_data, "timeframes", "GLOBAL", "strength", default=0),
+
+            # Extended Verdict
+            "rsi_alert": safe_get(tableau_data, "verdict", "rsi_alert", default=""),
+            "kola_state": verdict_data.get("kola_state") or safe_get(tableau_data, "verdict", "kola_state", default=""),
+
+            # KOLA Lines & Zones (safely)
+            "kola_line_1": tableau_data.get("kola_lines", [0, 0])[0] if tableau_data.get("kola_lines") and len(tableau_data.get("kola_lines", [])) > 0 else 0,
+            "kola_line_2": tableau_data.get("kola_lines", [0, 0])[1] if tableau_data.get("kola_lines") and len(tableau_data.get("kola_lines", [])) > 1 else 0,
+            "zone_1_high": tableau_data.get("zones", [{}])[0].get("high", 0) if tableau_data.get("zones") and len(tableau_data.get("zones", [])) > 0 else 0,
+            "zone_1_low": tableau_data.get("zones", [{}])[0].get("low", 0) if tableau_data.get("zones") and len(tableau_data.get("zones", [])) > 0 else 0,
+            "zone_2_high": tableau_data.get("zones", [{}])[1].get("high", 0) if tableau_data.get("zones") and len(tableau_data.get("zones", [])) > 1 else 0,
+            "zone_2_low": tableau_data.get("zones", [{}])[1].get("low", 0) if tableau_data.get("zones") and len(tableau_data.get("zones", [])) > 1 else 0,
+        }
+
+        return complete_data
+
+    except Exception as e:
+        logger.error(f"Error in /gom-tableau-complete: {e}", exc_info=True)
+        return {"ok": False, "symbol": symbol, "error": str(e)}
 
 
 if __name__ == "__main__":
