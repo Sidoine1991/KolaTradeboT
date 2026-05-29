@@ -1,0 +1,57 @@
+{
+  "lock_config": {
+    "enabled": true,
+    "target_timeframe": "M1",
+    "enforce_interval_ms": 2000,
+    "auto_revert": true,
+    "persistent": true,
+    "log_changes": true,
+    "description": "Force TradingView chart to stay on M1 — no auto-switching"
+  },
+  "symbols": [
+    "XAUUSD",
+    "EURUSD",
+    "GBPUSD",
+    "BTCUSD",
+    "Boom 600 Index",
+    "Boom 1000 Index",
+    "Crash 600 Index",
+    "Crash 1000 Index",
+    "Volatility 75 Index"
+  ],
+  "mcp_rules": {
+    "safe_commands": [
+      "chart_get_state",
+      "data_get_study_values",
+      "data_get_ohlcv",
+      "quote_get",
+      "data_get_pine_tables",
+      "data_get_pine_labels"
+    ],
+    "forbidden_commands": [
+      "chart_set_timeframe",
+      "batch_run (with multiple TFs)",
+      "chart_set_symbol (if different TF)"
+    ]
+  },
+  "tv_desktop_settings": {
+    "default_timeframe": "M1",
+    "auto_timeframe_switch": "DISABLED",
+    "lock_timeframe_on_attach": true,
+    "auto_update_apply": "DISABLED",
+    "reset_on_update": "DISABLED"
+  },
+  "ea_enforcement": {
+    "trademanager_m1_lock": true,
+    "spiderider_m1_lock": true,
+    "check_interval_ms": 100,
+    "force_revert_on_change": true,
+    "log_every_60s": true
+  },
+  "monitoring": {
+    "watchdog_enabled": false,
+    "watchdog_interval_ms": 10000,
+    "log_tf_changes": true,
+    "alert_on_drift": true
+  }
+}
