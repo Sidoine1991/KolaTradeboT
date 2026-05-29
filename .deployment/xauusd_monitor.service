@@ -1,0 +1,21 @@
+[Unit]
+Description=XAUUSD Real-Time Monitoring System
+Documentation=file:///d/Dev/TradBOT/DEPLOYMENT.md
+After=network.target
+StartLimitInterval=3600
+StartLimitBurst=3
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /d/Dev/TradBOT/scripts/xauusd_monitoring_orchestrator.py --daemon
+Restart=on-failure
+RestartSec=30
+WorkingDirectory=/d/Dev/TradBOT
+Environment="PYTHONUNBUFFERED=1"
+StandardOutput=append:/d/Dev/TradBOT/logs/xauusd_monitor.log
+StandardError=append:/d/Dev/TradBOT/logs/xauusd_monitor_err.log
+User=%i
+Group=%i
+
+[Install]
+WantedBy=multi-user.target

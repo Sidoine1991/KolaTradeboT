@@ -212,7 +212,10 @@ class XAUUSDMonitor:
     async def get_gom_from_server(self) -> Optional[Dict[str, Any]]:
         """Get GOM KOLA data from AI server (/gom-verdict cache)."""
         try:
-            return await self._get_ai_data(f"/gom-verdict?symbol={self.symbol}")
+            result = await self._get_ai_data(f"/gom-verdict?symbol={self.symbol}")
+            if result and result.get("ok"):
+                return result.get("data", result)
+            return None
         except Exception as e:
             logger.warning(f"[AI] GOM fetch failed: {e}")
             return None
@@ -232,6 +235,16 @@ class XAUUSDMonitor:
         report = await report_task
         gom = await gom_task
 
+        # Normalize order: extract from response structure
+        if order and isinstance(order, dict):
+            if "order" in order and order.get("ok") is False:
+                order = None  # No pending order
+
+        # Normalize report
+        if report and isinstance(report, dict):
+            if report.get("ok") is False or report.get("direction") == "NONE":
+                report = None  # No active report
+
         return {
             "bias": bias or {},
             "pending_order": order or {},
@@ -250,68 +263,97 @@ class XAUUSDMonitor:
         timestamp = now.strftime("%H:%M UTC")
         date_str = now.strftime("%d/%m %H:%M UTC")
 
-        quote = tv_data.get("quote", {})
-        indicators = tv_data.get("indicators", {})
-        gom_tv = tv_data.get("gom", {})
+        quote = tv_data.get("quote") or {}
+        indicators = tv_data.get("indicators") or {}
+        gom_tv = tv_data.get("gom") or {}
 
-        bias = ai_data.get("bias", {})
-        order = ai_data.get("pending_order", {})
-        report = ai_data.get("tradingagents_report", {})
-        gom_server = ai_data.get("gom", {})
+        bias = ai_data.get("bias") or {}
+        order = ai_data.get("pending_order") or {}
+        report = ai_data.get("tradingagents_report") or {}
+        gom_server = ai_data.get("gom") or {}
 
         # Prefer server GOM if available (more reliable)
         gom = gom_server if gom_server else gom_tv
 
-        # Extract values with fallbacks
-        price = quote.get("price", "?")
-        vwap = indicators.get("VWAP", "?")
-        bb_upper = indicators.get("BB_Upper", "?")
-        bb_mid = indicators.get("BB_Mid", "?")
-        bb_lower = indicators.get("BB_Lower", "?")
-        st_line = indicators.get("SuperTrend", "?")
-        st_dir = indicators.get("ST_Direction", "?")
+        # Extract values with fallbacks (prefer GOM data over quote/indicators)
+        price = quote.get("price", "?") if quote else "?"
+        if gom and price == "?":
+            price = gom.get("price", price)
 
-        gom_verdict = gom.get("verdict", "WAIT")
-        gom_buy_score = gom.get("score_buy", "?")
-        gom_sell_score = gom.get("score_sell", "?")
-        gom_spike = gom.get("spike_pct", "?")
-        gom_rsi = gom.get("rsi", "?")
+        vwap = indicators.get("VWAP", "?") if indicators else "?"
+        if gom and vwap == "?":
+            vwap = gom.get("vwap", vwap)
+
+        bb_upper = indicators.get("BB_Upper", "?") if indicators else "?"
+        if gom and bb_upper == "?":
+            bb_upper = gom.get("bb_upper", bb_upper)
+
+        bb_mid = indicators.get("BB_Mid", "?") if indicators else "?"
+        if gom and bb_mid == "?":
+            bb_mid = gom.get("bb_mid", bb_mid)
+
+        bb_lower = indicators.get("BB_Lower", "?") if indicators else "?"
+        if gom and bb_lower == "?":
+            bb_lower = gom.get("bb_lower", bb_lower)
+
+        st_line = indicators.get("SuperTrend", "?") if indicators else "?"
+        if gom and st_line == "?":
+            st_line = gom.get("st_line", st_line)
+
+        st_dir = indicators.get("ST_Direction", "?") if indicators else "?"
+        if gom and st_dir == "?":
+            st_dir = gom.get("st_dir", st_dir)
+
+        gom_verdict = gom.get("verdict", "WAIT") if gom else "WAIT"
+        gom_buy_score = gom.get("score_buy", "?") if gom else "?"
+        gom_sell_score = gom.get("score_sell", "?") if gom else "?"
+        gom_spike = gom.get("spike_pct", "?") if gom else "?"
+        gom_rsi = gom.get("rsi", "?") if gom else "?"
 
         # Handle nested structure from /session-bias
-        bias_data = bias.get("data", {})
+        bias_data = bias.get("data", {}) if bias else {}
         bias_dir = bias_data.get("direction", "NEUTRAL")
         bias_conf = int(bias_data.get("confidence", 0) * 100)
         bias_age_sec = bias_data.get("age_hours", "?")
 
-        order_obj = order.get("order", {})
+        order_obj = order.get("order") if order else None
         order_active = order_obj and order_obj.get("status") != "closed"
-        order_entry = order_obj.get("entry_price", "?")
-        order_sl = order_obj.get("stop_loss", "?")
-        order_tp = order_obj.get("take_profit", "?")
+        order_entry = order_obj.get("entry_price", "?") if order_obj else "?"
+        order_sl = order_obj.get("stop_loss", "?") if order_obj else "?"
+        order_tp = order_obj.get("take_profit", "?") if order_obj else "?"
 
-        report_dir = report.get("direction", "NEUTRAL") or "NEUTRAL"
-        report_conf = int(report.get("confidence", 0) * 100)
-        report_age_sec = report.get("age_minutes", "?")
+        report_dir = report.get("direction", "NEUTRAL") or "NEUTRAL" if report else "NEUTRAL"
+        report_conf = int(report.get("confidence", 0) * 100) if report else 0
+        report_age_sec = report.get("age_minutes", "?") if report else "?"
+
+        # Format numeric values
+        def fmt(val, decimals=2):
+            if val == "?" or val is None:
+                return "⚠️"
+            try:
+                return f"{float(val):.{decimals}f}"
+            except (ValueError, TypeError):
+                return str(val)
 
         # Build message
         msg = f"""📊 TradBOT [{timestamp}]
 
 *XAUUSD — Suivi 20min* | {date_str}
 ━━━━━━━━━━━━━━━━━━━━━━━━━
-💰 *Prix live :* ${price}
-📍 VWAP : ${vwap}
-📊 BB : [{bb_lower} / {bb_mid} / {bb_upper}]
-⚡ Supertrend : ${st_line} ({st_dir})
+💰 *Prix live :* ${fmt(price)}
+📍 VWAP : ${fmt(vwap)}
+📊 BB : [{fmt(bb_lower)} / {fmt(bb_mid)} / {fmt(bb_upper)}]
+⚡ Supertrend : ${fmt(st_line)} ({st_dir})
 ━━━━━━━━━━━━━━━━━━━━━━━━━
 🔴/🟢 *Verdict GOM KOLA : {gom_verdict}*
-   BUY={gom_buy_score} SELL={gom_sell_score} Spike={gom_spike}%
-   RSI={gom_rsi}
+   BUY={fmt(gom_buy_score, 1)} SELL={fmt(gom_sell_score, 1)} Spike={fmt(gom_spike, 0)}%
+   RSI={fmt(gom_rsi, 0)}
 ━━━━━━━━━━━━━━━━━━━━━━━━━
-🔴/🟢 *Biais session :* {bias_dir} {bias_conf}% | Age: {bias_age_sec}s
+🔴/🟢 *Biais session :* {bias_dir} {bias_conf}% | Age: {bias_age_sec}h
 ━━━━━━━━━━━━━━━━━━━━━━━━━
-📦 *Ordre EA :* {'✅ Actif E=' + str(order_entry) + ' SL=' + str(order_sl) + ' TP=' + str(order_tp) if order_active else '📭 Aucun'}
+📦 *Ordre EA :* {'✅ Actif E=' + fmt(order_entry) + ' SL=' + fmt(order_sl) + ' TP=' + fmt(order_tp) if order_active else '📭 Aucun'}
 ━━━━━━━━━━━━━━━━━━━━━━━━━
-🔴/🟢 *TradingAgents :* {report_dir} {report_conf}% | Age: {report_age_sec}s
+🔴/🟢 *TradingAgents :* {report_dir} {report_conf}% | Age: {fmt(report_age_sec, 0)}min
 ━━━━━━━━━━━━━━━━━━━━━━━━━
 🎯 *Décision:* {self._get_confluence_decision(gom_verdict, bias_dir, report_dir)}
 ━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -355,7 +397,8 @@ _Prochain check dans 20 min_"""
                     PSYCHOBOT_URL,
                     json=payload,
                     headers={"Content-Type": "application/json"},
-                    timeout=10
+                    timeout=10,
+                    verify=False  # Allow self-signed SSL on Render
                 )
             )
 
