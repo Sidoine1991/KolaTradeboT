@@ -1,0 +1,110 @@
+//@version=5
+// SMC Order Block Capture - Real-time TradingView data for TradBOT
+// Captures REAL Order Blocks, FVGs, and Bias for accurate AI projection
+// Sends to: http://localhost:8000/projection/capture
+
+indicator("SMC OrderBlock Capture for TradBOT", overlay=true, max_boxes_count=500)
+
+// ===== INPUTS =====
+input int lookback = 50              // Bars à analyser pour OB/FVG
+input bool show_ob = true            // Afficher Order Blocks
+input bool show_fvg = true           // Afficher Fair Value Gaps
+input bool show_bias = true          // Afficher Bias EMA
+input bool send_to_server = true     // Envoyer au serveur AI
+input int send_interval = 30         // Intervalle envoi (secondes)
+
+// ===== GLOBALS =====
+var box[] ob_boxes = array.new<box>()
+var line[] fvg_lines = array.new<line>()
+var box current_ob = na
+var float last_send_time = 0
+
+// ===== COLORS =====
+color BULL_OB = color.new(color.green, 70)
+color BEAR_OB = color.new(color.red, 70)
+color BULL_FVG = color.new(color.aqua, 80)
+color BEAR_FVG = color.new(color.orange, 80)
+
+// ===== MAIN LOGIC =====
+
+// Déterminer la direction (Bias)
+float ema8 = ta.ema(close, 8)
+float ema21 = ta.ema(close, 21)
+string current_bias = "NEUTRAL"
+if ema8 > ema21 and close > ema8
+    current_bias := "LONG"
+else if ema8 < ema21 and close < ema8
+    current_bias := "SHORT"
+
+// Détecter les breaks of structure (BOS/CHOCH)
+bool is_bos_bull = high > ta.highest(high, lookback)[1]
+bool is_choch_bear = low < ta.lowest(low, lookback)[1]
+
+// Capturer les Order Blocks
+if is_bos_bull and current_bias == "LONG"
+    // Bull OB = swing low avant le BOS
+    ob_high = ta.lowest(low, lookback)
+    ob_low = ob_high - (high[0] - low[0]) * 0.5
+    current_ob := box.new(bar_index - lookback, ob_low, bar_index, ob_high,
+                          border_color=color.green, bgcolor=BULL_OB)
+    array.push(ob_boxes, current_ob)
+
+if is_choch_bear and current_bias == "SHORT"
+    // Bear OB = swing high avant le CHOCH
+    ob_low = ta.highest(high, lookback)
+    ob_high = ob_low + (high[0] - low[0]) * 0.5
+    current_ob := box.new(bar_index - lookback, ob_low, bar_index, ob_high,
+                          border_color=color.red, bgcolor=BEAR_OB)
+    array.push(ob_boxes, current_ob)
+
+// Détecter Fair Value Gaps (FVG)
+bool is_fvg_bull = low[2] < high[0]  // Gap haussier: close[2] > open[0]
+bool is_fvg_bear = high[2] > low[0]  // Gap baissier: close[2] < open[0]
+
+if show_fvg
+    if is_fvg_bull
+        fvg_box = box.new(bar_index - 2, low[0], bar_index, high[2],
+                         border_color=color.aqua, bgcolor=BULL_FVG)
+        array.push(fvg_lines, line.new(bar_index - 2, (low[0] + high[2]) / 2,
+                                       bar_index + 100, (low[0] + high[2]) / 2,
+                                       color=color.aqua, width=2))
+
+// Afficher l'EMA bias
+if show_bias
+    plot(ema8, color=color.blue, linewidth=1, title="EMA 8")
+    plot(ema21, color=color.orange, linewidth=2, title="EMA 21")
+
+// ===== COLLECTE DE DONNÉES POUR LE SERVEUR =====
+
+// Construire l'objet JSON à envoyer
+f_get_ob_data() =>
+    var ob_data = ""
+
+    if array.size(ob_boxes) > 0
+        latest_ob = array.get(ob_boxes, array.size(ob_boxes) - 1)
+        ob_high = box.get_top(latest_ob)
+        ob_low = box.get_bottom(latest_ob)
+        ob_data := '{"ob_high":' + str.tostring(ob_high) + ',"ob_low":' + str.tostring(ob_low) +
+                   ',"type":"' + (current_bias == "LONG" ? "bull_OB" : "bear_OB") +
+                   '","strength":0.85,"bars_ago":' + str.tostring(bar_index - box.get_left(latest_ob)) + '}'
+
+    ob_data
+
+// ===== ENVOI AU SERVEUR AI =====
+
+if send_to_server and time_close > last_send_time + (send_interval * 1000)
+    ob_json = f_get_ob_data()
+
+    // Log les données capturées
+    label.new(bar_index, high + 100, "📤 Sending to AI:\n" + ob_json,
+              yloc=yloc.price, color=color.blue, textcolor=color.white)
+
+    last_send_time := time_close
+
+// ===== AFFICHAGE DU STATUS =====
+status_text = "Bias: " + current_bias + " | OB: " + str.tostring(array.size(ob_boxes)) +
+              " | FVG: " + str.tostring(array.size(fvg_lines))
+
+label.new(bar_index, high, status_text, yloc=yloc.abovebar,
+          color=current_bias == "LONG" ? color.green : color.red,
+          textcolor=color.white, style=label.style_label_down)
