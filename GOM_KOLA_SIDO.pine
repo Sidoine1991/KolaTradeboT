@@ -80,6 +80,8 @@ setup_rr2_mult= input.float(1.5, "TP2 = R x mult", minval=0.5, maxval=4.0, step=
 grp_path    = "CHEMIN PREDICTIF (200 bougies)"
 path_horizon = input.int(200, "Horizon bougies", minval=20, maxval=200, group=grp_path)
 path_show    = input.bool(true, "Segments direction futurs", group=grp_path)
+path_show_candles = input.bool(true, "Bougies predites (fantomes)", group=grp_path)
+path_candle_vis   = input.int(80, "Nb bougies fantomes visibles", minval=15, maxval=200, group=grp_path)
 path_width   = input.int(5, "Epaisseur segments", minval=2, maxval=10, group=grp_path)
 path_step    = input.float(0.16, "Pas (x ATR)", minval=0.05, maxval=0.45, step=0.01, group=grp_path)
 path_in_alert= input.bool(true, "Envoyer chemin → webhook", group=grp_path)
@@ -913,6 +915,8 @@ path_base_score += ema_above_count >= 3 ? 0.06 : ema_above_count <= 1 ? -0.06 : 
 path_base_score := math.max(-1.0, math.min(1.0, path_base_score))
 
 var line[] path_lines = array.new_line()
+var box[]  path_boxes = array.new_box()
+var line[] path_wicks = array.new_line()
 var string path_encoded = ""
 var int    path_bull_n  = 0
 var int    path_bear_n  = 0
@@ -932,9 +936,22 @@ if barstate.islast
             for i = 0 to npl - 1
                 line.delete(array.get(path_lines, i))
         array.clear(path_lines)
+    if path_show_candles
+        int npb = array.size(path_boxes)
+        if npb > 0
+            for i = 0 to npb - 1
+                box.delete(array.get(path_boxes, i))
+        array.clear(path_boxes)
+        int npw = array.size(path_wicks)
+        if npw > 0
+            for i = 0 to npw - 1
+                line.delete(array.get(path_wicks, i))
+        array.clear(path_wicks)
 
     float y_path = close
+    float y_open = close
     int   x0     = bar_index
+    int   vis_n  = math.min(path_candle_vis, path_horizon)
     path_encoded := ""
     path_bull_n  := 0
     path_bear_n  := 0
@@ -950,6 +967,18 @@ if barstate.islast
             line seg = line.new(x0 + step - 1, y_path, x0 + step, y1,
                  xloc=xloc.bar_index, color=seg_col, width=path_width, style=line.style_solid)
             array.push(path_lines, seg)
+        if path_show_candles and step <= vis_n
+            float y_h = math.max(y_open, y1) + atr14 * path_step * 0.12
+            float y_l = math.min(y_open, y1) - atr14 * path_step * 0.08
+            color bc = pdir == 1 ? color.new(color.lime, 40) :
+                 pdir == -1 ? color.new(color.red, 40) : color.new(color.orange, 55)
+            box pb = box.new(x0 + step - 1, y_h, x0 + step, y_l,
+                 xloc=xloc.bar_index, bgcolor=bc, border_color=bc, border_width=1)
+            array.push(path_boxes, pb)
+            line pw = line.new(x0 + step - 1, y_open, x0 + step - 1, y1,
+                 xloc=xloc.bar_index, color=color.new(color.white, 65), width=1)
+            array.push(path_wicks, pw)
+            y_open := y1
         y_path := y1
         path_encoded += pdir == 1 ? "U" : pdir == -1 ? "D" : "N"
         path_bull_n  += pdir == 1 ? 1 : 0

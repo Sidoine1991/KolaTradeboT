@@ -4,7 +4,7 @@
 //| Attacher sur UN SEUL chart — gère tout le terminal               |
 //+------------------------------------------------------------------+
 #property copyright "TradBOT"
-#property version   "3.16"
+#property version   "3.17"
 #property strict
 #include <Trade/Trade.mqh>
 #include <Trade/PositionInfo.mqh>
@@ -129,6 +129,16 @@ input bool   TVSetupInferFromGOM      = true;  // Reconstruire setup si plots TV
 input bool   TVSetupMarketOnBreakout  = true;  // Marché si prix repasse au-dessus entry (reprise BUY)
 input double TVSetupBreakoutTolPct    = 0.03;  // Tolérance breakout au-dessus entry (%)
 
+input group "=== CHEMIN PREDICTIF + ANTI-CORRECTION ==="
+input bool   ShowGOMPathCandles       = true;  // Dessiner bougies futures sur chart MT5
+input int    GOMPathDrawBars          = 80;    // Nombre de bougies predites affichees
+input int    GOMPathDrawRefreshSec    = 8;     // Rafraichissement affichage (sec)
+input double GOMPathStepAtr           = 0.16;  // Pas bougie (= Pine path_step x ATR)
+input bool   GOMBlockCorrectionZone   = true;  // Ne pas trader pendant correction
+input bool   GOMUseMicroTFCorrection  = true;  // M1/M5 contre H1 = correction
+input int    GOMCorrectionPathLook    = 25;    // Barres pred_path analysees
+input int    GOMCorrectionMinBars     = 7;     // Min bougies D/U opposees = correction
+
 input group "=== GOM/KOLA DASHBOARD ==="
 input bool   UseDashboard          = true;   // Afficher le dashboard GOM/KOLA sur le chart
 input int    DashboardX            = 20;     // Distance depuis le coin (CORNER_RIGHT_UPPER)
@@ -190,6 +200,13 @@ bool     g_tvSetupEntryTouched = false;
 datetime g_tvSetupCancelAt     = 0;
 datetime g_tvSetupBreakoutDone = 0;
 datetime g_tvSetupPlaceFailAt    = 0;
+
+// Chemin predictif GOM (pred_path depuis /gom-verdict)
+string   g_predPath           = "";
+string   g_predPathDrawKey    = "";
+int      g_predNet            = 0;
+int      g_lastGOMStDir       = 0;
+datetime g_lastGOMPathDraw    = 0;
 
 struct GOMReEntryState
 {
@@ -366,6 +383,7 @@ void OnDeinit(const int reason)
 {
    EventKillTimer();
    if(UseDashboard) RemoveAllDashboardObjects();
+   CleanupGOMPathObjects();
    for(int i = 0; i < g_stateCount; i++)
    {
       if(g_states[i].hRSI     != INVALID_HANDLE) IndicatorRelease(g_states[i].hRSI);
@@ -392,6 +410,7 @@ void OnTimer()
    if(UseGOMScalp)           CheckGOMAutoEntry();
    if(UseGOMScalp)           CheckGOMReEntry();
    if(UseTVSetupLimit)       ManageTVSetupLimitOrder();
+   if(ShowGOMPathCandles)    DrawGOMPathPredictedCandles();
    if(UseDashboard)          RefreshDashboard();  // ⭐ NEW Dashboard with colored boxes
 }
 
@@ -424,6 +443,195 @@ bool IsGOMVerdictWait()
    if(g_lastGOMVerdictNum == 0) return true;
    if(StringFind(g_lastGOMVerdict, "WAIT") >= 0) return true;
    return false;
+}
+
+//+------------------------------------------------------------------+
+//| Chemin predictif — affichage MT5 + filtre zone correction        |
+//+------------------------------------------------------------------+
+int CalcGOMTFDirection(const ENUM_TIMEFRAMES tf)
+{
+   double c0 = iClose(_Symbol, tf, 0);
+   double c3 = iClose(_Symbol, tf, 3);
+   if(c0 <= 0 || c3 <= 0) return 0;
+   double tol = c3 * 0.00008;
+   if(c0 > c3 + tol) return 1;
+   if(c0 < c3 - tol) return -1;
+   return 0;
+}
+
+bool IsGOMCorrectionZone(const int tradeDir)
+{
+   if(!GOMBlockCorrectionZone || tradeDir == 0) return false;
+
+   if(GOMUseMicroTFCorrection)
+   {
+      int m1 = CalcGOMTFDirection(PERIOD_M1);
+      int m5 = CalcGOMTFDirection(PERIOD_M5);
+      int h1 = CalcGOMTFDirection(PERIOD_H1);
+      int h4 = CalcGOMTFDirection(PERIOD_H4);
+
+      if(tradeDir == 1)
+      {
+         if((m1 == -1 || m5 == -1) && (h1 == 1 || h4 == 1))
+         {
+            PrintOnce("[GOM-Corr] Zone correction — M1/M5 baissiers vs H1/H4 haussiers", 25);
+            return true;
+         }
+         if(g_lastGOMStDir < 0)
+         {
+            PrintOnce("[GOM-Corr] Zone correction — Supertrend baissier", 25);
+            return true;
+         }
+      }
+      if(tradeDir == -1)
+      {
+         if((m1 == 1 || m5 == 1) && (h1 == -1 || h4 == -1))
+         {
+            PrintOnce("[GOM-Corr] Zone correction — M1/M5 haussiers vs H1/H4 baissiers", 25);
+            return true;
+         }
+         if(g_lastGOMStDir > 0)
+         {
+            PrintOnce("[GOM-Corr] Zone correction — Supertrend haussier", 25);
+            return true;
+         }
+      }
+   }
+
+   int look = MathMin(GOMCorrectionPathLook, StringLen(g_predPath));
+   if(look >= GOMCorrectionMinBars)
+   {
+      int u = 0, d = 0;
+      for(int i = 0; i < look; i++)
+      {
+         ushort ch = StringGetCharacter(g_predPath, i);
+         if(ch == 'U') u++;
+         else if(ch == 'D') d++;
+      }
+      if(tradeDir == 1 && d >= GOMCorrectionMinBars && d > u)
+      {
+         PrintOnce(StringFormat("[GOM-Corr] Chemin predictif correction (%d D / %d U sur %d)",
+               d, u, look), 25);
+         return true;
+      }
+      if(tradeDir == -1 && u >= GOMCorrectionMinBars && u > d)
+      {
+         PrintOnce(StringFormat("[GOM-Corr] Chemin predictif correction (%d U / %d D sur %d)",
+               u, d, look), 25);
+         return true;
+      }
+   }
+
+   return false;
+}
+
+void CleanupGOMPathObjects()
+{
+   for(int i = ObjectsTotal(0, 0, -1) - 1; i >= 0; i--)
+   {
+      string n = ObjectName(0, i, 0, -1);
+      if(StringFind(n, "GOM_PRED_") == 0)
+         ObjectDelete(0, n);
+   }
+}
+
+void DrawGOMPathPredictedCandles()
+{
+   if(!ShowGOMPathCandles) return;
+
+   string drawKey = g_predPath + "|" + IntegerToString(g_predNet);
+   if(drawKey == g_predPathDrawKey
+      && g_lastGOMPathDraw > 0
+      && (int)(TimeCurrent() - g_lastGOMPathDraw) < GOMPathDrawRefreshSec)
+      return;
+
+   if(StringLen(g_predPath) < 5)
+   {
+      PrintOnce("[GOM-Path] pred_path absent — activer path_in_alert dans Pine + poller", 120);
+      return;
+   }
+
+   CleanupGOMPathObjects();
+
+   ENUM_TIMEFRAMES tf = PERIOD_M1;
+   int nBars = MathMin(GOMPathDrawBars, StringLen(g_predPath));
+   int dg = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+
+   double atrBuf[];
+   ArraySetAsSeries(atrBuf, true);
+   int hAtr = iATR(_Symbol, tf, 14);
+   if(hAtr == INVALID_HANDLE) return;
+   if(CopyBuffer(hAtr, 0, 0, 1, atrBuf) < 1) { IndicatorRelease(hAtr); return; }
+   double stepPx = atrBuf[0] * GOMPathStepAtr;
+   IndicatorRelease(hAtr);
+   if(stepPx <= 0) stepPx = SymbolInfoDouble(_Symbol, SYMBOL_POINT) * 50;
+
+   datetime t0 = iTime(_Symbol, tf, 0);
+   int tfSec = PeriodSeconds(tf);
+   if(t0 <= 0 || tfSec <= 0) return;
+
+   double y = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   if(y <= 0) y = iClose(_Symbol, tf, 0);
+
+   double minP = y, maxP = y;
+
+   for(int i = 0; i < nBars; i++)
+   {
+      ushort ch = StringGetCharacter(g_predPath, i);
+      int pdir = (ch == 'U') ? 1 : (ch == 'D') ? -1 : 0;
+      double o = y;
+      double c = y + pdir * stepPx;
+      double h = MathMax(o, c) + stepPx * 0.12;
+      double l = MathMin(o, c) - stepPx * 0.08;
+
+      datetime tStart = t0 + (i * tfSec);
+      datetime tEnd   = t0 + ((i + 1) * tfSec);
+      datetime tMid   = tStart + tfSec / 2;
+
+      color col = (c >= o) ? clrLimeGreen : clrCrimson;
+      if(pdir == 0) col = clrOrange;
+
+      string bodyName = "GOM_PRED_BODY_" + IntegerToString(i);
+      ObjectCreate(0, bodyName, OBJ_RECTANGLE, 0, tStart, MathMax(o, c), tEnd, MathMin(o, c));
+      ObjectSetInteger(0, bodyName, OBJPROP_COLOR, col);
+      ObjectSetInteger(0, bodyName, OBJPROP_FILL, true);
+      ObjectSetInteger(0, bodyName, OBJPROP_BACK, true);
+      ObjectSetInteger(0, bodyName, OBJPROP_SELECTABLE, false);
+
+      string wickName = "GOM_PRED_WICK_" + IntegerToString(i);
+      ObjectCreate(0, wickName, OBJ_TREND, 0, tMid, l, tMid, h);
+      ObjectSetInteger(0, wickName, OBJPROP_COLOR, col);
+      ObjectSetInteger(0, wickName, OBJPROP_WIDTH, 1);
+      ObjectSetInteger(0, wickName, OBJPROP_RAY_RIGHT, false);
+      ObjectSetInteger(0, wickName, OBJPROP_BACK, true);
+      ObjectSetInteger(0, wickName, OBJPROP_SELECTABLE, false);
+
+      minP = MathMin(minP, l);
+      maxP = MathMax(maxP, h);
+      y = c;
+   }
+
+   string zoneName = "GOM_PRED_ZONE";
+   ObjectDelete(0, zoneName);
+   ObjectCreate(0, zoneName, OBJ_RECTANGLE, 0, t0 + tfSec, minP, t0 + nBars * tfSec, maxP);
+   ObjectSetInteger(0, zoneName, OBJPROP_COLOR, clrDimGray);
+   ObjectSetInteger(0, zoneName, OBJPROP_STYLE, STYLE_DOT);
+   ObjectSetInteger(0, zoneName, OBJPROP_FILL, false);
+   ObjectSetInteger(0, zoneName, OBJPROP_BACK, true);
+   ObjectSetInteger(0, zoneName, OBJPROP_SELECTABLE, false);
+
+   string lbl = "GOM_PRED_LBL";
+   ObjectDelete(0, lbl);
+   ObjectCreate(0, lbl, OBJ_TEXT, 0, t0 + tfSec, maxP);
+   ObjectSetString(0, lbl, OBJPROP_TEXT, StringFormat("GOM %d bars | net=%d", nBars, g_predNet));
+   ObjectSetInteger(0, lbl, OBJPROP_COLOR, clrYellow);
+   ObjectSetInteger(0, lbl, OBJPROP_FONTSIZE, 8);
+   ObjectSetString(0, lbl, OBJPROP_FONT, "Arial");
+   ObjectSetInteger(0, lbl, OBJPROP_SELECTABLE, false);
+
+   g_predPathDrawKey = drawKey;
+   g_lastGOMPathDraw = TimeCurrent();
+   ChartRedraw(0);
 }
 
 string BuildTVSetupKey()
@@ -647,6 +855,11 @@ bool PriceTouchedTVSetupEntry(const int dir, const double entry)
 bool PlaceTVSetupLimitOrder()
 {
    if(!g_setupValid || g_setupDir == 0) return false;
+   if(IsGOMCorrectionZone(g_setupDir))
+   {
+      PrintOnce("[TV-Setup] Entree bloquee — zone de correction active", 30);
+      return false;
+   }
    if(g_tvSetupPlaceFailAt > 0 && (int)(TimeCurrent() - g_tvSetupPlaceFailAt) < 25)
       return false;
    if(TVSetupRearmCooldownSec > 0 && g_tvSetupCancelAt > 0
@@ -800,6 +1013,11 @@ void ManageTVSetupLimitOrder()
 void TryTVSetupMarketBreakout()
 {
    if(!TVSetupMarketOnBreakout || !g_setupValid || g_setupDir != 1) return;
+   if(IsGOMCorrectionZone(1))
+   {
+      PrintOnce("[TV-Setup] Breakout BUY bloque — correction en cours", 30);
+      return;
+   }
    if(IsGOMVerdictWait()) return;
    if(g_lastGOMVerdictNum < 1 || g_lastGOMScoreBuy <= g_lastGOMScoreSell) return;
    if(GOMWaitPullbackToKola && StringCompare(g_lastKOLAState, "NEAR BUY") != 0) return;
@@ -2735,8 +2953,22 @@ void PollGOMScalpVerdict()
    }
    if(tfStrength > 0) g_lastGOMGlobalStrength = tfStrength;
 
+   g_predPath = JsonGetString(body, "pred_path");
+   g_predNet  = (int)JsonGetDouble(body, "pred_net");
+   g_lastGOMStDir = (int)JsonGetDouble(body, "st_dir");
+   if(StringLen(g_predPath) == 0)
+   {
+      int pb = (int)JsonGetDouble(body, "pred_bull");
+      int pbe = (int)JsonGetDouble(body, "pred_bear");
+      if(pb + pbe > 0)
+         PrintOnce(StringFormat("[GOM-Path] pred_path vide (bull=%d bear=%d) — redemarrer poller", pb, pbe), 90);
+   }
+
    if(UseTVSetupLimit)
       ParseTVSetupFromGOMBody(body);
+
+   if(ShowGOMPathCandles)
+      DrawGOMPathPredictedCandles();
 
    // ── Scanner positions ouvertes ──────────────────────────────
    // 🟡 Si CONSOLIDATION: Fermer positions si pas de profit significatif (fausse entrée)
@@ -3072,6 +3304,13 @@ void CheckGOMAutoEntry()
    int    dir = 0, effVnum = 0;
    string actTag;
    if(!ResolveGOMActionable(dir, effVnum, actTag)) return;
+
+   if(IsGOMCorrectionZone(dir))
+   {
+      PrintOnce(StringFormat("[GOM-Auto] %s bloque — zone correction (attendre fin pullback)",
+            sym), 35);
+      return;
+   }
 
    if(GOMIsCounterTrendEntryBlocked(dir))
    {
