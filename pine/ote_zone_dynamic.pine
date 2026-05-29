@@ -1,61 +1,25 @@
-//@version=5
+//@version=6
 indicator("OTE Zone Dynamic", overlay=true)
 
 // === SETTINGS ===
 atr_mult_up = input.float(0.3, "ATR Mult Up", minval=0.1, maxval=1.0)
 atr_mult_down = input.float(0.3, "ATR Mult Down", minval=0.1, maxval=1.0)
-line_width = input.int(2, "Line Width", minval=1, maxval=5)
-box_opacity = input.int(20, "Box Opacity %", minval=0, maxval=100)
 
 // === CALCULATIONS ===
 close_price = close
 atr_value = ta.atr(14)
 
 // OTE Zone (±ATR autour du prix actuel)
-ote_high = close_price + (atr_value * atr_mult_up)
-ote_low = close_price - (atr_value * atr_mult_down)
+ote_high = close_price + atr_value * atr_mult_up
+ote_low = close_price - atr_value * atr_mult_down
 
 // Détection: prix est-il dans la zone?
-in_zone = (close_price >= ote_low and close_price <= ote_high)
-zone_color = in_zone ? color.new(color.green, box_opacity) : color.new(color.orange, box_opacity)
+in_zone = close_price >= ote_low and close_price <= ote_high
 
 // === DRAWING ===
-// Zone OTE (rectangle)
-if barstate.islast
-    box.new(
-        left=bar_index - 20,
-        top=ote_high,
-        right=bar_index,
-        bottom=ote_low,
-        border_color=color.orange,
-        border_width=line_width,
-        bgcolor=zone_color
-    )
-
 // Lignes hautes/basses
-plot(ote_high, "OTE High", color=color.orange, linewidth=line_width, style=plot.style_dashed)
-plot(ote_low, "OTE Low", color=color.orange, linewidth=line_width, style=plot.style_dashed)
-plot(close_price, "Close", color=color.gray, linewidth=1)
-
-// === LABELS ===
-if barstate.islast
-    label.new(
-        x=bar_index,
-        y=ote_high,
-        text=str.format("OTE: {0,number,#.##}", ote_high),
-        color=color.orange,
-        style=label.style_label_bottom,
-        textcolor=color.white
-    )
-
-    label.new(
-        x=bar_index,
-        y=ote_low,
-        text=str.format("OTE: {0,number,#.##}", ote_low),
-        color=color.orange,
-        style=label.style_label_top,
-        textcolor=color.white
-    )
+plot(ote_high, "OTE High", color=color.orange, linewidth=2, style=plot.style_dashed)
+plot(ote_low, "OTE Low", color=color.orange, linewidth=2, style=plot.style_dashed)
 
 // === ALERTS ===
 alertcondition(in_zone, title="Prix dans zone OTE", message="🎯 Price in OTE Zone!")
