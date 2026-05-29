@@ -1,0 +1,310 @@
+════════════════════════════════════════════════════════════════════════════════
+🚀 TRADBOT AUTO-COMPILATION SYSTEM — ALL COMMANDS
+════════════════════════════════════════════════════════════════════════════════
+
+QUICK REFERENCE
+───────────────────────────────────────────────────────────────────────────────
+
+🟢 FIRST TIME SETUP (Recommended):
+   Command: D:\Dev\TradBOT\START_TRADING_SYSTEM.bat
+   What it does:
+     • Compiles TradeManager.mq5
+     • Compiles SpikeRiderEA.mq5
+     • Launches MT5 Terminal
+     • Verifies system status
+     • Shows next steps
+   Time: ~2 minutes
+
+🔄 RECOMPILE ONLY (After code changes):
+   Command: D:\Dev\TradBOT\RUN_AUTO_COMPILE.bat
+   What it does:
+     • Closes MT5
+     • Recompiles both EAs
+     • Relaunches MT5
+   Time: ~90 seconds
+
+📊 CHECK STATUS (Anytime):
+   Command: D:\Dev\TradBOT\QUICK_CHECK.bat
+   What it does:
+     • Shows if MT5 is running
+     • Shows if Python is installed
+     • Shows if trade log exists
+     • Counts lines in trade log
+   Time: ~5 seconds
+
+📈 MONITOR STATUS (Python):
+   Command: python D:\Dev\TradBOT\monitor_eas.py
+   What it does:
+     • Checks MT5 status
+     • Reads recent EA logs
+     • Shows recent trades
+     • Verifies parameters
+   Time: ~10 seconds
+
+────────────────────────────────────────────────────────────────────────────────
+DETAILED COMMANDS
+────────────────────────────────────────────────────────────────────────────────
+
+1️⃣ FULL STARTUP SEQUENCE
+   ─────────────────────────
+   Batch:  START_TRADING_SYSTEM.bat
+   Python: auto_compile.py (called internally)
+
+   Execution Steps:
+   1. Verifies source file modifications
+   2. Closes existing MT5 & MetaEditor
+   3. Compiles TradeManager.mq5
+   4. Compiles SpikeRiderEA.mq5
+   5. Launches MT5 Terminal
+   6. Waits 30 seconds for MT5 to load
+   7. Runs verification checks
+   8. Displays status and instructions
+
+   Expected Duration: 2-3 minutes
+   Output: Color-coded status messages + instructions
+
+   When to use: First run of the day, after major code changes
+
+
+2️⃣ QUICK RECOMPILE
+   ─────────────────
+   Batch:  RUN_AUTO_COMPILE.bat
+   Python: auto_compile.py
+
+   Execution Steps:
+   1. Verifies source files
+   2. Kills terminal64.exe & MetaEditor64.exe
+   3. Waits 2 seconds
+   4. Compiles TradeManager.mq5
+   5. Compiles SpikeRiderEA.mq5
+   6. Waits 2 seconds per file
+   7. Launches MT5 Terminal
+
+   Expected Duration: 90 seconds
+   Output: Status messages for each step
+
+   When to use: After parameter changes, EA fixes
+
+
+3️⃣ STATUS CHECK (No Compilation)
+   ─────────────────────────────────
+   Batch:  QUICK_CHECK.bat
+
+   Checks:
+   • Is terminal64.exe running? (✅/❌)
+   • Do source files exist? (✅/❌)
+   • Is Python installed? (✅/❌)
+   • Does trade log exist? (✅/❌)
+   • How many lines in trade log?
+
+   Expected Duration: 5 seconds
+   Output: Simple status table
+
+   When to use: Verify everything is ready before trading
+
+
+4️⃣ MONITOR EA STATUS
+   ───────────────────
+   Python: python D:\Dev\TradBOT\monitor_eas.py
+
+   Checks:
+   • Is MT5 running?
+   • Are source modifications in place?
+   • Any recent Expert Advisor logs?
+   • Any recent trade collections?
+
+   Expected Duration: 10 seconds
+   Output: Formatted status report
+
+   When to use: Verify EAs are loaded and trading
+
+
+5️⃣ LEGACY BATCH SCRIPT
+   ────────────────────
+   Batch:  FORCE_RELOAD_EAS.bat
+
+   Execution Steps:
+   1. Closes MT5 & MetaEditor
+   2. Cleans compiled cache
+   3. Launches MetaEditor
+   4. Sends keyboard F9 to compile (via PowerShell)
+   5. Relaunches MT5
+
+   Expected Duration: 3-4 minutes
+   Output: Batch window with progress
+
+   When to use: Alternative if Python scripts fail
+   Note: Uses keyboard automation (SendKeys), less reliable
+
+
+────────────────────────────────────────────────────────────────────────────────
+ADVANCED OPTIONS
+────────────────────────────────────────────────────────────────────────────────
+
+Manual Compilation (MetaEditor CLI):
+  powershell -Command ^
+    "$editor = 'C:\Program Files\MetaTrader 5\MetaEditor64.exe'; ^
+     & $editor /compile:'D:\Dev\TradBOT\TradeManager.mq5'; ^
+     Start-Sleep -Seconds 10; ^
+     & $editor /compile:'D:\Dev\TradBOT\SpikeRiderEA.mq5'"
+
+Manual MT5 Launch:
+  "C:\Program Files\MetaTrader 5\terminal64.exe"
+
+View Trade Log (Last 50 lines):
+  powershell -Command "Get-Content D:\Dev\TradBOT\whatsapp_alerts.log -Tail 50"
+
+Kill MT5 Forcefully:
+  taskkill /F /IM terminal64.exe
+
+Kill MetaEditor Forcefully:
+  taskkill /F /IM MetaEditor64.exe
+
+Check if MT5 Running:
+  tasklist | find /i "terminal64.exe"
+
+Python Version Check:
+  python --version
+
+Install Python Dependencies:
+  pip install psutil
+
+
+────────────────────────────────────────────────────────────────────────────────
+DECISION TREE - WHICH COMMAND TO RUN?
+────────────────────────────────────────────────────────────────────────────────
+
+START HERE → Is MT5 already running?
+           │
+           ├─ YES: Trade log showing activity?
+           │       │
+           │       ├─ YES → Everything working! Run: QUICK_CHECK.bat
+           │       │
+           │       └─ NO → Run: RUN_AUTO_COMPILE.bat
+           │
+           └─ NO: First time setting up?
+                  │
+                  ├─ YES → Run: START_TRADING_SYSTEM.bat
+                  │
+                  └─ NO → Run: RUN_AUTO_COMPILE.bat
+
+
+────────────────────────────────────────────────────────────────────────────────
+WHAT EACH SCRIPT DOES IN DETAIL
+────────────────────────────────────────────────────────────────────────────────
+
+auto_compile.py (Core Python Script)
+────────────────────────────────────────
+
+1. VERIFY MODIFICATIONS
+   Checks that source files contain:
+   • GOMBlockOnWait = false
+   • GOMMinCoherence = 50.0
+   • MinTAConfidence = 0.40
+   • InpGOMBlockOnWait = false
+   • InpSniperMinConfidence = 50.0
+   • InpZScoreMin = 1.5
+
+2. CLOSE PROCESSES
+   Kills: terminal64.exe
+   Kills: MetaEditor64.exe
+   Waits: 2 seconds
+
+3. COMPILE FILES
+   For each .mq5 file:
+   • Launch MetaEditor with file path
+   • Wait 3 seconds
+   • Send F9 (compile shortcut)
+   • Wait 8 seconds
+   • Kill MetaEditor
+   • Report success/failure
+
+4. LAUNCH MT5
+   • Start terminal64.exe
+   • Wait for process (max 30 seconds)
+   • Report if timeout
+
+
+monitor_eas.py (Verification & Monitoring)
+─────────────────────────────────────────────
+
+1. CHECK MT5 RUNNING
+   Uses tasklist to verify terminal64.exe is running
+
+2. VERIFY PARAMETERS
+   Reads source files and checks for correct modifications
+
+3. READ EXPERT LOGS
+   • Finds MetaTrader logs directory
+   • Searches for [GOM-Auto] messages
+   • Searches for [SpikeRider] messages
+   • Extracts last 3 messages per EA
+
+4. CHECK TRADE ACTIVITY
+   • Reads whatsapp_alerts.log
+   • Finds Collection #N entries
+   • Shows last 5 collections
+
+5. DISPLAY SUMMARY
+   • Status of each check
+   • Recommendations
+   • Next steps
+
+
+START_TRADING_SYSTEM.bat (Master Orchestrator)
+────────────────────────────────────────────────
+
+1. Change directory to D:\Dev\TradBOT
+2. Call RUN_AUTO_COMPILE.bat
+3. Wait 30 seconds (MT5 loading)
+4. Call monitor_eas.py
+5. Display instructions
+6. Pause for user review
+
+
+RUN_AUTO_COMPILE.bat (Batch Wrapper)
+──────────────────────────────────────
+
+1. Check Python installation
+2. Install psutil module if needed
+3. Call python auto_compile.py
+4. Check exit code
+5. Display result
+
+
+────────────────────────────────────────────────────────────────────────────────
+TROUBLESHOOTING MATRIX
+────────────────────────────────────────────────────────────────────────────────
+
+Issue: "Python not found"
+  → Install: https://www.python.org/downloads/
+  → Add to PATH: https://datatofish.com/add-python-to-windows-path/
+
+Issue: "MetaEditor hangs"
+  → taskkill /F /IM MetaEditor64.exe
+  → taskkill /F /IM terminal64.exe
+  → Run: START_TRADING_SYSTEM.bat
+
+Issue: "No trades after compilation"
+  → Run: QUICK_CHECK.bat
+  → Verify MT5: Tools > Options > Experts > Allow algorithmic trading = ON
+  → Attach EAs manually: Right-click chart > Expert Advisors
+
+Issue: "Compilation fails"
+  → Check error messages in output
+  → Verify source file integrity: D:\Dev\TradBOT\*.mq5
+  → Run manual compilation: MetaEditor > File > Open > F9
+
+Issue: "Trade log not updating"
+  → Check: python monitor_eas.py
+  → Verify EAs are attached to charts
+  → Check F2 logs in MT5 for [GOM-Auto] or [SpikeRider]
+
+
+════════════════════════════════════════════════════════════════════════════════
+READY TO START? Run this command:
+════════════════════════════════════════════════════════════════════════════════
+
+   D:\Dev\TradBOT\START_TRADING_SYSTEM.bat
+
+════════════════════════════════════════════════════════════════════════════════

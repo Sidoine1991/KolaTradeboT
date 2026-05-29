@@ -4,7 +4,7 @@
 //| Attacher sur UN SEUL chart — gère tout le terminal               |
 //+------------------------------------------------------------------+
 #property copyright "TradBOT"
-#property version   "3.15"
+#property version   "3.16"
 #property strict
 #include <Trade/Trade.mqh>
 #include <Trade/PositionInfo.mqh>
@@ -117,6 +117,18 @@ input bool   RequireGlobalDirMatch    = true;  // ✅ Exiger que TF Global soit 
 input int    GlobalDirMinConfidence   = 70;    // Confiance TF global minimale (%) pour autoriser l'entrée
 input double GlobalMinCoherencePct    = 60.0;  // Cohérence GOM minimale (%) pour autoriser l'entrée
 
+input group "=== SETUP TV — ORDRE LIMITE ==="
+input bool   UseTVSetupLimit          = true;   // Placer ordre limite depuis tableau SETUP TV
+input int    TVSetupMagicNumber       = 20260527; // Magic dédié setup limit
+input double TVSetupEntryTolPct       = 0.04;  // Tolérance « prix touche entry » (%)
+input bool   TVSetupRequirePinBar     = false;  // Exiger PIN_BAR_BULL/BEAR dans Confirm
+input bool   TVSetupBlockPlaceOnWait  = false; // false = placer la limite même si GOM WAIT (annule au touch+WAIT)
+input bool   TVSetupCancelOnWaitTouch = true;  // Annuler si entry touchée + GOM WAIT
+input int    TVSetupRearmCooldownSec  = 15;    // Délai après annulation avant nouveau même setup
+input bool   TVSetupInferFromGOM      = true;  // Reconstruire setup si plots TV absents (KOLA+BB)
+input bool   TVSetupMarketOnBreakout  = true;  // Marché si prix repasse au-dessus entry (reprise BUY)
+input double TVSetupBreakoutTolPct    = 0.03;  // Tolérance breakout au-dessus entry (%)
+
 input group "=== GOM/KOLA DASHBOARD ==="
 input bool   UseDashboard          = true;   // Afficher le dashboard GOM/KOLA sur le chart
 input int    DashboardX            = 20;     // Distance depuis le coin (CORNER_RIGHT_UPPER)
@@ -158,6 +170,26 @@ double   g_lastGOMScoreBuy   = 0.0;
 double   g_lastGOMScoreSell  = 0.0;
 string   g_lastGOMGlobalDir  = "";  // "BULL" | "BEAR" | "NEUT"
 int      g_lastGOMGlobalStrength = 0; // 0-100
+
+// Tableau SETUP TradingView (OB_BULL / OB_BEAR)
+bool     g_setupValid       = false;
+int      g_setupDir         = 0;      // 1=BUY limit, -1=SELL limit
+double   g_setupEntry       = 0.0;
+double   g_setupSL          = 0.0;
+double   g_setupTP1         = 0.0;
+double   g_setupTP2         = 0.0;
+double   g_setupRR          = 0.0;
+string   g_setupType        = "";
+string   g_setupConfirm     = "";
+string   g_setupKey         = "";     // détecte changement de proposition
+
+// Ordre limite setup TV actif
+ulong    g_tvSetupOrderTicket = 0;
+datetime g_tvSetupPlacedAt    = 0;
+bool     g_tvSetupEntryTouched = false;
+datetime g_tvSetupCancelAt     = 0;
+datetime g_tvSetupBreakoutDone = 0;
+datetime g_tvSetupPlaceFailAt    = 0;
 
 struct GOMReEntryState
 {
@@ -359,6 +391,7 @@ void OnTimer()
    if(UseGOMScalp)           PollGOMScalpVerdict();
    if(UseGOMScalp)           CheckGOMAutoEntry();
    if(UseGOMScalp)           CheckGOMReEntry();
+   if(UseTVSetupLimit)       ManageTVSetupLimitOrder();
    if(UseDashboard)          RefreshDashboard();  // ⭐ NEW Dashboard with colored boxes
 }
 
@@ -380,6 +413,427 @@ void OnTick()
    if(UseGOMScalp)           PollGOMScalpVerdict();
    if(UseGOMScalp)           CheckGOMAutoEntry();
    if(UseGOMScalp)           CheckGOMReEntry();
+   if(UseTVSetupLimit)       ManageTVSetupLimitOrder();
+}
+
+//+------------------------------------------------------------------+
+//| SETUP TV — ordre limite + annulation entry touchée + GOM WAIT    |
+//+------------------------------------------------------------------+
+bool IsGOMVerdictWait()
+{
+   if(g_lastGOMVerdictNum == 0) return true;
+   if(StringFind(g_lastGOMVerdict, "WAIT") >= 0) return true;
+   return false;
+}
+
+string BuildTVSetupKey()
+{
+   if(!g_setupValid || g_setupDir == 0 || g_setupEntry <= 0) return "";
+   return StringFormat("%s|%d|%.5f|%.5f|%.5f|%.5f",
+         g_setupType, g_setupDir, g_setupEntry, g_setupSL, g_setupTP1, g_setupTP2);
+}
+
+void ValidateTVSetupLevels()
+{
+   g_setupValid = (g_setupDir != 0 && g_setupEntry > 0 && g_setupSL > 0 && g_setupTP1 > 0);
+   if(!g_setupValid) return;
+   if(g_setupDir == 1 && !(g_setupSL < g_setupEntry && g_setupTP1 > g_setupEntry))
+      g_setupValid = false;
+   if(g_setupDir == -1 && !(g_setupSL > g_setupEntry && g_setupTP1 < g_setupEntry))
+      g_setupValid = false;
+}
+
+void InferTVSetupFromGOMBody(const string &body)
+{
+   if(!TVSetupInferFromGOM) return;
+
+   double sb  = JsonGetDouble(body, "score_buy");
+   double ss  = JsonGetDouble(body, "score_sell");
+   double gap = JsonGetDouble(body, "verdict_gap");
+   if(gap <= 0) gap = MathAbs(sb - ss);
+   double kola_buy  = JsonGetDouble(body, "kola_buy");
+   double kola_sell = JsonGetDouble(body, "kola_sell");
+   double bb_up = JsonGetDouble(body, "bb_up");
+   double bb_dn = JsonGetDouble(body, "bb_dn");
+   double price = JsonGetDouble(body, "price");
+   if(price <= 0) price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+
+   double atr_est = price * 0.0012;
+
+   if(sb >= ss && gap >= 0.8 && kola_buy > 0)
+   {
+      g_setupDir   = 1;
+      g_setupType  = "OB_BULL";
+      // Entry = retest SOUS le prix (BuyLimit). Éviter entry >= price (→ Invalid price).
+      double entryCand = kola_buy;
+      if(bb_up > 0 && bb_up < price - price * 0.00005)
+         entryCand = bb_up;
+      else if(bb_dn > 0 && bb_dn < price)
+         entryCand = MathMax(bb_dn, kola_buy);
+      g_setupEntry = MathMin(entryCand, price - atr_est * 0.08);
+      if(g_setupEntry <= 0 || g_setupEntry >= price)
+         g_setupEntry = kola_buy;
+      g_setupSL    = kola_buy - atr_est * 0.12;
+      double risk  = g_setupEntry - g_setupSL;
+      if(risk <= price * 0.00005) return;
+      g_setupTP1 = g_setupEntry + risk;
+      g_setupTP2 = g_setupEntry + risk * 1.5;
+      g_setupRR  = 1.0;
+   }
+   else if(ss > sb && gap >= 0.8 && kola_sell > 0)
+   {
+      g_setupDir   = -1;
+      g_setupType  = "OB_BEAR";
+      double entryCandS = kola_sell;
+      if(bb_dn > 0 && bb_dn > price + price * 0.00005)
+         entryCandS = bb_dn;
+      else if(bb_up > 0 && bb_up > price)
+         entryCandS = MathMin(bb_up, kola_sell);
+      g_setupEntry = MathMax(entryCandS, price + atr_est * 0.08);
+      if(g_setupEntry <= 0 || g_setupEntry <= price)
+         g_setupEntry = kola_sell;
+      g_setupSL    = kola_sell + atr_est * 0.12;
+      double risk  = g_setupSL - g_setupEntry;
+      if(risk <= price * 0.00005) return;
+      g_setupTP1 = g_setupEntry - risk;
+      g_setupTP2 = g_setupEntry - risk * 1.5;
+      g_setupRR  = 1.0;
+   }
+   ValidateTVSetupLevels();
+   if(g_setupValid)
+      PrintOnce(StringFormat("[TV-Setup] Setup inféré %s entry=%.2f SL=%.2f TP1=%.2f",
+            g_setupType, g_setupEntry, g_setupSL, g_setupTP1), 30);
+}
+
+void ParseTVSetupFromGOMBody(const string &body)
+{
+   g_setupDir     = (int)JsonGetDouble(body, "setup_dir");
+   g_setupEntry   = JsonGetDouble(body, "setup_entry");
+   g_setupSL      = JsonGetDouble(body, "setup_sl");
+   g_setupTP1     = JsonGetDouble(body, "setup_tp1");
+   g_setupTP2     = JsonGetDouble(body, "setup_tp2");
+   g_setupRR      = JsonGetDouble(body, "setup_rr");
+   g_setupType    = JsonGetString(body, "setup_type");
+   g_setupConfirm = JsonGetString(body, "setup_confirm");
+
+   if(StringLen(g_setupConfirm) == 0)
+   {
+      int ccode = (int)JsonGetDouble(body, "setup_confirm_code");
+      if(ccode == 1)       g_setupConfirm = "PIN_BAR_BULL";
+      else if(ccode == -1) g_setupConfirm = "PIN_BAR_BEAR";
+   }
+
+   ValidateTVSetupLevels();
+
+   if(!g_setupValid)
+      InferTVSetupFromGOMBody(body);
+   else if(g_setupDir != 0 && g_setupEntry > 0)
+      PrintOnce(StringFormat("[TV-Setup] Setup TV %s @ %.2f (confirm=%s)",
+            g_setupType, g_setupEntry, g_setupConfirm), 60);
+}
+
+// 1=BUY_LIMIT 2=BUY_STOP -1=SELL_LIMIT -2=SELL_STOP 0=entry trop proche du marché
+int ClassifyTVSetupPendingType(const int dir, const double entry)
+{
+   string sym = _Symbol;
+   double ask = SymbolInfoDouble(sym, SYMBOL_ASK);
+   double bid = SymbolInfoDouble(sym, SYMBOL_BID);
+   if(ask <= 0 || bid <= 0 || entry <= 0) return 0;
+   double pt = SymbolInfoDouble(sym, SYMBOL_POINT);
+   int stopsLvl = (int)SymbolInfoInteger(sym, SYMBOL_TRADE_STOPS_LEVEL);
+   double minDist = (double)MathMax(stopsLvl + 5, 10) * pt;
+
+   if(dir == 1)
+   {
+      if(entry < ask - minDist) return 1;
+      if(entry > ask + minDist) return 2;
+      return 0;
+   }
+   if(dir == -1)
+   {
+      if(entry > bid + minDist) return -1;
+      if(entry < bid - minDist) return -2;
+      return 0;
+   }
+   return 0;
+}
+
+bool FixTVSetupStopsForBroker(const int dir, double &entry, double &sl, double &tp)
+{
+   string sym = _Symbol;
+   int dg = (int)SymbolInfoInteger(sym, SYMBOL_DIGITS);
+   double pt = SymbolInfoDouble(sym, SYMBOL_POINT);
+   int stopsLvl = (int)SymbolInfoInteger(sym, SYMBOL_TRADE_STOPS_LEVEL);
+   double minDist = (double)MathMax(stopsLvl + 5, 10) * pt;
+   double ref = (dir == 1) ? SymbolInfoDouble(sym, SYMBOL_ASK) : SymbolInfoDouble(sym, SYMBOL_BID);
+   if(ref <= 0) ref = entry;
+
+   if(sl > 0 && MathAbs(ref - sl) < minDist)
+      sl = NormalizeDouble((dir == 1) ? ref - minDist : ref + minDist, dg);
+   if(tp > 0 && MathAbs(tp - ref) < minDist)
+      tp = NormalizeDouble((dir == 1) ? ref + minDist : ref - minDist, dg);
+
+   bool slOk = (sl <= 0) || ((dir == 1) ? (sl < entry) : (sl > entry));
+   bool tpOk = (tp <= 0) || ((dir == 1) ? (tp > entry) : (tp < entry));
+   if(!slOk || !tpOk)
+   {
+      PrintOnce(StringFormat("[TV-Setup] SL/TP invalides entry=%.2f sl=%.2f tp=%.2f (minDist=%.2f)",
+            entry, sl, tp, minDist), 30);
+      return false;
+   }
+   return true;
+}
+
+bool FindTVSetupPendingTicket(ulong &ticketOut)
+{
+   ticketOut = 0;
+   for(int i = OrdersTotal() - 1; i >= 0; i--)
+   {
+      ulong t = OrderGetTicket(i);
+      if(t == 0) continue;
+      if(OrderGetString(ORDER_SYMBOL) != _Symbol) continue;
+      if((long)OrderGetInteger(ORDER_MAGIC) != (long)TVSetupMagicNumber) continue;
+      ENUM_ORDER_TYPE ty = (ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE);
+      if(ty == ORDER_TYPE_BUY_LIMIT || ty == ORDER_TYPE_SELL_LIMIT
+         || ty == ORDER_TYPE_BUY_STOP || ty == ORDER_TYPE_SELL_STOP)
+      {
+         ticketOut = t;
+         return true;
+      }
+   }
+   return false;
+}
+
+bool CancelTVSetupLimitOrder(const string reason)
+{
+   ulong t = 0;
+   if(g_tvSetupOrderTicket > 0)
+      t = g_tvSetupOrderTicket;
+   else if(!FindTVSetupPendingTicket(t))
+   {
+      g_tvSetupOrderTicket = 0;
+      return false;
+   }
+
+   CTrade ct;
+   ct.SetExpertMagicNumber(TVSetupMagicNumber);
+   bool ok = ct.OrderDelete(t);
+   Print(StringFormat("[TV-Setup] ❌ Annulation limite ticket=%llu — %s", t, reason));
+   g_tvSetupOrderTicket = 0;
+   g_tvSetupEntryTouched = false;
+   return ok;
+}
+
+bool PriceTouchedTVSetupEntry(const int dir, const double entry)
+{
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   if(ask <= 0 || bid <= 0 || entry <= 0) return false;
+   double tol = MathMax(entry * TVSetupEntryTolPct / 100.0, SymbolInfoDouble(_Symbol, SYMBOL_POINT) * 5);
+   // BUY LIMIT / SELL LIMIT : retest vers l'entry
+   // BUY STOP / SELL STOP : franchissement de l'entry
+   int pk = ClassifyTVSetupPendingType(dir, entry);
+   if(dir == 1 && pk == 2)
+      return (ask >= entry - tol);
+   if(dir == -1 && pk == -2)
+      return (bid <= entry + tol);
+   if(dir == 1)
+      return (bid <= entry + tol);
+   if(dir == -1)
+      return (ask >= entry - tol);
+   return (MathAbs(bid - entry) <= tol || MathAbs(ask - entry) <= tol);
+}
+
+bool PlaceTVSetupLimitOrder()
+{
+   if(!g_setupValid || g_setupDir == 0) return false;
+   if(g_tvSetupPlaceFailAt > 0 && (int)(TimeCurrent() - g_tvSetupPlaceFailAt) < 25)
+      return false;
+   if(TVSetupRearmCooldownSec > 0 && g_tvSetupCancelAt > 0
+      && (int)(TimeCurrent() - g_tvSetupCancelAt) < TVSetupRearmCooldownSec)
+      return false;
+   if(TVSetupBlockPlaceOnWait && IsGOMVerdictWait())
+   {
+      Print("[TV-Setup] ⏸️ Pas de limite — GOM WAIT (TVSetupBlockPlaceOnWait=true)");
+      return false;
+   }
+   if(TVSetupRequirePinBar)
+   {
+      if(g_setupDir == 1 && StringFind(g_setupConfirm, "PIN_BAR_BULL") < 0) return false;
+      if(g_setupDir == -1 && StringFind(g_setupConfirm, "PIN_BAR_BEAR") < 0) return false;
+   }
+
+   if(UseGOMScalp)
+   {
+      int gomDir = 0, effVnum = 0;
+      string actTag;
+      if(ResolveGOMActionable(gomDir, effVnum, actTag))
+      {
+         if(gomDir != 0 && gomDir != g_setupDir)
+         {
+            PrintOnce(StringFormat("[TV-Setup] Setup %s ignoré — conflit GOM %s", g_setupType, actTag), 30);
+            return false;
+         }
+      }
+      else if(g_setupDir == 1 && g_lastGOMVerdictNum < 0)
+      {
+         PrintOnce("[TV-Setup] Setup BUY ignoré — verdict GOM baissier actif", 30);
+         return false;
+      }
+      else if(g_setupDir == -1 && g_lastGOMVerdictNum > 0)
+      {
+         PrintOnce("[TV-Setup] Setup SELL ignoré — verdict GOM haussier actif", 30);
+         return false;
+      }
+   }
+
+   if(IsGlobalPositionLimitReached()) return false;
+   if(HasMCPOpenPosition(_Symbol)) return false;
+
+   ulong existing = 0;
+   if(FindTVSetupPendingTicket(existing))
+   {
+      g_tvSetupOrderTicket = existing;
+      return true;
+   }
+
+   double lot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   double entry = NormalizeDouble(g_setupEntry, (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS));
+   double sl    = NormalizeDouble(g_setupSL, (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS));
+   double tp    = NormalizeDouble(g_setupTP1, (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS));
+
+   int pendKind = ClassifyTVSetupPendingType(g_setupDir, entry);
+   if(pendKind == 0)
+   {
+      PrintOnce(StringFormat("[TV-Setup] Entry %.2f trop proche du marché (ask=%.2f) — breakout ou attente",
+            entry, SymbolInfoDouble(_Symbol, SYMBOL_ASK)), 20);
+      return false;
+   }
+
+   if(!FixTVSetupStopsForBroker(g_setupDir, entry, sl, tp))
+      return false;
+
+   CTrade ct;
+   ct.SetExpertMagicNumber(TVSetupMagicNumber);
+   ct.SetDeviationInPoints(30);
+   ct.SetTypeFilling(ORDER_FILLING_IOC);
+
+   bool ok = false;
+   string pendLabel = "";
+   if(pendKind == 1)      { ok = ct.BuyLimit(lot, entry, _Symbol, sl, tp, ORDER_TIME_GTC, 0, "TM_TV_SETUP");  pendLabel = "BUY_LIMIT"; }
+   else if(pendKind == 2) { ok = ct.BuyStop(lot, entry, _Symbol, sl, tp, ORDER_TIME_GTC, 0, "TM_TV_SETUP");   pendLabel = "BUY_STOP"; }
+   else if(pendKind == -1){ ok = ct.SellLimit(lot, entry, _Symbol, sl, tp, ORDER_TIME_GTC, 0, "TM_TV_SETUP"); pendLabel = "SELL_LIMIT"; }
+   else if(pendKind == -2){ ok = ct.SellStop(lot, entry, _Symbol, sl, tp, ORDER_TIME_GTC, 0, "TM_TV_SETUP");  pendLabel = "SELL_STOP"; }
+
+   if(ok)
+   {
+      g_tvSetupOrderTicket = ct.ResultOrder();
+      g_tvSetupPlacedAt = TimeCurrent();
+      g_tvSetupEntryTouched = false;
+      g_tvSetupPlaceFailAt = 0;
+      Print(StringFormat("[TV-Setup] ✅ %s %s @ %.2f SL=%.2f TP1=%.2f (%s / %s)",
+            pendLabel, _Symbol, entry, sl, tp, g_setupType, g_setupConfirm));
+   }
+   else
+   {
+      uint rc = ct.ResultRetcode();
+      if(rc == TRADE_RETCODE_INVALID_PRICE || rc == TRADE_RETCODE_INVALID_STOPS)
+         g_tvSetupPlaceFailAt = TimeCurrent();
+      PrintOnce(StringFormat("[TV-Setup] ❌ Échec %s @ %.2f: %d %s (ask=%.2f bid=%.2f)",
+            pendLabel, entry, (int)rc, ct.ResultRetcodeDescription(),
+            SymbolInfoDouble(_Symbol, SYMBOL_ASK), SymbolInfoDouble(_Symbol, SYMBOL_BID)), 15);
+   }
+
+   return ok;
+}
+
+void ManageTVSetupLimitOrder()
+{
+   if(!UseTVSetupLimit) return;
+
+   if(!g_setupValid || g_setupDir == 0)
+   {
+      if(g_tvSetupOrderTicket > 0 || FindTVSetupPendingTicket(g_tvSetupOrderTicket))
+         CancelTVSetupLimitOrder("setup TV invalide ou retiré");
+      g_setupKey = "";
+      PrintOnce("[TV-Setup] Pas de setup actif — vérifier poller + GOM_KOLA_SIDO sur TV", 120);
+      return;
+   }
+
+   string newKey = BuildTVSetupKey();
+   if(newKey != "" && newKey != g_setupKey)
+   {
+      g_tvSetupPlaceFailAt = 0;
+      if(g_tvSetupOrderTicket > 0 || FindTVSetupPendingTicket(g_tvSetupOrderTicket))
+         CancelTVSetupLimitOrder("nouveau setup TV");
+      g_setupKey = newKey;
+      PlaceTVSetupLimitOrder();
+      return;
+   }
+
+   ulong t = 0;
+   if(!FindTVSetupPendingTicket(t))
+   {
+      g_tvSetupOrderTicket = 0;
+      if(g_setupValid)
+         PlaceTVSetupLimitOrder();
+      TryTVSetupMarketBreakout();
+      return;
+   }
+   g_tvSetupOrderTicket = t;
+
+   if(PriceTouchedTVSetupEntry(g_setupDir, g_setupEntry))
+      g_tvSetupEntryTouched = true;
+
+   if(TVSetupCancelOnWaitTouch && g_tvSetupEntryTouched && IsGOMVerdictWait())
+   {
+      CancelTVSetupLimitOrder("entry touchée + GOM WAIT — attente nouveau setup");
+      g_setupKey = "";
+      g_tvSetupCancelAt = TimeCurrent();
+      return;
+   }
+
+   TryTVSetupMarketBreakout();
+}
+
+// Reprise haussière : limite non exécutée, prix au-dessus de l'entry + GOM BUY
+void TryTVSetupMarketBreakout()
+{
+   if(!TVSetupMarketOnBreakout || !g_setupValid || g_setupDir != 1) return;
+   if(IsGOMVerdictWait()) return;
+   if(g_lastGOMVerdictNum < 1 || g_lastGOMScoreBuy <= g_lastGOMScoreSell) return;
+   if(GOMWaitPullbackToKola && StringCompare(g_lastKOLAState, "NEAR BUY") != 0) return;
+   if(HasMCPOpenPosition(_Symbol) || IsGlobalPositionLimitReached()) return;
+
+   ulong pending = 0;
+   if(FindTVSetupPendingTicket(pending)) return;
+
+   if((int)(TimeCurrent() - g_tvSetupBreakoutDone) < GOMAutoEntryCooldownSec) return;
+
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   if(ask <= 0 || g_setupEntry <= 0) return;
+   double tol = MathMax(g_setupEntry * TVSetupBreakoutTolPct / 100.0, SymbolInfoDouble(_Symbol, SYMBOL_POINT) * 5);
+   if(ask < g_setupEntry + tol) return;
+
+   double lot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   double entry = ask;
+   double sl = NormalizeDouble(g_setupSL, (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS));
+   double tp = NormalizeDouble(g_setupTP1, (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS));
+   if(!FixTVSetupStopsForBroker(1, entry, sl, tp)) return;
+
+   CTrade ct;
+   ct.SetExpertMagicNumber(TVSetupMagicNumber);
+   ct.SetDeviationInPoints(50);
+   ct.SetTypeFilling(ORDER_FILLING_IOC);
+   if(!ct.Buy(lot, _Symbol, 0, sl, tp, "TM_TV_SETUP_BRK"))
+   {
+      PrintOnce(StringFormat("[TV-Setup] Breakout BUY échoué: %d", (int)ct.ResultRetcode()), 20);
+      return;
+   }
+
+   g_tvSetupBreakoutDone = TimeCurrent();
+   Print(StringFormat("[TV-Setup] 🚀 BREAKOUT BUY %s @ %.2f (entry setup=%.2f) SL=%.2f TP=%.2f | %s",
+         _Symbol, entry, g_setupEntry, sl, tp, g_lastGOMVerdict));
 }
 
 //+------------------------------------------------------------------+
@@ -2281,6 +2735,9 @@ void PollGOMScalpVerdict()
    }
    if(tfStrength > 0) g_lastGOMGlobalStrength = tfStrength;
 
+   if(UseTVSetupLimit)
+      ParseTVSetupFromGOMBody(body);
+
    // ── Scanner positions ouvertes ──────────────────────────────
    // 🟡 Si CONSOLIDATION: Fermer positions si pas de profit significatif (fausse entrée)
    if(isConsolidation)
@@ -2316,8 +2773,13 @@ void PollGOMScalpVerdict()
                   (dir==1?"BUY":"SELL"), profit));
          }
       }
+      if(UseTVSetupLimit)
+         ManageTVSetupLimitOrder();
       return;  // Sortir après gestion consolidation
    }
+
+   if(UseTVSetupLimit)
+      ManageTVSetupLimitOrder();
 
    int posCount = 0, dupCount = 0;
    for(int i = PositionsTotal() - 1; i >= 0; i--)
@@ -2631,14 +3093,38 @@ void CheckGOMAutoEntry()
       if(dir == 1  && StringCompare(g_lastKOLAState, "NEAR BUY")  != 0) return;
    }
 
-   if(g_lastGOMQuality < GOMMinQuality || g_lastGOMCoherence < GOMMinCoherence) return;
+   double minQ = GOMMinQuality;
+   double minC = GOMMinCoherence;
+   if(GOMAllowStrongSimple && effVnum >= 2 && StringCompare(g_lastKOLAState, "NEAR BUY") == 0 && dir == 1)
+      minQ = MathMin(minQ, 12.0);
+   if(GOMAllowStrongSimple && effVnum <= -2 && StringCompare(g_lastKOLAState, "NEAR SELL") == 0 && dir == -1)
+      minQ = MathMin(minQ, 12.0);
 
-   // Filtre TF global + cohérence (condition additionnelle — ne remplace pas les règles précédentes)
+   if(g_lastGOMQuality < minQ)
+   {
+      PrintOnce(StringFormat("[GOM-Auto] %s bloqué — Quality %.0f%% < %.0f%% (GOM=%s)",
+            sym, g_lastGOMQuality, minQ, g_lastGOMVerdict), 45);
+      return;
+   }
+   if(g_lastGOMCoherence < minC)
+   {
+      PrintOnce(StringFormat("[GOM-Auto] %s bloqué — Cohérence %.0f%% < %.0f%%",
+            sym, g_lastGOMCoherence, minC), 45);
+      return;
+   }
+
+   bool bypassGlobal = false;
+   if(GOMAllowStrongSimple && dir == 1 && effVnum >= 2 && StringCompare(g_lastKOLAState, "NEAR BUY") == 0)
+      bypassGlobal = true;
+   if(GOMAllowStrongSimple && dir == -1 && effVnum <= -2 && StringCompare(g_lastKOLAState, "NEAR SELL") == 0)
+      bypassGlobal = true;
+
+   if(!bypassGlobal)
    {
       string globalReason;
       if(!CheckGlobalDirAndCoherence(dir, globalReason))
       {
-         PrintOnce(StringFormat("[GOM-Auto] 🚫 %s %s bloqué — %s",
+         PrintOnce(StringFormat("[GOM-Auto] %s %s bloqué — %s",
                sym, (dir==1?"BUY":"SELL"), globalReason), 60);
          return;
       }

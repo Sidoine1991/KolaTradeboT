@@ -15,7 +15,10 @@ const modPath = pathToFileURL(join(TV_ROOT, 'src', 'core', 'tradbot_analysis.js'
 const symbolArg = process.argv[2] || null;
 const mode = (process.argv[3] || 'both').toLowerCase();
 
-const { smcQuickAnalysis, spikeAnalysis } = await import(modPath);
+const tradbot = await import(modPath);
+const chartModPath = pathToFileURL(join(TV_ROOT, 'src', 'core', 'chart.js')).href;
+const chart = await import(chartModPath);
+const { smcQuickAnalysis, spikeAnalysis } = tradbot;
 
 const out = {
   success: false,
@@ -48,6 +51,10 @@ try {
 } catch (err) {
   out.error = err.message || String(err);
   out.success = false;
+} finally {
+  try {
+    await chart.restoreTradBotTimeframe({});
+  } catch (_) {}
 }
 
 console.log(JSON.stringify(out, null, 2));

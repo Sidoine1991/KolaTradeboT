@@ -35,6 +35,17 @@ from typing import Any, Dict, Optional
 
 import requests
 
+try:
+    from gom_path_prediction import apply_path_to_gom_record, infer_tv_setup_from_gom
+except ImportError:
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    try:
+        from gom_path_prediction import apply_path_to_gom_record, infer_tv_setup_from_gom
+    except ImportError:
+        apply_path_to_gom_record = None
+        infer_tv_setup_from_gom = None
+
 # ─────────────────────────────────────────────────────────────
 # Configuration
 # ─────────────────────────────────────────────────────────────
@@ -223,6 +234,24 @@ def parse_gom_study(raw: Dict[str, Any], symbol: str = SYMBOL) -> Optional[Dict[
     tf_global_strength = _val_from_study(vals, "tf_global_strength")  # max(tb,ts) 0-7
     tf_bull_count = _val_from_study(vals, "tf_bull_count")
     tf_bear_count = _val_from_study(vals, "tf_bear_count")
+    pred_bull = _val_from_study(vals, "pred_bull", "pred_bull")
+    pred_bear = _val_from_study(vals, "pred_bear", "pred_bear")
+    pred_neut = _val_from_study(vals, "pred_neut", "pred_neut")
+    pred_net = _val_from_study(vals, "pred_net", "pred_net")
+    setup_dir = _val_from_study(vals, "setup_dir", "setup_dir")
+    setup_entry = _val_from_study(vals, "setup_entry", "setup_entry")
+    setup_sl = _val_from_study(vals, "setup_sl", "setup_sl")
+    setup_tp1 = _val_from_study(vals, "setup_tp1", "setup_tp1")
+    setup_tp2 = _val_from_study(vals, "setup_tp2", "setup_tp2")
+    setup_rr = _val_from_study(vals, "setup_rr", "setup_rr")
+    setup_confirm_code = _val_from_study(vals, "setup_confirm_code", "setup_confirm_code")
+    setup_confirm = ""
+    if setup_confirm_code is not None:
+        c = int(round(setup_confirm_code))
+        if c == 1:
+            setup_confirm = "PIN_BAR_BULL"
+        elif c == -1:
+            setup_confirm = "PIN_BAR_BEAR"
     # Convertir gd (-1/0/1) en label BULL/BEAR/NEUT
     if tf_global_dir_raw is not None:
         _gd = int(round(tf_global_dir_raw))
@@ -250,7 +279,7 @@ def parse_gom_study(raw: Dict[str, Any], symbol: str = SYMBOL) -> Optional[Dict[
         elif kola_sell and price and abs(price - kola_sell) <= abs(price) * 0.002:
             kola_state = "NEAR SELL"
 
-        return {
+        payload = {
             "symbol": symbol,
             "verdict": verdict,
             "verdict_num": vnum,
@@ -276,8 +305,36 @@ def parse_gom_study(raw: Dict[str, Any], symbol: str = SYMBOL) -> Optional[Dict[
             "tf_global_strength": tf_global_strength_pct,
             "tf_bull_count": int(tf_bull_count or 0),
             "tf_bear_count": int(tf_bear_count or 0),
+            "pred_bull": int(pred_bull or 0),
+            "pred_bear": int(pred_bear or 0),
+            "pred_neut": int(pred_neut or 0),
+            "pred_net": int(pred_net or 0),
+            "setup_dir": int(setup_dir or 0),
+            "setup_entry": setup_entry or 0,
+            "setup_sl": setup_sl or 0,
+            "setup_tp1": setup_tp1 or 0,
+            "setup_tp2": setup_tp2 or 0,
+            "setup_rr": setup_rr or 0,
+            "setup_type": "OB_BULL" if setup_dir and int(setup_dir) > 0 else ("OB_BEAR" if setup_dir and int(setup_dir) < 0 else ""),
+            "setup_confirm": setup_confirm,
+            "setup_confirm_code": int(setup_confirm_code or 0),
             "source": "tradingview",
         }
+        if infer_tv_setup_from_gom:
+            try:
+                payload = infer_tv_setup_from_gom(payload)
+            except Exception as e:
+                log.warning(f"setup infer skipped: {e}")
+        if apply_path_to_gom_record:
+            try:
+                payload = apply_path_to_gom_record(payload)
+            except Exception as e:
+                log.warning(f"path guide skipped: {e}")
+        payload["setup_valid"] = bool(
+            int(payload.get("setup_dir") or 0) != 0
+            and float(payload.get("setup_entry") or 0) > 0
+        )
+        return payload
 
     # ── Fallback ancien calcul ──
     fib_0 = _val_from_study(vals, "fib_0", "Fib 0%")
@@ -389,6 +446,20 @@ def _read_tv_via_http() -> Optional[Dict[str, Any]]:
     return None
 
 
+def _ensure_tv_m1() -> None:
+    """Ramène le graphique TradingView actif sur M1 (GOM KOLA + spike)."""
+    try:
+        proc = subprocess.run(
+            ["node", str(TV_CLI), "timeframe", "1"],
+            capture_output=True, text=True, timeout=10,
+            cwd=str(MCP_NODE_ROOT),
+        )
+        if proc.returncode == 0:
+            log.debug("TV timeframe → M1")
+    except Exception:
+        pass
+
+
 def _refocus_tv_chart() -> None:
     """
     Force TradingView à revenir sur le chart XAUUSD si possible.
@@ -413,6 +484,7 @@ def read_and_push(symbol: str = SYMBOL) -> bool:
     Lit study values + quote (CLI subprocess), pousse le verdict GOM vers /gom-verdict.
     Si GOM non trouvé (TV sur mauvais tab), tente un re-focus et réessaie une fois.
     """
+    _ensure_tv_m1()
     for attempt in range(2):
         studies_raw = _run_tv_cli(["values"])
         if not studies_raw:
@@ -428,7 +500,9 @@ def read_and_push(symbol: str = SYMBOL) -> bool:
 
         payload = parse_gom_study(combined, symbol=symbol)
         if payload:
-            return push_gom_verdict(payload)
+            ok = push_gom_verdict(payload)
+            _ensure_tv_m1()
+            return ok
 
         # GOM non trouvé — tenter re-focus TV sur XAUUSD avant 2ème essai
         if attempt == 0:
@@ -436,6 +510,7 @@ def read_and_push(symbol: str = SYMBOL) -> bool:
             _refocus_tv_chart()
             import time as _t; _t.sleep(2)
 
+    _ensure_tv_m1()
     return False
 
 

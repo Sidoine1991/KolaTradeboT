@@ -1,0 +1,34 @@
+📊 TradBOT [10:30 UTC]
+
+*XAUUSD — Suivi 20min* | 29/05 10:30 UTC
+━━━━━━━━━━━━━━━━━━━━
+💰 *Prix live :* $4529.35
+📍 VWAP : $4507.997 → prix AU-DESSUS (+$21.35)
+📊 BB : [$4505.006 / $4516.977 / $4528.947] → EN HAUT de la zone
+⚡ Supertrend : $5366.137 (↑) → AU-DESSUS
+📐 Fibo : $4530.372 (R0) / $4514.423 (S1)
+━━━━━━━━━━━━━━━━━━━━
+🟢 *Verdict GOM KOLA : PERFECT BUY*
+   Score BUY=6.2  SELL=0.2  Spike=4%
+   RSI=64 | ST=↑ | Coherence=83%
+━━━━━━━━━━━━━━━━━━━━
+🟢 *Biais session :* BUY 90% | ✅ valide 21.3h
+━━━━━━━━━━━━━━━━━━━━
+📦 *Ordre EA :* 🟢 BUY market @ $4525.68 | Conf 88% | READY
+   SL: — | TP: —
+━━━━━━━━━━━━━━━━━━━━
+❌ *Rapport TradingAgents :* NONE | Pas d'ordre TA actif
+━━━━━━━━━━━━━━━━━━━━
+🔬 *Analyse croisée*
+  ✅ CONFLUENCE (4/4):
+     • GOM PERFECT BUY
+     • Biais BUY 90%
+     • Prix > VWAP
+     • Multi-TF dominante (5 BULL / 1 BEAR)
+  ✅ Multi-TF : 5 BULL / 1 BEAR → Tendance haussière dominante
+  ✅ Setup qualité: 42% (modéré)
+🎯 *Décision scalping*
+  🟢 BUY IMMÉDIAT — confluence maximale
+  EL: 4525.68-4528.95 | SL: 4505.01 | TP1: 4530.37 | TP2: 4545
+━━━━━━━━━━━━━━━━━━━━
+_Prochain check dans 20 min_

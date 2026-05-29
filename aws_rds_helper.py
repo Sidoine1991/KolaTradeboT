@@ -6,6 +6,7 @@ Remplace les fonctions Supabase par des connexions directes PostgreSQL
 
 import os
 import json
+from uuid import uuid4
 import psycopg2
 from psycopg2.extras import RealDictCursor
 import logging
@@ -361,6 +362,96 @@ class AWSRDSClient:
         if top_n:
             query += f" LIMIT {int(top_n)}"
         return self.execute_query(query, tuple(params) if params else None)
+
+    def insert_gom_path_prediction_run(
+        self,
+        symbol: str,
+        timeframe: str,
+        path_dirs: str,
+        base_price: float,
+        atr_value: float,
+        *,
+        step_atr_mult: float = 0.16,
+        metadata: Optional[Dict[str, Any]] = None,
+        model_version: str = "gom_kola_path_v1",
+    ) -> Optional[str]:
+        """
+        Enregistre un run dans prediction_runs + prediction_candles (AWS RDS).
+        structure_tag = U/D/N par bougie projetée.
+        """
+        try:
+            from gom_path_prediction import path_summary, path_to_ohlc_candles
+        except ImportError:
+            logger.warning("gom_path_prediction module unavailable")
+            return None
+
+        candles = path_to_ohlc_candles(
+            path_dirs, base_price, atr_value, step_atr_mult=step_atr_mult
+        )
+        if not candles:
+            return None
+
+        run_id = str(uuid4())
+        meta = dict(metadata or {})
+        meta.update(path_summary(path_dirs))
+
+        run_row = {
+            "id": run_id,
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "horizon": len(candles),
+            "model_version": model_version,
+            "metadata": json.dumps(meta),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+        try:
+            with self.get_connection() as conn:
+                cur = conn.cursor()
+                cur.execute(
+                    """
+                    INSERT INTO prediction_runs
+                        (id, symbol, timeframe, horizon, model_version, metadata, created_at)
+                    VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s)
+                    """,
+                    (
+                        run_row["id"],
+                        run_row["symbol"],
+                        run_row["timeframe"],
+                        run_row["horizon"],
+                        run_row["model_version"],
+                        run_row["metadata"],
+                        run_row["created_at"],
+                    ),
+                )
+                for idx, cdl in enumerate(candles):
+                    cur.execute(
+                        """
+                        INSERT INTO prediction_candles
+                            (run_id, step, candle_time, open, high, low, close,
+                             confidence, phase, structure_tag, level_ref)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        """,
+                        (
+                            run_id,
+                            idx + 1,
+                            int(cdl["time"]),
+                            float(cdl["open"]),
+                            float(cdl["high"]),
+                            float(cdl["low"]),
+                            float(cdl["close"]),
+                            float(cdl["confidence"]),
+                            str(cdl.get("phase", "gom_path")),
+                            str(cdl.get("structure_tag", "N")),
+                            float(cdl.get("level_ref", cdl["close"])),
+                        ),
+                    )
+                conn.commit()
+                cur.close()
+            return run_id
+        except Exception as e:
+            logger.error(f"insert_gom_path_prediction_run failed: {e}")
+            return None
 
     def get_verdict_win_rates(
         self, symbol: Optional[str] = None
