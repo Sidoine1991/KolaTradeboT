@@ -4,7 +4,7 @@
 //| Attacher sur UN SEUL chart — gère tout le terminal               |
 //+------------------------------------------------------------------+
 #property copyright "TradBOT"
-#property version   "3.17"
+#property version   "3.18"
 #property strict
 #include <Trade/Trade.mqh>
 #include <Trade/PositionInfo.mqh>
@@ -69,10 +69,12 @@ input bool   MCPBypassConsolidation = true;   // Ne pas bloquer MCP sur filtre c
 input bool   MCPDuplicateOnce       = true;   // Dupliquer 1x la position après profit minimum
 input double MCPDuplicateMinProfit  = 2.0;    // Profit minimum (USD) avant duplication
 input bool   DuplicateManualOrders  = true;   // Dupliquer aussi les ordres manuels (magic=0)
-input bool   DuplicateOnlyOnPerfect = true;   // Dupliquer UNIQUEMENT si verdict PERFECT (impulsion longue)
+input bool   DuplicateRequireGoodPerfect = true; // GOOD ou PERFECT (vnum ±2/±3) pour dupliquer
 input int    DuplicateMinGlobalStrength = 60; // Force TF global mini pour autoriser duplication
 input double DuplicateMinQuality    = 60.0;   // Quality min % pour dupliquer
 input double DuplicateMinCoherence  = 65.0;   // Coherence min % pour dupliquer
+input int    DupProfitStableSec     = 120;    // Profit >= $2 maintenu sans rechute (sec)
+input double DupMinSetupProb        = 0.45;   // Proba setup min (RDS) pour autoriser dup
 input string InpPollSymbols         = "Boom 600 Index,Boom 1000 Index,Crash 600 Index,Crash 1000 Index,XAUUSD,Gold Basket";
 
 input group "=== NOTIFICATIONS WHATSAPP ==="
@@ -131,13 +133,14 @@ input double TVSetupBreakoutTolPct    = 0.03;  // Tolérance breakout au-dessus 
 
 input group "=== CHEMIN PREDICTIF + ANTI-CORRECTION ==="
 input bool   ShowGOMPathCandles       = true;  // Dessiner bougies futures sur chart MT5
-input int    GOMPathDrawBars          = 80;    // Nombre de bougies predites affichees
+input int    GOMPathDrawBars          = 200;   // Nombre de bougies predites affichees
 input int    GOMPathDrawRefreshSec    = 8;     // Rafraichissement affichage (sec)
 input double GOMPathStepAtr           = 0.16;  // Pas bougie (= Pine path_step x ATR)
 input bool   GOMBlockCorrectionZone   = true;  // Ne pas trader pendant correction
 input bool   GOMUseMicroTFCorrection  = true;  // M1/M5 contre H1 = correction
 input int    GOMCorrectionPathLook    = 25;    // Barres pred_path analysees
 input int    GOMCorrectionMinBars     = 7;     // Min bougies D/U opposees = correction
+input double GOMMinSetupProb          = 0.40;  // Proba setup min (RDS) pour entrer
 
 input group "=== GOM/KOLA DASHBOARD ==="
 input bool   UseDashboard          = true;   // Afficher le dashboard GOM/KOLA sur le chart
@@ -207,6 +210,22 @@ string   g_predPathDrawKey    = "";
 int      g_predNet            = 0;
 int      g_lastGOMStDir       = 0;
 datetime g_lastGOMPathDraw    = 0;
+double   g_lastKolaBuy        = 0.0;
+double   g_lastKolaSell       = 0.0;
+double   g_lastBBUp           = 0.0;
+double   g_lastBBDn           = 0.0;
+double   g_setupBuyProb       = 0.0;
+double   g_setupSellProb      = 0.0;
+double   g_setupValidProb     = 0.0;
+double   g_predHitRate        = 0.0;
+
+struct DupProfitStable
+{
+   ulong    ticket;
+   datetime armedAt;
+};
+DupProfitStable g_dupStable[];
+int g_dupStableCount = 0;
 
 struct GOMReEntryState
 {
@@ -405,7 +424,7 @@ void OnTimer()
    if(UseReEntry)            CheckAllReEntries();
    if(UseMCPSignals)         PollMCPSignals();
    if(UseMCPSignals)         MonitorMCPPositions();
-   if(MCPDuplicateOnce)      MonitorManualDuplicates();
+   if(MCPDuplicateOnce)      { UpdateDupProfitStableTracking(); MonitorManualDuplicates(); }
    if(UseGOMScalp)           PollGOMScalpVerdict();
    if(UseGOMScalp)           CheckGOMAutoEntry();
    if(UseGOMScalp)           CheckGOMReEntry();
@@ -428,7 +447,7 @@ void OnTick()
    if(UseReEntry)            CheckAllReEntries();
    if(UseMCPSignals)         PollMCPSignals();
    if(UseMCPSignals)         MonitorMCPPositions();
-   if(MCPDuplicateOnce)      MonitorManualDuplicates();
+   if(MCPDuplicateOnce)      { UpdateDupProfitStableTracking(); MonitorManualDuplicates(); }
    if(UseGOMScalp)           PollGOMScalpVerdict();
    if(UseGOMScalp)           CheckGOMAutoEntry();
    if(UseGOMScalp)           CheckGOMReEntry();
@@ -535,9 +554,165 @@ void CleanupGOMPathObjects()
    }
 }
 
+//+------------------------------------------------------------------+
+//| Symboles — forex pur vs synthétiques (Boom/Crash/XAU/Index)      |
+//+------------------------------------------------------------------+
+bool IsPureForexPair(const string sym)
+{
+   string u = sym;
+   StringToUpper(u);
+   if(StringFind(u, "BOOM") >= 0 || StringFind(u, "CRASH") >= 0) return false;
+   if(StringFind(u, "INDEX") >= 0 || StringFind(u, "BASKET") >= 0) return false;
+   if(StringFind(u, "XAU") >= 0 || StringFind(u, "GOLD") >= 0) return false;
+   if(StringFind(u, "VOLATILITY") >= 0 || StringFind(u, "STEP") >= 0) return false;
+   if(StringFind(u, "JUMP") >= 0 || StringFind(u, "PAIN") >= 0 || StringFind(u, "GAIN") >= 0) return false;
+   return true;
+}
+
+bool IsBoomOrCrashSymbol(const string sym)
+{
+   string u = sym;
+   StringToUpper(u);
+   return (StringFind(u, "BOOM") >= 0 || StringFind(u, "CRASH") >= 0
+           || StringFind(u, "PAIN") >= 0 || StringFind(u, "GAIN") >= 0);
+}
+
+bool ShouldDrawGOMPathForSymbol(const string sym)
+{
+   return !IsPureForexPair(sym);
+}
+
+bool IsGOMPathAlignedWithDir(const int dir)
+{
+   if(dir == 0 || StringLen(g_predPath) < 10) return true;
+   int look = MathMin(30, StringLen(g_predPath));
+   int u = 0, d = 0;
+   for(int i = 0; i < look; i++)
+   {
+      ushort ch = StringGetCharacter(g_predPath, i);
+      if(ch == 'U') u++;
+      else if(ch == 'D') d++;
+   }
+   if(dir == 1) return (u >= d && g_predNet >= 0);
+   if(dir == -1) return (d >= u && g_predNet <= 0);
+   return true;
+}
+
+bool HasSetupProbForDir(const int dir)
+{
+   if(g_setupValidProb <= 0 && g_predHitRate <= 0) return true;
+   double prob = (dir == 1) ? g_setupBuyProb : g_setupSellProb;
+   if(prob <= 0) prob = g_setupValidProb;
+   if(prob <= 0 && g_predHitRate > 0) prob = g_predHitRate;
+   if(prob <= 0) return true;
+   return prob >= GOMMinSetupProb;
+}
+
+int FindDupStableIdx(const ulong ticket)
+{
+   for(int i = 0; i < g_dupStableCount; i++)
+      if(g_dupStable[i].ticket == ticket) return i;
+   return -1;
+}
+
+void UpdateDupProfitStableTracking()
+{
+   for(int i = g_dupStableCount - 1; i >= 0; i--)
+   {
+      if(!PositionSelectByTicket(g_dupStable[i].ticket))
+      {
+         for(int j = i; j < g_dupStableCount - 1; j++)
+            g_dupStable[j] = g_dupStable[j + 1];
+         g_dupStableCount--;
+         ArrayResize(g_dupStable, g_dupStableCount);
+      }
+   }
+
+   for(int pi = PositionsTotal() - 1; pi >= 0; pi--)
+   {
+      if(!posInfo.SelectByIndex(pi)) continue;
+      if(!PositionIncludedInTrailing()) continue;
+      ulong ticket = posInfo.Ticket();
+      double profit = PositionNetProfit();
+      int idx = FindDupStableIdx(ticket);
+
+      if(profit < MCPDuplicateMinProfit)
+      {
+         if(idx >= 0)
+         {
+            for(int j = idx; j < g_dupStableCount - 1; j++)
+               g_dupStable[j] = g_dupStable[j + 1];
+            g_dupStableCount--;
+            ArrayResize(g_dupStable, g_dupStableCount);
+         }
+         continue;
+      }
+
+      if(idx < 0)
+      {
+         ArrayResize(g_dupStable, g_dupStableCount + 1);
+         g_dupStable[g_dupStableCount].ticket = ticket;
+         g_dupStable[g_dupStableCount].armedAt = TimeCurrent();
+         g_dupStableCount++;
+      }
+   }
+}
+
+bool HasDupProfitStable(const ulong ticket)
+{
+   int idx = FindDupStableIdx(ticket);
+   if(idx < 0) return false;
+   if(!PositionSelectByTicket(ticket)) return false;
+   if(PositionNetProfit() < MCPDuplicateMinProfit) return false;
+   return ((int)(TimeCurrent() - g_dupStable[idx].armedAt) >= DupProfitStableSec);
+}
+
+void DrawGOMPathSRLevels(const datetime t0, const datetime tEnd)
+{
+   ObjectDelete(0, "GOM_PRED_SR_KB");
+   ObjectDelete(0, "GOM_PRED_SR_KS");
+   ObjectDelete(0, "GOM_PRED_SR_BBUP");
+   ObjectDelete(0, "GOM_PRED_SR_BBDN");
+   if(g_lastKolaBuy > 0)
+   {
+      ObjectCreate(0, "GOM_PRED_SR_KB", OBJ_TREND, 0, t0, g_lastKolaBuy, tEnd, g_lastKolaBuy);
+      ObjectSetInteger(0, "GOM_PRED_SR_KB", OBJPROP_COLOR, clrDodgerBlue);
+      ObjectSetInteger(0, "GOM_PRED_SR_KB", OBJPROP_STYLE, STYLE_DASH);
+      ObjectSetInteger(0, "GOM_PRED_SR_KB", OBJPROP_RAY_RIGHT, false);
+      ObjectSetInteger(0, "GOM_PRED_SR_KB", OBJPROP_BACK, true);
+   }
+   if(g_lastKolaSell > 0)
+   {
+      ObjectCreate(0, "GOM_PRED_SR_KS", OBJ_TREND, 0, t0, g_lastKolaSell, tEnd, g_lastKolaSell);
+      ObjectSetInteger(0, "GOM_PRED_SR_KS", OBJPROP_COLOR, clrOrangeRed);
+      ObjectSetInteger(0, "GOM_PRED_SR_KS", OBJPROP_STYLE, STYLE_DASH);
+      ObjectSetInteger(0, "GOM_PRED_SR_KS", OBJPROP_RAY_RIGHT, false);
+      ObjectSetInteger(0, "GOM_PRED_SR_KS", OBJPROP_BACK, true);
+   }
+   if(g_lastBBUp > 0)
+   {
+      ObjectCreate(0, "GOM_PRED_SR_BBUP", OBJ_TREND, 0, t0, g_lastBBUp, tEnd, g_lastBBUp);
+      ObjectSetInteger(0, "GOM_PRED_SR_BBUP", OBJPROP_COLOR, clrSilver);
+      ObjectSetInteger(0, "GOM_PRED_SR_BBUP", OBJPROP_STYLE, STYLE_DOT);
+      ObjectSetInteger(0, "GOM_PRED_SR_BBUP", OBJPROP_RAY_RIGHT, false);
+   }
+   if(g_lastBBDn > 0)
+   {
+      ObjectCreate(0, "GOM_PRED_SR_BBDN", OBJ_TREND, 0, t0, g_lastBBDn, tEnd, g_lastBBDn);
+      ObjectSetInteger(0, "GOM_PRED_SR_BBDN", OBJPROP_COLOR, clrSilver);
+      ObjectSetInteger(0, "GOM_PRED_SR_BBDN", OBJPROP_STYLE, STYLE_DOT);
+      ObjectSetInteger(0, "GOM_PRED_SR_BBDN", OBJPROP_RAY_RIGHT, false);
+   }
+}
+
 void DrawGOMPathPredictedCandles()
 {
    if(!ShowGOMPathCandles) return;
+   if(!ShouldDrawGOMPathForSymbol(_Symbol))
+   {
+      CleanupGOMPathObjects();
+      return;
+   }
 
    string drawKey = g_predPath + "|" + IntegerToString(g_predNet);
    if(drawKey == g_predPathDrawKey
@@ -623,11 +798,14 @@ void DrawGOMPathPredictedCandles()
    string lbl = "GOM_PRED_LBL";
    ObjectDelete(0, lbl);
    ObjectCreate(0, lbl, OBJ_TEXT, 0, t0 + tfSec, maxP);
-   ObjectSetString(0, lbl, OBJPROP_TEXT, StringFormat("GOM %d bars | net=%d", nBars, g_predNet));
+   ObjectSetString(0, lbl, OBJPROP_TEXT, StringFormat("GOM %d | net=%d | setup=%.0f%% hit=%.0f%%",
+         nBars, g_predNet, g_setupValidProb * 100.0, g_predHitRate * 100.0));
    ObjectSetInteger(0, lbl, OBJPROP_COLOR, clrYellow);
    ObjectSetInteger(0, lbl, OBJPROP_FONTSIZE, 8);
    ObjectSetString(0, lbl, OBJPROP_FONT, "Arial");
    ObjectSetInteger(0, lbl, OBJPROP_SELECTABLE, false);
+
+   DrawGOMPathSRLevels(t0 + tfSec, t0 + nBars * tfSec);
 
    g_predPathDrawKey = drawKey;
    g_lastGOMPathDraw = TimeCurrent();
@@ -1143,36 +1321,39 @@ double SumManagedProfit(const string sym)
 }
 
 // Règle unique de duplication :
-//   - Profit position >= MCPDuplicateMinProfit ($2)
-//   - Verdict GOM = PERFECT uniquement (vnum +3 BUY / -3 SELL)
-//   - 1 seule duplication par symbole (2 positions max au total)
-//   - PnL global du symbole positif
-//   - Pas de consolidation GOM/KOLA
-//   - TF Global aligné avec la direction
+//   - Jamais sur Boom/Crash
+//   - Profit position >= $2 stable pendant DupProfitStableSec
+//   - GOM GOOD/PERFECT + trajectoire alignée + proba setup RDS
+//   - 1 seule duplication par symbole (2 positions max)
 bool CanDuplicateOnSymbol(const string sym, string &why)
 {
    why = "";
-   // Max 2 positions par symbole (1 originale + 1 duplication)
+   if(IsBoomOrCrashSymbol(sym))
+   {
+      why = "duplication interdite sur Boom/Crash";
+      return false;
+   }
    if(CountManagedPositions(sym) >= 2)
    {
       why = StringFormat("déjà 2 positions sur %s — 1 duplication max", sym);
       return false;
    }
-   // PnL global du symbole doit être positif
-   double pnl = SumManagedProfit(sym);
-   if(pnl < MCPDuplicateMinProfit)
-   {
-      why = StringFormat("PnL %s insuffisant ($%.2f < $%.2f requis)", sym, pnl, MCPDuplicateMinProfit);
-      return false;
-   }
    return true;
 }
 
-bool CanDuplicateNowWithGOM(const string sym, const int dir, string &why)
+bool CanDuplicateNowWithGOM(const string sym, const int dir, const ulong ticket, string &why)
 {
    why = "";
    string baseWhy;
    if(!CanDuplicateOnSymbol(sym, baseWhy)) { why = baseWhy; return false; }
+
+   if(!HasDupProfitStable(ticket))
+   {
+      why = StringFormat("profit $%.2f pas stable %ds (min %ds sans rechute)",
+            PositionSelectByTicket(ticket) ? PositionNetProfit() : 0.0,
+            DupProfitStableSec, DupProfitStableSec);
+      return false;
+   }
 
    if(g_isConsolidation)
    {
@@ -1180,11 +1361,40 @@ bool CanDuplicateNowWithGOM(const string sym, const int dir, string &why)
       return false;
    }
 
-   // PERFECT uniquement — vnum +3 (PERFECT BUY) ou -3 (PERFECT SELL)
-   if(dir == 1  && g_lastGOMVerdictNum != 3)  { why = StringFormat("verdict=%s (exige PERFECT BUY)",  g_lastGOMVerdict); return false; }
-   if(dir == -1 && g_lastGOMVerdictNum != -3) { why = StringFormat("verdict=%s (exige PERFECT SELL)", g_lastGOMVerdict); return false; }
+   if(IsGOMCorrectionZone(dir))
+   {
+      why = "zone de correction active";
+      return false;
+   }
 
-   // TF Global aligné + force suffisante
+   if(DuplicateRequireGoodPerfect)
+   {
+      if(dir == 1 && (g_lastGOMVerdictNum != 2 && g_lastGOMVerdictNum != 3))
+      {
+         why = StringFormat("verdict=%s (exige GOOD/PERFECT BUY)", g_lastGOMVerdict);
+         return false;
+      }
+      if(dir == -1 && (g_lastGOMVerdictNum != -2 && g_lastGOMVerdictNum != -3))
+      {
+         why = StringFormat("verdict=%s (exige GOOD/PERFECT SELL)", g_lastGOMVerdict);
+         return false;
+      }
+   }
+
+   if(!IsGOMPathAlignedWithDir(dir))
+   {
+      why = StringFormat("trajectoire non alignée (pred_net=%d)", g_predNet);
+      return false;
+   }
+
+   double prob = (dir == 1) ? g_setupBuyProb : g_setupSellProb;
+   if(prob <= 0) prob = g_setupValidProb;
+   if(prob > 0 && prob < DupMinSetupProb)
+   {
+      why = StringFormat("proba setup %.0f%% < %.0f%%", prob * 100.0, DupMinSetupProb * 100.0);
+      return false;
+   }
+
    if(g_lastGOMGlobalStrength < DuplicateMinGlobalStrength)
    {
       why = StringFormat("force TF global insuffisante (%d < %d)", g_lastGOMGlobalStrength, DuplicateMinGlobalStrength);
@@ -1193,14 +1403,12 @@ bool CanDuplicateNowWithGOM(const string sym, const int dir, string &why)
    if(dir == 1  && StringCompare(g_lastGOMGlobalDir, "BULL") != 0) { why = StringFormat("TF global non haussier (%s)", g_lastGOMGlobalDir); return false; }
    if(dir == -1 && StringCompare(g_lastGOMGlobalDir, "BEAR") != 0) { why = StringFormat("TF global non baissier (%s)", g_lastGOMGlobalDir); return false; }
 
-   // Qualité / cohérence
    if(g_lastGOMQuality < DuplicateMinQuality || g_lastGOMCoherence < DuplicateMinCoherence)
    {
       why = StringFormat("Quality/Coherence insuffisantes (Q=%.0f%% C=%.0f%%)", g_lastGOMQuality, g_lastGOMCoherence);
       return false;
    }
 
-   // Anti micro-correction (si le filtre global est activé)
    if(GOMIsCounterTrendEntryBlocked(dir))
    {
       why = "bloqué par filtre contre-tendance";
@@ -2521,7 +2729,7 @@ bool DuplicateMCPPosition(int idx, CTrade &mcpTrade)
    string sym = g_mcpSignals[idx].symbol;
    int dir = g_mcpSignals[idx].direction;
    string dupWhy;
-   if(!CanDuplicateNowWithGOM(sym, dir, dupWhy))
+   if(!CanDuplicateNowWithGOM(sym, dir, g_mcpSignals[idx].ticket, dupWhy))
    {
       Print(StringFormat("[TradeManager] 🚫 Duplication MCP refusée %s: %s", sym, dupWhy));
       return false;
@@ -2804,7 +3012,7 @@ void MonitorManualDuplicates()
 
       ulong ticket = posInfo.Ticket();
       double profit = posInfo.Profit();
-      if(profit < MCPDuplicateMinProfit) continue;
+      if(!HasDupProfitStable(ticket)) continue;
 
       // Vérifier si déjà dupliqué
       bool alreadyDup = false;
@@ -2813,6 +3021,8 @@ void MonitorManualDuplicates()
       if(alreadyDup) continue;
 
       string sym = posInfo.Symbol();
+      if(IsBoomOrCrashSymbol(sym)) continue;
+
       int dir = (posInfo.PositionType() == POSITION_TYPE_BUY) ? 1 : -1;
 
       // Bloquer si déjà au max de positions
@@ -2827,19 +3037,9 @@ void MonitorManualDuplicates()
       }
 
       string dupWhy;
-      if(!CanDuplicateNowWithGOM(sym, dir, dupWhy))
+      if(!CanDuplicateNowWithGOM(sym, dir, ticket, dupWhy))
       {
          Print(StringFormat("[TradeManager] 🚫 Dup manuelle refusée %s: %s", sym, dupWhy));
-         // Sur Boom/Crash : marquer immédiatement pour stopper les tentatives répétées
-         bool isBoomCrash = (StringFind(sym,"Boom",0)>=0 || StringFind(sym,"boom",0)>=0 ||
-                             StringFind(sym,"Crash",0)>=0|| StringFind(sym,"crash",0)>=0||
-                             StringFind(sym,"PAIN",0)>=0 || StringFind(sym,"GAIN",0)>=0);
-         if(isBoomCrash)
-         {
-            ArrayResize(g_manualDupTickets, g_manualDupCount + 1);
-            g_manualDupTickets[g_manualDupCount++] = ticket;
-            Print(StringFormat("[TradeManager] 🔒 %s: Boom/Crash — duplication définitivement bloquée pour ce ticket", sym));
-         }
          continue;
       }
 
@@ -2956,6 +3156,18 @@ void PollGOMScalpVerdict()
    g_predPath = JsonGetString(body, "pred_path");
    g_predNet  = (int)JsonGetDouble(body, "pred_net");
    g_lastGOMStDir = (int)JsonGetDouble(body, "st_dir");
+   g_lastKolaBuy  = JsonGetDouble(body, "kola_buy");
+   g_lastKolaSell = JsonGetDouble(body, "kola_sell");
+   g_lastBBUp     = JsonGetDouble(body, "bb_up");
+   g_lastBBDn     = JsonGetDouble(body, "bb_dn");
+   g_setupBuyProb  = JsonGetDouble(body, "setup_buy_prob");
+   g_setupSellProb = JsonGetDouble(body, "setup_sell_prob");
+   g_setupValidProb = JsonGetDouble(body, "setup_valid_prob");
+   g_predHitRate   = JsonGetDouble(body, "pred_direction_hit_rate");
+   if(g_setupBuyProb > 1.0)  g_setupBuyProb  /= 100.0;
+   if(g_setupSellProb > 1.0) g_setupSellProb /= 100.0;
+   if(g_setupValidProb > 1.0) g_setupValidProb /= 100.0;
+   if(g_predHitRate > 1.0) g_predHitRate /= 100.0;
    if(StringLen(g_predPath) == 0)
    {
       int pb = (int)JsonGetDouble(body, "pred_bull");
@@ -3312,6 +3524,20 @@ void CheckGOMAutoEntry()
       return;
    }
 
+   if(!IsGOMPathAlignedWithDir(dir))
+   {
+      PrintOnce(StringFormat("[GOM-Auto] %s bloque — trajectoire opposee (pred_net=%d)",
+            sym, g_predNet), 35);
+      return;
+   }
+
+   if(!HasSetupProbForDir(dir))
+   {
+      PrintOnce(StringFormat("[GOM-Auto] %s bloque — proba setup insuffisante (buy=%.0f%% sell=%.0f%% hit=%.0f%%)",
+            sym, g_setupBuyProb * 100.0, g_setupSellProb * 100.0, g_predHitRate * 100.0), 45);
+      return;
+   }
+
    if(GOMIsCounterTrendEntryBlocked(dir))
    {
       Print(StringFormat("[GOM-Auto] %s entrée bloquée (micro-correction) — TF Global=%s force=%d",
@@ -3514,7 +3740,7 @@ void MonitorMCPPositions()
 
       // 🔴 DUPLICATION — FILTRES STRICTS (1 seule duplication, profit >= seuil, pas si déjà 2 positions)
       if(MCPDuplicateOnce && !g_mcpSignals[i].duplicated && posOpen
-         && profit >= MCPDuplicateMinProfit)
+         && HasDupProfitStable(g_mcpSignals[i].ticket))
       {
          // Vérification stricte : 1 seule position autorisée avant duplication
          if(CountManagedPositions(sym) >= MaxPositionsPerSymbol)
@@ -3526,18 +3752,9 @@ void MonitorMCPPositions()
          else
          {
             string dupWhy;
-            if(!CanDuplicateNowWithGOM(sym, dir, dupWhy))
+            if(!CanDuplicateNowWithGOM(sym, dir, g_mcpSignals[i].ticket, dupWhy))
             {
                Print(StringFormat("[TradeManager] 🟡 %s: Duplication BLOQUÉE — %s", sym, dupWhy));
-               // Boom/Crash : bloquer définitivement si conditions non réunies
-               bool isBoomCrash2 = (StringFind(sym,"Boom",0)>=0 || StringFind(sym,"boom",0)>=0 ||
-                                    StringFind(sym,"Crash",0)>=0|| StringFind(sym,"crash",0)>=0||
-                                    StringFind(sym,"PAIN",0)>=0 || StringFind(sym,"GAIN",0)>=0);
-               if(isBoomCrash2)
-               {
-                  g_mcpSignals[i].duplicated = true;
-                  Print(StringFormat("[TradeManager] 🔒 %s: Boom/Crash — duplication MCP bloquée définitivement", sym));
-               }
             }
             else
             {

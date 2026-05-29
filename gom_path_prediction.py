@@ -71,6 +71,93 @@ def compute_path_directions(
     return "".join(chars)
 
 
+def _collect_sr_levels(record: Dict[str, Any], base_price: float) -> Tuple[List[float], List[float]]:
+    supports: List[float] = []
+    resistances: List[float] = []
+    for key in ("kola_buy", "bb_dn", "fib_382", "fib_500", "fib_618", "setup_sl"):
+        v = float(record.get(key) or 0)
+        if v > 0 and v < base_price:
+            supports.append(v)
+    for key in ("kola_sell", "bb_up", "fib_618", "fib_786", "setup_tp1", "setup_entry"):
+        v = float(record.get(key) or 0)
+        if v > 0 and v > base_price:
+            resistances.append(v)
+    supports = sorted(set(round(x, 8) for x in supports), reverse=True)
+    resistances = sorted(set(round(x, 8) for x in resistances))
+    return supports, resistances
+
+
+def apply_sr_retest_to_path(
+    path_dirs: str,
+    base_price: float,
+    atr_value: float,
+    record: Optional[Dict[str, Any]] = None,
+    *,
+    step_atr_mult: float = 0.16,
+) -> str:
+    """Ajuste U/D/N aux retests support/résistance (KOLA, BB, Fib)."""
+    if not path_dirs or base_price <= 0:
+        return path_dirs
+    rec = record or {}
+    supports, resistances = _collect_sr_levels(rec, base_price)
+    if not supports and not resistances:
+        return path_dirs
+
+    step_px = max(atr_value, base_price * 0.0001) * step_atr_mult
+    tol = step_px * 0.35
+    y = float(base_price)
+    out: List[str] = []
+
+    for ch in path_dirs:
+        d = 1 if ch == "U" else -1 if ch == "D" else 0
+        ny = y + d * step_px
+        snapped = False
+
+        if d > 0 and resistances:
+            for r in resistances:
+                if y <= r + tol and ny >= r - tol:
+                    ny = r - step_px * 0.08
+                    out.extend(["N", "D"])
+                    snapped = True
+                    break
+        elif d < 0 and supports:
+            for s in supports:
+                if ny <= s + tol and y >= s - tol:
+                    ny = s + step_px * 0.08
+                    out.extend(["N", "U"])
+                    snapped = True
+                    break
+
+        if not snapped:
+            out.append(ch)
+        y = ny
+
+    result = "".join(out)
+    if len(result) > len(path_dirs):
+        result = result[: len(path_dirs)]
+    elif len(result) < len(path_dirs):
+        result += path_dirs[len(result) :]
+    return result
+
+
+def compute_setup_probabilities(path_dirs: str, setup_dir: int = 0) -> Dict[str, float]:
+    summ = path_summary(path_dirs)
+    horizon = max(1, summ["pred_horizon"])
+    buy_prob = summ["pred_bull"] / horizon
+    sell_prob = summ["pred_bear"] / horizon
+    valid_prob = buy_prob if setup_dir == 1 else sell_prob if setup_dir == -1 else max(buy_prob, sell_prob)
+    net = int(summ["pred_net"])
+    if setup_dir == 1 and net > 0:
+        valid_prob = min(0.97, valid_prob * 1.12)
+    elif setup_dir == -1 and net < 0:
+        valid_prob = min(0.97, valid_prob * 1.12)
+    return {
+        "setup_buy_prob": round(buy_prob, 4),
+        "setup_sell_prob": round(sell_prob, 4),
+        "setup_valid_prob": round(valid_prob, 4),
+    }
+
+
 def path_summary(path_dirs: str) -> Dict[str, Any]:
     bulls = path_dirs.count("U")
     bears = path_dirs.count("D")
@@ -216,8 +303,17 @@ def apply_path_to_gom_record(record: Dict[str, Any], path_dirs: Optional[str] = 
             tf_bear_count=int(record.get("tf_bear_count") or 0),
         )
 
+    base_price = float(record.get("price") or 0)
+    atr_est = base_price * 0.0012 if base_price > 0 else 1.0
+    if "XAU" in str(record.get("symbol", "")).upper() or "GOLD" in str(record.get("symbol", "")).upper():
+        atr_est = base_price * 0.0012
+    elif base_price > 0:
+        atr_est = base_price * 0.0008
+    path_dirs = apply_sr_retest_to_path(path_dirs, base_price, atr_est, record)
+
     summ = path_summary(path_dirs)
     out = {**record, **summ}
+    out.update(compute_setup_probabilities(path_dirs, int(record.get("setup_dir") or 0)))
 
     sb = float(out.get("score_buy") or 0)
     ss = float(out.get("score_sell") or 0)

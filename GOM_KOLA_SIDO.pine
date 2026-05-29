@@ -81,7 +81,7 @@ grp_path    = "CHEMIN PREDICTIF (200 bougies)"
 path_horizon = input.int(200, "Horizon bougies", minval=20, maxval=200, group=grp_path)
 path_show    = input.bool(true, "Segments direction futurs", group=grp_path)
 path_show_candles = input.bool(true, "Bougies predites (fantomes)", group=grp_path)
-path_candle_vis   = input.int(80, "Nb bougies fantomes visibles", minval=15, maxval=200, group=grp_path)
+path_candle_vis   = input.int(200, "Nb bougies fantomes visibles", minval=15, maxval=200, group=grp_path)
 path_width   = input.int(5, "Epaisseur segments", minval=2, maxval=10, group=grp_path)
 path_step    = input.float(0.16, "Pas (x ATR)", minval=0.05, maxval=0.45, step=0.01, group=grp_path)
 path_in_alert= input.bool(true, "Envoyer chemin → webhook", group=grp_path)

@@ -21918,6 +21918,8 @@ def _gom_verdict_record_from_payload(payload: GomVerdictPayload) -> dict:
         "tf_w1_dir", "tf_w1_rsi", "tf_global_dir", "tf_global_strength",
         "pred_path", "pred_horizon", "pred_bull", "pred_bear", "pred_neut", "pred_net",
         "path_guided", "setup_inferred",
+        "setup_buy_prob", "setup_sell_prob", "setup_valid_prob", "pred_direction_hit_rate",
+        "setup_score_live", "samples",
     ):
         if extra.get(key) is not None:
             record[key] = extra[key]
@@ -21955,7 +21957,38 @@ def _gom_verdict_record_from_payload(payload: GomVerdictPayload) -> dict:
         except Exception as e:
             logger.warning(f"[GomPath] apply_path_to_gom_record: {e}")
 
+    _enrich_gom_record_reliability(sym, record)
+
     return sym, record
+
+
+def _enrich_gom_record_reliability(sym: str, record: dict) -> None:
+    """Fusionne proba setup RDS (prediction_outcomes) dans le verdict GOM."""
+    if not AWS_RDS_AVAILABLE:
+        return
+    try:
+        rel = aws_rds_client.get_gom_setup_reliability(sym, "M1", lookback_days=14)
+        for key in (
+            "pred_direction_hit_rate",
+            "setup_buy_prob",
+            "setup_sell_prob",
+            "setup_valid_prob",
+            "setup_score_live",
+            "samples",
+        ):
+            val = rel.get(key)
+            if val is not None:
+                record[key] = val
+        # Prioriser RDS si plus de samples que le calcul live
+        if int(rel.get("samples") or 0) >= 20:
+            if rel.get("setup_buy_prob") is not None:
+                record["setup_buy_prob"] = rel["setup_buy_prob"]
+            if rel.get("setup_sell_prob") is not None:
+                record["setup_sell_prob"] = rel["setup_sell_prob"]
+            if rel.get("setup_valid_prob") is not None:
+                record["setup_valid_prob"] = rel["setup_valid_prob"]
+    except Exception as e:
+        logger.warning(f"[GomReliability] {sym}: {e}")
 
 
 def _sync_gom_tableau_from_verdict(sym: str, record: dict) -> None:
@@ -22133,6 +22166,25 @@ async def set_gom_verdict_webhook(request: Request):
         return {"ok": False, "error": "Invalid GOM alert body"}
     payload = GomVerdictPayload(**parsed)
     return _store_gom_verdict_payload(payload)
+
+@app.get("/gom/setup-reliability")
+async def get_gom_setup_reliability(symbol: str = "XAUUSD", timeframe: str = "M1", lookback_days: int = 14):
+    """Probabilités setup BUY/SELL validées (RDS prediction_outcomes + scores daily)."""
+    sym = _resolve_symbol(symbol)
+    if not AWS_RDS_AVAILABLE:
+        stored = _GOM_VERDICT_STORE.get(sym) or {}
+        return {
+            "ok": True,
+            "symbol": sym,
+            "source": "gom_verdict_cache",
+            "setup_buy_prob": stored.get("setup_buy_prob"),
+            "setup_sell_prob": stored.get("setup_sell_prob"),
+            "setup_valid_prob": stored.get("setup_valid_prob"),
+            "pred_direction_hit_rate": stored.get("pred_direction_hit_rate"),
+        }
+    rel = aws_rds_client.get_gom_setup_reliability(sym, timeframe.upper(), lookback_days=lookback_days)
+    return {"ok": True, **rel}
+
 
 @app.get("/gom-verdict")
 async def get_gom_verdict(symbol: str = "XAUUSD"):

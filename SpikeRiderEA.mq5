@@ -100,6 +100,7 @@ input int    InpTVBridgeMaxAgeSec   = 20;        // Données TV expirées → pa
 input bool   InpRequireTVSniper     = false;     // true = entrées UNIQUEMENT si sniper TV >= seuil
 input double InpSniperMinConfidence = 80.0;      // Confiance min sniper (%%) — spike imminent
 input bool   InpBlockCounterTrendTV = true;      // Bloquer BUY Boom / SELL Crash si TV oppose
+input bool   InpBlockCorrectionZone = true;      // Ne pas trader spike en zone correction
 
 input group "=== CONFIRMATION TRADINGVIEW (via ai_server) ==="
 input bool   InpUseTVConfirm        = true;      // Consulter indicateurs/TV avant ordre
@@ -387,12 +388,47 @@ void UpdateSMCContext()
    SR_BuildSMCSetup(_Symbol, InpTF, IsBoom(_Symbol), px, InpSwingLookback, g_smc);
 }
 
+bool IsSpikeCorrectionZone(const ESpikeType dir)
+{
+   if(!InpBlockCorrectionZone) return false;
+
+   if(InpUseTVBridge && g_spikeTVOk && g_tvCounterTrend)
+      return true;
+
+   int push = GetMicroTrendPush(InpTrendBars);
+   if(dir == SPIKE_BUY && push < 0) return true;
+   if(dir == SPIKE_SELL && push > 0) return true;
+
+   if(g_spikeTVOk && StringLen(g_tvGlobalDir) > 0 && g_tvGlobalStrength >= 50)
+   {
+      bool globalBull = (StringCompare(g_tvGlobalDir, "BULL") == 0);
+      bool globalBear = (StringCompare(g_tvGlobalDir, "BEAR") == 0);
+      if(dir == SPIKE_BUY && globalBear) return true;
+      if(dir == SPIKE_SELL && globalBull) return true;
+   }
+
+   double c1 = iClose(_Symbol, PERIOD_M1, 0);
+   double c3 = iClose(_Symbol, PERIOD_M1, 3);
+   double cH1 = iClose(_Symbol, PERIOD_H1, 0);
+   double cH3 = iClose(_Symbol, PERIOD_H1, 3);
+   if(dir == SPIKE_BUY && c1 < c3 && cH1 > cH3) return true;
+   if(dir == SPIKE_SELL && c1 > c3 && cH1 < cH3) return true;
+
+   return false;
+}
+
 bool CanEnterInDirection(const ESpikeType dir, const bool isPreSpike,
                          const SpikeResult &spike, string &reason)
 {
    reason = "";
    if(IsBoom(_Symbol)  && dir != SPIKE_BUY)  { reason = "Boom → BUY uniquement"; return false; }
    if(IsCrash(_Symbol) && dir != SPIKE_SELL) { reason = "Crash → SELL uniquement"; return false; }
+
+   if(IsSpikeCorrectionZone(dir))
+   {
+      reason = "zone correction — spike évité (M1 vs H1 / TV contre-tendance)";
+      return false;
+   }
 
    if(isPreSpike && !InpPreSpikeEnabled)
    {

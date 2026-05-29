@@ -522,6 +522,92 @@ class AWSRDSClient:
             }
         return {"wins": 0, "losses": 0, "total": 0, "win_rate": 0.0, "net_profit": 0.0}
 
+    def get_gom_setup_reliability(
+        self,
+        symbol: str,
+        timeframe: str = "M1",
+        lookback_days: int = 14,
+    ) -> Dict[str, Any]:
+        """
+        Probabilités setup BUY/SELL depuis prediction_outcomes + symbol_prediction_score_daily.
+        Setup validé = direction_hit sur la bougie prédite (ticks/bougie réelle).
+        """
+        out: Dict[str, Any] = {
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "samples": 0,
+            "pred_direction_hit_rate": None,
+            "setup_buy_prob": None,
+            "setup_sell_prob": None,
+            "setup_valid_prob": None,
+            "setup_score_live": None,
+        }
+        try:
+            q = """
+                SELECT
+                    COUNT(*) AS total,
+                    COUNT(*) FILTER (WHERE po.direction_hit IS TRUE) AS hits,
+                    COUNT(*) FILTER (WHERE pc.structure_tag = 'U' AND po.direction_hit IS TRUE) AS bull_hits,
+                    COUNT(*) FILTER (WHERE pc.structure_tag = 'U') AS bull_total,
+                    COUNT(*) FILTER (WHERE pc.structure_tag = 'D' AND po.direction_hit IS TRUE) AS bear_hits,
+                    COUNT(*) FILTER (WHERE pc.structure_tag = 'D') AS bear_total
+                FROM prediction_outcomes po
+                JOIN prediction_candles pc ON pc.run_id = po.run_id AND pc.step = po.step
+                JOIN prediction_runs pr ON pr.id = po.run_id
+                WHERE pr.symbol = %s AND pr.timeframe = %s
+                  AND po.evaluated_at >= NOW() - (%s::text || ' days')::interval
+            """
+            rows = self.execute_query(q, (symbol, timeframe, lookback_days))
+            if rows:
+                r = rows[0]
+                total = int(r.get("total") or 0)
+                hits = int(r.get("hits") or 0)
+                bull_total = int(r.get("bull_total") or 0)
+                bear_total = int(r.get("bear_total") or 0)
+                bull_hits = int(r.get("bull_hits") or 0)
+                bear_hits = int(r.get("bear_hits") or 0)
+                out["samples"] = total
+                if total > 0:
+                    out["pred_direction_hit_rate"] = round(hits / total, 4)
+                if bull_total > 0:
+                    out["setup_buy_prob"] = round(bull_hits / bull_total, 4)
+                if bear_total > 0:
+                    out["setup_sell_prob"] = round(bear_hits / bear_total, 4)
+                buy_p = out.get("setup_buy_prob")
+                sell_p = out.get("setup_sell_prob")
+                if buy_p is not None and sell_p is not None:
+                    out["setup_valid_prob"] = round(max(buy_p, sell_p), 4)
+                elif buy_p is not None:
+                    out["setup_valid_prob"] = buy_p
+                elif sell_p is not None:
+                    out["setup_valid_prob"] = sell_p
+
+            daily = self.execute_query(
+                """
+                SELECT direction_hit_rate, samples, score
+                FROM symbol_prediction_score_daily
+                WHERE symbol = %s AND timeframe = %s
+                ORDER BY day DESC LIMIT 7
+                """,
+                (symbol, timeframe),
+            )
+            if daily:
+                w = sum(int(d.get("samples") or 0) for d in daily) or 1
+                hit = sum(float(d.get("direction_hit_rate") or 0) * int(d.get("samples") or 0) for d in daily) / w
+                if out["pred_direction_hit_rate"] is None:
+                    out["pred_direction_hit_rate"] = round(hit, 4)
+                elif w >= 10:
+                    out["pred_direction_hit_rate"] = round(
+                        (float(out["pred_direction_hit_rate"]) + hit) / 2.0, 4
+                    )
+
+            setup_rows = self.get_latest_setup_scores(symbols=[symbol])
+            if setup_rows:
+                out["setup_score_live"] = float(setup_rows[0].get("setup_score") or 0)
+        except Exception as e:
+            logger.warning(f"get_gom_setup_reliability({symbol}): {e}")
+        return out
+
 
 # Instance globale
 aws_rds_client = AWSRDSClient()
