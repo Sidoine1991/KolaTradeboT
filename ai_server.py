@@ -18,6 +18,7 @@ import time
 import math
 import asyncio
 import logging
+import logging.handlers
 import sys
 import argparse
 import traceback
@@ -3020,12 +3021,20 @@ except Exception as e:
     GEMMA_AVAILABLE = False
 
 
-# Configuration du logging
+# Configuration du logging avec rotation (max 50MB par fichier, 5 fichiers max)
+rotating_handler = logging.handlers.RotatingFileHandler(
+    'ai_server.log',
+    encoding='utf-8',
+    maxBytes=50*1024*1024,  # 50 MB
+    backupCount=5
+)
+rotating_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('ai_server.log', encoding='utf-8'),
+        rotating_handler,
         logging.StreamHandler(sys.stdout)
     ]
 )
@@ -8219,6 +8228,48 @@ async def health_rds():
         out["error"] = str(e)[:200]
     return out
 
+# === GOM KOLA DASHBOARD CACHE ===
+# Cache singleton pour éviter timeout sur /gom-kola-dashboard
+_gom_cache: Dict[str, Dict[str, Any]] = {}
+_gom_cache_ttl = 10  # secondes
+_gom_bridge_singleton = None
+
+def _get_gom_bridge():
+    """Retourne l'instance singleton du bridge TradingView MCP"""
+    global _gom_bridge_singleton
+    if _gom_bridge_singleton is None:
+        try:
+            import sys
+            from pathlib import Path
+            bridge_path = Path(__file__).parent / "tradingview_mcp_bridge.py"
+            if bridge_path.exists():
+                sys.path.insert(0, str(Path(__file__).parent))
+                from tradingview_mcp_bridge import TradingViewMCPBridge
+                _gom_bridge_singleton = TradingViewMCPBridge()
+            else:
+                return None
+        except Exception as e:
+            logger.error(f"Failed to initialize GOM bridge: {e}")
+            return None
+    return _gom_bridge_singleton
+
+def _get_cached_gom_data(symbol: str) -> Optional[Dict[str, Any]]:
+    """Retourne les données GOM depuis le cache si valides, sinon None"""
+    if symbol not in _gom_cache:
+        return None
+    cached = _gom_cache[symbol]
+    age = time.time() - cached.get("cached_at", 0)
+    if age > _gom_cache_ttl:
+        return None
+    return cached.get("data")
+
+def _cache_gom_data(symbol: str, data: Dict[str, Any]):
+    """Cache les données GOM avec timestamp"""
+    _gom_cache[symbol] = {
+        "data": data,
+        "cached_at": time.time()
+    }
+
 @app.get("/gom-kola-dashboard")
 async def gom_kola_dashboard(symbol: str = Query("XAUUSD")):
     """
@@ -8255,31 +8306,14 @@ async def gom_kola_dashboard(symbol: str = Query("XAUUSD")):
     }
     """
     try:
-        import sys
-        from pathlib import Path
+        # Vérifier cache d'abord
+        cached_data = _get_cached_gom_data(symbol)
+        if cached_data:
+            return cached_data
 
-        # Import TradingView MCP Bridge
-        bridge_path = Path(__file__).parent / "tradingview_mcp_bridge.py"
-        if bridge_path.exists():
-            sys.path.insert(0, str(Path(__file__).parent))
-            from tradingview_mcp_bridge import TradingViewMCPBridge
-            bridge = TradingViewMCPBridge()
-            gom_data = bridge.get_gom_data()
-
-            if gom_data.get("error"):
-                return {
-                    "ok": False,
-                    "symbol": symbol,
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                    "error": gom_data.get("error")
-                }
-
-            # Utiliser les données du bridge
-            price = gom_data.get("price", 0)
-            vwap = gom_data.get("vwap", 0)
-            values = gom_data  # Les données sont déjà parsées
-        else:
-            # Fallback si bridge non disponible
+        # Récupérer bridge singleton
+        bridge = _get_gom_bridge()
+        if not bridge:
             return {
                 "ok": True,
                 "symbol": symbol,
@@ -8287,6 +8321,22 @@ async def gom_kola_dashboard(symbol: str = Query("XAUUSD")):
                 "source": "tradingview_mcp",
                 "error": "TradingView bridge not available"
             }
+
+        # Récupérer données fraîches
+        gom_data = bridge.get_gom_data()
+
+        if gom_data.get("error"):
+            return {
+                "ok": False,
+                "symbol": symbol,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "error": gom_data.get("error")
+            }
+
+        # Utiliser les données du bridge
+        price = gom_data.get("price", 0)
+        vwap = gom_data.get("vwap", 0)
+        values = gom_data  # Les données sont déjà parsées
 
         # Continuer avec les données
         if not values:
@@ -8317,7 +8367,8 @@ async def gom_kola_dashboard(symbol: str = Query("XAUUSD")):
         }
         verdict = verdict_map.get(verdict_num, "WAIT")
 
-        return {
+        # Construire réponse
+        response = {
             "ok": True,
             "symbol": symbol,
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -8347,6 +8398,10 @@ async def gom_kola_dashboard(symbol: str = Query("XAUUSD")):
             "path_step": values.get("path_step", 0.16),
             "source": "tradingview_mcp"
         }
+
+        # Mettre en cache avant de retourner
+        _cache_gom_data(symbol, response)
+        return response
 
     except Exception as e:
         logger.error(f"Erreur /gom-kola-dashboard: {e}", exc_info=True)
