@@ -197,6 +197,25 @@ double      g_angelConfidence    = 0.0;
 string      g_angelMarketState   = "";
 datetime    g_lastAngelFetch     = 0;
 datetime    g_lastAngelAttempt   = 0;
+
+//+------------------------------------------------------------------+
+//| SPIKE SCALP MODE v2.0                                            |
+//+------------------------------------------------------------------+
+input group "=== SPIKE SCALP IMMÉDIAT ==="
+input bool   InpUseImmediateScalp = true;   // Detecter spike → entrée market → close immédiate
+input double InpScalpZScore       = 2.5;   // Z-score threshold
+input int    InpScalpLookback     = 20;    // Bars pour Z-score
+input double InpScalpExitPips     = 5.0;   // Close après X pips profit
+
+struct SpikeScalpState {
+   bool spikeDetected;
+   int direction;
+   double zscore;
+   datetime detectedTime;
+};
+
+SpikeScalpState g_scalpState;
+datetime g_lastScalpTrade = 0;
 int         g_lastAngelHour      = -1;
 
 // Realtime cross-chart (/spike/realtime)
@@ -462,11 +481,26 @@ bool CanEnterInDirection(const ESpikeType dir, const bool isPreSpike,
       }
    }
 
-   if(InpUseTVBridge && InpBlockCounterTrendTV && g_spikeTVOk && g_tvCounterTrend)
+   // Bloquer si TV bride dit contre-tendance OU si les données TV fraîches contredisent
+   bool tvSaysCounterTrend = InpUseTVBridge && g_spikeTVOk && g_tvCounterTrend;
+   bool tvDataOld = InpUseTVBridge && g_spikeTVOk &&
+                    (TimeCurrent() - g_lastSpikeTVFetch > 120);
+
+   if(InpBlockCounterTrendTV && (tvSaysCounterTrend || !tvDataOld))
    {
-      reason = StringFormat("TV contre-tendance | EMA=%s OB=%s dir=%s",
-                            g_tvEmaTrend, g_tvObBias, g_tvDirection);
-      return false;
+      // Vérification secondaire : structure M15/H1 et direction explicit
+      if(dir == SPIKE_BUY && (g_tvStructureM15 == "bearish" || g_tvStructureH1 == "bearish"))
+      {
+         reason = StringFormat("TV contre-tendance (M15=%s H1=%s) | OB=%s EMA=%s",
+                               g_tvStructureM15, g_tvStructureH1, g_tvObBias, g_tvEmaTrend);
+         return false;
+      }
+      if(dir == SPIKE_SELL && (g_tvStructureM15 == "bullish" || g_tvStructureH1 == "bullish"))
+      {
+         reason = StringFormat("TV contre-tendance (M15=%s H1=%s) | OB=%s EMA=%s",
+                               g_tvStructureM15, g_tvStructureH1, g_tvObBias, g_tvEmaTrend);
+         return false;
+      }
    }
 
    if(InpUseTVBridge && InpRequireTVSniper)
@@ -513,51 +547,61 @@ bool CanEnterInDirection(const ESpikeType dir, const bool isPreSpike,
          return false;
    }
 
-   // Filtre TF global + cohérence — actif UNIQUEMENT si données TV fraîches et non-nulles
-   // (ne bloque pas quand le serveur est off ou données absentes)
-   bool globalDataValid = InpRequireGlobalDir && g_spikeTVOk
-                          && g_tvGlobalStrength > 0
-                          && StringLen(g_tvGlobalDir) > 0
-                          && (TimeCurrent() - g_lastSpikeTVFetch) < 120;
+   // Filtre TF global + cohérence — UNIQUEMENT si filtre activé ET données fraîches
+   bool tvDataFresh = (g_lastSpikeTVFetch > 0 &&
+                       (TimeCurrent() - g_lastSpikeTVFetch) < 120);
+   bool globalDataValid = InpRequireGlobalDir && g_spikeTVOk && tvDataFresh;
+
    if(globalDataValid)
    {
-      // 1. Cohérence minimale (seulement si valeur réelle disponible)
-      if(g_tvCoherencePct >= 5.0 && g_tvCoherencePct < InpGlobalMinCoherence)
+      // 1. Cohérence minimale — bloquer si cohérence basse et détectée
+      if(g_tvCoherencePct > 0 && g_tvCoherencePct < InpGlobalMinCoherence)
       {
-         reason = StringFormat("Cohérence insuffisante (%.0f%% < %.0f%%)",
+         reason = StringFormat("Cohérence TF global %.0f%% < seuil %.0f%%",
                                g_tvCoherencePct, InpGlobalMinCoherence);
          return false;
       }
+
       // 2. Confiance TF global minimale
-      if(g_tvGlobalStrength < InpGlobalMinConfidence)
+      if(g_tvGlobalStrength > 0 && g_tvGlobalStrength < InpGlobalMinConfidence)
       {
-         reason = StringFormat("TF global confiance insuffisante (%d%% < %d%%)",
+         reason = StringFormat("Confiance TF global %d%% < seuil %d%%",
                                g_tvGlobalStrength, InpGlobalMinConfidence);
          return false;
       }
-      // 3. Direction TF global opposée = blocage (NEUT = pas de blocage)
-      if(g_tvGlobalDir != "NEUT" && g_tvGlobalDir != "NEUTRAL")
+
+      // 3. Direction TF global opposée au spike (NEUT/NEUTRAL = pas de contrainte)
+      string gd = g_tvGlobalDir;
+      StringToUpper(gd);
+      bool isNeutral = (StringCompare(gd, "NEUT") == 0 ||
+                       StringCompare(gd, "NEUTRAL") == 0);
+
+      if(!isNeutral && g_tvGlobalStrength > 0)
       {
-         bool globalBull = (StringCompare(g_tvGlobalDir, "BULL") == 0);
-         bool globalBear = (StringCompare(g_tvGlobalDir, "BEAR") == 0);
+         bool globalBull = (StringCompare(gd, "BULL") == 0);
+         bool globalBear = (StringCompare(gd, "BEAR") == 0);
+
          if(dir == SPIKE_BUY && !globalBull)
          {
-            reason = StringFormat("TF global=%s (%d%%) — BUY non autorisé",
-                                  g_tvGlobalDir, g_tvGlobalStrength);
+            reason = StringFormat("TF global=%s force=%d%% (contre BUY)",
+                                  gd, g_tvGlobalStrength);
             return false;
          }
          if(dir == SPIKE_SELL && !globalBear)
          {
-            reason = StringFormat("TF global=%s (%d%%) — SELL non autorisé",
-                                  g_tvGlobalDir, g_tvGlobalStrength);
+            reason = StringFormat("TF global=%s force=%d%% (contre SELL)",
+                                  gd, g_tvGlobalStrength);
             return false;
          }
       }
    }
 
-   reason = StringFormat("OK %s | Z=%.2f | stair=%.0f%% | %s | Global=%s(%d%%) Coh=%.0f%%",
+   reason = StringFormat("✓ %s | Z=%.2f | stair=%.0f%% | %s | TV[%s CT=%s sniper=%s] | Global=%s(%d%%) Coh=%.0f%%",
                         (dir == SPIKE_BUY ? "BUY" : "SELL"),
                         spike.zScore, spike.stairScore * 100.0, g_smc.tag,
+                        (g_spikeTVOk ? "OK" : "OFF"),
+                        (g_tvCounterTrend ? "BLOQUE" : "ok"),
+                        (g_tvSniperReady ? "ready" : "---"),
                         g_tvGlobalDir, g_tvGlobalStrength, g_tvCoherencePct);
    return true;
 }
@@ -607,10 +651,13 @@ bool JsonExtractBool(const string &body, const string key)
 {
    string search = "\"" + key + "\":";
    int pos = StringFind(body, search);
-   if(pos < 0) return true;
+   if(pos < 0) return false;  // Défaut: false si clé absente (au lieu de true)
    pos += StringLen(search);
    while(pos < StringLen(body) && StringGetCharacter(body, pos) == ' ') pos++;
-   return (StringGetCharacter(body, pos) == 't');
+   ushort c = StringGetCharacter(body, pos);
+   if(c == 't') return true;   // "true"
+   if(c == 'f') return false;  // "false"
+   return false;  // Défaut: false pour les valeurs invalides
 }
 string JsonExtractString(const string &body, const string key)
 {
@@ -781,52 +828,88 @@ bool PollSpikeTVState(const bool forceRefresh = false)
       return false;
    }
 
+   // Parser "ok" status — verdict GOM principal
    g_spikeTVOk = JsonExtractBool(body, "ok");
    if(!g_spikeTVOk && StringFind(body, "\"ok\":true") >= 0)
       g_spikeTVOk = true;
 
+   // Direction principale (BUY/SELL/NEUTRAL)
    string dir = JsonExtractString(body, "direction");
    if(StringLen(dir) > 0) g_tvDirection = dir;
+   else g_tvDirection = "NEUTRAL";
 
+   // Structure M15 / H1 (bullish/bearish/neutral)
    string m15 = JsonExtractString(body, "structure_m15");
    string h1  = JsonExtractString(body, "structure_h1");
    if(StringLen(m15) > 0) g_tvStructureM15 = m15;
+   else g_tvStructureM15 = "neutral";
    if(StringLen(h1) > 0)  g_tvStructureH1  = h1;
+   else g_tvStructureH1 = "neutral";
 
+   // Scores imminence et confiance
    g_tvBiasScore        = JsonExtractDouble(body, "bias_score");
    g_tvImminencePct     = JsonExtractDouble(body, "imminence_pct");
+   if(g_tvImminencePct < 0) g_tvImminencePct = 0;
+   if(g_tvImminencePct > 100) g_tvImminencePct = 100;
+
    g_tvSniperConfidence = JsonExtractDouble(body, "sniper_confidence");
+   if(g_tvSniperConfidence < 0) g_tvSniperConfidence = 0;
+   if(g_tvSniperConfidence > 100) g_tvSniperConfidence = 100;
+
+   // Flags booléens — verdicts GOM cruciaux
    g_tvSniperReady      = JsonExtractBool(body, "sniper_ready");
-   g_tvCounterTrend     = JsonExtractBool(body, "counter_trend");
+   g_tvCounterTrend     = JsonExtractBool(body, "counter_trend");  // ← VERDICT GOM
    g_tvSpikeDetected    = JsonExtractBool(body, "spike_detected");
    g_tvEntryValid       = JsonExtractBool(body, "entry_valid");
 
+   // Biases et tendances (OB = Order Block, EMA = trend)
    string ob = JsonExtractString(body, "ob_bias");
    if(StringLen(ob) > 0) g_tvObBias = ob;
+   else g_tvObBias = "none";
+
    string emaTr = JsonExtractString(body, "ema_trend");
    if(StringLen(emaTr) > 0) g_tvEmaTrend = emaTr;
+   else g_tvEmaTrend = "neutral";
+
    string spDir = JsonExtractString(body, "spike_direction");
    if(StringLen(spDir) > 0) g_tvSpikeDir = spDir;
+   else g_tvSpikeDir = "NEUTRAL";
 
+   // Z-score du spike TV
    double z = JsonExtractDouble(body, "spike_z");
    if(z >= 0) g_tvSpikeZ = z;
+   else g_tvSpikeZ = 0;
 
-   // TF Global + cohérence — nécessaires pour le filtre direction global
+   // TF Global + cohérence — filtres direction haut niveau
    string gDir = JsonExtractString(body, "tf_global_dir");
    if(StringLen(gDir) > 0) { g_tvGlobalDir = gDir; StringToUpper(g_tvGlobalDir); }
+   else g_tvGlobalDir = "NEUT";
+
    double gStr = JsonExtractDouble(body, "tf_global_strength");
    if(gStr > 0) g_tvGlobalStrength = (int)gStr;
+   else g_tvGlobalStrength = 0;
+
    double coh = JsonExtractDouble(body, "coherence_pct");
    if(coh > 0) g_tvCoherencePct = coh;
+   else g_tvCoherencePct = 0;
 
    g_lastSpikeTVFetch = TimeCurrent();
    g_lastTVFetch      = TimeCurrent();
 
    if(InpDebug || forceRefresh)
-      PrintFormat("[SpikeRider] TV bridge %s | sniper=%s %.0f%% | imm=%.0f%% | %s | CT=%s | OB=%s EMA=%s",
-                  _Symbol, (g_tvSniperReady ? "READY" : "wait"),
-                  g_tvSniperConfidence, g_tvImminencePct, g_tvDirection,
-                  (g_tvCounterTrend ? "OUI" : "non"), g_tvObBias, g_tvEmaTrend);
+      PrintFormat("[SpikeRider] GOM-Bridge %s | "
+                  "verdict_CT=%s | sniper=%s %.0f%% | imm=%.0f%% | "
+                  "spike=%s Z=%.2f | dir=%s | "
+                  "struct=[M15=%s H1=%s] OB=%s EMA=%s | "
+                  "global=%s[%d%%] coh=%.0f%%",
+                  _Symbol,
+                  (g_tvCounterTrend ? "BLOQUE" : "ok"),
+                  (g_tvSniperReady ? "READY" : "wait"), g_tvSniperConfidence,
+                  g_tvImminencePct,
+                  (g_tvSpikeDetected ? g_tvSpikeDir : "---"), g_tvSpikeZ,
+                  g_tvDirection,
+                  g_tvStructureM15, g_tvStructureH1, g_tvObBias, g_tvEmaTrend,
+                  g_tvGlobalDir, g_tvGlobalStrength, g_tvCoherencePct);
 
    return g_spikeTVOk;
 }
@@ -835,50 +918,66 @@ bool TVSniperAllowsEntry(const ESpikeType dir, string &reason)
 {
    if(!InpRequireTVSniper) return true;
 
+   // Récupérer les données TV fraîches si nécessaire
    if(g_lastSpikeTVFetch == 0 || TimeCurrent() - g_lastSpikeTVFetch > InpTVBridgeMaxAgeSec)
    {
       if(!PollSpikeTVState(true))
       {
-         reason = "TV sniper: pas de données (poller + ai_server)";
+         reason = "TV sniper: pas de données (ai_server indisponible)";
          return false;
       }
    }
 
+   // Vérifier que les données ne sont pas trop vieilles (staleness check)
+   if(TimeCurrent() - g_lastSpikeTVFetch > InpTVBridgeMaxAgeSec)
+   {
+      reason = StringFormat("TV sniper: données expirées (%.0fs > %.0fs)",
+                            (double)(TimeCurrent() - g_lastSpikeTVFetch),
+                            (double)InpTVBridgeMaxAgeSec);
+      return false;
+   }
+
+   // Bloc 1: contre-tendance explicite du verdict GOM
    if(g_tvCounterTrend)
    {
-      reason = StringFormat("TV sniper bloqué — contre-tendance (EMA=%s OB=%s)",
+      reason = StringFormat("TV VERDICT: contre-tendance détecté (EMA=%s OB=%s CT=true)",
                             g_tvEmaTrend, g_tvObBias);
       return false;
    }
 
+   // Bloc 2: direction symbole vs EA (Boom=BUY, Crash=SELL)
    ESpikeType want = IsBoom(_Symbol) ? SPIKE_BUY : SPIKE_SELL;
    if(dir != want)
    {
-      reason = "direction EA != symbole synthétique";
+      reason = "Symbole incompatible (Boom→BUY, Crash→SELL)";
       return false;
    }
 
+   // Bloc 3: confiance sniper insuffisante
    if(!g_tvSniperReady || g_tvSniperConfidence < InpSniperMinConfidence)
    {
-      reason = StringFormat("Sniper TV %.0f%% < %.0f%% (imm=%.0f%% spike=%s)",
+      reason = StringFormat("Sniper TV %.0f%% < seuil %.0f%% (imm=%.0f%% spike=%s ready=%s)",
                             g_tvSniperConfidence, InpSniperMinConfidence,
-                            g_tvImminencePct, (g_tvSpikeDetected ? g_tvSpikeDir : "non"));
+                            g_tvImminencePct, (g_tvSpikeDetected ? g_tvSpikeDir : "---"),
+                            (g_tvSniperReady ? "oui" : "non"));
       return false;
    }
 
-   if(IsBoom(_Symbol) && g_tvSpikeDir == "SELL")
+   // Bloc 4: direction spike TV vs symbole
+   if(IsBoom(_Symbol) && StringCompare(g_tvSpikeDir, "SELL") == 0)
    {
-      reason = "TV spike SELL — pas de BUY Boom";
+      reason = "TV spike SELL incompatible avec Boom (BUY)";
       return false;
    }
-   if(IsCrash(_Symbol) && g_tvSpikeDir == "BUY")
+   if(IsCrash(_Symbol) && StringCompare(g_tvSpikeDir, "BUY") == 0)
    {
-      reason = "TV spike BUY — pas de SELL Crash";
+      reason = "TV spike BUY incompatible avec Crash (SELL)";
       return false;
    }
 
-   reason = StringFormat("SNIPER TV OK %.0f%% | imm=%.0f%% | Z=%.2f | OB=%s",
-                         g_tvSniperConfidence, g_tvImminencePct, g_tvSpikeZ, g_tvObBias);
+   reason = StringFormat("SNIPER TV OK %.0f%% | imm=%.0f%% | Z=%.2f | OB=%s | CT=%s",
+                         g_tvSniperConfidence, g_tvImminencePct, g_tvSpikeZ,
+                         g_tvObBias, (g_tvCounterTrend ? "bloque" : "ok"));
    return true;
 }
 
@@ -2977,11 +3076,14 @@ int OnInit()
    if(InpUseTVBridge)
       EventSetTimer(MathMax(1, InpTVBridgePollSec));
 
-   PrintFormat("[SpikeRider] ✅ Init v5.03 | %s | %s | SMC=%s | TVbridge=%s sniper=%s | Magic=%llu",
+   PrintFormat("[SpikeRider] ✅ Init v5.07 | %s | %s | SMC=%s | GOM-Bridge=%s | "
+               "Block-CT=%s Sniper=%s GlobalDir=%s | Magic=%llu",
                _Symbol, (IsBoom(_Symbol) ? "BUY only" : "SELL only"),
                (InpRequireSMC ? "ON" : "OFF"),
-               (InpUseTVBridge ? "ON" : "OFF"),
+               (InpUseTVBridge ? "ON (GOM verdict active)" : "OFF"),
+               (InpBlockCounterTrendTV ? "ON" : "OFF"),
                (InpRequireTVSniper ? "ON" : "OFF"),
+               (InpRequireGlobalDir ? "ON" : "OFF"),
                InpMagic);
    return INIT_SUCCEEDED;
 }
@@ -3023,6 +3125,102 @@ void OnTimer()
 }
 
 //+------------------------------------------------------------------+
+//| SPIKE SCALP: Z-Score Detection & Immediate Close                 |
+//+------------------------------------------------------------------+
+bool DetectSpikeScalp(int &direction, double &zscore)
+{
+   if(!InpUseImmediateScalp) return false;
+
+   double closes[]; ArraySetAsSeries(closes, true);
+   if(CopyClose(_Symbol, InpTF, 0, InpScalpLookback + 1, closes) < InpScalpLookback + 1) return false;
+
+   double mean = 0, stddev = 0;
+   for(int i = 1; i <= InpScalpLookback; i++) mean += closes[i];
+   mean /= InpScalpLookback;
+
+   for(int i = 1; i <= InpScalpLookback; i++) {
+      double diff = closes[i] - mean;
+      stddev += diff * diff;
+   }
+   stddev = MathSqrt(stddev / InpScalpLookback);
+   if(stddev <= 0) return false;
+
+   zscore = (closes[0] - mean) / stddev;
+
+   if(zscore > InpScalpZScore) {
+      direction = 1; // BUY spike
+      return true;
+   }
+   if(zscore < -InpScalpZScore) {
+      direction = -1; // SELL spike
+      return true;
+   }
+   return false;
+}
+
+void ExecuteSpikeScalp()
+{
+   if(!InpUseImmediateScalp) return;
+   if(TimeCurrent() - g_lastScalpTrade < 5) return;
+
+   int direction = 0;
+   double zscore = 0;
+
+   if(!DetectSpikeScalp(direction, zscore)) {
+      g_scalpState.spikeDetected = false;
+      return;
+   }
+
+   g_scalpState.spikeDetected = true;
+   g_scalpState.direction = direction;
+   g_scalpState.zscore = zscore;
+   g_scalpState.detectedTime = TimeCurrent();
+
+   // Check if position already open
+   for(int i = 0; i < PositionsTotal(); i++) {
+      if(!PositionSelectByTicket(PositionGetTicket(i))) continue;
+      if(PositionGetString(POSITION_SYMBOL) == _Symbol) return;
+   }
+
+   double atr = GetATR();
+   if(atr <= 0) return;
+
+   double lot = (InpFixedLot > 0) ? InpFixedLot : SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   int dg = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+   double pt = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+
+   double price, sl, tp;
+   string comment;
+
+   if(direction > 0) {
+      price = ask;
+      tp = NormalizeDouble(price + InpScalpExitPips * pt, dg);
+      sl = NormalizeDouble(price - atr * InpSL_ATR, dg);
+      comment = "ScalpBUY";
+   } else {
+      price = bid;
+      tp = NormalizeDouble(price - InpScalpExitPips * pt, dg);
+      sl = NormalizeDouble(price + atr * InpSL_ATR, dg);
+      comment = "ScalpSELL";
+   }
+
+   g_trade.SetExpertMagicNumber(InpMagic);
+   g_trade.SetDeviationInPoints(50);
+
+   bool ok = (direction > 0)
+      ? g_trade.Buy(lot, _Symbol, 0, sl, tp, comment)
+      : g_trade.Sell(lot, _Symbol, 0, sl, tp, comment);
+
+   if(ok) {
+      g_lastScalpTrade = TimeCurrent();
+      Print("[SpikeRider] 🔥 SPIKE SCALP: ", (direction > 0 ? "BUY ↑" : "SELL ↓"),
+            " Z=", DoubleToString(zscore, 2), " | TP=", InpScalpExitPips, "pips | Lot=", lot);
+   }
+}
+
+//+------------------------------------------------------------------+
 //| TICK                                                             |
 //+------------------------------------------------------------------+
 void OnTick()
@@ -3039,6 +3237,7 @@ void OnTick()
    ManageQuickExit(spikeNow);   // hold min + profit min avant sortie
    ManageTrailing();
    ManagePendingAge();
+   ExecuteSpikeScalp();  // [NEW] Spike scalp immediate detection
 
    // Refresh fetches si l'heure UTC a changé
    MqlDateTime utc; TimeToStruct(TimeGMT(), utc);
