@@ -21,19 +21,86 @@ from typing import List, Dict, Tuple
 class MorningScanner:
     def __init__(self, ai_server_url="http://127.0.0.1:8000"):
         self.ai_server = ai_server_url
-        self.symbols = [
-            "XAUUSD", "EURUSD", "GBPUSD", "AUDUSD",
-            "BTCUSD", "ETHUSD",
-            "Boom 600 Index", "Crash 600 Index",
-            "Volatility 75 Index"
-        ]
-        self.timeout = 5
+        self.timeout = 30
+        self.market_status = "Not initialized"
+        self.symbols = []
+
+        # Initialize will be called explicitly when needed
+        self._initialized = False
+
+    def initialize(self):
+        """Initialize the scanner by fetching D1 candidates from AI server"""
+        if self._initialized:
+            return
+
+        self.symbols = self._fetch_daily_candidates()
+
+        if not self.symbols:
+            print("⚠️ No D1 candidates found, falling back to default symbols")
+            self.symbols = self._fallback_symbols()
+
+        self._initialized = True
+
+    def _fetch_daily_candidates(self) -> List[str]:
+        """Fetch filtered D1 candidates from AI server"""
+        try:
+            resp = requests.get(
+                f"{self.ai_server}/symbols/daily-candidates",
+                timeout=self.timeout
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                candidates = data.get("candidates", [])
+
+                if not candidates:
+                    print(f"⚠️ No candidates passed D1 filters (scanned {data.get('scanned', 0)} symbols)")
+                    return []
+
+                # Limit to top 20 to avoid timeout (20 * 2s = ~40s scan time)
+                top20 = candidates[:20]
+
+                # Build market status string
+                self.market_status = self._build_market_status(top20)
+
+                return [c['symbol'] for c in top20]
+            else:
+                print(f"⚠️ Failed to fetch D1 candidates: {resp.status_code}")
+                return []
+        except Exception as e:
+            print(f"⚠️ Error fetching D1 candidates: {e}")
+            return []
+
+    def _fallback_symbols(self) -> List[str]:
+        """Fallback to minimal hardcoded list if API fails"""
+        from datetime import datetime
+        now = datetime.utcnow()
+        is_weekend = now.weekday() >= 5
+
+        symbols = ["XAUUSD", "EURUSD", "BTCUSD"]
+        if not is_weekend:
+            symbols.extend(["GBPUSD", "AUDUSD"])
+
+        self.market_status = "FALLBACK — Minimal list"
+        return symbols
+
+    def _build_market_status(self, candidates: List[Dict]) -> str:
+        """Build human-readable market status from candidates"""
+        by_category = {}
+        for c in candidates:
+            cat = c['category']
+            by_category[cat] = by_category.get(cat, 0) + 1
+
+        parts = [f"{count} {cat.title()}" for cat, count in sorted(by_category.items())]
+        return f"{len(candidates)} symbols scanned — " + ", ".join(parts)
 
     def scan_all(self) -> List[Dict]:
         """Scan all symbols and calculate confluence scores"""
         scores = []
 
-        for sym in self.symbols:
+        # Combine main symbols with AI-server-only symbols
+        all_symbols = self.symbols + self.ai_server_only_symbols
+
+        for sym in all_symbols:
             try:
                 # Fetch GOM verdict
                 gom_resp = requests.get(
@@ -80,37 +147,22 @@ class MorningScanner:
         return scores[:3]
 
     def _calculate_score(self, gom: Dict, bias: Dict) -> float:
-        """Calculate confluence score (0-10)"""
-        score = 0.0
+        """Calculate confluence score using GOM's pre-calculated scores (0-10)"""
+        # Use the max of buy/sell scores from GOM's confluence engine
+        score_buy = float(gom.get("score_buy", 0))
+        score_sell = float(gom.get("score_sell", 0))
 
-        # GOM signal (0-4 pts)
+        # Take the highest score (strongest signal)
+        confluence = max(score_buy, score_sell)
+
+        # Boost if bias is aligned with signal
         vnum = gom.get("verdict_num", 0)
-        if vnum in [3, -3]:  # PERFECT BUY/SELL
-            score += 4.0
-        elif vnum in [2, -2]:  # GOOD BUY/SELL
-            score += 3.0
-        elif vnum in [1, -1]:  # BUY/SELL
-            score += 2.0
-        # vnum = 0 (WAIT) → 0 pts
+        bias_direction = bias.get("direction", "NEUTRAL")
 
-        # Bias alignment (0-3 pts)
-        if bias.get("direction") in ["BUY", "SELL"]:
-            score += 3.0
-        elif bias.get("direction") == "HOLD":
-            score += 1.0
+        if (vnum > 0 and bias_direction == "BUY") or (vnum < 0 and bias_direction == "SELL"):
+            confluence += 0.5  # Small bonus for aligned bias
 
-        # Multi-TF alignment (0-3 pts)
-        bull_count = gom.get("tf_bull_count", 0)
-        bear_count = gom.get("tf_bear_count", 0)
-
-        if gom.get("verdict_num", 0) > 0 and bull_count >= 5:  # BUY direction
-            score += 3.0
-        elif gom.get("verdict_num", 0) > 0 and bull_count >= 3:
-            score += 2.0
-        elif gom.get("verdict_num", 0) > 0 and bull_count >= 1:
-            score += 1.0
-
-        return min(score, 10.0)  # Cap at 10
+        return min(confluence, 10.0)  # Cap at 10
 
     def build_message(self, top3: List[Dict]) -> str:
         """Build consolidated WhatsApp message for Top 3"""
@@ -172,7 +224,8 @@ class MorningScanner:
             response = requests.post(
                 "https://psychobot-1si7.onrender.com/send-message",
                 json={"phone": phone, "message": message},
-                timeout=15
+                timeout=15,
+                verify=False  # SSL bypass for Render certificate issue
             )
             return response.status_code == 200
         except Exception as e:
@@ -197,6 +250,12 @@ def main():
     print("🔍 Starting Morning Scanning System...")
 
     scanner = MorningScanner()
+
+    # Initialize scanner (fetch D1 candidates)
+    scanner.initialize()
+
+    # Show market status
+    print(f"📍 Market Status: {scanner.market_status}")
 
     # Scan all symbols
     print(f"\n📊 Scanning {len(scanner.symbols)} symbols...")

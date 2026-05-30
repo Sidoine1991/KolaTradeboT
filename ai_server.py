@@ -280,6 +280,23 @@ ALL_ACTIVE_SYMBOLS: tuple = (
     "BTCUSD", "ETHUSD",
 )
 
+# Constants pour filtrage D1 des symboles
+SPREAD_LIMITS = {
+    'forex': 3.0,
+    'metals': 5.0,
+    'crypto': 50.0,
+    'indices': 20.0,
+    'synthetics': 10.0
+}
+
+MIN_ATR_D1 = {
+    'forex': 0.0050,
+    'metals': 5.0,
+    'crypto': 500.0,
+    'indices': 100.0,
+    'synthetics': 500.0
+}
+
 try:
     from backend.indicator_confluence import apply_core_indicator_confluence
     INDICATOR_CONFLUENCE_AVAILABLE = True
@@ -21074,6 +21091,186 @@ async def get_symbols():
     except Exception as e:
         logger.error(f"Erreur lors de la récupération des symboles: {e}")
         return {"symbols": [], "count": 0, "error": str(e), "source": "error"}
+
+
+def get_mt5_ohlc(symbol: str, timeframe: str = "D1", count: int = 30) -> Optional[pd.DataFrame]:
+    """
+    Récupère les données OHLCV depuis MT5 pour un symbole et timeframe donnés.
+    Returns pd.DataFrame avec colonnes: time, open, high, low, close, tick_volume, real_volume, spread
+    """
+    try:
+        import MetaTrader5 as mt5
+
+        if not mt5.initialize():
+            logger.debug(f"MT5 init failed for {symbol}")
+            return None
+
+        # Map timeframe string to MT5 constant
+        tf_map = {
+            "M1": mt5.TIMEFRAME_M1,
+            "M5": mt5.TIMEFRAME_M5,
+            "M15": mt5.TIMEFRAME_M15,
+            "M30": mt5.TIMEFRAME_M30,
+            "H1": mt5.TIMEFRAME_H1,
+            "H4": mt5.TIMEFRAME_H4,
+            "D1": mt5.TIMEFRAME_D1,
+            "W1": mt5.TIMEFRAME_W1,
+            "MN": mt5.TIMEFRAME_MN1,
+        }
+
+        mt5_tf = tf_map.get(timeframe.upper(), mt5.TIMEFRAME_D1)
+
+        # Fetch OHLC bars
+        rates = mt5.copy_rates_from_pos(symbol, mt5_tf, 0, count)
+        mt5.shutdown()
+
+        if rates is None or len(rates) == 0:
+            logger.debug(f"No rates returned for {symbol} {timeframe}")
+            return None
+
+        # Convert to DataFrame
+        df = pd.DataFrame(rates)
+        df['time'] = pd.to_datetime(df['time'], unit='s')
+        df.set_index('time', inplace=True)
+
+        return df
+
+    except Exception as e:
+        logger.debug(f"get_mt5_ohlc error for {symbol} {timeframe}: {e}")
+        return None
+
+
+def categorize_symbol(symbol_name: str) -> str:
+    """Catégorise un symbole par type de marché"""
+    name = symbol_name.upper()
+    if 'BTC' in name or 'ETH' in name or 'LTC' in name or 'XRP' in name:
+        return 'crypto'
+    if 'XAU' in name or 'XAG' in name or 'GOLD' in name or 'SILVER' in name:
+        return 'metals'
+    if 'BOOM' in name or 'CRASH' in name or 'VOLATILITY' in name or 'STEP' in name:
+        return 'synthetics'
+    if any(idx in name for idx in ['US30', 'GER40', 'UK100', 'NAS100', 'SPX', 'DJ30']):
+        return 'indices'
+    return 'forex'
+
+
+def is_market_open_for_symbol(symbol: str) -> bool:
+    """Vérifie si le marché du symbole est ouvert"""
+    now = datetime.utcnow()
+    is_weekend = now.weekday() >= 5
+
+    category = categorize_symbol(symbol)
+
+    # Crypto et synthétiques: toujours ouverts
+    if category in ['crypto', 'synthetics']:
+        return True
+
+    # Forex, métaux et indices: fermés le weekend
+    if category in ['forex', 'metals', 'indices']:
+        if is_weekend:
+            return False
+
+    return True
+
+
+@app.get("/symbols/daily-candidates")
+async def get_daily_candidates():
+    """
+    Retourne les symboles filtrés pour opportunités Daily:
+    - Spread acceptable
+    - ATR D1 > seuil minimum
+    - Marché ouvert
+    - Volume D1 disponible
+    Triés par catégorie de marché et ATR (volatilité) décroissant
+    """
+    try:
+        # Step 1: Get all visible symbols from MT5
+        symbols_resp = await get_symbols()
+        all_symbols = symbols_resp.get("symbols", [])
+
+        if not all_symbols:
+            return {"candidates": [], "count": 0, "error": "No symbols available", "scanned": 0}
+
+        logger.debug(f"Filtering {len(all_symbols)} symbols for D1 candidates")
+
+        # Step 2: Filter by D1 criteria
+        candidates = []
+        for sym in all_symbols:
+            try:
+                # Get symbol info (spread)
+                info = get_symbol_info_mt5(sym)
+                if not info:
+                    continue
+
+                category = categorize_symbol(sym)
+                spread_limit = SPREAD_LIMITS.get(category, 10.0)
+
+                current_spread = info.get('spread', 999)
+                if current_spread > spread_limit:
+                    logger.debug(f"{sym}: Spread {current_spread} > {spread_limit}")
+                    continue
+
+                # Get D1 bars for ATR calculation (last 30 bars = ~1 month)
+                df = get_mt5_ohlc(sym, 'D1', count=30)
+                if df is None or len(df) < 14:
+                    logger.debug(f"{sym}: Not enough D1 bars ({len(df) if df is not None else 0})")
+                    continue
+
+                # Calculate ATR(14) on D1
+                atr_series = calculate_atr(df, period=14)
+                if atr_series is None or len(atr_series) == 0:
+                    logger.debug(f"{sym}: ATR calculation failed")
+                    continue
+
+                atr = float(atr_series.iloc[-1])
+                min_atr = MIN_ATR_D1.get(category, 0.001)
+
+                if atr < min_atr:
+                    logger.debug(f"{sym}: ATR {atr:.6f} < {min_atr} (category: {category})")
+                    continue
+
+                # Check market hours (skip Forex on weekends)
+                if not is_market_open_for_symbol(sym):
+                    logger.debug(f"{sym}: Market closed (weekend)")
+                    continue
+
+                # Get D1 trend direction
+                d1_trend = _mtf_dir_from_mt5(sym, "D1")
+
+                candidates.append({
+                    "symbol": sym,
+                    "category": category,
+                    "spread": current_spread,
+                    "atr_d1": float(atr),
+                    "d1_trend": d1_trend,
+                    "d1_trend_label": "BULLISH" if d1_trend > 0 else "BEARISH" if d1_trend < 0 else "NEUTRAL"
+                })
+
+                logger.debug(f"✓ {sym}: {category.upper()} | Spread: {current_spread} | ATR(D1): {atr:.6f} | Trend: {d1_trend}")
+
+            except Exception as e:
+                logger.debug(f"Symbol {sym} filtered: {e}")
+                continue
+
+        # Sort by category priority, then by ATR descending (highest volatility first)
+        priority = {'forex': 1, 'metals': 2, 'crypto': 3, 'indices': 4, 'synthetics': 5}
+        candidates.sort(key=lambda x: (
+            priority.get(x['category'], 9),
+            -x['atr_d1']
+        ))
+
+        logger.info(f"✅ Found {len(candidates)} D1 candidates from {len(all_symbols)} scanned symbols")
+
+        return {
+            "candidates": candidates,
+            "count": len(candidates),
+            "scanned": len(all_symbols),
+            "timestamp": datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Erreur daily-candidates: {e}", exc_info=True)
+        return {"candidates": [], "count": 0, "error": str(e), "scanned": 0}
+
 
 @app.get("/fallback-status")
 async def get_fallback_status():
