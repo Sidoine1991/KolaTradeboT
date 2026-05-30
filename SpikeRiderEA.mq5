@@ -294,7 +294,7 @@ datetime  g_lastNotifTime = 0;
 double    g_lastNotifImm  = 0.0;
 
 //+------------------------------------------------------------------+
-//| DÉTECTION SYMBOLE                                                |
+//| DÉTECTION & NORMALISATION SYMBOLES                               |
 //+------------------------------------------------------------------+
 bool IsBoom(const string s)
 {
@@ -307,6 +307,23 @@ bool IsCrash(const string s)
           StringFind(s,"PAIN",0)>=0  || StringFind(s,"pain",0)>=0;
 }
 bool IsSupportedSymbol(const string s) { return IsBoom(s) || IsCrash(s); }
+
+// Normalise symbole MT5 pour URL queries vers AI server
+// MT5: "Boom 500 Index" → URL: "Boom%20500%20Index" ou API: "Boom500Index"
+string NormalizeSymbolForURL(const string mtSymbol)
+{
+   string normalized = mtSymbol;
+   StringReplace(normalized, " ", "%20");  // URL encoding for spaces
+   return normalized;
+}
+
+// Alternative: encode sans espaces pour canonicité API
+string NormalizeSymbolForAPI(const string mtSymbol)
+{
+   string normalized = mtSymbol;
+   StringReplace(normalized, " ", "");  // Remove spaces: "Boom 500 Index" → "Boom500Index"
+   return normalized;
+}
 
 // Fréquence spike : 0 = déduire du nom (Boom 600 Index → 600), sinon input manuel
 int GetEffectiveSpikeFrequency()
@@ -718,8 +735,7 @@ bool FetchTVChartBias(const bool forceRefresh = false)
       return (g_lastTVFetch != 0);
    g_lastTVAttempt = TimeCurrent();
 
-   string sym_enc = _Symbol;
-   StringReplace(sym_enc, " ", "%20");
+   string sym_enc = NormalizeSymbolForURL(_Symbol);
    string url = InpAIServerURL + "/mt5/tv-bias?symbol=" + sym_enc;
    if(forceRefresh) url += "&refresh=true";
 
@@ -816,8 +832,7 @@ bool PollSpikeTVState(const bool forceRefresh = false)
       return g_spikeTVOk;
    g_lastSpikeTVAttempt = TimeCurrent();
 
-   string sym_enc = _Symbol;
-   StringReplace(sym_enc, " ", "%20");
+   string sym_enc = NormalizeSymbolForURL(_Symbol);
    string url = InpAIServerURL + "/spike-tv-state?symbol=" + sym_enc;
    if(forceRefresh) url += "&refresh=true";
 
@@ -1071,8 +1086,7 @@ void FetchAngelOfSpike()
    if(g_lastAngelAttempt != 0 && TimeCurrent() - g_lastAngelAttempt < 60) return;
    g_lastAngelAttempt = TimeCurrent();
 
-   string sym_enc = _Symbol;
-   StringReplace(sym_enc, " ", "%20");
+   string sym_enc = NormalizeSymbolForURL(_Symbol);
    string url = InpAIServerURL + "/angelofspike/trend?symbol=" + sym_enc + "&timeframe=M1";
    string headers = "Content-Type: application/json\r\n";
    char post[], result[]; string respH;
@@ -1105,8 +1119,7 @@ void FetchRealtimeSpike()
    if(TimeCurrent() - g_lastRealtimeFetch < 5) return;
    g_lastRealtimeFetch = TimeCurrent();
 
-   string sym_enc = _Symbol;
-   StringReplace(sym_enc, " ", "%20");
+   string sym_enc = NormalizeSymbolForURL(_Symbol);
    string url = InpAIServerURL + "/spike/realtime?symbol=" + sym_enc;
    string headers = "Content-Type: application/json\r\n";
    char post[], result[]; string respH;

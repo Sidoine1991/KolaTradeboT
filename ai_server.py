@@ -30,6 +30,16 @@ from dotenv import load_dotenv
 from uuid import uuid4
 from dataclasses import dataclass, asdict
 from fastapi import FastAPI, HTTPException, Request, Body, status, Query, BackgroundTasks
+
+# Importer le module de normalisation de symboles
+from symbol_mapper import (
+    get_symbol_mapping,
+    normalize_for_url,
+    normalize_for_api,
+    is_boom,
+    is_crash,
+    normalize_report_symbol,
+)
 from fastapi.exceptions import RequestValidationError
 from starlette.requests import Request as StarletteRequest
 from fastapi.middleware.cors import CORSMiddleware
@@ -8245,76 +8255,62 @@ async def gom_kola_dashboard(symbol: str = Query("XAUUSD")):
     }
     """
     try:
-        import subprocess
-        import json
+        import sys
+        from pathlib import Path
 
-        # MCP tools CLI — call mcp__tradingview-kola__ via subprocess
-        # Step 1: Get quote
-        quote_cmd = "node ~/.claude/mcp/tradingview-kola/cli.mjs quote_get --symbol OANDA:XAUUSD --format json"
-        quote_result = subprocess.run(quote_cmd, shell=True, capture_output=True, text=True, timeout=5)
+        # Import TradingView MCP Bridge
+        bridge_path = Path(__file__).parent / "tradingview_mcp_bridge.py"
+        if bridge_path.exists():
+            sys.path.insert(0, str(Path(__file__).parent))
+            from tradingview_mcp_bridge import TradingViewMCPBridge
+            bridge = TradingViewMCPBridge()
+            gom_data = bridge.get_gom_data()
 
-        # Step 2: Get study values
-        values_cmd = "node ~/.claude/mcp/tradingview-kola/cli.mjs data_get_study_values --format json"
-        values_result = subprocess.run(values_cmd, shell=True, capture_output=True, text=True, timeout=5)
+            if gom_data.get("error"):
+                return {
+                    "ok": False,
+                    "symbol": symbol,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "error": gom_data.get("error")
+                }
 
-        if quote_result.returncode != 0 or values_result.returncode != 0:
-            # Fallback: return cached data if MCP fails
+            # Utiliser les données du bridge
+            price = gom_data.get("price", 0)
+            vwap = gom_data.get("vwap", 0)
+            values = gom_data  # Les données sont déjà parsées
+        else:
+            # Fallback si bridge non disponible
             return {
                 "ok": True,
                 "symbol": symbol,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "source": "tradingview_mcp",
-                "note": "MCP tools not accessible — returning cached/last-known values",
-                "price": None,
-                "vwap": None,
-                "verdict": "WAIT",
-                "verdict_num": 0,
-                "error": "MCP tools temporarily unavailable"
+                "error": "TradingView bridge not available"
             }
 
-        # Parse quote
-        quote_data = json.loads(quote_result.stdout) if quote_result.stdout else {}
-        price = quote_data.get("close", 0)
-
-        # Parse study values
-        values_data = json.loads(values_result.stdout) if values_result.stdout else {}
-        studies = values_data.get("studies", [])
-
-        gom_study = None
-        for study in studies:
-            if "GOM KOLA" in study.get("name", ""):
-                gom_study = study
-                break
-
-        if not gom_study:
+        # Continuer avec les données
+        if not values:
             return {
                 "ok": False,
                 "symbol": symbol,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
-                "error": "GOM KOLA indicator not found on chart"
+                "error": "No GOM data available"
             }
 
-        values = gom_study.get("values", {})
-
-        # Extract values (handle comma-decimal format)
-        def parse_value(v):
-            if isinstance(v, str):
-                return float(v.replace(",", ".")) if v else 0
-            return float(v) if v else 0
-
-        vwap = parse_value(values.get("VWAP", values.get("vwap", 0)))
+        # Utiliser directement les données du bridge (déjà parsées)
+        vwap = values.get("vwap", 0)
         vwap_pos = "AU-DESSUS" if price > vwap else "EN-DESSOUS"
 
-        bb_sup = parse_value(values.get("BB Sup", values.get("bb_up", 0)))
-        bb_mid = parse_value(values.get("BB Mid", values.get("bb_mid", 0)))
-        bb_inf = parse_value(values.get("BB Inf", values.get("bb_dn", 0)))
+        bb_sup = values.get("bb_sup", 0)
+        bb_mid = values.get("bb_mid", 0)
+        bb_inf = values.get("bb_inf", 0)
         bb_pos = "DANS BANDE" if bb_inf <= price <= bb_sup else ("AU-DESSUS" if price > bb_sup else "EN-DESSOUS")
 
-        st = parse_value(values.get("Supertrend", values.get("st_line", 0)))
-        st_dir = "↑" if parse_value(values.get("st_dir", 1)) > 0 else "↓"
+        st = values.get("supertrend", 0)
+        st_dir = values.get("st_dir", "↑")
         st_pos = "AU-DESSUS" if price > st else "EN-DESSOUS"
 
-        verdict_num = int(parse_value(values.get("verdict_num", 0)))
+        verdict_num = values.get("verdict_num", 0)
         verdict_map = {
             -3: "STRONG SELL", -2: "SELL", -1: "SELL BIAS",
             0: "WAIT", 1: "BUY BIAS", 2: "BUY", 3: "STRONG BUY"
@@ -8338,14 +8334,17 @@ async def gom_kola_dashboard(symbol: str = Query("XAUUSD")):
             "fib_zone": "50%",
             "verdict": verdict,
             "verdict_num": verdict_num,
-            "score_buy": round(parse_value(values.get("score_buy", 0)), 1),
-            "score_sell": round(parse_value(values.get("score_sell", 0)), 1),
-            "spike_pct": round(parse_value(values.get("spike_pct", 0)), 1),
-            "rsi": int(parse_value(values.get("rsi", 0))),
-            "entry_quality": int(parse_value(values.get("entry_quality", 0))),
-            "coherence_pct": int(parse_value(values.get("coherence_pct", 0))),
-            "kola_buy": round(parse_value(values.get("kola_buy", 0)), 2),
-            "kola_sell": round(parse_value(values.get("kola_sell", 0)), 2),
+            "score_buy": round(values.get("score_buy", 0), 1),
+            "score_sell": round(values.get("score_sell", 0), 1),
+            "spike_pct": round(values.get("spike_pct", 0), 1),
+            "rsi": int(values.get("rsi", 0)),
+            "entry_quality": int(values.get("entry_quality", 0)),
+            "coherence_pct": int(values.get("coherence_pct", 0)),
+            "kola_buy": round(values.get("kola_buy", 0), 2),
+            "kola_sell": round(values.get("kola_sell", 0), 2),
+            "pred_path": values.get("pred_path", "U" * 200),
+            "atr": round(values.get("atr", 0), 2),
+            "path_step": values.get("path_step", 0.16),
             "source": "tradingview_mcp"
         }
 
@@ -21474,19 +21473,49 @@ async def get_session_bias(symbol: str = "XAUUSD"):  # noqa: F811
 # L'EA envoie _Symbol brut (BTCUSD, XAUUSD...), le bridge stocke le display name (BITCOIN, OR...)
 # ---------------------------------------------------------------------------
 _SYMBOL_ALIASES: dict = {
+    # Crypto
     "BTCUSD":  "BITCOIN", "BTC-USD": "BITCOIN", "BTC.X":   "BITCOIN",
     "ETHUSD":  "ETHEREUM","ETH-USD": "ETHEREUM","ETH.X":   "ETHEREUM",
-    "XAUUSD":  "XAUUSD",  "GOLD":    "XAUUSD",  "GC=F":    "XAUUSD",  # Keep XAUUSD (not OR) for consistency
+    # Métaux & FX
+    "XAUUSD":  "XAUUSD",  "GOLD":    "XAUUSD",  "GC=F":    "XAUUSD",
     "XAGUSD":  "ARGENT",  "SI=F":    "ARGENT",
     "SOLUSD":  "SOLANA",  "SOL-USD": "SOLANA",
     "BNBUSD":  "BNB",     "BNB-USD": "BNB",
     "EURUSD":  "EURUSD",  "GBPUSD":  "GBPUSD",
+    # Boom/Crash Deriv — mapping Boom/Crash sans espaces → canonique MT5 avec espaces
+    "BOOM300INDEX": "Boom 300 Index", "BOOM300": "Boom 300 Index",
+    "BOOM500INDEX": "Boom 500 Index", "BOOM500": "Boom 500 Index",
+    "BOOM600INDEX": "Boom 600 Index", "BOOM600": "Boom 600 Index",
+    "BOOM900INDEX": "Boom 900 Index", "BOOM900": "Boom 900 Index",
+    "BOOM1000INDEX": "Boom 1000 Index", "BOOM1000": "Boom 1000 Index",
+    "CRASH300INDEX": "Crash 300 Index", "CRASH300": "Crash 300 Index",
+    "CRASH500INDEX": "Crash 500 Index", "CRASH500": "Crash 500 Index",
+    "CRASH600INDEX": "Crash 600 Index", "CRASH600": "Crash 600 Index",
+    "CRASH900INDEX": "Crash 900 Index", "CRASH900": "Crash 900 Index",
+    "CRASH1000INDEX": "Crash 1000 Index", "CRASH1000": "Crash 1000 Index",
 }
 
 def _resolve_symbol(raw: str) -> str:
-    """Résout un symbole MT5 brut vers la clé utilisée dans les stores serveur."""
-    up = raw.strip().upper().replace("=X","").replace("=F","")
-    return _SYMBOL_ALIASES.get(up, up)
+    """Résout un symbole MT5 brut vers la clé utilisée dans les stores serveur.
+    Gère les variations: "Boom 500 Index", "BOOM500", "Boom500Index", etc.
+    """
+    if not raw:
+        return ""
+
+    # Nettoyer et normaliser
+    up = raw.strip().upper().replace("=X","").replace("=F","").replace(" ", "")
+
+    # Chercher dans alias
+    if up in _SYMBOL_ALIASES:
+        return _SYMBOL_ALIASES[up]
+
+    # Si déjà "Boom 500 Index" (avec espaces), le retourner tel-quel
+    normalized = raw.strip()
+    if "Boom" in normalized or "Crash" in normalized:
+        return normalized
+
+    # Fallback
+    return raw.strip()
 
 
 # ---------------------------------------------------------------------------
@@ -22034,7 +22063,19 @@ def _maybe_promote_gom_to_pending_order(sym: str, record: dict) -> None:
     sell = float(record.get("score_sell") or 0)
     gap_thr = float(os.getenv("GOM_STRONG_SCORE_GAP", "1.0"))
 
+    # Exception for Boom/Crash: respect their native direction bias
+    sym_lower = str(sym).lower().replace(" ", "")
+    is_boom = "boom" in sym_lower
+    is_crash = "crash" in sym_lower
+
     if vnum not in (2, 3, -2, -3):
+        # Boom naturally biases BUY, Crash naturally biases SELL
+        # If scores are inverted, swap them for verdict calculation
+        if is_boom and sell > buy:
+            buy, sell = sell, buy  # Swap for Boom to prioritize BUY
+        elif is_crash and buy > sell:
+            buy, sell = sell, buy  # Swap for Crash to prioritize SELL
+
         if sell - buy >= gap_thr:
             vnum = -2
             record = {**record, "verdict_num": vnum, "verdict": record.get("verdict") or "GOOD SELL"}
