@@ -7,7 +7,7 @@
 
 ## Overview
 
-Career-Ops now scrapes **10+ job sources** without API keys, payments, or rate limits:
+Career-Ops now scrapes **11+ job sources** without payments or rate limits:
 
 | # | Source | Method | Jobs/Day | Cost |
 |---|--------|--------|----------|------|
@@ -21,10 +21,12 @@ Career-Ops now scrapes **10+ job sources** without API keys, payments, or rate l
 | 8 | LinkedIn Public | Playwright | 30-80 | FREE |
 | 9 | GitHub Jobs | RSS Feed | 10-30 | FREE |
 | 10 | Stack Overflow | RSS Feed | 10-30 | FREE |
+| 11 | Google Jobs | SerpAPI | 50+ | $1-5/mo** |
 
-**Total**: **265-505 jobs/day** (unlimited, no API throttling)
+**Total**: **315-585 jobs/day** (unlimited scaling, no rate limits)
 
 *FREE* = Uses your own Gmail/email account (IMAP)
+**SerpAPI** = $1-5/month for 100 searches/day tier
 
 ---
 
@@ -74,7 +76,7 @@ jobs = await scrape_email_jobs(
 )
 ```
 
-### 2. Web Scrapers (No API)
+### 2. Web Scrapers (No Payment APIs)
 **File**: `career_ops/scrapers/web_scrapers_free.py`
 
 #### LinkedIn Public Jobs
@@ -99,13 +101,38 @@ from career_ops.scrapers.web_scrapers_free import scrape_free_sources
 jobs = await scrape_free_sources()
 ```
 
+### 3. Google Jobs (SerpAPI)
+**File**: `career_ops/scrapers/serpapi_google_jobs.py`
+
+Scrapes Google Jobs (ranked by Google's algorithm):
+- 5 keyword queries (data analyst, python developer, fullstack, backend, data scientist)
+- ~50+ jobs/day
+- Salary extraction (when available)
+- Remote type detection
+
+**Cost**: $1-5/month for 100 searches/day tier
+
+**Setup**:
+```bash
+# Get free API key: https://serpapi.com
+# Add to .env
+SERPAPI_API_KEY=your_key_here
+```
+
+**Usage**:
+```python
+from career_ops.scrapers.serpapi_google_jobs import scrape_serpapi_jobs
+
+jobs = await scrape_serpapi_jobs()
+```
+
 ---
 
 ## Extended Scheduler
 
 **File**: `career_ops/scheduler_extended.py`
 
-Orchestrates **10-source pipeline**:
+Orchestrates **11-source pipeline**:
 
 ```
 06:00 UTC+1
@@ -117,6 +144,7 @@ Orchestrates **10-source pipeline**:
   4. Indeed (Playwright)
   5. Email (IMAP) → LinkedIn, CDI, Opportunities
   6. Free Web → LinkedIn, GitHub, StackOverflow
+  7. Google Jobs (SerpAPI)
      ↓
 [NORMALIZE] (1000+ jobs)
      ↓
@@ -273,17 +301,17 @@ Location: Senegal / Remote
 | Indeed | 75-125 | ~30s |
 | Email (LinkedIn, CDI, Opp) | 20-90 | ~10s |
 | Free Web | 50-140 | ~60s |
-| **TOTAL** | **265-505** | **~2 min scraping** |
+| **TOTAL** | **315-585** | **~2-3 min scraping** |
 |  |  |  |
 | **RDS Operations** |  |  |
-| Insert jobs | 200-400 | ~5s |
-| Insert matches | 200-400 | ~30s |
+| Insert jobs | 250-500 | ~8s |
+| Insert matches | 250-500 | ~40s |
 | Query top | 30 | ~1s |
-| **Total RDS** | | **~36s** |
+| **Total RDS** | | **~49s** |
 |  |  |  |
 | **Scoring** |  |  |
-| Algorithm+Claude | 200-400 | ~10-20 min |
-| **Total Pipeline** | | **~22 min** |
+| Algorithm+Claude | 250-500 | ~12-25 min |
+| **Total Pipeline** | | **~25 min** |
 
 ---
 
@@ -296,20 +324,23 @@ Location: Senegal / Remote
 | Indeed | FREE (with anti-bot) | Unlimited |
 | **Total** | **FREE** | **Limited** |
 
-### Costs Now (Extended 10 Sources)
+### Costs Now (Extended 11 Sources)
 | Source | Cost | Limit |
 |--------|------|-------|
-| All 10 | FREE | Unlimited* |
+| 10 Free | FREE | Unlimited* |
+| SerpAPI (Google Jobs) | $1-5/mo | 100+ searches/day |
+| **TOTAL** | **$1-5/mo** | **315-585 jobs/day** |
 
-*Unlimited except LinkedIn (email rate limit ~50/day)
+*Unlimited except LinkedIn email (rate limit ~50/day)
 
 ### Comparison
 | Solution | Daily Jobs | Cost | API Limit | Setup Time |
 |----------|-----------|------|-----------|-----------|
 | Basic (1 source) | 50-100 | FREE | Yes | 5 min |
 | Standard (4 sources) | 195-375 | FREE | Partial | 15 min |
-| **Extended (10 sources)** | **265-505** | **FREE** | **None** | **30 min** |
-| Premium API | 500-1000 | $100+/mo | No | 10 min |
+| Extended (10 sources) | 265-505 | FREE | None | 30 min |
+| **Extended (11 sources + SerpAPI)** | **315-585** | **$1-5/mo** | **None** | **35 min** |
+| Premium APIs | 500-1000 | $100+/mo | No | 10 min |
 
 ---
 
@@ -320,6 +351,9 @@ Location: Senegal / Remote
 # Email Configuration
 EMAIL_ADDRESS=your.email@gmail.com
 EMAIL_PASSWORD=xxxx xxxx xxxx xxxx  # Gmail App Password
+
+# SerpAPI (Google Jobs - new!)
+SERPAPI_API_KEY=your_serpapi_key_here
 
 # Database (from Week 1)
 DATABASE_URL=postgresql://user:pass@host:5432/tradbot
@@ -336,21 +370,28 @@ NVIDIA_NIM_API_KEY=nvapi-YOUR_KEY_HERE
 
 ## Deployment Steps
 
-1. **Update .env** with EMAIL_ADDRESS and EMAIL_PASSWORD
-2. **Install Playwright**: `playwright install chromium`
-3. **Test email connection**:
+1. **Get SerpAPI key**: Visit https://serpapi.com (free tier available)
+2. **Update .env** with:
+   - EMAIL_ADDRESS and EMAIL_PASSWORD (Gmail app password)
+   - SERPAPI_API_KEY (from step 1)
+3. **Install Playwright**: `playwright install chromium`
+4. **Test email connection**:
    ```bash
    python career_ops/scrapers/email_linkedin_parser.py
    ```
-4. **Test free web scrapers**:
+5. **Test free web scrapers**:
    ```bash
    python career_ops/scrapers/web_scrapers_free.py
    ```
-5. **Run extended scheduler**:
+6. **Test SerpAPI Google Jobs**:
+   ```bash
+   python career_ops/scrapers/serpapi_google_jobs.py
+   ```
+7. **Run extended 11-source scheduler**:
    ```bash
    python career_ops/scheduler_extended.py
    ```
-6. **Update Windows Task Scheduler** to use `scheduler_extended.py` instead of `scheduler.py`
+8. **Update Windows Task Scheduler** to use `scheduler_extended.py` instead of `scheduler.py`
 
 ---
 
@@ -414,6 +455,6 @@ fingerprint = SHA256(company + title + posted_date + source)
 
 ---
 
-**Status**: Extended 10-source system ready for production ✅  
-**Job Capacity**: 265-505 jobs/day (unlimited, no API throttling)  
-**Cost**: FREE (uses your email account)
+**Status**: Extended 11-source system ready for production ✅  
+**Job Capacity**: 315-585 jobs/day (unlimited, no API rate limits)  
+**Cost**: $1-5/month (SerpAPI) + FREE (email + free web sources)

@@ -16,6 +16,7 @@ from career_ops.scrapers.weworkremotely import WeWorkRemotelyScaper
 from career_ops.scrapers.indeed import IndeedScraper
 from career_ops.scrapers.email_linkedin_parser import scrape_email_jobs
 from career_ops.scrapers.web_scrapers_free import scrape_free_sources
+from career_ops.scrapers.serpapi_google_jobs import scrape_serpapi_jobs
 from career_ops.matching.intelligent_scorer import IntelligentJobScorer
 from career_ops.db.rds_repository import RDSRepository
 from career_ops.delivery.psychobot_client import PsychoBotClient
@@ -24,17 +25,18 @@ from career_ops.delivery.intelligent_digest_builder import IntelligentDigestBuil
 
 async def run_extended_pipeline():
     """
-    Extended autonomous pipeline with 8+ sources:
+    Extended autonomous pipeline with 11 sources:
     1. RemoteOK (API)
     2. Himalayas (API)
     3. We Work Remotely (RSS)
     4. Indeed (Playwright)
-    5. LinkedIn Email Alerts
-    6. CDIscussion Email
-    7. Opportunités Africa Email
+    5. LinkedIn Email Alerts (IMAP)
+    6. CDIscussion Email (IMAP)
+    7. Opportunités Africa Email (IMAP)
     8. LinkedIn Public (Playwright)
     9. GitHub Jobs (RSS)
     10. Stack Overflow (RSS)
+    11. Google Jobs (SerpAPI)
     """
 
     print("=" * 70)
@@ -69,6 +71,7 @@ async def run_extended_pipeline():
         ("Indeed", IndeedScraper().fetch()),
         ("Email Sources", scrape_email_jobs()),
         ("Free Web (LinkedIn/GitHub/SO)", scrape_free_sources()),
+        ("Google Jobs (SerpAPI)", scrape_serpapi_jobs()),
     ]
 
     all_jobs = []
@@ -85,7 +88,7 @@ async def run_extended_pipeline():
             print(f" [ERROR] {str(e)[:40]}")
             continue
 
-    print(f"\n  TOTAL: {len(all_jobs)} jobs from 10 sources")
+    print(f"\n  TOTAL: {len(all_jobs)} jobs from 11 sources")
 
     # STEP 2: Insert & Score
     print("\n[STEP 2] Insert, Score & Analyze")
@@ -211,7 +214,7 @@ async def run_extended_pipeline():
     print("\n[STEP 6] Log & Save Report")
     print("-" * 70)
 
-    repo.log_scraper_run("extended_10sources", jobs_found=len(all_jobs), jobs_new=jobs_stored)
+    repo.log_scraper_run("extended_11sources", jobs_found=len(all_jobs), jobs_new=jobs_stored)
 
     report = {
         "timestamp": datetime.now().isoformat(),
@@ -227,7 +230,7 @@ async def run_extended_pipeline():
             "good": len([m for m in top_matches if 0.55 <= m["score_total"] < 0.75]),
         },
         "sources_breakdown": {
-            "API_sources": 4,  # RemoteOK, Himalayas, etc
+            "API_sources": 5,  # RemoteOK, Himalayas, SerpAPI, etc
             "Email_sources": 3,  # LinkedIn, CDI, Opportunities
             "Web_sources": 3,  # LinkedIn public, GitHub, StackOverflow
         },
@@ -245,9 +248,9 @@ async def run_extended_pipeline():
     # SUMMARY
     print()
     print("=" * 70)
-    print("EXTENDED PIPELINE COMPLETE")
+    print("EXTENDED PIPELINE COMPLETE (11 SOURCES)")
     print("=" * 70)
-    print(f"Jobs scraped (10 sources): {len(all_jobs)}")
+    print(f"Jobs scraped (11 sources): {len(all_jobs)}")
     print(f"Jobs stored: {jobs_stored}")
     print(f"Top matches: {len(top_matches)}")
     print(f"  - Excellent (≥0.75): {len([m for m in top_matches if m['score_total'] >= 0.75])}")
