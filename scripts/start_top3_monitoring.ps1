@@ -1,46 +1,43 @@
-# Top 3 Monitoring System Launcher
-# Suivi autonome toutes les 20 minutes avec rapport Word généré à chaque cycle
+# Top 3 Monitoring — symboles du scan matinal (PAS XAUUSD seul)
 #
 # Usage:
-#   .\start_top3_monitoring.ps1
-#   .\start_top3_monitoring.ps1 -Interval 600  (10 min pour test)
+#   .\scripts\start_top3_monitoring.ps1
+#   .\scripts\start_top3_monitoring.ps1 -Interval 600
 
 param(
-    [int]$Interval = 1200,  # 20 minutes
+    [int]$Interval = 1200,
     [string]$Python = "python"
 )
 
-Write-Host "🚀 Démarrage Top 3 Monitoring System" -ForegroundColor Cyan
-Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" -ForegroundColor Cyan
-Write-Host ""
+$Root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
+Set-Location $Root
 
-# Ensure directories exist
-@("logs", "reports") | ForEach-Object {
+@("logs", "reports", "data\state") | ForEach-Object {
     if (-not (Test-Path $_)) {
-        New-Item -ItemType Directory -Path $_ | Out-Null
-        Write-Host "📁 Créé: $_" -ForegroundColor Green
+        New-Item -ItemType Directory -Path $_ -Force | Out-Null
     }
 }
 
+$symbolsLine = "Top 3 scan matinal (morning_top3.json)"
+$activeFile = "data\active_symbols.txt"
+$stateFile = "data\state\morning_top3.json"
+if (Test-Path $stateFile) {
+    try {
+        $j = Get-Content $stateFile -Raw | ConvertFrom-Json
+        $syms = ($j.top3 | ForEach-Object { $_.symbol }) -join ", "
+        if ($syms) { $symbolsLine = $syms }
+    } catch { }
+} elseif (Test-Path $activeFile) {
+    $symbolsLine = ((Get-Content $activeFile | Select-Object -First 3) -join ", ")
+}
+
+Write-Host "Demarrage suivi Top 3 (Deriv/Weltrade)" -ForegroundColor Cyan
+Write-Host "  Symboles: $symbolsLine" -ForegroundColor Gray
+Write-Host "  Intervalle: $($Interval / 60) min" -ForegroundColor Gray
+Write-Host "  Script: scripts/unified_top3_daemon.py" -ForegroundColor Gray
 Write-Host ""
-Write-Host "📊 Configuration:" -ForegroundColor Yellow
-Write-Host "  • Symboles: XAUUSD, EURUSD, BTCUSD (Top 3)" -ForegroundColor Gray
-Write-Host "  • Intervalle: $Interval secondes ($(($Interval / 60)) minutes)" -ForegroundColor Gray
-Write-Host "  • Sorties:" -ForegroundColor Gray
-Write-Host "    - Messages WhatsApp via PsychoBot" -ForegroundColor Gray
-Write-Host "    - Rapports Word: reports/" -ForegroundColor Gray
-Write-Host "    - Logs: logs/top3_monitor.log" -ForegroundColor Gray
-Write-Host "    - Fallback: whatsapp_alerts.log" -ForegroundColor Gray
+Write-Host "Scan matinal si pas encore fait:" -ForegroundColor Yellow
+Write-Host "  python python\morning_scan.py" -ForegroundColor Gray
 Write-Host ""
 
-# Launch
-$script = "python/xauusd_top3_monitor.py"
-$args = @("--interval", $Interval)
-
-Write-Host "▶️  Lancement du monitoring..." -ForegroundColor Cyan
-Write-Host ""
-
-& $Python $script @args
-
-Write-Host ""
-Write-Host "🛑 Monitoring arrêté" -ForegroundColor Yellow
+& $Python "scripts\unified_top3_daemon.py"

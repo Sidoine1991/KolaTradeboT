@@ -1,0 +1,204 @@
+╔══════════════════════════════════════════════════════════════════════╗
+║            PSYCHOBOT AUDIO FIX - QUICKSTART GUIDE                    ║
+║                   Choose Your Solution (5-20 min)                    ║
+╚══════════════════════════════════════════════════════════════════════╝
+
+
+┌──────────────────────────────────────────────────────────────────────┐
+│ 🎯 THE PROBLEM                                                       │
+└──────────────────────────────────────────────────────────────────────┘
+
+    Voice messages received but NOT transcribed
+    User gets: "[Audio transcription - local fallback not available]"
+
+
+┌──────────────────────────────────────────────────────────────────────┐
+│ ⚡ QUICKEST SOLUTION: OpenAI Whisper (5 minutes)                    │
+└──────────────────────────────────────────────────────────────────────┘
+
+    [1] Get API Key (2 min)
+        → https://platform.openai.com/api-keys
+        → Click "Create new secret key"
+        → Copy: sk-proj-xxxxxxxxxx
+
+    [2] Configure Render (3 min)
+        → https://dashboard.render.com
+        → Service: psychobot-1si7
+        → Environment → Add:
+           OPENAI_API_KEY = sk-proj-xxx...
+        → Save (auto-redeploy ~3 min)
+
+    [3] Test (1 min)
+        → WhatsApp: +229 01 96 91 13 46
+        → Send voice: "Test après config"
+        → Receive: Voice reply ✓
+
+    Cost: ~$0.10/month (100 messages)
+    Setup Difficulty: ⭐ Very Easy
+    Time: 5-10 minutes TOTAL
+
+
+┌──────────────────────────────────────────────────────────────────────┐
+│ 💰 FREE SOLUTION: AWS Transcribe (20 minutes)                       │
+└──────────────────────────────────────────────────────────────────────┘
+
+    [1] Add AWS Credentials on Render (5 min)
+        → https://dashboard.render.com
+        → Service: psychobot-1si7
+        → Environment → Add 3 variables:
+           AWS_ACCESS_KEY_ID = REMOVED_AWS_KEY_ID
+           AWS_SECRET_ACCESS_KEY = thzLoc4AAPi5...
+           AWS_REGION = us-east-1
+        → Save
+
+    [2] Install Dependencies (3 min)
+        cd "D:/Dev/Depot Github/Psychobot"
+        npm install @aws-sdk/client-transcribe-streaming
+
+    [3] Add AWS Code (5 min)
+        cp D:/Dev/TradBOT/psychobot_aws_transcribe_solution.js \
+           src/services/aws-transcribe.js
+
+    [4] Modify audioProcessor.js (7 min)
+        • Add: require('./aws-transcribe')
+        • Create hybrid transcribeAudio() function
+        • See: PSYCHOBOT_AWS_MIGRATION_GUIDE.md
+
+    [5] Deploy & Test (5 min)
+        git commit & push
+        Wait for Render redeploy
+        Test voice message
+
+    Cost: FREE for 12 months (60 min/month)
+    Setup Difficulty: ⭐⭐⭐ Moderate
+    Time: 15-25 minutes TOTAL
+
+
+┌──────────────────────────────────────────────────────────────────────┐
+│ 🎯 RECOMMENDED: Start with OpenAI, Migrate Later                    │
+└──────────────────────────────────────────────────────────────────────┘
+
+    TODAY (5 min):
+       ✓ Setup OpenAI Whisper
+       ✓ Test & validate
+       ✓ Users can send voice messages
+
+    LATER (optional, 20 min):
+       ⏳ Implement AWS Transcribe
+       ⏳ Use as primary (OpenAI fallback)
+       ⏳ Save costs long-term
+
+    Why this approach:
+       • Service working in 5 minutes
+       • Zero code changes initially
+       • Can optimize later without pressure
+
+
+┌──────────────────────────────────────────────────────────────────────┐
+│ 📊 COST COMPARISON                                                   │
+└──────────────────────────────────────────────────────────────────────┘
+
+    100 voice messages/month (10 seconds each):
+
+    OpenAI Whisper:
+       Year 1:  $1.20
+       Year 2+: $1.20/year
+       Total 5 years: $6.00
+
+    AWS Transcribe:
+       Year 1:  $0 (free tier)
+       Year 2+: $4.80/year
+       Total 5 years: $19.20
+
+    Winner: OpenAI (cheaper long-term)
+    But: AWS free first year
+
+
+┌──────────────────────────────────────────────────────────────────────┐
+│ 📚 DOCUMENTATION FILES                                               │
+└──────────────────────────────────────────────────────────────────────┘
+
+    OpenAI Solution:
+    ────────────────────────────────────────────────────────────────
+    → PSYCHOBOT_FIX_INSTRUCTIONS.txt
+      Step-by-step OpenAI Whisper setup
+
+    → PSYCHOBOT_AUDIO_ISSUE_DIAGNOSIS.md
+      Complete problem diagnosis
+
+    AWS Solution:
+    ────────────────────────────────────────────────────────────────
+    → PSYCHOBOT_AWS_MIGRATION_GUIDE.md
+      Complete AWS Transcribe guide
+
+    → psychobot_aws_transcribe_solution.js
+      AWS integration code
+
+    → deploy_psychobot_aws.sh
+      Automated deployment script
+
+    Comparison:
+    ────────────────────────────────────────────────────────────────
+    → PSYCHOBOT_SOLUTION_COMPARISON.md
+      Detailed comparison of both solutions
+
+    → PSYCHOBOT_QUICKSTART.txt
+      This file
+
+
+┌──────────────────────────────────────────────────────────────────────┐
+│ ✅ SUCCESS CRITERIA                                                  │
+└──────────────────────────────────────────────────────────────────────┘
+
+    After fix, you should see:
+
+    User sends voice message:
+       "Bonjour PsychoBot, test audio"
+
+    Bot replies with:
+       🔊 Voice message (audio reply)
+       📋 Text showing transcript:
+          "Transcript: Bonjour PsychoBot, test audio"
+       🤖 Contextual response
+
+    Response time: 5-15 seconds
+    No error messages
+
+
+┌──────────────────────────────────────────────────────────────────────┐
+│ 🚀 NEXT ACTION                                                       │
+└──────────────────────────────────────────────────────────────────────┘
+
+    Choose one:
+
+    [ ] QUICK FIX (5 min)
+        → Open: PSYCHOBOT_FIX_INSTRUCTIONS.txt
+        → Follow OpenAI Whisper setup
+        → Test immediately
+
+    [ ] FREE OPTION (20 min)
+        → Open: PSYCHOBOT_AWS_MIGRATION_GUIDE.md
+        → Follow AWS Transcribe setup
+        → Test after deployment
+
+    [ ] HYBRID (25 min)
+        → Setup OpenAI first (5 min)
+        → Test & validate
+        → Add AWS later (20 min)
+
+
+╔══════════════════════════════════════════════════════════════════════╗
+║                      RECOMMENDATION: START NOW                       ║
+║                                                                      ║
+║  1. Setup OpenAI Whisper (5 min)                                     ║
+║  2. Test voice message                                               ║
+║  3. Validate with users                                              ║
+║  4. Migrate to AWS later (optional)                                  ║
+╚══════════════════════════════════════════════════════════════════════╝
+
+
+Last Updated: 2026-05-31 11:45 UTC
+Quick Links:
+  • OpenAI Keys: https://platform.openai.com/api-keys
+  • Render Dashboard: https://dashboard.render.com
+  • PsychoBot WhatsApp: +229 01 96 91 13 46

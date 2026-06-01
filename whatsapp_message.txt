@@ -1,37 +1,34 @@
-📊 TradBOT [20:07 UTC]
+📊 TradBOT [08:27 UTC]
 
-*XAUUSD — Suivi 20min* | 26/05 20:07 UTC
-━━━━━━━━━━━━━━━━━━━━━━━━━
-💰 *Prix live :* $4508.02
-📍 EMA Stack : $4508.04 / $4504.25 / $4504.35
-   → Prix EN-DESSOUS EMA1 ✅
-📊 Range : $4507.99 - $4508.19 ($0.20)
-⚡ Supertrend : [données TradingView limitées]
-📐 Fibonacci : [données TradingView limitées]
-━━━━━━━━━━━━━━━━━━━━━━━━━
-🔴/🟢 *Verdict GOM KOLA : [table non disponible]*
-   Score: [indisponible]
-   RSI: [indisponible]
-━━━━━━━━━━━━━━━━━━━━━━━━━
-🔴/🟢 *Biais session :* SELL 50%
-   ✅ Valide | Expire dans 5.5h
-━━━━━━━━━━━━━━━━━━━━━━━━━
-📦 *Ordre EA :* ✅ Actif BUY
-   Entrée: $2650.0 | SL: $2645.0 | TP: $2660.0
-   Confiance: 75%
-━━━━━━━━━━━━━━━━━━━━━━━━━
-🔴/🟢 *Rapport TradingAgents :* NONE 0%
-   [Pas de TA actif]
-━━━━━━━━━━━━━━━━━━━━━━━━━
+*XAUUSD — Suivi 20min* | 30/05 08:27 UTC
+━━━━━━━━━━━━━━━━━━━━
+💰 *Prix live :* $4540.53
+📍 VWAP : $4536.003 → prix AU-DESSUS
+📊 BB : [4539.677 / 4542.002 / 4544.328] → position bas
+⚡ Supertrend : $4576.986 (↑) → EN-DESSOUS
+📐 Fibo : zone $4540.060 (achat) / $4553.960 (vente)
+━━━━━━━━━━━━━━━━━━━━
+🟡 *Verdict GOM KOLA : WAIT*
+   Score BUY=4.42  SELL=4.80  Spike=4.56%
+   RSI=39 | ST=↑
+━━━━━━━━━━━━━━━━━━━━
+⚠️ *Biais session :* NEUTRAL 0% | ❌ EXPIRED 25.7h
+━━━━━━━━━━━━━━━━━━━━
+📦 *Ordre EA : BUY ACTIF*
+   Entrée: $4540.53
+   Confiance: 88%
+━━━━━━━━━━━━━━━━━━━━
+❌ *Rapport TradingAgents :* INACTIF
+━━━━━━━━━━━━━━━━━━━━
 🔬 *Analyse croisée*
-   Signaux en jeu: EA Ordre: BUY, Biais: SELL
-   ⚠️ CONFLIT DÉTECTÉ: BUY (EA) vs SELL (Biais)
-   Prix actuel $4508.02 >> Entrée $2650.0
-   → Position potentielle déjà très ITM
+  → Verdict WAIT (scores ~4.4-4.8) — pas de confluence
+  → Biais expiré 26h — aucun signal directif
+  → Ordre EA actif BUY @ $4540.53 (88%)
+  → KOLA zone achat $4540.060
 
 🎯 *Décision scalping*
-   🟡 ATTENDRE clarification
-   Raison: Conflit biais/ordre, pas de confirmation TA
-   Action recommandée: Monitorer les niveaux
-━━━━━━━━━━━━━━━━━━━━━━━━━
+  → ATTENDRE confirmation (WAIT persistant)
+  → Monitorer ordre EA existant
+  → Zones: $4544.328 (achat) / $4540.060 (support)
+━━━━━━━━━━━━━━━━━━━━
 _Prochain check dans 20 min_

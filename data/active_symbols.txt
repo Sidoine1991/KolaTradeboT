@@ -1,0 +1,5 @@
+BTCUSD
+ETHUSD
+BOOM500
+CRASH500
+Volatility 75 Index

@@ -135,7 +135,7 @@ input group "=== CHEMIN PREDICTIF + ANTI-CORRECTION ==="
 input bool   ShowGOMPathCandles       = true;  // Dessiner bougies futures sur chart MT5
 input int    GOMPathDrawBars          = 200;   // Nombre de bougies predites affichees
 input int    GOMPathDrawRefreshSec    = 8;     // Rafraichissement affichage (sec)
-input double GOMPathStepAtr           = 0.16;  // Pas bougie (= Pine path_step x ATR)
+input double GOMPathStepAtr           = 0.16;  // ⚠️ SYNC: Must match Pine GOM_KOLA_SIDO.pine path_step=0.16
 input bool   GOMBlockCorrectionZone   = true;  // Ne pas trader pendant correction
 input bool   GOMUseMicroTFCorrection  = true;  // M1/M5 contre H1 = correction
 input int    GOMCorrectionPathLook    = 25;    // Barres pred_path analysees

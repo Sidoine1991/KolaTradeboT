@@ -1,82 +1,24 @@
-📊 *TradBOT UNIFIED TOP 3 REPORT* [19:05 UTC]
+📊 *TradBOT — Suivi 20 min* [17:36 UTC]
 
-*Complete Daily Surveillance* | 29/05 19:05 UTC
+*Top 3 du scan matinal* | 30/05 17:36 UTC
+_Scan: voir morning_top3.json_
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-*1. TOP 3 RANKING*
-┌─────┬─────────┬─────────────┬──────────┬────────────────┐
-│ Rank│ Symbol  │ Price       │ GOM/Bias │ Confluence     │
-├─────┼─────────┼─────────────┼──────────┼────────────────┤
-│ 🥇 │ XAUUSD  │ $4554.59    │ GOOD/BUY  │ 2/2 ✅ │
-│ 🥈 │ EURUSD  │ $1.0895     │ WAIT/BUY  │ 1/2    │
-│ 🥉 │ BTCUSD  │ $62450      │ WAIT/NEUT │ 0/2    │
-└─────┴─────────┴─────────────┴──────────┴────────────────┘
+🥇 *BTCUSD* 
+   💰 Prix: 0
+   ⚪ GOM: WAIT | BUY=0.0 SELL=0.0
+   Biais: NEUTRAL
 
-*2. DETAILED ANALYSIS*
+🥈 *ETHUSD* 
+   💰 Prix: 0
+   ⚪ GOM: WAIT | BUY=0.0 SELL=0.0
+   Biais: NEUTRAL
+
+🥉 *BOOM500* 
+   💰 Prix: 0
+   ⚪ GOM: WAIT | BUY=0.0 SELL=0.0
+   Biais: NEUTRAL
+
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-🥇 *XAUUSD*
-   Price: $4554.59 (Live)
-   🟢 GOM Verdict: GOOD BUY
-      • BUY Score: 102.3
-      • SELL Score: 99.2
-   🟢 Session Bias: BUY 90%
-      • Expires: 11.7h
-      • Valid: ✅
-   📦 Order EA: BUY
-      • Entry: $25104.71
-      • Confidence: 88%
-      • Status: ready
-   Score Confluence: 2/2 ✅ MULTIPLE
-
-🥈 *EURUSD*
-   Price: $1.09 (Live)
-   ⚪ GOM Verdict: WAIT
-      • BUY Score: 0.0
-      • SELL Score: 0.0
-   🟢 Session Bias: BUY 90%
-      • Expires: 11.7h
-      • Valid: ✅
-   📭 No active order
-   Score Confluence: 1/2 ⚠️ WEAK
-
-🥉 *BTCUSD*
-   Price: $62450.00 (Live)
-   ⚪ GOM Verdict: WAIT
-      • BUY Score: 0.0
-      • SELL Score: 0.0
-   ⚪ Session Bias: NEUTRAL 0%
-      • Expires: 0.0h
-      • Valid: ❌
-   📭 No active order
-   Score Confluence: 0/2 ❌ NONE
-
-*3. CROSS ANALYSIS*
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-• Top 1 (XAUUSD):
-  → Confluence: 2/2 ✅
-  → GOOD BUY + BUY bias
-
-• Signal Count:
-  → BUY signals: 1
-  → With Confluence: 1
-  → WAIT signals: 2
-
-• Multi-Symbol Alignment:
-  → 1+ symbols aligned BUY+BIAS
-  → 1 total BUY signals
-  → 2 with BUY bias
-
-*4. TRADING DECISION*
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-⚠️ WEAK CONFLUENCE
-   → Entry READY but WAIT for confirmation
-   → Enter on next candle close
-   → Monitor bias validity
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-*5. NEXT UPDATE* in 20 min
-Session Active: 24/7 Autonomous
-Last Update: 19:05:15 UTC
+⏱ Prochain suivi dans 20 min
+_Symboles = Top 3 opportunités du jour uniquement_

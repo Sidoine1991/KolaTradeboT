@@ -1,0 +1,151 @@
+╔══════════════════════════════════════════════════════════════════════╗
+║                   PSYCHOBOT AUDIO - ISSUE SUMMARY                    ║
+╚══════════════════════════════════════════════════════════════════════╝
+
+📅 Date: 2026-05-31 11:04 UTC
+👤 Reporter: Kira (via WhatsApp voice message)
+🤖 Bot: PsychoBot (+229 01 96 91 13 46)
+
+
+┌──────────────────────────────────────────────────────────────────────┐
+│ 🔴 PROBLEM                                                           │
+└──────────────────────────────────────────────────────────────────────┘
+
+    User sent VOICE MESSAGE → Bot could not transcribe
+
+    Bot Response:
+    ─────────────────────────────────────────────────────────────────
+    🎙️ Transcript:
+    "[Audio transcription - local fallback not available]"
+
+    🤖 Response:
+    "Bonjour Kira ! Je rencontre une petite difficulté technique..."
+
+
+┌──────────────────────────────────────────────────────────────────────┐
+│ 🎯 ROOT CAUSE                                                        │
+└──────────────────────────────────────────────────────────────────────┘
+
+    ❌ OPENAI_API_KEY not configured in Render environment
+
+    Impact:
+    • Voice messages cannot be transcribed
+    • AI cannot understand audio content
+    • No voice replies generated
+    • Only fallback error message sent
+
+
+┌──────────────────────────────────────────────────────────────────────┐
+│ ✅ WHAT WORKS                                                        │
+└──────────────────────────────────────────────────────────────────────┘
+
+    ✓ WhatsApp connection
+    ✓ Audio file download (180 KB OGG received)
+    ✓ Error handling & fallback message
+    ✓ Text messages (unaffected)
+    ✓ All other bot features
+
+
+┌──────────────────────────────────────────────────────────────────────┐
+│ 🔧 SOLUTION (3 Steps - 5 minutes)                                    │
+└──────────────────────────────────────────────────────────────────────┘
+
+    [1] Get API Key
+        → https://platform.openai.com/api-keys
+        → Click "Create new secret key"
+        → Copy: sk-proj-xxxxxxxxxx
+
+    [2] Configure Render
+        → https://dashboard.render.com
+        → Service: psychobot-1si7
+        → Environment tab
+        → Add: OPENAI_API_KEY = sk-proj-xxx...
+        → Save & wait for redeploy (3 min)
+
+    [3] Test Voice
+        → WhatsApp: +229 01 96 91 13 46
+        → Send voice: "Test après configuration"
+        → Receive: Voice reply + transcript
+
+
+┌──────────────────────────────────────────────────────────────────────┐
+│ 📊 SYSTEM STATUS                                                     │
+└──────────────────────────────────────────────────────────────────────┘
+
+    Component               Status    Notes
+    ─────────────────────  ────────  ───────────────────────────
+    WhatsApp API           ✅ OK      Connected & functional
+    Audio Download         ✅ OK      180 KB OGG received
+    OpenAI Whisper         ❌ FAIL    API key missing
+    NVIDIA NIM             ✅ OK      AI responses working
+    Google TTS             ✅ OK      Text-to-speech ready
+    FFmpeg                 ✅ OK      Audio conversion ready
+
+    Overall:  ⚠️  5/6 components working (83%)
+              Missing: Whisper API key only
+
+
+┌──────────────────────────────────────────────────────────────────────┐
+│ 📈 EXPECTED AFTER FIX                                                │
+└──────────────────────────────────────────────────────────────────────┘
+
+    User Voice → Bot Voice Reply
+    ────────────────────────────────────────────────────────────────
+
+    [Before]
+    You: 🎙️ "Bonjour PsychoBot"
+    Bot: 💬 "[Audio transcription not available]"
+
+    [After Fix]
+    You: 🎙️ "Bonjour PsychoBot"
+    Bot: 🔊 Voice reply: "Yo ! Je t'entends. Besoin d'aide ?"
+         📋 Transcript: "Bonjour PsychoBot"
+
+    Response Time: 5-15 seconds
+    Voice Quality: Natural French voice
+    Accuracy: >90% transcription
+
+
+┌──────────────────────────────────────────────────────────────────────┐
+│ 💰 COST                                                              │
+└──────────────────────────────────────────────────────────────────────┘
+
+    OpenAI Whisper: $0.006 per minute
+    Typical usage:  $0.001 per 10-second message
+    Monthly (100 messages): ~$0.10
+    Monthly (1000 messages): ~$1.00
+
+    Very affordable! ✅
+
+
+┌──────────────────────────────────────────────────────────────────────┐
+│ 📄 DOCUMENTATION                                                     │
+└──────────────────────────────────────────────────────────────────────┘
+
+    Full Diagnosis:
+    D:\Dev\TradBOT\PSYCHOBOT_AUDIO_ISSUE_DIAGNOSIS.md
+
+    Fix Instructions:
+    D:\Dev\TradBOT\PSYCHOBOT_FIX_INSTRUCTIONS.txt (THIS FILE)
+
+    System Capabilities:
+    D:\Dev\TradBOT\PSYCHOBOT_AUDIO_CAPABILITIES.md
+
+    Testing Guide:
+    D:\Dev\TradBOT\PSYCHOBOT_VOICE_TEST_GUIDE.md
+
+
+╔══════════════════════════════════════════════════════════════════════╗
+║                          ACTION REQUIRED                             ║
+║                                                                      ║
+║  1. Get OpenAI API key (2 min)                                       ║
+║  2. Add to Render environment (3 min)                                ║
+║  3. Test voice message (1 min)                                       ║
+║                                                                      ║
+║  Total time: 5-10 minutes                                            ║
+║  Difficulty: Easy (copy-paste)                                       ║
+╚══════════════════════════════════════════════════════════════════════╝
+
+
+Issue Status: 🔴 OPEN - Pending API key configuration
+Last Update: 2026-05-31 11:20 UTC

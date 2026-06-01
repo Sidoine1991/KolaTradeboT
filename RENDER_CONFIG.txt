@@ -1,0 +1,67 @@
+╔══════════════════════════════════════════════════════════════════════╗
+║              CE QU'IL FAUT METTRE SUR RENDER                         ║
+║                   (5 minutes - Solution AWS)                         ║
+╚══════════════════════════════════════════════════════════════════════╝
+
+
+🌐 URL: https://dashboard.render.com
+📦 Service: psychobot-1si7
+⚙️  Section: Environment
+
+
+┌──────────────────────────────────────────────────────────────────────┐
+│ AJOUTEZ CES 3 VARIABLES :                                            │
+└──────────────────────────────────────────────────────────────────────┘
+
+Variable 1:
+───────────────────────────────────────────────────────────────────────
+Key:    AWS_ACCESS_KEY_ID
+Value:  REMOVED_AWS_KEY_ID
+
+
+Variable 2:
+───────────────────────────────────────────────────────────────────────
+Key:    AWS_SECRET_ACCESS_KEY
+Value:  REMOVED_AWS_SECRET
+
+
+Variable 3:
+───────────────────────────────────────────────────────────────────────
+Key:    AWS_REGION
+Value:  us-east-1
+
+
+┌──────────────────────────────────────────────────────────────────────┐
+│ PUIS :                                                                │
+└──────────────────────────────────────────────────────────────────────┘
+
+1. Cliquez "Save Changes" en bas de page
+2. Render va redéployer automatiquement (~3 min)
+3. Attendez que status = "Live"
+
+
+┌──────────────────────────────────────────────────────────────────────┐
+│ ENSUITE : COMMIT LE CODE                                             │
+└──────────────────────────────────────────────────────────────────────┘
+
+cd "D:/Dev/Depot Github/Psychobot"
+git add .
+git commit -m "feat: AWS Transcribe integration"
+git push origin main
+
+
+┌──────────────────────────────────────────────────────────────────────┐
+│ TESTER :                                                              │
+└──────────────────────────────────────────────────────────────────────┘
+
+WhatsApp: +229 01 96 91 13 46
+Message vocal: "Bonjour PsychoBot, test AWS"
+Résultat: Voice reply + transcript
+
+
+╔══════════════════════════════════════════════════════════════════════╗
+║                         C'EST TOUT !                                 ║
+║                                                                      ║
+║  Coût: GRATUIT (60 min/mois pendant 12 mois)                         ║
+║  Temps: 5-10 minutes                                                 ║
+╚══════════════════════════════════════════════════════════════════════╝

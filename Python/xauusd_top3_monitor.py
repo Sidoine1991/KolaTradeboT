@@ -1,18 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-XAUUSD + Top 3 Monitoring System
-=================================
+Top 3 Monitoring System (scan matinal — pas XAUUSD forcé)
+=========================================================
 Suivi autonome toutes les 20 minutes des Top 3 opportunités du scan matinal.
 
-Génère :
-  1. Message WhatsApp unifié
-  2. Rapport Word complet avec données + analyses
-  3. Envoi PsychoBot + fallback log
+Préférer: scripts/unified_top3_master_report.py ou scripts/unified_top3_daemon.py
 
 Usage:
-    python xauusd_top3_monitor.py --once
-    python xauusd_top3_monitor.py --interval 1200
+    python Python/xauusd_top3_monitor.py --once
+    python Python/xauusd_top3_monitor.py --interval 1200
 """
 
 import sys
@@ -50,15 +47,16 @@ AI_SERVER_URL = "http://127.0.0.1:8000"
 PSYCHOBOT_URL = "https://psychobot-1si7.onrender.com"
 PHONE = "+2290196911346"
 
-# Top 3 candidates (from morning scan)
-TOP_SYMBOLS = ["XAUUSD", "EURUSD", "BTCUSD"]
+REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO_ROOT / "python"))
+from top3_symbols import load_top3_symbols  # noqa: E402
 
 
 class Top3Monitor:
     """Monitor Top 3 symbols + generate Word report."""
 
     def __init__(self, symbols: List[str] = None):
-        self.symbols = symbols or TOP_SYMBOLS
+        self.symbols = symbols or load_top3_symbols()
         self.data = {}
 
     def collect_symbol_data(self, symbol: str) -> Dict[str, Any]:
@@ -105,8 +103,8 @@ class Top3Monitor:
             )
             if gom_resp.status_code == 200:
                 gom_data = gom_resp.json()
-                if gom_data.get("ok"):
-                    data["gom"] = gom_data.get("data", {})
+                if gom_data.get("ok") is not False:
+                    data["gom"] = gom_data
                     logger.info(f"[{symbol}] GOM: {data['gom'].get('verdict', '?')}")
         except Exception as e:
             logger.warning(f"[{symbol}] GOM failed: {e}")

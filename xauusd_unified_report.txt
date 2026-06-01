@@ -1,0 +1,26 @@
+📊 TradBOT [19:27 UTC]
+
+*XAUUSD — Suivi 20min* | 29/05 19:27 UTC
+━━━━━━━━━━━━━━━━━━━━
+💰 *Prix live :* $4554.59
+📍 VWAP : $4534.88 → prix AU-DESSUS
+📊 BB : [$4534.97 / $4560.59 / $4586.21] → ENTRE inf/mid
+⚡ Supertrend : $5368.54 (↑) → prix EN-DESSOUS
+📐 Fibo : Zone 50%
+━━━━━━━━━━━━━━━━━━━━
+🟢 *Verdict GOM KOLA : BUY*
+   Score BUY=4.1  SELL=1.8  Spike=14.5%
+   RSI=51 | ST=↑
+━━━━━━━━━━━━━━━━━━━━
+🟢 *Biais session :* BUY 90% | ✅ valide 11.3h
+━━━━━━━━━━━━━━━━━━━━
+🟢 *Ordre EA :* BUY @ $25104.71 (GOOD BUY)
+━━━━━━━━━━━━━━━━━━━━
+📭 *Rapport TradingAgents :* Aucun rapport actif
+━━━━━━━━━━━━━━━━━━━━
+🔬 *Analyse croisee*
+  ✅ Confluence 3/4: GOM:BUY, BIAS:BUY, ORDER:BUY
+🎯 *Decision scalping*
+  BUY - EXECUTE
+━━━━━━━━━━━━━━━━━━━━
+_Prochain check dans 20 min_

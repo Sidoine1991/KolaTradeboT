@@ -1,13 +1,13 @@
-📊 *TradBOT [19:01 UTC]*
+📊 *TradBOT [06:43 UTC]*
 
-*XAUUSD — Suivi 20min* | 29/05 19:01 UTC
+*XAUUSD — Suivi 20min* | 30/05 06:43 UTC
 ━━━━━━━━━━━━━━━━━━━━
 💰 *Prix live :* ⚠️ TradingView indisponible
 ━━━━━━━━━━━━━━━━━━━━
 ⚠️ *Verdict GOM KOLA : ATTENTE*
    Aucun ordre en attente
 ━━━━━━━━━━━━━━━━━━━━
-⚪ *Biais session :* NEUTRAL 0% | ❌ valide 0.0h
+⚠️ *Biais session :* AI server hors ligne
 ━━━━━━━━━━━━━━━━━━━━
 📭 *Rapport TradingAgents :* Aucun rapport actif
 ━━━━━━━━━━━━━━━━━━━━

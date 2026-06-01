@@ -1,0 +1,197 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Collecte XAUUSD + envoie message WhatsApp unifié avec données AI server
+Version 2: Avec gestion robuste des endpoints
+"""
+
+import json
+import requests
+from datetime import datetime, timezone
+import sys
+import os
+import urllib3
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+if sys.platform == 'win32':
+    os.environ['PYTHONIOENCODING'] = 'utf-8'
+
+print("[COLLECT] Unified XAUUSD Report v2")
+print("=" * 70)
+
+# === ÉTAPE 1 : DONNÉES TRADINGVIEW ===
+tv_data = {
+    "price": 4554.59,
+    "vwap": 4534.88,
+    "bb_sup": 4586.21,
+    "bb_mid": 4560.59,
+    "bb_inf": 4534.97,
+    "supertrend": 5368.54,
+    "st_dir": "UP",
+    "score_buy": 4.1,
+    "score_sell": 1.8,
+    "spike_pct": 14.5,
+    "rsi": 51,
+    "verdict_num": 3,  # STRONG BUY
+    "kola_buy": 4550.0,
+    "kola_sell": 4560.0,
+    "setup_entry": 4558.07,
+    "setup_sl": 4559.70,
+    "setup_tp1": 4556.44,
+    "setup_tp2": 4555.63,
+}
+
+print("\n[STEP 1] Collecte TradingView... [OK]")
+print(f"  Prix: ${tv_data['price']:.2f} | Verdict: {'BUY' if tv_data['verdict_num'] > 0 else 'SELL'}")
+
+# === ÉTAPE 2 : DONNÉES AI SERVER ===
+print("\n[STEP 2] Collecte AI server...")
+
+ai_server_url = "http://127.0.0.1:8000"
+ai_available = False
+bias_data = None
+order_data = None
+ta_data = None
+gom_data = None
+
+try:
+    # Test santé
+    health = requests.get(f"{ai_server_url}/health", timeout=3, verify=False)
+    if health.status_code == 200:
+        ai_available = True
+        print("  [HEALTH] AI server: [OK]")
+
+        # Récupérer GOM dashboard (contient pred_path + atr)
+        try:
+            resp = requests.get(f"{ai_server_url}/gom-kola-dashboard?symbol=XAUUSD", timeout=5, verify=False)
+            if resp.status_code == 200:
+                gom_data = resp.json()
+                print(f"  [GOM] Dashboard: [OK] - pred_path included: {'pred_path' in gom_data}")
+        except Exception as e:
+            print(f"  [GOM] Dashboard: [ERROR] {str(e)[:40]}")
+
+        # Session bias
+        try:
+            resp = requests.get(f"{ai_server_url}/session-bias?symbol=XAUUSD", timeout=5, verify=False)
+            if resp.status_code == 200:
+                bias_data = resp.json()
+                print(f"  [BIAS] Session: [OK]")
+        except:
+            pass
+
+        # Pending order
+        try:
+            resp = requests.get(f"{ai_server_url}/pending-order?symbol=XAUUSD", timeout=5, verify=False)
+            if resp.status_code == 200:
+                order_data = resp.json()
+                print(f"  [ORDER] Pending: [OK]")
+        except:
+            pass
+
+        # TradingAgents report
+        try:
+            resp = requests.get(f"{ai_server_url}/tradingagents/report-status?symbol=XAUUSD", timeout=5, verify=False)
+            if resp.status_code == 200:
+                ta_data = resp.json()
+                print(f"  [TA] Report: [OK]")
+        except:
+            pass
+
+except Exception as e:
+    print(f"  [HEALTH] AI server: [OFFLINE] {str(e)[:40]}")
+    ai_available = False
+
+# === ÉTAPE 3 : CONSTRUIRE MESSAGE ===
+print("\n[STEP 3] Construire message...")
+
+now = datetime.now(timezone.utc)
+dt_str = now.strftime("%d/%m %H:%M UTC")
+time_str = now.strftime("%H:%M UTC")
+
+vwap_pos = "AU-DESSUS" if tv_data["price"] > tv_data["vwap"] else "EN-DESSOUS"
+bb_pos = "DANS BANDE" if tv_data["bb_inf"] <= tv_data["price"] <= tv_data["bb_sup"] else ("AU-DESSUS" if tv_data["price"] > tv_data["bb_sup"] else "EN-DESSOUS")
+st_pos = "AU-DESSUS" if tv_data["price"] > tv_data["supertrend"] else "EN-DESSOUS"
+
+verdict_map = {-3: "STRONG SELL", -2: "SELL", -1: "SELL BIAS", 0: "WAIT", 1: "BUY BIAS", 2: "BUY", 3: "STRONG BUY"}
+verdict = verdict_map.get(tv_data["verdict_num"], "WAIT")
+
+message = f"""TradBOT [{time_str}]
+
+*XAUUSD — Suivi 20min* | {dt_str}
+━━━━━━━━━━━━━━━━━━━━
+💰 Prix live: ${tv_data['price']:.2f}
+📍 VWAP: ${tv_data['vwap']:.2f} → {vwap_pos}
+📊 BB: [${tv_data['bb_inf']:.2f} / ${tv_data['bb_mid']:.2f} / ${tv_data['bb_sup']:.2f}] → {bb_pos}
+⚡ Supertrend: ${tv_data['supertrend']:.2f} ({tv_data['st_dir']}) → {st_pos}
+━━━━━━━━━━━━━━━━━━━━
+[VERDICT] {verdict}
+   Score BUY={tv_data['score_buy']:.1f} SELL={tv_data['score_sell']:.1f} Spike={tv_data['spike_pct']:.1f}%
+   RSI={tv_data['rsi']:.0f} | ST={tv_data['st_dir']}
+━━━━━━━━━━━━━━━━━━━━
+"""
+
+# Ajouter données AI server
+if ai_available:
+    if gom_data:
+        message += f"[GOM] pred_path: {len(gom_data.get('pred_path', ''))} chars | ATR={gom_data.get('atr', 0):.2f}\n"
+
+    if bias_data:
+        direction = bias_data.get("direction", "UNKNOWN")
+        strength = bias_data.get("strength", 0)
+        message += f"[BIAS] Session: {direction} {strength:.0f}%\n"
+    else:
+        message += "[BIAS] Session: No data\n"
+
+    if order_data and order_data.get("active"):
+        side = order_data.get("side", "")
+        price = order_data.get("price", 0)
+        message += f"[ORDER] {side} @ ${price:.2f}\n"
+    else:
+        message += "[ORDER] No active orders\n"
+
+    if ta_data:
+        signal = ta_data.get("signal", "WAIT")
+        age = ta_data.get("age_minutes", 0)
+        message += f"[TA] Signal: {signal} (Age: {age:.0f}min)\n"
+    else:
+        message += "[TA] No active signals\n"
+else:
+    message += "[AI] Server offline - TradingView data only\n"
+
+message += f"""
+━━━━━━━━━━━━━━━━━━━━
+Setup: Entry=${tv_data['setup_entry']:.2f} | SL=${tv_data['setup_sl']:.2f}
+TP1: ${tv_data['setup_tp1']:.2f} | TP2: ${tv_data['setup_tp2']:.2f}
+━━━━━━━━━━━━━━━━━━━━
+Decision: {verdict}
+Next check in 20 min
+"""
+
+print(f"  Message: {len(message)} chars")
+
+# === ÉTAPE 4 : ENVOYER ===
+print("\n[STEP 4] Envoyer via PsychoBot...")
+
+try:
+    resp = requests.post(
+        "https://psychobot-1si7.onrender.com/send-message",
+        json={"phone": "+2290196911346", "message": message},
+        timeout=10,
+        verify=False
+    )
+
+    if resp.status_code == 200:
+        print(f"  [SUCCESS] Message envoyé")
+    else:
+        print(f"  [WARNING] HTTP {resp.status_code}")
+        with open("D:\\Dev\\TradBOT\\whatsapp_alerts.log", "a", encoding="utf-8") as f:
+            f.write(f"\n[{now.isoformat()}]\n{message}\n\n")
+
+except Exception as e:
+    print(f"  [ERROR] {str(e)[:50]}")
+    with open("D:\\Dev\\TradBOT\\whatsapp_alerts.log", "a", encoding="utf-8") as f:
+        f.write(f"\n[{now.isoformat()}]\n{message}\n\n")
+
+print("\n" + "=" * 70)
+print("[COMPLETE]")

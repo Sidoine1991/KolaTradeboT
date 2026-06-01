@@ -1,0 +1,196 @@
+[ANALYSIS] Candle Divergence Root Cause
+
+================================================================================
+FINDING 1: AI Server GOM Verdict is STALE
+================================================================================
+
+Current state:
+  curl -s "http://127.0.0.1:8000/gom-verdict?symbol=XAUUSD"
+  Response: {"ok":false,"symbol":"XAUUSD","verdict":"GOOD BUY",
+             "message":"GOM stale (1174s) — relancer gom_verdict_poller.py"}
+
+Problem:
+  - GOM data hasn't been updated for 1174 seconds (~19.5 minutes)
+  - /gom-verdict endpoint NEVER returns pred_path or atr fields
+  - TradeManager EA cannot receive predicted candle path
+  - Therefore, EA cannot draw the same candles as TradingView
+
+Root Cause Chain:
+  1. gom_verdict_poller.py is NOT running (stale data)
+  2. AI server /gom-verdict doesn't include pred_path and atr in response
+  3. TradeManager EA has no way to receive these values
+  4. EA cannot reconstruct the same predicted candles
+  5. Visible divergence: TradingView shows different candles than EA drawing
+
+================================================================================
+FINDING 2: Missing Data Fields in API Response
+================================================================================
+
+Current /gom-verdict response:
+  {
+    "ok": false,
+    "symbol": "XAUUSD",
+    "verdict": "GOOD BUY",
+    "message": "..."
+  }
+
+Missing fields (needed for candle alignment):
+  ✗ pred_path    (string like "DBDBDUUDUD..." indicating bar directions)
+  ✗ atr          (float value used to calculate path_step = 0.16 * atr)
+  ✗ path_step    (sync value to verify both systems use same parameter)
+
+These fields are essential for TradeManager to:
+  1. Receive the exact predicted path from AI server
+  2. Draw matching candles with same height/direction
+  3. Align entry levels with TradingView visuals
+
+================================================================================
+FINDING 3: Parameter Sync Values
+================================================================================
+
+Current sync state:
+  Parameter        Pine Script             TradeManager.mq5
+  ────────────────────────────────────────────────────────
+  path_step        0.16                    GOMPathStepAtr = 0.16
+  ATR period       ta.atr(10)              iATR(..., 10)
+  Timeframe        M1                      PERIOD_M1
+  Path lookback    200 bars                GOMPathDrawBars = 200
+
+Status: ✓ Parameters appear synchronized at code level
+Issue:  ✗ But NO data passed from AI server to EA
+        ✗ So synchronization is theoretical, not practical
+
+================================================================================
+SOLUTION OPTIONS
+================================================================================
+
+OPTION A: Fix AI Server (RECOMMENDED - 1 hour work)
+  1. Open ai_server.py
+  2. Find /gom-verdict endpoint definition
+  3. Add to return dict:
+     - "pred_path": pred_path string
+     - "atr": atr_value float
+     - "path_step": 0.16
+  4. Restart AI server
+  5. Verify with: curl -s "http://127.0.0.1:8000/gom-verdict?symbol=XAUUSD"
+
+  Before:  {"ok":true, "verdict":"BUY", "message":"..."}
+  After:   {"ok":true, "verdict":"BUY", "message":"...", "pred_path":"...", "atr":15.32, "path_step":0.16}
+
+OPTION B: Calculate in TradeManager (3 hours work)
+  1. Add local ATR calculation to TradeManager.mq5
+  2. Add local pred_path calculation
+  3. More complex, less maintainable
+  4. But works if AI server cannot be modified
+
+OPTION C: Hybrid (2 hours work)
+  1. Fix AI server to include fields
+  2. But add fallback in EA: if fields missing, calculate locally
+  3. Best robustness
+
+================================================================================
+IMMEDIATE ACTION PLAN
+================================================================================
+
+STEP 1: Start gom_verdict_poller.py
+  Command: python D:\Dev\TradBOT\scripts\gom_verdict_poller.py
+  Purpose: Stop data from being stale
+  Expected: /gom-verdict response will update every 30-60 seconds
+
+STEP 2: Check AI Server Source Code
+  File: D:\Dev\TradBOT\ai_server.py
+  Search for: @app.get("/gom-verdict")
+  Check: What does it return?
+  Question: Does it have access to pred_path and atr?
+
+STEP 3: If Missing: Add Fields
+  Location: ai_server.py, /gom-verdict endpoint
+  Add 3 lines:
+    "pred_path": pred_path or "U" * 200,  # fallback to neutral
+    "atr": atr_value or 0.0,
+    "path_step": 0.16,
+
+STEP 4: Restart AI Server
+  Kill current Python process
+  Restart: python ai_server.py
+
+STEP 5: Verify Response
+  curl -s "http://127.0.0.1:8000/gom-verdict?symbol=XAUUSD" | jq .
+  Expected keys: ok, symbol, verdict, message, pred_path, atr, path_step
+
+STEP 6: Recompile TradeManager
+  In MetaEditor: F5 to recompile
+  Verify: 0 errors, 0 warnings
+
+STEP 7: Restart MT5
+  Close MetaTrader 5 completely
+  Reopen MetaTrader 5
+  Watch EA initialization logs
+
+STEP 8: Compare Candles
+  Open TradingView at M1 timeframe
+  Check GOM_KOLA_SIDO indicator predicted path candles
+  Check MT5 chart: should now show matching candles from TradeManager
+  Expected: Visual alignment between both platforms
+
+================================================================================
+VERIFICATION CHECKLIST
+================================================================================
+
+After implementing fix, verify:
+
+[  ] 1. gom_verdict_poller.py is running
+       ps aux | grep gom_verdict_poller
+
+[  ] 2. /gom-verdict response includes all fields
+       curl -s http://127.0.0.1:8000/gom-verdict?symbol=XAUUSD | jq keys
+       Should show: ["ok", "symbol", "verdict", "message", "pred_path", "atr", "path_step"]
+
+[  ] 3. AI server returns valid pred_path string
+       curl -s http://127.0.0.1:8000/gom-verdict?symbol=XAUUSD | jq .pred_path
+       Should show: "UUUUDDDDDUUDDDUU..." (200 char string)
+
+[  ] 4. ATR value is non-zero
+       curl -s http://127.0.0.1:8000/gom-verdict?symbol=XAUUSD | jq .atr
+       Should show: 15.32 or similar float
+
+[  ] 5. TradeManager compiles without error
+       Look for: "0 errors, 0 warnings"
+
+[  ] 6. MT5 is running TradeManager EA
+       Check: Symbol tab shows "EA on" with green icon
+
+[  ] 7. Candles align visually
+       Compare: TradingView GOM path vs MT5 TradeManager drawing
+       Expected: Same shape, height, direction
+
+================================================================================
+ESTIMATED TIMELINE
+================================================================================
+
+Task                                Time      Difficulty
+─────────────────────────────────────────────────────────
+1. Inspect ai_server.py             5 min     Easy
+2. Add 3 fields to response          5 min     Easy
+3. Restart AI server                 2 min     Easy
+4. Verify API response               3 min     Easy
+5. Recompile TradeManager            2 min     Easy
+6. Restart MT5                       5 min     Easy
+7. Visual comparison                 5 min     Easy
+─────────────────────────────────────────────────────────
+TOTAL                               ~30 min   Easy-Medium
+
+If issues found, add 1-2 hours debugging ATR calculation differences.
+
+================================================================================
+STATUS: READY TO EXECUTE
+================================================================================
+
+This analysis provides:
+  [X] Root cause identified: Missing pred_path and atr in API
+  [X] Solution path clear: Add 3 fields to /gom-verdict response
+  [X] Action steps detailed: 8-step implementation plan
+  [X] Verification criteria: 7-point checklist
+  [X] Timeline realistic: 30 min base, 1-3 hours with debugging
+
+Ready to proceed with implementation.

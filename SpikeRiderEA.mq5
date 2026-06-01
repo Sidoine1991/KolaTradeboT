@@ -11,10 +11,13 @@
 //|   v5.04 : multi-symbole Market Watch, panel2 décalé, fermeture   |
 //|           immédiate sur spike en gain, notif pré-spike mobile     |
 //|   v5.03 : bridge TradingView /spike-tv-state (OB, EMA, sniper 80%%) |
-//|   v5    : stratégie SMC spike — BOS + CHOCH + Fib OTE + spike Z   |
+//|   v5.07 : mode synth Boom/Crash — détection corps bougie + bypass filtres |
+//|           TV spike entry, seuils abaissés, SMC/TV désactivés par défaut   |
+//|   v5.08 : intégration stratégies Deriv EA Pro — EMA crossover, S&R        |
+//|           breakout, range trading, RSI divergence, pattern 1-2-3          |
 //+------------------------------------------------------------------+
 #property copyright "TradBOT"
-#property version   "5.06"
+#property version   "5.08"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -30,8 +33,10 @@ input double InpMaxDailyLossPct  = 5.0;   // Arrêt journalier si perte > X% sol
 input group "=== DÉTECTION SPIKE ==="
 input ENUM_TIMEFRAMES InpTF      = PERIOD_M1;  // Timeframe analyse
 input int    InpLookback         = 20;          // Bougies historique pour Z-Score (réduit pour réactivité)
-input double InpZScoreMin        = 1.5;         // Z-Score minimum (abaissé pour capter plus de spikes)
-input double InpMinMoveMult      = 2.0;         // Mouvement min = X × mouvement moyen (abaissé)
+input double InpZScoreMin        = 1.2;         // Z-Score minimum (forex / général)
+input double InpSynthZScoreMin   = 0.9;         // Z-Score min Boom/Crash (corps bougie)
+input double InpMinMoveMult      = 1.35;        // Mouvement min = X × moyenne corps
+input double InpSynthBodyAtrMult = 0.32;        // Corps live >= X×ATR = spike synthétique
 input int    InpRSIPeriod        = 14;          // Période RSI
 input double InpRSIBoomMax       = 55.0;        // RSI max Boom — élargi (spikes arrivent souvent de RSI neutre)
 input double InpRSICrashMin      = 45.0;        // RSI min Crash — élargi
@@ -40,25 +45,39 @@ input int    InpStairBars        = 3;           // Escalier réduit à 3 bougies
 input double InpStairMinPct      = 0.0;         // Escalier désactivé comme filtre bloquant
 
 input group "=== PRÉ-SPIKE (désactivé v5 — setup SMC obligatoire) ==="
-input bool   InpPreSpikeEnabled  = true;        // ON : entrée pré-spike (imminence + filtres)
+input bool   InpPreSpikeEnabled  = false;       // OFF synth — entrée sur spike détecté uniquement
 input bool   InpPreSpikeUseMarket= true;        // true = marché (recommandé Boom/Crash)
 input int    InpSpikeFrequency   = 0;           // 0 = auto depuis nom symbole (ex. Boom 600 → 600)
-input double InpImminenceThresh  = 25.0;        // Seuil imminence (abaissé pour plus d'entrées)
+input double InpImminenceThresh  = 15.0;        // Seuil imminence (pré-spike si activé)
 input bool   InpRequirePriorFavorable = false;  // false = prior informatif seulement (ne bloque pas)
 input double InpPendingOffsetATR = 0.2;         // Offset pending = X×ATR au-dessus ask (Boom)
 input int    InpPendingMaxAgeSec = 60;          // Durée pending réduite (spike = rapide)
 input double InpAtrCompressRatio = 0.80;        // Seuil compression élargi
 
 input group "=== STAIR-ONLY ENTRY (sans spike Z) ==="
-input bool   InpEnableStairOnlyEntry = true;    // Entrée possible même sans spike Z
-input double InpStairOnlyMinPct      = 0.67;    // Stair min (0.67 = 2/3 bougies alignées)
-input bool   InpStairOnlyNeedImminence = true;  // Exiger imminence >= seuil
+input bool   InpEnableStairOnlyEntry = false;   // Désactivé — trop de faux signaux sans Z
+input double InpStairOnlyMinPct      = 0.67;    // Stair min si réactivé
+input bool   InpStairOnlyNeedImminence = false; // Sans imminence si stair-only réactivé
+
+input group "=== STRATÉGIES DERIV EA PRO ==="
+input bool   InpEnableEMACross       = true;    // Entrée E : croisement EMA 5/20
+input bool   InpEnableSRBreakout     = true;    // Entrée F : cassure S/R dynamique (50 bougies)
+input bool   InpEnableRangeTrading   = false;   // Entrée G : range trading (buy bas / sell haut)
+input bool   InpEnableRSIDivergence  = true;    // Entrée H : divergence RSI (retournement)
+input bool   InpEnablePattern123     = true;    // Entrée I : pattern 1-2-3 (swing pivots)
+input int    InpEMAEntryFast         = 5;       // EMA rapide pour croisement (défaut: 5)
+input int    InpEMAEntrySlow         = 20;      // EMA lente pour croisement (défaut: 20)
+input int    InpSRLookbackBars       = 50;      // Fenêtre S/R dynamique (bougies)
+input double InpSRBreakoutATRMult    = 0.5;     // Seuil cassure = X×ATR au-dessus S/R
+input double InpRangeZonePct         = 0.15;    // Zone extrême range = 15% de l'amplitude
+input int    InpDivLookback          = 20;      // Fenêtre analyse divergence RSI (bougies)
+input int    InpPattern123Lookback   = 30;      // Fenêtre pattern 1-2-3 (bougies)
 
 input group "=== SMC SPIKE (BOS / CHOCH / OTE) ==="
-input bool   InpRequireSMC       = true;        // Exiger structure SMC avant entrée
-input bool   InpRequireBOS       = true;        // Break of Structure requis
+input bool   InpRequireSMC       = false;       // OFF par défaut sur Boom/Crash (spike = signal)
+input bool   InpRequireBOS       = false;       // BOS non requis sur synthétiques
 input bool   InpRequireCHOCH     = false;       // CHOCH requis (sinon BOS OU CHOCH)
-input bool   InpRequireOTE       = true;        // Prix en zone OTE 61.8–78.6 (sauf spike Z fort)
+input bool   InpRequireOTE       = false;       // OTE non requis — spike direct
 input int    InpSwingLookback    = 40;         // Lookback pivots swing / Fib
 input bool   InpDrawSMCLevels    = true;        // Afficher Fib + OTE sur graphique
 
@@ -70,7 +89,7 @@ input bool   InpUseChartStops    = true;        // true = TOUJOURS placer SL/TP 
 input bool   InpUseTrailing      = false;       // false = pas de modify SL (Invalid stops)
 input double InpTrailActivation  = 0.5;         // Trailing activé dès 0.5×ATR de profit
 input double InpTrailStep        = 0.5;         // Pas trailing >= distance broker
-input int    InpCooldownSec      = 15;          // Cooldown réduit à 15s — scalping
+input int    InpCooldownSec      = 8;           // Cooldown court — spikes rapprochés
 
 input group "=== SERVEUR AI ==="
 input bool   InpUsePrior         = true;                         // Activer prior horaire
@@ -84,14 +103,14 @@ input bool   InpSendStairDetect  = false;       // Désactivé — réduit les W
 input bool   InpSendInfluence    = false;       // Désactivé — réduit les WebRequests
 
 input group "=== FILTRES TENDANCE / CONFIRMATION ==="
-input bool   InpRequireTrendAlign   = true;      // Bloquer BUY Boom en forte baisse / SELL Crash en forte hausse
+input bool   InpRequireTrendAlign   = false;     // OFF Boom/Crash — spike = contre-tendance
 input int    InpTrendBars           = 6;         // Bougies pour mesurer la poussée récente
-input double InpTrendStrongATR      = 0.28;     // Corps cumulés >= X×ATR = tendance opposée (plus strict)
-input int    InpConfirmBars         = 2;         // Bougies fermées dans le sens du spike requises
-input bool   InpPreSpikeNeedConfirm = true;      // Pré-spike : exiger confirmation (pas imminence seule)
+input double InpTrendStrongATR      = 0.28;     // Corps cumulés >= X×ATR = tendance opposée
+input int    InpConfirmBars         = 0;         // 0 = pas de confirmation bougies fermées
+input bool   InpPreSpikeNeedConfirm = false;     // Pas de confirm sur pré-spike
 input int    InpEMAFast             = 9;         // EMA rapide (structure)
 input int    InpEMASlow             = 21;        // EMA lente (structure)
-input bool   InpRequireM1PushAlign  = true;      // Boom: exiger poussée M1 non baissière avant BUY
+input bool   InpRequireM1PushAlign  = false;     // OFF — Boom spike en poussée baissière M1
 
 input group "=== BRIDGE TRADINGVIEW (SpikeRider) ==="
 input bool   InpUseTVBridge         = true;      // Poll /spike-tv-state (comme TradeManager/GOM)
@@ -99,11 +118,11 @@ input int    InpTVBridgePollSec     = 2;         // Intervalle poll TV (sec)
 input int    InpTVBridgeMaxAgeSec   = 20;        // Données TV expirées → pas d'entrée sniper
 input bool   InpRequireTVSniper     = false;     // true = entrées UNIQUEMENT si sniper TV >= seuil
 input double InpSniperMinConfidence = 80.0;      // Confiance min sniper (%%) — spike imminent
-input bool   InpBlockCounterTrendTV = true;      // Bloquer BUY Boom / SELL Crash si TV oppose
-input bool   InpBlockCorrectionZone = true;      // Ne pas trader spike en zone correction
+input bool   InpBlockCounterTrendTV = false;     // OFF — M15 bearish normal sur Boom
+input bool   InpBlockCorrectionZone = false;     // OFF — spike = correction par nature
 
 input group "=== CONFIRMATION TRADINGVIEW (via ai_server) ==="
-input bool   InpUseTVConfirm        = true;      // Consulter indicateurs/TV avant ordre
+input bool   InpUseTVConfirm        = false;     // OFF — ne bloque pas les spikes synth
 input int    InpTVConfirmIntervalSec= 45;        // Refresh max (évite spam WebRequest)
 input int    InpTVConfirmMaxAgeSec  = 120;       // Biais TV trop vieux → refus entrée
 
@@ -119,10 +138,16 @@ input bool   InpCheckNewBar      = false;       // DÉSACTIVÉ — entrée immé
 input int    InpMaxSpreadPoints  = 500;         // Spread élargi (synthétiques ont spreads larges)
 
 input group "=== FILTRE GLOBAL TF ==="
-input bool   InpRequireGlobalDir    = true;   // Exiger TF global dans la même direction (données fraîches uniquement)
+input bool   InpRequireGlobalDir    = false;  // OFF — TF global bloquait les BUY Boom
 input int    InpGlobalMinConfidence = 70;     // Confiance TF global minimale (%)
 input double InpGlobalMinCoherence  = 60.0;  // Cohérence signal minimale (%)
-input double InpOTEBypassZScore     = 2.5;   // Z-Score fort → bypass OTE pour Boom/Crash (spike évident)
+input double InpOTEBypassZScore     = 2.0;   // Z fort → bypass OTE (si SMC réactivé)
+
+input group "=== SPIKE SCALP IMMÉDIAT ==="
+input bool   InpUseImmediateScalp = true;   // Entrée immédiate sur spike Z (même DetectSpike)
+input double InpScalpZScore       = 0.9;   // Aligné InpSynthZScoreMin
+input int    InpScalpLookback     = 20;    // (legacy, DetectSpike utilise InpLookback)
+input double InpScalpExitPips     = 5.0;   // Close après X pips profit
 
 input group "=== AFFICHAGE ==="
 input bool   InpShowDashboard    = true;
@@ -156,6 +181,7 @@ datetime    g_lastBar         = 0;
 datetime    g_lastTrade       = 0;
 datetime    g_lastEntryFail   = 0;   // anti-spam après Invalid stops
 datetime    g_lastEntryBarTime = 0;  // bougie d'entrée (évite sortie même spike)
+bool        g_entrySlotLocked  = false; // 1 seule tentative d'ouverture / tick / symbole
 double      g_dayStartBalance = 0.0;
 datetime    g_dayTag          = 0;
 
@@ -201,12 +227,6 @@ datetime    g_lastAngelAttempt   = 0;
 //+------------------------------------------------------------------+
 //| SPIKE SCALP MODE v2.0                                            |
 //+------------------------------------------------------------------+
-input group "=== SPIKE SCALP IMMÉDIAT ==="
-input bool   InpUseImmediateScalp = true;   // Detecter spike → entrée market → close immédiate
-input double InpScalpZScore       = 2.5;   // Z-score threshold
-input int    InpScalpLookback     = 20;    // Bars pour Z-score
-input double InpScalpExitPips     = 5.0;   // Close après X pips profit
-
 struct SpikeScalpState {
    bool spikeDetected;
    int direction;
@@ -380,6 +400,25 @@ int GetMicroTrendPush(const int bars)
    return 0;
 }
 
+bool IsSynthIndex()
+{
+   return IsBoom(_Symbol) || IsCrash(_Symbol);
+}
+
+// Spike Z confirmé sur Boom/Crash : toute bougie spike validée bypass les filtres forex/TV
+bool IsSynthSpikeConfirmed(const SpikeResult &spike, const bool isPreSpike)
+{
+   if(!IsSynthIndex() || isPreSpike) return false;
+   if(spike.type != SPIKE_NONE) return true;
+   return (spike.zScore >= InpSynthZScoreMin);
+}
+
+bool IsSynthSpikeStrong(const SpikeResult &spike)
+{
+   if(!IsSynthIndex()) return false;
+   return (spike.zScore >= InpOTEBypassZScore);
+}
+
 bool HasDirectionConfirmation(const ESpikeType dir)
 {
    if(InpConfirmBars <= 0) return true;
@@ -460,7 +499,9 @@ bool CanEnterInDirection(const ESpikeType dir, const bool isPreSpike,
    if(IsBoom(_Symbol)  && dir != SPIKE_BUY)  { reason = "Boom → BUY uniquement"; return false; }
    if(IsCrash(_Symbol) && dir != SPIKE_SELL) { reason = "Crash → SELL uniquement"; return false; }
 
-   if(IsSpikeCorrectionZone(dir))
+   const bool synthSpike = IsSynthSpikeConfirmed(spike, isPreSpike);
+
+   if(!synthSpike && IsSpikeCorrectionZone(dir))
    {
       reason = "zone correction — spike évité (M1 vs H1 / TV contre-tendance)";
       return false;
@@ -472,13 +513,13 @@ bool CanEnterInDirection(const ESpikeType dir, const bool isPreSpike,
       return false;
    }
 
-   if(IsStrongCounterTrend(dir))
+   if(!synthSpike && IsStrongCounterTrend(dir))
    {
       reason = StringFormat("tendance opposée (%d bar, push=%d)", InpTrendBars, GetMicroTrendPush(InpTrendBars));
       return false;
    }
 
-   if(InpRequireM1PushAlign && IsBoom(_Symbol) && dir == SPIKE_BUY)
+   if(!synthSpike && InpRequireM1PushAlign && IsBoom(_Symbol) && dir == SPIKE_BUY)
    {
       int push = GetMicroTrendPush(InpTrendBars);
       if(push < 0)
@@ -488,7 +529,7 @@ bool CanEnterInDirection(const ESpikeType dir, const bool isPreSpike,
       }
    }
 
-   if(InpRequireM1PushAlign && IsCrash(_Symbol) && dir == SPIKE_SELL)
+   if(!synthSpike && InpRequireM1PushAlign && IsCrash(_Symbol) && dir == SPIKE_SELL)
    {
       int push = GetMicroTrendPush(InpTrendBars);
       if(push > 0)
@@ -498,24 +539,29 @@ bool CanEnterInDirection(const ESpikeType dir, const bool isPreSpike,
       }
    }
 
-   // Bloquer si TV bride dit contre-tendance OU si les données TV fraîches contredisent
+   // Bloquer si TV indique contre-tendance (données fraîches uniquement)
    bool tvSaysCounterTrend = InpUseTVBridge && g_spikeTVOk && g_tvCounterTrend;
-   bool tvDataOld = InpUseTVBridge && g_spikeTVOk &&
-                    (TimeCurrent() - g_lastSpikeTVFetch > 120);
+   bool tvDataFresh = InpUseTVBridge && g_spikeTVOk &&
+                      (TimeCurrent() - g_lastSpikeTVFetch <= 120);
 
-   if(InpBlockCounterTrendTV && (tvSaysCounterTrend || !tvDataOld))
+   if(!synthSpike && InpBlockCounterTrendTV && tvDataFresh)
    {
-      // Vérification secondaire : structure M15/H1 et direction explicit
-      if(dir == SPIKE_BUY && (g_tvStructureM15 == "bearish" || g_tvStructureH1 == "bearish"))
+      if(tvSaysCounterTrend)
       {
-         reason = StringFormat("TV contre-tendance (M15=%s H1=%s) | OB=%s EMA=%s",
-                               g_tvStructureM15, g_tvStructureH1, g_tvObBias, g_tvEmaTrend);
+         reason = StringFormat("TV contre-tendance (CT=true | M15=%s H1=%s)",
+                               g_tvStructureM15, g_tvStructureH1);
          return false;
       }
-      if(dir == SPIKE_SELL && (g_tvStructureM15 == "bullish" || g_tvStructureH1 == "bullish"))
+      if(dir == SPIKE_BUY && g_tvStructureM15 == "bearish")
       {
-         reason = StringFormat("TV contre-tendance (M15=%s H1=%s) | OB=%s EMA=%s",
-                               g_tvStructureM15, g_tvStructureH1, g_tvObBias, g_tvEmaTrend);
+         reason = StringFormat("TV M15 bearish bloque BUY | OB=%s EMA=%s",
+                               g_tvObBias, g_tvEmaTrend);
+         return false;
+      }
+      if(dir == SPIKE_SELL && g_tvStructureM15 == "bullish")
+      {
+         reason = StringFormat("TV M15 bullish bloque SELL | OB=%s EMA=%s",
+                               g_tvObBias, g_tvEmaTrend);
          return false;
       }
    }
@@ -530,7 +576,7 @@ bool CanEnterInDirection(const ESpikeType dir, const bool isPreSpike,
       }
    }
 
-   if(InpUseTVConfirm)
+   if(InpUseTVConfirm && !synthSpike)
    {
       string tvWhy;
       if(!TVChartConfirmsEntry(dir, tvWhy))
@@ -546,30 +592,27 @@ bool CanEnterInDirection(const ESpikeType dir, const bool isPreSpike,
       return false;
    }
 
-   if(InpPreSpikeNeedConfirm && !HasDirectionConfirmation(dir) && spike.zScore < InpZScoreMin + 0.75)
+   if(!synthSpike && InpPreSpikeNeedConfirm && !HasDirectionConfirmation(dir) &&
+      spike.zScore < InpZScoreMin + 0.75)
    {
       reason = "bougies non alignées + Z faible";
       return false;
    }
 
    UpdateSMCContext();
-   if(InpRequireSMC)
+   if(InpRequireSMC && !synthSpike)
    {
-      // Sur Boom/Crash avec Z-score fort → bypass OTE (spike évident, pas besoin de retracement)
-      bool boomCrash  = IsBoom(_Symbol) || IsCrash(_Symbol);
-      bool zStrong    = spike.zScore >= InpOTEBypassZScore;
-      bool requireOTE = InpRequireOTE && !(boomCrash && zStrong);
-      if(!SR_SMCAllowsEntry(g_smc, IsBoom(_Symbol), InpRequireBOS, InpRequireCHOCH,
+      bool requireBOS = InpRequireBOS;
+      bool requireOTE = InpRequireOTE;
+      if(!SR_SMCAllowsEntry(g_smc, IsBoom(_Symbol), requireBOS, InpRequireCHOCH,
                             requireOTE, !isPreSpike, spike.zScore, InpZScoreMin, reason))
          return false;
    }
 
    // Filtre TF global + cohérence — UNIQUEMENT si filtre activé ET données fraîches
-   bool tvDataFresh = (g_lastSpikeTVFetch > 0 &&
-                       (TimeCurrent() - g_lastSpikeTVFetch) < 120);
    bool globalDataValid = InpRequireGlobalDir && g_spikeTVOk && tvDataFresh;
 
-   if(globalDataValid)
+   if(globalDataValid && !synthSpike)
    {
       // 1. Cohérence minimale — bloquer si cohérence basse et détectée
       if(g_tvCoherencePct > 0 && g_tvCoherencePct < InpGlobalMinCoherence)
@@ -1820,46 +1863,89 @@ SpikeResult DetectSpike()
    ArraySetAsSeries(rates, true);
    if(CopyRates(_Symbol, InpTF, 0, need, rates) < need) return res;
 
-   double moves[];
-   ArrayResize(moves, InpLookback);
-   double sum = 0.0;
-   for(int i = 0; i < InpLookback; i++)
-   {
-      moves[i] = MathAbs(rates[i+1].close - rates[i+2].close);
-      sum += moves[i];
-   }
-   double mean = sum / InpLookback;
-   if(mean <= 0.0) return res;
-
-   double var = 0.0;
-   for(int i = 0; i < InpLookback; i++) var += MathPow(moves[i] - mean, 2);
-   double sd = MathSqrt(var / InpLookback);
-   if(sd <= 0.0) sd = mean * 0.1;
-
-   // Vérifier la bougie [1] (fermée) ET la bougie [0] (en cours) pour capter le spike live
-   double moveClosed  = MathAbs(rates[1].close - rates[1].open);
-   double moveLive    = MathAbs(rates[0].close - rates[0].open);
-   double curMove     = MathMax(moveClosed, moveLive);  // le plus grand des deux
-   bool   useLive     = (moveLive > moveClosed);         // on est sur la bougie live
-
-   double z = (curMove - mean) / sd;
-   res.zScore = z;
-
-   // Ne jamais durcir le seuil via le prior RDS (évite 0 trade quand atr_threshold > 2.0)
-   double zThresh = InpZScoreMin;
-   bool isSpike = (z >= zThresh) || (curMove >= mean * InpMinMoveMult);
-   if(!isSpike) return res;
-
-   // Direction depuis la bougie qui produit le signal
-   bool up      = useLive ? (rates[0].close > rates[0].open) : (rates[1].close > rates[1].open);
    bool isBoom  = IsBoom(_Symbol);
    bool isCrash = IsCrash(_Symbol);
+   bool synth   = isBoom || isCrash;
+
+   double mean = 0.0, sd = 0.0, z = 0.0;
+   double moveClosed = 0.0, moveLive = 0.0, curMove = 0.0;
+   bool useLive = false;
+
+   if(synth)
+   {
+      // Boom/Crash : baseline sur CORPS de bougies (pas close-close)
+      double bodies[];
+      ArrayResize(bodies, InpLookback);
+      for(int i = 0; i < InpLookback; i++)
+      {
+         bodies[i] = MathAbs(rates[i + 1].close - rates[i + 1].open);
+         mean += bodies[i];
+      }
+      mean /= InpLookback;
+      if(mean <= 0.0) mean = _Point * 10.0;
+
+      double var = 0.0;
+      for(int i = 0; i < InpLookback; i++)
+         var += MathPow(bodies[i] - mean, 2);
+      sd = MathSqrt(var / InpLookback);
+      if(sd <= 0.0) sd = mean * 0.15;
+
+      moveClosed = MathAbs(rates[1].close - rates[1].open);
+      moveLive   = MathAbs(rates[0].close - rates[0].open);
+      // Bougie en formation : extension haussière/baissière (capte le spike tôt)
+      if(isBoom)
+         moveLive = MathMax(moveLive, MathMax(rates[0].close - rates[0].open, rates[0].high - rates[0].open));
+      if(isCrash)
+         moveLive = MathMax(moveLive, MathMax(rates[0].open - rates[0].close, rates[0].open - rates[0].low));
+      moveLive = MathAbs(moveLive);
+
+      curMove  = MathMax(moveClosed, moveLive);
+      useLive  = (moveLive >= moveClosed);
+      z        = (curMove - mean) / sd;
+   }
+   else
+   {
+      double moves[];
+      ArrayResize(moves, InpLookback);
+      for(int i = 0; i < InpLookback; i++)
+      {
+         moves[i] = MathAbs(rates[i + 1].close - rates[i + 2].close);
+         mean += moves[i];
+      }
+      mean /= InpLookback;
+      if(mean <= 0.0) return res;
+
+      double var = 0.0;
+      for(int i = 0; i < InpLookback; i++) var += MathPow(moves[i] - mean, 2);
+      sd = MathSqrt(var / InpLookback);
+      if(sd <= 0.0) sd = mean * 0.1;
+
+      moveClosed = MathAbs(rates[1].close - rates[1].open);
+      moveLive   = MathAbs(rates[0].close - rates[0].open);
+      curMove    = MathMax(moveClosed, moveLive);
+      useLive    = (moveLive > moveClosed);
+      z          = (curMove - mean) / sd;
+   }
+
+   res.zScore = z;
+
+   double zThresh = synth ? InpSynthZScoreMin : InpZScoreMin;
+   bool isSpike = (z >= zThresh) || (curMove >= mean * InpMinMoveMult);
+   if(synth && res.atr > 0.0)
+      isSpike = isSpike || (curMove >= res.atr * InpSynthBodyAtrMult);
+   if(!isSpike) return res;
+
+   bool up = useLive ? (rates[0].close > rates[0].open) : (rates[1].close > rates[1].open);
+   if(synth && useLive && isBoom && rates[0].high > rates[0].open)
+      up = true;
+   if(synth && useLive && isCrash && rates[0].low < rates[0].open)
+      up = false;
+
    if(isBoom  && !up) return res;
    if(isCrash && up)  return res;
 
-   // Spike confirmé : refuser si poussée récente fortement opposée
    ESpikeType want = isBoom ? SPIKE_BUY : SPIKE_SELL;
-   if(IsStrongCounterTrend(want))
+   if(!synth && IsStrongCounterTrend(want))
    {
       if(InpDebug) Print("[SpikeRider] Spike Z OK mais tendance opposée — ignoré");
       return res;
@@ -1871,7 +1957,6 @@ SpikeResult DetectSpike()
       if(isCrash && res.rsi < InpRSICrashMin) return res;
    }
 
-   // Filtre Angel of Spike : bloquer si signal opposé avec forte confiance
    if(InpUseAngelOfSpike && g_lastAngelFetch != 0 && g_angelConfidence >= 70.0)
    {
       bool opposed = (isBoom  && g_angelSignal == "SELL") ||
@@ -1911,10 +1996,52 @@ int CountOurPositions()
    return count;
 }
 
+string SymbolEntryLockKey()
+{
+   return StringFormat("SpikeRider_%u_%s", (uint)InpMagic, _Symbol);
+}
+
+// Verrou global : plusieurs graphiques MT5 sur le même symbole partagent le même EA
+bool AcquireSymbolEntryLock(const int holdSec = 8)
+{
+   string key = SymbolEntryLockKey();
+   datetime now = TimeCurrent();
+   if(GlobalVariableCheck(key))
+   {
+      datetime lockedAt = (datetime)GlobalVariableGet(key);
+      if(now - lockedAt < holdSec)
+         return false;
+   }
+   GlobalVariableSet(key, (double)now);
+   return true;
+}
+
+void ReleaseSymbolEntryLock()
+{
+   string key = SymbolEntryLockKey();
+   if(GlobalVariableCheck(key))
+      GlobalVariableDel(key);
+}
+
+void SyncEntrySlotLock()
+{
+   bool hasPos      = (CountOurPositions() >= 1);
+   // Garde le slot verrouillé pendant le cooldown après un trade — évite la duplication
+   // entre l'envoi de l'ordre et la confirmation broker (race condition inter-ticks)
+   bool recentTrade = (g_lastTrade != 0 && TimeCurrent() - g_lastTrade < (int)MathMax(InpCooldownSec, 3));
+   g_entrySlotLocked = hasPos || recentTrade;
+   if(!g_entrySlotLocked)
+      ReleaseSymbolEntryLock();
+}
+
 bool HasPosition()        { return CountOurPositions() > 0; }
 
-// 1 seule position à la fois — scalping spike
-bool MaxPositionsReached() { return CountOurPositions() >= 1; }
+// 1 seule position par symbole (magic + _Symbol)
+bool MaxPositionsReached()
+{
+   if(CountOurPositions() >= 1) return true;
+   return g_entrySlotLocked;
+}
 ulong GetOpenTicket()
 {
    for(int i = PositionsTotal()-1; i >= 0; i--)
@@ -1960,6 +2087,23 @@ bool DailyLimitHit()
 //+------------------------------------------------------------------+
 bool EnterSpikeTrade(const SpikeResult &spike, double imminence, const bool isPreSpike = false)
 {
+   if(MaxPositionsReached())
+   {
+      if(InpDebug) Print("[SpikeRider] Entrée ignorée: position déjà ouverte sur ", _Symbol);
+      return false;
+   }
+   if(g_entrySlotLocked)
+   {
+      if(InpDebug) Print("[SpikeRider] Entrée ignorée: slot déjà réservé ce tick");
+      return false;
+   }
+   if(!AcquireSymbolEntryLock())
+   {
+      if(InpDebug) Print("[SpikeRider] Entrée ignorée: verrou global actif (autre instance/chart)");
+      return false;
+   }
+   g_entrySlotLocked = true;
+
    string blockReason;
    if(!CanEnterInDirection(spike.type, isPreSpike, spike, blockReason))
    {
@@ -1967,11 +2111,18 @@ bool EnterSpikeTrade(const SpikeResult &spike, double imminence, const bool isPr
          PrintFormat("[SpikeRider] %s %s bloqué: %s",
                      (isPreSpike ? "Pré-spike" : "Spike"),
                      (spike.type == SPIKE_BUY ? "BUY" : "SELL"), blockReason);
+      g_entrySlotLocked = (CountOurPositions() >= 1);
+      if(!g_entrySlotLocked) ReleaseSymbolEntryLock();
       return false;
    }
 
    double atr = spike.atr;
-   if(atr <= 0.0) return false;
+   if(atr <= 0.0)
+   {
+      g_entrySlotLocked = (CountOurPositions() >= 1);
+      if(!g_entrySlotLocked) ReleaseSymbolEntryLock();
+      return false;
+   }
    double lot   = CalcLot(atr);
    double ask   = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double bid   = SymbolInfoDouble(_Symbol, SYMBOL_BID);
@@ -2030,6 +2181,8 @@ bool EnterSpikeTrade(const SpikeResult &spike, double imminence, const bool isPr
             PrintFormat("[SpikeRider] SL/TP impossibles ask=%.5f ATR=%.5f stops=%d",
                         SymbolInfoDouble(_Symbol, SYMBOL_ASK), atr,
                         (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL));
+         g_entrySlotLocked = (CountOurPositions() >= 1);
+         if(!g_entrySlotLocked) ReleaseSymbolEntryLock();
          return false;
       }
    }
@@ -2051,6 +2204,8 @@ bool EnterSpikeTrade(const SpikeResult &spike, double imminence, const bool isPr
       PrintFormat("[SpikeRider] ❌ Ordre échoué SL=%.5f TP=%.5f ask=%.5f | %d - %s",
                   slUse, tpUse, SymbolInfoDouble(_Symbol, SYMBOL_ASK),
                   g_trade.ResultRetcode(), g_trade.ResultRetcodeDescription());
+      g_entrySlotLocked = (CountOurPositions() >= 1);
+      if(!g_entrySlotLocked) ReleaseSymbolEntryLock();
       return false;
    }
    if(ok)
@@ -2361,6 +2516,12 @@ void ObjLabel2(string suffix, string txt, int x, int y, color clr, int fontSize=
 // Supprime tous les objets SR_ de ce symbole + labels panel 2
 void ClearAllSRObjects()
 {
+   // Objets Deriv EA Pro
+   ObjDel("EF5"); ObjDel("EF20");
+   ObjDel("DynRes"); ObjDel("DynSup");
+   ObjDel("RngHi"); ObjDel("RngLo"); ObjDel("RngZoneHi"); ObjDel("RngZoneLo");
+   ObjDel("DerivSignal"); ObjDel("D_DerivStrat");
+
    // Panel 2 (coin bas-gauche) — noms sans préfixe SR_
    ObjectDelete(0, ObjName("D2_Title"));
    ObjectDelete(0, ObjName("D2_Empty"));
@@ -2374,6 +2535,197 @@ void ClearAllSRObjects()
       string nm = ObjectName(0, i);
       if(StringFind(nm, prefix) == 0) ObjectDelete(0, nm);
    }
+}
+
+// Handles indicateurs stratégies Deriv EA Pro
+int g_hEMAEntry5  = INVALID_HANDLE;
+int g_hEMAEntry20 = INVALID_HANDLE;
+
+// État dernier signal Deriv EA Pro (pour affichage dashboard)
+string   g_derivLastStrat  = "---";
+ESpikeType g_derivLastSig  = SPIKE_NONE;
+datetime   g_derivLastBar  = 0;   // bougie sur laquelle le signal a été évalué
+
+//+------------------------------------------------------------------+
+//| STRATÉGIES DERIV EA PRO                                          |
+//+------------------------------------------------------------------+
+
+// Copie close[shift=1..n] fermées dans un tableau
+bool GetClosedBodies(double &out[], int n, int shiftStart = 1)
+{
+   MqlRates r[];
+   ArraySetAsSeries(r, true);
+   if(CopyRates(_Symbol, InpTF, shiftStart, n, r) < n) return false;
+   ArrayResize(out, n);
+   for(int i = 0; i < n; i++) out[i] = r[i].close;
+   return true;
+}
+
+// E — EMA 5/20 crossover (adapté Deriv stratSpikeBoom / stratEMAScalp)
+// BUY : EMA5 croise au-dessus EMA20 + Boom | SELL : inverse + Crash
+ESpikeType StratEMACross()
+{
+   if(!InpEnableEMACross) return SPIKE_NONE;
+   if(g_hEMAEntry5 == INVALID_HANDLE || g_hEMAEntry20 == INVALID_HANDLE) return SPIKE_NONE;
+
+   double fast[], slow[];
+   ArraySetAsSeries(fast, true); ArraySetAsSeries(slow, true);
+   if(CopyBuffer(g_hEMAEntry5,  0, 0, 3, fast) < 3) return SPIKE_NONE;
+   if(CopyBuffer(g_hEMAEntry20, 0, 0, 3, slow) < 3) return SPIKE_NONE;
+
+   // croisement sur bougie fermée [1] vs bougie précédente [2]
+   bool crossUp   = fast[2] < slow[2] && fast[1] > slow[1];
+   bool crossDown = fast[2] > slow[2] && fast[1] < slow[1];
+
+   if(crossUp   && IsBoom(_Symbol))  return SPIKE_BUY;
+   if(crossDown && IsCrash(_Symbol)) return SPIKE_SELL;
+   return SPIKE_NONE;
+}
+
+// F — S&R Breakout dynamique (stratSRBreakout)
+ESpikeType StratSRBreakout()
+{
+   if(!InpEnableSRBreakout) return SPIKE_NONE;
+
+   MqlRates r[];
+   ArraySetAsSeries(r, true);
+   int need = InpSRLookbackBars + 2;
+   if(CopyRates(_Symbol, InpTF, 1, need, r) < need) return SPIKE_NONE;
+
+   double hi = r[0].high, lo = r[0].low;
+   for(int i = 1; i < InpSRLookbackBars; i++)
+   { hi = MathMax(hi, r[i].high); lo = MathMin(lo, r[i].low); }
+
+   double atr = GetATR();
+   double threshold = (atr > 0) ? atr * InpSRBreakoutATRMult : (hi - lo) * 0.02;
+   double priceNow = iClose(_Symbol, InpTF, 1);
+   double pricePrev = iClose(_Symbol, InpTF, 5);
+
+   if(IsBoom(_Symbol) && priceNow > hi + threshold && pricePrev < hi)
+      return SPIKE_BUY;
+   if(IsCrash(_Symbol) && priceNow < lo - threshold && pricePrev > lo)
+      return SPIKE_SELL;
+   return SPIKE_NONE;
+}
+
+// G — Range Trading (stratRangeTrading)
+ESpikeType StratRangeTrading()
+{
+   if(!InpEnableRangeTrading) return SPIKE_NONE;
+
+   MqlRates r[];
+   ArraySetAsSeries(r, true);
+   if(CopyRates(_Symbol, InpTF, 1, 60, r) < 60) return SPIKE_NONE;
+
+   double rHigh = r[0].high, rLow = r[0].low;
+   for(int i = 1; i < 60; i++)
+   { rHigh = MathMax(rHigh, r[i].high); rLow = MathMin(rLow, r[i].low); }
+
+   double amplitude = rHigh - rLow;
+   if(amplitude <= 0) return SPIKE_NONE;
+   double zone = amplitude * InpRangeZonePct;
+   double price = iClose(_Symbol, InpTF, 1);
+
+   if(IsCrash(_Symbol) && price >= rHigh - zone) return SPIKE_SELL;
+   if(IsBoom(_Symbol)  && price <= rLow  + zone) return SPIKE_BUY;
+   return SPIKE_NONE;
+}
+
+// H — RSI Divergence (stratRsiDivergence)
+// Prix monte + RSI baisse → SELL (divergence baissière) | inverse → BUY
+ESpikeType StratRSIDivergence()
+{
+   if(!InpEnableRSIDivergence) return SPIKE_NONE;
+   if(g_hRSI == INVALID_HANDLE) return SPIKE_NONE;
+
+   int half = InpDivLookback / 2;
+   if(half < 5) return SPIKE_NONE;
+
+   MqlRates r[];
+   ArraySetAsSeries(r, true);
+   if(CopyRates(_Symbol, InpTF, 1, InpDivLookback * 2, r) < InpDivLookback * 2) return SPIKE_NONE;
+
+   double rsiNow[1], rsiBuf[];
+   ArraySetAsSeries(rsiNow, true); ArraySetAsSeries(rsiBuf, true);
+   if(CopyBuffer(g_hRSI, 0, 1, 1, rsiNow) < 1) return SPIKE_NONE;
+   if(CopyBuffer(g_hRSI, 0, InpDivLookback + 1, 1, rsiBuf) < 1) return SPIKE_NONE;
+
+   double rsiCurr = rsiNow[0];
+   double rsiPrev = rsiBuf[0];
+
+   // Hauts et bas sur la fenêtre courante (1..half) vs précédente (half+1..half*2)
+   double currHigh = r[0].high, prevHigh = r[half].high;
+   double currLow  = r[0].low,  prevLow  = r[half].low;
+   for(int i = 1; i < half; i++)
+   { currHigh = MathMax(currHigh, r[i].high); currLow  = MathMin(currLow,  r[i].low); }
+   for(int i = half; i < half * 2; i++)
+   { prevHigh = MathMax(prevHigh, r[i].high); prevLow  = MathMin(prevLow,  r[i].low); }
+
+   // Divergence baissière : prix monte mais RSI baisse (suracheté)
+   if(IsCrash(_Symbol) && currHigh > prevHigh && rsiCurr < rsiPrev && rsiCurr > 60)
+      return SPIKE_SELL;
+   // Divergence haussière : prix baisse mais RSI monte (survendu)
+   if(IsBoom(_Symbol) && currLow < prevLow && rsiCurr > rsiPrev && rsiCurr < 40)
+      return SPIKE_BUY;
+   return SPIKE_NONE;
+}
+
+// I — Pattern 1-2-3 (stratPattern123 adapté MQL5)
+// Cherche 3 pivots locaux dans les InpPattern123Lookback dernières bougies fermées
+ESpikeType StratPattern123()
+{
+   if(!InpEnablePattern123) return SPIKE_NONE;
+
+   MqlRates r[];
+   ArraySetAsSeries(r, true);
+   int need = InpPattern123Lookback + 2;
+   if(CopyRates(_Symbol, InpTF, 1, need, r) < need) return SPIKE_NONE;
+
+   // Détecter 3 pivots alternants (haut/bas/haut ou bas/haut/bas) — fenêtre glissante
+   int p1=-1, p2=-1, p3=-1;
+   int n = MathMin(InpPattern123Lookback, ArraySize(r));
+
+   for(int i = 2; i < n - 2; i++)
+   {
+      bool isHigh = (r[i].high > r[i+1].high && r[i].high > r[i+2].high &&
+                     r[i].high > r[i-1].high && r[i].high > r[i-2].high);
+      bool isLow  = (r[i].low  < r[i+1].low  && r[i].low  < r[i+2].low  &&
+                     r[i].low  < r[i-1].low   && r[i].low  < r[i-2].low);
+
+      if(isHigh && p1 < 0) { p1 = i; continue; }
+      if(isLow  && p2 < 0 && p1 >= 0) { p2 = i; continue; }
+      if(isHigh && p3 < 0 && p2 >= 0) { p3 = i; break; }
+   }
+
+   // Pattern 1-2-3 haussier (Boom) : p3 > p1 et p2 < p1
+   if(IsBoom(_Symbol) && p1 >= 0 && p2 >= 0 && p3 >= 0)
+   {
+      if(r[p3].high > r[p1].high && r[p2].low < r[p1].low)
+         return SPIKE_BUY;
+   }
+
+   // Reset pour pattern baissier (Crash)
+   p1 = -1; p2 = -1; p3 = -1;
+   for(int i = 2; i < n - 2; i++)
+   {
+      bool isLow  = (r[i].low  < r[i+1].low  && r[i].low  < r[i+2].low  &&
+                     r[i].low  < r[i-1].low   && r[i].low  < r[i-2].low);
+      bool isHigh = (r[i].high > r[i+1].high && r[i].high > r[i+2].high &&
+                     r[i].high > r[i-1].high && r[i].high > r[i-2].high);
+
+      if(isLow  && p1 < 0) { p1 = i; continue; }
+      if(isHigh && p2 < 0 && p1 >= 0) { p2 = i; continue; }
+      if(isLow  && p3 < 0 && p2 >= 0) { p3 = i; break; }
+   }
+
+   // Pattern 1-2-3 baissier (Crash) : p3 < p1 et p2 > p1
+   if(IsCrash(_Symbol) && p1 >= 0 && p2 >= 0 && p3 >= 0)
+   {
+      if(r[p3].low < r[p1].low && r[p2].high > r[p1].high)
+         return SPIKE_SELL;
+   }
+
+   return SPIKE_NONE;
 }
 
 // Données S/R historiques depuis RDS (chargées au démarrage + toutes les heures)
@@ -2736,6 +3088,88 @@ void DrawChartIndicators(const SpikeResult &spike, double imminence)
       ObjectSetString(0, ObjName("ATRLo"), OBJPROP_TEXT, "ATR-");
    }
 
+   // ── 9. STRATÉGIES DERIV EA PRO — lignes visuelles ───────────────
+   // EMA Entry 5 / EMA Entry 20
+   if(InpEnableEMACross && g_hEMAEntry5 != INVALID_HANDLE && g_hEMAEntry20 != INVALID_HANDLE)
+   {
+      double eF[], eS[];
+      ArraySetAsSeries(eF, true); ArraySetAsSeries(eS, true);
+      if(CopyBuffer(g_hEMAEntry5,  0, 0, 2, eF) >= 2 && CopyBuffer(g_hEMAEntry20, 0, 0, 2, eS) >= 2)
+      {
+         ObjHLine("EF5",  NormalizeDouble(eF[0], digits), C'0,229,160',  STYLE_SOLID, 1);
+         ObjHLine("EF20", NormalizeDouble(eS[0], digits), C'0,102,255',  STYLE_SOLID, 1);
+         ObjectSetString(0, ObjName("EF5"),  OBJPROP_TEXT, "EMA5");
+         ObjectSetString(0, ObjName("EF20"), OBJPROP_TEXT, "EMA20");
+      }
+   }
+   else { ObjDel("EF5"); ObjDel("EF20"); }
+
+   // S&R dynamique (50 bougies fermées)
+   if(InpEnableSRBreakout)
+   {
+      MqlRates rSR[];
+      ArraySetAsSeries(rSR, true);
+      int srN = InpSRLookbackBars;
+      if(CopyRates(_Symbol, InpTF, 1, srN, rSR) >= srN)
+      {
+         double srHi = rSR[0].high, srLo = rSR[0].low;
+         for(int i = 1; i < srN; i++)
+         { srHi = MathMax(srHi, rSR[i].high); srLo = MathMin(srLo, rSR[i].low); }
+         ObjHLine("DynRes", NormalizeDouble(srHi, digits), C'255,170,0', STYLE_DASH, 2);
+         ObjHLine("DynSup", NormalizeDouble(srLo, digits), C'255,170,0', STYLE_DASH, 2);
+         ObjectSetString(0, ObjName("DynRes"), OBJPROP_TEXT, StringFormat("Résistance(%d)", srN));
+         ObjectSetString(0, ObjName("DynSup"), OBJPROP_TEXT, StringFormat("Support(%d)", srN));
+      }
+   }
+   else { ObjDel("DynRes"); ObjDel("DynSup"); }
+
+   // Zone Range (haut/bas des 60 bougies)
+   if(InpEnableRangeTrading)
+   {
+      MqlRates rRng[];
+      ArraySetAsSeries(rRng, true);
+      if(CopyRates(_Symbol, InpTF, 1, 60, rRng) >= 60)
+      {
+         double rHi = rRng[0].high, rLo = rRng[0].low;
+         for(int i = 1; i < 60; i++)
+         { rHi = MathMax(rHi, rRng[i].high); rLo = MathMin(rLo, rRng[i].low); }
+         double amp  = rHi - rLo;
+         double zone = amp * InpRangeZonePct;
+         bool   isCrash_ = IsCrash(_Symbol);
+         color  zClrH = isCrash_ ? C'255,68,68' : C'100,100,100';
+         color  zClrL = isBoom   ? C'0,201,122' : C'100,100,100';
+         ObjHLine("RngHi",    NormalizeDouble(rHi,         digits), C'168,85,247', STYLE_DOT, 1);
+         ObjHLine("RngLo",    NormalizeDouble(rLo,         digits), C'168,85,247', STYLE_DOT, 1);
+         ObjHLine("RngZoneHi",NormalizeDouble(rHi - zone,  digits), zClrH, STYLE_DOT, 1);
+         ObjHLine("RngZoneLo",NormalizeDouble(rLo + zone,  digits), zClrL, STYLE_DOT, 1);
+         ObjectSetString(0, ObjName("RngHi"),    OBJPROP_TEXT, "Range Hi");
+         ObjectSetString(0, ObjName("RngLo"),    OBJPROP_TEXT, "Range Lo");
+         ObjectSetString(0, ObjName("RngZoneHi"),OBJPROP_TEXT, "Zone SELL");
+         ObjectSetString(0, ObjName("RngZoneLo"),OBJPROP_TEXT, "Zone BUY");
+      }
+   }
+   else { ObjDel("RngHi"); ObjDel("RngLo"); ObjDel("RngZoneHi"); ObjDel("RngZoneLo"); }
+
+   // Flèche signal Deriv EA Pro sur la dernière bougie fermée
+   {
+      ObjDel("DerivSignal");
+      if(g_derivLastSig != SPIKE_NONE && g_derivLastBar > 0)
+      {
+         MqlRates rD[];
+         ArraySetAsSeries(rD, true);
+         if(CopyRates(_Symbol, InpTF, g_derivLastBar, 1, rD) >= 1)
+         {
+            bool buyDir = (g_derivLastSig == SPIKE_BUY);
+            double px = buyDir ? rD[0].low - atr * 0.4 : rD[0].high + atr * 0.4;
+            int code = buyDir ? 233 : 234;
+            int anchor = buyDir ? ANCHOR_TOP : ANCHOR_BOTTOM;
+            color clr = buyDir ? C'0,229,160' : C'255,107,53';
+            ObjArrow("DerivSignal", g_derivLastBar, px, code, clr, anchor);
+            ObjectSetInteger(0, ObjName("DerivSignal"), OBJPROP_WIDTH, 2);
+         }
+      }
+   }
+
    // ── 8. PANEL DASHBOARD (coins haut-gauche, labels empilés) ──────
    // Supprimer les labels conditionnels à chaque cycle pour éviter le chevauchement
    ObjDel("D_Prior");
@@ -2843,6 +3277,23 @@ void DrawChartIndicators(const SpikeResult &spike, double imminence)
       yBase += yStep;
    }
 
+   // Stratégies Deriv EA Pro — signal actif
+   ObjDel("D_DerivStrat");
+   {
+      color derivClr = (g_derivLastSig == SPIKE_BUY)  ? clrLimeGreen :
+                       (g_derivLastSig == SPIKE_SELL) ? clrOrangeRed : clrDimGray;
+      string derivTxt = StringFormat("DerivStrat: %s %s | EMA=%s SR=%s Rng=%s Div=%s P123=%s",
+                                     g_derivLastStrat,
+                                     (g_derivLastSig == SPIKE_BUY ? "▲" : g_derivLastSig == SPIKE_SELL ? "▼" : "—"),
+                                     (InpEnableEMACross      ? "ON" : "off"),
+                                     (InpEnableSRBreakout    ? "ON" : "off"),
+                                     (InpEnableRangeTrading  ? "ON" : "off"),
+                                     (InpEnableRSIDivergence ? "ON" : "off"),
+                                     (InpEnablePattern123    ? "ON" : "off"));
+      ObjLabel("D_DerivStrat", derivTxt, 8, yBase, derivClr, 9);
+      yBase += yStep;
+   }
+
    // Légende spikes historiques
    ObjLabel("D_HistLeg", StringFormat("Hist. RDS: %d spikes | vert=capturé  rouge=manqué", g_spikeCount),
             8, yBase, C'140,140,140', 8);
@@ -2913,7 +3364,7 @@ void UpdateDashboard(const SpikeResult &spike, double imminence)
    double bal   = AccountInfoDouble(ACCOUNT_BALANCE);
    double eq    = AccountInfoDouble(ACCOUNT_EQUITY);
    int    nPos  = CountOurPositions();
-   string pos   = StringFormat("%d/2%s", nPos, HasPendingOrder() ? "+PENDING" : "");
+   string pos   = StringFormat("%d/1%s", nPos, HasPendingOrder() ? "+PENDING" : "");
    double dayLoss = (g_dayStartBalance > 0)
                     ? (g_dayStartBalance - bal) / g_dayStartBalance * 100.0 : 0.0;
 
@@ -2986,6 +3437,14 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
    TradeRecord rec = g_openTrades[idx];
    RemoveOpenTradeAt(idx);
 
+   if(CountOurPositions() == 0)
+   {
+      // Forcer le cooldown après fermeture — empêche réentrée dans le même tick
+      g_lastTrade       = TimeCurrent();
+      g_entrySlotLocked = true;   // restera vrai jusqu'à expiry cooldown dans SyncEntrySlotLock
+      ReleaseSymbolEntryLock();
+   }
+
    // Spike confirmé → réinitialiser compteur + notif
    g_barsSinceLastSpike = 0;
    g_lastSpikeBar       = TimeCurrent();
@@ -3050,6 +3509,15 @@ int OnInit()
       return INIT_FAILED;
    }
 
+   // Handles stratégies Deriv EA Pro
+   g_hEMAEntry5  = iMA(_Symbol, InpTF, InpEMAEntryFast, 0, MODE_EMA, PRICE_CLOSE);
+   g_hEMAEntry20 = iMA(_Symbol, InpTF, InpEMAEntrySlow, 0, MODE_EMA, PRICE_CLOSE);
+   if(g_hEMAEntry5 == INVALID_HANDLE || g_hEMAEntry20 == INVALID_HANDLE)
+   {
+      Print("[SpikeRider] ❌ Erreur création indicateurs Deriv EA Pro");
+      return INIT_FAILED;
+   }
+
    // Scanner tous les Boom/Crash du Market Watch
    ScanMarketWatchSymbols();
 
@@ -3089,15 +3557,21 @@ int OnInit()
    if(InpUseTVBridge)
       EventSetTimer(MathMax(1, InpTVBridgePollSec));
 
-   PrintFormat("[SpikeRider] ✅ Init v5.07 | %s | %s | SMC=%s | GOM-Bridge=%s | "
-               "Block-CT=%s Sniper=%s GlobalDir=%s | Magic=%llu",
+   PrintFormat("[SpikeRider] ✅ Init v5.08 | %s | %s | SMC=%s | GOM-Bridge=%s | "
+               "Block-CT=%s Sniper=%s GlobalDir=%s | Magic=%llu | "
+               "DerivStrats: EMA=%s SR=%s Range=%s RSIDiv=%s Pat123=%s",
                _Symbol, (IsBoom(_Symbol) ? "BUY only" : "SELL only"),
                (InpRequireSMC ? "ON" : "OFF"),
                (InpUseTVBridge ? "ON (GOM verdict active)" : "OFF"),
                (InpBlockCounterTrendTV ? "ON" : "OFF"),
                (InpRequireTVSniper ? "ON" : "OFF"),
                (InpRequireGlobalDir ? "ON" : "OFF"),
-               InpMagic);
+               InpMagic,
+               (InpEnableEMACross      ? "ON" : "off"),
+               (InpEnableSRBreakout    ? "ON" : "off"),
+               (InpEnableRangeTrading  ? "ON" : "off"),
+               (InpEnableRSIDivergence ? "ON" : "off"),
+               (InpEnablePattern123    ? "ON" : "off"));
    return INIT_SUCCEEDED;
 }
 
@@ -3107,10 +3581,12 @@ int OnInit()
 void OnDeinit(const int reason)
 {
    EventKillTimer();
-   if(g_hATR != INVALID_HANDLE)     { IndicatorRelease(g_hATR);     g_hATR = INVALID_HANDLE; }
-   if(g_hRSI != INVALID_HANDLE)     { IndicatorRelease(g_hRSI);     g_hRSI = INVALID_HANDLE; }
-   if(g_hEMAFast != INVALID_HANDLE){ IndicatorRelease(g_hEMAFast); g_hEMAFast = INVALID_HANDLE; }
-   if(g_hEMASlow != INVALID_HANDLE){ IndicatorRelease(g_hEMASlow); g_hEMASlow = INVALID_HANDLE; }
+   if(g_hATR != INVALID_HANDLE)       { IndicatorRelease(g_hATR);       g_hATR = INVALID_HANDLE; }
+   if(g_hRSI != INVALID_HANDLE)       { IndicatorRelease(g_hRSI);       g_hRSI = INVALID_HANDLE; }
+   if(g_hEMAFast != INVALID_HANDLE)   { IndicatorRelease(g_hEMAFast);   g_hEMAFast = INVALID_HANDLE; }
+   if(g_hEMASlow != INVALID_HANDLE)   { IndicatorRelease(g_hEMASlow);   g_hEMASlow = INVALID_HANDLE; }
+   if(g_hEMAEntry5 != INVALID_HANDLE) { IndicatorRelease(g_hEMAEntry5); g_hEMAEntry5 = INVALID_HANDLE; }
+   if(g_hEMAEntry20!= INVALID_HANDLE) { IndicatorRelease(g_hEMAEntry20);g_hEMAEntry20= INVALID_HANDLE; }
 
    // Libérer les handles multi-symboles
    for(int si = 0; si < g_symCount; si++)
@@ -3144,44 +3620,62 @@ bool DetectSpikeScalp(int &direction, double &zscore)
 {
    if(!InpUseImmediateScalp) return false;
 
-   double closes[]; ArraySetAsSeries(closes, true);
-   if(CopyClose(_Symbol, InpTF, 0, InpScalpLookback + 1, closes) < InpScalpLookback + 1) return false;
+   SpikeResult spike = DetectSpike();
+   zscore = spike.zScore;
+   double thresh = IsSynthIndex() ? MathMin(InpScalpZScore, InpSynthZScoreMin) : InpScalpZScore;
+   if(spike.type == SPIKE_NONE || zscore < thresh)
+      return false;
 
-   double mean = 0, stddev = 0;
-   for(int i = 1; i <= InpScalpLookback; i++) mean += closes[i];
-   mean /= InpScalpLookback;
-
-   for(int i = 1; i <= InpScalpLookback; i++) {
-      double diff = closes[i] - mean;
-      stddev += diff * diff;
-   }
-   stddev = MathSqrt(stddev / InpScalpLookback);
-   if(stddev <= 0) return false;
-
-   zscore = (closes[0] - mean) / stddev;
-
-   if(zscore > InpScalpZScore) {
-      direction = 1; // BUY spike
-      return true;
-   }
-   if(zscore < -InpScalpZScore) {
-      direction = -1; // SELL spike
-      return true;
-   }
+   if(spike.type == SPIKE_BUY)  { direction = 1;  return true; }
+   if(spike.type == SPIKE_SELL) { direction = -1; return true; }
    return false;
 }
 
-void ExecuteSpikeScalp()
+// Spike détecté côté ai_server / TradingView (/spike-tv-state)
+bool TryBuildTVSpike(SpikeResult &out)
 {
-   if(!InpUseImmediateScalp) return;
-   if(TimeCurrent() - g_lastScalpTrade < 5) return;
+   out.type       = SPIKE_NONE;
+   out.zScore     = 0.0;
+   out.rsi        = GetRSI();
+   out.atr        = GetATR();
+   out.stairScore = CalcStairScore(IsBoom(_Symbol));
+
+   if(!InpUseTVBridge || !g_spikeTVOk || !g_tvSpikeDetected) return false;
+   if(g_tvSpikeZ < InpSynthZScoreMin) return false;
+
+   string dir = g_tvSpikeDir;
+   StringToUpper(dir);
+
+   if(IsBoom(_Symbol))
+   {
+      if(StringFind(dir, "BUY") < 0 && StringFind(dir, "UP") < 0 && StringFind(dir, "LONG") < 0)
+         return false;
+      out.type = SPIKE_BUY;
+   }
+   else if(IsCrash(_Symbol))
+   {
+      if(StringFind(dir, "SELL") < 0 && StringFind(dir, "DOWN") < 0 && StringFind(dir, "SHORT") < 0)
+         return false;
+      out.type = SPIKE_SELL;
+   }
+   else return false;
+
+   out.zScore = g_tvSpikeZ;
+   return true;
+}
+
+// Retourne true si une entrée a été tentée/ouverte (évite doublon avec Entrée A)
+bool ExecuteSpikeScalpOnce()
+{
+   if(TimeCurrent() - g_lastScalpTrade < InpCooldownSec) return false;
 
    int direction = 0;
    double zscore = 0;
 
-   if(!DetectSpikeScalp(direction, zscore)) {
+   if(!DetectSpikeScalp(direction, zscore))
+   {
       g_scalpState.spikeDetected = false;
-      return;
+      return false;
    }
 
    g_scalpState.spikeDetected = true;
@@ -3189,48 +3683,21 @@ void ExecuteSpikeScalp()
    g_scalpState.zscore = zscore;
    g_scalpState.detectedTime = TimeCurrent();
 
-   // Check if position already open
-   for(int i = 0; i < PositionsTotal(); i++) {
-      if(!PositionSelectByTicket(PositionGetTicket(i))) continue;
-      if(PositionGetString(POSITION_SYMBOL) == _Symbol) return;
-   }
+   SpikeResult spike;
+   spike.type       = (direction > 0) ? SPIKE_BUY : SPIKE_SELL;
+   spike.zScore     = zscore;
+   spike.rsi        = GetRSI();
+   spike.atr        = GetATR();
+   spike.stairScore = CalcStairScore(IsBoom(_Symbol));
 
-   double atr = GetATR();
-   if(atr <= 0) return;
-
-   double lot = (InpFixedLot > 0) ? InpFixedLot : SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
-   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   int dg = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
-   double pt = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
-
-   double price, sl, tp;
-   string comment;
-
-   if(direction > 0) {
-      price = ask;
-      tp = NormalizeDouble(price + InpScalpExitPips * pt, dg);
-      sl = NormalizeDouble(price - atr * InpSL_ATR, dg);
-      comment = "ScalpBUY";
-   } else {
-      price = bid;
-      tp = NormalizeDouble(price - InpScalpExitPips * pt, dg);
-      sl = NormalizeDouble(price + atr * InpSL_ATR, dg);
-      comment = "ScalpSELL";
-   }
-
-   g_trade.SetExpertMagicNumber(InpMagic);
-   g_trade.SetDeviationInPoints(50);
-
-   bool ok = (direction > 0)
-      ? g_trade.Buy(lot, _Symbol, 0, sl, tp, comment)
-      : g_trade.Sell(lot, _Symbol, 0, sl, tp, comment);
-
-   if(ok) {
+   if(EnterSpikeTrade(spike, 0.0, false))
+   {
       g_lastScalpTrade = TimeCurrent();
       Print("[SpikeRider] 🔥 SPIKE SCALP: ", (direction > 0 ? "BUY ↑" : "SELL ↓"),
-            " Z=", DoubleToString(zscore, 2), " | TP=", InpScalpExitPips, "pips | Lot=", lot);
+            " Z=", DoubleToString(zscore, 2));
+      return true;
    }
+   return false;
 }
 
 //+------------------------------------------------------------------+
@@ -3239,6 +3706,8 @@ void ExecuteSpikeScalp()
 void OnTick()
 {
    if(!IsSupportedSymbol(_Symbol)) return;
+
+   SyncEntrySlotLock();
 
    if(InpUseTVBridge && g_lastSpikeTVFetch == 0)
       PollSpikeTVState(true);
@@ -3250,7 +3719,6 @@ void OnTick()
    ManageQuickExit(spikeNow);   // hold min + profit min avant sortie
    ManageTrailing();
    ManagePendingAge();
-   ExecuteSpikeScalp();  // [NEW] Spike scalp immediate detection
 
    // Refresh fetches si l'heure UTC a changé
    MqlDateTime utc; TimeToStruct(TimeGMT(), utc);
@@ -3305,6 +3773,10 @@ void OnTick()
                        TimeCurrent() - g_lastEntryFail >= InpCooldownSec);
    bool entryDone = false;
 
+   // Scalp immédiat (optionnel) — après verrou, jamais en parallèle des entrées A/B/C
+   if(canTryEntry && InpUseImmediateScalp)
+      entryDone = ExecuteSpikeScalpOnce();
+
    // ── Entrée A : spike Z + structure SMC (BOS/CHOCH/OTE) ───────────
    if(canTryEntry && spike.type != SPIKE_NONE)
    {
@@ -3324,6 +3796,67 @@ void OnTick()
       }
       else if(InpDebug)
          PrintFormat("[SpikeRider] Spike Z=%.2f bloqué: %s", spike.zScore, why);
+   }
+
+   // ── Entrée D : spike bridge TV (ai_server) ───────────────────────
+   SpikeResult tvSpike;
+   if(canTryEntry && !entryDone && TryBuildTVSpike(tvSpike))
+   {
+      string whyTv;
+      if(CanEnterInDirection(tvSpike.type, false, tvSpike, whyTv))
+      {
+         PrintFormat("[SpikeRider] 📡 TV SPIKE %s | Z=%.2f | %s",
+                     (tvSpike.type == SPIKE_BUY ? "BUY" : "SELL"),
+                     tvSpike.zScore, whyTv);
+         entryDone = EnterSpikeTrade(tvSpike, imminence, false);
+      }
+      else if(InpDebug)
+         PrintFormat("[SpikeRider] TV spike Z=%.2f bloqué: %s", tvSpike.zScore, whyTv);
+   }
+
+   // ── Entrées E/F/G/H/I : stratégies Deriv EA Pro (1 éval par bougie fermée) ──
+   if(canTryEntry && !entryDone && newBar)
+   {
+      ESpikeType derivSig = SPIKE_NONE;
+      string derivStratName = "";
+
+      // E — EMA crossover (croisement sur bougie fermée [1])
+      if(derivSig == SPIKE_NONE) { derivSig = StratEMACross();      if(derivSig != SPIKE_NONE) derivStratName = "EMA-Cross"; }
+      // F — S&R Breakout
+      if(derivSig == SPIKE_NONE) { derivSig = StratSRBreakout();    if(derivSig != SPIKE_NONE) derivStratName = "SR-Breakout"; }
+      // G — Range Trading
+      if(derivSig == SPIKE_NONE) { derivSig = StratRangeTrading();  if(derivSig != SPIKE_NONE) derivStratName = "Range"; }
+      // H — RSI Divergence
+      if(derivSig == SPIKE_NONE) { derivSig = StratRSIDivergence(); if(derivSig != SPIKE_NONE) derivStratName = "RSI-Div"; }
+      // I — Pattern 1-2-3
+      if(derivSig == SPIKE_NONE) { derivSig = StratPattern123();    if(derivSig != SPIKE_NONE) derivStratName = "Pat123"; }
+
+      // Mémoriser pour le dashboard (bougie courante, même si pas d'entrée)
+      g_derivLastStrat = (derivSig != SPIKE_NONE) ? derivStratName : "---";
+      g_derivLastSig   = derivSig;
+      g_derivLastBar   = barTime;
+
+      if(derivSig != SPIKE_NONE)
+      {
+         SpikeResult derivSpike;
+         derivSpike.type       = derivSig;
+         derivSpike.zScore     = spike.zScore;
+         derivSpike.rsi        = spike.rsi;
+         derivSpike.atr        = spike.atr > 0 ? spike.atr : GetATR();
+         derivSpike.stairScore = stairNow;
+
+         string whyDeriv;
+         if(CanEnterInDirection(derivSpike.type, false, derivSpike, whyDeriv))
+         {
+            PrintFormat("[SpikeRider] 📐 %s %s | %s",
+                        derivStratName,
+                        (derivSpike.type == SPIKE_BUY ? "BUY" : "SELL"),
+                        whyDeriv);
+            entryDone = EnterSpikeTrade(derivSpike, imminence, false);
+         }
+         else if(InpDebug)
+            PrintFormat("[SpikeRider] %s bloqué: %s", derivStratName, whyDeriv);
+      }
    }
 
    // ── Entrée B : pré-spike/imminence (option 1) — priorité TV si sniper actif ─

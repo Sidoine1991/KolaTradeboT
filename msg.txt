@@ -1,0 +1,36 @@
+📊 TradBOT [09:07 UTC]
+
+*XAUUSD — Suivi 20min* | 30/05 09:07 UTC
+━━━━━━━━━━━━━━━━━━━━
+💰 *Prix live :* $4540.53
+📍 VWAP : $4537.031 → prix AU-DESSUS
+📊 BB : [4491.736 / 4533.319 / 4574.901] → position haut
+⚡ Supertrend : $5415.077 (↑) → EN-DESSOUS
+📐 Fibo : Entry $4394.270 | TP1 $4422.207
+━━━━━━━━━━━━━━━━━━━━
+🟢 *Verdict GOM KOLA : PERFECT BUY*
+   Score BUY=7.53  SELL=2.08  Spike=13.39%
+   RSI=58 | ST=↑
+━━━━━━━━━━━━━━━━━━━━
+⚠️ *Biais session :* NEUTRAL 0% | ❌ EXPIRED 26.3h
+━━━━━━━━━━━━━━━━━━━━
+📦 *Ordre EA : BUY ACTIF*
+   Entrée: $4540.53
+   Confiance: 88%
+━━━━━━━━━━━━━━━━━━━━
+❌ *Rapport TradingAgents :* INACTIF
+━━━━━━━━━━━━━━━━━━━━
+🔬 *Analyse croisée*
+  → PERFECT BUY signal ultra-fort (7.5 score, 13% spike, 58% quality)
+  → Biais expiré mais ordre EA confirme BUY
+  → Setup OB_BULL Entry $4394.27 TP1 $4422.21
+  → Confluence maximale : GOM PERFECT BUY + Ordre EA BUY
+  → Prédiction: 148 bull vs 4 bear (36:1 ratio)
+
+🎯 *Décision scalping*
+  → BUY IMMÉDIAT (signal PERFECT + ordre aligné)
+  → Entry court: $4394.27 SL $4366.33
+  → Objectifs: $4422.21 puis $4436.18
+  → Confiance: TRÈS FORTE (7.5/10)
+━━━━━━━━━━━━━━━━━━━━
+_Prochain check dans 20 min_
