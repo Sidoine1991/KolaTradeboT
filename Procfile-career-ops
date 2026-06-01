@@ -1,0 +1,2 @@
+web: python career_ops_service.py
+scheduler: python career_ops_scheduler_rds.py
