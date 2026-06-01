@@ -24,10 +24,10 @@ if ($pythonPath) {
 
 # Verify project
 Write-Host "[Check] Project path..." -ForegroundColor Yellow
-if (Test-Path "$ProjectPath\career_ops\scheduler.py") {
-    Write-Host "[OK] Scheduler found: $ProjectPath\career_ops\scheduler.py"
+if (Test-Path "$ProjectPath\career_ops\scheduler_extended.py") {
+    Write-Host "[OK] Scheduler found: $ProjectPath\career_ops\scheduler_extended.py"
 } else {
-    Write-Host "[ERROR] Scheduler not found at $ProjectPath\career_ops\scheduler.py"
+    Write-Host "[ERROR] Scheduler not found at $ProjectPath\career_ops\scheduler_extended.py"
     exit 1
 }
 
@@ -37,7 +37,7 @@ Write-Host "[Setup] Creating task action..." -ForegroundColor Yellow
 
 $taskAction = New-ScheduledTaskAction `
     -Execute $pythonPath `
-    -Argument "career_ops\scheduler.py" `
+    -Argument "career_ops\scheduler_extended.py" `
     -WorkingDirectory $ProjectPath
 
 Write-Host "[OK] Task action created"
@@ -59,7 +59,6 @@ $taskSettings = New-ScheduledTaskSettingsSet `
     -DontStopIfGoingOnBatteries `
     -StartWhenAvailable `
     -RunOnlyIfNetworkAvailable `
-    -RunOnlyIfIdle $false `
     -MultipleInstances IgnoreNew `
     -ExecutionTimeLimit ([TimeSpan]::FromHours(2))
 
@@ -79,7 +78,7 @@ try {
         -Action $taskAction `
         -Trigger $taskTrigger `
         -Settings $taskSettings `
-        -Description "Career-Ops: Daily autonomous job scan at 06:00 WAT" `
+        -Description "Career-Ops: Daily autonomous 11-source job scan (06:00 WAT) with WhatsApp delivery" `
         -Force | Out-Null
 
     Write-Host "[OK] Task registered: $TaskName"
@@ -111,9 +110,11 @@ Write-Host ""
 
 Write-Host "Task Information:"
 Write-Host "  Name: $TaskName"
-Write-Host "  Schedule: Daily @ $Time"
-Write-Host "  Action: python career_ops\scheduler.py"
+Write-Host "  Schedule: Daily @ $Time (06:00 WAT)"
+Write-Host "  Action: python career_ops\scheduler_extended.py (11 sources)"
 Write-Host "  Location: $ProjectPath"
+Write-Host "  Capacity: 315-585 jobs/day"
+Write-Host "  Delivery: WhatsApp via PsychoBot"
 Write-Host ""
 
 Write-Host "Manual Execution:"
