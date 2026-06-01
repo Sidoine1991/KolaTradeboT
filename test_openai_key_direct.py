@@ -6,7 +6,7 @@ import requests
 if sys.platform == "win32":
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 
-api_key = "REMOVED_OPENAI_KEY"
+api_key = "YOUR_OPENAI_API_KEY"
 
 print("=" * 70)
 print("  TEST CLÉ OPENAI")

@@ -21,8 +21,8 @@ print("=" * 80)
 
 # Configuration
 AUDIO_FILE = r"C:\Users\USER\Downloads\WhatsApp Ptt 2026-05-31 at 12.29.09.ogg"
-OPENAI_API_KEY = "REMOVED_OPENAI_KEY"
-NVIDIA_API_KEY = "REMOVED_NVIDIA_KEY_1"
+OPENAI_API_KEY = "YOUR_OPENAI_API_KEY"
+NVIDIA_API_KEY = "YOUR_NVIDIA_API_KEY"
 
 print(f"\n📂 Fichier audio: {AUDIO_FILE}")
 

@@ -139,8 +139,8 @@ Note: Plus cher long terme, mais gratuit la 1ère année
    → Service: psychobot-1si7
    → Environment tab
    → Add 3 variables:
-      AWS_ACCESS_KEY_ID = REMOVED_AWS_KEY_ID
-      AWS_SECRET_ACCESS_KEY = REMOVED_AWS_SECRET
+      AWS_ACCESS_KEY_ID = YOUR_AWS_ACCESS_KEY_ID
+      AWS_SECRET_ACCESS_KEY = YOUR_AWS_SECRET_ACCESS_KEY
       AWS_REGION = us-east-1
    → Save Changes
    ```

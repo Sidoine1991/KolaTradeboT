@@ -16,13 +16,13 @@
 Variable 1:
 ───────────────────────────────────────────────────────────────────────
 Key:    AWS_ACCESS_KEY_ID
-Value:  REMOVED_AWS_KEY_ID
+Value:  YOUR_AWS_ACCESS_KEY_ID
 
 
 Variable 2:
 ───────────────────────────────────────────────────────────────────────
 Key:    AWS_SECRET_ACCESS_KEY
-Value:  REMOVED_AWS_SECRET
+Value:  YOUR_AWS_SECRET_ACCESS_KEY
 
 
 Variable 3:

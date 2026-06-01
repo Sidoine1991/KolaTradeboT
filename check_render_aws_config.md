@@ -45,14 +45,14 @@ Dans **Environment** → **Add Environment Variable** :
 
 ```
 Key: AWS_ACCESS_KEY_ID
-Value: REMOVED_AWS_KEY_ID
+Value: YOUR_AWS_ACCESS_KEY_ID
 ```
 
 Cliquer **Add** → Ajouter la deuxième :
 
 ```
 Key: AWS_SECRET_ACCESS_KEY
-Value: REMOVED_AWS_SECRET
+Value: YOUR_AWS_SECRET_ACCESS_KEY
 ```
 
 Cliquer **Add** → Ajouter la troisième :
@@ -152,7 +152,7 @@ Si AWS ne fonctionne vraiment pas, utiliser OpenAI :
 
 **Clé actuelle (si présente) :**
 ```
-REMOVED_OPENAI_KEY
+YOUR_OPENAI_API_KEY
 ```
 
 **Problème possible :** Clé invalide ou pas de crédits.
