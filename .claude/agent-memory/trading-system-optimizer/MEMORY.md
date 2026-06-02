@@ -1,4 +1,0 @@
-- [Capital Profile](project_capital_profile.md) — Capital 20$ USD, ultra-conservateur, lot 0.01, max 1%/trade, Boom/Crash spike
-- [GoldSMC EA v4](goldsmc_v4_config.md) — v4 deployed: base v2 + 8 critical v3 fixes, SL=1.5xATR, RR=3.0, BuyBias=true
-- [GoldSMC EA v5](goldsmc_v5_config.md) — v5: W1 regime auto (BULL/BEAR/TRANSITION), partial TP RR=1.5+3.0, BuyBiasOnly removed
-- [v5 Backtest BEAR](goldsmc_v5_backtest_bear.md) — v5 BEAR 2022-2023: +20% vs v4 -13.1%, PF=1.55, Sharpe=1.72, DD=-4.8%
