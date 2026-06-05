@@ -3863,17 +3863,15 @@ bool IsOBBlockingPath(const int dir, const string reason_out)
 }
 
 //+------------------------------------------------------------------+
-//| Vérifie que le prix est bien à l'OB entry (pullback requis)      |
+//| Vérifie que le prix est sur l'OB entry OU sur le niveau KOLA    |
+//| KOLA BUY/SELL = anticipation valide avant même l'OB pullback    |
 //+------------------------------------------------------------------+
 bool IsPriceAtOBEntry(const int dir)
 {
-   if(!g_setupValid || g_setupEntry <= 0) return true; // pas de setup = pas de contrainte
-
    double price = (dir == 1) ? SymbolInfoDouble(_Symbol, SYMBOL_ASK)
                               : SymbolInfoDouble(_Symbol, SYMBOL_BID);
 
-   // Tolérance serrée : ATR * 0.3 ou 0.05% du prix (le plus grand)
-   // Garantit que le prix est vraiment SUR l'OB, pas à distance
+   // Calcul tolérance ATR M5
    double atrTol = 0.0;
    int hAtr = iATR(_Symbol, PERIOD_M5, 14);
    if(hAtr != INVALID_HANDLE)
@@ -3883,14 +3881,43 @@ bool IsPriceAtOBEntry(const int dir)
       if(CopyBuffer(hAtr, 0, 1, 1, atrBuf) >= 1) atrTol = atrBuf[0] * 0.3;
       IndicatorRelease(hAtr);
    }
-   double tol = MathMax(atrTol, price * 0.0005);  // réduit de 0.15% → 0.05%
+   double tol = MathMax(atrTol, price * 0.0005);
 
-   if(MathAbs(price - g_setupEntry) > tol)
+   // ── PRIORITÉ 1 : Prix touche le niveau KOLA (anticipation) ──────────
+   // KOLA BUY → entrée BUY dès que le prix touche ce niveau
+   // KOLA SELL → entrée SELL dès que le prix touche ce niveau
+   double kolaLevel = (dir == 1) ? g_lastKolaBuy : g_lastKolaSell;
+   if(kolaLevel > 0 && MathAbs(price - kolaLevel) <= tol)
    {
-      PrintOnce(StringFormat("[OB-Guard] %s attente pullback OB — prix %.5f | entry %.5f | dist=%.5f tol=%.5f",
-            _Symbol, price, g_setupEntry, MathAbs(price - g_setupEntry), tol), 15);
+      PrintOnce(StringFormat("[KOLA-Entry] %s %s | prix %.5f touche KOLA %.5f ✅ — entrée anticipée",
+            _Symbol, (dir==1?"BUY":"SELL"), price, kolaLevel), 15);
+      return true;
+   }
+
+   // ── PRIORITÉ 2 : Prix touche l'OB entry du setup GOM ────────────────
+   if(g_setupValid && g_setupEntry > 0)
+   {
+      if(MathAbs(price - g_setupEntry) <= tol)
+      {
+         PrintOnce(StringFormat("[OB-Entry] %s %s | prix %.5f sur OB entry %.5f ✅",
+               _Symbol, (dir==1?"BUY":"SELL"), price, g_setupEntry), 15);
+         return true;
+      }
+      // Prix entre KOLA et OB entry — attendre l'un des deux niveaux
+      PrintOnce(StringFormat("[OB-Guard] %s attente KOLA %.5f ou OB %.5f | prix %.5f",
+            _Symbol, kolaLevel, g_setupEntry, price), 15);
       return false;
    }
+
+   // Pas de setup OB — autoriser si KOLA est proche (priorité 1 a déjà été vérifiée)
+   if(kolaLevel > 0)
+   {
+      PrintOnce(StringFormat("[OB-Guard] %s attente KOLA %.5f | prix %.5f (dist=%.5f tol=%.5f)",
+            _Symbol, kolaLevel, price, MathAbs(price - kolaLevel), tol), 15);
+      return false;
+   }
+
+   // Ni OB ni KOLA disponibles — laisser passer (GOM seul suffit)
    return true;
 }
 
