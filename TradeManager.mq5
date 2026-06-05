@@ -121,7 +121,7 @@ input int    GOMGlobalTrendMinStrength = 55; // Force mini (0-100) pour filtrer 
 input bool   GOMWaitPullbackToKola    = true; // Entrer seulement sur pullback OM (KOLA NEAR BUY/SELL)
 input bool   RequireGlobalDirMatch    = true;  // ✅ Exiger que TF Global soit dans la même direction
 input int    GlobalDirMinConfidence   = 70;    // Confiance TF global minimale (%) pour autoriser l'entrée
-input double GlobalMinCoherencePct    = 60.0;  // Cohérence GOM minimale (%) pour autoriser l'entrée
+input double GlobalMinCoherencePct    = 45.0;  // Cohérence GOM minimale (%) — 45 évite de bloquer les PERFECT BUY/SELL
 
 input group "=== SETUP TV — ORDRE LIMITE ==="
 input bool   UseTVSetupLimit          = true;   // Placer ordre limite depuis tableau SETUP TV
@@ -2754,6 +2754,18 @@ void IngestPendingOrderForSymbol(const string sym, const string &body)
 
    if(isXau) Print(StringFormat("[TradeManager] ✅ %s: Found %s order (entry=%.2f SL=%.2f TP=%.2f lot=%.2f)",
          sym, action, entry, sl, tp, lot));
+
+   // Auto-calculer SL/TP si absents — utiliser niveaux GOM (KOLA/setup) ou ATR
+   if(sl <= 0 || tp <= 0)
+   {
+      int    dir2  = (action == "BUY") ? 1 : -1;
+      double ref   = (entry > 0) ? entry : ((dir2==1) ? SymbolInfoDouble(sym,SYMBOL_ASK) : SymbolInfoDouble(sym,SYMBOL_BID));
+      double slC = sl, tpC = tp;
+      ComputeAutoSLTPPrices(sym, dir2, lot, ref, slC, tpC);
+      if(sl <= 0 && slC > 0) sl = slC;
+      if(tp <= 0 && tpC > 0) tp = tpC;
+      if(isXau) Print(StringFormat("[TradeManager] 🔧 %s: SL/TP auto-calculés SL=%.5f TP=%.5f", sym, sl, tp));
+   }
 
    // ⭐ PRIORITÉ GOM: GOOD/PERFECT ou signal score fort (sell>>buy)
    if(UseGOMScalp && (TimeCurrent() - g_lastGOMPoll) < GOMSignalMaxAgeSec)
