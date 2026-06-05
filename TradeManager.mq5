@@ -2131,27 +2131,64 @@ void ManageAllTrailing()
       }
 
       if(!shouldActivate) continue;
+      if(profitPerPt <= 0) continue;
 
-      // Nouveau SL = verrouiller % du pic de profit
-      if(profitPerPt <= 0) continue;  // déjà calculé plus haut
+      int    dg       = (int)SymbolInfoInteger(sym, SYMBOL_DIGITS);
+      double pt       = SymbolInfoDouble(sym, SYMBOL_POINT);
+      double peakUse  = MathMax(g_states[idx].peakProfit, ticketPeak);
+      double minMove  = pt * 3;
+      double newSL    = 0;
+      string phase    = "";
 
-      double lockPct = g_states[idx].forceTrailing ? 0.5 : TrailLockPct;
-      double peakUse = MathMax(g_states[idx].peakProfit, ticketPeak);
-      double lockPts = (peakUse * lockPct) / profitPerPt;
-      int    dg      = (int)SymbolInfoInteger(sym, SYMBOL_DIGITS);
-      double newSL   = NormalizeDouble((dir == 1) ? ep + lockPts : ep - lockPts, dg);
-      double minMove = SymbolInfoDouble(sym, SYMBOL_POINT) * 3;
+      // ── PHASE 1 : $1–$2 → Breakeven obligatoire (entry + 1 pt buffer) ──
+      // ── PHASE 2 : $2–$4 → Verrouiller 50% du pic depuis entry         ──
+      // ── PHASE 3 : $4+   → Trailing serré 75% depuis prix ACTUEL       ──
 
+      if(peakUse >= 4.0 || (g_states[idx].forceTrailing && peakUse >= 2.0))
+      {
+         // Phase 3 — trailing serré sur prix courant : recul max = 25% du pic
+         double allowedGivebackUSD = peakUse * 0.25;
+         double allowedGivebackPts = allowedGivebackUSD / profitPerPt;
+         newSL = NormalizeDouble(
+            (dir == 1) ? (bid - allowedGivebackPts) : (bid + allowedGivebackPts), dg);
+         // Ne jamais descendre sous breakeven
+         double be = NormalizeDouble((dir == 1) ? ep + pt : ep - pt, dg);
+         if(dir == 1) newSL = MathMax(newSL, be);
+         else         newSL = MathMin(newSL, be);
+         phase = StringFormat("Phase3 serré | recul max $%.2f (25%%)", allowedGivebackUSD);
+      }
+      else if(peakUse >= 2.0)
+      {
+         // Phase 2 — verrouiller 50% du pic depuis entry
+         double lockPts = (peakUse * 0.50) / profitPerPt;
+         newSL = NormalizeDouble((dir == 1) ? ep + lockPts : ep - lockPts, dg);
+         phase = StringFormat("Phase2 lock50%% | SL verrouille $%.2f (50%% de $%.2f)", peakUse * 0.50, peakUse);
+      }
+      else
+      {
+         // Phase 1 — breakeven : SL à entry + 1 point buffer
+         newSL = NormalizeDouble((dir == 1) ? ep + pt : ep - pt, dg);
+         phase = "Phase1 breakeven";
+      }
+
+      // Vérifier stops_level broker
+      int stopsLvl = (int)SymbolInfoInteger(sym, SYMBOL_TRADE_STOPS_LEVEL);
+      double minDist = (double)(stopsLvl + 2) * pt;
+      double ask = SymbolInfoDouble(sym, SYMBOL_ASK);
+      if(dir == 1 && (ask - newSL) < minDist)
+         newSL = NormalizeDouble(ask - minDist, dg);
+      if(dir == -1 && (newSL - bid) < minDist)
+         newSL = NormalizeDouble(bid + minDist, dg);
+
+      // N'appliquer que si le nouveau SL est meilleur que l'actuel
       bool better = (dir == 1) ? (newSL > curSL + minMove)
                                : (curSL == 0 || newSL < curSL - minMove);
       if(!better) continue;
 
       if(trade.PositionModify(posInfo.Ticket(), newSL, posInfo.TakeProfit()))
       {
-         Print(StringFormat("[TradeManager] ✅ %s Trailing SL ACTIVÉ: %.5f→%.5f | profit=$%.2f peak=$%.2f | verrouille=%.1f%% du pic",
-               sym, curSL, newSL, curProfit, g_states[idx].peakProfit, lockPct * 100));
-         Print(StringFormat("[TradeManager] 🛡️ %s Perte maximale acceptée: %.5f (%.1f%% sous entry)",
-               sym, (dir == 1 ? ep - newSL : newSL - ep), ((ep - newSL) / slDist * 100)));
+         Print(StringFormat("[TradeManager] 🛡️ %s %s | SL %.5f→%.5f | profit=$%.2f peak=$%.2f",
+               sym, phase, curSL, newSL, curProfit, peakUse));
          SyncSLTPToServer(posInfo.Ticket(), newSL, posInfo.TakeProfit(), "ea_trailing");
       }
    }
