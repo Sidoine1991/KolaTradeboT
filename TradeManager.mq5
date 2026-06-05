@@ -1991,17 +1991,16 @@ double ExtractJSONDouble(string json, string key)
 void AutoSetSLTP(int idx)
 {
    string sym = g_states[idx].symbol;
-   double tickVal = SymbolInfoDouble(sym, SYMBOL_TRADE_TICK_VALUE);
-   double tickSz  = SymbolInfoDouble(sym, SYMBOL_TRADE_TICK_SIZE);
-   double lot     = g_states[idx].originalLot;
-   int    dg      = (int)SymbolInfoInteger(sym, SYMBOL_DIGITS);
+   double lot = g_states[idx].originalLot;
+   int    dg  = (int)SymbolInfoInteger(sym, SYMBOL_DIGITS);
+   double ep  = g_states[idx].openPrice;
+   int    dir = g_states[idx].direction;
 
-   double slPts = (tickSz > 0 && tickVal > 0 && lot > 0) ? (MaxRiskUSD * tickSz / (lot * tickVal)) : 50;
-   double tpPts = (tickSz > 0 && tickVal > 0 && lot > 0) ? (TargetProfitUSD * tickSz / (lot * tickVal)) : 100;
+   double newSL = 0.0, newTP = 0.0;
+   ComputeAutoSLTPPrices(sym, dir, lot, ep, newSL, newTP);
 
-   double ep = g_states[idx].openPrice;
-   double newSL = (g_states[idx].direction == 1) ? NormalizeDouble(ep - slPts, dg) : NormalizeDouble(ep + slPts, dg);
-   double newTP = (g_states[idx].direction == 1) ? NormalizeDouble(ep + tpPts, dg) : NormalizeDouble(ep - tpPts, dg);
+   double slPts = MathAbs(ep - newSL);
+   double tpPts = MathAbs(ep - newTP);
 
    for(int i = PositionsTotal()-1; i >= 0; i--)
    {
@@ -3775,16 +3774,58 @@ bool HasMCPOpenPosition(const string sym)
 void ComputeAutoSLTPPrices(const string sym, const int dir, const double lot,
                            const double entryPx, double &outSL, double &outTP)
 {
-   double tickVal = SymbolInfoDouble(sym, SYMBOL_TRADE_TICK_VALUE);
-   double tickSz  = SymbolInfoDouble(sym, SYMBOL_TRADE_TICK_SIZE);
-   double useLot  = (lot > 0) ? lot : SymbolInfoDouble(sym, SYMBOL_VOLUME_MIN);
-   int    dg      = (int)SymbolInfoInteger(sym, SYMBOL_DIGITS);
-   double slDist = (tickSz > 0 && tickVal > 0 && useLot > 0)
-                   ? (MaxRiskUSD * tickSz / (useLot * tickVal))
-                   : 50.0 * SymbolInfoDouble(sym, SYMBOL_POINT);
-   double tpDist = (tickSz > 0 && tickVal > 0 && useLot > 0)
-                   ? (TargetProfitUSD * tickSz / (useLot * tickVal))
-                   : 100.0 * SymbolInfoDouble(sym, SYMBOL_POINT);
+   int    dg  = (int)SymbolInfoInteger(sym, SYMBOL_DIGITS);
+   double pt  = SymbolInfoDouble(sym, SYMBOL_POINT);
+
+   // ── Lire ATR M5 (14 périodes) pour calibrer SL/TP sur la volatilité réelle ──
+   double atrVal = 0.0;
+   int hAtr = iATR(sym, PERIOD_M5, 14);
+   if(hAtr != INVALID_HANDLE)
+   {
+      double atrBuf[];
+      ArraySetAsSeries(atrBuf, true);
+      if(CopyBuffer(hAtr, 0, 1, 1, atrBuf) >= 1) atrVal = atrBuf[0];
+      IndicatorRelease(hAtr);
+   }
+   // Fallback si ATR indisponible : 0.3% du prix
+   if(atrVal <= 0) atrVal = entryPx * 0.003;
+
+   // ── Priorité 1 : niveaux GOM (OB setup ou KOLA) ──
+   // SL = au-delà du niveau structure (OB SL du setup, ou KOLA opposé + buffer)
+   double slDist = 0.0;
+   double tpDist = 0.0;
+
+   if(g_setupValid && g_setupSL > 0 && g_setupDir == dir)
+   {
+      // Utiliser le SL du setup OB GOM — il est déjà positionné sur la structure
+      slDist = MathAbs(entryPx - g_setupSL);
+      // TP1 du setup si disponible, sinon R/R 1:2
+      if(g_setupTP1 > 0)
+         tpDist = MathAbs(entryPx - g_setupTP1);
+      else
+         tpDist = slDist * 2.0;
+   }
+   else
+   {
+      // ── Priorité 2 : niveaux KOLA comme cible ──
+      double kolaOpposite = (dir == 1) ? g_lastKolaSell : g_lastKolaBuy;
+      if(kolaOpposite > 0 && MathAbs(entryPx - kolaOpposite) > atrVal * 0.5)
+         tpDist = MathAbs(entryPx - kolaOpposite);
+      else
+         tpDist = atrVal * 3.0;  // TP = 3× ATR minimum
+
+      // SL = 1.5× ATR sous/sur l'entrée — respect de la structure
+      slDist = atrVal * 1.5;
+   }
+
+   // ── Sécurités minimales ──
+   double minSL = atrVal * 1.0;   // SL jamais inférieur à 1× ATR
+   double minTP = atrVal * 1.5;   // TP jamais inférieur à 1.5× ATR
+   slDist = MathMax(slDist, minSL);
+   tpDist = MathMax(tpDist, minTP);
+   // R/R minimum 1:1.5
+   if(tpDist < slDist * 1.5) tpDist = slDist * 1.5;
+
    if(dir == 1)
    {
       outSL = NormalizeDouble(entryPx - slDist, dg);
