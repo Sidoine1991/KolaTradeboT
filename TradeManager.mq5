@@ -377,6 +377,8 @@ struct SymbolState
    bool     waitingReEntry;
    bool     forceTrailing;   // SL/TP refusés par broker — trailing activé de force
    datetime lastReEntryFail; // Timestamp dernier échec re-entrée (anti-spam)
+   datetime lastSLHitTime;   // Timestamp dernière fermeture par SL — bloque re-entrée 10min
+   int      consecutiveLosses; // Nombre de SL consécutifs sur ce symbole
    datetime stagnationZoneSince;  // Début zone profit >= StagnationTriggerUSD
    datetime stagnationLastPeakTime; // Dernier nouveau pic de profit
    double   stagnationPeakUSD;    // Pic profit en zone stagnation
@@ -1826,6 +1828,8 @@ void ScanAllPositions()
       g_states[idx].waitingReEntry   = false;
       g_states[idx].forceTrailing    = false;
       g_states[idx].lastReEntryFail  = 0;
+      g_states[idx].lastSLHitTime    = 0;
+      g_states[idx].consecutiveLosses = 0;
       g_states[idx].stagnationZoneSince    = 0;
       g_states[idx].stagnationLastPeakTime = 0;
       g_states[idx].stagnationPeakUSD       = 0.0;
@@ -2221,8 +2225,25 @@ void CheckAllReEntries()
             g_states[i].closePrice     = closePrice;
             g_states[i].waitingReEntry = true;
             g_states[i].peakProfit     = 0;
-            Print(StringFormat("[TradeManager] 🔴 %s fermé @ %.5f — attente re-entrée sur EMA%d/EMA%d",
-                  g_states[i].symbol, closePrice, EMA_Fast, EMA_Slow));
+
+            // Détecter fermeture par SL : close_price proche du SL original
+            double slRef  = g_states[i].originalSL;
+            double pt     = SymbolInfoDouble(g_states[i].symbol, SYMBOL_POINT);
+            bool   hitSL  = (slRef > 0 && MathAbs(closePrice - slRef) <= pt * 20);
+            // Aussi : si peakProfit était <= 0 → trade n'a jamais été en profit = perte nette
+            if(hitSL || g_states[i].peakProfit <= 0.10)
+            {
+               g_states[i].lastSLHitTime = TimeCurrent();
+               g_states[i].consecutiveLosses++;
+               Print(StringFormat("[TradeManager] ❌ %s PERTE (SL hit #%d) @ %.5f — cooldown re-entrée 10min",
+                     g_states[i].symbol, g_states[i].consecutiveLosses, closePrice));
+            }
+            else
+            {
+               g_states[i].consecutiveLosses = 0; // reset si sorti en profit
+               Print(StringFormat("[TradeManager] 🔴 %s fermé @ %.5f — attente re-entrée sur EMA%d/EMA%d",
+                     g_states[i].symbol, closePrice, EMA_Fast, EMA_Slow));
+            }
          }
       }
       else
@@ -2247,10 +2268,24 @@ void TryReEntryOnEMA(int idx)
       return;
    }
 
-   // Cooldown minimal
+   // Cooldown minimal entre re-entrées
    if(g_states[idx].lastReEntry > 0 &&
       (int)(TimeCurrent() - g_states[idx].lastReEntry) < ReEntryCooldownSec)
       return;
+
+   // Cooldown post-SL : 10 min après une perte, 20 min après 2 pertes consécutives
+   if(g_states[idx].lastSLHitTime > 0)
+   {
+      int losses    = g_states[idx].consecutiveLosses;
+      int cooldownSec = (losses >= 2) ? 1200 : 600; // 20min si 2+ pertes, 10min sinon
+      int elapsed   = (int)(TimeCurrent() - g_states[idx].lastSLHitTime);
+      if(elapsed < cooldownSec)
+      {
+         PrintOnce(StringFormat("[TM-EMA] %s re-entrée bloquée — %d perte(s) consécutive(s), attendre %ds (reste %ds)",
+               sym, losses, cooldownSec, cooldownSec - elapsed), 60);
+         return;
+      }
+   }
 
    double bid    = SymbolInfoDouble(sym, SYMBOL_BID);
    double ask    = SymbolInfoDouble(sym, SYMBOL_ASK);
@@ -4124,6 +4159,21 @@ void CheckGOMReEntry()
       string posSym = g_gomReEntry[i].symbol;
       int    dir    = g_gomReEntry[i].direction;
       int    vnum   = g_lastGOMVerdictNum;
+
+      // Cooldown post-SL via g_states
+      int sIdx2 = FindState(posSym);
+      if(sIdx2 >= 0 && g_states[sIdx2].lastSLHitTime > 0)
+      {
+         int losses2    = g_states[sIdx2].consecutiveLosses;
+         int cooldown2  = (losses2 >= 2) ? 1200 : 600;
+         int elapsed2   = (int)(TimeCurrent() - g_states[sIdx2].lastSLHitTime);
+         if(elapsed2 < cooldown2)
+         {
+            PrintOnce(StringFormat("[GOM-ReEntry] %s bloqué — %d perte(s) SL, reste %ds",
+                  posSym, losses2, cooldown2 - elapsed2), 60);
+            continue;
+         }
+      }
 
       bool gomGood = (vnum == 2 || vnum == 3 || vnum == -2 || vnum == -3);
       bool aligned = gomGood && ((dir == -1 && vnum <= -2) || (dir == 1 && vnum >= 2));
