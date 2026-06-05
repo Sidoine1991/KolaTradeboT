@@ -2186,12 +2186,17 @@ void ManageAllTrailing()
 
       // Vérifier stops_level broker
       int stopsLvl = (int)SymbolInfoInteger(sym, SYMBOL_TRADE_STOPS_LEVEL);
-      double minDist = (double)(stopsLvl + 2) * pt;
-      double ask = SymbolInfoDouble(sym, SYMBOL_ASK);
-      if(dir == 1 && (ask - newSL) < minDist)
-         newSL = NormalizeDouble(ask - minDist, dg);
-      if(dir == -1 && (newSL - bid) < minDist)
-         newSL = NormalizeDouble(bid + minDist, dg);
+      double minDist = (double)(stopsLvl + 5) * pt;
+      double ask2 = SymbolInfoDouble(sym, SYMBOL_ASK);
+      // BUY : SL doit être sous BID (pas ask) — le broker valide par rapport au BID
+      if(dir == 1 && (bid - newSL) < minDist)
+      {
+         newSL = NormalizeDouble(bid - minDist, dg);
+         // Si newSL < entry → breakeven impossible, abandonner ce tick
+         if(newSL <= ep) continue;
+      }
+      if(dir == -1 && (newSL - ask2) < minDist)
+         newSL = NormalizeDouble(ask2 + minDist, dg);
 
       // N'appliquer que si le nouveau SL est meilleur que l'actuel
       bool better = (dir == 1) ? (newSL > curSL + minMove)
