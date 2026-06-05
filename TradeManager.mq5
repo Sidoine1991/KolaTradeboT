@@ -475,6 +475,16 @@ int OnInit()
       Print("[Dashboard] Enabled - Update interval: " + IntegerToString(DashboardUpdateSec) + "s");
       RefreshDashboard();
    }
+
+   // Forcer un poll + dessin immédiat au chargement — pas d'attente du premier tick
+   if(UseGOMScalp)
+   {
+      g_lastGOMPoll = 0; // forcer le poll
+      PollGOMScalpVerdict();
+   }
+   DrawEntryLevels();
+   if(ShowGOMPathCandles) DrawGOMPathPredictedCandles();
+
    return INIT_SUCCEEDED;
 }
 
@@ -482,7 +492,8 @@ void OnDeinit(const int reason)
 {
    EventKillTimer();
    if(UseDashboard) RemoveAllDashboardObjects();
-   CleanupGOMPathObjects();
+   // Ne pas supprimer les niveaux GOM/OB/chemin — ils restent visibles après rechargement
+   // CleanupGOMPathObjects() — désactivé intentionnellement
    for(int i = 0; i < g_stateCount; i++)
    {
       if(g_states[i].hRSI     != INVALID_HANDLE) IndicatorRelease(g_states[i].hRSI);
