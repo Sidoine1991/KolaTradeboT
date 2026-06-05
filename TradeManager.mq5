@@ -2752,7 +2752,20 @@ void IngestPendingOrderForSymbol(const string sym, const string &body)
       return;
    }
 
-   if(isXau) Print(StringFormat("[TradeManager] ✅ %s: Found %s order (entry=%.2f SL=%.2f TP=%.2f lot=%.2f)",
+   // Sanity check : entry_price doit être dans ±20% du prix courant
+   // Protège contre les ordres corrompus ou les vieux caches MQL5
+   if(entry > 0)
+   {
+      double curPx = (action=="BUY") ? SymbolInfoDouble(sym,SYMBOL_ASK) : SymbolInfoDouble(sym,SYMBOL_BID);
+      if(curPx > 0 && (MathAbs(entry - curPx) / curPx) > 0.20)
+      {
+         Print(StringFormat("[TradeManager] ⚠️ %s: entry=%.5f aberrant (prix=%.5f écart=%.1f%%) — REJETÉ",
+               sym, entry, curPx, MathAbs(entry-curPx)/curPx*100));
+         return;
+      }
+   }
+
+   Print(StringFormat("[TradeManager] ✅ %s: Found %s order (entry=%.2f SL=%.2f TP=%.2f lot=%.2f)",
          sym, action, entry, sl, tp, lot));
 
    // Auto-calculer SL/TP si absents — utiliser niveaux GOM (KOLA/setup) ou ATR
