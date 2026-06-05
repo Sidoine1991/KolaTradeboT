@@ -22492,10 +22492,10 @@ async def get_gom_verdict(symbol: str = "XAUUSD"):
             and float(verdict.get("score_sell") or 0) == 0):
         return {"ok": False, "symbol": sym, "verdict": "WAIT",
                 "message": "GOM stale — is gom_verdict_poller running?"}
-    # Refuser si données trop vieilles (> 2 min) — TV/poller déconnecté
+    # Refuser si données trop vieilles (> 15 min) — TV/poller déconnecté
     try:
         age = (datetime.utcnow() - datetime.fromisoformat(verdict["timestamp"])).total_seconds()
-        if age > 120:
+        if age > 900:
             return {"ok": False, "symbol": sym, "verdict": verdict.get("verdict"),
                     "message": f"GOM stale ({int(age)}s) — relancer gom_verdict_poller.py"}
     except Exception:
@@ -23479,6 +23479,110 @@ async def get_gom_tableau_complete(symbol: str = "XAUUSD"):
     except Exception as e:
         logger.error(f"Error in /gom-tableau-complete: {e}", exc_info=True)
         return {"ok": False, "symbol": symbol, "error": str(e)}
+
+
+# ═══════════════════════════════════════════════════════════════════
+# BRIDGE — MCP Watchlist Scan (appel depuis morning_scan_report.py)
+# ═══════════════════════════════════════════════════════════════════
+
+class BridgeMcpScanBody(BaseModel):
+    symbols: List[str]
+
+@app.post("/bridge/mcp-watchlist-scan")
+async def bridge_mcp_watchlist_scan(body: BridgeMcpScanBody):
+    """
+    Orchestre le scan multi-symboles: ML predict + AutoScan par symbole.
+    Retourne les résultats au format attendu par MorningScanReportGenerator.normalize_result().
+    N'effectue pas d'appels HTTP internes pour éviter les deadlocks — lit directement les stores.
+    """
+    results = []
+    for symbol in body.symbols[:25]:
+        try:
+            sym_clean = symbol.upper().strip()
+            entry_price   = None
+            current_price = 0.0
+            stop_loss     = None
+            take_profit   = None
+            atr_val       = None
+            confluence    = 0.0
+            direction     = "NEUTRAL"
+            reasons: List[str] = []
+
+            # ── Session bias stocké sur fichier (mis à jour par bridge ou GOM poller) ──
+            try:
+                store = _read_session_bias_store()
+                bias_data = store.get(sym_clean, {})
+                if bias_data.get("direction") in ("BUY", "SELL"):
+                    bias_dir  = bias_data["direction"]
+                    bias_conf = float(bias_data.get("confidence", 0.5))
+                    direction = bias_dir
+                    confluence += bias_conf * 4
+                    reasons.append(f"Bias:{bias_dir}({bias_conf:.0%})")
+            except Exception:
+                pass
+
+            # ── GOM verdict (mis à jour par gom_verdict_poller) ──
+            try:
+                gom = _GOM_VERDICT_STORE.get(sym_clean, {})
+                gom_v = str(gom.get("verdict", "")).upper()
+                if gom_v in ("BUY", "GOOD BUY", "PERFECT BUY"):
+                    gv_dir  = "BUY"
+                    gv_conf = 0.7 if "PERFECT" in gom_v else 0.55
+                    if direction == "NEUTRAL":
+                        direction = gv_dir
+                    if gv_dir == direction:
+                        confluence += gv_conf * 3
+                        reasons.append(f"GOM:{gom_v}")
+                    else:
+                        confluence -= 1.0
+                elif gom_v in ("SELL", "GOOD SELL", "PERFECT SELL"):
+                    gv_dir  = "SELL"
+                    gv_conf = 0.7 if "PERFECT" in gom_v else 0.55
+                    if direction == "NEUTRAL":
+                        direction = gv_dir
+                    if gv_dir == direction:
+                        confluence += gv_conf * 3
+                        reasons.append(f"GOM:{gom_v}")
+                    else:
+                        confluence -= 1.0
+                if gom.get("setup_entry"):
+                    entry_price = float(gom["setup_entry"])
+                if gom.get("setup_sl"):
+                    stop_loss = float(gom["setup_sl"])
+                if gom.get("setup_tp1"):
+                    take_profit = float(gom["setup_tp1"])
+            except Exception:
+                pass
+
+            # ── ATR SL/TP auto si manquants ──
+            if direction in ("BUY", "SELL") and atr_val and not stop_loss:
+                cp = entry_price or current_price
+                if cp and cp > 0:
+                    entry_price = entry_price or cp
+                    stop_loss   = round(cp - atr_val * 1.5, 5) if direction == "BUY" else round(cp + atr_val * 1.5, 5)
+                    take_profit = round(cp + atr_val * 3.0, 5) if direction == "BUY" else round(cp - atr_val * 3.0, 5)
+
+            confluence = min(round(confluence, 2), 10.0)
+
+            results.append({
+                "symbol":        sym_clean,
+                "success":       True,
+                "current_price": current_price,
+                "bias":          {"direction": direction, "score": confluence, "reasons": reasons},
+                "entry_setup":   {
+                    "valid":            direction in ("BUY", "SELL") and confluence >= 4.0,
+                    "confluence_score": confluence,
+                    "direction":        direction,
+                    "entry_price":      entry_price,
+                    "stop_loss":        stop_loss,
+                    "take_profit":      take_profit,
+                    "atr":              atr_val,
+                },
+            })
+        except Exception as e:
+            results.append({"symbol": symbol, "success": False, "error": str(e)})
+
+    return {"ok": True, "count": len(results), "all_results": results}
 
 
 if __name__ == "__main__":
