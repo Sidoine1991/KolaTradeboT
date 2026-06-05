@@ -806,54 +806,84 @@ void DrawHLine(const string name, const double price, const color clr,
 //+------------------------------------------------------------------+
 //| Dessine Entry OB / SL / TP + KOLA sur le chart MT5 courant      |
 //+------------------------------------------------------------------+
+// Dessine une ligne horizontale bornée dans le temps (OBJ_TREND) avec label
+void DrawTLine(const string name, const double price, const color clr,
+               const int width, const ENUM_LINE_STYLE style, const string lbl,
+               const int barsBack = 5, const int barsForward = 80)
+{
+   ObjectDelete(0, name);
+   if(price <= 0) return;
+   datetime t0  = iTime(_Symbol, PERIOD_CURRENT, barsBack);
+   datetime tE  = iTime(_Symbol, PERIOD_CURRENT, 0) + PeriodSeconds(PERIOD_CURRENT) * barsForward;
+   if(t0 <= 0) t0 = TimeCurrent() - PeriodSeconds(PERIOD_CURRENT) * barsBack;
+   ObjectCreate(0, name, OBJ_TREND, 0, t0, price, tE, price);
+   ObjectSetInteger(0, name, OBJPROP_COLOR,      clr);
+   ObjectSetInteger(0, name, OBJPROP_WIDTH,      width);
+   ObjectSetInteger(0, name, OBJPROP_STYLE,      style);
+   ObjectSetInteger(0, name, OBJPROP_RAY_RIGHT,  false);
+   ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
+   ObjectSetInteger(0, name, OBJPROP_BACK,       false);
+   ObjectSetString (0, name, OBJPROP_TEXT,       lbl);
+}
+
 void DrawEntryLevels()
 {
    static datetime s_lastDraw = 0;
    if((int)(TimeCurrent() - s_lastDraw) < 3) return;
    s_lastDraw = TimeCurrent();
 
-   // Niveaux KOLA — toujours affichés dès que GOM poll a des données
-   DrawHLine("TM_KOLA_BUY",  g_lastKolaBuy,  clrDodgerBlue, 2, STYLE_DASH,
-             StringFormat("KOLA BUY  %.5f", g_lastKolaBuy));
-   DrawHLine("TM_KOLA_SELL", g_lastKolaSell, clrOrangeRed,  2, STYLE_DASH,
-             StringFormat("KOLA SELL %.5f", g_lastKolaSell));
+   int dg = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
 
+   // ── Niveaux KOLA ──────────────────────────────────────────────────
+   DrawTLine("TM_KOLA_BUY",  g_lastKolaBuy,  clrDodgerBlue, 2, STYLE_DASH,
+             StringFormat("KOLA BUY %."+IntegerToString(dg)+"f", g_lastKolaBuy));
+   DrawTLine("TM_KOLA_SELL", g_lastKolaSell, clrOrangeRed,  2, STYLE_DASH,
+             StringFormat("KOLA SELL %."+IntegerToString(dg)+"f", g_lastKolaSell));
+
+   // ── BB (résistance/support dynamique) ─────────────────────────────
+   DrawTLine("TM_BB_UP", g_lastBBUp, clrSilver, 1, STYLE_DOT,
+             StringFormat("BB Sup %."+IntegerToString(dg)+"f", g_lastBBUp));
+   DrawTLine("TM_BB_DN", g_lastBBDn, clrSilver, 1, STYLE_DOT,
+             StringFormat("BB Inf %."+IntegerToString(dg)+"f", g_lastBBDn));
+
+   // ── Niveaux OB Setup ──────────────────────────────────────────────
    if(g_setupValid && g_setupEntry > 0)
    {
       color cE = (g_setupDir == 1) ? clrDodgerBlue : clrOrangeRed;
 
-      DrawHLine("TM_OB_ENTRY", g_setupEntry, cE,          3, STYLE_SOLID,
-                StringFormat("ENTRY %s %.5f", g_setupType, g_setupEntry));
-      DrawHLine("TM_OB_SL",    g_setupSL,    clrCrimson,  2, STYLE_DASH,
-                StringFormat("SL %.5f", g_setupSL));
-      DrawHLine("TM_OB_TP1",   g_setupTP1,   clrLimeGreen,2, STYLE_DASH,
-                StringFormat("TP1 %.5f", g_setupTP1));
-      DrawHLine("TM_OB_TP2",   g_setupTP2,   clrLimeGreen,1, STYLE_DOT,
-                StringFormat("TP2 %.5f", g_setupTP2));
+      DrawTLine("TM_OB_ENTRY", g_setupEntry, cE, 3, STYLE_SOLID,
+                StringFormat("ENTRY %s %."+IntegerToString(dg)+"f", g_setupType, g_setupEntry));
+      DrawTLine("TM_OB_SL",    g_setupSL,    clrCrimson,   2, STYLE_DASH,
+                StringFormat("SL %."+IntegerToString(dg)+"f", g_setupSL));
+      DrawTLine("TM_OB_TP1",   g_setupTP1,   clrLimeGreen, 2, STYLE_DASH,
+                StringFormat("TP1 %."+IntegerToString(dg)+"f", g_setupTP1));
+      DrawTLine("TM_OB_TP2",   g_setupTP2,   clrLimeGreen, 1, STYLE_DOT,
+                StringFormat("TP2 %."+IntegerToString(dg)+"f", g_setupTP2));
 
-      // Zone OB entre Entry et SL
+      // Zone OB colorée (rectangle Entry → SL)
       ObjectDelete(0, "TM_OB_ZONE");
       if(g_setupSL > 0)
       {
-         datetime t0  = iTime(_Symbol, PERIOD_CURRENT, 0);
-         datetime tE  = t0 + PeriodSeconds(PERIOD_CURRENT) * 80;
-         double   zH  = MathMax(g_setupEntry, g_setupSL);
-         double   zL  = MathMin(g_setupEntry, g_setupSL);
+         datetime t0 = iTime(_Symbol, PERIOD_CURRENT, 10);
+         datetime tE = iTime(_Symbol, PERIOD_CURRENT, 0) + PeriodSeconds(PERIOD_CURRENT) * 60;
+         double zH = MathMax(g_setupEntry, g_setupSL);
+         double zL = MathMin(g_setupEntry, g_setupSL);
          ObjectCreate(0, "TM_OB_ZONE", OBJ_RECTANGLE, 0, t0, zH, tE, zL);
-         ObjectSetInteger(0, "TM_OB_ZONE", OBJPROP_COLOR, cE);
-         ObjectSetInteger(0, "TM_OB_ZONE", OBJPROP_BACK,  true);
-         ObjectSetInteger(0, "TM_OB_ZONE", OBJPROP_FILL,  true);
+         ObjectSetInteger(0, "TM_OB_ZONE", OBJPROP_COLOR,      cE);
+         ObjectSetInteger(0, "TM_OB_ZONE", OBJPROP_BACK,       true);
+         ObjectSetInteger(0, "TM_OB_ZONE", OBJPROP_FILL,       true);
          ObjectSetInteger(0, "TM_OB_ZONE", OBJPROP_SELECTABLE, false);
       }
 
-      // Label fixe coin haut-gauche
+      // Label résumé coin haut-gauche
       ObjectDelete(0, "TM_OB_LABEL");
       ObjectCreate(0, "TM_OB_LABEL", OBJ_LABEL, 0, 0, 0);
       ObjectSetInteger(0, "TM_OB_LABEL", OBJPROP_CORNER,    CORNER_LEFT_UPPER);
       ObjectSetInteger(0, "TM_OB_LABEL", OBJPROP_XDISTANCE, 10);
       ObjectSetInteger(0, "TM_OB_LABEL", OBJPROP_YDISTANCE, 30);
       ObjectSetString (0, "TM_OB_LABEL", OBJPROP_TEXT,
-         StringFormat("%s  E:%.5f  SL:%.5f  TP1:%.5f  RR:%.1f",
+         StringFormat("%s  E:%."+IntegerToString(dg)+"f  SL:%."+IntegerToString(dg)
+            +"f  TP1:%."+IntegerToString(dg)+"f  RR:%.1f",
             g_setupType, g_setupEntry, g_setupSL, g_setupTP1, g_setupRR));
       ObjectSetInteger(0, "TM_OB_LABEL", OBJPROP_COLOR,    clrWhite);
       ObjectSetInteger(0, "TM_OB_LABEL", OBJPROP_FONTSIZE, 10);
@@ -888,16 +918,43 @@ void DrawGOMPathPredictedCandles()
       && (int)(TimeCurrent() - g_lastGOMPathDraw) < GOMPathDrawRefreshSec)
       return;
 
-   if(StringLen(g_predPath) < 5)
+   // Si pred_path absent → construire localement depuis pred_net et les TF GOM
+   string usePath = g_predPath;
+   if(StringLen(usePath) < 5)
    {
-      PrintOnce("[GOM-Path] pred_path absent — activer path_in_alert dans Pine + poller", 120);
-      return;
+      // pred_net = différence bull-bear sur 200 barres
+      // On construit un chemin simplifié depuis la direction globale et pred_net
+      int netDir = 0;
+      if(g_predNet > 20)       netDir =  1;  // tendance haussière
+      else if(g_predNet < -20) netDir = -1;  // tendance baissière
+
+      // Fallback : utiliser la direction GOM globale
+      if(netDir == 0)
+      {
+         if(StringCompare(g_lastGOMGlobalDir, "BULL") == 0) netDir =  1;
+         if(StringCompare(g_lastGOMGlobalDir, "BEAR") == 0) netDir = -1;
+      }
+
+      if(netDir != 0)
+      {
+         string ch = (netDir == 1) ? "U" : "D";
+         int nGen = MathMin(GOMPathDrawBars, 60); // 60 barres max en mode local
+         usePath = "";
+         for(int k = 0; k < nGen; k++) usePath += ch;
+         PrintOnce(StringFormat("[GOM-Path] pred_path local construit (%d barres %s depuis pred_net=%d global=%s)",
+               nGen, ch, g_predNet, g_lastGOMGlobalDir), 60);
+      }
+      else
+      {
+         PrintOnce("[GOM-Path] pred_path absent et direction indéterminée — dessin ignoré", 120);
+         return;
+      }
    }
 
    CleanupGOMPathObjects();
 
    ENUM_TIMEFRAMES tf = PERIOD_M1;
-   int nBars = MathMin(GOMPathDrawBars, StringLen(g_predPath));
+   int nBars = MathMin(GOMPathDrawBars, StringLen(usePath));
    int dg = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
 
    double atrBuf[];
@@ -920,7 +977,7 @@ void DrawGOMPathPredictedCandles()
 
    for(int i = 0; i < nBars; i++)
    {
-      ushort ch = StringGetCharacter(g_predPath, i);
+      ushort ch = StringGetCharacter(usePath, i);
       int pdir = (ch == 'U') ? 1 : (ch == 'D') ? -1 : 0;
       double o = y;
       double c = y + pdir * stepPx;
