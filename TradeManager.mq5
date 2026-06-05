@@ -4984,6 +4984,66 @@ void DisplayCompleteGOMDashboard(const GOMData &gom)
    DrawDashCell("V1_SRC", xCur, y1, cellW, cellH,
                 src + " " + ts, cBg, cTxt);
 
+   // ── Ligne SETUP (3ème ligne — au-dessus des 2 premières) ─────────────
+   // Affiche le tableau SETUP TradingView : type, entry, SL, TP1, TP2, RR, confirm
+   int y2 = marginBot + (cellH + gap) * 2;   // ligne au-dessus de y0
+   xCur   = marginLR;
+
+   // Col 0 — Type setup + direction
+   color cSetup = (g_setupDir == 1) ? ColorBuy : (g_setupDir == -1) ? ColorSell : ColorNeutral;
+   string setupLabel = (g_setupValid && g_setupEntry > 0)
+      ? g_setupType + (g_setupDir == 1 ? " ▲" : " ▼")
+      : "NO SETUP";
+   DrawDashCell("S0_TYPE", xCur, y2, cellW, cellH, setupLabel, cSetup, cTxt);
+
+   // Col 1 — Entry OB
+   xCur += cellW + gap;
+   string entryTxt = (g_setupEntry > 0) ? "E " + DoubleToString(g_setupEntry, (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS)) : "---";
+   DrawDashCell("S1_ENTRY", xCur, y2, cellW, cellH, entryTxt, cSetup, cTxt);
+
+   // Col 2 — SL
+   xCur += cellW + gap;
+   string slTxt = (g_setupSL > 0) ? "SL " + DoubleToString(g_setupSL, (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS)) : "---";
+   DrawDashCell("S2_SL", xCur, y2, cellW, cellH, slTxt, ColorSell, cTxt);
+
+   // Col 3 — TP1
+   xCur += cellW + gap;
+   string tp1Txt = (g_setupTP1 > 0) ? "TP1 " + DoubleToString(g_setupTP1, (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS)) : "---";
+   DrawDashCell("S3_TP1", xCur, y2, cellW, cellH, tp1Txt, ColorBuy, cTxt);
+
+   // Col 4 — TP2
+   xCur += cellW + gap;
+   string tp2Txt = (g_setupTP2 > 0) ? "TP2 " + DoubleToString(g_setupTP2, (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS)) : "---";
+   DrawDashCell("S4_TP2", xCur, y2, cellW, cellH, tp2Txt, ColorBuy, cTxt);
+
+   // Col 5 — R/R
+   xCur += cellW + gap;
+   string rrTxt = (g_setupRR > 0) ? "R/R " + DoubleToString(g_setupRR, 1) : "R/R ---";
+   color cRR = (g_setupRR >= 1.5) ? ColorBuy : (g_setupRR > 0) ? ColorNeutral : cBg;
+   DrawDashCell("S5_RR", xCur, y2, cellW, cellH, rrTxt, cRR, cTxt);
+
+   // Col 6 — Confirm pattern
+   xCur += cellW + gap;
+   string confTxt = (StringLen(g_setupConfirm) > 0) ? g_setupConfirm : "CONFIRM ---";
+   DrawDashCell("S6_CONF", xCur, y2, cellW, cellH, confTxt, cBg, cTxt);
+
+   // Col 7 — OB entry guard (prix proche de l'entry ?)
+   xCur += cellW + gap;
+   double curPx = (g_setupDir == 1) ? SymbolInfoDouble(_Symbol, SYMBOL_ASK)
+                                     : SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double tol   = (curPx > 0) ? curPx * 0.0015 : 0;
+   bool nearEntry = (g_setupEntry > 0 && tol > 0 && MathAbs(curPx - g_setupEntry) <= tol);
+   string guardTxt = (g_setupEntry > 0) ? (nearEntry ? "AT OB ✓" : "WAIT OB") : "---";
+   color  cGuard   = nearEntry ? ColorBuy : ColorNeutral;
+   DrawDashCell("S7_GUARD", xCur, y2, cellW, cellH, guardTxt, cGuard, cTxt);
+
+   // Col 8 — OB path guard (chemin libre vers TP ?)
+   xCur += cellW + gap;
+   bool pathBlocked = IsOBBlockingPath(g_setupDir, "");
+   string pathTxt = (g_setupValid) ? (pathBlocked ? "OB BLOCK ✗" : "PATH OK ✓") : "---";
+   color  cPath    = (!g_setupValid) ? cBg : pathBlocked ? ColorSell : ColorBuy;
+   DrawDashCell("S8_PATH", xCur, y2, cellW, cellH, pathTxt, cPath, cTxt);
+
    #undef TF_COLOR
 
    ChartRedraw();
