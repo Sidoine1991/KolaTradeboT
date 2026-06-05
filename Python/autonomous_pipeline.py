@@ -237,6 +237,11 @@ def _lot_min(symbol: str) -> float:
 
 
 def _compute_lot(symbol: str, entry: float, sl: float, capital: float, risk_pct: float) -> float:
+    # RÈGLE : toujours utiliser le lot minimum — sécurité maximale
+    return _lot_min(symbol)
+
+def _compute_lot_full(symbol: str, entry: float, sl: float, capital: float, risk_pct: float) -> float:
+    """Calcul complet du lot (conservé pour référence, non utilisé en auto)."""
     """
     Lot = risk_amount / (sl_dist_in_price_points * dollar_per_point_per_lot)
     Références (valeur du point par lot entier):
@@ -370,7 +375,20 @@ class AutonomousPipeline:
 
         date_str = datetime.utcnow().strftime("%Y-%m-%d")
         worker   = str(_HERE / "ta_worker.py")
-        python   = sys.executable
+
+        # Charger .env si pas encore chargé (subprocess ne l'hérite pas toujours)
+        _env_file = _ROOT / ".env"
+        if _env_file.exists() and not os.getenv("AI_TRADINGAGENTS_REPO_PATH"):
+            for line in _env_file.read_text(encoding="utf-8").splitlines():
+                if "=" in line and not line.startswith("#"):
+                    k, _, v = line.partition("=")
+                    os.environ.setdefault(k.strip(), v.strip())
+
+        # Utiliser le venv TradingAgents — contient typer, langchain, etc.
+        ta_repo = os.getenv("AI_TRADINGAGENTS_REPO_PATH", "")
+        _ta_venv = Path(ta_repo) / ".venv" / "Scripts" / "python.exe" if ta_repo else None
+        python = str(_ta_venv) if _ta_venv and _ta_venv.exists() else sys.executable
+        log.info("  [TA] Python: %s", python)
 
         def _run_one(scan: ScanResult) -> TAResult:
             log.info("  [TA] Démarrage analyse: %s", scan.symbol)

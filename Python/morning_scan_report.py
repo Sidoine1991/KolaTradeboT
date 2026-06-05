@@ -2,7 +2,8 @@
 # -*- coding: utf-8 -*-
 """
 Complete Morning Scan Report Generator
-Analyzes markets via TradingView MCP, generates Word report, sends via WhatsApp
+Analyzes markets via TradingView MCP watchlist scan, generates Word report,
+sends via WhatsApp and pushes safe signals (score >= 6) to TradeManager.
 """
 
 import sys
@@ -27,6 +28,9 @@ except ImportError:
 if sys.platform == "win32":
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 
+# Minimum confluence score to auto-send signal to TradeManager
+SAFE_SIGNAL_MIN_SCORE = 6
+
 class MorningScanReportGenerator:
     def __init__(self):
         self.ai_server = "http://127.0.0.1:8000"
@@ -35,15 +39,11 @@ class MorningScanReportGenerator:
         self.reports_dir = Path("D:/Dev/TradBOT/reports/morning_scan")
         self.reports_dir.mkdir(parents=True, exist_ok=True)
 
-        # Priority symbols for morning scan
+        # Default symbols for morning scan (used as fallback)
         self.priority_symbols = [
-            # Forex majors
             "EURUSD", "GBPUSD", "USDJPY", "USDCHF", "AUDUSD", "NZDUSD", "USDCAD",
-            # Commodities
-            "XAUUSD", "XAGUSD", "USOIL",
-            # Indices
+            "XAUUSD", "XAGUSD",
             "US30", "US500", "NAS100",
-            # Crypto
             "BTCUSD", "ETHUSD"
         ]
 
@@ -54,96 +54,171 @@ class MorningScanReportGenerator:
         hour = now.hour
 
         open_symbols = []
-
         for symbol in self.priority_symbols:
-            # Crypto - always open
             if any(c in symbol for c in ["BTC", "ETH"]):
                 open_symbols.append(symbol)
                 continue
-
-            # Forex/Commodities - weekdays
-            if weekday < 5:  # Monday to Friday
+            if weekday < 5:
                 open_symbols.append(symbol)
-            elif weekday == 5 and hour < 22:  # Friday until 22:00
+            elif weekday == 5 and hour < 22:
                 open_symbols.append(symbol)
-            elif weekday == 6 and hour >= 22:  # Sunday from 22:00
+            elif weekday == 6 and hour >= 22:
                 open_symbols.append(symbol)
 
         return open_symbols
 
-    def analyze_symbol(self, symbol: str) -> Optional[Dict]:
-        """Analyze symbol via AI server"""
+    def run_mcp_watchlist_scan(self, symbols: List[str]) -> List[Dict]:
+        """
+        Call the MCP tradbot_watchlist_scan tool via the ai_server bridge.
+        Falls back to /ml/predict per symbol if bridge unavailable.
+        """
         try:
-            # Use /ml/predict endpoint with symbol parameter
-            response = requests.get(
-                f"{self.ai_server}/ml/predict",
-                params={"symbol": symbol},
-                timeout=30
+            response = requests.post(
+                f"{self.ai_server}/bridge/mcp-watchlist-scan",
+                json={"symbols": symbols},
+                timeout=120
             )
-
             if response.status_code == 200:
                 data = response.json()
+                return data.get("all_results", [])
+        except Exception:
+            pass
 
-                # Extract signal info from AI server response
-                signal = data.get("signal", data.get("recommendation", "NEUTRAL"))
-                confidence = data.get("confidence", data.get("score", 0.5))
+        # Fallback: analyze each symbol via /ml/predict
+        results = []
+        for symbol in symbols:
+            try:
+                r = requests.get(f"{self.ai_server}/ml/predict", params={"symbol": symbol}, timeout=30)
+                if r.status_code == 200:
+                    d = r.json()
+                    signal = d.get("signal", d.get("recommendation", "NEUTRAL"))
+                    confidence = d.get("confidence", d.get("score", 0.5))
+                    if confidence > 1:
+                        confidence /= 100
+                    direction = "BUY" if signal == "BUY" else "SELL" if signal == "SELL" else "NEUTRAL"
+                    results.append({
+                        "symbol": symbol,
+                        "success": True,
+                        "current_price": d.get("current_price", 0),
+                        "bias": {"direction": direction, "score": round(confidence * 10, 1), "reasons": []},
+                        "entry_setup": {
+                            "valid": signal in ["BUY", "SELL"],
+                            "confluence_score": round(confidence * 10, 1),
+                            "direction": direction,
+                            "entry_price": d.get("entry_price", d.get("current_price", 0)),
+                            "stop_loss": d.get("stop_loss"),
+                            "take_profit": d.get("take_profit"),
+                        }
+                    })
+            except Exception as e:
+                print(f"  ⚠️ {symbol}: {e}")
+        return results
 
-                # Ensure confidence is 0-1
-                if confidence > 1:
-                    confidence = confidence / 100
+    def normalize_result(self, raw: Dict) -> Dict:
+        """Flatten MCP scan result into a uniform dict for report/signal use."""
+        if not raw.get("success"):
+            return {
+                "symbol": raw.get("symbol", "?"),
+                "direction": "NEUTRAL",
+                "bias_score": 0,
+                "entry_valid": False,
+                "entry_price": None,
+                "stop_loss": None,
+                "take_profit": None,
+                "confluence_score": 0,
+                "current_price": 0,
+                "reasons": [],
+                "success": False,
+            }
+        entry = raw.get("entry_setup", {})
+        bias = raw.get("bias", {})
+        score = abs(entry.get("confluence_score", bias.get("score", 0)))
+        direction = entry.get("direction", bias.get("direction", "NEUTRAL"))
+        return {
+            "symbol": raw.get("symbol", "?"),
+            "direction": direction,
+            "bias_score": score,
+            "entry_valid": entry.get("valid", False) and direction in ["BUY", "SELL"],
+            "entry_price": entry.get("entry_price"),
+            "stop_loss": entry.get("stop_loss"),
+            "take_profit": entry.get("take_profit"),
+            "confluence_score": score,
+            "current_price": raw.get("current_price", 0),
+            "reasons": bias.get("reasons", []),
+            "atr": entry.get("atr"),
+            "structure_m15": raw.get("structure_m15", {}),
+            "structure_h1": raw.get("structure_h1", {}),
+            "success": True,
+        }
 
-                direction = "BUY" if signal == "BUY" else "SELL" if signal == "SELL" else "NEUTRAL"
+    def send_signal_to_trade_manager(self, result: Dict) -> bool:
+        """POST a safe signal to TradeManager via /pending-order."""
+        score = result.get("confluence_score", 0)
+        if score < SAFE_SIGNAL_MIN_SCORE or not result.get("entry_valid"):
+            return False
+        direction = result.get("direction")
+        if direction not in ["BUY", "SELL"]:
+            return False
 
-                return {
-                    "symbol": symbol,
-                    "direction": direction,
-                    "bias_score": confidence * 10,  # Scale to 0-10
-                    "entry_valid": signal in ["BUY", "SELL"],
-                    "entry_price": data.get("entry_price", data.get("current_price", 0)),
-                    "stop_loss": data.get("stop_loss"),
-                    "take_profit": data.get("take_profit"),
-                    "confluence_score": confidence * 10,
-                    "current_price": data.get("current_price", 0),
-                    "success": True,
-                    "raw": data  # Keep raw for debugging
-                }
+        payload = {
+            "symbol": result["symbol"],
+            "action": direction,
+            "recommendation": direction,
+            "entry_price": result.get("entry_price"),
+            "stop_loss": result.get("stop_loss"),
+            "take_profit": result.get("take_profit"),
+            "execution_type": "limit",
+            "confidence": round(min(score / 10.0, 1.0), 2),
+            "reasoning": f"Morning scan SMC — score {score}/10 — " + ", ".join(result.get("reasons", [])),
+            "status": "ready",
+        }
+
+        try:
+            r = requests.post(f"{self.ai_server}/pending-order", json=payload, timeout=15)
+            if r.status_code == 200:
+                print(f"  ✅ Signal envoyé à TradeManager: {result['symbol']} {direction} @ {result.get('entry_price')} (score {score})")
+                return True
             else:
-                print(f"⚠️ Analysis failed for {symbol}: HTTP {response.status_code}")
-                return None
-
+                print(f"  ⚠️ TradeManager {result['symbol']}: HTTP {r.status_code} — {r.text[:200]}")
+                return False
         except Exception as e:
-            print(f"❌ Error analyzing {symbol}: {e}")
-            return None
+            print(f"  ❌ TradeManager {result['symbol']}: {e}")
+            return False
 
-    def generate_text_report(self, results: List[Dict]) -> str:
+    def generate_text_report(self, results: List[Dict], sent_symbols: List[str] = None) -> str:
         """Generate text summary for WhatsApp"""
         now = datetime.utcnow().strftime("%d/%m/%Y %H:%M UTC")
+        sent_symbols = sent_symbols or []
 
-        # Filter valid entries
         valid_signals = [r for r in results if r.get("entry_valid")]
-
-        # Sort by confluence score
         top_3 = sorted(valid_signals, key=lambda x: x.get("confluence_score", 0), reverse=True)[:3]
 
-        message = f"📊 TradBOT Morning Scan Report\n"
-        message += f"🕐 Generated: {now}\n"
-        message += f"📈 Symbols analyzed: {len(results)}\n"
-        message += f"✅ Valid setups: {len(valid_signals)}\n\n"
+        message = f"📊 *TradBOT — Scan Matinal*\n"
+        message += f"🕐 {now}\n"
+        message += f"📈 Symboles analysés : {len(results)} | ✅ Setups valides : {len(valid_signals)}\n"
+        if sent_symbols:
+            message += f"🚀 *Signaux envoyés à TradeManager :* {', '.join(sent_symbols)}\n"
+        message += f"━━━━━━━━━━━━━━━━━━━━\n\n"
 
         if top_3:
-            message += "🎯 TOP 3 OPPORTUNITIES:\n\n"
+            message += "🎯 *TOP 3 OPPORTUNITÉS :*\n\n"
             for i, signal in enumerate(top_3, 1):
-                message += f"{i}. {signal['symbol']} - {signal['direction']}\n"
-                message += f"   💯 Score: {signal.get('confluence_score', 0):.1f}\n"
-                message += f"   💰 Entry: {signal.get('entry_price', 'N/A')}\n"
-                message += f"   🛑 SL: {signal.get('stop_loss', 'N/A')}\n"
-                message += f"   🎯 TP: {signal.get('take_profit', 'N/A')}\n\n"
+                direction_emoji = "🟢" if signal["direction"] == "BUY" else "🔴"
+                sent_tag = " 🚀" if signal["symbol"] in sent_symbols else ""
+                message += f"{i}. *{signal['symbol']}* {direction_emoji} {signal['direction']}{sent_tag}\n"
+                message += f"   💯 Score : {signal.get('confluence_score', 0):.1f}/10\n"
+                entry = signal.get('entry_price')
+                message += f"   💰 Entry : {entry if entry else 'N/A'}\n"
+                message += f"   🛑 SL : {signal.get('stop_loss', 'N/A')}\n"
+                message += f"   🎯 TP : {signal.get('take_profit', 'N/A')}\n"
+                if signal.get("reasons"):
+                    message += f"   📋 {' | '.join(signal['reasons'][:2])}\n"
+                message += "\n"
         else:
-            message += "⚠️ No high-quality setups found\n"
-            message += "📊 Market conditions: Low volatility or unclear trends\n\n"
+            message += "⚠️ Aucun setup de qualité trouvé\n"
+            message += "📊 Marché : faible volatilité ou tendance incertaine\n\n"
 
-        message += "📁 Full analysis attached as Word document"
-
+        message += "📁 Rapport complet Word en pièce jointe"
         return message
 
     def generate_word_report(self, results: List[Dict]) -> Optional[Path]:
@@ -261,36 +336,48 @@ class MorningScanReportGenerator:
             return None
 
     def send_via_whatsapp(self, message: str, file_path: Optional[Path] = None) -> bool:
-        """Send report via PsychoBot"""
+        """Send report via PsychoBot — message + optional Word file via tmpfiles upload"""
+        import urllib3
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
         try:
-            payload = {
-                "phone": self.phone,
-                "message": message
-            }
-
-            # Add file if provided
-            if file_path and file_path.exists():
-                with open(file_path, "rb") as f:
-                    file_data = f.read()
-
-                file_base64 = base64.b64encode(file_data).decode('utf-8')
-                payload["file_data"] = file_base64
-                payload["file_name"] = file_path.name
-                payload["file_type"] = "text/plain"  # or application/vnd... for .docx
-
+            # 1. Send text message
             response = requests.post(
                 f"{self.psychobot_url}/send-message",
-                json=payload,
+                json={"phone": self.phone, "message": message},
                 timeout=30,
                 verify=False
             )
-
-            if response.status_code in [200, 201]:
-                print(f"✅ WhatsApp sent successfully")
-                return True
-            else:
-                print(f"❌ WhatsApp failed: HTTP {response.status_code}")
+            if response.status_code not in [200, 201]:
+                print(f"❌ WhatsApp message failed: HTTP {response.status_code}")
                 return False
+            print(f"✅ WhatsApp message sent")
+
+            # 2. Send Word file — base64 direct vers PsychoBot (pas de service tiers)
+            if file_path and file_path.exists():
+                try:
+                    import base64
+                    print(f"📤 Envoi {file_path.name} via base64 → PsychoBot...")
+                    file_b64 = base64.b64encode(file_path.read_bytes()).decode("utf-8")
+                    file_resp = requests.post(
+                        f"{self.psychobot_url}/send-file",
+                        json={
+                            "phone": self.phone,
+                            "message": f"📎 {file_path.name}",
+                            "file_base64": file_b64,
+                            "file_name": file_path.name,
+                            "mime_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                        },
+                        timeout=60,
+                        verify=False
+                    )
+                    if file_resp.status_code == 200 and file_resp.json().get("success"):
+                        print(f"✅ Word file sent via WhatsApp")
+                    else:
+                        print(f"⚠️ File send: {file_resp.status_code} — {file_resp.text[:200]}")
+                except Exception as file_err:
+                    print(f"⚠️ File upload/send skipped: {file_err}")
+
+            return True
 
         except Exception as e:
             print(f"❌ WhatsApp error: {e}")
@@ -313,39 +400,51 @@ class MorningScanReportGenerator:
         except Exception as e:
             print(f"❌ Logging failed: {e}")
 
-    def run(self, no_file: bool = False):
-        """Main execution"""
+    def run(self, no_file: bool = False, scan_results: List[Dict] = None):
+        """Main execution.
+
+        Args:
+            no_file: Skip Word document generation.
+            scan_results: Pre-fetched MCP scan results (list of raw dicts from
+                          tradbot_watchlist_scan). If provided, skips the API scan.
+        """
         print("🚀 Starting Morning Scan Report Generation\n")
 
-        # Get open market symbols
-        symbols = self.get_open_market_symbols()
-        print(f"📊 Analyzing {len(symbols)} open market symbols...\n")
+        # Step 1: Get scan data
+        if scan_results is not None:
+            print(f"📊 Using {len(scan_results)} pre-fetched MCP results\n")
+            raw_results = scan_results
+        else:
+            symbols = self.get_open_market_symbols()
+            print(f"📊 Scanning {len(symbols)} open market symbols via MCP...\n")
+            raw_results = self.run_mcp_watchlist_scan(symbols)
 
-        # Analyze each symbol
-        results = []
-        for i, symbol in enumerate(symbols, 1):
-            print(f"[{i}/{len(symbols)}] Analyzing {symbol}...", end=" ")
-            analysis = self.analyze_symbol(symbol)
-            if analysis:
-                results.append(analysis)
-                print(f"✅ {analysis.get('direction', 'NEUTRAL')}")
-            else:
-                print("❌ Failed")
+        # Step 2: Normalize results
+        results = [self.normalize_result(r) for r in raw_results]
+        successful = [r for r in results if r.get("success")]
+        print(f"✅ Analysis complete: {len(successful)}/{len(results)} successful\n")
 
-        print(f"\n✅ Analysis complete: {len(results)}/{len(symbols)} successful\n")
+        # Step 3: Send safe signals to TradeManager
+        print("🚀 Envoi des signaux sûrs à TradeManager (score >= {})...\n".format(SAFE_SIGNAL_MIN_SCORE))
+        sent_symbols = []
+        for result in sorted(successful, key=lambda x: x.get("confluence_score", 0), reverse=True):
+            if self.send_signal_to_trade_manager(result):
+                sent_symbols.append(result["symbol"])
 
-        # Generate reports
-        text_message = self.generate_text_report(results)
+        if not sent_symbols:
+            print("  ℹ️ Aucun signal avec score suffisant — aucun envoi à TradeManager\n")
 
+        # Step 4: Generate Word report
         file_path = None
         if not no_file:
             file_path = self.generate_word_report(results)
 
-        # Send via WhatsApp
+        # Step 5: Build and send WhatsApp message
+        text_message = self.generate_text_report(results, sent_symbols)
+
         print("\n📤 Sending via WhatsApp...")
         success = self.send_via_whatsapp(text_message, file_path)
 
-        # Fallback: log to file
         if not success:
             print("⚠️ WhatsApp failed, logging to file...")
             self.log_to_file(text_message, file_path)

@@ -53,7 +53,11 @@ AI_SERVER_URL = "http://127.0.0.1:8000"
 SYMBOL        = "XAUUSD"
 MCP_NODE_ROOT = Path(r"D:\Dev\Depot Github\tradingview-mcp_kola")
 TV_CLI        = MCP_NODE_ROOT / "src" / "cli" / "index.js"
+TV_BAT        = MCP_NODE_ROOT / "scripts" / "launch_tv_debug.bat"
 POLL_INTERVAL = 5    # secondes — sync quasi temps réel (surclassé par --interval)
+
+# Ports CDP à tester dans l'ordre
+CDP_PORTS_CANDIDATES = [9222, 9223, 9224, 9225, 9229]
 
 logging.basicConfig(
     level=logging.INFO,
@@ -67,50 +71,253 @@ log = logging.getLogger(__name__)
 
 
 # ─────────────────────────────────────────────────────────────
-# Appel MCP via Node.js (même pattern que tv_mcp_client.py)
+# Détection CDP — trouve le port sur lequel TradingView écoute
 # ─────────────────────────────────────────────────────────────
 
-_MCP_SCRIPT = Path(__file__).parent / "gom_mcp_reader.mjs"
+import urllib.request as _urllib_req
+import os as _os
 
-_MCP_JS = r"""
-// gom_mcp_reader.mjs — lit study values + quote via CDP TradingView
-// Appelé par gom_verdict_poller.py via subprocess
+# Ne pas relancer TV (avec taskkill) plus souvent que ce délai
+_LAUNCH_COOLDOWN_SEC = float(_os.environ.get("GOM_TV_LAUNCH_COOLDOWN_SEC", "300"))
+_last_launch_attempt: float = 0.0
+_no_auto_launch_tv: bool = False
 
-import { createMcpClient } from '@tradingview-kola/mcp';
-
-async function main() {
-  const client = await createMcpClient();
-  try {
-    const [studies, quote] = await Promise.all([
-      client.callTool('data_get_study_values', {}),
-      client.callTool('quote_get', {}),
-    ]);
-    console.log(JSON.stringify({ studies, quote, success: true }));
-  } catch(e) {
-    console.log(JSON.stringify({ success: false, error: String(e) }));
-  } finally {
-    await client.close();
-  }
-}
-main();
-"""
+_active_cdp_port: Optional[int] = None   # mis en cache dès qu'on trouve
 
 
-def _run_tv_cli(command: list[str]) -> Optional[Dict[str, Any]]:
+def _probe_cdp_port(port: int, timeout: float = 2.0) -> bool:
+    """Retourne True si http://localhost:{port}/json/version répond."""
+    try:
+        with _urllib_req.urlopen(f"http://localhost:{port}/json/version", timeout=timeout) as r:
+            return r.status == 200
+    except Exception:
+        return False
+
+
+def detect_cdp_port(force: bool = False) -> Optional[int]:
     """
-    Appelle la CLI tradingview-kola : node src/cli/index.js <commande>
-    Exemple : node src/cli/index.js values
-              node src/cli/index.js quote
+    Cherche le premier port CDP actif parmi CDP_PORTS_CANDIDATES.
+    Met le résultat en cache. Retourne None si aucun port répond.
     """
+    global _active_cdp_port
+    if _active_cdp_port and not force:
+        if _probe_cdp_port(_active_cdp_port, timeout=1.5):
+            return _active_cdp_port
+        # Port mis en cache plus disponible — force re-scan
+        _active_cdp_port = None
+        log.warning("Port CDP mis en cache ne répond plus — re-scan...")
+
+    for port in CDP_PORTS_CANDIDATES:
+        if _probe_cdp_port(port):
+            _active_cdp_port = port
+            log.info(f"✅ Port CDP TradingView trouvé : {port}")
+            return port
+
+    return None
+
+
+def _auto_launch_tv_enabled() -> bool:
+    if _no_auto_launch_tv:
+        return False
+    v = _os.environ.get("GOM_TV_AUTO_LAUNCH", "1").strip().lower()
+    return v not in ("0", "false", "no", "off")
+
+
+def _tv_process_running() -> bool:
+    try:
+        proc = subprocess.run(
+            ["tasklist", "/FI", "IMAGENAME eq TradingView.exe", "/NH"],
+            capture_output=True,
+            text=True,
+            timeout=8,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+        return "TradingView.exe" in (proc.stdout or "")
+    except Exception:
+        return False
+
+
+def _find_tradingview_exe() -> Optional[Path]:
+    """Préfère la version Microsoft Store (CDP fiable) puis AppData Local."""
+    for key in ("GOM_TRADINGVIEW_EXE", "TRADINGVIEW_EXE"):
+        raw = _os.environ.get(key, "").strip().strip('"')
+        if raw:
+            p = Path(raw)
+            if p.is_file():
+                return p
+
+    pf = _os.environ.get("ProgramFiles", r"C:\Program Files")
+    store_root = Path(pf) / "WindowsApps"
+    if store_root.is_dir():
+        try:
+            for exe in sorted(store_root.glob("TradingView*/TradingView.exe")):
+                if exe.is_file():
+                    return exe
+        except OSError:
+            pass
+
+    candidates = [
+        Path(_os.environ.get("LOCALAPPDATA", "")) / "TradingView" / "TradingView.exe",
+        Path(r"C:\Program Files\TradingView\TradingView.exe"),
+        Path(r"C:\Program Files (x86)\TradingView\TradingView.exe"),
+    ]
+    for exe in candidates:
+        if exe.is_file():
+            return exe
+    return None
+
+
+def _start_tv_cdp_process(exe: Path, port: int) -> None:
+    """Démarre TV avec CDP sans hériter stdin/stdout (évite crash ICU Electron)."""
+    wd = str(exe.parent)
+    ps_cmd = (
+        "$psi = New-Object System.Diagnostics.ProcessStartInfo; "
+        f"$psi.FileName = '{str(exe).replace(chr(39), chr(39)+chr(39))}'; "
+        f"$psi.Arguments = '--remote-debugging-port={port}'; "
+        f"$psi.WorkingDirectory = '{wd.replace(chr(39), chr(39)+chr(39))}'; "
+        "$psi.UseShellExecute = $true; "
+        "[void][System.Diagnostics.Process]::Start($psi)"
+    )
+    subprocess.Popen(
+        ["powershell", "-NoProfile", "-Command", ps_cmd],
+        creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+def _wait_cdp_ready(port: int, attempts: int = 25, delay_sec: float = 2.0) -> bool:
+    global _active_cdp_port
+    for _ in range(attempts):
+        time.sleep(delay_sec)
+        if _probe_cdp_port(port):
+            _active_cdp_port = port
+            log.info(f"✅ TradingView CDP prêt sur port {port}")
+            return True
+    return False
+
+
+def _launch_tv_debug(port: int = 9222, *, force_kill: bool = False) -> bool:
+    """
+    Démarre TradingView en mode CDP.
+    Par défaut : ne tue PAS TradingView (évite la fermeture en boucle).
+    force_kill=True : utilise launch_tv_debug.bat (taskkill + relance).
+    """
+    global _last_launch_attempt
+
+    if not _auto_launch_tv_enabled():
+        log.warning(
+            "Auto-launch TV désactivé. Lance TradingView à la main :\n"
+            "  .\\scripts\\Start-TradingViewCDP.ps1\n"
+            "  puis vérifie : curl http://localhost:9222/json/version"
+        )
+        return False
+
+    now = time.time()
+    if now - _last_launch_attempt < _LAUNCH_COOLDOWN_SEC:
+        left = int(_LAUNCH_COOLDOWN_SEC - (now - _last_launch_attempt))
+        log.warning(
+            f"Relance TV ignorée (cooldown {left}s). "
+            "Si CDP ne répond pas, fermez TV puis lancez scripts\\Start-TradingViewCDP.ps1"
+        )
+        return _probe_cdp_port(port)
+
+    _last_launch_attempt = now
+
+    if _tv_process_running() and not force_kill:
+        log.warning(
+            "TradingView est ouvert mais le port CDP %s ne répond pas.\n"
+            "   → L'exe dans AppData\\Local ignore souvent --remote-debugging-port.\n"
+            "   → Fermez TV, puis : .\\scripts\\Start-TradingViewCDP.ps1\n"
+            "   → Ou définissez GOM_TRADINGVIEW_EXE vers la version Microsoft Store.",
+            port,
+        )
+        return False
+
+    exe = _find_tradingview_exe()
+    if exe and not force_kill:
+        log.info(f"🚀 Lancement TradingView CDP (sans taskkill) : {exe}")
+        try:
+            _start_tv_cdp_process(exe, port)
+        except Exception as e:
+            log.error(f"Impossible de lancer TradingView : {e}")
+            return False
+        if _wait_cdp_ready(port):
+            return True
+        log.error(
+            f"TradingView démarré mais CDP absent sur {port}. "
+            "Essayez la version Microsoft Store (WindowsApps) ou Start-TradingViewCDP.ps1"
+        )
+        return False
+
+    if not TV_BAT.exists():
+        log.error(f"Script .bat introuvable : {TV_BAT}")
+        return False
+
+    log.info(f"🚀 Lancement via {TV_BAT.name} (ferme les instances TV existantes)...")
+    try:
+        subprocess.Popen(
+            ["cmd", "/c", str(TV_BAT), str(port)],
+            cwd=str(MCP_NODE_ROOT),
+            creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
+        )
+    except Exception as e:
+        log.error(f"Impossible de lancer TradingView : {e}")
+        return False
+
+    if _wait_cdp_ready(port, attempts=18):
+        return True
+    log.error(f"TradingView n'a pas répondu sur le port {port} après ~36s")
+    return False
+
+
+def _ensure_tv_ready() -> Optional[int]:
+    """
+    Garantit que TradingView est lancé avec CDP.
+    Retourne le port actif, ou None si impossible.
+    """
+    port = detect_cdp_port()
+    if port:
+        return port
+
+    log.warning("⚠️ Aucun port CDP détecté — TradingView n'est pas en mode debug.")
+    if _auto_launch_tv_enabled():
+        log.warning("   → Tentative de lancement doux (sans fermer TV)...")
+        if _launch_tv_debug(9222, force_kill=False):
+            return detect_cdp_port(force=True) or 9222
+    log.error("❌ Impossible de démarrer TradingView en mode CDP.")
+    log.error("   Lance : .\\scripts\\Start-TradingViewCDP.ps1")
+    log.error("   Puis : curl http://localhost:9222/json/version")
+    return None
+
+
+# ─────────────────────────────────────────────────────────────
+# Appel CLI Node.js avec CDP_PORT injecté dans l'environnement
+# ─────────────────────────────────────────────────────────────
+
+def _run_tv_cli(command: list[str], cdp_port: Optional[int] = None) -> Optional[Dict[str, Any]]:
+    """
+    Appelle : node src/cli/index.js <commande>
+    Injecte CDP_PORT dans l'environnement du subprocess.
+    """
+    global _active_cdp_port
+    port = cdp_port or _active_cdp_port or 9222
+    env = {**_os.environ, "CDP_PORT": str(port)}
     try:
         proc = subprocess.run(
             ["node", str(TV_CLI)] + command,
             capture_output=True, text=True, timeout=30,
             cwd=str(MCP_NODE_ROOT),
+            env=env,
         )
         stdout = proc.stdout.strip()
         if not stdout:
-            log.warning(f"tv {' '.join(command)} — sortie vide. stderr: {proc.stderr[:200]}")
+            stderr_preview = proc.stderr.strip()[:300] if proc.stderr else ""
+            log.warning(f"tv {' '.join(command)} — sortie vide. stderr: {stderr_preview}")
+            # Si l'erreur est CDP, invalider le cache
+            if "CDP connection failed" in stderr_preview or "fetch failed" in stderr_preview:
+                _active_cdp_port = None
             return None
         return json.loads(stdout)
     except json.JSONDecodeError as e:
@@ -389,6 +596,48 @@ def parse_gom_study(raw: Dict[str, Any], symbol: str = SYMBOL) -> Optional[Dict[
 # Push vers AI server
 # ─────────────────────────────────────────────────────────────
 
+def _persist_gom_signal_file(payload: Dict[str, Any]) -> None:
+    """Écrit data/gom_signal.json pour deriv_ea_pro.html (/gom/latest) et MT5."""
+    try:
+        from datetime import datetime, timezone
+        root = Path(__file__).resolve().parents[1]
+        out = root / "data" / "gom_signal.json"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        slim = {
+            "symbol": payload.get("symbol", SYMBOL),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "verdict": payload.get("verdict", "WAIT"),
+            "verdict_num": payload.get("verdict_num", 0),
+            "buy_score": payload.get("score_buy", payload.get("buy_score", 0)),
+            "sell_score": payload.get("score_sell", payload.get("sell_score", 0)),
+            "spike_pct": payload.get("spike_pct", 0),
+            "quality": payload.get("entry_quality", payload.get("quality", 0)),
+            "coherence": payload.get("coherence_pct", payload.get("coherence", 0)),
+            "kola_state": payload.get("kola_state", "---"),
+            "rsi": payload.get("rsi"),
+            "st_direction": "UP" if payload.get("st_dir", 0) == 1 else "DN",
+            "verdict_gap": payload.get("verdict_gap"),
+            "tf_global_dir": payload.get("tf_global_dir"),
+            "tf_bull_count": payload.get("tf_bull_count"),
+            "tf_bear_count": payload.get("tf_bear_count"),
+            "pred_bull": payload.get("pred_bull"),
+            "pred_bear": payload.get("pred_bear"),
+            "pred_neut": payload.get("pred_neut"),
+            "pred_net": payload.get("pred_net"),
+            "setup_type": payload.get("setup_type"),
+            "setup_confirm": payload.get("setup_confirm"),
+            "setup_entry": payload.get("setup_entry"),
+            "setup_sl": payload.get("setup_sl"),
+            "setup_tp1": payload.get("setup_tp1"),
+            "setup_tp2": payload.get("setup_tp2"),
+            "setup_rr": payload.get("setup_rr"),
+            "setup_dir": payload.get("setup_dir"),
+        }
+        out.write_text(json.dumps(slim, indent=2), encoding="utf-8")
+    except Exception as e:
+        log.warning("gom_signal.json: %s", e)
+
+
 def push_gom_verdict(payload: Dict[str, Any]) -> bool:
     try:
         r = requests.post(
@@ -412,105 +661,117 @@ def push_gom_verdict(payload: Dict[str, Any]) -> bool:
 
 
 # ─────────────────────────────────────────────────────────────
-# Lecture TV : essaie REST MCP d'abord, puis subprocess
+# Lecture TV : CLI Node.js avec port CDP injecté
 # ─────────────────────────────────────────────────────────────
 
-def _read_tv_via_http() -> Optional[Dict[str, Any]]:
-    """
-    Lit study values + quote via le serveur MCP HTTP local (port 3000).
-    Plus fiable que subprocess — pas de problème d'encodage stdout.
-    Fallback sur subprocess CLI si le serveur HTTP n'est pas disponible.
-    """
-    MCP_HTTP_PORTS = [3000, 3001, 3002]
-    for port in MCP_HTTP_PORTS:
-        try:
-            import urllib.request as _ur
-            # data_get_study_values
-            req = _ur.Request(f"http://127.0.0.1:{port}/data_get_study_values",
-                              method="POST",
-                              headers={"Content-Type": "application/json"},
-                              data=b"{}")
-            with _ur.urlopen(req, timeout=15) as r:
-                studies_raw = json.loads(r.read().decode("utf-8"))
-            # quote_get
-            req2 = _ur.Request(f"http://127.0.0.1:{port}/quote_get",
-                               method="POST",
-                               headers={"Content-Type": "application/json"},
-                               data=b'{"symbol":"OANDA:XAUUSD"}')
-            with _ur.urlopen(req2, timeout=15) as r2:
-                quote_raw = json.loads(r2.read().decode("utf-8"))
-            log.info(f"✅ MCP HTTP port {port} OK")
-            return {"studies": studies_raw, "quote": quote_raw, "success": True}
-        except Exception:
-            continue
-    return None
-
-
-def _ensure_tv_m1() -> None:
-    """Ramène le graphique TradingView actif sur M1 (GOM KOLA + spike)."""
+def _ensure_tv_m1(cdp_port: Optional[int]) -> None:
+    """Ramène le graphique TradingView actif sur M1."""
     try:
-        proc = subprocess.run(
-            ["node", str(TV_CLI), "timeframe", "1"],
-            capture_output=True, text=True, timeout=10,
-            cwd=str(MCP_NODE_ROOT),
-        )
-        if proc.returncode == 0:
-            log.debug("TV timeframe → M1")
+        _run_tv_cli(["timeframe", "1"], cdp_port=cdp_port)
+        log.debug("TV timeframe → M1")
     except Exception:
         pass
 
 
-def _refocus_tv_chart() -> None:
-    """
-    Force TradingView à revenir sur le chart XAUUSD si possible.
-    Appelle 'node src/cli/index.js chart set-symbol OANDA:XAUUSD' via CLI.
-    Silencieux en cas d'échec — c'est un best-effort.
-    """
+def _refocus_tv_chart(cdp_port: Optional[int]) -> None:
+    """Force TradingView à revenir sur XAUUSD — best-effort."""
     try:
-        proc = subprocess.run(
-            ["node", str(TV_CLI), "chart", "set-symbol", "OANDA:XAUUSD"],
-            capture_output=True, text=True, timeout=10,
-            cwd=str(MCP_NODE_ROOT),
-        )
-        if proc.returncode == 0:
+        result = _run_tv_cli(["chart", "set-symbol", "OANDA:XAUUSD"], cdp_port=cdp_port)
+        if result:
             log.info("🔄 Re-focus TV sur OANDA:XAUUSD OK")
-        # Si échec, on continue quand même
     except Exception:
         pass
+
+
+def _read_via_mcp_bridge() -> Optional[Dict[str, Any]]:
+    """
+    Lit les study values via le MCP TradingView (kola) directement depuis Python.
+    Plus fiable que le CLI Node — lit directement le chart actif.
+    """
+    try:
+        # Appel direct à l'endpoint MCP via l'AI server bridge
+        import requests as _req
+        # Essai 1 : endpoint bridge dédié
+        r = _req.post(f"{AI_SERVER_URL}/bridge/mcp-study-values",
+                      json={"study_filter": "GOM"}, timeout=15)
+        if r.status_code == 200:
+            return r.json()
+        # Essai 2 : endpoint watchlist scan qui appelle le MCP
+        r2 = _req.post(f"{AI_SERVER_URL}/bridge/mcp-watchlist-scan",
+                       json={"symbols": ["XAUUSD"]}, timeout=30)
+        if r2.status_code == 200:
+            data = r2.json()
+            # Extraire les study values si présentes
+            studies = data.get("studies") or data.get("all_results")
+            if studies:
+                return {"studies": studies, "success": True}
+    except Exception as e:
+        log.debug(f"MCP bridge non disponible: {e}")
+    return None
 
 
 def read_and_push(symbol: str = SYMBOL) -> bool:
     """
-    Lit study values + quote (CLI subprocess), pousse le verdict GOM vers /gom-verdict.
-    Si GOM non trouvé (TV sur mauvais tab), tente un re-focus et réessaie une fois.
+    1. Vérifie que TradingView est actif en mode CDP (lance si besoin).
+    2. Lit study values via MCP bridge (prioritaire) ou CLI Node.js.
+    3. Pousse le verdict vers /gom-verdict.
+    Retry une fois si GOM absent (re-focus TV).
     """
-    _ensure_tv_m1()
+    # ── Étape 1 : s'assurer que CDP est disponible ──
+    cdp_port = _ensure_tv_ready()
+    if not cdp_port:
+        log.error(
+            "❌ TradingView CDP introuvable — lance TradingView via :\n"
+            f"   {TV_BAT}\n"
+            "   ou : TradingView.exe --remote-debugging-port=9222"
+        )
+        return False
+
+    _ensure_tv_m1(cdp_port)
+
+    # ── Étape 2 : lire les données — MCP bridge prioritaire ──
+    # Essayer d'abord via MCP bridge (données directes du chart actif, plus fiables)
+    mcp_data = _read_via_mcp_bridge()
+    if mcp_data:
+        log.debug("✅ Données via MCP bridge")
+        quote_raw = _run_tv_cli(["quote"], cdp_port=cdp_port) or {}
+        combined  = {"studies": mcp_data, "quote": quote_raw, "success": True}
+        payload = parse_gom_study(combined, symbol=symbol)
+        if payload:
+            _persist_gom_signal_file(payload)
+            ok = push_gom_verdict(payload)
+            log.info(f"✅ MCP bridge → verdict={payload['verdict']} buy={payload['score_buy']} sell={payload['score_sell']}")
+            return ok
+
+    # Fallback : CLI Node.js (2 essais)
     for attempt in range(2):
-        studies_raw = _run_tv_cli(["values"])
+        studies_raw = _run_tv_cli(["values"], cdp_port=cdp_port)
         if not studies_raw:
-            log.warning("⚠️ 'tv values' a échoué — TradingView ouvert avec GOM KOLA SIDO visible ?")
+            log.warning(
+                "⚠️ 'tv values' a échoué.\n"
+                f"   Port CDP : {cdp_port} — TradingView ouvert avec GOM KOLA SIDO visible ?"
+            )
+            if attempt == 0:
+                detect_cdp_port(force=True)
             return False
 
-        quote_raw = _run_tv_cli(["quote"])
-        combined = {
-            "studies": studies_raw,
-            "quote": quote_raw or {},
-            "success": True,
-        }
+        quote_raw = _run_tv_cli(["quote"], cdp_port=cdp_port)
+        combined  = {"studies": studies_raw, "quote": quote_raw or {}, "success": True}
 
         payload = parse_gom_study(combined, symbol=symbol)
         if payload:
+            _persist_gom_signal_file(payload)
             ok = push_gom_verdict(payload)
-            _ensure_tv_m1()
+            _ensure_tv_m1(cdp_port)
             return ok
 
-        # GOM non trouvé — tenter re-focus TV sur XAUUSD avant 2ème essai
+        # GOM absent — re-focus TV sur XAUUSD + retry
         if attempt == 0:
             log.info("⟳ GOM absent — re-focus TV sur XAUUSD puis retry...")
-            _refocus_tv_chart()
-            import time as _t; _t.sleep(2)
+            _refocus_tv_chart(cdp_port)
+            time.sleep(2)
 
-    _ensure_tv_m1()
+    _ensure_tv_m1(cdp_port)
     return False
 
 
@@ -534,7 +795,17 @@ def main() -> None:
         "--symbol", type=str, default=SYMBOL,
         help="Symbole MT5/TV pour le store serveur (ex. XAUUSD, XAUEUR)"
     )
+    parser.add_argument(
+        "--no-launch-tv", action="store_true",
+        help="Ne jamais lancer/relancer TradingView (CDP doit déjà être actif)",
+    )
+    parser.add_argument(
+        "--force-relaunch-tv", action="store_true",
+        help="Utilise launch_tv_debug.bat (taskkill) si CDP absent",
+    )
     args = parser.parse_args()
+    global _no_auto_launch_tv
+    _no_auto_launch_tv = bool(args.no_launch_tv)
     sym = args.symbol.upper().strip()
     if sym == "XAUEUR":
         sym = "XAUUSD"
@@ -545,6 +816,24 @@ def main() -> None:
 
     log.info(f"🚀 GOM Poller démarré — {sym} — intervalle {args.interval}s")
     log.info(f"   Flux: TradingView CDP → /gom-verdict → TradeManager MT5")
+
+    # Diagnostic CDP au démarrage
+    port = detect_cdp_port()
+    if port:
+        log.info(f"✅ TradingView CDP détecté sur port {port} — prêt.")
+    else:
+        log.warning(
+            "⚠️  TradingView n'est PAS en mode CDP.\n"
+            "   → .\\scripts\\Start-TradingViewCDP.ps1\n"
+            "   → curl http://localhost:9222/json/version\n"
+            "   Le poller ne fermera plus TV en boucle ; relance douce au prochain poll."
+        )
+    if args.force_relaunch_tv and not port:
+        _launch_tv_debug(9222, force_kill=True)
+        port = detect_cdp_port(force=True)
+        if port:
+            log.info(f"✅ CDP actif sur port {port} après force-relaunch.")
+
     while True:
         try:
             read_and_push(sym)
