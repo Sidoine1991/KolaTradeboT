@@ -3216,6 +3216,13 @@ void TryExecuteMCPSignal(int idx)
       }
    }
 
+   // ── GUARD OB : attendre que le prix soit à l'OB entry ──
+   if(!IsPriceAtOBEntry(dir)) return;
+
+   // ── GUARD OB : bloquer si un OB opposé barre la route vers le TP ──
+   string obBlockReason = "";
+   if(IsOBBlockingPath(dir, obBlockReason)) return;
+
    // Vérifier STOPS_LEVEL broker
    double pt       = SymbolInfoDouble(sym, SYMBOL_POINT);
    int    stopsLvl = (int)SymbolInfoInteger(sym, SYMBOL_TRADE_STOPS_LEVEL);
@@ -3793,6 +3800,82 @@ bool ShouldBlockGOMConsolidationForEntry(const int effVnum)
 }
 
 //+------------------------------------------------------------------+
+//| Vérifie qu'aucun OB opposé ne bloque le chemin vers le TP        |
+//| BUY  : OB BEAR entre prix actuel et TP = BLOQUER                 |
+//| SELL : OB BULL entre prix actuel et TP = BLOQUER                 |
+//+------------------------------------------------------------------+
+bool IsOBBlockingPath(const int dir, const string reason_out)
+{
+   // Si pas de setup GOM valide ou pas de TP, on ne peut pas vérifier
+   if(!g_setupValid || g_setupTP1 <= 0) return false;
+
+   double price = (dir == 1) ? SymbolInfoDouble(_Symbol, SYMBOL_ASK)
+                              : SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double tp    = g_setupTP1;
+
+   // OB BEAR = zone de résistance au-dessus du prix actuel (g_lastBBUp / g_lastKolaSell)
+   // OB BULL = zone de support en-dessous du prix actuel (g_lastBBDn / g_lastKolaBuy)
+
+   if(dir == 1) // BUY — chercher OB BEAR entre price et tp
+   {
+      // Résistance KOLA SELL dans le chemin
+      if(g_lastKolaSell > price && g_lastKolaSell < tp)
+      {
+         PrintOnce(StringFormat("[OB-Guard] %s BUY BLOQUÉ — KOLA SELL %.5f dans chemin (price=%.5f tp=%.5f)",
+               _Symbol, g_lastKolaSell, price, tp), 30);
+         return true;
+      }
+      // Résistance BB UP dans le chemin
+      if(g_lastBBUp > price && g_lastBBUp < tp)
+      {
+         PrintOnce(StringFormat("[OB-Guard] %s BUY BLOQUÉ — BB résistance %.5f dans chemin (price=%.5f tp=%.5f)",
+               _Symbol, g_lastBBUp, price, tp), 30);
+         return true;
+      }
+   }
+   else // SELL — chercher OB BULL entre tp et price
+   {
+      // Support KOLA BUY dans le chemin
+      if(g_lastKolaBuy < price && g_lastKolaBuy > tp)
+      {
+         PrintOnce(StringFormat("[OB-Guard] %s SELL BLOQUÉ — KOLA BUY %.5f dans chemin (price=%.5f tp=%.5f)",
+               _Symbol, g_lastKolaBuy, price, tp), 30);
+         return true;
+      }
+      // Support BB DN dans le chemin
+      if(g_lastBBDn < price && g_lastBBDn > tp)
+      {
+         PrintOnce(StringFormat("[OB-Guard] %s SELL BLOQUÉ — BB support %.5f dans chemin (price=%.5f tp=%.5f)",
+               _Symbol, g_lastBBDn, price, tp), 30);
+         return true;
+      }
+   }
+   return false;
+}
+
+//+------------------------------------------------------------------+
+//| Vérifie que le prix est bien à l'OB entry (pullback requis)      |
+//+------------------------------------------------------------------+
+bool IsPriceAtOBEntry(const int dir)
+{
+   if(!g_setupValid || g_setupEntry <= 0) return true; // pas de setup = pas de contrainte
+
+   double price = (dir == 1) ? SymbolInfoDouble(_Symbol, SYMBOL_ASK)
+                              : SymbolInfoDouble(_Symbol, SYMBOL_BID);
+
+   // Tolérance : 0.15% du prix (un peu plus large que re-entry)
+   double tol = price * 0.0015;
+
+   if(MathAbs(price - g_setupEntry) > tol)
+   {
+      PrintOnce(StringFormat("[OB-Guard] %s entrée prématurée — prix %.5f loin de l'OB entry %.5f (tol=%.5f) — attendre pullback",
+            _Symbol, price, g_setupEntry, tol), 30);
+      return false;
+   }
+   return true;
+}
+
+//+------------------------------------------------------------------+
 //| Entrée auto depuis verdict GOM (GOOD/PERFECT) — secours EA       |
 //+------------------------------------------------------------------+
 void CheckGOMAutoEntry()
@@ -3905,6 +3988,13 @@ void CheckGOMAutoEntry()
    if(dir == 1 && g_gomRSIOverbought) return;
    if(dir == -1 && g_gomRSIOversold) return;
    if(RequireSignalAlign && !IsDirectionAligned(sym, dir)) return;
+
+   // ── GUARD OB : attendre que le prix soit à l'OB entry ──
+   if(!IsPriceAtOBEntry(dir)) return;
+
+   // ── GUARD OB : bloquer si un OB opposé barre la route vers le TP ──
+   string obReason = "";
+   if(IsOBBlockingPath(dir, obReason)) return;
 
    double lot = GOMReEntryLot;
    double ask = SymbolInfoDouble(sym, SYMBOL_ASK);
