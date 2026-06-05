@@ -24,8 +24,8 @@ if errorlevel 1 (
 REM Log démarrage
 echo %DATE% %TIME% [START] Pipeline horaire >> D:\Dev\TradBOT\logs\pipeline_scheduler.log
 
-REM Lancer pipeline (--skip-ta pour rapidité, TradingAgents trop lent en auto)
-%VENV_PYTHON% Python\autonomous_pipeline.py --skip-ta >> D:\Dev\TradBOT\logs\pipeline_scheduler.log 2>&1
+REM Lancer pipeline complet avec TradingAgents (confirmation des signaux TV)
+%VENV_PYTHON% Python\autonomous_pipeline.py --ta-timeout 180 >> D:\Dev\TradBOT\logs\pipeline_scheduler.log 2>&1
 
 echo %DATE% %TIME% [DONE] Pipeline terminé >> D:\Dev\TradBOT\logs\pipeline_scheduler.log
 exit /b 0
