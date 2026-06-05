@@ -660,7 +660,7 @@ bool IsBoomOrCrashSymbol(const string sym)
 
 bool ShouldDrawGOMPathForSymbol(const string sym)
 {
-   return !IsPureForexPair(sym);
+   return true; // Dessiner le chemin prédictif sur TOUS les symboles
 }
 
 bool IsGOMPathAlignedWithDir(const int dir)
@@ -953,7 +953,7 @@ void DrawGOMPathPredictedCandles()
 
    CleanupGOMPathObjects();
 
-   ENUM_TIMEFRAMES tf = PERIOD_M1;
+   ENUM_TIMEFRAMES tf = PERIOD_CURRENT;
    int nBars = MathMin(GOMPathDrawBars, StringLen(usePath));
    int dg = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
 
