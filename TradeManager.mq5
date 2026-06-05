@@ -52,9 +52,9 @@ input double TargetProfitUSD        = 10.0;   // TP cible (USD)
 
 input group "=== PROTECTION PROFIT (anti dégringolade) ==="
 input bool   UseProfitGivebackExit  = true;   // Fermer au marché si gain → perte (sans attendre SL broker)
-input double ProfitGivebackArmUSD   = 1.0;    // Actif dès qu'un pic profit >= (USD)
-input double MaxGivebackFromPeakUSD = 3.0;    // Recul max depuis le pic (ex: pic $4 → coupe à $1)
-input double MaxLossCapUSD          = 3.0;    // Plancher perte si déjà été en gain (ex: pas plus de -$3)
+input double ProfitGivebackArmUSD   = 1.0;    // Actif dès qu'un pic profit >= $1
+input double MaxGivebackFromPeakUSD = 0.50;   // Recul max depuis le pic = 50% (pic $2 → plancher $1)
+input double MaxLossCapUSD          = 1.0;    // Plancher perte absolu si déjà été en gain
 input int    MaxPositionsPerSymbol  = 2;      // Max positions gérées par symbole (évite 2 dup en perte)
 
 input group "=== PROFIT GLOBAL ==="
@@ -91,10 +91,10 @@ input int    SignalCacheAgeSec      = 300;    // Durée validité cache biais (s
 input double MinTAConfidence        = 0.55;   // Confiance TA minimum pour que le biais compte
 
 input group "=== FILTRE CONSOLIDATION ==="
-input bool   UseConsolidationFilter = false;  // GOM gère consolidation → désactiver ce filtre (GOM mode)
+input bool   UseConsolidationFilter = true;   // Bloquer trades en range (ADX + ATR)
 input int    ADX_Period             = 14;     // Période ADX
-input double ADX_MinTrend           = 0;      // ADX < seuil → N/A (GOM mode: 0)
-input double ConsolidationATRRatio  = 0.65;  // ATR < ATR_SMA * ratio → consolidation
+input double ADX_MinTrend           = 20.0;   // ADX < 20 = range → entrée bloquée
+input double ConsolidationATRRatio  = 0.65;  // ATR < 65% de la moyenne = range serré
 
 input group "=== FILTRES CORRECTION (BUG FIX) ==="
 input bool   UseEMAFilter           = false;  // 🔧 DÉSACTIVÉ: Bloquer prix "mauvais côté EMA" (fix log)
@@ -1670,13 +1670,16 @@ void ManageProfitGivebackExit()
 
       if(peak < ProfitGivebackArmUSD) continue;
 
-      double floorPeak = peak - MaxGivebackFromPeakUSD;
-      double floorAbs  = -maxLoss;
+      // Plancher = 50% du pic (MaxGivebackFromPeakUSD = 0.50 → 50%)
+      // Ex : pic $2 → plancher $1 | pic $3 → plancher $1.5 | pic $5 → plancher $2.5
+      double floorPeak = peak * (1.0 - MaxGivebackFromPeakUSD);
+      // Jamais en négatif si on a déjà vu $1 de gain
+      double floorAbs  = (peak >= 1.0) ? 0.0 : -maxLoss;
       double floorUSD  = MathMax(floorPeak, floorAbs);
 
       if(profit < floorUSD)
       {
-         Print(StringFormat("[TradeManager] 💰 %s #%llu GIVEBACK | profit=$%.2f pic=$%.2f plancher=$%.2f",
+         Print(StringFormat("[TradeManager] 💰 %s #%llu GIVEBACK | profit=$%.2f pic=$%.2f plancher=$%.2f (50%% du pic)",
                sym, ticket, profit, peak, floorUSD));
          trade.PositionClose(ticket);
       }
@@ -2140,34 +2143,40 @@ void ManageAllTrailing()
       double newSL    = 0;
       string phase    = "";
 
-      // ── PHASE 1 : $1–$2 → Breakeven obligatoire (entry + 1 pt buffer) ──
-      // ── PHASE 2 : $2–$4 → Verrouiller 50% du pic depuis entry         ──
-      // ── PHASE 3 : $4+   → Trailing serré 75% depuis prix ACTUEL       ──
+      // ── PHASES TRAILING ──────────────────────────────────────────────────
+      // Phase 1 : pic $1–$2  → Breakeven (entry + buffer) — jamais en perte
+      // Phase 2 : pic $2+    → SL verrouille 50% du pic — si prix revient à 50% du chemin → ferme
+      // Phase 3 : pic $4+    → Trailing serré : SL suit prix courant, recul max 25%
+      // Règle absolue : si prix retourne à 50% du chemin entry→pic, SL monte pour protéger
+
+      // Calculer 50% du chemin entry → pic en prix
+      double halfPeakPts = (peakUse * 0.50) / MathMax(profitPerPt, 0.0001);
+      double halfPeakSL  = NormalizeDouble((dir == 1) ? ep + halfPeakPts : ep - halfPeakPts, dg);
 
       if(peakUse >= 4.0 || (g_states[idx].forceTrailing && peakUse >= 2.0))
       {
-         // Phase 3 — trailing serré sur prix courant : recul max = 25% du pic
+         // Phase 3 — trailing serré sur prix courant : recul max 25% du pic
          double allowedGivebackUSD = peakUse * 0.25;
-         double allowedGivebackPts = allowedGivebackUSD / profitPerPt;
+         double allowedGivebackPts = allowedGivebackUSD / MathMax(profitPerPt, 0.0001);
          newSL = NormalizeDouble(
             (dir == 1) ? (bid - allowedGivebackPts) : (bid + allowedGivebackPts), dg);
-         // Ne jamais descendre sous breakeven
-         double be = NormalizeDouble((dir == 1) ? ep + pt : ep - pt, dg);
-         if(dir == 1) newSL = MathMax(newSL, be);
-         else         newSL = MathMin(newSL, be);
+         // Jamais sous le 50% du chemin
+         if(dir == 1) newSL = MathMax(newSL, halfPeakSL);
+         else         newSL = MathMin(newSL, halfPeakSL);
          phase = StringFormat("Phase3 serré | recul max $%.2f (25%%)", allowedGivebackUSD);
       }
       else if(peakUse >= 2.0)
       {
-         // Phase 2 — verrouiller 50% du pic depuis entry
-         double lockPts = (peakUse * 0.50) / profitPerPt;
-         newSL = NormalizeDouble((dir == 1) ? ep + lockPts : ep - lockPts, dg);
-         phase = StringFormat("Phase2 lock50%% | SL verrouille $%.2f (50%% de $%.2f)", peakUse * 0.50, peakUse);
+         // Phase 2 — SL à 50% du pic depuis entry
+         // Si prix est déjà redescendu à 50% du chemin → SL s'y place immédiatement
+         newSL = halfPeakSL;
+         phase = StringFormat("Phase2 50%% | SL protège $%.2f (50%% de $%.2f)", peakUse * 0.50, peakUse);
       }
       else
       {
-         // Phase 1 — breakeven : SL à entry + 1 point buffer
-         newSL = NormalizeDouble((dir == 1) ? ep + pt : ep - pt, dg);
+         // Phase 1 — breakeven strict : SL à entry + 1 pt buffer
+         double be = NormalizeDouble((dir == 1) ? ep + pt : ep - pt, dg);
+         newSL = be;
          phase = "Phase1 breakeven";
       }
 
@@ -3863,13 +3872,23 @@ bool IsPriceAtOBEntry(const int dir)
    double price = (dir == 1) ? SymbolInfoDouble(_Symbol, SYMBOL_ASK)
                               : SymbolInfoDouble(_Symbol, SYMBOL_BID);
 
-   // Tolérance : 0.15% du prix (un peu plus large que re-entry)
-   double tol = price * 0.0015;
+   // Tolérance serrée : ATR * 0.3 ou 0.05% du prix (le plus grand)
+   // Garantit que le prix est vraiment SUR l'OB, pas à distance
+   double atrTol = 0.0;
+   int hAtr = iATR(_Symbol, PERIOD_M5, 14);
+   if(hAtr != INVALID_HANDLE)
+   {
+      double atrBuf[];
+      ArraySetAsSeries(atrBuf, true);
+      if(CopyBuffer(hAtr, 0, 1, 1, atrBuf) >= 1) atrTol = atrBuf[0] * 0.3;
+      IndicatorRelease(hAtr);
+   }
+   double tol = MathMax(atrTol, price * 0.0005);  // réduit de 0.15% → 0.05%
 
    if(MathAbs(price - g_setupEntry) > tol)
    {
-      PrintOnce(StringFormat("[OB-Guard] %s entrée prématurée — prix %.5f loin de l'OB entry %.5f (tol=%.5f) — attendre pullback",
-            _Symbol, price, g_setupEntry, tol), 30);
+      PrintOnce(StringFormat("[OB-Guard] %s attente pullback OB — prix %.5f | entry %.5f | dist=%.5f tol=%.5f",
+            _Symbol, price, g_setupEntry, MathAbs(price - g_setupEntry), tol), 15);
       return false;
    }
    return true;
