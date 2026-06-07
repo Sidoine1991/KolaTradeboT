@@ -4,7 +4,7 @@
 //| Attacher sur UN SEUL chart — gère tout le terminal               |
 //+------------------------------------------------------------------+
 #property copyright "TradBOT"
-#property version   "3.19"
+#property version   "3.20"
 #property strict
 #include <Trade/Trade.mqh>
 #include <Trade/PositionInfo.mqh>
@@ -624,6 +624,7 @@ void OnTimer()
 {
    ScanAllPositions();
    if(UseDerivEngine)        RunDerivEngine();
+   if(IsBoomOrCrashSymbol(_Symbol)) MonitorSpikeAutoClose();
    if(UseCapitalManager)     CheckDailyProfitTarget();
    if(RequireSignalAlign)    PollSignalBias();
    if(UseGlobalProfitTarget) CheckGlobalProfit();
@@ -645,6 +646,12 @@ void OnTimer()
 
 void OnTick()
 {
+   // Mise à jour flag barre confirmée pour MonitorSpikeAutoClose
+   static datetime _lastBar = 0;
+   datetime _curBar = iTime(_Symbol, PERIOD_M1, 0);
+   barstate_isconfirmed_local = (_curBar != _lastBar);
+   if(barstate_isconfirmed_local) _lastBar = _curBar;
+
    static datetime lastRun = 0;
    if(TimeCurrent() - lastRun < CheckIntervalSec) return;
    lastRun = TimeCurrent();
@@ -3274,6 +3281,54 @@ void DRV_ManagePosition()
    }
 }
 
+// ── Fermeture automatique après spike capté (Boom/Crash) ─────────
+// Ferme toute position en gain dès qu'un spike est détecté sur la barre courante
+// Applicable aux positions MCP pipeline ET moteur Deriv
+void MonitorSpikeAutoClose()
+{
+   if(!spike_bc_en_local || !IsBoomOrCrashSymbol(_Symbol)) return;
+
+   double atr = DRV_GetATR(1);
+   if(atr <= 0) return;
+
+   // Détecter spike en cours (même logique que DRV)
+   double body = MathAbs(iClose(_Symbol,PERIOD_M1,0) - iOpen(_Symbol,PERIOD_M1,0));
+   bool   isBoom  = StringFind(_Symbol,"Boom") >= 0 || StringFind(_Symbol,"BOOM") >= 0;
+   bool   isCrash = StringFind(_Symbol,"Crash") >= 0 || StringFind(_Symbol,"CRASH") >= 0;
+   bool   spikeUp   = isBoom  && body >= atr * 0.32 && iClose(_Symbol,PERIOD_M1,0) > iOpen(_Symbol,PERIOD_M1,0);
+   bool   spikeDown = isCrash && body >= atr * 0.32 && iClose(_Symbol,PERIOD_M1,0) < iOpen(_Symbol,PERIOD_M1,0);
+   bool   spikeNow  = barstate_isconfirmed_local ? (spikeUp || spikeDown) : false;
+
+   if(!spikeNow) return;
+
+   CTrade spkTrade;
+   spkTrade.SetDeviationInPoints(50);
+
+   for(int i = PositionsTotal()-1; i >= 0; i--)
+   {
+      if(!posInfo.SelectByIndex(i)) continue;
+      if(posInfo.Symbol() != _Symbol) continue;
+      // Seulement les positions en gain
+      double profit = posInfo.Profit() + posInfo.Swap();
+      if(profit <= 0) continue;
+      // Direction alignée avec le spike
+      bool isBuyPos  = posInfo.PositionType() == POSITION_TYPE_BUY;
+      bool isSellPos = posInfo.PositionType() == POSITION_TYPE_SELL;
+      if(isBoom  && !isBuyPos)  continue;  // Boom → seulement BUY en gain
+      if(isCrash && !isSellPos) continue;  // Crash → seulement SELL en gain
+
+      spkTrade.PositionClose(posInfo.Ticket(), 50);
+      Print(StringFormat("[SpikeClose] ✅ Fermé %s ticket=%llu profit=$%.2f | spike détecté body=%.5f atr=%.5f",
+            posInfo.Symbol(), posInfo.Ticket(), profit, body, atr));
+      SendWAEvent("SPIKE_CLOSE", _Symbol, posInfo.PriceCurrent(), profit,
+                  isBuyPos?"BUY":"SELL", posInfo.PriceOpen(), 0, 0, posInfo.Volume());
+   }
+}
+
+// Flags locaux pour éviter la re-déclaration (already declared in global scope)
+bool spike_bc_en_local    = true;   // Activer fermeture spike auto
+bool barstate_isconfirmed_local = false;  // Mis à jour dans OnTick
+
 // ── Point d'entrée principal Deriv ───────────────────────────────
 void RunDerivEngine()
 {
@@ -3788,8 +3843,16 @@ void PollMCPSignals()
          if(syms[j] == s) { dup = true; break; }
       if(!dup) syms[nsyms++] = s;
    }
-   // Note: g_states (positions d'autres graphiques) délibérément exclus
-   // Chaque EA gère uniquement son graphique + la liste explicite
+   // 3. Symboles de la whitelist pipeline (publiée par pipeline_with_approval.py)
+   for(int wi = 0; wi < g_whitelistCount; wi++)
+   {
+      string ws = g_whitelistSymbols[wi];
+      bool dup = false;
+      for(int j = 0; j < nsyms; j++)
+         if(syms[j] == ws) { dup = true; break; }
+      if(!dup && nsyms < ArraySize(syms))
+         syms[nsyms++] = ws;
+   }
 
    PrintOnce(StringFormat("[TradeManager] 🔄 PollMCPSignals ENABLED (interval=%ds) | Monitoring %d symbols", MCPPollIntervalSec, nsyms), 300);
 
