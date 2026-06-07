@@ -4,7 +4,7 @@
 //| Attacher sur UN SEUL chart — gère tout le terminal               |
 //+------------------------------------------------------------------+
 #property copyright "TradBOT"
-#property version   "3.18"
+#property version   "3.19"
 #property strict
 #include <Trade/Trade.mqh>
 #include <Trade/PositionInfo.mqh>
@@ -70,6 +70,10 @@ input int    CM_MaxTradesPerDay      = 3;      // Max trades par jour (0 = calcu
 input double CM_MinCapitalToTrade    = 20.0;   // Ne pas trader si capital < ce montant ($)
 input double CM_LotRiskPct          = 2.0;    // Risque par trade (% du capital) pour lot sizing adaptatif
 input bool   CM_PersistStats        = true;   // Sauvegarder stats journalières en fichier (survit rechargement)
+
+input group "=== MODE EXÉCUTION ==="
+input bool   PipelineOnlyMode       = true;   // 🔒 MODE STRICT: Uniquement ordres pipeline (désactive TOUTES entrées auto)
+input string PipelineWhitelistPath  = "pipeline_whitelist.json"; // Whitelist pipeline (Common/Files)
 
 input group "=== SIGNAUX MCP TRADINGVIEW ==="
 input bool   UseMCPSignals          = true;   // Exécuter signaux bridge/WhatsApp (pending-order)
@@ -346,6 +350,28 @@ bool IsSymbolWhitelisted(const string sym)
       if(g_whitelistSymbols[i] == sym) return true;
    return false;
 }
+
+// 🔒 MODE PIPELINE ONLY — Garde toutes entrées automatiques
+bool CanAutoEntry(const string context, const string sym = "")
+{
+   if(!PipelineOnlyMode)
+      return true;  // Mode normal — toutes entrées auto autorisées
+
+   // Mode strict — UNIQUEMENT ordres pipeline
+   string symCheck = (StringLen(sym) > 0) ? sym : _Symbol;
+
+   if(!IsSymbolWhitelisted(symCheck))
+   {
+      PrintOnce(StringFormat("[%s] 🔒 BLOQUÉ: %s pas dans whitelist pipeline (PipelineOnlyMode=true)",
+                context, symCheck), 120);
+      return false;
+   }
+
+   // Whitelist OK mais entrée auto désactivée en mode strict
+   PrintOnce(StringFormat("[%s] 🔒 BLOQUÉ: Entrée auto désactivée (PipelineOnlyMode=true) — attendre signal pipeline",
+             context), 120);
+   return false;
+}
 // ---------------------------------------------------------------------------
 
 struct DupProfitStable
@@ -517,11 +543,36 @@ int OnInit()
    trade.SetTypeFilling(ORDER_FILLING_IOC);
    EventSetTimer(CheckIntervalSec);
    ScanAllPositions();
-   Print("[TradeManager v3.14] Actif | MCP market=", MCPExecuteAtMarket,
+   Print("[TradeManager v3.19] Actif | 🔒 PipelineOnly=", PipelineOnlyMode,
+         " | MCP market=", MCPExecuteAtMarket,
          " | giveback=", UseProfitGivebackExit, " maxLoss=$", MaxLossCapUSD,
          " | stagnation=", UseStagnationExit, " @$", StagnationTriggerUSD, "/", StagnationHoldSec, "s",
          " | dup=", MCPDuplicateOnce, " | profit global=$", GlobalProfitTargetUSD,
          " | EMA", EMA_Fast, "/", EMA_Slow, " | positions=", g_stateCount);
+
+   if(PipelineOnlyMode)
+   {
+      Print("┌─────────────────────────────────────────────────────────────┐");
+      Print("│  🔒 MODE PIPELINE ONLY ACTIF                               │");
+      Print("│  TOUTES les entrées automatiques sont DÉSACTIVÉES          │");
+      Print("│  TradeManager = EXÉCUTEUR PASSIF uniquement                │");
+      Print("│                                                             │");
+      Print("│  Ordres acceptés UNIQUEMENT depuis:                        │");
+      Print("│  → Pipeline autonome (autonomous_pipeline.py)              │");
+      Print("│  → /pending-order API (signaux MCP validés)                │");
+      Print("│                                                             │");
+      Print("│  BLOQUÉ:                                                    │");
+      Print("│  ❌ GOM AutoEntry / ReEntry                                │");
+      Print("│  ❌ TradingView Setups automatiques                        │");
+      Print("│  ❌ Re-entrées EMA                                         │");
+      Print("│  ❌ Duplications manuelles                                 │");
+      Print("│  ❌ Moteur Deriv (Boom/Crash spikes)                       │");
+      Print("└─────────────────────────────────────────────────────────────┘");
+   }
+   else
+   {
+      Print("⚠️ MODE AUTO TRADING ACTIF — Toutes entrées auto autorisées");
+   }
    if(UseDashboard) {
       Print("[Dashboard] Enabled - Update interval: " + IntegerToString(DashboardUpdateSec) + "s");
       RefreshDashboard();
@@ -1338,6 +1389,10 @@ bool PriceTouchedTVSetupEntry(const int dir, const double entry)
 bool PlaceTVSetupLimitOrder()
 {
    if(!g_setupValid || g_setupDir == 0) return false;
+
+   // 🔒 GARDE PIPELINE ONLY MODE
+   if(!CanAutoEntry("TV-Setup-Limit", _Symbol)) return false;
+
    if(IsDailyTargetLocked())
    {
       PrintOnce("[CM] 🔒 TVSetup bloqué — objectif journalier atteint", 300);
@@ -1461,6 +1516,10 @@ bool PlaceTVSetupLimitOrder()
 bool TryTVPreSpikeMarketEntry()
 {
    if(!TVSetupSpikeMarket || !g_setupValid || g_setupDir == 0) return false;
+
+   // 🔒 GARDE PIPELINE ONLY MODE
+   if(!CanAutoEntry("TV-PreSpike", _Symbol)) return false;
+
    if(StringFind(g_setupType, "SPIKE_") < 0 && !g_spikeTradable) return false;
    if(!IsBoomOrCrashSymbol(_Symbol)) return false;
    if(IsDailyTargetLocked()) return false;
@@ -1569,6 +1628,10 @@ void ManageTVSetupLimitOrder()
 void TryTVSetupMarketBreakout()
 {
    if(!TVSetupMarketOnBreakout || !g_setupValid || g_setupDir != 1) return;
+
+   // 🔒 GARDE PIPELINE ONLY MODE
+   if(!CanAutoEntry("TV-Breakout", _Symbol)) return;
+
    if(IsGOMCorrectionZone(1))
    {
       PrintOnce("[TV-Setup] Breakout BUY bloque — correction en cours", 30);
@@ -2473,6 +2536,9 @@ void TryReEntryOnEMA(int idx)
    string sym = g_states[idx].symbol;
    int    dir = g_states[idx].direction;
 
+   // 🔒 GARDE PIPELINE ONLY MODE
+   if(!CanAutoEntry("EMA-ReEntry", sym)) return;
+
    // Limite par symbole toujours vérifiée — limite globale exemptée pour re-entrée tendance
    if(IsGlobalPositionLimitReachedForReEntry(sym)) return;
    if(CountManagedPositions(sym) >= MaxPositionsPerSymbol)
@@ -2952,6 +3018,9 @@ bool DRV_IsSpike(const MqlRates &c, double atr, bool forBoom)
 
 void DRV_UpdateCycle()
 {
+   // 🔒 GARDE PIPELINE ONLY MODE
+   if(!CanAutoEntry("Deriv-Engine", _Symbol)) return;
+
    double atr=DRV_GetATR(1); if(atr<=0) return;
    MqlRates r[]; ArraySetAsSeries(r,true);
    if(CopyRates(_Symbol,PERIOD_M1,1,1,r)<1) return;
@@ -4064,6 +4133,10 @@ void TryExecuteMCPSignal(int idx)
 void MonitorManualDuplicates()
 {
    if(!MCPDuplicateOnce || !DuplicateManualOrders) return;
+
+   // 🔒 GARDE PIPELINE ONLY MODE (duplication = entrée auto)
+   if(!CanAutoEntry("Manual-Duplicate")) return;
+
    if(IsGlobalPositionLimitReached())
    {
       Print(StringFormat("[TradeManager] 🚫 MonitorManualDup: limite globale %d positions atteinte — annulé", MaxGlobalPositions));
@@ -4735,6 +4808,10 @@ bool IsPriceAtOBEntry(const int dir)
 void CheckGOMAutoEntry()
 {
    if(!UseGOMScalp || !UseGOMAutoEntry) return;
+
+   // 🔒 GARDE PIPELINE ONLY MODE
+   if(!CanAutoEntry("GOM-AutoEntry", _Symbol)) return;
+
    if(IsDailyTargetLocked())
    {
       PrintOnce("[CM] 🔒 GOM AutoEntry bloqué — objectif journalier atteint", 300);
@@ -4915,6 +4992,10 @@ void CheckGOMAutoEntry()
 void CheckGOMReEntry()
 {
    if(!UseGOMScalp || !GOMReEntryEnabled) return;
+
+   // 🔒 GARDE PIPELINE ONLY MODE
+   if(!CanAutoEntry("GOM-ReEntry")) return;
+
    if(IsDailyTargetLocked())
    {
       PrintOnce("[CM] 🔒 GOM ReEntry bloqué — objectif journalier atteint", 300);
