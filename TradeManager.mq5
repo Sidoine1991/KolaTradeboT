@@ -4,7 +4,7 @@
 //| Attacher sur UN SEUL chart — gère tout le terminal               |
 //+------------------------------------------------------------------+
 #property copyright "TradBOT"
-#property version   "3.21"
+#property version   "3.22"
 #property strict
 #include <Trade/Trade.mqh>
 #include <Trade/PositionInfo.mqh>
@@ -3640,7 +3640,9 @@ void IngestPendingOrderForSymbol(const string sym, const string &body)
    }
 
    // ⭐ PRIORITÉ GOM: GOOD/PERFECT ou signal score fort (sell>>buy)
-   if(UseGOMScalp && (TimeCurrent() - g_lastGOMPoll) < GOMSignalMaxAgeSec)
+   // Pour Boom/Crash : GOM du chart courant non pertinent → skip tous les filtres GOM
+   bool isBoomCrashForGOM = IsBoomOrCrashSymbol(sym);
+   if(UseGOMScalp && (TimeCurrent() - g_lastGOMPoll) < GOMSignalMaxAgeSec && !isBoomCrashForGOM)
    {
       int    gomDir = 0, effVnum = 0;
       string actTag;
@@ -3654,21 +3656,12 @@ void IngestPendingOrderForSymbol(const string sym, const string &body)
 
       int mcpDir = (action == "BUY") ? 1 : -1;
 
-      // 🚫 Boom/Crash : indices unidirectionnels — GOM du chart courant non pertinent
-      // Le GOM mesure la tendance du chart attaché (ex: ETHUSD) pas du Boom/Crash
-      // → Skip le filtre GOM pour ces symboles
-      bool isBoomCrashSym = IsBoomOrCrashSymbol(sym);
-
-      if(!isBoomCrashSym && gomDir != 0 && gomDir != mcpDir)
+      if(gomDir != 0 && gomDir != mcpDir)
       {
-         // Conflit MCP vs GOM : rejeter le signal MCP.
-         Print(StringFormat("[TradeManager] 🚫 %s: CONFLIT GOM %s vs signal=%s — REJETÉ | GOM auto-entry prendra le relais",
+         Print(StringFormat("[TradeManager] 🚫 %s: CONFLIT GOM %s vs signal=%s — REJETÉ",
                sym, actTag, action));
          return;
       }
-      if(isBoomCrashSym && gomDir != 0 && gomDir != mcpDir)
-         Print(StringFormat("[TradeManager] ℹ️ %s: GOM=%s vs signal=%s — ignoré (Boom/Crash unidirectionnel)",
-               sym, actTag, action));
 
       if(ShouldBlockGOMConsolidationForEntry(effVnum))
       {
