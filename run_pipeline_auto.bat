@@ -1,18 +1,18 @@
 @echo off
-REM TradBOT Pipeline Autonome — exécution silencieuse (planificateur Windows)
-REM Tourne toutes les heures entre 07h et 22h (heures de marché)
+REM TradBOT Pipeline Approval — exécution horaire planifiée
+REM Mode --auto : valide et place les ordres directement sans confirmation WhatsApp
+REM
+REM Pour validation manuelle (recommandé) : utiliser run_pipeline.bat sans --auto
 
 cd /d D:\Dev\TradBOT
 
 set TRADINGAGENTS_REPO=D:\Dev\Depot Github\TradingAgents-main
 set VENV_PYTHON=%TRADINGAGENTS_REPO%\.venv\Scripts\python.exe
-
-REM Charger .env
-if exist .env (
-    for /f "usebackq tokens=1,2 delims==" %%a in (".env") do (
-        if not "%%a"=="" if not "%%b"=="" set %%a=%%b
-    )
-)
+set PYTHONHTTPSVERIFY=0
+set REQUESTS_CA_BUNDLE=
+set SSL_CERT_FILE=
+set CURL_CA_BUNDLE=
+set HTTPX_VERIFY=0
 
 REM Vérifier ai_server — sortir silencieusement si absent
 curl -s http://127.0.0.1:8000/health >nul 2>&1
@@ -21,11 +21,9 @@ if errorlevel 1 (
     exit /b 0
 )
 
-REM Log démarrage
-echo %DATE% %TIME% [START] Pipeline horaire >> D:\Dev\TradBOT\logs\pipeline_scheduler.log
+echo %DATE% %TIME% [START] Pipeline approval (auto) >> D:\Dev\TradBOT\logs\pipeline_scheduler.log
 
-REM Lancer pipeline complet avec TradingAgents (confirmation des signaux TV)
-%VENV_PYTHON% Python\autonomous_pipeline.py --ta-timeout 180 >> D:\Dev\TradBOT\logs\pipeline_scheduler.log 2>&1
+%VENV_PYTHON% Python\pipeline_with_approval.py --auto >> D:\Dev\TradBOT\logs\pipeline_scheduler.log 2>&1
 
 echo %DATE% %TIME% [DONE] Pipeline terminé >> D:\Dev\TradBOT\logs\pipeline_scheduler.log
 exit /b 0
