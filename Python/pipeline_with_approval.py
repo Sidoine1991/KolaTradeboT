@@ -232,12 +232,14 @@ def run_trading_agents(symbol: str, direction: str, trade_date: str) -> Optional
             save_report_word, _mt5_to_yfinance, push_pending_order,
         )
 
-        ticker_id = _mt5_to_yfinance(symbol)
+        # Nettoyer préfixe TV avant conversion (DERIV:BOOM_1000_INDEX → Boom 1000 Index)
+        clean_sym = _tv_to_mt5(symbol)  # ex: "Boom 1000 Index"
+        ticker_id = _mt5_to_yfinance(clean_sym)
         vendor = "deriv" if any(ticker_id.upper().startswith(p)
                                 for p in ("BOOM","CRASH","1HZ","R_","FRX")) else "yfinance"
 
-        log.info("  [TA] Analyse %s (%s)...", symbol, ticker_id)
-        result = run_quick(symbol, trade_date,
+        log.info("  [TA] Analyse %s → %s (%s) vendor=%s", symbol, clean_sym, ticker_id, vendor)
+        result = run_quick(clean_sym, trade_date,
                            analysts=["market", "social"],
                            data_ticker=ticker_id,
                            vendor=vendor)
