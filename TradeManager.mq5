@@ -4,7 +4,7 @@
 //| Attacher sur UN SEUL chart — gère tout le terminal               |
 //+------------------------------------------------------------------+
 #property copyright "TradBOT"
-#property version   "3.23"
+#property version   "3.24"
 #property strict
 #include <Trade/Trade.mqh>
 #include <Trade/PositionInfo.mqh>
@@ -4038,11 +4038,16 @@ void TryExecuteMCPSignal(int idx)
 
    int    dir  = g_mcpSignals[idx].direction;
    double ep   = g_mcpSignals[idx].entryPrice;
+
+   // Souscrire le symbole dans Market Watch si nécessaire
+   if(!SymbolInfoInteger(sym, SYMBOL_SELECT))
+      SymbolSelect(sym, true);
+
    double ask  = SymbolInfoDouble(sym, SYMBOL_ASK);
    double bid  = SymbolInfoDouble(sym, SYMBOL_BID);
    if(ask <= 0.0 || bid <= 0.0)
    {
-      if(isXau) Print(StringFormat("[TradeManager] ⚠️ %s: Invalid prices (ask=%.5f bid=%.5f) — SKIP", sym, ask, bid));
+      Print(StringFormat("[TradeManager] ⚠️ %s: ask=%.5f bid=%.5f — symbole non dispo sur ce broker ou marché fermé", sym, ask, bid));
       return;
    }
    double refPx = (dir == 1) ? ask : bid;
@@ -4114,7 +4119,8 @@ void TryExecuteMCPSignal(int idx)
       }
    }
 
-   // Filtre TF global + cohérence (condition additionnelle — ne remplace pas les règles précédentes)
+   // Filtre TF global + cohérence — skip pour Boom/Crash (GOM du chart courant non pertinent)
+   if(!IsBoomOrCrashSymbol(sym))
    {
       string globalReason;
       if(!CheckGlobalDirAndCoherence(dir, globalReason))
@@ -4125,12 +4131,12 @@ void TryExecuteMCPSignal(int idx)
       }
    }
 
-   // ── GUARD OB : attendre que le prix soit à l'OB entry ──
-   if(!IsPriceAtOBEntry(dir)) return;
+   // ── GUARD OB : attendre que le prix soit à l'OB entry — skip pour Boom/Crash ──
+   if(!IsBoomOrCrashSymbol(sym) && !IsPriceAtOBEntry(dir)) return;
 
-   // ── GUARD OB : bloquer si un OB opposé barre la route vers le TP ──
+   // ── GUARD OB : bloquer si un OB opposé barre la route — skip pour Boom/Crash ──
    string obBlockReason = "";
-   if(IsOBBlockingPath(dir, obBlockReason)) return;
+   if(!IsBoomOrCrashSymbol(sym) && IsOBBlockingPath(dir, obBlockReason)) return;
 
    // Vérifier STOPS_LEVEL broker
    double pt       = SymbolInfoDouble(sym, SYMBOL_POINT);
