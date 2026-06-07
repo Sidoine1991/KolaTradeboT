@@ -241,14 +241,32 @@ def run_trading_agents(symbol: str, direction: str, trade_date: str) -> Optional
         # Nettoyer préfixe TV avant conversion (DERIV:BOOM_1000_INDEX → Boom 1000 Index)
         clean_sym = _tv_to_mt5(symbol)  # ex: "Boom 1000 Index"
 
-        # Tout passer via Deriv — supporte frxBTCUSD, frxETHUSD, frxXAUUSD, BOOM*, CRASH*, EURUSD...
-        from tradingagents.dataflows.deriv_market import resolve_deriv_symbol  # type: ignore
-        try:
-            ticker_id = resolve_deriv_symbol(clean_sym.upper().replace(" ", ""))
-        except Exception:
+        # Déterminer vendor selon catégorie
+        _clean_up = clean_sym.upper().replace(" ", "")
+        _is_synth = any(_clean_up.startswith(p) for p in ("BOOM","CRASH","1HZ","R_","V10","V25","V50","V75","V100","STEP","JUMP","RANGE"))
+        _is_forex = any(_clean_up.startswith(p) for p in ("XAUUSD","XAGUSD","EURUSD","GBPUSD","USDJPY","USDCHF","AUDUSD","NZDUSD","USDCAD"))
+        _is_crypto = any(_clean_up.startswith(p) for p in ("BTC","ETH","BNB","SOL","XRP","ADA","DOT","AVAX"))
+
+        if _is_synth or _is_forex:
+            # Indices synthétiques et Forex → Deriv WebSocket (données réelles)
+            from tradingagents.dataflows.deriv_market import resolve_deriv_symbol  # type: ignore
+            try:
+                ticker_id = resolve_deriv_symbol(_clean_up)
+            except Exception:
+                ticker_id = _mt5_to_yfinance(clean_sym)
+            vendor = "deriv"
+        elif _is_crypto:
+            # Crypto → ticker yfinance standard (BTC-USD, ETH-USD)
+            _CRYPTO_MAP = {
+                "BTCUSD": "BTC-USD", "ETHUSD": "ETH-USD", "BNBUSD": "BNB-USD",
+                "SOLUSD": "SOL-USD", "XRPUSD": "XRP-USD", "ADAUSD": "ADA-USD",
+            }
+            ticker_id = _CRYPTO_MAP.get(_clean_up, _clean_up.replace("USD", "-USD"))
+            vendor = "yfinance"
+        else:
             ticker_id = _mt5_to_yfinance(clean_sym)
-        vendor = "deriv"
-        log.info("  [TA] Symbole %s -> ticker=%s vendor=deriv", clean_sym, ticker_id)
+            vendor = "yfinance"
+        log.info("  [TA] %s -> ticker=%s vendor=%s", clean_sym, ticker_id, vendor)
 
         log.info("  [TA] Analyse %s → %s (%s) vendor=%s", symbol, clean_sym, ticker_id, vendor)
         result = run_quick(clean_sym, trade_date,
@@ -265,8 +283,8 @@ def run_trading_agents(symbol: str, direction: str, trade_date: str) -> Optional
         cp  = float(indicators.get("current_price") or 0)
         atr = float(indicators.get("atr") or 0)
 
-        # Source 1 : Deriv WebSocket API (données réelles — utilisé pour TOUS les symboles)
-        if cp <= 0 or atr <= 0:
+        # Source 1 : Deriv WebSocket API (données réelles — synthétiques et forex)
+        if (cp <= 0 or atr <= 0) and vendor == "deriv":
             try:
                 from tradbot_bridge import compute_indicators_from_deriv
                 deriv_ind = compute_indicators_from_deriv(ticker_id)
