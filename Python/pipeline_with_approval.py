@@ -367,6 +367,26 @@ def run_trading_agents(symbol: str, direction: str, trade_date: str) -> Optional
 
         lot   = get_lot_min(symbol)
 
+        # Déterminer execution_type selon règles métier
+        # - market  : entrée immédiate au prix courant
+        # - limit   : BUY en-dessous du prix courant / SELL au-dessus
+        # - stop    : BUY au-dessus du prix courant / SELL en-dessous (breakout)
+        exec_type = sig0.get("exec_type", "market")
+        if entry and cp > 0:
+            is_buy = rec == "BUY"
+            if is_buy and float(entry) < cp * 0.999:
+                exec_type = "limit"   # BUY LIMIT sous le marché (pullback)
+            elif is_buy and float(entry) > cp * 1.001:
+                exec_type = "stop"    # BUY STOP au-dessus (breakout)
+            elif not is_buy and float(entry) > cp * 1.001:
+                exec_type = "limit"   # SELL LIMIT au-dessus du marché (rebond)
+            elif not is_buy and float(entry) < cp * 0.999:
+                exec_type = "stop"    # SELL STOP en-dessous (breakout)
+            else:
+                exec_type = "market"  # Entry = prix courant → marché
+        log.info("  [TA] %s %s execution_type=%s entry=%.5f prix=%.5f",
+                 rec, clean_sym, exec_type, float(entry) if entry else 0, cp)
+
         # Sauvegarder rapport Word
         confirmed = {
             "recommendation": rec,
@@ -374,7 +394,7 @@ def run_trading_agents(symbol: str, direction: str, trade_date: str) -> Optional
             "entry_price":    entry,
             "stop_loss":      sl,
             "take_profit":    tp,
-            "execution_type": sig0.get("exec_type", "market"),
+            "execution_type": exec_type,
             "lot":            lot,
         }
         # Utiliser clean_sym (ex: "Boom 300 Index") — jamais le ticker TV avec ":"
