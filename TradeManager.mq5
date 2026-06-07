@@ -3703,11 +3703,19 @@ void IngestPendingOrderForSymbol(const string sym, const string &body)
    else if(isXau && UseGOMScalp)
       Print(StringFormat("[TradeManager] ⏭️ %s: GOM check SKIPPED (verdict > %ds)", sym, GOMSignalMaxAgeSec));
 
+   // S'assurer que le symbole est subscrit dans Market Watch
+   if(!SymbolSelect(sym, true))
+      Print(StringFormat("[TradeManager] ⚠️ SymbolSelect(%s) échoué — symbole non disponible sur ce broker", sym));
+
    double ask = SymbolInfoDouble(sym, SYMBOL_ASK);
    double bid = SymbolInfoDouble(sym, SYMBOL_BID);
    if(atMarket && entry <= 0)
       entry = (action == "BUY") ? ask : bid;
-   if(entry <= 0) return;
+   if(entry <= 0)
+   {
+      Print(StringFormat("[TradeManager] ❌ %s: prix introuvable (ask=%.5f bid=%.5f) — symbole absent du broker?", sym, ask, bid));
+      return;
+   }
 
    // 🔧 VALIDATION SL/TP + AUTO-CORRECTION (FIX: adjust invalid levels vs reject)
    int dig = (int)SymbolInfoInteger(sym, SYMBOL_DIGITS);
@@ -3840,7 +3848,8 @@ void PollMCPSignals()
    int nsyms = 0;
    string parts[];
    int np = StringSplit(InpPollSymbols, ',', parts);
-   ArrayResize(syms, np + 4);
+   // Dimensionner: chart + InpPollSymbols + whitelist pipeline + marge
+   ArrayResize(syms, np + g_whitelistCount + 8);
 
    // 1. Symbole du graphique courant en premier
    syms[nsyms++] = _Symbol;
