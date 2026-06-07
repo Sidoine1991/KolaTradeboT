@@ -11469,6 +11469,22 @@ Format: Analyse claire et professionnelle en français.
         )
 
 
+@app.get("/gom/latest")
+async def gom_latest():
+    """Dernier verdict GOM (TradingView poller → data/gom_signal.json)."""
+    try:
+        root = Path(__file__).resolve().parents[1]
+        path = root / "data" / "gom_signal.json"
+        if not path.is_file():
+            return {"ok": False, "message": "gom_signal.json absent"}
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data["ok"] = True
+        return data
+    except Exception as e:
+        logger.warning("gom/latest: %s", e)
+        return {"ok": False, "message": str(e)}
+
+
 @app.post("/gom/interpret", response_model=GOMInterpretResponse)
 async def gom_interpret(req: Request):
     """
@@ -19234,6 +19250,60 @@ async def tradingagents_realtime_run_once(symbol: str):
     except Exception as e:
         logger.error("Erreur run-once TradingAgents (%s): %s", symbol, e, exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ========== APPROVAL STORE (pipeline_with_approval ↔ PsychoBot/WhatsApp) ==========
+# pipeline_with_approval.py attend une réponse OUI/NON pour chaque signal.
+# PsychoBot (ou l'utilisateur) POST /approval avec {symbol, answer}
+# Le pipeline poll GET /approval/{symbol} puis DELETE /approval/{symbol}
+
+_approvals: Dict[str, str] = {}  # symbol_upper → "yes" | "no"
+_approvals_lock = asyncio.Lock()
+
+_YES_WORDS = {"oui", "yes", "o", "y", "1", "ok", "valider", "valide", "go"}
+_NO_WORDS  = {"non", "no", "n", "0", "skip", "annuler", "annule"}
+
+def _parse_approval_answer(raw: str) -> Optional[str]:
+    word = raw.strip().lower().split()[0] if raw.strip() else ""
+    if word in _YES_WORDS:
+        return "yes"
+    if word in _NO_WORDS:
+        return "no"
+    return None
+
+class ApprovalBody(BaseModel):
+    symbol: str
+    answer: str  # "yes"/"no" ou "oui"/"non"
+
+@app.post("/approval", status_code=201)
+async def post_approval(body: ApprovalBody):
+    """Enregistre la réponse OUI/NON de l'utilisateur pour un signal."""
+    answer = _parse_approval_answer(body.answer)
+    if answer is None:
+        raise HTTPException(status_code=400, detail=f"Réponse invalide: {body.answer!r}. Utilisez yes/no ou oui/non.")
+    sym = body.symbol.strip().upper()
+    async with _approvals_lock:
+        _approvals[sym] = answer
+    logger.info("✅ Approbation reçue: %s → %s", sym, answer)
+    return {"ok": True, "symbol": sym, "answer": answer}
+
+@app.get("/approval/{symbol}")
+async def get_approval(symbol: str):
+    """Pipeline poll: retourne la réponse si disponible, 404 sinon."""
+    sym = symbol.strip().upper()
+    async with _approvals_lock:
+        answer = _approvals.get(sym)
+    if answer is None:
+        raise HTTPException(status_code=404, detail="Aucune réponse disponible")
+    return {"symbol": sym, "answer": answer}
+
+@app.delete("/approval/{symbol}")
+async def delete_approval(symbol: str):
+    """Pipeline nettoie après lecture de la réponse."""
+    sym = symbol.strip().upper()
+    async with _approvals_lock:
+        removed = _approvals.pop(sym, None)
+    return {"ok": True, "symbol": sym, "removed": removed is not None}
 
 
 # ========== PENDING ORDER QUEUE (CLI bridge → MT5) — persistante fichier ==========
