@@ -22114,6 +22114,23 @@ def _parse_gom_tv_csv(text: str) -> Optional[dict]:
         elif out.get("setup_dir") == -1:
             out["setup_type"] = "OB_BEAR"
 
+    if len(parts) > 48:
+        out["spike_level"] = _int(parts[44])
+        out["spike_pred_prob"] = _int(parts[45])
+        out["imminence_pct"] = _flt(parts[46])
+        spike_trad = _int(parts[48]) == 1
+        out["spike_tradable"] = spike_trad
+        bc_dir = _int(parts[49]) if len(parts) > 49 else 0
+        if spike_trad:
+            if bc_dir == 1 or out.get("setup_dir") == 1:
+                out["setup_type"] = "SPIKE_BOOM"
+                out["verdict"] = "GOOD BUY"
+                out["verdict_num"] = 2
+            elif bc_dir == -1 or out.get("setup_dir") == -1:
+                out["setup_type"] = "SPIKE_CRASH"
+                out["verdict"] = "GOOD SELL"
+                out["verdict_num"] = -2
+
     return out
 
 
@@ -22532,6 +22549,44 @@ async def resolve_pending_order(payload: dict = Body(...)):
     order["status"] = "ready"
     logger.info(f"[PendingOrder] {sym} conflit résolu → status=ready")
     return {"ok": True, "symbol": sym, "status": "ready"}
+
+# ── Approval store (pipeline avec validation WhatsApp) ──────────────────────
+# key = symbol | value = {"answer": "yes"|"no"|None, "ts": float}
+_APPROVAL_STORE: Dict[str, dict] = {}
+
+@app.post("/approval")
+async def post_approval(payload: dict = Body(...)):
+    """Enregistre la réponse OUI/NON de l'utilisateur pour un symbole.
+    Appelé par PsychoBot quand l'utilisateur répond au message de validation.
+    payload: {symbol: str, answer: "yes"|"no"}
+    """
+    sym    = _resolve_symbol((payload.get("symbol") or "").strip().upper())
+    answer = str(payload.get("answer") or "").strip().lower()
+    if answer in ("oui", "yes", "o", "y", "1", "ok", "go", "valider"):
+        answer = "yes"
+    elif answer in ("non", "no", "n", "0", "skip", "annuler"):
+        answer = "no"
+    else:
+        return {"ok": False, "message": f"Réponse non reconnue: {answer}. Utilisez yes/no"}
+    _APPROVAL_STORE[sym] = {"answer": answer, "ts": time.time()}
+    logger.info(f"[Approval] {sym} → {answer}")
+    return {"ok": True, "symbol": sym, "answer": answer}
+
+@app.get("/approval/{symbol}")
+async def get_approval(symbol: str):
+    """Retourne la réponse enregistrée pour un symbole (poll par le pipeline)."""
+    sym  = _resolve_symbol(symbol.strip().upper())
+    data = _APPROVAL_STORE.get(sym)
+    if not data:
+        return {"ok": True, "symbol": sym, "answer": None, "pending": True}
+    return {"ok": True, "symbol": sym, "answer": data["answer"], "pending": False, "ts": data["ts"]}
+
+@app.delete("/approval/{symbol}")
+async def delete_approval(symbol: str):
+    """Supprime l'approbation après traitement."""
+    sym = _resolve_symbol(symbol.strip().upper())
+    _APPROVAL_STORE.pop(sym, None)
+    return {"ok": True, "symbol": sym}
 
 @app.delete("/pending-order")
 async def delete_pending_order(symbol: str = "XAUUSD"):
@@ -23583,6 +23638,60 @@ async def bridge_mcp_watchlist_scan(body: BridgeMcpScanBody):
             results.append({"symbol": symbol, "success": False, "error": str(e)})
 
     return {"ok": True, "count": len(results), "all_results": results}
+
+
+@app.post("/bridge/mcp-study-values")
+async def bridge_mcp_study_values(body: dict = Body(default={})):
+    """
+    Retourne les study values GOM KOLA SIDO depuis le store en mémoire (_GOM_VERDICT_STORE).
+    Utilisé par gom_verdict_poller._read_via_mcp_bridge() pour lire les plots Pine sans CLI Node.
+    Format de retour identique à data_get_study_values MCP.
+    """
+    sym = _resolve_symbol((body.get("symbol") or "XAUUSD").strip().upper())
+    record = _GOM_VERDICT_STORE.get(sym, {})
+    if not record:
+        return {"success": False, "study_count": 0, "studies": [], "message": "Aucun verdict GOM en cache"}
+    # Convertir le record stocké en format study values attendu par parse_gom_study
+    values = {
+        "score_buy":          record.get("score_buy", 0),
+        "score_sell":         record.get("score_sell", 0),
+        "verdict_num":        record.get("verdict_num", 0),
+        "verdict_gap":        record.get("verdict_gap"),
+        "spike_pct":          record.get("spike_pct", 0),
+        "rsi":                record.get("rsi"),
+        "st_dir":             record.get("st_dir"),
+        "entry_quality":      record.get("entry_quality"),
+        "coherence_pct":      record.get("coherence_pct"),
+        "kola_buy":           record.get("kola_buy"),
+        "kola_sell":          record.get("kola_sell"),
+        "bb_up":              record.get("bb_up"),
+        "bb_mid":             record.get("bb_mid"),
+        "bb_dn":              record.get("bb_dn"),
+        "st_line":            record.get("st_line"),
+        "vwap":               record.get("vwap"),
+        "tf_global_dir":      record.get("tf_global_dir"),
+        "tf_global_strength": record.get("tf_global_strength"),
+        "tf_bull_count":      record.get("tf_bull_count"),
+        "tf_bear_count":      record.get("tf_bear_count"),
+        "pred_bull":          record.get("pred_bull"),
+        "pred_bear":          record.get("pred_bear"),
+        "pred_neut":          record.get("pred_neut"),
+        "pred_net":           record.get("pred_net"),
+        "setup_dir":          record.get("setup_dir", 0),
+        "setup_entry":        record.get("setup_entry", 0),
+        "setup_sl":           record.get("setup_sl", 0),
+        "setup_tp1":          record.get("setup_tp1", 0),
+        "setup_tp2":          record.get("setup_tp2", 0),
+        "setup_rr":           record.get("setup_rr", 0),
+        "setup_confirm_code": 1 if record.get("setup_confirm") == "PIN_BAR_BULL" else (-1 if record.get("setup_confirm") == "PIN_BAR_BEAR" else 0),
+    }
+    return {
+        "success": True,
+        "study_count": 1,
+        "studies": [{"name": "GOM KOLA SIDO — Full Integration", "values": values}],
+        "source": "gom_verdict_store",
+        "timestamp": record.get("timestamp"),
+    }
 
 
 if __name__ == "__main__":
