@@ -240,18 +240,15 @@ def run_trading_agents(symbol: str, direction: str, trade_date: str) -> Optional
 
         # Nettoyer préfixe TV avant conversion (DERIV:BOOM_1000_INDEX → Boom 1000 Index)
         clean_sym = _tv_to_mt5(symbol)  # ex: "Boom 1000 Index"
-        ticker_id = _mt5_to_yfinance(clean_sym)
 
-        # Overrides crypto : yfinance utilise BTC-USD pas BTCUSD=X
-        _CRYPTO_TICKER = {
-            "BTCUSD": "BTC-USD", "ETHUSD": "ETH-USD",
-            "BNBUSD": "BNB-USD", "SOLUSD": "SOL-USD",
-            "XRPUSD": "XRP-USD", "ADAUSD": "ADA-USD",
-        }
-        ticker_id = _CRYPTO_TICKER.get(clean_sym.upper(), ticker_id)
-
-        vendor = "deriv" if any(ticker_id.upper().startswith(p)
-                                for p in ("BOOM","CRASH","1HZ","R_","FRX")) else "yfinance"
+        # Tout passer via Deriv — supporte frxBTCUSD, frxETHUSD, frxXAUUSD, BOOM*, CRASH*, EURUSD...
+        from tradingagents.dataflows.deriv_market import resolve_deriv_symbol  # type: ignore
+        try:
+            ticker_id = resolve_deriv_symbol(clean_sym.upper().replace(" ", ""))
+        except Exception:
+            ticker_id = _mt5_to_yfinance(clean_sym)
+        vendor = "deriv"
+        log.info("  [TA] Symbole %s -> ticker=%s vendor=deriv", clean_sym, ticker_id)
 
         log.info("  [TA] Analyse %s → %s (%s) vendor=%s", symbol, clean_sym, ticker_id, vendor)
         result = run_quick(clean_sym, trade_date,
@@ -268,10 +265,8 @@ def run_trading_agents(symbol: str, direction: str, trade_date: str) -> Optional
         cp  = float(indicators.get("current_price") or 0)
         atr = float(indicators.get("atr") or 0)
 
-        # Source 1 : Deriv WebSocket API (données réelles, prioritaire pour synthétiques)
-        is_deriv = any(clean_sym.upper().replace(" ","").startswith(p)
-                       for p in ("BOOM","CRASH","1HZ","R_","V10","V25","V50","V75","V100"))
-        if (cp <= 0 or atr <= 0) and is_deriv:
+        # Source 1 : Deriv WebSocket API (données réelles — utilisé pour TOUS les symboles)
+        if cp <= 0 or atr <= 0:
             try:
                 from tradbot_bridge import compute_indicators_from_deriv
                 deriv_ind = compute_indicators_from_deriv(ticker_id)
