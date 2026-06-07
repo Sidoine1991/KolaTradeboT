@@ -253,66 +253,65 @@ def run_trading_agents(symbol: str, direction: str, trade_date: str) -> Optional
         cp  = float(indicators.get("current_price") or 0)
         atr = float(indicators.get("atr") or 0)
 
-        # Fallback 1 : AI server /trading/indicators
+        # Source 1 : Deriv WebSocket API (données réelles, prioritaire pour synthétiques)
+        is_deriv = any(clean_sym.upper().replace(" ","").startswith(p)
+                       for p in ("BOOM","CRASH","1HZ","R_","V10","V25","V50","V75","V100"))
+        if (cp <= 0 or atr <= 0) and is_deriv:
+            try:
+                from tradbot_bridge import compute_indicators_from_deriv
+                deriv_ind = compute_indicators_from_deriv(ticker_id)
+                if deriv_ind:
+                    if cp <= 0:
+                        cp  = float(deriv_ind.get("current_price") or 0)
+                    if atr <= 0:
+                        atr = float(deriv_ind.get("atr") or 0)
+                    if cp > 0:
+                        log.info("  [Deriv ✅] %s: prix=%.5f ATR=%.5f", symbol, cp, atr)
+            except Exception as e:
+                log.warning("  [Deriv] %s: %s", symbol, e)
+
+        # Source 2 : AI server /trading/indicators (pour Forex/Crypto)
         if cp <= 0 or atr <= 0:
-            lvl = compute_entry_levels(symbol, rec)
-            if not cp:
-                cp = float(lvl.get("current_price") or 0)
-            if not atr:
+            lvl = compute_entry_levels(clean_sym, rec)
+            if cp <= 0:
+                cp  = float(lvl.get("current_price") or 0)
+            if atr <= 0:
                 atr = float(lvl.get("atr") or 0)
 
-        # Fallback 2 : AI server /gom-verdict (prix actuel + ATR depuis GOM)
+        # Source 3 : AI server /gom-verdict
         if cp <= 0 or atr <= 0:
             try:
-                sym_enc = symbol.replace(" ", "%20")
                 rg = requests.get(f"{AI_SERVER}/gom-verdict",
-                                  params={"symbol": sym_enc}, timeout=4)
+                                  params={"symbol": clean_sym}, timeout=4)
                 if rg.status_code == 200:
                     gd = rg.json()
-                    if not cp:
-                        cp = float(gd.get("close") or gd.get("current_price") or 0)
-                    if not atr:
+                    if cp <= 0:
+                        cp  = float(gd.get("close") or gd.get("current_price") or 0)
+                    if atr <= 0:
                         atr = float(gd.get("atr") or 0)
             except Exception:
                 pass
 
-        # Fallback 3 : cache prix MCP du scan phase 1
+        # Source 4 : cache prix MCP du scan phase 1
         if cp <= 0:
             cached = _MCP_PRICE_CACHE.get(symbol, {})
             if cached.get("price"):
-                cp = float(cached["price"])
-                log.info("  [TA] %s: prix depuis cache MCP = %.5f", symbol, cp)
-            if not atr and cached.get("atr"):
+                cp  = float(cached["price"])
+                log.info("  [MCP cache] %s: prix=%.5f", symbol, cp)
+            if atr <= 0 and cached.get("atr"):
                 atr = float(cached["atr"])
-
-        # Fallback 4 : quote TradingView via AI server bridge
-        if cp <= 0:
-            try:
-                sym_enc = symbol.replace(" ", "%20").replace(":", "%3A")
-                rq = requests.post(
-                    f"{AI_SERVER}/bridge/mcp-watchlist-scan",
-                    json={"symbols": [symbol]}, timeout=15,
-                )
-                if rq.status_code == 200:
-                    results = rq.json().get("all_results", [])
-                    if results:
-                        r0 = results[0]
-                        cp_raw = r0.get("current_price") or 0
-                        if cp_raw:
-                            cp = float(cp_raw)
-                            log.info("  [TA] %s: prix depuis quote TV = %.5f", symbol, cp)
-            except Exception:
-                pass
 
         # Calculer signaux avec le meilleur prix disponible
         signals = []
         if cp > 0 and atr > 0:
-            signals = compute_signals(symbol, rec, cp, atr)
+            signals = compute_signals(clean_sym, rec, cp, atr)
         elif cp > 0:
             # ATR estimé à 0.5% du prix si indisponible
             atr_est = round(cp * 0.005, 5)
-            log.warning("  [TA] %s: ATR indisponible — estimé à %.5f (0.5%% de %.2f)", symbol, atr_est, cp)
-            signals = compute_signals(symbol, rec, cp, atr_est)
+            log.warning("  [TA] %s: ATR indisponible — estimé %.5f (0.5%% × %.2f)", symbol, atr_est, cp)
+            signals = compute_signals(clean_sym, rec, cp, atr_est)
+        else:
+            log.warning("  [TA] %s: Aucune source de prix disponible — niveaux N/A", symbol)
 
         sig0 = signals[0] if signals else {}
         entry = sig0.get("entry_price") or params.get("entry_price")
