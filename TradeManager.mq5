@@ -24,7 +24,7 @@ input double StagnationLockMinUSD     = 1.25;   // Plancher absolu après armeme
 input double StagnationFlatBandUSD    = 0.35;   // Bande "stagne autour du pic" (USD)
 
 input group "=== LIMITES GLOBALES ==="
-input int    MaxGlobalPositions     = 5;      // Max positions simultanées tous symboles confondus
+input int    MaxGlobalPositions     = 2;      // Max positions simultanées tous symboles confondus
 input bool   ReEntryIgnoreGlobal    = true;   // Re-entrée même symbole exempt de la limite globale
 
 input group "=== RE-ENTRÉE SUR EMA ==="
@@ -61,6 +61,15 @@ input group "=== PROFIT GLOBAL ==="
 input bool   UseGlobalProfitTarget  = true;   // Fermer tout si profit total >= cible
 input double GlobalProfitTargetUSD  = 10.0;   // Cible profit global (USD) — somme positions MCP
 input bool   GlobalProfitMCPOnly    = true;   // Ne compter que les positions magic MCP (bridge)
+
+input group "=== CAPITAL MANAGER — GAME CHANGER ==="
+input bool   UseCapitalManager      = true;   // Activer gestion intelligente du capital
+input double CM_DailyTargetPct      = 5.0;    // Objectif profit journalier (% du capital) — 5% de $50 = $2.50
+input double CM_DailyStopLossPct    = 6.0;    // Stop perte journalier (% du capital) — ex: 6% de $50 = $3
+input int    CM_MaxTradesPerDay      = 3;      // Max trades par jour (0 = calculé automatiquement)
+input double CM_MinCapitalToTrade    = 20.0;   // Ne pas trader si capital < ce montant ($)
+input double CM_LotRiskPct          = 2.0;    // Risque par trade (% du capital) pour lot sizing adaptatif
+input bool   CM_PersistStats        = true;   // Sauvegarder stats journalières en fichier (survit rechargement)
 
 input group "=== SIGNAUX MCP TRADINGVIEW ==="
 input bool   UseMCPSignals          = true;   // Exécuter signaux bridge/WhatsApp (pending-order)
@@ -134,6 +143,7 @@ input int    TVSetupRearmCooldownSec  = 15;    // Délai après annulation avant
 input bool   TVSetupInferFromGOM      = true;  // Reconstruire setup si plots TV absents (KOLA+BB)
 input bool   TVSetupMarketOnBreakout  = true;  // Marché si prix repasse au-dessus entry (reprise BUY)
 input double TVSetupBreakoutTolPct    = 0.03;  // Tolérance breakout au-dessus entry (%)
+input bool   TVSetupSpikeMarket       = true;  // Entrée marché immédiate PRE-SPIKE Boom/Crash (TV)
 
 input group "=== CHEMIN PREDICTIF + ANTI-CORRECTION ==="
 input bool   ShowGOMPathCandles       = true;  // Dessiner bougies futures sur chart MT5
@@ -145,6 +155,34 @@ input bool   GOMUseMicroTFCorrection  = true;  // M1/M5 contre H1 = correction
 input int    GOMCorrectionPathLook    = 25;    // Barres pred_path analysees
 input int    GOMCorrectionMinBars     = 7;     // Min bougies D/U opposees = correction
 input double GOMMinSetupProb          = 0.40;  // Proba setup min (RDS) pour entrer
+
+input group "=== DERIV SYNTHETICS (Boom / Crash / Volatility) ==="
+input bool   UseDerivEngine         = true;   // Activer moteur spike pour Boom/Crash
+input bool   DRV_AutoPresets        = true;   // Ajuster seuils auto selon le variant (300/500/1000)
+input double DRV_SpikeBodyMult      = 0.50;   // Corps min = N * ATR
+input double DRV_SpikeWickMult      = 0.60;   // Mèche min = N * ATR
+input int    DRV_BarsMin            = 8;      // Cycle attendu (barres) — Boom500=8, 1000=16
+input double DRV_WindowStart        = 0.60;   // Début fenêtre anticipation (% cycle)
+input double DRV_WindowEnd          = 0.85;   // Fin fenêtre anticipation
+input int    DRV_PullbackBars       = 3;      // Barres max post-spike pour pullback entry
+input bool   DRV_UseBOS            = true;   // ICT — Break of Structure
+input bool   DRV_UseCHOCH          = true;   // ICT — Change of Character
+input bool   DRV_UseLiqSweep       = true;   // ICT — Liquidity Sweep
+input bool   DRV_UseOB             = true;   // ICT — Order Block
+input bool   DRV_UseFVG            = true;   // ICT — Fair Value Gap
+input bool   DRV_UseOTE            = true;   // ICT — Optimal Trade Entry (Fib 62-79%)
+input int    DRV_MinICTScore        = 0;      // Score ICT minimum (0=OFF, 40=souple, 70=strict)
+input int    DRV_ICTLookback        = 20;     // Barres pour détection ICT
+input double DRV_SL_ATR             = 1.5;    // SL = N * ATR
+input double DRV_TP_ATR             = 3.0;    // TP = N * ATR
+input bool   DRV_UseQuickExit       = true;   // Fermer sur spike suivant
+input double DRV_QuickExitMinPct    = 0.3;    // Profit min avant quick exit (% ATR)
+input int    DRV_TimeStopMin        = 20;     // Fermer après N minutes
+input bool   DRV_UseSmartBE         = true;   // Breakeven automatique
+input double DRV_BETrigger          = 1.0;    // Déclencher BE à N*ATR profit
+input bool   DRV_UseTrail           = true;   // Trailing stop
+input double DRV_TrailATR           = 0.5;    // Distance trailing = N * ATR
+input double DRV_TrailActivation    = 0.8;    // Activer trailing à N*ATR profit
 
 input group "=== GOM/KOLA DASHBOARD ==="
 input bool   UseDashboard          = true;   // Afficher le dashboard GOM/KOLA sur le chart
@@ -170,6 +208,11 @@ CPositionInfo posInfo;
 bool     g_globalCloseDone = false;
 datetime g_globalCloseTime = 0;
 
+// Daily Profit Target (CM_DailyTargetPct)
+bool     g_dailyTargetHit    = false;  // true = objectif % atteint aujourd'hui → bloquer entrées
+datetime g_dailyResetDate    = 0;      // date du dernier reset (comparaison jour calendaire)
+double   g_dailyStartBalance = 0.0;    // balance au début de la journée
+
 // GOM Scalp Loop
 datetime g_lastGOMPoll       = 0;
 int      g_lastGOMAutoVnum   = 0;
@@ -187,6 +230,12 @@ double   g_lastGOMScoreBuy   = 0.0;
 double   g_lastGOMScoreSell  = 0.0;
 string   g_lastGOMGlobalDir  = "";  // "BULL" | "BEAR" | "NEUT"
 int      g_lastGOMGlobalStrength = 0; // 0-100
+
+// GHOST OrderFlow — mis à jour depuis /gom-verdict (plots data_window)
+double   g_ghostDelta   = 0.0;  // delta volume bougie courante (+ = buyers, - = sellers)
+double   g_ghostCVD     = 0.0;  // CVD cumulatif session
+double   g_ghostBuyPct  = 50.0; // sentiment BUY% pondéré volume (20 barres)
+double   g_ghostCompass = 0.0;  // angle boussole momentum 0-360°
 
 // Tableau SETUP TradingView (OB_BULL / OB_BEAR)
 bool     g_setupValid       = false;
@@ -222,6 +271,8 @@ double   g_setupBuyProb       = 0.0;
 double   g_setupSellProb      = 0.0;
 double   g_setupValidProb     = 0.0;
 double   g_predHitRate        = 0.0;
+bool     g_spikeTradable      = false;
+double   g_spikeImminence     = 0.0;
 
 // ---------------------------------------------------------------------------
 // WHITELIST PIPELINE — symboles validés par autonomous_pipeline.py
@@ -476,6 +527,18 @@ int OnInit()
       RefreshDashboard();
    }
 
+   // Handles indicateurs Deriv (uniquement sur symboles synthétiques)
+   if(UseDerivEngine && (IsBoomOrCrashSymbol(_Symbol) || DRV_IsVolatility()))
+   {
+      g_drvHATR = iATR(_Symbol, PERIOD_M1, 14);
+      g_drvHRSI = iRSI(_Symbol, PERIOD_M1, 14, PRICE_CLOSE);
+      g_drvBarsSinceSpike  = DRV_GetCycle() / 2;
+      g_drvLastProcessedBar= 0;
+      g_drvTradeTaken      = false;
+      Print(StringFormat("[DRV] Moteur Deriv activé — %s | Cycle=%d | Fenêtre %.0f-%.0f%%",
+            _Symbol, DRV_GetCycle(), DRV_WindowStart*100, DRV_WindowEnd*100));
+   }
+
    // Forcer un poll + dessin immédiat au chargement — pas d'attente du premier tick
    if(UseGOMScalp)
    {
@@ -491,6 +554,8 @@ int OnInit()
 void OnDeinit(const int reason)
 {
    EventKillTimer();
+   if(g_drvHATR!=INVALID_HANDLE) IndicatorRelease(g_drvHATR);
+   if(g_drvHRSI!=INVALID_HANDLE) IndicatorRelease(g_drvHRSI);
    if(UseDashboard) RemoveAllDashboardObjects();
    // Ne pas supprimer les niveaux GOM/OB/chemin — ils restent visibles après rechargement
    // CleanupGOMPathObjects() — désactivé intentionnellement
@@ -507,6 +572,8 @@ void OnDeinit(const int reason)
 void OnTimer()
 {
    ScanAllPositions();
+   if(UseDerivEngine)        RunDerivEngine();
+   if(UseCapitalManager)     CheckDailyProfitTarget();
    if(RequireSignalAlign)    PollSignalBias();
    if(UseGlobalProfitTarget) CheckGlobalProfit();
    if(UseProfitGivebackExit) ManageProfitGivebackExit();
@@ -531,6 +598,8 @@ void OnTick()
    if(TimeCurrent() - lastRun < CheckIntervalSec) return;
    lastRun = TimeCurrent();
    ScanAllPositions();
+   if(UseDerivEngine)        RunDerivEngine();
+   if(UseCapitalManager)     CheckDailyProfitTarget();
    if(RequireSignalAlign)    PollSignalBias();
    if(UseGlobalProfitTarget) CheckGlobalProfit();
    if(UseProfitGivebackExit) ManageProfitGivebackExit();
@@ -1082,7 +1151,7 @@ void InferTVSetupFromGOMBody(const string &body)
 
    double atr_est = price * 0.0012;
 
-   if(sb >= ss && gap >= 0.8 && kola_buy > 0)
+   if(sb >= ss && gap >= 0.3 && kola_buy > 0)
    {
       g_setupDir   = 1;
       g_setupType  = "OB_BULL";
@@ -1102,7 +1171,7 @@ void InferTVSetupFromGOMBody(const string &body)
       g_setupTP2 = g_setupEntry + risk * 1.5;
       g_setupRR  = 1.0;
    }
-   else if(ss > sb && gap >= 0.8 && kola_sell > 0)
+   else if(ss > sb && gap >= 0.3 && kola_sell > 0)
    {
       g_setupDir   = -1;
       g_setupType  = "OB_BEAR";
@@ -1269,6 +1338,11 @@ bool PriceTouchedTVSetupEntry(const int dir, const double entry)
 bool PlaceTVSetupLimitOrder()
 {
    if(!g_setupValid || g_setupDir == 0) return false;
+   if(IsDailyTargetLocked())
+   {
+      PrintOnce("[CM] 🔒 TVSetup bloqué — objectif journalier atteint", 300);
+      return false;
+   }
    if(IsGOMCorrectionZone(g_setupDir))
    {
       PrintOnce("[TV-Setup] Entree bloquee — zone de correction active", 30);
@@ -1302,15 +1376,24 @@ bool PlaceTVSetupLimitOrder()
             return false;
          }
       }
-      else if(g_setupDir == 1 && g_lastGOMVerdictNum < 0)
+      else
       {
-         PrintOnce("[TV-Setup] Setup BUY ignoré — verdict GOM baissier actif", 30);
-         return false;
-      }
-      else if(g_setupDir == -1 && g_lastGOMVerdictNum > 0)
-      {
-         PrintOnce("[TV-Setup] Setup SELL ignoré — verdict GOM haussier actif", 30);
-         return false;
+         // vnum=0 (WAIT) : bloquer placement sauf si TVSetupBlockPlaceOnWait désactivé explicitement
+         if(g_lastGOMVerdictNum == 0)
+         {
+            PrintOnce("[TV-Setup] Setup ignoré — GOM WAIT (vnum=0)", 30);
+            return false;
+         }
+         if(g_setupDir == 1 && g_lastGOMVerdictNum < 0)
+         {
+            PrintOnce("[TV-Setup] Setup BUY ignoré — verdict GOM baissier actif", 30);
+            return false;
+         }
+         if(g_setupDir == -1 && g_lastGOMVerdictNum > 0)
+         {
+            PrintOnce("[TV-Setup] Setup SELL ignoré — verdict GOM haussier actif", 30);
+            return false;
+         }
       }
    }
 
@@ -1374,9 +1457,62 @@ bool PlaceTVSetupLimitOrder()
    return ok;
 }
 
+// Pre-spike Boom/Crash : entrée marché immédiate depuis signal TV
+bool TryTVPreSpikeMarketEntry()
+{
+   if(!TVSetupSpikeMarket || !g_setupValid || g_setupDir == 0) return false;
+   if(StringFind(g_setupType, "SPIKE_") < 0 && !g_spikeTradable) return false;
+   if(!IsBoomOrCrashSymbol(_Symbol)) return false;
+   if(IsDailyTargetLocked()) return false;
+   if(HasMCPOpenPosition(_Symbol) || IsGlobalPositionLimitReached()) return false;
+   if((int)(TimeCurrent() - g_tvSetupBreakoutDone) < GOMAutoEntryCooldownSec) return false;
+
+   ulong pending = 0;
+   if(FindTVSetupPendingTicket(pending)) return false;
+
+   if(g_setupDir == 1 && g_lastGOMVerdictNum < 1) return false;
+   if(g_setupDir == -1 && g_lastGOMVerdictNum > -1) return false;
+
+   int pendKind = ClassifyTVSetupPendingType(g_setupDir, g_setupEntry);
+   if(pendKind != 0 && g_setupEntry > 0) return false;
+
+   double lot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   int dg = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+   double entry = (g_setupDir == 1) ? SymbolInfoDouble(_Symbol, SYMBOL_ASK) : SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   if(entry <= 0) return false;
+   double sl = NormalizeDouble(g_setupSL, dg);
+   double tp = NormalizeDouble(g_setupTP1, dg);
+   if(!FixTVSetupStopsForBroker(g_setupDir, entry, sl, tp)) return false;
+
+   CTrade ct;
+   ct.SetExpertMagicNumber(TVSetupMagicNumber);
+   ct.SetDeviationInPoints(50);
+   ct.SetTypeFilling(ORDER_FILLING_IOC);
+
+   bool ok = (g_setupDir == 1)
+      ? ct.Buy(lot, _Symbol, 0, sl, tp, "TM_TV_SPIKE")
+      : ct.Sell(lot, _Symbol, 0, sl, tp, "TM_TV_SPIKE");
+
+   if(!ok)
+   {
+      PrintOnce(StringFormat("[TV-Setup] Pre-spike %s échoué: %d",
+            (g_setupDir == 1 ? "BUY" : "SELL"), (int)ct.ResultRetcode()), 20);
+      return false;
+   }
+
+   g_tvSetupBreakoutDone = TimeCurrent();
+   g_setupKey = BuildTVSetupKey();
+   Print(StringFormat("[TV-Setup] ⚡ PRE-SPIKE %s %s @ %.2f SL=%.2f TP=%.2f | %s imm=%.0f%%",
+         g_setupType, (g_setupDir == 1 ? "BUY" : "SELL"), entry, sl, tp,
+         g_lastGOMVerdict, g_spikeImminence));
+   return true;
+}
+
 void ManageTVSetupLimitOrder()
 {
    if(!UseTVSetupLimit) return;
+
+   bool isSpikeSetup = (StringFind(g_setupType, "SPIKE_") >= 0) || g_spikeTradable;
 
    if(!g_setupValid || g_setupDir == 0)
    {
@@ -1384,6 +1520,12 @@ void ManageTVSetupLimitOrder()
          CancelTVSetupLimitOrder("setup TV invalide ou retiré");
       g_setupKey = "";
       PrintOnce("[TV-Setup] Pas de setup actif — vérifier poller + GOM_KOLA_SIDO sur TV", 120);
+      return;
+   }
+
+   if(isSpikeSetup && TVSetupSpikeMarket)
+   {
+      TryTVPreSpikeMarketEntry();
       return;
    }
 
@@ -2703,6 +2845,464 @@ void CheckGlobalProfit()
 }
 
 //+------------------------------------------------------------------+
+//| Daily Profit Target — bloque toute entrée dès 5% gagné/jour     |
+//+------------------------------------------------------------------+
+
+// Retourne le profit net des deals clôturés aujourd'hui (depuis minuit heure broker)
+double CalcDailyClosedProfit()
+{
+   double pnl = 0.0;
+   datetime dayStart = StringToTime(TimeToString(TimeCurrent(), TIME_DATE)); // minuit local broker
+   HistorySelect(dayStart, TimeCurrent());
+   for(int i = HistoryDealsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = HistoryDealGetTicket(i);
+      if(ticket == 0) continue;
+      if(HistoryDealGetInteger(ticket, DEAL_TYPE) == DEAL_TYPE_BALANCE) continue;
+      if(HistoryDealGetInteger(ticket, DEAL_ENTRY) != DEAL_ENTRY_OUT) continue;
+      pnl += HistoryDealGetDouble(ticket, DEAL_PROFIT)
+           + HistoryDealGetDouble(ticket, DEAL_SWAP)
+           + HistoryDealGetDouble(ticket, DEAL_COMMISSION);
+   }
+   return pnl;
+}
+
+// Profit flottant toutes positions ouvertes (tous magic)
+double CalcFloatingProfit()
+{
+   double pnl = 0.0;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      if(!posInfo.SelectByIndex(i)) continue;
+      pnl += posInfo.Profit() + posInfo.Swap();
+   }
+   return pnl;
+}
+
+//+------------------------------------------------------------------+
+//| DERIV ENGINE — Boom / Crash / Volatility                        |
+//| Moteur spike ICT/SMC intégré depuis DerivEAPro v9               |
+//+------------------------------------------------------------------+
+
+// État persistant Deriv
+int      g_drvBarsSinceSpike   = 0;
+datetime g_drvLastSpikeBar     = 0;
+datetime g_drvLastProcessedBar = 0;
+double   g_drvSpikeExtLow      = 0;
+double   g_drvSpikeExtHigh     = 0;
+bool     g_drvTradeTaken       = false;
+datetime g_drvLastTradeBar     = 0;
+datetime g_drvOpenTime         = 0;
+ulong    g_drvTicket           = 0;
+bool     g_drvBETriggered      = false;
+string   g_drvLastReason       = "—";
+// ICT last result
+int      g_drvICTScore         = 0;
+string   g_drvICTGrade         = "C";
+
+// Handles indicateurs Deriv (créés OnInit si symbole synthétique)
+int g_drvHATR = INVALID_HANDLE;
+int g_drvHRSI = INVALID_HANDLE;
+
+// ── Helpers symbole ──────────────────────────────────────────────
+bool DRV_IsBoom()  { return StringFind(_Symbol,"Boom")>=0||StringFind(_Symbol,"boom")>=0; }
+bool DRV_IsCrash() { return StringFind(_Symbol,"Crash")>=0||StringFind(_Symbol,"crash")>=0; }
+bool DRV_IsVolatility() { return StringFind(_Symbol,"Volatility")>=0||StringFind(_Symbol,"volatility")>=0||StringFind(_Symbol,"Vol ")>=0; }
+
+int DRV_GetCycle()
+{
+   if(StringFind(_Symbol,"300")>=0)  return 5;
+   if(StringFind(_Symbol,"500")>=0)  return 8;
+   if(StringFind(_Symbol,"600")>=0)  return 10;
+   if(StringFind(_Symbol,"900")>=0)  return 13;
+   if(StringFind(_Symbol,"1000")>=0) return 16;
+   return DRV_BarsMin;
+}
+double DRV_BodyMult() { return (DRV_AutoPresets && StringFind(_Symbol,"1000")>=0) ? 0.60 : DRV_SpikeBodyMult; }
+double DRV_WickMult() { return (DRV_AutoPresets && StringFind(_Symbol,"1000")>=0) ? 0.70 : DRV_SpikeWickMult; }
+double DRV_SL()       { return (DRV_AutoPresets && StringFind(_Symbol,"1000")>=0) ? 2.0  : DRV_SL_ATR; }
+double DRV_TP()       { return (DRV_AutoPresets && StringFind(_Symbol,"1000")>=0) ? 3.5  : DRV_TP_ATR; }
+
+double DRV_GetATR(int shift=1)
+{
+   if(g_drvHATR==INVALID_HANDLE) return 0;
+   double b[]; ArraySetAsSeries(b,true);
+   if(CopyBuffer(g_drvHATR,0,shift,1,b)<1) return 0;
+   return b[0];
+}
+double DRV_GetRSI(int shift=1)
+{
+   if(g_drvHRSI==INVALID_HANDLE) return 50;
+   double b[]; ArraySetAsSeries(b,true);
+   if(CopyBuffer(g_drvHRSI,0,shift,1,b)<1) return 50;
+   return b[0];
+}
+
+// ── Détection spike ──────────────────────────────────────────────
+bool DRV_IsSpike(const MqlRates &c, double atr, bool forBoom)
+{
+   double body=MathAbs(c.close-c.open);
+   double wickUp=c.high-MathMax(c.open,c.close);
+   double wickDn=MathMin(c.open,c.close)-c.low;
+   if(forBoom)
+      return ((body>=atr*DRV_BodyMult()||wickUp>=atr*DRV_WickMult())&&c.close>c.open);
+   else
+      return ((body>=atr*DRV_BodyMult()||wickDn>=atr*DRV_WickMult())&&c.close<c.open);
+}
+
+void DRV_UpdateCycle()
+{
+   double atr=DRV_GetATR(1); if(atr<=0) return;
+   MqlRates r[]; ArraySetAsSeries(r,true);
+   if(CopyRates(_Symbol,PERIOD_M1,1,1,r)<1) return;
+   bool forBoom = DRV_IsBoom();
+   // Volatility : spike dans les deux sens
+   bool spike = DRV_IsVolatility()
+      ? DRV_IsSpike(r[0],atr,true)||DRV_IsSpike(r[0],atr,false)
+      : DRV_IsSpike(r[0],atr,forBoom);
+   if(spike)
+   {
+      g_drvLastSpikeBar   = r[0].time;
+      g_drvSpikeExtLow    = r[0].low;
+      g_drvSpikeExtHigh   = r[0].high;
+      g_drvBarsSinceSpike = 0;
+      g_drvTradeTaken     = false;
+   }
+   else
+   {
+      g_drvBarsSinceSpike++;
+      int cyMax = DRV_GetCycle()*3;
+      if(g_drvBarsSinceSpike > cyMax) g_drvBarsSinceSpike = DRV_GetCycle();
+   }
+}
+
+// ── Score ICT simplifié ──────────────────────────────────────────
+int DRV_CalcICT(bool forBuy)
+{
+   int score=0;
+   MqlRates r[]; ArraySetAsSeries(r,true);
+   int n=DRV_ICTLookback+4;
+   if(CopyRates(_Symbol,PERIOD_M1,0,n,r)<n) return 0;
+   double atr=DRV_GetATR(1); if(atr<=0) return 0;
+   double cur=r[1].close;
+
+   // BOS
+   if(DRV_UseBOS)
+   {
+      double hh=r[2].high, ll=r[2].low;
+      for(int i=3;i<n-1;i++) { hh=MathMax(hh,r[i].high); ll=MathMin(ll,r[i].low); }
+      if(forBuy && r[1].close>hh) score+=20;
+      if(!forBuy && r[1].close<ll) score+=20;
+   }
+   // CHoCH
+   if(DRV_UseCHOCH && n>=8)
+   {
+      if(forBuy) {
+         bool down=(r[5].low>r[4].low)&&(r[4].low>r[3].low);
+         double rHi=MathMax(MathMax(r[2].high,r[3].high),r[4].high);
+         if(down&&r[1].close>rHi) score+=20;
+      } else {
+         bool up=(r[5].high<r[4].high)&&(r[4].high<r[3].high);
+         double rLo=MathMin(MathMin(r[2].low,r[3].low),r[4].low);
+         if(up&&r[1].close<rLo) score+=20;
+      }
+   }
+   // Order Block
+   if(DRV_UseOB)
+   {
+      for(int i=3;i<MathMin(11,n);i++)
+      {
+         if(forBuy && r[i].close<r[i].open)
+         {
+            double imp=0; for(int j=i-1;j>=2;j--) imp+=(r[j].close-r[j].open);
+            if(imp>=atr*1.2 && cur>=r[i].close-atr*0.1 && cur<=r[i].open+atr*0.2) { score+=15; break; }
+         }
+         if(!forBuy && r[i].close>r[i].open)
+         {
+            double imp=0; for(int j=i-1;j>=2;j--) imp+=(r[j].open-r[j].close);
+            if(imp>=atr*1.2 && cur<=r[i].close+atr*0.1 && cur>=r[i].open-atr*0.2) { score+=15; break; }
+         }
+      }
+   }
+   // FVG
+   if(DRV_UseFVG && n>=6)
+   {
+      for(int i=1;i<=3&&i+2<n;i++)
+      {
+         if(forBuy && r[i].low>r[i+2].high && cur>=r[i+2].high && cur<=r[i].low) { score+=15; break; }
+         if(!forBuy && r[i].high<r[i+2].low && cur<=r[i+2].low && cur>=r[i].high) { score+=15; break; }
+      }
+   }
+   // OTE (Fib 62-79%)
+   if(DRV_UseOTE)
+   {
+      double hi=r[1].high,lo=r[1].low;
+      for(int i=2;i<n;i++){hi=MathMax(hi,r[i].high);lo=MathMin(lo,r[i].low);}
+      double rng=hi-lo; if(rng>0)
+      {
+         if(forBuy) { double f62=hi-rng*0.62,f79=hi-rng*0.79; if(cur>=f79&&cur<=f62) score+=10; }
+         else       { double f62=lo+rng*0.62,f79=lo+rng*0.79; if(cur>=f62&&cur<=f79) score+=10; }
+      }
+   }
+   return MathMin(score, 100);
+}
+
+// ── Logique d'entrée ──────────────────────────────────────────────
+bool DRV_EvaluateEntry(bool &isBuy, string &reason)
+{
+   isBuy  = DRV_IsBoom();
+   reason = "";
+   if(g_drvTradeTaken) { reason="1 trade/cycle déjà pris"; return false; }
+
+   double atr = DRV_GetATR(1); if(atr<=0) { reason="ATR invalide"; return false; }
+   int cycle  = DRV_GetCycle();
+   double pct = (cycle>0) ? MathMin((double)g_drvBarsSinceSpike/cycle, 1.2) : 0.5;
+
+   // Volatility : direction par biais GOM
+   if(DRV_IsVolatility())
+   {
+      if(g_lastGOMVerdictNum >= 2)      isBuy = true;
+      else if(g_lastGOMVerdictNum <= -2) isBuy = false;
+      else { reason=StringFormat("Volatility — GOM WAIT (vnum=%d)",g_lastGOMVerdictNum); return false; }
+   }
+
+   // Filtre RSI
+   double rsi=DRV_GetRSI(1);
+   if(isBuy  && rsi>72) { reason=StringFormat("RSI=%.0f suracheté",rsi); return false; }
+   if(!isBuy && rsi<28) { reason=StringFormat("RSI=%.0f survendu",rsi);  return false; }
+
+   int ict = DRV_CalcICT(isBuy);
+   g_drvICTScore = ict;
+   g_drvICTGrade = ict>=85?"A+":ict>=70?"A":ict>=50?"B":"C";
+
+   if(DRV_MinICTScore>0 && ict<DRV_MinICTScore)
+   { reason=StringFormat("ICT=%d<%d",ict,DRV_MinICTScore); return false; }
+
+   // Mode 1 : ANTICIPATION (fenêtre 60-85%)
+   if(pct>=DRV_WindowStart && pct<DRV_WindowEnd)
+   {
+      reason=StringFormat("ANTICIPATION %.0f%% | ICT=%d(%s) | RSI=%.0f",pct*100,ict,g_drvICTGrade,rsi);
+      return true;
+   }
+   // Mode 2 : PULLBACK post-spike
+   if(g_drvLastSpikeBar>0 && g_drvBarsSinceSpike>=1 && g_drvBarsSinceSpike<=DRV_PullbackBars)
+   {
+      double refPx   = isBuy ? g_drvSpikeExtLow : g_drvSpikeExtHigh;
+      double curPx   = isBuy ? SymbolInfoDouble(_Symbol,SYMBOL_ASK)
+                              : SymbolInfoDouble(_Symbol,SYMBOL_BID);
+      double dist    = isBuy ? curPx-refPx : refPx-curPx;
+      if(dist>=-atr*0.3 && dist<=atr*2.5 && (DRV_MinICTScore==0||ict>=DRV_MinICTScore))
+      {
+         reason=StringFormat("PULLBACK %d bars | ICT=%d(%s) | RSI=%.0f",g_drvBarsSinceSpike,ict,g_drvICTGrade,rsi);
+         return true;
+      }
+   }
+   reason=StringFormat("Attente %.0f%% cycle (%.0f-%.0f%% requis) | ICT=%d",pct*100,DRV_WindowStart*100,DRV_WindowEnd*100,ict);
+   return false;
+}
+
+// ── Ouverture ordre Deriv ────────────────────────────────────────
+void DRV_OpenTrade(bool isBuy)
+{
+   if(IsDailyTargetLocked()) return;
+   if(IsGlobalPositionLimitReached()) return;
+   double atr   = DRV_GetATR(1); if(atr<=0) return;
+   double price  = isBuy ? SymbolInfoDouble(_Symbol,SYMBOL_ASK)
+                         : SymbolInfoDouble(_Symbol,SYMBOL_BID);
+   if(price<=0) return;
+   double pt    = SymbolInfoDouble(_Symbol,SYMBOL_POINT);
+   int    sl_lv = (int)SymbolInfoInteger(_Symbol,SYMBOL_TRADE_STOPS_LEVEL);
+   double minD  = MathMax((double)(sl_lv+100)*pt, atr*0.3);
+   double slD   = MathMax(atr*DRV_SL(), minD);
+   double tpD   = MathMax(atr*DRV_TP(), minD*1.5);
+   int    dg    = (int)SymbolInfoInteger(_Symbol,SYMBOL_DIGITS);
+   double sl    = isBuy ? NormalizeDouble(price-slD,dg) : NormalizeDouble(price+slD,dg);
+   double tp    = isBuy ? NormalizeDouble(price+tpD,dg) : NormalizeDouble(price-tpD,dg);
+   // 🔧 LOT MINIMUM BROKER UNIQUEMENT (pas de calcul risque pour éviter survolume)
+   double lot   = SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MIN);
+   // Désactivé: calcul automatique via CM_LotRiskPct
+   // On utilise TOUJOURS le lot minimum du broker pour ce symbole
+
+   CTrade drvTrade;
+   drvTrade.SetExpertMagicNumber(MCPMagicNumber);
+   drvTrade.SetDeviationInPoints(50);
+   drvTrade.SetTypeFilling(ORDER_FILLING_IOC);
+   string cmt=StringFormat("TM_DRV|%s|ICT%d",isBuy?"BUY":"SELL",g_drvICTScore);
+   bool ok = isBuy ? drvTrade.Buy(lot,_Symbol,0,sl,tp,cmt)
+                   : drvTrade.Sell(lot,_Symbol,0,sl,tp,cmt);
+   if(ok)
+   {
+      g_drvTicket       = drvTrade.ResultOrder();
+      g_drvTradeTaken   = true;
+      g_drvOpenTime     = TimeCurrent();
+      g_drvBETriggered  = false;
+      g_drvLastTradeBar = iTime(_Symbol,PERIOD_M1,0);
+      Print(StringFormat("[DRV] %s | lot=%.2f | SL=%.5f TP=%.5f | ICT=%d(%s) | %s",
+            isBuy?"BUY":"SELL", lot, sl, tp, g_drvICTScore, g_drvICTGrade, g_drvLastReason));
+      SendWAEvent(isBuy?"GOM_AUTO_ENTRY":"GOM_AUTO_ENTRY", _Symbol, price, 0,
+                  isBuy?"BUY":"SELL", price, sl, tp, lot);
+   }
+}
+
+// ── Gestion position Deriv ───────────────────────────────────────
+void DRV_ManagePosition()
+{
+   if(g_drvTicket==0) return;
+   if(!PositionSelectByTicket(g_drvTicket)) { g_drvTicket=0; return; }
+
+   double profit = PositionGetDouble(POSITION_PROFIT)+PositionGetDouble(POSITION_SWAP);
+   double openPx = PositionGetDouble(POSITION_PRICE_OPEN);
+   double curSL  = PositionGetDouble(POSITION_SL);
+   double curTP  = PositionGetDouble(POSITION_TP);
+   long   ptype  = PositionGetInteger(POSITION_TYPE);
+   double bid    = SymbolInfoDouble(_Symbol,SYMBOL_BID);
+   double ask    = SymbolInfoDouble(_Symbol,SYMBOL_ASK);
+   double atr    = DRV_GetATR(1); if(atr<=0) return;
+   double pt     = SymbolInfoDouble(_Symbol,SYMBOL_POINT);
+   int    sl_lv  = (int)SymbolInfoInteger(_Symbol,SYMBOL_TRADE_STOPS_LEVEL);
+   double minD   = MathMax((double)(sl_lv+100)*pt, atr*0.3);
+   int    dg     = (int)SymbolInfoInteger(_Symbol,SYMBOL_DIGITS);
+
+   CTrade drvT; drvT.SetDeviationInPoints(50);
+
+   // Time stop
+   if(DRV_TimeStopMin>0 && (int)(TimeCurrent()-g_drvOpenTime)>=DRV_TimeStopMin*60)
+   { drvT.PositionClose(g_drvTicket,20); g_drvTicket=0; return; }
+
+   // Quick exit sur spike suivant
+   if(DRV_UseQuickExit && g_drvBarsSinceSpike==0 && profit>=atr*DRV_QuickExitMinPct)
+   { drvT.PositionClose(g_drvTicket,20); g_drvTicket=0; return; }
+
+   // Smart Breakeven
+   if(DRV_UseSmartBE && !g_drvBETriggered)
+   {
+      double spread=ask-bid;
+      if(ptype==POSITION_TYPE_BUY && bid-openPx>=atr*DRV_BETrigger)
+      {
+         double nsl=NormalizeDouble(openPx+spread*1.5,dg);
+         if(bid-nsl>=minD && nsl>curSL) { drvT.PositionModify(g_drvTicket,nsl,curTP); g_drvBETriggered=true; }
+      }
+      else if(ptype==POSITION_TYPE_SELL && openPx-ask>=atr*DRV_BETrigger)
+      {
+         double nsl=NormalizeDouble(openPx-spread*1.5,dg);
+         if(nsl-ask>=minD && (curSL==0||nsl<curSL)) { drvT.PositionModify(g_drvTicket,nsl,curTP); g_drvBETriggered=true; }
+      }
+   }
+   // Trailing
+   if(DRV_UseTrail)
+   {
+      double trD=MathMax(atr*DRV_TrailATR,minD);
+      if(ptype==POSITION_TYPE_BUY && bid-openPx>=atr*DRV_TrailActivation)
+      {
+         double nsl=NormalizeDouble(bid-trD,dg);
+         if(nsl>curSL&&bid-nsl>=minD) drvT.PositionModify(g_drvTicket,nsl,curTP);
+      }
+      else if(ptype==POSITION_TYPE_SELL && openPx-ask>=atr*DRV_TrailActivation)
+      {
+         double nsl=NormalizeDouble(ask+trD,dg);
+         if((curSL==0||nsl<curSL)&&nsl-ask>=minD) drvT.PositionModify(g_drvTicket,nsl,curTP);
+      }
+   }
+}
+
+// ── Point d'entrée principal Deriv ───────────────────────────────
+void RunDerivEngine()
+{
+   if(!UseDerivEngine) return;
+   if(!IsBoomOrCrashSymbol(_Symbol) && !DRV_IsVolatility()) return;
+
+   // Nouvelle barre
+   datetime curBar = iTime(_Symbol,PERIOD_M1,0);
+   bool newBar     = (curBar != g_drvLastProcessedBar);
+   if(newBar) { g_drvLastProcessedBar=curBar; DRV_UpdateCycle(); }
+
+   // Gestion position existante
+   if(g_drvTicket>0) { DRV_ManagePosition(); return; }
+   // Vérifier aussi si position ouverte par ce magic sur ce symbole
+   for(int i=PositionsTotal()-1;i>=0;i--)
+   {
+      ulong t=PositionGetTicket(i);
+      if(!PositionSelectByTicket(t)) continue;
+      if(PositionGetInteger(POSITION_MAGIC)==(long)MCPMagicNumber &&
+         PositionGetString(POSITION_SYMBOL)==_Symbol)
+      { g_drvTicket=t; DRV_ManagePosition(); return; }
+   }
+
+   if(!newBar) return;            // Entrées uniquement sur nouvelle barre
+   if(g_drvTradeTaken) return;
+   if(IsDailyTargetLocked()) return;
+
+   bool   isBuy;
+   string reason;
+   if(!DRV_EvaluateEntry(isBuy, reason)) { g_drvLastReason=reason; return; }
+   g_drvLastReason=reason;
+   DRV_OpenTrade(isBuy);
+}
+
+void CheckDailyProfitTarget()
+{
+   if(!UseCapitalManager) return;
+
+   // Reset quotidien à minuit
+   datetime today = StringToTime(TimeToString(TimeCurrent(), TIME_DATE));
+   if(today != g_dailyResetDate)
+   {
+      g_dailyResetDate    = today;
+      g_dailyTargetHit    = false;
+      g_dailyStartBalance = AccountInfoDouble(ACCOUNT_BALANCE);
+      PrintOnce(StringFormat("[CM] Nouveau jour — balance=$%.2f  objectif=+%.0f%% ($%.2f)",
+            g_dailyStartBalance, CM_DailyTargetPct,
+            g_dailyStartBalance * CM_DailyTargetPct / 100.0), 3600);
+   }
+
+   if(g_dailyTargetHit) return;
+
+   double capital     = (g_dailyStartBalance > 0) ? g_dailyStartBalance : AccountInfoDouble(ACCOUNT_BALANCE);
+   double targetUSD   = capital * CM_DailyTargetPct / 100.0;
+   double closedPnl   = CalcDailyClosedProfit();
+   double floatPnl    = CalcFloatingProfit();
+   double totalDayPnl = closedPnl + floatPnl;
+
+   // Déjà en dessous de la cible — pas d'action
+   if(totalDayPnl < targetUSD) return;
+
+   // Objectif atteint → fermer toutes les positions et bloquer
+   g_dailyTargetHit = true;
+   Print(StringFormat("[CM] 🎯 OBJECTIF JOURNALIER ATTEINT +%.1f%% ($%.2f / cible $%.2f) — arrêt trading",
+         totalDayPnl / capital * 100.0, totalDayPnl, targetUSD));
+   SendNotification(StringFormat("🎯 TradBOT: +%.1f%% atteint ($%.2f) — arrêt du jour",
+         totalDayPnl / capital * 100.0, totalDayPnl));
+   SendWAEvent("DAILY_TARGET", _Symbol, 0, totalDayPnl, "",
+               0, 0, 0, 0,
+               StringFormat("+%.1f%% (%.2f$) objectif %.0f%% atteint",
+                     totalDayPnl / capital * 100.0, totalDayPnl, CM_DailyTargetPct));
+
+   // Fermer toutes les positions ouvertes
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      if(!posInfo.SelectByIndex(i)) continue;
+      trade.PositionClose(posInfo.Ticket());
+   }
+
+   // Annuler tous les ordres limites/stops en attente
+   for(int i = OrdersTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = OrderGetTicket(i);
+      if(ticket > 0) trade.OrderDelete(ticket);
+   }
+}
+
+// Retourne true si le robot doit refuser toute nouvelle entrée (objectif jour déjà atteint)
+bool IsDailyTargetLocked()
+{
+   if(!UseCapitalManager) return false;
+   // Re-vérifier le reset si minuit passé
+   datetime today = StringToTime(TimeToString(TimeCurrent(), TIME_DATE));
+   if(today != g_dailyResetDate) return false;
+   return g_dailyTargetHit;
+}
+
+//+------------------------------------------------------------------+
 //+------------------------------------------------------------------+
 //| HELPERS JSON (extraction simple sans lib)                        |
 //+------------------------------------------------------------------+
@@ -2841,8 +3441,8 @@ void IngestPendingOrderForSymbol(const string sym, const string &body)
    double entry = JsonGetDouble(orderBody, "entry_price");
    double sl    = JsonGetDouble(orderBody, "stop_loss");
    double tp    = JsonGetDouble(orderBody, "take_profit");
-   double lot   = JsonGetDouble(orderBody, "lot");
-      if(lot <= 0) lot = SymbolInfoDouble(sym, SYMBOL_VOLUME_MIN);
+   // 🔧 FORCER LOT MINIMUM BROKER (ignorer lot serveur pour éviter survolume)
+   double lot   = SymbolInfoDouble(sym, SYMBOL_VOLUME_MIN);
 
    string execType = JsonGetString(orderBody, "execution_type");
    StringToLower(execType);
@@ -2856,6 +3456,20 @@ void IngestPendingOrderForSymbol(const string sym, const string &body)
    if(action != "BUY" && action != "SELL")
    {
       if(isXau) Print(StringFormat("[TradeManager] ❌ %s: action=%s (not BUY/SELL) — IGNORE", sym, action));
+      return;
+   }
+
+   // 🚫 RÈGLE CRITIQUE: SELL interdit sur Boom, BUY interdit sur Crash
+   if(StringFind(sym, "Boom") >= 0 && action == "SELL")
+   {
+      Print(StringFormat("[TradeManager] 🚫 %s: SELL INTERDIT sur Boom — signal REJETÉ", sym));
+      SendNotification(StringFormat("🚫 TradBOT: SELL bloqué sur %s (Boom=BUY only)", sym));
+      return;
+   }
+   if(StringFind(sym, "Crash") >= 0 && action == "BUY")
+   {
+      Print(StringFormat("[TradeManager] 🚫 %s: BUY INTERDIT sur Crash — signal REJETÉ", sym));
+      SendNotification(StringFormat("🚫 TradBOT: BUY bloqué sur %s (Crash=SELL only)", sym));
       return;
    }
 
@@ -3071,6 +3685,11 @@ void PollMCPSignals()
 {
    if((int)(TimeCurrent() - g_lastMCPPoll) < MCPPollIntervalSec) return;
    g_lastMCPPoll = TimeCurrent();
+   if(IsDailyTargetLocked())
+   {
+      PrintOnce("[CM] 🔒 MCP Signals bloqués — objectif journalier atteint", 300);
+      return;
+   }
 
    // 🔍 LOG: Poll loop started
    static int pollCount = 0;
@@ -3168,7 +3787,8 @@ bool DuplicateMCPPosition(int idx, CTrade &mcpTrade)
       Print(StringFormat("[TradeManager] 🚫 Duplication MCP refusée %s: %s", sym, dupWhy));
       return false;
    }
-   double lot = g_mcpSignals[idx].lot;
+   // 🔧 FORCER LOT MINIMUM BROKER pour duplication
+   double lot = SymbolInfoDouble(sym, SYMBOL_VOLUME_MIN);
    double sl  = g_mcpSignals[idx].stopLoss;
    double tp  = g_mcpSignals[idx].takeProfit1;
 
@@ -3495,8 +4115,8 @@ void MonitorManualDuplicates()
          continue;
       }
 
-      // Dupliquer
-      double lot = posInfo.Volume();
+      // Dupliquer — 🔧 LOT MINIMUM BROKER
+      double lot = SymbolInfoDouble(sym, SYMBOL_VOLUME_MIN);
       double sl  = posInfo.StopLoss();
       double tp  = posInfo.TakeProfit();
 
@@ -3618,8 +4238,22 @@ void PollGOMScalpVerdict()
    g_predHitRate   = JsonGetDouble(body, "pred_direction_hit_rate");
    if(g_setupBuyProb > 1.0)  g_setupBuyProb  /= 100.0;
    if(g_setupSellProb > 1.0) g_setupSellProb /= 100.0;
+
+   // GHOST OrderFlow — lire si disponibles dans le payload
+   double gDelta   = JsonGetDouble(body, "ghost_delta",   -99999);
+   double gCVD     = JsonGetDouble(body, "ghost_cvd",     -99999);
+   double gBuyPct  = JsonGetDouble(body, "ghost_buypct",  -1);
+   double gCompass = JsonGetDouble(body, "ghost_compass", -1);
+   if(gDelta   > -99999) g_ghostDelta   = gDelta;
+   if(gCVD     > -99999) g_ghostCVD     = gCVD;
+   if(gBuyPct  >= 0)     g_ghostBuyPct  = gBuyPct;
+   if(gCompass >= 0)     g_ghostCompass = gCompass;
    if(g_setupValidProb > 1.0) g_setupValidProb /= 100.0;
    if(g_predHitRate > 1.0) g_predHitRate /= 100.0;
+
+   g_spikeTradable  = JsonGetDouble(body, "spike_tradable") >= 1.0;
+   g_spikeImminence = JsonGetDouble(body, "imminence_pct");
+
    if(StringLen(g_predPath) == 0)
    {
       int pb = (int)JsonGetDouble(body, "pred_bull");
@@ -4101,6 +4735,11 @@ bool IsPriceAtOBEntry(const int dir)
 void CheckGOMAutoEntry()
 {
    if(!UseGOMScalp || !UseGOMAutoEntry) return;
+   if(IsDailyTargetLocked())
+   {
+      PrintOnce("[CM] 🔒 GOM AutoEntry bloqué — objectif journalier atteint", 300);
+      return;
+   }
    if(IsGlobalPositionLimitReached())
    {
       Print(StringFormat("[GOM-Auto] %s entrée bloquée — limite globale %d positions atteinte", _Symbol, MaxGlobalPositions));
@@ -4216,7 +4855,29 @@ void CheckGOMAutoEntry()
    string obReason = "";
    if(IsOBBlockingPath(dir, obReason)) return;
 
-   double lot = GOMReEntryLot;
+   // ── GHOST OrderFlow : vetos si CVD et sentiment contradisent la direction ──
+   // BUY : CVD doit être positif (buyers dominent la session) OU sentiment BUY > 40%
+   // SELL : CVD doit être négatif (sellers dominent) OU sentiment BUY < 60%
+   if(g_ghostCVD != 0.0 || g_ghostBuyPct != 50.0)
+   {
+      bool ghostOk = true;
+      if(dir == 1 && g_ghostCVD < 0 && g_ghostBuyPct < 40.0)
+      {
+         PrintOnce(StringFormat("[GHOST] BUY bloqué — CVD=%.0f baissier + sentiment=%.0f%% faible",
+               g_ghostCVD, g_ghostBuyPct), 30);
+         ghostOk = false;
+      }
+      if(dir == -1 && g_ghostCVD > 0 && g_ghostBuyPct > 60.0)
+      {
+         PrintOnce(StringFormat("[GHOST] SELL bloqué — CVD=%.0f haussier + sentiment=%.0f%% fort",
+               g_ghostCVD, g_ghostBuyPct), 30);
+         ghostOk = false;
+      }
+      if(!ghostOk) return;
+   }
+
+   // 🔧 FORCER LOT MINIMUM BROKER (ignorer GOMReEntryLot input)
+   double lot = SymbolInfoDouble(sym, SYMBOL_VOLUME_MIN);
    double ask = SymbolInfoDouble(sym, SYMBOL_ASK);
    double bid = SymbolInfoDouble(sym, SYMBOL_BID);
    if(ask <= 0 || bid <= 0) return;
@@ -4254,6 +4915,11 @@ void CheckGOMAutoEntry()
 void CheckGOMReEntry()
 {
    if(!UseGOMScalp || !GOMReEntryEnabled) return;
+   if(IsDailyTargetLocked())
+   {
+      PrintOnce("[CM] 🔒 GOM ReEntry bloqué — objectif journalier atteint", 300);
+      return;
+   }
    if(IsGlobalPositionLimitReachedForReEntry(_Symbol))
    {
       Print(StringFormat("[GOM-ReEntry] %s re-entrée annulée — limite globale %d positions atteinte", _Symbol, MaxGlobalPositions));
@@ -4319,13 +4985,13 @@ void CheckGOMReEntry()
          continue;
       }
 
-      // Ouvrir re-entrée
+      // Ouvrir re-entrée — 🔧 LOT MINIMUM BROKER
       CTrade reTrade;
       reTrade.SetExpertMagicNumber(MCPMagicNumber);
       reTrade.SetDeviationInPoints(30);
       reTrade.SetTypeFilling(ORDER_FILLING_IOC);
 
-      double lot = g_gomReEntry[i].lot;
+      double lot = SymbolInfoDouble(posSym, SYMBOL_VOLUME_MIN);
       double sl  = g_gomReEntry[i].stopLoss;
       double tp  = g_gomReEntry[i].takeProfit;
       bool ok = (dir == 1) ? reTrade.Buy(lot, posSym, 0, sl, tp, "TM_GOM_REENTRY")
@@ -5278,6 +5944,47 @@ void DisplayCompleteGOMDashboard(const GOMData &gom)
    string pathTxt = (g_setupValid) ? (pathBlocked ? "OB BLOCK ✗" : "PATH OK ✓") : "---";
    color  cPath    = (!g_setupValid) ? cBg : pathBlocked ? ColorSell : ColorBuy;
    DrawDashCell("S8_PATH", xCur, y2, cellW, cellH, pathTxt, cPath, cTxt);
+
+   // ── Ligne GHOST (4ème ligne) ──────────────────────────────────────────
+   int y3 = marginBot + (cellH + gap) * 3;
+   xCur   = marginLR;
+
+   // CVD session
+   color cCVD = (g_ghostCVD >= 0) ? ColorBuy : ColorSell;
+   DrawDashCell("G0_CVD", xCur, y3, cellW, cellH,
+                "CVD " + (g_ghostCVD >= 0 ? "+" : "") + DoubleToString(g_ghostCVD, 0), cCVD, cTxt);
+
+   // Delta bougie courante
+   xCur += cellW + gap;
+   color cDelta = (g_ghostDelta >= 0) ? ColorBuy : ColorSell;
+   DrawDashCell("G1_DLT", xCur, y3, cellW, cellH,
+                "D " + (g_ghostDelta >= 0 ? "+" : "") + DoubleToString(g_ghostDelta, 0), cDelta, cTxt);
+
+   // Sentiment BUY%
+   xCur += cellW + gap;
+   color cSent = (g_ghostBuyPct > 60) ? ColorBuy : (g_ghostBuyPct < 40) ? ColorSell : ColorNeutral;
+   DrawDashCell("G2_SNT", xCur, y3, cellW, cellH,
+                "BUY " + DoubleToString(g_ghostBuyPct, 0) + "%", cSent, cTxt);
+
+   // Compass angle → direction label
+   xCur += cellW + gap;
+   int compassOct = (int)((g_ghostCompass + 22.5) / 45.0) % 8;
+   static const string compassLbls[8] = {"E>","NE","N^","NW","W<","SW","Sv","SE"};
+   bool compassBull = (compassOct == 0 || compassOct == 1 || compassOct == 2 || compassOct == 7);
+   color cCmp = compassBull ? ColorBuy : ColorSell;
+   string cmpTxt = compassLbls[compassOct] + " " + DoubleToString(g_ghostCompass, 0) + "d";
+   DrawDashCell("G3_CMP", xCur, y3, cellW, cellH, cmpTxt, cCmp, cTxt);
+
+   // Confluence GHOST : les 4 signaux pointent dans la même direction ?
+   xCur += cellW + gap;
+   int ghostBull = 0, ghostBear = 0;
+   if(g_ghostCVD    > 0) ghostBull++; else if(g_ghostCVD < 0) ghostBear++;
+   if(g_ghostDelta  > 0) ghostBull++; else if(g_ghostDelta < 0) ghostBear++;
+   if(g_ghostBuyPct > 55) ghostBull++; else if(g_ghostBuyPct < 45) ghostBear++;
+   if(compassBull) ghostBull++; else ghostBear++;
+   string ghostCnf = IntegerToString(ghostBull) + "B/" + IntegerToString(ghostBear) + "S";
+   color cGhostCnf = (ghostBull >= 3) ? ColorBuy : (ghostBear >= 3) ? ColorSell : ColorNeutral;
+   DrawDashCell("G4_CNF", xCur, y3, cellW * 2, cellH, "GHOST " + ghostCnf, cGhostCnf, cTxt);
 
    #undef TF_COLOR
 
