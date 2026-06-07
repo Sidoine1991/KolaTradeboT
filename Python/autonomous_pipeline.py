@@ -395,22 +395,67 @@ class AutonomousPipeline:
 
     # ── Phase 2 : ENRICH (TradingAgents) ────────────────────────────────────
 
+    def _fetch_gom_levels(self, symbol: str) -> dict:
+        """Récupère setup_entry/sl/tp depuis le poller GOM (données GOM KOLA script TradingView)."""
+        mt5_sym = _tv_to_mt5_symbol(symbol)
+        for sym in [mt5_sym, symbol]:
+            try:
+                r = requests.get(
+                    f"{self.cfg.ai_server_url}/gom-verdict",
+                    params={"symbol": sym}, timeout=4,
+                )
+                if r.status_code != 200:
+                    continue
+                data = r.json()
+                if not data.get("ok"):
+                    continue
+                entry = data.get("setup_entry") or data.get("entry_price")
+                sl    = data.get("setup_sl")    or data.get("stop_loss")
+                tp    = data.get("setup_tp1")   or data.get("take_profit")
+                atr   = data.get("atr")
+                price = data.get("close") or data.get("current_price")
+                # Calculer SL/TP via ATR si manquants mais ATR présent
+                if entry and atr and not sl:
+                    atr_f = float(atr)
+                    direction = data.get("tf_global_dir", "")
+                    is_buy = "BULL" in direction.upper() if direction else True
+                    sl = round(float(entry) - atr_f * 1.5, 5) if is_buy else round(float(entry) + atr_f * 1.5, 5)
+                if entry and sl and not tp:
+                    sl_dist = abs(float(entry) - float(sl))
+                    is_buy = float(entry) > float(sl)
+                    tp = round(float(entry) + sl_dist * 2.0, 5) if is_buy else round(float(entry) - sl_dist * 2.0, 5)
+                if entry and sl and tp:
+                    log.info("  [GOM] %s → entry=%.5f SL=%.5f TP=%.5f", symbol, float(entry), float(sl), float(tp))
+                    return {"entry": float(entry), "sl": float(sl), "tp": float(tp),
+                            "atr": float(atr) if atr else None, "price": float(price) if price else None}
+            except Exception:
+                continue
+        return {}
+
     def phase_enrich(self, candidates: List[ScanResult]) -> List[TAResult]:
         if self.cfg.skip_ta:
-            log.warning("=== PHASE 2 : TradingAgents IGNORÉ (--skip-ta) ===")
-            log.warning("⚠️ ATTENTION: Skip TradingAgents = PAS de entry/SL/TP précis!")
-            log.warning("⚠️ Les ordres envoyés à TradeManager seront INCOMPLETS")
-            return [
-                TAResult(
+            log.info("=== PHASE 2 : Skip TradingAgents — récupération niveaux GOM ===")
+            results = []
+            for c in candidates:
+                gom = self._fetch_gom_levels(c.symbol)
+                entry = gom.get("entry") or c.entry_price
+                sl    = gom.get("sl")    or c.stop_loss
+                tp    = gom.get("tp")    or c.take_profit
+                atr   = gom.get("atr")   or c.atr
+                price = gom.get("price") or c.current_price
+                if entry and sl and tp:
+                    log.info("  [GOM ✅] %s entry=%.5f SL=%.5f TP=%.5f", c.symbol, entry, sl, tp)
+                else:
+                    log.warning("  [GOM ⚠️] %s — niveaux manquants (entry=%s SL=%s TP=%s)", c.symbol, entry, sl, tp)
+                results.append(TAResult(
                     symbol=c.symbol, signal_rating=c.direction,
                     normalized_rating=c.direction, expert_analysis="",
                     final_trade_decision="", confidence=c.confluence_score / 10.0,
-                    success=True, entry_price=c.entry_price,
-                    stop_loss=c.stop_loss, take_profit=c.take_profit,
-                    current_price=c.current_price, atr=c.atr,
-                )
-                for c in candidates
-            ]
+                    success=True, entry_price=entry,
+                    stop_loss=sl, take_profit=tp,
+                    current_price=price, atr=atr,
+                ))
+            return results
 
         log.info("=== PHASE 2 : TradingAgents (%d symboles, max %d en parallèle, timeout %ds) ===",
                  len(candidates), self.cfg.max_concurrent_ta, self.cfg.ta_timeout_sec)
@@ -816,6 +861,11 @@ class AutonomousPipeline:
     # ── Phase 5 : EA READINESS ───────────────────────────────────────────────
 
     def phase_ea_readiness(self, symbols: List[str]) -> Dict[str, bool]:
+        """Vérifie l'EA registry — NON BLOQUANT.
+        Les ordres sont déjà dans /pending-order sur l'AI server.
+        TradeManager les récupère à son prochain poll (3s) dès qu'il est attaché.
+        On vérifie une seule fois et on notifie si manquant, sans bloquer le pipeline.
+        """
         log.info("=== PHASE 5 : Vérification EA registry ===")
         if not symbols:
             return {}
@@ -828,27 +878,8 @@ class AutonomousPipeline:
 
         if missing:
             log.info("  Symboles absents de MT5: %s", missing)
+            log.info("  ℹ️ Ordres en attente sur /pending-order — TradeManager les exécutera au prochain poll")
             self._alert_missing_symbols(missing)
-
-            # Polling jusqu'à max_sec
-            deadline = time.time() + self.cfg.ea_poll_max_sec
-            while missing and time.time() < deadline:
-                time.sleep(self.cfg.ea_poll_interval_sec)
-                registered = self._get_registered_symbols()
-                still_missing = []
-                for s in missing:
-                    if s in registered:
-                        log.info("  ✅ EA confirmé pour %s", s)
-                        ready[s] = True
-                    else:
-                        still_missing.append(s)
-                missing = still_missing
-                if missing:
-                    remaining = int(deadline - time.time())
-                    log.info("  Attente EA: %s toujours manquants (%ds restants)", missing, remaining)
-
-            if missing:
-                log.warning("  ⏰ Timeout: EA non confirmé pour %s — ordres ignorés", missing)
         else:
             log.info("  ✅ Tous les symboles sont dans l'EA registry")
 
@@ -870,11 +901,12 @@ class AutonomousPipeline:
     def _alert_missing_symbols(self, missing: List[str]):
         symbols_str = ", ".join(missing)
         msg = (
-            f"*TradBOT — Action requise*\n"
-            f"Pipeline autonome: {len(missing)} symbole(s) absent(s) de MT5\n\n"
-            f"Ouvrir un graphique MT5 et attacher l'EA TradeManager pour:\n"
+            f"*TradBOT — Ordres en attente*\n"
+            f"Pipeline autonome: {len(missing)} ordre(s) placé(s) sur le serveur\n\n"
             f"*{symbols_str}*\n\n"
-            f"Le pipeline attendra jusqu'à {self.cfg.ea_poll_max_sec // 60} minutes."
+            f"✅ Ordres sauvegardés sur /pending-order\n"
+            f"⏳ TradeManager les exécutera automatiquement\n"
+            f"   dès qu'il sera attaché sur ces charts MT5"
         )
         log.info("  WhatsApp alert → %s", symbols_str)
         self._send_whatsapp(msg)
