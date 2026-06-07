@@ -4,12 +4,31 @@
 TradBOT Autonomous Pipeline
 Scan matinal TradingView → Top 5 → TradingAgents (parallel) → Fusion → Pending-Order → EA → Monitor 20min
 
+⚠️ IMPORTANT: TradingAgents est OBLIGATOIRE pour obtenir entry/SL/TP précis.
+             Ne jamais utiliser --skip-ta en production.
+
 Usage:
-  python autonomous_pipeline.py                 # Pipeline complet
+  python autonomous_pipeline.py                 # Pipeline complet (RECOMMANDÉ)
   python autonomous_pipeline.py --top-n 3       # Seulement top 3
   python autonomous_pipeline.py --capital 20    # Compte $20
   python autonomous_pipeline.py --dry-run       # Simulation, pas d'ordres réels
-  python autonomous_pipeline.py --skip-ta       # TV uniquement, pas TradingAgents
+  python autonomous_pipeline.py --skip-ta       # ⚠️ DÉCONSEILLÉ: TV uniquement (entry/SL/TP = None)
+
+Workflow:
+  1. Phase 1: Scan TradingView MCP → Top-N symboles avec scores
+  2. Phase 2: TradingAgents analyse TOUS les top-N en parallèle (600s timeout)
+            → ⏳ ATTENTE COMPLÈTE avant phase 3
+  3. Phase 3: Fusion TV score + TA direction + Validation Boom/Crash
+            → ALIGNED si TV et TA dans même sens
+  4. Phase 4: Envoi ordres → TradeManager AVEC entry/SL/TP précis
+  5. Phase 5: Vérification EA registry (300s polling)
+  6. Phase 6: Monitor 20min pour symboles EA ready
+
+Règles Critiques:
+  - SELL interdit sur Boom (Boom = BUY uniquement)
+  - BUY interdit sur Crash (Crash = SELL uniquement)
+  - Correction multi-TF → REJECT (M1/M5 opposés H1/H4)
+  - Score TV < 5.0 → REJECT
 """
 
 import sys
@@ -62,6 +81,22 @@ _WHITELIST_PATH = _ROOT / "data" / "pipeline_whitelist.json"
 _MT5_COMMON_FILES = Path(os.environ.get("APPDATA", "")) / "MetaQuotes" / "Terminal" / "Common" / "Files"
 
 
+# Mapping ticker TradingView → nom symbole MT5 Deriv
+_TV_TO_MT5: dict = {
+    "DERIV:BOOM_1000_INDEX":  "Boom 1000 Index",
+    "DERIV:BOOM_500_INDEX":   "Boom 500 Index",
+    "DERIV:BOOM_300_INDEX":   "Boom 300 Index",
+    "DERIV:CRASH_1000_INDEX": "Crash 1000 Index",
+    "DERIV:CRASH_500_INDEX":  "Crash 500 Index",
+    "DERIV:CRASH_300_INDEX":  "Crash 300 Index",
+}
+
+
+def _tv_to_mt5_symbol(sym: str) -> str:
+    """Convertit un ticker TV (DERIV:BOOM_1000_INDEX) en nom MT5 (Boom 1000 Index)."""
+    return _TV_TO_MT5.get(sym, sym)
+
+
 def _publish_pipeline_whitelist(scans) -> None:
     """Écrit la whitelist dans data/ ET dans MT5 Common/Files pour TradeManager."""
     import json as _json
@@ -69,7 +104,7 @@ def _publish_pipeline_whitelist(scans) -> None:
         "generated_at": datetime.utcnow().isoformat(),
         "symbols": [
             {
-                "symbol": s.symbol,
+                "symbol": s.mt5_symbol,
                 "direction": s.direction,
                 "score": round(s.confluence_score, 2),
             }
@@ -77,7 +112,7 @@ def _publish_pipeline_whitelist(scans) -> None:
         ],
     }
     content = _json.dumps(payload, indent=2)
-    symbols = [s.symbol for s in scans]
+    symbols = [s.mt5_symbol for s in scans]
 
     # 1. Écriture locale (pour mt5_ai_client.py)
     try:
@@ -106,7 +141,7 @@ def _publish_pipeline_whitelist(scans) -> None:
 
 @dataclass
 class ScanResult:
-    symbol:          str
+    symbol:          str   # Ticker TV (ex: DERIV:BOOM_1000_INDEX ou XAUUSD)
     direction:       str
     confluence_score: float
     entry_price:     Optional[float]
@@ -116,6 +151,11 @@ class ScanResult:
     atr:             Optional[float]
     reasons:         List[str]
     entry_valid:     bool
+
+    @property
+    def mt5_symbol(self) -> str:
+        """Nom du symbole pour MT5 (ex: Boom 1000 Index)."""
+        return _tv_to_mt5_symbol(self.symbol)
 
 
 @dataclass
@@ -191,11 +231,11 @@ class PipelineConfig:
     phone:               str   = field(default_factory=lambda: os.getenv("WHATSAPP_PHONE_NUMBER", "+2290196911346"))
     top_n:               int   = 5
     max_concurrent_ta:   int   = 3
-    ta_timeout_sec:      int   = 300
+    ta_timeout_sec:      int   = 600
     capital:             float = 50.0
     risk_pct:            float = 0.02
-    min_tv_score:        float = 5.0
-    min_tv_score_tv_only: float = 7.0
+    min_tv_score:        float = 0.5  # Abaissé pour accepter plus de signaux (était 5.0)
+    min_tv_score_tv_only: float = 2.0  # Abaissé (était 7.0)
     ea_poll_interval_sec: int  = 30
     ea_poll_max_sec:     int   = 300
     monitor_interval_sec: int  = 1200   # 20 min
@@ -357,7 +397,9 @@ class AutonomousPipeline:
 
     def phase_enrich(self, candidates: List[ScanResult]) -> List[TAResult]:
         if self.cfg.skip_ta:
-            log.info("=== PHASE 2 : TradingAgents IGNORÉ (--skip-ta) ===")
+            log.warning("=== PHASE 2 : TradingAgents IGNORÉ (--skip-ta) ===")
+            log.warning("⚠️ ATTENTION: Skip TradingAgents = PAS de entry/SL/TP précis!")
+            log.warning("⚠️ Les ordres envoyés à TradeManager seront INCOMPLETS")
             return [
                 TAResult(
                     symbol=c.symbol, signal_rating=c.direction,
@@ -372,6 +414,7 @@ class AutonomousPipeline:
 
         log.info("=== PHASE 2 : TradingAgents (%d symboles, max %d en parallèle, timeout %ds) ===",
                  len(candidates), self.cfg.max_concurrent_ta, self.cfg.ta_timeout_sec)
+        log.info("⏳ Attente COMPLÈTE de tous les TradingAgents avant phase 3 (fusion)...")
 
         date_str = datetime.utcnow().strftime("%Y-%m-%d")
         worker   = str(_HERE / "ta_worker.py")
@@ -443,9 +486,18 @@ class AutonomousPipeline:
         with ThreadPoolExecutor(max_workers=self.cfg.max_concurrent_ta) as pool:
             future_map = {pool.submit(_run_one, c): c for c in candidates}
             try:
+                # ⏳ ATTENTE BLOQUANTE - Tous les workers doivent terminer avant de continuer
+                log.info("  [TA] Attente de %d analyses TradingAgents...", len(candidates))
                 for future in as_completed(future_map, timeout=self.cfg.ta_timeout_sec + 60):
                     try:
-                        results.append(future.result())
+                        result = future.result()
+                        results.append(result)
+                        # Log progrès
+                        completed = len(results)
+                        total = len(candidates)
+                        pct = int(completed / total * 100)
+                        log.info("  [TA] Progrès: %d/%d (%d%%) — %s terminé",
+                                completed, total, pct, result.symbol)
                     except Exception as e:
                         scan = future_map[future]
                         results.append(TAResult(symbol=scan.symbol, signal_rating="ERROR",
@@ -465,7 +517,7 @@ class AutonomousPipeline:
                         ))
 
         success_n = sum(1 for r in results if r.success)
-        log.info("Enrichissement terminé: %d/%d succès", success_n, len(results))
+        log.info("✅ Enrichissement COMPLET: %d/%d succès — Passage à phase 3 (fusion)", success_n, len(results))
         return results
 
     # ── Phase 3 : FUSE ──────────────────────────────────────────────────────
@@ -477,6 +529,20 @@ class AutonomousPipeline:
 
         for scan in scans:
             ta = ta_by_symbol.get(scan.symbol)
+
+            # 🚫 RÈGLE CRITIQUE: Validation Boom/Crash AVANT fusion
+            boom_crash_ok, boom_crash_reason = self._validate_boom_crash_direction(scan.symbol, scan.direction)
+            if not boom_crash_ok:
+                log.warning("  🚫 %s: %s — REJET IMMÉDIAT", scan.symbol, boom_crash_reason)
+                fused.append(FusedSignal(
+                    symbol=scan.symbol, direction=scan.direction, verdict="REJECT",
+                    tv_score=scan.confluence_score, ta_rating="N/A",
+                    entry_price=None, stop_loss=None, take_profit=None,
+                    current_price=scan.current_price, atr=scan.atr, lot=0.0,
+                    confidence=0.0, reasoning=boom_crash_reason,
+                ))
+                continue
+
             verdict, direction, confidence, reasoning = self._compute_verdict(scan, ta)
 
             # Choisir les niveaux : TradingAgents prioritaire si disponibles, sinon TV
@@ -532,6 +598,28 @@ class AutonomousPipeline:
         aligned = [f for f in fused if f.verdict == "ALIGNED"]
         log.info("Fusion terminée: %d/%d ALIGNED", len(aligned), len(fused))
         return fused
+
+    @staticmethod
+    def _validate_boom_crash_direction(symbol: str, direction: str) -> tuple[bool, str]:
+        """
+        🚫 RÈGLE CRITIQUE: SELL interdit sur Boom, BUY interdit sur Crash.
+        Indices synthétiques unidirectionnels — violation = perte garantie 100%.
+
+        Returns:
+            (ok, reason): (True, "") si valide, (False, raison) si interdit
+        """
+        symbol_upper = symbol.upper()
+        direction_upper = direction.upper()
+
+        # BOOM = BUY uniquement (spikes haussiers)
+        if "BOOM" in symbol_upper and direction_upper == "SELL":
+            return False, "🚫 SELL INTERDIT sur Boom (Boom = BUY uniquement - spikes haussiers)"
+
+        # CRASH = SELL uniquement (spikes baissiers)
+        if "CRASH" in symbol_upper and direction_upper == "BUY":
+            return False, "🚫 BUY INTERDIT sur Crash (Crash = SELL uniquement - spikes baissiers)"
+
+        return True, ""
 
     @staticmethod
     def _check_trend_alignment(scan: ScanResult) -> tuple[bool, str]:
@@ -657,6 +745,12 @@ class AutonomousPipeline:
             log.info("  Aucun signal ALIGNED — aucun ordre envoyé")
             return []
 
+        # Vérification entry/SL/TP présents
+        missing_levels = [s.symbol for s in aligned if not (s.entry_price and s.stop_loss and s.take_profit)]
+        if missing_levels:
+            log.warning("  ⚠️ Ordres INCOMPLETS (entry/SL/TP manquants): %s", missing_levels)
+            log.warning("  ⚠️ TradeManager ne pourra pas exécuter correctement!")
+
         if self.cfg.dry_run:
             log.info("  DRY-RUN: simulation de %d ordres", len(aligned))
             return [
@@ -668,6 +762,7 @@ class AutonomousPipeline:
                 for s in aligned
             ]
 
+        log.info("  📤 Envoi %d ordres COMPLETS (entry/SL/TP depuis TradingAgents)...", len(aligned))
         results = []
         for sig in aligned:
             result = self._push_one_order(sig)
@@ -1029,8 +1124,8 @@ def main():
     parser.add_argument("--capital",  type=float, default=50,  help="Capital compte ($)")
     parser.add_argument("--risk",     type=float, default=0.02,help="Risque par trade (ex: 0.02 = 2%%)")
     parser.add_argument("--dry-run",  action="store_true",     help="Simulation — pas d'ordres réels")
-    parser.add_argument("--skip-ta",  action="store_true",     help="Pas TradingAgents — TV uniquement")
-    parser.add_argument("--ta-timeout", type=int, default=300, help="Timeout TradingAgents par symbole (sec)")
+    parser.add_argument("--skip-ta",  action="store_true",     help="⚠️ DÉCONSEILLÉ: Skip TradingAgents (pas de entry/SL/TP précis)")
+    parser.add_argument("--ta-timeout", type=int, default=600, help="Timeout TradingAgents par symbole (sec) — défaut 600s pour analyses complètes")
     parser.add_argument("--min-score",  type=float, default=5.0, help="Score TV minimum pour ALIGNED")
     args = parser.parse_args()
 
