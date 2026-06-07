@@ -80,10 +80,10 @@ def is_valid_direction(symbol: str, direction: str) -> bool:
 # Lot minimum par catégorie
 # ---------------------------------------------------------------------------
 def get_lot_min(symbol: str) -> float:
-    s = symbol.upper()
-    if any(s.startswith(p) for p in ("BOOM", "CRASH")):
+    s = symbol.upper().replace("DERIV:", "").replace("_INDEX", "").replace(" ", "").replace("INDEX", "")
+    if any(p in s for p in ("BOOM", "CRASH")):
         return 0.20
-    if any(s.startswith(p) for p in ("1HZ", "R_", "V10", "V25", "V50", "V75", "V100")):
+    if any(s.startswith(p) for p in ("1HZ", "R_", "V10", "V25", "V50", "V75", "V100", "VOLATILITY")):
         return 0.10
     return 0.01
 

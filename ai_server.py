@@ -21735,16 +21735,23 @@ _SYMBOL_ALIASES: dict = {
     "BNBUSD":  "BNB",     "BNB-USD": "BNB",
     "EURUSD":  "EURUSD",  "GBPUSD":  "GBPUSD",
     # Boom/Crash Deriv — mapping Boom/Crash sans espaces → canonique MT5 avec espaces
-    "BOOM300INDEX": "Boom 300 Index", "BOOM300": "Boom 300 Index",
-    "BOOM500INDEX": "Boom 500 Index", "BOOM500": "Boom 500 Index",
-    "BOOM600INDEX": "Boom 600 Index", "BOOM600": "Boom 600 Index",
-    "BOOM900INDEX": "Boom 900 Index", "BOOM900": "Boom 900 Index",
-    "BOOM1000INDEX": "Boom 1000 Index", "BOOM1000": "Boom 1000 Index",
-    "CRASH300INDEX": "Crash 300 Index", "CRASH300": "Crash 300 Index",
-    "CRASH500INDEX": "Crash 500 Index", "CRASH500": "Crash 500 Index",
-    "CRASH600INDEX": "Crash 600 Index", "CRASH600": "Crash 600 Index",
-    "CRASH900INDEX": "Crash 900 Index", "CRASH900": "Crash 900 Index",
-    "CRASH1000INDEX": "Crash 1000 Index", "CRASH1000": "Crash 1000 Index",
+    "BOOM300INDEX": "BOOM 300 INDEX", "BOOM300": "BOOM 300 INDEX", "BOOM300N": "BOOM 300 INDEX",
+    "BOOM500INDEX": "BOOM 500 INDEX", "BOOM500": "BOOM 500 INDEX",
+    "BOOM600INDEX": "BOOM 600 INDEX", "BOOM600": "BOOM 600 INDEX",
+    "BOOM900INDEX": "BOOM 900 INDEX", "BOOM900": "BOOM 900 INDEX",
+    "BOOM1000INDEX": "BOOM 1000 INDEX", "BOOM1000": "BOOM 1000 INDEX",
+    "CRASH300INDEX": "CRASH 300 INDEX", "CRASH300": "CRASH 300 INDEX", "CRASH300N": "CRASH 300 INDEX",
+    "CRASH500INDEX": "CRASH 500 INDEX", "CRASH500": "CRASH 500 INDEX",
+    "CRASH600INDEX": "CRASH 600 INDEX", "CRASH600": "CRASH 600 INDEX",
+    "CRASH900INDEX": "CRASH 900 INDEX", "CRASH900": "CRASH 900 INDEX",
+    "CRASH1000INDEX": "CRASH 1000 INDEX", "CRASH1000": "CRASH 1000 INDEX",
+    # Noms MT5 avec espaces → clé UPPER
+    "BOOM 300 INDEX": "BOOM 300 INDEX", "BOOM 500 INDEX": "BOOM 500 INDEX",
+    "BOOM 600 INDEX": "BOOM 600 INDEX", "BOOM 900 INDEX": "BOOM 900 INDEX",
+    "BOOM 1000 INDEX": "BOOM 1000 INDEX",
+    "CRASH 300 INDEX": "CRASH 300 INDEX", "CRASH 500 INDEX": "CRASH 500 INDEX",
+    "CRASH 600 INDEX": "CRASH 600 INDEX", "CRASH 900 INDEX": "CRASH 900 INDEX",
+    "CRASH 1000 INDEX": "CRASH 1000 INDEX",
 }
 
 def _resolve_symbol(raw: str) -> str:
@@ -21759,15 +21766,18 @@ def _resolve_symbol(raw: str) -> str:
 
     # Chercher dans alias
     if up in _SYMBOL_ALIASES:
-        return _SYMBOL_ALIASES[up]
+        resolved = _SYMBOL_ALIASES[up]
+        # Normaliser la clé en UPPER pour cohérence store
+        return resolved.upper()
 
-    # Si déjà "Boom 500 Index" (avec espaces), le retourner tel-quel
-    normalized = raw.strip()
-    if "Boom" in normalized or "Crash" in normalized:
-        return normalized
+    # Boom/Crash/Volatility → clé UPPER pour cohérence
+    up_with_spaces = raw.strip().upper()
+    for prefix in ("BOOM", "CRASH", "VOLATILITY"):
+        if up_with_spaces.startswith(prefix):
+            return up_with_spaces
 
     # Fallback
-    return raw.strip()
+    return raw.strip().upper() if any(c in raw.upper() for c in ["BOOM","CRASH","VOLAT"]) else raw.strip()
 
 
 # ---------------------------------------------------------------------------
@@ -22523,6 +22533,18 @@ async def get_gom_verdict(symbol: str = "XAUUSD"):
 async def get_pending_order(symbol: str = "XAUUSD"):
     sym = _resolve_symbol(symbol)
     order = _PENDING_ORDER_STORE.get(sym)
+    # Fallback: chercher aussi en UPPER et en mixte (Boom 500 Index / BOOM 500 INDEX)
+    if not order:
+        order = _PENDING_ORDER_STORE.get(sym.upper())
+    if not order:
+        order = _PENDING_ORDER_STORE.get(sym.lower())
+    if not order:
+        # Chercher par correspondance partielle sur le symbole nettoyé
+        sym_clean = sym.upper().replace(" ","").replace("INDEX","")
+        for k, v in _PENDING_ORDER_STORE.items():
+            if k.upper().replace(" ","").replace("INDEX","") == sym_clean:
+                order = v
+                break
     if not order:
         return {"ok": False, "symbol": sym, "order": None, "message": "Aucun ordre pending"}
     if order.get("status", "ready") == "conflict_pending":

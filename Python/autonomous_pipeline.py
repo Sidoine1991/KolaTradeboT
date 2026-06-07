@@ -258,15 +258,16 @@ _SYMBOL_CATEGORIES = {
 }
 
 def _get_symbol_category(symbol: str) -> str:
-    s = symbol.upper().replace(" ", "")
+    # Nettoyer préfixes TV (DERIV:BOOM_500_INDEX → BOOM500INDEX)
+    s = symbol.upper().replace(" ", "").replace("DERIV:", "").replace("_INDEX", "").replace("INDEX", "")
     for cat, symbols in _SYMBOL_CATEGORIES.items():
         if any(s.startswith(p) for p in symbols):
             return cat
-    if any(s.startswith(p) for p in ("BOOM",)):
+    if "BOOM" in s:
         return "BOOM"
-    if any(s.startswith(p) for p in ("CRASH",)):
+    if "CRASH" in s:
         return "CRASH"
-    if any(s.startswith(p) for p in ("1HZ", "R_", "V10", "V25", "V50", "V75", "V100")):
+    if any(s.startswith(p) for p in ("1HZ", "R_", "V10", "V25", "V50", "V75", "V100", "VOLATILITY")):
         return "VOLATILITY"
     return "FOREX"
 
