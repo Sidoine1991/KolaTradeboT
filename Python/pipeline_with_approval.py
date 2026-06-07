@@ -406,6 +406,7 @@ def run_trading_agents(symbol: str, direction: str, trade_date: str) -> Optional
 
         return {
             "symbol":      symbol,
+            "clean_sym":   clean_sym,  # Nom MT5 propre pour /pending-order
             "direction":   rec,
             "entry":       entry,
             "sl":          sl,
@@ -472,8 +473,10 @@ def build_approval_message(idx: int, total: int, ta: Dict) -> str:
 # Envoyer l'ordre validé à TradeManager
 # ---------------------------------------------------------------------------
 def place_order(ta: Dict) -> bool:
+    # Utiliser le nom MT5 propre (ex: "Boom 500 Index") pas le ticker TV (DERIV:BOOM_500_INDEX)
+    mt5_symbol = ta.get("clean_sym") or _tv_to_mt5(ta["symbol"])
     payload = {
-        "symbol":         ta["symbol"],
+        "symbol":         mt5_symbol,
         "action":         ta["direction"].lower(),
         "recommendation": ta["direction"],
         "entry_price":    ta.get("entry"),
