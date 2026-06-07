@@ -21725,9 +21725,9 @@ async def get_session_bias(symbol: str = "XAUUSD"):  # noqa: F811
 # L'EA envoie _Symbol brut (BTCUSD, XAUUSD...), le bridge stocke le display name (BITCOIN, OR...)
 # ---------------------------------------------------------------------------
 _SYMBOL_ALIASES: dict = {
-    # Crypto
-    "BTCUSD":  "BITCOIN", "BTC-USD": "BITCOIN", "BTC.X":   "BITCOIN",
-    "ETHUSD":  "ETHEREUM","ETH-USD": "ETHEREUM","ETH.X":   "ETHEREUM",
+    # Crypto — conserver le symbole MT5 brut pour compatibilité TradeManager
+    "BTC-USD": "BTCUSD",  "BTC.X":   "BTCUSD",  "BITCOIN": "BTCUSD",
+    "ETH-USD": "ETHUSD",  "ETH.X":   "ETHUSD",  "ETHEREUM":"ETHUSD",
     # Métaux & FX
     "XAUUSD":  "XAUUSD",  "GOLD":    "XAUUSD",  "GC=F":    "XAUUSD",
     "XAGUSD":  "ARGENT",  "SI=F":    "ARGENT",
