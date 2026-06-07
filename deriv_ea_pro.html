@@ -1344,8 +1344,9 @@
       <div class="field">
         <label>Compte à utiliser</label>
         <select id="accountPref">
-          <option value="demo" selected>Démo (virtual) — recommandé</option>
-          <option value="real">Réel</option>
+          <option value="demo">Démo (virtual)</option>
+          <option value="real" selected>Réel (compte live)</option>
+          <option value="auto">Auto — suivre le token</option>
         </select>
       </div>
       <div class="field" id="accountSwitchField">
@@ -5605,9 +5606,12 @@ function mergeAccountEntry(loginid, isVirtualHint) {
   }
 }
 
-function pickAccountByPreference(accountList, preference) {
+function pickAccountByPreference(accountList, preference, currentLoginid) {
   const accounts = getAllAccounts(accountList);
   if (!accounts.length) return null;
+
+  // Mode 'auto' : rester sur le compte du token, ne jamais basculer
+  if (preference === 'auto') return null;
 
   const demoOverride = document.getElementById('demoLoginOverride')?.value.trim();
   if (preference === 'demo' && demoOverride) {
@@ -5764,7 +5768,16 @@ function onAuthorizeResponse(auth) {
   log('info', `Comptes API: ${state.accountList.length} | Actif: ${auth.loginid} (${auth.is_virtual ? 'démo' : 'réel'})`);
 
   const pref = getAccountPreference();
-  const target = pickAccountByPreference(state.accountList, pref);
+
+  // Mode auto : aligner le select sur le type de compte réellement connecté
+  if (pref === 'auto') {
+    const prefSel = document.getElementById('accountPref');
+    if (prefSel) prefSel.value = auth.is_virtual ? 'demo' : 'real';
+    finishAuthorizeSetup(auth);
+    return;
+  }
+
+  const target = pickAccountByPreference(state.accountList, pref, auth.loginid);
 
   if (target && target.loginid && target.loginid !== auth.loginid && !state.accountSwitchInProgress) {
     state.accountSwitchInProgress = true;
@@ -5775,7 +5788,7 @@ function onAuthorizeResponse(auth) {
   }
 
   if (!target && pref === 'demo' && !isVirtualAccount(auth)) {
-    log('warn', 'Compte démo non détecté. Collez votre Login ID démo (VRTC...) dans le champ prévu, puis reconnectez.');
+    log('warn', 'Aucun compte démo trouvé — restez en mode Réel ou changez la préférence sur "Auto".');
   }
 
   finishAuthorizeSetup(auth);
