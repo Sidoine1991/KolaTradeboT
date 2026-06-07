@@ -192,12 +192,18 @@ def scan_top_n_with_prices(top_n: int) -> List[Dict]:
         r for r in norm
         if r.get("success")
         and r.get("direction") in ("BUY", "SELL")
-        and r.get("confluence_score", 0) >= 5.0
         and is_valid_direction(r.get("symbol", ""), r.get("direction", ""))
     ]
-    valid.sort(key=lambda x: x.get("confluence_score", 0), reverse=True)
-    top = valid[:top_n]
-    log.info("Top-%d retenus: %s", top_n, [r["symbol"] for r in top])
+    # Seuil adaptatif : préférer >= 5.0, sinon prendre les meilleurs disponibles
+    high = [r for r in valid if r.get("confluence_score", 0) >= 5.0]
+    chosen = high if high else valid
+    chosen.sort(key=lambda x: x.get("confluence_score", 0), reverse=True)
+    top = chosen[:top_n]
+    if not high and top:
+        log.info("Phase 1 — Seuil abaissé (aucun score >= 5.0), meilleurs: %s",
+                 [(r["symbol"], round(r.get("confluence_score",0),1)) for r in top])
+    log.info("Top-%d retenus: %s", top_n,
+             [(r["symbol"], r["direction"], round(r.get("confluence_score",0),1)) for r in top])
     return top
 
 # ---------------------------------------------------------------------------
@@ -235,6 +241,15 @@ def run_trading_agents(symbol: str, direction: str, trade_date: str) -> Optional
         # Nettoyer préfixe TV avant conversion (DERIV:BOOM_1000_INDEX → Boom 1000 Index)
         clean_sym = _tv_to_mt5(symbol)  # ex: "Boom 1000 Index"
         ticker_id = _mt5_to_yfinance(clean_sym)
+
+        # Overrides crypto : yfinance utilise BTC-USD pas BTCUSD=X
+        _CRYPTO_TICKER = {
+            "BTCUSD": "BTC-USD", "ETHUSD": "ETH-USD",
+            "BNBUSD": "BNB-USD", "SOLUSD": "SOL-USD",
+            "XRPUSD": "XRP-USD", "ADAUSD": "ADA-USD",
+        }
+        ticker_id = _CRYPTO_TICKER.get(clean_sym.upper(), ticker_id)
+
         vendor = "deriv" if any(ticker_id.upper().startswith(p)
                                 for p in ("BOOM","CRASH","1HZ","R_","FRX")) else "yfinance"
 
@@ -329,8 +344,9 @@ def run_trading_agents(symbol: str, direction: str, trade_date: str) -> Optional
             "execution_type": sig0.get("exec_type", "market"),
             "lot":            lot,
         }
+        # Utiliser clean_sym (ex: "Boom 300 Index") — jamais le ticker TV avec ":"
         report_path = save_report_word(
-            symbol, trade_date, result["signal_rating"],
+            clean_sym, trade_date, result["signal_rating"],
             final_st, params, confirmed=confirmed,
             indicators=indicators if indicators else None,
         )
