@@ -342,9 +342,29 @@ def run_trading_agents(symbol: str, direction: str, trade_date: str) -> Optional
             log.warning("  [TA] %s: Aucune source de prix disponible — niveaux N/A", symbol)
 
         sig0 = signals[0] if signals else {}
-        entry = sig0.get("entry_price") or params.get("entry_price")
+
+        # Entry depuis signaux calculés (prioritaire) — ignorer si aberrant vs prix réel
+        entry_raw = sig0.get("entry_price") or params.get("entry_price")
+        if entry_raw and cp > 0:
+            ecart = abs(float(entry_raw) - cp) / cp
+            if ecart > 0.20:  # >20% d'écart = prix extrait du texte (ex: objectif $100k)
+                log.warning("  [TA] %s: entry=%.5f aberrant vs prix=%.5f (%.0f%%) — recalculé",
+                            symbol, float(entry_raw), cp, ecart * 100)
+                entry_raw = None  # forcer recalcul depuis prix courant
+        entry = entry_raw if entry_raw else (cp if cp > 0 else None)
         sl    = sig0.get("stop_loss")   or params.get("stop_loss")
         tp    = sig0.get("take_profit") or params.get("take_profit")
+
+        # Recalculer SL/TP si entry corrigée mais manquants
+        if entry and cp > 0 and (not sl or not tp):
+            atr_f = atr if atr > 0 else cp * 0.005
+            is_buy = rec == "BUY"
+            if not sl:
+                sl = round(entry - atr_f * 1.5, 5) if is_buy else round(entry + atr_f * 1.5, 5)
+            if not tp:
+                sl_dist = abs(entry - sl)
+                tp = round(entry + sl_dist * 2.0, 5) if is_buy else round(entry - sl_dist * 2.0, 5)
+
         lot   = get_lot_min(symbol)
 
         # Sauvegarder rapport Word
@@ -532,6 +552,13 @@ def run(top_n: int = 5, timeout: int = APPROVAL_TIMEOUT_SEC, auto: bool = False)
 
         # Envoyer rapport Word
         send_report_whatsapp(ta)
+
+        # Rejeter HOLD — aucun ordre à placer
+        if ta_dir not in ("BUY", "SELL"):
+            log.warning("  ⏭ %s: TA retourne '%s' — pas d'ordre placé", sym, ta_dir)
+            orders_skipped.append(sym)
+            send_whatsapp(f"⏭ *{sym}*: Signal TA = {ta_dir} — pas d'ordre")
+            continue
 
         if auto:
             # Mode auto — pas de confirmation
