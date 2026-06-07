@@ -22545,11 +22545,39 @@ async def get_pending_order(symbol: str = "XAUUSD"):
             if k.upper().replace(" ","").replace("INDEX","") == sym_clean:
                 order = v
                 break
+
+    # 🔒 ANTI-DUPLICATION : marquer "executing" dès le premier poll
+    # Si déjà en cours d'exécution par un autre EA → retourner null
+    if order and order.get("status") == "executing":
+        return {"ok": False, "symbol": sym, "order": None, "message": "Ordre déjà en cours d'exécution par un autre EA"}
+    if order and order.get("status") == "ready":
+        order["status"] = "executing"  # Verrouiller immédiatement
     if not order:
         return {"ok": False, "symbol": sym, "order": None, "message": "Aucun ordre pending"}
     if order.get("status", "ready") == "conflict_pending":
         return {"ok": False, "symbol": sym, "order": None, "message": "Ordre en attente résolution conflit TA/TV"}
     return {"ok": True, "symbol": sym, "order": order}
+
+
+@app.post("/pending-order/executed")
+async def mark_pending_order_executed(payload: dict = Body(...)):
+    """TradeManager appelle cet endpoint après avoir placé le trade.
+    Supprime l'ordre du store pour éviter toute ré-exécution.
+    payload: {symbol: str, mt5_ticket: int}
+    """
+    sym    = _resolve_symbol((payload.get("symbol") or "").strip().upper())
+    ticket = payload.get("mt5_ticket")
+    order  = _PENDING_ORDER_STORE.pop(sym, None)
+    if not order:
+        # Chercher avec variantes
+        for k in list(_PENDING_ORDER_STORE.keys()):
+            if k.upper().replace(" ","").replace("INDEX","") == sym.upper().replace(" ","").replace("INDEX",""):
+                order = _PENDING_ORDER_STORE.pop(k, None)
+                break
+    if order:
+        logger.info(f"[PendingOrder] {sym} exécuté ticket={ticket} → supprimé du store")
+        return {"ok": True, "symbol": sym, "removed": True}
+    return {"ok": True, "symbol": sym, "removed": False}
 
 
 @app.get("/pending-orders")
