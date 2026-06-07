@@ -4,7 +4,7 @@
 //| Attacher sur UN SEUL chart — gère tout le terminal               |
 //+------------------------------------------------------------------+
 #property copyright "TradBOT"
-#property version   "3.22"
+#property version   "3.23"
 #property strict
 #include <Trade/Trade.mqh>
 #include <Trade/PositionInfo.mqh>
@@ -4012,14 +4012,8 @@ void TryExecuteMCPSignal(int idx)
    string sym  = g_mcpSignals[idx].symbol;
    bool isXau = (StringCompare(sym, "XAUUSD") == 0);
 
-   // Règle absolue : n'exécuter que si le symbole = graphique courant
-   // Un EA attaché à XAUUSD ne doit jamais ouvrir un trade USDJPY
-   if(sym != _Symbol)
-   {
-      Print(StringFormat("[TradeManager] 🚫 %s: ordre ignoré — EA attaché à %s uniquement", sym, _Symbol));
-      g_mcpSignals[idx].active = false;
-      return;
-   }
+   // TradeManager est multi-symbole : il exécute les ordres pipeline sur tous les symboles
+   // même si l'EA est attaché sur un chart différent (ex: EA sur ETHUSD exécute Crash 300)
 
    if(IsGlobalPositionLimitReached())
    {
