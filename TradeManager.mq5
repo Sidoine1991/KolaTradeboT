@@ -92,7 +92,21 @@ input double DuplicateMinQuality    = 60.0;   // Quality min % pour dupliquer
 input double DuplicateMinCoherence  = 65.0;   // Coherence min % pour dupliquer
 input int    DupProfitStableSec     = 120;    // Profit >= $2 maintenu sans rechute (sec)
 input double DupMinSetupProb        = 0.45;   // Proba setup min (RDS) pour autoriser dup
-input string InpPollSymbols         = "Boom 600 Index,Boom 1000 Index,Crash 600 Index,Crash 1000 Index,XAUUSD,Gold Basket";
+input string InpPollSymbols         =
+   // Boom / Crash (tous les indices synthétiques Deriv)
+   "Boom 300 Index,Boom 500 Index,Boom 600 Index,Boom 900 Index,Boom 1000 Index,"
+   "Crash 300 Index,Crash 500 Index,Crash 600 Index,Crash 900 Index,Crash 1000 Index,"
+   // Volatility Index Deriv
+   "Volatility 10 Index,Volatility 25 Index,Volatility 50 Index,Volatility 75 Index,Volatility 100 Index,"
+   "Volatility 10 (1s) Index,Volatility 25 (1s) Index,Volatility 50 (1s) Index,Volatility 75 (1s) Index,Volatility 100 (1s) Index,"
+   // Métaux
+   "XAUUSD,XAGUSD,Gold Basket,"
+   // Forex majeurs
+   "EURUSD,GBPUSD,USDJPY,USDCHF,AUDUSD,NZDUSD,USDCAD,EURGBP,EURJPY,GBPJPY,"
+   // Indices boursiers
+   "US30,US500,NAS100,USTEC,UK100,GER40,JPN225,"
+   // Crypto
+   "BTCUSD,ETHUSD,BNBUSD,SOLUSD,XRPUSD,ADAUSD";
 
 input group "=== NOTIFICATIONS WHATSAPP ==="
 input bool   UseWhatsApp            = true;   // Envoyer alertes WhatsApp
