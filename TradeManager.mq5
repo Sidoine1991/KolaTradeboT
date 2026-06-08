@@ -12,16 +12,17 @@
 
 input group "=== TRAILING STOP ==="
 input bool   UseTrailing            = true;   // Activer trailing stop
-input double TrailActivateUSD       = 1.0;    // Activer dès que profit >= $1 USD (sécurise plus tôt)
-input double TrailLockPct           = 0.30;   // Verrouiller 30% du profit max depuis pic (sécurité perte)
+// Trailing : actif dès $2 profit, ferme si recul > 30% du gain depuis le pic ($2 → plancher $1.40)
+input double TrailActivateUSD       = 2.0;    // Activer trailing dès profit >= $2 (métaux/forex)
+input double TrailLockPct           = 0.30;   // Verrouiller 70% du pic — ferme si recul > 30%
 
 input group "=== SORTIE PROFIT STAGNÉ ==="
-input bool   UseStagnationExit        = true;   // Couper si profit stagne puis recule (ex: $2 → pas $1)
-input double StagnationTriggerUSD     = 2.0;    // Surveiller dès profit >= (USD)
-input int    StagnationHoldSec        = 180;    // Temps min en zone profit (sec) — ex: 3 minutes
-input double StagnationMaxGivebackUSD = 0.75;   // Recul max depuis le pic avant fermeture (ex: $2→$1.25)
-input double StagnationLockMinUSD     = 1.25;   // Plancher absolu après armement (ne pas descendre à $1)
-input double StagnationFlatBandUSD    = 0.35;   // Bande "stagne autour du pic" (USD)
+input bool   UseStagnationExit        = true;   // Couper si profit stagne puis recule
+input double StagnationTriggerUSD     = 2.0;    // Surveiller dès profit >= $2
+input int    StagnationHoldSec        = 120;    // Temps min en zone profit (sec) — 2 minutes
+input double StagnationMaxGivebackUSD = 0.60;   // Recul max depuis le pic (30% de $2 = $0.60)
+input double StagnationLockMinUSD     = 1.40;   // Plancher absolu après armement ($2 - $0.60)
+input double StagnationFlatBandUSD    = 0.25;   // Bande stagnation (USD)
 
 input group "=== LIMITES GLOBALES ==="
 input int    MaxGlobalPositions     = 2;      // Max positions simultanées tous symboles confondus
@@ -34,7 +35,7 @@ input int    ReEntryCooldownSec     = 30;     // Cooldown minimal entre tentativ
 input int    EMA_Fast               = 8;      // EMA rapide M1 — 1ère cible
 input int    EMA_Slow               = 21;     // EMA lente M1 — 2ème cible
 input double EMATouch_Pct           = 0.5;   // Tolérance toucher EMA (% du spread)
-input bool   RequireCorrectSide     = false;  // 🔧 DÉSACTIVÉ: Bloquer prix "mauvais côté EMA" (fix log)
+input bool   RequireCorrectSide     = false;  // Bloquer prix "mauvais côté EMA"
 
 input group "=== FILTRE RSI ==="
 input int    RSI_Period             = 14;
@@ -47,14 +48,15 @@ input int    CheckIntervalSec       = 5;      // Intervalle vérification (sec)
 
 input group "=== AUTO SL/TP ==="
 input bool   AutoAssignSLTP         = true;   // Auto-assigner SL/TP si manquants
-input double MaxRiskUSD             = 3.0;    // Perte max absolue par position (USD) — fermeture marché
+input double MaxRiskUSD             = 3.5;    // Perte max absolue métaux/forex (USD) — fermeture marché
 input double TargetProfitUSD        = 10.0;   // TP cible (USD)
 
 input group "=== PROTECTION PROFIT (anti dégringolade) ==="
-input bool   UseProfitGivebackExit  = true;   // Fermer au marché si gain → perte (sans attendre SL broker)
-input double ProfitGivebackArmUSD   = 1.0;    // Actif dès qu'un pic profit >= $1
-input double MaxGivebackFromPeakUSD = 0.50;   // Recul max depuis le pic = 50% (pic $2 → plancher $1)
-input double MaxLossCapUSD          = 1.0;    // Plancher perte absolu si déjà été en gain
+input bool   UseProfitGivebackExit  = true;   // Fermer au marché si gain → perte
+// Armé dès $2 profit — ferme si recul > 30% du pic ($2 → plancher $1.40)
+input double ProfitGivebackArmUSD   = 2.0;    // Actif dès pic profit >= $2
+input double MaxGivebackFromPeakUSD = 0.30;   // Recul max = 30% du pic (pic $2 → plancher $1.40)
+input double MaxLossCapUSD          = 3.5;    // Perte absolue max si jamais été en gain (=MaxRiskUSD)
 input int    MaxPositionsPerSymbol  = 2;      // Max positions gérées par symbole (évite 2 dup en perte)
 
 input group "=== PROFIT GLOBAL ==="
@@ -149,6 +151,9 @@ input bool   GOMWaitPullbackToKola    = true; // Entrer seulement sur pullback O
 input bool   RequireGlobalDirMatch    = true;  // ✅ Exiger que TF Global soit dans la même direction
 input int    GlobalDirMinConfidence   = 70;    // Confiance TF global minimale (%) pour autoriser l'entrée
 input double GlobalMinCoherencePct    = 45.0;  // Cohérence GOM minimale (%) — 45 évite de bloquer les PERFECT BUY/SELL
+input bool   UseBBTrendFilter         = true;  // Bloquer entrée si BB contre-tendance (prix sous BB Mid + pente baissière → pas de BUY)
+input int    BBTrendPeriod            = 20;    // Période Bollinger Band pour filtre tendance
+input int    BBTrendSlopeBars         = 3;     // Barres pour mesurer la pente de la BB Middle
 
 input group "=== SETUP TV — ORDRE LIMITE ==="
 input bool   UseTVSetupLimit          = true;   // Placer ordre limite depuis tableau SETUP TV
@@ -255,6 +260,12 @@ double   g_ghostCVD     = 0.0;  // CVD cumulatif session
 double   g_ghostBuyPct  = 50.0; // sentiment BUY% pondéré volume (20 barres)
 double   g_ghostCompass = 0.0;  // angle boussole momentum 0-360°
 
+// Order Blocks confirmés depuis TradingView Pine
+double   g_obBullTop    = 0.0;
+double   g_obBullBot    = 0.0;
+double   g_obBearTop    = 0.0;
+double   g_obBearBot    = 0.0;
+
 // Tableau SETUP TradingView (OB_BULL / OB_BEAR)
 bool     g_setupValid       = false;
 int      g_setupDir         = 0;      // 1=BUY limit, -1=SELL limit
@@ -284,7 +295,9 @@ datetime g_lastGOMPathDraw    = 0;
 double   g_lastKolaBuy        = 0.0;
 double   g_lastKolaSell       = 0.0;
 double   g_lastBBUp           = 0.0;
+double   g_lastBBMid          = 0.0;  // SMA20 — zone de rebond en tendance
 double   g_lastBBDn           = 0.0;
+datetime g_lastBBCurveDraw    = 0;    // timestamp dernier dessin courbes BB
 double   g_setupBuyProb       = 0.0;
 double   g_setupSellProb      = 0.0;
 double   g_setupValidProb     = 0.0;
@@ -431,6 +444,7 @@ struct MCPSignal
    bool     slNotifSent;
    string   orderId;        // UUID du pending order depuis AI server
    int      failCount;      // Nb tentatives echouees (abandon apres 3)
+   string   source;         // "pipeline" | "ob_reentry" | "" (GOM auto)
 };
 
 MCPSignal g_mcpSignals[];
@@ -611,6 +625,7 @@ int OnInit()
       PollGOMScalpVerdict();
    }
    DrawEntryLevels();
+   DrawBollingerCurves(true);  // dessin initial au chargement
    if(ShowGOMPathCandles) DrawGOMPathPredictedCandles();
 
    return INIT_SUCCEEDED;
@@ -685,6 +700,8 @@ void OnTick()
    if(UseGOMScalp)           CheckGOMAutoEntry();
    if(UseGOMScalp)           CheckGOMReEntry();
    if(UseTVSetupLimit)       ManageTVSetupLimitOrder();
+   DrawEntryLevels();
+   DrawBollingerCurves();    // courbes BB — redessinées toutes les 60s ou sur rapport TA
 }
 
 //+------------------------------------------------------------------+
@@ -772,6 +789,44 @@ bool IsGOMCorrectionZone(const int tradeDir)
                u, d, look), 25);
          return true;
       }
+   }
+
+   return false;
+}
+
+bool IsBBCounterTrend(const int tradeDir)
+{
+   if(!UseBBTrendFilter || tradeDir == 0) return false;
+
+   int hBB = iBands(_Symbol, PERIOD_CURRENT, BBTrendPeriod, 0, 2.0, PRICE_CLOSE);
+   if(hBB == INVALID_HANDLE) return false;
+
+   double bufMid[];
+   ArraySetAsSeries(bufMid, true);
+   if(CopyBuffer(hBB, 0, 0, BBTrendSlopeBars + 1, bufMid) < BBTrendSlopeBars + 1)
+   {
+      IndicatorRelease(hBB);
+      return false;
+   }
+   IndicatorRelease(hBB);
+
+   double price = (SymbolInfoDouble(_Symbol, SYMBOL_ASK) + SymbolInfoDouble(_Symbol, SYMBOL_BID)) / 2.0;
+   double bbMid = bufMid[0];
+   double bbMidPrev = bufMid[BBTrendSlopeBars];
+   bool slopeDown = (bbMid < bbMidPrev);
+   bool slopeUp   = (bbMid > bbMidPrev);
+
+   if(tradeDir == 1 && price < bbMid && slopeDown)
+   {
+      PrintOnce(StringFormat("[BB-Filter] BUY bloqué — prix (%.5f) sous BB Mid (%.5f) + pente baissière",
+            price, bbMid), 30);
+      return true;
+   }
+   if(tradeDir == -1 && price > bbMid && slopeUp)
+   {
+      PrintOnce(StringFormat("[BB-Filter] SELL bloqué — prix (%.5f) au-dessus BB Mid (%.5f) + pente haussière",
+            price, bbMid), 30);
+      return true;
    }
 
    return false;
@@ -978,6 +1033,172 @@ void DrawTLine(const string name, const double price, const color clr,
    ObjectSetString (0, name, OBJPROP_TEXT,       lbl);
 }
 
+//+------------------------------------------------------------------+
+//| Trace les courbes BB (Sup/Mid/Inf) sur 200 barres hist + 200     |
+//| barres projetées. Appelé à chaque nouveau rapport TradingAgents. |
+//+------------------------------------------------------------------+
+void DrawBollingerCurves(bool forceRedraw = false)
+{
+   // Redessiner si forcé (nouveau rapport TA) ou toutes les 60s
+   if(!forceRedraw && (int)(TimeCurrent() - g_lastBBCurveDraw) < 60) return;
+   g_lastBBCurveDraw = TimeCurrent();
+
+   // Supprimer les anciens objets BB courbe + les lignes plates obsolètes
+   for(int i = ObjectsTotal(0, 0, -1) - 1; i >= 0; i--)
+   {
+      string nm = ObjectName(0, i, 0, -1);
+      if(StringFind(nm, "TM_BB_CURVE_") == 0 || nm == "TM_BB_UP" || nm == "TM_BB_MID" || nm == "TM_BB_DN")
+         ObjectDelete(0, nm);
+   }
+
+   ENUM_TIMEFRAMES period = PERIOD_CURRENT;
+   int bbPer   = 20;
+   int bars    = 200;  // barres historiques
+   int proj    = 200;  // barres projetées
+   int dg      = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+
+   // Handles BB pour le symbole courant
+   int hBB = iBands(_Symbol, period, bbPer, 0, 2.0, PRICE_CLOSE);
+   if(hBB == INVALID_HANDLE) return;
+
+   double bufUp[], bufMid[], bufDn[];
+   ArraySetAsSeries(bufUp,  true);
+   ArraySetAsSeries(bufMid, true);
+   ArraySetAsSeries(bufDn,  true);
+
+   int copied = CopyBuffer(hBB, 1, 0, bars, bufUp);   // band supérieure
+   CopyBuffer(hBB, 0, 0, bars, bufMid);                // milieu (SMA20)
+   CopyBuffer(hBB, 2, 0, bars, bufDn);                 // band inférieure
+   IndicatorRelease(hBB);
+
+   if(copied < 2) return;
+
+   int ptSec = PeriodSeconds(period);
+
+   // ── Tracer 200 barres historiques ────────────────────────────────
+   for(int i = copied - 1; i >= 1; i--)
+   {
+      datetime t1 = iTime(_Symbol, period, i);
+      datetime t2 = iTime(_Symbol, period, i - 1);
+      if(t1 <= 0 || t2 <= 0) continue;
+
+      string sfx = IntegerToString(copied - 1 - i);
+
+      // BB Sup — argent
+      string nmU = "TM_BB_CURVE_U" + sfx;
+      ObjectCreate(0, nmU, OBJ_TREND, 0, t1, bufUp[i], t2, bufUp[i-1]);
+      ObjectSetInteger(0, nmU, OBJPROP_COLOR,     clrSilver);
+      ObjectSetInteger(0, nmU, OBJPROP_WIDTH,     1);
+      ObjectSetInteger(0, nmU, OBJPROP_STYLE,     STYLE_DOT);
+      ObjectSetInteger(0, nmU, OBJPROP_RAY_RIGHT, false);
+      ObjectSetInteger(0, nmU, OBJPROP_SELECTABLE,false);
+      ObjectSetInteger(0, nmU, OBJPROP_BACK,      true);
+
+      // BB Mid — or (SMA20, ligne de rebond)
+      string nmM = "TM_BB_CURVE_M" + sfx;
+      ObjectCreate(0, nmM, OBJ_TREND, 0, t1, bufMid[i], t2, bufMid[i-1]);
+      ObjectSetInteger(0, nmM, OBJPROP_COLOR,     clrGold);
+      ObjectSetInteger(0, nmM, OBJPROP_WIDTH,     1);
+      ObjectSetInteger(0, nmM, OBJPROP_STYLE,     STYLE_DOT);
+      ObjectSetInteger(0, nmM, OBJPROP_RAY_RIGHT, false);
+      ObjectSetInteger(0, nmM, OBJPROP_SELECTABLE,false);
+      ObjectSetInteger(0, nmM, OBJPROP_BACK,      true);
+
+      // BB Inf — argent
+      string nmD = "TM_BB_CURVE_D" + sfx;
+      ObjectCreate(0, nmD, OBJ_TREND, 0, t1, bufDn[i], t2, bufDn[i-1]);
+      ObjectSetInteger(0, nmD, OBJPROP_COLOR,     clrSilver);
+      ObjectSetInteger(0, nmD, OBJPROP_WIDTH,     1);
+      ObjectSetInteger(0, nmD, OBJPROP_STYLE,     STYLE_DOT);
+      ObjectSetInteger(0, nmD, OBJPROP_RAY_RIGHT, false);
+      ObjectSetInteger(0, nmD, OBJPROP_SELECTABLE,false);
+      ObjectSetInteger(0, nmD, OBJPROP_BACK,      true);
+   }
+
+   // ── Projection 200 barres futures (motif cyclique per-bar) ─────────
+   // Extraction du motif : deltas réels des 40 dernières barres
+   int patLen = MathMin(40, copied - 2);
+   if(patLen < 2) return;
+
+   double deltaU[], deltaM[], deltaD[];
+   ArrayResize(deltaU, patLen);
+   ArrayResize(deltaM, patLen);
+   ArrayResize(deltaD, patLen);
+   for(int k = 0; k < patLen; k++)
+   {
+      // buf[k] = barre la plus récente → buf[k+1] = barre précédente
+      // delta positif = bande montait de k+1 vers k
+      deltaU[k] = bufUp[k]  - bufUp[k+1];
+      deltaM[k] = bufMid[k] - bufMid[k+1];
+      deltaD[k] = bufDn[k]  - bufDn[k+1];
+   }
+
+   double prevU = bufUp[0], prevM = bufMid[0], prevD = bufDn[0];
+   datetime prevT = iTime(_Symbol, period, 0);
+
+   for(int p = 1; p <= proj; p++)
+   {
+      datetime t2p = prevT + (datetime)ptSec;
+      int    patIdx = (p - 1) % patLen;
+      double damp   = MathPow(0.97, p);   // 3% d'atténuation par barre
+      double nextU  = prevU + deltaU[patIdx] * damp;
+      double nextM  = prevM + deltaM[patIdx] * damp;
+      double nextD  = prevD + deltaD[patIdx] * damp;
+
+      string sfxP = "P" + IntegerToString(p);
+
+      string nmUP = "TM_BB_CURVE_U" + sfxP;
+      ObjectCreate(0, nmUP, OBJ_TREND, 0, prevT, prevU, t2p, nextU);
+      ObjectSetInteger(0, nmUP, OBJPROP_COLOR,     C'100,100,100');  // gris foncé projection
+      ObjectSetInteger(0, nmUP, OBJPROP_WIDTH,     1);
+      ObjectSetInteger(0, nmUP, OBJPROP_STYLE,     STYLE_DOT);
+      ObjectSetInteger(0, nmUP, OBJPROP_RAY_RIGHT, false);
+      ObjectSetInteger(0, nmUP, OBJPROP_SELECTABLE,false);
+      ObjectSetInteger(0, nmUP, OBJPROP_BACK,      true);
+
+      string nmMP = "TM_BB_CURVE_M" + sfxP;
+      ObjectCreate(0, nmMP, OBJ_TREND, 0, prevT, prevM, t2p, nextM);
+      ObjectSetInteger(0, nmMP, OBJPROP_COLOR,     C'180,140,0');    // or foncé projection
+      ObjectSetInteger(0, nmMP, OBJPROP_WIDTH,     1);
+      ObjectSetInteger(0, nmMP, OBJPROP_STYLE,     STYLE_DOT);
+      ObjectSetInteger(0, nmMP, OBJPROP_RAY_RIGHT, false);
+      ObjectSetInteger(0, nmMP, OBJPROP_SELECTABLE,false);
+      ObjectSetInteger(0, nmMP, OBJPROP_BACK,      true);
+
+      string nmDP = "TM_BB_CURVE_D" + sfxP;
+      ObjectCreate(0, nmDP, OBJ_TREND, 0, prevT, prevD, t2p, nextD);
+      ObjectSetInteger(0, nmDP, OBJPROP_COLOR,     C'100,100,100');
+      ObjectSetInteger(0, nmDP, OBJPROP_WIDTH,     1);
+      ObjectSetInteger(0, nmDP, OBJPROP_STYLE,     STYLE_DOT);
+      ObjectSetInteger(0, nmDP, OBJPROP_RAY_RIGHT, false);
+      ObjectSetInteger(0, nmDP, OBJPROP_SELECTABLE,false);
+      ObjectSetInteger(0, nmDP, OBJPROP_BACK,      true);
+
+      prevU = nextU; prevM = nextM; prevD = nextD; prevT = t2p;
+   }
+
+   // Label sur la dernière barre projetée
+   ObjectCreate(0, "TM_BB_LBL_U", OBJ_TEXT, 0, prevT, prevU);
+   ObjectSetString(0, "TM_BB_LBL_U", OBJPROP_TEXT, "BB Sup →");
+   ObjectSetInteger(0, "TM_BB_LBL_U", OBJPROP_COLOR, clrSilver);
+   ObjectSetInteger(0, "TM_BB_LBL_U", OBJPROP_FONTSIZE, 7);
+   ObjectSetInteger(0, "TM_BB_LBL_U", OBJPROP_SELECTABLE, false);
+
+   ObjectCreate(0, "TM_BB_LBL_M", OBJ_TEXT, 0, prevT, prevM);
+   ObjectSetString(0, "TM_BB_LBL_M", OBJPROP_TEXT, "BB Mid →");
+   ObjectSetInteger(0, "TM_BB_LBL_M", OBJPROP_COLOR, clrGold);
+   ObjectSetInteger(0, "TM_BB_LBL_M", OBJPROP_FONTSIZE, 7);
+   ObjectSetInteger(0, "TM_BB_LBL_M", OBJPROP_SELECTABLE, false);
+
+   ObjectCreate(0, "TM_BB_LBL_D", OBJ_TEXT, 0, prevT, prevD);
+   ObjectSetString(0, "TM_BB_LBL_D", OBJPROP_TEXT, "BB Inf →");
+   ObjectSetInteger(0, "TM_BB_LBL_D", OBJPROP_COLOR, clrSilver);
+   ObjectSetInteger(0, "TM_BB_LBL_D", OBJPROP_FONTSIZE, 7);
+   ObjectSetInteger(0, "TM_BB_LBL_D", OBJPROP_SELECTABLE, false);
+
+   ChartRedraw(0);
+}
+
 void DrawEntryLevels()
 {
    static datetime s_lastDraw = 0;
@@ -992,11 +1213,8 @@ void DrawEntryLevels()
    DrawTLine("TM_KOLA_SELL", g_lastKolaSell, clrOrangeRed,  2, STYLE_DASH,
              StringFormat("KOLA SELL %."+IntegerToString(dg)+"f", g_lastKolaSell));
 
-   // ── BB (résistance/support dynamique) ─────────────────────────────
-   DrawTLine("TM_BB_UP", g_lastBBUp, clrSilver, 1, STYLE_DOT,
-             StringFormat("BB Sup %."+IntegerToString(dg)+"f", g_lastBBUp));
-   DrawTLine("TM_BB_DN", g_lastBBDn, clrSilver, 1, STYLE_DOT,
-             StringFormat("BB Inf %."+IntegerToString(dg)+"f", g_lastBBDn));
+   // ── BB courbes — dessinées par DrawBollingerCurves() appelé séparément ──
+   // (200 barres hist + 200 barres projetées, redessinées sur nouveau rapport TA)
 
    // ── Niveaux OB Setup ──────────────────────────────────────────────
    if(g_setupValid && g_setupEntry > 0)
@@ -1656,6 +1874,11 @@ void TryTVSetupMarketBreakout()
    if(IsGOMCorrectionZone(1))
    {
       PrintOnce("[TV-Setup] Breakout BUY bloque — correction en cours", 30);
+      return;
+   }
+   if(IsBBCounterTrend(1))
+   {
+      PrintOnce("[TV-Setup] Breakout BUY bloque — BB baissier", 30);
       return;
    }
    if(IsGOMVerdictWait()) return;
@@ -2387,10 +2610,12 @@ void ManageAllTrailing()
          g_states[idx].peakProfit = curProfit;
 
       // Garde-fou perte max — fermer si perte >= cap (fallback broker sans SL)
-      if(curProfit <= -maxLoss)
+      // Boom/Crash : cap plus souple car gérés par spike — mais garde-fou à 2× MaxRisk
+      double capLoss = IsBoomOrCrashSymbol(sym) ? maxLoss * 2.0 : maxLoss;
+      if(curProfit <= -capLoss)
       {
          Print(StringFormat("[TradeManager] 🛑 %s #%llu perte $%.2f >= -$%.2f — fermeture urgente",
-               sym, ticket, curProfit, maxLoss));
+               sym, ticket, curProfit, capLoss));
          trade.PositionClose(ticket);
          continue;
       }
@@ -2440,41 +2665,50 @@ void ManageAllTrailing()
       double newSL    = 0;
       string phase    = "";
 
-      // ── PHASES TRAILING ──────────────────────────────────────────────────
-      // Phase 1 : pic $1–$2  → Breakeven (entry + buffer) — jamais en perte
-      // Phase 2 : pic $2+    → SL verrouille 50% du pic — si prix revient à 50% du chemin → ferme
-      // Phase 3 : pic $4+    → Trailing serré : SL suit prix courant, recul max 25%
-      // Règle absolue : si prix retourne à 50% du chemin entry→pic, SL monte pour protéger
+      // ── BOOM/CRASH : trailing désactivé — fermeture uniquement sur spike ──
+      // MonitorSpikeAutoClose() gère la sortie après spike détecté
+      if(IsBoomOrCrashSymbol(sym))
+      {
+         // Garde-fou perte max uniquement — pas de trailing SL progressif
+         // (le spike est la seule sortie rentable sur Boom/Crash)
+         continue;
+      }
 
-      // Calculer 50% du chemin entry → pic en prix
-      double halfPeakPts = (peakUse * 0.50) / MathMax(profitPerPt, 0.0001);
-      double halfPeakSL  = NormalizeDouble((dir == 1) ? ep + halfPeakPts : ep - halfPeakPts, dg);
+      // ── MÉTAUX / FOREX : trailing actif dès $2, recul max 30% du pic ────
+      // Phase 1 : pic $0→$2   → pas de trail, garde-fou perte max $3.50
+      // Phase 2 : pic $2+     → actif, SL protège 70% du pic (recul max 30%)
+      // Phase 3 : pic $4+     → trailing serré, recul max 20%
+
+      // 30% du pic en distance prix
+      double lockPts30   = (peakUse * TrailLockPct) / MathMax(profitPerPt, 0.0001);
+      double lockSL30    = NormalizeDouble((dir == 1) ? ep + (peakUse * 0.70 / MathMax(profitPerPt, 0.0001))
+                                                     : ep - (peakUse * 0.70 / MathMax(profitPerPt, 0.0001)), dg);
 
       if(peakUse >= 4.0 || (g_states[idx].forceTrailing && peakUse >= 2.0))
       {
-         // Phase 3 — trailing serré sur prix courant : recul max 25% du pic
-         double allowedGivebackUSD = peakUse * 0.25;
+         // Phase 3 — trailing serré : recul max 20% du pic depuis prix courant
+         double allowedGivebackUSD = peakUse * 0.20;
          double allowedGivebackPts = allowedGivebackUSD / MathMax(profitPerPt, 0.0001);
          newSL = NormalizeDouble(
             (dir == 1) ? (bid - allowedGivebackPts) : (bid + allowedGivebackPts), dg);
-         // Jamais sous le 50% du chemin
-         if(dir == 1) newSL = MathMax(newSL, halfPeakSL);
-         else         newSL = MathMin(newSL, halfPeakSL);
-         phase = StringFormat("Phase3 serré | recul max $%.2f (25%%)", allowedGivebackUSD);
+         // Jamais sous le plancher 70% du pic
+         if(dir == 1) newSL = MathMax(newSL, lockSL30);
+         else         newSL = MathMin(newSL, lockSL30);
+         phase = StringFormat("Phase3 serré | recul max $%.2f (20%%)", allowedGivebackUSD);
       }
-      else if(peakUse >= 2.0)
+      else if(peakUse >= TrailActivateUSD)
       {
-         // Phase 2 — SL à 50% du pic depuis entry
-         // Si prix est déjà redescendu à 50% du chemin → SL s'y place immédiatement
-         newSL = halfPeakSL;
-         phase = StringFormat("Phase2 50%% | SL protège $%.2f (50%% de $%.2f)", peakUse * 0.50, peakUse);
+         // Phase 2 — SL protège 70% du pic (recul max 30%)
+         // Armé dès $2 : si prix recule de 30% du pic → fermeture
+         newSL = lockSL30;
+         phase = StringFormat("Phase2 BB | SL=$%.2f (70%% de pic $%.2f, recul max 30%%)", peakUse * 0.70, peakUse);
       }
       else
       {
-         // Phase 1 — breakeven strict : SL à entry + 1 pt buffer
+         // Phase 1 — pas encore armé ($0→$2) : breakeven uniquement si déjà en gain
          double be = NormalizeDouble((dir == 1) ? ep + pt : ep - pt, dg);
          newSL = be;
-         phase = "Phase1 breakeven";
+         phase = StringFormat("Phase1 attente $%.2f (actuel $%.2f)", TrailActivateUSD, peakUse);
       }
 
       // Vérifier stops_level broker
@@ -2557,8 +2791,85 @@ void TryReEntryOnEMA(int idx)
    string sym = g_states[idx].symbol;
    int    dir = g_states[idx].direction;
 
-   // 🔒 GARDE PIPELINE ONLY MODE
-   if(!CanAutoEntry("EMA-ReEntry", sym)) return;
+   // 🔒 GARDE PIPELINE ONLY MODE — exception BB Mid en GOM PERFECT
+   bool isGOMPerfectPre = (g_lastGOMVerdictNum == 3 || g_lastGOMVerdictNum == -3);
+   bool bbDataReady     = (g_lastBBMid > 0 && g_lastBBUp > 0 && g_lastBBDn > 0);
+   bool bbPerfectMatch  = bbDataReady && isGOMPerfectPre &&
+                          ((g_lastGOMVerdictNum == 3 && dir == 1) || (g_lastGOMVerdictNum == -3 && dir == -1));
+   if(!bbPerfectMatch)
+   {
+      if(!CanAutoEntry("EMA-ReEntry", sym)) return;
+   }
+
+   // 🎯 STRATÉGIE BB MID : uniquement si GOM PERFECT BUY ou PERFECT SELL
+   // La BB Mid comme re-entry ne s'active qu'en condition de momentum parfait
+   bool isGOMPerfect = (g_lastGOMVerdictNum == 3 || g_lastGOMVerdictNum == -3);
+   bool isBBMidTouch = (g_lastBBMid > 0 && g_lastBBUp > 0 && g_lastBBDn > 0);
+   bool useBBStrategy = false;
+   if(isBBMidTouch && !isGOMPerfect)
+   {
+      // Touch BB Mid sans GOM PERFECT → bloquer si c'est la seule justification
+      double distBBCheck = (dir == 1) ? MathAbs(SymbolInfoDouble(sym, SYMBOL_BID) - g_lastBBMid)
+                                      : MathAbs(SymbolInfoDouble(sym, SYMBOL_ASK) - g_lastBBMid);
+      double tolBBCheck  = (SymbolInfoDouble(sym, SYMBOL_ASK) - SymbolInfoDouble(sym, SYMBOL_BID)) * 3.0;
+      if(distBBCheck < tolBBCheck)
+      {
+         PrintOnce(StringFormat("[TM-BB] %s re-entrée BB Mid bloquée — GOM=%s (exige PERFECT)",
+               sym, g_lastGOMVerdict), 60);
+         return;
+      }
+   }
+   if(isBBMidTouch && isGOMPerfect)
+   {
+      // Valider direction GOM PERFECT vs signal
+      bool perfectBuy  = (g_lastGOMVerdictNum == 3  && dir == 1);
+      bool perfectSell = (g_lastGOMVerdictNum == -3 && dir == -1);
+      if(!perfectBuy && !perfectSell)
+      {
+         PrintOnce(StringFormat("[TM-BB] %s BB Mid bloquée — GOM PERFECT %s opposé au signal %s",
+               sym, g_lastGOMVerdict, (dir==1?"BUY":"SELL")), 60);
+         return;
+      }
+
+      // Règle anti-correction : BB Mid doit être dans la même direction que le signal
+      // PERFECT BUY exige BB haussier (SMA20 montante) OU prix dans l'OB haussier
+      // PERFECT SELL exige BB baissier (SMA20 descendante) OU prix dans l'OB baissier
+      int hBBSlope = iBands(sym, PERIOD_CURRENT, 20, 0, 2.0, PRICE_CLOSE);
+      bool bbAligned = false;
+      if(hBBSlope != INVALID_HANDLE)
+      {
+         double bbMidSlope[];
+         ArraySetAsSeries(bbMidSlope, true);
+         if(CopyBuffer(hBBSlope, 0, 0, 3, bbMidSlope) >= 3)
+         {
+            bool bbRising  = (bbMidSlope[0] > bbMidSlope[1] && bbMidSlope[1] > bbMidSlope[2]);
+            bool bbFalling = (bbMidSlope[0] < bbMidSlope[1] && bbMidSlope[1] < bbMidSlope[2]);
+            if(dir == 1)  bbAligned = bbRising;
+            else          bbAligned = bbFalling;
+         }
+         IndicatorRelease(hBBSlope);
+      }
+
+      // Si BB opposé, vérifier si le prix est dans l'OB haussier/baissier (pullback valide)
+      bool inOBZone = false;
+      if(!bbAligned)
+      {
+         double refPxOB = (dir == 1) ? SymbolInfoDouble(sym, SYMBOL_BID)
+                                     : SymbolInfoDouble(sym, SYMBOL_ASK);
+         if(dir == 1 && g_obBullTop > 0 && g_obBullBot > 0)
+            inOBZone = (refPxOB >= g_obBullBot && refPxOB <= g_obBullTop);
+         if(dir == -1 && g_obBearTop > 0 && g_obBearBot > 0)
+            inOBZone = (refPxOB >= g_obBearBot && refPxOB <= g_obBearTop);
+      }
+
+      if(!bbAligned && !inOBZone)
+      {
+         PrintOnce(StringFormat("[TM-BB] %s entrée BLOQUÉE — BB %s (correction) et prix hors OB %s — attendre BB haussier ou pullback OB",
+               sym, (dir==1?"baissier":"haussier"), (dir==1?"haussier":"baissier")), 60);
+         return;
+      }
+      useBBStrategy = true;
+   }
 
    // Limite par symbole toujours vérifiée — limite globale exemptée pour re-entrée tendance
    if(IsGlobalPositionLimitReachedForReEntry(sym)) return;
@@ -2614,13 +2925,19 @@ void TryReEntryOnEMA(int idx)
    // Prix de référence selon direction
    double refPx = (dir == 1) ? bid : ask;
 
-   // Choisir l'EMA la plus proche
-   double distFast = hasFast ? MathAbs(refPx - emaFast) : 1e10;
-   double distSlow = hasSlow ? MathAbs(refPx - emaSlow) : 1e10;
+   // Choisir le niveau de rebond le plus proche : EMA fast, EMA slow, ou BB Mid (SMA20)
+   double distFast  = hasFast          ? MathAbs(refPx - emaFast)       : 1e10;
+   double distSlow  = hasSlow          ? MathAbs(refPx - emaSlow)        : 1e10;
+   double distBBMid = (g_lastBBMid > 0) ? MathAbs(refPx - g_lastBBMid) : 1e10;
    double targetEMA;
    int    emaUsed;
-   if(distFast <= distSlow) { targetEMA = emaFast; emaUsed = EMA_Fast; }
-   else                     { targetEMA = emaSlow; emaUsed = EMA_Slow; }
+   if(distBBMid <= distFast && distBBMid <= distSlow)
+   {
+      targetEMA = g_lastBBMid;
+      emaUsed   = 20;  // SMA20 = BB Mid
+   }
+   else if(distFast <= distSlow) { targetEMA = emaFast; emaUsed = EMA_Fast; }
+   else                          { targetEMA = emaSlow; emaUsed = EMA_Slow; }
 
    // Prix doit être du bon côté (direction confirmée par l'EMA)
    if(RequireCorrectSide)
@@ -2635,12 +2952,13 @@ void TryReEntryOnEMA(int idx)
       }
    }
 
-   // Vérifier le toucher de l'EMA
+   // Vérifier le toucher EMA/BB Mid
    double tolerance = spread * MathMax(EMATouch_Pct, 0.3);
+   string levelName = (emaUsed == 20) ? "BB Mid" : StringFormat("EMA%d", emaUsed);
    if(MathAbs(refPx - targetEMA) > tolerance)
    {
-      PrintOnce(StringFormat("[TradeManager] %s attente EMA%d=%.5f | ref=%.5f dist=%.5f tol=%.5f",
-            sym, emaUsed, targetEMA, refPx, MathAbs(refPx - targetEMA), tolerance), 60);
+      PrintOnce(StringFormat("[TradeManager] %s attente %s=%.5f | ref=%.5f dist=%.5f tol=%.5f",
+            sym, levelName, targetEMA, refPx, MathAbs(refPx - targetEMA), tolerance), 60);
       return;
    }
 
@@ -2796,17 +3114,43 @@ void TryReEntryOnEMA(int idx)
       return;
    }
 
-   double tpDist  = (tickSz > 0 && tickVal > 0 && lot > 0)
-                    ? TargetProfitUSD * tickSz / (lot * tickVal)
-                    : slDist * 2.0;
-   tpDist = MathMax(tpDist, minBroker);
-
    double entryPx = (dir == 1) ? ask : bid;
-   double newSL   = NormalizeDouble((dir == 1) ? entryPx - slDist : entryPx + slDist, dg);
-   double newTP   = NormalizeDouble((dir == 1) ? entryPx + tpDist : entryPx - tpDist, dg);
+   double newSL, newTP;
+   double tpDist = slDist * 2.0;  // valeur par défaut, écrasée selon stratégie
 
-   bool ok = (dir == 1) ? trade.Buy(lot, sym, 0, newSL, newTP, "TM_EMA_RE")
-                        : trade.Sell(lot, sym, 0, newSL, newTP, "TM_EMA_RE");
+   if(useBBStrategy && g_lastBBUp > 0 && g_lastBBDn > 0)
+   {
+      // Stratégie BB PERFECT : SL = BB Inf (BUY) / BB Sup (SELL), TP = BB Sup (BUY) / BB Inf (SELL)
+      if(dir == 1)
+      {
+         newSL = NormalizeDouble(g_lastBBDn, dg);  // BB Inf comme SL
+         newTP = NormalizeDouble(g_lastBBUp, dg);  // BB Sup comme TP
+      }
+      else
+      {
+         newSL = NormalizeDouble(g_lastBBUp, dg);  // BB Sup comme SL
+         newTP = NormalizeDouble(g_lastBBDn, dg);  // BB Inf comme TP
+      }
+      // Vérifier validité minimale broker
+      if(MathAbs(entryPx - newSL) < minBroker)
+         newSL = NormalizeDouble((dir==1) ? entryPx - minBroker : entryPx + minBroker, dg);
+      if(MathAbs(newTP - entryPx) < minBroker)
+         newTP = NormalizeDouble((dir==1) ? entryPx + minBroker*2 : entryPx - minBroker*2, dg);
+      Print(StringFormat("[TM-BB] %s %s BB Strategy — Entry=%.5f SL=%.5f(BBInf/Sup) TP=%.5f(BBSup/Inf)",
+            sym, (dir==1?"BUY":"SELL"), entryPx, newSL, newTP));
+   }
+   else
+   {
+      tpDist = (tickSz > 0 && tickVal > 0 && lot > 0)
+               ? TargetProfitUSD * tickSz / (lot * tickVal)
+               : slDist * 2.0;
+      tpDist = MathMax(tpDist, minBroker);
+      newSL = NormalizeDouble((dir == 1) ? entryPx - slDist : entryPx + slDist, dg);
+      newTP = NormalizeDouble((dir == 1) ? entryPx + tpDist : entryPx - tpDist, dg);
+   }
+
+   bool ok = (dir == 1) ? trade.Buy(lot, sym, 0, newSL, newTP, useBBStrategy ? "TM_BB_RE" : "TM_EMA_RE")
+                        : trade.Sell(lot, sym, 0, newSL, newTP, useBBStrategy ? "TM_BB_RE" : "TM_EMA_RE");
    if(ok)
    {
       g_states[idx].reEntryCount++;
@@ -3155,6 +3499,10 @@ bool DRV_EvaluateEntry(bool &isBuy, string &reason)
       else if(g_lastGOMVerdictNum <= -2) isBuy = false;
       else { reason=StringFormat("Volatility — GOM WAIT (vnum=%d)",g_lastGOMVerdictNum); return false; }
    }
+
+   // Filtre BB — ne pas entrer si Bollinger contre-tendance (sauf Boom/Crash pur)
+   if(!DRV_IsBoom() && !DRV_IsCrash() && IsBBCounterTrend(isBuy ? 1 : -1))
+   { reason="BB contre-tendance — attendre pullback OB ou BB haussier"; return false; }
 
    // Filtre RSI
    double rsi=DRV_GetRSI(1);
@@ -3530,18 +3878,21 @@ bool MCPHasSignalForSymbol(const string sym)
       // Vérifier l'âge du signal (timeout: 5 minutes = 300 sec)
       int signalAge = (int)(now - g_mcpSignals[k].receivedAt);
 
-      // Si signal EXÉCUTÉ mais très vieux (>10 min), il peut être remplacé
-      if(g_mcpSignals[k].executed && signalAge > 600)
+      // Signal exécuté : bloquer re-poll seulement 2 min (anti double-exécution)
+      // Après 2 min → libérer pour permettre un nouveau signal pipeline
+      if(g_mcpSignals[k].executed && signalAge > 120)
       {
-         Print(StringFormat("[TradeManager] ⚠️ %s: Ancien signal exécuté (age=%d sec) → REMPLACEABLE", sym, signalAge));
-         continue;  // Ne le compte pas comme "ayant signal"
+         g_mcpSignals[k].active = false;
+         if(StringCompare(sym, "XAUUSD") == 0)
+            Print(StringFormat("[TradeManager] ⚠️ %s: Signal exécuté expiré (%ds) → libéré pour nouveau signal", sym, signalAge));
+         continue;
       }
 
-      // Si signal ACTIF (pas exécuté) mais vieux (>5 min), le supprimer et remplacer
+      // Signal ACTIF (pas exécuté) mais vieux (>5 min) → expiration
       if(g_mcpSignals[k].active && !g_mcpSignals[k].executed && signalAge > 300)
       {
          Print(StringFormat("[TradeManager] 🔄 %s: Signal READY expiré après %d sec → REMPLACEMENT", sym, signalAge));
-         g_mcpSignals[k].active = false;  // Marquer comme inactif pour permettre nouveau signal
+         g_mcpSignals[k].active = false;
          continue;
       }
 
@@ -3640,9 +3991,32 @@ void IngestPendingOrderForSymbol(const string sym, const string &body)
    }
 
    // ⭐ PRIORITÉ GOM: GOOD/PERFECT ou signal score fort (sell>>buy)
+   // Pipeline bypass : skip tous les filtres GOM pour source=pipeline
+   string orderSource = JsonGetString(orderBody, "source");
+   bool isPipelineOrder = (StringCompare(orderSource, "pipeline") == 0);
+   if(isPipelineOrder)
+   {
+      Print(StringFormat("[TradeManager] ✅ %s: source=pipeline — GOM filters BYPASSED", sym));
+      // Nouveau rapport TradingAgents reçu → redessiner BB courbes immédiatement
+      DrawBollingerCurves(true);
+   }
+
    // Pour Boom/Crash : GOM du chart courant non pertinent → skip tous les filtres GOM
    bool isBoomCrashForGOM = IsBoomOrCrashSymbol(sym);
-   if(UseGOMScalp && (TimeCurrent() - g_lastGOMPoll) < GOMSignalMaxAgeSec && !isBoomCrashForGOM)
+   // Pour les ordres gom_tv_sync : utiliser le verdict inclus dans le JSON serveur
+   // (évite conflit avec g_lastGOMVerdict local stale quand poller est arrêté)
+   string serverVerdict = JsonGetString(orderBody, "gom_verdict");
+   StringToUpper(serverVerdict);
+   bool serverVerdictAligned = false;
+   if(StringLen(serverVerdict) > 0)
+   {
+      bool srvBuy  = (StringFind(serverVerdict, "BUY")  >= 0);
+      bool srvSell = (StringFind(serverVerdict, "SELL") >= 0);
+      serverVerdictAligned = (action == "BUY" && srvBuy) || (action == "SELL" && srvSell);
+   }
+
+   if(!isPipelineOrder && UseGOMScalp && (TimeCurrent() - g_lastGOMPoll) < GOMSignalMaxAgeSec && !isBoomCrashForGOM
+      && !serverVerdictAligned)  // Si verdict serveur aligné → skip check GOM local stale
    {
       int    gomDir = 0, effVnum = 0;
       string actTag;
@@ -3658,8 +4032,8 @@ void IngestPendingOrderForSymbol(const string sym, const string &body)
 
       if(gomDir != 0 && gomDir != mcpDir)
       {
-         Print(StringFormat("[TradeManager] 🚫 %s: CONFLIT GOM %s vs signal=%s — REJETÉ",
-               sym, actTag, action));
+         Print(StringFormat("[TradeManager] 🚫 %s: CONFLIT GOM local %s vs signal=%s — REJETÉ (server=%s)",
+               sym, actTag, action, serverVerdict));
          return;
       }
 
@@ -3680,18 +4054,22 @@ void IngestPendingOrderForSymbol(const string sym, const string &body)
       }
 
       // 🎯 Pullback OM: n'entrer que quand KOLA indique un retest (NEAR BUY/SELL)
+      // NOTE: ce guard ne s'applique qu'aux ordres GOM auto — pas aux ordres pipeline
+      // (les ordres pipeline ont isPipelineOrder=true → tout ce bloc est déjà skippé)
       if(GOMWaitPullbackToKola)
       {
          if(mcpDir == -1 && StringCompare(g_lastKOLAState, "NEAR SELL") != 0)
          {
             if(isXau) Print(StringFormat("[TradeManager] ⏳ %s: attente pullback OM (KOLA=%s) avant SELL",
                   sym, g_lastKOLAState));
+            // Ne pas détruire l'ordre — re-évaluer au prochain poll (60s)
             return;
          }
          if(mcpDir == 1 && StringCompare(g_lastKOLAState, "NEAR BUY") != 0)
          {
             if(isXau) Print(StringFormat("[TradeManager] ⏳ %s: attente pullback OM (KOLA=%s) avant BUY",
                   sym, g_lastKOLAState));
+            // Ne pas détruire l'ordre — re-évaluer au prochain poll (60s)
             return;
          }
       }
@@ -3813,7 +4191,8 @@ void IngestPendingOrderForSymbol(const string sym, const string &body)
       g_mcpSignals[idx].tp1NotifSent    = false;
       g_mcpSignals[idx].slNotifSent     = false;
    g_mcpSignals[idx].orderId         = JsonGetString(orderBody, "order_id");
-   g_mcpSignals[idx].failCount       = 0;  // 🔧 Compteur d'échecs (rejeté après MaxSignalFailCount)
+   g_mcpSignals[idx].source          = JsonGetString(orderBody, "source");
+   g_mcpSignals[idx].failCount       = 0;
 
    if(isXau) Print(StringFormat("[TradeManager] ✅ %s: Signal QUEUED (index %d) — now calling TryExecuteMCPSignal...", sym, idx));
 
@@ -3970,16 +4349,17 @@ bool CheckGlobalDirAndCoherence(int dir, string &reason)
 {
    if(!RequireGlobalDirMatch) return true;
 
-   // 1. Cohérence GOM minimale
-   if(g_lastGOMCoherence < GlobalMinCoherencePct)
+   // 1. Cohérence GOM minimale — skip si poller arrêté (coherence=0 = données absentes)
+   if(g_lastGOMCoherence > 0 && g_lastGOMCoherence < GlobalMinCoherencePct)
    {
       reason = StringFormat("Cohérence GOM insuffisante (%.0f%% < %.0f%%)",
                             g_lastGOMCoherence, GlobalMinCoherencePct);
       return false;
    }
 
-   // 2. Confiance TF global minimale (force = confidence proxy)
-   if(g_lastGOMGlobalStrength < GlobalDirMinConfidence)
+   // 2. Confiance TF global minimale — skip si poller arrêté (strength=0 = données absentes)
+   if(g_lastGOMGlobalStrength > 0 && g_lastGOMGlobalStrength < GlobalDirMinConfidence
+      && g_lastGOMGlobalStrength < 10000)  // anti-overflow
    {
       reason = StringFormat("TF global confiance insuffisante (%d%% < %d%%)",
                             g_lastGOMGlobalStrength, GlobalDirMinConfidence);
@@ -3987,19 +4367,26 @@ bool CheckGlobalDirAndCoherence(int dir, string &reason)
    }
 
    // 3. Direction TF global doit correspondre à la direction de l'ordre
+   // Si direction inconnue (poller pas démarré ou données absentes) → laisser passer
    bool globalBull = (StringCompare(g_lastGOMGlobalDir, "BULL") == 0);
    bool globalBear = (StringCompare(g_lastGOMGlobalDir, "BEAR") == 0);
-   if(dir == 1 && !globalBull)
+   bool globalKnown = (StringLen(g_lastGOMGlobalDir) > 0 &&
+                       g_lastGOMGlobalStrength > 0 &&
+                       g_lastGOMGlobalStrength < 10000);  // sanity anti-overflow
+   if(globalKnown)
    {
-      reason = StringFormat("TF global=%s (force=%d%%) — BUY non autorisé",
-                            g_lastGOMGlobalDir, g_lastGOMGlobalStrength);
-      return false;
-   }
-   if(dir == -1 && !globalBear)
-   {
-      reason = StringFormat("TF global=%s (force=%d%%) — SELL non autorisé",
-                            g_lastGOMGlobalDir, g_lastGOMGlobalStrength);
-      return false;
+      if(dir == 1 && !globalBull)
+      {
+         reason = StringFormat("TF global=%s (force=%d%%) — BUY non autorisé",
+                               g_lastGOMGlobalDir, g_lastGOMGlobalStrength);
+         return false;
+      }
+      if(dir == -1 && !globalBear)
+      {
+         reason = StringFormat("TF global=%s (force=%d%%) — SELL non autorisé",
+                               g_lastGOMGlobalDir, g_lastGOMGlobalStrength);
+         return false;
+      }
    }
    return true;
 }
@@ -4012,10 +4399,11 @@ void TryExecuteMCPSignal(int idx)
    string sym  = g_mcpSignals[idx].symbol;
    bool isXau = (StringCompare(sym, "XAUUSD") == 0);
 
-   // TradeManager est multi-symbole : il exécute les ordres pipeline sur tous les symboles
-   // même si l'EA est attaché sur un chart différent (ex: EA sur ETHUSD exécute Crash 300)
+   // Pipeline source préliminaire — sera confirmé après re-fetch plus bas
+   bool isPipelineEarly = (StringCompare(g_mcpSignals[idx].source, "pipeline") == 0);
 
-   if(IsGlobalPositionLimitReached())
+   // Limite globale : bypassée pour les ordres pipeline (signal validé humainement)
+   if(!isPipelineEarly && IsGlobalPositionLimitReached())
    {
       if(isXau) Print(StringFormat("[TradeManager] 🚫 %s: Signal annulé — limite globale %d positions atteinte", sym, MaxGlobalPositions));
       return;
@@ -4073,6 +4461,7 @@ void TryExecuteMCPSignal(int idx)
    }
 
    // Sanity check: SL/TP doivent etre du bon cote du prix d'entree
+   // Pour pipeline : corriger automatiquement plutôt que tuer le signal
    double slChk = g_mcpSignals[idx].stopLoss;
    double tpChk = g_mcpSignals[idx].takeProfit1;
    if(slChk > 0 && tpChk > 0)
@@ -4081,12 +4470,60 @@ void TryExecuteMCPSignal(int idx)
       bool tpOk = (dir == 1) ? (tpChk > refPx) : (tpChk < refPx);
       if(!slOk || !tpOk)
       {
-         Print(StringFormat("[TradeManager] INVALID SL/TP for %s %s: price=%.5f SL=%.5f TP=%.5f — signal supprime",
-               (dir==1?"BUY":"SELL"), sym, refPx, slChk, tpChk));
-         g_mcpSignals[idx].active = false;
-         return;
+         if(isPipelineEarly)
+         {
+            // Pipeline : auto-correction SL/TP invalides (swap si inversés)
+            double atrFix = slChk > 0 ? MathAbs(refPx - slChk) : MathAbs(tpChk - refPx) * 0.5;
+            if(atrFix <= 0) atrFix = refPx * 0.001;
+            int dgFix = (int)SymbolInfoInteger(sym, SYMBOL_DIGITS);
+            slChk = NormalizeDouble((dir == 1) ? refPx - atrFix : refPx + atrFix, dgFix);
+            tpChk = NormalizeDouble((dir == 1) ? refPx + atrFix * 1.5 : refPx - atrFix * 1.5, dgFix);
+            g_mcpSignals[idx].stopLoss    = slChk;
+            g_mcpSignals[idx].takeProfit1 = tpChk;
+            Print(StringFormat("[TradeManager] 🔧 Pipeline %s %s SL/TP corrigés auto: price=%.5f SL=%.5f TP=%.5f",
+                  (dir==1?"BUY":"SELL"), sym, refPx, slChk, tpChk));
+         }
+         else
+         {
+            Print(StringFormat("[TradeManager] INVALID SL/TP for %s %s: price=%.5f SL=%.5f TP=%.5f — signal supprime",
+                  (dir==1?"BUY":"SELL"), sym, refPx, slChk, tpChk));
+            g_mcpSignals[idx].active = false;
+            return;
+         }
       }
    }
+
+   // ── Re-fetch source depuis serveur pour capter un upgrade gom_tv_sync → pipeline ──
+   // Le pipeline peut poster son ordre APRÈS que le poll a queué un signal gom_tv_sync.
+   // On re-lit le source HTTP juste avant d'appliquer les guards.
+   if(StringCompare(g_mcpSignals[idx].source, "pipeline") != 0)
+   {
+      string reUrl = StringFormat("http://127.0.0.1:8000/pending-order?symbol=%s&peek=true", sym);
+      char reReq[], reResp[];
+      string reHdr;
+      int reSz = ArraySize(reResp);
+      if(WebRequest("GET", reUrl, "Content-Type: application/json\r\n", 5000, reReq, reResp, reHdr) > 0)
+      {
+         string reBody = CharArrayToString(reResp);
+         int reObjPos  = StringFind(reBody, "\"order\":{");
+         if(reObjPos >= 0)
+         {
+            string reOrderBody = StringSubstr(reBody, reObjPos);
+            string freshSource = JsonGetString(reOrderBody, "source");
+            if(StringLen(freshSource) > 0 && freshSource != g_mcpSignals[idx].source)
+            {
+               Print(StringFormat("[TradeManager] 🔄 %s: source mis à jour %s → %s",
+                     sym, g_mcpSignals[idx].source, freshSource));
+               g_mcpSignals[idx].source = freshSource;
+            }
+         }
+      }
+   }
+
+   // ── Pipeline bypass : ordres pipeline exécutent SANS aucun guard ──
+   bool isPipelineSource = (StringCompare(g_mcpSignals[idx].source, "pipeline") == 0);
+   if(isPipelineSource)
+      Print(StringFormat("[TradeManager] ✅ %s: source=pipeline — BYPASS all guards", sym));
 
    // Filtre consolidation (désactivable pour signaux bridge)
    int sIdx = FindState(sym);
@@ -4095,15 +4532,14 @@ void TryExecuteMCPSignal(int idx)
       ScanAllPositions();
       sIdx = FindState(sym);
    }
-   if(!MCPBypassConsolidation && sIdx >= 0 && IsConsolidating(sIdx))
+   if(!isPipelineSource && !MCPBypassConsolidation && sIdx >= 0 && IsConsolidating(sIdx))
    {
       PrintOnce(StringFormat("[TradeManager] 🔶 Signal MCP %s bloqué — consolidation élevée", sym), 120);
       return;
    }
 
-   // Filtre biais TA : le signal MCP est autorisé SAUF si un biais TA récent dit l'inverse
-   // avec forte confiance (>= 0.70) — le signal MCP a priorité si confiance TA faible
-   if(RequireSignalAlign)
+   // Filtre biais TA (skip pour pipeline)
+   if(!isPipelineSource && RequireSignalAlign)
    {
       double conf = 0.5;
       string bias = GetBiasForSymbol(sym, conf);
@@ -4119,8 +4555,8 @@ void TryExecuteMCPSignal(int idx)
       }
    }
 
-   // Filtre TF global + cohérence — skip pour Boom/Crash (GOM du chart courant non pertinent)
-   if(!IsBoomOrCrashSymbol(sym))
+   // Filtre TF global + cohérence (skip pour pipeline et Boom/Crash)
+   if(!isPipelineSource && !IsBoomOrCrashSymbol(sym))
    {
       string globalReason;
       if(!CheckGlobalDirAndCoherence(dir, globalReason))
@@ -4131,12 +4567,20 @@ void TryExecuteMCPSignal(int idx)
       }
    }
 
-   // ── GUARD OB : attendre que le prix soit à l'OB entry — skip pour Boom/Crash ──
-   if(!IsBoomOrCrashSymbol(sym) && !IsPriceAtOBEntry(dir)) return;
+   // ── GUARD BB — bloquer si BB contre-tendance (skip pipeline) ──
+   if(!isPipelineSource && IsBBCounterTrend(dir))
+   {
+      PrintOnce(StringFormat("[TradeManager] 🚫 MCP %s %s bloqué — BB contre-tendance (attendre pullback OB ou BB haussier)",
+            sym, (dir==1?"BUY":"SELL")), 60);
+      return;
+   }
 
-   // ── GUARD OB : bloquer si un OB opposé barre la route — skip pour Boom/Crash ──
+   // ── GUARD OB (skip pour pipeline et Boom/Crash) ──
+   if(!isPipelineSource && !IsBoomOrCrashSymbol(sym) && !IsPriceAtOBEntry(dir)) return;
+
+   // ── GUARD OB route (skip pour pipeline et Boom/Crash) ──
    string obBlockReason = "";
-   if(!IsBoomOrCrashSymbol(sym) && IsOBBlockingPath(dir, obBlockReason)) return;
+   if(!isPipelineSource && !IsBoomOrCrashSymbol(sym) && IsOBBlockingPath(dir, obBlockReason)) return;
 
    // Vérifier STOPS_LEVEL broker
    double pt       = SymbolInfoDouble(sym, SYMBOL_POINT);
@@ -4389,6 +4833,7 @@ void PollGOMScalpVerdict()
    g_lastKolaBuy  = JsonGetDouble(body, "kola_buy");
    g_lastKolaSell = JsonGetDouble(body, "kola_sell");
    g_lastBBUp     = JsonGetDouble(body, "bb_up");
+   g_lastBBMid    = JsonGetDouble(body, "bb_mid");
    g_lastBBDn     = JsonGetDouble(body, "bb_dn");
    g_setupBuyProb  = JsonGetDouble(body, "setup_buy_prob");
    g_setupSellProb = JsonGetDouble(body, "setup_sell_prob");
@@ -4406,6 +4851,17 @@ void PollGOMScalpVerdict()
    if(gCVD     > -99999) g_ghostCVD     = gCVD;
    if(gBuyPct  >= 0)     g_ghostBuyPct  = gBuyPct;
    if(gCompass >= 0)     g_ghostCompass = gCompass;
+
+   // Order Blocks confirmés depuis Pine
+   double obBT = JsonGetDouble(body, "ob_bull_top", 0);
+   double obBB = JsonGetDouble(body, "ob_bull_bot", 0);
+   double obRT = JsonGetDouble(body, "ob_bear_top", 0);
+   double obRB = JsonGetDouble(body, "ob_bear_bot", 0);
+   if(obBT > 0) g_obBullTop = obBT;
+   if(obBB > 0) g_obBullBot = obBB;
+   if(obRT > 0) g_obBearTop = obRT;
+   if(obRB > 0) g_obBearBot = obRB;
+
    if(g_setupValidProb > 1.0) g_setupValidProb /= 100.0;
    if(g_predHitRate > 1.0) g_predHitRate /= 100.0;
 
@@ -4669,18 +5125,22 @@ void ComputeAutoSLTPPrices(const string sym, const int dir, const double lot,
    {
       // ── Priorité 2 : niveaux KOLA comme cible ──
       double kolaOpposite = (dir == 1) ? g_lastKolaSell : g_lastKolaBuy;
-      if(kolaOpposite > 0 && MathAbs(entryPx - kolaOpposite) > atrVal * 0.5)
+      // Sanity : KOLA valide = dans ±30% du prix courant et non nul
+      bool kolaValid = (kolaOpposite > 0 &&
+                        MathAbs(entryPx - kolaOpposite) > atrVal * 0.5 &&
+                        MathAbs(entryPx - kolaOpposite) / entryPx < 0.30);
+      if(kolaValid)
          tpDist = MathAbs(entryPx - kolaOpposite);
       else
          tpDist = atrVal * 3.0;  // TP = 3× ATR minimum
 
-      // SL = 1.5× ATR sous/sur l'entrée — respect de la structure
-      slDist = atrVal * 1.5;
+      // SL = 0.8× ATR — serré pour petit compte
+      slDist = atrVal * 0.8;
    }
 
-   // ── Sécurités minimales ──
-   double minSL = atrVal * 1.0;   // SL jamais inférieur à 1× ATR
-   double minTP = atrVal * 1.5;   // TP jamais inférieur à 1.5× ATR
+   // ── Sécurités minimales (petit compte : SL serré) ──
+   double minSL = atrVal * 0.5;   // SL jamais inférieur à 0.5× ATR
+   double minTP = atrVal * 1.0;   // TP jamais inférieur à 1× ATR
    slDist = MathMax(slDist, minSL);
    tpDist = MathMax(tpDist, minTP);
    // R/R minimum 1:1.5
@@ -4932,6 +5392,13 @@ void CheckGOMAutoEntry()
       return;
    }
 
+   if(IsBBCounterTrend(dir))
+   {
+      PrintOnce(StringFormat("[GOM-Auto] %s bloque — BB contre-tendance (attendre pullback OB ou BB haussier)",
+            sym), 35);
+      return;
+   }
+
    if(!IsGOMPathAlignedWithDir(dir))
    {
       PrintOnce(StringFormat("[GOM-Auto] %s bloque — trajectoire opposee (pred_net=%d)",
@@ -5017,12 +5484,14 @@ void CheckGOMAutoEntry()
    string obReason = "";
    if(IsOBBlockingPath(dir, obReason)) return;
 
-   // ── GHOST OrderFlow : vetos si CVD et sentiment contradisent la direction ──
-   // BUY : CVD doit être positif (buyers dominent la session) OU sentiment BUY > 40%
-   // SELL : CVD doit être négatif (sellers dominent) OU sentiment BUY < 60%
-   if(g_ghostCVD != 0.0 || g_ghostBuyPct != 50.0)
+   // ── GHOST OrderFlow : vetos si CVD, sentiment ET compass contradisent la direction ──
+   if(g_ghostCVD != 0.0 || g_ghostBuyPct != 50.0 || g_ghostCompass > 0)
    {
       bool ghostOk = true;
+      int cmpOct = (int)((g_ghostCompass + 22.5) / 45.0) % 8;
+      bool compassBullish = (cmpOct == 0 || cmpOct == 1 || cmpOct == 2 || cmpOct == 7);
+      bool compassBearish = (cmpOct == 4 || cmpOct == 5 || cmpOct == 6 || cmpOct == 3);
+
       if(dir == 1 && g_ghostCVD < 0 && g_ghostBuyPct < 40.0)
       {
          PrintOnce(StringFormat("[GHOST] BUY bloqué — CVD=%.0f baissier + sentiment=%.0f%% faible",
@@ -5033,6 +5502,19 @@ void CheckGOMAutoEntry()
       {
          PrintOnce(StringFormat("[GHOST] SELL bloqué — CVD=%.0f haussier + sentiment=%.0f%% fort",
                g_ghostCVD, g_ghostBuyPct), 30);
+         ghostOk = false;
+      }
+      // Compass veto : momentum opposé à la direction demandée
+      if(dir == 1 && compassBearish && g_ghostBuyPct < 50.0)
+      {
+         PrintOnce(StringFormat("[GHOST] BUY bloqué — Compass bearish (%s %.0f°) + sentiment=%.0f%%",
+               (cmpOct==3?"NW":cmpOct==4?"W":cmpOct==5?"SW":"S"), g_ghostCompass, g_ghostBuyPct), 30);
+         ghostOk = false;
+      }
+      if(dir == -1 && compassBullish && g_ghostBuyPct > 50.0)
+      {
+         PrintOnce(StringFormat("[GHOST] SELL bloqué — Compass bullish (%s %.0f°) + sentiment=%.0f%%",
+               (cmpOct==0?"E":cmpOct==1?"NE":cmpOct==2?"N":"SE"), g_ghostCompass, g_ghostBuyPct), 30);
          ghostOk = false;
       }
       if(!ghostOk) return;
@@ -5129,6 +5611,12 @@ void CheckGOMReEntry()
       if(IsGOMCorrectionZone(dir))
       {
          PrintOnce(StringFormat("[GOM-ReEntry] %s re-entrée bloquée — zone correction", posSym), 60);
+         continue;
+      }
+
+      if(IsBBCounterTrend(dir))
+      {
+         PrintOnce(StringFormat("[GOM-ReEntry] %s re-entrée bloquée — BB contre-tendance", posSym), 60);
          continue;
       }
 
@@ -5535,6 +6023,149 @@ void DrawDashCell(string name, int x, int y, int cellW, int cellH,
    ObjectSetInteger(0, txtName, OBJPROP_YDISTANCE, y - 4);   // légèrement au-dessus du bord bas de la cellule
    ObjectSetInteger(0, txtName, OBJPROP_FONTSIZE,  FontSize);
    ObjectSetInteger(0, txtName, OBJPROP_COLOR,     txtColor);
+}
+
+//+------------------------------------------------------------------+
+//| COMPASS VISUEL — Dessin boussole moneyflow dans le dashboard     |
+//+------------------------------------------------------------------+
+void DrawCompassVisual(int cx, int cy, int radius)
+{
+   string pfx = "TM_DASH_CMP_";
+   int compassOct = (int)((g_ghostCompass + 22.5) / 45.0) % 8;
+   bool isBull = (compassOct == 0 || compassOct == 1 || compassOct == 2 || compassOct == 7);
+   color activeClr = isBull ? ColorBuy : ColorSell;
+
+   // Fond cercle (rectangle arrondi simulé)
+   string bgName = pfx + "BG";
+   if(ObjectFind(0, bgName) < 0)
+   {
+      ObjectCreate(0, bgName, OBJ_RECTANGLE_LABEL, 0, 0, 0);
+      ObjectSetInteger(0, bgName, OBJPROP_CORNER, CORNER_LEFT_LOWER);
+      ObjectSetInteger(0, bgName, OBJPROP_BACK, false);
+      ObjectSetInteger(0, bgName, OBJPROP_SELECTABLE, false);
+   }
+   int boxSize = radius * 2 + 12;
+   ObjectSetInteger(0, bgName, OBJPROP_XDISTANCE, cx - radius - 6);
+   ObjectSetInteger(0, bgName, OBJPROP_YDISTANCE, cy + radius + 6);
+   ObjectSetInteger(0, bgName, OBJPROP_XSIZE, boxSize);
+   ObjectSetInteger(0, bgName, OBJPROP_YSIZE, boxSize);
+   ObjectSetInteger(0, bgName, OBJPROP_BGCOLOR, 0x1A1A2E);
+   ObjectSetInteger(0, bgName, OBJPROP_BORDER_TYPE, BORDER_FLAT);
+   ObjectSetInteger(0, bgName, OBJPROP_BORDER_COLOR, ColorBorder);
+
+   // Labels cardinaux (N/S/E/W + diagonales)
+   static const string dirs[8] = {"E","NE","N","NW","W","SW","S","SE"};
+   // Positions relatives sur cercle (cos/sin * radius, Y inversé car LOWER)
+   static const double cosA[8] = { 1.0,  0.707, 0.0, -0.707, -1.0, -0.707,  0.0,  0.707};
+   static const double sinA[8] = { 0.0,  0.707, 1.0,  0.707,  0.0, -0.707, -1.0, -0.707};
+
+   for(int d = 0; d < 8; d++)
+   {
+      string lName = pfx + "D" + IntegerToString(d);
+      if(ObjectFind(0, lName) < 0)
+      {
+         ObjectCreate(0, lName, OBJ_LABEL, 0, 0, 0);
+         ObjectSetInteger(0, lName, OBJPROP_CORNER, CORNER_LEFT_LOWER);
+         ObjectSetString(0, lName, OBJPROP_FONT, "Consolas");
+         ObjectSetInteger(0, lName, OBJPROP_ANCHOR, ANCHOR_CENTER);
+         ObjectSetInteger(0, lName, OBJPROP_SELECTABLE, false);
+         ObjectSetInteger(0, lName, OBJPROP_BACK, false);
+      }
+      int lx = cx + (int)(cosA[d] * (radius - 4));
+      int ly = cy - (int)(sinA[d] * (radius - 4));
+      bool active = (d == compassOct);
+      ObjectSetInteger(0, lName, OBJPROP_XDISTANCE, lx);
+      ObjectSetInteger(0, lName, OBJPROP_YDISTANCE, ly);
+      ObjectSetString(0, lName, OBJPROP_TEXT, dirs[d]);
+      ObjectSetInteger(0, lName, OBJPROP_FONTSIZE, active ? 10 : 7);
+      ObjectSetInteger(0, lName, OBJPROP_COLOR, active ? activeClr : 0x606060);
+   }
+
+   // Aiguille : point central + extrémité (label Unicode ●→►)
+   string centerName = pfx + "CTR";
+   if(ObjectFind(0, centerName) < 0)
+   {
+      ObjectCreate(0, centerName, OBJ_LABEL, 0, 0, 0);
+      ObjectSetInteger(0, centerName, OBJPROP_CORNER, CORNER_LEFT_LOWER);
+      ObjectSetString(0, centerName, OBJPROP_FONT, "Consolas");
+      ObjectSetInteger(0, centerName, OBJPROP_ANCHOR, ANCHOR_CENTER);
+      ObjectSetInteger(0, centerName, OBJPROP_SELECTABLE, false);
+   }
+   ObjectSetInteger(0, centerName, OBJPROP_XDISTANCE, cx);
+   ObjectSetInteger(0, centerName, OBJPROP_YDISTANCE, cy);
+   ObjectSetString(0, centerName, OBJPROP_TEXT, "+");
+   ObjectSetInteger(0, centerName, OBJPROP_FONTSIZE, 10);
+   ObjectSetInteger(0, centerName, OBJPROP_COLOR, 0xB0B0B0);
+
+   // Pointe de l'aiguille (à 70% du rayon dans la direction)
+   string needleName = pfx + "NDL";
+   if(ObjectFind(0, needleName) < 0)
+   {
+      ObjectCreate(0, needleName, OBJ_LABEL, 0, 0, 0);
+      ObjectSetInteger(0, needleName, OBJPROP_CORNER, CORNER_LEFT_LOWER);
+      ObjectSetString(0, needleName, OBJPROP_FONT, "Wingdings");
+      ObjectSetInteger(0, needleName, OBJPROP_ANCHOR, ANCHOR_CENTER);
+      ObjectSetInteger(0, needleName, OBJPROP_SELECTABLE, false);
+   }
+   double rad = g_ghostCompass * M_PI / 180.0;
+   int nx = cx + (int)(MathCos(rad) * radius * 0.65);
+   int ny = cy - (int)(MathSin(rad) * radius * 0.65);
+   ObjectSetInteger(0, needleName, OBJPROP_XDISTANCE, nx);
+   ObjectSetInteger(0, needleName, OBJPROP_YDISTANCE, ny);
+   ObjectSetString(0, needleName, OBJPROP_TEXT, CharToString(108));
+   ObjectSetInteger(0, needleName, OBJPROP_FONTSIZE, 14);
+   ObjectSetInteger(0, needleName, OBJPROP_COLOR, activeClr);
+
+   // Titre au-dessus : "MONEYFLOW COMPASS"
+   string hdrName = pfx + "HDR";
+   if(ObjectFind(0, hdrName) < 0)
+   {
+      ObjectCreate(0, hdrName, OBJ_LABEL, 0, 0, 0);
+      ObjectSetInteger(0, hdrName, OBJPROP_CORNER, CORNER_LEFT_LOWER);
+      ObjectSetString(0, hdrName, OBJPROP_FONT, "Consolas");
+      ObjectSetInteger(0, hdrName, OBJPROP_ANCHOR, ANCHOR_CENTER);
+      ObjectSetInteger(0, hdrName, OBJPROP_SELECTABLE, false);
+   }
+   ObjectSetInteger(0, hdrName, OBJPROP_XDISTANCE, cx);
+   ObjectSetInteger(0, hdrName, OBJPROP_YDISTANCE, cy - radius - 14);
+   ObjectSetString(0, hdrName, OBJPROP_TEXT, "MONEYFLOW COMPASS");
+   ObjectSetInteger(0, hdrName, OBJPROP_FONTSIZE, 8);
+   ObjectSetInteger(0, hdrName, OBJPROP_COLOR, 0xB0B0B0);
+
+   // Valeur angle + direction
+   string titleName = pfx + "TTL";
+   if(ObjectFind(0, titleName) < 0)
+   {
+      ObjectCreate(0, titleName, OBJ_LABEL, 0, 0, 0);
+      ObjectSetInteger(0, titleName, OBJPROP_CORNER, CORNER_LEFT_LOWER);
+      ObjectSetString(0, titleName, OBJPROP_FONT, "Consolas");
+      ObjectSetInteger(0, titleName, OBJPROP_ANCHOR, ANCHOR_CENTER);
+      ObjectSetInteger(0, titleName, OBJPROP_SELECTABLE, false);
+   }
+   ObjectSetInteger(0, titleName, OBJPROP_XDISTANCE, cx);
+   ObjectSetInteger(0, titleName, OBJPROP_YDISTANCE, cy + radius + 14);
+   string valTxt = dirs[compassOct] + " " + DoubleToString(g_ghostCompass, 0) + "\xB0";
+   ObjectSetString(0, titleName, OBJPROP_TEXT, valTxt);
+   ObjectSetInteger(0, titleName, OBJPROP_FONTSIZE, 9);
+   ObjectSetInteger(0, titleName, OBJPROP_COLOR, activeClr);
+
+   // Label explicatif : "FLUX ACHETEUR" / "FLUX VENDEUR" / "NEUTRE"
+   string explName = pfx + "EXPL";
+   if(ObjectFind(0, explName) < 0)
+   {
+      ObjectCreate(0, explName, OBJ_LABEL, 0, 0, 0);
+      ObjectSetInteger(0, explName, OBJPROP_CORNER, CORNER_LEFT_LOWER);
+      ObjectSetString(0, explName, OBJPROP_FONT, "Consolas");
+      ObjectSetInteger(0, explName, OBJPROP_ANCHOR, ANCHOR_CENTER);
+      ObjectSetInteger(0, explName, OBJPROP_SELECTABLE, false);
+   }
+   ObjectSetInteger(0, explName, OBJPROP_XDISTANCE, cx);
+   ObjectSetInteger(0, explName, OBJPROP_YDISTANCE, cy + radius + 28);
+   bool isBear = (compassOct == 3 || compassOct == 4 || compassOct == 5 || compassOct == 6);
+   string explTxt = isBull ? "FLUX ACHETEUR" : isBear ? "FLUX VENDEUR" : "NEUTRE";
+   ObjectSetString(0, explName, OBJPROP_TEXT, explTxt);
+   ObjectSetInteger(0, explName, OBJPROP_FONTSIZE, 8);
+   ObjectSetInteger(0, explName, OBJPROP_COLOR, isBull ? ColorBuy : isBear ? ColorSell : ColorNeutral);
 }
 
 // Compatibilité — ancien DrawDashRow maintenu mais ne dessine plus rien
@@ -6151,6 +6782,12 @@ void DisplayCompleteGOMDashboard(const GOMData &gom)
    string ghostCnf = IntegerToString(ghostBull) + "B/" + IntegerToString(ghostBear) + "S";
    color cGhostCnf = (ghostBull >= 3) ? ColorBuy : (ghostBear >= 3) ? ColorSell : ColorNeutral;
    DrawDashCell("G4_CNF", xCur, y3, cellW * 2, cellH, "GHOST " + ghostCnf, cGhostCnf, cTxt);
+
+   // ── Compass visuel (milieu-droit du dashboard) ──
+   int compassRadius = (cellH * 2) + 4;
+   int compassCX = (chartW * 3) / 4;
+   int compassCY = y3 - cellH / 2;
+   DrawCompassVisual(compassCX, compassCY, compassRadius);
 
    #undef TF_COLOR
 
