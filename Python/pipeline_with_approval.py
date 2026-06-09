@@ -18,7 +18,7 @@ Usage:
   python pipeline_with_approval.py --auto           # valider tout auto (sans attente)
 """
 
-import sys, io, os
+import sys, io, os, subprocess
 if sys.platform == "win32":
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8")
@@ -236,11 +236,68 @@ def scan_top_n_with_prices(top_n: int) -> List[Dict]:
 # ---------------------------------------------------------------------------
 def run_trading_agents(symbol: str, direction: str, trade_date: str) -> Optional[Dict]:
     """
-    Appelle run_quick() du bridge TradingAgents.
-    Retourne dict avec entry, sl, tp, lot, rapport_path ou None si échec.
+    Appelle run_quick() du bridge TradingAgents via subprocess isolé.
+    Évite numpy import error en lançant TradingAgents dans son venv.
+
+    Note: TradingAgents a un problème numpy quand importé directement.
+    Subprocess isolé résout le problème en utilisant le venv séparé.
     """
     try:
-        # Charger .env AVANT d'importer tradbot_bridge
+        ta_repo = os.getenv("AI_TRADINGAGENTS_REPO_PATH",
+                            r"D:\Dev\Depot Github\TradingAgents-main")
+        venv_py = Path(ta_repo) / ".venv" / "Scripts" / "python.exe"
+
+        if not venv_py.exists():
+            log.warning("  [TA] Venv TradingAgents not found: %s", venv_py)
+            return None
+
+        # Créer script temporaire qui appelle ta_worker et retourne JSON
+        ta_script = f"""
+import sys
+sys.path.insert(0, r'{_HERE}')
+from ta_worker import run_quick, _normalize_rating, _extract_order_params
+import json
+
+try:
+    result = run_quick('{symbol}', '{trade_date}', analysts=['market', 'social'])
+    output = {{'ok': True, 'result': result}}
+except Exception as e:
+    output = {{'ok': False, 'error': str(e)}}
+
+print(json.dumps(output))
+"""
+
+        # Lancer via venv Python isolé
+        result = subprocess.run(
+            [str(venv_py), "-c", ta_script],
+            capture_output=True,
+            text=True,
+            timeout=60
+        )
+
+        if result.returncode != 0:
+            log.warning("  [TA] Erreur subprocess: %s", result.stderr[:200])
+            return None
+
+        try:
+            output = json.loads(result.stdout)
+            if not output.get("ok"):
+                log.warning("  [TA] TradingAgents error: %s", output.get("error", "Unknown")[:200])
+                return None
+            return output.get("result")
+        except json.JSONDecodeError:
+            log.warning("  [TA] JSON parse error from subprocess")
+            return None
+
+    except subprocess.TimeoutExpired:
+        log.warning("  [TA] Subprocess timeout (>60s)")
+        return None
+    except Exception as e:
+        log.warning("  [TA] Subprocess error: %s", str(e)[:200])
+        return None
+
+    # Fallback: Try direct import (may fail with numpy error, but try anyway)
+    try:
         env_file = _ROOT / ".env"
         if env_file.exists():
             for line in env_file.read_text(encoding="utf-8").splitlines():
@@ -248,30 +305,15 @@ def run_trading_agents(symbol: str, direction: str, trade_date: str) -> Optional
                     k, _, v = line.partition("=")
                     os.environ.setdefault(k.strip(), v.strip())
 
-        # Ajouter le venv TradingAgents au path — TEMPORAIRE pour imports
-        ta_repo = os.getenv("AI_TRADINGAGENTS_REPO_PATH",
-                            r"D:\Dev\Depot Github\TradingAgents-main")
         if str(_HERE) not in sys.path:
             sys.path.insert(0, str(_HERE))
 
-        _ta_in_path = ta_repo in sys.path
-        if not _ta_in_path:
-            sys.path.insert(0, ta_repo)
+        from tradbot_bridge import run_quick, _normalize_rating, _extract_order_params
+    except (ImportError, Exception):
+        return None
 
-        try:
-            # 🔧 Import tradbot_bridge (avec ta_repo temporairement en path)
-            from tradbot_bridge import (
-                run_quick, _normalize_rating, _extract_order_params,
-                compute_signals, compute_entry_levels, compute_lot_sizes,
-                save_report_word, _mt5_to_yfinance, push_pending_order,
-            )
-        finally:
-            # 🔧 Retirer ta_repo du path APRÈS imports pour éviter numpy local
-            if not _ta_in_path and ta_repo in sys.path:
-                sys.path.remove(ta_repo)
-
-        # Nettoyer préfixe TV avant conversion (DERIV:BOOM_1000_INDEX → Boom 1000 Index)
-        clean_sym = _tv_to_mt5(symbol)  # ex: "Boom 1000 Index"
+    # Nettoyer préfixe TV avant conversion (DERIV:BOOM_1000_INDEX → Boom 1000 Index)
+    clean_sym = _tv_to_mt5(symbol)  # ex: "Boom 1000 Index"
 
         # Déterminer vendor selon catégorie
         _clean_up = clean_sym.upper().replace(" ", "")
