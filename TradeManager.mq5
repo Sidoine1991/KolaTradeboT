@@ -4560,9 +4560,15 @@ void TryExecuteMCPSignal(int idx)
 {
    string sym  = g_mcpSignals[idx].symbol;
    bool isXau = (StringCompare(sym, "XAUUSD") == 0);
+   int dir = g_mcpSignals[idx].direction;  // 1=BUY, -1=SELL
 
    // Pipeline source préliminaire — sera confirmé après re-fetch plus bas
    bool isPipelineEarly = (StringCompare(g_mcpSignals[idx].source, "pipeline") == 0);
+
+   // LOG pour diagnostiquer: afficher vnum et direction
+   if(isXau) Print(StringFormat("[MCP-Execute] %s %s: vnum=%d (BEAR=%s, BULL=%s) UseGOMScalp=%d",
+                                sym, (dir==1?"BUY":"SELL"), g_lastGOMVerdictNum,
+                                (g_lastGOMVerdictNum<0?"YES":"NO"), (g_lastGOMVerdictNum>0?"YES":"NO"), UseGOMScalp));
 
    // 🚫 BLOQUER si GOM=WAIT — aucun entry quel que soit la source
    if(UseGOMScalp && IsGOMVerdictWait())
@@ -4574,7 +4580,6 @@ void TryExecuteMCPSignal(int idx)
    // 🚫 ANTI-CORRECTION: Bloquer BUY en BEAR ou SELL en BULL — évite trader les corrections
    if(UseGOMScalp && g_lastGOMVerdictNum != 0)  // vnum != 0 = direction établie
    {
-      int dir = g_mcpSignals[idx].direction;  // 1=BUY, -1=SELL
       bool isBull = (g_lastGOMVerdictNum > 0);  // vnum > 0 = tendance BULL
       bool isBear = (g_lastGOMVerdictNum < 0);  // vnum < 0 = tendance BEAR
 
@@ -4582,8 +4587,8 @@ void TryExecuteMCPSignal(int idx)
       {
          string dir_txt = (dir == 1) ? "BUY" : "SELL";
          string bias_txt = isBear ? "BEAR" : "BULL";
-         PrintOnce(StringFormat("[MCP-Execute] 🚫 %s %s bloqué — OB %s actif, marché en correction (vnum=%d)",
-                                sym, dir_txt, bias_txt, g_lastGOMVerdictNum), 60);
+         Print(StringFormat("[MCP-Execute] 🚫 %s %s bloqué — OB %s actif, marché en correction (vnum=%d)",
+                                sym, dir_txt, bias_txt, g_lastGOMVerdictNum));
          g_mcpSignals[idx].failCount++;
          return;
       }
