@@ -631,6 +631,41 @@ int OnInit()
    return INIT_SUCCEEDED;
 }
 
+//+------------------------------------------------------------------+
+//| 🆕 Surveillance GOM + Fermeture auto si WAIT                      |
+//+------------------------------------------------------------------+
+void MonitorGOMWaitClosePositions()
+{
+   if(!IsGOMVerdictWait()) return;  // Rien à faire si GOM n'est pas WAIT
+
+   // Parcourir toutes les positions ouvertes
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      if(!PositionSelectByTicket(PositionGetTicket(i))) continue;
+
+      string posSymbol = PositionGetString(POSITION_SYMBOL);
+      if(posSymbol != _Symbol) continue;  // Ignorer autres symboles
+
+      ulong ticket = PositionGetTicket(i);
+      double entry = PositionGetDouble(POSITION_PRICE_OPEN);
+      double pnl = PositionGetDouble(POSITION_PROFIT);
+      int dir = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY) ? 1 : -1;
+
+      // Fermer la position avec message explicite
+      CTrade tradeClose;
+      if(tradeClose.PositionClose(ticket, 50))
+      {
+         Print(StringFormat("[GOM-WAIT-CLOSE] ✅ %s fermée | entry=%.5f pnl=%.2f | verdict=WAIT (vnum=%d)",
+               _Symbol, entry, pnl, g_lastGOMVerdictNum));
+      }
+      else
+      {
+         Print(StringFormat("[GOM-WAIT-CLOSE] ❌ %s erreur fermeture | ticket=%d | %s",
+               _Symbol, ticket, tradeClose.ResultRetcodeDescription()));
+      }
+   }
+}
+
 void OnDeinit(const int reason)
 {
    EventKillTimer();
@@ -699,6 +734,7 @@ void OnTick()
    if(UseGOMScalp)           PollGOMScalpVerdict();
    if(UseGOMScalp)           CheckGOMAutoEntry();
    if(UseGOMScalp)           CheckGOMReEntry();
+   if(UseGOMScalp)           MonitorGOMWaitClosePositions();  // 🆕 Fermer si GOM passe à WAIT
    if(UseTVSetupLimit)       ManageTVSetupLimitOrder();
    DrawEntryLevels();
    DrawBollingerCurves();    // courbes BB — redessinées toutes les 60s ou sur rapport TA
@@ -2047,6 +2083,13 @@ bool CanDuplicateNowWithGOM(const string sym, const int dir, const ulong ticket,
    string baseWhy;
    if(!CanDuplicateOnSymbol(sym, baseWhy)) { why = baseWhy; return false; }
 
+   // GOM=WAIT — bloquer toute duplication peu importe DuplicateRequireGoodPerfect
+   if(IsGOMVerdictWait())
+   {
+      why = StringFormat("GOM=WAIT (vnum=%d) — duplication interdite", g_lastGOMVerdictNum);
+      return false;
+   }
+
    if(!HasDupProfitStable(ticket))
    {
       why = StringFormat("profit $%.2f pas stable %ds (min %ds sans rechute)",
@@ -2791,6 +2834,14 @@ void TryReEntryOnEMA(int idx)
    string sym = g_states[idx].symbol;
    int    dir = g_states[idx].direction;
 
+   // GOM=WAIT — bloquer toute re-entrée EMA/BB au marché
+   if(UseGOMScalp && IsGOMVerdictWait())
+   {
+      PrintOnce(StringFormat("[TM-EMA] %s re-entrée bloquée — GOM=WAIT (vnum=%d)",
+            sym, g_lastGOMVerdictNum), 60);
+      return;
+   }
+
    // 🔒 GARDE PIPELINE ONLY MODE — exception BB Mid en GOM PERFECT
    bool isGOMPerfectPre = (g_lastGOMVerdictNum == 3 || g_lastGOMVerdictNum == -3);
    bool bbDataReady     = (g_lastBBMid > 0 && g_lastBBUp > 0 && g_lastBBDn > 0);
@@ -2831,21 +2882,41 @@ void TryReEntryOnEMA(int idx)
          return;
       }
 
-      // Règle anti-correction : BB Mid doit être dans la même direction que le signal
-      // PERFECT BUY exige BB haussier (SMA20 montante) OU prix dans l'OB haussier
-      // PERFECT SELL exige BB baissier (SMA20 descendante) OU prix dans l'OB baissier
+      // Règle anti-correction : pente BB Mid nettement dans la direction du signal
+      // Méthode : régression linéaire sur 10 barres — slope > seuil = trending
+      // Seuil = 0.003% du prix par barre (élimine range et corrections faibles)
       int hBBSlope = iBands(sym, PERIOD_CURRENT, 20, 0, 2.0, PRICE_CLOSE);
       bool bbAligned = false;
       if(hBBSlope != INVALID_HANDLE)
       {
          double bbMidSlope[];
          ArraySetAsSeries(bbMidSlope, true);
-         if(CopyBuffer(hBBSlope, 0, 0, 3, bbMidSlope) >= 3)
+         int nSlope = 10;
+         if(CopyBuffer(hBBSlope, 0, 0, nSlope, bbMidSlope) >= nSlope)
          {
-            bool bbRising  = (bbMidSlope[0] > bbMidSlope[1] && bbMidSlope[1] > bbMidSlope[2]);
-            bool bbFalling = (bbMidSlope[0] < bbMidSlope[1] && bbMidSlope[1] < bbMidSlope[2]);
-            if(dir == 1)  bbAligned = bbRising;
-            else          bbAligned = bbFalling;
+            // Régression linéaire simple : slope = (sum(x*y) - n*mx*my) / (sum(x²) - n*mx²)
+            // x = 0..n-1 (le plus récent = index 0, donc x croît vers le passé)
+            // Pour que slope positif = montée récente, on inverse : x[i] = (n-1-i)
+            double sumX=0, sumY=0, sumXX=0, sumXY=0;
+            for(int ki=0; ki<nSlope; ki++)
+            {
+               double xi = (double)(nSlope - 1 - ki);  // 0=passé, n-1=récent
+               double yi = bbMidSlope[ki];
+               sumX  += xi;
+               sumY  += yi;
+               sumXX += xi * xi;
+               sumXY += xi * yi;
+            }
+            double denom = (double)nSlope * sumXX - sumX * sumX;
+            double slopePerBar = (denom != 0) ? ((double)nSlope * sumXY - sumX * sumY) / denom : 0;
+            // Seuil : 0.003% du prix courant par barre
+            double refPxSlope  = (dir == 1) ? SymbolInfoDouble(sym, SYMBOL_BID)
+                                            : SymbolInfoDouble(sym, SYMBOL_ASK);
+            double slopeMin    = refPxSlope * 0.00003;  // 0.003% / barre
+            if(dir == 1)  bbAligned = (slopePerBar >  slopeMin);
+            else          bbAligned = (slopePerBar < -slopeMin);
+            PrintOnce(StringFormat("[TM-BB] %s pente BB Mid = %.6f/barre (seuil=%.6f) → %s",
+                  sym, slopePerBar, slopeMin, bbAligned ? "TREND OK" : "RANGE/CONTRE-TENDANCE"), 30);
          }
          IndicatorRelease(hBBSlope);
       }
@@ -3487,6 +3558,10 @@ bool DRV_EvaluateEntry(bool &isBuy, string &reason)
    isBuy  = DRV_IsBoom();
    reason = "";
    if(g_drvTradeTaken) { reason="1 trade/cycle déjà pris"; return false; }
+
+   // GOM=WAIT → bloquer tout ordre marché (Boom/Crash inclus)
+   if(UseGOMScalp && IsGOMVerdictWait())
+   { reason=StringFormat("GOM=WAIT (vnum=%d) — aucun trade marché", g_lastGOMVerdictNum); return false; }
 
    double atr = DRV_GetATR(1); if(atr<=0) { reason="ATR invalide"; return false; }
    int cycle  = DRV_GetCycle();
@@ -4525,6 +4600,14 @@ void TryExecuteMCPSignal(int idx)
    if(isPipelineSource)
       Print(StringFormat("[TradeManager] ✅ %s: source=pipeline — BYPASS all guards", sym));
 
+   // GOM=WAIT — bloquer ordres marché MCP (sauf pipeline validé humainement)
+   if(!isPipelineSource && IsGOMVerdictWait())
+   {
+      PrintOnce(StringFormat("[TradeManager] 🚫 MCP %s %s bloqué — GOM=WAIT (vnum=%d)",
+            sym, (dir==1?"BUY":"SELL"), g_lastGOMVerdictNum), 60);
+      return;
+   }
+
    // Filtre consolidation (désactivable pour signaux bridge)
    int sIdx = FindState(sym);
    if(sIdx < 0)
@@ -4767,7 +4850,19 @@ void PollGOMScalpVerdict()
    if(code != 200) return;
 
    string body = CharArrayToString(result, 0, WHOLE_ARRAY, CP_UTF8);
-   if(StringFind(body, "\"ok\":false") >= 0) return;
+   if(StringFind(body, "\"ok\":false") >= 0)
+   {
+      // Serveur signale données stales ou absentes → forcer WAIT pour éviter verdict stale
+      string staleVerdict = JsonGetString(body, "verdict");
+      if(StringLen(staleVerdict) == 0 || StringCompare(staleVerdict, "WAIT") == 0
+         || StringFind(body, "stale") >= 0 || StringFind(body, "Aucun") >= 0)
+      {
+         g_lastGOMVerdictNum = 0;
+         g_lastGOMVerdict    = "WAIT";
+         PrintOnce("[GOM-Poll] ok:false reçu → verdict forcé WAIT (données stales/absentes)", 60);
+      }
+      return;
+   }
 
    // Parser indicateurs GOM complets
    string verdict       = JsonGetString(body, "verdict");
@@ -5187,6 +5282,8 @@ bool ResolveGOMActionable(int &dir, int &effVnum, string &tag)
    tag = "";
 
    int v = g_lastGOMVerdictNum;
+   if(v == 0) return false;  // GOM=WAIT — aucun trade marché autorisé
+
    if(v == 2 || v == 3) { dir = 1; tag = g_lastGOMVerdict; return true; }
    if(v == -2 || v == -3) { dir = -1; tag = g_lastGOMVerdict; return true; }
 
