@@ -6942,13 +6942,13 @@ void DisplayCompleteGOMDashboard(const GOMData &gom)
    // ── Ligne haute — colonnes 1-7 : TF ──────────────────────────────────
    struct TFSlot { string label; string dir; int rsi; };
    TFSlot tfs[7];
-   tfs[0].label="M1";  tfs[0].dir=gom.tf_m1_dir;  tfs[0].rsi=gom.tf_m1_rsi;
-   tfs[1].label="M5";  tfs[1].dir=gom.tf_m5_dir;  tfs[1].rsi=gom.tf_m5_rsi;
-   tfs[2].label="M15"; tfs[2].dir=gom.tf_m15_dir; tfs[2].rsi=gom.tf_m15_rsi;
-   tfs[3].label="H1";  tfs[3].dir=gom.tf_h1_dir;  tfs[3].rsi=gom.tf_h1_rsi;
-   tfs[4].label="H4";  tfs[4].dir=gom.tf_h4_dir;  tfs[4].rsi=gom.tf_h4_rsi;
-   tfs[5].label="D1";  tfs[5].dir=gom.tf_d1_dir;  tfs[5].rsi=gom.tf_d1_rsi;
-   tfs[6].label="GLOB"; tfs[6].dir=gom.tf_global_dir; tfs[6].rsi=gom.tf_global_strength;
+   tfs[0].label="M1";  tfs[0].dir=gom.tf_m1_dir;  tfs[0].rsi=MathMin(MathMax(gom.tf_m1_rsi,0),100);
+   tfs[1].label="M5";  tfs[1].dir=gom.tf_m5_dir;  tfs[1].rsi=MathMin(MathMax(gom.tf_m5_rsi,0),100);
+   tfs[2].label="M15"; tfs[2].dir=gom.tf_m15_dir; tfs[2].rsi=MathMin(MathMax(gom.tf_m15_rsi,0),100);
+   tfs[3].label="H1";  tfs[3].dir=gom.tf_h1_dir;  tfs[3].rsi=MathMin(MathMax(gom.tf_h1_rsi,0),100);
+   tfs[4].label="H4";  tfs[4].dir=gom.tf_h4_dir;  tfs[4].rsi=MathMin(MathMax(gom.tf_h4_rsi,0),100);
+   tfs[5].label="D1";  tfs[5].dir=gom.tf_d1_dir;  tfs[5].rsi=MathMin(MathMax(gom.tf_d1_rsi,0),100);
+   tfs[6].label="GLOB"; tfs[6].dir=gom.tf_global_dir; tfs[6].rsi=MathMin(MathMax(gom.tf_global_strength,0),100);
 
    for(int i = 0; i < 7; i++)
    {
