@@ -2291,7 +2291,14 @@ void ManageProfitGivebackExit()
       if(idx >= 0 && profit > g_states[idx].peakProfit)
          g_states[idx].peakProfit = profit;
 
-      if(profit <= -maxLoss)
+      // ⏰ Grace period: skip stop-loss check for first 120 seconds after entry
+      // Prevents immediate closure from spread/slippage on new positions
+      datetime openTime = PositionGetInteger(POSITION_TIME);
+      datetime timeNow  = TimeCurrent();
+      int ageSeconds    = (int)(timeNow - openTime);
+      bool withinGrace  = (ageSeconds < 120);  // First 2 minutes
+
+      if(!withinGrace && profit <= -maxLoss)
       {
          Print(StringFormat("[TradeManager] 🛑 %s #%llu perte $%.2f (cap -$%.2f) — fermeture",
                sym, ticket, profit, maxLoss));
