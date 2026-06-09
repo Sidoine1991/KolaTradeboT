@@ -665,8 +665,9 @@ void RegisterTradeEntry(const int direction, const string entryType = "")
    g_dailyTradeCount++;
    double closedPnl = CalcDailyClosedProfit();
    int remaining = g_maxDailyTrades - g_dailyTradeCount;
-   Print(StringFormat("[DISCIPLINE] ✅ TRADE #%d/%d | direction=%s type=%s | PnL=$%.2f | Entrées restantes: %d",
-         g_dailyTradeCount, g_maxDailyTrades, (direction > 0 ? "BUY" : "SELL"), entryType, closedPnl, remaining));
+   string dirStr = (direction > 0) ? "BUY" : "SELL";
+   Print(StringFormat("[DISCIPLINE] TRADE #%d/%d | direction=%s type=%s | PnL=$%.2f | Restantes: %d",
+         g_dailyTradeCount, g_maxDailyTrades, dirStr, entryType, closedPnl, remaining));
 }
 
 //+------------------------------------------------------------------+
@@ -683,15 +684,18 @@ void DisplayDisciplineStatus()
    bool targetReached = (closedPnl >= g_dailyProfitTarget);
    bool tradesMaxed = (g_dailyTradeCount >= g_maxDailyTrades);
 
-   Print(StringFormat("\n[DISCIPLINE STATUS] ═══════════════════════════════════════════"));
-   Print(StringFormat("  Trades: %d/%d (%s) | Cible: $%.2f/$%.2f (%s) | Entrées restantes: %d",
-         g_dailyTradeCount, g_maxDailyTrades, (tradesMaxed ? "❌ MAXED" : "✅ OK"),
-         closedPnl, g_dailyProfitTarget, (targetReached ? "✅ ATTEINT" : "..."),
-         remaining));
-   Print(StringFormat("  Status Global: %s — %s",
-         (tradesMaxed || targetReached ? "🛑 TRADING DESACTIF" : "🟢 TRADING ACTIF"),
-         (tradesMaxed && targetReached ? "MAX TRADES ET CIBLE" : (tradesMaxed ? "MAX TRADES" : (targetReached ? "CIBLE 20USD" : "NORMAL")))));
-   Print(StringFormat("═══════════════════════════════════════════════════════════════════\n"));
+   string tradesStatus = tradesMaxed ? "MAXED" : "OK";
+   string targetStatus = targetReached ? "ATTEINT" : "...";
+   string globalStatus = (tradesMaxed || targetReached) ? "DESACTIF" : "ACTIF";
+   string reasonStatus = "";
+   if(tradesMaxed && targetReached) reasonStatus = "MAX TRADES ET CIBLE";
+   else if(tradesMaxed) reasonStatus = "MAX TRADES";
+   else if(targetReached) reasonStatus = "CIBLE 20USD";
+   else reasonStatus = "NORMAL";
+
+   Print("[DISCIPLINE STATUS] Trades: " + IntegerToString(g_dailyTradeCount) + "/" + IntegerToString(g_maxDailyTrades) + " (" + tradesStatus + ")");
+   Print("  Cible: $" + StringFormat("%.2f", closedPnl) + "/$" + StringFormat("%.2f", g_dailyProfitTarget) + " (" + targetStatus + ") | Restantes: " + IntegerToString(remaining));
+   Print("  Status: TRADING " + globalStatus + " — " + reasonStatus);
 }
 
 //+------------------------------------------------------------------+
@@ -3704,7 +3708,8 @@ void DRV_OpenTrade(bool isBuy)
    drvTrade.SetExpertMagicNumber(MCPMagicNumber);
    drvTrade.SetDeviationInPoints(50);
    drvTrade.SetTypeFilling(ORDER_FILLING_IOC);
-   string cmt=StringFormat("TM_DRV|%s|ICT%d",isBuy?"BUY":"SELL",g_drvICTScore);
+   string dirStr = isBuy ? "BUY" : "SELL";
+   string cmt = StringFormat("TM_DRV|%s|ICT%d", dirStr, g_drvICTScore);
    bool ok = isBuy ? drvTrade.Buy(lot,_Symbol,0,sl,tp,cmt)
                    : drvTrade.Sell(lot,_Symbol,0,sl,tp,cmt);
    if(ok)
@@ -4600,7 +4605,8 @@ void TryExecuteMCPSignal(int idx)
 
    bool execNow = g_mcpSignals[idx].marketExec || MCPExecuteAtMarket;
    double priceDistance = MathAbs(refPx - ep);
-   if(isXau) Print(StringFormat("[TradeManager] 🔍 %s: execNow=%s distance=%.5f tol=%.5f", sym, (execNow?"YES":"NO"), priceDistance, tol));
+   string execStr = execNow ? "YES" : "NO";
+   if(isXau) Print(StringFormat("[TradeManager] execNow=%s distance=%.5f tol=%.5f", execStr, priceDistance, tol));
    if(!execNow && priceDistance > tol)
    {
       if(isXau) Print(StringFormat("[TradeManager] ⏳ %s: Distance %.5f > tolerance %.5f — waiting for price", sym, priceDistance, tol));
