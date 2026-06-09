@@ -6490,7 +6490,6 @@ void UpdateWinLossStats()
    g_totalProfitWins = 0.0;
    g_totalLossPerfect = 0.0;
 
-   CDealInfo dealInfo;  // Instance pour lire les deals
    datetime midnightToday = iTime(_Symbol, PERIOD_D1, 0);  // Minuit UTC d'aujourd'hui
 
    // Scanner deal history pour les positions fermées du jour
@@ -6498,14 +6497,18 @@ void UpdateWinLossStats()
    {
       ulong ticket = HistoryDealGetTicket(i);
       if(ticket == 0) continue;
-      if(!dealInfo.Select(ticket)) continue;
 
-      // Filtrer: only deals from today, only closing deals
-      if(dealInfo.Time() < midnightToday) break;  // Pas du jour
-      if(dealInfo.Entry() != DEAL_ENTRY_OUT && dealInfo.Entry() != DEAL_ENTRY_OUT_BY) continue;
+      datetime dealTime = HistoryDealGetInteger(ticket, DEAL_TIME);
+      if(dealTime < midnightToday) break;  // Pas du jour
+
+      ENUM_DEAL_ENTRY dealEntry = (ENUM_DEAL_ENTRY)HistoryDealGetInteger(ticket, DEAL_ENTRY);
+      if(dealEntry != DEAL_ENTRY_OUT && dealEntry != DEAL_ENTRY_OUT_BY) continue;
 
       // Sommer le profit/perte de ce deal
-      double dealProfit = dealInfo.Profit() + dealInfo.Commission() + dealInfo.Swap();
+      double dealProfit = HistoryDealGetDouble(ticket, DEAL_PROFIT);
+      double dealComm = HistoryDealGetDouble(ticket, DEAL_COMMISSION);
+      double dealSwap = HistoryDealGetDouble(ticket, DEAL_SWAP);
+      dealProfit += dealComm + dealSwap;
 
       if(dealProfit >= 0)
       {
