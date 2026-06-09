@@ -235,6 +235,9 @@ datetime g_globalCloseTime = 0;
 bool     g_dailyTargetHit    = false;  // true = objectif % atteint aujourd'hui → bloquer entrées
 datetime g_dailyResetDate    = 0;      // date du dernier reset (comparaison jour calendaire)
 double   g_dailyStartBalance = 0.0;    // balance au début de la journée
+int      g_dailyTradeCount   = 0;      // 🆕 nombre de trades ouverts aujourd'hui
+int      g_maxDailyTrades    = 7;      // 🆕 max 7 trades par jour (DISCIPLINE)
+double   g_dailyProfitTarget = 20.0;   // 🆕 cible: 20$ de profit → STOP entrées
 
 // GOM Scalp Loop
 datetime g_lastGOMPoll       = 0;
@@ -632,6 +635,66 @@ int OnInit()
 }
 
 //+------------------------------------------------------------------+
+//| 🆕 Discipline Trading: Max 7/jour, Cible 20USD → STOP entrées     |
+//+------------------------------------------------------------------+
+bool CanEnterTrade(const string reason = "")
+{
+   // Vérifier cible de profit 20 USD atteinte
+   double closedPnl = CalcDailyClosedProfit();
+   if(closedPnl >= g_dailyProfitTarget)
+   {
+      Print(StringFormat("[DISCIPLINE] ❌ BLOQUE: Cible profit +$%.2f atteinte | raison: %s", closedPnl, reason));
+      return false;
+   }
+
+   // Vérifier max 7 trades/jour
+   if(g_dailyTradeCount >= g_maxDailyTrades)
+   {
+      Print(StringFormat("[DISCIPLINE] ❌ BLOQUE: %d/%d trades atteint | raison: %s", g_dailyTradeCount, g_maxDailyTrades, reason));
+      return false;
+   }
+
+   return true;  // ✅ Autorisé
+}
+
+//+------------------------------------------------------------------+
+//| Wrapper: Enregistrer nouvelle entrée + vérifier discipline        |
+//+------------------------------------------------------------------+
+void RegisterTradeEntry(const int direction, const string entryType = "")
+{
+   g_dailyTradeCount++;
+   double closedPnl = CalcDailyClosedProfit();
+   int remaining = g_maxDailyTrades - g_dailyTradeCount;
+   Print(StringFormat("[DISCIPLINE] ✅ TRADE #%d/%d | direction=%s type=%s | PnL=$%.2f | Entrées restantes: %d",
+         g_dailyTradeCount, g_maxDailyTrades, (direction > 0 ? "BUY" : "SELL"), entryType, closedPnl, remaining));
+}
+
+//+------------------------------------------------------------------+
+//| Afficher status discipline toutes les 30 min                      |
+//+------------------------------------------------------------------+
+void DisplayDisciplineStatus()
+{
+   static datetime lastDisplay = 0;
+   if(TimeCurrent() - lastDisplay < 1800) return;  // 30 minutes
+   lastDisplay = TimeCurrent();
+
+   double closedPnl = CalcDailyClosedProfit();
+   int remaining = g_maxDailyTrades - g_dailyTradeCount;
+   bool targetReached = (closedPnl >= g_dailyProfitTarget);
+   bool tradesMaxed = (g_dailyTradeCount >= g_maxDailyTrades);
+
+   Print(StringFormat("\n[DISCIPLINE STATUS] ═══════════════════════════════════════════"));
+   Print(StringFormat("  Trades: %d/%d (%s) | Cible: $%.2f/$%.2f (%s) | Entrées restantes: %d",
+         g_dailyTradeCount, g_maxDailyTrades, (tradesMaxed ? "❌ MAXED" : "✅ OK"),
+         closedPnl, g_dailyProfitTarget, (targetReached ? "✅ ATTEINT" : "..."),
+         remaining));
+   Print(StringFormat("  Status Global: %s — %s",
+         (tradesMaxed || targetReached ? "🛑 TRADING DESACTIF" : "🟢 TRADING ACTIF"),
+         (tradesMaxed && targetReached ? "MAX TRADES ET CIBLE" : (tradesMaxed ? "MAX TRADES" : (targetReached ? "CIBLE 20USD" : "NORMAL")))));
+   Print(StringFormat("═══════════════════════════════════════════════════════════════════\n"));
+}
+
+//+------------------------------------------------------------------+
 //| 🆕 Surveillance GOM + Fermeture auto si WAIT                      |
 //+------------------------------------------------------------------+
 void MonitorGOMWaitClosePositions()
@@ -690,6 +753,7 @@ void OnTimer()
    if(UseDerivEngine)        RunDerivEngine();
    if(IsBoomOrCrashSymbol(_Symbol)) MonitorSpikeAutoClose();
    if(UseCapitalManager)     CheckDailyProfitTarget();
+   DisplayDisciplineStatus();  // 🆕 Afficher status discipline toutes les 30 min
    if(RequireSignalAlign)    PollSignalBias();
    if(UseGlobalProfitTarget) CheckGlobalProfit();
    if(UseProfitGivebackExit) ManageProfitGivebackExit();
@@ -3811,9 +3875,10 @@ void CheckDailyProfitTarget()
       g_dailyResetDate    = today;
       g_dailyTargetHit    = false;
       g_dailyStartBalance = AccountInfoDouble(ACCOUNT_BALANCE);
-      PrintOnce(StringFormat("[CM] Nouveau jour — balance=$%.2f  objectif=+%.0f%% ($%.2f)",
+      g_dailyTradeCount   = 0;  // 🆕 Reset compteur de trades
+      PrintOnce(StringFormat("[DISCIPLINE] Nouveau jour — balance=$%.2f | Objectif: +%.0f%% ($%.2f) | Max %d trades | Cible: +$%.0f",
             g_dailyStartBalance, CM_DailyTargetPct,
-            g_dailyStartBalance * CM_DailyTargetPct / 100.0), 3600);
+            g_dailyStartBalance * CM_DailyTargetPct / 100.0, g_maxDailyTrades, g_dailyProfitTarget), 3600);
    }
 
    if(g_dailyTargetHit) return;
@@ -4484,6 +4549,13 @@ void TryExecuteMCPSignal(int idx)
       return;
    }
 
+   // 🆕 Vérifier discipline: max 7/jour + cible 20USD (même pour pipeline)
+   if(!CanEnterTrade("MCP-Signal"))
+   {
+      if(isXau) Print(StringFormat("[TradeManager] 🚫 %s: Signal annulé — limite discipline atteinte", sym));
+      return;
+   }
+
    if(!g_mcpSignals[idx].active || g_mcpSignals[idx].executed)
    {
       if(isXau && !g_mcpSignals[idx].active) Print(StringFormat("[TradeManager] ⏭️ %s: Not active — SKIP", sym));
@@ -4703,6 +4775,7 @@ void TryExecuteMCPSignal(int idx)
       g_mcpSignals[idx].executed  = true;
       g_mcpSignals[idx].active    = false;
       g_mcpSignals[idx].ticket    = 0;
+      RegisterTradeEntry(dir, "MCP-Signal");  // 🆕 Incrémenter compteur discipline
       Sleep(300);
       for(int pi = PositionsTotal() - 1; pi >= 0; pi--)
       {
@@ -5459,6 +5532,10 @@ void CheckGOMAutoEntry()
       PrintOnce("[CM] 🔒 GOM AutoEntry bloqué — objectif journalier atteint", 300);
       return;
    }
+   if(!CanEnterTrade("GOM-AutoEntry"))
+   {
+      return;  // 🆕 Vérifier discipline: max 7/jour + cible 20USD
+   }
    if(IsGlobalPositionLimitReached())
    {
       Print(StringFormat("[GOM-Auto] %s entrée bloquée — limite globale %d positions atteinte", _Symbol, MaxGlobalPositions));
@@ -5644,6 +5721,7 @@ void CheckGOMAutoEntry()
 
    g_lastGOMAutoEntry = TimeCurrent();
    g_lastGOMAutoVnum  = effVnum;
+   RegisterTradeEntry(dir, "GOM-AutoEntry");  // 🆕 Incrémenter compteur discipline
    Print(StringFormat("[GOM-Auto] ENTREE %s %s | %s vnum=%d Q=%.0f%% C=%.0f%% lot=%.2f",
          (dir==1?"BUY":"SELL"), sym, actTag, effVnum,
          g_lastGOMQuality, g_lastGOMCoherence, lot));
@@ -5664,6 +5742,10 @@ void CheckGOMReEntry()
    {
       PrintOnce("[CM] 🔒 GOM ReEntry bloqué — objectif journalier atteint", 300);
       return;
+   }
+   if(!CanEnterTrade("GOM-ReEntry"))
+   {
+      return;  // 🆕 Vérifier discipline: max 7/jour + cible 20USD
    }
    if(IsGlobalPositionLimitReachedForReEntry(_Symbol))
    {
@@ -5751,6 +5833,7 @@ void CheckGOMReEntry()
       {
          g_gomReEntry[i].reEntryCount++;
          g_gomReEntry[i].closedAt = TimeCurrent();
+         RegisterTradeEntry(dir, "GOM-ReEntry");  // 🆕 Incrémenter compteur discipline
          Print(StringFormat("[GOMScalp] Re-entree #%d %s %s GOM=%s",
                g_gomReEntry[i].reEntryCount, (dir==1?"BUY":"SELL"), posSym, g_lastGOMVerdict));
          SendWAEvent("GOM_REENTRY", posSym,
