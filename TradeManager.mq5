@@ -6417,9 +6417,24 @@ void DisplayDisciplineDashboard()
 
    string line1 = "[DISCIPLINE] " + IntegerToString(g_dailyTradeCount) + "/" + IntegerToString(g_maxDailyTrades) + " | $" + StringFormat("%.2f", closedPnl) + "/$" + StringFormat("%.2f", g_dailyProfitTarget) + " | " + status;
 
-   // 🆕 Ajouter espaces pour descendre le dashboard sous les autres infos (+10 points supplémentaires)
-   string dashboard = "\n\n\n\n\n\n\n\n\n\n\n\n\n" + line1;
-   Comment(dashboard);
+   // 🆕 Utiliser ObjectCreate pour placer le texte à une position fixe (bas du chart)
+   string objName = "DISC_DASHBOARD";
+
+   // Supprimer l'ancien objet s'il existe
+   if(ObjectFind(0, objName) >= 0)
+      ObjectDelete(0, objName);
+
+   // Créer objet texte en bas à gauche du chart
+   ObjectCreate(0, objName, OBJ_LABEL, 0, 0, 0);
+   ObjectSetString(0, objName, OBJPROP_TEXT, line1);
+   ObjectSetInteger(0, objName, OBJPROP_XDISTANCE, 10);      // 10px from left
+   ObjectSetInteger(0, objName, OBJPROP_YDISTANCE, 100);     // 100px from top (descend bien)
+   ObjectSetInteger(0, objName, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+   ObjectSetInteger(0, objName, OBJPROP_FONTSIZE, 10);
+   ObjectSetString(0, objName, OBJPROP_FONT, "Courier New");
+   ObjectSetInteger(0, objName, OBJPROP_COLOR, 32768);  // Vert
+   ObjectSetInteger(0, objName, OBJPROP_BACK, false);
+   ObjectSetInteger(0, objName, OBJPROP_SELECTABLE, false);
 }
 
 void RefreshDashboard()
