@@ -567,6 +567,13 @@ struct GOMData {
 
 datetime g_lastDashboardUpdate = 0;
 
+// 🆕 Statistiques trades pour dashboard
+int      g_totalWins           = 0;      // Trades fermés en profit
+int      g_totalLosses         = 0;      // Trades fermés en perte
+double   g_totalProfitWins     = 0.0;    // Profit total des wins
+double   g_totalLossPerfect    = 0.0;    // Perte totale des losses
+double   g_lastTradeProfit     = 0.0;    // Profit du dernier trade fermé
+
 //+------------------------------------------------------------------+
 int OnInit()
 {
@@ -6415,31 +6422,87 @@ void DisplayDisciplineDashboard()
    else if(targetReached) status = "CIBLE +20";
    else status = "OK";
 
+   // 🆕 Ligne 1: Compteur trade + Profit cible
    string line1 = "[DISCIPLINE] " + IntegerToString(g_dailyTradeCount) + "/" + IntegerToString(g_maxDailyTrades) + " | $" + StringFormat("%.2f", closedPnl) + "/$" + StringFormat("%.2f", g_dailyProfitTarget) + " | " + status;
 
-   // 🆕 Utiliser ObjectCreate pour placer le texte à une position fixe (bas du chart)
-   string objName = "DISC_DASHBOARD";
+   // 🆕 Ligne 2: Wins/Losses + Profit/Perte détaillés
+   double netProfit = g_totalProfitWins - g_totalLossPerfect;
+   string winRatio = (g_totalWins + g_totalLosses > 0) ?
+      StringFormat("%.0f%%", 100.0 * g_totalWins / (g_totalWins + g_totalLosses)) : "N/A";
+   string line2 = "📊 Win: " + IntegerToString(g_totalWins) + " | Loss: " + IntegerToString(g_totalLosses) + " | " + winRatio + " | Gagné: +$" + StringFormat("%.2f", g_totalProfitWins) + " | Perdu: -$" + StringFormat("%.2f", g_totalLossPerfect);
 
-   // Supprimer l'ancien objet s'il existe
-   if(ObjectFind(0, objName) >= 0)
-      ObjectDelete(0, objName);
+   // Utiliser ObjectCreate pour placer le texte à une position fixe (bas du chart)
+   string objName1 = "DISC_DASHBOARD_1";
+   string objName2 = "DISC_DASHBOARD_2";
 
-   // Créer objet texte en bas à gauche du chart
-   ObjectCreate(0, objName, OBJ_LABEL, 0, 0, 0);
-   ObjectSetString(0, objName, OBJPROP_TEXT, line1);
-   ObjectSetInteger(0, objName, OBJPROP_XDISTANCE, 10);      // 10px from left
-   ObjectSetInteger(0, objName, OBJPROP_YDISTANCE, 100);     // 100px from top (descend bien)
-   ObjectSetInteger(0, objName, OBJPROP_CORNER, CORNER_LEFT_UPPER);
-   ObjectSetInteger(0, objName, OBJPROP_FONTSIZE, 10);
-   ObjectSetString(0, objName, OBJPROP_FONT, "Courier New");
-   ObjectSetInteger(0, objName, OBJPROP_COLOR, 32768);  // Vert
-   ObjectSetInteger(0, objName, OBJPROP_BACK, false);
-   ObjectSetInteger(0, objName, OBJPROP_SELECTABLE, false);
+   // Supprimer les anciens objets s'ils existent
+   if(ObjectFind(0, objName1) >= 0) ObjectDelete(0, objName1);
+   if(ObjectFind(0, objName2) >= 0) ObjectDelete(0, objName2);
+
+   // Ligne 1: Discipline counter
+   ObjectCreate(0, objName1, OBJ_LABEL, 0, 0, 0);
+   ObjectSetString(0, objName1, OBJPROP_TEXT, line1);
+   ObjectSetInteger(0, objName1, OBJPROP_XDISTANCE, 10);
+   ObjectSetInteger(0, objName1, OBJPROP_YDISTANCE, 100);
+   ObjectSetInteger(0, objName1, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+   ObjectSetInteger(0, objName1, OBJPROP_FONTSIZE, 10);
+   ObjectSetString(0, objName1, OBJPROP_FONT, "Courier New");
+   ObjectSetInteger(0, objName1, OBJPROP_COLOR, 32768);  // Vert
+   ObjectSetInteger(0, objName1, OBJPROP_BACK, false);
+   ObjectSetInteger(0, objName1, OBJPROP_SELECTABLE, false);
+
+   // Ligne 2: Win/Loss stats
+   ObjectCreate(0, objName2, OBJ_LABEL, 0, 0, 0);
+   ObjectSetString(0, objName2, OBJPROP_TEXT, line2);
+   ObjectSetInteger(0, objName2, OBJPROP_XDISTANCE, 10);
+   ObjectSetInteger(0, objName2, OBJPROP_YDISTANCE, 120);  // 20px below line1
+   ObjectSetInteger(0, objName2, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+   ObjectSetInteger(0, objName2, OBJPROP_FONTSIZE, 9);
+   ObjectSetString(0, objName2, OBJPROP_FONT, "Courier New");
+   ObjectSetInteger(0, objName2, OBJPROP_COLOR, g_totalProfitWins > g_totalLossPerfect ? 32768 : 16711680);  // Green if profit, Red if loss
+   ObjectSetInteger(0, objName2, OBJPROP_BACK, false);
+   ObjectSetInteger(0, objName2, OBJPROP_SELECTABLE, false);
+}
+
+void UpdateWinLossStats()
+{
+   // 🆕 Scan l'historique fermé du jour et met à jour win/loss counters
+   g_totalWins = 0;
+   g_totalLosses = 0;
+   g_totalProfitWins = 0.0;
+   g_totalLossPerfect = 0.0;
+
+   datetime midnightToday = iTime(_Symbol, PERIOD_D1, 0);  // Minuit UTC d'aujourd'hui
+
+   // Scanner deal history pour les positions fermées du jour
+   for(int i = HistoryDealsTotal() - 1; i >= 0; i--)
+   {
+      if(!historyDealInfo.SelectByIndex(i)) continue;
+
+      // Filtrer: only deals from today, only closing deals
+      if(historyDealInfo.Time() < midnightToday) break;  // Pas du jour
+      if(historyDealInfo.Entry() != DEAL_ENTRY_OUT && historyDealInfo.Entry() != DEAL_ENTRY_OUT_BY) continue;
+
+      // Sommer le profit/perte de ce deal
+      double dealProfit = historyDealInfo.Profit() + historyDealInfo.Commission() + historyDealInfo.Swap();
+
+      if(dealProfit >= 0)
+      {
+         g_totalWins++;
+         g_totalProfitWins += dealProfit;
+      }
+      else
+      {
+         g_totalLosses++;
+         g_totalLossPerfect += MathAbs(dealProfit);
+      }
+   }
 }
 
 void RefreshDashboard()
 {
    if(!UseDashboard) return;
+   UpdateWinLossStats();  // Mettre à jour les stats avant affichage
    if(TimeCurrent() - g_lastDashboardUpdate < DashboardUpdateSec) return;
    g_lastDashboardUpdate = TimeCurrent();
 
