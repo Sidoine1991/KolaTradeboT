@@ -2295,7 +2295,9 @@ void ManageProfitGivebackExit()
       {
          Print(StringFormat("[TradeManager] 🛑 %s #%llu perte $%.2f (cap -$%.2f) — fermeture",
                sym, ticket, profit, maxLoss));
-         trade.PositionClose(ticket);
+         if(trade.PositionClose(ticket))
+            Print(StringFormat("[ProfitGivebackExit] 💀 %s #%llu fermée perte STOP-LOSS $%.2f",
+                  sym, ticket, profit));
          continue;
       }
 
