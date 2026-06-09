@@ -6377,11 +6377,33 @@ void RemoveAllDashboardObjects()
    }
 }
 
+void DisplayDisciplineDashboard()
+{
+   if(!UseDashboard) return;
+
+   double closedPnl = CalcDailyClosedProfit();
+   int remaining = g_maxDailyTrades - g_dailyTradeCount;
+   bool targetReached = (closedPnl >= g_dailyProfitTarget);
+   bool tradesMaxed = (g_dailyTradeCount >= g_maxDailyTrades);
+
+   string status = "";
+   if(tradesMaxed && targetReached) status = "MAX & CIBLE";
+   else if(tradesMaxed) status = "MAX TRADES";
+   else if(targetReached) status = "CIBLE +20";
+   else status = "OK";
+
+   string line1 = "[DISCIPLINE] " + IntegerToString(g_dailyTradeCount) + "/" + IntegerToString(g_maxDailyTrades) + " | $" + StringFormat("%.2f", closedPnl) + "/$" + StringFormat("%.2f", g_dailyProfitTarget) + " | " + status;
+
+   Comment(line1);
+}
+
 void RefreshDashboard()
 {
    if(!UseDashboard) return;
    if(TimeCurrent() - g_lastDashboardUpdate < DashboardUpdateSec) return;
    g_lastDashboardUpdate = TimeCurrent();
+
+   DisplayDisciplineDashboard();  // 🆕 Afficher compteur discipline en haut
 
    GOMData gom = FetchGOMDataForChart();
    if(gom.valid)
