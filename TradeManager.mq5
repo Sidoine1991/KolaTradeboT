@@ -4557,6 +4557,13 @@ void TryExecuteMCPSignal(int idx)
    // Pipeline source préliminaire — sera confirmé après re-fetch plus bas
    bool isPipelineEarly = (StringCompare(g_mcpSignals[idx].source, "pipeline") == 0);
 
+   // 🚫 BLOQUER si GOM=WAIT — aucun entry quel que soit la source
+   if(UseGOMScalp && IsGOMVerdictWait())
+   {
+      PrintOnce(StringFormat("[MCP-Execute] %s bloqué — GOM=WAIT (vnum=%d) — pas d'entry", sym, g_lastGOMVerdictNum), 60);
+      return;
+   }
+
    // Limite globale : bypassée pour les ordres pipeline (signal validé humainement)
    if(!isPipelineEarly && IsGlobalPositionLimitReached())
    {
