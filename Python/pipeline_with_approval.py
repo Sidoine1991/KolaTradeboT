@@ -255,7 +255,7 @@ def run_trading_agents(symbol: str, direction: str, trade_date: str) -> Optional
         ta_script = f"""
 import sys
 sys.path.insert(0, r'{_HERE}')
-from ta_worker import run_quick, _normalize_rating, _extract_order_params
+from tradbot_bridge import run_quick
 import json
 
 try:
