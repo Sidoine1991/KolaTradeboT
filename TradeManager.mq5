@@ -6480,7 +6480,7 @@ void UpdateWinLossStats()
    {
       ulong ticket = HistoryDealGetTicket(i);
       if(ticket == 0) continue;
-      if(!dealInfo.SelectByTicket(ticket)) continue;
+      if(!dealInfo.Select(ticket)) continue;
 
       // Filtrer: only deals from today, only closing deals
       if(dealInfo.Time() < midnightToday) break;  // Pas du jour
