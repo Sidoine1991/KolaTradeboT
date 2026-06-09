@@ -4623,7 +4623,6 @@ void TryExecuteMCPSignal(int idx)
       return;
    }
 
-   int    dir  = g_mcpSignals[idx].direction;
    double ep   = g_mcpSignals[idx].entryPrice;
 
    // Souscrire le symbole dans Market Watch si nécessaire
@@ -6503,7 +6502,7 @@ void UpdateWinLossStats()
       ulong ticket = HistoryDealGetTicket(i);
       if(ticket == 0) continue;
 
-      datetime dealTime = HistoryDealGetInteger(ticket, DEAL_TIME);
+      datetime dealTime = (datetime)HistoryDealGetInteger(ticket, DEAL_TIME);
       if(dealTime < midnightToday) break;  // Pas du jour
 
       ENUM_DEAL_ENTRY dealEntry = (ENUM_DEAL_ENTRY)HistoryDealGetInteger(ticket, DEAL_ENTRY);
