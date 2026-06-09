@@ -247,7 +247,7 @@ string   g_lastGOMVerdict    = "";
 int      g_lastGOMRSI        = 50;
 bool     g_gomRSIOversold    = false;
 bool     g_gomRSIOverbought  = false;
-int      g_lastGOMVerdictNum = 0;
+int      g_lastGOMVerdictNum = 999;   // Init neutre (999=pas update encore). 0=WAIT, ±1=BUY/SELL, ±2=GOOD, ±3=PERFECT
 string   g_lastKOLAState     = "";  // "NEAR BUY" | "NEAR SELL" | "NEUTRAL"
 bool     g_isConsolidation   = false; // KOLA diverge du verdict
 double   g_lastGOMQuality    = 0.0; // entry_quality %
@@ -813,7 +813,8 @@ void OnTick()
 //+------------------------------------------------------------------+
 bool IsGOMVerdictWait()
 {
-   if(g_lastGOMVerdictNum == 0) return true;
+   if(g_lastGOMVerdictNum == 999) return false;  // Pas encore update (startup) → pas WAIT
+   if(g_lastGOMVerdictNum == 0) return true;     // 0 = WAIT verdict
    if(StringFind(g_lastGOMVerdict, "WAIT") >= 0) return true;
    return false;
 }
