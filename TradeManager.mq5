@@ -831,13 +831,12 @@ bool IsGOMVerdictWait()
 //+------------------------------------------------------------------+
 bool IsTFConsensus(int direction)
 {
-   // M1 dit BUY → H1 et H4 doivent aussi être bullish
-   // M1 dit SELL → H1 et H4 doivent aussi être bearish
+   // Récupérer les dernières données GOM locales via le poller
+   GOMData gom = FetchGOMDataForChart();
+   if(!gom.valid) return true;  // Si pas de données, passer (safe default)
 
-   if(g_lastGOMData.tf_h1_rsi < 10 || g_lastGOMData.tf_h4_rsi < 10) return false;  // Pas d'info
-
-   bool h1_bull = (StringFind(g_lastGOMData.tf_h1_dir, "BUY") >= 0 || StringFind(g_lastGOMData.tf_h1_dir, "BULL") >= 0);
-   bool h4_bull = (StringFind(g_lastGOMData.tf_h4_dir, "BUY") >= 0 || StringFind(g_lastGOMData.tf_h4_dir, "BULL") >= 0);
+   bool h1_bull = (StringFind(gom.tf_h1_dir, "BUY") >= 0 || StringFind(gom.tf_h1_dir, "BULL") >= 0);
+   bool h4_bull = (StringFind(gom.tf_h4_dir, "BUY") >= 0 || StringFind(gom.tf_h4_dir, "BULL") >= 0);
 
    if(direction == 1)  // BUY signal
       return (h1_bull && h4_bull);  // H1+H4 doivent être BULL
@@ -851,48 +850,43 @@ bool IsTFConsensus(int direction)
 bool HasRSIDivergence()
 {
    // Divergence baissière = prix HIGH mais RSI LOW = fake setup
-   // Divergence haussière = prix LOW mais RSI HIGH = fake setup
+   GOMData gom = FetchGOMDataForChart();
+   if(!gom.valid) return false;  // Pas de données = pas de divergence
 
-   if(g_lastGOMData.rsi < 10 || g_lastGOMData.rsi > 90) return false;  // RSI extrême = pas de divergence
+   if(gom.rsi < 10 || gom.rsi > 90) return false;  // RSI extrême = pas de divergence
 
    double close1 = iClose(_Symbol, PERIOD_M1, 1);
    double close5 = iClose(_Symbol, PERIOD_M1, 5);
 
    // Divergence baissière: prix hausse mais RSI descend
-   if(close1 > close5 && g_lastGOMData.rsi < 40)  // Prix monte mais RSI bas = danger
-      return true;
+   if(close1 > close5 && gom.rsi < 40) return true;  // Prix monte mais RSI bas = danger
 
    // Divergence haussière: prix baisse mais RSI monte
-   if(close1 < close5 && g_lastGOMData.rsi > 60)  // Prix descend mais RSI haut = danger
-      return true;
+   if(close1 < close5 && gom.rsi > 60) return true;  // Prix descend mais RSI haut = danger
 
    return false;
 }
 
 //+------------------------------------------------------------------+
-//| FILTRE 3: MOMENTUM CHECK — MACD/CCI/Volume confirme              |
+//| FILTRE 3: MOMENTUM CHECK — RSI M1/H1 confirme                    |
 //+------------------------------------------------------------------+
 bool HasMomentum(int direction)
 {
-   // Vérifier que la force existe pour entrer dans cette direction
-   // M1 RSI faible + H1 RSI faible = momentum insuffisant
+   GOMData gom = FetchGOMDataForChart();
+   if(!gom.valid) return true;  // Pas de données = passer (safe default)
 
-   int m1_rsi = g_lastGOMData.tf_m1_rsi;
-   int h1_rsi = g_lastGOMData.tf_h1_rsi;
+   int m1_rsi = gom.tf_m1_rsi;
+   int h1_rsi = gom.tf_h1_rsi;
 
    if(direction == 1)  // BUY
    {
-      // RSI M1 trop bas = pas d'élan haussier
-      if(m1_rsi < 35) return false;
-      // RSI H1 trop bas = pas de support haussier
-      if(h1_rsi < 40) return false;
+      if(m1_rsi < 35) return false;  // RSI M1 trop bas
+      if(h1_rsi < 40) return false;  // RSI H1 trop bas
    }
    else  // SELL
    {
-      // RSI M1 trop haut = pas d'élan baissier
-      if(m1_rsi > 65) return false;
-      // RSI H1 trop haut = pas de support baissier
-      if(h1_rsi > 60) return false;
+      if(m1_rsi > 65) return false;  // RSI M1 trop haut
+      if(h1_rsi > 60) return false;  // RSI H1 trop haut
    }
 
    return true;
@@ -4680,7 +4674,7 @@ void TryExecuteMCPSignal(int idx)
    if(UseGOMScalp && HasRSIDivergence())
    {
       Print(StringFormat("[MCP-Execute] 🚫 %s signal refusé — Divergence RSI détectée (RSI=%d) = fake setup",
-                         sym, g_lastGOMData.rsi));
+                         sym, g_lastGOMRSI));
       g_mcpSignals[idx].failCount++;
       return;
    }
@@ -4689,8 +4683,8 @@ void TryExecuteMCPSignal(int idx)
    if(UseGOMScalp && !HasMomentum(dir))
    {
       string dir_txt = (dir == 1) ? "BUY" : "SELL";
-      Print(StringFormat("[MCP-Execute] 🚫 %s %s refusé — Momentum insuffisant (M1_RSI=%d H1_RSI=%d)",
-                         sym, dir_txt, g_lastGOMData.tf_m1_rsi, g_lastGOMData.tf_h1_rsi));
+      Print(StringFormat("[MCP-Execute] 🚫 %s %s refusé — Momentum insuffisant",
+                         sym, dir_txt));
       g_mcpSignals[idx].failCount++;
       return;
    }
@@ -7253,20 +7247,20 @@ void DisplayCompleteGOMDashboard(const GOMData &gom)
    xCur   = marginLR;
 
    // Col 0 — TF CONSENSUS (H1+H4 confirm)
-   bool tfConsensus = IsTFConsensus(1);  // Check si H1+H4 supportent BUY
-   color cTFC = tfConsensus ? 0xFF00AA00 : 0xFFAA0000;  // Vert si OK, Rouge si NON
+   bool tfConsensus = IsTFConsensus(1);
+   color cTFC = tfConsensus ? (color)0xFF00AA00 : (color)0xFFAA0000;
    DrawDashCell("F0_TFC", xCur, y4, cellW, cellH,
                 tfConsensus ? "✓ TF CON" : "✗ TF CON", cTFC, cTxt);
 
    // Col 1 — RSI DIVERGENCE CHECK
    bool rsiDiv = HasRSIDivergence();
-   color cRSID = rsiDiv ? 0xFFAA0000 : 0xFF00AA00;  // Rouge si divergence, Vert si OK
+   color cRSID = rsiDiv ? (color)0xFFAA0000 : (color)0xFF00AA00;
    DrawDashCell("F1_RSID", xCur + cellW + gap, y4, cellW, cellH,
                 rsiDiv ? "✗ DIV RSI" : "✓ DIV RSI", cRSID, cTxt);
 
    // Col 2 — MOMENTUM CHECK
-   bool momOk = HasMomentum(1);  // Check BUY momentum
-   color cMOM = momOk ? 0xFF00AA00 : 0xFFAA0000;  // Vert si momentum OK
+   bool momOk = HasMomentum(1);
+   color cMOM = momOk ? (color)0xFF00AA00 : (color)0xFFAA0000;
    DrawDashCell("F2_MOM", xCur + (cellW + gap) * 2, y4, cellW, cellH,
                 momOk ? "✓ MOMENTUM" : "✗ MOMENTUM", cMOM, cTxt);
 
@@ -7275,7 +7269,7 @@ void DisplayCompleteGOMDashboard(const GOMData &gom)
    if(tfConsensus) robustScore++;
    if(!rsiDiv) robustScore++;
    if(momOk) robustScore++;
-   color cRobust = (robustScore == 3) ? 0xFF00DD00 : (robustScore >= 2) ? 0xFFFFFF00 : 0xFFFF0000;
+   color cRobust = (robustScore == 3) ? (color)0xFF00DD00 : (robustScore >= 2) ? (color)0xFFFFFF00 : (color)0xFFFF0000;
    DrawDashCell("F3_ROBUST", xCur + (cellW + gap) * 3, y4, cellW * 2, cellH,
                 "ROBUST " + IntegerToString(robustScore) + "/3", cRobust, cTxt);
 
