@@ -2293,9 +2293,9 @@ void ManageProfitGivebackExit()
 
       // ⏰ Grace period: skip stop-loss check for first 120 seconds after entry
       // Prevents immediate closure from spread/slippage on new positions
-      datetime openTime = PositionGetInteger(POSITION_TIME);
-      datetime timeNow  = TimeCurrent();
-      int ageSeconds    = (int)(timeNow - openTime);
+      long openTimeLong = PositionGetInteger(POSITION_TIME);
+      long timeNowLong  = (long)TimeCurrent();
+      int ageSeconds    = (int)(timeNowLong - openTimeLong);
       bool withinGrace  = (ageSeconds < 120);  // First 2 minutes
 
       if(!withinGrace && profit <= -maxLoss)
@@ -6411,7 +6411,7 @@ void DisplayDisciplineDashboard()
 
    string line1 = "[DISCIPLINE] " + IntegerToString(g_dailyTradeCount) + "/" + IntegerToString(g_maxDailyTrades) + " | $" + StringFormat("%.2f", closedPnl) + "/$" + StringFormat("%.2f", g_dailyProfitTarget) + " | " + status;
 
-   // 🆕 Utiliser TextCreate permanent au lieu de Comment() qui s'efface
+   // 🆕 Utiliser ObjectCreate permanent au lieu de Comment() qui s'efface
    string objName = "DISC_BANNER";
    int x = 10;        // 10px from left
    int y = 20;        // 20px from top
@@ -6421,7 +6421,8 @@ void DisplayDisciplineDashboard()
       ObjectDelete(0, objName);
 
    // Créer nouveau text object
-   TextCreate(0, objName, 0, x, y, line1);
+   ObjectCreate(0, objName, OBJ_TEXT, 0, 0, 0);
+   ObjectSetString(0, objName, OBJPROP_TEXT, line1);
 
    // Styles
    ObjectSetInteger(0, objName, OBJPROP_CORNER, CORNER_LEFT_UPPER);
@@ -6429,7 +6430,7 @@ void DisplayDisciplineDashboard()
    ObjectSetInteger(0, objName, OBJPROP_YDISTANCE, y);
    ObjectSetInteger(0, objName, OBJPROP_FONTSIZE, 10);
    ObjectSetString(0, objName, OBJPROP_FONT, "Courier New");
-   ObjectSetInteger(0, objName, OBJPROP_COLOR, C'0,200,0');  // vert
+   ObjectSetInteger(0, objName, OBJPROP_COLOR, 16711680);  // vert (BGR: 0,200,0)
    ObjectSetInteger(0, objName, OBJPROP_BACK, false);
    ObjectSetInteger(0, objName, OBJPROP_SELECTABLE, false);
 }
