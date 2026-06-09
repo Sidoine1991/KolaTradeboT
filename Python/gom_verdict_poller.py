@@ -27,9 +27,11 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 import subprocess
 import sys
 import time
+import traceback
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -332,6 +334,20 @@ def _run_tv_cli(command: list[str], cdp_port: Optional[int] = None) -> Optional[
 # Parse des valeurs Pine Script
 # ─────────────────────────────────────────────────────────────
 
+
+def _safe_int(v, default: int = 0) -> int:
+    """int() safe against infinity/NaN from Pine Script outputs."""
+    if v is None:
+        return default
+    try:
+        f = float(v)
+        if not math.isfinite(f):
+            return default
+        return int(round(f))
+    except (ValueError, TypeError, OverflowError):
+        return default
+
+
 def _parse_fr_float(s) -> Optional[float]:
     """Convertit tout format numerique (FR/EN, espaces, virgules) en float.
     Gere le tiret unicode U+2212 (−) retourné par TradingView data_window.
@@ -355,14 +371,53 @@ def _val_from_study(vals: Dict[str, Any], *keys: str) -> Optional[float]:
     for k in keys:
         if k in vals:
             v = _parse_fr_float(vals[k])
-            if v is not None:
+            if v is not None and math.isfinite(v):
                 return v
         for vk, vv in vals.items():
             if vk.lower() == k.lower():
                 v = _parse_fr_float(vv)
-                if v is not None:
+                if v is not None and math.isfinite(v):
                     return v
     return None
+
+
+def apply_spike_bc_override(payload: Dict[str, Any], vals: Dict[str, Any]) -> Dict[str, Any]:
+    """Si pre-spike tradable sur Boom/Crash, force verdict + setup pour TradeManager."""
+    spike_trad = _val_from_study(vals, "spike_tradable", "spike_tradable")
+    if spike_trad is None or _safe_int(spike_trad) < 1:
+        payload["spike_tradable"] = False
+        return payload
+
+    imminence = _val_from_study(vals, "imminence_pct", "imminence_pct")
+    spike_level = _val_from_study(vals, "spike_level", "spike_level")
+    pre_spike = _val_from_study(vals, "pre_spike_pct", "pre_spike_pct")
+
+    payload["spike_tradable"] = True
+    payload["imminence_pct"] = round(imminence or 0, 1)
+    payload["spike_level"] = _safe_int(spike_level)
+    payload["pre_spike_pct"] = round(pre_spike or 0, 1)
+
+    sdir = _safe_int(payload.get("setup_dir"))
+    if sdir == 1:
+        payload["verdict"] = "GOOD BUY"
+        payload["verdict_num"] = 2
+        payload["setup_type"] = "SPIKE_BOOM"
+    elif sdir == -1:
+        payload["verdict"] = "GOOD SELL"
+        payload["verdict_num"] = -2
+        payload["setup_type"] = "SPIKE_CRASH"
+
+    eq = float(payload.get("entry_quality") or 0)
+    co = float(payload.get("coherence_pct") or 0)
+    if eq < 55:
+        payload["entry_quality"] = max(eq, 65.0)
+    if co < 45:
+        payload["coherence_pct"] = max(co, 50.0)
+
+    payload["setup_valid"] = bool(
+        sdir != 0 and float(payload.get("setup_entry") or 0) > 0
+    )
+    return payload
 
 
 def _verdict_text_from_num(verdict_num: int) -> str:
@@ -400,11 +455,13 @@ def parse_gom_study(raw: Dict[str, Any], symbol: str = SYMBOL) -> Optional[Dict[
         studies = studies_payload
 
     gom_study = None
+    ghost_study = None
     for s in studies:
         name = (s.get("name") or s.get("title") or "").lower()
         if "gom" in name or "kola" in name or "sido" in name:
             gom_study = s
-            break
+        elif "ghost" in name:
+            ghost_study = s
 
     if not gom_study:
         # Logger les noms d'études disponibles pour aider au diagnostic
@@ -417,6 +474,7 @@ def parse_gom_study(raw: Dict[str, Any], symbol: str = SYMBOL) -> Optional[Dict[
         return None
 
     vals = gom_study.get("values") or gom_study.get("plots") or {}
+    ghost_vals = (ghost_study.get("values") or ghost_study.get("plots") or {}) if ghost_study else {}
 
     score_buy = _val_from_study(vals, "score_buy", "Score Buy", "BUY score")
     score_sell = _val_from_study(vals, "score_sell", "Score Sell", "SELL score")
@@ -452,21 +510,37 @@ def parse_gom_study(raw: Dict[str, Any], symbol: str = SYMBOL) -> Optional[Dict[
     setup_tp2 = _val_from_study(vals, "setup_tp2", "setup_tp2")
     setup_rr = _val_from_study(vals, "setup_rr", "setup_rr")
     setup_confirm_code = _val_from_study(vals, "setup_confirm_code", "setup_confirm_code")
+    spike_tradable_raw = _val_from_study(vals, "spike_tradable", "spike_tradable")
+    imminence_pct = _val_from_study(vals, "imminence_pct", "imminence_pct")
+    spike_level_raw = _val_from_study(vals, "spike_level", "spike_level")
+    pre_spike_pct = _val_from_study(vals, "pre_spike_pct", "pre_spike_pct")
+    ob_bull_top = _val_from_study(vals, "ob_bull_top")
+    ob_bull_bot = _val_from_study(vals, "ob_bull_bot")
+    ob_bear_top = _val_from_study(vals, "ob_bear_top")
+    ob_bear_bot = _val_from_study(vals, "ob_bear_bot")
+
+    # GHOST OrderFlow — indicateur séparé "GHOST — OrderFlow Intelligence"
+    ghost_delta   = _val_from_study(ghost_vals, "ghost_delta")
+    ghost_cvd     = _val_from_study(ghost_vals, "ghost_cvd")
+    ghost_buypct  = _val_from_study(ghost_vals, "ghost_buypct")
+    ghost_compass = _val_from_study(ghost_vals, "ghost_compass")
+
     setup_confirm = ""
     if setup_confirm_code is not None:
-        c = int(round(setup_confirm_code))
+        c = _safe_int(setup_confirm_code)
         if c == 1:
             setup_confirm = "PIN_BAR_BULL"
         elif c == -1:
             setup_confirm = "PIN_BAR_BEAR"
     # Convertir gd (-1/0/1) en label BULL/BEAR/NEUT
     if tf_global_dir_raw is not None:
-        _gd = int(round(tf_global_dir_raw))
+        _gd = _safe_int(tf_global_dir_raw)
         tf_global_dir_label = "BULL" if _gd == 1 else "BEAR" if _gd == -1 else "NEUT"
     else:
         tf_global_dir_label = ""
     # Convertir 0-7 votes → 0-100%
-    tf_global_strength_pct = int(round((tf_global_strength or 0) / 7.0 * 100))
+    _str_raw = float(tf_global_strength or 0)
+    tf_global_strength_pct = _safe_int(_str_raw / 7.0 * 100 if math.isfinite(_str_raw) else 0)
 
     quote_payload = raw.get("quote") or {}
     price = None
@@ -477,7 +551,7 @@ def parse_gom_study(raw: Dict[str, Any], symbol: str = SYMBOL) -> Optional[Dict[
 
     # ── Mode exact : plots Pine (identique au tableau TV) ──
     if score_buy is not None and score_sell is not None:
-        vnum = int(verdict_num) if verdict_num is not None else 0
+        vnum = _safe_int(verdict_num)
         verdict = _verdict_text_from_num(vnum)
         gap = verdict_gap if verdict_gap is not None else abs(score_buy - score_sell)
         kola_state = "---"
@@ -493,8 +567,8 @@ def parse_gom_study(raw: Dict[str, Any], symbol: str = SYMBOL) -> Optional[Dict[
             "score_buy": round(score_buy, 1),
             "score_sell": round(score_sell, 1),
             "spike_pct": round(spike_pct or 0, 1),
-            "rsi": int(rsi or 50),
-            "st_dir": int(st_dir or 0),
+            "rsi": _safe_int(rsi, 50),
+            "st_dir": _safe_int(st_dir),
             "entry_quality": round(entry_quality or 0, 1),
             "coherence_pct": round(coherence_pct or 0, 1),
             "kola_buy": kola_buy or 0,
@@ -510,22 +584,31 @@ def parse_gom_study(raw: Dict[str, Any], symbol: str = SYMBOL) -> Optional[Dict[
             # TF Global — fixe la confiance à 0% dans TradeManager/dashboard
             "tf_global_dir": tf_global_dir_label,
             "tf_global_strength": tf_global_strength_pct,
-            "tf_bull_count": int(tf_bull_count or 0),
-            "tf_bear_count": int(tf_bear_count or 0),
-            "pred_bull": int(pred_bull or 0),
-            "pred_bear": int(pred_bear or 0),
-            "pred_neut": int(pred_neut or 0),
-            "pred_net": int(pred_net or 0),
-            "setup_dir": int(setup_dir or 0),
+            "tf_bull_count": _safe_int(tf_bull_count),
+            "tf_bear_count": _safe_int(tf_bear_count),
+            "pred_bull": _safe_int(pred_bull),
+            "pred_bear": _safe_int(pred_bear),
+            "pred_neut": _safe_int(pred_neut),
+            "pred_net": _safe_int(pred_net),
+            "setup_dir": _safe_int(setup_dir),
             "setup_entry": setup_entry or 0,
             "setup_sl": setup_sl or 0,
             "setup_tp1": setup_tp1 or 0,
             "setup_tp2": setup_tp2 or 0,
             "setup_rr": setup_rr or 0,
-            "setup_type": "OB_BULL" if setup_dir and int(setup_dir) > 0 else ("OB_BEAR" if setup_dir and int(setup_dir) < 0 else ""),
+            "setup_type": "OB_BULL" if setup_dir and _safe_int(setup_dir) > 0 else ("OB_BEAR" if setup_dir and _safe_int(setup_dir) < 0 else ""),
             "setup_confirm": setup_confirm,
-            "setup_confirm_code": int(setup_confirm_code or 0),
+            "setup_confirm_code": _safe_int(setup_confirm_code),
+            "ob_bull_top": ob_bull_top or 0,
+            "ob_bull_bot": ob_bull_bot or 0,
+            "ob_bear_top": ob_bear_top or 0,
+            "ob_bear_bot": ob_bear_bot or 0,
             "source": "tradingview",
+            # GHOST OrderFlow — None si indicateur absent du chart
+            "ghost_delta":   round(ghost_delta,   2) if ghost_delta   is not None else None,
+            "ghost_cvd":     round(ghost_cvd,     2) if ghost_cvd     is not None else None,
+            "ghost_buypct":  round(ghost_buypct,  1) if ghost_buypct  is not None else None,
+            "ghost_compass": round(ghost_compass, 1) if ghost_compass is not None else None,
         }
         if infer_tv_setup_from_gom:
             try:
@@ -537,8 +620,9 @@ def parse_gom_study(raw: Dict[str, Any], symbol: str = SYMBOL) -> Optional[Dict[
                 payload = apply_path_to_gom_record(payload)
             except Exception as e:
                 log.warning(f"path guide skipped: {e}")
+        payload = apply_spike_bc_override(payload, vals)
         payload["setup_valid"] = bool(
-            int(payload.get("setup_dir") or 0) != 0
+            _safe_int(payload.get("setup_dir")) != 0
             and float(payload.get("setup_entry") or 0) > 0
         )
         return payload
@@ -632,6 +716,9 @@ def _persist_gom_signal_file(payload: Dict[str, Any]) -> None:
             "setup_tp2": payload.get("setup_tp2"),
             "setup_rr": payload.get("setup_rr"),
             "setup_dir": payload.get("setup_dir"),
+            "spike_tradable": payload.get("spike_tradable"),
+            "imminence_pct": payload.get("imminence_pct"),
+            "spike_level": payload.get("spike_level"),
         }
         out.write_text(json.dumps(slim, indent=2), encoding="utf-8")
     except Exception as e:
@@ -685,28 +772,71 @@ def _refocus_tv_chart(cdp_port: Optional[int]) -> None:
 
 def _read_via_mcp_bridge() -> Optional[Dict[str, Any]]:
     """
-    Lit les study values via le MCP TradingView (kola) directement depuis Python.
-    Plus fiable que le CLI Node — lit directement le chart actif.
+    Lit les study values GOM depuis /bridge/mcp-study-values (store en mémoire AI server).
+    Ne retourne des données que si le store contient un verdict récent (< 5 min).
     """
     try:
-        # Appel direct à l'endpoint MCP via l'AI server bridge
         import requests as _req
-        # Essai 1 : endpoint bridge dédié
         r = _req.post(f"{AI_SERVER_URL}/bridge/mcp-study-values",
-                      json={"study_filter": "GOM"}, timeout=15)
-        if r.status_code == 200:
-            return r.json()
-        # Essai 2 : endpoint watchlist scan qui appelle le MCP
-        r2 = _req.post(f"{AI_SERVER_URL}/bridge/mcp-watchlist-scan",
-                       json={"symbols": ["XAUUSD"]}, timeout=30)
-        if r2.status_code == 200:
-            data = r2.json()
-            # Extraire les study values si présentes
-            studies = data.get("studies") or data.get("all_results")
-            if studies:
-                return {"studies": studies, "success": True}
+                      json={"symbol": SYMBOL}, timeout=10)
+        if r.status_code != 200:
+            return None
+        data = r.json()
+        if not data.get("success"):
+            return None
+        # Vérifier fraîcheur du timestamp (< 60s) — timezone-aware
+        ts = data.get("timestamp")
+        if ts:
+            try:
+                from datetime import datetime, timezone, timedelta
+                ts_str = ts.replace("Z", "+00:00")
+                ts_dt = datetime.fromisoformat(ts_str)
+                # Normaliser en UTC: si naïf, supposer heure locale (UTC+1/+2)
+                if ts_dt.tzinfo is None:
+                    import time as _time
+                    utc_offset = timedelta(seconds=-_time.timezone)
+                    ts_dt = ts_dt.replace(tzinfo=timezone(utc_offset))
+                age = (datetime.now(timezone.utc) - ts_dt).total_seconds()
+                if age > 60:
+                    log.debug(f"MCP bridge stale ({int(age)}s) — ignorer, forcer lecture CLI directe")
+                    return None
+            except Exception:
+                pass
+        studies = data.get("studies", [])
+        if not studies:
+            return None
+        return {"studies": studies, "success": True}
     except Exception as e:
         log.debug(f"MCP bridge non disponible: {e}")
+    return None
+
+
+def _read_via_mcp_reader_mjs(cdp_port: Optional[int] = None) -> Optional[Dict[str, Any]]:
+    """
+    Lit les study values directement via gom_mcp_reader.mjs (appel MCP natif).
+    Contourne le CLI Node index.js dont les études retournent un nom vide/?.
+    """
+    mjs_path = Path(__file__).parent / "gom_mcp_reader.mjs"
+    if not mjs_path.exists():
+        return None
+    port = cdp_port or _active_cdp_port or 9222
+    env = {**_os.environ, "CDP_PORT": str(port)}
+    try:
+        proc = subprocess.run(
+            ["node", str(mjs_path)],
+            capture_output=True, text=True, timeout=20,
+            cwd=str(Path(__file__).parent),
+            env=env,
+        )
+        stdout = proc.stdout.strip()
+        if not stdout:
+            return None
+        data = json.loads(stdout)
+        if not data.get("success"):
+            return None
+        return data
+    except Exception as e:
+        log.debug(f"gom_mcp_reader.mjs: {e}")
     return None
 
 
@@ -729,8 +859,17 @@ def read_and_push(symbol: str = SYMBOL) -> bool:
 
     _ensure_tv_m1(cdp_port)
 
-    # ── Étape 2 : lire les données — MCP bridge prioritaire ──
-    # Essayer d'abord via MCP bridge (données directes du chart actif, plus fiables)
+    # ── Étape 2a : lire via gom_mcp_reader.mjs (MCP natif, plus fiable que CLI) ──
+    mjs_data = _read_via_mcp_reader_mjs(cdp_port)
+    if mjs_data:
+        payload = parse_gom_study(mjs_data, symbol=symbol)
+        if payload:
+            _persist_gom_signal_file(payload)
+            ok = push_gom_verdict(payload)
+            log.info(f"✅ MJS reader → verdict={payload['verdict']} buy={payload['score_buy']} sell={payload['score_sell']}")
+            return ok
+
+    # ── Étape 2b : lire les données — MCP bridge (store en mémoire, frais < 5 min) ──
     mcp_data = _read_via_mcp_bridge()
     if mcp_data:
         log.debug("✅ Données via MCP bridge")
@@ -841,7 +980,7 @@ def main() -> None:
             log.info("⏹️ Arrêt")
             break
         except Exception as e:
-            log.error(f"❌ Erreur inattendue: {e}")
+            log.error(f"❌ Erreur inattendue: {e}\n{traceback.format_exc()}")
         time.sleep(args.interval)
 
 

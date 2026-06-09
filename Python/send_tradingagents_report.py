@@ -7,6 +7,7 @@ Converti depuis Word vers Markdown
 
 import sys
 import io
+import time
 import requests
 from pathlib import Path
 try:
@@ -21,42 +22,70 @@ if sys.platform == "win32":
 
 WHATSAPP_API_URL = "https://psychobot-1si7.onrender.com"
 PHONE_NUMBER = "+2290196911346"
+_MAX_RETRIES = 3
+_RETRY_DELAYS = [5, 15, 30]  # secondes entre tentatives (wake-up Render ~15-30s)
 
 
-def send_whatsapp_message(message: str) -> bool:
-    """Envoie un message WhatsApp via PsychoBot."""
+def _wake_up_server() -> bool:
+    """Ping /health pour réveiller le serveur Render avant un vrai appel."""
     try:
-        response = requests.post(
-            f"{WHATSAPP_API_URL}/send-message",
-            json={"phone": PHONE_NUMBER, "message": message},
-            timeout=30
-        )
-
-        if response.status_code == 200:
-            result = response.json()
-            if result.get("success"):
-                print(f"✅ Message envoyé sur WhatsApp")
-                return True
-            else:
-                print(f"❌ Erreur: {result.get('error')}")
-                return False
-        else:
-            print(f"❌ HTTP {response.status_code}")
-            return False
-
-    except Exception as e:
-        print(f"❌ Exception: {e}")
+        r = requests.get(f"{WHATSAPP_API_URL}/health", timeout=35)
+        return r.status_code < 500
+    except Exception:
         return False
 
 
-def send_whatsapp_file(file_path: str, caption: str = "") -> bool:
-    """Envoie un fichier (Word, PDF, etc.) via PsychoBot."""
-    try:
-        # Upload le fichier vers un service temporaire (ex: file.io, tmpfiles.org)
-        # Pour simplicité, on va utiliser requests-toolbelt pour multipart
-        from requests_toolbelt.multipart.encoder import MultipartEncoder
+def _post_with_retry(url: str, payload: dict, timeout: int = 60) -> requests.Response | None:
+    """POST avec retry automatique sur RemoteDisconnected / ConnectionError (Render sleep)."""
+    for attempt in range(_MAX_RETRIES):
+        try:
+            return requests.post(url, json=payload, timeout=timeout)
+        except (requests.exceptions.ConnectionError,
+                requests.exceptions.ChunkedEncodingError) as e:
+            if attempt < _MAX_RETRIES - 1:
+                delay = _RETRY_DELAYS[attempt]
+                print(f"⚠️  Serveur déconnecté (tentative {attempt+1}/{_MAX_RETRIES}) — réveil dans {delay}s…")
+                time.sleep(delay)
+                _wake_up_server()
+                time.sleep(3)
+            else:
+                print(f"❌ Échec après {_MAX_RETRIES} tentatives: {e}")
+                return None
+    return None
 
-        # Option 1: Upload vers tmpfiles.org (7 jours de rétention)
+
+def send_whatsapp_message(message: str) -> bool:
+    """Envoie un message WhatsApp via PsychoBot (retry si Render dort)."""
+    response = _post_with_retry(
+        f"{WHATSAPP_API_URL}/send-message",
+        {"phone": PHONE_NUMBER, "message": message},
+        timeout=40
+    )
+    if response is None:
+        return False
+    try:
+        if response.status_code == 200:
+            result = response.json()
+            if result.get("success"):
+                print("✅ Message envoyé sur WhatsApp")
+                return True
+            print(f"❌ Erreur: {result.get('error')}")
+        else:
+            print(f"❌ HTTP {response.status_code}")
+    except Exception as e:
+        print(f"❌ Exception: {e}")
+    return False
+
+
+def send_whatsapp_file(file_path: str, caption: str = "") -> bool:
+    """Envoie un fichier (Word) via PsychoBot — upload tmpfiles.org + retry Render."""
+    try:
+        # Réveiller le serveur Render avant l'upload pour éviter le délai en milieu de requête
+        print("⏳ Wake-up PsychoBot…")
+        _wake_up_server()
+        time.sleep(2)
+
+        # Upload vers tmpfiles.org (7 jours)
         with open(file_path, 'rb') as f:
             files = {'file': (Path(file_path).name, f, 'application/octet-stream')}
             upload_response = requests.post(
@@ -74,18 +103,13 @@ def send_whatsapp_file(file_path: str, caption: str = "") -> bool:
             print(f"❌ Échec upload: {upload_data}")
             return False
 
-        # Extraire l'URL du fichier uploadé
-        file_url = upload_data['data']['url']
-        # tmpfiles.org renvoie une URL HTML, on doit la convertir en URL directe
-        # Format: https://tmpfiles.org/ABC123 → https://tmpfiles.org/dl/ABC123
-        file_url = file_url.replace('tmpfiles.org/', 'tmpfiles.org/dl/')
-
+        file_url = upload_data['data']['url'].replace('tmpfiles.org/', 'tmpfiles.org/dl/')
         print(f"✅ Fichier uploadé: {file_url}")
 
-        # Envoyer via PsychoBot
-        response = requests.post(
+        # Envoyer via PsychoBot avec retry
+        response = _post_with_retry(
             f"{WHATSAPP_API_URL}/send-file",
-            json={
+            {
                 "phone": PHONE_NUMBER,
                 "message": caption,
                 "file_url": file_url,
@@ -94,18 +118,18 @@ def send_whatsapp_file(file_path: str, caption: str = "") -> bool:
             },
             timeout=60
         )
+        if response is None:
+            return False
 
         if response.status_code == 200:
             result = response.json()
             if result.get("success"):
-                print(f"✅ Fichier envoyé sur WhatsApp")
+                print("✅ Fichier envoyé sur WhatsApp")
                 return True
-            else:
-                print(f"❌ Erreur: {result.get('error')}")
-                return False
+            print(f"❌ Erreur: {result.get('error')}")
         else:
             print(f"❌ HTTP {response.status_code}")
-            return False
+        return False
 
     except Exception as e:
         print(f"❌ Exception: {e}")

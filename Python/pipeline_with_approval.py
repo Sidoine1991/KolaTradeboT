@@ -35,6 +35,17 @@ from datetime import datetime, date
 from pathlib import Path
 from typing import List, Dict, Optional
 
+# Signal refiner — boucle de rétroaction TV → signal qualité
+try:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from signal_refiner import refine_signal, MIN_QUALITY_SCORE
+    _REFINER_AVAILABLE = True
+except ImportError as _ref_err:
+    _REFINER_AVAILABLE = False
+    log_tmp = logging.getLogger("pipeline_approval")
+    log_tmp.warning("signal_refiner non disponible: %s", _ref_err)
+    MIN_QUALITY_SCORE = 45
+
 _HERE  = Path(__file__).resolve().parent
 _ROOT  = _HERE.parent
 _LOG_DIR = _ROOT / "logs"
@@ -86,6 +97,19 @@ def get_lot_min(symbol: str) -> float:
     if any(s.startswith(p) for p in ("1HZ", "R_", "V10", "V25", "V50", "V75", "V100", "VOLATILITY")):
         return 0.10
     return 0.01
+
+# ---------------------------------------------------------------------------
+# Symboles NON disponibles chez Deriv (filtrés du pipeline)
+# ---------------------------------------------------------------------------
+_DERIV_EXCLUDED = {
+    "US500", "NAS100", "US30", "SPX500", "SP500", "NASDAQ",
+    "DAX", "FTSE", "CAC40", "NIKKEI", "HSI",
+    "^GSPC", "^DJI", "^IXIC", "^GDAXI",
+}
+
+def is_available_on_deriv(symbol: str) -> bool:
+    s = symbol.upper().replace("DERIV:", "").replace("_INDEX", "").replace(" ", "")
+    return s not in _DERIV_EXCLUDED
 
 # ---------------------------------------------------------------------------
 # WhatsApp helpers
@@ -193,6 +217,7 @@ def scan_top_n_with_prices(top_n: int) -> List[Dict]:
         if r.get("success")
         and r.get("direction") in ("BUY", "SELL")
         and is_valid_direction(r.get("symbol", ""), r.get("direction", ""))
+        and is_available_on_deriv(r.get("symbol", ""))
     ]
     # Seuil adaptatif : préférer >= 5.0, sinon prendre les meilleurs disponibles
     high = [r for r in valid if r.get("confluence_score", 0) >= 5.0]
@@ -215,16 +240,7 @@ def run_trading_agents(symbol: str, direction: str, trade_date: str) -> Optional
     Retourne dict avec entry, sl, tp, lot, rapport_path ou None si échec.
     """
     try:
-        # Ajouter le venv TradingAgents au path
-        ta_repo = os.getenv("AI_TRADINGAGENTS_REPO_PATH",
-                            r"D:\Dev\Depot Github\TradingAgents-main")
-        venv_py = Path(ta_repo) / ".venv" / "Scripts" / "python.exe"
-        if str(_HERE) not in sys.path:
-            sys.path.insert(0, str(_HERE))
-        if ta_repo not in sys.path:
-            sys.path.insert(0, ta_repo)
-
-        # Charger .env
+        # Charger .env AVANT d'importer tradbot_bridge
         env_file = _ROOT / ".env"
         if env_file.exists():
             for line in env_file.read_text(encoding="utf-8").splitlines():
@@ -232,11 +248,27 @@ def run_trading_agents(symbol: str, direction: str, trade_date: str) -> Optional
                     k, _, v = line.partition("=")
                     os.environ.setdefault(k.strip(), v.strip())
 
-        from tradbot_bridge import (
-            run_quick, _normalize_rating, _extract_order_params,
-            compute_signals, compute_entry_levels, compute_lot_sizes,
-            save_report_word, _mt5_to_yfinance, push_pending_order,
-        )
+        # Ajouter le venv TradingAgents au path — TEMPORAIRE pour imports
+        ta_repo = os.getenv("AI_TRADINGAGENTS_REPO_PATH",
+                            r"D:\Dev\Depot Github\TradingAgents-main")
+        if str(_HERE) not in sys.path:
+            sys.path.insert(0, str(_HERE))
+
+        _ta_in_path = ta_repo in sys.path
+        if not _ta_in_path:
+            sys.path.insert(0, ta_repo)
+
+        try:
+            # 🔧 Import tradbot_bridge (avec ta_repo temporairement en path)
+            from tradbot_bridge import (
+                run_quick, _normalize_rating, _extract_order_params,
+                compute_signals, compute_entry_levels, compute_lot_sizes,
+                save_report_word, _mt5_to_yfinance, push_pending_order,
+            )
+        finally:
+            # 🔧 Retirer ta_repo du path APRÈS imports pour éviter numpy local
+            if not _ta_in_path and ta_repo in sys.path:
+                sys.path.remove(ta_repo)
 
         # Nettoyer préfixe TV avant conversion (DERIV:BOOM_1000_INDEX → Boom 1000 Index)
         clean_sym = _tv_to_mt5(symbol)  # ex: "Boom 1000 Index"
@@ -329,6 +361,23 @@ def run_trading_agents(symbol: str, direction: str, trade_date: str) -> Optional
             if atr <= 0 and cached.get("atr"):
                 atr = float(cached["atr"])
 
+        # Source 5 : yfinance (fallback crypto/forex si toutes les sources précédentes échouent)
+        if cp <= 0 and vendor == "yfinance":
+            try:
+                import yfinance as yf  # type: ignore
+                tkr = yf.Ticker(ticker_id)
+                fast = tkr.fast_info
+                cp_yf = float(getattr(fast, "last_price", 0) or 0)
+                if cp_yf > 0:
+                    cp = cp_yf
+                    if atr <= 0:
+                        hist = tkr.history(period="5d", interval="1d")
+                        if not hist.empty:
+                            atr = float((hist["High"] - hist["Low"]).mean())
+                    log.info("  [yfinance ✅] %s: prix=%.5f ATR=%.5f", symbol, cp, atr)
+            except Exception as _yf_err:
+                log.warning("  [yfinance] %s: %s", symbol, _yf_err)
+
         # Calculer signaux avec le meilleur prix disponible
         signals = []
         if cp > 0 and atr > 0:
@@ -347,23 +396,31 @@ def run_trading_agents(symbol: str, direction: str, trade_date: str) -> Optional
         entry_raw = sig0.get("entry_price") or params.get("entry_price")
         if entry_raw and cp > 0:
             ecart = abs(float(entry_raw) - cp) / cp
-            if ecart > 0.20:  # >20% d'écart = prix extrait du texte (ex: objectif $100k)
-                log.warning("  [TA] %s: entry=%.5f aberrant vs prix=%.5f (%.0f%%) — recalculé",
+            if ecart > 0.20:  # >20% d'écart = prix extrait du texte (ex: objectif $100k BTC)
+                log.warning("  [TA] %s: entry=%.5f aberrant vs prix=%.5f (%.0f%%) — rejeté",
                             symbol, float(entry_raw), cp, ecart * 100)
                 entry_raw = None  # forcer recalcul depuis prix courant
         entry = entry_raw if entry_raw else (cp if cp > 0 else None)
+
+        # Si après tous les fallbacks on n'a toujours pas de prix, skip le signal
+        if not entry or float(entry) <= 0:
+            log.warning("  [TA] %s: prix non disponible — signal rejeté (entry invalide)", symbol)
+            return None
+
+        ref = cp if cp > 0 else float(entry)  # référence pour ATR et SL/TP
+
         sl    = sig0.get("stop_loss")   or params.get("stop_loss")
         tp    = sig0.get("take_profit") or params.get("take_profit")
 
-        # Recalculer SL/TP si entry corrigée mais manquants
-        if entry and cp > 0 and (not sl or not tp):
-            atr_f = atr if atr > 0 else cp * 0.005
+        # Recalculer SL/TP si manquants (fonctionne même quand cp=0)
+        if not sl or not tp:
+            atr_f = atr if atr > 0 else ref * 0.005
             is_buy = rec == "BUY"
             if not sl:
-                sl = round(entry - atr_f * 1.5, 5) if is_buy else round(entry + atr_f * 1.5, 5)
+                sl = round(float(entry) - atr_f * 1.5, 5) if is_buy else round(float(entry) + atr_f * 1.5, 5)
             if not tp:
-                sl_dist = abs(entry - sl)
-                tp = round(entry + sl_dist * 2.0, 5) if is_buy else round(entry - sl_dist * 2.0, 5)
+                sl_dist = abs(float(entry) - float(sl))
+                tp = round(float(entry) + sl_dist * 2.0, 5) if is_buy else round(float(entry) - sl_dist * 2.0, 5)
 
         lot   = get_lot_min(symbol)
 
@@ -422,8 +479,8 @@ def run_trading_agents(symbol: str, direction: str, trade_date: str) -> Optional
                             str(final_st.get("trader_investment_plan") or ""))[:500],
         }
 
-    except Exception as e:
-        log.error("  [TA] Erreur %s: %s", symbol, e, exc_info=True)
+    except (Exception, SystemExit) as e:
+        log.error("  [TA] Erreur %s: %s", symbol, e, exc_info=False)
         return None
 
 # ---------------------------------------------------------------------------
@@ -472,9 +529,55 @@ def build_approval_message(idx: int, total: int, ta: Dict) -> str:
 # ---------------------------------------------------------------------------
 # Envoyer l'ordre validé à TradeManager
 # ---------------------------------------------------------------------------
+def _check_gom_before_order(symbol: str, direction: str, exec_type: str) -> Optional[str]:
+    """
+    Vérifie le verdict GOM avant de placer un ordre.
+    Retourne None si OK, sinon un message d'erreur.
+    Les ordres limit/stop sont toujours autorisés (entrée différée — GOM peut changer).
+    """
+    if exec_type in ("limit", "stop"):
+        return None  # Ordre différé — pas de gate GOM
+    try:
+        clean = _tv_to_mt5(symbol)
+        rg = requests.get(f"{AI_SERVER}/gom-verdict", params={"symbol": clean}, timeout=5)
+        if rg.status_code != 200:
+            return None  # Serveur absent → laisser passer
+        gd = rg.json()
+        if not gd.get("ok"):
+            return f"GOM indisponible ({gd.get('message','?')}) — ordre market bloqué"
+        vnum = int(gd.get("verdict_num", 0))
+        verdict = gd.get("verdict", "WAIT")
+        if vnum == 0:
+            return f"GOM=WAIT (vnum=0) — ordre market bloqué. Attendre BUY/SELL confirmé."
+        if direction == "BUY" and vnum < 0:
+            return f"GOM={verdict} (vnum={vnum}) — direction opposée à BUY, ordre bloqué"
+        if direction == "SELL" and vnum > 0:
+            return f"GOM={verdict} (vnum={vnum}) — direction opposée à SELL, ordre bloqué"
+        log.info("  [GOM gate] %s vnum=%d (%s) → OK pour %s market", clean, vnum, verdict, direction)
+        return None
+    except Exception as e:
+        log.warning("  [GOM gate] Erreur fetch: %s — laisser passer", e)
+        return None
+
+
 def place_order(ta: Dict) -> bool:
     # Utiliser le nom MT5 propre (ex: "Boom 500 Index") pas le ticker TV (DERIV:BOOM_500_INDEX)
     mt5_symbol = ta.get("clean_sym") or _tv_to_mt5(ta["symbol"])
+    # execution_type : depuis refiner (raffiné) ou confirmed, jamais market par défaut aveugle
+    exec_type = (
+        ta.get("execution_type")
+        or (ta.get("confirmed") or {}).get("execution_type")
+        or "market"
+    )
+    # ── Gate GOM : bloquer les ordres market si GOM=WAIT ou direction opposée ──
+    gom_block = _check_gom_before_order(ta["symbol"], ta["direction"], exec_type)
+    if gom_block:
+        log.warning("  [GOM gate] 🚫 Ordre bloqué — %s", gom_block)
+        send_whatsapp(f"🚫 *{ta['symbol']}* ordre bloqué\n_{gom_block}_")
+        return False
+    quality_note = ""
+    if ta.get("quality_score"):
+        quality_note = f" | Score={ta['quality_score']}/100 ({ta.get('quality_label','?')})"
     payload = {
         "symbol":         mt5_symbol,
         "action":         ta["direction"].lower(),
@@ -483,10 +586,10 @@ def place_order(ta: Dict) -> bool:
         "stop_loss":      ta.get("sl"),
         "take_profit":    ta.get("tp"),
         "lot":            ta.get("lot"),
-        "execution_type": ta["confirmed"].get("execution_type", "market"),
+        "execution_type": exec_type,
         "confidence":     0.80,
-        "source":         "pipeline_approval",
-        "reasoning":      ta.get("reasoning", ""),
+        "source":         "pipeline",
+        "reasoning":      (ta.get("refiner_summary") or ta.get("reasoning") or "") + quality_note,
         "status":         "ready",
     }
     try:
@@ -495,10 +598,45 @@ def place_order(ta: Dict) -> bool:
         log.info("  ✅ Ordre placé: %s %s @ %s SL=%s TP=%s lot=%s",
                  ta["direction"], ta["symbol"],
                  ta.get("entry"), ta.get("sl"), ta.get("tp"), ta.get("lot"))
+        # Écrire pipeline_whitelist.json dans MT5 Common/Files
+        _write_mt5_whitelist(mt5_symbol, ta["direction"])
         return True
     except Exception as e:
         log.error("  ❌ Ordre échoué %s: %s", ta["symbol"], e)
         return False
+
+
+def _write_mt5_whitelist(symbol: str, direction: str) -> None:
+    """
+    Écrit pipeline_whitelist.json dans MT5 Common/Files.
+    Le TradeManager lit ce fichier pour autoriser l'exécution en PipelineOnlyMode.
+    """
+    import json as _json
+    import pathlib as _pl
+    from datetime import datetime as _dt
+    wl_path = _pl.Path(
+        os.getenv("MT5_COMMON_FILES",
+                  r"C:\Users\USER\AppData\Roaming\MetaQuotes\Terminal\Common\Files")
+    ) / "pipeline_whitelist.json"
+    try:
+        # Charger whitelist existante et ajouter le symbole
+        existing = []
+        if wl_path.exists():
+            try:
+                existing = _json.loads(wl_path.read_text(encoding="utf-8")).get("symbols", [])
+            except Exception:
+                existing = []
+        # Dédupliquer
+        syms_set = {s["symbol"] for s in existing}
+        if symbol not in syms_set:
+            existing.append({"symbol": symbol, "direction": direction,
+                              "added_at": _dt.utcnow().isoformat()})
+        data = {"generated_at": _dt.utcnow().isoformat(), "symbols": existing}
+        wl_path.parent.mkdir(parents=True, exist_ok=True)
+        wl_path.write_text(_json.dumps(data, indent=2), encoding="utf-8")
+        log.info("  [Whitelist] %s ajouté → %s", symbol, wl_path.name)
+    except Exception as wl_err:
+        log.warning("  [Whitelist] Échec écriture: %s", wl_err)
 
 # ---------------------------------------------------------------------------
 # Envoyer rapport Word par WhatsApp
@@ -573,9 +711,6 @@ def run(top_n: int = 5, timeout: int = APPROVAL_TIMEOUT_SEC, auto: bool = False)
             send_whatsapp(f"🚫 *{sym}*: Direction {ta_dir} invalide — rejeté automatiquement")
             continue
 
-        # Envoyer rapport Word
-        send_report_whatsapp(ta)
-
         # Rejeter HOLD — aucun ordre à placer
         if ta_dir not in ("BUY", "SELL"):
             log.warning("  ⏭ %s: TA retourne '%s' — pas d'ordre placé", sym, ta_dir)
@@ -583,15 +718,97 @@ def run(top_n: int = 5, timeout: int = APPROVAL_TIMEOUT_SEC, auto: bool = False)
             send_whatsapp(f"⏭ *{sym}*: Signal TA = {ta_dir} — pas d'ordre")
             continue
 
+        # ── Phase 2b — Fetch indicateurs TradingView MCP ─────────────────────
+        tv_raw_data: Dict = {}
+        if _REFINER_AVAILABLE:
+            log.info("  Fetch indicateurs TradingView MCP...")
+            try:
+                sys.path.insert(0, str(_ROOT / "python"))
+                from tv_mcp_client import fetch_tradingview_analysis  # type: ignore
+                clean_sym_tv = _tv_to_mt5(sym)
+                cat = clean_sym_tv.upper()
+                mode = "both" if ("BOOM" in cat or "CRASH" in cat) else "smc"
+                tv_raw_data = fetch_tradingview_analysis(clean_sym_tv, mode=mode)
+                if tv_raw_data.get("success"):
+                    smc_d = tv_raw_data.get("smc") or {}
+                    rsi_v = (smc_d.get("rsi") or {}).get("value")
+                    bias_d = (smc_d.get("bias") or {}).get("direction", "?")
+                    log.info("  [TV] Bias=%s RSI=%s OB=%d FVG=%d",
+                             bias_d,
+                             f"{rsi_v:.1f}" if rsi_v else "N/A",
+                             len(smc_d.get("order_blocks") or []),
+                             len(smc_d.get("fvg") or []))
+                else:
+                    log.warning("  [TV] Indisponible: %s", tv_raw_data.get("error", "CDP off"))
+            except Exception as _tv_err:
+                log.warning("  [TV] Erreur fetch: %s", _tv_err)
+
+        # ── Phase 2c — Signal Refiner (boucle TV → qualité → levels) ─────────
+        refined: Optional[Dict] = None
+        if _REFINER_AVAILABLE and ta_dir in ("BUY", "SELL"):
+            log.info("  Raffinage signal (TV + TA)...")
+            try:
+                refined = refine_signal(
+                    ta_result=ta,
+                    tv_raw=tv_raw_data,
+                    direction=ta_dir,
+                    symbol=_tv_to_mt5(sym),
+                )
+                q = refined["quality_score"]
+                label = refined["quality_label"]
+                log.info("  [Refiner] Score=%d/100 (%s) | RR=1:%s | exec=%s",
+                         q, label, refined.get("rr"), refined.get("execution_type"))
+                log.info("  [Refiner] Entry=%.5f SL=%.5f TP=%.5f Lot=$20:%.2f",
+                         refined.get("entry", 0), refined.get("sl", 0),
+                         refined.get("tp", 0), refined.get("recommended_lot", 0.01))
+
+                if not refined["accept"]:
+                    log.warning("  [Refiner] SIGNAL REJETÉ: %s", refined["reject_reason"])
+                    orders_skipped.append(sym)
+                    send_whatsapp(
+                        f"🚫 *{sym}* — Signal rejeté par refiner\n"
+                        f"Score: {q}/100 (min={MIN_QUALITY_SCORE})\n"
+                        f"_{refined['reject_reason'][:200]}_"
+                    )
+                    continue
+
+                # Mettre à jour ta avec les niveaux raffinés
+                ta["entry"]          = refined["entry"]
+                ta["sl"]             = refined["sl"]
+                ta["tp"]             = refined["tp"]
+                ta["lot"]            = refined["recommended_lot"]
+                ta["execution_type"] = refined["execution_type"]
+                ta["quality_score"]  = q
+                ta["quality_label"]  = label
+                ta["rr"]             = refined["rr"]
+                ta["refiner_summary"] = refined["summary"]
+
+                # Notifier la qualité sur WhatsApp
+                qual_icon = "🟢" if label == "FORT" else ("🟡" if label == "STANDARD" else "🟠")
+                send_whatsapp(
+                    f"{qual_icon} *Signal {sym} raffiné — {label} ({q}/100)*\n"
+                    f"{ta_dir} | Entry: {refined['entry']:.4f} | SL: {refined['sl']:.4f} | TP: {refined['tp']:.4f}\n"
+                    f"RR 1:{refined['rr']} | Lot $50: {refined['recommended_lot']}\n"
+                    f"_{'; '.join(refined['tv_reasons_pos'][:2]) or 'Pas de raisons TV'}_"
+                )
+
+            except Exception as _ref_err:
+                log.warning("  [Refiner] Erreur: %s — utilisation signal TA brut", _ref_err)
+
+        # Envoyer rapport Word (avec données raffinées si disponibles)
+        send_report_whatsapp(ta)
+
         if auto:
             # Mode auto — pas de confirmation
             log.info("  Mode AUTO — placement direct de l'ordre")
             if place_order(ta):
                 orders_placed.append(sym)
+                q_str = f" | Score: {ta.get('quality_score','?')}/100" if ta.get('quality_score') else ""
                 send_whatsapp(
                     f"✅ *Ordre placé automatiquement*\n"
-                    f"{ta_dir} *{sym}*\n"
-                    f"Entry: {ta.get('entry')} | SL: {ta.get('sl')} | TP: {ta.get('tp')} | Lot: {ta.get('lot')}"
+                    f"{ta_dir} *{sym}*{q_str}\n"
+                    f"Entry: {ta.get('entry')} | SL: {ta.get('sl')} | TP: {ta.get('tp')} | Lot: {ta.get('lot')}\n"
+                    f"Type: {ta.get('execution_type','market')} | RR 1:{ta.get('rr','?')}"
                 )
             else:
                 orders_failed.append(sym)

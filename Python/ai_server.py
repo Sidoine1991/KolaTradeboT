@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+import sys, io
+if sys.stdout.encoding and sys.stdout.encoding.lower() != 'utf-8':
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 """
 Serveur IA pour TradBOT - Gestion des prédictions et analyses de marché
 Version: 2.1.0 - STABILISÉ
@@ -87,7 +92,7 @@ def validate_required_env_vars():
             f"❌ CRITICAL: Missing required environment variables: {', '.join(missing)}\n"
             f"Configure-les dans le dashboard Render (Environment) ou dans votre fichier .env"
         )
-    print("✅ Required environment variables configured for current deployment mode")
+    print("[OK] Required environment variables configured for current deployment mode")
 
 # === INPUT VALIDATION ===
 VALID_SYMBOL_PATTERN = re.compile(r'^[A-Z0-9_]{2,20}$')

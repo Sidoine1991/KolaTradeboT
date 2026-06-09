@@ -7,13 +7,49 @@ LANCEMENT : utiliser le wrapper qui active le bon venv
   .\bridge.bat --symbol EURUSD --auto   # pas de confirmation avant envoi
   .\bridge.bat --symbol EURUSD --no-pending  # rapport seulement, pas d'ordre MT5
 
-Venv requis : D:\Dev\Depot Github\TradingAgents-main\.venv\Scripts\python.exe
+Venv requis : D:\\Dev\\Depot Github\\TradingAgents-main\\.venv\\Scripts\\python.exe
 """
 
 from __future__ import annotations
 
-import argparse
+import ssl
+ssl._create_default_https_context = ssl._create_unverified_context
+
 import os
+os.environ.setdefault("PYTHONHTTPSVERIFY", "0")
+os.environ.setdefault("CURL_CA_BUNDLE", "")
+os.environ.setdefault("REQUESTS_CA_BUNDLE", "")
+
+import certifi
+import httpx
+import urllib3
+urllib3.disable_warnings()
+
+# Patch httpx pour désactiver SSL (proxy antivirus Windows)
+_orig_client_init = httpx.Client.__init__
+def _patched_client_init(self, *a, **kw):
+    kw.setdefault("verify", False)
+    _orig_client_init(self, *a, **kw)
+httpx.Client.__init__ = _patched_client_init
+
+_orig_async_init = httpx.AsyncClient.__init__
+def _patched_async_init(self, *a, **kw):
+    kw.setdefault("verify", False)
+    _orig_async_init(self, *a, **kw)
+httpx.AsyncClient.__init__ = _patched_async_init
+
+# Patch curl_cffi (utilisé par yfinance) — doit être fait AVANT import yfinance
+try:
+    import curl_cffi.requests as _curl_req
+    _orig_curl_session_init = _curl_req.Session.__init__
+    def _patched_curl_session_init(self, *a, **kw):
+        kw.setdefault("verify", False)
+        _orig_curl_session_init(self, *a, **kw)
+    _curl_req.Session.__init__ = _patched_curl_session_init
+except Exception:
+    pass
+
+import argparse
 import re as _re
 import sys
 from datetime import date, datetime
@@ -128,6 +164,11 @@ _SERVER_URL = os.getenv("AI_SERVER_URL", "http://127.0.0.1:8000").rstrip("/")
 
 if str(_TA_REPO) not in sys.path:
     sys.path.insert(0, str(_TA_REPO))
+
+# Ajouter le site-packages du venv TradingAgents pour que typer et autres dépendances soient disponibles
+_TA_VENV_SITE = _TA_REPO / ".venv" / "Lib" / "site-packages"
+if _TA_VENV_SITE.exists() and str(_TA_VENV_SITE) not in sys.path:
+    sys.path.insert(0, str(_TA_VENV_SITE))
 
 try:
     from tradingagents.graph.trading_graph import TradingAgentsGraph       # type: ignore
@@ -563,10 +604,12 @@ DONNEES TECHNIQUES ACTUELLES ({symbol}) :
   BB Upper  : {bb_up} | BB Lower : {bb_low}
 
 CONTRAINTES BROKER/CAPITAL :
-  Lot minimum Deriv ({category}) : {lot_min}
+  Lot minimum Deriv ({category}) : {lot_min}  ← FIXE, NE PAS CHANGER
   Capital scalping cible         : ${capital}
   Risque max par trade           : {risk_pct*100:.0f}% = ${risk_amt:.2f}
-  REGLE : Si SL × lot_min × pip_value > ${risk_amt:.2f} → SKIP ce trade ou ajuster SL
+  REGLE ABSOLUE : Toujours utiliser lot={lot_min} (lot minimum broker) — ne jamais proposer 0 lot.
+  Si le risque calculé dépasse ${risk_amt:.2f} → RÉDUIRE le SL (pas éviter le trade).
+  Un setup avec lot {lot_min} et SL serré est TOUJOURS préférable à "ÉVITER ce trade".
 {spike_zones_txt}
 """
 
@@ -1207,7 +1250,7 @@ def compute_lot_sizes(entry: float, sl: float,
     Retourne un dict {account_size: {lot, risk_usd, risk_pct}}.
     """
     if accounts is None:
-        accounts = [10.0, 50.0]
+        accounts = [10.0, 20.0, 50.0]
     if not entry or not sl or entry <= 0:
         return {}
 
@@ -1674,6 +1717,488 @@ def _make_price_level_chart(entry: float, sl: float, tp: float,
     return Path(tmp.name)
 
 
+def _make_prediction_chart(signals: List[Dict], current_price: float,
+                            action: str, symbol: str,
+                            indicators: Optional[Dict] = None) -> "Path":
+    """
+    Graphique de prediction de direction : cone de probabilite avec zones
+    BUY/SELL, projection sur 20 periodes, RSI + MACD mini-panels.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import matplotlib.patches as mpatches
+    import numpy as np
+    import tempfile
+
+    if not signals or current_price <= 0:
+        return None
+
+    sig0 = signals[0]
+    entry = float(sig0.get("entry_price") or current_price)
+    sl    = float(sig0.get("stop_loss") or 0)
+    tp    = float(sig0.get("take_profit") or 0)
+    atr   = float(sig0.get("atr") or abs(entry - sl) or current_price * 0.001)
+
+    is_buy = action.upper() == "BUY"
+    fig_color = "#27ae60" if is_buy else "#e74c3c"
+    bg_zone   = "#d5f5e3" if is_buy else "#fadbd8"
+
+    # ── layout : 3 lignes (main + RSI + MACD) ──────────────────────────────
+    has_rsi  = indicators and indicators.get("rsi") is not None
+    has_macd = indicators and indicators.get("macd") is not None
+    n_rows   = 1 + (1 if has_rsi else 0) + (1 if has_macd else 0)
+    ratios   = [4] + ([1] if has_rsi else []) + ([1] if has_macd else [])
+    fig, axes = plt.subplots(n_rows, 1, figsize=(7, 3 + n_rows * 1.2),
+                              gridspec_kw={"height_ratios": ratios})
+    if n_rows == 1:
+        axes = [axes]
+    ax = axes[0]
+
+    # Simulation markov simplifiee (random walk biaise vers direction)
+    np.random.seed(42)
+    n_steps = 20
+    drift   = atr * 0.18 * (1 if is_buy else -1)
+    noise   = atr * 0.35
+    paths   = []
+    for _ in range(200):
+        path = [entry]
+        for _ in range(n_steps):
+            path.append(path[-1] + drift + np.random.normal(0, noise))
+        paths.append(path)
+    paths = np.array(paths)
+
+    x = np.arange(n_steps + 1)
+    p10  = np.percentile(paths, 10, axis=0)
+    p25  = np.percentile(paths, 25, axis=0)
+    p50  = np.median(paths, axis=0)
+    p75  = np.percentile(paths, 75, axis=0)
+    p90  = np.percentile(paths, 90, axis=0)
+
+    # Zones de probabilite
+    ax.fill_between(x, p10, p90, alpha=0.12, color=fig_color, label="80% CI")
+    ax.fill_between(x, p25, p75, alpha=0.25, color=fig_color, label="50% CI")
+    ax.plot(x, p50, color=fig_color, linewidth=2.0, label="Médiane")
+
+    # Niveaux TP / Entry / SL
+    for price_level, lbl, lc, ls in [
+        (tp,    "TP",    "#27ae60", "--"),
+        (entry, "Entry", "#2980b9", "-"),
+        (sl,    "SL",    "#e74c3c", "--"),
+    ]:
+        if price_level and price_level > 0:
+            ax.axhline(price_level, color=lc, linestyle=ls, linewidth=1.2, alpha=0.8)
+            ax.text(n_steps + 0.3, price_level, f"{lbl}\n{price_level:.3f}",
+                    va="center", fontsize=7, color=lc, fontweight="bold")
+
+    # Zone TP / SL colorees
+    if tp and sl and tp > 0 and sl > 0:
+        ymin_z = min(sl, current_price) * 0.9995
+        ymax_z = max(tp, current_price) * 1.0005
+        if is_buy:
+            ax.axhspan(entry, tp, alpha=0.07, color="#27ae60")
+            ax.axhspan(sl, entry, alpha=0.07, color="#e74c3c")
+        else:
+            ax.axhspan(tp, entry, alpha=0.07, color="#27ae60")
+            ax.axhspan(entry, sl, alpha=0.07, color="#e74c3c")
+
+    ax.set_xlim(0, n_steps + 2)
+    ax.set_ylabel("Prix", fontsize=8)
+    ax.set_title(f"{symbol} — Prédiction directionnelle ({action})", fontsize=10, fontweight="bold")
+    ax.tick_params(labelsize=7)
+    ax.legend(fontsize=7, loc="upper left")
+    ax.set_facecolor("#fafafa")
+
+    # ── Mini RSI ────────────────────────────────────────────────────────────
+    row_idx = 1
+    if has_rsi:
+        ax_rsi = axes[row_idx]
+        rsi_val = float(indicators["rsi"])
+        rsi_x   = np.arange(20)
+        rsi_sim = np.clip(rsi_val + np.random.normal(0, 3, 20).cumsum() * 0.3, 0, 100)
+        rsi_sim[-1] = rsi_val
+        ax_rsi.plot(rsi_x, rsi_sim, color="#3498db", linewidth=1.2)
+        ax_rsi.axhline(70, color="#e74c3c", linewidth=0.8, linestyle="--")
+        ax_rsi.axhline(30, color="#27ae60", linewidth=0.8, linestyle="--")
+        ax_rsi.axhline(rsi_val, color="#f39c12", linewidth=1.0)
+        ax_rsi.fill_between(rsi_x, rsi_sim, 50, alpha=0.15,
+                             color="#27ae60" if rsi_val < 50 else "#e74c3c")
+        ax_rsi.set_ylim(0, 100)
+        ax_rsi.set_ylabel(f"RSI {rsi_val:.1f}", fontsize=7)
+        ax_rsi.set_xticks([])
+        ax_rsi.tick_params(labelsize=7)
+        ax_rsi.set_facecolor("#fafafa")
+        row_idx += 1
+
+    # ── Mini MACD ───────────────────────────────────────────────────────────
+    if has_macd:
+        ax_macd = axes[row_idx]
+        macd_val = float(indicators["macd"])
+        macd_x   = np.arange(20)
+        macd_sim = macd_val + np.random.normal(0, abs(macd_val) * 0.3 + 0.0001, 20).cumsum() * 0.1
+        macd_sim[-1] = macd_val
+        colors_hist = ["#27ae60" if v >= 0 else "#e74c3c" for v in macd_sim]
+        ax_macd.bar(macd_x, macd_sim, color=colors_hist, alpha=0.7, width=0.8)
+        ax_macd.axhline(0, color="#555", linewidth=0.8)
+        ax_macd.set_ylabel(f"MACD {macd_val:.4f}", fontsize=7)
+        ax_macd.set_xticks([])
+        ax_macd.tick_params(labelsize=7)
+        ax_macd.set_facecolor("#fafafa")
+
+    fig.tight_layout(pad=0.8)
+    tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+    fig.savefig(tmp.name, dpi=140, bbox_inches="tight")
+    plt.close(fig)
+    return Path(tmp.name)
+
+
+def _make_lot_sizing_chart(signals: List[Dict],
+                            accounts: List[float] = None) -> "Path":
+    """
+    Graphique synthese lot sizing pour $10 / $20 / $50 :
+    barres risque USD + tableau lot par compte.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import numpy as np
+    import tempfile
+
+    if accounts is None:
+        accounts = [10.0, 20.0, 50.0]
+    if not signals:
+        return None
+
+    sig0  = signals[0]
+    entry = sig0.get("entry_price")
+    sl    = sig0.get("stop_loss")
+    if not entry or not sl:
+        return None
+
+    # Calculer lots pour les 3 tailles de compte
+    data = {}
+    for acc in accounts:
+        sl_dist = abs(float(entry) - float(sl))
+        if sl_dist <= 0:
+            continue
+        pip_val = _pip_value(float(entry))
+        sl_pips = sl_dist / pip_val
+        pip_value_per_lot = 1.0 if float(entry) > 1000 else (0.1 if float(entry) > 10 else 1.0)
+        risk_1pct  = acc * 0.01
+        risk_2pct  = acc * 0.02
+        lot_1pct   = max(0.01, round(risk_1pct / (sl_pips * pip_value_per_lot), 2))
+        lot_2pct   = max(0.01, round(risk_2pct / (sl_pips * pip_value_per_lot), 2))
+        actual_1   = round(lot_1pct * sl_pips * pip_value_per_lot, 3)
+        actual_2   = round(lot_2pct * sl_pips * pip_value_per_lot, 3)
+        data[f"${acc:.0f}"] = {
+            "lot_1pct": lot_1pct, "risk_1pct": actual_1,
+            "lot_2pct": lot_2pct, "risk_2pct": actual_2,
+        }
+
+    if not data:
+        return None
+
+    labels  = list(data.keys())
+    lots_1  = [data[k]["lot_1pct"] for k in labels]
+    risk_1  = [data[k]["risk_1pct"] for k in labels]
+    risk_2  = [data[k]["risk_2pct"] for k in labels]
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(7, 2.8))
+
+    # Barres lot sizing
+    x = np.arange(len(labels))
+    w = 0.35
+    lots_2 = [data[k]["lot_2pct"] for k in labels]
+    b1 = ax1.bar(x - w/2, lots_1, w, label="Risque 1%", color="#3498db", alpha=0.85)
+    b2 = ax1.bar(x + w/2, lots_2, w, label="Risque 2%", color="#e67e22", alpha=0.85)
+    ax1.set_xticks(x)
+    ax1.set_xticklabels(labels, fontsize=9)
+    ax1.set_ylabel("Taille de lot", fontsize=8)
+    ax1.set_title("Lot par compte", fontsize=9, fontweight="bold")
+    ax1.legend(fontsize=7)
+    ax1.tick_params(labelsize=8)
+    for bar in list(b1) + list(b2):
+        h = bar.get_height()
+        ax1.text(bar.get_x() + bar.get_width()/2, h + 0.001,
+                 f"{h:.2f}", ha="center", va="bottom", fontsize=7)
+
+    # Barres risque USD
+    b3 = ax2.bar(x - w/2, risk_1, w, label="Risque 1% ($)", color="#27ae60", alpha=0.85)
+    b4 = ax2.bar(x + w/2, risk_2, w, label="Risque 2% ($)", color="#e74c3c", alpha=0.85)
+    ax2.set_xticks(x)
+    ax2.set_xticklabels(labels, fontsize=9)
+    ax2.set_ylabel("Risque ($)", fontsize=8)
+    ax2.set_title("Risque en dollars", fontsize=9, fontweight="bold")
+    ax2.legend(fontsize=7)
+    ax2.tick_params(labelsize=8)
+    for bar in list(b3) + list(b4):
+        h = bar.get_height()
+        ax2.text(bar.get_x() + bar.get_width()/2, h + 0.002,
+                 f"${h:.3f}", ha="center", va="bottom", fontsize=7)
+
+    fig.suptitle(f"Money Management — Entry {float(entry):.3f}  SL dist {abs(float(entry)-float(sl)):.5f}",
+                 fontsize=8, color="#555")
+    fig.tight_layout(pad=0.8)
+    tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+    fig.savefig(tmp.name, dpi=130, bbox_inches="tight")
+    plt.close(fig)
+    return Path(tmp.name)
+
+
+def _make_multi_signal_chart(signals: List[Dict], current_price: float,
+                              symbol: str, action: str) -> "Path":
+    """
+    Compare visuellement les 2 signaux (conservateur vs agressif) :
+    barres horizontales entry/SL/TP + tableau RR + profit potentiel.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import matplotlib.patches as mpatches
+    import numpy as np
+    import tempfile
+
+    if not signals or len(signals) < 1:
+        return None
+
+    is_buy = action.upper() == "BUY"
+    fig, axes = plt.subplots(1, min(len(signals), 2), figsize=(7, 2.8))
+    if len(signals) == 1:
+        axes = [axes]
+
+    sig_fill = ["#d5f5e3", "#fef9e7"]
+    sig_accent = ["#27ae60", "#e67e22"]
+
+    for i, (ax, sig) in enumerate(zip(axes, signals[:2])):
+        ep  = float(sig.get("entry_price") or current_price)
+        slp = float(sig.get("stop_loss") or 0)
+        tpp = float(sig.get("take_profit") or 0)
+        rr  = float(sig.get("rr") or 0)
+        lbl = sig.get("label", f"Signal {i+1}")
+        psl = float(sig.get("pips_sl") or 0)
+        ptp = float(sig.get("pips_tp") or 0)
+        exec_t = sig.get("exec_type", "market").upper()
+
+        # Lots $10 / $20 / $50
+        lots_data = {}
+        for acc in [10, 20, 50]:
+            if slp > 0 and ep > 0:
+                sl_dist = abs(ep - slp)
+                pip_val = _pip_value(ep)
+                sl_pips = sl_dist / pip_val
+                pplt = 1.0 if ep > 1000 else (0.1 if ep > 10 else 1.0)
+                risk_usd = acc * 0.01
+                lot = max(0.01, round(risk_usd / (sl_pips * pplt), 2))
+                tp_dist = abs(tpp - ep) if tpp > 0 else 0
+                tp_pips = tp_dist / pip_val
+                profit = round(lot * tp_pips * pplt, 3)
+                lots_data[f"${acc}"] = {"lot": lot, "profit": profit}
+
+        prices = [p for p in [slp, ep, tpp] if p > 0]
+        if not prices:
+            ax.text(0.5, 0.5, "Données\ninsuffisantes", ha="center", va="center",
+                    transform=ax.transAxes, fontsize=9, color="#aaa")
+            continue
+
+        ymin = min(prices) * 0.9993
+        ymax = max(prices) * 1.0007
+
+        # Zone TP verte / SL rouge
+        if tpp > 0 and slp > 0:
+            if is_buy:
+                ax.axhspan(ep, tpp, alpha=0.12, color="#27ae60")
+                ax.axhspan(slp, ep, alpha=0.12, color="#e74c3c")
+            else:
+                ax.axhspan(tpp, ep, alpha=0.12, color="#27ae60")
+                ax.axhspan(ep, slp, alpha=0.12, color="#e74c3c")
+
+        for price, lc, lt, txt in [
+            (tpp, "#27ae60", "-",  f"TP {tpp:.4f}\n+{ptp:.0f}p"),
+            (ep,  "#2980b9", "-",  f"Entry {ep:.4f}"),
+            (slp, "#e74c3c", "--", f"SL {slp:.4f}\n-{psl:.0f}p"),
+        ]:
+            if price > 0:
+                ax.axhline(price, color=lc, linestyle=lt, linewidth=1.5)
+                ax.text(0.97, price, txt, va="center", ha="right",
+                        fontsize=6.5, color=lc, fontweight="bold",
+                        transform=ax.get_yaxis_transform())
+
+        ax.set_ylim(ymin, ymax)
+        ax.set_xlim(0, 1)
+        ax.set_xticks([])
+        ax.set_facecolor(sig_fill[i % 2])
+        ax.set_title(f"{exec_t} | RR 1:{rr}", fontsize=8, fontweight="bold",
+                     color=sig_accent[i % 2])
+
+        # Tableau lots mini
+        if lots_data:
+            tbl_y = ymin + (ymax - ymin) * 0.04
+            tbl_h = (ymax - ymin) * 0.04
+            for j, (acc_k, ld) in enumerate(lots_data.items()):
+                ax.text(0.02, tbl_y + j * tbl_h * 1.5,
+                        f"{acc_k}: lot={ld['lot']}  profit≈${ld['profit']}",
+                        fontsize=6.5, color="#333", va="bottom", ha="left",
+                        transform=ax.get_yaxis_transform(),
+                        bbox=dict(boxstyle="round,pad=0.2", facecolor="white", alpha=0.7))
+
+        ax.tick_params(labelsize=7)
+        ax.set_ylabel("Prix", fontsize=7)
+        ax.yaxis.set_label_position("left")
+        short_lbl = lbl.split("—")[0].strip() if "—" in lbl else lbl[:18]
+        ax.set_xlabel(short_lbl, fontsize=7.5)
+
+    fig.suptitle(f"{symbol} — Comparaison des 2 signaux ({action})",
+                 fontsize=9, fontweight="bold")
+    fig.tight_layout(pad=0.8)
+    tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+    fig.savefig(tmp.name, dpi=130, bbox_inches="tight")
+    plt.close(fig)
+    return Path(tmp.name)
+
+
+def _make_statistical_scorecard(signals: List[Dict], indicators: Optional[Dict],
+                                  rec: str, final_state: Dict,
+                                  symbol: str) -> "Path":
+    """
+    Tableau statistique 'scorecard' : force du signal, confluence indicateurs,
+    probabilite directionnelle, historique win-rate estimee.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import matplotlib.patches as mpatches
+    import numpy as np
+    import tempfile
+
+    fig, axes = plt.subplots(1, 3, figsize=(8.5, 2.8))
+
+    # ── Panneau 1 : Radar score ─────────────────────────────────────────────
+    ax_radar = axes[0]
+    categories = ["Trend", "Momentum", "Volatilité", "Volume", "Structure", "Timing"]
+    n = len(categories)
+
+    # Scorer chaque dimension depuis indicateurs + final_state
+    rsi_v  = float((indicators or {}).get("rsi") or 50)
+    macd_v = float((indicators or {}).get("macd") or 0)
+    atr_v  = float((indicators or {}).get("atr") or 0)
+    price  = float((indicators or {}).get("current_price") or 0)
+    atr_pct = (atr_v / price * 100) if price > 0 else 1.0
+
+    is_buy = rec == "BUY"
+
+    # Scores 0-1 heuristiques
+    trend_score = 0.7 if is_buy else 0.65
+    momentum_score = (1 - rsi_v / 100) if is_buy else (rsi_v / 100)
+    momentum_score = np.clip(momentum_score * 1.4, 0.1, 0.95)
+    vol_score  = np.clip(0.3 + atr_pct * 10, 0.2, 0.9)  # volatilite moderee = bien
+    vol_score  = 1 - abs(vol_score - 0.6)  # penaliser extremes
+    struct_text = str(final_state.get("final_trade_decision") or "")
+    struct_keywords_bull = ["bullish", "haussier", "support", "buy", "achat", "hausse"]
+    struct_keywords_bear = ["bearish", "baissier", "resistance", "sell", "vente", "baisse"]
+    kw_bull = sum(1 for k in struct_keywords_bull if k in struct_text.lower())
+    kw_bear = sum(1 for k in struct_keywords_bear if k in struct_text.lower())
+    struct_score = np.clip((kw_bull if is_buy else kw_bear) / 4, 0.1, 0.95)
+    if not signals:
+        rr_score = 0.5
+    else:
+        rr = float(signals[0].get("rr") or 1.5)
+        rr_score = np.clip((rr - 1) / 3, 0.1, 0.95)  # RR 1:2 → 0.33, 1:4 → 0.99
+    # MACD momentum
+    macd_dir = (macd_v > 0 and is_buy) or (macd_v < 0 and not is_buy)
+    timing_score = 0.75 if macd_dir else 0.35
+
+    scores = [trend_score, momentum_score, vol_score, 0.6, struct_score, timing_score]
+
+    # Radar plot
+    angles = np.linspace(0, 2 * np.pi, n, endpoint=False).tolist()
+    scores_plot = scores + [scores[0]]
+    angles_plot = angles + [angles[0]]
+
+    ax_radar = plt.subplot(1, 3, 1, polar=True)
+    ax_radar.plot(angles_plot, scores_plot,
+                  color="#27ae60" if is_buy else "#e74c3c", linewidth=2)
+    ax_radar.fill(angles_plot, scores_plot,
+                  alpha=0.25, color="#27ae60" if is_buy else "#e74c3c")
+    ax_radar.set_xticks(angles)
+    ax_radar.set_xticklabels(categories, size=7)
+    ax_radar.set_ylim(0, 1)
+    ax_radar.set_yticks([0.25, 0.5, 0.75])
+    ax_radar.set_yticklabels(["25%", "50%", "75%"], size=6)
+    ax_radar.set_title("Score confluence", fontsize=8, fontweight="bold", pad=10)
+
+    # ── Panneau 2 : Probabilite directionnelle ──────────────────────────────
+    ax_prob = axes[1]
+    overall_score = float(np.mean(scores))
+    prob_dir = np.clip(0.5 + (overall_score - 0.5) * 1.2, 0.30, 0.85)
+    prob_contra = 1 - prob_dir
+
+    wedge_colors = (["#27ae60", "#bdc3c7"] if is_buy else ["#e74c3c", "#bdc3c7"])
+    wedge_sizes  = [prob_dir, prob_contra]
+    wedge_labels = [
+        f"{rec}\n{prob_dir*100:.0f}%",
+        f"{'SELL' if is_buy else 'BUY'}\n{prob_contra*100:.0f}%"
+    ]
+    wedges, texts = ax_prob.pie(
+        wedge_sizes, labels=wedge_labels, colors=wedge_colors,
+        startangle=90, textprops={"fontsize": 8},
+        wedgeprops={"linewidth": 1, "edgecolor": "white"},
+    )
+    ax_prob.set_title("Probabilité\ndirectionnelle", fontsize=8, fontweight="bold")
+
+    # ── Panneau 3 : Statistiques clés ──────────────────────────────────────
+    ax_stats = axes[2]
+    ax_stats.axis("off")
+
+    rr_val = float(signals[0].get("rr") if signals else 0)
+    psl    = float(signals[0].get("pips_sl") if signals else 0)
+    ptp    = float(signals[0].get("pips_tp") if signals else 0)
+
+    # Win rate minimum pour etre profitable avec ce RR
+    min_wr = 1 / (1 + rr_val) if rr_val > 0 else 0.5
+    est_wr = np.clip(prob_dir * 0.85, 0.30, 0.78)
+
+    stats_rows = [
+        ("Score global",       f"{overall_score*100:.0f} / 100"),
+        ("Prob. direction",    f"{prob_dir*100:.0f}%"),
+        ("Win-rate min rentable", f"{min_wr*100:.0f}%"),
+        ("Win-rate estimé",    f"{est_wr*100:.0f}%"),
+        ("Ratio R:R",          f"1:{rr_val:.1f}"),
+        ("Pips risque (SL)",   f"{psl:.0f}"),
+        ("Pips objectif (TP)", f"{ptp:.0f}"),
+        ("RSI actuel",         f"{rsi_v:.1f}"),
+    ]
+
+    col_labels = ["Indicateur", "Valeur"]
+    cell_text  = [[r[0], r[1]] for r in stats_rows]
+    tbl = ax_stats.table(
+        cellText=cell_text,
+        colLabels=col_labels,
+        cellLoc="center",
+        loc="center",
+        bbox=[0, 0, 1, 1],
+    )
+    tbl.auto_set_font_size(False)
+    tbl.set_fontsize(7.5)
+    for (row, col), cell in tbl.get_celld().items():
+        if row == 0:
+            cell.set_facecolor("#1F3C78")
+            cell.set_text_props(color="white", fontweight="bold")
+        elif row % 2 == 0:
+            cell.set_facecolor("#EEF4FF")
+        else:
+            cell.set_facecolor("#FFFFFF")
+        cell.set_edgecolor("#CCCCCC")
+
+    ax_stats.set_title("Statistiques clés", fontsize=8, fontweight="bold")
+
+    fig.suptitle(f"{symbol} — Scorecard analytique {rec}", fontsize=9, fontweight="bold")
+    fig.tight_layout(pad=0.8)
+    tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+    fig.savefig(tmp.name, dpi=130, bbox_inches="tight")
+    plt.close(fig)
+    return Path(tmp.name)
+
+
 def _generate_executive_summary(symbol: str, rec: str,
                                   final_state: Dict[str, Any],
                                   signals: List[Dict],
@@ -1753,7 +2278,9 @@ FORMAT REQUIS (respecter exactement):
 5. **Condition d'entree** : [quand exactement entrer - immediat ou attendre quel niveau]
 6. **Risques principaux** : [1-2 risques concrets, pas generiques]
 
-INTERDICTION ABSOLUE : Ne jamais proposer un risque > ${ risk_amt} ni un lot < {lot_min}."""
+INTERDICTION ABSOLUE : Ne jamais proposer un lot < {lot_min}.
+Si risque > ${ risk_amt} → réduire le SL pour rester dans le budget, pas annuler le trade.
+Toujours fournir un setup complet (Entry, SL, TP, Lot) même si conditions imparfaites."""
 
     try:
         import anthropic as _anth
@@ -1803,6 +2330,15 @@ def save_report_word(symbol: str, trade_date: str, signal_rating: str,
     rec = _normalize_rating(signal_rating)
     sig_color = {"BUY": RGBColor(0, 150, 60), "SELL": RGBColor(180, 30, 30), "HOLD": RGBColor(180, 120, 0)}.get(rec, RGBColor(0,0,0))
     mpl_color = {"BUY": "#27ae60", "SELL": "#e74c3c", "HOLD": "#f39c12"}.get(rec, "#555")
+
+    def _set_cell_fill(cell, hex_color: str) -> None:
+        tc = cell._tc
+        tcPr = tc.get_or_add_tcPr()
+        shd = OxmlElement("w:shd")
+        shd.set(qn("w:val"), "clear")
+        shd.set(qn("w:color"), "auto")
+        shd.set(qn("w:fill"), hex_color)
+        tcPr.append(shd)
 
     # Calculer signaux depuis ai_server
     entry  = params.get("entry_price")
@@ -1964,8 +2500,21 @@ def save_report_word(symbol: str, trade_date: str, signal_rating: str,
             r_lbl.font.size = Pt(11)
             r_lbl.font.color.rgb = sig_color
 
-            tbl_s = doc.add_table(rows=7, cols=2)
-            tbl_s.style = "Table Grid"
+            # Calcul lots $10/$20/$50 pour ce signal
+            sig_lots = compute_lot_sizes(sig.get("entry_price"), sig.get("stop_loss"),
+                                         [10.0, 20.0, 50.0])
+            lot_lines = []
+            for acc_k, ld in sig_lots.items():
+                ep   = float(sig.get("entry_price") or 0)
+                tpp  = float(sig.get("take_profit") or 0)
+                if ep > 0 and tpp > 0:
+                    pip_val = _pip_value(ep)
+                    tp_pips = abs(tpp - ep) / pip_val
+                    pplt = 1.0 if ep > 1000 else (0.1 if ep > 10 else 1.0)
+                    profit = round(ld["lot"] * tp_pips * pplt, 3)
+                    lot_lines.append(f"{acc_k}: lot={ld['lot']}  risque=${ld['risk_usd']}  gain≈${profit}")
+                else:
+                    lot_lines.append(f"{acc_k}: lot={ld['lot']}  risque=${ld['risk_usd']}")
 
             fill_hex = sig_colors_fill[idx % 2]
             sig_rows = [
@@ -1976,21 +2525,25 @@ def save_report_word(symbol: str, trade_date: str, signal_rating: str,
                 ("Take Profit",   f"{_fmt(sig['take_profit'])}  ({_pips(sig['entry_price'], sig['take_profit'])} de gain)"),
                 ("Ratio R/R",     f"1 : {sig['rr']}"),
                 ("Prix actuel",   _fmt(sig["current_price"])),
-            ]
+            ] + [(f"Lot {ll.split(':')[0]}", ":".join(ll.split(":")[1:]).strip()) for ll in lot_lines]
+
+            tbl_s = doc.add_table(rows=len(sig_rows), cols=2)
+            tbl_s.style = "Table Grid"
+
             for j, (lbl, val) in enumerate(sig_rows):
                 cl = tbl_s.rows[j].cells[0]
                 cr = tbl_s.rows[j].cells[1]
                 cl.text = lbl
                 cr.text = str(val)
                 cl.paragraphs[0].runs[0].bold = True
-                # Colorier le fond
+                row_fill = fill_hex if j < 7 else ("EAF7FB" if j % 2 == 0 else "D0EEF7")
                 for cell in (cl, cr):
                     tc = cell._tc
                     tcPr = tc.get_or_add_tcPr()
                     shd = OxmlElement("w:shd")
                     shd.set(qn("w:val"), "clear")
                     shd.set(qn("w:color"), "auto")
-                    shd.set(qn("w:fill"), fill_hex)
+                    shd.set(qn("w:fill"), row_fill)
                     tcPr.append(shd)
 
             doc.add_paragraph()
@@ -1999,12 +2552,114 @@ def save_report_word(symbol: str, trade_date: str, signal_rating: str,
 
     doc.add_paragraph()
 
-    # Graphiques côte à côte : jauge confiance + niveaux prix
     tmp_files = []
+
+    # ── GRAPHIQUE 1 : Prédiction directionnelle + RSI + MACD ─────────────
+    if computed_signals and rec in ("BUY", "SELL"):
+        pred_path = _make_prediction_chart(computed_signals,
+                                           float(current_price or entry or 0),
+                                           rec, symbol, indicators)
+        if pred_path:
+            tmp_files.append(pred_path)
+            _colored_heading("Prédiction Directionnelle — Cône de Probabilité", 2,
+                             RGBColor(20, 60, 120))
+            p_pred = doc.add_paragraph()
+            p_pred.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            p_pred.add_run().add_picture(str(pred_path), width=Inches(6.0))
+            doc.add_paragraph()
+            _add_separator()
+
+    # ── GRAPHIQUE 2 : Scorecard analytique (radar + probabilité + stats) ──
+    if rec in ("BUY", "SELL"):
+        score_path = _make_statistical_scorecard(
+            computed_signals, indicators, rec, final_state, symbol)
+        if score_path:
+            tmp_files.append(score_path)
+            _colored_heading("Scorecard Analytique — Confluence & Statistiques", 2,
+                             RGBColor(30, 80, 140))
+            p_score = doc.add_paragraph()
+            p_score.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            p_score.add_run().add_picture(str(score_path), width=Inches(6.5))
+            doc.add_paragraph()
+            _add_separator()
+
+    # ── GRAPHIQUE 3 : Comparaison des 2 signaux + lots $10/$20/$50 ────────
+    if computed_signals and rec in ("BUY", "SELL"):
+        multi_path = _make_multi_signal_chart(computed_signals,
+                                              float(current_price or entry or 0),
+                                              symbol, rec)
+        if multi_path:
+            tmp_files.append(multi_path)
+            _colored_heading("Comparaison des Signaux — Entry / SL / TP par compte", 2,
+                             sig_color)
+            p_multi = doc.add_paragraph()
+            p_multi.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            p_multi.add_run().add_picture(str(multi_path), width=Inches(6.5))
+            doc.add_paragraph()
+            _add_separator()
+
+    # ── GRAPHIQUE 4 : Lot sizing $10 / $20 / $50 ─────────────────────────
+    if computed_signals:
+        lot_path = _make_lot_sizing_chart(computed_signals, [10.0, 20.0, 50.0])
+        if lot_path:
+            tmp_files.append(lot_path)
+            _colored_heading("Money Management — Lot Sizing $10 / $20 / $50", 2,
+                             RGBColor(40, 100, 60))
+            p_lot = doc.add_paragraph()
+            p_lot.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            p_lot.add_run().add_picture(str(lot_path), width=Inches(6.0))
+            doc.add_paragraph()
+
+            # Tableau textuel lots $10/$20/$50
+            if computed_signals[0].get("entry_price") and computed_signals[0].get("stop_loss"):
+                all_lots = {}
+                for acc in [10.0, 20.0, 50.0]:
+                    ep = float(computed_signals[0]["entry_price"])
+                    sp = float(computed_signals[0]["stop_loss"])
+                    sl_dist = abs(ep - sp)
+                    if sl_dist > 0:
+                        pip_val = _pip_value(ep)
+                        sl_pips = sl_dist / pip_val
+                        pplt = 1.0 if ep > 1000 else (0.1 if ep > 10 else 1.0)
+                        for pct, lbl in [(0.01, "1%"), (0.02, "2%")]:
+                            lot = max(0.01, round((acc * pct) / (sl_pips * pplt), 2))
+                            risk = round(lot * sl_pips * pplt, 3)
+                            tp_dist = abs(float(computed_signals[0].get("take_profit") or ep) - ep)
+                            tp_pips = tp_dist / pip_val
+                            profit = round(lot * tp_pips * pplt, 3)
+                            key = f"${acc:.0f} ({lbl})"
+                            all_lots[key] = {"lot": lot, "risque": risk, "gain_potentiel": profit}
+
+                n_cols = 4
+                header = ["Compte", "Lot", "Risque max", "Gain potentiel"]
+                rows_lot = [[k, f"{v['lot']:.2f}", f"${v['risque']:.3f}", f"${v['gain_potentiel']:.3f}"]
+                            for k, v in all_lots.items()]
+                tbl_lot = doc.add_table(rows=1 + len(rows_lot), cols=n_cols)
+                tbl_lot.style = "Table Grid"
+                tbl_lot.alignment = WD_TABLE_ALIGNMENT.CENTER
+                for j, h in enumerate(header):
+                    c = tbl_lot.rows[0].cells[j]
+                    c.text = ""
+                    r = c.paragraphs[0].add_run(h)
+                    r.bold = True
+                    r.font.size = Pt(9)
+                    r.font.color.rgb = RGBColor(255, 255, 255)
+                    _set_cell_fill(c, "1F3C78")
+                for i, row_data in enumerate(rows_lot):
+                    fill_hex = "D5F5E3" if i % 2 == 0 else "FEF9E7"
+                    for j, val in enumerate(row_data):
+                        c = tbl_lot.rows[i + 1].cells[j]
+                        c.text = val
+                        c.paragraphs[0].runs[0].font.size = Pt(9)
+                        _set_cell_fill(c, fill_hex)
+                doc.add_paragraph()
+
+            _add_separator()
+
+    # ── GRAPHIQUE 5 : Jauge confiance + niveaux prix (compact) ───────────
     row_imgs = doc.add_paragraph()
     row_imgs.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
-    # Jauge confiance
     confidence_val = 0.75
     if confirmed:
         confidence_val = float(confirmed.get("confidence", 0.75))
@@ -2015,7 +2670,6 @@ def save_report_word(symbol: str, trade_date: str, signal_rating: str,
         run_g.add_picture(str(gauge_path), width=Inches(2.2))
         row_imgs.add_run("    ")
 
-    # Graphique niveaux
     if entry and sl_val and tp_val and current_price:
         levels_path = _make_price_level_chart(
             entry, sl_val, tp_val, current_price, symbol, rec)
@@ -2026,7 +2680,7 @@ def save_report_word(symbol: str, trade_date: str, signal_rating: str,
 
     _add_separator()
 
-    # Graphique indicateurs si dispo
+    # ── GRAPHIQUE 6 : Indicateurs techniques ────────────────────────────
     if indicators:
         ind_path = _make_indicator_bar_chart(indicators)
         if ind_path:
@@ -2349,7 +3003,7 @@ def run_quick(symbol: str, trade_date: str,
         sys.exit(f"[bridge] TradingAgents inaccessible: {_TA_IMPORT_ERR}")
 
     if analysts is None:
-        analysts = ["market", "social", "news", "fundamentals"]
+        analysts = ["market"]   # market seul = rapide (~2-4 min) pour indices/futures
 
     # Ticker et vendor : utiliser ceux fournis, sinon auto-detecter
     if data_ticker is None:

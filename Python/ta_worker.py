@@ -12,6 +12,63 @@ import io
 import contextlib
 from pathlib import Path
 
+_HERE = Path(__file__).resolve().parent
+_ROOT = _HERE.parent
+
+# ── Désactiver vérification SSL globalement (certificat local non reconnu) ───
+import ssl as _ssl
+_ssl._create_default_https_context = _ssl._create_unverified_context
+os.environ.setdefault("PYTHONHTTPSVERIFY", "0")
+os.environ.setdefault("CURL_CA_BUNDLE", "")
+os.environ.setdefault("REQUESTS_CA_BUNDLE", "")
+
+# yfinance utilise curl_cffi qui ignore REQUESTS_CA_BUNDLE — patch direct
+try:
+    import curl_cffi.requests as _curl_req
+    _orig_curl_init = _curl_req.Session.__init__
+    def _patched_curl_init(self, *a, **kw):
+        kw.setdefault("verify", False)
+        _orig_curl_init(self, *a, **kw)
+    _curl_req.Session.__init__ = _patched_curl_init
+except ImportError:
+    pass
+
+# ── Auto-relaunch avec le venv TradingAgents si typer manque ─────────────────
+# Doit se faire AVANT tout autre import pour éviter les erreurs de module.
+# On ne relaunch qu'une fois (variable d'env sentinelle _TA_RELAUNCHED=1).
+# Utilise subprocess + sys.exit (os.execv est instable sur Windows avec espaces).
+if os.environ.get("_TA_RELAUNCHED") != "1":
+    try:
+        import typer  # noqa: F401 — test rapide
+    except ImportError:
+        # Lire le chemin du repo TradingAgents depuis .env
+        _env_file_early = _ROOT / ".env"
+        _ta_repo = ""
+        if _env_file_early.exists():
+            for _line in _env_file_early.read_text(encoding="utf-8").splitlines():
+                if _line.startswith("AI_TRADINGAGENTS_REPO_PATH="):
+                    _ta_repo = _line.split("=", 1)[1].strip().strip('"').strip("'")
+                    break
+        if not _ta_repo:
+            # Fallback : chercher dans les dossiers habituels
+            for _candidate in [
+                _ROOT.parent / "Depot Github" / "TradingAgents-main",
+                _ROOT.parent / "TradingAgents-main",
+            ]:
+                if (_candidate / ".venv" / "Scripts" / "python.exe").exists():
+                    _ta_repo = str(_candidate)
+                    break
+        _venv_py = Path(_ta_repo) / ".venv" / "Scripts" / "python.exe" if _ta_repo else None
+        if _venv_py and _venv_py.exists():
+            import subprocess as _sp
+            _env_relaunch = {**os.environ, "_TA_RELAUNCHED": "1"}
+            _result = _sp.run(
+                [str(_venv_py)] + sys.argv,
+                env=_env_relaunch
+            )
+            sys.exit(_result.returncode)
+        # Si venv introuvable → continuer avec Python actuel (échouera plus loin)
+
 # Redirige stdout de tradbot_bridge vers stderr pour garder stdout propre
 _orig_stdout = sys.stdout
 
@@ -21,8 +78,6 @@ def _redirect_prints():
 def _restore_stdout():
     sys.stdout = _orig_stdout
 
-_HERE = Path(__file__).resolve().parent
-_ROOT = _HERE.parent
 sys.path.insert(0, str(_HERE))
 
 # Charger .env pour avoir NVIDIA_NIM_API_KEY et autres variables
