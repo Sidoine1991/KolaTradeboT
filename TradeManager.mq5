@@ -4814,6 +4814,22 @@ void TryExecuteMCPSignal(int idx)
       return;
    }
 
+   // 🚨 VÉRIFICATION FINALE ANTI-CORRECTION JUSTE AVANT EXÉCUTION
+   if(UseGOMScalp && g_lastGOMVerdictNum != 0)
+   {
+      bool isBull = (g_lastGOMVerdictNum > 0);
+      bool isBear = (g_lastGOMVerdictNum < 0);
+      if((dir == 1 && isBear) || (dir == -1 && isBull))
+      {
+         string dir_txt = (dir == 1) ? "BUY" : "SELL";
+         string bias_txt = isBear ? "BEAR" : "BULL";
+         Print(StringFormat("[MCP-Execute-FINAL] 🚨 ULTIME BLOCAGE: %s %s refusé — OB %s, marché en correction (vnum=%d)",
+                           sym, dir_txt, bias_txt, g_lastGOMVerdictNum));
+         g_mcpSignals[idx].failCount++;
+         return;
+      }
+   }
+
    CTrade mcpTrade;
    mcpTrade.SetExpertMagicNumber(MCPMagicNumber);
    mcpTrade.SetDeviationInPoints(30);
