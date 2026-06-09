@@ -6417,8 +6417,8 @@ void DisplayDisciplineDashboard()
 
    string line1 = "[DISCIPLINE] " + IntegerToString(g_dailyTradeCount) + "/" + IntegerToString(g_maxDailyTrades) + " | $" + StringFormat("%.2f", closedPnl) + "/$" + StringFormat("%.2f", g_dailyProfitTarget) + " | " + status;
 
-   // 🆕 Ajouter espaces pour descendre le dashboard sous les autres infos
-   string dashboard = "\n\n\n" + line1;
+   // 🆕 Ajouter espaces pour descendre le dashboard sous les autres infos (+10 points supplémentaires)
+   string dashboard = "\n\n\n\n\n\n\n\n\n\n\n\n\n" + line1;
    Comment(dashboard);
 }
 
