@@ -4,18 +4,18 @@
 Pipeline Autonome avec Validation WhatsApp
 
 Workflow:
-  1. Scan TradingView → Top-N symboles
-  2. Pour chaque symbole → TradingAgents analyse complète
-  3. WhatsApp: affiche signal + Entry/SL/TP/Lot → attend OUI/NON
-  4. Si OUI → place l'ordre dans /pending-order (TradeManager l'exécute)
-  5. Si NON ou timeout → skip, symbole suivant
-  6. Rapport Word final envoyé
+    1. Scan TradingView → Top-N symboles
+    2. Pour chaque symbole → TradingAgents analyse complète
+    3. WhatsApp: affiche signal + Entry/SL/TP/Lot → attend OUI/NON
+    4. Si OUI → place l'ordre dans /pending-order (TradeManager l'exécute)
+    5. Si NON ou timeout → skip, symbole suivant
+    6. Rapport Word final envoyé
 
 Usage:
-  python pipeline_with_approval.py
-  python pipeline_with_approval.py --top-n 3
-  python pipeline_with_approval.py --timeout 300   # 5 min pour répondre
-  python pipeline_with_approval.py --auto           # valider tout auto (sans attente)
+    python pipeline_with_approval.py
+    python pipeline_with_approval.py --top-n 3
+    python pipeline_with_approval.py --timeout 300   # 5 min pour répondre
+    python pipeline_with_approval.py --auto           # valider tout auto (sans attente)
 """
 
 import sys, io, os, subprocess
@@ -80,11 +80,11 @@ def is_valid_direction(symbol: str, direction: str) -> bool:
     s = symbol.upper()
     d = direction.upper()
     if "BOOM" in s and d == "SELL":
-    log.warning("🚫 %s: SELL interdit sur Boom", symbol)
-    return False
+        log.warning("🚫 %s: SELL interdit sur Boom", symbol)
+        return False
     if "CRASH" in s and d == "BUY":
-    log.warning("🚫 %s: BUY interdit sur Crash", symbol)
-    return False
+        log.warning("🚫 %s: BUY interdit sur Crash", symbol)
+        return False
     return True
 
 # ---------------------------------------------------------------------------
@@ -93,9 +93,9 @@ def is_valid_direction(symbol: str, direction: str) -> bool:
 def get_lot_min(symbol: str) -> float:
     s = symbol.upper().replace("DERIV:", "").replace("_INDEX", "").replace(" ", "").replace("INDEX", "")
     if any(p in s for p in ("BOOM", "CRASH")):
-    return 0.20
+        return 0.20
     if any(s.startswith(p) for p in ("1HZ", "R_", "V10", "V25", "V50", "V75", "V100", "VOLATILITY")):
-    return 0.10
+        return 0.10
     return 0.01
 
 # ---------------------------------------------------------------------------
@@ -116,17 +116,17 @@ def is_available_on_deriv(symbol: str) -> bool:
 # ---------------------------------------------------------------------------
 def send_whatsapp(msg: str) -> bool:
     for attempt in range(3):
-    try:
-        r = requests.post(
-            f"{PSYCHOBOT}/send-message",
-            json={"phone": PHONE, "message": msg},
-            timeout=15, verify=False,
-        )
-        if r.status_code == 200:
-            return True
-    except Exception as e:
-        log.warning("WhatsApp tentative %d/%d: %s", attempt + 1, 3, e)
-    time.sleep(2)
+        try:
+            r = requests.post(
+                f"{PSYCHOBOT}/send-message",
+                json={"phone": PHONE, "message": msg},
+                timeout=15, verify=False,
+            )
+            if r.status_code == 200:
+                return True
+        except Exception as e:
+            log.warning("WhatsApp tentative %d/%d: %s", attempt + 1, 3, e)
+        time.sleep(2)
     return False
 
 def wait_for_approval(symbol: str, timeout: int) -> Optional[str]:
@@ -139,23 +139,23 @@ def wait_for_approval(symbol: str, timeout: int) -> Optional[str]:
     deadline = time.time() + timeout
     # Nettoyer toute approbation précédente
     for sym_try in [mt5_sym, symbol]:
-    try:
-        requests.delete(f"{AI_SERVER}/approval/{sym_try}", timeout=3)
-    except Exception:
-        pass
-    while time.time() < deadline:
-    for sym_try in [mt5_sym, symbol]:
         try:
-            r = requests.get(f"{AI_SERVER}/approval/{sym_try}", timeout=3)
-            if r.status_code == 200:
-                data = r.json()
-                if data.get("answer") in ("yes", "no"):
-                    # Nettoyer après lecture
-                    requests.delete(f"{AI_SERVER}/approval/{sym_try}", timeout=3)
-                    return data["answer"]
+            requests.delete(f"{AI_SERVER}/approval/{sym_try}", timeout=3)
         except Exception:
             pass
-    time.sleep(5)
+    while time.time() < deadline:
+        for sym_try in [mt5_sym, symbol]:
+            try:
+                r = requests.get(f"{AI_SERVER}/approval/{sym_try}", timeout=3)
+                if r.status_code == 200:
+                    data = r.json()
+                    if data.get("answer") in ("yes", "no"):
+                        # Nettoyer après lecture
+                        requests.delete(f"{AI_SERVER}/approval/{sym_try}", timeout=3)
+                        return data["answer"]
+            except Exception:
+                pass
+        time.sleep(5)
     return None
 
 def _tv_to_mt5(symbol: str) -> str:
@@ -226,9 +226,9 @@ def scan_top_n_with_prices(top_n: int) -> List[Dict]:
     top = chosen[:top_n]
     if not high and top:
     log.info("Phase 1 — Seuil abaissé (aucun score >= 5.0), meilleurs: %s",
-             [(r["symbol"], round(r.get("confluence_score",0),1)) for r in top])
+            [(r["symbol"], round(r.get("confluence_score",0),1)) for r in top])
     log.info("Top-%d retenus: %s", top_n,
-         [(r["symbol"], r["direction"], round(r.get("confluence_score",0),1)) for r in top])
+        [(r["symbol"], r["direction"], round(r.get("confluence_score",0),1)) for r in top])
     return top
 
 # ---------------------------------------------------------------------------
@@ -344,9 +344,9 @@ print(json.dumps(output))
 
     log.info("  [TA] Analyse %s → %s (%s) vendor=%s", symbol, clean_sym, ticker_id, vendor)
     result = run_quick(clean_sym, trade_date,
-                   analysts=["market", "social"],
-                   data_ticker=ticker_id,
-                   vendor=vendor)
+                    analysts=["market", "social"],
+                    data_ticker=ticker_id,
+                    vendor=vendor)
 
     rec       = _normalize_rating(result["signal_rating"])
     final_st  = result["final_state"]
@@ -384,7 +384,7 @@ print(json.dumps(output))
     if cp <= 0 or atr <= 0:
         try:
             rg = requests.get(f"{AI_SERVER}/gom-verdict",
-                              params={"symbol": clean_sym}, timeout=4)
+                                params={"symbol": clean_sym}, timeout=4)
             if rg.status_code == 200:
                 gd = rg.json()
                 if cp <= 0:
@@ -484,7 +484,7 @@ print(json.dumps(output))
         else:
             exec_type = "market"  # Entry = prix courant → marché
     log.info("  [TA] %s %s execution_type=%s entry=%.5f prix=%.5f",
-             rec, clean_sym, exec_type, float(entry) if entry else 0, cp)
+            rec, clean_sym, exec_type, float(entry) if entry else 0, cp)
 
     # Sauvegarder rapport Word
     confirmed = {
@@ -638,8 +638,8 @@ def place_order(ta: Dict) -> bool:
     r = requests.post(f"{AI_SERVER}/pending-order", json=payload, timeout=10)
     r.raise_for_status()
     log.info("  ✅ Ordre placé: %s %s @ %s SL=%s TP=%s lot=%s",
-             ta["direction"], ta["symbol"],
-             ta.get("entry"), ta.get("sl"), ta.get("tp"), ta.get("lot"))
+            ta["direction"], ta["symbol"],
+            ta.get("entry"), ta.get("sl"), ta.get("tp"), ta.get("lot"))
     # Écrire pipeline_whitelist.json dans MT5 Common/Files
     _write_mt5_whitelist(mt5_symbol, ta["direction"])
     return True
@@ -658,7 +658,7 @@ def _write_mt5_whitelist(symbol: str, direction: str) -> None:
     from datetime import datetime as _dt
     wl_path = _pl.Path(
     os.getenv("MT5_COMMON_FILES",
-              r"C:\Users\USER\AppData\Roaming\MetaQuotes\Terminal\Common\Files")
+                r"C:\Users\USER\AppData\Roaming\MetaQuotes\Terminal\Common\Files")
     ) / "pipeline_whitelist.json"
     try:
     # Charger whitelist existante et ajouter le symbole
@@ -672,7 +672,7 @@ def _write_mt5_whitelist(symbol: str, direction: str) -> None:
     syms_set = {s["symbol"] for s in existing}
     if symbol not in syms_set:
         existing.append({"symbol": symbol, "direction": direction,
-                          "added_at": _dt.utcnow().isoformat()})
+                            "added_at": _dt.utcnow().isoformat()})
     data = {"generated_at": _dt.utcnow().isoformat(), "symbols": existing}
     wl_path.parent.mkdir(parents=True, exist_ok=True)
     wl_path.write_text(_json.dumps(data, indent=2), encoding="utf-8")
@@ -691,7 +691,7 @@ def send_report_whatsapp(ta: Dict) -> None:
     sys.path.insert(0, str(_HERE))
     from send_tradingagents_report import send_whatsapp_file
     caption = (f"📊 *Rapport TradingAgents — {ta['symbol']}*\n"
-               f"Direction: *{ta['direction']}*")
+                f"Direction: *{ta['direction']}*")
     send_whatsapp_file(str(rp), caption)
     log.info("  📄 Rapport Word envoyé: %s", Path(rp).name)
     except Exception as e:
@@ -718,7 +718,7 @@ def run(top_n: int = 5, timeout: int = APPROVAL_TIMEOUT_SEC, auto: bool = False)
 
     # Notifier le début
     symbols_list = "\n".join([f"  {i+1}. {s['symbol']} {s['direction']} ({s['confluence_score']:.1f}/10)"
-                           for i, s in enumerate(scans)])
+                            for i, s in enumerate(scans)])
     send_whatsapp(
     f"*🤖 TradBOT — Pipeline démarré*\n"
     f"_{run_at}_\n\n"
@@ -776,10 +776,10 @@ def run(top_n: int = 5, timeout: int = APPROVAL_TIMEOUT_SEC, auto: bool = False)
                 rsi_v = (smc_d.get("rsi") or {}).get("value")
                 bias_d = (smc_d.get("bias") or {}).get("direction", "?")
                 log.info("  [TV] Bias=%s RSI=%s OB=%d FVG=%d",
-                         bias_d,
-                         f"{rsi_v:.1f}" if rsi_v else "N/A",
-                         len(smc_d.get("order_blocks") or []),
-                         len(smc_d.get("fvg") or []))
+                        bias_d,
+                        f"{rsi_v:.1f}" if rsi_v else "N/A",
+                        len(smc_d.get("order_blocks") or []),
+                        len(smc_d.get("fvg") or []))
             else:
                 log.warning("  [TV] Indisponible: %s", tv_raw_data.get("error", "CDP off"))
         except Exception as _tv_err:
@@ -799,10 +799,10 @@ def run(top_n: int = 5, timeout: int = APPROVAL_TIMEOUT_SEC, auto: bool = False)
             q = refined["quality_score"]
             label = refined["quality_label"]
             log.info("  [Refiner] Score=%d/100 (%s) | RR=1:%s | exec=%s",
-                     q, label, refined.get("rr"), refined.get("execution_type"))
+                    q, label, refined.get("rr"), refined.get("execution_type"))
             log.info("  [Refiner] Entry=%.5f SL=%.5f TP=%.5f Lot=$20:%.2f",
-                     refined.get("entry", 0), refined.get("sl", 0),
-                     refined.get("tp", 0), refined.get("recommended_lot", 0.01))
+                    refined.get("entry", 0), refined.get("sl", 0),
+                    refined.get("tp", 0), refined.get("recommended_lot", 0.01))
 
             if not refined["accept"]:
                 log.warning("  [Refiner] SIGNAL REJETÉ: %s", refined["reject_reason"])
