@@ -6411,28 +6411,8 @@ void DisplayDisciplineDashboard()
 
    string line1 = "[DISCIPLINE] " + IntegerToString(g_dailyTradeCount) + "/" + IntegerToString(g_maxDailyTrades) + " | $" + StringFormat("%.2f", closedPnl) + "/$" + StringFormat("%.2f", g_dailyProfitTarget) + " | " + status;
 
-   // 🆕 Utiliser ObjectCreate permanent au lieu de Comment() qui s'efface
-   string objName = "DISC_BANNER";
-   int x = 10;        // 10px from left
-   int y = 20;        // 20px from top
-
-   // Supprimer l'ancien objet s'il existe
-   if(ObjectFind(0, objName) >= 0)
-      ObjectDelete(0, objName);
-
-   // Créer nouveau text object
-   ObjectCreate(0, objName, OBJ_TEXT, 0, 0, 0);
-   ObjectSetString(0, objName, OBJPROP_TEXT, line1);
-
-   // Styles
-   ObjectSetInteger(0, objName, OBJPROP_CORNER, CORNER_LEFT_UPPER);
-   ObjectSetInteger(0, objName, OBJPROP_XDISTANCE, x);
-   ObjectSetInteger(0, objName, OBJPROP_YDISTANCE, y);
-   ObjectSetInteger(0, objName, OBJPROP_FONTSIZE, 10);
-   ObjectSetString(0, objName, OBJPROP_FONT, "Courier New");
-   ObjectSetInteger(0, objName, OBJPROP_COLOR, 16711680);  // vert (BGR: 0,200,0)
-   ObjectSetInteger(0, objName, OBJPROP_BACK, false);
-   ObjectSetInteger(0, objName, OBJPROP_SELECTABLE, false);
+   // 🆕 Utiliser Comment() simple — fiable et visible immédiatement
+   Comment(line1);
 }
 
 void RefreshDashboard()
