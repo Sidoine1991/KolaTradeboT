@@ -4664,18 +4664,16 @@ void TryExecuteMCPSignal(int idx)
    if(UseGOMScalp && !IsTFConsensus(dir))
    {
       string dir_txt = (dir == 1) ? "BUY" : "SELL";
-      Print(StringFormat("[MCP-Execute] 🚫 %s %s refusé — TF Consensus: H1/H4 ne confirment pas (H1:%s H4:%s)",
-                         sym, dir_txt, g_lastGOMData.tf_h1_dir, g_lastGOMData.tf_h4_dir));
-      g_mcpSignals[idx].failCount++;
+      Print(StringFormat("[MCP-Execute] 🚫 %s %s refusé — TF Consensus: H1+H4 ne confirment pas",
+                         sym, dir_txt));
       return;
    }
 
    // 🆕 FILTRE 2: RSI DIVERGENCE — prix/RSI divergence = fake
    if(UseGOMScalp && HasRSIDivergence())
    {
-      Print(StringFormat("[MCP-Execute] 🚫 %s signal refusé — Divergence RSI détectée (RSI=%d) = fake setup",
-                         sym, g_lastGOMRSI));
-      g_mcpSignals[idx].failCount++;
+      Print(StringFormat("[MCP-Execute] 🚫 %s signal refusé — Divergence RSI détectée = fake setup",
+                         sym));
       return;
    }
 
@@ -4685,7 +4683,6 @@ void TryExecuteMCPSignal(int idx)
       string dir_txt = (dir == 1) ? "BUY" : "SELL";
       Print(StringFormat("[MCP-Execute] 🚫 %s %s refusé — Momentum insuffisant",
                          sym, dir_txt));
-      g_mcpSignals[idx].failCount++;
       return;
    }
 
