@@ -5087,8 +5087,14 @@ void PollGOMScalpVerdict()
          ulong  ticket = posInfo.Ticket();
          int    dir    = posInfo.PositionType() == POSITION_TYPE_BUY ? 1 : -1;
 
-         // Fermer si profit < $5 USD (fausse entrée en consolidation)
-         if(profit < 5.0)
+         // ⏰ Grace period: skip consolidation close for first 120 seconds
+         long openTimeLong = PositionGetInteger(POSITION_TIME);
+         long timeNowLong  = (long)TimeCurrent();
+         int ageSeconds    = (int)(timeNowLong - openTimeLong);
+         bool withinGrace  = (ageSeconds < 120);
+
+         // Fermer si profit < $5 USD (fausse entrée en consolidation) — MAIS PAS dans les 2 premières minutes
+         if(!withinGrace && profit < 5.0)
          {
             CTrade closeTrade;
             closeTrade.SetDeviationInPoints(50);
