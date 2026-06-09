@@ -6403,14 +6403,14 @@ void RefreshDashboard()
    if(TimeCurrent() - g_lastDashboardUpdate < DashboardUpdateSec) return;
    g_lastDashboardUpdate = TimeCurrent();
 
-   DisplayDisciplineDashboard();  // 🆕 Afficher compteur discipline en haut
-
    GOMData gom = FetchGOMDataForChart();
    if(gom.valid)
    {
       SyncGOMGlobalsFromData(gom);
       DisplayCompleteGOMDashboard(gom);
    }
+
+   DisplayDisciplineDashboard();  // 🆕 Afficher compteur discipline EN DERNIER (par-dessus les tables)
 }
 
 //+------------------------------------------------------------------+
