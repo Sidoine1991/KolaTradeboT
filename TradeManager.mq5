@@ -4571,6 +4571,24 @@ void TryExecuteMCPSignal(int idx)
       return;
    }
 
+   // 🚫 ANTI-CORRECTION: Bloquer BUY en BEAR ou SELL en BULL — évite trader les corrections
+   if(UseGOMScalp && g_lastGOMVerdictNum != 0)  // vnum != 0 = direction établie
+   {
+      int dir = g_mcpSignals[idx].direction;  // 1=BUY, -1=SELL
+      bool isBull = (g_lastGOMVerdictNum > 0);  // vnum > 0 = tendance BULL
+      bool isBear = (g_lastGOMVerdictNum < 0);  // vnum < 0 = tendance BEAR
+
+      if((dir == 1 && isBear) || (dir == -1 && isBull))
+      {
+         string dir_txt = (dir == 1) ? "BUY" : "SELL";
+         string bias_txt = isBear ? "BEAR" : "BULL";
+         PrintOnce(StringFormat("[MCP-Execute] 🚫 %s %s bloqué — OB %s actif, marché en correction (vnum=%d)",
+                                sym, dir_txt, bias_txt, g_lastGOMVerdictNum), 60);
+         g_mcpSignals[idx].failCount++;
+         return;
+      }
+   }
+
    // Limite globale : bypassée pour les ordres pipeline (signal validé humainement)
    if(!isPipelineEarly && IsGlobalPositionLimitReached())
    {
