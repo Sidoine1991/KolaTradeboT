@@ -16,6 +16,7 @@ string   g_smcGomKolaState    = "";
 string   g_smcGomGlobalDir    = "";
 int      g_smcGomGlobalStr    = 0;
 bool     g_smcGomConnected    = false;
+double   g_iaStatusConfidence = 0.0;  // IA Status confiance (0-100%)
 datetime g_smcLastGOMPoll     = 0;
 datetime g_smcLastMCPPoll      = 0;
 datetime g_smcLastPipelineExec= 0;
@@ -624,6 +625,33 @@ bool SMCGP_GOMAllowsDirection(const int dir)
 {
    return SMCGP_GOMAllowsDirectionEx(dir, true);
 }
+
+// ── Vérification EA Indépendant: GOOD/PERFECT GOM + IA Status ≥70% ──
+bool SMCGP_AllowsDirectIndependentEntry(const int dir)
+{
+   // Désactiver si la fonctionnalité est OFF
+   if(!UseEAIndependentEntry)
+   { return false; }
+
+   // 1. Verdict GOOD/PERFECT requis
+   if(!SMCGP_IsGoodPerfect(g_smcGomVerdictNum))
+   { Print("[EA-INDEP] ❌ Rejeté: Verdict pas GOOD/PERFECT (vn=", g_smcGomVerdictNum, ")"); return false; }
+
+   // 2. IA Status ≥ 70%
+   if(g_iaStatusConfidence < 70.0)
+   { Print("[EA-INDEP] ❌ Rejeté: IA Status=", DoubleToString(g_iaStatusConfidence, 1), "% < 70%"); return false; }
+
+   // 3. Vérifier direction du verdict correspond à l'action
+   if(dir == 1 && g_smcGomVerdictNum < 2)
+   { Print("[EA-INDEP] ❌ Rejeté: BUY demandé mais verdict_num=", g_smcGomVerdictNum, " < 2 (GOOD)"); return false; }
+
+   if(dir == -1 && g_smcGomVerdictNum > -2)
+   { Print("[EA-INDEP] ❌ Rejeté: SELL demandé mais verdict_num=", g_smcGomVerdictNum, " > -2 (GOOD)"); return false; }
+
+   Print("[EA-INDEP] ✅ Autorisé | Verdict=", g_smcGomVerdict, " (vn=", g_smcGomVerdictNum, ") | IA Status=", DoubleToString(g_iaStatusConfidence, 1), "% | Direction=", dir);
+   return true;
+}
+
 
 bool SMCGP_GOMAllowsAction(const string action)
 {
