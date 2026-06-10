@@ -57,15 +57,24 @@ bool PositionCloseWithLog(ulong ticket, string reason = "")
          Print("   💰 Profit: ", DoubleToString(profit, 2), "$ | ACTION: Fermeture autorisée");
       }
       
-      Print("🚨 FERMETURE DÉTECTÉE - ", symbol, 
+      Print("🚨 FERMETURE DÉTECTÉE - ", symbol,
             " | Ticket: ", ticket,
             " | Profit: ", DoubleToString(profit, 2), "$",
             " | Âge: ", secondsSinceOpen, "s",
             " | Raison: ", reason);
    }
-   
+
    // Exécuter la fermeture réelle
-   return trade.PositionClose(ticket);
+   bool result = trade.PositionClose(ticket);
+
+   // Si fermeture réussie, réinitialiser g_maxProfit pour la prochaine position
+   if(result)
+   {
+      g_maxProfit = 0;
+      Print("✅ g_maxProfit réinitialisé pour la prochaine position");
+   }
+
+   return result;
 }
 
 //+------------------------------------------------------------------+
@@ -1938,6 +1947,102 @@ void ClosePositionsOnIAHold()
    }
 }
 
+//+------------------------------------------------------------------+
+//| GOM VERDICTS INTEGRATION — Fetch from ai_server /gom-verdicts   |
+//+------------------------------------------------------------------+
+
+static datetime last_gom_fetch = 0;
+static int GOM_fetch_interval = 60;  // Fetch every 60 seconds
+static string last_notified_symbols = "";  // Track which symbols were notified
+
+void UpdateGOMDashboard()
+{
+    // Fetch from ai_server every 60 seconds
+    datetime now = TimeCurrent();
+
+    if((now - last_gom_fetch) < GOM_fetch_interval)
+        return;
+
+    last_gom_fetch = now;
+
+    string url = "http://127.0.0.1:8000/gom-verdicts";
+    string headers = "Content-Type: application/json\r\n";
+
+    uchar request[];
+    uchar response[];
+    string result_headers = "";
+    int timeout = 5000;
+
+    // MQL5 WebRequest signature: (url, method, headers, timeout, request[], response[], result_headers)
+    int res = WebRequest("GET", url, headers, timeout, request, response, result_headers);
+
+    if(res != 200)
+    {
+        Print("❌ GOM fetch failed: HTTP ", res);
+        return;
+    }
+
+    string response_str = CharArrayToString(response);
+
+    if(StringFind(response_str, "\"ok\": true") < 0)
+    {
+        Print("❌ GOM response error");
+        return;
+    }
+
+    Print("✅ GOM verdicts updated from ai_server");
+
+    // Simple check for PERFECT signals: look for "verdict_num": 3 or -3
+    if(StringFind(response_str, "\"verdict_num\": 3") >= 0 && StringFind(last_notified_symbols, "PERFECT_BUY") < 0)
+    {
+        // Found a PERFECT BUY signal
+        SendGOMWhatsAppAlert("PERFECT BUY detected");
+        last_notified_symbols += "PERFECT_BUY;";
+    }
+
+    if(StringFind(response_str, "\"verdict_num\": -3") >= 0 && StringFind(last_notified_symbols, "PERFECT_SELL") < 0)
+    {
+        // Found a PERFECT SELL signal
+        SendGOMWhatsAppAlert("PERFECT SELL detected");
+        last_notified_symbols += "PERFECT_SELL;";
+    }
+
+    // Reset tracking every 24 hours to allow re-notifications
+    static datetime last_reset = 0;
+    if((now - last_reset) >= 86400)  // 24 hours
+    {
+        last_notified_symbols = "";
+        last_reset = now;
+    }
+}
+
+void SendGOMWhatsAppAlert(const string &message)
+{
+    string url = "http://127.0.0.1:8000/notify-whatsapp";
+    string payload = "{\"message\": \"🎯 GOM Signal: " + message + "\"}";
+
+    uchar request[];
+    StringToCharArray(payload, request);
+    uchar response[];
+    string result_headers = "";
+
+    // MQL5 WebRequest signature: (url, method, headers, timeout, request[], response[], result_headers)
+    int res = WebRequest("POST", url, "Content-Type: application/json\r\n", 3000, request, response, result_headers);
+
+    if(res == 200)
+    {
+        Print("✅ WhatsApp alert sent: ", message);
+    }
+    else if(res == -1)
+    {
+        Print("⚠️ WebRequest not allowed (check Tools > Options > EA > Allow WebRequest)");
+    }
+    else
+    {
+        Print("⚠️ WhatsApp send failed (HTTP ", res, ")");
+    }
+}
+
 void OnTick()
 {
    // MODE IA ULTRA STABLE - PAS DE DÉTACHEMENT
@@ -1995,6 +2100,9 @@ void OnTick()
    // ✅ POLL GOM FORCÉ À CHAQUE TICK — Mise à jour instantanée du verdict
    // Indépendamment des paramètres, poll toujours pour affichage temps réel
    SMCGP_PollGOM();
+
+   // 🎯 GOM VERDICTS FROM ai_server — Every 60 seconds + WhatsApp alerts
+   UpdateGOMDashboard();
 
    // Pipeline validé + dessin GOM si activé
    // GOM polling: XAUUSD, BTCUSD, ETHUSD, FOREX + Boom/Crash (si gom_signal.json disponible)
@@ -5497,69 +5605,65 @@ void ManageTrailingStop()
       {
          if(posInfo.PositionType() == POSITION_TYPE_BUY)
          {
-            double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+            double currentPrice = SymbolInfoDouble(symbol, SYMBOL_BID);
             double newSL = currentPrice - trailDistance;
-            
+
             // VALIDATION: Vérifier que la position existe toujours avant de modifier
             if(!PositionSelectByTicket(posInfo.Ticket()))
             {
                continue;
             }
-            
+
             // Double validation: vérifier que le magic number et symbole correspondent
-            if(PositionGetInteger(POSITION_MAGIC) != InpMagicNumber || PositionGetString(POSITION_SYMBOL) != _Symbol)
+            if(PositionGetInteger(POSITION_MAGIC) != InpMagicNumber || PositionGetString(POSITION_SYMBOL) != symbol)
             {
                continue;
             }
-            
+
             if(trade.PositionModify(posInfo.Ticket(), newSL, posInfo.TakeProfit()))
-               Print("🛡️ Stop loss initial BUY: ", DoubleToString(newSL, _Digits));
+               Print("🛡️ SL initial BUY ", symbol, ": ", DoubleToString(newSL, _Digits));
          }
          else
          {
-            double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+            double currentPrice = SymbolInfoDouble(symbol, SYMBOL_ASK);
             double newSL = currentPrice + trailDistance;
-            
+
             // VALIDATION: Vérifier que la position existe toujours avant de modifier
             if(!PositionSelectByTicket(posInfo.Ticket()))
             {
                continue;
             }
-            
+
             // Double validation: vérifier que le magic number et symbole correspondent
-            if(PositionGetInteger(POSITION_MAGIC) != InpMagicNumber || PositionGetString(POSITION_SYMBOL) != _Symbol)
+            if(PositionGetInteger(POSITION_MAGIC) != InpMagicNumber || PositionGetString(POSITION_SYMBOL) != symbol)
             {
                continue;
             }
-            
+
             if(trade.PositionModify(posInfo.Ticket(), newSL, posInfo.TakeProfit()))
-               Print("🛡️ Stop loss initial SELL: ", DoubleToString(newSL, _Digits));
+               Print("🛡️ SL initial SELL ", symbol, ": ", DoubleToString(newSL, _Digits));
          }
          continue;
       }
       
       // Trail si position est en gain OU si on risque de perdre >50% du gain maximum
       bool shouldTrail = false;
-      
+
       if(profit > 0)
       {
          // Garder en mémoire le gain maximum
          if(profit > g_maxProfit) g_maxProfit = profit;
-         
-         // Activer le trailing SEULEMENT à partir de 1$ de gain
-         // Avant 1$, on laisse respirer la position.
-         if(profit < 1.0)
-         {
-            shouldTrail = false;
-         }
-         else
+
+         // Activer le trailing À PARTIR DE 0.5$ de gain
+         // À 0.5$+, sécuriser au breakeven + ATR/2
+         if(profit >= 0.5)
          {
             shouldTrail = true;
          }
       }
-      else if(g_maxProfit >= 1.0)
+      else if(g_maxProfit >= 0.5)
       {
-         // Si on a déjà eu au moins 1$ de gain et qu'on a rendu >50% de ce gain,
+         // Si on a déjà eu au moins 0.5$ de gain et qu'on a rendu >50% de ce gain,
          // forcer le trailing pour empêcher de perdre plus de la moitié du gain maximum.
          if(profit <= (g_maxProfit * 0.5))
          {
@@ -5571,53 +5675,53 @@ void ManageTrailingStop()
       {
          if(posInfo.PositionType() == POSITION_TYPE_BUY)
          {
-            double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+            double currentPrice = SymbolInfoDouble(symbol, SYMBOL_BID);
             double newSL = currentPrice - trailDistance;
-            
-            // Only move SL if it improves the current SL and is above open price
-            if(newSL > currentSL && newSL > openPrice)
+
+            // BUY: SL doit être SOUS le prix courant et AMÉLIORER le SL existant
+            if(newSL > currentSL && newSL <= currentPrice)
             {
                // VALIDATION: Vérifier que la position existe toujours avant de modifier
                if(!PositionSelectByTicket(posInfo.Ticket()))
                {
                   continue;
                }
-               
+
                // Double validation: vérifier que le magic number et symbole correspondent
-               if(PositionGetInteger(POSITION_MAGIC) != InpMagicNumber || PositionGetString(POSITION_SYMBOL) != _Symbol)
+               if(PositionGetInteger(POSITION_MAGIC) != InpMagicNumber || PositionGetString(POSITION_SYMBOL) != symbol)
                {
                   continue;
                }
-               
+
                if(trade.PositionModify(posInfo.Ticket(), newSL, posInfo.TakeProfit()))
                {
-                  Print("🔄 Trailing Stop BUY mis à jour: ", DoubleToString(currentSL, _Digits), " → ", DoubleToString(newSL, _Digits));
+                  Print("🔒 SL BUY ", symbol, " sécurisé: ", DoubleToString(currentSL, _Digits), " → ", DoubleToString(newSL, _Digits), " | Gain: $", DoubleToString(profit, 2));
                }
             }
          }
          else if(posInfo.PositionType() == POSITION_TYPE_SELL)
          {
-            double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+            double currentPrice = SymbolInfoDouble(symbol, SYMBOL_ASK);
             double newSL = currentPrice + trailDistance;
-            
-            // Only move SL if it improves the current SL and is below open price
-            if((newSL < currentSL || currentSL == 0) && newSL < openPrice)
+
+            // SELL: SL doit être AU-DESSUS du prix courant et AMÉLIORER le SL existant
+            if(newSL < currentSL && newSL >= currentPrice)
             {
                // VALIDATION: Vérifier que la position existe toujours avant de modifier
                if(!PositionSelectByTicket(posInfo.Ticket()))
                {
                   continue;
                }
-               
+
                // Double validation: vérifier que le magic number et symbole correspondent
-               if(PositionGetInteger(POSITION_MAGIC) != InpMagicNumber || PositionGetString(POSITION_SYMBOL) != _Symbol)
+               if(PositionGetInteger(POSITION_MAGIC) != InpMagicNumber || PositionGetString(POSITION_SYMBOL) != symbol)
                {
                   continue;
                }
-               
+
                if(trade.PositionModify(posInfo.Ticket(), newSL, posInfo.TakeProfit()))
                {
-                  Print("🔄 Trailing Stop SELL mis à jour: ", DoubleToString(currentSL, _Digits), " → ", DoubleToString(newSL, _Digits));
+                  Print("🔒 SL SELL ", symbol, " sécurisé: ", DoubleToString(currentSL, _Digits), " → ", DoubleToString(newSL, _Digits), " | Gain: $", DoubleToString(profit, 2));
                }
             }
          }

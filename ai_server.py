@@ -8276,23 +8276,12 @@ _gom_cache_ttl = 10  # secondes
 _gom_bridge_singleton = None
 
 def _get_gom_bridge():
-    """Retourne l'instance singleton du bridge TradingView MCP"""
-    global _gom_bridge_singleton
-    if _gom_bridge_singleton is None:
-        try:
-            import sys
-            from pathlib import Path
-            bridge_path = Path(__file__).parent / "tradingview_mcp_bridge.py"
-            if bridge_path.exists():
-                sys.path.insert(0, str(Path(__file__).parent))
-                from tradingview_mcp_bridge import TradingViewMCPBridge
-                _gom_bridge_singleton = TradingViewMCPBridge()
-            else:
-                return None
-        except Exception as e:
-            logger.error(f"Failed to initialize GOM bridge: {e}")
-            return None
-    return _gom_bridge_singleton
+    """
+    ⚠️ DEPRECATED: Bridge TradingView MCP n'est plus utilisé.
+    GOM/KOLA est maintenant 100% calculé localement depuis data/gom_signal.json.
+    Fonction conservée pour compatibilité rétroactive.
+    """
+    return None
 
 def _get_cached_gom_data(symbol: str) -> Optional[Dict[str, Any]]:
     """Retourne les données GOM depuis le cache si valides, sinon None"""
@@ -8314,36 +8303,27 @@ def _cache_gom_data(symbol: str, data: Dict[str, Any]):
 @app.get("/gom-kola-dashboard")
 async def gom_kola_dashboard(symbol: str = Query("XAUUSD")):
     """
-    Récupère les données du GOM KOLA indicator directement depuis TradingView via MCP.
-    Utilisé par le dashboard TradeManager pour afficher les données fraîches.
+    Récupère les données GOM/KOLA depuis data/gom_signal.json (100% LOCAL, NO TradingView).
+    Utilisé par SMC_Universal (MT5) pour récupérer les verdicts et niveaux Kola.
 
-    Retourne:
+    Retourne (source: local JSON uniquement):
     {
         "ok": true,
         "symbol": "XAUUSD",
-        "timestamp": "2026-05-28T00:10:00Z",
-        "price": 4455.64,
-        "vwap": 4458.59,
-        "vwap_pos": "AU-DESSUS",
-        "bb_sup": 4458.30,
-        "bb_mid": 4457.06,
-        "bb_inf": 4455.83,
-        "bb_pos": "DANS BANDE",
-        "supertrend": 4582.72,
-        "st_dir": "↑",
-        "st_pos": "EN-DESSOUS",
-        "fib_zone": "50%",
-        "verdict": "STRONG SELL",
-        "verdict_num": -3,
-        "score_buy": 1.7,
-        "score_sell": 7.3,
-        "spike_pct": 6.4,
-        "rsi": 42,
-        "entry_quality": 57,
-        "coherence_pct": 67,
-        "kola_buy": 4452.81,
-        "kola_sell": 4457.86,
-        "source": "tradingview_mcp"
+        "timestamp": "2026-06-10T14:30:00Z",
+        "verdict": "PERFECT BUY",
+        "verdict_num": 3,
+        "score_buy": 7.52,
+        "score_sell": 1.65,
+        "kola_buy": 4191.0,
+        "kola_sell": 4198.0,
+        "entry": 4192.2,
+        "sl": 6040.0,
+        "tp": 6028.0,
+        "tf_global_dir": "BULL",
+        "tf_global_strength": 6,
+        "coherence_pct": 60.0,
+        "source": "local_json"
     }
     """
     try:
@@ -8352,92 +8332,64 @@ async def gom_kola_dashboard(symbol: str = Query("XAUUSD")):
         if cached_data:
             return cached_data
 
-        # Récupérer bridge singleton
-        bridge = _get_gom_bridge()
-        if not bridge:
-            return {
-                "ok": True,
-                "symbol": symbol,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "source": "tradingview_mcp",
-                "error": "TradingView bridge not available"
-            }
+        # NOUVELLE LOGIQUE: Charger DIRECTEMENT depuis JSON local (NO TradingView)
+        gom_file = Path(__file__).parent / "data" / "gom_signal.json"
 
-        # Récupérer données fraîches
-        gom_data = bridge.get_gom_data()
-
-        if gom_data.get("error"):
+        if not gom_file.exists():
             return {
                 "ok": False,
                 "symbol": symbol,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
-                "error": gom_data.get("error")
+                "error": "GOM signal file not found",
+                "source": "local_json"
             }
 
-        # Utiliser les données du bridge
-        price = gom_data.get("price", 0)
-        vwap = gom_data.get("vwap", 0)
-        values = gom_data  # Les données sont déjà parsées
+        with open(gom_file, 'r', encoding='utf-8') as f:
+            gom_data = json.load(f)
 
-        # Continuer avec les données
-        if not values:
+        if symbol not in gom_data:
             return {
                 "ok": False,
                 "symbol": symbol,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
-                "error": "No GOM data available"
+                "error": f"Symbol {symbol} not in GOM data",
+                "source": "local_json"
             }
 
-        # Utiliser directement les données du bridge (déjà parsées)
-        vwap = values.get("vwap", 0)
-        vwap_pos = "AU-DESSUS" if price > vwap else "EN-DESSOUS"
+        record = gom_data[symbol]
 
-        bb_sup = values.get("bb_sup", 0)
-        bb_mid = values.get("bb_mid", 0)
-        bb_inf = values.get("bb_inf", 0)
-        bb_pos = "DANS BANDE" if bb_inf <= price <= bb_sup else ("AU-DESSUS" if price > bb_sup else "EN-DESSOUS")
-
-        st = values.get("supertrend", 0)
-        st_dir = values.get("st_dir", "↑")
-        st_pos = "AU-DESSUS" if price > st else "EN-DESSOUS"
-
-        verdict_num = values.get("verdict_num", 0)
+        # Construire réponse depuis JSON local
+        verdict_num = record.get("verdict_num", 0)
         verdict_map = {
-            -3: "STRONG SELL", -2: "SELL", -1: "SELL BIAS",
-            0: "WAIT", 1: "BUY BIAS", 2: "BUY", 3: "STRONG BUY"
+            -3: "PERFECT SELL", -2: "GOOD SELL", -1: "SELL BIAS",
+            0: "WAIT", 1: "BUY BIAS", 2: "GOOD BUY", 3: "PERFECT BUY"
         }
-        verdict = verdict_map.get(verdict_num, "WAIT")
+        verdict = record.get("verdict", verdict_map.get(verdict_num, "WAIT"))
 
-        # Construire réponse
         response = {
             "ok": True,
             "symbol": symbol,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "price": round(price, 2),
-            "vwap": round(vwap, 2),
-            "vwap_pos": vwap_pos,
-            "bb_sup": round(bb_sup, 2),
-            "bb_mid": round(bb_mid, 2),
-            "bb_inf": round(bb_inf, 2),
-            "bb_pos": bb_pos,
-            "supertrend": round(st, 2),
-            "st_dir": st_dir,
-            "st_pos": st_pos,
-            "fib_zone": "50%",
+            "timestamp": record.get("timestamp", datetime.now(timezone.utc).isoformat()),
             "verdict": verdict,
             "verdict_num": verdict_num,
-            "score_buy": round(values.get("score_buy", 0), 1),
-            "score_sell": round(values.get("score_sell", 0), 1),
-            "spike_pct": round(values.get("spike_pct", 0), 1),
-            "rsi": int(values.get("rsi", 0)),
-            "entry_quality": int(values.get("entry_quality", 0)),
-            "coherence_pct": int(values.get("coherence_pct", 0)),
-            "kola_buy": round(values.get("kola_buy", 0), 2),
-            "kola_sell": round(values.get("kola_sell", 0), 2),
-            "pred_path": values.get("pred_path", "U" * 200),
-            "atr": round(values.get("atr", 0), 2),
-            "path_step": values.get("path_step", 0.16),
-            "source": "tradingview_mcp"
+            "score_buy": round(record.get("score_buy", 0.0), 2),
+            "score_sell": round(record.get("score_sell", 0.0), 2),
+            "kola_buy": round(record.get("kola_buy", 0.0), 2),
+            "kola_sell": round(record.get("kola_sell", 0.0), 2),
+            "entry": round(record.get("entry", 0.0), 2),
+            "sl": round(record.get("sl", 0.0), 2),
+            "tp": round(record.get("tp", 0.0), 2),
+            "tf_global_dir": record.get("tf_global_dir", "NEUT"),
+            "tf_global_strength": int(record.get("tf_global_strength", 0)),
+            "coherence_pct": round(record.get("coherence_pct", 0.0), 1),
+            "filter_ratio": round(record.get("filter_ratio", 0.0), 2),
+            "bb_up": round(record.get("bb_up", 0.0), 2),
+            "bb_mid": round(record.get("bb_mid", 0.0), 2),
+            "bb_dn": round(record.get("bb_dn", 0.0), 2),
+            "setup_entry": round(record.get("setup_entry", 0.0), 2),
+            "setup_sl": round(record.get("setup_sl", 0.0), 2),
+            "setup_tp1": round(record.get("setup_tp1", 0.0), 2),
+            "source": "local_json"
         }
 
         # Mettre en cache avant de retourner
@@ -8451,7 +8403,7 @@ async def gom_kola_dashboard(symbol: str = Query("XAUUSD")):
             "symbol": symbol,
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "error": str(e),
-            "source": "error"
+            "source": "local_json_error"
         }
 
 
@@ -22582,48 +22534,94 @@ def _gom_verdict_record_from_payload(payload: GomVerdictPayload, enrich_mt5: boo
     }
 
     # ══════════════════════════════════════════════════════════════
-    # RECALCUL VERDICT_NUM SELON LA MÉTHODE PINE SCRIPT EXACT
-    # Seuils Pine: vn=±3 si gap >= 4.0, vn=±2 si gap >= 2.5, vn=±1 si gap >= 1.2
+    # CALCUL VERDICT GOM — PURE PINE SCRIPT LOGIC
+    # Basé UNIQUEMENT sur: gap = |score_buy - score_sell| + coherence_ok
     # ══════════════════════════════════════════════════════════════
-    score_buy = record["score_buy"]
-    score_sell = record["score_sell"]
-    logger.info(f"[GomRecalc] {_resolve_symbol(payload.symbol)}: score_buy={score_buy:.2f}, score_sell={score_sell:.2f}")
 
-    if score_buy > score_sell:
-        gap = score_buy - score_sell
-        logger.info(f"[GomRecalc]   gap={gap:.2f} → BUY side")
-        if gap >= 4.0:
-            record["verdict_num"] = 3
-            record["verdict"] = "PERFECT BUY"
-            logger.info(f"[GomRecalc]   gap >= 4.0 → vn=3 PERFECT BUY ✓")
-        elif gap >= 2.5:
-            record["verdict_num"] = 2
-            record["verdict"] = "GOOD BUY"
-            logger.info(f"[GomRecalc]   gap >= 2.5 → vn=2 GOOD BUY")
-        elif gap >= 1.2:
-            record["verdict_num"] = 1
-            record["verdict"] = "BUY"
-        else:
-            record["verdict_num"] = 0
-            record["verdict"] = "WAIT"
-    elif score_sell > score_buy:
-        gap = score_sell - score_buy
-        if gap >= 4.0:
-            record["verdict_num"] = -3
-            record["verdict"] = "PERFECT SELL"
-        elif gap >= 2.5:
-            record["verdict_num"] = -2
-            record["verdict"] = "GOOD SELL"
-        elif gap >= 1.2:
-            record["verdict_num"] = -1
-            record["verdict"] = "SELL"
-        else:
-            record["verdict_num"] = 0
-            record["verdict"] = "WAIT"
-    else:
-        # score_buy == score_sell → WAIT
+    # 1. EXTRACT SCORES
+    score_buy = float(record.get("score_buy") or 0)
+    score_sell = float(record.get("score_sell") or 0)
+    coherence_pct = float(record.get("coherence_pct") or 0)
+    filter_ratio = float(record.get("filter_ratio") or 0)
+
+    # 2. CALCULATE GAP
+    gap = abs(score_buy - score_sell)
+
+    # 3. DETERMINE COHERENCE_OK
+    # Pine Script logic (line 956):
+    # coherence_ok = not verdict_coherence or filter_ratio >= 0.40 or verdict_gap >= (verdict_gap_th + 0.24)
+    # Simplified: accept if filter_ratio >= 40% OR gap is very strong (>= 4.5)
+    coherence_ok = (filter_ratio >= 0.40) or (gap >= 4.5)
+
+    logger.info(f"[GOM VERDICT] {_resolve_symbol(payload.symbol)}")
+    logger.info(f"  Scores: buy={score_buy:.2f}, sell={score_sell:.2f}")
+    logger.info(f"  Gap: {gap:.2f} | Coherence: {coherence_pct:.0f}% (filter_ratio={filter_ratio:.2f}) | coherence_ok={coherence_ok}")
+
+    # 4. CLASSIFY BY GAP + COHERENCE
+    # These are the ONLY thresholds that matter:
+    # Gap >= 4.0: PERFECT
+    # Gap >= 2.5: GOOD
+    # Gap >= 1.2: REGULAR
+    # Gap < 1.2:  WAIT
+
+    if gap < 1.2:
+        # Insufficient conviction
         record["verdict_num"] = 0
         record["verdict"] = "WAIT"
+        logger.info(f"  → WAIT (gap={gap:.2f} < 1.2)")
+
+    elif gap < 2.5:
+        # Regular signal (gap 1.2-2.5)
+        if coherence_ok:
+            if score_buy > score_sell:
+                record["verdict_num"] = 1
+                record["verdict"] = "BUY"
+                logger.info(f"  → BUY (gap={gap:.2f}, coherence_ok=True)")
+            else:
+                record["verdict_num"] = -1
+                record["verdict"] = "SELL"
+                logger.info(f"  → SELL (gap={gap:.2f}, coherence_ok=True)")
+        else:
+            record["verdict_num"] = 0
+            record["verdict"] = "WAIT"
+            logger.info(f"  → WAIT (gap={gap:.2f} in valid range BUT coherence_ok=False)")
+
+    elif gap < 4.0:
+        # Good signal (gap 2.5-4.0)
+        if coherence_ok:
+            if score_buy > score_sell:
+                record["verdict_num"] = 2
+                record["verdict"] = "GOOD BUY"
+                logger.info(f"  → GOOD BUY (gap={gap:.2f}, coherence_ok=True)")
+            else:
+                record["verdict_num"] = -2
+                record["verdict"] = "GOOD SELL"
+                logger.info(f"  → GOOD SELL (gap={gap:.2f}, coherence_ok=True)")
+        else:
+            record["verdict_num"] = 0
+            record["verdict"] = "WAIT"
+            logger.info(f"  → WAIT (gap={gap:.2f} in valid range BUT coherence_ok=False)")
+
+    else:
+        # Perfect signal (gap >= 4.0)
+        if coherence_ok:
+            if score_buy > score_sell:
+                record["verdict_num"] = 3
+                record["verdict"] = "PERFECT BUY"
+                logger.info(f"  → PERFECT BUY (gap={gap:.2f}, coherence_ok=True)")
+            else:
+                record["verdict_num"] = -3
+                record["verdict"] = "PERFECT SELL"
+                logger.info(f"  → PERFECT SELL (gap={gap:.2f}, coherence_ok=True)")
+        else:
+            record["verdict_num"] = 0
+            record["verdict"] = "WAIT"
+            logger.info(f"  → WAIT (gap={gap:.2f} very strong BUT coherence_ok=False)")
+
+    # Store gap and coherence for reference
+    record["verdict_gap"] = gap
+    record["filter_ratio"] = filter_ratio
+    record["coherence_pct"] = coherence_pct
 
     # Ajouter les champs optionnels avec défauts pour éviter les null
     optional_fields = {
@@ -23075,6 +23073,125 @@ async def get_gom_verdict(symbol: str = "XAUUSD"):
     #     pass
     flat = _build_gom_mt5_payload(verdict)
     return {"ok": True, "symbol": sym, **flat}
+
+def _calculate_gom_verdict(score_buy: float, score_sell: float, coherence: float = 0, filter_ratio: float = 0) -> tuple:
+    """
+    Calcule le verdict GOM basé sur les scores.
+    Retourne: (verdict_num, verdict_string)
+
+    verdict_num:
+      3 = PERFECT BUY
+      2 = GOOD BUY
+      1 = BUY
+      0 = WAIT
+     -1 = SELL
+     -2 = GOOD SELL
+     -3 = PERFECT SELL
+    """
+    gap = abs(score_buy - score_sell)
+
+    # Gating: coherence et filter_ratio doivent être >= 0.40 pour un signal
+    if coherence is None or filter_ratio is None or (coherence < 0.40 and filter_ratio < 0.40):
+        return (0, "WAIT")
+
+    # Classification par gap
+    if gap < 1.2:
+        return (0, "WAIT")
+    elif 1.2 <= gap < 2.5:
+        if score_buy > score_sell:
+            return (1, "BUY")
+        else:
+            return (-1, "SELL")
+    elif 2.5 <= gap < 4.0:
+        if score_buy > score_sell:
+            return (2, "GOOD BUY")
+        else:
+            return (-2, "GOOD SELL")
+    else:  # gap >= 4.0
+        if score_buy > score_sell:
+            return (3, "PERFECT BUY")
+        else:
+            return (-3, "PERFECT SELL")
+
+@app.get("/gom-verdicts")
+async def get_all_gom_verdicts():
+    """
+    Retourne TOUS les verdicts GOM.
+    Lit depuis gom_signal.json (source locale) et recalcule EN TEMPS RÉEL.
+    Aucune connexion externe — entièrement autonome.
+    """
+    try:
+        gom_file = Path(__file__).resolve().parent / "data" / "gom_signal.json"
+        if not gom_file.is_file():
+            return {"ok": False, "verdicts": [], "message": "gom_signal.json not found"}
+
+        data = json.loads(gom_file.read_text(encoding="utf-8"))
+        verdicts = []
+
+        for symbol, record in data.items():
+            try:
+                score_buy = float(record.get("score_buy") or 0)
+                score_sell = float(record.get("score_sell") or 0)
+                coherence = float(record.get("coherence_pct") or 0) / 100.0  # Convert % to decimal
+                filter_ratio = float(record.get("filter_ratio") or 0)
+
+                # Recalculer le verdict en temps réel
+                vn, verdict_str = _calculate_gom_verdict(score_buy, score_sell, coherence, filter_ratio)
+
+                # Map entry→setup_entry, sl→setup_sl, tp→setup_tp1
+                entry = float(record.get("entry") or 0)
+                sl = float(record.get("sl") or 0)
+                tp = float(record.get("tp") or 0)
+                setup_entry = float(record.get("setup_entry") or entry or 0)
+                setup_sl = float(record.get("setup_sl") or sl or 0)
+                setup_tp1 = float(record.get("setup_tp1") or tp or 0)
+
+                verdict_obj = {
+                    "symbol": symbol,
+                    "verdict_num": vn,
+                    "verdict": verdict_str,
+                    "score_buy": score_buy,
+                    "score_sell": score_sell,
+                    "verdict_gap": abs(score_buy - score_sell),
+                    "coherence_pct": float(record.get("coherence_pct") or 0),
+                    "filter_ratio": filter_ratio,
+                    "entry": entry,
+                    "sl": sl,
+                    "tp": tp,
+                    "setup_entry": setup_entry,
+                    "setup_sl": setup_sl,
+                    "setup_tp1": setup_tp1,
+                    "timestamp": str(record.get("timestamp") or ""),
+                    "tf_global_dir": str(record.get("tf_global_dir") or "NEUT"),
+                    "tf_global_strength": int(record.get("tf_global_strength") or 0),
+                }
+
+                verdicts.append(verdict_obj)
+            except Exception as e:
+                logger.warning(f"[GOM-Verdicts] Error processing {symbol}: {e}")
+                continue
+
+        # Sort by verdict strength (PERFECT first, then GOOD, then regular)
+        verdicts.sort(key=lambda x: (
+            -abs(x["verdict_num"]),  # Strongest verdicts first
+            -x["verdict_gap"]  # Then by gap strength
+        ))
+
+        logger.info(f"[GOM-Verdicts] Loaded {len(verdicts)} verdicts from gom_signal.json (recalculated live)")
+        return {
+            "ok": True,
+            "count": len(verdicts),
+            "verdicts": verdicts,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+
+    except Exception as e:
+        logger.error(f"[GOM-Verdicts] Error: {e}")
+        return {
+            "ok": False,
+            "verdicts": [],
+            "message": f"Error loading verdicts: {str(e)}"
+        }
 
 @app.get("/pending-order")
 async def get_pending_order(symbol: str = "XAUUSD", peek: bool = False):
