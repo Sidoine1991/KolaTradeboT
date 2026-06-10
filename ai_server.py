@@ -8294,7 +8294,7 @@ async def health_rds():
 # === GOM KOLA DASHBOARD CACHE ===
 # Cache singleton pour éviter timeout sur /gom-kola-dashboard
 _gom_cache: Dict[str, Dict[str, Any]] = {}
-_gom_cache_ttl = 10  # secondes
+_gom_cache_ttl = 0  # Désactivé pour testing — remet à 120 après
 _gom_bridge_singleton = None
 
 def _get_gom_bridge():
@@ -8387,6 +8387,7 @@ async def gom_kola_dashboard(symbol: str = Query("XAUUSD")):
 
         # 3. Construire réponse (compatible avec SMC_GOM_Pipeline.mqh parsing)
         price = record.get("entry", record.get("close", 0.0))
+        logger.warning(f"DEBUG: Building response with price={price}, has tf_m1_dir={record.get('tf_m1_dir')}")
         response = {
             "ok": True,
             "symbol": symbol,
@@ -8450,6 +8451,7 @@ async def gom_kola_dashboard(symbol: str = Query("XAUUSD")):
 
         # Mettre en cache (2 min)
         _cache_gom_data(symbol, response)
+        logger.warning(f"RETURNATING RESPONSE WITH {len(response)} KEYS: {list(response.keys())[:10]}")
         return response
 
     except Exception as e:

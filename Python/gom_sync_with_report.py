@@ -148,7 +148,11 @@ def send_whatsapp_report(report):
 
     try:
         url = f"{AI_SERVER}/notify-whatsapp"
-        payload = {"message": report}
+        payload = {
+            "event": "gom_report",
+            "symbol": "GOM_VERDICTS",
+            "message": report
+        }
 
         response = requests.post(url, json=payload, timeout=5)
 
