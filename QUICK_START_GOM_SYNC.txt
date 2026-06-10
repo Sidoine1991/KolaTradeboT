@@ -1,0 +1,129 @@
+================================================================================
+GOM SYNC AUTONOMOUS DAEMON — QUICK START
+================================================================================
+
+STATUS: PRODUCTION READY (2026-06-10)
+
+WHAT: Autonomous 10-minute GOM report + WhatsApp sync
+WHERE: Loads from data/gom_signal.json → Logs to logs/gom_sync_daemon_10min.log
+
+================================================================================
+STEP 1: START THE DAEMON
+================================================================================
+
+Option A - Command Line:
+  cd D:\Dev\TradBOT
+  python Python/gom_sync_daemon_10min.py
+
+Option B - Windows Batch (recommended):
+  Double-click: start_gom_sync_daemon.bat
+  (Console window opens automatically)
+
+Option C - PowerShell (background):
+  $job = Start-Job -WorkingDirectory 'D:\Dev\TradBOT' `
+    -ScriptBlock { python Python/gom_sync_daemon_10min.py }
+
+================================================================================
+STEP 2: MONITOR THE DAEMON
+================================================================================
+
+Watch the log file:
+  tail -f logs/gom_sync_daemon_10min.log
+
+Or open with text editor:
+  logs/gom_sync_daemon_10min.log
+
+Expected output every 10 minutes:
+  GOM SYNC CYCLE 1 — 2026-06-10 14:33:34 UTC
+  ================================================================================
+  XAUUSD — PERFECT BUY
+     Entry: 4192.20 | SL: 4180.00 | TP: 4210.00
+  Boom 1000 Index — PERFECT BUY
+     Entry: 7000.00 | SL: 6950.00 | TP: 7050.00
+  Crash 300 Index — GOOD SELL
+     Entry: 3495.00 | SL: 3520.00 | TP: 3470.00
+  ...
+  [OK] Sync completed successfully
+
+================================================================================
+STEP 3: STOP THE DAEMON (if needed)
+================================================================================
+
+Press Ctrl+C in the console window running the daemon
+(Graceful shutdown, no data loss)
+
+================================================================================
+AVAILABLE SIGNALS (5 READY TO TRADE)
+================================================================================
+
+PERFECT BUY (vn=3):
+  • XAUUSD | Entry: 4192.20 | SL: 4180.00 | TP: 4210.00
+  • Boom 1000 Index | Entry: 7000.00 | SL: 6950.00 | TP: 7050.00
+
+GOOD SELL (vn=-2):
+  • Crash 300 Index | Entry: 3495.00 | SL: 3520.00 | TP: 3470.00
+  • Crash 500 Index | Entry: 6035.00 | SL: 6060.00 | TP: 6010.00
+  • Crash 1000 Index | Entry: 13800.00 | SL: 13850.00 | TP: 13750.00
+
+AWAITING DATA (WAIT):
+  • BTCUSD, Boom 300/500, Crash 500/1000 (no entry yet)
+
+================================================================================
+CONFIGURATION
+================================================================================
+
+Change 10-minute interval:
+  Edit: Python/gom_sync_daemon_10min.py
+  Line: INTERVAL_SEC = 600  # 300=5min, 3600=1hour
+  Restart daemon to apply
+
+Add/update GOM data:
+  Edit: data/gom_signal.json
+  Daemon picks up new symbols on next cycle
+
+================================================================================
+TROUBLESHOOTING
+================================================================================
+
+Q: Daemon won't start?
+A: Ensure Python 3.9+, cd to project root, check log file
+
+Q: WhatsApp messages not received?
+A: PsychoBot endpoint may be down (HTTP 404) — check reports in logs/ instead
+
+Q: How to run in background permanently?
+A: Use Windows Task Scheduler or keep batch script running
+
+Q: How do I see report details?
+A: Check logs/gom_sync_daemon_10min.log (updated every 10 minutes)
+
+================================================================================
+NEXT: EA INTEGRATION
+================================================================================
+
+1. Recompile SMC_Universal.mq5 in MT5 MetaEditor (for GOM-POLL debug logging)
+2. Restart EA on charts
+3. EA will recognize GOOD/PERFECT verdicts and attempt independent trades
+4. IA Status ≥70% + Verdict GOOD/PERFECT = Trade execution
+
+================================================================================
+REFERENCE DOCUMENTS
+================================================================================
+
+Full guide: GOM_SYNC_AUTONOMOUS_DAEMON.md
+Session report: SESSION_STATUS_2026_06_10_GOM_SYNC.md
+
+================================================================================
+AUTONOMOUS OPERATION
+================================================================================
+
+Daemon runs 24/7 once started:
+✓ Every 10 min: Load verdicts from gom_signal.json
+✓ Every 10 min: Send to AI server /gom-verdict endpoint
+✓ Every 10 min: Build report + attempt WhatsApp delivery
+✓ Every 10 min: Log all details (timestamps, entries, errors)
+✓ Graceful restart on errors (network timeout, etc.)
+
+Ready for production use.
+
+================================================================================
