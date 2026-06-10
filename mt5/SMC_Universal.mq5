@@ -1992,15 +1992,18 @@ void OnTick()
    // ✅ AUTO TRADING LOOP — Placement + Trailing Stop + Profit targets
    // AutoTradingTick();  // TODO: Fix MQL5 compatibility
 
-   // Pipeline validé + poll GOM (timer 1s + rattrapage OnTick)
+   // ✅ POLL GOM FORCÉ À CHAQUE TICK — Mise à jour instantanée du verdict
+   // Indépendamment des paramètres, poll toujours pour affichage temps réel
+   SMCGP_PollGOM();
+
+   // Pipeline validé + dessin GOM si activé
    // GOM polling: XAUUSD, BTCUSD, ETHUSD, FOREX + Boom/Crash (si gom_signal.json disponible)
    bool hasGOMData = (StringFind(_Symbol, "XAUUSD") >= 0 || StringFind(_Symbol, "USD") >= 0 || StringFind(_Symbol, "EUR") >= 0 ||
                       StringFind(_Symbol, "GBP") >= 0 || StringFind(_Symbol, "JPY") >= 0 ||
                       StringFind(_Symbol, "BTC") >= 0 || StringFind(_Symbol, "ETH") >= 0 ||
                       StringFind(_Symbol, "Boom") >= 0 || StringFind(_Symbol, "Crash") >= 0);
-   if((UseGOMPipeline || UseGOMVerdictFilter || ShowGOMDashboard) && hasGOMData)
+   if(hasGOMData)
    {
-      SMCGP_PollGOM();
 
       // Dessiner les Bollinger et zones GOM
       if(ShowGOMDashboard)

@@ -402,7 +402,8 @@ void SMCGP_ParseSetupFromGOM(const string &body)
 // ── Poll GOM ───────────────────────────────────────────────────────
 void SMCGP_PollGOM()
 {
-   if(!UseGOMVerdictFilter && !UseGOMPipeline && !ShowGOMDashboard) return;
+   // TOUJOURS poll (même si UseGOMVerdictFilter + UseGOMPipeline + ShowGOMDashboard sont OFF)
+   // Pour affichage temps réel du verdict sur SMC dashboard
 
    // Si GOMPollIntervalSec = 0, poll à chaque tick (instantané)
    // Sinon, respecter l'interval en secondes
