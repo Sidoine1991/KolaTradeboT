@@ -9,6 +9,7 @@ Récupère candles locales → Calcule indicateurs → Retourne verdict FRAIS
 
 import sys
 import json
+import asyncio
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple
 from datetime import datetime, timezone, timedelta
@@ -18,6 +19,13 @@ import pandas as pd
 # Fix encoding
 if sys.stdout.encoding != 'utf-8':
     sys.stdout.reconfigure(encoding='utf-8')
+
+# Import Deriv WebSocket
+try:
+    from deriv_candles_ws import DerivCandlesWSFetcher
+    DERIV_AVAILABLE = True
+except ImportError:
+    DERIV_AVAILABLE = False
 
 
 class GOMSignalsLiveCalculator:
@@ -110,15 +118,45 @@ class GOMSignalsLiveCalculator:
         self, symbol: str, timeframe: str = "15", bars: int = 100
     ) -> pd.DataFrame:
         """
-        Récupère les candles (CSV → Fallback).
+        Récupère les candles (Deriv WebSocket → CSV → Fallback).
+        PRIORITÉ 1: Deriv WebSocket (LIVE, real-time)
+        PRIORITÉ 2: CSV local
+        PRIORITÉ 3: Synthétique fallback
         """
-        # Essayer CSV d'abord
-        df = self.get_candles_from_csv(symbol, timeframe, bars)
+        # PRIORITÉ 1: Deriv WebSocket (LIVE EN TEMPS RÉEL)
+        if DERIV_AVAILABLE:
+            try:
+                # Utilise threading pour appeler asyncio.run() depuis contexte sync
+                import threading
+                result = [None]
 
+                def fetch_deriv():
+                    try:
+                        result[0] = asyncio.run(
+                            DerivCandlesWSFetcher().fetch_candles(symbol, timeframe, bars)
+                        )
+                    except Exception as e:
+                        print(f"[GOM-CALC] Deriv thread error: {e}")
+
+                thread = threading.Thread(target=fetch_deriv, daemon=True)
+                thread.start()
+                thread.join(timeout=5.0)  # Timeout 5 secondes
+
+                df = result[0]
+                if df is not None and len(df) > 0:
+                    print(f"[GOM-CALC] Fetched {len(df)} candles from Deriv WebSocket for {symbol} {timeframe}m")
+                    return df
+            except Exception as e:
+                print(f"[GOM-CALC] Deriv error: {e} - Falling back to CSV")
+
+        # PRIORITÉ 2: Essayer CSV local
+        df = self.get_candles_from_csv(symbol, timeframe, bars)
         if df is not None and len(df) > 0:
+            print(f"[GOM-CALC] Fetched {len(df)} candles from CSV for {symbol} {timeframe}m")
             return df
 
-        # Fallback: données synthétiques depuis gom_signal.json
+        # PRIORITÉ 3: Fallback synthétique depuis gom_signal.json
+        print(f"[GOM-CALC] Using fallback synthetic candles for {symbol} {timeframe}m")
         return self.get_candles_fallback(symbol, timeframe)
 
     def calculate_rsi(self, df: pd.DataFrame, period: int = 14) -> float:
