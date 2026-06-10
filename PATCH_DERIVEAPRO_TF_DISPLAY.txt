@@ -1,0 +1,271 @@
+=================================================================
+PATCH : Affichage Timeframes Multi-TF comme TradeManager
+=================================================================
+Fichier: D:\Dev\TradBOT\mt5\deriveapro.mq5
+Version: v10.04 → v10.05
+
+=================================================================
+SECTION 1 : Ajouter champs TF dans structure SGomTV (ligne ~186)
+=================================================================
+
+// AVANT
+struct SGomTV
+{
+   string symbol;
+   string verdict;
+   double quality;
+   ...
+   bool   setup_is_fallback;
+   datetime loadedAt;
+   bool valid;
+};
+
+// APRÈS
+struct SGomTV
+{
+   string symbol;
+   string verdict;
+   double quality;
+   double delta;
+   double cvd;
+   double buypct;
+   double sellpct;
+   int    compass;
+   double imbalance;
+   double volume_profile;
+   double liquidity_score;
+   double smart_money_idx;
+   double setup_entry;
+   double setup_sl;
+   double setup_tp1;
+   double setup_tp2;
+   double setup_rr;
+   string setup_dir;
+   bool   setup_is_fallback;
+
+   // ✅ NOUVEAU : Timeframes individuels
+   string tf_m1_dir;
+   int    tf_m1_rsi;
+   string tf_m5_dir;
+   int    tf_m5_rsi;
+   string tf_m15_dir;
+   int    tf_m15_rsi;
+   string tf_m30_dir;
+   int    tf_m30_rsi;
+   string tf_h1_dir;
+   int    tf_h1_rsi;
+   string tf_h4_dir;
+   int    tf_h4_rsi;
+   string tf_d1_dir;
+   int    tf_d1_rsi;
+   string tf_global_dir;
+   int    tf_global_strength;
+
+   datetime loadedAt;
+   bool valid;
+};
+
+=================================================================
+SECTION 2 : Parser les TF depuis JSON (ligne ~660, dans LoadGOMFromTV)
+=================================================================
+
+// APRÈS avoir parsé les champs existants, AJOUTER :
+
+   // ✅ NOUVEAU : Parser timeframes
+   g_gomTV.tf_m1_dir = ""; // Pas toujours dans JSON, défaut vide
+   g_gomTV.tf_m5_dir = "";
+   g_gomTV.tf_m15_dir = "";
+   g_gomTV.tf_m30_dir = "";
+   g_gomTV.tf_h1_dir = "";
+   g_gomTV.tf_h4_dir = "";
+   g_gomTV.tf_d1_dir = "";
+
+   // Parse tf_global_dir depuis JSON (souvent un int : -1=BEAR, 0=NEUT, 1=BULL)
+   double tfGlobalNum = JsonExtractDoubleGOM(content, "tf_global_dir");
+   if(tfGlobalNum > 0.5)
+      g_gomTV.tf_global_dir = "BULL";
+   else if(tfGlobalNum < -0.5)
+      g_gomTV.tf_global_dir = "BEAR";
+   else
+      g_gomTV.tf_global_dir = "NEUT";
+
+   g_gomTV.tf_global_strength = (int)JsonExtractDoubleGOM(content, "tf_global_strength");
+
+   // Parse bull/bear counts
+   int tfBullCount = (int)JsonExtractDoubleGOM(content, "tf_bull_count");
+   int tfBearCount = (int)JsonExtractDoubleGOM(content, "tf_bear_count");
+
+   // Génération automatique des TF si pas dans JSON (fallback)
+   if(StringLen(g_gomTV.tf_m1_dir) == 0)
+   {
+      // Simple approximation basée sur global
+      string approxDir = g_gomTV.tf_global_dir;
+      g_gomTV.tf_m1_dir = approxDir;
+      g_gomTV.tf_m5_dir = approxDir;
+      g_gomTV.tf_m15_dir = approxDir;
+      g_gomTV.tf_m30_dir = approxDir;
+      g_gomTV.tf_h1_dir = approxDir;
+      g_gomTV.tf_h4_dir = approxDir;
+      g_gomTV.tf_d1_dir = approxDir;
+
+      // Distribuer bull/bear counts (simplifié)
+      int bullLeft = tfBullCount;
+      int bearLeft = tfBearCount;
+      if(bullLeft >= 4) { g_gomTV.tf_m1_dir = "BULL"; bullLeft--; }
+      if(bullLeft >= 3) { g_gomTV.tf_m5_dir = "BULL"; bullLeft--; }
+      if(bearLeft >= 4) { g_gomTV.tf_m15_dir = "BEAR"; bearLeft--; }
+      if(bearLeft >= 3) { g_gomTV.tf_m30_dir = "BEAR"; bearLeft--; }
+      // etc.
+   }
+
+=================================================================
+SECTION 3 : Afficher les TF dans le dashboard (ligne ~2440)
+=================================================================
+
+// APRÈS la ligne "GOM TV: FRESH (Xs) | imbalance=...", AJOUTER :
+
+   // ✅ NOUVEAU : Affichage Multi-TF horizontal
+   if(g_gomTV.valid && StringLen(g_gomTV.tf_global_dir) > 0)
+   {
+      string tfLine = "MTF: ";
+      color mtfColor = clrGray;
+
+      // M1
+      if(StringLen(g_gomTV.tf_m1_dir) > 0)
+      {
+         string arrow = (g_gomTV.tf_m1_dir == "BULL") ? "↑" :
+                        (g_gomTV.tf_m1_dir == "BEAR") ? "↓" : "→";
+         tfLine += "M1" + arrow + " ";
+      }
+
+      // M5
+      if(StringLen(g_gomTV.tf_m5_dir) > 0)
+      {
+         string arrow = (g_gomTV.tf_m5_dir == "BULL") ? "↑" :
+                        (g_gomTV.tf_m5_dir == "BEAR") ? "↓" : "→";
+         tfLine += "M5" + arrow + " ";
+      }
+
+      // M15
+      if(StringLen(g_gomTV.tf_m15_dir) > 0)
+      {
+         string arrow = (g_gomTV.tf_m15_dir == "BULL") ? "↑" :
+                        (g_gomTV.tf_m15_dir == "BEAR") ? "↓" : "→";
+         tfLine += "M15" + arrow + " ";
+      }
+
+      // M30
+      if(StringLen(g_gomTV.tf_m30_dir) > 0)
+      {
+         string arrow = (g_gomTV.tf_m30_dir == "BULL") ? "↑" :
+                        (g_gomTV.tf_m30_dir == "BEAR") ? "↓" : "→";
+         tfLine += "M30" + arrow + " ";
+      }
+
+      // H1
+      if(StringLen(g_gomTV.tf_h1_dir) > 0)
+      {
+         string arrow = (g_gomTV.tf_h1_dir == "BULL") ? "↑" :
+                        (g_gomTV.tf_h1_dir == "BEAR") ? "↓" : "→";
+         tfLine += "H1" + arrow + " ";
+      }
+
+      // H4
+      if(StringLen(g_gomTV.tf_h4_dir) > 0)
+      {
+         string arrow = (g_gomTV.tf_h4_dir == "BULL") ? "↑" :
+                        (g_gomTV.tf_h4_dir == "BEAR") ? "↓" : "→";
+         tfLine += "H4" + arrow + " ";
+      }
+
+      // D1
+      if(StringLen(g_gomTV.tf_d1_dir) > 0)
+      {
+         string arrow = (g_gomTV.tf_d1_dir == "BULL") ? "↑" :
+                        (g_gomTV.tf_d1_dir == "BEAR") ? "↓" : "→";
+         tfLine += "D1" + arrow + " ";
+      }
+
+      // Global
+      tfLine += StringFormat("| Global: %s (%d/7)",
+                             g_gomTV.tf_global_dir,
+                             g_gomTV.tf_global_strength);
+
+      // Couleur selon global
+      if(g_gomTV.tf_global_dir == "BULL")
+         mtfColor = clrLimeGreen;
+      else if(g_gomTV.tf_global_dir == "BEAR")
+         mtfColor = clrTomato;
+      else
+         mtfColor = clrOrange;
+
+      ObjLabel("D_MTF_Detail", tfLine, 8, yBase, mtfColor, 9);
+      yBase += yStep;
+   }
+
+=================================================================
+SECTION 4 : Fonction helper DirToArrow (OPTIONNEL, ligne ~2500)
+=================================================================
+
+// Ajouter avant OnInit() :
+
+string DirToArrow(const string dir)
+{
+   if(dir == "BULL" || dir == "BUY" || dir == "UP")
+      return "↑";
+   else if(dir == "BEAR" || dir == "SELL" || dir == "DOWN")
+      return "↓";
+   else
+      return "→";
+}
+
+=================================================================
+RÉSULTAT ATTENDU
+=================================================================
+
+Dashboard affichera maintenant :
+
+┌────────────────────────────────────────────────────────────────┐
+│ -- DerivEAPro v10.05 -- Boom 500 Index --                     │
+│ Regime=TRENDING SL=1.5×ATR TP=2.5×ATR | MTF=3/3 | CM:OK       │
+│ Bal $1000.00 | Eq $1025.50 | Pos:1 | DayLoss:0.5%            │
+│ Z=2.1  RSI=52  ATR=15.2  Stair=75%  Compress:non             │
+│ Imminence [||||||||..] 82%                                     │
+│ Barres: 11/12 (92%) | Spread: 5                               │
+│                                                                 │
+│ GHOST: PERFECT BUY | delta=92.89 | buyPct=24% | q=43         │
+│ GOM TV: FRESH (3s) | imbalance=0.00 | liquidity=0.00 | SM=0.65│
+│ MTF: M1↑ M5↑ M15↓ M30↓ H1↓ H4↓ D1↓ | Global: BEAR (5/7)     │ ← NOUVEAU
+│ Setup TV BUY: Entry=5011.79 SL=5010.82 TP1=5012.76 R:R=1.0   │
+└────────────────────────────────────────────────────────────────┘
+
+=================================================================
+NOTES
+=================================================================
+
+1. **Flèches Unicode :** ↑ (BULL) ↓ (BEAR) → (NEUT)
+   - Si problème affichage MT5 : utiliser "^" "v" "-" à la place
+
+2. **Couleur ligne MTF :**
+   - Vert si Global BULL
+   - Rouge si Global BEAR
+   - Orange si NEUT
+
+3. **JSON minimal requis :**
+   ```json
+   {
+     "tf_global_dir": -1,
+     "tf_global_strength": 5,
+     "tf_bull_count": 2,
+     "tf_bear_count": 5
+   }
+   ```
+
+4. **Si TF individuels absents :** Génération automatique basée sur global
+
+5. **Version TradeManager :** Utilise des cellules graphiques
+   **Version deriveapro :** Utilise ObjLabel simple (plus léger)
+
+=================================================================
+FIN DU PATCH
+=================================================================

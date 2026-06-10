@@ -30,11 +30,11 @@ from typing import Any, Dict, List, Optional, Tuple
 log = logging.getLogger("signal_refiner")
 
 # ---------------------------------------------------------------------------
-# Seuils de qualité
+# Seuils de qualité — MODE HAUTE PRECISION (qualité > quantité)
 # ---------------------------------------------------------------------------
-MIN_QUALITY_SCORE  = 45   # Sous ce score → REJECT
-MIN_QUALITY_AUTO   = 55   # Sous ce score en mode AUTO → lot réduit de 50%
-HIGH_QUALITY_SCORE = 70   # Au-dessus → lot au risque 2% au lieu de 1%
+MIN_QUALITY_SCORE  = 75   # Seuil MINIMUM = 75% confiance avant trade
+MIN_QUALITY_AUTO   = 80   # Sous ce score en mode AUTO → lot réduit de 50%
+HIGH_QUALITY_SCORE = 90   # Au-dessus → lot au risque 2% au lieu de 1%
 
 # Compte cible pour recommended_lot (petit compte)
 ACCOUNT_TARGET_USD = 50.0
@@ -491,9 +491,15 @@ def refine_signal(
     else:
         quality_label = "INSUFFISANT"
 
-    # ── 4. Filtre qualité ─────────────────────────────────────────────────────
+    # ── 4. Filtre qualité + validation Entry ──────────────────────────────────
     reject_reason = None
-    if quality_score < MIN_QUALITY_SCORE:
+
+    # Reject si entry manquante
+    if entry <= 0:
+        reject_reason = f"Entry manquante ou zéro (entry={entry}). Sources: TV={tv_raw.get('entry', 'N/A')}, TA={ta_result.get('entry', 'N/A')}"
+
+    # Reject si qualité insuffisante
+    if not reject_reason and quality_score < MIN_QUALITY_SCORE:
         reject_reason = (
             f"Qualité insuffisante ({quality_score}/100 < seuil {MIN_QUALITY_SCORE}). "
             f"Raisons: {'; '.join(tv_neg[:3]) or 'confluence TV/TA faible'}"

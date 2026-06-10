@@ -33,6 +33,7 @@ TOUCH_SLACK = 0.3         # distance OB/EMA en × ATR pour déclencher "touch"
 CONFIRM_SEC = 30          # délai de confirmation pullback
 COOLDOWN    = 300         # secondes de cooldown après un ordre placé par symbole
 SYMBOLS     = ["XAUUSD"]  # symboles à surveiller (étendre selon besoin)
+MIN_CONFIDENCE = 0.75     # Confiance minimale pour re-entry (75%)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -212,14 +213,22 @@ def _check_symbol(sym: str):
             log.info("❌ Pullback non confirmé %s (déplacement=%.5f < seuil)", sym, moved)
             return
 
+        # ✅ VALIDATION CONFIANCE ≥ 75% AVANT RE-ENTRY
+        confidence = _safe_float(data.get("confidence") or data.get("score"), 0.0)
+        if confidence < MIN_CONFIDENCE:
+            log.warning("❌ Re-entry BLOQUÉE %s: confiance %.0f%% < %.0f%%",
+                       sym, confidence * 100, MIN_CONFIDENCE * 100)
+            return
+
         # Placer l'ordre
         sl, tp = _compute_sl_tp(price, direction, atr)
         lot    = _get_lot(sym)
-        reason = f"OB/EMA re-entry: {state.touch_type} touch @ {state.touch_price:.5f}, pullback confirmé {elapsed:.0f}s"
+        reason = f"OB/EMA re-entry: {state.touch_type} touch @ {state.touch_price:.5f}, pullback confirmé {elapsed:.0f}s, confiance={confidence*100:.0f}%"
 
         success = _place_order(sym, direction, price, sl, tp, lot, reason)
         if success:
             state.last_order = now
+            log.info("🔄 Re-entry placée — Confiance: %.0f%% ≥ %.0f%% ✓", confidence * 100, MIN_CONFIDENCE * 100)
 
 
 # ---------------------------------------------------------------------------

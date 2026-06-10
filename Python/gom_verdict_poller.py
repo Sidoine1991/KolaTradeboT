@@ -12,14 +12,14 @@ Architecture :
         → data_get_study_values  (valeurs Pine visibles)
         → quote_get              (prix live)
         ↓
-    /gom-verdict  (AI server local)
+    POST /gom-verdict  (ai_server local :8000)
         ↓
-    xauusd_whatsapp_monitor.py  (lit /gom-verdict à chaque check)
+    SMC_Universal.mq5  (GET /gom-verdict + /pending-order via SMC_GOM_Pipeline.mqh)
 
 Usage :
-    python Python/gom_verdict_poller.py            # toutes les 60s
-    python Python/gom_verdict_poller.py --interval 30
-    python Python/gom_verdict_poller.py --once      # une seule fois
+    python python/gom_verdict_poller.py            # suit SMC_Universal (heartbeat MT5)
+    python python/gom_verdict_poller.py --symbol "Boom 500 Index"  # symbole fixe
+    python python/gom_verdict_poller.py --once
 """
 
 from __future__ import annotations
@@ -36,6 +36,11 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 import requests
+
+_TRADBOT_ROOT = Path(__file__).resolve().parent.parent
+if str(_TRADBOT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_TRADBOT_ROOT))
+from symbol_mapper import resolve_mt5_symbol, mt5_to_tv_cdp_ticker
 
 try:
     from gom_path_prediction import apply_path_to_gom_record, infer_tv_setup_from_gom
@@ -70,6 +75,9 @@ logging.basicConfig(
     ],
 )
 log = logging.getLogger(__name__)
+
+_last_tv_ticker: Optional[str] = None
+_TV_SWITCH_PAUSE_SEC = 2.5
 
 
 # ─────────────────────────────────────────────────────────────
@@ -140,7 +148,7 @@ def _tv_process_running() -> bool:
 
 
 def _find_tradingview_exe() -> Optional[Path]:
-    """Préfère la version Microsoft Store (CDP fiable) puis AppData Local."""
+    """Préfère 31178TradingViewInc (Store) — CDP fiable. Évite TradingView.Desktop en doublon."""
     for key in ("GOM_TRADINGVIEW_EXE", "TRADINGVIEW_EXE"):
         raw = _os.environ.get(key, "").strip().strip('"')
         if raw:
@@ -148,10 +156,37 @@ def _find_tradingview_exe() -> Optional[Path]:
             if p.is_file():
                 return p
 
+    try:
+        proc = subprocess.run(
+            [
+                "powershell", "-NoProfile", "-Command",
+                "Get-AppxPackage *TradingView* | "
+                "Where-Object { $_.InstallLocation } | "
+                "Sort-Object { if ($_.Name -eq '31178TradingViewInc.TradingView') {0} else {1} }, "
+                "{ [version]$_.Version } -Descending | "
+                "ForEach-Object { Join-Path $_.InstallLocation 'TradingView.exe' } | "
+                "Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+        line = (proc.stdout or "").strip().splitlines()
+        if line and line[0]:
+            p = Path(line[0].strip())
+            if p.is_file():
+                return p
+    except Exception:
+        pass
+
     pf = _os.environ.get("ProgramFiles", r"C:\Program Files")
     store_root = Path(pf) / "WindowsApps"
     if store_root.is_dir():
         try:
+            preferred = list(store_root.glob("31178TradingViewInc.TradingView*/TradingView.exe"))
+            if preferred:
+                return preferred[0]
             for exe in sorted(store_root.glob("TradingView*/TradingView.exe")):
                 if exe.is_file():
                     return exe
@@ -172,13 +207,12 @@ def _find_tradingview_exe() -> Optional[Path]:
 def _start_tv_cdp_process(exe: Path, port: int) -> None:
     """Démarre TV avec CDP sans hériter stdin/stdout (évite crash ICU Electron)."""
     wd = str(exe.parent)
+    exe_esc = str(exe).replace("'", "''")
+    wd_esc = wd.replace("'", "''")
     ps_cmd = (
-        "$psi = New-Object System.Diagnostics.ProcessStartInfo; "
-        f"$psi.FileName = '{str(exe).replace(chr(39), chr(39)+chr(39))}'; "
-        f"$psi.Arguments = '--remote-debugging-port={port}'; "
-        f"$psi.WorkingDirectory = '{wd.replace(chr(39), chr(39)+chr(39))}'; "
-        "$psi.UseShellExecute = $true; "
-        "[void][System.Diagnostics.Process]::Start($psi)"
+        f"Start-Process -FilePath '{exe_esc}' "
+        f"-ArgumentList '--remote-debugging-port={port}' "
+        f"-WorkingDirectory '{wd_esc}'"
     )
     subprocess.Popen(
         ["powershell", "-NoProfile", "-Command", ps_cmd],
@@ -382,7 +416,7 @@ def _val_from_study(vals: Dict[str, Any], *keys: str) -> Optional[float]:
 
 
 def apply_spike_bc_override(payload: Dict[str, Any], vals: Dict[str, Any]) -> Dict[str, Any]:
-    """Si pre-spike tradable sur Boom/Crash, force verdict + setup pour TradeManager."""
+    """Si pre-spike tradable sur Boom/Crash, force verdict + setup pour SMC_Universal."""
     spike_trad = _val_from_study(vals, "spike_tradable", "spike_tradable")
     if spike_trad is None or _safe_int(spike_trad) < 1:
         payload["spike_tradable"] = False
@@ -444,6 +478,7 @@ def parse_gom_study(raw: Dict[str, Any], symbol: str = SYMBOL) -> Optional[Dict[
     Lit les plots data_window de GOM_KOLA_SIDO.pine (score_buy, verdict_num, …).
     Fallback : ancien calcul simplifié si plots absents.
     """
+    symbol = resolve_mt5_symbol(symbol)
     studies_payload = raw.get("studies") or raw
     studies: list = []
 
@@ -581,7 +616,7 @@ def parse_gom_study(raw: Dict[str, Any], symbol: str = SYMBOL) -> Optional[Dict[
             "bb_dn": bb_dn,
             "st_line": st_line,
             "price": price,
-            # TF Global — fixe la confiance à 0% dans TradeManager/dashboard
+            # TF Global — fixe la confiance à 0% dans le dashboard SMC_Universal
             "tf_global_dir": tf_global_dir_label,
             "tf_global_strength": tf_global_strength_pct,
             "tf_bull_count": _safe_int(tf_bull_count),
@@ -681,12 +716,17 @@ def parse_gom_study(raw: Dict[str, Any], symbol: str = SYMBOL) -> Optional[Dict[
 # ─────────────────────────────────────────────────────────────
 
 def _persist_gom_signal_file(payload: Dict[str, Any]) -> None:
-    """Écrit data/gom_signal.json pour deriv_ea_pro.html (/gom/latest) et MT5."""
+    """
+    Accumule data/gom_signal.json par symbole pour support multi-symbole MT5.
+    Format: {"XAUUSD": {...}, "Boom 500 Index": {...}}
+    """
     try:
         from datetime import datetime, timezone
         root = Path(__file__).resolve().parents[1]
         out = root / "data" / "gom_signal.json"
         out.parent.mkdir(parents=True, exist_ok=True)
+
+        # Créer l'objet pour ce symbole
         slim = {
             "symbol": payload.get("symbol", SYMBOL),
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -719,8 +759,29 @@ def _persist_gom_signal_file(payload: Dict[str, Any]) -> None:
             "spike_tradable": payload.get("spike_tradable"),
             "imminence_pct": payload.get("imminence_pct"),
             "spike_level": payload.get("spike_level"),
+            "bb_up": payload.get("bb_up", 0.0),
+            "bb_mid": payload.get("bb_mid", 0.0),
+            "bb_dn": payload.get("bb_dn", 0.0),
+            "kola_buy": payload.get("kola_buy", 0.0),
+            "kola_sell": payload.get("kola_sell", 0.0),
         }
-        out.write_text(json.dumps(slim, indent=2), encoding="utf-8")
+
+        # Charger les données existantes (dict par symbole)
+        existing = {}
+        if out.is_file():
+            try:
+                existing = json.loads(out.read_text(encoding="utf-8"))
+                if not isinstance(existing, dict):
+                    existing = {}
+            except Exception:
+                existing = {}
+
+        # Accumuler par symbole
+        symbol_key = slim.get("symbol", "UNKNOWN")
+        existing[symbol_key] = slim
+
+        # Écrire le dict accumulé
+        out.write_text(json.dumps(existing, indent=2), encoding="utf-8")
     except Exception as e:
         log.warning("gom_signal.json: %s", e)
 
@@ -760,17 +821,54 @@ def _ensure_tv_m1(cdp_port: Optional[int]) -> None:
         pass
 
 
-def _refocus_tv_chart(cdp_port: Optional[int]) -> None:
-    """Force TradingView à revenir sur XAUUSD — best-effort."""
+def _switch_tv_to_mt5_symbol(mt5_symbol: str, cdp_port: Optional[int]) -> str:
+    """Bascule le graphique TV sur le symbole MT5 (mapping orthographe MT5/TV)."""
+    global _last_tv_ticker
+    canon = resolve_mt5_symbol(mt5_symbol)
+    tv_ticker = mt5_to_tv_cdp_ticker(canon)
+    if tv_ticker == _last_tv_ticker:
+        return tv_ticker
     try:
-        result = _run_tv_cli(["chart", "set-symbol", "OANDA:XAUUSD"], cdp_port=cdp_port)
-        if result:
-            log.info("🔄 Re-focus TV sur OANDA:XAUUSD OK")
-    except Exception:
-        pass
+        result = _run_tv_cli(["symbol", tv_ticker], cdp_port=cdp_port)
+        if result is not None:
+            log.info("TV chart -> %s (MT5: %s)", tv_ticker, canon)
+            time.sleep(_TV_SWITCH_PAUSE_SEC)
+            _last_tv_ticker = tv_ticker
+    except Exception as e:
+        log.warning("set-symbol %s: %s", tv_ticker, e)
+    return tv_ticker
 
 
-def _read_via_mcp_bridge() -> Optional[Dict[str, Any]]:
+def fetch_poll_targets() -> Optional[Dict[str, Any]]:
+    """Lit /gom/poll-targets — symbole prioritaire envoyé par SMC_Universal."""
+    try:
+        r = requests.get(f"{AI_SERVER_URL}/gom/poll-targets", timeout=5)
+        if r.ok:
+            data = r.json()
+            if data.get("ok"):
+                return data
+    except Exception as e:
+        log.debug("poll-targets: %s", e)
+    return None
+
+
+def resolve_poll_symbol(fixed_symbol: Optional[str], follow_mt5: bool) -> str:
+    """Symbole à poller : fixe (--symbol) ou heartbeat MT5 (--follow-mt5)."""
+    if fixed_symbol:
+        return resolve_mt5_symbol(fixed_symbol)
+    if follow_mt5:
+        data = fetch_poll_targets()
+        primary = (data or {}).get("primary")
+        if primary:
+            raw = primary.get("mt5_raw") or primary.get("mt5_canon") or primary.get("symbol")
+            if raw:
+                sym = resolve_mt5_symbol(str(raw))
+                log.debug("Follow MT5: %s (TV %s)", sym, primary.get("tv_ticker"))
+                return sym
+    return "XAUUSD"
+
+
+def _read_via_mcp_bridge(symbol: str = SYMBOL) -> Optional[Dict[str, Any]]:
     """
     Lit les study values GOM depuis /bridge/mcp-study-values (store en mémoire AI server).
     Ne retourne des données que si le store contient un verdict récent (< 5 min).
@@ -778,7 +876,7 @@ def _read_via_mcp_bridge() -> Optional[Dict[str, Any]]:
     try:
         import requests as _req
         r = _req.post(f"{AI_SERVER_URL}/bridge/mcp-study-values",
-                      json={"symbol": SYMBOL}, timeout=10)
+                      json={"symbol": resolve_mt5_symbol(symbol)}, timeout=10)
         if r.status_code != 200:
             return None
         data = r.json()
@@ -843,10 +941,13 @@ def _read_via_mcp_reader_mjs(cdp_port: Optional[int] = None) -> Optional[Dict[st
 def read_and_push(symbol: str = SYMBOL) -> bool:
     """
     1. Vérifie que TradingView est actif en mode CDP (lance si besoin).
-    2. Lit study values via MCP bridge (prioritaire) ou CLI Node.js.
-    3. Pousse le verdict vers /gom-verdict.
+    2. Bascule TV sur le symbole MT5 (mapping Boom_500_Index etc.).
+    3. Lit study values via MCP bridge (prioritaire) ou CLI Node.js.
+    4. Pousse le verdict vers /gom-verdict.
     Retry une fois si GOM absent (re-focus TV).
     """
+    symbol = resolve_mt5_symbol(symbol)
+
     # ── Étape 1 : s'assurer que CDP est disponible ──
     cdp_port = _ensure_tv_ready()
     if not cdp_port:
@@ -857,6 +958,7 @@ def read_and_push(symbol: str = SYMBOL) -> bool:
         )
         return False
 
+    _switch_tv_to_mt5_symbol(symbol, cdp_port)
     _ensure_tv_m1(cdp_port)
 
     # ── Étape 2a : lire via gom_mcp_reader.mjs (MCP natif, plus fiable que CLI) ──
@@ -870,7 +972,7 @@ def read_and_push(symbol: str = SYMBOL) -> bool:
             return ok
 
     # ── Étape 2b : lire les données — MCP bridge (store en mémoire, frais < 5 min) ──
-    mcp_data = _read_via_mcp_bridge()
+    mcp_data = _read_via_mcp_bridge(symbol)
     if mcp_data:
         log.debug("✅ Données via MCP bridge")
         quote_raw = _run_tv_cli(["quote"], cdp_port=cdp_port) or {}
@@ -904,10 +1006,12 @@ def read_and_push(symbol: str = SYMBOL) -> bool:
             _ensure_tv_m1(cdp_port)
             return ok
 
-        # GOM absent — re-focus TV sur XAUUSD + retry
+        # GOM absent — re-bascule TV sur le symbole MT5 + retry
         if attempt == 0:
-            log.info("⟳ GOM absent — re-focus TV sur XAUUSD puis retry...")
-            _refocus_tv_chart(cdp_port)
+            log.info("GOM absent — re-bascule TV sur %s puis retry...", symbol)
+            global _last_tv_ticker
+            _last_tv_ticker = None
+            _switch_tv_to_mt5_symbol(symbol, cdp_port)
             time.sleep(2)
 
     _ensure_tv_m1(cdp_port)
@@ -931,8 +1035,16 @@ def main() -> None:
         help="Lire une seule fois et quitter"
     )
     parser.add_argument(
-        "--symbol", type=str, default=SYMBOL,
-        help="Symbole MT5/TV pour le store serveur (ex. XAUUSD, XAUEUR)"
+        "--symbol", type=str, default=None,
+        help="Symbole MT5 fixe (ex. 'Boom 500 Index'). Omis = suit SMC_Universal via heartbeat.",
+    )
+    parser.add_argument(
+        "--follow-mt5", action="store_true", default=True,
+        help="Suit le symbole du graphique SMC_Universal (defaut: actif)",
+    )
+    parser.add_argument(
+        "--no-follow-mt5", dest="follow_mt5", action="store_false",
+        help="Ne pas suivre MT5 — utiliser XAUUSD ou --symbol",
     )
     parser.add_argument(
         "--no-launch-tv", action="store_true",
@@ -945,16 +1057,16 @@ def main() -> None:
     args = parser.parse_args()
     global _no_auto_launch_tv
     _no_auto_launch_tv = bool(args.no_launch_tv)
-    sym = args.symbol.upper().strip()
-    if sym == "XAUEUR":
-        sym = "XAUUSD"
+    fixed_sym = resolve_mt5_symbol(args.symbol) if args.symbol else None
 
     if args.once:
+        sym = resolve_poll_symbol(fixed_sym, args.follow_mt5)
         success = read_and_push(sym)
         sys.exit(0 if success else 1)
 
-    log.info(f"🚀 GOM Poller démarré — {sym} — intervalle {args.interval}s")
-    log.info(f"   Flux: TradingView CDP → /gom-verdict → TradeManager MT5")
+    mode = f"fixe={fixed_sym}" if fixed_sym else ("follow MT5" if args.follow_mt5 else "XAUUSD")
+    log.info("GOM Poller demarre — mode %s — intervalle %ss", mode, args.interval)
+    log.info("   Flux: TV CDP -> /gom-verdict -> SMC_Universal (symbole auto MT5/TV)")
 
     # Diagnostic CDP au démarrage
     port = detect_cdp_port()
@@ -975,6 +1087,7 @@ def main() -> None:
 
     while True:
         try:
+            sym = resolve_poll_symbol(fixed_sym, args.follow_mt5)
             read_and_push(sym)
         except KeyboardInterrupt:
             log.info("⏹️ Arrêt")

@@ -1,8 +1,6 @@
 @echo off
 REM TradBOT Pipeline Approval — exécution horaire planifiée
-REM Mode --auto : valide et place les ordres directement sans confirmation WhatsApp
-REM
-REM Pour validation manuelle (recommandé) : utiliser run_pipeline.bat sans --auto
+REM Mode confirmation WhatsApp — attend OUI/NON avant de placer
 
 cd /d D:\Dev\TradBOT
 
@@ -23,7 +21,7 @@ if errorlevel 1 (
 
 echo %DATE% %TIME% [START] Pipeline approval (auto) >> D:\Dev\TradBOT\logs\pipeline_scheduler.log
 
-%VENV_PYTHON% Python\pipeline_with_approval.py --auto >> D:\Dev\TradBOT\logs\pipeline_scheduler.log 2>&1
+%VENV_PYTHON% Python\pipeline_with_approval.py >> D:\Dev\TradBOT\logs\pipeline_scheduler.log 2>&1
 
 echo %DATE% %TIME% [DONE] Pipeline terminé >> D:\Dev\TradBOT\logs\pipeline_scheduler.log
 exit /b 0

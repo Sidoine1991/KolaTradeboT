@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"><title>Diagnostic Deriv WS</title>
+<style>
+  body { background:#0a0d12; color:#e8eaf0; font-family:monospace; padding:20px; }
+  .ok   { color:#00e5a0; }
+  .err  { color:#ff4444; }
+  .warn { color:#ffaa00; }
+  button { padding:8px 18px; margin:4px; background:#161c28; color:#e8eaf0;
+           border:1px solid #333; cursor:pointer; font-family:monospace; }
+  button:hover { border-color:#00e5a0; }
+  #log { margin-top:16px; white-space:pre-wrap; font-size:13px; line-height:1.8; }
+  input { background:#161c28; color:#e8eaf0; border:1px solid #333; padding:6px 10px;
+          font-family:monospace; width:320px; }
+</style>
+</head>
+<body>
+<h2 style="color:#00e5a0">Diagnostic Deriv WebSocket</h2>
+
+<div style="margin:12px 0">
+  <input id="token" type="password" placeholder="Token Deriv (optionnel pour auth test)" />
+</div>
+
+<button onclick="testEndpoint('wss://ws.derivws.com/websockets/v3?app_id=36544',  'derivws  app_id=36544')">Test derivws 36544</button>
+<button onclick="testEndpoint('wss://ws.binaryws.com/websockets/v3?app_id=36544', 'binaryws app_id=36544')">Test binaryws 36544</button>
+<button onclick="testEndpoint('wss://ws.derivws.com/websockets/v3?app_id=1089',   'derivws  app_id=1089 (ancien)')">Test ancien app_id</button>
+<button onclick="clearLog()">Effacer</button>
+
+<div id="log"></div>
+
+<script>
+function log(msg, cls) {
+  const d = document.getElementById('log');
+  const t = new Date().toLocaleTimeString();
+  d.innerHTML += '<span class="' + (cls||'') + '">[' + t + '] ' + msg + '</span>\n';
+}
+function clearLog() { document.getElementById('log').innerHTML = ''; }
+
+function testEndpoint(url, label) {
+  log('── Test: ' + label, 'warn');
+  log('   URL: ' + url);
+  let ws;
+  try {
+    ws = new WebSocket(url);
+  } catch(e) {
+    log('   ERREUR new WebSocket: ' + e.message, 'err');
+    return;
+  }
+
+  const timer = setTimeout(() => {
+    log('   TIMEOUT (8s) — aucune réponse', 'err');
+    try { ws.close(); } catch(_){}
+  }, 8000);
+
+  ws.onopen = () => {
+    log('   OPEN ✓ — connexion établie', 'ok');
+    ws.send(JSON.stringify({ ping: 1 }));
+
+    const token = document.getElementById('token').value.trim();
+    if (token) {
+      log('   Envoi authorize...');
+      ws.send(JSON.stringify({ authorize: token }));
+    }
+  };
+
+  ws.onmessage = (evt) => {
+    clearTimeout(timer);
+    let d;
+    try { d = JSON.parse(evt.data); } catch(_) { log('   MSG (raw): ' + evt.data.slice(0,100)); return; }
+
+    if (d.msg_type === 'ping') {
+      log('   PING → pong ✓', 'ok');
+    } else if (d.msg_type === 'authorize') {
+      log('   AUTH ✓ — loginid: ' + d.authorize.loginid + ' (' + (d.authorize.is_virtual ? 'DÉMO' : 'RÉEL') + ')', 'ok');
+      ws.close();
+    } else if (d.error) {
+      log('   ERREUR API [' + d.error.code + ']: ' + d.error.message, 'err');
+      ws.close();
+    } else {
+      log('   MSG: ' + JSON.stringify(d).slice(0,120));
+    }
+  };
+
+  ws.onerror = (e) => {
+    clearTimeout(timer);
+    log('   WS ERROR — connexion refusée ou réseau bloqué', 'err');
+    log('   (vérifier proxy, pare-feu, ou certificat SSL)', 'warn');
+  };
+
+  ws.onclose = (e) => {
+    clearTimeout(timer);
+    log('   CLOSE code=' + e.code + (e.reason ? ' reason=' + e.reason : ''));
+    log('');
+  };
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,46 @@
+//@version=6
+indicator("TF Bias Detector (SMC)", overlay=false)
+
+// Capture la tendance via EMA sur 4 timeframes
+// H4, H1, M15, M1
+
+// RSI pour détecter la tendance
+rsi_h4 = ta.rsi(close, 14)
+rsi_h1 = request.security(syminfo.tickerid, "60", ta.rsi(close, 14))
+rsi_m15 = request.security(syminfo.tickerid, "15", ta.rsi(close, 14))
+rsi_m1 = ta.rsi(close, 14)
+
+// EMA pour la direction
+ema_h4 = ta.ema(close, 20)
+ema_h1 = request.security(syminfo.tickerid, "60", ta.ema(close, 20))
+ema_m15 = request.security(syminfo.tickerid, "15", ta.ema(close, 20))
+ema_m1 = ta.ema(close, 20)
+
+// Calcul direction (1 = bullish, -1 = bearish)
+bias_h4 = close > ema_h4 ? 1 : -1
+bias_h1 = close > ema_h1 ? 1 : -1
+bias_m15 = close > ema_m15 ? 1 : -1
+bias_m1 = close > ema_m1 ? 1 : -1
+
+// Plot les tendances
+plot(rsi_h4, "RSI H4", color.blue, linewidth=2)
+plot(rsi_h1, "RSI H1", color.orange, linewidth=2)
+plot(rsi_m15, "RSI M15", color.green, linewidth=2)
+plot(rsi_m1, "RSI M1", color.red, linewidth=2)
+
+// Alertes niveau 50
+hline(50, "Mid", color.gray, linestyle.dashed)
+hline(70, "Overbought", color.red, linestyle.dotted)
+hline(30, "Oversold", color.green, linestyle.dotted)
+
+// Export data window
+plotchar(bias_h4, "Bias_H4", "", location.top, size=size.tiny)
+plotchar(bias_h1, "Bias_H1", "", location.top, size=size.tiny)
+plotchar(bias_m15, "Bias_M15", "", location.top, size=size.tiny)
+plotchar(bias_m1, "Bias_M1", "", location.top, size=size.tiny)
+
+// Affiche les valeurs en data window
+plotchar(rsi_h4, "RSI_H4_Val", "", location.top)
+plotchar(rsi_h1, "RSI_H1_Val", "", location.top)
+plotchar(rsi_m15, "RSI_M15_Val", "", location.top)
+plotchar(rsi_m1, "RSI_M1_Val", "", location.top)

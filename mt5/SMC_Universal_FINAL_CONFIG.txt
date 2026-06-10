@@ -1,0 +1,38 @@
+=================================================================
+SMC_UNIVERSAL.mq5 — CONFIGURATION FINALISÉE 2026-06-10
+=================================================================
+
+✅ SYSTÈME ACTIFS:
+
+1. TRAILING STOP (AutoTrading.mqh)
+   - Activation: À partir de +2.00$ de profit
+   - Giveback: 30% (laisse 30% se perdre avant de cut)
+   - SL minimum: Jamais au-dessous de l'entry
+
+2. PROTECTIVE STOP
+   - Si perte > 50% du profit max → FERMETURE auto
+   - Previent les grands drawdowns
+
+3. RE-ENTRY AUTOMATIQUE (ob_reentry_engine.py)
+   - Détecte: OB/EMA touch + pullback
+   - Validation: Confiance ≥ 75% (NOUVELLE)
+   - Cooldown: 300s par symbole
+
+4. GOM POLLER (gom_sync_daemon.py)
+   - Intervalle: 1 MINUTE (au lieu de 10)
+   - Sync: GOM verdicts → ai_server → MT5
+
+5. PIPELINE QUALITÉ (MIN_QUALITY_SCORE = 75%)
+   - Entry=0 → REJETÉ
+   - Score < 75% → REJETÉ
+   - Rapport Word → SEULEMENT si ≥ 75%
+   - Placement ordre → APRÈS rapport
+
+=================================================================
+COMPILATIONS À FAIRE:
+
+1. SMC_Universal.mq5 - Vérifier imports + ajout logs
+2. Redémarrer MT5
+3. Charger sur symbole test: XAUUSD
+
+=================================================================

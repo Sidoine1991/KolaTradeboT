@@ -1,0 +1,147 @@
+//+------------------------------------------------------------------+
+//| PATCH : Flèche clignotante AVANT le spike (anticipation)        |
+//| À remplacer dans deriveapro.mq5 lignes 1972-1994                |
+//+------------------------------------------------------------------+
+
+// ══════════════════════════════════════════════════════════════════
+// LOGIQUE CORRIGÉE : 3 MODES DE FLÈCHE
+// ══════════════════════════════════════════════════════════════════
+//
+// MODE 1 : ANTICIPATION (imminence 40-85%)
+//   → Flèche PETITE à r[0].time + PeriodSeconds (AVANT la prochaine barre)
+//   → Position : ATR×0.3 sous/sur la barre actuelle
+//   → Width : 2 (fine)
+//   → Couleur : DeepSkyBlue/Orange (clignote avec DodgerBlue/Gold)
+//   → Signification : "Spike probable dans 1-5 barres"
+//
+// MODE 2 : IMMINENT (imminence ≥ 85%)
+//   → Flèche MOYENNE à r[0].time + PeriodSeconds
+//   → Position : ATR×0.5 sous/sur
+//   → Width : 4 (moyenne)
+//   → Couleur : Aqua/OrangeRed (clignote avec Yellow/Red)
+//   → Signification : "Spike TRÈS proche (1-2 barres)"
+//
+// MODE 3 : EN COURS (spike détecté ou position ouverte)
+//   → Flèche GROSSE à r[0].time (barre actuelle)
+//   → Position : ATR×0.6 sous/sur
+//   → Width : 5 (grosse)
+//   → Couleur : Yellow/Red (clignotement rapide)
+//   → Signification : "Action en cours (trade actif)"
+//
+// ══════════════════════════════════════════════════════════════════
+
+   // Flèche anticipation spike
+   {
+      MqlRates r[]; ArraySetAsSeries(r,true);
+      bool hasBars=(CopyRates(_Symbol,InpTF,0,3,r)>=3);
+      bool hasPos=HasPosition();
+      bool spikeDetected=(spike.type!=SPIKE_NONE);
+
+      // Calculer mode d'affichage
+      enum ARROW_MODE { MODE_NONE, MODE_ANTICIPATION, MODE_IMMINENT, MODE_ACTION };
+      ARROW_MODE mode=MODE_NONE;
+
+      if(spikeDetected || hasPos)
+         mode=MODE_ACTION;        // Mode 3 : spike en cours
+      else if(imminence>=85.0)
+         mode=MODE_IMMINENT;      // Mode 2 : imminent (1-2 barres)
+      else if(imminence>=40.0)
+         mode=MODE_ANTICIPATION;  // Mode 1 : anticipation (1-5 barres)
+
+      bool shouldBlink=(hasBars && mode!=MODE_NONE);
+
+      if(shouldBlink && atr>0)
+      {
+         // ── Configuration par mode ──────────────────────────────────
+         datetime arrowTime;
+         double arrowPx;
+         int arrowWidth;
+         color c1, c2;
+
+         int code=isBoom?233:234;  // ↓ pour Boom, ↑ pour Crash
+         int anchor=isBoom?ANCHOR_TOP:ANCHOR_BOTTOM;
+
+         switch(mode)
+         {
+            case MODE_ANTICIPATION:
+               // Petite flèche AVANT la prochaine barre
+               arrowTime = r[0].time + PeriodSeconds(InpTF);
+               arrowPx   = isBoom ? (r[0].low - atr*0.3) : (r[0].high + atr*0.3);
+               arrowWidth= 2;
+               c1 = isBoom ? clrDeepSkyBlue : clrOrange;
+               c2 = isBoom ? clrDodgerBlue  : clrGold;
+               break;
+
+            case MODE_IMMINENT:
+               // Flèche moyenne AVANT la prochaine barre (plus visible)
+               arrowTime = r[0].time + PeriodSeconds(InpTF);
+               arrowPx   = isBoom ? (r[0].low - atr*0.5) : (r[0].high + atr*0.5);
+               arrowWidth= 4;
+               c1 = isBoom ? clrAqua : clrOrangeRed;
+               c2 = isBoom ? C'255,255,100' : clrRed;  // Jaune vif / Rouge
+               break;
+
+            case MODE_ACTION:
+               // Grosse flèche SUR la barre actuelle (spike en cours)
+               arrowTime = r[0].time;
+               arrowPx   = isBoom ? (r[0].low - atr*0.6) : (r[0].high + atr*0.6);
+               arrowWidth= 5;
+               c1 = isBoom ? clrYellow : clrRed;
+               c2 = isBoom ? clrAqua   : clrOrangeRed;
+               break;
+
+            default:
+               shouldBlink=false;
+               break;
+         }
+
+         if(shouldBlink)
+         {
+            // Clignotement (alterne toutes les secondes)
+            color blinkClr=((TimeCurrent()%2)==0)?c1:c2;
+
+            ObjArrow("SpikeArrow",arrowTime,arrowPx,code,blinkClr,anchor);
+            ObjectSetInteger(0,ObjName("SpikeArrow"),OBJPROP_WIDTH,arrowWidth);
+
+            // ── Tooltip informatif (survol souris) ──────────────────────
+            string tooltip="";
+            switch(mode)
+            {
+               case MODE_ANTICIPATION:
+                  tooltip=StringFormat("Spike anticipé (%.0f%% imminence) - Préparez-vous!",imminence);
+                  break;
+               case MODE_IMMINENT:
+                  tooltip=StringFormat("SPIKE IMMINENT (%.0f%%) - Dernières barres avant déclenchement!",imminence);
+                  break;
+               case MODE_ACTION:
+                  tooltip=spikeDetected ? "SPIKE EN COURS - Trade actif!" : "Position ouverte";
+                  break;
+            }
+            ObjectSetString(0,ObjName("SpikeArrow"),OBJPROP_TOOLTIP,tooltip);
+         }
+      }
+      else
+      {
+         ObjDel("SpikeArrow");
+      }
+   }
+
+//+------------------------------------------------------------------+
+// FIN DU PATCH
+//+------------------------------------------------------------------+
+
+// ══════════════════════════════════════════════════════════════════
+// INSTRUCTIONS D'INTÉGRATION
+// ══════════════════════════════════════════════════════════════════
+//
+// 1. Ouvrir deriveapro.mq5
+// 2. Trouver la section "Flèche" (lignes ~1972-1994)
+// 3. REMPLACER tout le bloc entre { } par le code ci-dessus
+// 4. Compiler et tester
+//
+// RÉSULTAT ATTENDU :
+// ✅ Imminence 40-70% → Flèche PETITE bleue/orange DEVANT la barre
+// ✅ Imminence 85%+   → Flèche MOYENNE aqua/rouge DEVANT la barre
+// ✅ Spike détecté    → Flèche GROSSE jaune/rouge SUR la barre actuelle
+//
+// ══════════════════════════════════════════════════════════════════

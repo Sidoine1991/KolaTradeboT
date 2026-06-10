@@ -19,6 +19,11 @@ from pathlib import Path
 # Configuration des URLs de l'API
 RENDER_API_URL = "https://kolatradebot.onrender.com"
 LOCAL_API_URL = "http://localhost:8000"  # Utilisation du port 8000
+
+# Whitelist publiée par autonomous_pipeline.py après le scan du matin
+_WHITELIST_PATH = Path(__file__).resolve().parent / "data" / "pipeline_whitelist.json"
+# Durée de validité de la whitelist : 24h (un scan par jour)
+_WHITELIST_MAX_AGE_SEC = 86400
 TIMEFRAMES = ["M5"]  # Horizon M5 comme demandé
 CHECK_INTERVAL = 60  # Secondes entre chaque vérification
 MIN_CONFIDENCE = 0.65  # Confiance minimale pour prendre un trade (65% - plus réaliste)
@@ -118,6 +123,57 @@ logger = logging.getLogger("mt5_ai_client")
 
 # Logger spécialisé pour les filling modes
 filling_mode_logger = logging.getLogger("filling_mode")
+
+
+def _load_pipeline_whitelist() -> dict:
+    """
+    Lit la whitelist publiée par autonomous_pipeline.py.
+    Retourne {"symbols": [...], "generated_at": "..."} ou {"symbols": []} si absente/expirée.
+    """
+    try:
+        if not _WHITELIST_PATH.exists():
+            return {"symbols": []}
+        age = time.time() - _WHITELIST_PATH.stat().st_mtime
+        if age > _WHITELIST_MAX_AGE_SEC:
+            logger.warning("[Whitelist] Expirée (%.0fh) — aucun trade autorisé", age / 3600)
+            return {"symbols": []}
+        data = json.loads(_WHITELIST_PATH.read_text(encoding="utf-8"))
+        return data
+    except Exception as e:
+        logger.warning("[Whitelist] Erreur lecture: %s", e)
+        return {"symbols": []}
+
+
+def _is_symbol_whitelisted(symbol: str) -> bool:
+    """Vérifie si le symbole a été validé par le pipeline ce jour."""
+    wl = _load_pipeline_whitelist()
+    allowed = [s["symbol"] for s in wl.get("symbols", [])]
+    if not allowed:
+        logger.warning("[Whitelist] Liste vide — trade BLOQUÉ pour %s", symbol)
+        return False
+    ok = symbol in allowed
+    if not ok:
+        logger.warning("[Whitelist] %s absent du top-%d pipeline (%s) — BLOQUÉ",
+                       symbol, len(allowed), ", ".join(allowed))
+    return ok
+
+
+# ---------------------------------------------------------------------------
+# Wrapper mt5.order_send — gate whitelist sur TOUS les ordres sans exception
+# ---------------------------------------------------------------------------
+_mt5_order_send_real = mt5.order_send
+
+def _guarded_order_send(request):
+    """Intercepte tous les mt5.order_send() et bloque si symbole hors whitelist."""
+    sym = getattr(request, "symbol", None) or (request.get("symbol") if isinstance(request, dict) else None)
+    if sym and not _is_symbol_whitelisted(sym):
+        logger.warning("[Whitelist] order_send BLOQUÉ — %s hors whitelist pipeline", sym)
+        return None
+    return _mt5_order_send_real(request)
+
+mt5.order_send = _guarded_order_send
+# ---------------------------------------------------------------------------
+
 filling_mode_logger.setLevel(logging.DEBUG)
 
 class TradeLogger:
@@ -3033,18 +3089,22 @@ class MT5AIClient:
     def execute_trade(self, symbol, signal_data):
         """Exécute un trade basé sur le signal de l'IA avec décision finale claire requise"""
         try:
+            # ===== GATE PIPELINE : symbole doit être dans le top-N du scan du matin =====
+            if not _is_symbol_whitelisted(symbol):
+                return False
+
             signal = signal_data.get('signal')
             confidence = signal_data.get('confidence', 0)
             decision = signal_data.get('decision', '')  # Décision finale (ACHAT FORT, VENTE FORTE, etc.)
-            
+
             # La confiance est en décimal (0-1), convertir en pourcentage pour comparaison
             confidence_percent = confidence * 100 if confidence <= 1.0 else confidence
-            
+
             # ===== SÉCURITÉ MAXIMALE: VALIDATION 80% CONFIANCE =====
             # RÈGLE STRICTE: Aucune position sans 80% de confiance minimum
             if confidence_percent < 80.0:
                 return False  # Pas de log pour éviter de ramer
-            
+
             # ===== NOUVEAU: VÉRIFICATION LISTE NOIRE (SYMBOLES NEUTRES) =====
             if self.is_symbol_blacklisted(symbol):
                 return False  # Pas de log pour éviter de ramer

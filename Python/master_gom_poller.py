@@ -4,7 +4,7 @@
 Master GOM Poller — Multi-symboles
 ====================================
 Synchronise TOUS les symboles ouverts sur TradingView vers l'AI server
-/gom-verdict, afin que le dashboard TradeManager soit à jour pour
+/gom-verdict, afin que le dashboard GOM de SMC_Universal soit à jour pour
 chaque symbole simultanément.
 
 Flux :
@@ -12,16 +12,16 @@ Flux :
         ↓  rotation chart TV (set-symbol)
     data_get_study_values (GOM KOLA SIDO Pine plots)
         ↓
-    POST /gom-verdict  (AI server local, par symbole)
+    POST /gom-verdict  (ai_server local, par symbole)
         ↓
-    TradeManager EA → PollGOMScalpVerdict → dashboard sync
+    SMC_Universal EA → SMCGP_PollGOM() → dashboard GOM (SMC_DASH_*)
 
 Usage :
-    python Python/master_gom_poller.py                         # tous symboles, 12s/symbole
-    python Python/master_gom_poller.py --interval 8            # plus rapide
-    python Python/master_gom_poller.py --symbols XAUUSD,BTCUSD # sous-ensemble
-    python Python/master_gom_poller.py --once                  # un seul tour
-    python Python/master_gom_poller.py --no-launch-tv          # CDP déjà actif
+    python python/master_gom_poller.py                         # tous symboles, 12s/symbole
+    python python/master_gom_poller.py --interval 8            # plus rapide
+    python python/master_gom_poller.py --symbols XAUUSD,BTCUSD # sous-ensemble
+    python python/master_gom_poller.py --once                  # un seul tour
+    python python/master_gom_poller.py --no-launch-tv          # CDP déjà actif
 """
 from __future__ import annotations
 
@@ -103,7 +103,7 @@ _ALWAYS_OPEN = {
     "Crash 1000 Index", "Crash 500 Index", "Crash 300 Index", "Crash 600 Index",
 }
 
-# Liste complète par défaut (= InpPollSymbols TradeManager + Boom/Crash)
+# Liste complète par défaut (= symboles SMC_Universal + Boom/Crash)
 _DEFAULT_SYMBOLS: List[str] = [
     "XAUUSD",
     "EURUSD", "GBPUSD", "USDJPY", "USDCHF", "AUDUSD", "NZDUSD", "USDCAD",
@@ -137,9 +137,14 @@ def _switch_and_wait(symbol: str, cdp_port: int, pause: float) -> bool:
     """Bascule le chart TV sur symbol et attend le rechargement du Pine."""
     tv_t = _tv_ticker(symbol)
     try:
-        _run_tv_cli(["chart", "set-symbol", tv_t], cdp_port=cdp_port)
+        # Utiliser MCP au lieu de CLI
+        import requests
+        mcp_port = 8889  # Port MCP par défaut
+        url = f"http://localhost:{mcp_port}/chart-set-symbol"
+        requests.post(url, json={"symbol": tv_t}, timeout=5)
     except Exception as e:
-        log.debug(f"set-symbol {tv_t}: {e}")
+        log.debug(f"set-symbol {tv_t} via MCP: {e}")
+        # Fallback : ignorer silencieusement si MCP non dispo
     time.sleep(pause)
     return True
 
@@ -147,11 +152,15 @@ def _switch_and_wait(symbol: str, cdp_port: int, pause: float) -> bool:
 def _poll_one(symbol: str, cdp_port: int, pause: float) -> bool:
     """
     Cycle complet pour un symbole :
-      1. Basculer chart TV
+      1. Basculer chart TV (si possible)
       2. Lire GOM study values (mjs → bridge fallback)
       3. Pousser vers /gom-verdict
     """
-    _switch_and_wait(symbol, cdp_port, pause)
+    # Optionnel : basculer le chart. Peut ignorer silencieusement si MCP bridge non dispo.
+    try:
+        _switch_and_wait(symbol, cdp_port, pause)
+    except Exception as e:
+        log.debug(f"_switch_and_wait {symbol}: {e}")
 
     # Priorité 1 : gom_mcp_reader.mjs (appel MCP natif)
     mjs = _read_via_mcp_reader_mjs(cdp_port)
@@ -207,7 +216,10 @@ def run_tour(symbols: List[str], cdp_port: int, pause: float) -> Dict[str, bool]
 
     # Revenir sur XAUUSD après le tour
     try:
-        _run_tv_cli(["chart", "set-symbol", _tv_ticker("XAUUSD")], cdp_port=cdp_port)
+        import requests
+        mcp_port = 8889
+        requests.post(f"http://localhost:{mcp_port}/chart-set-symbol",
+                      json={"symbol": _tv_ticker("XAUUSD")}, timeout=5)
         _ensure_tv_m1(cdp_port)
     except Exception:
         pass
@@ -272,7 +284,7 @@ def main() -> None:
     log.info("🚀 Master GOM Poller démarré")
     log.info("   Symboles (%d) : %s", len(symbols), ", ".join(symbols))
     log.info("   Pause/symbole : %ds  |  Cycle-pause : %ds", args.interval, args.cycle_pause)
-    log.info("   Flux : TradingView CDP → /gom-verdict → TradeManager")
+    log.info("   Flux : TradingView CDP -> /gom-verdict -> SMC_Universal")
     log.info("=" * 60)
 
     cdp_port = _ensure_tv_ready()

@@ -44,7 +44,7 @@ except ImportError as _ref_err:
     _REFINER_AVAILABLE = False
     log_tmp = logging.getLogger("pipeline_approval")
     log_tmp.warning("signal_refiner non disponible: %s", _ref_err)
-    MIN_QUALITY_SCORE = 45
+    MIN_QUALITY_SCORE = 75  # Seuil minimum = 75% confiance
 
 _HERE  = Path(__file__).resolve().parent
 _ROOT  = _HERE.parent
@@ -273,7 +273,7 @@ print(json.dumps(output))
                 [str(venv_py), "-c", ta_script],
                 capture_output=True,
                 text=True,
-                timeout=60
+                timeout=120
             )
 
             if result.returncode != 0:
@@ -560,14 +560,16 @@ def _check_gom_before_order(symbol: str, direction: str, exec_type: str) -> Opti
         clean = _tv_to_mt5(symbol)
         rg = requests.get(f"{AI_SERVER}/gom-verdict", params={"symbol": clean}, timeout=5)
         if rg.status_code != 200:
-            return None  # Serveur absent → laisser passer
+            return f"GOM serveur indisponible ({rg.status_code}) — ordre market bloqué"
         gd = rg.json()
         if not gd.get("ok"):
             return f"GOM indisponible ({gd.get('message','?')}) — ordre market bloqué"
         vnum = int(gd.get("verdict_num", 0))
         verdict = gd.get("verdict", "WAIT")
+        # ✅ RÈGLE STRICTE: vnum=0 (WAIT) toujours bloqué
         if vnum == 0:
             return f"GOM=WAIT (vnum=0) — ordre market bloqué. Attendre BUY/SELL confirmé."
+        # ✅ Direction opposée au verdict = bloquer
         if direction == "BUY" and vnum < 0:
             return f"GOM={verdict} (vnum={vnum}) — direction opposée à BUY, ordre bloqué"
         if direction == "SELL" and vnum > 0:
@@ -575,8 +577,8 @@ def _check_gom_before_order(symbol: str, direction: str, exec_type: str) -> Opti
         log.info("  [GOM gate] %s vnum=%d (%s) → OK pour %s market", clean, vnum, verdict, direction)
         return None
     except Exception as e:
-        log.warning("  [GOM gate] Erreur fetch: %s — laisser passer", e)
-        return None
+        log.warning("  [GOM gate] Erreur fetch: %s — ordre market bloqué (WAIT par défaut)", e)
+        return f"GOM fetch error ({e}) — ordre market bloqué"
 
 
 def place_order(ta: Dict) -> bool:
@@ -718,12 +720,18 @@ def run(top_n: int = 5, timeout: int = APPROVAL_TIMEOUT_SEC, auto: bool = False)
         ta = run_trading_agents(sym, dir_tv, trade_date)
 
         if ta is None:
-            log.warning("  TradingAgents échoué pour %s — skip", sym)
-            orders_failed.append(sym)
-            send_whatsapp(f"⚠️ *{sym}*: Analyse TradingAgents échouée — ignoré")
-            continue
+            log.warning("  TradingAgents timeout/échoué — fallback sur TradingView")
+            ta = {
+                "symbol": sym,
+                "direction": dir_tv,
+                "reason": "TV-only (TA timeout)",
+                "clean_sym": _tv_to_mt5(sym),
+                "entry": 0.0,
+                "sl": 0.0,
+                "tp": 0.0,
+            }
 
-        # Vérifier direction retournée par TA
+        # Vérifier direction retournée par TA (ou fallback TV)
         ta_dir = ta.get("direction", dir_tv)
         if not is_valid_direction(sym, ta_dir):
             orders_skipped.append(sym)
@@ -813,23 +821,44 @@ def run(top_n: int = 5, timeout: int = APPROVAL_TIMEOUT_SEC, auto: bool = False)
 
             except Exception as _ref_err:
                 log.warning("  [Refiner] Erreur: %s — utilisation signal TA brut", _ref_err)
-
-        # Envoyer rapport Word (avec données raffinées si disponibles)
-        send_report_whatsapp(ta)
+                # ⚠️ FORCER rejection si refiner crash (pas de quality_score = pas d'entry fiable)
+                ta["quality_score"] = 0  # Force reject (0 < 75%)
+                ta["quality_label"] = "ERREUR REFINER"
 
         if auto:
-            # Mode auto — pas de confirmation
-            log.info("  Mode AUTO — placement direct de l'ordre")
+            # Mode auto — validation qualité stricte avant placement
+            quality = ta.get('quality_score', 0)
+            entry = ta.get('entry', 0)
+
+            # REJET si qualité < 75% OU entry manquante
+            if quality < MIN_QUALITY_SCORE or entry <= 0:
+                log.warning("  Mode AUTO — SIGNAL REJETÉ (qualité=%.0f%% < %.0f%% OU entry=%.5f ≤ 0)",
+                           quality, MIN_QUALITY_SCORE, entry)
+                send_whatsapp(
+                    f"🚫 *{sym}* — Mode AUTO: Signal rejeté\n"
+                    f"Qualité {quality}/100 < {MIN_QUALITY_SCORE} OU Entry={entry:.5f}\n"
+                    f"→ HOLD jusqu'à signal > {MIN_QUALITY_SCORE}%"
+                )
+                orders_skipped.append(sym)
+                continue
+
+            # ✅ QUALITÉ OK — ENVOYER RAPPORT WORD AVANT PLACEMENT
+            log.info("  Mode AUTO — qualité OK (%.0f%% ≥ %.0f%%) — envoi rapport...", quality, MIN_QUALITY_SCORE)
+            send_report_whatsapp(ta)
+            log.info("  📄 Rapport Word envoyé — En attente placement...")
+
+            # OK — Placer l'ordre
+            log.info("  Mode AUTO — qualité OK (%.0f%% ≥ %.0f%%) — placement direct", quality, MIN_QUALITY_SCORE)
             if place_order(ta):
                 orders_placed.append(sym)
-                q_str = f" | Score: {ta.get('quality_score','?')}/100" if ta.get('quality_score') else ""
                 send_whatsapp(
                     f"✅ *Ordre placé automatiquement*\n"
-                    f"{ta_dir} *{sym}*{q_str}\n"
-                    f"Entry: {ta.get('entry')} | SL: {ta.get('sl')} | TP: {ta.get('tp')} | Lot: {ta.get('lot')}\n"
+                    f"{ta_dir} *{sym}* | Score: {quality:.0f}/100 (ACCEPTÉ)\n"
+                    f"Entry: {ta.get('entry', 0):.5f} | SL: {ta.get('sl', 0):.5f} | TP: {ta.get('tp', 0):.5f} | Lot: {ta.get('lot', 0.01)}\n"
                     f"Type: {ta.get('execution_type','market')} | RR 1:{ta.get('rr','?')}"
                 )
             else:
+                log.error("  Échec placement ordre %s", sym)
                 orders_failed.append(sym)
             continue
 

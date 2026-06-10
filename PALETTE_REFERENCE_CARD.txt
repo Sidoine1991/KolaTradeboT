@@ -1,0 +1,229 @@
+╔═══════════════════════════════════════════════════════════════════════════════╗
+║                  GOM KOLA SIDO — PALETTE GHOST PRO                            ║
+║                        REFERENCE CARD RAPIDE                                  ║
+╚═══════════════════════════════════════════════════════════════════════════════╝
+
+┌───────────────────────────────────────────────────────────────────────────────┐
+│ COULEURS SIGNATURE MARQUE                                                     │
+└───────────────────────────────────────────────────────────────────────────────┘
+BRAND_PRIMARY    #00D5FE  █████  Cyan électrique (OTE, chemin bull, headers)
+BRAND_SECONDARY  #FF6B35  █████  Orange énergique (alertes, spikes, chemin bear)
+BRAND_ACCENT     #FFD700  █████  Gold excellence (spike level 4, force max)
+
+┌───────────────────────────────────────────────────────────────────────────────┐
+│ COULEURS DIRECTIONNELLES (signaux trading)                                   │
+└───────────────────────────────────────────────────────────────────────────────┘
+BULL             #00FF80  █████  Green électrique (BUY confirmé, KOLA buy)
+BEAR             #FF3366  █████  Red moderne (SELL confirmé, KOLA sell)
+WAIT             #FFB800  █████  Orange neutre (attente, 50% Fib, MIXED)
+
+┌───────────────────────────────────────────────────────────────────────────────┐
+│ SURFACES UI (backgrounds, borders)                                           │
+└───────────────────────────────────────────────────────────────────────────────┘
+BG_MAIN          #0A0E1A + transp 85  Noir-bleu principal
+BG_HEADER        #1A1F2E + transp 60  Headers tables (plus sombre)
+BG_CELL          #14172B + transp 80  Cellules alternées
+BORDER           #2E3650 + transp 40  Séparateurs, frames
+
+┌───────────────────────────────────────────────────────────────────────────────┐
+│ TEXTE (hiérarchie typographique)                                             │
+└───────────────────────────────────────────────────────────────────────────────┘
+TEXT_PRIMARY     #FFFFFF (white)      Valeurs importantes, titres
+TEXT_SECONDARY   #B0B8D0              Labels, métadonnées
+TEXT_MUTED       #6B7280              Notes, infos tertiaires
+
+┌───────────────────────────────────────────────────────────────────────────────┐
+│ GHOST ORDERFLOW (palette distinctive conservée)                              │
+└───────────────────────────────────────────────────────────────────────────────┘
+OF_BULL          #2962ff  █████  Bleu TradingView
+OF_BEAR          #f23645  █████  Red TradingView
+OF_NEUT          #787b86  █████  Gris neutre
+OF_GOLD          #ffd700  █████  Gold (identique BRAND_ACCENT)
+
+═══════════════════════════════════════════════════════════════════════════════
+
+USAGE PAR ÉLÉMENT VISUEL
+═════════════════════════════════════════════════════════════════════════════════
+
+KOLA LEVELS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  BUY level:   BULL (#00FF80) width=2 solid
+  SELL level:  BEAR (#FF3366) width=2 solid
+  Labels:      textcolor = BULL/BEAR, size small
+
+SIDO (Double Top/Bottom)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Double Top:    BRAND_SECONDARY (#FF6B35) dashed
+  Double Bottom: BRAND_PRIMARY (#00D5FE) dashed
+  Labels:        textcolor white, size small
+
+ORDER BLOCKS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  OB Bull:  border BULL, bgcolor BULL transp 88
+  OB Bear:  border BEAR, bgcolor BEAR transp 88
+  Text:     BULL/BEAR size small
+
+CHoCH / BOS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  CHoCH ^:  BULL transp 15, size small
+  CHoCH v:  BEAR transp 15, size small
+  BOS ^:    BRAND_PRIMARY transp 15, size tiny
+  BOS v:    BRAND_SECONDARY transp 15, size tiny
+
+FIBONACCI OTE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  OTE 61.8/78.6:  BRAND_PRIMARY (#00D5FE cyan) width=2 solid
+  50%:            WAIT (#FFB800) width=2
+  Autres:         TEXT_MUTED (#6B7280) width=1 dashed
+  Zone OTE:       BULL/BEAR transp 75 (selon st_dir)
+  SL:             BEAR transp 20
+  TP:             BULL transp 20
+
+SPIKE DETECTION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Barcolor level 4 (spike):      BRAND_ACCENT transp 20
+  Barcolor level 3 (tradable):   BRAND_SECONDARY transp 30
+  Barcolor level 2 (watch):      WAIT transp 55
+  Barcolor generic:              BULL/BEAR transp 30
+  Labels pre-spike:              BULL/BEAR transp 15, size LARGE
+  Label spike actif:             BRAND_ACCENT transp 15, size normal
+  Flèches ON:                    BULL/BEAR transp 0, size HUGE ★★★
+  Flèches OFF:                   BULL/BEAR transp 78, size large
+  bgcolor tradable:              BRAND_SECONDARY transp 92
+
+VERDICT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  BUY:   BULL (#00FF80)
+  SELL:  BEAR (#FF3366)
+  WAIT:  WAIT (#FFB800)
+  bgcolor BUY:   BULL transp 97
+  bgcolor SELL:  BEAR transp 97
+
+CHEMIN PRÉDICTIF (200 bougies)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  pdir==1:  BRAND_PRIMARY (#00D5FE cyan) transp 15, width=3 ★★★
+  pdir==-1: BRAND_SECONDARY (#FF6B35 orange) transp 15, width=3 ★★★
+  pdir==0:  WAIT (#FFB800) transp 35, width=3
+  Bougies fantômes: PRIMARY/SECONDARY transp 75, WAIT transp 80
+
+═══════════════════════════════════════════════════════════════════════════════
+
+TABLES (6)
+═════════════════════════════════════════════════════════════════════════════════
+
+MTF TABLE (top_right)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  bgcolor:         BG_MAIN
+  border/frame:    BORDER
+  Header TF/DIR/RSI: BRAND_PRIMARY, bgcolor BG_HEADER
+  Cells TF:        TEXT_PRIMARY
+  Cells DIR:       BULL/BEAR/WAIT
+  Cells RSI:       BULL (>60), BEAR (<40), TEXT_SECONDARY (neutre)
+  GLOBAL bg:       BULL/BEAR/WAIT transp 60
+
+SIGNAL UNIFIÉ PANEL (bottom_left — Boom/Crash)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  bgcolor:         BG_MAIN
+  border:          BRAND_SECONDARY transp 35 ★★★
+  frame:           BRAND_SECONDARY transp 25
+  Header "SIGNAL": BRAND_SECONDARY, size small
+  Action tradable: BRAND_ACCENT size large ★★★
+  Verdict:         TEXT_SECONDARY / verdict_col
+  Pre-Spike:       BRAND_SECONDARY si tradable
+  Cycle:           BRAND_SECONDARY si >= entry
+  Prob/Imm:        BULL si >= seuil
+  Tradable OUI:    BULL
+  Setup:           BULL/BEAR/MUTED
+  Entry/SL/TP:     TEXT_PRIMARY size tiny
+  Scores:          TEXT_SECONDARY
+  RSI/ST:          BULL/BEAR
+  EA:              BRAND_PRIMARY (cyan) ★★★
+  Info:            TEXT_MUTED
+
+VERDICT GOM TABLE (bottom_left fallback si panel off)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  bgcolor:         BG_MAIN
+  border:          BORDER
+  Header:          BRAND_PRIMARY, bgcolor BG_HEADER
+  BUY score:       BULL
+  SELL score:      BEAR
+  Spike %:         BRAND_ACCENT si >= min
+  RSI/ST:          BULL/BEAR
+  RSI Alert:       BRAND_SECONDARY
+  Force:           BRAND_ACCENT (>=4), BULL (>=2.5), TEXT_SECONDARY
+  Coherence:       BULL (>=60%), WAIT (>=40%), BEAR (<40%)
+  Quality:         BULL (>=60%), WAIT (>=30%), BEAR (<30%)
+  KOLA:            BULL/BEAR/MUTED
+
+PRE-SPIKE TABLE (top_center — Boom/Crash uniquement)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  bgcolor:         BG_MAIN
+  border:          BRAND_SECONDARY transp 40
+  frame:           BRAND_SECONDARY transp 30
+  Header selon niveau:
+    Level 4:       BRAND_ACCENT transp 30
+    Level 3:       BRAND_SECONDARY transp 20
+    Level 2:       WAIT transp 50
+    Autre:         BULL/BEAR transp 70 ou BG_CELL
+  Niveau:          BRAND_SECONDARY/ACCENT/PRIMARY selon level
+  Cycle:           BRAND_SECONDARY si >= entry
+  Prob/Imm:        BULL si >= min_prob
+  Z-score:         BRAND_ACCENT si >= min
+  Pre-compress:    BRAND_SECONDARY si >= 0.4
+  Tradable OUI:    BULL
+
+SETUP TABLE (middle_right)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  bgcolor:         BG_MAIN
+  border:          BORDER
+  Header "SETUP":  BRAND_PRIMARY, bgcolor BULL/BEAR transp 30 selon dir
+  Confirm:         BULL si pin bar
+  Entry:           TEXT_PRIMARY
+  SL:              BEAR
+  TP1:             BULL
+  TP2:             BRAND_PRIMARY (cyan)
+  R/R:             BRAND_SECONDARY (orange)
+
+GHOST ORDERFLOW TABLE (bottom_right)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  → INCHANGÉ — palette OF_BULL/OF_BEAR/OF_NEUT/OF_GOLD conservée
+  Header:          OF_GOLD
+  Sentiment:       OF_BULL/OF_BEAR
+  Delta:           OF_BULL/OF_BEAR
+  CVD:             OF_BULL/OF_BEAR
+  Compass:         OF_BULL/OF_BEAR selon direction
+
+═══════════════════════════════════════════════════════════════════════════════
+
+TRANSPARENCES STANDARDISÉES
+═════════════════════════════════════════════════════════════════════════════════
+  0   → Opaque (lignes importantes, flèches ON)
+  15  → Semi-opaque (labels alertes, chemin segments)
+  20  → Surfaces importantes (DT/DB, SL/TP)
+  30  → Borders boxes (OB), barcolor spikes
+  40  → Headers tables, borders
+  60  → Headers secondaires, GLOBAL row
+  75  → Zone OTE, bougies fantômes bull/bear
+  80  → Background cells
+  85  → Background main
+  88  → Boxes OB
+  92  → bgcolor spike tradable
+  97  → bgcolor verdict
+
+TEXT SIZES (hiérarchie)
+═════════════════════════════════════════════════════════════════════════════════
+  huge   → Flèches pre-spike ON (★★★ ultra visible)
+  large  → Action panel tradable, labels pre-spike, flèches OFF
+  normal → Headers tables, verdict display, spike actif
+  small  → Valeurs importantes tables, labels chart
+  tiny   → Métadonnées, infos secondaires, BOS labels
+
+LINE WIDTHS
+═════════════════════════════════════════════════════════════════════════════════
+  1 → Lignes secondaires (Fib standard)
+  2 → Lignes importantes (KOLA, SIDO, OTE, OB borders)
+  3 → Chemin prédictif (input modifiable path_width, default 3)
+
+═══════════════════════════════════════════════════════════════════════════════
+FIN PALETTE REFERENCE CARD
+═══════════════════════════════════════════════════════════════════════════════

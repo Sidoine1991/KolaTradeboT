@@ -5,6 +5,7 @@ Gère la conversion entre symboles TradingView et MT5.
 Évite les mismatches de symboles qui causaient des trades sur le mauvais instrument.
 """
 
+import re
 from typing import Dict, Optional
 
 # Mappings canoniques: MT5 symbol → TradingView / API canonical form
@@ -97,6 +98,33 @@ SYMBOL_MAPPINGS: Dict[str, Dict[str, str]] = {
     },
 }
 
+# Ticker TradingView CDP (chart set-symbol) — DERIV:BOOM_500_INDEX vs MT5 "Boom 500 Index"
+_TV_CDP_TICKERS: Dict[str, str] = {
+    "XAUUSD": "OANDA:XAUUSD",
+    "XAGUSD": "OANDA:XAGUSD",
+    "EURUSD": "OANDA:EURUSD",
+    "GBPUSD": "OANDA:GBPUSD",
+    "USDJPY": "OANDA:USDJPY",
+    "USDCHF": "OANDA:USDCHF",
+    "AUDUSD": "OANDA:AUDUSD",
+    "NZDUSD": "OANDA:NZDUSD",
+    "USDCAD": "OANDA:USDCAD",
+    "BTCUSD": "BITSTAMP:BTCUSD",
+    "ETHUSD": "BITSTAMP:ETHUSD",
+    "Boom 300 Index": "DERIV:BOOM_300_INDEX",
+    "Boom 500 Index": "DERIV:BOOM_500_INDEX",
+    "Boom 600 Index": "DERIV:BOOM_600_INDEX",
+    "Boom 900 Index": "DERIV:BOOM_900_INDEX",
+    "Boom 1000 Index": "DERIV:BOOM_1000_INDEX",
+    "Crash 300 Index": "DERIV:CRASH_300_INDEX",
+    "Crash 500 Index": "DERIV:CRASH_500_INDEX",
+    "Crash 600 Index": "DERIV:CRASH_600_INDEX",
+    "Crash 900 Index": "DERIV:CRASH_900_INDEX",
+    "Crash 1000 Index": "DERIV:CRASH_1000_INDEX",
+}
+
+_TV_TO_MT5: Dict[str, str] = {v: k for k, v in _TV_CDP_TICKERS.items()}
+
 
 def get_symbol_mapping(mt5_symbol: str) -> Optional[Dict[str, str]]:
     """
@@ -183,6 +211,58 @@ def get_all_boom_crash_symbols() -> list[str]:
     """Retourne liste de tous symboles Boom/Crash"""
     return [sym for sym, map_data in SYMBOL_MAPPINGS.items()
             if map_data["category"] == "boom_crash"]
+
+
+def resolve_mt5_symbol(raw: str) -> str:
+    """
+    Résout toute variante MT5/TV vers le nom canonique MT5.
+    Ex: Boom500Index, Boom 500Index, BOOM_500_INDEX, DERIV:BOOM_500_INDEX -> Boom 500 Index
+    """
+    if not raw:
+        return "XAUUSD"
+    s = raw.strip()
+    if s.upper() in ("XAUEUR", "GOLD", "OR"):
+        return "XAUUSD"
+
+    mapping = get_symbol_mapping(s)
+    if mapping:
+        return mapping["mt5"]
+
+    if s in _TV_TO_MT5:
+        return _TV_TO_MT5[s]
+
+    up = s.upper().replace("DERIV:", "").strip()
+    if up in _TV_TO_MT5:
+        return _TV_TO_MT5[up]
+
+    compact = re.sub(r"[^A-Z0-9]", "", up)
+    for canon, data in SYMBOL_MAPPINGS.items():
+        api_key = re.sub(r"[^A-Z0-9]", "", data.get("api", "").upper())
+        canon_key = re.sub(r"[^A-Z0-9]", "", canon.upper())
+        if compact and compact in (api_key, canon_key):
+            return canon
+
+    m = re.match(r"^(BOOM|CRASH)[_]?(\d+)[_]?(INDEX)?$", compact)
+    if m:
+        kind = m.group(1).title()
+        num = m.group(2)
+        candidate = f"{kind} {num} Index"
+        if get_symbol_mapping(candidate):
+            return candidate
+
+    m2 = re.match(r"^(BOOM|CRASH)(\d+)$", compact)
+    if m2:
+        candidate = f"{m2.group(1).title()} {m2.group(2)} Index"
+        if get_symbol_mapping(candidate):
+            return candidate
+
+    return s
+
+
+def mt5_to_tv_cdp_ticker(mt5_symbol: str) -> str:
+    """Symbole MT5 -> ticker TradingView CDP (ex. DERIV:BOOM_500_INDEX)."""
+    canon = resolve_mt5_symbol(mt5_symbol)
+    return _TV_CDP_TICKERS.get(canon, canon)
 
 
 def normalize_report_symbol(symbol: str, default: str = "Unknown") -> str:

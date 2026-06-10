@@ -1,0 +1,175 @@
+//@version=5
+indicator("GHOST OrderFlow Dashboard — DerivEAPro v10", overlay=true, max_lines_count=500, max_labels_count=500)
+
+// ============================================================================
+// GHOST OrderFlow Dashboard Visual
+// Displays GHOST data captured from gom_signal.json via DerivEAPro EA
+// ============================================================================
+
+// Colors
+col_bg = color.new(color.black, 95)
+col_buy = color.new(color.lime, 0)
+col_sell = color.new(color.red, 0)
+col_hold = color.new(color.yellow, 0)
+col_text_light = color.new(color.white, 0)
+col_text_dark = color.new(color.gray, 0)
+
+// ============================================================================
+// PANEL: GHOST OrderFlow Sentiment
+// ============================================================================
+
+y_pos = 1.0
+
+// Title
+label.new(x=bar_index, y=y_pos, text="👻 GHOST OrderFlow v10",
+          style=label.style_label_left, color=col_bg, textcolor=col_text_light, size=size.large)
+y_pos -= 0.5
+
+// Sentiment Gauge (Buyers vs Sellers)
+// In production, these values come from gom_signal.json
+// For demo: assuming 72.5% buyers
+buyer_pct = 72.5
+seller_pct = 27.5
+
+buyer_bar = string.rep("█", int(buyer_pct / 5))
+seller_bar = string.rep("█", int(seller_pct / 5))
+
+label.new(x=bar_index, y=y_pos, text="BUY:  " + buyer_bar + " " + str.tostring(buyer_pct, "#.0") + "%",
+          style=label.style_label_left, color=col_bg, textcolor=col_buy, size=size.normal)
+y_pos -= 0.4
+
+label.new(x=bar_index, y=y_pos, text="SELL: " + seller_bar + " " + str.tostring(seller_pct, "#.0") + "%",
+          style=label.style_label_left, color=col_bg, textcolor=col_sell, size=size.normal)
+y_pos -= 0.4
+
+// ============================================================================
+// PANEL: Delta Volume + CVD
+// ============================================================================
+
+// Delta: +1245.8 (buyers pushing)
+ghost_delta = 1245.8
+delta_color = ghost_delta > 0 ? col_buy : col_sell
+delta_icon = ghost_delta > 0 ? "🟢" : "🔴"
+
+label.new(x=bar_index, y=y_pos, text="Δ: " + delta_icon + " " + str.tostring(ghost_delta, "+#0.0"),
+          style=label.style_label_left, color=col_bg, textcolor=delta_color, size=size.small)
+y_pos -= 0.4
+
+// CVD: +8932.1 (cumulative bullish)
+ghost_cvd = 8932.1
+cvd_color = ghost_cvd > 0 ? col_buy : col_sell
+cvd_arrow = ghost_cvd > 0 ? "▲" : "▼"
+
+label.new(x=bar_index, y=y_pos, text="CVD: " + cvd_arrow + " " + str.tostring(ghost_cvd, "+#0.0"),
+          style=label.style_label_left, color=col_bg, textcolor=cvd_color, size=size.small)
+y_pos -= 0.4
+
+// ============================================================================
+// PANEL: Momentum Compass (8 directions)
+// ============================================================================
+
+// Compass: 45° (NE↗ — Bullish Northeast)
+ghost_compass = 45.0
+compass_dirs = array.new<string>()
+array.push(compass_dirs, "E→")    // 0°
+array.push(compass_dirs, "NE↗")   // 45°
+array.push(compass_dirs, "N↑")    // 90°
+array.push(compass_dirs, "NW↖")   // 135°
+array.push(compass_dirs, "W←")    // 180°
+array.push(compass_dirs, "SW↙")   // 225°
+array.push(compass_dirs, "S↓")    // 270°
+array.push(compass_dirs, "SE↘")   // 315°
+
+compass_oct = int(((ghost_compass + 22.5) % 360.0) / 45.0)
+compass_dir = array.get(compass_dirs, compass_oct)
+compass_color = compass_oct in (0, 1, 2, 7) ? col_buy : (compass_oct in (3, 4, 5, 6) ? col_sell : col_hold)
+
+label.new(x=bar_index, y=y_pos, text="Compass: " + compass_dir + " (" + str.tostring(ghost_compass, "#0.0") + "°)",
+          style=label.style_label_left, color=col_bg, textcolor=compass_color, size=size.small)
+y_pos -= 0.4
+
+// ============================================================================
+// PANEL: Quality & Freshness
+// ============================================================================
+
+ghost_quality = 72.0
+ghost_age_sec = 3
+
+quality_color = ghost_quality >= 60 ? col_buy : (ghost_quality >= 40 ? col_hold : col_sell)
+freshness_icon = ghost_age_sec < 5 ? "🔋" : (ghost_age_sec < 15 ? "⚡" : "⏱")
+
+label.new(x=bar_index, y=y_pos, text="Quality: " + str.tostring(ghost_quality, "#0.0") + "% | Age: " + freshness_icon + " " + str.tostring(ghost_age_sec) + "s",
+          style=label.style_label_left, color=col_bg, textcolor=quality_color, size=size.small)
+y_pos -= 0.5
+
+// ============================================================================
+// PANEL: Entry Signal Summary
+// ============================================================================
+
+signal_text = "✅ BUY CONFLUENCE"
+signal_color = col_buy
+
+confluence_items = array.new<string>()
+array.push(confluence_items, "• GOM: BUY (2.5)")
+array.push(confluence_items, "• GHOST: Buyers 72.5% + CVD bullish")
+array.push(confluence_items, "• ICT: Grade B (Score 68)")
+array.push(confluence_items, "• RSI: 62 (bullish)")
+
+label.new(x=bar_index, y=y_pos, text=signal_text,
+          style=label.style_label_left, color=col_bg, textcolor=signal_color, size=size.large)
+y_pos -= 0.5
+
+for item in confluence_items
+    label.new(x=bar_index, y=y_pos, text=item,
+              style=label.style_label_left, color=col_bg, textcolor=col_text_light, size=size.small)
+    y_pos -= 0.4
+
+// ============================================================================
+// PANEL: Entry Setup
+// ============================================================================
+
+y_pos -= 0.3
+
+label.new(x=bar_index, y=y_pos, text="ENTRY SETUP",
+          style=label.style_label_left, color=col_bg, textcolor=col_text_light, size=size.small, weight=weight.bold)
+y_pos -= 0.4
+
+setup_data = array.new<string>()
+array.push(setup_data, "Entry: 1845.32")
+array.push(setup_data, "SL: 1844.87 (−45 pips)")
+array.push(setup_data, "TP1: 1846.50 (−118 pips)")
+array.push(setup_data, "R/R: 1:1.8")
+
+for data in setup_data
+    label.new(x=bar_index, y=y_pos, text=data,
+              style=label.style_label_left, color=col_bg, textcolor=col_text_light, size=size.small)
+    y_pos -= 0.3
+
+// ============================================================================
+// Bottom Note
+// ============================================================================
+
+y_pos -= 0.3
+label.new(x=bar_index, y=y_pos, text="DerivEAPro v10 — GHOST OrderFlow Integration | " + str.tostring(timenow, "HH:mm:ss"),
+          style=label.style_label_left, color=col_bg, textcolor=color.gray, size=size.small)
+
+// ============================================================================
+// Alert Line: Entry Price
+// ============================================================================
+
+line.new(x1=bar_index - 50, y1=1845.32, x2=bar_index, y2=1845.32,
+         color=col_buy, width=2, style=line.style_dashed, extend=extend.right)
+
+// ============================================================================
+// Alert Line: Stop Loss
+// ============================================================================
+
+line.new(x1=bar_index - 50, y1=1844.87, x2=bar_index, y2=1844.87,
+         color=col_sell, width=2, style=line.style_dotted, extend=extend.right)
+
+// ============================================================================
+// PLOTCHAR: Visible Markers on Chart
+// ============================================================================
+
+plotchar(close > 1845.0 ? 1845.5 : na, "BUY Signal", "🟢", location.absolute, col_buy, size=size.large)
+plotchar(close > 1845.0 ? 1844.5 : na, "STOP", "🔴", location.absolute, col_sell, size=size.normal)

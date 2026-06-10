@@ -1,0 +1,1712 @@
+//@version=6
+indicator("GOM KOLA SIDO — Full Integration", shorttitle="GOM SIDO", overlay=true,
+     max_lines_count=500, max_labels_count=200, max_boxes_count=580)
+
+// ═══════════════════════════════════════════════════════════════
+// INPUTS
+// ═══════════════════════════════════════════════════════════════
+
+grp_kola    = "KOLA LEVELS (pivot S/R + touches)"
+kola_lb     = input.int(3,    "Line Break Period",     minval=1,  maxval=10,  group=grp_kola)
+kola_bars   = input.int(120,  "Max bars analyse",      minval=40, maxval=300, group=grp_kola)
+kola_show   = input.bool(true,"Afficher niveaux KOLA",                        group=grp_kola)
+kola_touch  = input.bool(true,"Touch detection",                              group=grp_kola)
+kola_touch_zone_pct = input.float(30.0, "Touch zone ATR%", minval=5, maxval=80, group=grp_kola)
+kola_touch_bars = input.int(150, "Bars for touch count", minval=20, maxval=500, group=grp_kola)
+
+grp_ob      = "ORDER BLOCKS"
+ob_lookback = input.int(10,   "Lookback OB",         minval=3,  maxval=50,  group=grp_ob)
+ob_show     = input.bool(true,"Afficher OBs",                               group=grp_ob)
+
+grp_struct  = "STRUCTURE (CHoCH / BOS)"
+show_choch  = input.bool(false,"Afficher CHoCH / BOS (masqué par défaut)",   group=grp_struct)
+struct_lb   = input.int(8,    "Lookback pivots",      minval=3,  maxval=30,  group=grp_struct)
+
+grp_sido    = "SIDO (FIGURES CHARTISTES)"
+sido_enable = input.bool(true,"Activer SIDO",                                group=grp_sido)
+sido_lb     = input.int(3,    "Pivot lookback SIDO",  minval=2,  maxval=10,  group=grp_sido)
+sido_bars   = input.int(300,  "Bars to analyze",      minval=50, maxval=500, group=grp_sido)
+sido_max_gap= input.int(80,   "Max bars between swings", minval=10,maxval=200,group=grp_sido)
+sido_tol_pct= input.float(35.0,"Tolerance ATR%",      minval=5,  maxval=80,  group=grp_sido)
+
+grp_fib     = "FIBONACCI OTE"
+show_fib    = input.bool(true, "Afficher Fibonacci / OTE",                   group=grp_fib)
+fib_lb      = input.int(50,   "Lookback swing",       minval=20, maxval=200, group=grp_fib)
+
+grp_spike   = "SPIKE DETECTOR"
+spike_lb    = input.int(25,   "Lookback spike",       minval=10, maxval=60,  group=grp_spike)
+spike_min   = input.float(0.62,"Seuil alerte spike",  minval=0.40,maxval=0.95,step=0.01, group=grp_spike)
+spike_blink = input.float(0.52,"Seuil alerte precoce",minval=0.40,maxval=0.95,step=0.01, group=grp_spike)
+
+grp_spike_bc = "BOOM/CRASH — PRE-SPIKE"
+spike_bc_en  = input.bool(true,  "Activer pre-spike Boom/Crash", group=grp_spike_bc)
+spike_freq_ov= input.int(0,     "Frequence spike (0=auto)", minval=0, maxval=2000, group=grp_spike_bc)
+spike_wake   = input.float(0.30,"Reveil cycle (30%)", minval=0.10, maxval=0.50, step=0.05, group=grp_spike_bc)
+spike_watch  = input.float(0.55,"Zone watch (55%)", minval=0.40, maxval=0.70, step=0.05, group=grp_spike_bc)
+spike_entry  = input.float(0.65,"Zone entree (65%)", minval=0.55, maxval=0.80, step=0.05, group=grp_spike_bc)
+spike_overdue= input.float(0.85,"Reset cycle (85%)", minval=0.75, maxval=0.95, step=0.05, group=grp_spike_bc)
+spike_min_prob=input.int(55,    "Prob min tradable %", minval=40, maxval=85, group=grp_spike_bc)
+spike_z_min  = input.float(2.0, "Z-score spike min", minval=1.0, maxval=4.0, step=0.1, group=grp_spike_bc)
+spike_stair_b= input.int(5,    "Barres stair", minval=3, maxval=10, group=grp_spike_bc)
+spike_show_bc= input.bool(true, "Tableau pre-spike", group=grp_spike_bc)
+spike_show_lbl=input.bool(true,"Labels spike chart", group=grp_spike_bc)
+spike_sl_atr = input.float(0.8,"SL spike (x ATR)", minval=0.3, maxval=2.0, step=0.1, group=grp_spike_bc)
+spike_tp_atr = input.float(1.2,"TP spike (x ATR)", minval=0.5, maxval=3.0, step=0.1, group=grp_spike_bc)
+
+grp_ui      = "INTERFACE — SIGNAL CLAIR"
+ui_signal_panel = input.bool(true, "Panneau SIGNAL unifié (recommandé Boom/Crash)", group=grp_ui)
+ui_compact_bc   = input.bool(true, "Mode compact Boom/Crash (moins de bruit)", group=grp_ui)
+ui_show_arrow   = input.bool(true, "Flèche clignotante entrée pre-spike", group=grp_ui)
+path_show_bc    = input.bool(false, "Chemin predictif sur Boom/Crash", group=grp_ui)
+
+grp_ind     = "INDICATEURS"
+show_vwap   = input.bool(true,"VWAP session",                                group=grp_ind)
+show_bb     = input.bool(true,"Bollinger Bands",                             group=grp_ind)
+bb_period   = input.int(20,   "Periode BB",                                  group=grp_ind)
+bb_dev      = input.float(2.0,"Deviation BB",                                group=grp_ind)
+show_st     = input.bool(true,"Supertrend",                                  group=grp_ind)
+st_atr_per  = input.int(10,   "ATR Supertrend",                              group=grp_ind)
+st_mult     = input.float(3.0,"Mult Supertrend",                             group=grp_ind)
+show_kc     = input.bool(true,"Keltner Channel",                             group=grp_ind)
+kc_ema_per  = input.int(20,   "EMA Keltner",                                 group=grp_ind)
+kc_atr_mult = input.float(1.5,"Mult Keltner",                                group=grp_ind)
+show_dc     = input.bool(true,"Donchian Channel",                            group=grp_ind)
+dc_period   = input.int(20,   "Periode Donchian",                            group=grp_ind)
+
+grp_mtf     = "TABLEAU MTF"
+show_mtf    = input.bool(true,"Afficher tableau MTF",                        group=grp_mtf)
+tf1  = input.timeframe("1",  "TF1", group=grp_mtf)
+tf2  = input.timeframe("5",  "TF2", group=grp_mtf)
+tf3  = input.timeframe("15", "TF3", group=grp_mtf)
+tf4  = input.timeframe("60", "TF4", group=grp_mtf)
+tf5  = input.timeframe("240","TF5", group=grp_mtf)
+tf6  = input.timeframe("D",  "TF6", group=grp_mtf)
+tf7  = input.timeframe("W",  "TF7", group=grp_mtf)
+
+grp_verdict = "VERDICT"
+show_verdict= input.bool(true,"Afficher verdict",                            group=grp_verdict)
+verdict_gap_th = input.float(0.45, "Gap threshold", minval=0.1, maxval=2.0, step=0.05, group=grp_verdict)
+verdict_coherence = input.bool(true, "Coherence gate", group=grp_verdict)
+verdict_bb_vwap_weight = input.float(1.0, "BB/VWAP weight", minval=0.0, maxval=3.0, step=0.1, group=grp_verdict)
+verdict_adv_weight = input.float(0.8, "Advanced indic weight", minval=0.0, maxval=3.0, step=0.1, group=grp_verdict)
+
+grp_quality = "ENTRY QUALITY"
+show_quality = input.bool(true, "Afficher quality score", group=grp_quality)
+
+grp_setup   = "TABLEAU SETUP (ordre limite)"
+show_setup  = input.bool(true, "Afficher tableau SETUP", group=grp_setup)
+setup_rr_mult = input.float(1.0, "TP1 = R x mult", minval=0.5, maxval=3.0, step=0.1, group=grp_setup)
+setup_rr2_mult= input.float(1.5, "TP2 = R x mult", minval=0.5, maxval=4.0, step=0.1, group=grp_setup)
+
+grp_path    = "CHEMIN PREDICTIF (200 bougies)"
+path_horizon = input.int(200, "Horizon bougies", minval=20, maxval=200, group=grp_path)
+path_show    = input.bool(true, "Segments direction futurs", group=grp_path)
+path_show_candles = input.bool(true, "Bougies predites (fantomes)", group=grp_path)
+path_candle_vis   = input.int(200, "Nb bougies fantomes visibles", minval=15, maxval=200, group=grp_path)
+path_width   = input.int(5, "Epaisseur segments", minval=2, maxval=10, group=grp_path)
+path_step    = input.float(0.16, "Pas (x ATR)", minval=0.05, maxval=0.45, step=0.01, group=grp_path)
+path_in_alert= input.bool(true, "Envoyer chemin → webhook", group=grp_path)
+
+// ═══════════════════════════════════════════════════════════════
+// GHOST — ORDER FLOW (inputs)
+// ═══════════════════════════════════════════════════════════════
+grp_of      = "GHOST — ORDER FLOW"
+of_hm_show  = input.bool(true,  "Heatmap liquidité",        group=grp_of)
+of_hm_lb    = input.int(100,    "Heatmap lookback bougies", group=grp_of, minval=20, maxval=300)
+of_hm_zones = input.int(24,     "Heatmap tranches",         group=grp_of, minval=8,  maxval=40)
+of_dlt_show = input.bool(true,  "Delta + CVD",              group=grp_of)
+of_dlt_bars = input.int(12,     "Barres histogramme Delta", group=grp_of, minval=6,  maxval=20)
+of_cmp_show = input.bool(true,  "Boussole momentum",        group=grp_of)
+of_snt_show = input.bool(true,  "Sentiment BUY/SELL%",      group=grp_of)
+of_snt_per  = input.int(20,     "Sentiment période",        group=grp_of, minval=5,  maxval=100)
+
+// ═══════════════════════════════════════════════════════════════
+// VWAP SESSION
+// ═══════════════════════════════════════════════════════════════
+var float vwap_sum = 0.0
+var float vwap_vol = 0.0
+is_new_session = ta.change(time("D")) != 0
+if is_new_session
+    vwap_sum := 0.0
+    vwap_vol := 0.0
+typical   = (high + low + close) / 3
+vwap_sum += typical * volume
+vwap_vol += volume
+vwap_val  = vwap_vol > 0 ? vwap_sum / vwap_vol : close
+plot(show_vwap ? vwap_val : na, "vwap", color=color.new(color.yellow, 0), linewidth=2)
+
+// ═══════════════════════════════════════════════════════════════
+// BOLLINGER BANDS
+// ═══════════════════════════════════════════════════════════════
+[bb_mid, bb_up, bb_dn] = ta.bb(close, bb_period, bb_dev)
+plot(show_bb ? bb_up  : na, "bb_up", color=color.new(color.blue, 40), linewidth=1)
+plot(show_bb ? bb_mid : na, "bb_mid", color=color.new(color.silver, 50), linewidth=1, style=plot.style_circles)
+plot(show_bb ? bb_dn  : na, "bb_dn", color=color.new(color.blue, 40), linewidth=1)
+bb_width = bb_up - bb_dn
+bb_squeeze = bb_width < ta.sma(bb_width, 20) * 0.85
+bb_pctb = bb_width > 0 ? (close - bb_dn) / bb_width : 0.5
+
+// ═══════════════════════════════════════════════════════════════
+// SUPERTREND
+// ═══════════════════════════════════════════════════════════════
+atr_st  = ta.atr(st_atr_per)
+up_band = hl2 - st_mult * atr_st
+dn_band = hl2 + st_mult * atr_st
+var float st_up  = na
+var float st_dn  = na
+var int   st_dir = 1
+st_up := math.max(up_band, nz(st_up[1], up_band))
+st_dn := math.min(dn_band, nz(st_dn[1], dn_band))
+if close > nz(st_dn[1])
+    st_dir := 1
+else if close < nz(st_up[1])
+    st_dir := -1
+st_line = st_dir == 1 ? st_up : st_dn
+plot(show_st ? st_line : na, "st_line",
+     color=st_dir==1 ? color.new(color.lime,30) : color.new(color.red,30), linewidth=2)
+
+// ═══════════════════════════════════════════════════════════════
+// KELTNER CHANNEL (sans plot — limite 64 TradingView)
+// ═══════════════════════════════════════════════════════════════
+kc_mid = ta.ema(close, kc_ema_per)
+kc_atr = ta.atr(kc_ema_per)
+kc_upper = kc_mid + kc_atr_mult * kc_atr
+kc_lower = kc_mid - kc_atr_mult * kc_atr
+kc_pos = kc_upper > kc_lower ? ((close - kc_lower) / (kc_upper - kc_lower)) * 2.0 - 1.0 : 0.0
+
+// ═══════════════════════════════════════════════════════════════
+// DONCHIAN CHANNEL (sans plot — limite 64 TradingView)
+// ═══════════════════════════════════════════════════════════════
+dc_high = ta.highest(high, dc_period)
+dc_low  = ta.lowest(low, dc_period)
+dc_mid_val = (dc_high + dc_low) / 2
+dc_sig = close > dc_high - atr_st * 0.05 ? 1.0 : close < dc_low + atr_st * 0.05 ? -1.0 : 0.0
+
+// ═══════════════════════════════════════════════════════════════
+// KOLA LEVELS — Pivot S/R avec Touch Counting (MTF)
+// ═══════════════════════════════════════════════════════════════
+// Logique portee du MQL5: on cherche le meilleur pivot low (BUY) sous le prix
+// et le meilleur pivot high (SELL) au-dessus du prix, ponderes par touches.
+
+atr14 = ta.atr(14)
+touch_zone = kola_touch ? atr14 * (kola_touch_zone_pct / 100.0) : 0.0
+
+// Fonction pour trouver les niveaux KOLA sur le TF actuel
+is_pivot_high(src, lb, idx) =>
+    result = true
+    for k = 1 to lb
+        if idx - k >= 0
+            if high[idx - k] >= src
+                result := false
+                break
+        if high[idx + k] >= src
+            result := false
+            break
+    result
+
+is_pivot_low(src, lb, idx) =>
+    result = true
+    for k = 1 to lb
+        if idx - k >= 0
+            if low[idx - k] <= src
+                result := false
+                break
+        if low[idx + k] <= src
+            result := false
+            break
+    result
+
+// Calcul touches
+calc_touches(level, zone_size, max_bars) =>
+    touches = 0
+    for i = 0 to math.min(max_bars, 499)
+        h = high[i]
+        l = low[i]
+        if math.abs(h - level) <= zone_size or math.abs(l - level) <= zone_size or (l <= level and h >= level)
+            touches += 1
+    touches
+
+// Trouver niveaux KOLA sur le timeframe courant
+var float kola_buy_level  = na
+var float kola_sell_level = na
+var int   kola_buy_touches  = 0
+var int   kola_sell_touches = 0
+
+if barstate.islast and kola_show
+    best_buy  = 0.0
+    best_sell = 0.0
+    best_buy_t  = 0
+    best_sell_t = 0
+    max_idx = math.min(bar_index, kola_bars)
+
+    for i = kola_lb + 1 to max_idx
+        // Pivot low → BUY level
+        is_pl = true
+        for k = 1 to kola_lb
+            if low[i - k] <= low[i] or low[i + k] < low[i]
+                is_pl := false
+                break
+        if is_pl
+            lvl = low[i]
+            t = kola_touch ? calc_touches(lvl, touch_zone, kola_touch_bars) : 1
+            if lvl < close
+                if t > best_buy_t or (t == best_buy_t and lvl > best_buy)
+                    best_buy := lvl
+                    best_buy_t := t
+
+        // Pivot high → SELL level
+        is_ph = true
+        for k = 1 to kola_lb
+            if high[i - k] >= high[i] or high[i + k] > high[i]
+                is_ph := false
+                break
+        if is_ph
+            lvl = high[i]
+            t = kola_touch ? calc_touches(lvl, touch_zone, kola_touch_bars) : 1
+            if lvl > close
+                if t > best_sell_t or (t == best_sell_t and (best_sell == 0.0 or lvl < best_sell))
+                    best_sell := lvl
+                    best_sell_t := t
+
+    kola_buy_level  := best_buy > 0 ? best_buy : na
+    kola_sell_level := best_sell > 0 ? best_sell : na
+    kola_buy_touches  := best_buy_t
+    kola_sell_touches := best_sell_t
+
+// Dessiner les niveaux KOLA
+var line kola_buy_ln  = na
+var line kola_sell_ln = na
+var label kola_buy_lbl  = na
+var label kola_sell_lbl = na
+
+if barstate.islast and kola_show
+    if not na(kola_buy_ln)
+        line.delete(kola_buy_ln)
+    if not na(kola_sell_ln)
+        line.delete(kola_sell_ln)
+    if not na(kola_buy_lbl)
+        label.delete(kola_buy_lbl)
+    if not na(kola_sell_lbl)
+        label.delete(kola_sell_lbl)
+
+    if not na(kola_buy_level)
+        _w = math.min(4, math.max(1, math.round(kola_buy_touches / 3)))
+        kola_buy_ln := line.new(bar_index - kola_bars, kola_buy_level, bar_index, kola_buy_level,
+             color=color.lime, width=_w, style=line.style_solid, extend=extend.right)
+        kola_buy_lbl := label.new(bar_index, kola_buy_level,
+             "BUY " + str.tostring(math.round(kola_buy_level, 2)) + " (" + str.tostring(kola_buy_touches) + "t)",
+             color=color.new(color.black,100), textcolor=color.lime, size=size.small, style=label.style_label_left)
+
+    if not na(kola_sell_level)
+        _w = math.min(4, math.max(1, math.round(kola_sell_touches / 3)))
+        kola_sell_ln := line.new(bar_index - kola_bars, kola_sell_level, bar_index, kola_sell_level,
+             color=color.red, width=_w, style=line.style_solid, extend=extend.right)
+        kola_sell_lbl := label.new(bar_index, kola_sell_level,
+             "SELL " + str.tostring(math.round(kola_sell_level, 2)) + " (" + str.tostring(kola_sell_touches) + "t)",
+             color=color.new(color.black,100), textcolor=color.red, size=size.small, style=label.style_label_left)
+
+// ═══════════════════════════════════════════════════════════════
+// SIDO — DOUBLE TOP / DOUBLE BOTTOM
+// ═══════════════════════════════════════════════════════════════
+var float sido_dt_level = na
+var float sido_db_level = na
+var line  sido_dt_ln = na
+var line  sido_db_ln = na
+var label sido_dt_lbl = na
+var label sido_db_lbl = na
+
+if barstate.islast and sido_enable
+    // Cleanup
+    if not na(sido_dt_ln)
+        line.delete(sido_dt_ln)
+    if not na(sido_db_ln)
+        line.delete(sido_db_ln)
+    if not na(sido_dt_lbl)
+        label.delete(sido_dt_lbl)
+    if not na(sido_db_lbl)
+        label.delete(sido_db_lbl)
+
+    sido_dt_level := na
+    sido_db_level := na
+
+    tol = atr14 * (sido_tol_pct / 100.0)
+    max_idx_sido = math.min(bar_index, sido_bars)
+
+    // Trouver les 2 derniers pivot highs et lows
+    var int ph1_idx = -1
+    var int ph2_idx = -1
+    var int pl1_idx = -1
+    var int pl2_idx = -1
+    ph1_idx := -1
+    ph2_idx := -1
+    pl1_idx := -1
+    pl2_idx := -1
+
+    for i = sido_lb + 1 to max_idx_sido
+        // Pivot high
+        is_ph_s = true
+        for k = 1 to sido_lb
+            if high[i - k] >= high[i] or high[i + k] > high[i]
+                is_ph_s := false
+                break
+        if is_ph_s
+            if ph1_idx == -1
+                ph1_idx := i
+            else if ph2_idx == -1
+                ph2_idx := i
+                break
+
+    for i = sido_lb + 1 to max_idx_sido
+        // Pivot low
+        is_pl_s = true
+        for k = 1 to sido_lb
+            if low[i - k] <= low[i] or low[i + k] < low[i]
+                is_pl_s := false
+                break
+        if is_pl_s
+            if pl1_idx == -1
+                pl1_idx := i
+            else if pl2_idx == -1
+                pl2_idx := i
+                break
+
+    // Double Top
+    if ph1_idx >= 0 and ph2_idx >= 0
+        bars_gap_h = math.abs(ph1_idx - ph2_idx)
+        h1 = high[ph1_idx]
+        h2 = high[ph2_idx]
+        if bars_gap_h <= sido_max_gap and math.abs(h1 - h2) <= tol
+            dt_lvl = (h1 + h2) / 2.0
+            sido_dt_level := dt_lvl
+            sido_dt_ln := line.new(bar_index - ph2_idx, dt_lvl, bar_index, dt_lvl,
+                 color=color.new(color.orange, 20), width=2, style=line.style_dashed, extend=extend.right)
+            sido_dt_lbl := label.new(bar_index, dt_lvl, "DT",
+                 color=color.new(color.orange, 20), textcolor=color.white, size=size.small, style=label.style_label_left)
+
+    // Double Bottom
+    if pl1_idx >= 0 and pl2_idx >= 0
+        bars_gap_l = math.abs(pl1_idx - pl2_idx)
+        l1 = low[pl1_idx]
+        l2 = low[pl2_idx]
+        if bars_gap_l <= sido_max_gap and math.abs(l1 - l2) <= tol
+            db_lvl = (l1 + l2) / 2.0
+            sido_db_level := db_lvl
+            sido_db_ln := line.new(bar_index - pl2_idx, db_lvl, bar_index, db_lvl,
+                 color=color.new(color.aqua, 20), width=2, style=line.style_dashed, extend=extend.right)
+            sido_db_lbl := label.new(bar_index, db_lvl, "DB",
+                 color=color.new(color.aqua, 20), textcolor=color.white, size=size.small, style=label.style_label_left)
+
+// ═══════════════════════════════════════════════════════════════
+// ORDER BLOCKS — pivot-based avec invalidation
+// ═══════════════════════════════════════════════════════════════
+pivot_h = ta.pivothigh(high, ob_lookback, ob_lookback)
+pivot_l = ta.pivotlow(low,  ob_lookback, ob_lookback)
+
+var float ob_bear_top = na
+var float ob_bear_bot = na
+var int   ob_bear_bar = na
+var float ob_bull_top = na
+var float ob_bull_bot = na
+var int   ob_bull_bar = na
+
+if not na(pivot_h)
+    ob_bear_top := high[ob_lookback + 1]
+    ob_bear_bot := math.min(open[ob_lookback + 1], close[ob_lookback + 1])
+    ob_bear_bar := bar_index - ob_lookback - 1
+if not na(pivot_l)
+    ob_bull_top := math.max(open[ob_lookback + 1], close[ob_lookback + 1])
+    ob_bull_bot := low[ob_lookback + 1]
+    ob_bull_bar := bar_index - ob_lookback - 1
+
+if not na(ob_bear_top) and high >= ob_bear_bot
+    ob_bear_top := na
+    ob_bear_bot := na
+if not na(ob_bull_bot) and low <= ob_bull_top
+    ob_bull_top := na
+    ob_bull_bot := na
+
+var box ob_bear_box = na
+var box ob_bull_box = na
+
+if ob_show and not na(ob_bear_top) and not na(ob_bear_bar)
+    if not na(ob_bear_box)
+        box.delete(ob_bear_box)
+    ob_bear_box := box.new(ob_bear_bar, ob_bear_top, bar_index, ob_bear_bot,
+         border_color=color.red, border_width=2, bgcolor=color.new(color.red, 80),
+         extend=extend.right, text="OB Bear", text_color=color.red, text_size=size.small)
+
+if ob_show and not na(ob_bull_bot) and not na(ob_bull_bar)
+    if not na(ob_bull_box)
+        box.delete(ob_bull_box)
+    ob_bull_box := box.new(ob_bull_bar, ob_bull_top, bar_index, ob_bull_bot,
+         border_color=color.lime, border_width=2, bgcolor=color.new(color.lime, 80),
+         extend=extend.right, text="OB Bull", text_color=color.lime, text_size=size.small)
+
+// ═══════════════════════════════════════════════════════════════
+// CHoCH / BOS — pivot structure
+// ═══════════════════════════════════════════════════════════════
+ph = ta.pivothigh(high, struct_lb, struct_lb)
+pl = ta.pivotlow(low,  struct_lb, struct_lb)
+
+var float last_ph = na
+var float last_pl = na
+var float prev_ph = na
+var float prev_pl = na
+
+if not na(ph)
+    prev_ph := last_ph
+    last_ph := ph
+if not na(pl)
+    prev_pl := last_pl
+    last_pl := pl
+
+choch_bear = not na(last_ph) and not na(prev_ph) and not na(prev_pl) and close < prev_pl and last_ph < prev_ph
+choch_bull = not na(last_pl) and not na(prev_pl) and not na(prev_ph) and close > prev_ph and last_pl > prev_pl
+bos_bear   = not na(last_pl) and close < last_pl and not choch_bear
+bos_bull   = not na(last_ph) and close > last_ph and not choch_bull
+
+if show_choch
+    if choch_bear
+        label.new(bar_index, high, "CHoCH v",
+             color=color.new(color.red,10), textcolor=color.white,
+             style=label.style_label_down, size=size.normal)
+    if choch_bull
+        label.new(bar_index, low, "CHoCH ^",
+             color=color.new(color.lime,10), textcolor=color.black,
+             style=label.style_label_up, size=size.normal)
+    if bos_bear
+        label.new(bar_index, high, "BOS v",
+             color=color.new(color.orange,10), textcolor=color.white,
+             style=label.style_label_down, size=size.small)
+    if bos_bull
+        label.new(bar_index, low, "BOS ^",
+             color=color.new(color.teal,10), textcolor=color.white,
+             style=label.style_label_up, size=size.small)
+
+// ═══════════════════════════════════════════════════════════════
+// FIBONACCI OTE
+// ═══════════════════════════════════════════════════════════════
+fib_high = ta.highest(high, fib_lb)
+fib_low  = ta.lowest(low,  fib_lb)
+fib_rng  = fib_high - fib_low
+f0   = fib_high
+f236 = fib_high - 0.236 * fib_rng
+f382 = fib_high - 0.382 * fib_rng
+f500 = fib_high - 0.500 * fib_rng
+f618 = fib_high - 0.618 * fib_rng
+f786 = fib_high - 0.786 * fib_rng
+f100 = fib_low
+
+var line[]  fib_lines  = array.new_line()
+var label[] fib_labels = array.new_label()
+var box[]   fib_boxes  = array.new_box()
+
+if barstate.islast and show_fib
+    int nl = array.size(fib_lines)
+    if nl > 0
+        for i = 0 to nl - 1
+            line.delete(array.get(fib_lines, i))
+    array.clear(fib_lines)
+    int nlb = array.size(fib_labels)
+    if nlb > 0
+        for i = 0 to nlb - 1
+            label.delete(array.get(fib_labels, i))
+    array.clear(fib_labels)
+    int nb = array.size(fib_boxes)
+    if nb > 0
+        for i = 0 to nb - 1
+            box.delete(array.get(fib_boxes, i))
+    array.clear(fib_boxes)
+
+    t_now  = bar_index
+    t_back = bar_index - fib_lb
+
+    fib_prices = array.from(f0, f236, f382, f500, f618, f786, f100)
+    fib_names  = array.from("0%", "23.6%", "38.2%", "50%", "61.8% OTE", "78.6% OTE", "100%")
+
+    for i = 0 to 6
+        _p   = array.get(fib_prices, i)
+        _n   = array.get(fib_names,  i)
+        _ote = i == 4 or i == 5
+        _col = _ote ? color.new(color.fuchsia, 0) : i == 3 ? color.new(color.orange, 0) : color.new(color.gray, 40)
+        _lw  = _ote ? 2 : i == 3 ? 2 : 1
+        _sty = _ote ? line.style_solid : line.style_dashed
+        _l   = line.new(t_back, _p, t_now, _p, color=_col, width=_lw, style=_sty, extend=extend.right)
+        array.push(fib_lines, _l)
+        _lb  = label.new(t_now, _p, " " + _n + " " + str.tostring(math.round(_p, 2)),
+             color=color.new(color.black, 100), textcolor=_col,
+             size=size.tiny, style=label.style_label_left)
+        array.push(fib_labels, _lb)
+
+    // Zone OTE (61.8–78.6%) — surface colorée visible + extend
+    _ote_col   = st_dir == -1 ? color.new(color.red, 65) : color.new(color.lime, 65)
+    _ote_bord  = st_dir == -1 ? color.new(color.red, 0)  : color.new(color.lime, 0)
+    _b = box.new(t_back, f618, t_now, f786,
+         border_color=_ote_bord, bgcolor=_ote_col, border_width=2, extend=extend.right)
+    array.push(fib_boxes, _b)
+
+    // Ligne SL/TP (atr14 defini globalement ligne 147)
+    _sl_price  = st_dir == -1 ? f0   + atr14 * 0.5 : f100 - atr14 * 0.5
+    _tp_price  = st_dir == -1 ? f100 - atr14 * 0.2 : f0   + atr14 * 0.2
+    _sl_col    = color.new(color.red,    20)
+    _tp_col    = color.new(color.lime,   20)
+    _sl_l = line.new(t_back, _sl_price, t_now, _sl_price,
+         color=_sl_col, width=2, style=line.style_dashed, extend=extend.right)
+    _tp_l = line.new(t_back, _tp_price, t_now, _tp_price,
+         color=_tp_col, width=2, style=line.style_dashed, extend=extend.right)
+    _sl_lb = label.new(t_now, _sl_price, " SL " + str.tostring(math.round(_sl_price, 2)),
+         color=color.new(color.black, 100), textcolor=_sl_col, size=size.tiny, style=label.style_label_left)
+    _tp_lb = label.new(t_now, _tp_price, " TP " + str.tostring(math.round(_tp_price, 2)),
+         color=color.new(color.black, 100), textcolor=_tp_col, size=size.tiny, style=label.style_label_left)
+    array.push(fib_lines,  _sl_l)
+    array.push(fib_lines,  _tp_l)
+    array.push(fib_labels, _sl_lb)
+    array.push(fib_labels, _tp_lb)
+
+// ═══════════════════════════════════════════════════════════════
+// SPIKE DETECTOR — multi-facteur + PRE-SPIKE BOOM/CRASH
+// ═══════════════════════════════════════════════════════════════
+candle_body  = math.abs(close - open)
+candle_range = high - low
+body_ratio   = candle_range > 0 ? candle_body / candle_range : 0.0
+avg_range    = ta.sma(candle_range, spike_lb)
+avg_volume   = ta.sma(volume, spike_lb)
+
+// ATR compression (du MQL5: ratio < 1 → compression)
+atr_comp_ratio = nz(atr14[1]) > 0 ? atr14 / nz(atr14[1]) : 1.0
+atr_compression = atr_comp_ratio < 1.0 ? math.min((1.0 - atr_comp_ratio) / 0.6, 1.0) : 0.0
+atr14_old = ta.sma(atr14, 14)
+atr_comp_deep = atr14_old > 0 ? math.max(0.0, math.min((atr14_old - atr14) / atr14_old / 0.4, 1.0)) : 0.0
+
+// Acceleration (du MQL5)
+change1 = close[1] != 0 ? (close - close[1]) / close[1] : 0.0
+change2 = close[3] != 0 ? (close[2] - close[3]) / close[3] : 0.0
+accel = math.min(math.abs(change1 - change2) / 0.003, 1.0)
+
+// Volume surge
+vol_ratio = avg_volume > 0 ? volume / avg_volume : 1.0
+vol_surge = vol_ratio > 1.0 ? math.min((vol_ratio - 1.0) / 1.5, 1.0) : 0.0
+
+// Score composite comme MQL5: 40% ATR compression + 35% accel + 25% vol
+spike_prob_mql = 0.40 * atr_compression + 0.35 * accel + 0.25 * vol_surge
+spike_prob_mql := math.max(0.0, math.min(1.0, spike_prob_mql))
+
+// Score Pine enrichi (momentum + body + BB squeeze + ST)
+momentum     = math.abs(close - close[spike_lb]) / (avg_range * spike_lb + 0.0001)
+body_score   = body_ratio > 0.65 ? 0.4 : body_ratio > 0.45 ? 0.2 : 0.0
+st_score_sp  = (close > st_line and st_dir == 1) or (close < st_line and st_dir == -1) ? 0.3 : -0.1
+bb_sq_score  = bb_squeeze ? 0.3 : 0.0
+spike_raw    = momentum * 0.25 + spike_prob_mql * 0.40 + body_score * 0.15 + bb_sq_score * 0.10 + st_score_sp * 0.10
+spike_prob   = math.min(math.max(spike_raw, 0.0), 1.0)
+
+spike_bull   = close > open and close > vwap_val and st_dir ==  1
+spike_bear   = close < open and close < vwap_val and st_dir == -1
+spike_dir_num = spike_bull ? 1.0 : spike_bear ? -1.0 : 0.0
+
+// ── Boom / Crash symbol detection ─────────────────────────────
+_ticker_lc = str.lower(syminfo.ticker)
+is_boom  = str.contains(_ticker_lc, "boom")
+is_crash = str.contains(_ticker_lc, "crash")
+is_bc    = is_boom or is_crash
+bc_dir   = is_boom ? 1 : is_crash ? -1 : 0
+path_show_eff     = path_show and (not is_bc or path_show_bc or not ui_compact_bc)
+path_candles_eff  = path_show_candles and path_show_eff
+of_hm_show_eff    = of_hm_show and (not is_bc or not ui_compact_bc)
+
+// Frequence spike auto (300/500/600/900/1000 ticks)
+_spike_freq_auto =
+     str.contains(syminfo.ticker, "1000") ? 1000 :
+     str.contains(syminfo.ticker, "900")  ? 900  :
+     str.contains(syminfo.ticker, "600")  ? 600  :
+     str.contains(syminfo.ticker, "500")  ? 500  :
+     str.contains(syminfo.ticker, "300")  ? 300  : 500
+spike_freq_bars = spike_freq_ov > 0 ? spike_freq_ov : _spike_freq_auto
+
+// Z-score mouvement (DetectSpike MQL5)
+_move_cur = math.abs(close - close[1])
+_spike_mean = ta.sma(_move_cur, spike_lb)
+_spike_sd = ta.stdev(_move_cur, spike_lb)
+_spike_sd := _spike_sd > 0 ? _spike_sd : _spike_mean * 0.1
+_body_closed = math.abs(close[1] - open[1])
+_body_live   = math.abs(close - open)
+_spike_move  = math.max(_body_closed, _body_live)
+spike_z      = _spike_sd > 0 ? (_spike_move - _spike_mean) / _spike_sd : 0.0
+
+// Detection spike en cours (barre confirmee)
+_body_bar_move = math.abs(close - open)
+_spike_bar_now = _body_bar_move >= atr14 * 0.32
+_spike_dir_ok  = is_boom ? close > open : is_crash ? close < open : false
+_spike_z_ok    = spike_z >= spike_z_min or _spike_move >= _spike_mean * 2.5
+bc_spike_now   = spike_bc_en and is_bc and barstate.isconfirmed and _spike_bar_now and _spike_dir_ok
+
+// Cycle inter-spike (barres depuis dernier spike)
+var int bars_since_spike = 0
+if barstate.isconfirmed
+    if bc_spike_now
+        bars_since_spike := 0
+    else
+        bars_since_spike += 1
+
+spike_progress = spike_freq_bars > 0 ? math.min(bars_since_spike / spike_freq_bars, 1.0) : 0.0
+
+// Reset cycle si depasse (evaluateSpikeImminence)
+if spike_bc_en and is_bc and barstate.isconfirmed and spike_progress >= spike_overdue and not bc_spike_now
+    bars_since_spike := 0
+
+// Stair score (corps alignes Boom/Crash)
+f_stair_count(int isBoomSide, int n) =>
+    int cnt = 0
+    for i = 1 to n
+        float body = close[i] - open[i]
+        if isBoomSide == 1 and body > 0
+            cnt += 1
+        else if isBoomSide == 0 and body < 0
+            cnt += 1
+    cnt
+_stair_aligned = is_boom ? f_stair_count(1, spike_stair_b) : is_crash ? f_stair_count(0, spike_stair_b) : 0
+stair_score = is_bc and spike_stair_b > 0 ? _stair_aligned / spike_stair_b : 0.0
+
+// Pre-spike compression (corps de plus en plus petits)
+_body0 = math.abs(close[5] - open[5])
+_body1 = math.abs(close[4] - open[4])
+_body2 = math.abs(close[3] - open[3])
+_body3 = math.abs(close[2] - open[2])
+_body4 = math.abs(close[1] - open[1])
+_body5 = math.abs(close - open)
+_avg_body6 = (_body0 + _body1 + _body2 + _body3 + _body4 + _body5) / 6.0
+_is_compressing = _body4 < _body1 and _body5 < _body2
+_dir_ok_bodies = is_boom ? (close >= open and close[1] >= open[1] and close[2] >= open[2]) :
+     is_crash ? (close <= open and close[1] <= open[1] and close[2] <= open[2]) : false
+f_pre_spike = _is_compressing and _dir_ok_bodies and _avg_body6 > 0 ? 0.8 :
+     _is_compressing ? 0.4 : 0.0
+
+// Momentum aligne Boom/Crash
+_avg5  = ta.sma(close, 5)
+_avg15 = ta.sma(close, 15)
+_mom_raw = _avg15 != 0 ? (_avg5 - _avg15) / _avg15 : 0.0
+_mom_aligned = is_boom ? _mom_raw > 0 : is_crash ? _mom_raw < 0 : false
+f_momentum_bc = _mom_aligned ? math.min(math.abs(_mom_raw) / 0.0015, 1.0) : 0.0
+
+// Acceleration alignee
+_prev5 = ta.sma(close, 5)[5]
+_prev_mom = _avg15 != 0 ? (_prev5 - _avg15) / _avg15 : 0.0
+_accel_raw = _mom_raw - _prev_mom
+f_accel_bc = (is_boom ? _accel_raw > 0 : is_crash ? _accel_raw < 0 : false) ?
+     math.min(math.abs(_accel_raw) / 0.001, 1.0) : 0.0
+
+// Cycle factor (zone optimale 60-80%)
+f_cycle = spike_progress >= 0.80 ? 0.2 :
+     spike_progress >= 0.60 ? 1.0 :
+     spike_progress >= 0.45 ? 0.6 :
+     spike_progress >= spike_wake ? 0.2 : 0.0
+
+// BB squeeze factor
+_bb_width_pct = bb_mid > 0 ? bb_width / bb_mid : 0.0
+f_bb_squeeze_bc = _bb_width_pct < 0.008 ? 1.0 : _bb_width_pct < 0.015 ? 0.5 : 0.0
+
+// Pattern pin bar / engulfing
+_rng_p = high - low
+_lw_p  = math.min(open, close) - low
+_up_p  = high - math.max(open, close)
+_pin_bull = _rng_p > 0 and _lw_p / _rng_p >= 0.55 and candle_body / _rng_p <= 0.35
+_pin_bear = _rng_p > 0 and _up_p / _rng_p >= 0.55 and candle_body / _rng_p <= 0.35
+_engulf_bull = close > open and close > open[1] and open < close[1]
+_engulf_bear = close < open and close < open[1] and open > close[1]
+f_pattern_bc = is_boom and (_pin_bull or _engulf_bull) ? 0.8 :
+     is_crash and (_pin_bear or _engulf_bear) ? 0.8 : 0.0
+
+// Alignement directionnel (ST + VWAP) — pas de dependance verdict
+f_st_bc = is_boom and st_dir == 1 and close > vwap_val ? 0.8 :
+     is_crash and st_dir == -1 and close < vwap_val ? 0.8 :
+     is_bc ? 0.0 : 0.2
+
+// RSI14 local (evite forward-ref si besoin)
+_rsi_bc = ta.rsi(close, 14)
+f_rsi_bc = 0.0
+if is_boom and _rsi_bc < 30
+    f_rsi_bc := 1.0
+else if is_boom and _rsi_bc < 40
+    f_rsi_bc := 0.5
+else if is_crash and _rsi_bc > 70
+    f_rsi_bc := 1.0
+else if is_crash and _rsi_bc > 60
+    f_rsi_bc := 0.5
+else if _rsi_bc >= 40 and _rsi_bc <= 60
+    f_rsi_bc := 0.1
+_rsi_entry_ok = is_boom ? _rsi_bc < 65 : is_crash ? _rsi_bc > 46 : false
+
+// Score composite predicteur (modele deriv_ea_pro)
+_bc_raw =
+     f_cycle       * 0.22 +
+     f_momentum_bc * 0.15 +
+     f_accel_bc    * 0.08 +
+     atr_comp_deep * 0.08 +
+     f_rsi_bc      * 0.10 +
+     f_bb_squeeze_bc * 0.06 +
+     f_pattern_bc  * 0.06 +
+     f_st_bc       * 0.10 +
+     f_pre_spike   * 0.10 +
+     spike_prob_mql* 0.05
+spike_pred_prob = is_bc ? math.round(math.min(_bc_raw / 0.7, 1.0) * 100) : math.round(spike_prob * 100)
+
+// Imminence MQL5 simplifiee (0-100) — bonus GOM ajoute apres calcul verdict
+_imminence_cnt = spike_freq_bars > 0 and spike_progress >= 0.25 ?
+     math.min((spike_progress - 0.25) / 0.75, 1.0) * 30.0 : 0.0
+_imminence_comp = atr_comp_deep * 20.0
+_imminence_stair = stair_score * 15.0
+_imminence_rsi = is_boom ? (_rsi_bc <= 35 ? 10.0 : _rsi_bc < 45 ? (45 - _rsi_bc) / 10.0 * 10.0 : 0.0) :
+     is_crash ? (_rsi_bc >= 65 ? 10.0 : _rsi_bc > 55 ? (_rsi_bc - 55) / 10.0 * 10.0 : 0.0) : 0.0
+float spike_imminence_base = is_bc ? math.min(100.0, _imminence_cnt + _imminence_comp + _imminence_stair + _imminence_rsi + spike_pred_prob * 0.15) : spike_prob * 100
+float spike_imminence = spike_imminence_base
+
+// Niveau spike: 0=none 1=early 2=watch 3=imminent 4=spike
+int spike_level_num = 0
+bool spike_tradable = false
+string spike_level_txt = "—"
+string spike_reason_txt = ""
+
+if spike_bc_en and is_bc
+    if bc_spike_now
+        spike_level_num := 4
+        spike_level_txt := "SPIKE"
+        spike_reason_txt := is_boom ? "Spike Boom en cours" : "Spike Crash en cours"
+    else if spike_progress < spike_wake
+        spike_level_num := 0
+        spike_level_txt := "ATTENTE"
+        spike_reason_txt := "Cycle " + str.tostring(math.round(spike_progress * 100)) + "% — reveil a " + str.tostring(math.round(spike_wake * 100)) + "%"
+    else if spike_progress >= spike_entry and _rsi_entry_ok
+        spike_tradable := spike_pred_prob >= spike_min_prob
+        spike_level_num := 3
+        spike_level_txt := spike_tradable ? "IMMINENT" : "IMMINENT?"
+        spike_reason_txt := spike_tradable ?
+             "Fenetre " + (is_boom ? "BUY" : "SELL") + " " + str.tostring(math.round(spike_progress * 100)) + "% — prob " + str.tostring(spike_pred_prob) + "%" :
+             "Prob " + str.tostring(spike_pred_prob) + "% < " + str.tostring(spike_min_prob) + "%"
+    else if spike_progress >= spike_watch
+        spike_level_num := 2
+        spike_level_txt := "WATCH"
+        spike_reason_txt := "Approche spike " + str.tostring(math.round(spike_progress * 100)) + "% — prob " + str.tostring(spike_pred_prob) + "%"
+    else
+        spike_level_num := 1
+        spike_level_txt := "EARLY"
+        spike_reason_txt := "Cycle " + str.tostring(math.round(spike_progress * 100)) + "% — attente " + str.tostring(math.round(spike_watch * 100)) + "%"
+
+// Couleurs chart
+color _bc_bar_col = na
+if spike_level_num == 4
+    _bc_bar_col := is_boom ? color.new(color.lime, 20) : color.new(color.red, 20)
+else if spike_level_num == 3 and spike_tradable
+    _bc_bar_col := color.new(color.orange, 30)
+else if spike_level_num == 2
+    _bc_bar_col := color.new(color.yellow, 55)
+else if spike_prob >= spike_blink
+    _bc_bar_col := color.new(color.orange, 50)
+
+barcolor(is_bc and spike_bc_en and not na(_bc_bar_col) ? _bc_bar_col :
+     spike_prob >= spike_min and spike_bull ? color.new(color.lime, 30) :
+     spike_prob >= spike_min and spike_bear ? color.new(color.red, 30) :
+     spike_prob >= spike_blink ? color.new(color.orange, 50) : na)
+
+// Labels spike (désactivés si flèches clignotantes actives)
+var label spike_sig_lbl = na
+if spike_show_lbl and not ui_show_arrow and spike_bc_en and barstate.isconfirmed
+    if not na(spike_sig_lbl)
+        label.delete(spike_sig_lbl)
+        spike_sig_lbl := na
+    if is_boom and spike_level_num == 3 and spike_tradable
+        spike_sig_lbl := label.new(bar_index, low, "PRE-SPIKE ▲",
+             style=label.style_label_up, color=color.new(color.lime, 15),
+             textcolor=color.white, size=size.normal)
+    else if is_crash and spike_level_num == 3 and spike_tradable
+        spike_sig_lbl := label.new(bar_index, high, "PRE-SPIKE ▼",
+             style=label.style_label_down, color=color.new(color.red, 15),
+             textcolor=color.white, size=size.normal)
+    else if bc_spike_now
+        spike_sig_lbl := label.new(bar_index, high, "SPIKE",
+             style=label.style_label_down, color=color.new(color.orange, 10),
+             textcolor=color.white, size=size.small)
+
+bgcolor(spike_bc_en and is_bc and spike_level_num == 3 and spike_tradable ? color.new(color.orange, 92) : na)
+
+// ═══════════════════════════════════════════════════════════════
+// EMA RIBBON (scoring comme MQL5)
+// ═══════════════════════════════════════════════════════════════
+ema9  = ta.ema(close, 9)
+ema13 = ta.ema(close, 13)
+ema21 = ta.ema(close, 21)
+ema50 = ta.ema(close, 50)
+ema_above_count = (close > ema9 ? 1 : 0) + (close > ema13 ? 1 : 0) + (close > ema21 ? 1 : 0) + (close > ema50 ? 1 : 0)
+
+// ═══════════════════════════════════════════════════════════════
+// SCORE VERDICT ENRICHI (porte du MQL5)
+// ═══════════════════════════════════════════════════════════════
+rsi14     = ta.rsi(close, 14)
+macd_line = ta.ema(close, 12) - ta.ema(close, 26)
+macd_sig  = ta.ema(macd_line, 9)
+adx_val   = ta.rma(math.abs(ta.change(high) - ta.change(low)), 14)
+
+score_buy  = 0.0
+score_sell = 0.0
+
+// Base scores (meme que avant)
+score_buy  += st_dir ==  1 ? 1.5 : 0.0
+score_sell += st_dir == -1 ? 1.5 : 0.0
+score_buy  += close > vwap_val ? 1.0 : 0.0
+score_sell += close < vwap_val ? 1.0 : 0.0
+score_buy  += close > bb_mid   ? 0.5 : 0.0
+score_sell += close < bb_mid   ? 0.5 : 0.0
+score_buy  += rsi14 > 50 and rsi14 < 70 ? 1.0 : rsi14 <= 35 ? 0.5 : 0.0
+score_sell += rsi14 < 50 and rsi14 > 30 ? 1.0 : rsi14 >= 65 ? 0.5 : 0.0
+score_buy  += macd_line > macd_sig ? 0.8 : 0.0
+score_sell += macd_line < macd_sig ? 0.8 : 0.0
+score_buy  += not na(ob_bull_bot) and close >= ob_bull_bot and close <= ob_bull_top * 1.003 ? 1.5 : 0.0
+score_sell += not na(ob_bear_top) and close <= ob_bear_top and close >= ob_bear_bot * 0.997 ? 1.5 : 0.0
+score_buy  += spike_prob >= spike_min and spike_bull ? 2.0 : 0.0
+score_sell += spike_prob >= spike_min and spike_bear ? 2.0 : 0.0
+score_buy  += spike_bc_en and is_boom and spike_level_num >= 2 and spike_pred_prob >= 50 ? 1.5 : 0.0
+score_sell += spike_bc_en and is_crash and spike_level_num >= 2 and spike_pred_prob >= 50 ? 1.5 : 0.0
+score_buy  += spike_bc_en and is_boom and spike_tradable ? 2.5 : 0.0
+score_sell += spike_bc_en and is_crash and spike_tradable ? 2.5 : 0.0
+
+// BB/VWAP bias (du MQL5: GOM_AddBollingerVwapVerdictBias)
+vwap_dist_pct = vwap_val > 0 ? (close - vwap_val) / vwap_val : 0.0
+vwap_mag = math.min(1.0, math.abs(vwap_dist_pct) / 0.0025)
+score_buy  += vwap_dist_pct > 0.00025 ? 0.24 * verdict_bb_vwap_weight * vwap_mag : 0.0
+score_sell += vwap_dist_pct < -0.00025 ? 0.24 * verdict_bb_vwap_weight * vwap_mag : 0.0
+score_buy  += bb_pctb < 0.22 ? 0.16 * verdict_bb_vwap_weight : 0.0
+score_sell += bb_pctb > 0.78 ? 0.16 * verdict_bb_vwap_weight : 0.0
+score_buy  += bb_squeeze ? 0.06 * verdict_bb_vwap_weight : 0.0
+score_sell += bb_squeeze ? 0.06 * verdict_bb_vwap_weight : 0.0
+
+// Advanced indicators bias (du MQL5: GOM_AddAdvancedIndicatorsVerdictBias)
+// Supertrend direction
+st_adv = st_dir == 1 ? 0.20 * verdict_adv_weight : st_dir == -1 ? 0.0 : 0.0
+score_buy  += st_dir == 1 ? 0.20 * verdict_adv_weight : 0.0
+score_sell += st_dir == -1 ? 0.20 * verdict_adv_weight : 0.0
+// Keltner position
+score_buy  += kc_pos > 0.10 ? 0.22 * verdict_adv_weight * math.min(1.0, math.abs(kc_pos)) : 0.0
+score_sell += kc_pos < -0.10 ? 0.22 * verdict_adv_weight * math.min(1.0, math.abs(kc_pos)) : 0.0
+// Donchian signal
+score_buy  += dc_sig > 0 ? 0.24 * verdict_adv_weight : 0.0
+score_sell += dc_sig < 0 ? 0.24 * verdict_adv_weight : 0.0
+
+// EMA Ribbon bias (du MQL5: GOM_AddEmaRibbonScriptTfBias)
+score_buy  += ema_above_count * 0.15
+score_sell += (4 - ema_above_count) * 0.15
+score_buy  += ema_above_count >= 4 ? 0.25 : 0.0
+score_sell += ema_above_count <= 0 ? 0.25 : 0.0
+
+// KOLA proximity bonus
+kola_near_buy  = not na(kola_buy_level) and math.abs(close - kola_buy_level) <= atr14 * 1.5
+kola_near_sell = not na(kola_sell_level) and math.abs(close - kola_sell_level) <= atr14 * 1.5
+score_buy  += kola_near_buy  ? 1.5 : 0.0
+score_sell += kola_near_sell ? 1.5 : 0.0
+
+// SIDO bonus
+score_sell += not na(sido_dt_level) and close >= sido_dt_level * 0.998 ? 1.2 : 0.0
+score_buy  += not na(sido_db_level) and close <= sido_db_level * 1.002 ? 1.2 : 0.0
+
+// BOS/CHoCH influence (du MQL5 SMC)
+score_buy  += bos_bull ? 1.38 : 0.0
+score_sell += bos_bear ? 1.38 : 0.0
+score_buy  -= bos_bear ? 0.58 : 0.0
+score_sell -= bos_bull ? 0.58 : 0.0
+
+// Verdict gap et classification
+verdict_gap = math.abs(score_buy - score_sell)
+
+// Coherence gate (du MQL5: VerdictCoherenceGateEnabled)
+filter_count = 6.0
+pc1 = st_dir == 1 and score_buy > score_sell ? 1.0 : st_dir == -1 and score_sell > score_buy ? 1.0 : 0.0
+pc2 = close > vwap_val and score_buy > score_sell ? 1.0 : close < vwap_val and score_sell > score_buy ? 1.0 : 0.0
+pc3 = macd_line > macd_sig and score_buy > score_sell ? 1.0 : macd_line < macd_sig and score_sell > score_buy ? 1.0 : 0.0
+pc4 = rsi14 > 50 and score_buy > score_sell ? 1.0 : rsi14 < 50 and score_sell > score_buy ? 1.0 : 0.0
+pc5 = kc_pos > 0 and score_buy > score_sell ? 1.0 : kc_pos < 0 and score_sell > score_buy ? 1.0 : 0.0
+pc6 = dc_sig > 0 and score_buy > score_sell ? 1.0 : dc_sig < 0 and score_sell > score_buy ? 1.0 : 0.0
+pass_count = pc1 + pc2 + pc3 + pc4 + pc5 + pc6
+filter_ratio = pass_count / filter_count
+coherence_ok = not verdict_coherence or filter_ratio >= 0.40 or verdict_gap >= (verdict_gap_th + 0.24)
+
+// Niveaux de conviction
+is_perfect_sell = score_sell > score_buy and verdict_gap >= 4.0 and coherence_ok
+is_good_sell    = score_sell > score_buy and verdict_gap >= 2.5 and not is_perfect_sell and coherence_ok
+is_sell         = score_sell > score_buy and verdict_gap >= 1.2 and not is_good_sell and not is_perfect_sell and coherence_ok
+is_perfect_buy  = score_buy > score_sell and verdict_gap >= 4.0 and coherence_ok
+is_good_buy     = score_buy > score_sell and verdict_gap >= 2.5 and not is_perfect_buy and coherence_ok
+is_buy          = score_buy > score_sell and verdict_gap >= 1.2 and not is_good_buy and not is_perfect_buy and coherence_ok
+
+verdict_num     = is_perfect_sell ? -3 : is_good_sell ? -2 : is_sell ? -1 : is_perfect_buy ? 3 : is_good_buy ? 2 : is_buy ? 1 : 0
+
+verdict_txt = is_perfect_sell ? "PERFECT SELL" :
+              is_good_sell    ? "GOOD SELL"    :
+              is_sell         ? "SELL"         :
+              is_perfect_buy  ? "PERFECT BUY"  :
+              is_good_buy     ? "GOOD BUY"     :
+              is_buy          ? "BUY"          : "WAIT"
+
+verdict_col = str.contains(verdict_txt, "SELL") ? color.red :
+              str.contains(verdict_txt, "BUY")  ? color.lime : color.orange
+
+rsi_oversold   = rsi14 < 28
+rsi_overbought = rsi14 > 72
+
+bgcolor(show_verdict ? (is_buy or is_good_buy or is_perfect_buy ? color.new(color.lime, 97) :
+         is_sell or is_good_sell or is_perfect_sell ? color.new(color.red, 97) : na) : na)
+
+// ═══════════════════════════════════════════════════════════════
+// ENTRY QUALITY SCORE (du MQL5: GOM_ComputeEntryQualityScore)
+// ═══════════════════════════════════════════════════════════════
+dir_for_eq = score_buy > score_sell ? "BUY" : score_sell > score_buy ? "SELL" : "WAIT"
+
+// Gap normalisé
+gap_n = 0.0
+if dir_for_eq == "BUY" and verdict_gap > verdict_gap_th
+    gap_n := math.min(1.0, (verdict_gap - verdict_gap_th) / (verdict_gap_th * 2.5))
+if dir_for_eq == "SELL" and verdict_gap > verdict_gap_th
+    gap_n := math.min(1.0, (verdict_gap - verdict_gap_th) / (verdict_gap_th * 2.5))
+
+// Spike aligné
+spike_aligned = (dir_for_eq == "BUY" and spike_bull) or (dir_for_eq == "SELL" and spike_bear)
+sp_n = spike_aligned ? math.min(1.0, spike_prob / 0.72) : spike_prob > 0 ? 0.14 * math.min(1.0, spike_prob / 0.55) : 0.0
+
+// Level confluence (KOLA proximity)
+lc_n = 0.0
+if dir_for_eq == "BUY" and kola_near_buy
+    lc_n := 0.8
+if dir_for_eq == "SELL" and kola_near_sell
+    lc_n := 0.8
+
+// Filter quality
+fq_n = filter_ratio
+
+// Score composite
+entry_quality = 0.20 * gap_n + 0.30 * sp_n + 0.24 * lc_n + 0.16 * fq_n + 0.10 * filter_ratio
+entry_quality := math.max(0.0, math.min(1.0, entry_quality))
+
+// Bonus GOM sur imminence spike (apres verdict)
+_gom_spike_bonus = 0.0
+if spike_bc_en and is_boom and score_buy > score_sell and verdict_gap >= 1.2
+    _gom_spike_bonus := math.min(12.0, verdict_gap * 2.0)
+else if spike_bc_en and is_crash and score_sell > score_buy and verdict_gap >= 1.2
+    _gom_spike_bonus := math.min(12.0, verdict_gap * 2.0)
+spike_imminence := math.min(100.0, spike_imminence_base + _gom_spike_bonus)
+if spike_bc_en and is_bc and spike_level_num == 3
+    float _prob_adj = spike_pred_prob + _gom_spike_bonus * 0.5
+    spike_tradable := _prob_adj >= spike_min_prob and _rsi_entry_ok
+
+// Niveaux entree spike Boom/Crash (pour tableau SETUP)
+float spike_entry_px = na
+float spike_sl_px    = na
+float spike_tp_px    = na
+if spike_bc_en and is_bc and spike_tradable and not bc_spike_now
+    spike_entry_px := close
+    spike_sl_px    := is_boom ? close - atr14 * spike_sl_atr : close + atr14 * spike_sl_atr
+    spike_tp_px    := is_boom ? close + atr14 * spike_tp_atr : close - atr14 * spike_tp_atr
+
+// ── SETUP (OB ou PRE-SPIKE) — calculé avant affichage / webhook ──
+_rng_s  = high - low
+_body_s = math.abs(close - open)
+_lw_s   = math.min(open, close) - low
+_up_s   = high - math.max(open, close)
+pin_bull = _rng_s > 0 and _lw_s / _rng_s >= 0.52 and _body_s / _rng_s <= 0.38 and close > open
+pin_bear = _rng_s > 0 and _up_s / _rng_s >= 0.52 and _body_s / _rng_s <= 0.38 and close < open
+
+var string setup_type    = ""
+var string setup_confirm = ""
+var int    setup_dir     = 0
+var float  setup_entry   = na
+var float  setup_sl      = na
+var float  setup_tp1     = na
+var float  setup_tp2     = na
+var float  setup_rr      = na
+
+setup_type    := ""
+setup_confirm := ""
+setup_dir     := 0
+setup_entry   := na
+setup_sl      := na
+setup_tp1     := na
+setup_tp2     := na
+setup_rr      := na
+
+if spike_bc_en and is_bc and spike_tradable and not bc_spike_now and not na(spike_entry_px)
+    setup_type    := is_boom ? "SPIKE_BOOM" : "SPIKE_CRASH"
+    setup_confirm := spike_level_txt
+    setup_dir     := bc_dir
+    setup_entry   := spike_entry_px
+    setup_sl      := spike_sl_px
+    setup_tp1     := spike_tp_px
+    setup_tp2     := is_boom ? spike_entry_px + atr14 * spike_tp_atr * 1.5 : spike_entry_px - atr14 * spike_tp_atr * 1.5
+    setup_rr      := spike_sl_atr > 0 ? spike_tp_atr / spike_sl_atr : 0.0
+else if not na(ob_bull_bot) and not na(ob_bull_top) and score_buy >= score_sell and verdict_gap >= 0.8
+    setup_type    := "OB_BULL"
+    setup_confirm := pin_bull ? "PIN_BAR_BULL" : "—"
+    setup_dir     := 1
+    setup_entry   := ob_bull_top
+    setup_sl      := ob_bull_bot - atr14 * 0.12
+    float risk_b  = setup_entry - setup_sl
+    if risk_b > syminfo.mintick * 10
+        setup_tp1 := setup_entry + risk_b * setup_rr_mult
+        setup_tp2 := setup_entry + risk_b * setup_rr2_mult
+        setup_rr  := setup_rr_mult
+else if not na(ob_bear_top) and not na(ob_bear_bot) and score_sell > score_buy and verdict_gap >= 0.8
+    setup_type    := "OB_BEAR"
+    setup_confirm := pin_bear ? "PIN_BAR_BEAR" : "—"
+    setup_dir     := -1
+    setup_entry   := ob_bear_bot
+    setup_sl      := ob_bear_top + atr14 * 0.12
+    float risk_s  = setup_sl - setup_entry
+    if risk_s > syminfo.mintick * 10
+        setup_tp1 := setup_entry - risk_s * setup_rr_mult
+        setup_tp2 := setup_entry - risk_s * setup_rr2_mult
+        setup_rr  := setup_rr_mult
+
+// Override verdict quand pre-spike tradable → signal clair pour EA / alertes
+if spike_bc_en and is_bc and spike_tradable and not bc_spike_now
+    verdict_num := bc_dir == 1 ? 2 : -2
+    verdict_txt := bc_dir == 1 ? "PRE-SPIKE BUY" : "PRE-SPIKE SELL"
+    verdict_col := bc_dir == 1 ? color.lime : color.red
+
+// Flèches clignotantes pre-spike (2 états = effet blink)
+_spike_blink_on = bar_index % 2 == 0
+_spike_arr_up   = ui_show_arrow and spike_bc_en and is_bc and spike_tradable and is_boom and not bc_spike_now
+_spike_arr_dn   = ui_show_arrow and spike_bc_en and is_bc and spike_tradable and is_crash and not bc_spike_now
+plotshape(_spike_arr_up and _spike_blink_on, title="PRE-SPIKE BUY ON", style=shape.triangleup,
+     location=location.belowbar, color=color.lime, size=size.large)
+plotshape(_spike_arr_up and not _spike_blink_on, title="PRE-SPIKE BUY OFF", style=shape.triangleup,
+     location=location.belowbar, color=color.new(color.lime, 78), size=size.normal)
+plotshape(_spike_arr_dn and _spike_blink_on, title="PRE-SPIKE SELL ON", style=shape.triangledown,
+     location=location.abovebar, color=color.red, size=size.large)
+plotshape(_spike_arr_dn and not _spike_blink_on, title="PRE-SPIKE SELL OFF", style=shape.triangledown,
+     location=location.abovebar, color=color.new(color.red, 78), size=size.normal)
+
+// ═══════════════════════════════════════════════════════════════
+// TABLEAU MTF DIRECTION — top_right
+// ═══════════════════════════════════════════════════════════════
+get_dir(tf) =>
+    [_ef, _es, _eh, _c, _rsi, _atr, _hl2] = request.security(syminfo.tickerid, tf,
+         [ta.ema(close,9), ta.ema(close,21), ta.ema(close,50), close, ta.rsi(close,14), ta.atr(10), hl2],
+         lookahead=barmerge.lookahead_off)
+    _st_bull = _c > (_hl2 + 3.0 * _atr)
+    _bull = (_ef > _es ? 1 : 0) + (_c > _eh ? 1 : 0) + (_rsi > 52 ? 1 : 0) + (_st_bull ? 1 : 0)
+    _bear = (_ef < _es ? 1 : 0) + (_c < _eh ? 1 : 0) + (_rsi < 48 ? 1 : 0) + (not _st_bull ? 1 : 0)
+    _dir  = _bull >= 3 ? 1 : _bear >= 3 ? -1 : 0
+    [_dir, _rsi]
+
+[d1, r1] = get_dir(tf1)
+[d2, r2] = get_dir(tf2)
+[d3, r3] = get_dir(tf3)
+[d4, r4] = get_dir(tf4)
+[d5, r5] = get_dir(tf5)
+[d6, r6] = get_dir(tf6)
+[d7, r7] = get_dir(tf7)
+
+tb = (d1==1?1:0)+(d2==1?1:0)+(d3==1?1:0)+(d4==1?1:0)+(d5==1?1:0)+(d6==1?1:0)+(d7==1?1:0)
+ts = (d1==-1?1:0)+(d2==-1?1:0)+(d3==-1?1:0)+(d4==-1?1:0)+(d5==-1?1:0)+(d6==-1?1:0)+(d7==-1?1:0)
+gd = tb >= 5 ? 1 : ts >= 5 ? -1 : tb > ts ? 1 : ts > tb ? -1 : 0
+
+tf_lbl(tf) =>
+    tf == "1" ? "M1" : tf == "3" ? "M3" : tf == "5" ? "M5" : tf == "15" ? "M15" : tf == "30" ? "M30" : tf == "60" ? "H1" : tf == "120" ? "H2" : tf == "240" ? "H4" : tf == "D" ? "D1" : tf == "W" ? "W1" : tf == "M" ? "MN" : tf
+
+dir_txt(d) => d==1 ? "BULL" : d==-1 ? "BEAR" : "NEUT"
+dir_col(d) => d==1 ? color.lime : d==-1 ? color.red : color.orange
+bg_cell(d) => d==1 ? color.new(color.lime,85) : d==-1 ? color.new(color.red,85) : color.new(color.gray,85)
+
+var table mtf_tbl = table.new(ui_signal_panel and is_bc ? position.top_left : position.top_right, 3, 10,
+     bgcolor=color.new(color.black,15), border_color=color.new(color.gray,50),
+     border_width=1, frame_color=color.new(color.gray,30), frame_width=2)
+
+if show_mtf and barstate.islast
+    table.cell(mtf_tbl,0,0,"TF",        text_color=color.silver, text_size=size.small, bgcolor=color.new(color.navy,20))
+    table.cell(mtf_tbl,1,0,"DIR",       text_color=color.silver, text_size=size.small, bgcolor=color.new(color.navy,20))
+    table.cell(mtf_tbl,2,0,"RSI",       text_color=color.silver, text_size=size.small, bgcolor=color.new(color.navy,20))
+
+    tfs  = array.from(tf1,tf2,tf3,tf4,tf5,tf6,tf7)
+    dirs = array.from(d1,d2,d3,d4,d5,d6,d7)
+    rsis = array.from(r1,r2,r3,r4,r5,r6,r7)
+    for i = 0 to 6
+        _tf = array.get(tfs,i)
+        _d  = array.get(dirs,i)
+        _r  = array.get(rsis,i)
+        _bg = bg_cell(_d)
+        table.cell(mtf_tbl,0,i+1, tf_lbl(_tf),              text_color=color.white,  text_size=size.small, bgcolor=_bg)
+        table.cell(mtf_tbl,1,i+1, dir_txt(_d),               text_color=dir_col(_d),  text_size=size.small, bgcolor=_bg)
+        table.cell(mtf_tbl,2,i+1, str.tostring(math.round(_r)),
+             text_color=_r>60?color.lime:_r<40?color.red:color.silver, text_size=size.small, bgcolor=_bg)
+
+    _gbg  = gd==1?color.new(color.lime,60):gd==-1?color.new(color.red,60):color.new(color.orange,70)
+    _gtxt = gd==1?"BULL "+str.tostring(tb)+"B":gd==-1?"BEAR "+str.tostring(ts)+"S":"MIXED"
+    table.cell(mtf_tbl,0,8,"GLOBAL",   text_color=color.white, text_size=size.small, bgcolor=_gbg)
+    table.cell(mtf_tbl,1,8,_gtxt,      text_color=gd==1?color.lime:gd==-1?color.red:color.orange, text_size=size.small, bgcolor=_gbg)
+    table.cell(mtf_tbl,2,8,str.tostring(7-tb-ts)+" N", text_color=color.orange, text_size=size.small, bgcolor=_gbg)
+
+// ═══════════════════════════════════════════════════════════════
+// PANNEAU SIGNAL UNIFIÉ — bottom_left (Boom/Crash)
+// ═══════════════════════════════════════════════════════════════
+var table signal_tbl = table.new(position.bottom_left, 2, 12,
+     bgcolor=color.new(color.black, 12), border_color=color.new(color.orange, 35),
+     border_width=2, frame_color=color.new(color.orange, 25), frame_width=2)
+
+_signal_action = spike_tradable and not bc_spike_now ? (is_boom ? ">>> ACHETER <<<" : ">>> VENDRE <<<") :
+     bc_spike_now ? "SPIKE — TROP TARD" :
+     spike_level_num == 2 ? "WATCH — SURVEILLER" :
+     spike_level_num == 1 ? "EARLY — ATTENDRE" :
+     verdict_txt
+_signal_act_col = spike_tradable and not bc_spike_now ? (is_boom ? color.lime : color.red) :
+     bc_spike_now ? color.yellow : verdict_col
+_signal_hdr_bg = spike_tradable and not bc_spike_now ? color.new(color.orange, 15) : color.new(color.black, 30)
+
+if ui_signal_panel and show_verdict and barstate.islast
+    table.cell(signal_tbl, 0, 0, "SIGNAL", text_color=color.orange, text_size=size.small, bgcolor=_signal_hdr_bg)
+    table.cell(signal_tbl, 1, 0, _signal_action, text_color=_signal_act_col, text_size=size.large, bgcolor=_signal_hdr_bg)
+    table.cell(signal_tbl, 0, 1, "Verdict", text_color=color.silver, text_size=size.small)
+    table.cell(signal_tbl, 1, 1, verdict_txt, text_color=verdict_col, text_size=size.normal)
+    if spike_bc_en and is_bc
+        table.cell(signal_tbl, 0, 2, "Pre-Spike", text_color=color.silver, text_size=size.small)
+        table.cell(signal_tbl, 1, 2, (is_boom ? "BOOM ▲" : "CRASH ▼") + " " + spike_level_txt,
+             text_color=spike_tradable ? color.orange : color.gray, text_size=size.small)
+        table.cell(signal_tbl, 0, 3, "Cycle", text_color=color.silver, text_size=size.small)
+        table.cell(signal_tbl, 1, 3, str.tostring(bars_since_spike) + "/" + str.tostring(spike_freq_bars) +
+             " (" + str.tostring(math.round(spike_progress * 100)) + "%)",
+             text_color=spike_progress >= spike_entry ? color.orange : color.gray, text_size=size.small)
+        table.cell(signal_tbl, 0, 4, "Prob / Imm", text_color=color.silver, text_size=size.small)
+        table.cell(signal_tbl, 1, 4, str.tostring(spike_pred_prob) + "% / " + str.tostring(math.round(spike_imminence)) + "%",
+             text_color=spike_pred_prob >= spike_min_prob ? color.lime : color.gray, text_size=size.small)
+        table.cell(signal_tbl, 0, 5, "Tradable", text_color=color.silver, text_size=size.small)
+        table.cell(signal_tbl, 1, 5, spike_tradable ? "OUI — ENTRER" : "NON",
+             text_color=spike_tradable ? color.lime : color.gray, text_size=size.small)
+    else
+        for r = 2 to 5
+            table.cell(signal_tbl, 0, r, "", bgcolor=color.new(color.black, 12))
+            table.cell(signal_tbl, 1, r, "", bgcolor=color.new(color.black, 12))
+    table.cell(signal_tbl, 0, 6, "Setup", text_color=color.silver, text_size=size.small)
+    table.cell(signal_tbl, 1, 6, setup_type != "" ? setup_type : "—",
+         text_color=setup_dir == 1 ? color.lime : setup_dir == -1 ? color.red : color.gray, text_size=size.small)
+    table.cell(signal_tbl, 0, 7, "Entry / SL / TP", text_color=color.silver, text_size=size.tiny)
+    _setup_lvls = na(setup_entry) ? "—" :
+         str.tostring(setup_entry, format.mintick) + " / " +
+         str.tostring(setup_sl, format.mintick) + " / " +
+         str.tostring(setup_tp1, format.mintick)
+    table.cell(signal_tbl, 1, 7, _setup_lvls, text_color=color.white, text_size=size.tiny)
+    table.cell(signal_tbl, 0, 8, "Scores", text_color=color.silver, text_size=size.tiny)
+    table.cell(signal_tbl, 1, 8, "B:" + str.tostring(math.round(score_buy * 10) / 10) +
+         " S:" + str.tostring(math.round(score_sell * 10) / 10) +
+         " Q:" + str.tostring(math.round(entry_quality * 100)) + "%",
+         text_color=color.silver, text_size=size.tiny)
+    table.cell(signal_tbl, 0, 9, "RSI / ST", text_color=color.silver, text_size=size.tiny)
+    table.cell(signal_tbl, 1, 9, str.tostring(math.round(rsi14)) + " / " + (st_dir == 1 ? "UP" : "DN"),
+         text_color=st_dir == 1 ? color.lime : color.red, text_size=size.tiny)
+    table.cell(signal_tbl, 0, 10, "EA", text_color=color.silver, text_size=size.tiny)
+    table.cell(signal_tbl, 1, 10, spike_tradable and not bc_spike_now ? "ENVOYER TRADE" : "ATTENTE",
+         text_color=spike_tradable ? color.aqua : color.gray, text_size=size.tiny)
+    table.cell(signal_tbl, 0, 11, spike_reason_txt, text_color=color.gray, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(signal_tbl, 1, 11, "", bgcolor=color.new(color.black, 12))
+
+// ═══════════════════════════════════════════════════════════════
+// TABLEAU VERDICT GOM — bottom_left (classique, si panneau unifié off)
+// ═══════════════════════════════════════════════════════════════
+var table vtbl = table.new(position.bottom_left, 2, 10,
+     bgcolor=color.new(color.black,20),
+     border_color=color.new(color.gray,40), border_width=1, frame_width=1)
+
+if show_verdict and not ui_signal_panel and barstate.islast
+    table.cell(vtbl,0,0,"GOM VERDICT", text_color=color.silver, text_size=size.small, bgcolor=color.new(color.black,30))
+    table.cell(vtbl,1,0, verdict_txt,  text_color=verdict_col,  text_size=size.normal, bgcolor=color.new(color.black,10))
+    table.cell(vtbl,0,1,"BUY score",   text_color=color.silver, text_size=size.small)
+    table.cell(vtbl,1,1, str.tostring(math.round(score_buy  *10)/10), text_color=color.lime, text_size=size.small)
+    table.cell(vtbl,0,2,"SELL score",  text_color=color.silver, text_size=size.small)
+    table.cell(vtbl,1,2, str.tostring(math.round(score_sell *10)/10), text_color=color.red,  text_size=size.small)
+    table.cell(vtbl,0,3,"Spike %",     text_color=color.silver, text_size=size.small)
+    table.cell(vtbl,1,3, str.tostring(math.round(spike_prob*100))+"%",
+         text_color=spike_prob>=spike_min?color.yellow:color.gray, text_size=size.small)
+    table.cell(vtbl,0,4,"RSI / ST",    text_color=color.silver, text_size=size.small)
+    table.cell(vtbl,1,4, str.tostring(math.round(rsi14))+" / "+(st_dir==1?"UP":"DN"),
+         text_color=st_dir==1?color.lime:color.red, text_size=size.small)
+    table.cell(vtbl,0,5,"RSI Alert",   text_color=color.silver, text_size=size.small)
+    table.cell(vtbl,1,5, rsi_oversold ? "SURVENTE!" : rsi_overbought ? "SURACHAT!" : "normal",
+         text_color=rsi_oversold ? color.orange : rsi_overbought ? color.orange : color.gray,
+         text_size=size.small)
+    table.cell(vtbl,0,6,"Force",       text_color=color.silver, text_size=size.small)
+    table.cell(vtbl,1,6, str.tostring(math.round(verdict_gap*10)/10)+" pts",
+         text_color=verdict_gap>=4?color.yellow:verdict_gap>=2.5?color.lime:color.silver,
+         text_size=size.small)
+    // Nouvelles lignes
+    table.cell(vtbl,0,7,"Coherence",   text_color=color.silver, text_size=size.small)
+    table.cell(vtbl,1,7, str.tostring(math.round(filter_ratio*100))+"%",
+         text_color=filter_ratio>=0.6?color.lime:filter_ratio>=0.4?color.orange:color.red,
+         text_size=size.small)
+    table.cell(vtbl,0,8,"Quality",     text_color=color.silver, text_size=size.small)
+    table.cell(vtbl,1,8, str.tostring(math.round(entry_quality*100))+"%",
+         text_color=entry_quality>=0.6?color.lime:entry_quality>=0.3?color.orange:color.red,
+         text_size=size.small)
+    table.cell(vtbl,0,9,"KOLA",        text_color=color.silver, text_size=size.small)
+    _kola_txt = kola_near_buy ? "NEAR BUY" : kola_near_sell ? "NEAR SELL" : "---"
+    _kola_col = kola_near_buy ? color.lime : kola_near_sell ? color.red : color.gray
+    table.cell(vtbl,1,9, _kola_txt, text_color=_kola_col, text_size=size.small)
+
+// ═══════════════════════════════════════════════════════════════
+// TABLEAU PRE-SPIKE BOOM/CRASH — top_center
+// ═══════════════════════════════════════════════════════════════
+var table spike_tbl = table.new(position.top_center, 2, 8,
+     bgcolor=color.new(color.black, 15), border_color=color.new(color.orange, 40),
+     border_width=1, frame_color=color.new(color.orange, 30), frame_width=2)
+
+_spike_hdr_col = spike_level_num == 4 ? color.new(color.yellow, 30) :
+     spike_level_num == 3 and spike_tradable ? color.new(color.orange, 20) :
+     spike_level_num == 2 ? color.new(color.yellow, 50) :
+     is_boom ? color.new(color.lime, 70) : is_crash ? color.new(color.red, 70) : color.new(color.gray, 60)
+
+if show_verdict and not ui_signal_panel and spike_show_bc and barstate.islast and spike_bc_en and is_bc
+    table.cell(spike_tbl, 0, 0, "PRE-SPIKE", text_color=color.orange, text_size=size.small, bgcolor=_spike_hdr_col)
+    table.cell(spike_tbl, 1, 0, is_boom ? "BOOM ▲" : "CRASH ▼",
+         text_color=is_boom ? color.lime : color.red, text_size=size.normal, bgcolor=_spike_hdr_col)
+    table.cell(spike_tbl, 0, 1, "Niveau", text_color=color.silver, text_size=size.small)
+    table.cell(spike_tbl, 1, 1, spike_level_txt,
+         text_color=spike_level_num == 3 and spike_tradable ? color.orange : spike_level_num == 4 ? color.yellow : color.white,
+         text_size=size.small)
+    table.cell(spike_tbl, 0, 2, "Cycle", text_color=color.silver, text_size=size.small)
+    table.cell(spike_tbl, 1, 2, str.tostring(bars_since_spike) + "/" + str.tostring(spike_freq_bars) +
+         " (" + str.tostring(math.round(spike_progress * 100)) + "%)",
+         text_color=spike_progress >= spike_entry ? color.orange : color.gray, text_size=size.small)
+    table.cell(spike_tbl, 0, 3, "Prob / Imm", text_color=color.silver, text_size=size.small)
+    table.cell(spike_tbl, 1, 3, str.tostring(spike_pred_prob) + "% / " + str.tostring(math.round(spike_imminence)) + "%",
+         text_color=spike_pred_prob >= spike_min_prob ? color.lime : color.gray, text_size=size.small)
+    table.cell(spike_tbl, 0, 4, "Z-score", text_color=color.silver, text_size=size.small)
+    table.cell(spike_tbl, 1, 4, str.tostring(math.round(spike_z * 10) / 10),
+         text_color=spike_z >= spike_z_min ? color.yellow : color.gray, text_size=size.small)
+    table.cell(spike_tbl, 0, 5, "Pre-compress", text_color=color.silver, text_size=size.small)
+    table.cell(spike_tbl, 1, 5, str.tostring(math.round(f_pre_spike * 100)) + "%",
+         text_color=f_pre_spike >= 0.4 ? color.orange : color.gray, text_size=size.small)
+    table.cell(spike_tbl, 0, 6, "Tradable", text_color=color.silver, text_size=size.small)
+    table.cell(spike_tbl, 1, 6, spike_tradable ? "OUI — ENTREE" : bc_spike_now ? "NON (spike)" : "NON",
+         text_color=spike_tradable ? color.lime : color.gray, text_size=size.small)
+    table.cell(spike_tbl, 0, 7, "Info", text_color=color.silver, text_size=size.tiny)
+    table.cell(spike_tbl, 1, 7, spike_reason_txt, text_color=color.silver, text_size=size.tiny)
+
+// ═══════════════════════════════════════════════════════════════
+// TABLEAU SETUP — déjà calculé plus haut (OB / PRE-SPIKE)
+// ═══════════════════════════════════════════════════════════════
+var table setup_tbl = table.new(position.middle_right, 2, 7,
+     bgcolor=color.new(color.black, 12), border_color=color.new(color.gray, 40), border_width=1)
+
+if show_setup and not ui_signal_panel and barstate.islast
+    color hdr = setup_dir == 1 ? color.new(color.lime, 30) : setup_dir == -1 ? color.new(color.red, 30) : color.new(color.gray, 50)
+    table.cell(setup_tbl, 0, 0, "SETUP", text_color=color.silver, text_size=size.small, bgcolor=hdr)
+    table.cell(setup_tbl, 1, 0, setup_type != "" ? setup_type : "—", text_color=setup_dir==1?color.lime:setup_dir==-1?color.red:color.gray, text_size=size.normal, bgcolor=hdr)
+    table.cell(setup_tbl, 0, 1, "Confirm", text_color=color.silver, text_size=size.small)
+    table.cell(setup_tbl, 1, 1, setup_confirm, text_color=pin_bull or pin_bear ? color.lime : color.gray, text_size=size.small)
+    table.cell(setup_tbl, 0, 2, "Entry", text_color=color.silver, text_size=size.small)
+    table.cell(setup_tbl, 1, 2, na(setup_entry) ? "—" : str.tostring(setup_entry, format.mintick), text_color=color.white, text_size=size.small)
+    table.cell(setup_tbl, 0, 3, "SL", text_color=color.silver, text_size=size.small)
+    table.cell(setup_tbl, 1, 3, na(setup_sl) ? "—" : str.tostring(setup_sl, format.mintick), text_color=color.red, text_size=size.small)
+    table.cell(setup_tbl, 0, 4, "TP1", text_color=color.silver, text_size=size.small)
+    table.cell(setup_tbl, 1, 4, na(setup_tp1) ? "—" : str.tostring(setup_tp1, format.mintick), text_color=color.lime, text_size=size.small)
+    table.cell(setup_tbl, 0, 5, "TP2", text_color=color.silver, text_size=size.small)
+    table.cell(setup_tbl, 1, 5, na(setup_tp2) ? "—" : str.tostring(setup_tp2, format.mintick), text_color=color.teal, text_size=size.small)
+    table.cell(setup_tbl, 0, 6, "R/R", text_color=color.silver, text_size=size.small)
+    table.cell(setup_tbl, 1, 6, na(setup_rr) ? "—" : str.tostring(setup_rr, "#.##"), text_color=color.orange, text_size=size.small)
+
+// ═══════════════════════════════════════════════════════════════
+// CHEMIN PREDICTIF — 200 segments (direction bougie par bougie)
+// ═══════════════════════════════════════════════════════════════
+path_base_score = 0.0
+path_base_score += gd * 0.32
+path_base_score += (score_buy > score_sell ? 1.0 : score_sell > score_buy ? -1.0 : 0.0) * math.min(1.0, verdict_gap / 3.5) * 0.28
+path_base_score += st_dir * 0.14
+path_base_score += bos_bull ? 0.10 : bos_bear ? -0.10 : 0.0
+path_base_score += choch_bull ? 0.08 : choch_bear ? -0.08 : 0.0
+path_base_score += (tb - ts) / 7.0 * 0.12
+path_base_score += dc_sig * 0.06
+path_base_score += kc_pos > 0.20 ? 0.05 : kc_pos < -0.20 ? -0.05 : 0.0
+path_base_score += ema_above_count >= 3 ? 0.06 : ema_above_count <= 1 ? -0.06 : 0.0
+path_base_score := math.max(-1.0, math.min(1.0, path_base_score))
+
+var line[] path_lines = array.new_line()
+var box[]  path_boxes = array.new_box()
+var line[] path_wicks = array.new_line()
+var string path_encoded = ""
+var int    path_bull_n  = 0
+var int    path_bear_n  = 0
+var int    path_neut_n  = 0
+var float  path_net_n   = 0.0
+
+f_path_dir(step, base_sc) =>
+    decay = 1.0 - (step / (path_horizon * 1.15))
+    micro = math.sin(step * 0.29 + base_sc * 2.0) * 0.11
+    sc    = base_sc * decay + micro
+    sc > 0.055 ? 1 : sc < -0.055 ? -1 : 0
+
+if barstate.islast
+    if path_show_eff
+        int npl = array.size(path_lines)
+        if npl > 0
+            for i = 0 to npl - 1
+                line.delete(array.get(path_lines, i))
+        array.clear(path_lines)
+    if path_candles_eff
+        int npb = array.size(path_boxes)
+        if npb > 0
+            for i = 0 to npb - 1
+                box.delete(array.get(path_boxes, i))
+        array.clear(path_boxes)
+        int npw = array.size(path_wicks)
+        if npw > 0
+            for i = 0 to npw - 1
+                line.delete(array.get(path_wicks, i))
+        array.clear(path_wicks)
+
+    float y_path = close
+    float y_open = close
+    int   x0     = bar_index
+    int   vis_n  = math.min(path_candle_vis, path_horizon)
+    path_encoded := ""
+    path_bull_n  := 0
+    path_bear_n  := 0
+    path_neut_n  := 0
+
+    for step = 1 to path_horizon
+        int pdir = f_path_dir(step, path_base_score)
+        float dy = pdir * atr14 * path_step
+        float y1 = y_path + dy
+        if path_show_eff
+            color seg_col = pdir == 1 ? color.new(color.lime, 0) :
+                 pdir == -1 ? color.new(color.red, 0) : color.new(color.orange, 20)
+            line seg = line.new(x0 + step - 1, y_path, x0 + step, y1,
+                 xloc=xloc.bar_index, color=seg_col, width=path_width, style=line.style_solid)
+            array.push(path_lines, seg)
+        if path_candles_eff and step <= vis_n
+            float y_h = math.max(y_open, y1) + atr14 * path_step * 0.12
+            float y_l = math.min(y_open, y1) - atr14 * path_step * 0.08
+            color bc = pdir == 1 ? color.new(color.lime, 40) :
+                 pdir == -1 ? color.new(color.red, 40) : color.new(color.orange, 55)
+            box pb = box.new(x0 + step - 1, y_h, x0 + step, y_l,
+                 xloc=xloc.bar_index, bgcolor=bc, border_color=bc, border_width=1)
+            array.push(path_boxes, pb)
+            line pw = line.new(x0 + step - 1, y_open, x0 + step - 1, y1,
+                 xloc=xloc.bar_index, color=color.new(color.white, 65), width=1)
+            array.push(path_wicks, pw)
+            y_open := y1
+        y_path := y1
+        path_encoded += pdir == 1 ? "U" : pdir == -1 ? "D" : "N"
+        path_bull_n  += pdir == 1 ? 1 : 0
+        path_bear_n  += pdir == -1 ? 1 : 0
+        path_neut_n  += pdir == 0 ? 1 : 0
+
+    path_net_n := path_bull_n - path_bear_n
+
+// ═══════════════════════════════════════════════════════════════
+// GHOST — ORDER FLOW (calculs + dessin)
+// Réutilise : atr14 (l.161), ema9/ema21 (l.581-583) déjà calculés
+// ═══════════════════════════════════════════════════════════════
+
+// ── GHOST Palette ────────────────────────────────────────────
+OF_BULL = #2962ff
+OF_BEAR = #f23645
+OF_NEUT = #787b86
+OF_GOLD = #ffd700
+OF_BG   = color.new(#0c0e16, 80)
+OF_HDR  = color.new(#191c2a, 60)
+OF_SEP  = color.new(#282d40, 10)
+
+// ── Delta Volume ─────────────────────────────────────────────
+of_f_delta(h, l, c, v) =>
+    rng = h - l
+    rng > 1e-10 ? float(v) * (2.0 * (c - l) / rng - 1.0) : 0.0
+
+of_dv_cur = of_f_delta(high, low, close, volume)
+
+// ── CVD (reset chaque session) ───────────────────────────────
+var float of_cvd = 0.0
+if ta.change(time("D")) != 0
+    of_cvd := 0.0
+of_cvd += of_dv_cur
+
+// ── Sentiment pondéré volume ─────────────────────────────────
+of_bull_v  = close >= open ? volume : 0
+of_bear_v  = close <  open ? volume : 0
+of_sum_b   = math.sum(float(of_bull_v), of_snt_per)
+of_sum_s   = math.sum(float(of_bear_v), of_snt_per)
+of_tot_sv  = of_sum_b + of_sum_s
+of_buy_pct = of_tot_sv > 0 ? of_sum_b / of_tot_sv * 100.0 : 50.0
+of_sel_pct = 100.0 - of_buy_pct
+
+// ── Boussole (réutilise ema9/ema21/atr14 du script GOM) ──────
+of_slope   = atr14 > 0 ? (ema9  - ema9[4])  / (4.0 * atr14) : 0.0
+of_diff    = atr14 > 0 ? (ema9  - ema21)     / atr14         : 0.0
+_of_raw    = math.atan(of_slope / (math.abs(of_diff) + 0.001)) * 180.0 / math.pi
+_of_adj    = of_diff < 0 ? _of_raw + (of_slope >= 0 ? 180.0 : -180.0) : _of_raw
+of_angle   = _of_adj < 0.0 ? _of_adj + 360.0 : _of_adj
+of_oct     = int(((of_angle + 22.5) % 360.0) / 45.0)
+of_bull_d  = of_oct == 0 or of_oct == 1 or of_oct == 2 or of_oct == 7
+of_bear_d  = not of_bull_d
+of_cmp_col = of_bull_d ? color.new(OF_BULL, 0) : color.new(OF_BEAR, 0)
+
+// ── Heatmap (boxes overlay, palette Bookmap) ─────────────────
+var box[] of_bxs = array.new_box()
+
+of_hm_color(p) =>
+    p < 0.30 ? color.new(#001a5e, 78) : p < 0.50 ? color.new(#0052a3, 68) : p < 0.70 ? color.new(#00b4c8, 55) : p < 0.88 ? color.new(#00c882, 42) : color.new(#d45a0a, 30)
+
+if barstate.islast and of_hm_show_eff
+    sz_of = array.size(of_bxs)
+    if sz_of > 0
+        for i_of = 0 to sz_of - 1
+            box.delete(array.get(of_bxs, i_of))
+    array.clear(of_bxs)
+    of_hi = ta.highest(high, of_hm_lb)
+    of_lo = ta.lowest(low, of_hm_lb)
+    of_rng = of_hi - of_lo
+    if of_rng > 0.0
+        of_zh = of_rng / of_hm_zones
+        float[] of_sc = array.new_float(of_hm_zones, 0.0)
+        for i_b = 0 to of_hm_lb - 1
+            b_r = high[i_b] - low[i_b]
+            if b_r > 0.0
+                v_f = float(volume[i_b])
+                for z_i = 0 to of_hm_zones - 1
+                    z_lo = of_lo + z_i * of_zh
+                    z_hi = z_lo + of_zh
+                    ovlp = math.min(high[i_b], z_hi) - math.max(low[i_b], z_lo)
+                    if ovlp > 0.0
+                        array.set(of_sc, z_i, array.get(of_sc, z_i) + v_f * (ovlp / b_r))
+        of_mx = array.max(of_sc)
+        if of_mx > 0.0
+            of_t0 = bar_index - of_hm_lb
+            of_t1 = bar_index + 8
+            for z_i = 0 to of_hm_zones - 1
+                of_pct = array.get(of_sc, z_i) / of_mx
+                if of_pct >= 0.12
+                    z_lo = of_lo + z_i * of_zh
+                    z_hi = z_lo + of_zh
+                    of_bc = of_hm_color(of_pct)
+                    of_bx = box.new(of_t0, z_hi, of_t1, z_lo, xloc=xloc.bar_index, bgcolor=of_bc, border_color=color.new(of_bc, 92), border_width=0)
+                    array.push(of_bxs, of_bx)
+
+// ── Table GHOST (middle_left) ────────────────────────────────
+var table of_tbl = table.new(position.bottom_right, 14, 11, bgcolor=OF_BG, border_color=color.new(#404870, 0), border_width=1, frame_color=color.new(#404870, 0), frame_width=1)
+
+of_fill(t, r, bg) =>
+    for c = 0 to 13
+        table.cell(t, c, r, "", bgcolor=bg)
+
+of_sym(oct, active) =>
+    sa = array.from("E>","NE","N^","NW","W<","SW","Sv","SE")
+    sn = array.from("E","NE","N","NW","W","SW","S","SE")
+    active ? array.get(sa, oct) : array.get(sn, oct)
+
+if barstate.islast
+    // Header
+    table.cell(of_tbl, 0, 0, "GHOST  OrderFlow", text_color=color.new(OF_GOLD, 0), text_size=size.small, bgcolor=OF_HDR, text_halign=text.align_left)
+    for c = 1 to 13
+        table.cell(of_tbl, c, 0, "", bgcolor=OF_HDR)
+
+    // Sentiment gauge (row 1-2)
+    if of_snt_show
+        of_buy_cnt = int(of_buy_pct / 100.0 * 12 + 0.5)
+        table.cell(of_tbl, 0, 1, "SENT", text_color=color.new(OF_NEUT, 0), text_size=size.tiny, bgcolor=OF_HDR)
+        for c = 1 to 12
+            of_is_b = c <= of_buy_cnt
+            of_bg_s = of_is_b ? color.new(OF_BULL, 50) : color.new(OF_BEAR, 50)
+            table.cell(of_tbl, c, 1, " ", bgcolor=of_bg_s, text_size=size.tiny)
+        table.cell(of_tbl, 13, 1, "", bgcolor=OF_BG)
+        of_bc2 = of_buy_pct > 60.0 ? color.new(OF_BULL, 0) : color.new(OF_NEUT, 0)
+        of_sc2 = of_sel_pct > 60.0 ? color.new(OF_BEAR, 0) : color.new(OF_NEUT, 0)
+        of_buy_lbl = "BUY " + str.tostring(math.round(of_buy_pct)) + "%"
+        of_sel_lbl = "SELL " + str.tostring(math.round(of_sel_pct)) + "%"
+        table.cell(of_tbl, 0, 2, of_buy_lbl, text_color=of_bc2, text_size=size.tiny, bgcolor=OF_BG, text_halign=text.align_left)
+        for c = 1 to 12
+            table.cell(of_tbl, c, 2, "", bgcolor=OF_BG)
+        table.cell(of_tbl, 13, 2, of_sel_lbl, text_color=of_sc2, text_size=size.tiny, bgcolor=OF_BG, text_halign=text.align_left)
+    else
+        of_fill(of_tbl, 1, OF_BG)
+        of_fill(of_tbl, 2, OF_BG)
+
+    // Séparateur row 3
+    of_fill(of_tbl, 3, OF_SEP)
+
+    // Delta histogramme (row 4) + valeurs (row 5)
+    if of_dlt_show
+        float of_mx_dv = 1.0
+        for i_d = 1 to of_dlt_bars
+            of_mx_dv := math.max(of_mx_dv, math.abs(of_f_delta(high[i_d], low[i_d], close[i_d], volume[i_d])))
+        table.cell(of_tbl, 0, 4, "DELTA", text_color=color.new(OF_NEUT, 0), text_size=size.tiny, bgcolor=OF_HDR)
+        for i_d = 0 to of_dlt_bars - 1
+            of_bidx = of_dlt_bars - i_d
+            of_dvi  = of_f_delta(high[of_bidx], low[of_bidx], close[of_bidx], volume[of_bidx])
+            of_nd   = of_mx_dv > 0 ? math.abs(of_dvi) / of_mx_dv : 0.0
+            of_base = of_dvi >= 0.0 ? OF_BULL : OF_BEAR
+            of_tr   = int((1.0 - of_nd) * 72)
+            of_bc_d = of_nd > 0.75 ? "+" : of_nd > 0.50 ? "o" : of_nd > 0.25 ? "." : " "
+            of_cp   = i_d + 1
+            if of_cp <= 12
+                table.cell(of_tbl, of_cp, 4, of_bc_d, bgcolor=color.new(of_base, of_tr), text_color=color.new(of_base, 15), text_size=size.tiny)
+        table.cell(of_tbl, 13, 4, "", bgcolor=OF_HDR)
+        of_dvc    = of_dv_cur >= 0 ? color.new(OF_BULL, 0) : color.new(OF_BEAR, 0)
+        of_cvdc   = of_cvd    >= 0 ? color.new(OF_BULL, 0) : color.new(OF_BEAR, 0)
+        of_dv_pfx = of_dv_cur >= 0 ? "D+" : "D-"
+        of_cv_pfx = of_cvd    >= 0 ? "CVD+" : "CVD-"
+        of_dv_lbl = of_dv_pfx + str.tostring(math.round(math.abs(of_dv_cur)))
+        of_cv_lbl = of_cv_pfx + str.tostring(math.round(math.abs(of_cvd)))
+        table.cell(of_tbl, 0, 5, of_dv_lbl, text_color=of_dvc, text_size=size.tiny, bgcolor=OF_BG, text_halign=text.align_left)
+        for c = 1 to 12
+            table.cell(of_tbl, c, 5, "", bgcolor=OF_BG)
+        table.cell(of_tbl, 13, 5, of_cv_lbl, text_color=of_cvdc, text_size=size.tiny, bgcolor=OF_BG, text_halign=text.align_left)
+    else
+        of_fill(of_tbl, 4, OF_BG)
+        of_fill(of_tbl, 5, OF_BG)
+
+    // Séparateur row 6
+    of_fill(of_tbl, 6, OF_SEP)
+
+    // Boussole (rows 7–10)
+    if of_cmp_show
+        of_ang_lbl = str.tostring(math.round(of_angle)) + "deg"
+        table.cell(of_tbl, 0, 7, "COMPASS", text_color=color.new(OF_NEUT, 0), text_size=size.tiny, bgcolor=OF_HDR, text_halign=text.align_left)
+        for c = 1 to 12
+            table.cell(of_tbl, c, 7, "", bgcolor=OF_HDR)
+        table.cell(of_tbl, 13, 7, of_ang_lbl, text_color=of_cmp_col, text_size=size.tiny, bgcolor=OF_HDR, text_halign=text.align_left)
+        of_occ = array.from(10, 10, 7, 4, 4, 4, 7, 10)
+        of_ocr = array.from(9, 8, 8, 8, 9, 10, 10, 10)
+        for r = 8 to 10
+            for c = 0 to 13
+                table.cell(of_tbl, c, r, "", bgcolor=OF_BG)
+        for d = 0 to 7
+            of_gc    = array.get(of_occ, d)
+            of_gr    = array.get(of_ocr, d)
+            of_ia    = d == of_oct
+            of_sym_t = of_sym(d, of_ia)
+            of_tc    = of_ia ? of_cmp_col : color.new(OF_NEUT, 0)
+            of_tsz   = of_ia ? size.normal : size.tiny
+            of_bg_c  = of_ia ? color.new(of_cmp_col, 72) : OF_BG
+            table.cell(of_tbl, of_gc, of_gr, of_sym_t, text_color=of_tc, text_size=of_tsz, bgcolor=of_bg_c)
+        table.cell(of_tbl, 7, 9, "*", text_color=color.new(OF_NEUT, 0), text_size=size.tiny, bgcolor=OF_BG)
+    else
+        for r = 7 to 10
+            of_fill(of_tbl, r, OF_BG)
+
+// ═══════════════════════════════════════════════════════════════
+// PLOTS data_window — MCP gom_verdict_poller (≤64 plots total)
+// Chart : vwap + bb×3 + st_line = 5 | Data window : 33 | Total ≈ 38
+// ═══════════════════════════════════════════════════════════════
+_spike_export_pct = is_bc ? float(spike_pred_prob) : spike_prob * 100.0
+
+plot(score_buy,  "score_buy",  display=display.data_window)
+plot(score_sell, "score_sell", display=display.data_window)
+plot(_spike_export_pct, "spike_pct", display=display.data_window)
+plot(spike_imminence, "imminence_pct", display=display.data_window)
+plot(spike_level_num, "spike_level", display=display.data_window)
+plot(spike_tradable ? 1.0 : 0.0, "spike_tradable", display=display.data_window)
+plot(f_pre_spike * 100, "pre_spike_pct", display=display.data_window)
+plot(rsi14, "rsi", display=display.data_window)
+plot(st_dir, "st_dir", display=display.data_window)
+plot(verdict_num, "verdict_num", display=display.data_window)
+plot(verdict_gap, "verdict_gap", display=display.data_window)
+plot(entry_quality * 100, "entry_quality", display=display.data_window)
+plot(filter_ratio * 100, "coherence_pct", display=display.data_window)
+plot(nz(kola_buy_level), "kola_buy", display=display.data_window)
+plot(nz(kola_sell_level), "kola_sell", display=display.data_window)
+plot(gd, "tf_global_dir", display=display.data_window)
+plot(math.max(tb, ts), "tf_global_strength", display=display.data_window)
+plot(tb, "tf_bull_count", display=display.data_window)
+plot(ts, "tf_bear_count", display=display.data_window)
+plot(path_bull_n, "pred_bull", display=display.data_window)
+plot(path_bear_n, "pred_bear", display=display.data_window)
+plot(path_neut_n, "pred_neut", display=display.data_window)
+plot(path_net_n, "pred_net", display=display.data_window)
+plot(setup_dir, "setup_dir", display=display.data_window)
+plot(nz(setup_entry), "setup_entry", display=display.data_window)
+plot(nz(setup_sl), "setup_sl", display=display.data_window)
+plot(nz(setup_tp1), "setup_tp1", display=display.data_window)
+plot(nz(setup_tp2), "setup_tp2", display=display.data_window)
+plot(nz(setup_rr), "setup_rr", display=display.data_window)
+setup_confirm_code = setup_confirm == "PIN_BAR_BULL" ? 1.0 : setup_confirm == "PIN_BAR_BEAR" ? -1.0 : 0.0
+plot(setup_confirm_code, "setup_confirm_code", display=display.data_window)
+plot(of_dv_cur, "ghost_delta", display=display.data_window)
+plot(of_cvd, "ghost_cvd", display=display.data_window)
+plot(of_buy_pct, "ghost_buypct", display=display.data_window)
+plot(of_sel_pct, "ghost_sellpct", display=display.data_window)
+plot(of_angle, "ghost_compass", display=display.data_window)
+
+// ═══════════════════════════════════════════════════════════════
+// ALERTE WEBHOOK — POST /gom-verdict sur changement de verdict
+// ═══════════════════════════════════════════════════════════════
+verdict_changed = ta.change(verdict_num) != 0
+rsi_extreme     = (rsi_oversold and not rsi_oversold[1]) or (rsi_overbought and not rsi_overbought[1])
+spike_entry_signal = spike_bc_en and is_bc and spike_tradable and not spike_tradable[1] and not bc_spike_now
+spike_watch_signal = spike_bc_en and is_bc and spike_level_num == 2 and spike_level_num[1] != 2
+
+_kola_st = kola_near_buy ? "NB" : kola_near_sell ? "NS" : "---"
+
+// CSV 34 champs — webhook POST /gom-verdict/webhook (message = {{message}})
+_path_payload = path_in_alert ? path_encoded : ""
+gom_json = str.format(
+     "{0},{1},{2},{3},{4},{5},{6},{7},{8},{9},{10},{11},{12},{13},{14},{15},{16},{17},{18},{19},{20},{21},{22},{23},{24},{25},{26},{27},{28},{29},{30},{31},{32},{33},{34},{35},{36},{37},{38},{39},{40},{41},{42},{43},{44},{45},{46},{47},{48},{49},{50},{51},{52},{53}",
+     syminfo.ticker,
+     verdict_txt,
+     verdict_num,
+     math.round(score_buy * 10) / 10,
+     math.round(score_sell * 10) / 10,
+     math.round(spike_prob * 100),
+     math.round(rsi14),
+     (rsi_oversold ? "true" : "false"),
+     (rsi_overbought ? "true" : "false"),
+     st_dir,
+     math.round(entry_quality * 100),
+     math.round(filter_ratio * 100),
+     nz(kola_buy_level, 0),
+     nz(kola_sell_level, 0),
+     math.round(verdict_gap * 10) / 10,
+     close,
+     _kola_st,
+     d1, math.round(r1),
+     d2, math.round(r2),
+     d3, math.round(r3),
+     d4, math.round(r4),
+     d5, math.round(r5),
+     d6, math.round(r6),
+     d7, math.round(r7),
+     gd,
+     tb,
+     ts,
+     path_bull_n,
+     path_bear_n,
+     path_neut_n,
+     _path_payload,
+     setup_dir,
+     math.round(nz(setup_entry) * 100) / 100,
+     math.round(nz(setup_sl) * 100) / 100,
+     math.round(nz(setup_tp1) * 100) / 100,
+     math.round(nz(setup_tp2) * 100) / 100,
+     math.round(nz(setup_rr) * 100) / 100,
+     spike_level_num,
+     spike_pred_prob,
+     math.round(spike_imminence),
+     math.round(spike_progress * 100),
+     spike_tradable ? 1 : 0,
+     bc_dir,
+     math.round(f_pre_spike * 100),
+     math.round(spike_z * 10) / 10,
+     bars_since_spike,
+     spike_freq_bars
+)
+
+// Sync chaque bougie confirmée → TradeManager / MT5 dashboard
+if barstate.isconfirmed
+    alert(gom_json, alert.freq_once_per_bar_close)
+
+// Alerte immédiate sur changement de verdict, RSI extreme, ou pre-spike tradable
+if verdict_changed or rsi_extreme or spike_entry_signal or spike_watch_signal
+    alert(gom_json, alert.freq_once_per_bar)
+
+// Alerte dédiée pre-spike (TradingView : activer le SON dans la config alerte)
+_pre_spike_alert = "PRE_SPIKE_TRADE|" + syminfo.ticker + "|" + timeframe.period + "|" +
+     (is_boom ? "BUY" : "SELL") + "|" + str.tostring(spike_pred_prob) + "|" + gom_json
+if spike_entry_signal
+    alert(_pre_spike_alert, alert.freq_once_per_bar)
+
+// Alertes TradingView dédiées pre-spike (configurer son + webhook)
+alertcondition(spike_entry_signal, title="Pre-Spike TRADABLE + BIP",
+     message="PRE_SPIKE_TRADE|{{ticker}}|{{interval}}|ENTRER|{{plot_5}}")
+alertcondition(spike_watch_signal, title="Pre-Spike WATCH",
+     message="PRE_SPIKE_WATCH|{{ticker}}|{{interval}}|SURVEILLER")
+alertcondition(bc_spike_now, title="Spike ACTIF",
+     message="SPIKE_ACTIF|{{ticker}}|{{interval}}|TROP_TARD")

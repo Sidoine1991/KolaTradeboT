@@ -1,0 +1,346 @@
+//@version=6
+// ═══════════════════════════════════════════════════════════════════
+//   GHOST — OrderFlow Intelligence                v1.0
+//   Inspiré Bookmap / NinjaTrader (screenshot KMMTradeHUB)
+//
+//   Modules :
+//   1. Liquidity Heatmap  — densité volume par zone de prix (palette Bookmap)
+//   2. Delta Volume       — pression acheteurs/vendeurs par bougie
+//   3. CVD               — Cumulative Volume Delta (reset session)
+//   4. Momentum Compass   — boussole angulaire 8 directions
+//   5. Sentiment Gauge    — BUY% vs SELL% pondéré volume
+//
+//   Positionnement :
+//   - Heatmap   → overlay chart (derrière les bougies)
+//   - Panel     → bottom_right (GOM = bottom_left et top_right)
+//
+//   Compatible GOM KOLA SIDO — aucun doublon de calcul
+// ═══════════════════════════════════════════════════════════════════
+indicator("GHOST — OrderFlow Intelligence", shorttitle="GHOST OF", overlay=true,
+     max_boxes_count=500, max_lines_count=50, max_labels_count=20)
+
+// ───────────────────────────────────────────────────────────────────
+// INPUTS
+// ───────────────────────────────────────────────────────────────────
+grp_hm  = "■ HEATMAP LIQUIDITÉ"
+hm_show  = input.bool(true,  "Afficher heatmap",     group=grp_hm)
+hm_lb    = input.int(100,    "Lookback bougies",     group=grp_hm, minval=20,  maxval=300)
+hm_zones = input.int(24,     "Tranches de prix",     group=grp_hm, minval=8,   maxval=40)
+
+grp_dlt = "■ DELTA / CVD"
+dlt_show = input.bool(true,  "Afficher Delta + CVD", group=grp_dlt)
+dlt_bars = input.int(12,     "Barres histogramme",   group=grp_dlt, minval=6,  maxval=20)
+
+grp_cmp = "■ BOUSSOLE MOMENTUM"
+cmp_show = input.bool(true,  "Afficher boussole",    group=grp_cmp)
+cmp_ema_f= input.int(9,      "EMA rapide",           group=grp_cmp, minval=3,  maxval=21)
+cmp_ema_s= input.int(21,     "EMA lente",            group=grp_cmp, minval=8,  maxval=55)
+
+grp_snt = "■ SENTIMENT"
+snt_show = input.bool(true,  "Afficher sentiment",   group=grp_snt)
+snt_per  = input.int(20,     "Période",              group=grp_snt, minval=5,  maxval=100)
+
+// ───────────────────────────────────────────────────────────────────
+// PALETTE
+// ───────────────────────────────────────────────────────────────────
+C_BULL  = #2962ff
+C_BEAR  = #f23645
+C_NEUT  = #787b86
+C_GOLD  = #ffd700
+C_BG    = color.new(#0c0e16, 80)
+C_HDR   = color.new(#191c2a, 60)
+C_SEP   = color.new(#282d40, 10)
+
+// ───────────────────────────────────────────────────────────────────
+// INDICATEURS DE BASE
+// ───────────────────────────────────────────────────────────────────
+atr14_g  = ta.atr(14)
+ema_f_g  = ta.ema(close, cmp_ema_f)
+ema_s_g  = ta.ema(close, cmp_ema_s)
+
+// ───────────────────────────────────────────────────────────────────
+// MODULE 1 — DELTA VOLUME (formule proxy Bookmap)
+//   delta = volume × (2 × (close−low) / (high−low) − 1)
+//   +volume → buyers agressifs (close près du high)
+//   −volume → sellers agressifs (close près du low)
+// ───────────────────────────────────────────────────────────────────
+f_delta(o, h, l, c, v) =>
+    rng = h - l
+    rng > 1e-10 ? float(v) * (2.0 * (c - l) / rng - 1.0) : 0.0
+
+dv_cur = f_delta(open, high, low, close, volume)
+
+// ───────────────────────────────────────────────────────────────────
+// MODULE 2 — CVD CUMULATIF (reset chaque nouvelle session)
+// ───────────────────────────────────────────────────────────────────
+var float cvd = 0.0
+if ta.change(time("D")) != 0
+    cvd := 0.0
+cvd += dv_cur
+
+// ───────────────────────────────────────────────────────────────────
+// MODULE 3 — SENTIMENT PONDÉRÉ PAR VOLUME
+// ───────────────────────────────────────────────────────────────────
+bull_v  = close >= open ? volume : 0
+bear_v  = close <  open ? volume : 0
+sum_b   = math.sum(float(bull_v), snt_per)
+sum_s   = math.sum(float(bear_v), snt_per)
+tot_sv  = sum_b + sum_s
+buy_pct = tot_sv > 0 ? sum_b / tot_sv * 100.0 : 50.0
+sel_pct = 100.0 - buy_pct
+
+// ───────────────────────────────────────────────────────────────────
+// MODULE 4 — MOMENTUM COMPASS
+//   Angle = atan( slope EMA_f / |déséquilibre EMA_f-EMA_s| )
+//   Normalise 0–360°, octant = floor((angle+22.5)%360 / 45)
+//   Octants : 0=E  1=NE  2=N  3=NW  4=W  5=SW  6=S  7=SE
+// ───────────────────────────────────────────────────────────────────
+ema_slope = atr14_g > 0 ? (ema_f_g - ema_f_g[4]) / (4.0 * atr14_g) : 0.0
+ema_diff  = atr14_g > 0 ? (ema_f_g - ema_s_g)    / atr14_g          : 0.0
+
+_raw_ang  = math.atan(ema_slope / (math.abs(ema_diff) + 0.001)) * 180.0 / math.pi
+cmp_angle = ema_diff < 0 ? _raw_ang + (ema_slope >= 0 ? 180.0 : -180.0) : _raw_ang
+cmp_angle := cmp_angle < 0.0 ? cmp_angle + 360.0 : cmp_angle
+cmp_oct   = int(((cmp_angle + 22.5) % 360.0) / 45.0)
+
+// Couleur boussole : N/NE/E/SE → bull | S/SW/W/NW → bear
+cmp_bull  = cmp_oct == 0 or cmp_oct == 1 or cmp_oct == 2 or cmp_oct == 7
+cmp_bear  = cmp_oct == 3 or cmp_oct == 4 or cmp_oct == 5 or cmp_oct == 6
+cmp_col   = cmp_bull ? color.new(C_BULL, 0) : cmp_bear ? color.new(C_BEAR, 0) : color.new(C_NEUT, 0)
+
+// ───────────────────────────────────────────────────────────────────
+// MODULE 5 — LIQUIDITY HEATMAP (boxes overlay)
+// ───────────────────────────────────────────────────────────────────
+var box[] hm_bxs = array.new_box()
+
+if barstate.islast and hm_show
+    // Cleanup anciens rectangles
+    sz_hm = array.size(hm_bxs)
+    if sz_hm > 0
+        for i_hm = 0 to sz_hm - 1
+            box.delete(array.get(hm_bxs, i_hm))
+    array.clear(hm_bxs)
+
+    hi_mx = ta.highest(high, hm_lb)
+    lo_mn = ta.lowest(low,   hm_lb)
+    rng_h = hi_mx - lo_mn
+
+    if rng_h > 0.0
+        z_h = rng_h / hm_zones
+        float[] sc = array.new_float(hm_zones, 0.0)
+
+        // Accumulation volume pondéré par overlap (zone ∩ bougie)
+        for i_b = 0 to hm_lb - 1
+            b_rng = high[i_b] - low[i_b]
+            if b_rng > 0.0
+                v_f = float(volume[i_b])
+                for z_i = 0 to hm_zones - 1
+                    z_lo = lo_mn + z_i * z_h
+                    z_hi = z_lo + z_h
+                    ovlp = math.min(high[i_b], z_hi) - math.max(low[i_b], z_lo)
+                    if ovlp > 0.0
+                        array.set(sc, z_i, array.get(sc, z_i) + v_f * (ovlp / b_rng))
+
+        mx_sc = array.max(sc)
+        if mx_sc > 0.0
+            t0 = bar_index - hm_lb
+            t1 = bar_index + 8
+
+            for z_i = 0 to hm_zones - 1
+                pct_z = array.get(sc, z_i) / mx_sc
+                if pct_z >= 0.12   // filtrer le bruit (<12%)
+                    z_lo = lo_mn + z_i * z_h
+                    z_hi = z_lo + z_h
+                    // Palette Bookmap : bleu profond → cyan → vert → orange/rouge
+                    bx_c = pct_z < 0.30 ? color.new(#001a5e, 78) :
+                           pct_z < 0.50 ? color.new(#0052a3, 68) :
+                           pct_z < 0.70 ? color.new(#00b4c8, 55) :
+                           pct_z < 0.88 ? color.new(#00c882, 42) :
+                                          color.new(#d45a0a, 30)
+                    bx = box.new(t0, z_hi, t1, z_lo,
+                         xloc=xloc.bar_index,
+                         bgcolor=bx_c,
+                         border_color=color.new(bx_c, 92),
+                         border_width=0)
+                    array.push(hm_bxs, bx)
+
+// ───────────────────────────────────────────────────────────────────
+// TABLE PRINCIPALE — GHOST Panel (bottom_right)
+//
+//  14 colonnes × 10 lignes :
+//  col 0           = labels gauche
+//  cols 1–12       = 12 cellules histogramme / gauge
+//  col 13          = valeurs droite
+//
+//  Row 0 : Header  "⬡ GHOST  OrderFlow"
+//  Row 1 : Sentiment gauge (barre colorée 12 cellules)
+//  Row 2 : Labels BUY% / SELL%
+//  Row 3 : Séparateur
+//  Row 4 : Delta histogramme (12 barres)
+//  Row 5 : Δ courant + CVD
+//  Row 6 : Séparateur
+//  Row 7 : Compass header + angle
+//  Row 8 : Grille 3×3 ligne haute  (NW N NE)
+//  Row 9 : Grille 3×3 ligne milieu (W  ●  E)
+//  Row 10: Grille 3×3 ligne basse  (SW S SE)
+// ───────────────────────────────────────────────────────────────────
+var table tbl = table.new(position.middle_left, 14, 11,
+     bgcolor=C_BG,
+     border_color=color.new(#404870, 0),
+     border_width=1,
+     frame_color=color.new(#404870, 0),
+     frame_width=1)
+
+// Helper : remplir une ligne entière
+f_fill_row(tbl_id, row, bg) =>
+    for c = 0 to 13
+        table.cell(tbl_id, c, row, "", bgcolor=bg)
+
+// Symboles octant
+f_sym(oct, active) =>
+    syms_a = array.from("►","↗","▲","↖","◄","↙","▼","↘")
+    syms_n = array.from("E","NE","N","NW","W","SW","S","SE")
+    active ? array.get(syms_a, oct) : array.get(syms_n, oct)
+
+if barstate.islast
+
+    // ── ROW 0 : HEADER ──────────────────────────────────────────
+    table.cell(tbl, 0, 0, "⬡ GHOST  OrderFlow",
+         text_color=color.new(C_GOLD, 0),
+         text_size=size.small,
+         bgcolor=C_HDR,
+         text_halign=text.align_left)
+    for c = 1 to 13
+        table.cell(tbl, c, 0, "", bgcolor=C_HDR)
+
+    // ── ROW 1 : SENTIMENT gauge ──────────────────────────────────
+    if snt_show
+        snt_cells = 12
+        buy_cnt   = int(buy_pct / 100.0 * snt_cells + 0.5)
+        table.cell(tbl, 0, 1, "SENT",
+             text_color=color.new(C_NEUT, 0), text_size=size.tiny, bgcolor=C_HDR)
+        for c = 1 to snt_cells
+            is_b = c <= buy_cnt
+            bg_c = is_b ? color.new(C_BULL, 50) : color.new(C_BEAR, 50)
+            table.cell(tbl, c, 1, " ", bgcolor=bg_c, text_size=size.tiny)
+        table.cell(tbl, 13, 1, "", bgcolor=C_BG)
+
+        // ROW 2 : pourcentages
+        buy_s  = str.tostring(math.round(buy_pct)) + "%"
+        sell_s = str.tostring(math.round(sel_pct)) + "%"
+        buy_c2 = buy_pct > 60.0 ? color.new(C_BULL, 0) : color.new(C_NEUT, 0)
+        sel_c2 = sel_pct > 60.0 ? color.new(C_BEAR, 0) : color.new(C_NEUT, 0)
+        table.cell(tbl, 0, 2, "BUY " + buy_s,
+             text_color=buy_c2, text_size=size.tiny, bgcolor=C_BG, text_halign=text.align_left)
+        for c = 1 to 12
+            table.cell(tbl, c, 2, "", bgcolor=C_BG)
+        table.cell(tbl, 13, 2, "SELL " + sell_s,
+             text_color=sel_c2, text_size=size.tiny, bgcolor=C_BG, text_halign=text.align_left)
+    else
+        f_fill_row(tbl, 1, C_BG)
+        f_fill_row(tbl, 2, C_BG)
+
+    // ── ROW 3 : SÉPARATEUR ───────────────────────────────────────
+    f_fill_row(tbl, 3, C_SEP)
+
+    // ── ROWS 4–5 : DELTA HISTOGRAM + CVD ─────────────────────────
+    if dlt_show
+        // Calcul max delta sur la fenêtre pour normalisation
+        float mx_dv = 1.0
+        for i_d = 1 to dlt_bars
+            dv_i = math.abs(f_delta(open[i_d], high[i_d], low[i_d], close[i_d], volume[i_d]))
+            mx_dv := math.max(mx_dv, dv_i)
+
+        table.cell(tbl, 0, 4, "DELTA",
+             text_color=color.new(C_NEUT, 0), text_size=size.tiny, bgcolor=C_HDR)
+
+        // Histogramme : col 1 = plus ancienne, col 12 = plus récente
+        for i_d = 0 to dlt_bars - 1
+            bar_idx = dlt_bars - i_d   // plus récent = bar_idx=1
+            dv_i    = f_delta(open[bar_idx], high[bar_idx], low[bar_idx], close[bar_idx], volume[bar_idx])
+            norm_d  = mx_dv > 0 ? math.abs(dv_i) / mx_dv : 0.0
+            is_pos  = dv_i >= 0.0
+            base_c  = is_pos ? C_BULL : C_BEAR
+            transp  = int((1.0 - norm_d) * 72)
+            cell_c  = color.new(base_c, transp)
+            bar_c   = norm_d > 0.75 ? "█" : norm_d > 0.50 ? "▓" : norm_d > 0.25 ? "▒" : "░"
+            col_pos = i_d + 1
+            if col_pos <= 12
+                table.cell(tbl, col_pos, 4, bar_c,
+                     bgcolor=cell_c,
+                     text_color=color.new(base_c, 15),
+                     text_size=size.tiny)
+
+        table.cell(tbl, 13, 4, "", bgcolor=C_HDR)
+
+        // Row 5 : Δ courant + CVD
+        dv_c   = dv_cur >= 0 ? color.new(C_BULL, 0) : color.new(C_BEAR, 0)
+        cvd_c  = cvd     >= 0 ? color.new(C_BULL, 0) : color.new(C_BEAR, 0)
+        dv_str = (dv_cur >= 0 ? "Δ+" : "Δ") + str.tostring(math.round(dv_cur))
+        cv_str = (cvd    >= 0 ? "CVD▲+" : "CVD▼") + str.tostring(math.round(cvd))
+        table.cell(tbl, 0, 5, dv_str,
+             text_color=dv_c, text_size=size.tiny, bgcolor=C_BG, text_halign=text.align_left)
+        for c = 1 to 12
+            table.cell(tbl, c, 5, "", bgcolor=C_BG)
+        table.cell(tbl, 13, 5, cv_str,
+             text_color=cvd_c, text_size=size.tiny, bgcolor=C_BG, text_halign=text.align_left)
+    else
+        f_fill_row(tbl, 4, C_BG)
+        f_fill_row(tbl, 5, C_BG)
+
+    // ── ROW 6 : SÉPARATEUR ───────────────────────────────────────
+    f_fill_row(tbl, 6, C_SEP)
+
+    // ── ROWS 7–10 : MOMENTUM COMPASS ─────────────────────────────
+    if cmp_show
+        ang_str = str.tostring(math.round(cmp_angle)) + "°"
+        table.cell(tbl, 0, 7, "COMPASS",
+             text_color=color.new(C_NEUT, 0), text_size=size.tiny,
+             bgcolor=C_HDR, text_halign=text.align_left)
+        for c = 1 to 12
+            table.cell(tbl, c, 7, "", bgcolor=C_HDR)
+        table.cell(tbl, 13, 7, ang_str,
+             text_color=cmp_col, text_size=size.tiny,
+             bgcolor=C_HDR, text_halign=text.align_left)
+
+        // Grille 3×3 centrée dans les 14 colonnes
+        // cols utilisées : 4 (gauche), 7 (centre), 10 (droite)
+        // rows          : 8 (haut),   9 (milieu), 10 (bas)
+        // Mapping octant → [col_idx, row_idx]
+        // 0=E(10,9) 1=NE(10,8) 2=N(7,8) 3=NW(4,8)
+        // 4=W(4,9)  5=SW(4,10) 6=S(7,10) 7=SE(10,10)
+        oct_col_map = array.from(10, 10, 7, 4, 4, 4, 7, 10)
+        oct_row_map = array.from( 9,  8, 8, 8, 9, 10,10, 10)
+
+        // Remplir les 3 lignes avec fond par défaut
+        for r = 8 to 10
+            for c = 0 to 13
+                table.cell(tbl, c, r, "", bgcolor=C_BG)
+
+        // Dessiner les 8 points cardinaux
+        for d = 0 to 7
+            g_col = array.get(oct_col_map, d)
+            g_row = array.get(oct_row_map, d)
+            is_a  = d == cmp_oct
+            sym   = f_sym(d, is_a)
+            t_col = is_a ? cmp_col : color.new(C_NEUT, 0)
+            t_sz  = is_a ? size.normal : size.tiny
+            bg_a  = is_a ? color.new(cmp_col, 72) : C_BG
+            table.cell(tbl, g_col, g_row, sym,
+                 text_color=t_col, text_size=t_sz, bgcolor=bg_a)
+
+        // Centre ●
+        table.cell(tbl, 7, 9, "●",
+             text_color=color.new(C_NEUT, 0), text_size=size.tiny, bgcolor=C_BG)
+    else
+        for r = 7 to 10
+            f_fill_row(tbl, r, C_BG)
+
+// ───────────────────────────────────────────────────────────────────
+// PLOTS data_window — disponibles pour gom_verdict_poller.py
+// ───────────────────────────────────────────────────────────────────
+plot(dv_cur,    "ghost_delta",   display=display.data_window)
+plot(cvd,       "ghost_cvd",     display=display.data_window)
+plot(buy_pct,   "ghost_buypct",  display=display.data_window)
+plot(sel_pct,   "ghost_sellpct", display=display.data_window)
+plot(cmp_angle, "ghost_compass", display=display.data_window)

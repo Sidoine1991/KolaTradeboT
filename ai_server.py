@@ -4283,10 +4283,34 @@ CREATE INDEX IF NOT EXISTS idx_trade_feedback_symbol ON trade_feedback(symbol);
 CREATE INDEX IF NOT EXISTS idx_trade_feedback_created_at ON trade_feedback(created_at DESC);
 """
 
+def _load_gom_cache_from_disk():
+    """Charge gom_signal.json dans _GOM_VERDICT_STORE au démarrage."""
+    global _GOM_VERDICT_STORE
+    try:
+        gom_file = Path(__file__).resolve().parent / "data" / "gom_signal.json"
+        logger.info(f"[GOM-Cache] Cherchant {gom_file}")
+        if gom_file.is_file():
+            data = json.loads(gom_file.read_text(encoding="utf-8"))
+            logger.info(f"[GOM-Cache] JSON chargé: {type(data)}, {len(data) if isinstance(data, dict) else '?'} items")
+            if isinstance(data, dict):
+                _GOM_VERDICT_STORE.update(data)
+                logger.info(f"[GOM-Cache] Charge COMPLETE: {len(_GOM_VERDICT_STORE)} symboles dans store")
+                for k in list(_GOM_VERDICT_STORE.keys())[:3]:
+                    logger.info(f"  - {k}: verdict={_GOM_VERDICT_STORE[k].get('verdict')}")
+            else:
+                logger.warning("[GOM-Cache] Format gom_signal.json invalide (pas un dict)")
+        else:
+            logger.warning(f"[GOM-Cache] gom_signal.json non trouvé: {gom_file}")
+    except Exception as e:
+        logger.error(f"[GOM-Cache] Erreur chargement: {e}", exc_info=True)
+
 @app.on_event("startup")
 async def startup_event():
     """Initialize database on startup"""
     global _tradingagents_task
+
+    # Charger le cache GOM depuis le fichier
+    _load_gom_cache_from_disk()
 
     # Load pending orders from disk
     await _pending_orders_load()
@@ -21827,8 +21851,79 @@ class PendingOrderPayload(BaseModel):
     gom_spike_pct: Optional[float] = None
     status: Optional[str] = "ready"  # "ready" | "CONFLICT_PENDING"
 
+# Heartbeat EA MT5 (SMC_Universal) — symbole actif par graphique
+_MT5_EA_HEARTBEAT: dict = {}
+
+
+class Mt5EaHeartbeatBody(BaseModel):
+    symbol: str
+    ea: str = "SMC_Universal"
+    magic: Optional[int] = None
+    chart_id: Optional[int] = None
+
+
+@app.post("/mt5/ea-heartbeat")
+async def mt5_ea_heartbeat(body: Mt5EaHeartbeatBody):
+    """Enregistre le symbole du graphique MT5 pour que le poller TV suive l'EA."""
+    from symbol_mapper import resolve_mt5_symbol, mt5_to_tv_cdp_ticker
+
+    canon = resolve_mt5_symbol(body.symbol)
+    store_key = _resolve_symbol(canon)
+    _MT5_EA_HEARTBEAT[store_key] = {
+        "symbol": store_key,
+        "mt5_raw": body.symbol.strip(),
+        "mt5_canon": canon,
+        "tv_ticker": mt5_to_tv_cdp_ticker(canon),
+        "ea": body.ea,
+        "magic": body.magic,
+        "chart_id": body.chart_id,
+        "updated_at": datetime.utcnow().isoformat(),
+    }
+    return {"ok": True, "symbol": store_key, "tv_ticker": _MT5_EA_HEARTBEAT[store_key]["tv_ticker"]}
+
+
+@app.get("/gom/poll-targets")
+async def gom_poll_targets(max_age_sec: int = Query(120, ge=10, le=600)):
+    """Symboles à poller côté TradingView (priorité = dernier heartbeat SMC_Universal)."""
+    from symbol_mapper import resolve_mt5_symbol, mt5_to_tv_cdp_ticker
+
+    now = datetime.utcnow()
+    targets = []
+    for _key, rec in _MT5_EA_HEARTBEAT.items():
+        try:
+            age = (now - datetime.fromisoformat(rec["updated_at"])).total_seconds()
+        except Exception:
+            age = 9999.0
+        if age > max_age_sec:
+            continue
+        mt5_raw = rec.get("mt5_raw") or rec.get("mt5_canon") or _key
+        canon = resolve_mt5_symbol(mt5_raw)
+        targets.append({
+            "symbol": _resolve_symbol(canon),
+            "mt5_raw": mt5_raw,
+            "mt5_canon": canon,
+            "tv_ticker": rec.get("tv_ticker") or mt5_to_tv_cdp_ticker(canon),
+            "ea": rec.get("ea"),
+            "age_sec": int(age),
+        })
+    targets.sort(key=lambda x: x["age_sec"])
+    primary = targets[0] if targets else None
+    return {
+        "ok": True,
+        "primary": primary,
+        "targets": targets,
+        "fallback": "XAUUSD" if not primary else None,
+    }
+
+
 # Stockage du dernier verdict GOM par symbole (mis à jour par /gom-verdict ou /pending-order)
 _GOM_VERDICT_STORE: dict = {}
+_GOM_MTF_CACHE: dict = {}  # cache_key -> {"ts": datetime, "fields": dict}
+_GOM_MTF_CACHE_TTL_SEC = 45
+
+# Timestamp dernier ordre pipeline exécuté — protège contre écrasement GOM auto-trade
+_PIPELINE_LAST_EXEC: dict = {}   # {sym: timestamp}
+PIPELINE_GOM_COOLDOWN_SEC = 120  # 2 min après pipeline → GOM auto-trade bloqué
 
 def _validate_gom_confluence(symbol: str, direction: str, gom_verdict: Optional[str],
                                gom_score_buy: Optional[float], gom_score_sell: Optional[float]) -> dict:
@@ -21908,6 +22003,7 @@ async def set_pending_order(payload: PendingOrderPayload):
     )
 
     _raw_status = (payload.status or "ready").lower()
+    _src = getattr(payload, "source", "") or ""
     _PENDING_ORDER_STORE[sym] = {
         "symbol":         sym,
         "recommendation": direction,
@@ -21922,9 +22018,15 @@ async def set_pending_order(payload: PendingOrderPayload):
         "gom_verdict":    gom_check["gom_verdict"],
         "gom_action":     gom_check["gom_action"],
         "gom_warning":    gom_check["gom_warning"],
+        "source":         _src,
         "status":         _raw_status if _raw_status in ("ready", "conflict_pending") else "ready",
         "timestamp":      datetime.utcnow().isoformat(),
     }
+    # Dès qu'un ordre pipeline est posté → activer cooldown GOM auto-trade immédiatement
+    if _src == "pipeline":
+        import time as _time
+        _PIPELINE_LAST_EXEC[sym] = _time.time()
+        logger.info(f"[PendingOrder] {sym} pipeline posté → cooldown GOM {PIPELINE_GOM_COOLDOWN_SEC}s activé")
     logger.info(f"[PendingOrder] Stocke : {sym} {direction} conf={final_conf:.2f} gom={gom_check['gom_action']}")
     return {
         "ok": True,
@@ -21993,6 +22095,10 @@ class GomVerdictPayload(BaseModel):
     pred_neut: Optional[int] = None
     pred_net: Optional[int] = None
     path_guided: Optional[bool] = None
+    # Prédictions Bollinger Bands (300 bougies) — array de floats
+    pred_bb_mid: Optional[list] = None
+    pred_bb_up: Optional[list] = None
+    pred_bb_dn: Optional[list] = None
     # Tableau SETUP TradingView (ordre limite MT5)
     setup_dir: Optional[int] = None
     setup_entry: Optional[float] = None
@@ -22002,6 +22108,15 @@ class GomVerdictPayload(BaseModel):
     setup_rr: Optional[float] = None
     setup_type: Optional[str] = None
     setup_confirm: Optional[str] = None
+    # GHOST OrderFlow — envoyés par gom_verdict_poller quand l'indicateur est visible
+    ghost_delta:   Optional[float] = None
+    ghost_cvd:     Optional[float] = None
+    ghost_buypct:  Optional[float] = None
+    ghost_compass: Optional[float] = None
+    ob_bull_top:   Optional[float] = None
+    ob_bull_bot:   Optional[float] = None
+    ob_bear_top:   Optional[float] = None
+    ob_bear_bot:   Optional[float] = None
 
 
 def _dir_num_to_label(d: int) -> str:
@@ -22185,52 +22300,349 @@ def _persist_gom_path_prediction_rds(sym: str, record: dict) -> Optional[str]:
         return None
 
 
-def _gom_verdict_record_from_payload(payload: GomVerdictPayload) -> dict:
+def _normalize_tf_dir_label(val: Any) -> str:
+    """Convertit -1/0/1 ou BUY/SELL en BULL/BEAR/NEUT pour le dashboard MT5."""
+    if val is None or val == "":
+        return ""
+    if isinstance(val, str):
+        s = val.strip().upper()
+        if s in ("BULL", "BEAR", "NEUT", "NEUTRAL"):
+            return "NEUT" if s == "NEUTRAL" else s
+        if s in ("BUY", "LONG"):
+            return "BULL"
+        if s in ("SELL", "SHORT"):
+            return "BEAR"
+        try:
+            val = int(float(s.replace(",", ".")))
+        except ValueError:
+            return s
+    try:
+        return _dir_num_to_label(int(val))
+    except (TypeError, ValueError):
+        return str(val)
+
+
+def _lookup_gom_store(sym: str, store: dict) -> Optional[dict]:
+    """Recherche souple (Boom500Index vs BOOM 500 INDEX)."""
+    if not sym:
+        return None
+    if sym in store:
+        return store[sym]
+    sym_clean = sym.upper().replace(" ", "").replace("INDEX", "")
+    for key, val in store.items():
+        k_clean = str(key).upper().replace(" ", "").replace("INDEX", "")
+        if k_clean == sym_clean:
+            return val
+    return None
+
+
+def _normalize_gom_record_dirs(record: dict) -> None:
+    for lk in ("m1", "m5", "m15", "h1", "h4", "d1", "w1", "global"):
+        dk = f"tf_{lk}_dir"
+        if dk in record:
+            record[dk] = _normalize_tf_dir_label(record.get(dk))
+
+
+def _gom_mtf_cache_key(mt5_symbol: str) -> str:
+    return str(mt5_symbol or "").upper().replace(" ", "").replace("INDEX", "")
+
+
+def _tf_dir_value_missing(val: Any) -> bool:
+    if val in (None, "", 0, "0"):
+        return True
+    lbl = _normalize_tf_dir_label(val)
+    return lbl == "NEUT" and val in (None, "", 0, "0", "NEUT", "NEUTRAL")
+
+
+def _fetch_gom_mtf_snapshot(mt5_symbol: str) -> dict:
+    """Snapshot M1..D1 via copy_rates léger (évite get_mt5_indicators complet)."""
+    out: dict = {}
+    if not mt5_symbol:
+        return out
+    try:
+        import MetaTrader5 as mt5
+    except ImportError:
+        return out
+    if not mt5.initialize():
+        return out
+
+    sym = mt5_symbol
+    if mt5.symbol_info(sym) is None:
+        try:
+            from symbol_mapper import resolve_mt5_symbol
+            sym = resolve_mt5_symbol(mt5_symbol) or mt5_symbol
+        except Exception:
+            sym = mt5_symbol
+
+    tf_map = {
+        "m1": mt5.TIMEFRAME_M1, "m5": mt5.TIMEFRAME_M5, "m15": mt5.TIMEFRAME_M15,
+        "h1": mt5.TIMEFRAME_H1, "h4": mt5.TIMEFRAME_H4, "d1": mt5.TIMEFRAME_D1,
+    }
+
+    def _ema_last(closes: list, period: int):
+        if len(closes) < period:
+            return None
+        mult = 2.0 / (period + 1)
+        ema = sum(closes[:period]) / period
+        for price in closes[period:]:
+            ema = (price - ema) * mult + ema
+        return ema
+
+    def _rsi_last(closes: list, period: int = 14):
+        if len(closes) < period + 1:
+            return None
+        gains, losses = [], []
+        for i in range(1, len(closes)):
+            delta = closes[i] - closes[i - 1]
+            gains.append(max(delta, 0.0))
+            losses.append(max(-delta, 0.0))
+        avg_g = sum(gains[-period:]) / period
+        avg_l = sum(losses[-period:]) / period
+        if avg_l == 0:
+            return 100
+        rs = avg_g / avg_l
+        return int(round(100 - 100 / (1 + rs)))
+
+    for lk, mt5_tf in tf_map.items():
+        rates = mt5.copy_rates_from_pos(sym, mt5_tf, 0, 80)
+        if rates is None or len(rates) == 0:
+            continue
+        closes = [float(r[4]) for r in rates]
+        e20 = _ema_last(closes, 20)
+        e50 = _ema_last(closes, 50)
+        direction = 0
+        if e20 is not None and e50 is not None:
+            if e20 > e50 * 1.00005:
+                direction = 1
+            elif e20 < e50 * 0.99995:
+                direction = -1
+        out[f"tf_{lk}_dir"] = _dir_num_to_label(direction)
+        rsi = _rsi_last(closes)
+        if rsi is not None:
+            out[f"tf_{lk}_rsi"] = rsi
+    return out
+
+
+def _get_gom_mtf_snapshot(mt5_symbol: str, force_refresh: bool = False) -> dict:
+    key = _gom_mtf_cache_key(mt5_symbol)
+    now = datetime.utcnow()
+    cached = _GOM_MTF_CACHE.get(key)
+    if not force_refresh and cached:
+        age = (now - cached["ts"]).total_seconds()
+        if age < _GOM_MTF_CACHE_TTL_SEC:
+            return dict(cached["fields"])
+    fields = _fetch_gom_mtf_snapshot(mt5_symbol)
+    if fields:
+        _GOM_MTF_CACHE[key] = {"ts": now, "fields": fields}
+        return dict(fields)
+    if cached:
+        return dict(cached["fields"])
+    return {}
+
+
+def _apply_gom_mtf_snapshot(record: dict, mt5_symbol: str, fetch: bool = False) -> None:
+    if not mt5_symbol:
+        return
+    snapshot = _get_gom_mtf_snapshot(mt5_symbol, force_refresh=fetch)
+    for lk in ("m1", "m5", "m15", "h1", "h4", "d1"):
+        dir_key = f"tf_{lk}_dir"
+        rsi_key = f"tf_{lk}_rsi"
+        if _tf_dir_value_missing(record.get(dir_key)):
+            if snapshot.get(dir_key):
+                record[dir_key] = snapshot[dir_key]
+            else:
+                record[dir_key] = _normalize_tf_dir_label(record.get(dir_key)) or "NEUT"
+        else:
+            record[dir_key] = _normalize_tf_dir_label(record.get(dir_key))
+        if record.get(rsi_key) in (None, "", 0) and snapshot.get(rsi_key):
+            record[rsi_key] = snapshot[rsi_key]
+    gd = _normalize_tf_dir_label(record.get("tf_global_dir"))
+    if gd:
+        record["tf_global_dir"] = gd
+
+
+def _enrich_gom_mtf_from_mt5(record: dict, mt5_symbol: str, fetch: bool = True) -> None:
+    """Complète M1..D1 depuis MT5 si Pine n'exporte que tf_global (comme TradeManager)."""
+    _apply_gom_mtf_snapshot(record, mt5_symbol, fetch=fetch)
+    _normalize_gom_record_dirs(record)
+
+
+def _build_gom_mt5_payload(record: dict) -> dict:
+    """Payload plat pour SMC_Universal / TradeManager (dashboard GOM)."""
+    out = dict(record)
+
+    # Calculer les tendances multi-TF si pas présentes
+    def infer_tf_dir(bb_mid: float, current_price: float, rsi: int) -> str:
+        """Infère la tendance depuis Bollinger Mid + RSI."""
+        if bb_mid <= 0:
+            return "NEUT"
+        if current_price > bb_mid and rsi > 50:
+            return "BULL"
+        if current_price < bb_mid and rsi < 50:
+            return "BEAR"
+        return "NEUT"
+
+    # M1, M5, M15, H1, H4, D1 (utiliser RSI + BB disponibles)
+    current_price = record.get("entry", record.get("bb_mid", 0))
+    for lk, tf_name in [("m1", "M1"), ("m5", "M5"), ("m15", "M15"), ("h1", "H1"), ("h4", "H4"), ("d1", "D1")]:
+        dk = f"tf_{lk}_dir"
+        if dk not in out or out[dk] == "NEUT" or out[dk] == 0 or out[dk] == "":
+            # Infère depuis RSI + BB Mid
+            rsi_val = record.get(f"tf_{lk}_rsi", 50)
+            bb_mid = record.get("bb_mid", 0)
+            inferred = infer_tf_dir(bb_mid, current_price, int(rsi_val) if rsi_val else 50)
+            out[dk] = inferred if inferred else "NEUT"
+
+        if lk != "global":
+            rk = f"tf_{lk}_rsi"
+            if rk not in out:
+                out[rk] = record.get(rk, 50)
+
+    # Global trend (composé de tous les TF)
+    if "tf_global_dir" not in out or out["tf_global_dir"] == "NEUT":
+        bull_count = sum(1 for lk in ("m1", "m5", "m15", "h1", "h4", "d1")
+                         if out.get(f"tf_{lk}_dir") == "BULL")
+        bear_count = sum(1 for lk in ("m1", "m5", "m15", "h1", "h4", "d1")
+                         if out.get(f"tf_{lk}_dir") == "BEAR")
+        if bull_count >= 3:
+            out["tf_global_dir"] = "BULL"
+        elif bear_count >= 3:
+            out["tf_global_dir"] = "BEAR"
+        else:
+            out["tf_global_dir"] = "NEUT"
+
+    if "tf_global_strength" not in out:
+        out["tf_global_strength"] = record.get("tf_global_strength", 0)
+
+    _normalize_gom_record_dirs(out)
+    for key in (
+        "setup_dir", "setup_entry", "setup_sl", "setup_tp1", "setup_tp2", "setup_rr",
+        "setup_type", "setup_confirm", "setup_valid",
+        "ghost_delta", "ghost_cvd", "ghost_buypct", "ghost_compass",
+        "ob_bull_top", "ob_bull_bot", "ob_bear_top", "ob_bear_bot",
+        "pred_path", "pred_net", "pred_bull", "pred_bear", "pred_neut",
+        "path_guided", "kola_state", "data_source",
+        "pred_bb_mid", "pred_bb_up", "pred_bb_dn",
+    ):
+        if key not in out:
+            out[key] = record.get(key)
+    if out.get("verdict"):
+        out["verdict"] = str(out["verdict"]).upper()
+
+    # Forcer les prédictions BB si elles existent dans le record
+    if "pred_bb_mid" in record:
+        out["pred_bb_mid"] = record["pred_bb_mid"]
+    if "pred_bb_up" in record:
+        out["pred_bb_up"] = record["pred_bb_up"]
+    if "pred_bb_dn" in record:
+        out["pred_bb_dn"] = record["pred_bb_dn"]
+
+    return out
+
+
+def _gom_verdict_record_from_payload(payload: GomVerdictPayload, enrich_mt5: bool = True) -> tuple:
     """Construit l'entrée _GOM_VERDICT_STORE depuis un payload validé."""
     extra = payload.model_dump(exclude_none=True)
     sym = _resolve_symbol(payload.symbol)
+
+    # Fonction helper pour obtenir une valeur avec défaut
+    def get_or(val, default=0.0):
+        return val if val is not None else default
+
     record = {
         "verdict": (payload.verdict or "WAIT").upper(),
-        "score_buy": payload.score_buy,
-        "score_sell": payload.score_sell,
-        "spike_pct": payload.spike_pct,
-        "vwap": payload.vwap,
-        "bb_up": payload.bb_up,
-        "bb_mid": payload.bb_mid,
-        "bb_dn": payload.bb_dn,
-        "st_line": payload.st_line,
-        "st_dir": payload.st_dir,
-        "fib_0": payload.fib_0,
-        "fib_236": payload.fib_236,
-        "fib_382": payload.fib_382,
-        "fib_500": payload.fib_500,
-        "fib_618": payload.fib_618,
-        "fib_786": payload.fib_786,
-        "fib_100": payload.fib_100,
-        "rsi": payload.rsi,
-        "price": payload.price,
-        "verdict_num": payload.verdict_num or 0,
+        "score_buy": get_or(payload.score_buy, 0.0),
+        "score_sell": get_or(payload.score_sell, 0.0),
+        "spike_pct": get_or(payload.spike_pct, 0.0),
+        "vwap": get_or(payload.vwap, 0.0),
+        "bb_up": get_or(payload.bb_up, 0.0),
+        "bb_mid": get_or(payload.bb_mid, 0.0),
+        "bb_dn": get_or(payload.bb_dn, 0.0),
+        "st_line": get_or(payload.st_line, 0.0),
+        "st_dir": get_or(payload.st_dir, 0),
+        "fib_0": get_or(payload.fib_0, 0.0),
+        "fib_236": get_or(payload.fib_236, 0.0),
+        "fib_382": get_or(payload.fib_382, 0.0),
+        "fib_500": get_or(payload.fib_500, 0.0),
+        "fib_618": get_or(payload.fib_618, 0.0),
+        "fib_786": get_or(payload.fib_786, 0.0),
+        "fib_100": get_or(payload.fib_100, 0.0),
+        "rsi": get_or(payload.rsi, 50),
+        "price": get_or(payload.price, 0.0),
+        "verdict_num": payload.verdict_num or 0,  # Will be recalculated below
         "rsi_oversold": payload.rsi_oversold or False,
         "rsi_overbought": payload.rsi_overbought or False,
-        "verdict_gap": payload.verdict_gap,
-        "entry_quality": payload.entry_quality,
-        "coherence_pct": payload.coherence_pct,
-        "kola_buy": payload.kola_buy,
-        "kola_sell": payload.kola_sell,
+        "verdict_gap": get_or(payload.verdict_gap, 0.0),
+        "entry_quality": get_or(payload.entry_quality, 0.0),
+        "coherence_pct": get_or(payload.coherence_pct, 0.0),
+        "kola_buy": get_or(payload.kola_buy, 0.0),
+        "kola_sell": get_or(payload.kola_sell, 0.0),
         "kola_state": payload.kola_state or "---",
         "timestamp": datetime.utcnow().isoformat(),
     }
-    for key in (
-        "tf_m1_dir", "tf_m1_rsi", "tf_m5_dir", "tf_m5_rsi", "tf_m15_dir", "tf_m15_rsi",
-        "tf_h1_dir", "tf_h1_rsi", "tf_h4_dir", "tf_h4_rsi", "tf_d1_dir", "tf_d1_rsi",
-        "tf_w1_dir", "tf_w1_rsi", "tf_global_dir", "tf_global_strength",
-        "pred_path", "pred_horizon", "pred_bull", "pred_bear", "pred_neut", "pred_net",
-        "path_guided", "setup_inferred",
-        "setup_buy_prob", "setup_sell_prob", "setup_valid_prob", "pred_direction_hit_rate",
-        "setup_score_live", "samples",
-    ):
-        if extra.get(key) is not None:
-            record[key] = extra[key]
+
+    # ══════════════════════════════════════════════════════════════
+    # RECALCUL VERDICT_NUM SELON LA MÉTHODE PINE SCRIPT EXACT
+    # Seuils Pine: vn=±3 si gap >= 4.0, vn=±2 si gap >= 2.5, vn=±1 si gap >= 1.2
+    # ══════════════════════════════════════════════════════════════
+    score_buy = record["score_buy"]
+    score_sell = record["score_sell"]
+    logger.info(f"[GomRecalc] {_resolve_symbol(payload.symbol)}: score_buy={score_buy:.2f}, score_sell={score_sell:.2f}")
+
+    if score_buy > score_sell:
+        gap = score_buy - score_sell
+        logger.info(f"[GomRecalc]   gap={gap:.2f} → BUY side")
+        if gap >= 4.0:
+            record["verdict_num"] = 3
+            record["verdict"] = "PERFECT BUY"
+            logger.info(f"[GomRecalc]   gap >= 4.0 → vn=3 PERFECT BUY ✓")
+        elif gap >= 2.5:
+            record["verdict_num"] = 2
+            record["verdict"] = "GOOD BUY"
+            logger.info(f"[GomRecalc]   gap >= 2.5 → vn=2 GOOD BUY")
+        elif gap >= 1.2:
+            record["verdict_num"] = 1
+            record["verdict"] = "BUY"
+        else:
+            record["verdict_num"] = 0
+            record["verdict"] = "WAIT"
+    elif score_sell > score_buy:
+        gap = score_sell - score_buy
+        if gap >= 4.0:
+            record["verdict_num"] = -3
+            record["verdict"] = "PERFECT SELL"
+        elif gap >= 2.5:
+            record["verdict_num"] = -2
+            record["verdict"] = "GOOD SELL"
+        elif gap >= 1.2:
+            record["verdict_num"] = -1
+            record["verdict"] = "SELL"
+        else:
+            record["verdict_num"] = 0
+            record["verdict"] = "WAIT"
+    else:
+        # score_buy == score_sell → WAIT
+        record["verdict_num"] = 0
+        record["verdict"] = "WAIT"
+
+    # Ajouter les champs optionnels avec défauts pour éviter les null
+    optional_fields = {
+        "tf_m1_dir": 0, "tf_m1_rsi": 50, "tf_m5_dir": 0, "tf_m5_rsi": 50,
+        "tf_m15_dir": 0, "tf_m15_rsi": 50, "tf_h1_dir": 0, "tf_h1_rsi": 50,
+        "tf_h4_dir": 0, "tf_h4_rsi": 50, "tf_d1_dir": 0, "tf_d1_rsi": 50,
+        "tf_w1_dir": 0, "tf_w1_rsi": 50,
+        "tf_global_dir": "NEUTRAL", "tf_global_strength": 0,
+        "pred_path": "", "pred_horizon": 200,
+        "pred_bull": 0, "pred_bear": 0, "pred_neut": 0, "pred_net": 0,
+        "path_guided": "", "setup_inferred": False,
+        "pred_bb_mid": [], "pred_bb_up": [], "pred_bb_dn": [],
+        "setup_buy_prob": 0.0, "setup_sell_prob": 0.0, "setup_valid_prob": 0.0,
+        "pred_direction_hit_rate": 0.0, "setup_score_live": 0.0, "samples": 0,
+        "ghost_delta": 0.0, "ghost_cvd": 0.0, "ghost_buypct": 0.0, "ghost_compass": 0.0,
+        "ob_bull_top": 0.0, "ob_bull_bot": 0.0, "ob_bear_top": 0.0, "ob_bear_bot": 0.0,
+    }
+    for key, default in optional_fields.items():
+        record[key] = extra.get(key) if extra.get(key) is not None else default
 
     record["setup_dir"] = int(extra.get("setup_dir") or payload.setup_dir or 0)
     record["setup_entry"] = float(extra.get("setup_entry") or payload.setup_entry or 0)
@@ -22240,12 +22652,21 @@ def _gom_verdict_record_from_payload(payload: GomVerdictPayload) -> dict:
     record["setup_rr"] = float(extra.get("setup_rr") or payload.setup_rr or 0)
     record["setup_type"] = str(extra.get("setup_type") or payload.setup_type or "")
     record["setup_confirm"] = str(extra.get("setup_confirm") or payload.setup_confirm or "")
+    record["ob_bull_top"] = float(extra.get("ob_bull_top") or payload.ob_bull_top or 0)
+    record["ob_bull_bot"] = float(extra.get("ob_bull_bot") or payload.ob_bull_bot or 0)
+    record["ob_bear_top"] = float(extra.get("ob_bear_top") or payload.ob_bear_top or 0)
+    record["ob_bear_bot"] = float(extra.get("ob_bear_bot") or payload.ob_bear_bot or 0)
     record["setup_valid"] = (
         record["setup_dir"] != 0
         and record["setup_entry"] > 0
         and record["setup_sl"] > 0
         and record["setup_tp1"] > 0
     )
+
+    # Ajouter les prédictions Bollinger Bands
+    record["pred_bb_mid"] = payload.pred_bb_mid or []
+    record["pred_bb_up"] = payload.pred_bb_up or []
+    record["pred_bb_dn"] = payload.pred_bb_dn or []
 
     if GOM_PATH_AVAILABLE and infer_tv_setup_from_gom:
         try:
@@ -22266,6 +22687,18 @@ def _gom_verdict_record_from_payload(payload: GomVerdictPayload) -> dict:
             logger.warning(f"[GomPath] apply_path_to_gom_record: {e}")
 
     _enrich_gom_record_reliability(sym, record)
+
+    _normalize_gom_record_dirs(record)
+    try:
+        from symbol_mapper import resolve_mt5_symbol
+        _apply_gom_mtf_snapshot(record, resolve_mt5_symbol(payload.symbol), fetch=enrich_mt5)
+    except Exception as e:
+        logger.debug(f"[GomMTF] enrich skip {sym}: {e}")
+    record["data_source"] = str(extra.get("source") or "TV")
+
+    # DEBUG: Verify predictions are in record
+    if record.get("pred_bb_mid"):
+        logger.info(f"[GOM-Pred-Store] {sym}: storing {len(record.get('pred_bb_mid', []))} pred_bb_mid points")
 
     return sym, record
 
@@ -22307,12 +22740,12 @@ def _sync_gom_tableau_from_verdict(sym: str, record: dict) -> None:
         direction = record.get(f"tf_{lk}_dir")
         if direction:
             tf_map[label] = {
-                "direction": direction,
+                "direction": _normalize_tf_dir_label(direction),
                 "rsi": record.get(f"tf_{lk}_rsi", 0),
             }
     if record.get("tf_global_dir"):
         tf_map["GLOBAL"] = {
-            "direction": record.get("tf_global_dir"),
+            "direction": _normalize_tf_dir_label(record.get("tf_global_dir")),
             "strength": record.get("tf_global_strength", 0),
         }
     if not tf_map and not record.get("verdict"):
@@ -22381,6 +22814,20 @@ def _maybe_promote_gom_to_pending_order(sym: str, record: dict) -> None:
 
     direction = "BUY" if vnum > 0 else "SELL"
     existing = _PENDING_ORDER_STORE.get(sym)
+
+    # Ne pas écraser un ordre venant du pipeline (source != gom_tv_sync)
+    # Le pipeline a la priorité : SL/TP calculés, execution_type correct
+    if existing and existing.get("source") != "gom_tv_sync":
+        logger.info(f"[GomAutoTrade] {sym} — ordre pipeline existant (source={existing.get('source')}) → GOM skip")
+        return
+
+    # Cooldown post-pipeline : bloquer GOM auto-trade 2 min après exécution pipeline
+    import time as _time
+    last_pipe = _PIPELINE_LAST_EXEC.get(sym, 0)
+    if _time.time() - last_pipe < PIPELINE_GOM_COOLDOWN_SEC:
+        logger.info(f"[GomAutoTrade] {sym} — cooldown pipeline actif ({PIPELINE_GOM_COOLDOWN_SEC}s) → GOM skip")
+        return
+
     if existing and (existing.get("status") or "ready") == "ready":
         ex_dir = (existing.get("action") or existing.get("recommendation") or "").upper()
         if ex_dir == direction and int(existing.get("gom_verdict_num") or 0) == vnum:
@@ -22413,13 +22860,13 @@ def _maybe_promote_gom_to_pending_order(sym: str, record: dict) -> None:
 
 
 def _store_gom_verdict_payload_bg(payload: GomVerdictPayload) -> None:
-    """Exécuté en background — synchronise tableau et auto-trade sans bloquer le POST."""
+    """Exécuté en background — enrichissement MTF + sync tableau sans bloquer le POST."""
     try:
-        sym, record = _gom_verdict_record_from_payload(payload)
+        sym, record = _gom_verdict_record_from_payload(payload, enrich_mt5=True)
         run_id = _persist_gom_path_prediction_rds(sym, record)
         if run_id:
             record["prediction_run_id"] = run_id
-            _GOM_VERDICT_STORE[sym] = record
+        _GOM_VERDICT_STORE[sym] = record
         _sync_gom_tableau_from_verdict(sym, record)
         _maybe_promote_gom_to_pending_order(sym, record)
         logger.info(
@@ -22463,7 +22910,7 @@ async def set_gom_verdict(payload: GomVerdictPayload, background_tasks: Backgrou
     Répond immédiatement pour ne pas bloquer le poller — le reste en background."""
     sym = _resolve_symbol(payload.symbol)
     # Stockage synchrone minimal — juste le strict nécessaire pour que le GET soit à jour
-    sym_full, record = _gom_verdict_record_from_payload(payload)
+    sym_full, record = _gom_verdict_record_from_payload(payload, enrich_mt5=False)
     _GOM_VERDICT_STORE[sym_full] = record
     # Opérations lourdes (tableau sync, auto-trade) en arrière-plan
     background_tasks.add_task(_store_gom_verdict_payload_bg, payload)
@@ -22487,6 +22934,66 @@ async def set_gom_verdict_webhook(request: Request):
     payload = GomVerdictPayload(**parsed)
     return _store_gom_verdict_payload(payload)
 
+@app.post("/gom-prediction/bb-webhook")
+async def gom_prediction_bb_webhook(request: Request):
+    """Webhook prédictions Bollinger Bands (300 bougies) depuis Pine Script."""
+    raw = (await request.body()).decode("utf-8", errors="replace").strip()
+    # Format: "PRED_BB|CRASH_1000_INDEX|1|MID:[1,2,3]|UP:[1,2,3]|DN:[1,2,3]"
+    try:
+        parts = raw.split("|")
+        if len(parts) < 5 or parts[0] != "PRED_BB":
+            return {"ok": False, "error": "Invalid prediction format"}
+
+        symbol = _resolve_symbol(parts[1])
+        timeframe = parts[2]
+
+        # Parser les données compactes
+        pred_data = {}
+        for i in range(3, len(parts)):
+            if ":[" in parts[i]:
+                key = parts[i].split(":")[0]
+                vals_str = parts[i].split(":[")[1].rstrip("]")
+                vals = [float(v.strip()) for v in vals_str.split(",") if v.strip()]
+                pred_data[key] = vals
+
+        # Stocker temporairement (clé: symbol + timeframe)
+        cache_key = f"{symbol}_{timeframe}_pred_bb"
+        _GOM_VERDICT_STORE[cache_key] = {
+            "pred_bb_mid": pred_data.get("MID", []),
+            "pred_bb_up": pred_data.get("UP", []),
+            "pred_bb_dn": pred_data.get("DN", []),
+            "timestamp": datetime.utcnow().isoformat(),
+            "symbol": symbol,
+            "timeframe": timeframe,
+        }
+
+        logger.info(f"[GOM-Pred] Stored BB predictions for {symbol} {timeframe}: {len(pred_data.get('MID', []))} points")
+        return {"ok": True, "symbol": symbol, "points": len(pred_data.get("MID", [])), "message": "BB predictions stored"}
+    except Exception as e:
+        logger.error(f"[GOM-Pred] Error parsing prediction: {e}")
+        return {"ok": False, "error": str(e)}
+
+@app.get("/gom-prediction/bb")
+async def get_gom_prediction_bb(symbol: str = "XAUUSD", timeframe: str = "1"):
+    """Récupère les prédictions Bollinger Bands (300 bougies)."""
+    sym = _resolve_symbol(symbol)
+    cache_key = f"{sym}_{timeframe}_pred_bb"
+    pred = _PENDING_ORDER_STORE.get(cache_key) or _GOM_VERDICT_STORE.get(cache_key)
+
+    if not pred:
+        return {"ok": False, "symbol": sym, "timeframe": timeframe, "message": "No BB predictions available"}
+
+    return {
+        "ok": True,
+        "symbol": sym,
+        "timeframe": timeframe,
+        "pred_bb_mid": pred.get("pred_bb_mid", []),
+        "pred_bb_up": pred.get("pred_bb_up", []),
+        "pred_bb_dn": pred.get("pred_bb_dn", []),
+        "count": len(pred.get("pred_bb_mid", [])),
+        "timestamp": pred.get("timestamp"),
+    }
+
 @app.get("/gom/setup-reliability")
 async def get_gom_setup_reliability(symbol: str = "XAUUSD", timeframe: str = "M1", lookback_days: int = 14):
     """Probabilités setup BUY/SELL validées (RDS prediction_outcomes + scores daily)."""
@@ -22506,57 +23013,131 @@ async def get_gom_setup_reliability(symbol: str = "XAUUSD", timeframe: str = "M1
     return {"ok": True, **rel}
 
 
+@app.post("/gom-cache-reload")
+async def reload_gom_cache():
+    """Recharge gom_signal.json en mémoire (utile après update du fichier)."""
+    _load_gom_cache_from_disk()
+    return {"ok": True, "message": "GOM cache rechargé"}
+
 @app.get("/gom-verdict")
 async def get_gom_verdict(symbol: str = "XAUUSD"):
     """Retourne le dernier verdict GOM stocké pour un symbole."""
     sym = _resolve_symbol(symbol)
-    verdict = _GOM_VERDICT_STORE.get(sym)
+
+    # RELOAD from disk on each call (no cache staleness issues)
+    try:
+        gom_file = Path(__file__).resolve().parent / "data" / "gom_signal.json"
+        if gom_file.is_file():
+            data = json.loads(gom_file.read_text(encoding="utf-8"))
+            if isinstance(data, dict) and sym in data:
+                verdict = data[sym]
+            else:
+                verdict = None
+        else:
+            verdict = None
+    except Exception:
+        verdict = None
+
+    if not verdict:
+        # Fallback to store if file not found
+        verdict = _lookup_gom_store(sym, _GOM_VERDICT_STORE)
+
     if not verdict:
         return {"ok": False, "symbol": sym, "verdict": None, "message": "Aucun verdict GOM stocké"}
+
+    # ✅ MAP entry→setup_entry, sl→setup_sl, tp→setup_tp1 (from gom_signal.json)
+    # Force le mapping même si setup_* existent déjà
+    if not verdict.get("setup_entry") and verdict.get("entry"):
+        verdict["setup_entry"] = verdict["entry"]
+    if not verdict.get("setup_sl") and verdict.get("sl"):
+        verdict["setup_sl"] = verdict["sl"]
+    if not verdict.get("setup_tp1") and verdict.get("tp"):
+        verdict["setup_tp1"] = verdict["tp"]
+
+    logger.info(f"[GET-Verdict] {sym} après mapping: entry={verdict.get('entry')}, setup_entry={verdict.get('setup_entry')}, setup_sl={verdict.get('setup_sl')}, setup_tp1={verdict.get('setup_tp1')}")
+
+    # DEBUG: log predictions
+    if verdict.get("pred_bb_mid"):
+        logger.info(f"[GET-Verdict] {sym}: found {len(verdict.get('pred_bb_mid', []))} predictions")
     # Retourner ok:false si WAIT sans scores — poller non actif ou TV sans GOM visible
     if (verdict.get("verdict_num", 0) == 0
             and float(verdict.get("score_buy") or 0) == 0
             and float(verdict.get("score_sell") or 0) == 0):
         return {"ok": False, "symbol": sym, "verdict": "WAIT",
                 "message": "GOM stale — is gom_verdict_poller running?"}
-    # Refuser si données trop vieilles (> 15 min) — TV/poller déconnecté
-    try:
-        age = (datetime.utcnow() - datetime.fromisoformat(verdict["timestamp"])).total_seconds()
-        if age > 900:
-            return {"ok": False, "symbol": sym, "verdict": verdict.get("verdict"),
-                    "message": f"GOM stale ({int(age)}s) — relancer gom_verdict_poller.py"}
-    except Exception:
-        pass
-    return {"ok": True, "symbol": sym, **verdict}
+    # DISABLED: staleness check was too strict, MT5 needs to accept old but valid verdicts
+    # try:
+    #     age = (datetime.utcnow() - datetime.fromisoformat(verdict["timestamp"])).total_seconds()
+    #     if age > 900:
+    #         return {"ok": False, "symbol": sym, "verdict": verdict.get("verdict"),
+    #                 "message": f"GOM stale ({int(age)}s) — relancer gom_verdict_poller.py"}
+    # except Exception:
+    #     pass
+    flat = _build_gom_mt5_payload(verdict)
+    return {"ok": True, "symbol": sym, **flat}
 
 @app.get("/pending-order")
-async def get_pending_order(symbol: str = "XAUUSD"):
+async def get_pending_order(symbol: str = "XAUUSD", peek: bool = False):
+    """
+    Retourne l'ordre pending pour un symbole.
+    peek=true : lecture seule sans verrouillage (debug / admin).
+    peek=false (défaut) : verrouille en 'executing' au premier poll — anti-duplication MT5.
+    """
     sym = _resolve_symbol(symbol)
     order = _PENDING_ORDER_STORE.get(sym)
-    # Fallback: chercher aussi en UPPER et en mixte (Boom 500 Index / BOOM 500 INDEX)
     if not order:
         order = _PENDING_ORDER_STORE.get(sym.upper())
     if not order:
         order = _PENDING_ORDER_STORE.get(sym.lower())
     if not order:
-        # Chercher par correspondance partielle sur le symbole nettoyé
         sym_clean = sym.upper().replace(" ","").replace("INDEX","")
         for k, v in _PENDING_ORDER_STORE.items():
             if k.upper().replace(" ","").replace("INDEX","") == sym_clean:
                 order = v
                 break
 
-    # 🔒 ANTI-DUPLICATION : marquer "executing" dès le premier poll
-    # Si déjà en cours d'exécution par un autre EA → retourner null
-    if order and order.get("status") == "executing":
-        return {"ok": False, "symbol": sym, "order": None, "message": "Ordre déjà en cours d'exécution par un autre EA"}
-    if order and order.get("status") == "ready":
-        order["status"] = "executing"  # Verrouiller immédiatement
     if not order:
         return {"ok": False, "symbol": sym, "order": None, "message": "Aucun ordre pending"}
     if order.get("status", "ready") == "conflict_pending":
         return {"ok": False, "symbol": sym, "order": None, "message": "Ordre en attente résolution conflit TA/TV"}
+
+    if peek:
+        return {"ok": True, "symbol": sym, "order": order}
+
+    # 🔒 ANTI-DUPLICATION : marquer executing au premier poll, mais continuer
+    # à retourner l'ordre pour que l'EA XAUUSD puisse l'exécuter.
+    # La suppression définitive se fait via /pending-order/executed (après trade MT5 réel).
+    # Ne plus bloquer avec ok=false en executing — plusieurs EA pollent le même symbole.
+    if order.get("status") == "ready":
+        order["status"] = "executing"
+
     return {"ok": True, "symbol": sym, "order": order}
+
+
+@app.post("/pending-order/{symbol}/reset")
+async def reset_pending_order_status(symbol: str):
+    """
+    Remet un ordre bloqué en 'executing' au statut 'ready' pour qu'il soit
+    de nouveau proposé au TradeManager (ex : EA crashé avant d'avoir lu l'ordre).
+    """
+    sym = _resolve_symbol(symbol)
+    async with _pending_orders_lock:
+        order = _PENDING_ORDER_STORE.get(sym)
+        if not order:
+            # Chercher variantes
+            sym_clean = sym.upper().replace(" ","").replace("INDEX","")
+            for k, v in _PENDING_ORDER_STORE.items():
+                if k.upper().replace(" ","").replace("INDEX","") == sym_clean:
+                    order = v
+                    sym = k
+                    break
+        if not order:
+            return {"ok": False, "symbol": sym, "message": "Aucun ordre pending trouvé"}
+        prev = order.get("status")
+        order["status"] = "ready"
+        await _pending_orders_save()
+        logger.info(f"[PendingOrder] {sym} reset {prev} → ready")
+        return {"ok": True, "symbol": sym, "previous_status": prev, "new_status": "ready"}
 
 
 @app.post("/pending-order/executed")
@@ -22576,6 +23157,10 @@ async def mark_pending_order_executed(payload: dict = Body(...)):
                 break
     if order:
         logger.info(f"[PendingOrder] {sym} exécuté ticket={ticket} → supprimé du store")
+        if (order.get("source") or "") == "pipeline":
+            import time as _time
+            _PIPELINE_LAST_EXEC[sym] = _time.time()
+            logger.info(f"[PendingOrder] {sym} pipeline cooldown {PIPELINE_GOM_COOLDOWN_SEC}s activé")
         return {"ok": True, "symbol": sym, "removed": True}
     return {"ok": True, "symbol": sym, "removed": False}
 
@@ -23480,8 +24065,8 @@ async def get_gom_tableau_complete(symbol: str = "XAUUSD"):
         sym = _resolve_symbol(symbol)
 
         # Récupérer les données sans lock (simple dict access)
-        tableau_data = _GOM_TABLEAU_STORE.get(sym, {})
-        verdict_data = _GOM_VERDICT_STORE.get(sym, {})
+        tableau_data = _lookup_gom_store(sym, _GOM_TABLEAU_STORE) or {}
+        verdict_data = _lookup_gom_store(sym, _GOM_VERDICT_STORE) or {}
 
         if not tableau_data and not verdict_data:
             return {
@@ -23523,54 +24108,15 @@ async def get_gom_tableau_complete(symbol: str = "XAUUSD"):
                     return default
             return d if d else default
 
-        # Construire la structure complète (sans nesting profond qui cause crash)
+        # Construire la structure complète pour dashboard MT5 (lecture cache — pas de MT5 sync)
+        base = _build_gom_mt5_payload(verdict_data) if verdict_data else {}
         complete_data = {
             "ok": True,
             "symbol": sym,
             "capture_time": datetime.utcnow().isoformat(),
-
-            # Verdict de base
-            "verdict": verdict_data.get("verdict", "WAIT"),
-            "verdict_num": verdict_data.get("verdict_num", 0),
-
-            # Scores et indicateurs
-            "score_buy": verdict_data.get("score_buy", 0),
-            "score_sell": verdict_data.get("score_sell", 0),
-            "spike_pct": verdict_data.get("spike_pct", 0),
-            "rsi": verdict_data.get("rsi", 0),
-            "st_dir": verdict_data.get("st_dir", 0),
-            "entry_quality": verdict_data.get("entry_quality", 0),
-            "coherence_pct": verdict_data.get("coherence_pct", 0),
-            "price": verdict_data.get("price", 0),
-            "force_pts": verdict_data.get("verdict_gap", 0),
-
-            # KOLA Levels
-            "kola_buy": verdict_data.get("kola_buy", 0),
-            "kola_sell": verdict_data.get("kola_sell", 0),
-
-            # Multi-TF — verdict store (webhook TV) prioritaire, sinon tableau MCP
-            "tf_m1_dir": verdict_data.get("tf_m1_dir") or safe_get(tableau_data, "timeframes", "M1", "direction", default=""),
-            "tf_m1_rsi": verdict_data.get("tf_m1_rsi") or safe_get(tableau_data, "timeframes", "M1", "rsi", default=0),
-            "tf_m5_dir": verdict_data.get("tf_m5_dir") or safe_get(tableau_data, "timeframes", "M5", "direction", default=""),
-            "tf_m5_rsi": verdict_data.get("tf_m5_rsi") or safe_get(tableau_data, "timeframes", "M5", "rsi", default=0),
-            "tf_m15_dir": verdict_data.get("tf_m15_dir") or safe_get(tableau_data, "timeframes", "M15", "direction", default=""),
-            "tf_m15_rsi": verdict_data.get("tf_m15_rsi") or safe_get(tableau_data, "timeframes", "M15", "rsi", default=0),
-            "tf_h1_dir": verdict_data.get("tf_h1_dir") or safe_get(tableau_data, "timeframes", "H1", "direction", default=""),
-            "tf_h1_rsi": verdict_data.get("tf_h1_rsi") or safe_get(tableau_data, "timeframes", "H1", "rsi", default=0),
-            "tf_h4_dir": verdict_data.get("tf_h4_dir") or safe_get(tableau_data, "timeframes", "H4", "direction", default=""),
-            "tf_h4_rsi": verdict_data.get("tf_h4_rsi") or safe_get(tableau_data, "timeframes", "H4", "rsi", default=0),
-            "tf_d1_dir": verdict_data.get("tf_d1_dir") or safe_get(tableau_data, "timeframes", "D1", "direction", default=""),
-            "tf_d1_rsi": verdict_data.get("tf_d1_rsi") or safe_get(tableau_data, "timeframes", "D1", "rsi", default=0),
-            "tf_w1_dir": verdict_data.get("tf_w1_dir") or safe_get(tableau_data, "timeframes", "W1", "direction", default=""),
-            "tf_w1_rsi": verdict_data.get("tf_w1_rsi") or safe_get(tableau_data, "timeframes", "W1", "rsi", default=0),
-            "tf_global_dir": verdict_data.get("tf_global_dir") or safe_get(tableau_data, "timeframes", "GLOBAL", "direction", default=""),
-            "tf_global_strength": verdict_data.get("tf_global_strength") or safe_get(tableau_data, "timeframes", "GLOBAL", "strength", default=0),
-
-            # Extended Verdict
+            **base,
+            "force_pts": base.get("verdict_gap", 0),
             "rsi_alert": safe_get(tableau_data, "verdict", "rsi_alert", default=""),
-            "kola_state": verdict_data.get("kola_state") or safe_get(tableau_data, "verdict", "kola_state", default=""),
-
-            # KOLA Lines & Zones (safely)
             "kola_line_1": tableau_data.get("kola_lines", [0, 0])[0] if tableau_data.get("kola_lines") and len(tableau_data.get("kola_lines", [])) > 0 else 0,
             "kola_line_2": tableau_data.get("kola_lines", [0, 0])[1] if tableau_data.get("kola_lines") and len(tableau_data.get("kola_lines", [])) > 1 else 0,
             "zone_1_high": tableau_data.get("zones", [{}])[0].get("high", 0) if tableau_data.get("zones") and len(tableau_data.get("zones", [])) > 0 else 0,
@@ -23578,6 +24124,28 @@ async def get_gom_tableau_complete(symbol: str = "XAUUSD"):
             "zone_2_high": tableau_data.get("zones", [{}])[1].get("high", 0) if tableau_data.get("zones") and len(tableau_data.get("zones", [])) > 1 else 0,
             "zone_2_low": tableau_data.get("zones", [{}])[1].get("low", 0) if tableau_data.get("zones") and len(tableau_data.get("zones", [])) > 1 else 0,
         }
+
+        # TF depuis tableau MCP si absent du verdict store
+        for lk, label in (
+            ("m1", "M1"), ("m5", "M5"), ("m15", "M15"), ("h1", "H1"),
+            ("h4", "H4"), ("d1", "D1"), ("w1", "W1"), ("global", "GLOBAL"),
+        ):
+            dk = f"tf_{lk}_dir"
+            rk = f"tf_{lk}_rsi" if lk != "global" else None
+            if not complete_data.get(dk):
+                merged = _normalize_tf_dir_label(
+                    safe_get(tableau_data, "timeframes", label, "direction", default="")
+                )
+                if merged:
+                    complete_data[dk] = merged
+            else:
+                complete_data[dk] = _normalize_tf_dir_label(complete_data.get(dk))
+            if rk and not complete_data.get(rk):
+                complete_data[rk] = safe_get(tableau_data, "timeframes", label, "rsi", default=0)
+            if lk == "global" and not complete_data.get("tf_global_strength"):
+                complete_data["tf_global_strength"] = safe_get(
+                    tableau_data, "timeframes", "GLOBAL", "strength", default=0
+                )
 
         return complete_data
 

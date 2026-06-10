@@ -1,0 +1,110 @@
+//@version=6
+// GOM_BB_PREDICTION.pine — Calcule les Bollinger Bands futures (300 bougies)
+// À ajouter comme étude separate ou fusionner dans GOM_KOLA_script.pine
+
+indicator("GOM BB Prediction (300 bars)", shorttitle="GOM BB Pred", overlay=false)
+
+// Entrées
+pred_horizon = input.int(300, "Horizon prediction (bougies)", minval=50, maxval=500)
+pred_method = input.string("linear", "Méthode", options=["linear", "trend", "sma"])
+bb_period = input.int(20, "Période Bollinger", minval=5, maxval=50)
+bb_dev = input.float(2.0, "Déviation Bollinger", minval=0.5, maxval=4.0)
+
+// Calculer BB actuels
+[bb_mid, bb_up, bb_dn] = ta.bb(close, bb_period, bb_dev)
+
+// ═══════════════════════════════════════════════════════════════
+// PRÉDICTION LINÉAIRE — extrapolation simple
+// ═══════════════════════════════════════════════════════════════
+// Pente simple sur les 20 dernières bougies
+lookback_slope = 20
+
+// Mid-line trend
+slope_mid = 0.0
+if bb_period <= bar_index
+    slope_mid := (bb_mid - bb_mid[lookback_slope]) / lookback_slope
+
+// Upper trend
+slope_up = 0.0
+if bb_period <= bar_index
+    slope_up := (bb_up - bb_up[lookback_slope]) / lookback_slope
+
+// Lower trend
+slope_dn = 0.0
+if bb_period <= bar_index
+    slope_dn := (bb_dn - bb_dn[lookback_slope]) / lookback_slope
+
+// ─────────────────────────────────────────────────────────────
+// Prédictions futures (300 bars)
+// ─────────────────────────────────────────────────────────────
+var array<float> pred_bb_mid = array.new<float>()
+var array<float> pred_bb_up  = array.new<float>()
+var array<float> pred_bb_dn  = array.new<float>()
+var array<int>   pred_times  = array.new<int>()
+
+if barstate.islast
+    // Effacer anciens
+    array.clear(pred_bb_mid)
+    array.clear(pred_bb_up)
+    array.clear(pred_bb_dn)
+    array.clear(pred_times)
+
+    // Générer 300 points prédits
+    current_mid = bb_mid
+    current_up  = bb_up
+    current_dn  = bb_dn
+
+    for i = 1 to pred_horizon
+        // Extrapolation linéaire
+        future_mid = current_mid + slope_mid * i
+        future_up  = current_up + slope_up * i
+        future_dn  = current_dn + slope_dn * i
+
+        array.push(pred_bb_mid, future_mid)
+        array.push(pred_bb_up,  future_up)
+        array.push(pred_bb_dn,  future_dn)
+        array.push(pred_times,  bar_index + i)
+
+// ─────────────────────────────────────────────────────────────
+// EXPORT JSON pour webhook
+// ─────────────────────────────────────────────────────────────
+// Construire une chaîne JSON compacte (JSON complet = trop lourd)
+
+pred_json = ""
+if barstate.islast and array.size(pred_bb_mid) > 0
+    // Format compact: "mid:[1,2,3]|up:[1,2,3]|dn:[1,2,3]"
+    mid_str = ""
+    up_str  = ""
+    dn_str  = ""
+
+    // Limiter à 100 points pour rester dans les limites
+    steps = math.max(1, array.size(pred_bb_mid) / 100)
+
+    for i = 0 to array.size(pred_bb_mid) - 1 by steps
+        if mid_str != ""
+            mid_str += ","
+            up_str  += ","
+            dn_str  += ","
+        mid_str += str.tostring(math.round(array.get(pred_bb_mid, i) * 100) / 100)
+        up_str  += str.tostring(math.round(array.get(pred_bb_up, i) * 100) / 100)
+        dn_str  += str.tostring(math.round(array.get(pred_bb_dn, i) * 100) / 100)
+
+    pred_json = "PRED_BB|" + syminfo.ticker + "|" + timeframe.period + "|MID:[" + mid_str + "]|UP:[" + up_str + "]|DN:[" + dn_str + "]"
+
+// Plot pour debug (affiche les prédictions)
+plot(barstate.islast ? bb_mid : na, "BB Mid Current", color=color.blue, linewidth=2)
+plot(barstate.islast ? bb_up : na, "BB Up Current", color=color.red, linewidth=1)
+plot(barstate.islast ? bb_dn : na, "BB Down Current", color=color.green, linewidth=1)
+
+// Export via alerte
+if barstate.isconfirmed and pred_json != ""
+    alert(pred_json, alert.freq_once_per_bar_close)
+
+// Affichage debug
+var label pred_lbl = na
+if barstate.islast
+    if not na(pred_lbl)
+        label.delete(pred_lbl)
+    pred_lbl := label.new(bar_index, bb_mid,
+         "Pred: " + str.tostring(array.size(pred_bb_mid)) + " points",
+         color=color.new(color.blue, 80), textcolor=color.white, size=size.small)

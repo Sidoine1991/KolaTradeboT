@@ -1,0 +1,368 @@
+//+------------------------------------------------------------------+
+//| MODULE : Chargement GOM depuis TradingView (gom_signal.json)    |
+//| À intégrer dans deriveapro.mq5                                   |
+//+------------------------------------------------------------------+
+
+// ══════════════════════════════════════════════════════════════════
+// PROBLÈME :
+// Le GOM poller Python récupère les données depuis TradingView
+// et écrit D:\Dev\TradBOT\data\gom_signal.json, mais l'EA ne charge
+// JAMAIS ce fichier → GHOST calculé localement (moins précis)
+// ══════════════════════════════════════════════════════════════════
+
+// ══════════════════════════════════════════════════════════════════
+// SOLUTION : Ajouter module LoadGOMFromTV() + structure SGomTV
+// ══════════════════════════════════════════════════════════════════
+
+// ─── ÉTAPE 1 : Ajouter cette structure APRÈS SGhost (ligne ~115) ──
+
+struct SGomTV
+{
+   string symbol;           // Symbol TV (ex: "Boom500Index")
+   string verdict;          // BUY/SELL/NEUTRAL
+   double quality;          // 0-100 (confiance)
+   double delta;            // Delta moyen
+   double cvd;              // Cumulative Volume Delta
+   double buypct;           // % pression achat
+   double sellpct;          // % pression vente
+   int compass;             // Direction 0-7 (E/NE/N/NW/W/SW/S/SE)
+
+   // GOM Money Flow (depuis TradingView Pine)
+   double imbalance;        // Déséquilibre achat/vente
+   double volume_profile;   // Profil volume
+   double liquidity_score;  // Score liquidité
+   double smart_money_idx;  // Index smart money
+
+   // Setup (si disponible)
+   double setup_entry;      // Prix d'entrée suggéré
+   double setup_sl;         // Stop Loss suggéré
+   double setup_tp1;        // Take Profit 1
+   double setup_tp2;        // Take Profit 2
+   double setup_rr;         // Risk/Reward ratio
+   string setup_dir;        // Direction setup (BUY/SELL)
+
+   datetime loadedAt;       // Timestamp dernier chargement
+   bool valid;              // Données valides
+};
+
+SGomTV g_gomTV;             // Variable globale pour stocker GOM TV
+
+
+// ─── ÉTAPE 2 : Ajouter ces fonctions APRÈS PollGHOST() (ligne ~600) ──
+
+//+------------------------------------------------------------------+
+//| Parse JSON simple sans library externe                           |
+//+------------------------------------------------------------------+
+string JsonExtractStringGOM(const string &body, const string &key)
+{
+   int pos = StringFind(body, "\""+key+"\"");
+   if(pos < 0) return "";
+   int colon = StringFind(body, ":", pos);
+   if(colon < 0) return "";
+   int quote1 = StringFind(body, "\"", colon);
+   if(quote1 < 0) return "";
+   int quote2 = StringFind(body, "\"", quote1+1);
+   if(quote2 < 0) return "";
+   return StringSubstr(body, quote1+1, quote2-quote1-1);
+}
+
+double JsonExtractDoubleGOM(const string &body, const string &key)
+{
+   int pos = StringFind(body, "\""+key+"\"");
+   if(pos < 0) return 0.0;
+   int colon = StringFind(body, ":", pos);
+   if(colon < 0) return 0.0;
+
+   // Extraire nombre (peut être entre virgules ou avant })
+   int start = colon + 1;
+   while(start < StringLen(body) &&
+         (StringGetCharacter(body,start)==' ' ||
+          StringGetCharacter(body,start)=='\t')) start++;
+
+   int end = start;
+   while(end < StringLen(body))
+   {
+      ushort ch = StringGetCharacter(body,end);
+      if(ch==',' || ch=='}' || ch==']' || ch=='\n' || ch==' ') break;
+      end++;
+   }
+
+   string numStr = StringSubstr(body, start, end-start);
+   StringReplace(numStr, " ", "");
+   StringReplace(numStr, "\t", "");
+   StringReplace(numStr, "\n", "");
+
+   if(StringLen(numStr) == 0) return 0.0;
+   if(numStr == "null") return 0.0;
+
+   return StringToDouble(numStr);
+}
+
+int JsonExtractIntGOM(const string &body, const string &key)
+{
+   return (int)JsonExtractDoubleGOM(body, key);
+}
+
+//+------------------------------------------------------------------+
+//| Charger GOM depuis data/gom_signal.json (via GOM poller Python) |
+//+------------------------------------------------------------------+
+bool LoadGOMFromTV()
+{
+   // Ne charger que si intervalle >= 3s écoulé
+   if((int)(TimeCurrent() - g_gomTV.loadedAt) < 3) return g_gomTV.valid;
+
+   // Chemin absolu : D:\Dev\TradBOT\data\gom_signal.json
+   string filePath = "D:\\Dev\\TradBOT\\data\\gom_signal.json";
+
+   // Lire fichier
+   int handle = FileOpen(filePath, FILE_READ|FILE_TXT|FILE_ANSI);
+   if(handle == INVALID_HANDLE)
+   {
+      if(InpDebug)
+         PrintFormat("[v10] ⚠️  GOM TV: fichier non trouvé %s (GOM poller lancé?)", filePath);
+      g_gomTV.valid = false;
+      return false;
+   }
+
+   string content = "";
+   while(!FileIsEnding(handle))
+   {
+      string line = FileReadString(handle);
+      content += line;
+   }
+   FileClose(handle);
+
+   if(StringLen(content) < 10)
+   {
+      if(InpDebug) Print("[v10] ⚠️  GOM TV: fichier vide");
+      g_gomTV.valid = false;
+      return false;
+   }
+
+   // Parser JSON
+   string sym = JsonExtractStringGOM(content, "symbol");
+
+   // Vérifier que c'est bien notre symbole (ou compatible)
+   // Boom500Index → Boom 500 Index, etc.
+   bool symbolMatch = false;
+   if(StringFind(_Symbol, "Boom") >= 0 && StringFind(sym, "Boom") >= 0) symbolMatch = true;
+   if(StringFind(_Symbol, "Crash") >= 0 && StringFind(sym, "Crash") >= 0) symbolMatch = true;
+
+   if(!symbolMatch)
+   {
+      if(InpDebug)
+         PrintFormat("[v10] GOM TV: symbole mismatch (EA=%s, TV=%s)", _Symbol, sym);
+      g_gomTV.valid = false;
+      return false;
+   }
+
+   // Remplir structure
+   g_gomTV.symbol = sym;
+   g_gomTV.verdict = JsonExtractStringGOM(content, "verdict");
+   g_gomTV.quality = JsonExtractDoubleGOM(content, "quality");
+   g_gomTV.delta = JsonExtractDoubleGOM(content, "delta");
+   g_gomTV.cvd = JsonExtractDoubleGOM(content, "cvd");
+   g_gomTV.buypct = JsonExtractDoubleGOM(content, "buypct");
+   g_gomTV.sellpct = JsonExtractDoubleGOM(content, "sellpct");
+   g_gomTV.compass = JsonExtractIntGOM(content, "compass");
+
+   // GOM Money Flow
+   g_gomTV.imbalance = JsonExtractDoubleGOM(content, "imbalance");
+   g_gomTV.volume_profile = JsonExtractDoubleGOM(content, "volume_profile");
+   g_gomTV.liquidity_score = JsonExtractDoubleGOM(content, "liquidity_score");
+   g_gomTV.smart_money_idx = JsonExtractDoubleGOM(content, "smart_money_idx");
+
+   // Setup (optionnel)
+   g_gomTV.setup_entry = JsonExtractDoubleGOM(content, "setup_entry");
+   g_gomTV.setup_sl = JsonExtractDoubleGOM(content, "setup_sl");
+   g_gomTV.setup_tp1 = JsonExtractDoubleGOM(content, "setup_tp1");
+   g_gomTV.setup_tp2 = JsonExtractDoubleGOM(content, "setup_tp2");
+   g_gomTV.setup_rr = JsonExtractDoubleGOM(content, "setup_rr");
+   g_gomTV.setup_dir = JsonExtractStringGOM(content, "setup_dir");
+
+   g_gomTV.loadedAt = TimeCurrent();
+   g_gomTV.valid = (StringLen(g_gomTV.verdict) > 0);
+
+   if(InpDebug && g_gomTV.valid)
+   {
+      PrintFormat("[v10] ✅ GOM TV chargé: %s | verdict=%s | delta=%.2f | cvd=%.2f | quality=%.0f%% | imbalance=%.2f",
+         g_gomTV.symbol, g_gomTV.verdict, g_gomTV.delta, g_gomTV.cvd,
+         g_gomTV.quality, g_gomTV.imbalance);
+   }
+
+   return g_gomTV.valid;
+}
+
+
+// ─── ÉTAPE 3 : Remplacer PollGHOST() pour utiliser GOM TV ──────
+
+// AVANT (calcul local GHOST) :
+void PollGHOST()
+{
+   if((int)(TimeCurrent() - g_lastGhostPoll) < 3) return;
+   g_lastGhostPoll = TimeCurrent();
+   MqlRates r[]; ArraySetAsSeries(r, true);
+   int got = CopyRates(_Symbol, _Period, 1, 60, r);
+   if(got < 20) { g_ghost.valid = false; return; }
+   double sumDelta = 0;
+   for(int i = 0; i < got; i++) sumDelta += GHOST_EstimateDelta(r[i]);
+   double deltaAvg = sumDelta / got;
+   ...
+}
+
+// APRÈS (priorité GOM TV, fallback local) :
+void PollGHOST()
+{
+   if((int)(TimeCurrent() - g_lastGhostPoll) < 3) return;
+   g_lastGhostPoll = TimeCurrent();
+
+   // ── PRIORITÉ 1 : Charger GOM depuis TradingView ────────────────
+   bool gomLoaded = LoadGOMFromTV();
+
+   if(gomLoaded && g_gomTV.valid)
+   {
+      // Utiliser données GOM TV (plus précises que calcul local)
+      g_ghost.verdict = g_gomTV.verdict;
+      g_ghost.quality = g_gomTV.quality;
+      g_ghost.delta = g_gomTV.delta;
+      g_ghost.cvd = g_gomTV.cvd;
+      g_ghost.buypct = g_gomTV.buypct;
+      g_ghost.sellpct = g_gomTV.sellpct;
+      g_ghost.compass = g_gomTV.compass;
+      g_ghost.valid = true;
+      g_ghost.loadedAt = TimeCurrent();
+
+      // Log si nouvelles données
+      static string lastVerdict = "";
+      if(g_ghost.verdict != lastVerdict)
+      {
+         PrintFormat("[v10] 🎯 GOM TV: %s (q=%.0f%%) | imbalance=%.2f | liquidity=%.2f | smart_money=%.2f",
+            g_ghost.verdict, g_ghost.quality,
+            g_gomTV.imbalance, g_gomTV.liquidity_score, g_gomTV.smart_money_idx);
+         lastVerdict = g_ghost.verdict;
+      }
+
+      return;  // GOM TV chargé avec succès, pas besoin de calcul local
+   }
+
+   // ── FALLBACK : Calcul local GHOST (si GOM TV indisponible) ─────
+   if(InpDebug && !gomLoaded)
+      Print("[v10] ℹ️  GOM TV indisponible → fallback calcul local GHOST");
+
+   // Code original de PollGHOST() (calcul local)
+   MqlRates r[]; ArraySetAsSeries(r, true);
+   int got = CopyRates(_Symbol, _Period, 1, 60, r);
+   if(got < 20) { g_ghost.valid = false; return; }
+   double sumDelta = 0;
+   for(int i = 0; i < got; i++) sumDelta += GHOST_EstimateDelta(r[i]);
+   double deltaAvg = sumDelta / got;
+   double cvd      = GHOST_CalcCVD(60);
+   double buyPct = 50, sellPct = 50;
+   GHOST_CalcSentiment(40, buyPct, sellPct);
+   int compass = GHOST_CalcCompass();
+
+   // ... reste du code original PollGHOST() ...
+}
+
+
+// ─── ÉTAPE 4 : Ajouter GOM TV au dashboard (après ligne ~2107) ──
+
+// Après la ligne :
+//    ObjLabel("D_Ghost",StringFormat("GHOST: %s | delta=%.2f | buyPct=%.0f%% | q=%.0f | CVD=%.2f",
+//             g_ghost.verdict,g_ghost.delta,g_ghost.buypct,g_ghost.quality,g_ghost.cvd),
+//             8,yBase,ghostClr,9);
+//    yBase+=yStep;
+
+// AJOUTER :
+if(g_gomTV.valid)
+{
+   int ageGOM = (int)(TimeCurrent() - g_gomTV.loadedAt);
+   color gomClr;
+   if(ageGOM <= 5)       gomClr = clrLimeGreen;
+   else if(ageGOM <= 15) gomClr = clrOrange;
+   else                  gomClr = clrTomato;
+
+   ObjLabel("D_GOM_TV",
+      StringFormat("GOM TV: %s (%.0fs) | imbalance=%.2f | liquidity=%.2f | smart_money=%.2f",
+         (ageGOM<=15?"FRESH":"STALE"), ageGOM,
+         g_gomTV.imbalance, g_gomTV.liquidity_score, g_gomTV.smart_money_idx),
+      8, yBase, gomClr, 9);
+   yBase += yStep;
+
+   // Ligne 2 : Setup si disponible
+   if(g_gomTV.setup_entry > 0)
+   {
+      ObjLabel("D_GOM_Setup",
+         StringFormat("Setup %s: Entry=%.2f SL=%.2f TP1=%.2f TP2=%.2f R:R=%.2f",
+            g_gomTV.setup_dir, g_gomTV.setup_entry, g_gomTV.setup_sl,
+            g_gomTV.setup_tp1, g_gomTV.setup_tp2, g_gomTV.setup_rr),
+         8, yBase, clrGold, 9);
+      yBase += yStep;
+   }
+}
+
+
+// ─── ÉTAPE 5 : Appeler LoadGOMFromTV() dans OnInit() (ligne ~2263) ──
+
+// Après :
+//    FetchHourlyPrior(); FetchZonePrior(); FetchAngelOfSpike(); FetchSpikeLevels();
+//    UpdateSMCContext();
+
+// AJOUTER :
+   // Charger GOM TV initial
+   LoadGOMFromTV();
+   if(g_gomTV.valid)
+      PrintFormat("[v10] ✅ GOM TV init: %s | verdict=%s | quality=%.0f%%",
+         g_gomTV.symbol, g_gomTV.verdict, g_gomTV.quality);
+   else
+      Print("[v10] ⚠️  GOM TV non disponible au démarrage (GOM poller lancé?)");
+
+
+// ══════════════════════════════════════════════════════════════════
+// AVANTAGES DU GOM TV vs CALCUL LOCAL
+// ══════════════════════════════════════════════════════════════════
+//
+// GOM TV (depuis TradingView Pine) :
+// ✅ Données RÉELLES du volume profile TradingView
+// ✅ Money Flow Index précis (volume réel)
+// ✅ Imbalance détecté via delta cumulatif TV
+// ✅ Smart Money Index (flux institutionnels)
+// ✅ Liquidity Score (zones liquidité TV)
+// ✅ Setup entry/SL/TP suggérés par Pine
+//
+// Calcul local (MT5) :
+// ❌ Volume synthétique (tick_volume, pas réel)
+// ❌ Delta estimé via body/range ratio (approximatif)
+// ❌ Pas de Money Flow réel
+// ❌ Pas de liquidity zones
+// ❌ Pas de setup suggeré
+//
+// ══════════════════════════════════════════════════════════════════
+// FICHIER JSON EXEMPLE (data/gom_signal.json)
+// ══════════════════════════════════════════════════════════════════
+//
+// {
+//   "symbol": "Boom500Index",
+//   "timestamp": "2026-06-07T09:00:00Z",
+//   "verdict": "BUY",
+//   "quality": 87.5,
+//   "delta": 0.45,
+//   "cvd": 12.3,
+//   "buypct": 68.0,
+//   "sellpct": 32.0,
+//   "compass": 1,
+//   "imbalance": 0.35,
+//   "volume_profile": 0.72,
+//   "liquidity_score": 0.88,
+//   "smart_money_idx": 0.65,
+//   "setup_entry": 24550.50,
+//   "setup_sl": 24500.00,
+//   "setup_tp1": 24600.00,
+//   "setup_tp2": 24650.00,
+//   "setup_rr": 2.5,
+//   "setup_dir": "BUY"
+// }
+//
+// ══════════════════════════════════════════════════════════════════
+// FIN DU PATCH
+// ══════════════════════════════════════════════════════════════════

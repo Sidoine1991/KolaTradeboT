@@ -1,0 +1,400 @@
+//+------------------------------------------------------------------+
+//| PATCH VISUEL AMÉLIORÉ — Money Management Flow + Compass + Heatmap|
+//| À intégrer dans deriveapro.mq5                                   |
+//+------------------------------------------------------------------+
+
+// ══════════════════════════════════════════════════════════════════
+// SECTION 1 : COMPASS CIRCULAIRE (comme l'image)
+// ══════════════════════════════════════════════════════════════════
+
+void DrawCompassCircular(int px, int py)
+{
+   if(!InpShowGhostPanel || !g_ghost.valid) return;
+
+   // Centre du compass
+   int cx = px + 40, cy = py + 40;
+   int radius = 35;
+
+   // Dessiner le cercle extérieur (8 segments avec caractères Unicode)
+   static const string segments[8] = {"→","↗","↑","↖","←","↙","↓","↘"};
+   static const double angles[8] = {0, 45, 90, 135, 180, 225, 270, 315};
+
+   for(int i = 0; i < 8; i++)
+   {
+      // Position sur le cercle
+      double rad = angles[i] * M_PI / 180.0;
+      int x = cx + (int)(radius * MathCos(rad));
+      int y = cy - (int)(radius * MathSin(rad));
+
+      // Couleur : actif si c'est l'octant actuel
+      color segClr = (i == g_ghost.compass) ? clrYellow : clrDimGray;
+      int fontSize = (i == g_ghost.compass) ? 12 : 9;
+
+      ObjLabelTL("Compass_Seg"+IntegerToString(i), segments[i], x-5, y-5, segClr, fontSize);
+   }
+
+   // Point central (indicateur de force)
+   double strength = g_ghost.quality / 100.0;
+   color centerClr = (g_ghost.verdict == "BUY") ? clrLimeGreen :
+                     (g_ghost.verdict == "SELL") ? clrTomato : clrGold;
+
+   // Utiliser des blocs Unicode pour le centre
+   string centerDot = (strength > 0.75) ? "⬤" : (strength > 0.5) ? "●" : (strength > 0.25) ? "◉" : "○";
+   ObjLabelTL("Compass_Center", centerDot, cx-6, cy-6, centerClr, 14);
+
+   // Label verdict sous le compass
+   ObjLabelTL("Compass_Label", g_ghost.verdict, cx-15, cy+radius+5, centerClr, 10);
+}
+
+// ══════════════════════════════════════════════════════════════════
+// SECTION 2 : HEATMAP DOM AMÉLIORÉE (barres empilées rouge/vert)
+// ══════════════════════════════════════════════════════════════════
+
+void DrawHeatmapStacked(int px, int py, int width, int height)
+{
+   if(!InpShowHeatmap || g_heatmapCount <= 0) return;
+
+   // Trier les niveaux par prix (du plus haut au plus bas)
+   struct HeatLevel { double price; double strength; bool isBuy; };
+   HeatLevel sorted[];
+   ArrayResize(sorted, g_heatmapCount);
+
+   for(int i = 0; i < g_heatmapCount; i++)
+   {
+      sorted[i].price = g_heatmapLevels[i];
+      sorted[i].strength = g_heatmapStrength[i];
+      sorted[i].isBuy = g_heatmapIsBuy[i];
+   }
+
+   // Tri simple (bulle)
+   for(int i = 0; i < g_heatmapCount-1; i++)
+      for(int j = i+1; j < g_heatmapCount; j++)
+         if(sorted[j].price > sorted[i].price)
+         {
+            HeatLevel temp = sorted[i];
+            sorted[i] = sorted[j];
+            sorted[j] = temp;
+         }
+
+   // Dessiner les barres empilées
+   int barHeight = height / MathMax(g_heatmapCount, 1);
+
+   for(int i = 0; i < g_heatmapCount; i++)
+   {
+      int y = py + i * barHeight;
+      int barWidth = (int)(sorted[i].strength * width); // Largeur proportionnelle
+
+      // Couleur : vert = achat (support), rouge = vente (résistance)
+      int intensity = (int)(sorted[i].strength * 200) + 55;
+      color barClr = sorted[i].isBuy ?
+         (color)((0<<16) | (intensity<<8) | 0) :  // Vert
+         (color)((intensity<<16) | (0<<8) | 0);   // Rouge
+
+      // Dessiner rectangle
+      string rectName = "HM_Bar"+IntegerToString(i);
+      datetime t1 = iTime(_Symbol, InpTF, 10);
+      datetime t2 = iTime(_Symbol, InpTF, 0) + PeriodSeconds(InpTF);
+
+      // Prix = niveau heatmap
+      double p1 = sorted[i].price;
+      double p2 = sorted[i].price + SymbolInfoDouble(_Symbol, SYMBOL_POINT) * barWidth * 2;
+
+      ObjRect(rectName, t1, p1, t2, p2, barClr, true);
+
+      // Label avec % de force
+      string label = StringFormat("%s %.0f%%",
+         sorted[i].isBuy ? "BUY" : "SELL",
+         sorted[i].strength * 100);
+      ObjLabelTL("HM_Lbl"+IntegerToString(i), label, px, y, clrWhite, 8);
+   }
+}
+
+// ══════════════════════════════════════════════════════════════════
+// SECTION 3 : MONEY MANAGEMENT FLOW VISUEL (guide trader)
+// ══════════════════════════════════════════════════════════════════
+
+void DrawMoneyManagementFlow(int px, int py)
+{
+   // Position : coin inférieur droit
+   int yBase = py;
+   int xBase = px;
+   int step = 16;
+
+   // ── TITRE ────────────────────────────────────────────────────
+   ObjLabel("MM_Title", "═══ MONEY MANAGEMENT FLOW ═══", xBase, yBase, C'100,200,255', 10);
+   yBase += step + 4;
+
+   // ── ÉTAPE 1 : Capital & Risk % ──────────────────────────────
+   double balance = AccountInfoDouble(ACCOUNT_BALANCE);
+   double riskPct = 2.0; // Fixe pour Boom/Crash
+   double riskAmount = balance * riskPct / 100.0;
+
+   color stepClr = C'150,220,255';
+   ObjLabel("MM_Step1", StringFormat("① Capital : $%.2f", balance), xBase, yBase, stepClr, 9);
+   yBase += step;
+   ObjLabel("MM_Step1b", StringFormat("   Risk : %.1f%% = $%.2f", riskPct, riskAmount), xBase, yBase, C'200,240,255', 9);
+   yBase += step + 4;
+
+   // ── ÉTAPE 2 : SL Distance (ATR) ──────────────────────────────
+   double atr = GetATR();
+   double slDist = atr * InpSL_ATR;
+   double slPips = slDist / SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+
+   ObjLabel("MM_Step2", StringFormat("② SL : %.1fx ATR = %.0f pips", InpSL_ATR, slPips), xBase, yBase, stepClr, 9);
+   yBase += step;
+   ObjLabel("MM_Step2b", StringFormat("   Distance : %.5f", slDist), xBase, yBase, clrTomato, 9);
+   yBase += step + 4;
+
+   // ── ÉTAPE 3 : Lot Size Calculation ───────────────────────────
+   double minLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   double lot = (InpFixedLot > 0) ? InpFixedLot : minLot;
+
+   // Calcul théorique : Risk / SL distance (en devise)
+   double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+   double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+
+   ObjLabel("MM_Step3", StringFormat("③ Lot Size : %.2f", lot), xBase, yBase, stepClr, 9);
+   yBase += step;
+
+   string lotInfo = (InpFixedLot > 0) ? "FIXE" : "MIN broker";
+   ObjLabel("MM_Step3b", StringFormat("   Mode : %s", lotInfo), xBase, yBase, C'200,240,255', 9);
+   yBase += step + 4;
+
+   // ── ÉTAPE 4 : TP Distance & R:R ──────────────────────────────
+   double tpDist = atr * InpTP_ATR;
+   double tpPips = tpDist / SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   double rr = InpTP_ATR / InpSL_ATR;
+
+   ObjLabel("MM_Step4", StringFormat("④ TP : %.1fx ATR = %.0f pips", InpTP_ATR, tpPips), xBase, yBase, stepClr, 9);
+   yBase += step;
+
+   color rrClr = (rr >= 2.0) ? clrLimeGreen : (rr >= 1.5) ? clrGold : clrOrange;
+   ObjLabel("MM_Step4b", StringFormat("   R:R = 1:%.2f", rr), xBase, yBase, rrClr, 9);
+   yBase += step + 4;
+
+   // ── ÉTAPE 5 : Résultat Potentiel ─────────────────────────────
+   double potentialLoss = riskAmount;
+   double potentialWin = riskAmount * rr;
+
+   ObjLabel("MM_Step5", "⑤ Résultat Potentiel :", xBase, yBase, stepClr, 9);
+   yBase += step;
+   ObjLabel("MM_Step5a", StringFormat("   Loss : -$%.2f", potentialLoss), xBase, yBase, clrTomato, 9);
+   yBase += step;
+   ObjLabel("MM_Step5b", StringFormat("   Win  : +$%.2f", potentialWin), xBase, yBase, clrLimeGreen, 9);
+   yBase += step + 4;
+
+   // ── ÉTAPE 6 : Validation Finale ──────────────────────────────
+   bool valid = (rr >= 1.5 && lot >= minLot && atr > 0);
+   string statusTxt = valid ? "✓ SETUP VALIDE" : "✗ SETUP INVALIDE";
+   color statusClr = valid ? clrLimeGreen : clrTomato;
+
+   ObjLabel("MM_Step6", StringFormat("⑥ %s", statusTxt), xBase, yBase, statusClr, 10);
+   yBase += step + 4;
+
+   // ── RÈGLES MONEY MANAGEMENT (rappel) ─────────────────────────
+   ObjLabel("MM_Rules", "─── Règles MM ───", xBase, yBase, C'120,120,120', 8);
+   yBase += step - 2;
+   ObjLabel("MM_Rule1", "• Max 2% risk/trade", xBase, yBase, clrDimGray, 8);
+   yBase += 12;
+   ObjLabel("MM_Rule2", "• Min R:R = 1:1.5", xBase, yBase, clrDimGray, 8);
+   yBase += 12;
+   ObjLabel("MM_Rule3", StringFormat("• Daily stop: %.0f%%", InpCMDailyStopPct), xBase, yBase, clrDimGray, 8);
+   yBase += 12;
+
+   // ── ALERTE SI RÈGLE VIOLÉE ───────────────────────────────────
+   if(rr < 1.5)
+   {
+      yBase += 4;
+      ObjLabel("MM_Alert", "⚠ R:R insuffisant!", xBase, yBase, clrOrange, 9);
+   }
+}
+
+// ══════════════════════════════════════════════════════════════════
+// SECTION 4 : DELTA BARS AMÉLIORÉES (histogramme vertical)
+// ══════════════════════════════════════════════════════════════════
+
+void DrawDeltaBarsImproved(int px, int py, int width, int height)
+{
+   if(!InpShowDeltaBars || !g_ghost.valid || g_ghost.deltaCount <= 0) return;
+
+   int nbShow = MathMin(g_ghost.deltaCount, InpDeltaBarsCount);
+
+   // Trouver max delta pour normaliser
+   double maxD = 0.001;
+   for(int i = 0; i < nbShow; i++)
+      maxD = MathMax(maxD, MathAbs(g_ghost.deltaHistory[i]));
+
+   // Largeur d'une barre
+   int barWidth = width / nbShow;
+
+   // Dessiner chaque barre
+   for(int i = 0; i < nbShow; i++)
+   {
+      double d = g_ghost.deltaHistory[nbShow - 1 - i]; // Du plus ancien au plus récent
+      double norm = MathAbs(d) / maxD; // 0-1
+
+      // Hauteur proportionnelle
+      int barHeight = (int)(norm * height);
+
+      // Couleur : vert = buy pressure, rouge = sell pressure
+      int intensity = (int)(norm * 200) + 55;
+      color barClr = (d >= 0) ?
+         (color)((0<<16) | (intensity<<8) | 0) :  // Vert
+         (color)((intensity<<16) | (0<<8) | 0);   // Rouge
+
+      // Dessiner barre (label avec blocs Unicode)
+      int x = px + i * barWidth;
+      int y = py + height - barHeight;
+
+      string bar = "";
+      int nbBlocks = barHeight / 8; // 1 bloc = 8 pixels
+      for(int b = 0; b < nbBlocks; b++) bar += "█";
+
+      ObjLabelTL("DBar_"+IntegerToString(i), bar, x, y, barClr, 8);
+   }
+
+   // Ligne zéro
+   ObjLabelTL("DBar_Zero", "━━━━━━━━━━━━━━━━━━━━", px, py+height, clrDimGray, 8);
+}
+
+// ══════════════════════════════════════════════════════════════════
+// SECTION 5 : CVD LINE AMÉLIORÉE (graphique mini)
+// ══════════════════════════════════════════════════════════════════
+
+void DrawCVDGraph(int px, int py, int width, int height)
+{
+   if(!InpShowCVDLine || !g_ghost.valid || g_ghost.deltaCount <= 0) return;
+
+   // Calculer historique CVD
+   double cvdHistory[];
+   int cvdN = MathMin(g_ghost.deltaCount, 40);
+   ArrayResize(cvdHistory, cvdN);
+
+   double runCVD = 0;
+   for(int i = cvdN-1; i >= 0; i--)
+   {
+      runCVD += g_ghost.deltaHistory[i];
+      cvdHistory[cvdN-1-i] = runCVD;
+   }
+
+   // Trouver min/max pour normaliser
+   double cvdMin = cvdHistory[0], cvdMax = cvdHistory[0];
+   for(int i = 1; i < cvdN; i++)
+   {
+      cvdMin = MathMin(cvdMin, cvdHistory[i]);
+      cvdMax = MathMax(cvdMax, cvdHistory[i]);
+   }
+
+   double cvdRange = cvdMax - cvdMin;
+   if(cvdRange < 0.01) cvdRange = 1.0;
+
+   // Dessiner ligne CVD avec caractères Unicode
+   int barWidth = width / cvdN;
+
+   for(int i = 0; i < cvdN; i++)
+   {
+      double norm = (cvdHistory[i] - cvdMin) / cvdRange; // 0-1
+      int y = py + (int)((1.0 - norm) * height);
+      int x = px + i * barWidth;
+
+      // Couleur gradient selon valeur CVD
+      color ptClr = (cvdHistory[i] >= 0) ?
+         (color)((0<<16) | ((int)(norm*150)+105)<<8) | 0) :
+         (color)(((int)(norm*150)+105)<<16) | (0<<8) | 0);
+
+      ObjLabelTL("CVD_Pt"+IntegerToString(i), "●", x, y, ptClr, 6);
+   }
+
+   // Label CVD actuel
+   ObjLabelTL("CVD_Value", StringFormat("CVD: %+.2f", g_ghost.cvd),
+      px, py-15, (g_ghost.cvd>=0)?clrLimeGreen:clrTomato, 9);
+}
+
+// ══════════════════════════════════════════════════════════════════
+// SECTION 6 : INTÉGRATION DANS DrawGhostPanel()
+// Remplacer la fonction DrawGhostPanel() existante par celle-ci
+// ══════════════════════════════════════════════════════════════════
+
+void DrawGhostPanel()
+{
+   if(!InpShowGhostPanel || !g_ghost.valid) return;
+
+   int px = InpGhostPanelX, py = InpGhostPanelY;
+   int step = 14;
+
+   // ── Titre GHOST ──────────────────────────────────────────────
+   color titleClr = (g_ghost.verdict=="BUY") ? clrLimeGreen :
+                    (g_ghost.verdict=="SELL") ? clrTomato : clrGold;
+   ObjLabelTL("G_Title",
+      StringFormat("▣ GHOST OrderFlow — %s (q=%.0f%%)", g_ghost.verdict, g_ghost.quality),
+      px, py, titleClr, 9);
+   py += step + 4;
+
+   // ── COMPASS CIRCULAIRE (comme l'image) ───────────────────────
+   DrawCompassCircular(px, py);
+   py += 90; // Espace pour le compass
+
+   // ── Delta moyen + CVD ─────────────────────────────────────────
+   color dClr = (g_ghost.delta > 0) ? clrDeepSkyBlue : clrOrangeRed;
+   ObjLabelTL("G_Delta",
+      StringFormat("Δ Delta : %+.3f    CVD : %+.2f", g_ghost.delta, g_ghost.cvd),
+      px, py, dClr, 9);
+   py += step;
+
+   // ── Buy/Sell % ────────────────────────────────────────────────
+   string bsBar = "";
+   int bFill = (int)(g_ghost.buypct / 10.0);
+   for(int i = 0; i < 10; i++) bsBar += (i < bFill) ? "█" : "░";
+
+   color bsClr = (g_ghost.buypct > 60) ? clrLimeGreen :
+                 (g_ghost.buypct < 40) ? clrTomato : clrGold;
+   ObjLabelTL("G_Sent",
+      StringFormat("Buy [%s] %.0f%%   Sell %.0f%%", bsBar, g_ghost.buypct, g_ghost.sellpct),
+      px, py, bsClr, 9);
+   py += step + 4;
+
+   // ── DELTA BARS AMÉLIORÉES ─────────────────────────────────────
+   if(InpShowDeltaBars && g_ghost.deltaCount > 0)
+   {
+      ObjLabelTL("G_DBarTitle", "Delta Bars (rouge=sell│vert=buy) :", px, py, clrSilver, 8);
+      py += step;
+
+      DrawDeltaBarsImproved(px, py, 200, 60);
+      py += 70;
+   }
+
+   // ── CVD GRAPHIQUE ─────────────────────────────────────────────
+   if(InpShowCVDLine)
+   {
+      ObjLabelTL("G_CVDTitle", "CVD (profil cumulatif) :", px, py, clrSilver, 8);
+      py += step;
+
+      DrawCVDGraph(px, py, 200, 50);
+      py += 60;
+   }
+
+   // ── HEATMAP DOM EMPILÉE ───────────────────────────────────────
+   if(InpShowHeatmap && g_heatmapCount > 0)
+   {
+      ObjLabelTL("G_HMTitle",
+         StringFormat("Heatmap DOM : %d niveaux", g_heatmapCount),
+         px, py, clrSilver, 8);
+      py += step;
+
+      DrawHeatmapStacked(px, py, 150, g_heatmapCount * 12);
+   }
+}
+
+// ══════════════════════════════════════════════════════════════════
+// SECTION 7 : AJOUT MONEY MANAGEMENT FLOW AU DASHBOARD PRINCIPAL
+// Ajouter cet appel dans DrawChartIndicators(), après le panel droit
+// ══════════════════════════════════════════════════════════════════
+
+// Dans DrawChartIndicators(), après le panel dashboard droit, ajouter :
+//
+// // ── MONEY MANAGEMENT FLOW (coin inférieur droit) ─────────────
+// DrawMoneyManagementFlow(InpDashPanelWidth - 320, ChartGetInteger(0, CHART_HEIGHT_IN_PIXELS) - 300);
+
+//+------------------------------------------------------------------+
+// FIN DU PATCH — Compilation requise après intégration
+//+------------------------------------------------------------------+

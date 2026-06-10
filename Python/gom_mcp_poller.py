@@ -9,12 +9,12 @@ Utilise directement TradingView MCP pour changer symboles et lire données.
 Flux :
     Symbols list → chart_set_symbol (MCP) → data_get_study_values (MCP)
         ↓
-    POST /gom-verdict (AI server)
+    POST /gom-verdict (ai_server)
         ↓
-    TradeManager EA → dashboard sync
+    SMC_Universal EA → SMCGP_PollGOM() → dashboard GOM
 
 Usage :
-    python Python/gom_mcp_poller.py --symbol "Boom 500 Index"
+    python python/gom_mcp_poller.py --symbol "Boom 500 Index"
     python Python/gom_mcp_poller.py --symbols "XAUUSD,BTCUSD,Boom 500 Index"
     python Python/gom_mcp_poller.py --once  # un seul tour sur tous les symboles
 """
@@ -194,10 +194,54 @@ def push_gom_verdict(payload: Dict) -> bool:
 
 
 def persist_gom_signal(payload: Dict):
-    """Écrit gom_signal.json pour EA MT5."""
+    """
+    Écrit gom_signal.json pour EA MT5.
+    Format: {"XAUUSD": {...}, "Boom 500 Index": {...}, ...}
+    Accumule les données par symbole pour support multi-symbole.
+    """
     out = _DATA_DIR / "gom_signal.json"
     try:
-        out.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        # Charger les données existantes si présentes
+        existing = {}
+        if out.is_file():
+            try:
+                existing = json.loads(out.read_text(encoding="utf-8"))
+                if not isinstance(existing, dict):
+                    existing = {}
+            except Exception:
+                existing = {}
+
+        # Extraire le symbole du payload
+        symbol = payload.get("symbol", "UNKNOWN")
+
+        # ✅ FUSIONNER INTELLIGENT: ne pas écraser les verdicts déjà calculés (vn >= 2)
+        # Raison: gom_sync_with_report.py calcule verdicts précis; ne pas perdre le travail
+        if symbol in existing:
+            prev = existing[symbol]
+            prev_vn = prev.get("verdict_num", 0)
+            new_vn = payload.get("verdict_num", 0)
+
+            # Si le verdict précédent est "bon" (vn >= 2) et le nouveau est "nul" (vn == 0/1),
+            # garder l'ancien (il a probablement été calculé par gom_pine_calculator)
+            if prev_vn >= 2 and new_vn <= 1:
+                # Fusionner seulement les données techniques (prix, BB, RSI)
+                # Garder verdict, score, verdict_num de l'ancien
+                payload_copy = payload.copy()
+                for key in ["bb_up", "bb_mid", "bb_dn", "tf_m1_rsi", "entry", "close", "timestamp"]:
+                    if key in payload_copy:
+                        prev[key] = payload_copy[key]
+                existing[symbol] = prev
+                log.info(f"✅ {symbol}: Fusion SMART (gardé vn={prev_vn}, mis à jour prix/RSI)")
+            else:
+                # Sinon, remplacer complètement
+                existing[symbol] = payload
+                log.info(f"✅ {symbol}: Remplacement complet")
+        else:
+            existing[symbol] = payload
+
+        # Écrire le dict accumulé
+        out.write_text(json.dumps(existing, indent=2), encoding="utf-8")
+        log.info(f"✅ GOM signal persisted: {symbol} (total symbols: {len(existing)})")
     except Exception as e:
         log.error(f"Erreur écriture {out}: {e}")
 

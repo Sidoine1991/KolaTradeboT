@@ -11490,6 +11490,87 @@ async def gom_latest():
         return {"ok": False, "message": str(e)}
 
 
+@app.get("/gom-verdict")
+async def gom_verdict(symbol: str = Query(...)):
+    """
+    Endpoint pour MT5 SMC_Universal — retourne le dernier verdict GOM pour n'importe quel symbole.
+    Support: XAUUSD, Boom 500 Index, Crash 500 Index, BTCUSD, etc.
+    Données sourced de gom_signal.json (mis à jour par gom_mcp_poller.py).
+
+    Gère les 2 formats : ancien (un seul objet) et nouveau (dict par symbole).
+    Retourne ok=false si les données sont vides (verdict=WAIT).
+    """
+    try:
+        if not symbol or not symbol.strip():
+            return {"ok": False, "message": "symbol requis"}
+
+        root = Path(__file__).resolve().parents[1]
+        gom_file = root / "data" / "gom_signal.json"
+
+        if not gom_file.is_file():
+            return {
+                "ok": False,
+                "message": "gom_signal.json absent — gom_mcp_poller.py pas lancé?",
+            }
+
+        gom_data = json.loads(gom_file.read_text(encoding="utf-8"))
+        result = None
+
+        # Format 1: Dict par symbole (nouveau) — {"XAUUSD": {...}, "Boom 500": {...}}
+        if isinstance(gom_data, dict) and symbol in gom_data:
+            result = gom_data[symbol]
+
+        # Format 2: Un seul objet avec "symbol" field (ancien) — {"symbol": "XAUUSD", ...}
+        elif isinstance(gom_data, dict) and gom_data.get("symbol") == symbol:
+            result = gom_data
+
+        # Pas de données trouvées
+        if result is None:
+            return {
+                "ok": False,
+                "message": f"Symbole {symbol} non trouvé",
+            }
+
+        # IMPORTANT: Si verdict est WAIT (données vides), retourner ok=false pour que MT5 ignore
+        if result.get("verdict") == "WAIT" or result.get("verdict_num") == 0:
+            return {
+                "ok": False,
+                "message": "Données GOM non disponibles (WAIT) — gom_mcp_poller.py doit poller ce symbole",
+                "symbol": symbol,
+            }
+
+        # Ajouter le flag ok=true si les données sont réelles
+        result["ok"] = True
+        return result
+
+    except Exception as e:
+        logger.warning(f"gom-verdict({symbol}): {e}")
+        return {
+            "ok": False,
+            "message": str(e),
+        }
+
+
+@app.get("/gom-verdict-clean")
+async def gom_verdict_clean(symbol: str = Query(...)):
+    """Endpoint simplifié — retourne le verdict brut sans aucun traitement de staleness."""
+    try:
+        if not symbol or not symbol.strip():
+            return {"ok": False, "message": "symbol required"}
+        root = Path(__file__).resolve().parents[1]
+        gom_file = root / "data" / "gom_signal.json"
+        if not gom_file.is_file():
+            return {"ok": False, "message": "gom_signal.json missing"}
+        gom_data = json.loads(gom_file.read_text(encoding="utf-8"))
+        if isinstance(gom_data, dict) and symbol in gom_data:
+            result = gom_data[symbol]
+            result["ok"] = result.get("verdict_num", 0) != 0
+            return result
+        return {"ok": False, "message": f"Symbol {symbol} not found"}
+    except Exception as e:
+        return {"ok": False, "message": str(e)}
+
+
 @app.post("/gom/interpret", response_model=GOMInterpretResponse)
 async def gom_interpret(req: Request):
     """
