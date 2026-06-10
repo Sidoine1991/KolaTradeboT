@@ -86,7 +86,8 @@ public:
         Print("[UPLOAD] Sending ", count, " candles for ", sym, " to ", url);
 
         // Envoie la requête
-        int response_code = WebRequest("POST", url, headers, timeout_ms, data, result);
+        string result_headers = "";
+        int response_code = WebRequest("POST", url, headers, timeout_ms, data, result, result_headers);
 
         if (response_code == 200) {
             Print("OK: Candles uploaded for ", sym);
