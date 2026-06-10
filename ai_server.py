@@ -76,6 +76,17 @@ logging.basicConfig(
 )
 logger = logging.getLogger("tradbot_ai")
 
+# Import du calculateur de verdicts CORRECT (v2)
+try:
+    from gom_verdict_calculator_v2 import GOMVerdictCalculatorV2
+    GOM_VERDICT_CALCULATOR_V2_AVAILABLE = True
+    _gom_verdict_calc = GOMVerdictCalculatorV2()
+    logger.info("✅ GOMVerdictCalculatorV2 loaded successfully")
+except ImportError as _imp_err:
+    GOM_VERDICT_CALCULATOR_V2_AVAILABLE = False
+    _gom_verdict_calc = None
+    logger.warning(f"⚠️ GOMVerdictCalculatorV2 not available: {_imp_err}")
+
 try:
     from divergence_strategy import (
         candles_to_dataframe,
@@ -8358,13 +8369,31 @@ async def gom_kola_dashboard(symbol: str = Query("XAUUSD")):
 
         record = gom_data[symbol]
 
-        # Construire réponse depuis JSON local
-        verdict_num = record.get("verdict_num", 0)
-        verdict_map = {
-            -3: "PERFECT SELL", -2: "GOOD SELL", -1: "SELL BIAS",
-            0: "WAIT", 1: "BUY BIAS", 2: "GOOD BUY", 3: "PERFECT BUY"
-        }
-        verdict = record.get("verdict", verdict_map.get(verdict_num, "WAIT"))
+        # ✅ NOUVELLE LOGIQUE: Recalculer les verdicts avec GOMVerdictCalculatorV2
+        if GOM_VERDICT_CALCULATOR_V2_AVAILABLE and _gom_verdict_calc:
+            try:
+                # Enrichir le record avec les verdicts CORRECTS
+                record = _gom_verdict_calc.enrich_record(record)
+                verdict_num = record.get("verdict_num", 0)
+                verdict = record.get("verdict", "WAIT")
+                logger.debug(f"✅ Verdict calculé pour {symbol}: {verdict} (vn={verdict_num})")
+            except Exception as e:
+                logger.error(f"⚠️ Erreur calcul verdict v2 pour {symbol}: {e}")
+                # Fallback: utiliser verdict du JSON
+                verdict_num = record.get("verdict_num", 0)
+                verdict_map = {
+                    -3: "PERFECT SELL", -2: "GOOD SELL", -1: "SELL",
+                    0: "WAIT", 1: "BUY", 2: "GOOD BUY", 3: "PERFECT BUY"
+                }
+                verdict = record.get("verdict", verdict_map.get(verdict_num, "WAIT"))
+        else:
+            # Fallback: utiliser verdict du JSON si calculateur v2 indisponible
+            verdict_num = record.get("verdict_num", 0)
+            verdict_map = {
+                -3: "PERFECT SELL", -2: "GOOD SELL", -1: "SELL",
+                0: "WAIT", 1: "BUY", 2: "GOOD BUY", 3: "PERFECT BUY"
+            }
+            verdict = record.get("verdict", verdict_map.get(verdict_num, "WAIT"))
 
         response = {
             "ok": True,
@@ -8374,6 +8403,7 @@ async def gom_kola_dashboard(symbol: str = Query("XAUUSD")):
             "verdict_num": verdict_num,
             "score_buy": round(record.get("score_buy", 0.0), 2),
             "score_sell": round(record.get("score_sell", 0.0), 2),
+            "verdict_gap": round(record.get("verdict_gap", 0.0), 2),  # ← NOUVEAU: gap |buy - sell|
             "kola_buy": round(record.get("kola_buy", 0.0), 2),
             "kola_sell": round(record.get("kola_sell", 0.0), 2),
             "entry": round(record.get("entry", 0.0), 2),
@@ -8381,8 +8411,9 @@ async def gom_kola_dashboard(symbol: str = Query("XAUUSD")):
             "tp": round(record.get("tp", 0.0), 2),
             "tf_global_dir": record.get("tf_global_dir", "NEUT"),
             "tf_global_strength": int(record.get("tf_global_strength", 0)),
+            "coherence_ok": record.get("coherence_ok", False),  # ← NOUVEAU: cohérence validée
             "coherence_pct": round(record.get("coherence_pct", 0.0), 1),
-            "filter_ratio": round(record.get("filter_ratio", 0.0), 2),
+            "filter_ratio": round(record.get("filter_ratio", 0.0), 2),  # ← NOUVEAU: 6 filters ratio
             "bb_up": round(record.get("bb_up", 0.0), 2),
             "bb_mid": round(record.get("bb_mid", 0.0), 2),
             "bb_dn": round(record.get("bb_dn", 0.0), 2),
