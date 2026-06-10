@@ -407,7 +407,12 @@ void SMCGP_PollGOM()
 
    // Si GOMPollIntervalSec = 0, poll à chaque tick (instantané)
    // Sinon, respecter l'interval en secondes
-   if(GOMPollIntervalSec > 0 && (int)(TimeCurrent() - g_smcLastGOMPoll) < GOMPollIntervalSec) return;
+   if(GOMPollIntervalSec > 0)
+   {
+      int age = (int)(TimeCurrent() - g_smcLastGOMPoll);
+      if(age < GOMPollIntervalSec) return;  // Interval pas encore écoulé
+   }
+   // else: GOMPollIntervalSec == 0 → poll TOUJOURS (instantané)
 
    g_smcLastGOMPoll = TimeCurrent();
 
@@ -432,10 +437,16 @@ void SMCGP_PollGOM()
          g_smcGomSource = "WAIT_POLL";  // Données pas encore pollées
       else
          g_smcGomSource = "HTTP_" + IntegerToString(g_smcLastHttpCode);
+
+      // DEBUG: Log des requêtes échouées
+      Print("[GOM-POLL] ❌ FAILED for ", sym, " | Source: ", g_smcGomSource, " | Last HTTP: ", g_smcLastHttpCode);
       return;
    }
 
    SMCGP_ParseGOMBody(body);
+
+   // DEBUG: Log des requêtes réussies
+   Print("[GOM-POLL] ✅ SUCCESS for ", sym, " | Verdict: ", g_smcGomVerdict, " (vn=", g_smcGomVerdictNum, ") | Coherence: ", g_smcGomCoherence, "%");
 }
 
 bool SMCGP_IsGoodPerfect(int vnum)
