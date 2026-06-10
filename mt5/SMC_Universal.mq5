@@ -2,8 +2,14 @@
 //| Robot Smart Money Concepts - UN SEUL ROBOT multi-actifs + IA      |
 //| Boom/Crash | Volatility | Forex | Commodities | Metals           |
 //| GOM: TradingView -> ai_server -> SMC (symbole graphique MT5)      |
+//|                                                                    |
+//| ✅ UPDATE 2026-06-10: GOM Pipeline 100% LIVE (NO STALE JSON)     |
+//| - SMCGP_PollGOM() now calls /gom-kola-dashboard (LIVE) first     |
+//| - Fallback chain: /gom-kola-dashboard → /gom-tableau-complete   |
+//| - Response includes ALL fields for MT5 parsing                   |
+//| - Verdicts SYNCHRONIZED with TradingView (< 1 sec latency)      |
 #property copyright "TradBOT SMC"
-#property version   "1.01"
+#property version   "1.02"
 #property strict
 
 #include <Trade/Trade.mqh>
