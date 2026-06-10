@@ -1,23 +1,12 @@
 //+------------------------------------------------------------------+
 //| MT5 Candles Uploader Module — Envoie les candles à l'API
-//| Version: 1.0
+//| Version: 2.0 (Fixed MQL5 syntax)
 //+------------------------------------------------------------------+
 
 #ifndef MT5_CANDLES_UPLOADER_MQH
 #define MT5_CANDLES_UPLOADER_MQH
 
-#include <WinAPI/winsock.mqh>
-
-// Structure pour une candle
-struct CandleData {
-    long time;      // Unix timestamp
-    double open;
-    double high;
-    double low;
-    double close;
-    long volume;
-};
-
+// Classe pour uploader les candles
 class MT5CandlesUploader {
 private:
     string aiServerUrl;
@@ -25,36 +14,46 @@ private:
     int timeout_ms;
 
 public:
-    MT5CandlesUploader(string _symbol, string _serverUrl = "http://localhost:8000") {
+    // Constructeur
+    MT5CandlesUploader(string _symbol, string _serverUrl) {
         symbol = _symbol;
         aiServerUrl = _serverUrl;
         timeout_ms = 5000;
     }
 
-    // Récupère les candles depuis MT5 et les formate en JSON
-    string FormatCandlesJSON(string sym, string timeframe, int count = 100) {
-        // Récupère les candles
+    // Récupère les candles et formate en JSON
+    string FormatCandlesJSON(string sym, ENUM_TIMEFRAMES tf, int count = 100) {
         MqlRates rates[];
-        string tf_str = IntToString(PeriodSeconds(StringToTimeframe(timeframe)) / 60);
 
-        int bars = CopyRates(sym, StringToTimeframe(timeframe), 0, count, rates);
+        int bars = CopyRates(sym, tf, 0, count, rates);
         if (bars <= 0) {
-            Print("❌ Erreur CopyRates pour ", sym, " ", timeframe);
+            Print("Error: CopyRates failed for ", sym);
             return "";
         }
 
         // Construit le JSON
-        string json = "{\"symbol\":\"" + sym + "\",\"timeframe\":\"" + timeframe + "\",\"candles\":[";
+        string json = "{\"symbol\":\"" + sym + "\",\"timeframe\":\"";
+
+        // Ajoute le timeframe
+        if (tf == PERIOD_M1) json += "M1";
+        else if (tf == PERIOD_M5) json += "M5";
+        else if (tf == PERIOD_M15) json += "M15";
+        else if (tf == PERIOD_H1) json += "H1";
+        else if (tf == PERIOD_H4) json += "H4";
+        else if (tf == PERIOD_D1) json += "D1";
+        else json += "M1";
+
+        json += "\",\"candles\":[";
 
         for (int i = 0; i < bars; i++) {
             if (i > 0) json += ",";
             json += "{";
-            json += "\"time\":" + IntToString(rates[i].time) + ",";
+            json += "\"time\":" + IntegerToString((long)rates[i].time) + ",";
             json += "\"open\":" + DoubleToString(rates[i].open, 2) + ",";
             json += "\"high\":" + DoubleToString(rates[i].high, 2) + ",";
             json += "\"low\":" + DoubleToString(rates[i].low, 2) + ",";
             json += "\"close\":" + DoubleToString(rates[i].close, 2) + ",";
-            json += "\"volume\":" + IntToString(rates[i].tick_volume);
+            json += "\"volume\":" + IntegerToString((long)rates[i].tick_volume);
             json += "}";
         }
 
@@ -63,11 +62,11 @@ public:
     }
 
     // Envoie les candles à l'API
-    bool UploadCandles(string sym, string timeframe, int count = 100) {
-        string json = FormatCandlesJSON(sym, timeframe, count);
+    bool UploadCandles(string sym, ENUM_TIMEFRAMES tf, int count = 100) {
+        string json = FormatCandlesJSON(sym, tf, count);
 
         if (json == "") {
-            Print("❌ Erreur formatage JSON");
+            Print("Error: JSON formatting failed");
             return false;
         }
 
@@ -75,46 +74,44 @@ public:
         string url = aiServerUrl + "/mt5/upload-candles";
         string headers = "Content-Type: application/json\r\n";
 
-        char data[];
+        uchar data[];
+        uchar result[];
+
         int len = StringLen(json);
         ArrayResize(data, len);
         for (int i = 0; i < len; i++) {
             data[i] = (uchar)StringGetCharacter(json, i);
         }
 
-        Print("[UPLOAD] Sending ", count, " candles for ", sym, " ", timeframe, " to ", url);
+        Print("[UPLOAD] Sending ", count, " candles for ", sym, " to ", url);
 
         // Envoie la requête
-        char response[];
-        int response_code = WebRequest(
-            "POST",
-            url,
-            headers,
-            timeout_ms,
-            data,
-            response
-        );
+        int response_code = WebRequest("POST", url, headers, timeout_ms, data, result);
 
         if (response_code == 200) {
-            Print("✅ Candles uploaded successfully for ", sym, " ", timeframe);
+            Print("OK: Candles uploaded for ", sym);
             return true;
         } else {
-            Print("❌ Upload failed. Code: ", response_code);
+            Print("ERROR: Upload failed. Code: ", response_code);
             return false;
         }
     }
 
-    // Envoie les candles pour plusieurs timeframes
+    // Envoie les candles pour tous les timeframes
     bool UploadAllTimeframes(string sym) {
         bool success = true;
-        string timeframes[] = {"M1", "M5", "M15", "H1", "H4", "D1"};
 
-        for (int i = 0; i < ArraySize(timeframes); i++) {
-            if (!UploadCandles(sym, timeframes[i], 100)) {
-                success = false;
-            }
-            Sleep(500); // Délai entre les requêtes
-        }
+        if (!UploadCandles(sym, PERIOD_M1, 100)) success = false;
+        Sleep(500);
+        if (!UploadCandles(sym, PERIOD_M5, 100)) success = false;
+        Sleep(500);
+        if (!UploadCandles(sym, PERIOD_M15, 100)) success = false;
+        Sleep(500);
+        if (!UploadCandles(sym, PERIOD_H1, 100)) success = false;
+        Sleep(500);
+        if (!UploadCandles(sym, PERIOD_H4, 100)) success = false;
+        Sleep(500);
+        if (!UploadCandles(sym, PERIOD_D1, 100)) success = false;
 
         return success;
     }
