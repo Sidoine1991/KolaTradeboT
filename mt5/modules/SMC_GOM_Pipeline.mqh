@@ -402,7 +402,11 @@ void SMCGP_ParseSetupFromGOM(const string &body)
 void SMCGP_PollGOM()
 {
    if(!UseGOMVerdictFilter && !UseGOMPipeline && !ShowGOMDashboard) return;
-   if((int)(TimeCurrent() - g_smcLastGOMPoll) < GOMPollIntervalSec) return;
+
+   // Si GOMPollIntervalSec = 0, poll à chaque tick (instantané)
+   // Sinon, respecter l'interval en secondes
+   if(GOMPollIntervalSec > 0 && (int)(TimeCurrent() - g_smcLastGOMPoll) < GOMPollIntervalSec) return;
+
    g_smcLastGOMPoll = TimeCurrent();
 
    string sym = SMCGP_EncodeSym(SMCGP_ResolveGOMSym(_Symbol));
