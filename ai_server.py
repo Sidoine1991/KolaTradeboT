@@ -76,6 +76,17 @@ logging.basicConfig(
 )
 logger = logging.getLogger("tradbot_ai")
 
+# Import GOM Live Calculator + Verdict Calculator v2
+try:
+    from gom_live_calculator import GOMSignalsLiveCalculator
+    GOM_LIVE_CALCULATOR_AVAILABLE = True
+    _gom_live_calc = GOMSignalsLiveCalculator()
+    logger.info("✅ GOMSignalsLiveCalculator loaded successfully (100% LOCAL)")
+except ImportError as _imp_err:
+    GOM_LIVE_CALCULATOR_AVAILABLE = False
+    _gom_live_calc = None
+    logger.warning(f"⚠️ GOMSignalsLiveCalculator not available: {_imp_err}")
+
 # Import du calculateur de verdicts CORRECT (v2)
 try:
     from gom_verdict_calculator_v2 import GOMVerdictCalculatorV2
@@ -8314,127 +8325,109 @@ def _cache_gom_data(symbol: str, data: Dict[str, Any]):
 @app.get("/gom-kola-dashboard")
 async def gom_kola_dashboard(symbol: str = Query("XAUUSD")):
     """
-    Récupère les données GOM/KOLA depuis data/gom_signal.json (100% LOCAL, NO TradingView).
-    Utilisé par SMC_Universal (MT5) pour récupérer les verdicts et niveaux Kola.
+    ✅ NOUVEAU: Calcule les données GOM/KOLA EN TEMPS RÉEL (100% LOCAL, NO JSON STALE)
 
-    Retourne (source: local JSON uniquement):
+    Pipeline:
+    1. GOMSignalsLiveCalculator récupère candles + calcule indicateurs LIVE
+    2. GOMVerdictCalculatorV2 applique logique de verdicts CORRECTE
+    3. Retourne verdict FRAIS (pas de JSON stale)
+
+    Retourne:
     {
         "ok": true,
         "symbol": "XAUUSD",
-        "timestamp": "2026-06-10T14:30:00Z",
-        "verdict": "PERFECT BUY",
-        "verdict_num": 3,
-        "score_buy": 7.52,
-        "score_sell": 1.65,
+        "timestamp": "2026-06-10T17:46:20Z",  ← ACTUEL (pas 6+ heures!)
+        "verdict": "PERFECT SELL",             ← CORRECT (matches TradingView)
+        "verdict_num": -3,
+        "score_buy": 1.65,
+        "score_sell": 7.52,
         "kola_buy": 4191.0,
         "kola_sell": 4198.0,
-        "entry": 4192.2,
-        "sl": 6040.0,
-        "tp": 6028.0,
-        "tf_global_dir": "BULL",
-        "tf_global_strength": 6,
-        "coherence_pct": 60.0,
-        "source": "local_json"
+        "source": "live_calculation"          ← Calculé EN TEMPS RÉEL
     }
     """
     try:
-        # Vérifier cache d'abord
+        # Vérifier cache d'abord (2 min TTL)
         cached_data = _get_cached_gom_data(symbol)
         if cached_data:
             return cached_data
 
-        # NOUVELLE LOGIQUE: Charger DIRECTEMENT depuis JSON local (NO TradingView)
-        gom_file = Path(__file__).parent / "data" / "gom_signal.json"
-
-        if not gom_file.exists():
+        # ✅ NOUVELLE LOGIQUE: Calculer EN TEMPS RÉEL avec GOMSignalsLiveCalculator
+        if not GOM_LIVE_CALCULATOR_AVAILABLE or not _gom_live_calc:
             return {
                 "ok": False,
                 "symbol": symbol,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
-                "error": "GOM signal file not found",
-                "source": "local_json"
+                "error": "Live calculator not available",
+                "source": "live_calculation_error"
             }
 
-        with open(gom_file, 'r', encoding='utf-8') as f:
-            gom_data = json.load(f)
+        # 1. Récupérer record FRAIS (candles + indicateurs)
+        record = _gom_live_calc.calculate_record_live(symbol)
 
-        if symbol not in gom_data:
+        if "error" in record:
             return {
                 "ok": False,
                 "symbol": symbol,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "error": f"Symbol {symbol} not in GOM data",
-                "source": "local_json"
+                "timestamp": record.get("timestamp", datetime.now(timezone.utc).isoformat()),
+                "error": record.get("error"),
+                "source": "live_calculation_error"
             }
 
-        record = gom_data[symbol]
-
-        # ✅ NOUVELLE LOGIQUE: Recalculer les verdicts avec GOMVerdictCalculatorV2
+        # 2. Enrichir avec verdicts CORRECTS (v2)
         if GOM_VERDICT_CALCULATOR_V2_AVAILABLE and _gom_verdict_calc:
             try:
-                # Enrichir le record avec les verdicts CORRECTS
                 record = _gom_verdict_calc.enrich_record(record)
-                verdict_num = record.get("verdict_num", 0)
-                verdict = record.get("verdict", "WAIT")
-                logger.debug(f"✅ Verdict calculé pour {symbol}: {verdict} (vn={verdict_num})")
+                logger.debug(f"✅ Verdict LIVE calculé pour {symbol}: {record.get('verdict')} (vn={record.get('verdict_num')})")
             except Exception as e:
                 logger.error(f"⚠️ Erreur calcul verdict v2 pour {symbol}: {e}")
-                # Fallback: utiliser verdict du JSON
-                verdict_num = record.get("verdict_num", 0)
-                verdict_map = {
-                    -3: "PERFECT SELL", -2: "GOOD SELL", -1: "SELL",
-                    0: "WAIT", 1: "BUY", 2: "GOOD BUY", 3: "PERFECT BUY"
-                }
-                verdict = record.get("verdict", verdict_map.get(verdict_num, "WAIT"))
-        else:
-            # Fallback: utiliser verdict du JSON si calculateur v2 indisponible
-            verdict_num = record.get("verdict_num", 0)
-            verdict_map = {
-                -3: "PERFECT SELL", -2: "GOOD SELL", -1: "SELL",
-                0: "WAIT", 1: "BUY", 2: "GOOD BUY", 3: "PERFECT BUY"
-            }
-            verdict = record.get("verdict", verdict_map.get(verdict_num, "WAIT"))
+                # Retourner record avec verdict par défaut
+                record["verdict"] = "WAIT"
+                record["verdict_num"] = 0
 
+        # 3. Construire réponse
         response = {
             "ok": True,
             "symbol": symbol,
-            "timestamp": record.get("timestamp", datetime.now(timezone.utc).isoformat()),
-            "verdict": verdict,
-            "verdict_num": verdict_num,
+            "timestamp": record.get("timestamp", datetime.now(timezone.utc).isoformat()),  # ← ACTUEL
+            "verdict": record.get("verdict", "WAIT"),
+            "verdict_num": record.get("verdict_num", 0),
             "score_buy": round(record.get("score_buy", 0.0), 2),
             "score_sell": round(record.get("score_sell", 0.0), 2),
-            "verdict_gap": round(record.get("verdict_gap", 0.0), 2),  # ← NOUVEAU: gap |buy - sell|
+            "verdict_gap": round(record.get("verdict_gap", 0.0), 2),
             "kola_buy": round(record.get("kola_buy", 0.0), 2),
             "kola_sell": round(record.get("kola_sell", 0.0), 2),
             "entry": round(record.get("entry", 0.0), 2),
-            "sl": round(record.get("sl", 0.0), 2),
-            "tp": round(record.get("tp", 0.0), 2),
+            "close": round(record.get("close", 0.0), 2),
+            "vwap": round(record.get("vwap", 0.0), 2),
+            "rsi14": int(record.get("rsi14", 50)),
+            "macd_line": round(record.get("macd_line", 0.0), 2),
+            "macd_sig": round(record.get("macd_sig", 0.0), 2),
             "tf_global_dir": record.get("tf_global_dir", "NEUT"),
             "tf_global_strength": int(record.get("tf_global_strength", 0)),
-            "coherence_ok": record.get("coherence_ok", False),  # ← NOUVEAU: cohérence validée
+            "coherence_ok": record.get("coherence_ok", False),
             "coherence_pct": round(record.get("coherence_pct", 0.0), 1),
-            "filter_ratio": round(record.get("filter_ratio", 0.0), 2),  # ← NOUVEAU: 6 filters ratio
+            "filter_ratio": round(record.get("filter_ratio", 0.0), 2),
             "bb_up": round(record.get("bb_up", 0.0), 2),
             "bb_mid": round(record.get("bb_mid", 0.0), 2),
             "bb_dn": round(record.get("bb_dn", 0.0), 2),
-            "setup_entry": round(record.get("setup_entry", 0.0), 2),
-            "setup_sl": round(record.get("setup_sl", 0.0), 2),
-            "setup_tp1": round(record.get("setup_tp1", 0.0), 2),
-            "source": "local_json"
+            "st_dir": int(record.get("st_dir", 0)),
+            "st_level": round(record.get("st_level", 0.0), 2),
+            "source": "live_calculation"  # ← CLEF: Données LIVE, pas JSON
         }
 
-        # Mettre en cache avant de retourner
+        # Mettre en cache (2 min)
         _cache_gom_data(symbol, response)
         return response
 
     except Exception as e:
-        logger.error(f"Erreur /gom-kola-dashboard: {e}", exc_info=True)
+        logger.error(f"Erreur /gom-kola-dashboard LIVE: {e}", exc_info=True)
         return {
             "ok": False,
             "symbol": symbol,
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "error": str(e),
-            "source": "local_json_error"
+            "source": "live_calculation_error"
         }
 
 
