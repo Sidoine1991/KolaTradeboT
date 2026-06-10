@@ -8380,7 +8380,12 @@ async def gom_kola_dashboard(symbol: str = Query("XAUUSD")):
                 "source": "live_calculation_error"
             }
 
-        # 1. Récupérer record FRAIS (candles + indicateurs)
+        # 1. Passe le cache MT5 à la calculatrice (DOIT être fait à chaque appel!)
+        if _gom_live_calc:
+            _gom_live_calc.mt5_candles_cache = _mt5_candles_cache
+            logger.debug(f"[GOM-CALC] Cache MT5 updated: {list(_mt5_candles_cache.keys())}")
+
+        # 2. Récupérer record FRAIS (candles + indicateurs)
         record = _gom_live_calc.calculate_record_live(symbol)
 
         if "error" in record:

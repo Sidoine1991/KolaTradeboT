@@ -36,6 +36,7 @@ class GOMSignalsLiveCalculator:
         self.data_dir = Path(__file__).parent.parent / "data"
         self.candles_cache = {}  # {symbol: {timeframe: df}}
         self.cache_ttl_seconds = 120  # Cache 2 minutes
+        self.mt5_candles_cache = {}  # {symbol: {timeframe: df}} - SET BY ai_server.py
 
     def get_candles_from_csv(
         self, symbol: str, timeframe: str, bars: int = 100
@@ -125,16 +126,16 @@ class GOMSignalsLiveCalculator:
         PRIORITÉ 4: Synthétique fallback
         """
         # PRIORITÉ 0: MT5 (CANDLES FRAÎCHES ENVOYÉES PAR L'EA)
-        try:
-            # Importe depuis ai_server si disponible
-            from ai_server import _mt5_candles_cache
-            if symbol in _mt5_candles_cache and timeframe in _mt5_candles_cache[symbol]:
-                df = _mt5_candles_cache[symbol][timeframe]
+        if self.mt5_candles_cache and symbol in self.mt5_candles_cache:
+            if timeframe in self.mt5_candles_cache[symbol]:
+                df = self.mt5_candles_cache[symbol][timeframe]
                 if df is not None and len(df) > 0:
-                    print(f"[GOM-CALC] ✅ Using FRESH candles from MT5 for {symbol} {timeframe}m ({len(df)} bars)")
+                    print(f"[GOM-CALC] ✅ MT5 CACHE HIT: {symbol} {timeframe}m ({len(df)} bars, last price={df['close'].iloc[-1]:.2f})")
                     return df.tail(bars)
-        except Exception as e:
-            print(f"[GOM-CALC] MT5 cache not available: {e}")
+            else:
+                print(f"[GOM-CALC] MT5 cache exists for {symbol} but no data for timeframe {timeframe}")
+        else:
+            print(f"[GOM-CALC] MT5 cache empty or symbol not found")
 
         # PRIORITÉ 1: Deriv WebSocket (LIVE EN TEMPS RÉEL)
         if DERIV_AVAILABLE:
