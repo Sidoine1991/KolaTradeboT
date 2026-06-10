@@ -113,6 +113,7 @@ class DerivCandlesWSFetcher:
     ) -> Optional[List[Dict[str, Any]]]:
         """
         Récupère l'historique des ticks via WebSocket Deriv.
+        Mode PUBLIC (sans token) d'abord, puis avec token si disponible.
 
         Args:
             symbol: Deriv symbol ID
@@ -132,15 +133,19 @@ class DerivCandlesWSFetcher:
             "app_id": self.app_id,
         }
 
-        # Ajouter le token si disponible
+        # Ajouter le token si disponible (pas obligatoire pour données publiques)
         if self.token:
             request["authorize"] = self.token
 
         try:
-            # Utilise le WebSocket public de Deriv (pas d'auth requise pour les données publiques)
+            # WebSocket public Deriv (marche sans token pour les données publiques)
             ws_url = "wss://ws.deriv.com/websockets/v3"
 
-            async with websockets.connect(ws_url, max_size=None) as websocket:
+            logger.info(f"[Deriv] Connecting to {ws_url} (public mode)...")
+
+            async with websockets.connect(ws_url, max_size=None, ping_interval=20, ping_timeout=10) as websocket:
+                logger.info(f"[Deriv] Connected, requesting {bars} candles for {symbol}...")
+
                 # Envoyer la requête
                 await websocket.send(json.dumps(request))
 
@@ -149,22 +154,25 @@ class DerivCandlesWSFetcher:
                 data = json.loads(response)
 
                 if data.get("error"):
-                    logger.error(f"Deriv error: {data['error']['message']}")
+                    logger.error(f"[Deriv] Error: {data['error']['message']}")
                     return None
 
                 candles = data.get("candles", [])
                 if not candles:
-                    logger.warning(f"No candles returned for {symbol}")
+                    logger.warning(f"[Deriv] No candles returned for {symbol}")
                     return None
 
-                logger.info(f"Got {len(candles)} candles from Deriv for {symbol}")
+                logger.info(f"[Deriv] ✅ Got {len(candles)} candles from Deriv for {symbol}")
                 return candles
 
         except asyncio.TimeoutError:
-            logger.error(f"WebSocket timeout fetching {symbol}")
+            logger.error(f"[Deriv] ⏱️ WebSocket timeout (5s) fetching {symbol}")
+            return None
+        except OSError as e:
+            logger.error(f"[Deriv] 🌐 Network error: {e}")
             return None
         except Exception as e:
-            logger.error(f"WebSocket error: {e}")
+            logger.error(f"[Deriv] ❌ WebSocket error: {e}")
             return None
 
 
