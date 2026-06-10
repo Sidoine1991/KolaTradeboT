@@ -9,15 +9,20 @@ import sys
 import json
 import asyncio
 import logging
+import os
 from typing import Dict, Any, Optional, List
 from datetime import datetime, timezone
 import pandas as pd
 import websockets
+from dotenv import load_dotenv
 
 if sys.stdout.encoding != 'utf-8':
     sys.stdout.reconfigure(encoding='utf-8')
 
 logger = logging.getLogger('deriv_candles')
+
+# Load environment
+load_dotenv()
 
 # Mapping des symboles Deriv
 DERIV_SYMBOL_MAP = {
@@ -46,18 +51,19 @@ TIMEFRAME_MAP = {
 
 
 class DerivCandlesWSFetcher:
-    """Récupère les candles Deriv via WebSocket"""
+    """Récupère les candles Deriv via WebSocket avec authentification"""
 
-    def __init__(self, app_id: str = "1089"):
-        """
-        Initialise le fetcher Deriv.
-
-        Args:
-            app_id: Deriv app ID (default: 1089 pour demo)
-        """
-        self.app_id = app_id
-        self.ws_url = "wss://ws.derivws.com/websockets/v3"
+    def __init__(self):
+        """Initialise le fetcher Deriv avec token depuis .env"""
+        self.app_id = os.getenv("DERIV_APP_ID", "1089")
+        self.token = os.getenv("DERIV_API_TOKEN", "")
+        self.ws_url = "wss://ws.deriv.com/websockets/v3"
         self.cache = {}  # {symbol: {timeframe: df}}
+
+        if self.token:
+            logger.info(f"Deriv token loaded (length: {len(self.token)})")
+        else:
+            logger.warning("No Deriv token in .env - using unauthenticated mode")
 
     async def fetch_candles(
         self, symbol: str, timeframe: str = "15", bars: int = 100
@@ -125,6 +131,10 @@ class DerivCandlesWSFetcher:
             "style": "candles",
             "app_id": self.app_id,
         }
+
+        # Ajouter le token si disponible
+        if self.token:
+            request["authorize"] = self.token
 
         try:
             # Utilise le WebSocket public de Deriv (pas d'auth requise pour les données publiques)
