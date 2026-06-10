@@ -8385,7 +8385,8 @@ async def gom_kola_dashboard(symbol: str = Query("XAUUSD")):
                 record["verdict"] = "WAIT"
                 record["verdict_num"] = 0
 
-        # 3. Construire réponse
+        # 3. Construire réponse (compatible avec SMC_GOM_Pipeline.mqh parsing)
+        price = record.get("entry", record.get("close", 0.0))
         response = {
             "ok": True,
             "symbol": symbol,
@@ -8399,21 +8400,52 @@ async def gom_kola_dashboard(symbol: str = Query("XAUUSD")):
             "kola_sell": round(record.get("kola_sell", 0.0), 2),
             "entry": round(record.get("entry", 0.0), 2),
             "close": round(record.get("close", 0.0), 2),
+            "price": round(price, 2),  # ← SMC_GOM_Pipeline.mqh expects this
             "vwap": round(record.get("vwap", 0.0), 2),
-            "rsi14": int(record.get("rsi14", 50)),
+            "rsi": int(record.get("rsi14", 50)),  # ← SMC_GOM_Pipeline.mqh expects "rsi" not "rsi14"
+            "rsi14": int(record.get("rsi14", 50)),  # ← Keep for dashboard
             "macd_line": round(record.get("macd_line", 0.0), 2),
             "macd_sig": round(record.get("macd_sig", 0.0), 2),
             "tf_global_dir": record.get("tf_global_dir", "NEUT"),
             "tf_global_strength": int(record.get("tf_global_strength", 0)),
+            # Multi-TF directions and RSI (from live calc)
+            "tf_m1_dir": record.get("tf_m1_dir", "NEUT"),
+            "tf_m1_rsi": int(record.get("tf_m1_rsi", 50)),
+            "tf_m5_dir": record.get("tf_m5_dir", "NEUT"),
+            "tf_m5_rsi": int(record.get("tf_m5_rsi", 50)),
+            "tf_m15_dir": record.get("tf_m15_dir", "NEUT"),
+            "tf_m15_rsi": int(record.get("tf_m15_rsi", 50)),
+            "tf_h1_dir": record.get("tf_h1_dir", "NEUT"),
+            "tf_h1_rsi": int(record.get("tf_h1_rsi", 50)),
+            "tf_h4_dir": record.get("tf_h4_dir", "NEUT"),
+            "tf_h4_rsi": int(record.get("tf_h4_rsi", 50)),
+            "tf_d1_dir": record.get("tf_d1_dir", "NEUT"),
+            "tf_d1_rsi": int(record.get("tf_d1_rsi", 50)),
+            # Coherence
             "coherence_ok": record.get("coherence_ok", False),
             "coherence_pct": round(record.get("coherence_pct", 0.0), 1),
             "filter_ratio": round(record.get("filter_ratio", 0.0), 2),
+            # Bollinger Bands
             "bb_up": round(record.get("bb_up", 0.0), 2),
             "bb_mid": round(record.get("bb_mid", 0.0), 2),
             "bb_dn": round(record.get("bb_dn", 0.0), 2),
+            "bb_width": round(record.get("bb_width", 0.0), 2),
+            # SuperTrend
             "st_dir": int(record.get("st_dir", 0)),
             "st_level": round(record.get("st_level", 0.0), 2),
-            "source": "live_calculation"  # ← CLEF: Données LIVE, pas JSON
+            # Order Block (placeholder - not in live_calc yet)
+            "ob_bull_top": 0.0,
+            "ob_bull_bot": 0.0,
+            "ob_bear_top": 0.0,
+            "ob_bear_bot": 0.0,
+            # KOLA state and prediction (placeholder)
+            "kola_state": "---",
+            "pred_path": "",
+            "spike_pct": 0.0,
+            "entry_quality": round(record.get("verdict_gap", 0.0) / 7.0, 2),  # Normalized quality
+            # Data source
+            "data_source": "live_calculation",
+            "source": "live_calculation"  # ← Both names for compatibility
         }
 
         # Mettre en cache (2 min)

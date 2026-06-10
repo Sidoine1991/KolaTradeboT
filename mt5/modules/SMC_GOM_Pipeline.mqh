@@ -254,6 +254,7 @@ void SMCGP_ParseGOMBody(const string &body)
    bool hasData = (g_smcGomVerdictNum != 0 || g_smcGomScoreBuy > 0 || g_smcGomScoreSell > 0);
    g_smcGomConnected = hasData && StringLen(g_smcGomVerdict) > 0;
    string src = SMCGP_JsonString(body, "data_source");
+   if(StringLen(src) == 0) src = SMCGP_JsonString(body, "source");  // Try "source" if "data_source" missing (from /gom-kola-dashboard)
    if(StringLen(src) == 0) src = "TV";
    g_smcGomSource = g_smcGomConnected ? src : "OFF";
 
@@ -420,9 +421,15 @@ void SMCGP_PollGOM()
    string body;
    bool ok = false;
 
-   if(SMCGP_HttpGet("/gom-tableau-complete?symbol=" + sym, body, AI_Timeout_ms)
+   // ✅ PRIORITÉ 1: /gom-kola-dashboard (LIVE, 100% LOCAL calculation)
+   if(SMCGP_HttpGet("/gom-kola-dashboard?symbol=" + sym, body, AI_Timeout_ms)
       && (SMCGP_JsonBool(body, "ok") || StringFind(body, "\"ok\":true") >= 0))
       ok = true;
+   // Fallback 2: /gom-tableau-complete (cache, peut être stale)
+   else if(SMCGP_HttpGet("/gom-tableau-complete?symbol=" + sym, body, AI_Timeout_ms)
+      && (SMCGP_JsonBool(body, "ok") || StringFind(body, "\"ok\":true") >= 0))
+      ok = true;
+   // Fallback 3: /gom-verdict
    else if(SMCGP_HttpGet("/gom-verdict?symbol=" + sym, body, AI_Timeout_ms)
            && (SMCGP_JsonBool(body, "ok") || StringFind(body, "\"ok\":true") >= 0))
       ok = true;
