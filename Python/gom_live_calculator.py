@@ -27,6 +27,13 @@ try:
 except ImportError:
     DERIV_AVAILABLE = False
 
+# Import GOM Scoring Engine
+try:
+    from gom_scoring_engine import GOMScoringEngine
+    SCORING_ENGINE = GOMScoringEngine()
+except ImportError:
+    SCORING_ENGINE = None
+
 
 class GOMSignalsLiveCalculator:
     """Calcule les signaux GOM en temps réel depuis données locales."""
@@ -367,7 +374,7 @@ class GOMSignalsLiveCalculator:
             "tf_global_dir": current_dir,
             "tf_global_strength": 6 if current_dir != "NEUT" else 0,
 
-            # Placeholders (seront enrichis par GOMVerdictCalculatorV2)
+            # Placeholders (seront enrichis par GOMScoringEngine)
             "score_buy": 0.0,
             "score_sell": 0.0,
             "verdict_num": 0,
@@ -377,6 +384,11 @@ class GOMSignalsLiveCalculator:
             "filter_ratio": 0.0,
             "coherence_pct": 0.0,
         }
+
+        # APPLIQUER LE SCORING ENGINE COMPLET
+        if SCORING_ENGINE:
+            record = SCORING_ENGINE.score_record(record)
+            print(f"[GOM-CALC] Scoring complete: BUY={record.get('score_buy')}, SELL={record.get('score_sell')}, VERDICT={record.get('verdict')}")
 
         return record
 
