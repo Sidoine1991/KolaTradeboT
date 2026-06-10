@@ -6213,6 +6213,24 @@ class CoherentAnalysisResponse(BaseModel):
     timestamp: str
     message: Optional[str] = None
 
+
+class MT5CandleData(BaseModel):
+    """Modèle pour une candle MT5"""
+    time: int  # Unix timestamp
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: int
+
+
+class MT5CandlesRequest(BaseModel):
+    """Modèle pour recevoir les candles de MT5"""
+    symbol: str
+    timeframe: str  # "M1", "M5", "M15", "H1", "H4", "D1"
+    candles: List[MT5CandleData]
+    timestamp: Optional[str] = Field(default_factory=lambda: datetime.utcnow().isoformat())
+
 class DashboardStatsResponse(BaseModel):
     timestamp: str
     model_performance: Dict[str, Any]
@@ -8462,6 +8480,75 @@ async def gom_kola_dashboard(symbol: str = Query("XAUUSD")):
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "error": str(e),
             "source": "live_calculation_error"
+        }
+
+
+# Cache globale pour les candles MT5 (mises à jour en temps réel)
+_mt5_candles_cache = {}  # {symbol: {timeframe: DataFrame}}
+_mt5_candles_lock = {}  # {symbol: Lock}
+
+
+@app.post("/mt5/upload-candles")
+async def mt5_upload_candles(request: MT5CandlesRequest):
+    """
+    Endpoint pour que MT5 envoie les candles FRAÎCHES à l'API.
+
+    Ces candles seront utilisées par GOMSignalsLiveCalculator à la place du CSV/Deriv.
+
+    Format:
+    POST /mt5/upload-candles
+    {
+        "symbol": "XAUUSD",
+        "timeframe": "M15",
+        "candles": [
+            {"time": 1718049000, "open": 2345.50, "high": 2346.80, "low": 2345.10, "close": 2346.20, "volume": 1000},
+            ...
+        ]
+    }
+    """
+    try:
+        symbol = request.symbol
+        timeframe = request.timeframe
+
+        # Convertir les candles en DataFrame
+        candles_data = []
+        for candle in request.candles:
+            candles_data.append({
+                'time': pd.to_datetime(candle.time, unit='s'),
+                'open': candle.open,
+                'high': candle.high,
+                'low': candle.low,
+                'close': candle.close,
+                'volume': candle.volume
+            })
+
+        df = pd.DataFrame(candles_data)
+        df.set_index('time', inplace=True)
+
+        # Stocker en cache
+        if symbol not in _mt5_candles_cache:
+            _mt5_candles_cache[symbol] = {}
+
+        _mt5_candles_cache[symbol][timeframe] = df
+
+        logger.info(f"✅ MT5 candles received: {symbol} {timeframe} ({len(df)} candles)")
+        logger.debug(f"   Last candle: {df['close'].iloc[-1]:.2f} @ {df.index[-1]}")
+
+        return {
+            "ok": True,
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "candles_count": len(df),
+            "last_price": float(df['close'].iloc[-1]),
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+
+    except Exception as e:
+        logger.error(f"❌ Error in /mt5/upload-candles: {e}", exc_info=True)
+        return {
+            "ok": False,
+            "error": str(e),
+            "timestamp": datetime.now(timezone.utc).isoformat()
         }
 
 

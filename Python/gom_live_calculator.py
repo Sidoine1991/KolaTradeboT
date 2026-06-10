@@ -118,11 +118,24 @@ class GOMSignalsLiveCalculator:
         self, symbol: str, timeframe: str = "15", bars: int = 100
     ) -> pd.DataFrame:
         """
-        Récupère les candles (Deriv WebSocket → CSV → Fallback).
-        PRIORITÉ 1: Deriv WebSocket (LIVE, real-time)
-        PRIORITÉ 2: CSV local
-        PRIORITÉ 3: Synthétique fallback
+        Récupère les candles (MT5 → Deriv → CSV → Fallback).
+        PRIORITÉ 1: MT5 (reçues via /mt5/upload-candles)
+        PRIORITÉ 2: Deriv WebSocket (LIVE, real-time)
+        PRIORITÉ 3: CSV local
+        PRIORITÉ 4: Synthétique fallback
         """
+        # PRIORITÉ 0: MT5 (CANDLES FRAÎCHES ENVOYÉES PAR L'EA)
+        try:
+            # Importe depuis ai_server si disponible
+            from ai_server import _mt5_candles_cache
+            if symbol in _mt5_candles_cache and timeframe in _mt5_candles_cache[symbol]:
+                df = _mt5_candles_cache[symbol][timeframe]
+                if df is not None and len(df) > 0:
+                    print(f"[GOM-CALC] ✅ Using FRESH candles from MT5 for {symbol} {timeframe}m ({len(df)} bars)")
+                    return df.tail(bars)
+        except Exception as e:
+            print(f"[GOM-CALC] MT5 cache not available: {e}")
+
         # PRIORITÉ 1: Deriv WebSocket (LIVE EN TEMPS RÉEL)
         if DERIV_AVAILABLE:
             try:
@@ -144,7 +157,7 @@ class GOMSignalsLiveCalculator:
 
                 df = result[0]
                 if df is not None and len(df) > 0:
-                    print(f"[GOM-CALC] Fetched {len(df)} candles from Deriv WebSocket for {symbol} {timeframe}m")
+                    print(f"[GOM-CALC] 🌐 Fetched {len(df)} candles from Deriv WebSocket for {symbol} {timeframe}m")
                     return df
             except Exception as e:
                 print(f"[GOM-CALC] Deriv error: {e} - Falling back to CSV")
@@ -152,11 +165,11 @@ class GOMSignalsLiveCalculator:
         # PRIORITÉ 2: Essayer CSV local
         df = self.get_candles_from_csv(symbol, timeframe, bars)
         if df is not None and len(df) > 0:
-            print(f"[GOM-CALC] Fetched {len(df)} candles from CSV for {symbol} {timeframe}m")
+            print(f"[GOM-CALC] 📁 Fetched {len(df)} candles from CSV for {symbol} {timeframe}m")
             return df
 
         # PRIORITÉ 3: Fallback synthétique depuis gom_signal.json
-        print(f"[GOM-CALC] Using fallback synthetic candles for {symbol} {timeframe}m")
+        print(f"[GOM-CALC] ⚠️ Using fallback synthetic candles for {symbol} {timeframe}m")
         return self.get_candles_fallback(symbol, timeframe)
 
     def calculate_rsi(self, df: pd.DataFrame, period: int = 14) -> float:
