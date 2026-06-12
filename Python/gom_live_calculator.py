@@ -50,24 +50,58 @@ class GOMSignalsLiveCalculator:
     ) -> Optional[pd.DataFrame]:
         """
         Récupère les candles depuis un CSV local.
-        Format expected: data/{symbol}_{timeframe}.csv
-        Colonnes: time, open, high, low, close, volume
+        Cherche dans data/ et tous les subdirs (recursive).
         """
-        csv_path = self.data_dir / f"{symbol}_{timeframe}.csv"
+        import glob
 
-        if not csv_path.exists():
-            # Fallback: essayer sans timeframe
-            csv_path = self.data_dir / f"{symbol}.csv"
-            if not csv_path.exists():
-                return None
+        # Map timeframe to filename patterns
+        tf_patterns = {
+            "1": "M1",
+            "5": "M5",
+            "15": "M15",
+            "60": "H1",
+            "240": "H4",
+            "D": "D1"
+        }
 
-        try:
-            df = pd.read_csv(csv_path, index_col=0, parse_dates=True)
-            # Prendre les derniers 'bars'
-            return df.tail(bars).copy()
-        except Exception as e:
-            print(f"⚠️ Erreur lecture CSV {symbol}: {e}")
-            return None
+        tf_label = tf_patterns.get(timeframe, "")
+        # PRIORITÉ: files with the exact timeframe label first
+        patterns_to_try = []
+        if tf_label:
+            patterns_to_try.append(f"{symbol}_{tf_label}*.csv")
+            patterns_to_try.append(f"**/{symbol}_{tf_label}*.csv")
+        # Fallback to any file with the symbol
+        patterns_to_try.append(f"{symbol}_*.csv")
+        patterns_to_try.append(f"**/{symbol}_*.csv")
+
+        # Chercher les fichiers avec recursive=True
+        for pattern in patterns_to_try:
+            csv_files = glob.glob(str(self.data_dir / pattern), recursive=True)
+            if csv_files:
+                # Essayer TOUS les fichiers, pas seulement le premier
+                for csv_path in csv_files:
+                    try:
+                        df = pd.read_csv(csv_path, parse_dates=True)
+
+                        # Handle index name
+                        if df.index.name == 'time':
+                            df = df.reset_index()
+
+                        # Assure que les colonnes existent
+                        if 'time' not in df.columns:
+                            df['time'] = pd.date_range(start='2020-01-01', periods=len(df), freq='min')
+                        if 'volume' not in df.columns and 'tick_volume' in df.columns:
+                            df['volume'] = df['tick_volume']
+
+                        df.set_index('time', inplace=True)
+
+                        required_cols = ['open', 'high', 'low', 'close', 'volume']
+                        if all(c in df.columns for c in required_cols):
+                            print(f"[GOM] CSV: {Path(csv_path).name} ({len(df)} bars)")
+                            return df.tail(bars).copy()
+                    except Exception as e:
+                        continue
+        return None
 
     def get_candles_fallback(self, symbol: str, timeframe: str) -> pd.DataFrame:
         """
@@ -127,22 +161,14 @@ class GOMSignalsLiveCalculator:
     ) -> pd.DataFrame:
         """
         Récupère les candles (MT5 → Deriv → CSV → Fallback).
-        PRIORITÉ 1: MT5 (reçues via /mt5/upload-candles)
-        PRIORITÉ 2: Deriv WebSocket (LIVE, real-time)
-        PRIORITÉ 3: CSV local
-        PRIORITÉ 4: Synthétique fallback
         """
         # PRIORITÉ 0: MT5 (CANDLES FRAÎCHES ENVOYÉES PAR L'EA)
         if self.mt5_candles_cache and symbol in self.mt5_candles_cache:
             if timeframe in self.mt5_candles_cache[symbol]:
                 df = self.mt5_candles_cache[symbol][timeframe]
                 if df is not None and len(df) > 0:
-                    print(f"[GOM-CALC] ✅ MT5 CACHE HIT: {symbol} {timeframe}m ({len(df)} bars, last price={df['close'].iloc[-1]:.2f})")
                     return df.tail(bars)
-            else:
-                print(f"[GOM-CALC] MT5 cache exists for {symbol} but no data for timeframe {timeframe}")
-        else:
-            print(f"[GOM-CALC] MT5 cache empty or symbol not found")
+
 
         # PRIORITÉ 1: Deriv WebSocket (LIVE EN TEMPS RÉEL)
         if DERIV_AVAILABLE:
@@ -173,7 +199,6 @@ class GOMSignalsLiveCalculator:
         # PRIORITÉ 2: Essayer CSV local
         df = self.get_candles_from_csv(symbol, timeframe, bars)
         if df is not None and len(df) > 0:
-            print(f"[GOM-CALC] 📁 Fetched {len(df)} candles from CSV for {symbol} {timeframe}m")
             return df
 
         # PRIORITÉ 3: Fallback synthétique depuis gom_signal.json
