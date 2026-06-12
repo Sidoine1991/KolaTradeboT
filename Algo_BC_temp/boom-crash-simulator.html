@@ -1,0 +1,737 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Boom & Crash — Spike Simulator & Strategy Engine</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<style>
+:root {
+  --bg: #0a0c10;
+  --bg2: #12151d;
+  --bg3: #1a1e2a;
+  --bg4: #222738;
+  --border: rgba(255,255,255,0.06);
+  --border2: rgba(255,255,255,0.12);
+  --border3: rgba(255,255,255,0.18);
+  --text: #e8ecf4;
+  --text2: #8892a8;
+  --text3: #505a70;
+  --blue: #4a9eff;
+  --blue2: #1e5faa;
+  --green: #22c983;
+  --green2: #0f8a58;
+  --red: #f25d3b;
+  --red2: #a83d20;
+  --amber: #ffb020;
+  --purple: #8b7ff7;
+  --cyan: #4ecdc4;
+  --font: 'Inter', 'SF Pro Display', system-ui, sans-serif;
+  --mono: 'JetBrains Mono', 'Cascadia Code', 'Fira Code', monospace;
+  --radius: 10px;
+  --radius-lg: 14px;
+  --shadow: 0 4px 24px rgba(0,0,0,0.3);
+  --glow-green: 0 0 20px rgba(34,201,131,0.15);
+  --glow-red: 0 0 20px rgba(242,93,59,0.15);
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: var(--font); background: var(--bg); color: var(--text); min-height: 100vh; line-height: 1.5; }
+
+.app { max-width: 1280px; margin: 0 auto; padding: 28px 24px; }
+
+header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 32px; padding-bottom: 24px; border-bottom: 1px solid var(--border); }
+.header-left { display: flex; align-items: center; gap: 16px; }
+.logo { width: 40px; height: 40px; background: linear-gradient(135deg, var(--green), var(--blue)); border-radius: 10px; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 18px; color: #fff; box-shadow: var(--glow-green); }
+header h1 { font-size: 22px; font-weight: 600; letter-spacing: -0.3px; }
+header .sub { font-size: 12px; color: var(--text2); margin-top: 2px; letter-spacing: 0.2px; }
+.badge-ver { background: var(--bg3); border: 1px solid var(--border2); border-radius: 6px; padding: 4px 10px; font-size: 11px; color: var(--cyan); font-family: var(--mono); font-weight: 500; }
+
+/* Tabs */
+.tabs { display: flex; gap: 2px; margin-bottom: 28px; background: var(--bg2); border-radius: var(--radius); padding: 4px; border: 1px solid var(--border); }
+.tab { flex: 1; padding: 10px 16px; font-size: 12px; font-weight: 500; border: none; background: none; color: var(--text2); cursor: pointer; border-radius: 8px; transition: all .2s; text-align: center; letter-spacing: 0.2px; }
+.tab:hover { color: var(--text); background: var(--bg3); }
+.tab.active { color: #fff; background: var(--bg4); box-shadow: 0 2px 8px rgba(0,0,0,0.2); }
+.tab.boom.active { background: linear-gradient(135deg, var(--green2), rgba(15,138,88,0.4)); color: var(--green); }
+.tab.crash.active { background: linear-gradient(135deg, var(--red2), rgba(168,61,32,0.4)); color: var(--red); }
+
+.section { display: none; animation: fadeIn .3s ease; } .section.active { display: block; }
+@keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+
+/* Controls */
+.controls-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 16px; margin-bottom: 24px; background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 20px; }
+.ctrl { display: flex; flex-direction: column; gap: 8px; }
+.ctrl label { font-size: 10px; color: var(--text3); text-transform: uppercase; letter-spacing: 0.08em; font-weight: 600; }
+.ctrl .val { font-size: 13px; font-weight: 600; color: var(--text); font-family: var(--mono); }
+select, input[type=range] { width: 100%; background: var(--bg3); border: 1px solid var(--border2); border-radius: 8px; color: var(--text); padding: 8px 10px; font-size: 12px; cursor: pointer; transition: border-color .2s; }
+select:focus, input[type=range]:focus { border-color: var(--blue); outline: none; }
+select { height: 36px; }
+input[type=range] { padding: 8px 0; accent-color: var(--blue); height: 6px; }
+input[type=checkbox] { accent-color: var(--blue); width: 18px; height: 18px; cursor: pointer; border-radius: 4px; }
+
+/* Buttons */
+.btn-row { display: flex; gap: 10px; margin-bottom: 24px; flex-wrap: wrap; align-items: center; }
+.btn { padding: 10px 22px; border: 1px solid var(--border2); background: var(--bg3); color: var(--text); border-radius: 8px; font-size: 12px; font-weight: 600; cursor: pointer; transition: all .2s; letter-spacing: 0.3px; }
+.btn:hover { background: var(--bg4); border-color: var(--border3); transform: translateY(-1px); }
+.btn.primary { background: linear-gradient(135deg, var(--blue2), var(--blue)); border-color: var(--blue); color: #fff; box-shadow: 0 4px 12px rgba(74,158,255,0.2); }
+.btn.primary:hover { box-shadow: 0 6px 20px rgba(74,158,255,0.3); }
+.btn.success { background: linear-gradient(135deg, var(--green2), var(--green)); border-color: var(--green); color: #fff; }
+
+/* Metrics */
+.metrics-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 12px; margin-bottom: 24px; }
+.metric { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 16px; transition: border-color .2s, box-shadow .2s; }
+.metric:hover { border-color: var(--border2); box-shadow: 0 4px 12px rgba(0,0,0,0.2); }
+.metric .mlabel { font-size: 9px; color: var(--text3); text-transform: uppercase; letter-spacing: 0.08em; font-weight: 600; margin-bottom: 8px; }
+.metric .mval { font-size: 24px; font-weight: 600; font-family: var(--mono); letter-spacing: -0.5px; }
+.metric .msub { font-size: 10px; color: var(--text2); margin-top: 4px; }
+.mval.pos { color: var(--green); } .mval.neg { color: var(--red); }
+.mval.blue { color: var(--blue); } .mval.amber { color: var(--amber); }
+.mval.purple { color: var(--purple); } .mval.cyan { color: var(--cyan); }
+
+/* Charts */
+.chart-wrap { position: relative; width: 100%; margin-bottom: 18px; background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 18px; transition: border-color .2s; }
+.chart-wrap:hover { border-color: var(--border2); }
+.chart-title { font-size: 11px; color: var(--text3); margin-bottom: 12px; text-transform: uppercase; letter-spacing: 0.06em; font-weight: 600; }
+
+/* Legend */
+.legend { display: flex; flex-wrap: wrap; gap: 16px; margin-bottom: 14px; font-size: 11px; color: var(--text2); }
+.leg-item { display: flex; align-items: center; gap: 7px; }
+.leg-dot { width: 10px; height: 10px; border-radius: 3px; flex-shrink: 0; }
+.leg-dot.circle { border-radius: 50%; }
+
+/* Algo info box */
+.algo-box { background: var(--bg3); border: 1px solid var(--border); border-left: 3px solid var(--blue); border-radius: var(--radius); padding: 18px 20px; margin-bottom: 24px; font-size: 12px; color: var(--text2); line-height: 2; }
+.algo-box strong { color: var(--text); font-size: 14px; display: block; margin-bottom: 6px; }
+.algo-box code { font-family: var(--mono); color: var(--amber); font-size: 11px; background: rgba(255,176,32,.08); padding: 2px 7px; border-radius: 4px; border: 1px solid rgba(255,176,32,.15); }
+.algo-box.boom-box { border-left-color: var(--green); }
+.algo-box.crash-box { border-left-color: var(--red); }
+
+/* Strategy box */
+.strategy-box { background: linear-gradient(135deg, var(--bg2), var(--bg3)); border: 1px solid var(--border2); border-radius: var(--radius-lg); padding: 24px; margin-bottom: 24px; }
+.strategy-box h3 { font-size: 15px; font-weight: 600; margin-bottom: 16px; color: var(--text); display: flex; align-items: center; gap: 10px; }
+.strategy-box h3::before { content: ''; width: 4px; height: 20px; background: var(--blue); border-radius: 2px; }
+.strategy-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.strategy-table th { text-align: left; padding: 10px 14px; background: var(--bg4); color: var(--text2); font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; font-weight: 600; border-bottom: 1px solid var(--border); }
+.strategy-table td { padding: 10px 14px; border-bottom: 1px solid var(--border); color: var(--text); font-family: var(--mono); font-size: 11px; }
+.strategy-table tr:hover td { background: var(--bg4); }
+.strat-badge { display: inline-flex; padding: 3px 8px; border-radius: 4px; font-size: 10px; font-weight: 600; }
+.strat-badge.perfect { background: rgba(34,201,131,.12); color: var(--green); border: 1px solid rgba(34,201,131,.25); }
+.strat-badge.good { background: rgba(74,158,255,.12); color: var(--blue); border: 1px solid rgba(74,158,255,.25); }
+.strat-badge.base { background: rgba(255,176,32,.12); color: var(--amber); border: 1px solid rgba(255,176,32,.25); }
+.strat-badge.wait { background: rgba(80,90,112,.2); color: var(--text3); border: 1px solid var(--border2); }
+
+/* Trade log */
+.trade-log-wrap { margin-top: 18px; }
+.trade-log { max-height: 280px; overflow-y: auto; border: 1px solid var(--border); border-radius: var(--radius); }
+.trade-log table { width: 100%; border-collapse: collapse; font-size: 11px; }
+.trade-log th { font-size: 9px; font-weight: 600; padding: 10px 12px; background: var(--bg3); color: var(--text3); text-align: left; position: sticky; top: 0; z-index: 1; text-transform: uppercase; letter-spacing: 0.05em; }
+.trade-log td { padding: 8px 12px; border-top: 1px solid var(--border); color: var(--text); font-family: var(--mono); font-size: 10px; }
+.trade-log tr:hover td { background: var(--bg3); }
+.badge { display: inline-flex; align-items: center; padding: 3px 8px; border-radius: 5px; font-size: 9px; font-weight: 700; letter-spacing: 0.05em; }
+.badge.buy { background: rgba(34,201,131,.12); color: var(--green); border: 1px solid rgba(34,201,131,.25); }
+.badge.sell { background: rgba(242,93,59,.12); color: var(--red); border: 1px solid rgba(242,93,59,.25); }
+.badge.win { background: rgba(34,201,131,.1); color: var(--green); }
+.badge.loss { background: rgba(242,93,59,.1); color: var(--red); }
+.badge.sl { background: rgba(242,93,59,.12); color: var(--red); }
+.badge.tp { background: rgba(74,158,255,.12); color: var(--blue); }
+.badge.trail { background: rgba(255,176,32,.12); color: var(--amber); }
+
+/* Dual chart panels */
+.dual-charts { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 18px; }
+@media (max-width: 768px) { .dual-charts { grid-template-columns: 1fr; } }
+.triple-charts { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; margin-bottom: 18px; }
+@media (max-width: 900px) { .triple-charts { grid-template-columns: 1fr; } }
+
+/* Status bar */
+.statusbar { display: flex; gap: 24px; background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 18px; font-size: 11px; color: var(--text2); margin-bottom: 20px; flex-wrap: wrap; }
+.statusbar span { display: flex; align-items: center; gap: 6px; }
+.statusbar .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); animation: pulse 2s infinite; box-shadow: 0 0 6px var(--green); }
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.3} }
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: var(--bg2); border-radius: 4px; }
+::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: var(--border3); }
+
+/* Section divider */
+.divider { font-size: 10px; color: var(--text3); text-transform: uppercase; letter-spacing: 0.08em; font-weight: 600; margin: 24px 0 14px; display: flex; align-items: center; gap: 12px; }
+.divider::after { content: ''; flex: 1; height: 1px; background: linear-gradient(90deg, var(--border), transparent); }
+
+/* Algo detail */
+.algo-detail { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 24px; }
+@media (max-width: 768px) { .algo-detail { grid-template-columns: 1fr; } }
+.algo-card { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius); padding: 18px; }
+.algo-card h4 { font-size: 12px; color: var(--text2); margin-bottom: 12px; text-transform: uppercase; letter-spacing: 0.05em; font-weight: 600; }
+.algo-card pre { font-family: var(--mono); font-size: 11px; color: var(--cyan); line-height: 1.8; white-space: pre-wrap; }
+.algo-card .highlight { color: var(--amber); }
+</style>
+</head>
+<body>
+<div class="app">
+
+<header>
+  <div class="header-left">
+    <div class="logo">BC</div>
+    <div>
+      <h1>Boom & Crash Strategy Engine</h1>
+      <div class="sub">Algorithme Deriv reproduit &middot; Z-Score ATR &middot; Backtest quantitatif</div>
+    </div>
+  </div>
+  <div class="badge-ver">v3.0</div>
+</header>
+
+<div class="tabs">
+  <button class="tab boom active" onclick="switchTab('boom')">Boom</button>
+  <button class="tab crash" onclick="switchTab('crash')">Crash</button>
+  <button class="tab" onclick="switchTab('strategy')">Strategie EA</button>
+  <button class="tab" onclick="switchTab('backtest')">Backtest</button>
+  <button class="tab" onclick="switchTab('compare')">Compare</button>
+</div>
+
+<!-- ==================== BOOM ==================== -->
+<div class="section active" id="sec-boom">
+  <div class="algo-box boom-box">
+    <strong>Algorithme Boom &mdash; Reproduction Deriv</strong>
+    Chaque tick : <code>P(spike) = 1/N</code> &middot; Spike haussier si <code>Z-Score ATR &ge; 2.0</code> ET <code>close &gt; EMA(14)</code><br>
+    Drift negatif <code>-0.12&middot;&sigma;</code> entre les spikes &middot; Cooldown <code>&lfloor;N&times;0.45&rfloor;</code> ticks post-spike &middot; Signal BUY au tick suivant
+  </div>
+
+  <div class="algo-detail">
+    <div class="algo-card">
+      <h4>Conditions Pre-Spike</h4>
+      <pre><span class="highlight">1.</span> Volatilite comprimee (Z-Score ATR &le; -1.0)
+<span class="highlight">2.</span> Prix au-dessus EMA(14)
+<span class="highlight">3.</span> Cooldown ecoule (&gt; N&times;0.45 ticks)
+<span class="highlight">4.</span> Drift negatif accumule</pre>
+    </div>
+    <div class="algo-card">
+      <h4>Conditions Spike Confirme</h4>
+      <pre><span class="highlight">1.</span> Z-Score ATR &ge; 2.0 (explosion)
+<span class="highlight">2.</span> Mouvement &gt; 3.5% du prix
+<span class="highlight">3.</span> Close &gt; EMA(14) maintenu
+<span class="highlight">4.</span> Volume spike (ratio &ge; 1.6&times;)</pre>
+    </div>
+  </div>
+
+  <div class="controls-grid">
+    <div class="ctrl"><label>Symbole</label>
+      <select id="b-sym" onchange="runBoom()">
+        <option value="300">Boom 300</option>
+        <option value="500" selected>Boom 500</option>
+        <option value="1000">Boom 1000</option>
+      </select>
+    </div>
+    <div class="ctrl"><label>Ticks simules</label>
+      <input type="range" min="500" max="8000" step="500" value="3000" id="b-ticks" oninput="bv('b-ticks','');runBoom()">
+      <span class="val" id="b-ticks-v">3000</span>
+    </div>
+    <div class="ctrl"><label>Volatilite (%)</label>
+      <input type="range" min="1" max="10" step="0.5" value="3" id="b-vol" oninput="bv('b-vol','%');runBoom()">
+      <span class="val" id="b-vol-v">3%</span>
+    </div>
+    <div class="ctrl"><label>Amplitude spike (%)</label>
+      <input type="range" min="1" max="10" step="0.5" value="3.5" id="b-amp" oninput="bv('b-amp','%');runBoom()">
+      <span class="val" id="b-amp-v">3.5%</span>
+    </div>
+  </div>
+  <div class="btn-row">
+    <button class="btn success" onclick="runBoom()">Regenerer simulation</button>
+  </div>
+  <div class="metrics-grid" id="boom-metrics"></div>
+  <div class="legend">
+    <span class="leg-item"><span class="leg-dot" style="background:var(--green)"></span>Prix</span>
+    <span class="leg-item"><span class="leg-dot circle" style="background:#fff"></span>Spike</span>
+    <span class="leg-item"><span class="leg-dot circle" style="background:var(--amber)"></span>Signal BUY</span>
+    <span class="leg-item"><span class="leg-dot" style="background:var(--purple)"></span>EMA(14)</span>
+  </div>
+  <div class="chart-wrap" style="height:360px"><div class="chart-title">Serie de prix &mdash; Boom</div><canvas id="boomChart"></canvas></div>
+  <div class="triple-charts">
+    <div class="chart-wrap" style="height:180px"><div class="chart-title">ATR(14)</div><canvas id="boomAtrChart"></canvas></div>
+    <div class="chart-wrap" style="height:180px"><div class="chart-title">Z-Score ATR (seuil 2.0)</div><canvas id="boomZChart"></canvas></div>
+    <div class="chart-wrap" style="height:180px"><div class="chart-title">Cooldown restant</div><canvas id="boomCDChart"></canvas></div>
+  </div>
+</div>
+
+<!-- ==================== CRASH ==================== -->
+<div class="section" id="sec-crash">
+  <div class="algo-box crash-box">
+    <strong>Algorithme Crash &mdash; Reproduction Deriv</strong>
+    Chaque tick : <code>P(spike) = 1/N</code> &middot; Spike baissier si <code>Z-Score ATR &ge; 2.0</code> ET <code>close &lt; EMA(14)</code><br>
+    Drift positif <code>+0.12&middot;&sigma;</code> entre les spikes &middot; Cooldown <code>&lfloor;N&times;0.45&rfloor;</code> ticks post-spike &middot; Signal SELL au tick suivant
+  </div>
+  <div class="controls-grid">
+    <div class="ctrl"><label>Symbole</label>
+      <select id="c-sym" onchange="runCrash()">
+        <option value="300">Crash 300</option>
+        <option value="500" selected>Crash 500</option>
+        <option value="1000">Crash 1000</option>
+      </select>
+    </div>
+    <div class="ctrl"><label>Ticks simules</label>
+      <input type="range" min="500" max="8000" step="500" value="3000" id="c-ticks" oninput="bv('c-ticks','');runCrash()">
+      <span class="val" id="c-ticks-v">3000</span>
+    </div>
+    <div class="ctrl"><label>Volatilite (%)</label>
+      <input type="range" min="1" max="10" step="0.5" value="3" id="c-vol" oninput="bv('c-vol','%');runCrash()">
+      <span class="val" id="c-vol-v">3%</span>
+    </div>
+    <div class="ctrl"><label>Amplitude spike (%)</label>
+      <input type="range" min="1" max="10" step="0.5" value="3.5" id="c-amp" oninput="bv('c-amp','%');runCrash()">
+      <span class="val" id="c-amp-v">3.5%</span>
+    </div>
+  </div>
+  <div class="btn-row">
+    <button class="btn primary" style="background:linear-gradient(135deg,var(--red2),var(--red));border-color:var(--red)" onclick="runCrash()">Regenerer simulation</button>
+  </div>
+  <div class="metrics-grid" id="crash-metrics"></div>
+  <div class="legend">
+    <span class="leg-item"><span class="leg-dot" style="background:var(--red)"></span>Prix</span>
+    <span class="leg-item"><span class="leg-dot circle" style="background:#fff"></span>Spike</span>
+    <span class="leg-item"><span class="leg-dot circle" style="background:var(--amber)"></span>Signal SELL</span>
+    <span class="leg-item"><span class="leg-dot" style="background:var(--purple)"></span>EMA(14)</span>
+  </div>
+  <div class="chart-wrap" style="height:360px"><div class="chart-title">Serie de prix &mdash; Crash</div><canvas id="crashChart"></canvas></div>
+  <div class="triple-charts">
+    <div class="chart-wrap" style="height:180px"><div class="chart-title">ATR(14)</div><canvas id="crashAtrChart"></canvas></div>
+    <div class="chart-wrap" style="height:180px"><div class="chart-title">Z-Score ATR (seuil 2.0)</div><canvas id="crashZChart"></canvas></div>
+    <div class="chart-wrap" style="height:180px"><div class="chart-title">Cooldown restant</div><canvas id="crashCDChart"></canvas></div>
+  </div>
+</div>
+
+<!-- ==================== STRATEGY EA ==================== -->
+<div class="section" id="sec-strategy">
+  <div class="strategy-box">
+    <h3>Algorithme d'Entree SMC_Universal.mq5</h3>
+    <table class="strategy-table">
+      <thead><tr><th>Verdict GOM</th><th>Condition</th><th>Action</th><th>SL/TP</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><span class="strat-badge perfect">PERFECT &plusmn;3</span></td>
+          <td>Coherence &ge; 70% + Direction alignee</td>
+          <td style="color:var(--green);font-weight:600">ENTREE MARCHE IMMEDIATE</td>
+          <td>SL=2&times;ATR &middot; TP=RR 2.0</td>
+        </tr>
+        <tr>
+          <td><span class="strat-badge good">GOOD &plusmn;2</span></td>
+          <td>IsAlgoSpikeReady() = true<br><span style="color:var(--text3)">Z-Score &le; -1 ou &ge; 2 + EMA OK + Cooldown OK</span></td>
+          <td style="color:var(--blue);font-weight:600">ENTREE SI CONDITIONS MURES</td>
+          <td>SL=1.5&times;ATR &middot; TP=RR 2.0</td>
+        </tr>
+        <tr>
+          <td><span class="strat-badge base">BUY/SELL &plusmn;1</span></td>
+          <td>Deriv Arrow detectee (spike confirme)</td>
+          <td style="color:var(--amber);font-weight:600">ATTENDRE SPIKE</td>
+          <td>SL=2&times;ATR &middot; TP=RR 1.5</td>
+        </tr>
+        <tr>
+          <td><span class="strat-badge wait">WAIT 0</span></td>
+          <td>&mdash;</td>
+          <td style="color:var(--text3)">AUCUNE ENTREE</td>
+          <td>&mdash;</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="algo-detail">
+    <div class="algo-card">
+      <h4>IsAlgoSpikeReady() &mdash; 3 conditions</h4>
+      <pre><span class="highlight">// 1. Z-Score ATR (fenetre 20)</span>
+mean = average(ATR[1..20])
+stdDev = sqrt(variance(ATR[1..20]))
+zScore = (ATR[0] - mean) / stdDev
+atrReady = zScore &le; -1.0 OR zScore &ge; 2.0
+
+<span class="highlight">// 2. EMA(14) directionnelle</span>
+ema14 = EMA(close, 14)
+Boom:  emaOk = close &gt; ema14
+Crash: emaOk = close &lt; ema14
+
+<span class="highlight">// 3. Cooldown (pas de spike recent)</span>
+maxMove(5 bars) &lt; avgBody(10 bars) &times; 3.0</pre>
+    </div>
+    <div class="algo-card">
+      <h4>Gates universelles (toutes entrees)</h4>
+      <pre><span class="highlight">1.</span> GOM Coherence &ge; 70%
+<span class="highlight">2.</span> Boom = BUY only / Crash = SELL only
+<span class="highlight">3.</span> Max 1 position par symbole
+<span class="highlight">4.</span> Capital Manager (profit/perte jour)
+<span class="highlight">5.</span> SetupScore &ge; 65
+<span class="highlight">6.</span> 7min no-profit auto-close
+<span class="highlight">7.</span> GOM WAIT = fermer positions</pre>
+    </div>
+  </div>
+
+  <div class="algo-detail">
+    <div class="algo-card">
+      <h4>Probabilite de spike (Deriv)</h4>
+      <pre>Boom 300:  1 spike / 300 ticks (~5 min)
+Boom 500:  1 spike / 500 ticks (~8 min)
+Boom 1000: 1 spike / 1000 ticks (~16 min)
+
+Cooldown apres spike: ~45% de N ticks
+Boom 300:  ~135 ticks de pause
+Boom 500:  ~225 ticks de pause
+Boom 1000: ~450 ticks de pause</pre>
+    </div>
+    <div class="algo-card">
+      <h4>Detection pre-spike (signaux)</h4>
+      <pre><span class="highlight">Compression ATR:</span> volCompression &lt; 0.6
+<span class="highlight">Volume spike:</span>     volRatio &ge; 1.6&times;
+<span class="highlight">Pre-spike:</span>        range10 &lt; range50 &times; 0.4
+<span class="highlight">Canal touch:</span>      prix au canal H1
+<span class="highlight">Acceleration:</span>     |change1-change2| &gt; 0
+
+Combinaison ponderee:
+prob = 0.25&times;compression + 0.20&times;accel
+     + 0.20&times;volume + 0.15&times;range
+     + 0.10&times;preSpikePattern + 0.10&times;canal</pre>
+    </div>
+  </div>
+</div>
+
+<!-- ==================== BACKTEST ==================== -->
+<div class="section" id="sec-backtest">
+  <div class="statusbar">
+    <span><span class="dot"></span> Simulation active</span>
+    <span id="bt-status-sym">Boom 500</span>
+    <span id="bt-status-ticks">5000 ticks</span>
+    <span id="bt-status-trades">&mdash; trades</span>
+  </div>
+  <div class="controls-grid" style="grid-template-columns: repeat(auto-fill, minmax(140px,1fr))">
+    <div class="ctrl"><label>Symbole</label>
+      <select id="bt-sym" onchange="updateBtStatus();runBacktest()">
+        <option value="boom300">Boom 300</option>
+        <option value="boom500" selected>Boom 500</option>
+        <option value="boom1000">Boom 1000</option>
+        <option value="crash300">Crash 300</option>
+        <option value="crash500">Crash 500</option>
+        <option value="crash1000">Crash 1000</option>
+      </select>
+    </div>
+    <div class="ctrl"><label>Ticks</label>
+      <input type="range" min="1000" max="20000" step="1000" value="5000" id="bt-ticks" oninput="bv('bt-ticks','');updateBtStatus();runBacktest()">
+      <span class="val" id="bt-ticks-v">5000</span>
+    </div>
+    <div class="ctrl"><label>TP (ticks)</label>
+      <input type="range" min="5" max="150" step="5" value="40" id="bt-tp" oninput="bv('bt-tp','');runBacktest()">
+      <span class="val" id="bt-tp-v">40</span>
+    </div>
+    <div class="ctrl"><label>SL (%)</label>
+      <input type="range" min="0.5" max="6" step="0.5" value="1.5" id="bt-sl" oninput="bv('bt-sl','%');runBacktest()">
+      <span class="val" id="bt-sl-v">1.5%</span>
+    </div>
+    <div class="ctrl"><label>Volatilite (%)</label>
+      <input type="range" min="1" max="8" step="0.5" value="3" id="bt-vol" oninput="bv('bt-vol','%');runBacktest()">
+      <span class="val" id="bt-vol-v">3%</span>
+    </div>
+    <div class="ctrl"><label>Amplitude (%)</label>
+      <input type="range" min="1" max="10" step="0.5" value="3.5" id="bt-amp" oninput="bv('bt-amp','%');runBacktest()">
+      <span class="val" id="bt-amp-v">3.5%</span>
+    </div>
+    <div class="ctrl"><label>Risque/trade (%)</label>
+      <input type="range" min="0.5" max="5" step="0.5" value="1" id="bt-risk" oninput="bv('bt-risk','%');runBacktest()">
+      <span class="val" id="bt-risk-v">1%</span>
+    </div>
+    <div class="ctrl"><label>Trailing Stop</label>
+      <input type="checkbox" id="bt-trail" onchange="runBacktest()" style="margin-top:8px">
+    </div>
+    <div class="ctrl"><label>Trail (%)</label>
+      <input type="range" min="0.5" max="5" step="0.5" value="1.5" id="bt-trail-pct" oninput="bv('bt-trail-pct','%');runBacktest()">
+      <span class="val" id="bt-trail-pct-v">1.5%</span>
+    </div>
+  </div>
+  <div class="btn-row">
+    <button class="btn primary" onclick="runBacktest()">Lancer backtest</button>
+    <button class="btn" onclick="exportCSV()">Exporter CSV</button>
+  </div>
+  <div class="divider">Performance</div>
+  <div class="metrics-grid" id="bt-metrics"></div>
+  <div class="divider">Graphiques</div>
+  <div class="chart-wrap" style="height:300px"><div class="chart-title">Prix &mdash; entrees & sorties</div><canvas id="btPriceChart"></canvas></div>
+  <div class="dual-charts">
+    <div class="chart-wrap" style="height:220px"><div class="chart-title">Equite (capital = 100)</div><canvas id="btEquityChart"></canvas></div>
+    <div class="chart-wrap" style="height:220px"><div class="chart-title">Drawdown (%)</div><canvas id="btDDChart"></canvas></div>
+  </div>
+  <div class="dual-charts">
+    <div class="chart-wrap" style="height:190px"><div class="chart-title">Distribution PnL (%)</div><canvas id="btPnlDist"></canvas></div>
+    <div class="chart-wrap" style="height:190px"><div class="chart-title">Sorties : TP / SL / Trail</div><canvas id="btExitPie"></canvas></div>
+  </div>
+  <div class="divider">Journal des trades</div>
+  <div class="trade-log">
+    <table><thead><tr><th>#</th><th>Dir</th><th>Entree</th><th>Sortie</th><th>PnL%</th><th>MFE%</th><th>MAE%</th><th>Duree</th><th>Raison</th><th>Resultat</th></tr></thead>
+    <tbody id="bt-log-body"></tbody></table>
+  </div>
+</div>
+
+<!-- ==================== COMPARE ==================== -->
+<div class="section" id="sec-compare">
+  <div class="algo-box">
+    <strong>Comparaison multi-symboles</strong>
+    Backtest identique sur les 6 symboles Boom/Crash pour identifier les meilleures configurations.
+  </div>
+  <div class="controls-grid">
+    <div class="ctrl"><label>Ticks</label>
+      <input type="range" min="2000" max="15000" step="1000" value="5000" id="cmp-ticks" oninput="bv('cmp-ticks','');runCompare()">
+      <span class="val" id="cmp-ticks-v">5000</span>
+    </div>
+    <div class="ctrl"><label>TP (ticks)</label>
+      <input type="range" min="5" max="100" step="5" value="40" id="cmp-tp" oninput="bv('cmp-tp','');runCompare()">
+      <span class="val" id="cmp-tp-v">40</span>
+    </div>
+    <div class="ctrl"><label>SL (%)</label>
+      <input type="range" min="0.5" max="5" step="0.5" value="1.5" id="cmp-sl" oninput="bv('cmp-sl','%');runCompare()">
+      <span class="val" id="cmp-sl-v">1.5%</span>
+    </div>
+    <div class="ctrl"><label>Volatilite (%)</label>
+      <input type="range" min="1" max="8" step="0.5" value="3" id="cmp-vol" oninput="bv('cmp-vol','%');runCompare()">
+      <span class="val" id="cmp-vol-v">3%</span>
+    </div>
+    <div class="ctrl"><label>Amplitude (%)</label>
+      <input type="range" min="1" max="8" step="0.5" value="3.5" id="cmp-amp" oninput="bv('cmp-amp','%');runCompare()">
+      <span class="val" id="cmp-amp-v">3.5%</span>
+    </div>
+  </div>
+  <div class="btn-row"><button class="btn primary" onclick="runCompare()">Comparer</button></div>
+  <div class="triple-charts">
+    <div class="chart-wrap" style="height:260px"><div class="chart-title">Win Rate (%)</div><canvas id="cmpWRChart"></canvas></div>
+    <div class="chart-wrap" style="height:260px"><div class="chart-title">Profit Factor</div><canvas id="cmpPFChart"></canvas></div>
+    <div class="chart-wrap" style="height:260px"><div class="chart-title">Sharpe Ratio</div><canvas id="cmpSharpeChart"></canvas></div>
+  </div>
+</div>
+
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const lbl = n => Array.from({length:n},(_,i)=>i);
+let charts = {};
+function destroyChart(k){ if(charts[k]){ charts[k].destroy(); delete charts[k]; } }
+function mkChart(id, cfg){ destroyChart(id); charts[id] = new Chart($(id), cfg); return charts[id]; }
+function bv(id, suffix=''){ $(id+'-v').textContent = $(id).value + suffix; }
+
+const COOLDOWN_R=0.45, EMA_P=14, ATR_P=14, Z_THRESH=2.0;
+function calcEMA(arr,p){ const k=2/(p+1),e=[arr[0]]; for(let i=1;i<arr.length;i++) e.push(arr[i]*k+e[i-1]*(1-k)); return e; }
+function calcATR(arr,p){ const tr=[0]; for(let i=1;i<arr.length;i++) tr.push(Math.abs(arr[i]-arr[i-1])); const a=[tr[0]]; for(let i=1;i<tr.length;i++) a.push((a[i-1]*(p-1)+tr[i])/p); return a; }
+function calcZ(atr,w=20){ return atr.map((v,i)=>{ if(i<w) return 0; const s=atr.slice(i-w,i); const m=s.reduce((a,b)=>a+b,0)/w; const sd=Math.sqrt(s.reduce((a,b)=>a+(b-m)**2,0)/w); return sd>0?(v-m)/sd:0; }); }
+
+function generateBoom(N,ticks,volP=3,ampP=3.5){
+  const vol=volP/100,amp=ampP/100,drift=-vol*0.12;
+  const coolMax=Math.floor(N*COOLDOWN_R);
+  let price=10000; const prices=[price],raw=[false],cdArr=[0]; let cd=0;
+  for(let i=1;i<ticks;i++){
+    let sp=false;
+    if(cd<=0&&Math.random()<1/N){ price*=(1+amp*(0.75+Math.random()*0.65)); sp=true; cd=coolMax+Math.floor(Math.random()*20); }
+    else { price*=(1+drift+vol*(Math.random()*2-1)); price=Math.max(price,100); }
+    if(cd>0)cd--; prices.push(price); raw.push(sp); cdArr.push(cd);
+  }
+  const ema=calcEMA(prices,EMA_P),atr=calcATR(prices,ATR_P),z=calcZ(atr,20);
+  const isSpike=raw.map((s,i)=>s&&z[i]>=Z_THRESH&&prices[i]>ema[i]);
+  const sig=new Array(ticks).fill(false);
+  for(let i=1;i<ticks;i++) if(isSpike[i-1]) sig[i]=true;
+  return {prices,isSpike,sig,atr,z,ema,raw,cdArr};
+}
+
+function generateCrash(N,ticks,volP=3,ampP=3.5){
+  const vol=volP/100,amp=ampP/100,drift=vol*0.12;
+  const coolMax=Math.floor(N*COOLDOWN_R);
+  let price=10000; const prices=[price],raw=[false],cdArr=[0]; let cd=0;
+  for(let i=1;i<ticks;i++){
+    let sp=false;
+    if(cd<=0&&Math.random()<1/N){ price*=(1-amp*(0.75+Math.random()*0.65)); sp=true; cd=coolMax+Math.floor(Math.random()*20); }
+    else { price*=(1+drift+vol*(Math.random()*2-1)); price=Math.max(price,100); }
+    if(cd>0)cd--; prices.push(price); raw.push(sp); cdArr.push(cd);
+  }
+  const ema=calcEMA(prices,EMA_P),atr=calcATR(prices,ATR_P),z=calcZ(atr,20);
+  const isSpike=raw.map((s,i)=>s&&z[i]>=Z_THRESH&&prices[i]<ema[i]);
+  const sig=new Array(ticks).fill(false);
+  for(let i=1;i<ticks;i++) if(isSpike[i-1]) sig[i]=true;
+  return {prices,isSpike,sig,atr,z,ema,raw,cdArr};
+}
+
+function runBT({prices,signals,dir,tpTicks=40,slPct=1.5,riskPct=1,trailPct=1.5,useTrail=false}){
+  const n=prices.length,isBuy=dir==='BUY',slF=slPct/100,trF=trailPct/100;
+  const trades=[],equity=[100],dd=[0];
+  let cap=100,peak=100,inT=false,entry={};
+  const eM=new Array(n).fill(null),xM=new Array(n).fill(null);
+  for(let i=1;i<n;i++){
+    const p=prices[i];
+    if(!inT&&signals[i]){ inT=true; entry={idx:i,price:p,best:p}; eM[i]=p; }
+    if(inT){
+      const ep=entry.price;
+      if(isBuy) entry.best=Math.max(entry.best,p); else entry.best=Math.min(entry.best,p);
+      const ret=isBuy?(p-ep)/ep:(ep-p)/ep;
+      let trail=false;
+      if(useTrail){ trail=isBuy?p<=entry.best*(1-trF):p>=entry.best*(1+trF); }
+      const sl=ret<=-slF,tp=(i-entry.idx)>=tpTicks,exit=sl||tp||trail;
+      if(exit){
+        const pnlPct=ret*100;
+        const mfe=isBuy?((entry.best-ep)/ep)*100:((ep-entry.best)/ep)*100;
+        const posSize=(cap*riskPct/100)/slF;
+        const pnlAbs=posSize*(pnlPct/100);
+        cap+=pnlAbs; cap=Math.max(cap,0.01);
+        trades.push({idx:entry.idx,xIdx:i,dir,ep,xp:p,pnlPct:+pnlPct.toFixed(3),pnlAbs:+pnlAbs.toFixed(3),win:pnlPct>0,mfe:+mfe.toFixed(3),mae:+(ret<0?pnlPct:0).toFixed(3),dur:i-entry.idx,reason:sl?'SL':trail?'Trail':'TP'});
+        xM[i]=p; peak=Math.max(peak,cap); inT=false;
+      }
+    }
+    equity.push(+cap.toFixed(4)); dd.push(+(peak>0?((peak-cap)/peak)*100:0).toFixed(4));
+  }
+  return {trades,equity,dd,eM,xM,metrics:calcMetrics(trades,equity,dd)};
+}
+
+function calcMetrics(trades,equity,dd){
+  const n=trades.length; if(!n) return {error:'Aucun trade genere'};
+  const wins=trades.filter(t=>t.win),losses=trades.filter(t=>!t.win);
+  const wr=wins.length/n*100;
+  const gp=wins.reduce((s,t)=>s+t.pnlAbs,0);
+  const gl=Math.abs(losses.reduce((s,t)=>s+t.pnlAbs,0));
+  const pf=gl>0?gp/gl:gp>0?999:0;
+  const avgW=wins.length?gp/wins.length:0,avgL=losses.length?gl/losses.length:0;
+  const exp=(wr/100)*avgW-((1-wr/100))*avgL;
+  const rets=trades.map(t=>t.pnlPct/100);
+  const mu=rets.reduce((a,b)=>a+b,0)/n;
+  const sig=Math.sqrt(rets.reduce((s,r)=>s+(r-mu)**2,0)/n);
+  const sharpe=sig>0?(mu/sig)*Math.sqrt(252):0;
+  const dn=rets.filter(r=>r<0); const ds=dn.length?Math.sqrt(dn.reduce((s,r)=>s+r**2,0)/dn.length):0;
+  const sortino=ds>0?(mu/ds)*Math.sqrt(252):0;
+  const maxDD=Math.max(...dd);
+  const totalPnlPct=((equity[equity.length-1]/equity[0])-1)*100;
+  const rf=maxDD>0?totalPnlPct/maxDD:0;
+  let mw=0,ml=0,cw=0,cl=0;
+  trades.forEach(t=>{ if(t.win){cw++;cl=0;mw=Math.max(mw,cw);}else{cl++;cw=0;ml=Math.max(ml,cl);} });
+  const er={}; trades.forEach(t=>{er[t.reason]=(er[t.reason]||0)+1;});
+  return {n,wins:wins.length,losses:losses.length,wr:+wr.toFixed(2),pf:+pf.toFixed(3),sharpe:+sharpe.toFixed(3),sortino:+sortino.toFixed(3),maxDD:+maxDD.toFixed(2),rf:+rf.toFixed(3),totalPnlPct:+totalPnlPct.toFixed(2),exp:+exp.toFixed(4),avgW:+avgW.toFixed(4),avgL:+avgL.toFixed(4),avgMAE:+(trades.reduce((s,t)=>s+t.mae,0)/n).toFixed(3),avgMFE:+(trades.reduce((s,t)=>s+t.mfe,0)/n).toFixed(3),avgDur:+(trades.reduce((s,t)=>s+t.dur,0)/n).toFixed(1),mConsecW:mw,mConsecL:ml,er};
+}
+
+function renderMetrics(el, m){
+  if(!m||m.error){ el.innerHTML=`<p style="color:var(--text2);font-size:13px">${m?.error||'Aucune donnee'}</p>`; return; }
+  const rows=[
+    ['Trades',m.n,'blue'],['Win Rate',m.wr+'%',m.wr>=55?'pos':m.wr>=45?'amber':'neg'],
+    ['Profit Factor',m.pf,m.pf>=1.5?'pos':m.pf>=1?'amber':'neg'],
+    ['Sharpe',m.sharpe,m.sharpe>=1?'pos':m.sharpe>=0?'amber':'neg'],
+    ['Sortino',m.sortino,m.sortino>=1?'pos':m.sortino>=0?'amber':'neg'],
+    ['Max DD',m.maxDD.toFixed(2)+'%','neg'],
+    ['Recovery',m.rf,m.rf>=2?'pos':m.rf>=1?'amber':'neg'],
+    ['Total PnL',m.totalPnlPct.toFixed(2)+'%',m.totalPnlPct>=0?'pos':'neg'],
+    ['Expectancy',m.exp.toFixed(4),m.exp>=0?'pos':'neg'],
+    ['Avg Win',m.avgW.toFixed(3),'pos'],['Avg Loss',m.avgL.toFixed(3),'neg'],
+    ['Avg MFE',m.avgMFE+'%','cyan'],['Avg MAE',m.avgMAE+'%','purple'],
+    ['Avg Duree',m.avgDur+' t','blue'],
+    ['Max WinStreak',m.mConsecW,'pos'],['Max LossStreak',m.mConsecL,'neg'],
+  ];
+  el.innerHTML=rows.map(([l,v,c])=>`<div class="metric"><div class="mlabel">${l}</div><div class="mval ${c}">${v}</div></div>`).join('');
+}
+
+const chartOpts=(noX=true)=>({responsive:true,maintainAspectRatio:false,animation:false,plugins:{legend:{display:false}},scales:{x:{display:!noX,ticks:{color:'#505a70',font:{size:9}},grid:{display:false}},y:{ticks:{color:'#505a70',font:{size:10}},grid:{color:'rgba(255,255,255,.03)'}}}});
+
+function renderSimChart(prefix, data, color){
+  const {prices,isSpike,sig,atr,z,ema,cdArr}=data;
+  const ticks=prices.length;
+  const spikes=prices.map((v,i)=>isSpike[i]?v:null);
+  const sigs=prices.map((v,i)=>sig[i]?v:null);
+  const sp=isSpike.filter(Boolean).length;
+  $(prefix+'-metrics').innerHTML=`
+    <div class="metric"><div class="mlabel">Spikes confirmes</div><div class="mval ${color==='green'?'pos':'neg'}">${sp}</div></div>
+    <div class="metric"><div class="mlabel">Frequence moy.</div><div class="mval blue">${Math.round(ticks/Math.max(sp,1))}</div><div class="msub">ticks/spike</div></div>
+    <div class="metric"><div class="mlabel">Signaux</div><div class="mval amber">${sig.filter(Boolean).length}</div></div>
+    <div class="metric"><div class="mlabel">Prix final</div><div class="mval">${Math.round(prices[prices.length-1]).toLocaleString()}</div></div>`;
+  const c=color==='green'?'#22c983':'#f25d3b';
+  mkChart(prefix+'Chart',{type:'line',data:{labels:lbl(ticks),datasets:[
+    {label:'Prix',data:prices,borderColor:c,borderWidth:1.2,pointRadius:0,fill:false,tension:0,order:3},
+    {label:'EMA14',data:ema,borderColor:'#8b7ff7',borderWidth:1,pointRadius:0,fill:false,tension:0.3,borderDash:[3,3],order:4},
+    {label:'Spike',data:spikes,borderColor:'transparent',pointBackgroundColor:'#fff',pointBorderColor:c,pointRadius:spikes.map(v=>v?6:0),pointBorderWidth:2,showLine:false,order:1},
+    {label:'Signal',data:sigs,borderColor:'transparent',pointBackgroundColor:'#ffb020',pointRadius:sigs.map(v=>v?7:0),pointStyle:'triangle',showLine:false,order:0},
+  ]},options:chartOpts()});
+  mkChart(prefix+'AtrChart',{type:'line',data:{labels:lbl(ticks),datasets:[{data:atr,borderColor:'#4a9eff',borderWidth:1,pointRadius:0,fill:true,backgroundColor:'rgba(74,158,255,.05)',tension:0}]},options:chartOpts()});
+  mkChart(prefix+'ZChart',{type:'line',data:{labels:lbl(ticks),datasets:[
+    {data:z,borderColor:'#ffb020',borderWidth:1,pointRadius:0,fill:false,tension:0},
+    {data:new Array(ticks).fill(Z_THRESH),borderColor:'rgba(242,93,59,.4)',borderWidth:1,borderDash:[4,4],pointRadius:0,fill:false},
+    {data:new Array(ticks).fill(-1),borderColor:'rgba(78,205,196,.3)',borderWidth:1,borderDash:[4,4],pointRadius:0,fill:false},
+  ]},options:chartOpts()});
+  mkChart(prefix+'CDChart',{type:'line',data:{labels:lbl(ticks),datasets:[{data:cdArr,borderColor:'#8b7ff7',borderWidth:1,pointRadius:0,fill:true,backgroundColor:'rgba(139,127,247,.06)',tension:0}]},options:chartOpts()});
+}
+
+function runBoom(){ const N=+$('b-sym').value,t=+$('b-ticks').value; renderSimChart('boom',generateBoom(N,t,+$('b-vol').value,+$('b-amp').value),'green'); }
+function runCrash(){ const N=+$('c-sym').value,t=+$('c-ticks').value; renderSimChart('crash',generateCrash(N,t,+$('c-vol').value,+$('c-amp').value),'red'); }
+
+function updateBtStatus(){
+  $('bt-status-sym').textContent=$('bt-sym').value.replace('boom','Boom ').replace('crash','Crash ');
+  $('bt-status-ticks').textContent=$('bt-ticks').value+' ticks';
+}
+
+let btResult=null;
+function runBacktest(){
+  const sym=$('bt-sym').value,ticks=+$('bt-ticks').value,vol=+$('bt-vol').value,amp=+$('bt-amp').value;
+  const tpT=+$('bt-tp').value,sl=+$('bt-sl').value,risk=+$('bt-risk').value;
+  const useTrail=$('bt-trail').checked,trailPct=+$('bt-trail-pct').value;
+  const isBoom=sym.startsWith('boom'),N=+sym.replace('boom','').replace('crash','');
+  const res=isBoom?generateBoom(N,ticks,vol,amp):generateCrash(N,ticks,vol,amp);
+  const dir=isBoom?'BUY':'SELL';
+  btResult=runBT({prices:res.prices,signals:res.sig,dir,tpTicks:tpT,slPct:sl,riskPct:risk,useTrail,trailPct});
+  $('bt-status-trades').textContent=(btResult.metrics.n||0)+' trades';
+  renderMetrics($('bt-metrics'),btResult.metrics);
+  const pc=isBoom?'#22c983':'#f25d3b'; const n=res.prices.length;
+  mkChart('btPriceChart',{type:'line',data:{labels:lbl(n),datasets:[
+    {data:res.prices,borderColor:pc,borderWidth:1,pointRadius:0,fill:false,tension:0,order:3},
+    {data:res.prices.map((v,i)=>btResult.eM[i]),borderColor:'transparent',pointBackgroundColor:'#22c983',pointRadius:btResult.eM.map(v=>v?5:0),showLine:false,order:1},
+    {data:res.prices.map((v,i)=>btResult.xM[i]),borderColor:'transparent',pointBackgroundColor:'#f25d3b',pointRadius:btResult.xM.map(v=>v?5:0),pointStyle:'rectRot',showLine:false,order:0},
+  ]},options:chartOpts()});
+  const eqC=btResult.equity[btResult.equity.length-1]>=100?'#22c983':'#f25d3b';
+  mkChart('btEquityChart',{type:'line',data:{labels:lbl(btResult.equity.length),datasets:[{data:btResult.equity,borderColor:eqC,borderWidth:1.5,pointRadius:0,fill:true,backgroundColor:eqC==='#22c983'?'rgba(34,201,131,.06)':'rgba(242,93,59,.06)',tension:0.2}]},options:chartOpts()});
+  mkChart('btDDChart',{type:'line',data:{labels:lbl(btResult.dd.length),datasets:[{data:btResult.dd,borderColor:'#f25d3b',borderWidth:1,pointRadius:0,fill:true,backgroundColor:'rgba(242,93,59,.06)',tension:0}]},options:chartOpts()});
+  const pnls=btResult.trades.map(t=>t.pnlPct);
+  if(pnls.length){
+    const min=Math.min(...pnls),max=Math.max(...pnls),bins=20,bw=(max-min)/bins||1;
+    const buckets=Array.from({length:bins},(_,i)=>({label:(min+i*bw).toFixed(1),count:0,isPos:(min+i*bw)>=0}));
+    pnls.forEach(p=>{const b=Math.min(Math.floor((p-min)/bw),bins-1);if(buckets[b])buckets[b].count++;});
+    mkChart('btPnlDist',{type:'bar',data:{labels:buckets.map(b=>b.label),datasets:[{data:buckets.map(b=>b.count),backgroundColor:buckets.map(b=>b.isPos?'rgba(34,201,131,.5)':'rgba(242,93,59,.5)'),borderWidth:0}]},options:{...chartOpts(false),scales:{x:{ticks:{color:'#505a70',font:{size:9},maxRotation:45,autoSkip:true,maxTicksLimit:10},grid:{display:false}},y:{ticks:{color:'#505a70',font:{size:10}},grid:{color:'rgba(255,255,255,.03)'}}}}});
+  }
+  const er=btResult.metrics.er||{};
+  mkChart('btExitPie',{type:'doughnut',data:{labels:Object.keys(er),datasets:[{data:Object.values(er),backgroundColor:Object.keys(er).map(k=>k==='TP'?'#4a9eff':k==='SL'?'#f25d3b':'#ffb020'),borderColor:'#12151d',borderWidth:3}]},options:{responsive:true,maintainAspectRatio:false,animation:false,plugins:{legend:{labels:{color:'#8892a8',font:{size:11},boxWidth:12}}}}});
+  $('bt-log-body').innerHTML=btResult.trades.slice().reverse().slice(0,60).map((t,i)=>`<tr>
+    <td>${btResult.trades.length-i}</td>
+    <td><span class="badge ${t.dir==='BUY'?'buy':'sell'}">${t.dir}</span></td>
+    <td>${t.idx}</td><td>${t.xIdx}</td>
+    <td style="color:${t.pnlPct>=0?'var(--green)':'var(--red)'}">${t.pnlPct>=0?'+':''}${t.pnlPct}%</td>
+    <td style="color:var(--green)">+${t.mfe}%</td>
+    <td style="color:var(--red)">${t.mae}%</td>
+    <td>${t.dur}</td>
+    <td><span class="badge ${t.reason.toLowerCase()}">${t.reason}</span></td>
+    <td><span class="badge ${t.win?'win':'loss'}">${t.win?'WIN':'LOSS'}</span></td>
+  </tr>`).join('');
+}
+
+function runCompare(){
+  const ticks=+$('cmp-ticks').value,tp=+$('cmp-tp').value,sl=+$('cmp-sl').value;
+  const vol=+$('cmp-vol').value,amp=+$('cmp-amp').value;
+  const syms=[['boom300',300,'BUY'],['boom500',500,'BUY'],['boom1000',1000,'BUY'],['crash300',300,'SELL'],['crash500',500,'SELL'],['crash1000',1000,'SELL']];
+  const results=syms.map(([name,N,dir])=>{
+    const res=dir==='BUY'?generateBoom(N,ticks,vol,amp):generateCrash(N,ticks,vol,amp);
+    return {name,...runBT({prices:res.prices,signals:res.sig,dir,tpTicks:tp,slPct:sl,riskPct:1,useTrail:false}).metrics};
+  });
+  const labels=results.map(r=>r.name.replace('boom','Boom ').replace('crash','Crash '));
+  const bg=['rgba(34,201,131,.65)','rgba(34,201,131,.45)','rgba(34,201,131,.25)','rgba(242,93,59,.65)','rgba(242,93,59,.45)','rgba(242,93,59,.25)'];
+  const opts={responsive:true,maintainAspectRatio:false,animation:false,plugins:{legend:{display:false}},scales:{x:{ticks:{color:'#8892a8',font:{size:11}},grid:{display:false}},y:{ticks:{color:'#505a70',font:{size:10}},grid:{color:'rgba(255,255,255,.03)'}}}};
+  mkChart('cmpWRChart',{type:'bar',data:{labels,datasets:[{data:results.map(r=>r.wr||0),backgroundColor:bg,borderRadius:4,borderWidth:0}]},options:opts});
+  mkChart('cmpPFChart',{type:'bar',data:{labels,datasets:[{data:results.map(r=>Math.min(r.pf||0,5)),backgroundColor:bg,borderRadius:4,borderWidth:0}]},options:opts});
+  mkChart('cmpSharpeChart',{type:'bar',data:{labels,datasets:[{data:results.map(r=>r.sharpe||0),backgroundColor:bg,borderRadius:4,borderWidth:0}]},options:opts});
+}
+
+function exportCSV(){
+  if(!btResult||!btResult.trades.length){alert('Lancez un backtest d\'abord.');return;}
+  const h='#,Direction,Entree,Sortie,Prix_E,Prix_S,PnL%,PnL$,MFE%,MAE%,Duree,Raison,Win';
+  const rows=btResult.trades.map((t,i)=>`${i+1},${t.dir},${t.idx},${t.xIdx},${t.ep.toFixed(4)},${t.xp.toFixed(4)},${t.pnlPct},${t.pnlAbs},${t.mfe},${t.mae},${t.dur},${t.reason},${t.win?1:0}`);
+  const a=document.createElement('a'); a.href='data:text/csv;charset=utf-8,'+encodeURIComponent([h,...rows].join('\n')); a.download='backtest_trades.csv'; a.click();
+}
+
+function switchTab(t){
+  ['boom','crash','strategy','backtest','compare'].forEach((k,i)=>{
+    document.querySelectorAll('.tab')[i].classList.toggle('active',k===t);
+    $('sec-'+k).classList.toggle('active',k===t);
+  });
+}
+
+window.addEventListener('load',()=>{ runBoom(); setTimeout(runCrash,200); setTimeout(runBacktest,400); setTimeout(runCompare,600); });
+</script>
+</body>
+</html>

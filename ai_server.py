@@ -67,7 +67,17 @@ if str(_python_dir) not in sys.path:
     sys.path.insert(0, str(_python_dir))
 load_dotenv(_root_dir / "python" / ".env")
 load_dotenv(_root_dir / ".env")
+load_dotenv(_root_dir / ".env.local")  # Override via local config
 load_dotenv()
+
+# Import spike anticipation
+try:
+    from spike_anticipation import SpikeAnticipator
+    _spike_anticipator = SpikeAnticipator(anticipation_pips=5.0)
+    SPIKE_ANTICIPATION_AVAILABLE = True
+except ImportError:
+    _spike_anticipator = None
+    SPIKE_ANTICIPATION_AVAILABLE = False
 
 # === EARLY LOGGER INIT ===
 logging.basicConfig(
@@ -22382,13 +22392,59 @@ async def set_pending_order(payload: PendingOrderPayload):
 
     _raw_status = (payload.status or "ready").lower()
     _src = payload.source or ""
+
+    # Apply spike anticipation if available
+    _entry_price = payload.entry_price
+    _stop_loss = payload.stop_loss
+    _take_profit = payload.take_profit
+    _anticipation_applied = False
+    _anticipation_distance = 0.0
+
+    if SPIKE_ANTICIPATION_AVAILABLE and _spike_anticipator:
+        logger.debug(f"[SPIKE] Available and enabled for {sym}")
+        try:
+            # Get RSI from payload if available (check both normal attrs and extra fields)
+            _rsi = getattr(payload, 'rsi', None)
+            if _rsi is None and hasattr(payload, '__pydantic_extra__'):
+                _rsi = payload.__pydantic_extra__.get('rsi')
+
+            # Determine volatility regime (optional)
+            _volatility = getattr(payload, 'volatility_regime', None)
+            if _volatility is None and hasattr(payload, '__pydantic_extra__'):
+                _volatility = payload.__pydantic_extra__.get('volatility_regime')
+
+            # Apply anticipation
+            anticipated = _spike_anticipator.format_order_with_anticipation(
+                symbol=sym,
+                action=direction,
+                base_entry=payload.entry_price,
+                base_sl=payload.stop_loss,
+                base_tp=payload.take_profit,
+                verdict_strength=gom_check["gom_verdict"],
+                rsi=_rsi,
+                volatility_regime=_volatility,
+            )
+
+            if anticipated.get("anticipation_applied", False):
+                _entry_price = anticipated.get("entry", payload.entry_price)
+                _stop_loss = anticipated.get("sl", payload.stop_loss)
+                _take_profit = anticipated.get("tp", payload.take_profit)
+                _anticipation_applied = True
+                _anticipation_distance = anticipated.get("anticipation_distance_pips", 0.0)
+                logger.info(
+                    f"[SPIKE] {sym} Anticipation applied: {_anticipation_distance:.1f} pips "
+                    f"(entry {payload.entry_price} -> {_entry_price})"
+                )
+        except Exception as e:
+            logger.warning(f"[SPIKE] Anticipation failed for {sym}: {e} (using original prices)")
+
     _PENDING_ORDER_STORE[sym] = {
         "symbol":         sym,
         "recommendation": direction,
         "action":         direction,
-        "entry_price":    payload.entry_price,
-        "stop_loss":      payload.stop_loss,
-        "take_profit":    payload.take_profit,
+        "entry_price":    _entry_price,
+        "stop_loss":      _stop_loss,
+        "take_profit":    _take_profit,
         "lot":            payload.lot,
         "execution_type": payload.execution_type,
         "confidence":     final_conf,
@@ -22399,6 +22455,8 @@ async def set_pending_order(payload: PendingOrderPayload):
         "source":         _src,
         "status":         _raw_status if _raw_status in ("ready", "conflict_pending") else "ready",
         "timestamp":      datetime.utcnow().isoformat(),
+        "spike_anticipation": _anticipation_applied,
+        "anticipation_distance_pips": _anticipation_distance,
     }
     # Dès qu'un ordre pipeline est posté → activer cooldown GOM auto-trade immédiatement
     if _src == "pipeline":
@@ -22406,13 +22464,41 @@ async def set_pending_order(payload: PendingOrderPayload):
         _PIPELINE_LAST_EXEC[sym] = _time.time()
         logger.info(f"[PendingOrder] {sym} pipeline posté → cooldown GOM {PIPELINE_GOM_COOLDOWN_SEC}s activé")
     logger.info(f"[PendingOrder] Stocke : {sym} {direction} conf={final_conf:.2f} gom={gom_check['gom_action']}")
-    return {
+    logger.info(f"[PendingOrder] BEFORE RETURN: _anticipation_applied={_anticipation_applied}, _anticipation_distance={_anticipation_distance}")
+
+    _response = {
         "ok": True,
         "symbol": sym,
         "order_id": sym,
         "gom_action": gom_check["gom_action"],
         "gom_warning": gom_check["gom_warning"],
         "confidence_adjusted": final_conf,
+        "spike_anticipation_applied": _anticipation_applied,
+        "anticipation_distance_pips": _anticipation_distance,
+        "entry_price": _entry_price,
+        "stop_loss": _stop_loss,
+        "take_profit": _take_profit,
+    }
+    logger.info(f"[PendingOrder] RESPONSE KEYS: {list(_response.keys())} | TOTAL={len(_response)}")
+    logger.info(f"[PendingOrder] RETURNING: spike_anticipation_applied={_response.get('spike_anticipation_applied')}")
+    return _response
+
+
+@app.get("/test-spike-response")
+async def test_spike_response():
+    """Test endpoint to verify spike response structure"""
+    return {
+        "ok": True,
+        "symbol": "TEST",
+        "order_id": "TEST",
+        "gom_action": "BUY",
+        "gom_warning": None,
+        "confidence_adjusted": 0.85,
+        "spike_anticipation_applied": True,
+        "anticipation_distance_pips": 7.5,
+        "entry_price": 4223.95,
+        "stop_loss": 4207.50,
+        "take_profit": 4247.50,
     }
 
 
@@ -22967,6 +23053,24 @@ def _gom_verdict_record_from_payload(payload: GomVerdictPayload, enrich_mt5: boo
         "tp": float(extra.get("tp") or 0.0),
         "atr": float(extra.get("atr") or extra.get("atr14") or 0.0),
         "atr14": float(extra.get("atr14") or extra.get("atr") or 0.0),
+        # Timeframe directions (pour IA Status v2 multi-TF)
+        "tf_m1_dir": str(payload.tf_m1_dir or "NEUT"),
+        "tf_m1_rsi": int(payload.tf_m1_rsi or 50),
+        "tf_m5_dir": str(payload.tf_m5_dir or "NEUT"),
+        "tf_m5_rsi": int(payload.tf_m5_rsi or 50),
+        "tf_m15_dir": str(payload.tf_m15_dir or "NEUT"),
+        "tf_m15_rsi": int(payload.tf_m15_rsi or 50),
+        "tf_m30_dir": str(getattr(payload, "tf_m30_dir", None) or "NEUT"),
+        "tf_m30_rsi": int(getattr(payload, "tf_m30_rsi", None) or 50),
+        "tf_h1_dir": str(payload.tf_h1_dir or "NEUT"),
+        "tf_h1_rsi": int(payload.tf_h1_rsi or 50),
+        "tf_h4_dir": str(payload.tf_h4_dir or "NEUT"),
+        "tf_h4_rsi": int(payload.tf_h4_rsi or 50),
+        "tf_d1_dir": str(payload.tf_d1_dir or "NEUT"),
+        "tf_d1_rsi": int(payload.tf_d1_rsi or 50),
+        "tf_w1_dir": str(payload.tf_w1_dir or "NEUT"),
+        "tf_global_dir": str(payload.tf_global_dir or "NEUT"),
+        "tf_global_strength": int(payload.tf_global_strength or 0),
     }
 
     # ══════════════════════════════════════════════════════════════
@@ -23399,6 +23503,14 @@ async def set_gom_verdict(payload: GomVerdictPayload, background_tasks: Backgrou
     # Stockage synchrone minimal — juste le strict nécessaire pour que le GET soit à jour
     sym_full, record = _gom_verdict_record_from_payload(payload, enrich_mt5=False)
     _GOM_VERDICT_STORE[sym_full] = record
+
+    # 🔑 INVALIDATE gom-kola-dashboard cache so SMC_Universal sees fresh verdict immediately
+    for chart_tf in ["M1", "M5", "M15", "H1", "H4", "D1"]:
+        cache_key = f"{sym_full}:{chart_tf}"
+        if cache_key in _gom_cache:
+            del _gom_cache[cache_key]
+    logger.info(f"[GOM-VERDICT] Cache invalidated for {sym_full} — SMC_Universal will poll fresh data next call")
+
     # Opérations lourdes (tableau sync, auto-trade) en arrière-plan
     background_tasks.add_task(_store_gom_verdict_payload_bg, payload)
     return {

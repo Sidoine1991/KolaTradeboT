@@ -112,7 +112,7 @@ void GOMG_DrawBollingerPrediction(double& pred_bb_mid[], double& pred_bb_up[], d
    // ── Tracer MID (bleu, solide, épais) ──
    for(int i = 0; i < n_points - 1; i++)
    {
-      string line_name = "GOM_PRED_MID_" + IntToString(i);
+      string line_name = "GOM_PRED_MID_" + IntegerToString(i);
       datetime t1 = now + (i * time_step);
       datetime t2 = now + ((i + 1) * time_step);
 
@@ -128,7 +128,7 @@ void GOMG_DrawBollingerPrediction(double& pred_bb_mid[], double& pred_bb_up[], d
    // ── Tracer UP (rouge, pointillé) ──
    for(int i = 0; i < n_points - 1; i++)
    {
-      string line_name = "GOM_PRED_UP_" + IntToString(i);
+      string line_name = "GOM_PRED_UP_" + IntegerToString(i);
       datetime t1 = now + (i * time_step);
       datetime t2 = now + ((i + 1) * time_step);
 
@@ -144,7 +144,7 @@ void GOMG_DrawBollingerPrediction(double& pred_bb_mid[], double& pred_bb_up[], d
    // ── Tracer DN (vert, pointillé) ──
    for(int i = 0; i < n_points - 1; i++)
    {
-      string line_name = "GOM_PRED_DN_" + IntToString(i);
+      string line_name = "GOM_PRED_DN_" + IntegerToString(i);
       datetime t1 = now + (i * time_step);
       datetime t2 = now + ((i + 1) * time_step);
 
@@ -157,7 +157,7 @@ void GOMG_DrawBollingerPrediction(double& pred_bb_mid[], double& pred_bb_up[], d
       ObjectSetInteger(0, line_name, OBJPROP_BACK, false);
    }
 
-   Print("[GOMG] Bollinger Predictions dessinées: " + IntToString(n_points) + " points");
+   Print("[GOMG] Bollinger Predictions dessinées: " + IntegerToString(n_points) + " points");
 }
 
 //+------------------------------------------------------------------+
@@ -171,9 +171,9 @@ void GOMG_ClearAll()
    ObjectDelete(0, "GOM_KOLA_BUY");
    ObjectDelete(0, "GOM_KOLA_SELL");
    ObjectDelete(0, "GOM_FUTURE_ZONE");
-   ObjectDelete(0, "GOM_PRED_MID*");  // Nettoyer les prédictions aussi
-   ObjectDelete(0, "GOM_PRED_UP*");
-   ObjectDelete(0, "GOM_PRED_DN*");
+   ObjectsDeleteAll(0, "GOM_PRED_MID_");  // prefix sans wildcard (ObjectDelete ignore les wildcards)
+   ObjectsDeleteAll(0, "GOM_PRED_UP_");
+   ObjectsDeleteAll(0, "GOM_PRED_DN_");
    Print("[GOMG] Tous les dessins GOM nettoyés");
 }
 

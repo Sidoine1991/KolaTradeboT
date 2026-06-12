@@ -1,0 +1,224 @@
+================================================================================
+GOM SYNC SCHEDULER — COMMANDES RAPIDES
+================================================================================
+
+Date: 2026-06-12
+Version: 1.0
+Status: ✅ Production Ready
+
+================================================================================
+COMMANDES DE BASE
+================================================================================
+
+1️⃣  TEST UNIQUE (1 exécution)
+    cd D:/Dev/TradBOT
+    python Python/gom_sync_with_report.py --report
+
+2️⃣  BOUCLE 10 MINUTES (console)
+    python Python/gom_sync_scheduler.py
+
+3️⃣  BOUCLE PERSONNALISÉE (5 min au lieu de 10)
+    python Python/gom_sync_scheduler.py --interval 300
+
+================================================================================
+LANCEMENT VIA SCRIPTS
+================================================================================
+
+📄 Script Windows (lancement simple)
+    D:\Dev\TradBOT\scripts\start_gom_sync_10min.bat
+
+🔧 Tâche Planifiée (autonome, toutes les 10 min)
+    PowerShell -ExecutionPolicy Bypass -File D:\Dev\TradBOT\scripts\register_gom_sync_10min_task.ps1
+
+================================================================================
+GESTION TÂCHE PLANIFIÉE
+================================================================================
+
+✅ Enregistrer tâche:
+    PowerShell -ExecutionPolicy Bypass -File scripts/register_gom_sync_10min_task.ps1
+
+🔍 Vérifier l'état:
+    Get-ScheduledTask -TaskName "TradBOT-GOM-Sync-10min"
+
+▶ Lancer manuellement:
+    Start-ScheduledTask -TaskName "TradBOT-GOM-Sync-10min"
+
+⏸ Désactiver:
+    Disable-ScheduledTask -TaskName "TradBOT-GOM-Sync-10min"
+
+✋ Arrêter l'exécution:
+    Stop-ScheduledTask -TaskName "TradBOT-GOM-Sync-10min"
+
+❌ Supprimer:
+    Unregister-ScheduledTask -TaskName "TradBOT-GOM-Sync-10min"
+
+📊 Voir les infos:
+    Get-ScheduledTaskInfo -TaskName "TradBOT-GOM-Sync-10min"
+
+================================================================================
+MONITORING & LOGS
+================================================================================
+
+📊 Logs Scheduler (temps réel)
+    tail -f logs/gom_sync_scheduler.log
+
+📊 Logs GOM Sync (détails)
+    tail -f logs/gom_sync.log
+
+📋 Voir tous les logs
+    tail -50 logs/gom_sync_scheduler.log
+
+🔍 Chercher erreurs
+    grep -i error logs/gom_sync_scheduler.log
+
+🔴 Chercher avertissements
+    grep -i warning logs/gom_sync_scheduler.log
+
+✅ Chercher succès
+    grep "OK\|HTTP 200" logs/gom_sync_scheduler.log
+
+================================================================================
+VÉRIFICATION PRÉREQUIS
+================================================================================
+
+✓ Vérifier ai_server
+    curl http://127.0.0.1:8000/health
+
+✓ Vérifier /gom-verdicts
+    curl http://127.0.0.1:8000/gom-verdicts | jq '.verdicts | length'
+
+✓ Vérifier nombre de verdicts
+    curl http://127.0.0.1:8000/gom-verdicts | jq 'length'
+
+✓ Vérifier fichier GOM
+    type data\gom_signal.json
+
+✓ Vérifier dossier logs
+    dir logs\
+
+================================================================================
+FLUX DE DONNÉES
+================================================================================
+
+1. Charge GOM verdicts (live ou fallback JSON)
+   └─ Source: /gom-verdicts → data/gom_signal.json
+
+2. Filtre signaux actifs (verdict_num ≠ 0)
+   └─ Rejette: WAIT, stale (>1h), direction invalide Boom/Crash
+
+3. POST chaque verdict → /gom-verdict
+   └─ Envoie: symbol, entry, SL, TP, coherence_pct, etc.
+
+4. Construit rapport formaté
+   └─ Format: "🟢 SYMBOL — ACTION | Entry: X | SL: X | TP: X | Coh: X%"
+
+5. POST rapport → /notify-whatsapp
+   └─ WhatsApp alert envoyée
+
+6. Logs complets avec timestamps
+
+================================================================================
+FORMAT RAPPORT WHATSAPP
+================================================================================
+
+🎯 **GOM VERDICTS REPORT**
+==================================================
+🟢 BOOM 1000 INDEX — GOOD BUY | Entry: 13890.55 | SL: 13854.22 | TP: 13927.88 | Coh: 67%
+  🟢M1 🔴M5 🟢M15 🟢H1 🔴H4 🔴D1
+🟢 XAUUSD — GOOD BUY | Entry: 4203.96 | SL: 4199.55 | TP: 4211.23 | Coh: 50%
+  🟢M1 🟢M5 🔴M15 🟢H1 🔴H4 🔴D1
+==================================================
+📅 2026-06-12 16:05:14 UTC
+
+Légende:
+  🟢 = BUY / BULL / Bullish
+  🔴 = SELL / BEAR / Bearish
+  ⚪ = WAIT / NEUTRAL
+
+================================================================================
+OPTIONS AVANCÉES
+================================================================================
+
+Intervalle personnalisé (5 minutes):
+    python Python/gom_sync_scheduler.py --interval 300
+
+Une seule exécution (pas de boucle):
+    python Python/gom_sync_scheduler.py --once
+
+Tâche planifiée avec intervalle personnalisé:
+    PowerShell -ExecutionPolicy Bypass -File scripts/register_gom_sync_10min_task.ps1 -Interval 5
+
+================================================================================
+TROUBLESHOOTING
+================================================================================
+
+❌ Aucun verdict trouvé
+   ✓ Vérifier: curl http://127.0.0.1:8000/gom-verdicts
+   ✓ Vérifier: GOM MT5 sync actif
+
+❌ Verdicts stale (rejetés)
+   ✓ Verdicts > 1h automatiquement ignorés
+   ✓ Vérifier: Timestamps récents
+
+❌ WhatsApp non envoyé
+   ✓ Vérifier: logs/gom_sync_scheduler.log pour erreurs
+   ✓ Vérifier: PsychoBot accessible
+   ✓ Vérifier: WhatsApp bot connecté
+
+❌ Script crash
+   ✓ Vérifier: logs/gom_sync_scheduler.log pour exceptions
+   ✓ Vérifier: Espace disque libre
+   ✓ Vérifier: Memory disponible
+
+❌ Tâche planifiée ne s'exécute pas
+   ✓ Vérifier: Get-ScheduledTask -TaskName "TradBOT-GOM-Sync-10min"
+   ✓ Vérifier: Tâche enabled
+   ✓ Vérifier: Permissions Windows
+
+================================================================================
+FICHIERS IMPORTANTS
+================================================================================
+
+📄 Scripts:
+   Python/gom_sync_with_report.py          [Script principal]
+   Python/gom_sync_scheduler.py            [Scheduler wrapper]
+   scripts/start_gom_sync_10min.bat        [Lancement Windows]
+   scripts/register_gom_sync_10min_task.ps1 [Tâche planifiée]
+
+📊 Données:
+   data/gom_signal.json                     [GOM fallback]
+
+📋 Logs:
+   logs/gom_sync.log                        [GOM sync details]
+   logs/gom_sync_scheduler.log              [Scheduler + timestamps]
+
+📖 Docs:
+   GOM_SYNC_SCHEDULER.md                    [Full documentation]
+   GOM_SYNC_COMMANDS.txt                    [This file]
+
+================================================================================
+DÉMARRAGE RAPIDE (3 COMMANDES)
+================================================================================
+
+1. Test (une fois):
+   python Python/gom_sync_with_report.py --report
+
+2. Production (boucle 10 min):
+   python Python/gom_sync_scheduler.py
+
+3. Autonome (tâche Windows):
+   PowerShell -ExecutionPolicy Bypass -File scripts/register_gom_sync_10min_task.ps1
+
+================================================================================
+VERSION & STATUS
+================================================================================
+
+Version:        1.0
+Release Date:   2026-06-12
+Interval:       10 minutes (configurable)
+Status:         ✅ Production Ready
+
+Prêt à démarrer ? Lancer:
+   python Python/gom_sync_scheduler.py
+
+================================================================================

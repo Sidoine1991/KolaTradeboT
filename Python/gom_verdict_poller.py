@@ -812,13 +812,26 @@ def push_gom_verdict(payload: Dict[str, Any]) -> bool:
 # Lecture TV : CLI Node.js avec port CDP injecté
 # ─────────────────────────────────────────────────────────────
 
-def _ensure_tv_m1(cdp_port: Optional[int]) -> None:
-    """Ramène le graphique TradingView actif sur M1."""
+def _mt5_tf_to_tv_cli(chart_tf: str) -> str:
+    return {
+        "M1": "1", "M5": "5", "M15": "15", "M30": "30",
+        "H1": "60", "H4": "240", "D1": "D", "W1": "W",
+    }.get((chart_tf or "M15").upper(), "15")
+
+
+def _ensure_tv_chart_tf(cdp_port: Optional[int], chart_tf: str = "M15") -> None:
+    """Aligne le graphique TradingView sur le TF du graphique MT5 (heartbeat)."""
     try:
-        _run_tv_cli(["timeframe", "1"], cdp_port=cdp_port)
-        log.debug("TV timeframe → M1")
+        tf = _mt5_tf_to_tv_cli(chart_tf)
+        _run_tv_cli(["timeframe", tf], cdp_port=cdp_port)
+        log.debug("TV timeframe → %s (MT5 %s)", tf, chart_tf)
     except Exception:
         pass
+
+
+def _ensure_tv_m1(cdp_port: Optional[int]) -> None:
+    """Compat — délègue au TF heartbeat."""
+    _ensure_tv_chart_tf(cdp_port, "M15")
 
 
 def _switch_tv_to_mt5_symbol(mt5_symbol: str, cdp_port: Optional[int]) -> str:
@@ -958,8 +971,13 @@ def read_and_push(symbol: str = SYMBOL) -> bool:
         )
         return False
 
+    targets = fetch_poll_targets()
+    chart_tf = "M15"
+    if targets and targets.get("primary"):
+        chart_tf = targets["primary"].get("chart_tf") or chart_tf
+
     _switch_tv_to_mt5_symbol(symbol, cdp_port)
-    _ensure_tv_m1(cdp_port)
+    _ensure_tv_chart_tf(cdp_port, chart_tf)
 
     # ── Étape 2a : lire via gom_mcp_reader.mjs (MCP natif, plus fiable que CLI) ──
     mjs_data = _read_via_mcp_reader_mjs(cdp_port)
@@ -1003,7 +1021,7 @@ def read_and_push(symbol: str = SYMBOL) -> bool:
         if payload:
             _persist_gom_signal_file(payload)
             ok = push_gom_verdict(payload)
-            _ensure_tv_m1(cdp_port)
+            _ensure_tv_chart_tf(cdp_port, chart_tf)
             return ok
 
         # GOM absent — re-bascule TV sur le symbole MT5 + retry
@@ -1014,7 +1032,7 @@ def read_and_push(symbol: str = SYMBOL) -> bool:
             _switch_tv_to_mt5_symbol(symbol, cdp_port)
             time.sleep(2)
 
-    _ensure_tv_m1(cdp_port)
+    _ensure_tv_chart_tf(cdp_port, chart_tf)
     return False
 
 

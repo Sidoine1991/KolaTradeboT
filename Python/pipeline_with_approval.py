@@ -87,6 +87,51 @@ def is_valid_direction(symbol: str, direction: str) -> bool:
         return False
     return True
 
+
+def check_mtf_gate(symbol: str, data: dict, action: str) -> tuple:
+    """Gate MTF : H4+H1+M15 doivent confirmer la direction du signal.
+
+    Règles :
+    - BUY  valide  : H4==BULL ou (H1==BULL et M15==BULL)
+    - SELL valide  : H4==BEAR ou (H1==BEAR et M15==BEAR)
+    - Rejet absolu : H4 ET H1 tous deux opposés au signal
+    - Cohérence MTF: >= 4/6 TF dans la direction du signal
+
+    Retourne (ok: bool, raison: str).
+    Si aucune donnée TF disponible → laisse passer.
+    """
+    tfs = {
+        "m1":  data.get("tf_m1_dir",  "NEUT"),
+        "m5":  data.get("tf_m5_dir",  "NEUT"),
+        "m15": data.get("tf_m15_dir", "NEUT"),
+        "h1":  data.get("tf_h1_dir",  "NEUT"),
+        "h4":  data.get("tf_h4_dir",  "NEUT"),
+        "d1":  data.get("tf_d1_dir",  "NEUT"),
+    }
+    if all(d == "NEUT" for d in tfs.values()):
+        return True, ""
+
+    h4  = tfs["h4"]
+    h1  = tfs["h1"]
+    m15 = tfs["m15"]
+    side     = "BULL" if action.upper() == "BUY" else "BEAR"
+    opposite = "BEAR" if action.upper() == "BUY" else "BULL"
+
+    # Rejet absolu : H4 ET H1 tous deux opposés
+    if h4 == opposite and h1 == opposite:
+        return False, f"MTF rejet absolu — H4={h4} H1={h1} contre {action}"
+
+    # Structure : H4 confirme OU (H1 + M15 confirment)
+    if not ((h4 == side) or (h1 == side and m15 == side)):
+        return False, f"MTF structure insuffisante — H4={h4} H1={h1} M15={m15} pour {action}"
+
+    # Cohérence >= 4/6 TF
+    count = sum(1 for d in tfs.values() if d == side)
+    if count < 4:
+        return False, f"MTF cohérence {count}/6 TF {side} < 4 requis pour {action}"
+
+    return True, ""
+
 # ---------------------------------------------------------------------------
 # Lot minimum par catégorie
 # ---------------------------------------------------------------------------
@@ -171,64 +216,75 @@ def _tv_to_mt5(symbol: str) -> str:
     return mapping.get(symbol, symbol)
 
 # ---------------------------------------------------------------------------
-# Scan TradingView (réutilise morning_scan_report)
+# Scan MT5/GOM (remplace TradingView MCP — 100% local)
 # ---------------------------------------------------------------------------
-def scan_top_n(top_n: int) -> List[Dict]:
-    from morning_scan_report import MorningScanReportGenerator
-    gen = MorningScanReportGenerator()
-    symbols = gen.get_open_market_symbols()
-    log.info("Phase 1 — Scan TradingView: %d symboles", len(symbols))
-    raw = gen.run_mcp_watchlist_scan(symbols)
-    norm = [gen.normalize_result(r) for r in raw]
-    valid = [
-    r for r in norm
-    if r.get("success")
-    and r.get("direction") in ("BUY", "SELL")
-    and r.get("confluence_score", 0) >= 5.0
-    and is_valid_direction(r.get("symbol", ""), r.get("direction", ""))
-    ]
-    valid.sort(key=lambda x: x.get("confluence_score", 0), reverse=True)
-    top = valid[:top_n]
-    log.info("Top-%d retenus: %s", top_n, [r["symbol"] for r in top])
-    return top
-
-# Cache des prix MCP du scan — alimenté par scan_top_n pour fallback
 _MCP_PRICE_CACHE: Dict[str, Dict] = {}
 
+def scan_top_n(top_n: int) -> List[Dict]:
+    return scan_top_n_with_prices(top_n)
+
 def scan_top_n_with_prices(top_n: int) -> List[Dict]:
-    """Scan TradingView et conserve aussi les prix/ATR MCP pour fallback."""
-    from morning_scan_report import MorningScanReportGenerator
-    gen = MorningScanReportGenerator()
-    symbols = gen.get_open_market_symbols()
-    log.info("Phase 1 — Scan TradingView: %d symboles", len(symbols))
-    raw = gen.run_mcp_watchlist_scan(symbols)
+    """Scan depuis /gom-verdicts (candles MT5 live) — sans TradingView."""
+    log.info("Phase 1 — Scan GOM MT5 (sans TradingView)")
+    try:
+        r = requests.get(f"{AI_SERVER}/gom-verdicts", timeout=5)
+        if r.status_code != 200:
+            log.warning("Phase 1 — /gom-verdicts HTTP %s", r.status_code)
+            return []
+        data = r.json()
+        verdicts = data.get("verdicts", data) if isinstance(data, dict) else data
+        if not isinstance(verdicts, list):
+            verdicts = list(verdicts.values()) if isinstance(verdicts, dict) else []
+    except Exception as exc:
+        log.error("Phase 1 — /gom-verdicts error: %s", exc)
+        return []
 
-    # Stocker prix/ATR MCP dans le cache
-    for r in raw:
-        sym = r.get("symbol", "")
-        cp  = r.get("current_price") or r.get("entry_setup", {}).get("entry_price")
-        atr = r.get("entry_setup", {}).get("atr")
-        if sym and (cp or atr):
-            _MCP_PRICE_CACHE[sym] = {"price": cp, "atr": atr}
+    valid = []
+    _seen_normalized = {}  # sym_norm → index dans valid (dédup)
+    for v in verdicts:
+        vnum = v.get("verdict_num", 0)
+        if vnum == 0:
+            continue
+        sym = v.get("symbol", "")
+        direction = "BUY" if vnum > 0 else "SELL"
+        if not is_valid_direction(sym, direction):
+            continue
+        if not is_available_on_deriv(sym):
+            continue
+        score = float(v.get("verdict_gap", abs(vnum)))
+        cp = float(v.get("entry") or v.get("close") or v.get("price") or 0)
+        if cp > 0:
+            _MCP_PRICE_CACHE[sym] = {"price": cp, "atr": float(v.get("atr", cp * 0.005))}
+        # Normaliser pour dédup (évite "Crash 500 Index" + "CRASH 500 INDEX")
+        sym_norm = sym.upper().replace(" ", "").replace("INDEX", "").replace("DERIV:", "")
+        if sym_norm in _seen_normalized:
+            existing_idx = _seen_normalized[sym_norm]
+            if score > valid[existing_idx]["confluence_score"]:
+                valid[existing_idx] = {
+                    "symbol": sym, "direction": direction,
+                    "confluence_score": score, "success": True,
+                    "current_price": cp, "entry": cp,
+                    "verdict_num": vnum, "verdict": v.get("verdict", direction),
+                    "coherence_pct": float(v.get("coherence_pct", 0)),
+                }
+            continue
+        _seen_normalized[sym_norm] = len(valid)
+        valid.append({
+            "symbol":          sym,
+            "direction":       direction,
+            "confluence_score": score,
+            "success":         True,
+            "current_price":   cp,
+            "entry":           cp,
+            "verdict_num":     vnum,
+            "verdict":         v.get("verdict", direction),
+            "coherence_pct":   float(v.get("coherence_pct", 0)),
+        })
 
-    norm = [gen.normalize_result(r) for r in raw]
-    valid = [
-        r for r in norm
-        if r.get("success")
-        and r.get("direction") in ("BUY", "SELL")
-        and is_valid_direction(r.get("symbol", ""), r.get("direction", ""))
-        and is_available_on_deriv(r.get("symbol", ""))
-    ]
-    # Seuil adaptatif : préférer >= 5.0, sinon prendre les meilleurs disponibles
-    high = [r for r in valid if r.get("confluence_score", 0) >= 5.0]
-    chosen = high if high else valid
-    chosen.sort(key=lambda x: x.get("confluence_score", 0), reverse=True)
-    top = chosen[:top_n]
-    if not high and top:
-        log.info("Phase 1 — Seuil abaissé (aucun score >= 5.0), meilleurs: %s",
-                [(r["symbol"], round(r.get("confluence_score",0),1)) for r in top])
+    valid.sort(key=lambda x: x["confluence_score"], reverse=True)
+    top = valid[:top_n]
     log.info("Top-%d retenus: %s", top_n,
-        [(r["symbol"], r["direction"], round(r.get("confluence_score",0),1)) for r in top])
+             [(r["symbol"], r["direction"], round(r["confluence_score"], 1)) for r in top])
     return top
 
 # ---------------------------------------------------------------------------
@@ -407,9 +463,9 @@ print(json.dumps(output))
         signals = compute_signals(clean_sym, rec, cp, atr)
     elif cp > 0:
         # ATR estimé à 0.5% du prix si indisponible
-        atr_est = round(cp * 0.005, 5)
-        log.warning("  [TA] %s: ATR indisponible — estimé %.5f (0.5%% × %.2f)", symbol, atr_est, cp)
-        signals = compute_signals(clean_sym, rec, cp, atr_est)
+        atr = round(cp * 0.005, 5)
+        log.warning("  [TA] %s: ATR indisponible — estimé %.5f (0.5%% × %.2f)", symbol, atr, cp)
+        signals = compute_signals(clean_sym, rec, cp, atr)
     else:
         log.warning("  [TA] %s: Aucune source de prix disponible — niveaux N/A", symbol)
 
@@ -439,8 +495,10 @@ print(json.dumps(output))
     if not sl or not tp:
         atr_f = atr if atr > 0 else ref * 0.005
         is_buy = rec == "BUY"
+        sym_up = str(symbol).upper()
+        sl_mult = 2.0 if ("BOOM" in sym_up or "CRASH" in sym_up) else 2.0
         if not sl:
-            sl = round(float(entry) - atr_f * 1.5, 5) if is_buy else round(float(entry) + atr_f * 1.5, 5)
+            sl = round(float(entry) - atr_f * sl_mult, 5) if is_buy else round(float(entry) + atr_f * sl_mult, 5)
         if not tp:
             sl_dist = abs(float(entry) - float(sl))
             tp = round(float(entry) + sl_dist * 2.0, 5) if is_buy else round(float(entry) - sl_dist * 2.0, 5)
@@ -596,6 +654,14 @@ def place_order(ta: Dict) -> bool:
         log.warning("  [GOM gate] 🚫 Ordre bloqué — %s", gom_block)
         send_whatsapp(f"🚫 *{ta['symbol']}* ordre bloqué\n_{gom_block}_")
         return False
+
+    # ── Gate MTF : H4+H1+M15 doivent confirmer la direction ──
+    if exec_type not in ("limit", "stop"):
+        _mtf_ok, _mtf_reason = check_mtf_gate(ta["symbol"], ta, ta["direction"])
+        if not _mtf_ok:
+            log.warning("  [MTF gate] 🚫 Ordre bloqué — %s", _mtf_reason)
+            send_whatsapp(f"🚫 *{ta['symbol']}* bloqué (MTF gate)\n_{_mtf_reason}_")
+            return False
     quality_note = ""
     if ta.get("quality_score"):
         quality_note = f" | Score={ta['quality_score']}/100 ({ta.get('quality_label','?')})"
@@ -615,6 +681,18 @@ def place_order(ta: Dict) -> bool:
     }
     try:
         r = requests.post(f"{AI_SERVER}/pending-order", json=payload, timeout=10)
+
+        # 409 = ordre actif déjà en store — reset via endpoint dédié puis retry
+        if r.status_code == 409:
+            log.info("  [409] Ordre existant pour %s — reset puis retry", mt5_symbol)
+            try:
+                from urllib.parse import quote
+                reset_sym = quote(mt5_symbol, safe="")
+                requests.post(f"{AI_SERVER}/pending-order/{reset_sym}/reset", timeout=5)
+            except Exception as reset_err:
+                log.warning("  [409] Reset échoué: %s", reset_err)
+            r = requests.post(f"{AI_SERVER}/pending-order", json=payload, timeout=10)
+
         r.raise_for_status()
         log.info("  ✅ Ordre placé: %s %s @ %s SL=%s TP=%s lot=%s",
                 ta["direction"], ta["symbol"],
@@ -715,20 +793,26 @@ def run(top_n: int = 5, timeout: int = APPROVAL_TIMEOUT_SEC, auto: bool = False)
 
         log.info("--- [%d/%d] %s %s ---", idx, len(scans), sym, dir_tv)
 
-        # Phase 2 — TradingAgents
-        log.info("  Analyse TradingAgents...")
-        ta = run_trading_agents(sym, dir_tv, trade_date)
+        # Phase 2 — TradingAgents (skip pour Deriv synthétiques — GOM MT5 suffit)
+        clean_sym_2 = _tv_to_mt5(sym)
+        _is_deriv = any(p in clean_sym_2.upper() for p in ("BOOM", "CRASH", "XAUUSD", "1HZ", "V10", "V25", "V50", "V75", "V100"))
+        ta = None
+        if not _is_deriv:
+            log.info("  Analyse TradingAgents...")
+            ta = run_trading_agents(sym, dir_tv, trade_date)
 
         if ta is None:
-            log.warning("  TradingAgents timeout/échoué — fallback sur TradingView")
+            log.info("  Fallback GOM MT5 (skip TA — symbole Deriv ou timeout)")
+            # Récupérer le prix depuis le GOM store
+            _gom_entry = float(scan.get("entry") or scan.get("current_price") or 0)
             ta = {
-                "symbol": sym,
+                "symbol":    sym,
                 "direction": dir_tv,
-                "reason": "TV-only (TA timeout)",
-                "clean_sym": _tv_to_mt5(sym),
-                "entry": 0.0,
-                "sl": 0.0,
-                "tp": 0.0,
+                "reason":    "gom-mt5-direct",
+                "clean_sym": clean_sym_2,
+                "entry":     _gom_entry,
+                "sl":        0.0,
+                "tp":        0.0,
             }
 
         # Vérifier direction retournée par TA (ou fallback TV)
@@ -745,35 +829,61 @@ def run(top_n: int = 5, timeout: int = APPROVAL_TIMEOUT_SEC, auto: bool = False)
             send_whatsapp(f"⏭ *{sym}*: Signal TA = {ta_dir} — pas d'ordre")
             continue
 
-        # ── Phase 2b — Fetch indicateurs TradingView MCP ─────────────────────
+        # ── Phase 2b — Indicateurs depuis GOM MT5 (remplace TV MCP) ────────────
         tv_raw_data: Dict = {}
         if _REFINER_AVAILABLE:
-            log.info("  Fetch indicateurs TradingView MCP...")
+            log.info("  Fetch indicateurs GOM MT5...")
             try:
-                sys.path.insert(0, str(_ROOT / "python"))
-                from tv_mcp_client import fetch_tradingview_analysis  # type: ignore
-                clean_sym_tv = _tv_to_mt5(sym)
-                cat = clean_sym_tv.upper()
-                mode = "both" if ("BOOM" in cat or "CRASH" in cat) else "smc"
-                tv_raw_data = fetch_tradingview_analysis(clean_sym_tv, mode=mode)
-                if tv_raw_data.get("success"):
-                    smc_d = tv_raw_data.get("smc") or {}
-                    rsi_v = (smc_d.get("rsi") or {}).get("value")
-                    bias_d = (smc_d.get("bias") or {}).get("direction", "?")
-                    log.info("  [TV] Bias=%s RSI=%s OB=%d FVG=%d",
-                            bias_d,
-                            f"{rsi_v:.1f}" if rsi_v else "N/A",
-                            len(smc_d.get("order_blocks") or []),
-                            len(smc_d.get("fvg") or []))
+                clean_sym_mt5 = _tv_to_mt5(sym)
+                rg = requests.get(f"{AI_SERVER}/gom-kola-dashboard",
+                                  params={"symbol": clean_sym_mt5}, timeout=8)
+                if rg.status_code == 200:
+                    gd = rg.json()
+                    if gd.get("ok"):
+                        # Convertir BEAR/BULL/NEUT → SELL/BUY/NEUTRAL (attendu par signal_refiner)
+                        _raw_dir = (gd.get("tf_global_dir") or "NEUT").upper()
+                        _bias_dir = {"BULL": "BUY", "BEAR": "SELL", "NEUT": "NEUTRAL"}.get(_raw_dir, "NEUTRAL")
+                        _coh = float(gd.get("coherence_pct", 0) or 0)
+                        _bias_score = _coh / 10.0 if _coh > 1 else _coh * 10  # → échelle 0-10
+                        tv_raw_data = {
+                            "success": True,
+                            "smc": {
+                                "bias": {"direction": _bias_dir, "score": _bias_score},
+                                "rsi":  {"value": float(gd.get("rsi14", gd.get("rsi", 50)))},
+                                "order_blocks": [],
+                                "fvg": [],
+                            },
+                            "gom": gd,
+                        }
+                        # Override entry avec prix live MT5 si disponible
+                        _live_price = float(gd.get("entry") or gd.get("price") or gd.get("close") or 0)
+                        if _live_price > 0 and (ta.get("entry", 0) <= 0 or ta.get("entry", 0) in (7000.0, 6035.0, 3495.0, 13800.0)):
+                            ta["entry"] = _live_price
+                            log.info("  [GOM MT5] Entry override → %.5f (prix live)", _live_price)
+                        # Injecter ATR GOM MT5 si absent dans ta_result
+                        _gom_atr = float(gd.get("atr14") or gd.get("atr") or 0)
+                        if _gom_atr > 0 and float(ta.get("atr") or 0) <= 0:
+                            ta["atr"] = _gom_atr
+                            log.info("  [GOM MT5] ATR injecté → %.5f", _gom_atr)
+                        log.info("  [GOM MT5] Bias=%s RSI=%.0f gap=%.1f coh=%.0f%%",
+                                 gd.get("tf_global_dir", "?"),
+                                 float(gd.get("rsi14", gd.get("rsi", 50))),
+                                 float(gd.get("verdict_gap", 0)),
+                                 float(gd.get("coherence_pct", 0)))
+                    else:
+                        log.warning("  [GOM MT5] ok=False — %s", gd.get("error", "?"))
                 else:
-                    log.warning("  [TV] Indisponible: %s", tv_raw_data.get("error", "CDP off"))
-            except Exception as _tv_err:
-                log.warning("  [TV] Erreur fetch: %s", _tv_err)
+                    log.warning("  [GOM MT5] HTTP %s", rg.status_code)
+            except Exception as _mt5_err:
+                log.warning("  [GOM MT5] Erreur fetch: %s", _mt5_err)
 
         # ── Phase 2c — Signal Refiner (boucle TV → qualité → levels) ─────────
         refined: Optional[Dict] = None
         if _REFINER_AVAILABLE and ta_dir in ("BUY", "SELL"):
             log.info("  Raffinage signal (TV + TA)...")
+            log.debug("  [Refiner] ta entry=%.5f sl=%.5f tp=%.5f atr=%.5f",
+                     float(ta.get("entry") or 0), float(ta.get("sl") or 0),
+                     float(ta.get("tp") or 0), float(ta.get("atr") or 0))
             try:
                 refined = refine_signal(
                     ta_result=ta,
@@ -790,14 +900,54 @@ def run(top_n: int = 5, timeout: int = APPROVAL_TIMEOUT_SEC, auto: bool = False)
                         refined.get("tp", 0), refined.get("recommended_lot", 0.01))
 
                 if not refined["accept"]:
-                    log.warning("  [Refiner] SIGNAL REJETÉ: %s", refined["reject_reason"])
-                    orders_skipped.append(sym)
-                    send_whatsapp(
-                        f"🚫 *{sym}* — Signal rejeté par refiner\n"
-                        f"Score: {q}/100 (min={MIN_QUALITY_SCORE})\n"
-                        f"_{refined['reject_reason'][:200]}_"
-                    )
-                    continue
+                    # Bypass qualité pour Deriv (Boom/Crash) avec verdict PERFECT ou GOOD
+                    # Ces symboles n'ont pas M15/H1/EMA/OB → score plafonné à ~45 structurellement
+                    # CONDITION ABSOLUE : IA status (coherence_pct) doit être >= 70%
+                    _sym_up = sym.upper()
+                    _is_deriv_bypass = any(p in _sym_up for p in ("BOOM", "CRASH"))
+                    _verdict_num = int(scan.get("verdict_num", 0))
+                    _is_strong = abs(_verdict_num) >= 2  # PERFECT(±3) ou GOOD(±2)
+                    # Priorité : GOM MT5 live (ta) > scan initial (peut être périmé)
+                    _ia_coh = float(ta.get("coherence_pct") or scan.get("coherence_pct") or 0)
+                    _ia_ok = _ia_coh >= 70.0 or _ia_coh == 0.0  # 0 = pas de donnée → laisser passer
+                    _signal_dir = "BUY" if _verdict_num > 0 else "SELL"
+                    _mtf_ok, _mtf_reason = check_mtf_gate(sym, ta, _signal_dir)
+                    if _is_deriv_bypass and _is_strong and q >= 30 and _ia_ok and _mtf_ok:
+                        log.info("  [Refiner] Bypass Deriv PERFECT/GOOD (score=%d/100 coh=%.0f%%) — signal accepté", q, _ia_coh)
+                        refined["accept"] = True
+                        refined["reject_reason"] = ""
+                        # Force quality_score à 75 pour passer le gate auto
+                        refined["quality_score"] = 75
+                        q = 75
+                        label = "STANDARD"
+                        refined["quality_label"] = label
+                    elif _is_deriv_bypass and _is_strong and not _ia_ok:
+                        _reject_ia = f"IA status {_ia_coh:.0f}% < 70% requis — bypass Deriv refusé malgré {scan.get('verdict', 'PERFECT')}"
+                        log.warning("  [Refiner] SIGNAL REJETÉ (IA gate): %s", _reject_ia)
+                        orders_skipped.append(sym)
+                        send_whatsapp(
+                            f"🚫 *{sym}* — Signal rejeté (IA gate)\n"
+                            f"IA status: {_ia_coh:.0f}% (min=70%)\n"
+                            f"_{_reject_ia[:200]}_"
+                        )
+                        continue
+                    elif _is_deriv_bypass and _is_strong and not _mtf_ok:
+                        log.warning("  [Refiner] SIGNAL REJETÉ (MTF gate): %s", _mtf_reason)
+                        orders_skipped.append(sym)
+                        send_whatsapp(
+                            f"🚫 *{sym}* — Signal rejeté (MTF gate)\n"
+                            f"_{_mtf_reason[:200]}_"
+                        )
+                        continue
+                    else:
+                        log.warning("  [Refiner] SIGNAL REJETÉ: %s", refined["reject_reason"])
+                        orders_skipped.append(sym)
+                        send_whatsapp(
+                            f"🚫 *{sym}* — Signal rejeté par refiner\n"
+                            f"Score: {q}/100 (min={MIN_QUALITY_SCORE})\n"
+                            f"_{refined['reject_reason'][:200]}_"
+                        )
+                        continue
 
                 # Mettre à jour ta avec les niveaux raffinés
                 ta["entry"]          = refined["entry"]

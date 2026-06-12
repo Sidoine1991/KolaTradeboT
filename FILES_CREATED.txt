@@ -1,0 +1,249 @@
+================================================================================
+PIPELINE AUTO GOOD/PERFECT — FILES CREATED
+================================================================================
+
+Date: 2026-06-12
+Version: 1.0
+Status: Production Ready
+
+================================================================================
+1. MAIN PYTHON SCRIPT
+================================================================================
+
+Python/pipeline_auto_goodperfect.py (519 lines)
+   - Complete pipeline implementation
+   - Scan → Filter Good/Perfect → Analyze → Report → Order
+   - Automated execution (no manual validation)
+   - Quality gates (IA status, MTF alignment)
+   - WhatsApp integration
+   - Dry-run support
+
+================================================================================
+2. WINDOWS SCRIPTS
+================================================================================
+
+scripts/start_pipeline_auto_goodperfect.bat
+   - Quick launch via double-click
+   - Usage: D:\Dev\TradBOT\scripts\start_pipeline_auto_goodperfect.bat
+
+scripts/register_pipeline_auto_goodperfect_task.ps1
+   - Register as Windows scheduled task
+   - Supports: Hourly, Daily, custom intervals
+   - Usage: PowerShell -ExecutionPolicy Bypass -File register_...ps1
+
+scripts/test_pipeline_auto_goodperfect.sh
+   - Pre-flight health checks
+   - Verifies ai_server, GOM verdicts
+   - Runs dry-run test
+
+================================================================================
+3. CONFIGURATION
+================================================================================
+
+.env.pipeline
+   - Configurable settings
+   - AI Server URL, PsychoBot URL, phone number
+   - Quality thresholds (IA status min 70%)
+   - Lot sizing per category
+   - Timeout settings
+
+================================================================================
+4. DOCUMENTATION
+================================================================================
+
+PIPELINE_AUTO_GOODPERFECT.md (285 lines)
+   - Complete technical documentation
+   - Architecture diagram
+   - Usage examples
+   - All filters & gates explained
+   - Troubleshooting guide
+
+QUICKSTART.md (120 lines)
+   - 30-second setup guide
+   - Common commands
+   - Quick troubleshooting
+
+IMPLEMENTATION_SUMMARY.md (350+ lines)
+   - Overview of entire implementation
+   - Architecture flow
+   - Features & key components
+   - Pre-flight checklist
+   - Performance metrics
+
+TEST_CHECKLIST.md (180+ lines)
+   - Pre-launch validation tests
+   - Integration tests
+   - Logging verification
+   - Production readiness checklist
+
+================================================================================
+5. QUICK REFERENCE
+================================================================================
+
+FILES_CREATED.txt (this file)
+   - Complete file listing & purposes
+
+================================================================================
+QUICK START COMMANDS
+================================================================================
+
+TEST MODE (no orders):
+   python Python/pipeline_auto_goodperfect.py --dry-run
+
+PRODUCTION (real orders, top-3):
+   python Python/pipeline_auto_goodperfect.py --top-n 3
+
+TOP-5 EXTENDED:
+   python Python/pipeline_auto_goodperfect.py --top-n 5
+
+WINDOWS LAUNCH:
+   D:\Dev\TradBOT\scripts\start_pipeline_auto_goodperfect.bat
+
+SCHEDULE HOURLY:
+   PowerShell -ExecutionPolicy Bypass -File D:\Dev\TradBOT\scripts\register_pipeline_auto_goodperfect_task.ps1
+
+================================================================================
+WORKFLOW
+================================================================================
+
+1. SCAN
+   - GOM MT5 via /gom-verdicts
+   - Filter: Good (±2) & Perfect (±3) only
+   - Reject: WAIT, HOLD, others
+
+2. VALIDATE BOOM/CRASH
+   - SELL on Boom? NO
+   - BUY on Crash? NO
+
+3. ANALYZE EACH SIGNAL
+   - Calculate Entry/SL/TP
+   - Determine execution type (market/limit/stop)
+   - Extract indicators (ATR, RSI, TF directions)
+
+4. GENERATE REPORTS
+   - Create Word report for each Good/Perfect
+   - Send via WhatsApp
+
+5. VALIDATE GATES (Top-3 only)
+   - Gate 1: IA Status >= 70%
+   - Gate 2: MTF alignment (H4/H1/M15)
+   - Gate 3: MTF coherence >= 4/6 timeframes
+
+6. PLACE ORDERS
+   - Send to /pending-order endpoint
+   - TradeManager executes order
+
+7. NOTIFY
+   - Send WhatsApp summary
+   - Report: placed, errors, duration
+
+================================================================================
+QUALITY GATES
+================================================================================
+
+✓ Good/Perfect Filter: verdict_num ±2, ±3
+✓ IA Status Gate: coherence_pct >= 70%
+✓ MTF Gate: H4 BULL OR (H1 BULL & M15 BULL) for BUY
+✓ MTF Coherence: >= 4/6 timeframes aligned
+✓ Boom/Crash Rule: SELL forbidden on Boom, BUY forbidden on Crash
+
+================================================================================
+LOGS & MONITORING
+================================================================================
+
+Log File:
+   logs/pipeline_auto_goodperfect.log
+
+Real-time:
+   tail -f logs/pipeline_auto_goodperfect.log
+
+Errors:
+   grep -i "error\|failed" logs/pipeline_auto_goodperfect.log
+
+================================================================================
+PREREQUISITES
+================================================================================
+
+✓ ai_server running on http://127.0.0.1:8000
+✓ GOM sync active (fresh data)
+✓ /gom-verdicts returning Good/Perfect signals
+✓ PsychoBot accessible
+✓ WhatsApp bot connected
+✓ TradeManager listening on /pending-order
+✓ MT5 with SMC_Universal attached
+
+================================================================================
+TROUBLESHOOTING
+================================================================================
+
+No signals found?
+   Check: curl http://127.0.0.1:8000/gom-verdicts | grep -i good
+
+Orders blocked (IA status)?
+   Check: coherence_pct must be >= 70%
+
+MTF gate failures?
+   Check: H4/H1/M15 alignment, >= 4/6 timeframes
+
+Reports not sent?
+   Check: PsychoBot accessible, WhatsApp connected
+
+================================================================================
+FILES STRUCTURE
+================================================================================
+
+D:\Dev\TradBOT\
+├── Python/
+│   └── pipeline_auto_goodperfect.py          [Main script]
+├── scripts/
+│   ├── start_pipeline_auto_goodperfect.bat   [Windows launch]
+│   ├── register_pipeline_auto_goodperfect_task.ps1  [Schedule]
+│   └── test_pipeline_auto_goodperfect.sh     [Tests]
+├── logs/
+│   └── pipeline_auto_goodperfect.log         [Output logs]
+├── .env.pipeline                              [Configuration]
+├── PIPELINE_AUTO_GOODPERFECT.md              [Full docs]
+├── QUICKSTART.md                             [30-sec setup]
+├── IMPLEMENTATION_SUMMARY.md                 [Overview]
+├── TEST_CHECKLIST.md                         [Tests]
+└── FILES_CREATED.txt                         [This file]
+
+================================================================================
+NEXT STEPS
+================================================================================
+
+1. Run dry-run test:
+   python Python/pipeline_auto_goodperfect.py --dry-run
+
+2. Verify logs:
+   tail logs/pipeline_auto_goodperfect.log
+
+3. Check WhatsApp alerts
+
+4. Run production (top-3):
+   python Python/pipeline_auto_goodperfect.py --top-n 3
+
+5. Schedule hourly:
+   PowerShell -ExecutionPolicy Bypass -File scripts/register_...ps1
+
+6. Monitor results:
+   tail -f logs/pipeline_auto_goodperfect.log
+
+================================================================================
+SUPPORT
+================================================================================
+
+Documentation: PIPELINE_AUTO_GOODPERFECT.md
+Quick Start: QUICKSTART.md
+Tests: TEST_CHECKLIST.md
+Overview: IMPLEMENTATION_SUMMARY.md
+
+================================================================================
+VERSION INFO
+================================================================================
+
+Version: 1.0
+Release: 2026-06-12
+Status: Production Ready
+
+================================================================================

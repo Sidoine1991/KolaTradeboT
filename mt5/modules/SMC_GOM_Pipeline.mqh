@@ -5,6 +5,14 @@
 #ifndef SMC_GOM_PIPELINE_MQH
 #define SMC_GOM_PIPELINE_MQH
 
+#include "MT5_Candles_Uploader.mqh"
+
+// Déclaré / implémenté dans SMC_Universal.mq5
+bool DisciplineAllowsPipelineAction(const string action);
+bool SMCGP_GOMValidatesPrimarySignal(const int dir);
+
+MT5CandlesUploader *g_smcCandlesUploader = NULL;
+datetime g_smcLastCandleUpload = 0;
 // ── État GOM ───────────────────────────────────────────────────────
 string   g_smcGomVerdict      = "WAIT";
 int      g_smcGomVerdictNum   = 0;
@@ -21,7 +29,11 @@ datetime g_smcLastGOMPoll     = 0;
 datetime g_smcLastMCPPoll      = 0;
 datetime g_smcLastPipelineExec= 0;
 string   g_smcLastPipelineId  = "";
+datetime g_smcLastPipelineFail= 0;
+string   g_smcFailedPipelineId= "";
+int      g_smcPipelineFailCount = 0;
 string   g_smcGomSource       = "OFF";
+string   g_smcDashPrefix      = "SMC_DASH_";  // suffixé ChartID() dans SMCGP_Init()
 double   g_smcGomScoreBuy     = 0.0;
 double   g_smcGomScoreSell    = 0.0;
 int      g_smcGomRsi          = 50;
@@ -46,6 +58,12 @@ double   g_smcGhostCompass    = 0.0;
 string   g_smcPredPath        = "";
 int      g_smcLastHttpCode    = 0;
 string   g_smcServerUrl       = "";
+
+// OTE zone (Optimal Trade Entry — Fibonacci 61.8%–78.6% du swing HH/LL)
+double   g_smcOteTop          = 0.0;
+double   g_smcOteBot          = 0.0;
+bool     g_smcInOTE           = false;
+int      g_smcOteDir          = 0;
 
 // Setup TV (OB ICT)
 bool     g_smcSetupValid      = false;
@@ -111,6 +129,22 @@ bool SMCGP_JsonBool(const string &body, const string key)
    return (StringGetCharacter(body, pos) == 't');
 }
 
+string SMCGP_ChartTfLabel()
+{
+   switch(_Period)
+   {
+      case PERIOD_M1:  return "M1";
+      case PERIOD_M5:  return "M5";
+      case PERIOD_M15: return "M15";
+      case PERIOD_M30: return "M30";
+      case PERIOD_H1:  return "H1";
+      case PERIOD_H4:  return "H4";
+      case PERIOD_D1:  return "D1";
+      case PERIOD_W1:  return "W1";
+      default:         return "M15";
+   }
+}
+
 string SMCGP_EncodeSym(const string sym)
 {
    string enc = sym;
@@ -120,13 +154,9 @@ string SMCGP_EncodeSym(const string sym)
 
 string SMCGP_ResolveGOMSym(const string sym)
 {
-   // Mapping pour symboles non-reconnus par le serveur IA
    if(sym == "XAUEUR" || sym == "GOLD" || sym == "OR") return "XAUUSD";
-
-   // Boom/Crash → Deriv equivalent (reconnaissance serveur)
-   if(StringFind(sym, "Boom") >= 0)  return "Boom 500 Index";  // OU découper par taille
-   if(StringFind(sym, "Crash") >= 0) return "Crash 500 Index";
-
+   // Garder le symbole exact du graphique (Boom 1000, Crash 300, Volatility 75, etc.)
+   if(StringFind(sym, "Index") >= 0) return sym;
    return sym;
 }
 
@@ -154,9 +184,10 @@ void SMCGP_SendHeartbeat()
    string symJson = sym;
    StringReplace(symJson, "\\", "\\\\");
    StringReplace(symJson, "\"", "\\\"");
+   string chartTf = SMCGP_ChartTfLabel();
    string body = StringFormat(
-      "{\"symbol\":\"%s\",\"ea\":\"SMC_Universal\",\"magic\":%d,\"chart_id\":%I64d}",
-      symJson, InpMagicNumber, ChartID());
+      "{\"symbol\":\"%s\",\"ea\":\"SMC_Universal\",\"magic\":%d,\"chart_id\":\"%I64d\",\"chart_tf\":\"%s\"}",
+      symJson, InpMagicNumber, ChartID(), chartTf);
    SMCGP_HttpPost("/mt5/ea-heartbeat", body, AI_Timeout_ms);
 }
 
@@ -216,6 +247,12 @@ void SMCGP_ParseGOMBody(const string &body)
    g_smcObBullBot       = SMCGP_JsonDouble(body, "ob_bull_bot");
    g_smcObBearTop       = SMCGP_JsonDouble(body, "ob_bear_top");
    g_smcObBearBot       = SMCGP_JsonDouble(body, "ob_bear_bot");
+   // OTE zone
+   g_smcOteTop          = SMCGP_JsonDouble(body, "ote_top");
+   g_smcOteBot          = SMCGP_JsonDouble(body, "ote_bot");
+   g_smcOteDir          = (int)SMCGP_JsonDouble(body, "ote_dir");
+   string inOteStr      = SMCGP_JsonString(body, "in_ote");
+   g_smcInOTE           = (inOteStr == "true" || inOteStr == "1");
    g_smcPredPath        = SMCGP_JsonString(body, "pred_path");
    if(g_smcGomPrice <= 0) g_smcGomPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
 
@@ -251,11 +288,11 @@ void SMCGP_ParseGOMBody(const string &body)
       else g_smcGomKolaState = "---";
    }
 
-   bool hasData = (g_smcGomVerdictNum != 0 || g_smcGomScoreBuy > 0 || g_smcGomScoreSell > 0);
-   g_smcGomConnected = hasData && StringLen(g_smcGomVerdict) > 0;
+   bool hasData = (StringLen(g_smcGomVerdict) > 0);
+   g_smcGomConnected = (g_smcLastHttpCode == 200) && hasData;
    string src = SMCGP_JsonString(body, "data_source");
-   if(StringLen(src) == 0) src = SMCGP_JsonString(body, "source");  // Try "source" if "data_source" missing (from /gom-kola-dashboard)
-   if(StringLen(src) == 0) src = "TV";
+   if(StringLen(src) == 0) src = SMCGP_JsonString(body, "source");
+   if(StringLen(src) == 0) src = "MT5";
    g_smcGomSource = g_smcGomConnected ? src : "OFF";
 
    if(ShowTVSyncedLevels || ShowGOMDashboard)
@@ -421,18 +458,25 @@ void SMCGP_PollGOM()
    string body;
    bool ok = false;
 
-   // ✅ PRIORITÉ 1: /gom-kola-dashboard (LIVE, 100% LOCAL calculation)
-   if(SMCGP_HttpGet("/gom-kola-dashboard?symbol=" + sym, body, AI_Timeout_ms)
+   string chartTf = SMCGP_ChartTfLabel();
+   string srcParam = "auto";
+   if(GOMVerdictSource == GOM_SRC_TRADINGVIEW) srcParam = "tv";
+   else if(GOMVerdictSource == GOM_SRC_LOCAL) srcParam = "local";
+   else srcParam = "local";
+   string gomQuery = "/gom-kola-dashboard?symbol=" + sym + "&chart_tf=" + chartTf + "&source=" + srcParam;
+   int gomTimeout = (GOM_Timeout_ms > 0 ? GOM_Timeout_ms : AI_Timeout_ms);
+
+   // ✅ PRIORITÉ 1: /gom-kola-dashboard (calcul local MT5)
+   if(SMCGP_HttpGet(gomQuery, body, gomTimeout)
       && (SMCGP_JsonBool(body, "ok") || StringFind(body, "\"ok\":true") >= 0))
       ok = true;
-   // Fallback 2: /gom-tableau-complete (cache, peut être stale)
-   else if(SMCGP_HttpGet("/gom-tableau-complete?symbol=" + sym, body, AI_Timeout_ms)
+   // Fallback 2: cache TV — uniquement si source TradingView (évite stale PERFECT BUY)
+   else if(GOMVerdictSource == GOM_SRC_TRADINGVIEW
+      && SMCGP_HttpGet("/gom-tableau-complete?symbol=" + sym, body, gomTimeout)
       && (SMCGP_JsonBool(body, "ok") || StringFind(body, "\"ok\":true") >= 0))
       ok = true;
-   // Fallback 3: /gom-verdict
-   else if(SMCGP_HttpGet("/gom-verdict?symbol=" + sym, body, AI_Timeout_ms)
-           && (SMCGP_JsonBool(body, "ok") || StringFind(body, "\"ok\":true") >= 0))
-      ok = true;
+   // Fallback 3 supprimé — /gom-verdict retourne des données stales (cache Python non temps-réel)
+   // En cas d'échec des deux premiers endpoints, on invalide le GOM plutôt que de trader sur données stales
 
    if(!ok)
    {
@@ -615,6 +659,24 @@ bool SMCGP_GOMAllowsDirectionEx(const int dir, const bool requireOBTouch)
       if(SMCGP_IsOBBlockingPath(dir)) { Print("[GOM-ALLOW] Rejeté: OB_BLOCKING_PATH"); return false; }
    }
 
+   // OTE Filter: prix doit être dans la zone Fibonacci 61.8%-78.6% du swing
+   // BYPASS si verdict GOOD/PERFECT (vn ±2, ±3) — ils ont déjà des gates suffisantes
+   bool isGoodPerfect = (g_smcGomVerdictNum >= 2 || g_smcGomVerdictNum <= -2);
+   if(GOMRequireOTE && UseOTE && g_smcOteTop > 0 && g_smcOteBot > 0 && !isGoodPerfect)
+   {
+      double curPx = SymbolInfoDouble(_Symbol, (dir == 1) ? SYMBOL_ASK : SYMBOL_BID);
+      double oteLo = MathMin(g_smcOteTop, g_smcOteBot);
+      double oteHi = MathMax(g_smcOteTop, g_smcOteBot);
+      bool priceInOTE = (curPx >= oteLo && curPx <= oteHi);
+
+      if(!priceInOTE)
+      { Print("[GOM-ALLOW] Rejeté: NOT_IN_OTE prix=", DoubleToString(curPx, _Digits),
+              " zone=[", DoubleToString(oteLo, _Digits), "-", DoubleToString(oteHi, _Digits), "]"); return false; }
+
+      if(g_smcOteDir != 0 && g_smcOteDir != dir)
+      { Print("[GOM-ALLOW] Rejeté: OTE_DIR_MISMATCH ote_dir=", g_smcOteDir, " trade_dir=", dir); return false; }
+   }
+
    Print("[GOM-ALLOW] ✅ Autorisé pour dir=", dir, " vn=", g_smcGomVerdictNum);
    return true;
 }
@@ -645,6 +707,8 @@ bool SMCGP_GOMAllowsDirection(const int dir)
    return SMCGP_GOMAllowsDirectionEx(dir, true);
 }
 
+// SMCGP_GOMValidatesPrimarySignal — implémentée dans SMC_Universal.mq5
+
 // ── Vérification EA Indépendant: GOOD/PERFECT GOM + IA Status ≥70% ──
 bool SMCGP_AllowsDirectIndependentEntry(const int dir)
 {
@@ -666,6 +730,8 @@ bool SMCGP_AllowsDirectIndependentEntry(const int dir)
 
    if(dir == -1 && g_smcGomVerdictNum > -2)
    { Print("[EA-INDEP] ❌ Rejeté: SELL demandé mais verdict_num=", g_smcGomVerdictNum, " > -2 (GOOD)"); return false; }
+
+   // OTE pas bloquant pour EA-INDEP (exige déjà GOOD/PERFECT)
 
    Print("[EA-INDEP] ✅ Autorisé | Verdict=", g_smcGomVerdict, " (vn=", g_smcGomVerdictNum, ") | IA Status=", DoubleToString(g_iaStatusConfidence, 1), "% | Direction=", dir);
    return true;
@@ -703,29 +769,37 @@ void SMCGP_DrawOTEZone()
 {
    ObjectDelete(0, "SMC_OTE_ZONE");
    ObjectDelete(0, "SMC_OTE_LABEL");
-   if(!UseOTE || !g_smcSetupValid || g_smcSetupEntry <= 0 || g_smcSetupSL <= 0) return;
+   if(!UseOTE) return;
 
-   double hi = MathMax(g_smcSetupEntry, g_smcSetupSL);
-   double lo = MathMin(g_smcSetupEntry, g_smcSetupSL);
-   double range = hi - lo;
-   if(range <= 0) return;
-
-   double oteLo, oteHi;
-   if(g_smcSetupDir == 1)
+   // Priorité : niveaux OTE calculés par le serveur (Fib 61.8%–78.6% du swing MT5)
+   double oteLo = 0.0, oteHi = 0.0;
+   if(g_smcOteTop > 0 && g_smcOteBot > 0)
    {
-      oteHi = hi - range * 0.62;
-      oteLo = hi - range * 0.79;
+      oteLo = MathMin(g_smcOteTop, g_smcOteBot);
+      oteHi = MathMax(g_smcOteTop, g_smcOteBot);
    }
-   else
+   else if(g_smcSetupValid && g_smcSetupEntry > 0 && g_smcSetupSL > 0)
    {
-      oteLo = lo + range * 0.62;
-      oteHi = lo + range * 0.79;
+      // Fallback : recalcul local depuis Entry/SL du setup TV
+      double hi = MathMax(g_smcSetupEntry, g_smcSetupSL);
+      double lo = MathMin(g_smcSetupEntry, g_smcSetupSL);
+      double range = hi - lo;
+      if(range <= 0) return;
+      if(g_smcSetupDir == 1) { oteHi = hi - range * 0.618; oteLo = hi - range * 0.786; }
+      else                   { oteLo = lo + range * 0.618; oteHi = lo + range * 0.786; }
    }
+   else return;
 
-   datetime t0 = iTime(_Symbol, PERIOD_CURRENT, 10);
-   datetime tE = iTime(_Symbol, PERIOD_CURRENT, 0) + PeriodSeconds(PERIOD_CURRENT) * 60;
+   if(oteHi <= oteLo || oteHi <= 0) return;
+
+   // Couleur : vert si prix dans la zone, orange sinon
+   color zoneColor = g_smcInOTE ? clrForestGreen : clrDarkOrange;
+   string lbl = g_smcInOTE ? "OTE 61.8-78.6% ✅ PRIX DANS ZONE" : "OTE 61.8-78.6%";
+
+   datetime t0 = iTime(_Symbol, PERIOD_CURRENT, 30);
+   datetime tE = iTime(_Symbol, PERIOD_CURRENT, 0) + PeriodSeconds(PERIOD_CURRENT) * 80;
    ObjectCreate(0, "SMC_OTE_ZONE", OBJ_RECTANGLE, 0, t0, oteHi, tE, oteLo);
-   ObjectSetInteger(0, "SMC_OTE_ZONE", OBJPROP_COLOR, clrDarkOrange);
+   ObjectSetInteger(0, "SMC_OTE_ZONE", OBJPROP_COLOR, zoneColor);
    ObjectSetInteger(0, "SMC_OTE_ZONE", OBJPROP_BACK, true);
    ObjectSetInteger(0, "SMC_OTE_ZONE", OBJPROP_FILL, true);
    ObjectSetInteger(0, "SMC_OTE_ZONE", OBJPROP_SELECTABLE, false);
@@ -734,16 +808,21 @@ void SMCGP_DrawOTEZone()
    ObjectSetInteger(0, "SMC_OTE_LABEL", OBJPROP_CORNER, CORNER_LEFT_UPPER);
    ObjectSetInteger(0, "SMC_OTE_LABEL", OBJPROP_XDISTANCE, 10);
    ObjectSetInteger(0, "SMC_OTE_LABEL", OBJPROP_YDISTANCE, 50);
-   ObjectSetString(0, "SMC_OTE_LABEL", OBJPROP_TEXT, "OTE 62-79%");
-   ObjectSetInteger(0, "SMC_OTE_LABEL", OBJPROP_COLOR, clrDarkOrange);
+   ObjectSetString(0, "SMC_OTE_LABEL", OBJPROP_TEXT, lbl);
+   ObjectSetInteger(0, "SMC_OTE_LABEL", OBJPROP_COLOR, zoneColor);
    ObjectSetInteger(0, "SMC_OTE_LABEL", OBJPROP_FONTSIZE, 9);
 }
 
 void SMCGP_CleanupLegacyDrawings()
 {
    if(!CleanupLegacyDrawings) return;
+   // OB locaux EA seulement — conserver SMC_OB_BULL_ZONE / SMC_OB_BEAR_ZONE (ai_server)
+   string localObPrefixes[] = {"SMC_OB_Bull_", "SMC_OB_Bear_"};
+   for(int o = 0; o < ArraySize(localObPrefixes); o++)
+      ObjectsDeleteAll(0, localObPrefixes[o]);
+
    string prefixes[] = {
-      "SMC_OB_", "SMC_FVG_", "SMC_Liq_", "SMC_Fib_", "SMC_EMA_",
+      "SMC_FVG_", "SMC_Liq_", "SMC_Fib_", "SMC_EMA_",
       "SMC_Hist_", "SMC_BC_", "SMC_CH_", "EMA_ST_", "SMC_Limit_",
       "SMC_Pred_", "SMC_Confirmed_", "SMC_Bookmark_"
    };
@@ -883,7 +962,8 @@ void SMCGP_DrawTVLevels()
 
 void SMCGP_CleanupChartObjects()
 {
-   string prefixes[] = {"TM_KOLA_", "TM_OB_", "TM_BB_", "GOM_PRED_", "SMC_OTE_", "SMC_OB_"};
+   SMCGP_CleanupOrderFlowCompass();
+   string prefixes[] = {"TM_KOLA_", "TM_OB_", "TM_BB_", "GOM_PRED_", "SMC_OTE_", "SMC_OB_BULL_", "SMC_OB_BEAR_"};
    for(int p = 0; p < ArraySize(prefixes); p++)
       ObjectsDeleteAll(0, prefixes[p]);
    ObjectDelete(0, "TM_OB_LABEL");
@@ -902,6 +982,91 @@ bool SMCGP_MarkPipelineConsumed(const string sym)
    return (code == 200 || code == 204);
 }
 
+bool SMCGP_DeletePendingOrder(const string sym)
+{
+   return SMCGP_MarkPipelineConsumed(sym);
+}
+
+double SMCGP_MinStopDistance(const string sym)
+{
+   double pt = SymbolInfoDouble(sym, SYMBOL_POINT);
+   if(pt <= 0) return 0;
+   int stops  = (int)SymbolInfoInteger(sym, SYMBOL_TRADE_STOPS_LEVEL);
+   int freeze = (int)SymbolInfoInteger(sym, SYMBOL_TRADE_FREEZE_LEVEL);
+   double minD = (double)MathMax(stops + freeze + 5, 10) * pt;
+   double ask = SymbolInfoDouble(sym, SYMBOL_ASK);
+   bool isBC = (StringFind(sym, "Boom") >= 0 || StringFind(sym, "Crash") >= 0);
+   if(isBC && ask > 0)
+      minD = MathMax(minD, ask * 0.0008);
+   return minD;
+}
+
+bool SMCGP_OrderCheckMarket(const string sym, const ENUM_ORDER_TYPE otype,
+                            const double lot, const double sl, const double tp)
+{
+   MqlTradeRequest req;
+   MqlTradeCheckResult chk;
+   ZeroMemory(req);
+   ZeroMemory(chk);
+   req.action    = TRADE_ACTION_DEAL;
+   req.symbol    = sym;
+   req.volume    = lot;
+   req.type      = otype;
+   req.price     = (otype == ORDER_TYPE_BUY)
+                   ? SymbolInfoDouble(sym, SYMBOL_ASK)
+                   : SymbolInfoDouble(sym, SYMBOL_BID);
+   req.sl        = sl;
+   req.tp        = tp;
+   req.deviation = 30;
+   req.magic     = InpMagicNumber;
+   return OrderCheck(req, chk);
+}
+
+bool SMCGP_PrepareMarketStops(const string sym, const int dir, const double entryPx,
+                              const double slOrig, const double tpOrig, const double lot,
+                              double &sl, double &tp)
+{
+   double ask = SymbolInfoDouble(sym, SYMBOL_ASK);
+   double bid = SymbolInfoDouble(sym, SYMBOL_BID);
+   if(ask <= 0 || bid <= 0) return false;
+
+   double px = (dir == 1) ? ask : bid;
+   int dg = (int)SymbolInfoInteger(sym, SYMBOL_DIGITS);
+   double minD = SMCGP_MinStopDistance(sym);
+   double refEntry = (entryPx > 0) ? entryPx : px;
+
+   double slDist = (slOrig > 0) ? MathAbs(refEntry - slOrig) : minD * 2.0;
+   double tpDist = (tpOrig > 0) ? MathAbs(tpOrig - refEntry) : minD * 3.0;
+   slDist = MathMax(slDist, minD);
+   tpDist = MathMax(tpDist, minD);
+
+   ENUM_ORDER_TYPE otype = (dir == 1) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+   for(int pass = 0; pass < 4; pass++)
+   {
+      if(dir == 1)
+      {
+         sl = NormalizeDouble(px - slDist, dg);
+         tp = NormalizeDouble(px + tpDist, dg);
+         if(sl >= px) sl = NormalizeDouble(px - minD, dg);
+         if(tp <= px) tp = NormalizeDouble(px + minD * 2.0, dg);
+      }
+      else
+      {
+         sl = NormalizeDouble(px + slDist, dg);
+         tp = NormalizeDouble(px - tpDist, dg);
+         if(sl <= px) sl = NormalizeDouble(px + minD, dg);
+         if(tp >= px) tp = NormalizeDouble(px - minD * 2.0, dg);
+      }
+
+      if(SMCGP_OrderCheckMarket(sym, otype, lot, sl, tp))
+         return true;
+
+      slDist *= 1.2;
+      tpDist *= 1.2;
+   }
+   return false;
+}
+
 bool SMCGP_ExecutePipelineOrder(const string sym, const string action,
                                 double sl, double tp, double lot, const bool isPipeline)
 {
@@ -912,14 +1077,34 @@ bool SMCGP_ExecutePipelineOrder(const string sym, const string action,
 
    int dir = (action == "BUY") ? 1 : -1;
 
+   // GATE IA STATUS (sync avec Python pipeline) — NOUVEAU
+   if(UseLossCooldown && g_iaStatusConfidence < 50.0)
+   {
+      Print("[SMC-GOM] 🚫 Ordre ", action, " ", sym, " bloqué — IA Status=",
+            DoubleToString(g_iaStatusConfidence, 1), "% < 50% requis");
+      return false;
+   }
+
    if(UseGOMVerdictFilter)
    {
-      bool needOB = GOMRequireOBTouch && (isPipeline ? GOMOBTouchForPipeline : true);
-      if(!SMCGP_GOMAllowsDirectionEx(dir, needOB))
+      if(UseSignalFirstDiscipline)
       {
-         Print("[SMC-GOM] Ordre ", action, " bloqué — GOM=", g_smcGomVerdict,
-               " vn=", g_smcGomVerdictNum, " BB/OB/tendance");
-         return false;
+         if(!SMCGP_GOMValidatesPrimarySignal(dir))
+         {
+            Print("[SMC-GOM] Ordre ", action, " bloqué — GOM n'a pas validé le signal (vn=",
+                  g_smcGomVerdictNum, ")");
+            return false;
+         }
+      }
+      else
+      {
+         bool needOB = GOMRequireOBTouch && (isPipeline ? GOMOBTouchForPipeline : true);
+         if(!SMCGP_GOMAllowsDirectionEx(dir, needOB))
+         {
+            Print("[SMC-GOM] Ordre ", action, " bloqué — GOM=", g_smcGomVerdict,
+                  " vn=", g_smcGomVerdictNum, " BB/OB/tendance");
+            return false;
+         }
       }
    }
 
@@ -939,15 +1124,17 @@ bool SMCGP_ExecutePipelineOrder(const string sym, const string action,
       return false;
    }
 
-   int dg = (int)SymbolInfoInteger(sym, SYMBOL_DIGITS);
-   int stopsLvl = (int)SymbolInfoInteger(sym, SYMBOL_TRADE_STOPS_LEVEL);
-   double minDist = (double)MathMax(stopsLvl + 5, 10) * SymbolInfoDouble(sym, SYMBOL_POINT);
-   double refPx = (dir == 1) ? ask : bid;
-
-   if(sl > 0 && MathAbs(refPx - sl) < minDist)
-      sl = NormalizeDouble((dir == 1) ? refPx - minDist : refPx + minDist, dg);
-   if(tp > 0 && MathAbs(tp - refPx) < minDist)
-      tp = NormalizeDouble((dir == 1) ? refPx + minDist : refPx - minDist, dg);
+   double entryPx = (dir == 1) ? ask : bid;
+   if(!SMCGP_PrepareMarketStops(sym, dir, entryPx, sl, tp, lot, sl, tp))
+   {
+      ReleaseOpenLock();
+      g_smcLastPipelineFail = TimeCurrent();
+      g_smcPipelineFailCount++;
+      PrintFormat("[SMC-GOM] ❌ SL/TP invalides (OrderCheck) %s %s bid=%.5f ask=%.5f SL=%.5f TP=%.5f",
+                  sym, action, bid, ask, sl, tp);
+      SMCGP_DeletePendingOrder(sym);
+      return false;
+   }
 
    if(lot <= 0) lot = SymbolInfoDouble(sym, SYMBOL_VOLUME_MIN);
    if(UseMinLotOnly) lot = SymbolInfoDouble(sym, SYMBOL_VOLUME_MIN);
@@ -962,6 +1149,8 @@ bool SMCGP_ExecutePipelineOrder(const string sym, const string action,
    if(ok)
    {
       g_smcLastPipelineExec = TimeCurrent();
+      g_smcPipelineFailCount = 0;
+      g_smcFailedPipelineId = "";
       PrintFormat("[SMC-GOM] ✅ Pipeline %s %s lot=%.2f SL=%.5f TP=%.5f | GOM=%s",
                   sym, action, lot, sl, tp, g_smcGomVerdict);
       SMCGP_MarkPipelineConsumed(sym);
@@ -969,6 +1158,13 @@ bool SMCGP_ExecutePipelineOrder(const string sym, const string action,
    }
 
    PrintFormat("[SMC-GOM] ❌ Pipeline échec %s %s: %s", sym, action, trade.ResultRetcodeDescription());
+   uint rc = trade.ResultRetcode();
+   if(rc == TRADE_RETCODE_INVALID_STOPS || rc == TRADE_RETCODE_INVALID_PRICE)
+   {
+      g_smcLastPipelineFail = TimeCurrent();
+      g_smcPipelineFailCount++;
+      SMCGP_DeletePendingOrder(sym);
+   }
    return false;
 }
 
@@ -995,6 +1191,13 @@ void SMCGP_PollAndExecutePipeline()
       && (int)(TimeCurrent() - g_smcLastPipelineExec) < 120)
       return;
 
+   if(StringLen(orderId) > 0 && orderId == g_smcFailedPipelineId
+      && (int)(TimeCurrent() - g_smcLastPipelineFail) < 300)
+      return;
+
+   if(g_smcPipelineFailCount >= 3 && (int)(TimeCurrent() - g_smcLastPipelineFail) < 300)
+      return;
+
    string action = SMCGP_JsonString(orderBody, "action");
    if(StringLen(action) == 0) action = SMCGP_JsonString(orderBody, "recommendation");
    StringToUpper(action);
@@ -1012,15 +1215,32 @@ void SMCGP_PollAndExecutePipeline()
 
    string serverVerdict = SMCGP_JsonString(orderBody, "gom_verdict");
    StringToUpper(serverVerdict);
+   if(UseSignalFirstDiscipline && !DisciplineAllowsPipelineAction(action))
+   {
+      Print("[SMC-GOM] Pipeline rejeté — signal SMC/GOM discipline (action=", action, ")");
+      return;
+   }
+
    if(UseGOMVerdictFilter)
    {
       int pDir = (action == "BUY") ? 1 : -1;
-      bool needOB = GOMRequireOBTouch && (isPipeline ? GOMOBTouchForPipeline : true);
-      if(!SMCGP_GOMAllowsDirectionEx(pDir, needOB))
+      if(UseSignalFirstDiscipline)
       {
-         Print("[SMC-GOM] Pipeline rejeté — GOM=", g_smcGomVerdict,
-               " vn=", g_smcGomVerdictNum, " BB/OB/tendance");
-         return;
+         if(!SMCGP_GOMValidatesPrimarySignal(pDir))
+         {
+            Print("[SMC-GOM] Pipeline rejeté — GOM n'a pas validé (vn=", g_smcGomVerdictNum, ")");
+            return;
+         }
+      }
+      else
+      {
+         bool needOB = GOMRequireOBTouch && (isPipeline ? GOMOBTouchForPipeline : true);
+         if(!SMCGP_GOMAllowsDirectionEx(pDir, needOB))
+         {
+            Print("[SMC-GOM] Pipeline rejeté — GOM=", g_smcGomVerdict,
+                  " vn=", g_smcGomVerdictNum, " BB/OB/tendance");
+            return;
+         }
       }
    }
 
@@ -1037,6 +1257,11 @@ void SMCGP_PollAndExecutePipeline()
 
    if(SMCGP_ExecutePipelineOrder(_Symbol, action, sl, tp, lot, isPipeline))
       g_smcLastPipelineId = orderId;
+   else if(StringLen(orderId) > 0)
+   {
+      g_smcFailedPipelineId = orderId;
+      g_smcLastPipelineFail = TimeCurrent();
+   }
 }
 
 // ── Dashboard GOM (style TradeManager, préfixe SMC_DASH_) ───────────
@@ -1077,8 +1302,8 @@ string SMCGP_TfShort(const string dir)
 void SMCGP_DrawDashCell(const string name, const int x, const int y, const int cellW, const int cellH,
                         const string text, const color bgColor, const color txtColor)
 {
-   string bgName  = "SMC_DASH_" + name + "_BG";
-   string txtName = "SMC_DASH_" + name + "_TXT";
+   string bgName  = g_smcDashPrefix + name + "_BG";
+   string txtName = g_smcDashPrefix + name + "_TXT";
 
    if(ObjectFind(0, bgName) < 0)
    {
@@ -1113,7 +1338,164 @@ void SMCGP_DrawDashCell(const string name, const int x, const int y, const int c
 
 void SMCGP_CleanupDashboard()
 {
-   ObjectsDeleteAll(0, "SMC_DASH_");
+   ObjectsDeleteAll(0, g_smcDashPrefix);
+}
+
+void SMCGP_CleanupOrderFlowCompass()
+{
+   ObjectsDeleteAll(0, "SMC_OF_CMP_");
+}
+
+// Boussole circulaire OrderFlow (momentum GHOST depuis ai_server)
+void SMCGP_DrawOrderFlowCompass(const int chartW, const int marginBot,
+                                const int cellH, const int gap)
+{
+   if(!ShowOrderFlowCompass) { SMCGP_CleanupOrderFlowCompass(); return; }
+
+   const int radius = 38;
+   const int marginLR = 12;
+   // bottom-left, au-dessus du dashboard GOM (comme TradingView)
+   int cx = marginLR + radius + 8;
+   int cy = marginBot + (cellH + gap) * 4 + radius + 28;
+
+   string pfx = "SMC_OF_CMP_";
+   int compassOct = (int)((g_smcGhostCompass + 22.5) / 45.0) % 8;
+   bool isBull = (compassOct == 0 || compassOct == 1 || compassOct == 2 || compassOct == 7);
+   bool isBear = (compassOct == 3 || compassOct == 4 || compassOct == 5 || compassOct == 6);
+   color activeClr = isBull ? (color)SMC_DASH_C_BUY : isBear ? (color)SMC_DASH_C_SELL : (color)SMC_DASH_C_NEUTRAL;
+   color borderClr = (color)0xFF404040;
+   color goldClr   = (color)0xFFFFD700;
+
+   // Fond circulaire (carré arrondi)
+   string bgName = pfx + "BG";
+   if(ObjectFind(0, bgName) < 0)
+   {
+      ObjectCreate(0, bgName, OBJ_RECTANGLE_LABEL, 0, 0, 0);
+      ObjectSetInteger(0, bgName, OBJPROP_CORNER, CORNER_LEFT_LOWER);
+      ObjectSetInteger(0, bgName, OBJPROP_BACK, false);
+      ObjectSetInteger(0, bgName, OBJPROP_SELECTABLE, false);
+   }
+   int boxSize = radius * 2 + 14;
+   ObjectSetInteger(0, bgName, OBJPROP_XDISTANCE, cx - radius - 7);
+   ObjectSetInteger(0, bgName, OBJPROP_YDISTANCE, cy + radius + 7);
+   ObjectSetInteger(0, bgName, OBJPROP_XSIZE, boxSize);
+   ObjectSetInteger(0, bgName, OBJPROP_YSIZE, boxSize);
+   ObjectSetInteger(0, bgName, OBJPROP_BGCOLOR, (color)0xFF1A1A2E);
+   ObjectSetInteger(0, bgName, OBJPROP_BORDER_TYPE, BORDER_FLAT);
+   ObjectSetInteger(0, bgName, OBJPROP_BORDER_COLOR, borderClr);
+
+   // Anneau (8 points cardinaux)
+   static const string dirs[8] = {"E","NE","N","NW","W","SW","S","SE"};
+   static const double cosA[8] = { 1.0,  0.707, 0.0, -0.707, -1.0, -0.707,  0.0,  0.707};
+   static const double sinA[8] = { 0.0,  0.707, 1.0,  0.707,  0.0, -0.707, -1.0, -0.707};
+
+   for(int d = 0; d < 8; d++)
+   {
+      string lName = pfx + "D" + IntegerToString(d);
+      if(ObjectFind(0, lName) < 0)
+      {
+         ObjectCreate(0, lName, OBJ_LABEL, 0, 0, 0);
+         ObjectSetInteger(0, lName, OBJPROP_CORNER, CORNER_LEFT_LOWER);
+         ObjectSetString(0, lName, OBJPROP_FONT, "Consolas");
+         ObjectSetInteger(0, lName, OBJPROP_ANCHOR, ANCHOR_CENTER);
+         ObjectSetInteger(0, lName, OBJPROP_SELECTABLE, false);
+      }
+      int lx = cx + (int)(cosA[d] * (radius - 6));
+      int ly = cy - (int)(sinA[d] * (radius - 6));
+      bool active = (d == compassOct);
+      ObjectSetInteger(0, lName, OBJPROP_XDISTANCE, lx);
+      ObjectSetInteger(0, lName, OBJPROP_YDISTANCE, ly);
+      ObjectSetString(0, lName, OBJPROP_TEXT, dirs[d]);
+      ObjectSetInteger(0, lName, OBJPROP_FONTSIZE, active ? 10 : 7);
+      ObjectSetInteger(0, lName, OBJPROP_COLOR, active ? activeClr : (color)0xFF606060);
+   }
+
+   // Centre +
+   string ctrName = pfx + "CTR";
+   if(ObjectFind(0, ctrName) < 0)
+   {
+      ObjectCreate(0, ctrName, OBJ_LABEL, 0, 0, 0);
+      ObjectSetInteger(0, ctrName, OBJPROP_CORNER, CORNER_LEFT_LOWER);
+      ObjectSetString(0, ctrName, OBJPROP_FONT, "Consolas");
+      ObjectSetInteger(0, ctrName, OBJPROP_ANCHOR, ANCHOR_CENTER);
+      ObjectSetInteger(0, ctrName, OBJPROP_SELECTABLE, false);
+   }
+   ObjectSetInteger(0, ctrName, OBJPROP_XDISTANCE, cx);
+   ObjectSetInteger(0, ctrName, OBJPROP_YDISTANCE, cy);
+   ObjectSetString(0, ctrName, OBJPROP_TEXT, "+");
+   ObjectSetInteger(0, ctrName, OBJPROP_FONTSIZE, 10);
+   ObjectSetInteger(0, ctrName, OBJPROP_COLOR, (color)0xFFB0B0B0);
+
+   // Aiguille momentum
+   string ndlName = pfx + "NDL";
+   if(ObjectFind(0, ndlName) < 0)
+   {
+      ObjectCreate(0, ndlName, OBJ_LABEL, 0, 0, 0);
+      ObjectSetInteger(0, ndlName, OBJPROP_CORNER, CORNER_LEFT_LOWER);
+      ObjectSetString(0, ndlName, OBJPROP_FONT, "Wingdings");
+      ObjectSetInteger(0, ndlName, OBJPROP_ANCHOR, ANCHOR_CENTER);
+      ObjectSetInteger(0, ndlName, OBJPROP_SELECTABLE, false);
+   }
+   double rad = g_smcGhostCompass * M_PI / 180.0;
+   int nx = cx + (int)(MathCos(rad) * radius * 0.62);
+   int ny = cy - (int)(MathSin(rad) * radius * 0.62);
+   ObjectSetInteger(0, ndlName, OBJPROP_XDISTANCE, nx);
+   ObjectSetInteger(0, ndlName, OBJPROP_YDISTANCE, ny);
+   ObjectSetString(0, ndlName, OBJPROP_TEXT, CharToString(108));
+   ObjectSetInteger(0, ndlName, OBJPROP_FONTSIZE, 16);
+   ObjectSetInteger(0, ndlName, OBJPROP_COLOR, activeClr);
+
+   // Titre + angle
+   string hdrName = pfx + "HDR";
+   if(ObjectFind(0, hdrName) < 0)
+   {
+      ObjectCreate(0, hdrName, OBJ_LABEL, 0, 0, 0);
+      ObjectSetInteger(0, hdrName, OBJPROP_CORNER, CORNER_LEFT_LOWER);
+      ObjectSetString(0, hdrName, OBJPROP_FONT, "Consolas");
+      ObjectSetInteger(0, hdrName, OBJPROP_ANCHOR, ANCHOR_CENTER);
+      ObjectSetInteger(0, hdrName, OBJPROP_SELECTABLE, false);
+   }
+   ObjectSetInteger(0, hdrName, OBJPROP_XDISTANCE, cx);
+   ObjectSetInteger(0, hdrName, OBJPROP_YDISTANCE, cy - radius - 12);
+   ObjectSetString(0, hdrName, OBJPROP_TEXT, "ORDERFLOW COMPASS");
+   ObjectSetInteger(0, hdrName, OBJPROP_FONTSIZE, 8);
+   ObjectSetInteger(0, hdrName, OBJPROP_COLOR, goldClr);
+
+   string valName = pfx + "VAL";
+   if(ObjectFind(0, valName) < 0)
+   {
+      ObjectCreate(0, valName, OBJ_LABEL, 0, 0, 0);
+      ObjectSetInteger(0, valName, OBJPROP_CORNER, CORNER_LEFT_LOWER);
+      ObjectSetString(0, valName, OBJPROP_FONT, "Consolas");
+      ObjectSetInteger(0, valName, OBJPROP_ANCHOR, ANCHOR_CENTER);
+      ObjectSetInteger(0, valName, OBJPROP_SELECTABLE, false);
+   }
+   ObjectSetInteger(0, valName, OBJPROP_XDISTANCE, cx);
+   ObjectSetInteger(0, valName, OBJPROP_YDISTANCE, cy + radius + 12);
+   ObjectSetString(0, valName, OBJPROP_TEXT, dirs[compassOct] + " " + DoubleToString(g_smcGhostCompass, 0) + "\xB0");
+   ObjectSetInteger(0, valName, OBJPROP_FONTSIZE, 9);
+   ObjectSetInteger(0, valName, OBJPROP_COLOR, activeClr);
+
+   // Métriques OrderFlow sous la boussole
+   string ofName = pfx + "OF";
+   if(ObjectFind(0, ofName) < 0)
+   {
+      ObjectCreate(0, ofName, OBJ_LABEL, 0, 0, 0);
+      ObjectSetInteger(0, ofName, OBJPROP_CORNER, CORNER_LEFT_LOWER);
+      ObjectSetString(0, ofName, OBJPROP_FONT, "Consolas");
+      ObjectSetInteger(0, ofName, OBJPROP_ANCHOR, ANCHOR_LEFT_UPPER);
+      ObjectSetInteger(0, ofName, OBJPROP_SELECTABLE, false);
+   }
+   string fluxTxt = isBull ? "FLUX ACHETEUR" : isBear ? "FLUX VENDEUR" : "NEUTRE";
+   string ofTxt = "D" + (g_smcGhostDelta >= 0 ? "+" : "") + DoubleToString(g_smcGhostDelta, 0)
+      + " | CVD" + (g_smcGhostCVD >= 0 ? "+" : "") + DoubleToString(g_smcGhostCVD, 0)
+      + " | " + DoubleToString(g_smcGhostBuyPct, 0) + "%"
+      + "\n" + fluxTxt;
+   ObjectSetInteger(0, ofName, OBJPROP_XDISTANCE, cx - radius);
+   ObjectSetInteger(0, ofName, OBJPROP_YDISTANCE, cy + radius + 28);
+   ObjectSetString(0, ofName, OBJPROP_TEXT, ofTxt);
+   ObjectSetInteger(0, ofName, OBJPROP_FONTSIZE, 8);
+   ObjectSetInteger(0, ofName, OBJPROP_COLOR, activeClr);
 }
 
 void SMCGP_DrawGOMDashboard()
@@ -1142,10 +1524,10 @@ void SMCGP_DrawGOMDashboard()
    color cTxt = (color)SMC_DASH_C_TXT;
    int dg = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
    string sym = SMCGP_ResolveGOMSym(_Symbol);
-   string ts = TimeToString(TimeCurrent(), TIME_MINUTES);
+   string ts = TimeToString(TimeCurrent(), TIME_DATE | TIME_SECONDS);
    int pollAge = (g_smcLastGOMPoll > 0) ? (int)(TimeCurrent() - g_smcLastGOMPoll) : -1;
 
-   string connTxt = g_smcGomConnected ? "PY+TV OK" : "PY/TV OFF";
+   string connTxt = g_smcGomConnected ? "PY+MT5 OK" : "PY/MT5 OFF";
    if(!g_smcGomConnected && g_smcLastHttpCode > 0)
       connTxt = "HTTP " + IntegerToString(g_smcLastHttpCode);
    else if(!g_smcGomConnected && g_smcLastHttpCode == 0)
@@ -1314,16 +1696,50 @@ void SMCGP_DrawGOMDashboard()
    color cConn = g_smcGomConnected ? (color)SMC_DASH_C_BUY : (color)SMC_DASH_C_SELL;
    SMCGP_DrawDashCell("G5_LINK", xCur, y3, cellW * 2, cellH, connTxt, cConn, cTxt);
 
+   if(ShowOrderFlowCompass)
+      SMCGP_DrawOrderFlowCompass(chartW, marginBot, cellH, gap);
+   else
+      SMCGP_CleanupOrderFlowCompass();
+
    ChartRedraw(0);
+}
+
+void SMCGP_UploadCandles()
+{
+   if(!GOMUploadCandles) return;
+   if(g_smcCandlesUploader == NULL) return;
+   int intervalSec = MathMax(60, GOMUploadIntervalMin * 60);
+   if((int)(TimeCurrent() - g_smcLastCandleUpload) < intervalSec) return;
+   g_smcLastCandleUpload = TimeCurrent();
+
+   string sym = SMCGP_ResolveGOMSym(_Symbol);
+   Print("[GOM-UPLOAD] Envoi candles MT5 → ai_server pour ", sym);
+   g_smcCandlesUploader.UploadAllTimeframes(sym);
 }
 
 void SMCGP_OnTimer()
 {
+   // GOM poll + dashboard: indépendant par graphique (ChartID), même en UltraLightMode
+   if(ShowGOMDashboard || UseGOMVerdictFilter || UseGOMPipeline)
+   {
+      SMCGP_PollGOM();
+      if(ShowGOMDashboard)
+         SMCGP_DrawGOMDashboard();
+      else if(ShowOrderFlowCompass)
+      {
+         int chartW = (int)ChartGetInteger(0, CHART_WIDTH_IN_PIXELS);
+         if(chartW < 400) chartW = 1200;
+         SMCGP_DrawOrderFlowCompass(chartW, GOMDashboardY, SMC_DASH_ROW_H, 2);
+      }
+      else
+         SMCGP_CleanupOrderFlowCompass();
+   }
+
    if(UltraLightMode) return;
-   SMCGP_SendHeartbeat();
-   SMCGP_PollGOM();
-   if(ShowGOMDashboard)
-      SMCGP_DrawGOMDashboard();
+
+   SMCGP_UploadCandles();
+   if(GOMSyncSymbolToTV)
+      SMCGP_SendHeartbeat();
    if(!BlockAllTrades)
       SMCGP_PollAndExecutePipeline();
 }
@@ -1411,14 +1827,36 @@ void SMCGP_ParseDoubleArray(const string &csv, double &arr[])
 
 void SMCGP_Init()
 {
+   g_smcDashPrefix = "SMC_DASH_" + IntegerToString((long)ChartID()) + "_";
    g_smcGomVerdict = "WAIT";
+   if(g_smcCandlesUploader != NULL)
+   {
+      delete g_smcCandlesUploader;
+      g_smcCandlesUploader = NULL;
+   }
+   if(GOMUploadCandles)
+   {
+      string sym = SMCGP_ResolveGOMSym(_Symbol);
+      g_smcCandlesUploader = new MT5CandlesUploader(sym, AI_ServerURL);
+      g_smcLastCandleUpload = 0;
+   }
    Print("[SMC-GOM] Module actif | symbole=", _Symbol,
          " | Pipeline=", UseGOMPipeline ? "ON" : "OFF",
          " | GOM=", UseGOMVerdictFilter ? "ON" : "OFF",
          " | TV sync=", ShowTVSyncedLevels ? "ON" : "OFF",
          " | Dashboard=", ShowGOMDashboard ? "ON" : "OFF",
          " | Heartbeat=", GOMSyncSymbolToTV ? "ON" : "OFF",
+         " | CandlesUpload=", GOMUploadCandles ? "ON" : "OFF",
          " | Serveur=", AI_ServerURL);
+}
+
+void SMCGP_Deinit()
+{
+   if(g_smcCandlesUploader != NULL)
+   {
+      delete g_smcCandlesUploader;
+      g_smcCandlesUploader = NULL;
+   }
 }
 
 #endif

@@ -64,6 +64,12 @@ input bool   UseGlobalProfitTarget  = true;   // Fermer tout si profit total >= 
 input double GlobalProfitTargetUSD  = 10.0;   // Cible profit global (USD) — somme positions MCP
 input bool   GlobalProfitMCPOnly    = true;   // Ne compter que les positions magic MCP (bridge)
 
+input group "=== LOSS COOLDOWN — REVENGE TRADING PROTECTION ==="
+input bool   UseLossCooldown         = true;   // Activer cooldown après pertes successives
+input int    CooldownConsecutiveLoss = 2;      // Nombre de pertes consécutives = cooldown (ex: 2)
+input int    CooldownDurationMin     = 60;     // Durée cooldown (minutes) — ex: 60 = 1 heure
+input bool   LogCooldownStatus       = true;   // Afficher statut cooldown dans les logs
+
 input group "=== CAPITAL MANAGER — GAME CHANGER ==="
 input bool   UseCapitalManager      = true;   // Activer gestion intelligente du capital
 input double CM_DailyTargetPct      = 5.0;    // Objectif profit journalier (% du capital) — 5% de $50 = $2.50
@@ -453,6 +459,12 @@ struct MCPSignal
 MCPSignal g_mcpSignals[];
 int       g_mcpCount    = 0;
 datetime  g_lastMCPPoll = 0;
+
+// Cooldown order_id après échec Invalid stops (évite re-poll → spam journal)
+string   g_mcpFailedOrderIds[];
+datetime g_mcpFailedOrderAt[];
+int      g_mcpFailedOrderCount = 0;
+const int MCP_FAILED_ORDER_COOLDOWN_SEC = 300;
 
 // --- Cache biais TradingAgents / MCP (poll /session-bias) ---
 struct SignalBias
@@ -2859,12 +2871,30 @@ void ManageAllTrailing()
       double newSL    = 0;
       string phase    = "";
 
-      // ── BOOM/CRASH : trailing désactivé — fermeture uniquement sur spike ──
-      // MonitorSpikeAutoClose() gère la sortie après spike détecté
+      // ── BOOM/CRASH : breakeven dès $2 de gain, puis skip trailing progressif ──
       if(IsBoomOrCrashSymbol(sym))
       {
-         // Garde-fou perte max uniquement — pas de trailing SL progressif
-         // (le spike est la seule sortie rentable sur Boom/Crash)
+         // À $2+ de gain net : ramener le SL au breakeven (entry + 1 point)
+         if(profitUSD >= 2.0)
+         {
+            double bePrice = NormalizeDouble((dir == 1) ? ep + pt : ep - pt, dg);
+            bool slAlreadyBeyondBreakeven = (dir == 1) ? (curSL >= bePrice) : (curSL > 0 && curSL <= bePrice);
+            if(!slAlreadyBeyondBreakeven)
+            {
+               int stopsLvl = (int)SymbolInfoInteger(sym, SYMBOL_TRADE_STOPS_LEVEL);
+               double minDist = (double)(stopsLvl + 5) * pt;
+               double beSafe  = NormalizeDouble((dir == 1) ? ep + minDist : ep - minDist, dg);
+               double finalBE = (dir == 1) ? MathMax(bePrice, beSafe) : MathMin(bePrice, beSafe);
+               bool beOk = (dir == 1) ? (finalBE > curSL) : (curSL == 0 || finalBE < curSL);
+               if(beOk && PositionSelectByTicket(ticket))
+               {
+                  if(trade.PositionModify(ticket, finalBE, posInfo.TakeProfit()))
+                     Print(StringFormat("[TradeManager] 🔒 %s BREAKEVEN $2 #%llu | SL %.5f→%.5f | profit=$%.2f",
+                           sym, ticket, curSL, finalBE, profitUSD));
+               }
+            }
+         }
+         // Pas de trailing progressif sur Boom/Crash — le spike est la seule sortie
          continue;
       }
 
@@ -4132,6 +4162,140 @@ bool MCPHasSignalForSymbol(const string sym)
 }
 
 //+------------------------------------------------------------------+
+//| Helpers SL/TP marché — OrderCheck broker avant envoi             |
+//+------------------------------------------------------------------+
+double TM_MinStopDistance(const string sym)
+{
+   double pt = SymbolInfoDouble(sym, SYMBOL_POINT);
+   if(pt <= 0) return 0;
+   int stops  = (int)SymbolInfoInteger(sym, SYMBOL_TRADE_STOPS_LEVEL);
+   int freeze = (int)SymbolInfoInteger(sym, SYMBOL_TRADE_FREEZE_LEVEL);
+   double minD = (double)MathMax(stops + freeze + 5, 10) * pt;
+   double ask = SymbolInfoDouble(sym, SYMBOL_ASK);
+   if(IsBoomOrCrashSymbol(sym) && ask > 0)
+      minD = MathMax(minD, ask * 0.0008);
+   return minD;
+}
+
+bool TM_OrderCheckMarket(const string sym, const ENUM_ORDER_TYPE otype,
+                         const double lot, const double sl, const double tp)
+{
+   MqlTradeRequest req;
+   MqlTradeCheckResult chk;
+   ZeroMemory(req);
+   ZeroMemory(chk);
+   req.action    = TRADE_ACTION_DEAL;
+   req.symbol    = sym;
+   req.volume    = lot;
+   req.type      = otype;
+   req.price     = (otype == ORDER_TYPE_BUY)
+                   ? SymbolInfoDouble(sym, SYMBOL_ASK)
+                   : SymbolInfoDouble(sym, SYMBOL_BID);
+   req.sl        = sl;
+   req.tp        = tp;
+   req.deviation = 30;
+   req.magic     = MCPMagicNumber;
+   return OrderCheck(req, chk);
+}
+
+bool TM_PrepareMarketStops(const string sym, const int dir, const double entryPx,
+                           const double slOrig, const double tpOrig, const double lot,
+                           double &sl, double &tp)
+{
+   double ask = SymbolInfoDouble(sym, SYMBOL_ASK);
+   double bid = SymbolInfoDouble(sym, SYMBOL_BID);
+   if(ask <= 0 || bid <= 0) return false;
+
+   double px = (dir == 1) ? ask : bid;
+   int dg = (int)SymbolInfoInteger(sym, SYMBOL_DIGITS);
+   double minD = TM_MinStopDistance(sym);
+   double refEntry = (entryPx > 0) ? entryPx : px;
+
+   double slDist = (slOrig > 0) ? MathAbs(refEntry - slOrig) : minD * 2.0;
+   double tpDist = (tpOrig > 0) ? MathAbs(tpOrig - refEntry) : minD * 3.0;
+   slDist = MathMax(slDist, minD);
+   tpDist = MathMax(tpDist, minD);
+
+   ENUM_ORDER_TYPE otype = (dir == 1) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+   for(int pass = 0; pass < 4; pass++)
+   {
+      if(dir == 1)
+      {
+         sl = NormalizeDouble(px - slDist, dg);
+         tp = NormalizeDouble(px + tpDist, dg);
+         if(sl >= px) sl = NormalizeDouble(px - minD, dg);
+         if(tp <= px) tp = NormalizeDouble(px + minD * 2.0, dg);
+      }
+      else
+      {
+         sl = NormalizeDouble(px + slDist, dg);
+         tp = NormalizeDouble(px - tpDist, dg);
+         if(sl <= px) sl = NormalizeDouble(px + minD, dg);
+         if(tp >= px) tp = NormalizeDouble(px - minD * 2.0, dg);
+      }
+
+      if(TM_OrderCheckMarket(sym, otype, lot, sl, tp))
+         return true;
+
+      slDist *= 1.2;
+      tpDist *= 1.2;
+   }
+   return false;
+}
+
+void TM_DeletePendingOrder(const string sym)
+{
+   string symEnc = sym;
+   StringReplace(symEnc, " ", "%20");
+   string delUrl = AIServerURL + "/pending-order?symbol=" + symEnc;
+   char dp[], dr[];
+   string dh;
+   WebRequest("DELETE", delUrl, "Content-Type: application/json\r\n", WATimeoutMs, dp, dr, dh);
+}
+
+bool MCPOrderIdRecentlyFailed(const string orderId)
+{
+   if(StringLen(orderId) == 0) return false;
+   datetime now = TimeCurrent();
+   for(int i = 0; i < g_mcpFailedOrderCount; i++)
+   {
+      if(g_mcpFailedOrderIds[i] != orderId) continue;
+      if((int)(now - g_mcpFailedOrderAt[i]) < MCP_FAILED_ORDER_COOLDOWN_SEC)
+         return true;
+      g_mcpFailedOrderAt[i] = 0;
+   }
+   return false;
+}
+
+void MCPMarkOrderIdFailed(const string orderId)
+{
+   if(StringLen(orderId) == 0) return;
+   datetime now = TimeCurrent();
+   for(int i = 0; i < g_mcpFailedOrderCount; i++)
+   {
+      if(g_mcpFailedOrderIds[i] == orderId)
+      {
+         g_mcpFailedOrderAt[i] = now;
+         return;
+      }
+   }
+   if(g_mcpFailedOrderCount >= 32)
+   {
+      for(int j = 0; j < 31; j++)
+      {
+         g_mcpFailedOrderIds[j] = g_mcpFailedOrderIds[j + 1];
+         g_mcpFailedOrderAt[j]  = g_mcpFailedOrderAt[j + 1];
+      }
+      g_mcpFailedOrderCount = 31;
+   }
+   ArrayResize(g_mcpFailedOrderIds, g_mcpFailedOrderCount + 1);
+   ArrayResize(g_mcpFailedOrderAt, g_mcpFailedOrderCount + 1);
+   g_mcpFailedOrderIds[g_mcpFailedOrderCount] = orderId;
+   g_mcpFailedOrderAt[g_mcpFailedOrderCount]  = now;
+   g_mcpFailedOrderCount++;
+}
+
+//+------------------------------------------------------------------+
 //| Enregistre + exécute un pending-order JSON pour un symbole       |
 //+------------------------------------------------------------------+
 void IngestPendingOrderForSymbol(const string sym, const string &body)
@@ -4151,6 +4315,14 @@ void IngestPendingOrderForSymbol(const string sym, const string &body)
       return;
    }
       string orderBody = StringSubstr(body, orderPos);
+
+   string incomingOrderId = JsonGetString(orderBody, "order_id");
+   if(MCPOrderIdRecentlyFailed(incomingOrderId))
+   {
+      PrintOnce(StringFormat("[TradeManager] ⏭️ %s: order_id en cooldown après échec SL/TP (%s)",
+            sym, incomingOrderId), 60);
+      return;
+   }
 
    string action = JsonGetString(orderBody, "action");
    if(StringLen(action) == 0) action = JsonGetString(orderBody, "recommendation");
@@ -4881,30 +5053,24 @@ void TryExecuteMCPSignal(int idx)
    string obBlockReason = "";
    if(!isPipelineSource && !IsBoomOrCrashSymbol(sym) && IsOBBlockingPath(dir, obBlockReason)) return;
 
-   // Vérifier STOPS_LEVEL broker
-   double pt       = SymbolInfoDouble(sym, SYMBOL_POINT);
-   int    stopsLvl = (int)SymbolInfoInteger(sym, SYMBOL_TRADE_STOPS_LEVEL);
-   double minDist  = (double)(stopsLvl + 5) * pt;
    double sl = g_mcpSignals[idx].stopLoss;
    double tp = g_mcpSignals[idx].takeProfit1;
-   int    dg = (int)SymbolInfoInteger(sym, SYMBOL_DIGITS);
+   double lot = g_mcpSignals[idx].lot;
+   if(lot <= 0) lot = SymbolInfoDouble(sym, SYMBOL_VOLUME_MIN);
 
-   // Ajuster SL/TP au minimum broker si nécessaire
-   if(sl > 0 && MathAbs(refPx - sl) < minDist)
-      sl = NormalizeDouble((dir==1) ? refPx - minDist : refPx + minDist, dg);
-   if(tp > 0 && MathAbs(tp - refPx) < minDist)
-      tp = NormalizeDouble((dir==1) ? refPx + minDist : refPx - minDist, dg);
-
-   // Vérifier après correction que SL/TP sont du bon côté du prix
-   bool slValid = (sl <= 0) || ((dir == 1) ? (sl < refPx) : (sl > refPx));
-   bool tpValid = (tp <= 0) || ((dir == 1) ? (tp > refPx) : (tp < refPx));
-   if(!slValid || !tpValid)
+   if(!TM_PrepareMarketStops(sym, dir, ep, sl, tp, lot, sl, tp))
    {
-      Print(StringFormat("[TradeManager] ❌ INVALID SL/TP after adjustment for %s %s: price=%.5f SL=%.5f TP=%.5f",
-            (dir==1?"BUY":"SELL"), sym, refPx, sl, tp));
+      Print(StringFormat("[TradeManager] ❌ SL/TP invalides après OrderCheck %s %s: bid=%.5f ask=%.5f SL=%.5f TP=%.5f",
+            (dir==1?"BUY":"SELL"), sym,
+            SymbolInfoDouble(sym, SYMBOL_BID), SymbolInfoDouble(sym, SYMBOL_ASK), sl, tp));
+      MCPMarkOrderIdFailed(g_mcpSignals[idx].orderId);
+      TM_DeletePendingOrder(sym);
       g_mcpSignals[idx].active = false;
+      g_mcpSignals[idx].failCount = (int)MaxSignalFailCount;
       return;
    }
+   g_mcpSignals[idx].stopLoss    = sl;
+   g_mcpSignals[idx].takeProfit1 = tp;
 
    // 🚨 VÉRIFICATION FINALE ANTI-CORRECTION JUSTE AVANT EXÉCUTION
    if(UseGOMScalp && g_lastGOMVerdictNum != 0)
@@ -4927,7 +5093,6 @@ void TryExecuteMCPSignal(int idx)
    mcpTrade.SetDeviationInPoints(30);
    mcpTrade.SetTypeFilling(ORDER_FILLING_IOC);
 
-   double lot = g_mcpSignals[idx].lot;
    bool ok = (dir == 1) ? mcpTrade.Buy(lot, sym, 0, sl, tp, "TM_MCP_SIGNAL")
                         : mcpTrade.Sell(lot, sym, 0, sl, tp, "TM_MCP_SIGNAL");
    if(ok)
@@ -4949,12 +5114,7 @@ void TryExecuteMCPSignal(int idx)
       ScanAllPositions();
       // Duplication différée — déclenchée par MonitorMCPPositions() quand profit >= MCPDuplicateMinProfit
 
-      // Supprimer l'ordre pending du serveur
-      string symEnc = sym;
-      StringReplace(symEnc, " ", "%20");
-      string delUrl = AIServerURL + "/pending-order?symbol=" + symEnc;
-      char dp[], dr[]; string dh;
-      WebRequest("DELETE", delUrl, "Content-Type: application/json\r\n", WATimeoutMs, dp, dr, dh);
+      TM_DeletePendingOrder(sym);
 
       Print(StringFormat("[TradeManager] ✅ MCP AUTO %s %s @ %.5f SL=%.5f TP=%.5f lot=%.2f ticket=%llu dup=%s",
             (dir==1?"BUY":"SELL"), sym, refPx, sl, tp, lot, g_mcpSignals[idx].ticket,
@@ -4965,10 +5125,19 @@ void TryExecuteMCPSignal(int idx)
    else
    {
       g_mcpSignals[idx].failCount++;
-      Print(StringFormat("[TradeManager] MCP ORDER ECHOUE %s %s: %d %s (tentative %d/3)",
+      uint rc = mcpTrade.ResultRetcode();
+      Print(StringFormat("[TradeManager] MCP ORDER ECHOUE %s %s: %d %s (tentative %d/%d)",
             (dir==1?"BUY":"SELL"), sym,
-            (int)mcpTrade.ResultRetcode(), mcpTrade.ResultRetcodeDescription(),
-            g_mcpSignals[idx].failCount));
+            (int)rc, mcpTrade.ResultRetcodeDescription(),
+            g_mcpSignals[idx].failCount, (int)MaxSignalFailCount));
+
+      if(rc == TRADE_RETCODE_INVALID_STOPS || rc == TRADE_RETCODE_INVALID_PRICE)
+      {
+         MCPMarkOrderIdFailed(g_mcpSignals[idx].orderId);
+         TM_DeletePendingOrder(sym);
+         g_mcpSignals[idx].active = false;
+         g_mcpSignals[idx].failCount = (int)MaxSignalFailCount;
+      }
    }
 }
 

@@ -14,12 +14,28 @@ from pathlib import Path
 from datetime import datetime, timezone
 from typing import Dict, List, Any, Optional, Tuple
 
+# Import loss cooldown tracker
+try:
+    from loss_cooldown_tracker import get_cooldown_tracker, check_symbol_cooldown
+    COOLDOWN_TRACKER_AVAILABLE = True
+except ImportError:
+    COOLDOWN_TRACKER_AVAILABLE = False
+
 # Import spike anticipation
 try:
     from spike_anticipation import SpikeAnticipator
     SPIKE_ANTICIPATION_AVAILABLE = True
 except ImportError:
     SPIKE_ANTICIPATION_AVAILABLE = False  # Tuple is needed for return type in get_ia_status_v2
+
+# Import docx for Word report generation
+try:
+    from docx import Document
+    from docx.shared import Inches, Pt, RGBColor
+    DOCX_AVAILABLE = True
+except ImportError:
+    DOCX_AVAILABLE = False
+    log_warning = lambda msg: print(f"⚠️  {msg}")
 
 # Fix encoding for Windows
 if sys.stdout.encoding != 'utf-8':
@@ -206,6 +222,7 @@ class PipelineHourly:
         self.orders_placed = []
         self.errors = []
         self._gom_cache: Dict[str, Any] = {}
+        self._recent_orders: Dict[str, float] = {}  # {symbol: timestamp} — dedup within 5 sec
 
         # Initialize spike anticipator if available
         self.spike_anticipator = None
@@ -361,12 +378,29 @@ class PipelineHourly:
 
             # Floor ATR minimum : SL trop serré (BB collé au prix) cause des stops immédiats
             atr_raw = g.get("atr", 0.0) or g.get("atr14", 0.0)
+            is_synthetic = "CRASH" in symbol or "BOOM" in symbol or "JUMP" in symbol
+
             if atr_raw and atr_raw > 0:
-                min_sl_dist = atr_raw * 2.0  # 2× ATR minimum (SL plus large, moins de fermetures prématurées)
+                # Multiplier plus grand pour CRASH/BOOM (indices synthétiques)
+                atr_multiplier = 4.0 if is_synthetic else 2.0
+                min_sl_dist = atr_raw * atr_multiplier
                 sl_dist = abs(entry - sl)
                 if sl_dist < min_sl_dist:
                     sl = round(entry - min_sl_dist if direction == "BUY" else entry + min_sl_dist, 5)
                     log.info(f"  ℹ️  SL ATR floor appliqué ({sl_dist:.2f} < {min_sl_dist:.2f}) → SL={sl:.5f}")
+
+            # MINIMUM ABSOLU pour synthétiques: 40+ pips (0.40) pour CRASH/BOOM
+            if is_synthetic:
+                min_abs_pips = 0.40  # 40 pips minimum
+                sl_dist = abs(entry - sl)
+                if sl_dist < min_abs_pips:
+                    sl = entry - min_abs_pips if direction == "BUY" else entry + min_abs_pips
+                    log.info(f"  ℹ️  SYNTHÉTIQUE: SL forcé à +{min_abs_pips} pips (trop serré: {sl_dist:.2f})")
+
+                tp_dist = abs(entry - tp)
+                if tp_dist < min_abs_pips:
+                    tp = entry + min_abs_pips if direction == "BUY" else entry - min_abs_pips
+                    log.info(f"  ℹ️  SYNTHÉTIQUE: TP forcé à +{min_abs_pips} pips (trop serré: {tp_dist:.2f})")
 
             # ENRICHIR CONFIANCE: IA Status v2 (multi-TF avec M5 prioritaire)
             ia_conf_pct, ia_details = get_ia_status_v2(symbol, g)
@@ -404,6 +438,32 @@ class PipelineHourly:
         log.info(f"📈 Phase 3 — Place l'ordre: {symbol}")
 
         try:
+            # PRÉ-CHECK: Vérifier si un ordre existe déjà pour ce symbole
+            try:
+                check = requests.get(
+                    f"{AI_SERVER_URL}/pending-order",
+                    params={"symbol": symbol},
+                    timeout=5
+                )
+                if check.status_code == 200:
+                    existing = check.json()
+                    if existing and existing.get("ok") and existing.get("status") in ("ready", "executing"):
+                        log.warning(f"  🚫 {symbol}: ORDRE EXISTANT (status={existing.get('status')}) — SKIP placement")
+                        self.errors.append((symbol, "ORDER_ALREADY_EXISTS"))
+                        return False
+            except:
+                pass  # Continue si vérification échoue
+
+            # GATE COOLDOWN : Check if symbol is in cooldown after 2 consecutive losses
+            if COOLDOWN_TRACKER_AVAILABLE:
+                if check_symbol_cooldown(symbol):
+                    tracker = get_cooldown_tracker()
+                    info = tracker.get_cooldown_info(symbol)
+                    remaining_min = info["remaining_minutes"]
+                    log.warning(f"  🔴 {symbol}: IN COOLDOWN — {remaining_min}min remaining (2 losses detected)")
+                    self.errors.append((symbol, f"COOLDOWN_{remaining_min}min"))
+                    return False
+
             # Build payload matching /pending-order endpoint
             action = "BUY" if analysis.get("opinion", "").upper() in ["BUY", "PERFECT BUY", "GOOD BUY"] else "SELL"
 
@@ -481,6 +541,16 @@ class PipelineHourly:
                         f"  [SPIKE] Anticipation: {anticipated['anticipation_distance_pips']:.1f} pips ahead"
                     )
 
+            # DEDUP : Refuser si même ordre posté dans les 5 dernières secondes
+            from time import time
+            now = time()
+            if symbol in self._recent_orders:
+                last_order_time = self._recent_orders[symbol]
+                if now - last_order_time < 5:  # moins de 5 sec
+                    log.warning(f"  🚫 {symbol}: Ordre déjà placé y a {now - last_order_time:.1f}s — SKIP (dedup)")
+                    self.errors.append((symbol, f"DEDUP: Ordre dans les 5s"))
+                    return False
+
             payload = {
                 "symbol": symbol,
                 "action": action,
@@ -499,6 +569,7 @@ class PipelineHourly:
 
             if response.status_code in [200, 201]:
                 result = response.json()
+                self._recent_orders[symbol] = now  # Enregistrer le timestamp
                 log.info(f"  ✅ Ordre placé: {action} {symbol}")
                 self.orders_placed.append((symbol, result))
                 return True
@@ -512,7 +583,7 @@ class PipelineHourly:
             return False
 
     def build_report(self) -> str:
-        """Construit le rapport Word."""
+        """Construit le rapport texte et Word."""
         lines = [
             "PIPELINE HOURLY REPORT",
             f"Time: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC",
@@ -532,7 +603,75 @@ class PipelineHourly:
             for sym, err in self.errors:
                 lines.append(f"  • {sym} — {err}")
 
-        return "\n".join(lines)
+        report_text = "\n".join(lines)
+
+        # Generate Word document
+        if DOCX_AVAILABLE:
+            self._generate_word_report(report_text)
+
+        return report_text
+
+    def _generate_word_report(self, report_text: str) -> None:
+        """Génère le rapport Word et l'envoie via PsychoBot."""
+        try:
+            doc = Document()
+            doc.add_heading("PIPELINE HOURLY REPORT", 0)
+
+            timestamp = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
+            doc.add_paragraph(f"Report Time: {timestamp}")
+            doc.add_paragraph(f"Top-5 Analyzed: {len(self.top5_results)}")
+            doc.add_paragraph(f"Orders Placed: {len(self.orders_placed)}")
+            doc.add_paragraph("")
+
+            if self.orders_placed:
+                doc.add_heading("Successful Orders", level=1)
+                for sym, result in self.orders_placed:
+                    entry = result.get('entry', '?')
+                    action = result.get('action', '?')
+                    doc.add_paragraph(
+                        f"✅ {sym} — {action} @ {entry}",
+                        style='List Bullet'
+                    )
+
+            if self.errors:
+                doc.add_heading("Rejected Orders", level=1)
+                for sym, err in self.errors:
+                    doc.add_paragraph(f"❌ {sym} — {err}", style='List Bullet')
+
+            # Save to temp file
+            report_file = Path("logs") / f"pipeline_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.docx"
+            report_file.parent.mkdir(parents=True, exist_ok=True)
+            doc.save(str(report_file))
+
+            log.info(f"  📄 Word report saved: {report_file}")
+
+            # Send via PsychoBot /send-file endpoint
+            self._send_word_report_via_psychobot(report_file)
+
+        except Exception as e:
+            log.warning(f"  ⚠️  Word report generation failed: {e}")
+
+    def _send_word_report_via_psychobot(self, report_file: Path) -> None:
+        """Envoie le rapport Word via PsychoBot /send-file."""
+        try:
+            # Read file in binary
+            with open(report_file, 'rb') as f:
+                files = {'file': (report_file.name, f, 'application/vnd.openxmlformats-officedocument.wordprocessingml.document')}
+
+                response = requests.post(
+                    "http://127.0.0.1:8888/send-file",
+                    files=files,
+                    data={"to_number": "2290196911346"},
+                    timeout=10
+                )
+
+            if response.status_code in [200, 201]:
+                log.info(f"  📤 Word report sent via WhatsApp (HTTP {response.status_code})")
+            else:
+                log.warning(f"  ⚠️  PsychoBot /send-file HTTP {response.status_code}")
+
+        except Exception as e:
+            log.warning(f"  ⚠️  Failed to send Word report: {e}")
 
     async def run_hourly_cycle(self):
         """Exécute un cycle complet."""

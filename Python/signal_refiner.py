@@ -39,8 +39,19 @@ HIGH_QUALITY_SCORE = 90   # Au-dessus → lot au risque 2% au lieu de 1%
 # Compte cible pour recommended_lot (petit compte)
 ACCOUNT_TARGET_USD = 50.0
 
-# SL max en múltiples d'ATR — pour petit compte, on serre
-SL_MAX_ATR_MULT    = 0.8   # SL ≤ 0.8× ATR (≈ 12-20 pts sur XAUUSD M1)
+# SL/TP par catégorie de symbole — stratégie GoldSMC (OB+CHOCH + EMA multi-TF)
+# Or/Forex/Crypto : SL=2.0×ATR, RR=1.5 (paramètres optimisés GoldSMC v2)
+# Boom/Crash      : SL=2.0×ATR, RR=2.0 (indices synthétiques — SL élargi pour éviter fermetures prématurées)
+SL_ATR_MULT_GOLD   = 2.0   # XAUUSD H1 strategy GoldSMC : SL=2.0×ATR
+TP_RR_GOLD         = 1.5   # XAUUSD H1 strategy GoldSMC : TP=SL×1.5
+SL_MAX_ATR_MULT    = 2.0   # Boom/Crash synthétiques : 2×ATR
+
+# Stop minimum absolu pour indices synthétiques Boom/Crash (en points de prix)
+SYNTH_MIN_STOP_PTS = 20    # empêche SL à 2-3 pts qui se font toucher immédiatement
+
+# Symboles Or/Forex/Crypto — stratégie GoldSMC
+_GOLD_FOREX_PREFIXES = ("XAU", "EUR", "GBP", "USD", "JPY", "AUD", "NZD", "CAD", "CHF",
+                         "BTC", "ETH", "NAS", "US30", "US500", "DAX")
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -367,19 +378,27 @@ def _adjust_levels_from_tv(
             tp = round(entry - atr * 2.0, 5)
             adjustments.append(f"TP corrigé (était ≥ entry) → {tp:.5f}")
 
-    # Cap le SL à SL_MAX_ATR_MULT × ATR pour petit compte
+    # Cap le SL à SL_MAX_ATR_MULT × ATR
     if atr > 0:
         sl_dist = abs(entry - sl)
         max_sl_dist = atr * SL_MAX_ATR_MULT
         if sl_dist > max_sl_dist:
             sl = round(entry - max_sl_dist if is_buy else entry + max_sl_dist, 5)
-            adjustments.append(f"SL serré petit compte → {sl:.5f} ({max_sl_dist:.2f} pts max)")
+            adjustments.append(f"SL cappé à {SL_MAX_ATR_MULT}×ATR → {sl:.5f} ({max_sl_dist:.2f} pts max)")
             # Recaler TP pour garder RR ≥ 1.5
             sl_new_dist = abs(entry - sl)
             tp_min = round(entry + sl_new_dist * 1.5 if is_buy else entry - sl_new_dist * 1.5, 5)
             if (is_buy and tp < tp_min) or (not is_buy and tp > tp_min):
                 tp = tp_min
                 adjustments.append(f"TP ajusté RR 1.5 → {tp:.5f}")
+
+    # Floor minimum absolu pour indices synthétiques Boom/Crash
+    symbol_upper = tv_raw.get("symbol", "").upper()
+    if any(p in symbol_upper for p in ("BOOM", "CRASH")):
+        sl_dist = abs(entry - sl)
+        if sl_dist < SYNTH_MIN_STOP_PTS:
+            sl = round(entry - SYNTH_MIN_STOP_PTS if is_buy else entry + SYNTH_MIN_STOP_PTS, 5)
+            adjustments.append(f"SL floor Boom/Crash {SYNTH_MIN_STOP_PTS}pts → {sl:.5f}")
 
     return entry, sl, tp, adjustments
 
@@ -470,6 +489,14 @@ def refine_signal(
     atr   = _safe_float(ta_result.get("atr"))
     price = _safe_float(ta_result.get("current")) or entry
 
+    # Déterminer la stratégie SL/TP selon le type de symbole
+    # GoldSMC v2 : XAUUSD + Forex + Crypto → SL=2.0×ATR, RR=1.5
+    # Synthétiques Boom/Crash → SL=1.5×ATR, RR=2.0
+    _sym_up = symbol.upper()
+    _is_gold_forex = any(_sym_up.startswith(p) or p in _sym_up for p in _GOLD_FOREX_PREFIXES)
+    _sl_atr_mult = SL_ATR_MULT_GOLD if _is_gold_forex else SL_MAX_ATR_MULT
+    _tp_rr       = TP_RR_GOLD if _is_gold_forex else 2.0
+
     # ── 1. Score TV ───────────────────────────────────────────────────────────
     tv_score, tv_pos, tv_neg = _score_tv_data(tv_raw, direction)
 
@@ -498,6 +525,21 @@ def refine_signal(
     if entry <= 0:
         reject_reason = f"Entry manquante ou zéro (entry={entry}). Sources: TV={tv_raw.get('entry', 'N/A')}, TA={ta_result.get('entry', 'N/A')}"
 
+    # GATE IA STATUS : cohérence multi-TF (GOM statut IA) doit être >= 70%
+    # Condition ABSOLUE — même si toutes les autres conditions sont réunies
+    # smc non encore défini ici — on lit depuis ta_result / tv_raw directement
+    _smc_early = tv_raw.get("smc") or {}
+    _ia_status = _safe_float(
+        _smc_early.get("coherence_pct") or
+        ta_result.get("coherence_pct") or
+        tv_raw.get("coherence_pct")
+    )
+    if not reject_reason and _ia_status > 0 and _ia_status < 70.0:
+        reject_reason = (
+            f"IA status trop bas ({_ia_status:.0f}% < 70% requis) — "
+            f"cohérence multi-TF insuffisante pour valider le signal"
+        )
+
     # Reject si qualité insuffisante
     if not reject_reason and quality_score < MIN_QUALITY_SCORE:
         reject_reason = (
@@ -513,14 +555,16 @@ def refine_signal(
             entry, sl, tp, tv_raw, direction, atr
         )
     elif entry > 0 and atr > 0:
-        # Recalculer SL/TP si manquants
+        # Recalculer SL/TP avec la stratégie du symbole
+        # GoldSMC v2 : SL=2.0×ATR, RR=1.5 | Boom/Crash : SL=1.5×ATR, RR=2.0
         is_buy = direction.upper() == "BUY"
         if sl <= 0:
-            sl = round(entry - atr * 1.2, 5) if is_buy else round(entry + atr * 1.2, 5)
+            sl = round(entry - atr * _sl_atr_mult, 5) if is_buy else round(entry + atr * _sl_atr_mult, 5)
         if tp <= 0:
             sl_dist = abs(entry - sl)
-            tp = round(entry + sl_dist * 2.0, 5) if is_buy else round(entry - sl_dist * 2.0, 5)
-        adjustments.append(f"SL/TP calculés depuis ATR (pas de niveaux TV)")
+            tp = round(entry + sl_dist * _tp_rr, 5) if is_buy else round(entry - sl_dist * _tp_rr, 5)
+        strat_name = "GoldSMC (SL=2×ATR RR=1.5)" if _is_gold_forex else "Synthétique (SL=2×ATR RR=2.0)"
+        adjustments.append(f"SL/TP {strat_name}")
 
     # ── 6. Ratio R:R ──────────────────────────────────────────────────────────
     rr = 0.0

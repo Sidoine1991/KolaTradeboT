@@ -100,9 +100,9 @@ class GOMScoringEngine:
         if total == 0:
             return False, 0.0
 
-        # Ratio du côté dominant
+        # Ratio du côté dominant — 57% = 4/7 TF minimum (professionnel M1)
         ratio = max(bull_count, bear_count) / total
-        coherence_ok = ratio >= 0.40  # 40% threshold
+        coherence_ok = ratio >= 0.57
 
         return coherence_ok, round(ratio * 100, 1)
 
@@ -119,8 +119,8 @@ class GOMScoringEngine:
             return "WAIT", 0
 
         if score_buy > score_sell:
-            # Direction BUY
-            if gap >= 4.0 and coherence_ok:
+            # Direction BUY — PERFECT exige gap >= 5.0 (aligné gom_pine_calculator)
+            if gap >= 5.0 and coherence_ok:
                 return "PERFECT BUY", 3
             elif gap >= 2.5 and coherence_ok:
                 return "GOOD BUY", 2
@@ -130,7 +130,7 @@ class GOMScoringEngine:
                 return "WAIT", 0
         elif score_sell > score_buy:
             # Direction SELL
-            if gap >= 4.0 and coherence_ok:
+            if gap >= 5.0 and coherence_ok:
                 return "PERFECT SELL", -3
             elif gap >= 2.5 and coherence_ok:
                 return "GOOD SELL", -2
