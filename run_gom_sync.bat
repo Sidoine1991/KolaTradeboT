@@ -1,5 +1,16 @@
 @echo off
+REM Run GOM sync + WhatsApp report with fixed Python
+REM Usage: run_gom_sync.bat [--report] [--once]
+
+echo.
+echo [GOM SYNC] Starting GOM verdicts synchronization...
+echo.
+
 cd /d D:\Dev\TradBOT
-set PYTHONHOME=C:\Users\USER\AppData\Local\Programs\Python\Python311_9
-set PYTHONPATH=
-"C:\Users\USER\AppData\Local\Programs\Python\Python311_9\python.exe" Python/gom_sync_with_report.py --report
+
+C:\Python314_old\python.exe Python/gom_sync_with_report.py %* 2>&1
+
+echo.
+echo [GOM SYNC] Execution complete
+echo.
+pause
