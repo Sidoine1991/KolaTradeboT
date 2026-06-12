@@ -12,7 +12,14 @@ import requests
 import sys
 from pathlib import Path
 from datetime import datetime, timezone
-from typing import Dict, List, Any, Optional, Tuple  # Tuple is needed for return type in get_ia_status_v2
+from typing import Dict, List, Any, Optional, Tuple
+
+# Import spike anticipation
+try:
+    from spike_anticipation import SpikeAnticipator
+    SPIKE_ANTICIPATION_AVAILABLE = True
+except ImportError:
+    SPIKE_ANTICIPATION_AVAILABLE = False  # Tuple is needed for return type in get_ia_status_v2
 
 # Fix encoding for Windows
 if sys.stdout.encoding != 'utf-8':
@@ -199,6 +206,12 @@ class PipelineHourly:
         self.orders_placed = []
         self.errors = []
         self._gom_cache: Dict[str, Any] = {}
+
+        # Initialize spike anticipator if available
+        self.spike_anticipator = None
+        if SPIKE_ANTICIPATION_AVAILABLE:
+            self.spike_anticipator = SpikeAnticipator(anticipation_pips=5.0)
+            log.info("[INIT] Spike anticipation enabled")
 
     def load_gom_data(self) -> Dict[str, Dict[str, Any]]:
         """Charge les verdicts GOM depuis le serveur live (fallback fichier JSON)."""
@@ -441,12 +454,39 @@ class PipelineHourly:
                 self.errors.append((symbol, "CRASH_BUY_FORBIDDEN"))
                 return False
 
+            # Apply spike anticipation if available
+            entry_price = float(analysis.get("entry", 0))
+            stop_loss = float(analysis.get("sl", 0))
+            take_profit = float(analysis.get("tp", 0))
+            verdict_str = analysis.get("opinion", "GOOD")
+            rsi = float(analysis.get("rsi", 50))
+
+            if self.spike_anticipator:
+                anticipated = self.spike_anticipator.format_order_with_anticipation(
+                    symbol=symbol,
+                    action=action,
+                    base_entry=entry_price,
+                    base_sl=stop_loss,
+                    base_tp=take_profit,
+                    verdict_strength=verdict_str,
+                    rsi=rsi,
+                    volatility_regime=None,
+                )
+
+                if anticipated.get("anticipation_applied"):
+                    entry_price = anticipated["entry"]
+                    stop_loss = anticipated["sl"]
+                    take_profit = anticipated["tp"]
+                    log.info(
+                        f"  [SPIKE] Anticipation: {anticipated['anticipation_distance_pips']:.1f} pips ahead"
+                    )
+
             payload = {
                 "symbol": symbol,
                 "action": action,
-                "entry_price": analysis.get("entry", 0),
-                "stop_loss": analysis.get("sl", 0),
-                "take_profit": analysis.get("tp", 0),
+                "entry_price": entry_price,
+                "stop_loss": stop_loss,
+                "take_profit": take_profit,
                 "lot": analysis.get("lot", 0.01),
                 "source": "pipeline_hourly"
             }
