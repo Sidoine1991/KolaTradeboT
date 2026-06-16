@@ -1,0 +1,281 @@
+╔═══════════════════════════════════════════════════════════════════════════╗
+║                                                                           ║
+║   🚀 GOM SYNC 10-MINUTE AUTONOMOUS DEPLOYMENT                           ║
+║   Synchronisation + Rapport WhatsApp Toutes les 10 Minutes              ║
+║                                                                           ║
+╚═══════════════════════════════════════════════════════════════════════════╝
+
+
+📋 ÉTAPES DE DÉPLOIEMENT (5 minutes)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+ÉTAPE 1: Ouvrir PowerShell Admin
+────────────────────────────────
+  1. Appuyer sur WIN+X
+  2. Sélectionner "Windows PowerShell (Admin)"
+     OU "Terminal (Admin)"
+  3. Confirmer les droits admin
+
+
+ÉTAPE 2: Exécuter le déploiement
+───────────────────────────────
+  Copier/coller cette commande:
+
+    cd D:\Dev\TradBOT
+    powershell -NoProfile -ExecutionPolicy Bypass -File DEPLOY_10MIN_AUTO.ps1
+
+  Résultat attendu:
+    ✅ Task created: \TradBOT\GOM-Sync-10min
+    ✅ State: Ready
+    ✅ Test execution successful
+    ✅ AUTONOMOUS SYSTEM ACTIVE
+
+
+ÉTAPE 3: Vérifier l'installation
+─────────────────────────────────
+  Commande:
+    schtasks /query /tn "TradBOT\GOM-Sync-10min" /v
+
+  Chercher:
+    Scheduled Task State: Ready ✅
+
+
+ÉTAPE 4: Attendre & Monitorer
+──────────────────────────────
+  Attendre 10 minutes pour la première exécution
+
+  Voir les logs:
+    Get-Content D:\Dev\TradBOT\logs\gom_sync.log -Tail 20
+
+  Ou suivi en temps réel:
+    Get-Content D:\Dev\TradBOT\logs\gom_sync.log -Tail 20 -Wait
+
+
+ÉTAPE 5: Vérifier WhatsApp
+──────────────────────────
+  Vous recevrez un rapport comme:
+
+    🎯 **GOM VERDICTS REPORT** 📊
+    ==================================================
+    🟢 XAUUSD — BUY | Entry: 6031.70 | SL: 6025.81 | TP: 6038.78 | Coh: 85%
+      🟢M1 🟢M5 🟢M15 🟢H1 🟢H4 🟢D1
+    ==================================================
+    📅 2026-06-16 18:00:00 UTC
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+🎯 CE QUI S'EXÉCUTE AUTOMATIQUEMENT TOUTES LES 10 MINUTES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+1. CHARGEMENT GOM
+   └─ Charge verdicts du dashboard MT5 LIVE (priorité)
+     Fallback: AI server → Local JSON file
+
+2. APPLICATION DES GATES (Protection)
+   ├─ Cohérence ≥ 85%
+   ├─ Direction Boom/Crash correcte
+   ├─ RSI pas extrême
+   ├─ M15 pas opposé
+   ├─ Fenêtre de trading respectée
+   └─ Pas de position déjà ouverte
+
+3. SYNC TO AI SERVER
+   └─ POST /gom-verdict pour chaque verdict actif
+
+4. RAPPORT WHATSAPP
+   ├─ Format: 🟢 SYMBOL — ACTION | Entry/SL/TP
+   ├─ Cohérence %
+   ├─ Directions par timeframe (M1-D1)
+   └─ ML advisory (si disponible)
+
+5. ENVOI WHATSAPP
+   └─ Via AI server ou PsychoBot fallback
+
+6. LOGS
+   └─ Tout enregistré: timestamps, verdicts, errors, gates
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+⚡ COMMANDES UTILES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+Vérifier le statut de la tâche:
+  schtasks /query /tn "TradBOT\GOM-Sync-10min" /v
+
+Exécuter immédiatement (ne pas attendre 10 min):
+  schtasks /run /tn "TradBOT\GOM-Sync-10min"
+
+Voir les logs (dernières 20 lignes):
+  Get-Content logs\gom_sync.log -Tail 20
+
+Voir les logs en temps réel:
+  Get-Content logs\gom_sync.log -Tail 20 -Wait
+
+Arrêter la tâche:
+  schtasks /end /tn "TradBOT\GOM-Sync-10min"
+
+Reprendre la tâche:
+  schtasks /run /tn "TradBOT\GOM-Sync-10min"
+
+Désinstaller la tâche:
+  schtasks /delete /tn "TradBOT\GOM-Sync-10min" /f
+
+Tester manuellement:
+  cd D:\Dev\TradBOT
+  .\launch-gom-10min.ps1 run
+
+Vérifier l'installation:
+  .\launch-gom-10min.ps1 verify
+
+Auto-fixer les problèmes:
+  .\launch-gom-10min.ps1 fix
+
+Voir les logs via CLI:
+  .\launch-gom-10min.ps1 logs
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+❌ DÉPANNAGE RAPIDE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+PROBLÈME: "Access Denied" ou droits admin refusés
+  SOLUTION:
+    1. Right-click PowerShell → "Run as Administrator"
+    2. Puis exécuter DEPLOY_10MIN_AUTO.ps1
+
+PROBLÈME: "Python not found"
+  SOLUTION:
+    1. Vérifier: python --version
+    2. Si absent: Télécharger https://www.python.org/downloads/
+    3. Ajouter à PATH (Paramètres système → Env vars)
+
+PROBLÈME: Task ne s'exécute pas toutes les 10 min
+  SOLUTION:
+    1. Vérifier: schtasks /query /tn "TradBOT\GOM-Sync-10min" /v
+    2. Réinstaller: DEPLOY_10MIN_AUTO.ps1
+    3. Ou: .\launch-gom-10min.ps1 fix
+
+PROBLÈME: Aucun WhatsApp reçu
+  SOLUTION:
+    1. Vérifier AI server: curl http://127.0.0.1:8000/health
+    2. Tester manuellement: .\launch-gom-10min.ps1 run
+    3. Vérifier logs: Select-String "ERROR" logs\gom_sync.log
+
+PROBLÈME: Verdicts rejetés par gates
+  SOLUTION: C'est NORMAL!
+    Les gates protègent contre les faux signaux.
+    Chercher des verdicts avec:
+    - Cohérence >= 85%
+    - M15 aligné
+    - RSI pas extrême
+    - Pas de position déjà ouverte
+
+PROBLÈME: Logs inexistants ou vides
+  SOLUTION:
+    Exécuter manuellement:
+    cd D:\Dev\TradBOT && python Python\gom_sync_with_report.py --report
+    Les logs seront créés dans logs\gom_sync.log
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+📊 EXEMPLE DE LOG COMPLET (10 minutes)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+2026-06-16 18:00:00 - INFO - 🔄 [SYNC] Exécution unique GOM sync...
+
+2026-06-16 18:00:05 - WARNING - [GATE-M15] ETHUSD: M15=BEAR opposé à BUY — rejeté
+
+2026-06-16 18:00:10 - INFO - [OK] Charge 2 verdicts GOM depuis dashboard MT5 LIVE
+
+2026-06-16 18:00:12 - WARNING - [GATE-COH] XAUUSD: cohérence 67% < 85% — ordre ignoré
+
+2026-06-16 18:00:14 - INFO - 📤 BTCUSD → BUY (HTTP 200)
+
+2026-06-16 18:00:16 - INFO - 📋 Rapport construit (2 signaux actifs)
+
+2026-06-16 18:00:18 - INFO - ✅ Rapport WhatsApp envoyé via AI server
+
+2026-06-16 18:00:18 - INFO - ✅ Exécution unique terminée
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+📁 FICHIERS IMPORTANTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+DEPLOY_10MIN_AUTO.ps1
+  → Déploiement complet (admin)
+
+START_10MIN_SYNC.md
+  → Guide rapide (2 pages)
+
+GOM_SYNC_10MIN_GUIDE.md
+  → Guide complet technique
+
+DEPLOY_GOM_10MIN.md
+  → Quick reference card
+
+python/gom_sync_with_report.py
+  → Script principal (le cœur du système)
+
+scripts/run-gom-sync-10min.bat
+  → Entry point Task Scheduler
+
+launch-gom-10min.ps1
+  → CLI launcher avec commandes utiles
+
+logs/gom_sync.log
+  → Log file (auto-créé à la première exécution)
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+✅ CHECKLIST FINAL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+☑ PowerShell ouvert en admin
+☑ Exécuté DEPLOY_10MIN_AUTO.ps1
+☑ Tâche créée: TradBOT\GOM-Sync-10min
+☑ Task State: Ready ✅
+☑ Attendu 10 minutes
+☑ Vérifiés logs/gom_sync.log
+☑ Reçu rapport WhatsApp
+☑ Monitorer 2-3 cycles supplémentaires
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+🎯 STATUS: ✅ PRODUCTION READY
+   Le système est déployé et exécuté automatiquement
+   Toutes les 10 minutes, 24/7
+
+📊 LOGS: D:\Dev\TradBOT\logs\gom_sync.log
+   Timestamps, verdicts, entrées, erreurs, gates
+
+📱 RAPPORTS: WhatsApp
+   Format: 🟢 SYMBOL — ACTION | Entry/SL/TP | Coh | Timeframes
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+Créé: 2026-06-16
+Script: gom_sync_with_report.py v1.0
+Status: 🚀 Production Ready
