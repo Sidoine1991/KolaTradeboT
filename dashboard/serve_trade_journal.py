@@ -156,18 +156,22 @@ def compute_metrics(trades: list[dict]) -> dict:
     gross_loss = abs(sum(t["net_profit"] for t in losses))
     net_pnl = sum(t["net_profit"] for t in trades)
 
-    by_symbol: dict[str, dict] = defaultdict(lambda: {"trades": 0, "wins": 0, "pnl": 0.0})
+    by_symbol: dict[str, dict] = defaultdict(lambda: {"trades": 0, "wins": 0, "pnl": 0.0, "category": ""})
     by_hour: dict[int, dict] = defaultdict(lambda: {"trades": 0, "wins": 0, "pnl": 0.0})
     by_day: dict[str, dict] = defaultdict(lambda: {"trades": 0, "wins": 0, "pnl": 0.0})
     by_category: dict[str, dict] = defaultdict(lambda: {"trades": 0, "wins": 0, "pnl": 0.0})
     daily_pnl: dict[str, float] = defaultdict(float)
 
     for t in trades:
+        # Group by "CATEGORY:SYMBOL" for proper categorization
         sym = t["symbol"]
-        by_symbol[sym]["trades"] += 1
-        by_symbol[sym]["pnl"] += t["net_profit"]
+        cat = t["category"] or "UNKNOWN"
+        sym_key = f"{cat}:{sym}"
+        by_symbol[sym_key]["trades"] += 1
+        by_symbol[sym_key]["pnl"] += t["net_profit"]
+        by_symbol[sym_key]["category"] = cat
         if t["net_profit"] > 0:
-            by_symbol[sym]["wins"] += 1
+            by_symbol[sym_key]["wins"] += 1
 
         h = t["hour_utc"]
         by_hour[h]["trades"] += 1

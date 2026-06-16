@@ -218,7 +218,7 @@
   <section class="tables">
     <div class="panel-full">
       <h3>Top symboles</h3>
-      <table id="tblSymbols"><thead><tr><th>Symbole</th><th>Trades</th><th>Win%</th><th>PnL</th></tr></thead><tbody></tbody></table>
+      <table id="tblSymbols"><thead><tr><th>Catégorie</th><th>Symbole</th><th>Trades</th><th>Win%</th><th>PnL</th></tr></thead><tbody></tbody></table>
     </div>
     <div class="panel-full">
       <h3>Par catégorie</h3>
@@ -231,7 +231,7 @@
     <table id="tblTrades">
       <thead>
         <tr>
-          <th>Date</th><th>Heure</th><th>Symbole</th><th>Dir</th><th>Vol</th>
+          <th>Date</th><th>Heure</th><th>Catégorie</th><th>Symbole</th><th>Dir</th><th>Vol</th>
           <th>Durée</th><th>PnL</th><th>Résultat</th><th>IA conf</th>
         </tr>
       </thead>
@@ -364,12 +364,26 @@
       const symRows = Object.entries(m.by_symbol || {})
         .sort((a,b) => b[1].pnl - a[1].pnl)
         .slice(0, 15);
-      renderTable('tblSymbols', symRows, [
-        ([s]) => s,
-        ([,d]) => d.trades,
-        ([,d]) => d.win_rate + '%',
-        ([,d]) => `<span class="${d.pnl>=0?'win':'loss'}">${fmt(d.pnl)}$</span>`
-      ]);
+      const tbody = document.querySelector('#tblSymbols tbody');
+      if (symRows.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="5" class="empty">Aucune donnée</td></tr>';
+      } else {
+        tbody.innerHTML = symRows.map(([key, d]) => {
+          // Parse "CATEGORY:SYMBOL" key
+          const parts = key.split(':');
+          const cat = d.category || parts[0] || 'N/A';
+          const sym = parts[1] || key;
+          return `
+            <tr>
+              <td><strong>${cat}</strong></td>
+              <td>${sym}</td>
+              <td>${d.trades}</td>
+              <td>${d.win_rate}%</td>
+              <td class="${d.pnl>=0?'win':'loss'}">${fmt(d.pnl)}$</td>
+            </tr>
+          `;
+        }).join('');
+      }
 
       const catRows = Object.entries(m.by_category || {}).sort((a,b) => b[1].pnl - a[1].pnl);
       renderTable('tblCategory', catRows, [
@@ -392,6 +406,7 @@
         <tr>
           <td>${t.trade_date}</td>
           <td>${t.hour_utc}h</td>
+          <td><strong>${t.category || 'N/A'}</strong></td>
           <td>${t.symbol}</td>
           <td>${t.direction}</td>
           <td>${t.volume}</td>
