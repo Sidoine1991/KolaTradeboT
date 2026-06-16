@@ -1,0 +1,459 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>TradBOT — Journal de Trades</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <style>
+    :root {
+      --bg: #0f1419;
+      --panel: #1a2332;
+      --border: #2d3a4f;
+      --text: #e7ecf3;
+      --muted: #8b9cb3;
+      --green: #22c55e;
+      --red: #ef4444;
+      --blue: #3b82f6;
+      --amber: #f59e0b;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: "Segoe UI", system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      padding: 1rem 1.5rem 2rem;
+    }
+    header {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1rem;
+      margin-bottom: 1.25rem;
+      padding-bottom: 1rem;
+      border-bottom: 1px solid var(--border);
+    }
+    h1 { font-size: 1.4rem; font-weight: 600; }
+    h1 span { color: var(--blue); }
+    .status {
+      font-size: 0.8rem;
+      color: var(--muted);
+    }
+    .status.live { color: var(--green); }
+    .filters {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.6rem;
+      margin-bottom: 1.25rem;
+      padding: 1rem;
+      background: var(--panel);
+      border-radius: 10px;
+      border: 1px solid var(--border);
+    }
+    .filters label { font-size: 0.75rem; color: var(--muted); display: block; margin-bottom: 0.2rem; }
+    .filters select, .filters input {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 0.45rem 0.6rem;
+      border-radius: 6px;
+      font-size: 0.85rem;
+      min-width: 120px;
+    }
+    .filters button {
+      align-self: flex-end;
+      background: var(--blue);
+      color: white;
+      border: none;
+      padding: 0.5rem 1rem;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 0.85rem;
+    }
+    .filters button.secondary { background: var(--border); }
+    .kpi-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+      gap: 0.75rem;
+      margin-bottom: 1.25rem;
+    }
+    .kpi {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 0.85rem 1rem;
+    }
+    .kpi .label { font-size: 0.72rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+    .kpi .value { font-size: 1.35rem; font-weight: 700; margin-top: 0.25rem; }
+    .kpi .value.pos { color: var(--green); }
+    .kpi .value.neg { color: var(--red); }
+    .charts {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1rem;
+      margin-bottom: 1.25rem;
+    }
+    @media (max-width: 900px) { .charts { grid-template-columns: 1fr; } }
+    .chart-box {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 1rem;
+    }
+    .chart-box h3 { font-size: 0.85rem; color: var(--muted); margin-bottom: 0.75rem; }
+    .chart-box canvas { max-height: 220px; }
+    .tables {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1rem;
+      margin-bottom: 1.25rem;
+    }
+    @media (max-width: 900px) { .tables { grid-template-columns: 1fr; } }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.82rem;
+    }
+    th, td {
+      padding: 0.45rem 0.6rem;
+      text-align: left;
+      border-bottom: 1px solid var(--border);
+    }
+    th { color: var(--muted); font-weight: 500; }
+    tr:hover td { background: rgba(59,130,246,0.08); }
+    .win { color: var(--green); }
+    .loss { color: var(--red); }
+    .panel-full {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 1rem;
+      overflow-x: auto;
+    }
+    .panel-full h3 { font-size: 0.85rem; color: var(--muted); margin-bottom: 0.75rem; }
+    .empty { text-align: center; padding: 3rem; color: var(--muted); }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>TradBOT <span>Journal de Trades</span></h1>
+      <p class="status" id="status">Chargement…</p>
+    </div>
+    <div class="status" id="csvPath"></div>
+  </header>
+
+  <section class="filters">
+    <div>
+      <label>Symbole</label>
+      <select id="fSymbol"><option value="">Tous</option></select>
+    </div>
+    <div>
+      <label>Catégorie</label>
+      <select id="fCategory">
+        <option value="">Toutes</option>
+        <option value="BOOM_CRASH">Boom/Crash</option>
+        <option value="VOLATILITY">Volatility</option>
+        <option value="FOREX">Forex</option>
+        <option value="METAL">Or/Métaux</option>
+        <option value="CRYPTO">Crypto</option>
+        <option value="COMMODITY">Commodity</option>
+      </select>
+    </div>
+    <div>
+      <label>Direction</label>
+      <select id="fDirection">
+        <option value="">Toutes</option>
+        <option value="BUY">BUY</option>
+        <option value="SELL">SELL</option>
+      </select>
+    </div>
+    <div>
+      <label>Résultat</label>
+      <select id="fResult">
+        <option value="">Tous</option>
+        <option value="WIN">Gains</option>
+        <option value="LOSS">Pertes</option>
+      </select>
+    </div>
+    <div>
+      <label>Heure UTC</label>
+      <select id="fHour"><option value="">Toutes</option></select>
+    </div>
+    <div>
+      <label>Date début</label>
+      <input type="date" id="fDateFrom">
+    </div>
+    <div>
+      <label>Date fin</label>
+      <input type="date" id="fDateTo">
+    </div>
+    <button type="button" id="btnApply">Appliquer</button>
+    <button type="button" class="secondary" id="btnReset">Reset</button>
+  </section>
+
+  <section class="kpi-grid" id="kpis"></section>
+
+  <section class="charts">
+    <div class="chart-box">
+      <h3>Courbe d'équité (PnL cumulé)</h3>
+      <canvas id="chartEquity"></canvas>
+    </div>
+    <div class="chart-box">
+      <h3>PnL par jour</h3>
+      <canvas id="chartDaily"></canvas>
+    </div>
+    <div class="chart-box">
+      <h3>Performance par symbole</h3>
+      <canvas id="chartSymbol"></canvas>
+    </div>
+    <div class="chart-box">
+      <h3>Win rate par heure UTC</h3>
+      <canvas id="chartHour"></canvas>
+    </div>
+  </section>
+
+  <section class="tables">
+    <div class="panel-full">
+      <h3>Top symboles</h3>
+      <table id="tblSymbols"><thead><tr><th>Symbole</th><th>Trades</th><th>Win%</th><th>PnL</th></tr></thead><tbody></tbody></table>
+    </div>
+    <div class="panel-full">
+      <h3>Par catégorie</h3>
+      <table id="tblCategory"><thead><tr><th>Catégorie</th><th>Trades</th><th>Win%</th><th>PnL</th></tr></thead><tbody></tbody></table>
+    </div>
+  </section>
+
+  <section class="panel-full">
+    <h3>Historique des trades (derniers 100)</h3>
+    <table id="tblTrades">
+      <thead>
+        <tr>
+          <th>Date</th><th>Heure</th><th>Symbole</th><th>Dir</th><th>Vol</th>
+          <th>Durée</th><th>PnL</th><th>Résultat</th><th>IA conf</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <script>
+    const API = window.location.origin;
+    let charts = {};
+
+    function qs() {
+      const p = new URLSearchParams();
+      const s = document.getElementById('fSymbol').value;
+      const c = document.getElementById('fCategory').value;
+      const d = document.getElementById('fDirection').value;
+      const r = document.getElementById('fResult').value;
+      const h = document.getElementById('fHour').value;
+      const df = document.getElementById('fDateFrom').value;
+      const dt = document.getElementById('fDateTo').value;
+      if (s) p.set('symbol', s);
+      if (c) p.set('category', c);
+      if (d) p.set('direction', d);
+      if (r) p.set('result', r);
+      if (h !== '') p.set('hour', h);
+      if (df) p.set('date_from', df);
+      if (dt) p.set('date_to', dt);
+      return p.toString();
+    }
+
+    async function fetchJSON(path) {
+      const q = qs();
+      const url = q ? `${API}${path}?${q}` : `${API}${path}`;
+      const res = await fetch(url);
+      return res.json();
+    }
+
+    function fmt(n, dec = 2) {
+      const v = Number(n);
+      return (v >= 0 ? '+' : '') + v.toFixed(dec);
+    }
+
+    function renderKPIs(m) {
+      const items = [
+        { label: 'Trades', value: m.total_trades, cls: '' },
+        { label: 'Win rate', value: m.win_rate + '%', cls: m.win_rate >= 50 ? 'pos' : 'neg' },
+        { label: 'PnL net', value: fmt(m.net_pnl) + '$', cls: m.net_pnl >= 0 ? 'pos' : 'neg' },
+        { label: 'Gains moy.', value: fmt(m.avg_win) + '$', cls: 'pos' },
+        { label: 'Pertes moy.', value: fmt(m.avg_loss) + '$', cls: 'neg' },
+        { label: 'Profit factor', value: m.profit_factor, cls: m.profit_factor >= 1 ? 'pos' : 'neg' },
+        { label: 'Meilleur', value: fmt(m.best_trade) + '$', cls: 'pos' },
+        { label: 'Pire', value: fmt(m.worst_trade) + '$', cls: 'neg' },
+        { label: 'Durée moy.', value: m.avg_duration_min + ' min', cls: '' },
+        { label: 'W / L / BE', value: `${m.wins} / ${m.losses} / ${m.breakeven}`, cls: '' },
+      ];
+      document.getElementById('kpis').innerHTML = items.map(i =>
+        `<div class="kpi"><div class="label">${i.label}</div><div class="value ${i.cls}">${i.value}</div></div>`
+      ).join('');
+    }
+
+    function destroyChart(id) {
+      if (charts[id]) { charts[id].destroy(); delete charts[id]; }
+    }
+
+    function renderCharts(m) {
+      const opts = {
+        responsive: true,
+        plugins: { legend: { labels: { color: '#8b9cb3' } } },
+        scales: {
+          x: { ticks: { color: '#8b9cb3' }, grid: { color: '#2d3a4f' } },
+          y: { ticks: { color: '#8b9cb3' }, grid: { color: '#2d3a4f' } }
+        }
+      };
+
+      destroyChart('equity');
+      const eq = m.equity_curve || [];
+      charts.equity = new Chart(document.getElementById('chartEquity'), {
+        type: 'line',
+        data: {
+          labels: eq.map(e => e.time.split(' ')[0] || e.time),
+          datasets: [{ label: 'PnL cumulé $', data: eq.map(e => e.equity), borderColor: '#3b82f6', tension: 0.2, fill: false }]
+        },
+        options: opts
+      });
+
+      destroyChart('daily');
+      const days = Object.keys(m.daily_pnl || {});
+      const dayVals = days.map(d => m.daily_pnl[d]);
+      charts.daily = new Chart(document.getElementById('chartDaily'), {
+        type: 'bar',
+        data: {
+          labels: days,
+          datasets: [{ label: 'PnL jour $', data: dayVals, backgroundColor: dayVals.map(v => v >= 0 ? '#22c55e88' : '#ef444488') }]
+        },
+        options: opts
+      });
+
+      destroyChart('symbol');
+      const symData = m.by_symbol || {};
+      const syms = Object.keys(symData).sort((a,b) => symData[b].pnl - symData[a].pnl);
+      charts.symbol = new Chart(document.getElementById('chartSymbol'), {
+        type: 'bar',
+        data: {
+          labels: syms,
+          datasets: [{ label: 'PnL $', data: syms.map(s => symData[s].pnl), backgroundColor: '#3b82f688' }]
+        },
+        options: { ...opts, indexAxis: syms.length > 8 ? 'y' : 'x' }
+      });
+
+      destroyChart('hour');
+      const hourData = m.by_hour || {};
+      const hours = Object.keys(hourData).sort((a,b) => +a - +b);
+      charts.hour = new Chart(document.getElementById('chartHour'), {
+        type: 'bar',
+        data: {
+          labels: hours.map(h => h + 'h'),
+          datasets: [{ label: 'Win rate %', data: hours.map(h => hourData[h].win_rate), backgroundColor: '#f59e0b88' }]
+        },
+        options: opts
+      });
+    }
+
+    function renderTable(id, rows, cols) {
+      const tbody = document.querySelector(`#${id} tbody`);
+      tbody.innerHTML = rows.map(r => `<tr>${cols.map(c => `<td>${c(r)}</td>`).join('')}</tr>`).join('') ||
+        '<tr><td colspan="4" class="empty">Aucune donnée</td></tr>';
+    }
+
+    function renderTables(m) {
+      const symRows = Object.entries(m.by_symbol || {})
+        .sort((a,b) => b[1].pnl - a[1].pnl)
+        .slice(0, 15);
+      renderTable('tblSymbols', symRows, [
+        ([s]) => s,
+        ([,d]) => d.trades,
+        ([,d]) => d.win_rate + '%',
+        ([,d]) => `<span class="${d.pnl>=0?'win':'loss'}">${fmt(d.pnl)}$</span>`
+      ]);
+
+      const catRows = Object.entries(m.by_category || {}).sort((a,b) => b[1].pnl - a[1].pnl);
+      renderTable('tblCategory', catRows, [
+        ([c]) => c,
+        ([,d]) => d.trades,
+        ([,d]) => d.win_rate + '%',
+        ([,d]) => `<span class="${d.pnl>=0?'win':'loss'}">${fmt(d.pnl)}$</span>`
+      ]);
+    }
+
+    async function renderTrades() {
+      const data = await fetchJSON('/api/trades');
+      const trades = (data.trades || []).slice(-100).reverse();
+      const tbody = document.querySelector('#tblTrades tbody');
+      if (!trades.length) {
+        tbody.innerHTML = '<tr><td colspan="9" class="empty">En attente de trades — lancez SMC_Universal sur MT5</td></tr>';
+        return;
+      }
+      tbody.innerHTML = trades.map(t => `
+        <tr>
+          <td>${t.trade_date}</td>
+          <td>${t.hour_utc}h</td>
+          <td>${t.symbol}</td>
+          <td>${t.direction}</td>
+          <td>${t.volume}</td>
+          <td>${t.duration_min}m</td>
+          <td class="${t.net_profit>=0?'win':'loss'}">${fmt(t.net_profit)}$</td>
+          <td class="${t.result==='WIN'?'win':'loss'}">${t.result}</td>
+          <td>${(t.ai_confidence*100).toFixed(0)}%</td>
+        </tr>
+      `).join('');
+    }
+
+    async function populateSymbols() {
+      const data = await fetchJSON('/api/trades');
+      const syms = [...new Set((data.trades||[]).map(t => t.symbol))].sort();
+      const sel = document.getElementById('fSymbol');
+      const cur = sel.value;
+      sel.innerHTML = '<option value="">Tous</option>' + syms.map(s => `<option value="${s}">${s}</option>`).join('');
+      sel.value = cur;
+    }
+
+    async function refresh() {
+      try {
+        const [status, metrics] = await Promise.all([
+          fetch(`${API}/api/status`).then(r => r.json()),
+          fetchJSON('/api/metrics')
+        ]);
+        const st = document.getElementById('status');
+        st.textContent = `Live — ${status.trade_count} trades — MAJ ${status.last_modified || 'n/a'}`;
+        st.className = 'status live';
+        document.getElementById('csvPath').textContent = status.csv_path || '';
+
+        if (metrics.total_trades === 0) {
+          document.getElementById('kpis').innerHTML = '<div class="empty" style="grid-column:1/-1">Aucun trade journalisé. Activez UseTradeJournal dans SMC_Universal.</div>';
+        } else {
+          renderKPIs(metrics);
+          renderCharts(metrics);
+          renderTables(metrics);
+        }
+        await renderTrades();
+      } catch (e) {
+        document.getElementById('status').textContent = 'Erreur connexion API — lancez serve_trade_journal.py';
+        document.getElementById('status').className = 'status';
+      }
+    }
+
+    // Heures 0-23
+    const fHour = document.getElementById('fHour');
+    for (let h = 0; h < 24; h++) {
+      fHour.innerHTML += `<option value="${h}">${h}h UTC</option>`;
+    }
+
+    document.getElementById('btnApply').addEventListener('click', refresh);
+    document.getElementById('btnReset').addEventListener('click', () => {
+      ['fSymbol','fCategory','fDirection','fResult','fHour','fDateFrom','fDateTo'].forEach(id => {
+        document.getElementById(id).value = '';
+      });
+      refresh();
+    });
+
+    populateSymbols();
+    refresh();
+    setInterval(refresh, 3000);
+  </script>
+</body>
+</html>

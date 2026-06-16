@@ -981,6 +981,399 @@ def is_boom_crash_symbol(symbol: str) -> bool:
     return False
 
 
+# ── Boom/Crash heures UTC (bc_heure) ─────────────────────────────────────
+_BC_VOL_CACHE: Dict[str, Any] = {}
+_BC_VOL_CACHE_PATH = Path(__file__).resolve().parent / "data" / "bc_volatility.json"
+
+
+def _load_bc_volatility_cache(force: bool = False) -> Dict[str, Any]:
+    global _BC_VOL_CACHE
+    if _BC_VOL_CACHE and not force:
+        return _BC_VOL_CACHE
+    try:
+        from bc_heure.bc_volatility_service import get_merged_cache
+
+        _BC_VOL_CACHE = get_merged_cache(_BC_VOL_CACHE_PATH)
+        return _BC_VOL_CACHE
+    except Exception as exc:
+        logger.warning(f"[BC-HEURE] load cache failed: {exc}")
+    try:
+        if _BC_VOL_CACHE_PATH.is_file():
+            _BC_VOL_CACHE = json.loads(_BC_VOL_CACHE_PATH.read_text(encoding="utf-8"))
+            return _BC_VOL_CACHE
+    except Exception:
+        pass
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from bc_heure.bc_volatility_service import export_json, run_analysis
+
+        payload = run_analysis()
+        export_json(_BC_VOL_CACHE_PATH, payload)
+        _BC_VOL_CACHE = payload
+        logger.info(f"[BC-HEURE] generated {_BC_VOL_CACHE_PATH}")
+    except Exception as exc:
+        logger.warning(f"[BC-HEURE] generate failed: {exc}")
+        _BC_VOL_CACHE = {}
+    return _BC_VOL_CACHE
+
+
+def _invalidate_bc_volatility_cache() -> None:
+    global _BC_VOL_CACHE
+    _BC_VOL_CACHE = {}
+
+
+def _check_bc_hour_gate(symbol: str, min_conf: float = 60.0) -> Tuple[bool, Optional[str], Dict[str, Any]]:
+    """Gate Boom/Crash — plage horaire UTC propice (bc_heure + learnings)."""
+    if not is_boom_crash_symbol(str(symbol)):
+        return True, None, {}
+    try:
+        from bc_heure.bc_volatility_service import get_bc_hour_status
+
+        cache = _load_bc_volatility_cache()
+        status = get_bc_hour_status(symbol, cache=cache)
+        if not status.get("bc_applicable"):
+            return True, None, status
+        conf = float(status.get("bc_confidence", 0) or 0)
+        if not status.get("bc_tradeable") or conf < min_conf:
+            msg = (
+                f"BC heure UTC {status.get('bc_hour_utc')} — confiance {conf:.0f}% "
+                f"< {min_conf:.0f}% (fenetre {status.get('bc_window_start')}-"
+                f"{status.get('bc_window_end')})"
+            )
+            return False, msg, status
+        return True, None, status
+    except Exception as exc:
+        logger.debug(f"[BC-HEURE] gate check failed for {symbol}: {exc}")
+        return True, None, {}
+
+
+def _bc_learn_from_deals(rows: List[Dict[str, Any]]) -> int:
+    """Met à jour bc_spike_learnings.json depuis deals MT5 uploadés."""
+    if not rows:
+        return 0
+    try:
+        from bc_heure.bc_volatility_service import load_learnings, record_trade_outcome
+
+        learnings = load_learnings()
+        n = 0
+        for row in rows:
+            sym = row.get("symbol") or ""
+            if not is_boom_crash_symbol(str(sym)):
+                continue
+            if record_trade_outcome(
+                sym,
+                float(row.get("profit") or 0.0),
+                is_win=row.get("is_win"),
+                open_time=row.get("open_time"),
+                close_time=row.get("close_time"),
+                learnings=learnings,
+            ):
+                n += 1
+        if n:
+            _invalidate_bc_volatility_cache()
+        return n
+    except Exception as exc:
+        logger.warning(f"[BC-HEURE] learn from deals failed: {exc}")
+        return 0
+
+
+def _dir_str_to_int(s: str) -> int:
+    """Convertit tf_*_dir string (BULL/BEAR/NEUT/BUY/SELL) en int +1/0/-1."""
+    s = str(s or "").upper()
+    if s in ("BULL", "BUY", "LONG", "1"):
+        return 1
+    if s in ("BEAR", "SELL", "SHORT", "-1"):
+        return -1
+    return 0
+
+
+def _enrich_ia_status(out: dict) -> None:
+    """
+    Calcule ia_status_action (BUY/SELL/HOLD) et ia_status_confidence_pct depuis
+    les champs tf_*_dir du payload GOM dashboard, en utilisant _ia_status_decide
+    (même logique que compute_ia_status_v2 côté /decide).
+    """
+    try:
+        tf_dirs = {
+            "D1":  _dir_str_to_int(out.get("tf_d1_dir", "")),
+            "H4":  _dir_str_to_int(out.get("tf_h4_dir", "")),
+            "H1":  _dir_str_to_int(out.get("tf_h1_dir", "")),
+            "M5":  _dir_str_to_int(out.get("tf_m5_dir", "")),
+            "M15": _dir_str_to_int(out.get("tf_m15_dir", "")),
+            "M1":  _dir_str_to_int(out.get("tf_m1_dir", "")),
+            "M30": _dir_str_to_int(out.get("tf_m30_dir", "")),
+        }
+        result = _ia_status_decide(tf_dirs, _IA_STATUS_TF_WEIGHTS)
+        out["ia_status_action"] = result["action"].upper()
+        out["ia_status_confidence_pct"] = result["confidence_percent"]
+    except Exception as exc:
+        logger.debug(f"[IA-STATUS-ENRICH] {exc}")
+        out["ia_status_action"] = "HOLD"
+        out["ia_status_confidence_pct"] = 0.0
+
+
+def _enrich_bc_volatility(out: dict, symbol: str) -> None:
+    """Ajoute bc_* au payload GOM pour l'EA (filtre horaire Boom/Crash)."""
+    if not is_boom_crash_symbol(str(symbol)):
+        out["bc_applicable"] = False
+        return
+    try:
+        from bc_heure.bc_volatility_service import get_bc_hour_status
+
+        cache = _load_bc_volatility_cache()
+        status = get_bc_hour_status(symbol, cache=cache)
+        out.update(status)
+    except Exception as exc:
+        logger.debug(f"[BC-HEURE] enrich failed for {symbol}: {exc}")
+        out["bc_applicable"] = True
+        out["bc_tradeable"] = True
+
+
+def _enrich_correction_cycle(out: dict, symbol: str) -> None:
+    """Ajoute correction_exhaustion_pct au payload GOM — gate timing d'entrée.
+    Désactivé sur Boom/Crash (pas de corrections classiques, seulement des spikes)."""
+    if is_boom_crash_symbol(str(symbol)):
+        out["correction_exhaustion_pct"] = 100.0
+        out["correction_phase"] = "trending"
+        out["correction_entry_safe"] = True
+        return
+    try:
+        from correction_cycle_detector import compute_correction_exhaustion
+
+        sym = _resolve_symbol(str(symbol))
+        sym_cache = _mt5_candles_cache.get(sym) or {}
+
+        df_m5 = sym_cache.get("M5")
+        df_m15 = sym_cache.get("M15")
+        if df_m5 is None or len(df_m5) < 30:
+            df_m5 = None
+        if df_m15 is None or len(df_m15) < 30:
+            df_m15 = None
+
+        rsi_h4 = float(out.get("tf_h4_rsi", 50))
+        rsi_h1 = float(out.get("tf_h1_rsi", 50))
+        rsi_d1 = float(out.get("tf_d1_rsi", 50))
+
+        direction_hint = _dir_str_to_int(out.get("ia_status_action", ""))
+
+        result = compute_correction_exhaustion(
+            df_m5=df_m5,
+            df_m15=df_m15,
+            rsi_h4=rsi_h4,
+            rsi_h1=rsi_h1,
+            rsi_d1=rsi_d1,
+            direction_hint=direction_hint,
+        )
+
+        out["correction_exhaustion_pct"] = result["correction_exhaustion_pct"]
+        out["correction_phase"] = result["phase"]
+        out["correction_entry_safe"] = result["entry_safe"]
+        out["correction_rsi_m5_slope"] = result["rsi_m5_slope"]
+        out["correction_divergence"] = result["divergence_score"]
+        out["correction_volume"] = result["volume_score"]
+    except Exception as exc:
+        logger.debug(f"[CORRECTION-CYCLE] {exc}")
+        out["correction_exhaustion_pct"] = 50.0
+        out["correction_phase"] = "unknown"
+        out["correction_entry_safe"] = True
+
+
+def _enrich_cognition_forecast(out: dict, symbol: str, chart_tf: str = "M1") -> None:
+    """Direction, force, 200 bougies fantômes pour l'EA."""
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent / "python"))
+        from ml.cognition_forecast import forecast_200, to_mt5_payload
+
+        sym = _resolve_symbol(str(symbol))
+        tf = (chart_tf or "M1").upper()
+        df = None
+        sym_cache = _mt5_candles_cache.get(sym) or {}
+        if tf in sym_cache and sym_cache[tf] is not None and len(sym_cache[tf]) >= 50:
+            df = sym_cache[tf]
+        if df is None or len(df) < 50:
+            from mt5_candles_fetcher import fetch_mt5_candles
+
+            df = fetch_mt5_candles(sym, tf, 250)
+        if df is None or len(df) < 10:
+            return
+
+        gom = {
+            "verdict_num": out.get("verdict_num", 0),
+            "coherence_pct": out.get("coherence_pct", 0),
+        }
+        bc_conf = float(out.get("bc_confidence", 0) or 0)
+        fc = forecast_200(df, sym, tf, horizon=200, gom=gom, bc_confidence=bc_conf)
+        payload = to_mt5_payload(fc)
+        for key in (
+            "cog_direction", "cog_strength", "cog_confidence", "cog_regime",
+            "cog_atr", "horizon", "pred_path_mid", "pred_path_up", "pred_path_dn",
+            "cog_fc_open", "cog_fc_high", "cog_fc_low", "cog_fc_close",
+            "cog_fc_q10", "cog_fc_q90", "cog_patterns",
+        ):
+            if key in payload:
+                out[key] = payload[key]
+    except Exception as exc:
+        logger.debug(f"[COGNITION] enrich failed for {symbol}: {exc}")
+
+
+def _cognition_learn_from_deals(rows: List[Dict[str, Any]]) -> int:
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent / "python"))
+        from ml.pattern_memory import update_pattern_memory_from_deal
+
+        n = 0
+        for row in rows:
+            sym = row.get("symbol")
+            if not sym:
+                continue
+            profit = float(row.get("profit") or 0)
+            direction = str(row.get("direction") or row.get("decision") or "UNKNOWN")
+            close_time = row.get("close_time")
+            if update_pattern_memory_from_deal(
+                str(sym),
+                profit,
+                close_time=close_time,
+                direction=direction,
+            ):
+                n += 1
+        return n
+    except Exception as exc:
+        logger.warning(f"[COGNITION] learn from deals failed: {exc}")
+        return 0
+
+
+def _compute_entry_probability(out: dict, direction: str = "") -> float:
+    """Score composite 0-100 — même logique que SMC_ProbabilityGate.mqh."""
+    score = 0.0
+    coherence = float(out.get("coherence_pct", 0) or 0)
+    if coherence > 0:
+        score += min(100.0, coherence) * 0.30
+
+    vn = int(out.get("verdict_num", 0) or 0)
+    vn_abs = abs(vn)
+    if vn_abs >= 3:
+        score += 25.0
+    elif vn_abs >= 2:
+        score += 18.0
+    elif vn_abs >= 1:
+        score += 8.0
+
+    strength = float(out.get("cog_strength", 0) or 0)
+    confidence = float(out.get("cog_confidence", 0) or 0)
+    cog_dir = str(out.get("cog_direction", "NEUTRAL")).upper()
+    score += strength * confidence * 100.0 * 0.25
+
+    d = (direction or "").upper()
+    if d in ("BUY", "LONG") and cog_dir == "BUY":
+        score += 3.0
+    elif d in ("SELL", "SHORT") and cog_dir == "SELL":
+        score += 3.0
+    elif cog_dir != "NEUTRAL" and d:
+        if (d in ("BUY", "LONG") and cog_dir == "SELL") or (d in ("SELL", "SHORT") and cog_dir == "BUY"):
+            score -= 12.0
+
+    if out.get("bc_applicable"):
+        bc_conf = float(out.get("bc_confidence", 0) or 0)
+        score += (bc_conf if out.get("bc_tradeable") else 0.0) * 0.15
+    else:
+        score += 10.0
+
+    global_dir = str(out.get("tf_global_dir", "") or "").upper()
+    global_str = int(out.get("tf_global_strength", 0) or 0)
+    if d in ("BUY", "LONG") and global_dir == "BULL":
+        score += 5.0
+    elif d in ("SELL", "SHORT") and global_dir == "BEAR":
+        score += 5.0
+    elif d and global_str >= 2:
+        if (d in ("BUY", "LONG") and global_dir == "BEAR") or (d in ("SELL", "SHORT") and global_dir == "BULL"):
+            score -= 8.0
+
+    return float(max(0.0, min(100.0, score)))
+
+
+def _check_probability_gate(symbol: str, direction: str, chart_tf: str = "M1") -> Tuple[bool, str]:
+    """Bloque entrées hazard — GOOD/PERFECT + cognition + BC + score composite."""
+    try:
+        sym = _resolve_symbol(str(symbol))
+        out: Dict[str, Any] = {"symbol": sym}
+        store = _GOM_VERDICT_STORE.get(sym.upper(), {})
+        if store:
+            out.update(store)
+        _enrich_bc_volatility(out, sym)
+        _enrich_cognition_forecast(out, sym, chart_tf)
+
+        vn = int(out.get("verdict_num", 0) or 0)
+        if vn == 0:
+            return False, "GOM WAIT — pas d'entrée hazard"
+        if abs(vn) < MIN_GOM_VERDICT_NUM_ABS:
+            return False, f"Verdict vn={vn} — GOOD/PERFECT requis (|vn|>={MIN_GOM_VERDICT_NUM_ABS})"
+
+        d = (direction or "").upper()
+        if d in ("BUY", "LONG") and vn < MIN_GOM_VERDICT_NUM_ABS:
+            return False, f"GOM vn={vn} insuffisant pour BUY"
+        if d in ("SELL", "SHORT") and vn > -MIN_GOM_VERDICT_NUM_ABS:
+            return False, f"GOM vn={vn} insuffisant pour SELL"
+
+        if out.get("bc_applicable"):
+            bc_conf = float(out.get("bc_confidence", 0) or 0)
+            if not out.get("bc_tradeable") or bc_conf < HIGH_PROB_BC_MIN_CONF:
+                return False, f"BC heure conf {bc_conf:.0f}% < {HIGH_PROB_BC_MIN_CONF:.0f}%"
+
+        strength = float(out.get("cog_strength", 0) or 0)
+        conf = float(out.get("cog_confidence", 0) or 0)
+        cog_dir = str(out.get("cog_direction", "NEUTRAL")).upper()
+        if strength < MIN_COG_STRENGTH or conf < MIN_COG_CONFIDENCE:
+            return False, f"Cognition faible str={strength:.2f} conf={conf:.2f}"
+        if d in ("BUY", "LONG") and cog_dir == "SELL":
+            return False, "Cognition oppose BUY"
+        if d in ("SELL", "SHORT") and cog_dir == "BUY":
+            return False, "Cognition oppose SELL"
+
+        prob = _compute_entry_probability(out, direction)
+        out["entry_probability"] = round(prob, 1)
+        if prob < MIN_ENTRY_PROBABILITY_PCT:
+            return False, f"Probabilité {prob:.1f}% < {MIN_ENTRY_PROBABILITY_PCT:.0f}% (setup hazard)"
+        return True, ""
+    except Exception as exc:
+        logger.debug(f"[PROB-GATE] skip fail-open: {exc}")
+        return True, ""
+
+
+def _check_cognition_gate(symbol: str, direction: str, chart_tf: str = "M1") -> Tuple[bool, str]:
+    """Bloque si forecast cognition faible ou opposé à la direction."""
+    try:
+        sym = _resolve_symbol(str(symbol))
+        out: Dict[str, Any] = {"symbol": sym}
+        store = _GOM_VERDICT_STORE.get(sym.upper(), {})
+        if store:
+            out.update(store)
+        _enrich_bc_volatility(out, sym)
+        _enrich_cognition_forecast(out, sym, chart_tf)
+
+        strength = float(out.get("cog_strength", 0) or 0)
+        confidence = float(out.get("cog_confidence", 0) or 0)
+        cog_dir = str(out.get("cog_direction", "NEUTRAL")).upper()
+        min_str = MIN_COG_STRENGTH
+        min_conf = MIN_COG_CONFIDENCE
+
+        if strength < min_str or confidence < min_conf:
+            return False, (
+                f"Cognition faible (str={strength:.2f} conf={confidence:.2f}, "
+                f"min {min_str}/{min_conf})"
+            )
+        if cog_dir == "NEUTRAL":
+            return False, "Cognition direction NEUTRAL"
+        d = (direction or "").upper()
+        if d in ("BUY", "LONG") and cog_dir == "SELL":
+            return False, f"Cognition {cog_dir} oppose BUY"
+        if d in ("SELL", "SHORT") and cog_dir == "BUY":
+            return False, f"Cognition {cog_dir} oppose SELL"
+        return True, ""
+    except Exception as exc:
+        logger.debug(f"[COGNITION] gate skip (fail-open): {exc}")
+        return True, ""
+
+
 def enforce_ea_boom_crash_direction(symbol: str, action: str, confidence: float, reason: str):
     """
     Aligner la décision HTTP avec SMC_Universal.mq5 :
@@ -6357,131 +6750,122 @@ def _mtf_dir_from_mt5(symbol: str, timeframe: str) -> int:
         return 0
 
 
-def compute_ia_status_v2(request: "DecisionRequest") -> Dict[str, Any]:
+def _ia_status_decide(tf_dirs: Dict[str, int], tf_weights: Dict[str, float]) -> Dict[str, Any]:
     """
-    IA Status v2 AMÉLIORÉ: Retourne BUY/SELL avec confiance % sur chaque TF.
+    Logique de décision IA Status partagée entre compute_ia_status_v2 et _enrich_ia_status.
 
-    Logique:
-    1. Calcule direction + confiance pour chaque TF (M1, M5, M15, M30, H1, H4, D1, W1)
-    2. Pèse les TF selon leur importance: M5=30%, M15=25%, M1=20%, H1=15%, autres=10%
-    3. Agrège pour décision finale: BUY/SELL/HOLD
-    4. Retourne confiance basée sur: votes alignés / total_votes
-
-    M5 est le TF de JUGEMENT PRINCIPAL (comme requis)
+    Règles (par ordre de priorité) :
+    1. gap pondéré BUY/SELL < 0.15  →  HOLD  (marché réellement indécis)
+    2. M5 s'oppose à la majorité    →  HOLD  (vrai conflit micro vs macro)
+    3. Majorité claire + M5 aligné  →  BUY/SELL  confiance 68–85%
+    4. Majorité claire + M5 neutre  →  BUY/SELL  confiance 53–65%
+       (pause normale, pas un retournement)
     """
-    symbol = str(request.symbol or "")
-
-    # Recueillir les directions par TF
-    tf_dirs: Dict[str, int] = {
-        "W1": _mtf_dir_from_mt5(symbol, "W1"),
-        "D1": _mtf_dir_from_mt5(symbol, "D1"),
-        "H4": _mtf_dir_from_mt5(symbol, "H4"),
-        "H1": _ema_dir(request.ema_fast_h1, request.ema_slow_h1),
-        "M30": _mtf_dir_from_mt5(symbol, "M30"),
-        "M15": _mtf_dir_from_mt5(symbol, "M15"),
-        "M5": _ema_dir(request.ema_fast_m5, request.ema_slow_m5),
-        "M1": _ema_dir(request.ema_fast_m1, request.ema_slow_m1),
-    }
-
-    # Poids de chaque TF (M5 = référence principale)
-    tf_weights: Dict[str, float] = {
-        "M5": 0.30,    # Jugement principal
-        "M15": 0.25,   # Court terme
-        "M1": 0.20,    # Très court terme
-        "H1": 0.15,    # Moyen terme
-        "M30": 0.05,   # Support
-        "H4": 0.03,    # Moyen long
-        "D1": 0.02,    # Long
-        "W1": 0.00,    # Très long (information seulement)
-    }
-
-    # Calculer score pondéré
     score_buy = 0.0
     score_sell = 0.0
-    total_weight = 0.0
-    count_buy = 0
-    count_sell = 0
-    count_neutral = 0
+    total_w = 0.0
+    count_buy = count_sell = count_neutral = 0
 
-    for tf, direction in tf_dirs.items():
-        weight = tf_weights.get(tf, 0.0)
-        if direction > 0:  # BUY signal
-            score_buy += direction * weight
+    for tf, d in tf_dirs.items():
+        w = tf_weights.get(tf, 0.0)
+        total_w += w
+        if d > 0:
+            score_buy += w
             count_buy += 1
-        elif direction < 0:  # SELL signal
-            score_sell += abs(direction) * weight
+        elif d < 0:
+            score_sell += w
             count_sell += 1
-        else:  # NEUTRAL/HOLD
+        else:
             count_neutral += 1
-        total_weight += weight
 
-    # Normaliser les scores
-    if total_weight > 0:
-        score_buy /= total_weight
-        score_sell /= total_weight
+    if total_w > 0:
+        score_buy /= total_w
+        score_sell /= total_w
 
-    # Déterminer action finale basée sur M5 en priorité
-    m5_dir = tf_dirs.get("M5", 0)
+    gap = abs(score_buy - score_sell)
+    majority_dir = 1 if score_buy > score_sell else (-1 if score_sell > score_buy else 0)
+    m5 = tf_dirs.get("M5", 0)
 
-    action = "hold"
-    confidence = 0.5
+    if gap < 0.15 or majority_dir == 0:
+        # Marché indécis — HOLD
+        action = "hold"
+        confidence = 0.40 + gap * 0.30
 
-    if m5_dir > 0:  # M5 dit BUY
-        if score_buy > score_sell:
-            action = "buy"
-            confidence = min(0.95, 0.60 + (count_buy / 8.0) * 0.35)
-        else:
-            action = "hold"
-            confidence = 0.45
-    elif m5_dir < 0:  # M5 dit SELL
-        if score_sell > score_buy:
-            action = "sell"
-            confidence = min(0.95, 0.60 + (count_sell / 8.0) * 0.35)
-        else:
-            action = "hold"
-            confidence = 0.45
-    else:  # M5 NEUTRAL
-        if score_buy > 0.55:
-            action = "buy"
-            confidence = min(0.75, 0.50 + (count_buy / 8.0) * 0.25)
-        elif score_sell > 0.55:
-            action = "sell"
-            confidence = min(0.75, 0.50 + (count_sell / 8.0) * 0.25)
-        else:
-            action = "hold"
-            confidence = 0.40 + (count_neutral / 8.0) * 0.10
+    elif m5 != 0 and m5 != majority_dir:
+        # M5 s'oppose activement à la majorité — vrai conflit, pas d'entrée
+        action = "hold"
+        confidence = 0.48 + gap * 0.10
 
-    # Confiance finale = pourcentage TF alignés avec décision
+    elif m5 == majority_dir:
+        # M5 confirme la majorité — signal fort
+        action = "buy" if majority_dir == 1 else "sell"
+        count_aligned = count_buy if majority_dir == 1 else count_sell
+        confidence = min(0.85, 0.68 + (count_aligned / 6.0) * 0.17)
+
+    else:
+        # M5 neutre sur une tendance H4/H1 claire — pause normale, pas retournement
+        action = "buy" if majority_dir == 1 else "sell"
+        count_aligned = count_buy if majority_dir == 1 else count_sell
+        confidence = min(0.65, 0.53 + (count_aligned / 6.0) * 0.12)
+
+    confidence = max(0.0, min(1.0, confidence))
     total_votes = count_buy + count_sell + count_neutral
-    aligned_count = 0
     if action == "buy":
         aligned_count = count_buy
     elif action == "sell":
         aligned_count = count_sell
     else:
-        # Pour HOLD: tous les TF qui sont neutres OU en minorité
         aligned_count = max(count_buy, count_sell, count_neutral)
-        # Mais si c'est un HOLD par défaut (aucune majorité), c'est faible
-        if count_buy == 0 and count_sell == 0:
-            aligned_count = count_neutral
-
     alignment_score = min(1.0, aligned_count / max(total_votes, 1)) * 100.0
-
-    # Assurer confiance cohérente
-    confidence = max(0.0, min(1.0, confidence))
 
     return {
         "action": action,
         "confidence": confidence,
         "confidence_percent": round(confidence * 100.0, 1),
         "alignment_score": round(alignment_score, 1),
-        "m5_direction": m5_dir,
+        "m5_direction": m5,
         "score_buy": round(score_buy, 3),
         "score_sell": round(score_sell, 3),
-        "timeframe_dirs": tf_dirs,
+        "gap": round(gap, 3),
         "counts": {"buy": count_buy, "sell": count_sell, "neutral": count_neutral},
-        "weights": tf_weights,
     }
+
+
+# Poids partagés : tendance (H4+H1+D1) et exécution (M5+M15+M1) à parts égales
+_IA_STATUS_TF_WEIGHTS: Dict[str, float] = {
+    "H4":  0.20,   # Tendance principale
+    "H1":  0.18,   # Contexte moyen terme
+    "D1":  0.12,   # Biais macro
+    "M5":  0.20,   # Anti-conflit + trigger
+    "M15": 0.18,   # Court terme
+    "M1":  0.08,   # Micro (poids réduit — bruit élevé)
+    "M30": 0.04,   # Support
+}
+
+
+def compute_ia_status_v2(request: "DecisionRequest") -> Dict[str, Any]:
+    """
+    IA Status v2 : direction multi-TF, logique majorité pondérée.
+
+    HOLD uniquement si marché indécis (gap < 0.15) OU M5 s'oppose à la majorité.
+    M5 neutre sur tendance H4 claire = pause normale → BUY/SELL confiance moyenne.
+    """
+    symbol = str(request.symbol or "")
+
+    tf_dirs: Dict[str, int] = {
+        "D1":  _mtf_dir_from_mt5(symbol, "D1"),
+        "H4":  _mtf_dir_from_mt5(symbol, "H4"),
+        "H1":  _ema_dir(request.ema_fast_h1, request.ema_slow_h1),
+        "M30": _mtf_dir_from_mt5(symbol, "M30"),
+        "M15": _mtf_dir_from_mt5(symbol, "M15"),
+        "M5":  _ema_dir(request.ema_fast_m5, request.ema_slow_m5),
+        "M1":  _ema_dir(request.ema_fast_m1, request.ema_slow_m1),
+    }
+
+    result = _ia_status_decide(tf_dirs, _IA_STATUS_TF_WEIGHTS)
+    result["timeframe_dirs"] = tf_dirs
+    result["weights"] = _IA_STATUS_TF_WEIGHTS
+    return result
 
 
 def compute_mtf_funnel_decision(request: "DecisionRequest") -> Dict[str, Any]:
@@ -8509,7 +8893,7 @@ def _resolve_gom_dashboard(sym: str, chart_tf: str, source: str) -> Dict[str, An
             "hint": "Lancez: python python/gom_verdict_poller.py (TradingView CDP port 9222)",
         }
 
-    # auto = calcul MT5 local uniquement (sans TradingView)
+    # auto = calcul MT5 local (candles uploadées ou terminal MT5 ouvert)
     if src == "auto":
         src = "local"
 
@@ -8536,11 +8920,130 @@ def _resolve_gom_dashboard(sym: str, chart_tf: str, source: str) -> Dict[str, An
     }
 
 
+@app.get("/bc-volatility")
+async def bc_volatility(
+    symbol: Optional[str] = Query(None, description="Symbole MT5 (ex: Crash 500 Index) — omit pour tout"),
+    hour_utc: Optional[int] = Query(None, ge=0, le=23, description="Heure UTC (défaut: heure courante)"),
+):
+    """
+    Heures propices Boom/Crash par symbole (bc_heure).
+    Utilisé par l'EA via champs bc_* dans /gom-kola-dashboard.
+    """
+    cache = _load_bc_volatility_cache()
+    if not cache:
+        return {"ok": False, "error": "bc_volatility.json indisponible — POST /bc-volatility/refresh"}
+
+    if symbol:
+        from bc_heure.bc_volatility_service import get_bc_hour_status
+
+        status = get_bc_hour_status(symbol, hour_utc=hour_utc, cache=cache)
+        return {"ok": True, "symbol": _resolve_symbol(symbol), **status}
+
+    from bc_heure.bc_volatility_service import recommend_symbols_now
+
+    return {
+        "ok": True,
+        "generated_at": cache.get("generated_at"),
+        "source": cache.get("source"),
+        "min_confidence_trade": cache.get("min_confidence_trade", 60),
+        "tradeable_now": recommend_symbols_now(cache=cache),
+        "windows": cache.get("windows", {}),
+        "hourly": cache.get("hourly", {}),
+    }
+
+
+@app.post("/bc-volatility/refresh")
+async def bc_volatility_refresh(duration: int = Query(120, ge=30, le=3600)):
+    """Regénère data/bc_volatility.json (WebSocket Deriv ou simulation calibrée)."""
+    try:
+        from bc_heure.bc_volatility_service import export_json, run_analysis
+
+        payload = run_analysis(duration=duration)
+        path = export_json(_BC_VOL_CACHE_PATH, payload)
+        _invalidate_bc_volatility_cache()
+        return {
+            "ok": True,
+            "path": str(path),
+            "generated_at": payload.get("generated_at"),
+            "source": payload.get("source"),
+            "tradeable_hours_total": payload.get("tradeable_hours_total"),
+        }
+    except Exception as e:
+        logger.error(f"[BC-HEURE] refresh failed: {e}", exc_info=True)
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/bc-volatility/learn-from-feedback")
+async def bc_volatility_learn_from_feedback():
+    """
+    Reconstruit bc_spike_learnings.json depuis trade_feedback.jsonl local
+    puis invalide le cache horaire fusionné.
+    """
+    try:
+        from bc_heure.bc_volatility_service import ingest_feedback_jsonl
+
+        n = ingest_feedback_jsonl()
+        _invalidate_bc_volatility_cache()
+        cache = _load_bc_volatility_cache(force=True)
+        return {
+            "ok": True,
+            "ingested": n,
+            "learnings_applied": bool(cache.get("learnings_applied")),
+            "generated_at": cache.get("generated_at"),
+        }
+    except Exception as e:
+        logger.error(f"[BC-HEURE] learn-from-feedback failed: {e}", exc_info=True)
+        return {"ok": False, "error": str(e)}
+
+
+@app.get("/cognition/forecast-200")
+async def cognition_forecast_200(
+    symbol: str = Query("Crash 500 Index"),
+    chart_tf: str = Query("M1"),
+    horizon: int = Query(200, ge=10, le=500),
+):
+    """Forecast cognition 200 bougies + direction/strength pour EA ou debug."""
+    sym = _resolve_symbol(symbol)
+    out: Dict[str, Any] = {"symbol": sym, "ok": True}
+    store = _GOM_VERDICT_STORE.get(sym.upper(), {})
+    if store:
+        out.update(store)
+    _enrich_bc_volatility(out, sym)
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent / "python"))
+        from ml.cognition_forecast import forecast_200, to_mt5_payload
+
+        tf = (chart_tf or "M1").upper()
+        df = None
+        sym_cache = _mt5_candles_cache.get(sym) or {}
+        if tf in sym_cache and sym_cache[tf] is not None and len(sym_cache[tf]) >= 50:
+            df = sym_cache[tf]
+        if df is None or len(df) < 50:
+            from mt5_candles_fetcher import fetch_mt5_candles
+
+            df = fetch_mt5_candles(sym, tf, max(250, horizon + 50))
+        if df is None or len(df) < 10:
+            return {"ok": False, "error": "candles indisponibles", "symbol": sym}
+
+        gom = {
+            "verdict_num": out.get("verdict_num", 0),
+            "coherence_pct": out.get("coherence_pct", 0),
+        }
+        bc_conf = float(out.get("bc_confidence", 0) or 0)
+        fc = forecast_200(df, sym, tf, horizon=horizon, gom=gom, bc_confidence=bc_conf)
+        payload = to_mt5_payload(fc)
+        payload["ok"] = True
+        return payload
+    except Exception as e:
+        logger.error(f"[COGNITION] forecast-200 failed: {e}", exc_info=True)
+        return {"ok": False, "symbol": sym, "error": str(e)}
+
+
 @app.get("/gom-kola-dashboard")
 async def gom_kola_dashboard(
     symbol: str = Query("XAUUSD"),
     chart_tf: str = Query("M15"),
-    source: str = Query("local", description="local | mt5 | tv (tv désactivé par défaut)"),
+    source: str = Query("local", description="local | mt5 | auto (=local) | tv"),
 ):
     """
     ✅ NOUVEAU: Calcule les données GOM/KOLA EN TEMPS RÉEL (100% LOCAL, NO JSON STALE)
@@ -8567,11 +9070,18 @@ async def gom_kola_dashboard(
     try:
         import asyncio
         sym = _resolve_symbol(symbol)
-        src_norm = (source or "auto").lower().strip()
+        src_norm = (source or "local").lower().strip()
+        if src_norm == "auto":
+            src_norm = "local"
 
-        if src_norm in ("local", "mt5", "auto"):
+        if src_norm in ("local", "mt5"):
             cached_data = _get_cached_gom_data(sym, chart_tf)
             if cached_data:
+                _enrich_bc_volatility(cached_data, sym)
+                _enrich_cognition_forecast(cached_data, sym, chart_tf)
+                cached_data["entry_probability"] = round(_compute_entry_probability(cached_data), 1)
+                _enrich_ia_status(cached_data)
+                _enrich_correction_cycle(cached_data, sym)
                 return cached_data
 
         loop = asyncio.get_running_loop()
@@ -8579,12 +9089,17 @@ async def gom_kola_dashboard(
             None, lambda: _resolve_gom_dashboard(sym, chart_tf, source)
         )
         if response.get("ok"):
+            _enrich_bc_volatility(response, sym)
+            _enrich_cognition_forecast(response, sym, chart_tf)
+            response["entry_probability"] = round(_compute_entry_probability(response), 1)
+            _enrich_ia_status(response)
+            _enrich_correction_cycle(response, sym)
             ds = response.get("data_source", "?")
             logger.info(
                 f"[GOM-DASH] {sym}: {response.get('verdict')} "
                 f"(vn={response.get('verdict_num')}) src={ds} mode={src_norm}"
             )
-            if src_norm in ("local", "mt5", "auto"):
+            if src_norm in ("local", "mt5"):
                 _cache_gom_data(sym, response, chart_tf)
         return response
 
@@ -14305,6 +14820,186 @@ async def predict(request: Request, symbol: str, timeframe: str = "M1"):
         logger.error(f"Erreur dans /predict: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
+def _ml_build_ohlcv_features(cached: Dict[str, Any]) -> Optional["np.ndarray"]:
+    """
+    Construit le vecteur de 22 features attendu par les scalers entraînés :
+    price_vs_sma20, price_vs_sma50, rsi, rsi_normalized, macd, macd_signal,
+    macd_histogram, atr, atr_normalized, atr_ma_ratio, bb_width, bb_position,
+    volume_ratio, volume_trend, high_low_range, open_close_range, body_size,
+    momentum_5, momentum_10, momentum_20, distance_to_high, distance_to_low
+    Depuis les données disponibles dans le cache GOM dashboard.
+    """
+    try:
+        import numpy as _np
+        price = float(cached.get("bid") or cached.get("price") or cached.get("entry") or 0)
+        if price <= 0:
+            return None
+
+        rsi   = float(cached.get("rsi") or cached.get("rsi14") or 50)
+        atr   = float(cached.get("atr") or cached.get("atr14") or price * 0.001)
+        bb_up = float(cached.get("bb_up") or (price + atr * 2))
+        bb_dn = float(cached.get("bb_dn") or (price - atr * 2))
+        ema20 = float(cached.get("ema_slow_m1") or cached.get("ema_slow") or price)
+        ema50 = float(cached.get("ema_slow_m5") or cached.get("ema_slow_h1") or price)
+
+        bb_width    = (bb_up - bb_dn) / max(price, 1e-9)
+        bb_position = (price - bb_dn) / max(bb_up - bb_dn, 1e-9)
+        atr_norm    = atr / max(price, 1e-9)
+
+        # MACD approximé depuis EMA fast/slow M1
+        ema_fast = float(cached.get("ema_fast_m1") or cached.get("ema_fast") or price)
+        macd_val  = (ema_fast - ema20) / max(price, 1e-9)
+        macd_sig  = macd_val * 0.9   # signal approximé
+        macd_hist = macd_val - macd_sig
+
+        # Momentum approximé depuis RSI
+        mom = (rsi - 50) / 50.0
+
+        features = _np.array([
+            (price - ema20) / max(price, 1e-9),   # price_vs_sma20
+            (price - ema50) / max(price, 1e-9),   # price_vs_sma50
+            rsi,                                   # rsi
+            rsi / 100.0,                           # rsi_normalized
+            macd_val,                              # macd
+            macd_sig,                              # macd_signal
+            macd_hist,                             # macd_histogram
+            atr,                                   # atr
+            atr_norm,                              # atr_normalized
+            1.0,                                   # atr_ma_ratio (neutre)
+            bb_width,                              # bb_width
+            bb_position,                           # bb_position
+            1.0,                                   # volume_ratio (neutre)
+            0.0,                                   # volume_trend
+            atr * 2,                               # high_low_range ≈ 2×ATR
+            0.0,                                   # open_close_range
+            atr * 0.5,                             # body_size
+            mom,                                   # momentum_5
+            mom * 0.9,                             # momentum_10
+            mom * 0.8,                             # momentum_20
+            atr,                                   # distance_to_high
+            atr,                                   # distance_to_low
+        ], dtype=_np.float32).reshape(1, -1)
+        return features
+    except Exception:
+        return None
+
+
+def _ml_predict_direct(sym: str, snapshot: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """
+    Charge le modèle RF .joblib pour (sym, M1) et retourne {action, confidence, model}.
+    Construit les 22 features OHLCV+indicateurs attendues par le scaler.
+    Fallback silencieux — retourne None si modèle absent ou erreur.
+    """
+    try:
+        import joblib as _joblib
+        from pathlib import Path as _Path
+
+        models_dir = _Path(__file__).parent / "models"
+        model_path = None
+        for p in models_dir.glob("*_M1_rf.joblib"):
+            key = p.stem.replace("_M1_rf", "").replace("_", " ").upper()
+            if key == sym.upper():
+                model_path = p
+                break
+        # Fallback avec espaces directs
+        if model_path is None:
+            direct = models_dir / f"{sym}_M1_rf.joblib"
+            if direct.exists():
+                model_path = direct
+
+        if model_path is None:
+            return None
+
+        scaler_path = _Path(str(model_path).replace("_rf.joblib", "_scaler.joblib"))
+        model  = _joblib.load(model_path)
+        scaler = _joblib.load(scaler_path) if scaler_path.exists() else None
+
+        cached = _get_cached_gom_data(sym, "M1") or _get_cached_gom_data(sym, "M15") or {}
+        features = _ml_build_ohlcv_features(cached)
+        if features is None:
+            return None
+
+        if scaler is not None:
+            import warnings
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                features = scaler.transform(features)
+
+        proba   = model.predict_proba(features)[0]
+        classes = list(model.classes_)
+        idx_buy  = classes.index(1)  if 1  in classes else -1
+        idx_sell = classes.index(-1) if -1 in classes else -1
+        p_buy  = float(proba[idx_buy])  if idx_buy  >= 0 else 0.0
+        p_sell = float(proba[idx_sell]) if idx_sell >= 0 else 0.0
+
+        if p_buy >= p_sell and p_buy >= 0.45:
+            action, conf = "BUY", p_buy
+        elif p_sell > p_buy and p_sell >= 0.45:
+            action, conf = "SELL", p_sell
+        else:
+            action, conf = "NEUTRAL", max(p_buy, p_sell)
+
+        return {"action": action, "confidence": round(conf, 4), "model": model_path.stem}
+
+    except Exception as exc:
+        logger.debug(f"[ml-direct] predict error for {sym}: {exc}")
+        return None
+
+
+@app.get("/ml-metrics/{symbol}")
+async def ml_metrics(symbol: str):
+    """
+    Métriques ML temps réel — charge directement les modèles .joblib de models/.
+    Non-bloquant : retourne toujours un JSON valide, jamais de 500.
+    Consommé par gom_sync_with_report pour enrichir les rapports WhatsApp.
+    """
+    sym = _resolve_symbol(symbol) or symbol.upper()
+    now_iso = datetime.utcnow().isoformat()
+
+    result: Dict[str, Any] = {
+        "symbol": sym,
+        "action": "NEUTRAL",
+        "confidence": 0.0,
+        "accuracy_last20": 0.5,
+        "model": None,
+        "ml_available": False,
+        "timestamp": now_iso,
+    }
+
+    # 1. Essai via integrated_ml_trainer (si disponible)
+    if ML_TRAINER_AVAILABLE:
+        try:
+            cached = _get_cached_gom_data(sym, "M1") or _get_cached_gom_data(sym, "M15") or {}
+            pred = ml_trainer.predict(sym, "M1", cached)
+            if pred and isinstance(pred, dict):
+                action_raw = str(pred.get("action", "hold")).upper()
+                result["action"] = action_raw if action_raw in ("BUY", "SELL") else "NEUTRAL"
+                result["confidence"] = round(float(pred.get("confidence", 0)), 4)
+                result["model"] = pred.get("model", "random_forest")
+                result["ml_available"] = True
+        except Exception as exc:
+            logger.debug(f"[ml-metrics] ml_trainer error for {sym}: {exc}")
+
+    # 2. Fallback direct .joblib si ml_trainer indisponible ou raté
+    if not result["ml_available"]:
+        pred = _ml_predict_direct(sym, {})
+        if pred:
+            result.update({
+                "action":      pred["action"],
+                "confidence":  pred["confidence"],
+                "model":       pred["model"],
+                "ml_available": True,
+            })
+
+    # 3. Accuracy historique
+    try:
+        result["accuracy_last20"] = round(get_prediction_accuracy_score(sym), 4)
+    except Exception:
+        pass
+
+    return result
+
+
 @app.get("/analyze/{symbol}")
 async def analyze(symbol: str):
     """
@@ -15800,6 +16495,20 @@ async def upload_mt5_deals(request: MT5DealsUploadRequest):
 
         logger.info(f"📥 /mt5/deals-upload received={len(deals)} kept={len(rows)} skipped={skipped}")
 
+        _bc_n = _bc_learn_from_deals(rows)
+        if _bc_n:
+            logger.info("[BC-HEURE] %s trades BC integres aux plages horaires", _bc_n)
+
+        _cog_n = _cognition_learn_from_deals(rows)
+        if _cog_n:
+            logger.info("[COGNITION] %s trades integres a la memoire patterns", _cog_n)
+
+        for row in rows:
+            try:
+                _record_win_streak_from_profit(float(row.get("profit") or 0), str(row.get("symbol") or ""))
+            except Exception:
+                pass
+
         # Priorité AWS RDS (Render + local → même base)
         rds_inserted = 0
         if AWS_RDS_AVAILABLE and not _env_bool("USE_SUPABASE", False):
@@ -17174,6 +17883,8 @@ async def trades_feedback(request: TradeFeedbackRequest):
         
         # Recalibration locale
         update_calibration_from_feedback(symbol, bool(request.is_win), float(request.profit), request.side or "")
+
+        _record_win_streak_from_profit(float(request.profit), symbol)
 
         # [NOUVEAU] Apprentissage adaptatif continu
         if ADAPTIVE_LEARNING_AVAILABLE and adaptive_learning:
@@ -22278,6 +22989,67 @@ PIPELINE_GOM_COOLDOWN_SEC = 120  # 2 min après pipeline → GOM auto-trade bloq
 _LOSS_COOLDOWN_STORE: dict = {}  # {sym: timestamp_de_perte}
 LOSS_COOLDOWN_SEC = 900          # 15 min de pause obligatoire après une perte
 
+# Pause globale après N gains consécutifs sans perte (performance exceptionnelle)
+_WIN_STREAK: list = []
+WIN_STREAK_THRESHOLD = 5           # 5 wins d'affilée → pause 2h
+WIN_STREAK_PAUSE_SEC = 2 * 3600    # 2 heures
+_WIN_STREAK_PAUSE_UNTIL: float = 0.0
+
+# Gate probabilité élevée (anti-hazard)
+MIN_ENTRY_PROBABILITY_PCT = 72.0
+MIN_GOM_VERDICT_NUM_ABS = 2
+HIGH_PROB_BC_MIN_CONF = 70.0
+MIN_COG_STRENGTH = 0.50
+MIN_COG_CONFIDENCE = 0.55
+
+def _record_win_streak_from_profit(profit: float, symbol: str = "") -> None:
+    """Met à jour la série de gains et déclenche la pause performance si seuil atteint."""
+    import time as _ws_time
+    global _WIN_STREAK, _WIN_STREAK_PAUSE_UNTIL
+
+    try:
+        p = float(profit or 0)
+    except (TypeError, ValueError):
+        return
+
+    if p < 0:
+        _WIN_STREAK = []
+        logger.info("[WinStreak] Série réinitialisée après perte%s", f" ({symbol})" if symbol else "")
+        return
+
+    if p <= 0:
+        return
+
+    _WIN_STREAK.append(_ws_time.time())
+    logger.info(
+        "[WinStreak] Gain %s profit=%.2f — série: %s/%s",
+        symbol or "?",
+        p,
+        len(_WIN_STREAK),
+        WIN_STREAK_THRESHOLD,
+    )
+    if len(_WIN_STREAK) >= WIN_STREAK_THRESHOLD:
+        _WIN_STREAK_PAUSE_UNTIL = _ws_time.time() + WIN_STREAK_PAUSE_SEC
+        _WIN_STREAK = []
+        resume_ts = datetime.utcfromtimestamp(_WIN_STREAK_PAUSE_UNTIL).strftime("%H:%M UTC")
+        logger.warning(
+            "[WinStreak] %s gains consécutifs — PAUSE %sh jusqu'à %s",
+            WIN_STREAK_THRESHOLD,
+            WIN_STREAK_PAUSE_SEC // 3600,
+            resume_ts,
+        )
+
+
+def _check_win_streak_pause() -> Tuple[bool, Optional[str]]:
+    import time as _ws_time
+    if _ws_time.time() >= _WIN_STREAK_PAUSE_UNTIL:
+        return True, None
+    remaining = int(_WIN_STREAK_PAUSE_UNTIL - _ws_time.time())
+    hours = remaining // 3600
+    mins = (remaining % 3600) // 60
+    return False, f"Pause performance win-streak — {hours}h{mins:02d}m restantes"
+
+
 def _validate_gom_confluence(symbol: str, direction: str, gom_verdict: Optional[str],
                                gom_score_buy: Optional[float], gom_score_sell: Optional[float]) -> dict:
     """
@@ -22340,6 +23112,25 @@ async def set_pending_order(payload: PendingOrderPayload):
     if gom_check["gom_warning"]:
         logger.warning(f"[PendingOrder] {sym} {gom_check['gom_warning']}")
 
+    # Gate bc_heure — plage UTC propice (Boom/Crash, pipeline inclus)
+    bc_ok, bc_reason, bc_status = _check_bc_hour_gate(sym)
+    if not bc_ok:
+        from fastapi import HTTPException
+        logger.warning(f"[PendingOrder] {sym} bloque BC heure: {bc_reason}")
+        raise HTTPException(status_code=403, detail=bc_reason)
+
+    cog_ok, cog_reason = _check_cognition_gate(sym, direction)
+    if not cog_ok:
+        from fastapi import HTTPException
+        logger.warning(f"[PendingOrder] {sym} bloque cognition: {cog_reason}")
+        raise HTTPException(status_code=403, detail=cog_reason)
+
+    prob_ok, prob_reason = _check_probability_gate(sym, direction)
+    if not prob_ok:
+        from fastapi import HTTPException
+        logger.warning(f"[PendingOrder] {sym} bloque probabilité: {prob_reason}")
+        raise HTTPException(status_code=403, detail=prob_reason)
+
     # Mise à jour store verdict GOM si fourni dans ce payload
     if payload.gom_verdict:
         _GOM_VERDICT_STORE[sym] = {
@@ -22354,6 +23145,12 @@ async def set_pending_order(payload: PendingOrderPayload):
         f" | GOM={gom_check['gom_verdict']} ({gom_check['gom_action']})" +
         (f" | {gom_check['gom_warning']}" if gom_check["gom_warning"] else "")
     )
+    if bc_status.get("bc_applicable"):
+        reasoning_enriched += (
+            f" | BC UTC{bc_status.get('bc_hour_utc')} "
+            f"{bc_status.get('bc_confidence', 0):.0f}% "
+            f"{'OK' if bc_status.get('bc_tradeable') else 'OFF'}"
+        )
 
     # Cooldown post-perte : refuser un nouvel ordre si une perte récente existe
     import time as _t
@@ -22365,6 +23162,12 @@ async def set_pending_order(payload: PendingOrderPayload):
             status_code=429,
             detail=f"{sym} en cooldown post-perte — {_remaining}s restantes ({LOSS_COOLDOWN_SEC//60}min)"
         )
+
+    _ws_ok, _ws_reason = _check_win_streak_pause()
+    if not _ws_ok:
+        from fastapi import HTTPException
+        logger.warning(f"[PendingOrder] {sym} bloque win-streak: {_ws_reason}")
+        raise HTTPException(status_code=429, detail=_ws_reason)
 
     # Dedup gate — rejeter si un ordre actif existe déjà pour ce symbole
     # Exception : source=pipeline a priorité et remplace toujours l'ordre GOM auto
@@ -22452,6 +23255,9 @@ async def set_pending_order(payload: PendingOrderPayload):
         "gom_verdict":    gom_check["gom_verdict"],
         "gom_action":     gom_check["gom_action"],
         "gom_warning":    gom_check["gom_warning"],
+        "bc_hour_utc":    bc_status.get("bc_hour_utc"),
+        "bc_confidence":  bc_status.get("bc_confidence"),
+        "bc_tradeable":   bc_status.get("bc_tradeable"),
         "source":         _src,
         "status":         _raw_status if _raw_status in ("ready", "conflict_pending") else "ready",
         "timestamp":      datetime.utcnow().isoformat(),
@@ -22582,6 +23388,14 @@ class GomVerdictPayload(BaseModel):
     ob_bull_bot:   Optional[float] = None
     ob_bear_top:   Optional[float] = None
     ob_bear_bot:   Optional[float] = None
+    spike_level: Optional[int] = None
+    imminence_pct: Optional[float] = None
+    spike_tradable: Optional[bool] = None
+    pre_spike_pct: Optional[float] = None
+    spike_progress_pct: Optional[float] = None
+    bars_since_spike: Optional[int] = None
+    spike_freq_bars: Optional[int] = None
+    source: Optional[str] = None
 
 
 def _dir_num_to_label(d: int) -> str:
@@ -22590,6 +23404,54 @@ def _dir_num_to_label(d: int) -> str:
     if d == -1:
         return "BEAR"
     return "NEUT"
+
+
+def _gom_verdict_label_from_num(vnum: int) -> str:
+    """Libellé verdict aligné sur GOM_KOLA_script.pine / GOMLPineCalculator."""
+    n = int(vnum)
+    if n >= 3:
+        return "PERFECT BUY"
+    if n == 2:
+        return "GOOD BUY"
+    if n == 1:
+        return "BUY"
+    if n <= -3:
+        return "PERFECT SELL"
+    if n == -2:
+        return "GOOD SELL"
+    if n == -1:
+        return "SELL"
+    return "WAIT"
+
+
+def _gom_trust_precalculated_verdict(payload_source: str, payload: "GomVerdictPayload") -> bool:
+    """Verdict déjà calculé par GOMLPineCalculator ou poller MT5 — ne pas écraser."""
+    src = (payload_source or "").lower()
+    trusted = (
+        "live_calculation", "mt5_live", "mt5_upload", "mt5_direct",
+        "tradingview", "tv", "tradingview_sync", "tradingview_fallback", "sync",
+    )
+    return payload.verdict_num is not None and any(t in src for t in trusted)
+
+
+def _gom_apply_pine_verdict(record: dict) -> dict:
+    """Recalcule verdict via GOMLPineCalculator (même logique que /gom-kola-dashboard)."""
+    if GOM_LIVE_CALCULATOR_AVAILABLE and _gom_live_calc and getattr(_gom_live_calc, "pine", None):
+        enriched = _gom_live_calc.pine.enrich_record(dict(record))
+        record.update({
+            "score_buy": enriched["score_buy"],
+            "score_sell": enriched["score_sell"],
+            "verdict_num": enriched["verdict_num"],
+            "verdict": enriched["verdict"],
+            "verdict_gap": enriched["verdict_gap"],
+            "filter_ratio": enriched["filter_ratio"],
+            "coherence_pct": enriched["coherence_pct"],
+            "coherence_ok": enriched.get("coherence_ok", False),
+            "entry_quality": round(float(enriched.get("entry_quality", 0)) * 100.0, 1),
+            "data_source": record.get("data_source") or "live_calculation",
+        })
+        return record
+    return record
 
 
 def _parse_gom_tv_csv(text: str) -> Optional[dict]:
@@ -22988,6 +23850,8 @@ def _build_gom_mt5_payload(record: dict) -> dict:
         "pred_path", "pred_net", "pred_bull", "pred_bear", "pred_neut",
         "path_guided", "kola_state", "data_source",
         "pred_bb_mid", "pred_bb_up", "pred_bb_dn",
+        "spike_level", "imminence_pct", "spike_tradable", "pre_spike_pct",
+        "spike_progress_pct", "bars_since_spike", "spike_freq_bars",
     ):
         if key not in out:
             out[key] = record.get(key)
@@ -23001,6 +23865,12 @@ def _build_gom_mt5_payload(record: dict) -> dict:
         out["pred_bb_up"] = record["pred_bb_up"]
     if "pred_bb_dn" in record:
         out["pred_bb_dn"] = record["pred_bb_dn"]
+
+    sym = record.get("symbol") or out.get("symbol")
+    if sym:
+        _enrich_bc_volatility(out, str(sym))
+        _enrich_cognition_forecast(out, str(sym), str(record.get("chart_tf") or "M1"))
+        out["entry_probability"] = round(_compute_entry_probability(out), 1)
 
     return out
 
@@ -23043,7 +23913,7 @@ def _gom_verdict_record_from_payload(payload: GomVerdictPayload, enrich_mt5: boo
         "filter_ratio": get_or(payload.filter_ratio, 0.0),
         "entry": get_or(payload.price, 0.0),   # prix courant → entry pour pipelines
         "close": get_or(payload.price, 0.0),
-        "source": getattr(payload, "source", "api"),
+        "source": str(extra.get("source") or getattr(payload, "source", None) or "api"),
         "kola_buy": get_or(payload.kola_buy, 0.0),
         "kola_sell": get_or(payload.kola_sell, 0.0),
         "kola_state": payload.kola_state or "---",
@@ -23074,94 +23944,39 @@ def _gom_verdict_record_from_payload(payload: GomVerdictPayload, enrich_mt5: boo
     }
 
     # ══════════════════════════════════════════════════════════════
-    # CALCUL VERDICT GOM — PURE PINE SCRIPT LOGIC
-    # Basé UNIQUEMENT sur: gap = |score_buy - score_sell| + coherence_ok
+    # VERDICT — MT5 live calc ou Pine poller = source de vérité
+    # Sinon recalcul via GOMLPineCalculator (pas de seuils simplifiés)
     # ══════════════════════════════════════════════════════════════
 
-    # 1. EXTRACT SCORES
     score_buy = float(record.get("score_buy") or 0)
     score_sell = float(record.get("score_sell") or 0)
     coherence_pct = float(record.get("coherence_pct") or 0)
     filter_ratio = float(record.get("filter_ratio") or 0)
-
-    # 2. CALCULATE GAP
     gap = abs(score_buy - score_sell)
+    payload_source = str(record.get("source") or "").lower()
 
-    # 3. DETERMINE COHERENCE_OK
-    # Pine Script logic (line 956):
-    # coherence_ok = not verdict_coherence or filter_ratio >= 0.40 or verdict_gap >= (verdict_gap_th + 0.24)
-    # Simplified: accept if filter_ratio >= 40% OR gap is very strong (>= 4.5)
-    coherence_ok = (filter_ratio >= 0.40) or (gap >= 4.5)
+    logger.info(f"[GOM VERDICT] {_resolve_symbol(payload.symbol)} src={payload_source}")
 
-    logger.info(f"[GOM VERDICT] {_resolve_symbol(payload.symbol)}")
-    logger.info(f"  Scores: buy={score_buy:.2f}, sell={score_sell:.2f}")
-    logger.info(f"  Gap: {gap:.2f} | Coherence: {coherence_pct:.0f}% (filter_ratio={filter_ratio:.2f}) | coherence_ok={coherence_ok}")
-
-    # 4. CLASSIFY BY GAP + COHERENCE
-    # These are the ONLY thresholds that matter:
-    # Gap >= 4.0: PERFECT
-    # Gap >= 2.5: GOOD
-    # Gap >= 1.2: REGULAR
-    # Gap < 1.2:  WAIT
-
-    if gap < 1.2:
-        # Insufficient conviction
-        record["verdict_num"] = 0
-        record["verdict"] = "WAIT"
-        logger.info(f"  → WAIT (gap={gap:.2f} < 1.2)")
-
-    elif gap < 2.5:
-        # Regular signal (gap 1.2-2.5)
-        if coherence_ok:
-            if score_buy > score_sell:
-                record["verdict_num"] = 1
-                record["verdict"] = "BUY"
-                logger.info(f"  → BUY (gap={gap:.2f}, coherence_ok=True)")
-            else:
-                record["verdict_num"] = -1
-                record["verdict"] = "SELL"
-                logger.info(f"  → SELL (gap={gap:.2f}, coherence_ok=True)")
-        else:
-            record["verdict_num"] = 0
-            record["verdict"] = "WAIT"
-            logger.info(f"  → WAIT (gap={gap:.2f} in valid range BUT coherence_ok=False)")
-
-    elif gap < 4.0:
-        # Good signal (gap 2.5-4.0)
-        if coherence_ok:
-            if score_buy > score_sell:
-                record["verdict_num"] = 2
-                record["verdict"] = "GOOD BUY"
-                logger.info(f"  → GOOD BUY (gap={gap:.2f}, coherence_ok=True)")
-            else:
-                record["verdict_num"] = -2
-                record["verdict"] = "GOOD SELL"
-                logger.info(f"  → GOOD SELL (gap={gap:.2f}, coherence_ok=True)")
-        else:
-            record["verdict_num"] = 0
-            record["verdict"] = "WAIT"
-            logger.info(f"  → WAIT (gap={gap:.2f} in valid range BUT coherence_ok=False)")
-
+    if _gom_trust_precalculated_verdict(payload_source, payload):
+        vnum = int(payload.verdict_num)
+        record["verdict_num"] = vnum
+        record["verdict"] = (
+            str(payload.verdict).upper()
+            if payload.verdict
+            else _gom_verdict_label_from_num(vnum)
+        )
+        record["verdict_gap"] = float(payload.verdict_gap if payload.verdict_gap is not None else gap)
+        record["filter_ratio"] = filter_ratio
+        record["coherence_pct"] = coherence_pct
+        if "live" in payload_source or "mt5" in payload_source:
+            record["data_source"] = payload_source if payload_source else "live_calculation"
+        logger.info(f"  → trust vn={vnum} {record['verdict']}")
     else:
-        # Perfect signal (gap >= 4.0)
-        if coherence_ok:
-            if score_buy > score_sell:
-                record["verdict_num"] = 3
-                record["verdict"] = "PERFECT BUY"
-                logger.info(f"  → PERFECT BUY (gap={gap:.2f}, coherence_ok=True)")
-            else:
-                record["verdict_num"] = -3
-                record["verdict"] = "PERFECT SELL"
-                logger.info(f"  → PERFECT SELL (gap={gap:.2f}, coherence_ok=True)")
-        else:
-            record["verdict_num"] = 0
-            record["verdict"] = "WAIT"
-            logger.info(f"  → WAIT (gap={gap:.2f} very strong BUT coherence_ok=False)")
-
-    # Store gap and coherence for reference
-    record["verdict_gap"] = gap
-    record["filter_ratio"] = filter_ratio
-    record["coherence_pct"] = coherence_pct
+        _gom_apply_pine_verdict(record)
+        logger.info(
+            f"  → pine recalc vn={record.get('verdict_num')} "
+            f"{record.get('verdict')} gap={record.get('verdict_gap')}"
+        )
 
     # Ajouter les champs optionnels avec défauts pour éviter les null
     optional_fields = {
@@ -23194,6 +24009,20 @@ def _gom_verdict_record_from_payload(payload: GomVerdictPayload, enrich_mt5: boo
     record["ob_bull_bot"] = float(extra.get("ob_bull_bot") or payload.ob_bull_bot or 0)
     record["ob_bear_top"] = float(extra.get("ob_bear_top") or payload.ob_bear_top or 0)
     record["ob_bear_bot"] = float(extra.get("ob_bear_bot") or payload.ob_bear_bot or 0)
+    if extra.get("spike_level") is not None or payload.spike_level is not None:
+        record["spike_level"] = int(extra.get("spike_level") or payload.spike_level or 0)
+    if extra.get("imminence_pct") is not None or payload.imminence_pct is not None:
+        record["imminence_pct"] = float(extra.get("imminence_pct") or payload.imminence_pct or 0)
+    if extra.get("spike_tradable") is not None or payload.spike_tradable is not None:
+        record["spike_tradable"] = bool(extra.get("spike_tradable") if extra.get("spike_tradable") is not None else payload.spike_tradable)
+    if extra.get("pre_spike_pct") is not None or payload.pre_spike_pct is not None:
+        record["pre_spike_pct"] = float(extra.get("pre_spike_pct") or payload.pre_spike_pct or 0)
+    if extra.get("spike_progress_pct") is not None or payload.spike_progress_pct is not None:
+        record["spike_progress_pct"] = float(extra.get("spike_progress_pct") or payload.spike_progress_pct or 0)
+    if extra.get("bars_since_spike") is not None or payload.bars_since_spike is not None:
+        record["bars_since_spike"] = int(extra.get("bars_since_spike") or payload.bars_since_spike or 0)
+    if extra.get("spike_freq_bars") is not None or payload.spike_freq_bars is not None:
+        record["spike_freq_bars"] = int(extra.get("spike_freq_bars") or payload.spike_freq_bars or 0)
     record["setup_valid"] = (
         record["setup_dir"] != 0
         and record["setup_entry"] > 0
@@ -23740,16 +24569,28 @@ async def get_all_gom_verdicts():
             score_buy = float(record.get("score_buy") or 0)
             score_sell = float(record.get("score_sell") or 0)
             coherence_raw = float(record.get("coherence_pct") or 0)
-            # coherence_pct peut être en % (83) ou en décimal (0.83) selon la source
-            coherence = coherence_raw / 100.0 if coherence_raw > 1.0 else coherence_raw
             filter_ratio = float(record.get("filter_ratio") or 0)
 
-            vn, verdict_str = _calculate_gom_verdict(score_buy, score_sell, coherence, filter_ratio)
-
-            # Utiliser verdict_num stocké si présent (déjà calculé par le poller)
-            if "verdict_num" in record and record["verdict_num"] != 0:
-                vn = int(record["verdict_num"])
-                verdict_str = record.get("verdict", verdict_str)
+            # Priorité absolue au verdict_num déjà calculé (poller MT5 ou _gom_verdict_record_from_payload)
+            # Le recalcul via _calculate_gom_verdict n'est qu'un fallback pour les records sans verdict_num
+            stored_vn = record.get("verdict_num")
+            if stored_vn is not None and stored_vn != 0:
+                vn = int(stored_vn)
+                verdict_str = record.get("verdict", "WAIT")
+            else:
+                coherence = coherence_raw / 100.0 if coherence_raw > 1.0 else coherence_raw
+                vn, verdict_str = _calculate_gom_verdict(score_buy, score_sell, coherence, filter_ratio)
+                # Si le record a un verdict texte explicite mais vn=0 (ex: données file sans scores)
+                # faire confiance au texte stocké et reconstruire le vn
+                stored_verdict = (record.get("verdict") or "WAIT").upper()
+                if stored_vn == 0 and stored_verdict not in ("WAIT", ""):
+                    verdict_str = stored_verdict
+                    if "PERFECT BUY" in stored_verdict: vn = 3
+                    elif "GOOD BUY" in stored_verdict: vn = 2
+                    elif stored_verdict == "BUY": vn = 1
+                    elif "PERFECT SELL" in stored_verdict: vn = -3
+                    elif "GOOD SELL" in stored_verdict: vn = -2
+                    elif stored_verdict == "SELL": vn = -1
 
             entry = float(record.get("entry") or record.get("close") or record.get("price") or 0)
             sl = float(record.get("sl") or record.get("setup_sl") or 0)
@@ -23925,16 +24766,23 @@ async def mark_pending_order_executed(payload: dict = Body(...)):
             _PIPELINE_LAST_EXEC[sym] = _time.time()
             logger.info(f"[PendingOrder] {sym} pipeline cooldown {PIPELINE_GOM_COOLDOWN_SEC}s activé")
 
-        # Enregistrer perte si MT5 signale un résultat négatif
+        # Enregistrer perte ou gain — tracker win streak global
         trade_profit = payload.get("profit") or payload.get("pnl") or 0
         try:
             trade_profit = float(trade_profit)
         except (TypeError, ValueError):
             trade_profit = 0
+
+        import time as _time2
+        global _WIN_STREAK, _WIN_STREAK_PAUSE_UNTIL
+
         if trade_profit < 0:
-            import time as _time2
             _LOSS_COOLDOWN_STORE[sym] = _time2.time()
             logger.warning(f"[PendingOrder] {sym} perte enregistrée (profit={trade_profit}) → cooldown {LOSS_COOLDOWN_SEC//60}min activé")
+            _record_win_streak_from_profit(trade_profit, sym)
+
+        elif trade_profit > 0:
+            _record_win_streak_from_profit(trade_profit, sym)
 
         return {"ok": True, "symbol": sym, "removed": True}
     return {"ok": True, "symbol": sym, "removed": False}
@@ -23948,6 +24796,29 @@ async def list_pending_orders():
         if (o.get("status") or "ready").lower() in ("ready",)
     ]
     return {"ok": True, "count": len(ready), "orders": ready}
+
+
+@app.get("/trading-pause")
+async def get_trading_pause():
+    """
+    Retourne l'état de la pause globale post-win-streak.
+    active=true  → pipeline ne doit pas placer d'ordres
+    active=false → trading autorisé
+    """
+    import time as _tp
+    now = _tp.time()
+    is_paused = now < _WIN_STREAK_PAUSE_UNTIL
+    remaining_sec = max(0, int(_WIN_STREAK_PAUSE_UNTIL - now))
+    return {
+        "active": is_paused,
+        "pause_until": _WIN_STREAK_PAUSE_UNTIL if is_paused else None,
+        "remaining_sec": remaining_sec,
+        "win_streak_current": len(_WIN_STREAK),
+        "win_streak_threshold": WIN_STREAK_THRESHOLD,
+        "win_streak_pause_hours": WIN_STREAK_PAUSE_SEC // 3600,
+        "min_entry_probability_pct": MIN_ENTRY_PROBABILITY_PCT,
+    }
+
 
 @app.post("/pending-order/resolve")
 async def resolve_pending_order(payload: dict = Body(...)):
@@ -25114,43 +25985,67 @@ async def get_tv_indicators(symbol: str = Query(..., description="Symbol to fetc
         raise HTTPException(status_code=500, detail=str(e))
 
 
+_TA_VENV_PYTHON = Path(r"D:\Dev\Depot Github\TradingAgents-main\.venv\Scripts\python.exe")
+_TA_BRIDGE_SCRIPT = Path(__file__).parent / "Python" / "tradbot_bridge.py"
+
 @app.get("/ta-analysis")
 async def get_ta_analysis(symbol: str = Query(...), date_str: str = Query(...)):
     """
     Get TradingAgents analysis opinion for a symbol.
-    Returns analyst consensus if available.
+    Runs tradbot_bridge via the TA venv (Python 3.11) in a subprocess to avoid
+    ABI conflicts between Python 3.14 (ai_server) and the 3.11-compiled .pyd files.
     """
     try:
         logger.info(f"[/ta-analysis] Fetching for {symbol} on {date_str}...")
 
-        # Try to import and run TradingAgents
-        try:
-            sys.path.insert(0, str(Path("D:/Dev/Depot Github/TradingAgents-main")))
-            from tradbot_bridge import run_quick
-
-            result = run_quick(symbol, date_str, analysts=["market", "social"])
-            logger.info(f"[/ta-analysis] {symbol} result: {result}")
-
-            return {
-                "success": True,
-                "symbol": symbol,
-                "date": date_str,
-                "opinion": result.get("opinion", "NEUTRAL"),
-                "confidence": result.get("confidence", 0.5),
-                "analysts": result.get("analysts", []),
-                "source": "trading_agents",
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            }
-        except ImportError:
-            logger.warning("[/ta-analysis] TradingAgents not available")
+        if not _TA_VENV_PYTHON.exists():
+            logger.warning("[/ta-analysis] TradingAgents venv not found")
             return {
                 "success": False,
                 "symbol": symbol,
-                "error": "TradingAgents not installed",
+                "error": "TradingAgents venv not installed",
                 "opinion": "NEUTRAL",
                 "confidence": 0.0,
                 "source": "none",
             }
+
+        import subprocess, json as _json
+        wrapper = (
+            "import sys, json\n"
+            f"sys.path.insert(0, r'{_TA_BRIDGE_SCRIPT.parent}')\n"
+            "from tradbot_bridge import run_quick\n"
+            f"result = run_quick({symbol!r}, {date_str!r}, analysts=['market', 'social'])\n"
+            "print(json.dumps(result))\n"
+        )
+        proc = await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: subprocess.run(
+                [str(_TA_VENV_PYTHON), "-c", wrapper],
+                capture_output=True, text=True, timeout=180,
+                cwd=str(Path(__file__).parent)
+            )
+        )
+
+        if proc.returncode != 0:
+            err = proc.stderr.strip().splitlines()[-1] if proc.stderr.strip() else "unknown"
+            logger.warning(f"[/ta-analysis] bridge exit {proc.returncode}: {err}")
+            raise HTTPException(status_code=500, detail=err)
+
+        result = _json.loads(proc.stdout.strip().splitlines()[-1])
+        logger.info(f"[/ta-analysis] {symbol} result: {result}")
+
+        return {
+            "success": True,
+            "symbol": symbol,
+            "date": date_str,
+            "opinion": result.get("opinion", "NEUTRAL"),
+            "confidence": result.get("confidence", 0.5),
+            "analysts": result.get("analysts", []),
+            "source": "trading_agents",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"[/ta-analysis] Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))

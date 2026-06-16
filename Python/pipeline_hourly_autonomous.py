@@ -240,7 +240,31 @@ class PipelineHourly:
                 verdicts = data.get("verdicts", data) if isinstance(data, dict) else data
                 if isinstance(verdicts, list) and verdicts:
                     log.info(f"  [GOM] {len(verdicts)} verdicts chargés depuis /gom-verdicts (LIVE)")
-                    return {v["symbol"]: v for v in verdicts if "symbol" in v}
+                    indexed = {v["symbol"]: v for v in verdicts if "symbol" in v}
+                    # Enrichir avec kola/BB/ATR depuis /gom-kola-dashboard (niveaux réels)
+                    enriched = 0
+                    for sym, v in indexed.items():
+                        if float(v.get("kola_buy") or 0) > 0:
+                            continue  # déjà enrichi
+                        try:
+                            import urllib.parse
+                            enc = urllib.parse.quote(sym)
+                            dr = requests.get(
+                                f"{AI_SERVER_URL}/gom-kola-dashboard?symbol={enc}&source=local",
+                                timeout=3
+                            )
+                            if dr.status_code == 200:
+                                d = dr.json()
+                                for field in ("kola_buy", "kola_sell", "bb_up", "bb_dn", "atr", "atr14"):
+                                    val = d.get(field)
+                                    if val:
+                                        v[field] = float(val)
+                                enriched += 1
+                        except Exception:
+                            pass
+                    if enriched:
+                        log.info(f"  [GOM] {enriched} symboles enrichis kola/BB/ATR depuis dashboard")
+                    return indexed
         except Exception:
             pass
 
@@ -333,6 +357,12 @@ class PipelineHourly:
                 data = response.json()
                 if data.get("success"):
                     log.info(f"  ✅ TradingAgents OK: {data.get('opinion')}")
+                    # Enrichir avec ia_status_v2 depuis GOM cache si absent (pour gate HOLD)
+                    if "ia_status_v2" not in data:
+                        g = getattr(self, "_gom_cache", {}).get(symbol, {})
+                        if g:
+                            _, ia_details = get_ia_status_v2(symbol, g)
+                            data["ia_status_v2"] = ia_details
                     return data
                 log.warning(f"  ⚠️  TradingAgents not available: {data.get('error')} — fallback GOM")
             else:
@@ -361,46 +391,62 @@ class PipelineHourly:
                 return None
 
             direction = "BUY" if verdict_num > 0 else "SELL"
-            entry = g.get("entry", 0.0) or g.get("price", 0.0)
+            entry = float(g.get("entry", 0.0) or g.get("price", 0.0))
             if entry <= 0:
                 log.warning(f"  ⚠️  GOM entry=0 pour {symbol} — skip")
                 return None
 
-            # SL/TP depuis Bollinger ou kola levels — avec floor ATR minimum
-            bb_up  = g.get("bb_up", 0.0)
-            bb_dn  = g.get("bb_dn", 0.0)
+            atr_raw = float(g.get("atr", 0.0) or g.get("atr14", 0.0))
+            kola_buy  = float(g.get("kola_buy")  or 0.0)
+            kola_sell = float(g.get("kola_sell") or 0.0)
+            bb_up = float(g.get("bb_up") or 0.0)
+            bb_dn = float(g.get("bb_dn") or 0.0)
+            is_synthetic = "CRASH" in symbol.upper() or "BOOM" in symbol.upper() or "JUMP" in symbol.upper()
+
+            # Multiplicateurs ATR selon stratégie GoldSMC v2
+            atr_sl_mult = 1.5 if is_synthetic else 2.0
+            atr_tp_rr   = 2.0 if is_synthetic else 1.5
+            min_sl_dist = atr_raw * atr_sl_mult if atr_raw > 0 else entry * 0.003
+
             if direction == "BUY":
-                sl = bb_dn if bb_dn > 0 else entry * 0.995
-                tp = bb_up if bb_up > 0 else entry * 1.01
+                # Entry : utiliser kola_buy (support réel) si en-dessous du prix
+                if kola_buy > 0 and kola_buy < entry:
+                    entry = kola_buy
+                # SL : sous bb_dn ou sous entry d'un ATR×mult
+                if bb_dn > 0 and abs(entry - bb_dn) >= min_sl_dist:
+                    sl = bb_dn - atr_raw * 0.5 if atr_raw > 0 else bb_dn * 0.998
+                else:
+                    sl = entry - min_sl_dist
+                # TP : kola_sell (résistance) ou bb_up
+                if kola_sell > entry:
+                    tp = kola_sell
+                elif bb_up > entry:
+                    tp = bb_up
+                else:
+                    tp = entry + abs(entry - sl) * atr_tp_rr
             else:
-                sl = bb_up if bb_up > 0 else entry * 1.005
-                tp = bb_dn if bb_dn > 0 else entry * 0.99
+                # Entry : utiliser kola_sell (résistance réelle) si au-dessus du prix
+                if kola_sell > 0 and kola_sell > entry:
+                    entry = kola_sell
+                # SL : au-dessus bb_up ou au-dessus entry d'un ATR×mult
+                if bb_up > 0 and abs(bb_up - entry) >= min_sl_dist:
+                    sl = bb_up + atr_raw * 0.5 if atr_raw > 0 else bb_up * 1.002
+                else:
+                    sl = entry + min_sl_dist
+                # TP : kola_buy (support) ou bb_dn
+                if kola_buy > 0 and kola_buy < entry:
+                    tp = kola_buy
+                elif bb_dn > 0 and bb_dn < entry:
+                    tp = bb_dn
+                else:
+                    tp = entry - abs(sl - entry) * atr_tp_rr
 
-            # Floor ATR minimum : SL trop serré (BB collé au prix) cause des stops immédiats
-            atr_raw = g.get("atr", 0.0) or g.get("atr14", 0.0)
-            is_synthetic = "CRASH" in symbol or "BOOM" in symbol or "JUMP" in symbol
-
-            if atr_raw and atr_raw > 0:
-                # Multiplier plus grand pour CRASH/BOOM (indices synthétiques)
-                atr_multiplier = 4.0 if is_synthetic else 2.0
-                min_sl_dist = atr_raw * atr_multiplier
-                sl_dist = abs(entry - sl)
-                if sl_dist < min_sl_dist:
-                    sl = round(entry - min_sl_dist if direction == "BUY" else entry + min_sl_dist, 5)
-                    log.info(f"  ℹ️  SL ATR floor appliqué ({sl_dist:.2f} < {min_sl_dist:.2f}) → SL={sl:.5f}")
-
-            # MINIMUM ABSOLU pour synthétiques: 40+ pips (0.40) pour CRASH/BOOM
-            if is_synthetic:
-                min_abs_pips = 0.40  # 40 pips minimum
-                sl_dist = abs(entry - sl)
-                if sl_dist < min_abs_pips:
-                    sl = entry - min_abs_pips if direction == "BUY" else entry + min_abs_pips
-                    log.info(f"  ℹ️  SYNTHÉTIQUE: SL forcé à +{min_abs_pips} pips (trop serré: {sl_dist:.2f})")
-
-                tp_dist = abs(entry - tp)
-                if tp_dist < min_abs_pips:
-                    tp = entry + min_abs_pips if direction == "BUY" else entry - min_abs_pips
-                    log.info(f"  ℹ️  SYNTHÉTIQUE: TP forcé à +{min_abs_pips} pips (trop serré: {tp_dist:.2f})")
+            # Garantir RR ≥ 1.0 (TP doit couvrir au moins la distance SL)
+            sl_dist = abs(entry - sl)
+            tp_dist = abs(entry - tp)
+            if sl_dist > 0 and tp_dist < sl_dist:
+                tp = entry + sl_dist * atr_tp_rr if direction == "BUY" else entry - sl_dist * atr_tp_rr
+                log.info(f"  ℹ️  RR corrigé (tp_dist={tp_dist:.2f} < sl_dist={sl_dist:.2f}) → TP={tp:.5f}")
 
             # ENRICHIR CONFIANCE: IA Status v2 (multi-TF avec M5 prioritaire)
             ia_conf_pct, ia_details = get_ia_status_v2(symbol, g)
@@ -438,6 +484,19 @@ class PipelineHourly:
         log.info(f"📈 Phase 3 — Place l'ordre: {symbol}")
 
         try:
+            # GATE WIN-STREAK : pause 1h après 3 gains consécutifs sans perte
+            try:
+                pause_r = requests.get(f"{AI_SERVER_URL}/trading-pause", timeout=5)
+                if pause_r.status_code == 200:
+                    pause_data = pause_r.json()
+                    if pause_data.get("active"):
+                        remaining_min = pause_data.get("remaining_sec", 0) // 60
+                        log.warning(f"  🏆 Pause win-streak active — trading suspendu encore {remaining_min}min")
+                        self.errors.append((symbol, f"WIN_STREAK_PAUSE_{remaining_min}min"))
+                        return False
+            except Exception:
+                pass  # AI server indisponible → continuer sans gate
+
             # PRÉ-CHECK: Vérifier si un ordre existe déjà pour ce symbole
             try:
                 check = requests.get(
@@ -467,11 +526,30 @@ class PipelineHourly:
             # Build payload matching /pending-order endpoint
             action = "BUY" if analysis.get("opinion", "").upper() in ["BUY", "PERFECT BUY", "GOOD BUY"] else "SELL"
 
-            # GATE IA STATUS : coherence_pct doit être >= 50% (M5 prioritaire avec confiance min)
+            # GARDE ABSOLUE Boom/Crash — vérifiée en premier avant toute autre gate
+            sym_up = symbol.upper()
+            if "BOOM" in sym_up and action == "SELL":
+                log.warning(f"  🚫 {symbol}: SELL interdit sur Boom (RÈGLE ABSOLUE) — skip")
+                self.errors.append((symbol, "BOOM_SELL_FORBIDDEN"))
+                return False
+            if "CRASH" in sym_up and action == "BUY":
+                log.warning(f"  🚫 {symbol}: BUY interdit sur Crash (RÈGLE ABSOLUE) — skip")
+                self.errors.append((symbol, "CRASH_BUY_FORBIDDEN"))
+                return False
+
+            # GATE IA STATUS : coherence_pct doit être >= 80% (relevé 50→80 après série de pertes)
+            # Note: 0 inclus → données absentes = bloqué (anciennement 0 < _ia laissait passer)
             _ia = float(analysis.get("coherence_pct") or analysis.get("confidence", 0) * 100 or 0)
-            if 0 < _ia < 50.0:
-                log.warning(f"  🚫 {symbol}: IA status {_ia:.0f}% < 50% requis — ordre bloqué")
+            if _ia < 80.0:
+                log.warning(f"  🚫 {symbol}: IA status {_ia:.0f}% < 80% requis — ordre bloqué")
                 self.errors.append((symbol, f"IA_STATUS_{_ia:.0f}pct"))
+                return False
+
+            # GATE IA ACTION HOLD : si IA v2 dit HOLD, bloquer même si confiance >= 80%
+            _ia_action = (analysis.get("ia_status_v2") or {}).get("action", "")
+            if _ia_action == "HOLD":
+                log.warning(f"  🚫 {symbol}: IA v2 action=HOLD ({_ia:.0f}%) — aucun signal clair, ordre bloqué")
+                self.errors.append((symbol, f"IA_HOLD_{_ia:.0f}pct"))
                 return False
 
             # GATE RSI EXTREME : éviter entrées sur RSI overbought/oversold
@@ -485,6 +563,17 @@ class PipelineHourly:
                 self.errors.append((symbol, f"RSI_OVERSOLD_{_rsi:.0f}"))
                 return False
 
+            # GATE M15 : M15 ne doit pas être opposé à la direction (tendance intermédiaire)
+            _m15 = analysis.get("tf_m15_dir", "NEUT")
+            if action == "BUY" and _m15 == "BEAR":
+                log.warning(f"  🚫 {symbol}: M15=BEAR opposé à BUY — setup non confirmé, ordre bloqué")
+                self.errors.append((symbol, "M15_OPPOSED_BUY"))
+                return False
+            if action == "SELL" and _m15 == "BULL":
+                log.warning(f"  🚫 {symbol}: M15=BULL opposé à SELL — setup non confirmé, ordre bloqué")
+                self.errors.append((symbol, "M15_OPPOSED_SELL"))
+                return False
+
             # GATE M1 : M1 ne doit pas être opposé à la direction (micro-tendance)
             _m1 = analysis.get("tf_m1_dir", "NEUT")
             if action == "BUY" and _m1 == "BEAR":
@@ -496,6 +585,13 @@ class PipelineHourly:
                 self.errors.append((symbol, "M1_OPPOSED_SELL"))
                 return False
 
+            # GATE POST-SPIKE : attendre 2 bougies M1 de confirmation après un spike
+            _bars_since_spike = int(analysis.get("bars_since_spike") or 99)
+            if 0 < _bars_since_spike < 2:
+                log.warning(f"  🚫 {symbol}: spike trop récent ({_bars_since_spike} bougie M1) — attente confirmation 2 bougies min")
+                self.errors.append((symbol, f"POST_SPIKE_CONFIRM_{_bars_since_spike}bar"))
+                return False
+
             # GATE MTF : H4+H1+M15 doivent confirmer la direction
             _mtf_ok, _mtf_reason = _check_mtf_gate(symbol, analysis, action)
             if not _mtf_ok:
@@ -503,16 +599,7 @@ class PipelineHourly:
                 self.errors.append((symbol, f"MTF_GATE: {_mtf_reason[:60]}"))
                 return False
 
-            # Garde Boom/Crash : SELL interdit sur Boom, BUY interdit sur Crash
-            sym_up = symbol.upper()
-            if "BOOM" in sym_up and action == "SELL":
-                log.warning(f"  🚫 {symbol}: SELL interdit sur Boom — skip")
-                self.errors.append((symbol, "BOOM_SELL_FORBIDDEN"))
-                return False
-            if "CRASH" in sym_up and action == "BUY":
-                log.warning(f"  🚫 {symbol}: BUY interdit sur Crash — skip")
-                self.errors.append((symbol, "CRASH_BUY_FORBIDDEN"))
-                return False
+            # (garde Boom/Crash déjà appliquée en tête de fonction)
 
             # Apply spike anticipation if available
             entry_price = float(analysis.get("entry", 0))

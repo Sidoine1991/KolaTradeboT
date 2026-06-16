@@ -416,41 +416,28 @@ def _val_from_study(vals: Dict[str, Any], *keys: str) -> Optional[float]:
 
 
 def apply_spike_bc_override(payload: Dict[str, Any], vals: Dict[str, Any]) -> Dict[str, Any]:
-    """Si pre-spike tradable sur Boom/Crash, force verdict + setup pour SMC_Universal."""
-    spike_trad = _val_from_study(vals, "spike_tradable", "spike_tradable")
-    if spike_trad is None or _safe_int(spike_trad) < 1:
-        payload["spike_tradable"] = False
-        return payload
-
+    """Enrichit les métadonnées spike Boom/Crash depuis les plots Pine (sans écraser le verdict GOM)."""
     imminence = _val_from_study(vals, "imminence_pct", "imminence_pct")
     spike_level = _val_from_study(vals, "spike_level", "spike_level")
     pre_spike = _val_from_study(vals, "pre_spike_pct", "pre_spike_pct")
+    spike_progress = _val_from_study(vals, "spike_progress_pct", "spike_progress_pct")
+    bars_since = _val_from_study(vals, "bars_since_spike", "bars_since_spike")
+    spike_freq = _val_from_study(vals, "spike_freq_bars", "spike_freq_bars")
+    spike_trad = _val_from_study(vals, "spike_tradable", "spike_tradable")
 
-    payload["spike_tradable"] = True
-    payload["imminence_pct"] = round(imminence or 0, 1)
-    payload["spike_level"] = _safe_int(spike_level)
-    payload["pre_spike_pct"] = round(pre_spike or 0, 1)
-
-    sdir = _safe_int(payload.get("setup_dir"))
-    if sdir == 1:
-        payload["verdict"] = "GOOD BUY"
-        payload["verdict_num"] = 2
-        payload["setup_type"] = "SPIKE_BOOM"
-    elif sdir == -1:
-        payload["verdict"] = "GOOD SELL"
-        payload["verdict_num"] = -2
-        payload["setup_type"] = "SPIKE_CRASH"
-
-    eq = float(payload.get("entry_quality") or 0)
-    co = float(payload.get("coherence_pct") or 0)
-    if eq < 55:
-        payload["entry_quality"] = max(eq, 65.0)
-    if co < 45:
-        payload["coherence_pct"] = max(co, 50.0)
-
-    payload["setup_valid"] = bool(
-        sdir != 0 and float(payload.get("setup_entry") or 0) > 0
-    )
+    if spike_level is not None:
+        payload["spike_level"] = _safe_int(spike_level)
+    if imminence is not None:
+        payload["imminence_pct"] = round(imminence, 1)
+    if pre_spike is not None:
+        payload["pre_spike_pct"] = round(pre_spike, 1)
+    if spike_progress is not None:
+        payload["spike_progress_pct"] = round(spike_progress, 1)
+    if bars_since is not None:
+        payload["bars_since_spike"] = _safe_int(bars_since)
+    if spike_freq is not None:
+        payload["spike_freq_bars"] = _safe_int(spike_freq)
+    payload["spike_tradable"] = spike_trad is not None and _safe_int(spike_trad) >= 1
     return payload
 
 
@@ -549,6 +536,9 @@ def parse_gom_study(raw: Dict[str, Any], symbol: str = SYMBOL) -> Optional[Dict[
     imminence_pct = _val_from_study(vals, "imminence_pct", "imminence_pct")
     spike_level_raw = _val_from_study(vals, "spike_level", "spike_level")
     pre_spike_pct = _val_from_study(vals, "pre_spike_pct", "pre_spike_pct")
+    spike_progress_pct = _val_from_study(vals, "spike_progress_pct", "spike_progress_pct")
+    bars_since_spike = _val_from_study(vals, "bars_since_spike", "bars_since_spike")
+    spike_freq_bars = _val_from_study(vals, "spike_freq_bars", "spike_freq_bars")
     ob_bull_top = _val_from_study(vals, "ob_bull_top")
     ob_bull_bot = _val_from_study(vals, "ob_bull_bot")
     ob_bear_top = _val_from_study(vals, "ob_bear_top")
@@ -759,6 +749,10 @@ def _persist_gom_signal_file(payload: Dict[str, Any]) -> None:
             "spike_tradable": payload.get("spike_tradable"),
             "imminence_pct": payload.get("imminence_pct"),
             "spike_level": payload.get("spike_level"),
+            "pre_spike_pct": payload.get("pre_spike_pct"),
+            "spike_progress_pct": payload.get("spike_progress_pct"),
+            "bars_since_spike": payload.get("bars_since_spike"),
+            "spike_freq_bars": payload.get("spike_freq_bars"),
             "bb_up": payload.get("bb_up", 0.0),
             "bb_mid": payload.get("bb_mid", 0.0),
             "bb_dn": payload.get("bb_dn", 0.0),

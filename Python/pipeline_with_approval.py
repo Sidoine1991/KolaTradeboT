@@ -44,7 +44,7 @@ except ImportError as _ref_err:
     _REFINER_AVAILABLE = False
     log_tmp = logging.getLogger("pipeline_approval")
     log_tmp.warning("signal_refiner non disponible: %s", _ref_err)
-    MIN_QUALITY_SCORE = 75  # Seuil minimum = 75% confiance
+    MIN_QUALITY_SCORE = 80  # Seuil minimum = 80% confiance
 
 _HERE  = Path(__file__).resolve().parent
 _ROOT  = _HERE.parent
@@ -639,6 +639,117 @@ def _check_gom_before_order(symbol: str, direction: str, exec_type: str) -> Opti
         return f"GOM fetch error ({e}) — ordre market bloqué"
 
 
+def _check_bc_hour_before_order(symbol: str) -> Optional[str]:
+    """Gate bc_heure — plage UTC propice pour Boom/Crash."""
+    try:
+        clean = _tv_to_mt5(symbol)
+        r = requests.get(f"{AI_SERVER}/bc-volatility", params={"symbol": clean}, timeout=5)
+        if r.status_code != 200:
+            return None  # serveur indisponible — ne pas bloquer ici (EA gate reste actif)
+        data = r.json()
+        if not data.get("ok"):
+            return None
+        if not data.get("bc_applicable"):
+            return None
+        if not data.get("bc_tradeable"):
+            return (
+                f"BC heure UTC {data.get('bc_hour_utc')} conf "
+                f"{data.get('bc_confidence', 0):.0f}% — hors plage propice"
+            )
+        return None
+    except Exception as e:
+        log.warning("  [BC gate] Erreur fetch: %s", e)
+        return None
+
+
+def _check_trading_pause() -> Optional[str]:
+    """Gate pause performance (7 gains → 4h) via ai_server."""
+    try:
+        r = requests.get(f"{AI_SERVER}/trading-pause", timeout=5)
+        if r.status_code != 200:
+            return None
+        data = r.json()
+        if data.get("active"):
+            rem = int(data.get("remaining_sec", 0))
+            return f"Pause win-streak — {rem // 3600}h{(rem % 3600) // 60}m restantes"
+        return None
+    except Exception as e:
+        log.warning("  [PAUSE gate] Erreur fetch: %s", e)
+        return None
+
+
+def _check_cognition_before_order(symbol: str, direction: str) -> Optional[str]:
+    """Gate cognition — direction/strength depuis ai_server."""
+    try:
+        clean = _tv_to_mt5(symbol)
+        r = requests.get(
+            f"{AI_SERVER}/cognition/forecast-200",
+            params={"symbol": clean, "chart_tf": "M1"},
+            timeout=8,
+        )
+        if r.status_code != 200:
+            return None
+        data = r.json()
+        if not data.get("ok"):
+            return None
+        strength = float(data.get("cog_strength", 0) or 0)
+        confidence = float(data.get("cog_confidence", 0) or 0)
+        cog_dir = str(data.get("cog_direction", "NEUTRAL")).upper()
+        min_str, min_conf = 0.50, 0.55
+        if strength < min_str or confidence < min_conf:
+            return (
+                f"Cognition faible str={strength:.2f} conf={confidence:.2f} "
+                f"(min {min_str}/{min_conf})"
+            )
+        if cog_dir == "NEUTRAL":
+            return "Cognition direction NEUTRAL"
+        d = direction.upper()
+        if d in ("BUY", "LONG") and cog_dir == "SELL":
+            return f"Cognition {cog_dir} oppose BUY"
+        if d in ("SELL", "SHORT") and cog_dir == "BUY":
+            return f"Cognition {cog_dir} oppose SELL"
+        return None
+    except Exception as e:
+        log.warning("  [COG gate] Erreur fetch: %s", e)
+        return None
+
+
+def _check_probability_before_order(symbol: str, direction: str) -> Optional[str]:
+    """Gate probabilité composite — aligné EA SMC_ProbabilityGate."""
+    try:
+        clean = _tv_to_mt5(symbol)
+        r = requests.get(
+            f"{AI_SERVER}/gom-kola-dashboard",
+            params={"symbol": clean, "chart_tf": "M1", "source": "local"},
+            timeout=8,
+        )
+        if r.status_code != 200:
+            return None
+        data = r.json()
+        if not data.get("ok"):
+            return None
+        vn = int(data.get("verdict_num", 0) or 0)
+        if abs(vn) < 2:
+            return f"GOM vn={vn} — GOOD/PERFECT requis (anti-hazard)"
+        coherence = float(data.get("coherence_pct", 0) or 0)
+        if coherence > 0 and coherence < 80:
+            return f"Cohérence GOM {coherence:.0f}% < 80%"
+        prob = float(data.get("entry_probability", 0) or 0)
+        if prob <= 0:
+            # recalcul local si pas encore enrichi
+            cog_s = float(data.get("cog_strength", 0) or 0)
+            cog_c = float(data.get("cog_confidence", 0) or 0)
+            if cog_s < 0.50 or cog_c < 0.55:
+                return f"Cognition faible str={cog_s:.2f} conf={cog_c:.2f}"
+            prob = coherence * 0.30 + (25 if abs(vn) >= 3 else 18) + cog_s * cog_c * 25
+        if prob < 72:
+            return f"Probabilité entrée {prob:.0f}% < 72% (setup hazard)"
+        return None
+    except Exception as e:
+        log.warning("  [PROB gate] Erreur fetch: %s", e)
+        return None
+
+
 def place_order(ta: Dict) -> bool:
     # Utiliser le nom MT5 propre (ex: "Boom 500 Index") pas le ticker TV (DERIV:BOOM_500_INDEX)
     mt5_symbol = ta.get("clean_sym") or _tv_to_mt5(ta["symbol"])
@@ -653,6 +764,30 @@ def place_order(ta: Dict) -> bool:
     if gom_block:
         log.warning("  [GOM gate] 🚫 Ordre bloqué — %s", gom_block)
         send_whatsapp(f"🚫 *{ta['symbol']}* ordre bloqué\n_{gom_block}_")
+        return False
+
+    pause_block = _check_trading_pause()
+    if pause_block:
+        log.warning("  [PAUSE gate] 🚫 Ordre bloqué — %s", pause_block)
+        send_whatsapp(f"🏆 *{ta['symbol']}* pause performance\n_{pause_block}_")
+        return False
+
+    bc_block = _check_bc_hour_before_order(ta["symbol"])
+    if bc_block:
+        log.warning("  [BC gate] 🚫 Ordre bloqué — %s", bc_block)
+        send_whatsapp(f"🚫 *{ta['symbol']}* bloqué (BC heure)\n_{bc_block}_")
+        return False
+
+    cog_block = _check_cognition_before_order(ta["symbol"], ta["direction"])
+    if cog_block:
+        log.warning("  [COG gate] 🚫 Ordre bloqué — %s", cog_block)
+        send_whatsapp(f"🚫 *{ta['symbol']}* bloqué (cognition)\n_{cog_block}_")
+        return False
+
+    prob_block = _check_probability_before_order(ta["symbol"], ta["direction"])
+    if prob_block:
+        log.warning("  [PROB gate] 🚫 Ordre bloqué — %s", prob_block)
+        send_whatsapp(f"🚫 *{ta['symbol']}* bloqué (probabilité)\n_{prob_block}_")
         return False
 
     # ── Gate MTF : H4+H1+M15 doivent confirmer la direction ──

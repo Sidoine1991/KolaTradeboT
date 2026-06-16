@@ -25,7 +25,7 @@ import json
 import logging
 import time
 import requests
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Dict, Optional
 
@@ -138,6 +138,33 @@ def load_gom_verdicts() -> List[Dict]:
     except Exception as e:
         log.error(f"[GOM] Failed to load: {e}")
         return []
+
+
+# Fenêtres de trading UTC — hors fenêtre = verdict ignoré même si GOM actif.
+# Boom/Crash : pas de restriction locale (bc_heure gate gérée par ai_server /pending-order).
+_TRADING_WINDOWS: dict = {
+    "XAUUSD": [(7, 17)],
+    "BTCUSD": [(8, 22)],
+    "ETHUSD": [(8, 22)],
+    "NAS100": [(13, 20)],
+    "US30":   [(13, 20)],
+}
+
+
+def _in_trading_window(symbol: str) -> bool:
+    """Retourne True si le symbole est dans sa fenêtre de trading UTC (heure courante)."""
+    utc_hour = datetime.now(timezone.utc).hour
+    s = symbol.upper().replace(" ", "")
+    for key, windows in _TRADING_WINDOWS.items():
+        if key in s:
+            in_window = any(start <= utc_hour < end for start, end in windows)
+            if not in_window:
+                log.warning(
+                    f"[GATE-SESSION] {symbol}: heure UTC {utc_hour:02d}h "
+                    f"hors fenêtre propice {windows} — rejeté"
+                )
+            return in_window
+    return True  # Boom/Crash et symboles inconnus → gate déléguée à ai_server
 
 
 def validate_direction(symbol: str, direction: str) -> bool:
@@ -422,7 +449,12 @@ def main(auto_approve: bool = False, approval_timeout: int = 120, test_mode: boo
             stats["rejected"] += 1
             continue
 
-        # 1b. Vérifier whitelist pipeline (si active)
+        # 1b. Gate horaire UTC — ne pas trader hors fenêtre propice
+        if not _in_trading_window(symbol):
+            stats["rejected"] += 1
+            continue
+
+        # 1c. Vérifier whitelist pipeline (si active)
         if not check_whitelist(symbol):
             stats["rejected"] += 1
             continue

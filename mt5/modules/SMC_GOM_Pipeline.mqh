@@ -7,15 +7,33 @@
 
 #include "MT5_Candles_Uploader.mqh"
 
+// inputs du .mq5 parent — visibles globalement, pas besoin de extern en MQL5
+
 // Déclaré / implémenté dans SMC_Universal.mq5
 bool DisciplineAllowsPipelineAction(const string action);
 bool SMCGP_GOMValidatesPrimarySignal(const int dir);
+bool SMC_BCHourAllowsTrade(const string symbol = "");
+bool SMC_HighProbabilityAllowsEntry(const int dirSign = 0);
+extern double g_lastEntryProbability;
+extern string g_lastAIAction;
+extern double g_lastAIConfidence;
+
+bool SMCGP_IsBoomCrashSym(const string sym)
+{
+   string s = sym;
+   StringToUpper(s);
+   return (StringFind(s, "BOOM") >= 0 || StringFind(s, "CRASH") >= 0);
+}
 
 MT5CandlesUploader *g_smcCandlesUploader = NULL;
 datetime g_smcLastCandleUpload = 0;
 // ── État GOM ───────────────────────────────────────────────────────
 string   g_smcGomVerdict      = "WAIT";
 int      g_smcGomVerdictNum   = 0;
+int      g_smcGomVerdictNumPrev = 999;  // 999 = pas encore armé
+bool     g_smcGomForceExhausted = false; // PERFECT→GOOD : fin cycle spike Boom/Crash
+string   g_smcGomVerdictPrev  = "";
+bool     g_smcGomNotifReady     = false;
 double   g_smcGomQuality      = 0.0;
 double   g_smcGomCoherence    = 0.0;
 double   g_smcGomKolaBuy      = 0.0;
@@ -25,6 +43,10 @@ string   g_smcGomGlobalDir    = "";
 int      g_smcGomGlobalStr    = 0;
 bool     g_smcGomConnected    = false;
 double   g_iaStatusConfidence = 0.0;  // IA Status confiance (0-100%)
+string   g_smcIAStatusAction  = "HOLD"; // IA Status action depuis dashboard GOM (BUY/SELL/HOLD)
+double   g_smcCorrExhaustPct  = 0.0;  // Correction exhaustion 0-100 (>70 = safe)
+string   g_smcCorrPhase       = "unknown"; // trending|correcting|exhausted|resuming
+bool     g_smcCorrEntrySafe   = false; // true = correction terminée, re-entrée safe
 datetime g_smcLastGOMPoll     = 0;
 datetime g_smcLastMCPPoll      = 0;
 datetime g_smcLastPipelineExec= 0;
@@ -39,6 +61,24 @@ double   g_smcGomScoreSell    = 0.0;
 int      g_smcGomRsi          = 50;
 double   g_smcGomPrice        = 0.0;
 double   g_smcGomSpikePct     = 0.0;
+int      g_smcGomSpikeLevel   = 0;
+int      g_smcGomSpikeLevelPrev = -1;
+double   g_smcGomImminencePct = 0.0;
+bool     g_smcGomSpikeTradable = false;
+bool     g_smcGomSpikeTradablePrev = false;
+double   g_smcGomSpikeProgressPct = 0.0;
+int      g_smcGomBarsSinceSpike = 0;
+int      g_smcGomSpikeFreqBars  = 0;
+// Heures UTC Boom/Crash (bc_heure — enrichi par ai_server)
+int      g_smcBcHourUtc         = -1;
+double   g_smcBcConfidence      = 0.0;
+bool     g_smcBcTradeable       = true;
+string   g_smcBcSession         = "";
+string   g_smcBcRating          = "";
+string   g_smcBcWindowStart     = "";
+string   g_smcBcWindowEnd       = "";
+string   g_smcBcMappedKey       = "";
+bool     g_smcSpikeNotifReady   = false;
 string   g_smcTfM1Dir         = "";
 string   g_smcTfM5Dir         = "";
 string   g_smcTfM15Dir        = "";
@@ -89,6 +129,22 @@ double   g_smcObBearBot       = 0.0;
 double   g_smcPredBbMid[]     = {};
 double   g_smcPredBbUp[]      = {};
 double   g_smcPredBbDn[]      = {};
+
+// Cognition forecast 200 bougies (ai_server)
+double   g_cogStrength        = 0.0;
+double   g_cogConfidence      = 0.0;
+string   g_cogDirection       = "NEUTRAL";
+int      g_pipelineEma9Handle = INVALID_HANDLE;  // EMA9 M1 pour re-entrées scalp pipeline
+string   g_cogRegime          = "";
+double   g_smcPredPathMid[]   = {};
+double   g_smcPredPathUp[]    = {};
+double   g_smcPredPathDn[]    = {};
+double   g_smcCogOpen[]       = {};
+double   g_smcCogHigh[]       = {};
+double   g_smcCogLow[]        = {};
+double   g_smcCogClose[]      = {};
+double   g_smcCogQ10[]        = {};
+double   g_smcCogQ90[]        = {};
 
 // ── JSON helpers ───────────────────────────────────────────────────
 double SMCGP_JsonDouble(const string &body, const string key, double def = 0.0)
@@ -200,9 +256,108 @@ bool SMCGP_HttpGet(const string path, string &bodyOut, int timeoutMs = 5000)
    string respH;
    int code = WebRequest("GET", g_smcServerUrl, headers, timeoutMs, post, result, respH);
    g_smcLastHttpCode = code;
-   if(code != 200) return false;
+   if(code != 200)
+   {
+      if(code == -1)
+      {
+         static datetime s_lastHttpHint = 0;
+         if(TimeCurrent() - s_lastHttpHint >= 60)
+         {
+            s_lastHttpHint = TimeCurrent();
+            int err = GetLastError();
+            Print("[GOM-HTTP] WebRequest echoue (code -1, err=", err, ") url=", g_smcServerUrl);
+            Print("[GOM-HTTP] MT5 > Outils > Options > Expert Advisors > autoriser WebRequest pour: ",
+                  AI_ServerURL);
+            Print("[GOM-HTTP] Verifier aussi que ai_server tourne (start_ai_server.bat)");
+         }
+      }
+      return false;
+   }
    bodyOut = CharArrayToString(result, 0, WHOLE_ARRAY, CP_UTF8);
    return true;
+}
+
+int SMCGP_GOMTradeDirection()
+{
+   if(g_smcGomVerdictNum >= 2) return 1;
+   if(g_smcGomVerdictNum <= -2) return -1;
+   return 0;
+}
+
+int SMCGP_GOMPerfectDirection()
+{
+   if(g_smcGomVerdictNum == 3) return 1;
+   if(g_smcGomVerdictNum == -3) return -1;
+   return 0;
+}
+
+int SMCGP_GOMGoodDirection()
+{
+   if(g_smcGomVerdictNum == 2) return 1;
+   if(g_smcGomVerdictNum == -2) return -1;
+   return 0;
+}
+
+int SMCGP_GOMSimpleDirection()
+{
+   if(g_smcGomVerdictNum == 1) return 1;
+   if(g_smcGomVerdictNum == -1) return -1;
+   return 0;
+}
+
+bool SMCGP_IsPerfectVerdict(const int vnum)
+{
+   return (vnum == 3 || vnum == -3);
+}
+
+bool SMCGP_IsGoodVerdict(const int vnum)
+{
+   return (vnum == 2 || vnum == -2);
+}
+
+bool SMCGP_IsSimpleVerdict(const int vnum)
+{
+   return (vnum == 1 || vnum == -1);
+}
+
+bool SMCGP_IsGOMCorrectionExit(const int prevVn, const int curVn)
+{
+   if(MathAbs(prevVn) != 2) return false;
+   if(curVn == 0) return true;
+   if(MathAbs(curVn) < 2) return true;
+   if((prevVn > 0 && curVn < 0) || (prevVn < 0 && curVn > 0)) return true;
+   return false;
+}
+
+bool SMCGP_IsGOMForceExhausted(const int prevVn, const int curVn)
+{
+   return ((prevVn == 3 && curVn == 2) || (prevVn == -3 && curVn == -2));
+}
+
+bool SMCGP_GOMSpikeReentryAllowed()
+{
+   if(!g_smcGomForceExhausted) return true;
+   return SMCGP_IsPerfectVerdict(g_smcGomVerdictNum);
+}
+
+double SMCGP_GetGOMOBLimitPrice(const int dir)
+{
+   if(dir == 1 && g_smcObBullBot > 0 && g_smcObBullTop > 0)
+      return MathMin(g_smcObBullBot, g_smcObBullTop);
+   if(dir == -1 && g_smcObBearTop > 0 && g_smcObBearBot > 0)
+      return MathMax(g_smcObBearTop, g_smcObBearBot);
+   if(g_smcSetupValid && g_smcSetupEntry > 0 && g_smcSetupDir == dir)
+      return g_smcSetupEntry;
+   return 0.0;
+}
+
+bool SMCGP_IsGOMManagedComment(const string comment)
+{
+   if(StringFind(comment, "GOM_LIMIT") >= 0) return true;
+   if(StringFind(comment, "GOM_GOOD") >= 0) return true;
+   if(StringFind(comment, "GOM_PERFECT") >= 0) return true;
+   if(StringFind(comment, "GOM_GP") >= 0) return true;
+   return false;
 }
 
 string SMCGP_JsonTfDir(const string &body, const string key)
@@ -240,6 +395,14 @@ void SMCGP_ParseGOMBody(const string &body)
    g_smcGomRsi          = (int)SMCGP_JsonDouble(body, "rsi");
    g_smcGomPrice        = SMCGP_JsonDouble(body, "price");
    g_smcGomSpikePct     = SMCGP_JsonDouble(body, "spike_pct");
+   g_smcGomSpikeLevel   = (int)SMCGP_JsonDouble(body, "spike_level");
+   g_smcGomImminencePct = SMCGP_JsonDouble(body, "imminence_pct");
+   g_smcGomSpikeProgressPct = SMCGP_JsonDouble(body, "spike_progress_pct");
+   g_smcGomBarsSinceSpike = (int)SMCGP_JsonDouble(body, "bars_since_spike");
+   g_smcGomSpikeFreqBars  = (int)SMCGP_JsonDouble(body, "spike_freq_bars");
+   g_smcGomSpikeTradable  = SMCGP_JsonBool(body, "spike_tradable");
+   if(!g_smcGomSpikeTradable && SMCGP_JsonDouble(body, "spike_tradable", -1.0) >= 1.0)
+      g_smcGomSpikeTradable = true;
    g_smcBbUp            = SMCGP_JsonDouble(body, "bb_up");
    g_smcBbMid           = SMCGP_JsonDouble(body, "bb_mid");
    g_smcBbDn            = SMCGP_JsonDouble(body, "bb_dn");
@@ -258,6 +421,12 @@ void SMCGP_ParseGOMBody(const string &body)
 
    // Parser les prédictions Bollinger Bands (arrays JSON)
    SMCGP_ParsePredictionArrays(body);
+   SMCGP_ParseCognitionArrays(body);
+
+   if(ShowCognitionPath)
+      SMCFP_DrawFromGlobals();
+   else
+      SMCFP_Clear();
 
    g_smcTfM1Dir  = SMCGP_JsonTfDir(body, "tf_m1_dir");
    g_smcTfM5Dir  = SMCGP_JsonTfDir(body, "tf_m5_dir");
@@ -280,6 +449,39 @@ void SMCGP_ParseGOMBody(const string &body)
    if(gCvd   > -99999) g_smcGhostCVD   = gCvd;
    if(gBuy   >= 0)     g_smcGhostBuyPct = gBuy;
    if(gCmp   >= 0)     g_smcGhostCompass = gCmp;
+
+   g_smcBcHourUtc     = (int)SMCGP_JsonDouble(body, "bc_hour_utc", -1.0);
+   g_smcBcConfidence  = SMCGP_JsonDouble(body, "bc_confidence");
+   g_smcBcTradeable   = SMCGP_JsonBool(body, "bc_tradeable");
+   if(!g_smcBcTradeable && SMCGP_JsonDouble(body, "bc_tradeable", -1.0) >= 1.0)
+      g_smcBcTradeable = true;
+   g_smcBcSession     = SMCGP_JsonString(body, "bc_session");
+   g_smcBcRating      = SMCGP_JsonString(body, "bc_rating");
+   g_smcBcWindowStart = SMCGP_JsonString(body, "bc_window_start");
+   g_smcBcWindowEnd   = SMCGP_JsonString(body, "bc_window_end");
+   g_smcBcMappedKey   = SMCGP_JsonString(body, "bc_mapped_key");
+
+   g_cogDirection   = SMCGP_JsonString(body, "cog_direction");
+   g_cogRegime      = SMCGP_JsonString(body, "cog_regime");
+   g_cogStrength    = SMCGP_JsonDouble(body, "cog_strength");
+   g_cogConfidence  = SMCGP_JsonDouble(body, "cog_confidence");
+
+   // IA Status depuis dashboard (ia_status_action + ia_status_confidence_pct)
+   string iaAct = SMCGP_JsonString(body, "ia_status_action");
+   StringToUpper(iaAct);
+   if(StringLen(iaAct) > 0)
+      g_smcIAStatusAction = iaAct;
+   else
+      g_smcIAStatusAction = "HOLD";
+   double iaCfPct = SMCGP_JsonDouble(body, "ia_status_confidence_pct", 0.0);
+   if(iaCfPct > 0.0)
+      g_iaStatusConfidence = iaCfPct;
+
+   // Correction Cycle Detector
+   g_smcCorrExhaustPct = SMCGP_JsonDouble(body, "correction_exhaustion_pct", 50.0);
+   g_smcCorrPhase      = SMCGP_JsonString(body, "correction_phase");
+   string safeStr      = SMCGP_JsonString(body, "correction_entry_safe");
+   g_smcCorrEntrySafe  = (safeStr == "true" || safeStr == "1" || SMCGP_JsonBool(body, "correction_entry_safe"));
 
    if(StringLen(g_smcGomKolaState) == 0)
    {
@@ -440,6 +642,56 @@ void SMCGP_ParseSetupFromGOM(const string &body)
 // ── Poll GOM ───────────────────────────────────────────────────────
 void SMCGP_PollGOM()
 {
+   // ── MODE BACKTEST : simuler GOM depuis EMA locales (pas d'HTTP) ──────────
+   long testerMode = MQL5InfoInteger((ENUM_MQL5_INFO_INTEGER)7); // MQL_TESTER = 7
+   if(testerMode != 0)
+   {
+      if(GOMPollIntervalSec > 0 && (int)(TimeCurrent() - g_smcLastGOMPoll) < GOMPollIntervalSec)
+         return;
+      g_smcLastGOMPoll = TimeCurrent();
+
+      MqlRates r[];
+      ArraySetAsSeries(r, true);
+      int copied = CopyRates(_Symbol, PERIOD_M1, 0, 50, r);
+      if(copied >= 20)
+      {
+         // EMA8 et EMA21 rapides
+         double k8 = 2.0/9.0, k21 = 2.0/22.0;
+         double e8 = r[copied-1].close, e21 = r[copied-1].close;
+         for(int i = copied-2; i >= 0; i--)
+         { e8 = r[i].close*k8 + e8*(1-k8); e21 = r[i].close*k21 + e21*(1-k21); }
+         double currentClose = r[0].close;
+         double momentum = (e8 - e21) / e21;
+
+         int prevVn = g_smcGomVerdictNum;
+         string prevVerd = g_smcGomVerdict;
+
+         if(momentum > 0.0003)
+         {
+            g_smcGomVerdictNum  = 2;   // GOOD BUY
+            g_smcGomVerdict     = "GOOD BUY";
+            g_smcGomCoherence   = MathMin(95.0, 70.0 + MathAbs(momentum)*5000.0);
+         }
+         else if(momentum < -0.0003)
+         {
+            g_smcGomVerdictNum  = -2;  // GOOD SELL
+            g_smcGomVerdict     = "GOOD SELL";
+            g_smcGomCoherence   = MathMin(95.0, 70.0 + MathAbs(momentum)*5000.0);
+         }
+         else
+         {
+            g_smcGomVerdictNum  = 0;
+            g_smcGomVerdict     = "WAIT";
+            g_smcGomCoherence   = 50.0;
+         }
+         g_smcGomConnected   = true;
+         g_cogDirection      = (g_smcGomVerdictNum > 0) ? "BUY" : (g_smcGomVerdictNum < 0 ? "SELL" : "NEUTRAL");
+         SMCGP_NotifyGOMVerdictChange(SMCGP_ResolveGOMSym(_Symbol), prevVn, prevVerd);
+      }
+      return;
+   }
+   // ────────────────────────────────────────────────────────────────────────
+
    // TOUJOURS poll (même si UseGOMVerdictFilter + UseGOMPipeline + ShowGOMDashboard sont OFF)
    // Pour affichage temps réel du verdict sur SMC dashboard
 
@@ -459,10 +711,10 @@ void SMCGP_PollGOM()
    bool ok = false;
 
    string chartTf = SMCGP_ChartTfLabel();
-   string srcParam = "auto";
+   string srcParam = "local";
    if(GOMVerdictSource == GOM_SRC_TRADINGVIEW) srcParam = "tv";
    else if(GOMVerdictSource == GOM_SRC_LOCAL) srcParam = "local";
-   else srcParam = "local";
+   else srcParam = "local"; // AUTO = calcul MT5 live (candles uploadées)
    string gomQuery = "/gom-kola-dashboard?symbol=" + sym + "&chart_tf=" + chartTf + "&source=" + srcParam;
    int gomTimeout = (GOM_Timeout_ms > 0 ? GOM_Timeout_ms : AI_Timeout_ms);
 
@@ -478,9 +730,14 @@ void SMCGP_PollGOM()
    // Fallback 3 supprimé — /gom-verdict retourne des données stales (cache Python non temps-réel)
    // En cas d'échec des deux premiers endpoints, on invalide le GOM plutôt que de trader sur données stales
 
+   string symLabel = SMCGP_ResolveGOMSym(_Symbol);
+
    if(!ok)
    {
+      int errPrevVnum = g_smcGomVerdictNum;
+      string errPrevVerd = g_smcGomVerdict;
       SMCGP_InvalidateGOM();
+      SMCGP_NotifyGOMVerdictChange(symLabel, errPrevVnum, errPrevVerd);
       // Déterminer la source d'erreur
       if(g_smcLastHttpCode == 0 || g_smcLastHttpCode == -1)
          g_smcGomSource = "NO_HTTP";
@@ -494,7 +751,15 @@ void SMCGP_PollGOM()
       return;
    }
 
+   int prevVnum = g_smcGomVerdictNum;
+   string prevVerd = g_smcGomVerdict;
+   int prevSpikeLevel = g_smcGomSpikeLevel;
+   bool prevSpikeTrad = g_smcGomSpikeTradable;
    SMCGP_ParseGOMBody(body);
+   if(prevVnum != g_smcGomVerdictNum || prevVerd != g_smcGomVerdict)
+      SMCGP_NotifyGOMVerdictChange(symLabel, prevVnum, prevVerd);
+   if(prevSpikeLevel != g_smcGomSpikeLevel || prevSpikeTrad != g_smcGomSpikeTradable)
+      SMCGP_NotifySpikeImminent(symLabel, prevSpikeLevel, prevSpikeTrad);
 
    // DEBUG: Log des requêtes réussies
    Print("[GOM-POLL] ✅ SUCCESS for ", sym, " | Verdict: ", g_smcGomVerdict, " (vn=", g_smcGomVerdictNum, ") | Coherence: ", g_smcGomCoherence, "%");
@@ -503,6 +768,146 @@ void SMCGP_PollGOM()
 bool SMCGP_IsGoodPerfect(int vnum)
 {
    return (vnum == 2 || vnum == 3 || vnum == -2 || vnum == -3);
+}
+
+void SMCGP_PushGOMMsg(const string msg)
+{
+   Print("[GOM-NOTIF] ", msg);
+   Alert(msg);
+   if(!SendNotification(msg))
+      Print("[GOM-NOTIF] SendNotification a echoue — verifier Options > Notifications MT5");
+}
+
+void SMCGP_NotifyGOMVerdictChange(const string symLabel,
+                                  const int prevVnum, const string &prevVerdict)
+{
+   if(!UseNotifications || !GOMVerdictPushNotify) return;
+
+   const int newVnum = g_smcGomVerdictNum;
+   const string newVerdict = g_smcGomVerdict;
+
+   if(!g_smcGomNotifReady)
+   {
+      g_smcGomNotifReady = true;
+      g_smcGomVerdictNumPrev = newVnum;
+      g_smcGomVerdictPrev = newVerdict;
+      Print("[GOM-NOTIF] Baseline ", symLabel, " vn=", newVnum, " ", newVerdict);
+      return;
+   }
+
+   if(prevVnum == newVnum && prevVerdict == newVerdict) return;
+
+   if(SMCGP_IsGOMForceExhausted(prevVnum, newVnum))
+   {
+      g_smcGomForceExhausted = true;
+      Print("[GOM] Force mouvement épuisée ", symLabel, " ", prevVerdict, " -> ", newVerdict);
+   }
+   if(SMCGP_IsPerfectVerdict(newVnum) || newVnum == 0)
+      g_smcGomForceExhausted = false;
+
+   const bool wasGP = SMCGP_IsGoodPerfect(prevVnum);
+   const bool isGP  = SMCGP_IsGoodPerfect(newVnum);
+
+   if(!wasGP && isGP)
+   {
+      string side = (newVnum > 0) ? "BUY" : "SELL";
+      string msg = StringFormat("[GOM] %s %s %s | Coh %.0f%% Q %.0f%%",
+                                symLabel, newVerdict, side, g_smcGomCoherence, g_smcGomQuality);
+      SMCGP_PushGOMMsg(msg);
+   }
+   else if(wasGP && isGP && prevVnum != newVnum)
+   {
+      string msg = StringFormat("[GOM] %s upgrade %s -> %s | Coh %.0f%%",
+                                symLabel, prevVerdict, newVerdict, g_smcGomCoherence);
+      SMCGP_PushGOMMsg(msg);
+   }
+   else if(wasGP && newVnum == 0)
+   {
+      string wasTxt = prevVerdict;
+      if(StringLen(wasTxt) == 0)
+      {
+         if(prevVnum == 3)       wasTxt = "PERFECT BUY";
+         else if(prevVnum == 2)  wasTxt = "GOOD BUY";
+         else if(prevVnum == -3) wasTxt = "PERFECT SELL";
+         else if(prevVnum == -2) wasTxt = "GOOD SELL";
+         else                    wasTxt = "GOOD/PERFECT";
+      }
+      string msg = StringFormat("[GOM] WAIT %s (etait %s)", symLabel, wasTxt);
+      SMCGP_PushGOMMsg(msg);
+   }
+   else
+   {
+      Print("[GOM-NOTIF] Changement ignore ", symLabel,
+            " ", prevVnum, "->", newVnum, " (", prevVerdict, " -> ", newVerdict, ")");
+   }
+
+   g_smcGomVerdictNumPrev = newVnum;
+   g_smcGomVerdictPrev = newVerdict;
+}
+
+int SMCGP_ResolveSpikeFreqFromSymbol(const string sym)
+{
+   string u = sym;
+   StringToUpper(u);
+   if(StringFind(u, "1000") >= 0) return 1000;
+   if(StringFind(u, "500") >= 0)  return 500;
+   if(StringFind(u, "300") >= 0)  return 300;
+   return 0;
+}
+
+int SMCGP_EstimateSpikeMinutes()
+{
+   int freq = g_smcGomSpikeFreqBars;
+   if(freq <= 0) freq = SMCGP_ResolveSpikeFreqFromSymbol(_Symbol);
+   if(freq <= 0) return 0;
+
+   if(g_smcGomSpikeProgressPct > 0.0 && g_smcGomSpikeProgressPct < 100.0)
+      return (int)MathMax(1, MathRound((100.0 - g_smcGomSpikeProgressPct) / 100.0 * freq));
+
+   if(g_smcGomBarsSinceSpike > 0 && g_smcGomBarsSinceSpike < freq)
+      return (int)MathMax(1, freq - g_smcGomBarsSinceSpike);
+
+   return (int)MathMax(1, MathRound(freq / 60.0));
+}
+
+void SMCGP_NotifySpikeImminent(const string symLabel, const int prevLevel, const bool prevTradable)
+{
+   if(!UseNotifications || !SpikeImminentPushNotify) return;
+
+   string _smcSym = _Symbol;
+   StringToUpper(_smcSym);
+   if(StringFind(_smcSym, "BOOM") < 0 && StringFind(_smcSym, "CRASH") < 0) return;
+
+   const int lvl = g_smcGomSpikeLevel;
+   const bool tradable = g_smcGomSpikeTradable;
+   const bool isImminent = (lvl >= 3 && tradable);
+
+   if(!g_smcSpikeNotifReady)
+   {
+      g_smcSpikeNotifReady = true;
+      g_smcGomSpikeLevelPrev = lvl;
+      g_smcGomSpikeTradablePrev = tradable;
+      Print("[SPIKE-NOTIF] Baseline ", symLabel, " level=", lvl, " trad=", tradable);
+      return;
+   }
+
+   const bool wasImminent = (prevLevel >= 3 && prevTradable);
+   if(isImminent && !wasImminent)
+   {
+      int etaMin = SMCGP_EstimateSpikeMinutes();
+      string side = (StringFind(symLabel, "Boom") >= 0 || StringFind(_Symbol, "Boom") >= 0) ? "BUY spike" : "SELL spike";
+      string msg = StringFormat("[SPIKE] %s IMMINENT %s | prob %.0f%% imm %.0f%% ~%d min",
+                                symLabel, side, g_smcGomSpikePct, g_smcGomImminencePct, etaMin);
+      SMCGP_PushGOMMsg(msg);
+   }
+   else if(wasImminent && lvl < 3)
+   {
+      string msg = StringFormat("[SPIKE] %s fenetre fermee (niv %d)", symLabel, lvl);
+      SMCGP_PushGOMMsg(msg);
+   }
+
+   g_smcGomSpikeLevelPrev = lvl;
+   g_smcGomSpikeTradablePrev = tradable;
 }
 
 double SMCGP_EntryTolerance(const double price)
@@ -609,14 +1014,34 @@ bool SMCGP_IsPriceAtOBEntry(const int dir)
    return true;
 }
 
+bool SMCGP_GOMCoherenceOK()
+{
+   double minCoh = SMC_EffectiveGOMMinCoherence();
+   if(minCoh <= 0) return true;
+   if(g_smcGomCoherence <= 0) return false;
+   return (g_smcGomCoherence >= minCoh);
+}
+
 bool SMCGP_GOMAllowsDirectionEx(const int dir, const bool requireOBTouch)
 {
    if(!UseGOMVerdictFilter) return true;
    if(!g_smcGomConnected) { Print("[GOM-ALLOW] Rejeté: NOT_CONNECTED"); return false; }
    if(g_smcGomVerdictNum == 0) { Print("[GOM-ALLOW] Rejeté: VERDICT_ZERO"); return false; }
+
+   // PERFECT : gates allégés — le verdict vn=±3 prime sur BB/MTF
+   if(SMCGP_IsPerfectVerdict(g_smcGomVerdictNum))
+   {
+      if(dir == 1 && g_smcGomVerdictNum != 3) return false;
+      if(dir == -1 && g_smcGomVerdictNum != -3) return false;
+      if(!SMCGP_GOMCoherenceOK())
+      { Print("[GOM-ALLOW] Rejeté PERFECT: LOW_COHERENCE ", g_smcGomCoherence, "%"); return false; }
+      Print("[GOM-ALLOW] ✅ PERFECT autorisé dir=", dir, " vn=", g_smcGomVerdictNum);
+      return true;
+   }
+
    if(!SMCGP_IsGoodPerfect(g_smcGomVerdictNum)) { Print("[GOM-ALLOW] Rejeté: NOT_GOOD_PERFECT vn=", g_smcGomVerdictNum); return false; }
 
-   if(GOMMinCoherencePct > 0 && g_smcGomCoherence > 0 && g_smcGomCoherence < GOMMinCoherencePct)
+   if(!SMCGP_GOMCoherenceOK())
    { Print("[GOM-ALLOW] Rejeté: LOW_COHERENCE ", g_smcGomCoherence, "%"); return false; }
 
    if(dir == 1)
@@ -681,6 +1106,17 @@ bool SMCGP_GOMAllowsDirectionEx(const int dir, const bool requireOBTouch)
    return true;
 }
 
+bool SMCGP_GOMAllowsBasicDirection(const int dir)
+{
+   if(!UseGOMVerdictFilter) return true;
+   if(!g_smcGomConnected) return false;
+   if(!SMCGP_IsSimpleVerdict(g_smcGomVerdictNum)) return false;
+   if(!SMCGP_GOMCoherenceOK()) return false;
+   if(dir == 1 && g_smcGomVerdictNum != 1) return false;
+   if(dir == -1 && g_smcGomVerdictNum != -1) return false;
+   return true;
+}
+
 // Vérifier que le prix est proche de la BB Mid (max 30 pips de déviation pour FOREX)
 bool SMCGP_IsNearBBForTrade(const int dir)
 {
@@ -720,20 +1156,32 @@ bool SMCGP_AllowsDirectIndependentEntry(const int dir)
    if(!SMCGP_IsGoodPerfect(g_smcGomVerdictNum))
    { Print("[EA-INDEP] ❌ Rejeté: Verdict pas GOOD/PERFECT (vn=", g_smcGomVerdictNum, ")"); return false; }
 
-   // 2. IA Status ≥ 70%
-   if(g_iaStatusConfidence < 70.0)
-   { Print("[EA-INDEP] ❌ Rejeté: IA Status=", DoubleToString(g_iaStatusConfidence, 1), "% < 70%"); return false; }
+   // 2. IA Status ne doit PAS être HOLD
+   if(g_smcIAStatusAction == "HOLD" || StringLen(g_smcIAStatusAction) == 0)
+   { Print("[EA-INDEP] ❌ Rejeté: IA Status=HOLD (", DoubleToString(g_iaStatusConfidence, 1), "%)"); return false; }
 
-   // 3. Vérifier direction du verdict correspond à l'action
+   // 3. IA Status confiance ≥ 50%
+   if(g_iaStatusConfidence < 50.0)
+   { Print("[EA-INDEP] ❌ Rejeté: IA Status=", DoubleToString(g_iaStatusConfidence, 1), "% < 50%"); return false; }
+
+   // 4. Correction Cycle — ne pas entrer pendant une correction (exempt Boom/Crash)
+   if(!SMCGP_IsBoomCrashSym(_Symbol) && !g_smcCorrEntrySafe && g_smcCorrExhaustPct < 65.0)
+   { Print("[EA-INDEP] ❌ Rejeté: correction active (", g_smcCorrPhase, " ", DoubleToString(g_smcCorrExhaustPct, 0), "%)"); return false; }
+
+   // 5. Vérifier direction du verdict GOM correspond à l'action
    if(dir == 1 && g_smcGomVerdictNum < 2)
    { Print("[EA-INDEP] ❌ Rejeté: BUY demandé mais verdict_num=", g_smcGomVerdictNum, " < 2 (GOOD)"); return false; }
 
    if(dir == -1 && g_smcGomVerdictNum > -2)
    { Print("[EA-INDEP] ❌ Rejeté: SELL demandé mais verdict_num=", g_smcGomVerdictNum, " > -2 (GOOD)"); return false; }
 
-   // OTE pas bloquant pour EA-INDEP (exige déjà GOOD/PERFECT)
+   // 5. IA Status direction ne doit pas contredire le trade
+   if(dir == 1 && g_smcIAStatusAction == "SELL")
+   { Print("[EA-INDEP] ❌ Rejeté: BUY demandé mais IA Status=SELL"); return false; }
+   if(dir == -1 && g_smcIAStatusAction == "BUY")
+   { Print("[EA-INDEP] ❌ Rejeté: SELL demandé mais IA Status=BUY"); return false; }
 
-   Print("[EA-INDEP] ✅ Autorisé | Verdict=", g_smcGomVerdict, " (vn=", g_smcGomVerdictNum, ") | IA Status=", DoubleToString(g_iaStatusConfidence, 1), "% | Direction=", dir);
+   Print("[EA-INDEP] ✅ Autorisé | Verdict=", g_smcGomVerdict, " (vn=", g_smcGomVerdictNum, ") | IA=", g_smcIAStatusAction, " ", DoubleToString(g_iaStatusConfidence, 1), "% | Dir=", dir);
    return true;
 }
 
@@ -935,27 +1383,49 @@ void SMCGP_DrawTVLevels()
    {
       double zH = MathMax(g_smcObBullTop, g_smcObBullBot);
       double zL = MathMin(g_smcObBullTop, g_smcObBullBot);
+      int dp = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
       ObjectDelete(0, "SMC_OB_BULL_ZONE");
       ObjectCreate(0, "SMC_OB_BULL_ZONE", OBJ_RECTANGLE, 0, tOb0, zH, tObE, zL);
       ObjectSetInteger(0, "SMC_OB_BULL_ZONE", OBJPROP_COLOR, clrDodgerBlue);
       ObjectSetInteger(0, "SMC_OB_BULL_ZONE", OBJPROP_BACK, true);
       ObjectSetInteger(0, "SMC_OB_BULL_ZONE", OBJPROP_FILL, true);
       ObjectSetInteger(0, "SMC_OB_BULL_ZONE", OBJPROP_SELECTABLE, false);
+      // Label prix OB Bull
+      ObjectDelete(0, "SMC_OB_BULL_LBL");
+      ObjectCreate(0, "SMC_OB_BULL_LBL", OBJ_TEXT, 0, tObE, zH);
+      ObjectSetString(0, "SMC_OB_BULL_LBL", OBJPROP_TEXT,
+         "OB+ " + DoubleToString(zL, dp) + "-" + DoubleToString(zH, dp));
+      ObjectSetInteger(0, "SMC_OB_BULL_LBL", OBJPROP_COLOR, clrDodgerBlue);
+      ObjectSetInteger(0, "SMC_OB_BULL_LBL", OBJPROP_FONTSIZE, 8);
+      ObjectSetString(0, "SMC_OB_BULL_LBL", OBJPROP_FONT, "Arial Bold");
+      ObjectSetInteger(0, "SMC_OB_BULL_LBL", OBJPROP_ANCHOR, ANCHOR_LEFT_LOWER);
+      ObjectSetInteger(0, "SMC_OB_BULL_LBL", OBJPROP_SELECTABLE, false);
    }
-   else ObjectDelete(0, "SMC_OB_BULL_ZONE");
+   else { ObjectDelete(0, "SMC_OB_BULL_ZONE"); ObjectDelete(0, "SMC_OB_BULL_LBL"); }
 
    if(ShowTVOrderBlocks && g_smcObBearTop > 0 && g_smcObBearBot > 0)
    {
       double zH = MathMax(g_smcObBearTop, g_smcObBearBot);
       double zL = MathMin(g_smcObBearTop, g_smcObBearBot);
+      int dp = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
       ObjectDelete(0, "SMC_OB_BEAR_ZONE");
       ObjectCreate(0, "SMC_OB_BEAR_ZONE", OBJ_RECTANGLE, 0, tOb0, zH, tObE, zL);
       ObjectSetInteger(0, "SMC_OB_BEAR_ZONE", OBJPROP_COLOR, clrOrangeRed);
       ObjectSetInteger(0, "SMC_OB_BEAR_ZONE", OBJPROP_BACK, true);
       ObjectSetInteger(0, "SMC_OB_BEAR_ZONE", OBJPROP_FILL, true);
       ObjectSetInteger(0, "SMC_OB_BEAR_ZONE", OBJPROP_SELECTABLE, false);
+      // Label prix OB Bear
+      ObjectDelete(0, "SMC_OB_BEAR_LBL");
+      ObjectCreate(0, "SMC_OB_BEAR_LBL", OBJ_TEXT, 0, tObE, zH);
+      ObjectSetString(0, "SMC_OB_BEAR_LBL", OBJPROP_TEXT,
+         "OB- " + DoubleToString(zL, dp) + "-" + DoubleToString(zH, dp));
+      ObjectSetInteger(0, "SMC_OB_BEAR_LBL", OBJPROP_COLOR, clrOrangeRed);
+      ObjectSetInteger(0, "SMC_OB_BEAR_LBL", OBJPROP_FONTSIZE, 8);
+      ObjectSetString(0, "SMC_OB_BEAR_LBL", OBJPROP_FONT, "Arial Bold");
+      ObjectSetInteger(0, "SMC_OB_BEAR_LBL", OBJPROP_ANCHOR, ANCHOR_LEFT_UPPER);
+      ObjectSetInteger(0, "SMC_OB_BEAR_LBL", OBJPROP_SELECTABLE, false);
    }
-   else ObjectDelete(0, "SMC_OB_BEAR_ZONE");
+   else { ObjectDelete(0, "SMC_OB_BEAR_ZONE"); ObjectDelete(0, "SMC_OB_BEAR_LBL"); }
 
    ChartRedraw(0);
 }
@@ -963,10 +1433,13 @@ void SMCGP_DrawTVLevels()
 void SMCGP_CleanupChartObjects()
 {
    SMCGP_CleanupOrderFlowCompass();
-   string prefixes[] = {"TM_KOLA_", "TM_OB_", "TM_BB_", "GOM_PRED_", "SMC_OTE_", "SMC_OB_BULL_", "SMC_OB_BEAR_"};
+   string prefixes[] = {"TM_KOLA_", "TM_OB_", "TM_BB_", "GOM_PRED_", "SMC_OTE_",
+                        "SMC_OB_BULL_", "SMC_OB_BEAR_", "COG_FC_", "COG_FAN_", "COG_LBL_"};
    for(int p = 0; p < ArraySize(prefixes); p++)
       ObjectsDeleteAll(0, prefixes[p]);
    ObjectDelete(0, "TM_OB_LABEL");
+   ObjectDelete(0, "COG_ARROW");
+   ObjectDelete(0, "COG_SUMMARY");
    SMCGP_CleanupDashboard();
    SMCGP_CleanupLegacyDrawings();
 }
@@ -1045,17 +1518,17 @@ bool SMCGP_PrepareMarketStops(const string sym, const int dir, const double entr
    {
       if(dir == 1)
       {
-         sl = NormalizeDouble(px - slDist, dg);
-         tp = NormalizeDouble(px + tpDist, dg);
-         if(sl >= px) sl = NormalizeDouble(px - minD, dg);
-         if(tp <= px) tp = NormalizeDouble(px + minD * 2.0, dg);
+         sl = NormalizeDouble(refEntry - slDist, dg);
+         tp = NormalizeDouble(refEntry + tpDist, dg);
+         if(sl >= refEntry) sl = NormalizeDouble(refEntry - minD, dg);
+         if(tp <= refEntry) tp = NormalizeDouble(refEntry + minD * 2.0, dg);
       }
       else
       {
-         sl = NormalizeDouble(px + slDist, dg);
-         tp = NormalizeDouble(px - tpDist, dg);
-         if(sl <= px) sl = NormalizeDouble(px + minD, dg);
-         if(tp >= px) tp = NormalizeDouble(px - minD * 2.0, dg);
+         sl = NormalizeDouble(refEntry + slDist, dg);
+         tp = NormalizeDouble(refEntry - tpDist, dg);
+         if(sl <= refEntry) sl = NormalizeDouble(refEntry + minD, dg);
+         if(tp >= refEntry) tp = NormalizeDouble(refEntry - minD * 2.0, dg);
       }
 
       if(SMCGP_OrderCheckMarket(sym, otype, lot, sl, tp))
@@ -1068,24 +1541,72 @@ bool SMCGP_PrepareMarketStops(const string sym, const int dir, const double entr
 }
 
 bool SMCGP_ExecutePipelineOrder(const string sym, const string action,
-                                double sl, double tp, double lot, const bool isPipeline)
+                                double entry, double sl, double tp, double lot, const bool isPipeline)
 {
    if(BlockAllTrades) return false;
    if(CountPositionsForSymbol(sym) > 0) return false;
-   if(CountPositionsOurEA() >= MaxPositionsTerminal) return false;
    if(!IsDirectionAllowedForBoomCrash(sym, action)) return false;
+
+   // Max positions atteint : si signal PERFECT, placer ordre LIMIT au lieu de bloquer
+   if(CountPositionsOurEA() >= MaxPositionsTerminal)
+   {
+      if(SMCGP_IsPerfectVerdict(g_smcGomVerdictNum) && entry > 0 && sl > 0 && tp > 0)
+      {
+         Print("[SMC-GOM] Max positions (", MaxPositionsTerminal, ") — signal PERFECT ",
+               action, " ", sym, " → ordre LIMIT placé au lieu de marché");
+         // L'ordre LIMIT sera exécuté quand une position se libère + prix touche l'entry
+      }
+      else
+      {
+         Print("[SMC-GOM] 🚫 Max positions (", MaxPositionsTerminal, ") — ", action, " ", sym, " bloqué");
+         return false;
+      }
+   }
 
    int dir = (action == "BUY") ? 1 : -1;
 
-   // GATE IA STATUS (sync avec Python pipeline) — NOUVEAU
+   // GATE IA STATUS — bloquer si dashboard GOM affiche HOLD
+   if(g_smcIAStatusAction == "HOLD" || StringLen(g_smcIAStatusAction) == 0)
+   {
+      Print("[SMC-GOM] 🚫 Ordre ", action, " ", sym, " bloqué — IA Status dashboard=HOLD (",
+            DoubleToString(g_iaStatusConfidence, 1), "%)");
+      return false;
+   }
    if(UseLossCooldown && g_iaStatusConfidence < 50.0)
    {
-      Print("[SMC-GOM] 🚫 Ordre ", action, " ", sym, " bloqué — IA Status=",
+      Print("[SMC-GOM] 🚫 Ordre ", action, " ", sym, " bloqué — IA Status conf=",
             DoubleToString(g_iaStatusConfidence, 1), "% < 50% requis");
       return false;
    }
 
-   if(UseGOMVerdictFilter)
+   // GATE CORRECTION CYCLE — bloquer si correction en cours (entrée trop tôt)
+   // Exempt Boom/Crash (pas de corrections classiques)
+   if(!SMCGP_IsBoomCrashSym(sym) && !g_smcCorrEntrySafe && g_smcCorrExhaustPct < 65.0)
+   {
+      Print("[SMC-GOM] 🚫 Ordre ", action, " ", sym, " bloqué — correction en cours (",
+            g_smcCorrPhase, " ", DoubleToString(g_smcCorrExhaustPct, 0), "% < 65%)");
+      return false;
+   }
+
+   // source=pipeline : filtre GOM déjà appliqué côté Python au moment du POST.
+   // Vérification minimale en live : si le verdict a changé à WAIT ou s'est inversé depuis, annuler.
+   if(isPipeline && UseGOMVerdictFilter)
+   {
+      if(g_smcGomVerdictNum == 0)
+      {
+         Print("[SMC-GOM] 🚫 Pipeline ", action, " ", sym, " annulé — GOM=WAIT depuis le POST Python");
+         return false;
+      }
+      int gomDir = (g_smcGomVerdictNum > 0) ? 1 : -1;
+      if(gomDir != dir)
+      {
+         Print("[SMC-GOM] 🚫 Pipeline ", action, " ", sym, " annulé — GOM inversé (vn=",
+               g_smcGomVerdictNum, ") depuis le POST Python");
+         return false;
+      }
+   }
+
+   if(UseGOMVerdictFilter && !isPipeline)
    {
       if(UseSignalFirstDiscipline)
       {
@@ -1108,6 +1629,121 @@ bool SMCGP_ExecutePipelineOrder(const string sym, const string action,
       }
    }
 
+   if(!SMC_BCHourAllowsTrade(sym))
+   {
+      Print("[SMC-GOM] Pipeline ", action, " ", sym,
+            " annule — hors plage bc_heure UTC (conf=", DoubleToString(g_smcBcConfidence, 1), "%)");
+      return false;
+   }
+
+   int pipeDir = (action == "BUY") ? 1 : -1;
+   if(UseCognitionFilter && StringLen(g_cogDirection) > 0 && g_cogDirection != "NEUTRAL")
+   {
+      if((pipeDir > 0 && g_cogDirection == "SELL") || (pipeDir < 0 && g_cogDirection == "BUY"))
+      {
+         Print("[SMC-GOM] Pipeline ", action, " ", sym,
+               " annule — cognition ", g_cogDirection,
+               " str=", DoubleToString(g_cogStrength, 2),
+               " conf=", DoubleToString(g_cogConfidence, 2));
+         return false;
+      }
+   }
+
+   // ── Gate Triple Alignement (COG + IA + GOM même sens) ─────────────────────
+   // Quand activé : si triple alignement détecté, on ajuste l'entrée sur EMA9 ou S/R proche.
+   // Sans triple alignement, l'ordre est bloqué (signal insuffisamment confirmé).
+   if(UseTripleAlignmentGate)
+   {
+      // Vérifier si cognition confirme la direction
+      bool cogConfirms = (g_cogDirection == action) &&
+                         (g_cogStrength >= CognitionMinStrength) &&
+                         (g_cogConfidence >= CognitionMinConfidence);
+
+      // Vérifier si IA confirm la direction
+      string iaActionUp = g_lastAIAction;
+      StringToUpper(iaActionUp);
+      bool iaConfirms = (iaActionUp == action) && (g_lastAIConfidence >= 0.65);
+
+      // GOM dans le même sens (déjà validé avant, mais on vérifie le niveau)
+      bool gomPerfect = (pipeDir > 0) ? (g_smcGomVerdictNum >= 2) : (g_smcGomVerdictNum <= -2);
+
+      bool tripleAligned = cogConfirms && iaConfirms;
+
+      if(tripleAligned)
+      {
+         // Triple alignement : ajuster l'entrée sur EMA9 M1 ou prix actuel si proche
+         if(g_pipelineEma9Handle != INVALID_HANDLE)
+         {
+            double ema9buf[];
+            ArraySetAsSeries(ema9buf, true);
+            if(CopyBuffer(g_pipelineEma9Handle, 0, 0, 3, ema9buf) == 3)
+            {
+               double ema9Val    = ema9buf[0];
+               double curAsk     = SymbolInfoDouble(sym, SYMBOL_ASK);
+               double curBid     = SymbolInfoDouble(sym, SYMBOL_BID);
+               double atrVal     = SymbolInfoDouble(sym, SYMBOL_POINT) * 50; // fallback
+               double tolPct     = 0.0015; // 0.15% tolérance autour EMA9
+               double tol        = ema9Val * tolPct;
+
+               if(pipeDir == 1)
+               {
+                  // BUY : re-entrer si ask proche ou sous EMA9 (rebond)
+                  if(curAsk <= ema9Val + tol)
+                  {
+                     entry = curAsk;
+                     Print("[TRIPLE] ✅ BUY aligné | COG+IA+GOM | EMA9=", DoubleToString(ema9Val, _Digits),
+                           " Ask=", DoubleToString(curAsk, _Digits), " → re-entrée EMA9");
+                  }
+                  else
+                  {
+                     // Prix au-dessus EMA9 — attendre retour; on laisse l'entrée GOM
+                     Print("[TRIPLE] ✅ BUY aligné | COG+IA+GOM | EMA9=", DoubleToString(ema9Val, _Digits),
+                           " Ask=", DoubleToString(curAsk, _Digits), " → entrée GOM directe");
+                  }
+               }
+               else
+               {
+                  // SELL : re-entrer si bid proche ou au-dessus EMA9
+                  if(curBid >= ema9Val - tol)
+                  {
+                     entry = curBid;
+                     Print("[TRIPLE] ✅ SELL aligné | COG+IA+GOM | EMA9=", DoubleToString(ema9Val, _Digits),
+                           " Bid=", DoubleToString(curBid, _Digits), " → re-entrée EMA9");
+                  }
+                  else
+                  {
+                     Print("[TRIPLE] ✅ SELL aligné | COG+IA+GOM | EMA9=", DoubleToString(ema9Val, _Digits),
+                           " Bid=", DoubleToString(curBid, _Digits), " → entrée GOM directe");
+                  }
+               }
+            }
+         }
+         Print("[TRIPLE] 🔥 Signal FORT confirmé (Cog+IA+GOM) | gomPerfect=", gomPerfect ? "OUI" : "NON");
+      }
+      else
+      {
+         // Pas de triple alignement : bloquer si cognition ou IA s'oppose/est faible
+         bool cogOppose = (StringLen(g_cogDirection) > 0 && g_cogDirection != "NEUTRAL" &&
+                           ((pipeDir > 0 && g_cogDirection == "SELL") || (pipeDir < 0 && g_cogDirection == "BUY")));
+         bool iaOppose  = (StringLen(iaActionUp) > 0 && iaActionUp != "HOLD" &&
+                           iaActionUp != action && g_lastAIConfidence >= 0.55);
+         if(cogOppose || iaOppose)
+         {
+            Print("[TRIPLE] 🚫 Signal bloqué — pas de triple alignement | cogConfirms=", cogConfirms,
+                  " iaConfirms=", iaConfirms, " cog=", g_cogDirection, " ia=", g_lastAIAction);
+            return false;
+         }
+         // Alignement partiel acceptable (cognition neutre ou IA faible) — on laisse passer
+      }
+   }
+
+   if(!SMC_HighProbabilityAllowsEntry(pipeDir))
+   {
+      Print("[SMC-GOM] Pipeline ", action, " ", sym,
+            " annule — prob=", DoubleToString(g_lastEntryProbability, 1), "%");
+      return false;
+   }
+
    if(!TryAcquireOpenLock()) return false;
 
    if(!SymbolSelect(sym, true))
@@ -1124,7 +1760,8 @@ bool SMCGP_ExecutePipelineOrder(const string sym, const string action,
       return false;
    }
 
-   double entryPx = (dir == 1) ? ask : bid;
+   double mktPx   = (dir == 1) ? ask : bid;
+   double entryPx = (entry > 0 && MathAbs(entry - mktPx) / mktPx <= 0.05) ? entry : mktPx;
    if(!SMCGP_PrepareMarketStops(sym, dir, entryPx, sl, tp, lot, sl, tp))
    {
       ReleaseOpenLock();
@@ -1140,9 +1777,10 @@ bool SMCGP_ExecutePipelineOrder(const string sym, const string action,
    if(UseMinLotOnly) lot = SymbolInfoDouble(sym, SYMBOL_VOLUME_MIN);
 
    trade.SetExpertMagicNumber(InpMagicNumber);
+   double execPx = (MathAbs(entryPx - mktPx) < SymbolInfoDouble(sym, SYMBOL_POINT)) ? 0 : entryPx;
    bool ok = (dir == 1)
-      ? trade.Buy(lot, sym, 0, sl, tp, "SMC_PIPELINE")
-      : trade.Sell(lot, sym, 0, sl, tp, "SMC_PIPELINE");
+      ? trade.Buy(lot, sym, execPx, sl, tp, "SMC_PIPELINE")
+      : trade.Sell(lot, sym, execPx, sl, tp, "SMC_PIPELINE");
 
    ReleaseOpenLock();
 
@@ -1174,6 +1812,22 @@ void SMCGP_PollAndExecutePipeline()
    if((int)(TimeCurrent() - g_smcLastMCPPoll) < MCPPollIntervalSec) return;
    g_smcLastMCPPoll = TimeCurrent();
 
+   // Règle universelle : bloquer toute entrée si IA en HOLD (dashboard GOM ou /decide)
+   bool holdFromDashboard = (g_smcIAStatusAction == "HOLD" || StringLen(g_smcIAStatusAction) == 0);
+   bool holdFromDecide    = (g_lastAIAction == "hold" || g_lastAIAction == "HOLD" || g_lastAIAction == "");
+   if(holdFromDashboard || holdFromDecide)
+   {
+      static datetime s_holdLog = 0;
+      if(TimeCurrent() - s_holdLog >= 60)
+      {
+         s_holdLog = TimeCurrent();
+         Print("[PIPELINE] ⏸ IA en HOLD — pipeline suspendu sur ", _Symbol,
+               " | dashboard=", g_smcIAStatusAction, " (", DoubleToString(g_iaStatusConfidence,1), "%)",
+               " | decide=", g_lastAIAction);
+      }
+      return;
+   }
+
    string sym = SMCGP_EncodeSym(_Symbol);
    string body;
    if(!SMCGP_HttpGet("/pending-order?symbol=" + sym, body, AI_Timeout_ms))
@@ -1203,6 +1857,12 @@ void SMCGP_PollAndExecutePipeline()
    StringToUpper(action);
    if(action != "BUY" && action != "SELL") return;
 
+   if(!SMC_BCHourAllowsTrade(_Symbol))
+   {
+      Print("[SMC-GOM] Pipeline poll ignore — bc_heure UTC non propice pour ", _Symbol);
+      return;
+   }
+
    string source = SMCGP_JsonString(orderBody, "source");
    bool isPipeline = (StringCompare(source, "pipeline") == 0);
    if(PipelineOnlyMode && !isPipeline) return;
@@ -1215,13 +1875,14 @@ void SMCGP_PollAndExecutePipeline()
 
    string serverVerdict = SMCGP_JsonString(orderBody, "gom_verdict");
    StringToUpper(serverVerdict);
-   if(UseSignalFirstDiscipline && !DisciplineAllowsPipelineAction(action))
+   // source=pipeline : tous les filtres GOM déjà appliqués côté Python — bypass
+   if(!isPipeline && UseSignalFirstDiscipline && !DisciplineAllowsPipelineAction(action))
    {
       Print("[SMC-GOM] Pipeline rejeté — signal SMC/GOM discipline (action=", action, ")");
       return;
    }
 
-   if(UseGOMVerdictFilter)
+   if(!isPipeline && UseGOMVerdictFilter)
    {
       int pDir = (action == "BUY") ? 1 : -1;
       if(UseSignalFirstDiscipline)
@@ -1255,7 +1916,7 @@ void SMCGP_PollAndExecutePipeline()
       }
    }
 
-   if(SMCGP_ExecutePipelineOrder(_Symbol, action, sl, tp, lot, isPipeline))
+   if(SMCGP_ExecutePipelineOrder(_Symbol, action, entry, sl, tp, lot, isPipeline))
       g_smcLastPipelineId = orderId;
    else if(StringLen(orderId) > 0)
    {
@@ -1595,8 +2256,16 @@ void SMCGP_DrawGOMDashboard()
                       "KSell " + DoubleToString(g_smcGomKolaSell, 2), (color)SMC_DASH_C_SELL, cTxt);
 
    xCur += cellW + gap;
-   SMCGP_DrawDashCell("V1_PIPE", xCur, y1, cellW, cellH,
-                      "PIPE " + (UseGOMPipeline ? "ON" : "OFF"), cBg, cTxt);
+   {
+      double probScore = SMC_ComputeEntryProbability(0);
+      color  cProb = !UseHighProbabilityFilter ? cBg
+                   : (probScore >= MinEntryProbabilityPct) ? (color)SMC_DASH_C_BUY
+                                                           : (color)SMC_DASH_C_SELL;
+      string probTxt = UseHighProbabilityFilter
+         ? ("P:" + DoubleToString(probScore, 0) + "% >" + DoubleToString(MinEntryProbabilityPct, 0))
+         : ("P:" + DoubleToString(probScore, 0) + "% OFF");
+      SMCGP_DrawDashCell("V1_PIPE", xCur, y1, cellW, cellH, probTxt, cProb, cTxt);
+   }
 
    xCur += cellW + gap;
    color cGlob = (g_smcGomGlobalStr >= GOMGlobalMinConfidence) ? (color)SMC_DASH_C_BUY : (color)SMC_DASH_C_SELL;
@@ -1605,7 +2274,7 @@ void SMCGP_DrawGOMDashboard()
                       cGlob, cTxt);
 
    xCur += cellW + gap;
-   string srcTxt = g_smcGomSource + " " + ts;
+   string srcTxt = g_smcGomSource;
    if(pollAge >= 0) srcTxt += " " + IntegerToString(pollAge) + "s";
    SMCGP_DrawDashCell("V1_SRC", xCur, y1, cellW, cellH, srcTxt, cBg, cTxt);
 
@@ -1694,7 +2363,74 @@ void SMCGP_DrawGOMDashboard()
 
    xCur += (cellW + gap) * 2;
    color cConn = g_smcGomConnected ? (color)SMC_DASH_C_BUY : (color)SMC_DASH_C_SELL;
-   SMCGP_DrawDashCell("G5_LINK", xCur, y3, cellW * 2, cellH, connTxt, cConn, cTxt);
+   string linkTxt = connTxt;
+   // Cellule IA status commune aux deux branches
+   // Priorité: IA status du dashboard GOM (ia_status_action) si disponible, sinon /decide
+   string iaTxt; color cIA;
+   if(!UseAIServer)
+   {
+      iaTxt = "IA OFF";
+      cIA   = cBg;
+   }
+   else
+   {
+      // Utiliser l'action dashboard GOM si disponible (plus en phase avec ce qui est affiché)
+      string displayAction = (StringLen(g_smcIAStatusAction) > 0) ? g_smcIAStatusAction : g_lastAIAction;
+      double displayConf   = (g_iaStatusConfidence > 0.0) ? g_iaStatusConfidence : g_lastAIConfidence * 100.0;
+      StringToUpper(displayAction);
+      if(displayAction == "" || displayAction == "HOLD")
+      {
+         iaTxt = "IA HOLD " + DoubleToString(displayConf, 0) + "%";
+         cIA   = (color)SMC_DASH_C_NEUTRAL;
+      }
+      else
+      {
+         iaTxt = "IA " + displayAction + " " + DoubleToString(displayConf, 0) + "%";
+         cIA   = (displayAction == "BUY") ? (color)SMC_DASH_C_BUY : (color)SMC_DASH_C_SELL;
+      }
+   }
+
+   {
+      bool cogOk = (g_cogStrength >= CognitionMinStrength && g_cogConfidence >= CognitionMinConfidence);
+
+      // Triple alignement : cog + IA + GOM dans le même sens
+      string iaUp = g_lastAIAction;
+      StringToUpper(iaUp);
+      int gomDir = (g_smcGomVerdictNum > 0) ? 1 : (g_smcGomVerdictNum < 0) ? -1 : 0;
+      bool cogAlignsBuy  = (g_cogDirection == "BUY"  && cogOk);
+      bool cogAlignsSell = (g_cogDirection == "SELL" && cogOk);
+      bool iaAlignsBuy   = (iaUp == "BUY"  && g_lastAIConfidence >= 0.65);
+      bool iaAlignsSell  = (iaUp == "SELL" && g_lastAIConfidence >= 0.65);
+      bool tripleAlignedBuy  = cogAlignsBuy  && iaAlignsBuy  && (gomDir == 1);
+      bool tripleAlignedSell = cogAlignsSell && iaAlignsSell && (gomDir == -1);
+      bool tripleAligned = tripleAlignedBuy || tripleAlignedSell;
+
+      color cCog;
+      string cogTxt;
+      if(tripleAligned)
+      {
+         cCog   = tripleAlignedBuy ? (color)0xFF00E676 : (color)0xFFFF1744; // vert/rouge vif
+         cogTxt = (tripleAlignedBuy ? "🔥BUY" : "🔥SELL") + " " + DoubleToString(g_cogConfidence * 100, 0) + "% 3x";
+      }
+      else
+      {
+         cCog   = cogOk ? (color)SMC_DASH_C_BUY : (color)SMC_DASH_C_SELL;
+         cogTxt = "->5m " + g_cogDirection + " " + DoubleToString(g_cogConfidence * 100, 0) + "%";
+      }
+      SMCGP_DrawDashCell("G5_COG", xCur, y3, cellW, cellH, cogTxt, cCog, cTxt);
+      xCur += cellW + gap;
+      SMCGP_DrawDashCell("G6_IA", xCur, y3, cellW, cellH, iaTxt, cIA, cTxt);
+      xCur += cellW + gap;
+
+      // Cellule Correction Cycle
+      string corrTxt = g_smcCorrPhase + " " + DoubleToString(g_smcCorrExhaustPct, 0) + "%";
+      color cCorr = g_smcCorrEntrySafe ? (color)SMC_DASH_C_BUY : (color)SMC_DASH_C_SELL;
+      if(g_smcCorrExhaustPct >= 45 && !g_smcCorrEntrySafe) cCorr = (color)SMC_DASH_C_NEUTRAL;
+      SMCGP_DrawDashCell("G6B_CORR", xCur, y3, cellW, cellH, corrTxt, cCorr, cTxt);
+      xCur += cellW + gap;
+
+      SMCGP_DrawDashCell("G7_LINK", xCur, y3, cellW, cellH, linkTxt, cConn, cTxt);
+   }
 
    if(ShowOrderFlowCompass)
       SMCGP_DrawOrderFlowCompass(chartW, marginBot, cellH, gap);
@@ -1794,7 +2530,40 @@ void SMCGP_ParsePredictionArrays(const string &body)
    }
 
    if(ArraySize(g_smcPredBbMid) > 0)
-      Print("[SMCGP] Prédictions chargées: ", ArraySize(g_smcPredBbMid), " points");
+      Print("[SMCGP] Prédictions BB chargées: ", ArraySize(g_smcPredBbMid), " points");
+}
+
+void SMCGP_ParseJsonArrayKey(const string &body, const string key, double &arr[])
+{
+   ArrayFree(arr);
+   int pos = StringFind(body, "\"" + key + "\"");
+   if(pos < 0) return;
+   int start_bracket = StringFind(body, "[", pos);
+   int end_bracket = StringFind(body, "]", start_bracket);
+   if(start_bracket < 0 || end_bracket <= start_bracket) return;
+   string arr_str = StringSubstr(body, start_bracket + 1, end_bracket - start_bracket - 1);
+   SMCGP_ParseDoubleArray(arr_str, arr);
+}
+
+void SMCGP_ParseCognitionArrays(const string &body)
+{
+   SMCGP_ParseJsonArrayKey(body, "pred_path_mid", g_smcPredPathMid);
+   SMCGP_ParseJsonArrayKey(body, "pred_path_up", g_smcPredPathUp);
+   SMCGP_ParseJsonArrayKey(body, "pred_path_dn", g_smcPredPathDn);
+   SMCGP_ParseJsonArrayKey(body, "cog_fc_open", g_smcCogOpen);
+   SMCGP_ParseJsonArrayKey(body, "cog_fc_high", g_smcCogHigh);
+   SMCGP_ParseJsonArrayKey(body, "cog_fc_low", g_smcCogLow);
+   SMCGP_ParseJsonArrayKey(body, "cog_fc_close", g_smcCogClose);
+   SMCGP_ParseJsonArrayKey(body, "cog_fc_q10", g_smcCogQ10);
+   SMCGP_ParseJsonArrayKey(body, "cog_fc_q90", g_smcCogQ90);
+
+   if(ArraySize(g_smcCogClose) == 0 && ArraySize(g_smcPredPathMid) > 0)
+      ArrayCopy(g_smcCogClose, g_smcPredPathMid);
+
+   if(ArraySize(g_smcPredPathMid) > 0 || ArraySize(g_smcCogClose) > 0)
+      Print("[SMCGP] Cognition path: ", ArraySize(g_smcCogClose), " bougies | ",
+            g_cogDirection, " str=", DoubleToString(g_cogStrength, 2),
+            " conf=", DoubleToString(g_cogConfidence, 2));
 }
 
 void SMCGP_ParseDoubleArray(const string &csv, double &arr[])
@@ -1829,6 +2598,15 @@ void SMCGP_Init()
 {
    g_smcDashPrefix = "SMC_DASH_" + IntegerToString((long)ChartID()) + "_";
    g_smcGomVerdict = "WAIT";
+   g_smcGomVerdictNum = 0;
+   g_smcGomVerdictNumPrev = 999;
+   g_smcGomVerdictPrev = "";
+   g_smcGomForceExhausted = false;
+   g_smcGomNotifReady = false;
+   g_smcGomSpikeLevel = 0;
+   g_smcGomSpikeLevelPrev = -1;
+   g_smcSpikeNotifReady = false;
+   g_smcGomSpikeTradablePrev = false;
    if(g_smcCandlesUploader != NULL)
    {
       delete g_smcCandlesUploader;
@@ -1840,6 +2618,10 @@ void SMCGP_Init()
       g_smcCandlesUploader = new MT5CandlesUploader(sym, AI_ServerURL);
       g_smcLastCandleUpload = 0;
    }
+   if(g_pipelineEma9Handle != INVALID_HANDLE)
+   { IndicatorRelease(g_pipelineEma9Handle); g_pipelineEma9Handle = INVALID_HANDLE; }
+   g_pipelineEma9Handle = iMA(_Symbol, PERIOD_M1, 9, 0, MODE_EMA, PRICE_CLOSE);
+
    Print("[SMC-GOM] Module actif | symbole=", _Symbol,
          " | Pipeline=", UseGOMPipeline ? "ON" : "OFF",
          " | GOM=", UseGOMVerdictFilter ? "ON" : "OFF",
@@ -1848,6 +2630,12 @@ void SMCGP_Init()
          " | Heartbeat=", GOMSyncSymbolToTV ? "ON" : "OFF",
          " | CandlesUpload=", GOMUploadCandles ? "ON" : "OFF",
          " | Serveur=", AI_ServerURL);
+   string pingBody;
+   if(SMCGP_HttpGet("/health", pingBody, 3000))
+      Print("[SMC-GOM] ai_server OK — GOM local MT5 actif");
+   else
+      Print("[SMC-GOM] ai_server INJOIGNABLE (HTTP ", g_smcLastHttpCode,
+            ") — verdict GOM indisponible tant que WebRequest + serveur ne sont pas OK");
 }
 
 void SMCGP_Deinit()
@@ -1857,6 +2645,10 @@ void SMCGP_Deinit()
       delete g_smcCandlesUploader;
       g_smcCandlesUploader = NULL;
    }
+   if(g_pipelineEma9Handle != INVALID_HANDLE)
+   { IndicatorRelease(g_pipelineEma9Handle); g_pipelineEma9Handle = INVALID_HANDLE; }
 }
+
+#include "SMC_FuturePath.mqh"
 
 #endif

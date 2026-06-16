@@ -32,9 +32,9 @@ log = logging.getLogger("signal_refiner")
 # ---------------------------------------------------------------------------
 # Seuils de qualité — MODE HAUTE PRECISION (qualité > quantité)
 # ---------------------------------------------------------------------------
-MIN_QUALITY_SCORE  = 75   # Seuil MINIMUM = 75% confiance avant trade
-MIN_QUALITY_AUTO   = 80   # Sous ce score en mode AUTO → lot réduit de 50%
-HIGH_QUALITY_SCORE = 90   # Au-dessus → lot au risque 2% au lieu de 1%
+MIN_QUALITY_SCORE  = 80   # Seuil MINIMUM = 80% confiance avant trade
+MIN_QUALITY_AUTO   = 85   # Sous ce score en mode AUTO → lot réduit de 50%
+HIGH_QUALITY_SCORE = 92   # Au-dessus → lot au risque 2% au lieu de 1%
 
 # Compte cible pour recommended_lot (petit compte)
 ACCOUNT_TARGET_USD = 50.0
@@ -534,9 +534,9 @@ def refine_signal(
         ta_result.get("coherence_pct") or
         tv_raw.get("coherence_pct")
     )
-    if not reject_reason and _ia_status > 0 and _ia_status < 70.0:
+    if not reject_reason and _ia_status > 0 and _ia_status < 75.0:
         reject_reason = (
-            f"IA status trop bas ({_ia_status:.0f}% < 70% requis) — "
+            f"IA status trop bas ({_ia_status:.0f}% < 75% requis) — "
             f"cohérence multi-TF insuffisante pour valider le signal"
         )
 

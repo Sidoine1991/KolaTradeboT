@@ -759,6 +759,10 @@ class GOMSignalsLiveCalculator:
             "ob_bear_top": round(float(record.get("ob_bear_top", 0)), 5),
             "ob_bear_bot": round(float(record.get("ob_bear_bot", 0)), 5),
             "spike_pct": round(float(record.get("spike_pct", 0)), 1),
+            "spike_level": int(record.get("spike_level_num", record.get("spike_level", 0))),
+            "imminence_pct": round(float(record.get("spike_imminence", record.get("imminence_pct", 0))), 1),
+            "spike_tradable": bool(record.get("spike_tradable", False)),
+            "spike_progress_pct": round(float(record.get("spike_progress_pct", 0)), 1),
             "atr": round(float(record.get("atr14", 0)), 5),
             "atr14": round(float(record.get("atr14", 0)), 5),
             "entry_quality": round(float(record.get("entry_quality", 0)) * 100, 1),
@@ -775,7 +779,8 @@ class GOMSignalsLiveCalculator:
             "pred_path": "",
             "data_source": record.get("data_source", "live_calculation"),
             "chart_tf": record.get("chart_tf", normalize_tf_key(chart_tf)),
-            "source": "live_calculation",
+            "source": record.get("data_source", "live_calculation"),
+            "candle_source": record.get("data_source", "live_calculation"),
         }
 
 

@@ -326,12 +326,16 @@ class GOMLPineCalculator:
         return verdict_num
 
     def apply_bc_verdict_guard(self, record: Dict[str, Any], verdict_num: int) -> int:
-        """Boom/Crash: logique inversée — le drift EST le signal pré-spike.
+        """Boom/Crash: inversion uniquement si spike imminent confirmé (spike_tradable=True).
 
-        Crash: quand les indicateurs disent BUY (drift haussier en cours),
-        c'est le signe que le spike baissier approche → convertir en SELL.
-        Boom: quand les indicateurs disent SELL (drift baissier en cours),
-        c'est le signe que le spike haussier approche → convertir en BUY.
+        La logique "drift = pré-spike" n'est valide que quand spike_tradable est True
+        (spike detector a confirmé le setup). Sans confirmation, on respecte la tendance
+        réelle indiquée par les scores — sinon on génère des BUY contre-tendance sur Boom
+        en plein marché baissier.
+
+        Règles absolues (inchangées) :
+        - SELL interdit sur Boom → si vn < 0 et pas de spike imminent → 0 (WAIT)
+        - BUY interdit sur Crash → si vn > 0 et pas de spike imminent → 0 (WAIT)
         """
         sym = str(record.get("symbol", "")).lower()
         is_crash = "crash" in sym
@@ -340,19 +344,19 @@ class GOMLPineCalculator:
         if not is_crash and not is_boom:
             return verdict_num
 
+        spike_tradable = bool(record.get("spike_tradable", False))
+
         if is_crash:
             if verdict_num > 0:
-                return -verdict_num
-            if verdict_num < 0:
-                return verdict_num
-            return 0
+                # Score dit BUY : inverser seulement si spike baissier imminent confirmé
+                return -verdict_num if spike_tradable else 0
+            return verdict_num  # SELL ou WAIT : respecter
 
         if is_boom:
             if verdict_num < 0:
-                return -verdict_num
-            if verdict_num > 0:
-                return verdict_num
-            return 0
+                # Score dit SELL : inverser seulement si spike haussier imminent confirmé
+                return -verdict_num if spike_tradable else 0
+            return verdict_num  # BUY ou WAIT : respecter
 
         return verdict_num
 

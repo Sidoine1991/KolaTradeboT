@@ -1,16 +1,24 @@
 @echo off
-REM Run GOM sync + WhatsApp report with fixed Python
-REM Usage: run_gom_sync.bat [--report] [--once]
-
-echo.
-echo [GOM SYNC] Starting GOM verdicts synchronization...
-echo.
+REM GOM Sync + WhatsApp Report — boucle 10 minutes
+REM Lance directement si pas d'argument --loop, sinon mode boucle interne
 
 cd /d D:\Dev\TradBOT
 
-C:\Python314_old\python.exe Python/gom_sync_with_report.py %* 2>&1
+if "%1"=="--loop" goto loop
 
+REM Mode single-shot (appelé par Task Scheduler ou manuellement)
+C:\Python314_old\python.exe Python\gom_sync_with_report.py --report >> logs\gom_sync_scheduler.log 2>&1
+exit /b 0
+
+:loop
+REM Mode boucle infinie (fenêtre dédiée)
+title GOM Sync Loop — 10min
+set /a iter=0
+:next
+set /a iter+=1
 echo.
-echo [GOM SYNC] Execution complete
-echo.
-pause
+echo [%date% %time%] === ITERATION %iter% ===
+C:\Python314_old\python.exe Python\gom_sync_with_report.py --report
+echo [%date% %time%] Prochaine execution dans 10 minutes...
+timeout /t 600 /nobreak
+goto next

@@ -11,13 +11,33 @@
 #include <Trade/OrderInfo.mqh>
 #include <Trade/DealInfo.mqh>
 #include <Trade/HistoryOrderInfo.mqh>
+
+// Profil Or/Forex/Crypto — déclarations anticipées (implémentations après inputs)
+bool   SMC_IsGoldProfileActive();
+bool   SMC_IsForexProfileActive();
+bool   SMC_IsCryptoProfileActive();
+double SMC_EffectiveSLMult();
+double SMC_EffectiveTPMult();
+double SMC_EffectiveMaxDailyDDPct();
+double SMC_EffectiveRiskPct();
+double SMC_EffectiveMaxTotalLossUSD();
+int    SMC_EffectiveMaxPositionsTerminal();
+double SMC_EffectiveGOMMinCoherence();
+double SMC_EffectiveMinAIConfidence();
+double SMC_EffectiveGOMTrailingMinUSD();
+bool   SMC_EffectiveRequireDerivArrow();
+bool   SMC_IsInProfileSessionWindow();
+bool   SMC_IsGoldDirectionAllowed(const string direction);
+double SMC_GoldTransitionLotFactor();
+void   SMC_ManageGoldPartialTP();
+void   SMC_ManageGoldScalp();
+
 #include "modules/GOM_Graphics.mqh"
 #include "modules/SMC_GOM_Pipeline.mqh"
 #include "modules/LossCooldownManager.mqh"
+#include "modules/SMC_PerformancePause.mqh"
+#include "modules/SMC_ProbabilityGate.mqh"
 #include "modules/OrderflowGraphics.mqh"
-
-// Déclaration — implémentation après les inputs (évite erreur si mqh pas à jour)
-bool SMCGP_GOMValidatesPrimarySignal(const int dir);
 
 //+------------------------------------------------------------------+
 //| WRAPPER POUR CAPTURER TOUTES LES FERMETURES                    |
@@ -32,9 +52,12 @@ bool PositionCloseWithLog(ulong ticket, string reason = "")
       datetime openTime = (datetime)PositionGetInteger(POSITION_TIME);
       int secondsSinceOpen = (int)(TimeCurrent() - openTime);
       
-      // Attendre au moins MinLossBeforeAutoCloseUSD de perte avant fermeture auto
-      double minLoss = MathMax(0.01, MinLossBeforeAutoCloseUSD);
-      if(profit < 0 && profit > -minLoss)
+      // GOM WAIT = fermeture immédiate, sans condition de perte (règle absolue)
+      bool isGOMWait = (StringFind(reason, "GOM WAIT") >= 0);
+
+      // Pour toutes les autres raisons : attendre au moins $3 de perte avant fermeture auto
+      double minLoss = MathMax(0.01, g_minLossBeforeAutoClose);
+      if(!isGOMWait && profit < 0 && profit > -minLoss)
       {
          Print("🛡️ PROTECTION PETITE PERTE - Fermeture bloquée");
          Print("   📊 Position: ", symbol, " | Ticket: ", ticket);
@@ -77,7 +100,7 @@ bool PositionCloseWithLog(ulong ticket, string reason = "")
 bool GetAISignalData();
 bool UpdateAIDecision(int timeoutMs = -1);
 void UpdateMLMetricsDisplay();
-void DrawSwingHighLow();
+void DrawBollingerCurve();
 void DrawFVGOnChart();
 void DrawOBOnChart();
 void DrawFibonacciOnChart();
@@ -115,6 +138,30 @@ void DrawPreciseSwingPredictionsWithOrders();
 void DrawOrderLinksToSwings(double nextSH, double nextSL, datetime nextSHTime, datetime nextSLTime);
 void PlacePreciseSwingBasedOrders();
 void CheckAndExecuteDerivArrowTrade();
+bool TryExecuteGOMPerfectEntry();
+void ManageGOMVerdictExits();
+void ManageGOMAutonomousStrategy();
+bool GOM_EntryCoherenceOK();
+bool COG_ConflictsWithGOM();
+bool GOM_EntryEnvironmentOK(const int dirSign);
+bool SMC_BCHourAllowsTrade(const string symbol = "");
+bool SMC_HighProbabilityAllowsEntry(const int dirSign = 0);
+double SMC_ComputeEntryProbability(const int dirSign);
+bool SMC_DailyDisciplineAllowsEntry();
+bool SMC_PerformancePauseAllowsEntry();
+void SMC_RecordTradeClosePerformance(const double profit);
+void SMC_ResetPerformancePauseDaily();
+void SMC_LoadPerformancePauseState();
+void SMC_RecordDailyTradeOpen();
+double SMC_GetDailyProfitUSD();
+double SMC_GetDailyProfitTargetUSD();
+bool SMC_GOMSupportsOpenPosition(const int posDir);
+double SMC_GetPositionMaxLossUSD(const int posDir, const bool isGomWaitExit);
+bool SMC_IsCorrectionZoneForDirection(const string symbol, const int dirSign);
+void SMC_MarkSpikeCaptured(const string symbol);
+int  SMC_CountSmallM1BarsAfterTime(const string symbol, const datetime afterTime);
+bool SMC_IsCrash150Symbol(const string symbol);
+int    SMC_GOMReentryCooldownSec();
 void StartSpikePositionMonitoring(string direction);
 bool IsSymbolPaused(string symbol);
 void UpdateSymbolPauseInfo(string symbol, double profit);
@@ -131,6 +178,7 @@ void CheckImminentSpike();
 void CheckSMCChannelReturnMovements();
 void PlaceReturnMovementLimitOrder(string direction, double currentPrice, double channelPrice, double atrVal, double strength);
 void DrawSpikeWarning(double probability);
+void UpdateSpikeCountdown();
 void InitializeSymbolPauseSystem();
 bool IsPriceInRange();
 bool DetectPriceRange();
@@ -169,6 +217,71 @@ bool ValidateAndAdjustLimitPrice(double &entryPrice, double &stopLoss, double &t
 double CalculateLotSize();
 bool GetRecentAndProjectedMLChannelIntersection(string direction, double &recentPrice, datetime &recentTime, double &projectedPrice, datetime &projectedTime);
 void AdjustEMAScalpingLimitOrder();
+
+//+------------------------------------------------------------------+
+//| Zone de correction MTF — M1/M5 en retracement contre la direction |
+//+------------------------------------------------------------------+
+bool SMC_IsCorrectionZoneForDirection(const string symbol, const int dirSign)
+{
+   if(dirSign == 0) return false;
+
+   int h4Dir = 0, h1Dir = 0, m15Dir = 0, m5Dir = 0, m1Dir = 0;
+
+   int h4EmaH = iMA(symbol, PERIOD_H4, 50, 0, MODE_EMA, PRICE_CLOSE);
+   double h4Ema50[];
+   ArraySetAsSeries(h4Ema50, true);
+   if(h4EmaH != INVALID_HANDLE && CopyBuffer(h4EmaH, 0, 0, 3, h4Ema50) >= 3)
+   {
+      MqlRates h4r[];
+      ArraySetAsSeries(h4r, true);
+      if(CopyRates(symbol, PERIOD_H4, 0, 3, h4r) >= 3)
+         h4Dir = (h4r[0].close > h4Ema50[0]) ? 1 : -1;
+   }
+   if(h4EmaH != INVALID_HANDLE) IndicatorRelease(h4EmaH);
+
+   double h1Ema21[];
+   ArraySetAsSeries(h1Ema21, true);
+   int h1EmaH = iMA(symbol, PERIOD_H1, 21, 0, MODE_EMA, PRICE_CLOSE);
+   if(h1EmaH != INVALID_HANDLE && CopyBuffer(h1EmaH, 0, 0, 5, h1Ema21) >= 5)
+      h1Dir = (h1Ema21[0] > h1Ema21[4]) ? 1 : -1;
+   if(h1EmaH != INVALID_HANDLE) IndicatorRelease(h1EmaH);
+
+   double m15Rsi[];
+   ArraySetAsSeries(m15Rsi, true);
+   int m15RsiH = iRSI(symbol, PERIOD_M15, 14, PRICE_CLOSE);
+   if(m15RsiH != INVALID_HANDLE && CopyBuffer(m15RsiH, 0, 0, 1, m15Rsi) >= 1)
+   {
+      if(m15Rsi[0] > 55) m15Dir = 1;
+      else if(m15Rsi[0] < 45) m15Dir = -1;
+   }
+   if(m15RsiH != INVALID_HANDLE) IndicatorRelease(m15RsiH);
+
+   double m5Ema[];
+   ArraySetAsSeries(m5Ema, true);
+   int m5EmaH = iMA(symbol, PERIOD_M5, 9, 0, MODE_EMA, PRICE_CLOSE);
+   if(m5EmaH != INVALID_HANDLE && CopyBuffer(m5EmaH, 0, 0, 5, m5Ema) >= 5)
+      m5Dir = (m5Ema[0] > m5Ema[4]) ? 1 : -1;
+   if(m5EmaH != INVALID_HANDLE) IndicatorRelease(m5EmaH);
+
+   double m1Ema[];
+   ArraySetAsSeries(m1Ema, true);
+   int m1EmaH = iMA(symbol, PERIOD_M1, 9, 0, MODE_EMA, PRICE_CLOSE);
+   if(m1EmaH != INVALID_HANDLE && CopyBuffer(m1EmaH, 0, 0, 5, m1Ema) >= 5)
+      m1Dir = (m1Ema[0] > m1Ema[4]) ? 1 : -1;
+   if(m1EmaH != INVALID_HANDLE) IndicatorRelease(m1EmaH);
+
+   // M1+M5 contre = zone de correction / consolidation
+   if(m1Dir == -dirSign && m5Dir == -dirSign)
+      return true;
+
+   if(h1Dir == dirSign && m1Dir == -dirSign && m5Dir == -dirSign)
+      return true;
+
+   if(h4Dir == dirSign && h1Dir == dirSign && m15Dir == -dirSign && m5Dir == -dirSign && m1Dir == -dirSign)
+      return true;
+
+   return false;
+}
 
 //+------------------------------------------------------------------+
 //| GATE UNIQUE AVANT TOUT ORDERSEND — Analyse MTF + Capital         |
@@ -275,45 +388,10 @@ bool ValidateTradeBeforeExecution(const string symbol, const string direction, d
    }
 
    // ═══ 3. DETECTION ZONE DE CORRECTION ═══
-   // Correction = M1/M5 opposés à H1/H4 (retracement contre tendance principale)
-   // Règle : si les petits TF (M1+M5) vont CONTRE les grands TF (H1+H4) → on est en correction → NE PAS ENTRER
-   int m5Dir = 0;
-   {
-      double m5Ema[];
-      ArraySetAsSeries(m5Ema, true);
-      int m5EmaH = iMA(symbol, PERIOD_M5, 9, 0, MODE_EMA, PRICE_CLOSE);
-      if(m5EmaH != INVALID_HANDLE && CopyBuffer(m5EmaH, 0, 0, 5, m5Ema) >= 5)
-         m5Dir = (m5Ema[0] > m5Ema[4]) ? 1 : -1;
-      if(m5EmaH != INVALID_HANDLE) IndicatorRelease(m5EmaH);
-   }
-
-   int m1Dir = 0;
-   {
-      double m1Ema[];
-      ArraySetAsSeries(m1Ema, true);
-      int m1EmaH = iMA(symbol, PERIOD_M1, 9, 0, MODE_EMA, PRICE_CLOSE);
-      if(m1EmaH != INVALID_HANDLE && CopyBuffer(m1EmaH, 0, 0, 5, m1Ema) >= 5)
-         m1Dir = (m1Ema[0] > m1Ema[4]) ? 1 : -1;
-      if(m1EmaH != INVALID_HANDLE) IndicatorRelease(m1EmaH);
-   }
-
-   // Détection correction : M1 ET M5 opposés à la direction du trade ET H1 aligné avec trade
-   bool inCorrection = false;
-   if(h1Dir == dirSign && m1Dir == -dirSign && m5Dir == -dirSign)
-   {
-      inCorrection = true;
-   }
-   // Aussi si H4 et H1 sont alignés avec le trade mais M1+M5+M15 sont tous contre
-   if(h4Dir == dirSign && h1Dir == dirSign && m15Dir == -dirSign && m5Dir == -dirSign && m1Dir == -dirSign)
-   {
-      inCorrection = true;
-   }
-
-   if(inCorrection)
+   if(SMC_IsCorrectionZoneForDirection(symbol, dirSign))
    {
       Print("[GATE-CORRECTION] BLOQUE — Zone de correction detectee pour ", dir,
-            " | H4=", h4Dir, " H1=", h1Dir, " M15=", m15Dir, " M5=", m5Dir, " M1=", m1Dir,
-            " | Tendance globale OK mais M1/M5 en retracement → attendre fin correction");
+            " | attendre fin retracement M1/M5");
       return false;
    }
 
@@ -337,6 +415,27 @@ bool ValidateTradeBeforeExecution(const string symbol, const string direction, d
       }
    }
 
+   // ═══ 5. POST-SPIKE — attendre petites bougies après spike capté (Boom/Crash) ═══
+   if(SMC_GetSymbolCategory(symbol) == SYM_BOOM_CRASH
+      && g_lastSpikeCapturedSymbol == symbol && g_lastSpikeCapturedTime > 0)
+   {
+      int smallBars = SMC_CountSmallM1BarsAfterTime(symbol, g_lastSpikeCapturedTime);
+      if(smallBars < PostSpikeMinSmallCandles)
+      {
+         Print("[GATE-SPIKE] BLOQUE ", dir, " — spike capté, petites bougies M1: ",
+               smallBars, "/", PostSpikeMinSmallCandles);
+         return false;
+      }
+   }
+
+   // ═══ 6. HEURE UTC BOOM/CRASH (bc_heure via ai_server) ═══
+   if(!SMC_BCHourAllowsTrade(symbol))
+      return false;
+
+   int gateDir = (dir == "BUY") ? 1 : -1;
+   if(!SMC_HighProbabilityAllowsEntry(gateDir))
+      return false;
+
    Print("[GATE] ✅ VALIDE — ", dir, " ", symbol, " lot=", DoubleToString(lot, 2),
          " | MTF aligned=", aligned, "/3 | Balance=", DoubleToString(balance, 2),
          " | Risk=", DoubleToString(riskUSD, 2), "$");
@@ -351,64 +450,111 @@ bool SafeOrderSend(MqlTradeRequest &request, MqlTradeResult &result)
    string dir = (request.type == ORDER_TYPE_BUY || request.type == ORDER_TYPE_BUY_LIMIT ||
                  request.type == ORDER_TYPE_BUY_STOP) ? "BUY" : "SELL";
 
-   // Recalculer SL/TP au prix marché courant + OrderCheck broker (évite Invalid stops)
-   if(request.action == TRADE_ACTION_DEAL && (request.sl > 0 || request.tp > 0))
+   // OrderCheck broker pour ordres marché (SL/TP valides)
+   if(request.action == TRADE_ACTION_DEAL)
    {
-      int dirSign = (request.type == ORDER_TYPE_BUY) ? 1 : -1;
-      double sl = request.sl, tp = request.tp;
-      if(sl > 0 && tp > 0 && sl != request.price && tp != request.price)
+      MqlTradeCheckResult chk;
+      ZeroMemory(chk);
+      if(!OrderCheck(request, chk))
       {
-         Print("[SafeOrderSend] SL/TP invalides (OrderCheck) ", dir, " ", request.symbol,
-               " bid=", DoubleToString(SymbolInfoDouble(request.symbol, SYMBOL_BID), _Digits),
-               " ask=", DoubleToString(SymbolInfoDouble(request.symbol, SYMBOL_ASK), _Digits),
-               " SL=", DoubleToString(request.sl, _Digits),
-               " TP=", DoubleToString(request.tp, _Digits));
-         result.retcode = TRADE_RETCODE_INVALID_STOPS;
+         Print("[SafeOrderSend] OrderCheck rejeté ", dir, " ", request.symbol,
+               " retcode=", chk.retcode, " ", chk.comment);
+         result.retcode = chk.retcode;
          return false;
       }
-      request.sl = sl;
-      request.tp = tp;
    }
 
-   if(!ValidateTradeBeforeExecution(request.symbol, dir, request.volume, request.price, request.sl, request.tp))
+   bool isGomOrder = (StringFind(request.comment, "GOM_") >= 0);
+   bool isOpening  = (request.action == TRADE_ACTION_DEAL || request.action == TRADE_ACTION_PENDING);
+
+   // GATE CORRECTION CYCLE — filet final, aucune ouverture si correction active
+   // Exempt Boom/Crash (pas de corrections classiques, fonctionnent par spikes)
+   if(isOpening && SMC_GetSymbolCategory(request.symbol) != SYM_BOOM_CRASH
+      && !g_smcCorrEntrySafe && g_smcCorrExhaustPct < 65.0)
+   {
+      Print("[SafeOrderSend] Ordre ", dir, " ", request.symbol,
+            " BLOQUE — correction active (", g_smcCorrPhase, " ",
+            DoubleToString(g_smcCorrExhaustPct, 0), "%)");
+      result.retcode = 10006;
+      return false;
+   }
+
+   if(isOpening && !SMC_DailyDisciplineAllowsEntry())
+   {
+      Print("[SafeOrderSend] Ordre ", dir, " ", request.symbol, " BLOQUE — discipline journalière");
+      result.retcode = 10006;
+      return false;
+   }
+
+   if(!isGomOrder && isOpening && !ValidateTradeBeforeExecution(request.symbol, dir, request.volume, request.price, request.sl, request.tp))
    {
       Print("[SafeOrderSend] Ordre ", dir, " ", request.symbol, " BLOQUE par gate MTF/Capital");
       result.retcode = 10006; // TRADE_RETCODE_REJECT
       return false;
    }
 
-   return OrderSend(request, result);
+   bool sent = OrderSend(request, result);
+   if(sent && isOpening && (result.retcode == TRADE_RETCODE_DONE || result.retcode == TRADE_RETCODE_PLACED))
+      SMC_RecordDailyTradeOpen();
+   return sent;
 }
 
-// Dessin basique des derniers swing high / low sur le graphique courant
-void DrawSwingHighLow()
+// Courbe Bandes de Bollinger (SMA20 + bandes ±2σ) tracée bar-par-bar
+void DrawBollingerCurve()
 {
-   MqlRates rates[];
-   ArraySetAsSeries(rates, true);
-   if(CopyRates(_Symbol, PERIOD_CURRENT, 0, 20, rates) < 5) return;
+   ObjectsDeleteAll(0, "SMC_Last_SH");
+   ObjectsDeleteAll(0, "SMC_Last_SL");
+   ObjectDelete(0, "SMC_Last_SH_LINE");
+   ObjectDelete(0, "SMC_Last_SL_LINE");
 
-   double lastHigh = rates[0].high;
-   double lastLow  = rates[0].low;
-   datetime lastTime = rates[0].time;
+   if(bbHandle == INVALID_HANDLE) return;
 
-   // Supprimer les anciens objets pour éviter l'encombrement
-   ObjectDelete(0, "SMC_Last_SH");
-   ObjectDelete(0, "SMC_Last_SL");
+   const int len = 60;
+   double bbMid[], bbUp[], bbDn[];
+   datetime bbTime[];
+   ArraySetAsSeries(bbMid,   true);
+   ArraySetAsSeries(bbUp,    true);
+   ArraySetAsSeries(bbDn,    true);
+   ArraySetAsSeries(bbTime,  true);
 
-   // Dernier Swing High (simple: high de la dernière bougie)
-   if(ObjectCreate(0, "SMC_Last_SH", OBJ_ARROW, 0, lastTime, lastHigh))
+   if(CopyBuffer(bbHandle, 0, 0, len, bbMid) < len) return;
+   if(CopyBuffer(bbHandle, 1, 0, len, bbUp)  < len) return;
+   if(CopyBuffer(bbHandle, 2, 0, len, bbDn)  < len) return;
+   if(CopyTime(_Symbol, PERIOD_CURRENT, 0, len, bbTime) < len) return;
+
+   ObjectsDeleteAll(0, "SMC_BB_");
+
+   for(int i = 0; i < len - 1; i++)
    {
-      ObjectSetInteger(0, "SMC_Last_SH", OBJPROP_COLOR, clrRed);
-      ObjectSetInteger(0, "SMC_Last_SH", OBJPROP_ARROWCODE, 233);
-      ObjectSetInteger(0, "SMC_Last_SH", OBJPROP_WIDTH, 2);
-   }
+      // Segment milieu (SMA)
+      string midName = "SMC_BB_MID_" + IntegerToString(i);
+      ObjectCreate(0, midName, OBJ_TREND, 0, bbTime[i + 1], bbMid[i + 1], bbTime[i], bbMid[i]);
+      ObjectSetInteger(0, midName, OBJPROP_COLOR, clrGold);
+      ObjectSetInteger(0, midName, OBJPROP_WIDTH, 2);
+      ObjectSetInteger(0, midName, OBJPROP_STYLE, STYLE_SOLID);
+      ObjectSetInteger(0, midName, OBJPROP_RAY_RIGHT, false);
+      ObjectSetInteger(0, midName, OBJPROP_SELECTABLE, false);
+      ObjectSetInteger(0, midName, OBJPROP_BACK, true);
 
-   // Dernier Swing Low (simple: low de la dernière bougie)
-   if(ObjectCreate(0, "SMC_Last_SL", OBJ_ARROW, 0, lastTime, lastLow))
-   {
-      ObjectSetInteger(0, "SMC_Last_SL", OBJPROP_COLOR, clrDodgerBlue);
-      ObjectSetInteger(0, "SMC_Last_SL", OBJPROP_ARROWCODE, 234);
-      ObjectSetInteger(0, "SMC_Last_SL", OBJPROP_WIDTH, 2);
+      // Bande haute
+      string upName = "SMC_BB_UP_" + IntegerToString(i);
+      ObjectCreate(0, upName, OBJ_TREND, 0, bbTime[i + 1], bbUp[i + 1], bbTime[i], bbUp[i]);
+      ObjectSetInteger(0, upName, OBJPROP_COLOR, clrMediumPurple);
+      ObjectSetInteger(0, upName, OBJPROP_WIDTH, 1);
+      ObjectSetInteger(0, upName, OBJPROP_STYLE, STYLE_SOLID);
+      ObjectSetInteger(0, upName, OBJPROP_RAY_RIGHT, false);
+      ObjectSetInteger(0, upName, OBJPROP_SELECTABLE, false);
+      ObjectSetInteger(0, upName, OBJPROP_BACK, true);
+
+      // Bande basse
+      string dnName = "SMC_BB_DN_" + IntegerToString(i);
+      ObjectCreate(0, dnName, OBJ_TREND, 0, bbTime[i + 1], bbDn[i + 1], bbTime[i], bbDn[i]);
+      ObjectSetInteger(0, dnName, OBJPROP_COLOR, clrMediumPurple);
+      ObjectSetInteger(0, dnName, OBJPROP_WIDTH, 1);
+      ObjectSetInteger(0, dnName, OBJPROP_STYLE, STYLE_SOLID);
+      ObjectSetInteger(0, dnName, OBJPROP_RAY_RIGHT, false);
+      ObjectSetInteger(0, dnName, OBJPROP_SELECTABLE, false);
+      ObjectSetInteger(0, dnName, OBJPROP_BACK, true);
    }
 }
 
@@ -564,6 +710,7 @@ enum ENUM_SYMBOL_CATEGORY {
    SYM_FOREX,
    SYM_COMMODITY,
    SYM_METAL,
+   SYM_CRYPTO,
    SYM_UNKNOWN
 };
 ENUM_SYMBOL_CATEGORY SMC_GetSymbolCategory(string symbol)
@@ -575,9 +722,17 @@ ENUM_SYMBOL_CATEGORY SMC_GetSymbolCategory(string symbol)
    if(StringFind(s, "XAU") >= 0 || StringFind(s, "GOLD") >= 0) return SYM_METAL;
    if(StringFind(s, "XAG") >= 0 || StringFind(s, "SILVER") >= 0) return SYM_METAL;
    if(StringFind(s, "OIL") >= 0 || StringFind(s, "COPPER") >= 0) return SYM_COMMODITY;
-   if(StringFind(s, "USD") >= 0 || StringFind(s, "EUR") >= 0 || StringFind(s, "GBP") >= 0 || StringFind(s, "JPY") >= 0) return SYM_FOREX;
+   if(StringFind(s, "BTC") >= 0 || StringFind(s, "ETH") >= 0 || StringFind(s, "SOL") >= 0 ||
+      StringFind(s, "ADA") >= 0 || StringFind(s, "BNB") >= 0 || StringFind(s, "XRP") >= 0 ||
+      StringFind(s, "DOT") >= 0 || StringFind(s, "AVAX") >= 0 || StringFind(s, "MATIC") >= 0 ||
+      StringFind(s, "LINK") >= 0 || StringFind(s, "LTC") >= 0) return SYM_CRYPTO;
+   if(StringFind(s, "USD") >= 0 || StringFind(s, "EUR") >= 0 || StringFind(s, "GBP") >= 0 ||
+      StringFind(s, "JPY") >= 0 || StringFind(s, "CHF") >= 0 || StringFind(s, "AUD") >= 0 ||
+      StringFind(s, "NZD") >= 0 || StringFind(s, "CAD") >= 0) return SYM_FOREX;
    return SYM_UNKNOWN;
 }
+
+#include "modules/SMC_TradeJournal.mqh"
 
 // Règle directionnelle spécifique Boom/Crash:
 // - Sur Boom: uniquement BUY (jamais SELL)
@@ -732,8 +887,19 @@ bool SMCGP_GOMValidatesPrimarySignal(const int dir)
       Print("[GOM-VALIDATE] Rejeté: SELL vs GOM vn=", g_smcGomVerdictNum);
       return false;
    }
+   if(!GOM_EntryCoherenceOK())
+   {
+      Print("[GOM-VALIDATE] Rejeté: cohérence ", g_smcGomCoherence,
+            "% < seuil ", SMC_EffectiveGOMMinCoherence(), "%");
+      return false;
+   }
+   if(COG_ConflictsWithGOM())
+   {
+      Print("[GOM-VALIDATE] Rejeté: conflit COG=", g_cogDirection, " / GOM=", g_smcGomVerdict);
+      return false;
+   }
    Print("[GOM-VALIDATE] ✅ Signal validé dir=", dir, " GOM=", g_smcGomVerdict,
-         " vn=", g_smcGomVerdictNum);
+         " vn=", g_smcGomVerdictNum, " coh=", g_smcGomCoherence, "% COG=", g_cogDirection);
    return true;
 }
 
@@ -812,23 +978,8 @@ void ManageDisciplineExits()
       }
    }
 
-   // Fermer positions ouvertes si GOM = WAIT seulement après perte >= MinLossBeforeAutoCloseUSD
-   if(UseGOMWaitAutoClose && g_smcGomConnected && g_smcGomVerdictNum == 0)
-   {
-      double minLoss = MathMax(0.01, MinLossBeforeAutoCloseUSD);
-      for(int i = PositionsTotal() - 1; i >= 0; i--)
-      {
-         if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
-         if((long)PositionGetInteger(POSITION_MAGIC) != InpMagicNumber) continue;
-         double profit = PositionGetDouble(POSITION_PROFIT);
-         if(profit > -minLoss)
-            continue; // ordre déclenché mais pas encore invalidé (perte < 1$)
-         ulong ticket = PositionGetInteger(POSITION_TICKET);
-         Print("[DISCIPLINE] Fermeture — GOM=WAIT + perte ", DoubleToString(profit, 2),
-               "$ | ticket=", ticket);
-         PositionCloseWithLog(ticket, "GOM verdict=WAIT discipline");
-      }
-   }
+   // Fermetures GOM autonomes (WAIT, PERFECT→GOOD, correction, force épuisée)
+   ManageGOMVerdictExits();
 
    // Fermer si position ouverte trop longtemps
    if(MaxPositionHoldSec > 0)
@@ -890,8 +1041,8 @@ bool PlacePreciseLimitOrder(const string direction, const string tag)
       return false;
    }
 
-   double slDist = atrVal * SL_ATRMult * 0.35;
-   double tpDist = atrVal * TP_ATRMult * 0.35;
+   double slDist = atrVal * SMC_EffectiveSLMult();
+   double tpDist = atrVal * SMC_EffectiveTPMult();
    double sl = 0, tp = 0;
    if(direction == "BUY")
    {
@@ -1086,6 +1237,7 @@ double SMC_GetATRMultiplier(ENUM_SYMBOL_CATEGORY cat)
       case SYM_FOREX:       return 2.0;
       case SYM_COMMODITY:   return 2.5;
       case SYM_METAL:       return 2.5;
+      case SYM_CRYPTO:      return 2.0;
       default:              return 2.0;
    }
 }
@@ -1103,6 +1255,12 @@ datetime g_lastAIUpdate = 0;
 double   g_lastSpikeProbability = 0.0;
 datetime g_lastSpikeUpdate      = 0;
 
+// Décompte spike imminent
+int      g_spikeCountdownSec    = 0;   // secondes restantes (0 = inactif)
+datetime g_spikeCountdownStart  = 0;   // moment où le décompte a démarré
+int      g_spikeCountdownTotal  = 0;   // durée totale du décompte (pour %)
+datetime g_spikeBeepLast        = 0;   // dernier bip émis
+
 // Variables ML pour le tableau de bord
 string g_mlMetricsStr = "";
 datetime g_lastMLMetricsUpdate = 0;
@@ -1111,6 +1269,9 @@ bool g_channelValid = false;
 // Variables de trading et positions
 double g_maxProfit = 0.0;
 datetime g_lastBoomCrashPrice = 0;
+datetime g_lastGomVerdictExitTime = 0; // Cooldown ré-entrée après fermeture GOM
+string   g_lastSpikeCapturedSymbol = "";
+datetime g_lastSpikeCapturedTime   = 0;
 datetime s_lastRefUpdate = 0;
 
 // Suivi de l'équité journalière pour contrôle du drawdown
@@ -1118,6 +1279,9 @@ double g_dailyStartEquity = 0.0;
 double g_dailyMaxEquity   = 0.0;
 double g_dailyMinEquity   = 0.0;
 int    g_dailyEquityDate  = 0;   // YYYYMMDD
+int    g_dailyTradeCount  = 0;   // Positions ouvertes aujourd'hui (discipline)
+int    g_dailyDisciplineDate = 0;
+bool   g_dailyTargetHit   = false;
 
 // Dernière perte par symbole (éviter 2e perte consécutive sans conditions strictes)
 string g_lastLossSymbol   = "";
@@ -1127,14 +1291,14 @@ static const int RECENT_LOSS_WINDOW_SEC = 3600;  // 1 h
 //| INPUTS                                                            |
 input group "=== GÉNÉRAL ==="
 input bool   UseMinLotOnly     = true;   // Toujours lot minimum (le plus bas)
-input int    MaxPositionsTerminal = 2;   // Nombre max de positions (tout le terminal MT5) - LIMITÉ À 2 pour protéger le capital
+input int    MaxPositionsTerminal = 3;   // Nombre max de positions (tout le terminal MT5)
 input bool   OnePositionPerSymbol = true; // Une seule position par symbole - MAINTENU pour éviter duplication
 input int    InpMagicNumber       = 202502; // Magic Number
 input double MaxTotalLossDollars  = 10.0; // Perte totale max ($) - au-delà on ferme la position la plus perdante
 input double MaxLossPerSpikeTradeDollars = 3.0;  // Perte max par trade Spike Boom/Crash ($) - lot réduit si dépassement
 input double MaxRiskPerTradePercent   = 1.5;  // Risque normal par trade (% de l'équité)
 input double MaxDailyDrawdownPercent  = 10.0; // Drawdown max journalier (%) avant blocage des nouvelles entrées
-input double MinSetupScoreEntry      = 65.0;  // Score minimum (0-100) pour autoriser une nouvelle entrée
+input double MinSetupScoreEntry      = 75.0;  // Score minimum (0-100) pour autoriser une nouvelle entrée
 input double MinAIConfidencePercent   = 65.0;  // Confiance IA minimum (%) pour exécuter un trade
 input bool   UseSessions       = true;   // Trader seulement LO/NYO
 input bool   ShowChartGraphics = true;   // FVG, OB, Fibo, EMA, Swing H/L sur le graphique
@@ -1169,20 +1333,18 @@ input bool   UseDirectionConflictClose = true; // Fermer sur conflit direction (
 
 input group "=== AI SERVER (confirmation signaux) ==="
 input bool   UseAIServer       = true;   // Utiliser le serveur IA pour confirmation
-input string AI_ServerURL       = "http://localhost:8000";  // URL du serveur IA local
+input string AI_ServerURL       = "http://127.0.0.1:8000";  // URL du serveur IA local
 input string AI_ServerRender    = "https://kolatradebot.onrender.com";  // URL render en fallback
 input int    AI_Timeout_ms     = 5000;   // Timeout WebRequest (ms)
 input int    AI_UpdateInterval_Seconds = 30;  // Intervalle mise à jour IA (secondes)
 input bool   UseRenderAsPrimary = false; // Utiliser le serveur local en premier (Render en fallback)
-input string AI_ServerURL2      = "http://localhost:8000";  // URL serveur local
+input string AI_ServerURL2      = "http://127.0.0.1:8000";  // URL serveur local
 input double MinAIConfidence   = 0.55;   // Confiance IA min pour exécuter (55% = plus de sécurité)
 input int    AI_Timeout_ms2     = 10000;  // Timeout WebRequest (ms) - Render cold start
 input string AI_ModelName       = "SMC_Model";  // Nom du modèle IA
 input string AI_ModelVersion    = "1.0";  // Version du modèle IA
 input bool   AI_UseGPU          = true;   // Utiliser le GPU pour l'IA (si disponible)
-input bool   RequireAIConfirmation = true
-
-; // Exiger confirmation IA pour SMC (false = trader sans IA)
+input bool   RequireAIConfirmation = true; // Exiger confirmation IA pour SMC (false = trader sans IA)
 input bool   UseFVG            = true;   // Fair Value Gap
 input bool   UseOrderBlocks    = true;   // Order Blocks
 input bool   UseLiquiditySweep = true;   // Liquidity Sweep (LS)
@@ -1201,40 +1363,130 @@ enum GOMVerdictSourceEnum
    GOM_SRC_AUTO        = 2,
 };
 input bool   UseGOMVerdictFilter    = true;  // Filtrer entrées par verdict GOM GOOD/PERFECT
-input bool   UseGOMPipeline         = false; // DÉSACTIVÉ — Python pipeline seul
+input bool   UseGOMPipeline         = true;  // Pipeline Python → MT5 via /pending-order
 input bool   PipelineOnlyMode       = true;  // ACTIVÉ — ordres pipeline uniquement
-input GOMVerdictSourceEnum GOMVerdictSource = GOM_SRC_LOCAL; // Source verdict GOM
+input GOMVerdictSourceEnum GOMVerdictSource = GOM_SRC_LOCAL; // Source verdict GOM (LOCAL = prix MT5 via ai_server)
 input bool   ShowGOMDashboard       = true;  // Tableau de bord verdict GOM
 input bool   ShowTVSyncedLevels     = true;  // Dessins TV sync (KOLA, OB, OTE)
 input bool   UseGOMWaitAutoClose    = true;  // Fermer positions si GOM = WAIT
+input double GOMWaitCloseMinLossUSD = 1.0;   // Sur WAIT: fermer dès perte >= N $ (sans attendre $3)
+input double GOMHoldMaxLossUSD      = 3.0;   // GOM valide + pas de spike: perte max tolérée ($)
 input bool   GOMRequireOBTouch      = true;  // Entrée seulement sur OB entry
 input bool   GOMRequireOTE          = true;  // Entrée seulement si prix dans OTE (bypass GOOD/PERFECT)
 input int    GOMPollIntervalSec     = 2;     // Intervalle poll GOM (sec)
-input double GOMMinCoherencePct     = 70.0;  // Cohérence minimum pour entrer (%)
+input double GOMMinCoherencePct     = 80.0;  // Cohérence minimum pour entrer (%)
 input int    GOMGlobalMinConfidence = 4;     // Force direction globale minimum (1-7)
 input bool   UseTVBollingerFilter   = true;  // Bloquer entrées contre BB Mid
 input bool   GOMUploadCandles       = true;  // Upload candles EA -> ai_server
 input int    GOMUploadIntervalMin   = 1;     // Intervalle upload (minutes)
 input bool   UseEAIndependentEntry  = true;  // Entrées indépendantes EA (GOOD/PERFECT + IA ≥70%)
 input bool   GOMOBTouchForPipeline  = false; // Exiger OB touch pour pipeline
+input bool   GOMPerfectAutoEntry    = true;  // Stratégie GOM autonome (WAIT/LIMIT/GOOD/PERFECT)
+input double GOMTrailingMinProfitUSD = 1.0;  // Trailing GOM actif au-delà de N $ de gain
 input bool   ShowTVBollingerLines   = true;  // Bandes Bollinger TV sync
 input bool   ShowTVOrderBlocks      = true;  // Zones OB bull/bear (ai_server uniquement)
 input bool   UseLocalOrderBlockDrawings = false; // OB calculés localement (OFF = ai_server seul)
-input bool   ShowOrderFlowCompass   = true;  // Boussole circulaire momentum OrderFlow (GHOST)
+input bool   ShowOrderFlowCompass   = false; // Boussole circulaire momentum OrderFlow (GHOST)
 input bool   GOMSyncSymbolToTV      = false; // Sync symbole vers TradingView (OFF)
 input int    GOM_Timeout_ms         = 15000; // Timeout poll GOM (ms)
 input int    MCPPollIntervalSec     = 3;     // Poll /pending-order (sec)
 input int    GOMDashboardY          = 50;    // Marge basse dashboard GOM (pixels)
 input bool   CleanupLegacyDrawings  = true;  // Supprimer anciens dessins OB/FVG locaux
 
+input group "=== PROFIL OR XAUUSD (hybride GoldSMC + GOM autonome) ==="
+input bool   UseGoldHybridProfile   = true;  // Profil optimisé Or (SYM_METAL) — backtest Python $100
+input double GoldSL_ATRMult         = 2.2;   // SL Or (x ATR) — optimal backtest OOS
+input double GoldTP_ATRMult         = 1.5;   // TP Or TP1 (x ATR) — RR=1.5 fermer 50% puis trailing vers TP2
+input double GoldTP2_ATRMult        = 3.0;   // TP Or TP2 (x ATR) — trailing après TP partiel
+input bool   GoldUsePartialTP       = true;  // Or: fermer 50% à TP1=RR1.5, trailing vers TP2=RR3.0
+input double GoldMaxDailyLossPct    = 5.0;   // Drawdown journalier max (%) sur Or
+input double GoldMaxRiskPct         = 0.5;   // Risque par trade (%) sur Or — optimal OOS
+input double GoldTrailingMinUSD     = 1.0;   // Trailing GOM min ($) sur Or (PERFECT)
+input bool   GoldDisableDerivArrow  = true;  // Or: pas de flèche Deriv requise (GOM autonome)
+input bool   GoldGOMOnlyOnMetal     = true;  // GOM autonome actif seulement sur métaux
+input double GoldMaxTotalLossUSD    = 6.0;   // Perte totale max ($) sur Or (~6% de $100)
+input int    GoldMaxPositions       = 3;     // Max positions terminal sur Or
+input double GoldMinAIConfidencePct = 65.0;  // Confiance IA min (%) sur Or
+input double GoldGOMMinCoherencePct = 90.0;  // Cohérence GOM min (%) sur Or — PERFECT only optimal
+input bool   GoldUseRegimeFilter    = true;  // Or: détection régime marché W1 (BULL/BEAR/TRANSITION)
+
+input group "=== GOLD SCALP (COG vert actif) ==="
+input bool   GoldScalpEnabled       = true;  // Scalp Or tant que COG projeté = BUY (vert)
+input int    GoldScalpMaxPositions  = 3;     // Max positions scalp simultanées sur Or
+input double GoldScalpSL_ATRMult    = 1.0;   // SL scalp Or (x ATR) — plus serré pour re-entrées
+input double GoldScalpTP_ATRMult    = 1.5;   // TP scalp Or (x ATR) — RR=1.5
+input double GoldScalpRiskPct       = 0.3;   // Risque par scalp (%) — plus petit lot
+input bool   GoldScalpUseEMA9       = true;  // Re-entrée sur rebond EMA9 M1
+input bool   GoldScalpUseOBBull     = true;  // Re-entrée sur touch OB Bullish M1
+input double GoldScalpOBTolATR      = 0.3;   // Tolérance OB Bull (x ATR) pour déclenchement
+input int    GoldScalpCooldownSec   = 120;   // Cooldown (secondes) entre 2 re-entrées scalp
+
+input group "=== PROFIL FOREX (paires majeures/mineures) ==="
+input bool   UseForexProfile        = true;  // Profil adapté Forex (SYM_FOREX)
+input double ForexSL_ATRMult        = 2.0;   // SL Forex (x ATR) — spread plus large que Or
+input double ForexTP_ATRMult        = 3.0;   // TP Forex (x ATR) — RR=1.5
+input double ForexMaxDailyLossPct   = 3.0;   // Drawdown journalier max (%) Forex
+input double ForexMaxRiskPct        = 1.0;   // Risque par trade (%) Forex
+input double ForexGOMMinCoherencePct= 80.0;  // Cohérence GOM min (%) Forex
+input bool   ForexUseSessionFilter  = true;  // Forex: sessions London+NY uniquement
+input int    ForexSessionStart      = 7;     // Début fenêtre Forex (UTC)
+input int    ForexSessionEnd        = 17;    // Fin fenêtre Forex (UTC)
+
+input group "=== PROFIL CRYPTO (BTC/ETH/SOL etc.) ==="
+input bool   UseCryptoProfile       = true;  // Profil adapté Crypto (SYM_CRYPTO)
+input double CryptoSL_ATRMult       = 2.0;   // SL Crypto (x ATR) — volatilité élevée
+input double CryptoTP_ATRMult       = 4.0;   // TP Crypto (x ATR) — RR=2.0 (mouvements amples)
+input double CryptoMaxDailyLossPct  = 5.0;   // Drawdown journalier max (%) Crypto
+input double CryptoMaxRiskPct       = 0.5;   // Risque par trade (%) Crypto — prudent
+input double CryptoGOMMinCoherencePct= 80.0; // Cohérence GOM min (%) Crypto
+input bool   CryptoUseSessionFilter = true;  // Crypto: sessions actives uniquement
+input int    CryptoSessionStart     = 8;     // Début fenêtre Crypto (UTC)
+input int    CryptoSessionEnd       = 22;    // Fin fenêtre Crypto (UTC)
+
 input group "=== DISCIPLINE ROBOT (signal → GOM) ==="
 input bool   UseSignalFirstDiscipline = false; // DÉSACTIVÉ — Python pipeline seul
 input int    MaxLimitOrdersTerminal   = 2;     // Max ordres LIMIT (tout le terminal MT5)
 input int    MaxPositionHoldSec       = 300;   // Fermer position si ouverte > N sec (300 = 5 min)
-input double PreciseLimitMaxDistATR   = 0.25;  // Distance max ordre LIMIT précis (x ATR)
+input double PreciseLimitMaxDistATR   = 1.5;   // Distance max ordre LIMIT précis (x ATR)
 input bool   PreferLimitOverMarket    = true;  // Préférer LIMIT précis au lieu du marché
-input double MinLossBeforeAutoCloseUSD = 1.0;  // Fermer seulement si perte >= N $ (ordre déclenché)
+input double MinLossBeforeAutoCloseUSD = 3.0;  // Fermer seulement si perte >= N $ (ordre déclenché)
 input bool   KeepPendingUntilTrigger  = true;  // Ne pas annuler LIMIT/STOP en attente avant déclenchement
+input group "=== JOURNAL CSV + DASHBOARD ==="
+input bool   UseTradeJournal          = true;  // Exporter chaque trade fermé en CSV
+input int    TradeJournalBackfillDays = 30;    // Historique à importer au démarrage (jours)
+
+input group "=== DISCIPLINE JOURNALIÈRE (selectif) ==="
+input bool   UseDailyDiscipline       = true;  // Activer la discipline journalière
+input int    MaxDailyTrades           = 30;    // Max trades par jour
+input double DailyProfitTargetPct     = 10.0;  // Objectif profit journalier (% équité départ)
+input bool   StopOnDailyTarget        = true;  // Bloquer nouvelles entrées si objectif atteint
+input bool   StopOnMaxDailyTrades     = true;  // Bloquer nouvelles entrées si max trades/jour atteint
+
+input group "=== PAUSE PERFORMANCE (money management) ==="
+input bool   UseWinStreakPause        = true;  // Pause après série de gains consécutifs
+input int    WinStreakThreshold       = 5;     // Nb gains d'affilée → pause
+input int    WinStreakPauseHours      = 2;     // Durée pause (heures)
+input bool   UseProfitGivebackGuard   = true;  // Stop si on rend trop du pic journalier
+input double ProfitGivebackPct        = 40.0;  // % du pic rendu → blocage jusqu'à demain
+input double ProfitGivebackMinPeakUSD = 5.0;   // Pic min ($) pour activer la garde
+
+input group "=== PROBABILITÉ ÉLEVÉE (anti-hazard) ==="
+input bool   UseHighProbabilityFilter = true;  // N'entrer que si score probabilité élevé
+input double MinEntryProbabilityPct   = 72.0;  // Score composite min (0-100) pour entrer
+input int    MinGOMVerdictNumAbs      = 2;     // |vn| min = 2 (GOOD/PERFECT seulement)
+input double HighProbBcMinConfidence  = 70.0;  // BC heure min % (Boom/Crash)
+
+input group "=== BOOM/CRASH HEURES UTC (bc_heure) ==="
+input bool   UseBCHourFilter          = true;  // Bloquer entrées hors fenêtre volatilité UTC
+input double BCHourMinConfidence      = 70.0;  // Confiance min % (≥70 = tradeable)
+
+input group "=== COGNITION FORECAST 200 ==="
+input bool   ShowCognitionPath        = true;  // Dessiner 200 bougies fantômes sur le graphique
+input int    CognitionHorizonBars     = 200;   // Nombre de bougies à afficher
+input double CognitionMinConfidence   = 0.55;  // Confiance min (0-1) pour entrer
+input double CognitionMinStrength     = 0.50;  // Force min (0-1) pour entrer
+input bool   UseCognitionFilter       = true;  // Bloquer entrées si forecast faible/opposé
+input bool   UseTripleAlignmentGate   = true;  // FORT: Cog+IA+GOM alignés = scalp direct EMA9/SR
 
 input group "=== TIMEFRAMES ==="
 input ENUM_TIMEFRAMES HTF      = PERIOD_H4;  // Structure (HTF)
@@ -1257,6 +1509,9 @@ input int    NYOEnd            = 16;     // New York Open fin
 
 input group "=== NOTIFICATIONS ==="
 input bool   UseNotifications  = true;   // Alert + notification push (signaux et trades)
+input bool   GOMVerdictPushNotify    = true; // Push MT5 quand GOM passe GOOD/PERFECT ou WAIT
+input bool   SpikeImminentPushNotify = true; // Push MT5 spike IMMINENT (Boom/Crash, source TV)
+input bool   UseLossCooldown         = false; // Bloquer pipeline si IA Status < 50%
 
 input group "=== BOUGIES FUTURES ==="
 input int    PredictionChannelPastBars = 1000; // (interne)
@@ -1284,7 +1539,7 @@ input bool   NoSLTP_BoomCrash  = false;  // Pas de SL/TP sur Boom/Crash (DÉSACT
 input double BoomCrashSpikeTP  = 0.50;   // Fermer dès petit gain (spike capté) si profit > ce seuil ($) - AUGMENTÉ
 input double BoomCrashSpikePct = 0.50;   // Pourcentage de mouvement pour détecter spike (50% - beaucoup plus élevé)
 input double TargetProfitBoomCrashUSD = 2.0; // Gain à capter ($) - fermer si profit >= ce seuil (Spike_Close)
-input double MaxLossDollars    = 15.0;   // Fermer toute position si perte atteint ($) - augmenté pour éviter fermetures prématurées
+input double MaxLossDollars    = 3.0;    // Fermer toute position si perte atteint ($) - perte max tolérée
 input double TakeProfitDollars = 2.0;    // Fermer si bénéfice atteint ($) - Volatility/Forex/Commodity
 
 // Filtre basé sur la probabilité de spike issue du modèle ML
@@ -1295,6 +1550,9 @@ input bool   SpikeRequirePreSpikePattern = true; // Mode strict: exiger le patte
 input double PreSpike_CompressionRatio   = 0.65;  // Pré-spike: range10 < range50 * ratio (plus haut = plus permissif)
 input double PreSpike_ConsolidationPct   = 0.002; // Pré-spike: distance au MA20 (0.2% par défaut)
 input double PreSpike_KeyLevelPct        = 0.002; // Pré-spike: proximité swing high/low (0.2% par défaut)
+input int    PostSpikeMinSmallCandles    = 2;    // Petites bougies M1 après spike capté avant ré-entrée
+input double PostSpikeSmallBodyRatio     = 0.55; // Corps < moyenne×ratio = petite bougie
+input int    PostSpikeBlockBarsSinceSpike = 2;   // Bloquer entrée si bars_since_spike GOM <= N (Boom/Crash)
 
 input group "=== INDICATEURS CLASSIQUES (RSI / MACD / BB / VWAP / Pivots / Ichimoku / OBV) ==="
 input bool   UseClassicIndicatorsFilter = true;  // Activer le filtre combiné d'indicateurs classiques
@@ -1306,6 +1564,421 @@ input bool   UseIchimokuFilter          = true;  // Utiliser un résumé tendanc
 input bool   UseOBVFilter               = true;  // Utiliser le volume OBV comme confirmation
 
 //| GESTION DES POSITIONS ET VARIABLES GLOBALES                    |
+
+// ─── Variables TP partiel Or ────────────────────────────────────────────────
+bool     g_goldHalfClosed    = false;   // 50% du lot Or déjà fermé à TP1
+double   g_goldSlDistance    = 0.0;     // Distance SL→entry en prix (pour calcul RR)
+double   g_goldEntryPrice    = 0.0;     // Prix d'entrée de la position Or courante
+ulong    g_goldPartialTicket = 0;       // Ticket de la position Or gérée
+// ─── Variables régime marché Or (W1) ────────────────────────────────────────
+int      g_goldRegimeW1_50  = INVALID_HANDLE;
+int      g_goldRegimeW1_200 = INVALID_HANDLE;
+int      g_goldRegime       = 0;        // 1=BULL, -1=BEAR, 0=TRANSITION
+datetime g_goldRegimeUpdate = 0;
+// ─── Variables Gold Scalp (COG vert) ────────────────────────────────────────
+datetime g_goldScalpLastEntry = 0;      // Timestamp dernière re-entrée scalp
+string   g_goldScalpCogPrev   = "";    // Dernière direction COG connue (pour détecter changement)
+int      g_goldScalpEma9M1    = INVALID_HANDLE;  // EMA9 M1 pour re-entrées scalp
+// ────────────────────────────────────────────────────────────────────────────
+
+bool SMC_IsGoldProfileActive()
+{
+   return UseGoldHybridProfile && SMC_GetSymbolCategory(_Symbol) == SYM_METAL;
+}
+bool SMC_IsForexProfileActive()
+{
+   return UseForexProfile && SMC_GetSymbolCategory(_Symbol) == SYM_FOREX;
+}
+bool SMC_IsCryptoProfileActive()
+{
+   return UseCryptoProfile && SMC_GetSymbolCategory(_Symbol) == SYM_CRYPTO;
+}
+
+double SMC_EffectiveSLMult()
+{
+   if(SMC_IsGoldProfileActive())   return GoldSL_ATRMult;
+   if(SMC_IsForexProfileActive())  return ForexSL_ATRMult;
+   if(SMC_IsCryptoProfileActive()) return CryptoSL_ATRMult;
+   return SL_ATRMult;
+}
+
+double SMC_EffectiveTPMult()
+{
+   if(SMC_IsGoldProfileActive())   return GoldTP_ATRMult;   // TP1 — TP partiel
+   if(SMC_IsForexProfileActive())  return ForexTP_ATRMult;
+   if(SMC_IsCryptoProfileActive()) return CryptoTP_ATRMult;
+   return TP_ATRMult;
+}
+
+double SMC_EffectiveMaxDailyDDPct()
+{
+   if(SMC_IsGoldProfileActive())   return GoldMaxDailyLossPct;
+   if(SMC_IsForexProfileActive())  return ForexMaxDailyLossPct;
+   if(SMC_IsCryptoProfileActive()) return CryptoMaxDailyLossPct;
+   return MaxDailyDrawdownPercent;
+}
+
+double SMC_EffectiveRiskPct()
+{
+   if(SMC_IsGoldProfileActive())   return GoldMaxRiskPct;
+   if(SMC_IsForexProfileActive())  return ForexMaxRiskPct;
+   if(SMC_IsCryptoProfileActive()) return CryptoMaxRiskPct;
+   return MaxRiskPerTradePercent;
+}
+
+double SMC_EffectiveMaxTotalLossUSD()
+{
+   return SMC_IsGoldProfileActive() ? GoldMaxTotalLossUSD : MaxTotalLossDollars;
+}
+
+int SMC_EffectiveMaxPositionsTerminal()
+{
+   return SMC_IsGoldProfileActive() ? GoldMaxPositions : MaxPositionsTerminal;
+}
+
+double SMC_EffectiveGOMMinCoherence()
+{
+   if(SMC_IsGoldProfileActive())   return GoldGOMMinCoherencePct;
+   if(SMC_IsForexProfileActive())  return ForexGOMMinCoherencePct;
+   if(SMC_IsCryptoProfileActive()) return CryptoGOMMinCoherencePct;
+   return GOMMinCoherencePct;
+}
+
+double SMC_EffectiveMinAIConfidence()
+{
+   return SMC_IsGoldProfileActive() ? GoldMinAIConfidencePct : MinAIConfidencePercent;
+}
+
+double SMC_EffectiveGOMTrailingMinUSD()
+{
+   return SMC_IsGoldProfileActive() ? GoldTrailingMinUSD : GOMTrailingMinProfitUSD;
+}
+
+bool SMC_EffectiveRequireDerivArrow()
+{
+   if(SMC_IsGoldProfileActive() && GoldDisableDerivArrow)
+      return false;
+   return RequireSMCDerivArrowForMarketOrders;
+}
+
+// Vérifie si l'heure UTC est dans la fenêtre de trading du profil actif
+bool SMC_IsInProfileSessionWindow()
+{
+   MqlDateTime dt;
+   TimeToStruct(TimeCurrent(), dt);
+   int h = dt.hour;
+   if(SMC_IsForexProfileActive() && ForexUseSessionFilter)
+      return (h >= ForexSessionStart && h < ForexSessionEnd);
+   if(SMC_IsCryptoProfileActive() && CryptoUseSessionFilter)
+      return (h >= CryptoSessionStart && h < CryptoSessionEnd);
+   return true;
+}
+
+// Détecte le régime marché W1 pour l'Or (EMA50 vs EMA200 hebdo)
+// Retourne 1=BULL, -1=BEAR, 0=TRANSITION
+int SMC_GetGoldRegimeW1()
+{
+   if(!GoldUseRegimeFilter) return 1;  // Pas de filtre → BULL par défaut (v4 comportement)
+   if(TimeCurrent() - g_goldRegimeUpdate < 300) return g_goldRegime;  // Cache 5min
+
+   if(g_goldRegimeW1_50  == INVALID_HANDLE) g_goldRegimeW1_50  = iMA(_Symbol, PERIOD_W1, 50,  0, MODE_EMA, PRICE_CLOSE);
+   if(g_goldRegimeW1_200 == INVALID_HANDLE) g_goldRegimeW1_200 = iMA(_Symbol, PERIOD_W1, 200, 0, MODE_EMA, PRICE_CLOSE);
+   if(g_goldRegimeW1_50 == INVALID_HANDLE || g_goldRegimeW1_200 == INVALID_HANDLE) return g_goldRegime;
+
+   double buf50[], buf200[];
+   ArraySetAsSeries(buf50, true); ArraySetAsSeries(buf200, true);
+   if(CopyBuffer(g_goldRegimeW1_50,  0, 0, 2, buf50)  < 2) return g_goldRegime;
+   if(CopyBuffer(g_goldRegimeW1_200, 0, 0, 2, buf200) < 2) return g_goldRegime;
+
+   double ema50  = buf50[1];
+   double ema200 = buf200[1];
+   if(ema200 <= 0) return g_goldRegime;
+
+   double thresh = ema200 * 0.005;  // 0.5% seuil séparation BULL/BEAR
+   int newRegime;
+   if(ema50 > ema200 + thresh)       newRegime = 1;   // BULL
+   else if(ema50 < ema200 - thresh)  newRegime = -1;  // BEAR
+   else                               newRegime = 0;   // TRANSITION
+
+   if(newRegime != g_goldRegime)
+   {
+      string names[] = {"BEAR", "TRANSITION", "BULL"};
+      Print(StringFormat("[SMC-Gold] Régime W1 changé : %s → %s | EMA50=%.2f EMA200=%.2f",
+            names[g_goldRegime+1], names[newRegime+1], ema50, ema200));
+   }
+   g_goldRegime       = newRegime;
+   g_goldRegimeUpdate = TimeCurrent();
+   return g_goldRegime;
+}
+
+// Vérifie si la direction est autorisée selon le régime Or
+bool SMC_IsGoldDirectionAllowed(const string direction)
+{
+   if(!SMC_IsGoldProfileActive()) return true;
+   int regime = SMC_GetGoldRegimeW1();
+   if(regime ==  1) return (direction == "BUY");   // BULL : BUY seulement
+   if(regime == -1) return true;                    // BEAR : BUY et SELL autorisés (SELL priorisé)
+   // TRANSITION : les deux autorisés avec lot réduit (géré au placement)
+   return true;
+}
+
+// Facteur de réduction du lot en TRANSITION Or
+double SMC_GoldTransitionLotFactor()
+{
+   if(!SMC_IsGoldProfileActive() || !GoldUseRegimeFilter) return 1.0;
+   return (SMC_GetGoldRegimeW1() == 0) ? 0.5 : 1.0;  // 50% en TRANSITION
+}
+
+// Gestion TP partiel Or : fermer 50% à TP1=RR1.5, SL au BE, trailing vers TP2=RR3.0
+void SMC_ManageGoldPartialTP()
+{
+   if(!SMC_IsGoldProfileActive() || !GoldUsePartialTP) return;
+   if(g_goldPartialTicket == 0) return;
+   if(!posInfo.SelectByTicket(g_goldPartialTicket)) { g_goldPartialTicket = 0; return; }
+   if(posInfo.Symbol() != _Symbol || posInfo.Magic() != InpMagicNumber) { g_goldPartialTicket = 0; return; }
+
+   double curPrice = posInfo.PriceCurrent();
+   double ep       = g_goldEntryPrice;
+   double slDist   = g_goldSlDistance;
+   if(slDist <= 0) return;
+
+   bool isBuy = (posInfo.PositionType() == POSITION_TYPE_BUY);
+
+   if(!g_goldHalfClosed)
+   {
+      double tp1dist = slDist * GoldTP_ATRMult / SMC_EffectiveSLMult();  // RR = TP1/SL
+      bool tp1Hit = isBuy ? (curPrice >= ep + slDist * 1.5) : (curPrice <= ep - slDist * 1.5);
+
+      if(tp1Hit)
+      {
+         double halfLot = posInfo.Volume() * 0.5;
+         double minLot  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+         double stepLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+         halfLot = MathMax(minLot, MathFloor(halfLot / stepLot) * stepLot);
+
+         if(halfLot >= minLot && trade.PositionClosePartial(g_goldPartialTicket, halfLot))
+         {
+            g_goldHalfClosed = true;
+            int    dg      = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+            double newSL   = NormalizeDouble(ep, dg);
+            double minStop = (double)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * _Point;
+            bool   slOk    = isBuy ? (newSL < curPrice - minStop) : (newSL > curPrice + minStop);
+            if(slOk) trade.PositionModify(g_goldPartialTicket, newSL, posInfo.TakeProfit());
+            Print(StringFormat("[SMC-Gold] TP1 PARTIEL Or | %.2f lots fermés à RR=1.5 | SL→BE (%.2f)",
+                  halfLot, ep));
+         }
+      }
+   }
+}
+
+// ─── Gold Scalp COG ─────────────────────────────────────────────────────────
+// Active un mode scalp continu sur XAUUSD tant que le COG projeté reste BUY (vert).
+// Re-entrées BUY sur : rebond EMA9 M1 OU touch OB Bullish M1.
+// Ferme tous les scalps Or et stoppe le mode si COG change de direction ou GOM passe WAIT.
+void SMC_ManageGoldScalp()
+{
+   if(!GoldScalpEnabled) return;
+   if(!SMC_IsGoldProfileActive()) return;
+   if(BlockAllTrades) return;
+
+   // COG direction courante
+   string cogDir = g_cogDirection;     // "BUY", "SELL", "NEUTRAL"
+   int    gomVn  = g_smcGomVerdictNum; // >0=BUY, <0=SELL, 0=WAIT
+
+   // ── Fermeture forcée si COG change ou GOM=WAIT ───────────────────────────
+   bool cogTurnedOff  = (cogDir != "BUY");
+   bool gomWait       = (gomVn == 0);
+
+   if(cogTurnedOff || gomWait)
+   {
+      // Mémoriser si COG a changé pour log unique
+      if(g_goldScalpCogPrev == "BUY" && cogTurnedOff)
+      {
+         Print("[GOLD-SCALP] COG changé (", cogDir, ") — fermeture de tous les scalps Or");
+         // Fermer toutes positions Or avec magic + tag scalp
+         for(int i = PositionsTotal() - 1; i >= 0; i--)
+         {
+            if(!posInfo.SelectByIndex(i)) continue;
+            if(posInfo.Symbol() != _Symbol)     continue;
+            if(posInfo.Magic()  != InpMagicNumber) continue;
+            if(StringFind(posInfo.Comment(), "GOLD_SCALP") < 0) continue;
+            PositionCloseWithLog(posInfo.Ticket(), "COG changé — sortie scalp Or");
+         }
+      }
+      else if(gomWait && g_goldScalpCogPrev == "BUY")
+      {
+         Print("[GOLD-SCALP] GOM=WAIT — fermeture scalps Or");
+         for(int i = PositionsTotal() - 1; i >= 0; i--)
+         {
+            if(!posInfo.SelectByIndex(i)) continue;
+            if(posInfo.Symbol() != _Symbol)        continue;
+            if(posInfo.Magic()  != InpMagicNumber) continue;
+            if(StringFind(posInfo.Comment(), "GOLD_SCALP") < 0) continue;
+            PositionCloseWithLog(posInfo.Ticket(), "GOM WAIT — sortie scalp Or");
+         }
+      }
+      g_goldScalpCogPrev = cogDir;
+      return;
+   }
+
+   g_goldScalpCogPrev = "BUY";
+
+   // ── Pré-conditions pour nouvelle re-entrée ───────────────────────────────
+   // GOM doit être GOOD ou PERFECT BUY (vn >= 2)
+   if(gomVn < 2) return;
+
+   // IA Status dashboard doit être BUY (pas HOLD/SELL)
+   if(g_smcIAStatusAction != "BUY")
+   {
+      static datetime s_iaGoldLog = 0;
+      if(TimeCurrent() - s_iaGoldLog >= 120)
+      { s_iaGoldLog = TimeCurrent();
+        Print("[GOLD-SCALP] IA Status=", g_smcIAStatusAction, " — scalp bloqué"); }
+      return;
+   }
+
+   // Correction Cycle : ne pas scalper pendant une correction active
+   if(!g_smcCorrEntrySafe && g_smcCorrExhaustPct < 65.0)
+   {
+      static datetime s_corrGoldLog = 0;
+      if(TimeCurrent() - s_corrGoldLog >= 120)
+      { s_corrGoldLog = TimeCurrent();
+        Print("[GOLD-SCALP] Correction active (", g_smcCorrPhase, " ",
+              DoubleToString(g_smcCorrExhaustPct, 0), "%) — scalp bloqué"); }
+      return;
+   }
+
+   // Cooldown entre re-entrées
+   if(TimeCurrent() - g_goldScalpLastEntry < GoldScalpCooldownSec) return;
+
+   // Compter les scalps Or déjà ouverts
+   int scalpCount = 0;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      if(!posInfo.SelectByIndex(i)) continue;
+      if(posInfo.Symbol() != _Symbol)        continue;
+      if(posInfo.Magic()  != InpMagicNumber) continue;
+      if(StringFind(posInfo.Comment(), "GOLD_SCALP") >= 0) scalpCount++;
+   }
+   if(scalpCount >= GoldScalpMaxPositions) return;
+
+   double atr = GOM_GetATRValue();
+   if(atr <= 0) return;
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   if(ask <= 0) return;
+
+   bool trigger = false;
+   string reason = "";
+
+   // ── Signal 1 : rebond EMA9 M1 ───────────────────────────────────────────
+   if(GoldScalpUseEMA9 && g_goldScalpEma9M1 != INVALID_HANDLE)
+   {
+      double ema9[];
+      ArraySetAsSeries(ema9, true);
+      if(CopyBuffer(g_goldScalpEma9M1, 0, 0, 3, ema9) == 3)
+      {
+         double low1[];
+         ArraySetAsSeries(low1, true);
+         if(CopyLow(_Symbol, PERIOD_M1, 0, 3, low1) == 3)
+         {
+            // Bougie précédente a touché ou percé l'EMA9, bougie courante repasse au-dessus
+            bool touchedEma = (low1[1] <= ema9[1] + atr * 0.1);
+            bool recovering = (ask > ema9[0]);
+            if(touchedEma && recovering)
+            {
+               trigger = true;
+               reason  = "EMA9_REBOND";
+            }
+         }
+      }
+   }
+
+   // ── Signal 2 : touch OB Bullish M1 ──────────────────────────────────────
+   if(!trigger && GoldScalpUseOBBull)
+   {
+      MqlRates rates[];
+      ArraySetAsSeries(rates, true);
+      if(CopyRates(_Symbol, PERIOD_M1, 0, 30, rates) == 30)
+      {
+         double tol = atr * GoldScalpOBTolATR;
+         for(int k = 2; k < 28 && !trigger; k++)
+         {
+            // OB Bull : bougie baissière suivie d'une haussière (absorption demand)
+            bool isBullOB = (rates[k].close < rates[k].open &&
+                             rates[k+1].close > rates[k+1].open &&
+                             (rates[k+1].high - rates[k].low) > SymbolInfoDouble(_Symbol, SYMBOL_POINT) * 10);
+            if(!isBullOB) continue;
+            double obHigh = rates[k].high;
+            double obLow  = rates[k].low;
+            // Prix actuel dans la zone OB (ask proche du haut de l'OB)
+            if(ask >= obLow - tol && ask <= obHigh + tol)
+            {
+               trigger = true;
+               reason  = StringFormat("OB_BULL@%.2f-%.2f", obLow, obHigh);
+            }
+         }
+      }
+   }
+
+   if(!trigger) return;
+
+   // ── Passer l'ordre scalp BUY ─────────────────────────────────────────────
+   double sl = ask - atr * GoldScalpSL_ATRMult;
+   double tp = ask + atr * GoldScalpTP_ATRMult;
+
+   // Normaliser lot selon GoldScalpRiskPct
+   double balance   = AccountInfoDouble(ACCOUNT_BALANCE);
+   double riskAmt   = balance * GoldScalpRiskPct / 100.0;
+   double slPips    = atr * GoldScalpSL_ATRMult;
+   double tickVal   = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+   double tickSize  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+   double minLot    = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   double lotStep   = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+   double maxLot    = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+   double lot = 0.01;
+   if(tickVal > 0 && tickSize > 0 && slPips > 0)
+      lot = riskAmt / (slPips / tickSize * tickVal);
+   lot = MathMax(minLot, MathFloor(lot / lotStep) * lotStep);
+   lot = MathMin(lot, maxLot);
+
+   MqlTradeRequest req = {};
+   MqlTradeResult  res = {};
+   req.action    = TRADE_ACTION_DEAL;
+   req.symbol    = _Symbol;
+   req.volume    = lot;
+   req.type      = ORDER_TYPE_BUY;
+   req.price     = ask;
+   req.sl        = NormalizeDouble(sl, _Digits);
+   req.tp        = NormalizeDouble(tp, _Digits);
+   req.deviation = 10;
+   req.magic     = InpMagicNumber;
+   req.comment   = "GOLD_SCALP|" + reason;
+   // Détecter dynamiquement le mode de remplissage supporté par le broker
+   {
+      long fillFlags = SymbolInfoInteger(_Symbol, SYMBOL_FILLING_MODE);
+      if((fillFlags & SYMBOL_FILLING_IOC) != 0)
+         req.type_filling = ORDER_FILLING_IOC;
+      else if((fillFlags & SYMBOL_FILLING_FOK) != 0)
+         req.type_filling = ORDER_FILLING_FOK;
+      else
+         req.type_filling = ORDER_FILLING_RETURN;
+   }
+
+   // Toujours mettre à jour le cooldown (succès ou échec) — évite retry infini
+   g_goldScalpLastEntry = TimeCurrent();
+
+   if(SafeOrderSend(req, res) && res.retcode == TRADE_RETCODE_DONE)
+   {
+      Print(StringFormat("[GOLD-SCALP] BUY %.2f lots @ %.2f | SL=%.2f TP=%.2f | %s | COG=%s GOM=%s",
+            lot, ask, sl, tp, reason, cogDir, g_smcGomVerdict));
+   }
+   else
+   {
+      Print(StringFormat("[GOLD-SCALP] Échec BUY retcode=%d | %s — cooldown %ds avant prochain essai",
+            res.retcode, reason, GoldScalpCooldownSec));
+   }
+}
+// ─────────────────────────────────────────────────────────────────────────────
 
 // Vrai si ce symbole a subi une perte récente (SL ou autre) → réentrée soumise à conditions strictes
 bool IsRecentLossOnSymbol(const string symbol)
@@ -1379,9 +2052,37 @@ double ApplyRecoveryLot(double baseLot)
 // l'ouverture d'une nouvelle position (hors Boom/Crash).
 bool IsAITradeAllowedForDirection(const string direction)
 {
-   if(!UseAIServer) return true; // Pas d'IA requise si serveur désactivé
-   
    ENUM_SYMBOL_CATEGORY cat = SMC_GetSymbolCategory(_Symbol);
+
+   // Gate session Forex/Crypto : hors fenêtre = bloqué
+   if(cat == SYM_FOREX || cat == SYM_CRYPTO)
+   {
+      if(!SMC_IsInProfileSessionWindow())
+      {
+         MqlDateTime dt; TimeToStruct(TimeCurrent(), dt);
+         static datetime s_sesLog = 0;
+         if(TimeCurrent() - s_sesLog >= 1800) { s_sesLog = TimeCurrent();
+            Print(StringFormat("[GATE-SESSION] %s : heure UTC %02dh hors fenêtre — entrée bloquée", _Symbol, dt.hour)); }
+         return false;
+      }
+   }
+
+   // Gate régime Or : direction interdite selon EMA W1
+   if(cat == SYM_METAL && UseGoldHybridProfile)
+   {
+      if(!SMC_IsGoldDirectionAllowed(direction))
+      {
+         int regime = SMC_GetGoldRegimeW1();
+         static datetime s_regLog = 0;
+         if(TimeCurrent() - s_regLog >= 1800) { s_regLog = TimeCurrent();
+            Print(StringFormat("[GATE-REGIME] %s : %s interdit en régime %s (W1)", _Symbol, direction,
+                  regime == 1 ? "BULL" : (regime == -1 ? "BEAR" : "TRANSITION"))); }
+         return false;
+      }
+   }
+
+   if(!UseAIServer) return true; // Pas d'IA requise si serveur désactivé
+
    // Sur Boom/Crash, on garde la logique actuelle DERIV ARROW + règles spécifiques
    if(cat == SYM_BOOM_CRASH) return true;
    
@@ -1437,7 +2138,8 @@ CPositionInfo posInfo;  // Local position info variable
 COrderInfo orderInfo;
 
 int atrHandle;
-int emaHandle = INVALID_HANDLE;
+int emaHandle  = INVALID_HANDLE;
+int bbHandle   = INVALID_HANDLE;
 int ema50H = INVALID_HANDLE;
 int ema200H = INVALID_HANDLE;
 int fractalH = INVALID_HANDLE;
@@ -1491,14 +2193,30 @@ struct SymbolPauseInfo {
 SymbolPauseInfo g_symbolPauses[20]; // Maximum 20 symboles
 int g_pauseCount = 0;
 
+// Variables globales pour enforcer les seuils de perte (override paramètres profil)
+double g_maxLossDollars           = 3.0;
+double g_minLossBeforeAutoClose   = 3.0;
+
 int OnInit()
 {
+   // Enforcer les seuils de perte — ignorer les valeurs du profil .chr si inférieures
+   if(MaxLossDollars < 3.0)
+   {
+      Print("⚠️ MaxLossDollars=", MaxLossDollars, " trop bas (profil) — forcé à 3.0$");
+      // MQL5 ne permet pas de modifier les inputs, on utilise g_maxLossDollars
+   }
+   g_maxLossDollars         = MathMax(MaxLossDollars, GOMHoldMaxLossUSD);
+   g_minLossBeforeAutoClose = MathMax(MinLossBeforeAutoCloseUSD, GOMHoldMaxLossUSD);
+   Print("✅ Seuils perte — GOM valide max ", GOMHoldMaxLossUSD, "$ | GOM WAIT max ",
+         GOMWaitCloseMinLossUSD, "$ | MinLossAutoClose=", g_minLossBeforeAutoClose, "$");
+
    trade.SetExpertMagicNumber(InpMagicNumber);
    trade.SetDeviationInPoints(20);
-   trade.SetTypeFilling(ORDER_FILLING_IOC);
+   trade.SetTypeFillingBySymbol(_Symbol);
    
    atrHandle = iATR(_Symbol, LTF, 14);
    emaHandle = iMA(_Symbol, LTF, 9, 0, MODE_EMA, PRICE_CLOSE);
+   bbHandle  = iBands(_Symbol, PERIOD_CURRENT, 20, 0, 2.0, PRICE_CLOSE);
    ema50H = iMA(_Symbol, HTF, EMA50_Period, 0, MODE_EMA, PRICE_CLOSE);
    ema200H = iMA(_Symbol, HTF, EMA200_Period, 0, MODE_EMA, PRICE_CLOSE);
    // EMAs SMC sur le timeframe d'entrée (LTF)
@@ -1516,6 +2234,10 @@ int OnInit()
    emaM5H = iMA(_Symbol, PERIOD_M5, 20, 0, MODE_EMA, PRICE_CLOSE);
    emaH1H = iMA(_Symbol, PERIOD_H1, 20, 0, MODE_EMA, PRICE_CLOSE);
    
+   // EMA9 M1 dédié Gold Scalp
+   if(GoldScalpEnabled)
+      g_goldScalpEma9M1 = iMA(_Symbol, PERIOD_M1, 9, 0, MODE_EMA, PRICE_CLOSE);
+
    // Handles pour EMA Supertrend Multi-TF
    emaFastM1 = iMA(_Symbol, PERIOD_M1, EMAFastPeriod, 0, MODE_EMA, PRICE_CLOSE);
    emaSlowM1 = iMA(_Symbol, PERIOD_M1, EMASlowPeriod, 0, MODE_EMA, PRICE_CLOSE);
@@ -1543,14 +2265,34 @@ int OnInit()
    Print("📊 SMC Universal + FVG_Kill PRO | 1 pos/symbole | Stratégie visible");
    Print("   Catégorie: ", EnumToString(SMC_GetSymbolCategory(_Symbol)));
    Print("   IA: ", UseAIServer ? AI_ServerURL : "Désactivé");
+   if(SMC_IsGoldProfileActive())
+      Print("   [GOLD] SL=", GoldSL_ATRMult, "xATR | TP1(50%)=RR1.5 | TP2(trail)=RR3.0 | GOMcoh=", GoldGOMMinCoherencePct, "% | Regime=", GoldUseRegimeFilter?"W1":"OFF");
+   if(SMC_IsForexProfileActive())
+      Print("   [FOREX] SL=", ForexSL_ATRMult, "xATR | TP=", ForexTP_ATRMult, "xATR | Session=", ForexSessionStart, "-", ForexSessionEnd, "h UTC");
+   if(SMC_IsCryptoProfileActive())
+      Print("   [CRYPTO] SL=", CryptoSL_ATRMult, "xATR | TP=", CryptoTP_ATRMult, "xATR | Session=", CryptoSessionStart, "-", CryptoSessionEnd, "h UTC");
 
    // Initialisation module GOM Pipeline + Dashboard
    SMCGP_Init();
-   if(!UseLocalOrderBlockDrawings)
-   {
-      ObjectsDeleteAll(0, "SMC_OB_Bull_");
-      ObjectsDeleteAll(0, "SMC_OB_Bear_");
-   }
+   UpdateDailyEquityStats();
+   SMC_LoadDailyDisciplineState();
+   SMC_LoadPerformancePauseState();
+   if(UseDailyDiscipline)
+      Print("[DISCIPLINE-JOUR] Actif — max ", MaxDailyTrades, " trades/jour | objectif +",
+            DoubleToString(DailyProfitTargetPct, 1), "% = ",
+            DoubleToString(SMC_GetDailyProfitTargetUSD(), 2), "$");
+   if(UseWinStreakPause)
+      Print("[WIN-STREAK] Actif — ", WinStreakThreshold, " gains → pause ", WinStreakPauseHours, "h");
+   if(UseHighProbabilityFilter)
+      Print("[PROB-GATE] Actif — min ", DoubleToString(MinEntryProbabilityPct, 0),
+            "% | |vn|>=", MinGOMVerdictNumAbs, " | BC>=", DoubleToString(HighProbBcMinConfidence, 0), "%");
+
+   ObjectsDeleteAll(0, "SMC_OB_Bull_");
+   ObjectsDeleteAll(0, "SMC_OB_Bear_");
+
+   SMC_JournalConfigure(UseTradeJournal, InpMagicNumber, "SMC_Universal", TradeJournalBackfillDays);
+   if(UseTradeJournal)
+      SMC_JournalInit();
 
    return INIT_SUCCEEDED;
 }
@@ -1562,7 +2304,7 @@ bool TryAcquireOpenLock()
    // Vérification simple sans Sleep pour éviter détachement
    if(GlobalVariableGet(lockName) != 0) return false;
    GlobalVariableSet(lockName, 1);
-   if(CountPositionsOurEA() >= MaxPositionsTerminal) { GlobalVariableSet(lockName, 0); return false; }
+   if(CountPositionsOurEA() >= SMC_EffectiveMaxPositionsTerminal()) { GlobalVariableSet(lockName, 0); return false; }
    return true;
 }
 void ReleaseOpenLock() { GlobalVariableSet("SMC_OPEN_LOCK_" + IntegerToString(InpMagicNumber), 0); }
@@ -1597,6 +2339,7 @@ void OnDeinit(const int reason)
    if(emaM1H != INVALID_HANDLE) { IndicatorRelease(emaM1H); emaM1H = INVALID_HANDLE; }
    if(emaM5H != INVALID_HANDLE) { IndicatorRelease(emaM5H); emaM5H = INVALID_HANDLE; }
    if(emaH1H != INVALID_HANDLE) { IndicatorRelease(emaH1H); emaH1H = INVALID_HANDLE; }
+   if(g_goldScalpEma9M1 != INVALID_HANDLE) { IndicatorRelease(g_goldScalpEma9M1); g_goldScalpEma9M1 = INVALID_HANDLE; }
    if(emaFastM1 != INVALID_HANDLE) { IndicatorRelease(emaFastM1); emaFastM1 = INVALID_HANDLE; }
    if(emaSlowM1 != INVALID_HANDLE) { IndicatorRelease(emaSlowM1); emaSlowM1 = INVALID_HANDLE; }
    if(emaFastM5 != INVALID_HANDLE) { IndicatorRelease(emaFastM5); emaFastM5 = INVALID_HANDLE; }
@@ -1783,7 +2526,7 @@ void ExecuteFVGKillBuy()
    if(CopyRates(_Symbol, LTF, 0, 3, r) < 3) return;
    double sl = r[1].low - atr[0] * ATR_Mult;
    double tp = SymbolInfoDouble(_Symbol, SYMBOL_ASK) + (SymbolInfoDouble(_Symbol, SYMBOL_ASK) - sl) * 2.0;
-   if(CountPositionsOurEA() >= MaxPositionsTerminal) return;
+   if(CountPositionsOurEA() >= SMC_EffectiveMaxPositionsTerminal()) return;
    if(!TryAcquireOpenLock()) return;
    
    // Règle duplication / IA avant ouverture d'une nouvelle position
@@ -1839,7 +2582,7 @@ void ExecuteFVGKillSell()
    if(CopyRates(_Symbol, LTF, 0, 3, r) < 3) return;
    double sl = r[1].high + atr[0] * ATR_Mult;
    double tp = SymbolInfoDouble(_Symbol, SYMBOL_BID) - (sl - SymbolInfoDouble(_Symbol, SYMBOL_BID)) * 2.0;
-   if(CountPositionsOurEA() >= MaxPositionsTerminal) return;
+   if(CountPositionsOurEA() >= SMC_EffectiveMaxPositionsTerminal()) return;
    if(!TryAcquireOpenLock()) return;
    
    if(!CanOpenAdditionalPositionForSymbol(_Symbol, "SELL"))
@@ -1934,9 +2677,9 @@ void CloseWorstPositionIfTotalLossExceeded()
          worstTicket = posInfo.Ticket();
       }
    }
-   if(totalProfit > -MaxTotalLossDollars) return;
+   if(totalProfit > -SMC_EffectiveMaxTotalLossUSD()) return;
    if(worstTicket != 0 && PositionCloseWithLog(worstTicket, "Perte totale max atteinte"))
-      Print("🛑 Perte totale (", DoubleToString(totalProfit, 2), "$) >= ", DoubleToString(MaxTotalLossDollars, 0), "$ → position la plus perdante fermée (", DoubleToString(worstProfit, 2), "$)");
+      Print("🛑 Perte totale (", DoubleToString(totalProfit, 2), "$) >= ", DoubleToString(SMC_EffectiveMaxTotalLossUSD(), 0), "$ → position la plus perdante fermée (", DoubleToString(worstProfit, 2), "$)");
 }
 
 void CloseAllPositionsIfTotalProfitReached()
@@ -2036,6 +2779,7 @@ void CloseBoomCrashAfterSpike(ulong ticket, string symbol, double currentProfit)
       if(CloseBoomCrashPosition(ticket, symbol))
       {
          Print("✅ Boom/Crash fermé: bénéfice 2$ atteint (", DoubleToString(currentProfit, 2), "$) - ", symbol);
+         SMC_MarkSpikeCaptured(symbol);
          if(symbol == _Symbol) { g_lastBoomCrashPrice = 0; }
       }
       return;
@@ -2047,6 +2791,7 @@ void CloseBoomCrashAfterSpike(ulong ticket, string symbol, double currentProfit)
       if(CloseBoomCrashPosition(ticket, symbol))
       {
          Print("🚀 Boom/Crash fermé (gain >= ", DoubleToString(TargetProfitBoomCrashUSD, 2), "$): ", DoubleToString(currentProfit, 2), "$) - ", symbol);
+         SMC_MarkSpikeCaptured(symbol);
          if(symbol == _Symbol) { g_lastBoomCrashPrice = 0; }
       }
       return;
@@ -2115,9 +2860,11 @@ void ManageBoomCrashSpikeClose()
       datetime openTime = posInfo.Time();
       int secondsSinceOpen = (int)(TimeCurrent() - openTime);
       string comment = posInfo.Comment();
+      bool isGomManaged = SMCGP_IsGOMManagedComment(comment);
       bool isSpikeTrade = (StringFind(comment, "SPIKE TRADE") >= 0);
       
-      // Pour les trades classiques, on conserve une protection de 10 secondes.
+      // GOM : pas de fermeture spike immédiate — respecter hold + seuil perte
+      if(isGomManaged) continue;
       // Pour les SPIKE TRADE, aucune attente: on peut fermer dès que le spike est capté.
       if(!isSpikeTrade && secondsSinceOpen < 10) // Moins de 10 secondes pour les trades non "SPIKE TRADE"
       {
@@ -2164,6 +2911,7 @@ void ManageBoomCrashSpikeClose()
          
          if(PositionCloseWithLog(ticket, "Spike close - " + closeReason))
          {
+            SMC_MarkSpikeCaptured(symbol);
             // OPTIMISATION: Log minimal pour éviter le lag
             Print("🎯 EA FERMETURE SPIKE - ", symbol, " | ticket=", ticket, " | Profit: ", DoubleToString(profit, 2));
             
@@ -2200,7 +2948,7 @@ void ManageDollarExits()
    static datetime lastLog = 0;
    if(TimeCurrent() - lastLog >= 5) // Log toutes les 5 secondes maximum
    {
-      Print("🔍 DEBUG - ManageDollarExits appelée | MaxLossDollars: ", MaxLossDollars, " | BoomCrashSpikeTP: ", BoomCrashSpikeTP);
+      Print("🔍 DEBUG - ManageDollarExits appelée | MaxLossDollars(enforced): ", g_maxLossDollars, " | BoomCrashSpikeTP: ", BoomCrashSpikeTP);
       lastLog = TimeCurrent();
    }
    
@@ -2218,10 +2966,14 @@ void ManageDollarExits()
       datetime openTime = (datetime)PositionGetInteger(POSITION_TIME);
       int secondsSinceOpen = (int)(TimeCurrent() - openTime);
       
-      if(secondsSinceOpen < 30) // Moins de 30 secondes
+      if(secondsSinceOpen < 30)
       {
-         Print("🔍 DEBUG - Trade trop récent - ", symbol, " | Ouvert il y a: ", secondsSinceOpen, "s | Profit: ", DoubleToString(profit, 2), "$");
-         continue; // Ignorer ce trade pour l'instant
+         // WAIT GOM : pas de délai 30s — fermer dès que possible
+         if(!(symbol == _Symbol && UseGOMVerdictFilter && g_smcGomConnected && g_smcGomVerdictNum == 0))
+         {
+            Print("🔍 DEBUG - Trade trop récent - ", symbol, " | Ouvert il y a: ", secondsSinceOpen, "s | Profit: ", DoubleToString(profit, 2), "$");
+            continue;
+         }
       }
       
       // DEBUG: Log chaque position analysée
@@ -2248,12 +3000,32 @@ void ManageDollarExits()
          continue;
       }
       
-      // Règle de perte maximale (Boom/Crash: laisser le SL naturel, pas de fermeture sur perte)
-      if(cat == SYM_BOOM_CRASH)
-         ; // Ne pas fermer Boom/Crash sur perte - laisser SL/TP
-      else if(profit <= -MaxLossDollars)
+      // Perte maximale adaptée au verdict GOM
+      if((long)PositionGetInteger(POSITION_MAGIC) != InpMagicNumber) continue;
+
+      int posDir = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY) ? 1 : -1;
+      bool onChartSymbol = (symbol == _Symbol);
+      double maxLossForPos = g_maxLossDollars;
+
+      if(onChartSymbol && UseGOMVerdictFilter && g_smcGomConnected)
+         maxLossForPos = SMC_GetPositionMaxLossUSD(posDir, false);
+
+      // WAIT sur symbole chart : ne pas laisser courir jusqu'à $3
+      if(onChartSymbol && g_smcGomVerdictNum == 0 && profit <= -GOMWaitCloseMinLossUSD)
       {
-         Print("⚠️ TENTATIVE FERMETURE PERTE MAX - ", symbol, " | Profit: ", DoubleToString(profit, 2), "$ | MaxLoss: ", MaxLossDollars, "$");
+         Print("[DOLLAR-EXIT] GOM WAIT — fermeture à ", DoubleToString(profit, 2),
+               "$ (seuil WAIT ", DoubleToString(GOMWaitCloseMinLossUSD, 2), "$, pas $3)");
+         if(PositionCloseWithLog(ticket, "GOM WAIT — perte >= seuil $"))
+            Print("✅ Fermé sur WAIT+perte — ", symbol, " | ticket=", ticket);
+         continue;
+      }
+
+      if(profit <= -maxLossForPos)
+      {
+         Print("⚠️ TENTATIVE FERMETURE PERTE MAX - ", symbol, " | Profit: ", DoubleToString(profit, 2),
+               "$ | MaxLoss: ", DoubleToString(maxLossForPos, 2), "$",
+               (onChartSymbol && g_smcGomConnected && SMC_GOMSupportsOpenPosition(posDir))
+                  ? " (GOM valide, pas de spike)" : " (GOM WAIT/rétro ou hors GOM)");
          // VALIDATION: Vérifier que la position existe toujours avant de fermer
          if(!PositionSelectByTicket(ticket))
          {
@@ -2261,7 +3033,7 @@ void ManageDollarExits()
             continue;
          }
          
-         if(PositionCloseWithLog(ticket, "Profit total atteint"))
+         if(PositionCloseWithLog(ticket, "Perte max atteinte"))
             Print("🛑 EA Position fermée: perte max atteinte (", DoubleToString(profit, 2), "$) - ", symbol, " | ticket=", ticket);
          else
          {
@@ -2453,6 +3225,14 @@ void OnTick()
    if(currentTime - lastProcess < 2) return;
    lastProcess = currentTime;
    
+   // GOM poll + notifications — toujours actif (même en mode observation)
+   SMCGP_PollGOM();
+   if(ShowGOMDashboard)
+   {
+      DrawOrderFlowOnChart();
+      SMCGP_DrawGOMDashboard();
+   }
+
    // BLOCAGE TOTAL DES TRADES - Mode observation seul
    if(BlockAllTrades)
    {
@@ -2492,12 +3272,6 @@ void OnTick()
       return; // Sortir immédiatement - aucun trading
    }
 
-   // ═══ GOM PIPELINE — Poll verdict + Dashboard ═══
-   SMCGP_PollGOM();
-   if(ShowGOMDashboard)
-      DrawOrderFlowOnChart();  // Afficher orderflow à côté de la boussole
-      SMCGP_DrawGOMDashboard();
-
    // Discipline : fermeture WAIT / timeout 5 min + annulation LIMIT si WAIT
    ManageDisciplineExits();
 
@@ -2511,6 +3285,10 @@ void OnTick()
    // Pipeline ordres GOM (pending-order depuis ai_server)
    if(UseGOMPipeline && !BlockAllTrades)
       SMCGP_PollAndExecutePipeline();
+
+   // Stratégie GOM autonome (WAIT → LIMIT → GOOD pullback → PERFECT scalp)
+   if(GOMPerfectAutoEntry && UseGOMVerdictFilter && !BlockAllTrades)
+      ManageGOMAutonomousStrategy();
 
    // Ordres LIMIT disciplinés — DÉSACTIVÉ (Python pipeline seul)
    // if(UseSignalFirstDiscipline && !BlockAllTrades)
@@ -2565,7 +3343,7 @@ void OnTick()
    
    // DÉTECTION ULTRA-RAPIDE DE SPIKE (toutes les 5 secondes pour Boom/Crash)
    static datetime lastSpikeCheck = 0;
-   if(StringFind(_Symbol, "Boom") >= 0 || StringFind(_Symbol, "Crash") >= 0)
+   if(SMC_GetSymbolCategory(_Symbol) == SYM_BOOM_CRASH)
    {
       if(currentTime - lastSpikeCheck >= 5)
       {
@@ -2573,7 +3351,15 @@ void OnTick()
          CheckImminentSpike(); // Vérification rapide sans graphiques
       }
    }
-   
+
+   // DÉCOMPTE SPIKE — mis à jour chaque seconde (indépendant du bloc graphique 15s)
+   static datetime lastCountdownUpdate = 0;
+   if(g_spikeCountdownSec > 0 && currentTime != lastCountdownUpdate)
+   {
+      lastCountdownUpdate = currentTime;
+      UpdateSpikeCountdown();
+   }
+
    // GRAPHIQUES SMC CONTRÔLÉS (toutes les 15 secondes pour plus de réactivité)
    if(ShowChartGraphics && currentTime - lastGraphicsUpdate >= 15)
    {
@@ -2584,31 +3370,29 @@ void OnTick()
       DrawConfirmedSwingPoints();
       
       // DÉTECTION SPÉCIALE BOOM/CRASH (ANTI-SPIKE)
-      if(StringFind(_Symbol, "Boom") >= 0 || StringFind(_Symbol, "Crash") >= 0)
+      if(SMC_GetSymbolCategory(_Symbol) == SYM_BOOM_CRASH)
       {
          DetectBoomCrashSwingPoints();
-         
-         // DÉTECTION AVANCÉE DE SPIKE IMMINENT - OPTIMISÉE
          CheckImminentSpike();
-         
-         // DÉTECTION DES MOUVEMENTS DE RETOUR VERS CANAUX SMC
          CheckSMCChannelReturnMovements();
       }
       
       // AFFICHAGE STATUT IA ET PRÉDICTIONS
       DrawAIStatusAndPredictions();
       
-      // Graphiques essentiels et zones Premium/Discount
-      DrawSwingHighLow();
-      DrawBookmarkLevels();
-      DrawFVGOnChart();
-      if(UseLocalOrderBlockDrawings)
-         DrawOBOnChart();
-      else
-      {
-         ObjectsDeleteAll(0, "SMC_OB_Bull_");
-         ObjectsDeleteAll(0, "SMC_OB_Bear_");
-      }
+      // Graphiques essentiels
+      ObjectDelete(0, "SMC_Last_SH");
+      ObjectDelete(0, "SMC_Last_SL");
+      ObjectDelete(0, "SMC_Last_SH_LINE");
+      ObjectDelete(0, "SMC_Last_SL_LINE");
+      ObjectDelete(0, "SMC_Bookmark_Band_"  + _Symbol);
+      ObjectDelete(0, "SMC_Bookmark_SH_"   + _Symbol);
+      ObjectDelete(0, "SMC_Bookmark_SL_"   + _Symbol);
+      ObjectDelete(0, "SMC_Bookmark_Info_" + _Symbol);
+      ObjectsDeleteAll(0, "SMC_FVG_");
+      ObjectsDeleteAll(0, "SMC_OB_Bull_");
+      ObjectsDeleteAll(0, "SMC_OB_Bear_");
+      DrawBollingerCurve();
       DrawFibonacciOnChart();
       DrawEMACurveOnChart();
       DrawLiquidityZonesOnChart();
@@ -2660,7 +3444,8 @@ void UpdateDashboard()
       case SYM_VOLATILITY:  catStr = "Volatility"; break;
       case SYM_FOREX:       catStr = "Forex"; break;
       case SYM_COMMODITY:   catStr = "Commodity"; break;
-      case SYM_METAL:       catStr = "Metal"; break;
+      case SYM_METAL:       catStr = "Metal/Or"; break;
+      case SYM_CRYPTO:      catStr = "Crypto"; break;
    }
    int posCount = CountPositionsForSymbol(_Symbol);
    int totalPos = CountPositionsOurEA();
@@ -2683,6 +3468,20 @@ void UpdateDashboard()
       UpdateMLMetricsDisplay();
    string killStr = SMC_IsKillZone(LondonStart, LondonEnd, NYOStart, NYOEnd) ? "ACTIVE" : "OFF";
    string bcStr = (StringFind(_Symbol, "Boom") >= 0) ? "BOOM" : (StringFind(_Symbol, "Crash") >= 0) ? "CRASH" : "FOREX";
+   UpdateDailyEquityStats();
+   SMC_ResetDailyDisciplineIfNewDay();
+   double dayPL = SMC_GetDailyProfitUSD();
+   double dayTarget = SMC_GetDailyProfitTargetUSD();
+   string discStr = StringFormat("Trades: %d/%d | Jour: %+.2f$ / %.2f$ (%s)",
+                                 g_dailyTradeCount, MaxDailyTrades,
+                                 dayPL, dayTarget,
+                                 g_dailyTargetHit ? "OBJECTIF OK" : "en cours");
+   string bcHourStr = "";
+   if(SMC_GetSymbolCategory(_Symbol) == SYM_BOOM_CRASH && g_smcBcHourUtc >= 0)
+      bcHourStr = StringFormat("BC UTC %dh: %.0f%% %s (%s) | fenêtre %s-%s\n",
+                               g_smcBcHourUtc, g_smcBcConfidence, g_smcBcRating,
+                               g_smcBcTradeable ? "OK" : "BLOQUE",
+                               g_smcBcWindowStart, g_smcBcWindowEnd);
    Comment("═══ SMC Universal + FVG_Kill PRO ═══\n",
            "Stratégie: SMC (FVG|OB|LS|BOS) + FVG_Kill (EMA HTF + LS)\n",
            "Trend HTF: ", trendHTF, " | Liquidity Sweep: ", lsStr, " | Kill Zone: ", killStr, "\n",
@@ -2690,6 +3489,8 @@ void UpdateDashboard()
            "IA: ", (g_lastAIAction != "") ? (g_lastAIAction + " " + DoubleToString(g_lastAIConfidence*100,1) + "% | Align: " + g_lastAIAlignment + " | Cohér: " + g_lastAICoherence) : "OFF", "\n",
            "Dernière mise à jour IA: ", (g_lastAIUpdate > 0) ? TimeToString(g_lastAIUpdate, TIME_SECONDS) : "Jamais", "\n",
            "Positions terminal: ", totalPos, "/", MaxPositionsTerminal, " | ", _Symbol, ": ", posCount, "/1\n",
+           "Discipline jour: ", discStr, "\n",
+           bcHourStr,
            "Perte totale: ", DoubleToString(totalPL, 2), " $ (max ", DoubleToString(MaxTotalLossDollars, 0), "$)\n",
            "Swing: ", swingStr, "\n",
            "ATR: ", DoubleToString(atrVal, _Digits), " | EMA(9): ", DoubleToString(emaVal, _Digits),
@@ -3825,35 +4626,45 @@ void DrawEMACurveOnChart()
 
 void DrawLiquidityZonesOnChart()
 {
-   MqlRates rates[];
-   ArraySetAsSeries(rates, true);
-   int bars = 30;
-   if(CopyRates(_Symbol, LTF, 0, bars, rates) < bars) return;
-   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   // 2 lignes seulement : EQH (Equal Highs = liquidité résistance) et EQL (Equal Lows = liquidité support)
+   ObjectDelete(0, "SMC_Liq_EQH");
+   ObjectDelete(0, "SMC_Liq_EQL");
    ObjectsDeleteAll(0, "SMC_Liq_");
-   int cnt = 0;
-   for(int i = 5; i < bars - 5 && cnt < 8; i++)
-   {
-      double zHigh = rates[i].high, zLow = rates[i].low;
-      for(int j = i; j < i + 10 && j < bars; j++)
-      {
-         if(rates[j].high > zHigh) zHigh = rates[j].high;
-         if(rates[j].low < zLow) zLow = rates[j].low;
-      }
-      if(zHigh - zLow > point * 5)
-      {
-         string name = "SMC_Liq_" + IntegerToString(i);
-         if(ObjectCreate(0, name, OBJ_RECTANGLE, 0, rates[i+5].time, zLow, rates[i].time, zHigh))
-         {
-            ObjectSetInteger(0, name, OBJPROP_COLOR, clrPurple);
-            ObjectSetInteger(0, name, OBJPROP_STYLE, STYLE_DOT);
-            ObjectSetInteger(0, name, OBJPROP_WIDTH, 1);
-            ObjectSetInteger(0, name, OBJPROP_BACK, true);
-            ObjectSetInteger(0, name, OBJPROP_FILL, false);
-            cnt++;
-         }
-      }
-   }
+
+   double highs[], lows[];
+   datetime times[];
+   ArraySetAsSeries(highs, true); ArraySetAsSeries(lows, true); ArraySetAsSeries(times, true);
+   int bars = 100;
+   if(CopyHigh(_Symbol, LTF, 0, bars, highs) < bars) return;
+   if(CopyLow(_Symbol,  LTF, 0, bars, lows)  < bars) return;
+   if(CopyTime(_Symbol, LTF, 0, bars, times)  < bars) return;
+
+   // EQH = le plus haut des 100 dernières bougies (liquidité résistance)
+   int idxH = 0;
+   for(int i = 1; i < bars; i++) if(highs[i] > highs[idxH]) idxH = i;
+
+   // EQL = le plus bas des 100 dernières bougies (liquidité support)
+   int idxL = 0;
+   for(int i = 1; i < bars; i++) if(lows[i] < lows[idxL]) idxL = i;
+
+   datetime futureT = TimeCurrent() + PeriodSeconds(LTF) * 30;
+   int dp = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+
+   ObjectCreate(0, "SMC_Liq_EQH", OBJ_TREND, 0, times[idxH], highs[idxH], futureT, highs[idxH]);
+   ObjectSetInteger(0, "SMC_Liq_EQH", OBJPROP_COLOR, clrMagenta);
+   ObjectSetInteger(0, "SMC_Liq_EQH", OBJPROP_STYLE, STYLE_DOT);
+   ObjectSetInteger(0, "SMC_Liq_EQH", OBJPROP_WIDTH, 1);
+   ObjectSetInteger(0, "SMC_Liq_EQH", OBJPROP_RAY_RIGHT, false);
+   ObjectSetString(0,  "SMC_Liq_EQH", OBJPROP_TEXT, "EQH (Liq) " + DoubleToString(highs[idxH], dp));
+   ObjectSetInteger(0, "SMC_Liq_EQH", OBJPROP_SELECTABLE, false);
+
+   ObjectCreate(0, "SMC_Liq_EQL", OBJ_TREND, 0, times[idxL], lows[idxL], futureT, lows[idxL]);
+   ObjectSetInteger(0, "SMC_Liq_EQL", OBJPROP_COLOR, clrMagenta);
+   ObjectSetInteger(0, "SMC_Liq_EQL", OBJPROP_STYLE, STYLE_DOT);
+   ObjectSetInteger(0, "SMC_Liq_EQL", OBJPROP_WIDTH, 1);
+   ObjectSetInteger(0, "SMC_Liq_EQL", OBJPROP_RAY_RIGHT, false);
+   ObjectSetString(0,  "SMC_Liq_EQL", OBJPROP_TEXT, "EQL (Liq) " + DoubleToString(lows[idxL], dp));
+   ObjectSetInteger(0, "SMC_Liq_EQL", OBJPROP_SELECTABLE, false);
 }
 
 void DrawPremiumDiscountZones()
@@ -4011,7 +4822,7 @@ void CheckPredictedSwingTriggers()
    
    if(IsPriceInRange()) return;
    
-   if(CountPositionsOurEA() >= MaxPositionsTerminal) return;
+   if(CountPositionsOurEA() >= SMC_EffectiveMaxPositionsTerminal()) return;
    
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
@@ -4660,6 +5471,76 @@ double GetClosestBuyLevel(double currentPrice, double atr, double maxDistATR, st
    double maxDist = MathMax(atr * MathMax(0.2, maxDistATR), atr * 0.2);
    double best = 0.0;
 
+   // 0) GOM OB Bull + setup TV (priorité ai_server)
+   double gomOb = SMCGP_GetGOMOBLimitPrice(1);
+   if(gomOb > 0 && gomOb < currentPrice)
+   {
+      double dist = currentPrice - gomOb;
+      if(dist <= maxDist && gomOb > best)
+      {
+         best = gomOb;
+         sourceOut = "GOM OB Bull";
+      }
+   }
+
+   // 0b) EMA rapides M1/M5 (support dynamique — priorité PERFECT entry)
+   double emaBuf[];
+   ArraySetAsSeries(emaBuf, true);
+   if(emaFastM5 != INVALID_HANDLE && CopyBuffer(emaFastM5, 0, 0, 1, emaBuf) >= 1)
+   {
+      double ema = emaBuf[0];
+      if(ema > 0 && ema < currentPrice)
+      {
+         double dist = currentPrice - ema;
+         if(dist <= maxDist && ema > best)
+         {
+            best = ema;
+            sourceOut = "EMA Fast M5";
+         }
+      }
+   }
+   if(emaFastM1 != INVALID_HANDLE && CopyBuffer(emaFastM1, 0, 0, 1, emaBuf) >= 1)
+   {
+      double ema = emaBuf[0];
+      if(ema > 0 && ema < currentPrice)
+      {
+         double dist = currentPrice - ema;
+         if(dist <= maxDist && ema > best)
+         {
+            best = ema;
+            sourceOut = "EMA Fast M1";
+         }
+      }
+   }
+
+   // 0c) EMA lentes M1/M5 (support dynamique)
+   if(emaSlowM5 != INVALID_HANDLE && CopyBuffer(emaSlowM5, 0, 0, 1, emaBuf) >= 1)
+   {
+      double ema = emaBuf[0];
+      if(ema > 0 && ema < currentPrice)
+      {
+         double dist = currentPrice - ema;
+         if(dist <= maxDist && ema > best)
+         {
+            best = ema;
+            sourceOut = "EMA Slow M5";
+         }
+      }
+   }
+   if(emaSlowM1 != INVALID_HANDLE && CopyBuffer(emaSlowM1, 0, 0, 1, emaBuf) >= 1)
+   {
+      double ema = emaBuf[0];
+      if(ema > 0 && ema < currentPrice)
+      {
+         double dist = currentPrice - ema;
+         if(dist <= maxDist && ema > best)
+         {
+            best = ema;
+            sourceOut = "EMA Slow M1";
+         }
+      }
+   }
+
    // 1) Pivots locaux (support proche) sur M1
    MqlRates r[];
    ArraySetAsSeries(r, true);
@@ -4732,13 +5613,975 @@ double GetClosestBuyLevel(double currentPrice, double atr, double maxDistATR, st
    return best;
 }
 
-//| Niveau SELL LIMIT = résistance M1 tracée sur le graphique (ligne SMC_Limit_Resistance) |
+// Niveau LIMIT simple GOM (BUY/SELL) : OB GOM + pivot uniquement
+double GetGOMSimpleLimitLevel(const int dir, const double currentPrice, const double atr,
+                              string &sourceOut)
+{
+   sourceOut = "";
+   if(atr <= 0 || dir == 0) return 0.0;
+   double maxDist = MathMax(atr * MathMax(0.2, PreciseLimitMaxDistATR), atr * 0.2);
+   double best = 0.0;
+
+   double gomOb = SMCGP_GetGOMOBLimitPrice(dir);
+   if(gomOb > 0)
+   {
+      if(dir == 1 && gomOb < currentPrice)
+      {
+         double dist = currentPrice - gomOb;
+         if(dist <= maxDist && gomOb > best)
+         {
+            best = gomOb;
+            sourceOut = (StringFind(sourceOut, "GOM OB") >= 0) ? sourceOut : "GOM OB";
+         }
+      }
+      else if(dir == -1 && gomOb > currentPrice)
+      {
+         double dist = gomOb - currentPrice;
+         if(dist <= maxDist && (best == 0.0 || gomOb < best))
+         {
+            best = gomOb;
+            sourceOut = "GOM OB";
+         }
+      }
+   }
+
+   MqlRates r[];
+   ArraySetAsSeries(r, true);
+   if(CopyRates(_Symbol, PERIOD_M1, 0, 80, r) >= 20)
+   {
+      for(int i = 2; i < 30; i++)
+      {
+         if(dir == 1)
+         {
+            double lo = r[i].low;
+            if(lo <= 0 || lo >= currentPrice) continue;
+            if(lo < r[i-1].low && lo < r[i+1].low)
+            {
+               double dist = currentPrice - lo;
+               if(dist <= maxDist && lo > best)
+               {
+                  best = lo;
+                  sourceOut = "Pivot Low";
+               }
+            }
+         }
+         else
+         {
+            double hi = r[i].high;
+            if(hi <= 0 || hi <= currentPrice) continue;
+            if(hi > r[i-1].high && hi > r[i+1].high)
+            {
+               double dist = hi - currentPrice;
+               if(dist <= maxDist && (best == 0.0 || hi < best))
+               {
+                  best = hi;
+                  sourceOut = "Pivot High";
+               }
+            }
+         }
+      }
+   }
+   return best;
+}
+
+int CountGOMPendingByTag(const string symbol, const string tagPrefix)
+{
+   int count = 0;
+   for(int i = OrdersTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = OrderGetTicket(i);
+      if(ticket == 0 || !OrderSelect(ticket)) continue;
+      if(OrderGetString(ORDER_SYMBOL) != symbol) continue;
+      if((long)OrderGetInteger(ORDER_MAGIC) != InpMagicNumber) continue;
+      if(!IsEAPendingOrderType((ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE))) continue;
+      string cmt = OrderGetString(ORDER_COMMENT);
+      if(StringFind(cmt, tagPrefix) >= 0) count++;
+   }
+   return count;
+}
+
+void CancelGOMPendingByTag(const string symbol, const string tagPrefix)
+{
+   for(int i = OrdersTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = OrderGetTicket(i);
+      if(ticket == 0 || !OrderSelect(ticket)) continue;
+      if(OrderGetString(ORDER_SYMBOL) != symbol) continue;
+      if((long)OrderGetInteger(ORDER_MAGIC) != InpMagicNumber) continue;
+      string cmt = OrderGetString(ORDER_COMMENT);
+      if(StringFind(cmt, tagPrefix) < 0) continue;
+      if(trade.OrderDelete(ticket))
+         Print("[GOM-AUTO] Annulation pending ", tagPrefix, " ticket=", ticket);
+   }
+}
+
+void CancelAllGOMPendingOrders(const string symbol)
+{
+   CancelGOMPendingByTag(symbol, "GOM_LIMIT");
+   CancelGOMPendingByTag(symbol, "GOM_GOOD");
+   CancelGOMPendingByTag(symbol, "GOM_PERFECT");
+}
+
+double GOM_GetATRValue()
+{
+   double atrVal = 0.0;
+   if(atrHandle != INVALID_HANDLE)
+   {
+      double atrBuf[];
+      ArraySetAsSeries(atrBuf, true);
+      if(CopyBuffer(atrHandle, 0, 0, 1, atrBuf) > 0) atrVal = atrBuf[0];
+   }
+   if(atrVal <= 0) atrVal = SymbolInfoDouble(_Symbol, SYMBOL_POINT) * 50;
+   return atrVal;
+}
+
+bool GOM_EntryCoherenceOK()
+{
+   double minCoh = SMC_EffectiveGOMMinCoherence();
+   if(minCoh <= 0) return true;
+   if(g_smcGomCoherence <= 0) return false;
+   return (g_smcGomCoherence >= minCoh);
+}
+
+// Prédiction 5min (COG) en conflit avec le verdict GOM → attendre alignement
+// Règle absolue : COG BUY + GOM SELL = conflit, COG SELL + GOM BUY = conflit
+// Peu importe la confiance % ou la qualité GOM (GOOD/PERFECT), si directions opposées = BLOQUÉ
+bool COG_ConflictsWithGOM()
+{
+   if(!UseCognitionFilter) return false;
+   if(g_cogDirection == "NEUTRAL" || StringLen(g_cogDirection) == 0) return false;
+   if(g_smcGomVerdictNum == 0) return false; // GOM=WAIT géré ailleurs
+
+   bool cogBuy  = (g_cogDirection == "BUY");
+   bool gomBuy  = (g_smcGomVerdictNum > 0);
+
+   if(cogBuy != gomBuy)
+   {
+      static datetime s_lastConflictLog = 0;
+      if(TimeCurrent() - s_lastConflictLog >= 60)
+      {
+         Print("[COG-GOM-CONFLICT] ⛔ Prédiction 5min=", g_cogDirection,
+               " vs GOM=", g_smcGomVerdict, " — attendre alignement");
+         s_lastConflictLog = TimeCurrent();
+      }
+      return true;
+   }
+   return false;
+}
+
+bool SMC_IsCrash150Symbol(const string symbol)
+{
+   string s = symbol;
+   StringToUpper(s);
+   return (StringFind(s, "CRASH") >= 0 && StringFind(s, "150") >= 0);
+}
+
+void SMC_MarkSpikeCaptured(const string symbol)
+{
+   g_lastSpikeCapturedSymbol = symbol;
+   g_lastSpikeCapturedTime   = TimeCurrent();
+   Print("[SPIKE] Spike capté sur ", symbol,
+         " — attendre ", PostSpikeMinSmallCandles, " petites bougies M1 avant ré-entrée");
+}
+
+int SMC_CountSmallM1BarsAfterTime(const string symbol, const datetime afterTime)
+{
+   if(afterTime <= 0) return 999;
+
+   MqlRates m1[];
+   ArraySetAsSeries(m1, true);
+   if(CopyRates(symbol, PERIOD_M1, 0, 25, m1) < 5) return 0;
+
+   double avgBody = 0;
+   int avgN = MathMin(20, ArraySize(m1) - 1);
+   for(int j = 1; j <= avgN; j++)
+      avgBody += MathAbs(m1[j].close - m1[j].open);
+   if(avgN > 0) avgBody /= avgN;
+
+   double smallMax = avgBody * PostSpikeSmallBodyRatio;
+   double pt = SymbolInfoDouble(symbol, SYMBOL_POINT);
+   if(smallMax < pt * 3) smallMax = pt * 3;
+
+   int smallCount = 0;
+   int barSec = PeriodSeconds(PERIOD_M1);
+   for(int i = 1; i < ArraySize(m1); i++)
+   {
+      datetime barClose = m1[i].time + barSec;
+      if(barClose <= afterTime) continue;
+      if(MathAbs(m1[i].close - m1[i].open) <= smallMax)
+         smallCount++;
+   }
+   return smallCount;
+}
+
+bool SMC_BCHourAllowsTrade(const string symbol = "")
+{
+   if(!UseBCHourFilter) return true;
+
+   string sym = (StringLen(symbol) > 0) ? symbol : _Symbol;
+   if(SMC_GetSymbolCategory(sym) != SYM_BOOM_CRASH) return true;
+
+   if(g_smcBcHourUtc < 0) return true; // pas encore pollé — ne pas bloquer aveuglément
+
+   if(!g_smcBcTradeable || g_smcBcConfidence < BCHourMinConfidence)
+   {
+      static datetime s_bcLog = 0;
+      if(TimeCurrent() - s_bcLog >= 60)
+      {
+         s_bcLog = TimeCurrent();
+         Print("[BC-HEURE] BLOQUE ", sym,
+               " — UTC ", g_smcBcHourUtc, "h conf=", DoubleToString(g_smcBcConfidence, 1),
+               "% (min ", DoubleToString(BCHourMinConfidence, 0), "%) session=",
+               g_smcBcSession, " fenêtre ", g_smcBcWindowStart, "-", g_smcBcWindowEnd);
+      }
+      return false;
+   }
+   return true;
+}
+
+bool GOM_EntryEnvironmentOK(const int dirSign)
+{
+   if(dirSign == 0) return true;
+
+   // PERFECT (vn=±3) : signal le plus fort, exempt des gates secondaires
+   if(SMCGP_IsPerfectVerdict(g_smcGomVerdictNum)) return true;
+
+   string dir = (dirSign == 1) ? "BUY" : "SELL";
+
+   if(SMC_IsCorrectionZoneForDirection(_Symbol, dirSign))
+   {
+      static datetime s_corrLog = 0;
+      if(TimeCurrent() - s_corrLog >= 30)
+      {
+         s_corrLog = TimeCurrent();
+         Print("[GOM-GATE] BLOQUE ", dir, " — zone de correction M1/M5");
+      }
+      return false;
+   }
+
+   if(g_smcGomForceExhausted && !SMCGP_IsPerfectVerdict(g_smcGomVerdictNum))
+   {
+      static datetime s_exhLog = 0;
+      if(TimeCurrent() - s_exhLog >= 30)
+      {
+         s_exhLog = TimeCurrent();
+         Print("[GOM-GATE] BLOQUE ", dir, " — force spike épuisée (PERFECT→GOOD), attendre consolidation");
+      }
+      return false;
+   }
+
+   if(SMC_GetSymbolCategory(_Symbol) == SYM_BOOM_CRASH && PostSpikeBlockBarsSinceSpike > 0
+      && g_smcGomBarsSinceSpike >= 0 && g_smcGomBarsSinceSpike <= PostSpikeBlockBarsSinceSpike)
+   {
+      static datetime s_barLog = 0;
+      if(TimeCurrent() - s_barLog >= 30)
+      {
+         s_barLog = TimeCurrent();
+         Print("[GOM-GATE] BLOQUE ", dir, " — spike GOM récent (bars_since_spike=",
+               g_smcGomBarsSinceSpike, ")");
+      }
+      return false;
+   }
+
+   if(g_lastSpikeCapturedSymbol == _Symbol && g_lastSpikeCapturedTime > 0)
+   {
+      int smallBars = SMC_CountSmallM1BarsAfterTime(_Symbol, g_lastSpikeCapturedTime);
+      if(smallBars < PostSpikeMinSmallCandles)
+      {
+         static datetime s_spikeLog = 0;
+         if(TimeCurrent() - s_spikeLog >= 30)
+         {
+            s_spikeLog = TimeCurrent();
+            Print("[GOM-GATE] BLOQUE ", dir, " — spike capté, petites bougies M1: ",
+                  smallBars, "/", PostSpikeMinSmallCandles);
+         }
+         return false;
+      }
+   }
+
+   if(!SMC_BCHourAllowsTrade(_Symbol))
+      return false;
+
+   if(!SMC_HighProbabilityAllowsEntry(dirSign))
+      return false;
+
+   // GATE RSI EXTREME : RSI overbought sur BUY ou oversold sur SELL = entrée risquée
+   if(g_smcGomRsi > 0)
+   {
+      if(dirSign == 1 && g_smcGomRsi > 78)
+      {
+         static datetime s_rsiOBLog = 0;
+         if(TimeCurrent() - s_rsiOBLog >= 30)
+         {
+            s_rsiOBLog = TimeCurrent();
+            Print("[GOM-GATE] BLOQUE BUY — RSI overbought ", g_smcGomRsi, " > 78");
+         }
+         return false;
+      }
+      if(dirSign == -1 && g_smcGomRsi < 22)
+      {
+         static datetime s_rsiOSLog = 0;
+         if(TimeCurrent() - s_rsiOSLog >= 30)
+         {
+            s_rsiOSLog = TimeCurrent();
+            Print("[GOM-GATE] BLOQUE SELL — RSI oversold ", g_smcGomRsi, " < 22");
+         }
+         return false;
+      }
+   }
+
+   // GATE M15 OPPOSE : M15 contre la direction = setup non confirmé sur TF intermédiaire
+   if(g_smcTfM15Dir != "")
+   {
+      if(dirSign == 1 && g_smcTfM15Dir == "BEAR")
+      {
+         static datetime s_m15BuyLog = 0;
+         if(TimeCurrent() - s_m15BuyLog >= 30)
+         {
+            s_m15BuyLog = TimeCurrent();
+            Print("[GOM-GATE] BLOQUE BUY — M15=BEAR opposé à BUY");
+         }
+         return false;
+      }
+      if(dirSign == -1 && g_smcTfM15Dir == "BULL")
+      {
+         static datetime s_m15SellLog = 0;
+         if(TimeCurrent() - s_m15SellLog >= 30)
+         {
+            s_m15SellLog = TimeCurrent();
+            Print("[GOM-GATE] BLOQUE SELL — M15=BULL opposé à SELL");
+         }
+         return false;
+      }
+   }
+
+   return true;
+}
+
+int SMC_GOMReentryCooldownSec()
+{
+   if(SMC_IsCrash150Symbol(_Symbol)) return 120;
+   if(SMC_GetSymbolCategory(_Symbol) == SYM_BOOM_CRASH) return 60;
+   return 30;
+}
+
+// GOM encore aligné avec la position (pas WAIT, pas rétrogradé, pas inversé)
+bool SMC_GOMSupportsOpenPosition(const int posDir)
+{
+   if(!UseGOMVerdictFilter || !g_smcGomConnected) return true;
+   if(g_smcGomVerdictNum == 0) return false;
+   if(g_smcGomForceExhausted) return false;
+   if(posDir == 1 && g_smcGomVerdictNum <= 0) return false;
+   if(posDir == -1 && g_smcGomVerdictNum >= 0) return false;
+   return true;
+}
+
+// Perte max applicable: WAIT/rétro = $1 | GOM valide sans spike = $3
+double SMC_GetPositionMaxLossUSD(const int posDir, const bool isGomWaitExit)
+{
+   if(isGomWaitExit)
+      return MathMax(0.01, GOMWaitCloseMinLossUSD);
+
+   if(UseGOMVerdictFilter && g_smcGomConnected)
+   {
+      if(g_smcGomVerdictNum == 0)
+         return MathMax(0.01, GOMWaitCloseMinLossUSD);
+      if(!SMC_GOMSupportsOpenPosition(posDir))
+         return MathMax(0.01, GOMWaitCloseMinLossUSD);
+      return MathMax(0.01, GOMHoldMaxLossUSD);
+   }
+
+   return g_maxLossDollars;
+}
+
+bool GOM_CanOpenNewTrade(const int dirSign = 0)
+{
+   if(!SMC_DailyDisciplineAllowsEntry()) return false;
+   if(!GOM_EntryCoherenceOK()) return false;
+   if(COG_ConflictsWithGOM()) return false;
+   if(dirSign != 0 && !GOM_EntryEnvironmentOK(dirSign)) return false;
+   if(CountPositionsForSymbol(_Symbol) > 0) return false;
+   if(CountOpenLimitOrdersTerminal() >= MaxLimitOrdersTerminal) return false;
+   return true;
+}
+
+bool PlaceGOMMarketOrder(const string direction, const string tag, const string levelSource)
+{
+   int dir = (direction == "BUY") ? 1 : -1;
+   if(!GOM_CanOpenNewTrade(dir)) return false;
+   if(!IsDirectionAllowedForBoomCrash(_Symbol, direction)) return false;
+   if(!TryAcquireOpenLock()) return false;
+
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   if(bid <= 0 || ask <= 0) { ReleaseOpenLock(); return false; }
+
+   double atrVal = GOM_GetATRValue();
+   double slDist = atrVal * SMC_EffectiveSLMult();
+   double tpDist = atrVal * SMC_EffectiveTPMult();
+   double sl = 0, tp = 0;
+   if(direction == "BUY")
+   {
+      sl = bid - slDist;
+      tp = bid + tpDist;
+   }
+   else
+   {
+      sl = ask + slDist;
+      tp = ask - tpDist;
+   }
+
+   MqlTradeRequest req;
+   MqlTradeResult  res;
+   ZeroMemory(req);
+   ZeroMemory(res);
+   req.action    = TRADE_ACTION_DEAL;
+   req.symbol    = _Symbol;
+   req.magic     = InpMagicNumber;
+   req.volume    = CalculateLotSize();
+   req.type      = (direction == "BUY") ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+   req.price     = (direction == "BUY") ? ask : bid;
+   req.sl        = NormalizeDouble(sl, _Digits);
+   req.tp        = NormalizeDouble(tp, _Digits);
+   req.comment   = tag + " " + direction + " " + levelSource;
+   req.deviation = 20;
+   {
+      long fillFlags = SymbolInfoInteger(_Symbol, SYMBOL_FILLING_MODE);
+      req.type_filling = ((fillFlags & SYMBOL_FILLING_IOC) != 0) ? ORDER_FILLING_IOC :
+                         ((fillFlags & SYMBOL_FILLING_FOK) != 0) ? ORDER_FILLING_FOK :
+                         ORDER_FILLING_RETURN;
+   }
+
+   bool ok = SafeOrderSend(req, res);
+   ReleaseOpenLock();
+   return ok;
+}
+
+bool PlaceGOMSimpleLimitOrder(const string direction)
+{
+   int dir = (direction == "BUY") ? 1 : -1;
+   if(!GOM_CanOpenNewTrade(dir)) return false;
+   if(CountGOMPendingByTag(_Symbol, "GOM_LIMIT") > 0) return false;
+   if(!IsDirectionAllowedForBoomCrash(_Symbol, direction)) return false;
+
+   if(!SMCGP_GOMAllowsBasicDirection(dir)) return false;
+   if(!TryAcquireOpenLock()) return false;
+
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   if(bid <= 0 || ask <= 0) { ReleaseOpenLock(); return false; }
+
+   double atrVal = GOM_GetATRValue();
+   double refPrice = (direction == "BUY") ? bid : ask;
+   string levelSource = "";
+   double limitPrice = GetGOMSimpleLimitLevel(dir, refPrice, atrVal, levelSource);
+   if(limitPrice <= 0)
+   {
+      ReleaseOpenLock();
+      return false;
+   }
+
+   double maxDist = atrVal * PreciseLimitMaxDistATR;
+   if(MathAbs(limitPrice - refPrice) > maxDist)
+   {
+      ReleaseOpenLock();
+      return false;
+   }
+
+   double slDist = atrVal * SMC_EffectiveSLMult();
+   double tpDist = atrVal * SMC_EffectiveTPMult();
+   double sl = 0, tp = 0;
+   if(direction == "BUY")
+   {
+      sl = limitPrice - slDist;
+      tp = limitPrice + tpDist;
+   }
+   else
+   {
+      sl = limitPrice + slDist;
+      tp = limitPrice - tpDist;
+   }
+
+   MqlTradeRequest req;
+   MqlTradeResult  res;
+   ZeroMemory(req);
+   ZeroMemory(res);
+   req.action  = TRADE_ACTION_PENDING;
+   req.symbol  = _Symbol;
+   req.magic   = InpMagicNumber;
+   req.volume  = CalculateLotSize();
+   req.type    = (direction == "BUY") ? ORDER_TYPE_BUY_LIMIT : ORDER_TYPE_SELL_LIMIT;
+   req.price   = NormalizeDouble(limitPrice, _Digits);
+   req.sl      = NormalizeDouble(sl, _Digits);
+   req.tp      = NormalizeDouble(tp, _Digits);
+   req.comment = "GOM_LIMIT " + direction + " " + levelSource;
+
+   ENUM_ORDER_TYPE ot = (ENUM_ORDER_TYPE)req.type;
+   if(!ValidateAndAdjustLimitPrice(req.price, req.sl, req.tp, ot))
+   {
+      ReleaseOpenLock();
+      return false;
+   }
+
+   bool ok = SafeOrderSend(req, res);
+   ReleaseOpenLock();
+   if(ok)
+      Print("[GOM-LIMIT] ", direction, " @ ", levelSource, " prix=", DoubleToString(limitPrice, _Digits));
+   return ok;
+}
+
+bool PlaceGOMLimitAtLevel(const string direction, const string tag, const double limitPrice, const string levelSource)
+{
+   if(limitPrice <= 0) return false;
+   int dir = (direction == "BUY") ? 1 : -1;
+   if(!GOM_CanOpenNewTrade(dir)) return false;
+   if(CountGOMPendingByTag(_Symbol, tag) > 0) return false;
+   if(!IsDirectionAllowedForBoomCrash(_Symbol, direction)) return false;
+   if(!TryAcquireOpenLock()) return false;
+
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   if(bid <= 0 || ask <= 0) { ReleaseOpenLock(); return false; }
+
+   double atrVal = GOM_GetATRValue();
+   double refPrice = (direction == "BUY") ? bid : ask;
+   double maxDist = atrVal * PreciseLimitMaxDistATR;
+   if(MathAbs(limitPrice - refPrice) > maxDist)
+   {
+      ReleaseOpenLock();
+      Print("[GOM-LIMIT] Niveau trop loin — ", direction, " dist=", DoubleToString(MathAbs(limitPrice - refPrice), _Digits));
+      return false;
+   }
+
+   double slDist = atrVal * SMC_EffectiveSLMult();
+   double tpDist = atrVal * SMC_EffectiveTPMult();
+   double sl = 0, tp = 0;
+   if(direction == "BUY")
+   {
+      sl = limitPrice - slDist;
+      tp = limitPrice + tpDist;
+   }
+   else
+   {
+      sl = limitPrice + slDist;
+      tp = limitPrice - tpDist;
+   }
+
+   MqlTradeRequest req;
+   MqlTradeResult  res;
+   ZeroMemory(req);
+   ZeroMemory(res);
+   req.action  = TRADE_ACTION_PENDING;
+   req.symbol  = _Symbol;
+   req.magic   = InpMagicNumber;
+   req.volume  = CalculateLotSize();
+   req.type    = (direction == "BUY") ? ORDER_TYPE_BUY_LIMIT : ORDER_TYPE_SELL_LIMIT;
+   req.price   = NormalizeDouble(limitPrice, _Digits);
+   req.sl      = NormalizeDouble(sl, _Digits);
+   req.tp      = NormalizeDouble(tp, _Digits);
+   req.comment = tag + " " + direction + " " + levelSource;
+
+   ENUM_ORDER_TYPE ot = (ENUM_ORDER_TYPE)req.type;
+   if(!ValidateAndAdjustLimitPrice(req.price, req.sl, req.tp, ot))
+   {
+      ReleaseOpenLock();
+      return false;
+   }
+
+   bool ok = SafeOrderSend(req, res);
+   ReleaseOpenLock();
+   if(ok)
+      Print("[GOM-LIMIT] ", tag, " ", direction, " @ ", levelSource, " prix=", DoubleToString(limitPrice, _Digits));
+   return ok;
+}
+
+void ManageGOMVerdictExits()
+{
+   if(!UseGOMWaitAutoClose || !g_smcGomConnected) return;
+
+   const int curVn = g_smcGomVerdictNum;
+
+   // WAIT : annuler les ordres GOM en attente
+   if(curVn == 0)
+   {
+      static datetime s_lastWaitCancel = 0;
+      if(TimeCurrent() - s_lastWaitCancel >= 5)
+      {
+         CancelAllGOMPendingOrders(_Symbol);
+         s_lastWaitCancel = TimeCurrent();
+      }
+   }
+   // PERFECT→GOOD : annuler les ordres PERFECT encore en attente
+   else if(g_smcGomForceExhausted && (curVn == 2 || curVn == -2))
+   {
+      static datetime s_lastDownCancel = 0;
+      if(TimeCurrent() - s_lastDownCancel >= 5)
+      {
+         CancelGOMPendingByTag(_Symbol, "GOM_PERFECT");
+         s_lastDownCancel = TimeCurrent();
+      }
+   }
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      if(!posInfo.SelectByIndex(i)) continue;
+      if(posInfo.Symbol() != _Symbol) continue;
+      if(posInfo.Magic() != InpMagicNumber) continue;
+
+      ulong ticket = posInfo.Ticket();
+      string cmt = posInfo.Comment();
+      double profit = posInfo.Profit() + posInfo.Swap() + posInfo.Commission();
+      int posDir = (posInfo.PositionType() == POSITION_TYPE_BUY) ? 1 : -1;
+      string reason = "";
+
+      // Timer WAIT : déclaré hors du if pour rester dans la portée du for
+      static datetime s_waitSince[64];
+      static ulong    s_waitTicket[64];
+      static int      s_waitCount = 0;
+
+      if(curVn == 0)
+      {
+         // WAIT : attendre 60s avant de fermer (évite fermeture sur WAIT transitoire)
+         datetime waitSince = 0;
+         for(int w = 0; w < s_waitCount; w++)
+            if(s_waitTicket[w] == ticket) { waitSince = s_waitSince[w]; break; }
+         if(waitSince == 0)
+         {
+            if(s_waitCount < 64) { s_waitTicket[s_waitCount] = ticket; s_waitSince[s_waitCount] = TimeCurrent(); s_waitCount++; }
+            Print("[GOM-EXIT] WAIT détecté ticket=", ticket, " — attente 60s avant fermeture");
+            continue;
+         }
+         if(TimeCurrent() - waitSince < 60)
+         {
+            Print("[GOM-EXIT] WAIT ticket=", ticket, " — encore ", 60 - (int)(TimeCurrent() - waitSince), "s avant fermeture");
+            continue;
+         }
+         reason = "GOM WAIT — fermeture automatique";
+      }
+      else
+      {
+         // Verdict revenu : annuler le timer WAIT pour ce ticket
+         for(int w = 0; w < s_waitCount; w++)
+            if(s_waitTicket[w] == ticket)
+            {
+               s_waitTicket[w] = s_waitTicket[s_waitCount - 1];
+               s_waitSince[w]  = s_waitSince[s_waitCount - 1];
+               s_waitCount--;
+               break;
+            }
+
+         // PERFECT → GOOD : quitter (prix probable en correction)
+         if(g_smcGomForceExhausted
+              && ((posDir == 1 && curVn == 2) || (posDir == -1 && curVn == -2)))
+            reason = "GOM PERFECT->GOOD retrogradation";
+         else if(StringFind(cmt, "GOM_PERFECT") >= 0
+              && ((posDir == 1 && curVn == 2) || (posDir == -1 && curVn == -2)))
+            reason = "GOM PERFECT->GOOD retrogradation";
+
+         // GOM-managed : correction vers BUY/SELL simple ou inversion
+         else if(SMCGP_IsGOMManagedComment(cmt))
+         {
+            bool fromGoodPerfect = (StringFind(cmt, "GOM_GOOD") >= 0 || StringFind(cmt, "GOM_PERFECT") >= 0);
+            if(fromGoodPerfect && MathAbs(curVn) < 2)
+               reason = "GOM correction (GOOD/PERFECT -> BUY/SELL)";
+            else if((curVn > 0 && posDir < 0) || (curVn < 0 && posDir > 0))
+               reason = "GOM inversion de sens";
+         }
+      }
+
+      if(StringLen(reason) == 0) continue;
+
+      bool isWait = (StringFind(reason, "GOM WAIT") >= 0);
+
+      // WAIT : fermer immédiatement (ne pas attendre -$3)
+      // Autres GOM (rétrogradation/correction) : attendre seuil $3 sauf si perte >= $1 et WAIT implicite
+      if(!isWait)
+      {
+         double minLoss = MathMax(0.01, g_minLossBeforeAutoClose);
+         if(profit > -minLoss)
+         {
+            static datetime s_lastHoldLog = 0;
+            if(TimeCurrent() - s_lastHoldLog >= 60)
+            {
+               s_lastHoldLog = TimeCurrent();
+               Print("[GOM-EXIT] Position maintenue — P/L ", DoubleToString(profit, 2),
+                     "$ | besoin <= -", DoubleToString(minLoss, 2), "$ avant ", reason);
+            }
+            continue;
+         }
+      }
+      else if(profit < 0 && profit > -GOMWaitCloseMinLossUSD)
+      {
+         // WAIT avec micro-perte (< $1) : fermer quand même — verdict invalidé
+         Print("[GOM-EXIT] WAIT avec perte ", DoubleToString(profit, 2),
+               "$ < ", DoubleToString(GOMWaitCloseMinLossUSD, 2), "$ — fermeture immédiate");
+      }
+      else if(profit <= -GOMWaitCloseMinLossUSD)
+      {
+         Print("[GOM-EXIT] WAIT + perte ", DoubleToString(profit, 2),
+               "$ >= ", DoubleToString(GOMWaitCloseMinLossUSD, 2), "$ — fermeture (sans attendre $3)");
+      }
+
+      Print("[GOM-EXIT] ", reason, " ticket=", ticket, " profit=", DoubleToString(profit, 2),
+            "$ vn=", curVn, " ", g_smcGomVerdict);
+      if(PositionCloseWithLog(ticket, reason))
+      {
+         g_lastGomVerdictExitTime = TimeCurrent();
+         if(SMC_GetSymbolCategory(_Symbol) == SYM_BOOM_CRASH && profit >= BoomCrashSpikeTP)
+            SMC_MarkSpikeCaptured(_Symbol);
+      }
+   }
+}
+
+void ManageGOMAutonomousStrategy()
+{
+   if(!GOMPerfectAutoEntry) return;
+
+   ENUM_SYMBOL_CATEGORY gomCat = SMC_GetSymbolCategory(_Symbol);
+   if(GoldGOMOnlyOnMetal && gomCat != SYM_METAL && gomCat != SYM_BOOM_CRASH)
+      return;
+
+   if(!g_smcGomConnected)
+   {
+      static datetime s_lastConnLog = 0;
+      if(TimeCurrent() - s_lastConnLog >= 30)
+      {
+         s_lastConnLog = TimeCurrent();
+         Print("[GOM-AUTO] En attente connexion ai_server (g_smcGomConnected=false) — vn=",
+               g_smcGomVerdictNum, " ", g_smcGomVerdict);
+      }
+      return;
+   }
+
+   static datetime s_lastTry = 0;
+   static int s_lastVn = 999;
+   int cooldown = (GOMPollIntervalSec > 0 ? GOMPollIntervalSec : 5);
+
+   // WAIT : rien + annuler les ordres GOM en attente
+   if(g_smcGomVerdictNum == 0)
+   {
+      if(s_lastVn != 0)
+         CancelAllGOMPendingOrders(_Symbol);
+      s_lastVn = 0;
+      return;
+   }
+
+   // Changement de direction : annuler LIMIT obsolète
+   if(s_lastVn != 999)
+   {
+      int prevSign = (s_lastVn > 0) ? 1 : ((s_lastVn < 0) ? -1 : 0);
+      int curSign  = (g_smcGomVerdictNum > 0) ? 1 : ((g_smcGomVerdictNum < 0) ? -1 : 0);
+      if(prevSign != 0 && curSign != 0 && prevSign != curSign)
+         CancelGOMPendingByTag(_Symbol, "GOM_LIMIT");
+   }
+   s_lastVn = g_smcGomVerdictNum;
+
+   if(!GOM_EntryCoherenceOK())
+   {
+      static datetime s_lastCohLog = 0;
+      if(TimeCurrent() - s_lastCohLog >= 30)
+      {
+         s_lastCohLog = TimeCurrent();
+         Print("[GOM-AUTO] Entrée bloquée — cohérence ", g_smcGomCoherence,
+               "% < seuil ", SMC_EffectiveGOMMinCoherence(), "%");
+      }
+      return;
+   }
+
+   int reentryCd = SMC_GOMReentryCooldownSec();
+   if(g_lastGomVerdictExitTime > 0 && TimeCurrent() - g_lastGomVerdictExitTime < reentryCd)
+      return;
+
+   if(TimeCurrent() - s_lastTry < cooldown) return;
+   if(CountPositionsForSymbol(_Symbol) > 0) return;
+   if(CountOpenLimitOrdersTerminal() >= MaxLimitOrdersTerminal)
+   {
+      Print("[GOM-AUTO] Max ordres pending terminal atteint");
+      return;
+   }
+
+   int perfectDir = SMCGP_GOMPerfectDirection();
+   int goodDir    = SMCGP_GOMGoodDirection();
+   int simpleDir  = SMCGP_GOMSimpleDirection();
+
+   double atrVal = GOM_GetATRValue();
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   if(bid <= 0 || ask <= 0) return;
+
+   // --- PERFECT : marché immédiat, sinon LIMIT sur support/résistance proche ---
+   if(perfectDir != 0)
+   {
+      CancelGOMPendingByTag(_Symbol, "GOM_LIMIT");
+      string direction = (perfectDir == 1) ? "BUY" : "SELL";
+      if(!IsDirectionAllowedForBoomCrash(_Symbol, direction))
+      {
+         Print("[GOM-PERFECT] Direction ", direction, " interdite sur ", _Symbol);
+         return;
+      }
+      if(!SMCGP_GOMAllowsDirectionEx(perfectDir, false))
+      {
+         Print("[GOM-PERFECT] Gate GOM refuse — vn=", g_smcGomVerdictNum, " ", g_smcGomVerdict);
+         return;
+      }
+
+      s_lastTry = TimeCurrent();
+      if(PlaceGOMMarketOrder(direction, "GOM_PERFECT", "scalp"))
+      {
+         Print("[GOM-PERFECT] MARKET ", direction, " | ", g_smcGomVerdict, " vn=", g_smcGomVerdictNum);
+         return;
+      }
+
+      string levelSource = "";
+      double refPrice = (perfectDir == 1) ? ask : bid;
+      double entryLvl = (perfectDir == 1)
+         ? GetClosestBuyLevel(refPrice, atrVal, PreciseLimitMaxDistATR, levelSource)
+         : GetClosestSellLevel(refPrice, atrVal, PreciseLimitMaxDistATR, levelSource);
+      if(entryLvl > 0 && PlaceGOMLimitAtLevel(direction, "GOM_PERFECT", entryLvl, levelSource))
+      {
+         Print("[GOM-PERFECT] LIMIT fallback ", direction, " @ ", levelSource,
+               " | ", g_smcGomVerdict, " vn=", g_smcGomVerdictNum);
+         return;
+      }
+      Print("[GOM-PERFECT] Échec MARKET + LIMIT — vn=", g_smcGomVerdictNum, " niveau=", entryLvl);
+      return;
+   }
+
+   // --- GOOD : entrée marché sur pullback support/résistance ---
+   if(goodDir != 0)
+   {
+      CancelGOMPendingByTag(_Symbol, "GOM_LIMIT");
+      string direction = (goodDir == 1) ? "BUY" : "SELL";
+      if(!IsDirectionAllowedForBoomCrash(_Symbol, direction)) return;
+      if(!SMCGP_GOMAllowsDirectionEx(goodDir, false)) return;
+
+      double refPrice = (goodDir == 1) ? ask : bid;
+      string levelSource = "";
+      double entryLvl = (goodDir == 1)
+         ? GetClosestBuyLevel(refPrice, atrVal, PreciseLimitMaxDistATR, levelSource)
+         : GetClosestSellLevel(refPrice, atrVal, PreciseLimitMaxDistATR, levelSource);
+      if(entryLvl <= 0)
+      {
+         Print("[GOM-GOOD] BLOQUÉ — aucun niveau proche trouvé (", direction, " @ ref=", DoubleToString(refPrice, _Digits), ")");
+         return;
+      }
+
+      double zoneTol = MathMax(atrVal * 0.25, SymbolInfoDouble(_Symbol, SYMBOL_POINT) * 5);
+      if(MathAbs(refPrice - entryLvl) > zoneTol)
+      {
+         Print("[GOM-GOOD] BLOQUÉ — prix trop loin du niveau ", direction,
+               " ref=", DoubleToString(refPrice, _Digits),
+               " lvl=", DoubleToString(entryLvl, _Digits),
+               " dist=", DoubleToString(MathAbs(refPrice - entryLvl), _Digits),
+               " tol=", DoubleToString(zoneTol, _Digits));
+         return;
+      }
+
+      s_lastTry = TimeCurrent();
+      if(PlaceGOMMarketOrder(direction, "GOM_GOOD", levelSource))
+      {
+         Print("[GOM-GOOD] MARKET pullback ", direction, " @ ", levelSource,
+               " | ", g_smcGomVerdict);
+         return;
+      }
+   }
+
+   // --- BUY/SELL simple : LIMIT sur OB ou pivot ---
+   if(simpleDir != 0)
+   {
+      string direction = (simpleDir == 1) ? "BUY" : "SELL";
+      if(CountGOMPendingByTag(_Symbol, "GOM_LIMIT") > 0) return;
+      if(!IsDirectionAllowedForBoomCrash(_Symbol, direction)) return;
+
+      s_lastTry = TimeCurrent();
+      if(PlaceGOMSimpleLimitOrder(direction))
+         Print("[GOM-SIMPLE] LIMIT ", direction, " | ", g_smcGomVerdict);
+   }
+}
+
+// Legacy — redirige vers la stratégie autonome
+bool TryExecuteGOMPerfectEntry()
+{
+   ManageGOMAutonomousStrategy();
+   return false;
+}
+
 double GetClosestSellLevel(double currentPrice, double atr, double maxDistATR, string &sourceOut)
 {
    sourceOut = "";
    if(atr <= 0) return 0.0;
    double maxDist = MathMax(atr * MathMax(0.2, maxDistATR), atr * 0.2);
    double best = 0.0;
+
+   // 0) GOM OB Bear + setup TV (priorité ai_server)
+   double gomOb = SMCGP_GetGOMOBLimitPrice(-1);
+   if(gomOb > 0 && gomOb > currentPrice)
+   {
+      double dist = gomOb - currentPrice;
+      if(dist <= maxDist && (best == 0.0 || gomOb < best))
+      {
+         best = gomOb;
+         sourceOut = "GOM OB Bear";
+      }
+   }
+
+   // 0b) EMA rapides M1/M5 (résistance dynamique — priorité PERFECT entry)
+   double emaBuf[];
+   ArraySetAsSeries(emaBuf, true);
+   if(emaFastM5 != INVALID_HANDLE && CopyBuffer(emaFastM5, 0, 0, 1, emaBuf) >= 1)
+   {
+      double ema = emaBuf[0];
+      if(ema > 0 && ema > currentPrice)
+      {
+         double dist = ema - currentPrice;
+         if(dist <= maxDist && (best == 0.0 || ema < best))
+         {
+            best = ema;
+            sourceOut = "EMA Fast M5";
+         }
+      }
+   }
+   if(emaFastM1 != INVALID_HANDLE && CopyBuffer(emaFastM1, 0, 0, 1, emaBuf) >= 1)
+   {
+      double ema = emaBuf[0];
+      if(ema > 0 && ema > currentPrice)
+      {
+         double dist = ema - currentPrice;
+         if(dist <= maxDist && (best == 0.0 || ema < best))
+         {
+            best = ema;
+            sourceOut = "EMA Fast M1";
+         }
+      }
+   }
+
+   // 0c) EMA lentes M1/M5 (résistance dynamique)
+   if(emaSlowM5 != INVALID_HANDLE && CopyBuffer(emaSlowM5, 0, 0, 1, emaBuf) >= 1)
+   {
+      double ema = emaBuf[0];
+      if(ema > 0 && ema > currentPrice)
+      {
+         double dist = ema - currentPrice;
+         if(dist <= maxDist && (best == 0.0 || ema < best))
+         {
+            best = ema;
+            sourceOut = "EMA Slow M5";
+         }
+      }
+   }
+   if(emaSlowM1 != INVALID_HANDLE && CopyBuffer(emaSlowM1, 0, 0, 1, emaBuf) >= 1)
+   {
+      double ema = emaBuf[0];
+      if(ema > 0 && ema > currentPrice)
+      {
+         double dist = ema - currentPrice;
+         if(dist <= maxDist && (best == 0.0 || ema < best))
+         {
+            best = ema;
+            sourceOut = "EMA Slow M1";
+         }
+      }
+   }
 
    // 1) Pivots locaux (résistance proche) sur M1
    MqlRates r[];
@@ -5456,7 +7299,7 @@ bool ConfirmWithAI(SMC_Signal &sig)
 
 void ExecuteSignal(SMC_Signal &sig)
 {
-   if(CountPositionsOurEA() >= MaxPositionsTerminal) return;
+   if(CountPositionsOurEA() >= SMC_EffectiveMaxPositionsTerminal()) return;
    if(!TryAcquireOpenLock()) return;
    double lotSize = CalculateLotSize();
    lotSize = ApplyRecoveryLot(lotSize);
@@ -5632,7 +7475,7 @@ double CalculateLotSize()
    UpdateDailyEquityStats();
 
    // Si le drawdown max est atteint, ne plus ouvrir de nouvelles positions
-   if(IsDailyDrawdownExceeded())
+   if(IsDailyDrawdownExceeded() || !SMC_DailyDisciplineAllowsEntry())
    {
       Print("⚠️ Nouvelle entrée bloquée par la gestion de risque journalière.");
       return 0.0;
@@ -5644,7 +7487,7 @@ double CalculateLotSize()
       return NormalizeDouble(MathMax(minLot, lotStep), 2);
    double maxLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
    double balance = AccountInfoDouble(ACCOUNT_BALANCE);
-   double riskPct = MaxRiskPerTradePercent;
+   double riskPct = SMC_EffectiveRiskPct();
    if(riskPct <= 0.0) riskPct = 1.0; // fallback très conservateur
    double riskAmount = balance * (riskPct / 100.0);
    double tickVal = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
@@ -5655,12 +7498,25 @@ double CalculateLotSize()
    double atr[];
    ArraySetAsSeries(atr, true);
    if(CopyBuffer(atrHandle, 0, 0, 1, atr) < 1) return minLot;
-   double slPoints = (atr[0] / point) * SL_ATRMult;
+   double slPoints = (atr[0] / point) * SMC_EffectiveSLMult();
    double pipVal = (tickVal / tickSize) * point;
    if(pipVal <= 0) return minLot;
    double lotSize = riskAmount / (slPoints * pipVal);
    lotSize = MathMax(minLot, MathMin(maxLot, lotSize));
-   lotSize = MathRound(lotSize / lotStep) * lotStep;
+   lotSize = MathFloor(lotSize / lotStep) * lotStep;  // plancher = ne jamais dépasser le risque calculé
+   if(lotSize < minLot) lotSize = minLot;
+
+   // Or en TRANSITION W1 : réduire lot de 50%
+   double transitionFactor = SMC_GoldTransitionLotFactor();
+   if(transitionFactor < 1.0)
+   {
+      lotSize *= transitionFactor;
+      lotSize = MathMax(minLot, MathFloor(lotSize / lotStep) * lotStep);
+      static datetime s_trLog = 0;
+      if(TimeCurrent() - s_trLog >= 1800) { s_trLog = TimeCurrent();
+         Print(StringFormat("[SMC-Gold] Lot réduit 50%% en régime TRANSITION | lot=%.2f", lotSize)); }
+   }
+
    return NormalizeDouble(lotSize, 2);
 }
 
@@ -5679,6 +7535,135 @@ double NormalizeVolumeForSymbol(double desiredVolume)
 }
 
 // Met à jour les statistiques d'équité journalière (début, max, min)
+int SMC_GetTodayDateInt()
+{
+   MqlDateTime dt;
+   TimeCurrent(dt);
+   return dt.year * 10000 + dt.mon * 100 + dt.day;
+}
+
+string SMC_DailyDisciplineGV(const string suffix)
+{
+   return "SMC_Disc_" + IntegerToString(InpMagicNumber) + "_" + suffix;
+}
+
+void SMC_LoadDailyDisciplineState()
+{
+   int today = SMC_GetTodayDateInt();
+   string keyDate = SMC_DailyDisciplineGV("Date");
+
+   if(!GlobalVariableCheck(keyDate) || (int)GlobalVariableGet(keyDate) != today)
+   {
+      g_dailyDisciplineDate = today;
+      g_dailyTradeCount = 0;
+      g_dailyTargetHit = false;
+      SMC_ResetPerformancePauseDaily();
+      GlobalVariableSet(keyDate, today);
+      GlobalVariableSet(SMC_DailyDisciplineGV("Trades"), 0);
+      GlobalVariableSet(SMC_DailyDisciplineGV("TargetHit"), 0);
+      Print("[DISCIPLINE-JOUR] Nouveau jour — compteur trades reset, objectif ",
+            DoubleToString(DailyProfitTargetPct, 1), "%");
+   }
+   else
+   {
+      g_dailyDisciplineDate = today;
+      g_dailyTradeCount = (int)GlobalVariableGet(SMC_DailyDisciplineGV("Trades"));
+      g_dailyTargetHit = (GlobalVariableGet(SMC_DailyDisciplineGV("TargetHit")) > 0.5);
+   }
+}
+
+void SMC_SaveDailyDisciplineState()
+{
+   GlobalVariableSet(SMC_DailyDisciplineGV("Date"), g_dailyDisciplineDate);
+   GlobalVariableSet(SMC_DailyDisciplineGV("Trades"), g_dailyTradeCount);
+   GlobalVariableSet(SMC_DailyDisciplineGV("TargetHit"), g_dailyTargetHit ? 1.0 : 0.0);
+}
+
+void SMC_ResetDailyDisciplineIfNewDay()
+{
+   int today = SMC_GetTodayDateInt();
+   if(g_dailyDisciplineDate != today)
+      SMC_LoadDailyDisciplineState();
+}
+
+double SMC_GetDailyProfitUSD()
+{
+   UpdateDailyEquityStats();
+   if(g_dailyStartEquity <= 0.0) return 0.0;
+   return AccountInfoDouble(ACCOUNT_EQUITY) - g_dailyStartEquity;
+}
+
+double SMC_GetDailyProfitTargetUSD()
+{
+   UpdateDailyEquityStats();
+   if(g_dailyStartEquity <= 0.0 || DailyProfitTargetPct <= 0.0) return 0.0;
+   return g_dailyStartEquity * DailyProfitTargetPct / 100.0;
+}
+
+bool SMC_DailyDisciplineAllowsEntry()
+{
+   if(!UseDailyDiscipline) return true;
+   if(BlockAllTrades) return false;
+
+   if(!SMC_PerformancePauseAllowsEntry())
+      return false;
+
+   UpdateDailyEquityStats();
+   SMC_ResetDailyDisciplineIfNewDay();
+
+   if(IsDailyDrawdownExceeded())
+      return false;
+
+   double dailyProfit = SMC_GetDailyProfitUSD();
+   double dailyTarget = SMC_GetDailyProfitTargetUSD();
+
+   if(StopOnDailyTarget && dailyTarget > 0.0 && dailyProfit >= dailyTarget)
+   {
+      if(!g_dailyTargetHit)
+      {
+         g_dailyTargetHit = true;
+         SMC_SaveDailyDisciplineState();
+         Print("[DISCIPLINE-JOUR] 🎯 OBJECTIF ATTEINT — +", DoubleToString(dailyProfit, 2),
+               "$ (", DoubleToString(DailyProfitTargetPct, 1), "% de ",
+               DoubleToString(g_dailyStartEquity, 2), "$) — nouvelles entrées bloquées jusqu'à demain");
+         if(UseNotifications)
+         {
+            Alert("Objectif journalier atteint: +", DoubleToString(dailyProfit, 2), "$");
+            SendNotification("Objectif journalier atteint: +" + DoubleToString(dailyProfit, 2) + "$");
+         }
+      }
+      return false;
+   }
+
+   if(StopOnMaxDailyTrades && MaxDailyTrades > 0 && g_dailyTradeCount >= MaxDailyTrades)
+   {
+      static datetime s_maxLog = 0;
+      if(TimeCurrent() - s_maxLog >= 120)
+      {
+         s_maxLog = TimeCurrent();
+         Print("[DISCIPLINE-JOUR] BLOQUE — max trades/jour: ",
+               g_dailyTradeCount, "/", MaxDailyTrades,
+               " | P/L jour: ", DoubleToString(dailyProfit, 2), "$");
+      }
+      return false;
+   }
+
+   return true;
+}
+
+void SMC_RecordDailyTradeOpen()
+{
+   if(!UseDailyDiscipline) return;
+   SMC_ResetDailyDisciplineIfNewDay();
+   g_dailyTradeCount++;
+   SMC_SaveDailyDisciplineState();
+   double dailyProfit = SMC_GetDailyProfitUSD();
+   double dailyTarget = SMC_GetDailyProfitTargetUSD();
+   Print("[DISCIPLINE-JOUR] Trade #", g_dailyTradeCount, "/", MaxDailyTrades,
+         " ouvert | P/L jour: ", DoubleToString(dailyProfit, 2), "$ / objectif ",
+         DoubleToString(dailyTarget, 2), "$ (", DoubleToString(DailyProfitTargetPct, 1), "%)");
+}
+
 void UpdateDailyEquityStats()
 {
    double equity = AccountInfoDouble(ACCOUNT_EQUITY);
@@ -5692,7 +7677,9 @@ void UpdateDailyEquityStats()
       g_dailyStartEquity = equity;
       g_dailyMaxEquity = equity;
       g_dailyMinEquity = equity;
+      g_dailyTargetHit = false;
       Print("📊 Réinitialisation stats journalières: équité départ = ", DoubleToString(equity, 2));
+      SMC_LoadDailyDisciplineState();
    }
    else
    {
@@ -5704,7 +7691,8 @@ void UpdateDailyEquityStats()
 // Indique si le drawdown journalier max autorisé est dépassé
 bool IsDailyDrawdownExceeded()
 {
-   if(MaxDailyDrawdownPercent <= 0.0 || g_dailyStartEquity <= 0.0)
+   double maxDD = SMC_EffectiveMaxDailyDDPct();
+   if(maxDD <= 0.0 || g_dailyStartEquity <= 0.0)
       return false;
 
    double equity = AccountInfoDouble(ACCOUNT_EQUITY);
@@ -5712,11 +7700,11 @@ bool IsDailyDrawdownExceeded()
    if(g_dailyStartEquity > 0.0)
       ddPercent = (g_dailyStartEquity - equity) / g_dailyStartEquity * 100.0;
 
-   if(ddPercent >= MaxDailyDrawdownPercent)
+   if(ddPercent >= maxDD)
    {
       Print("🛑 DRAWDOWN JOURNALIER MAX ATTEINT: ",
             DoubleToString(ddPercent, 1), "% / ",
-            DoubleToString(MaxDailyDrawdownPercent, 1),
+            DoubleToString(maxDD, 1),
             "% - blocage des nouvelles entrées pour aujourd'hui.");
       return true;
    }
@@ -5880,6 +7868,12 @@ bool ValidateAndAdjustLimitPrice(double &entryPrice, double &stopLoss, double &t
 
 void ManageTrailingStop()
 {
+   // TP partiel Or — géré avant le trailing général
+   SMC_ManageGoldPartialTP();
+
+   // Gold Scalp COG — re-entrées BUY tant que COG=BUY vert + GOM GOOD/PERFECT
+   SMC_ManageGoldScalp();
+
    // OPTIMISATION: Sortir rapidement si aucune position
    if(PositionsTotal() == 0) return;
    
@@ -5914,10 +7908,11 @@ void ManageTrailingStop()
       if(!posInfo.SelectByIndex(i)) continue;
       if(posInfo.Magic() != InpMagicNumber) continue;
       
-      // Limiter le trailing aux marchés Volatility / Forex / Métaux (hors Boom/Crash)
+      // Boom/Crash : trailing pour positions GOM autonomes (profit >= seuil)
       string symbol = posInfo.Symbol();
       ENUM_SYMBOL_CATEGORY cat = SMC_GetSymbolCategory(symbol);
-      if(cat == SYM_BOOM_CRASH)
+      bool isGomManaged = SMCGP_IsGOMManagedComment(posInfo.Comment());
+      if(cat == SYM_BOOM_CRASH && !isGomManaged)
          continue;
       
       double profit = posInfo.Profit() + posInfo.Swap() + posInfo.Commission();
@@ -5979,9 +7974,9 @@ void ManageTrailingStop()
          // Garder en mémoire le gain maximum
          if(profit > g_maxProfit) g_maxProfit = profit;
          
-         // Activer le trailing SEULEMENT à partir de 1$ de gain
-         // Avant 1$, on laisse respirer la position.
-         if(profit < 1.0)
+         // Activer le trailing au-delà du seuil GOM (1–2$ selon input)
+         double trailMin = MathMax(0.5, SMC_EffectiveGOMTrailingMinUSD());
+         if(profit < trailMin)
          {
             shouldTrail = false;
          }
@@ -5990,7 +7985,7 @@ void ManageTrailingStop()
             shouldTrail = true;
          }
       }
-      else if(g_maxProfit >= 1.0)
+      else if(g_maxProfit >= MathMax(0.5, SMC_EffectiveGOMTrailingMinUSD()))
       {
          // Si on a déjà eu au moins 1$ de gain et qu'on a rendu >50% de ce gain,
          // forcer le trailing pour empêcher de perdre plus de la moitié du gain maximum.
@@ -6363,16 +8358,16 @@ bool IsClassicIndicatorsAligned(const string direction, string &summaryOut)
    // 4) Bandes de Bollinger
    if(UseBollingerFilter)
    {
-      int bbHandle = iBands(_Symbol, PERIOD_M1, 20, 2.0, 0, PRICE_CLOSE);
-      if(bbHandle != INVALID_HANDLE)
+      int bbHandleLocal = iBands(_Symbol, PERIOD_M1, 20, 2.0, 0, PRICE_CLOSE);
+      if(bbHandleLocal != INVALID_HANDLE)
       {
          double upper[], middle[], lower[];
          ArraySetAsSeries(upper,  true);
          ArraySetAsSeries(middle, true);
          ArraySetAsSeries(lower,  true);
-         if(CopyBuffer(bbHandle, 0, 0, 1, upper)  == 1 &&
-            CopyBuffer(bbHandle, 1, 0, 1, middle) == 1 &&
-            CopyBuffer(bbHandle, 2, 0, 1, lower)  == 1)
+         if(CopyBuffer(bbHandleLocal, 0, 0, 1, upper)  == 1 &&
+            CopyBuffer(bbHandleLocal, 1, 0, 1, middle) == 1 &&
+            CopyBuffer(bbHandleLocal, 2, 0, 1, lower)  == 1)
          {
             bool nearUpper = (price >= middle[0]) && (price > upper[0] * 0.995);
             bool nearLower = (price <= middle[0]) && (price < lower[0] * 1.005);
@@ -6387,7 +8382,7 @@ bool IsClassicIndicatorsAligned(const string direction, string &summaryOut)
                else              { scoreAgainst++; summaryOut += "[BB BAS CONTRA] "; }
             }
          }
-         IndicatorRelease(bbHandle);
+         IndicatorRelease(bbHandleLocal);
       }
    }
 
@@ -6547,6 +8542,36 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
                         const MqlTradeRequest &request,
                         const MqlTradeResult &result)
 {
+   // Journal CSV — chaque deal de clôture (tous symboles, magic EA)
+   if(UseTradeJournal && trans.type == TRADE_TRANSACTION_DEAL_ADD && trans.deal > 0)
+      SMC_JournalLogDealClose(trans.deal, g_lastAIConfidence, g_lastAIAction);
+
+   // Détecter ouverture position Or pour TP partiel
+   if(trans.type == TRADE_TRANSACTION_DEAL_ADD && UseGoldHybridProfile)
+   {
+      CDealInfo d;
+      if(d.SelectByIndex(HistoryDealsTotal() - 1) && d.Magic() == InpMagicNumber
+         && d.Entry() == DEAL_ENTRY_IN && SMC_GetSymbolCategory(d.Symbol()) == SYM_METAL)
+      {
+         // Chercher la position ouverte correspondante
+         for(int pi = PositionsTotal() - 1; pi >= 0; pi--)
+         {
+            if(posInfo.SelectByIndex(pi) && posInfo.Magic() == InpMagicNumber
+               && posInfo.Symbol() == d.Symbol())
+            {
+               g_goldPartialTicket = posInfo.Ticket();
+               g_goldEntryPrice    = posInfo.PriceOpen();
+               g_goldHalfClosed    = false;
+               double atrVal = GOM_GetATRValue();
+               g_goldSlDistance = atrVal * GoldSL_ATRMult;
+               Print(StringFormat("[SMC-Gold] Entrée Or détectée | Ticket=%llu EP=%.2f SLdist=%.2f TP1=RR1.5 TP2=RR3.0",
+                     g_goldPartialTicket, g_goldEntryPrice, g_goldSlDistance));
+               break;
+            }
+         }
+      }
+   }
+
    // Ne traiter que les transactions de clôture de positions
    if(trans.type != TRADE_TRANSACTION_POSITION)
       return;
@@ -6595,6 +8620,8 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
                      g_lastLossSymbol = "";
                      g_lastLossTime   = 0;
                   }
+
+                  SMC_RecordTradeClosePerformance(profit);
 
                   // Timestamps (convertir en millisecondes pour compatibilité JSON)
                   long open_time = (long)deal.Time() * 1000;  // Time of the deal
@@ -7506,6 +9533,9 @@ void DrawConfirmedSwingPoints()
 //| VÉRIFICATION ET EXÉCUTION IMMÉDIATE DU DERIV ARROW               |
 void CheckAndExecuteDerivArrowTrade()
 {
+   if(SMC_IsGoldProfileActive() && GoldDisableDerivArrow)
+      return;
+
    // DEBUG: Log pour voir si la fonction est appelée
    static datetime lastLog = 0;
    if(TimeCurrent() - lastLog >= 10) // Log toutes les 10 secondes maximum
@@ -7894,7 +9924,7 @@ bool IsDerivArrowPresent()
 // Direction: "BUY" ou "SELL" (insensible à la casse).
 bool HasRecentSMCDerivArrowForDirection(string direction)
 {
-   if(!RequireSMCDerivArrowForMarketOrders) return true;
+   if(!SMC_EffectiveRequireDerivArrow()) return true;
 
    string dir = direction;
    StringToUpper(dir);
@@ -8391,17 +10421,17 @@ void ExecuteDerivArrowTrade(string direction)
    {
       double aiConfidence = g_lastAIConfidence;
       Print("📊 Vérification IA - Confiance: ", DoubleToString(aiConfidence, 1), "% | Action: ", g_lastAIAction);
-      if(aiConfidence < MinAIConfidencePercent)
+      if(aiConfidence < SMC_EffectiveMinAIConfidence())
       {
          Print("🚫 FLÈCHE DERIV ARROW BLOQUÉE - Confiance IA insuffisante: ", 
-               DoubleToString(aiConfidence, 1), "% < ", DoubleToString(MinAIConfidencePercent, 1), "% minimum");
+               DoubleToString(aiConfidence, 1), "% < ", DoubleToString(SMC_EffectiveMinAIConfidence(), 1), "% minimum");
          Print("   📊 IA Action: ", g_lastAIAction);
          return;
       }
       else
       {
          Print("✅ CONFIANCE IA VALIDÉE - ", DoubleToString(aiConfidence, 1), "% ≥ ", 
-               DoubleToString(MinAIConfidencePercent, 1), "% minimum");
+               DoubleToString(SMC_EffectiveMinAIConfidence(), 1), "% minimum");
       }
    }
    else
@@ -8662,9 +10692,10 @@ void ExecuteAIDecisionMarketOrder()
    // Catégorie du symbole pour adapter le seuil de confiance IA
    ENUM_SYMBOL_CATEGORY cat = SMC_GetSymbolCategory(_Symbol);
    double requiredConf = MinAIConfidence;
-   // Pour tous les marchés HORS Boom/Crash: 85% minimum
-   if(cat != SYM_BOOM_CRASH)
-      requiredConf = 0.85;
+   if(cat == SYM_METAL && UseGoldHybridProfile)
+      requiredConf = GoldMinAIConfidencePct / 100.0;  // Or: seuil dédié (par défaut 65%)
+   else if(cat != SYM_BOOM_CRASH)
+      requiredConf = 0.85;  // Forex/Crypto/Commodity: 85% minimum
    
    // Vérifier si on a une décision IA valide
    if(g_lastAIAction == "" || g_lastAIConfidence < requiredConf)
@@ -8682,8 +10713,10 @@ void ExecuteAIDecisionMarketOrder()
    }
    
    // Calculer une note de setup globale et bloquer si trop basse
+   // Boom/Crash exemptés : les spikes sont aléatoires, le score HTF/range est inadapté
+   bool isBoomCrashSetup = (SMC_GetSymbolCategory(_Symbol) == SYM_BOOM_CRASH);
    double setupScore = ComputeSetupScore(g_lastAIAction);
-   if(setupScore < MinSetupScoreEntry)
+   if(!isBoomCrashSetup && setupScore < MinSetupScoreEntry)
    {
       Print("🚫 ORDRE IA BLOQUÉ - SetupScore trop bas: ",
             DoubleToString(setupScore, 1), " < ",
@@ -8691,9 +10724,10 @@ void ExecuteAIDecisionMarketOrder()
             " pour ", _Symbol, " (", g_lastAIAction, ")");
       return;
    }
-   
+
    Print("✅ ORDRES MARCHÉ AUTORISÉS - IA: ", g_lastAIAction,
-         " | SetupScore=", DoubleToString(setupScore, 1));
+         " | SetupScore=", DoubleToString(setupScore, 1),
+         (isBoomCrashSetup ? " [BoomCrash exempt]" : ""));
 
    // Réentrée après perte sur ce symbole: exiger conditions exceptionnelles
    if(!AllowReentryAfterRecentLoss(_Symbol, g_lastAIAction, false))
@@ -8707,10 +10741,68 @@ void ExecuteAIDecisionMarketOrder()
       return; // BLOQUER TOUTE duplication sur ce symbole
    }
    
-   // BLOQUER LES ORDRES MARCHÉ SUR BOOM/CRASH - ATTENDRE DERIV ARROW
+   // Boom/Crash : entrées marché sur GOM SIMPLE/GOOD/PERFECT (|vn|>=1) + IA aligné
    if(cat == SYM_BOOM_CRASH)
    {
-      Print("🚫 ORDRES MARCHÉ BLOQUÉS SUR BOOM/CRASH - Attendre DERIV ARROW pour ", _Symbol);
+      // GOM SIMPLE, GOOD ou PERFECT + IA aligné : capture spike directe
+      bool isGoodOrPerfect = (MathAbs(g_smcGomVerdictNum) >= 1);
+      if(isGoodOrPerfect)
+      {
+         string spikeDir = (g_lastAIAction == "BUY" || g_lastAIAction == "buy") ? "BUY" : "SELL";
+         // Diagnostics individuels pour identifier le gate qui bloque
+         if(!IsDirectionAllowedForBoomCrash(_Symbol, spikeDir))
+         { Print("🚫 [BoomCrash] Direction ", spikeDir, " interdite sur ", _Symbol); return; }
+         if(!SMC_DailyDisciplineAllowsEntry())
+         { Print("🚫 [BoomCrash] Discipline journalière bloque ", _Symbol); return; }
+         if(CountPositionsForSymbol(_Symbol) > 0)
+         { Print("🚫 [BoomCrash] Position déjà ouverte sur ", _Symbol, " — duplication bloquée"); return; }
+         if(!TryAcquireOpenLock())
+         { Print("🚫 [BoomCrash] Lock occupé (", CountPositionsOurEA(), "/", SMC_EffectiveMaxPositionsTerminal(), " positions terminal) — ", _Symbol); return; }
+         {
+            double lot   = CalculateLotSize();
+            if(lot <= 0) { Print("🚫 [BoomCrash] lot=0 — drawdown journalier ou risque bloque ", _Symbol); ReleaseOpenLock(); return; }
+            double bid   = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+            double ask   = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+            double atr   = GOM_GetATRValue();
+            double sl    = (spikeDir == "BUY") ? bid - atr * SMC_EffectiveSLMult()
+                                                : ask + atr * SMC_EffectiveSLMult();
+            double tp    = (spikeDir == "BUY") ? bid + atr * SMC_EffectiveTPMult()
+                                                : ask - atr * SMC_EffectiveTPMult();
+            MqlTradeRequest req; MqlTradeResult res;
+            ZeroMemory(req); ZeroMemory(res);
+            req.action    = TRADE_ACTION_DEAL;
+            req.symbol    = _Symbol;
+            req.magic     = InpMagicNumber;
+            req.volume    = lot;
+            req.type      = (spikeDir == "BUY") ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+            req.price     = (spikeDir == "BUY") ? ask : bid;
+            req.sl        = NormalizeDouble(sl, _Digits);
+            req.tp        = NormalizeDouble(tp, _Digits);
+            req.comment   = "GOM_IA_SPIKE " + spikeDir;
+            req.deviation = 20;
+            long fillFlags = SymbolInfoInteger(_Symbol, SYMBOL_FILLING_MODE);
+            req.type_filling = ((fillFlags & SYMBOL_FILLING_IOC) != 0) ? ORDER_FILLING_IOC :
+                               ((fillFlags & SYMBOL_FILLING_FOK) != 0) ? ORDER_FILLING_FOK :
+                               ORDER_FILLING_RETURN;
+            if(SafeOrderSend(req, res))
+            {
+               Print("🚀 [BoomCrash] SPIKE MARKET ", spikeDir,
+                     " | GOM ", g_smcGomVerdict, " (vn=", g_smcGomVerdictNum, ") + IA ",
+                     DoubleToString(g_lastAIConfidence*100,1), "%",
+                     " | SL=", DoubleToString(sl, _Digits),
+                     " TP=", DoubleToString(tp, _Digits));
+               ReleaseOpenLock();
+               return;
+            }
+            Print("❌ [BoomCrash] Échec SPIKE MARKET ", spikeDir,
+                  " | RetCode=", res.retcode,
+                  " | Lot=", DoubleToString(lot, 2));
+            ReleaseOpenLock();
+         }
+         return;
+      }
+      // GOM=WAIT (vn=0) : pas de signal, on attend
+      Print("🚫 BOOM/CRASH — GOM WAIT (vn=0) ou direction interdite — attente signal valide pour ", _Symbol);
       return;
    }
    
@@ -8732,14 +10824,33 @@ void ExecuteAIDecisionMarketOrder()
       return;
    }
    
-   // VALIDATION MULTI-SIGNAUX POUR ENTRÉES PRÉCISES
-   if(!ValidateEntryWithMultipleSignals(g_lastAIAction))
+   // Pour l'or en profil hybride: vérifier conflit COG-GOM avant entrée
+   bool isGoldHybrid = (cat == SYM_METAL && UseGoldHybridProfile);
+   if(isGoldHybrid)
+   {
+      if(COG_ConflictsWithGOM())
+      {
+         Print("[OR-HYBRID] ⛔ Conflit COG=", g_cogDirection, " / GOM=", g_smcGomVerdict, " — attente alignement");
+         ReleaseOpenLock();
+         return;
+      }
+      if(!GOM_EntryCoherenceOK())
+      {
+         Print("[OR-HYBRID] ⛔ Cohérence GOM ", g_smcGomCoherence, "% < seuil — entrée bloquée");
+         ReleaseOpenLock();
+         return;
+      }
+   }
+
+   // VALIDATION MULTI-SIGNAUX POUR ENTRÉES PRÉCISES (exemptée pour l'or hybride avec GOM valide)
+   bool skipMultiSignal = isGoldHybrid && (MathAbs(g_smcGomVerdictNum) >= 2);
+   if(!skipMultiSignal && !ValidateEntryWithMultipleSignals(g_lastAIAction))
    {
       Print("❌ ENTRÉE BLOQUÉE - Validation multi-signaux échouée pour ", g_lastAIAction, " sur ", _Symbol);
       ReleaseOpenLock();
       return;
    }
-   
+
    // CALCULER L'ENTRÉE PRÉCISE AU LIEU DU PRIX ACTUEL
    double preciseEntry, preciseSL, preciseTP;
    if(!CalculatePreciseEntryPoint(g_lastAIAction, preciseEntry, preciseSL, preciseTP))
@@ -8748,19 +10859,21 @@ void ExecuteAIDecisionMarketOrder()
       ReleaseOpenLock();
       return;
    }
-   
+
    double lot = CalculateLotSize();
    if(lot <= 0)
    {
       ReleaseOpenLock();
       return;
    }
-   
+
    bool orderExecuted = false;
-   
+
    if(g_lastAIAction == "BUY" || g_lastAIAction == "buy")
    {
-      if(!HasRecentSMCDerivArrowForDirection("BUY"))
+      // Or hybride avec GoldDisableDerivArrow: pas de flèche SMC requise
+      bool needArrow = !(isGoldHybrid && GoldDisableDerivArrow);
+      if(needArrow && !HasRecentSMCDerivArrowForDirection("BUY"))
       {
          Print("🚫 ORDRE MARCHÉ BLOQUÉ - Attendre flèche SMC_DERIV_ARROW BUY sur ", _Symbol);
          ReleaseOpenLock();
@@ -8789,7 +10902,8 @@ void ExecuteAIDecisionMarketOrder()
    }
    else if(g_lastAIAction == "SELL" || g_lastAIAction == "sell")
    {
-      if(!HasRecentSMCDerivArrowForDirection("SELL"))
+      bool needArrowSell = !(isGoldHybrid && GoldDisableDerivArrow);
+      if(needArrowSell && !HasRecentSMCDerivArrowForDirection("SELL"))
       {
          Print("🚫 ORDRE MARCHÉ BLOQUÉ - Attendre flèche SMC_DERIV_ARROW SELL sur ", _Symbol);
          ReleaseOpenLock();
@@ -9053,7 +11167,10 @@ double ComputeSetupScore(const string direction)
       if(alignPct < 0.0) alignPct = 0.0;
       if(alignPct > 100.0) alignPct = 100.0;
    }
-   if(StringLen(g_lastAICoherence) > 0)
+   // Cohérence GOM directe (dashboard MT5) — plus fiable que g_lastAICoherence (string IA)
+   if(g_smcGomCoherence > 0)
+      cohPct = g_smcGomCoherence;
+   else if(StringLen(g_lastAICoherence) > 0)
    {
       string s2 = g_lastAICoherence;
       StringReplace(s2, "%", "");
@@ -9413,7 +11530,7 @@ bool CalculatePreciseEntryPoint(string direction, double &entryPrice, double &st
       double buyLevel1 = support + (atrValue * 0.5);
       double buyLevel2 = fib38_2 + (atrValue * 0.3);
       
-      entryPrice = MathMax(buyLevel1, buyLevel2);
+      entryPrice = MathMin(buyLevel1, buyLevel2);
       
       // SL: sous le support avec marge de sécurité
       stopLoss = support - (atrValue * 0.2);
@@ -9800,22 +11917,106 @@ void CheckImminentSpike()
    // Alerte si probabilité élevée (ajustée à 75% pour correspondre aux trades)
    if(finalSpikeProb > 0.75)
    {
-      string alertMsg = "🚨 SPIKE IMMINENT sur " + _Symbol + 
+      string alertMsg = "🚨 SPIKE IMMINENT sur " + _Symbol +
                       " | Probabilité: " + DoubleToString(finalSpikeProb*100, 1) + "%" +
                       " | Compression: " + DoubleToString(volCompression*100, 1) + "%" +
                       " | Volume: " + (volumeSpike ? "SPIKE" : "Normal");
-      
+
       Print(alertMsg);
-      
+
       if(UseNotifications)
       {
          Alert(alertMsg);
          SendNotification("🚨 SPIKE " + _Symbol + " " + DoubleToString(finalSpikeProb*100, 1) + "%");
       }
-      
-      // Dessiner un marqueur visuel rapide
+
+      // Démarrer le décompte spike si pas déjà actif
+      if(g_spikeCountdownSec <= 0)
+      {
+         // Durée estimée : plus la prob est haute, plus le spike est proche
+         // prob 0.75 → ~60s | prob 0.90 → ~20s | prob 1.0 → ~10s
+         int estimatedSec = (int)MathRound(60.0 * MathPow(1.0 - finalSpikeProb, 0.5));
+         if(estimatedSec < 5)  estimatedSec = 5;
+         if(estimatedSec > 90) estimatedSec = 90;
+         g_spikeCountdownTotal = estimatedSec;
+         g_spikeCountdownSec   = estimatedSec;
+         g_spikeCountdownStart = TimeCurrent();
+      }
+
       DrawSpikeWarning(finalSpikeProb);
    }
+   else
+   {
+      // Probabilité retombée : annuler le décompte
+      if(g_spikeCountdownSec > 0)
+      {
+         g_spikeCountdownSec = 0;
+         ObjectDelete(0, "SPIKE_COUNTDOWN");
+      }
+   }
+}
+
+// Met à jour le décompte spike en live (appelé toutes les secondes dans la boucle graphique)
+void UpdateSpikeCountdown()
+{
+   if(g_spikeCountdownSec <= 0)
+   {
+      ObjectDelete(0, "SPIKE_COUNTDOWN");
+      return;
+   }
+
+   datetime now = TimeCurrent();
+   int elapsed = (int)(now - g_spikeCountdownStart);
+   int remaining = g_spikeCountdownTotal - elapsed;
+
+   if(remaining <= 0)
+   {
+      // Décompte terminé — spike attendu maintenant
+      g_spikeCountdownSec = 0;
+      ObjectDelete(0, "SPIKE_COUNTDOWN");
+      return;
+   }
+
+   g_spikeCountdownSec = remaining;
+
+   // Bip sonore à chaque seconde (fréquence variable selon urgence)
+   if(now != g_spikeBeepLast)
+   {
+      g_spikeBeepLast = now;
+      // Accélère et monte en fréquence à mesure que le décompte se termine
+      if(remaining <= 5)
+         PlaySound("alert.wav");
+      else if(remaining <= 15)
+      { if(remaining % 2 == 0) PlaySound("alert.wav"); }
+      else
+      { if(remaining % 5 == 0) PlaySound("ok.wav"); }
+   }
+
+   // Couleur : orange (>15s) → rouge (≤15s) → rouge vif clignotant (≤5s)
+   color txtColor = (remaining <= 5)  ? clrRed :
+                   (remaining <= 15) ? clrOrangeRed : clrOrange;
+
+   // Clignotement rapide dans les 5 dernières secondes
+   bool visible = true;
+   if(remaining <= 5)
+      visible = (now % 2 == 0);  // clignote 0.5s on / 0.5s off
+
+   string label = "SPIKE_COUNTDOWN";
+   if(ObjectFind(0, label) < 0)
+      ObjectCreate(0, label, OBJ_LABEL, 0, 0, 0);
+
+   string txt = "⚡ SPIKE dans " + IntegerToString(remaining) + "s";
+   ObjectSetString(0,  label, OBJPROP_TEXT,      visible ? txt : "");
+   ObjectSetInteger(0, label, OBJPROP_XDISTANCE, 10);
+   ObjectSetInteger(0, label, OBJPROP_YDISTANCE, 60);
+   ObjectSetInteger(0, label, OBJPROP_CORNER,    CORNER_LEFT_UPPER);
+   ObjectSetInteger(0, label, OBJPROP_COLOR,     txtColor);
+   ObjectSetInteger(0, label, OBJPROP_FONTSIZE,  26);
+   ObjectSetString(0,  label, OBJPROP_FONT,      "Arial Black");
+   ObjectSetInteger(0, label, OBJPROP_SELECTABLE,false);
+   ObjectSetInteger(0, label, OBJPROP_BACK,      false);
+
+   ChartRedraw(0);
 }
 
 //| DÉTECTION DES MOUVEMENTS DE RETOUR VERS CANAUX SMC               |
@@ -10128,53 +12329,11 @@ void DrawSpikeWarning(double probability)
 // Affiche l'état IA et les prédictions sur le graphique
 void DrawAIStatusAndPredictions()
 {
+   // Panneau flottant supprimé — l'IA status est affiché dans le dashboard GOM
    string statusBoxName = "AI_STATUS_BOX_" + _Symbol;
    string statusTextName = "AI_STATUS_TEXT_" + _Symbol;
-   
-   // Supprimer les objets précédents
-   if(ObjectFind(0, statusBoxName) >= 0)
-      ObjectDelete(0, statusBoxName);
-   if(ObjectFind(0, statusTextName) >= 0)
-      ObjectDelete(0, statusTextName);
-   
-   // Créer une boîte de statut
-   MqlRates r[];
-   ArraySetAsSeries(r, true);
-   if(CopyRates(_Symbol, PERIOD_CURRENT, 0, 1, r) < 1) return;
-   
-   // Position de la boîte (coin supérieur gauche)
-   datetime boxTime = r[0].time;
-   double boxPrice = r[0].high + (r[0].high - r[0].low) * 0.8;
-   
-   // Créer le rectangle de fond
-   ObjectCreate(0, statusBoxName, OBJ_RECTANGLE_LABEL, 0, 0, 0);
-   ObjectSetInteger(0, statusBoxName, OBJPROP_XDISTANCE, 10);
-   ObjectSetInteger(0, statusBoxName, OBJPROP_YDISTANCE, 200); // Positionné en bas
-   ObjectSetInteger(0, statusBoxName, OBJPROP_XSIZE, 250);
-   ObjectSetInteger(0, statusBoxName, OBJPROP_YSIZE, 80);
-   ObjectSetInteger(0, statusBoxName, OBJPROP_BGCOLOR, clrBlack);
-   ObjectSetInteger(0, statusBoxName, OBJPROP_BORDER_COLOR, clrGray);
-   ObjectSetInteger(0, statusBoxName, OBJPROP_CORNER, CORNER_LEFT_LOWER); // Bas à gauche
-   
-   // Texte de statut IA
-   string iaStatus = UseAIServer ? 
-                    ("IA: " + g_lastAIAction + " (" + DoubleToString(g_lastAIConfidence*100, 1) + "%)") : 
-                    "IA: DÉSACTIVÉ";
-   
-   // Texte de prédiction spike
-   double spikeProb = CalculateSpikeProbability();
-   string spikeStatus = "SPIKE: " + DoubleToString(spikeProb*100, 1) + "%";
-   
-   // Créer le texte de statut
-   ObjectCreate(0, statusTextName, OBJ_LABEL, 0, 0, 0);
-   ObjectSetString(0, statusTextName, OBJPROP_TEXT, 
-                 iaStatus + "\n" + spikeStatus + "\nSymbole: " + _Symbol);
-   ObjectSetInteger(0, statusTextName, OBJPROP_XDISTANCE, 20);
-   ObjectSetInteger(0, statusTextName, OBJPROP_YDISTANCE, 210); // Aligné avec la boîte
-   ObjectSetInteger(0, statusTextName, OBJPROP_COLOR, clrWhite);
-   ObjectSetInteger(0, statusTextName, OBJPROP_FONTSIZE, 10);
-   ObjectSetString(0, statusTextName, OBJPROP_FONT, "Arial");
-   ObjectSetInteger(0, statusTextName, OBJPROP_CORNER, CORNER_LEFT_LOWER); // Bas à gauche
+   if(ObjectFind(0, statusBoxName) >= 0)  ObjectDelete(0, statusBoxName);
+   if(ObjectFind(0, statusTextName) >= 0) ObjectDelete(0, statusTextName);
 }
 
 //| DÉTECTER UN SPIKE RÉCENT sur Boom/Crash                           |

@@ -1,0 +1,263 @@
+; SMC_Universal — BACKTEST XAUUSD Juin 2026
+; Config adaptée Strategy Tester (pas d'AI server, pas de GOM live)
+; Symbol: XAUUSD | TF: M1 | Dépôt: $100
+; Mode: Every tick ou Open prices only
+; Généré: 2026-06-16
+; ─────────────────────────────────────────────────────────────────
+
+; === GÉNÉRAL ===
+UseMinLotOnly=true
+MaxPositionsTerminal=3
+OnePositionPerSymbol=true
+InpMagicNumber=202502
+MaxTotalLossDollars=10.0
+MaxLossPerSpikeTradeDollars=3.0
+MaxRiskPerTradePercent=1.5
+MaxDailyDrawdownPercent=10.0
+MinSetupScoreEntry=65.0
+MinAIConfidencePercent=55.0
+UseSessions=false
+ShowChartGraphics=false
+ShowPremiumDiscount=false
+ShowSignalArrow=false
+RequireSMCDerivArrowForMarketOrders=false
+SMCDerivArrowMaxAgeBars=3
+ShowPredictedSwing=false
+ShowEMASupportResistance=false
+UltraLightMode=false
+BlockAllTrades=false
+SpikePredictionOffsetMinutes=60
+
+; === SL/TP DYNAMIQUES ===
+SL_ATRMult=2.5
+TP_ATRMult=5.0
+
+; === TRAILING STOP ===
+UseTrailingStop=true
+TrailingStop_ATRMult=3.0
+
+; === GRAPHIQUES SMC ===
+ShowPredictionChannel=false
+ShowBookmarkLevels=false
+
+; === TABLEAU DE BORD ===
+UseDashboard=false
+ShowMLMetrics=false
+UseSpikeAutoClose=true
+UseDollarExits=true
+UseIAHoldClose=false
+UseDirectionConflictClose=false
+
+; === AI SERVER — DÉSACTIVÉ EN BACKTEST ===
+UseAIServer=false
+AI_ServerURL=http://127.0.0.1:8000
+AI_ServerRender=https://kolatradebot.onrender.com
+AI_Timeout_ms=5000
+AI_UpdateInterval_Seconds=30
+UseRenderAsPrimary=false
+AI_ServerURL2=http://127.0.0.1:8000
+MinAIConfidence=0.55
+AI_Timeout_ms2=10000
+AI_ModelName=SMC_Model
+AI_ModelVersion=1.0
+AI_UseGPU=false
+RequireAIConfirmation=false
+
+; === SMC STRUCTURE ===
+UseFVG=true
+UseOrderBlocks=true
+UseLiquiditySweep=true
+RequireStructureAfterSweep=true
+NoEntryDuringSweep=true
+StopBeyondNewStructure=true
+UseBOS=true
+UseOTE=true
+UseEqualHL=true
+
+; === GOM PIPELINE — DÉSACTIVÉ EN BACKTEST ===
+UseGOMVerdictFilter=false
+UseGOMPipeline=false
+PipelineOnlyMode=false
+GOMVerdictSource=1
+ShowGOMDashboard=false
+ShowTVSyncedLevels=false
+UseGOMWaitAutoClose=false
+GOMWaitCloseMinLossUSD=1.0
+GOMHoldMaxLossUSD=3.0
+GOMRequireOBTouch=false
+GOMRequireOTE=false
+GOMPollIntervalSec=2
+GOMMinCoherencePct=70.0
+GOMGlobalMinConfidence=4
+UseTVBollingerFilter=false
+GOMUploadCandles=false
+GOMUploadIntervalMin=1
+UseEAIndependentEntry=true
+GOMOBTouchForPipeline=false
+GOMPerfectAutoEntry=true
+GOMTrailingMinProfitUSD=1.0
+ShowTVBollingerLines=false
+ShowTVOrderBlocks=false
+UseLocalOrderBlockDrawings=false
+ShowOrderFlowCompass=false
+GOMSyncSymbolToTV=false
+GOM_Timeout_ms=15000
+MCPPollIntervalSec=3
+GOMDashboardY=50
+CleanupLegacyDrawings=false
+
+; === PROFIL OR XAUUSD ===
+UseGoldHybridProfile=true
+GoldSL_ATRMult=2.2
+GoldTP_ATRMult=1.5
+GoldTP2_ATRMult=3.0
+GoldUsePartialTP=true
+GoldMaxDailyLossPct=5.0
+GoldMaxRiskPct=0.5
+GoldTrailingMinUSD=1.0
+GoldDisableDerivArrow=true
+GoldGOMOnlyOnMetal=false
+GoldMaxTotalLossUSD=6.0
+GoldMaxPositions=2
+GoldMinAIConfidencePct=0.0
+GoldGOMMinCoherencePct=90.0
+GoldUseRegimeFilter=true
+
+; === GOLD SCALP COG — ACTIF EN BACKTEST (EMA local) ===
+GoldScalpEnabled=true
+GoldScalpMaxPositions=2
+GoldScalpSL_ATRMult=1.0
+GoldScalpTP_ATRMult=1.5
+GoldScalpRiskPct=0.3
+GoldScalpUseEMA9=true
+GoldScalpUseOBBull=true
+GoldScalpOBTolATR=0.3
+GoldScalpCooldownSec=120
+
+; === FOREX/SESSION ===
+ForexSessionStart=7
+ForexSessionEnd=17
+
+; === PROFIL CRYPTO — DÉSACTIVÉ ===
+UseCryptoProfile=false
+CryptoSL_ATRMult=2.0
+CryptoTP_ATRMult=4.0
+CryptoMaxDailyLossPct=5.0
+CryptoMaxRiskPct=0.5
+CryptoGOMMinCoherencePct=80.0
+CryptoUseSessionFilter=true
+CryptoSessionStart=8
+CryptoSessionEnd=22
+
+; === DISCIPLINE ROBOT ===
+UseSignalFirstDiscipline=false
+MaxLimitOrdersTerminal=2
+MaxPositionHoldSec=300
+PreciseLimitMaxDistATR=1.5
+PreferLimitOverMarket=true
+MinLossBeforeAutoCloseUSD=3.0
+KeepPendingUntilTrigger=true
+
+; === DISCIPLINE JOURNALIÈRE ===
+UseDailyDiscipline=true
+MaxDailyTrades=20
+DailyProfitTargetPct=10.0
+StopOnDailyTarget=true
+StopOnMaxDailyTrades=true
+
+; === PAUSE PERFORMANCE ===
+UseWinStreakPause=true
+WinStreakThreshold=5
+WinStreakPauseHours=2
+UseProfitGivebackGuard=true
+ProfitGivebackPct=40.0
+ProfitGivebackMinPeakUSD=5.0
+
+; === PROBABILITÉ ÉLEVÉE ===
+UseHighProbabilityFilter=false
+MinEntryProbabilityPct=72.0
+MinGOMVerdictNumAbs=2
+HighProbBcMinConfidence=70.0
+
+; === BOOM/CRASH HEURES — DÉSACTIVÉ SUR OR ===
+UseBCHourFilter=false
+BCHourMinConfidence=70.0
+
+; === COGNITION FORECAST — DÉSACTIVÉ EN BACKTEST (pas de serveur) ===
+ShowCognitionPath=false
+CognitionHorizonBars=200
+CognitionMinConfidence=0.55
+CognitionMinStrength=0.50
+UseCognitionFilter=false
+UseTripleAlignmentGate=false
+
+; === TIMEFRAMES ===
+HTF=16388
+LTF=15
+
+; === FVG KILL PRO ===
+UseFVGKillMode=true
+EMA50_Period=50
+EMA200_Period=200
+ATR_Mult=1.8
+UseTrailingStructure=true
+BoomCrashMode=false
+
+; === SESSIONS — TRADER 24/7 EN BACKTEST ===
+TradeOutsideKillZone=true
+LondonStart=8
+LondonEnd=11
+NYOStart=13
+NYOEnd=16
+
+; === NOTIFICATIONS — DÉSACTIVÉES EN BACKTEST ===
+UseNotifications=false
+GOMVerdictPushNotify=false
+SpikeImminentPushNotify=false
+UseLossCooldown=false
+
+; === BOUGIES FUTURES ===
+PredictionChannelPastBars=1000
+PredictionChannelBars=1000
+
+; === CANAUX SMC MULTI-TF — DÉSACTIVÉS EN BT ===
+ShowSMCChannelsMultiTF=false
+ShowEMASupertrendMultiTF=false
+SMCChannelFutureBars=5000
+EMAFastPeriod=9
+EMASlowPeriod=21
+ATRMultiplier=2.0
+
+; === ORDRES LIMITES ===
+UseClosestLevelForLimits=true
+MaxDistanceLimitATR=1.0
+ShowLimitOrderLevels=false
+
+; === BOOM/CRASH — CONFIG STANDARD (pas utilisé sur Or) ===
+BoomBuyOnly=true
+CrashSellOnly=true
+NoSLTP_BoomCrash=false
+BoomCrashSpikeTP=0.5
+BoomCrashSpikePct=0.5
+TargetProfitBoomCrashUSD=2.0
+MaxLossDollars=3.0
+TakeProfitDollars=2.0
+UseSpikeMLFilter=false
+SpikeML_MinProbability=0.75
+SpikeUsePreSpikeOnlyForBoomCrash=true
+SpikeRequirePreSpikePattern=true
+PreSpike_CompressionRatio=0.65
+PreSpike_ConsolidationPct=0.002
+PreSpike_KeyLevelPct=0.002
+PostSpikeMinSmallCandles=2
+PostSpikeSmallBodyRatio=0.55
+PostSpikeBlockBarsSinceSpike=2
+
+; === INDICATEURS CLASSIQUES ===
+UseClassicIndicatorsFilter=true
+ClassicMinConfirmations=2
+UseBollingerFilter=true
+UseVWAPFilter=true
+UsePivotFilter=true
+UseIchimokuFilter=true
+UseOBVFilter=true

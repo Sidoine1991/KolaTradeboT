@@ -1,0 +1,206 @@
+; SMC_Universal — Profil BACKTEST XAUUSD Gold Hybrid
+; Paramètres optimisés pour Strategy Tester MT5
+; Symbol: XAUUSD | Timeframe: M1 | Période: 2024.01.01 - 2026.01.01
+; Dépôt: $100 | Qualité: Ticks réels 100%
+; Généré: 2026-06-13
+; -------------------------------------------------------
+; DIFF vs config live:
+;   PipelineOnlyMode         false  (live=true)  -> EA entre seul
+;   RequireAIConfirmation    false  (live=true)  -> pas d'AI server en BT
+;   UseGOMVerdictFilter      false  (live=true)  -> pas de verdicts live en BT
+;   RequireSMCDerivArrow     false  (live=true)  -> flèches indispo en BT
+;   GoldSL_ATRMult           2.2    (live=1.5)   -> optimisé backtest Python
+;   GoldTP_ATRMult           1.5    (live=3.0)   -> RR ratio optimal
+;   GoldGOMMinCoherencePct   90.0   (live=65.0)  -> PERFECT only
+;   GoldMaxRiskPct           0.5    (live=1.0)   -> réduire DD
+; -------------------------------------------------------
+
+; === GÉNÉRAL ===
+UseMinLotOnly=true
+MaxPositionsTerminal=2
+OnePositionPerSymbol=true
+InpMagicNumber=202502
+MaxTotalLossDollars=10.0
+MaxLossPerSpikeTradeDollars=3.0
+MaxRiskPerTradePercent=1.5
+MaxDailyDrawdownPercent=10.0
+MinSetupScoreEntry=65.0
+MinAIConfidencePercent=65.0
+UseSessions=false
+ShowChartGraphics=false
+ShowPremiumDiscount=false
+ShowSignalArrow=false
+RequireSMCDerivArrowForMarketOrders=false
+SMCDerivArrowMaxAgeBars=3
+ShowPredictedSwing=false
+ShowEMASupportResistance=false
+UltraLightMode=false
+BlockAllTrades=false
+SpikePredictionOffsetMinutes=60
+
+; === SL/TP DYNAMIQUES ===
+SL_ATRMult=2.5
+TP_ATRMult=5.0
+
+; === TRAILING STOP ===
+UseTrailingStop=true
+TrailingStop_ATRMult=3.0
+
+; === GRAPHIQUES SMC ===
+ShowPredictionChannel=false
+ShowBookmarkLevels=false
+
+; === TABLEAU DE BORD ===
+UseDashboard=false
+ShowMLMetrics=false
+UseSpikeAutoClose=true
+UseDollarExits=true
+UseIAHoldClose=false
+UseDirectionConflictClose=true
+
+; === AI SERVER — DÉSACTIVÉ EN BACKTEST ===
+UseAIServer=false
+AI_ServerURL=http://localhost:8000
+AI_ServerRender=https://kolatradebot.onrender.com
+AI_Timeout_ms=5000
+AI_UpdateInterval_Seconds=30
+UseRenderAsPrimary=false
+AI_ServerURL2=http://localhost:8000
+MinAIConfidence=0.55
+AI_Timeout_ms2=10000
+AI_ModelName=SMC_Model
+AI_ModelVersion=1.0
+AI_UseGPU=false
+RequireAIConfirmation=false
+
+; === SMC STRUCTURE ===
+UseFVG=true
+UseOrderBlocks=true
+UseLiquiditySweep=true
+RequireStructureAfterSweep=true
+NoEntryDuringSweep=true
+StopBeyondNewStructure=true
+UseBOS=true
+UseOTE=true
+UseEqualHL=true
+
+; === GOM PIPELINE — DÉSACTIVÉ EN BACKTEST ===
+UseGOMVerdictFilter=false
+UseGOMPipeline=false
+PipelineOnlyMode=false
+GOMVerdictSource=0
+ShowGOMDashboard=false
+ShowTVSyncedLevels=false
+UseGOMWaitAutoClose=false
+GOMRequireOBTouch=false
+GOMRequireOTE=false
+GOMPollIntervalSec=2
+GOMMinCoherencePct=70.0
+GOMGlobalMinConfidence=4
+UseTVBollingerFilter=false
+GOMUploadCandles=false
+GOMUploadIntervalMin=1
+UseEAIndependentEntry=true
+GOMOBTouchForPipeline=false
+GOMPerfectAutoEntry=true
+GOMTrailingMinProfitUSD=1.0
+ShowTVBollingerLines=false
+ShowTVOrderBlocks=false
+UseLocalOrderBlockDrawings=false
+ShowOrderFlowCompass=false
+GOMSyncSymbolToTV=false
+GOM_Timeout_ms=15000
+MCPPollIntervalSec=3
+GOMDashboardY=50
+CleanupLegacyDrawings=false
+
+; === PROFIL OR XAUUSD — OPTIMISÉ BACKTEST ===
+UseGoldHybridProfile=true
+GoldSL_ATRMult=2.2
+GoldTP_ATRMult=1.5
+GoldMaxDailyLossPct=5.0
+GoldMaxRiskPct=0.5
+GoldTrailingMinUSD=1.0
+GoldDisableDerivArrow=true
+GoldGOMOnlyOnMetal=false
+GoldMaxTotalLossUSD=6.0
+GoldMaxPositions=1
+GoldMinAIConfidencePct=0.0
+GoldGOMMinCoherencePct=90.0
+
+; === DISCIPLINE ORDRES LIMITES ===
+UseSignalFirstDiscipline=false
+MaxLimitOrdersTerminal=2
+MaxPositionHoldSec=300
+PreciseLimitMaxDistATR=1.5
+PreferLimitOverMarket=true
+MinLossBeforeAutoCloseUSD=3.0
+KeepPendingUntilTrigger=true
+
+; === TIMEFRAMES ===
+HTF=16388
+LTF=15
+
+; === FVG KILL PRO ===
+UseFVGKillMode=true
+EMA50_Period=50
+EMA200_Period=200
+ATR_Mult=1.8
+UseTrailingStructure=true
+BoomCrashMode=true
+
+; === SESSIONS — DÉSACTIVÉ (trader 24/7 en BT) ===
+TradeOutsideKillZone=true
+LondonStart=8
+LondonEnd=11
+NYOStart=13
+NYOEnd=16
+
+; === NOTIFICATIONS — DÉSACTIVÉES EN BACKTEST ===
+UseNotifications=false
+GOMVerdictPushNotify=false
+SpikeImminentPushNotify=false
+UseLossCooldown=false
+
+; === BOUGIES FUTURES ===
+PredictionChannelPastBars=1000
+PredictionChannelBars=1000
+
+; === CANAUX SMC MULTI-TF ===
+ShowSMCChannelsMultiTF=false
+ShowEMASupertrendMultiTF=false
+SMCChannelFutureBars=5000
+EMAFastPeriod=9
+EMASlowPeriod=21
+ATRMultiplier=2.0
+
+; === ORDRES LIMITES ===
+UseClosestLevelForLimits=true
+MaxDistanceLimitATR=1.0
+ShowLimitOrderLevels=false
+
+; === BOOM/CRASH ===
+BoomBuyOnly=true
+CrashSellOnly=true
+NoSLTP_BoomCrash=false
+BoomCrashSpikeTP=0.5
+BoomCrashSpikePct=0.5
+TargetProfitBoomCrashUSD=2.0
+MaxLossDollars=3.0
+TakeProfitDollars=2.0
+UseSpikeMLFilter=false
+SpikeML_MinProbability=0.75
+SpikeUsePreSpikeOnlyForBoomCrash=true
+SpikeRequirePreSpikePattern=true
+PreSpike_CompressionRatio=0.65
+PreSpike_ConsolidationPct=0.002
+PreSpike_KeyLevelPct=0.002
+
+; === INDICATEURS CLASSIQUES ===
+UseClassicIndicatorsFilter=true
+ClassicMinConfirmations=2
+UseBollingerFilter=true
+UseVWAPFilter=true
+UsePivotFilter=true
+UseIchimokuFilter=true
+UseOBVFilter=true

@@ -1,0 +1,62 @@
+GOM SYNC + WHATSAPP REPORT — 10 MINUTE LOOP
+============================================================
+
+✅ STATUS: READY FOR DEPLOYMENT
+
+Configuration:
+  • Interval: Every 10 minutes
+  • Source: /gom-kola-dashboard (MT5 live) → /gom-verdicts (fallback)
+  • Destination: WhatsApp via AI server (/notify-whatsapp)
+  • Logs: D:\Dev\TradBOT\logs\gom_sync.log
+
+Actions per cycle:
+  1. Load GOM verdicts from MT5 dashboard (live time-series)
+  2. Apply gates:
+     - RSI extremes (>78 BUY, <22 SELL)
+     - M15 trend coherence
+     - Session trading windows (XAUUSD 7-17 UTC, etc)
+     - Boom=BUY only, Crash=SELL only
+     - Coherence >= 85% to place orders
+  3. Process verdict changes:
+     - WAIT → immediate close position (if open)
+     - GOOD → PERFECT upgrade → immediate market order
+  4. Place market orders (if eligible)
+  5. Build formatted report with TF directions + ML scores
+  6. Send via WhatsApp
+
+Deployment options:
+
+  OPTION A: Windows Task Scheduler (Recommended)
+  ┌─────────────────────────────────────────────────────┐
+  │ 1. Run PowerShell as Admin                          │
+  │ 2. Execute: schedule_gom_sync_10min.ps1              │
+  │ 3. Verify: Get-ScheduledTask -TaskName 'TradBOT-*' │
+  └─────────────────────────────────────────────────────┘
+
+  OPTION B: Batch loop (direct)
+  ┌─────────────────────────────────────────────────────┐
+  │ 1. Double-click: start_gom_sync_10min_loop.bat      │
+  │ 2. Window stays open, logs to console               │
+  └─────────────────────────────────────────────────────┘
+
+  OPTION C: Python daemon (best for server)
+  ┌─────────────────────────────────────────────────────┐
+  │ 1. Terminal: python Python/gom_sync_with_report.py  │
+  │ 2. (no --report arg = infinite loop)                 │
+  └─────────────────────────────────────────────────────┘
+
+Last tested: 2026-06-16 15:52:43 UTC
+Test result: ✅ 3 verdicts loaded, report sent to WhatsApp
+
+Gate performance (test cycle):
+  • M15 filter: 2 verdicts rejected (M15=BEAR vs BUY/SELL)
+  • Coherence filter: 3 verdicts below 85% threshold
+  • Net result: 3 active signals (67% coherence)
+
+Next steps:
+  1. Choose deployment option above
+  2. Monitor logs/gom_sync.log for errors
+  3. Confirm WhatsApp delivery
+  4. Enable trading via /pending-order POST
+
+============================================================
