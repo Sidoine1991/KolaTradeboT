@@ -30,7 +30,7 @@ void SMC_JournalConfigure(bool enabled, ulong magic, string ea_name, int backfil
    MqlDateTime dt;
    TimeToStruct(TimeCurrent(), dt);
    g_journal_filename = StringFormat("%s_Trade_Journal_%04d_%02d_%02d.csv",
-      ea_name, dt.year, dt.mon, dt.mday);
+      ea_name, dt.year, dt.mon, dt.day);
 }
 
 //+------------------------------------------------------------------+
@@ -78,12 +78,11 @@ void SMC_JournalLogDealClose(ulong deal, double ai_confidence, string ai_action)
       return;
 
    // Only log closing deals (DEAL_TYPE_SELL after DEAL_TYPE_BUY or vice versa)
-   if(d.Deal() != deal)
+   if(d.Ticket() != deal)
       return;
 
    ENUM_DEAL_TYPE deal_type = (ENUM_DEAL_TYPE)d.Type();
-   if(deal_type != DEAL_TYPE_BUY && deal_type != DEAL_TYPE_SELL &&
-      deal_type != DEAL_TYPE_CLOSE_BY)
+   if(deal_type != DEAL_TYPE_BUY && deal_type != DEAL_TYPE_SELL)
       return;
 
    // Get entry deal (look back in history)
@@ -114,7 +113,8 @@ void SMC_JournalLogDealClose(ulong deal, double ai_confidence, string ai_action)
 
    // Calculate profit
    double close_price = d.Price();
-   double profit = (close_price - entry_price) * entry_volume * d.ContractSize();
+   double contract_size = SymbolInfoDouble(d.Symbol(), SYMBOL_TRADE_CONTRACT_SIZE);
+   double profit = (close_price - entry_price) * entry_volume * contract_size;
    double profit_pct = (entry_price > 0) ? ((close_price - entry_price) / entry_price * 100) : 0;
 
    // Log to file
@@ -127,7 +127,7 @@ void SMC_JournalLogDealClose(ulong deal, double ai_confidence, string ai_action)
          "%s,%s,%llu,%s,%.5f,%.5f,%.2f,%.2f,%.2f,%.5f,%.5f,%llu,%s,%.2f,%s,%s,CLOSED",
          TimeToString(d.Time(), TIME_DATE | TIME_MINUTES),
          d.Symbol(),
-         d.Deal(),
+         d.Ticket(),
          TimeToString(entry_time, TIME_DATE | TIME_MINUTES),
          entry_price,
          close_price,
