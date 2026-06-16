@@ -12,6 +12,11 @@
 #include <Trade/DealInfo.mqh>
 #include <Trade/HistoryOrderInfo.mqh>
 
+// Journal — déclarations anticipées
+void   SMC_JournalConfigure(bool enabled, ulong magic, string ea_name, int backfill_days = 0);
+void   SMC_JournalInit();
+void   SMC_JournalLogDealClose(ulong deal, double ai_confidence, string ai_action);
+
 // Profil Or/Forex/Crypto — déclarations anticipées (implémentations après inputs)
 bool   SMC_IsGoldProfileActive();
 bool   SMC_IsForexProfileActive();
@@ -32,6 +37,8 @@ double SMC_GoldTransitionLotFactor();
 void   SMC_ManageGoldPartialTP();
 void   SMC_ManageGoldScalp();
 
+// Include modules (journal first, then others)
+#include "modules/SMC_TradeJournal.mqh"
 #include "modules/GOM_Graphics.mqh"
 #include "modules/SMC_GOM_Pipeline.mqh"
 #include "modules/LossCooldownManager.mqh"
@@ -731,8 +738,6 @@ ENUM_SYMBOL_CATEGORY SMC_GetSymbolCategory(string symbol)
       StringFind(s, "NZD") >= 0 || StringFind(s, "CAD") >= 0) return SYM_FOREX;
    return SYM_UNKNOWN;
 }
-
-#include "modules/SMC_TradeJournal.mqh"
 
 // Règle directionnelle spécifique Boom/Crash:
 // - Sur Boom: uniquement BUY (jamais SELL)
