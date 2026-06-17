@@ -1130,12 +1130,14 @@ def _enrich_bc_volatility(out: dict, symbol: str) -> None:
 
 
 def _enrich_correction_cycle(out: dict, symbol: str) -> None:
-    """Ajoute correction_exhaustion_pct au payload GOM — gate timing d'entrée.
-    Désactivé sur Boom/Crash (pas de corrections classiques, seulement des spikes)."""
+    """Correction cycle orienté SCALP : confiance dominée M1/M5, contexte multi-TF."""
     if is_boom_crash_symbol(str(symbol)):
         out["correction_exhaustion_pct"] = 100.0
         out["correction_phase"] = "trending"
+        out["correction_type"] = "trend_run"
+        out["correction_strength"] = "strong"
         out["correction_entry_safe"] = True
+        out["correction_execution_ready"] = True
         return
     try:
         from correction_cycle_detector import compute_correction_exhaustion
@@ -1143,15 +1145,22 @@ def _enrich_correction_cycle(out: dict, symbol: str) -> None:
         sym = _resolve_symbol(str(symbol))
         sym_cache = _mt5_candles_cache.get(sym) or {}
 
+        df_m1 = sym_cache.get("M1")
         df_m5 = sym_cache.get("M5")
         df_m15 = sym_cache.get("M15")
-        if df_m5 is None or len(df_m5) < 30:
+        if df_m1 is None or len(df_m1) < 25:
+            df_m1 = None
+        if df_m5 is None or len(df_m5) < 25:
             df_m5 = None
-        if df_m15 is None or len(df_m15) < 30:
+        if df_m15 is None or len(df_m15) < 25:
             df_m15 = None
 
-        rsi_h4 = float(out.get("tf_h4_rsi", 50))
+        rsi_m1 = float(out.get("tf_m1_rsi", 50))
+        rsi_m5 = float(out.get("tf_m5_rsi", 50))
+        rsi_m15 = float(out.get("tf_m15_rsi", 50))
+        rsi_m30 = float(out.get("tf_m30_rsi", 50))
         rsi_h1 = float(out.get("tf_h1_rsi", 50))
+        rsi_h4 = float(out.get("tf_h4_rsi", 50))
         rsi_d1 = float(out.get("tf_d1_rsi", 50))
 
         direction_hint = _dir_str_to_int(out.get("ia_status_action", ""))
@@ -1159,22 +1168,52 @@ def _enrich_correction_cycle(out: dict, symbol: str) -> None:
         result = compute_correction_exhaustion(
             df_m5=df_m5,
             df_m15=df_m15,
+            df_m1=df_m1,
             rsi_h4=rsi_h4,
             rsi_h1=rsi_h1,
             rsi_d1=rsi_d1,
+            rsi_m1=rsi_m1,
+            rsi_m5=rsi_m5,
+            rsi_m15=rsi_m15,
+            rsi_m30=rsi_m30,
             direction_hint=direction_hint,
         )
 
-        out["correction_exhaustion_pct"] = result["correction_exhaustion_pct"]
-        out["correction_phase"] = result["phase"]
-        out["correction_entry_safe"] = result["entry_safe"]
-        out["correction_rsi_m5_slope"] = result["rsi_m5_slope"]
-        out["correction_divergence"] = result["divergence_score"]
-        out["correction_volume"] = result["volume_score"]
+        pct = float(result["correction_exhaustion_pct"])
+        vn = int(out.get("verdict_num", 0) or 0)
+        gom_boost = 10.0 if abs(vn) >= 2 else (5.0 if abs(vn) >= 1 else 0.0)
+        if gom_boost > 0:
+            pct = min(100.0, pct + gom_boost)
+
+        block_thresh = float(result.get("correction_block_threshold", 45.0))
+        if abs(vn) >= 2:
+            block_thresh = max(22.0, block_thresh - 10.0)
+
+        phase = result.get("correction_phase") or result.get("phase", "unknown")
+        out["correction_exhaustion_pct"] = round(pct, 1)
+        out["correction_phase"] = phase
+        out["correction_type"] = result.get("correction_type", "unknown")
+        out["correction_strength"] = result.get("correction_strength", "moderate")
+        out["correction_entry_safe"] = (
+            bool(result.get("entry_safe"))
+            or bool(result.get("execution_ready"))
+            or pct >= block_thresh
+        )
+        out["correction_execution_ready"] = bool(result.get("execution_ready"))
+        out["correction_block_threshold"] = round(block_thresh, 1)
+        out["correction_tf_alignment_pct"] = result.get("tf_alignment_pct", 0)
+        out["correction_pullback_depth_pct"] = result.get("pullback_depth_pct", 0)
+        out["correction_rsi_m1_slope"] = result.get("rsi_m1_slope", 0)
+        out["correction_rsi_m5_slope"] = result.get("rsi_m5_slope", 0)
+        out["correction_divergence"] = result.get("divergence_score", 0)
+        out["correction_volume"] = result.get("volume_score", 0)
+        out["correction_gom_boost"] = gom_boost
+        out["correction_tf_summary"] = result.get("tf_summary", "")
     except Exception as exc:
         logger.debug(f"[CORRECTION-CYCLE] {exc}")
         out["correction_exhaustion_pct"] = 50.0
         out["correction_phase"] = "unknown"
+        out["correction_type"] = "unknown"
         out["correction_entry_safe"] = True
 
 
@@ -25956,6 +25995,73 @@ async def bridge_mcp_study_values(body: dict = Body(default={})):
         "source": "gom_verdict_store",
         "timestamp": record.get("timestamp"),
     }
+
+
+#═══════════════════════════════════════════════════════════════════════════════
+#| PULLBACK ENTRY SYSTEM — WhatsApp Alerts from MT5
+#═══════════════════════════════════════════════════════════════════════════════
+
+@app.post("/pullback-alert")
+async def receive_pullback_alert(body: dict = Body(...)):
+    """
+    Receive Pullback Entry events from SMC_Universal.mq5
+    Send beautiful WhatsApp alerts via PsychoBot
+
+    Event structure:
+    {
+        "phase": "pullback_start|pullback_detected|resumption_confirmed|trade_opened",
+        "symbol": "Boom 150 Index",
+        "direction": "BUY|SELL",
+        "breakout_price": 1456.23,
+        ... (see pullback_alert_service.py for full schema)
+    }
+
+    Uses existing send_whatsapp_report() pattern from gom_sync_with_report.py
+    """
+    try:
+        # Import service (lazy load to avoid circular imports)
+        from pullback_alert_service import handle_pullback_event
+
+        # Import WhatsApp sender from gom_sync pattern
+        # For now, use a local wrapper that uses requests directly to PsychoBot
+        import requests
+
+        def send_via_psychobot(message: str) -> bool:
+            """Send message via PsychoBot Render endpoint"""
+            try:
+                psychobot_url = "https://psychobot-1si7.onrender.com/send-message"
+                phone = os.getenv("WHATSAPP_PHONE_NUMBER", "+2290196911346")
+
+                payload = {
+                    "phone": phone,
+                    "message": message,
+                    "source": "tradbot-pullback"
+                }
+
+                response = requests.post(psychobot_url, json=payload, timeout=10, verify=False)
+                return response.status_code == 200
+
+            except Exception as e:
+                logger.warning(f"PsychoBot send failed: {e}")
+                return False
+
+        # Process event and send alert
+        result = handle_pullback_event(body, send_via_psychobot)
+
+        # Log result
+        if result.get("success"):
+            logger.info(f"[PULLBACK] {result.get('phase')} — {result.get('symbol')} sent successfully")
+        else:
+            logger.warning(f"[PULLBACK] Failed: {result.get('error')}")
+
+        return result
+
+    except Exception as e:
+        logger.error(f"[PULLBACK-ALERT] Exception: {e}", exc_info=True)
+        return {
+            "success": False,
+            "error": str(e)
+        }
 
 
 @app.get("/tv-indicators")
