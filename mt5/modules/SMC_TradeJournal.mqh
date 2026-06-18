@@ -293,6 +293,8 @@ bool SMC_JournalLogPositionClose(const ulong positionId,
    double volume, openPrice, closePrice, profit, swap, commission;
    datetime openTime, closeTime;
    ulong closeDealTicket = 0;
+   double localAiConfidence = aiConfidence;
+   string localAiAction = aiAction;
 
    if(!SMC_JournalExtractPosition(positionId, g_journalMagic,
                                   symbol, direction, volume, openTime, closeTime,
@@ -318,7 +320,7 @@ bool SMC_JournalLogPositionClose(const ulong positionId,
                        symbol, category, direction, volume,
                        openTime, openPrice, closePrice,
                        profit, swap, commission, netProfit,
-                       durationSec, result, aiConfidence, aiAction,
+                       durationSec, result, localAiConfidence, localAiAction,
                        AccountInfoDouble(ACCOUNT_BALANCE),
                        AccountInfoDouble(ACCOUNT_EQUITY),
                        dailyPnL, comment);
@@ -328,7 +330,7 @@ bool SMC_JournalLogPositionClose(const ulong positionId,
                        symbol, category, direction, volume,
                        openTime, openPrice, closePrice,
                        profit, swap, commission, netProfit,
-                       durationSec, result, aiConfidence, aiAction,
+                       durationSec, result, localAiConfidence, localAiAction,
                        AccountInfoDouble(ACCOUNT_BALANCE),
                        AccountInfoDouble(ACCOUNT_EQUITY),
                        dailyPnL, comment);
