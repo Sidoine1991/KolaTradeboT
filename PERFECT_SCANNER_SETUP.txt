@@ -1,0 +1,272 @@
+================================================================================
+🎯 PERFECT OPPORTUNITIES SCANNER — COMPLETE SETUP GUIDE
+================================================================================
+
+OVERVIEW:
+Real-time detection of symbols meeting ALL trading criteria (gates)
+Sends WhatsApp alerts every 2 minutes with countdown timers
+
+COMPONENTS INSTALLED:
+✅ perfect_opportunity_scanner.py — Main scanning engine
+✅ perfect_scanner_api.py — FastAPI endpoints
+✅ perfect_opportunities.html — Live dashboard
+✅ install_perfect_scanner_task.bat — Windows Task installer
+✅ start_perfect_scanner.bat — Quick launcher
+✅ README_PERFECT_OPPORTUNITIES.md — Full documentation
+
+================================================================================
+STEP 1: INSTALL SCANNER SERVICE (One-time)
+================================================================================
+
+1. Open Command Prompt as ADMINISTRATOR
+
+2. Run installer:
+   cd D:\Dev\TradBOT
+   install_perfect_scanner_task.bat
+
+3. You should see:
+   ✅ Task installed successfully!
+   Task Name: TradBOT-PerfectOpportunitiesScanner
+
+4. Verify installation:
+   schtasks /query /tn "TradBOT-PerfectOpportunitiesScanner"
+
+Result: Task will run every 1 minute automatically at system boot
+
+================================================================================
+STEP 2: START SCANNER
+================================================================================
+
+Option A: Quick Start (Recommended)
+   Double-click: D:\Dev\TradBOT\start_perfect_scanner.bat
+
+Option B: Manual Start
+   schtasks /run /tn "TradBOT-PerfectOpportunitiesScanner"
+
+Option C: Python Direct (for testing)
+   cd D:\Dev\TradBOT\Python
+   python perfect_opportunity_scanner.py
+
+================================================================================
+STEP 3: VIEW RESULTS
+================================================================================
+
+A. WhatsApp Alerts (Real-time)
+   - Receives alerts every 2 minutes when opportunities exist
+   - Shows symbol + action (BUY/SELL)
+   - Shows metrics: IA%, GOM%, PROB%
+   - Shows countdown timer until window closes
+
+B. Live Dashboard
+   Open in browser: http://localhost:8000/dashboard/perfect_opportunities.html
+
+   Shows:
+   - Status bar with total perfect opportunities count
+   - Cards for each symbol with:
+     * Action (📈 BUY / 📉 SELL)
+     * IA Confidence %
+     * GOM Coherence %
+     * Probability %
+     * Countdown timer
+     * Detection duration
+
+C. API Endpoint
+   curl http://localhost:8000/api/perfect-opportunities
+
+   Returns JSON with:
+   - opportunities array
+   - count
+   - last_update timestamp
+
+D. Log File
+   D:\Dev\TradBOT\logs\scanner.log
+
+   Contains:
+   - Scan start/stop messages
+   - New perfect opportunities detected
+   - WhatsApp send confirmations
+   - Errors (if any)
+
+================================================================================
+STEP 4: CONFIGURATION (Optional)
+================================================================================
+
+Change Scan Interval:
+  Set environment variable: SCAN_INTERVAL=60
+  (60 = scan every 60 seconds; default 30)
+
+Change WhatsApp Alert Frequency:
+  Edit Python file, line ~15: WHATSAPP_UPDATE_INTERVAL = 120
+  (120 = 2 minutes; change to 60 for 1 minute, etc.)
+
+Change Detection Thresholds:
+  Edit Python file, lines ~19-21:
+  MIN_IA_CONFIDENCE = 70.0    (≥ 70% IA Status)
+  MIN_GOM_COHERENCE = 85.0    (≥ 85% GOM Coherence)
+  MIN_PROBABILITY = 65.0      (≥ 65% Probability Gate)
+
+  Lower = more alerts
+  Higher = fewer, more selective alerts
+
+================================================================================
+STEP 5: TROUBLESHOOTING
+================================================================================
+
+❌ No WhatsApp Alerts:
+   1. Check PsychoBot running: http://localhost:3000/status
+   2. Check AI Server running: http://localhost:8000/health
+   3. Verify OWNER_NUMBER set correctly
+   4. Check logs: type D:\Dev\TradBOT\logs\scanner.log | tail -20
+
+❌ Dashboard Shows "Scanning...":
+   1. Verify AI Server endpoint is correct
+   2. Check logs for errors
+   3. Try lowering thresholds to generate test opportunities
+   4. Restart scanner: schtasks /run /tn "TradBOT-PerfectOpportunitiesScanner"
+
+❌ Task Not Running:
+   1. Check if enabled: schtasks /query /tn "TradBOT-PerfectOpportunitiesScanner" /v
+   2. Verify Python 3.14 installed: C:\Users\%USERNAME%\AppData\Local\Programs\Python\Python314\python.exe
+   3. Check file permissions on D:\Dev\TradBOT\Python\*.py
+   4. Run installer again as Administrator
+
+❌ "Can't connect to AI Server":
+   1. Start AI Server first: python D:\Dev\TradBOT\Python\ai_server.py
+   2. Verify port 8000 is open
+   3. Check firewall settings
+
+================================================================================
+STEP 6: DAILY OPERATIONS
+================================================================================
+
+Morning Routine:
+   1. Run: D:\Dev\TradBOT\start_perfect_scanner.bat
+   2. Check dashboard: http://localhost:8000/dashboard/perfect_opportunities.html
+   3. Watch WhatsApp for real-time alerts
+
+During Trading:
+   - Perfect opportunities appear automatically
+   - WhatsApp alerts notify you immediately
+   - Countdown shows time remaining in window
+   - Take trades when ready (EA auto-executes if enabled)
+
+End of Day:
+   1. Optional: schtasks /change /tn "TradBOT-PerfectOpportunitiesScanner" /disable
+   2. Or leave running for overnight scanning
+
+================================================================================
+STEP 7: ADVANCED — MANUAL CONTROL
+================================================================================
+
+View All Logs (Real-time):
+   Invoke-WebRequest -Uri http://localhost:8000/logs/scanner.log -OutFile - | Select-Object -Last 50
+
+Stop Scanner (without disabling task):
+   taskkill /IM python.exe /F  ⚠️  CAUTION: Kills all Python processes
+
+Restart Scanner:
+   schtasks /run /tn "TradBOT-PerfectOpportunitiesScanner" /force
+
+Schedule Scanner at Different Time:
+   1. Open Task Scheduler: taskschd.msc
+   2. Find: TradBOT-PerfectOpportunitiesScanner
+   3. Right-click → Properties → Triggers → Edit
+
+Remove Scanner Completely:
+   schtasks /delete /tn "TradBOT-PerfectOpfortunitiesScanner" /f
+
+================================================================================
+PERFECT OPPORTUNITY CRITERIA
+================================================================================
+
+A symbol is "PERFECT" when ALL of these are ✅:
+
+✓ IA Status Confidence        ≥ 70%
+✓ GOM Coherence               ≥ 85%
+✓ Probability Gate            ≥ 65%
+✓ Action Confirmed            BUY or SELL (not HOLD)
+
+For Boom/Crash Symbols:
+✓ Current time is 08:00-16:00 UTC (trading window open)
+
+When met: Symbol added to "perfect opportunities"
+Scan updates: Every 30 seconds
+WhatsApp notified: Every 2 minutes (batch update)
+
+================================================================================
+EXAMPLE WHATSAPP MESSAGE
+================================================================================
+
+🎯 **PERFECT TRADING OPPORTUNITIES** 🎯
+⏰ 14:32:45 UTC
+
+📈 **XAUUSD**
+  IA: 85% | GOM: 92% | PROB: 78%
+  ⏱️  Trading until 16:00 UTC (1h 27m left)
+  ✅ Perfect for 5m
+
+📉 **Boom500**
+  IA: 72% | GOM: 88% | PROB: 70%
+  ⏱️  Trading until 16:00 UTC (1h 27m left)
+
+📊 Total: 2 perfect opportunity(ies)
+Ready to trade! ✨
+
+================================================================================
+KEYBOARD SHORTCUTS
+================================================================================
+
+Windows Task Scheduler:
+   Win + X → T → Open Task Scheduler
+   Win + R → taskschd.msc → Enter
+
+Command Prompt Admin:
+   Win + X → A (Windows 11)
+   Or: Win + R → cmd → Ctrl+Shift+Enter
+
+View Logs:
+   Notepad D:\Dev\TradBOT\logs\scanner.log
+
+Open Dashboard:
+   http://localhost:8000/dashboard/perfect_opportunities.html
+
+Check API:
+   http://localhost:8000/api/perfect-opportunities
+
+================================================================================
+SUPPORT
+================================================================================
+
+📊 Dashboard: http://localhost:8000/dashboard/perfect_opportunities.html
+📡 API Docs: http://localhost:8000/docs
+📱 WhatsApp: Receive alerts from PsychoBot
+📋 Logs: D:\Dev\TradBOT\logs\scanner.log
+📖 Full Docs: D:\Dev\TradBOT\README_PERFECT_OPPORTUNITIES.md
+
+Questions?
+- Check logs first: type D:\Dev\TradBOT\logs\scanner.log
+- Review README_PERFECT_OPPORTUNITIES.md
+- Verify all prerequisites are running (AI Server, PsychoBot)
+
+================================================================================
+PRODUCTION CHECKLIST
+================================================================================
+
+Before Live Trading:
+
+☑️ AI Server running (port 8000)
+☑️ PsychoBot running (WhatsApp active)
+☑️ Scanner task installed and enabled
+☑️ Dashboard loads without errors
+☑️ WhatsApp receives test alert
+☑️ SMC_Universal.mq5 compiled (0 errors)
+☑️ MT5 running with EA attached to charts
+☑️ Auto-correction enabled (manual order SL/TP)
+☑️ GOM verdicts updating in real-time
+☑️ Logs directory writable (D:\Dev\TradBOT\logs)
+
+Ready to Trade! ✨
+
+================================================================================
+Version: 1.0 | Release Date: 2026-06-17 | Status: ✅ Production Ready
+================================================================================

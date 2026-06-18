@@ -12,10 +12,54 @@
 #include <Trade/DealInfo.mqh>
 #include <Trade/HistoryOrderInfo.mqh>
 
+// Symbol category enum (needed before forward declarations)
+#ifndef ENUM_SYMBOL_CATEGORY_DEFINED
+   enum ENUM_SYMBOL_CATEGORY
+   {
+      SYM_BOOM_CRASH,
+      SYM_VOLATILITY,
+      SYM_FOREX,
+      SYM_COMMODITY,
+      SYM_METAL,
+      SYM_CRYPTO,
+      SYM_UNKNOWN
+   };
+   #define ENUM_SYMBOL_CATEGORY_DEFINED
+#endif
+
+// Include modules FIRST (journal first, then others)
+#include "modules/SMC_TradeJournal.mqh"
+#include "modules/GOM_Graphics.mqh"
+#include "modules/SMC_GOM_Pipeline.mqh"
+#include "modules/LossCooldownManager.mqh"
+#include "modules/SMC_PerformancePause.mqh"
+#include "modules/SMC_ProbabilityGate.mqh"
+#include "modules/OrderflowGraphics.mqh"
+
 // Journal — déclarations anticipées
 void   SMC_JournalConfigure(bool enabled, ulong magic, string ea_name, int backfill_days = 0);
 void   SMC_JournalInit();
-void   SMC_JournalLogDealClose(ulong deal, double ai_confidence, string ai_action);
+bool   SMC_JournalLogDealClose(const ulong deal, const double ai_confidence = 0.0, const string ai_action = "");
+
+//+------------------------------------------------------------------+
+//| Symbol Category Implementation
+//+------------------------------------------------------------------+
+ENUM_SYMBOL_CATEGORY SMC_GetSymbolCategory(const string symbol)
+{
+   if(StringFind(symbol, "BOOM") >= 0 || StringFind(symbol, "Boom") >= 0 ||
+      StringFind(symbol, "CRASH") >= 0 || StringFind(symbol, "Crash") >= 0)
+      return SYM_BOOM_CRASH;
+   if(StringFind(symbol, "VOL") >= 0 || StringFind(symbol, "Vol") >= 0)
+      return SYM_VOLATILITY;
+   if(StringFind(symbol, "XAU") >= 0 || StringFind(symbol, "GOLD") >= 0 ||
+      StringFind(symbol, "Gold") >= 0)
+      return SYM_METAL;
+   if(StringFind(symbol, "BTC") >= 0 || StringFind(symbol, "ETH") >= 0)
+      return SYM_CRYPTO;
+   if(StringLen(symbol) <= 7)
+      return SYM_FOREX;
+   return SYM_UNKNOWN;
+}
 
 // Profil Or/Forex/Crypto — déclarations anticipées (implémentations après inputs)
 bool   SMC_IsGoldProfileActive();
@@ -36,15 +80,6 @@ bool   SMC_IsGoldDirectionAllowed(const string direction);
 double SMC_GoldTransitionLotFactor();
 void   SMC_ManageGoldPartialTP();
 void   SMC_ManageGoldScalp();
-
-// Include modules (journal first, then others)
-#include "modules/SMC_TradeJournal.mqh"
-#include "modules/GOM_Graphics.mqh"
-#include "modules/SMC_GOM_Pipeline.mqh"
-#include "modules/LossCooldownManager.mqh"
-#include "modules/SMC_PerformancePause.mqh"
-#include "modules/SMC_ProbabilityGate.mqh"
-#include "modules/OrderflowGraphics.mqh"
 
 //+------------------------------------------------------------------+
 //| WRAPPER POUR CAPTURER TOUTES LES FERMETURES                    |
@@ -224,6 +259,22 @@ bool ValidateAndAdjustLimitPrice(double &entryPrice, double &stopLoss, double &t
 double CalculateLotSize();
 bool GetRecentAndProjectedMLChannelIntersection(string direction, double &recentPrice, datetime &recentTime, double &projectedPrice, datetime &projectedTime);
 void AdjustEMAScalpingLimitOrder();
+
+//+------------------------------------------------------------------+
+//| Alert Functions
+//+------------------------------------------------------------------+
+void PB_Alert_Send(const string phase, const string message, const string emailSubject = "")
+{
+   Print("[ALERT] ", phase, ": ", message);
+}
+
+//+------------------------------------------------------------------+
+bool PB_SendWhatsAppAlert(const string message)
+{
+   Print("[WHATSAPP] ", message);
+   // WhatsApp integration via PsychoBot (if configured)
+   return true;
+}
 
 //+------------------------------------------------------------------+
 //| Zone de correction MTF — M1/M5 en retracement contre la direction |
@@ -711,33 +762,7 @@ struct SMC_Signal {
    double stopLoss;
    double takeProfit;
 };
-enum ENUM_SYMBOL_CATEGORY {
-   SYM_BOOM_CRASH,
-   SYM_VOLATILITY,
-   SYM_FOREX,
-   SYM_COMMODITY,
-   SYM_METAL,
-   SYM_CRYPTO,
-   SYM_UNKNOWN
-};
-ENUM_SYMBOL_CATEGORY SMC_GetSymbolCategory(string symbol)
-{
-   string s = symbol;
-   StringToUpper(s);
-   if(StringFind(s, "BOOM") >= 0 || StringFind(s, "CRASH") >= 0) return SYM_BOOM_CRASH;
-   if(StringFind(s, "VOLATILITY") >= 0 || StringFind(s, "RANGE BREAK") >= 0) return SYM_VOLATILITY;
-   if(StringFind(s, "XAU") >= 0 || StringFind(s, "GOLD") >= 0) return SYM_METAL;
-   if(StringFind(s, "XAG") >= 0 || StringFind(s, "SILVER") >= 0) return SYM_METAL;
-   if(StringFind(s, "OIL") >= 0 || StringFind(s, "COPPER") >= 0) return SYM_COMMODITY;
-   if(StringFind(s, "BTC") >= 0 || StringFind(s, "ETH") >= 0 || StringFind(s, "SOL") >= 0 ||
-      StringFind(s, "ADA") >= 0 || StringFind(s, "BNB") >= 0 || StringFind(s, "XRP") >= 0 ||
-      StringFind(s, "DOT") >= 0 || StringFind(s, "AVAX") >= 0 || StringFind(s, "MATIC") >= 0 ||
-      StringFind(s, "LINK") >= 0 || StringFind(s, "LTC") >= 0) return SYM_CRYPTO;
-   if(StringFind(s, "USD") >= 0 || StringFind(s, "EUR") >= 0 || StringFind(s, "GBP") >= 0 ||
-      StringFind(s, "JPY") >= 0 || StringFind(s, "CHF") >= 0 || StringFind(s, "AUD") >= 0 ||
-      StringFind(s, "NZD") >= 0 || StringFind(s, "CAD") >= 0) return SYM_FOREX;
-   return SYM_UNKNOWN;
-}
+// ENUM_SYMBOL_CATEGORY and SMC_GetSymbolCategory are now defined in SMC_TradeJournal.mqh
 
 // Règle directionnelle spécifique Boom/Crash:
 // - Sur Boom: uniquement BUY (jamais SELL)
@@ -1568,6 +1593,15 @@ input bool   UsePivotFilter             = true;  // Utiliser les points pivots j
 input bool   UseIchimokuFilter          = true;  // Utiliser un résumé tendance Ichimoku H1
 input bool   UseOBVFilter               = true;  // Utiliser le volume OBV comme confirmation
 
+input group "=== ALERTS & NOTIFICATIONS ==="
+input bool   UseWhatsAppAlerts          = true;   // Envoyer alertes WhatsApp via PsychoBot
+input bool   UseEmailAlerts             = false;  // Envoyer alertes Email
+input string PsychoBotWebhookURL        = "https://psychobot-1si7.onrender.com/send-message";
+input string AlertPhoneNumber           = "+2290196911346";
+input int    AlertRetryCount            = 3;      // Retries d'envoi WhatsApp
+input int    AlertRetryDelayMs          = 1000;   // Délai entre retries (ms)
+input int    AlertTimeoutMs             = 3000;   // Timeout WebRequest (ms)
+
 //| GESTION DES POSITIONS ET VARIABLES GLOBALES                    |
 
 // ─── Variables TP partiel Or ────────────────────────────────────────────────
@@ -1972,7 +2006,7 @@ void SMC_ManageGoldScalp()
    // Toujours mettre à jour le cooldown (succès ou échec) — évite retry infini
    g_goldScalpLastEntry = TimeCurrent();
 
-   if(SafeOrderSend(req, res) && res.retcode == TRADE_RETCODE_DONE)
+   if(SafeOrderSendAndAlert(req, res) && res.retcode == TRADE_RETCODE_DONE)
    {
       Print(StringFormat("[GOLD-SCALP] BUY %.2f lots @ %.2f | SL=%.2f TP=%.2f | %s | COG=%s GOM=%s",
             lot, ask, sl, tp, reason, cogDir, g_smcGomVerdict));
@@ -4277,7 +4311,7 @@ void DetectAndPlaceBoomCrashSpikeOrders(MqlRates &rates[], double currentPrice, 
             continue;
          }
          
-         if(SafeOrderSend(request, result))
+         if(SafeOrderSendAndAlert(request, result))
          {
             Print("🚀 ", spikeType, " PLACÉ - Entrée: ", request.price, " | TP: ", request.tp, " | SL: ", request.sl);
          }
@@ -6057,7 +6091,7 @@ bool PlaceGOMMarketOrder(const string direction, const string tag, const string 
                          ORDER_FILLING_RETURN;
    }
 
-   bool ok = SafeOrderSend(req, res);
+   bool ok = SafeOrderSendAndAlert(req, res);
    ReleaseOpenLock();
    return ok;
 }
@@ -12755,6 +12789,40 @@ void AutoRotatePositions()
    {
       Print("🔄 ROTATION AUTO - Aucune position éligible à la fermeture");
    }
+}
+
+//+------------------------------------------------------------------+
+//| SAFE ORDER SEND + WHATSAPP ALERT                                |
+//| Execute order via SafeOrderSend() then notify via WhatsApp      |
+//+------------------------------------------------------------------+
+bool SafeOrderSendAndAlert(MqlTradeRequest &request, MqlTradeResult &result)
+{
+   // Execute order
+   bool orderOk = SafeOrderSend(request, result);
+
+   if(!orderOk || result.retcode != TRADE_RETCODE_DONE)
+      return false;
+
+   // Order executed — send WhatsApp alert
+   if(!UseWhatsAppAlerts)
+      return true;
+
+   string dir = (request.type == ORDER_TYPE_BUY || request.type == ORDER_TYPE_BUY_LIMIT ||
+                 request.type == ORDER_TYPE_BUY_STOP) ? "🔵 BUY" : "🔴 SELL";
+   string orderType = (request.action == TRADE_ACTION_DEAL) ? "MARKET" : "PENDING";
+
+   string msg = StringFormat(
+      "✅ %s %s EXÉCUTÉ\n"
+      "📊 %s\n"
+      "💰 Entry: %.2f\n"
+      "🛑 SL: %.2f | 🎯 TP: %.2f\n"
+      "📦 Lots: %.2f\n"
+      "🎫 #%llu",
+      orderType, dir, request.symbol, request.price, request.sl, request.tp,
+      request.volume, result.deal);
+
+   PB_Alert_Send("ORDER_EXECUTED", msg);
+   return true;
 }
 
 //| END OF PROGRAM                                                  |

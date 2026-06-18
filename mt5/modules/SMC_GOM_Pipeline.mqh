@@ -45,8 +45,16 @@ bool     g_smcGomConnected    = false;
 double   g_iaStatusConfidence = 0.0;  // IA Status confiance (0-100%)
 string   g_smcIAStatusAction  = "HOLD"; // IA Status action depuis dashboard GOM (BUY/SELL/HOLD)
 double   g_smcCorrExhaustPct  = 0.0;  // Correction exhaustion 0-100 (>70 = safe)
-string   g_smcCorrPhase       = "unknown"; // trending|correcting|exhausted|resuming
+string   g_smcCorrPhase       = "unknown"; // trending|correcting|exhausted|resuming|ranging
+string   g_smcCorrType        = "";        // trend_run|micro_pullback|m5_pullback|...
 bool     g_smcCorrEntrySafe   = false; // true = correction terminée, re-entrée safe
+// Seuils blocage correction (configurés depuis SMC_Universal OnInit)
+double   g_smcCorrBlockDefault    = 45.0;
+double   g_smcCorrBlockTrending   = 35.0;
+double   g_smcCorrBlockCorrecting = 45.0;
+double   g_smcCorrBlockExhausted  = 40.0;
+double   g_smcCorrBlockRanging    = 38.0;
+double   g_smcCorrGomRelaxPts     = 10.0;  // assouplissement si |vn|>=2
 datetime g_smcLastGOMPoll     = 0;
 datetime g_smcLastMCPPoll      = 0;
 datetime g_smcLastPipelineExec= 0;
@@ -79,6 +87,65 @@ string   g_smcBcWindowStart     = "";
 string   g_smcBcWindowEnd       = "";
 string   g_smcBcMappedKey       = "";
 bool     g_smcSpikeNotifReady   = false;
+
+void SMCGP_ConfigureCorrectionGate(const double blockDefault, const double blockTrending,
+                                 const double blockCorrecting, const double blockExhausted,
+                                 const double blockRanging, const double gomRelaxPts)
+{
+   g_smcCorrBlockDefault    = blockDefault;
+   g_smcCorrBlockTrending   = blockTrending;
+   g_smcCorrBlockCorrecting = blockCorrecting;
+   g_smcCorrBlockExhausted  = blockExhausted;
+   g_smcCorrBlockRanging    = blockRanging;
+   g_smcCorrGomRelaxPts     = gomRelaxPts;
+}
+
+double SMCGP_CorrectionBlockThreshold(const string phase = "")
+{
+   string p = (StringLen(phase) > 0) ? phase : g_smcCorrPhase;
+   if(p == "trending")   return g_smcCorrBlockTrending;
+   if(p == "correcting") return g_smcCorrBlockCorrecting;
+   if(p == "exhausted")  return g_smcCorrBlockExhausted;
+   if(p == "resuming")   return MathMin(g_smcCorrBlockExhausted, 30.0);
+   if(p == "ranging")    return g_smcCorrBlockRanging;
+   return g_smcCorrBlockDefault;
+}
+
+bool SMCGP_CorrectionBlocksEntry(const bool isBoomCrash = false)
+{
+   if(g_smcCorrEntrySafe) return false;
+   double thresh = SMCGP_CorrectionBlockThreshold();
+   if(MathAbs(g_smcGomVerdictNum) >= 2 && !isBoomCrash)
+      thresh -= g_smcCorrGomRelaxPts;
+   if(thresh < 22.0) thresh = 22.0;
+
+   // Boom/Crash : pas de gate serveur sur trend_run, mais blocage si pullback profond
+   if(isBoomCrash)
+   {
+      if(g_smcCorrType == "counter_move" || g_smcCorrType == "m15_pullback")
+         thresh = MathMax(thresh, 52.0);
+      else if(g_smcCorrType == "m5_pullback")
+         thresh = MathMax(thresh, 48.0);
+      else if(StringLen(g_smcCorrType) == 0)
+         return false;
+      else if(g_smcCorrType == "trend_run" || g_smcCorrType == "micro_pullback")
+         return false;
+   }
+
+   return (g_smcCorrExhaustPct < thresh);
+}
+
+string SMCGP_CorrectionBlockReason(const bool isBoomCrash = false)
+{
+   if(!SMCGP_CorrectionBlocksEntry(isBoomCrash))
+      return "";
+   double thresh = SMCGP_CorrectionBlockThreshold();
+   if(MathAbs(g_smcGomVerdictNum) >= 2)
+      thresh -= g_smcCorrGomRelaxPts;
+   if(thresh < 22.0) thresh = 22.0;
+   return StringFormat("correction %s %s %.0f%% < seuil %.0f%%",
+                       g_smcCorrType, g_smcCorrPhase, g_smcCorrExhaustPct, thresh);
+}
 string   g_smcTfM1Dir         = "";
 string   g_smcTfM5Dir         = "";
 string   g_smcTfM15Dir        = "";
@@ -480,6 +547,7 @@ void SMCGP_ParseGOMBody(const string &body)
    // Correction Cycle Detector
    g_smcCorrExhaustPct = SMCGP_JsonDouble(body, "correction_exhaustion_pct", 50.0);
    g_smcCorrPhase      = SMCGP_JsonString(body, "correction_phase");
+   g_smcCorrType       = SMCGP_JsonString(body, "correction_type");
    string safeStr      = SMCGP_JsonString(body, "correction_entry_safe");
    g_smcCorrEntrySafe  = (safeStr == "true" || safeStr == "1" || SMCGP_JsonBool(body, "correction_entry_safe"));
 
@@ -1164,9 +1232,9 @@ bool SMCGP_AllowsDirectIndependentEntry(const int dir)
    if(g_iaStatusConfidence < 50.0)
    { Print("[EA-INDEP] ❌ Rejeté: IA Status=", DoubleToString(g_iaStatusConfidence, 1), "% < 50%"); return false; }
 
-   // 4. Correction Cycle — ne pas entrer pendant une correction (exempt Boom/Crash)
-   if(!SMCGP_IsBoomCrashSym(_Symbol) && !g_smcCorrEntrySafe && g_smcCorrExhaustPct < 65.0)
-   { Print("[EA-INDEP] ❌ Rejeté: correction active (", g_smcCorrPhase, " ", DoubleToString(g_smcCorrExhaustPct, 0), "%)"); return false; }
+   // 4. Correction Cycle — seuil adapté à la phase (exempt Boom/Crash)
+   if(SMCGP_CorrectionBlocksEntry(SMCGP_IsBoomCrashSym(_Symbol)))
+   { Print("[EA-INDEP] ❌ Rejeté: ", SMCGP_CorrectionBlockReason(SMCGP_IsBoomCrashSym(_Symbol))); return false; }
 
    // 5. Vérifier direction du verdict GOM correspond à l'action
    if(dir == 1 && g_smcGomVerdictNum < 2)
@@ -1579,12 +1647,11 @@ bool SMCGP_ExecutePipelineOrder(const string sym, const string action,
       return false;
    }
 
-   // GATE CORRECTION CYCLE — bloquer si correction en cours (entrée trop tôt)
-   // Exempt Boom/Crash (pas de corrections classiques)
-   if(!SMCGP_IsBoomCrashSym(sym) && !g_smcCorrEntrySafe && g_smcCorrExhaustPct < 65.0)
+   // GATE CORRECTION CYCLE — seuil par phase (exempt Boom/Crash)
+   if(SMCGP_CorrectionBlocksEntry(SMCGP_IsBoomCrashSym(sym)))
    {
-      Print("[SMC-GOM] 🚫 Ordre ", action, " ", sym, " bloqué — correction en cours (",
-            g_smcCorrPhase, " ", DoubleToString(g_smcCorrExhaustPct, 0), "% < 65%)");
+      Print("[SMC-GOM] 🚫 Ordre ", action, " ", sym, " bloqué — ",
+            SMCGP_CorrectionBlockReason(SMCGP_IsBoomCrashSym(sym)));
       return false;
    }
 
@@ -2422,8 +2489,10 @@ void SMCGP_DrawGOMDashboard()
       SMCGP_DrawDashCell("G6_IA", xCur, y3, cellW, cellH, iaTxt, cIA, cTxt);
       xCur += cellW + gap;
 
-      // Cellule Correction Cycle
+      // Cellule Correction Cycle (type scalp + confiance %)
       string corrTxt = g_smcCorrPhase + " " + DoubleToString(g_smcCorrExhaustPct, 0) + "%";
+      if(StringLen(g_smcCorrType) > 0)
+         corrTxt = g_smcCorrType + " " + DoubleToString(g_smcCorrExhaustPct, 0) + "%";
       color cCorr = g_smcCorrEntrySafe ? (color)SMC_DASH_C_BUY : (color)SMC_DASH_C_SELL;
       if(g_smcCorrExhaustPct >= 45 && !g_smcCorrEntrySafe) cCorr = (color)SMC_DASH_C_NEUTRAL;
       SMCGP_DrawDashCell("G6B_CORR", xCur, y3, cellW, cellH, corrTxt, cCorr, cTxt);

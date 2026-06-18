@@ -230,6 +230,43 @@ class PipelineHourly:
             self.spike_anticipator = SpikeAnticipator(anticipation_pips=5.0)
             log.info("[INIT] Spike anticipation enabled")
 
+    @staticmethod
+    def _flatten_directions(v: dict) -> dict:
+        """Aplatit le champ imbriqué 'directions' en clés tf_*_dir individuelles.
+
+        Supporte les deux formats:
+          - {"directions": {"M1": "BUY", "M5": "BUY", ...}}  (format gom_signal.json)
+          - {"tf_m1_dir": "BULL", ...}                        (format /gom-verdict)
+
+        Convertit BUY->BULL, SELL->BEAR, NEUTRAL->NEUT pour uniformité pipeline.
+        """
+        dirs = v.get("directions")
+        if not isinstance(dirs, dict):
+            return v
+
+        _MAP = {"BUY": "BULL", "SELL": "BEAR", "NEUTRAL": "NEUT", "NEUT": "NEUT",
+                "BULL": "BULL", "BEAR": "BEAR"}
+        tf_key_map = {
+            "M1": "tf_m1_dir", "M5": "tf_m5_dir", "M15": "tf_m15_dir",
+            "M30": "tf_m30_dir", "H1": "tf_h1_dir", "H4": "tf_h4_dir",
+            "D1": "tf_d1_dir", "W1": "tf_w1_dir",
+        }
+        for tf_label, flat_key in tf_key_map.items():
+            raw_val = dirs.get(tf_label, "NEUT")
+            v[flat_key] = _MAP.get(str(raw_val).upper(), "NEUT")
+
+        # Calculer coherence_pct depuis les directions si absent ou 0
+        if not v.get("coherence_pct"):
+            verdict_str = str(v.get("verdict", "")).upper()
+            is_buy = "BUY" in verdict_str
+            target = "BULL" if is_buy else "BEAR"
+            aligned = sum(1 for d in dirs.values() if _MAP.get(str(d).upper(), "NEUT") == target)
+            total = len(dirs)
+            # Confiance = aligned/total * 100 (si >= 4/6 = 67%+, si 5/6 = 83%, 6/6 = 100%)
+            v["coherence_pct"] = round((aligned / max(total, 1)) * 100.0, 1)
+
+        return v
+
     def load_gom_data(self) -> Dict[str, Dict[str, Any]]:
         """Charge les verdicts GOM depuis le serveur live (fallback fichier JSON)."""
         # Priorité 1: endpoint live /gom-verdicts (tous les symboles)
@@ -240,7 +277,7 @@ class PipelineHourly:
                 verdicts = data.get("verdicts", data) if isinstance(data, dict) else data
                 if isinstance(verdicts, list) and verdicts:
                     log.info(f"  [GOM] {len(verdicts)} verdicts chargés depuis /gom-verdicts (LIVE)")
-                    indexed = {v["symbol"]: v for v in verdicts if "symbol" in v}
+                    indexed = {v["symbol"]: self._flatten_directions(v) for v in verdicts if "symbol" in v}
                     # Enrichir avec kola/BB/ATR depuis /gom-kola-dashboard (niveaux réels)
                     enriched = 0
                     for sym, v in indexed.items():
@@ -272,13 +309,31 @@ class PipelineHourly:
         try:
             if GOM_SIGNAL_FILE.exists():
                 raw = json.loads(GOM_SIGNAL_FILE.read_text(encoding="utf-8"))
-                if isinstance(raw, list):
-                    indexed = {v["symbol"]: v for v in raw if "symbol" in v}
-                    log.warning("⚠️  Données GOM depuis fichier local (peut être stale)")
+
+                # Format A: {"verdicts": [...], "timestamp": ...} (gom_sync export)
+                if isinstance(raw, dict) and "verdicts" in raw and isinstance(raw["verdicts"], list):
+                    indexed = {v["symbol"]: self._flatten_directions(v)
+                               for v in raw["verdicts"] if "symbol" in v}
+                    log.info(f"  [GOM] {len(indexed)} verdicts depuis fichier local (format verdicts[])")
                     return indexed
-                return raw
+
+                # Format B: [v1, v2, ...] (ancien format liste)
+                if isinstance(raw, list):
+                    indexed = {v["symbol"]: self._flatten_directions(v)
+                               for v in raw if "symbol" in v}
+                    log.warning("  [GOM] Données depuis fichier local (format liste, peut être stale)")
+                    return indexed
+
+                # Format C: {"SYMBOL": {...}, ...} (dict par symbole, écrit par _persist_gom_signal_file)
+                if isinstance(raw, dict):
+                    indexed = {k: self._flatten_directions(v) for k, v in raw.items()
+                               if isinstance(v, dict) and "verdict" in v}
+                    if indexed:
+                        log.info(f"  [GOM] {len(indexed)} verdicts depuis fichier local (format dict)")
+                        return indexed
+                    return raw
         except Exception as e:
-            log.error(f"❌ Erreur GOM: {e}")
+            log.error(f"  [GOM] Erreur lecture fichier: {e}")
         return {}
 
     def check_mt5_attachment(self, symbol: str) -> bool:
@@ -357,6 +412,10 @@ class PipelineHourly:
                 data = response.json()
                 if data.get("success"):
                     log.info(f"  ✅ TradingAgents OK: {data.get('opinion')}")
+                    # Handle report generation if job_id is available
+                    job_id = data.get("job_id")
+                    if job_id:
+                        self._queue_tradingagents_report(job_id, symbol)
                     # Enrichir avec ia_status_v2 depuis GOM cache si absent (pour gate HOLD)
                     if "ia_status_v2" not in data:
                         g = getattr(self, "_gom_cache", {}).get(symbol, {})
@@ -537,11 +596,14 @@ class PipelineHourly:
                 self.errors.append((symbol, "CRASH_BUY_FORBIDDEN"))
                 return False
 
-            # GATE IA STATUS : coherence_pct doit être >= 80% (relevé 50→80 après série de pertes)
+            # GATE IA STATUS : coherence_pct doit être >= seuil (80% standard, 70% Boom/Crash)
             # Note: 0 inclus → données absentes = bloqué (anciennement 0 < _ia laissait passer)
+            # Synthétiques (Boom/Crash) : seuil réduit à 70% car volatilité propre + directions fiables
             _ia = float(analysis.get("coherence_pct") or analysis.get("confidence", 0) * 100 or 0)
-            if _ia < 80.0:
-                log.warning(f"  🚫 {symbol}: IA status {_ia:.0f}% < 80% requis — ordre bloqué")
+            _is_synthetic = "BOOM" in sym_up or "CRASH" in sym_up or "JUMP" in sym_up
+            _ia_threshold = 70.0 if _is_synthetic else 80.0
+            if _ia < _ia_threshold:
+                log.warning(f"  🚫 {symbol}: IA status {_ia:.0f}% < {_ia_threshold:.0f}% requis — ordre bloqué")
                 self.errors.append((symbol, f"IA_STATUS_{_ia:.0f}pct"))
                 return False
 
@@ -593,11 +655,23 @@ class PipelineHourly:
                 return False
 
             # GATE MTF : H4+H1+M15 doivent confirmer la direction
-            _mtf_ok, _mtf_reason = _check_mtf_gate(symbol, analysis, action)
-            if not _mtf_ok:
-                log.warning(f"  🚫 {symbol}: Gate MTF — {_mtf_reason}")
-                self.errors.append((symbol, f"MTF_GATE: {_mtf_reason[:60]}"))
-                return False
+            # Boom/Crash : gate MTF assouplie (unidirectionnel, M5+M15 suffisent)
+            if not _is_synthetic:
+                _mtf_ok, _mtf_reason = _check_mtf_gate(symbol, analysis, action)
+                if not _mtf_ok:
+                    log.warning(f"  🚫 {symbol}: Gate MTF — {_mtf_reason}")
+                    self.errors.append((symbol, f"MTF_GATE: {_mtf_reason[:60]}"))
+                    return False
+            else:
+                # Synthétiques : vérifier seulement que M5+M15 ne sont pas opposés
+                _m5_s = analysis.get("tf_m5_dir", "NEUT")
+                _m15_s = analysis.get("tf_m15_dir", "NEUT")
+                _opp = "BEAR" if action == "BUY" else "BULL"
+                if _m5_s == _opp and _m15_s == _opp:
+                    log.warning(f"  🚫 {symbol}: Synth MTF — M5={_m5_s} M15={_m15_s} tous contre {action}")
+                    self.errors.append((symbol, f"SYNTH_MTF: M5+M15 contre {action}"))
+                    return False
+                log.info(f"  [MTF] Synthétique {symbol}: gate assouplie M5={_m5_s} M15={_m15_s} — OK")
 
             # (garde Boom/Crash déjà appliquée en tête de fonction)
 
@@ -739,26 +813,39 @@ class PipelineHourly:
             log.warning(f"  ⚠️  Word report generation failed: {e}")
 
     def _send_word_report_via_psychobot(self, report_file: Path) -> None:
-        """Envoie le rapport Word via PsychoBot /send-file."""
+        """Envoie le rapport Word via PsychoBot Render (en arrière-plan si besoin)."""
         try:
-            # Read file in binary
-            with open(report_file, 'rb') as f:
-                files = {'file': (report_file.name, f, 'application/vnd.openxmlformats-officedocument.wordprocessingml.document')}
-
-                response = requests.post(
-                    "http://127.0.0.1:8888/send-file",
-                    files=files,
-                    data={"to_number": "2290196911346"},
-                    timeout=10
-                )
-
-            if response.status_code in [200, 201]:
-                log.info(f"  📤 Word report sent via WhatsApp (HTTP {response.status_code})")
-            else:
-                log.warning(f"  ⚠️  PsychoBot /send-file HTTP {response.status_code}")
+            import subprocess
+            import time
+            # Delegate to send_tradingagents_report.py which has robust retry logic
+            cmd = [
+                sys.executable,
+                "python/send_tradingagents_report.py",
+                "--file", str(report_file),
+                "--send-file"
+            ]
+            # Run async in background
+            subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            log.info(f"  📤 [Background] Sending pipeline report to WhatsApp")
 
         except Exception as e:
-            log.warning(f"  ⚠️  Failed to send Word report: {e}")
+            log.warning(f"  ⚠️  Failed to queue report send: {e}")
+
+    def _queue_tradingagents_report(self, job_id: str, symbol: str) -> None:
+        """Génère et envoie le rapport TradingAgents en arrière-plan."""
+        try:
+            import subprocess
+            cmd = [
+                sys.executable,
+                "python/tradingagents_report_handler.py",
+                "--job-id", job_id,
+                "--symbol", symbol
+            ]
+            # Run async in background
+            subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            log.info(f"  📄 [Background] Generating TradingAgents report (job_id={job_id})")
+        except Exception as e:
+            log.debug(f"  ⚠️  Failed to queue report: {e}")
 
     async def run_hourly_cycle(self):
         """Exécute un cycle complet."""

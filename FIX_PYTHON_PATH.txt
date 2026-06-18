@@ -1,0 +1,206 @@
+================================================================================
+PYTHON NOT FOUND — SOLUTION
+================================================================================
+
+PROBLEM:
+   [ERROR] Python 3.14 not found at:
+     C:\Users\USER\AppData\Local\Programs\Python\Python314\python.exe
+
+SOLUTION: 3 OPTIONS
+
+================================================================================
+OPTION 1: AUTO-FIND (Easiest)
+================================================================================
+
+Double-click: D:\Dev\TradBOT\FIND_PYTHON_AND_LAUNCH.bat
+
+This script will:
+   1. Search common Python installations
+   2. Automatically find your Python
+   3. Launch scanner if found
+
+If Python is found and scanner launches → DONE!
+
+If Python still not found → Go to Option 2
+
+================================================================================
+OPTION 2: MANUAL PATH (If Option 1 fails)
+================================================================================
+
+Double-click: D:\Dev\TradBOT\LAUNCH_WITH_PYTHON_PATH.bat
+
+Script will ask:
+   "Enter full path to python.exe: "
+
+You need to provide your Python path. To find it:
+
+STEP 1: Open Command Prompt (Admin)
+   - Win + X
+   - Select: Command Prompt (Admin)
+
+STEP 2: Run:
+   where python
+
+STEP 3: Copy the path shown
+
+Example output:
+   C:\Users\USER\AppData\Local\Programs\Python\Python311\python.exe
+   ^
+   Copy this entire path
+
+STEP 4: Paste into LAUNCH_WITH_PYTHON_PATH.bat when prompted
+
+DONE! Scanner launches with correct Python path
+
+================================================================================
+OPTION 3: INSTALL PYTHON (If no Python found)
+================================================================================
+
+If both options fail or Python isn't installed:
+
+STEP 1: Download Python
+   https://www.python.org/downloads/
+
+STEP 2: Choose version
+   Download latest (3.14, 3.13, or 3.12)
+
+STEP 3: Install
+   - Run installer
+   - IMPORTANT: Check "Add Python to PATH"
+   - Click "Install Now"
+
+STEP 4: Restart Command Prompt
+
+STEP 5: Try Option 1 again
+
+================================================================================
+FIND YOUR PYTHON PATH — DETAILED
+================================================================================
+
+Method A: Command Prompt
+   1. Open Command Prompt (Win + R → cmd → Enter)
+   2. Type: where python
+   3. Copy the path shown
+
+Method B: Windows Search
+   1. Win + S
+   2. Search: python.exe
+   3. Right-click → Open file location
+   4. Copy full path (in address bar)
+
+Method C: Check these locations manually
+   - C:\Users\%USERNAME%\AppData\Local\Programs\Python\Python314\python.exe
+   - C:\Users\%USERNAME%\AppData\Local\Programs\Python\Python313\python.exe
+   - C:\Users\%USERNAME%\AppData\Local\Programs\Python\Python312\python.exe
+   - C:\Python\python.exe
+   - C:\Program Files\Python\python.exe
+
+================================================================================
+PYTHON VERSION CHECK
+================================================================================
+
+To verify Python works, run in Command Prompt:
+
+   python --version
+
+Should show: Python 3.XX.X (where XX is version)
+
+If shows "Command not found" or "is not recognized":
+   → Python not in PATH
+   → Use full path: C:\path\to\python.exe --version
+
+================================================================================
+WHAT TO DO NOW
+================================================================================
+
+1. Try: D:\Dev\TradBOT\FIND_PYTHON_AND_LAUNCH.bat
+   (Auto-search your system)
+
+2. If fails, try: D:\Dev\TradBOT\LAUNCH_WITH_PYTHON_PATH.bat
+   (Manual path input)
+
+3. If neither works:
+   - Install Python from python.org
+   - Restart computer
+   - Try again
+
+================================================================================
+ONCE PYTHON WORKS
+================================================================================
+
+When you find working Python path:
+
+You can create a shortcut with correct path:
+   1. Right-click LAUNCH_SCANNER_NOW.bat
+   2. Edit with Notepad
+   3. Change line 10: set PYTHON_PATH=YOUR_PYTHON_PATH_HERE
+   4. Save
+
+Or use FIND_PYTHON_AND_LAUNCH.bat (it auto-finds Python)
+
+================================================================================
+VERIFY SCANNER IS RUNNING
+================================================================================
+
+After launching, you should see 3 windows:
+
+Window 1 — AI Server Console
+   Shows: [INFO] Uvicorn running on http://0.0.0.0:8000
+
+Window 2 — Scanner Console
+   Shows: Scanning for perfect opportunities...
+
+Window 3 — Browser Dashboard
+   Shows: Perfect Trading Opportunities
+
+If all 3 appear → SCANNER IS RUNNING! ✓
+
+================================================================================
+QUICK REFERENCE
+================================================================================
+
+To find Python: where python (in Command Prompt)
+
+To test Python: python --version
+
+Auto-launch: FIND_PYTHON_AND_LAUNCH.bat
+
+Manual-launch: LAUNCH_WITH_PYTHON_PATH.bat
+
+Dashboard: http://localhost:8000/dashboard/perfect_opportunities.html
+
+Logs: D:\Dev\TradBOT\logs\scanner.log
+
+================================================================================
+SUPPORT
+================================================================================
+
+Still having issues?
+
+1. Check that Python is installed
+   where python
+
+2. Check Python version
+   python --version
+   (Should be 3.11 or higher)
+
+3. Try manual path script
+   LAUNCH_WITH_PYTHON_PATH.bat
+
+4. Check logs for errors
+   D:\Dev\TradBOT\logs\scanner.log
+
+5. Verify all services started
+   VERIFY_SCANNER_RUNNING.bat
+
+================================================================================
+NOW GO!
+================================================================================
+
+Try: D:\Dev\TradBOT\FIND_PYTHON_AND_LAUNCH.bat
+
+It should find Python and start scanner automatically!
+
+Good luck! 🎯
+
+================================================================================

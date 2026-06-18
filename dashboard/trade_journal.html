@@ -134,6 +134,39 @@
     }
     .panel-full h3 { font-size: 0.85rem; color: var(--muted); margin-bottom: 0.75rem; }
     .empty { text-align: center; padding: 3rem; color: var(--muted); }
+    .reco-section { margin-bottom: 1.25rem; }
+    .reco-section h2 { font-size: 1rem; color: var(--muted); margin-bottom: 0.75rem; font-weight: 500; }
+    .reco-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 1rem;
+    }
+    .reco-card {
+      background: linear-gradient(145deg, #1e2a3d 0%, #1a2332 100%);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 1rem 1.1rem;
+      position: relative;
+    }
+    .reco-card.rank1 { border-color: var(--amber); }
+    .reco-rank {
+      position: absolute; top: 0.75rem; right: 0.75rem;
+      font-size: 0.7rem; font-weight: 700; color: var(--amber);
+      background: rgba(245,158,11,0.15); padding: 0.15rem 0.45rem; border-radius: 4px;
+    }
+    .reco-symbol { font-size: 1.1rem; font-weight: 700; margin-bottom: 0.15rem; }
+    .reco-cat { font-size: 0.72rem; color: var(--muted); margin-bottom: 0.6rem; }
+    .reco-stats { display: flex; flex-wrap: wrap; gap: 0.5rem 1rem; font-size: 0.82rem; margin-bottom: 0.6rem; }
+    .reco-stats span.pos { color: var(--green); }
+    .reco-stats span.neg { color: var(--red); }
+    .reco-hours { font-size: 0.78rem; color: var(--muted); margin-bottom: 0.5rem; }
+    .reco-hours strong { color: var(--blue); }
+    .reco-tip { font-size: 0.75rem; color: var(--text); line-height: 1.4; border-top: 1px solid var(--border); padding-top: 0.5rem; margin-top: 0.4rem; }
+    .block-alert {
+      background: rgba(239,68,68,0.1); border: 1px solid var(--red);
+      border-radius: 10px; padding: 0.85rem 1rem; margin-bottom: 1rem; font-size: 0.85rem;
+    }
+    .block-alert code { font-size: 0.8rem; color: var(--amber); }
   </style>
 </head>
 <body>
@@ -147,19 +180,22 @@
 
   <section class="filters">
     <div>
-      <label>Symbole</label>
-      <select id="fSymbol"><option value="">Tous</option></select>
-    </div>
-    <div>
       <label>Catégorie</label>
       <select id="fCategory">
-        <option value="">Toutes</option>
+        <option value="">— Choisir une catégorie —</option>
         <option value="BOOM_CRASH">Boom/Crash</option>
         <option value="VOLATILITY">Volatility</option>
         <option value="FOREX">Forex</option>
         <option value="METAL">Or/Métaux</option>
         <option value="CRYPTO">Crypto</option>
         <option value="COMMODITY">Commodity</option>
+        <option value="UNKNOWN">Autre</option>
+      </select>
+    </div>
+    <div>
+      <label>Symbole <span style="color:var(--muted);font-weight:400">(sous la catégorie)</span></label>
+      <select id="fSymbol" disabled>
+        <option value="">— Choisir catégorie d'abord —</option>
       </select>
     </div>
     <div>
@@ -195,6 +231,17 @@
   </section>
 
   <section class="kpi-grid" id="kpis"></section>
+
+  <section class="reco-section panel-full" id="recoSection">
+    <h2>Top 3 symboles recommandés pour le robot (historique journal)</h2>
+    <p style="font-size:0.78rem;color:var(--muted);margin:-0.4rem 0 0.75rem 0;">
+      Score basé sur win rate, profit factor, PnL net et volume de trades (min. 8 trades/symbole).
+      Heures en UTC — ajoutez votre décalage broker si besoin.
+    </p>
+    <div class="reco-grid" id="recoGrid">
+      <div class="empty">Analyse en cours…</div>
+    </div>
+  </section>
 
   <section class="charts">
     <div class="chart-box">
@@ -242,6 +289,7 @@
   <script>
     const API = window.location.origin;
     let charts = {};
+    let tradesCatalog = [];
 
     function qs() {
       const p = new URLSearchParams();
@@ -331,14 +379,18 @@
 
       destroyChart('symbol');
       const symData = m.by_symbol || {};
-      const syms = Object.keys(symData).sort((a,b) => symData[b].pnl - symData[a].pnl);
+      const symEntries = Object.entries(symData).sort((a,b) => b[1].pnl - a[1].pnl);
+      const symLabels = symEntries.map(([key]) => {
+        const parts = key.split(':');
+        return parts.length > 1 ? parts[1] : key;
+      });
       charts.symbol = new Chart(document.getElementById('chartSymbol'), {
         type: 'bar',
         data: {
-          labels: syms,
-          datasets: [{ label: 'PnL $', data: syms.map(s => symData[s].pnl), backgroundColor: '#3b82f688' }]
+          labels: symLabels,
+          datasets: [{ label: 'PnL $', data: symEntries.map(([,d]) => d.pnl), backgroundColor: '#3b82f688' }]
         },
-        options: { ...opts, indexAxis: syms.length > 8 ? 'y' : 'x' }
+        options: { ...opts, indexAxis: symLabels.length > 8 ? 'y' : 'x' }
       });
 
       destroyChart('hour');
@@ -418,13 +470,93 @@
       `).join('');
     }
 
-    async function populateSymbols() {
-      const data = await fetchJSON('/api/trades');
-      const syms = [...new Set((data.trades||[]).map(t => t.symbol))].sort();
-      const sel = document.getElementById('fSymbol');
-      const cur = sel.value;
-      sel.innerHTML = '<option value="">Tous</option>' + syms.map(s => `<option value="${s}">${s}</option>`).join('');
-      sel.value = cur;
+    async function loadCatalog() {
+      const res = await fetch(`${API}/api/trades`);
+      const data = await res.json();
+      tradesCatalog = data.trades || [];
+      populateSymbolFilter();
+    }
+
+    function inferCategory(symbol) {
+      const s = (symbol || '').toUpperCase();
+      if (s.includes('BOOM') || s.includes('CRASH')) return 'BOOM_CRASH';
+      if (s.includes('VOLATILITY') || s.includes('STEP INDEX')) return 'VOLATILITY';
+      if (s.includes('XAU') || s.includes('GOLD')) return 'METAL';
+      if (s.includes('BTC') || s.includes('ETH')) return 'CRYPTO';
+      if (s.includes('USD') || s.includes('EUR') || s.includes('GBP')) return 'FOREX';
+      return 'UNKNOWN';
+    }
+
+    function tradeCategory(t) {
+      return (t.category || inferCategory(t.symbol) || 'UNKNOWN').toUpperCase();
+    }
+
+    function populateSymbolFilter() {
+      const catSel = document.getElementById('fCategory');
+      const symSel = document.getElementById('fSymbol');
+      const category = catSel.value;
+      const prevSymbol = symSel.value;
+
+      if (!category) {
+        symSel.disabled = true;
+        symSel.innerHTML = '<option value="">— Choisir catégorie d\'abord —</option>';
+        return;
+      }
+
+      const symbols = [...new Set(
+        tradesCatalog
+          .filter(t => tradeCategory(t) === category.toUpperCase())
+          .map(t => t.symbol)
+      )].sort();
+
+      symSel.disabled = false;
+      if (symbols.length === 0) {
+        symSel.innerHTML = '<option value="">Aucun symbole dans cette catégorie</option>';
+        return;
+      }
+
+      symSel.innerHTML = '<option value="">Tous les symboles</option>' +
+        symbols.map(s => `<option value="${s}">${s}</option>`).join('');
+
+      if (symbols.includes(prevSymbol)) {
+        symSel.value = prevSymbol;
+      } else {
+        symSel.value = '';
+      }
+    }
+
+    async function renderRecommendations() {
+      const cat = document.getElementById('fCategory').value;
+      const url = cat ? `${API}/api/recommendations?category=${encodeURIComponent(cat)}` : `${API}/api/recommendations`;
+      const data = await fetch(url).then(r => r.json());
+      const grid = document.getElementById('recoGrid');
+      const items = data.top_symbols || [];
+      if (!items.length) {
+        grid.innerHTML = `<div class="empty">Pas assez de trades (min ${data.min_trades || 8} par symbole). Importez plus d'historique.</div>`;
+        return;
+      }
+      grid.innerHTML = items.map((s, i) => `
+        <div class="reco-card ${i === 0 ? 'rank1' : ''}">
+          <span class="reco-rank">#${i + 1} · Score ${s.score}</span>
+          <div class="reco-symbol">${s.symbol}</div>
+          <div class="reco-cat">${s.category}</div>
+          <div class="reco-stats">
+            <span>Win ${s.win_rate}%</span>
+            <span class="${s.net_pnl >= 0 ? 'pos' : 'neg'}">PnL ${s.net_pnl >= 0 ? '+' : ''}${s.net_pnl}$</span>
+            <span>PF ${s.profit_factor}</span>
+            <span>${s.trades} trades</span>
+          </div>
+          <div class="reco-hours">
+            <strong>Heures propices UTC:</strong>
+            ${(s.best_hours || []).map(h => `${h.label} (${h.win_rate}% · ${h.pnl >= 0 ? '+' : ''}${h.pnl}$)`).join(' · ') || '—'}
+          </div>
+          <div class="reco-hours">
+            <strong>Entrée optimale:</strong> ${s.best_direction} (${s.direction_win_rate}% win)
+            · durée moy. ${s.avg_duration_min} min
+          </div>
+          <div class="reco-tip">${s.entry_tip}</div>
+        </div>
+      `).join('');
     }
 
     async function refresh() {
@@ -434,7 +566,7 @@
           fetchJSON('/api/metrics')
         ]);
         const st = document.getElementById('status');
-        st.textContent = `Live — ${status.trade_count} trades — MAJ ${status.last_modified || 'n/a'}`;
+        st.textContent = `Live — ${status.trade_count} trades — ${status.categories ? Object.keys(status.categories).length + ' cat.' : ''} — MAJ auto`;
         st.className = 'status live';
         document.getElementById('csvPath').textContent = status.csv_path || '';
 
@@ -446,6 +578,8 @@
           renderTables(metrics);
         }
         await renderTrades();
+        await loadCatalog();
+        await renderRecommendations();
       } catch (e) {
         document.getElementById('status').textContent = 'Erreur connexion API — lancez serve_trade_journal.py';
         document.getElementById('status').className = 'status';
@@ -458,15 +592,25 @@
       fHour.innerHTML += `<option value="${h}">${h}h UTC</option>`;
     }
 
+    document.getElementById('fCategory').addEventListener('change', () => {
+      document.getElementById('fSymbol').value = '';
+      populateSymbolFilter();
+      refresh();
+      renderRecommendations();
+    });
+
+    document.getElementById('fSymbol').addEventListener('change', refresh);
+
     document.getElementById('btnApply').addEventListener('click', refresh);
     document.getElementById('btnReset').addEventListener('click', () => {
       ['fSymbol','fCategory','fDirection','fResult','fHour','fDateFrom','fDateTo'].forEach(id => {
         document.getElementById(id).value = '';
       });
+      populateSymbolFilter();
       refresh();
     });
 
-    populateSymbols();
+    loadCatalog();
     refresh();
     setInterval(refresh, 3000);
   </script>

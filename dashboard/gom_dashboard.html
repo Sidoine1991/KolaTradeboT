@@ -1,0 +1,595 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GOM Verdicts + Trade History Dashboard</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+            color: #e2e8f0;
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 30px;
+            padding: 20px;
+            background: rgba(15, 23, 42, 0.8);
+            border-radius: 12px;
+            border: 1px solid rgba(71, 85, 105, 0.3);
+        }
+
+        .header h1 {
+            font-size: 28px;
+            font-weight: 700;
+        }
+
+        .timestamp {
+            font-size: 12px;
+            color: #94a3b8;
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+
+        .card {
+            background: rgba(30, 41, 59, 0.8);
+            border: 1px solid rgba(71, 85, 105, 0.3);
+            border-radius: 12px;
+            padding: 20px;
+            backdrop-filter: blur(10px);
+            transition: all 0.3s ease;
+        }
+
+        .card:hover {
+            border-color: rgba(148, 163, 184, 0.5);
+            transform: translateY(-2px);
+        }
+
+        .card-title {
+            font-size: 14px;
+            font-weight: 600;
+            color: #cbd5e1;
+            margin-bottom: 15px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .metric {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 10px 0;
+            border-bottom: 1px solid rgba(71, 85, 105, 0.2);
+        }
+
+        .metric:last-child {
+            border-bottom: none;
+        }
+
+        .metric-label {
+            font-size: 12px;
+            color: #94a3b8;
+        }
+
+        .metric-value {
+            font-size: 16px;
+            font-weight: 600;
+            color: #e2e8f0;
+        }
+
+        .metric-value.positive {
+            color: #10b981;
+        }
+
+        .metric-value.negative {
+            color: #ef4444;
+        }
+
+        .verdict-card {
+            background: rgba(30, 41, 59, 0.8);
+            border-left: 4px solid;
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 15px;
+            display: grid;
+            grid-template-columns: 1fr auto;
+            gap: 20px;
+            align-items: start;
+        }
+
+        .verdict-card.buy {
+            border-left-color: #10b981;
+            background: rgba(16, 185, 129, 0.05);
+        }
+
+        .verdict-card.sell {
+            border-left-color: #ef4444;
+            background: rgba(239, 68, 68, 0.05);
+        }
+
+        .verdict-header {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 12px;
+        }
+
+        .verdict-emoji {
+            font-size: 24px;
+        }
+
+        .verdict-symbol {
+            font-size: 18px;
+            font-weight: 700;
+        }
+
+        .verdict-direction {
+            font-size: 12px;
+            font-weight: 600;
+            padding: 4px 8px;
+            border-radius: 6px;
+            text-transform: uppercase;
+        }
+
+        .verdict-direction.buy {
+            background: rgba(16, 185, 129, 0.2);
+            color: #10b981;
+        }
+
+        .verdict-direction.sell {
+            background: rgba(239, 68, 68, 0.2);
+            color: #ef4444;
+        }
+
+        .verdict-details {
+            font-size: 13px;
+            display: grid;
+            gap: 8px;
+        }
+
+        .verdict-detail {
+            display: flex;
+            justify-content: space-between;
+            padding: 6px 0;
+        }
+
+        .verdict-detail-label {
+            color: #94a3b8;
+        }
+
+        .verdict-detail-value {
+            font-weight: 600;
+            color: #e2e8f0;
+            font-family: 'Courier New', monospace;
+        }
+
+        .verdict-coherence {
+            font-size: 14px;
+            font-weight: 700;
+            color: #f59e0b;
+        }
+
+        .verdict-multitf {
+            display: flex;
+            gap: 4px;
+            margin-top: 8px;
+            font-size: 12px;
+        }
+
+        .tf-indicator {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 24px;
+            height: 24px;
+            border-radius: 4px;
+            font-weight: 600;
+            font-size: 11px;
+        }
+
+        .tf-indicator.up {
+            background: rgba(16, 185, 129, 0.2);
+            color: #10b981;
+        }
+
+        .tf-indicator.down {
+            background: rgba(239, 68, 68, 0.2);
+            color: #ef4444;
+        }
+
+        .tf-indicator.neutral {
+            background: rgba(100, 116, 139, 0.2);
+            color: #94a3b8;
+        }
+
+        .section {
+            margin-bottom: 30px;
+        }
+
+        .section-title {
+            font-size: 16px;
+            font-weight: 700;
+            margin-bottom: 15px;
+            padding-bottom: 10px;
+            border-bottom: 2px solid rgba(148, 163, 184, 0.2);
+        }
+
+        .trade-table {
+            width: 100%;
+            border-collapse: collapse;
+            overflow: hidden;
+            border-radius: 12px;
+            background: rgba(30, 41, 59, 0.8);
+            border: 1px solid rgba(71, 85, 105, 0.3);
+        }
+
+        .trade-table th {
+            background: rgba(15, 23, 42, 0.8);
+            padding: 12px;
+            text-align: left;
+            font-size: 12px;
+            font-weight: 600;
+            color: #cbd5e1;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            border-bottom: 1px solid rgba(71, 85, 105, 0.3);
+        }
+
+        .trade-table td {
+            padding: 12px;
+            font-size: 13px;
+            border-bottom: 1px solid rgba(71, 85, 105, 0.2);
+        }
+
+        .trade-table tr:hover {
+            background: rgba(71, 85, 105, 0.1);
+        }
+
+        .status-win {
+            color: #10b981;
+            font-weight: 600;
+        }
+
+        .status-loss {
+            color: #ef4444;
+            font-weight: 600;
+        }
+
+        .status-be {
+            color: #f59e0b;
+            font-weight: 600;
+        }
+
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: #94a3b8;
+        }
+
+        .error {
+            background: rgba(239, 68, 68, 0.1);
+            border: 1px solid rgba(239, 68, 68, 0.3);
+            color: #fca5a5;
+            padding: 15px;
+            border-radius: 8px;
+            margin: 15px 0;
+        }
+
+        .success {
+            background: rgba(16, 185, 129, 0.1);
+            border: 1px solid rgba(16, 185, 129, 0.3);
+            color: #a7f3d0;
+            padding: 15px;
+            border-radius: 8px;
+            margin: 15px 0;
+        }
+
+        .refresh-btn {
+            background: rgba(59, 130, 246, 0.2);
+            border: 1px solid rgba(59, 130, 246, 0.5);
+            color: #93c5fd;
+            padding: 8px 16px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 12px;
+            font-weight: 600;
+            transition: all 0.2s;
+        }
+
+        .refresh-btn:hover {
+            background: rgba(59, 130, 246, 0.3);
+            border-color: rgba(59, 130, 246, 0.7);
+        }
+
+        .refresh-btn:active {
+            transform: scale(0.95);
+        }
+
+        @media (max-width: 768px) {
+            .header {
+                flex-direction: column;
+                gap: 10px;
+                text-align: center;
+            }
+
+            .header h1 {
+                font-size: 20px;
+            }
+
+            .verdict-card {
+                grid-template-columns: 1fr;
+            }
+
+            .grid {
+                grid-template-columns: 1fr;
+            }
+
+            .trade-table {
+                font-size: 12px;
+            }
+
+            .trade-table th, .trade-table td {
+                padding: 8px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🎯 GOM Verdicts + Trade History</h1>
+            <div style="text-align: right;">
+                <button class="refresh-btn" onclick="refreshData()">🔄 Refresh</button>
+                <div class="timestamp" id="timestamp"></div>
+            </div>
+        </div>
+
+        <!-- Summary Cards -->
+        <div class="grid" id="summaryGrid">
+            <div class="card">
+                <div class="card-title">GOM Verdicts (Active)</div>
+                <div class="loading">Loading...</div>
+            </div>
+            <div class="card">
+                <div class="card-title">Trades (24h)</div>
+                <div class="loading">Loading...</div>
+            </div>
+            <div class="card">
+                <div class="card-title">Trades (7d)</div>
+                <div class="loading">Loading...</div>
+            </div>
+        </div>
+
+        <!-- GOM Verdicts Section -->
+        <div class="section">
+            <div class="section-title">🎯 Active GOM Verdicts</div>
+            <div id="verdictsContainer" class="loading">Loading verdicts...</div>
+        </div>
+
+        <!-- Recent Trades Section -->
+        <div class="section">
+            <div class="section-title">📊 Recent Trades (Last 24h)</div>
+            <div id="tradesContainer" class="loading">Loading trades...</div>
+        </div>
+    </div>
+
+    <script>
+        const API_BASE = 'http://127.0.0.1:8765';
+
+        async function loadData() {
+            try {
+                // Load GOM summary
+                const summaryRes = await fetch(`${API_BASE}/api/gom-summary`);
+                const summary = await summaryRes.json();
+                updateSummary(summary);
+
+                // Load verdicts
+                const verdictsRes = await fetch(`${API_BASE}/api/gom-verdicts`);
+                const verdictsData = await verdictsRes.json();
+                updateVerdicts(verdictsData.verdicts);
+
+                // Load trades
+                const tradesRes = await fetch(`${API_BASE}/api/trades?date_from=${getTodayDate()}`);
+                const tradesData = await tradesRes.json();
+                updateTrades(tradesData.trades);
+
+                updateTimestamp();
+            } catch (error) {
+                console.error('Error loading data:', error);
+                showError('Failed to load data: ' + error.message);
+            }
+        }
+
+        function updateSummary(data) {
+            const summaryGrid = document.getElementById('summaryGrid');
+            summaryGrid.innerHTML = `
+                <div class="card">
+                    <div class="card-title">GOM Verdicts</div>
+                    <div class="metric">
+                        <span class="metric-label">Total Symbols</span>
+                        <span class="metric-value">${data.verdicts.total_verdicts}</span>
+                    </div>
+                    <div class="metric">
+                        <span class="metric-label">BUY Signals</span>
+                        <span class="metric-value positive">+${data.verdicts.buys}</span>
+                    </div>
+                    <div class="metric">
+                        <span class="metric-label">SELL Signals</span>
+                        <span class="metric-value negative">-${data.verdicts.sells}</span>
+                    </div>
+                </div>
+                <div class="card">
+                    <div class="card-title">Trades (24h)</div>
+                    <div class="metric">
+                        <span class="metric-label">Total</span>
+                        <span class="metric-value">${data.metrics_24h.total_trades}</span>
+                    </div>
+                    <div class="metric">
+                        <span class="metric-label">Win Rate</span>
+                        <span class="metric-value">${data.metrics_24h.win_rate.toFixed(1)}%</span>
+                    </div>
+                    <div class="metric">
+                        <span class="metric-label">Net P&L</span>
+                        <span class="metric-value ${data.metrics_24h.net_pnl > 0 ? 'positive' : 'negative'}">
+                            $${data.metrics_24h.net_pnl.toFixed(2)}
+                        </span>
+                    </div>
+                </div>
+                <div class="card">
+                    <div class="card-title">Trades (7d)</div>
+                    <div class="metric">
+                        <span class="metric-label">Total</span>
+                        <span class="metric-value">${data.metrics_7d.total_trades}</span>
+                    </div>
+                    <div class="metric">
+                        <span class="metric-label">Win Rate</span>
+                        <span class="metric-value">${data.metrics_7d.win_rate.toFixed(1)}%</span>
+                    </div>
+                    <div class="metric">
+                        <span class="metric-label">Net P&L</span>
+                        <span class="metric-value ${data.metrics_7d.net_pnl > 0 ? 'positive' : 'negative'}">
+                            $${data.metrics_7d.net_pnl.toFixed(2)}
+                        </span>
+                    </div>
+                </div>
+            `;
+        }
+
+        function updateVerdicts(verdicts) {
+            const container = document.getElementById('verdictsContainer');
+            if (!verdicts || verdicts.length === 0) {
+                container.innerHTML = '<div class="error">No active verdicts</div>';
+                return;
+            }
+
+            const isBuy = (v) => v.verdict_num in [1, 2];
+            const verdict = (v) => v.verdict_num === 1 ? 'PERFECT BUY' : v.verdict_num === 2 ? 'BUY' : v.verdict_num === 3 ? 'SELL' : 'PERFECT SELL';
+            const emoji = (v) => isBuy(v) ? '🟢' : '🔴';
+
+            container.innerHTML = verdicts.slice(0, 10).map(v => `
+                <div class="verdict-card ${isBuy(v) ? 'buy' : 'sell'}">
+                    <div>
+                        <div class="verdict-header">
+                            <span class="verdict-emoji">${emoji(v)}</span>
+                            <span class="verdict-symbol">${v.symbol || 'N/A'}</span>
+                            <span class="verdict-direction ${isBuy(v) ? 'buy' : 'sell'}">${verdict(v)}</span>
+                        </div>
+                        <div class="verdict-details">
+                            <div class="verdict-detail">
+                                <span class="verdict-detail-label">Entry:</span>
+                                <span class="verdict-detail-value">${(v.entry || 0).toFixed(2)}</span>
+                            </div>
+                            <div class="verdict-detail">
+                                <span class="verdict-detail-label">Stop Loss:</span>
+                                <span class="verdict-detail-value">${(v.sl || 0).toFixed(2)}</span>
+                            </div>
+                            <div class="verdict-detail">
+                                <span class="verdict-detail-label">Take Profit:</span>
+                                <span class="verdict-detail-value">${(v.tp || 0).toFixed(2)}</span>
+                            </div>
+                        </div>
+                    </div>
+                    <div style="text-align: right;">
+                        <div class="verdict-coherence">${(v.coherence || 0).toFixed(0)}%</div>
+                        <div style="font-size: 11px; color: #94a3b8; margin-top: 8px;">Coherence</div>
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        function updateTrades(trades) {
+            const container = document.getElementById('tradesContainer');
+            if (!trades || trades.length === 0) {
+                container.innerHTML = '<div class="error">No trades in the last 24 hours</div>';
+                return;
+            }
+
+            const html = `
+                <table class="trade-table">
+                    <thead>
+                        <tr>
+                            <th>Time</th>
+                            <th>Symbol</th>
+                            <th>Direction</th>
+                            <th>Volume</th>
+                            <th>Entry</th>
+                            <th>Close</th>
+                            <th>P&L</th>
+                            <th>Result</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${trades.slice(0, 20).map(t => {
+                            const statusClass = t.net_profit > 0 ? 'status-win' : t.net_profit < 0 ? 'status-loss' : 'status-be';
+                            const statusText = t.net_profit > 0 ? 'WIN' : t.net_profit < 0 ? 'LOSS' : 'BE';
+                            return `
+                                <tr>
+                                    <td>${t.close_time || ''}</td>
+                                    <td>${t.symbol}</td>
+                                    <td>${t.direction}</td>
+                                    <td>${t.volume?.toFixed(2) || '0'}</td>
+                                    <td>${t.open_price?.toFixed(2) || '0'}</td>
+                                    <td>${t.close_price?.toFixed(2) || '0'}</td>
+                                    <td class="${t.net_profit > 0 ? 'positive' : t.net_profit < 0 ? 'negative' : ''}">
+                                        $${t.net_profit?.toFixed(2) || '0'}
+                                    </td>
+                                    <td class="${statusClass}">${statusText}</td>
+                                </tr>
+                            `;
+                        }).join('')}
+                    </tbody>
+                </table>
+            `;
+            container.innerHTML = html;
+        }
+
+        function getTodayDate() {
+            const now = new Date();
+            return now.toISOString().split('T')[0];
+        }
+
+        function updateTimestamp() {
+            const ts = new Date().toLocaleString();
+            document.getElementById('timestamp').textContent = 'Last updated: ' + ts;
+        }
+
+        function refreshData() {
+            loadData();
+        }
+
+        function showError(msg) {
+            const div = document.createElement('div');
+            div.className = 'error';
+            div.textContent = msg;
+            document.querySelector('.container').insertBefore(div, document.querySelector('.section'));
+        }
+
+        // Load data on page load
+        loadData();
+
+        // Auto-refresh every 10 seconds
+        setInterval(loadData, 10000);
+    </script>
+</body>
+</html>

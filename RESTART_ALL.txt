@@ -1,0 +1,69 @@
+=========================================================
+DASHBOARD ROUTE FIXED
+=========================================================
+
+I added the dashboard HTML serving route to ai_server.py
+
+Now you need to RESTART everything:
+
+=========================================================
+STEP 1: Close all running services
+=========================================================
+
+Close these windows if open:
+   - AI Server console
+   - Perfect Scanner console
+   - Browser dashboard
+
+Or run:
+   taskkill /IM python.exe /F
+
+=========================================================
+STEP 2: Recompile SMC_Universal
+=========================================================
+
+Double-clic: D:\Dev\TradBOT\COMPILE_SMC_UNIVERSAL.bat
+
+Wait for compilation to finish
+Should show: 0 errors
+
+=========================================================
+STEP 3: Restart services
+=========================================================
+
+Double-clic: D:\Dev\TradBOT\START_SERVICES.bat
+
+Wait 20 seconds...
+
+=========================================================
+STEP 4: Test dashboard
+=========================================================
+
+Try these URLs:
+
+http://localhost:8000/dashboard/perfect_opportunities.html
+
+or
+
+http://localhost:8000/dashboard/
+
+Both should work now!
+
+=========================================================
+
+If still doesn't work:
+
+Check: D:\Dev\TradBOT\logs\ai_server.log
+
+For errors starting the server
+
+=========================================================
+
+NOW:
+
+1. Close running services
+2. Run: COMPILE_SMC_UNIVERSAL.bat
+3. Run: START_SERVICES.bat
+4. Try dashboard URL
+
+GO!

@@ -1,0 +1,164 @@
+================================================================================
+START HERE — LAUNCH SCANNER NOW
+================================================================================
+
+YOU SEE THIS ERROR:
+   [ERROR] Python 3.14 not found
+
+SOLUTION: 3 SCRIPTS TO TRY (in order)
+
+================================================================================
+TRY #1: AUTO-FIND PYTHON (Recommended)
+================================================================================
+
+Double-click: D:\Dev\TradBOT\FIND_PYTHON_AND_LAUNCH.bat
+
+This will:
+   - Search your computer for Python
+   - Find it automatically
+   - Launch scanner
+
+Wait 10 seconds... you should see 3 windows open
+
+SUCCESS = Done!
+FAIL = Try #2 below
+
+================================================================================
+TRY #2: MANUAL PYTHON PATH (If #1 fails)
+================================================================================
+
+Double-click: D:\Dev\TradBOT\LAUNCH_WITH_PYTHON_PATH.bat
+
+It will ask: "Enter full path to python.exe:"
+
+To find your Python path:
+   1. Open Command Prompt (Win + R → cmd → Enter)
+   2. Type: where python
+   3. Copy the path shown
+   4. Paste into the script
+
+Example:
+   C:\Users\USER\AppData\Local\Programs\Python\Python311\python.exe
+
+SUCCESS = Done!
+FAIL = Try #3 below
+
+================================================================================
+TRY #3: INSTALL PYTHON (If #2 fails)
+================================================================================
+
+You need to install Python first.
+
+Download: https://www.python.org/downloads/
+
+Install:
+   1. Run installer
+   2. IMPORTANT: Check "Add Python to PATH"
+   3. Click "Install Now"
+   4. Restart computer
+
+Then try #1 or #2 again
+
+================================================================================
+AFTER SCANNER LAUNCHES
+================================================================================
+
+You'll see 3 windows:
+
+1. AI Server (Console)
+   - Black window with green text
+   - Shows: "Uvicorn running on http://0.0.0.0:8000"
+
+2. Scanner (Console)
+   - Black window
+   - Shows: "Scanning for perfect opportunities..."
+
+3. Dashboard (Browser)
+   - Chrome/Firefox/Edge opens
+   - Shows: "Perfect Trading Opportunities"
+
+Monitor these 3 windows:
+
+   Dashboard: http://localhost:8000/dashboard/perfect_opportunities.html
+   
+   Logs: D:\Dev\TradBOT\logs\scanner.log
+   
+   WhatsApp: Check for real-time alerts
+
+================================================================================
+WHAT HAPPENS NEXT
+================================================================================
+
+Every 30 seconds:
+   Scanner checks all symbols for "perfect" opportunities
+
+Every 2 minutes:
+   WhatsApp alert sent (if perfect opportunity found)
+
+Real-time:
+   Dashboard updates automatically
+   Shows symbol + metrics + countdown
+
+When you see a perfect opportunity:
+   - Card appears on dashboard
+   - WhatsApp alert received
+   - Ready to trade!
+
+================================================================================
+IF SCANNER DOESN'T START
+================================================================================
+
+Check:
+   1. All 3 windows appear within 10 seconds
+      → If no windows: Python path is wrong, try #2
+   
+   2. Dashboard loads
+      → If "Not Found": Wait 5 more seconds, refresh (F5)
+   
+   3. Logs file exists
+      → D:\Dev\TradBOT\logs\scanner.log should have content
+   
+   4. Verify status
+      → Double-click: VERIFY_SCANNER_RUNNING.bat
+
+================================================================================
+HELP FILES
+================================================================================
+
+Python Path Issues:
+   → Read: FIX_PYTHON_PATH.txt
+
+Scanner Not Starting:
+   → Read: RUN_SCANNER_NOW.txt
+
+Full Documentation:
+   → Read: README_PERFECT_OPPORTUNITIES.md
+
+Setup Guide:
+   → Read: PERFECT_SCANNER_SETUP.txt
+
+Status Check:
+   → Run: VERIFY_SCANNER_RUNNING.bat
+
+View Logs:
+   → Run: VIEW_SCANNER_LOGS.bat
+
+================================================================================
+SUMMARY
+================================================================================
+
+1. Double-click: FIND_PYTHON_AND_LAUNCH.bat
+2. Wait 10 seconds
+3. See 3 windows open
+4. Monitor dashboard + WhatsApp
+5. Trade when perfect opportunity appears!
+
+================================================================================
+NOW DO IT!
+================================================================================
+
+D:\Dev\TradBOT\FIND_PYTHON_AND_LAUNCH.bat
+
+Let's go! 🚀
+
+================================================================================

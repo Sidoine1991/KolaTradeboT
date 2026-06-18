@@ -1,0 +1,85 @@
+═══════════════════════════════════════════════════════════════════════════════
+🚀 DEPLOY IA HOLD HIERARCHY FIX
+═══════════════════════════════════════════════════════════════════════════════
+
+CHANGE APPLIED:
+✅ File: D:\Dev\TradBOT\mt5\SMC_Universal.mq5 (Line ~11100)
+✅ Logic: GOM > IA HOLD (hierarchical decision)
+✅ Result: XAUUSD BUY signals no longer blocked by IA HOLD (50%)
+
+═══════════════════════════════════════════════════════════════════════════════
+STEP 1: COMPILE
+═══════════════════════════════════════════════════════════════════════════════
+
+Method A (Windows Batch):
+  D:\Dev\TradBOT\compile-fix.bat
+
+Method B (Manual):
+  1. Open MetaEditor
+  2. File → Open: D:\Dev\TradBOT\mt5\SMC_Universal.mq5
+  3. Press: F5
+  4. Wait for: "Compilation successful"
+  5. Expected: 0 errors, 0 warnings
+
+═══════════════════════════════════════════════════════════════════════════════
+STEP 2: VERIFY COMPILATION
+═══════════════════════════════════════════════════════════════════════════════
+
+Look for output in MetaEditor:
+  ✅ "Compiling: SMC_Universal.mq5"
+  ✅ "Compilation successful"
+  ✅ "Compiled in: X.XX seconds"
+
+═══════════════════════════════════════════════════════════════════════════════
+STEP 3: DEPLOY TO MT5
+═══════════════════════════════════════════════════════════════════════════════
+
+Option A (Auto reload):
+  1. Just compile (MT5 auto-reloads EA)
+  2. Check Expert tab for: "SMC_Universal loaded successfully"
+
+Option B (Manual reload):
+  1. Close MT5 terminal completely
+  2. Open MT5 terminal
+  3. EA automatically loads
+  4. Check Expert tab
+
+═══════════════════════════════════════════════════════════════════════════════
+STEP 4: TEST & VERIFY
+═══════════════════════════════════════════════════════════════════════════════
+
+Watch logs for fix activation:
+
+OLD BEHAVIOR (before 14:14):
+  ❌ 🚫 ORDRES MARCHÉ BLOQUÉS - IA en HOLD
+  ❌ Entry refused (IA HOLD absolute block)
+
+NEW BEHAVIOR (after fix):
+  ✅ ✅ IA HOLD mais GOM=GOOD_BUY (83.3%) → HIÉRARCHIE GOM PRIME
+  ✅ Entry allowed (GOM prime over IA HOLD)
+
+Test scenarios:
+  ✅ XAUUSD with GOM BUY + IA HOLD → Should ENTER (NEW)
+  ✅ Boom/Crash with direction wrong → Should BLOCK (unchanged)
+  ✅ GOM WAIT + IA HOLD → Should BLOCK (double safety)
+
+═══════════════════════════════════════════════════════════════════════════════
+NEXT SIGNAL
+═══════════════════════════════════════════════════════════════════════════════
+
+Wait for next GOM verdict on XAUUSD or similar Forex:
+
+  If GOM = GOOD_BUY/PERFECT_BUY + Coherence ≥80%
+  Then Entry WILL proceed (even if IA = HOLD)
+  Result: ✅ Capture opportunity
+
+═══════════════════════════════════════════════════════════════════════════════
+DOCUMENTATION
+═══════════════════════════════════════════════════════════════════════════════
+
+Read for details:
+  📄 D:\Dev\TradBOT\FIX_IA_HOLD_HIERARCHY.md
+
+═══════════════════════════════════════════════════════════════════════════════
+STATUS: READY TO DEPLOY ✅
+═══════════════════════════════════════════════════════════════════════════════

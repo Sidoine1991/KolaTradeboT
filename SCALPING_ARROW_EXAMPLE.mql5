@@ -1,0 +1,265 @@
+//+------------------------------------------------------------------+
+//| SCALPING ARROW INTEGRATION EXAMPLE
+//| Shows how to integrate SMC_ScalpingArrow into OnTick()
+//| Copy relevant sections to SMC_Universal.mq5
+//+------------------------------------------------------------------+
+
+//+------------------------------------------------------------------+
+//| EXAMPLE 1: Global Declaration (add to SMC_Universal.mq5 globals)
+//+------------------------------------------------------------------+
+
+// Create scalping arrow manager (one per symbol per timeframe)
+ScalpingArrowManager scalpArrow_M1(Symbol(), PERIOD_M1);
+ScalpingArrowManager scalpArrow_M5(Symbol(), PERIOD_M5);
+
+// Track gates for current symbol
+struct GateStatus {
+   bool direction;
+   bool coherence;
+   bool iaConfidence;
+   bool multitf;
+   bool correction;
+   bool giveback;
+   string lastFailReason;
+};
+
+GateStatus gateStatus;
+
+
+//+------------------------------------------------------------------+
+//| EXAMPLE 2: Gate Validation Function (add to SMC_Universal.mq5)
+//+------------------------------------------------------------------+
+
+bool CheckAllGatesForScalping(GateStatus &gates, string &reason) {
+   gates.direction = true;
+   gates.coherence = false;
+   gates.iaConfidence = false;
+   gates.multitf = true;
+   gates.correction = true;
+   gates.giveback = true;
+
+   // Gate 1: Direction enforcement
+   if(StringFind(_Symbol, "BOOM") >= 0 && g_gomVerdict == "SELL") {
+      gates.direction = false;
+      reason = "SELL forbidden on Boom";
+      return false;
+   }
+   if(StringFind(_Symbol, "CRASH") >= 0 && g_gomVerdict == "BUY") {
+      gates.direction = false;
+      reason = "BUY forbidden on Crash";
+      return false;
+   }
+
+   // Gate 2: Coherence ≥85%
+   if(g_gomCoherence >= 85.0) {
+      gates.coherence = true;
+   } else {
+      reason = StringFormat("Coherence %.0f%% < 85%%", g_gomCoherence);
+      return false;
+   }
+
+   // Gate 3: IA Confidence ≥70%
+   if(g_lastAIConfidence >= 70.0) {
+      gates.iaConfidence = true;
+   } else {
+      reason = StringFormat("IA confidence %.0f%% < 70%%", g_lastAIConfidence);
+      return false;
+   }
+
+   // Gate 4: Multi-TF alignment (simplified example)
+   // Full logic would check M1/M5/H1 alignment via SMCGP
+   gates.multitf = true;
+
+   // Gate 5: No correction detected
+   if(g_lastAIAction == "hold") {
+      gates.correction = false;
+      reason = "IA in HOLD (correction/pullback detected)";
+      return false;
+   }
+
+   // Gate 6: No giveback cooldown
+   // (Would check cooldown timer)
+   gates.giveback = true;
+
+   reason = "ALL GATES PASSED ✓";
+   return true;
+}
+
+
+//+------------------------------------------------------------------+
+//| EXAMPLE 3: OnTick Integration (add to SMC_Universal.mq5 OnTick)
+//+------------------------------------------------------------------+
+
+void OnTick() {
+   // [Existing code...]
+
+   // Get current rates
+   MqlRates rates[200];
+   int copied = CopyRates(_Symbol, _Period, 0, 200, rates);
+   if(copied < 5) return;
+
+   double currentATR = iATR(_Symbol, _Period, 14);
+   double currentBid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+
+   //+------------------------------------------------------------------+
+   //| SCALPING ARROW MAIN LOGIC
+   //+------------------------------------------------------------------+
+
+   // Step 1: Check all gates
+   GateStatus gates;
+   string gateReason = "";
+
+   bool allGatesPassed = CheckAllGatesForScalping(gates, gateReason);
+
+   if(allGatesPassed && g_gomVerdict != "WAIT") {
+      //--- ALL GATES PASSED: Activate arrow and send notification ---
+
+      // Calculate TP levels based on direction and ATR
+      double entry = currentBid;
+      double sl, tp1, tp2, tp3;
+
+      if(g_gomVerdict == "BUY" || g_gomVerdict == "PERFECT BUY") {
+         // Buy signal
+         sl = entry - (2.0 * currentATR);
+         tp1 = entry + (2.0 * currentATR);
+         tp2 = entry + (4.0 * currentATR);
+         tp3 = entry + (6.0 * currentATR);
+      } else {
+         // Sell signal
+         sl = entry + (2.0 * currentATR);
+         tp1 = entry - (2.0 * currentATR);
+         tp2 = entry - (4.0 * currentATR);
+         tp3 = entry - (6.0 * currentATR);
+      }
+
+      // Activate the blinking arrow
+      ScalpingArrowState arrowState = scalpArrow_M1.GetState();
+
+      if(!arrowState.isActive) {
+         // First activation
+         scalpArrow_M1.ActivateArrow(entry, sl, tp1, tp2, tp3, g_gomVerdict);
+
+         // Send WhatsApp notification
+         scalpArrow_M1.SendNotification("ENTRY", g_gomVerdict);
+
+         Print("📢 NOTIFICATION SENT");
+         Print("   Entry: ", DoubleToString(entry, _Digits));
+         Print("   SL: ", DoubleToString(sl, _Digits));
+         Print("   TP1: ", DoubleToString(tp1, _Digits));
+         Print("   TP2: ", DoubleToString(tp2, _Digits));
+         Print("   TP3: ", DoubleToString(tp3, _Digits));
+      }
+
+      // Draw the blinking arrow on chart
+      scalpArrow_M1.DrawBlinkingArrow(rates, copied);
+
+   } else if(allGatesPassed == false) {
+      //--- GATE FAILED: Deactivate arrow ---
+
+      ScalpingArrowState arrowState = scalpArrow_M1.GetState();
+
+      if(arrowState.isActive) {
+         scalpArrow_M1.DeactivateArrow(gateReason);
+         Print("❌ Arrow deactivated: ", gateReason);
+      }
+   }
+
+   // Step 2: Check spike detection (arrow should disappear)
+   scalpArrow_M1.DetectSpike(rates, copied, currentATR);
+
+   // Step 3: Track small candles (reappearance logic)
+   scalpArrow_M1.TrackSmallCandles(rates, copied, currentATR);
+
+   // Step 4: Check for correction exit
+   CorrectionAnticipation antic = SMC_AnticipateCorrection(rates, copied, currentATR);
+
+   if(antic.isAnticipated && antic.barsUntilCorrection <= 5) {
+      // Correction imminent - EXIT NOW
+      scalpArrow_M1.CheckCorrectionExit(antic);
+
+      Print("⚠️ CORRECTION EXIT TRIGGERED");
+      Print("   Reason: ", antic.reason);
+      Print("   ETA: ", antic.barsUntilCorrection, " bars");
+   }
+
+   // [Rest of existing OnTick code...]
+}
+
+
+//+------------------------------------------------------------------+
+//| EXAMPLE 4: WhatsApp Callback (when notification arrives)
+//+------------------------------------------------------------------+
+
+void OnWhatsAppNotification(string msg) {
+   // This is called when WhatsApp message is received from PsychoBot
+
+   if(StringFind(msg, "ENTRY SIGNAL READY") >= 0) {
+      Print("✅ User received ENTRY notification");
+      // Can log, alert, etc.
+   } else if(StringFind(msg, "EXIT SIGNAL") >= 0) {
+      Print("❌ User received EXIT notification");
+      // Can log, alert, etc.
+   }
+}
+
+
+//+------------------------------------------------------------------+
+//| EXAMPLE 5: Monitor Scalping Activity (for logs)
+//+------------------------------------------------------------------+
+
+void PrintScalpingStatus() {
+   ScalpingArrowState state = scalpArrow_M1.GetState();
+
+   Print("═══════════════════════════════════════════════");
+   Print("SCALPING ARROW STATUS - ", _Symbol);
+   Print("═══════════════════════════════════════════════");
+   Print("Active: ", state.isActive ? "YES" : "NO");
+   Print("Blinking: ", state.isBlinking ? "YES" : "NO");
+   Print("Spike Detected: ", state.spikeDetected ? "YES" : "NO");
+   Print("Bars in Small Candles: ", state.barsInSmallCandles);
+   Print("TP Level: ", state.tpLevel);
+   Print("Entry: ", DoubleToString(state.entryPrice, _Digits));
+   Print("SL: ", DoubleToString(state.stopLoss, _Digits));
+   Print("TP1: ", DoubleToString(state.takeProfit1, _Digits));
+   Print("TP2: ", DoubleToString(state.takeProfit2, _Digits));
+   Print("TP3: ", DoubleToString(state.takeProfit3, _Digits));
+   Print("Last Notification: ", state.lastNotificationID);
+   Print("═══════════════════════════════════════════════");
+}
+
+
+//+------------------------------------------------------------------+
+//| EXPECTED BEHAVIOR IN LOGS
+//+------------------------------------------------------------------+
+
+/*
+When all gates pass:
+───────────────────────────────────
+🎯 ARROW ACTIVATED - VOLATILITY 100 INDEX | Direction: PERFECT SELL
+   Entry: 348.45 | SL: 352.31
+📢 NOTIFICATION SENT
+   Entry: 348.45
+   SL: 352.31
+   TP1: 344.21
+   TP2: 340.55
+   TP3: 336.89
+📊 Arrow blinking: TP1: 344.21 | TP2: 340.55 | TP3: 336.89
+
+If spike detected:
+───────────────────────────────────
+🚨 SPIKE DETECTED - VOLATILITY 100 INDEX
+❌ ARROW DEACTIVATED - VOLATILITY 100 INDEX | Reason: SPIKE DETECTED
+
+After 3-4 small candles:
+───────────────────────────────────
+✅ ARROW RE-ACTIVATED - Signal still valid after spike
+📊 Arrow blinking: TP1: 344.21 | TP2: 340.55 | TP3: 336.89
+
+If correction detected:
+───────────────────────────────────
+⚠️ CORRECTION EXIT TRIGGERED
+   Reason: Correction anticipated (FVG+OB pattern detected, 3 bars)
+   ETA: 3 bars
+🚨 EXIT SIGNAL - VOLATILITY 100 INDEX
+   Reason: Correction imminent (3 bars)
+*/

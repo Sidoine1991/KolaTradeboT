@@ -1,0 +1,216 @@
+================================================================================
+GOM SYNC + WHATSAPP REPORT DEPLOYMENT — 2026-06-17
+================================================================================
+
+✅ STATUS: DÉPLOIEMENT COMPLÉTÉ AVEC SUCCÈS
+
+================================================================================
+1. EXÉCUTION GOM SYNC
+================================================================================
+
+Command:
+  cd D:/Dev/TradBOT && python python/gom_sync_with_report.py --report
+
+Result:
+  [✅] 3 verdicts GOM chargés depuis MT5 LIVE
+  [✅] Rapport construit avec format standardisé
+  [✅] Envoi WhatsApp réussi (AI server HTTP 200)
+  [✅] Logs complets stockés
+
+Rapport Généré:
+  🟢 BOOM 900 INDEX — BUY
+     Entry: 9156.29 | SL: 9146.69 | TP: 9175.47 | Coh: 83%
+
+  🔴 CRASH 300 INDEX — PERFECT SELL
+     Entry: 1827.75 | SL: 1841.12 | TP: 1801.02 | Coh: 83%
+
+  🔴 BTCUSD — GOOD SELL
+     Entry: 65811.64 | SL: 65937.44 | TP: 65622.93 | Coh: 83%
+
+  📅 Timestamp: 2026-06-17 00:55:15 UTC
+
+================================================================================
+2. BOUCLE 10 MINUTES — OPTIONS DE DÉPLOIEMENT
+================================================================================
+
+OPTION 1: Exécution Manuelle (Une fois)
+  python python/gom_sync_with_report.py --report
+
+OPTION 2: PowerShell Boucle Interactive
+  powershell -ExecutionPolicy Bypass -File gom_sync_loop.ps1
+  
+  Paramètres:
+  - -IntervalMinutes 5    (modifie intervalle de 10 à 5 minutes)
+  - -RunOnce              (exécution unique)
+
+OPTION 3: Windows Scheduler Automatique 24/7
+  RUN AS ADMIN:
+  install_gom_sync_task.bat install
+  
+  Vérifier:
+  install_gom_sync_task.bat status
+  
+  Arrêter:
+  install_gom_sync_task.bat uninstall
+
+================================================================================
+3. FICHIERS CRÉÉS/MODIFIÉS
+================================================================================
+
+✅ gom_sync_loop.ps1
+   - Boucle PowerShell avec intervalle configurable
+   - Logging complet avec timestamps
+   - Gestion erreurs non-bloquante
+
+✅ install_gom_sync_task.bat
+   - Installation tâche Windows Scheduler
+   - Commandes: install, uninstall, status
+   - Exécution automatique toutes les 10 minutes
+
+✅ data/gom_signal.json
+   - Enrichi champs manquants:
+     * tf_m1_dir, tf_m5_dir, tf_m15_dir, tf_h1_dir, tf_h4_dir, tf_d1_dir
+     * coherence_pct
+     * verdict_num corrigés (négatif pour SELL)
+   - Compatibilité pipeline_hourly_autonomous.py
+
+================================================================================
+4. LOGS — EMPLACEMENTS ET FORMAT
+================================================================================
+
+Fichier Principal:
+  logs/gom_sync.log
+  - Append mode (données persistantes)
+  - Chaque exécution ajoute ses logs
+  - Includes: timestamps, verdicts, gates, erreurs
+
+Log Boucle:
+  logs/gom_sync_loop.log
+  - Créé par gom_sync_loop.ps1 (boucle PowerShell)
+  - Tous les runs 10-min, timestamps complets
+  - Statistiques: succès, erreurs, total
+
+Format Log Standard:
+  [YYYY-MM-DD HH:MM:SS] [LEVEL] [TAG] Message
+
+Tags Utilisés:
+  [OK]            ✅ Succès
+  [SEND]          📤 Envoi WhatsApp
+  [LOG]           📋 Rapport construit
+  [GATE-*]        🚫 Gate appliquée (rejet)
+  [ERROR]         ❌ Erreur
+
+================================================================================
+5. DÉCOUVERTE: VOLATILITY INDEX TRADING RESTRICTED
+================================================================================
+
+Problème Identifié:
+  - Boom/Crash rejetés en dehors fenêtres UTC spécifiques
+  - À 23:00 UTC: HTTP 403 "confiance 18% < 60% (fenetre 8-16)"
+
+Root Cause:
+  - bc_volatility.json définit fenêtres tradeables par heure UTC
+  - Serveur AI applique ces fenêtres comme gates
+  - Design intent: limiter trading volatility index aux heures haute volatilité
+
+Fenêtres Effectives (UTC):
+  BOOM 1000:    7-16 (tradeable)
+  BOOM 500:     8-16
+  CRASH 300:    8-16
+  CRASH 1000:   8-16
+  XAUUSD:       7-17
+  BTCUSD:       8-22
+
+Impact:
+  ✅ Robot inclut Boom/Crash dans top-5 scan (pipeline le fait)
+  ⚠️  Robot rejette ordres hors fenêtre 8-16 UTC
+  ✅ Top 3 symboles historiques sont Boom150 (70% WR), Boom50 (73% WR), Crash1000
+
+Recommandation:
+  Tester placements Boom/Crash entre 8-16 UTC pour valider stratégie
+
+================================================================================
+6. TOP 3 SYMBOLES RECOMMANDÉS (Historique)
+================================================================================
+
+[1] BOOM 150 Index — GOLD
+    Trades: 30 | Win Rate: 70.0% ⭐⭐ | Profit Factor: 1.38x
+    PnL Net: +3.50 | Trading Hours: 11:00-15:00 UTC
+
+[2] BOOM 50 Index — SILVER
+    Trades: 15 | Win Rate: 73.3% ⭐⭐ | Profit Factor: 1.40x
+    PnL Net: +2.23 | Trading Hours: 10:00-14:00 UTC
+
+[3] CRASH 1000 Index — BRONZE
+    Trades: 60 | Win Rate: 56.7% ⭐ | Profit Factor: 1.23x
+    PnL Net: +7.32 | Trading Hours: 14:00-18:00 UTC
+
+⚠️  XAUUSD: -295.05 PnL (54.3% WR) — À REVOIR
+
+================================================================================
+7. GATES APPLIQUÉES — PRIORITÉ ET ORDRE
+================================================================================
+
+1. [GATE-Boom/Crash Direction] — Rejet absolu si SELL sur Boom ou BUY sur Crash
+2. [GATE-IA-STATUS] — Cohérence < 70% (synth) ou < 80% (autres)
+3. [GATE-BC-HEURE] — Boom/Crash hors fenêtre UTC (HTTP 403 from server)
+4. [GATE-SESSION] — Symbole hors fenêtre trading marché UTC
+5. [GATE-RSI] — RSI extreme (BUY > 78, SELL < 22)
+6. [GATE-M15] — M15 opposé à direction
+
+================================================================================
+8. PROCHAINES ÉTAPES
+================================================================================
+
+IMMÉDIAT:
+  1. Installer Windows Scheduler (admin):
+     install_gom_sync_task.bat install
+
+  2. Vérifier installation:
+     install_gom_sync_task.bat status
+
+  3. Tester WhatsApp reception — rapports toutes les 10 min
+
+COURT TERME:
+  1. Tester Boom 150/50 trading entre 8-16 UTC
+  2. Valider placement dans pipeline_hourly_autonomous.py
+  3. Monitorer win rate vs prévisions (70% + 73%)
+
+MOYEN TERME:
+  1. Ajuster gates si nécessaire (cohérence 70%→75%?)
+  2. Affiner SL/TP pour synthétiques vs XAUUSD
+  3. Implémenter feedback de trades pour apprentissage
+
+================================================================================
+9. COMMANDES UTILES
+================================================================================
+
+Exécuter sync une fois:
+  python python/gom_sync_with_report.py --report
+
+Voir derniers logs (20 lignes):
+  Get-Content logs\gom_sync.log | Select-Object -Last 20
+
+Voir logs boucle:
+  Get-Content logs\gom_sync_loop.log
+
+Compter exécutions réussies:
+  (Get-Content logs\gom_sync.log | Select-String "\[OK\]").Count
+
+Nombre de verdicts générés:
+  (Get-Content logs\gom_sync.log | Select-String "Rapport construit").Count
+
+================================================================================
+10. CONTACT / SUPPORT
+================================================================================
+
+Logs: D:\Dev\TradBOT\logs\
+Config: D:\Dev\TradBOT\data\gom_signal.json
+AI Server: http://127.0.0.1:8000
+WhatsApp: Sidoine (+2290196911346)
+
+Memory Session: session_2026_06_17_gom_sync_whatsapp.md
+
+================================================================================
+END DEPLOYMENT SUMMARY
+================================================================================

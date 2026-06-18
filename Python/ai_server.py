@@ -38,8 +38,10 @@ from fastapi.exceptions import RequestValidationError
 from starlette.requests import Request as StarletteRequest
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.wsgi import WSGIMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi import WebSocket, WebSocketDisconnect
+import os
 from pydantic import BaseModel, Field
 
 import uvicorn
@@ -19844,3 +19846,143 @@ async def test_fallback_endpoint(symbol: str = "EURUSD", rsi: float = 65, macd: 
             }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+#==================== PERFECT OPPORTUNITIES SCANNER ====================
+
+# Global state for perfect opportunities
+g_perfect_opportunities = []
+g_last_scanner_update = None
+
+@app.get("/")
+async def root():
+    """Root endpoint - health check"""
+    return {
+        "status": "ok",
+        "service": "TradBOT Perfect Opportunities Scanner",
+        "endpoints": {
+            "health": "/health",
+            "perfect-opportunities": "/perfect-opportunities",
+            "dashboard": "/dashboard/perfect_opportunities.html"
+        }
+    }
+
+@app.get("/perfect-opportunities")
+async def get_perfect_opportunities():
+    """Get current perfect trading opportunities"""
+    return {
+        "opportunities": g_perfect_opportunities,
+        "count": len(g_perfect_opportunities),
+        "last_update": g_last_scanner_update,
+        "timestamp": datetime.now().isoformat()
+    }
+
+
+@app.get("/perfect-opportunities/{symbol}")
+async def get_opportunity_status(symbol: str):
+    """Get status for a specific symbol"""
+    for opp in g_perfect_opportunities:
+        if opp.get("symbol", "").upper() == symbol.upper():
+            return opp
+
+    raise HTTPException(status_code=404, detail=f"No perfect opportunity for {symbol}")
+
+
+@app.post("/perfect-opportunities/update")
+async def update_opportunities(data: dict):
+    """Update opportunities list (called by scanner)"""
+    global g_perfect_opportunities, g_last_scanner_update
+
+    g_perfect_opportunities = data.get("opportunities", [])
+    g_last_scanner_update = datetime.now().isoformat()
+
+    return {
+        "status": "updated",
+        "count": len(g_perfect_opportunities),
+        "timestamp": g_last_scanner_update
+    }
+
+
+@app.get("/api/perfect-opportunities")
+async def api_get_perfect_opportunities():
+    """API endpoint for perfect opportunities (alias)"""
+    return {
+        "opportunities": g_perfect_opportunities,
+        "count": len(g_perfect_opportunities),
+        "last_update": g_last_scanner_update,
+        "timestamp": datetime.now().isoformat()
+    }
+
+
+#==================== DASHBOARD ROUTES ====================
+
+@app.get("/dashboard/perfect_opportunities.html")
+async def get_dashboard():
+    """Serve perfect opportunities dashboard HTML"""
+    dashboard_path = os.path.join(
+        os.path.dirname(__file__),
+        "..",
+        "dashboard",
+        "perfect_opportunities.html"
+    )
+
+    # Normalize path
+    dashboard_path = os.path.normpath(dashboard_path)
+
+    if not os.path.exists(dashboard_path):
+        raise HTTPException(
+            status_code=404,
+            detail=f"Dashboard not found at {dashboard_path}"
+        )
+
+    return FileResponse(dashboard_path, media_type="text/html")
+
+
+@app.get("/dashboard/")
+async def dashboard_redirect():
+    """Redirect to dashboard"""
+    return FileResponse(
+        os.path.normpath(
+            os.path.join(
+                os.path.dirname(__file__),
+                "..",
+                "dashboard",
+                "perfect_opportunities.html"
+            )
+        ),
+        media_type="text/html"
+    )
+
+
+@app.post("/perfect-opportunities/test-data")
+async def test_perfect_opportunities():
+    """Load test data for demonstration"""
+    global g_perfect_opportunities, g_last_scanner_update
+
+    g_perfect_opportunities = [
+        {
+            "symbol": "XAUUSD",
+            "ia_confidence": 85.0,
+            "gom_coherence": 92.0,
+            "probability": 78.0,
+            "action": "BUY",
+            "detected_at": datetime.now().isoformat(),
+            "detected_duration": 300
+        },
+        {
+            "symbol": "Boom500",
+            "ia_confidence": 72.0,
+            "gom_coherence": 88.0,
+            "probability": 70.0,
+            "action": "SELL",
+            "detected_at": (datetime.now() - timedelta(minutes=2)).isoformat(),
+            "detected_duration": 120
+        }
+    ]
+    g_last_scanner_update = datetime.now().isoformat()
+
+    return {
+        "status": "test-data-loaded",
+        "count": len(g_perfect_opportunities),
+        "timestamp": g_last_scanner_update
+    }

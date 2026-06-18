@@ -1,0 +1,445 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>TradBOT — Top 3 Symboles Recommandés</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <style>
+    :root {
+      --bg: #0f1419;
+      --panel: #1a2332;
+      --border: #2d3a4f;
+      --text: #e7ecf3;
+      --muted: #8b9cb3;
+      --green: #22c55e;
+      --red: #ef4444;
+      --blue: #3b82f6;
+      --amber: #f59e0b;
+      --purple: #a855f7;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: "Segoe UI", system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      padding: 1rem 1.5rem 2rem;
+    }
+    header {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1rem;
+      margin-bottom: 2rem;
+      padding-bottom: 1rem;
+      border-bottom: 1px solid var(--border);
+    }
+    h1 { font-size: 1.6rem; font-weight: 700; }
+    h1 span { color: var(--green); }
+    .nav-links {
+      display: flex;
+      gap: 1rem;
+      font-size: 0.9rem;
+    }
+    .nav-links a {
+      color: var(--blue);
+      text-decoration: none;
+      cursor: pointer;
+    }
+    .nav-links a:hover { color: var(--green); }
+    .status {
+      font-size: 0.85rem;
+      color: var(--muted);
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+    .status.live { color: var(--green); }
+    .status::before {
+      content: '';
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: currentColor;
+      animation: pulse 2s infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.5; }
+    }
+    .filters {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.8rem;
+      margin-bottom: 1.5rem;
+      padding: 1rem;
+      background: var(--panel);
+      border-radius: 10px;
+      border: 1px solid var(--border);
+    }
+    .filter-group {
+      display: flex;
+      flex-direction: column;
+      gap: 0.3rem;
+    }
+    .filter-group label { font-size: 0.75rem; color: var(--muted); text-transform: uppercase; }
+    .filter-group select {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 0.5rem 0.75rem;
+      border-radius: 6px;
+      font-size: 0.9rem;
+      cursor: pointer;
+    }
+    .filters button {
+      align-self: flex-end;
+      background: var(--blue);
+      color: white;
+      border: none;
+      padding: 0.6rem 1.2rem;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 0.9rem;
+      font-weight: 600;
+    }
+    .filters button:hover { background: var(--green); }
+    .content {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 1.5rem;
+    }
+    .ranking-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+      gap: 1.5rem;
+      margin-bottom: 2rem;
+    }
+    .rank-card {
+      background: var(--panel);
+      border: 2px solid var(--border);
+      border-radius: 12px;
+      overflow: hidden;
+      transition: all 0.3s ease;
+    }
+    .rank-card:hover {
+      border-color: var(--blue);
+      box-shadow: 0 0 20px rgba(59, 130, 246, 0.2);
+    }
+    .rank-card.rank-1 { border-color: var(--amber); }
+    .rank-card.rank-1:hover { box-shadow: 0 0 20px rgba(245, 158, 11, 0.3); }
+    .rank-header {
+      background: linear-gradient(135deg, var(--blue) 0%, var(--purple) 100%);
+      padding: 1.2rem 1.5rem;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .rank-card.rank-1 .rank-header {
+      background: linear-gradient(135deg, var(--amber) 0%, #fbbf24 100%);
+    }
+    .rank-badge {
+      font-size: 2rem;
+      font-weight: 700;
+      opacity: 0.7;
+    }
+    .rank-header-title {
+      flex: 1;
+    }
+    .rank-symbol {
+      font-size: 1.3rem;
+      font-weight: 700;
+      margin-bottom: 0.3rem;
+    }
+    .rank-category {
+      font-size: 0.75rem;
+      color: rgba(255, 255, 255, 0.7);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    .rank-score {
+      text-align: right;
+    }
+    .rank-score-value {
+      font-size: 1.8rem;
+      font-weight: 700;
+      color: white;
+    }
+    .rank-score-label {
+      font-size: 0.7rem;
+      color: rgba(255, 255, 255, 0.7);
+      text-transform: uppercase;
+    }
+    .rank-body {
+      padding: 1.5rem;
+    }
+    .stat-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1rem;
+      margin-bottom: 1.2rem;
+    }
+    .stat {
+      background: rgba(255, 255, 255, 0.03);
+      padding: 0.75rem;
+      border-radius: 8px;
+      border-left: 3px solid var(--blue);
+    }
+    .stat-label {
+      font-size: 0.75rem;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+      margin-bottom: 0.3rem;
+    }
+    .stat-value {
+      font-size: 1.15rem;
+      font-weight: 700;
+    }
+    .stat-value.pos { color: var(--green); }
+    .stat-value.neg { color: var(--red); }
+    .stat-value.neutral { color: var(--amber); }
+    .best-hours {
+      margin-bottom: 1.2rem;
+    }
+    .best-hours-title {
+      font-size: 0.85rem;
+      color: var(--muted);
+      text-transform: uppercase;
+      margin-bottom: 0.6rem;
+      font-weight: 600;
+    }
+    .hours-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+    }
+    .hour-badge {
+      background: rgba(59, 130, 246, 0.15);
+      border: 1px solid var(--blue);
+      color: var(--blue);
+      padding: 0.35rem 0.75rem;
+      border-radius: 6px;
+      font-size: 0.75rem;
+      font-weight: 600;
+    }
+    .entry-tip {
+      background: rgba(34, 197, 94, 0.08);
+      border-left: 3px solid var(--green);
+      padding: 0.75rem;
+      border-radius: 6px;
+      font-size: 0.85rem;
+      color: var(--text);
+      line-height: 1.4;
+    }
+    .no-data {
+      text-align: center;
+      padding: 3rem 1rem;
+      color: var(--muted);
+    }
+    .no-data-icon {
+      font-size: 3rem;
+      margin-bottom: 1rem;
+      opacity: 0.5;
+    }
+    .refresh-btn {
+      position: fixed;
+      bottom: 2rem;
+      right: 2rem;
+      width: 50px;
+      height: 50px;
+      border-radius: 50%;
+      background: var(--blue);
+      border: none;
+      color: white;
+      font-size: 1.5rem;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: all 0.3s ease;
+      box-shadow: 0 4px 12px rgba(59, 130, 246, 0.4);
+    }
+    .refresh-btn:hover {
+      background: var(--green);
+      transform: rotate(180deg);
+    }
+    .meta {
+      font-size: 0.8rem;
+      color: var(--muted);
+      text-align: right;
+      margin-top: 1rem;
+      padding-top: 1rem;
+      border-top: 1px solid var(--border);
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>🚀 TradBOT — <span>Top 3 Symboles</span></h1>
+      <p class="status live">● Production en direct</p>
+    </div>
+    <div class="nav-links">
+      <a href="/">← Journal complet</a>
+      <a href="/gom">GOM Dashboard</a>
+    </div>
+  </header>
+
+  <div class="filters">
+    <div class="filter-group">
+      <label>Catégorie</label>
+      <select id="categoryFilter">
+        <option value="">Tous</option>
+        <option value="BOOM_CRASH">Boom/Crash</option>
+        <option value="FOREX">Forex</option>
+        <option value="CRYPTO">Crypto</option>
+        <option value="METAL">Métaux</option>
+        <option value="COMMODITY">Matières 1ères</option>
+        <option value="VOLATILITY">Volatilité</option>
+      </select>
+    </div>
+    <button onclick="refreshData()" class="filters button">🔄 Rafraîchir</button>
+  </div>
+
+  <div id="content" class="content">
+    <div class="no-data">
+      <div class="no-data-icon">⏳</div>
+      <p>Chargement des recommandations...</p>
+    </div>
+  </div>
+
+  <button class="refresh-btn" onclick="refreshData()" title="Rafraîchir les données">🔄</button>
+
+  <script>
+    const API_BASE = "http://127.0.0.1:8765";
+
+    async function loadRecommendations() {
+      try {
+        const category = document.getElementById("categoryFilter")?.value || "";
+        const url = new URL(`${API_BASE}/api/recommendations`);
+        if (category) url.searchParams.append("category", category);
+
+        const response = await fetch(url);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+        const data = await response.json();
+        renderRecommendations(data);
+      } catch (error) {
+        console.error("Error loading recommendations:", error);
+        document.getElementById("content").innerHTML = `
+          <div class="no-data">
+            <div class="no-data-icon">❌</div>
+            <p>Erreur: ${error.message}</p>
+            <p style="margin-top: 0.5rem; font-size: 0.85rem;">Assurez-vous que le serveur dashboard est actif sur le port 8765</p>
+          </div>
+        `;
+      }
+    }
+
+    function renderRecommendations(data) {
+      const topSymbols = data.top_symbols || [];
+
+      if (topSymbols.length === 0) {
+        document.getElementById("content").innerHTML = `
+          <div class="no-data">
+            <div class="no-data-icon">📊</div>
+            <p>Pas assez de données historiques</p>
+            <p style="margin-top: 0.5rem; font-size: 0.85rem;">
+              Minimum ${data.min_trades} trades par symbole requis pour les recommandations.
+            </p>
+          </div>
+        `;
+        return;
+      }
+
+      const html = `
+        <div class="ranking-grid">
+          ${topSymbols.map((sym, idx) => renderSymbolCard(sym, idx + 1)).join("")}
+        </div>
+        <div class="meta">
+          Generated: ${new Date(data.generated_at).toLocaleString("fr-FR")} |
+          ${data.eligible_count} symbole(s) éligible(s)
+        </div>
+      `;
+      document.getElementById("content").innerHTML = html;
+    }
+
+    function renderSymbolCard(sym, rank) {
+      const rankClass = `rank-${rank}`;
+      const netPnlClass = sym.net_pnl >= 0 ? "pos" : "neg";
+
+      return `
+        <div class="rank-card ${rankClass}">
+          <div class="rank-header">
+            <div class="rank-header-title">
+              <div class="rank-symbol">${sym.symbol}</div>
+              <div class="rank-category">${sym.category}</div>
+            </div>
+            <div class="rank-score">
+              <div class="rank-score-value">${sym.score.toFixed(1)}</div>
+              <div class="rank-score-label">Score</div>
+            </div>
+            <div class="rank-badge">#${rank}</div>
+          </div>
+
+          <div class="rank-body">
+            <div class="stat-grid">
+              <div class="stat">
+                <div class="stat-label">Win Rate</div>
+                <div class="stat-value neutral">${sym.win_rate.toFixed(1)}%</div>
+              </div>
+              <div class="stat">
+                <div class="stat-label">Profit Factor</div>
+                <div class="stat-value neutral">${sym.profit_factor.toFixed(2)}</div>
+              </div>
+              <div class="stat">
+                <div class="stat-label">Trades</div>
+                <div class="stat-value">${sym.trades}</div>
+              </div>
+              <div class="stat">
+                <div class="stat-label">Net PnL</div>
+                <div class="stat-value ${netPnlClass}">${sym.net_pnl >= 0 ? '+' : ''}${sym.net_pnl.toFixed(2)}$</div>
+              </div>
+            </div>
+
+            <div class="best-hours">
+              <div class="best-hours-title">📍 Fenêtres actives (UTC)</div>
+              <div class="hours-list">
+                ${sym.best_hours.map(h =>
+                  `<div class="hour-badge">${h.label} <br/><small>${h.win_rate}% WR</small></div>`
+                ).join("")}
+              </div>
+            </div>
+
+            <div class="entry-tip">
+              <strong>💡 Stratégie:</strong><br/>
+              ${sym.entry_tip}
+            </div>
+
+            <div style="margin-top: 1rem; padding-top: 1rem; border-top: 1px solid var(--border); font-size: 0.8rem; color: var(--muted);">
+              <strong>Direction historique:</strong> ${sym.best_direction} (${sym.direction_win_rate.toFixed(1)}% WR)<br/>
+              <strong>Durée moyenne:</strong> ${sym.avg_duration_min.toFixed(1)} min
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    function refreshData() {
+      const btn = event.target.closest("button");
+      btn.style.animation = "spin 0.6s linear";
+      loadRecommendations().finally(() => {
+        btn.style.animation = "";
+      });
+    }
+
+    document.getElementById("categoryFilter")?.addEventListener("change", loadRecommendations);
+
+    // Initial load
+    loadRecommendations();
+  </script>
+</body>
+</html>

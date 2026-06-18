@@ -1,0 +1,106 @@
+╔══════════════════════════════════════════════════════════════════════╗
+║  GOM SYNC 10-MINUTE AUTOMATION — QUICK START                         ║
+╚══════════════════════════════════════════════════════════════════════╝
+
+✅ WHAT'S READY
+━━━━━━━━━━━━━━
+✓ GOM sync script (Python/gom_sync_with_report.py)
+✓ Task scheduler wrapper (scripts/run-gom-sync-10min.bat)
+✓ Installation tools (install-gom-task.bat, setup-gom-task.ps1)
+✓ Verification tools (verify-gom-task.ps1)
+✓ Complete documentation
+✓ Quick launcher
+
+⚡ 3-MINUTE SETUP (Recommended)
+━━━━━━━━━━━━━━━━
+1. Open PowerShell as Administrator
+2. cd D:\Dev\TradBOT
+3. .\launch-gom-10min.ps1 install
+4. .\launch-gom-10min.ps1 verify
+5. Wait 10 minutes → Check logs
+
+Or use launcher commands:
+  .\launch-gom-10min.ps1 help       View all commands
+  .\launch-gom-10min.ps1 test       Pre-flight test
+  .\launch-gom-10min.ps1 run        Execute now
+  .\launch-gom-10min.ps1 logs       View activity
+  .\launch-gom-10min.ps1 fix        Auto-fix issues
+
+📋 ALTERNATIVE INSTALL METHODS
+━━━━━━━━━━━━━━━━━━━━━━
+Method A (Easiest): Right-click → Run as Administrator
+  install-gom-task.bat
+
+Method B (PowerShell): Run as Administrator
+  .\scripts\setup-gom-task.ps1
+
+Method C (Manual GUI): Open Task Scheduler
+  See GOM_SYNC_SETUP.md for detailed steps
+
+🔍 VERIFY IT WORKS
+━━━━━━━━━━━━━━━━
+Check task status:
+  .\launch-gom-10min.ps1 verify
+
+View logs:
+  .\launch-gom-10min.ps1 logs
+
+Manual test:
+  .\launch-gom-10min.ps1 run
+
+🎯 WHAT HAPPENS EVERY 10 MINUTES
+━━━━━━━━━━━━━━━━━━━━━━━━
+1. Load GOM verdicts from MT5
+2. Apply trading gates (coherence, RSI, session window, etc.)
+3. Place market orders for eligible signals
+4. Send WhatsApp report
+5. Log all activity
+
+📊 WHERE TO MONITOR
+━━━━━━━━━━━━━━━━━
+Logs: logs/gom_sync.log
+Reports: WhatsApp messages every 10 min
+Orders: AI Server /pending-orders endpoint
+
+📖 FULL DOCUMENTATION
+━━━━━━━━━━━━━━━━━━
+README_GOM_SYNC_10MIN.md     Complete reference
+GOM_SYNC_SETUP.md             Setup guide
+verify-gom-task.ps1           Status checker
+launch-gom-10min.ps1          Quick launcher
+
+🚀 NEED HELP?
+━━━━━━━━━━━
+Check logs for errors:
+  tail -50 logs/gom_sync.log | grep ERROR
+
+Auto-fix issues:
+  .\launch-gom-10min.ps1 fix
+
+Verify setup:
+  .\launch-gom-10min.ps1 verify
+
+View full command list:
+  .\launch-gom-10min.ps1 help
+
+⚠️  REQUIREMENTS
+━━━━━━━━━━━━━
+• Windows 10/11 with Task Scheduler
+• Administrator rights (for installation only)
+• Python 3.11+ with requests module
+• AI Server running on 127.0.0.1:8000
+• Optional: PsychoBot for WhatsApp fallback
+
+✨ QUICK WIN: One-Command Setup
+━━━━━━━━━━━━━━━━━━━━━━━━━━━
+(As Administrator in PowerShell)
+
+cd D:\Dev\TradBOT
+.\launch-gom-10min.ps1 install
+
+Done! Task will run every 10 minutes.
+
+Check with: .\launch-gom-10min.ps1 verify
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Status: ✅ Production Ready | Last Updated: 2026-06-16 | v1.0

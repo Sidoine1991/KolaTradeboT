@@ -1,0 +1,80 @@
+=========================================================
+AI SERVER NOT STARTING - SOLUTION
+=========================================================
+
+PROBLEM:
+   Scanner shows: "Read timed out"
+   = AI Server not responding on port 8000
+
+REASON:
+   AI Server crashed or didn't start properly
+
+SOLUTION:
+=========================================================
+
+Option 1: BEST - Use new launcher
+
+Double-clic: D:\Dev\TradBOT\START_SERVICES.bat
+
+This script:
+   1. Starts AI Server
+   2. Waits 15 seconds for it to initialize
+   3. Checks if it's responding
+   4. Starts Scanner ONLY if AI Server works
+   5. Opens Dashboard
+
+Wait 20 seconds total → Services should run
+
+=========================================================
+
+Option 2: MANUAL - Full control
+
+Terminal 1 (Admin):
+   cd D:\Dev\TradBOT\Python
+   C:\Users\USER\AppData\Roaming\uv\python\cpython-3.14.0-windows-x86_64-none\python.exe ai_server.py
+
+Wait 10 seconds for it to say:
+   "Uvicorn running on http://0.0.0.0:8000"
+
+Then Terminal 2 (Admin):
+   cd D:\Dev\TradBOT\Python
+   C:\Users\USER\AppData\Roaming\uv\python\cpython-3.14.0-windows-x86_64-none\python.exe perfect_opportunity_scanner.py
+
+Then Browser:
+   http://localhost:8000/dashboard/perfect_opportunities.html
+
+=========================================================
+
+Option 3: DEBUG - Check what's wrong
+
+Open: D:\Dev\TradBOT\logs\ai_server.log
+
+If file doesn't exist or is empty:
+   = AI Server failed to start
+   = Check terminal output for error
+
+=========================================================
+
+QUICK CHECKLIST:
+
+[ ] AI Server console shows:
+    "Uvicorn running on http://0.0.0.0:8000"
+
+[ ] Scanner console shows:
+    "Perfect Opportunity Scanner started"
+
+[ ] Browser dashboard loads without error
+
+[ ] API responds: http://localhost:8000/health
+
+If all 4 are OK → Scanner is running!
+
+=========================================================
+
+NOW:
+
+Try: D:\Dev\TradBOT\START_SERVICES.bat
+
+Or read full logs if it fails
+
+=========================================================

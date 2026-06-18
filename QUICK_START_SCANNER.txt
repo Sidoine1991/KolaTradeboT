@@ -1,0 +1,169 @@
+================================================================================
+PERFECT OPPORTUNITIES SCANNER — QUICK START
+================================================================================
+
+PROBLEM: Dashboard shows {"detail":"Not Found"}
+
+SOLUTION: Need to start AI Server first!
+
+================================================================================
+STEP 1: Start All Services (Easiest)
+================================================================================
+
+Double-click: D:\Dev\TradBOT\start_all.bat
+
+This starts:
+- AI Server (port 8000)
+- Perfect Opportunities Scanner
+- Opens dashboard automatically
+
+Wait 5-10 seconds for services to initialize.
+
+================================================================================
+STEP 2: View Dashboard
+================================================================================
+
+Browser: http://localhost:8000/dashboard/perfect_opportunities.html
+
+Should show:
+- Status bar with opportunity count
+- Loading message initially
+- Real-time updates as scanner runs
+
+================================================================================
+STEP 3: Test API
+================================================================================
+
+Option A: Use test script
+   Double-click: D:\Dev\TradBOT\test_scanner_api.bat
+
+Option B: Manual curl
+   curl http://localhost:8000/perfect-opportunities
+
+Should return JSON:
+{
+  "opportunities": [],
+  "count": 0,
+  "last_update": null,
+  "timestamp": "2026-06-17T14:35:22"
+}
+
+================================================================================
+WHAT HAPPENS NEXT
+================================================================================
+
+1. Scanner starts scanning symbols every 30 seconds
+
+2. When perfect opportunity found:
+   - Added to opportunities list
+   - API updated
+   - Dashboard refreshes
+   - WhatsApp alert sent (every 2 minutes)
+
+3. Example WhatsApp:
+   🎯 PERFECT TRADING OPPORTUNITIES 🎯
+
+   📈 **XAUUSD**
+   IA: 85% | GOM: 92% | PROB: 78%
+   Trading until 16:00 UTC (1h 27m left)
+
+================================================================================
+MANUAL STARTUP (If start_all.bat doesn't work)
+================================================================================
+
+In separate Command Prompt windows:
+
+Window 1 - AI Server:
+  cd D:\Dev\TradBOT\Python
+  python ai_server.py
+
+Window 2 - Scanner:
+  cd D:\Dev\TradBOT\Python
+  python perfect_opportunity_scanner.py
+
+Window 3 - Browser:
+  Open: http://localhost:8000/dashboard/perfect_opportunities.html
+
+================================================================================
+TROUBLESHOOTING
+================================================================================
+
+Dashboard still shows "Not Found" error?
+
+1. Check if AI Server is running:
+   http://localhost:8000/health
+
+   Should show: {"status":"ok"}
+
+2. Check if endpoint exists:
+   http://localhost:8000/perfect-opportunities
+
+   Should show JSON with "opportunities"
+
+3. View AI Server console for errors:
+   Look at command prompt where ai_server.py is running
+
+4. Restart everything:
+   - Close both command prompt windows
+   - Run start_all.bat again
+   - Wait 10 seconds
+
+================================================================================
+CHECK SCANNER STATUS
+================================================================================
+
+Is scanner running?
+   Check file: D:\Dev\TradBOT\logs\scanner.log
+
+Are there opportunities?
+   Check API: http://localhost:8000/perfect-opportunities
+
+   If count > 0, scanner found opportunities!
+
+Did WhatsApp alert send?
+   Check WhatsApp messages from PsychoBot
+
+================================================================================
+FILES
+================================================================================
+
+start_all.bat — Start everything at once
+test_scanner_api.bat — Test API connectivity
+perfect_opportunity_scanner.py — Main scanner
+perfect_opportunities.html — Dashboard
+ai_server.py — API server
+
+================================================================================
+SUCCESS CHECKLIST
+================================================================================
+
+When everything works:
+
+[ ] start_all.bat launches without errors
+[ ] Command prompts open for AI Server and Scanner
+[ ] Dashboard opens in browser
+[ ] Dashboard shows "0 perfect opportunities" (or more)
+[ ] API returns valid JSON
+[ ] Logs file updates (check D:\Dev\TradBOT\logs\scanner.log)
+[ ] WhatsApp receives alerts (optional, depends on PsychoBot)
+
+================================================================================
+STOP SERVICES
+================================================================================
+
+Close the command prompt windows:
+- AI Server window
+- Scanner window
+
+Or run:
+  taskkill /IM python.exe /F
+
+================================================================================
+MORE INFO
+================================================================================
+
+Full documentation: D:\Dev\TradBOT\README_PERFECT_OPPORTUNITIES.md
+Setup guide: D:\Dev\TradBOT\PERFECT_SCANNER_SETUP.txt
+Config: D:\Dev\TradBOT\Python\perfect_opportunity_scanner.py (lines 15-21)
+
+================================================================================

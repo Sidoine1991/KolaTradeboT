@@ -1,0 +1,129 @@
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                       TOP 3 SYMBOLES RECOMMANDÉS                             ║
+║                    TradBOT — Journal de Trades (1067 trades)                 ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🥇 #1 — CRASH 1000 INDEX
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Score:               70.4/100
+  Catégorie:           BOOM_CRASH
+  
+  Statistiques:
+  ├─ Win Rate:        57.4% (57 wins / 61 trades)
+  ├─ Profit Factor:   1.24
+  ├─ Net PnL:         +7.59$
+  ├─ Trades:          61
+  └─ Durée moyenne:   12.5 min
+
+  Direction:           SELL ONLY (Crash = SELL uniquement)
+  Direction Win Rate:  57.4%
+
+  Meilleures fenêtres UTC:
+  ├─ 23h-24h UTC      (100% WR, 6 trades, +9.95$) ← MEILLEURE
+  ├─ 18h-19h UTC      (100% WR, 4 trades, +2.58$)
+  └─ 07h-08h UTC      (66.7% WR, 3 trades, +3.43$)
+
+  💡 Stratégie recommandée:
+     Boom: BUY only | Crash: SELL only
+     · Fenêtres actives: 23h-24h UTC, 18h-19h UTC
+     · Direction historique: SELL
+     · Durée moy. 12 min
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🥈 #2 — BOOM 150 INDEX
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Score:               69.6/100
+  Catégorie:           BOOM_CRASH
+  
+  Statistiques:
+  ├─ Win Rate:        67.7% (21 wins / 31 trades)
+  ├─ Profit Factor:   1.24
+  ├─ Net PnL:         +2.47$
+  ├─ Trades:          31
+  └─ Durée moyenne:   4.5 min
+
+  Direction:           BUY ONLY (Boom = BUY uniquement)
+  Direction Win Rate:  67.7%
+
+  Meilleures fenêtres UTC:
+  ├─ 17h-18h UTC      (100% WR, 4 trades, +3.94$) ← MEILLEURE
+  ├─ 11h-12h UTC      (85.7% WR, 7 trades, +2.57$)
+  └─ 15h-16h UTC      (66.7% WR, 3 trades, -0.09$)
+
+  💡 Stratégie recommandée:
+     Boom: BUY only | Crash: SELL only
+     · Fenêtres actives: 17h-18h UTC, 11h-12h UTC
+     · Direction historique: BUY
+     · Durée moy. 5 min
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🥉 #3 — BOOM 50 INDEX
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Score:               64.8/100
+  Catégorie:           BOOM_CRASH
+  
+  Statistiques:
+  ├─ Win Rate:        73.3% (11 wins / 15 trades) ← MEILLEURE WR
+  ├─ Profit Factor:   1.40 ← MEILLEUR RATIO
+  ├─ Net PnL:         +2.23$
+  ├─ Trades:          15
+  └─ Durée moyenne:   4.3 min
+
+  Direction:           BUY ONLY (Boom = BUY uniquement)
+  Direction Win Rate:  73.3%
+
+  Meilleures fenêtres UTC:
+  ├─ 11h-12h UTC      (80% WR, 5 trades, +1.72$) ← MEILLEURE
+  ├─ 14h-15h UTC      (66.7% WR, 3 trades, -0.40$)
+  └─ 10h-11h UTC      (60% WR, 5 trades, -0.19$)
+
+  💡 Stratégie recommandée:
+     Boom: BUY only | Crash: SELL only
+     · Fenêtres actives: 11h-12h UTC, 14h-15h UTC
+     · Direction historique: BUY
+     · Durée moy. 4 min
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                         ⏰ CONVERSION HEURES UTC                              ║
+╠══════════════════════════════════════════════════════════════════════════════╣
+║                                                                              ║
+║  Ajouter votre décalage broker à l'heure UTC:                              ║
+║                                                                              ║
+║  Exemple: Signal à 23h-24h UTC en zone GMT+2 = 01h-02h (minuit+2h)        ║
+║                                                                              ║
+║  GMT+0:    Pas de décalage                                                 ║
+║  GMT+1:    +1h                                                             ║
+║  GMT+2:    +2h (Europe de l'Est, CEST)                                     ║
+║  GMT+3:    +3h (Moscou, Istanbul)                                          ║
+║  EST -5:   -5h (New York)                                                  ║
+║                                                                              ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📊 POUR VOIR CES DONNÉES DANS LE DASHBOARD:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+1. Lancez le serveur dashboard:
+   D:\Dev\TradBOT\launch-dashboard.bat
+
+2. Ouvrez le navigateur:
+   http://127.0.0.1:8765/
+
+3. Scrollez vers le bas du journal
+
+4. Vous verrez la section:
+   "Top 3 symboles recommandés pour le robot (historique journal)"
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Données générées: 2026-06-17 06:17 UTC
+Base historique: 1067 trades
+Symboles éligibles: 12 (minimum 8 trades par symbole)
+Min trades: 8
+Profit Factor min: > 1.2
+

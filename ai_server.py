@@ -1131,14 +1131,16 @@ def _enrich_bc_volatility(out: dict, symbol: str) -> None:
 
 def _enrich_correction_cycle(out: dict, symbol: str) -> None:
     """Correction cycle orienté SCALP : confiance dominée M1/M5, contexte multi-TF."""
-    if is_boom_crash_symbol(str(symbol)):
-        out["correction_exhaustion_pct"] = 100.0
-        out["correction_phase"] = "trending"
-        out["correction_type"] = "trend_run"
-        out["correction_strength"] = "strong"
-        out["correction_entry_safe"] = True
-        out["correction_execution_ready"] = True
-        return
+    sym_u = str(symbol).upper()
+    is_bc = is_boom_crash_symbol(str(symbol))
+    # Boom = BUY only, Crash = SELL only → biais directionnel pour détecter pullback post-spike
+    bc_dir_hint = 0
+    if is_bc:
+        if "BOOM" in sym_u:
+            bc_dir_hint = 1
+        elif "CRASH" in sym_u:
+            bc_dir_hint = -1
+
     try:
         from correction_cycle_detector import compute_correction_exhaustion
 
@@ -1163,7 +1165,9 @@ def _enrich_correction_cycle(out: dict, symbol: str) -> None:
         rsi_h4 = float(out.get("tf_h4_rsi", 50))
         rsi_d1 = float(out.get("tf_d1_rsi", 50))
 
-        direction_hint = _dir_str_to_int(out.get("ia_status_action", ""))
+        direction_hint = bc_dir_hint if bc_dir_hint != 0 else _dir_str_to_int(
+            out.get("ia_status_action", "")
+        )
 
         result = compute_correction_exhaustion(
             df_m5=df_m5,
@@ -1182,22 +1186,28 @@ def _enrich_correction_cycle(out: dict, symbol: str) -> None:
         pct = float(result["correction_exhaustion_pct"])
         vn = int(out.get("verdict_num", 0) or 0)
         gom_boost = 10.0 if abs(vn) >= 2 else (5.0 if abs(vn) >= 1 else 0.0)
-        if gom_boost > 0:
+        if gom_boost > 0 and not is_bc:
             pct = min(100.0, pct + gom_boost)
 
         block_thresh = float(result.get("correction_block_threshold", 45.0))
-        if abs(vn) >= 2:
+        if abs(vn) >= 2 and not is_bc:
             block_thresh = max(22.0, block_thresh - 10.0)
+
+        # Boom/Crash : seuils plus stricts en phase correcting/counter_move
+        corr_type = result.get("correction_type", "unknown")
+        if is_bc and corr_type in ("counter_move", "m5_pullback", "m15_pullback"):
+            block_thresh = max(block_thresh, 55.0)
+            pct = min(pct, 42.0)
 
         phase = result.get("correction_phase") or result.get("phase", "unknown")
         out["correction_exhaustion_pct"] = round(pct, 1)
         out["correction_phase"] = phase
-        out["correction_type"] = result.get("correction_type", "unknown")
+        out["correction_type"] = corr_type
         out["correction_strength"] = result.get("correction_strength", "moderate")
         out["correction_entry_safe"] = (
             bool(result.get("entry_safe"))
-            or bool(result.get("execution_ready"))
-            or pct >= block_thresh
+            and corr_type not in ("counter_move",)
+            and (bool(result.get("execution_ready")) or pct >= block_thresh)
         )
         out["correction_execution_ready"] = bool(result.get("execution_ready"))
         out["correction_block_threshold"] = round(block_thresh, 1)
@@ -1207,14 +1217,14 @@ def _enrich_correction_cycle(out: dict, symbol: str) -> None:
         out["correction_rsi_m5_slope"] = result.get("rsi_m5_slope", 0)
         out["correction_divergence"] = result.get("divergence_score", 0)
         out["correction_volume"] = result.get("volume_score", 0)
-        out["correction_gom_boost"] = gom_boost
+        out["correction_gom_boost"] = gom_boost if not is_bc else 0.0
         out["correction_tf_summary"] = result.get("tf_summary", "")
     except Exception as exc:
         logger.debug(f"[CORRECTION-CYCLE] {exc}")
-        out["correction_exhaustion_pct"] = 50.0
-        out["correction_phase"] = "unknown"
+        out["correction_exhaustion_pct"] = 50.0 if not is_bc else 35.0
+        out["correction_phase"] = "correcting" if is_bc else "unknown"
         out["correction_type"] = "unknown"
-        out["correction_entry_safe"] = True
+        out["correction_entry_safe"] = not is_bc
 
 
 def _enrich_cognition_forecast(out: dict, symbol: str, chart_tf: str = "M1") -> None:
@@ -26027,17 +26037,31 @@ async def receive_pullback_alert(body: dict = Body(...)):
         import requests
 
         def send_via_psychobot(message: str) -> bool:
-            """Send message via PsychoBot Render endpoint"""
+            """Send message via PsychoBot local webhook"""
             try:
-                psychobot_url = "https://psychobot-1si7.onrender.com/send-message"
+                # Try local webhook first (port 10000)
+                psychobot_url = "http://localhost:10000/pullback-webhook"
                 phone = os.getenv("WHATSAPP_PHONE_NUMBER", "+2290196911346")
 
+                payload = {
+                    "phone": phone,
+                    "message_preview": message,
+                    "source": "tradbot-pullback"
+                }
+
+                response = requests.post(psychobot_url, json=payload, timeout=5)
+                if response.status_code == 200:
+                    logger.info(f"[PULLBACK] Message sent via local PsychoBot webhook")
+                    return True
+
+                # Fallback to Render cloud
+                logger.warning(f"Local webhook failed ({response.status_code}), trying Render...")
+                psychobot_url = "https://psychobot-1si7.onrender.com/send-message"
                 payload = {
                     "phone": phone,
                     "message": message,
                     "source": "tradbot-pullback"
                 }
-
                 response = requests.post(psychobot_url, json=payload, timeout=10, verify=False)
                 return response.status_code == 200
 

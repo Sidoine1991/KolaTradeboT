@@ -1,0 +1,181 @@
+╔════════════════════════════════════════════════════════════════════════════╗
+║                  GOM SYNC + WHATSAPP REPORT — QUICK START                  ║
+╚════════════════════════════════════════════════════════════════════════════╝
+
+📋 WHAT IS THIS?
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+GOM Sync automatically:
+  1. Loads GOM verdicts from multiple sources
+  2. Sends each verdict to AI server
+  3. Formats a WhatsApp report with Entry/SL/TP
+  4. Sends report to WhatsApp (+2290196911346)
+  5. Logs all activity to logs/gom_sync.log
+
+Runs every 10 minutes (autonomous daemon)
+
+🚀 QUICK START (3 STEPS)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+STEP 1: TEST IT (One-time execution)
+─────────────────────────────────────
+cd D:\Dev\TradBOT
+python Python/gom_sync_with_report.py --report
+
+Expected output:
+  ✅ Charge X verdicts GOM
+  📤 Symbol → ACTION (HTTP 200)
+  📋 Rapport construit (N signaux)
+  ✅ Rapport WhatsApp envoyé
+
+Time: 2-3 seconds
+
+STEP 2: MONITOR IT (Check logs)
+────────────────────────────────
+tail -f D:\Dev\TradBOT\logs\gom_sync.log
+
+Watch for:
+  ✅ Verdicts loaded
+  📤 HTTP 200 confirmations
+  ✅ WhatsApp delivered
+
+STEP 3: AUTOMATE IT (Windows Task Scheduler)
+─────────────────────────────────────────────
+Right-click this file and select "Run as Administrator":
+  D:\Dev\TradBOT\install-gom-sync-task-admin.bat
+
+Verify:
+  tasklist | findstr GOM-Sync-10Min
+
+That's it! It will run every 10 minutes automatically.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+⚡ COMMON COMMANDS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+RUN ONCE:
+  cd D:\Dev\TradBOT && python Python/gom_sync_with_report.py --report
+
+RUN FOREVER (CLI LOOP):
+  cd D:\Dev\TradBOT && python Python/gom_sync_with_report.py
+  (Stop with Ctrl+C)
+
+VIEW LOGS (Real-time):
+  tail -f D:\Dev\TradBOT\logs\gom_sync.log
+
+COUNT VERDICTS SYNCED:
+  grep "📤.*HTTP 200" D:\Dev\TradBOT\logs\gom_sync.log | wc -l
+
+FIND WHATSAPP DELIVERIES:
+  grep "✅ Rapport WhatsApp" D:\Dev\TradBOT\logs\gom_sync.log
+
+INSTALL TASK SCHEDULER:
+  powershell -ExecutionPolicy Bypass -File D:\Dev\TradBOT\install-gom-sync-10min-task.ps1
+
+CHECK TASK STATUS:
+  Get-ScheduledTask -TaskName "GOM-Sync-10Min"
+
+START TASK MANUALLY:
+  Start-ScheduledTask -TaskName "GOM-Sync-10Min"
+
+STOP TASK:
+  Stop-ScheduledTask -TaskName "GOM-Sync-10Min"
+
+REMOVE TASK:
+  Unregister-ScheduledTask -TaskName "GOM-Sync-10Min" -Confirm:$false
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+🛡️  PROTECTION GATES (All Enabled)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+✅ Coherence >= 85%        — Only trade high-conviction signals
+✅ Boom = BUY only         — ABSOLUTE RULE (no SELL on Boom)
+✅ Crash = SELL only       — ABSOLUTE RULE (no BUY on Crash)
+✅ Session Window (UTC)    — Trade within recommended hours
+✅ RSI Extreme             — Reject overbought/oversold entries
+✅ M15 Confirmed           — Require M15 support
+✅ Trend Global            — MTF consistency check
+✅ Post-Spike              — Wait confirmation after spikes
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+📊 REPORT FORMAT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+🎯 **GOM VERDICTS REPORT** 📊
+==================================================
+🟢 BOOM 500 INDEX — PERFECT BUY | Entry: 5306.20 | SL: 5290.28 | TP: 5338.04 | Coh: 83%
+  🟢M1 🟢M5 🟢M15 🔴H1 🔴H4 🔴D1
+
+🔴 CRASH 900 INDEX — PERFECT SELL | Entry: 16559.31 | SL: 16570.73 | TP: 16489.33 | Coh: 83%
+  🔴M1 🔴M5 🟢M15 🔴H1 🔴H4 🔴D1
+
+🔴 XAUUSD — SELL | Entry: 4327.24 | SL: 4336.68 | TP: 4308.36 | Coh: 67%
+  🔴M1 🔴M5 🔴M15 🟢H1 🟢H4 🔴D1
+==================================================
+📅 2026-06-17 08:23:59 UTC
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+📝 FILES & LOCATIONS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Main Script:
+  D:\Dev\TradBOT\Python\gom_sync_with_report.py
+
+Installer (Task Scheduler):
+  D:\Dev\TradBOT\install-gom-sync-10min-task.ps1
+  D:\Dev\TradBOT\install-gom-sync-task-admin.bat
+
+Documentation:
+  D:\Dev\TradBOT\GOM_SYNC_DEPLOYMENT_GUIDE.md
+  D:\Dev\TradBOT\GOM_SYNC_QUICK_START.txt (this file)
+
+Logs:
+  D:\Dev\TradBOT\logs\gom_sync.log
+
+GOM Data (Fallback):
+  D:\Dev\TradBOT\data\gom_signal.json
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+❓ TROUBLESHOOTING
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Q: Script not running?
+A: Check if Python 3.11+ installed: python --version
+
+Q: No WhatsApp delivery?
+A: Check logs: grep "ERROR" logs/gom_sync.log
+
+Q: Task Scheduler not working?
+A: Run install batch as Administrator (Right-click → Run as Admin)
+
+Q: How to stop the script?
+A: If running in terminal: Ctrl+C
+   If running as task: Stop-ScheduledTask -TaskName "GOM-Sync-10Min"
+
+Q: How to see all verdicts synced?
+A: grep "📤" logs/gom_sync.log | grep "HTTP 200"
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+✅ STATUS: PRODUCTION READY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Tested:   ✅ Yes
+Logs:     ✅ Working
+Gates:    ✅ 8 Active
+Reports:  ✅ Generated
+WhatsApp: ✅ Delivered
+Task Scheduler: ✅ Ready
+
+Ready to deploy? Run this now:
+  D:\Dev\TradBOT\install-gom-sync-task-admin.bat
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+For full documentation:
+  See: GOM_SYNC_DEPLOYMENT_GUIDE.md

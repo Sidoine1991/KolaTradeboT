@@ -1,0 +1,47 @@
+=========================================================
+PERFECT OPPORTUNITIES SCANNER — READY!
+=========================================================
+
+✅ Services running:
+   - AI Server (port 8000)
+   - Perfect Scanner (scanning every 30s)
+   - Dashboard HTML ready
+
+=========================================================
+OPEN DASHBOARD IN BROWSER
+=========================================================
+
+URL:
+   http://localhost:8000/dashboard/perfect_opportunities.html
+
+OR:
+   http://localhost:8000/dashboard/
+
+=========================================================
+EXPECTED BEHAVIOR
+=========================================================
+
+Dashboard will show:
+   - Status bar with count of perfect opportunities
+   - Real-time update every 5 seconds
+   - Cards for each symbol (if opportunities found)
+   - IA/GOM/PROB metrics
+   - Countdown timers
+
+Scanner will:
+   - Scan every 30 seconds
+   - Detect when all gates are met (IA>=70% + GOM>=85% + PROB>=65%)
+   - Update API
+   - Send WhatsApp alerts every 2 minutes
+
+=========================================================
+LOGS
+=========================================================
+
+Scanner: D:\Dev\TradBOT\logs\scanner.log
+AI Server: D:\Dev\TradBOT\logs\ai_server.log
+
+=========================================================
+ALL SYSTEMS GO! 🚀
+=========================================================
+

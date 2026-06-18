@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.3" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Date>2026-06-16T16:00:00</Date>
+    <Author>TradBOT</Author>
+    <Version>1.0</Version>
+    <Description>GOM Sync + WhatsApp Report every 10 minutes</Description>
+  </RegistrationInfo>
+  <Triggers>
+    <TimerTrigger>
+      <Repetition>
+        <Interval>PT10M</Interval>
+        <Duration>P1D</Duration>
+        <StopAtDurationEnd>false</StopAtDurationEnd>
+      </Repetition>
+      <StartBoundary>2026-06-16T16:00:00</StartBoundary>
+      <Enabled>true</Enabled>
+    </TimerTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="LocalSystem">
+      <UserId>S-1-5-18</UserId>
+      <RunLevel>HighestAvailable</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <IdleSettings>
+      <Duration>PT10M</Duration>
+      <WaitTimeout>PT1H</WaitTimeout>
+      <StopOnIdleEnd>true</StopOnIdleEnd>
+      <RestartOnIdle>false</RestartOnIdle>
+    </IdleSettings>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <Hidden>false</Hidden>
+    <RunOnlyIfLoggedOn>false</RunOnlyIfLoggedOn>
+    <Priority>7</Priority>
+    <ExecutionTimeLimit>PT5M</ExecutionTimeLimit>
+    <RestartOnFailure>
+      <Interval>PT1M</Interval>
+      <Count>1</Count>
+    </RestartOnFailure>
+  </Settings>
+  <Actions Context="LocalSystem">
+    <Exec>
+      <Command>D:\Dev\TradBOT\scripts\run-gom-sync-10min.bat</Command>
+      <WorkingDirectory>D:\Dev\TradBOT</WorkingDirectory>
+    </Exec>
+  </Actions>
+</Task>

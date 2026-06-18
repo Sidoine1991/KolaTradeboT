@@ -1,0 +1,265 @@
+================================================================================
+PERFECT OPPORTUNITIES SCANNER — LAUNCH GUIDE
+================================================================================
+
+YOU ARE HERE: Ready to launch the scanner
+
+3 OPTIONS TO START:
+
+================================================================================
+OPTION 1: EASIEST (Recommended)
+================================================================================
+
+1. Double-click this file:
+   D:\Dev\TradBOT\LAUNCH_SCANNER_NOW.bat
+
+2. Wait 5-10 seconds
+
+3. You'll see 3 windows:
+   - Console 1: AI Server
+   - Console 2: Scanner
+   - Browser: Dashboard
+
+4. Monitor WhatsApp for real-time alerts
+
+DONE! Scanner is running!
+
+================================================================================
+OPTION 2: STEP BY STEP
+================================================================================
+
+Step 1: Open Command Prompt (Admin)
+   - Win + X → Command Prompt (Admin)
+
+Step 2: Start AI Server (Terminal 1)
+   cd D:\Dev\TradBOT\Python
+   python ai_server.py
+
+Step 3: Open NEW Command Prompt (Admin)
+   - (Same as Step 1)
+
+Step 4: Start Scanner (Terminal 2)
+   cd D:\Dev\TradBOT\Python
+   python perfect_opportunity_scanner.py
+
+Step 5: Open Browser
+   http://localhost:8000/dashboard/perfect_opportunities.html
+
+Step 6: Monitor
+   - Watch dashboard for opportunities
+   - Check logs: D:\Dev\TradBOT\logs\scanner.log
+   - Check WhatsApp for alerts
+
+================================================================================
+OPTION 3: VERIFY FIRST (If you're cautious)
+================================================================================
+
+1. Check scanner will work:
+   double-click: D:\Dev\TradBOT\VERIFY_SCANNER_RUNNING.bat
+
+2. If all [OK], launch:
+   double-click: D:\Dev\TradBOT\LAUNCH_SCANNER_NOW.bat
+
+3. If issues [FAIL], read:
+   D:\Dev\TradBOT\RUN_SCANNER_NOW.txt
+
+================================================================================
+WHAT HAPPENS AFTER YOU START
+================================================================================
+
+Immediately:
+   - AI Server starts listening on port 8000
+   - Scanner begins polling GOM verdicts
+   - Dashboard loads in browser
+
+Every 30 seconds:
+   - Scanner checks all symbols
+   - Detects any "perfect" opportunities
+   - Updates dashboard in real-time
+
+Every 2 minutes:
+   - WhatsApp alert sent (if opportunities exist)
+   - Shows symbols + metrics + countdown
+
+Continuous:
+   - Dashboard auto-refreshes
+   - Logs update in real-time
+   - API responds to requests
+
+================================================================================
+MONITOR YOUR SCANNER
+================================================================================
+
+Real-time Dashboard:
+   http://localhost:8000/dashboard/perfect_opportunities.html
+
+Real-time Logs:
+   double-click: D:\Dev\TradBOT\VIEW_SCANNER_LOGS.bat
+
+Status Check:
+   double-click: D:\Dev\TradBOT\VERIFY_SCANNER_RUNNING.bat
+
+WhatsApp Alerts:
+   Check messages from PsychoBot
+
+API Endpoint:
+   http://localhost:8000/perfect-opportunities
+
+================================================================================
+THRESHOLDS (What counts as PERFECT)
+================================================================================
+
+Symbol is "PERFECT" when ALL are met:
+
+   IA Status Confidence     >= 70%     ✓ Must be confident
+   GOM Coherence           >= 85%     ✓ Must be coherent
+   Probability Gate        >= 65%     ✓ Must be probable
+   Action                  BUY/SELL   ✓ Must be clear direction
+   Window (if Boom/Crash)  08:00-16:00 UTC  ✓ Must be open
+
+When all criteria met:
+   - Added to opportunities list
+   - Dashboard displays card
+   - WhatsApp alert sent (every 2 min)
+   - Countdown timer shows time left
+
+================================================================================
+WHAT YOU'LL RECEIVE BY WHATSAPP
+================================================================================
+
+Format:
+   🎯 PERFECT TRADING OPPORTUNITIES 🎯
+   ⏰ 14:32:45 UTC
+
+   📈 **XAUUSD**
+   IA: 85% | GOM: 92% | PROB: 78%
+   ⏱️ Trading until 16:00 UTC (1h 27m left)
+   ✅ Perfect for 5m
+
+   📉 **Boom500**
+   IA: 72% | GOM: 88% | PROB: 70%
+   ⏱️ Trading until 16:00 UTC (1h 27m left)
+
+   📊 Total: 2 perfect opportunity(ies)
+   Ready to trade! ✨
+
+Updates: Every 2 minutes (when opportunities exist)
+
+================================================================================
+DASHBOARD FEATURES
+================================================================================
+
+Real-time display shows:
+
+   Status Bar:
+   - Number of perfect opportunities
+   - Last scan time
+   - Live indicator
+
+   For Each Opportunity Card:
+   - Symbol name (big, bold)
+   - Action (📈 BUY / 📉 SELL)
+   - IA Confidence %
+   - GOM Coherence %
+   - Probability %
+   - Countdown timer (animated)
+   - Detection duration (how long it's been perfect)
+
+   Updates: Every 5 seconds (auto-refresh)
+
+================================================================================
+LOGS & DEBUGGING
+================================================================================
+
+Scanner logs written to:
+   D:\Dev\TradBOT\logs\scanner.log
+
+Contains:
+   - Scanner startup/shutdown
+   - New perfect opportunities detected
+   - WhatsApp send confirmations
+   - Errors and warnings
+   - Timestamps for every action
+
+View in real-time:
+   double-click: D:\Dev\TradBOT\VIEW_SCANNER_LOGS.bat
+
+Or open in text editor:
+   notepad D:\Dev\TradBOT\logs\scanner.log
+
+================================================================================
+STOP SCANNER ANYTIME
+================================================================================
+
+Option A: Close console windows
+   - Click X on each console window
+   - Press Ctrl+C if prompted
+
+Option B: Command
+   taskkill /IM python.exe /F
+
+Option C: Task Manager
+   - Find python.exe
+   - Right-click → End Task
+
+Scanner will stop and all services shut down.
+
+================================================================================
+RESTART SCANNER
+================================================================================
+
+Just run again:
+   double-click: D:\Dev\TradBOT\LAUNCH_SCANNER_NOW.bat
+
+Or manually:
+   1. Start AI Server in terminal 1
+   2. Start Scanner in terminal 2
+
+No issues restarting - no cleanup needed.
+
+================================================================================
+COMMON QUESTIONS
+================================================================================
+
+Q: How often does it scan?
+A: Every 30 seconds
+
+Q: How often are WhatsApp alerts sent?
+A: Every 2 minutes (when opportunities exist)
+
+Q: What if no opportunities are found?
+A: Dashboard shows empty, no WhatsApp sent
+
+Q: Can I lower thresholds to get more alerts?
+A: Yes! Edit perfect_opportunity_scanner.py lines 19-21
+
+Q: Can I run this 24/7?
+A: Yes! Leave windows open
+
+Q: Does it work with auto-trading?
+A: Yes! Send trade when scanner finds perfect opportunity
+
+Q: Does auto-correction work with this?
+A: Yes! Manually placed orders get SL/TP attached automatically
+
+Q: Can I modify symbols to scan?
+A: Yes! Edit perfect_opportunity_scanner.py lines 115-125
+
+================================================================================
+NOW LAUNCH IT!
+================================================================================
+
+You're ready!
+
+Run: D:\Dev\TradBOT\LAUNCH_SCANNER_NOW.bat
+
+And watch for perfect trading opportunities appearing in real-time!
+
+Questions?
+- Check logs: VIEW_SCANNER_LOGS.bat
+- Verify status: VERIFY_SCANNER_RUNNING.bat
+- Read docs: README_PERFECT_OPPORTUNITIES.md
+
+GOOD LUCK! 🎯
+
+================================================================================

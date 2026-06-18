@@ -1,0 +1,54 @@
+=========================================================
+PYTHON ERREUR FIXÉE — TRY THIS NOW
+=========================================================
+
+L'ancien script avait un problème d'échappement.
+
+Nouveau script créé: LAUNCH_NOW.bat
+
+C'est beaucoup plus simple et ça devrait marcher!
+
+=========================================================
+FAIS CECI:
+=========================================================
+
+Double-clic: D:\Dev\TradBOT\LAUNCH_NOW.bat
+
+Attends 10 secondes...
+
+Tu devrais voir:
+   1. Fenêtre "AI Server"
+   2. Fenêtre "Perfect Scanner"  
+   3. Browser dashboard
+
+Si ça marche → DONE! Scanner actif!
+
+=========================================================
+SI CA NE MARCHE PAS:
+=========================================================
+
+Essaie manuel (plus de contrôle):
+
+1. Ouvre Command Prompt (Admin)
+   Win + X → Command Prompt (Admin)
+
+2. Lance AI Server:
+   cd D:\Dev\TradBOT\Python
+   C:\Users\USER\AppData\Roaming\uv\python\cpython-3.14.0-windows-x86_64-none\python.exe ai_server.py
+
+3. Ouvre AUTRE Command Prompt (Admin)
+
+4. Lance Scanner:
+   cd D:\Dev\TradBOT\Python
+   C:\Users\USER\AppData\Roaming\uv\python\cpython-3.14.0-windows-x86_64-none\python.exe perfect_opportunity_scanner.py
+
+5. Ouvre browser:
+   http://localhost:8000/dashboard/perfect_opportunities.html
+
+=========================================================
+ALLEZ-Y!
+=========================================================
+
+Double-clic: LAUNCH_NOW.bat
+
+🚀
