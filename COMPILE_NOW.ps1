@@ -1,7 +1,7 @@
 #!/usr/bin/env powershell
 # Force MetaEditor to compile SMC_Universal.mq5
 
-$MetaEditorPath = "C:\Program Files\MetaTrader 5\MetaEditor64.exe"
+$MetaEditorPath = "D:\Program Files\MetaTrader 5\MetaEditor64.exe"
 $SourceFile = "D:\Dev\TradBOT\mt5\SMC_Universal.mq5"
 
 # Step 1: Delete any existing compiled files
