@@ -282,9 +282,7 @@ void SMC_JournalWriteRow(const string filePath,
 }
 
 //+------------------------------------------------------------------+
-bool SMC_JournalLogPositionClose(const ulong positionId,
-                                 const double aiConfidence = 0.0,
-                                 const string aiAction = "")
+bool SMC_JournalLogPositionClose(ulong positionId, double aiConfidence, string aiAction)
 {
    if(!g_journalEnabled || g_journalMagic <= 0)
       return false;
@@ -293,8 +291,6 @@ bool SMC_JournalLogPositionClose(const ulong positionId,
    double volume, openPrice, closePrice, profit, swap, commission;
    datetime openTime, closeTime;
    ulong closeDealTicket = 0;
-   double localAiConfidence = aiConfidence;
-   string localAiAction = aiAction;
 
    if(!SMC_JournalExtractPosition(positionId, g_journalMagic,
                                   symbol, direction, volume, openTime, closeTime,
@@ -320,7 +316,7 @@ bool SMC_JournalLogPositionClose(const ulong positionId,
                        symbol, category, direction, volume,
                        openTime, openPrice, closePrice,
                        profit, swap, commission, netProfit,
-                       durationSec, result, localAiConfidence, localAiAction,
+                       durationSec, result, aiConfidence, aiAction,
                        AccountInfoDouble(ACCOUNT_BALANCE),
                        AccountInfoDouble(ACCOUNT_EQUITY),
                        dailyPnL, comment);
@@ -330,7 +326,7 @@ bool SMC_JournalLogPositionClose(const ulong positionId,
                        symbol, category, direction, volume,
                        openTime, openPrice, closePrice,
                        profit, swap, commission, netProfit,
-                       durationSec, result, localAiConfidence, localAiAction,
+                       durationSec, result, aiConfidence, aiAction,
                        AccountInfoDouble(ACCOUNT_BALANCE),
                        AccountInfoDouble(ACCOUNT_EQUITY),
                        dailyPnL, comment);
@@ -343,9 +339,7 @@ bool SMC_JournalLogPositionClose(const ulong positionId,
 }
 
 //+------------------------------------------------------------------+
-bool SMC_JournalLogDealClose(const ulong dealTicket,
-                             const double aiConfidence = 0.0,
-                             const string aiAction = "")
+bool SMC_JournalLogDealClose(ulong dealTicket, double aiConfidence, string aiAction)
 {
    if(!g_journalEnabled || dealTicket == 0)
       return false;
