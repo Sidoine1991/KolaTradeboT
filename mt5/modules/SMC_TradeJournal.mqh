@@ -7,21 +7,6 @@
 #define SMC_JOURNAL_MAIN_FILE  "TradBOT/trade_journal.csv"
 #define SMC_JOURNAL_DAILY_DIR  "TradBOT/daily"
 
-// Forward declare ENUM_SYMBOL_CATEGORY if not already defined
-#ifndef ENUM_SYMBOL_CATEGORY_DEFINED
-   enum ENUM_SYMBOL_CATEGORY
-   {
-      SYM_BOOM_CRASH,
-      SYM_VOLATILITY,
-      SYM_FOREX,
-      SYM_COMMODITY,
-      SYM_METAL,
-      SYM_CRYPTO,
-      SYM_UNKNOWN
-   };
-   #define ENUM_SYMBOL_CATEGORY_DEFINED
-#endif
-
 bool   g_journalEnabled      = true;
 int    g_journalMagic        = 0;
 int    g_journalBackfillDays = 30;
