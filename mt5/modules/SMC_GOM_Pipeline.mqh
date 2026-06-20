@@ -14,6 +14,7 @@ bool DisciplineAllowsPipelineAction(const string action);
 bool SMCGP_GOMValidatesPrimarySignal(const int dir);
 bool SMC_BCHourAllowsTrade(const string symbol = "");
 bool SMC_HighProbabilityAllowsEntry(const int dirSign = 0);
+bool PB_SendWhatsAppAlert(const string message);
 extern double g_lastEntryProbability;
 extern string g_lastAIAction;
 extern double g_lastAIConfidence;
@@ -22,7 +23,8 @@ bool SMCGP_IsBoomCrashSym(const string sym)
 {
    string s = sym;
    StringToUpper(s);
-   return (StringFind(s, "BOOM") >= 0 || StringFind(s, "CRASH") >= 0);
+   return (StringFind(s, "BOOM") >= 0 || StringFind(s, "CRASH") >= 0 ||
+           StringFind(s, "PAINX") >= 0 || StringFind(s, "GAINX") >= 0);
 }
 
 MT5CandlesUploader *g_smcCandlesUploader = NULL;
@@ -844,6 +846,7 @@ void SMCGP_PushGOMMsg(const string msg)
    Alert(msg);
    if(!SendNotification(msg))
       Print("[GOM-NOTIF] SendNotification a echoue — verifier Options > Notifications MT5");
+   PB_SendWhatsAppAlert(msg);
 }
 
 void SMCGP_NotifyGOMVerdictChange(const string symLabel,
@@ -944,7 +947,8 @@ void SMCGP_NotifySpikeImminent(const string symLabel, const int prevLevel, const
 
    string _smcSym = _Symbol;
    StringToUpper(_smcSym);
-   if(StringFind(_smcSym, "BOOM") < 0 && StringFind(_smcSym, "CRASH") < 0) return;
+   if(StringFind(_smcSym, "BOOM") < 0 && StringFind(_smcSym, "CRASH") < 0 &&
+      StringFind(_smcSym, "PAINX") < 0 && StringFind(_smcSym, "GAINX") < 0) return;
 
    const int lvl = g_smcGomSpikeLevel;
    const bool tradable = g_smcGomSpikeTradable;
@@ -963,7 +967,7 @@ void SMCGP_NotifySpikeImminent(const string symLabel, const int prevLevel, const
    if(isImminent && !wasImminent)
    {
       int etaMin = SMCGP_EstimateSpikeMinutes();
-      string side = (StringFind(symLabel, "Boom") >= 0 || StringFind(_Symbol, "Boom") >= 0) ? "BUY spike" : "SELL spike";
+      string side = (StringFind(symLabel, "Boom") >= 0 || StringFind(_smcSym, "PAINX") >= 0) ? "BUY spike" : "SELL spike";
       string msg = StringFormat("[SPIKE] %s IMMINENT %s | prob %.0f%% imm %.0f%% ~%d min",
                                 symLabel, side, g_smcGomSpikePct, g_smcGomImminencePct, etaMin);
       SMCGP_PushGOMMsg(msg);
@@ -1615,20 +1619,11 @@ bool SMCGP_ExecutePipelineOrder(const string sym, const string action,
    if(CountPositionsForSymbol(sym) > 0) return false;
    if(!IsDirectionAllowedForBoomCrash(sym, action)) return false;
 
-   // Max positions atteint : si signal PERFECT, placer ordre LIMIT au lieu de bloquer
+   // Max positions atteint : bloquer toute nouvelle entrée sans exception
    if(CountPositionsOurEA() >= MaxPositionsTerminal)
    {
-      if(SMCGP_IsPerfectVerdict(g_smcGomVerdictNum) && entry > 0 && sl > 0 && tp > 0)
-      {
-         Print("[SMC-GOM] Max positions (", MaxPositionsTerminal, ") — signal PERFECT ",
-               action, " ", sym, " → ordre LIMIT placé au lieu de marché");
-         // L'ordre LIMIT sera exécuté quand une position se libère + prix touche l'entry
-      }
-      else
-      {
-         Print("[SMC-GOM] 🚫 Max positions (", MaxPositionsTerminal, ") — ", action, " ", sym, " bloqué");
-         return false;
-      }
+      Print("[SMC-GOM] 🚫 Max positions (", MaxPositionsTerminal, ") — ", action, " ", sym, " bloqué");
+      return false;
    }
 
    int dir = (action == "BUY") ? 1 : -1;
@@ -1880,19 +1875,25 @@ void SMCGP_PollAndExecutePipeline()
    g_smcLastMCPPoll = TimeCurrent();
 
    // Règle universelle : bloquer toute entrée si IA en HOLD (dashboard GOM ou /decide)
-   bool holdFromDashboard = (g_smcIAStatusAction == "HOLD" || StringLen(g_smcIAStatusAction) == 0);
-   bool holdFromDecide    = (g_lastAIAction == "hold" || g_lastAIAction == "HOLD" || g_lastAIAction == "");
-   if(holdFromDashboard || holdFromDecide)
+   // Exception : synthétiques Weltrade (PAINX/GAINX/FXVOL) — pas de décision IA valide,
+   // ils s'appuient uniquement sur GOM. Le gate IA HOLD ne s'applique pas.
+   bool isWeltradeSynth = SMC_IsWeltradeSymbol(_Symbol);
+   if(!isWeltradeSynth)
    {
-      static datetime s_holdLog = 0;
-      if(TimeCurrent() - s_holdLog >= 60)
+      bool holdFromDashboard = (g_smcIAStatusAction == "HOLD" || StringLen(g_smcIAStatusAction) == 0);
+      bool holdFromDecide    = (g_lastAIAction == "hold" || g_lastAIAction == "HOLD" || g_lastAIAction == "");
+      if(holdFromDashboard || holdFromDecide)
       {
-         s_holdLog = TimeCurrent();
-         Print("[PIPELINE] ⏸ IA en HOLD — pipeline suspendu sur ", _Symbol,
-               " | dashboard=", g_smcIAStatusAction, " (", DoubleToString(g_iaStatusConfidence,1), "%)",
-               " | decide=", g_lastAIAction);
+         static datetime s_holdLog = 0;
+         if(TimeCurrent() - s_holdLog >= 60)
+         {
+            s_holdLog = TimeCurrent();
+            Print("[PIPELINE] ⏸ IA en HOLD — pipeline suspendu sur ", _Symbol,
+                  " | dashboard=", g_smcIAStatusAction, " (", DoubleToString(g_iaStatusConfidence,1), "%)",
+                  " | decide=", g_lastAIAction);
+         }
+         return;
       }
-      return;
    }
 
    string sym = SMCGP_EncodeSym(_Symbol);
@@ -1942,7 +1943,36 @@ void SMCGP_PollAndExecutePipeline()
 
    string serverVerdict = SMCGP_JsonString(orderBody, "gom_verdict");
    StringToUpper(serverVerdict);
-   // source=pipeline : tous les filtres GOM déjà appliqués côté Python — bypass
+
+   // Gate GOM WAIT absolu — bloque même les ordres pipeline
+   // Le verdict Python peut être en cache (généré quand GOM était BUY/SELL),
+   // mais si g_smcGomVerdictNum == 0 maintenant, on n'entre pas
+   if(UseGOMVerdictFilter && g_smcGomConnected && g_smcGomVerdictNum == 0)
+   {
+      static datetime s_pipeWaitLog = 0;
+      if(TimeCurrent() - s_pipeWaitLog >= 60)
+      {
+         s_pipeWaitLog = TimeCurrent();
+         Print("[PIPELINE] BLOQUE — GOM=WAIT (vn=0) au moment de l'exécution | ", _Symbol,
+               " action=", action, " source=", source);
+      }
+      return;
+   }
+   // Gate stale — verdict trop vieux = traiter comme WAIT
+   if(UseGOMVerdictFilter && g_smcGomConnected && g_smcLastGOMPoll > 0
+      && (int)(TimeCurrent() - g_smcLastGOMPoll) > 90)
+   {
+      static datetime s_pipeStalLog = 0;
+      if(TimeCurrent() - s_pipeStalLog >= 60)
+      {
+         s_pipeStalLog = TimeCurrent();
+         Print("[PIPELINE] BLOQUE — GOM stale (", (int)(TimeCurrent() - g_smcLastGOMPoll),
+               "s sans poll) | ", _Symbol, " action=", action);
+      }
+      return;
+   }
+
+   // source=pipeline : tous les filtres GOM déjà appliqués côté Python — bypass filtres secondaires
    if(!isPipeline && UseSignalFirstDiscipline && !DisciplineAllowsPipelineAction(action))
    {
       Print("[SMC-GOM] Pipeline rejeté — signal SMC/GOM discipline (action=", action, ")");
@@ -2067,6 +2097,8 @@ void SMCGP_DrawDashCell(const string name, const int x, const int y, const int c
 void SMCGP_CleanupDashboard()
 {
    ObjectsDeleteAll(0, g_smcDashPrefix);
+   // Nettoyage élargi : préfixe fixe sans ChartID (objets orphelins d'anciens reloads)
+   ObjectsDeleteAll(0, "SMC_DASH_");
 }
 
 void SMCGP_CleanupOrderFlowCompass()
