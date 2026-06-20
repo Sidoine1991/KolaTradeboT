@@ -6309,37 +6309,101 @@ bool SMC_IsCrash150Symbol(const string symbol)
 }
 
 // Score propice 0-100 : évalue si ce symbole est dans une période favorable pour trader.
-// Facteurs : force GOM (40pts) + cohérence multi-TF (25pts) + absence perte récente (20pts) + fraîcheur signal (15pts)
+// 7 facteurs : force GOM + cohérence TF + perte récente + fraîcheur signal
+//            + fenêtre horaire active + volatilité relative + clarté tendance globale
 int SMC_ComputePropiceScore()
 {
    int score = 0;
 
-   // 1. Force verdict GOM : vn=±3 → 40pts | vn=±2 → 28pts | vn=±1 → 12pts | vn=0 → 0pts
+   // 1. Force verdict GOM : vn=±3 → 30pts | vn=±2 → 21pts | vn=±1 → 10pts | vn=0 → 0pts
    int absVn = MathAbs(g_smcGomVerdictNum);
-   if(absVn >= 3)      score += 40;
-   else if(absVn == 2) score += 28;
-   else if(absVn == 1) score += 12;
-   // vn=0 (WAIT) = 0 pts
+   if(absVn >= 3)      score += 30;
+   else if(absVn == 2) score += 21;
+   else if(absVn == 1) score += 10;
 
-   // 2. Cohérence multi-TF : 100% → 25pts | 66% → 16pts | 33% → 8pts | 0% → 0pts
+   // 2. Cohérence multi-TF : ≥95% → 20pts | ≥60% → 13pts | ≥30% → 6pts
    double coh = g_smcGomCoherence;
-   if(coh >= 95.0)      score += 25;
-   else if(coh >= 60.0) score += 16;
-   else if(coh >= 30.0) score += 8;
+   if(coh >= 95.0)      score += 20;
+   else if(coh >= 60.0) score += 13;
+   else if(coh >= 30.0) score += 6;
 
-   // 3. Absence de perte récente sur ce symbole (< 30 min) : +20pts si propre
+   // 3. Absence de perte récente (<30 min) : +15pts si aucune perte récente sur ce symbole
    if(!(g_lastLossSymbol == _Symbol && g_lastLossTime > 0
         && (TimeCurrent() - g_lastLossTime) < 1800))
-      score += 20;
-
-   // 4. Fraîcheur du signal GOM (bars_since_spike) :
-   //    Signal frais (1-3 bars) → 15pts | moyen (4-8) → 8pts | vieux → 0pts
-   if(g_smcGomBarsSinceSpike >= 1 && g_smcGomBarsSinceSpike <= 3)
       score += 15;
-   else if(g_smcGomBarsSinceSpike > 3 && g_smcGomBarsSinceSpike <= 8)
-      score += 8;
 
-   return score;
+   // 4. Fraîcheur signal GOM (bars_since_spike) : 1-3 bars → 10pts | 4-8 → 5pts
+   if(g_smcGomBarsSinceSpike >= 1 && g_smcGomBarsSinceSpike <= 3)
+      score += 10;
+   else if(g_smcGomBarsSinceSpike > 3 && g_smcGomBarsSinceSpike <= 8)
+      score += 5;
+
+   // 5. Fenêtre horaire active : 15pts si marché actif (session London/NY pour Deriv, 04-16 UTC pour Weltrade)
+   MqlDateTime utc; TimeGMT(utc);
+   int h = utc.hour;
+   ENUM_SYMBOL_CATEGORY cat = SMC_GetSymbolCategory(_Symbol);
+   bool inActiveWindow = false;
+   if(SMC_IsWeltradeSymbol(_Symbol))
+   {
+      // Weltrade synthétiques : actifs 04h-16h UTC, pic de volatilité 07h-13h
+      inActiveWindow = (h >= 7 && h < 13);   // cœur London+NY overlap
+      if(!inActiveWindow && h >= 4 && h < 16)
+         score += 7;  // actif mais hors cœur → demi-points
+   }
+   else if(cat == SYM_BOOM_CRASH)
+   {
+      // Deriv Boom/Crash : pic de volatilité London 07h-11h, NY 13h-17h
+      inActiveWindow = (h >= 7 && h < 11) || (h >= 13 && h < 17);
+      if(!inActiveWindow && ((h >= 5 && h < 13) || (h >= 11 && h < 19)))
+         score += 7;
+   }
+   else
+   {
+      // Forex/Métaux/Crypto : London+NY overlap 12h-16h UTC = meilleur | London 07h-11h = bon
+      inActiveWindow = (h >= 12 && h < 16);
+      if(!inActiveWindow && h >= 7 && h < 20)
+         score += 7;
+   }
+   if(inActiveWindow) score += 15;
+
+   // 6. Volatilité relative : ATR actuel vs moyenne 20 bougies M1.
+   //    ATR > 1.3× moyenne → marché en mouvement → 10pts
+   //    ATR 1.0-1.3× → normal → 6pts | ATR < 1.0× → marché calme → 0pts
+   double atrNow = GOM_GetATRValue();
+   if(atrNow > 0)
+   {
+      double m1rates[];
+      ArraySetAsSeries(m1rates, true);
+      double atrSum = 0;
+      int    atrN   = 0;
+      if(CopyClose(_Symbol, PERIOD_M1, 1, 21, m1rates) == 21)
+      {
+         double hiArr[], loArr[];
+         ArraySetAsSeries(hiArr, true); ArraySetAsSeries(loArr, true);
+         if(CopyHigh(_Symbol, PERIOD_M1, 1, 21, hiArr) == 21 &&
+            CopyLow (_Symbol, PERIOD_M1, 1, 21, loArr) == 21)
+         {
+            for(int k = 0; k < 20; k++)
+               atrSum += (hiArr[k] - loArr[k]);
+            atrN = 20;
+         }
+      }
+      if(atrN > 0)
+      {
+         double atrAvg = atrSum / atrN;
+         double ratio  = (atrAvg > 0) ? (atrNow / atrAvg) : 1.0;
+         if(ratio >= 1.3)      score += 10;
+         else if(ratio >= 1.0) score += 6;
+         // ratio < 1.0 = marché calme = 0pts
+      }
+      else score += 6; // données insuffisantes → neutre
+   }
+
+   // 7. Clarté tendance globale (g_smcGomGlobalStr 0-100) : ≥60 → 10pts | ≥35 → 5pts
+   if(g_smcGomGlobalStr >= 60)      score += 10;
+   else if(g_smcGomGlobalStr >= 35) score += 5;
+
+   return MathMin(score, 100);
 }
 
 void SMC_MarkSpikeCaptured(const string symbol)
