@@ -1506,6 +1506,8 @@ input bool   UseEAIndependentEntry  = true;  // Entrées indépendantes EA (GOOD
 input bool   GOMOBTouchForPipeline  = false; // Exiger OB touch pour pipeline
 input bool   GOMPerfectAutoEntry    = true;  // Stratégie GOM autonome (WAIT/LIMIT/GOOD/PERFECT)
 input double GOMTrailingMinProfitUSD = 1.0;  // Trailing GOM actif au-delà de N $ de gain
+input bool   UsePropitiousScore     = true;  // Filtrer par score propice (0-100) avant toute entrée
+input int    GOMMinPropiceScore     = 70;    // Score minimum pour entrer (0=désactivé, 70=recommandé)
 input bool   ShowTVBollingerLines   = true;  // Bandes Bollinger TV sync
 input bool   ShowTVOrderBlocks      = true;  // Zones OB bull/bear (ai_server uniquement)
 input bool   UseLocalOrderBlockDrawings = false; // OB calculés localement (OFF = ai_server seul)
@@ -6306,6 +6308,40 @@ bool SMC_IsCrash150Symbol(const string symbol)
    return (StringFind(s, "CRASH") >= 0 && StringFind(s, "150") >= 0);
 }
 
+// Score propice 0-100 : évalue si ce symbole est dans une période favorable pour trader.
+// Facteurs : force GOM (40pts) + cohérence multi-TF (25pts) + absence perte récente (20pts) + fraîcheur signal (15pts)
+int SMC_ComputePropiceScore()
+{
+   int score = 0;
+
+   // 1. Force verdict GOM : vn=±3 → 40pts | vn=±2 → 28pts | vn=±1 → 12pts | vn=0 → 0pts
+   int absVn = MathAbs(g_smcGomVerdictNum);
+   if(absVn >= 3)      score += 40;
+   else if(absVn == 2) score += 28;
+   else if(absVn == 1) score += 12;
+   // vn=0 (WAIT) = 0 pts
+
+   // 2. Cohérence multi-TF : 100% → 25pts | 66% → 16pts | 33% → 8pts | 0% → 0pts
+   double coh = g_smcGomCoherence;
+   if(coh >= 95.0)      score += 25;
+   else if(coh >= 60.0) score += 16;
+   else if(coh >= 30.0) score += 8;
+
+   // 3. Absence de perte récente sur ce symbole (< 30 min) : +20pts si propre
+   if(!(g_lastLossSymbol == _Symbol && g_lastLossTime > 0
+        && (TimeCurrent() - g_lastLossTime) < 1800))
+      score += 20;
+
+   // 4. Fraîcheur du signal GOM (bars_since_spike) :
+   //    Signal frais (1-3 bars) → 15pts | moyen (4-8) → 8pts | vieux → 0pts
+   if(g_smcGomBarsSinceSpike >= 1 && g_smcGomBarsSinceSpike <= 3)
+      score += 15;
+   else if(g_smcGomBarsSinceSpike > 3 && g_smcGomBarsSinceSpike <= 8)
+      score += 8;
+
+   return score;
+}
+
 void SMC_MarkSpikeCaptured(const string symbol)
 {
    g_lastSpikeCapturedSymbol = symbol;
@@ -6374,6 +6410,36 @@ bool SMC_BCHourAllowsTrade(const string symbol = "")
 bool GOM_EntryEnvironmentOK(const int dirSign)
 {
    if(dirSign == 0) return true;
+
+   // Gate score propice — s'applique AVANT le bypass PERFECT (évite surtrading sur faux contextes)
+   if(UsePropitiousScore && GOMMinPropiceScore > 0)
+   {
+      int propScore = SMC_ComputePropiceScore();
+      if(propScore < GOMMinPropiceScore)
+      {
+         static datetime s_propLog = 0;
+         if(TimeCurrent() - s_propLog >= 30)
+         {
+            s_propLog = TimeCurrent();
+            string dir = (dirSign == 1) ? "BUY" : "SELL";
+            Print("[PROPICE] BLOQUE ", dir, " ", _Symbol,
+                  " — score ", propScore, "/", GOMMinPropiceScore,
+                  " (GOM vn=", g_smcGomVerdictNum,
+                  " coh=", DoubleToString(g_smcGomCoherence, 0), "%",
+                  " bars_spike=", g_smcGomBarsSinceSpike,
+                  " perte_recente=", (g_lastLossSymbol == _Symbol && (TimeCurrent() - g_lastLossTime) < 1800) ? "oui" : "non",
+                  ")");
+         }
+         return false;
+      }
+      static datetime s_propOkLog = 0;
+      if(TimeCurrent() - s_propOkLog >= 60)
+      {
+         s_propOkLog = TimeCurrent();
+         string dir = (dirSign == 1) ? "BUY" : "SELL";
+         Print("[PROPICE] OK ", dir, " ", _Symbol, " — score ", propScore, "/100");
+      }
+   }
 
    // PERFECT (vn=±3) : signal le plus fort, exempt des gates secondaires
    if(SMCGP_IsPerfectVerdict(g_smcGomVerdictNum)) return true;
