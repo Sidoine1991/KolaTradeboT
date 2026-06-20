@@ -15,6 +15,7 @@ bool SMCGP_GOMValidatesPrimarySignal(const int dir);
 bool SMC_BCHourAllowsTrade(const string symbol = "");
 bool SMC_HighProbabilityAllowsEntry(const int dirSign = 0);
 bool PB_SendWhatsAppAlert(const string message);
+int  SMC_ComputePropiceScore();
 extern double g_lastEntryProbability;
 extern string g_lastAIAction;
 extern double g_lastAIConfidence;
@@ -2530,7 +2531,22 @@ void SMCGP_DrawGOMDashboard()
       SMCGP_DrawDashCell("G6B_CORR", xCur, y3, cellW, cellH, corrTxt, cCorr, cTxt);
       xCur += cellW + gap;
 
-      SMCGP_DrawDashCell("G7_LINK", xCur, y3, cellW, cellH, linkTxt, cConn, cTxt);
+      // Score propice 0-100 (affiché à la place du lien connexion, lien fusionné dans le titre)
+      int propScore = SMC_ComputePropiceScore();
+      bool propOK   = (!UsePropitiousScore || GOMMinPropiceScore <= 0 || propScore >= GOMMinPropiceScore);
+      color cProp   = propOK ? (propScore >= 85 ? (color)0xFF00E676   // vert vif = excellent
+                                                : (color)SMC_DASH_C_BUY)  // vert = OK
+                             : (propScore >= 55 ? (color)SMC_DASH_C_NEUTRAL  // orange = limite
+                                                : (color)SMC_DASH_C_SELL);  // rouge = bloqué
+      string propTxt = "PROP " + IntegerToString(propScore) + "/100";
+      if(!UsePropitiousScore || GOMMinPropiceScore <= 0)
+         propTxt += " OFF";
+      else
+         propTxt += (propOK ? " OK" : " /" + IntegerToString(GOMMinPropiceScore));
+      SMCGP_DrawDashCell("G7_PROP", xCur, y3, cellW, cellH, propTxt, cProp, cTxt);
+      xCur += cellW + gap;
+
+      SMCGP_DrawDashCell("G8_LINK", xCur, y3, cellW, cellH, linkTxt, cConn, cTxt);
    }
 
    if(ShowOrderFlowCompass)
