@@ -300,8 +300,18 @@ ALL_ACTIVE_SYMBOLS: tuple = (
     "Boom 900 Index", "Boom 1000 Index",
     "Crash 300 Index", "Crash 500 Index", "Crash 600 Index",
     "Crash 900 Index", "Crash 1000 Index",
-    # Volatility / Step
+
+    # Boom/Crash Weltrade equivalents (same trading logic as Deriv)
+    "PAINX 400",  # ≡ Crash Index (Weltrade) — SELL only, prix chute par spikes
+    "GAINX 400",  # ≡ Boom Index (Weltrade)  — BUY only, prix monte par spikes
+
+    # Volatility / Step Deriv
     "Step Index", "Volatility 30 (1s) Index",
+
+    # Volatility Weltrade equivalents
+    "FX Vol 20",  # ≡ Volatility Index (Weltrade)
+    "SFV Vol",    # ≡ Volatility Index - Stocks (Weltrade)
+
     # Forex majeurs
     "EURUSD", "GBPUSD", "USDJPY", "USDCAD", "AUDUSD",
     # Métaux
@@ -964,16 +974,17 @@ _history_cache: Dict[str, pd.DataFrame] = {}
 # Fonctions de détection de spikes Boom/Crash
 # =========================
 def is_boom_crash_symbol(symbol: str) -> bool:
-    """Vérifie si le symbole est un indice Boom ou Crash (Deriv : *Index*, Boom500, Crash 1000, etc.)"""
+    """Vérifie si le symbole est un indice Boom ou Crash (Deriv + Weltrade PainX/GainX)."""
     s_raw = str(symbol).lower()
     s = s_raw.replace(" ", "").replace("_", "")
+    if "painx" in s_raw or "gainx" in s_raw:
+        return True
     boom = "boom" in s_raw
     crash = "crash" in s_raw
     if not boom and not crash:
         return False
     if "index" in s_raw:
         return True
-    # Symboles sans le mot « index » (ex. broker compact)
     if boom and re.search(r"boom\d", s):
         return True
     if crash and re.search(r"crash\d", s):
@@ -1020,6 +1031,45 @@ def _load_bc_volatility_cache(force: bool = False) -> Dict[str, Any]:
 def _invalidate_bc_volatility_cache() -> None:
     global _BC_VOL_CACHE
     _BC_VOL_CACHE = {}
+
+
+# ── Fenêtres horaires Weltrade synthetics ─────────────────────────────────
+# Analysé sur ~6000 polls (2026-06-18/20) : zone active 00h-16h UTC (46-97% signal),
+# zone morte 17h-23h UTC (14-30% signal). Les 2 pertes du 2026-06-20 à 00h08 et 00h22
+# étaient dues à des signaux instables hors fenêtre optimale (0h ≡ juste après 23h).
+_WELTRADE_TRADING_WINDOWS: Dict[str, List[Tuple[int, int]]] = {
+    "PAINX": [(4, 16)],
+    "GAINX": [(4, 16)],
+    "FXVOL": [(4, 16)],
+}
+
+
+def is_weltrade_synthetic_symbol(symbol: str) -> bool:
+    """Retourne True si le symbole est un synthétique Weltrade (PainX, GainX, FX Vol)."""
+    s = str(symbol).upper().replace(" ", "").replace("_", "")
+    return s.startswith("PAINX") or s.startswith("GAINX") or s.startswith("FXVOL")
+
+
+def _check_weltrade_hour_gate(symbol: str) -> Tuple[bool, Optional[str]]:
+    """Gate horaire Weltrade — bloque les trades hors fenêtre active (00h-16h UTC).
+
+    Retourne (True, None) si autorisé, (False, message) sinon.
+    """
+    if not is_weltrade_synthetic_symbol(symbol):
+        return True, None
+    s = str(symbol).upper().replace(" ", "")
+    utc_hour = datetime.now(timezone.utc).hour
+    for prefix, windows in _WELTRADE_TRADING_WINDOWS.items():
+        if s.startswith(prefix):
+            in_window = any(start <= utc_hour < end for start, end in windows)
+            if not in_window:
+                msg = (
+                    f"Weltrade {symbol}: heure UTC {utc_hour:02d}h "
+                    f"hors fenêtre propice {windows}"
+                )
+                return False, msg
+            return True, None
+    return True, None
 
 
 def _check_bc_hour_gate(symbol: str, min_conf: float = 60.0) -> Tuple[bool, Optional[str], Dict[str, Any]]:
@@ -1426,18 +1476,16 @@ def _check_cognition_gate(symbol: str, direction: str, chart_tf: str = "M1") -> 
 def enforce_ea_boom_crash_direction(symbol: str, action: str, confidence: float, reason: str):
     """
     Aligner la décision HTTP avec SMC_Universal.mq5 :
-    Boom = BUY seulement, Crash = SELL seulement ;
-    Weltrade GainX = pas de SELL, PainX = pas de BUY (même principe).
-    Une direction interdite est ramenée à HOLD pour laisser la logique aggressive (EMA) proposer SELL/BUY.
+    Boom/GainX = BUY seulement (prix monte par spikes).
+    Crash/PainX = SELL seulement (prix chute par spikes).
     """
     s = str(symbol).lower()
     a = (action or "hold").lower()
-    if is_boom_crash_symbol(str(symbol)):
-        if "crash" in s and a == "buy":
-            return "hold", min(float(confidence), 0.55), reason + "[Crash: BUY incompatible EA → HOLD] "
-        if "boom" in s and a == "sell":
-            return "hold", min(float(confidence), 0.55), reason + "[Boom: SELL incompatible EA → HOLD] "
-    # weltrade_symbols module not available in this environment — skip PainX/GainX checks
+    if is_boom_crash_symbol(str(symbol)) or "painx" in s or "gainx" in s:
+        if ("crash" in s or "painx" in s) and a == "buy":
+            return "hold", min(float(confidence), 0.55), reason + "[Crash/PainX: BUY incompatible EA → HOLD] "
+        if ("boom" in s or "gainx" in s) and a == "sell":
+            return "hold", min(float(confidence), 0.55), reason + "[Boom/GainX: SELL incompatible EA → HOLD] "
     return action, confidence, reason
 
 
@@ -1544,9 +1592,9 @@ def apply_divergence_strategy_to_decision(
 def synth_stair_direction_for_symbol(symbol: str) -> Optional[str]:
     """Direction trade autorisée pour indices escalier (Boom/GainX → BUY, Crash/PainX → SELL)."""
     s = str(symbol).lower()
-    if "boom" in s:
+    if "boom" in s or "gainx" in s:
         return "BUY"
-    if "crash" in s:
+    if "crash" in s or "painx" in s:
         return "SELL"
     return None
 
@@ -1780,7 +1828,7 @@ async def _patch_stair_outcome_supabase(
         try:
             update_data = {
                 "outcome": outcome.lower(),
-                "updated_at": datetime.utcnow().isoformat() + "Z",
+                "updated_at": datetime.now(timezone.utc).isoformat() + "Z",
             }
             if result_usd is not None:
                 update_data["result_usd"] = result_usd
@@ -1823,7 +1871,7 @@ async def _patch_stair_outcome_supabase(
 
     patch: Dict[str, Any] = {
         "outcome": outcome.lower(),
-        "updated_at": datetime.utcnow().isoformat() + "Z",
+        "updated_at": datetime.now(timezone.utc).isoformat() + "Z",
     }
     if result_usd is not None:
         patch["result_usd"] = result_usd
@@ -2403,17 +2451,24 @@ def get_market_data_cloud(symbol: str, period: str = "5d", interval: str = "1m")
     try:
         if not YFINANCE_AVAILABLE:
             return generate_simulated_data(symbol, 100)
+        if not symbol or symbol.strip().upper() in ("UNKNOWN", ""):
+            return generate_simulated_data(symbol or "UNKNOWN", 100)
         
         # Mapping des symboles pour yfinance
         symbol_map = {
             "EURUSD": "EURUSD=X",
             "GBPUSD": "GBPUSD=X",
             "USDJPY": "USDJPY=X",
+            # Deriv Boom/Crash
             "Boom 500 Index": "^GSPC",
             "Boom 300 Index": "^GSPC",
             "Boom 600 Index": "^GSPC",
             "Boom 900 Index": "^GSPC",
             "Boom 1000 Index": "^GSPC",
+            # Weltrade Boom/Crash equivalents (use same market indices)
+            "PAINX 400": "^GSPC",  # Boom ≡ S&P 500
+            "GAINX 400": "^VIX",   # Crash ≡ VIX
+            # Deriv Volatility
             "Crash 300 Index": "^VIX",
             "Crash 500 Index": "^VIX",
             "Crash 900 Index": "^VIX",
@@ -2421,6 +2476,9 @@ def get_market_data_cloud(symbol: str, period: str = "5d", interval: str = "1m")
             "Volatility 75 Index": "^VIX",
             "Volatility 100 Index": "^VIX",
             "Volatility 25 Index": "^VIX",
+            # Weltrade Volatility equivalents
+            "FX Vol 20": "^VIX",     # FX Volatility ≡ VIX
+            "SFV Vol": "^VIX",       # Stock Volatility ≡ VIX
             "Step Index": "^GSPC",
         }
         
@@ -3230,7 +3288,7 @@ async def _run_tradingagents_once(symbol: str) -> Dict[str, Any]:
     started_at = time.time()
     TradingAgentsGraph, ta_default_config = _import_tradingagents_local()
     data_ticker = _mt5_to_yfinance_ticker(symbol)
-    today = datetime.utcnow().strftime("%Y-%m-%d")
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
     def _sync_propagate(cfg: Dict[str, Any]) -> Dict[str, Any]:
         ta_graph = TradingAgentsGraph(debug=False, config=cfg)
@@ -3240,7 +3298,7 @@ async def _run_tradingagents_once(symbol: str) -> Dict[str, Any]:
     base_result: Dict[str, Any] = {
         "symbol": symbol,
         "data_ticker": data_ticker,
-        "ran_at": datetime.utcnow().isoformat(),
+        "ran_at": datetime.now(timezone.utc).isoformat(),
     }
 
     try:
@@ -3888,6 +3946,14 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Enregistrement du router des agents d'intelligence (avant startup)
+try:
+    from agents.api_routes import agent_router
+    app.include_router(agent_router)
+    logger.info("✅ Agent router enregistré (/agents/*)")
+except Exception as _arouter_err:
+    logger.warning("⚠️ Agent router non disponible: %s", _arouter_err)
 
 
 @app.exception_handler(RequestValidationError)
@@ -4757,6 +4823,14 @@ async def startup_event():
     # Charger le cache GOM depuis le fichier
     _load_gom_cache_from_disk()
 
+    # Démarrer les 6 agents d'intelligence (boucles de fond seulement — router déjà enregistré)
+    try:
+        from agents.orchestrator import get_orchestrator
+        get_orchestrator().start_all()
+        logger.info("✅ Intelligence agents démarrés (6 agents)")
+    except Exception as _agent_err:
+        logger.warning("⚠️ Intelligence agents non disponibles: %s", _agent_err)
+
     # Load pending orders from disk
     await _pending_orders_load()
 
@@ -5366,7 +5440,7 @@ async def _compute_propice_top_from_trade_feedback(
         return {"rows": [], "source": "none", "note": "rds_unavailable"}
     from datetime import timezone
 
-    dt_from = datetime.utcnow().replace(tzinfo=timezone.utc) - timedelta(days=int(lookback_days or 14))
+    dt_from = datetime.now(timezone.utc).replace(tzinfo=timezone.utc) - timedelta(days=int(lookback_days or 14))
 
     try:
         rds_rows = aws_rds_client.execute_query("""
@@ -5509,7 +5583,7 @@ async def get_dashboard_top_net_summary(timeframe: str = "M1", days: int = 30, t
                 "global_model_perf_pct": 0.0,
                 "global_model_samples": 0,
                 "top_count": 0,
-                "updated_at": datetime.utcnow().isoformat(),
+                "updated_at": datetime.now(timezone.utc).isoformat(),
                 "persistence": "off",
             }
             for i in range(3):
@@ -5522,7 +5596,7 @@ async def get_dashboard_top_net_summary(timeframe: str = "M1", days: int = 30, t
         d = int(max(1, min(365, days)))
         n = int(max(1, min(5, top_n)))
         tf = (timeframe or "M1").upper()
-        dt_from = (datetime.utcnow() - timedelta(days=d)).isoformat()
+        dt_from = (datetime.now(timezone.utc) - timedelta(days=d)).isoformat()
         headers = {"apikey": supabase_key, "Authorization": f"Bearer {supabase_key}"}
 
         # 1) trade_feedback -> top net (normalisé par alias symbol)
@@ -5579,7 +5653,7 @@ async def get_dashboard_top_net_summary(timeframe: str = "M1", days: int = 30, t
             "global_model_perf_pct": round(global_perf, 2),
             "global_model_samples": int(total_samples),
             "top_count": len(top),
-            "updated_at": datetime.utcnow().isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
         }
         for i in range(3):
             idx = i + 1
@@ -6295,7 +6369,7 @@ def update_spike_state_from_request(req: "DecisionRequest") -> None:
             return
 
         info = {
-            "time": datetime.utcnow(),
+            "time": datetime.now(timezone.utc),
             "direction": direction,
             "diff_points": float(diff),
         }
@@ -6545,7 +6619,7 @@ class OllamaAnalysisResponse(BaseModel):
     key_levels: Dict[str, Optional[float]]  # support, resistance, entry_buy, entry_sell
     risk_reward: Optional[float] = None
     reasoning: str  # Raison de la recommandation
-    timestamp: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
+    timestamp: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     model_used: str = "ollama"
     latency_ms: Optional[float] = None
 
@@ -6652,7 +6726,7 @@ class MT5CandlesRequest(BaseModel):
     symbol: str
     timeframe: str  # "M1", "M5", "M15", "H1", "H4", "D1"
     candles: List[MT5CandleData]
-    timestamp: Optional[str] = Field(default_factory=lambda: datetime.utcnow().isoformat())
+    timestamp: Optional[str] = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
 class DashboardStatsResponse(BaseModel):
     timestamp: str
@@ -8333,6 +8407,17 @@ async def root():
         ]
     }
 
+@app.get("/agents-dashboard", include_in_schema=False)
+async def serve_agents_dashboard():
+    """Sert le dashboard des agents via HTTP (évite le blocage file://)."""
+    from fastapi.responses import FileResponse, HTMLResponse
+    from pathlib import Path
+    f = Path(__file__).resolve().parent / "dashboard" / "agent_intelligence.html"
+    if f.exists():
+        return FileResponse(str(f), media_type="text/html")
+    return HTMLResponse("<h2>dashboard/agent_intelligence.html introuvable</h2>", status_code=404)
+
+
 @app.get("/health")
 async def health_check():
     """Endpoint de santé pour Render et monitoring"""
@@ -9119,6 +9204,23 @@ async def gom_kola_dashboard(
     try:
         import asyncio
         sym = _resolve_symbol(symbol)
+
+        # Gate Weltrade — hors fenêtre 04h-16h UTC → retourner WAIT immédiatement
+        wt_ok, wt_reason = _check_weltrade_hour_gate(sym)
+        if not wt_ok:
+            utc_hour = datetime.now(timezone.utc).hour
+            logger.info(f"[GOM-Dashboard] {sym} WAIT forcé — hors fenêtre Weltrade ({utc_hour:02d}h UTC)")
+            return {
+                "ok": True,
+                "symbol": sym,
+                "verdict": "WAIT",
+                "verdict_num": 0,
+                "action": "WAIT",
+                "gate": "weltrade_hour",
+                "message": wt_reason,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+
         src_norm = (source or "local").lower().strip()
         if src_norm == "auto":
             src_norm = "local"
@@ -10065,7 +10167,7 @@ def _fetch_ml_metrics_for_symbol_from_rds(symbol: str, timeframe: str = "M1") ->
             "feedback_losses": 0,
             "status": "collecting_data",
             "best_model": "random_forest",
-            "last_update": datetime.utcnow().isoformat(),
+            "last_update": datetime.now(timezone.utc).isoformat(),
             "data_source": "aws_rds",
             "rds_connected": True,
             "supabase_connected": False,
@@ -10111,7 +10213,7 @@ def _fetch_ml_metrics_for_symbol_from_rds(symbol: str, timeframe: str = "M1") ->
         "feedback_losses": fb_losses,
         "status": status,
         "best_model": str(model_name),
-        "last_update": training_date or datetime.utcnow().isoformat(),
+        "last_update": training_date or datetime.now(timezone.utc).isoformat(),
         "data_source": "aws_rds",
         "rds_connected": True,
         "supabase_connected": False,
@@ -11416,7 +11518,7 @@ async def get_symbol_propice_status(symbol: str, timeframe: str = "M1", lookback
         raise HTTPException(status_code=400, detail="timeframe supporté: M1 uniquement")
     lookback_days = int(lookback_days or 14)
 
-    now_hour_utc = int(datetime.utcnow().hour)
+    now_hour_utc = int(datetime.now(timezone.utc).hour)
 
     # 1) cache local
     cached_profile = symbol_hour_profile_cache.get((symbol, timeframe, lookback_days))
@@ -11493,7 +11595,7 @@ async def get_symbols_propice_top(timeframe: str = "M1", lookback_days: int = 14
         raise HTTPException(status_code=400, detail="timeframe supporté: M1 uniquement")
     lookback_days = int(lookback_days or 14)
     n = max(1, min(int(n or 5), 50))
-    now_hour_utc = int(datetime.utcnow().hour)
+    now_hour_utc = int(datetime.now(timezone.utc).hour)
 
     # 1) essayer Supabase trade_feedback d'abord (source-of-truth = résultats réels)
     try:
@@ -11671,7 +11773,7 @@ async def webhook_tradingview(signal: TradingViewSignal):
             "take_profit": signal.take_profit or 0.0,
             "reason": signal.reason or "TradingView Signal",
             "source": "tradingview_webhook",
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
         }
 
         if signal.custom_data:
@@ -11681,7 +11783,7 @@ async def webhook_tradingview(signal: TradingViewSignal):
         decision_request = DecisionRequest(
             symbol=symbol,
             timeframe=timeframe,
-            timestamp=datetime.utcnow().isoformat(),
+            timestamp=datetime.now(timezone.utc).isoformat(),
             data=analysis_payload,
             rsi=None,
             macd=None,
@@ -11708,7 +11810,7 @@ async def webhook_tradingview(signal: TradingViewSignal):
             "confidence": confidence,
             "decision": result,
             "source": "tradingview",
-            "processed_at": datetime.utcnow().isoformat(),
+            "processed_at": datetime.now(timezone.utc).isoformat(),
             "processing_time_ms": int(process_time * 1000),
         }
 
@@ -14576,7 +14678,7 @@ async def gom_interpret(req: Request):
             action=action,
             confidence=float(conf),
             reason=reason,
-            timestamp=datetime.utcnow().isoformat() + "Z",
+            timestamp=datetime.now(timezone.utc).isoformat() + "Z",
             ai_status=1,
             ai_confidence=float(conf),
             ai_decision=ai_decision,
@@ -15003,7 +15105,7 @@ async def ml_metrics(symbol: str):
     Consommé par gom_sync_with_report pour enrichir les rapports WhatsApp.
     """
     sym = _resolve_symbol(symbol) or symbol.upper()
-    now_iso = datetime.utcnow().isoformat()
+    now_iso = datetime.now(timezone.utc).isoformat()
 
     result: Dict[str, Any] = {
         "symbol": sym,
@@ -15123,7 +15225,7 @@ def _generate_future_ohlc_series(
     vol_mult = float(max(0.55, min(2.20, float(prof.get("vol_multiplier", 1.0)))))
     retrace_ratio = float(max(0.20, min(0.85, float(prof.get("retrace_ratio", 0.48)))))
     
-    last_time = pd.to_datetime(df['time'].iloc[-1]) if 'time' in df.columns else datetime.utcnow()
+    last_time = pd.to_datetime(df['time'].iloc[-1]) if 'time' in df.columns else datetime.now(timezone.utc)
     seed = abs(hash(f"ohlc:{int(last_time.timestamp())//60}:{len(df)}")) % (2**32)
     rng = np.random.default_rng(seed)
 
@@ -15263,7 +15365,7 @@ async def _store_prediction_run_to_supabase(
             "horizon": len(candles),
             "model_version": "structure_v1",
             "metadata": metadata or {},
-            "created_at": datetime.utcnow().isoformat(),
+            "created_at": datetime.now(timezone.utc).isoformat(),
         }
         candle_rows = []
         for idx, cdl in enumerate(candles):
@@ -15741,7 +15843,7 @@ async def robot_predict_ohlc_profile(symbol: str, timeframe: str = "M1"):
             "symbol": symbol,
             "timeframe": tf,
             "profile": profile,
-            "generated_at": datetime.utcnow().isoformat(),
+            "generated_at": datetime.now(timezone.utc).isoformat(),
         }
     except Exception as e:
         logger.error(f"Erreur /robot/predict_ohlc/profile: {e}", exc_info=True)
@@ -15810,7 +15912,7 @@ async def rebuild_prediction_score_daily(symbol: str = "", timeframe: str = "M1"
         import httpx
         tf = (timeframe or "M1").upper()
         d = int(max(1, min(365, days)))
-        dt_from = (datetime.utcnow() - timedelta(days=d)).isoformat()
+        dt_from = (datetime.now(timezone.utc) - timedelta(days=d)).isoformat()
         headers = {
             "apikey": supabase_key,
             "Authorization": f"Bearer {supabase_key}",
@@ -15873,7 +15975,7 @@ async def rebuild_prediction_score_daily(symbol: str = "", timeframe: str = "M1"
                     "direction_hit_rate": float(v["hits"]) / max(1, samples),
                     "avg_mae": float(v["mae_sum"]) / max(1, samples),
                     "score": float(v["score_sum"]) / max(1, samples),
-                    "updated_at": datetime.utcnow().isoformat(),
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
                 })
 
             if rows:
@@ -15976,7 +16078,7 @@ async def validate_prediction_run(
             candle_time = int(pred.get("candle_time", 0) or 0)
             evaluated_at_iso = (
                 datetime.utcfromtimestamp(candle_time).isoformat()
-                if candle_time > 0 else datetime.utcnow().isoformat()
+                if candle_time > 0 else datetime.now(timezone.utc).isoformat()
             )
             outcome_rows.append({
                 "run_id": run_id,
@@ -16009,7 +16111,7 @@ async def validate_prediction_run(
         by_day: Dict[str, Dict[str, float]] = {}
         for o in outcome_rows:
             ev = str(o.get("evaluated_at", ""))
-            day_key = (ev[:10] if len(ev) >= 10 else datetime.utcnow().date().isoformat())
+            day_key = (ev[:10] if len(ev) >= 10 else datetime.now(timezone.utc).date().isoformat())
             bucket = by_day.setdefault(day_key, {"samples": 0.0, "hits": 0.0, "mae_sum": 0.0, "score_sum": 0.0})
             bucket["samples"] += 1.0
             bucket["hits"] += (1.0 if bool(o.get("direction_hit")) else 0.0)
@@ -16050,7 +16152,7 @@ async def validate_prediction_run(
                 "direction_hit_rate": _wavg(float(prev.get("direction_hit_rate", 0.0) or 0.0), batch_hit_rate),
                 "avg_mae": _wavg(float(prev.get("avg_mae", 0.0) or 0.0), batch_mae),
                 "score": _wavg(float(prev.get("score", 0.0) or 0.0), batch_score),
-                "updated_at": datetime.utcnow().isoformat(),
+                "updated_at": datetime.now(timezone.utc).isoformat(),
             })
 
         if merged_rows:
@@ -16382,9 +16484,9 @@ async def upload_mt5_history(request: MT5HistoryUploadRequest):
                     if profile_rows:
                         symbol_hour_profile_cache[(request.symbol, "M1", lookback_days)] = {
                             "rows": profile_rows,
-                            "computed_at": datetime.utcnow(),
+                            "computed_at": datetime.now(timezone.utc),
                         }
-                        now_hour_utc = int(datetime.utcnow().hour)
+                        now_hour_utc = int(datetime.now(timezone.utc).hour)
                         now_row = next((r for r in profile_rows if int(r.get("hour_utc", -1)) == now_hour_utc), None)
                         if now_row:
                             symbol_hour_status_cache[(request.symbol, "M1")] = {
@@ -16395,7 +16497,7 @@ async def upload_mt5_history(request: MT5HistoryUploadRequest):
                                 "trend_bias": float(now_row.get("trend_bias", 0.0) or 0.0),
                                 "penalty_factor": 1.0,
                                 "reason": "computed_from_mt5_history_upload",
-                                "computed_at": datetime.utcnow(),
+                                "computed_at": datetime.now(timezone.utc),
                             }
                         # Upsert Supabase (best-effort)
                         asyncio.create_task(
@@ -16800,7 +16902,7 @@ async def upload_mt5_symbol_trade_stats(request: MT5SymbolTradeStatsUploadReques
             }
             _symbol_stats_upload_freshness.setdefault(sym, {})[ptype] = {
                 "last_trade_at": _parse_dt(row.get("last_trade_at")),
-                "updated_at": datetime.utcnow(),
+                "updated_at": datetime.now(timezone.utc),
             }
 
         return {"ok": True, "received": len(rows_in), "upserted": len(kept), "skipped": skipped}
@@ -17200,7 +17302,7 @@ async def log_decision_accuracy(request: DecisionAccuracyRequest):
                 "is_win": is_win,
                 "side": (request.action or "").lower(),
                 "ai_confidence": float(request.confidence),
-                "timestamp": request.timestamp or datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+                "timestamp": request.timestamp or datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
             })
             update_calibration_from_feedback(request.symbol, is_win, profit, request.action)
         except Exception as fb_err:
@@ -17325,7 +17427,7 @@ async def spike_realtime(symbol: str):
         last_time = info.get("time")
         if isinstance(last_time, datetime):
             last_time_str = last_time.isoformat()
-            if datetime.utcnow() - last_time <= timedelta(seconds=SPIKE_RECENT_WINDOW_SECONDS):
+            if datetime.now(timezone.utc) - last_time <= timedelta(seconds=SPIKE_RECENT_WINDOW_SECONDS):
                 spike = True
                 direction = info.get("direction")
                 diff = float(info.get("diff_points", 0.0))
@@ -17486,7 +17588,7 @@ async def _refresh_symbol_trade_stats(timeframe: str = "M1") -> None:
 
     import httpx
 
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
 
@@ -17655,7 +17757,7 @@ async def _refresh_symbol_trade_stats(timeframe: str = "M1") -> None:
 async def _symbol_stats_loop(interval_sec: int = 300) -> None:
     global _symbol_stats_last_tick
     while True:
-        _symbol_stats_last_tick = datetime.utcnow().isoformat()
+        _symbol_stats_last_tick = datetime.now(timezone.utc).isoformat()
         try:
             await _refresh_symbol_trade_stats("M1")
         except Exception as e:
@@ -17821,7 +17923,7 @@ async def _push_feedback_to_supabase(
     coherent_confidence: Optional[float] = None
 ):
     """Envoie le feedback vers la base de données (AWS RDS ou Supabase fallback) pour que le robot apprenne des erreurs."""
-    now_iso = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
     # Formater les dates (compatible AWS RDS et Supabase)
     def to_iso(t):
@@ -17913,7 +18015,7 @@ async def trades_feedback(request: TradeFeedbackRequest):
 
         processed_open = process_time(request.open_time)
         processed_close = process_time(request.close_time)
-        processed_ts = process_time(request.timestamp) or datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+        processed_ts = process_time(request.timestamp) or datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
         # Mise à jour du buffer mémoire
         buf = _get_feedback_buf(symbol, tf)
@@ -19743,7 +19845,7 @@ class GemmaTradingResponse(BaseModel):
     analysis: Optional[str] = None
     chart_filename: Optional[str] = None
     error: Optional[str] = None
-    timestamp: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
+    timestamp: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
 class TradingSignalRequest(BaseModel):
     """Modèle pour les requêtes de signaux de trading"""
@@ -19757,7 +19859,7 @@ class TradingSignalResponse(BaseModel):
     success: bool
     signal: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
-    timestamp: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
+    timestamp: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
 class GemmaTradingRequest(BaseModel):
     """Modèle pour les requêtes d'analyse de graphique Gemma"""
@@ -19798,7 +19900,7 @@ class GemmaTradingBot:
             logger.error("Symbole %s introuvable dans MT5", symbol)
             return None, None
 
-        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         filename = f"{symbol}_{timeframe}_{timestamp}.png"
         filepath = os.path.join(self.chart_dir, filename)
 
@@ -20101,7 +20203,7 @@ async def get_ichimoku_analysis(
         return {
             "symbol": symbol,
             "timeframe": timeframe,
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             **ichimoku
         }
         
@@ -20151,7 +20253,7 @@ async def get_fibonacci_levels(
             "symbol": symbol,
             "timeframe": timeframe,
             "lookback_periods": lookback,
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             **fib_levels
         }
         
@@ -20202,7 +20304,7 @@ async def get_order_blocks(
             "timeframe": timeframe,
             "lookback_periods": lookback,
             "min_strength": min_strength,
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "order_blocks": blocks
         }
         
@@ -20252,7 +20354,7 @@ async def get_liquidity_zones(
             "timeframe": timeframe,
             "num_zones": len(zones),
             "volume_filter": volume_filter,
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "liquidity_zones": zones
         }
         
@@ -20315,7 +20417,7 @@ async def get_market_profile_analysis(
             "timeframe": timeframe,
             "period": period,
             "value_area_percent": value_area_percent,
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             **profile
         }
         
@@ -20441,7 +20543,7 @@ async def get_autoscan_signals(symbol: Optional[str] = None):
                 "data": {
                     "signals": []
                 },
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
                 "count": 0,
                 "message": "MT5 non disponible"
             }
@@ -20553,7 +20655,7 @@ async def get_autoscan_signals(symbol: Optional[str] = None):
             "data": {
                 "signals": signals
             },
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "count": len(signals)
         }
         
@@ -20565,7 +20667,7 @@ async def get_autoscan_signals(symbol: Optional[str] = None):
                 "signals": []
             },
             "error": str(e),
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": datetime.now(timezone.utc).isoformat()
         }
 
 # ==================== FIN AUTOSCAN ENDPOINTS ====================
@@ -21924,7 +22026,7 @@ async def get_scalping_daily_report():
         "remaining": max(0, 3 - count),
         "signals": signals_list,
         "report_markdown": report_md,
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
 
@@ -22083,7 +22185,7 @@ async def tradingagents_realtime_run_once(symbol: str):
             return {
                 "symbol": sym,
                 "data_ticker": _mt5_to_yfinance_ticker(sym),
-                "ran_at": datetime.utcnow().isoformat(),
+                "ran_at": datetime.now(timezone.utc).isoformat(),
                 "status": "disabled",
                 "llm_route": "none",
                 "latency_ms": 0.0,
@@ -22285,7 +22387,7 @@ def categorize_symbol(symbol_name: str) -> str:
 
 def is_market_open_for_symbol(symbol: str) -> bool:
     """Vérifie si le marché du symbole est ouvert"""
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     is_weekend = now.weekday() >= 5
 
     category = categorize_symbol(symbol)
@@ -22394,7 +22496,7 @@ async def get_daily_candidates():
             "candidates": candidates,
             "count": len(candidates),
             "scanned": len(all_symbols),
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": datetime.now(timezone.utc).isoformat()
         }
     except Exception as e:
         logger.error(f"Erreur daily-candidates: {e}", exc_info=True)
@@ -22594,7 +22696,7 @@ def _get_recent_h1_bars(n: int = 250) -> pd.DataFrame:
     Ici, on utilise un historique en cache ou on simule des donnees recentes.
     """
     cache_key = "regime_h1_cache"
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
 
     # Si un cache recente existe (< 60 min), le reutiliser
     cached = prediction_cache.get(cache_key)
@@ -22694,7 +22796,7 @@ async def get_regime_quality(symbol: str = "XAUUSD"):
                 "features": features_dict,
                 "source": "model",
                 "symbol": symbol,
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
             },
             "error": None,
         }
@@ -22740,7 +22842,7 @@ class SessionBiasPayload(BaseModel):
     symbol: str = Field("XAUUSD", description="Symbole (ex: XAUUSD)")
     direction: str = Field(..., description="BUY | SELL | NEUTRAL")
     confidence: float = Field(..., ge=0.0, le=1.0, description="Confiance 0.0-1.0")
-    timestamp: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
+    timestamp: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     expires_hours: int = Field(24, ge=1, le=168, description="Duree de validite en heures")
 
 
@@ -22770,7 +22872,7 @@ async def set_session_bias(payload: SessionBiasPayload):
         "confidence": payload.confidence,
         "timestamp": payload.timestamp,
         "expires_hours": payload.expires_hours,
-        "stored_at": datetime.utcnow().isoformat(),
+        "stored_at": datetime.now(timezone.utc).isoformat(),
     }
     _write_session_bias_store(store)
 
@@ -22820,7 +22922,7 @@ async def get_session_bias(symbol: str = "XAUUSD"):  # noqa: F811
 
     try:
         stored_at = datetime.fromisoformat(entry.get("stored_at", ""))
-        now_utc = datetime.utcnow()
+        now_utc = datetime.now(timezone.utc)
         age_hours = (now_utc - stored_at).total_seconds() / 3600.0
         expires_hours = int(entry.get("expires_hours", 24))
         is_valid = age_hours <= expires_hours
@@ -22884,14 +22986,19 @@ _SYMBOL_ALIASES: dict = {
 }
 
 def _resolve_symbol(raw: str) -> str:
-    """Résout un symbole MT5 brut vers la clé utilisée dans les stores serveur.
-    Gère les variations: "Boom 500 Index", "BOOM500", "Boom500Index", etc.
-    """
+    """Résout un symbole MT5 brut vers la clé utilisée dans les stores serveur."""
     if not raw:
         return ""
 
+    try:
+        from symbol_mapper import resolve_mt5_symbol, is_weltrade_symbol
+        if is_weltrade_symbol(raw):
+            return resolve_mt5_symbol(raw)
+    except ImportError:
+        pass
+
     # Nettoyer et normaliser
-    up = raw.strip().upper().replace("=X","").replace("=F","").replace(" ", "")
+    up = raw.strip().upper().replace("=X", "").replace("=F", "").replace(" ", "")
 
     # Chercher dans alias
     if up in _SYMBOL_ALIASES:
@@ -22985,7 +23092,7 @@ async def mt5_ea_heartbeat(body: Mt5EaHeartbeatBody):
         "magic": body.magic,
         "chart_id": str(body.chart_id) if body.chart_id is not None else None,
         "chart_tf": (body.chart_tf or "M15").upper(),
-        "updated_at": datetime.utcnow().isoformat(),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
     }
     return {"ok": True, "symbol": store_key, "tv_ticker": _MT5_EA_HEARTBEAT[store_key]["tv_ticker"]}
 
@@ -22995,7 +23102,7 @@ async def gom_poll_targets(max_age_sec: int = Query(120, ge=10, le=600)):
     """Symboles à poller côté TradingView (priorité = dernier heartbeat SMC_Universal)."""
     from symbol_mapper import resolve_mt5_symbol, mt5_to_tv_cdp_ticker
 
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     targets = []
     for _key, rec in _MT5_EA_HEARTBEAT.items():
         try:
@@ -23168,6 +23275,13 @@ async def set_pending_order(payload: PendingOrderPayload):
         logger.warning(f"[PendingOrder] {sym} bloque BC heure: {bc_reason}")
         raise HTTPException(status_code=403, detail=bc_reason)
 
+    # Gate Weltrade synthetics — fenêtre horaire 00h-16h UTC
+    wt_ok, wt_reason = _check_weltrade_hour_gate(sym)
+    if not wt_ok:
+        from fastapi import HTTPException
+        logger.warning(f"[PendingOrder] {sym} bloque Weltrade heure: {wt_reason}")
+        raise HTTPException(status_code=403, detail=wt_reason)
+
     cog_ok, cog_reason = _check_cognition_gate(sym, direction)
     if not cog_ok:
         from fastapi import HTTPException
@@ -23187,7 +23301,7 @@ async def set_pending_order(payload: PendingOrderPayload):
             "score_buy":  payload.gom_score_buy  or 0.0,
             "score_sell": payload.gom_score_sell or 0.0,
             "spike_pct":  payload.gom_spike_pct  or 0.0,
-            "timestamp":  datetime.utcnow().isoformat(),
+            "timestamp":  datetime.now(timezone.utc).isoformat(),
         }
 
     reasoning_enriched = (payload.reasoning or "") + (
@@ -23224,7 +23338,7 @@ async def set_pending_order(payload: PendingOrderPayload):
     _existing = _PENDING_ORDER_STORE.get(sym)
     if _existing and _existing.get("status") in ("ready", "executing"):
         _existing_source = (_existing.get("source") or "").lower()
-        _age_s = (datetime.utcnow() - datetime.fromisoformat(_existing["timestamp"])).total_seconds() if _existing.get("timestamp") else 9999
+        _age_s = (datetime.now(timezone.utc) - datetime.fromisoformat(_existing["timestamp"])).total_seconds() if _existing.get("timestamp") else 9999
         _is_pipeline = _incoming_source in ("pipeline", "pipeline_ta", "pipeline_hourly")
         _is_gom_auto = _existing_source in ("gom_tv_sync", "mt5_live", "")
         # Un ordre executing non-confirmé depuis > 5min est abandonné (MT5 n'a pas confirmé)
@@ -23309,7 +23423,7 @@ async def set_pending_order(payload: PendingOrderPayload):
         "bc_tradeable":   bc_status.get("bc_tradeable"),
         "source":         _src,
         "status":         _raw_status if _raw_status in ("ready", "conflict_pending") else "ready",
-        "timestamp":      datetime.utcnow().isoformat(),
+        "timestamp":      datetime.now(timezone.utc).isoformat(),
         "spike_anticipation": _anticipation_applied,
         "anticipation_distance_pips": _anticipation_distance,
     }
@@ -23801,7 +23915,7 @@ def _fetch_gom_mtf_snapshot(mt5_symbol: str) -> dict:
 
 def _get_gom_mtf_snapshot(mt5_symbol: str, force_refresh: bool = False) -> dict:
     key = _gom_mtf_cache_key(mt5_symbol)
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     cached = _GOM_MTF_CACHE.get(key)
     if not force_refresh and cached:
         age = (now - cached["ts"]).total_seconds()
@@ -23966,7 +24080,7 @@ def _gom_verdict_record_from_payload(payload: GomVerdictPayload, enrich_mt5: boo
         "kola_buy": get_or(payload.kola_buy, 0.0),
         "kola_sell": get_or(payload.kola_sell, 0.0),
         "kola_state": payload.kola_state or "---",
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         # SL/TP/ATR — calculés par le poller MT5 (ATR-based), absents si source TV
         "sl": float(extra.get("sl") or 0.0),
         "tp": float(extra.get("tp") or 0.0),
@@ -24174,7 +24288,7 @@ def _sync_gom_tableau_from_verdict(sym: str, record: dict) -> None:
             "score_buy": record.get("score_buy"),
             "score_sell": record.get("score_sell"),
         },
-        "timestamp": record.get("timestamp", datetime.utcnow().isoformat()),
+        "timestamp": record.get("timestamp", datetime.now(timezone.utc).isoformat()),
     }
 
 
@@ -24184,6 +24298,12 @@ def _maybe_promote_gom_to_pending_order(sym: str, record: dict) -> None:
     Évite le trou : gom-verdict OK mais ok=false sur /pending-order.
     """
     if os.getenv("GOM_AUTO_PENDING_ORDER", "true").lower() not in ("1", "true", "yes"):
+        return
+
+    # Gate Weltrade — hors fenêtre 04h-16h UTC : aucune promotion possible
+    wt_ok, wt_reason = _check_weltrade_hour_gate(sym)
+    if not wt_ok:
+        logger.info(f"[GomAutoTrade] {sym} — hors fenêtre Weltrade → promotion pending-order annulée")
         return
 
     vnum = int(record.get("verdict_num") or 0)
@@ -24319,7 +24439,7 @@ def _maybe_promote_gom_to_pending_order(sym: str, record: dict) -> None:
         "gom_score_buy": record.get("score_buy"),
         "gom_score_sell": record.get("score_sell"),
         "status": "ready",
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "source": "gom_tv_sync",
     }
     logger.info(
@@ -24378,11 +24498,34 @@ async def set_gom_verdict(payload: GomVerdictPayload, background_tasks: Backgrou
     """Stocke le verdict GOM KOLA + indicateurs (JSON MCP ou bridge).
     Répond immédiatement pour ne pas bloquer le poller — le reste en background."""
     sym = _resolve_symbol(payload.symbol)
+
+    # Gate Weltrade — hors fenêtre 04h-16h UTC : forcer WAIT dans le store,
+    # ne pas déclencher pending-order ni background enrichment
+    wt_ok, wt_reason = _check_weltrade_hour_gate(sym)
+    if not wt_ok:
+        utc_hour = datetime.now(timezone.utc).hour
+        logger.info(f"[GOM-VERDICT] {sym} POST ignoré — hors fenêtre Weltrade ({utc_hour:02d}h UTC) → WAIT forcé dans store")
+        _GOM_VERDICT_STORE[sym] = {
+            "verdict": "WAIT",
+            "verdict_num": 0,
+            "action": "WAIT",
+            "gate": "weltrade_hour",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        return {
+            "ok": True,
+            "symbol": sym,
+            "verdict": "WAIT",
+            "verdict_num": 0,
+            "gate": "weltrade_hour",
+            "message": wt_reason,
+        }
+
     # Stockage synchrone minimal — juste le strict nécessaire pour que le GET soit à jour
     sym_full, record = _gom_verdict_record_from_payload(payload, enrich_mt5=False)
     _GOM_VERDICT_STORE[sym_full] = record
 
-    # 🔑 INVALIDATE gom-kola-dashboard cache so SMC_Universal sees fresh verdict immediately
+    # Invalider le cache gom-kola-dashboard pour que SMC_Universal voie les données fraîches
     for chart_tf in ["M1", "M5", "M15", "H1", "H4", "D1"]:
         cache_key = f"{sym_full}:{chart_tf}"
         if cache_key in _gom_cache:
@@ -24439,7 +24582,7 @@ async def gom_prediction_bb_webhook(request: Request):
             "pred_bb_mid": pred_data.get("MID", []),
             "pred_bb_up": pred_data.get("UP", []),
             "pred_bb_dn": pred_data.get("DN", []),
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "symbol": symbol,
             "timeframe": timeframe,
         }
@@ -24505,6 +24648,21 @@ async def get_gom_verdict(
     """Retourne le verdict GOM — connecteur TV en priorité (source=tv|auto)."""
     sym = _resolve_symbol(symbol)
 
+    # Gate Weltrade — hors fenêtre 00h-16h UTC → retourner WAIT pour bloquer l'EA
+    wt_ok, wt_reason = _check_weltrade_hour_gate(sym)
+    if not wt_ok:
+        utc_hour = datetime.now(timezone.utc).hour
+        logger.info(f"[GOM-Verdict] {sym} WAIT forcé (fenêtre Weltrade fermée à {utc_hour:02d}h UTC)")
+        return {
+            "ok": True,
+            "symbol": sym,
+            "verdict": "WAIT",
+            "verdict_num": 0,
+            "action": "WAIT",
+            "message": wt_reason,
+            "gate": "weltrade_hour",
+        }
+
     try:
         dash = _resolve_gom_dashboard(sym, chart_tf, source)
         if dash.get("ok"):
@@ -24558,7 +24716,7 @@ async def get_gom_verdict(
                 "message": "GOM stale — is gom_verdict_poller running?"}
     # DISABLED: staleness check was too strict, MT5 needs to accept old but valid verdicts
     # try:
-    #     age = (datetime.utcnow() - datetime.fromisoformat(verdict["timestamp"])).total_seconds()
+    #     age = (datetime.now(timezone.utc) - datetime.fromisoformat(verdict["timestamp"])).total_seconds()
     #     if age > 900:
     #         return {"ok": False, "symbol": sym, "verdict": verdict.get("verdict"),
     #                 "message": f"GOM stale ({int(age)}s) — relancer gom_verdict_poller.py"}
@@ -24697,7 +24855,18 @@ async def get_all_gom_verdicts():
         if gom_file.is_file():
             try:
                 file_data = json.loads(gom_file.read_text(encoding="utf-8"))
-                for symbol, record in file_data.items():
+                # Supporter deux formats :
+                #   A) {"XAUUSD": {...}, "EURUSD": {...}}  — dict symbol->record
+                #   B) {"verdicts": [{symbol, ...}, ...]}  — liste sous clé "verdicts"
+                if isinstance(file_data, dict) and "verdicts" in file_data and isinstance(file_data["verdicts"], list):
+                    file_records = {v["symbol"]: v for v in file_data["verdicts"] if "symbol" in v}
+                elif isinstance(file_data, dict):
+                    file_records = file_data
+                elif isinstance(file_data, list):
+                    file_records = {v["symbol"]: v for v in file_data if "symbol" in v}
+                else:
+                    file_records = {}
+                for symbol, record in file_records.items():
                     if symbol.upper() in seen_symbols:
                         continue  # Déjà couvert par le store live
                     try:
@@ -24718,7 +24887,7 @@ async def get_all_gom_verdicts():
             "count": len(verdicts),
             "live_count": live_count,
             "verdicts": verdicts,
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": datetime.now(timezone.utc).isoformat()
         }
 
     except Exception as e:
@@ -25170,7 +25339,7 @@ async def validate_signal(payload: SignalValidationRequest) -> dict:
         "consolidation": is_consolidation,
         "quality_ok": quality_ok,
         "verdict_validation": verdict_validation,
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
     if execute:
@@ -25192,7 +25361,7 @@ async def set_alert_levels(payload: dict):
     _ALERT_LEVELS_STORE[symbol] = {
         "symbol":    symbol,
         "levels":    payload.get("levels", []),
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
     }
     logger.info(f"[AlertLevels] Stocke : {symbol} {len(payload.get('levels', []))} niveaux")
     return {"ok": True, "symbol": symbol}
@@ -25232,7 +25401,7 @@ async def notify_whatsapp(req: WaNotifyRequest):
     if not phone:
         return {"ok": False, "error": "WHATSAPP_PHONE non configuré"}
 
-    ts = datetime.utcnow().strftime("%H:%M UTC")
+    ts = datetime.now(timezone.utc).strftime("%H:%M UTC")
     event_icons = {
         "ENTRY_HIT":       "🎯",
         "TP1_HIT":         "✅",
@@ -25316,7 +25485,7 @@ async def mt5_tv_bias(symbol: str = "XAUUSD", refresh: bool = False):
     Utilise le cache bridge, sinon analyse live via tradingview-mcp_kola (CDP 9222).
     """
     sym = _resolve_symbol(symbol.upper())
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
 
     if not refresh:
         uni = _UNIFIED_SIGNAL_STORE.get(sym)
@@ -25497,7 +25666,7 @@ def _compute_spike_tv_sniper(sym: str, summary: dict) -> dict:
 
 def _spike_tv_record_from_summary(sym: str, summary: dict, source: str = "live_mcp") -> dict:
     sniper = _compute_spike_tv_sniper(sym, summary)
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     return {
         "ok": bool(summary.get("success")),
         "symbol": sym,
@@ -25522,7 +25691,7 @@ async def _store_spike_tv(payload: SpikeTvStatePayload) -> dict:
     sym = _resolve_symbol(payload.symbol.upper())
     record = payload.model_dump()
     record["symbol"] = sym
-    record["updated_at"] = record.get("updated_at") or datetime.utcnow().isoformat()
+    record["updated_at"] = record.get("updated_at") or datetime.now(timezone.utc).isoformat()
     async with _SPIKE_TV_LOCK:
         _SPIKE_TV_STORE[sym] = record
     logger.info(
@@ -25550,7 +25719,7 @@ async def get_spike_tv_state(symbol: str, refresh: bool = False):
     Cache court + refresh MCP si demandé ou cache expiré.
     """
     sym = _resolve_symbol((symbol or "").strip().upper())
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
 
     if not refresh:
         cached = _SPIKE_TV_STORE.get(sym)
@@ -25628,7 +25797,7 @@ async def set_unified_signal(payload: dict):
         "confirmed": payload.get("confirmed"),
         "tv_summary": payload.get("tv_summary"),
         "comparison": payload.get("comparison"),
-        "updated_at": payload.get("updated_at") or datetime.utcnow().isoformat(),
+        "updated_at": payload.get("updated_at") or datetime.now(timezone.utc).isoformat(),
     }
     logger.info("[UnifiedSignal] Stocke %s verdict=%s", symbol,
                 (payload.get("comparison") or {}).get("verdict"))
@@ -25707,7 +25876,7 @@ async def store_gom_tableau(body: GomTableauBody):
             _GOM_TABLEAU_STORE[sym] = {
                 "timeframes": tfs,
                 "verdict": gom_data.get("verdict", {}),
-                "timestamp": gom_data.get("timestamp", datetime.utcnow().isoformat()),
+                "timestamp": gom_data.get("timestamp", datetime.now(timezone.utc).isoformat()),
             }
 
         return {"ok": True, "symbol": sym, "stored": True}
@@ -25742,7 +25911,7 @@ async def get_gom_tableau(symbol: str = "XAUUSD"):
             "timeframes": data.get("timeframes", []),
             "verdict": data.get("verdict", {}),
             "timestamp": data.get("timestamp"),
-            "age_seconds": (datetime.utcnow() - datetime.fromisoformat(data.get("timestamp", datetime.utcnow().isoformat()))).total_seconds()
+            "age_seconds": (datetime.now(timezone.utc) - datetime.fromisoformat(data.get("timestamp", datetime.now(timezone.utc).isoformat()))).total_seconds()
         }
 
     except Exception as e:
@@ -25774,7 +25943,7 @@ async def get_gom_tableau_complete(symbol: str = "XAUUSD"):
         _ts_str = verdict_data.get("timestamp") or tableau_data.get("timestamp")
         if _ts_str:
             try:
-                _age = (datetime.utcnow() - datetime.fromisoformat(_ts_str)).total_seconds()
+                _age = (datetime.now(timezone.utc) - datetime.fromisoformat(_ts_str)).total_seconds()
                 if _age > 120:
                     return {
                         "ok": False, "symbol": sym,
@@ -25808,7 +25977,7 @@ async def get_gom_tableau_complete(symbol: str = "XAUUSD"):
         complete_data = {
             "ok": True,
             "symbol": sym,
-            "capture_time": datetime.utcnow().isoformat(),
+            "capture_time": datetime.now(timezone.utc).isoformat(),
             **base,
             "force_pts": base.get("verdict_gap", 0),
             "rsi_alert": safe_get(tableau_data, "verdict", "rsi_alert", default=""),
