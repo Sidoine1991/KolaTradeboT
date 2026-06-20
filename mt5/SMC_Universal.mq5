@@ -2642,10 +2642,10 @@ bool TryAcquireOpenLock()
 {
    string lockName = "SMC_OPEN_LOCK_" + IntegerToString(InpMagicNumber);
 
-   if(GlobalVariableGet(lockName) != 0) return false;
-   GlobalVariableSet(lockName, 1);
-   // Limite absolue terminal : jamais plus de MaxPositionsTerminal positions simultanées,
-   // tous symboles et tous profils confondus.
+   // GlobalVariableSetOnCondition est atomique — seul un chart peut passer (vrai mutex MT5)
+   if(!GlobalVariableSetOnCondition(lockName, 1, 0)) return false;
+
+   // Vérification max positions APRÈS acquisition atomique du lock
    if(CountPositionsOurEA() >= MaxPositionsTerminal) { GlobalVariableSet(lockName, 0); return false; }
    return true;
 }
