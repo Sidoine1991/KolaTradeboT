@@ -237,6 +237,11 @@ bool IsSymbolPaused(string symbol);
 void UpdateSymbolPauseInfo(string symbol, double profit);
 bool ShouldPauseSymbol(string symbol, double profit);
 
+// Session Readiness + Circuit-Breaker (Phase 1 & 2)
+void   SMC_PollDailyReadiness();
+bool   SMC_ReadinessAllowsEntry(const string symbol);
+void   SMC_ReportTradeClose(const string symbol, double netProfit, bool isWin);
+
 // Fonctions de détection avancée de spike
 double CalculateVolatilityCompression();
 double CalculatePriceAcceleration();
@@ -1408,6 +1413,17 @@ string g_lastLossSymbol   = "";
 datetime g_lastLossTime   = 0;
 static const int RECENT_LOSS_WINDOW_SEC = 900;   // 15 min (réduit de 1h)
 
+// Session Readiness + Circuit-Breaker
+bool     g_readinessGo            = true;    // Défaut GO (fail-open si serveur KO)
+int      g_readinessScore         = 100;     // Score 0-100 du dernier poll
+bool     g_readinessCBActive      = false;   // Circuit-breaker global actif
+bool     g_readinessCBSymbolCool  = false;   // Cooldown symbole courant
+string   g_readinessCBReason      = "";      // Raison du halt
+string   g_readinessBestHours     = "";      // ex: "8,9,13,14"
+string   g_readinessAvoidHours    = "";      // ex: "0,1,2,22,23"
+datetime g_lastReadinessPoll      = 0;
+datetime g_lastReadinessOK        = 0;       // Dernière fois qu'un poll a réussi
+
 //| INPUTS                                                            |
 input group "=== GÉNÉRAL ==="
 input bool   UseMinLotOnly     = true;   // Toujours lot minimum (le plus bas)
@@ -1508,6 +1524,9 @@ input bool   GOMPerfectAutoEntry    = true;  // Stratégie GOM autonome (WAIT/LI
 input double GOMTrailingMinProfitUSD = 1.0;  // Trailing GOM actif au-delà de N $ de gain
 input bool   UsePropitiousScore     = true;  // Filtrer par score propice (0-100) avant toute entrée
 input int    GOMMinPropiceScore     = 70;    // Score minimum pour entrer (0=désactivé, 70=recommandé)
+input bool   UseSessionReadiness    = true;  // Circuit-breaker + Daily Readiness adaptatif
+input int    ReadinessMinScore      = 45;    // Score readiness minimum (0=off, 45=recommandé)
+input int    ReadinessPollMinutes   = 60;    // Fréquence de poll /daily-readiness (minutes)
 input bool   ShowTVBollingerLines   = true;  // Bandes Bollinger TV sync
 input bool   ShowTVOrderBlocks      = true;  // Zones OB bull/bear (ai_server uniquement)
 input bool   UseLocalOrderBlockDrawings = false; // OB calculés localement (OFF = ai_server seul)
@@ -3574,6 +3593,7 @@ void OnTick()
    
    // GOM poll + notifications — toujours actif (même en mode observation)
    SMCGP_PollGOM();
+   SMC_PollDailyReadiness();   // Session Readiness + Circuit-Breaker (poll horaire)
    if(ShowGOMDashboard)
    {
       DrawOrderFlowOnChart();
@@ -6308,7 +6328,123 @@ bool SMC_IsCrash150Symbol(const string symbol)
    return (StringFind(s, "CRASH") >= 0 && StringFind(s, "150") >= 0);
 }
 
-// Score propice 0-100 : évalue si ce symbole est dans une période favorable pour trader.
+// ─── Session Readiness + Circuit-Breaker ─────────────────────────────────────
+
+void SMC_PollDailyReadiness()
+{
+   if(!UseSessionReadiness) return;
+   int pollInterval = MathMax(1, ReadinessPollMinutes) * 60;
+   if(TimeCurrent() - g_lastReadinessPoll < pollInterval) return;
+   g_lastReadinessPoll = TimeCurrent();
+
+   double atrNow   = GOM_GetATRValue();
+   double atrRatio = 1.0;
+   if(atrNow > 0)
+   {
+      double hiArr[], loArr[];
+      ArraySetAsSeries(hiArr, true); ArraySetAsSeries(loArr, true);
+      if(CopyHigh(_Symbol, PERIOD_M1, 1, 21, hiArr) == 21 &&
+         CopyLow (_Symbol, PERIOD_M1, 1, 21, loArr) == 21)
+      {
+         double atrSum = 0;
+         for(int k = 0; k < 20; k++) atrSum += (hiArr[k] - loArr[k]);
+         double atrAvg = atrSum / 20.0;
+         if(atrAvg > 0) atrRatio = atrNow / atrAvg;
+      }
+   }
+
+   string symEnc = _Symbol;
+   StringReplace(symEnc, " ", "%20");
+   string path = "/daily-readiness?symbol=" + symEnc
+               + "&gom_global_str=" + IntegerToString(g_smcGomGlobalStr)
+               + "&atr_ratio=" + DoubleToString(atrRatio, 3)
+               + "&include_factors=false";
+
+   string body;
+   if(!SMCGP_HttpGet(path, body, 8000))
+   {
+      static datetime s_warnLog = 0;
+      if(TimeCurrent() - s_warnLog >= 300)
+      {
+         s_warnLog = TimeCurrent();
+         if(g_lastReadinessOK > 0 && (TimeCurrent() - g_lastReadinessOK) > 7200)
+            Print("[READINESS] Serveur KO depuis >2h — fail-open maintenu sur ", _Symbol);
+      }
+      return;
+   }
+   g_lastReadinessOK = TimeCurrent();
+
+   g_readinessGo    = SMCGP_JsonBool(body, "go");
+   g_readinessScore = (int)SMCGP_JsonDouble(body, "score");
+
+   int cbPos = StringFind(body, "\"circuit_breaker\"");
+   if(cbPos >= 0)
+   {
+      string cbSub = StringSubstr(body, cbPos, 250);
+      g_readinessCBActive     = (StringFind(cbSub, "\"active\":true")         >= 0);
+      g_readinessCBSymbolCool = (StringFind(cbSub, "\"symbol_cooling\":true") >= 0);
+      g_readinessCBReason     = SMCGP_JsonString(cbSub, "reason");
+   }
+
+   int bhPos = StringFind(body, "\"best_hours\":[");
+   if(bhPos >= 0) { int e = StringFind(body, "]", bhPos); if(e > bhPos) g_readinessBestHours  = StringSubstr(body, bhPos + 14, e - bhPos - 14); }
+   int ahPos = StringFind(body, "\"avoid_hours\":[");
+   if(ahPos >= 0) { int e = StringFind(body, "]", ahPos); if(e > ahPos) g_readinessAvoidHours = StringSubstr(body, ahPos + 15, e - ahPos - 15); }
+
+   static datetime s_logTime = 0;
+   if(TimeCurrent() - s_logTime >= 300)
+   {
+      s_logTime = TimeCurrent();
+      string st = g_readinessCBActive ? "HALT-GLOBAL" : (g_readinessCBSymbolCool ? "HALT-SYMBOLE" : (g_readinessGo ? "GO" : "NO-GO"));
+      Print("[READINESS] ", _Symbol, " ", st, " score=", g_readinessScore, "/100 CB=", g_readinessCBReason, " best_hours=", g_readinessBestHours);
+   }
+}
+
+bool SMC_ReadinessAllowsEntry(const string symbol)
+{
+   if(!UseSessionReadiness || ReadinessMinScore <= 0) return true;
+
+   if(g_readinessCBActive)
+   {
+      static datetime s_cbLog = 0;
+      if(TimeCurrent() - s_cbLog >= 60) { s_cbLog = TimeCurrent();
+         Print("[READINESS] HALT GLOBAL (", g_readinessCBReason, ") — bloqué: ", symbol); }
+      return false;
+   }
+   if(g_readinessCBSymbolCool)
+   {
+      static datetime s_symLog = 0;
+      if(TimeCurrent() - s_symLog >= 60) { s_symLog = TimeCurrent();
+         Print("[READINESS] COOLDOWN SYMBOLE — bloqué: ", symbol); }
+      return false;
+   }
+   if(g_readinessScore < ReadinessMinScore)
+   {
+      static datetime s_scoreLog = 0;
+      if(TimeCurrent() - s_scoreLog >= 60) { s_scoreLog = TimeCurrent();
+         Print("[READINESS] score ", g_readinessScore, "/", ReadinessMinScore, " — bloqué: ", symbol); }
+      return false;
+   }
+   return true;
+}
+
+void SMC_ReportTradeClose(const string symbol, double netProfit, bool isWin)
+{
+   if(!UseSessionReadiness) return;
+   double equity = AccountInfoDouble(ACCOUNT_EQUITY);
+   string jsonBody = "{\"symbol\":\"" + symbol + "\","
+                   + "\"net_profit\":" + DoubleToString(netProfit, 2) + ","
+                   + "\"is_win\":" + (isWin ? "true" : "false") + ","
+                   + "\"account_equity\":" + DoubleToString(equity, 2) + "}";
+   char postData[], result[];
+   StringToCharArray(jsonBody, postData, 0, StringLen(jsonBody));
+   string headers = "Content-Type: application/json\r\n";
+   string respH;
+   WebRequest("POST", AI_ServerURL + "/circuit-breaker/event", headers, 5000, postData, result, respH);
+   g_lastReadinessPoll = 0;  // forcer re-poll immédiat
+}
+
+// ─── Score propice 0-100 : évalue si ce symbole est dans une période favorable pour trader.
 // 7 facteurs : force GOM + cohérence TF + perte récente + fraîcheur signal
 //            + fenêtre horaire active + volatilité relative + clarté tendance globale
 int SMC_ComputePropiceScore()
@@ -6474,6 +6610,9 @@ bool SMC_BCHourAllowsTrade(const string symbol = "")
 bool GOM_EntryEnvironmentOK(const int dirSign)
 {
    if(dirSign == 0) return true;
+
+   // Gate Session Readiness + Circuit-Breaker — priorité maximale (avant tout autre gate)
+   if(!SMC_ReadinessAllowsEntry(_Symbol)) return false;
 
    // Gate score propice — s'applique AVANT le bypass PERFECT (évite surtrading sur faux contextes)
    if(UsePropitiousScore && GOMMinPropiceScore > 0)
@@ -9767,6 +9906,7 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
                   }
 
                   SMC_RecordTradeClosePerformance(profit);
+                  SMC_ReportTradeClose(symbol, profit, is_win);  // Circuit-breaker
 
                   // Timestamps (convertir en millisecondes pour compatibilité JSON)
                   long open_time = (long)deal.Time() * 1000;  // Time of the deal
@@ -12071,6 +12211,8 @@ void ExecuteAIDecisionMarketOrder()
          { Print("?? [BoomCrash] Discipline journalière bloque ", _Symbol); return; }
          if(CountPositionsForSymbol(_Symbol) > 0)
          { Print("?? [BoomCrash] Position déjà ouverte sur ", _Symbol, " — duplication bloquée"); return; }
+         // Gate Session Readiness + Circuit-Breaker (spike path)
+         if(!SMC_ReadinessAllowsEntry(_Symbol)) return;
          // Gate propice : même exigence que pour les entrées GOM auto (pas d'exemption spike)
          if(UsePropitiousScore && GOMMinPropiceScore > 0)
          {

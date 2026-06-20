@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 Serveur IA pour TradBOT - Gestion des prédictions et analyses de marché
@@ -26348,6 +26348,137 @@ async def get_ta_analysis(symbol: str = Query(...), date_str: str = Query(...)):
     except Exception as e:
         logger.error(f"[/ta-analysis] Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SESSION READINESS + CIRCUIT-BREAKER (Phase 1 & 2)
+# ─────────────────────────────────────────────────────────────────────────────
+try:
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'Python'))
+    from session_readiness import (
+        get_hourly_stats, get_dow_stats, get_symbols_summary,
+        get_best_hours, get_avoid_hours, compute_daily_readiness,
+        compute_daily_readiness_all, check_circuit_breaker,
+        record_trade_result, reset_circuit_breaker,
+    )
+    _session_readiness_ok = True
+    logger.info('[session_readiness] Module charge OK')
+except Exception as _sr_err:
+    _session_readiness_ok = False
+    logger.warning(f'[session_readiness] Module non disponible: {_sr_err}')
+
+_readiness_cache: dict = {}
+_readiness_cache_ts: dict = {}
+_READINESS_TTL_SEC = 300
+
+
+def _get_readiness_cached(symbol: str, hour_utc: int, gom_str: int = 0, atr_ratio: float = 1.0) -> dict:
+    key = f'{symbol}_{hour_utc}'
+    now_ts = time.time()
+    if key in _readiness_cache and (now_ts - _readiness_cache_ts.get(key, 0)) < _READINESS_TTL_SEC:
+        return _readiness_cache[key]
+    result = compute_daily_readiness(symbol, hour_utc, gom_str, atr_ratio)
+    _readiness_cache[key] = result
+    _readiness_cache_ts[key] = now_ts
+    return result
+
+
+@app.get('/session-stats')
+async def get_session_stats(
+    symbol: str = Query('XAUUSD'),
+    lookback_days: int = Query(30, ge=7, le=90),
+):
+    if not _session_readiness_ok:
+        raise HTTPException(status_code=503, detail='session_readiness module not available')
+    try:
+        hourly = get_hourly_stats(symbol, lookback_days)
+        daily = get_dow_stats(symbol, lookback_days)
+        best = get_best_hours(symbol, lookback_days=lookback_days)
+        avoid = get_avoid_hours(symbol, lookback_days=lookback_days)
+        total = sum(h['trades'] for h in hourly)
+        return {'ok': True, 'symbol': symbol, 'lookback_days': lookback_days,
+                'hourly': hourly, 'daily': daily, 'best_hours': best,
+                'avoid_hours': avoid, 'total_trades': total}
+    except Exception as e:
+        logger.error(f'[/session-stats] {e}')
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get('/daily-readiness')
+async def get_daily_readiness(
+    symbol: str = Query('ALL'),
+    gom_global_str: int = Query(0, ge=0, le=100),
+    atr_ratio: float = Query(1.0, ge=0.0, le=10.0),
+    include_factors: bool = Query(True),
+):
+    if not _session_readiness_ok:
+        raise HTTPException(status_code=503, detail='session_readiness module not available')
+    try:
+        hour_utc = datetime.now(timezone.utc).hour
+        if symbol.upper() == 'ALL':
+            by_sym = compute_daily_readiness_all(hour_utc, gom_global_str, atr_ratio)
+            if not include_factors:
+                by_sym = {k: {ek: ev for ek, ev in v.items() if ek != 'factors'} for k, v in by_sym.items()}
+            cb_global = check_circuit_breaker()
+            return {'ok': True, 'hour_utc': hour_utc, 'by_symbol': by_sym,
+                    'circuit_breaker': cb_global, 'computed_at': datetime.now(timezone.utc).isoformat()}
+        result = _get_readiness_cached(symbol, hour_utc, gom_global_str, atr_ratio)
+        if not include_factors:
+            result = {k: v for k, v in result.items() if k != 'factors'}
+        return {'ok': True, 'symbol': symbol, **result}
+    except Exception as e:
+        logger.error(f'[/daily-readiness] {e}')
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get('/circuit-breaker')
+async def get_circuit_breaker_status(symbol: str = Query('')):
+    if not _session_readiness_ok:
+        raise HTTPException(status_code=503, detail='session_readiness module not available')
+    try:
+        state = check_circuit_breaker(symbol)
+        return {'ok': True, 'symbol': symbol or 'ALL', **state}
+    except Exception as e:
+        logger.error(f'[/circuit-breaker] {e}')
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class CircuitBreakerEventPayload(BaseModel):
+    symbol: str
+    net_profit: float
+    is_win: bool
+    account_equity: float = 0.0
+
+
+@app.post('/circuit-breaker/event')
+async def post_circuit_breaker_event(payload: CircuitBreakerEventPayload):
+    if not _session_readiness_ok:
+        raise HTTPException(status_code=503, detail='session_readiness module not available')
+    try:
+        hour_utc = datetime.now(timezone.utc).hour
+        for k in list(_readiness_cache.keys()):
+            if k.startswith(payload.symbol + '_'):
+                _readiness_cache_ts[k] = 0
+        state = record_trade_result(payload.symbol, payload.net_profit, payload.is_win, payload.account_equity)
+        return {'ok': True, 'symbol': payload.symbol, 'circuit_breaker': state}
+    except Exception as e:
+        logger.error(f'[/circuit-breaker/event] {e}')
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post('/circuit-breaker/reset')
+async def post_circuit_breaker_reset(symbol: str = Query('')):
+    if not _session_readiness_ok:
+        raise HTTPException(status_code=503, detail='session_readiness module not available')
+    try:
+        state = reset_circuit_breaker(symbol)
+        _readiness_cache_ts.clear()
+        logger.info(f'[/circuit-breaker/reset] Reset ' + (symbol if symbol else 'global'))
+        return {'ok': True, 'symbol': symbol or 'ALL', 'state_after_reset': state}
+    except Exception as e:
+        logger.error(f'[/circuit-breaker/reset] {e}')
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 
 if __name__ == "__main__":
