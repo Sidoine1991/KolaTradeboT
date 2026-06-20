@@ -497,10 +497,17 @@ bool ValidateTradeBeforeExecution(const string symbol, const string direction, d
       }
    }
 
-   // ??? 5. POST-SPIKE — attendre petites bougies après spike capté (Boom/Crash) ???
+   // ??? 5. POST-SPIKE — délai 60s + petites bougies après spike capté (Boom/Crash) ???
    if(SMC_GetSymbolCategory(symbol) == SYM_BOOM_CRASH
       && g_lastSpikeCapturedSymbol == symbol && g_lastSpikeCapturedTime > 0)
    {
+      int elapsedSinceSpike = (int)(TimeCurrent() - g_lastSpikeCapturedTime);
+      if(elapsedSinceSpike < 60)
+      {
+         Print("[GATE-SPIKE] BLOQUE ", dir, " — spike capté il y a ", elapsedSinceSpike,
+               "s, attendre 60s minimum (reste ", 60 - elapsedSinceSpike, "s)");
+         return false;
+      }
       int smallBars = SMC_CountSmallM1BarsAfterTime(symbol, g_lastSpikeCapturedTime);
       if(smallBars < PostSpikeMinSmallCandles)
       {
@@ -6410,6 +6417,19 @@ bool GOM_EntryEnvironmentOK(const int dirSign)
 
    if(g_lastSpikeCapturedSymbol == _Symbol && g_lastSpikeCapturedTime > 0)
    {
+      // Délai minimum 60s après spike capté — laisser 1-2 bougies se former
+      int elapsedSinceSpike = (int)(TimeCurrent() - g_lastSpikeCapturedTime);
+      if(elapsedSinceSpike < 60)
+      {
+         static datetime s_timeLog = 0;
+         if(TimeCurrent() - s_timeLog >= 15)
+         {
+            s_timeLog = TimeCurrent();
+            Print("[GOM-GATE] BLOQUE ", dir, " — spike capté il y a ", elapsedSinceSpike,
+                  "s, attendre 60s minimum (reste ", 60 - elapsedSinceSpike, "s)");
+         }
+         return false;
+      }
       int smallBars = SMC_CountSmallM1BarsAfterTime(_Symbol, g_lastSpikeCapturedTime);
       if(smallBars < PostSpikeMinSmallCandles)
       {
