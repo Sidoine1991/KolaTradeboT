@@ -12071,6 +12071,20 @@ void ExecuteAIDecisionMarketOrder()
          { Print("?? [BoomCrash] Discipline journalière bloque ", _Symbol); return; }
          if(CountPositionsForSymbol(_Symbol) > 0)
          { Print("?? [BoomCrash] Position déjà ouverte sur ", _Symbol, " — duplication bloquée"); return; }
+         // Gate propice : même exigence que pour les entrées GOM auto (pas d'exemption spike)
+         if(UsePropitiousScore && GOMMinPropiceScore > 0)
+         {
+            int propSpike = SMC_ComputePropiceScore();
+            if(propSpike < GOMMinPropiceScore)
+            {
+               Print("[PROPICE] SPIKE BLOQUE ", spikeDir, " ", _Symbol,
+                     " - score ", propSpike, "/", GOMMinPropiceScore,
+                     " (GOM vn=", g_smcGomVerdictNum,
+                     " coh=", DoubleToString(g_smcGomCoherence,0),
+                     "% bars_spike=", g_smcGomBarsSinceSpike, ")");
+               return;
+            }
+         }
          if(!TryAcquireOpenLock())
          { Print("?? [BoomCrash] Lock occupé (", CountPositionsOurEA(), "/", MaxPositionsTerminal, " positions terminal) — ", _Symbol); return; }
          {
