@@ -758,12 +758,59 @@ def is_boom_crash_symbol(symbol: str) -> bool:
     return False
 
 
+def is_weltrade_pain_synth(symbol: str) -> bool:
+    """PainX (Weltrade) → SELL seulement (prix chute par spikes)."""
+    return "painx" in str(symbol).lower()
+
+def is_weltrade_gain_synth(symbol: str) -> bool:
+    """GainX (Weltrade) → BUY seulement (prix monte par spikes)."""
+    return "gainx" in str(symbol).lower()
+
+
+# ── Fenêtres horaires Weltrade synthetics ─────────────────────────────────
+# Analysé sur ~6000 polls (2026-06-18/20) : zone active 00h-16h UTC (46-97% signal),
+# zone morte 17h-23h UTC (14-30% signal). 2 pertes 2026-06-20 à 00h08 et 00h22 UTC
+# dues à des signaux instables (00h ≡ juste après la zone morte 17h-23h).
+_WELTRADE_TRADING_WINDOWS: Dict[str, List[Tuple[int, int]]] = {
+    "PAINX": [(4, 16)],
+    "GAINX": [(4, 16)],
+    "FXVOL": [(4, 16)],
+}
+
+
+def is_weltrade_synthetic_symbol(symbol: str) -> bool:
+    """Retourne True si le symbole est un synthétique Weltrade (PainX, GainX, FX Vol)."""
+    s = str(symbol).upper().replace(" ", "").replace("_", "")
+    return s.startswith("PAINX") or s.startswith("GAINX") or s.startswith("FXVOL")
+
+
+def _check_weltrade_hour_gate(symbol: str) -> Tuple[bool, Optional[str]]:
+    """Gate horaire Weltrade — bloque les trades hors fenêtre active (00h-16h UTC).
+
+    Retourne (True, None) si autorisé, (False, message) sinon.
+    """
+    if not is_weltrade_synthetic_symbol(symbol):
+        return True, None
+    s = str(symbol).upper().replace(" ", "")
+    utc_hour = datetime.now(timezone.utc).hour
+    for prefix, windows in _WELTRADE_TRADING_WINDOWS.items():
+        if s.startswith(prefix):
+            in_window = any(start <= utc_hour < end for start, end in windows)
+            if not in_window:
+                msg = (
+                    f"Weltrade {symbol}: heure UTC {utc_hour:02d}h "
+                    f"hors fenêtre propice {windows}"
+                )
+                return False, msg
+            return True, None
+    return True, None
+
+
 def enforce_ea_boom_crash_direction(symbol: str, action: str, confidence: float, reason: str):
     """
     Aligner la décision HTTP avec SMC_Universal.mq5 :
-    Boom = BUY seulement, Crash = SELL seulement ;
-    Weltrade GainX = pas de SELL, PainX = pas de BUY (même principe).
-    Une direction interdite est ramenée à HOLD pour laisser la logique aggressive (EMA) proposer SELL/BUY.
+    Boom = BUY only, Crash = SELL only, PainX = SELL only, GainX = BUY only.
+    Une direction interdite est ramenée à HOLD.
     """
     s = str(symbol).lower()
     a = (action or "hold").lower()
@@ -772,42 +819,35 @@ def enforce_ea_boom_crash_direction(symbol: str, action: str, confidence: float,
             return "hold", min(float(confidence), 0.55), reason + "[Crash: BUY incompatible EA → HOLD] "
         if "boom" in s and a == "sell":
             return "hold", min(float(confidence), 0.55), reason + "[Boom: SELL incompatible EA → HOLD] "
-    try:
-        from backend.weltrade_symbols import is_weltrade_pain_synth, is_weltrade_gain_synth
-    except ImportError:
-        from weltrade_symbols import is_weltrade_pain_synth, is_weltrade_gain_synth
+    # PainX → SELL only (BUY interdit)
     if is_weltrade_pain_synth(str(symbol)) and a == "buy":
         return "hold", min(float(confidence), 0.55), reason + "[PainX: BUY incompatible EA → HOLD] "
+    # GainX → BUY only (SELL interdit)
     if is_weltrade_gain_synth(str(symbol)) and a == "sell":
         return "hold", min(float(confidence), 0.55), reason + "[GainX: SELL incompatible EA → HOLD] "
     return action, confidence, reason
 
 
 def synth_stair_direction_for_symbol(symbol: str) -> Optional[str]:
-    """Direction trade autorisée pour indices escalier (Boom/GainX → BUY, Crash/PainX → SELL)."""
+    """Direction trade autorisée pour indices escalier.
+    Boom → BUY only | Crash → SELL only | PainX → SELL only | GainX → BUY only."""
     s = str(symbol).lower()
     if "boom" in s:
         return "BUY"
     if "crash" in s:
         return "SELL"
-    try:
-        from backend.weltrade_symbols import is_weltrade_pain_synth, is_weltrade_gain_synth
-    except ImportError:
-        from weltrade_symbols import is_weltrade_pain_synth, is_weltrade_gain_synth
-    if is_weltrade_gain_synth(str(symbol)):
-        return "BUY"
+    # PainX → SELL only
     if is_weltrade_pain_synth(str(symbol)):
         return "SELL"
+    # GainX → BUY only
+    if is_weltrade_gain_synth(str(symbol)):
+        return "BUY"
     return None
 
 
 def _stair_category_for_symbol(symbol: str) -> str:
     if is_boom_crash_symbol(str(symbol)):
         return "boomcrash"
-    try:
-        from backend.weltrade_symbols import is_weltrade_pain_synth, is_weltrade_gain_synth
-    except ImportError:
-        from weltrade_symbols import is_weltrade_pain_synth, is_weltrade_gain_synth
     if is_weltrade_pain_synth(str(symbol)) or is_weltrade_gain_synth(str(symbol)):
         return "weltrade_synth"
     return "other"
@@ -1202,13 +1242,11 @@ def detect_spike_pattern(df: pd.DataFrame, symbol: str) -> Dict[str, Any]:
         elif is_crash and spike_direction == "BUY":
             has_spike = False  # Pas de BUY sur Crash
         else:
-            try:
-                from backend.weltrade_symbols import is_weltrade_pain_synth, is_weltrade_gain_synth
-            except ImportError:
-                from weltrade_symbols import is_weltrade_pain_synth, is_weltrade_gain_synth
-            if is_weltrade_gain_synth(symbol) and spike_direction == "SELL":
+            # PainX → SELL only (spike SELL valide, BUY invalide)
+            # GainX → BUY only (spike BUY valide, SELL invalide)
+            if is_weltrade_pain_synth(symbol) and spike_direction == "BUY":
                 has_spike = False
-            elif is_weltrade_pain_synth(symbol) and spike_direction == "BUY":
+            elif is_weltrade_gain_synth(symbol) and spike_direction == "SELL":
                 has_spike = False
     
     # Calculer la confiance du spike
@@ -11506,6 +11544,21 @@ async def gom_verdict(symbol: str = Query(...)):
         if not symbol or not symbol.strip():
             return {"ok": False, "message": "symbol requis"}
 
+        # Gate Weltrade — hors fenêtre 00h-16h UTC → retourner WAIT pour bloquer l'EA
+        wt_ok, wt_reason = _check_weltrade_hour_gate(symbol)
+        if not wt_ok:
+            utc_hour = datetime.now(timezone.utc).hour
+            logger.info(f"[GOM-Verdict] {symbol} WAIT forcé (fenêtre Weltrade fermée à {utc_hour:02d}h UTC)")
+            return {
+                "ok": True,
+                "symbol": symbol,
+                "verdict": "WAIT",
+                "verdict_num": 0,
+                "action": "WAIT",
+                "message": wt_reason,
+                "gate": "weltrade_hour",
+            }
+
         root = Path(__file__).resolve().parents[1]
         gom_file = root / "data" / "gom_signal.json"
 
@@ -19460,6 +19513,13 @@ async def create_pending_order(body: PendingOrderBody):
     action = (body.action or "").strip().lower()
     if action not in ("buy", "sell"):
         raise HTTPException(status_code=422, detail="action doit être buy ou sell")
+
+    # Gate Weltrade synthetics — fenêtre horaire 00h-16h UTC
+    wt_ok, wt_reason = _check_weltrade_hour_gate(sym)
+    if not wt_ok:
+        logger.warning(f"[PendingOrder] {sym} bloque Weltrade heure: {wt_reason}")
+        raise HTTPException(status_code=403, detail=wt_reason)
+
     order_id = str(_uuid.uuid4())
     entry: Dict[str, Any] = {
         "order_id": order_id,

@@ -1,0 +1,839 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Architecture SMC Universal — TradBOT</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --card: #161b22;
+    --border: #30363d;
+    --text: #e6edf3;
+    --dim: #8b949e;
+    --green: #3fb950;
+    --red: #f85149;
+    --orange: #d29922;
+    --blue: #58a6ff;
+    --purple: #bc8cff;
+    --cyan: #39d2c0;
+  }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body {
+    font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.6;
+    padding: 2rem;
+  }
+  .container { max-width:1100px; margin:0 auto; }
+  h1 { font-size:2rem; margin-bottom:.25rem; color:var(--blue); }
+  .subtitle { color:var(--dim); margin-bottom:2rem; font-size:.95rem; }
+  h2 {
+    font-size:1.3rem; margin:2rem 0 1rem; padding-bottom:.5rem;
+    border-bottom:1px solid var(--border); color:var(--cyan);
+  }
+  h3 { font-size:1.05rem; margin:1.5rem 0 .75rem; color:var(--orange); }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(320px,1fr)); gap:1rem; }
+  .card {
+    background:var(--card); border:1px solid var(--border); border-radius:8px;
+    padding:1.25rem;
+  }
+  .card h4 { color:var(--blue); margin-bottom:.5rem; font-size:.95rem; }
+  .card p, .card li { color:var(--dim); font-size:.88rem; }
+  .card ul { padding-left:1.2rem; }
+  .card ul li { margin-bottom:.3rem; }
+  .tag {
+    display:inline-block; font-size:.7rem; padding:.1rem .5rem; border-radius:4px;
+    margin-right:.3rem; font-weight:600;
+  }
+  .tag-green { background:#1a3a1a; color:var(--green); }
+  .tag-red   { background:#3a1a1a; color:var(--red); }
+  .tag-blue  { background:#1a2a4a; color:var(--blue); }
+  .tag-orange{ background:#3a2a1a; color:var(--orange); }
+  .tag-purple{ background:#2a1a3a; color:var(--purple); }
+  table {
+    width:100%; border-collapse:collapse; font-size:.85rem;
+    background:var(--card); border:1px solid var(--border); border-radius:8px;
+    overflow:hidden;
+  }
+  th, td { padding:.5rem .75rem; text-align:left; border-bottom:1px solid var(--border); }
+  th { background:var(--border); color:var(--cyan); font-weight:600; }
+  .flow {
+    display:flex; flex-wrap:wrap; gap:.5rem; align-items:center;
+    background:var(--card); border:1px solid var(--border); border-radius:8px;
+    padding:1rem; margin:1rem 0;
+  }
+  .flow span {
+    background:var(--border); padding:.3rem .7rem; border-radius:4px;
+    font-size:.8rem;
+  }
+  .flow .arrow { background:none; color:var(--dim); font-size:.9rem; }
+  .bypass { color:var(--orange); font-size:.75rem; }
+  pre {
+    background:#111; border:1px solid var(--border); border-radius:6px;
+    padding:1rem; overflow-x:auto; font-size:.8rem; color:var(--dim);
+  }
+  .stats { display:flex; gap:1rem; flex-wrap:wrap; margin:1rem 0; }
+  .stat {
+    flex:1; min-width:140px; background:var(--card); border:1px solid var(--border);
+    border-radius:8px; padding:1rem; text-align:center;
+  }
+  .stat .num { font-size:1.6rem; font-weight:700; color:var(--blue); }
+  .stat .lbl { font-size:.78rem; color:var(--dim); }
+  .stat .green { color:var(--green); }
+  .stat .red { color:var(--red); }
+  .stat .orange { color:var(--orange); }
+  a { color:var(--blue); }
+  .warn {
+    background:#3a2a1a; border:1px solid var(--orange); border-radius:6px;
+    padding:.75rem 1rem; margin:1rem 0; color:var(--orange); font-size:.88rem;
+  }
+</style>
+</head>
+<body>
+<div class="container">
+
+<h1>⚙ SMC Universal — Architecture du Robot</h1>
+<p class="subtitle">
+  EA multi-actifs (Boom/Crash, Volatility, Forex, XAU, Crypto) · 16 950 lignes MQL5 ·
+  Serveur IA Python localhost:8000 · Décisions GOM + Cognition + IA
+</p>
+
+<div class="stats">
+  <div class="stat"><div class="num">4</div><div class="lbl">Mécanismes d'entrée</div></div>
+  <div class="stat"><div class="num">10+</div><div class="lbl">Mécanismes de sortie</div></div>
+  <div class="stat"><div class="num">24</div><div class="lbl">Gates DecisionEngine</div></div>
+  <div class="stat"><div class="num">37</div><div class="lbl">Groupes d'inputs</div></div>
+  <div class="stat"><div class="num">~200</div><div class="lbl">Paramètres configurables</div></div>
+  <div class="stat"><div class="num">33</div><div class="lbl">Fichiers .mqh modules</div></div>
+</div>
+
+<!-- ─── Architecture ────────────────────────────────── -->
+<h2>1. Vue d'ensemble</h2>
+<div class="flow">
+  <span>Serveur IA<br><small>localhost:8000</small></span>
+  <span class="arrow">→</span>
+  <span>GOM Pipeline<br><small>poll verdict 2s</small></span>
+  <span class="arrow">→</span>
+  <span>DecisionEngine<br><small>24 gates</small></span>
+  <span class="arrow">→</span>
+  <span>SafeOrderSend<br><small>OrderSend</small></span>
+  <span class="arrow">→</span>
+  <span>Exit Management<br><small>partial close + thesis</small></span>
+  <span class="arrow">→</span>
+  <span>PerformancePause<br><small>streak tracking</small></span>
+</div>
+
+<div class="grid">
+  <div class="card">
+    <h4>🧠 Cerveau : Serveur IA Python</h4>
+    <p>Tourne sur <code>localhost:8000</code> (fallback render.com). Fournit :</p>
+    <ul>
+      <li>Verdict GOM (BUY/SELL/WAIT/PERFECT) + score 0-100</li>
+      <li>Directions multi-TF (M1 → D1), RSI, Kola, OB, OTE</li>
+      <li>Cognition forecast (200 bougies fantômes)</li>
+      <li>BC heure, ghost sentiment, spike level</li>
+      <li>Décision IA (BUY/SELL/HOLD) + confiance</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h4>🔁 Loop principal OnTick</h4>
+    <p>Throttlé à ~1 tick/2s. Ordre d'exécution :</p>
+    <ul>
+      <li>GOM poll + stale guard (120s)</li>
+      <li>Session readiness + dashboard</li>
+      <li>Entrées : Pipeline → GOM Auto → Aligné → Pullback</li>
+      <li>Sorties : Spike → Dollar → Trailing → Thesis → Partial</li>
+      <li>IA update + agents gate (30s)</li>
+      <li>Graphiques + dashboard (15s)</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h4>📦 Modules clefs (dossier modules/)</h4>
+    <ul>
+      <li><strong>SMC_GOM_Pipeline</strong> (2953l) — Poll verdict, exécution pipeline, dashboard</li>
+      <li><strong>SMC_PerformancePause</strong> (340l) — Streak gains/pertes, giveback guard</li>
+      <li><strong>SMC_ExitManagement</strong> (443l) — Partial closes 3 niveaux, thesis invalidation</li>
+      <li><strong>SMC_MarketIntelligence</strong> (720l) — Régime, corrélation, qualité session</li>
+      <li><strong>SMC_MasterScore</strong> (241l) — Score composite God Mode 0-100</li>
+      <li><strong>SMC_ProbabilityGate</strong> (198l) — Probabilité d'entrée composite</li>
+      <li><strong>LossCooldownManager</strong> (198l) — Cooldown par symbole après pertes</li>
+      <li><strong>TrailingStop</strong> (293l) — Trailing ATR + giveback trail</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h4>📊 Profils par actif</h4>
+    <p>Paramètres SL/TP/Risque adaptés automatiquement :</p>
+    <ul>
+      <li><span class="tag tag-orange">Gold</span> SL=2.2xATR, TP1=1.5R (50%), TP2=3.0R trail</li>
+      <li><span class="tag tag-blue">Forex</span> SL=2.5xATR, TP=5.0xATR, session 08-17h UTC</li>
+      <li><span class="tag tag-purple">Crypto</span> SL=3.0xATR, TP=6.0xATR, session 24h</li>
+      <li><span class="tag tag-green">Boom/Crash</span> Spike TP=$0.80, pulse exhaustion, BC heure</li>
+      <li><span class="tag tag-red">Volatility</span> SL/TP adaptatifs, trailing ATR 3.0x</li>
+    </ul>
+  </div>
+</div>
+
+<!-- ─── DecisionEngine ──────────────────────────────── -->
+<h2>2. DecisionEngine — Les 24 Gates</h2>
+<p style="color:var(--dim);font-size:.88rem;margin-bottom:1rem;">
+  Appelé par <code>SafeOrderSend</code> → <code>SMC_EvaluateEntryGate()</code>. Chaque gate peut bloquer le trade avec un code.
+  Certaines gates ont un <span class="tag tag-orange">PERFECT bypass</span> : si GOM=PERFECT, la gate est assouplie ou sautée.
+</p>
+<table>
+  <thead><tr><th>#</th><th>Gate</th><th>Code</th><th>Description</th><th>PERFECT</th></tr></thead>
+  <tbody>
+    <tr><td>—</td><td><strong>GOM=WAIT</strong></td><td>21</td><td>Aucune entrée si verdict WAIT (ordres GOM)</td><td>❌</td></tr>
+    <tr><td>1</td><td>BlockAllTrades</td><td>1</td><td>Kill switch manuel</td><td>❌</td></tr>
+    <tr><td>2</td><td>Warmup</td><td>2</td><td>60s (synthétiques) / 300s (autres) après OnInit</td><td>❌</td></tr>
+    <tr><td>3</td><td>Session Readiness</td><td>3/23</td><td>Circuit-breaker, cooldown symbole, score readiness</td><td>❌</td></tr>
+    <tr><td>4</td><td>Avoid Hours</td><td>6</td><td>Heures à éviter (depuis /daily-readiness)</td><td>❌</td></tr>
+    <tr><td>5</td><td>Daily Discipline</td><td>4/5</td><td>Limite trades/jour, pause performance (win streak, giveback)</td><td>❌</td></tr>
+    <tr><td>6</td><td>Capital/Margin</td><td>7</td><td>Equity&lt;80% balance, marge insuffisante, risque&gt;2%</td><td>❌</td></tr>
+    <tr><td>7</td><td>Correction Cycle</td><td>8</td><td>Correction pas épuisée (non-Boom/Crash)</td><td>❌</td></tr>
+    <tr><td>8</td><td>Boom/Crash Direction</td><td>9</td><td>Boom=BUY seulement, Crash=SELL seulement</td><td>❌</td></tr>
+    <tr><td>9</td><td>Survival Margin</td><td>11</td><td>Marge suffisante jusqu'au SL</td><td>❌</td></tr>
+    <tr><td>10</td><td><strong>Coherence</strong></td><td>12</td><td>Coherence GOM &lt; seuil</td><td><span class="tag tag-orange">oui</span></td></tr>
+    <tr><td>11</td><td><strong>COG Conflict</strong></td><td>13</td><td>COG en conflit avec GOM</td><td><span class="tag tag-orange">oui</span></td></tr>
+    <tr><td>12</td><td><strong>IA+COG Alignment</strong></td><td>14</td><td>IA+COG pas alignés avec GOM</td><td><span class="tag tag-orange">oui</span></td></tr>
+    <tr><td>13</td><td><strong>Propice Score</strong></td><td>15</td><td>Score propice &lt; seuil</td><td><span class="tag tag-orange">seuil réduit</span></td></tr>
+    <tr><td>14</td><td><strong>RSI Extreme</strong></td><td>16</td><td>RSI surachat/survente</td><td><span class="tag tag-orange">soft</span></td></tr>
+    <tr><td>15</td><td><strong>M15 Opposed</strong></td><td>17</td><td>M15 opposé à la direction</td><td><span class="tag tag-orange">oui</span></td></tr>
+    <tr><td>16</td><td><strong>Force Exhausted</strong></td><td>18</td><td>Cycle PERFECT→GOOD terminé</td><td>❌ (jamais)</td></tr>
+    <tr><td>17</td><td><strong>Probability Gate</strong></td><td>19</td><td>Probabilité composite &lt; seuil</td><td>❌</td></tr>
+    <tr><td>18</td><td><strong>Stale Verdict</strong></td><td>20</td><td>Dernier poll GOM &gt; 90s</td><td>❌</td></tr>
+    <tr><td>19</td><td><strong>Post-Spike</strong></td><td>21</td><td>60s + petites bougies après spike</td><td>❌</td></tr>
+    <tr><td>20</td><td><strong>Session Window</strong></td><td>22</td><td>Weltrade 04-16h UTC</td><td>❌</td></tr>
+    <tr><td>21</td><td><strong>Max Positions</strong></td><td>8</td><td>Capacité terminal atteinte</td><td>❌</td></tr>
+    <tr><td>—</td><td><strong>Fast-path triple</strong></td><td>—</td><td>GOM+IA+COG alignés → saute gates non-capital</td><td>✔ bypass</td></tr>
+  </tbody>
+</table>
+
+<div class="warn">
+  ⚡ <strong>Fast-path triple alignement :</strong> si GOM &ge; GOOD (|vn|&ge;2), IA alignée ET COG aligné → toutes les gates 10-15 sont bypassées. Seules les gates capital/discipline/positions sont vérifiées.
+</div>
+
+<!-- ─── Arbre décisionnel ─────────────────────────── -->
+<h2>3. Arbre décisionnel complet</h2>
+<p style="color:var(--dim);font-size:.88rem;margin-bottom:1rem;">
+  Parcours logique de l'entrée : de l'arrivée du tick jusqu'à l'execution.
+  Chaque boîte est une décision binaire (✔ / ✘) qui suit le code réel.
+</p>
+
+<div style="display:flex;flex-direction:column;gap:0;font-size:.82rem;">
+
+<!-- RACINE -->
+<div style="background:var(--card);border:1px solid var(--border);border-radius:8px;padding:.75rem 1rem;margin-bottom:0;text-align:center;border-left:4px solid var(--blue);">
+  <strong style="color:var(--blue);">⚡ Tick entrant</strong><br>
+  <span style="color:var(--dim);">OnTick() — throttlé à 1 tick / 2s</span>
+</div>
+<div style="text-align:center;color:var(--dim);font-size:.9rem;padding:.25rem 0;">│</div>
+
+<!-- THROTTLE -->
+<div style="background:var(--card);border:1px solid var(--border);border-radius:8px;padding:.75rem 1rem;margin-bottom:0;text-align:center;border-left:4px solid var(--dim);">
+  <strong style="color:var(--dim);">Throttle 2s</strong><br>
+  <span style="color:var(--dim);"><code>GetTickCount() - g_lastTickTime &lt; 2000</code></span>
+</div>
+<div style="display:flex;justify-content:center;gap:0;padding:.25rem 0;">
+  <div style="text-align:center;color:var(--dim);font-size:.9rem;border-right:1px solid var(--border);padding-right:1.5rem;flex:1;">│</div>
+  <div style="text-align:center;flex:1;padding-left:1.5rem;">
+    <span style="color:var(--green);">✔ &lt;2s → skip</span>
+  </div>
+</div>
+
+<!-- GOM POLL -->
+<div style="background:var(--card);border:1px solid var(--border);border-radius:8px;padding:.75rem 1rem;margin-bottom:0;text-align:center;border-left:4px solid var(--green);">
+  <strong style="color:var(--green);">📡 Poll GOM Pipeline</strong><br>
+  <span style="color:var(--dim);"><code>/gom-kola-dashboard?symbol=XXX</code></span>
+</div>
+<div style="display:flex;justify-content:center;gap:0;padding:.25rem 0;">
+  <div style="text-align:center;color:var(--dim);font-size:.9rem;border-right:1px solid var(--border);padding-right:1.5rem;flex:1;">
+    <span style="color:var(--red);">✘ HTTP error → skip tick</span>
+  </div>
+  <div style="text-align:center;flex:1;padding-left:1.5rem;">
+    <span style="color:var(--green);">✔ OK → continue</span>
+  </div>
+</div>
+
+<!-- STALE GUARD -->
+<div style="background:var(--card);border:1px solid var(--border);border-radius:8px;padding:.75rem 1rem;margin-bottom:0;text-align:center;border-left:4px solid var(--orange);">
+  <strong style="color:var(--orange);">⏳ Stale Guard</strong><br>
+  <span style="color:var(--dim);">Dernier poll &gt; 120s ?</span>
+</div>
+<div style="display:flex;justify-content:center;gap:0;padding:.25rem 0;">
+  <div style="text-align:center;color:var(--dim);font-size:.9rem;border-right:1px solid var(--border);padding-right:1.5rem;flex:1;">
+    <span style="color:var(--red);">✘ Oui → force GOM=WAIT, skip tick</span>
+  </div>
+  <div style="text-align:center;flex:1;padding-left:1.5rem;">
+    <span style="color:var(--green);">✔ Non → continue</span>
+  </div>
+</div>
+
+<!-- VERDICT GOM -->
+<div style="background:var(--card);border:1px solid var(--border);border-radius:8px;padding:.75rem 1rem;margin-bottom:0;text-align:center;border-left:4px solid var(--purple);">
+  <strong style="color:var(--purple);">🎯 Verdict GOM</strong><br>
+  <span style="color:var(--dim);"><code>g_smcGomVerdictNum</code> = -3 à +3</span>
+</div>
+<div style="display:flex;justify-content:center;gap:0;padding:.25rem 0;">
+  <div style="text-align:center;color:var(--dim);font-size:.9rem;border-right:1px solid var(--border);padding-right:1.5rem;flex:1;">
+    <span style="color:var(--red);">✘ |vn| = 0 → WAIT</span><br>
+    <span style="color:var(--dim);font-size:.75rem;">→ seule entrée Pipeline autorisée</span>
+  </div>
+  <div style="text-align:center;flex:1;padding-left:1.5rem;">
+    <span style="color:var(--green);">✔ |vn| ≥ 1 → GOOD / PERFECT</span><br>
+    <span style="color:var(--dim);font-size:.75rem;">→ toutes les entrées possibles</span>
+  </div>
+</div>
+
+<!-- DIVERGENCE 1 : WAIT GOM -->
+<div style="display:flex;gap:0;margin:.25rem 0;">
+  <!-- Branche WAIT (gauche) -->
+  <div style="flex:1;border-right:1px solid var(--border);padding-right:1rem;">
+    <div style="background:#1a1a22;border:1px solid #3a3a4a;border-radius:6px;padding:.6rem .8rem;margin-bottom:.25rem;text-align:center;border-left:3px solid var(--red);">
+      <span style="color:var(--red);font-weight:600;">GOM = WAIT</span><br>
+      <span style="color:var(--dim);font-size:.75rem;">Gate 21 → blocage entrées GOM</span>
+    </div>
+    <div style="text-align:center;color:var(--dim);font-size:.8rem;">│</div>
+    <div style="background:#1a1a22;border:1px solid #3a3a4a;border-radius:6px;padding:.6rem .8rem;margin-bottom:.25rem;border-left:3px solid var(--blue);">
+      <span style="color:var(--blue);">Alternate : Pullback Wait</span><br>
+      <span style="color:var(--dim);font-size:.75rem;">Pipeline ordre &amp; IA≠HOLD &amp; COG aligné ?</span>
+    </div>
+    <div style="display:flex;justify-content:center;gap:0;padding:.1rem 0;">
+      <div style="text-align:center;font-size:.8rem;border-right:1px solid var(--border);padding-right:.75rem;flex:1;">
+        <span style="color:var(--red);">✘ Non</span><br>
+        <span style="color:var(--dim);font-size:.7rem;">→ FIN : skip entrée</span>
+      </div>
+      <div style="text-align:center;font-size:.8rem;flex:1;padding-left:.75rem;">
+        <span style="color:var(--green);">✔ Oui</span><br>
+        <span style="color:var(--dim);font-size:.7rem;">→ LIMIT zone OB</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Branche PERFECT/GOOD (droite) -->
+  <div style="flex:1;padding-left:1rem;">
+    <div style="background:#1a2a1a;border:1px solid #2a4a2a;border-radius:6px;padding:.6rem .8rem;margin-bottom:.25rem;text-align:center;border-left:3px solid var(--green);">
+      <span style="color:var(--green);font-weight:600;">GOM = PERFECT / GOOD</span><br>
+      <span style="color:var(--dim);font-size:.75rem;">vn=3(PERFECT) ou vn=2/1(GOOD)</span>
+    </div>
+    <div style="text-align:center;color:var(--dim);font-size:.8rem;">│</div>
+    <!-- Décision : vérifier fast-path -->
+    <div style="background:#1a1a22;border:1px solid #3a3a4a;border-radius:6px;padding:.6rem .8rem;margin-bottom:.25rem;border-left:3px solid var(--cyan);">
+      <span style="color:var(--cyan);">Fast-path triple assorti ?</span><br>
+      <span style="color:var(--dim);font-size:.75rem;">GOM≥GOOD + IA alignée + COG aligné ?</span>
+    </div>
+    <div style="display:flex;justify-content:center;gap:0;padding:.1rem 0;">
+      <div style="text-align:center;font-size:.8rem;border-right:1px solid var(--border);padding-right:.75rem;flex:1;">
+        <span style="color:var(--green);font-size:.7rem;">✔ Oui</span><br>
+        <span style="color:var(--dim);font-size:.7rem;">→ saute gates 10-15</span>
+      </div>
+      <div style="text-align:center;font-size:.8rem;flex:1;padding-left:.75rem;">
+        <span style="color:var(--red);font-size:.7rem;">✘ Non</span><br>
+        <span style="color:var(--dim);font-size:.7rem;">→ toutes les gates</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- GATES COMMUNES -->
+<div style="background:var(--card);border:1px solid var(--border);border-radius:8px;padding:.75rem 1rem;margin:.25rem 0;text-align:center;border-left:4px solid var(--dim);">
+  <strong style="color:var(--dim);">🔐 DecisionEngine — 21 gates communes</strong><br>
+  <span style="color:var(--dim);font-size:.75rem;">
+    Warmup · BlockAllTrades · Session Readiness · Avoid Hours · Daily Discipline · Capital/Margin · Correction Cycle · BC Direction · Survival Margin
+    <strong style="color:var(--orange);">| PERFECT bypass zone :</strong> Coherence · COG Conflict · IA+COG Alignment · Propice Score · RSI Extreme · M15 Opposed
+    <br>Force Exhausted · Probability Gate · Stale Verdict · Post-Spike · Session Window · Max Positions
+  </span>
+</div>
+
+<div style="display:flex;justify-content:center;gap:0;padding:.25rem 0;">
+  <div style="text-align:center;color:var(--dim);font-size:.9rem;border-right:1px solid var(--border);padding-right:1.5rem;flex:1;">
+    <span style="color:var(--red);">✘ Une gate bloque → FIN</span><br>
+    <span style="color:var(--dim);font-size:.75rem;">Code gate logué + dashboard</span>
+  </div>
+  <div style="text-align:center;flex:1;padding-left:1.5rem;">
+    <span style="color:var(--green);">✔ Toutes les gates passent</span>
+  </div>
+</div>
+
+<!-- MODE D'ENTRÉE -->
+<div style="background:var(--card);border:1px solid var(--border);border-radius:8px;padding:.75rem 1rem;margin-bottom:0;text-align:center;border-left:4px solid var(--blue);">
+  <strong style="color:var(--blue);">🎯 Choix du mode d'entrée</strong>
+</div>
+<div style="text-align:center;color:var(--dim);font-size:.9rem;padding:.25rem 0;">│</div>
+
+<!-- 4 branches entrées -->
+<div style="display:grid;grid-template-columns:repeat(2,1fr);gap:.5rem;margin:.25rem 0;">
+
+  <div style="background:#1a1a22;border:1px solid #3a3a4a;border-radius:6px;padding:.6rem .8rem;border-left:3px solid var(--blue);">
+    <strong style="color:var(--blue);font-size:.78rem;">📋 Pipeline Order</strong>
+    <div style="color:var(--dim);font-size:.72rem;margin-top:.3rem;">
+      Serveur → ordre explicite (prix, lot, SL, TP)<br>
+      <span class="tag tag-blue">MCP</span> poll 3s
+    </div>
+  </div>
+
+  <div style="background:#1a1a22;border:1px solid #3a3a4a;border-radius:6px;padding:.6rem .8rem;border-left:3px solid var(--green);">
+    <strong style="color:var(--green);font-size:.78rem;">🤖 GOM Auto Entry</strong>
+    <div style="color:var(--dim);font-size:.72rem;margin-top:.3rem;">
+      PERFECT → LIMIT S/R ou MARKET direct<br>
+      GOOD → LIMIT zone OB (Kola/BB)
+    </div>
+  </div>
+
+  <div style="background:#1a1a22;border:1px solid #3a3a4a;border-radius:6px;padding:.6rem .8rem;border-left:3px solid var(--purple);">
+    <strong style="color:var(--purple);font-size:.78rem;">🔱 Triple Aligné</strong>
+    <div style="color:var(--dim);font-size:.72rem;margin-top:.3rem;">
+      GOM + IA + COG même direction<br>
+      Près OB → LIMIT · Pullback EMA5 → MARKET
+    </div>
+  </div>
+
+  <div style="background:#1a1a22;border:1px solid #3a3a4a;border-radius:6px;padding:.6rem .8rem;border-left:3px solid var(--orange);">
+    <strong style="color:var(--orange);font-size:.78rem;">⏳ Wait Pullback</strong>
+    <div style="color:var(--dim);font-size:.72rem;margin-top:.3rem;">
+      GOM=WAIT mais COG+IA alignés<br>
+      Confiance IA ≥ 55% → LIMIT OB
+    </div>
+  </div>
+
+  <!-- Ligne 2 -->
+  <div style="background:#1a1a22;border:1px solid #3a3a4a;border-radius:6px;padding:.6rem .8rem;border-left:3px solid var(--red);">
+    <strong style="color:var(--red);font-size:.78rem;">⚡ Gold Scalp</strong>
+    <div style="color:var(--dim);font-size:.72rem;margin-top:.3rem;">
+      XAUUSD seulement · COG=BUY + GOM≥2<br>
+      Rebond EMA9/OB M1 · max 3 positions
+    </div>
+  </div>
+
+  <div style="background:#1a1a22;border:1px solid #3a3a4a;border-radius:6px;padding:.6rem .8rem;border-left:3px solid var(--dim);">
+    <strong style="color:var(--dim);font-size:.78rem;">📜 Legacy</strong>
+    <div style="color:var(--dim);font-size:.72rem;margin-top:.3rem;">
+      DecisionEngine=OFF uniquement<br>
+      Validation MTF, zone correction, M1
+    </div>
+  </div>
+</div>
+
+<div style="text-align:center;color:var(--dim);font-size:.9rem;padding:.25rem 0;">│</div>
+
+<!-- ORDERSEND -->
+<div style="background:var(--card);border:1px solid var(--border);border-radius:8px;padding:.75rem 1rem;margin-bottom:0;text-align:center;border-left:4px solid var(--green);">
+  <strong style="color:var(--green);">📤 SafeOrderSend</strong><br>
+  <span style="color:var(--dim);">Position ouverte → <code>g_posTicket</code>, <code>g_posDirection</code>, <code>g_posOpenPrice</code></span>
+</div>
+<div style="text-align:center;color:var(--dim);font-size:.9rem;padding:.25rem 0;">│</div>
+
+<!-- EXIT / THESIS -->
+<div style="background:var(--card);border:1px solid var(--border);border-radius:8px;padding:.75rem 1rem;margin-bottom:0;text-align:center;border-left:4px solid var(--orange);">
+  <strong style="color:var(--orange);">🔄 Suivi &amp; Sortie</strong><br>
+  <span style="color:var(--dim);font-size:.75rem;">
+    Thesis invalidation (-0.3R) · Partial TP1 30% (+1.5R) · TP2 30% (+3.0R) · TP3 40% (+5.0R) · Trailing ATR 3x ·
+    Profit giveback trail · IA conflict · GOM WAIT close · Spike close · Pulse exhaustion
+  </span>
+</div>
+<div style="text-align:center;color:var(--dim);font-size:.9rem;padding:.25rem 0;">│</div>
+
+<!-- PERFORMANCE -->
+<div style="background:var(--card);border:1px solid var(--border);border-radius:8px;padding:.75rem 1rem;text-align:center;border-left:4px solid var(--purple);">
+  <strong style="color:var(--purple);">📊 Enregistrement Performance</strong><br>
+  <span style="color:var(--dim);font-size:.75rem;">
+    <code>SMC_RecordTradeClosePerformance()</code> → win/loss streak, giveback, daily P&amp;L
+  </span>
+</div>
+
+</div>
+
+<!-- ─── Entrées ─────────────────────────────────────── -->
+<h2>4. Mécanismes d'entrée</h2>
+<div class="grid">
+  <div class="card">
+    <h4>A. Pipeline Orders <span class="tag tag-blue">MCP</span></h4>
+    <p>Poll <code>/pending-order?symbol=...</code> toutes les 3s. Le serveur envoie : action, prix, SL, TP, lot. Validé par :</p>
+    <ul>
+      <li>IA ≠ HOLD, GOM ≠ WAIT</li>
+      <li>Pas de double-indécision IA+COG</li>
+      <li>Execution via <code>SafeOrderSend</code></li>
+    </ul>
+  </div>
+  <div class="card">
+    <h4>B. GOM Autonomous <span class="tag tag-green">GOMPerfectAutoEntry</span></h4>
+    <p>Déclenché quand GOM=PERFECT ou GOOD :</p>
+    <ul>
+      <li>PERFECT → LIMIT sur S/R ou MARKET direct</li>
+      <li>GOOD → LIMIT sur zone OB (Kola ou BB mid)</li>
+      <li>SIMPLE → optionnel</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h4>C. Triple Aligné <span class="tag tag-purple">GOM+IA+COG</span></h4>
+    <p>Quand les 3 signaux sont alignés dans la même direction :</p>
+    <ul>
+      <li>Près d'un niveau OB/SR → LIMIT</li>
+      <li>Pullback EMA M5 détecté → MARKET</li>
+      <li>Bypasse les gates 10-15 du DecisionEngine</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h4>D. GOM Wait Pullback <span class="tag tag-orange">WAIT_PULLBACK</span></h4>
+    <p>Si GOM=WAIT mais COG+IA alignés : places des LIMIT OB.</p>
+    <ul>
+      <li>Nécessite confiance IA &ge; 55%</li>
+      <li>Mode défensif : entre seulement sur retracement</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h4>E. Gold Scalp <span class="tag tag-red">GoldScalpEnabled</span></h4>
+    <p>Ré-entrées agressives sur XAUUSD tant que COG=BUY + GOM&ge;2 :</p>
+    <ul>
+      <li>Rebond EMA9 M1 ou touch OB Bullish M1</li>
+      <li>Max 3 scalps simultanés</li>
+      <li>Cooldown 120s entre ré-entrées</li>
+      <li>Fermeture si COG change ou GOM→WAIT</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h4>F. Entrées Legacy <span class="tag tag-dim">DecisionEngine=OFF</span></h4>
+    <p>Ancien chemin via <code>ValidateTradeBeforeExecution()</code> :</p>
+    <ul>
+      <li>Analyse MTF (2/3 TF alignés sur H4/H1/M15)</li>
+      <li>Zone correction, validation M1, post-spike</li>
+      <li>BC heure, probability gate</li>
+    </ul>
+  </div>
+</div>
+
+<!-- ─── Sorties ─────────────────────────────────────── -->
+<h2>5. Mécanismes de sortie</h2>
+<table>
+  <thead><tr><th>Mécanisme</th><th>Déclencheur</th><th>Application</th></tr></thead>
+  <tbody>
+    <tr><td><strong>Spike Close</strong></td><td>Profit &ge; BoomCrashSpikeTP ($0.80)</td><td>Boom/Crash seulement</td></tr>
+    <tr><td><strong>Dollar Exit</strong></td><td>Profit &ge; $0.80 ou temps &gt;90s sans profit</td><td>Universal</td></tr>
+    <tr><td><strong>GOM WAIT Close</strong></td><td>GOM=WAIT + perte &ge; $1.0</td><td>Positions GOM</td></tr>
+    <tr><td><strong>Petite perte protection</strong></td><td>Perte &lt; $3.0 bloque la fermeture</td><td>Universal (sauf force ou GOM WAIT)</td></tr>
+    <tr><td><strong>Trailing Stop</strong></td><td>ATR 3.0x, activation à $1 profit</td><td>Boom/Crash, Metal, Volatility</td></tr>
+    <tr><td><strong>Profit Giveback Trail</strong></td><td>30% reversal from peak profit</td><td>Universal</td></tr>
+    <tr><td><strong>Partial Close TP1</strong></td><td>+1.5R → ferme 30% volume, SL→BE</td><td>Universal (ExitManagement)</td></tr>
+    <tr><td><strong>Partial Close TP2</strong></td><td>+3.0R → ferme 30% volume</td><td>Universal (ExitManagement)</td></tr>
+    <tr><td><strong>Partial Close TP3</strong></td><td>+5.0R → ferme 40% volume</td><td>Universal (ExitManagement)</td></tr>
+    <tr><td><strong>Thesis Invalidation</strong></td><td>Prix atteint -0.3R sans confirmer +0.5R</td><td>Universal (ExitManagement)</td></tr>
+    <tr><td><strong>Gold Partial TP</strong></td><td>RR=1.5 → ferme 50%, SL→BE, trail reste</td><td>XAUUSD</td></tr>
+    <tr><td><strong>IA HOLD Close</strong></td><td>IA retourne HOLD</td><td>Universal (exempt PERFECT 300s)</td></tr>
+    <tr><td><strong>Direction Conflict</strong></td><td>IA direction opposée à la position</td><td>Universal</td></tr>
+    <tr><td><strong>Pulse Exhaustion</strong></td><td>Score épuisement &ge; 70%</td><td>Boom/Crash</td></tr>
+    <tr><td><strong>Auto Rotation</strong></td><td>Toutes les 60s, temps-based</td><td>Universal</td></tr>
+  </tbody>
+</table>
+
+<!-- ─── IA Server ───────────────────────────────────── -->
+<h2>6. Serveur IA & Endpoints</h2>
+<div class="grid">
+  <div class="card">
+    <h4>📡 Endpoints appelés par l'EA</h4>
+    <table style="font-size:.8rem;">
+      <tr><th>Endpoint</th><th>Fréquence</th><th>Usage</th></tr>
+      <tr><td><code>GET /gom-kola-dashboard</code></td><td>2s</td><td>Verdict GOM + toutes les données</td></tr>
+      <tr><td><code>GET /pending-order</code></td><td>3s</td><td>Ordres pipeline</td></tr>
+      <tr><td><code>POST /mt5/ea-heartbeat</code></td><td>10s</td><td>Keep-alive</td></tr>
+      <tr><td><code>GET /daily-readiness</code></td><td>60min</td><td>Circuit-breaker, avoid/best hours</td></tr>
+      <tr><td><code>GET /ml/signal</code></td><td>30s</td><td>Signal ML trading</td></tr>
+      <tr><td><code>GET /agents/gate</code></td><td>30s</td><td>Boost/pénalité confiance agents</td></tr>
+      <tr><td><code>POST /notify-whatsapp</code></td><td>events</td><td>Notifications WhatsApp</td></tr>
+    </table>
+  </div>
+  <div class="card">
+    <h4>📦 Données retournées (GOM verdict)</h4>
+    <pre>{
+  "verdict": "GOOD BUY",
+  "verdict_num": 2,
+  "entry_quality": 82.5,
+  "coherence_pct": 85.0,
+  "score_buy": 78.0,
+  "score_sell": 22.0,
+  "kola_buy": 2542.5,
+  "kola_sell": 2538.0,
+  "kola_state": "BULL",
+  "tf_global_dir": "BULL",
+  "rsi": 62,
+  "bb_up/mid/dn": [...],
+  "ob_bull/bear_top/bot": [...],
+  "ote_top/bot": [2545,2535],
+  "bc_hour_utc": 8,
+  "cog_direction": "BUY",
+  "cog_strength": 0.72,
+  "ia_status_action": "BUY",
+  "ia_status_confidence_pct": 82.0
+}</pre>
+  </div>
+  <div class="card">
+    <h4>🧠 Décision IA</h4>
+    <p>Réponse parsée :</p>
+    <pre>{
+  "action": "BUY/SELL/HOLD",
+  "confidence": 0.85,
+  "alignment": "75%",
+  "coherence": "82%"
+}</pre>
+    <p>Stockée dans : <code>g_lastAIAction</code>, <code>g_lastAIConfidence</code>, <code>g_lastAIAlignment</code>, <code>g_lastAICoherence</code></p>
+  </div>
+</div>
+
+<!-- ─── Performance ─────────────────────────────────── -->
+<h2>7. Gestion des pertes & performance</h2>
+<div class="grid">
+  <div class="card">
+    <h4>📈 Win Streak Pause</h4>
+    <ul>
+      <li><strong>Seuil :</strong> <code>WinStreakThreshold</code> (5 gains consécutifs)</li>
+      <li><strong>Action :</strong> Pause toutes les entrées pendant <code>WinStreakPauseHours</code> (2h)</li>
+      <li><strong>Suivi :</strong> <code>g_winStreakSessionUSD</code> cumulé, persisté en GV</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h4>📉 Loss Streak Pause</h4>
+    <ul>
+      <li><strong>Seuil :</strong> 2 pertes consécutives</li>
+      <li><strong>Symboles différents :</strong> Pause GLOBALE 1h</li>
+      <li><strong>Même symbole :</strong> Pause symbole 2h</li>
+      <li><strong>Reset :</strong> Un gain remet le compteur à zéro</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h4>🛡 Profit Giveback Guard</h4>
+    <ul>
+      <li><strong>Déclencheur :</strong> Drawdown depuis pic journalier &gt; <code>ProfitGivebackPct</code> (40%)</li>
+      <li><strong>Pic minimum :</strong> <code>ProfitGivebackMinPeakUSD</code> ($5.0)</li>
+      <li><strong>Action :</strong> Pause 2h ou jusqu'à nouvelle journée</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h4>🔒 Petit Loss Block</h4>
+    <ul>
+      <li><strong>Seuil :</strong> <code>MinLossBeforeAutoCloseUSD</code> ($3.0)</li>
+      <li><strong>Comportement :</strong> Bloque la fermeture si perte &lt; seuil</li>
+      <li><strong>Exceptions :</strong> Force close ou GOM=WAIT</li>
+    </ul>
+  </div>
+</div>
+
+<!-- ─── Market Intelligence ─────────────────────────── -->
+<h2>8. Market Intelligence</h2>
+<div class="grid">
+  <div class="card">
+    <h4>📊 Régime de marché</h4>
+    <p>Détecté via ATR percentile + ADX :</p>
+    <ul>
+      <li>Range : ATR &lt; 25e percentile</li>
+      <li>Trend fort : ADX &gt; 28</li>
+      <li>Volatilité extrême : ATR &gt; 85e percentile</li>
+      <li>Squeeze : BB width analysis</li>
+      <li>Score de régime : 0-100 adapté à la direction</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h4>🔗 Filtre corrélation</h4>
+    <p>Groupes définis par nom de symbole :</p>
+    <ul>
+      <li><strong>10 groupes :</strong> EUR, USD, GBP, AUD, METAL, CRYPTO, INDEX, OIL, BC, NONE</li>
+      <li><strong>Limite :</strong> <code>ExtMaxPerGroup</code> (1) position max par groupe</li>
+      <li>Couvre les corrélations directes ET inverses</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h4>⏰ Qualité de session</h4>
+    <p>Scores de qualité par heure UTC pour chaque catégorie :</p>
+    <ul>
+      <li>London AM (8-11h) : score élevé pour Forex, Métaux</li>
+      <li>NY Open (13-16h) : score élevé pour Indices, Crypto</li>
+      <li>Asia (0-6h) : score faible sauf Crypto</li>
+      <li>Minimum : <code>ExtMinSessionQuality</code> (50.0)</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h4>📐 MTF Alignment</h4>
+    <p>Score d'alignement multi-timeframe (0-100) :</p>
+    <ul>
+      <li>H4 : Prix par rapport à EMA50</li>
+      <li>H1 : Pente EMA21</li>
+      <li>M15 : RSI(14) zone</li>
+      <li>Moyenne des 3 scores = mtfScore</li>
+    </ul>
+  </div>
+</div>
+
+<!-- ─── Master Score ────────────────────────────────── -->
+<h2>9. God Mode — Master Score (0-100)</h2>
+<p style="color:var(--dim);font-size:.88rem;margin-bottom:1rem;">
+  Fusionne <strong>8 composants pondérés</strong> en un score unique. Le trade est refusé si score &lt; <code>ExtMasterScoreMin</code> (85).
+  PERFECT bypass : si GOM=PERFECT, le master score peut être ignoré.
+</p>
+<table>
+  <thead><tr><th>Composant</th><th>Poids</th><th>Source</th><th>Score max</th></tr></thead>
+  <tbody>
+    <tr><td>1. Régime</td><td>20%</td><td><code>g_regimeScore</code> (MarketIntelligence)</td><td>100</td></tr>
+    <tr><td>2. Session</td><td>10%</td><td><code>SMC_GetSessionQuality()</code></td><td>100</td></tr>
+    <tr><td>3. MTF Alignment</td><td>20%</td><td>Moyenne H4+H1+M15</td><td>100</td></tr>
+    <tr><td>4. Propice Score</td><td>15%</td><td><code>SMC_ComputePropiceScore()</code></td><td>100</td></tr>
+    <tr><td>5. GOM Verdict</td><td>10%</td><td>PERFECT=100, GOOD=80, WAIT=0</td><td>100</td></tr>
+    <tr><td>6. IA Confidence</td><td>10%</td><td><code>g_lastAIConfidence</code> × 100</td><td>100</td></tr>
+    <tr><td>7. Probability Gate</td><td>10%</td><td><code>g_lastEntryProbability</code></td><td>100</td></tr>
+    <tr><td>8. Setup Quality</td><td>5%</td><td><code>ComputeSetupScore()</code></td><td>100</td></tr>
+  </tbody>
+</table>
+<p style="color:var(--dim);font-size:.82rem;margin-top:.5rem;">
+  Score total = &sum;(composant × poids) / poids_total. Seuil par défaut 85/100.
+  PERFECT GOM verdict abaisse le seuil de 20%.
+</p>
+
+<!-- ─── Paramètres clés ─────────────────────────────── -->
+<h2>10. Paramètres clés recommandés</h2>
+<table>
+  <thead><tr><th>Paramètre</th><th>Valeur</th><th>Rôle</th></tr></thead>
+  <tbody>
+    <tr><td><code>MaxPositionsTerminal</code></td><td>2</td><td>Max positions simultanées</td></tr>
+    <tr><td><code>SL_ATRMult</code></td><td>2.5</td><td>Stop Loss en multiple d'ATR</td></tr>
+    <tr><td><code>TP_ATRMult</code></td><td>5.0</td><td>Take Profit en multiple d'ATR</td></tr>
+    <tr><td><code>TrailingStop_ATRMult</code></td><td>3.0</td><td>Distance trailing stop</td></tr>
+    <tr><td><code>GOMMinPropiceScore</code></td><td>70</td><td>Score propice minimum</td></tr>
+    <tr><td><code>GOMMinCoherencePct</code></td><td>80</td><td>Cohérence GOM minimum (%)</td></tr>
+    <tr><td><code>PerfectRsiOBMax</code></td><td>88</td><td>RSI max pour PERFECT (surachat)</td></tr>
+    <tr><td><code>PerfectRsiOSMin</code></td><td>12</td><td>RSI min pour PERFECT (survente)</td></tr>
+    <tr><td><code>WinStreakThreshold</code></td><td>5</td><td>Nb gains avant pause</td></tr>
+    <tr><td><code>WinStreakPauseHours</code></td><td>2</td><td>Durée pause gains</td></tr>
+    <tr><td><code>ProfitGivebackPct</code></td><td>40</td><td>% drawdown max depuis pic (%)</td></tr>
+    <tr><td><code>MaxDailyDrawdown</code></td><td>5.0</td><td>Drawdown max journalier (%)</td></tr>
+    <tr><td><code>BoomCrashSpikeTP</code></td><td>$0.80</td><td>TP cible après spike</td></tr>
+    <tr><td><code>MaxLossDollars</code></td><td>$0.65</td><td>Perte max par position</td></tr>
+    <tr><td><code>GoldSL_ATRMult</code></td><td>2.2</td><td>SL Gold spécifique</td></tr>
+    <tr><td><code>ExtMasterScoreMin</code></td><td>85</td><td>Seuil master score God Mode</td></tr>
+    <tr><td><code>MinEntryProbabilityPct</code></td><td>72</td><td>Probabilité entrée minimum (%)</td></tr>
+    <tr><td><code>WARMUP_SECONDS</code></td><td>300</td><td>Temps warmup après démarrage</td></tr>
+  </tbody>
+</table>
+
+<!-- ─── Flux complet ────────────────────────────────── -->
+<h2>11. Flux complet : du tick à l'exécution</h2>
+<div class="flow">
+  <span>⚡ Tick entrant</span>
+  <span class="arrow">→</span>
+  <span>Throttle 2s</span>
+  <span class="arrow">→</span>
+  <span>Poll GOM<br><small>/gom-kola-dashboard</small></span>
+  <span class="arrow">→</span>
+  <span>Stale Guard<br><small>&gt;120s? → WAIT</small></span>
+  <span class="arrow">→</span>
+  <span>Pipeline poll<br><small>/pending-order</small></span>
+  <span class="arrow">→</span>
+  <span>DecisionEngine<br><small>24 gates</small></span>
+  <span class="arrow">→</span>
+  <span>SafeOrderSend<br><small>OrderSend + tracking</small></span>
+  <span class="arrow">→</span>
+  <span>SMC_RecordTradeClosePerformance<br><small>win/loss streak</small></span>
+  <span class="arrow">→</span>
+  <span>ExitManagement<br><small>partial close + thesis</small></span>
+  <span class="arrow">→</span>
+  <span>Dashboard + Graphics<br><small>15s</small></span>
+</div>
+
+<!-- ─── Variables Globales ──────────────────────────── -->
+<h2>12. Variables globales principales</h2>
+<div class="grid">
+  <div class="card">
+    <h4>🎯 GOM Pipeline</h4>
+    <ul>
+      <li><code>g_smcGomVerdict</code> — Verdict textuel</li>
+      <li><code>g_smcGomVerdictNum</code> — Force (-3 à +3)</li>
+      <li><code>g_smcGomQuality</code> — Qualité d'entrée</li>
+      <li><code>g_smcGomCoherence</code> — Cohérence (%)</li>
+      <li><code>g_smcGomConnected</code> — État connexion</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h4>🤖 IA</h4>
+    <ul>
+      <li><code>g_lastAIAction</code> — BUY/SELL/HOLD</li>
+      <li><code>g_lastAIConfidence</code> — 0.0-1.0</li>
+      <li><code>g_lastAIAlignment</code> — Alignement texte</li>
+      <li><code>g_lastAICoherence</code> — Cohérence texte</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h4>📐 TF / COG</h4>
+    <ul>
+      <li><code>g_smcTfM1Dir</code>…<code>g_smcTfD1Dir</code> — 6 TFs</li>
+      <li><code>g_cogDirection</code> — Cognition direction</li>
+      <li><code>g_cogStrength</code> — Force cognition</li>
+      <li><code>g_cogConfidence</code> — Confiance cognition</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h4>📊 Market Intelligence</h4>
+    <ul>
+      <li><code>g_marketRegime</code> — Régime actuel</li>
+      <li><code>g_regimeScore</code> — Score 0-100</li>
+      <li><code>g_groupPositionCount[]</code> — Positions/groupe</li>
+      <li><code>g_currentSessionQuality</code> — Qualité session</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h4>📈 Performance</h4>
+    <ul>
+      <li><code>g_consecutiveWins</code> — Gains consécutifs</li>
+      <li><code>g_consecutiveLosses</code> — Pertes consécutives</li>
+      <li><code>g_perfPauseUntil</code> — Pause win streak</li>
+      <li><code>g_lossPauseGlobalUntil</code> — Pause loss streak</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h4>🔧 Session Readiness</h4>
+    <ul>
+      <li><code>g_readinessScore</code> — Score readiness (0-100)</li>
+      <li><code>g_readinessCBActive</code> — Circuit-breaker actif</li>
+      <li><code>g_readinessAvoidHours</code> — Heures à éviter</li>
+      <li><code>g_readinessCBSymbolCool</code> — Cooldown symbole</li>
+    </ul>
+  </div>
+</div>
+
+<!-- ─── Notes ───────────────────────────────────────── -->
+<h2>13. Notes importantes</h2>
+<div class="grid">
+  <div class="card">
+    <h4>⚙ Compilation</h4>
+    <p>Pour compiler après modification du code source :</p>
+    <ul>
+      <li>Fermer MetaEditor</li>
+      <li>Effacer <code>%APPDATA%\MetaQuotes\Terminal\*\MQL5\Cache\*</code></li>
+      <li>Supprimer <code>SMC_Universal.ex5</code> du dossier Experts</li>
+      <li>Rouvrir MetaEditor et compiler (F7)</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h4>📁 Source structure</h4>
+    <ul>
+      <li><code>SMC_Universal.mq5</code> — EA principal (16 950 lignes)</li>
+      <li><code>modules/*.mqh</code> — 33 modules</li>
+      <li><code>ai_server.py</code> — Serveur IA Python</li>
+      <li>Syncer vers : <code>...\MQL5\Experts\</code> (pas TradBOT\ sous-dossier)</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h4>⚠ Contraintes</h4>
+    <ul>
+      <li>Max 2 positions simultanées terminal-wide</li>
+      <li>Gold utilise son propre partial TP (50% à 1.5R)</li>
+      <li>Post-spike cooldown : 60s + 2 petites bougies M1</li>
+      <li>Le cache MetaEditor peut causer des erreurs de compilation</li>
+      <li>Plusieurs terminal IDs existent ; utiliser celui de MetaEditor</li>
+    </ul>
+  </div>
+</div>
+
+<p style="text-align:center;color:var(--dim);font-size:.8rem;margin-top:3rem;padding-top:1rem;border-top:1px solid var(--border);">
+  Documentation générée le 26/06/2026 · TradBOT · SMC_Universal.mq5
+</p>
+
+</div>
+</body>
+</html>

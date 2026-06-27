@@ -70,6 +70,13 @@ load_dotenv(_root_dir / ".env")
 load_dotenv(_root_dir / ".env.local")  # Override via local config
 load_dotenv()
 
+# === EARLY LOGGER INIT (before optional imports that log) ===
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger("tradbot_ai")
+
 # Import spike anticipation
 try:
     from spike_anticipation import SpikeAnticipator
@@ -79,12 +86,19 @@ except ImportError:
     _spike_anticipator = None
     SPIKE_ANTICIPATION_AVAILABLE = False
 
-# === EARLY LOGGER INIT ===
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger("tradbot_ai")
+# Import Ollama client pour modèles locaux
+try:
+    from ollama_client import init_ollama_client, get_ollama_client, OLLAMA_AVAILABLE
+    _ollama_client = init_ollama_client()
+    logger.info("Ollama client initialise - Available: %s", OLLAMA_AVAILABLE)
+except ImportError:
+    _ollama_client = None
+    OLLAMA_AVAILABLE = False
+    logger.info("Ollama client non disponible (module absent)")
+except Exception as exc:
+    _ollama_client = None
+    OLLAMA_AVAILABLE = False
+    logger.warning("Ollama non connecte (serveur demarre sans Ollama): %s", exc)
 
 # Import GOM Live Calculator + Verdict Calculator v2
 try:
@@ -2981,6 +2995,7 @@ AI_ENABLE_TRADINGAGENTS_AUTO_LOOP = _env_bool("AI_ENABLE_TRADINGAGENTS_AUTO_LOOP
 AI_TRADINGAGENTS_ALLOW_HTTP_RUNS = _env_bool("AI_TRADINGAGENTS_ALLOW_HTTP_RUNS", default=False)
 AI_TRADINGAGENTS_MANUAL_TTL_SEC = max(60, int(os.getenv("AI_TRADINGAGENTS_MANUAL_TTL_SEC", "1800")))
 AI_TRADINGAGENTS_INTERVAL_SEC = max(60, int(os.getenv("AI_TRADINGAGENTS_INTERVAL_SEC", "300")))
+AI_TRADINGAGENTS_RUN_TIMEOUT = float(os.getenv("AI_TRADINGAGENTS_RUN_TIMEOUT", "300"))
 AI_TRADINGAGENTS_REPO_PATH = (
     os.getenv("AI_TRADINGAGENTS_REPO_PATH")
     or r"D:\Dev\Depot Github\TradingAgents-main"
@@ -3301,9 +3316,14 @@ async def _run_tradingagents_once(symbol: str) -> Dict[str, Any]:
         "ran_at": datetime.now(timezone.utc).isoformat(),
     }
 
+    _TA_CALL_TIMEOUT = 100.0  # secondes par appel LLM TradingAgents
+
     try:
         cfg = _tradingagents_build_cfg_from_base(ta_default_config)
-        normalized = await asyncio.to_thread(_sync_propagate, cfg)
+        normalized = await asyncio.wait_for(
+            asyncio.to_thread(_sync_propagate, cfg),
+            timeout=_TA_CALL_TIMEOUT,
+        )
         latency_ms = (time.time() - started_at) * 1000.0
         return {
             **base_result,
@@ -3312,6 +3332,9 @@ async def _run_tradingagents_once(symbol: str) -> Dict[str, Any]:
             "latency_ms": latency_ms,
             **normalized,
         }
+    except asyncio.TimeoutError:
+        err_s = f"TradingAgents timeout ({_TA_CALL_TIMEOUT}s)"
+        logger.warning("TradingAgents bridge error for %s: %s", symbol, err_s)
     except Exception as e:
         err_s = str(e)
         cred_missing = "Missing credentials" in err_s or (
@@ -3335,7 +3358,10 @@ async def _run_tradingagents_once(symbol: str) -> Dict[str, Any]:
         if use_fb and oa_key and (quota_like or _env_bool("AI_TRADINGAGENTS_FALLBACK_OPENAI_FORCE", False)):
             try:
                 cfg_fb = _tradingagents_build_cfg_openai_fallback(ta_default_config)
-                normalized_fb = await asyncio.to_thread(_sync_propagate, cfg_fb)
+                normalized_fb = await asyncio.wait_for(
+                    asyncio.to_thread(_sync_propagate, cfg_fb),
+                    timeout=_TA_CALL_TIMEOUT,
+                )
                 latency_ms = (time.time() - started_at) * 1000.0
                 logger.info(
                     "TradingAgents OpenAI fallback OK %s -> %s (%.0fms)",
@@ -3364,7 +3390,10 @@ async def _run_tradingagents_once(symbol: str) -> Dict[str, Any]:
         ):
             try:
                 cfg_nim = _tradingagents_build_cfg_nvidia_nim_fallback(ta_default_config)
-                normalized_nim = await asyncio.to_thread(_sync_propagate, cfg_nim)
+                normalized_nim = await asyncio.wait_for(
+                    asyncio.to_thread(_sync_propagate, cfg_nim),
+                    timeout=_TA_CALL_TIMEOUT,
+                )
                 latency_ms = (time.time() - started_at) * 1000.0
                 logger.info(
                     "TradingAgents NVIDIA NIM fallback OK %s -> %s (%.0fms)",
@@ -3428,7 +3457,15 @@ async def _tradingagents_realtime_loop() -> None:
 
             symbol = symbols[_tradingagents_cursor % len(symbols)]
             _tradingagents_cursor += 1
-            result = await _run_tradingagents_once(symbol)
+            try:
+                result = await asyncio.wait_for(
+                _run_tradingagents_once(symbol),
+                timeout=AI_TRADINGAGENTS_RUN_TIMEOUT,
+            )
+            except asyncio.TimeoutError:
+                logger.warning("TradingAgents timeout (%.0fs) for %s - skipping", AI_TRADINGAGENTS_RUN_TIMEOUT, symbol)
+                await asyncio.sleep(AI_TRADINGAGENTS_INTERVAL_SEC)
+                continue
             async with _tradingagents_lock:
                 _tradingagents_results[symbol] = result
                 _tradingagents_last_error = None
@@ -4815,6 +4852,78 @@ def _load_gom_cache_from_disk():
     except Exception as e:
         logger.error(f"[GOM-Cache] Erreur chargement: {e}", exc_info=True)
 
+_MT5_TERMINALS = [
+    r"D:\Program Files\MetaTrader 5\terminal64.exe",         # Deriv E6E3
+    r"D:\Program Files\MetaTrader 5 - Copie\terminal64.exe", # Weltrade F016
+]
+_MT5_IMPORT_INTERVAL_SEC = int(os.getenv("MT5_IMPORT_INTERVAL_SEC", "600"))  # 10 min
+_mt5_import_loop_task = None
+
+
+# Chargement unique du module import_mt5_history — évite exec_module à chaque appel
+_import_from_mt5_fn = None
+
+def _load_mt5_import_fn():
+    global _import_from_mt5_fn
+    if _import_from_mt5_fn is not None:
+        return _import_from_mt5_fn
+    import os as _os, importlib.util as _ilu
+    _path = _os.path.join(_os.path.dirname(__file__), "Python", "import_mt5_history.py")
+    try:
+        _spec = _ilu.spec_from_file_location("import_mt5_history", _path)
+        _mod  = _ilu.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)
+        _import_from_mt5_fn = _mod.import_from_mt5
+    except Exception as _e:
+        logger.warning("MT5 import module not loadable: %s", _e)
+    return _import_from_mt5_fn
+
+
+def _run_mt5_history_import():
+    """Import MT5 trade history into trades.db (nouveaux trades seulement, skip doublons)."""
+    import os as _os
+    import_from_mt5 = _load_mt5_import_fn()
+    if import_from_mt5 is None:
+        return 0
+    total = 0
+    for _tp in _MT5_TERMINALS:
+        if not _os.path.exists(_tp):
+            continue
+        try:
+            n = import_from_mt5(terminal_path=_tp)
+            total += n
+        except Exception as _e:
+            logger.debug("MT5 import from %s: %s", _tp, _e)
+    if total > 0:
+        logger.info("MT5 history import: +%d new trades in trades.db", total)
+        try:
+            _readiness_cache.clear()
+            _readiness_cache_ts.clear()
+            logger.info("Readiness cache invalidé (%d nouveaux trades)", total)
+        except Exception:
+            pass
+    return total
+
+
+async def _mt5_import_background_loop():
+    """Boucle asynchrone : importe les nouveaux trades MT5 toutes les 10 min."""
+    import asyncio as _asyncio
+    await _asyncio.sleep(30)  # laisser le serveur démarrer
+    while True:
+        try:
+            loop = _asyncio.get_event_loop()
+            # Timeout 90s — 2 terminaux × (15s init + 20s deals_get) avec marge
+            await _asyncio.wait_for(
+                loop.run_in_executor(None, _run_mt5_history_import),
+                timeout=90.0
+            )
+        except _asyncio.TimeoutError:
+            logger.warning("MT5 import timeout (>90s) — ignoré, prochaine tentative dans %ds", _MT5_IMPORT_INTERVAL_SEC)
+        except Exception as _e:
+            logger.debug("MT5 import loop error: %s", _e)
+        await _asyncio.sleep(_MT5_IMPORT_INTERVAL_SEC)
+
+
 @app.on_event("startup")
 async def startup_event():
     """Initialize database on startup"""
@@ -4822,6 +4931,15 @@ async def startup_event():
 
     # Charger le cache GOM depuis le fichier
     _load_gom_cache_from_disk()
+
+    # Import MT5 trade history + boucle 10 min pour mise à jour continue des best_hours
+    global _mt5_import_loop_task
+    try:
+        import asyncio as _asyncio
+        _mt5_import_loop_task = _asyncio.create_task(_mt5_import_background_loop())
+        logger.info("Boucle import MT5 demarree (intervalle %ds)", _MT5_IMPORT_INTERVAL_SEC)
+    except Exception as _imp_err:
+        logger.warning("MT5 history import loop skipped: %s", _imp_err)
 
     # Démarrer les 6 agents d'intelligence (boucles de fond seulement — router déjà enregistré)
     try:
@@ -11455,6 +11573,11 @@ async def trend_health():
 @app.get("/status")
 async def status():
     """Statut détaillé du serveur"""
+    ollama_info = {"available": OLLAMA_AVAILABLE}
+    if OLLAMA_AVAILABLE and _ollama_client:
+        ollama_info["models"] = _ollama_client.get_models()
+        ollama_info["default_model"] = _ollama_client.config.default_model
+    
     return {
         "status": "running",
         "timestamp": datetime.now().isoformat(),
@@ -11468,6 +11591,7 @@ async def status():
         "gemini": {
             "available": GEMINI_AVAILABLE
         },
+        "ollama": ollama_info,
         "backend": {
             "available": BACKEND_AVAILABLE,
             "ml_predictor": ml_predictor is not None,
@@ -24035,6 +24159,40 @@ def _build_gom_mt5_payload(record: dict) -> dict:
         _enrich_cognition_forecast(out, str(sym), str(record.get("chart_tf") or "M1"))
         out["entry_probability"] = round(_compute_entry_probability(out), 1)
 
+    # ── Inversion GainX / PainX (Weltrade) ────────────────────────────────────
+    # GainX = BUY only: le prix MONTE par spikes baissiers sur le graphique.
+    # Le GOM calcule score_sell > score_buy → PERFECT SELL (vn=-3), mais c'est
+    # en réalité un signal d'entrée BUY sur GainX → on inverse le signe.
+    # PainX = SELL only: inverse symétrique (score_buy > score_sell → inverser en SELL).
+    if sym:
+        s_up = str(sym).upper()
+        vn = out.get("verdict_num", 0)
+        if vn and vn != 0:
+            is_gainx = "GAINX" in s_up
+            is_painx = "PAINX" in s_up
+            if is_gainx or is_painx:
+                out["verdict_num"] = -int(vn)
+                # Rebuild verdict string from inverted vn
+                inv = out["verdict_num"]
+                if inv == 3:
+                    out["verdict"] = "PERFECT BUY"
+                elif inv == 2:
+                    out["verdict"] = "GOOD BUY"
+                elif inv == 1:
+                    out["verdict"] = "BUY"
+                elif inv == -3:
+                    out["verdict"] = "PERFECT SELL"
+                elif inv == -2:
+                    out["verdict"] = "GOOD SELL"
+                elif inv == -1:
+                    out["verdict"] = "SELL"
+                else:
+                    out["verdict"] = "WAIT"
+                logger.debug(
+                    "[GOM-INVERT] %s: vn %s→%s (%s)",
+                    sym, vn, out["verdict_num"], out["verdict"],
+                )
+
     return out
 
 
@@ -26373,11 +26531,17 @@ _READINESS_TTL_SEC = 300
 
 
 def _get_readiness_cached(symbol: str, hour_utc: int, gom_str: int = 0, atr_ratio: float = 1.0) -> dict:
-    key = f'{symbol}_{hour_utc}'
+    # Normaliser le symbole vers le nom DB (ex: "Crash 500" -> "Crash 500 Index")
+    try:
+        from symbol_mapper import resolve_mt5_symbol
+        db_symbol = resolve_mt5_symbol(symbol) or symbol
+    except Exception:
+        db_symbol = symbol
+    key = f'{db_symbol}_{hour_utc}'
     now_ts = time.time()
     if key in _readiness_cache and (now_ts - _readiness_cache_ts.get(key, 0)) < _READINESS_TTL_SEC:
         return _readiness_cache[key]
-    result = compute_daily_readiness(symbol, hour_utc, gom_str, atr_ratio)
+    result = compute_daily_readiness(db_symbol, hour_utc, gom_str, atr_ratio)
     _readiness_cache[key] = result
     _readiness_cache_ts[key] = now_ts
     return result

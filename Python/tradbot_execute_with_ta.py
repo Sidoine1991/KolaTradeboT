@@ -142,12 +142,18 @@ def load_gom_verdicts() -> List[Dict]:
 
 # Fenêtres de trading UTC — hors fenêtre = verdict ignoré même si GOM actif.
 # Boom/Crash : pas de restriction locale (bc_heure gate gérée par ai_server /pending-order).
+# Weltrade synthetics (PainX/GainX/FX Vol) : analysé sur logs 2026-06-18/20 (~6000 polls)
+#   → zone active 00h-16h UTC (46-97% signal), zone morte 17h-23h UTC (14-30% signal)
 _TRADING_WINDOWS: dict = {
     "XAUUSD": [(7, 17)],
     "BTCUSD": [(8, 22)],
     "ETHUSD": [(8, 22)],
     "NAS100": [(13, 20)],
     "US30":   [(13, 20)],
+    # Weltrade synthetics — actifs 04h-16h UTC (00h-03h choppy/instable)
+    "PAINX":  [(4, 16)],
+    "GAINX":  [(4, 16)],
+    "FXVOL":  [(4, 16)],
 }
 
 

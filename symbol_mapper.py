@@ -81,6 +81,50 @@ SYMBOL_MAPPINGS: Dict[str, Dict[str, str]] = {
         "url": "Crash%201000%20Index",
         "category": "boom_crash",
     },
+    # Weltrade equivalents (PAINX = Boom, GAINX = Crash)
+    "PAINX": {
+        "mt5": "PAINX",
+        "tradingview": "PAINX",
+        "api": "PAINX",
+        "url": "PAINX",
+        "category": "boom_crash",
+        "equivalent": "Boom (Weltrade)",
+        "direction": "buy_only",
+    },
+    "GAINX": {
+        "mt5": "GAINX",
+        "tradingview": "GAINX",
+        "api": "GAINX",
+        "url": "GAINX",
+        "category": "boom_crash",
+        "equivalent": "Crash (Weltrade)",
+        "direction": "sell_only",
+    },
+    # Deriv Volatility equivalents (FXVOL, SFVVOL)
+    "FXVOL": {
+        "mt5": "FXVOL",
+        "tradingview": "FXVOL",
+        "api": "FXVOL",
+        "url": "FXVOL",
+        "category": "volatility",
+        "equivalent": "Volatility (Deriv FX)",
+    },
+    "SFVVOL": {
+        "mt5": "SFVVOL",
+        "tradingview": "SFVVOL",
+        "api": "SFVVOL",
+        "url": "SFVVOL",
+        "category": "volatility",
+        "equivalent": "Volatility (Deriv Stocks)",
+    },
+    "SFXVOL": {
+        "mt5": "SFXVOL",
+        "tradingview": "SFXVOL",
+        "api": "SFXVOL",
+        "url": "SFXVOL",
+        "category": "volatility",
+        "equivalent": "Volatility (Weltrade SFX)",
+    },
     # Forex & métaux
     "XAUUSD": {
         "mt5": "XAUUSD",
@@ -186,19 +230,47 @@ def normalize_for_api(symbol: str) -> str:
     return symbol.replace(" ", "")
 
 
+def is_weltrade_symbol(symbol: str) -> bool:
+    """Symbole Weltrade (PainX/GainX/FX Vol…) — nécessite terminal MT5 Weltrade."""
+    if not symbol:
+        return False
+    s = symbol.upper().replace(" ", "")
+    if "PAINX" in s or "GAINX" in s:
+        return True
+    if re.search(r"(FX|SFV|SFX)?VOL", symbol, re.I):
+        return True
+    return s in ("PAINX", "GAINX", "FXVOL", "SFVVOL", "SFXVOL")
+
+
 def is_boom_crash(symbol: str) -> bool:
-    """Vérifie si c'est un symbole Boom/Crash"""
-    return "Boom" in symbol or "Crash" in symbol
+    """Vérifie si c'est un symbole Boom/Crash (y compris équivalents Weltrade/Deriv)"""
+    s = symbol.upper().replace(" ", "")
+    return (
+        "Boom" in symbol or "Crash" in symbol
+        or "PAINX" in s or "GAINX" in s
+    )
 
 
 def is_boom(symbol: str) -> bool:
-    """Vérifie si c'est un Boom (BUY seulement)"""
-    return "Boom" in symbol
+    """Vérifie si c'est un Boom (BUY seulement) - inclut PainX"""
+    s = symbol.upper().replace(" ", "")
+    return "Boom" in symbol or "PAINX" in s
 
 
 def is_crash(symbol: str) -> bool:
-    """Vérifie si c'est un Crash (SELL seulement)"""
-    return "Crash" in symbol
+    """Vérifie si c'est un Crash (SELL seulement) - inclut GainX"""
+    s = symbol.upper().replace(" ", "")
+    return "Crash" in symbol or "GAINX" in s
+
+
+def is_volatility(symbol: str) -> bool:
+    """Vérifie si c'est un symbole Volatility (FX Vol, SFVVOL, etc)"""
+    s = symbol.upper().replace(" ", "")
+    return (
+        "Volatility" in symbol
+        or s in ("FXVOL", "SFVVOL", "SFXVOL")
+        or bool(re.search(r"(FX|SFV|SFX)?VOL\d+", s))
+    )
 
 
 def get_symbol_category(symbol: str) -> Optional[str]:
@@ -211,6 +283,127 @@ def get_all_boom_crash_symbols() -> list[str]:
     """Retourne liste de tous symboles Boom/Crash"""
     return [sym for sym, map_data in SYMBOL_MAPPINGS.items()
             if map_data["category"] == "boom_crash"]
+
+
+def get_equivalent_symbol(symbol: str, target_broker: str = "deriv") -> str:
+    """
+    Convertit un symbole vers son équivalent sur une autre broker.
+
+    Args:
+        symbol: Symbole source (ex: "Boom 500 Index", "PAINX", "FXVOL")
+        target_broker: Broker cible ("deriv", "weltrade", "xt", etc)
+
+    Returns:
+        Symbole équivalent sur la broker cible
+
+    Examples:
+        >>> get_equivalent_symbol("Boom 500 Index", "weltrade")
+        "PAINX"
+        >>> get_equivalent_symbol("PAINX", "deriv")
+        "Boom 500 Index"
+        >>> get_equivalent_symbol("Volatility 75 Index", "deriv")
+        "FXVOL"
+    """
+    s = symbol.upper()
+
+    # Déterminer la catégorie
+    if is_boom(symbol):
+        if target_broker.lower() == "weltrade":
+            return "PAINX"
+        elif target_broker.lower() == "deriv":
+            # Chercher Boom équivalent
+            for num in [300, 500, 600, 900, 1000]:
+                if str(num) in symbol:
+                    return f"Boom {num} Index"
+            return "Boom 500 Index"
+
+    elif is_crash(symbol):
+        if target_broker.lower() == "weltrade":
+            return "GAINX"
+        elif target_broker.lower() == "deriv":
+            # Chercher Crash équivalent
+            for num in [300, 500, 600, 900, 1000]:
+                if str(num) in symbol:
+                    return f"Crash {num} Index"
+            return "Crash 500 Index"
+
+    elif is_volatility(symbol):
+        if target_broker.lower() == "weltrade":
+            return "FXVOL"  # ou "SFVVOL" selon le type
+        elif target_broker.lower() == "deriv":
+            return "Volatility 75 Index"
+
+    # Pas de conversion nécessaire
+    return symbol
+
+
+def get_broker_from_symbol(symbol: str) -> str:
+    """Détecte la broker à partir du symbole"""
+    if is_weltrade_symbol(symbol):
+        return "weltrade"
+    if any(x in symbol for x in ["Boom", "Crash", "Volatility"]) and "Index" in symbol:
+        return "deriv"
+    s = symbol.upper()
+    if s in ("XAUUSD", "EURUSD", "GBPUSD"):
+        return "forex"
+    return "unknown"
+
+
+def _format_weltrade_painx(num: str) -> str:
+    return f"PainX {num}" if num else "PainX"
+
+
+def _format_weltrade_gainx(num: str) -> str:
+    return f"GainX {num}" if num else "GainX"
+
+
+def _format_weltrade_fxvol(num: str, prefix: str = "FX") -> str:
+    return f"{prefix} Vol {num}" if num else f"{prefix} Vol"
+
+
+def _register_weltrade_variants() -> None:
+    """Enregistre les variantes Weltrade réelles (PainX 600, GainX 1200, FX Vol 20…)."""
+    for num in ("400", "600", "800", "1200"):
+        painx = _format_weltrade_painx(num)
+        if painx not in SYMBOL_MAPPINGS:
+            SYMBOL_MAPPINGS[painx] = {
+                "mt5": painx,
+                "tradingview": painx,
+                "api": painx.replace(" ", ""),
+                "url": painx.replace(" ", "%20"),
+                "category": "boom_crash",
+                "equivalent": "Boom (Weltrade)",
+                "direction": "buy_only",
+                "broker": "weltrade",
+            }
+        gainx = _format_weltrade_gainx(num)
+        if gainx not in SYMBOL_MAPPINGS:
+            SYMBOL_MAPPINGS[gainx] = {
+                "mt5": gainx,
+                "tradingview": gainx,
+                "api": gainx.replace(" ", ""),
+                "url": gainx.replace(" ", "%20"),
+                "category": "boom_crash",
+                "equivalent": "Crash (Weltrade)",
+                "direction": "sell_only",
+                "broker": "weltrade",
+            }
+    for num in ("20", "40", "60", "75"):
+        for label, prefix in (("FX Vol", "FX"), ("SFV Vol", "SFV")):
+            vol = f"{label} {num}"
+            if vol not in SYMBOL_MAPPINGS:
+                SYMBOL_MAPPINGS[vol] = {
+                    "mt5": vol,
+                    "tradingview": vol,
+                    "api": vol.replace(" ", ""),
+                    "url": vol.replace(" ", "%20"),
+                    "category": "volatility",
+                    "equivalent": "Volatility (Weltrade)",
+                    "broker": "weltrade",
+                }
+
+
+_register_weltrade_variants()
 
 
 def resolve_mt5_symbol(raw: str) -> str:
@@ -255,6 +448,22 @@ def resolve_mt5_symbol(raw: str) -> str:
         candidate = f"{m2.group(1).title()} {m2.group(2)} Index"
         if get_symbol_mapping(candidate):
             return candidate
+
+    # Weltrade PainX / GainX (PainX 600, PAINX600, PainX600)
+    m_pain = re.match(r"^PAINX(\d+)?$", compact)
+    if m_pain:
+        return _format_weltrade_painx(m_pain.group(1) or "")
+
+    m_gain = re.match(r"^GAINX(\d+)?$", compact)
+    if m_gain:
+        return _format_weltrade_gainx(m_gain.group(1) or "")
+
+    # Weltrade FX Vol / SFV Vol (FX Vol 20, FXVOL20)
+    m_fx = re.match(r"^(FX|SFV|SFX)?VOL(\d+)?$", compact)
+    if m_fx:
+        prefix_raw = (m_fx.group(1) or "FX").upper()
+        prefix = "SFV" if prefix_raw in ("SFV", "SFX") else "FX"
+        return _format_weltrade_fxvol(m_fx.group(2) or "20", prefix)
 
     return s
 

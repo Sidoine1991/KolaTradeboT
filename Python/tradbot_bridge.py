@@ -3544,6 +3544,8 @@ Exemples:
                         help="Pas d'envoi WhatsApp unifie")
     parser.add_argument("--followup", action="store_true",
                         help="Lance le monitor de suivi 10 min en arriere-plan apres envoi")
+    parser.add_argument("--output-json", action="store_true",
+                        help="Emettre une ligne JSON sur stdout a la fin (pour agent_trading_agents)")
     args = parser.parse_args()
 
     # Valider les analystes (noms exacts TradingAgents)
@@ -3762,6 +3764,31 @@ Exemples:
     print(f"  Status  : GET {_SERVER_URL}/tradingagents/realtime/status")
     print(f"  Ordres  : GET {_SERVER_URL}/pending-order")
     print(f"  Rapports: {_REPORTS_DIR}\n")
+
+    # --output-json : emit a compact JSON result for agent_trading_agents.py
+    if args.output_json:
+        import json as _json
+        _out = {
+            "symbol":          symbol,
+            "data_ticker":     result.get("data_ticker", symbol),
+            "signal_rating":   signal_rating,
+            "direction":       rec,
+            "confidence":      float(confirmed.get("confidence") or 0.60) if confirmed else 0.60,
+            "entry_price":     (computed_signals[0].get("entry_price") if computed_signals
+                                else params.get("entry_price")),
+            "stop_loss":       (computed_signals[0].get("stop_loss") if computed_signals
+                                else params.get("stop_loss")),
+            "take_profit":     (computed_signals[0].get("take_profit") if computed_signals
+                                else params.get("take_profit")),
+            "expert_analysis": expert_analysis[:1000] if expert_analysis else "",
+            "market_report":   str(final_state.get("market_report") or "")[:600],
+            "trade_decision":  str(final_state.get("final_trade_decision") or "")[:600],
+            "indicators":      result.get("indicators") or {},
+            "final_state":     {k: str(v)[:400] for k, v in final_state.items()
+                                if k in ("market_report", "final_trade_decision",
+                                         "trader_investment_plan", "risk_assessment")},
+        }
+        print(_json.dumps(_out))
 
 
 if __name__ == "__main__":

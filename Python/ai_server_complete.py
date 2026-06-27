@@ -761,31 +761,36 @@ def enforce_ea_boom_crash_direction(symbol: str, action: str, confidence: float,
             return "hold", min(float(confidence), 0.55), reason + "[Crash: BUY incompatible EA → HOLD] "
         if "boom" in s and a == "sell":
             return "hold", min(float(confidence), 0.55), reason + "[Boom: SELL incompatible EA → HOLD] "
-    try:
-        from backend.weltrade_symbols import is_weltrade_pain_synth, is_weltrade_gain_synth
-    except ImportError:
-        from weltrade_symbols import is_weltrade_pain_synth, is_weltrade_gain_synth
-    if is_weltrade_pain_synth(str(symbol)) and a == "buy":
-        return "hold", min(float(confidence), 0.55), reason + "[PainX: BUY incompatible EA → HOLD] "
-    if is_weltrade_gain_synth(str(symbol)) and a == "sell":
-        return "hold", min(float(confidence), 0.55), reason + "[GainX: SELL incompatible EA → HOLD] "
+    # PainX = équivalent Boom → BUY seulement (SELL interdit)
+    if is_weltrade_pain_synth(str(symbol)) and a == "sell":
+        return "hold", min(float(confidence), 0.55), reason + "[PainX: SELL incompatible EA → HOLD] "
+    # GainX = équivalent Crash → SELL seulement (BUY interdit)
+    if is_weltrade_gain_synth(str(symbol)) and a == "buy":
+        return "hold", min(float(confidence), 0.55), reason + "[GainX: BUY incompatible EA → HOLD] "
     return action, confidence, reason
 
 
+def is_weltrade_pain_synth(symbol: str) -> bool:
+    """PainX = équivalent Boom Weltrade → BUY seulement."""
+    return "painx" in str(symbol).lower()
+
+def is_weltrade_gain_synth(symbol: str) -> bool:
+    """GainX = équivalent Crash Weltrade → SELL seulement."""
+    return "gainx" in str(symbol).lower()
+
 def synth_stair_direction_for_symbol(symbol: str) -> Optional[str]:
-    """Direction trade autorisée pour indices escalier (Boom/GainX → BUY, Crash/PainX → SELL)."""
+    """Direction trade autorisée pour indices escalier.
+    Boom/PainX → BUY seulement | Crash/GainX → SELL seulement."""
     s = str(symbol).lower()
     if "boom" in s:
         return "BUY"
     if "crash" in s:
         return "SELL"
-    try:
-        from backend.weltrade_symbols import is_weltrade_pain_synth, is_weltrade_gain_synth
-    except ImportError:
-        from weltrade_symbols import is_weltrade_pain_synth, is_weltrade_gain_synth
-    if is_weltrade_gain_synth(str(symbol)):
-        return "BUY"
+    # PainX = équivalent Boom → BUY seulement
     if is_weltrade_pain_synth(str(symbol)):
+        return "BUY"
+    # GainX = équivalent Crash → SELL seulement
+    if is_weltrade_gain_synth(str(symbol)):
         return "SELL"
     return None
 
@@ -793,10 +798,6 @@ def synth_stair_direction_for_symbol(symbol: str) -> Optional[str]:
 def _stair_category_for_symbol(symbol: str) -> str:
     if is_boom_crash_symbol(str(symbol)):
         return "boomcrash"
-    try:
-        from backend.weltrade_symbols import is_weltrade_pain_synth, is_weltrade_gain_synth
-    except ImportError:
-        from weltrade_symbols import is_weltrade_pain_synth, is_weltrade_gain_synth
     if is_weltrade_pain_synth(str(symbol)) or is_weltrade_gain_synth(str(symbol)):
         return "weltrade_synth"
     return "other"
@@ -1191,13 +1192,11 @@ def detect_spike_pattern(df: pd.DataFrame, symbol: str) -> Dict[str, Any]:
         elif is_crash and spike_direction == "BUY":
             has_spike = False  # Pas de BUY sur Crash
         else:
-            try:
-                from backend.weltrade_symbols import is_weltrade_pain_synth, is_weltrade_gain_synth
-            except ImportError:
-                from weltrade_symbols import is_weltrade_pain_synth, is_weltrade_gain_synth
-            if is_weltrade_gain_synth(symbol) and spike_direction == "SELL":
+            # PainX = Boom → spike BUY valide, SELL invalide
+            # GainX = Crash → spike SELL valide, BUY invalide
+            if is_weltrade_pain_synth(symbol) and spike_direction == "SELL":
                 has_spike = False
-            elif is_weltrade_pain_synth(symbol) and spike_direction == "BUY":
+            elif is_weltrade_gain_synth(symbol) and spike_direction == "BUY":
                 has_spike = False
     
     # Calculer la confiance du spike

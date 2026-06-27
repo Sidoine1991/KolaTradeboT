@@ -16,6 +16,9 @@ extern int    g_smcBcHourUtc;
 extern double g_smcBcConfidence;
 extern bool   g_smcBcTradeable;
 
+bool GOM_EntryAlignmentOK(const int dirSign);
+bool SMC_IsSyntheticAutonomousSym(const string symbol);
+
 double g_lastEntryProbability = 0.0;
 
 bool SMCGP_IsBoomCrashSym(const string sym);
@@ -109,7 +112,31 @@ bool SMC_HighProbabilityAllowsEntry(const int dirSign = 0)
    if(dirSign < 0 && g_smcGomVerdictNum > -MinGOMVerdictNumAbs)
       return false;
 
-   if(SMCGP_IsBoomCrashSym(_Symbol) && g_smcBcHourUtc >= 0)
+   // Synthétiques : GOM GOOD/PERFECT + IA + COG alignés → prob-gate assoupli
+   if(SMC_IsSyntheticAutonomousSym(_Symbol) && MathAbs(g_smcGomVerdictNum) >= 2
+      && GOM_EntryAlignmentOK(dirSign))
+      return true;
+
+   // Weltrade PainX/GainX : fenêtre UTC propre (04-16h), pas bc_heure Deriv
+   string symUp = _Symbol;
+   StringToUpper(symUp);
+   bool isWtBoomCrash = (StringFind(symUp, "PAINX") >= 0 || StringFind(symUp, "GAINX") >= 0);
+   if(isWtBoomCrash)
+   {
+      MqlDateTime utcWt;
+      TimeGMT(utcWt);
+      if(utcWt.hour < 4 || utcWt.hour >= 16)
+      {
+         static datetime s_wtLog = 0;
+         if(TimeCurrent() - s_wtLog >= 60)
+         {
+            s_wtLog = TimeCurrent();
+            Print("[PROB-GATE] BLOQUE Weltrade — hors fenêtre 04h-16h UTC (actuel ", utcWt.hour, "h)");
+         }
+         return false;
+      }
+   }
+   else if(SMCGP_IsBoomCrashSym(_Symbol) && g_smcBcHourUtc >= 0)
    {
       if(!g_smcBcTradeable || g_smcBcConfidence < HighProbBcMinConfidence)
       {
@@ -126,6 +153,13 @@ bool SMC_HighProbabilityAllowsEntry(const int dirSign = 0)
 
    if(g_cogStrength < CognitionMinStrength || g_cogConfidence < CognitionMinConfidence)
    {
+      // Weltrade/synthétiques : COG dashboard parfois en échelle basse — seuil assoupli si GOM aligné
+      if(SMC_IsSyntheticAutonomousSym(_Symbol) && MathAbs(g_smcGomVerdictNum) >= 2
+         && GOM_EntryAlignmentOK(dirSign)
+         && g_cogStrength >= 0.30 && g_cogConfidence >= 0.30)
+      { /* pass */ }
+      else
+      {
       static datetime s_cogLog = 0;
       if(TimeCurrent() - s_cogLog >= 60)
       {
@@ -134,6 +168,7 @@ bool SMC_HighProbabilityAllowsEntry(const int dirSign = 0)
                " conf=", DoubleToString(g_cogConfidence, 2));
       }
       return false;
+      }
    }
 
    if(dirSign != 0 && g_cogDirection != "NEUTRAL")

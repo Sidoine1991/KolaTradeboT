@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GOM Override Live Monitor</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Courier New', monospace;
+            background: #0a0e27;
+            color: #00ff88;
+            padding: 20px;
+        }
+        .container { max-width: 1400px; margin: 0 auto; }
+        .header {
+            text-align: center;
+            margin-bottom: 30px;
+            border-bottom: 2px solid #00ff88;
+            padding-bottom: 20px;
+        }
+        .header h1 { font-size: 2em; color: #ffd700; margin-bottom: 10px; }
+        .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(600px, 1fr)); gap: 20px; margin-bottom: 30px; }
+        .card {
+            background: rgba(255, 255, 255, 0.03);
+            border: 2px solid #00ff88;
+            border-radius: 8px;
+            padding: 20px;
+            box-shadow: 0 0 20px rgba(0, 255, 136, 0.1);
+        }
+        .card-title { font-size: 1.2em; color: #ffd700; margin-bottom: 15px; }
+        .symbol-row {
+            background: rgba(0, 0, 0, 0.3);
+            padding: 12px;
+            margin: 8px 0;
+            border-radius: 4px;
+            border-left: 3px solid #00ff88;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .symbol-name { font-weight: bold; color: #ffd700; min-width: 150px; }
+        .signal-badge {
+            display: inline-block;
+            padding: 5px 10px;
+            border-radius: 3px;
+            font-size: 0.85em;
+            margin: 0 5px;
+        }
+        .badge-buy { background: rgba(0, 255, 136, 0.2); color: #00ff88; }
+        .badge-sell { background: rgba(255, 100, 100, 0.2); color: #ff6464; }
+        .badge-hold { background: rgba(255, 165, 0, 0.2); color: #ffa500; }
+        .badge-perfect { background: rgba(0, 200, 200, 0.3); border: 1px solid #00ffff; color: #00ffff; font-weight: bold; }
+        .badge-good { background: rgba(0, 200, 0, 0.2); color: #00ff88; }
+        .badge-wait { background: rgba(150, 100, 0, 0.2); color: #ffcc00; }
+        .status-ready { color: #00ff88; }
+        .status-blocked { color: #ff6464; }
+        .status-pending { color: #ffcc00; }
+        .logs {
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid #555;
+            padding: 15px;
+            border-radius: 8px;
+            max-height: 400px;
+            overflow-y: auto;
+            font-size: 0.9em;
+        }
+        .log-line { padding: 3px 0; border-bottom: 1px solid #333; }
+        .log-time { color: #888; }
+        .log-success { color: #00ff88; }
+        .log-error { color: #ff6464; }
+        .log-warning { color: #ffcc00; }
+        .stats-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-top: 15px; }
+        .stat-box {
+            background: rgba(0, 0, 0, 0.5);
+            padding: 10px;
+            border-radius: 4px;
+            text-align: center;
+        }
+        .stat-value { font-size: 1.5em; color: #ffd700; font-weight: bold; }
+        .stat-label { font-size: 0.8em; color: #888; }
+        .refresh-btn {
+            background: #00ff88;
+            color: #0a0e27;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-weight: bold;
+            margin-top: 15px;
+        }
+        .refresh-btn:hover { background: #00ffaa; }
+        @keyframes pulse { 0% { opacity: 0.8; } 50% { opacity: 1; } 100% { opacity: 0.8; } }
+        .pulsing { animation: pulse 2s infinite; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>GOM Override System - Live Monitor</h1>
+            <p>Real-time signal tracking: IA Server → GOM Verdict → EA Execution</p>
+            <p id="timestamp" style="color: #888; font-size: 0.9em; margin-top: 10px;"></p>
+        </div>
+
+        <div class="grid">
+            <!-- Deriv Broker -->
+            <div class="card">
+                <div class="card-title">Deriv Terminal</div>
+                <div id="deriv-symbols"></div>
+            </div>
+
+            <!-- Weltrade Broker -->
+            <div class="card">
+                <div class="card-title">Weltrade Terminal (F016)</div>
+                <div id="weltrade-symbols"></div>
+            </div>
+        </div>
+
+        <!-- Statistics -->
+        <div class="card">
+            <div class="card-title">System Statistics</div>
+            <div class="stats-grid">
+                <div class="stat-box">
+                    <div class="stat-value" id="stat-total">0</div>
+                    <div class="stat-label">Total Signals</div>
+                </div>
+                <div class="stat-box">
+                    <div class="stat-value" id="stat-ready">0</div>
+                    <div class="stat-label">Ready to Trade</div>
+                </div>
+                <div class="stat-box">
+                    <div class="stat-value" id="stat-blocked">0</div>
+                    <div class="stat-label">Blocked (IA HOLD)</div>
+                </div>
+                <div class="stat-box">
+                    <div class="stat-value" id="stat-override">0</div>
+                    <div class="stat-label">Override Active</div>
+                </div>
+            </div>
+            <button class="refresh-btn" onclick="refreshData()">Refresh Now</button>
+        </div>
+
+        <!-- Live Logs -->
+        <div class="card" style="margin-top: 30px;">
+            <div class="card-title">Event Logs</div>
+            <div class="logs" id="logs"></div>
+        </div>
+    </div>
+
+    <script>
+        const SYMBOLS = {
+            deriv: [
+                { name: 'Boom 500 Index', dir: 'BUY' },
+                { name: 'Crash 500 Index', dir: 'SELL' },
+                { name: 'Volatility 75 Index', dir: 'BOTH' },
+            ],
+            weltrade: [
+                { name: 'PAINX', dir: 'BUY' },
+                { name: 'GAINX', dir: 'SELL' },
+                { name: 'FXVOL', dir: 'BOTH' },
+            ]
+        };
+
+        let eventLogs = [];
+
+        function addLog(msg, type = 'info') {
+            const ts = new Date().toLocaleTimeString();
+            eventLogs.unshift({ ts, msg, type });
+            if (eventLogs.length > 50) eventLogs.pop();
+            updateLogs();
+        }
+
+        function updateLogs() {
+            const logsDiv = document.getElementById('logs');
+            logsDiv.innerHTML = eventLogs.map(log => `
+                <div class="log-line">
+                    <span class="log-time">[${log.ts}]</span>
+                    <span class="log-${log.type}">${log.msg}</span>
+                </div>
+            `).join('');
+        }
+
+        function renderSymbol(sym, broker) {
+            return `
+                <div class="symbol-row">
+                    <div class="symbol-name">${sym.name}</div>
+                    <div>
+                        <span class="signal-badge badge-hold">${sym.dir}</span>
+                        <span class="signal-badge" style="background: rgba(100,100,100,0.2); color: #aaa;">Checking...</span>
+                    </div>
+                </div>
+            `;
+        }
+
+        function refreshData() {
+            // Render initial UI
+            const derivDiv = document.getElementById('deriv-symbols');
+            const weltDiv = document.getElementById('weltrade-symbols');
+
+            derivDiv.innerHTML = SYMBOLS.deriv.map(s => renderSymbol(s, 'deriv')).join('');
+            weltDiv.innerHTML = SYMBOLS.weltrade.map(s => renderSymbol(s, 'weltrade')).join('');
+
+            addLog('[SYSTEM] Data refresh initiated...', 'warning');
+            addLog('[API] Connecting to AI Server on localhost:5000...', 'info');
+
+            // Try to fetch from server
+            fetch('http://localhost:5000/gom-verdict?symbol=Boom%20500%20Index')
+                .then(r => {
+                    if (r.ok) {
+                        addLog('[API] SUCCESS - Server is responding!', 'success');
+                        addLog('[GOM] GOM poller ready. Waiting for verdicts...', 'success');
+                        updateStats();
+                    } else {
+                        addLog(`[API] Server responded with status ${r.status}`, 'warning');
+                    }
+                    return r.json();
+                })
+                .then(data => {
+                    addLog(`[SIGNAL] Boom 500 Index: ${data.action} (${(data.confidence*100).toFixed(1)}%)`, 'info');
+                })
+                .catch(err => {
+                    addLog(`[ERROR] Cannot connect to server: ${err.message}`, 'error');
+                    addLog('[INFO] Start the AI server with: python launch_ai_server.py', 'warning');
+                });
+
+            // Update timestamp
+            document.getElementById('timestamp').innerText = 'Last updated: ' + new Date().toLocaleTimeString();
+        }
+
+        function updateStats() {
+            // Mock stats for now
+            document.getElementById('stat-total').innerText = '6';
+            document.getElementById('stat-ready').innerText = '2';
+            document.getElementById('stat-blocked').innerText = '3';
+            document.getElementById('stat-override').innerText = '1';
+        }
+
+        // Initialize on load
+        window.addEventListener('load', () => {
+            addLog('[STARTUP] GOM Override Monitor initialized', 'success');
+            addLog('[INFO] Waiting for AI Server to respond...', 'warning');
+            refreshData();
+
+            // Auto-refresh every 10 seconds
+            setInterval(refreshData, 10000);
+        });
+    </script>
+</body>
+</html>

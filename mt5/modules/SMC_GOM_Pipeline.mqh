@@ -20,6 +20,7 @@ extern double g_lastEntryProbability;
 extern string g_lastAIAction;
 extern double g_lastAIConfidence;
 
+
 bool SMCGP_IsBoomCrashSym(const string sym)
 {
    string s = sym;
@@ -58,7 +59,8 @@ double   g_smcCorrBlockCorrecting = 45.0;
 double   g_smcCorrBlockExhausted  = 40.0;
 double   g_smcCorrBlockRanging    = 38.0;
 double   g_smcCorrGomRelaxPts     = 10.0;  // assouplissement si |vn|>=2
-datetime g_smcLastGOMPoll     = 0;
+datetime g_smcLastGOMPoll     = 0;  // dernier poll RÉUSSI (HTTP 200 + données valides)
+datetime g_smcLastGOMAttempt  = 0;  // dernière TENTATIVE (succès ou échec)
 datetime g_smcLastMCPPoll      = 0;
 datetime g_smcLastPipelineExec= 0;
 string   g_smcLastPipelineId  = "";
@@ -253,6 +255,42 @@ bool SMCGP_JsonBool(const string &body, const string key)
    pos += StringLen(search);
    while(pos < StringLen(body) && StringGetCharacter(body, pos) == ' ') pos++;
    return (StringGetCharacter(body, pos) == 't');
+}
+
+// Parse un tableau JSON d'entiers "[7, 8, 13]" ou pretty-print avec newlines → "7,8,13"
+string SMCGP_ParseIntArray(const string &body, const string key)
+{
+   string search = "\"" + key + "\"";
+   int pos = StringFind(body, search);
+   if(pos < 0) return "";
+   pos += StringLen(search);
+   // Avancer jusqu'au '['
+   int len = StringLen(body);
+   while(pos < len && StringGetCharacter(body, pos) != '[') pos++;
+   if(pos >= len) return "";
+   pos++; // sauter '['
+   // Lire jusqu'au ']', extraire les chiffres séparés par virgule
+   string result = "";
+   string token  = "";
+   while(pos < len)
+   {
+      ushort ch = StringGetCharacter(body, pos);
+      if(ch == ']')
+      {
+         if(StringLen(token) > 0)
+            result += (StringLen(result) > 0 ? "," : "") + token;
+         break;
+      }
+      if(ch >= '0' && ch <= '9')
+         token += ShortToString(ch);
+      else if(ch == ',' && StringLen(token) > 0)
+      {
+         result += (StringLen(result) > 0 ? "," : "") + token;
+         token = "";
+      }
+      pos++;
+   }
+   return result;
 }
 
 string SMCGP_ChartTfLabel()
@@ -767,15 +805,15 @@ void SMCGP_PollGOM()
    // Pour affichage temps réel du verdict sur SMC dashboard
 
    // Si GOMPollIntervalSec = 0, poll à chaque tick (instantané)
-   // Sinon, respecter l'interval en secondes
+   // Sinon, respecter l'interval en secondes (basé sur la dernière TENTATIVE, succès ou non)
    if(GOMPollIntervalSec > 0)
    {
-      int age = (int)(TimeCurrent() - g_smcLastGOMPoll);
+      int age = (int)(TimeCurrent() - g_smcLastGOMAttempt);
       if(age < GOMPollIntervalSec) return;  // Interval pas encore écoulé
    }
    // else: GOMPollIntervalSec == 0 → poll TOUJOURS (instantané)
 
-   g_smcLastGOMPoll = TimeCurrent();
+   g_smcLastGOMAttempt = TimeCurrent();  // timestamp tentative (peu importe résultat)
 
    string sym = SMCGP_EncodeSym(SMCGP_ResolveGOMSym(_Symbol));
    string body;
@@ -827,6 +865,10 @@ void SMCGP_PollGOM()
    int prevSpikeLevel = g_smcGomSpikeLevel;
    bool prevSpikeTrad = g_smcGomSpikeTradable;
    SMCGP_ParseGOMBody(body);
+
+   // ── Poll réussi : mettre à jour le timestamp de succès ──────────────────
+   g_smcLastGOMPoll = TimeCurrent();
+
    if(prevVnum != g_smcGomVerdictNum || prevVerd != g_smcGomVerdict)
       SMCGP_NotifyGOMVerdictChange(symLabel, prevVnum, prevVerd);
    if(prevSpikeLevel != g_smcGomSpikeLevel || prevSpikeTrad != g_smcGomSpikeTradable)
@@ -968,7 +1010,13 @@ void SMCGP_NotifySpikeImminent(const string symLabel, const int prevLevel, const
    if(isImminent && !wasImminent)
    {
       int etaMin = SMCGP_EstimateSpikeMinutes();
-      string side = (StringFind(symLabel, "Boom") >= 0 || StringFind(_smcSym, "PAINX") >= 0) ? "BUY spike" : "SELL spike";
+      string symU = symLabel;
+      StringToUpper(symU);
+      string sc = symU;
+      StringReplace(sc, " ", "");
+      bool boomLike  = (StringFind(sc, "BOOM") >= 0 || StringFind(sc, "GAINX") >= 0);
+      bool crashLike = (StringFind(sc, "CRASH") >= 0 || StringFind(sc, "PAINX") >= 0);
+      string side = boomLike ? "BUY spike" : (crashLike ? "SELL spike" : "spike");
       string msg = StringFormat("[SPIKE] %s IMMINENT %s | prob %.0f%% imm %.0f%% ~%d min",
                                 symLabel, side, g_smcGomSpikePct, g_smcGomImminencePct, etaMin);
       SMCGP_PushGOMMsg(msg);
@@ -1092,6 +1140,9 @@ bool SMCGP_GOMCoherenceOK()
    double minCoh = SMC_EffectiveGOMMinCoherence();
    if(minCoh <= 0) return true;
    if(g_smcGomCoherence <= 0) return false;
+   // Synthétiques Boom/Crash + Weltrade vol : 2/3 TF = 66.7% → seuil 65%
+   if(SMC_GetSymbolCategory(_Symbol) == SYM_BOOM_CRASH && minCoh > 65.0) minCoh = 65.0;
+   else if(SMC_IsWeltradeSymbol(_Symbol) && minCoh > 65.0) minCoh = 65.0;
    return (g_smcGomCoherence >= minCoh);
 }
 
@@ -1621,9 +1672,9 @@ bool SMCGP_ExecutePipelineOrder(const string sym, const string action,
    if(!IsDirectionAllowedForBoomCrash(sym, action)) return false;
 
    // Max positions atteint : bloquer toute nouvelle entrée sans exception
-   if(CountPositionsOurEA() >= MaxPositionsTerminal)
+   if(CountPositionsOurEA() >= SMC_EffectiveMaxPositionsTerminal())
    {
-      Print("[SMC-GOM] 🚫 Max positions (", MaxPositionsTerminal, ") — ", action, " ", sym, " bloqué");
+      Print("[SMC-GOM] 🚫 Max positions (", SMC_EffectiveMaxPositionsTerminal(), ") — ", action, " ", sym, " bloqué");
       return false;
    }
 
@@ -1651,13 +1702,13 @@ bool SMCGP_ExecutePipelineOrder(const string sym, const string action,
       return false;
    }
 
-   // source=pipeline : filtre GOM déjà appliqué côté Python au moment du POST.
-   // Vérification minimale en live : si le verdict a changé à WAIT ou s'est inversé depuis, annuler.
-   if(isPipeline && UseGOMVerdictFilter)
+   // source=pipeline : bloquer si GOM=WAIT ou inversé depuis le POST Python
+   // Vérification inconditionnelle — indépendante de UseGOMVerdictFilter
+   if(isPipeline && !SMC_IsWeltradeSymbol(sym))
    {
       if(g_smcGomVerdictNum == 0)
       {
-         Print("[SMC-GOM] 🚫 Pipeline ", action, " ", sym, " annulé — GOM=WAIT depuis le POST Python");
+         Print("[SMC-GOM] 🚫 Pipeline ", action, " ", sym, " annulé — GOM=WAIT (vn=0)");
          return false;
       }
       int gomDir = (g_smcGomVerdictNum > 0) ? 1 : -1;
@@ -1665,6 +1716,14 @@ bool SMCGP_ExecutePipelineOrder(const string sym, const string action,
       {
          Print("[SMC-GOM] 🚫 Pipeline ", action, " ", sym, " annulé — GOM inversé (vn=",
                g_smcGomVerdictNum, ") depuis le POST Python");
+         return false;
+      }
+   }
+   else if(isPipeline && UseGOMVerdictFilter)
+   {
+      if(g_smcGomVerdictNum == 0)
+      {
+         Print("[SMC-GOM] 🚫 Pipeline Weltrade ", action, " ", sym, " annulé — GOM=WAIT");
          return false;
       }
    }
@@ -1727,8 +1786,8 @@ bool SMCGP_ExecutePipelineOrder(const string sym, const string action,
       StringToUpper(iaActionUp);
       bool iaConfirms = (iaActionUp == action) && (g_lastAIConfidence >= 0.65);
 
-      // GOM dans le même sens (déjà validé avant, mais on vérifie le niveau)
-      bool gomPerfect = (pipeDir > 0) ? (g_smcGomVerdictNum >= 2) : (g_smcGomVerdictNum <= -2);
+      // GOM PERFECT uniquement (vn=±3) — GOOD (vn=±2) ne bypass pas l'indécision IA/COG
+      bool gomPerfect = (MathAbs(g_smcGomVerdictNum) >= 3);
 
       bool tripleAligned = cogConfirms && iaConfirms;
 
@@ -1785,18 +1844,23 @@ bool SMCGP_ExecutePipelineOrder(const string sym, const string action,
       }
       else
       {
-         // Pas de triple alignement : bloquer si cognition ou IA s'oppose/est faible
-         bool cogOppose = (StringLen(g_cogDirection) > 0 && g_cogDirection != "NEUTRAL" &&
-                           ((pipeDir > 0 && g_cogDirection == "SELL") || (pipeDir < 0 && g_cogDirection == "BUY")));
-         bool iaOppose  = (StringLen(iaActionUp) > 0 && iaActionUp != "HOLD" &&
-                           iaActionUp != action && g_lastAIConfidence >= 0.55);
-         if(cogOppose || iaOppose)
+         // Pas de triple alignement : bloquer si cognition ou IA s'oppose OU est indécise (HOLD/NEUTRAL)
+         bool cogOppose  = (StringLen(g_cogDirection) > 0 && g_cogDirection != "NEUTRAL" &&
+                            ((pipeDir > 0 && g_cogDirection == "SELL") || (pipeDir < 0 && g_cogDirection == "BUY")));
+         bool iaOppose   = (StringLen(iaActionUp) > 0 && iaActionUp != "HOLD" &&
+                            iaActionUp != action && g_lastAIConfidence >= 0.55);
+         // Bloquer aussi si IA=HOLD ou Cognition=NEUTRAL sans confirmation forte GOM
+         bool iaHold     = (iaActionUp == "HOLD" || StringLen(iaActionUp) == 0);
+         bool cogNeutral = (g_cogDirection == "NEUTRAL" || StringLen(g_cogDirection) == 0);
+         // HOLD + NEUTRAL = aucune confirmation directionnelle → bloquer sauf PERFECT GOM (vn=±3)
+         bool neitherConfirms = (iaHold && cogNeutral && !gomPerfect);
+         if(cogOppose || iaOppose || neitherConfirms)
          {
-            Print("[TRIPLE] 🚫 Signal bloqué — pas de triple alignement | cogConfirms=", cogConfirms,
-                  " iaConfirms=", iaConfirms, " cog=", g_cogDirection, " ia=", g_lastAIAction);
+            Print("[TRIPLE] 🚫 Signal bloqué — alignement insuffisant | cogConfirms=", cogConfirms,
+                  " iaConfirms=", iaConfirms, " cog=", g_cogDirection, " ia=", g_lastAIAction,
+                  " gomPerfect=", gomPerfect ? "OUI" : "NON");
             return false;
          }
-         // Alignement partiel acceptable (cognition neutre ou IA faible) — on laisse passer
       }
    }
 
@@ -1839,11 +1903,31 @@ bool SMCGP_ExecutePipelineOrder(const string sym, const string action,
    if(lot <= 0) lot = SymbolInfoDouble(sym, SYMBOL_VOLUME_MIN);
    if(UseMinLotOnly) lot = SymbolInfoDouble(sym, SYMBOL_VOLUME_MIN);
 
-   trade.SetExpertMagicNumber(InpMagicNumber);
+   // Utiliser SafeOrderSend pour respecter toutes les gates (max positions, DecisionEngine, etc.)
+   MqlTradeRequest req = {};
+   MqlTradeResult  res = {};
    double execPx = (MathAbs(entryPx - mktPx) < SymbolInfoDouble(sym, SYMBOL_POINT)) ? 0 : entryPx;
-   bool ok = (dir == 1)
-      ? trade.Buy(lot, sym, execPx, sl, tp, "SMC_PIPELINE")
-      : trade.Sell(lot, sym, execPx, sl, tp, "SMC_PIPELINE");
+   req.action   = TRADE_ACTION_DEAL;
+   req.symbol   = sym;
+   req.volume   = lot;
+   req.type     = (dir == 1) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+   req.price    = (execPx > 0) ? execPx : ((dir == 1) ? ask : bid);
+   req.sl          = sl;
+   req.tp          = tp;
+   req.deviation   = 10;
+   req.magic       = InpMagicNumber;
+   req.comment     = "SMC_PIPELINE";
+   {
+      long fillFlags = SymbolInfoInteger(sym, SYMBOL_FILLING_MODE);
+      if((fillFlags & SYMBOL_FILLING_IOC) != 0)
+         req.type_filling = ORDER_FILLING_IOC;
+      else if((fillFlags & SYMBOL_FILLING_FOK) != 0)
+         req.type_filling = ORDER_FILLING_FOK;
+      else
+         req.type_filling = ORDER_FILLING_RETURN;
+   }
+
+   bool ok = SafeOrderSendAndAlert(req, res);
 
    ReleaseOpenLock();
 
@@ -1858,9 +1942,8 @@ bool SMCGP_ExecutePipelineOrder(const string sym, const string action,
       return true;
    }
 
-   PrintFormat("[SMC-GOM] ❌ Pipeline échec %s %s: %s", sym, action, trade.ResultRetcodeDescription());
-   uint rc = trade.ResultRetcode();
-   if(rc == TRADE_RETCODE_INVALID_STOPS || rc == TRADE_RETCODE_INVALID_PRICE)
+   PrintFormat("[SMC-GOM] ❌ Pipeline échec %s %s: %d", sym, action, res.retcode);
+   if(res.retcode == TRADE_RETCODE_INVALID_STOPS || res.retcode == TRADE_RETCODE_INVALID_PRICE)
    {
       g_smcLastPipelineFail = TimeCurrent();
       g_smcPipelineFailCount++;
@@ -1892,6 +1975,39 @@ void SMCGP_PollAndExecutePipeline()
             Print("[PIPELINE] ⏸ IA en HOLD — pipeline suspendu sur ", _Symbol,
                   " | dashboard=", g_smcIAStatusAction, " (", DoubleToString(g_iaStatusConfidence,1), "%)",
                   " | decide=", g_lastAIAction);
+         }
+         return;
+      }
+   }
+
+   // Gate GOM=WAIT absolu : aucun ordre pipeline si vn=0, sauf Weltrade synthétiques
+   if(!isWeltradeSynth && g_smcGomVerdictNum == 0)
+   {
+      static datetime s_waitLog = 0;
+      if(TimeCurrent() - s_waitLog >= 60)
+      {
+         s_waitLog = TimeCurrent();
+         Print("[PIPELINE] 🚫 GOM=WAIT (vn=0) — pipeline suspendu | ",
+               _Symbol, " | IA=", g_smcIAStatusAction, " COG=", g_cogDirection);
+      }
+      return;
+   }
+
+   // Gate double-indécision : IA=HOLD ET Cognition=NEUTRAL sans GOM PERFECT → bloquer
+   if(!isWeltradeSynth && MathAbs(g_smcGomVerdictNum) < 3)
+   {
+      bool iaIndecis  = (g_smcIAStatusAction == "HOLD" || StringLen(g_smcIAStatusAction) == 0 ||
+                         g_lastAIAction == "hold" || g_lastAIAction == "HOLD" || StringLen(g_lastAIAction) == 0);
+      bool cogIndecis = (g_cogDirection == "NEUTRAL" || StringLen(g_cogDirection) == 0);
+      if(iaIndecis && cogIndecis)
+      {
+         static datetime s_dblIndLog = 0;
+         if(TimeCurrent() - s_dblIndLog >= 60)
+         {
+            s_dblIndLog = TimeCurrent();
+            Print("[PIPELINE] ⏸ Double-indécision IA+COG — pipeline suspendu | ",
+                  _Symbol, " | IA=", g_smcIAStatusAction, "/", g_lastAIAction,
+                  " COG=", g_cogDirection, " GOM=", g_smcGomVerdict, " (vn=", g_smcGomVerdictNum, ")");
          }
          return;
       }
@@ -2279,6 +2395,7 @@ void SMCGP_DrawGOMDashboard()
    int y1 = marginBot;
    int y2 = marginBot + (cellH + gap) * 2;
    int y3 = marginBot + (cellH + gap) * 3;
+   int y4 = marginBot + (cellH + gap) * 4;
 
    color cVerdict = SMCGP_VerdictColor(g_smcGomVerdictNum);
    color cBg = (color)SMC_DASH_C_BG;
@@ -2553,6 +2670,90 @@ void SMCGP_DrawGOMDashboard()
       SMCGP_DrawOrderFlowCompass(chartW, marginBot, cellH, gap);
    else
       SMCGP_CleanupOrderFlowCompass();
+
+   // ── Rangée 5 : Session Readiness + Circuit-Breaker + Discipline ──────────
+   {
+      xCur = marginLR;
+
+      // Cellule 1 — READINESS score
+      string rdyStatus = g_readinessCBActive      ? "HALT-GLOBAL"
+                       : g_readinessCBSymbolCool  ? "HALT-SYM"
+                       : g_readinessGo            ? "GO"
+                                                  : "NO-GO";
+      string rdyTxt = "RDY " + IntegerToString(g_readinessScore) + "/100 " + rdyStatus;
+      color cRdy = g_readinessCBActive     ? (color)SMC_DASH_C_SELL
+                 : g_readinessCBSymbolCool ? (color)0xFFE65100       // orange foncé
+                 : g_readinessGo           ? (color)SMC_DASH_C_BUY
+                                           : (color)SMC_DASH_C_NEUTRAL;
+      SMCGP_DrawDashCell("R0_RDY", xCur, y4, cellW, cellH, rdyTxt, cRdy, cTxt);
+
+      // Cellule 2 — Circuit-Breaker raison (ou "CB OK")
+      xCur += cellW + gap;
+      string cbTxt = (g_readinessCBActive || g_readinessCBSymbolCool)
+                   ? ("CB: " + (StringLen(g_readinessCBReason) > 0 ? g_readinessCBReason : "ACTIF"))
+                   : "CB OK";
+      color cCB = (g_readinessCBActive || g_readinessCBSymbolCool) ? (color)SMC_DASH_C_SELL : cBg;
+      SMCGP_DrawDashCell("R1_CB", xCur, y4, cellW, cellH, cbTxt, cCB, cTxt);
+
+      // Cellule 3 — Best hours
+      xCur += cellW + gap;
+      string bhTxt = (StringLen(g_readinessBestHours) > 0)
+                   ? ("Best:" + g_readinessBestHours + "h")
+                   : "Best: peu data";
+      color cBH = (StringLen(g_readinessBestHours) > 0) ? (color)SMC_DASH_C_BUY : cBg;
+      SMCGP_DrawDashCell("R2_BH", xCur, y4, cellW, cellH, bhTxt, cBH, cTxt);
+
+      // Cellule 4 — Avoid hours
+      xCur += cellW + gap;
+      string ahTxt = (StringLen(g_readinessAvoidHours) > 0)
+                   ? ("Avoid:" + g_readinessAvoidHours + "h")
+                   : "Avoid: peu data";
+      color cAh = (StringLen(g_readinessAvoidHours) > 0) ? (color)SMC_DASH_C_SELL : cBg;
+      SMCGP_DrawDashCell("R3_AH", xCur, y4, cellW, cellH, ahTxt, cAh, cTxt);
+
+      // Cellule 5 — Discipline trades jour
+      xCur += cellW + gap;
+      bool discBlocked = (g_dailyTradeCount >= MaxDailyTrades);
+      string discTxt = StringFormat("J: %d/%d trades", g_dailyTradeCount, MaxDailyTrades);
+      color cDisc = discBlocked ? (color)SMC_DASH_C_SELL
+                  : (g_dailyTradeCount >= MaxDailyTrades * 7 / 10) ? (color)SMC_DASH_C_NEUTRAL
+                                                                    : (color)SMC_DASH_C_BUY;
+      SMCGP_DrawDashCell("R4_DISC", xCur, y4, cellW, cellH, discTxt, cDisc, cTxt);
+
+      // Cellule 6 — Objectif journalier
+      xCur += cellW + gap;
+      string tgtTxt = g_dailyTargetHit ? "OBJECTIF OK" : ("Obj: " + DoubleToString(DailyProfitTargetPct, 0) + "%");
+      color cTgt = g_dailyTargetHit ? (color)SMC_DASH_C_BUY : cBg;
+      SMCGP_DrawDashCell("R5_TGT", xCur, y4, cellW, cellH, tgtTxt, cTgt, cTxt);
+
+      // Cellule 7 — Heure UTC courante + gate horaire Weltrade
+      xCur += cellW + gap;
+      MqlDateTime dtUtc; TimeGMT(dtUtc);
+      string utcTxt = StringFormat("UTC %02d:%02d", dtUtc.hour, dtUtc.min);
+      bool wtOpen = (dtUtc.hour >= 4 && dtUtc.hour < 16);
+      if(SMCGP_IsBoomCrashSym(_Symbol))
+         utcTxt += wtOpen ? " OPEN" : " CLOSED";
+      color cUtc = (SMCGP_IsBoomCrashSym(_Symbol) && !wtOpen) ? (color)SMC_DASH_C_SELL : cBg;
+      SMCGP_DrawDashCell("R6_UTC", xCur, y4, cellW, cellH, utcTxt, cUtc, cTxt);
+
+      // Cellule 8 — Connexion AI server
+      xCur += cellW + gap;
+      SMCGP_DrawDashCell("R7_CONN", xCur, y4, cellW, cellH, connTxt, cConn, cTxt);
+
+      // Cellule 9 — Zone spike H1+M5
+      xCur += cellW + gap;
+      string zoneTxt;
+      color  cZone;
+      if(g_spikeBonusPts >= 20)
+         { zoneTxt = "ZONE HOT +20"; cZone = (color)0xFFFF6D00; }   // orange vif
+      else if(g_spikeBonusPts >= 10)
+         { zoneTxt = "ZONE+ +10";    cZone = (color)SMC_DASH_C_NEUTRAL; }
+      else if(g_spikeZoneCount > 0)
+         { zoneTxt = "ZONE " + IntegerToString(g_spikeZoneCount); cZone = cBg; }
+      else
+         { zoneTxt = "---";          cZone = cBg; }
+      SMCGP_DrawDashCell("R8_ZONE", xCur, y4, cellW, cellH, zoneTxt, cZone, cTxt);
+   }
 
    ChartRedraw(0);
 }

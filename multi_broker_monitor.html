@@ -1,0 +1,482 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Multi-Broker Trade Monitor 🌐</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Monaco', 'Courier New', monospace;
+            background: linear-gradient(135deg, #0a0e27 0%, #1a1f3a 100%);
+            color: #00ff88;
+            padding: 20px;
+            min-height: 100vh;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        .header {
+            text-align: center;
+            margin-bottom: 30px;
+            border-bottom: 2px solid #00ff88;
+            padding-bottom: 20px;
+        }
+
+        .header h1 {
+            font-size: 2.2em;
+            color: #ffd700;
+            text-shadow: 0 0 10px rgba(255, 215, 0, 0.5);
+            margin-bottom: 10px;
+        }
+
+        .terminals {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(650px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+
+        .terminal {
+            background: rgba(255, 255, 255, 0.03);
+            border: 2px solid #00ff88;
+            border-radius: 8px;
+            padding: 20px;
+            box-shadow: 0 0 20px rgba(0, 255, 136, 0.1);
+        }
+
+        .terminal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+            padding-bottom: 10px;
+            border-bottom: 1px solid #00ff88;
+        }
+
+        .terminal-name {
+            font-size: 1.3em;
+            color: #ffd700;
+            font-weight: bold;
+        }
+
+        .terminal-status {
+            padding: 5px 15px;
+            border-radius: 20px;
+            font-size: 0.9em;
+        }
+
+        .status-active {
+            background: rgba(0, 255, 136, 0.2);
+            color: #00ff88;
+        }
+
+        .status-inactive {
+            background: rgba(255, 100, 100, 0.2);
+            color: #ff6464;
+        }
+
+        .symbols-list {
+            display: grid;
+            gap: 12px;
+        }
+
+        .symbol-row {
+            background: rgba(0, 0, 0, 0.3);
+            border-left: 3px solid #888;
+            padding: 12px;
+            border-radius: 4px;
+            display: grid;
+            grid-template-columns: 1fr 2fr 1fr;
+            gap: 15px;
+            align-items: center;
+        }
+
+        .symbol-row.blocked {
+            border-left-color: #ff6464;
+            background: rgba(255, 100, 100, 0.05);
+        }
+
+        .symbol-row.ready {
+            border-left-color: #00ff88;
+            background: rgba(0, 255, 136, 0.05);
+        }
+
+        .symbol-name {
+            font-weight: bold;
+            color: #ffd700;
+        }
+
+        .symbol-signals {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 8px;
+        }
+
+        .signal {
+            padding: 8px;
+            border-radius: 3px;
+            font-size: 0.85em;
+            text-align: center;
+            background: rgba(0, 0, 0, 0.2);
+        }
+
+        .signal.ia {
+            border: 1px solid #ffd700;
+            color: #ffd700;
+        }
+
+        .signal.gom {
+            border: 1px solid #00ff88;
+            color: #00ff88;
+        }
+
+        .signal-value {
+            display: block;
+            font-weight: bold;
+        }
+
+        .signal-label {
+            display: block;
+            font-size: 0.75em;
+            opacity: 0.7;
+        }
+
+        .trade-status {
+            text-align: right;
+        }
+
+        .status-badge {
+            display: inline-block;
+            padding: 8px 15px;
+            border-radius: 4px;
+            font-weight: bold;
+            font-size: 0.9em;
+        }
+
+        .badge-hold {
+            background: rgba(255, 165, 0, 0.2);
+            color: #ffa500;
+        }
+
+        .badge-ready {
+            background: rgba(0, 255, 136, 0.2);
+            color: #00ff88;
+        }
+
+        .badge-blocked {
+            background: rgba(255, 100, 100, 0.2);
+            color: #ff6464;
+        }
+
+        .blockers {
+            margin-top: 15px;
+            padding-top: 15px;
+            border-top: 1px solid #555;
+        }
+
+        .blockers h4 {
+            color: #ff6464;
+            margin-bottom: 8px;
+            font-size: 0.9em;
+        }
+
+        .blocker-item {
+            padding: 5px 10px;
+            margin: 3px 0;
+            background: rgba(255, 100, 100, 0.1);
+            border-left: 2px solid #ff6464;
+            font-size: 0.85em;
+            color: #ffb3b3;
+        }
+
+        .comparison {
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid #555;
+            border-radius: 8px;
+            padding: 20px;
+            margin-top: 20px;
+        }
+
+        .comparison h3 {
+            color: #ffd700;
+            margin-bottom: 15px;
+            font-size: 1.1em;
+        }
+
+        .comparison-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+        }
+
+        .comparison-item {
+            background: rgba(0, 0, 0, 0.3);
+            padding: 12px;
+            border-radius: 4px;
+            border-left: 3px solid #00ff88;
+        }
+
+        .comparison-item.deriv {
+            border-left-color: #ffd700;
+        }
+
+        .comparison-item h4 {
+            color: #888;
+            font-size: 0.85em;
+            margin-bottom: 5px;
+        }
+
+        .comparison-item .value {
+            color: #00ff88;
+            font-size: 1.2em;
+            font-weight: bold;
+        }
+
+        .logs {
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid #555;
+            border-radius: 8px;
+            padding: 15px;
+            margin-top: 20px;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+
+        .logs h3 {
+            color: #ffd700;
+            margin-bottom: 10px;
+        }
+
+        .log-item {
+            padding: 5px 0;
+            border-bottom: 1px solid #333;
+            font-size: 0.85em;
+            color: #888;
+        }
+
+        .log-item.error {
+            color: #ff6464;
+        }
+
+        .log-item.success {
+            color: #00ff88;
+        }
+
+        @keyframes pulse {
+            0% { opacity: 0.8; }
+            50% { opacity: 1; }
+            100% { opacity: 0.8; }
+        }
+
+        .pulsing {
+            animation: pulse 2s infinite;
+        }
+
+        .footer {
+            text-align: center;
+            margin-top: 30px;
+            color: #666;
+            font-size: 0.9em;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🌐 Multi-Broker Trade Monitor</h1>
+            <p>Deriv vs Weltrade | Signal Analysis & Trade Execution</p>
+        </div>
+
+        <div class="terminals" id="terminalsContainer">
+            <!-- Dynamically populated -->
+        </div>
+
+        <div class="comparison">
+            <h3>📊 Broker Comparison</h3>
+            <div class="comparison-grid" id="comparisonGrid">
+                <!-- Dynamically populated -->
+            </div>
+        </div>
+
+        <div class="logs">
+            <h3>📜 Event Log</h3>
+            <div id="logsList"></div>
+        </div>
+
+        <div class="footer">
+            <p>Real-time monitoring • PainX/GAINX/FXVOL support • Multi-broker signal tracking</p>
+        </div>
+    </div>
+
+    <script>
+        // Configuration
+        const TERMINALS = {
+            deriv: {
+                name: 'Deriv (Primary)',
+                symbols: ['Boom 500 Index', 'Crash 500 Index', 'Volatility 75 Index', 'XAUUSD'],
+                status: 'active',
+                color: '#ffd700'
+            },
+            weltrade: {
+                name: 'Weltrade (F016)',
+                symbols: ['PainX 400', 'GAINX 400', 'FX Vol 20', 'XAUUSD'],
+                status: 'active',
+                color: '#00ff88'
+            }
+        };
+
+        // Mock signal data (in production, this comes from MT5 logs)
+        const SIGNALS = {
+            'Boom 500 Index': { ia: 'buy', confidence: 75, gom: 'PERFECT_BUY', status: 'ready' },
+            'Crash 500 Index': { ia: 'sell', confidence: 70, gom: 'WAIT', status: 'blocked', reason: 'GOM WAIT' },
+            'Volatility 75 Index': { ia: 'hold', confidence: 45, gom: 'NEUTRAL', status: 'blocked', reason: 'IA HOLD + Low confidence' },
+            'XAUUSD': { ia: 'buy', confidence: 60, gom: 'GOOD_BUY', status: 'ready' },
+            'PainX 400': { ia: 'hold', confidence: 50, gom: 'WAIT', status: 'blocked', reason: 'IA HOLD + GOM WAIT' },
+            'GAINX 400': { ia: 'sell', confidence: 65, gom: 'PERFECT_SELL', status: 'ready', direction: 'SELL_ONLY' },
+            'FX Vol 20': { ia: 'hold', confidence: 52, gom: 'WAIT', status: 'blocked', reason: 'IA HOLD + GOM WAIT' }
+        };
+
+        let eventLog = [];
+
+        function formatPercent(val) {
+            return `${(val * 100).toFixed(1)}%`;
+        }
+
+        function renderTerminal(key, config) {
+            const symbols = config.symbols.map(sym => {
+                const signal = SIGNALS[sym] || { ia: 'unknown', confidence: 0, gom: 'UNKNOWN', status: 'unknown' };
+                const isBlocked = signal.status === 'blocked';
+                const isReady = signal.status === 'ready';
+
+                return `
+                    <div class="symbol-row ${isBlocked ? 'blocked' : isReady ? 'ready' : ''}">
+                        <div class="symbol-name">${sym}</div>
+                        <div class="symbol-signals">
+                            <div class="signal ia">
+                                <span class="signal-value">${signal.ia.toUpperCase()}</span>
+                                <span class="signal-label">IA ${formatPercent(signal.confidence)}</span>
+                            </div>
+                            <div class="signal gom">
+                                <span class="signal-value">${signal.gom}</span>
+                                <span class="signal-label">GOM</span>
+                            </div>
+                        </div>
+                        <div class="trade-status">
+                            ${isReady ? '<span class="status-badge badge-ready">✅ READY</span>' : ''}
+                            ${isBlocked ? `<span class="status-badge badge-blocked">🚫 BLOCKED</span>` : ''}
+                            ${!isReady && !isBlocked ? '<span class="status-badge badge-hold">⏳ HOLD</span>' : ''}
+                        </div>
+                        ${isBlocked ? `<div class="blockers"><h4>Raison du blocage:</h4><div class="blocker-item">${signal.reason}</div></div>` : ''}
+                    </div>
+                `;
+            }).join('');
+
+            return `
+                <div class="terminal">
+                    <div class="terminal-header">
+                        <div class="terminal-name">${config.name}</div>
+                        <div class="terminal-status ${config.status === 'active' ? 'status-active' : 'status-inactive'}">
+                            ${config.status === 'active' ? '🟢 ACTIVE' : '🔴 OFFLINE'}
+                        </div>
+                    </div>
+                    <div class="symbols-list">
+                        ${symbols}
+                    </div>
+                </div>
+            `;
+        }
+
+        function renderComparison() {
+            const stats = {
+                deriv: {
+                    total: TERMINALS.deriv.symbols.length,
+                    ready: TERMINALS.deriv.symbols.filter(s => SIGNALS[s]?.status === 'ready').length,
+                    blocked: TERMINALS.deriv.symbols.filter(s => SIGNALS[s]?.status === 'blocked').length
+                },
+                weltrade: {
+                    total: TERMINALS.weltrade.symbols.length,
+                    ready: TERMINALS.weltrade.symbols.filter(s => SIGNALS[s]?.status === 'ready').length,
+                    blocked: TERMINALS.weltrade.symbols.filter(s => SIGNALS[s]?.status === 'blocked').length
+                }
+            };
+
+            return `
+                <div class="comparison-item deriv">
+                    <h4>Deriv</h4>
+                    <div class="value">${stats.deriv.ready}/${stats.deriv.total}</div>
+                    <small>Ready to Trade</small>
+                </div>
+                <div class="comparison-item">
+                    <h4>Weltrade</h4>
+                    <div class="value">${stats.weltrade.ready}/${stats.weltrade.total}</div>
+                    <small>Ready to Trade</small>
+                </div>
+                <div class="comparison-item">
+                    <h4>Total Blocked</h4>
+                    <div class="value" style="color: #ff6464;">${stats.deriv.blocked + stats.weltrade.blocked}</div>
+                    <small>Waiting for signals</small>
+                </div>
+                <div class="comparison-item">
+                    <h4>Success Rate</h4>
+                    <div class="value">${((stats.deriv.ready + stats.weltrade.ready) / (stats.deriv.total + stats.weltrade.total) * 100).toFixed(0)}%</div>
+                    <small>Execution %</small>
+                </div>
+            `;
+        }
+
+        function addLog(message, type = 'info') {
+            const time = new Date().toLocaleTimeString('fr-FR');
+            eventLog.unshift({ time, message, type });
+            if (eventLog.length > 20) eventLog.pop();
+
+            const logsDiv = document.getElementById('logsList');
+            logsDiv.innerHTML = eventLog.map(log =>
+                `<div class="log-item ${log.type}">
+                    [${log.time}] ${log.message}
+                </div>`
+            ).join('');
+        }
+
+        function init() {
+            // Render terminals
+            const container = document.getElementById('terminalsContainer');
+            container.innerHTML = Object.entries(TERMINALS)
+                .map(([key, config]) => renderTerminal(key, config))
+                .join('');
+
+            // Render comparison
+            const compGrid = document.getElementById('comparisonGrid');
+            compGrid.innerHTML = renderComparison();
+
+            // Initial logs
+            addLog('✅ System initialized', 'success');
+            addLog('📡 Connected to Deriv terminal', 'success');
+            addLog('📡 Connected to Weltrade terminal (F016)', 'success');
+            addLog('🔍 Scanning signals...', 'info');
+
+            setTimeout(() => {
+                addLog('⚠️ PainX 400: IA HOLD (50%) + GOM WAIT → Trade blocked', 'error');
+                addLog('⚠️ FX Vol 20: IA HOLD (52%) + GOM WAIT → Trade blocked', 'error');
+                addLog('✅ GAINX 400: SELL ready (IA 65%, GOM PERFECT_SELL)', 'success');
+            }, 1000);
+        }
+
+        // Initialize on load
+        window.addEventListener('load', init);
+
+        // Auto-refresh every 5 seconds (in production, this would come from WebSocket)
+        setInterval(() => {
+            document.getElementById('comparisonGrid').innerHTML = renderComparison();
+        }, 5000);
+    </script>
+</body>
+</html>

@@ -1,0 +1,402 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>XAUUSD Scalping Monitor 💰</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Monaco', 'Courier New', monospace;
+            background: linear-gradient(135deg, #1a1a2e 0%, #0f3460 100%);
+            color: #00ff88;
+            padding: 20px;
+            min-height: 100vh;
+        }
+
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+        }
+
+        .header {
+            text-align: center;
+            margin-bottom: 30px;
+            border-bottom: 2px solid #00ff88;
+            padding-bottom: 20px;
+        }
+
+        .header h1 {
+            font-size: 2.5em;
+            color: #ffd700;
+            text-shadow: 0 0 10px rgba(255, 215, 0, 0.5);
+            margin-bottom: 10px;
+        }
+
+        .header p {
+            font-size: 1.1em;
+            color: #00ff88;
+        }
+
+        .trade-info {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 15px;
+            margin-bottom: 30px;
+        }
+
+        .info-box {
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid #00ff88;
+            padding: 15px;
+            border-radius: 5px;
+        }
+
+        .info-box label {
+            color: #888;
+            font-size: 0.9em;
+            display: block;
+            margin-bottom: 5px;
+        }
+
+        .info-box .value {
+            font-size: 1.3em;
+            color: #ffd700;
+        }
+
+        .tp-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 10px;
+            margin-bottom: 30px;
+        }
+
+        .tp-level {
+            background: rgba(255, 255, 255, 0.08);
+            border: 2px solid #555;
+            padding: 15px;
+            text-align: center;
+            border-radius: 5px;
+            transition: all 0.3s ease;
+            cursor: pointer;
+        }
+
+        .tp-level.reached {
+            background: rgba(0, 255, 136, 0.2);
+            border-color: #00ff88;
+            box-shadow: 0 0 15px rgba(0, 255, 136, 0.3);
+        }
+
+        .tp-level.reached::before {
+            content: "✅ ";
+            color: #00ff88;
+        }
+
+        .tp-level .tp-price {
+            font-size: 1.2em;
+            color: #ffd700;
+            font-weight: bold;
+            margin-bottom: 5px;
+        }
+
+        .tp-level .tp-status {
+            font-size: 0.85em;
+            color: #888;
+        }
+
+        .tp-level.reached .tp-status {
+            color: #00ff88;
+        }
+
+        .price-input {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 30px;
+        }
+
+        input[type="number"] {
+            flex: 1;
+            padding: 12px;
+            background: rgba(255, 255, 255, 0.1);
+            border: 1px solid #00ff88;
+            color: #00ff88;
+            font-size: 1em;
+            border-radius: 5px;
+        }
+
+        input[type="number"]::placeholder {
+            color: #666;
+        }
+
+        button {
+            padding: 12px 30px;
+            background: linear-gradient(135deg, #00ff88 0%, #00cc66 100%);
+            border: none;
+            color: #000;
+            font-weight: bold;
+            cursor: pointer;
+            border-radius: 5px;
+            font-size: 1em;
+            transition: all 0.3s ease;
+        }
+
+        button:hover {
+            transform: scale(1.05);
+            box-shadow: 0 0 20px rgba(0, 255, 136, 0.4);
+        }
+
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 15px;
+            margin-bottom: 30px;
+        }
+
+        .stat {
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid #00ff88;
+            padding: 15px;
+            text-align: center;
+            border-radius: 5px;
+        }
+
+        .stat .label {
+            color: #888;
+            font-size: 0.9em;
+            margin-bottom: 5px;
+        }
+
+        .stat .number {
+            font-size: 1.8em;
+            color: #ffd700;
+            font-weight: bold;
+        }
+
+        .alerts {
+            background: rgba(255, 100, 100, 0.1);
+            border: 1px solid #ff6464;
+            padding: 15px;
+            border-radius: 5px;
+            margin-top: 30px;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+
+        .alerts h3 {
+            color: #ff6464;
+            margin-bottom: 10px;
+        }
+
+        .alert-item {
+            padding: 8px;
+            margin-bottom: 5px;
+            background: rgba(0, 0, 0, 0.3);
+            border-left: 3px solid #ff6464;
+            font-size: 0.9em;
+        }
+
+        .footer {
+            text-align: center;
+            margin-top: 30px;
+            padding-top: 20px;
+            border-top: 1px solid #555;
+            color: #666;
+            font-size: 0.9em;
+        }
+
+        @keyframes pulse {
+            0% { box-shadow: 0 0 0 0 rgba(0, 255, 136, 0.7); }
+            70% { box-shadow: 0 0 0 10px rgba(0, 255, 136, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(0, 255, 136, 0); }
+        }
+
+        .pulse {
+            animation: pulse 2s infinite;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>💰 XAUUSD SCALPING</h1>
+            <p>Real-time TP Monitor | 9-Level Partial Take Profits</p>
+        </div>
+
+        <div class="trade-info">
+            <div class="info-box">
+                <label>Entry Zone</label>
+                <div class="value">4260 - 4266 BUY</div>
+            </div>
+            <div class="info-box">
+                <label>Stop Loss</label>
+                <div class="value" style="color: #ff6464;">4255</div>
+            </div>
+            <div class="info-box">
+                <label>Current Price</label>
+                <div class="value" id="currentPrice">-</div>
+            </div>
+            <div class="info-box">
+                <label>Profit/Loss</label>
+                <div class="value" id="profit">-</div>
+            </div>
+        </div>
+
+        <div class="price-input">
+            <input type="number" id="priceInput" placeholder="Entrez le prix actuel..." step="0.01">
+            <button onclick="updatePrice()">📊 UPDATE</button>
+            <button onclick="resetTrade()">🔄 RESET</button>
+        </div>
+
+        <div class="stats">
+            <div class="stat">
+                <div class="label">TP Fermés</div>
+                <div class="number" id="closedTPs">0/9</div>
+            </div>
+            <div class="stat">
+                <div class="label">TP Restants</div>
+                <div class="number" id="remainingTPs">9</div>
+            </div>
+            <div class="stat">
+                <div class="label">Progression</div>
+                <div class="number" id="progress">0%</div>
+            </div>
+        </div>
+
+        <div class="tp-grid" id="tpGrid">
+            <!-- Les niveaux de TP seront générés en JS -->
+        </div>
+
+        <div class="alerts" id="alerts">
+            <h3>📢 Alertes</h3>
+            <div class="alert-item">En attente de prix...</div>
+        </div>
+
+        <div class="footer">
+            <p>🚀 TradBOT Scalping Monitor | Alerts via WhatsApp</p>
+        </div>
+    </div>
+
+    <script>
+        const TP_LEVELS = [4270, 4274, 4280, 4284, 4290, 4294, 4299, 4304, 4310];
+        const ENTRY_LOW = 4260;
+        const ENTRY_HIGH = 4266;
+        const SL = 4255;
+
+        let closedTPs = new Set();
+        let alerts = [];
+
+        function initTPGrid() {
+            const grid = document.getElementById('tpGrid');
+            grid.innerHTML = '';
+            TP_LEVELS.forEach(tp => {
+                const div = document.createElement('div');
+                div.className = 'tp-level';
+                div.id = `tp-${tp}`;
+                div.innerHTML = `
+                    <div class="tp-price">${tp}</div>
+                    <div class="tp-status">⏳ OUVERT</div>
+                `;
+                grid.appendChild(div);
+            });
+        }
+
+        function updatePrice() {
+            const input = document.getElementById('priceInput');
+            const price = parseFloat(input.value);
+
+            if (!price || price <= 0) {
+                addAlert('❌ Prix invalide');
+                return;
+            }
+
+            const currentPriceDiv = document.getElementById('currentPrice');
+            currentPriceDiv.textContent = price.toFixed(2);
+
+            // Check SL
+            if (price <= SL) {
+                addAlert(`🛑 STOP LOSS ATTEINT @ ${price.toFixed(2)}`);
+                currentPriceDiv.style.color = '#ff6464';
+                document.getElementById('priceInput').disabled = true;
+                return;
+            }
+
+            // Check TP levels
+            TP_LEVELS.forEach(tp => {
+                if (price >= tp && !closedTPs.has(tp)) {
+                    closedTPs.add(tp);
+                    const tpDiv = document.getElementById(`tp-${tp}`);
+                    tpDiv.classList.add('reached', 'pulse');
+                    tpDiv.querySelector('.tp-status').textContent = '✅ FERMÉ';
+
+                    const profit = price - ENTRY_LOW;
+                    addAlert(`🟢 TP ${tp} ATTEINT @ ${price.toFixed(2)} | Profit: +${profit.toFixed(2)}`);
+                }
+            });
+
+            // Update stats
+            const profit = price - ENTRY_LOW;
+            const profitDiv = document.getElementById('profit');
+            profitDiv.textContent = profit >= 0 ? `+${profit.toFixed(2)}` : profit.toFixed(2);
+            profitDiv.style.color = profit >= 0 ? '#00ff88' : '#ff6464';
+
+            const remaining = TP_LEVELS.length - closedTPs.size;
+            document.getElementById('closedTPs').textContent = `${closedTPs.size}/9`;
+            document.getElementById('remainingTPs').textContent = remaining.toString();
+
+            const progressPct = Math.round((closedTPs.size / 9) * 100);
+            document.getElementById('progress').textContent = `${progressPct}%`;
+
+            if (remaining === 0) {
+                addAlert('🎉 TOUS LES TP FERMÉS! 🎉');
+                input.disabled = true;
+            }
+        }
+
+        function resetTrade() {
+            closedTPs.clear();
+            alerts = [];
+            document.getElementById('priceInput').value = '';
+            document.getElementById('priceInput').disabled = false;
+            document.getElementById('currentPrice').textContent = '-';
+            document.getElementById('currentPrice').style.color = '#ffd700';
+            document.getElementById('profit').textContent = '-';
+            document.getElementById('profit').style.color = '#ffd700';
+            document.getElementById('closedTPs').textContent = '0/9';
+            document.getElementById('remainingTPs').textContent = '9';
+            document.getElementById('progress').textContent = '0%';
+            document.getElementById('alerts').innerHTML = '<h3>📢 Alertes</h3><div class="alert-item">Trade réinitialisé...</div>';
+            initTPGrid();
+        }
+
+        function addAlert(message) {
+            const alertsDiv = document.getElementById('alerts');
+            const time = new Date().toLocaleTimeString('fr-FR');
+
+            if (alerts.length === 0) {
+                alertsDiv.innerHTML = '<h3>📢 Alertes</h3>';
+            }
+
+            const item = document.createElement('div');
+            item.className = 'alert-item';
+            item.textContent = `[${time}] ${message}`;
+            alertsDiv.appendChild(item);
+
+            alerts.push({ time, message });
+
+            // Scroll to bottom
+            alertsDiv.scrollTop = alertsDiv.scrollHeight;
+        }
+
+        // Init
+        initTPGrid();
+        document.getElementById('priceInput').addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') updatePrice();
+        });
+    </script>
+</body>
+</html>

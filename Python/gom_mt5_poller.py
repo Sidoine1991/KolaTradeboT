@@ -38,13 +38,29 @@ for p in (str(ROOT), str(ROOT / "python")):
 AI_SERVER_URL = "http://127.0.0.1:8000"
 
 DEFAULT_SYMBOLS: List[str] = [
+    # Deriv Boom/Crash — liste complète
     "Boom 1000 Index",
+    "Boom 900 Index",
+    "Boom 600 Index",
     "Boom 500 Index",
     "Boom 300 Index",
+    "Boom 200 Index",
+    "Boom 150 Index",
     "Crash 1000 Index",
+    "Crash 900 Index",
+    "Crash 600 Index",
     "Crash 500 Index",
     "Crash 300 Index",
+    "Crash 200 Index",
+    "Crash 150 Index",
+    # Metals / Forex
     "XAUUSD",
+    # Weltrade synthetics
+    "PAINX",
+    "GAINX",
+    "FXVOL",
+    "SFVVOL",
+    "SFXVOL",
 ]
 
 POLL_INTERVAL = 30  # secondes
@@ -89,10 +105,29 @@ def _push_verdict(payload: Dict[str, Any]) -> bool:
         return False
 
 
+_WELTRADE_UTC_PREFIXES = ("PAINX", "GAINX", "FXVOL", "SFVVOL", "SFXVOL")
+
+
+def _weltrade_gate_open(symbol: str) -> bool:
+    """Retourne False si le symbole Weltrade est hors fenêtre 04h-16h UTC."""
+    from datetime import datetime, timezone
+    sym = symbol.upper().replace(" ", "")
+    for prefix in _WELTRADE_UTC_PREFIXES:
+        if sym.startswith(prefix):
+            h = datetime.now(timezone.utc).hour
+            in_window = 4 <= h < 16
+            if not in_window:
+                log.info("[GATE] %s: UTC %02dh hors 04h-16h — poll ignore", symbol, h)
+            return in_window
+    return True
+
+
 def poll_once(symbols: List[str], calc) -> int:
     """Calcule GOM pour chaque symbole et pousse vers /gom-verdict."""
     ok_count = 0
     for symbol in symbols:
+        if not _weltrade_gate_open(symbol):
+            continue
         try:
             resp = calc.build_api_response(symbol)
             if not resp.get("ok"):

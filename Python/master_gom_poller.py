@@ -85,6 +85,7 @@ _MT5_TO_TV: Dict[str, str] = {
     "NAS100":           "NASDAQ:NDX",
     "BTCUSD":           "BITSTAMP:BTCUSD",
     "ETHUSD":           "BITSTAMP:ETHUSD",
+    # Deriv Boom/Crash
     "Boom 1000 Index":  "DERIV:BOOM_1000_INDEX",
     "Boom 500 Index":   "DERIV:BOOM_500_INDEX",
     "Boom 300 Index":   "DERIV:BOOM_300_INDEX",
@@ -93,6 +94,12 @@ _MT5_TO_TV: Dict[str, str] = {
     "Crash 500 Index":  "DERIV:CRASH_500_INDEX",
     "Crash 300 Index":  "DERIV:CRASH_300_INDEX",
     "Crash 600 Index":  "DERIV:CRASH_600_INDEX",
+    # Weltrade symbols (mapped to DERIV equivalents for GOM Pine script)
+    "PAINX":            "DERIV:BOOM_500_INDEX",   # Weltrade Boom = Deriv Boom
+    "GAINX":            "DERIV:CRASH_500_INDEX",  # Weltrade Crash = Deriv Crash
+    "FXVOL":            "DERIV:VOLATILITY_75_INDEX",  # Weltrade Vol = Deriv Vol
+    "SFVVOL":           "DERIV:VOLATILITY_75_INDEX",  # Weltrade Stock Vol = Deriv Vol
+    "SFXVOL":           "DERIV:VOLATILITY_75_INDEX",  # Weltrade SFX Vol = Deriv Vol
     "Gold Basket":      "OANDA:XAUUSD",
 }
 
@@ -101,25 +108,49 @@ _ALWAYS_OPEN = {
     "BTCUSD", "ETHUSD",
     "Boom 1000 Index", "Boom 500 Index", "Boom 300 Index", "Boom 600 Index",
     "Crash 1000 Index", "Crash 500 Index", "Crash 300 Index", "Crash 600 Index",
+    # Weltrade symbols: 24/7 marché mais gate UTC 04h-16h appliqué séparément
+    "PAINX", "GAINX", "FXVOL", "SFVVOL", "SFXVOL",
 }
 
-# Liste complète par défaut (= symboles SMC_Universal + Boom/Crash)
+# Liste complète par défaut (= symboles SMC_Universal + Boom/Crash + Weltrade)
 _DEFAULT_SYMBOLS: List[str] = [
     "XAUUSD",
     "EURUSD", "GBPUSD", "USDJPY", "USDCHF", "AUDUSD", "NZDUSD", "USDCAD",
     "XAGUSD", "US30", "US500", "NAS100",
     "BTCUSD", "ETHUSD",
+    # Deriv Boom/Crash
     "Boom 1000 Index", "Boom 500 Index", "Crash 1000 Index", "Crash 500 Index",
+    # Weltrade symbols (added 2026-06-18)
+    "PAINX", "GAINX", "FXVOL",
 ]
 
 
+_WELTRADE_WINDOW_SYMBOLS = {"PAINX", "GAINX", "FXVOL", "SFVVOL", "SFXVOL"}
+_WELTRADE_UTC_OPEN  = 4   # inclus
+_WELTRADE_UTC_CLOSE = 16  # exclus
+
+
 def _is_market_open(symbol: str) -> bool:
-    """Filtre weekend pour forex/métaux. Synthétiques toujours ouverts."""
-    if symbol in _ALWAYS_OPEN:
-        return True
+    """Filtre weekend pour forex/métaux. Synthétiques 24/7 sauf gate UTC Weltrade."""
     import datetime as _dt
     now = _dt.datetime.utcnow()
-    wd, h = now.weekday(), now.hour
+    h = now.hour
+
+    # Gate Weltrade 04h-16h UTC — s'applique même si le marché est 24/7
+    sym_upper = symbol.upper().replace(" ", "")
+    for prefix in _WELTRADE_WINDOW_SYMBOLS:
+        if sym_upper.startswith(prefix):
+            in_window = _WELTRADE_UTC_OPEN <= h < _WELTRADE_UTC_CLOSE
+            if not in_window:
+                log.info(
+                    "[GATE-SESSION] %s: UTC %02dh hors fenetre 04h-16h — poll ignore",
+                    symbol, h,
+                )
+            return in_window
+
+    if symbol in _ALWAYS_OPEN:
+        return True
+    wd = now.weekday()
     if wd == 5:
         return False                    # samedi
     if wd == 4 and h >= 22:

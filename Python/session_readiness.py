@@ -9,6 +9,7 @@ import os
 import sqlite3
 import logging
 import json
+import math
 from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass, field, asdict
 from typing import Optional
@@ -33,8 +34,13 @@ CB_GLOBAL_HALT_H       = int(os.getenv("CB_GLOBAL_HALT_H",       "2"))   # Heure
 
 # ── Score daily readiness ─────────────────────────────────────────────────────
 DR_LOOKBACK_DAYS       = int(os.getenv("DR_LOOKBACK_DAYS",        "30"))
-DR_MIN_TRADES_PER_HOUR = int(os.getenv("DR_MIN_TRADES_PER_HOUR",  "3"))
+DR_MIN_TRADES_PER_HOUR = int(os.getenv("DR_MIN_TRADES_PER_HOUR",  "1"))
 DR_GO_THRESHOLD        = int(os.getenv("DR_GO_THRESHOLD",          "45"))
+
+# ── Pondération récence ───────────────────────────────────────────────────────
+# Décroissance exponentielle : un trade d'aujourd'hui vaut e^0=1.0
+# Un trade vieux de DECAY_HALF_LIFE_DAYS vaut 0.5 (demi-vie)
+DR_DECAY_HALF_LIFE_DAYS = float(os.getenv("DR_DECAY_HALF_LIFE_DAYS", "7.0"))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -56,35 +62,63 @@ def _db_exists() -> bool:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def get_hourly_stats(symbol: str, lookback_days: int = DR_LOOKBACK_DAYS) -> list[dict]:
-    """Win rate et profit par heure UTC pour un symbole."""
+    """Win rate pondéré par récence par heure UTC pour un symbole.
+
+    Chaque trade reçoit un poids w = exp(-age_jours * ln2 / DR_DECAY_HALF_LIFE_DAYS).
+    Un trade d'aujourd'hui vaut 1.0, un trade vieux de 7 jours vaut 0.5.
+    Les heures récemment mauvaises ou bonnes ont donc plus de poids que l'historique ancien.
+    """
     if not _db_exists():
         return []
     try:
         conn = _get_conn()
+        # Récupérer tous les trades avec leur date pour calculer le poids en Python
         rows = conn.execute("""
-            SELECT
-                hour_utc,
-                COUNT(*) AS trades,
-                SUM(CASE WHEN result='WIN' THEN 1 ELSE 0 END) AS wins,
-                SUM(CASE WHEN result='LOSS' THEN 1 ELSE 0 END) AS losses,
-                ROUND(AVG(CASE WHEN result='WIN' THEN 1.0 ELSE 0.0 END) * 100, 1) AS win_rate_pct,
-                ROUND(SUM(net_profit), 2) AS total_profit,
-                ROUND(AVG(net_profit), 2) AS avg_profit
+            SELECT hour_utc, result, net_profit, trade_date
             FROM trades
-            WHERE symbol = ?
+            WHERE UPPER(symbol) = UPPER(?)
               AND result IN ('WIN','LOSS')
               AND trade_date >= date('now', ? || ' days')
-            GROUP BY hour_utc
             ORDER BY hour_utc
         """, (symbol, f"-{lookback_days}")).fetchall()
         conn.close()
 
-        # Remplir les heures manquantes avec 0 trades
-        by_hour = {r["hour_utc"]: dict(r) for r in rows}
+        today = datetime.now(timezone.utc).date()
+        decay_k = math.log(2) / DR_DECAY_HALF_LIFE_DAYS  # ln2 / demi-vie
+
+        # Accumulateurs pondérés par heure
+        buckets: dict[int, dict] = {}
+        for r in rows:
+            h = r["hour_utc"]
+            if h not in buckets:
+                buckets[h] = {"w_total": 0.0, "w_wins": 0.0, "w_profit": 0.0, "raw_trades": 0}
+            try:
+                trade_date = datetime.strptime(r["trade_date"], "%Y-%m-%d").date()
+                age_days = max(0, (today - trade_date).days)
+            except Exception:
+                age_days = 0
+            w = math.exp(-decay_k * age_days)
+            buckets[h]["w_total"]  += w
+            buckets[h]["w_profit"] += w * r["net_profit"]
+            buckets[h]["raw_trades"] += 1
+            if r["result"] == "WIN":
+                buckets[h]["w_wins"] += w
+
         result = []
         for h in range(24):
-            if h in by_hour:
-                result.append(by_hour[h])
+            if h in buckets and buckets[h]["raw_trades"] > 0:
+                b = buckets[h]
+                wr = round(100.0 * b["w_wins"] / b["w_total"], 1) if b["w_total"] > 0 else 0.0
+                avg_p = round(b["w_profit"] / b["w_total"], 2) if b["w_total"] > 0 else 0.0
+                result.append({
+                    "hour_utc": h,
+                    "trades": b["raw_trades"],
+                    "wins": 0,   # non utilisé en aval
+                    "losses": 0,
+                    "win_rate_pct": wr,
+                    "total_profit": round(b["w_profit"], 2),
+                    "avg_profit": avg_p,
+                })
             else:
                 result.append({
                     "hour_utc": h, "trades": 0, "wins": 0, "losses": 0,
@@ -110,7 +144,7 @@ def get_dow_stats(symbol: str, lookback_days: int = DR_LOOKBACK_DAYS) -> list[di
                 ROUND(AVG(CASE WHEN result='WIN' THEN 1.0 ELSE 0.0 END) * 100, 1) AS win_rate_pct,
                 ROUND(SUM(net_profit), 2) AS total_profit
             FROM trades
-            WHERE symbol = ?
+            WHERE UPPER(symbol) = UPPER(?)
               AND result IN ('WIN','LOSS')
               AND trade_date >= date('now', ? || ' days')
             GROUP BY day_of_week
@@ -174,7 +208,7 @@ def get_recent_trades(symbol: str, n: int = 5) -> list[dict]:
         rows = conn.execute("""
             SELECT symbol, result, net_profit, close_time
             FROM trades
-            WHERE symbol = ? AND result IN ('WIN','LOSS')
+            WHERE UPPER(symbol) = UPPER(?) AND result IN ('WIN','LOSS')
             ORDER BY close_time DESC
             LIMIT ?
         """, (symbol, n)).fetchall()

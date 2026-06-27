@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Bougies OHLC depuis le terminal MT5 local (Deriv) — sans TradingView."""
+"""Bougies OHLC depuis MT5 — multi-terminal (Deriv + Weltrade)."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ import logging
 import os
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from pathlib import Path
 from typing import Optional
 
@@ -21,7 +22,14 @@ logger = logging.getLogger(__name__)
 
 _mt5_ready = False
 _last_init_error: Optional[str] = None
+_current_broker: Optional[str] = None
 _mt5_lock = __import__("threading").Lock()
+_symbol_cache: dict[str, str] = {}  # canonical → mt5 name cache
+_MT5_CALL_TIMEOUT = 10.0  # secondes max pour tout appel MT5 bloquant
+_MT5_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="mt5_call")
+
+DEFAULT_DERIV_TERMINAL = r"D:\Program Files\MetaTrader 5\terminal64.exe"
+DEFAULT_WELTRADE_TERMINAL = r"D:\Program Files\MetaTrader 5 - Copie\terminal64.exe"
 
 CANON_TO_MT5_TF = {
     "1": ("M1", None),
@@ -45,94 +53,180 @@ def mt5_python_available() -> bool:
         return False
 
 
-def ensure_mt5_connected() -> bool:
-    """Attache le package Python au terminal MT5 déjà ouvert (Deriv)."""
-    global _mt5_ready, _last_init_error
+def _broker_for_symbol(symbol: str) -> str:
+    try:
+        from symbol_mapper import is_weltrade_symbol
+        return "weltrade" if is_weltrade_symbol(symbol) else "deriv"
+    except ImportError:
+        s = (symbol or "").upper().replace(" ", "")
+        if "PAINX" in s or "GAINX" in s or "FXVOL" in s or "SFVVOL" in s:
+            return "weltrade"
+        return "deriv"
+
+
+def _terminal_path_for_broker(broker: str) -> str:
+    if broker == "weltrade":
+        return (
+            os.getenv("MT5_WELTRADE_TERMINAL_PATH", DEFAULT_WELTRADE_TERMINAL).strip()
+            or DEFAULT_WELTRADE_TERMINAL
+        )
+    return (
+        os.getenv("MT5_TERMINAL_PATH", DEFAULT_DERIV_TERMINAL).strip()
+        or DEFAULT_DERIV_TERMINAL
+    )
+
+
+def _shutdown_mt5() -> None:
+    global _mt5_ready, _current_broker
+    if not mt5_python_available():
+        return
+    import MetaTrader5 as mt5
+    try:
+        mt5.shutdown()
+    except Exception:
+        pass
+    _mt5_ready = False
+    _current_broker = None
+    _symbol_cache.clear()  # les noms de symboles varient entre terminaux
+
+
+def ensure_mt5_connected(symbol: Optional[str] = None) -> bool:
+    """Connecte le terminal MT5 adapté au symbole (Deriv ou Weltrade)."""
+    global _mt5_ready, _last_init_error, _current_broker
+
     if not mt5_python_available():
         _last_init_error = "MetaTrader5 non installé (pip install MetaTrader5)"
         return False
 
+    broker = _broker_for_symbol(symbol or "")
+    path = _terminal_path_for_broker(broker)
+
     import MetaTrader5 as mt5
 
-    if _mt5_ready:
+    if _mt5_ready and _current_broker == broker:
         if mt5.terminal_info() is not None:
             return True
         _mt5_ready = False
 
+    if _mt5_ready and _current_broker != broker:
+        logger.info("MT5 switch terminal: %s -> %s", _current_broker, broker)
+        _shutdown_mt5()
+        time.sleep(0.3)  # laisse le terminal précédent se libérer
+
+    init_kwargs = {"path": path} if path else {}
+
     login = os.getenv("MT5_LOGIN", "").strip()
     password = os.getenv("MT5_PASSWORD", "").strip()
     server = os.getenv("MT5_SERVER", "").strip()
-    path = os.getenv("MT5_TERMINAL_PATH", "").strip()
-
-    init_kwargs = {}
-    if path:
-        init_kwargs["path"] = path
 
     ok = False
-    if login and password and server:
+    if broker == "deriv" and login and password and server:
         try:
-            ok = mt5.initialize(login=int(login), password=password, server=server, **init_kwargs)
+            _login = int(login)
+            future = _MT5_EXECUTOR.submit(
+                mt5.initialize, login=_login, password=password, server=server, **init_kwargs
+            )
+            ok = future.result(timeout=_MT5_CALL_TIMEOUT) or False
+        except FuturesTimeoutError:
+            logger.warning("MT5 initialize(login) timeout — broker=%s", broker)
         except Exception as exc:
             logger.debug("MT5 init with login failed: %s", exc)
 
     if not ok:
         try:
-            ok = mt5.initialize(**init_kwargs)
+            future = _MT5_EXECUTOR.submit(mt5.initialize, **init_kwargs)
+            ok = future.result(timeout=_MT5_CALL_TIMEOUT) or False
+        except FuturesTimeoutError:
+            _last_init_error = f"mt5.initialize timeout ({_MT5_CALL_TIMEOUT}s) broker={broker}"
+            logger.warning(_last_init_error)
+            return False
         except Exception as exc:
             _last_init_error = str(exc)
             return False
 
     if not ok:
         err = mt5.last_error()
-        _last_init_error = f"mt5.initialize failed: {err}"
+        _last_init_error = f"mt5.initialize failed ({broker}): {err} path={path}"
         return False
 
     ti = mt5.terminal_info()
     ai = mt5.account_info()
     if ti is None:
-        _last_init_error = "terminal_info() vide — MT5 ouvert ?"
+        _last_init_error = f"terminal_info() vide — MT5 {broker} ouvert ?"
         return False
 
     _mt5_ready = True
+    _current_broker = broker
     _last_init_error = None
     logger.info(
-        "MT5 connecté: %s | compte=%s serveur=%s",
+        "MT5 connecté [%s]: %s | compte=%s serveur=%s | path=%s",
+        broker,
         ti.name,
         getattr(ai, "login", "?"),
         getattr(ai, "server", "?"),
+        path,
     )
     return True
 
 
+def ensure_mt5_connected_legacy() -> bool:
+    """Compatibilité — connecte Deriv par défaut."""
+    return ensure_mt5_connected(None)
+
+
+def _mt5_call_with_timeout(fn, *args, timeout: float = _MT5_CALL_TIMEOUT):
+    """Exécute fn(*args) dans un thread avec timeout pour éviter le blocage sur MT5."""
+    future = _MT5_EXECUTOR.submit(fn, *args)
+    try:
+        return future.result(timeout=timeout)
+    except FuturesTimeoutError:
+        logger.warning("MT5 call timeout (%.1fs): %s", timeout, getattr(fn, "__name__", fn))
+        return None
+    except Exception as exc:
+        logger.debug("MT5 call error %s: %s", getattr(fn, "__name__", fn), exc)
+        return None
+
+
 def _resolve_broker_symbol(symbol: str) -> Optional[str]:
-    from symbol_mapper import resolve_mt5_symbol
+    # Cache lookup (évite symbols_get() répétés)
+    cached = _symbol_cache.get(symbol.strip())
+    if cached:
+        return cached
+
+    try:
+        from symbol_mapper import resolve_mt5_symbol
+        canon = resolve_mt5_symbol(symbol)
+    except ImportError:
+        canon = symbol.strip()
 
     import MetaTrader5 as mt5
 
-    candidates = []
-    canon = resolve_mt5_symbol(symbol)
-    candidates.append(canon)
-    candidates.append(symbol.strip())
-    if canon != symbol.strip():
-        candidates.append(symbol.strip())
-
-    seen = set()
+    candidates = [canon, symbol.strip()]
+    seen: set[str] = set()
     for cand in candidates:
         if not cand or cand in seen:
             continue
         seen.add(cand)
-        info = mt5.symbol_info(cand)
+        info = _mt5_call_with_timeout(mt5.symbol_info, cand)
         if info is not None:
             if not info.visible:
                 mt5.symbol_select(cand, True)
+            _symbol_cache[symbol.strip()] = cand
             return cand
 
+    # Fallback fuzzy sur symbols_get() — avec timeout pour ne pas bloquer
     compact = (candidates[-1] if candidates else symbol).upper().replace(" ", "")
-    for s in mt5.symbols_get() or []:
+    all_syms = _mt5_call_with_timeout(mt5.symbols_get)
+    if all_syms is None:
+        logger.warning("symbols_get() timeout — symbole %s non résolu", symbol)
+        return None
+    for s in all_syms:
         key = s.name.upper().replace(" ", "")
-        if key == compact:
-            mt5.symbol_select(s.name, True)
-            return s.name
+        if key == compact or (compact in key or key in compact):
+            if len(key) >= 5 and len(compact) >= 5:
+                mt5.symbol_select(s.name, True)
+                _symbol_cache[symbol.strip()] = s.name
+                return s.name
     return None
 
 
@@ -146,16 +240,21 @@ def _canon_tf(timeframe: str) -> str:
 
 
 def fetch_mt5_candles(symbol: str, timeframe: str, bars: int = 200) -> Optional[pd.DataFrame]:
-    """Lit les bougies fermées depuis MT5 (shift=1)."""
+    """Lit les bougies fermées depuis MT5 (shift=1) — terminal auto selon symbole."""
     with _mt5_lock:
-        if not ensure_mt5_connected():
+        if not ensure_mt5_connected(symbol):
             return None
 
         import MetaTrader5 as mt5
 
         sym = _resolve_broker_symbol(symbol)
         if not sym:
-            logger.warning("Symbole MT5 introuvable: %s", symbol)
+            logger.warning(
+                "Symbole MT5 introuvable: %s (broker=%s, terminal=%s)",
+                symbol,
+                _current_broker,
+                _terminal_path_for_broker(_current_broker or "deriv"),
+            )
             return None
 
         canon = _canon_tf(timeframe)
@@ -174,9 +273,9 @@ def fetch_mt5_candles(symbol: str, timeframe: str, bars: int = 200) -> Optional[
         }
         mt5_tf = tf_map.get(tf_label, mt5.TIMEFRAME_M15)
 
-        rates = mt5.copy_rates_from_pos(sym, mt5_tf, 1, bars)
+        rates = _mt5_call_with_timeout(mt5.copy_rates_from_pos, sym, mt5_tf, 1, bars)
         if rates is None or len(rates) == 0:
-            rates = mt5.copy_rates_from_pos(sym, mt5_tf, 0, bars)
+            rates = _mt5_call_with_timeout(mt5.copy_rates_from_pos, sym, mt5_tf, 0, bars)
         if rates is None or len(rates) == 0:
             logger.warning("copy_rates vide: %s %s", sym, tf_label)
             return None
@@ -189,11 +288,14 @@ def fetch_mt5_candles(symbol: str, timeframe: str, bars: int = 200) -> Optional[
         return df[["open", "high", "low", "close", "volume"]].copy()
 
 
-def mt5_status_snapshot() -> dict:
+def mt5_status_snapshot(symbol: Optional[str] = None) -> dict:
     """Diagnostic connexion MT5 pour /gom/mt5-status."""
+    broker = _broker_for_symbol(symbol or "")
     out = {
         "python_package": mt5_python_available(),
         "connected": False,
+        "broker": broker,
+        "terminal_path": _terminal_path_for_broker(broker),
         "terminal": None,
         "account": None,
         "last_error": _last_init_error,
@@ -201,14 +303,15 @@ def mt5_status_snapshot() -> dict:
     if not out["python_package"]:
         out["hint"] = "pip install MetaTrader5"
         return out
-    if not ensure_mt5_connected():
-        out["hint"] = "Ouvrez MetaTrader 5 (Deriv) et connectez-vous au compte"
+    if not ensure_mt5_connected(symbol):
+        out["hint"] = f"Ouvrez MetaTrader 5 ({broker}) et connectez-vous"
         return out
     import MetaTrader5 as mt5
 
     ti = mt5.terminal_info()
     ai = mt5.account_info()
     out["connected"] = True
+    out["current_broker"] = _current_broker
     if ti:
         out["terminal"] = {
             "name": ti.name,

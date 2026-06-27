@@ -1,0 +1,70 @@
+; ============================================================
+; CONFIG DEMO — CRASH 500 (SMC_Universal.mq5)
+; Backtest: Return +92% | WR 52.6% | PF 1.26 | DD 5%
+; Periode testee: 2020-2021 M1 (donnees limitees)
+; ============================================================
+
+; === BOOM/CRASH MODE ===
+BoomBuyOnly=false
+CrashSellOnly=true
+NoSLTP_BoomCrash=false
+
+; === RISK MANAGEMENT ===
+MaxRiskPerTradePercent=0.3
+MaxLossPerSpikeTradeDollars=0.65
+TargetProfitBoomCrashUSD=0.80
+MaxPositionsTerminal=1
+
+; === SL/TP ===
+SL_ATRMult=2.5
+TP_ATRMult=3.0
+BoomCrashSpikeTP=0.80
+
+; === SPIKE DETECTION ===
+BoomCrashSpikePct=0.50
+UseSpikeAutoClose=true
+PostSpikeBlockBarsSinceSpike=20
+PostSpikeMinSmallCandles=2
+UseSpikeMLFilter=false
+
+; === PULSE EXHAUSTION ===
+UsePulseExhaustion=true
+BoomCrashProtectTriggerUSD=0.30
+SpikeSeriesMaxCount=5
+
+; === DECISION ENGINE ===
+UseDecisionEngine=true
+GOMPerfectHoldImmunitySec=300
+GOMRequireOBTouch=false
+GOMRequireOTE=false
+GOMMinPropiceScore=70
+MinGOMVerdictNumAbs=1
+
+; === GOM PIPELINE ===
+UseGOMVerdictFilter=true
+UseGOMPipeline=true
+GOMPollIntervalSec=2
+GOMMinCoherencePct=50
+GOMGlobalMinConfidence=4
+
+; === PROFIL BOOM/CRASH (override) ===
+; (pas de profil specifique, utiliser SL_ATRMult/TP_ATRMult globaux)
+
+; === IA / COG ===
+MinAIConfidencePercent=55
+MinAIConfidence=0.55
+UseIAHoldClose=false
+
+; === TRIPLE ALIGNMENT ===
+UseTripleAlignmentGate=false
+
+; === FILTRES RSI (PERFECT bypass) ===
+PerfectRsiOSMin=12
+PerfectRsiOBMax=88
+
+; === SESSION ===
+; Pas de filtre horaire pour Crash 500 (24/7)
+
+; === AFFICHAGE ===
+ShowSpikeZones=true
+ShowGOMDashboard=true

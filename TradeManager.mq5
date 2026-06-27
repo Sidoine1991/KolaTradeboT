@@ -3137,11 +3137,11 @@ void TryReEntryOnEMA(int idx)
       (int)(TimeCurrent() - g_states[idx].lastReEntry) < ReEntryCooldownSec)
       return;
 
-   // Cooldown post-SL : 10 min après une perte, 20 min après 2 pertes consécutives
-   if(g_states[idx].lastSLHitTime > 0)
+   // Cooldown post-SL : configurable via inputs (UseLossCooldown / CooldownConsecutiveLoss / CooldownDurationMin)
+   if(UseLossCooldown && g_states[idx].lastSLHitTime > 0)
    {
       int losses    = g_states[idx].consecutiveLosses;
-      int cooldownSec = (losses >= 2) ? 1200 : 600; // 20min si 2+ pertes, 10min sinon
+      int cooldownSec = (losses >= CooldownConsecutiveLoss) ? CooldownDurationMin * 60 : 600;
       int elapsed   = (int)(TimeCurrent() - g_states[idx].lastSLHitTime);
       if(elapsed < cooldownSec)
       {
@@ -6104,10 +6104,10 @@ void CheckGOMReEntry()
 
       // Cooldown post-SL via g_states
       int sIdx2 = FindState(posSym);
-      if(sIdx2 >= 0 && g_states[sIdx2].lastSLHitTime > 0)
+      if(UseLossCooldown && sIdx2 >= 0 && g_states[sIdx2].lastSLHitTime > 0)
       {
          int losses2    = g_states[sIdx2].consecutiveLosses;
-         int cooldown2  = (losses2 >= 2) ? 1200 : 600;
+         int cooldown2  = (losses2 >= CooldownConsecutiveLoss) ? CooldownDurationMin * 60 : 600;
          int elapsed2   = (int)(TimeCurrent() - g_states[sIdx2].lastSLHitTime);
          if(elapsed2 < cooldown2)
          {
