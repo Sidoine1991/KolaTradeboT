@@ -598,53 +598,10 @@ bool SMCPS_EntryAllowed(const string symbol, const int dirSign)
    return true;
 }
 
-// Gate universelle : direction GOM + pattern Charly confirmé (breakout si activé)
-bool SMCPS_ValidateGOMDirectionAndPattern(const string symbol, const int dirSign,
-                                            const bool requirePattern = true)
-{
-   if(dirSign == 0) return false;
-
-   if(UseGOMVerdictFilter && g_smcGomConnected)
-   {
-      int effVn = SMCPS_EffectiveGOMVerdictNum();
-      if(effVn == 0)
-      {
-         Print("[ENTRY-GATE] BLOQUE — GOM=WAIT (vn=0) | ", symbol,
-               " ordre=", (dirSign > 0 ? "BUY" : "SELL"));
-         return false;
-      }
-      if(dirSign == 1 && effVn <= 0)
-      {
-         Print("[ENTRY-GATE] BLOQUE — BUY interdit vs GOM ", g_smcGomVerdict,
-               " (vn=", effVn, ") | ", symbol);
-         return false;
-      }
-      if(dirSign == -1 && effVn >= 0)
-      {
-         Print("[ENTRY-GATE] BLOQUE — SELL interdit vs GOM ", g_smcGomVerdict,
-               " (vn=", effVn, ") | ", symbol);
-         return false;
-      }
-   }
-
-   if(!requirePattern || !UsePatternEntrySignals) return true;
-
-   if(!SMCPS_PatternGateOK(symbol, dirSign, true)) return false;
-
-   if(!SMCPS_BreakoutConfirmed(symbol, dirSign))
-   {
-      static datetime s_boLog = 0;
-      if(TimeCurrent() - s_boLog >= 45)
-      {
-         s_boLog = TimeCurrent();
-         Print("[ENTRY-GATE] Attente confirmation breakout | ",
-               (dirSign > 0 ? "BUY" : "SELL"), " | ", g_smcps.summary,
-               " | GOM vn=", g_smcGomVerdictNum);
-      }
-      return false;
-   }
-   return true;
-}
+// Gate universelle : direction GOM + pattern Charly confirmé.
+// NOTE: la definition de SMCPS_ValidateGOMDirectionAndPattern() se trouve
+// desormais dans le fichier principal SMC_Universal.mq5 (autonome, evite les
+// duplications/desynchronisations de version de module).
 
 string SMCPS_GetSummary() { return g_smcps.summary; }
 
