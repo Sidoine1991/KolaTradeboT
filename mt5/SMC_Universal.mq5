@@ -294,6 +294,8 @@ void DrawHistoricalSwingPoints(MqlRates &rates[], int bars, double point);
 void DrawBookmarkLevels();
 void ManageBoomCrashSpikeClose();
 void ManageDollarExits();
+void SMC_EnforceHardMaxLossBackstop();
+void SMC_ManageVerdictReversalExit();
 void CloseWorstPositionIfTotalLossExceeded();
 void CloseAllPositionsIfTotalProfitReached();
 void ClosePositionsOnIAHold();
@@ -1027,6 +1029,51 @@ if(!ValidateTradeBeforeExecution(request.symbol, dir, request.volume, request.pr
                 " retcode=", chkFinal.retcode, " ", chkFinal.comment);
           result.retcode = chkFinal.retcode;
           return false;
+       }
+    }
+
+    // ── FILET DE SECURITE FINAL (non contournable) ────────────────────────
+    // Empeche toute entree opposee a un verdict GOM ferme + tout risque > balance%.
+    if(UseHardSafetyNet && isOpening
+       && (request.action == TRADE_ACTION_DEAL || request.action == TRADE_ACTION_PENDING))
+    {
+       int guardDir = (request.type == ORDER_TYPE_BUY || request.type == ORDER_TYPE_BUY_LIMIT
+                       || request.type == ORDER_TYPE_BUY_STOP) ? 1 : -1;
+
+       // 1) Direction : jamais opposee a un verdict GOM ferme (symbole du chart)
+       if(request.symbol == _Symbol && UseGOMVerdictFilter && g_smcGomConnected
+          && g_smcGomVerdictNum != 0 && MathAbs(g_smcGomVerdictNum) >= MinGOMVerdictNumAbs
+          && !SMC_GOMDirectionAllowsOrder(guardDir))
+       {
+          Print("[SAFETY-NET] REFUSE ", dir, " ", request.symbol,
+                " — oppose au verdict GOM ", g_smcGomVerdict, " (vn=", g_smcGomVerdictNum, ")");
+          result.retcode = 10006;
+          return false;
+       }
+
+       // 2) Risque/balance : perte estimee au SL <= MaxTradeRiskBalancePct % de la balance
+       if(request.sl > 0 && request.volume > 0 && MaxTradeRiskBalancePct > 0)
+       {
+          double entryRef = request.price;
+          if(entryRef <= 0)
+             entryRef = (guardDir == 1) ? SymbolInfoDouble(request.symbol, SYMBOL_ASK)
+                                        : SymbolInfoDouble(request.symbol, SYMBOL_BID);
+          double tv = SymbolInfoDouble(request.symbol, SYMBOL_TRADE_TICK_VALUE);
+          double ts = SymbolInfoDouble(request.symbol, SYMBOL_TRADE_TICK_SIZE);
+          double priceDist = MathAbs(entryRef - request.sl);
+          double lossUSD = (tv > 0 && ts > 0)
+                           ? (priceDist / ts) * tv * request.volume
+                           : priceDist * request.volume * SymbolInfoDouble(request.symbol, SYMBOL_TRADE_CONTRACT_SIZE);
+          double bal = AccountInfoDouble(ACCOUNT_BALANCE);
+          if(bal > 0 && lossUSD > bal * (MaxTradeRiskBalancePct / 100.0))
+          {
+             Print("[SAFETY-NET] REFUSE ", dir, " ", request.symbol,
+                   " — risque ", DoubleToString(lossUSD, 2), "$ > ",
+                   DoubleToString(MaxTradeRiskBalancePct, 1), "% de la balance (",
+                   DoubleToString(bal, 2), "$)");
+             result.retcode = 10006;
+             return false;
+          }
        }
     }
 
@@ -2369,6 +2416,13 @@ input group "=== GOM WAIT OB PULLBACK (ordre limit sur OB quand GOM=WAIT + Cogni
 input ENUM_WAIT_MODE GOMWaitMode      = WAIT_PATIENT; // WAIT: PATIENT=aucun trade | PULLBACK=LIMIT OB (déconseillé)
 input double PullbackMinIAConf       = 55.0;   // Confiance IA minimale pour déclencher un OB limit (%)
 input bool   PullbackNotifyWhatsApp  = true;   // Notifier WhatsApp à la pose de l'ordre OB pullback
+
+input group "=== SECURITE / RESPECT VERDICT GOM (KolaTradeboT) ==="
+input bool   UseHardSafetyNet        = true;  // Filet de securite final non contournable (direction GOM + risque/balance)
+input double MaxTradeRiskBalancePct  = 3.0;   // Risque max par trade en % de la balance (perte estimee au SL)
+input bool   UseVerdictReversalExit  = true;  // Fermer une position opposee a un verdict GOM ferme (GOOD/PERFECT)
+input double VerdictReversalKeepUSD  = 0.30;  // Si position opposee deja > N $ de gain: laisser le trailing gerer
+input bool   UseHardMaxLossBackstop  = true;  // Backstop: couper toute position EA a -HardMaxLoss quel que soit UseDollarExits
 
 input group "=== DECISION ENGINE (gates unifies) ==="
 input bool   UseDecisionEngine       = true;   // Utiliser le DecisionEngine centralise (false = ancien comportement)
@@ -4337,6 +4391,71 @@ void ManageBoomCrashSpikeClose()
    }
 }
 
+//+------------------------------------------------------------------+
+//| BACKSTOP PERTE MAX — coupe toute position EA a -HardMaxLoss       |
+//| Independant de UseDollarExits (filet de securite absolu).        |
+//+------------------------------------------------------------------+
+void SMC_EnforceHardMaxLossBackstop()
+{
+   if(!UseHardMaxLossBackstop) return;
+   if(PositionsTotal() == 0) return;
+
+   double hardCap = MathMax(0.01, MathMax(UniversalMaxLossUSD, GOMHoldMaxLossUSD));
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      if(!posInfo.SelectByIndex(i)) continue;
+      if(posInfo.Magic() != InpMagicNumber) continue;
+
+      double profit = posInfo.Profit() + posInfo.Swap() + posInfo.Commission();
+      if(profit > -hardCap) continue;
+
+      string sym    = posInfo.Symbol();
+      ulong  ticket = posInfo.Ticket();
+      if(!PositionSelectByTicket(ticket)) continue;
+      if(PositionCloseWithLog(ticket, "Backstop perte max", true))
+         Print("[MAXLOSS-BACKSTOP] ", sym, " ferme a ", DoubleToString(profit, 2),
+               "$ (cap -", DoubleToString(hardCap, 2), "$)");
+   }
+}
+
+//+------------------------------------------------------------------+
+//| SORTIE SUR VERDICT GOM OPPOSE — respecte le verdict dashboard    |
+//| Ferme toute position (symbole du chart) opposee a un verdict     |
+//| GOM ferme (GOOD/PERFECT) et pas nettement en gain.               |
+//+------------------------------------------------------------------+
+void SMC_ManageVerdictReversalExit()
+{
+   if(!UseVerdictReversalExit) return;
+   if(!UseGOMVerdictFilter || !g_smcGomConnected) return;
+   if(g_smcGomVerdictNum == 0) return;
+   if(MathAbs(g_smcGomVerdictNum) < MinGOMVerdictNumAbs) return;
+   // Ne pas agir sur un verdict perime
+   if(g_smcLastGOMPoll > 0 && (int)(TimeCurrent() - g_smcLastGOMPoll) > 90) return;
+
+   int verdictDir = (g_smcGomVerdictNum > 0) ? 1 : -1;
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      if(!posInfo.SelectByIndex(i)) continue;
+      if(posInfo.Magic() != InpMagicNumber) continue;
+      if(posInfo.Symbol() != _Symbol) continue; // le verdict live ne vaut que pour le symbole du chart
+
+      int posDir = (posInfo.PositionType() == POSITION_TYPE_BUY) ? 1 : -1;
+      if(posDir == verdictDir) continue; // position alignee au verdict
+
+      double profit = posInfo.Profit() + posInfo.Swap() + posInfo.Commission();
+      if(profit > VerdictReversalKeepUSD) continue; // gagnant: laisser trailing/gain-protection gerer
+
+      ulong ticket = posInfo.Ticket();
+      if(!PositionSelectByTicket(ticket)) continue;
+      if(PositionCloseWithLog(ticket, "Verdict GOM oppose", true))
+         Print("[REVERSAL-EXIT] ", _Symbol, " ", (posDir == 1 ? "BUY" : "SELL"),
+               " ferme — verdict GOM=", g_smcGomVerdict, " (vn=", g_smcGomVerdictNum,
+               ") | P/L=", DoubleToString(profit, 2), "$");
+   }
+}
+
 void ManageDollarExits()
 {
    // Si les sorties en dollars sont désactivées, sortir immédiatement
@@ -5193,6 +5312,9 @@ void OnTick()
    ManageBoomCrashSpikeClose();
    // Gestion des sorties en dollars (TP/SL globaux + BoomCrashSpikeTP)
    ManageDollarExits();
+   // Backstop perte max (independant de UseDollarExits) + sortie sur verdict GOM oppose
+   SMC_EnforceHardMaxLossBackstop();
+   SMC_ManageVerdictReversalExit();
 
    // Positions manuelles : appliquer SL/TP scalp si absents
    if(ManageManualPositions)
@@ -13660,7 +13782,52 @@ void ManageTrailingStop()
       double currentSL = posInfo.StopLoss();
       double currentTP = posInfo.TakeProfit();
       double trailMinUSD = MathMax(0.10, TrailingMinProfitUSD);
-      
+
+      // GAIN-LOCK universel : des trailMinUSD de gain (defaut 0.50$), verrouiller au moins
+      // le break-even. Une position en gain ne doit jamais redevenir perdante.
+      // Complementaire a GainProtection (qui verrouille un % du peak) ; ne fait que resserrer.
+      if(profit >= trailMinUSD)
+      {
+         int    bpDigits = (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS);
+         double bpPoint  = SymbolInfoDouble(symbol, SYMBOL_POINT);
+         double stopsD   = (double)SymbolInfoInteger(symbol, SYMBOL_TRADE_STOPS_LEVEL) * bpPoint;
+         double buffer   = bpPoint * 5.0;
+         if(posInfo.PositionType() == POSITION_TYPE_BUY)
+         {
+            double bidPx = SymbolInfoDouble(symbol, SYMBOL_BID);
+            double beSL  = NormalizeDouble(openPrice + buffer, bpDigits);
+            if(beSL > bidPx - stopsD) beSL = NormalizeDouble(bidPx - stopsD, bpDigits);
+            if(beSL >= openPrice && (currentSL <= 0 || beSL > currentSL) && beSL < bidPx)
+            {
+               if(PositionSelectByTicket(posInfo.Ticket())
+                  && PositionGetInteger(POSITION_MAGIC) == InpMagicNumber
+                  && trade.PositionModify(posInfo.Ticket(), beSL, currentTP))
+               {
+                  Print("[GAIN-LOCK] BUY +", DoubleToString(profit, 2), "$ | ", symbol,
+                        " SL->BE ", DoubleToString(beSL, bpDigits));
+                  currentSL = beSL;
+               }
+            }
+         }
+         else if(posInfo.PositionType() == POSITION_TYPE_SELL)
+         {
+            double askPx = SymbolInfoDouble(symbol, SYMBOL_ASK);
+            double beSL  = NormalizeDouble(openPrice - buffer, bpDigits);
+            if(beSL < askPx + stopsD) beSL = NormalizeDouble(askPx + stopsD, bpDigits);
+            if(beSL <= openPrice && (currentSL <= 0 || beSL < currentSL) && beSL > askPx)
+            {
+               if(PositionSelectByTicket(posInfo.Ticket())
+                  && PositionGetInteger(POSITION_MAGIC) == InpMagicNumber
+                  && trade.PositionModify(posInfo.Ticket(), beSL, currentTP))
+               {
+                  Print("[GAIN-LOCK] SELL +", DoubleToString(profit, 2), "$ | ", symbol,
+                        " SL->BE ", DoubleToString(beSL, bpDigits));
+                  currentSL = beSL;
+               }
+            }
+         }
+      }
+
       // Position initiale sans SL — poser SL protecteur si déjà en gain
       if(currentSL == 0)
       {
