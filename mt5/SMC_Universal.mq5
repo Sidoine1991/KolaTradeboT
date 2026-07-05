@@ -2423,6 +2423,8 @@ input double MaxTradeRiskBalancePct  = 3.0;   // Risque max par trade en % de la
 input bool   UseVerdictReversalExit  = true;  // Fermer une position opposee a un verdict GOM ferme (GOOD/PERFECT)
 input double VerdictReversalKeepUSD  = 0.30;  // Si position opposee deja > N $ de gain: laisser le trailing gerer
 input bool   UseHardMaxLossBackstop  = true;  // Backstop: couper toute position EA a -HardMaxLoss quel que soit UseDollarExits
+input bool   UseSniperEntry          = true;  // Entrees sniper: ne jamais entrer en pleine correction non epuisee
+input double SniperCorrExhaustMinPct = 60.0;  // Correction min. epuisee (%) requise pour autoriser une entree (sauf PERFECT+pattern)
 
 input group "=== DECISION ENGINE (gates unifies) ==="
 input bool   UseDecisionEngine       = true;   // Utiliser le DecisionEngine centralise (false = ancien comportement)
@@ -9113,6 +9115,20 @@ SMC_EntryGateResult SMC_EvaluateEntryGate(const int dirSign, const bool isGomOrd
 
    // ── 8. CORRECTION CYCLE ────────────────────────────────────────────────
    bool volScalpBypass = (SMC_IsWeltradeVolSymbol(symbol) && isGomOrder && MathAbs(g_smcGomVerdictNum) >= 2);
+
+   // SNIPER: ne jamais entrer en pleine correction non epuisee, MEME en bypass vol-scalp.
+   // Seule exception: PERFECT avec pattern chartiste confirme (setup A+).
+   if(UseSniperEntry && SMC_GetSymbolCategory(symbol) != SYM_BOOM_CRASH
+      && !g_smcCorrEntrySafe && g_smcCorrExhaustPct < SniperCorrExhaustMinPct
+      && !(isPerfect && perfectPatternReady))
+   {
+      Print("[SNIPER] BLOQUE ", symbol, " ", dir, " — correction ", g_smcCorrPhase, " ",
+            DoubleToString(g_smcCorrExhaustPct, 0), "% < ", DoubleToString(SniperCorrExhaustMinPct, 0),
+            "% (attendre fin de correction)");
+      result.blockedBy = 8; result.blockedByName = "SniperCorrection"; result.allowed = false;
+      return result;
+   }
+
    if(SMC_GetSymbolCategory(symbol) != SYM_BOOM_CRASH && !SMCGP_IsCorrectionResumeWindow() && !volScalpBypass)
    {
       if(SMCGP_CorrectionBlocksEntry(SMCGP_IsBoomCrashSym(symbol)))
