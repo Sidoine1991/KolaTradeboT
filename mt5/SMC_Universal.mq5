@@ -2759,37 +2759,6 @@ bool SMC_IsGOMPatternGateSymbol(const string symbol)
    return false;
 }
 
-//+------------------------------------------------------------------+
-//| Gate absolu direction GOM + pattern chartiste (pattern Charly).  |
-//| Retourne false pour BLOQUER l'ordre :                            |
-//|   - direction opposee a un verdict GOM ferme (GOOD/PERFECT), ou  |
-//|   - (si requirePattern) aucun pattern confirme dans la direction.|
-//+------------------------------------------------------------------+
-bool SMCPS_ValidateGOMDirectionAndPattern(const string symbol, const int dirSign, const bool requirePattern = true)
-{
-   if(dirSign == 0) return false;
-
-   // 1) Direction : jamais opposee a un verdict GOM ferme
-   if(UseGOMVerdictFilter && g_smcGomConnected && symbol == _Symbol
-      && g_smcGomVerdictNum != 0 && MathAbs(g_smcGomVerdictNum) >= MinGOMVerdictNumAbs
-      && !SMC_GOMDirectionAllowsOrder(dirSign))
-   {
-      Print("[GOM-PATTERN] BLOQUE direction — ", (dirSign == 1 ? "BUY" : "SELL"),
-            " ", symbol, " oppose au verdict GOM ", g_smcGomVerdict, " (vn=", g_smcGomVerdictNum, ")");
-      return false;
-   }
-
-   // 2) Pattern chartiste confirme dans la direction (confirmation Charly)
-   if(requirePattern && UsePatternEntrySignals && !SMCPS_HasPatternForDirection(dirSign))
-   {
-      Print("[GOM-PATTERN] BLOQUE pattern — aucun pattern confirme ",
-            (dirSign == 1 ? "BUY" : "SELL"), " ", symbol);
-      return false;
-   }
-
-   return true;
-}
-
 double SMC_GetTrailATR(const string symbol)
 {
    double atrVal = 0;

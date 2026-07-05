@@ -20,6 +20,7 @@ extern double g_lastEntryProbability;
 extern string g_lastAIAction;
 extern double g_lastAIConfidence;
 
+
 bool SMCGP_IsBoomCrashSym(const string sym)
 {
    string s = sym;
@@ -33,9 +34,17 @@ datetime g_smcLastCandleUpload = 0;
 // ── État GOM ───────────────────────────────────────────────────────
 string   g_smcGomVerdict      = "WAIT";
 int      g_smcGomVerdictNum   = 0;
+int      g_smcGomVerdictReactiveNum = 0;
+int      g_smcGomVerdictForecastNum = 0;
 int      g_smcGomVerdictNumPrev = 999;  // 999 = pas encore armé
 bool     g_smcGomForceExhausted = false; // PERFECT→GOOD : fin cycle spike Boom/Crash
 string   g_smcGomVerdictPrev  = "";
+string   g_smcGomVerdictServer   = "WAIT";  // verdict serveur avant overlay correction
+int      g_smcGomVerdictNumServer = 0;
+bool     g_smcGomCorrectionWait  = false;    // true = affichage/trading en WAIT (correction)
+string   g_smcGomCorrectionReason = "";
+bool     g_smcGomServerCorrWait    = false;  // correction_wait=true du serveur (dernier poll)
+datetime g_smcGomCorrectionResumeUntil = 0;  // fenêtre MARKET après fin correction WAIT
 bool     g_smcGomNotifReady     = false;
 double   g_smcGomQuality      = 0.0;
 double   g_smcGomCoherence    = 0.0;
@@ -51,6 +60,9 @@ double   g_smcCorrExhaustPct  = 0.0;  // Correction exhaustion 0-100 (>70 = safe
 string   g_smcCorrPhase       = "unknown"; // trending|correcting|exhausted|resuming|ranging
 string   g_smcCorrType        = "";        // trend_run|micro_pullback|m5_pullback|...
 bool     g_smcCorrEntrySafe   = false; // true = correction terminée, re-entrée safe
+bool     g_smcM1EntryBlocked  = false; // gate M1 correction (serveur)
+bool     g_smcActiveCorrection = false;
+string   g_smcM1EntryReason   = "";
 // Seuils blocage correction (configurés depuis SMC_Universal OnInit)
 double   g_smcCorrBlockDefault    = 45.0;
 double   g_smcCorrBlockTrending   = 35.0;
@@ -58,7 +70,10 @@ double   g_smcCorrBlockCorrecting = 45.0;
 double   g_smcCorrBlockExhausted  = 40.0;
 double   g_smcCorrBlockRanging    = 38.0;
 double   g_smcCorrGomRelaxPts     = 10.0;  // assouplissement si |vn|>=2
-datetime g_smcLastGOMPoll     = 0;
+double   g_smcEntryProbabilityPct = 0.0;   // probabilité entrée composite (ai_server)
+bool     g_pathTrailBonusActive   = false; // trailing bonus path concordance
+datetime g_smcLastGOMPoll     = 0;  // dernier poll RÉUSSI (HTTP 200 + données valides)
+datetime g_smcLastGOMAttempt  = 0;  // dernière TENTATIVE (succès ou échec)
 datetime g_smcLastMCPPoll      = 0;
 datetime g_smcLastPipelineExec= 0;
 string   g_smcLastPipelineId  = "";
@@ -75,6 +90,7 @@ double   g_smcGomSpikePct     = 0.0;
 int      g_smcGomSpikeLevel   = 0;
 int      g_smcGomSpikeLevelPrev = -1;
 double   g_smcGomImminencePct = 0.0;
+double   g_smcPreSpikePct     = 0.0;
 bool     g_smcGomSpikeTradable = false;
 bool     g_smcGomSpikeTradablePrev = false;
 double   g_smcGomSpikeProgressPct = 0.0;
@@ -90,6 +106,24 @@ string   g_smcBcWindowStart     = "";
 string   g_smcBcWindowEnd       = "";
 string   g_smcBcMappedKey       = "";
 bool     g_smcSpikeNotifReady   = false;
+
+// ── Price Action Zone (MA50/MA200) ─────────────────────────────────
+string   g_smcPaTrend         = "UNKNOWN";
+bool     g_smcPaInCorrection  = false;
+bool     g_smcPaConsolidation = false;
+double   g_smcPaMa50          = 0.0;
+double   g_smcPaMa200         = 0.0;
+double   g_smcPaRsi           = 0.0;
+double   g_smcPaZoneSupport   = 0.0;
+double   g_smcPaZoneResistance= 0.0;
+double   g_smcPaCorrDepthPct  = 0.0;
+bool     g_smcPaPriceInZone   = false;
+
+// ── TradingView bias / score ──────────────────────────────────────
+string   g_smcTvBias           = "";
+double   g_smcTvScore          = 0.0;
+string   g_smcTvEntryStrength  = "";
+double   g_smcTvEntryRR        = 0.0;
 
 void SMCGP_ConfigureCorrectionGate(const double blockDefault, const double blockTrending,
                                  const double blockCorrecting, const double blockExhausted,
@@ -117,6 +151,14 @@ double SMCGP_CorrectionBlockThreshold(const string phase = "")
 bool SMCGP_CorrectionBlocksEntry(const bool isBoomCrash = false)
 {
    if(g_smcCorrEntrySafe) return false;
+
+   // FX Vol Weltrade : scalp continu en GOOD/PERFECT — micro-correction = opportunité
+   if(SMC_IsWeltradeVolSymbol(_Symbol))
+   {
+      int vn = (MathAbs(g_smcGomVerdictNumServer) >= 2) ? g_smcGomVerdictNumServer : g_smcGomVerdictNum;
+      if(MathAbs(vn) >= 2) return false;
+   }
+
    double thresh = SMCGP_CorrectionBlockThreshold();
    if(MathAbs(g_smcGomVerdictNum) >= 2 && !isBoomCrash)
       thresh -= g_smcCorrGomRelaxPts;
@@ -148,6 +190,222 @@ string SMCGP_CorrectionBlockReason(const bool isBoomCrash = false)
    if(thresh < 22.0) thresh = 22.0;
    return StringFormat("correction %s %s %.0f%% < seuil %.0f%%",
                        g_smcCorrType, g_smcCorrPhase, g_smcCorrExhaustPct, thresh);
+}
+
+int SMCGP_TfDirToSign(const string tfDir)
+{
+   string d = tfDir;
+   StringToUpper(d);
+   if(d == "BULL" || d == "BUY") return 1;
+   if(d == "BEAR" || d == "SELL") return -1;
+   return 0;
+}
+
+bool SMCGP_LiveMicroCorrectionAgainstVerdict(const string symbol, const int verdictNum)
+{
+   if(verdictNum == 0) return false;
+   int tradeDir = (verdictNum > 0) ? 1 : -1;
+   bool strongVerdict = (MathAbs(verdictNum) >= 2);
+
+   int oppBars = 0;
+   for(int i = 0; i <= 5; i++)
+   {
+      double o = iOpen(symbol, PERIOD_M1, i);
+      double c = iClose(symbol, PERIOD_M1, i);
+      if(o <= 0 || c <= 0) continue;
+      if(tradeDir < 0 && c > o) oppBars++;
+      if(tradeDir > 0 && c < o) oppBars++;
+   }
+
+   double c0 = iClose(symbol, PERIOD_M1, 0);
+   double c1 = iClose(symbol, PERIOD_M1, 1);
+   double c4 = iClose(symbol, PERIOD_M1, 4);
+   double netMove = (c0 > 0 && c4 > 0) ? (c0 - c4) : 0.0;
+   double pt = SymbolInfoDouble(symbol, SYMBOL_POINT);
+   double atr = 0.0;
+   int m1AtrH = iATR(symbol, PERIOD_M1, 14);
+   if(m1AtrH != INVALID_HANDLE)
+   {
+      double atrBuf[];
+      ArraySetAsSeries(atrBuf, true);
+      if(CopyBuffer(m1AtrH, 0, 0, 1, atrBuf) > 0)
+         atr = atrBuf[0];
+      IndicatorRelease(m1AtrH);
+   }
+   double minMove = (atr > 0) ? atr * 0.12 : ((pt > 0) ? pt * 8 : 0.0);
+   if(minMove <= 0 && pt > 0) minMove = pt * 8;
+
+   // Séquence de closes montants/descendants = correction visible
+   if(tradeDir < 0 && c0 > 0 && c1 > 0 && c4 > 0 && c0 > c1 && c1 > c4)
+      return true;
+   if(tradeDir > 0 && c0 > 0 && c1 > 0 && c4 > 0 && c0 < c1 && c1 < c4)
+      return true;
+
+   if(tradeDir < 0)
+   {
+      int needOpp = strongVerdict ? 2 : 3;
+      if(oppBars >= needOpp && netMove > minMove) return true;
+      if(oppBars >= 3 && netMove > minMove * 0.5) return true;
+   }
+   else
+   {
+      int needOpp = strongVerdict ? 2 : 3;
+      if(oppBars >= needOpp && netMove < -minMove) return true;
+      if(oppBars >= 3 && netMove < -minMove * 0.5) return true;
+   }
+
+   int m1s = SMCGP_TfDirToSign(g_smcTfM1Dir);
+   int m5s = SMCGP_TfDirToSign(g_smcTfM5Dir);
+   if(tradeDir < 0 && m1s > 0 && m5s > 0) return true;
+   if(tradeDir > 0 && m1s < 0 && m5s < 0) return true;
+   if(tradeDir < 0 && m1s > 0 && oppBars >= 2) return true;
+   if(tradeDir > 0 && m1s < 0 && oppBars >= 2) return true;
+
+   return false;
+}
+
+bool SMCGP_VerdictWaitOnCorrectionCycle(const int serverVn)
+{
+   if(serverVn == 0) return false;
+
+   if(g_smcM1EntryBlocked)
+   {
+      g_smcGomCorrectionReason = (StringLen(g_smcM1EntryReason) > 0)
+                                 ? g_smcM1EntryReason : "M1 correction active";
+      return true;
+   }
+
+   if(g_smcActiveCorrection)
+   {
+      string phase = g_smcCorrPhase;
+      StringToLower(phase);
+      if(phase == "correcting" || phase == "ranging")
+      {
+         g_smcGomCorrectionReason = StringFormat("correction %s (%s)",
+                                                 g_smcCorrType, g_smcCorrPhase);
+         return true;
+      }
+   }
+
+   string ctype = g_smcCorrType;
+   StringToLower(ctype);
+   if(ctype == "micro_pullback" || ctype == "m5_pullback" || ctype == "counter_move")
+   {
+      string phase2 = g_smcCorrPhase;
+      StringToLower(phase2);
+      if(phase2 == "correcting")
+      {
+         g_smcGomCorrectionReason = StringFormat("phase correcting (%s)", g_smcCorrType);
+         return true;
+      }
+   }
+
+   // Seuil verdict WAIT sans assouplissement PERFECT (contrairement à CorrectionBlocksEntry)
+   if(!g_smcCorrEntrySafe)
+   {
+      double thresh = SMCGP_CorrectionBlockThreshold();
+      if(thresh > 40.0) thresh = 40.0;
+      if(g_smcCorrExhaustPct < thresh)
+      {
+         g_smcGomCorrectionReason = StringFormat("correction %.0f%% < %.0f%%",
+                                                 g_smcCorrExhaustPct, thresh);
+         return true;
+      }
+   }
+
+   return false;
+}
+
+bool SMCGP_ShouldForceWaitOnCorrection(const string symbol)
+{
+   int vn = g_smcGomVerdictNumServer;
+   if(vn == 0) return false;
+
+   // FX Vol : le verdict GOM GOOD/PERFECT prime — ne pas forcer WAIT sur micro-correction M1
+   if(SMC_IsWeltradeVolSymbol(symbol) && MathAbs(vn) >= 2)
+      return false;
+
+   if(g_smcPaInCorrection && !g_smcCorrEntrySafe)
+   {
+      g_smcGomCorrectionReason = "PA correction";
+      return true;
+   }
+
+   if(SMCGP_VerdictWaitOnCorrectionCycle(vn))
+      return true;
+
+   if(SMCGP_LiveMicroCorrectionAgainstVerdict(symbol, vn))
+   {
+      g_smcGomCorrectionReason = "M1 pullback live";
+      return true;
+   }
+
+   return false;
+}
+
+void SMCGP_ArmCorrectionResumeWindow(const int sec = 90)
+{
+   g_smcGomCorrectionResumeUntil = TimeCurrent() + MathMax(15, sec);
+}
+
+bool SMCGP_IsCorrectionResumeWindow()
+{
+   return (g_smcGomCorrectionResumeUntil > 0 && TimeCurrent() < g_smcGomCorrectionResumeUntil);
+}
+
+void SMCGP_RefreshCorrectionWaitOverlay(const string symbol)
+{
+   if(g_smcGomVerdictNumServer == 0 && !g_smcGomServerCorrWait) return;
+
+   bool clientWait = SMCGP_ShouldForceWaitOnCorrection(symbol);
+   bool shouldWait = g_smcGomServerCorrWait || clientWait;
+
+   // FX Vol GOOD/PERFECT : ne jamais écraser le verdict serveur par WAIT correction
+   if(SMC_IsWeltradeVolSymbol(symbol) && MathAbs(g_smcGomVerdictNumServer) >= 2)
+      shouldWait = false;
+
+   bool wasWait = g_smcGomCorrectionWait;
+
+   if(shouldWait)
+   {
+      if(!g_smcGomCorrectionWait)
+      {
+         static datetime s_log = 0;
+         if(TimeCurrent() - s_log >= 15)
+         {
+            s_log = TimeCurrent();
+            Print("[GOM-CORR-WAIT] ", symbol, " ", g_smcGomVerdictServer,
+                  " (vn=", g_smcGomVerdictNumServer, ") → WAIT | ",
+                  g_smcGomCorrectionReason,
+                  " | srv=", (g_smcGomServerCorrWait ? "Y" : "N"),
+                  " cli=", (clientWait ? "Y" : "N"),
+                  " | M1=", g_smcTfM1Dir, " M5=", g_smcTfM5Dir);
+         }
+      }
+      g_smcGomCorrectionWait = true;
+      g_smcGomVerdictNum = 0;
+      g_smcGomVerdict = "WAIT";
+      g_smcGomCorrectionResumeUntil = 0;
+      return;
+   }
+
+   if(wasWait)
+   {
+      g_smcGomCorrectionWait = false;
+      g_smcGomCorrectionReason = "";
+      g_smcGomVerdictNum = g_smcGomVerdictNumServer;
+      g_smcGomVerdict = g_smcGomVerdictServer;
+      SMCGP_ArmCorrectionResumeWindow(90);
+      Print("[GOM-CORR-RESUME] ", symbol, " ", g_smcGomVerdict,
+            " (vn=", g_smcGomVerdictNum, ") — fenêtre exécution 90s");
+   }
+}
+
+void SMCGP_ApplyCorrectionVerdictWait(const string symbol, const bool serverFlag = false)
+{
+   if(serverFlag && StringLen(g_smcGomCorrectionReason) == 0)
+      g_smcGomCorrectionReason = "serveur correction";
+   SMCGP_RefreshCorrectionWaitOverlay(symbol);
 }
 string   g_smcTfM1Dir         = "";
 string   g_smcTfM5Dir         = "";
@@ -194,6 +452,8 @@ double   g_smcObBullTop       = 0.0;
 double   g_smcObBullBot       = 0.0;
 double   g_smcObBearTop       = 0.0;
 double   g_smcObBearBot       = 0.0;
+datetime g_smcObBullTime      = 0;
+datetime g_smcObBearTime      = 0;
 
 // Prédictions Bollinger Bands (300 bougies)
 double   g_smcPredBbMid[]     = {};
@@ -204,6 +464,15 @@ double   g_smcPredBbDn[]      = {};
 double   g_cogStrength        = 0.0;
 double   g_cogConfidence      = 0.0;
 string   g_cogDirection       = "NEUTRAL";
+string   g_cogDirection5m     = "NEUTRAL";
+string   g_cogDirection15m    = "NEUTRAL";
+double   g_cogSlope5m         = 0.0;
+double   g_cogSlope15m        = 0.0;
+double   g_cogShortConfidence = 0.0;
+#ifndef G_PATH_CONCORDANCE_PCT_DEFINED
+double   g_pathConcordancePct  = 0.0;
+#define G_PATH_CONCORDANCE_PCT_DEFINED
+#endif
 int      g_pipelineEma9Handle = INVALID_HANDLE;  // EMA9 M1 pour re-entrées scalp pipeline
 string   g_cogRegime          = "";
 double   g_smcPredPathMid[]   = {};
@@ -253,6 +522,42 @@ bool SMCGP_JsonBool(const string &body, const string key)
    pos += StringLen(search);
    while(pos < StringLen(body) && StringGetCharacter(body, pos) == ' ') pos++;
    return (StringGetCharacter(body, pos) == 't');
+}
+
+// Parse un tableau JSON d'entiers "[7, 8, 13]" ou pretty-print avec newlines → "7,8,13"
+string SMCGP_ParseIntArray(const string &body, const string key)
+{
+   string search = "\"" + key + "\"";
+   int pos = StringFind(body, search);
+   if(pos < 0) return "";
+   pos += StringLen(search);
+   // Avancer jusqu'au '['
+   int len = StringLen(body);
+   while(pos < len && StringGetCharacter(body, pos) != '[') pos++;
+   if(pos >= len) return "";
+   pos++; // sauter '['
+   // Lire jusqu'au ']', extraire les chiffres séparés par virgule
+   string result = "";
+   string token  = "";
+   while(pos < len)
+   {
+      ushort ch = StringGetCharacter(body, pos);
+      if(ch == ']')
+      {
+         if(StringLen(token) > 0)
+            result += (StringLen(result) > 0 ? "," : "") + token;
+         break;
+      }
+      if(ch >= '0' && ch <= '9')
+         token += ShortToString(ch);
+      else if(ch == ',' && StringLen(token) > 0)
+      {
+         result += (StringLen(result) > 0 ? "," : "") + token;
+         token = "";
+      }
+      pos++;
+   }
+   return result;
 }
 
 string SMCGP_ChartTfLabel()
@@ -315,6 +620,173 @@ void SMCGP_SendHeartbeat()
       "{\"symbol\":\"%s\",\"ea\":\"SMC_Universal\",\"magic\":%d,\"chart_id\":\"%I64d\",\"chart_tf\":\"%s\"}",
       symJson, InpMagicNumber, ChartID(), chartTf);
    SMCGP_HttpPost("/mt5/ea-heartbeat", body, AI_Timeout_ms);
+}
+
+string SMCGP_JsonEscape(const string s)
+{
+   string out = s;
+   StringReplace(out, "\\", "\\\\");
+   StringReplace(out, "\"", "\\\"");
+   return out;
+}
+
+string SMCGP_BuildMarketWatchSymbolsJson(const int maxSyms = 80)
+{
+   string json = "[";
+   int n = 0;
+   int total = SymbolsTotal(true);
+   for(int i = 0; i < total && n < maxSyms; i++)
+   {
+      string s = SymbolName(i, true);
+      if(s == "") continue;
+      if(n > 0) json += ",";
+      json += "\"" + SMCGP_JsonEscape(s) + "\"";
+      n++;
+   }
+   json += "]";
+   return json;
+}
+
+void SMCGP_SendDashboardLive(const bool forceNow = false)
+{
+   if(!UseAIServer) return;
+   if(!MT5DashboardSync) return;
+   static datetime s_lastLive = 0;
+   if(!forceNow && TimeCurrent() - s_lastLive < 15) return;
+   s_lastLive = TimeCurrent();
+
+   string sym = SMCGP_ResolveGOMSym(_Symbol);
+   string symJson = SMCGP_JsonEscape(sym);
+   string chartTf = SMCGP_ChartTfLabel();
+
+   long login = (long)AccountInfoInteger(ACCOUNT_LOGIN);
+   string server = AccountInfoString(ACCOUNT_SERVER);
+   string name = AccountInfoString(ACCOUNT_NAME);
+   string company = AccountInfoString(ACCOUNT_COMPANY);
+   string currency = AccountInfoString(ACCOUNT_CURRENCY);
+   int leverage = (int)AccountInfoInteger(ACCOUNT_LEVERAGE);
+
+   double balance = AccountInfoDouble(ACCOUNT_BALANCE);
+   double equity  = AccountInfoDouble(ACCOUNT_EQUITY);
+   double margin  = AccountInfoDouble(ACCOUNT_MARGIN);
+   double marginFree = AccountInfoDouble(ACCOUNT_MARGIN_FREE);
+   double profit = AccountInfoDouble(ACCOUNT_PROFIT);
+
+   string posJson = "[";
+   int posCount = 0;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0) continue;
+      if(!PositionSelectByTicket(ticket)) continue;
+      if((int)PositionGetInteger(POSITION_MAGIC) != InpMagicNumber) continue;
+      if(posCount > 0) posJson += ",";
+      string pSym = SMCGP_JsonEscape(PositionGetString(POSITION_SYMBOL));
+      string pType = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY) ? "BUY" : "SELL";
+      string pComment = SMCGP_JsonEscape(PositionGetString(POSITION_COMMENT));
+      double pProfit = PositionGetDouble(POSITION_PROFIT)
+                     + PositionGetDouble(POSITION_SWAP);
+      posJson += StringFormat(
+         "{\"ticket\":%I64u,\"symbol\":\"%s\",\"type\":\"%s\",\"volume\":%.2f,"
+         "\"price_open\":%.5f,\"sl\":%.5f,\"tp\":%.5f,\"profit\":%.2f,\"magic\":%d,\"comment\":\"%s\"}",
+         ticket, pSym, pType, PositionGetDouble(POSITION_VOLUME),
+         PositionGetDouble(POSITION_PRICE_OPEN),
+         PositionGetDouble(POSITION_SL), PositionGetDouble(POSITION_TP),
+         pProfit, (int)PositionGetInteger(POSITION_MAGIC), pComment);
+      posCount++;
+   }
+   posJson += "]";
+
+   string watchJson = SMCGP_BuildMarketWatchSymbolsJson(80);
+
+   string body = StringFormat(
+      "{\"symbol\":\"%s\",\"ea\":\"SMC_Universal\",\"magic\":%d,\"chart_id\":\"%I64d\",\"chart_tf\":\"%s\","
+      "\"terminal_id\":\"%I64d\",\"symbols_watch\":%s,"
+      "\"account\":{\"login\":%I64d,\"server\":\"%s\",\"name\":\"%s\","
+      "\"company\":\"%s\",\"balance\":%.2f,\"equity\":%.2f,\"margin\":%.2f,\"margin_free\":%.2f,"
+      "\"profit\":%.2f,\"currency\":\"%s\",\"leverage\":%d},\"positions\":%s}",
+      symJson, InpMagicNumber, ChartID(), chartTf, ChartID(), watchJson,
+      login, SMCGP_JsonEscape(server), SMCGP_JsonEscape(name), SMCGP_JsonEscape(company),
+      balance, equity, margin, marginFree, profit, SMCGP_JsonEscape(currency), leverage, posJson);
+
+   if(SMCGP_HttpPost("/mt5/live-snapshot", body, AI_Timeout_ms))
+   {
+      static datetime s_lastOk = 0;
+      if(TimeCurrent() - s_lastOk >= 120)
+      {
+         s_lastOk = TimeCurrent();
+         Print("[MT5-DASH] Live snapshot OK | ", sym, " | balance=", DoubleToString(balance, 2),
+               " | positions=", posCount);
+      }
+   }
+   else
+   {
+      static datetime s_lastFail = 0;
+      if(TimeCurrent() - s_lastFail >= 60)
+      {
+         s_lastFail = TimeCurrent();
+         Print("[MT5-DASH] ECHEC HTTP ", g_smcLastHttpCode, " -> ", AI_ServerURL, "/mt5/live-snapshot");
+         if(g_smcLastHttpCode == -1)
+            Print("[MT5-DASH] Autoriser WebRequest pour ", AI_ServerURL, " dans MT5 > Options > Expert Advisors");
+      }
+   }
+}
+
+void SMCGP_PollServerLossGuard()
+{
+   if(!UseAIServer) return;
+   static datetime s_lastPoll = 0;
+   if((int)(TimeCurrent() - s_lastPoll) < 2) return;
+   s_lastPoll = TimeCurrent();
+
+   string path = "/mt5/loss-guard?terminal_id=" + IntegerToString((long)ChartID());
+   string body;
+   if(!SMCGP_HttpGet(path, body, AI_Timeout_ms)) return;
+   if(!SMCGP_JsonBool(body, "ok")) return;
+
+   int pos = StringFind(body, "\"actions\":[");
+   if(pos < 0) return;
+   int end = StringFind(body, "]", pos);
+   if(end <= pos) return;
+   string arr = StringSubstr(body, pos + 11, end - pos - 11);
+   if(StringLen(arr) < 3) return;
+
+   int start = 0;
+   while(true)
+   {
+      int objStart = StringFind(arr, "{", start);
+      if(objStart < 0) break;
+      int objEnd = StringFind(arr, "}", objStart);
+      if(objEnd < 0) break;
+      string obj = StringSubstr(arr, objStart, objEnd - objStart + 1);
+
+      string ticketStr = SMCGP_JsonString(obj, "ticket");
+      string symClose = SMCGP_JsonString(obj, "symbol");
+      string reason = SMCGP_JsonString(obj, "reason");
+      if(StringLen(reason) == 0) reason = "LOSS-GUARD server emergency";
+      ulong ticket = (ulong)StringToInteger(ticketStr);
+
+      if(ticket > 0 && PositionSelectByTicket(ticket))
+      {
+         if((long)PositionGetInteger(POSITION_MAGIC) == InpMagicNumber)
+         {
+            if(PositionCloseWithLog(ticket, reason, true))
+            {
+               string ackBody = StringFormat(
+                  "{\"terminal_id\":\"%I64d\",\"ticket\":\"%s\",\"symbol\":\"%s\"}",
+                  ChartID(), ticketStr, SMCGP_JsonEscape(symClose));
+               char post[], result[];
+               string respH;
+               string ackUrl = AI_ServerURL + "/mt5/loss-guard/ack";
+               StringToCharArray(ackBody, post, 0, WHOLE_ARRAY, CP_UTF8);
+               ArrayResize(post, ArraySize(post) - 1);
+               WebRequest("POST", ackUrl, "Content-Type: application/json\r\n", AI_Timeout_ms, post, result, respH);
+            }
+         }
+      }
+
+      start = objEnd + 1;
+   }
 }
 
 bool SMCGP_HttpGet(const string path, string &bodyOut, int timeoutMs = 5000)
@@ -427,6 +899,9 @@ bool SMCGP_IsGOMManagedComment(const string comment)
    if(StringFind(comment, "GOM_GOOD") >= 0) return true;
    if(StringFind(comment, "GOM_PERFECT") >= 0) return true;
    if(StringFind(comment, "GOM_GP") >= 0) return true;
+   if(StringFind(comment, "GOM_PATTERN") >= 0) return true;
+   if(StringFind(comment, "GOM_ALIGN") >= 0) return true;
+   if(StringFind(comment, "GOM_STAIR") >= 0) return true;
    return false;
 }
 
@@ -449,10 +924,151 @@ string SMCGP_JsonTfDir(const string &body, const string key)
    return "";
 }
 
+// Direction cognition effective — consensus 5m + 15m (prioritaire pour gates)
+string SMCGP_EffectiveCogDirection()
+{
+   if(StringLen(g_cogDirection5m) > 0 && g_cogDirection5m != "NEUTRAL")
+   {
+      if(StringLen(g_cogDirection15m) > 0 && g_cogDirection15m != "NEUTRAL")
+      {
+         if(g_cogDirection5m == g_cogDirection15m)
+            return g_cogDirection5m;
+         return "NEUTRAL";
+      }
+      return g_cogDirection5m;
+   }
+   if(StringLen(g_cogDirection15m) > 0 && g_cogDirection15m != "NEUTRAL")
+      return g_cogDirection15m;
+   return g_cogDirection;
+}
+
+double SMCGP_ParseNestedConcordancePct(const string &body)
+{
+   int p = StringFind(body, "\"path_concordance\"");
+   if(p < 0) return 0.0;
+   int objStart = StringFind(body, "{", p);
+   if(objStart < 0) return 0.0;
+   int depth = 0;
+   int objEnd = -1;
+   for(int i = objStart; i < StringLen(body); i++)
+   {
+      ushort ch = StringGetCharacter(body, i);
+      if(ch == '{') depth++;
+      else if(ch == '}')
+      {
+         depth--;
+         if(depth == 0) { objEnd = i; break; }
+      }
+   }
+   if(objEnd <= objStart) return 0.0;
+   string obj = StringSubstr(body, objStart, objEnd - objStart + 1);
+   return SMCGP_JsonDouble(obj, "concordance_pct");
+}
+
+double SMCGP_EstimateConcordanceLocal()
+{
+   int n = ArraySize(g_smcPredPathMid);
+   if(n < 10) return 0.0;
+
+   int posDir = 0;
+   if(g_smcGomVerdictNum >= 2) posDir = 1;
+   else if(g_smcGomVerdictNum <= -2) posDir = -1;
+   if(posDir == 0)
+   {
+      string cog = SMCGP_EffectiveCogDirection();
+      if(cog == "BUY") posDir = 1;
+      else if(cog == "SELL") posDir = -1;
+   }
+   if(posDir == 0) return 0.0;
+
+   int aligned = 0, total = 0;
+   int look = MathMin(n - 1, 60);
+   for(int i = 1; i <= look; i++)
+   {
+      double d = g_smcPredPathMid[i] - g_smcPredPathMid[i - 1];
+      if(MathAbs(d) <= 0.0) continue;
+      total++;
+      if(posDir > 0 && d > 0) aligned++;
+      else if(posDir < 0 && d < 0) aligned++;
+   }
+   if(total <= 0) return 0.0;
+   return (double)aligned * 100.0 / (double)total;
+}
+
+void SMCGP_SyncVerdictFromMTF(const string &body)
+{
+   string gate = SMCGP_JsonString(body, "gate");
+   if(StringFind(gate, "weltrade") >= 0) return;
+   if(g_smcGomVerdictNum != 0) return;
+
+   double gap = MathAbs(g_smcGomScoreBuy - g_smcGomScoreSell);
+   if(gap < 0.25) return;
+
+   if(g_smcTfM1Dir == "BULL" && g_smcTfM5Dir == "BULL" && g_smcTfM15Dir == "BULL"
+      && g_smcGomScoreBuy >= g_smcGomScoreSell)
+   {
+      g_smcGomVerdictNum = (gap >= 2.5) ? 2 : 1;
+      g_smcGomVerdict = (g_smcGomVerdictNum == 2) ? "GOOD BUY" : "BUY";
+      return;
+   }
+   if(g_smcTfM1Dir == "BEAR" && g_smcTfM5Dir == "BEAR" && g_smcTfM15Dir == "BEAR"
+      && g_smcGomScoreSell >= g_smcGomScoreBuy)
+   {
+      g_smcGomVerdictNum = (gap >= 2.5) ? -2 : -1;
+      g_smcGomVerdict = (g_smcGomVerdictNum == -2) ? "GOOD SELL" : "SELL";
+      return;
+   }
+
+   int bulls = 0, bears = 0;
+   if(g_smcTfM1Dir == "BULL") bulls++; else if(g_smcTfM1Dir == "BEAR") bears++;
+   if(g_smcTfM5Dir == "BULL") bulls++; else if(g_smcTfM5Dir == "BEAR") bears++;
+   if(g_smcTfM15Dir == "BULL") bulls++; else if(g_smcTfM15Dir == "BEAR") bears++;
+
+   if(bulls >= 2 && g_smcGomGlobalDir == "BULL" && g_smcGomScoreBuy > g_smcGomScoreSell && gap >= 0.45)
+   {
+      g_smcGomVerdictNum = (gap >= 2.5) ? 2 : 1;
+      g_smcGomVerdict = (g_smcGomVerdictNum == 2) ? "GOOD BUY" : "BUY";
+   }
+   if(bears >= 2 && g_smcGomGlobalDir == "BEAR" && g_smcGomScoreSell > g_smcGomScoreBuy && gap >= 0.45)
+   {
+      g_smcGomVerdictNum = (gap >= 2.5) ? -2 : -1;
+      g_smcGomVerdict = (g_smcGomVerdictNum == -2) ? "GOOD SELL" : "SELL";
+   }
+
+   static datetime s_mtfSyncLog = 0;
+   if(g_smcGomVerdictNum != 0 && TimeCurrent() - s_mtfSyncLog >= 30)
+   {
+      s_mtfSyncLog = TimeCurrent();
+      Print("[GOM-MTF-SYNC] Verdict aligné MTF: ", g_smcGomVerdict,
+            " (vn=", g_smcGomVerdictNum, " gap=", DoubleToString(gap, 2),
+            " M1=", g_smcTfM1Dir, " M5=", g_smcTfM5Dir, " M15=", g_smcTfM15Dir, ")");
+   }
+}
+
+void SMCGP_ReconcileOrderBlocks(const string symbol);
+
 void SMCGP_ParseGOMBody(const string &body)
 {
+   string vmode = SMCGP_JsonString(body, "verdict_mode");
+   bool predictiveBlend = (vmode == "predictive_blend");
+
    g_smcGomVerdict      = SMCGP_JsonString(body, "verdict");
    g_smcGomVerdictNum   = (int)SMCGP_JsonDouble(body, "verdict_num");
+
+   if(predictiveBlend)
+   {
+      g_smcGomVerdictReactiveNum = (int)SMCGP_JsonDouble(body, "verdict_reactive_num", 0);
+      g_smcGomVerdictForecastNum = (int)SMCGP_JsonDouble(body, "forecast_verdict_num", 0);
+      int effVn = (int)SMCGP_JsonDouble(body, "effective_verdict_num", g_smcGomVerdictNum);
+      string effV = SMCGP_JsonString(body, "effective_verdict");
+      g_smcGomVerdictNum = effVn;
+      if(StringLen(effV) > 0) g_smcGomVerdict = effV;
+   }
+   else
+   {
+      g_smcGomVerdictReactiveNum = g_smcGomVerdictNum;
+      g_smcGomVerdictForecastNum = 0;
+   }
    g_smcGomQuality      = SMCGP_JsonDouble(body, "entry_quality");
    g_smcGomCoherence    = SMCGP_JsonDouble(body, "coherence_pct");
    g_smcGomScoreBuy     = SMCGP_JsonDouble(body, "score_buy");
@@ -467,6 +1083,7 @@ void SMCGP_ParseGOMBody(const string &body)
    g_smcGomSpikePct     = SMCGP_JsonDouble(body, "spike_pct");
    g_smcGomSpikeLevel   = (int)SMCGP_JsonDouble(body, "spike_level");
    g_smcGomImminencePct = SMCGP_JsonDouble(body, "imminence_pct");
+   g_smcPreSpikePct     = SMCGP_JsonDouble(body, "pre_spike_pct");
    g_smcGomSpikeProgressPct = SMCGP_JsonDouble(body, "spike_progress_pct");
    g_smcGomBarsSinceSpike = (int)SMCGP_JsonDouble(body, "bars_since_spike");
    g_smcGomSpikeFreqBars  = (int)SMCGP_JsonDouble(body, "spike_freq_bars");
@@ -480,6 +1097,7 @@ void SMCGP_ParseGOMBody(const string &body)
    g_smcObBullBot       = SMCGP_JsonDouble(body, "ob_bull_bot");
    g_smcObBearTop       = SMCGP_JsonDouble(body, "ob_bear_top");
    g_smcObBearBot       = SMCGP_JsonDouble(body, "ob_bear_bot");
+   SMCGP_ReconcileOrderBlocks(_Symbol);
    // OTE zone
    g_smcOteTop          = SMCGP_JsonDouble(body, "ote_top");
    g_smcOteBot          = SMCGP_JsonDouble(body, "ote_bot");
@@ -532,9 +1150,46 @@ void SMCGP_ParseGOMBody(const string &body)
    g_smcBcMappedKey   = SMCGP_JsonString(body, "bc_mapped_key");
 
    g_cogDirection   = SMCGP_JsonString(body, "cog_direction");
+   string d5 = SMCGP_JsonString(body, "cog_direction_5m");
+   if(StringLen(d5) > 0) g_cogDirection5m = d5;
+   string d15 = SMCGP_JsonString(body, "cog_direction_15m");
+   if(StringLen(d15) > 0) g_cogDirection15m = d15;
+   g_cogSlope5m      = SMCGP_JsonDouble(body, "cog_slope_5m");
+   g_cogSlope15m     = SMCGP_JsonDouble(body, "cog_slope_15m");
+   g_cogShortConfidence = SMCGP_JsonDouble(body, "cog_short_confidence");
+   if(g_cogShortConfidence > 1.0) g_cogShortConfidence /= 100.0;
+   double shortConfPct = SMCGP_JsonDouble(body, "cog_short_confidence_pct");
+   if(shortConfPct > 0.0) g_cogShortConfidence = shortConfPct / 100.0;
+   string effCog = SMCGP_EffectiveCogDirection();
+   if(StringLen(effCog) > 0 && effCog != "NEUTRAL")
+      g_cogDirection = effCog;
+   else if(StringLen(g_cogDirection) == 0)
+      g_cogDirection = effCog;
    g_cogRegime      = SMCGP_JsonString(body, "cog_regime");
    g_cogStrength    = SMCGP_JsonDouble(body, "cog_strength");
+   if(g_cogStrength > 1.0) g_cogStrength /= 100.0;
+   double strPct = SMCGP_JsonDouble(body, "cog_strength_pct");
+   if(strPct > 0.0) g_cogStrength = strPct / 100.0;
    g_cogConfidence  = SMCGP_JsonDouble(body, "cog_confidence");
+   if(g_cogConfidence > 1.0) g_cogConfidence /= 100.0;
+   double confPct = SMCGP_JsonDouble(body, "cog_confidence_pct");
+   if(confPct > 0.0)
+      g_cogConfidence = confPct / 100.0;
+   else if(g_cogConfidence <= 0.0 && g_cogShortConfidence > 0.0)
+      g_cogConfidence = g_cogShortConfidence;
+   g_pathConcordancePct = SMCGP_JsonDouble(body, "path_concordance_pct");
+   if(g_pathConcordancePct <= 0.0)
+      g_pathConcordancePct = SMCGP_ParseNestedConcordancePct(body);
+   if(g_pathConcordancePct <= 0.0)
+   {
+      int concPos = StringFind(body, "\"concordance_pct\"");
+      if(concPos >= 0)
+         g_pathConcordancePct = SMCGP_JsonDouble(body, "concordance_pct");
+   }
+   if(g_pathConcordancePct <= 0.0)
+      g_pathConcordancePct = SMCGP_EstimateConcordanceLocal();
+
+   g_smcEntryProbabilityPct = SMCGP_JsonDouble(body, "entry_probability");
 
    // IA Status depuis dashboard (ia_status_action + ia_status_confidence_pct)
    string iaAct = SMCGP_JsonString(body, "ia_status_action");
@@ -553,6 +1208,40 @@ void SMCGP_ParseGOMBody(const string &body)
    g_smcCorrType       = SMCGP_JsonString(body, "correction_type");
    string safeStr      = SMCGP_JsonString(body, "correction_entry_safe");
    g_smcCorrEntrySafe  = (safeStr == "true" || safeStr == "1" || SMCGP_JsonBool(body, "correction_entry_safe"));
+   g_smcM1EntryBlocked = SMCGP_JsonBool(body, "m1_entry_blocked");
+   g_smcActiveCorrection = SMCGP_JsonBool(body, "active_correction");
+   g_smcM1EntryReason = SMCGP_JsonString(body, "m1_entry_reason");
+
+    // Price Action Zone (MA50/MA200) depuis ai_server
+    string paTrend = SMCGP_JsonString(body, "pa_trend");
+    if(StringLen(paTrend) > 0) g_smcPaTrend = paTrend;
+    g_smcPaInCorrection  = SMCGP_JsonBool(body, "pa_in_correction");
+    g_smcPaConsolidation = SMCGP_JsonBool(body, "pa_consolidation");
+    double paMa50  = SMCGP_JsonDouble(body, "pa_ma50", -1.0);
+    if(paMa50 > 0)  g_smcPaMa50  = paMa50;
+    double paMa200 = SMCGP_JsonDouble(body, "pa_ma200", -1.0);
+    if(paMa200 > 0) g_smcPaMa200 = paMa200;
+    double paRsi   = SMCGP_JsonDouble(body, "pa_rsi", -1.0);
+    if(paRsi >= 0)  g_smcPaRsi   = paRsi;
+    double paSup   = SMCGP_JsonDouble(body, "pa_zone_support", -1.0);
+    if(paSup > 0)   g_smcPaZoneSupport    = paSup;
+    double paRes   = SMCGP_JsonDouble(body, "pa_zone_resistance", -1.0);
+    if(paRes > 0)   g_smcPaZoneResistance = paRes;
+    double paDepth = SMCGP_JsonDouble(body, "pa_corr_depth_pct", -1.0);
+    if(paDepth >= 0) g_smcPaCorrDepthPct  = paDepth;
+
+    // TradingView bias / score depuis ai_server
+    string tvBias = SMCGP_JsonString(body, "tv_bias");
+    if(StringLen(tvBias) > 0) g_smcTvBias = tvBias;
+    double tvSc = SMCGP_JsonDouble(body, "tv_score", -1.0);
+    if(tvSc >= 0) g_smcTvScore = tvSc;
+    string tvStr = SMCGP_JsonString(body, "tv_entry_strength");
+    if(StringLen(tvStr) > 0) g_smcTvEntryStrength = tvStr;
+    double tvRR = SMCGP_JsonDouble(body, "tv_entry_rr", -1.0);
+   if(tvRR >= 0) g_smcTvEntryRR = tvRR;
+
+   // Verdict prédictif calculé côté serveur (blend réactif + forecast 5 M1, latch anti-repaint)
+   // SMCGP_SyncVerdictFromMTF désactivé — évite double uplift client qui simule du repaint
 
    if(StringLen(g_smcGomKolaState) == 0)
    {
@@ -570,6 +1259,27 @@ void SMCGP_ParseGOMBody(const string &body)
 
    if(ShowTVSyncedLevels || ShowGOMDashboard)
       SMCGP_ParseSetupFromGOM(body);
+
+   bool serverCorrWait = SMCGP_JsonBool(body, "correction_wait");
+   g_smcGomServerCorrWait = serverCorrWait;
+   string serverCorrReason = SMCGP_JsonString(body, "correction_wait_reason");
+   if(StringLen(serverCorrReason) > 0)
+      g_smcGomCorrectionReason = serverCorrReason;
+
+   int srvVn = (int)SMCGP_JsonDouble(body, "verdict_server_num", 0);
+   string srvTxt = SMCGP_JsonString(body, "verdict_server");
+   if(srvVn != 0)
+   {
+      g_smcGomVerdictNumServer = srvVn;
+      if(StringLen(srvTxt) > 0) g_smcGomVerdictServer = srvTxt;
+   }
+   else if(g_smcGomVerdictNum != 0)
+   {
+      g_smcGomVerdictNumServer = g_smcGomVerdictNum;
+      g_smcGomVerdictServer = g_smcGomVerdict;
+   }
+
+   SMCGP_ApplyCorrectionVerdictWait(_Symbol, serverCorrWait);
 }
 
 void SMCGP_InvalidateGOM()
@@ -767,15 +1477,15 @@ void SMCGP_PollGOM()
    // Pour affichage temps réel du verdict sur SMC dashboard
 
    // Si GOMPollIntervalSec = 0, poll à chaque tick (instantané)
-   // Sinon, respecter l'interval en secondes
+   // Sinon, respecter l'interval en secondes (basé sur la dernière TENTATIVE, succès ou non)
    if(GOMPollIntervalSec > 0)
    {
-      int age = (int)(TimeCurrent() - g_smcLastGOMPoll);
+      int age = (int)(TimeCurrent() - g_smcLastGOMAttempt);
       if(age < GOMPollIntervalSec) return;  // Interval pas encore écoulé
    }
    // else: GOMPollIntervalSec == 0 → poll TOUJOURS (instantané)
 
-   g_smcLastGOMPoll = TimeCurrent();
+   g_smcLastGOMAttempt = TimeCurrent();  // timestamp tentative (peu importe résultat)
 
    string sym = SMCGP_EncodeSym(SMCGP_ResolveGOMSym(_Symbol));
    string body;
@@ -827,6 +1537,10 @@ void SMCGP_PollGOM()
    int prevSpikeLevel = g_smcGomSpikeLevel;
    bool prevSpikeTrad = g_smcGomSpikeTradable;
    SMCGP_ParseGOMBody(body);
+
+   // ── Poll réussi : mettre à jour le timestamp de succès ──────────────────
+   g_smcLastGOMPoll = TimeCurrent();
+
    if(prevVnum != g_smcGomVerdictNum || prevVerd != g_smcGomVerdict)
       SMCGP_NotifyGOMVerdictChange(symLabel, prevVnum, prevVerd);
    if(prevSpikeLevel != g_smcGomSpikeLevel || prevSpikeTrad != g_smcGomSpikeTradable)
@@ -838,7 +1552,7 @@ void SMCGP_PollGOM()
 
 bool SMCGP_IsGoodPerfect(int vnum)
 {
-   return (vnum == 2 || vnum == 3 || vnum == -2 || vnum == -3);
+   return (MathAbs(vnum) >= 2);
 }
 
 void SMCGP_PushGOMMsg(const string msg)
@@ -968,7 +1682,13 @@ void SMCGP_NotifySpikeImminent(const string symLabel, const int prevLevel, const
    if(isImminent && !wasImminent)
    {
       int etaMin = SMCGP_EstimateSpikeMinutes();
-      string side = (StringFind(symLabel, "Boom") >= 0 || StringFind(_smcSym, "PAINX") >= 0) ? "BUY spike" : "SELL spike";
+      string symU = symLabel;
+      StringToUpper(symU);
+      string sc = symU;
+      StringReplace(sc, " ", "");
+      bool boomLike  = (StringFind(sc, "BOOM") >= 0 || StringFind(sc, "GAINX") >= 0);
+      bool crashLike = (StringFind(sc, "CRASH") >= 0 || StringFind(sc, "PAINX") >= 0);
+      string side = boomLike ? "BUY spike" : (crashLike ? "SELL spike" : "spike");
       string msg = StringFormat("[SPIKE] %s IMMINENT %s | prob %.0f%% imm %.0f%% ~%d min",
                                 symLabel, side, g_smcGomSpikePct, g_smcGomImminencePct, etaMin);
       SMCGP_PushGOMMsg(msg);
@@ -1092,6 +1812,9 @@ bool SMCGP_GOMCoherenceOK()
    double minCoh = SMC_EffectiveGOMMinCoherence();
    if(minCoh <= 0) return true;
    if(g_smcGomCoherence <= 0) return false;
+   // Synthétiques Boom/Crash + Weltrade vol : 2/3 TF = 66.7% → seuil 65%
+   if(SMC_GetSymbolCategory(_Symbol) == SYM_BOOM_CRASH && minCoh > 65.0) minCoh = 65.0;
+   else if(SMC_IsWeltradeSymbol(_Symbol) && minCoh > 65.0) minCoh = 65.0;
    return (g_smcGomCoherence >= minCoh);
 }
 
@@ -1358,6 +2081,107 @@ void SMCGP_CleanupLegacyDrawings()
       ObjectsDeleteAll(0, singles[s]);
 }
 
+bool SMCGP_LocalFindOB(const string symbol, const ENUM_TIMEFRAMES tf, const int wantDir,
+                       double &outTop, double &outBot, datetime &outTime)
+{
+   MqlRates rates[];
+   ArraySetAsSeries(rates, true);
+   if(CopyRates(symbol, tf, 0, 50, rates) < 50) return false;
+   double pt = SymbolInfoDouble(symbol, SYMBOL_POINT);
+   if(pt <= 0) return false;
+   for(int i = 3; i < 45; i++)
+   {
+      if(wantDir == 1 && rates[i].close < rates[i].open && rates[i+1].close > rates[i+1].open)
+      {
+         double moveUp = rates[i+2].high - rates[i].low;
+         if(moveUp > pt * 20)
+         {
+            outTop = rates[i].high;
+            outBot = rates[i].low;
+            outTime = rates[i].time;
+            return true;
+         }
+      }
+      if(wantDir == -1 && rates[i].close > rates[i].open && rates[i+1].close < rates[i+1].open)
+      {
+         double moveDown = rates[i].high - rates[i+2].low;
+         if(moveDown > pt * 20)
+         {
+            outTop = rates[i].high;
+            outBot = rates[i].low;
+            outTime = rates[i].time;
+            return true;
+         }
+      }
+   }
+   return false;
+}
+
+bool SMCGP_OBLevelsPlausible(const string symbol, const double top, const double bot)
+{
+   if(top <= 0 || bot <= 0) return false;
+   double zH = MathMax(top, bot);
+   double zL = MathMin(top, bot);
+   if(zH <= zL) return false;
+   double bid = SymbolInfoDouble(symbol, SYMBOL_BID);
+   if(bid <= 0) return false;
+   double ratio = zH / bid;
+   if(ratio > 8.0 || ratio < 0.125) return false;
+   int hAtr = iATR(symbol, PERIOD_M15, 14);
+   double atr = 0.0;
+   if(hAtr != INVALID_HANDLE)
+   {
+      double b[];
+      ArraySetAsSeries(b, true);
+      if(CopyBuffer(hAtr, 0, 0, 1, b) >= 1) atr = b[0];
+      IndicatorRelease(hAtr);
+   }
+   double maxDist = (atr > 0) ? atr * 35.0 : bid * 0.15;
+   if(bid < zL - maxDist && bid > zH + maxDist) return false;
+   return true;
+}
+
+void SMCGP_ReconcileOrderBlocks(const string symbol)
+{
+   double bid = SymbolInfoDouble(symbol, SYMBOL_BID);
+   if(g_smcGomPrice > 0 && bid > 0)
+   {
+      double scale = bid / g_smcGomPrice;
+      if(scale > 1.35 || scale < 0.74)
+      {
+         if(g_smcObBullTop > 0) { g_smcObBullTop *= scale; g_smcObBullBot *= scale; }
+         if(g_smcObBearTop > 0) { g_smcObBearTop *= scale; g_smcObBearBot *= scale; }
+         if(g_smcBbUp > 0) g_smcBbUp *= scale;
+         if(g_smcBbMid > 0) g_smcBbMid *= scale;
+         if(g_smcBbDn > 0) g_smcBbDn *= scale;
+      }
+   }
+   if(!SMCGP_OBLevelsPlausible(symbol, g_smcObBullTop, g_smcObBullBot))
+   {
+      double top = 0, bot = 0;
+      datetime t = 0;
+      if(SMCGP_LocalFindOB(symbol, PERIOD_M15, 1, top, bot, t))
+      {
+         g_smcObBullTop = top;
+         g_smcObBullBot = bot;
+         g_smcObBullTime = t;
+      }
+      else { g_smcObBullTop = 0; g_smcObBullBot = 0; g_smcObBullTime = 0; }
+   }
+   if(!SMCGP_OBLevelsPlausible(symbol, g_smcObBearTop, g_smcObBearBot))
+   {
+      double top = 0, bot = 0;
+      datetime t = 0;
+      if(SMCGP_LocalFindOB(symbol, PERIOD_M15, -1, top, bot, t))
+      {
+         g_smcObBearTop = top;
+         g_smcObBearBot = bot;
+         g_smcObBearTime = t;
+      }
+      else { g_smcObBearTop = 0; g_smcObBearBot = 0; g_smcObBearTime = 0; }
+   }
+}
+
 void SMCGP_DrawTVLevels()
 {
    if(!ShowTVSyncedLevels) return;
@@ -1366,6 +2190,7 @@ void SMCGP_DrawTVLevels()
    if((int)(TimeCurrent() - s_last) < 3) return;
    s_last = TimeCurrent();
 
+   SMCGP_ReconcileOrderBlocks(_Symbol);
    SMCGP_CleanupLegacyDrawings();
 
    int dg = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
@@ -1449,56 +2274,80 @@ void SMCGP_DrawTVLevels()
       ObjectDelete(0, "TM_BB_DN");
    }
 
-   datetime tOb0 = iTime(_Symbol, PERIOD_CURRENT, 10);
-   datetime tObE = iTime(_Symbol, PERIOD_CURRENT, 0) + PeriodSeconds(PERIOD_CURRENT) * 60;
+   double liveBid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   int barSec = PeriodSeconds(PERIOD_CURRENT);
+   if(barSec <= 0) barSec = 60;
+   datetime tObE = TimeCurrent() + (datetime)(barSec * 40);
 
    if(ShowTVOrderBlocks && g_smcObBullTop > 0 && g_smcObBullBot > 0)
    {
       double zH = MathMax(g_smcObBullTop, g_smcObBullBot);
       double zL = MathMin(g_smcObBullTop, g_smcObBullBot);
       int dp = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+      datetime tOb0 = (g_smcObBullTime > 0) ? g_smcObBullTime : (TimeCurrent() - (datetime)(barSec * 30));
       ObjectDelete(0, "SMC_OB_BULL_ZONE");
       ObjectCreate(0, "SMC_OB_BULL_ZONE", OBJ_RECTANGLE, 0, tOb0, zH, tObE, zL);
       ObjectSetInteger(0, "SMC_OB_BULL_ZONE", OBJPROP_COLOR, clrDodgerBlue);
       ObjectSetInteger(0, "SMC_OB_BULL_ZONE", OBJPROP_BACK, true);
       ObjectSetInteger(0, "SMC_OB_BULL_ZONE", OBJPROP_FILL, true);
       ObjectSetInteger(0, "SMC_OB_BULL_ZONE", OBJPROP_SELECTABLE, false);
-      // Label prix OB Bull
       ObjectDelete(0, "SMC_OB_BULL_LBL");
       ObjectCreate(0, "SMC_OB_BULL_LBL", OBJ_TEXT, 0, tObE, zH);
       ObjectSetString(0, "SMC_OB_BULL_LBL", OBJPROP_TEXT,
-         "OB+ " + DoubleToString(zL, dp) + "-" + DoubleToString(zH, dp));
+         StringFormat("OB+ %.*f-%.*f | bid %.*f", dp, zL, dp, zH, dp, liveBid));
       ObjectSetInteger(0, "SMC_OB_BULL_LBL", OBJPROP_COLOR, clrDodgerBlue);
       ObjectSetInteger(0, "SMC_OB_BULL_LBL", OBJPROP_FONTSIZE, 8);
       ObjectSetString(0, "SMC_OB_BULL_LBL", OBJPROP_FONT, "Arial Bold");
       ObjectSetInteger(0, "SMC_OB_BULL_LBL", OBJPROP_ANCHOR, ANCHOR_LEFT_LOWER);
       ObjectSetInteger(0, "SMC_OB_BULL_LBL", OBJPROP_SELECTABLE, false);
+      ObjectDelete(0, "SMC_OB_BULL_LIVE");
+      ObjectCreate(0, "SMC_OB_BULL_LIVE", OBJ_HLINE, 0, 0, liveBid);
+      ObjectSetInteger(0, "SMC_OB_BULL_LIVE", OBJPROP_COLOR, clrAqua);
+      ObjectSetInteger(0, "SMC_OB_BULL_LIVE", OBJPROP_STYLE, STYLE_DOT);
+      ObjectSetInteger(0, "SMC_OB_BULL_LIVE", OBJPROP_WIDTH, 1);
+      ObjectSetInteger(0, "SMC_OB_BULL_LIVE", OBJPROP_SELECTABLE, false);
    }
-   else { ObjectDelete(0, "SMC_OB_BULL_ZONE"); ObjectDelete(0, "SMC_OB_BULL_LBL"); }
+   else
+   {
+      ObjectDelete(0, "SMC_OB_BULL_ZONE");
+      ObjectDelete(0, "SMC_OB_BULL_LBL");
+      ObjectDelete(0, "SMC_OB_BULL_LIVE");
+   }
 
    if(ShowTVOrderBlocks && g_smcObBearTop > 0 && g_smcObBearBot > 0)
    {
       double zH = MathMax(g_smcObBearTop, g_smcObBearBot);
       double zL = MathMin(g_smcObBearTop, g_smcObBearBot);
       int dp = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+      datetime tOb0 = (g_smcObBearTime > 0) ? g_smcObBearTime : (TimeCurrent() - (datetime)(barSec * 30));
       ObjectDelete(0, "SMC_OB_BEAR_ZONE");
       ObjectCreate(0, "SMC_OB_BEAR_ZONE", OBJ_RECTANGLE, 0, tOb0, zH, tObE, zL);
       ObjectSetInteger(0, "SMC_OB_BEAR_ZONE", OBJPROP_COLOR, clrOrangeRed);
       ObjectSetInteger(0, "SMC_OB_BEAR_ZONE", OBJPROP_BACK, true);
       ObjectSetInteger(0, "SMC_OB_BEAR_ZONE", OBJPROP_FILL, true);
       ObjectSetInteger(0, "SMC_OB_BEAR_ZONE", OBJPROP_SELECTABLE, false);
-      // Label prix OB Bear
       ObjectDelete(0, "SMC_OB_BEAR_LBL");
       ObjectCreate(0, "SMC_OB_BEAR_LBL", OBJ_TEXT, 0, tObE, zH);
       ObjectSetString(0, "SMC_OB_BEAR_LBL", OBJPROP_TEXT,
-         "OB- " + DoubleToString(zL, dp) + "-" + DoubleToString(zH, dp));
+         StringFormat("OB- %.*f-%.*f | bid %.*f", dp, zL, dp, zH, dp, liveBid));
       ObjectSetInteger(0, "SMC_OB_BEAR_LBL", OBJPROP_COLOR, clrOrangeRed);
       ObjectSetInteger(0, "SMC_OB_BEAR_LBL", OBJPROP_FONTSIZE, 8);
       ObjectSetString(0, "SMC_OB_BEAR_LBL", OBJPROP_FONT, "Arial Bold");
       ObjectSetInteger(0, "SMC_OB_BEAR_LBL", OBJPROP_ANCHOR, ANCHOR_LEFT_UPPER);
       ObjectSetInteger(0, "SMC_OB_BEAR_LBL", OBJPROP_SELECTABLE, false);
+      ObjectDelete(0, "SMC_OB_BEAR_LIVE");
+      ObjectCreate(0, "SMC_OB_BEAR_LIVE", OBJ_HLINE, 0, 0, liveBid);
+      ObjectSetInteger(0, "SMC_OB_BEAR_LIVE", OBJPROP_COLOR, clrAqua);
+      ObjectSetInteger(0, "SMC_OB_BEAR_LIVE", OBJPROP_STYLE, STYLE_DOT);
+      ObjectSetInteger(0, "SMC_OB_BEAR_LIVE", OBJPROP_WIDTH, 1);
+      ObjectSetInteger(0, "SMC_OB_BEAR_LIVE", OBJPROP_SELECTABLE, false);
    }
-   else { ObjectDelete(0, "SMC_OB_BEAR_ZONE"); ObjectDelete(0, "SMC_OB_BEAR_LBL"); }
+   else
+   {
+      ObjectDelete(0, "SMC_OB_BEAR_ZONE");
+      ObjectDelete(0, "SMC_OB_BEAR_LBL");
+      ObjectDelete(0, "SMC_OB_BEAR_LIVE");
+   }
 
    ChartRedraw(0);
 }
@@ -1533,18 +2382,71 @@ bool SMCGP_DeletePendingOrder(const string sym)
    return SMCGP_MarkPipelineConsumed(sym);
 }
 
-double SMCGP_MinStopDistance(const string sym)
+double SMCGP_SnapToTick(const string sym, const double price)
+{
+   double tick = SymbolInfoDouble(sym, SYMBOL_TRADE_TICK_SIZE);
+   if(tick <= 0) tick = SymbolInfoDouble(sym, SYMBOL_POINT);
+   if(tick <= 0) return price;
+   return NormalizeDouble(MathRound(price / tick) * tick, (int)SymbolInfoInteger(sym, SYMBOL_DIGITS));
+}
+
+double SMCGP_MinStopDistance(const string sym, const double refPrice = 0)
 {
    double pt = SymbolInfoDouble(sym, SYMBOL_POINT);
+   double tick = SymbolInfoDouble(sym, SYMBOL_TRADE_TICK_SIZE);
+   if(tick <= 0) tick = pt;
    if(pt <= 0) return 0;
-   int stops  = (int)SymbolInfoInteger(sym, SYMBOL_TRADE_STOPS_LEVEL);
-   int freeze = (int)SymbolInfoInteger(sym, SYMBOL_TRADE_FREEZE_LEVEL);
-   double minD = (double)MathMax(stops + freeze + 5, 10) * pt;
-   double ask = SymbolInfoDouble(sym, SYMBOL_ASK);
-   bool isBC = (StringFind(sym, "Boom") >= 0 || StringFind(sym, "Crash") >= 0);
-   if(isBC && ask > 0)
-      minD = MathMax(minD, ask * 0.0008);
-   return minD;
+
+   long stops  = SymbolInfoInteger(sym, SYMBOL_TRADE_STOPS_LEVEL);
+   long freeze = SymbolInfoInteger(sym, SYMBOL_TRADE_FREEZE_LEVEL);
+   double minD = (double)(stops + freeze) * pt;
+   if(minD <= 0) minD = 10.0 * pt;
+   minD = MathMax(minD, tick * 5.0);
+
+   double px = refPrice;
+   if(px <= 0)
+   {
+      double ask = SymbolInfoDouble(sym, SYMBOL_ASK);
+      double bid = SymbolInfoDouble(sym, SYMBOL_BID);
+      px = (ask > 0) ? ask : bid;
+   }
+   if(px <= 0)
+   {
+      double last = SymbolInfoDouble(sym, SYMBOL_LAST);
+      if(last > 0) px = last;
+   }
+
+   string symU = sym;
+   StringToUpper(symU);
+   string sc = symU;
+   StringReplace(sc, " ", "");
+
+   bool isWeltrade = SMC_IsWeltradeSymbol(sym);
+   bool isDerivSynth = (StringFind(symU, "BOOM") >= 0 || StringFind(symU, "CRASH") >= 0
+                        || StringFind(sc, "GAIN") >= 0 || StringFind(sc, "PAIN") >= 0
+                        || StringFind(sc, "TREND") >= 0);
+   bool isVol = (StringFind(symU, "VOLATILITY") >= 0 || StringFind(sc, "FXVOL") >= 0
+                 || StringFind(sc, "SFVVOL") >= 0 || StringFind(sc, "SFXVOL") >= 0
+                 || StringFind(symU, "VOL ") >= 0 || StringFind(symU, "FX VOL") >= 0);
+
+   // Weltrade synth (GainX/PainX/FX Vol) : distances larges obligatoires (~0.2% du prix)
+   if(isWeltrade && px > 0)
+   {
+      minD = MathMax(minD, px * 0.002);
+      minD = MathMax(minD, MathMax(pt * 150.0, tick * 50.0));
+   }
+   else if(isDerivSynth && px > 0)
+   {
+      minD = MathMax(minD, MathMax(pt * 250.0, px * 0.005));
+   }
+   else if(isVol && px > 0)
+   {
+      minD = MathMax(minD, MathMax(pt * 500.0, px * 0.0015));
+   }
+   else if(px > 0)
+      minD = MathMax(minD, pt * 30.0);
+
+   return minD * 1.25 + tick;
 }
 
 bool SMCGP_OrderCheckMarket(const string sym, const ENUM_ORDER_TYPE otype,
@@ -1565,6 +2467,15 @@ bool SMCGP_OrderCheckMarket(const string sym, const ENUM_ORDER_TYPE otype,
    req.tp        = tp;
    req.deviation = 30;
    req.magic     = InpMagicNumber;
+   {
+      long fillFlags = SymbolInfoInteger(sym, SYMBOL_FILLING_MODE);
+      if((fillFlags & SYMBOL_FILLING_IOC) != 0)
+         req.type_filling = ORDER_FILLING_IOC;
+      else if((fillFlags & SYMBOL_FILLING_FOK) != 0)
+         req.type_filling = ORDER_FILLING_FOK;
+      else
+         req.type_filling = ORDER_FILLING_RETURN;
+   }
    return OrderCheck(req, chk);
 }
 
@@ -1578,52 +2489,130 @@ bool SMCGP_PrepareMarketStops(const string sym, const int dir, const double entr
 
    double px = (dir == 1) ? ask : bid;
    int dg = (int)SymbolInfoInteger(sym, SYMBOL_DIGITS);
-   double minD = SMCGP_MinStopDistance(sym);
-   double refEntry = (entryPx > 0) ? entryPx : px;
+   double pt = SymbolInfoDouble(sym, SYMBOL_POINT);
+   double minD = SMCGP_MinStopDistance(sym, px);
 
-   double slDist = (slOrig > 0) ? MathAbs(refEntry - slOrig) : minD * 2.0;
-   double tpDist = (tpOrig > 0) ? MathAbs(tpOrig - refEntry) : minD * 3.0;
+   double slDist = (slOrig > 0) ? MathAbs(px - slOrig) : 0;
+   double tpDist = (tpOrig > 0) ? MathAbs(tpOrig - px) : 0;
+   if(slDist <= 0) slDist = minD * 2.0;
+   if(tpDist <= 0) tpDist = minD * 3.0;
    slDist = MathMax(slDist, minD);
-   tpDist = MathMax(tpDist, minD);
+   tpDist = MathMax(tpDist, minD * 1.5);
+   if(pt > 0)
+   {
+      if(MarketSLExtraPoints > 0) slDist += (double)MarketSLExtraPoints * pt;
+      if(MarketTPExtraPoints > 0) tpDist += (double)MarketTPExtraPoints * pt;
+   }
 
    ENUM_ORDER_TYPE otype = (dir == 1) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
-   for(int pass = 0; pass < 4; pass++)
+   long stopsLvl = SymbolInfoInteger(sym, SYMBOL_TRADE_STOPS_LEVEL);
+   long freezeLvl = SymbolInfoInteger(sym, SYMBOL_TRADE_FREEZE_LEVEL);
+
+   // Détection Weltrade synthetics pour ajustements spécifiques
+   string symU = sym;
+   StringToUpper(symU);
+   string sc = symU;
+   StringReplace(sc, " ", "");
+   bool isWeltrade = SMC_IsWeltradeSymbol(sym);
+   bool isBoomCrash = (StringFind(symU, "BOOM") >= 0 || StringFind(symU, "CRASH") >= 0 ||
+                      StringFind(symU, "PAINX") >= 0 || StringFind(symU, "GAINX") >= 0);
+
+   // Pour Weltrade synthetics, utiliser des distances beaucoup plus grandes dès le départ
+   if(isWeltrade && px > 0)
+   {
+      slDist = MathMax(slDist, px * 0.003);  // 0.3% minimum
+      tpDist = MathMax(tpDist, px * 0.005);  // 0.5% minimum
+   }
+   
+   // Pour Boom/Crash (Deriv et Weltrade), distances beaucoup plus grandes
+   if(isBoomCrash && px > 0)
+   {
+      slDist = MathMax(slDist, px * 0.080);  // 8.0% minimum — évite invalid stops broker
+      tpDist = MathMax(tpDist, px * 0.100);  // 10.0% minimum
+   }
+
+   for(int pass = 0; pass < 30; pass++)
    {
       if(dir == 1)
       {
-         sl = NormalizeDouble(refEntry - slDist, dg);
-         tp = NormalizeDouble(refEntry + tpDist, dg);
-         if(sl >= refEntry) sl = NormalizeDouble(refEntry - minD, dg);
-         if(tp <= refEntry) tp = NormalizeDouble(refEntry + minD * 2.0, dg);
+         sl = SMCGP_SnapToTick(sym, px - slDist);
+         tp = SMCGP_SnapToTick(sym, px + tpDist);
+         if(sl >= px - pt) sl = SMCGP_SnapToTick(sym, px - minD);
+         if(tp <= px + pt) tp = SMCGP_SnapToTick(sym, px + minD * 2.0);
       }
       else
       {
-         sl = NormalizeDouble(refEntry + slDist, dg);
-         tp = NormalizeDouble(refEntry - tpDist, dg);
-         if(sl <= refEntry) sl = NormalizeDouble(refEntry + minD, dg);
-         if(tp >= refEntry) tp = NormalizeDouble(refEntry - minD * 2.0, dg);
+         sl = SMCGP_SnapToTick(sym, px + slDist);
+         tp = SMCGP_SnapToTick(sym, px - tpDist);
+         if(sl <= px + pt) sl = SMCGP_SnapToTick(sym, px + minD);
+         if(tp >= px - pt) tp = SMCGP_SnapToTick(sym, px - minD * 2.0);
       }
 
       if(SMCGP_OrderCheckMarket(sym, otype, lot, sl, tp))
          return true;
 
-      slDist *= 1.2;
-      tpDist *= 1.2;
+      slDist *= 1.20;
+      tpDist *= 1.20;
    }
+
+   PrintFormat("[PrepareMarketStops] ECHEC %s dir=%d px=%.5f minD=%.5f stops=%d freeze=%d sl=%.5f tp=%.5f",
+               sym, dir, px, minD, (int)stopsLvl, (int)freezeLvl, sl, tp);
    return false;
+}
+
+bool SMC_MarketDealSend(const string sym, const int dirSign, const double lot,
+                        double slIn, double tpIn, const string comment,
+                        MqlTradeResult &result)
+{
+   if(dirSign == 0 || lot <= 0) return false;
+   double ask = SymbolInfoDouble(sym, SYMBOL_ASK);
+   double bid = SymbolInfoDouble(sym, SYMBOL_BID);
+   if(ask <= 0 || bid <= 0) return false;
+
+   double sl = slIn;
+   double tp = tpIn;
+   if(!SMCGP_PrepareMarketStops(sym, dirSign, 0, slIn, tpIn, lot, sl, tp))
+   {
+      result.retcode = TRADE_RETCODE_INVALID_STOPS;
+      return false;
+   }
+
+   MqlTradeRequest req;
+   ZeroMemory(req);
+   ZeroMemory(result);
+   req.action    = TRADE_ACTION_DEAL;
+   req.symbol    = sym;
+   req.magic     = InpMagicNumber;
+   req.volume    = lot;
+   req.type      = (dirSign == 1) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+   req.price     = (dirSign == 1) ? ask : bid;
+   req.sl        = sl;
+   req.tp        = tp;
+   req.comment   = comment;
+   req.deviation = 30;
+   {
+      long fillFlags = SymbolInfoInteger(sym, SYMBOL_FILLING_MODE);
+      if((fillFlags & SYMBOL_FILLING_IOC) != 0)
+         req.type_filling = ORDER_FILLING_IOC;
+      else if((fillFlags & SYMBOL_FILLING_FOK) != 0)
+         req.type_filling = ORDER_FILLING_FOK;
+      else
+         req.type_filling = ORDER_FILLING_RETURN;
+   }
+   return SafeOrderSend(req, result);
 }
 
 bool SMCGP_ExecutePipelineOrder(const string sym, const string action,
                                 double entry, double sl, double tp, double lot, const bool isPipeline)
 {
    if(BlockAllTrades) return false;
-   if(CountPositionsForSymbol(sym) > 0) return false;
+   if(!CanOpenAdditionalPositionForSymbol(sym, action)) return false;
    if(!IsDirectionAllowedForBoomCrash(sym, action)) return false;
 
    // Max positions atteint : bloquer toute nouvelle entrée sans exception
-   if(CountPositionsOurEA() >= MaxPositionsTerminal)
+   if(CountPositionsOurEA() >= SMC_EffectiveMaxPositionsTerminal())
    {
-      Print("[SMC-GOM] 🚫 Max positions (", MaxPositionsTerminal, ") — ", action, " ", sym, " bloqué");
+      Print("[SMC-GOM] 🚫 Max positions (", SMC_EffectiveMaxPositionsTerminal(), ") — ", action, " ", sym, " bloqué");
       return false;
    }
 
@@ -1651,20 +2640,35 @@ bool SMCGP_ExecutePipelineOrder(const string sym, const string action,
       return false;
    }
 
-   // source=pipeline : filtre GOM déjà appliqué côté Python au moment du POST.
-   // Vérification minimale en live : si le verdict a changé à WAIT ou s'est inversé depuis, annuler.
-   if(isPipeline && UseGOMVerdictFilter)
+   // Gate GOM direction — TOUS symboles (Deriv + Weltrade FX Vol + Boom/Crash)
+   // Empêche un SELL pipeline quand le dashboard affiche PERFECT BUY (vn=+3)
+   if(UseGOMVerdictFilter && g_smcGomConnected)
    {
       if(g_smcGomVerdictNum == 0)
       {
-         Print("[SMC-GOM] 🚫 Pipeline ", action, " ", sym, " annulé — GOM=WAIT depuis le POST Python");
+         Print("[SMC-GOM] 🚫 Ordre ", action, " ", sym, " annulé — GOM=WAIT (vn=0)");
          return false;
       }
       int gomDir = (g_smcGomVerdictNum > 0) ? 1 : -1;
       if(gomDir != dir)
       {
-         Print("[SMC-GOM] 🚫 Pipeline ", action, " ", sym, " annulé — GOM inversé (vn=",
-               g_smcGomVerdictNum, ") depuis le POST Python");
+         Print("[SMC-GOM] 🚫 Ordre ", action, " ", sym, " annulé — GOM inversé (vn=",
+               g_smcGomVerdictNum, " ", g_smcGomVerdict, ") vs action=", action);
+         return false;
+      }
+   }
+
+   // Pattern Charly requis si UsePatternEntrySignals (confirmation M1/M5/H1)
+   if(UsePatternEntrySignals)
+   {
+      if(!SMCPS_PatternGateOK(sym, dir, true))
+      {
+         Print("[SMC-GOM] 🚫 Ordre ", action, " ", sym, " bloqué — pattern non confirmé");
+         return false;
+      }
+      if(!SMCPS_BreakoutConfirmed(sym, dir))
+      {
+         Print("[SMC-GOM] 🚫 Ordre ", action, " ", sym, " bloqué — attente breakout pattern");
          return false;
       }
    }
@@ -1727,8 +2731,8 @@ bool SMCGP_ExecutePipelineOrder(const string sym, const string action,
       StringToUpper(iaActionUp);
       bool iaConfirms = (iaActionUp == action) && (g_lastAIConfidence >= 0.65);
 
-      // GOM dans le même sens (déjà validé avant, mais on vérifie le niveau)
-      bool gomPerfect = (pipeDir > 0) ? (g_smcGomVerdictNum >= 2) : (g_smcGomVerdictNum <= -2);
+      // GOM PERFECT uniquement (vn=±3) — GOOD (vn=±2) ne bypass pas l'indécision IA/COG
+      bool gomPerfect = (MathAbs(g_smcGomVerdictNum) >= 3);
 
       bool tripleAligned = cogConfirms && iaConfirms;
 
@@ -1785,18 +2789,23 @@ bool SMCGP_ExecutePipelineOrder(const string sym, const string action,
       }
       else
       {
-         // Pas de triple alignement : bloquer si cognition ou IA s'oppose/est faible
-         bool cogOppose = (StringLen(g_cogDirection) > 0 && g_cogDirection != "NEUTRAL" &&
-                           ((pipeDir > 0 && g_cogDirection == "SELL") || (pipeDir < 0 && g_cogDirection == "BUY")));
-         bool iaOppose  = (StringLen(iaActionUp) > 0 && iaActionUp != "HOLD" &&
-                           iaActionUp != action && g_lastAIConfidence >= 0.55);
-         if(cogOppose || iaOppose)
+         // Pas de triple alignement : bloquer si cognition ou IA s'oppose OU est indécise (HOLD/NEUTRAL)
+         bool cogOppose  = (StringLen(g_cogDirection) > 0 && g_cogDirection != "NEUTRAL" &&
+                            ((pipeDir > 0 && g_cogDirection == "SELL") || (pipeDir < 0 && g_cogDirection == "BUY")));
+         bool iaOppose   = (StringLen(iaActionUp) > 0 && iaActionUp != "HOLD" &&
+                            iaActionUp != action && g_lastAIConfidence >= 0.55);
+         // Bloquer aussi si IA=HOLD ou Cognition=NEUTRAL sans confirmation forte GOM
+         bool iaHold     = (iaActionUp == "HOLD" || StringLen(iaActionUp) == 0);
+         bool cogNeutral = (g_cogDirection == "NEUTRAL" || StringLen(g_cogDirection) == 0);
+         // HOLD + NEUTRAL = aucune confirmation directionnelle → bloquer sauf PERFECT GOM (vn=±3)
+         bool neitherConfirms = (iaHold && cogNeutral && !gomPerfect);
+         if(cogOppose || iaOppose || neitherConfirms)
          {
-            Print("[TRIPLE] 🚫 Signal bloqué — pas de triple alignement | cogConfirms=", cogConfirms,
-                  " iaConfirms=", iaConfirms, " cog=", g_cogDirection, " ia=", g_lastAIAction);
+            Print("[TRIPLE] 🚫 Signal bloqué — alignement insuffisant | cogConfirms=", cogConfirms,
+                  " iaConfirms=", iaConfirms, " cog=", g_cogDirection, " ia=", g_lastAIAction,
+                  " gomPerfect=", gomPerfect ? "OUI" : "NON");
             return false;
          }
-         // Alignement partiel acceptable (cognition neutre ou IA faible) — on laisse passer
       }
    }
 
@@ -1836,14 +2845,38 @@ bool SMCGP_ExecutePipelineOrder(const string sym, const string action,
       return false;
    }
 
-   if(lot <= 0) lot = SymbolInfoDouble(sym, SYMBOL_VOLUME_MIN);
-   if(UseMinLotOnly) lot = SymbolInfoDouble(sym, SYMBOL_VOLUME_MIN);
+   if(SMC_IsWeltradeVolSymbol(sym))
+      lot = SMC_WeltradeFxVolLot();
+   else if(lot <= 0)
+      lot = SymbolInfoDouble(sym, SYMBOL_VOLUME_MIN);
+   else if(UseMinLotOnly)
+      lot = SymbolInfoDouble(sym, SYMBOL_VOLUME_MIN);
 
-   trade.SetExpertMagicNumber(InpMagicNumber);
+   // Utiliser SafeOrderSend pour respecter toutes les gates (max positions, DecisionEngine, etc.)
+   MqlTradeRequest req = {};
+   MqlTradeResult  res = {};
    double execPx = (MathAbs(entryPx - mktPx) < SymbolInfoDouble(sym, SYMBOL_POINT)) ? 0 : entryPx;
-   bool ok = (dir == 1)
-      ? trade.Buy(lot, sym, execPx, sl, tp, "SMC_PIPELINE")
-      : trade.Sell(lot, sym, execPx, sl, tp, "SMC_PIPELINE");
+   req.action   = TRADE_ACTION_DEAL;
+   req.symbol   = sym;
+   req.volume   = lot;
+   req.type     = (dir == 1) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+   req.price    = (execPx > 0) ? execPx : ((dir == 1) ? ask : bid);
+   req.sl          = sl;
+   req.tp          = tp;
+   req.deviation   = 10;
+   req.magic       = InpMagicNumber;
+   req.comment     = "SMC_PIPELINE";
+   {
+      long fillFlags = SymbolInfoInteger(sym, SYMBOL_FILLING_MODE);
+      if((fillFlags & SYMBOL_FILLING_IOC) != 0)
+         req.type_filling = ORDER_FILLING_IOC;
+      else if((fillFlags & SYMBOL_FILLING_FOK) != 0)
+         req.type_filling = ORDER_FILLING_FOK;
+      else
+         req.type_filling = ORDER_FILLING_RETURN;
+   }
+
+   bool ok = SafeOrderSendAndAlert(req, res);
 
    ReleaseOpenLock();
 
@@ -1858,9 +2891,8 @@ bool SMCGP_ExecutePipelineOrder(const string sym, const string action,
       return true;
    }
 
-   PrintFormat("[SMC-GOM] ❌ Pipeline échec %s %s: %s", sym, action, trade.ResultRetcodeDescription());
-   uint rc = trade.ResultRetcode();
-   if(rc == TRADE_RETCODE_INVALID_STOPS || rc == TRADE_RETCODE_INVALID_PRICE)
+   PrintFormat("[SMC-GOM] ❌ Pipeline échec %s %s: %d", sym, action, res.retcode);
+   if(res.retcode == TRADE_RETCODE_INVALID_STOPS || res.retcode == TRADE_RETCODE_INVALID_PRICE)
    {
       g_smcLastPipelineFail = TimeCurrent();
       g_smcPipelineFailCount++;
@@ -1885,13 +2917,62 @@ void SMCGP_PollAndExecutePipeline()
       bool holdFromDecide    = (g_lastAIAction == "hold" || g_lastAIAction == "HOLD" || g_lastAIAction == "");
       if(holdFromDashboard || holdFromDecide)
       {
-         static datetime s_holdLog = 0;
-         if(TimeCurrent() - s_holdLog >= 60)
+         // NOUVEAU: Vérifier si un reset manuel a été forcé
+         string gvReset = "SMC_GivebackManualReset_" + IntegerToString((long)ChartID());
+         if(GlobalVariableCheck(gvReset))
          {
-            s_holdLog = TimeCurrent();
-            Print("[PIPELINE] ⏸ IA en HOLD — pipeline suspendu sur ", _Symbol,
-                  " | dashboard=", g_smcIAStatusAction, " (", DoubleToString(g_iaStatusConfidence,1), "%)",
-                  " | decide=", g_lastAIAction);
+            // Reset manuel effectué — ignorer les restrictions hold pour forcer une nouvelle évaluation
+            static datetime s_resetLog = 0;
+            if(TimeCurrent() - s_resetLog >= 60)
+            {
+               s_resetLog = TimeCurrent();
+               Print("[PIPELINE] ? Reset manuel forcé — les restrictions hold ignorées, pipeline repris | reset_time=", TimeToString(TimeCurrent(), TIME_MINUTES));
+            }
+            // Continuer à évaluer le pipeline, ignorer hold
+         }
+         else
+         {
+            static datetime s_holdLog = 0;
+            if(TimeCurrent() - s_holdLog >= 60)
+            {
+               s_holdLog = TimeCurrent();
+               Print("[PIPELINE] ⏸ IA en HOLD — pipeline suspendu sur ", _Symbol,
+                     " | dashboard=", g_smcIAStatusAction, " (", DoubleToString(g_iaStatusConfidence,1), "%)",
+                     " | decide=", g_lastAIAction);
+            }
+            return;
+         }
+      }
+   }
+
+   // Gate GOM=WAIT absolu : aucun ordre pipeline si vn=0, sauf Weltrade synthétiques
+   if(!isWeltradeSynth && g_smcGomVerdictNum == 0)
+   {
+      static datetime s_waitLog = 0;
+      if(TimeCurrent() - s_waitLog >= 60)
+      {
+         s_waitLog = TimeCurrent();
+         Print("[PIPELINE] 🚫 GOM=WAIT (vn=0) — pipeline suspendu | ",
+               _Symbol, " | IA=", g_smcIAStatusAction, " COG=", g_cogDirection);
+      }
+      return;
+   }
+
+   // Gate double-indécision : IA=HOLD ET Cognition=NEUTRAL sans GOM PERFECT → bloquer
+   if(!isWeltradeSynth && MathAbs(g_smcGomVerdictNum) < 3)
+   {
+      bool iaIndecis  = (g_smcIAStatusAction == "HOLD" || StringLen(g_smcIAStatusAction) == 0 ||
+                         g_lastAIAction == "hold" || g_lastAIAction == "HOLD" || StringLen(g_lastAIAction) == 0);
+      bool cogIndecis = (g_cogDirection == "NEUTRAL" || StringLen(g_cogDirection) == 0);
+      if(iaIndecis && cogIndecis)
+      {
+         static datetime s_dblIndLog = 0;
+         if(TimeCurrent() - s_dblIndLog >= 60)
+         {
+            s_dblIndLog = TimeCurrent();
+            Print("[PIPELINE] ⏸ Double-indécision IA+COG — pipeline suspendu | ",
+                  _Symbol, " | IA=", g_smcIAStatusAction, "/", g_lastAIAction,
+                  " COG=", g_cogDirection, " GOM=", g_smcGomVerdict, " (vn=", g_smcGomVerdictNum, ")");
          }
          return;
       }
@@ -1940,7 +3021,10 @@ void SMCGP_PollAndExecutePipeline()
    double sl    = SMCGP_JsonDouble(orderBody, "stop_loss");
    double tp    = SMCGP_JsonDouble(orderBody, "take_profit");
    double lot   = SMCGP_JsonDouble(orderBody, "lot");
-   if(lot <= 0) lot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   if(SMC_IsWeltradeVolSymbol(_Symbol))
+      lot = SMC_WeltradeFxVolLot();
+   else if(lot <= 0)
+      lot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
 
    string serverVerdict = SMCGP_JsonString(orderBody, "gom_verdict");
    StringToUpper(serverVerdict);
@@ -2263,6 +3347,8 @@ void SMCGP_DrawGOMDashboard()
 {
    if(!ShowGOMDashboard) return;
 
+   SMCGP_RefreshCorrectionWaitOverlay(_Symbol);
+
    int chartW = (int)ChartGetInteger(0, CHART_WIDTH_IN_PIXELS);
    if(chartW < 400) chartW = 1200;
 
@@ -2279,6 +3365,7 @@ void SMCGP_DrawGOMDashboard()
    int y1 = marginBot;
    int y2 = marginBot + (cellH + gap) * 2;
    int y3 = marginBot + (cellH + gap) * 3;
+   int y4 = marginBot + (cellH + gap) * 4;
 
    color cVerdict = SMCGP_VerdictColor(g_smcGomVerdictNum);
    color cBg = (color)SMC_DASH_C_BG;
@@ -2295,7 +3382,11 @@ void SMCGP_DrawGOMDashboard()
       connTxt = "NO WEBREQ";
 
    string verdLabel = g_smcGomVerdict;
-   if(g_smcGomVerdictNum >= 2 || g_smcGomVerdictNum <= -2) verdLabel += " *";
+   if(g_smcGomCorrectionWait && g_smcGomVerdictNumServer != 0)
+      verdLabel = "WAIT ← " + g_smcGomVerdictServer;
+   else if(g_smcGomVerdictNum >= 2 || g_smcGomVerdictNum <= -2) verdLabel += " *";
+   if(g_smcGomVerdictReactiveNum != 0 || g_smcGomVerdictForecastNum != 0)
+      verdLabel += StringFormat(" [R:%d F:%d]", g_smcGomVerdictReactiveNum, g_smcGomVerdictForecastNum);
 
    int xCur = marginLR;
    SMCGP_DrawDashCell("V0_HDR", xCur, y0, cellW, cellH, sym + " GOM", cVerdict, cTxt);
@@ -2355,17 +3446,27 @@ void SMCGP_DrawGOMDashboard()
    SMCGP_DrawDashCell("V1_KS", xCur, y1, cellW, cellH,
                       "KSell " + DoubleToString(g_smcGomKolaSell, 2), (color)SMC_DASH_C_SELL, cTxt);
 
-   xCur += cellW + gap;
-   {
-      double probScore = SMC_ComputeEntryProbability(0);
-      color  cProb = !UseHighProbabilityFilter ? cBg
-                   : (probScore >= MinEntryProbabilityPct) ? (color)SMC_DASH_C_BUY
-                                                           : (color)SMC_DASH_C_SELL;
-      string probTxt = UseHighProbabilityFilter
-         ? ("P:" + DoubleToString(probScore, 0) + "% >" + DoubleToString(MinEntryProbabilityPct, 0))
-         : ("P:" + DoubleToString(probScore, 0) + "% OFF");
-      SMCGP_DrawDashCell("V1_PIPE", xCur, y1, cellW, cellH, probTxt, cProb, cTxt);
-   }
+xCur += cellW + gap;
+    {
+       double probScore = SMC_ComputeEntryProbability(0);
+       color  cProb = !UseHighProbabilityFilter ? cBg
+                    : (probScore >= MinEntryProbabilityPct) ? (color)SMC_DASH_C_BUY
+                                                            : (color)SMC_DASH_C_SELL;
+       string probTxt;
+       if(!UseHighProbabilityFilter)
+       {
+          probTxt = "P:" + DoubleToString(probScore, 0) + "% OFF";
+       }
+       else if(probScore >= MinEntryProbabilityPct)
+       {
+          probTxt = "P:" + DoubleToString(probScore, 0) + "% >=" + DoubleToString(MinEntryProbabilityPct, 0);
+       }
+       else
+       {
+          probTxt = "P:" + DoubleToString(probScore, 0) + "% <" + DoubleToString(MinEntryProbabilityPct, 0);
+       }
+       SMCGP_DrawDashCell("V1_PIPE", xCur, y1, cellW, cellH, probTxt, cProb, cTxt);
+    }
 
    xCur += cellW + gap;
    color cGlob = (g_smcGomGlobalStr >= GOMGlobalMinConfidence) ? (color)SMC_DASH_C_BUY : (color)SMC_DASH_C_SELL;
@@ -2507,18 +3608,39 @@ void SMCGP_DrawGOMDashboard()
 
       color cCog;
       string cogTxt;
+      double confDisp = g_cogConfidence * 100.0;
+      if(confDisp <= 0.0 && g_cogShortConfidence > 0.0)
+         confDisp = g_cogShortConfidence * 100.0;
+      string cog5 = (StringLen(g_cogDirection5m) > 0) ? g_cogDirection5m : "—";
+      string cog15 = (StringLen(g_cogDirection15m) > 0) ? g_cogDirection15m : "—";
+      string cogMain = (StringLen(g_cogDirection) > 0 && g_cogDirection != "NEUTRAL")
+                       ? g_cogDirection + " " : "";
       if(tripleAligned)
       {
          cCog   = tripleAlignedBuy ? (color)0xFF00E676 : (color)0xFFFF1744; // vert/rouge vif
-         cogTxt = (tripleAlignedBuy ? "🔥BUY" : "🔥SELL") + " " + DoubleToString(g_cogConfidence * 100, 0) + "% 3x";
+         cogTxt = (tripleAlignedBuy ? "🔥BUY" : "🔥SELL") + " " + DoubleToString(confDisp, 0) + "% 3x";
       }
       else
       {
          cCog   = cogOk ? (color)SMC_DASH_C_BUY : (color)SMC_DASH_C_SELL;
-         cogTxt = "->5m " + g_cogDirection + " " + DoubleToString(g_cogConfidence * 100, 0) + "%";
+         cogTxt = cogMain + cog5 + "/" + cog15 + " " + DoubleToString(confDisp, 0) + "%";
       }
       SMCGP_DrawDashCell("G5_COG", xCur, y3, cellW, cellH, cogTxt, cCog, cTxt);
       xCur += cellW + gap;
+
+      string concTxt = (g_pathConcordancePct > 0.0)
+         ? ("CONC " + DoubleToString(g_pathConcordancePct, 0) + "%")
+         : "CONC —";
+      if(g_pathTrailBonusActive)
+         concTxt = "PATH+" + DoubleToString(g_pathConcordancePct, 0) + "%";
+      color cConc = g_pathTrailBonusActive ? (color)0xFF00E676
+                  : (g_pathConcordancePct >= 65.0) ? (color)SMC_DASH_C_BUY
+                  : (g_pathConcordancePct >= 45.0) ? (color)SMC_DASH_C_NEUTRAL
+                  : (g_pathConcordancePct > 0.0) ? (color)SMC_DASH_C_SELL
+                  : cBg;
+      SMCGP_DrawDashCell("G5B_CONC", xCur, y3, cellW, cellH, concTxt, cConc, cTxt);
+      xCur += cellW + gap;
+
       SMCGP_DrawDashCell("G6_IA", xCur, y3, cellW, cellH, iaTxt, cIA, cTxt);
       xCur += cellW + gap;
 
@@ -2554,6 +3676,90 @@ void SMCGP_DrawGOMDashboard()
    else
       SMCGP_CleanupOrderFlowCompass();
 
+   // ── Rangée 5 : Session Readiness + Circuit-Breaker + Discipline ──────────
+   {
+      xCur = marginLR;
+
+      // Cellule 1 — READINESS score
+      string rdyStatus = g_readinessCBActive      ? "HALT-GLOBAL"
+                       : g_readinessCBSymbolCool  ? "HALT-SYM"
+                       : g_readinessGo            ? "GO"
+                                                  : "NO-GO";
+      string rdyTxt = "RDY " + IntegerToString(g_readinessScore) + "/100 " + rdyStatus;
+      color cRdy = g_readinessCBActive     ? (color)SMC_DASH_C_SELL
+                 : g_readinessCBSymbolCool ? (color)0xFFE65100       // orange foncé
+                 : g_readinessGo           ? (color)SMC_DASH_C_BUY
+                                           : (color)SMC_DASH_C_NEUTRAL;
+      SMCGP_DrawDashCell("R0_RDY", xCur, y4, cellW, cellH, rdyTxt, cRdy, cTxt);
+
+      // Cellule 2 — Circuit-Breaker raison (ou "CB OK")
+      xCur += cellW + gap;
+      string cbTxt = (g_readinessCBActive || g_readinessCBSymbolCool)
+                   ? ("CB: " + (StringLen(g_readinessCBReason) > 0 ? g_readinessCBReason : "ACTIF"))
+                   : "CB OK";
+      color cCB = (g_readinessCBActive || g_readinessCBSymbolCool) ? (color)SMC_DASH_C_SELL : cBg;
+      SMCGP_DrawDashCell("R1_CB", xCur, y4, cellW, cellH, cbTxt, cCB, cTxt);
+
+      // Cellule 3 — Best hours
+      xCur += cellW + gap;
+      string bhTxt = (StringLen(g_readinessBestHours) > 0)
+                   ? ("Best:" + g_readinessBestHours + "h")
+                   : "Best: peu data";
+      color cBH = (StringLen(g_readinessBestHours) > 0) ? (color)SMC_DASH_C_BUY : cBg;
+      SMCGP_DrawDashCell("R2_BH", xCur, y4, cellW, cellH, bhTxt, cBH, cTxt);
+
+      // Cellule 4 — Avoid hours
+      xCur += cellW + gap;
+      string ahTxt = (StringLen(g_readinessAvoidHours) > 0)
+                   ? ("Avoid:" + g_readinessAvoidHours + "h")
+                   : "Avoid: peu data";
+      color cAh = (StringLen(g_readinessAvoidHours) > 0) ? (color)SMC_DASH_C_SELL : cBg;
+      SMCGP_DrawDashCell("R3_AH", xCur, y4, cellW, cellH, ahTxt, cAh, cTxt);
+
+      // Cellule 5 — Discipline trades jour
+      xCur += cellW + gap;
+      bool discBlocked = (g_dailyTradeCount >= MaxDailyTrades);
+      string discTxt = StringFormat("J: %d/%d trades", g_dailyTradeCount, MaxDailyTrades);
+      color cDisc = discBlocked ? (color)SMC_DASH_C_SELL
+                  : (g_dailyTradeCount >= MaxDailyTrades * 7 / 10) ? (color)SMC_DASH_C_NEUTRAL
+                                                                    : (color)SMC_DASH_C_BUY;
+      SMCGP_DrawDashCell("R4_DISC", xCur, y4, cellW, cellH, discTxt, cDisc, cTxt);
+
+      // Cellule 6 — Objectif journalier
+      xCur += cellW + gap;
+      string tgtTxt = g_dailyTargetHit ? "OBJECTIF OK" : ("Obj: " + DoubleToString(DailyProfitTargetPct, 0) + "%");
+      color cTgt = g_dailyTargetHit ? (color)SMC_DASH_C_BUY : cBg;
+      SMCGP_DrawDashCell("R5_TGT", xCur, y4, cellW, cellH, tgtTxt, cTgt, cTxt);
+
+      // Cellule 7 — Heure UTC courante + gate horaire Weltrade
+      xCur += cellW + gap;
+      MqlDateTime dtUtc; TimeGMT(dtUtc);
+      string utcTxt = StringFormat("UTC %02d:%02d", dtUtc.hour, dtUtc.min);
+      bool wtOpen = (dtUtc.hour >= 4 && dtUtc.hour < 16);
+      if(SMCGP_IsBoomCrashSym(_Symbol))
+         utcTxt += wtOpen ? " OPEN" : " CLOSED";
+      color cUtc = (SMCGP_IsBoomCrashSym(_Symbol) && !wtOpen) ? (color)SMC_DASH_C_SELL : cBg;
+      SMCGP_DrawDashCell("R6_UTC", xCur, y4, cellW, cellH, utcTxt, cUtc, cTxt);
+
+      // Cellule 8 — Connexion AI server
+      xCur += cellW + gap;
+      SMCGP_DrawDashCell("R7_CONN", xCur, y4, cellW, cellH, connTxt, cConn, cTxt);
+
+      // Cellule 9 — Zone spike H1+M5
+      xCur += cellW + gap;
+      string zoneTxt;
+      color  cZone;
+      if(g_spikeBonusPts >= 20)
+         { zoneTxt = "ZONE HOT +20"; cZone = (color)0xFFFF6D00; }   // orange vif
+      else if(g_spikeBonusPts >= 10)
+         { zoneTxt = "ZONE+ +10";    cZone = (color)SMC_DASH_C_NEUTRAL; }
+      else if(g_spikeZoneCount > 0)
+         { zoneTxt = "ZONE " + IntegerToString(g_spikeZoneCount); cZone = cBg; }
+      else
+         { zoneTxt = "---";          cZone = cBg; }
+      SMCGP_DrawDashCell("R8_ZONE", xCur, y4, cellW, cellH, zoneTxt, cZone, cTxt);
+   }
+
    ChartRedraw(0);
 }
 
@@ -2568,6 +3774,22 @@ void SMCGP_UploadCandles()
    string sym = SMCGP_ResolveGOMSym(_Symbol);
    Print("[GOM-UPLOAD] Envoi candles MT5 → ai_server pour ", sym);
    g_smcCandlesUploader.UploadAllTimeframes(sym);
+
+   // Market Watch Deriv — M15 pour les symboles visibles (rotation)
+   static int s_watchRot = 0;
+   int total = SymbolsTotal(true);
+   int batch = MathMin(10, MathMax(total, 0));
+   for(int k = 0; k < batch && total > 0; k++)
+   {
+      int idx = (s_watchRot + k) % total;
+      string wsym = SymbolName(idx, true);
+      if(wsym == "" || wsym == sym) continue;
+      g_smcCandlesUploader.UploadCandles(wsym, PERIOD_M1, 80);
+      Sleep(200);
+      g_smcCandlesUploader.UploadCandles(wsym, PERIOD_M15, 120);
+      Sleep(250);
+   }
+   if(total > 0) s_watchRot = (s_watchRot + batch) % total;
 }
 
 void SMCGP_OnTimer()
@@ -2586,6 +3808,12 @@ void SMCGP_OnTimer()
       }
       else
          SMCGP_CleanupOrderFlowCompass();
+   }
+
+   if(UseAIServer && MT5DashboardSync)
+   {
+      SMCGP_SendDashboardLive();
+      SMCGP_PollServerLossGuard();
    }
 
    if(UltraLightMode) return;
@@ -2753,6 +3981,8 @@ void SMCGP_Init()
    else
       Print("[SMC-GOM] ai_server INJOIGNABLE (HTTP ", g_smcLastHttpCode,
             ") — verdict GOM indisponible tant que WebRequest + serveur ne sont pas OK");
+   if(UseAIServer && MT5DashboardSync)
+      SMCGP_SendDashboardLive(true);
 }
 
 void SMCGP_Deinit()
@@ -2762,8 +3992,102 @@ void SMCGP_Deinit()
       delete g_smcCandlesUploader;
       g_smcCandlesUploader = NULL;
    }
-   if(g_pipelineEma9Handle != INVALID_HANDLE)
-   { IndicatorRelease(g_pipelineEma9Handle); g_pipelineEma9Handle = INVALID_HANDLE; }
+if(g_pipelineEma9Handle != INVALID_HANDLE)
+    { IndicatorRelease(g_pipelineEma9Handle); g_pipelineEma9Handle = INVALID_HANDLE; }
+}
+
+// ── Price Action Zone helpers ──────────────────────────────────────
+bool SMCGP_UpdatePriceInActionZone(const string sym = "")
+{
+    g_smcPaPriceInZone = false;
+    if(g_smcPaZoneSupport <= 0 || g_smcPaZoneResistance <= 0)
+       return false;
+
+    string s = (StringLen(sym) > 0) ? sym : _Symbol;
+    double zLo = MathMin(g_smcPaZoneSupport, g_smcPaZoneResistance);
+    double zHi = MathMax(g_smcPaZoneSupport, g_smcPaZoneResistance);
+    if(zHi <= zLo) return false;
+
+    double point = SymbolInfoDouble(s, SYMBOL_POINT);
+    int dg = (int)SymbolInfoInteger(s, SYMBOL_DIGITS);
+    double tol = (dg <= 3) ? point * 3.0 : point * 8.0;
+    double bid = SymbolInfoDouble(s, SYMBOL_BID);
+    g_smcPaPriceInZone = (bid >= zLo - tol && bid <= zHi + tol);
+    return g_smcPaPriceInZone;
+}
+
+bool SMCGP_PriceActionBlocksEntry(const string sym = "")
+{
+    if(!g_usePriceActionZoneGate) return false;
+    if(g_smcPaZoneSupport <= 0 || g_smcPaZoneResistance <= 0) return false;
+    if(!SMCGP_UpdatePriceInActionZone(sym)) return false;
+    return true;
+}
+
+string SMCGP_PriceActionBlockReason(const string sym = "")
+{
+    if(!SMCGP_PriceActionBlocksEntry(sym)) return "";
+    string s = (StringLen(sym) > 0) ? sym : _Symbol;
+    int dg = (int)SymbolInfoInteger(s, SYMBOL_DIGITS);
+    double zLo = MathMin(g_smcPaZoneSupport, g_smcPaZoneResistance);
+    double zHi = MathMax(g_smcPaZoneSupport, g_smcPaZoneResistance);
+    string mode = g_smcPaConsolidation ? "consolidation" : (g_smcPaInCorrection ? "correction" : "MA zone");
+    return StringFormat("prix dans zone %s %s (MA50/200 %.*f-%.*f) trend=%s RSI=%.0f",
+                        mode, s, dg, zLo, dg, zHi, g_smcPaTrend, g_smcPaRsi);
+}
+
+void SMCGP_DrawPriceActionZone()
+{
+    ObjectDelete(0, "SMC_PA_ZONE");
+    ObjectDelete(0, "SMC_PA_LABEL");
+    ObjectDelete(0, "SMC_PA_MA50");
+    ObjectDelete(0, "SMC_PA_MA200");
+
+    if(!g_showPriceActionZone) return;
+    if(g_smcPaZoneSupport <= 0 || g_smcPaZoneResistance <= 0) return;
+
+    SMCGP_UpdatePriceInActionZone();
+
+    double zLo = MathMin(g_smcPaZoneSupport, g_smcPaZoneResistance);
+    double zHi = MathMax(g_smcPaZoneSupport, g_smcPaZoneResistance);
+    if(zHi <= zLo) return;
+
+    int dg = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+    datetime t0 = iTime(_Symbol, PERIOD_CURRENT, 40);
+    datetime tE = iTime(_Symbol, PERIOD_CURRENT, 0) + PeriodSeconds(PERIOD_CURRENT) * 100;
+    if(t0 <= 0) t0 = TimeCurrent() - PeriodSeconds(PERIOD_CURRENT) * 40;
+
+    color zoneClr = g_smcPaPriceInZone ? clrTomato : clrDimGray;
+    if(g_smcPaPriceInZone && g_smcPaConsolidation) zoneClr = clrOrangeRed;
+
+    ObjectCreate(0, "SMC_PA_ZONE", OBJ_RECTANGLE, 0, t0, zHi, tE, zLo);
+    ObjectSetInteger(0, "SMC_PA_ZONE", OBJPROP_COLOR, zoneClr);
+    ObjectSetInteger(0, "SMC_PA_ZONE", OBJPROP_BACK, true);
+    ObjectSetInteger(0, "SMC_PA_ZONE", OBJPROP_FILL, true);
+    ObjectSetInteger(0, "SMC_PA_ZONE", OBJPROP_SELECTABLE, false);
+
+    string lbl = g_smcPaPriceInZone
+       ? StringFormat("PRIX DANS ZONE MA50/200 [%.*f-%.*f] %s RSI=%.0f",
+                      dg, zLo, dg, zHi, g_smcPaTrend, g_smcPaRsi)
+       : StringFormat("ZONE MA50/200 [%.*f-%.*f] %s RSI=%.0f",
+                      dg, zLo, dg, zHi, g_smcPaTrend, g_smcPaRsi);
+
+    ObjectCreate(0, "SMC_PA_LABEL", OBJ_LABEL, 0, 0, 0);
+    ObjectSetInteger(0, "SMC_PA_LABEL", OBJPROP_CORNER, CORNER_LEFT_UPPER);
+    ObjectSetInteger(0, "SMC_PA_LABEL", OBJPROP_XDISTANCE, 10);
+    ObjectSetInteger(0, "SMC_PA_LABEL", OBJPROP_YDISTANCE, 70);
+    ObjectSetString(0, "SMC_PA_LABEL", OBJPROP_TEXT, lbl);
+    ObjectSetInteger(0, "SMC_PA_LABEL", OBJPROP_COLOR, zoneClr);
+    ObjectSetInteger(0, "SMC_PA_LABEL", OBJPROP_FONTSIZE, 9);
+}
+
+void SMCGP_EnsurePriceActionData()
+{
+    if(g_smcPaMa50 > 0 && g_smcPaMa200 > 0)
+    {
+       g_smcPaZoneSupport = MathMin(g_smcPaMa50, g_smcPaMa200);
+       g_smcPaZoneResistance = MathMax(g_smcPaMa50, g_smcPaMa200);
+    }
 }
 
 #include "SMC_FuturePath.mqh"

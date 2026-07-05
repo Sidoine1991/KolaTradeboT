@@ -1,5 +1,5 @@
 //+------------------------------------------------------------------+
-//| GOM_Graphics.mqh â€” Dessine Bollinger + Zones futures            |
+//| GOM_Graphics.mqh — Dessine Bollinger + Zones futures            |
 //+------------------------------------------------------------------+
 #ifndef GOM_GRAPHICS_MQH
 #define GOM_GRAPHICS_MQH
@@ -14,7 +14,7 @@ void GOMG_DrawBollinger(double bb_up, double bb_mid, double bb_dn)
    datetime now = TimeCurrent();
    datetime future = now + 3600; // 1 heure dans le futur
 
-   // Bande supÃ©rieure (OBJ_TREND = droite)
+   // Bande supérieure (OBJ_TREND = droite)
    string bbUpName = "GOM_BB_UP";
    ObjectDelete(0, bbUpName);
    ObjectCreate(0, bbUpName, OBJ_TREND, 0, now, bb_up, future, bb_up);
@@ -34,7 +34,7 @@ void GOMG_DrawBollinger(double bb_up, double bb_mid, double bb_dn)
    ObjectSetInteger(0, bbMidName, OBJPROP_RAY_RIGHT, true);
    ObjectSetInteger(0, bbMidName, OBJPROP_BACK, false);
 
-   // Bande infÃ©rieure (OBJ_TREND = droite)
+   // Bande inférieure (OBJ_TREND = droite)
    string bbDnName = "GOM_BB_DN";
    ObjectDelete(0, bbDnName);
    ObjectCreate(0, bbDnName, OBJ_TREND, 0, now, bb_dn, future, bb_dn);
@@ -44,11 +44,11 @@ void GOMG_DrawBollinger(double bb_up, double bb_mid, double bb_dn)
    ObjectSetInteger(0, bbDnName, OBJPROP_RAY_RIGHT, true);
    ObjectSetInteger(0, bbDnName, OBJPROP_BACK, false);
 
-   Print("[GOMG] Bollinger dessinÃ©es: UP=", bb_up, " MID=", bb_mid, " DN=", bb_dn);
+   Print("[GOMG] Bollinger dessinées: UP=", bb_up, " MID=", bb_mid, " DN=", bb_dn);
 }
 
 //+------------------------------------------------------------------+
-// Dessiner les zones de prÃ©diction futures
+// Dessiner les zones de prédiction futures
 //+------------------------------------------------------------------+
 void GOMG_DrawFutureZone(double zone_high, double zone_low, string label = "GOM_FUTURE_ZONE")
 {
@@ -58,7 +58,7 @@ void GOMG_DrawFutureZone(double zone_high, double zone_low, string label = "GOM_
    // Effacer l'ancienne zone
    ObjectDelete(0, label);
 
-   // CrÃ©er une rectangle pour la zone future
+   // Créer une rectangle pour la zone future
    datetime now = TimeCurrent();
    datetime future = now + 3600; // 1 heure dans le futur
 
@@ -67,7 +67,7 @@ void GOMG_DrawFutureZone(double zone_high, double zone_low, string label = "GOM_
    ObjectSetInteger(0, label, OBJPROP_FILL, true);
    ObjectSetInteger(0, label, OBJPROP_BACK, false);
 
-   Print("[GOMG] Zone future dessinÃ©e: HIGH=", zone_high, " LOW=", zone_low);
+   Print("[GOMG] Zone future dessinée: HIGH=", zone_high, " LOW=", zone_low);
 }
 
 //+------------------------------------------------------------------+
@@ -97,7 +97,7 @@ void GOMG_DrawKolaLevels(double kola_buy, double kola_sell)
 }
 
 //+------------------------------------------------------------------+
-// Tracer les Bollinger Bands PRÃ‰DITES (300 bougies) â€” Courbes continues
+// Tracer les Bollinger Bands PRÉDITES (300 bougies) — Courbes continues
 //+------------------------------------------------------------------+
 void GOMG_DrawBollingerPrediction(double& pred_bb_mid[], double& pred_bb_up[], double& pred_bb_dn[])
 {
@@ -106,10 +106,10 @@ void GOMG_DrawBollingerPrediction(double& pred_bb_mid[], double& pred_bb_up[], d
    datetime now = TimeCurrent();
    int n_points = ArraySize(pred_bb_mid);
 
-   // Intervalle temporel entre points (30s par dÃ©faut pour M1 = 60 points/min)
+   // Intervalle temporel entre points (30s par défaut pour M1 = 60 points/min)
    int time_step = 60; // 1 min per point
 
-   // â”€â”€ Tracer MID (bleu, solide, Ã©pais) â”€â”€
+   // ?? Tracer MID (bleu, solide, épais) ??
    for(int i = 0; i < n_points - 1; i++)
    {
       string line_name = "GOM_PRED_MID_" + IntegerToString(i);
@@ -125,7 +125,7 @@ void GOMG_DrawBollingerPrediction(double& pred_bb_mid[], double& pred_bb_up[], d
       ObjectSetInteger(0, line_name, OBJPROP_BACK, false);
    }
 
-   // â”€â”€ Tracer UP (rouge, pointillÃ©) â”€â”€
+   // ?? Tracer UP (rouge, pointillé) ??
    for(int i = 0; i < n_points - 1; i++)
    {
       string line_name = "GOM_PRED_UP_" + IntegerToString(i);
@@ -141,7 +141,7 @@ void GOMG_DrawBollingerPrediction(double& pred_bb_mid[], double& pred_bb_up[], d
       ObjectSetInteger(0, line_name, OBJPROP_BACK, false);
    }
 
-   // â”€â”€ Tracer DN (vert, pointillÃ©) â”€â”€
+   // ?? Tracer DN (vert, pointillé) ??
    for(int i = 0; i < n_points - 1; i++)
    {
       string line_name = "GOM_PRED_DN_" + IntegerToString(i);
@@ -157,7 +157,7 @@ void GOMG_DrawBollingerPrediction(double& pred_bb_mid[], double& pred_bb_up[], d
       ObjectSetInteger(0, line_name, OBJPROP_BACK, false);
    }
 
-   Print("[GOMG] Bollinger Predictions dessinÃ©es: " + IntegerToString(n_points) + " points");
+   Print("[GOMG] Bollinger Predictions dessinées: " + IntegerToString(n_points) + " points");
 }
 
 //+------------------------------------------------------------------+
@@ -174,7 +174,7 @@ void GOMG_ClearAll()
    ObjectsDeleteAll(0, "GOM_PRED_MID_");  // prefix sans wildcard (ObjectDelete ignore les wildcards)
    ObjectsDeleteAll(0, "GOM_PRED_UP_");
    ObjectsDeleteAll(0, "GOM_PRED_DN_");
-   Print("[GOMG] Tous les dessins GOM nettoyÃ©s");
+   Print("[GOMG] Tous les dessins GOM nettoyés");
 }
 
 #endif
