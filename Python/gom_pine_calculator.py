@@ -4,6 +4,7 @@
 GOM Pine Script Calculator — Réplique de GOM_KOLA_script.pine (scoring + verdict)
 """
 
+import os
 import sys
 from typing import Dict, Any, Tuple
 
@@ -26,6 +27,9 @@ class GOMLPineCalculator:
         self.gap_perfect = 5.0
         # Gap pour GOOD — inchangé
         self.gap_good = 2.5
+        # Uplift MTF : un alignement multi-TF pondéré net produit un signal même
+        # quand le TF du graphique est calme (WAIT). Désactivable via GOM_MTF_UPLIFT=0.
+        self.mtf_uplift_enabled = os.getenv("GOM_MTF_UPLIFT", "1").lower() not in ("0", "false", "no")
 
     def calculate_filter_ratio(
         self, record: Dict[str, Any], score_buy: float, score_sell: float
@@ -360,6 +364,56 @@ class GOMLPineCalculator:
 
         return verdict_num
 
+    def apply_mtf_verdict_uplift(
+        self, record: Dict[str, Any], verdict_num: int, score_buy: float, score_sell: float
+    ) -> int:
+        """Complément symétrique de apply_mtf_verdict_gate.
+
+        Le verdict de base vient surtout des indicateurs du TF graphique ; un net
+        alignement multi-TF ne pouvait, jusqu'ici, que RABAISSER le verdict. Ici on
+        REMONTE un WAIT quand le MTF pondéré est franchement directionnel (le prix
+        tend clairement sur les TF alors que la bougie du graphique est calme).
+
+        Plafonné à GOOD (±2) : PERFECT reste réservé à la confluence complète
+        (gap de score + cohérence). Le score du TF graphique ne doit pas contredire
+        le sens MTF, et la structure H4/H1 doit rester compatible.
+        """
+        if not self.mtf_uplift_enabled or verdict_num != 0:
+            return verdict_num
+
+        tf_w = {
+            "tf_h4_dir": 3,
+            "tf_h1_dir": 2,
+            "tf_d1_dir": 2,
+            "tf_m15_dir": 1,
+            "tf_m5_dir": 1,
+            "tf_m1_dir": 1,
+            "tf_w1_dir": 1,
+        }
+        tb_w = sum(w for k, w in tf_w.items() if record.get(k, "NEUT") == "BULL")
+        ts_w = sum(w for k, w in tf_w.items() if record.get(k, "NEUT") == "BEAR")
+        total_w = tb_w + ts_w
+        if total_w == 0:
+            return verdict_num
+
+        h4_dir = record.get("tf_h4_dir", "NEUT")
+        h1_dir = record.get("tf_h1_dir", "NEUT")
+
+        if tb_w > ts_w and h4_dir != "BEAR" and score_buy >= score_sell:
+            ratio = tb_w / total_w
+            if ratio >= 0.63 and tb_w >= 7 and h1_dir != "BEAR":
+                return 2
+            if ratio >= 0.55:
+                return 1
+        elif ts_w > tb_w and h4_dir != "BULL" and score_sell >= score_buy:
+            ratio = ts_w / total_w
+            if ratio >= 0.63 and ts_w >= 7 and h1_dir != "BULL":
+                return -2
+            if ratio >= 0.55:
+                return -1
+
+        return verdict_num
+
     def enrich_record(self, record: Dict[str, Any]) -> Dict[str, Any]:
         score_buy, score_sell = self.calculate_scores(record)
         verdict_gap = abs(score_buy - score_sell)
@@ -371,6 +425,7 @@ class GOMLPineCalculator:
         )
         verdict_num = self.calculate_verdict_num(score_buy, score_sell, filter_ratio)
         verdict_num = self.apply_mtf_verdict_gate(record, verdict_num)
+        verdict_num = self.apply_mtf_verdict_uplift(record, verdict_num, score_buy, score_sell)
         verdict_num = self.apply_bc_verdict_guard(record, verdict_num)
 
         record["score_buy"] = score_buy
