@@ -375,8 +375,14 @@ class GOMLPineCalculator:
         tend clairement sur les TF alors que la bougie du graphique est calme).
 
         Plafonné à GOOD (±2) : PERFECT reste réservé à la confluence complète
-        (gap de score + cohérence). Le score du TF graphique ne doit pas contredire
-        le sens MTF, et la structure H4/H1 doit rester compatible.
+        (gap de score + cohérence).
+
+        Deux niveaux :
+        - MTF pondéré net + score du TF graphique compatible → BUY/SELL, GOOD si dominant.
+        - Structure majeure alignée (H4+H1+D1 même sens, ratio ≥ 0.63) → GOOD même si la
+          bougie du TF graphique diverge (bruit court terme). Indispensable pour les
+          synthétiques drift+spike (GainX/PainX) dont le TF graphique contredit souvent
+          la structure dominante — après inversion Weltrade, cette structure EST le signal.
         """
         if not self.mtf_uplift_enabled or verdict_num != 0:
             return verdict_num
@@ -398,19 +404,26 @@ class GOMLPineCalculator:
 
         h4_dir = record.get("tf_h4_dir", "NEUT")
         h1_dir = record.get("tf_h1_dir", "NEUT")
+        d1_dir = record.get("tf_d1_dir", "NEUT")
 
-        if tb_w > ts_w and h4_dir != "BEAR" and score_buy >= score_sell:
+        if tb_w > ts_w and h4_dir != "BEAR":
             ratio = tb_w / total_w
-            if ratio >= 0.63 and tb_w >= 7 and h1_dir != "BEAR":
+            if score_buy >= score_sell:
+                if ratio >= 0.63 and tb_w >= 7 and h1_dir != "BEAR":
+                    return 2
+                if ratio >= 0.55:
+                    return 1
+            if h4_dir == "BULL" and h1_dir == "BULL" and d1_dir == "BULL" and ratio >= 0.63:
                 return 2
-            if ratio >= 0.55:
-                return 1
-        elif ts_w > tb_w and h4_dir != "BULL" and score_sell >= score_buy:
+        elif ts_w > tb_w and h4_dir != "BULL":
             ratio = ts_w / total_w
-            if ratio >= 0.63 and ts_w >= 7 and h1_dir != "BULL":
+            if score_sell >= score_buy:
+                if ratio >= 0.63 and ts_w >= 7 and h1_dir != "BULL":
+                    return -2
+                if ratio >= 0.55:
+                    return -1
+            if h4_dir == "BEAR" and h1_dir == "BEAR" and d1_dir == "BEAR" and ratio >= 0.63:
                 return -2
-            if ratio >= 0.55:
-                return -1
 
         return verdict_num
 
