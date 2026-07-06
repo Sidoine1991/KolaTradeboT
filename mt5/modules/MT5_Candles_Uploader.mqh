@@ -103,7 +103,7 @@ public:
     bool UploadAllTimeframes(string sym) {
         bool success = true;
 
-        if (!UploadCandles(sym, PERIOD_M1, 100)) success = false;
+        if (!UploadCandles(sym, PERIOD_M1, 1500)) success = false;
         Sleep(500);
         if (!UploadCandles(sym, PERIOD_M5, 100)) success = false;
         Sleep(500);
