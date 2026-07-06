@@ -1817,7 +1817,7 @@ input bool   ShowSignalArrow     = true; // Flèche dynamique clignotante BUY/SE
 input bool   RequireSMCDerivArrowForMarketOrders = true; // Avant tout ordre au marché, attendre SMC_DERIV_ARROW
 input int    SMCDerivArrowMaxAgeBars = 3; // La flèche doit être sur les N dernières bougies (timeframe courant)
 input double SpikeArrowImminenceMin  = 40.0; // % imminence minimum pour afficher l'arrow préventive (Boom/Crash)
-input double SpikeArrowImminenceStrong = 70.0; // % imminence pour arrow forte (signal d'entrée)
+input double SpikeArrowImminenceStrong = 60.0; // % imminence pour arrow forte (signal d'entrée)
 input bool   ShowPredictedSwing  = true; // SL/SH prédits (futurs) sur le canal
 input bool   ShowEMASupportResistance = true; // EMA M1, M5, H1 en support/résistance
 input bool   UltraLightMode      = false; // Mode ultra léger: pas de graphiques ni IA, exécution trading minimale
@@ -3230,7 +3230,7 @@ static datetime g_chTimeStart = 0, g_chTimeEnd = 0;
 
 // Gate démarrage : bloquer toute entrée pendant WARMUP_SECONDS après OnInit (rechargement EA)
 datetime g_initTimestamp = 0;
-#define WARMUP_SECONDS 300  // 5 minutes — temps de réchauffement IA/GOM après (re)chargement
+#define WARMUP_SECONDS 0  // Warmup désactivé — les entrées ne sont plus bloquées après (re)chargement
 
 // Trendlines GOM — calculées depuis les 2 derniers swing points alignés avec le verdict
 double   g_trendlineBuyPrice  = 0.0;  // Prix trendline projeté au bar courant (BUY = SL→SL)
@@ -8277,8 +8277,8 @@ SMC_EntryGateResult SMC_EvaluateEntryGate(const int dirSign, const bool isGomOrd
    // ── 2. WARMUP (60s synthétiques / 300s autres) ───────────────────────
    static datetime s_initTime = 0;
    if(s_initTime == 0) s_initTime = TimeCurrent();
-   int warmupSec = SMC_IsSyntheticAutonomousSym(symbol) ? 60 : 300;
-   if((int)(TimeCurrent() - s_initTime) < warmupSec)
+   int warmupSec = (WARMUP_SECONDS <= 0) ? 0 : (SMC_IsSyntheticAutonomousSym(symbol) ? 60 : 300);
+   if(warmupSec > 0 && (int)(TimeCurrent() - s_initTime) < warmupSec)
    {
       result.blockedBy = 2; result.blockedByName = "Warmup"; result.allowed = false;
       return result;
@@ -8809,6 +8809,10 @@ bool SMC_ReadinessAllowsEntry(const string symbol)
          Print("[READINESS] COOLDOWN SYMBOLE — bloqué: ", symbol); }
       return false;
    }
+   // GOOD/PERFECT (|vn|>=2) : signal fort — bypass score + fenêtres horaires
+   // (le halt global et le cooldown symbole ci-dessus restent, eux, bloquants).
+   if(MathAbs(g_smcGomVerdictNum) >= 2)
+      return true;
    if(g_readinessScore < ReadinessMinScore)
    {
       static datetime s_scoreLog = 0;

@@ -321,8 +321,10 @@ bool SMCGP_ShouldForceWaitOnCorrection(const string symbol)
    int vn = g_smcGomVerdictNumServer;
    if(vn == 0) return false;
 
-   // FX Vol : le verdict GOM GOOD/PERFECT prime — ne pas forcer WAIT sur micro-correction M1
-   if(SMC_IsWeltradeVolSymbol(symbol) && MathAbs(vn) >= 2)
+   // Synthétiques (FX Vol + Boom/Crash GainX/PainX/TrendX) : un verdict GOM fort
+   // (GOOD/PERFECT, |vn|>=2) prime — ne pas forcer WAIT sur micro-correction M1.
+   // Pour les Boom/Crash, le timing d'entrée reste géré par la gate spike (imminence).
+   if(SMC_IsSyntheticAutonomousSym(symbol) && MathAbs(vn) >= 2)
       return false;
 
    if(g_smcPaInCorrection && !g_smcCorrEntrySafe)
@@ -360,8 +362,8 @@ void SMCGP_RefreshCorrectionWaitOverlay(const string symbol)
    bool clientWait = SMCGP_ShouldForceWaitOnCorrection(symbol);
    bool shouldWait = g_smcGomServerCorrWait || clientWait;
 
-   // FX Vol GOOD/PERFECT : ne jamais écraser le verdict serveur par WAIT correction
-   if(SMC_IsWeltradeVolSymbol(symbol) && MathAbs(g_smcGomVerdictNumServer) >= 2)
+   // Synthétiques GOOD/PERFECT : ne jamais écraser le verdict serveur par WAIT correction
+   if(SMC_IsSyntheticAutonomousSym(symbol) && MathAbs(g_smcGomVerdictNumServer) >= 2)
       shouldWait = false;
 
    bool wasWait = g_smcGomCorrectionWait;
