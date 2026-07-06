@@ -8297,10 +8297,21 @@ SMC_EntryGateResult SMC_EvaluateEntryGate(const int dirSign, const bool isGomOrd
          result.blockedBy = 23; result.blockedByName = "SymbolCooldown"; result.allowed = false;
          return result;
       }
+      // Readiness = heuristique de qualité de session : un verdict GOM fort
+      // (GOOD/PERFECT, |vn|>=2) doit pouvoir passer même si le score est bas
+      // (le circuit-breaker et le cooldown symbole restent, eux, bloquants).
       if(ReadinessMinScore > 0 && g_readinessScore < ReadinessMinScore)
       {
-         result.blockedBy = 23; result.blockedByName = "ReadinessScore"; result.allowed = false;
-         return result;
+         if(MathAbs(g_smcGomVerdictNum) >= 2)
+         {
+            result.bypassedGates += "readiness,";
+            result.isPerfectBypass = true;
+         }
+         else
+         {
+            result.blockedBy = 23; result.blockedByName = "ReadinessScore"; result.allowed = false;
+            return result;
+         }
       }
    }
 
