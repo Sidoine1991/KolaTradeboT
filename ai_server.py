@@ -1752,7 +1752,7 @@ def _check_probability_gate(symbol: str, direction: str, chart_tf: str = "M1") -
         if vn == 0:
             return False, "GOM WAIT — pas d'entrée hazard"
         if abs(vn) < MIN_GOM_VERDICT_NUM_ABS:
-            return False, f"Verdict vn={vn} — GOOD/PERFECT requis (|vn|>={MIN_GOM_VERDICT_NUM_ABS})"
+            return False, f"Verdict vn={vn} — WAIT interdit, exige BUY/SELL+ (|vn|>={MIN_GOM_VERDICT_NUM_ABS})"
 
         d = (direction or "").upper()
         if d in ("BUY", "LONG") and vn < MIN_GOM_VERDICT_NUM_ABS:
@@ -1928,7 +1928,7 @@ def _evaluate_signal_alignment(
         "id": "gom_verdict",
         "label": "Verdict GOM",
         "ok": gom_ok,
-        "reason": f"{verdict} (vn={vn})" if gom_ok else f"{verdict} vn={vn} — GOOD/PERFECT requis",
+        "reason": f"{verdict} (vn={vn})" if gom_ok else f"{verdict} vn={vn} — WAIT interdit, exige BUY/SELL+",
     })
 
     gom_conf = _validate_gom_confluence(sym, d, verdict, None, None)
@@ -5618,7 +5618,9 @@ def _load_gom_cache_from_disk():
                 _GOM_VERDICT_STORE.update(data)
                 logger.info(f"[GOM-Cache] Charge COMPLETE: {len(_GOM_VERDICT_STORE)} symboles dans store")
                 for k in list(_GOM_VERDICT_STORE.keys())[:3]:
-                    logger.info(f"  - {k}: verdict={_GOM_VERDICT_STORE[k].get('verdict')}")
+                    v = _GOM_VERDICT_STORE[k]
+                    verdict = v.get('verdict') if isinstance(v, dict) else str(v)[:60]
+                    logger.info(f"  - {k}: verdict={verdict}")
             else:
                 logger.warning("[GOM-Cache] Format gom_signal.json invalide (pas un dict)")
         else:
@@ -5633,6 +5635,7 @@ _MT5_TERMINALS = [
 ]
 _MT5_IMPORT_INTERVAL_SEC = int(os.getenv("MT5_IMPORT_INTERVAL_SEC", "600"))  # 10 min
 _mt5_import_loop_task = None
+_wa_opp_scan_task = None
 
 
 # Chargement unique du module import_mt5_history — évite exec_module à chaque appel
@@ -5747,6 +5750,18 @@ async def startup_event():
         logger.info("Pont MT5 dashboard actif (refresh %ds)", _MT5_BRIDGE_LOOP_SEC)
     except Exception as _br_err:
         logger.warning("Pont MT5 dashboard non démarré: %s", _br_err)
+
+    # Scan opportunités WhatsApp (tous terminaux: Deriv + Weltrade + Forex...)
+    global _wa_opp_scan_task
+    if not AI_DISABLE_BACKGROUND_TASKS:
+        try:
+            import asyncio as _asyncio
+            _wa_opp_scan_task = _asyncio.create_task(_scan_opportunities_whatsapp_loop())
+            logger.info("✅ Scan opportunités WhatsApp démarré (toutes les 60s)")
+        except Exception as _wa_err:
+            logger.warning("Scan opportunités WhatsApp non démarré: %s", _wa_err)
+    else:
+        logger.info("ℹ️ Scan opportunités WhatsApp désactivé (AI_DISABLE_BACKGROUND_TASKS=true)")
 
     # Agents d'intelligence (optionnels — lourds, désactivés par défaut)
     if AI_ENABLE_INTELLIGENCE_AGENTS and not AI_DISABLE_BACKGROUND_TASKS:
@@ -21442,6 +21457,21 @@ async def validate_order(order_data: Dict[str, Any]):
             
             current_price = tick.ask if order_type == "BUY" else tick.bid
             
+            # ── GATE STRICT GOM: WAIT (vn=0) interdit TOUT ordre ──
+            # Règle: un ordre n'est exécuté QUE si verdict GOM =
+            # BUY/SELL, GOOD BUY/SELL ou PERFECT BUY/SELL. Jamais WAIT.
+            gom_store = _GOM_VERDICT_STORE.get(str(symbol).upper(), {})
+            gom_vn = int(gom_store.get("verdict_num", 0) or 0)
+            if gom_vn == 0:
+                return {"valid": False, "reason": "GOM WAIT (vn=0) — AUCUN ORDRE autorisé"}
+            if abs(gom_vn) < MIN_GOM_VERDICT_NUM_ABS:
+                return {"valid": False, "reason": f"GOM vn={gom_vn} — exige BUY/SELL+ (|vn|>={MIN_GOM_VERDICT_NUM_ABS})"}
+            d = (order_type or "").upper()
+            if d in ("BUY", "LONG") and gom_vn < MIN_GOM_VERDICT_NUM_ABS:
+                return {"valid": False, "reason": f"GOM vn={gom_vn} oppose BUY"}
+            if d in ("SELL", "SHORT") and gom_vn > -MIN_GOM_VERDICT_NUM_ABS:
+                return {"valid": False, "reason": f"GOM vn={gom_vn} oppose SELL"}
+            
             # Vérifier les stops
             min_stop = symbol_info.trade_stops_level * symbol_info.point
             if sl and abs(current_price - sl) < min_stop:
@@ -25330,6 +25360,11 @@ async def gom_poll_targets(max_age_sec: int = Query(120, ge=10, le=600)):
 _GOM_VERDICT_STORE: dict = {}
 _GOM_MTF_CACHE: dict = {}  # cache_key -> {"ts": datetime, "fields": dict}
 
+# Dernière alerte WhatsApp d'opportunité par symbole (évite le spam)
+_LAST_WA_OPP_ALERT: dict = {}   # sym -> (verdict_num, epoch)
+WA_OPP_ALERT_COOLDOWN_SEC = 600  # 10 min entre 2 alertes même symbole
+WA_OPP_ALERT_MIN_VN = 2          # PERFECT/GOOD uniquement (|vn|>=2)
+
 # Store d'analyse SMC TradingView (optionnel, enrichit le verdict GOM)
 _TV_SMC_ANALYSIS_STORE: dict = {}  # {sym: {"ts": datetime, "smc": {...}, "confluence": {...}, "entry_setup": {...}}}
 _TV_SMC_MAX_AGE_SEC = 120  # fraîcheur max 2 min
@@ -25379,7 +25414,7 @@ _WIN_STREAK_PAUSE_UNTIL: float = 0.0
 
 # Gate probabilité élevée (anti-hazard)
 MIN_ENTRY_PROBABILITY_PCT = 72.0
-MIN_GOM_VERDICT_NUM_ABS = 2
+MIN_GOM_VERDICT_NUM_ABS = 1   # 1 = BUY/SELL+ autorisés (WAIT=vn0 interdit), 2 = GOOD/PERFECT only
 HIGH_PROB_BC_MIN_CONF = 70.0
 MIN_COG_STRENGTH = 0.50
 MIN_COG_CONFIDENCE = 0.55
@@ -25442,7 +25477,7 @@ def _validate_gom_confluence(symbol: str, direction: str, gom_verdict: Optional[
       - Signal SELL + GOM BUY  → correction probable, réduire confiance, warning
       - Signal BUY  + GOM SELL → correction probable, réduire confiance, warning
       - Signal aligné avec GOM → boost confiance +10%
-      - GOM WAIT               → neutre, pas de modification
+      - GOM WAIT               → BLOCAGE strict (aucun ordre autorisé)
     """
     stored = _GOM_VERDICT_STORE.get(symbol.upper(), {})
     verdict = (gom_verdict or stored.get("verdict") or "UNKNOWN").upper()
@@ -25451,7 +25486,13 @@ def _validate_gom_confluence(symbol: str, direction: str, gom_verdict: Optional[
 
     result = {"gom_verdict": verdict, "gom_action": "NONE", "gom_warning": None, "confidence_delta": 0.0}
 
-    if verdict == "UNKNOWN" or verdict == "WAIT":
+    # ── GATE STRICT: WAIT (vn=0) interdit TOUT ordre ──
+    if verdict == "WAIT":
+        result["gom_action"] = "BLOCK"
+        result["gom_warning"] = "⛔ GOM WAIT — AUCUN ORDRE autorisé (market ni limit)"
+        return result
+
+    if verdict == "UNKNOWN":
         result["gom_action"] = "NEUTRAL"
         return result
 
@@ -25490,6 +25531,11 @@ async def set_pending_order(payload: PendingOrderPayload):
         sym, direction,
         payload.gom_verdict, payload.gom_score_buy, payload.gom_score_sell
     )
+    # ── GATE STRICT: WAIT (vn=0) → rejet de l'ordre ──
+    if gom_check.get("gom_action") == "BLOCK":
+        from fastapi import HTTPException
+        logger.warning(f"[PendingOrder] {sym} BLOQUÉ GOM WAIT: {gom_check.get('gom_warning')}")
+        raise HTTPException(status_code=403, detail=gom_check.get("gom_warning") or "GOM WAIT — ordre interdit")
     base_conf = payload.confidence or 0.75
     final_conf = max(0.0, min(1.0, base_conf + gom_check["confidence_delta"]))
 
@@ -27830,8 +27876,104 @@ class WaNotifyRequest(BaseModel):
     lot: Optional[float] = None
     message: Optional[str] = None
 
-@app.post("/notify-whatsapp")
-async def notify_whatsapp(req: WaNotifyRequest):
+
+# ── SCAN OPPORTUNITÉS WHATSAPP (tous terminaux: Deriv + Weltrade + Forex...) ──
+def _build_opportunity_message(sym: str, v: dict) -> str:
+    """Construit un message WhatsApp ACTIONNABLE pour une forte opportunité GOM."""
+    ts = datetime.now(timezone.utc).strftime("%H:%M UTC")
+    verdict = str(v.get("verdict", "WAIT")).upper()
+    vn = int(v.get("verdict_num", 0) or 0)
+    entry = float(v.get("entry") or v.get("price") or 0)
+    sl = float(v.get("sl") or 0)
+    tp = float(v.get("tp") or v.get("tp1") or 0)
+    m5 = str(v.get("tf_m5_dir", "?")).upper()
+    m15 = str(v.get("tf_m15_dir", "?")).upper()
+    coh = float(v.get("coherence_pct", 0) or 0)
+
+    direction = "BUY" if vn > 0 else "SELL"
+    icon = "🟢" if vn > 0 else "🔴"
+    broker = ""
+    su = sym.upper().replace(" ", "")
+    if any(p in su for p in ("PAINX", "GAINX", "FXVOL", "SFVVOL", "SFXVOL")):
+        broker = " (Weltrade)"
+    elif "INDEX" in su:
+        broker = " (Deriv)"
+    elif sym.upper() in ("EURUSD", "GBPUSD", "XAUUSD", "BTCUSD"):
+        broker = " (Forex/Metal/Crypto)"
+
+    # Alignement M5/M15 → prédiction "dans ~5 min"
+    aligned = (m5 == "BULL" and vn > 0) or (m5 == "BEAR" and vn < 0)
+    pred = f"M5 {m5} / M15 {m15} alignés → mouvement attendu ~5 min" if aligned else f"M5 {m5} / M15 {m15}"
+
+    # Risk/Reward
+    rr = ""
+    if entry > 0 and sl > 0 and tp > 0:
+        risk = abs(entry - sl)
+        rew = abs(tp - entry)
+        if risk > 0:
+            rr = f"RR 1:{rew/risk:.1f}"
+
+    lines = [
+        f"🎯 OPPORTUNITÉ FORTE [{ts}]",
+        f"Symbole: {sym}{broker}",
+        f"{icon} {verdict} (vn={vn:+d})",
+        f"Prévu: {pred}",
+        "",
+        f"Entrée: {entry:,.5f}" if entry < 1000 else f"Entrée: {entry:,.2f}",
+        f"SL: {sl:,.5f} | TP1: {tp:,.5f}" if sl < 1000 else f"SL: {sl:,.2f} | TP1: {tp:,.2f}",
+        f"{rr} | Cohérence: {coh:.0f}%" if rr else f"Cohérence: {coh:.0f}%",
+        "",
+        f"👉 Prépare-toi: place {'BUY' if vn > 0 else 'SELL'} LIMIT " +
+        (f"sous {entry:,.5f}" if vn > 0 else f"au-dessus {entry:,.5f}") if entry > 0 else "👉 Prépare-toi: signal en formation",
+    ]
+    return "\n".join(lines)
+
+
+async def _scan_opportunities_whatsapp_loop():
+    """Boucle arrière-plan: alerte les fortes opportunités GOM pour TOUS les symbols."""
+    import asyncio as _asyncio
+    await _asyncio.sleep(15)  # laisser le cache se remplir au démarrage
+    while True:
+        try:
+            phone = WHATSAPP_PHONE
+            if phone and _api_gates_enabled():
+                now_epoch = time.time()
+                for sym, v in list(_GOM_VERDICT_STORE.items()):
+                    vn = int(v.get("verdict_num", 0) or 0)
+                    if abs(vn) < WA_OPP_ALERT_MIN_VN:
+                        continue  # seulement PERFECT/GOOD
+                    ts_raw = v.get("timestamp")
+                    # fraîcheur max 3 min
+                    age_sec = 999
+                    try:
+                        if isinstance(ts_raw, str):
+                            tso = datetime.fromisoformat(ts_raw.replace("Z", "+00:00"))
+                            age_sec = (datetime.now(timezone.utc) - tso).total_seconds()
+                    except Exception:
+                        pass
+                    if age_sec > 180:
+                        continue
+                    last = _LAST_WA_OPP_ALERT.get(sym)
+                    if last and (last[0] == vn) and (now_epoch - last[1] < WA_OPP_ALERT_COOLDOWN_SEC):
+                        continue
+                    msg = _build_opportunity_message(sym, v)
+                    try:
+                        resp = requests.post(
+                            f"{PSYCHOBOT_URL}/send-message",
+                            json={"phone": phone, "message": msg},
+                            timeout=20,
+                        )
+                        if resp.status_code == 200 and resp.json().get("success", False):
+                            _LAST_WA_OPP_ALERT[sym] = (vn, now_epoch)
+                            logger.info("[WA Opp] alerte %s %s envoyée", sym, v.get("verdict"))
+                    except Exception as _e:
+                        logger.warning("[WA Opp] envoi %s échoué: %s", sym, _e)
+            await _asyncio.sleep(60)  # scan toutes les 60s
+        except Exception as _loop_err:
+            logger.error("[WA Opp] erreur boucle: %s", _loop_err)
+            await _asyncio.sleep(60)
+
+
     """MT5 envoie ici les événements trading spéciaux → PsychoBot WhatsApp."""
     phone = WHATSAPP_PHONE
     if not phone:
@@ -27848,30 +27990,42 @@ async def notify_whatsapp(req: WaNotifyRequest):
     icon = event_icons.get(req.event, "📢")
 
     if req.event == "ORDER_EXECUTED":
+        rr = ""
+        try:
+            e = float(req.entry_price or req.price or 0); s = float(req.sl or 0); t = float(req.tp1 or 0)
+            if e > 0 and s > 0 and t > 0:
+                risk = abs(e - s); rew = abs(t - e)
+                if risk > 0: rr = f" | RR 1:{rew/risk:.1f}"
+        except Exception:
+            pass
         body = (f"{icon} ORDRE EXÉCUTÉ [{ts}]\n"
                 f"Symbole : {req.symbol}\n"
                 f"Direction : {req.direction or '?'}\n"
                 f"Prix entrée : {req.entry_price or req.price or '?'}\n"
-                f"SL : {req.sl or '?'} | TP1 : {req.tp1 or '?'}\n"
-                f"Lot : {req.lot or '?'}")
+                f"SL : {req.sl or '?'} | TP1 : {req.tp1 or '?'}{rr}\n"
+                f"Lot : {req.lot or '?'}\n"
+                f"👉 Trade ouvert — surveille SL, passe BE au TP1")
     elif req.event == "ENTRY_HIT":
         body = (f"{icon} NIVEAU D'ENTRÉE ATTEINT [{ts}]\n"
                 f"Symbole : {req.symbol}\n"
                 f"Prix : {req.price or '?'}\n"
                 f"Direction : {req.direction or '?'}\n"
-                f"Entrée cible : {req.entry_price or '?'}")
+                f"Entrée cible : {req.entry_price or '?'}\n"
+                f"👉 Valide le setup, place SL strict")
     elif req.event == "TP1_HIT":
         profit_str = f"+${req.profit:.2f}" if req.profit is not None else "?"
         body = (f"{icon} TP1 ATTEINT [{ts}]\n"
                 f"Symbole : {req.symbol}\n"
                 f"Prix : {req.price or '?'}\n"
-                f"Profit : {profit_str}")
+                f"Profit : {profit_str}\n"
+                f"👉 Sécurise: passe SL à BE, laisse cours")
     elif req.event == "SL_HIT":
         profit_str = f"-${abs(req.profit):.2f}" if req.profit is not None else "?"
         body = (f"{icon} STOP LOSS TOUCHÉ [{ts}]\n"
                 f"Symbole : {req.symbol}\n"
                 f"Prix : {req.price or '?'}\n"
-                f"Perte : {profit_str}")
+                f"Perte : {profit_str}\n"
+                f"👉 Trade clôturé — analyse le contexte")
     else:
         body = f"{icon} TradBOT [{ts}]\n{req.symbol}\n{req.message or req.event}"
 
