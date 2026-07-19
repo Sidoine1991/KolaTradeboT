@@ -6,3 +6,7 @@ python-multipart==0.0.6
 aiofiles==23.2.1
 requests==2.31.0
 python-dotenv==1.0.0
+numpy==1.26.4
+pandas==2.2.2
+aiohttp==3.9.5
+joblib==1.4.2
