@@ -3672,11 +3672,16 @@ void SMCGP_DrawGOMDashboard()
 
    SMCGP_RefreshCorrectionWaitOverlay(_Symbol);
 
-   int chartW = (int)ChartGetInteger(0, CHART_WIDTH_IN_PIXELS);
-   // FIX: on ne force 1200px QUE si la lecture est invalide (<=0).
-   // Avant, tout graphique < 400px se voyait quand même assigner 1200px,
-   // ce qui poussait les colonnes de droite du dashboard HORS de la zone visible.
-   if(chartW <= 0) chartW = 1200;
+    static int g_smcLastGoodChartW = 1000;
+    int chartW = (int)ChartGetInteger(0, CHART_WIDTH_IN_PIXELS);
+    // FIX deformation: pendant un reload/resize MT5, CHART_WIDTH_IN_PIXELS
+    // renvoie 0 brièvement -> fallback 1200px étirait le dashboard HORS ecran
+    // sur les fenetres < 1200px. On memorise la derniere largeur valide et on
+    // refuse tout < 400px (borne conservative) au lieu d'un fallback fixe.
+    if(chartW < 400)
+       chartW = (g_smcLastGoodChartW > 0) ? g_smcLastGoodChartW : 1000;
+    else
+       g_smcLastGoodChartW = chartW;
 
    const int COLS = 9;
    const int cellH = SMC_DASH_ROW_H;
