@@ -108,6 +108,46 @@ def validate_timeframe(timeframe: str) -> bool:
     """Validate timeframe is known"""
     return timeframe in VALID_TIMEFRAMES
 
+# === BROKER SUFFIX STRIPPING (Exness .m, .ecn, .pro, etc.) ===
+_BROKER_SUFFIXES = ('.m', '.ecn', '.pro', '.raw', '.std', '.micro', '.mini', 
+                     '.gold', '.crypto', '.stocks', '.narrow', '.exness', '.real', '.demo')
+_SUFFIX_RE = re.compile(r'\.(m|ecn|pro|raw|std|micro|mini|gold|crypto|stocks?|narrow|exness|real|demo)\d*$', re.IGNORECASE)
+
+def strip_broker_suffix(symbol: str) -> str:
+    """
+    Supprime les suffixes de broker (Exness .m, .ecn, .pro, etc.)
+    Ex: XAUUSD.m -> XAUUSD, Boom 500 Index.m -> Boom 500 Index
+    """
+    if not symbol:
+        return symbol
+    s = symbol.strip()
+    cleaned = _SUFFIX_RE.sub('', s)
+    if cleaned != s:
+        return cleaned
+    s_upper = s.upper()
+    for suffix in _BROKER_SUFFIXES:
+        if s_upper.endswith(suffix.upper()):
+            candidate = s[:-len(suffix)]
+            if candidate:
+                return candidate
+    return s
+
+def normalize_symbol(raw_symbol: str) -> str:
+    """
+    Normalise un symbole: strip suffixe broker + upper + résolution canonique.
+    Ex: XAUUSD.m -> XAUUSD, Boom 500 Index.m -> Boom 500 Index
+    """
+    if not raw_symbol:
+        return "XAUUSD"
+    stripped = strip_broker_suffix(raw_symbol)
+    normalized = stripped.upper().strip()
+    # Résolution spéciale pour les alias communs
+    ALIASES = {
+        "XAUEUR": "XAUUSD", "GOLD": "XAUUSD", "OR": "XAUUSD",
+        "XAGUSD": "XAGUSD", "SILVER": "XAGUSD",
+    }
+    return ALIASES.get(normalized, normalized)
+
 # --- Supabase config helpers ---
 def _get_supabase_config(strict: bool = True) -> Tuple[str, str]:
     """
@@ -772,9 +812,9 @@ def is_weltrade_gain_synth(symbol: str) -> bool:
 # zone morte 17h-23h UTC (14-30% signal). 2 pertes 2026-06-20 à 00h08 et 00h22 UTC
 # dues à des signaux instables (00h ≡ juste après la zone morte 17h-23h).
 _WELTRADE_TRADING_WINDOWS: Dict[str, List[Tuple[int, int]]] = {
-    "PAINX": [(4, 16)],
-    "GAINX": [(4, 16)],
-    "FXVOL": [(4, 16)],
+    "PAINX": [(4, 23)],
+    "GAINX": [(4, 23)],
+    "FXVOL": [(4, 23)],
 }
 
 
@@ -2213,6 +2253,17 @@ AI_ENABLE_CONTINUOUS_LEARNING_LOOP = _env_bool("AI_ENABLE_CONTINUOUS_LEARNING_LO
 AI_CONTINUOUS_LEARNING_INTERVAL_SEC = int(os.getenv("AI_CONTINUOUS_LEARNING_INTERVAL_SEC", "21600" if RUNNING_ON_RENDER else "10800"))
 AI_CONTINUOUS_DEFAULT_INTERVAL_SEC = int(os.getenv("AI_CONTINUOUS_DEFAULT_INTERVAL_SEC", "3600" if RUNNING_ON_RENDER else "600"))
 AI_CONTINUOUS_MIN_INTERVAL_SEC = int(os.getenv("AI_CONTINUOUS_MIN_INTERVAL_SEC", "1800" if RUNNING_ON_RENDER else "300"))
+
+# ── WhatsApp Report 30min ──────────────────────────────────────────────
+WHATSAPP_PHONE_NUMBER = os.getenv("WHATSAPP_PHONE_NUMBER", "+2290196911346")
+PSYCHOBOT_URL = os.getenv("PSYCHOBOT_URL", "https://psychobot-1si7.onrender.com")
+AI_ENABLE_WHATSAPP_REPORT = _env_bool("AI_ENABLE_WHATSAPP_REPORT", default=True)
+AI_WHATSAPP_REPORT_INTERVAL_SEC = int(os.getenv("AI_WHATSAPP_REPORT_INTERVAL_SEC", "1800"))
+
+# ── Giveback Guard dynamique (basé sur pic du jour) ────────────────────
+_giveback_daily_peak_pnl: float = 0.0  # Pic P/L du jour (reset à minuit UTC)
+_giveback_daily_peak_date: str = ""     # Date du pic (YYYY-MM-DD)
+GIVEBACK_LOCK_PCT = 0.40  # 40% du pic → pause (même seuil que MT5)
 
 # Intégration TradingAgents (dépôt local). La boucle temps réel est **désactivée par défaut** :
 # exécution manuelle via CLI TradingAgents + POST /tradingagents/manual-report, puis /decision côté MT5.
@@ -3991,6 +4042,15 @@ async def startup_event():
             "ℹ️ TradingAgents: boucle serveur désactivée (AI_ENABLE_TRADINGAGENTS_AUTO_LOOP=false); "
             "run-once HTTP désactivé par défaut (AI_TRADINGAGENTS_ALLOW_HTTP_RUNS=false) — CLI + POST /tradingagents/manual-report"
         )
+
+    # Démarrer la boucle WhatsApp Report (30min)
+    global _whatsapp_report_task
+    if AI_ENABLE_WHATSAPP_REPORT:
+        if _whatsapp_report_task is None or _whatsapp_report_task.done():
+            _whatsapp_report_task = asyncio.create_task(_whatsapp_report_loop(AI_WHATSAPP_REPORT_INTERVAL_SEC))
+            logger.info(f"✅ Boucle WhatsApp Report démarrée ({AI_WHATSAPP_REPORT_INTERVAL_SEC}s)")
+    else:
+        logger.info("ℹ️ WhatsApp Report désactivé (AI_ENABLE_WHATSAPP_REPORT=false)")
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -9229,7 +9289,7 @@ def _parse_decision_body(raw: bytes) -> DecisionRequest:
     def _str(v, default="UNKNOWN"):
         if v is None or v == "": return default
         return str(v).strip() or default
-    symbol = _str(body.get("symbol"))
+    symbol = normalize_symbol(_str(body.get("symbol")))  # Strip broker suffix + normalize
     bid = _float(body.get("bid"), 1.0)
     ask = _float(body.get("ask"), 1.0001)
     if bid >= ask:
@@ -11623,6 +11683,174 @@ async def gom_verdict_clean(symbol: str = Query(...)):
             return result
         return {"ok": False, "message": f"Symbol {symbol} not found"}
     except Exception as e:
+        return {"ok": False, "message": str(e)}
+
+
+@app.get("/gom-kola-dashboard")
+async def gom_kola_dashboard(
+    symbol: str = Query(...),
+    chart_tf: str = Query(default="M15"),
+    source: str = Query(default="local"),
+):
+    """
+    Endpoint MT5 EA polling — remplace l'ancien /gom-kola-dashboard.
+    Lit gom_signal.json, gère les 3 formats:
+      1. Dict par symbole: {"XAUUSD": {...}}
+      2. Single object: {"symbol": "XAUUSD", ...}
+      3. Array format: {"verdicts": [{...}, ...]}
+    Mappe les field names pour correspondre à SMCGP_ParseGOMBody().
+    """
+    try:
+        if not symbol or not symbol.strip():
+            return {"ok": False, "message": "symbol requis"}
+
+        wt_ok, wt_reason = _check_weltrade_hour_gate(symbol)
+        if not wt_ok:
+            return {
+                "ok": True,
+                "symbol": symbol,
+                "verdict": "WAIT",
+                "verdict_num": 0,
+                "message": wt_reason,
+                "gate": "weltrade_hour",
+            }
+
+        root = Path(__file__).resolve().parents[1]
+        gom_file = root / "data" / "gom_signal.json"
+        if not gom_file.is_file():
+            return {"ok": False, "message": "gom_signal.json absent"}
+
+        gom_data = json.loads(gom_file.read_text(encoding="utf-8"))
+        result = None
+
+        # Format 1: Dict par symbole {"XAUUSD": {...}}
+        if isinstance(gom_data, dict) and symbol in gom_data:
+            result = gom_data[symbol]
+        # Format 2: Single object {"symbol": "XAUUSD", ...}
+        elif isinstance(gom_data, dict) and gom_data.get("symbol") == symbol:
+            result = gom_data
+        # Format 3: {"verdicts": [{...}, ...]}
+        elif isinstance(gom_data, dict) and "verdicts" in gom_data:
+            for v in gom_data["verdicts"]:
+                if isinstance(v, dict) and v.get("symbol") == symbol:
+                    result = v
+                    break
+
+        if result is None:
+            return {"ok": False, "message": f"Symbol {symbol} not found"}
+
+        # Field name normalization: poller writes buy_score/coherence/quality,
+        # but EA expects score_buy/coherence_pct/entry_quality
+        mapped = dict(result)
+        if "buy_score" in mapped and "score_buy" not in mapped:
+            mapped["score_buy"] = mapped.pop("buy_score")
+        if "sell_score" in mapped and "score_sell" not in mapped:
+            mapped["score_sell"] = mapped.pop("sell_score")
+        if "coherence" in mapped and "coherence_pct" not in mapped:
+            mapped["coherence_pct"] = mapped.pop("coherence")
+        if "quality" in mapped and "entry_quality" not in mapped:
+            mapped["entry_quality"] = mapped.pop("quality")
+        if "st_direction" in mapped and "st_dir" not in mapped:
+            d = mapped.pop("st_direction")
+            mapped["st_dir"] = 1 if d == "UP" else -1 if d == "DN" else 0
+
+        # TF directions: ensure tf_m1_dir..tf_d1_dir exist (parse from directions dict if missing)
+        for tf_key, tv_key in [("m1", "M1"), ("m5", "M5"), ("m15", "M15"),
+                               ("h1", "H1"), ("h4", "H4"), ("d1", "D1")]:
+            fkey = f"tf_{tf_key}_dir"
+            if fkey not in mapped and "directions" in mapped:
+                dirs = mapped["directions"]
+                if isinstance(dirs, dict) and tv_key in dirs:
+                    mapped[fkey] = dirs[tv_key]
+
+        # TF RSI: ensure tf_m1_rsi..tf_d1_rsi exist
+        for tf_key in ["m1", "m5", "m15", "h1", "h4", "d1"]:
+            fkey = f"tf_{tf_key}_rsi"
+            if fkey not in mapped:
+                # Try from tf_rsi dict or individual tf_XX_rsi fields
+                if "tf_rsi" in mapped and isinstance(mapped["tf_rsi"], dict):
+                    mapped[fkey] = mapped["tf_rsi"].get(tf_key.upper(), 0)
+
+        mapped["ok"] = True
+        return mapped
+
+    except Exception as e:
+        logger.warning(f"gom-kola-dashboard({symbol}): {e}")
+        return {"ok": False, "message": str(e)}
+
+
+@app.get("/gom-verdicts")
+async def gom_verdicts():
+    """
+    Retourne tous les verdicts GOM pour le dashboard.
+    Gère les 3 formats de gom_signal.json.
+    """
+    try:
+        root = Path(__file__).resolve().parents[1]
+        gom_file = root / "data" / "gom_signal.json"
+        if not gom_file.is_file():
+            return {"ok": False, "message": "gom_signal.json absent", "verdicts": []}
+
+        gom_data = json.loads(gom_file.read_text(encoding="utf-8"))
+        verdicts = []
+
+        # Format 1: {"verdicts": [...]}
+        if isinstance(gom_data, dict) and "verdicts" in gom_data:
+            verdicts = gom_data["verdicts"] if isinstance(gom_data["verdicts"], list) else []
+        # Format 2: Dict par symbole {"XAUUSD": {...}}
+        elif isinstance(gom_data, dict):
+            for sym_key, val in gom_data.items():
+                if isinstance(val, dict) and "verdict" in val:
+                    verdicts.append(val)
+
+        return {"ok": True, "verdicts": verdicts, "count": len(verdicts)}
+    except Exception as e:
+        logger.warning(f"gom-verdicts: {e}")
+        return {"ok": False, "message": str(e), "verdicts": []}
+
+
+@app.post("/gom-verdict")
+async def gom_verdict_post(req: Request):
+    """
+    POST endpoint pour gom_verdict_poller.py — stocke le payload dans gom_signal.json.
+    Le poller envoie le payload complet avec les bons field names (score_buy, score_sell, etc.).
+    """
+    try:
+        body = await req.json()
+        if not isinstance(body, dict) or not body.get("symbol"):
+            return {"ok": False, "message": "Missing symbol in payload"}
+
+        symbol = body["symbol"]
+        root = Path(__file__).resolve().parents[1]
+        gom_file = root / "data" / "gom_signal.json"
+        gom_file.parent.mkdir(parents=True, exist_ok=True)
+
+        existing = {}
+        if gom_file.is_file():
+            try:
+                existing = json.loads(gom_file.read_text(encoding="utf-8"))
+                if not isinstance(existing, dict):
+                    existing = {}
+                # Migrate from {"verdicts": [...]} to dict-by-symbol
+                if "verdicts" in existing and isinstance(existing["verdicts"], list):
+                    for v in existing["verdicts"]:
+                        if isinstance(v, dict) and "symbol" in v:
+                            existing[v["symbol"]] = v
+                    del existing["verdicts"]
+                    if "timestamp" in existing:
+                        del existing["timestamp"]
+                    if "source" in existing:
+                        del existing["source"]
+            except Exception:
+                existing = {}
+
+        existing[symbol] = body
+        gom_file.write_text(json.dumps(existing, indent=2, ensure_ascii=False), encoding="utf-8")
+
+        logger.info(f"POST /gom-verdict: {symbol} stored ({len(existing)} symbols)")
+        return {"ok": True, "symbol": symbol}
+    except Exception as e:
+        logger.warning(f"POST /gom-verdict: {e}")
         return {"ok": False, "message": str(e)}
 
 
@@ -14681,6 +14909,9 @@ _symbol_stats_task: Optional[asyncio.Task] = None
 _continuous_learning_bg_task: Optional[asyncio.Task] = None
 _symbol_stats_last_tick: Optional[str] = None
 _symbol_stats_cache: Dict[str, Dict[str, Any]] = {}  # {symbol: {"day": {...}, "month": {...}}}
+
+# --- WhatsApp Report 30min ---
+_whatsapp_report_task: Optional[asyncio.Task] = None
 _symbol_stats_upload_freshness: Dict[str, Dict[str, Dict[str, Any]]] = {}  # {symbol: {period_type: {"last_trade_at": dt, "updated_at": dt}}}
 
 CREATE_SYMBOL_TRADE_STATS_SQL = """
@@ -14894,6 +15125,111 @@ async def _symbol_stats_loop(interval_sec: int = 300) -> None:
         except Exception as e:
             logger.warning(f"⚠️ symbol stats loop: {e}")
         await asyncio.sleep(max(30, int(interval_sec)))
+
+
+# ── WhatsApp Report 30min ──────────────────────────────────────────────
+async def _send_whatsapp_report() -> None:
+    """Envoie un rapport WhatsApp avec solde, equity, positions et P/L."""
+    try:
+        import requests as _req
+        now = datetime.utcnow()
+        hour = now.strftime("%H:%M")
+
+        # Récupérer les infos des comptes MT5
+        accounts = []
+        try:
+            import MetaTrader5 as _mt5
+            if _mt5.initialize():
+                for login, server in [(5026526, "Deriv-MT5-Real")]:
+                    if _mt5.login(login, server=server):
+                        acc = _mt5.account_info()
+                        if acc:
+                            positions = _mt5.positions_get() or []
+                            pos_list = []
+                            total_pnl = 0.0
+                            for p in positions:
+                                pnl = p.profit
+                                total_pnl += pnl
+                                pos_list.append({
+                                    "symbol": p.symbol,
+                                    "type": "BUY" if p.type == 0 else "SELL",
+                                    "volume": p.volume,
+                                    "profit": pnl,
+                                })
+                            accounts.append({
+                                "server": server,
+                                "balance": acc.balance,
+                                "equity": acc.equity,
+                                "margin": acc.margin,
+                                "positions": pos_list,
+                                "daily_pnl": total_pnl,
+                            })
+                _mt5.shutdown()
+        except Exception as e:
+            logger.warning(f"⚠️ MT5 report error: {e}")
+
+        total_balance = sum(a["balance"] for a in accounts)
+        total_equity = sum(a["equity"] for a in accounts)
+        total_pnl = sum(a["daily_pnl"] for a in accounts)
+        total_positions = sum(len(a["positions"]) for a in accounts)
+
+        # ── Giveback Guard dynamique (pic du jour) ──
+        global _giveback_daily_peak_pnl, _giveback_daily_peak_date
+        today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        if _giveback_daily_peak_date != today_str:
+            _giveback_daily_peak_pnl = 0.0
+            _giveback_daily_peak_date = today_str
+        if total_pnl > _giveback_daily_peak_pnl:
+            _giveback_daily_peak_pnl = total_pnl
+
+        giveback_active = False
+        giveback_info = "🟢 INACTIF"
+        if _giveback_daily_peak_pnl >= 5.0:  # Pic minimum $5
+            giveback_pct = 1.0 - (total_pnl / _giveback_daily_peak_pnl) if _giveback_daily_peak_pnl > 0 else 0
+            if giveback_pct >= GIVEBACK_LOCK_PCT:
+                giveback_active = True
+                giveback_info = f"🔴 ACTIF — {giveback_pct*100:.0f}% du pic rendu (pic +${_giveback_daily_peak_pnl:.2f})"
+            else:
+                giveback_info = f"🟢 {giveback_pct*100:.0f}% rendu (pic +${_giveback_daily_peak_pnl:.2f})"
+        elif _giveback_daily_peak_pnl > 0:
+            giveback_info = f"🟢 Pic ${_giveback_daily_peak_pnl:.2f} < $5 seuil"
+
+        msg = f"📊 *RAPPORT 30min* — {hour}\n\n"
+        msg += f"💰 *SOLDE:* ${total_balance:.2f}\n"
+        msg += f"📈 *EQUITY:* ${total_equity:.2f}\n"
+        msg += f"💵 *P/L DU JOUR:* ${total_pnl:+.2f}\n\n"
+
+        msg += f"🔓 *POSITIONS ({total_positions})*\n"
+        for a in accounts:
+            if a["positions"]:
+                msg += f"▸ {a['server']}:\n"
+                for p in a["positions"]:
+                    emoji = "🟢" if p["profit"] >= 0 else "🔴"
+                    msg += f"  {emoji} {p['type']} {p['symbol']} | {p['volume']} lot | {p['profit']:+.2f}$\n"
+            else:
+                msg += f"▸ {a['server']}: Aucune position\n"
+
+        msg += f"\n🛡️ *GIVEBACK:* {giveback_info}"
+
+        # Envoyer via PsychoBot
+        _req.post(
+            f"{PSYCHOBOT_URL}/send-message",
+            json={"phone": WHATSAPP_PHONE_NUMBER, "message": msg},
+            timeout=15,
+        )
+        logger.info(f"📱 WhatsApp report envoyé ({hour})")
+    except Exception as e:
+        logger.error(f"❌ WhatsApp report error: {e}")
+
+
+async def _whatsapp_report_loop(interval_sec: int = 1800) -> None:
+    """Boucle d'envoi de rapport WhatsApp toutes les 30 minutes."""
+    while True:
+        try:
+            await _send_whatsapp_report()
+        except Exception as e:
+            logger.warning(f"⚠️ whatsapp report loop: {e}")
+        await asyncio.sleep(max(60, int(interval_sec)))
 
 def _apply_symbol_risk_policy(symbol: str, action: str, confidence: float) -> Tuple[str, float, str]:
     """
@@ -19520,6 +19856,24 @@ async def create_pending_order(body: PendingOrderBody):
         logger.warning(f"[PendingOrder] {sym} bloque Weltrade heure: {wt_reason}")
         raise HTTPException(status_code=403, detail=wt_reason)
 
+    # Gate correction cycle M1 — bloque entrées pendant micro-corrections Boom/Crash
+    _corr_store = _GOM_VERDICT_STORE.get(sym, {})
+    _m1_blocked = bool(_corr_store.get("m1_entry_blocked", False))
+    _corr_entry_safe = bool(_corr_store.get("correction_entry_safe", True))
+    if is_boom_crash_symbol(sym) and _m1_blocked:
+        _m1_reason = _corr_store.get("m1_entry_reason", "micro-correction active")
+        logger.warning(f"[PendingOrder] {sym} bloque M1 correction: {_m1_reason}")
+        raise HTTPException(
+            status_code=403,
+            detail=f"{sym} micro-correction M1 active — entrée bloquée: {_m1_reason}"
+        )
+    if is_boom_crash_symbol(sym) and not _corr_entry_safe:
+        logger.warning(f"[PendingOrder] {sym} bloque correction_entry_safe=False")
+        raise HTTPException(
+            status_code=403,
+            detail=f"{sym} correction_entry_safe=False — phase de correction non résolue"
+        )
+
     order_id = str(_uuid.uuid4())
     entry: Dict[str, Any] = {
         "order_id": order_id,
@@ -19643,13 +19997,17 @@ if __name__ == "__main__":
 # ========== 3 ENDPOINTS MANQUANTS POUR SMC_Universal.mq5 ==========
 
 @app.get("/ml/decision")
-async def ml_decision(symbol: str = Query(..., description="Symbol (ex: Boom 1000 Index)"),
+async def ml_decision(symbol: str = Query(..., description="Symbol (ex: Boom 1000 Index, XAUUSD.m)"),
                      timeframe: str = Query("M1", description="Timeframe: M1, M5, H1, etc.")):
     """
     Endpoint léger pour décision ML - retour rapide du dernier signal /decision en cache.
-    Appelé par SMC_Universal ligne 7152.
+    Appelé par SMC_Universal.mq5.
+    Gère les suffixes broker (Exness .m, .ecn, etc.)
     """
     try:
+        # Normaliser le symbole (strip suffixe broker + upper)
+        symbol = normalize_symbol(symbol)
+        
         if not validate_symbol(symbol):
             return {
                 "action": "hold",
