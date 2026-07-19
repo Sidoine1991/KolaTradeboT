@@ -17,7 +17,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 # Configuration des URLs de l'API
-RENDER_API_URL = "https://kolatradebot.onrender.com"
+RENDER_API_URL = "https://kolatradebot-7ofl.onrender.com"
 LOCAL_API_URL = "http://localhost:8000"  # Utilisation du port 8000
 
 # Whitelist publiée par autonomous_pipeline.py après le scan du matin
@@ -159,19 +159,8 @@ def _is_symbol_whitelisted(symbol: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Wrapper mt5.order_send — gate whitelist sur TOUS les ordres sans exception
-# ---------------------------------------------------------------------------
-_mt5_order_send_real = mt5.order_send
-
-def _guarded_order_send(request):
-    """Intercepte tous les mt5.order_send() et bloque si symbole hors whitelist."""
-    sym = getattr(request, "symbol", None) or (request.get("symbol") if isinstance(request, dict) else None)
-    if sym and not _is_symbol_whitelisted(sym):
-        logger.warning("[Whitelist] order_send BLOQUÉ — %s hors whitelist pipeline", sym)
-        return None
-    return _mt5_order_send_real(request)
-
-mt5.order_send = _guarded_order_send
+# NOTE: All order execution is now handled by EA via /pending-order endpoint
+# Python side ONLY sends entry signals - no direct mt5.order_send() calls
 # ---------------------------------------------------------------------------
 
 filling_mode_logger.setLevel(logging.DEBUG)
@@ -1658,30 +1647,29 @@ class AggressiveTradingStrategy:
             sl = price + self.sl_pips * 10 * point
             tp = price - self.tp_pips * 10 * point
             
-        # Exécuter l'ordre
-        request = {
-            "action": mt5.TRADE_ACTION_DEAL,
+        # Envoyer le SIGNAL au serveur — l'EA MT5 exécutera
+        _signal_type = "BUY" if order_type == mt5.ORDER_TYPE_BUY else "SELL"
+        _payload = {
             "symbol": symbol,
-            "volume": position_lot,
-            "type": order_type,
-            "price": price,
-            "sl": sl,
-            "tp": tp,
-            "deviation": 10,
-            "magic": 234567,
-            "comment": f"AGGRESSIVE-{position_count+1}",
-            "type_time": mt5.ORDER_TIME_GTC,
-            "type_filling": mt5.ORDER_FILLING_FOK,
+            "action": _signal_type,
+            "entry_price": price,
+            "stop_loss": sl,
+            "take_profit": tp,
+            "lot": position_lot,
+            "source": "aggressive_strategy",
+            "reasoning": f"AGGRESSIVE-{position_count+1}",
         }
-        
-        result = mt5.order_send(request)
-        if result.retcode == mt5.TRADE_RETCODE_DONE:
-            logger.info(f"🔥 Position agressive #{position_count+1} ouverte sur {symbol} - Lot: {position_lot}")
-            strategy['positions'].append(result.order)
-            strategy['last_entry_time'] = current_time
-            return True
-        else:
-            logger.error(f"Erreur ouverture position agressive: {result.comment}")
+        try:
+            _resp = requests.post("http://127.0.0.1:8000/pending-order", json=_payload, timeout=10)
+            if _resp.status_code in (200, 201):
+                logger.info(f"🔥 Signal agressif #{position_count+1} {symbol} envoyé (pending-order)")
+                strategy['last_entry_time'] = current_time
+                return True
+            else:
+                logger.error(f"❌ Signal agressif {symbol} rejeté (HTTP {_resp.status_code}): {_resp.text[:200]}")
+                return False
+        except requests.exceptions.RequestException as _e:
+            logger.error(f"❌ Erreur connexion serveur (agressif) {symbol}: {_e}")
             return False
     
     def close_strategy(self, symbol, reason):
@@ -1971,30 +1959,28 @@ class EMAScalpingStrategy:
             sl = entry_price + (self.scalping_sl_pips * 10 * point)
             tp = entry_price - (self.scalping_tp_pips * 10 * point)
         
-        # Créer la requête d'ordre
-        request = {
-            "action": mt5.TRADE_ACTION_DEAL,
+        # Envoyer le SIGNAL au serveur — l'EA MT5 exécutera
+        _payload = {
             "symbol": symbol,
-            "volume": self.scalping_lot_size,
-            "type": order_type,
-            "price": entry_price,
-            "sl": sl,
-            "tp": tp,
-            "deviation": 10,
-            "magic": 345678,  # Magic number différent pour scalping
-            "comment": f"SCALPING-EMA-{strategy['direction']}",
-            "type_time": mt5.ORDER_TIME_GTC,
-            "type_filling": mt5.ORDER_FILLING_FOK,
+            "action": strategy['direction'],
+            "entry_price": entry_price,
+            "stop_loss": sl,
+            "take_profit": tp,
+            "lot": self.scalping_lot_size,
+            "source": "ema_scalping",
+            "reasoning": f"SCALPING-EMA-{strategy['direction']}",
         }
-        
-        result = mt5.order_send(request)
-        if result.retcode == mt5.TRADE_RETCODE_DONE:
-            logger.info(f"⚡ Trade scalping exécuté: {symbol} {strategy['direction']} | Entry: {entry_price} | SL: {sl} | TP: {tp}")
-            strategy['positions'].append(result.order)
-            strategy['last_ema_touch_time'] = time.time()
-            return True
-        else:
-            logger.error(f"Erreur trade scalping: {result.comment}")
+        try:
+            _resp = requests.post("http://127.0.0.1:8000/pending-order", json=_payload, timeout=10)
+            if _resp.status_code in (200, 201):
+                logger.info(f"⚡ Signal scalping {strategy['direction']} {symbol} envoyé (pending-order)")
+                strategy['last_ema_touch_time'] = time.time()
+                return True
+            else:
+                logger.error(f"❌ Signal scalping {symbol} rejeté (HTTP {_resp.status_code}): {_resp.text[:200]}")
+                return False
+        except requests.exceptions.RequestException as _e:
+            logger.error(f"❌ Erreur connexion serveur (scalping) {symbol}: {_e}")
             return False
     
     def update_scalping_profit(self, strategy):
@@ -2726,59 +2712,14 @@ class MT5AIClient:
                 new_sl = current_price * (1 - trailing_distance)
                 
                 # Vérifier si le profit est suffisant pour activer le trailing
-                if profit_pct >= activation_profit:
-                    # Vérifier si le nouveau SL est plus élevé que l'ancien
-                    if new_sl > current_sl + (point * 10):  # Éviter les mises à jour trop fréquentes
-                        # Mettre à jour le SL
-                        request = {
-                            "action": mt5.TRADE_ACTION_SLTP,
-                            "symbol": symbol,
-                            "position": ticket,
-                            "sl": new_sl,
-                            "tp": current_tp,
-                            "type_time": mt5.ORDER_TIME_GTC
-                        }
-                        
-                        result = mt5.order_send(request)
-                        if result.retcode == mt5.TRADE_RETCODE_DONE:
-                            logger.info(f"Trailing stop mis à jour pour {symbol}: SL={new_sl}")
-                            return True
-                        else:
-                            logger.error(f"Erreur mise à jour trailing stop {symbol}: {result.comment}")
-                            return False
-                            
-            elif position_type == mt5.ORDER_TYPE_SELL:
-                profit_pct = (open_price - current_price) / open_price
-                new_sl = current_price * (1 + trailing_distance)
-                
-                # Vérifier si le profit est suffisant pour activer le trailing
-                if profit_pct >= activation_profit:
-                    # Vérifier si le nouveau SL est plus bas que l'ancien
-                    if new_sl < current_sl - (point * 10) or current_sl == 0:  # Éviter les mises à jour trop fréquentes
-                        # Mettre à jour le SL
-                        request = {
-                            "action": mt5.TRADE_ACTION_SLTP,
-                            "symbol": symbol,
-                            "position": ticket,
-                            "sl": new_sl,
-                            "tp": current_tp,
-                            "type_time": mt5.ORDER_TIME_GTC
-                        }
-                        
-                        result = mt5.order_send(request)
-                        if result.retcode == mt5.TRADE_RETCODE_DONE:
-                            logger.info(f"Trailing stop mis à jour pour {symbol}: SL={new_sl}")
-                            return True
-                        else:
-                            logger.error(f"Erreur mise à jour trailing stop {symbol}: {result.comment}")
-                            return False
-            
-            return False
-            
-        except Exception as e:
-            logger.error(f"Erreur dans update_trailing_stop pour {symbol}: {e}")
-            return False
-    
+                def update_trailing_stop(self, symbol, activation_profit=0.5, trailing_distance=0.02):
+        """
+        Trailing stop is now handled by EA (ManageTrailingStop + SMC_ManageGainProtectionTrail).
+        Python side no longer manages SL/TP directly.
+        """
+        logger.debug(f"Trailing stop for {symbol} managed by EA - skipping Python-side update")
+        return False
+        
     def calculate_total_profit(self):
         """Calcule le profit total de toutes les positions"""
         total_profit = 0.0
@@ -2854,6 +2795,10 @@ class MT5AIClient:
         stops_level = getattr(symbol_info, "trade_stops_level", 0) or getattr(symbol_info, "stops_level", 0) or 0
         min_dist_points = max(stops_level, 20) if symbol_info.digits >= 4 else max(stops_level, 5)
         min_dist_price = min_dist_points * point
+
+        # Boom/Crash: distance minimum proportionnelle au prix (0.08% = miroir TM_MinStopDistance)
+        if "Boom" in symbol or "Crash" in symbol:
+            min_dist_price = max(min_dist_price, entry_price * 0.0008)
 
         sl_dist = abs(entry_price - sl)
         tp_dist = abs(tp - entry_price)
@@ -3321,110 +3266,31 @@ class MT5AIClient:
             logger.info(f"  Volume: {position_size}")
             rr = perc_tp / perc_sl if perc_sl != 0 else 0
             logger.info(f"  Risk/Reward: 1:{rr:.1f}")
-            
-            # Envoyer l'ordre
-            max_retries = 2
-            retry_count = 0
-            result = None
-            
-            while retry_count < max_retries:
-                try:
-                    # Logger la tentative de trade
-                    filling_mode_name = self.get_filling_mode_name(request.get("type_filling", 0))
-                    trade_logger_instance.log_trade_attempt(
-                        symbol, request.get("type", "UNKNOWN"), 
-                        request.get("volume", 0), request.get("price", 0),
-                        request.get("sl", 0), request.get("tp", 0),
-                        filling_mode_name
-                    )
-                    
-                    result = mt5.order_send(request)
-                    
-                    # Si succès, logger et sortir de la boucle
-                    if result and result.retcode == mt5.TRADE_RETCODE_DONE:
-                        trade_logger_instance.log_trade_success(
-                            symbol, request.get("type", "UNKNOWN"), 
-                            result.order if result else 0
-                        )
-                        break
-                        
-                    # Si erreur de mode de remplissage, essayer tous les modes: FOK, IOC, RETURN
-                    if result and (result.retcode == 10030 or "filling" in (result.comment or "").lower() or "unsupported" in (result.comment or "").lower()):
-                        attempted_mode = self.get_filling_mode_name(request.get("type_filling", 0))
-                        fallback_modes = [mt5.ORDER_FILLING_FOK, mt5.ORDER_FILLING_IOC, mt5.ORDER_FILLING_RETURN]
-                        tried = request.get("type_filling")
-                        success = False
-                        for mode in fallback_modes:
-                            if mode == tried:
-                                continue
-                            fallback_mode = self.get_filling_mode_name(mode)
-                            trade_logger_instance.log_filling_mode_error(
-                                symbol, result.retcode, result.comment or "Invalid fill",
-                                attempted_mode, fallback_mode
-                            )
-                            logger.warning(f"Unsupported filling mode - Essai avec {fallback_mode} pour {symbol}")
-                            request["type_filling"] = mode
-                            result = mt5.order_send(request)
-                            if result and result.retcode == mt5.TRADE_RETCODE_DONE:
-                                trade_logger_instance.log_filling_mode_success(symbol, fallback_mode, was_fallback=True)
-                                trade_logger_instance.log_trade_success(symbol, request.get("type", "UNKNOWN"), result.order if result else 0)
-                                logger.info(f"Ordre réussi avec {fallback_mode} pour {symbol}")
-                                success = True
-                                break
-                        if success:
-                            break
-                        retry_count = max_retries  # sortir de la boucle
-                        continue
-                        
-                    # Autre erreur, logger et sortir de la boucle
-                    error_msg = result.comment if result else "Unknown error"
-                    trade_logger_instance.log_trade_error(
-                        symbol, request.get("type", "UNKNOWN"),
-                        result.retcode if result else -1, error_msg,
-                        filling_mode_name
-                    )
-                    break
-                    
-                except Exception as e:
-                    logger.error(f"Erreur lors de l'envoi de l'ordre pour {symbol}: {e}")
-                    retry_count += 1
-                    if retry_count < max_retries:
-                        logger.info(f"Nouvelle tentative {retry_count}/{max_retries}...")
-                        time.sleep(1)  # Attendre 1 seconde avant de réessayer
-            
-            # Vérifier si result est None
-            if result is None:
-                last_error = mt5.last_error()
-                logger.error(f"Echec ordre {symbol}: mt5.order_send() a retourné None - {last_error}")
-                logger.error(f"Requête: {request}")
-                return False
-            
-            # Vérifier le code de retour
-            if result.retcode != mt5.TRADE_RETCODE_DONE:
-                logger.error(f"Echec ordre {symbol}: {result.retcode} - {result.comment}")
-                # Les fallbacks FOK/IOC/RETURN ont déjà été essayés dans la boucle ci-dessus
-                return False
-            
-            # Enregistrer la position
-            self.positions[symbol] = {
-                "ticket": result.order,
+
+            # Envoyer le SIGNAL au serveur — l'EA MT5 exécutera l'ordre avec ses validations
+            _payload = {
                 "symbol": symbol,
-                "type": signal,
-                "volume": position_size,
-                "price": result.price,
-                "sl": sl,
-                "tp": tp,
-                "open_time": datetime.now(),
-                "signal_data": signal_data,
-                "category": category
+                "action": signal,
+                "entry_price": entry_price,
+                "stop_loss": sl,
+                "take_profit": tp,
+                "lot": position_size,
+                "confidence": confidence,
+                "source": "mt5_live",
+                "reasoning": f"AI-{signal}-{category} conf={confidence_percent:.0f}%",
             }
-            
-            logger.info(f"✅ Ordre réussi: {signal} {symbol} [{category}] - Ticket: {result.order}")
-            
-            # Envoyer le feedback au serveur
-            self.send_trade_feedback(symbol, signal_data, "opened")
-            
-            return True
+            try:
+                _resp = requests.post("http://127.0.0.1:8000/pending-order", json=_payload, timeout=10)
+                if _resp.status_code in (200, 201):
+                    logger.info(f"✅ Signal {signal} {symbol} envoyé au serveur (pending-order) — lot={position_size} SL={sl} TP={tp}")
+                    self.send_trade_feedback(symbol, signal_data, "pending")
+                    return True
+                else:
+                    logger.error(f"❌ Signal {symbol} rejeté par serveur (HTTP {_resp.status_code}): {_resp.text[:200]}")
+                    return False
+            except requests.exceptions.RequestException as _e:
+                logger.error(f"❌ Erreur connexion serveur pour {symbol}: {_e}")
+                return False
             
         except Exception as e:
             logger.error(f"Erreur execution trade {symbol}: {e}")
@@ -3465,46 +3331,13 @@ class MT5AIClient:
             logger.error(f"Erreur verification positions: {e}")
     
     def close_position(self, pos):
-        try:
-            symbol = pos.symbol
-            volume = pos.volume
-            position_ticket = pos.ticket
-            symbol_info = mt5.symbol_info(symbol)
-            if not symbol_info:
-                return False
-            tick = mt5.symbol_info_tick(symbol)
-            if not tick:
-                return False
-            if pos.type == mt5.POSITION_TYPE_BUY:
-                price = tick.bid
-                order_type = mt5.ORDER_TYPE_SELL
-            else:
-                price = tick.ask
-                order_type = mt5.ORDER_TYPE_BUY
-            request = {
-                "action": mt5.TRADE_ACTION_DEAL,
-                "symbol": symbol,
-                "volume": volume,
-                "type": order_type,
-                "position": position_ticket,
-                "price": price,
-                "deviation": 20,
-                "magic": 234000,
-                "comment": "AI-Autoclose-1",
-                "type_time": mt5.ORDER_TIME_GTC,
-                "type_filling": mt5.ORDER_FILLING_RETURN,
-            }
-            result = mt5.order_send(request)
-            if result and result.retcode == mt5.TRADE_RETCODE_DONE:
-                logger.info(f"Position fermee {symbol} ticket={position_ticket} profit=${pos.profit:.2f}")
-                return True
-            else:
-                logger.error(f"Echec fermeture {symbol} ticket={position_ticket}: {result.retcode if result else 'None'}")
-                return False
-        except Exception as e:
-            logger.error(f"Erreur fermeture position {pos.symbol}: {e}")
-            return False
-    
+        """
+        Position closing is now handled by EA (ManageDollarExits, ManageGOMVerdictExits, etc.).
+        Python side no longer closes positions directly.
+        """
+        logger.debug(f"Position close for {pos.symbol} managed by EA - skipping Python-side close")
+        return False
+        
     def auto_close_winners(self, profit_target=1.0):
         try:
             positions = mt5.positions_get()
@@ -3768,44 +3601,16 @@ class MT5AIClient:
                     current_profit = current_price - entry_price
                     
                     # Si on a atteint 50% du TP, on peut déplacer le SL au point d'entrée
+                    # NOTE: EA's GAIN-LOCK logic in ManageTrailingStop handles this automatically
                     if current_profit >= (distance_to_tp * 0.5) and sl < entry_price:
-                        # Mettre à jour le SL au point d'entrée
-                        request = {
-                            "action": mt5.TRADE_ACTION_SLTP,
-                            "symbol": position.symbol,
-                            "position": position.ticket,
-                            "sl": entry_price,
-                            "tp": tp,
-                            "type_time": mt5.ORDER_TIME_GTC
-                        }
-                        
-                        result = mt5.order_send(request)
-                        if result.retcode == mt5.TRADE_RETCODE_DONE:
-                            logger.info(f"SL déplacé au point d'entrée pour {position.symbol} (Ticket: {position.ticket})")
-                        else:
-                            logger.error(f"Erreur déplacement SL pour {position.symbol}: {result.comment}")
+                        logger.debug(f"SL breakeven for {position.symbol} handled by EA - skipping Python-side update")
                             
                 elif position.type == mt5.ORDER_TYPE_SELL and current_price < entry_price:
-                    # Même logique pour les positions de vente
                     distance_to_tp = entry_price - tp
                     current_profit = entry_price - current_price
                     
                     if current_profit >= (distance_to_tp * 0.5) and (sl > entry_price or sl == 0):
-                        # Mettre à jour le SL au point d'entrée
-                        request = {
-                            "action": mt5.TRADE_ACTION_SLTP,
-                            "symbol": position.symbol,
-                            "position": position.ticket,
-                            "sl": entry_price,
-                            "tp": tp,
-                            "type_time": mt5.ORDER_TIME_GTC
-                        }
-                        
-                        result = mt5.order_send(request)
-                        if result.retcode == mt5.TRADE_RETCODE_DONE:
-                            logger.info(f"SL déplacé au point d'entrée pour {position.symbol} (Ticket: {position.ticket})")
-                        else:
-                            logger.error(f"Erreur déplacement SL pour {position.symbol}: {result.comment}")
+                        logger.debug(f"SL breakeven for {position.symbol} handled by EA - skipping Python-side update")
                             
         except Exception as e:
             logger.error(f"Erreur vérification positions: {e}")
@@ -3847,30 +3652,28 @@ class MT5AIClient:
                 logger.error(f"Impossible de calculer SL/TP pour {symbol}")
                 return False
             
-            # Créer la requête d'ordre
-            filling_mode = self.get_symbol_filling_mode(symbol)
-            
-            request = {
-                "action": mt5.TRADE_ACTION_DEAL,
+            # Envoyer le SIGNAL au serveur — l'EA MT5 exécutera
+            _payload = {
                 "symbol": symbol,
-                "volume": position_size,
-                "type": order_type,
-                "price": price,
-                "sl": sl,
-                "tp": tp,
-                "deviation": 10,
-                "magic": 456789,  # Magic number pour trades 100%
-                "comment": f"100%-IMMEDIATE-{signal}",
-                "type_time": mt5.ORDER_TIME_GTC,
-                "type_filling": filling_mode,
+                "action": signal,
+                "entry_price": price,
+                "stop_loss": sl,
+                "take_profit": tp,
+                "lot": position_size,
+                "confidence": confidence,
+                "source": "mt5_live",
+                "reasoning": f"100%-IMMEDIATE-{signal}",
             }
-            
-            result = mt5.order_send(request)
-            if result.retcode == mt5.TRADE_RETCODE_DONE:
-                logger.info(f"✅ Trade 100% exécuté: {symbol} {signal} | Ticket: {result.order} | Lot: {position_size}")
-                return True
-            else:
-                logger.error(f"❌ Erreur trade 100%: {result.comment}")
+            try:
+                _resp = requests.post("http://127.0.0.1:8000/pending-order", json=_payload, timeout=10)
+                if _resp.status_code in (200, 201):
+                    logger.info(f"✅ Signal 100% {signal} {symbol} envoyé au serveur (pending-order)")
+                    return True
+                else:
+                    logger.error(f"❌ Signal 100% {symbol} rejeté (HTTP {_resp.status_code}): {_resp.text[:200]}")
+                    return False
+            except requests.exceptions.RequestException as _e:
+                logger.error(f"❌ Erreur connexion serveur 100% {symbol}: {_e}")
                 return False
                 
         except Exception as e:

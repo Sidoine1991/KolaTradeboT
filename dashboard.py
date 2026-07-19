@@ -18,7 +18,7 @@ from tkinter import ttk, font
 import threading
 
 # Configuration
-RENDER_API_URL = "https://kolatradebot.onrender.com"
+RENDER_API_URL = "https://kolatradebot-7ofl.onrender.com"
 SYMBOLS_TO_MONITOR = [
     "Boom 300 Index",
     "Boom 600 Index", 
