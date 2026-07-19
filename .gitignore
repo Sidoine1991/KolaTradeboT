@@ -136,4 +136,21 @@ RESTRUCTURING_PROGRESS.md
 reports/
 Backtest_report/
 
+# Caches runtime volumineux (genères par le trading, non versionnes)
+signals/
+logs/
+data/hist_*/
+*.db
+*.sqlite
+*.sqlite3
+Bomm & Crash Deriv/
+wa_figures/
+screenshots/
+models/*.joblib
+models/*.pkl
+models/*.onnx
+__pycache__/
+*.pyc
+node_modules/
+
 nul
