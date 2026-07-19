@@ -9631,11 +9631,8 @@ async def api_version():
 
 @app.get("/health")
 async def health_check():
-    """Endpoint de santé pour Render et monitoring"""
-    try:
-        ollama_ok = ollama_service_reachable()
-    except Exception:
-        ollama_ok = False
+    """Endpoint de santé pour Render et monitoring.
+    Ne sonde PAS Ollama (timeout cold-start sur plan gratuit) : on lit juste le flag déjà en mémoire."""
     return {
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
@@ -9644,7 +9641,8 @@ async def health_check():
         "mt5_available": MT5_AVAILABLE,
         "ml_trainer_available": ML_TRAINER_AVAILABLE,
         "ml_recommendation_available": ML_RECOMMENDATION_AVAILABLE,
-        "ollama_available": bool(ollama_ok),
+        "gom_live_calculator_available": GOM_LIVE_CALCULATOR_AVAILABLE,
+        "gom_verdict_calculator_v2_available": GOM_VERDICT_CALCULATOR_V2_AVAILABLE,
         "simplified_tf_cache_entries": len(simplified_tf_cache),
         "CACHE_DURATION_SECONDS": CACHE_DURATION,
     }

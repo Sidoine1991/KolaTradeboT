@@ -15,7 +15,7 @@ RUN apt-get update \
 # pip récent : résolution correcte des Requires-Python (mistralai 1.12+ exige Python >=3.10)
 RUN python -m pip install --no-cache-dir --upgrade "pip>=25.0" "setuptools>=75.0" wheel
 
-# CACHE BUSTER - Force full rebuild 2026-05-16T22:30:00Z
+# CACHE BUSTER - Force full rebuild 2026-07-19T22:00:00Z (python/ rename + health fix)
 RUN echo "Invalidating Docker layer cache for clean ai_server deployment"
 
 # Copier les fichiers de configuration
