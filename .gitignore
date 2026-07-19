@@ -154,3 +154,5 @@ __pycache__/
 node_modules/
 
 nul
+# EA proprietaire (NE PAS versionner)
+mt5/SMC_Universal.mq5
