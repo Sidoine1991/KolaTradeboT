@@ -1,0 +1,2 @@
+[@anthropic-ai/claude-code] Could not find native binary package "@anthropic-ai/claude-code-win32-x64".
+  Try reinstalling with: npm install

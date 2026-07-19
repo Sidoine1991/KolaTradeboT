@@ -44,7 +44,7 @@ def get_gom_verdict(symbol: str) -> Dict:
     try:
         resp = requests.get(
             f"{GOM_AI_SERVER}/gom-verdict?symbol={symbol}",
-            timeout=5
+            timeout=15
         )
         if resp.status_code == 200:
             return resp.json()
@@ -68,10 +68,13 @@ def get_symbol_opportunity_status(symbol: str) -> Tuple[bool, Dict]:
         if not verdict:
             return False, {}
 
-        ia_conf = float(verdict.get("ia_status_confidence", 0))
-        gom_coher = float(verdict.get("gom_coherence_pct", 0))
-        prob_gate = float(verdict.get("probability_pct", 0))
-        action = verdict.get("ia_action", "HOLD")
+        _ia = verdict.get("cog_confidence_pct", verdict.get("ia_status_confidence", 0)) or 0.0
+        _gom = verdict.get("coherence_pct", verdict.get("gom_coherence_pct", 0)) or 0.0
+        _prob = verdict.get("entry_probability", verdict.get("probability_pct", 0)) or 0.0
+        ia_conf = float(_ia)
+        gom_coher = float(_gom)
+        prob_gate = float(_prob)
+        action = verdict.get("verdict", verdict.get("ia_action", "HOLD"))
 
         # Check all gates
         is_perfect = (
@@ -195,7 +198,7 @@ def send_whatsapp_alert(message: str, to_number: str = None):
         # Try Render first, then local
         for url in [f"{PSYCHOBOT_RENDER}/send-message", "http://localhost:3000/send-message"]:
             try:
-                resp = requests.post(url, json=payload, timeout=5)
+                resp = requests.post(url, json=payload, timeout=15)
                 if resp.status_code == 200:
                     print(f"[OK] WhatsApp sent to {to_number}")
                     return True
@@ -219,7 +222,7 @@ def update_api_opportunities(opportunities: List[Dict]):
         resp = requests.post(
             f"{GOM_AI_SERVER}/perfect-opportunities/update",
             json=payload,
-            timeout=5
+            timeout=15
         )
         if resp.status_code == 200:
             return True

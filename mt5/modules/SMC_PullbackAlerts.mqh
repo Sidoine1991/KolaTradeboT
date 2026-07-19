@@ -1,6 +1,6 @@
 //+------------------------------------------------------------------+
 //| SMC_PullbackAlerts.mqh
-//| Pullback Entry System — WhatsApp Alerts via AI Server
+//| Pullback Entry System � WhatsApp Alerts via AI Server
 //| Sends events to Python service for beautiful formatted messages
 //+------------------------------------------------------------------+
 
@@ -101,12 +101,12 @@ bool SendPullbackAlert(
     // Check success
     if (StringFind(response, "\"success\":true") >= 0)
     {
-        Print("[PULLBACK ALERT] ✅ ", phase.Upper(), " alert sent successfully");
+        Print("[PULLBACK ALERT] ? ", phase.Upper(), " alert sent successfully");
         return true;
     }
     else
     {
-        Print("[PULLBACK ALERT] ⚠️ Response indicated failure: ", response);
+        Print("[PULLBACK ALERT] ?? Response indicated failure: ", response);
         return false;
     }
 }

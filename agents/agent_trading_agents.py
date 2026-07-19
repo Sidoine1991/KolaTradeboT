@@ -72,6 +72,7 @@ _FALLBACK_SYMBOL = os.getenv("TA7_FALLBACK_SYMBOL", "XAUUSD")
 _SYNTHETIC_PREFIXES = (
     "BOOM", "CRASH", "STEP INDEX", "JUMP", "RANGE BREAK",
     "VOLATILITY", "1HZ", "R_", "RDBULL", "RDBEAR",
+    "PAINX", "GAINX", "FX VOL", "FXVOL", "SFX VOL", "SFV VOL",
 )
 
 def _is_synthetic(symbol: str) -> bool:

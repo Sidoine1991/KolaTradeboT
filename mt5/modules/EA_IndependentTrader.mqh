@@ -1,11 +1,11 @@
 //+------------------------------------------------------------------+
-//| EA_IndependentTrader.mqh — Exécution des entrées indépendantes   |
-//| Conditionné par: GOOD/PERFECT GOM + IA Status ≥70%               |
+//| EA_IndependentTrader.mqh � Ex�cution des entr�es ind�pendantes   |
+//| Conditionn� par: GOOD/PERFECT GOM + IA Status ?70%               |
 //+------------------------------------------------------------------+
 #ifndef EA_INDEPENDENT_TRADER_MQH
 #define EA_INDEPENDENT_TRADER_MQH
 
-// ── Structure de résultat d'entrée ──────────────────────────────────
+// ?? Structure de r�sultat d'entr�e ??????????????????????????????????
 struct TradeResult
 {
    bool     success;
@@ -16,18 +16,18 @@ struct TradeResult
    double   sl;
 };
 
-// ── Exécuter un BUY indépendant ─────────────────────────────────────
+// ?? Ex�cuter un BUY ind�pendant ?????????????????????????????????????
 TradeResult EAIT_ExecuteBUY(const double lotSize = 0.01)
 {
    TradeResult result;
    result.success = false;
    result.ticket = 0;
 
-   // 1. Vérifier gating
+   // 1. V�rifier gating
    if(!SMCGP_AllowsDirectIndependentEntry(1))
    {
       result.reason = "GOM GATING FAILED";
-      Print("[EAIT-BUY] ❌ ", result.reason);
+      Print("[EAIT-BUY] ? ", result.reason);
       return result;
    }
 
@@ -36,7 +36,7 @@ TradeResult EAIT_ExecuteBUY(const double lotSize = 0.01)
    if(!setup.valid)
    {
       result.reason = "INVALID SETUP";
-      Print("[EAIT-BUY] ❌ ", result.reason);
+      Print("[EAIT-BUY] ? ", result.reason);
       return result;
    }
 
@@ -44,34 +44,45 @@ TradeResult EAIT_ExecuteBUY(const double lotSize = 0.01)
    if(!EAPE_IsPriceTouchingEntry(setup.entry))
    {
       result.reason = "PRICE NOT AT ENTRY";
-      Print("[EAIT-BUY] ℹ️ Prix n'a pas touché entry, attente...";
+      Print("[EAIT-BUY] ?? Prix n'a pas touch� entry, attente...";
       return result;
    }
 
-   // 4. Préparer la requête
+   // 4. Pr�parer la requ�te
    MqlTradeRequest request;
    MqlTradeResult tradeResult;
 
-   request.action = TRADE_ACTION_DEAL;
-   request.symbol = _Symbol;
-   request.volume = lotSize;
-   request.type = ORDER_TYPE_BUY;
-   request.price = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-   request.sl = setup.sl;
-   request.tp = setup.tp;
-   request.deviation = 50;
-   request.magic = 12345;
-   request.comment = "EA_INDEP_BUY | GOM=" + g_smcGomVerdict;
+    request.action = TRADE_ACTION_DEAL;
+    request.symbol = _Symbol;
+    request.volume = lotSize;
+    request.type = ORDER_TYPE_BUY;
+    request.price = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+    request.sl = setup.sl;
+    request.tp = setup.tp;
+    request.deviation = 50;
+    request.magic = 12345;
+    request.comment = "EA_INDEP_BUY | GOM=" + g_smcGomVerdict;
 
-   // 5. Envoyer l'ordre
-   if(!OrderSend(request, tradeResult))
+    // Vérifier et corriger SL/TP par rapport au stops_level broker
+    int stopLevel = (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
+    if(stopLevel > 0)
+    {
+       double minDist = stopLevel * SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+       if(request.price - request.sl < minDist)
+          request.sl = NormalizeDouble(request.price - minDist, _Digits);
+       if(request.tp - request.price < minDist)
+          request.tp = NormalizeDouble(request.price + minDist, _Digits);
+    }
+
+    // 5. Envoyer l'ordre
+    if(!OrderSend(request, tradeResult))
    {
       result.reason = "ORDER_SEND_FAILED: " + IntegerToString(tradeResult.retcode);
-      Print("[EAIT-BUY] ❌ OrderSend failed: ", result.reason);
+      Print("[EAIT-BUY] ? OrderSend failed: ", result.reason);
       return result;
    }
 
-   // 6. Succès
+   // 6. Succ�s
    result.success = true;
    result.ticket = tradeResult.deal;
    result.entry = setup.entry;
@@ -79,7 +90,7 @@ TradeResult EAIT_ExecuteBUY(const double lotSize = 0.01)
    result.sl = setup.sl;
    result.reason = "SUCCESS";
 
-   Print("[EAIT-BUY] ✅ BUY placé:");
+   Print("[EAIT-BUY] ? BUY plac�:");
    Print("   Ticket: ", result.ticket);
    Print("   Entry: ", DoubleToString(setup.entry, _Digits));
    Print("   TP: ", DoubleToString(setup.tp, _Digits));
@@ -90,18 +101,18 @@ TradeResult EAIT_ExecuteBUY(const double lotSize = 0.01)
    return result;
 }
 
-// ── Exécuter un SELL indépendant ────────────────────────────────────
+// ?? Ex�cuter un SELL ind�pendant ????????????????????????????????????
 TradeResult EAIT_ExecuteSELL(const double lotSize = 0.01)
 {
    TradeResult result;
    result.success = false;
    result.ticket = 0;
 
-   // 1. Vérifier gating
+   // 1. V�rifier gating
    if(!SMCGP_AllowsDirectIndependentEntry(-1))
    {
       result.reason = "GOM GATING FAILED";
-      Print("[EAIT-SELL] ❌ ", result.reason);
+      Print("[EAIT-SELL] ? ", result.reason);
       return result;
    }
 
@@ -110,7 +121,7 @@ TradeResult EAIT_ExecuteSELL(const double lotSize = 0.01)
    if(!setup.valid)
    {
       result.reason = "INVALID SETUP";
-      Print("[EAIT-SELL] ❌ ", result.reason);
+      Print("[EAIT-SELL] ? ", result.reason);
       return result;
    }
 
@@ -118,34 +129,45 @@ TradeResult EAIT_ExecuteSELL(const double lotSize = 0.01)
    if(!EAPE_IsPriceTouchingEntry(setup.entry))
    {
       result.reason = "PRICE NOT AT ENTRY";
-      Print("[EAIT-SELL] ℹ️ Prix n'a pas touché entry, attente...");
+      Print("[EAIT-SELL] ?? Prix n'a pas touch� entry, attente...");
       return result;
    }
 
-   // 4. Préparer la requête
+   // 4. Pr�parer la requ�te
    MqlTradeRequest request;
    MqlTradeResult tradeResult;
 
-   request.action = TRADE_ACTION_DEAL;
-   request.symbol = _Symbol;
-   request.volume = lotSize;
-   request.type = ORDER_TYPE_SELL;
-   request.price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   request.sl = setup.sl;
-   request.tp = setup.tp;
-   request.deviation = 50;
-   request.magic = 12346;
-   request.comment = "EA_INDEP_SELL | GOM=" + g_smcGomVerdict;
+    request.action = TRADE_ACTION_DEAL;
+    request.symbol = _Symbol;
+    request.volume = lotSize;
+    request.type = ORDER_TYPE_SELL;
+    request.price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+    request.sl = setup.sl;
+    request.tp = setup.tp;
+    request.deviation = 50;
+    request.magic = 12346;
+    request.comment = "EA_INDEP_SELL | GOM=" + g_smcGomVerdict;
 
-   // 5. Envoyer l'ordre
-   if(!OrderSend(request, tradeResult))
+    // Vérifier et corriger SL/TP par rapport au stops_level broker
+    int stopLevel = (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
+    if(stopLevel > 0)
+    {
+       double minDist = stopLevel * SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+       if(request.sl - request.price < minDist)
+          request.sl = NormalizeDouble(request.price + minDist, _Digits);
+       if(request.price - request.tp < minDist)
+          request.tp = NormalizeDouble(request.price - minDist, _Digits);
+    }
+
+    // 5. Envoyer l'ordre
+    if(!OrderSend(request, tradeResult))
    {
       result.reason = "ORDER_SEND_FAILED: " + IntegerToString(tradeResult.retcode);
-      Print("[EAIT-SELL] ❌ OrderSend failed: ", result.reason);
+      Print("[EAIT-SELL] ? OrderSend failed: ", result.reason);
       return result;
    }
 
-   // 6. Succès
+   // 6. Succ�s
    result.success = true;
    result.ticket = tradeResult.deal;
    result.entry = setup.entry;
@@ -153,7 +175,7 @@ TradeResult EAIT_ExecuteSELL(const double lotSize = 0.01)
    result.sl = setup.sl;
    result.reason = "SUCCESS";
 
-   Print("[EAIT-SELL] ✅ SELL placé:");
+   Print("[EAIT-SELL] ? SELL plac�:");
    Print("   Ticket: ", result.ticket);
    Print("   Entry: ", DoubleToString(setup.entry, _Digits));
    Print("   TP: ", DoubleToString(setup.tp, _Digits));

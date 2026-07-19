@@ -4,12 +4,8 @@
 #ifndef SMC_PERFORMANCE_PAUSE_MQH
 #define SMC_PERFORMANCE_PAUSE_MQH
 
-extern double g_dailyStartEquity;
-extern double g_dailyMaxEquity;
-extern double g_dailyMinEquity;
-// Ces variables sont declarees en input dans le .mq5 principal
-// extern bool   UseAbsoluteDrawdownGuard;
-// extern double AbsoluteDrawdownPct;
+// Declare the new global variable for giveback pause hours
+int    g_profitGivebackPauseHours = 0;  // Duration of giveback pause in hours
 
 int g_consecutiveWins = 0;
 double g_winStreakSessionUSD = 0.0;
@@ -18,11 +14,25 @@ bool g_profitGivebackLock = false;
 string g_perfPauseLastWinSymbol = ""; // dernier symbole gagnant
 void SMC_SetLastWinSymbol(const string s) { g_perfPauseLastWinSymbol = s; }
 datetime g_givebackLockTime    = 0;   // Heure du déclenchement du lock giveback
-bool     g_absoluteDrawdownLock    = false;
+double   g_givebackPeakAtLock  = 0.0; // Pic journalier ($) au moment du lock — évite re-lock immédiat
+bool g_absoluteDrawdownLock    = false;
 datetime g_absoluteDrawdownLockTime = 0;
 
+// --- Configuration Proxies (Set from SMC_Universal) ---
+bool   g_useNotifications         = true;
+bool   g_useWinStreakPause       = true;
+int    g_winStreakPauseHours     = 1;
+int    g_winStreakThreshold      = 3;
+bool   g_useAbsoluteDrawdownGuard = true;
+double g_absoluteDrawdownPct     = 10.0;
+bool   g_useLossStreakPause       = true;
+bool   g_useProfitGivebackGuard  = true;
+double g_profitGivebackPct       = 40.0;
+double g_profitGivebackMinPeakUSD = 5.0;
+
 // --- Perte consécutive tracking ---
-string   g_lastLossSymbol            = "";
+#define RECENT_LOSS_WINDOW_SEC 900   // 15 min — fenêtre perte récente (post-loss cooldown)
+// g_lastLossSymbol, g_lastLossTime declared in SMC_Universal.mq5 before #include
 int      g_consecutiveLosses         = 0;
 datetime g_lossPauseGlobalUntil      = 0;  // Pause globale après pertes sur symboles différents
 int      g_lossPauseGlobalHours      = 1;  // Durée pause globale (défaut 1h)
@@ -46,6 +56,8 @@ void SMC_LoadPerformancePauseState()
       g_profitGivebackLock = (GlobalVariableGet(SMC_PerfPauseGV("GivebackLock")) > 0.5);
    if(GlobalVariableCheck(SMC_PerfPauseGV("GivebackLockTime")))
       g_givebackLockTime = (datetime)GlobalVariableGet(SMC_PerfPauseGV("GivebackLockTime"));
+   if(GlobalVariableCheck(SMC_PerfPauseGV("GivebackPeak")))
+      g_givebackPeakAtLock = GlobalVariableGet(SMC_PerfPauseGV("GivebackPeak"));
    if(GlobalVariableCheck(SMC_PerfPauseGV("LossPauseGlobal")))
       g_lossPauseGlobalUntil = (datetime)GlobalVariableGet(SMC_PerfPauseGV("LossPauseGlobal"));
    if(GlobalVariableCheck(SMC_PerfPauseGV("LossPauseSymUntil")))
@@ -62,6 +74,7 @@ void SMC_SavePerformancePauseState()
    GlobalVariableSet(SMC_PerfPauseGV("ConsecWins"),        (double)g_consecutiveWins);
    GlobalVariableSet(SMC_PerfPauseGV("GivebackLock"),      g_profitGivebackLock ? 1.0 : 0.0);
    GlobalVariableSet(SMC_PerfPauseGV("GivebackLockTime"),  (double)g_givebackLockTime);
+   GlobalVariableSet(SMC_PerfPauseGV("GivebackPeak"),        g_givebackPeakAtLock);
    GlobalVariableSet(SMC_PerfPauseGV("LossPauseGlobal"),   (double)g_lossPauseGlobalUntil);
    GlobalVariableSet(SMC_PerfPauseGV("LossPauseSymUntil"), (double)g_lossPauseSymbolUntil);
    GlobalVariableSet(SMC_PerfPauseGV("AbsDrawdownLock"),     g_absoluteDrawdownLock ? 1.0 : 0.0);
@@ -72,10 +85,12 @@ void SMC_ResetPerformancePauseDaily()
 {
     g_profitGivebackLock = false;
     g_givebackLockTime = 0;
+    g_givebackPeakAtLock = 0.0;
     g_absoluteDrawdownLock = false;
     g_absoluteDrawdownLockTime = 0;
     GlobalVariableSet(SMC_PerfPauseGV("GivebackLock"), 0.0);
     GlobalVariableSet(SMC_PerfPauseGV("GivebackLockTime"), 0.0);
+    GlobalVariableSet(SMC_PerfPauseGV("GivebackPeak"), 0.0);
     GlobalVariableSet(SMC_PerfPauseGV("AbsDrawdownLock"), 0.0);
     GlobalVariableSet(SMC_PerfPauseGV("AbsDrawdownLockTime"), 0.0);
 }
@@ -87,6 +102,7 @@ void SMC_ResetPerformancePauseFull()
     g_perfPauseUntil = 0;
     g_profitGivebackLock = false;
     g_givebackLockTime = 0;
+    g_givebackPeakAtLock = 0.0;
     g_absoluteDrawdownLock = false;
     g_absoluteDrawdownLockTime = 0;
     if(GlobalVariableCheck(SMC_PerfPauseGV("PauseUntil")))
@@ -97,11 +113,34 @@ void SMC_ResetPerformancePauseFull()
         GlobalVariableDel(SMC_PerfPauseGV("GivebackLock"));
     if(GlobalVariableCheck(SMC_PerfPauseGV("GivebackLockTime")))
         GlobalVariableDel(SMC_PerfPauseGV("GivebackLockTime"));
+    if(GlobalVariableCheck(SMC_PerfPauseGV("GivebackPeak")))
+        GlobalVariableDel(SMC_PerfPauseGV("GivebackPeak"));
+}
+
+int SMC_GivebackPauseSeconds()
+{
+   return MathMax(1, g_profitGivebackPauseHours) * 3600;
+}
+
+// Fin de pause giveback : autoriser le trading et repartir sur un nouveau pic
+void SMC_UnlockProfitGivebackAfterPause()
+{
+   double eq = AccountInfoDouble(ACCOUNT_EQUITY);
+   g_profitGivebackLock = false;
+   g_givebackLockTime   = 0;
+   g_givebackPeakAtLock = 0.0;
+   g_dailyMaxEquity     = eq;
+   if(g_dailyMinEquity <= 0.0 || eq < g_dailyMinEquity)
+      g_dailyMinEquity = eq;
+   SMC_SavePerformancePauseState();
+   Print("[GIVEBACK-GUARD] ✅ Pause ", g_profitGivebackPauseHours,
+         "h terminée — trading autorisé | nouveau pic journalier=",
+         DoubleToString(eq, 2), "$ (cycle giveback remis à zéro)");
 }
 
 bool SMC_WinStreakPauseActive()
 {
-   if(!UseWinStreakPause || g_perfPauseUntil <= 0)
+   if(!g_useWinStreakPause || g_perfPauseUntil <= 0)
       return false;
 
    if(TimeCurrent() >= g_perfPauseUntil)
@@ -116,21 +155,21 @@ bool SMC_WinStreakPauseActive()
 
 void SMC_TriggerWinStreakPause()
 {
-   int pauseSec = MathMax(1, WinStreakPauseHours) * 3600;
+   int pauseSec = MathMax(1, g_winStreakPauseHours) * 3600;
    g_perfPauseUntil = TimeCurrent() + pauseSec;
    g_consecutiveWins = 0;
    g_winStreakSessionUSD = 0.0;
    SMC_SavePerformancePauseState();
 
    datetime resumeAt = g_perfPauseUntil;
-   Print("[WIN-STREAK] 🏆 ", WinStreakThreshold,
-         " gains consécutifs — PAUSE ", WinStreakPauseHours, "h jusqu'à ",
+   Print("[WIN-STREAK] 🏆 ", g_winStreakThreshold,
+         " gains consécutifs — PAUSE ", g_winStreakPauseHours, "h jusqu'à ",
          TimeToString(resumeAt, TIME_DATE|TIME_MINUTES));
 
-   if(UseNotifications)
+   if(g_useNotifications)
    {
-      Alert("Pause performance: ", WinStreakThreshold, " gains → stop ", WinStreakPauseHours, "h");
-      SendNotification("Pause performance: serie de gains → stop " + IntegerToString(WinStreakPauseHours) + "h");
+      Alert("Pause performance: ", g_winStreakThreshold, " gains → stop ", g_winStreakPauseHours, "h");
+      SendNotification("Pause performance: serie de gains → stop " + IntegerToString(g_winStreakPauseHours) + "h");
    }
 }
 
@@ -181,7 +220,7 @@ void SMC_RecordTradeClosePerformance(const double profit, const string symbol)
         // Ne pas reset les pauses déjà actives (elles restent jusqu'à expiration)
     }
 
-    if(!UseWinStreakPause || profit <= 0)
+    if(!g_useWinStreakPause || profit <= 0)
         return;
 
     g_consecutiveWins++;
@@ -191,7 +230,7 @@ void SMC_RecordTradeClosePerformance(const double profit, const string symbol)
     Print("[WIN-STREAK] Gain #", g_consecutiveWins, " | +", DoubleToString(profit, 2),
           "$ | serie +", DoubleToString(g_winStreakSessionUSD, 2), "$");
 
-    if(g_consecutiveWins >= WinStreakThreshold)
+    if(g_consecutiveWins >= g_winStreakThreshold)
         SMC_TriggerWinStreakPause();
 }
 
@@ -244,8 +283,12 @@ bool SMC_LossStreakAllowsEntry(const string symbol)
 
 bool SMC_CheckProfitGivebackLock()
 {
-   if(!UseProfitGivebackGuard || g_profitGivebackLock)
-      return g_profitGivebackLock;
+   if(!g_useProfitGivebackGuard)
+      return false;
+
+   // Déjà en pause giveback — ne pas re-évaluer le seuil (évite re-lock instantané)
+   if(g_profitGivebackLock)
+      return true;
 
    if(g_dailyStartEquity <= 0.0)
       return false;
@@ -253,33 +296,32 @@ bool SMC_CheckProfitGivebackLock()
    double peakProfit = g_dailyMaxEquity - g_dailyStartEquity;
    double curProfit  = AccountInfoDouble(ACCOUNT_EQUITY) - g_dailyStartEquity;
 
-   // Petit capital : seuil relatif si le pic absolu est trop bas
-   if(peakProfit < ProfitGivebackMinPeakUSD)
-   {
-      if(g_dailyStartEquity > 0 && peakProfit < g_dailyStartEquity * 0.03)
-         return false; // Pic < 3% du capital — trop petit pour giveback
-      // Sinon on continue même si pic < ProfitGivebackMinPeakUSD (petit capital)
-   }
+   if(peakProfit < g_profitGivebackMinPeakUSD)
+      return false;
    if(peakProfit <= 0.0)
       return false;
 
-   double floorProfit = peakProfit * (1.0 - ProfitGivebackPct / 100.0);
+   double floorProfit = peakProfit * (1.0 - g_profitGivebackPct / 100.0);
    if(curProfit >= floorProfit)
       return false;
 
-   g_profitGivebackLock = true;
-   g_givebackLockTime   = TimeCurrent();
+   g_profitGivebackLock   = true;
+   g_givebackLockTime     = TimeCurrent();
+   g_givebackPeakAtLock   = peakProfit;
    SMC_SavePerformancePauseState();
-   Print("[GIVEBACK-GUARD] 🔒 Pic jour +", DoubleToString(peakProfit, 2),
-         "$ → actuel +", DoubleToString(curProfit, 2),
-         "$ (seuil ", DoubleToString(floorProfit, 2), "$) — pause 2h, reprise à ",
-         TimeToString(g_givebackLockTime + 7200, TIME_MINUTES));
-   if(UseNotifications)
-   {
-      Alert("Giveback guard: pause 2h — profits proteges");
-      SendNotification("Giveback guard: pause 2h — reprise " + TimeToString(g_givebackLockTime + 7200, TIME_MINUTES));
-   }
-   return true;
+int pauseSec = SMC_GivebackPauseSeconds();
+    Print("[GIVEBACK-GUARD] 🔒 Pic jour +", DoubleToString(peakProfit, 2),
+          "$ → actuel +", DoubleToString(curProfit, 2),
+          "$ (seuil ", DoubleToString(floorProfit, 2), "$) — pause ",
+          g_profitGivebackPauseHours, "h, reprise à ",
+          TimeToString(g_givebackLockTime + pauseSec, TIME_MINUTES));
+    if(g_useNotifications)
+    {
+       Alert("Giveback guard: pause " + IntegerToString(g_profitGivebackPauseHours) + "h — profits proteges");
+       SendNotification("Giveback guard: pause " + IntegerToString(g_profitGivebackPauseHours) +
+                        "h — reprise " + TimeToString(g_givebackLockTime + pauseSec, TIME_MINUTES));
+    }
+    return true;
 }
 
 //+------------------------------------------------------------------+
@@ -287,11 +329,11 @@ bool SMC_CheckProfitGivebackLock()
 //+------------------------------------------------------------------+
 bool SMC_CheckAbsoluteDrawdown()
 {
-   if(!UseAbsoluteDrawdownGuard || g_absoluteDrawdownLock)
+   if(!g_useAbsoluteDrawdownGuard || g_absoluteDrawdownLock)
       return g_absoluteDrawdownLock;
    if(g_dailyStartEquity <= 0.0)
       return false;
-   double floorEquity = g_dailyStartEquity * (AbsoluteDrawdownPct / 100.0);
+   double floorEquity = g_dailyStartEquity * (g_absoluteDrawdownPct / 100.0);
    double currentEquity = AccountInfoDouble(ACCOUNT_EQUITY);
    if(currentEquity >= floorEquity)
       return false;
@@ -299,9 +341,9 @@ bool SMC_CheckAbsoluteDrawdown()
    g_absoluteDrawdownLockTime = TimeCurrent();
    SMC_SavePerformancePauseState();
    Print("[ABS-DD] 🔒 Équité ", DoubleToString(currentEquity, 2), "$ < ",
-         DoubleToString(AbsoluteDrawdownPct, 0), "% départ (",
+         DoubleToString(g_absoluteDrawdownPct, 0), "% départ (",
          DoubleToString(floorEquity, 2), "$) — PAUSE jusqu'à réinitialisation quotidienne");
-   if(UseNotifications)
+   if(g_useNotifications)
    {
       Alert("Drawdown absolu: pause quotidienne — equity " + DoubleToString(currentEquity, 2) + "$");
       SendNotification("Drawdown absolu: pause — equity " + DoubleToString(currentEquity, 2) + "$");
@@ -311,6 +353,21 @@ bool SMC_CheckAbsoluteDrawdown()
 
 bool SMC_PerformancePauseAllowsEntry(const string symbol = "")
 {
+   // ── 0. RESET MANUEL : script ResetGiveback a posé le flag ──────────────
+   string gvReset = "SMC_GivebackManualReset_" + IntegerToString((long)ChartID());
+   if(GlobalVariableCheck(gvReset) && GlobalVariableGet(gvReset) > 0.5)
+   {
+      GlobalVariableDel(gvReset);
+      g_profitGivebackLock = false;
+      g_givebackLockTime   = 0;
+      g_givebackPeakAtLock = 0.0;
+      g_dailyMaxEquity     = AccountInfoDouble(ACCOUNT_EQUITY);
+      SMC_SavePerformancePauseState();
+      Print("[GIVEBACK-GUARD] ✅ Reset manuel — pic journalier repart à ",
+            DoubleToString(g_dailyMaxEquity, 2), "$");
+      return true;
+   }
+
    // ── 1. Absolute Drawdown (perte en capital) ────────────────────────────
    if(SMC_CheckAbsoluteDrawdown())
    {
@@ -324,26 +381,28 @@ bool SMC_PerformancePauseAllowsEntry(const string symbol = "")
    }
 
    // ── 2. Profit Giveback Guard ───────────────────────────────────────────
-   if(SMC_CheckProfitGivebackLock())
+   if(g_profitGivebackLock)
    {
-      // Reset automatique après 2 heures
-      if(g_givebackLockTime > 0 && (TimeCurrent() - g_givebackLockTime) >= 7200)
+      int pauseSec = SMC_GivebackPauseSeconds();
+      if(g_givebackLockTime > 0 && (TimeCurrent() - g_givebackLockTime) >= pauseSec)
       {
-         g_profitGivebackLock = false;
-         g_givebackLockTime   = 0;
-         SMC_SavePerformancePauseState();
-         Print("[GIVEBACK-GUARD] ✅ Pause 2h terminée — trading autorisé");
+         SMC_UnlockProfitGivebackAfterPause();
          return true;
       }
       static datetime s_gbLog = 0;
       if(TimeCurrent() - s_gbLog >= 120)
       {
          s_gbLog = TimeCurrent();
-         int remaining = (int)(7200 - (TimeCurrent() - g_givebackLockTime));
-         Print("[GIVEBACK-GUARD] BLOQUÉ — ", remaining/60, "min ", remaining%60, "s restantes avant reprise");
+         int remaining = (int)(pauseSec - (TimeCurrent() - g_givebackLockTime));
+         if(remaining < 0) remaining = 0;
+         Print("[GIVEBACK-GUARD] BLOQUÉ — ", remaining/60, "min ", remaining%60,
+               "s restantes avant reprise");
       }
       return false;
    }
+
+   if(SMC_CheckProfitGivebackLock())
+      return false;
 
    if(SMC_WinStreakPauseActive())
    {

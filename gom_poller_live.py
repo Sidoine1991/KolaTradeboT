@@ -117,10 +117,14 @@ def parse_verdict(gom_data: dict, symbol: str = "CRASH_1000") -> dict:
     def verdict_name(vnum):
         if vnum >= 3:
             return "STRONG BUY"
+        elif vnum == 2:
+            return "GOOD BUY"
         elif vnum >= 1:
             return "BUY"
         elif vnum <= -3:
             return "STRONG SELL"
+        elif vnum == -2:
+            return "GOOD SELL"
         elif vnum <= -1:
             return "SELL"
         else:

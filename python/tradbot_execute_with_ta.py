@@ -57,6 +57,7 @@ log = logging.getLogger(__name__)
 AI_SERVER = os.getenv("AI_SERVER_URL", "http://127.0.0.1:8000")
 PSYCHOBOT = os.getenv("PSYCHOBOT_URL", "https://psychobot-1si7.onrender.com")
 PHONE = os.getenv("WHATSAPP_PHONE_NUMBER", "+2290196911346")
+GOM_JOURNAL_FILE = ROOT / "data" / "trade_journal_gom.jsonl"
 
 # Action mappings
 ACTION_MAP = {
@@ -150,10 +151,10 @@ _TRADING_WINDOWS: dict = {
     "ETHUSD": [(8, 22)],
     "NAS100": [(13, 20)],
     "US30":   [(13, 20)],
-    # Weltrade synthetics — actifs 04h-16h UTC (00h-03h choppy/instable)
-    "PAINX":  [(4, 16)],
-    "GAINX":  [(4, 16)],
-    "FXVOL":  [(4, 16)],
+    # Weltrade synthetics — actifs 04h-23h UTC (00h-03h choppy/instable)
+    "PAINX":  [(4, 23)],
+    "GAINX":  [(4, 23)],
+    "FXVOL":  [(4, 23)],
 }
 
 
@@ -259,8 +260,8 @@ def analyze_with_trading_agents(symbol: str, date_str: str) -> Optional[Dict]:
         return None
 
 
-def fetch_tv_indicators(symbol: str) -> Optional[Dict]:
-    """Fetch indicateurs depuis GOM MT5 (remplace TradingView MCP)."""
+def fetch_gom_dashboard_data(symbol: str) -> Optional[Dict]:
+    """Fetch GOM dashboard live data (RSI, BB, OB, TF dirs, OTE). Remplace l'ancien TradingView MCP."""
     try:
         log.info(f"[GOM] Fetching indicators for {symbol}...")
         url = f"{AI_SERVER}/gom-kola-dashboard"
@@ -380,13 +381,23 @@ def place_order(verdict: Dict) -> bool:
         # GATE 1 — IA STATUS : coherence_pct doit être >= 70%
         _ia = float(verdict.get("coherence_pct") or 0)
         if 0 < _ia < 70.0:
-            log.warning(f"[ORDER] 🚫 {symbol}: IA status {_ia:.0f}% < 70% requis — ordre bloqué")
+            log.warning(f"[ORDER] {symbol}: IA status {_ia:.0f}% < 70% requis — ordre bloqué")
             return False
 
-        # GATE 2 — MTF : H4+H1+M15 doivent confirmer la direction
+        # GATE 2 — RSI extreme filter (si donnée dashboard disponible)
+        _rsi = float(verdict.get("rsi") or 0)
+        if _rsi > 0:
+            if action == "BUY" and _rsi > 75:
+                log.warning(f"[ORDER] {symbol}: RSI={_rsi:.0f} > 75, BUY en zone surachat — ordre bloqué")
+                return False
+            if action == "SELL" and _rsi < 25:
+                log.warning(f"[ORDER] {symbol}: RSI={_rsi:.0f} < 25, SELL en zone survente — ordre bloqué")
+                return False
+
+        # GATE 3 — MTF : H4+H1+M15 doivent confirmer la direction
         _mtf_ok, _mtf_reason = _check_mtf_gate(symbol, verdict, action)
         if not _mtf_ok:
-            log.warning(f"[ORDER] 🚫 {symbol}: Gate MTF — {_mtf_reason}")
+            log.warning(f"[ORDER] {symbol}: Gate MTF — {_mtf_reason}")
             return False
 
         # Fallback ATR si SL absent — 2× ATR (SL large, évite fermetures prématurées)
@@ -405,6 +416,8 @@ def place_order(verdict: Dict) -> bool:
         log.info(f"[ORDER] Placing {action} order for {symbol} (IA={_ia:.0f}%)...")
 
         url = f"{AI_SERVER}/pending-order"
+        gom_vnum = verdict.get("verdict_num", 0)
+        gom_verdict = verdict.get("verdict", "WAIT")
         payload = {
             "symbol": symbol,
             "action": action,
@@ -413,6 +426,9 @@ def place_order(verdict: Dict) -> bool:
             "take_profit": tp,
             "lot": lot,
             "source": "pipeline_ta",
+            "gom_verdict": gom_verdict,
+            "gom_score_buy": verdict.get("score_buy", 0),
+            "gom_score_sell": verdict.get("score_sell", 0),
         }
 
         response = requests.post(url, json=payload, timeout=5)
@@ -424,9 +440,34 @@ def place_order(verdict: Dict) -> bool:
             log.error(f"[ORDER] {symbol} failed (HTTP {response.status_code}): {response.text}")
             return False
 
+        # GOM Journal: loguer le verdict GOM au moment de l'ordre
+        _log_gom_journal(symbol, action, payload, _ia)
+        return True
+
     except Exception as e:
         log.error(f"[ORDER] {symbol} exception: {e}")
         return False
+
+
+def _log_gom_journal(symbol: str, action: str, payload: dict, coherence_pct: float):
+    """Enregistre l'ordre dans le journal GOM (JSONL) pour analyse post-hoc."""
+    try:
+        entry = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "symbol": symbol,
+            "action": action,
+            "gom_verdict": payload.get("gom_verdict", "N/A"),
+            "gom_vnum": payload.get("gom_score_buy") if action == "BUY" else payload.get("gom_score_sell"),
+            "coherence_pct": coherence_pct,
+            "entry_price": payload.get("entry_price", 0),
+            "stop_loss": payload.get("stop_loss", 0),
+            "take_profit": payload.get("take_profit", 0),
+            "lot": payload.get("lot", 0.01),
+        }
+        with open(GOM_JOURNAL_FILE, "a") as f:
+            f.write(json.dumps(entry) + "\n")
+    except Exception as e:
+        log.debug(f"[GOM_JOURNAL] Write error: {e}")
 
 
 def main(auto_approve: bool = False, approval_timeout: int = 120, test_mode: bool = False):
@@ -471,11 +512,11 @@ def main(auto_approve: bool = False, approval_timeout: int = 120, test_mode: boo
         # 3. Run TradingAgents analysis
         ta_result = analyze_with_trading_agents(symbol, datetime.now().strftime("%Y-%m-%d"))
 
-        # 4. Fetch TV indicators for refinement
-        tv_data = fetch_tv_indicators(symbol)
+        # 4. Fetch GOM dashboard data (RSI, BB, OB, TF directions) for refinement
+        gom_dashboard = fetch_gom_dashboard_data(symbol)
 
-        # 5. Build approval message
-        msg = build_order_message(verdict, ta_result, tv_data)
+        # 5. Build approval message (with GOM dashboard RSI/bias)
+        msg = build_order_message(verdict, ta_result, gom_dashboard)
 
         # 6. Get approval (auto or WhatsApp)
         approved = auto_approve or send_approval_request(symbol, msg, timeout_sec=approval_timeout)

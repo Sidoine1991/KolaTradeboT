@@ -71,8 +71,9 @@ public:
             return false;
         }
 
-        // Crée la requête HTTP
-        string url = aiServerUrl + "/mt5/upload-candles";
+        // Crée la requête HTTP — URL active (failover local→Render), sinon URL fixée au constructeur
+        string activeUrl = SMCGP_ActiveServerURL();
+        string url = activeUrl + "/mt5/upload-candles";
         string headers = "Content-Type: application/json\r\n";
 
         uchar data[];
@@ -103,7 +104,7 @@ public:
     bool UploadAllTimeframes(string sym) {
         bool success = true;
 
-        if (!UploadCandles(sym, PERIOD_M1, 100)) success = false;
+        if (!UploadCandles(sym, PERIOD_M1, 1500)) success = false;
         Sleep(500);
         if (!UploadCandles(sym, PERIOD_M5, 100)) success = false;
         Sleep(500);

@@ -278,15 +278,30 @@ class CircuitBreakerState:
 
 
 _cb_state = CircuitBreakerState()
+_cb_state_date: Optional[str] = None  # Date du dernier état chargé
 
 
 def _load_cb_state():
-    global _cb_state
+    global _cb_state, _cb_state_date
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     if os.path.exists(CB_STATE_FILE):
         try:
             with open(CB_STATE_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
             _cb_state = CircuitBreakerState(**data)
+            # Vérifier si c'est un nouveau jour → reset compteurs
+            state_date = (data.get("last_updated") or "")[:10]
+            if state_date and state_date < today:
+                logger.info(f"[CB] Nouveau jour détecté ({state_date} → {today}) — reset compteurs")
+                _cb_state.session_losses_usd = 0.0
+                _cb_state.consecutive_losses_global = 0
+                _cb_state.active = False  # Réactiver le trading
+                _cb_state.reason = ""
+                keys_to_del = [k for k in _cb_state.symbol_cooldowns if k.startswith("_consec_")]
+                for k in keys_to_del:
+                    del _cb_state.symbol_cooldowns[k]
+                _save_cb_state()
+            _cb_state_date = today
         except Exception as e:
             logger.warning(f"[CB] Cannot load state: {e}")
 

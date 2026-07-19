@@ -1,7 +1,7 @@
 //+------------------------------------------------------------------+
-//| SMC_MasterScore.mqh â€” God Mode quality score                    |
+//| SMC_MasterScore.mqh — God Mode quality score                    |
 //| Fusionne TOUS les filtres en un score unique 0-100.             |
-//| Un trade n'est autorisÃ© que si score > MasterScoreMinThreshold   |
+//| Un trade n'est autorisé que si score > MasterScoreMinThreshold   |
 //+------------------------------------------------------------------+
 #property copyright "TradBOT"
 #property version   "1.00"
@@ -31,23 +31,23 @@ extern double g_regimeScore;
 //+------------------------------------------------------------------+
 bool   ExtUseMasterScore       = true;     // Activer le master score
 double ExtMasterScoreMin       = 85.0;     // Seuil minimum (0-100)
-bool   ExtMasterScoreLog       = false;    // Log dÃ©taillÃ© du score
+bool   ExtMasterScoreLog       = false;    // Log détaillé du score
 
 //+------------------------------------------------------------------+
 //| Score components structure                                       |
 //+------------------------------------------------------------------+
 struct SMC_MasterScoreComponents
 {
-   double regimeScore;      // 0-100 RÃ©gime de marchÃ©
-   double sessionScore;     // 0-100 QualitÃ© de session
+   double regimeScore;      // 0-100 Régime de marché
+   double sessionScore;     // 0-100 Qualité de session
    double mtfScore;         // 0-100 Alignment MTF
    double propiceScore;     // 0-100 Score propice existant
    double gomScore;         // 0-100 GOM verdict
    double aiScore;          // 0-100 Confiance IA
    double probabilityScore; // 0-100 Probability gate
    double setupScore;       // 0-100 Setup quality
-   double total;            // 0-100 Score final pondÃ©rÃ©
-   bool   perfectBypass;    // PERFECT bypass activÃ© ?
+   double total;            // 0-100 Score final pondéré
+   bool   perfectBypass;    // PERFECT bypass activé ?
 };
 SMC_MasterScoreComponents g_masterScore;
 
@@ -55,14 +55,14 @@ SMC_MasterScoreComponents g_masterScore;
 //| Weight configuration                                             |
 //+------------------------------------------------------------------+
 double g_masterWeights[8] = {
-   0.20,  // regime     â€” 20%
-   0.10,  // session    â€” 10%
-   0.20,  // mtf        â€” 20%
-   0.15,  // propice    â€” 15%
-   0.10,  // gom        â€” 10%
-   0.10,  // ai         â€” 10%
-   0.10,  // probabilityâ€” 10%
-   0.05   // setup      â€” 5%
+   0.20,  // regime     — 20%
+   0.10,  // session    — 10%
+   0.20,  // mtf        — 20%
+   0.15,  // propice    — 15%
+   0.10,  // gom        — 10%
+   0.10,  // ai         — 10%
+   0.10,  // probability— 10%
+   0.05   // setup      — 5%
 };
 
 //+------------------------------------------------------------------+
@@ -127,7 +127,7 @@ void SMC_CalcMasterScore(const string symbol, const int dirSign)
    string action = (dirSign == 1) ? "BUY" : "SELL";
    g_masterScore.setupScore = ComputeSetupScore(action);
 
-   // --- Calcul pondÃ©rÃ© ---
+   // --- Calcul pondéré ---
    double weightedSum = 0;
    double weightTotal = 0;
 
@@ -160,8 +160,8 @@ void SMC_CalcMasterScore(const string symbol, const int dirSign)
    if(g_smcGomVerdict == "PERFECT")
    {
       g_masterScore.perfectBypass = true;
-      // PERFECT bypass: le seuil est rÃ©duit de 20 points
-      // (car PERFECT est un signal trÃ¨s fort)
+      // PERFECT bypass: le seuil est réduit de 20 points
+      // (car PERFECT est un signal très fort)
    }
    else
    {
@@ -185,14 +185,14 @@ bool SMC_MasterScoreAllowsTrade(const string symbol, const int dirSign)
    {
       effectiveMin -= 20.0;
       if(ExtMasterScoreLog)
-         Print("[MASTER] PERFECT bypass actif â€” seuil abaissÃ© de ", effectiveMin + 20, " â†’ ", effectiveMin);
+         Print("[MASTER] PERFECT bypass actif — seuil abaissé de ", effectiveMin + 20, " ? ", effectiveMin);
    }
 
    bool allowed = (g_masterScore.total >= effectiveMin);
 
    if(!allowed)
    {
-      Print(StringFormat("[MASTER] BLOQUÃ‰ â€” Score total %.1f < seuil %.1f | R=%.0f S=%.0f MTF=%.0f P=%.0f G=%.0f AI=%.0f Prob=%.0f Set=%.0f",
+      Print(StringFormat("[MASTER] BLOQUÉ — Score total %.1f < seuil %.1f | R=%.0f S=%.0f MTF=%.0f P=%.0f G=%.0f AI=%.0f Prob=%.0f Set=%.0f",
             g_masterScore.total, effectiveMin,
             g_masterScore.regimeScore,
             g_masterScore.sessionScore,
@@ -207,7 +207,7 @@ bool SMC_MasterScoreAllowsTrade(const string symbol, const int dirSign)
    {
       if(ExtMasterScoreLog || g_masterScore.total >= 95)
       {
-         Print(StringFormat("[MASTER] âœ… Score %.1f âœ… | %s | R=%.0f S=%.0f MTF=%.0f P=%.0f G=%.0f AI=%.0f",
+         Print(StringFormat("[MASTER] ? Score %.1f ? | %s | R=%.0f S=%.0f MTF=%.0f P=%.0f G=%.0f AI=%.0f",
                g_masterScore.total, (g_masterScore.perfectBypass ? "PERFECT" : ""),
                g_masterScore.regimeScore,
                g_masterScore.sessionScore,
@@ -236,6 +236,6 @@ void SMC_InitMasterScore()
 {
    ZeroMemory(g_masterScore);
    g_masterScore.total = 100.0;
-   Print("[SMC-MasterScore] Module initialisÃ© | Seuil=", ExtMasterScoreMin, "% | ", ExtUseMasterScore ? "ACTIF" : "INACTIF");
+   Print("[SMC-MasterScore] Module initialisé | Seuil=", ExtMasterScoreMin, "% | ", ExtUseMasterScore ? "ACTIF" : "INACTIF");
 }
 //+------------------------------------------------------------------+

@@ -1,19 +1,19 @@
 //+------------------------------------------------------------------+
-//| EA_PivotEntry.mqh — Entrées basées Pivot Low/High + Bollinger    |
+//| EA_PivotEntry.mqh � Entr�es bas�es Pivot Low/High + Bollinger    |
 //| Entry: Pivot Low (BUY) / Pivot High (SELL)                       |
 //| TP: Bollinger Mid Upper Band (BUY) / Bollinger Mid Lower (SELL)  |
 //+------------------------------------------------------------------+
 #ifndef EA_PIVOT_ENTRY_MQH
 #define EA_PIVOT_ENTRY_MQH
 
-// ── État Pivot + Bollinger ─────────────────────────────────────────
+// ?? �tat Pivot + Bollinger ?????????????????????????????????????????
 double   g_pivotLow         = 0.0;
 double   g_pivotHigh        = 0.0;
 double   g_bollingerUp      = 0.0;
 double   g_bollingerMid     = 0.0;
 double   g_bollingerDown    = 0.0;
 
-// ── Calcul Pivot Points (High/Low sur 20 bougies) ───────────────────
+// ?? Calcul Pivot Points (High/Low sur 20 bougies) ???????????????????
 void EAPE_CalculatePivots(const int lookback = 20)
 {
    MqlRates rates[];
@@ -21,7 +21,7 @@ void EAPE_CalculatePivots(const int lookback = 20)
 
    if(CopyRates(_Symbol, PERIOD_CURRENT, 0, lookback + 1, rates) < lookback)
    {
-      Print("[EAPE] ❌ CopyRates failed");
+      Print("[EAPE] ? CopyRates failed");
       return;
    }
 
@@ -38,17 +38,17 @@ void EAPE_CalculatePivots(const int lookback = 20)
    g_pivotHigh = high;
 }
 
-// ── Récupérer les Bollinger Bands du JSON GOM ──────────────────────
+// ?? R�cup�rer les Bollinger Bands du JSON GOM ??????????????????????
 void EAPE_GetBollingerFromGOM()
 {
-   // Les valeurs viennent du module GOM (déjà calculées)
+   // Les valeurs viennent du module GOM (d�j� calcul�es)
    // g_smcBbUp, g_smcBbMid, g_smcBbDn (depuis SMC_GOM_Pipeline.mqh)
    g_bollingerUp   = g_smcBbUp;
    g_bollingerMid  = g_smcBbMid;
    g_bollingerDown = g_smcBbDn;
 }
 
-// ── Setup BUY: Entry à Pivot Low, TP à Bollinger Mid Upper ──────────
+// ?? Setup BUY: Entry � Pivot Low, TP � Bollinger Mid Upper ??????????
 struct BUYSetup
 {
    double entry;
@@ -65,14 +65,14 @@ BUYSetup EAPE_GetBUYSetup()
    EAPE_CalculatePivots(20);
    EAPE_GetBollingerFromGOM();
 
-   // Entrée au Pivot Low
+   // Entr�e au Pivot Low
    setup.entry = g_pivotLow;
 
    // TP au Bollinger Mid Upper
    if(g_bollingerUp > setup.entry)
    {
       setup.tp = g_bollingerUp;
-      setup.sl = g_pivotLow * 0.999;  // SL à -0.1% du pivot (protection min)
+      setup.sl = g_pivotLow * 0.999;  // SL � -0.1% du pivot (protection min)
       setup.valid = true;
 
       Print("[EAPE-BUY] Setup valide:");
@@ -82,14 +82,14 @@ BUYSetup EAPE_GetBUYSetup()
    }
    else
    {
-      Print("[EAPE-BUY] ❌ TP invalide: BB Upper (", DoubleToString(g_bollingerUp, _Digits),
-            ") ≤ Entry (", DoubleToString(setup.entry, _Digits), ")");
+      Print("[EAPE-BUY] ? TP invalide: BB Upper (", DoubleToString(g_bollingerUp, _Digits),
+            ") ? Entry (", DoubleToString(setup.entry, _Digits), ")");
    }
 
    return setup;
 }
 
-// ── Setup SELL: Entry à Pivot High, TP à Bollinger Mid Lower ────────
+// ?? Setup SELL: Entry � Pivot High, TP � Bollinger Mid Lower ????????
 struct SELLSetup
 {
    double entry;
@@ -106,14 +106,14 @@ SELLSetup EAPE_GetSELLSetup()
    EAPE_CalculatePivots(20);
    EAPE_GetBollingerFromGOM();
 
-   // Entrée au Pivot High
+   // Entr�e au Pivot High
    setup.entry = g_pivotHigh;
 
    // TP au Bollinger Mid Lower
    if(g_bollingerDown < setup.entry)
    {
       setup.tp = g_bollingerDown;
-      setup.sl = g_pivotHigh * 1.001;  // SL à +0.1% du pivot (protection min)
+      setup.sl = g_pivotHigh * 1.001;  // SL � +0.1% du pivot (protection min)
       setup.valid = true;
 
       Print("[EAPE-SELL] Setup valide:");
@@ -123,14 +123,14 @@ SELLSetup EAPE_GetSELLSetup()
    }
    else
    {
-      Print("[EAPE-SELL] ❌ TP invalide: BB Lower (", DoubleToString(g_bollingerDown, _Digits),
-            ") ≥ Entry (", DoubleToString(setup.entry, _Digits), ")");
+      Print("[EAPE-SELL] ? TP invalide: BB Lower (", DoubleToString(g_bollingerDown, _Digits),
+            ") ? Entry (", DoubleToString(setup.entry, _Digits), ")");
    }
 
    return setup;
 }
 
-// ── Vérifier si le prix touche l'entry (tolérance: ATR * 0.3) ────────
+// ?? V�rifier si le prix touche l'entry (tol�rance: ATR * 0.3) ????????
 bool EAPE_IsPriceTouchingEntry(const double entry, const double tolerance = 0.0)
 {
    double bid  = SymbolInfoDouble(_Symbol, SYMBOL_BID);
@@ -155,7 +155,7 @@ bool EAPE_IsPriceTouchingEntry(const double entry, const double tolerance = 0.0)
 
    bool touching = (MathAbs(mid - entry) <= tol);
    if(touching)
-      Print("[EAPE] ✅ Prix touche entry: mid=", DoubleToString(mid, _Digits),
+      Print("[EAPE] ? Prix touche entry: mid=", DoubleToString(mid, _Digits),
             " entry=", DoubleToString(entry, _Digits), " tol=", DoubleToString(tol, _Digits));
 
    return touching;

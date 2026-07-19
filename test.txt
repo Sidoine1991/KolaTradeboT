@@ -1,0 +1,2 @@
+print("=== Agent Financier SMC ===")
+print("Analyse quotidienne des marches")

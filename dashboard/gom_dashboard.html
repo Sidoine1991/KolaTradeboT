@@ -30,9 +30,9 @@
             align-items: center;
             margin-bottom: 30px;
             padding: 20px;
-            background: rgba(15, 23, 42, 0.8);
+            background: rgba(15, 23, 42, 0.45);
             border-radius: 12px;
-            border: 1px solid rgba(71, 85, 105, 0.3);
+            border: 1px solid rgba(71, 85, 105, 0.1);
         }
 
         .header h1 {
@@ -53,11 +53,11 @@
         }
 
         .card {
-            background: rgba(30, 41, 59, 0.8);
-            border: 1px solid rgba(71, 85, 105, 0.3);
+            background: rgba(30, 41, 59, 0.45);
+            border: 1px solid rgba(71, 85, 105, 0.12);
             border-radius: 12px;
             padding: 20px;
-            backdrop-filter: blur(10px);
+            backdrop-filter: blur(6px);
             transition: all 0.3s ease;
         }
 
@@ -107,7 +107,7 @@
         }
 
         .verdict-card {
-            background: rgba(30, 41, 59, 0.8);
+            background: rgba(30, 41, 59, 0.4);
             border-left: 4px solid;
             border-radius: 12px;
             padding: 20px;
@@ -119,13 +119,13 @@
         }
 
         .verdict-card.buy {
-            border-left-color: #10b981;
-            background: rgba(16, 185, 129, 0.05);
+            border-left-color: rgba(16, 185, 129, 0.4);
+            background: rgba(16, 185, 129, 0.02);
         }
 
         .verdict-card.sell {
-            border-left-color: #ef4444;
-            background: rgba(239, 68, 68, 0.05);
+            border-left-color: rgba(239, 68, 68, 0.4);
+            background: rgba(239, 68, 68, 0.02);
         }
 
         .verdict-header {
@@ -153,13 +153,13 @@
         }
 
         .verdict-direction.buy {
-            background: rgba(16, 185, 129, 0.2);
-            color: #10b981;
+            background: rgba(16, 185, 129, 0.06);
+            color: rgba(16, 185, 129, 0.65);
         }
 
         .verdict-direction.sell {
-            background: rgba(239, 68, 68, 0.2);
-            color: #ef4444;
+            background: rgba(239, 68, 68, 0.06);
+            color: rgba(239, 68, 68, 0.65);
         }
 
         .verdict-details {
@@ -209,18 +209,18 @@
         }
 
         .tf-indicator.up {
-            background: rgba(16, 185, 129, 0.2);
-            color: #10b981;
+            background: rgba(16, 185, 129, 0.06);
+            color: rgba(16, 185, 129, 0.65);
         }
 
         .tf-indicator.down {
-            background: rgba(239, 68, 68, 0.2);
-            color: #ef4444;
+            background: rgba(239, 68, 68, 0.06);
+            color: rgba(239, 68, 68, 0.65);
         }
 
         .tf-indicator.neutral {
-            background: rgba(100, 116, 139, 0.2);
-            color: #94a3b8;
+            background: rgba(100, 116, 139, 0.05);
+            color: rgba(148, 163, 184, 0.6);
         }
 
         .section {
@@ -240,20 +240,20 @@
             border-collapse: collapse;
             overflow: hidden;
             border-radius: 12px;
-            background: rgba(30, 41, 59, 0.8);
-            border: 1px solid rgba(71, 85, 105, 0.3);
+            background: rgba(30, 41, 59, 0.35);
+            border: 1px solid rgba(71, 85, 105, 0.1);
         }
 
         .trade-table th {
-            background: rgba(15, 23, 42, 0.8);
+            background: rgba(15, 23, 42, 0.4);
             padding: 12px;
             text-align: left;
             font-size: 12px;
             font-weight: 600;
-            color: #cbd5e1;
+            color: rgba(203, 213, 225, 0.7);
             text-transform: uppercase;
             letter-spacing: 0.5px;
-            border-bottom: 1px solid rgba(71, 85, 105, 0.3);
+            border-bottom: 1px solid rgba(71, 85, 105, 0.1);
         }
 
         .trade-table td {
@@ -263,21 +263,21 @@
         }
 
         .trade-table tr:hover {
-            background: rgba(71, 85, 105, 0.1);
+            background: rgba(71, 85, 105, 0.04);
         }
 
         .status-win {
-            color: #10b981;
+            color: rgba(16, 185, 129, 0.6);
             font-weight: 600;
         }
 
         .status-loss {
-            color: #ef4444;
+            color: rgba(239, 68, 68, 0.6);
             font-weight: 600;
         }
 
         .status-be {
-            color: #f59e0b;
+            color: rgba(245, 158, 11, 0.6);
             font-weight: 600;
         }
 
@@ -288,27 +288,27 @@
         }
 
         .error {
-            background: rgba(239, 68, 68, 0.1);
-            border: 1px solid rgba(239, 68, 68, 0.3);
-            color: #fca5a5;
+            background: rgba(239, 68, 68, 0.04);
+            border: 1px solid rgba(239, 68, 68, 0.1);
+            color: rgba(252, 165, 165, 0.6);
             padding: 15px;
             border-radius: 8px;
             margin: 15px 0;
         }
 
         .success {
-            background: rgba(16, 185, 129, 0.1);
-            border: 1px solid rgba(16, 185, 129, 0.3);
-            color: #a7f3d0;
+            background: rgba(16, 185, 129, 0.04);
+            border: 1px solid rgba(16, 185, 129, 0.1);
+            color: rgba(167, 243, 208, 0.6);
             padding: 15px;
             border-radius: 8px;
             margin: 15px 0;
         }
 
         .refresh-btn {
-            background: rgba(59, 130, 246, 0.2);
-            border: 1px solid rgba(59, 130, 246, 0.5);
-            color: #93c5fd;
+            background: rgba(59, 130, 246, 0.06);
+            border: 1px solid rgba(59, 130, 246, 0.15);
+            color: rgba(147, 197, 253, 0.65);
             padding: 8px 16px;
             border-radius: 6px;
             cursor: pointer;
@@ -318,8 +318,8 @@
         }
 
         .refresh-btn:hover {
-            background: rgba(59, 130, 246, 0.3);
-            border-color: rgba(59, 130, 246, 0.7);
+            background: rgba(59, 130, 246, 0.1);
+            border-color: rgba(59, 130, 246, 0.25);
         }
 
         .refresh-btn:active {
@@ -487,7 +487,31 @@
             const verdict = (v) => v.verdict_num === 1 ? 'PERFECT BUY' : v.verdict_num === 2 ? 'BUY' : v.verdict_num === 3 ? 'SELL' : 'PERFECT SELL';
             const emoji = (v) => isBuy(v) ? '🟢' : '🔴';
 
-            container.innerHTML = verdicts.slice(0, 10).map(v => `
+            // Score de continuation basé sur verdict + coherence (0-100)
+            const contScore = (v) => {
+                let score = 0;
+                const vn = Math.abs(v.verdict_num || 0);
+                // GOM verdict (50 pts)
+                if(vn >= 3) score += 50;       // PERFECT
+                else if(vn >= 2) score += 35;  // GOOD
+                else if(vn >= 1) score += 15;  // SIMPLE
+                // Coherence (50 pts)
+                const coh = v.coherence_pct || v.coherence || 0;
+                if(coh >= 90) score += 50;
+                else if(coh >= 75) score += 35;
+                else if(coh >= 60) score += 20;
+                else score += 5;
+                return Math.min(100, score);
+            };
+            const contColor = (s) => s >= 75 ? '#22c55e' : s >= 50 ? '#f59e0b' : '#ef4444';
+            const contLabel = (s) => s >= 75 ? 'STRONG' : s >= 50 ? 'OK' : 'WEAK';
+
+            container.innerHTML = verdicts.slice(0, 10).map(v => {
+                const cs = contScore(v);
+                const cp = v.path_concordance_pct ?? v.path_concordance?.concordance_pct ?? 0;
+                const cpColor = cp >= 65 ? '#22c55e' : cp >= 45 ? '#f59e0b' : '#ef4444';
+                const cpLabel = cp >= 65 ? 'FORTE' : cp >= 45 ? 'MOYENNE' : 'FAIBLE';
+                return `
                 <div class="verdict-card ${isBuy(v) ? 'buy' : 'sell'}">
                     <div>
                         <div class="verdict-header">
@@ -511,11 +535,21 @@
                         </div>
                     </div>
                     <div style="text-align: right;">
-                        <div class="verdict-coherence">${(v.coherence || 0).toFixed(0)}%</div>
-                        <div style="font-size: 11px; color: #94a3b8; margin-top: 8px;">Coherence</div>
+                        <div class="verdict-coherence">${(v.coherence_pct || v.coherence || 0).toFixed(0)}%</div>
+                        <div style="font-size: 11px; color: #94a3b8; margin-top: 4px;">Coherence</div>
+                        <div style="margin-top: 12px; padding: 8px; border-radius: 8px; background: rgba(0,0,0,0.3);">
+                            <div style="font-size: 18px; font-weight: 700; color: ${cpColor};">${cp > 0 ? cp.toFixed(0) + '%' : '—'}</div>
+                            <div style="font-size: 10px; color: ${cpColor}; font-weight: 600;">CONCORDANCE PATH</div>
+                            <div style="font-size: 10px; color: #94a3b8;">${cp > 0 ? cpLabel : 'en attente'}</div>
+                        </div>
+                        <div style="margin-top: 12px; padding: 8px; border-radius: 8px; background: rgba(0,0,0,0.3);">
+                            <div style="font-size: 18px; font-weight: 700; color: ${contColor(cs)};">${cs}</div>
+                            <div style="font-size: 10px; color: ${contColor(cs)}; font-weight: 600;">CONTINUATION</div>
+                            <div style="font-size: 10px; color: #94a3b8;">${contLabel(cs)}</div>
+                        </div>
                     </div>
                 </div>
-            `).join('');
+            `}).join('');
         }
 
         function updateTrades(trades) {

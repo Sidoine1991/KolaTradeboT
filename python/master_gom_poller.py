@@ -127,7 +127,7 @@ _DEFAULT_SYMBOLS: List[str] = [
 
 _WELTRADE_WINDOW_SYMBOLS = {"PAINX", "GAINX", "FXVOL", "SFVVOL", "SFXVOL"}
 _WELTRADE_UTC_OPEN  = 4   # inclus
-_WELTRADE_UTC_CLOSE = 16  # exclus
+_WELTRADE_UTC_CLOSE = 23  # exclus
 
 
 def _is_market_open(symbol: str) -> bool:
@@ -143,7 +143,7 @@ def _is_market_open(symbol: str) -> bool:
             in_window = _WELTRADE_UTC_OPEN <= h < _WELTRADE_UTC_CLOSE
             if not in_window:
                 log.info(
-                    "[GATE-SESSION] %s: UTC %02dh hors fenetre 04h-16h — poll ignore",
+                    "[GATE-SESSION] %s: UTC %02dh hors fenetre 04h-23h — poll ignore",
                     symbol, h,
                 )
             return in_window

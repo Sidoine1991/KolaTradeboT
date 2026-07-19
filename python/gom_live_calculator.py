@@ -79,12 +79,30 @@ class GOMSignalsLiveCalculator:
         self.pine = _PINE_CALC or GOMLPineCalculator()
 
     def _cache_lookup(self, symbol: str, tf: str) -> Optional[pd.DataFrame]:
-        sym_cache = self.mt5_candles_cache.get(symbol) or {}
-        for alias in tf_aliases(tf):
-            df = sym_cache.get(alias)
-            if df is not None and len(df) > 0:
-                return df
+        for sym_key in self._symbol_lookup_keys(symbol):
+            sym_cache = self.mt5_candles_cache.get(sym_key) or {}
+            for alias in tf_aliases(tf):
+                df = sym_cache.get(alias)
+                if df is not None and len(df) > 0:
+                    return df
         return None
+
+    def _symbol_lookup_keys(self, symbol: str) -> List[str]:
+        keys: List[str] = []
+        for k in (symbol,):
+            if k and k not in keys:
+                keys.append(k)
+        try:
+            from symbol_mapper import resolve_mt5_symbol
+            canon = resolve_mt5_symbol(symbol)
+            if canon and canon not in keys:
+                keys.append(canon)
+        except ImportError:
+            pass
+        compact = str(symbol or "").upper().replace(" ", "")
+        if compact and compact not in keys:
+            keys.append(compact)
+        return keys
 
     def get_candles_from_csv(
         self, symbol: str, timeframe: str, bars: int = 200
@@ -119,8 +137,18 @@ class GOMSignalsLiveCalculator:
                 continue
         return None
 
+    def _is_deriv_synthetic(self, symbol: str) -> bool:
+        sym = str(symbol or "").upper().replace(" ", "")
+        return any(
+            x in sym
+            for x in (
+                "BOOM", "CRASH", "PAINX", "GAINX", "TRENDX", "BREAKX",
+                "VOL", "FXVOL", "SFVVOL", "SFXVOL", "STEP",
+            )
+        )
+
     def get_candles(
-        self, symbol: str, timeframe: str = "15", bars: int = 200, allow_deriv: bool = False
+        self, symbol: str, timeframe: str = "15", bars: int = 200, allow_deriv: bool = False, broker: Optional[str] = None
     ) -> pd.DataFrame:
         cache_key = f"{symbol}:{normalize_tf_key(timeframe)}"
         now = time.time()
@@ -142,7 +170,7 @@ class GOMSignalsLiveCalculator:
                 mt5_sym = resolve_mt5_symbol(symbol)
             except ImportError:
                 mt5_sym = symbol
-            df_mt5 = fetch_mt5_candles(mt5_sym, timeframe, bars)
+            df_mt5 = fetch_mt5_candles(mt5_sym, timeframe, bars, broker=broker)
             if df_mt5 is not None and len(df_mt5) >= 30:
                 self._store_mem_cache(cache_key, df_mt5, "mt5_direct")
                 return df_mt5.tail(bars).copy()
@@ -153,7 +181,8 @@ class GOMSignalsLiveCalculator:
                 self._store_mem_cache(cache_key, df, "csv_local")
                 return df
 
-        if allow_deriv and DERIV_AVAILABLE:
+        use_deriv = allow_deriv or self._is_deriv_synthetic(symbol)
+        if use_deriv and DERIV_AVAILABLE:
             import asyncio
             import threading
 
@@ -529,8 +558,15 @@ class GOMSignalsLiveCalculator:
         record.update(self.compute_bos(df))
         record.update(self.compute_spike(df, st_dir, vwap))
         record.update(self.compute_ote_zone(df, symbol))
-        sym_lc = symbol.lower()
-        record["spike_bc_en"] = "boom" in sym_lc or "crash" in sym_lc
+        sym_lc = symbol.lower().replace(" ", "")
+        sym_up = symbol.upper().replace(" ", "")
+        record["spike_bc_en"] = (
+            "boom" in sym_lc or "crash" in sym_lc
+            or sym_up.startswith("PAINX") or sym_up.startswith("GAINX")
+            or "FXVOL" in sym_up or "SFVVOL" in sym_up or "SFXVOL" in sym_up
+            or "TRENDX" in sym_up or "BREAKX" in sym_up
+            or "vol" in sym_lc
+        )
         return record
 
     def compute_ote_zone(self, df: pd.DataFrame, symbol: str = "", lookback: int = 50) -> Dict[str, Any]:
@@ -594,12 +630,13 @@ class GOMSignalsLiveCalculator:
         except Exception:
             return empty
 
-    def compute_mtf(self, symbol: str) -> Dict[str, Any]:
+    def compute_mtf(self, symbol: str, broker: Optional[str] = None) -> Dict[str, Any]:
         """Directions + RSI par TF (Pine MTF table)."""
         tf_keys = {
             "m1": "1",
             "m5": "5",
             "m15": "15",
+            "m30": "30",
             "h1": "60",
             "h4": "240",
             "d1": "D",
@@ -608,7 +645,7 @@ class GOMSignalsLiveCalculator:
         dirs: Dict[str, int] = {}
         rsis: Dict[str, int] = {}
         for name, tf in tf_keys.items():
-            df = self.get_candles(symbol, tf, 200, allow_deriv=False)
+            df = self.get_candles(symbol, tf, 200, allow_deriv=self._is_deriv_synthetic(symbol), broker=broker)
             if len(df) < 55:
                 dirs[name] = 0
                 rsis[name] = 50
@@ -659,17 +696,17 @@ class GOMSignalsLiveCalculator:
                 return False
         return True
 
-    def prefetch_mtf(self, symbol: str, bars: int = 200) -> None:
+    def prefetch_mtf(self, symbol: str, bars: int = 200, broker: Optional[str] = None) -> None:
         """Précharge tous les TF — saute si l'EA a déjà uploadé les bougies."""
         if self._has_upload_mtf(symbol):
             return
         for tf in ("1", "5", "15", "60", "240", "D"):
-            self.get_candles(symbol, tf, bars, allow_deriv=False)
+            self.get_candles(symbol, tf, bars, allow_deriv=False, broker=broker)
 
-    def calculate_record_live(self, symbol: str, timeframe: str = "15") -> Dict[str, Any]:
+    def calculate_record_live(self, symbol: str, timeframe: str = "15", broker: Optional[str] = None) -> Dict[str, Any]:
         primary_tf = normalize_tf_key(timeframe)
-        self.prefetch_mtf(symbol, 200)
-        df = self.get_candles(symbol, primary_tf, 200, allow_deriv=False)
+        self.prefetch_mtf(symbol, 200, broker=broker)
+        df = self.get_candles(symbol, primary_tf, 200, allow_deriv=self._is_deriv_synthetic(symbol), broker=broker)
         used_tf = primary_tf
         if df is None or len(df) < 30:
             hint = "Ouvrez MT5 (Deriv) + pip install MetaTrader5"
@@ -688,7 +725,7 @@ class GOMSignalsLiveCalculator:
 
         record = self.analyze_chart(df, symbol)
         record["chart_tf"] = used_tf
-        record.update(self.compute_mtf(symbol))
+        record.update(self.compute_mtf(symbol, broker=broker))
         record["timestamp"] = datetime.now(timezone.utc).isoformat()
         record["source"] = "live_calculation"
         record["data_source"] = self._candle_source_for(symbol, used_tf)
@@ -699,9 +736,9 @@ class GOMSignalsLiveCalculator:
         record["ok"] = True
         return record
 
-    def build_api_response(self, symbol: str, chart_tf: str = "15") -> Dict[str, Any]:
+    def build_api_response(self, symbol: str, chart_tf: str = "15", broker: Optional[str] = None) -> Dict[str, Any]:
         """Payload compatible SMC_GOM_Pipeline.mqh / gom-kola-dashboard."""
-        record = self.calculate_record_live(symbol, chart_tf)
+        record = self.calculate_record_live(symbol, chart_tf, broker=broker)
         if record.get("error"):
             return {
                 "ok": False,
@@ -781,7 +818,55 @@ class GOMSignalsLiveCalculator:
             "chart_tf": record.get("chart_tf", normalize_tf_key(chart_tf)),
             "source": record.get("data_source", "live_calculation"),
             "candle_source": record.get("data_source", "live_calculation"),
+            "asset_category": record.get("asset_category", "other"),
         }
+        _attach_correction_cycle(resp, symbol, self)
+        return resp
+
+
+def _attach_correction_cycle(payload: Dict[str, Any], symbol: str, calc: "GOMSignalsLiveCalculator") -> None:
+    """Cycle correction (debut/milieu/fin) — disponible dès le poll MT5."""
+    try:
+        from correction_cycle_detector import compute_correction_exhaustion
+
+        allow_deriv = calc._is_deriv_synthetic(symbol)  # noqa: SLF001
+        df_m1 = calc.get_candles(symbol, "1", 200, allow_deriv=allow_deriv)
+        df_m5 = calc.get_candles(symbol, "5", 200, allow_deriv=allow_deriv)
+        df_m15 = calc.get_candles(symbol, "15", 200, allow_deriv=allow_deriv)
+
+        vn = int(payload.get("verdict_num", 0) or 0)
+        result = compute_correction_exhaustion(
+            df_m5=df_m5 if len(df_m5) >= 25 else None,
+            df_m15=df_m15 if len(df_m15) >= 25 else None,
+            df_m1=df_m1 if len(df_m1) >= 25 else None,
+            rsi_h4=float(payload.get("tf_h4_rsi", 50) or 50),
+            rsi_h1=float(payload.get("tf_h1_rsi", 50) or 50),
+            rsi_d1=float(payload.get("tf_d1_rsi", 50) or 50),
+            direction_hint=vn,
+            rsi_m1=float(payload.get("tf_m1_rsi", 50) or 50),
+            rsi_m5=float(payload.get("tf_m5_rsi", 50) or 50),
+            rsi_m15=float(payload.get("tf_m15_rsi", 50) or 50),
+        )
+        payload.update(result)
+        payload["correction_pullback_depth_pct"] = result.get("pullback_depth_pct", 0)
+        # Alias MT5 (SMC_GOM_Pipeline parse pa_*)
+        payload["pa_trend"] = result.get("price_action_trend", "UNKNOWN")
+        payload["pa_in_correction"] = bool(result.get("price_action_in_correction"))
+        payload["pa_consolidation"] = bool(result.get("price_action_consolidation"))
+        if result.get("price_action_ma50"):
+            payload["pa_ma50"] = result["price_action_ma50"]
+        if result.get("price_action_ma200"):
+            payload["pa_ma200"] = result["price_action_ma200"]
+        if result.get("price_action_rsi") is not None:
+            payload["pa_rsi"] = result["price_action_rsi"]
+        if result.get("price_action_zone_support"):
+            payload["pa_zone_support"] = result["price_action_zone_support"]
+        if result.get("price_action_zone_resistance"):
+            payload["pa_zone_resistance"] = result["price_action_zone_resistance"]
+        payload["pa_corr_depth_pct"] = result.get("price_action_correction_depth_pct", 0)
+    except Exception:
+        payload.setdefault("correction_stage", "unknown")
+        payload.setdefault("correction_entry_safe", True)
 
 
 def test_live_calculator():

@@ -88,6 +88,18 @@ double   g_smcPredBbMid[]     = {};
 double   g_smcPredBbUp[]      = {};
 double   g_smcPredBbDn[]      = {};
 
+// ── Price Action Zone (MA50/MA200) ─────────────────────────────────
+string   g_smcPaTrend         = "UNKNOWN";
+bool     g_smcPaInCorrection  = false;
+bool     g_smcPaConsolidation = false;
+double   g_smcPaMa50          = 0.0;
+double   g_smcPaMa200         = 0.0;
+double   g_smcPaRsi           = 0.0;
+double   g_smcPaZoneSupport   = 0.0;
+double   g_smcPaZoneResistance= 0.0;
+double   g_smcPaCorrDepthPct  = 0.0;
+bool     g_smcPaPriceInZone   = false;
+
 // ── JSON helpers ───────────────────────────────────────────────────
 double SMCGP_JsonDouble(const string &body, const string key, double def = 0.0)
 {
@@ -1723,6 +1735,91 @@ void SMCGP_Deinit()
       delete g_smcCandlesUploader;
       g_smcCandlesUploader = NULL;
    }
+}
+
+// ── Price Action Zone functions ────────────────────────────────────
+bool SMCGP_UpdatePriceInActionZone(const string sym = "")
+{
+   g_smcPaPriceInZone = false;
+   if(g_smcPaZoneSupport <= 0 || g_smcPaZoneResistance <= 0)
+      return false;
+
+   string s = (StringLen(sym) > 0) ? sym : _Symbol;
+   double zLo = MathMin(g_smcPaZoneSupport, g_smcPaZoneResistance);
+   double zHi = MathMax(g_smcPaZoneSupport, g_smcPaZoneResistance);
+   if(zHi <= zLo) return false;
+
+   double point = SymbolInfoDouble(s, SYMBOL_POINT);
+   int dg = (int)SymbolInfoInteger(s, SYMBOL_DIGITS);
+   double tol = (dg <= 3) ? point * 3.0 : point * 8.0;
+   double bid = SymbolInfoDouble(s, SYMBOL_BID);
+   g_smcPaPriceInZone = (bid >= zLo - tol && bid <= zHi + tol);
+   return g_smcPaPriceInZone;
+}
+
+bool SMCGP_PriceActionBlocksEntry(const string sym = "")
+{
+   if(!UsePriceActionZoneGate) return false;
+   if(g_smcPaZoneSupport <= 0 || g_smcPaZoneResistance <= 0) return false;
+   if(!SMCGP_UpdatePriceInActionZone(sym)) return false;
+   return true;
+}
+
+string SMCGP_PriceActionBlockReason(const string sym = "")
+{
+   if(!SMCGP_PriceActionBlocksEntry(sym)) return "";
+   string s = (StringLen(sym) > 0) ? sym : _Symbol;
+   int dg = (int)SymbolInfoInteger(s, SYMBOL_DIGITS);
+   double zLo = MathMin(g_smcPaZoneSupport, g_smcPaZoneResistance);
+   double zHi = MathMax(g_smcPaZoneSupport, g_smcPaZoneResistance);
+   string mode = g_smcPaConsolidation ? "consolidation" : (g_smcPaInCorrection ? "correction" : "MA zone");
+   return StringFormat("prix dans zone %s %s (MA50/200 %.5f-%.5f) trend=%s RSI=%.0f",
+                       mode, s, zLo, zHi, g_smcPaTrend, g_smcPaRsi);
+}
+
+void SMCGP_DrawPriceActionZone()
+{
+   ObjectDelete(0, "SMC_PA_ZONE");
+   ObjectDelete(0, "SMC_PA_LABEL");
+   ObjectDelete(0, "SMC_PA_MA50");
+   ObjectDelete(0, "SMC_PA_MA200");
+
+   if(!ShowPriceActionZone) return;
+   if(g_smcPaZoneSupport <= 0 || g_smcPaZoneResistance <= 0) return;
+
+   SMCGP_UpdatePriceInActionZone();
+
+   double zLo = MathMin(g_smcPaZoneSupport, g_smcPaZoneResistance);
+   double zHi = MathMax(g_smcPaZoneSupport, g_smcPaZoneResistance);
+   if(zHi <= zLo) return;
+
+   int dg = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+   datetime t0 = iTime(_Symbol, PERIOD_CURRENT, 40);
+   datetime tE = iTime(_Symbol, PERIOD_CURRENT, 0) + PeriodSeconds(PERIOD_CURRENT) * 100;
+   if(t0 <= 0) t0 = TimeCurrent() - PeriodSeconds(PERIOD_CURRENT) * 40;
+
+   color zoneClr = g_smcPaPriceInZone ? clrTomato : clrDimGray;
+   if(g_smcPaPriceInZone && g_smcPaConsolidation) zoneClr = clrOrangeRed;
+
+   ObjectCreate(0, "SMC_PA_ZONE", OBJ_RECTANGLE, 0, t0, zHi, tE, zLo);
+   ObjectSetInteger(0, "SMC_PA_ZONE", OBJPROP_COLOR, zoneClr);
+   ObjectSetInteger(0, "SMC_PA_ZONE", OBJPROP_BACK, true);
+   ObjectSetInteger(0, "SMC_PA_ZONE", OBJPROP_FILL, true);
+   ObjectSetInteger(0, "SMC_PA_ZONE", OBJPROP_SELECTABLE, false);
+
+   string lbl = g_smcPaPriceInZone
+      ? StringFormat("⚠ PRIX DANS ZONE MA50/200 [%.*f-%.*f] %s RSI=%.0f",
+                     dg, zLo, dg, zHi, g_smcPaTrend, g_smcPaRsi)
+      : StringFormat("ZONE MA50/200 [%.*f-%.*f] %s RSI=%.0f",
+                     dg, zLo, dg, zHi, g_smcPaTrend, g_smcPaRsi);
+
+   ObjectCreate(0, "SMC_PA_LABEL", OBJ_LABEL, 0, 0, 0);
+   ObjectSetInteger(0, "SMC_PA_LABEL", OBJPROP_CORNER, CORNER_LEFT_UPPER);
+   ObjectSetInteger(0, "SMC_PA_LABEL", OBJPROP_XDISTANCE, 10);
+   ObjectSetInteger(0, "SMC_PA_LABEL", OBJPROP_YDISTANCE, 70);
+   ObjectSetString(0, "SMC_PA_LABEL", OBJPROP_TEXT, lbl);
+   ObjectSetInteger(0, "SMC_PA_LABEL", OBJPROP_COLOR, zoneClr);
+   ObjectSetInteger(0, "SMC_PA_LABEL", OBJPROP_FONTSIZE, 9);
 }
 
 #endif

@@ -14,7 +14,10 @@ import time
 import threading
 import logging
 import requests
+import urllib3
 from typing import Dict, Any, List, Optional
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 from .agent_correlation import SymbolCorrelationAgent
 from .agent_regime import MarketRegimeAgent
@@ -25,6 +28,22 @@ from .agent_news import MacroFilterAgent
 from .agent_trading_agents import TradingAgentsDeepAnalyst
 
 logger = logging.getLogger("tradbot.orchestrator")
+
+# ──────────────────────────────────────────────────────────────
+# Core Engine Bridge — enrichit les agents avec patterns SMC
+# ──────────────────────────────────────────────────────────────
+_CORE_BRIDGE = None
+try:
+    from core.bridge import CoreBridge, get_engine
+    _core_engine = get_engine()
+    _CORE_BRIDGE = CoreBridge(_core_engine)
+    logger.info("✅ Core Engine bridge attaché — patterns SMC disponibles")
+except ImportError:
+    logger.info("ℹ️ Core Engine non disponible, fonctionnement sans patterns SMC")
+
+# Agent 7 (TradingAgents deep analysis) — lourd (~2–4 min), désactivé par défaut.
+# Activer manuellement : AI_ENABLE_TRADINGAGENTS_AGENT=true
+TA7_ENABLED = os.getenv("AI_ENABLE_TRADINGAGENTS_AGENT", "false").lower() in ("1", "true", "yes")
 
 # WhatsApp report config
 _PSYCHOBOT   = os.getenv("PSYCHOBOT_URL", "https://psychobot-1si7.onrender.com")
@@ -43,8 +62,15 @@ class AgentOrchestrator:
             "timing":          EntryTimingAgent(),
             "pattern":         PatternEvolutionAgent(),
             "news":            MacroFilterAgent(),
-            "trading_agents":  TradingAgentsDeepAnalyst(),
         }
+        if TA7_ENABLED:
+            self.agents["trading_agents"] = TradingAgentsDeepAnalyst()
+            logger.info("TradingAgents agent activé (AI_ENABLE_TRADINGAGENTS_AGENT=true)")
+        else:
+            logger.info(
+                "TradingAgents agent désactivé (AI_ENABLE_TRADINGAGENTS_AGENT=false) — "
+                "pas de lancement auto XAUUSD; activer manuellement si besoin"
+            )
         self._lock = threading.Lock()
         self._unified_report: Dict = {}
         self._last_unified_ts: float = 0.0
@@ -100,6 +126,14 @@ class AgentOrchestrator:
     # ------------------------------------------------------------------
 
     def _whatsapp_loop(self) -> None:
+        # Guard against misconfiguration that would create a CPU busy-loop
+        if _WA_INTERVAL <= 0:
+            logger.error(
+                "WhatsApp loop disabled: AGENTS_REPORT_INTERVAL_H must be > 0 (got %s). "
+                "Check your .env or environment variable.",
+                os.getenv("AGENTS_REPORT_INTERVAL_H"),
+            )
+            return
         # Short warm-up so agents have at least one cycle of data before first send
         _WARMUP = min(120, _WA_INTERVAL)
         self._wa_stop.wait(timeout=_WARMUP)
@@ -253,6 +287,37 @@ class AgentOrchestrator:
                 snippet = ta_intel["expert_analysis"][:120].replace("\n", " ")
                 lines.append(f"   _{snippet}…_")
 
+        # --- Orderflow + gates pour meilleure entrée ---
+        of_sym = (top or {}).get("symbol") or (best[0]["symbol"] if best else None) or ta_intel.get("symbol")
+        if of_sym:
+            try:
+                ai_url = os.getenv("AI_SERVER_URL", "http://127.0.0.1:8000")
+                r = requests.get(
+                    f"{ai_url}/api/predictive-panel",
+                    params={"symbol": of_sym, "chart_tf": "M15"},
+                    timeout=10,
+                )
+                if r.status_code == 200:
+                    panel = r.json()
+                    if panel.get("ok"):
+                        sig = panel.get("signals_aligned") or {}
+                        ghost = (panel.get("orderflow") or {}).get("ghost") or {}
+                        proj = panel.get("projection") or {}
+                        lines += [
+                            "",
+                            f"📊 *Orderflow + Gates — {of_sym[:16]}*",
+                            f"   Buy {ghost.get('buypct', '—')}% | Δ {ghost.get('delta', '—')} | CVD {ghost.get('cvd', '—')}",
+                            f"   🎯 {sig.get('verdict_label', '—')} {sig.get('direction', '')} | prob {sig.get('entry_probability', 0):.0f}% | gates {sig.get('gates_passed', 0)}/{sig.get('gates_total', 0)}",
+                        ]
+                        if proj.get("sl") and proj.get("tp1"):
+                            lines.append(
+                                f"   📐 Entry {proj.get('entry', panel.get('price', '—'))} | SL {proj['sl']} | TP1 {proj['tp1']}"
+                            )
+                        if sig.get("conclusion"):
+                            lines.append(f"   💡 {sig['conclusion'][:100]}")
+            except Exception as exc:
+                logger.debug("WhatsApp orderflow fetch skipped: %s", exc)
+
         # --- Peer interactions summary ---
         timing_ctx = self.agents["timing"].get_last_output().get("peer_context", {})
         risk_ctx   = self.agents["risk"].get_last_output().get("peer_context", {})
@@ -315,6 +380,25 @@ class AgentOrchestrator:
             except Exception as e:
                 logger.warning("run_all_sequential: agent %s error: %s", agent_id, e)
 
+    def run_all_parallel(self):
+        """Run all agents concurrently — each agent in its own thread."""
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        results: Dict[str, Any] = {}
+        with ThreadPoolExecutor(max_workers=len(self.agents)) as pool:
+            futures = {
+                pool.submit(self.run_agent_once, agent_id): agent_id
+                for agent_id in self.agents
+            }
+            for fut in as_completed(futures):
+                aid = futures[fut]
+                try:
+                    results[aid] = fut.result()
+                except Exception as exc:
+                    logger.warning("run_all_parallel: agent %s error: %s", aid, exc)
+                    results[aid] = {"error": str(exc)}
+        logger.info("run_all_parallel terminé (%d agents)", len(results))
+        return results
+
     # ------------------------------------------------------------------
     # Status & reporting
     # ------------------------------------------------------------------
@@ -360,7 +444,19 @@ class AgentOrchestrator:
         best_entries = timing.get("best_entries", [])
         top_entry = best_entries[0] if best_entries else None
 
+        # Core Engine patterns (si disponible)
+        core_patterns = {}
+        if _CORE_BRIDGE is not None:
+            try:
+                for sym in list(regime.get("symbol_regimes", {}).keys())[:5]:
+                    ctx = _CORE_BRIDGE.get_pattern_context(sym)
+                    if ctx.get("total_active", 0) > 0:
+                        core_patterns[sym] = ctx
+            except Exception:
+                pass
+
         report = {
+            "core_patterns": core_patterns,
             "ts": time.time(),
             "global_regime": regime.get("global_regime", {}),
             "symbol_regimes": regime.get("symbol_regimes", {}),

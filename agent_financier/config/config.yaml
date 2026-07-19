@@ -1,0 +1,30 @@
+# Agent Financier SMC - Configuration
+
+calendar:
+  analysis_time: "07:00"
+  timezone: "Europe/Paris"
+
+symbols:
+  forex:
+    pairs: [EURUSD, GBPUSD, USDJPY, USDCHF, AUDUSD, USDCAD, NZDUSD]
+    timeframes: [M15, H1, H4, D1]
+  metals:
+    pairs: [XAUUSD, XAGUSD]
+    timeframes: [M15, H1, H4, D1]
+  crypto:
+    pairs: [BTCUSD, ETHUSD, SOLUSD]
+    timeframes: [H1, H4, D1]
+  indices:
+    pairs: [US30, US500, NAS100]
+    timeframes: [H1, H4, D1]
+
+smc_analysis:
+  ob_tolerance: 0.002
+  fvg_min_size: 0.001
+  liquidity_sweep_threshold: 0.5
+
+output:
+  image_format: "png"
+  chart_width: 1920
+  chart_height: 1080
+  send_whatsapp: true

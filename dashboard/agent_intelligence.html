@@ -73,8 +73,8 @@
     .header-right { display:flex; align-items:center; gap:14px; }
     .status-pill {
       display:flex; align-items:center; gap:6px;
-      background: rgba(34,197,94,.12); border:1px solid rgba(34,197,94,.3);
-      border-radius:20px; padding:5px 14px; font-size:12px; font-weight:600; color:var(--green);
+      background: rgba(34,197,94,.05); border:1px solid rgba(34,197,94,.12);
+      border-radius:20px; padding:5px 14px; font-size:12px; font-weight:600; color:rgba(34,197,94,.7);
     }
     .dot { width:7px; height:7px; border-radius:50%; background:var(--green);
       animation: pulse 1.5s ease-in-out infinite; }
@@ -99,16 +99,17 @@
 
     /* ── Cards ──────────────────────────────────────────── */
     .card {
-      background: var(--bg-card);
-      border: 1px solid var(--border);
+      background: rgba(13,22,37,.55);
+      backdrop-filter: blur(6px);
+      border: 1px solid rgba(56,100,180,.1);
       border-radius: 14px;
       overflow: hidden;
     }
     .card-header {
       display:flex; align-items:center; justify-content:space-between;
       padding:14px 18px;
-      border-bottom: 1px solid var(--border);
-      background: rgba(255,255,255,.02);
+      border-bottom: 1px solid rgba(56,100,180,.08);
+      background: rgba(255,255,255,.01);
     }
     .card-title { display:flex; align-items:center; gap:8px; font-size:13px; font-weight:700; }
     .card-icon { font-size:16px; }
@@ -144,10 +145,10 @@
     .agent-tile-header { display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:12px; }
     .agent-icon { font-size:24px; }
     .agent-status { font-size:10px; font-weight:700; padding:3px 8px; border-radius:10px; }
-    .status-running { background:rgba(34,197,94,.15); color:var(--green); }
-    .status-idle    { background:rgba(59,130,246,.15); color:#60a5fa; }
-    .status-error   { background:rgba(239,68,68,.15);  color:var(--red); }
-    .status-disabled{ background:rgba(107,128,153,.15);color:var(--text-dim); }
+    .status-running { background:rgba(34,197,94,.06); color:rgba(34,197,94,.65); }
+    .status-idle    { background:rgba(59,130,246,.06); color:rgba(96,165,250,.65); }
+    .status-error   { background:rgba(239,68,68,.06);  color:rgba(239,68,68,.65); }
+    .status-disabled{ background:rgba(107,128,153,.04);color:var(--text-dim); }
 
     .agent-name { font-size:13px; font-weight:700; margin-bottom:4px; }
     .agent-desc { font-size:11px; color:var(--text-dim); line-height:1.5; }
@@ -158,10 +159,10 @@
     .metric-label { font-size:9px; color:var(--text-dim); text-transform:uppercase; margin-top:2px; }
     .agent-run-btn {
       margin-top:10px; width:100%; padding:6px; border-radius:7px;
-      background: rgba(59,130,246,.1); border:1px solid rgba(59,130,246,.3);
-      color:#60a5fa; font-size:11px; font-weight:600; cursor:pointer; transition:.2s;
+      background: rgba(59,130,246,.04); border:1px solid rgba(59,130,246,.12);
+      color:rgba(96,165,250,.7); font-size:11px; font-weight:600; cursor:pointer; transition:.2s;
     }
-    .agent-run-btn:hover { background:rgba(59,130,246,.2); }
+    .agent-run-btn:hover { background:rgba(59,130,246,.08); }
 
     /* ── Latency bar ────────────────────────────────────── */
     .latency-bar { height:3px; border-radius:2px; margin-top:4px; background:var(--bg-deep); overflow:hidden; }
@@ -203,7 +204,7 @@
     }
     .ix-arrow.active {
       border-color: rgba(99,179,237,.5);
-      box-shadow: 0 0 12px rgba(59,130,246,.15);
+      box-shadow: 0 0 12px rgba(59,130,246,.06);
     }
     .ix-from { font-size:18px; }
     .ix-connector { flex:1; display:flex; flex-direction:column; align-items:center; gap:2px; }
@@ -265,12 +266,12 @@
     .tag {
       font-size:10px; font-weight:700; padding:2px 7px; border-radius:6px;
     }
-    .tag-buy    { background:rgba(34,197,94,.15);  color:var(--green); }
-    .tag-sell   { background:rgba(239,68,68,.15);  color:var(--red); }
-    .tag-wait   { background:rgba(107,128,153,.15);color:var(--text-dim); }
-    .tag-boost  { background:rgba(59,130,246,.15); color:#60a5fa; }
-    .tag-warn   { background:rgba(245,158,11,.15); color:var(--orange); }
-    .tag-skip   { background:rgba(239,68,68,.08);  color:#f87171; }
+    .tag-buy    { background:rgba(34,197,94,.06);  color:rgba(34,197,94,.7); }
+    .tag-sell   { background:rgba(239,68,68,.06);  color:rgba(239,68,68,.7); }
+    .tag-wait   { background:rgba(107,128,153,.04);color:var(--text-dim); }
+    .tag-boost  { background:rgba(59,130,246,.06); color:rgba(96,165,250,.7); }
+    .tag-warn   { background:rgba(245,158,11,.06); color:rgba(245,158,11,.7); }
+    .tag-skip   { background:rgba(239,68,68,.04);  color:rgba(248,113,113,.7); }
 
     /* ── Entry ranking ──────────────────────────────────── */
     .entry-rank {
@@ -286,19 +287,19 @@
     .rank-score-bar { margin-top:5px; }
     .rank-meta { font-size:11px; color:var(--text-dim); margin-top:3px; }
     .rank-rec { font-size:10px; font-weight:700; padding:3px 8px; border-radius:6px; }
-    .rec-IMMEDIATE  { background:rgba(34,197,94,.2);  color:var(--green); }
-    .rec-ENTER_NOW  { background:rgba(6,182,212,.2);  color:var(--cyan); }
-    .rec-WAIT_RETEST{ background:rgba(245,158,11,.2); color:var(--orange); }
-    .rec-SKIP       { background:rgba(239,68,68,.15); color:var(--red); }
+    .rec-IMMEDIATE  { background:rgba(34,197,94,.08);  color:rgba(34,197,94,.7); }
+    .rec-ENTER_NOW  { background:rgba(6,182,212,.08);  color:rgba(6,182,212,.7); }
+    .rec-WAIT_RETEST{ background:rgba(245,158,11,.08); color:rgba(245,158,11,.7); }
+    .rec-SKIP       { background:rgba(239,68,68,.06); color:rgba(239,68,68,.7); }
 
     /* ── Event pill ─────────────────────────────────────── */
     .event-pill {
       display:flex; align-items:center; gap:8px;
       padding:8px 12px; border-radius:8px;
-      background:rgba(245,158,11,.08); border:1px solid rgba(245,158,11,.2);
+      background:rgba(245,158,11,.04); border:1px solid rgba(245,158,11,.1);
       margin-bottom:6px;
     }
-    .event-pill.high { background:rgba(239,68,68,.08); border-color:rgba(239,68,68,.25); }
+    .event-pill.high { background:rgba(239,68,68,.04); border-color:rgba(239,68,68,.12); }
     .event-icon { font-size:16px; }
     .event-name { font-size:12px; font-weight:600; }
     .event-time { font-size:10px; color:var(--text-dim); margin-top:1px; }
@@ -310,8 +311,8 @@
     .sess-chip {
       padding:4px 12px; border-radius:20px; font-size:11px; font-weight:700;
     }
-    .sess-active   { background:rgba(34,197,94,.15); color:var(--green); border:1px solid rgba(34,197,94,.3); }
-    .sess-inactive { background:rgba(255,255,255,.04); color:var(--text-muted); border:1px solid var(--border); }
+    .sess-active   { background:rgba(34,197,94,.06); color:rgba(34,197,94,.7); border:1px solid rgba(34,197,94,.15); }
+    .sess-inactive { background:rgba(255,255,255,.015); color:var(--text-muted); border:1px solid rgba(56,100,180,.1); }
 
     /* ── Correlation matrix ─────────────────────────────── */
     .corr-grid { display:flex; flex-wrap:wrap; gap:6px; }
@@ -319,9 +320,9 @@
       padding:5px 10px; border-radius:7px; font-size:11px; font-weight:700;
       display:flex; flex-direction:column; align-items:center; min-width:90px;
     }
-    .corr-pos  { background:rgba(34,197,94,.12); color:var(--green); }
-    .corr-neg  { background:rgba(239,68,68,.12); color:var(--red); }
-    .corr-neut { background:rgba(255,255,255,.04); color:var(--text-dim); }
+    .corr-pos  { background:rgba(34,197,94,.05); color:rgba(34,197,94,.6); }
+    .corr-neg  { background:rgba(239,68,68,.05); color:rgba(239,68,68,.6); }
+    .corr-neut { background:rgba(255,255,255,.015); color:var(--text-dim); }
     .corr-sym  { font-size:9px; color:var(--text-dim); margin-top:2px; }
 
     /* ── Anomaly/alert ──────────────────────────────────── */
@@ -329,8 +330,8 @@
       display:flex; align-items:flex-start; gap:10px; padding:10px 12px;
       border-radius:9px; border:1px solid; margin-bottom:6px;
     }
-    .alert-high   { background:rgba(239,68,68,.06);  border-color:rgba(239,68,68,.2); }
-    .alert-medium { background:rgba(245,158,11,.06); border-color:rgba(245,158,11,.2); }
+    .alert-high   { background:rgba(239,68,68,.03);  border-color:rgba(239,68,68,.1); }
+    .alert-medium { background:rgba(245,158,11,.03); border-color:rgba(245,158,11,.1); }
     .alert-sev { font-size:10px; font-weight:700; padding:2px 7px; border-radius:5px; white-space:nowrap; margin-top:1px; }
     .alert-title { font-size:12px; font-weight:700; }
     .alert-detail { font-size:11px; color:var(--text-dim); margin-top:2px; }
@@ -402,7 +403,101 @@
     @media (max-width:700px) {
       .agents-grid { grid-template-columns:1fr; }
       .intel-grid { grid-template-columns:1fr; }
+      .pred-grid { grid-template-columns:1fr !important; }
     }
+
+    /* ── Predictive SMC Panel ─────────────────────────── */
+    .pred-grid {
+      display: grid;
+      grid-template-columns: 220px 1fr 200px;
+      gap: 12px;
+      min-height: 420px;
+    }
+    .pred-dom, .pred-side {
+      background: rgba(0,0,0,.25);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 8px;
+      font-size: 11px;
+      overflow: auto;
+      max-height: 420px;
+    }
+    .pred-chart-wrap {
+      position: relative;
+      background: #0a1220;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      overflow: hidden;
+    }
+    #predCanvas { width: 100%; height: 420px; display: block; }
+    .pred-toolbar {
+      display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
+      margin-bottom: 10px;
+    }
+    .pred-toolbar input, .pred-toolbar select {
+      background: var(--bg-panel); border: 1px solid var(--border);
+      color: var(--text); padding: 6px 10px; border-radius: 8px; font-size: 12px;
+    }
+    .pred-badge {
+      padding: 4px 10px; border-radius: 8px; font-size: 11px; font-weight: 700;
+    }
+    .pred-active { background: rgba(34,197,94,.08); color: rgba(34,197,94,.7); }
+    .pred-forming { background: rgba(245,158,11,.08); color: rgba(245,158,11,.7); }
+    .pred-none { background: rgba(107,128,153,.06); color: var(--text-dim); }
+    .dom-row { display: grid; grid-template-columns: 1fr 70px 1fr; gap: 4px; padding: 2px 0; }
+    .dom-bid { color: var(--green); text-align: right; }
+    .dom-ask { color: var(--red); }
+    .dom-price { color: var(--orange); text-align: center; font-weight: 700; }
+    .ts-row { display: flex; justify-content: space-between; padding: 2px 0; border-bottom: 1px solid rgba(255,255,255,.04); }
+    .liq-bar { height: 8px; border-radius: 3px; margin: 1px 0; background: linear-gradient(90deg, #1e3a5f, #f59e0b); }
+    .pred-signals {
+      margin-bottom: 12px; padding: 12px 14px;
+      background: rgba(0,0,0,.28); border: 1px solid var(--border); border-radius: 10px;
+    }
+    .pred-signals.valid { border-color: rgba(34,197,94,.2); background: rgba(34,197,94,.03); }
+    .pred-signals.blocked { border-color: rgba(239,68,68,.18); background: rgba(239,68,68,.025); }
+    .pred-signals.wait { border-color: rgba(245,158,11,.18); background: rgba(245,158,11,.025); }
+    .pred-signals-header { display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:10px; }
+    .pred-signal-verdict {
+      font-size: 15px; font-weight: 800; letter-spacing: .03em;
+      padding: 6px 14px; border-radius: 8px;
+    }
+    .pred-signal-verdict.valid { background: rgba(34,197,94,.08); color: rgba(34,197,94,.7); }
+    .pred-signal-verdict.blocked { background: rgba(239,68,68,.08); color: rgba(239,68,68,.7); }
+    .pred-signal-verdict.wait { background: rgba(245,158,11,.08); color: rgba(245,158,11,.7); }
+    .pred-signal-dir { font-size: 22px; font-weight: 900; }
+    .pred-signal-dir.buy { color: var(--green); }
+    .pred-signal-dir.sell { color: var(--red); }
+    .pred-signal-dir.hold { color: var(--text-dim); }
+    .pred-signal-stats { display:flex; gap:16px; flex-wrap:wrap; font-size:11px; color:var(--text-dim); }
+    .pred-signal-stats b { color: var(--text); }
+    .pred-signal-conclusion { font-size: 12px; line-height: 1.5; margin-bottom: 10px; color: var(--text); }
+    .pred-gates { display:grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap:6px; }
+    .pred-gate {
+      display:flex; align-items:flex-start; gap:6px; font-size:10px;
+      padding: 5px 8px; border-radius: 6px; background: rgba(255,255,255,.03);
+      border: 1px solid rgba(255,255,255,.05);
+    }
+    .pred-gate.ok { border-color: rgba(34,197,94,.1); }
+    .pred-gate.fail { border-color: rgba(239,68,68,.12); }
+    .pred-gate-icon { font-size:12px; flex-shrink:0; }
+    .pred-gate-label { font-weight:700; color:var(--text); }
+    .pred-gate-reason { color:var(--text-dim); margin-top:1px; }
+    .struct-tag {
+      position: absolute; left: 8px; padding: 4px 8px; border-radius: 6px;
+      font-size: 10px; font-weight: 700; pointer-events: none;
+    }
+
+    /* ── MT5 Live Bridge ─────────────────────────────── */
+    .mt5-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:10px; }
+    .mt5-stat { background:rgba(0,0,0,.22); border:1px solid var(--border); border-radius:10px; padding:10px; }
+    .mt5-stat label { font-size:10px; color:var(--text-dim); display:block; margin-bottom:4px; }
+    .mt5-stat .val { font-size:16px; font-weight:700; }
+    .mt5-off { color:var(--red); }
+    .mt5-on { color:var(--green); }
+    .mt5-pos-table { width:100%; font-size:11px; border-collapse:collapse; margin-top:10px; }
+    .mt5-pos-table th, .mt5-pos-table td { padding:6px 8px; border-bottom:1px solid rgba(255,255,255,.06); text-align:left; }
+    .mt5-pos-table th { color:var(--text-dim); font-weight:600; }
   </style>
 </head>
 <body>
@@ -443,7 +538,7 @@
       <div class="card">
         <div class="card-header">
           <div class="card-title"><span class="card-icon">🌍</span> Régime Global</div>
-          <span class="card-badge" id="globalRegimeBadge" style="background:rgba(59,130,246,.15);color:#60a5fa;">—</span>
+          <span class="card-badge" id="globalRegimeBadge" style="background:rgba(59,130,246,.05);color:rgba(96,165,250,.6);">—</span>
         </div>
         <div class="card-body">
           <div style="text-align:center;padding:12px 0">
@@ -494,7 +589,7 @@
       <div class="card">
         <div class="card-header">
           <div class="card-title"><span class="card-icon">🗺️</span> Session &amp; Macro</div>
-          <span id="impactBadge" class="card-badge" style="background:rgba(107,128,153,.15);color:var(--text-dim);">NONE</span>
+          <span id="impactBadge" class="card-badge" style="background:rgba(107,128,153,.04);color:var(--text-dim);">NONE</span>
         </div>
         <div class="card-body">
           <div class="stat-row">
@@ -516,6 +611,65 @@
         </div>
       </div>
 
+      <!-- Daily Readiness + Circuit-Breaker -->
+      <div class="card" id="readinessCard" style="border-color:rgba(56,100,180,.1)">
+        <div class="card-header">
+          <div class="card-title"><span class="card-icon">⚡</span> Daily Readiness</div>
+          <span id="rdyStatusBadge" class="card-badge" style="background:rgba(107,128,153,.04);color:var(--text-dim);">—</span>
+        </div>
+        <div class="card-body">
+          <div style="text-align:center;padding:8px 0 12px">
+            <div id="rdyScoreBig" style="font-size:32px;font-weight:900;letter-spacing:-1px;">—</div>
+            <div style="font-size:10px;color:var(--text-dim);text-transform:uppercase;letter-spacing:.6px;margin-top:2px;">Score Readiness</div>
+            <div class="progress" style="margin-top:10px;height:5px;">
+              <div id="rdyScoreBar" class="progress-fill" style="width:0%;background:rgba(34,197,94,.3)"></div>
+            </div>
+          </div>
+
+          <div class="stat-row">
+            <span class="stat-label">Statut</span>
+            <span class="stat-value" id="rdyGoStatus">—</span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">Seuil GO</span>
+            <span class="stat-value" id="rdyThreshold">—</span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">Best hours</span>
+            <span class="stat-value" id="rdyBestHours" style="font-size:11px">—</span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">Avoid hours</span>
+            <span class="stat-value" id="rdyAvoidHours" style="font-size:11px;color:rgba(239,68,68,.5)">—</span>
+          </div>
+
+          <!-- Circuit-Breaker -->
+          <div style="margin-top:12px;padding:10px 12px;border-radius:9px;background:rgba(56,100,180,.03);border:1px solid rgba(56,100,180,.08)">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+              <span style="font-size:11px;font-weight:700;color:var(--text-dim)">🔴 Circuit-Breaker</span>
+              <span id="cbBadge" class="card-badge" style="background:rgba(34,197,94,.04);color:rgba(34,197,94,.5);font-size:9px">INACTIF</span>
+            </div>
+            <div id="cbReason" style="font-size:10px;color:var(--text-dim);line-height:1.4;display:none"></div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:6px">
+              <div style="font-size:10px;color:var(--text-dim)">
+                <span style="opacity:.6">Loss streak:</span>
+                <span id="cbLossStreak" style="font-weight:600;color:var(--text)">—</span>
+              </div>
+              <div style="font-size:10px;color:var(--text-dim)">
+                <span style="opacity:.6">Session loss:</span>
+                <span id="cbSessionLoss" style="font-weight:600;color:var(--text)">$—</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Symboles bloqués -->
+          <div id="cbBlockedSyms" style="margin-top:8px;display:none">
+            <div style="font-size:10px;color:rgba(239,68,68,.5);margin-bottom:4px;text-transform:uppercase;letter-spacing:.5px">Symboles bloqués</div>
+            <div id="cbBlockedSymsList" style="display:flex;flex-wrap:wrap;gap:4px"></div>
+          </div>
+        </div>
+      </div>
+
       <!-- Group Alignment -->
       <div class="card">
         <div class="card-header">
@@ -533,12 +687,76 @@
     <!-- ── Content ──────────────────────────────────────── -->
     <section class="content">
 
+      <!-- MT5 Live (compte + positions réels) -->
+      <div class="card" style="border-color:rgba(34,197,94,.12)">
+        <div class="card-header" style="border-color:rgba(34,197,94,.08)">
+          <div class="card-title">
+            <span class="card-icon">📡</span>
+            MT5 Live — Compte &amp; Positions
+          </div>
+          <span id="mt5ConnBadge" class="pred-badge pred-none">HORS LIGNE</span>
+        </div>
+        <div class="card-body">
+          <div id="mt5LiveMeta" style="font-size:11px;color:var(--text-dim);margin-bottom:10px">En attente export EA…</div>
+          <div class="mt5-grid" id="mt5Stats"></div>
+          <div id="mt5PositionsWrap" style="margin-top:12px;overflow:auto;max-height:200px"></div>
+          <div id="mt5CandlesMeta" style="font-size:10px;color:var(--text-muted);margin-top:8px"></div>
+        </div>
+      </div>
+
+      <!-- Setup Prédictif SMC + Orderflow -->
+      <div class="card" style="border-color:rgba(245,158,11,.12)">
+        <div class="card-header" style="border-color:rgba(245,158,11,.08)">
+          <div class="card-title">
+            <span class="card-icon">📐</span>
+            Setup Prédictif SMC + Orderflow
+          </div>
+          <span id="predAlertBadge" class="pred-badge pred-none">—</span>
+          <span id="predConcordanceBadge" class="pred-badge pred-none">Concordance —</span>
+        </div>
+        <div class="card-body">
+          <div class="pred-toolbar">
+            <label style="font-size:12px;color:var(--text-dim)">Symbole MT5</label>
+            <select id="predSymbol" style="width:min(320px,100%);max-width:100%;background:var(--bg-panel);border:1px solid var(--border);color:var(--text);padding:6px 10px;border-radius:8px;font-size:12px">
+              <option value="">— Connexion MT5… —</option>
+            </select>
+            <button class="refresh-btn" id="predApplyBtn" onclick="applyPredSymbol()" style="color:rgba(245,158,11,.55);border-color:rgba(245,158,11,.12)">✓ Appliquer</button>
+            <button class="refresh-btn" onclick="fetchPredictivePanel()">⟳ Actualiser setup</button>
+            <span id="predPendingHint" style="font-size:10px;color:var(--orange);display:none">Symbole non appliqué</span>
+            <span id="predMeta" style="font-size:11px;color:var(--text-dim)">—</span>
+          </div>
+          <div id="predSignals" class="pred-signals wait" style="display:none">
+            <div class="pred-signals-header">
+              <span id="predSignalVerdict" class="pred-signal-verdict wait">—</span>
+              <span id="predSignalDir" class="pred-signal-dir hold">—</span>
+              <div class="pred-signal-stats" id="predSignalStats"></div>
+            </div>
+            <div id="predSignalConclusion" class="pred-signal-conclusion">—</div>
+            <div id="predGates" class="pred-gates"></div>
+          </div>
+          <div class="pred-grid">
+            <div class="pred-dom" id="predDom">DOM…</div>
+            <div class="pred-chart-wrap">
+              <canvas id="predCanvas"></canvas>
+            </div>
+            <div class="pred-side">
+              <div style="font-weight:700;margin-bottom:6px;color:var(--orange)">Time &amp; Sales</div>
+              <div id="predTs" style="margin-bottom:12px"></div>
+              <div style="font-weight:700;margin-bottom:6px;color:#f59e0b">Liquidity Map</div>
+              <div id="predLiq" style="margin-bottom:12px"></div>
+              <div style="font-weight:700;margin-bottom:6px;color:#06b6d4">CVD</div>
+              <canvas id="predCvd" style="width:100%;height:80px;background:rgba(0,0,0,.3);border-radius:6px"></canvas>
+            </div>
+          </div>
+        </div>
+      </div>
+
       <!-- Agent Tiles -->
       <div class="card">
         <div class="card-header">
           <div class="card-title"><span class="card-icon">🤖</span> Les 7 Agents d'Intelligence</div>
           <div style="display:flex;gap:8px">
-            <button class="refresh-btn" onclick="runAllAgents()" style="color:#60a5fa;border-color:rgba(59,130,246,.3)">▶ Tout déclencher</button>
+            <button class="refresh-btn" onclick="runAllAgents()" style="color:rgba(96,165,250,.6);border-color:rgba(59,130,246,.1)">▶ Tout déclencher</button>
           </div>
         </div>
         <div class="card-body">
@@ -609,18 +827,18 @@
       </div>
 
       <!-- TradingAgents Deep Analyst (Agent 7) -->
-      <div class="card" id="ta7Card" style="border-color:rgba(168,85,247,.3)">
-        <div class="card-header" style="border-color:rgba(168,85,247,.2)">
+      <div class="card" id="ta7Card" style="border-color:rgba(168,85,247,.12)">
+        <div class="card-header" style="border-color:rgba(168,85,247,.08)">
           <div class="card-title">
             <span class="card-icon">🧠</span>
             TradingAgents Deep Analyst
-            <span id="ta7RunningBadge" style="display:none;font-size:10px;background:rgba(168,85,247,.2);color:#c084fc;padding:2px 8px;border-radius:8px;margin-left:6px">
+            <span id="ta7RunningBadge" style="display:none;font-size:10px;background:rgba(168,85,247,.06);color:rgba(192,132,252,.6);padding:2px 8px;border-radius:8px;margin-left:6px">
               <span class="inline-loader"></span> En cours…
             </span>
           </div>
           <div style="display:flex;gap:8px;align-items:center">
-            <span id="ta7StatusBadge" class="card-badge" style="background:rgba(107,128,153,.15);color:var(--text-dim);">—</span>
-            <button class="refresh-btn" onclick="runAgent('trading_agents',this)" style="color:#c084fc;border-color:rgba(168,85,247,.3)">▶ Run</button>
+            <span id="ta7StatusBadge" class="card-badge" style="background:rgba(107,128,153,.04);color:var(--text-dim);">—</span>
+            <button class="refresh-btn" onclick="runAgent('trading_agents',this)" style="color:rgba(192,132,252,.6);border-color:rgba(168,85,247,.1)">▶ Run</button>
           </div>
         </div>
         <div class="card-body">
@@ -772,9 +990,11 @@ function resolveBaseURL() {
 const SCAN_PORTS  = [8001, 8000, 8002];
 let   API         = resolveBaseURL() || "";
 let   _apiReady   = !!API;
-let   _failCount  = 0;          // nb d'erreurs consécutives
-const FAIL_THRESHOLD = 5;       // déconnecte seulement après 5 échecs d'affilée
+let   _failCount  = 0;          // nb d'erreurs consécutives intelligence
+const FAIL_THRESHOLD = 8;       // intelligence seule — ne coupe plus la connexion serveur
 const REFRESH_INTERVAL = 10000;
+let   _predAppliedSymbol = "";  // symbole validé via Appliquer
+let   _predFetching = false;
 
 const AGENT_META = {
   correlation:     { icon:"🔗", color:"#06b6d4",  name:"Symbol Correlation Matrix" },
@@ -844,28 +1064,546 @@ function updateClock() {
 
 async function refreshAll() {
   if (!_apiReady) { await scanPorts(); if (!_apiReady) return; }
-  await Promise.all([fetchIntelligence(), fetchPerformance()]);
+  const healthOk = await checkServerHealth();
+  if (!healthOk) return;
+  await Promise.all([fetchMt5Live(), fetchIntelligence(), fetchPerformance(), fetchReadiness()]);
+  if (_predAppliedSymbol) await fetchPredictivePanel(_predAppliedSymbol);
   if (window._nnUpdate) window._nnUpdate();
+}
+
+async function checkServerHealth() {
+  if (!API) return false;
+  try {
+    const r = await fetch(`${API}/health`, {signal: AbortSignal.timeout(3000)});
+    if (r.ok) {
+      setSystemStatus(true);
+      _apiReady = true;
+      return true;
+    }
+  } catch (_) {}
+  setSystemStatus(false, "Serveur non démarré — lancez start_agents.bat");
+  return false;
+}
+
+// ── MT5 Live Bridge ───────────────────────────────────────
+let _mt5Live = null;
+
+async function fetchMt5Live() {
+  if (!_apiReady) return;
+  const meta = el("mt5LiveMeta");
+  try {
+    // 1) Réponse rapide depuis le cache serveur
+    let r = await fetch(`${API}/api/mt5-live?fast=1`, {signal: AbortSignal.timeout(4000)});
+    if (r.ok) {
+      _mt5Live = await r.json();
+      if (_mt5Live?.connected && _mt5Live?.account_login) {
+        renderMt5Live(_mt5Live);
+        return;
+      }
+    }
+    // 2) Refresh complet (pont Python MT5 — peut prendre 10-20s au 1er appel)
+    if (meta) meta.textContent = "Connexion MT5 Deriv en cours…";
+    r = await fetch(`${API}/api/mt5-live`, {signal: AbortSignal.timeout(25000)});
+    if (!r.ok) throw new Error(r.status);
+    _mt5Live = await r.json();
+    renderMt5Live(_mt5Live);
+  } catch (e) {
+    if (meta) {
+      meta.innerHTML = _mt5Live?.connected
+        ? "MT5 partiellement connecté — rechargez dans 10s"
+        : "Impossible de joindre MT5 — vérifiez : <b>MetaTrader 5 Deriv ouvert</b>, <b>ai_server.py</b> actif, EA avec WebRequest <code>127.0.0.1:8000</code>";
+    }
+    if (_mt5Live) renderMt5Live(_mt5Live);
+  }
+}
+
+function renderMt5Live(d) {
+  const badge = el("mt5ConnBadge");
+  const primary = (d.terminals || []).find(t => t.connected && t.account && t.account.login)
+    || (d.terminals || []).find(t => t.account && t.account.login)
+    || (d.terminals || [])[0];
+  const acc = primary?.account || {};
+  const hasAccount = !!(d.account_login || acc.login);
+  const connected = !!(d?.connected && hasAccount);
+
+  badge.textContent = connected ? "MT5 CONNECTÉ" : "MT5 HORS LIGNE";
+  badge.className = "pred-badge " + (connected ? "pred-active" : "pred-none");
+
+  const sym = d.primary_symbol || primary?.symbol || "—";
+  const src = d.connection_source || primary?.source || "none";
+
+  if (!connected) {
+    const hint = d.python_bridge_error
+      ? `Pont Python MT5: ${d.python_bridge_error} — ouvrez MetaTrader 5 Deriv et reconnectez-vous`
+      : "Aucun compte MT5 détecté. Ouvrez <b>MetaTrader 5 Deriv</b>, connectez-vous, puis activez l'EA avec <b>MT5DashboardSync=true</b> + WebRequest <code>127.0.0.1:8000</code>.";
+    el("mt5LiveMeta").innerHTML = hint;
+  } else if (src === "python_bridge" || src === "ea+python_bridge") {
+    el("mt5LiveMeta").textContent =
+      `${acc.server || d.account_server || "Deriv"} | Login ${acc.login || d.account_login} | ${acc.name || ""} | Balance ${Number(acc.balance || 0).toFixed(2)} ${acc.currency || "USD"}`;
+  } else {
+    el("mt5LiveMeta").textContent =
+      `${acc.server || "MT5"} | Login ${acc.login || "—"} | Graphique ${sym} ${primary?.chart_tf || ""} | MAJ il y a ${primary?.age_sec ?? "—"}s | Source: EA`;
+  }
+
+  populatePredSymbols(d);
+
+  el("mt5Stats").innerHTML = [
+    ["Balance", acc.balance != null ? acc.balance.toFixed(2) + " " + (acc.currency || "") : "—"],
+    ["Equity", acc.equity != null ? acc.equity.toFixed(2) : "—"],
+    ["Profit", acc.profit != null ? (acc.profit >= 0 ? "+" : "") + acc.profit.toFixed(2) : "—"],
+    ["Marge libre", acc.margin_free != null ? acc.margin_free.toFixed(2) : "—"],
+    ["Positions", String((d.positions || []).length)],
+    ["Terminaux", String((d.terminals || []).filter(t => t.connected).length)],
+  ].map(([k,v]) => `<div class="mt5-stat"><label>${k}</label><div class="val ${k==="Profit"&&acc.profit<0?"mt5-off":""}">${v}</div></div>`).join("");
+
+  const pos = d.positions || [];
+  if (!pos.length) {
+    el("mt5PositionsWrap").innerHTML = "<div style='font-size:11px;color:var(--text-dim)'>Aucune position ouverte (magic EA)</div>";
+  } else {
+    el("mt5PositionsWrap").innerHTML = `<table class="mt5-pos-table"><thead><tr>
+      <th>Symbole</th><th>Type</th><th>Vol</th><th>Entry</th><th>SL</th><th>TP</th><th>P/L</th>
+    </tr></thead><tbody>${pos.map(p => `<tr>
+      <td>${p.symbol}</td><td style="color:${p.type==="BUY"?"var(--green)":"var(--red)"}">${p.type}</td>
+      <td>${p.volume}</td><td>${p.price_open}</td><td>${p.sl||"—"}</td><td>${p.tp||"—"}</td>
+      <td style="color:${p.profit>=0?"var(--green)":"var(--red)"}">${p.profit?.toFixed(2)}</td>
+    </tr>`).join("")}</tbody></table>`;
+  }
+
+  const cache = d.candles_cache || {};
+  const cacheTxt = Object.keys(cache).map(s => `${s}: ${Object.entries(cache[s]).map(([tf,n])=>tf+"="+n).join(", ")}`).join(" | ");
+  el("mt5CandlesMeta").textContent = cacheTxt
+    ? "Cache candles MT5: " + cacheTxt
+    : "Cache candles vide — activez GOMUploadCandles sur l'EA";
+
+  if (!_predAppliedSymbol && d.primary_symbol) {
+    _predAppliedSymbol = d.primary_symbol;
+    const sel = el("predSymbol");
+    if (sel) {
+      sel.value = d.primary_symbol;
+      sel.dataset.userEdited = "1";
+    }
+    fetchPredictivePanel(d.primary_symbol);
+  }
+  updatePredPendingHint();
+}
+
+document.addEventListener("DOMContentLoaded", () => {
+  const ps = el("predSymbol");
+  if (ps) ps.addEventListener("change", () => {
+    ps.dataset.userEdited = "1";
+    updatePredPendingHint();
+  });
+});
+
+function updatePredPendingHint() {
+  const sel = el("predSymbol");
+  const hint = el("predPendingHint");
+  const btn = el("predApplyBtn");
+  if (!sel || !hint) return;
+  const pending = sel.value && sel.value !== _predAppliedSymbol;
+  hint.style.display = pending ? "inline" : "none";
+  if (btn) btn.style.opacity = pending ? "1" : "0.7";
+}
+
+function applyPredSymbol() {
+  const sym = (el("predSymbol")?.value || "").trim();
+  if (!sym) {
+    el("predMeta").textContent = "Sélectionnez un symbole MT5";
+    return;
+  }
+  el("predSymbol").dataset.userEdited = "1";
+  _predAppliedSymbol = sym;
+  updatePredPendingHint();
+  fetchPredictivePanel(sym);
+}
+
+function populatePredSymbols(mt5Live) {
+  const sel = el("predSymbol");
+  if (!sel) return;
+  const opts = mt5Live?.symbols_options || [];
+  const prev = sel.value;
+  if (!opts.length) {
+    sel.innerHTML = `<option value="">Aucun symbole MT5 — EA Deriv actif ?</option>`;
+    return;
+  }
+  sel.innerHTML = opts.map(o => {
+    const val = o.raw || o.resolved || o.label || "";
+    const tag = o.has_candles ? "●" : "○";
+    const src = o.source ? ` [${o.source}]` : "";
+    return `<option value="${val.replace(/"/g, "&quot;")}">${tag} ${o.label || val}${src}</option>`;
+  }).join("");
+  if (!sel.dataset.userEdited && mt5Live.primary_symbol) {
+    const prim = opts.find(o => (o.raw || o.resolved) === mt5Live.primary_symbol || o.resolved === mt5Live.primary_symbol);
+    sel.value = prim ? (prim.raw || prim.resolved) : (opts[0].raw || opts[0].resolved);
+  } else if (prev && [...sel.options].some(o => o.value === prev)) {
+    sel.value = prev;
+  }
+}
+
+// ── Predictive SMC Panel ─────────────────────────────────
+let _predData = null;
+
+async function fetchPredictivePanel(forceSym) {
+  if (!_apiReady || _predFetching) return;
+  const sym = (forceSym || _predAppliedSymbol || el("predSymbol")?.value || _mt5Live?.primary_symbol || "").trim();
+  if (!sym) {
+    el("predMeta").textContent = "Sélectionnez un symbole MT5 puis cliquez Appliquer";
+    return;
+  }
+  _predFetching = true;
+  const meta = el("predMeta");
+  if (meta) meta.textContent = `Chargement ${sym}…`;
+  try {
+    const r = await fetch(`${API}/api/predictive-panel?symbol=${encodeURIComponent(sym)}&chart_tf=M15`,
+      {signal: AbortSignal.timeout(20000)});
+    if (!r.ok) throw new Error(r.status);
+    _predData = await r.json();
+    if (_predData.symbols_available?.length) {
+      populatePredSymbols({ symbols_options: _predData.symbols_available, primary_symbol: _predData.mt5_raw || sym });
+      if (_predAppliedSymbol) el("predSymbol").value = _predAppliedSymbol;
+    }
+    renderPredictivePanel(_predData);
+    updatePredPendingHint();
+  } catch (e) {
+    if (meta) meta.textContent = `Erreur chargement setup (${sym}) — réessayez`;
+  } finally {
+    _predFetching = false;
+  }
+}
+
+function renderPredictivePanel(d) {
+  if (!d || !d.ok) {
+    const hint = d?.hint || d?.error || "Données indisponibles";
+    el("predMeta").textContent = hint;
+    return;
+  }
+  const alert = d.alert || "NONE";
+  const badge = el("predAlertBadge");
+  badge.textContent = alert === "ACTIVE" ? "SETUP ACTIF" : alert === "FORMING" ? "EN FORMATION" : "ATTENTE";
+  badge.className = "pred-badge " + (alert === "ACTIVE" ? "pred-active" : alert === "FORMING" ? "pred-forming" : "pred-none");
+
+  const of = d.orderflow || {};
+  const ghost = of.ghost || {};
+  const dispSym = d.mt5_raw || d.symbol;
+  const srcTag = of.source === "ghost" ? "GHOST" : "proxy";
+  const ghostTxt = ghost.cvd != null
+    ? ` | Δ ${ghost.delta ?? "—"} | CVD ${ghost.cvd} | Buy ${ghost.buypct ?? "—"}% | Compass ${ghost.compass ?? "—"}°`
+    : "";
+  const gom = d.gom || {};
+  const cogDir = (gom.cog_direction || gom.cog_direction_5m || "NEUTRAL").toUpperCase();
+  const cogConf = gom.cog_confidence_pct ?? (gom.cog_confidence != null ? Math.round(gom.cog_confidence * 100) : "—");
+  const cogStr = gom.cog_strength_pct ?? "—";
+  const conc = d.projection?.concordance || {};
+  const concPct = conc.concordance_pct ?? d.gom?.path_concordance_pct ?? "—";
+  const concBadge = el("predConcordanceBadge");
+  if (concBadge) {
+    if (concPct !== "—" && concPct != null) {
+      const cc = Number(concPct);
+      const col = cc >= 65 ? "var(--green)" : cc >= 45 ? "var(--orange)" : "var(--red)";
+      concBadge.textContent = `Concordance ${cc}%`;
+      concBadge.style.background = col + "22";
+      concBadge.style.color = col;
+      concBadge.style.borderColor = col + "55";
+    } else {
+      concBadge.textContent = "Concordance —";
+      concBadge.style.background = "";
+      concBadge.style.color = "";
+    }
+  }
+  el("predMeta").textContent =
+    `[${srcTag}] ${dispSym} @ ${d.price} | ${of.trend_label || ""} | VWAP ${of.vwap} | POC ${of.poc_htf}${ghostTxt}` +
+    ` | COG ${cogDir} ${cogConf}% (5m/15m ${gom.cog_direction_5m}/${gom.cog_direction_15m})` +
+    ` | Concordance path ${concPct}%`;
+
+  // DOM
+  const dom = of.dom || [];
+  el("predDom").innerHTML = `<div style="text-align:center;font-weight:700;margin-bottom:6px;color:var(--text-dim)">BID · PRICE · ASK</div>` +
+    dom.map(row => {
+      const hi = Math.abs(row.price - d.price) < (d.price * 0.0003);
+      return `<div class="dom-row" style="${hi?'background:rgba(245,158,11,.12)':''}">
+        <span class="dom-bid">${row.bid > 0 ? (row.bid/1000).toFixed(2)+'M' : ''}</span>
+        <span class="dom-price">${row.price}</span>
+        <span class="dom-ask">${row.ask > 0 ? (row.ask/1000).toFixed(2)+'M' : ''}</span>
+      </div>`;
+    }).join("");
+
+  // Time & Sales — prepend GHOST delta if available
+  const tsRows = (of.time_sales || []).slice().reverse().map(t =>
+    `<div class="ts-row"><span style="color:${t.side==='BUY'?'var(--green)':'var(--red)'}">${t.side}</span><span>${t.price}</span><span style="color:var(--text-dim)">${t.volume}</span></div>`
+  ).join("");
+  const ghostRow = of.last_delta
+    ? `<div class="ts-row" style="border:1px solid rgba(245,158,11,.4);border-radius:4px;padding:2px 4px;margin-bottom:4px">
+        <span style="color:var(--orange);font-weight:700">GHOST Δ</span>
+        <span style="color:${of.last_delta.side==='BUY'?'var(--green)':'var(--red)'}">${of.last_delta.side}</span>
+        <span style="color:var(--text-dim)">${of.last_delta.delta}</span>
+      </div>`
+    : "";
+  el("predTs").innerHTML = ghostRow + tsRows;
+
+  // Liquidity map
+  el("predLiq").innerHTML = (of.liquidity_map || []).filter(l => l.intensity > 0.15).slice(-12).map(l =>
+    `<div class="liq-bar" style="width:${Math.round(l.intensity*100)}%;opacity:${0.4+l.intensity*0.6}"></div>`
+  ).join("");
+
+  drawPredChart(d);
+  drawPredCvd(of.cvd_series || []);
+  renderPredSignals(d.signals_aligned, d);
+}
+
+function renderPredSignals(sig, panelData) {
+  const panel = el("predSignals");
+  if (!panel) return;
+  if (!sig) { panel.style.display = "none"; return; }
+  panel.style.display = "block";
+
+  const gom = panelData?.gom || {};
+  const cogDir = (gom.cog_direction || gom.cog_direction_5m || "NEUTRAL").toUpperCase();
+  const cogConf = gom.cog_confidence_pct ?? (gom.cog_confidence != null ? Math.round(gom.cog_confidence * 100) : "—");
+  const cogStr = gom.cog_strength_pct ?? "—";
+  const concPct = panelData?.projection?.concordance?.concordance_pct ?? "—";
+
+  const label = sig.verdict_label || "ATTENTE";
+  const cls = label === "SIGNAL VALIDE" ? "valid" : label === "BLOQUÉ" ? "blocked" : "wait";
+  panel.className = "pred-signals " + cls;
+
+  const vEl = el("predSignalVerdict");
+  if (vEl) { vEl.textContent = label; vEl.className = "pred-signal-verdict " + cls; }
+
+  const dir = (sig.direction || "HOLD").toUpperCase();
+  const dEl = el("predSignalDir");
+  if (dEl) {
+    dEl.textContent = dir;
+    dEl.className = "pred-signal-dir " + (dir === "BUY" ? "buy" : dir === "SELL" ? "sell" : "hold");
+  }
+
+  const stats = el("predSignalStats");
+  if (stats) {
+    stats.innerHTML = [
+      `<span>Gates <b>${sig.gates_passed}/${sig.gates_total}</b> (${sig.alignment_pct}%)</span>`,
+      `<span>Probabilité <b>${sig.entry_probability ?? "—"}%</b></span>`,
+      `<span>Concordance path <b>${concPct}%</b></span>`,
+      `<span>GOM <b>${sig.gom_verdict || "—"}</b> (vn=${sig.gom_verdict_num ?? 0})</span>`,
+      `<span>IA <b>${sig.ia_status_action || "—"}</b> ${sig.ia_status_confidence_pct ?? 0}%</span>`,
+      `<span>Cohérence <b>${sig.coherence_pct ?? 0}%</b></span>`,
+      `<span>Cognition <b>${cogDir}</b> conf ${cogConf}% force ${cogStr}%</span>`,
+    ].join("");
+  }
+
+  const conc = el("predSignalConclusion");
+  if (conc) {
+    conc.textContent = sig.direction_conflict
+      ? `SMC suggère ${sig.suggested_direction} — évaluation ${sig.direction} (loi symbole). ${sig.conclusion || ""}`
+      : (sig.conclusion || "—");
+  }
+
+  const gatesEl = el("predGates");
+  if (gatesEl) {
+    gatesEl.innerHTML = (sig.gates || []).map(g => `
+      <div class="pred-gate ${g.ok ? "ok" : "fail"}">
+        <span class="pred-gate-icon">${g.ok ? "✅" : "❌"}</span>
+        <div>
+          <div class="pred-gate-label">${g.label || g.id}</div>
+          <div class="pred-gate-reason">${g.reason || ""}</div>
+        </div>
+      </div>`).join("");
+  }
+
+  if (!sig.gates_enabled) {
+    const note = document.createElement("div");
+    note.style.cssText = "font-size:10px;color:var(--orange);margin-top:8px";
+    note.textContent = "⚠ Mode dev : AI_DISABLE_API_GATES=true — gates HTTP désactivés";
+    if (!panel.querySelector(".gates-dev-note")) {
+      note.className = "gates-dev-note";
+      panel.appendChild(note);
+    }
+  }
+}
+
+function drawPredChart(d) {
+  const canvas = el("predCanvas");
+  if (!canvas) return;
+  const rect = canvas.parentElement.getBoundingClientRect();
+  canvas.width = rect.width * devicePixelRatio;
+  canvas.height = 420 * devicePixelRatio;
+  const ctx = canvas.getContext("2d");
+  const W = canvas.width, H = canvas.height;
+  const dpr = devicePixelRatio;
+  ctx.fillStyle = "#0a1220";
+  ctx.fillRect(0, 0, W, H);
+
+  const tradeDir = (d.trade_direction || d.signals_aligned?.direction || d.direction || "HOLD").toUpperCase();
+  const proj = d.projection || {};
+  const path = (proj.path || []).map(p => p.price);
+  const pathQ10 = proj.path_q10 || [];
+  const pathQ90 = proj.path_q90 || [];
+  const conc = proj.concordance || {};
+  const pathBars = proj.path_bars || path.length || 0;
+  const zones = d.zones || [];
+  const levels = d.levels || [];
+  const entry = proj.entry || d.price;
+  const allPrices = [...path, d.price, entry, proj.tp1, proj.tp2, proj.sl,
+    ...levels.map(l => l.price), ...zones.flatMap(z => [z.high, z.low])].filter(Boolean);
+  if (!allPrices.length) return;
+  const pMin = Math.min(...allPrices), pMax = Math.max(...allPrices);
+  const pad = (pMax - pMin) * 0.12 || 1;
+  const yMin = pMin - pad, yMax = pMax + pad;
+  const y = p => H - ((p - yMin) / (yMax - yMin)) * H * 0.85 - H * 0.05;
+
+  // Zones OB
+  zones.forEach(z => {
+    const y1 = y(z.high), y2 = y(z.low);
+    const bull = z.type.includes("BULL") || tradeDir === "BUY";
+    ctx.fillStyle = bull ? "rgba(59,130,246,.18)" : "rgba(245,158,11,.18)";
+    ctx.fillRect(40*dpr, Math.min(y1,y2), W - 80*dpr, Math.abs(y2-y1));
+  });
+
+  // Levels
+  levels.forEach(l => {
+    const yy = y(l.price);
+    ctx.strokeStyle = "rgba(234,179,8,.7)";
+    ctx.setLineDash([6*dpr, 4*dpr]);
+    ctx.beginPath(); ctx.moveTo(30*dpr, yy); ctx.lineTo(W-30*dpr, yy); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = "#eab308";
+    ctx.font = `${10*dpr}px sans-serif`;
+    ctx.fillText(l.label, 34*dpr, yy - 4*dpr);
+  });
+
+  // Entry line
+  if (entry) {
+    const ey = y(entry);
+    ctx.strokeStyle = "#60a5fa";
+    ctx.lineWidth = 1.2*dpr;
+    ctx.setLineDash([3*dpr, 3*dpr]);
+    ctx.beginPath(); ctx.moveTo(30*dpr, ey); ctx.lineTo(W-30*dpr, ey); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = "#60a5fa";
+    ctx.font = `bold ${10*dpr}px sans-serif`;
+    ctx.fillText("ENTRY " + entry, 34*dpr, ey - 6*dpr);
+  }
+
+  // TP / SL — couleurs selon direction trade
+  [{p:proj.tp1,c:"#22c55e",l:"TP1"},{p:proj.tp2,c:"#16a34a",l:"TP2"},{p:proj.sl,c:"#ef4444",l:"SL"}].forEach(t => {
+    if (!t.p) return;
+    const yy = y(t.p);
+    ctx.strokeStyle = t.c; ctx.lineWidth = 1.5*dpr;
+    ctx.beginPath(); ctx.moveTo(30*dpr, yy); ctx.lineTo(W-30*dpr, yy); ctx.stroke();
+    ctx.fillStyle = t.c; ctx.font = `bold ${11*dpr}px sans-serif`;
+    ctx.fillText(t.l + " " + t.p, W - 120*dpr, yy - 4*dpr);
+  });
+
+  // Bande incertitude path (q10-q90)
+  if (pathQ10.length && pathQ90.length && path.length) {
+    const xStep = (W - 100*dpr) / path.length;
+    ctx.fillStyle = tradeDir === "BUY" ? "rgba(34,197,94,.08)" : tradeDir === "SELL" ? "rgba(239,68,68,.08)" : "rgba(148,163,184,.08)";
+    ctx.beginPath();
+    pathQ10.forEach((p, i) => {
+      const xx = 50*dpr + i * xStep;
+      const yy = y(p);
+      if (i === 0) ctx.moveTo(xx, yy); else ctx.lineTo(xx, yy);
+    });
+    for (let i = pathQ90.length - 1; i >= 0; i--) {
+      const xx = 50*dpr + i * xStep;
+      const yy = y(pathQ90[i]);
+      ctx.lineTo(xx, yy);
+    }
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  // Future path — vert BUY, rouge SELL (1000 M1)
+  if (path.length) {
+    const xStep = (W - 100*dpr) / path.length;
+    ctx.strokeStyle = tradeDir === "BUY" ? "#22c55e" : tradeDir === "SELL" ? "#ef4444" : "#ffffff";
+    ctx.lineWidth = 2.5*dpr;
+    ctx.setLineDash([4*dpr, 4*dpr]);
+    ctx.beginPath();
+    path.forEach((p, i) => {
+      const xx = 50*dpr + i * xStep;
+      const yy = y(p);
+      if (i === 0) ctx.moveTo(xx, yy); else ctx.lineTo(xx, yy);
+    });
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  // Badge concordance sur le graphique
+  if (conc.concordance_pct != null) {
+    const cc = conc.concordance_pct;
+    const col = cc >= 65 ? "#22c55e" : cc >= 45 ? "#f59e0b" : "#ef4444";
+    ctx.fillStyle = "rgba(10,18,32,.85)";
+    ctx.fillRect(W - 210*dpr, 8*dpr, 200*dpr, 52*dpr);
+    ctx.strokeStyle = col;
+    ctx.lineWidth = 1.5*dpr;
+    ctx.strokeRect(W - 210*dpr, 8*dpr, 200*dpr, 52*dpr);
+    ctx.fillStyle = col;
+    ctx.font = `bold ${13*dpr}px sans-serif`;
+    ctx.fillText(`Concordance ${cc}%`, W - 200*dpr, 28*dpr);
+    ctx.fillStyle = "#94a3b8";
+    ctx.font = `${9*dpr}px sans-serif`;
+    ctx.fillText(`hist ${conc.historical_respect_pct ?? "—"}% | traj ${conc.trajectory_respect_pct ?? "—"}% | live ${conc.live_respect_pct ?? "—"}%`, W - 200*dpr, 44*dpr);
+    ctx.fillText(`${pathBars} bougies M1`, W - 200*dpr, 56*dpr);
+  }
+
+  // Prix actuel
+  const py = y(d.price);
+  ctx.fillStyle = "#f59e0b";
+  ctx.beginPath(); ctx.arc(W - 55*dpr, py, 5*dpr, 0, Math.PI * 2); ctx.fill();
+  ctx.font = `bold ${10*dpr}px sans-serif`;
+  ctx.fillText(String(d.price), W - 110*dpr, py + 14*dpr);
+
+  // Structure labels
+  const st = d.structure || {};
+  ctx.fillStyle = "rgba(239,68,68,.85)";
+  ctx.font = `bold ${11*dpr}px sans-serif`;
+  if (st.h1?.label) ctx.fillText(st.h1.label, 40*dpr, 24*dpr);
+  ctx.fillStyle = "rgba(34,197,94,.9)";
+  if (st.m15?.label) ctx.fillText(st.m15.label, 40*dpr, 42*dpr);
+
+  const sig = d.signals_aligned || {};
+  const gom = d.gom || {};
+  const cogConf = gom.cog_confidence_pct ?? "—";
+  ctx.fillStyle = tradeDir === "BUY" ? "#22c55e" : tradeDir === "SELL" ? "#ef4444" : "#94a3b8";
+  ctx.font = `bold ${11*dpr}px sans-serif`;
+  ctx.fillText(`${tradeDir} | ${sig.verdict_label || "—"} | prob ${sig.entry_probability ?? "—"}% | COG ${gom.cog_direction || "—"} ${cogConf}%`, 40*dpr, H - 16*dpr);
+}
+
+function drawPredCvd(series) {
+  const c = el("predCvd");
+  if (!c || !series.length) return;
+  const ctx = c.getContext("2d");
+  const W = c.width = c.offsetWidth * devicePixelRatio;
+  const H = c.height = 80 * devicePixelRatio;
+  ctx.clearRect(0,0,W,H);
+  const mn = Math.min(...series), mx = Math.max(...series);
+  const rng = mx - mn || 1;
+  ctx.strokeStyle = "#06b6d4";
+  ctx.lineWidth = 1.5 * devicePixelRatio;
+  ctx.beginPath();
+  series.forEach((v, i) => {
+    const x = (i / (series.length-1)) * (W - 20*devicePixelRatio) + 10*devicePixelRatio;
+    const y = H - ((v - mn) / rng) * (H - 20*devicePixelRatio) - 10*devicePixelRatio;
+    if (i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+  });
+  ctx.stroke();
 }
 
 // ── Data fetchers ────────────────────────────────────────
 async function fetchIntelligence() {
   try {
-    const r = await fetch(`${API}/agents/intelligence`, {signal: AbortSignal.timeout(8000)});
+    const r = await fetch(`${API}/agents/intelligence`, {signal: AbortSignal.timeout(12000)});
     if(!r.ok) throw new Error(r.status);
     cachedIntel = await r.json();
     renderIntelligence(cachedIntel);
-    setSystemStatus(true);
-    _failCount = 0;  // réinitialise le compteur d'erreurs
+    const symEl = el("predSymbol");
+    if (symEl && _mt5Live?.primary_symbol && !symEl.dataset.userEdited) {
+      symEl.value = _mt5Live.primary_symbol;
+      _predAppliedSymbol = _mt5Live.primary_symbol;
+    }
+    _failCount = 0;
   } catch(e) {
     _failCount++;
-    if (_failCount >= FAIL_THRESHOLD) {
-      // seulement après 3 échecs consécutifs → vraiment déconnecté
-      setSystemStatus(false);
-      _apiReady = false;
-      _failCount = 0;
-    }
-    // sinon : garde le dernier affichage, réessaie au prochain cycle
+    // Intelligence peut échouer sans couper le serveur — le statut vient de /health
   }
 }
 
@@ -918,20 +1656,20 @@ function renderTA7(ta) {
   const dirColor = { BUY:"#22c55e", SELL:"#ef4444", HOLD:"#6b8099" }[dir] || "#6b8099";
   if (err === "warming_up") {
     badge.textContent = "Warmup";
-    badge.style.background = "rgba(107,128,153,.15)";
+    badge.style.background = "rgba(107,128,153,.04)";
     badge.style.color = "var(--text-dim)";
   } else if (err === "no_target" || (!sym && !err)) {
     badge.textContent = "En attente";
-    badge.style.background = "rgba(107,128,153,.15)";
+    badge.style.background = "rgba(107,128,153,.04)";
     badge.style.color = "var(--text-dim)";
   } else if (err && err !== "warming_up") {
     badge.textContent = "Erreur";
-    badge.style.background = "rgba(239,68,68,.15)";
-    badge.style.color = "#ef4444";
+    badge.style.background = "rgba(239,68,68,.04)";
+    badge.style.color = "rgba(239,68,68,.6)";
   } else {
     badge.textContent = dir;
-    badge.style.background = `${dirColor}22`;
-    badge.style.color = dirColor;
+    badge.style.background = `${dirColor}14`;
+    badge.style.color = dirColor + "aa";
   }
 
   // Badge running
@@ -976,14 +1714,14 @@ function renderTA7(ta) {
 
   body.innerHTML = `
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:14px">
-      <div style="background:rgba(168,85,247,.08);border:1px solid rgba(168,85,247,.2);border-radius:10px;padding:12px">
+      <div style="background:rgba(168,85,247,.03);border:1px solid rgba(168,85,247,.1);border-radius:10px;padding:12px">
         <div style="font-size:10px;color:var(--text-dim);margin-bottom:4px">SYMBOLE ANALYSÉ</div>
         <div style="font-size:18px;font-weight:800;color:#e2eaf6">${sym}</div>
         <div style="font-size:11px;color:var(--text-dim);margin-top:2px">Prix: ${price} · ATR: ${atr} · RSI: ${rsi}</div>
       </div>
-      <div style="background:${dirColor}11;border:1px solid ${dirColor}33;border-radius:10px;padding:12px">
+      <div style="background:${dirColor}08;border:1px solid ${dirColor}18;border-radius:10px;padding:12px">
         <div style="font-size:10px;color:var(--text-dim);margin-bottom:4px">SIGNAL TA</div>
-        <div style="font-size:18px;font-weight:800;color:${dirColor}">${dirIcon} ${dir}</div>
+        <div style="font-size:18px;font-weight:800;color:${dirColor}aa">${dirIcon} ${dir}</div>
         <div style="font-size:11px;color:var(--text-dim);margin-top:2px">Confiance: ${(conf*100).toFixed(0)}% · Biais: <span style="color:${biasColor}">${bias}</span></div>
       </div>
     </div>
@@ -1008,23 +1746,23 @@ function renderTA7(ta) {
 
     ${ta.entry_price ? `
     <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;margin-bottom:14px;font-size:11px">
-      <div style="background:rgba(59,130,246,.08);border:1px solid rgba(59,130,246,.2);border-radius:6px;padding:8px;text-align:center">
+      <div style="background:rgba(59,130,246,.03);border:1px solid rgba(59,130,246,.1);border-radius:6px;padding:8px;text-align:center">
         <div style="color:var(--text-dim);margin-bottom:2px">ENTRY</div>
-        <div style="color:#60a5fa;font-weight:700">${parseFloat(ta.entry_price).toFixed(5)}</div>
+        <div style="color:rgba(96,165,250,.6);font-weight:700">${parseFloat(ta.entry_price).toFixed(5)}</div>
       </div>
-      <div style="background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.2);border-radius:6px;padding:8px;text-align:center">
+      <div style="background:rgba(239,68,68,.03);border:1px solid rgba(239,68,68,.1);border-radius:6px;padding:8px;text-align:center">
         <div style="color:var(--text-dim);margin-bottom:2px">SL</div>
-        <div style="color:#f87171;font-weight:700">${ta.stop_loss ? parseFloat(ta.stop_loss).toFixed(5) : '—'}</div>
+        <div style="color:rgba(248,113,113,.6);font-weight:700">${ta.stop_loss ? parseFloat(ta.stop_loss).toFixed(5) : '—'}</div>
       </div>
-      <div style="background:rgba(34,197,94,.08);border:1px solid rgba(34,197,94,.2);border-radius:6px;padding:8px;text-align:center">
+      <div style="background:rgba(34,197,94,.03);border:1px solid rgba(34,197,94,.1);border-radius:6px;padding:8px;text-align:center">
         <div style="color:var(--text-dim);margin-bottom:2px">TP</div>
-        <div style="color:#4ade80;font-weight:700">${ta.take_profit ? parseFloat(ta.take_profit).toFixed(5) : '—'}</div>
+        <div style="color:rgba(74,222,128,.6);font-weight:700">${ta.take_profit ? parseFloat(ta.take_profit).toFixed(5) : '—'}</div>
       </div>
     </div>` : ''}
 
     ${ta.expert_analysis ? `
-    <div style="background:rgba(168,85,247,.06);border:1px solid rgba(168,85,247,.15);border-radius:8px;padding:12px;margin-bottom:8px">
-      <div style="font-size:10px;color:#c084fc;font-weight:700;margin-bottom:6px">ANALYSE EXPERT SCALPING (Claude)</div>
+    <div style="background:rgba(168,85,247,.03);border:1px solid rgba(168,85,247,.08);border-radius:8px;padding:12px;margin-bottom:8px">
+      <div style="font-size:10px;color:rgba(192,132,252,.55);font-weight:700;margin-bottom:6px">ANALYSE EXPERT SCALPING (Claude)</div>
       <div style="font-size:11px;color:var(--text-dim);line-height:1.5;white-space:pre-wrap;max-height:120px;overflow-y:auto">${ta.expert_analysis.substring(0,500)}${ta.expert_analysis.length>500?'…':''}</div>
     </div>` : ''}
 
@@ -1161,8 +1899,8 @@ function renderInteractions(d) {
 
   const activeCount = ARROWS.filter(a => a.active).length;
   el("interactionCount").textContent = `${activeCount} active${activeCount > 1 ? 's' : ''}`;
-  el("interactionCount").style.background = activeCount > 0 ? "rgba(59,130,246,.2)" : "rgba(107,128,153,.12)";
-  el("interactionCount").style.color = activeCount > 0 ? "#60a5fa" : "var(--text-dim)";
+  el("interactionCount").style.background = activeCount > 0 ? "rgba(59,130,246,.06)" : "rgba(107,128,153,.04)";
+  el("interactionCount").style.color = activeCount > 0 ? "rgba(96,165,250,.6)" : "var(--text-dim)";
 
   // ── Tableau détail ─────────────────────────────────────
   const rows = [];
@@ -1342,8 +2080,8 @@ function renderRisk(d) {
   const badge = el("riskLevelBadge");
   badge.textContent = rl;
   badge.className = "card-badge";
-  const rlColors = {NORMAL:"rgba(34,197,94,.12)",CAUTION:"rgba(245,158,11,.12)",HIGH:"rgba(239,68,68,.12)",CRITICAL:"rgba(239,68,68,.2)"};
-  const rlText   = {NORMAL:"var(--green)",CAUTION:"var(--orange)",HIGH:"var(--red)",CRITICAL:"#ff0000"};
+  const rlColors = {NORMAL:"rgba(34,197,94,.04)",CAUTION:"rgba(245,158,11,.04)",HIGH:"rgba(239,68,68,.04)",CRITICAL:"rgba(239,68,68,.08)"};
+  const rlText   = {NORMAL:"rgba(34,197,94,.6)",CAUTION:"rgba(245,158,11,.6)",HIGH:"rgba(239,68,68,.6)",CRITICAL:"rgba(255,0,0,.7)"};
   badge.style.background = rlColors[rl] || rlColors.NORMAL;
   badge.style.color = rlText[rl] || "var(--green)";
 
@@ -1372,8 +2110,8 @@ function renderRisk(d) {
 
 // ── Session & Macro ──────────────────────────────────────
 function renderSession(sess, impact, events, sentiment) {
-  const impactColors = {HIGH:"rgba(239,68,68,.15)",MEDIUM:"rgba(245,158,11,.15)",LOW:"rgba(34,197,94,.15)",NONE:"rgba(107,128,153,.15)"};
-  const impactText   = {HIGH:"var(--red)",MEDIUM:"var(--orange)",LOW:"var(--green)",NONE:"var(--text-dim)"};
+  const impactColors = {HIGH:"rgba(239,68,68,.04)",MEDIUM:"rgba(245,158,11,.04)",LOW:"rgba(34,197,94,.04)",NONE:"rgba(107,128,153,.04)"};
+  const impactText   = {HIGH:"rgba(239,68,68,.6)",MEDIUM:"rgba(245,158,11,.6)",LOW:"rgba(34,197,94,.6)",NONE:"var(--text-dim)"};
   const ib = el("impactBadge");
   ib.textContent = impact || "NONE";
   ib.style.background = impactColors[impact] || impactColors.NONE;
@@ -1416,6 +2154,118 @@ function renderSession(sess, impact, events, sentiment) {
         <span class="corr-sym">${k}</span>
       </div>`;
     }).join("");
+  }
+}
+
+// ── Daily Readiness + Circuit-Breaker ────────────────────
+async function fetchReadiness() {
+  if (!_apiReady) return;
+  try {
+    const [rdyRes, cbRes] = await Promise.all([
+      fetch(`${API}/daily-readiness?symbol=ALL&include_factors=false`, {signal: AbortSignal.timeout(4000)}),
+      fetch(`${API}/circuit-breaker`, {signal: AbortSignal.timeout(4000)}),
+    ]);
+    if (!rdyRes.ok || !cbRes.ok) return;
+    const rdy = await rdyRes.json();
+    const cb  = await cbRes.json();
+    renderReadiness(rdy, cb);
+  } catch(e) {
+    // silent — pas de spam console
+  }
+}
+
+function renderReadiness(rdy, cb) {
+  // --- Score global (moyenne des symboles ou score unique) ---
+  let score = 0, goCount = 0, totalSym = 0;
+  const bySym = rdy.by_symbol || {};
+  const symEntries = Object.entries(bySym);
+  if (symEntries.length > 0) {
+    for (const [sym, data] of symEntries) {
+      score += (data.score || 0);
+      if (data.go) goCount++;
+      totalSym++;
+    }
+    score = Math.round(score / totalSym);
+  } else {
+    score = rdy.score || 0;
+    totalSym = 1;
+    goCount = rdy.go ? 1 : 0;
+  }
+
+  const scoreEl = el("rdyScoreBig");
+  scoreEl.textContent = score + "/100";
+  const scoreColor = score >= 70 ? "rgba(34,197,94,.65)" : score >= 40 ? "rgba(245,158,11,.65)" : "rgba(239,68,68,.65)";
+  scoreEl.style.color = scoreColor;
+
+  const bar = el("rdyScoreBar");
+  bar.style.width = Math.min(100, score) + "%";
+  bar.style.background = score >= 70 ? "rgba(34,197,94,.25)" : score >= 40 ? "rgba(245,158,11,.25)" : "rgba(239,68,68,.25)";
+
+  // --- Statut GO / HALT ---
+  const cbActive = cb.active || rdy.circuit_breaker?.active;
+  const goGlobal = !cbActive && goCount > 0;
+  const statusBadge = el("rdyStatusBadge");
+  const goStatus = el("rdyGoStatus");
+  if (cbActive) {
+    statusBadge.textContent = "HALT";
+    statusBadge.style.background = "rgba(239,68,68,.06)";
+    statusBadge.style.color = "rgba(239,68,68,.6)";
+    goStatus.textContent = "⛔ Halt CB";
+    goStatus.style.color = "rgba(239,68,68,.6)";
+  } else if (goGlobal) {
+    statusBadge.textContent = "GO";
+    statusBadge.style.background = "rgba(34,197,94,.04)";
+    statusBadge.style.color = "rgba(34,197,94,.5)";
+    goStatus.textContent = "✅ GO (" + goCount + "/" + totalSym + ")";
+    goStatus.style.color = "rgba(34,197,94,.6)";
+  } else {
+    statusBadge.textContent = "WAIT";
+    statusBadge.style.background = "rgba(245,158,11,.04)";
+    statusBadge.style.color = "rgba(245,158,11,.5)";
+    goStatus.textContent = "⚠️ Wait (0/" + totalSym + ")";
+    goStatus.style.color = "rgba(245,158,11,.5)";
+  }
+
+  el("rdyThreshold").textContent = (rdy.threshold || 60) + "/100";
+
+  // Best/Avoid hours (from first symbol or global)
+  const firstSym = symEntries[0]?.[1] || rdy;
+  el("rdyBestHours").textContent = (firstSym.best_hours || []).length > 0
+    ? firstSym.best_hours.join(",") + "h" : "—";
+  el("rdyAvoidHours").textContent = (firstSym.avoid_hours || []).length > 0
+    ? firstSym.avoid_hours.join(",") + "h" : "—";
+
+  // --- Circuit-Breaker ---
+  const cbBadge = el("cbBadge");
+  const cbReason = el("cbReason");
+  if (cbActive || cb.symbol_cooling) {
+    cbBadge.textContent = "ACTIF";
+    cbBadge.style.background = "rgba(239,68,68,.06)";
+    cbBadge.style.color = "rgba(239,68,68,.55)";
+    cbReason.style.display = "block";
+    cbReason.textContent = cb.reason || rdy.circuit_breaker?.reason || "Circuit-breaker déclenché";
+  } else {
+    cbBadge.textContent = "INACTIF";
+    cbBadge.style.background = "rgba(34,197,94,.03)";
+    cbBadge.style.color = "rgba(34,197,94,.4)";
+    cbReason.style.display = "none";
+  }
+
+  el("cbLossStreak").textContent = (cb.consecutive_losses || 0) + "/" + (cb.loss_streak_threshold || 3);
+  el("cbSessionLoss").textContent = "$" + (cb.session_losses_usd || 0).toFixed(2);
+
+  // --- Symboles bloqués ---
+  const blockedSyms = symEntries.filter(([s, d]) => d.circuit_breaker?.active || d.circuit_breaker?.symbol_cooling);
+  const blockedWrap = el("cbBlockedSyms");
+  const blockedList = el("cbBlockedSymsList");
+  if (blockedSyms.length > 0) {
+    blockedWrap.style.display = "block";
+    blockedList.innerHTML = blockedSyms.map(([s, d]) => {
+      const isCool = d.circuit_breaker?.symbol_cooling;
+      return `<span style="font-size:9px;font-weight:600;padding:2px 6px;border-radius:4px;background:rgba(239,68,68,.04);color:rgba(239,68,68,.5);border:1px solid rgba(239,68,68,.08)">${s}${isCool ? " 🔒" : ""}</span>`;
+    }).join("");
+  } else {
+    blockedWrap.style.display = "none";
   }
 }
 
@@ -1507,7 +2357,7 @@ function renderAnomalies(anomalies) {
   el("anomalyList").innerHTML = anomalies.map(a => `
     <div class="alert-row alert-${a.severity?.toLowerCase() || "medium"}">
       <div>
-        <span class="alert-sev" style="background:${a.severity==="HIGH"?"rgba(239,68,68,.2)":"rgba(245,158,11,.2)"};color:${a.severity==="HIGH"?"var(--red)":"var(--orange)"}">${a.severity}</span>
+        <span class="alert-sev" style="background:${a.severity==="HIGH"?"rgba(239,68,68,.06)":"rgba(245,158,11,.06)"};color:${a.severity==="HIGH"?"rgba(239,68,68,.55)":"rgba(245,158,11,.55)"}">${a.severity}</span>
       </div>
       <div>
         <div class="alert-title">${a.symbol}</div>

@@ -31,6 +31,48 @@ DEFAULT_RISK_CONFIG = {
     "max_lot": 1.0,
 }
 
+# MT5 terminals
+MT5_TERMINALS = [
+    {"login": 5026526, "server": "Deriv-MT5-Real", "name": "Weltrade"},
+    {"login": 5026526, "server": "Deriv-MT5-Real", "name": "Deriv"},
+]
+
+def _fetch_mt5_balances() -> dict:
+    """Récupère les vrais soldes/equity des 2 terminaux MT5."""
+    result = {"balance": 0.0, "equity": 0.0, "margin_free": 0.0, "positions": 0, "daily_pnl": 0.0}
+    try:
+        import MetaTrader5 as mt5
+        if not mt5.initialize():
+            return result
+        for terminal in MT5_TERMINALS:
+            try:
+                if mt5.login(terminal["login"], server=terminal["server"]):
+                    acc = mt5.account_info()
+                    if acc:
+                        result["balance"] += acc.balance
+                        result["equity"] += acc.equity
+                        result["margin_free"] += acc.margin_free
+                    positions = mt5.positions_get()
+                    if positions:
+                        result["positions"] += len(positions)
+                        for pos in positions:
+                            result["daily_pnl"] += pos.profit
+                    # Deals du jour
+                    from datetime import datetime, timedelta
+                    today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+                    deals = mt5.history_deals_get(today, datetime.now())
+                    if deals:
+                        for deal in deals:
+                            result["daily_pnl"] += deal.profit + deal.commission + deal.swap
+            except Exception as e:
+                logger.warning(f"[RiskAgent] MT5 {terminal['name']}: {e}")
+        mt5.shutdown()
+    except ImportError:
+        logger.warning("[RiskAgent] MetaTrader5 module non disponible")
+    except Exception as e:
+        logger.error(f"[RiskAgent] MT5 error: {e}")
+    return result
+
 # ATR multiplier per symbol category (from known volatility profiles)
 ATR_PROFILE = {
     "Boom": {"sl_atr": 1.5, "tp_atr": 3.0},
@@ -108,6 +150,7 @@ class RiskOptimizerAgent(AgentBase):
 
         daily_budget = self._daily_budget()
         risk_level = self._assess_risk_level()
+        mt5_data = _fetch_mt5_balances()
 
         return {
             "recommendations": recommendations,
@@ -117,6 +160,12 @@ class RiskOptimizerAgent(AgentBase):
             "risk_level": risk_level,
             "config": self._config,
             "can_trade": daily_budget > 0 and self._open_positions < regime_pos_cap,
+            "mt5_accounts": {
+                "balance": round(mt5_data["balance"], 2),
+                "equity": round(mt5_data["equity"], 2),
+                "margin_free": round(mt5_data["margin_free"], 2),
+                "positions": mt5_data["positions"],
+            },
             "peer_context": {
                 "global_regime": global_regime,
                 "regime_pos_cap": regime_pos_cap,
@@ -221,6 +270,14 @@ class RiskOptimizerAgent(AgentBase):
         return defaults
 
     def _refresh_account_state(self):
+        # Priorité: données MT5 réelles
+        mt5_data = _fetch_mt5_balances()
+        if mt5_data["balance"] > 0:
+            self._config["account_balance"] = mt5_data["balance"]
+            self._open_positions = mt5_data["positions"]
+            self._daily_pnl = mt5_data["daily_pnl"]
+            return
+        # Fallback: AI server
         try:
             r = requests.get(f"{AI_SERVER}/market-state", timeout=3)
             if r.status_code == 200:

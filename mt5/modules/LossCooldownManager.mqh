@@ -1,5 +1,5 @@
 //+------------------------------------------------------------------+
-//| Loss Cooldown Manager — MT5 Module
+//| Loss Cooldown Manager � MT5 Module
 //| Tracks consecutive losses per symbol and triggers 1-hour cooldown
 //+------------------------------------------------------------------+
 
@@ -186,7 +186,7 @@ private:
 
         if(log_enabled)
         {
-            Print("[LossCooldown] 🔴 ", cooldowns[idx].symbol,
+            Print("[LossCooldown] ? ", cooldowns[idx].symbol,
                   ": COOLDOWN TRIGGERED after ", consecutive_loss_threshold, " losses");
             Print("[LossCooldown]    Cooldown until: ",
                   TimeToString(cooldowns[idx].cooldown_until, TIME_DATE|TIME_MINUTES));

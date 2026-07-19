@@ -1,5 +1,5 @@
 //+------------------------------------------------------------------+
-//| SMC_TradeJournal.mqh â€” Journal CSV complet (Common/Files)        |
+//| SMC_TradeJournal.mqh — Journal CSV complet (Common/Files)        |
 //+------------------------------------------------------------------+
 #ifndef SMC_TRADE_JOURNAL_MQH
 #define SMC_TRADE_JOURNAL_MQH
@@ -89,7 +89,7 @@ bool SMC_JournalEnsureHeader(const string filePath)
    h = FileOpen(filePath, FILE_WRITE | FILE_CSV | FILE_COMMON, ',');
    if(h == INVALID_HANDLE)
    {
-      Print("[TradeJournal] Erreur crÃ©ation ", filePath, " err=", GetLastError());
+      Print("[TradeJournal] Erreur création ", filePath, " err=", GetLastError());
       return false;
    }
 
@@ -397,7 +397,7 @@ void SMC_JournalBackfillRecent(const int daysBack = 30)
       SMC_JournalLogPositionClose(posId, 0.0, "");
    }
 
-   Print("[TradeJournal] Backfill ", daysBack, "j â€” fichier: Common/Files/", SMC_JOURNAL_MAIN_FILE);
+   Print("[TradeJournal] Backfill ", daysBack, "j — fichier: Common/Files/", SMC_JOURNAL_MAIN_FILE);
 }
 
 //+------------------------------------------------------------------+
@@ -410,7 +410,7 @@ void SMC_JournalInit()
    SMC_JournalEnsureHeader(SMC_JournalDayFile(TimeCurrent()));
    SMC_JournalBackfillRecent(g_journalBackfillDays);
 
-   Print("[TradeJournal] Actif â†’ Common/Files/", SMC_JOURNAL_MAIN_FILE);
+   Print("[TradeJournal] Actif ? Common/Files/", SMC_JOURNAL_MAIN_FILE);
 }
 
 #endif

@@ -1,0 +1,13 @@
+yaml
+tvdatafeed
+pandas
+numpy
+matplotlib
+requests
+fastapi
+uvicorn
+apscheduler
+pillow
+twilio
+python-telegram-bot
+schedule

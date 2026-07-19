@@ -206,14 +206,26 @@ def _find_tradingview_exe() -> Optional[Path]:
 
 def _start_tv_cdp_process(exe: Path, port: int) -> None:
     """Démarre TV avec CDP sans hériter stdin/stdout (évite crash ICU Electron)."""
-    wd = str(exe.parent)
-    exe_esc = str(exe).replace("'", "''")
-    wd_esc = wd.replace("'", "''")
-    ps_cmd = (
-        f"Start-Process -FilePath '{exe_esc}' "
-        f"-ArgumentList '--remote-debugging-port={port}' "
-        f"-WorkingDirectory '{wd_esc}'"
-    )
+    is_msix = "WindowsApps" in exe.parts
+    if is_msix:
+        # MSIX = pas de Start-Process direct. Query AUMID via PowerShell.
+        ps_cmd = (
+            "$p = Get-AppxPackage -Name '*TradingView*' | "
+            "Sort-Object Version -Descending | Select-Object -First 1; "
+            "$aumid = $p.PackageFamilyName + '!TradingView.Desktop'; "
+            "$s = New-Object -ComObject 'Shell.Application'; "
+            f"$s.ShellExecute('shell:AppsFolder\\' + $aumid, "
+            f"'--remote-debugging-port={port}', '', '')"
+        )
+    else:
+        wd = str(exe.parent)
+        exe_esc = str(exe).replace("'", "''")
+        wd_esc = wd.replace("'", "''")
+        ps_cmd = (
+            f"Start-Process -FilePath '{exe_esc}' "
+            f"-ArgumentList '--remote-debugging-port={port}' "
+            f"-WorkingDirectory '{wd_esc}'"
+        )
     subprocess.Popen(
         ["powershell", "-NoProfile", "-Command", ps_cmd],
         creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
@@ -716,28 +728,50 @@ def _persist_gom_signal_file(payload: Dict[str, Any]) -> None:
         out = root / "data" / "gom_signal.json"
         out.parent.mkdir(parents=True, exist_ok=True)
 
-        # Créer l'objet pour ce symbole
+        # Créer l'objet pour ce symbole — field names matching SMCGP_ParseGOMBody()
         slim = {
             "symbol": payload.get("symbol", SYMBOL),
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "verdict": payload.get("verdict", "WAIT"),
             "verdict_num": payload.get("verdict_num", 0),
-            "buy_score": payload.get("score_buy", payload.get("buy_score", 0)),
-            "sell_score": payload.get("score_sell", payload.get("sell_score", 0)),
+            # ── EA field names (score_buy, score_sell, coherence_pct, entry_quality) ──
+            "score_buy": payload.get("score_buy", payload.get("buy_score", 0)),
+            "score_sell": payload.get("score_sell", payload.get("sell_score", 0)),
             "spike_pct": payload.get("spike_pct", 0),
-            "quality": payload.get("entry_quality", payload.get("quality", 0)),
-            "coherence": payload.get("coherence_pct", payload.get("coherence", 0)),
+            "entry_quality": payload.get("entry_quality", payload.get("quality", 0)),
+            "coherence_pct": payload.get("coherence_pct", payload.get("coherence", 0)),
+            "kola_buy": payload.get("kola_buy", 0.0),
+            "kola_sell": payload.get("kola_sell", 0.0),
             "kola_state": payload.get("kola_state", "---"),
             "rsi": payload.get("rsi"),
-            "st_direction": "UP" if payload.get("st_dir", 0) == 1 else "DN",
+            "st_dir": payload.get("st_dir", 0),
+            "price": payload.get("price"),
+            "st_line": payload.get("st_line"),
             "verdict_gap": payload.get("verdict_gap"),
+            # ── TF global direction ──
             "tf_global_dir": payload.get("tf_global_dir"),
+            "tf_global_strength": payload.get("tf_global_strength"),
             "tf_bull_count": payload.get("tf_bull_count"),
             "tf_bear_count": payload.get("tf_bear_count"),
+            # ── Per-TF directions (EA reads tf_m1_dir..tf_d1_dir) ──
+            "tf_m1_dir": payload.get("tf_m1_dir"),
+            "tf_m5_dir": payload.get("tf_m5_dir"),
+            "tf_m15_dir": payload.get("tf_m15_dir"),
+            "tf_h1_dir": payload.get("tf_h1_dir"),
+            "tf_h4_dir": payload.get("tf_h4_dir"),
+            "tf_d1_dir": payload.get("tf_d1_dir"),
+            "tf_m1_rsi": payload.get("tf_m1_rsi"),
+            "tf_m5_rsi": payload.get("tf_m5_rsi"),
+            "tf_m15_rsi": payload.get("tf_m15_rsi"),
+            "tf_h1_rsi": payload.get("tf_h1_rsi"),
+            "tf_h4_rsi": payload.get("tf_h4_rsi"),
+            "tf_d1_rsi": payload.get("tf_d1_rsi"),
+            # ── Predictions ──
             "pred_bull": payload.get("pred_bull"),
             "pred_bear": payload.get("pred_bear"),
             "pred_neut": payload.get("pred_neut"),
             "pred_net": payload.get("pred_net"),
+            # ── Setup ──
             "setup_type": payload.get("setup_type"),
             "setup_confirm": payload.get("setup_confirm"),
             "setup_entry": payload.get("setup_entry"),
@@ -746,6 +780,7 @@ def _persist_gom_signal_file(payload: Dict[str, Any]) -> None:
             "setup_tp2": payload.get("setup_tp2"),
             "setup_rr": payload.get("setup_rr"),
             "setup_dir": payload.get("setup_dir"),
+            # ── Spike ──
             "spike_tradable": payload.get("spike_tradable"),
             "imminence_pct": payload.get("imminence_pct"),
             "spike_level": payload.get("spike_level"),
@@ -753,11 +788,45 @@ def _persist_gom_signal_file(payload: Dict[str, Any]) -> None:
             "spike_progress_pct": payload.get("spike_progress_pct"),
             "bars_since_spike": payload.get("bars_since_spike"),
             "spike_freq_bars": payload.get("spike_freq_bars"),
+            # ── Bollinger / OB / Ghost / BC / COG ──
             "bb_up": payload.get("bb_up", 0.0),
             "bb_mid": payload.get("bb_mid", 0.0),
             "bb_dn": payload.get("bb_dn", 0.0),
-            "kola_buy": payload.get("kola_buy", 0.0),
-            "kola_sell": payload.get("kola_sell", 0.0),
+            "ob_bull_top": payload.get("ob_bull_top", 0.0),
+            "ob_bull_bot": payload.get("ob_bull_bot", 0.0),
+            "ob_bear_top": payload.get("ob_bear_top", 0.0),
+            "ob_bear_bot": payload.get("ob_bear_bot", 0.0),
+            "ghost_delta": payload.get("ghost_delta"),
+            "ghost_cvd": payload.get("ghost_cvd"),
+            "ghost_buypct": payload.get("ghost_buypct"),
+            "ghost_compass": payload.get("ghost_compass"),
+            "bc_hour_utc": payload.get("bc_hour_utc"),
+            "bc_confidence": payload.get("bc_confidence"),
+            "bc_tradeable": payload.get("bc_tradeable"),
+            "bc_session": payload.get("bc_session"),
+            "bc_rating": payload.get("bc_rating"),
+            "bc_window_start": payload.get("bc_window_start"),
+            "bc_window_end": payload.get("bc_window_end"),
+            "bc_mapped_key": payload.get("bc_mapped_key"),
+            "cog_direction": payload.get("cog_direction"),
+            "cog_regime": payload.get("cog_regime"),
+            "cog_strength": payload.get("cog_strength"),
+            "cog_confidence": payload.get("cog_confidence"),
+            "cog_short_confidence": payload.get("cog_short_confidence"),
+            "cog_slope_5m": payload.get("cog_slope_5m"),
+            "cog_slope_15m": payload.get("cog_slope_15m"),
+            "correction_exhaustion_pct": payload.get("correction_exhaustion_pct"),
+            "correction_phase": payload.get("correction_phase"),
+            "correction_type": payload.get("correction_type"),
+            "correction_entry_safe": payload.get("correction_entry_safe"),
+            "active_correction": payload.get("active_correction"),
+            "pa_trend": payload.get("pa_trend"),
+            "pa_in_correction": payload.get("pa_in_correction"),
+            "pa_ma50": payload.get("pa_ma50"),
+            "pa_ma200": payload.get("pa_ma200"),
+            "pa_rsi": payload.get("pa_rsi"),
+            "entry_probability": payload.get("entry_probability"),
+            "source": payload.get("source", "tradingview"),
         }
 
         # Charger les données existantes (dict par symbole)
@@ -767,6 +836,16 @@ def _persist_gom_signal_file(payload: Dict[str, Any]) -> None:
                 existing = json.loads(out.read_text(encoding="utf-8"))
                 if not isinstance(existing, dict):
                     existing = {}
+                # Migrate from {"verdicts": [...]} to dict-by-symbol
+                if "verdicts" in existing and isinstance(existing["verdicts"], list):
+                    for v in existing["verdicts"]:
+                        if isinstance(v, dict) and "symbol" in v:
+                            existing[v["symbol"]] = v
+                    del existing["verdicts"]
+                    if "timestamp" in existing:
+                        del existing["timestamp"]
+                    if "source" in existing:
+                        del existing["source"]
             except Exception:
                 existing = {}
 

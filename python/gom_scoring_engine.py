@@ -119,8 +119,8 @@ class GOMScoringEngine:
             return "WAIT", 0
 
         if score_buy > score_sell:
-            # Direction BUY — PERFECT exige gap >= 5.0 (aligné gom_pine_calculator)
-            if gap >= 5.0 and coherence_ok:
+            # Direction BUY — PERFECT exige gap >= 4.0 (Pine / gom_pine_calculator)
+            if gap >= 4.0 and coherence_ok:
                 return "PERFECT BUY", 3
             elif gap >= 2.5 and coherence_ok:
                 return "GOOD BUY", 2
@@ -130,7 +130,7 @@ class GOMScoringEngine:
                 return "WAIT", 0
         elif score_sell > score_buy:
             # Direction SELL
-            if gap >= 5.0 and coherence_ok:
+            if gap >= 4.0 and coherence_ok:
                 return "PERFECT SELL", -3
             elif gap >= 2.5 and coherence_ok:
                 return "GOOD SELL", -2

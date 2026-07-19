@@ -13,12 +13,12 @@
 input group "=== TRAILING STOP ==="
 input bool   UseTrailing            = true;   // Activer trailing stop
 // Trailing : actif dès $2 profit, ferme si recul > 30% du gain depuis le pic ($2 → plancher $1.40)
-input double TrailActivateUSD       = 2.0;    // Activer trailing dès profit >= $2 (métaux/forex)
+input double TrailActivateUSD       = 0.50;    // Activer trailing dès profit >= $0.50 (TOUTES positions)
 input double TrailLockPct           = 0.30;   // Verrouiller 70% du pic — ferme si recul > 30%
 
 input group "=== SORTIE PROFIT STAGNÉ ==="
 input bool   UseStagnationExit        = true;   // Couper si profit stagne puis recule
-input double StagnationTriggerUSD     = 2.0;    // Surveiller dès profit >= $2
+input double StagnationTriggerUSD     = 0.50;    // Surveiller dès profit >= $0.50 (toute position)
 input int    StagnationHoldSec        = 120;    // Temps min en zone profit (sec) — 2 minutes
 input double StagnationMaxGivebackUSD = 0.60;   // Recul max depuis le pic (30% de $2 = $0.60)
 input double StagnationLockMinUSD     = 1.40;   // Plancher absolu après armement ($2 - $0.60)
@@ -54,7 +54,7 @@ input double TargetProfitUSD        = 10.0;   // TP cible (USD)
 input group "=== PROTECTION PROFIT (anti dégringolade) ==="
 input bool   UseProfitGivebackExit  = true;   // Fermer au marché si gain → perte
 // Armé dès $2 profit — ferme si recul > 30% du pic ($2 → plancher $1.40)
-input double ProfitGivebackArmUSD   = 2.0;    // Actif dès pic profit >= $2
+input double ProfitGivebackArmUSD   = 0.50;    // Actif dès pic profit >= $0.50 (TOUTES positions)
 input double MaxGivebackFromPeakUSD = 0.30;   // Recul max = 30% du pic (pic $2 → plancher $1.40)
 input double MaxLossCapUSD          = 3.5;    // Perte absolue max si jamais été en gain (=MaxRiskUSD)
 input int    MaxPositionsPerSymbol  = 2;      // Max positions gérées par symbole (évite 2 dup en perte)
@@ -2871,11 +2871,11 @@ void ManageAllTrailing()
       double newSL    = 0;
       string phase    = "";
 
-      // ── BOOM/CRASH : breakeven dès $2 de gain, puis skip trailing progressif ──
+      // ── BOOM/CRASH : breakeven dès $0.50 de gain, trailing progressif actif ──
       if(IsBoomOrCrashSymbol(sym))
       {
-         // À $2+ de gain net : ramener le SL au breakeven (entry + 1 point)
-         if(profitUSD >= 2.0)
+         // À partir de $0.50 de gain net : ramener le SL au breakeven (entry + 1 point)
+         if(profitUSD >= 0.50)
          {
             double bePrice = NormalizeDouble((dir == 1) ? ep + pt : ep - pt, dg);
             bool slAlreadyBeyondBreakeven = (dir == 1) ? (curSL >= bePrice) : (curSL > 0 && curSL <= bePrice);
@@ -2889,13 +2889,12 @@ void ManageAllTrailing()
                if(beOk && PositionSelectByTicket(ticket))
                {
                   if(trade.PositionModify(ticket, finalBE, posInfo.TakeProfit()))
-                     Print(StringFormat("[TradeManager] 🔒 %s BREAKEVEN $2 #%llu | SL %.5f→%.5f | profit=$%.2f",
+                     Print(StringFormat("[TradeManager] 🔒 %s BREAKEVEN $0.50 #%llu | SL %.5f→%.5f | profit=$%.2f",
                            sym, ticket, curSL, finalBE, profitUSD));
                }
             }
          }
-         // Pas de trailing progressif sur Boom/Crash — le spike est la seule sortie
-         continue;
+         // Trailing progressif activé pour Boom/Crash dès $0.50
       }
 
       // ── MÉTAUX / FOREX : trailing actif dès $2, recul max 30% du pic ────
@@ -4390,16 +4389,32 @@ void IngestPendingOrderForSymbol(const string sym, const string &body)
       if(isXau) Print(StringFormat("[TradeManager] 🔧 %s: SL/TP auto-calculés SL=%.5f TP=%.5f", sym, sl, tp));
    }
 
-   // ⭐ PRIORITÉ GOM: GOOD/PERFECT ou signal score fort (sell>>buy)
-   // Pipeline bypass : skip tous les filtres GOM pour source=pipeline
-   string orderSource = JsonGetString(orderBody, "source");
-   bool isPipelineOrder = (StringCompare(orderSource, "pipeline") == 0);
-   if(isPipelineOrder)
-   {
-      Print(StringFormat("[TradeManager] ✅ %s: source=pipeline — GOM filters BYPASSED", sym));
-      // Nouveau rapport TradingAgents reçu → redessiner BB courbes immédiatement
-      DrawBollingerCurves(true);
-   }
+    // ⭐ PRIORITÉ GOM: GOOD/PERFECT ou signal score fort (sell>>buy)
+    // Pipeline bypass : skip tous les filtres GOM pour source=pipeline
+    string orderSource = JsonGetString(orderBody, "source");
+    bool isPipelineOrder = (StringCompare(orderSource, "pipeline") == 0);
+    if(isPipelineOrder)
+    {
+       Print(StringFormat("[TradeManager] ✅ %s: source=pipeline — GOM filters BYPASSED", sym));
+
+       // Gate direction GOM pour pipeline — éviter SELL quand GOM affiche PERFECT BUY
+       // 999 = init (pas encore update),  0 = WAIT, ±1 = BUY/SELL, ±2 = GOOD, ±3 = PERFECT
+       int gomVn = g_lastGOMVerdictNum;
+       if(gomVn != 999 && gomVn != 0)
+       {
+          int gomSign = (gomVn > 0) ? 1 : -1;
+          int dirSign = (action == "BUY") ? 1 : -1;
+          if(gomSign != dirSign && MathAbs(gomVn) >= 2)
+          {
+             string effVerdict = (MathAbs(gomVn) >= 3) ? "PERFECT" : "GOOD";
+             Print(StringFormat("[TradeManager] 🚫 %s: pipeline %s BLOQUÉ — GOM %s %s (vn=%d) direction opposée",
+                   sym, action, effVerdict, (gomVn > 0 ? "BUY" : "SELL"), gomVn));
+             return;
+          }
+       }
+
+       DrawBollingerCurves(true);
+    }
 
    // Pour Boom/Crash : GOM du chart courant non pertinent → skip tous les filtres GOM
    bool isBoomCrashForGOM = IsBoomOrCrashSymbol(sym);

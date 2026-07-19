@@ -407,7 +407,18 @@ def load_trades() -> list[dict]:
 
 
 def load_gom_verdicts() -> list[dict]:
-    """Charge les verdicts GOM depuis gom_signal.json"""
+    """Charge les verdicts GOM depuis ai_server live, fallback fichier local."""
+    ai_server = os.getenv("AI_SERVER_URL", "http://127.0.0.1:8000").rstrip("/")
+    try:
+        import urllib.request
+        req = urllib.request.Request(f"{ai_server}/gom-verdicts", headers={"Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=6) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        if isinstance(data, dict) and data.get("ok") and isinstance(data.get("verdicts"), list):
+            return data["verdicts"]
+    except Exception as exc:
+        print(f"[Journal] /gom-verdicts indisponible ({exc}) — fallback fichier")
+
     gom_file = Path(__file__).parent.parent / "data" / "gom_signal.json"
     if not gom_file.exists():
         return []

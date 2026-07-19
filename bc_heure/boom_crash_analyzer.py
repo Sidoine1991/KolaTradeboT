@@ -39,15 +39,30 @@ USE_SIMULATION   = True            # True = données simulées réalistes si WS 
 # Symboles Deriv Boom & Crash
 BOOM_CRASH_SYMBOLS = {
     "BOOM1000": {"type": "Boom",  "spike": "up",   "freq": "~1/1000 ticks", "tier": "standard"},
+    "BOOM900":  {"type": "Boom",  "spike": "up",   "freq": "~1/900 ticks",  "tier": "standard"},
+    "BOOM600":  {"type": "Boom",  "spike": "up",   "freq": "~1/600 ticks",  "tier": "standard"},
     "BOOM500":  {"type": "Boom",  "spike": "up",   "freq": "~1/500 ticks",  "tier": "standard"},
     "BOOM300":  {"type": "Boom",  "spike": "up",   "freq": "~1/300 ticks",  "tier": "high_freq"},
     "BOOM200":  {"type": "Boom",  "spike": "up",   "freq": "~1/200 ticks",  "tier": "high_freq"},
+    "BOOM150":  {"type": "Boom",  "spike": "up",   "freq": "~1/150 ticks",  "tier": "high_freq"},
     "BOOM100":  {"type": "Boom",  "spike": "up",   "freq": "~1/100 ticks",  "tier": "ultra_freq"},
+    "BOOM50":   {"type": "Boom",  "spike": "up",   "freq": "~1/50 ticks",   "tier": "ultra_freq"},
     "CRASH1000":{"type": "Crash", "spike": "down", "freq": "~1/1000 ticks", "tier": "standard"},
+    "CRASH900": {"type": "Crash", "spike": "down", "freq": "~1/900 ticks",  "tier": "standard"},
+    "CRASH600": {"type": "Crash", "spike": "down", "freq": "~1/600 ticks",  "tier": "standard"},
     "CRASH500": {"type": "Crash", "spike": "down", "freq": "~1/500 ticks",  "tier": "standard"},
     "CRASH300": {"type": "Crash", "spike": "down", "freq": "~1/300 ticks",  "tier": "high_freq"},
     "CRASH200": {"type": "Crash", "spike": "down", "freq": "~1/200 ticks",  "tier": "high_freq"},
+    "CRASH150": {"type": "Crash", "spike": "down", "freq": "~1/150 ticks",  "tier": "high_freq"},
     "CRASH100": {"type": "Crash", "spike": "down", "freq": "~1/100 ticks",  "tier": "ultra_freq"},
+    "CRASH50":  {"type": "Crash", "spike": "down", "freq": "~1/50 ticks",   "tier": "ultra_freq"},
+    # Weltrade equivalents
+    "PAINX600":  {"type": "Crash", "spike": "down", "freq": "~1/600 ticks",  "tier": "standard",  "broker": "weltrade"},
+    "PAINX1200": {"type": "Crash", "spike": "down", "freq": "~1/1200 ticks", "tier": "standard",  "broker": "weltrade"},
+    "GAINX400":  {"type": "Boom",  "spike": "up",   "freq": "~1/400 ticks",  "tier": "standard",  "broker": "weltrade"},
+    "GAINX600":  {"type": "Boom",  "spike": "up",   "freq": "~1/600 ticks",  "tier": "standard",  "broker": "weltrade"},
+    "GAINX800":  {"type": "Boom",  "spike": "up",   "freq": "~1/800 ticks",  "tier": "standard",  "broker": "weltrade"},
+    "GAINX1200": {"type": "Boom",  "spike": "up",   "freq": "~1/1200 ticks", "tier": "standard",  "broker": "weltrade"},
 }
 
 # Heures UTC de référence (marchés actifs)

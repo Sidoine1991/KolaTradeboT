@@ -1,7 +1,7 @@
 //+------------------------------------------------------------------+
 //| SMC_MarketIntelligence.mqh                                       |
 //| Market regime detection, correlation filter, session quality     |
-//| Améliore la sélection des trades en filtrant par régime/session  |
+//| Am�liore la s�lection des trades en filtrant par r�gime/session  |
 //+------------------------------------------------------------------+
 #property copyright "TradBOT"
 #property version   "1.00"
@@ -14,7 +14,7 @@
 //+------------------------------------------------------------------+
 ENUM_SYMBOL_CATEGORY SMC_GetSymbolCategory(const string symbol);
 
-// InpMagicNumber is input global in SMC_Universal.mq5 — accessible directly
+// InpMagicNumber is input global in SMC_Universal.mq5 � accessible directly
 
 //+------------------------------------------------------------------+
 //| Module-level CPositionInfo (main file declares 'posInfo' later)  |
@@ -24,16 +24,16 @@ CPositionInfo g_posInfoMI;
 //+------------------------------------------------------------------+
 //| Configuration variables                                          |
 //+------------------------------------------------------------------+
-bool   ExtUseRegimeFilter       = true;    // Bloquer hors régime idéal
+bool   ExtUseRegimeFilter       = true;    // Bloquer hors r�gime id�al
 double ExtRangeATRPercentile    = 0.25;    // Range si ATR < 25e percentile
 double ExtTrendADXThreshold     = 28.0;    // Trend fort si ADX > 28
-double ExtExtremeATRPercentile  = 0.85;    // Volatilité extrême si ATR > 85e percentile
+double ExtExtremeATRPercentile  = 0.85;    // Volatilit� extr�me si ATR > 85e percentile
 
-bool   ExtUseCorrelationFilter  = true;    // Bloquer positions corrélées
+bool   ExtUseCorrelationFilter  = true;    // Bloquer positions corr�l�es
 int    ExtMaxPerGroup           = 1;       // Max positions par groupe
 
-bool   ExtUseSessionQuality     = true;    // Filtrer par qualité de session
-double ExtMinSessionQuality     = 50.0;    // Qualité min (0-100) pour trader
+bool   ExtUseSessionQuality     = true;    // Filtrer par qualit� de session
+double ExtMinSessionQuality     = 50.0;    // Qualit� min (0-100) pour trader
 
 //+------------------------------------------------------------------+
 //| Market regime enum                                               |
@@ -41,13 +41,13 @@ double ExtMinSessionQuality     = 50.0;    // Qualité min (0-100) pour trader
 enum ENUM_MARKET_REGIME
 {
    REGIME_UNKNOWN      = 0,
-   REGIME_RANGE        = 1,   // Marché range / sideway
-   REGIME_TREND_BULL   = 2,   // Tendance haussière modérée
-   REGIME_TREND_BEAR   = 3,   // Tendance baissière modérée
-   REGIME_STRONG_BULL  = 4,   // Tendance haussière forte
-   REGIME_STRONG_BEAR  = 5,   // Tendance baissière forte
-   REGIME_VOLATILE     = 6,   // Volatilité excessive
-   REGIME_SQUEEZE      = 7    // Compression (pré-mouvement)
+   REGIME_RANGE        = 1,   // March� range / sideway
+   REGIME_TREND_BULL   = 2,   // Tendance haussi�re mod�r�e
+   REGIME_TREND_BEAR   = 3,   // Tendance baissi�re mod�r�e
+   REGIME_STRONG_BULL  = 4,   // Tendance haussi�re forte
+   REGIME_STRONG_BEAR  = 5,   // Tendance baissi�re forte
+   REGIME_VOLATILE     = 6,   // Volatilit� excessive
+   REGIME_SQUEEZE      = 7    // Compression (pr�-mouvement)
 };
 
 //+------------------------------------------------------------------+
@@ -72,17 +72,17 @@ enum ENUM_CORRELATION_GROUP
 //+------------------------------------------------------------------+
 struct SMC_SessionInfo
 {
-   int    hourBegin;    // Heure de début (UTC)
+   int    hourBegin;    // Heure de d�but (UTC)
    int    hourEnd;      // Heure de fin (UTC)
    string label;        // "London AM", "NY Open", etc.
-   double quality;      // Qualité 0-100 pour ce symbole/catégorie
+   double quality;      // Qualit� 0-100 pour ce symbole/cat�gorie
 };
 
 //+------------------------------------------------------------------+
 //| Globals                                                          |
 //+------------------------------------------------------------------+
 ENUM_MARKET_REGIME g_marketRegime       = REGIME_UNKNOWN;
-double             g_regimeScore        = 50.0;     // 0-100 adapté au régime
+double             g_regimeScore        = 50.0;     // 0-100 adapt� au r�gime
 string             g_regimeName         = "UNKNOWN";
 datetime           g_regimeLastUpdate   = 0;
 
@@ -91,7 +91,7 @@ int                g_regimeATR_Handle   = INVALID_HANDLE;
 int                g_regimeADX_Handle   = INVALID_HANDLE;
 int                g_regimeBB_Handle    = INVALID_HANDLE;
 
-// Positions par groupe de corrélation
+// Positions par groupe de corr�lation
 int                g_groupPositionCount[10];
 
 // Session quality cache
@@ -105,12 +105,12 @@ ENUM_CORRELATION_GROUP SMC_GetCorrelationGroup(const string symbol)
    string s = symbol;
    StringToUpper(s);
 
-   // Boom/Crash et équivalents
+   // Boom/Crash et �quivalents
    if(StringFind(s, "BOOM") >= 0 || StringFind(s, "CRASH") >= 0 ||
       StringFind(s, "PAINX") >= 0 || StringFind(s, "GAINX") >= 0)
       return CORR_GROUP_BC;
 
-   // Métaux
+   // M�taux
    if(StringFind(s, "XAU") >= 0 || StringFind(s, "XAG") >= 0 ||
       StringFind(s, "GOLD") >= 0 || StringFind(s, "SILVER") >= 0)
       return CORR_GROUP_METAL;
@@ -127,7 +127,7 @@ ENUM_CORRELATION_GROUP SMC_GetCorrelationGroup(const string symbol)
       StringFind(s, "UK100") >= 0)
       return CORR_GROUP_INDEX;
 
-   // Pétrole
+   // P�trole
    if(StringFind(s, "WTI") >= 0 || StringFind(s, "BRENT") >= 0 ||
       StringFind(s, "OIL") >= 0 || StringFind(s, "CL") >= 0)
       return CORR_GROUP_OIL;
@@ -179,8 +179,8 @@ bool SMC_CorrelationAllowsTrade(const string symbol, const int dirSign)
    if(grp == CORR_GROUP_NONE) return true;
    if(grp >= 10) return true;
 
-   // Gérer les paires EUR: EURUSD long + EURJPY long = même direction EUR
-   // Compter uniquement les positions dans la MÊME direction
+   // G�rer les paires EUR: EURUSD long + EURJPY long = m�me direction EUR
+   // Compter uniquement les positions dans la M�ME direction
    int sameDirCount = 0;
    for(int i = PositionsTotal() - 1; i >= 0; i--)
    {
@@ -197,7 +197,7 @@ bool SMC_CorrelationAllowsTrade(const string symbol, const int dirSign)
 
    if(sameDirCount >= ExtMaxPerGroup)
    {
-      Print(StringFormat("[CORR] BLOQUE — %s direction %d: déjà %d position(s) dans le groupe #%d",
+      Print(StringFormat("[CORR] BLOQUE � %s direction %d: d�j� %d position(s) dans le groupe #%d",
             symbol, dirSign, sameDirCount, (int)grp));
       return false;
    }
@@ -206,7 +206,7 @@ bool SMC_CorrelationAllowsTrade(const string symbol, const int dirSign)
 }
 
 //+------------------------------------------------------------------+
-//| Get ATR percentile (simplifié — compare aux N dernières barres)  |
+//| Get ATR percentile (simplifi� � compare aux N derni�res barres)  |
 //+------------------------------------------------------------------+
 double SMC_GetATRPercentile(const string symbol, const ENUM_TIMEFRAMES tf, const int period, const int lookback)
 {
@@ -250,7 +250,7 @@ ENUM_MARKET_REGIME SMC_DetectRegime(const string symbol)
       adxVal = adxBuf[0];
    if(adxHandle != INVALID_HANDLE) IndicatorRelease(adxHandle);
 
-   // ATR pour volatilité
+   // ATR pour volatilit�
    double atrCurrent = 0;
    double atrBuf[];
    ArraySetAsSeries(atrBuf, true);
@@ -276,21 +276,21 @@ ENUM_MARKET_REGIME SMC_DetectRegime(const string symbol)
    int emaDir = 0;
    if(emaH != INVALID_HANDLE && CopyBuffer(emaH, 0, 0, 3, emaBuf) >= 3)
    {
-      if(emaBuf[0] > emaBuf[2] * 1.001) emaDir = 1;     // pente haussière significative
-      else if(emaBuf[0] < emaBuf[2] * 0.999) emaDir = -1; // pente baissière significative
+      if(emaBuf[0] > emaBuf[2] * 1.001) emaDir = 1;     // pente haussi�re significative
+      else if(emaBuf[0] < emaBuf[2] * 0.999) emaDir = -1; // pente baissi�re significative
    }
    if(emaH != INVALID_HANDLE) IndicatorRelease(emaH);
 
    // Calculer ATR percentile sur 48h (48 barres H1)
    double atrPct = SMC_GetATRPercentile(symbol, PERIOD_H1, 14, 48);
 
-   // --- Logique de décision ---
+   // --- Logique de d�cision ---
 
-   // Volatilité extrême
+   // Volatilit� extr�me
    if(atrPct > ExtExtremeATRPercentile)
       return REGIME_VOLATILE;
 
-   // BB squeeze (BB très serré = compression)
+   // BB squeeze (BB tr�s serr� = compression)
    if(bbWidth > 0 && atrCurrent > 0)
    {
       double bbPct = SMC_GetATRPercentile(symbol, PERIOD_H1, 20, 48); // proxy
@@ -303,17 +303,17 @@ ENUM_MARKET_REGIME SMC_DetectRegime(const string symbol)
    {
       if(emaDir == 1) return REGIME_STRONG_BULL;
       if(emaDir == -1) return REGIME_STRONG_BEAR;
-      return REGIME_VOLATILE; // ADX haut mais direction ambiguë
+      return REGIME_VOLATILE; // ADX haut mais direction ambigu�
    }
 
-   // Trend modéré
+   // Trend mod�r�
    if(adxVal > 20)
    {
       if(emaDir == 1) return REGIME_TREND_BULL;
       if(emaDir == -1) return REGIME_TREND_BEAR;
    }
 
-   // Range (ADX bas + BB serré)
+   // Range (ADX bas + BB serr�)
    if(atrPct < ExtRangeATRPercentile || adxVal < 20)
       return REGIME_RANGE;
 
@@ -321,7 +321,7 @@ ENUM_MARKET_REGIME SMC_DetectRegime(const string symbol)
 }
 
 //+------------------------------------------------------------------+
-//| Get regime score (0-100) — how favorable for SMC trades         |
+//| Get regime score (0-100) � how favorable for SMC trades         |
 //+------------------------------------------------------------------+
 double SMC_GetRegimeScore(const ENUM_MARKET_REGIME regime, const int dirSign)
 {
@@ -338,9 +338,9 @@ double SMC_GetRegimeScore(const ENUM_MARKET_REGIME regime, const int dirSign)
       case REGIME_RANGE:
          return 30.0;  // Mauvais pour SMC
       case REGIME_VOLATILE:
-         return 15.0;  // Très mauvais
+         return 15.0;  // Tr�s mauvais
       case REGIME_SQUEEZE:
-         return (dirSign == 1 || dirSign == -1) ? 60.0 : 50.0; // Préparation mouvement
+         return (dirSign == 1 || dirSign == -1) ? 60.0 : 50.0; // Pr�paration mouvement
       default:
          return 50.0;
    }
@@ -359,7 +359,7 @@ bool SMC_RegimeAllowsTrade(const string symbol, const int dirSign, double &outSc
 
    ENUM_MARKET_REGIME regime = SMC_DetectRegime(symbol);
 
-   // Mettre à jour globals pour dashboard
+   // Mettre � jour globals pour dashboard
    g_marketRegime = regime;
    g_regimeScore = SMC_GetRegimeScore(regime, dirSign);
    outScore = g_regimeScore;
@@ -367,19 +367,19 @@ bool SMC_RegimeAllowsTrade(const string symbol, const int dirSign, double &outSc
    switch(regime)
    {
       case REGIME_RANGE:
-         Print(StringFormat("[REGIME] BLOQUE %s — Marché RANGE (ATR bas, pas de tendance) | Score=%.0f",
+         Print(StringFormat("[REGIME] BLOQUE %s � March� RANGE (ATR bas, pas de tendance) | Score=%.0f",
                symbol, g_regimeScore));
          return false;
 
       case REGIME_VOLATILE:
-         Print(StringFormat("[REGIME] BLOQUE %s — Volatilité EXTRÊME (ATR > %.0f%% percentile) | Score=%.0f",
+         Print(StringFormat("[REGIME] BLOQUE %s � Volatilit� EXTR�ME (ATR > %.0f%% percentile) | Score=%.0f",
                symbol, ExtExtremeATRPercentile * 100, g_regimeScore));
          return false;
 
       case REGIME_STRONG_BULL:
          if(dirSign == -1)
          {
-            Print(StringFormat("[REGIME] BLOQUE %s SELL — Marché FORTEMENT HAUSSIER | Score=%.0f",
+            Print(StringFormat("[REGIME] BLOQUE %s SELL � March� FORTEMENT HAUSSIER | Score=%.0f",
                   symbol, g_regimeScore));
             return false;
          }
@@ -388,7 +388,7 @@ bool SMC_RegimeAllowsTrade(const string symbol, const int dirSign, double &outSc
       case REGIME_STRONG_BEAR:
          if(dirSign == 1)
          {
-            Print(StringFormat("[REGIME] BLOQUE %s BUY — Marché FORTEMENT BAISSIER | Score=%.0f",
+            Print(StringFormat("[REGIME] BLOQUE %s BUY � March� FORTEMENT BAISSIER | Score=%.0f",
                   symbol, g_regimeScore));
             return false;
          }
@@ -405,14 +405,14 @@ bool SMC_RegimeAllowsTrade(const string symbol, const int dirSign, double &outSc
 
 //+------------------------------------------------------------------+
 //| Session quality data                                             |
-//| Chaque catégorie a des créneaux horaires de qualité optimale     |
+//| Chaque cat�gorie a des cr�neaux horaires de qualit� optimale     |
 //+------------------------------------------------------------------+
 double SMC_GetSessionQuality(const string symbol, const int utcHour)
 {
    ENUM_SYMBOL_CATEGORY cat = SMC_GetSymbolCategory(symbol);
    ENUM_CORRELATION_GROUP grp = SMC_GetCorrelationGroup(symbol);
 
-   // Qualité par heure UTC pour chaque catégorie (0-100)
+   // Qualit� par heure UTC pour chaque cat�gorie (0-100)
    // Heures: 0-23 UTC
 
    if(cat == SYM_FOREX)
@@ -478,7 +478,7 @@ bool SMC_SessionQualityAllowsTrade(const string symbol)
 
    if(quality < ExtMinSessionQuality)
    {
-      Print(StringFormat("[SESSION] BLOQUE %s — Heure %02d:00 UTC qualité=%.0f (min %.0f)",
+      Print(StringFormat("[SESSION] BLOQUE %s � Heure %02d:00 UTC qualit�=%.0f (min %.0f)",
             symbol, utcHour, quality, ExtMinSessionQuality));
       return false;
    }
@@ -487,7 +487,7 @@ bool SMC_SessionQualityAllowsTrade(const string symbol)
 }
 
 //+------------------------------------------------------------------+
-//| MTF structure enhancement — H4/H1/M15 alignment check           |
+//| MTF structure enhancement � H4/H1/M15 alignment check           |
 //| Returns number of aligned TFs (0-3) and detailed scores         |
 //+------------------------------------------------------------------+
 int SMC_GetMTFAlignment(const string symbol, const int dirSign,
@@ -584,7 +584,7 @@ int SMC_GetMTFAlignment(const string symbol, const int dirSign,
       if(m15dir == dirSign)
       {
          aligned++;
-         // Plus le RSI est fort/extrême (dans la bonne direction), meilleur est le score
+         // Plus le RSI est fort/extr�me (dans la bonne direction), meilleur est le score
          double rsiStrength = (dirSign == 1) ? (m15rsi[0] - 50) : (50 - m15rsi[0]);
          outM15score = 65.0 + MathMin(rsiStrength * 1.5, 35.0);
       }
@@ -593,7 +593,7 @@ int SMC_GetMTFAlignment(const string symbol, const int dirSign,
       else
          outM15score = 10.0;
 
-      // Vérifier momentum: RSI progression
+      // V�rifier momentum: RSI progression
       if(CopyRates(symbol, PERIOD_M15, 0, 3, m15r) >= 3)
       {
          double body1 = m15r[0].close - m15r[0].open;
@@ -622,7 +622,7 @@ int SMC_GetMTFAlignment(const string symbol, const int dirSign,
 }
 
 //+------------------------------------------------------------------+
-//| Main market filter — combine regime + correlation + session      |
+//| Main market filter � combine regime + correlation + session      |
 //| Returns true if trade is allowed, false if blocked               |
 //+------------------------------------------------------------------+
 bool SMC_MarketAllowsTrade(const string symbol, const int dirSign, double &totalScore)
@@ -631,7 +631,7 @@ bool SMC_MarketAllowsTrade(const string symbol, const int dirSign, double &total
    double componentScore = 100.0;
    int components = 0;
 
-   // 1. Régime filter
+   // 1. R�gime filter
    double regimeScore = 100.0;
    if(ExtUseRegimeFilter)
    {
@@ -711,7 +711,7 @@ void SMC_InitMarketIntelligence()
    g_marketRegime = REGIME_UNKNOWN;
    g_regimeScore = 50.0;
    g_currentSessionQuality = 50.0;
-   Print("[SMC-Intelligence] Module initialisé | Regime=", ExtUseRegimeFilter,
+   Print("[SMC-Intelligence] Module initialis� | Regime=", ExtUseRegimeFilter,
          " Corr=", ExtUseCorrelationFilter, " Session=", ExtUseSessionQuality);
 }
 //+------------------------------------------------------------------+

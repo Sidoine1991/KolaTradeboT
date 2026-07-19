@@ -1,30 +1,44 @@
 @echo off
-REM start-mt5-poller.bat
-REM Démarre le GOM MT5 Poller en boucle continue
+REM start-mt5-poller.bat — Poller GOM (ai_server requis sur :8000)
 
 setlocal enabledelayedexpansion
 
 echo.
 echo =====================================================
-echo  🎯 GOM MT5 POLLER — LIVE DATA FEED
+echo  GOM MT5 POLLER — LIVE DATA FEED
 echo =====================================================
-echo.
-echo Ce processus:
-echo   1. Lit les candles LIVE depuis MT5 Terminal
-echo   2. Calcule GOM (Boom/Crash/Forex/Metals)
-echo   3. POST verdicts à /gom-verdict endpoint
-echo   4. Renouvelle TOUTES LES 30 SECONDES
-echo.
-echo Résultat: Verdicts GOM TOUJOURS EN LIVE
 echo.
 
 cd /d D:\Dev\TradBOT
 
-echo 🚀 Lancement du MT5 GOM Poller...
-echo.
+set PYTHON=python
+where python >nul 2>&1 || set PYTHON=C:\Python314_old\python.exe
 
-python Python/gom_mt5_poller.py
+curl -s -m 3 http://127.0.0.1:8000/health >nul 2>&1
+if %ERRORLEVEL% NEQ 0 (
+    echo [ATTENTION] ai_server non detecte sur http://127.0.0.1:8000
+    echo.
+    echo Option A — tout demarrer ensemble:
+    echo   start-gom-pipeline.bat
+    echo.
+    echo Option B — ai_server seul puis poller:
+    echo   python ai_server.py
+    echo   python python\gom_mt5_poller.py
+    echo.
+    choice /C AO /M "Demarrer ai_server maintenant (A) ou continuer sans (O)"
+    if errorlevel 2 goto RUN_POLLER
+    if errorlevel 1 (
+        start "TradBOT ai_server" cmd /k "%PYTHON%" ai_server.py
+        echo Attente ai_server...
+        timeout /t 15 /nobreak >nul
+    )
+)
+
+:RUN_POLLER
+echo.
+echo Lancement du poller...
+"%PYTHON%" python\gom_mt5_poller.py
 
 echo.
-echo ⚠️  Poller arrêté
+echo Poller arrete
 pause

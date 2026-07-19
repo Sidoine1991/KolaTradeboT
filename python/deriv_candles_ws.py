@@ -37,6 +37,19 @@ DERIV_SYMBOL_MAP = {
     'Crash 500 Index': 'R_50',    # Crash 500
     'Boom 1000 Index': 'R_100',   # Boom 1000
     'Crash 1000 Index': 'R_100',  # Crash 1000
+    # Volatility Indices (Deriv) — FX Vol / SFx Vol / SFV Vol (Weltrade) -> Volatility 75
+    'Volatility 10 Index': 'R_10',
+    'Volatility 10 (1s) Index': 'R_10',
+    'Volatility 25 Index': 'R_25',
+    'Volatility 25 (1s) Index': 'R_25',
+    'Volatility 50 Index': 'R_50',
+    'Volatility 50 (1s) Index': 'R_50',
+    'Volatility 75 Index': 'R_75',
+    'Volatility 75 (1s) Index': 'R_75',
+    'Volatility 100 Index': 'R_100',
+    'Volatility 100 (1s) Index': 'R_100',
+    'Volatility 150 Index': 'R_150',
+    'Volatility 250 Index': 'R_250',
 }
 
 # Mapping des timeframes

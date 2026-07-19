@@ -366,7 +366,15 @@ def _score_recovery_layer(
 def _phase_from_scalp(
     corr_type: str, confidence: float, exec_depth: float, slope_m1: float, regime: int
 ) -> Tuple[str, bool]:
-    """Map type + confiance → phase EA (trending|correcting|exhausted|resuming|ranging)."""
+    """Map type + confiance → phase EA (trending|correcting|exhausted|resuming|ranging).
+
+    RÈGLE STRICTE M1 (Boom/Crash) :
+      - On ne passe JAMAIS en "exhausted" ou "resuming" sans flip momentum confirmé
+        (slope_m1 * regime > 0 signifie que M1 a repris la direction de la tendance).
+      - micro_pullback nécessite slope_m1 * regime > 0.5 pour "resuming"
+        (pas juste > 0.3) — évite d'entrer pendant la micro-correction.
+      - m5/m15_pullback nécessitent un momentum encore plus fort.
+    """
     if corr_type == "range":
         return "ranging", confidence >= 38
 
@@ -376,26 +384,200 @@ def _phase_from_scalp(
     if corr_type == "trend_run":
         return "trending", confidence >= 35
 
-    mom_ok = slope_m1 * regime > 0.3
+    # Flip momentum : M1 doit être retourné dans la direction de la tendance
+    mom_strong = slope_m1 * regime > 0.5   # flip confirmé (pas juste > 0)
+    mom_weak   = slope_m1 * regime > 0.0   # momentum neutre ou retourné
 
     if corr_type == "micro_pullback":
-        if confidence >= 55 and mom_ok:
+        # RESUMING : correction finie + flip momentum fort + confiance haute
+        if confidence >= 60 and mom_strong and exec_depth < 0.25:
             return "resuming", True
-        if confidence >= 42 or (exec_depth < 0.2 and mom_ok):
-            return "exhausted", confidence >= 40
-        return "correcting", confidence >= 48
+        # EXHAUSTED : correction presque finie + momentum au moins neutre
+        # NE PAS autoriser exhausted si slope est encore négatif (= correction en cours)
+        if confidence >= 55 and mom_weak:
+            return "exhausted", confidence >= 50
+        # Sinon = correcting (trop tôt)
+        return "correcting", confidence >= 55
 
     if corr_type == "m5_pullback":
-        if confidence >= 58 and mom_ok:
+        if confidence >= 65 and mom_strong:
+            return "resuming", True
+        if confidence >= 58 and mom_weak:
             return "exhausted", True
-        return "correcting", confidence >= 50
+        return "correcting", confidence >= 55
 
     if corr_type == "m15_pullback":
-        if confidence >= 62 and mom_ok:
-            return "exhausted", confidence >= 55
-        return "correcting", confidence >= 52
+        if confidence >= 70 and mom_strong:
+            return "resuming", True
+        if confidence >= 62 and mom_weak:
+            return "exhausted", confidence >= 58
+        return "correcting", confidence >= 58
 
     return "trending", confidence >= 35
+
+
+def is_m1_correction_active(
+    corr_type: str,
+    phase: str,
+    exec_depth: float,
+    slope_m1: float,
+    regime: int,
+    confidence: float,
+) -> Dict[str, Any]:
+    """
+    Gate strict M1 pour Boom/Crash : retourne True si une micro-correction
+    est EN COURS et qu'il ne faut PAS entrer.
+
+    Logique :
+      - Si phase == "correcting" ou "ranging" → BLOCK (correction en cours)
+      - Si corr_type == "micro_pullback" ET slope_m1 * regime < 0.5 → BLOCK
+        (M1 n'a pas encore flip dans la bonne direction)
+      - Si exec_depth > 0.3 ET mom弱 → BLOCK (pullback trop profond)
+      - Sinon → OK (entrer)
+
+    Retourne :
+      {
+        "blocked": bool,          # True = NE PAS entrer
+        "reason": str,            # Raison du blocage (ou "OK")
+        "correction_active": bool # True si micro-correction détectée
+      }
+    """
+    mom_strong = slope_m1 * regime > 0.5
+    mom_weak   = slope_m1 * regime > 0.0
+
+    # 1. Phase correcting = toujours bloquer
+    if phase == "correcting":
+        return {
+            "blocked": True,
+            "reason": f"Phase '{phase}' — correction en cours (type={corr_type})",
+            "correction_active": True,
+        }
+
+    # 2. Phase ranging = toujours bloquer
+    if phase == "ranging":
+        return {
+            "blocked": True,
+            "reason": "Phase 'ranging' — marché indécis, pas de direction claire",
+            "correction_active": True,
+        }
+
+    # 3. micro_pullback sans flip momentum = bloquer
+    if corr_type == "micro_pullback" and not mom_strong:
+        return {
+            "blocked": True,
+            "reason": (
+                f"Micro-pullback en cours (depth={exec_depth:.0%}, "
+                f"slope_m1×regime={slope_m1 * regime:.2f} < 0.5) — "
+                f"attendre flip momentum M1"
+            ),
+            "correction_active": True,
+        }
+
+    # 4. Pullback profond non résolu = bloquer
+    if exec_depth > 0.3 and not mom_weak:
+        return {
+            "blocked": True,
+            "reason": (
+                f"Pullback profond (depth={exec_depth:.0%}) avec "
+                f"slope négatif ({slope_m1 * regime:.2f}) — "
+                f"correction pas terminée"
+            ),
+            "correction_active": True,
+        }
+
+    # 5. m5/m15 pullback sans flip = bloquer
+    if corr_type in ("m5_pullback", "m15_pullback") and not mom_weak:
+        return {
+            "blocked": True,
+            "reason": (
+                f"{corr_type} en cours (slope_m1×regime={slope_m1 * regime:.2f}) — "
+                f"momentum pas encore retourné"
+            ),
+            "correction_active": True,
+        }
+
+    # 6. counter_move = toujours bloquer
+    if corr_type == "counter_move":
+        return {
+            "blocked": True,
+            "reason": "Contre-tendance détectée — éviter ce trade",
+            "correction_active": True,
+        }
+
+    # 7. Tous les checks passés → autoriser l'entrée
+    return {
+        "blocked": False,
+        "reason": "OK" if phase in ("trending", "resuming") else f"Phase '{phase}' — momentum confirmé",
+        "correction_active": corr_type in ("micro_pullback", "m5_pullback", "m15_pullback"),
+    }
+
+
+_STAGE_LABELS = {
+    "none": "TENDANCE",
+    "start": "DEBUT",
+    "middle": "MILIEU",
+    "end": "FIN",
+}
+
+
+def compute_correction_stage(
+    corr_type: str,
+    phase: str,
+    exec_depth: float,
+    entry_safe: bool,
+    m1_blocked: bool,
+    active_correction: bool,
+    confidence: float = 50.0,
+) -> Dict[str, Any]:
+    """
+    Phase lisible pour l'EA et le graphique :
+      none   — pas de correction active (tendance)
+      start  — correction qui démarre (entrées interdites)
+      middle — correction en cours (entrées interdites)
+      end    — correction terminée / reprise (entrées autorisées si entry_safe)
+    """
+    depth = float(exec_depth)
+    if depth <= 1.0:
+        depth *= 100.0
+    phase_l = (phase or "").lower()
+    ctype = corr_type or "unknown"
+
+    stage = "none"
+    blocks_entry = False
+
+    if ctype == "counter_move":
+        stage, blocks_entry = "middle", True
+    elif ctype == "range" or phase_l == "ranging":
+        stage, blocks_entry = "middle", True
+    elif phase_l == "resuming" or (
+        phase_l == "exhausted" and entry_safe and not m1_blocked
+    ):
+        stage, blocks_entry = "end", False
+    elif not active_correction and ctype == "trend_run" and phase_l in ("trending", ""):
+        stage, blocks_entry = "none", False
+    elif m1_blocked or phase_l == "correcting" or active_correction:
+        if depth < 22.0:
+            stage, blocks_entry = "start", True
+        elif depth < 58.0:
+            stage, blocks_entry = "middle", True
+        elif entry_safe or confidence >= 58.0:
+            stage, blocks_entry = "end", False
+        else:
+            stage, blocks_entry = "middle", True
+    elif phase_l == "exhausted":
+        stage = "end" if entry_safe else "middle"
+        blocks_entry = not entry_safe
+    elif phase_l == "trending" and depth < 15.0:
+        stage, blocks_entry = "none", False
+
+    if stage in ("start", "middle"):
+        blocks_entry = True
+
+    return {
+        "correction_stage": stage,
+        "correction_stage_label": _STAGE_LABELS.get(stage, stage.upper()),
+        "correction_stage_blocks_entry": blocks_entry,
+    }
 
 
 def _strength_label(confidence: float, corr_type: str) -> str:
@@ -406,6 +588,79 @@ def _strength_label(confidence: float, corr_type: str) -> str:
     if confidence >= 48:
         return "moderate"
     return "weak"
+
+
+def compute_price_action_zones(
+    df: Optional[pd.DataFrame],
+    ma_fast: int = 50,
+    ma_slow: int = 200,
+    consolidation_gap_pct: float = 0.08,
+) -> Dict[str, Any]:
+    """
+    Zones correction / consolidation via price action (MA50/MA200 + RSI + corps M1).
+    Complète le scoring RSI multi-TF pour l'EA et le dashboard.
+    """
+    empty: Dict[str, Any] = {
+        "price_action_trend": "UNKNOWN",
+        "price_action_in_correction": False,
+        "price_action_consolidation": False,
+        "price_action_ma50": None,
+        "price_action_ma200": None,
+        "price_action_rsi": None,
+        "price_action_zone_support": None,
+        "price_action_zone_resistance": None,
+        "price_action_correction_depth_pct": 0.0,
+    }
+    if df is None or len(df) < ma_slow + 5 or "close" not in df.columns:
+        return empty
+
+    close = df["close"].astype(float)
+    ma50 = close.rolling(ma_fast).mean()
+    ma200 = close.rolling(ma_slow).mean()
+    if np.isnan(ma50.iloc[-1]) or np.isnan(ma200.iloc[-1]):
+        return empty
+
+    rsi = rsi_series(close, 14)
+    last_close = float(close.iloc[-1])
+    last_ma50 = float(ma50.iloc[-1])
+    last_ma200 = float(ma200.iloc[-1])
+    last_rsi = float(rsi.iloc[-1]) if not np.isnan(rsi.iloc[-1]) else 50.0
+
+    uptrend = last_ma50 > last_ma200
+    trend = "UP" if uptrend else "DOWN"
+    ma_gap_pct = abs(last_ma50 - last_ma200) / max(last_close, 1e-9) * 100.0
+
+    in_correction = (uptrend and last_close < last_ma50) or (
+        not uptrend and last_close > last_ma50
+    )
+
+    small_body_ratio = 0.5
+    if "open" in df.columns and "high" in df.columns and "low" in df.columns:
+        bodies = (df["close"] - df["open"]).abs().iloc[-8:]
+        ranges = (df["high"] - df["low"]).astype(float).replace(0, np.nan).iloc[-8:]
+        valid = ranges.dropna()
+        if len(valid) >= 3:
+            small_body_ratio = float((bodies.iloc[-len(valid) :] / valid).mean())
+
+    is_consolidation = ma_gap_pct < consolidation_gap_pct or (
+        small_body_ratio < 0.42 and ma_gap_pct < consolidation_gap_pct * 2.5
+    )
+
+    return {
+        "price_action_trend": trend,
+        "price_action_in_correction": bool(in_correction),
+        "price_action_consolidation": bool(is_consolidation),
+        "price_action_ma50": round(last_ma50, 5),
+        "price_action_ma200": round(last_ma200, 5),
+        "price_action_rsi": round(last_rsi, 1),
+        "price_action_zone_support": round(min(last_ma50, last_ma200), 5),
+        "price_action_zone_resistance": round(max(last_ma50, last_ma200), 5),
+        "price_action_correction_depth_pct": round(
+            abs(last_close - last_ma50) / max(last_close, 1e-9) * 100.0, 3
+        ),
+        "price_action_ma_gap_pct": round(ma_gap_pct, 4),
+        "price_action_small_body_ratio": round(small_body_ratio, 3),
+    }
 
 
 def compute_correction_exhaustion(
@@ -507,6 +762,42 @@ def compute_correction_exhaustion(
         and (slope_m1 * regime > 0 or corr_type == "trend_run")
     )
 
+    price_action = compute_price_action_zones(df_m5 if df_m5 is not None else df_m1)
+    if price_action.get("price_action_consolidation"):
+        corr_type = "range" if corr_type == "trend_run" else corr_type
+        phase = "ranging" if price_action["price_action_consolidation"] else phase
+    if price_action.get("price_action_in_correction") and corr_type == "trend_run":
+        corr_type = "micro_pullback"
+
+    # ── Gate strict M1 : bloque l'entrée si micro-correction en cours ───────
+    m1_gate = is_m1_correction_active(
+        corr_type=corr_type,
+        phase=phase,
+        exec_depth=exec_depth,
+        slope_m1=slope_m1,
+        regime=regime,
+        confidence=confidence,
+    )
+
+    # Si le gate bloque, on force execution_ready = False
+    if m1_gate["blocked"]:
+        execution_ready = False
+        entry_safe = False
+
+    stage_info = compute_correction_stage(
+        corr_type=corr_type,
+        phase=phase,
+        exec_depth=exec_depth,
+        entry_safe=entry_safe,
+        m1_blocked=m1_gate["blocked"],
+        active_correction=corr_type
+        in ("micro_pullback", "m5_pullback", "m15_pullback", "counter_move"),
+        confidence=confidence,
+    )
+    if stage_info["correction_stage_blocks_entry"]:
+        execution_ready = False
+        entry_safe = False
+
     return {
         "correction_exhaustion_pct": round(confidence, 1),
         "correction_type": corr_type,
@@ -531,4 +822,8 @@ def compute_correction_exhaustion(
             f"M1={rsi_m1:.0f} M5={rsi_m5:.0f} M15={rsi_m15:.0f} "
             f"H1={rsi_h1:.0f} type={corr_type}"
         ),
+        "m1_entry_blocked": m1_gate["blocked"],
+        "m1_entry_reason": m1_gate["reason"],
+        **stage_info,
+        **price_action,
     }

@@ -16,9 +16,15 @@ function Test-CdpPort([int]$p) {
 }
 
 function Start-TradingViewDetached([string]$ExePath, [int]$p) {
-    $wd = Split-Path -Parent $ExePath
-    # Start-Process (comme launch_tv_debug.bat) — plus fiable que ProcessStartInfo sur WindowsApps
-    return Start-Process -FilePath $ExePath -ArgumentList "--remote-debugging-port=$p" -WorkingDirectory $wd -PassThru
+    # MSIX (Microsoft Store) = pas de Start-Process direct. Use Shell.Application.
+    $appx = Get-AppxPackage -Name "*TradingView*" -ErrorAction SilentlyContinue | Sort-Object Version -Descending | Select-Object -First 1
+    if ($appx) {
+        $shl = New-Object -ComObject "Shell.Application"
+        $shl.ShellExecute("shell:AppsFolder\$($appx.PackageFamilyName)!TradingView.Desktop", "--remote-debugging-port=$p", "", "")
+        return $null # ShellExecute ne retourne pas de handle
+    }
+    # Fallback pour les exécutables classiques
+    return Start-Process -FilePath $ExePath -ArgumentList "--remote-debugging-port=$p" -PassThru
 }
 
 function Find-TradingViewExe {

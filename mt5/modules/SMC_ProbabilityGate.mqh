@@ -1,5 +1,5 @@
 //+------------------------------------------------------------------+
-//| SMC_ProbabilityGate.mqh — entrées uniquement si probabilité élevée |
+//| SMC_ProbabilityGate.mqh � entr�es uniquement si probabilit� �lev�e |
 //+------------------------------------------------------------------+
 #ifndef SMC_PROBABILITY_GATE_MQH
 #define SMC_PROBABILITY_GATE_MQH
@@ -18,6 +18,14 @@ extern bool   g_smcBcTradeable;
 
 bool GOM_EntryAlignmentOK(const int dirSign);
 bool SMC_IsSyntheticAutonomousSym(const string symbol);
+int  SMC_EffectiveMinGOMVerdictAbs(const string symbol = "")
+{
+   // Par d�faut, verdict absolu minimum = 1
+   // Les symboles synth�tiques (Boom/Crash) peuvent exiger un seuil plus �lev�
+   if(symbol != "" && SMCGP_IsBoomCrashSym(symbol))
+      return 2;
+   return 1;
+}
 
 double g_lastEntryProbability = 0.0;
 
@@ -27,7 +35,7 @@ double SMC_ComputeEntryProbability(const int dirSign)
 {
    double score = 0.0;
 
-   // GOM cohérence (30 %)
+   // GOM coh�rence (30 %)
    if(g_smcGomCoherence > 0)
       score += MathMin(100.0, g_smcGomCoherence) * 0.30;
 
@@ -40,7 +48,7 @@ double SMC_ComputeEntryProbability(const int dirSign)
    else if(vnAbs >= 1)
       score += 8.0;
 
-   // Cognition alignée (25 %)
+   // Cognition align�e (25 %)
    double cogPart = g_cogStrength * g_cogConfidence * 100.0 * 0.25;
    score += cogPart;
    if(dirSign > 0 && g_cogDirection == "BUY")
@@ -81,13 +89,17 @@ bool SMC_HighProbabilityAllowsEntry(const int dirSign = 0)
    if(!UseHighProbabilityFilter)
       return true;
 
+   // PERFECT GOM : bypass prob-gate si cohérence >= 30% (PerfectMinCoherence)
+   if(MathAbs(g_smcGomVerdictNum) >= 3 && g_smcGomCoherence >= 30.0)
+      return true;
+
    if(!g_smcGomConnected)
    {
       static datetime s_log = 0;
       if(TimeCurrent() - s_log >= 120)
       {
          s_log = TimeCurrent();
-         Print("[PROB-GATE] BLOQUE — GOM non connecté");
+         Print("[PROB-GATE] BLOQUE � GOM non connect�");
       }
       return false;
    }
@@ -95,29 +107,30 @@ bool SMC_HighProbabilityAllowsEntry(const int dirSign = 0)
    if(g_smcGomVerdictNum == 0)
       return false;
 
-   if(MathAbs(g_smcGomVerdictNum) < MinGOMVerdictNumAbs)
+   int minVnAbs = SMC_EffectiveMinGOMVerdictAbs(_Symbol);
+   if(MathAbs(g_smcGomVerdictNum) < minVnAbs)
    {
       static datetime s_vnLog = 0;
       if(TimeCurrent() - s_vnLog >= 60)
       {
          s_vnLog = TimeCurrent();
-         Print("[PROB-GATE] BLOQUE — verdict vn=", g_smcGomVerdictNum,
-               " (min |vn|=", MinGOMVerdictNumAbs, " GOOD/PERFECT requis)");
+         Print("[PROB-GATE] BLOQUE � verdict vn=", g_smcGomVerdictNum,
+               " (min |vn|=", minVnAbs, " requis sur ", _Symbol, ")");
       }
       return false;
    }
 
-   if(dirSign > 0 && g_smcGomVerdictNum < MinGOMVerdictNumAbs)
+   if(dirSign > 0 && g_smcGomVerdictNum < minVnAbs)
       return false;
-   if(dirSign < 0 && g_smcGomVerdictNum > -MinGOMVerdictNumAbs)
+   if(dirSign < 0 && g_smcGomVerdictNum > -minVnAbs)
       return false;
 
-   // Synthétiques : GOM GOOD/PERFECT + IA + COG alignés → prob-gate assoupli
-   if(SMC_IsSyntheticAutonomousSym(_Symbol) && MathAbs(g_smcGomVerdictNum) >= 2
+   // Synth�tiques : GOM align� + seuil vn effectif ? prob-gate assoupli
+   if(SMC_IsSyntheticAutonomousSym(_Symbol) && MathAbs(g_smcGomVerdictNum) >= minVnAbs
       && GOM_EntryAlignmentOK(dirSign))
       return true;
 
-   // Weltrade PainX/GainX : fenêtre UTC propre (04-16h), pas bc_heure Deriv
+   // Weltrade PainX/GainX : fen�tre UTC propre (04-23h), pas bc_heure Deriv
    string symUp = _Symbol;
    StringToUpper(symUp);
    bool isWtBoomCrash = (StringFind(symUp, "PAINX") >= 0 || StringFind(symUp, "GAINX") >= 0);
@@ -125,13 +138,13 @@ bool SMC_HighProbabilityAllowsEntry(const int dirSign = 0)
    {
       MqlDateTime utcWt;
       TimeGMT(utcWt);
-      if(utcWt.hour < 4 || utcWt.hour >= 16)
+      if(utcWt.hour < 4 || utcWt.hour >= 23)
       {
          static datetime s_wtLog = 0;
          if(TimeCurrent() - s_wtLog >= 60)
          {
             s_wtLog = TimeCurrent();
-            Print("[PROB-GATE] BLOQUE Weltrade — hors fenêtre 04h-16h UTC (actuel ", utcWt.hour, "h)");
+            Print("[PROB-GATE] BLOQUE Weltrade � hors fen�tre 04h-16h UTC (actuel ", utcWt.hour, "h)");
          }
          return false;
       }
@@ -144,7 +157,7 @@ bool SMC_HighProbabilityAllowsEntry(const int dirSign = 0)
          if(TimeCurrent() - s_bcLog >= 60)
          {
             s_bcLog = TimeCurrent();
-            Print("[PROB-GATE] BLOQUE BC — conf=", DoubleToString(g_smcBcConfidence, 1),
+            Print("[PROB-GATE] BLOQUE BC � conf=", DoubleToString(g_smcBcConfidence, 1),
                   "% min ", DoubleToString(HighProbBcMinConfidence, 0), "%");
          }
          return false;
@@ -153,7 +166,7 @@ bool SMC_HighProbabilityAllowsEntry(const int dirSign = 0)
 
    if(g_cogStrength < CognitionMinStrength || g_cogConfidence < CognitionMinConfidence)
    {
-      // Weltrade/synthétiques : COG dashboard parfois en échelle basse — seuil assoupli si GOM aligné
+      // Weltrade/synth�tiques : COG dashboard parfois en �chelle basse � seuil assoupli si GOM align�
       if(SMC_IsSyntheticAutonomousSym(_Symbol) && MathAbs(g_smcGomVerdictNum) >= 2
          && GOM_EntryAlignmentOK(dirSign)
          && g_cogStrength >= 0.30 && g_cogConfidence >= 0.30)
@@ -164,7 +177,7 @@ bool SMC_HighProbabilityAllowsEntry(const int dirSign = 0)
       if(TimeCurrent() - s_cogLog >= 60)
       {
          s_cogLog = TimeCurrent();
-         Print("[PROB-GATE] BLOQUE cognition — str=", DoubleToString(g_cogStrength, 2),
+         Print("[PROB-GATE] BLOQUE cognition � str=", DoubleToString(g_cogStrength, 2),
                " conf=", DoubleToString(g_cogConfidence, 2));
       }
       return false;
@@ -184,7 +197,7 @@ bool SMC_HighProbabilityAllowsEntry(const int dirSign = 0)
       if(TimeCurrent() - s_probLog >= 60)
       {
          s_probLog = TimeCurrent();
-         Print("[PROB-GATE] BLOQUE — prob=", DoubleToString(prob, 1),
+         Print("[PROB-GATE] BLOQUE � prob=", DoubleToString(prob, 1),
                "% < min ", DoubleToString(MinEntryProbabilityPct, 1),
                "% | vn=", g_smcGomVerdictNum,
                " coh=", DoubleToString(g_smcGomCoherence, 1), "%");

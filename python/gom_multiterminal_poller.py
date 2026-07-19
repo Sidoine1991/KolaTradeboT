@@ -60,7 +60,16 @@ TERMINALS = {
     },
     "weltrade": {
         "path": "D:\\Program Files\\MetaTrader 5 - Copie",
-        "symbols": ["PAINX", "GAINX", "FXVOL", "SFVVOL", "SFXVOL"],
+        "symbols": [
+            "PainX 600",
+            "PainX 1200",
+            "GainX 400",
+            "GainX 600",
+            "GainX 800",
+            "GainX 1200",
+            "FX Vol 20",
+            "SFV Vol",
+        ],
         "enabled": True,
     }
 }
@@ -102,19 +111,19 @@ def _push_verdict(payload: Dict[str, Any]) -> bool:
         return False
 
 
-_WELTRADE_UTC_PREFIXES = ("PAINX", "GAINX", "FXVOL", "SFVVOL", "SFXVOL")
+_WELTRADE_UTC_PREFIXES = ("PAINX", "GAINX", "FXVOL", "SFVVOL")
 
 
 def _weltrade_gate_open(symbol: str) -> bool:
-    """Retourne False si le symbole Weltrade est hors fenêtre 04h-16h UTC."""
+    """Retourne False si le symbole Weltrade est hors fenêtre 04h-23h UTC."""
     from datetime import datetime, timezone
     sym = symbol.upper().replace(" ", "")
     for prefix in _WELTRADE_UTC_PREFIXES:
         if sym.startswith(prefix):
             h = datetime.now(timezone.utc).hour
-            in_window = 4 <= h < 16
+            in_window = 4 <= h < 23
             if not in_window:
-                log.info("[GATE] %s: UTC %02dh hors 04h-16h — poll ignore", symbol, h)
+                log.info("[GATE] %s: UTC %02dh hors 04h-23h — poll ignore", symbol, h)
             return in_window
     return True
 

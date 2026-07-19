@@ -583,12 +583,14 @@ const FILTER_ID CHAIN_MCP_FULL[CHAIN_MCP_FULL_LEN] = {
    FID_GHOST_ORDERFLOW
 };
 
-// Pipeline orders (minimal validation — human already approved)
-#define CHAIN_PIPELINE_LEN 3
+// Pipeline orders (human approved + GOM sanity check)
+#define CHAIN_PIPELINE_LEN 5
 const FILTER_ID CHAIN_PIPELINE[CHAIN_PIPELINE_LEN] = {
    FID_DAILY_LIMIT,
    FID_DAILY_PROFIT,
-   FID_BOOM_CRASH_DIR
+   FID_BOOM_CRASH_DIR,
+   FID_GOM_WAIT,          // Reject if GOM=WAIT (verdictNum==0)
+   FID_ANTI_CORRECTION    // Reject if trading against GOM bias
 };
 
 // GOM Auto Entry (skip TF consensus, focus on GOM + correction)

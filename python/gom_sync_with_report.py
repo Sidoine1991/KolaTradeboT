@@ -78,6 +78,55 @@ ACTION_MAP = {
 
 _VERDICT_MAX_AGE_HOURS = 1  # Rejeter les verdicts plus vieux que 1h
 
+def _get_signal_panel(symbol: str) -> dict | None:
+    """Récupère signals_aligned + orderflow depuis /api/predictive-panel (timeout court)."""
+    try:
+        r = requests.get(
+            f"{AI_SERVER}/api/predictive-panel",
+            params={"symbol": symbol, "chart_tf": "M15"},
+            timeout=10,
+        )
+        if r.status_code != 200:
+            return None
+        data = r.json()
+        if not data.get("ok"):
+            return None
+        return data
+    except Exception:
+        return None
+
+
+def _fmt_orderflow_line(v: dict, panel: dict | None = None) -> str:
+    """Ligne orderflow GHOST + gates pour WhatsApp."""
+    of = (panel or {}).get("orderflow") or {}
+    ghost = of.get("ghost") or {}
+    sig = (panel or {}).get("signals_aligned") or {}
+
+    parts = []
+    if ghost.get("buypct") is not None:
+        parts.append(f"Buy {ghost['buypct']:.0f}%")
+    if ghost.get("delta") is not None:
+        parts.append(f"Δ {ghost['delta']}")
+    if ghost.get("cvd") is not None:
+        parts.append(f"CVD {ghost['cvd']}")
+    if not parts:
+        bp = v.get("ghost_buypct")
+        if bp is not None:
+            parts.append(f"Buy {float(bp):.0f}%")
+        gd = v.get("ghost_delta")
+        if gd is not None:
+            parts.append(f"Δ {gd}")
+
+    of_txt = " | ".join(parts) if parts else "Orderflow N/A"
+
+    if sig:
+        label = sig.get("verdict_label", "—")
+        prob = sig.get("entry_probability", 0)
+        gates = f"{sig.get('gates_passed', 0)}/{sig.get('gates_total', 0)}"
+        return f"  📊 OF: {of_txt}\n  🎯 Signal: {label} | prob {prob:.0f}% | gates {gates}"
+    return f"  📊 OF: {of_txt}"
+
+
 def _get_ml_score(symbol: str) -> dict | None:
     """
     Appelle GET /ml-metrics/{symbol} sur AI server (non-bloquant, timeout=3s).
@@ -240,6 +289,16 @@ def _load_from_dashboard() -> list:
                 logger.warning(f"[TREND-FILTER] {sym}: {verdict} (vn={vn}) rejeté — contre-tendance sans spike confirmé")
                 continue
 
+            # Pas de signal WhatsApp sans spike confirmé (Boom/Crash)
+            if "BOOM" in sym.upper() or "CRASH" in sym.upper():
+                spike_imm = float(d.get("spike_imminence_pct") or d.get("spike_pct") or 0)
+                if not d.get("spike_tradable") or spike_imm < 70:
+                    logger.warning(
+                        f"[SPIKE-GATE] {sym}: {verdict} rejeté — spike non confirmé "
+                        f"(tradable={d.get('spike_tradable')} imminence={spike_imm:.0f}%)"
+                    )
+                    continue
+
             # Gate RSI extreme : BUY sur RSI>78 ou SELL sur RSI<22 = entrée retardée
             rsi_val = float(d.get("rsi") or d.get("rsi14") or 50)
             if vn > 0 and rsi_val > 78:
@@ -285,6 +344,12 @@ def _load_from_dashboard() -> list:
                 "atr": d.get("atr", 0),
                 "source": "mt5_live_dashboard",
                 "timestamp": d.get("timestamp", ""),
+                "ghost_delta": d.get("ghost_delta"),
+                "ghost_cvd": d.get("ghost_cvd"),
+                "ghost_buypct": d.get("ghost_buypct"),
+                "ghost_compass": d.get("ghost_compass"),
+                "spike_tradable": d.get("spike_tradable"),
+                "spike_imminence_pct": d.get("spike_imminence_pct") or d.get("spike_pct"),
             })
         except Exception:
             continue
@@ -415,6 +480,14 @@ def build_report(verdicts):
                 f"  🤖 ML: {ml_icon}{ml['action']} {ml['confidence']*100:.0f}%"
                 f" | acc={ml['accuracy_last20']*100:.0f}%"
             )
+
+        # Orderflow GHOST + gates alignés
+        panel = _get_signal_panel(symbol)
+        of_line = _fmt_orderflow_line(v, panel)
+        if of_line:
+            lines.append(of_line)
+        if panel and panel.get("signals_aligned", {}).get("conclusion"):
+            lines.append(f"  💡 {panel['signals_aligned']['conclusion'][:120]}")
 
     lines.append("=" * 50)
     lines.append(f"📅 {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}")
@@ -727,7 +800,8 @@ def process_verdict_changes(current_verdicts: list):
                 f"Verdict {ACTION_MAP.get(vn_prev,'?')} → WAIT\n"
                 f"{'✅ Ordre de fermeture envoyé' if closed else '⚠️ Échec envoi fermeture'}"
             )
-            send_whatsapp_report(msg)
+            # WhatsApp désactivé — garder seulement les signaux SR20
+            # send_whatsapp_report(msg)
             logger.info(f"[WAIT-CLOSE] {symbol}: fermeture immédiate demandée (vn_prev={vn_prev})")
             _wait_notified.add(symbol)
 
@@ -752,7 +826,8 @@ def process_verdict_changes(current_verdicts: list):
                 f"{'✅ Ordre marché placé' if placed else '⚠️ Échec placement'}: {direction} "
                 f"@ {v_enriched.get('entry',0):.2f} SL={v_enriched.get('sl',0):.2f} TP={v_enriched.get('tp',0):.2f}"
             )
-            send_whatsapp_report(msg)
+            # WhatsApp désactivé — garder seulement les signaux SR20
+            # send_whatsapp_report(msg)
 
     # Mettre à jour l'état précédent pour le prochain cycle
     for symbol, v in current_map.items():
@@ -821,10 +896,10 @@ def main_loop():
                 # Sync to ai_server
                 sync_verdicts_to_ai_server(verdicts)
 
-                # Construire et envoyer rapport
-                report = build_report(verdicts)
-                if report:
-                    send_whatsapp_report(report)
+                # Construire et envoyer rapport (désactivé — garder seulement les signaux SR20)
+                # report = build_report(verdicts)
+                # if report:
+                #     send_whatsapp_report(report)
 
             logger.info(f"⏰ Prochain sync dans 10 min ({LOOP_INTERVAL}s)...")
             time.sleep(LOOP_INTERVAL)
@@ -851,11 +926,12 @@ def run_once():
             logger.info(f"🚀 {len(placed)} ordre(s) placé(s): {[p['symbol']+' '+p['direction'] for p in placed]}")
 
         sync_verdicts_to_ai_server(verdicts)
-        report = build_report(verdicts)
-        if report:
-            logger.info("\n📋 RAPPORT:")
-            logger.info(report)
-            send_whatsapp_report(report)
+        # WhatsApp GOM scan désactivé — garder seulement les signaux SR20
+        # report = build_report(verdicts)
+        # if report:
+        #     logger.info("\n📋 RAPPORT:")
+        #     logger.info(report)
+        #     send_whatsapp_report(report)
 
     logger.info("✅ Exécution unique terminée")
 

@@ -1,25 +1,10 @@
 //+------------------------------------------------------------------+
-//| SMC_FuturePath.mqh — 200 bougies fantômes (cognition forecast)   |
+//| SMC_FuturePath.mqh � 200 bougies fant�mes (cognition forecast)   |
 //+------------------------------------------------------------------+
 #ifndef SMC_FUTURE_PATH_MQH
 #define SMC_FUTURE_PATH_MQH
 
-// inputs du .mq5 parent — visibles globalement, pas besoin de extern en MQL5
-
-// État cognition (défini dans SMC_GOM_Pipeline.mqh)
-extern double g_cogStrength;
-extern double g_cogConfidence;
-extern string g_cogDirection;
-extern string g_cogRegime;
-extern double g_smcPredPathMid[];
-extern double g_smcPredPathUp[];
-extern double g_smcPredPathDn[];
-extern double g_smcCogOpen[];
-extern double g_smcCogHigh[];
-extern double g_smcCogLow[];
-extern double g_smcCogClose[];
-extern double g_smcCogQ10[];
-extern double g_smcCogQ90[];
+// etat cognition (defini dans SMC_GOM_Pipeline.mqh, inclus AVANT ce fichier)
 
 void SMCFP_Clear()
 {
@@ -30,8 +15,8 @@ void SMCFP_Clear()
    ObjectDelete(0, "COG_SUMMARY");
 }
 
-// Couleur verte (haussier) ou rouge (baissier) dont la vivacité reflète strength × confidence
-// Plage : 80 (signal faible) → 255 (signal maximal)
+// Couleur verte (haussier) ou rouge (baissier) dont la vivacit� refl�te strength � confidence
+// Plage : 80 (signal faible) ? 255 (signal maximal)
 color SMCFP_StrengthColor(const bool bullish, const double strength, const double confidence = 1.0)
 {
    double combo = MathSqrt(MathMax(0.0, strength) * MathMax(0.0, confidence));
@@ -108,18 +93,20 @@ void SMCFP_DrawGhostCandles(
       }
    }
 
-   // ── Label direction + confiance sur 1ère bougie ──────────────────
+   // ?? Label direction + confiance sur 1�re bougie ??????????????????
    if(n > 0)
    {
       datetime tLbl = t0 + (datetime)(barSec);
       double   pLbl = (ArraySize(closes) > 0) ? closes[0] : 0;
       if(pLbl > 0)
       {
-         string dirIcon  = bull ? "▲" : "▼";
+         string dirIcon  = bull ? "?" : "?";
          string dirTxt   = bull ? "HAUSSE" : "BAISSE";
          string cogLabel = dirIcon + " " + dirTxt
                          + "  conf=" + DoubleToString(confidence * 100, 0) + "%"
                          + "  force=" + DoubleToString(strength * 100, 0) + "%";
+         if(g_pathConcordancePct > 0.0)
+            cogLabel += "  conc=" + DoubleToString(g_pathConcordancePct, 0) + "%";
 
          ObjectDelete(0, "COG_LBL_DIR");
          ObjectCreate(0, "COG_LBL_DIR", OBJ_TEXT, 0, tLbl, pLbl);
@@ -132,31 +119,31 @@ void SMCFP_DrawGhostCandles(
       }
    }
 
-   // ── Flèche de synthèse sur dernière bougie + label résumé ────────
+   // ?? Fl�che de synth�se sur derni�re bougie + label r�sum� ????????
    if(n > 1)
    {
       datetime tEnd = t0 + (datetime)(n * barSec);
       double   pEnd = (ArraySize(closes) >= n) ? closes[n - 1] : 0;
       if(pEnd > 0)
       {
-         // Flèche directionnelle
+         // Fl�che directionnelle
          ObjectDelete(0, "COG_ARROW");
          ObjectCreate(0, "COG_ARROW", OBJ_ARROW, 0, tEnd, pEnd);
-         ObjectSetInteger(0, "COG_ARROW", OBJPROP_ARROWCODE, bull ? 233 : 234); // ↑ ou ↓
+         ObjectSetInteger(0, "COG_ARROW", OBJPROP_ARROWCODE, bull ? 233 : 234); // ? ou ?
          ObjectSetInteger(0, "COG_ARROW", OBJPROP_COLOR, bodyClr);
          ObjectSetInteger(0, "COG_ARROW", OBJPROP_WIDTH, 2);
          ObjectSetInteger(0, "COG_ARROW", OBJPROP_SELECTABLE, false);
 
-         // Résumé interprétatif
+         // R�sum� interpr�tatif
          string quality = (confidence >= 0.7 && strength >= 0.6) ? "FORT" :
                           (confidence >= 0.5 && strength >= 0.4) ? "MODERE" : "FAIBLE";
          string impl = bull
-            ? (quality == "FORT"   ? "Continuation haussiere probable — surveiller resistance"  :
-               quality == "MODERE" ? "Biais haussier — confirmation recommandee"                :
-                                     "Faible biais haussier — attendre signal clair")
-            : (quality == "FORT"   ? "Continuation baissiere probable — surveiller support"     :
-               quality == "MODERE" ? "Biais baissier — confirmation recommandee"                :
-                                     "Faible biais baissier — attendre signal clair");
+            ? (quality == "FORT"   ? "Continuation haussiere probable � surveiller resistance"  :
+               quality == "MODERE" ? "Biais haussier � confirmation recommandee"                :
+                                     "Faible biais haussier � attendre signal clair")
+            : (quality == "FORT"   ? "Continuation baissiere probable � surveiller support"     :
+               quality == "MODERE" ? "Biais baissier � confirmation recommandee"                :
+                                     "Faible biais baissier � attendre signal clair");
 
          ObjectDelete(0, "COG_SUMMARY");
          ObjectCreate(0, "COG_SUMMARY", OBJ_TEXT, 0, tEnd, pEnd);
@@ -170,6 +157,22 @@ void SMCFP_DrawGhostCandles(
    }
 
    ChartRedraw(0);
+}
+
+void SMCFP_ExtendArrayToTarget(double &arr[], int targetSize)
+{
+   int current = ArraySize(arr);
+   if(current >= targetSize || current < 2) return;
+   double lastVal = arr[current - 1];
+   double prevVal = arr[current - 2];
+   double slope = lastVal - prevVal;
+   ArrayResize(arr, targetSize);
+   for(int i = current; i < targetSize; i++)
+   {
+      double t = (double)(i - current + 1) / (double)(targetSize - current);
+      double noise = MathSin((double)i * 0.7) * MathAbs(slope) * 0.3;
+      arr[i] = lastVal + slope * (i - current + 1) * 0.5 + noise * (1.0 - t * 0.5);
+   }
 }
 
 void SMCFP_DrawFromGlobals()
@@ -195,6 +198,19 @@ void SMCFP_DrawFromGlobals()
          g_smcCogQ10[i] = g_smcCogLow[i];
          g_smcCogQ90[i] = g_smcCogHigh[i];
       }
+   }
+
+   // Extend to CognitionHorizonBars if server sent fewer candles
+   if(CognitionHorizonBars > 0 && ArraySize(g_smcCogClose) < CognitionHorizonBars)
+   {
+      int target = CognitionHorizonBars;
+      Print("[SMCFP] Extension projection: ", ArraySize(g_smcCogClose), " -> ", target, " bougies");
+      SMCFP_ExtendArrayToTarget(g_smcCogClose, target);
+      SMCFP_ExtendArrayToTarget(g_smcCogOpen, target);
+      SMCFP_ExtendArrayToTarget(g_smcCogHigh, target);
+      SMCFP_ExtendArrayToTarget(g_smcCogLow, target);
+      SMCFP_ExtendArrayToTarget(g_smcCogQ10, target);
+      SMCFP_ExtendArrayToTarget(g_smcCogQ90, target);
    }
 
    SMCFP_DrawGhostCandles(

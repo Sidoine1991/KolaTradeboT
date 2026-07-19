@@ -10,9 +10,9 @@ from fastapi import APIRouter, HTTPException, BackgroundTasks
 from typing import Optional
 from .orchestrator import get_orchestrator
 
-# Symbols that follow Boom/Crash unidirectional law
-_BOOM_KEYWORDS  = ("BOOM", "PAINX")
-_CRASH_KEYWORDS = ("CRASH", "GAINX")
+# Symbols that follow Boom/Crash unidirectional law (aligné EA + ai_server)
+_BOOM_KEYWORDS  = ("BOOM", "GAINX", "TRENDX")
+_CRASH_KEYWORDS = ("CRASH", "PAINX")
 
 agent_router = APIRouter(prefix="/agents", tags=["Intelligence Agents"])
 
@@ -53,6 +53,14 @@ async def run_all_agents(background_tasks: BackgroundTasks):
     orch = get_orchestrator()
     background_tasks.add_task(orch.run_all_sequential)
     return {"message": "All agents triggered (sequential)", "count": len(orch.agents)}
+
+
+@agent_router.post("/run-all-parallel")
+async def run_all_agents_parallel(background_tasks: BackgroundTasks):
+    """Trigger all 6 agents in parallel (one thread per agent)."""
+    orch = get_orchestrator()
+    background_tasks.add_task(orch.run_all_parallel)
+    return {"message": "All agents triggered (parallel)", "count": len(orch.agents)}
 
 
 @agent_router.get("/intelligence")
