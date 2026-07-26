@@ -376,7 +376,7 @@ bool GOM_EntryCoherenceOK();
 bool COG_ConflictsWithGOM();
 bool GOM_EntryEnvironmentOK(const int dirSign);
 bool SMC_BCHourAllowsTrade(const string symbol = "");
-// SMC_HighProbabilityAllowsEntry et SMC_ComputeEntryProbability d�finis dans SMC_ProbabilityGate.mqh
+// SMC_HighProbabilityAllowsEntry et SMC_ComputeEntryProbability d finis dans SMC_ProbabilityGate.mqh
 void SMC_ResetTradeStatistics();
 bool SMC_DailyDisciplineAllowsEntry();
 bool SMC_PerformancePauseAllowsEntry(const string symbol = "");
@@ -957,10 +957,6 @@ int CountChannelLimitOrdersForSymbol(const string symbol)
 // Forward declarations (defined in SMC_GOM_Pipeline.mqh, included later)
 int  SMCGP_GetCachedVerdictNum(const string symbol);
 void SMCGP_EnforceLimitDiscipline(const long magic, const int maxLimits = 2);
-bool LimitPlaceDisciplineOK(const string symbol, const int dirSign, string &reasonOut);
-bool LimitCancelAllowed(const ulong ticket, const bool forceCounterTrend = false, const string reason = "");
-bool LimitSafeOrderDelete(const ulong ticket, const bool forceCounterTrend = false, const string reason = "");
-void LimitRegisterCancel(const string symbol);
 
 // ── GATEKEEPER GOM: WAIT interdit + direction GOOD/PERFECT obligatoire ──
 // dirSign: +1 BUY, -1 SELL. Retourne false si bloqué.
@@ -1024,25 +1020,6 @@ bool CanPlaceOrderByGOM(const string symbol, const int dirSign, const string ord
 
 bool CanPlaceMarketOrder(const string symbol, const int dirSign)
 {
-   // ── GARDE DIRECTION BOOM/CRASH: pas de SELL sur Boom/Gainx, pas de BUY sur Crash/Painx ──
-   string dirStr = (dirSign > 0) ? "BUY" : "SELL";
-   if(!IsDirectionAllowedForBoomCrash(symbol, dirStr))
-   {
-      Print("🚫 MARKET BLOQUÉ — ", symbol, " — direction ", dirStr, " interdite (règle Boom/Crash)");
-      return false;
-   }
-   // ── GARDE TERMINAL GLOBAL ──
-   if(IsTerminalFull())
-   {
-        Print("🚫 MARKET BLOQUÉ — Terminal plein (", CountTerminalAllOrders(), "/", MaxPositionsTerminal, ")");
-      return false;
-   }
-   // ── GARDE PAR SYMBOLE: pas de 2ème ordre sur même symbole ──
-   if(SymbolHasActiveOrder(symbol))
-   {
-      Print("🚫 MARKET BLOQUÉ — ", symbol, " a déjà un ordre actif (", CountOrdersForSymbol(symbol), ")");
-      return false;
-   }
    return CanPlaceOrderByGOM(symbol, dirSign, "MARKET");
 }
 
@@ -1050,30 +1027,6 @@ bool CanPlaceMarketOrder(const string symbol, const int dirSign)
 // Retourne true si l'ordre LIMIT est autorisé, false sinon
 bool CanPlaceLimitOrder(const string symbol, ENUM_ORDER_TYPE orderType)
 {
-   // ── GARDE DIRECTION BOOM/CRASH: pas de SELL sur Boom/Gainx, pas de BUY sur Crash/Painx ──
-   string dirStr = "";
-   if(orderType == ORDER_TYPE_BUY_LIMIT || orderType == ORDER_TYPE_BUY)
-      dirStr = "BUY";
-   else if(orderType == ORDER_TYPE_SELL_LIMIT || orderType == ORDER_TYPE_SELL)
-      dirStr = "SELL";
-   if(dirStr != "" && !IsDirectionAllowedForBoomCrash(symbol, dirStr))
-   {
-      Print("🚫 LIMIT BLOQUÉ — ", symbol, " — direction ", dirStr, " interdite (règle Boom/Crash)");
-      return false;
-   }
-   // ── GARDE TERMINAL GLOBAL ──
-   if(IsTerminalFull())
-   {
-        Print("🚫 LIMIT BLOQUÉ — Terminal plein (", CountTerminalAllOrders(), "/", MaxPositionsTerminal, ")");
-      return false;
-   }
-   // ── GARDE PAR SYMBOLE: pas de 2ème ordre sur même symbole ──
-   if(SymbolHasActiveOrder(symbol))
-   {
-      Print("🚫 LIMIT BLOQUÉ — ", symbol, " a déjà un ordre actif (", CountOrdersForSymbol(symbol), ")");
-      return false;
-   }
-
    int dirSign = 0;
    if(orderType == ORDER_TYPE_BUY_LIMIT || orderType == ORDER_TYPE_BUY)
       dirSign = 1;
@@ -1082,18 +1035,6 @@ bool CanPlaceLimitOrder(const string symbol, ENUM_ORDER_TYPE orderType)
 
    if(!CanPlaceOrderByGOM(symbol, dirSign, "LIMIT"))
       return false;
-
-   string limReason = "";
-   if(!LimitPlaceDisciplineOK(symbol, dirSign, limReason))
-   {
-      static datetime s_lastLimPlaceLog = 0;
-      if(TimeCurrent() - s_lastLimPlaceLog >= 30)
-      {
-         s_lastLimPlaceLog = TimeCurrent();
-         Print("🚫 LIMIT BLOQUÉ — ", symbol, " — ", limReason);
-      }
-      return false;
-   }
 
    // Max 2 ordres LIMIT par symbole (garder les meilleurs via CleanupExcessLimits)
    int maxLimits = MathMax(1, MaxLimitOrdersTerminal);
@@ -1127,10 +1068,9 @@ void CleanupExcessLimits(const string symbol, int maxOrders)
       string cmt = OrderGetString(ORDER_COMMENT);
       if(StringFind(cmt, "DOW") >= 0) continue;
 
-      // Grâce min discipline : ne pas supprimer un LIMIT trop jeune
+      // Grâce 60s : ne pas supprimer un LIMIT qui vient d'être placé
       datetime orderTime = (datetime)OrderGetInteger(ORDER_TIME_SETUP);
-      if(!LimitCancelAllowed(ticket, false, "CleanupExcessLimits"))
-         continue;
+      if(TimeCurrent() - orderTime < 60) continue;
 
       int sz = ArraySize(orders);
       ArrayResize(orders, sz + 1);
@@ -1167,8 +1107,15 @@ void CleanupExcessLimits(const string symbol, int maxOrders)
       ulong tk = orders[k].ticket;
       if(!OrderSelect(tk)) continue;
       string cmt = OrderGetString(ORDER_COMMENT);
-      if(!LimitSafeOrderDelete(tk, false, "CleanupExcessLimits " + cmt))
-         Print("❌ Échec/suppression différée limit excessif ticket=", tk);
+      MqlTradeRequest dr = {}; MqlTradeResult drRes = {};
+      dr.action = TRADE_ACTION_REMOVE;
+      dr.order  = tk;
+      if(!OrderSend(dr, drRes))
+         Print("❌ Échec suppression limit excessif ticket=", tk);
+      else
+         Print("🗑️ LIMIT SUPPRIMÉ (trop éloigné): ticket=", tk,
+               " prix=", orders[k].price, " type=", EnumToString(orders[k].type),
+               " comment=", cmt);
    }
 }
 
@@ -1807,10 +1754,6 @@ input double PreciseLimitMaxDistATR   = 1.5;
 input bool   PreferLimitOverMarket    = true;
 input double MinLossBeforeAutoCloseUSD = 2.0; // Fermer auto seulement si perte >= N $
 input bool   KeepPendingUntilTrigger  = true; // Ne pas annuler LIMIT sur WAIT avant fill
-input int    LimitCancelMinAgeSec       = 300;  // Min 5 min avant annulation LIMIT
-input int    LimitCancelUnfilledMinAgeSec = 180; // Min 3 min si ordre pending non rempli
-input int    LimitPlaceCooldownSec      = 45;   // Pause après annulation avant replacer
-input bool   LimitRequireBlinkBeforePlace = true; // Exiger BUY/SELL clignotant avant LIMIT
 input group "=== JOURNAL CSV + DASHBOARD ==="
 input bool   UseTradeJournal          = true;
 input int    TradeJournalBackfillDays = 30;
@@ -2001,7 +1944,7 @@ double g_spikeBonusPts      = 0;      // Points bonus spike
 int    g_spikeZoneCount     = 0;      // Compteur zones spike
 bool   g_usePriceActionZoneGate = false; // Gate zone PA
 bool   g_showPriceActionZone    = false; // Afficher zone PA
-// g_lastEntryProbability d�fini dans SMC_ProbabilityGate.mqh
+// g_lastEntryProbability d fini dans SMC_ProbabilityGate.mqh
 bool   g_showCorrectionOverlay  = true;  // Afficher overlay correction
 
 // ── TP1 state (used by GOM dashboard in SMC_GOM_Pipeline.mqh) ─────────
@@ -2013,9 +1956,6 @@ bool     g_tp1WaitingReEntry = false;   // En attente d'un pullback
 
 // ── Forward declarations (used by SMC_GOM_Pipeline.mqh) ───────────────
 bool AreAllTimeframesAligned(string &direction);
-
-#include "modules/SMC_SignalGates.mqh"
-#include "modules/SMC_LimitDiscipline.mqh"
 
 #include "modules/SMC_Stubs.mqh"
 #include "modules/SMC_PatternSignals.mqh"
@@ -2126,7 +2066,7 @@ int SMC_EffectiveMaxPositionsTerminal()
 
 bool SMC_TerminalPositionCapReached()
 {
-   return CountTerminalAllOrders() >= SMC_EffectiveMaxPositionsTerminal();
+   return CountPositionsOurEA() >= SMC_EffectiveMaxPositionsTerminal();
 }
 
 double SMC_EffectiveGOMMinCoherence()
@@ -2744,7 +2684,6 @@ static datetime g_spikeWarningStart = 0;
 static bool g_spikeWarningVisible = true;
 int g_aiUpdateInterval = 30;
 bool g_aiConnected = false;
-bool g_terminalFull = false;  // Flag local (optimisation)
 static datetime g_lastBoomCrashPriceTime = 0;
 // Variables swing (compatibles avec nouveau système anti-repaint)
 double g_lastSwingHigh = 0, g_lastSwingLow = 0;
@@ -2941,7 +2880,7 @@ bool TryAcquireOpenLock()
    // Vérification simple sans Sleep pour éviter détachement
    if(GlobalVariableGet(lockName) != 0) return false;
    GlobalVariableSet(lockName, 1);
-   if(IsTerminalFull()) { GlobalVariableSet(lockName, 0); return false; }
+   if(CountPositionsOurEA() >= MaxPositionsTerminal) { GlobalVariableSet(lockName, 0); return false; }
    return true;
 }
 void ReleaseOpenLock() { GlobalVariableSet("SMC_OPEN_LOCK_" + IntegerToString(InpMagicNumber), 0); }
@@ -3174,7 +3113,7 @@ void ExecuteFVGKillBuy()
    if(CopyRates(_Symbol, LTF, 0, 3, r) < 3) return;
    double sl = r[1].low - atr[0] * ATR_Mult;
    double tp = SymbolInfoDouble(_Symbol, SYMBOL_ASK) + (SymbolInfoDouble(_Symbol, SYMBOL_ASK) - sl) * 2.0;
-   if(IsTerminalFull()) return;
+   if(CountPositionsOurEA() >= MaxPositionsTerminal) return;
    if(!TryAcquireOpenLock()) return;
    
    // Règle duplication / IA avant ouverture d'une nouvelle position
@@ -3233,10 +3172,8 @@ void ExecuteFVGKillBuy()
       Print("🚫 FVG_Kill BUY BLOQUÉ — GOM verdict=WAIT (vn=0) — pas de direction");
       ReleaseOpenLock(); return;
    }
-   if(!CanTradeOnSymbol(_Symbol)) { Print("🚫 FVG_Kill BUY BLOQUÉ — Terminal plein ou ordre existant sur ", _Symbol); ReleaseOpenLock(); return; }
    if(trade.Buy(lot, _Symbol, 0, sl, tp, "FVG_Kill BUY"))
    {
-      RegisterOrderPlaced();
       ulong ticket = trade.ResultOrder();
       if(ticket > 0) SMC_ApplyPostEntrySLBuffer(_Symbol, ticket, 1.0);
    }
@@ -3259,7 +3196,7 @@ void ExecuteFVGKillSell()
    if(CopyRates(_Symbol, LTF, 0, 3, r) < 3) return;
    double sl = r[1].high + atr[0] * ATR_Mult;
    double tp = SymbolInfoDouble(_Symbol, SYMBOL_BID) - (sl - SymbolInfoDouble(_Symbol, SYMBOL_BID)) * 2.0;
-   if(IsTerminalFull()) return;
+   if(CountPositionsOurEA() >= MaxPositionsTerminal) return;
    if(!TryAcquireOpenLock()) return;
    
    if(!CanOpenAdditionalPositionForSymbol(_Symbol, "SELL"))
@@ -3317,10 +3254,8 @@ void ExecuteFVGKillSell()
       Print("🚫 FVG_Kill SELL BLOQUÉ — GOM verdict=WAIT (vn=0) — pas de direction");
       ReleaseOpenLock(); return;
    }
-   if(!CanTradeOnSymbol(_Symbol)) { Print("🚫 FVG_Kill SELL BLOQUÉ — Terminal plein ou ordre existant sur ", _Symbol); ReleaseOpenLock(); return; }
    if(trade.Sell(lot, _Symbol, 0, sl, tp, "FVG_Kill SELL"))
    {
-      RegisterOrderPlaced();
       ulong ticket = trade.ResultOrder();
       if(ticket > 0) SMC_ApplyPostEntrySLBuffer(_Symbol, ticket, 1.0);
    }
@@ -3364,91 +3299,6 @@ int CountPositionsOurEA()
       if(posInfo.SelectByIndex(i) && posInfo.Magic() == InpMagicNumber)
          n++;
    return n;
-}
-
-//+------------------------------------------------------------------+
-//| Compte TOUT : positions + pending orders, tous magics, terminal  |
-//| Utilisé pour le gate MaxPositionsTerminal (max 2 au total)       |
-//+------------------------------------------------------------------+
-int CountTerminalAllOrders()
-{
-   int count = 0;
-   count += PositionsTotal();
-   for(int i = OrdersTotal() - 1; i >= 0; i--)
-   {
-      ulong ticket = OrderGetTicket(i);
-      if(ticket == 0) continue;
-      ENUM_ORDER_TYPE t = (ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE);
-      if(t == ORDER_TYPE_BUY_LIMIT || t == ORDER_TYPE_SELL_LIMIT ||
-         t == ORDER_TYPE_BUY_STOP  || t == ORDER_TYPE_SELL_STOP)
-         count++;
-   }
-   return count;
-}
-
-//+------------------------------------------------------------------+
-//| Vérifie si le terminal est plein                                  |
-//| Compte TOUT: positions ouvertes + pending orders, tous symboles   |
-//| Les pending orders sont visibles immédiatement après OrderSend    |
-//+------------------------------------------------------------------+
-bool IsTerminalFull()
-{
-   return CountTerminalAllOrders() >= MaxPositionsTerminal;
-}
-
-//+------------------------------------------------------------------+
-//| Compte les positions + pending orders pour UN symbole donné      |
-//+------------------------------------------------------------------+
-int CountOrdersForSymbol(const string symbol)
-{
-   int count = 0;
-   for(int i = PositionsTotal() - 1; i >= 0; i--)
-   {
-      ulong ticket = PositionGetTicket(i);
-      if(ticket == 0) continue;
-      if(PositionGetString(POSITION_SYMBOL) == symbol)
-         count++;
-   }
-   for(int i = OrdersTotal() - 1; i >= 0; i--)
-   {
-      ulong ticket = OrderGetTicket(i);
-      if(ticket == 0) continue;
-      if(OrderGetString(ORDER_SYMBOL) == symbol)
-      {
-         ENUM_ORDER_TYPE t = (ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE);
-         if(t == ORDER_TYPE_BUY_LIMIT || t == ORDER_TYPE_SELL_LIMIT ||
-            t == ORDER_TYPE_BUY_STOP  || t == ORDER_TYPE_SELL_STOP)
-            count++;
-      }
-   }
-   return count;
-}
-
-//+------------------------------------------------------------------+
-//| Vérifie si un symbole a déjà un ordre actif (position ou pending)|
-//+------------------------------------------------------------------+
-bool SymbolHasActiveOrder(const string symbol)
-{
-   return CountOrdersForSymbol(symbol) > 0;
-}
-
-//+------------------------------------------------------------------+
-//| Gate combiné: terminal plein OU déjà un ordre sur ce symbole     |
-//+------------------------------------------------------------------+
-bool CanTradeOnSymbol(const string symbol)
-{
-   if(IsTerminalFull()) return false;
-   if(SymbolHasActiveOrder(symbol)) return false;
-   return true;
-}
-
-//+------------------------------------------------------------------+
-//| Incrémente le compteur (noop — gardé pour compatibilité)         |
-//+------------------------------------------------------------------+
-void RegisterOrderPlaced()
-{
-   // Les pending orders sont comptés immédiatement par CountTerminalAllOrders()
-   // Pas besoin de compteur séparé — le comptage terminal suffit
 }
 
 void CloseWorstPositionIfTotalLossExceeded()
@@ -4228,12 +4078,6 @@ void PredictSpikeChainAndAlert()
 
 void OnTick()
 {
-   // Track signal transitions for blink confirmation gate
-   UpdateSignalAppearTime(g_lastAIAction);
-
-   // Gate global: bloquer toutes les nouvelles entrées si terminal plein
-   g_terminalFull = IsTerminalFull();
-
    // Tick Frequency Tracker (runs on EVERY tick, before rate-limiting)
    datetime tNow = TimeCurrent();
    if(tNow == g_tickFreqLastSec)
@@ -4366,7 +4210,8 @@ void OnTick()
        }
     }
 
-     // ── ANNULER pending si GOM=WAIT soutenu — min 3-5 min (discipline LIMIT)
+     // ── ANNULER nos pending orders si GOM=WAIT / DÉCONNECTÉ (anti-thrash) ──
+    // Grâce 60s + WAIT soutenu 45s : évite place→cancel immédiat quand vn flicker
     if(gomBlocked)
     {
        const bool waitSustained = SMC_GomWaitSustained(45) || !g_smcGomConnected;
@@ -4378,16 +4223,20 @@ void OnTick()
              if(tk == 0) continue;
              if(OrderGetString(ORDER_SYMBOL) != _Symbol) continue;
              if(OrderGetInteger(ORDER_MAGIC) != InpMagicNumber) continue;
+             datetime setupT = (datetime)OrderGetInteger(ORDER_TIME_SETUP);
+             if(setupT > 0 && (TimeCurrent() - setupT) < 60)
+                continue; // ne pas annuler un LIMIT fraîchement posé
              string cm = OrderGetString(ORDER_COMMENT);
-             if(StringFind(cm, "DOW") >= 0) continue;
+             // Annuler uniquement nos ordres pending (AUTOSCALP, PIPELINE, SR20, SMC...)
+             // Note: DOW exclu — DowTrendline_OnTick gère son LIMIT seul
              if(StringFind(cm, "AUTOSCALP") >= 0 ||
                 StringFind(cm, "PIPELINE") >= 0 || StringFind(cm, "SR20") >= 0 ||
                 StringFind(cm, "SMC") >= 0 || StringFind(cm, "IMPULSE") >= 0 ||
-                StringFind(cm, "RETURN") >= 0 || StringFind(cm, "POSTHOLD") >= 0 ||
-                StringFind(cm, "GOM_") >= 0 || StringFind(cm, "PIVOT_") >= 0)
+                StringFind(cm, "RETURN") >= 0 || StringFind(cm, "POSTHOLD") >= 0)
              {
-                LimitSafeOrderDelete(tk, false,
-                     "GOM=" + (!g_smcGomConnected ? "déconnecté" : "WAIT soutenu") + " | " + cm);
+                if(trade.OrderDelete(tk))
+                   Print("❌ LIMIT annulé (GOM=", (!g_smcGomConnected ? "déconnecté" : "WAIT soutenu"),
+                         ") | âge>=60s | ", cm);
              }
           }
        }
@@ -5466,10 +5315,9 @@ void PlaceHistoricalBasedScalpingOrders(MqlRates &rates[], int futureBars, doubl
                req.magic = InpMagicNumber;
                 req.comment = "EMA SMC BUY LIMIT";
                 
-                 if(!CanPlaceLimitOrder(_Symbol, ORDER_TYPE_BUY_LIMIT)) return;
-                 if(IsTerminalFull()) return;
-                 CleanupExcessLimits(_Symbol, 2);
-                 if(bestLevel > 0 && ValidateAndAdjustLimitPrice(req.price, req.sl, req.tp, ORDER_TYPE_BUY_LIMIT) && OrderSend(req, res))
+                if(!CanPlaceLimitOrder(_Symbol, ORDER_TYPE_BUY_LIMIT)) return;
+                CleanupExcessLimits(_Symbol, 2);
+                if(bestLevel > 0 && ValidateAndAdjustLimitPrice(req.price, req.sl, req.tp, ORDER_TYPE_BUY_LIMIT) && OrderSend(req, res))
                {
                   Print("📈 EMA SMC BUY LIMIT @ ", req.price, levelSource, " | SL=", req.sl, " | TP=", req.tp);
                   ordersToPlace--;
@@ -5520,10 +5368,9 @@ void PlaceHistoricalBasedScalpingOrders(MqlRates &rates[], int futureBars, doubl
                req.magic = InpMagicNumber;
                 req.comment = "EMA SMC SELL LIMIT";
                 
-                 if(!CanPlaceLimitOrder(_Symbol, ORDER_TYPE_SELL_LIMIT)) return;
-                 if(IsTerminalFull()) return;
-                 CleanupExcessLimits(_Symbol, 2);
-                 if(bestLevel > 0 && ValidateAndAdjustLimitPrice(req.price, req.sl, req.tp, ORDER_TYPE_SELL_LIMIT) && OrderSend(req, res))
+                if(!CanPlaceLimitOrder(_Symbol, ORDER_TYPE_SELL_LIMIT)) return;
+                CleanupExcessLimits(_Symbol, 2);
+                if(bestLevel > 0 && ValidateAndAdjustLimitPrice(req.price, req.sl, req.tp, ORDER_TYPE_SELL_LIMIT) && OrderSend(req, res))
                {
                   Print("📉 EMA SMC SELL LIMIT @ ", req.price, levelSource, " | SL=", req.sl, " | TP=", req.tp);
                   ordersToPlace--;
@@ -5624,7 +5471,6 @@ request.sl = buyLimitPrice - (currentATR * 1.2); // SL élargi pour petits mouve
           CleanupExcessLimits(_Symbol, 2);
           if(OrderSend(request, result))
          {
-            RegisterOrderPlaced();
             Print("📈 ORDRE BUY PETITS MOUVEMENTS - Prix: ", request.price, " | TP: ", request.tp, " | SL: ", request.sl, " | Distance: ", MathAbs(request.price - currentPrice), " points");
             ordersToPlace--;
          }
@@ -5676,7 +5522,6 @@ request.sl = sellLimitPrice + (currentATR * 1.2); // SL élargi pour petits mouv
           CleanupExcessLimits(_Symbol, 2);
           if(OrderSend(request, result))
          {
-            RegisterOrderPlaced();
             Print("📉 ORDRE SELL PETITS MOUVEMENTS - Prix: ", request.price, " | TP: ", request.tp, " | SL: ", request.sl, " | Distance: ", MathAbs(request.price - currentPrice), " points");
             ordersToPlace--;
          }
@@ -5866,7 +5711,6 @@ void DetectAndPlaceBoomCrashSpikeOrders(MqlRates &rates[], double currentPrice, 
           CleanupExcessLimits(_Symbol, 2);
           if(OrderSend(request, result))
          {
-            RegisterOrderPlaced();
             Print("🚀 ", spikeType, " PLACÉ - Entrée: ", request.price, " | TP: ", request.tp, " | SL: ", request.sl);
          }
          else
@@ -5973,7 +5817,6 @@ void PlaceNormalScalpingOrders(MqlRates &rates[], int futureBars, double current
        CleanupExcessLimits(_Symbol, 2);
        if(OrderSend(request, result))
       {
-         RegisterOrderPlaced();
          Print("📈 SEUL ORDRE LIMIT BUY PLACÉ - Prix: ", request.price, " | TP: ", request.tp, " | SL: ", request.sl, " | Distance: ", distanceToSL, " points");
       }
    }
@@ -6007,7 +5850,6 @@ void PlaceNormalScalpingOrders(MqlRates &rates[], int futureBars, double current
        CleanupExcessLimits(_Symbol, 2);
        if(OrderSend(request, result))
       {
-         RegisterOrderPlaced();
          Print("📉 SEUL ORDRE LIMIT SELL PLACÉ - Prix: ", request.price, " | TP: ", request.tp, " | SL: ", request.sl, " | Distance: ", distanceToSH, " points");
       }
    }
@@ -6405,7 +6247,7 @@ void CheckPredictedSwingTriggers()
    
    if(IsPriceInRange()) return;
    
-   if(IsTerminalFull()) return;
+   if(CountPositionsOurEA() >= MaxPositionsTerminal) return;
    
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
@@ -7892,7 +7734,7 @@ bool ConfirmWithAI(SMC_Signal &sig)
 
 void ExecuteSignal(SMC_Signal &sig)
 {
-   if(IsTerminalFull()) return;
+   if(CountPositionsOurEA() >= MaxPositionsTerminal) return;
    if(!TryAcquireOpenLock()) return;
    double lotSize = CalculateLotSize();
    lotSize = ApplyRecoveryLot(lotSize);
@@ -8058,28 +7900,24 @@ void ExecuteSignal(SMC_Signal &sig)
 
    if(sig.action == "BUY")
    {
-      if(!CanTradeOnSymbol(_Symbol)) { Print("🚫 SMC BUY BLOQUÉ — Terminal plein ou ordre existant sur ", _Symbol); return; }
       if(NoSLTP_BoomCrash && SMC_GetSymbolCategory(_Symbol) == SYM_BOOM_CRASH)
          trade.Buy(lotSize, _Symbol, 0, 0, 0, "SMC " + sig.concept);
       else
          trade.Buy(lotSize, _Symbol, 0, sig.stopLoss, sig.takeProfit, "SMC " + sig.concept);
       if(trade.ResultRetcode() == TRADE_RETCODE_DONE)
       {
-         RegisterOrderPlaced();
          Print("✅ SMC BUY @ ", sig.entryPrice, " - ", sig.concept);
          if(UseNotifications) { Alert("SMC BUY ", _Symbol, " ", sig.concept); SendNotification("SMC BUY " + _Symbol + " " + sig.concept); }
       }
    }
    else if(sig.action == "SELL")
    {
-      if(!CanTradeOnSymbol(_Symbol)) { Print("🚫 SMC SELL BLOQUÉ — Terminal plein ou ordre existant sur ", _Symbol); return; }
       if(NoSLTP_BoomCrash && SMC_GetSymbolCategory(_Symbol) == SYM_BOOM_CRASH)
          trade.Sell(lotSize, _Symbol, 0, 0, 0, "SMC " + sig.concept);
       else
          trade.Sell(lotSize, _Symbol, 0, sig.stopLoss, sig.takeProfit, "SMC " + sig.concept);
       if(trade.ResultRetcode() == TRADE_RETCODE_DONE)
       {
-         RegisterOrderPlaced();
          Print("✅ SMC SELL @ ", sig.entryPrice, " - ", sig.concept);
          if(UseNotifications) { Alert("SMC SELL ", _Symbol, " ", sig.concept); SendNotification("SMC SELL " + _Symbol + " " + sig.concept); }
       }
@@ -9334,15 +9172,13 @@ void TP1_CloseAndReEntry()
             {
                if(g_smcGomConnected && g_smcGomVerdictNum < 0)
                {
-                   Print("🚫 TP1-REENTRY BUY BLOQUÉ — GOM verdict=", g_smcGomVerdict, " (vn=", g_smcGomVerdictNum, ")");
-                   ReleaseOpenLock(); continue;
-                }
-                if(!CanTradeOnSymbol(symbol)) { Print("🚫 TP1-REENTRY BUY BLOQUÉ — Terminal plein ou ordre existant sur ", symbol); ReleaseOpenLock(); continue; }
-                double sl = NormalizeDouble(ask - atrVal * GOMAlignSL_ATRMult, dg);
-                double tp = NormalizeDouble(ask + atrVal * GOMAlignTP_ATRMult, dg);
-                if(trade.Buy(lot, symbol, ask, sl, tp, "TP1-REENTRY BUY"))
+                  Print("🚫 TP1-REENTRY BUY BLOQUÉ — GOM verdict=", g_smcGomVerdict, " (vn=", g_smcGomVerdictNum, ")");
+                  ReleaseOpenLock(); continue;
+               }
+               double sl = NormalizeDouble(ask - atrVal * GOMAlignSL_ATRMult, dg);
+               double tp = NormalizeDouble(ask + atrVal * GOMAlignTP_ATRMult, dg);
+               if(trade.Buy(lot, symbol, ask, sl, tp, "TP1-REENTRY BUY"))
                {
-                  RegisterOrderPlaced();
                   orderOK = true;
                   Print("🔄 TP1 RE-ENTRY BUY ", symbol, " @", DoubleToString(ask, dg),
                         " SL=", DoubleToString(sl, dg), " TP=", DoubleToString(tp, dg),
@@ -9353,15 +9189,13 @@ void TP1_CloseAndReEntry()
             {
                if(g_smcGomConnected && g_smcGomVerdictNum > 0)
                {
-                   Print("🚫 TP1-REENTRY SELL BLOQUÉ — GOM verdict=", g_smcGomVerdict, " (vn=", g_smcGomVerdictNum, ")");
-                   ReleaseOpenLock(); continue;
-                }
-                if(!CanTradeOnSymbol(symbol)) { Print("🚫 TP1-REENTRY SELL BLOQUÉ — Terminal plein ou ordre existant sur ", symbol); ReleaseOpenLock(); continue; }
-                double sl = NormalizeDouble(bid + atrVal * GOMAlignSL_ATRMult, dg);
-                double tp = NormalizeDouble(bid - atrVal * GOMAlignTP_ATRMult, dg);
-                if(trade.Sell(lot, symbol, bid, sl, tp, "TP1-REENTRY SELL"))
+                  Print("🚫 TP1-REENTRY SELL BLOQUÉ — GOM verdict=", g_smcGomVerdict, " (vn=", g_smcGomVerdictNum, ")");
+                  ReleaseOpenLock(); continue;
+               }
+               double sl = NormalizeDouble(bid + atrVal * GOMAlignSL_ATRMult, dg);
+               double tp = NormalizeDouble(bid - atrVal * GOMAlignTP_ATRMult, dg);
+               if(trade.Sell(lot, symbol, bid, sl, tp, "TP1-REENTRY SELL"))
                {
-                  RegisterOrderPlaced();
                   orderOK = true;
                   Print("🔄 TP1 RE-ENTRY SELL ", symbol, " @", DoubleToString(bid, dg),
                         " SL=", DoubleToString(sl, dg), " TP=", DoubleToString(tp, dg),
@@ -12555,7 +12389,6 @@ void PlacePostHoldLimitOrder(string closedSymbol, ENUM_POSITION_TYPE closedType,
    CleanupExcessLimits(closedSymbol, 2);
    if(OrderSend(request, result))
    {
-      RegisterOrderPlaced();
       g_postHoldLimitOrderPending = true;
       g_lastHoldCloseTime = TimeCurrent();
       Print("✅ POST-HOLD - Ordre limit placé avec succès");
@@ -13161,7 +12994,6 @@ void ExecuteDerivArrowTrade(string direction)
    
    if(OrderSend(request, result))
    {
-      RegisterOrderPlaced();
       Print("✅ ORDRE DERIV ARROW EXÉCUTÉ - ", direction, " sur ", _Symbol,
             " | Prix: ", DoubleToString((direction == "BUY") ? askPrice : bidPrice, _Digits),
             " | SL: ", DoubleToString(stopLoss, _Digits),
@@ -13334,13 +13166,11 @@ void ExecuteGOMAlignmentMarketOrder()
 
    if(gomBuy)
    {
-      if(!CanTradeOnSymbol(_Symbol)) { Print("🚫 GOM-ALIGN BUY BLOQUÉ — Terminal plein ou ordre existant sur ", _Symbol); return; }
       double sl = NormalizeDouble(ask - atrValue * GOMAlignSL_ATRMult, dg);
       double tp = NormalizeDouble(ask + atrValue * GOMAlignTP_ATRMult, dg);
 
 if(trade.Buy(lot, _Symbol, ask, sl, tp, "GOM-ALIGN BUY"))
        {
-          RegisterOrderPlaced();
           orderExecuted = true;
           s_lastGomAlignEntry = TimeCurrent();
           ulong ticket = trade.ResultOrder();
@@ -13371,13 +13201,11 @@ if(trade.Buy(lot, _Symbol, ask, sl, tp, "GOM-ALIGN BUY"))
    }
    else if(gomSell)
    {
-      if(!CanTradeOnSymbol(_Symbol)) { Print("🚫 GOM-ALIGN SELL BLOQUÉ — Terminal plein ou ordre existant sur ", _Symbol); return; }
       double sl = NormalizeDouble(bid + atrValue * GOMAlignSL_ATRMult, dg);
       double tp = NormalizeDouble(bid - atrValue * GOMAlignTP_ATRMult, dg);
 
 if(trade.Sell(lot, _Symbol, bid, sl, tp, "GOM-ALIGN SELL"))
        {
-          RegisterOrderPlaced();
           orderExecuted = true;
           s_lastGomAlignEntry = TimeCurrent();
           ulong ticket = trade.ResultOrder();
@@ -13565,11 +13393,9 @@ void ExecuteAIDecisionMarketOrder()
           ReleaseOpenLock();
           return;
        }
-       if(!CanTradeOnSymbol(_Symbol)) { Print("🚫 IA SMC-EMA BUY BLOQUÉ — Terminal plein ou ordre existant sur ", _Symbol); ReleaseOpenLock(); return; }
 // Utiliser l'entrée précise calculée au lieu du prix actuel
        if(trade.Buy(lot, _Symbol, preciseEntry, preciseSL, preciseTP, "IA SMC-EMA BUY PRÉCIS"))
        {
-          RegisterOrderPlaced();
           orderExecuted = true;
           ulong ticket = trade.ResultOrder();
           if(ticket > 0) SMC_ApplyPostEntrySLBuffer(_Symbol, ticket, 1.0);
@@ -13598,11 +13424,9 @@ void ExecuteAIDecisionMarketOrder()
           ReleaseOpenLock();
           return;
        }
-       if(!CanTradeOnSymbol(_Symbol)) { Print("🚫 IA SMC-EMA SELL BLOQUÉ — Terminal plein ou ordre existant sur ", _Symbol); ReleaseOpenLock(); return; }
 // Utiliser l'entrée précise calculée au lieu du prix actuel
        if(trade.Sell(lot, _Symbol, preciseEntry, preciseSL, preciseTP, "IA SMC-EMA SELL PRÉCIS"))
        {
-          RegisterOrderPlaced();
           orderExecuted = true;
           ulong ticket = trade.ResultOrder();
           if(ticket > 0) SMC_ApplyPostEntrySLBuffer(_Symbol, ticket, 1.0);
@@ -15253,12 +15077,10 @@ void CheckRSISqueezeAndTrade()
            Print("🚫 RSI-SQUEEZE BUY BLOQUÉ — GOM verdict=", g_smcGomVerdict, " (vn=", g_smcGomVerdictNum, ")");
            ReleaseOpenLock(); return;
         }
-         double sl = NormalizeDouble(ask - atrVal * 2.0, dg);
-         double tp = NormalizeDouble(ask + atrVal * 5.0, dg);
-         if(!CanTradeOnSymbol(_Symbol)) { Print("🚫 RSI-SQUEEZE BUY BLOQUÉ — Terminal plein ou ordre existant sur ", _Symbol); ReleaseOpenLock(); return; }
-         if(trade.Buy(lot, _Symbol, ask, sl, tp, "RSI-SQUEEZE BUY"))
+        double sl = NormalizeDouble(ask - atrVal * 2.0, dg);
+        double tp = NormalizeDouble(ask + atrVal * 5.0, dg);
+        if(trade.Buy(lot, _Symbol, ask, sl, tp, "RSI-SQUEEZE BUY"))
        {
-          RegisterOrderPlaced();
           orderOK = true;
           ulong ticket = trade.ResultOrder();
           if(ticket > 0) SMC_ApplyPostEntrySLBuffer(_Symbol, ticket, 1.0);
@@ -15272,14 +15094,12 @@ void CheckRSISqueezeAndTrade()
         if(g_smcGomConnected && g_smcGomVerdictNum > 0)
         {
            Print("🚫 RSI-SQUEEZE SELL BLOQUÉ — GOM verdict=", g_smcGomVerdict, " (vn=", g_smcGomVerdictNum, ")");
-            ReleaseOpenLock(); return;
-         }
-         double sl = NormalizeDouble(bid + atrVal * 2.0, dg);
-         double tp = NormalizeDouble(bid - atrVal * 5.0, dg);
-         if(!CanTradeOnSymbol(_Symbol)) { Print("🚫 RSI-SQUEEZE SELL BLOQUÉ — Terminal plein ou ordre existant sur ", _Symbol); ReleaseOpenLock(); return; }
-         if(trade.Sell(lot, _Symbol, bid, sl, tp, "RSI-SQUEEZE SELL"))
+           ReleaseOpenLock(); return;
+        }
+        double sl = NormalizeDouble(bid + atrVal * 2.0, dg);
+        double tp = NormalizeDouble(bid - atrVal * 5.0, dg);
+        if(trade.Sell(lot, _Symbol, bid, sl, tp, "RSI-SQUEEZE SELL"))
        {
-          RegisterOrderPlaced();
           orderOK = true;
           ulong ticket = trade.ResultOrder();
           if(ticket > 0) SMC_ApplyPostEntrySLBuffer(_Symbol, ticket, 1.0);
@@ -17038,15 +16858,13 @@ void PlaceSRLimitOrders20Bars()
    bool orderOK = false;
 
 if(impulseBuy)
-     {
-        if(!CanTradeOnSymbol(_Symbol)) { Print("🚫 IMPULSE BUY BLOQUÉ — Terminal plein ou ordre existant sur ", _Symbol); ReleaseOpenLock(); return; }
-        double entry = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-        double sl = NormalizeDouble(entry - atrVal * ImpulseZoneSL_ATRMult, dg);
-        double tp = NormalizeDouble(entry + atrVal * ImpulseZoneTP_ATRMult, dg);
+    {
+       double entry = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+       double sl = NormalizeDouble(entry - atrVal * ImpulseZoneSL_ATRMult, dg);
+       double tp = NormalizeDouble(entry + atrVal * ImpulseZoneTP_ATRMult, dg);
 
-        if(trade.Buy(lot, _Symbol, entry, sl, tp, "IMPULSE BUY"))
+       if(trade.Buy(lot, _Symbol, entry, sl, tp, "IMPULSE BUY"))
        {
-          RegisterOrderPlaced();
           orderOK = true;
           ulong ticket = trade.ResultOrder();
           if(ticket > 0) SMC_ApplyPostEntrySLBuffer(_Symbol, ticket, 1.0);
@@ -17057,16 +16875,14 @@ if(impulseBuy)
                 " | SL=", DoubleToString(sl, dg), " TP=", DoubleToString(tp, dg));
        }
     }
-     else if(impulseSell)
-     {
-        if(!CanTradeOnSymbol(_Symbol)) { Print("🚫 IMPULSE SELL BLOQUÉ — Terminal plein ou ordre existant sur ", _Symbol); ReleaseOpenLock(); return; }
-        double entry = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-        double sl = NormalizeDouble(entry + atrVal * ImpulseZoneSL_ATRMult, dg);
-        double tp = NormalizeDouble(entry - atrVal * ImpulseZoneTP_ATRMult, dg);
+    else if(impulseSell)
+    {
+       double entry = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+       double sl = NormalizeDouble(entry + atrVal * ImpulseZoneSL_ATRMult, dg);
+       double tp = NormalizeDouble(entry - atrVal * ImpulseZoneTP_ATRMult, dg);
 
-        if(trade.Sell(lot, _Symbol, entry, sl, tp, "IMPULSE SELL"))
+       if(trade.Sell(lot, _Symbol, entry, sl, tp, "IMPULSE SELL"))
        {
-          RegisterOrderPlaced();
           orderOK = true;
           ulong ticket = trade.ResultOrder();
           if(ticket > 0) SMC_ApplyPostEntrySLBuffer(_Symbol, ticket, 1.0);

@@ -174,7 +174,7 @@ bool SafeOrderSend(MqlTradeRequest &req, MqlTradeResult &result, const string la
       if(IsTerminalFull())
       {
          result.retcode = TRADE_RETCODE_REJECT;
-         Print("[SAFE] ORDRE BLOQUÉ — Terminal plein (", CountTerminalAllOrders(), "/", MaxPositionsTerminal, ") | ", label, " | ", req.symbol);
+         Print("[SAFE] ORDRE BLOQUÉ — Terminal plein (", CountTerminalAllOrders(), "/", SMC_EffectiveMaxPositionsTerminal(), ") | ", label, " | ", req.symbol);
          return false;
       }
       // ── GARDE PAR SYMBOLE: pas de 2ème ordre sur même symbole ──
@@ -318,5 +318,35 @@ int SMC_ComputePropiceScore() { return 0; }
 bool g_smcAlignExecBypass = false;
 
 // PlaceGOMMarketOrder → SMC_GOMAlign.mqh
+
+// ── Forward declarations (définies dans SMC_Universal.mq5) ──
+int  CountPositionsOurEA();
+int  CountPositionsForSymbol(const string symbol);
+int  SMC_EffectiveMaxPositionsTerminal();
+
+// ── Gardes globaux terminal ──
+int    g_ordersPlacedCounter = 0;
+datetime g_lastOrderPlaceTime = 0;
+
+int CountTerminalAllOrders()
+{
+   return CountPositionsOurEA();
+}
+
+bool IsTerminalFull()
+{
+   return (CountTerminalAllOrders() >= SMC_EffectiveMaxPositionsTerminal());
+}
+
+bool SymbolHasActiveOrder(const string symbol)
+{
+   return (CountPositionsForSymbol(symbol) > 0);
+}
+
+void RegisterOrderPlaced()
+{
+   g_ordersPlacedCounter++;
+   g_lastOrderPlaceTime = TimeCurrent();
+}
 
 #endif
