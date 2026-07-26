@@ -29,10 +29,33 @@ import pandas as pd
 # Parametres par defaut (a ajuster selon l'indice - Boom1000 != Boom500)
 # ------------------------------------------------------------------
 DEFAULT_PARAMS = {
+    # Boom/Crash (Deriv) — spikes up/down respectively
     "BOOM1000":  {"direction": "up",   "atr_period": 14, "spike_atr_mult": 3.0},
     "BOOM500":   {"direction": "up",   "atr_period": 14, "spike_atr_mult": 3.0},
     "CRASH1000": {"direction": "down", "atr_period": 14, "spike_atr_mult": 3.0},
     "CRASH500":  {"direction": "down", "atr_period": 14, "spike_atr_mult": 3.0},
+    # PainX (spikes down) / GainX (spikes up) — Weltrade
+    "PainX_400":  {"direction": "down", "atr_period": 14, "spike_atr_mult": 3.0},
+    "GainX_400":  {"direction": "up",   "atr_period": 14, "spike_atr_mult": 3.0},
+    "PainX_600":  {"direction": "down", "atr_period": 14, "spike_atr_mult": 3.0},
+    "GainX_600":  {"direction": "up",   "atr_period": 14, "spike_atr_mult": 3.0},
+    "PainX_800":  {"direction": "down", "atr_period": 14, "spike_atr_mult": 3.0},
+    "GainX_800":  {"direction": "up",   "atr_period": 14, "spike_atr_mult": 3.0},
+    "PainX_999":  {"direction": "down", "atr_period": 14, "spike_atr_mult": 3.0},
+    "GainX_999":  {"direction": "up",   "atr_period": 14, "spike_atr_mult": 3.0},
+    "PainX_1200": {"direction": "down", "atr_period": 14, "spike_atr_mult": 3.0},
+    "GainX_1200": {"direction": "up",   "atr_period": 14, "spike_atr_mult": 3.0},
+    # Volatility indices — mean-reverting, spikes in both directions
+    "FX_Vol_20":  {"direction": "both", "atr_period": 14, "spike_atr_mult": 2.0},
+    "FX_Vol_40":  {"direction": "both", "atr_period": 14, "spike_atr_mult": 2.0},
+    "FX_Vol_60":  {"direction": "both", "atr_period": 14, "spike_atr_mult": 2.0},
+    "FX_Vol_80":  {"direction": "both", "atr_period": 14, "spike_atr_mult": 2.0},
+    "FX_Vol_99":  {"direction": "both", "atr_period": 14, "spike_atr_mult": 2.0},
+    "SFX_Vol_20": {"direction": "both", "atr_period": 14, "spike_atr_mult": 2.5},
+    "SFX_Vol_40": {"direction": "both", "atr_period": 14, "spike_atr_mult": 2.5},
+    "SFX_Vol_60": {"direction": "both", "atr_period": 14, "spike_atr_mult": 2.5},
+    "SFX_Vol_80": {"direction": "both", "atr_period": 14, "spike_atr_mult": 2.5},
+    "SFX_Vol_99": {"direction": "both", "atr_period": 14, "spike_atr_mult": 2.5},
 }
 
 
@@ -52,8 +75,9 @@ def detect_spikes(df: pd.DataFrame, direction: str, atr_period: int, spike_atr_m
     Marque chaque bougie comme spike si son range (ou son deplacement close-open)
     depasse spike_atr_mult * ATR, dans le sens attendu pour l'indice.
 
-    direction: "up"   -> on cherche les spikes haussiers (typique Boom)
-               "down" -> on cherche les spikes baissiers (typique Crash)
+    direction: "up"   -> on cherche les spikes haussiers (typique Boom/GainX)
+               "down" -> on cherche les spikes baissiers (typique Crash/PainX)
+               "both" -> on cherche les deux directions (Volatility indices)
     """
     df = df.copy()
     df["atr"] = compute_atr(df, atr_period)
@@ -61,23 +85,23 @@ def detect_spikes(df: pd.DataFrame, direction: str, atr_period: int, spike_atr_m
     df["range"] = df["high"] - df["low"]
 
     threshold = spike_atr_mult * df["atr"]
+    df["spike_direction"] = None
 
     if direction == "up":
-        is_spike = (df["body"] > 0) & (df["body"] > threshold)
-        df["spike_direction"] = np.where(is_spike, "up", None)
+        up_spike = (df["body"] > 0) & (df["body"] > threshold)
+        down_spike = (df["body"] < 0) & (df["body"].abs() > threshold)
+        df.loc[up_spike, "spike_direction"] = "up"
+        df.loc[down_spike, "spike_direction"] = "down"
+    elif direction == "down":
+        down_spike = (df["body"] < 0) & (df["body"].abs() > threshold)
+        up_spike = (df["body"] > 0) & (df["body"] > threshold)
+        df.loc[down_spike, "spike_direction"] = "down"
+        df.loc[up_spike, "spike_direction"] = "up"
     else:
-        is_spike = (df["body"] < 0) & (df["body"].abs() > threshold)
-        df["spike_direction"] = np.where(is_spike, "down", None)
-
-    # On garde egalement les contre-spikes (rares mais existent) pour
-    # avoir un vrai historique bidirectionnel haussier/baissier
-    opposite_is_spike = None
-    if direction == "up":
-        opposite_is_spike = (df["body"] < 0) & (df["body"].abs() > threshold)
-        df.loc[opposite_is_spike, "spike_direction"] = "down"
-    else:
-        opposite_is_spike = (df["body"] > 0) & (df["body"] > threshold)
-        df.loc[opposite_is_spike, "spike_direction"] = "up"
+        up_spike = (df["body"] > 0) & (df["body"] > threshold)
+        down_spike = (df["body"] < 0) & (df["body"].abs() > threshold)
+        df.loc[up_spike, "spike_direction"] = "up"
+        df.loc[down_spike, "spike_direction"] = "down"
 
     df["is_spike"] = df["spike_direction"].notna()
     return df
@@ -114,10 +138,13 @@ def extract_spike_events(df: pd.DataFrame, symbol: str) -> pd.DataFrame:
     return spikes[cols].reset_index(drop=True)
 
 
+def _param_key(symbol: str) -> str:
+    return symbol.replace(" ", "_")
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--input", required=True, help="CSV M1 avec colonnes time,open,high,low,close,volume")
-    parser.add_argument("--symbol", required=True, choices=list(DEFAULT_PARAMS.keys()))
+    parser.add_argument("--symbol", required=True, help="Nom du symbole (ex: PainX 999)")
     parser.add_argument("--output", required=True, help="CSV de sortie: liste des evenements spike")
     parser.add_argument("--spike_atr_mult", type=float, default=None, help="Override du multiplicateur ATR")
     args = parser.parse_args()
@@ -129,7 +156,12 @@ def main():
     if missing:
         raise ValueError(f"Colonnes manquantes dans {args.input}: {missing}")
 
-    params = DEFAULT_PARAMS[args.symbol].copy()
+    key = _param_key(args.symbol)
+    if key not in DEFAULT_PARAMS:
+        print(f"[WARN] Symbole '{args.symbol}' non dans DEFAULT_PARAMS, utilisation defauts direction=both")
+        params = {"direction": "both", "atr_period": 14, "spike_atr_mult": 3.5}
+    else:
+        params = DEFAULT_PARAMS[key].copy()
     if args.spike_atr_mult is not None:
         params["spike_atr_mult"] = args.spike_atr_mult
 

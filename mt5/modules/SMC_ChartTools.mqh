@@ -90,11 +90,72 @@ void SMCCT_CleanSessions()
    }
 }
 
-// SMCCT_DrawCorrectionOverlay — stub si l'overlay n'est pas encore implémenté
+//+------------------------------------------------------------------+
+//| SMCCT_DrawCorrectionOverlay — overlay de correction Dow (vert/rouge)
+//| La zone semi-transparente apparaît quand Dow Theory = BULL ou BEAR
+//| et disparaît quand le prix quitte la zone (WAIT/consolidation).   |
+//+------------------------------------------------------------------+
 void SMCCT_DrawCorrectionOverlay()
 {
-   // Placeholder: dessiner l'overlay de correction GOM si nécessaire
-   // Sera implémenté cuando la logique de correction sera finalisée
+   string symbol = _Symbol;
+   int digits = (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS);
+
+   int vcgVerdict = g_smcGomVerdictNum;
+   bool dowBull = (vcgVerdict >= 2);
+   bool dowBear = (vcgVerdict <= -2);
+
+   uint   fillColor = 0;
+   color  lineColor = clrNONE;
+
+   if(dowBull)
+   {
+      fillColor = ColorToARGB(clrLime, 40);
+      lineColor = clrLime;
+   }
+   else if(dowBear)
+   {
+      fillColor = ColorToARGB(clrRed, 40);
+      lineColor = clrRed;
+   }
+
+   double bid = SymbolInfoDouble(symbol, SYMBOL_BID);
+   double ask = SymbolInfoDouble(symbol, SYMBOL_ASK);
+   double mid = (bid + ask) / 2.0;
+
+   double zoneWidthPts = 122.5;
+   double zoneLow  = mid - zoneWidthPts * _Point * 0.5;
+   double zoneHigh = mid + zoneWidthPts * _Point * 0.5;
+
+   string rectName = "DOW_CORRECTION_RECT";
+   string textName = "DOW_CORRECTION_TEXT";
+   ObjectDelete(0, rectName);
+   ObjectDelete(0, textName);
+
+   if(fillColor != clrNONE)
+   {
+      datetime now = TimeCurrent();
+      datetime future = now + PeriodSeconds(PERIOD_CURRENT) * 20;
+
+      ObjectCreate(0, rectName, OBJ_RECTANGLE, 0, now, zoneLow, future, zoneHigh);
+      ObjectSetInteger(0, rectName, OBJPROP_COLOR, lineColor);
+      ObjectSetInteger(0, rectName, OBJPROP_FILL, true);
+      ObjectSetInteger(0, rectName, OBJPROP_BACK, true);
+      ObjectSetInteger(0, rectName, OBJPROP_WIDTH, 1);
+      ObjectSetInteger(0, rectName, OBJPROP_STYLE, STYLE_SOLID);
+      ObjectSetInteger(0, rectName, OBJPROP_SELECTABLE, false);
+
+      string dirTxt = dowBull ? "BULL" : "BEAR";
+      ObjectCreate(0, textName, OBJ_TEXT, 0, now, zoneHigh);
+      ObjectSetString(0, textName, OBJPROP_TEXT, " DOW " + dirTxt + " EP=" + DoubleToString(mid, digits));
+      ObjectSetInteger(0, textName, OBJPROP_FONTSIZE, 8);
+      ObjectSetInteger(0, textName, OBJPROP_COLOR, lineColor);
+      ObjectSetInteger(0, textName, OBJPROP_BACK, false);
+      ObjectSetInteger(0, textName, OBJPROP_SELECTABLE, false);
+   }
+
+   Print("[SMCCT] Dow Overlay: ", dowBull ? "BULL" : (dowBear ? "BEAR" : "WAIT"),
+         " EP=", DoubleToString(mid, digits),
+         " zone=[", DoubleToString(zoneLow, digits), " - ", DoubleToString(zoneHigh, digits), "]");
 }
 
 #endif

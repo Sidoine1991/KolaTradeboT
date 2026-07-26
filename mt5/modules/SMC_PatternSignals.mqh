@@ -7,6 +7,12 @@
 
 #define SMCPS_MAX_PATTERNS 48
 
+// Définition unique (inclus une seule fois via guard). Partagée avec SMC_Universal.mq5.
+bool   g_sr20BounceArmedBuy  = false;
+bool   g_sr20BounceArmedSell = false;
+int    g_sr20BounceBuyBars   = 0;
+int    g_sr20BounceSellBars  = 0;
+
 enum SMC_PATTERN_ID
 {
    PAT_NONE = 0,
@@ -591,6 +597,104 @@ bool SMCPS_TryExecutePatternEntry(const string symbol, const int dirSign, const 
    return false;
 }
 
+//+------------------------------------------------------------------+
+//| Détéction du RETEST du pointillé Entry d'un pattern : le prix vient  |
+//| toucher le niveau (corps OU mèche de bougie) sans le casser dans  |
+//| le sens du breakout. C'est le comportement "pullback sur l'entry".  |
+//| Retourne l'entryLevel touché (le plus proche du prix) ou 0.       |
+//+------------------------------------------------------------------+
+double SMCPS_RetestEntryLevel(const string symbol, const int dirSign, double &tolOut)
+{
+    double bid = SymbolInfoDouble(symbol, SYMBOL_BID);
+    double ask = SymbolInfoDouble(symbol, SYMBOL_ASK);
+    if(bid <= 0 || ask <= 0) return 0.0;
+    double px = (dirSign > 0) ? bid : ask;
+
+    double atr = SMCPS_ATR(symbol, PERIOD_CURRENT);
+    if(atr <= 0) atr = (ask - bid) * 2.0;
+    if(atr <= 0) return 0.0;
+    // Tolérance de toucher = mèche d'une bougie (~0.35 ATR) ou 10 points
+    double tol = MathMax(atr * 0.35, SymbolInfoDouble(symbol, SYMBOL_POINT) * 10);
+    tolOut = tol;
+
+    double best = 0.0, bestDist = 999 * atr;
+    for(int i = 0; i < g_smcps.hitCount; i++)
+    {
+        if(g_smcps.hits[i].dirSign != dirSign) continue;
+        double lvl = g_smcps.hits[i].entryLevel;
+        if(lvl <= 0) continue;
+        double dist = MathAbs(px - lvl);
+        if(dist <= tol && dist < bestDist)
+        {
+            bestDist = dist;
+            best = lvl;
+        }
+    }
+    return best;
+}
+
+//+------------------------------------------------------------------+
+//| Entrée MARCHÉ sur RETEST du pointillé Entry (corps/mèche),         |
+//| conditionnée par: S/R 20 bars DÉJÀ touché+rebondi (impulsion     |
+//| forte) + verdict GOM GOOD/PERFECT. 1 ordre par toucher (debounce |
+//| par bougie de toucher) pour éviter les doublons.                   |
+//+------------------------------------------------------------------+
+void SMCPS_TryExecutePatternEntryOnRetest(const string symbol, const int dirSign, const string direction)
+{
+    if(!PatternTriggerMarketEntry || !UsePatternEntrySignals) return;
+    if(dirSign == 0) return;
+    if(!SMC_IsSpikeStyleSymbol(symbol)) return;   // uniquement symboles spike
+
+    // 1) S/R 20 bars touché + rebondi (preuve impulsion forte)
+    bool armed = (dirSign > 0) ? g_sr20BounceArmedBuy : g_sr20BounceArmedSell;
+    if(!armed) return;
+
+    // 2) Verdict GOM : on exécute le retest SEULEMENT si GOM = GOOD/PERFECT.
+    // Sous WAIT -> on n'entre PAS (on attend le retour du verdict).
+    int effVn = SMCPS_EffectiveGOMVerdictNum();
+    if(MathAbs(effVn) < 2) return;           // WAIT -> pas d'entrée, on attend
+    if(dirSign == 1 && effVn <= 0) return;   // GOM SELL clair -> BUY interdit
+    if(dirSign == -1 && effVn >= 0) return;  // GOM BUY clair -> SELL interdit
+
+    // 3) Pattern présent dans la direction
+    if(!SMCPS_PatternGateOK(symbol, dirSign, false)) return;
+
+    // 4) Le prix touche le pointillé Entry (retest, pas breakout)
+    double tol = 0;
+    double lvl = SMCPS_RetestEntryLevel(symbol, dirSign, tol);
+    if(lvl <= 0) return;
+
+    // Debounce: 1 ordre par bougie de toucher (ne pas re-déclencher sur ticks voisins)
+    static datetime s_lastRetestBar = 0;
+    datetime curBar = iTime(symbol, PERIOD_CURRENT, 0);
+    static double   s_lastRetestLvl  = 0;
+    if(curBar == s_lastRetestBar && MathAbs(lvl - s_lastRetestLvl) < tol) return;
+    s_lastRetestBar = curBar;
+    s_lastRetestLvl  = lvl;
+
+    string tag = SMCPS_BestPatternTag(dirSign) + "_RETST";
+
+    // Entrée sur retest : on utilise UNIQUEMENT le verdict GOM GOOD/PERFECT
+    // (pas le gate strict COG/IA/prédiction qui bloque tout). Bypass le gate.
+    g_smcAlignExecBypass = true;
+
+    bool ok = PlaceGOMMarketOrder(direction, "GOM_PATTERN", tag);
+
+    g_smcAlignExecBypass = false;
+
+    if(ok)
+    {
+        Print("[PATTERN-RETST] MARKET ", direction, " (retest Entry=", DoubleToString(lvl, (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS)),
+              ") | SR20 rebondi + GOM ", g_smcGomVerdict, " vn=", effVn,
+              " | ", g_smcps.summary);
+    }
+    else
+    {
+        Print("[PATTERN-RETST] ECHEC ", direction, " retest Entry=", DoubleToString(lvl, (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS)),
+              " | GOM ", g_smcGomVerdict, " align=", (GOM_EntryAlignmentOK(dirSign) ? "OK" : "NON"));
+    }
+}
+
 bool SMCPS_EntryAllowed(const string symbol, const int dirSign)
 {
    if(!SMCPS_PatternGateOK(symbol, dirSign, true)) return false;
@@ -662,18 +766,7 @@ void SMCPS_DrawMarker(const string symbol)
    SMCPS_ClearDrawings();
 
    if(g_smcps.hitCount <= 0)
-   {
-      string empty = "SMCPS_PANEL";
-      ObjectCreate(0, empty, OBJ_LABEL, 0, 0, 0);
-      ObjectSetInteger(0, empty, OBJPROP_CORNER, CORNER_LEFT_UPPER);
-      ObjectSetInteger(0, empty, OBJPROP_XDISTANCE, 10);
-      ObjectSetInteger(0, empty, OBJPROP_YDISTANCE, 120);
-      ObjectSetString(0, empty, OBJPROP_TEXT, "PATTERNS: aucun (M1/M5/H1)");
-      ObjectSetInteger(0, empty, OBJPROP_COLOR, clrSilver);
-      ObjectSetInteger(0, empty, OBJPROP_FONTSIZE, 8);
-      ObjectSetInteger(0, empty, OBJPROP_SELECTABLE, false);
       return;
-   }
 
    int dp = (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS);
    int drawn = 0;

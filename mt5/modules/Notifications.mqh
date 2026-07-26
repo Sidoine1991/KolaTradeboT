@@ -1,5 +1,5 @@
 //+------------------------------------------------------------------+
-//| Notifications.mqh — WhatsApp + trade event notifications         |
+//| Notifications.mqh ï¿½ WhatsApp + trade event notifications         |
 //+------------------------------------------------------------------+
 #ifndef TM_NOTIFICATIONS_MQH
 #define TM_NOTIFICATIONS_MQH
@@ -76,9 +76,10 @@ bool SendWAEvent(const string message, const string eventType = "INFO")
    );
 
    // Escape quotes in message for JSON
-   json = StringReplace(json, "\"", "\\\"");
+   string escapedMsg = message;
+   StringReplace(escapedMsg, "\"", "\\\"");
    json = StringFormat("{\"message\":\"%s\",\"event_type\":\"%s\",\"timestamp\":%lld}",
-                       StringReplace(message, "\"", "\\\""), eventType, TimeCurrent());
+                       escapedMsg, eventType, TimeCurrent());
 
    HTTPResponse resp = HTTP_NotifyWhatsApp(json);
    bool success = resp.success;

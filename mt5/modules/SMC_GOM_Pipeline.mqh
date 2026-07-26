@@ -5,11 +5,11 @@
 #ifndef SMC_GOM_PIPELINE_MQH
 #define SMC_GOM_PIPELINE_MQH
 
+#include "SMC_SignalGates.mqh"
 #include "MT5_Candles_Uploader.mqh"
+#include "GOM_Graphics.mqh"
 
 // inputs du .mq5 parent — déclarés extern pour compilation indépendante du .mqh
-
-// Déclaré / implémenté dans SMC_Universal.mq5
 bool DisciplineAllowsPipelineAction(const string action);
 bool SMCGP_GOMValidatesPrimarySignal(const int dir);
 bool SMC_BCHourAllowsTrade(const string symbol = "");
@@ -198,7 +198,7 @@ int      g_smcPipelineFailCount = 0;
 // ── Failover serveur IA (local → Render) pour tout le pipeline GOM ─────
 int      g_smcGomFailCount  = 0;     // échecs consécutifs sur le serveur actif
 bool     g_smcGomUseRender  = false;  // true = on bascule sur AI_ServerRender
-int      g_smcGomFailThreshold = 3;  // nb d'échecs avant bascule
+int      g_smcGomFailThreshold = 2;  // nb d'échecs avant bascule
 datetime g_smcGomLastBascule = 0;   // anti-oscillation : délais avant revenir local
 
 string SMCGP_ActiveServerURL()
@@ -286,7 +286,11 @@ int SMCGP_GetCachedVerdictNum(const string symbol)
 // À appeler périodiquement (OnTick / OnTimer)
 void SMCGP_EnforceLimitDiscipline(const long magic, const int maxLimits = 2)
 {
-   if(!g_smcGomConnected) return;
+   // Ne PAS exiger g_smcGomConnected : sous WAIT (vn=0) on doit annuler les LIMIT
+   // même si le serveur GOM est temporairement down. Le cache conserve le dernier
+   // verdict connu. On ne touche pas si le verdict est inconnu (vn=-999).
+   if(!g_smcGomConnected && g_smcLastGOMPoll > 0 && TimeCurrent() - g_smcLastGOMPoll > 900)
+      return; // déconnexion > 15 min + cache périmé → on ne risque pas d'annuler à tort
 
    // 1) Supprimer les ordres LIMIT qui vont contre le verdict en cache
    for(int i = OrdersTotal() - 1; i >= 0; i--)
@@ -298,27 +302,37 @@ void SMCGP_EnforceLimitDiscipline(const long magic, const int maxLimits = 2)
       ENUM_ORDER_TYPE t = (ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE);
       if(t != ORDER_TYPE_BUY_LIMIT && t != ORDER_TYPE_SELL_LIMIT) continue;
 
-      string sym = OrderGetString(ORDER_SYMBOL);
-      int vn = SMCGP_GetCachedVerdictNum(sym);
-      if(vn == -999) continue; // inconnu → ne pas toucher
+       string sym = OrderGetString(ORDER_SYMBOL);
+       // Ne jamais toucher aux ordres LIMIT DOW (ancrés sur DOW PROJ)
+       string cmt = OrderGetString(ORDER_COMMENT);
+       if(StringFind(cmt, "DOW") >= 0)
+          continue;
 
-      bool isBuyLimit = (t == ORDER_TYPE_BUY_LIMIT);
-      // WAIT / SIMPLE (|vn|<2) : annuler tous les limits — aucune entrée autorisée
+       // Grâce discipline LIMIT (3-5 min) — ne pas supprimer un LIMIT trop jeune
+       if(!LimitCancelAllowed(ticket, false, "EnforceLimitDiscipline"))
+          continue;
+
+       int vn = SMCGP_GetCachedVerdictNum(sym);
+       // Fallback: si le cache est inconnu/périmé, utiliser le verdict GLOBAL.
+       // Sous WAIT global (vn=0) on ANNULE les LIMIT non-DOW (après délai min).
+       if(vn == -999) vn = (sym == _Symbol) ? g_smcGomVerdictNum : 0;
+
+       bool isBuyLimit = (t == ORDER_TYPE_BUY_LIMIT);
+      // Ordres contraires Boom/Gainx (SELL) et Crash/Painx (BUY) — suppression immédiate
+      string dirStr = isBuyLimit ? "BUY" : "SELL";
+      if(!IsDirectionAllowedForBoomCrash(sym, dirStr))
+      {
+         LimitSafeOrderDelete(ticket, true, "contre-tendance Boom/Crash " + dirStr);
+         continue;
+      }
+      // WAIT / SIMPLE (|vn|<2) : annuler les limits non-DOW (après délai min)
       bool waitOrWeak = (vn == 0 || MathAbs(vn) < 2);
       bool against = (isBuyLimit && vn < 0) || (!isBuyLimit && vn > 0);
       if(waitOrWeak || against)
       {
-         MqlTradeRequest req; MqlTradeResult res;
-         ZeroMemory(req); ZeroMemory(res);
-         req.action = TRADE_ACTION_REMOVE;
-         req.order  = ticket;
-         req.symbol = sym;
          string why = waitOrWeak ? "WAIT/WEAK" : "contre-tendance";
-         if(OrderSend(req, res))
-            Print("🗑️ LIMIT ", why, " supprimé: ", sym, " ",
-                  (isBuyLimit ? "BUY_LIMIT" : "SELL_LIMIT"), " (GOM vn=", vn, ")");
-         else
-            Print("⚠️ Échec suppression LIMIT ", why, " ", sym, " err=", res.retcode);
+         LimitSafeOrderDelete(ticket, false,
+                              why + " GOM vn=" + IntegerToString(vn) + " " + sym);
       }
    }
 
@@ -348,6 +362,8 @@ void SMCGP_EnforceLimitDiscipline(const long magic, const int maxLimits = 2)
          ENUM_ORDER_TYPE t = (ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE);
          if(t != ORDER_TYPE_BUY_LIMIT && t != ORDER_TYPE_SELL_LIMIT) continue;
          if(OrderGetString(ORDER_SYMBOL) != syms[s]) continue;
+         // Ne jamais compter/supprimer un LIMIT DOW comme excédentaire
+         if(StringFind(OrderGetString(ORDER_COMMENT), "DOW") >= 0) continue;
          int sz = cnt++; ArrayResize(arr, sz + 1);
          arr[sz].ticket = ticket;
          arr[sz].price  = OrderGetDouble(ORDER_PRICE_OPEN);
@@ -367,15 +383,44 @@ void SMCGP_EnforceLimitDiscipline(const long magic, const int maxLimits = 2)
          }
       for(int k = 0; k < excess; k++)
       {
-         MqlTradeRequest req; MqlTradeResult res;
-         ZeroMemory(req); ZeroMemory(res);
-         req.action = TRADE_ACTION_REMOVE;
-         req.order  = arr[k].ticket;
-         req.symbol = syms[s];
-         if(OrderSend(req, res))
-            Print("🗑️ LIMIT excédentaire supprimé: ", syms[s], " (max=", maxLimits, ")");
-         else
-            Print("⚠️ Échec suppression LIMIT excédentaire ", syms[s], " err=", res.retcode);
+         LimitSafeOrderDelete(arr[k].ticket, false,
+                              "LIMIT excédentaire sym=" + syms[s]);
+      }
+   }
+
+   // 3) Plafond terminal: max MaxLimitOrdersTerminal LIMIT pending (tout symbole confondu)
+   int termTotal = CountOpenLimitOrdersTerminal();
+   int termExcess = termTotal - MaxLimitOrdersTerminal;
+   if(termExcess > 0)
+   {
+      struct TermLim { ulong ticket; double price; string sym; datetime tm; };
+      TermLim tarr[]; int tcnt = 0;
+      for(int i = OrdersTotal() - 1; i >= 0; i--)
+      {
+         ulong ticket = OrderGetTicket(i);
+         if(ticket == 0) continue;
+         if((long)OrderGetInteger(ORDER_MAGIC) != magic) continue;
+         ENUM_ORDER_TYPE t = (ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE);
+         if(t != ORDER_TYPE_BUY_LIMIT && t != ORDER_TYPE_SELL_LIMIT) continue;
+         if(!LimitCancelAllowed(ticket, false, "terminal excess")) continue;
+         int sz = tcnt++; ArrayResize(tarr, sz + 1);
+         tarr[sz].ticket = ticket;
+         tarr[sz].price  = OrderGetDouble(ORDER_PRICE_OPEN);
+         tarr[sz].sym    = OrderGetString(ORDER_SYMBOL);
+         tarr[sz].tm     = (datetime)OrderGetInteger(ORDER_TIME_SETUP);
+      }
+      for(int a = 0; a < tcnt - 1; a++)
+         for(int b = a + 1; b < tcnt; b++)
+         {
+            double curA = SymbolInfoDouble(tarr[a].sym, SYMBOL_BID);
+            double curB = SymbolInfoDouble(tarr[b].sym, SYMBOL_BID);
+            double da = (curA > 0) ? MathAbs(tarr[a].price - curA) : (double)tarr[a].tm;
+            double db = (curB > 0) ? MathAbs(tarr[b].price - curB) : (double)tarr[b].tm;
+            if(da > db) { TermLim tmp = tarr[a]; tarr[a] = tarr[b]; tarr[b] = tmp; }
+         }
+      for(int k = 0; k < termExcess && k < tcnt; k++)
+      {
+         LimitSafeOrderDelete(tarr[k].ticket, false, "LIMIT terminal excédentaire");
       }
    }
 }
@@ -506,6 +551,18 @@ bool SMCGP_LiveMicroCorrectionAgainstVerdict(const string symbol, const int verd
    int tradeDir = (verdictNum > 0) ? 1 : -1;
    bool strongVerdict = (MathAbs(verdictNum) >= 2);
 
+   // ── EARLY EXIT: Si M1+M5 sont d'accord avec la direction du trade, ignorer les micro-pullbacks ──
+   // Le trend macro prime sur le bruit M1. Pas de blocage si le momentum HTF est aligné.
+   {
+      int m1s = SMCGP_TfDirToSign(g_smcTfM1Dir);
+      int m5s = SMCGP_TfDirToSign(g_smcTfM5Dir);
+      if(m1s == tradeDir && m5s == tradeDir)
+         return false;
+      // Même si seulement M5 est aligné et verdict strong, pas de blocage
+      if(strongVerdict && m5s == tradeDir)
+         return false;
+   }
+
    int oppBars = 0;
    for(int i = 0; i <= 5; i++)
    {
@@ -555,6 +612,10 @@ bool SMCGP_LiveMicroCorrectionAgainstVerdict(const string symbol, const int verd
 
    int m1s = SMCGP_TfDirToSign(g_smcTfM1Dir);
    int m5s = SMCGP_TfDirToSign(g_smcTfM5Dir);
+
+   // NB: M1+M5 agreement check already handled at function entry (early exit)
+   // If we reach here, M1 or M5 disagree with trade direction
+
    if(tradeDir < 0 && m1s > 0 && m5s > 0) return true;
    if(tradeDir > 0 && m1s < 0 && m5s < 0) return true;
    if(tradeDir < 0 && m1s > 0 && oppBars >= 2) return true;
@@ -893,14 +954,17 @@ string SMCGP_ResolveGOMSym(const string sym)
 
 bool SMCGP_HttpPost(const string path, const string &jsonBody, int timeoutMs = 3000)
 {
-   string url = AI_ServerURL + path;
+   string url = SMCGP_ActiveServerURL() + path;
    char post[], result[];
    StringToCharArray(jsonBody, post, 0, WHOLE_ARRAY, CP_UTF8);
    string headers = "Content-Type: application/json\r\n";
    string respH;
    int code = WebRequest("POST", url, headers, timeoutMs, post, result, respH);
    g_smcLastHttpCode = code;
-   return (code == 200 || code == 201);
+   bool ok = (code == 200 || code == 201);
+   if(ok) SMCGP_MarkResult(true);
+   else   SMCGP_MarkResult(false);
+   return ok;
 }
 
 void SMCGP_SendHeartbeat()
@@ -1077,7 +1141,7 @@ void SMCGP_PollServerLossGuard()
                   ChartID(), ticketStr, SMCGP_JsonEscape(symClose));
                char post[], result[];
                string respH;
-               string ackUrl = AI_ServerURL + "/mt5/loss-guard/ack";
+               string ackUrl = SMCGP_ActiveServerURL() + "/mt5/loss-guard/ack";
                StringToCharArray(ackBody, post, 0, WHOLE_ARRAY, CP_UTF8);
                ArrayResize(post, ArraySize(post) - 1);
                WebRequest("POST", ackUrl, "Content-Type: application/json\r\n", AI_Timeout_ms, post, result, respH);
@@ -1103,8 +1167,6 @@ bool SMCGP_HttpGet(const string path, string &bodyOut, int timeoutMs = 5000)
       SMCGP_MarkResult(false);
       if(code == -1)
       {
-      if(code == -1)
-      {
          static datetime s_lastHttpHint = 0;
          if(TimeCurrent() - s_lastHttpHint >= 60)
          {
@@ -1112,7 +1174,7 @@ bool SMCGP_HttpGet(const string path, string &bodyOut, int timeoutMs = 5000)
             int err = GetLastError();
             Print("[GOM-HTTP] WebRequest echoue (code -1, err=", err, ") url=", g_smcServerUrl);
             Print("[GOM-HTTP] MT5 > Outils > Options > Expert Advisors > autoriser WebRequest pour: ",
-                  AI_ServerURL);
+                  AI_ServerURL, " ET ", AI_ServerRender);
             Print("[GOM-HTTP] Verifier aussi que ai_server tourne (start_ai_server.bat)");
          }
       }
@@ -1593,6 +1655,11 @@ void SMCGP_InvalidateGOM()
    g_smcGomVerdictNum = 0;
    g_smcSetupValid    = false;
    g_smcGomSource     = "OFF";
+   // Reset no-repaint signal state
+   g_gomCommittedSignal = SIGNAL_NONE;
+   g_gomCommittedDir    = 0;
+   g_gomConfirmCount    = 0;
+   g_gomCommittedTime   = 0;
 }
 
 void SMCGP_ValidateSetup()
@@ -2680,10 +2747,12 @@ void SMCGP_CleanupChartObjects()
 bool SMCGP_MarkPipelineConsumed(const string sym)
 {
    string symEnc = SMCGP_EncodeSym(sym);
-   string url = AI_ServerURL + "/pending-order?symbol=" + symEnc;
+   string url = SMCGP_ActiveServerURL() + "/pending-order?symbol=" + symEnc;
    char dp[], dr[];
    string dh;
    int code = WebRequest("DELETE", url, "Content-Type: application/json\r\n", AI_Timeout_ms, dp, dr, dh);
+   if(code == 200 || code == 204) SMCGP_MarkResult(true);
+   else SMCGP_MarkResult(false);
    return (code == 200 || code == 204);
 }
 
@@ -2932,8 +3001,30 @@ bool SMCGP_ExecutePipelineOrder(const string sym, const string action,
    if(!CanOpenAdditionalPositionForSymbol(sym, action)) return false;
    if(!IsDirectionAllowedForBoomCrash(sym, action)) return false;
 
+   // Spike Boom/Crash/Painx/Gainx: uniquement sous GOM GOOD/PERFECT + blink BUY/SELL
+   if(SMC_IsSpikeStyleSymbol(sym))
+   {
+      if(MathAbs(g_smcGomVerdictNum) < 2)
+      {
+         Print("[SMC-GOM] 🚫 Pipeline spike bloqué — GOM pas GOOD/PERFECT vn=", g_smcGomVerdictNum);
+         return false;
+      }
+      int wantDir = (action == "BUY") ? 1 : -1;
+      if(!IsSignalConfirmed() || GetConfirmedSignalDir() != wantDir)
+      {
+         Print("[SMC-GOM] 🚫 Pipeline spike bloqué — décision finale pas clignotante (", action, ")");
+         return false;
+      }
+      // Contre-verdict
+      if((wantDir > 0 && g_smcGomVerdictNum < 0) || (wantDir < 0 && g_smcGomVerdictNum > 0))
+      {
+         Print("[SMC-GOM] 🚫 Pipeline spike bloqué — contre-verdict GOM");
+         return false;
+      }
+   }
+
    // Max positions atteint : bloquer toute nouvelle entrée sans exception
-   if(CountPositionsOurEA() >= SMC_EffectiveMaxPositionsTerminal())
+    if(IsTerminalFull())
    {
       Print("[SMC-GOM] 🚫 Max positions (", SMC_EffectiveMaxPositionsTerminal(), ") — ", action, " ", sym, " bloqué");
       return false;
@@ -3268,8 +3359,8 @@ void SMCGP_PollAndExecutePipeline()
       }
    }
 
-   // Gate GOM=WAIT absolu : aucun ordre pipeline si vn=0, sauf Weltrade synthétiques
-   if(!isWeltradeSynth && g_smcGomVerdictNum == 0)
+   // Gate GOM=WAIT absolu : aucun ordre pipeline si vn=0 (TOUS symboles, y compris Weltrade)
+   if(g_smcGomVerdictNum == 0)
    {
       static datetime s_waitLog = 0;
       if(TimeCurrent() - s_waitLog >= 60)
@@ -3282,7 +3373,7 @@ void SMCGP_PollAndExecutePipeline()
    }
 
    // Gate double-indécision : IA=HOLD ET Cognition=NEUTRAL sans GOM PERFECT → bloquer
-   if(!isWeltradeSynth && MathAbs(g_smcGomVerdictNum) < 3)
+   if(MathAbs(g_smcGomVerdictNum) < 3)
    {
       bool iaIndecis  = (g_smcIAStatusAction == "HOLD" || StringLen(g_smcIAStatusAction) == 0 ||
                          g_lastAIAction == "hold" || g_lastAIAction == "HOLD" || StringLen(g_lastAIAction) == 0);
@@ -3524,7 +3615,7 @@ void SMCGP_DrawOrderFlowCompass(const int chartW, const int marginBot,
    const int marginLR = 12;
    // bottom-left, au-dessus du dashboard GOM (comme TradingView)
    int cx = marginLR + radius + 8;
-   int cy = marginBot + (cellH + gap) * 4 + radius + 28;
+    int cy = marginBot + (cellH + gap) * 3 + radius + 28;
 
    string pfx = "SMC_OF_CMP_";
    int compassOct = (int)((g_smcGhostCompass + 22.5) / 45.0) % 8;
@@ -3692,12 +3783,10 @@ void SMCGP_DrawGOMDashboard()
    int cellW = (totalW - (COLS - 1) * gap) / COLS;
    if(cellW < 60) cellW = 60;
 
-   int y0 = marginBot + cellH + gap;
-   int y1 = marginBot;
-   int y_pred = marginBot + (cellH + gap) * 2;  // NEW: Predictive forecast row
-   int y2 = marginBot + (cellH + gap) * 3;
-   int y3 = marginBot + (cellH + gap) * 4;
-   int y4 = marginBot + (cellH + gap) * 5;
+    int y1 = marginBot;
+    int y2 = marginBot + (cellH + gap) * 1;
+    int y3 = marginBot + (cellH + gap) * 2;
+    int y4 = marginBot + (cellH + gap) * 3;
 
    color cVerdict = SMCGP_VerdictColor(g_smcGomVerdictNum);
    color cBg = (color)SMC_DASH_C_BG;
@@ -3720,35 +3809,7 @@ void SMCGP_DrawGOMDashboard()
    if(g_smcGomVerdictReactiveNum != 0 || g_smcGomVerdictForecastNum != 0)
       verdLabel += StringFormat(" [R:%d F:%d]", g_smcGomVerdictReactiveNum, g_smcGomVerdictForecastNum);
 
-   int xCur = marginLR;
-   SMCGP_DrawDashCell("V0_HDR", xCur, y0, cellW, cellH, sym + " GOM", cVerdict, cTxt);
-
-   string tfLbl[7] = {"M1", "M5", "M15", "H1", "H4", "D1", "GLOB"};
-   string tfDir[7];
-   int    tfRsi[7];
-   tfDir[0] = g_smcTfM1Dir;  tfRsi[0] = g_smcTfM1Rsi;
-   tfDir[1] = g_smcTfM5Dir;  tfRsi[1] = g_smcTfM5Rsi;
-   tfDir[2] = g_smcTfM15Dir; tfRsi[2] = g_smcTfM15Rsi;
-   tfDir[3] = g_smcTfH1Dir;  tfRsi[3] = g_smcTfH1Rsi;
-   tfDir[4] = g_smcTfH4Dir;  tfRsi[4] = g_smcTfH4Rsi;
-   tfDir[5] = g_smcTfD1Dir;  tfRsi[5] = g_smcTfD1Rsi;
-   tfDir[6] = g_smcGomGlobalDir; tfRsi[6] = g_smcGomGlobalStr;
-
-   for(int i = 0; i < 7; i++)
-   {
-      xCur += cellW + gap;
-      color cTF = SMCGP_TfColor(tfDir[i]);
-      string tfTxt = tfLbl[i] + " " + SMCGP_TfShort(tfDir[i]);
-      if(tfRsi[i] > 0) tfTxt += " R" + IntegerToString(tfRsi[i]);
-      SMCGP_DrawDashCell("V0_TF" + IntegerToString(i), xCur, y0, cellW, cellH, tfTxt, cTF, cTxt);
-   }
-
-   xCur += cellW + gap;
-   color cKola = SMCGP_TfColor(g_smcGomKolaState);
-   SMCGP_DrawDashCell("V0_KOLA", xCur, y0, cellW, cellH,
-                      "KOLA " + (StringLen(g_smcGomKolaState) > 0 ? g_smcGomKolaState : "---"), cKola, cTxt);
-
-   xCur = marginLR;
+    int xCur = marginLR;
    int vn = g_smcGomVerdictNum;
    string scoreTxt = verdLabel + " B:" + DoubleToString(g_smcGomScoreBuy, 1) +
                       " S:" + DoubleToString(g_smcGomScoreSell, 1) +
@@ -3820,81 +3881,7 @@ xCur += cellW + gap;
    if(pollAge >= 0) srcTxt += " " + IntegerToString(pollAge) + "s";
    SMCGP_DrawDashCell("V1_SRC", xCur, y1, cellW, cellH, srcTxt, cBg, cTxt);
 
-   // ── RANGÉE PRÉDICTIVE 5min (y_pred) ─ Reactive vs Forecast vs Effective ──
-   {
-      xCur = marginLR;
-      // Cell 1: HEADER
-      SMCGP_DrawDashCell("PF_HDR", xCur, y_pred, cellW, cellH, "▸ PREDICT 5min", (color)0xFF7C4DFF, cTxt);
-
-      // Cell 2: REACTIVE verdict (instantané, tick par tick)
-      xCur += cellW + gap;
-      string reactDir = (g_smcGomVerdictReactiveNum > 0) ? "BUY" :
-                        (g_smcGomVerdictReactiveNum < 0) ? "SELL" : "WAIT";
-      color cReact = SMCGP_VerdictColor(g_smcGomVerdictReactiveNum);
-      SMCGP_DrawDashCell("PF_REACT", xCur, y_pred, cellW, cellH,
-         "R:" + reactDir + " " + IntegerToString(MathAbs(g_smcGomVerdictReactiveNum)),
-         cReact, cTxt);
-
-      // Cell 3: FORECAST verdict (5 M1 lookahead)
-      xCur += cellW + gap;
-      string fcDir = (g_smcGomVerdictForecastNum > 0) ? "BUY" :
-                     (g_smcGomVerdictForecastNum < 0) ? "SELL" : "WAIT";
-      color cForecast = SMCGP_VerdictColor(g_smcGomVerdictForecastNum);
-      SMCGP_DrawDashCell("PF_FCST", xCur, y_pred, cellW, cellH,
-         "F:" + fcDir + " " + IntegerToString(MathAbs(g_smcGomVerdictForecastNum)),
-         cForecast, cTxt);
-
-      // Cell 4: EFFECTIVE verdict (blend réactif+forecast)
-      xCur += cellW + gap;
-      string effDir = (g_smcGomVerdictNum > 0) ? "BUY" :
-                      (g_smcGomVerdictNum < 0) ? "SELL" : "WAIT";
-      SMCGP_DrawDashCell("PF_EFF", xCur, y_pred, cellW, cellH,
-         "E:" + effDir + " " + IntegerToString(MathAbs(g_smcGomVerdictNum)),
-         cVerdict, cTxt);
-
-      // Cell 5: Convergence react ↔ forecast
-      xCur += cellW + gap;
-      bool reactBull  = (g_smcGomVerdictReactiveNum > 0);
-      bool fcBull     = (g_smcGomVerdictForecastNum > 0);
-      bool reactBear  = (g_smcGomVerdictReactiveNum < 0);
-      bool fcBear     = (g_smcGomVerdictForecastNum < 0);
-      bool converged  = (reactBull && fcBull) || (reactBear && fcBear);
-      bool divergent  = (reactBull && fcBear) || (reactBear && fcBull);
-      string convTxt  = converged ? "ALIGNED" : divergent ? "CLASH" : "NEUTRAL";
-      color  cConv    = converged ? (color)0xFF00E676 : divergent ? (color)0xFFFF1744 : cBg;
-      SMCGP_DrawDashCell("PF_CONV", xCur, y_pred, cellW, cellH, convTxt, cConv, cTxt);
-
-      // Cell 6: Confidence gap (|react| vs |forecast|)
-      xCur += cellW + gap;
-      int gapVn = MathAbs(g_smcGomVerdictReactiveNum) - MathAbs(g_smcGomVerdictForecastNum);
-      string gapTxt = "GAP " + (gapVn >= 0 ? "+" : "") + IntegerToString(gapVn);
-      color cGap = (MathAbs(gapVn) >= 2) ? (color)0xFFFF6D00 : cBg;
-      SMCGP_DrawDashCell("PF_GAP", xCur, y_pred, cellW, cellH, gapTxt, cGap, cTxt);
-
-      // Cell 7: Score buy (reactive)
-      xCur += cellW + gap;
-      SMCGP_DrawDashCell("PF_SB", xCur, y_pred, cellW, cellH,
-         "Sb " + DoubleToString(g_smcGomScoreBuy, 1), (color)SMC_DASH_C_BUY, cTxt);
-
-      // Cell 8: Score sell (reactive)
-      xCur += cellW + gap;
-      SMCGP_DrawDashCell("PF_SS", xCur, y_pred, cellW, cellH,
-         "Ss " + DoubleToString(g_smcGomScoreSell, 1), (color)SMC_DASH_C_SELL, cTxt);
-
-      // Cell 9: Pred path (up/down from server)
-      xCur += cellW + gap;
-      color cPath = (StringFind(g_smcPredPath, "up") >= 0) ? (color)SMC_DASH_C_BUY :
-                    (StringFind(g_smcPredPath, "down") >= 0) ? (color)SMC_DASH_C_SELL : cBg;
-      SMCGP_DrawDashCell("PF_PATH", xCur, y_pred, cellW, cellH,
-         "PATH " + (StringLen(g_smcPredPath) > 0 ? g_smcPredPath : "---"), cPath, cTxt);
-
-      // Cell 10: Last poll timestamp (instant)
-      xCur += cellW + gap;
-      SMCGP_DrawDashCell("PF_TS", xCur, y_pred, cellW, cellH,
-         TimeToString(TimeCurrent(), TIME_SECONDS), (color)0xFF9E9E9E, cTxt);
-   }
-
-   // ── RANGÉE NOUVEAUX INDICATEURS (y2) ──────────────────────────────
+    // ── RANGÉE NOUVEAUX INDICATEURS (y2) ──────────────────────────────
    xCur = marginLR;
 
    // Cell 1: RSI Squeeze (Boom/Crash only)
@@ -3949,21 +3936,7 @@ xCur += cellW + gap;
    color cAlign = aligned ? ((alignDir == "BUY") ? (color)SMC_DASH_C_BUY : (color)SMC_DASH_C_SELL) : (color)SMC_DASH_C_NEUTRAL;
    SMCGP_DrawDashCell("I5_ALIGN", xCur, y2, cellW, cellH, alignTxt, cAlign, cTxt);
 
-   // Cell 7: Spike Chain State
-   xCur += cellW + gap;
-   string chainTxt;
-   color cChain;
-   switch(g_spikeChainState)
-   {
-      case SPIKE_STATE_CALM:        chainTxt = "CHAIN CALM"; cChain = cBg; break;
-      case SPIKE_STATE_PRE_SPIKE:   chainTxt = "CHAIN PRE"; cChain = (color)0xFFFFD600; break;
-      case SPIKE_STATE_CHAIN_ACTIVE:chainTxt = "CHAIN ACT " + IntegerToString(g_spikeChainStrongBars); cChain = (color)0xFFFF1744; break;
-      case SPIKE_STATE_EXHAUSTION:  chainTxt = "CHAIN EXH"; cChain = (color)0xFFFF6D00; break;
-      default: chainTxt = "CHAIN ---"; cChain = cBg; break;
-   }
-   SMCGP_DrawDashCell("I6_CHAIN", xCur, y2, cellW, cellH, chainTxt, cChain, cTxt);
-
-   // Cell 8: Propice Score
+    // Cell 8: Propice Score
    xCur += cellW + gap;
    int propScore2 = SMC_ComputePropiceScore();
    bool propOK2   = (!UsePropitiousScore || GOMMinPropiceScore <= 0 || propScore2 >= GOMMinPropiceScore);
@@ -4284,12 +4257,20 @@ void SMCGP_OnTimer()
       SMCGP_PollServerLossGuard();
    }
 
-   // Dessins chart (EMA 200 + session asiatique + signal GOM)
-   SMCGP_DrawEMA200();
-   SMCGP_DrawAsianSession();
-   SMCGP_DrawGOMSignal();
+    // Dessins chart (EMA 200 + session asiatique + signal GOM)
+    SMCGP_DrawEMA200();
+    SMCGP_DrawAsianSession();
+    SMCGP_DrawGOMSignal();
 
-   if(UltraLightMode) return;
+    // Timer pour le clignotement du signal central GOM (version blinking)
+    static datetime s_lastSignalDraw = 0;
+    if(TimeCurrent() - s_lastSignalDraw >= GOM_SIGNAL_BLINK_DURATION)
+    {
+        SMCGP_DrawGOMSignal();
+        s_lastSignalDraw = TimeCurrent();
+    }
+
+    if(UltraLightMode) return;
 
    SMCGP_UploadCandles();
    if(GOMSyncSymbolToTV)
@@ -4450,7 +4431,8 @@ void SMCGP_Init()
          " | Dashboard=", ShowGOMDashboard ? "ON" : "OFF",
          " | Heartbeat=", GOMSyncSymbolToTV ? "ON" : "OFF",
          " | CandlesUpload=", GOMUploadCandles ? "ON" : "OFF",
-         " | Serveur=", AI_ServerURL);
+         " | Serveur=", AI_ServerURL,
+         " | Render fallback=", AI_ServerRender);
    string pingBody;
    if(SMCGP_HttpGet("/health", pingBody, 3000))
       Print("[SMC-GOM] ai_server OK — GOM local MT5 actif");
@@ -4683,31 +4665,27 @@ string SMCGP_GOMVerdictAction()
    return "WAIT";
 }
 
-// ── Signal visuel GOM (BUY/SELL/WAIT) sur le chart ────────────────────
+// ── Signal visuel GOM (full range: BUY_ENTER, SELL_ENTER, HOLD, EXIT_NOW, etc) ────
 void SMCGP_DrawGOMSignal()
 {
+   // Supprimer l'ancien signal (version petite)
    ObjectDelete(0, "SMC_GOM_SIGNAL");
    ObjectDelete(0, "SMC_GOM_SIGNAL_BG");
 
+    // CORRECTION: Calculer le signal à partir du verdict GOM + précédent + qualité/cohérence
+    TradingSignal signal = GOM_CalcSignal(g_smcGomVerdictNum, g_smcGomVerdictNumPrev, g_smcGomQuality, g_smcGomCoherence);
    string action = SMCGP_GOMVerdictAction();
    string verdict = g_smcGomVerdict;
-   color cSig;
-   if(action == "BUY")       cSig = clrLimeGreen;
-   else if(action == "SELL") cSig = clrRed;
-   else                       cSig = clrGray;
+   double chartBid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   
+   // Supprimer l'ancien signal central s'il existe (de GOMG_DrawCentralSignal)
+   ObjectDelete(0, "GOM_CENTER_SIGNAL");
+   ObjectDelete(0, "GOM_CENTER_BG");
+   ObjectDelete(0, "GOM_SIGNAL_ENTER_BG");
 
-   string txt = verdict + " → " + action;
-   if(action == "BUY")       txt = "▲ " + txt;
-   else if(action == "SELL") txt = "▼ " + txt;
-   else                       txt = "◆ " + txt;
+   // ********************** NOUVEAU : Signaux centraux GOM à gros coup de pinceau **************
+   GOMG_DrawCentralSignal(signal, verdict, chartBid);
 
-   ObjectCreate(0, "SMC_GOM_SIGNAL", OBJ_LABEL, 0, 0, 0);
-   ObjectSetInteger(0, "SMC_GOM_SIGNAL", OBJPROP_CORNER, CORNER_RIGHT_UPPER);
-   ObjectSetInteger(0, "SMC_GOM_SIGNAL", OBJPROP_XDISTANCE, 10);
-   ObjectSetInteger(0, "SMC_GOM_SIGNAL", OBJPROP_YDISTANCE, 5);
-   ObjectSetString(0, "SMC_GOM_SIGNAL", OBJPROP_TEXT, txt);
-   ObjectSetInteger(0, "SMC_GOM_SIGNAL", OBJPROP_COLOR, cSig);
-   ObjectSetInteger(0, "SMC_GOM_SIGNAL", OBJPROP_FONTSIZE, 14);
 }
 
 #include "SMC_FuturePath.mqh"

@@ -55,13 +55,17 @@ foreach ($tid in $terminalIds) {
     }
 
     $deployedEa = Join-Path $experts "SMC_Universal.mq5"
-    $line9 = (Get-Content $deployedEa -TotalCount 9)[-1]
-    if ($line9 -match 'Trade\.mqh>A' -or $line9 -notmatch 'Trade\.mqh>$') {
-        Write-Error "Deploy verification FAILED [$tid]: ligne 9 invalide -> $line9"
+    $badTypo = Select-String -Path $deployedEa -Pattern 'Trade\.mqh>A' -Quiet
+    if ($badTypo) {
+        Write-Error "Deploy verification FAILED [$tid]: typo Trade.mqh>A détectée"
     }
-    $hasSymbolCategory = Select-String -Path $deployedEa -Pattern 'SMC_SymbolCategory\.mqh' -Quiet
-    if (-not $hasSymbolCategory) {
-        Write-Error "Deploy verification FAILED [$tid]: SMC_SymbolCategory.mqh manquant"
+    $hasTradeInclude = Select-String -Path $deployedEa -Pattern '#include\s*<Trade/Trade\.mqh>' -Quiet
+    if (-not $hasTradeInclude) {
+        Write-Error "Deploy verification FAILED [$tid]: #include <Trade/Trade.mqh> manquant"
+    }
+    $hasDow = Test-Path (Join-Path $modules "SMC_DowTrendline.mqh")
+    if (-not $hasDow) {
+        Write-Error "Deploy verification FAILED [$tid]: SMC_DowTrendline.mqh manquant"
     }
 
     Write-Host ""

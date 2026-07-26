@@ -55,6 +55,9 @@ from slowapi import Limiter
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 
+# Spike Chain Scanner
+from spike_chain_scanner import SpikeChainScanner, SpikeEvent, ChainAlert
+
 # Load environment variables from .env (python/.env puis racine)
 from pathlib import Path as _Path
 _TRADBOT_ROOT = _Path(__file__).resolve().parent.parent
@@ -2297,6 +2300,9 @@ _tradingagents_manual_lock = asyncio.Lock()
 _TRADINGAGENTS_MT5_MAX_SYMBOLS = max(1, min(64, int(os.getenv("AI_TRADINGAGENTS_MT5_MAX_SYMBOLS", "32"))))
 _tradingagents_cred_warned = False
 
+# === SPIKE CHAIN SCANNER ===
+_spike_chain_scanner = None
+
 
 def _normalize_tradingagents_symbol_list(symbols: List[str]) -> List[str]:
     """Dédoublonne, majuscules, limite la taille (symboles MT5 ou tickers)."""
@@ -3201,6 +3207,9 @@ def adjust_decision_with_rules(
 # Charger les éventuelles règles d'association au démarrage
 load_association_rules()
 
+# === SPIKE CHAIN SCANNER ===
+_spike_chain_scanner = None
+
 # === RATE LIMITING SETUP ===
 limiter = Limiter(key_func=get_remote_address)
 
@@ -4051,6 +4060,14 @@ async def startup_event():
             logger.info(f"✅ Boucle WhatsApp Report démarrée ({AI_WHATSAPP_REPORT_INTERVAL_SEC}s)")
     else:
         logger.info("ℹ️ WhatsApp Report désactivé (AI_ENABLE_WHATSAPP_REPORT=false)")
+
+    # Initialiser le Spike Chain Scanner
+    global _spike_chain_scanner
+    _spike_chain_scanner = SpikeChainScanner()
+    # Link GOM verdict store for cross-validation
+    if "_GOM_VERDICT_STORE" in globals():
+        _spike_chain_scanner.set_gom_store(_GOM_VERDICT_STORE)
+    logger.info("✅ Spike Chain Scanner initialisé")
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -9386,6 +9403,27 @@ async def decision(req: Request):
                 }
             )
         request = _parse_decision_body(raw)
+        
+        # Spike Chain Scanner: process recent candles if provided
+        global _spike_chain_scanner
+        if _spike_chain_scanner is not None and hasattr(request, 'recent_candles') and request.recent_candles:
+            try:
+                candles_data = []
+                for c in request.recent_candles:
+                    # Convert RecentCandle to dict format expected by scanner
+                    if hasattr(c, 'time') and hasattr(c, 'open'):
+                        candles_data.append({
+                            "time": c.time,
+                            "open": c.open,
+                            "high": c.high,
+                            "low": c.low,
+                            "close": c.close,
+                            "volume": getattr(c, 'volume', 0)
+                        })
+                if candles_data:
+                    _spike_chain_scanner.process_candles(request.symbol, candles_data)
+            except Exception as e:
+                logger.warning(f"⚠️ Spike chain scan error for {request.symbol}: {e}")
         
         logger.info(f"🎯 Requête DECISION reçue pour {request.symbol}")
         
@@ -14876,6 +14914,97 @@ async def spike_realtime(symbol: str):
         diff_points=diff,
         last_spike_time=last_time_str,
     )
+
+
+# ===== SPIKE CHAIN SCANNER ENDPOINTS =====
+# Pour EA: polling d'alertes chaînes de spikes multi-symboles
+
+@app.get("/spike-chain/alerts")
+async def spike_chain_alerts(symbol: str = None):
+    """
+    Retourne les alertes de chaînes de spikes actives.
+    EA poll cette route toutes les 5s via PollSpikeChainAlerts().
+    """
+    global _spike_chain_scanner
+    if _spike_chain_scanner is None:
+        return {"alerts": [], "error": "Scanner not initialized"}
+    alerts = await _spike_chain_scanner.get_active_alerts(symbol)
+    return {"alerts": alerts, "count": len(alerts)}
+
+
+@app.post("/spike-chain/acknowledge/{alert_id}")
+async def spike_chain_acknowledge(alert_id: str):
+    """Marque une alerte comme notifiée à l'EA (acquittement)."""
+    global _spike_chain_scanner
+    if _spike_chain_scanner is None:
+        raise HTTPException(status_code=503, detail="Scanner not initialized")
+    ok = await _spike_chain_scanner.acknowledge_alert(alert_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Alert not found")
+    return {"ok": True, "alert_id": alert_id}
+
+
+@app.post("/spike-chain/scan")
+async def spike_chain_scan(symbol: str = Body(..., embed=True), candles: list = Body(..., embed=True)):
+    """
+    Scan manuel : traiter des bougies M1 pour un symbole et générer des alertes.
+    Utilisé par EA pour upload de bougies via /mt5/upload-candles ou direct.
+    """
+    global _spike_chain_scanner
+    if _spike_chain_scanner is None:
+        raise HTTPException(status_code=503, detail="Scanner not initialized")
+    alerts = _spike_chain_scanner.process_candles(symbol, candles)
+    return {"alerts": [a.__dict__ if hasattr(a, '__dict__') else a for a in alerts], "count": len(alerts)}
+
+
+@app.get("/spike-chain/stats")
+async def spike_chain_stats():
+    """Statistiques du scanner."""
+    global _spike_chain_scanner
+    if _spike_chain_scanner is None:
+        return {"error": "Scanner not initialized"}
+    return {
+        "scan_count": _spike_chain_scanner._scan_count,
+        "spike_count": _spike_chain_scanner._spike_count,
+        "chain_count": _spike_chain_scanner._chain_count,
+        "active_alerts": len(_spike_chain_scanner._alerts),
+        "symbols_tracked": len(_spike_chain_scanner._candle_history),
+    }
+
+
+@app.get("/spike-chain/history/{symbol}")
+async def spike_chain_history(symbol: str, limit: int = 50):
+    """Historique des spikes détectés pour un symbole."""
+    global _spike_chain_scanner
+    if _spike_chain_scanner is None:
+        raise HTTPException(status_code=503, detail="Scanner not initialized")
+    spikes = _spike_chain_scanner.get_spike_history(symbol, limit)
+    return {"symbol": symbol, "spikes": spikes, "count": len(spikes)}
+
+
+# WebSocket pour push temps réel (optionnel, EA utilise polling HTTP)
+from fastapi import WebSocket, WebSocketDisconnect
+
+@app.websocket("/ws/spike-chain")
+async def ws_spike_chain(websocket: WebSocket):
+    """WebSocket push temps réel d'alertes spike-chain."""
+    global _spike_chain_scanner
+    if _spike_chain_scanner is None:
+        await websocket.close(code=1011)
+        return
+    await websocket.accept()
+    try:
+        while True:
+            alerts = await _spike_chain_scanner.get_active_alerts()
+            if alerts:
+                await websocket.send_json({"alerts": alerts})
+            await asyncio.sleep(5)
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        logger.error(f"WS spike-chain error: {e}")
+        await websocket.close()
+
 
 # ===== ML FEEDBACK + METRICS (ENTRAÎNEMENT CONTINU) =====
 # Système de feedback léger en mémoire pour apprentissage online

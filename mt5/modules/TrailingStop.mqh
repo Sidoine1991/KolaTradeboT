@@ -1,5 +1,5 @@
 //+------------------------------------------------------------------+
-//| TrailingStop.mqh — Trailing, stagnation exit, profit giveback    |
+//| TrailingStop.mqh ï¿½ Trailing, stagnation exit, profit giveback    |
 //+------------------------------------------------------------------+
 #ifndef TM_TRAILING_STOP_MQH
 #define TM_TRAILING_STOP_MQH
@@ -28,6 +28,7 @@ void Trail_ManageTrailing()
    {
       ulong ticket = PositionGetTicket(i);
       if(!PositionSelectByTicket(ticket)) continue;
+      if((long)PositionGetInteger(POSITION_MAGIC) != InpMagicNumber) continue;
 
       string symbol = PositionGetString(POSITION_SYMBOL);
       int direction = (int)PositionGetInteger(POSITION_TYPE);  // 0=BUY, 1=SELL
@@ -102,21 +103,22 @@ void Trail_ManageStagnation()
 
    for(int i = PositionsTotal() - 1; i >= 0; i--)
    {
-      ulong ticket = PositionGetTicket(i);
-      if(!PositionSelectByTicket(ticket)) continue;
+       ulong ticket = PositionGetTicket(i);
+       if(!PositionSelectByTicket(ticket)) continue;
+       if((long)PositionGetInteger(POSITION_MAGIC) != InpMagicNumber) continue;
 
-      string symbol = PositionGetString(POSITION_SYMBOL);
-      int direction = (int)PositionGetInteger(POSITION_TYPE);
-      datetime openTime = (datetime)PositionGetInteger(POSITION_TIME);
-      double profit = PositionGetDouble(POSITION_PROFIT);
+       string symbol = PositionGetString(POSITION_SYMBOL);
+       int direction = (int)PositionGetInteger(POSITION_TYPE);
+       datetime openTime = (datetime)PositionGetInteger(POSITION_TIME);
+       double profit = PositionGetDouble(POSITION_PROFIT);
 
-      // ?????????????????????????????????????????????????????????
-      // Check if entering stagnation zone (profit >= trigger)
-      // ?????????????????????????????????????????????????????????
+       // ?????????????????????????????????????????????????????????
+       // Check if entering stagnation zone (profit >= trigger)
+       // ?????????????????????????????????????????????????????????
 
-      if(profit < g_state.config.stagnationTriggerUSD)
-      {
-         // Not yet in stagnation zone
+       if(profit < g_state.config.stagnationTriggerUSD)
+       {
+          // Not yet in stagnation zone
          int symIdx = AddOrGetSymbolState(symbol);
          g_state.symbols[symIdx].stagnationArmed = false;
          continue;
@@ -155,7 +157,7 @@ void Trail_ManageStagnation()
       // Check if profit has receded below floor
       if(profit < minFloor)
       {
-         // Recul > maxGiveback — close position
+         // Recul > maxGiveback ï¿½ close position
          CTrade trade;
          trade.PositionClose(ticket);
          DebugLogClose(ticket, symbol, direction, 0.0, profit, "Stagnation exit: recul > threshold");
@@ -192,15 +194,16 @@ void Trail_ManageProfitGiveback()
 
    for(int i = PositionsTotal() - 1; i >= 0; i--)
    {
-      ulong ticket = PositionGetTicket(i);
-      if(!PositionSelectByTicket(ticket)) continue;
+       ulong ticket = PositionGetTicket(i);
+       if(!PositionSelectByTicket(ticket)) continue;
+       if((long)PositionGetInteger(POSITION_MAGIC) != InpMagicNumber) continue;
 
-      string symbol = PositionGetString(POSITION_SYMBOL);
-      int direction = (int)PositionGetInteger(POSITION_TYPE);
-      datetime openTime = (datetime)PositionGetInteger(POSITION_TIME);
-      double profit = PositionGetDouble(POSITION_PROFIT);
+       string symbol = PositionGetString(POSITION_SYMBOL);
+       int direction = (int)PositionGetInteger(POSITION_TYPE);
+       datetime openTime = (datetime)PositionGetInteger(POSITION_TIME);
+       double profit = PositionGetDouble(POSITION_PROFIT);
 
-      int symIdx = AddOrGetSymbolState(symbol);
+       int symIdx = AddOrGetSymbolState(symbol);
 
       // ?????????????????????????????????????????????????????????
       // Track peak profit ever achieved

@@ -189,6 +189,30 @@ struct TMConfig
    // Whitelist
    string   pipelineWhitelistPath;
    string   inpPollSymbols;
+
+   // === DOW SCANNER ===
+   bool     useDowScanner;
+   int      scannerIntervalSec;
+   int      scannerMaxSymbols;
+   double   scannerMinScore;
+   int      scannerTopN;
+   bool     scannerShowPanel;
+
+   // === ADAPTIVE EXECUTOR ===
+   double   maxLossUSD;
+   double   targetProfitUSD;
+   double   limitATRThreshold;
+   int      maxOpenPositions;
+   int      maxPositionsPerSymbol;
+
+   // === ATR TRAILING ===
+   bool     useATRTrail;
+   int      atrTrailPeriod;
+   double   atrTrailBETrigger;
+   double   atrTrailAggressive;
+   double   atrTrailConservative;
+   double   atrTrailAggrDist;
+   double   atrTrailConsDist;
 };
 
 struct TMGOMState
@@ -378,6 +402,48 @@ struct TMTimingState
    datetime lastBBCurveDraw;
    datetime lastGOMAutoEntry;
    datetime lastGOMReEntry;
+   datetime lastScannerScan;
+};
+
+// ═══════════════════════════════════════════════════════════════════
+// DOW SCANNER STATE
+// ═══════════════════════════════════════════════════════════════════
+
+struct TMScannerOpportunity
+{
+   string   symbol;
+   double   score;          // Score total 0-100
+   int      direction;      // 1=BUY, -1=SELL, 0=NEUT
+   double   dowScore;       // DOW structure score
+   double   gomScore;       // GOM verdict score
+   double   atrScore;       // ATR momentum score
+   double   rsiScore;       // RSI confirmation score
+   double   sessionScore;   // Session quality score
+   double   dowPrice;       // Prix projeté trendline DOW
+   double   distToDow;      // Distance prix→trendline (en ATR)
+   bool     dowActive;      // Trendline DOW valide
+   bool     limitReady;     // Prix proche de la trendline (LIMIT)
+   bool     marketReady;    // Signal urgent (MARKET)
+   datetime lastUpdate;     // Timestamp du scan
+};
+
+struct TMScannerState
+{
+   TMScannerOpportunity opportunities[];
+   int                  count;
+   int                  lastTopIdx;
+   datetime             lastScanTime;
+   bool                 initialized;
+};
+
+// ═══════════════════════════════════════════════════════════════════
+// ATR TRAILING STATE
+// ═══════════════════════════════════════════════════════════════════
+
+struct TMATRTrailState
+{
+   int      hATR[];        // ATR handles par position index
+   double   peakATR[];     // ATR au moment du pic profit
 };
 
 // ═══════════════════════════════════════════════════════════════════
@@ -396,6 +462,8 @@ struct TradeManagerState
    TMWhitelistState   whitelist;
    TMOrderBlockState  orderBlocks;
    TMTimingState      timing;
+   TMScannerState     scanner;
+   TMATRTrailState    atrTrail;
 
    // Dynamic arrays (resized on demand)
    TMSymbolState      symbols[];

@@ -26,7 +26,7 @@ _current_broker: Optional[str] = None
 _mt5_lock = __import__("threading").Lock()
 _symbol_cache: dict[str, str] = {}  # canonical → mt5 name cache
 _MT5_CALL_TIMEOUT = 10.0  # secondes max pour tout appel MT5 bloquant
-_MT5_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="mt5_call")
+_MT5_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="mt5_call")
 
 DEFAULT_DERIV_TERMINAL = r"D:\Program Files\MetaTrader 5\terminal64.exe"
 DEFAULT_WELTRADE_TERMINAL = r"D:\Program Files\MetaTrader 5 - Copie\terminal64.exe"
@@ -131,9 +131,12 @@ def ensure_mt5_connected(symbol: Optional[str] = None, broker: Optional[str] = N
     import MetaTrader5 as mt5
 
     if _mt5_ready and _current_broker == broker:
-        if _mt5_call_with_timeout(mt5.terminal_info) is not None:
+        ti = _mt5_call_with_timeout(mt5.terminal_info)
+        if ti is not None:
             return True
+        logger.warning("MT5 terminal_info timeout → reset + reinit [%s]", broker)
         _mt5_ready = False
+        _shutdown_mt5()
 
     if _mt5_ready and _current_broker != broker:
         logger.info("MT5 switch terminal: %s -> %s", _current_broker, broker)

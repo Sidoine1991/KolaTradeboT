@@ -1,5 +1,5 @@
 //+------------------------------------------------------------------+
-//| HTTPTransport.mqh — Unified HTTP communication abstraction       |
+//| HTTPTransport.mqh ï¿½ Unified HTTP communication abstraction       |
 //| Single responsibility: all WebRequest calls go through here      |
 //+------------------------------------------------------------------+
 #ifndef TM_HTTP_TRANSPORT_MQH
@@ -180,8 +180,8 @@ bool JsonGetDouble(const string json, const string key, double &value)
    while(end < StringLen(json) && json[end] != ',' && json[end] != '}' && json[end] != ']') end++;
 
    string numStr = StringSubstr(json, pos, end - pos);
-   numStr = StringTrimLeft(numStr);
-   numStr = StringTrimRight(numStr);
+   StringTrimLeft(numStr);
+   StringTrimRight(numStr);
 
    if(numStr == "" || numStr == "null") return false;
 

@@ -1,50 +1,335 @@
 //+------------------------------------------------------------------+
-//| GOM_Graphics.mqh � Dessine Bollinger + Zones futures            |
+//| GOM_Graphics.mqh � Dessine Bollinger + Zones futures + Signaux         |
 //+------------------------------------------------------------------+
 #ifndef GOM_GRAPHICS_MQH
 #define GOM_GRAPHICS_MQH
 
 //+------------------------------------------------------------------+
-// Dessiner les bandes Bollinger depuis GOM
+// Enum�ration des signaux de trading GOM                                     |
+//+------------------------------------------------------------------+
+enum TradingSignal
+{
+    SIGNAL_NONE = 0,            // Aucun signal
+    SIGNAL_BUY_ENTER = 1,        // Acheter maintenant
+    SIGNAL_BUY_PREPARE = 2,       // Pr�parer � acheter
+    SIGNAL_SELL_ENTER = 3,       // Vendre maintenant
+    SIGNAL_SELL_PREPARE = 4,      // Pr�parer � vendre
+    SIGNAL_EXIT_NOW = 5,         // Sortir maintenant - urgent
+    SIGNAL_EXIT_SOON = 6,        // Pr�parer � sortir - bient�t
+    SIGNAL_HOLD_LONG = 7,        // Conserver long
+    SIGNAL_HOLD_SHORT = 8        // Conserver court
+};
+
+//+------------------------------------------------------------------+
+// Param�tres pour les signaux centraux                                       |
+//+------------------------------------------------------------------+
+// Taille de la zone de signal central
+#define GOM_CENTER_SIGNAL_SIZE_X 60  // Largeur X du signal central
+#define GOM_CENTER_SIGNAL_SIZE_Y 40  // Hauteur Y du signal central
+#define GOM_CENTER_ZOOM     1.5     // Taille du zoom pour les ic�nes centraux
+#define GOM_SIGNAL_BLINK_DURATION 2
+//--- No-repaint signal confirm
+#define GOM_CONFIRM_COUNT      2     // polls consecutifs pour confirmer le signal
+#define GOM_COMMIT_TIMEOUT_SEC 300   // timeout d'un signal commit\ (secondes)
+#define GOM_EXIT_COOLDOWN_SEC  60    // cooldown EXIT avant re-entr\e
+ // Dur�e de clignotement en secondes
+//+------------------------------------------------------------------+
+
+//+------------------------------------------------------------------+
+// Dessiner les bandes Bollinger depuis GOM                                   |
 //+------------------------------------------------------------------+
 void GOMG_DrawBollinger(double bb_up, double bb_mid, double bb_dn)
 {
-   if(bb_up <= 0 || bb_mid <= 0 || bb_dn <= 0) return;
+    if(bb_up <= 0 || bb_mid <= 0 || bb_dn <= 0) return;
 
-   datetime now = TimeCurrent();
-   datetime future = now + 3600; // 1 heure dans le futur
+    datetime now = TimeCurrent();
+    datetime future = now + 3600; // 1 heure dans le futur
 
-   // Bande sup�rieure (OBJ_TREND = droite)
-   string bbUpName = "GOM_BB_UP";
-   ObjectDelete(0, bbUpName);
-   ObjectCreate(0, bbUpName, OBJ_TREND, 0, now, bb_up, future, bb_up);
-   ObjectSetInteger(0, bbUpName, OBJPROP_COLOR, clrRed);
-   ObjectSetInteger(0, bbUpName, OBJPROP_WIDTH, 1);
-   ObjectSetInteger(0, bbUpName, OBJPROP_STYLE, STYLE_DASH);
-   ObjectSetInteger(0, bbUpName, OBJPROP_RAY_RIGHT, true);
-   ObjectSetInteger(0, bbUpName, OBJPROP_BACK, false);
+    // Bande sup�rieure (OBJ_TREND = droite)
+    string bbUpName = "GOM_BB_UP";
+    ObjectDelete(0, bbUpName);
+    ObjectCreate(0, bbUpName, OBJ_TREND, 0, now, bb_up, future, bb_up);
+    ObjectSetInteger(0, bbUpName, OBJPROP_COLOR, clrRed);
+    ObjectSetInteger(0, bbUpName, OBJPROP_WIDTH, 1);
+    ObjectSetInteger(0, bbUpName, OBJPROP_STYLE, STYLE_DASH);
+    ObjectSetInteger(0, bbUpName, OBJPROP_RAY_RIGHT, true);
+    ObjectSetInteger(0, bbUpName, OBJPROP_BACK, false);
 
-   // Bande du milieu (OBJ_TREND = droite)
-   string bbMidName = "GOM_BB_MID";
-   ObjectDelete(0, bbMidName);
-   ObjectCreate(0, bbMidName, OBJ_TREND, 0, now, bb_mid, future, bb_mid);
-   ObjectSetInteger(0, bbMidName, OBJPROP_COLOR, clrBlue);
-   ObjectSetInteger(0, bbMidName, OBJPROP_WIDTH, 2);
-   ObjectSetInteger(0, bbMidName, OBJPROP_STYLE, STYLE_SOLID);
-   ObjectSetInteger(0, bbMidName, OBJPROP_RAY_RIGHT, true);
-   ObjectSetInteger(0, bbMidName, OBJPROP_BACK, false);
+    // Bande du milieu (OBJ_TREND = droite)
+    string bbMidName = "GOM_BB_MID";
+    ObjectDelete(0, bbMidName);
+    ObjectCreate(0, bbMidName, OBJ_TREND, 0, now, bb_mid, future, bb_mid);
+    ObjectSetInteger(0, bbMidName, OBJPROP_COLOR, clrBlue);
+    ObjectSetInteger(0, bbMidName, OBJPROP_WIDTH, 2);
+    ObjectSetInteger(0, bbMidName, OBJPROP_STYLE, STYLE_SOLID);
+    ObjectSetInteger(0, bbMidName, OBJPROP_RAY_RIGHT, true);
+    ObjectSetInteger(0, bbMidName, OBJPROP_BACK, false);
 
-   // Bande inf�rieure (OBJ_TREND = droite)
-   string bbDnName = "GOM_BB_DN";
-   ObjectDelete(0, bbDnName);
-   ObjectCreate(0, bbDnName, OBJ_TREND, 0, now, bb_dn, future, bb_dn);
-   ObjectSetInteger(0, bbDnName, OBJPROP_COLOR, clrGreen);
-   ObjectSetInteger(0, bbDnName, OBJPROP_WIDTH, 1);
-   ObjectSetInteger(0, bbDnName, OBJPROP_STYLE, STYLE_DASH);
-   ObjectSetInteger(0, bbDnName, OBJPROP_RAY_RIGHT, true);
-   ObjectSetInteger(0, bbDnName, OBJPROP_BACK, false);
+    // Bande inf�rieure (OBJ_TREND = droite)
+    string bbDnName = "GOM_BB_DN";
+    ObjectDelete(0, bbDnName);
+    ObjectCreate(0, bbDnName, OBJ_TREND, 0, now, bb_dn, future, bb_dn);
+    ObjectSetInteger(0, bbDnName, OBJPROP_COLOR, clrGreen);
+    ObjectSetInteger(0, bbDnName, OBJPROP_WIDTH, 1);
+    ObjectSetInteger(0, bbDnName, OBJPROP_STYLE, STYLE_DASH);
+    ObjectSetInteger(0, bbDnName, OBJPROP_RAY_RIGHT, true);
+    ObjectSetInteger(0, bbDnName, OBJPROP_BACK, false);
 
-   Print("[GOMG] Bollinger dessin�es: UP=", bb_up, " MID=", bb_mid, " DN=", bb_dn);
+    Print("[GOMG] Bollinger dessin�es: UP=", bb_up, " MID=", bb_mid, " DN=", bb_dn);
+}
+
+//+------------------------------------------------------------------+
+// Calculer le signal de trading GOM � partir du verdict actuel                   |
+//+------------------------------------------------------------------+
+// ── No-repaint : état global du signal commité ──
+TradingSignal g_gomCommittedSignal  = SIGNAL_NONE;
+int           g_gomCommittedDir     = 0;   // +1 buy, -1 sell
+int           g_gomConfirmCount     = 0;   // compteur de confirmation dans la même direction
+datetime      g_gomCommittedTime    = 0;
+
+TradingSignal GOM_CalcSignal(int verdictNum, int prevVerdictNum = 0,
+                              double quality = 0, double coherence = 0)
+{
+    // ── WAIT ──
+    if(verdictNum == 0)
+    {
+        // Si commité, garder jusqu'au timeout (no-repaint)
+        if(g_gomCommittedSignal != SIGNAL_NONE)
+        {
+            if(TimeCurrent() - g_gomCommittedTime > GOM_COMMIT_TIMEOUT_SEC)
+            {
+                g_gomCommittedSignal = SIGNAL_NONE;
+                g_gomCommittedDir = 0;
+                g_gomConfirmCount = 0;
+                return SIGNAL_NONE;
+            }
+            return g_gomCommittedSignal; // garder l'ancien signal
+        }
+        return SIGNAL_NONE;
+    }
+
+    int nowDir = (verdictNum > 0) ? 1 : -1;
+    int nowMag = MathAbs(verdictNum);
+
+    // ── REVERSAL: direction opposée au signal commité → EXIT NOW ──
+    if(g_gomCommittedDir != 0 && g_gomCommittedDir != nowDir)
+    {
+        g_gomCommittedSignal = SIGNAL_EXIT_NOW;
+        g_gomCommittedDir = 0;
+        g_gomConfirmCount = 0;
+        g_gomCommittedTime = TimeCurrent();
+        return SIGNAL_EXIT_NOW;
+    }
+
+    // ── Pas de signal commité : accumuler des confirmations ──
+    if(g_gomCommittedSignal == SIGNAL_NONE)
+    {
+        // PERFECT → commit immédiat
+        if(nowMag >= 3)
+        {
+            g_gomCommittedSignal = (verdictNum > 0) ? SIGNAL_BUY_ENTER : SIGNAL_SELL_ENTER;
+            g_gomCommittedDir = nowDir;
+            g_gomConfirmCount = GOM_CONFIRM_COUNT;
+            g_gomCommittedTime = TimeCurrent();
+            return g_gomCommittedSignal;
+        }
+
+        // COMPTER les confirmations (GOOD + qualité cohérente)
+        if(nowMag >= 2 && quality >= 60 && coherence >= 50)
+        {
+            g_gomConfirmCount++;
+            if(g_gomConfirmCount >= GOM_CONFIRM_COUNT)
+            {
+                g_gomCommittedSignal = (verdictNum > 0) ? SIGNAL_BUY_ENTER : SIGNAL_SELL_ENTER;
+                g_gomCommittedDir = nowDir;
+                g_gomCommittedTime = TimeCurrent();
+                return g_gomCommittedSignal;
+            }
+            // Pas encore assez de confirmations → PREPARE
+            if(verdictNum > 0) return SIGNAL_BUY_PREPARE;
+            return SIGNAL_SELL_PREPARE;
+        }
+
+        // |v|=1 → HOLD
+        if(verdictNum > 0) return SIGNAL_HOLD_LONG;
+        return SIGNAL_HOLD_SHORT;
+    }
+
+    // ── Signal déjà commité : NE PAS REPAINT ──
+    if(g_gomCommittedDir == nowDir)
+    {
+        // Weakening: force épuisée (|v|≤1) → EXIT SOON
+        if(nowMag <= 1)
+        {
+            g_gomCommittedSignal = SIGNAL_EXIT_SOON;
+            g_gomCommittedDir = 0;
+            g_gomConfirmCount = 0;
+            g_gomCommittedTime = TimeCurrent();
+            return SIGNAL_EXIT_SOON;
+        }
+        g_gomCommittedTime = TimeCurrent(); // reset timeout
+        return g_gomCommittedSignal;        // inchangé (no-repaint)
+    }
+
+    // Fallback
+    if(verdictNum > 0) return SIGNAL_HOLD_LONG;
+    return SIGNAL_HOLD_SHORT;
+}
+
+//+------------------------------------------------------------------+
+// Dessiner un signal central au centre du chart (OBJ_LABEL + CORNER) |
+//+------------------------------------------------------------------+
+void GOMG_DrawCentralSignal(TradingSignal signal, string verdict, double price)
+{
+    // Nettoyer tous les anciens signaux centraux
+    ObjectsDeleteAll(0, "GOM_CENTER_");
+
+    if(signal == SIGNAL_NONE)
+        return;
+
+    // -- Paramètres par type de signal --
+    string label = "";
+    color  sigColor = clrGray;
+    int    fontSize = 14;
+    bool   urgent = false;
+
+    if(signal == SIGNAL_BUY_ENTER)     { label = "BUY";    sigColor = clrLime;       fontSize = 28; }
+    else if(signal == SIGNAL_SELL_ENTER){ label = "SELL";   sigColor = clrRed;        fontSize = 28; }
+    else if(signal == SIGNAL_BUY_PREPARE){ label = "BUY P"; sigColor = clrGold;       fontSize = 20; }
+    else if(signal == SIGNAL_SELL_PREPARE){ label = "SELL P"; sigColor = clrOrange;   fontSize = 20; }
+    else if(signal == SIGNAL_EXIT_NOW) { label = "EXIT NOW"; sigColor = 0xFF4500;     fontSize = 24; urgent = true; }
+    else if(signal == SIGNAL_EXIT_SOON){ label = "EXIT";    sigColor = clrDarkOrange; fontSize = 18; urgent = true; }
+    else if(signal == SIGNAL_HOLD_LONG){ label = "HOLD L";  sigColor = clrGray;       fontSize = 16; }
+    else if(signal == SIGNAL_HOLD_SHORT){ label = "HOLD S"; sigColor = clrGray;       fontSize = 16; }
+
+    // -- Position: centré sous le panel ChainCorr (380px, y=10→146) --
+    int chartW = (int)ChartGetInteger(0, CHART_WIDTH_IN_PIXELS);
+    int sigW   = 280;
+    int sigX   = MathMax(5, (chartW - sigW) / 2);
+    int sigY   = 155;  // juste sous le panel ChainCorr (10 + 136 + 9)
+
+    // -- Ligne 1 : Signal principal --
+    string nameMain = "GOM_CENTER_MAIN";
+    ObjectCreate(0, nameMain, OBJ_LABEL, 0, 0, 0);
+    ObjectSetInteger(0, nameMain, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+    ObjectSetInteger(0, nameMain, OBJPROP_XDISTANCE, sigX + (sigW - 200) / 2);
+    ObjectSetInteger(0, nameMain, OBJPROP_YDISTANCE, sigY);
+    ObjectSetString(0, nameMain, OBJPROP_TEXT, label);
+    ObjectSetInteger(0, nameMain, OBJPROP_COLOR, sigColor);
+    ObjectSetInteger(0, nameMain, OBJPROP_FONTSIZE, fontSize);
+    ObjectSetString(0, nameMain, OBJPROP_FONT, "Arial Black");
+    ObjectSetInteger(0, nameMain, OBJPROP_SELECTABLE, false);
+
+    // -- Ligne 2 : Sous-texte verdict --
+    string nameSub = "GOM_CENTER_SUB";
+    string subText = verdict;
+    if(signal == SIGNAL_BUY_ENTER)        subText = verdict + " -> ENTER BUY";
+    else if(signal == SIGNAL_SELL_ENTER)  subText = verdict + " -> ENTER SELL";
+    else if(signal == SIGNAL_EXIT_NOW)    subText = "!! URGENT EXIT !!";
+    else if(signal == SIGNAL_EXIT_SOON)   subText = "Prepare to exit";
+    else if(signal == SIGNAL_BUY_PREPARE) subText = "Prepare to buy";
+    else if(signal == SIGNAL_SELL_PREPARE) subText = "Prepare to sell";
+    else if(signal == SIGNAL_HOLD_LONG)   subText = "Maintain long";
+    else if(signal == SIGNAL_HOLD_SHORT)  subText = "Maintain short";
+
+    ObjectCreate(0, nameSub, OBJ_LABEL, 0, 0, 0);
+    ObjectSetInteger(0, nameSub, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+    ObjectSetInteger(0, nameSub, OBJPROP_XDISTANCE, sigX + (sigW - 180) / 2);
+    ObjectSetInteger(0, nameSub, OBJPROP_YDISTANCE, sigY + fontSize + 4);
+    ObjectSetString(0, nameSub, OBJPROP_TEXT, subText);
+    ObjectSetInteger(0, nameSub, OBJPROP_COLOR, sigColor);
+    ObjectSetInteger(0, nameSub, OBJPROP_FONTSIZE, 11);
+    ObjectSetString(0, nameSub, OBJPROP_FONT, "Arial");
+    ObjectSetInteger(0, nameSub, OBJPROP_SELECTABLE, false);
+
+    // -- Fond semi-transparent pour TOUS les signaux (lisibilité garantie) --
+    string nameBG = "GOM_CENTER_BG";
+    ObjectCreate(0, nameBG, OBJ_RECTANGLE_LABEL, 0, 0, 0);
+    ObjectSetInteger(0, nameBG, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+    ObjectSetInteger(0, nameBG, OBJPROP_XDISTANCE, sigX);
+    ObjectSetInteger(0, nameBG, OBJPROP_YDISTANCE, sigY - 6);
+    ObjectSetInteger(0, nameBG, OBJPROP_XSIZE, sigW);
+    ObjectSetInteger(0, nameBG, OBJPROP_YSIZE, fontSize + 32);
+    ObjectSetInteger(0, nameBG, OBJPROP_BGCOLOR, 0xDD0A0A0A);
+    ObjectSetInteger(0, nameBG, OBJPROP_BORDER_TYPE, BORDER_FLAT);
+    ObjectSetInteger(0, nameBG, OBJPROP_BORDER_COLOR, urgent ? sigColor : 0xFF333333);
+    ObjectSetInteger(0, nameBG, OBJPROP_COLOR, urgent ? sigColor : 0xFF333333);
+    ObjectSetInteger(0, nameBG, OBJPROP_WIDTH, urgent ? 3 : 1);
+    ObjectSetInteger(0, nameBG, OBJPROP_BACK, true);
+    ObjectSetInteger(0, nameBG, OBJPROP_SELECTABLE, false);
+    // Remettre le texte devant le fond
+    ObjectSetInteger(0, nameMain, OBJPROP_BACK, false);
+    ObjectSetInteger(0, nameSub, OBJPROP_BACK, false);
+
+    Print(StringFormat("[GOMG] Signal central: %s | verdict=%s | price=%.5f | urgent=%s",
+          label, verdict, price, urgent ? "YES" : "no"));
+
+    // ── Push MT5 anti-spam: notifier uniquement au changement de signal ──
+    static TradingSignal s_lastNotifSignal = SIGNAL_NONE;
+    static string        s_lastNotifVerdict = "";
+    if(signal != s_lastNotifSignal || verdict != s_lastNotifVerdict)
+    {
+        s_lastNotifSignal  = signal;
+        s_lastNotifVerdict = verdict;
+        string pushMsg = StringFormat("[GOM] %s | %s | %.5f", label, verdict, price);
+        if(!SendNotification(pushMsg))
+            Print("[GOM-PUSH] Echec — vérifier Options > Notifications MT5");
+    }
+}
+
+//+------------------------------------------------------------------+
+// Message de signal pour debug                                       |
+//+------------------------------------------------------------------+
+string GetSignalMessage(TradingSignal signal, string verdict)
+{
+    switch(signal)
+    {
+        case SIGNAL_BUY_ENTER:     return "BUY NOW - Entry Signal";
+        case SIGNAL_BUY_PREPARE:   return "Prepare to buy";
+        case SIGNAL_SELL_ENTER:    return "SELL NOW - Entry Signal";
+        case SIGNAL_SELL_PREPARE:  return "Prepare to sell";
+        case SIGNAL_EXIT_NOW:      return "EXIT NOW - Urgent!";
+        case SIGNAL_EXIT_SOON:     return "Prepare to exit";
+        case SIGNAL_HOLD_LONG:     return "Hold long position";
+        case SIGNAL_HOLD_SHORT:    return "Hold short position";
+        default:                   return "";
+    }
+}
+
+//+------------------------------------------------------------------+
+// Dessiner icône BUY (coin supérieur droit, backup)                  |
+//+------------------------------------------------------------------+
+void GOMG_DrawBuySignal(double price)
+{
+    string name = "GOM_CENTER_BUY";
+    ObjectDelete(0, name);
+    ObjectCreate(0, name, OBJ_LABEL, 0, 0, 0);
+    ObjectSetInteger(0, name, OBJPROP_CORNER, CORNER_RIGHT_UPPER);
+    ObjectSetInteger(0, name, OBJPROP_XDISTANCE, 10);
+    ObjectSetInteger(0, name, OBJPROP_YDISTANCE, 60);
+    ObjectSetString(0, name, OBJPROP_TEXT, "BUY");
+    ObjectSetInteger(0, name, OBJPROP_COLOR, clrLime);
+    ObjectSetInteger(0, name, OBJPROP_FONTSIZE, 18);
+    ObjectSetString(0, name, OBJPROP_FONT, "Arial Black");
+    ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
+}
+
+//+------------------------------------------------------------------+
+// Dessiner icône SELL (coin supérieur droit, backup)                 |
+//+------------------------------------------------------------------+
+void GOMG_DrawSellSignal(double price)
+{
+    string name = "GOM_CENTER_SELL";
+    ObjectDelete(0, name);
+    ObjectCreate(0, name, OBJ_LABEL, 0, 0, 0);
+    ObjectSetInteger(0, name, OBJPROP_CORNER, CORNER_RIGHT_UPPER);
+    ObjectSetInteger(0, name, OBJPROP_XDISTANCE, 10);
+    ObjectSetInteger(0, name, OBJPROP_YDISTANCE, 60);
+    ObjectSetString(0, name, OBJPROP_TEXT, "SELL");
+    ObjectSetInteger(0, name, OBJPROP_COLOR, clrRed);
+    ObjectSetInteger(0, name, OBJPROP_FONTSIZE, 18);
+    ObjectSetString(0, name, OBJPROP_FONT, "Arial Black");
+    ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
 }
 
 //+------------------------------------------------------------------+
@@ -301,7 +586,7 @@ void GOMG_DrawBollingerPrediction(double& pred_bb_mid[], double& pred_bb_up[], d
    // Intervalle temporel entre points (30s par d�faut pour M1 = 60 points/min)
    int time_step = 60; // 1 min per point
 
-   // ?? Tracer MID (bleu, solide, �pais) ??
+   // ?? Tracer MID (bleu, solide, ?pais) ??
    for(int i = 0; i < n_points - 1; i++)
    {
       string line_name = "GOM_PRED_MID_" + IntegerToString(i);
@@ -353,6 +638,32 @@ void GOMG_DrawBollingerPrediction(double& pred_bb_mid[], double& pred_bb_up[], d
 }
 
 //+------------------------------------------------------------------+
+// Tracer la zone de RETRACEMENT (barr�e semi-transparente)
+//+------------------------------------------------------------------+
+void GOMG_DrawRetracementZone(const string symbol, double zone_low, double zone_high, string label = "GOM_RETRACEMENT_ZONE")
+{
+   int digits = (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS);
+   datetime now = TimeCurrent();
+   datetime future = now + PeriodSeconds(PERIOD_CURRENT) * 20;
+
+   if(!ObjectCreate(0, label, OBJ_RECTANGLE, 0, now, zone_low, future, zone_high))
+   {
+      Print("[GOMG] ERREUR: ObjectCreate RECTANGLE ", label, " a échoué");
+      return;
+   }
+
+   ObjectSetInteger(0, label, OBJPROP_COLOR, ColorToARGB(clrWhite, 30));
+   ObjectSetInteger(0, label, OBJPROP_FILL, true);
+   ObjectSetInteger(0, label, OBJPROP_BACK, true);
+   ObjectSetInteger(0, label, OBJPROP_WIDTH, 1);
+   ObjectSetInteger(0, label, OBJPROP_STYLE, STYLE_SOLID);
+   ObjectSetInteger(0, label, OBJPROP_SELECTABLE, false);
+
+   Print("[GOMG] Zone Retracement dessinée: ", symbol,
+         " [", DoubleToString(zone_low, digits), " - ", DoubleToString(zone_high, digits), "]");
+}
+
+//+------------------------------------------------------------------+
 // Nettoyer tous les dessins GOM
 //+------------------------------------------------------------------+
 void GOMG_ClearAll()
@@ -370,3 +681,4 @@ void GOMG_ClearAll()
 }
 
 #endif
+

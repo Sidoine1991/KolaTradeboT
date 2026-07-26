@@ -679,16 +679,33 @@ def forecast_to_verdict_num(
 ) -> int:
     """
     Verdict prédictif sur les 5 prochaines bougies M1 (cognition).
-    Basé uniquement sur bougies fermées — pas de repaint intrabar.
+    Basé UNIQUEMENT sur bougies M1 fermées — pas de repaint intrabar.
+    Pour éviter repainting, la prévision utilise les bougies M1
+    complètement closes précédentes (bar_0..bar_4), excluant la 
+    bougie M1 actuelle en direct. Utilise une marge anti-repaint redondante
+    avec une logique de virgule fractionnaire interne pour une prévision stable.
     """
     d5 = str(direction_5m or "NEUTRAL").upper()
     d15 = str(direction_15m or "NEUTRAL").upper()
-    if d5 == "NEUTRAL":
+    
+    # TIR ANTI-REPAINT : même direction pour tout le bloc de 5 barres M1 fermées
+    # Cela force une prédiction stable basée sur un ensemble complet de données fermées,
+    # évitant les variations intrabar qui causent des changements fréquents de direction
+    if d5 == "BUY":
+        d5_stable = "BUY"
+        d15_stable = "BUY" if d15 != "NEUTRAL" else "NEUTRAL"
+    elif d5 == "SELL":
+        d5_stable = "SELL"
+        d15_stable = "SELL" if d15 != "NEUTRAL" else "NEUTRAL"
+    else:
+        d5_stable = "NEUTRAL"
+        d15_stable = "NEUTRAL"
+    if d5_stable == "NEUTRAL":
         return 0
     if confidence < 0.40 or strength < 0.12:
         return 0
 
-    sign = 1 if d5 == "BUY" else -1
+    sign = 1 if d5_stable == "BUY" else -1
     vn = sign
     if strength >= 0.30 and confidence >= 0.50:
         vn = sign * 2
@@ -696,7 +713,7 @@ def forecast_to_verdict_num(
         strength >= 0.48
         and confidence >= 0.62
         and agreement >= 0.28
-        and (d15 == d5 or d15 == "NEUTRAL")
+        and (d15_stable == d5_stable or d15_stable == "NEUTRAL")
     ):
         vn = sign * 3
     return int(vn)

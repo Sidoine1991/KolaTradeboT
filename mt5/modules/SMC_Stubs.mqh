@@ -7,18 +7,7 @@
 //--- SMC_EffectiveGOMMinCoherence et SMC_EffectiveMaxPositionsTerminal
 //--- définis dans SMC_Universal.mq5 (profil Gold/Forex/Crypto)
 
-double GOM_GetATRValue()
-{
-   double atrVal = 0.0;
-   if(atrHandle != INVALID_HANDLE)
-   {
-      double atrBuf[];
-      ArraySetAsSeries(atrBuf, true);
-      if(CopyBuffer(atrHandle, 0, 0, 1, atrBuf) > 0) atrVal = atrBuf[0];
-   }
-   if(atrVal <= 0) atrVal = SymbolInfoDouble(_Symbol, SYMBOL_POINT) * 50;
-   return atrVal;
-}
+// GOM_GetATRValue → SMC_GOMAlign.mqh
 bool SMC_GOM_M5H1SMCConfirmOK(const string sym, const string sym2 = "")
 {
    return true; // Backup: autoriser
@@ -80,18 +69,8 @@ bool SMC_PerformancePauseAllowsEntry(const string sym)
 {
    return true;
 }
-bool SMC_IsCorrectionZoneForDirection(const string sym, const int dirSign)
-{
-   return false;
-}
-bool SMC_IAAndCOGAligned(const int dirSign)
-{
-   return true;
-}
-bool GOM_EntryAlignmentOK(const int dirSign)
-{
-   return true;
-}
+/* bool SMC_IsCorrectionZoneForDirection — défini dans SMC_Universal.mq5 */
+// SMC_IAAndCOGAligned, GOM_EntryAlignmentOK → SMC_GOMAlign.mqh
 bool GOM_EntryEnvironmentOK(const int dirSign)
 {
    return true;
@@ -129,10 +108,7 @@ bool SMC_IsPriceNearLevel(const int dirSign, const string sym, const double mult
 {
    return false;
 }
-bool SMC_M5H1PreciseAligned(const int dirSign)
-{
-   return true;
-}
+// SMC_M5H1PreciseAligned → SMC_GOMAlign.mqh
 bool SMC_M5EMATrendAligned(const int dirSign)
 {
    return true;
@@ -153,30 +129,13 @@ bool SMC_M5EMAPullbackConfirmOK(const int dirSign, const double ema, string &rea
 {
    return true;
 }
-bool SMC_TfDirMatchesSign(const int dirSign, const string tfDir)
-{
-   return true;
-}
-bool SMC_AlignExecStrictGateOK(const int dirSign, string &reason)
-{
-   return true;
-}
-bool SMC_ExecuteAlignMarketIfOK(const int dirSign, const string dir, const string level)
-{
-   return false;
-}
-bool GOM_CanOpenAlignedTrade(const int dirSign)
-{
-   return true;
-}
+// SMC_TfDirMatchesSign, SMC_AlignExecStrictGateOK, SMC_ExecuteAlignMarketIfOK,
+// GOM_CanOpenAlignedTrade, SMC_PricePullbackM5EMA → SMC_GOMAlign.mqh
 bool GOM_EntryCoherenceOK()
 {
    return true;
 }
-bool COG_ConflictsWithGOM()
-{
-   return false;
-}
+// COG_ConflictsWithGOM → SMC_GOMAlign.mqh
 bool TryExecuteGOMPerfectEntry()
 {
    return false;
@@ -185,7 +144,7 @@ void ManageManualTradeSLTP() {}
 void ManageGOMVerdictExits() {}
 void ManageGOMAutonomousStrategy() {}
 void ManageGOMWaitPullbackLimit() {}
-void ManageGOMAlignedLimitOrders() {}
+// ManageGOMAlignedLimitOrders → SMC_GOMAlign.mqh
 void ManageOTEEAutonomousStrategy() {}
 void SMC_EnforceTerminalOrderLimits() {}
 void SMC_ClearSymbolLocksOnInit() {}
@@ -200,7 +159,6 @@ double SMC_GetPositionMaxLossUSD(const int posDir, const bool isGomWait) { retur
 bool GOM_EntrySupportsOpenPosition(const int posDir) { return false; }
 void SMC_MarkSpikeCaptured(const string sym) {}
 int SMC_CountSmallM1BarsAfterTime(const string sym, const datetime after) { return 0; }
-bool SMC_PricePullbackM5EMA(const int dirSign, double &emaPrice, const double tol = 0.40) { return false; }
 bool EvaluateEntryWithMultipleSignals() { return false; }
 
 //--- SafeOrder wrappers — gate GOM WAIT / contre-verdict avant tout envoi
@@ -209,26 +167,101 @@ bool SafeOrderSend(MqlTradeRequest &req, MqlTradeResult &result, const string la
    ENUM_ORDER_TYPE t = req.type;
    bool isMarket = (t == ORDER_TYPE_BUY || t == ORDER_TYPE_SELL);
    bool isLimit  = (t == ORDER_TYPE_BUY_LIMIT || t == ORDER_TYPE_SELL_LIMIT);
+
+   // ── GARDE TERMINAL GLOBAL: positions + pending orders <= MaxPositionsTerminal ──
+   if(req.action == TRADE_ACTION_DEAL || req.action == TRADE_ACTION_PENDING)
+   {
+      if(IsTerminalFull())
+      {
+         result.retcode = TRADE_RETCODE_REJECT;
+         Print("[SAFE] ORDRE BLOQUÉ — Terminal plein (", CountTerminalAllOrders(), "/", MaxPositionsTerminal, ") | ", label, " | ", req.symbol);
+         return false;
+      }
+      // ── GARDE PAR SYMBOLE: pas de 2ème ordre sur même symbole ──
+      string sym = (StringLen(req.symbol) > 0) ? req.symbol : _Symbol;
+      if(SymbolHasActiveOrder(sym))
+      {
+         result.retcode = TRADE_RETCODE_REJECT;
+         Print("[SAFE] ORDRE BLOQUÉ — ", sym, " a déjà un ordre actif | ", label);
+         return false;
+      }
+   }
+
+   // ── GARDE WAIT ABSOLU: QUE GOOD/PERFECT ──
+   // Aucun ORDRE (marché OU limit) ne peut être créé/ouvert sauf si
+   // GOM est GOOD (|vn|>=2) ou PERFECT (|vn|>=3). WAIT (vn=0) et
+   // SIMPLE (|vn|=1) sont bloqués.
+   // Ce garde est INCONTOURNABLE (même via g_smcAlignExecBypass).
+   // On autorise uniquement les actions de gestion: annulation (REMOVE) et
+   // modification (MODIFY) d'ordres déjà existants (nécessaire pour annuler les LIMIT).
+   if(req.action == TRADE_ACTION_DEAL || req.action == TRADE_ACTION_PENDING)
+   {
+      if(MathAbs(g_smcGomVerdictNum) < 2)
+      {
+         result.retcode = TRADE_RETCODE_REJECT;
+         Print("[SAFE] ORDRE BLOQUÉ — GOM=", g_smcGomVerdict, " (vn=", g_smcGomVerdictNum,
+               ") — seul GOOD/PERFECT (|vn|>=2) autorisé | ", label, " | ",
+               (isMarket ? "MARKET" : (isLimit ? "LIMIT" : EnumToString(t))), " | ", req.symbol);
+         return false;
+      }
+   }
+
+   // ── GARDE DIRECTION BOOM/CRASH: INCONTOURNABLE (même via bypass) ──
+   // Pas de SELL sur Boom/Gainx, pas de BUY sur Crash/Painx
+   if(req.action == TRADE_ACTION_DEAL || req.action == TRADE_ACTION_PENDING)
+   {
+      string symDir = (StringLen(req.symbol) > 0) ? req.symbol : _Symbol;
+      string dirCheck = "";
+      if(t == ORDER_TYPE_BUY || t == ORDER_TYPE_BUY_LIMIT) dirCheck = "BUY";
+      else if(t == ORDER_TYPE_SELL || t == ORDER_TYPE_SELL_LIMIT) dirCheck = "SELL";
+      if(dirCheck != "" && !IsDirectionAllowedForBoomCrash(symDir, dirCheck))
+      {
+         result.retcode = TRADE_RETCODE_REJECT;
+         Print("[SAFE] ORDRE BLOQUÉ — ", symDir, " — ", dirCheck, " interdit (règle Boom/Crash) | ", label);
+         return false;
+      }
+   }
+
    if(req.action == TRADE_ACTION_DEAL || req.action == TRADE_ACTION_PENDING)
    {
       int dirSign = 0;
       if(t == ORDER_TYPE_BUY || t == ORDER_TYPE_BUY_LIMIT) dirSign = 1;
       else if(t == ORDER_TYPE_SELL || t == ORDER_TYPE_SELL_LIMIT) dirSign = -1;
       string sym = (StringLen(req.symbol) > 0) ? req.symbol : _Symbol;
-      if(isMarket && !CanPlaceMarketOrder(sym, dirSign))
+      if(isMarket && !g_smcAlignExecBypass && !CanPlaceMarketOrder(sym, dirSign))
       {
          result.retcode = TRADE_RETCODE_REJECT;
          Print("[SAFE] MARKET rejeté GOM | ", label, " | ", sym);
          return false;
       }
-      if(isLimit && !CanPlaceLimitOrder(sym, t))
+      if(isLimit && !g_smcAlignExecBypass && !CanPlaceLimitOrder(sym, t))
       {
          result.retcode = TRADE_RETCODE_REJECT;
          Print("[SAFE] LIMIT rejeté GOM | ", label, " | ", sym);
          return false;
       }
    }
-   return OrderSend(req, result);
+    bool sent = OrderSend(req, result);
+    // ── NOTIFICATION PUSH: tout ordre exécuté (limit ou marché) avec Entry/TP/SL ──
+     if(sent && result.retcode == TRADE_RETCODE_DONE)
+    {
+       RegisterOrderPlaced();  // Anti-race: incrémenter compteur immédiatement
+       if(UseNotifications)
+       {
+          string sym = (StringLen(req.symbol) > 0) ? req.symbol : _Symbol;
+          string dir = (t == ORDER_TYPE_BUY || t == ORDER_TYPE_BUY_LIMIT) ? "BUY" : "SELL";
+          int dg = (int)SymbolInfoInteger(sym, SYMBOL_DIGITS);
+          double entry = (t == ORDER_TYPE_BUY || t == ORDER_TYPE_BUY_LIMIT) ? req.price : req.price;
+          string msg = "📩 ORDRE " + dir + " [" + sym + "]\n";
+          msg += "Type: " + (isMarket ? "MARKET" : "LIMIT") + " | " + (StringLen(label) > 0 ? label : "—") + "\n";
+          msg += "Entry: " + DoubleToString(entry, dg) + "\n";
+          msg += "SL: " + DoubleToString(req.sl, dg) + "\n";
+          msg += "TP: " + DoubleToString(req.tp, dg) + "\n";
+          msg += "Lot: " + DoubleToString(req.volume, 2);
+          SendNotification(msg);
+       }
+    }
+    return sent;
 }
 bool SafeOrderSendAndAlert(MqlTradeRequest &req, MqlTradeResult &result, const string label = "")
 {
@@ -284,63 +317,6 @@ int SMC_ComputePropiceScore() { return 0; }
 // --- Symboles requis par SMC_PatternSignals.mqh ---
 bool g_smcAlignExecBypass = false;
 
-bool PlaceGOMMarketOrder(const string direction, const string src, const string tag)
-{
-   if(BlockAllTrades) return false;
-   if(!CanOpenAdditionalPositionForSymbol(_Symbol, direction)) return false;
-   if(!IsDirectionAllowedForBoomCrash(_Symbol, direction)) return false;
-   if(CountPositionsOurEA() >= SMC_EffectiveMaxPositionsTerminal()) return false;
-
-   int dir = (direction == "BUY") ? 1 : -1;
-
-   if(!CanPlaceMarketOrder(_Symbol, dir)) return false;
-
-   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   if(ask <= 0 || bid <= 0) return false;
-   double px = (dir == 1) ? ask : bid;
-
-   double slDist = px * 0.001;
-   double tpDist = slDist * 3.0;
-
-   double sl, tp;
-   if(dir == 1) { sl = px - slDist; tp = px + tpDist; }
-   else         { sl = px + slDist; tp = px - tpDist; }
-
-   sl = NormalizeDouble(sl, _Digits);
-   tp = NormalizeDouble(tp, _Digits);
-
-   if(!SMCGP_PrepareMarketStops(_Symbol, dir, px, sl, tp, 0.01, sl, tp))
-      return false;
-
-   double lot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
-
-   MqlTradeRequest req = {};
-   MqlTradeResult  res = {};
-   req.action    = TRADE_ACTION_DEAL;
-   req.symbol    = _Symbol;
-   req.volume    = lot;
-   req.type      = (dir == 1) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
-   req.price     = (dir == 1) ? ask : bid;
-   req.sl        = sl;
-   req.tp        = tp;
-   req.deviation = 10;
-   req.magic     = InpMagicNumber;
-   req.comment   = src + ":" + tag;
-
-   long fillFlags = SymbolInfoInteger(_Symbol, SYMBOL_FILLING_MODE);
-   if((fillFlags & SYMBOL_FILLING_IOC) != 0)      req.type_filling = ORDER_FILLING_IOC;
-   else if((fillFlags & SYMBOL_FILLING_FOK) != 0)  req.type_filling = ORDER_FILLING_FOK;
-   else                                             req.type_filling = ORDER_FILLING_RETURN;
-
-   if(SafeOrderSendAndAlert(req, res))
-   {
-      PrintFormat("[GOM-MARKET] %s %s @ %.5f | SL=%.5f TP=%.5f | %s | %s",
-                  src, direction, req.price, sl, tp, tag, g_smcGomVerdict);
-      return true;
-   }
-   PrintFormat("[GOM-MARKET] ECHEC %s %s: %d | %s", src, direction, res.retcode, tag);
-   return false;
-}
+// PlaceGOMMarketOrder → SMC_GOMAlign.mqh
 
 #endif

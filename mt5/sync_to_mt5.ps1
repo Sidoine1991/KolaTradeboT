@@ -1,5 +1,5 @@
 # Sync SMC_Universal.mq5 + modules from repo to ALL MT5 Experts folders.
-$src = Join-Path $PSScriptRoot "."
+$src = Split-Path -Parent $MyInvocation.MyCommand.Definition
 $mqBase = Join-Path $env:APPDATA "MetaQuotes\Terminal"
 
 $targets = @()
@@ -20,8 +20,29 @@ if (-not (Test-Path $srcMq5)) { Write-Error "Missing $srcMq5"; exit 1 }
 foreach ($t in $targets) {
     $mod = Join-Path $t "modules"
     if (-not (Test-Path $mod)) { New-Item -ItemType Directory -Path $mod | Out-Null }
+
+    # EA source (depot SMC_Universal.mq5) -> copie sous les deux noms utilises
     Copy-Item -Force $srcMq5 (Join-Path $t "SMC_Universal.mq5")
+    Copy-Item -Force $srcMq5 (Join-Path $t "SMC_smart_Trader.mq5")
+
+    # EX5 compilé (si present) -> copie sous les deux noms pour pouvoir trader direct
+    $srcEx5 = [System.IO.Path]::ChangeExtension($srcMq5, ".ex5")
+    if (Test-Path $srcEx5) {
+        Copy-Item -Force $srcEx5 (Join-Path $t "SMC_Universal.ex5")
+        Copy-Item -Force $srcEx5 (Join-Path $t "SMC_smart_Trader.ex5")
+    }
+
+    # Modules complets
     Copy-Item -Force -Recurse (Join-Path $srcMod "*") $mod
+
+    # Dossier Modele_spike (SpikeChainPredictor.mqh)
+    $srcSpike = Join-Path $src "Modele_spike"
+    if (Test-Path $srcSpike) {
+        $dstSpike = Join-Path $t "Modele_spike"
+        if (-not (Test-Path $dstSpike)) { New-Item -ItemType Directory -Path $dstSpike | Out-Null }
+        Copy-Item -Force -Recurse (Join-Path $srcSpike "*") $dstSpike
+    }
+
     Write-Host "OK -> $t"
 }
 

@@ -175,20 +175,8 @@ void SMCPP_DrawPanel(const SMCPP_PanelState &st)
    SMCPP_DrawHLine("PRED_LVL_HIGH", st.levelHigh, 0x8A8A00, "High récent"); // Dim gold
    SMCPP_DrawHLine("PRED_TP1", st.tp1, 0x1A8A1A, "TP1", STYLE_SOLID);      // Dim lime
    SMCPP_DrawHLine("PRED_TP2", st.tp2, 0x1A6A1A, "TP2", STYLE_SOLID);      // Dim green
-   SMCPP_DrawHLine("PRED_SL", st.sl, 0x8A1A1A, "SL", STYLE_SOLID);         // Dim red
-   SMCPP_DrawPath(st.pathPrices);
-
-   string status = "PRED: " + st.alert + " | " + st.direction;
-   if(StringLen(st.m15Label) > 0) status += " | " + st.m15Label;
-   ObjectDelete(0, "PRED_LBL_STATUS");
-   ObjectCreate(0, "PRED_LBL_STATUS", OBJ_LABEL, 0, 0, 0);
-   ObjectSetInteger(0, "PRED_LBL_STATUS", OBJPROP_CORNER, CORNER_LEFT_UPPER);
-   ObjectSetInteger(0, "PRED_LBL_STATUS", OBJPROP_XDISTANCE, 10);
-   ObjectSetInteger(0, "PRED_LBL_STATUS", OBJPROP_YDISTANCE, 95);
-   ObjectSetString(0, "PRED_LBL_STATUS", OBJPROP_TEXT, status);
-   ObjectSetInteger(0, "PRED_LBL_STATUS", OBJPROP_COLOR,
-                   st.alert == "ACTIVE" ? 0x1A8A1A : st.alert == "FORMING" ? 0x8A5C1A : 0x5A5A5A);  // Dimmed
-   ObjectSetInteger(0, "PRED_LBL_STATUS", OBJPROP_FONTSIZE, 9);
+    SMCPP_DrawHLine("PRED_SL", st.sl, 0x8A1A1A, "SL", STYLE_SOLID);         // Dim red
+    SMCPP_DrawPath(st.pathPrices);
 }
 
 bool SMCPP_FetchPanel(const string symbol, string &body)

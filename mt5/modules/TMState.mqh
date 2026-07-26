@@ -1,13 +1,13 @@
 //+------------------------------------------------------------------+
-//| TMState.mqh � Centralized state replacing 50+ globals             |
+//| TMState.mqh — Centralized state replacing 50+ globals             |
 //| Institutional-grade EA state management (Phase 1 refactoring)     |
 //+------------------------------------------------------------------+
 #ifndef TM_STATE_MQH
 #define TM_STATE_MQH
 
-// ???????????????????????????????????????????????????????????????????
+// ═══════════════════════════════════════════════════════════════════
 // SUB-STRUCTS (logically grouped for clarity)
-// ???????????????????????????????????????????????????????????????????
+// ═══════════════════════════════════════════════════════════════════
 
 struct TMConfig
 {
@@ -78,13 +78,16 @@ struct TMConfig
    bool     gomAllowSimpleDespiteKola;
    int      gomReEntryCooldownSec;
    double   gomReEntryLot;
-   int      gomReEntryMaxCount;
-   bool     gomUseGlobalTrendFilter;
-   int      gomGlobalTrendMinStrength;
-   bool     gomWaitPullbackToKola;
-   bool     requireGlobalDirMatch;
-   int      globalDirMinConfidence;
-   double   globalMinCoherencePct;
+    int      gomReEntryMaxCount;
+    bool     gomUseGlobalTrendFilter;
+    int      gomGlobalTrendMinStrength;
+    bool     gomWaitPullbackToKola;
+    bool     requireGlobalDirMatch;
+    int      globalDirMinConfidence;
+    double   globalMinCoherencePct;
+    bool     gomAutoConvertPending;
+    double   gomAutoConvertMinQuality;
+    int      gomAutoConvertMinRuntimeSec;
 
    // Filters
    bool     useConsolidationFilter;
@@ -189,6 +192,28 @@ struct TMConfig
    // Whitelist
    string   pipelineWhitelistPath;
    string   inpPollSymbols;
+
+   // === DOW SCANNER ===
+   bool     useDowScanner;
+   int      scannerIntervalSec;
+   int      scannerMaxSymbols;
+   double   scannerMinScore;
+   int      scannerTopN;
+   bool     scannerShowPanel;
+
+   // === ADAPTIVE EXECUTOR ===
+   double   maxLossUSD;
+   double   limitATRThreshold;
+   int      maxOpenPositions;
+
+   // === ATR TRAILING ===
+   bool     useATRTrail;
+   int      atrTrailPeriod;
+   double   atrTrailBETrigger;
+   double   atrTrailAggressive;
+   double   atrTrailConservative;
+   double   atrTrailAggrDist;
+   double   atrTrailConsDist;
 };
 
 struct TMGOMState
@@ -378,11 +403,61 @@ struct TMTimingState
    datetime lastBBCurveDraw;
    datetime lastGOMAutoEntry;
    datetime lastGOMReEntry;
+   datetime lastScannerScan;
 };
 
-// ???????????????????????????????????????????????????????????????????
+// ═══════════════════════════════════════════════════════════════════
+// DOW SCANNER STATE
+// ═══════════════════════════════════════════════════════════════════
+
+struct TMScannerOpportunity
+{
+   string   symbol;
+   double   score;          // Score total 0-100
+   int      direction;      // 1=BUY, -1=SELL, 0=NEUT
+   double   dowScore;       // DOW structure score
+   double   gomScore;       // GOM verdict score
+   double   atrScore;       // ATR momentum score
+   double   rsiScore;       // RSI confirmation score
+   double   sessionScore;   // Session quality score
+   double   dowPrice;       // Prix projeté trendline DOW
+   double   distToDow;      // Distance prix→trendline (en ATR)
+   bool     dowActive;      // Trendline DOW valide
+   bool     limitReady;     // Prix proche de la trendline (LIMIT)
+   bool     marketReady;    // Signal urgent (MARKET)
+   datetime lastUpdate;     // Timestamp du scan
+   // === SPIKE RANKER DATA ===
+   double   spikeScore;     // Score probabilité spike 0-100
+   double   imminencePct;   // % imminence spike (0-100)
+   double   preSpikePct;    // % compression pré-spike (0-100)
+   double   spikeProgressPct; // Progression spike en cours (0-100)
+   int      barsSinceSpike; // Barres depuis dernier spike
+   int      spikeFreqBars;  // Fréquence moyenne des spikes
+   double   estMinutesToSpike; // Estimation minutes avant spike
+};
+
+struct TMScannerState
+{
+   TMScannerOpportunity opportunities[];
+   int                  count;
+   int                  lastTopIdx;
+   datetime             lastScanTime;
+   bool                 initialized;
+};
+
+// ═══════════════════════════════════════════════════════════════════
+// ATR TRAILING STATE
+// ═══════════════════════════════════════════════════════════════════
+
+struct TMATRTrailState
+{
+   int      hATR[];        // ATR handles par position index
+   double   peakATR[];     // ATR au moment du pic profit
+};
+
+// ═══════════════════════════════════════════════════════════════════
 // MASTER STATE STRUCT
-// ???????????????????????????????????????????????????????????????????
+// ═══════════════════════════════════════════════════════════════════
 
 struct TradeManagerState
 {
@@ -396,6 +471,8 @@ struct TradeManagerState
    TMWhitelistState   whitelist;
    TMOrderBlockState  orderBlocks;
    TMTimingState      timing;
+   TMScannerState     scanner;
+   TMATRTrailState    atrTrail;
 
    // Dynamic arrays (resized on demand)
    TMSymbolState      symbols[];
@@ -419,15 +496,15 @@ struct TradeManagerState
    datetime           globalCloseTime;
 };
 
-// ???????????????????????????????????????????????????????????????????
+// ═══════════════════════════════════════════════════════════════════
 // GLOBAL STATE INSTANCE (singleton pattern)
-// ???????????????????????????????????????????????????????????????????
+// ═══════════════════════════════════════════════════════════════════
 
 TradeManagerState g_state;
 
-// ???????????????????????????????????????????????????????????????????
+// ═══════════════════════════════════════════════════════════════════
 // ACCESSOR FUNCTIONS
-// ???????????????????????????????????????????????????????????????????
+// ═══════════════════════════════════════════════════════════════════
 
 int FindSymbolState(const string sym)
 {

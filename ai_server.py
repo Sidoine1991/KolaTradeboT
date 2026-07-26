@@ -4780,6 +4780,23 @@ async def _log_validation_errors(request: Request, exc: RequestValidationError):
     return JSONResponse(status_code=422, content={"detail": exc.errors()})
 
 
+@app.exception_handler(Exception)
+async def _global_exception_handler(request: Request, exc: Exception):
+    """Attrape toute exception non gérée → 500 au lieu de planter le serveur."""
+    path = request.url.path or "unknown"
+    logger.error(
+        "UNHANDLED %s sur %s: %s",
+        type(exc).__name__,
+        path,
+        exc,
+        exc_info=True,
+    )
+    return JSONResponse(
+        status_code=500,
+        content={"ok": False, "error": f"Internal error ({type(exc).__name__})"},
+    )
+
+
 # =============================================================================
 # Decision Engine 360 (intégration de ai_serverbis.py)
 # - Expose un WebSocket FastAPI: /ws360
@@ -10154,7 +10171,7 @@ _gom_enrich_ttl = int(os.getenv("GOM_DASHBOARD_ENRICH_CACHE_SEC", "30"))
 # Recalcul Pine systématique (tous symboles Deriv/Weltrade/Forex/Metal/Crypto)
 GOM_FORCE_PINE_RECALC = _env_bool("GOM_FORCE_PINE_RECALC", True)
 # Blend cognition 5 bougies — désactivé par défaut (évite WAIT/retards en fin de move)
-GOM_USE_PREDICTIVE_BLEND = _env_bool("GOM_USE_PREDICTIVE_BLEND", False)
+GOM_USE_PREDICTIVE_BLEND = _env_bool("GOM_USE_PREDICTIVE_BLEND", True)
 # Overlay correction WAIT côté serveur — désactivé (EA gère via UseGOMCorrectionOverlay)
 GOM_USE_CORRECTION_WAIT_OVERLAY = _env_bool("GOM_USE_CORRECTION_WAIT_OVERLAY", False)
 _gom_calc_inflight: Dict[str, asyncio.Task] = {}
@@ -11057,12 +11074,56 @@ async def mt5_upload_candles(request: MT5CandlesRequest):
         logger.info(f"✅ MT5 candles received: {symbol} {timeframe}→{canon} ({len(df)} candles)")
         logger.debug(f"   Last candle: {df['close'].iloc[-1]:.2f} @ {df.index[-1]}")
 
+        # ── Spike Chain Scanner : analyser M1 pour chaînes de spikes ──
+        spike_chain_alerts = []
+        if SPIKE_CHAIN_AVAILABLE and _spike_chain_scanner and str(timeframe).upper() == "M1":
+            try:
+                candles_list = []
+                for idx, row in df.iterrows():
+                    ts_val = int(idx.timestamp()) if hasattr(idx, 'timestamp') else 0
+                    candles_list.append({
+                        "time": ts_val,
+                        "open": float(row["open"]),
+                        "high": float(row["high"]),
+                        "low": float(row["low"]),
+                        "close": float(row["close"]),
+                        "volume": float(row.get("volume", 0)),
+                    })
+                spike_chain_alerts = _spike_chain_scanner.process_candles(symbol, candles_list)
+                if spike_chain_alerts:
+                    logger.info(f"[SPIKE-CHAIN] {len(spike_chain_alerts)} alerte(s) sur {symbol}")
+                    for alert in spike_chain_alerts:
+                        alert_dict = {
+                            "alert_id": alert.alert_id,
+                            "symbol": alert.symbol,
+                            "direction": alert.direction,
+                            "chain_length": alert.chain_length,
+                            "gom_verdict": alert.gom_verdict,
+                            "gom_verdict_num": alert.gom_verdict_num,
+                            "gom_ok": alert.gom_ok,
+                            "last_price": alert.last_price,
+                            "price_pullback_pct": alert.price_pullback_pct,
+                            "correction_state": alert.correction_state,
+                            "avg_body_atr": alert.avg_body_atr,
+                            "timestamp": alert.timestamp,
+                        }
+                        # Push WebSocket (non-blocking)
+                        try:
+                            import asyncio as _asyncio_check
+                            if _asyncio_check.get_event_loop().is_running():
+                                _asyncio_check.ensure_future(_spike_chain_push_alert(alert_dict))
+                        except Exception:
+                            pass
+            except Exception as _sc_err:
+                logger.warning(f"[SPIKE-CHAIN] Erreur scan {symbol}: {_sc_err}")
+
         return {
             "ok": True,
             "symbol": symbol,
             "timeframe": timeframe,
             "candles_count": len(df),
             "last_price": float(df['close'].iloc[-1]),
+            "spike_chain_alerts": len(spike_chain_alerts),
             "timestamp": datetime.now(timezone.utc).isoformat()
         }
 
@@ -29467,10 +29528,116 @@ async def api_get_perfect_opportunities():
     }
 
 
+# ──────────────────────────────────────────────────────────────────────
+# SPIKE CHAIN SCANNER — Détection temps réel chaînes de spikes
+# ──────────────────────────────────────────────────────────────────────
+try:
+    from spike_chain_scanner import SpikeChainScanner
+    _spike_chain_scanner = SpikeChainScanner()
+    _spike_chain_scanner.set_gom_store(_GOM_VERDICT_STORE)
+    SPIKE_CHAIN_AVAILABLE = True
+    logger.info("✅ Spike Chain Scanner chargé")
+except Exception as _sc_err:
+    _spike_chain_scanner = None
+    SPIKE_CHAIN_AVAILABLE = False
+    logger.warning(f"⚠️ Spike Chain Scanner non disponible: {_sc_err}")
+
+_SPIKE_CHAIN_WS_CLIENTS: list = []
+
+
+@app.get("/spike-chain/alerts")
+async def spike_chain_get_alerts(symbol: str = Query("", description="Filtrer par symbole")):
+    """EA poll cet endpoint pour récupérer les alertes chaîne de spikes."""
+    if not SPIKE_CHAIN_AVAILABLE or not _spike_chain_scanner:
+        return {"ok": False, "available": False, "alerts": []}
+    alerts = await _spike_chain_scanner.get_active_alerts(symbol=symbol or None)
+    return {"ok": True, "available": True, "alerts": alerts, "count": len(alerts)}
+
+
+@app.post("/spike-chain/acknowledge/{alert_id}")
+async def spike_chain_acknowledge(alert_id: str):
+    """EA acquitte une alerte après notification Telegram."""
+    if not SPIKE_CHAIN_AVAILABLE or not _spike_chain_scanner:
+        return {"ok": False}
+    ok = await _spike_chain_scanner.acknowledge_alert(alert_id)
+    return {"ok": ok, "alert_id": alert_id}
+
+
+@app.get("/spike-chain/scan")
+async def spike_chain_force_scan(symbol: str = Query(..., description="Symbole à scanner")):
+    """Force un scan immédiat d'un symbole (debug/dashboard)."""
+    if not SPIKE_CHAIN_AVAILABLE or not _spike_chain_scanner:
+        return {"ok": False, "available": False}
+    result = _spike_chain_scanner.force_scan(symbol)
+    return {"ok": True, "result": result}
+
+
+@app.get("/spike-chain/stats")
+async def spike_chain_stats():
+    """Stats du scanner (debug/monitoring)."""
+    if not SPIKE_CHAIN_AVAILABLE or not _spike_chain_scanner:
+        return {"ok": False, "available": False}
+    return {"ok": True, "stats": _spike_chain_scanner.get_stats()}
+
+
+@app.get("/spike-chain/history/{symbol}")
+async def spike_chain_history(symbol: str, limit: int = Query(50)):
+    """Historique des spikes détectés pour un symbole."""
+    if not SPIKE_CHAIN_AVAILABLE or not _spike_chain_scanner:
+        return {"ok": False, "spikes": []}
+    spikes = _spike_chain_scanner.get_spike_history(symbol, limit=limit)
+    return {"ok": True, "symbol": symbol.upper(), "spikes": spikes, "count": len(spikes)}
+
+
+@app.websocket("/spike-chain/ws")
+async def spike_chain_websocket(websocket: WebSocket):
+    """WebSocket push pour alertes spike chain en temps réel."""
+    await websocket.accept()
+    _SPIKE_CHAIN_WS_CLIENTS.append(websocket)
+    client = websocket.client
+    logger.info(f"[SPIKE-CHAIN] WS connectée: {client}")
+    try:
+        while True:
+            data = await websocket.receive_text()
+            # Ping/pong keepalive
+            if data == "ping":
+                await websocket.send_json({"type": "pong", "ts": datetime.now(timezone.utc).isoformat()})
+    except WebSocketDisconnect:
+        logger.info(f"[SPIKE-CHAIN] WS déconnectée: {client}")
+    except Exception as e:
+        logger.warning(f"[SPIKE-CHAIN] WS error: {e}")
+    finally:
+        if websocket in _SPIKE_CHAIN_WS_CLIENTS:
+            _SPIKE_CHAIN_WS_CLIENTS.remove(websocket)
+
+
+async def _spike_chain_push_alert(alert_dict: dict):
+    """Push une alerte à tous les clients WebSocket connectés."""
+    dead = []
+    for ws in _SPIKE_CHAIN_WS_CLIENTS:
+        try:
+            await ws.send_json({"type": "spike_chain_alert", "alert": alert_dict})
+        except Exception:
+            dead.append(ws)
+    for ws in dead:
+        _SPIKE_CHAIN_WS_CLIENTS.remove(ws)
+
+
 if __name__ == "__main__":
+    import signal
     import uvicorn
 
-    # Démarrer le serveur avec gestion des événements de vie
+    # Gestion signaux pour arrêt propre
+    def _signal_handler(signum, frame):
+        sig_name = signal.Signals(signum).name
+        logger.warning("Signal %s reçu — arrêt propre de ai_server", sig_name)
+        # Uvicorn s'arrête via le flag shutdown_requested
+        import os
+        os._exit(0)
+
+    signal.signal(signal.SIGTERM, _signal_handler)
+    signal.signal(signal.SIGINT, _signal_handler)
+
     logger.info("Lancement du serveur IA TradBOT avec systeme ML integre")
 
     uvicorn.run(
