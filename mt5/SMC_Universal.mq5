@@ -957,6 +957,10 @@ int CountChannelLimitOrdersForSymbol(const string symbol)
 // Forward declarations (defined in SMC_GOM_Pipeline.mqh, included later)
 int  SMCGP_GetCachedVerdictNum(const string symbol);
 void SMCGP_EnforceLimitDiscipline(const long magic, const int maxLimits = 2);
+bool LimitPlaceDisciplineOK(const string symbol, const int dirSign, string &reasonOut);
+bool LimitCancelAllowed(const ulong ticket, const bool forceCounterTrend = false, const string reason = "");
+bool LimitSafeOrderDelete(const ulong ticket, const bool forceCounterTrend = false, const string reason = "");
+void LimitRegisterCancel(const string symbol);
 
 // ── GATEKEEPER GOM: WAIT interdit + direction GOOD/PERFECT obligatoire ──
 // dirSign: +1 BUY, -1 SELL. Retourne false si bloqué.
@@ -1035,6 +1039,18 @@ bool CanPlaceLimitOrder(const string symbol, ENUM_ORDER_TYPE orderType)
 
    if(!CanPlaceOrderByGOM(symbol, dirSign, "LIMIT"))
       return false;
+
+   string limReason = "";
+   if(!LimitPlaceDisciplineOK(symbol, dirSign, limReason))
+   {
+      static datetime s_lastLimPlaceLog = 0;
+      if(TimeCurrent() - s_lastLimPlaceLog >= 30)
+      {
+         s_lastLimPlaceLog = TimeCurrent();
+         Print("🚫 LIMIT BLOQUÉ — ", symbol, " — ", limReason);
+      }
+      return false;
+   }
 
    // Max 2 ordres LIMIT par symbole (garder les meilleurs via CleanupExcessLimits)
    int maxLimits = MathMax(1, MaxLimitOrdersTerminal);
@@ -1958,6 +1974,7 @@ bool     g_tp1WaitingReEntry = false;   // En attente d'un pullback
 bool AreAllTimeframesAligned(string &direction);
 
 #include "modules/SMC_Stubs.mqh"
+#include "modules/SMC_LimitDiscipline.mqh"
 #include "modules/SMC_PatternSignals.mqh"
 #include "modules/SMC_ProbabilityGate.mqh"
 #include "modules/SMC_DowTrendline.mqh"
