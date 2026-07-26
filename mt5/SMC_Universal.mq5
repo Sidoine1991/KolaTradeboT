@@ -1770,6 +1770,10 @@ input double PreciseLimitMaxDistATR   = 1.5;
 input bool   PreferLimitOverMarket    = true;
 input double MinLossBeforeAutoCloseUSD = 2.0; // Fermer auto seulement si perte >= N $
 input bool   KeepPendingUntilTrigger  = true; // Ne pas annuler LIMIT sur WAIT avant fill
+input int    LimitCancelMinAgeSec       = 300;  // Âge min LIMIT avant annulation (secondes)
+input int    LimitCancelUnfilledMinAgeSec = 180; // Âge min LIMIT non rempli avant annulation
+input int    LimitPlaceCooldownSec      = 45;   // Pause après annulation avant replacer
+input bool   LimitRequireBlinkBeforePlace = true; // Exiger signal clignotant avant placement LIMIT
 input group "=== JOURNAL CSV + DASHBOARD ==="
 input bool   UseTradeJournal          = true;
 input int    TradeJournalBackfillDays = 30;
