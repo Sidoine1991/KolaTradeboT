@@ -62,17 +62,16 @@ except subprocess.CalledProcessError as e:
     sys.exit(1)
 
 try:
-    try:
-        data = json.loads(out)
-        message = data.get('message', data.get('response', ''))
-    except Exception:
-        import re
-        m = re.search(r'"(?:message|response)"\s*:\s*"([^\"]*)"', out)
-        if m:
-            message = m.group(1)
-        else:
-            print('Failed to parse ollama JSON output:', out, file=sys.stderr)
-            sys.exit(1)
+    data = json.loads(out)
+    message = data.get('message', data.get('response', ''))
+except Exception:
+    import re
+    m = re.search(r'"(?:message|response)"\s*:\s*"([^\"]*)"', out)
+    if m:
+        message = m.group(1)
+    else:
+        print('Failed to parse ollama JSON output:', out, file=sys.stderr)
+        sys.exit(1)
 
 if args.out_file:
     p = Path(args.out_file)
