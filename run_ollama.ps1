@@ -36,6 +36,20 @@ if ([string]::IsNullOrWhiteSpace($Model)) {
     if ([string]::IsNullOrWhiteSpace($Model)) { $Model = 'qwen2.5-coder-fast:7b' }
 }
 
+# Validate model is available according to ollama list
+try {
+    $names = (& ollama list) | ForEach-Object { ($_ -split '\s+')[0] } | Where-Object { $_ -ne 'NAME' }
+} catch {
+    Write-Error "Failed to run 'ollama list': $_"
+    exit 1
+}
+if (-not ($names -contains $Model)) {
+    Write-Host "Model '$Model' not found in local ollama models." -ForegroundColor Yellow
+    Write-Host "Available models:" -ForegroundColor Yellow
+    $names | ForEach-Object { Write-Host "  $_" }
+    exit 1
+}
+
 $keep = "${KeepAliveMinutes}m"
 $args = @('run', $Model, '--format', 'json', '--keepalive', $keep)
 if ($Verbose) { $args += '--verbose' }
