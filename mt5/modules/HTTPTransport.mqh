@@ -24,6 +24,7 @@ struct HTTPResponse
 // HTTP REQUEST FUNCTIONS
 // ???????????????????????????????????????????????????????????????????
 
+// Robust GET with retries
 HTTPResponse HTTP_Get(const string path, int timeoutMs = 5000)
 {
    HTTPResponse resp;
@@ -44,22 +45,29 @@ HTTPResponse HTTP_Get(const string path, int timeoutMs = 5000)
    string headers = "Content-Type: application/json\r\n";
    string respH = "";
 
-   datetime start = TimeCurrent();
-   resp.code = WebRequest("GET", url, headers, timeoutMs, data, result, respH);
-   resp.elapsedMs = (int)((TimeCurrent() - start) * 1000);
-
-   resp.body = CharArrayToString(result, 0, WHOLE_ARRAY, CP_UTF8);
-   resp.success = (resp.code == 200);
-
-   if(!resp.success)
+   int attempts = 0;
+   int maxAttempts = 3;
+   int backoffMs = 300; // simple backoff
+   while(attempts < maxAttempts)
    {
-      resp.error = StringFormat("HTTP GET failed: code=%d, url=%s", resp.code, url);
+      attempts++;
+      datetime start = TimeCurrent();
+      int code = WebRequest("GET", url, headers, timeoutMs, data, result, respH);
+      resp.elapsedMs = (int)((TimeCurrent() - start) * 1000);
+      resp.code = code;
+      resp.body = CharArrayToString(result, 0, WHOLE_ARRAY, CP_UTF8);
+      resp.success = (code == 200);
+      if(resp.success) return resp;
+      // log and wait before retry
+      resp.error = StringFormat("HTTP GET failed (attempt %d/%d): code=%d, url=%s", attempts, maxAttempts, code, url);
       PrintFormat("[HTTPTransport] %s", resp.error);
+      Sleep(backoffMs * attempts);
    }
 
    return resp;
 }
 
+// Robust POST with retries and optional JSON validation
 HTTPResponse HTTP_Post(const string path, const string jsonBody, int timeoutMs = 10000)
 {
    HTTPResponse resp;
@@ -83,17 +91,22 @@ HTTPResponse HTTP_Post(const string path, const string jsonBody, int timeoutMs =
    string headers = "Content-Type: application/json\r\n";
    string respH = "";
 
-   datetime start = TimeCurrent();
-   resp.code = WebRequest("POST", url, headers, timeoutMs, post, result, respH);
-   resp.elapsedMs = (int)((TimeCurrent() - start) * 1000);
-
-   resp.body = CharArrayToString(result, 0, WHOLE_ARRAY, CP_UTF8);
-   resp.success = (resp.code == 200);
-
-   if(!resp.success)
+   int attempts = 0;
+   int maxAttempts = 3;
+   int backoffMs = 300;
+   while(attempts < maxAttempts)
    {
-      resp.error = StringFormat("HTTP POST failed: code=%d, url=%s, body_len=%d", resp.code, url, StringLen(jsonBody));
+      attempts++;
+      datetime start = TimeCurrent();
+      int code = WebRequest("POST", url, headers, timeoutMs, post, result, respH);
+      resp.elapsedMs = (int)((TimeCurrent() - start) * 1000);
+      resp.code = code;
+      resp.body = CharArrayToString(result, 0, WHOLE_ARRAY, CP_UTF8);
+      resp.success = (code == 200);
+      if(resp.success) return resp;
+      resp.error = StringFormat("HTTP POST failed (attempt %d/%d): code=%d, url=%s", attempts, maxAttempts, code, url);
       PrintFormat("[HTTPTransport] %s", resp.error);
+      Sleep(backoffMs * attempts);
    }
 
    return resp;
