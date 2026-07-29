@@ -61,17 +61,47 @@ except subprocess.CalledProcessError as e:
     print('ollama failed:', e.output, file=sys.stderr)
     sys.exit(1)
 
+# Robust JSON extraction: handle ANSI escapes and spinner braille characters, then locate the JSON object
+import re
+
+# Try direct JSON first
+message = None
 try:
     data = json.loads(out)
     message = data.get('message', data.get('response', ''))
 except Exception:
-    import re
-    m = re.search(r'"(?:message|response)"\s*:\s*"([^\"]*)"', out)
+    # Remove common ANSI CSI sequences
+    cleaned = re.sub(r'\x1b\[[0-9;]*[A-Za-z]', '', out)
+    # Remove braille/box spinner characters (U+2800–U+28FF) often used by ollama's spinner
+    cleaned = re.sub(r'[\u2800-\u28FF]', '', cleaned)
+    # Try to extract a JSON object that contains message or response
+    m = re.search(r'(\{[^}]*"(?:message|response)"[^}]*\})', cleaned, re.DOTALL)
     if m:
-        message = m.group(1)
-    else:
-        print('Failed to parse ollama JSON output:', out, file=sys.stderr)
-        sys.exit(1)
+        candidate = m.group(1)
+        try:
+            data = json.loads(candidate)
+            message = data.get('message', data.get('response', ''))
+        except Exception:
+            message = None
+    if message is None:
+        # Fallback: take everything after last '{' and try to parse
+        idx = cleaned.rfind('{')
+        if idx != -1:
+            candidate = cleaned[idx:]
+            try:
+                data = json.loads(candidate)
+                message = data.get('message', data.get('response', ''))
+            except Exception:
+                message = None
+    if message is None:
+        # Last resort: extract the value of message/response with a regex
+        m2 = re.search(r'"(?:message|response)"\s*:\s*"([^\"]*)"', cleaned)
+        if m2:
+            message = m2.group(1)
+
+if message is None:
+    print('Failed to parse ollama JSON output:', out, file=sys.stderr)
+    sys.exit(1)
 
 if args.out_file:
     p = Path(args.out_file)
