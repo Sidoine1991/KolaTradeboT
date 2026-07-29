@@ -62,9 +62,18 @@ except subprocess.CalledProcessError as e:
     sys.exit(1)
 
 try:
-    data = json.loads(out)
+    try:
+        data = json.loads(out)
+    except json.JSONDecodeError:
+        # attempt to recover JSON by taking the last '{' to strip spinner/ANSI prefixes
+        idx = out.rfind('{')
+        if idx != -1:
+            candidate = out[idx:]
+            data = json.loads(candidate)
+        else:
+            raise
     message = data.get('message', '')
-except json.JSONDecodeError:
+except Exception:
     print('Failed to parse ollama JSON output:', out, file=sys.stderr)
     sys.exit(1)
 
