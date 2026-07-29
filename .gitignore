@@ -66,6 +66,7 @@ Thumbs.db
 *.csv
 *.xlsx
 *.json
+!models.json
 backtest_results/
 
 # Agentic OS data layer — keep decisions and state, ignore daily logs and inbox
