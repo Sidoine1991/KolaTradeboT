@@ -2,7 +2,6 @@
 #ifndef SYMBOL_SCANNER_MQH
 #define SYMBOL_SCANNER_MQH
 
-#include <stdlib.mqh>
 
 // Configuration
 input int   SCAN_LOOKBACK_BARS = 5;      // bars to examine on M1 for spikes
@@ -43,7 +42,7 @@ double ComputeSpikeScore(const string symbol)
 }
 
 // Get list of symbols from MarketWatch up to maxSymbols
-int GetMarketWatchSymbols(string syms[], int maxSymbols)
+int GetMarketWatchSymbols(string &syms[], int maxSymbols)
 {
    int total = SymbolsTotal(false);
    int added = 0;

@@ -43,13 +43,15 @@
 #include <Trade/OrderInfo.mqh>
 #include <Trade/DealInfo.mqh>
 #include <Trade/HistoryOrderInfo.mqh>
-#include "modules/GOM_Graphics.mqh"
+#include "modules/SMC_SymbolCategory.mqh"
 #include "modules/SymbolScanner.mqh"
 #include "modules/SpikeChainDetector.mqh"
 #include "modules/SMC_CrossCorrelation.mqh"
 string g_sch1PanelText = "";
 #include "modules/SMC_ChainPredictor.mqh"
 #include "modules/SMC_TFGate.mqh"
+// GOM and graphics included after feature defines to ensure macros are visible
+
 // #include "modules/EA_PivotEntry.mqh"        // TODO: Refactor pour MQL5
 // #include "modules/EA_IndependentTrader.mqh"  // TODO: Refactor pour MQL5
 // #include "modules/AutoTrading.mqh"  // TODO: Fix MQL5 OrderSend compatibility
@@ -73,6 +75,10 @@ string g_sch1PanelText = "";
 #define ShowPremiumDiscount         true    // Zones Premium/Discount/équilibre
 #define ShowSignalArrow             true    // Flèche dynamique BUY/SELL
 #define ShowSpikeZones              true    // Zones spike H1+M5
+
+// Include GOM pipeline + graphics after defines
+#include "modules/SMC_GOM_Pipeline.mqh"
+#include "modules/GOM_Graphics.mqh"
 
 //+------------------------------------------------------------------+
 //| ENUMS, STRUCTS & DEFINES                                        |
