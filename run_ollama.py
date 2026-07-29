@@ -20,7 +20,7 @@ models = load_models(repo_root)
 parser = argparse.ArgumentParser(description='Call local ollama model and optionally write+commit output')
 parser.add_argument('--model', default=None, help='Model id (defaults to first entry in models.json)')
 parser.add_argument('--list-models', action='store_true', help='List available models from models.json')
-parser.add_argument('--prompt', required=True)
+parser.add_argument('--prompt', required=False, help='Prompt to send to the model')
 parser.add_argument('--out', dest='out_file', default='')
 parser.add_argument('--keepalive', type=int, default=5, help='minutes to keep model loaded')
 parser.add_argument('--verbose', action='store_true')
@@ -36,6 +36,12 @@ if args.list_models:
         print(f"{m.get('id')} - {m.get('display_name','')}")
     sys.exit(0)
 
+# Ensure prompt provided when not listing models
+if not args.list_models and not args.prompt:
+    parser.print_usage()
+    print('\nError: --prompt is required unless --list-models is used', file=sys.stderr)
+    sys.exit(2)
+
 # Determine model to use
 model = args.model
 if not model:
@@ -50,7 +56,7 @@ if args.verbose:
 cmd += ['--', args.prompt]
 
 try:
-    out = subprocess.check_output(cmd, stderr=subprocess.STDOUT, text=True)
+    out = subprocess.check_output(cmd, stderr=subprocess.STDOUT, text=True, encoding='utf-8', errors='replace')
 except subprocess.CalledProcessError as e:
     print('ollama failed:', e.output, file=sys.stderr)
     sys.exit(1)
