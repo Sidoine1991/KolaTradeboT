@@ -1,0 +1,48 @@
+[
+  {
+    "id": "qwen2.5-coder-fast:7b",
+    "display_name": "Qwen 2.5 Coder Fast",
+    "source": "ollama local",
+    "size": "4.7 GB",
+    "notes": "Low-latency coder model (keepalive recommended)."
+  },
+  {
+    "id": "s80982708/ZINI-LOCAL:latest",
+    "display_name": "ZINI-LOCAL",
+    "source": "ollama local",
+    "size": "4.7 GB",
+    "notes": "Custom local image (container registry style)."
+  },
+  {
+    "id": "qwen2.5-coder:7b",
+    "display_name": "Qwen 2.5 Coder",
+    "source": "ollama local",
+    "size": "4.7 GB"
+  },
+  {
+    "id": "qwen2.5-coder:1.5b",
+    "display_name": "Qwen 2.5 Coder (1.5b)",
+    "source": "ollama local",
+    "size": "986 MB"
+  },
+  {
+    "id": "qwen3.5:4b",
+    "display_name": "Qwen 3.5",
+    "source": "ollama local",
+    "size": "3.4 GB"
+  },
+  {
+    "id": "gemini-3-flash-preview:latest",
+    "display_name": "Gemini 3 Flash Preview",
+    "source": "ollama local",
+    "size": "-",
+    "notes": "Preview image"
+  },
+  {
+    "id": "glm-ocr:latest",
+    "display_name": "GLM OCR",
+    "source": "ollama local",
+    "size": "2.2 GB",
+    "notes": "OCR-focused model"
+  }
+]
