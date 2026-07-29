@@ -79,6 +79,8 @@ except Exception:
     cleaned = re.sub(r'\x1b\[[0-9;]*[A-Za-z]', '', out)
     # Remove braille spinner characters (U+2800–U+28FF)
     cleaned = re.sub(r'[\u2800-\u28FF]', '', cleaned)
+    # Remove literal escape sequences like "\u28xx" that some outputs show
+    cleaned = re.sub(r'\\u28[0-9a-fA-F]{2}', '', cleaned)
     # Remove other C0 control chars except newline and tab
     cleaned = ''.join(ch for ch in cleaned if ch == '\n' or ch == '\t' or ord(ch) >= 32)
     # Now try to locate the JSON by finding the "message" or "response" token
