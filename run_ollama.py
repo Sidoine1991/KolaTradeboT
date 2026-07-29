@@ -66,7 +66,7 @@ except subprocess.CalledProcessError as e:
     print('ollama failed:', e.output, file=sys.stderr)
     sys.exit(1)
 
-# Robust JSON extraction: handle ANSI escapes and spinner braille characters, then locate the JSON object
+# Robust JSON extraction: aggressively strip non-printable/spinner chars then locate JSON
 import re
 
 # Try direct JSON first
@@ -75,21 +75,29 @@ try:
     data = json.loads(out)
     message = data.get('message', data.get('response', ''))
 except Exception:
-    # Remove common ANSI CSI sequences
+    # Remove ANSI CSI sequences
     cleaned = re.sub(r'\x1b\[[0-9;]*[A-Za-z]', '', out)
-    # Remove braille/box spinner characters (U+2800–U+28FF) often used by ollama's spinner
+    # Remove braille spinner characters (U+2800–U+28FF)
     cleaned = re.sub(r'[\u2800-\u28FF]', '', cleaned)
-    # Try to extract a JSON object that contains message or response
-    m = re.search(r'(\{[^}]*"(?:message|response)"[^}]*\})', cleaned, re.DOTALL)
-    if m:
-        candidate = m.group(1)
-        try:
-            data = json.loads(candidate)
-            message = data.get('message', data.get('response', ''))
-        except Exception:
-            message = None
+    # Remove other C0 control chars except newline and tab
+    cleaned = ''.join(ch for ch in cleaned if ch == '\n' or ch == '\t' or ord(ch) >= 32)
+    # Now try to locate the JSON by finding the "message" or "response" token
+    for key in ('"message"', '"response"'):
+        pos = cleaned.find(key)
+        if pos != -1:
+            # find nearest '{' before pos and nearest '}' after pos
+            open_idx = cleaned.rfind('{', 0, pos)
+            close_idx = cleaned.find('}', pos)
+            if open_idx != -1 and close_idx != -1 and close_idx > open_idx:
+                candidate = cleaned[open_idx:close_idx+1]
+                try:
+                    data = json.loads(candidate)
+                    message = data.get('message', data.get('response', ''))
+                    break
+                except Exception:
+                    pass
     if message is None:
-        # Fallback: take everything after last '{' and try to parse
+        # fallback: try last '{' to end
         idx = cleaned.rfind('{')
         if idx != -1:
             candidate = cleaned[idx:]
@@ -97,9 +105,9 @@ except Exception:
                 data = json.loads(candidate)
                 message = data.get('message', data.get('response', ''))
             except Exception:
-                message = None
+                pass
     if message is None:
-        # Last resort: extract the value of message/response with a regex
+        # final fallback: regex extract of the field value
         m2 = re.search(r'"(?:message|response)"\s*:\s*"([^\"]*)"', cleaned)
         if m2:
             message = m2.group(1)
