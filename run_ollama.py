@@ -24,6 +24,9 @@ parser.add_argument('--prompt', required=False, help='Prompt to send to the mode
 parser.add_argument('--out', dest='out_file', default='')
 parser.add_argument('--keepalive', type=int, default=5, help='minutes to keep model loaded')
 parser.add_argument('--verbose', action='store_true')
+parser.add_argument('--hide-thinking', dest='hide_thinking', action='store_true', help='Suppress ollama thinking/spinner output (enabled by default)')
+parser.add_argument('--no-hide-thinking', dest='hide_thinking', action='store_false', help='Do not suppress ollama thinking output')
+parser.set_defaults(hide_thinking=True)
 parser.add_argument('--apply-git', action='store_true')
 parser.add_argument('--commit-message', default='Model-generated update')
 args = parser.parse_args()
@@ -51,6 +54,8 @@ if not model:
         model = 'qwen2.5-coder-fast:7b'
 
 cmd = ['ollama', 'run', model, '--format', 'json', '--keepalive', f'{args.keepalive}m']
+if args.hide_thinking:
+    cmd.append('--hidethinking')
 if args.verbose:
     cmd.append('--verbose')
 cmd += ['--', args.prompt]
