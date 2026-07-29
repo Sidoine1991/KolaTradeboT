@@ -82,7 +82,7 @@ try:
                 data = json.loads(candidate)
             else:
                 raise
-    message = data.get('message', '')
+    message = data.get('message', data.get('response', ''))
 except Exception:
     print('Failed to parse ollama JSON output:', out, file=sys.stderr)
     sys.exit(1)
