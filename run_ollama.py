@@ -5,6 +5,7 @@ import subprocess
 from pathlib import Path
 import sys
 
+
 def load_models(repo_root: Path):
     path = repo_root / 'models.json'
     if not path.exists():
@@ -53,66 +54,90 @@ if not model:
     else:
         model = 'qwen2.5-coder-fast:7b'
 
-cmd = ['ollama', 'run', model, '--format', 'json', '--keepalive', f'{args.keepalive}m']
-if args.hide_thinking:
-    cmd.append('--hidethinking')
-if args.verbose:
-    cmd.append('--verbose')
-cmd += ['--', args.prompt]
-
-try:
-    out = subprocess.check_output(cmd, stderr=subprocess.STDOUT, text=True, encoding='utf-8', errors='replace')
-except subprocess.CalledProcessError as e:
-    print('ollama failed:', e.output, file=sys.stderr)
-    sys.exit(1)
-
-# Robust JSON extraction: aggressively strip non-printable/spinner chars then locate JSON
-import re
-
-# Try direct JSON first
+# Prefer calling the PowerShell wrapper when available (it already produces clean output)
+ps_wrapper = repo_root / 'run_ollama.ps1'
 message = None
-try:
-    data = json.loads(out)
-    message = data.get('message', data.get('response', ''))
-except Exception:
-    # Remove ANSI CSI sequences
-    cleaned = re.sub(r'\x1b\[[0-9;]*[A-Za-z]', '', out)
-    # Remove braille spinner characters (U+2800–U+28FF)
-    cleaned = re.sub(r'[\u2800-\u28FF]', '', cleaned)
-    # Remove literal escape sequences like "\u28xx" that some outputs show
-    cleaned = re.sub(r'\\u28[0-9a-fA-F]{2}', '', cleaned)
-    # Remove other C0 control chars except newline and tab
-    cleaned = ''.join(ch for ch in cleaned if ch == '\n' or ch == '\t' or ord(ch) >= 32)
-    # Now try to locate the JSON by finding the "message" or "response" token
-    for key in ('"message"', '"response"'):
-        pos = cleaned.find(key)
-        if pos != -1:
-            # find nearest '{' before pos and nearest '}' after pos
-            open_idx = cleaned.rfind('{', 0, pos)
-            close_idx = cleaned.find('}', pos)
-            if open_idx != -1 and close_idx != -1 and close_idx > open_idx:
-                candidate = cleaned[open_idx:close_idx+1]
+out = None
+if ps_wrapper.exists():
+    ps_cmd = ['powershell', '-ExecutionPolicy', 'Bypass', '-File', str(ps_wrapper), '-Model', model, '-Prompt', args.prompt, '-KeepAliveMinutes', str(args.keepalive)]
+    if args.out_file:
+        ps_cmd += ['-OutFile', args.out_file]
+        if args.apply_git:
+            ps_cmd += ['-ApplyGit', '-CommitMessage', args.commit_message]
+    try:
+        out = subprocess.check_output(ps_cmd, stderr=subprocess.STDOUT, text=True, encoding='utf-8', errors='replace')
+    except subprocess.CalledProcessError as e:
+        print('PowerShell wrapper failed:', e.output, file=sys.stderr)
+        sys.exit(1)
+    # PowerShell wrapper may print informational lines; extract the last non-empty line as the message
+    lines = [ln for ln in out.splitlines() if ln.strip()]
+    if lines:
+        last = lines[-1]
+        try:
+            maybe = json.loads(last)
+            message = maybe.get('message', maybe.get('response', ''))
+        except Exception:
+            message = last
+else:
+    # Build ollama command and call directly
+    cmd = ['ollama', 'run', model, '--format', 'json', '--keepalive', f'{args.keepalive}m']
+    if args.hide_thinking:
+        cmd.append('--hidethinking')
+    if args.verbose:
+        cmd.append('--verbose')
+    cmd += ['--', args.prompt]
+    try:
+        out = subprocess.check_output(cmd, stderr=subprocess.STDOUT, text=True, encoding='utf-8', errors='replace')
+    except subprocess.CalledProcessError as e:
+        print('ollama failed:', e.output, file=sys.stderr)
+        sys.exit(1)
+
+    # Robust JSON extraction: aggressively strip non-printable/spinner chars then locate JSON
+    import re
+
+    # Try direct JSON first
+    try:
+        data = json.loads(out)
+        message = data.get('message', data.get('response', ''))
+    except Exception:
+        # Remove ANSI CSI sequences
+        cleaned = re.sub(r'\\x1b\\[[0-9;]*[A-Za-z]', '', out)
+        # Remove braille spinner characters (U+2800–U+28FF)
+        cleaned = re.sub(r'[\\u2800-\\u28FF]', '', cleaned)
+        # Remove literal escape sequences like "\\u28xx" that some outputs show
+        cleaned = re.sub(r'\\\\u28[0-9a-fA-F]{2}', '', cleaned)
+        # Remove other C0 control chars except newline and tab
+        cleaned = ''.join(ch for ch in cleaned if ch == '\\n' or ch == '\\t' or ord(ch) >= 32)
+        # Now try to locate the JSON by finding the "message" or "response" token
+        for key in ('"message"', '"response"'):
+            pos = cleaned.find(key)
+            if pos != -1:
+                # find nearest '{' before pos and nearest '}' after pos
+                open_idx = cleaned.rfind('{', 0, pos)
+                close_idx = cleaned.find('}', pos)
+                if open_idx != -1 and close_idx != -1 and close_idx > open_idx:
+                    candidate = cleaned[open_idx:close_idx+1]
+                    try:
+                        data = json.loads(candidate)
+                        message = data.get('message', data.get('response', ''))
+                        break
+                    except Exception:
+                        pass
+        if message is None:
+            # fallback: try last '{' to end
+            idx = cleaned.rfind('{')
+            if idx != -1:
+                candidate = cleaned[idx:]
                 try:
                     data = json.loads(candidate)
                     message = data.get('message', data.get('response', ''))
-                    break
                 except Exception:
                     pass
-    if message is None:
-        # fallback: try last '{' to end
-        idx = cleaned.rfind('{')
-        if idx != -1:
-            candidate = cleaned[idx:]
-            try:
-                data = json.loads(candidate)
-                message = data.get('message', data.get('response', ''))
-            except Exception:
-                pass
-    if message is None:
-        # final fallback: regex extract of the field value
-        m2 = re.search(r'"(?:message|response)"\s*:\s*"([^\"]*)"', cleaned)
-        if m2:
-            message = m2.group(1)
+        if message is None:
+            # final fallback: regex extract of the field value
+            m2 = re.search(r'"(?:message|response)"\\s*:\\s*"([^\\"]*)"', cleaned)
+            if m2:
+                message = m2.group(1)
 
 if message is None:
     print('Failed to parse ollama JSON output:', out, file=sys.stderr)
@@ -127,7 +152,7 @@ if args.out_file:
     if args.apply_git:
         try:
             subprocess.check_call(['git', 'add', '--', str(p)])
-            full_msg = f"{args.commit_message}\n\nCo-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>"
+            full_msg = f"{args.commit_message}\\n\\nCo-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>"
             subprocess.check_call(['git', 'commit', '-m', full_msg])
             print(f'Committed {p}')
         except subprocess.CalledProcessError:
