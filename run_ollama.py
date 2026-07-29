@@ -158,4 +158,9 @@ if args.out_file:
         except subprocess.CalledProcessError:
             print('Git add/commit failed or no changes to commit', file=sys.stderr)
 else:
-    print(message)
+    try:
+        # Write bytes to stdout to avoid encoding errors on Windows consoles
+        sys.stdout.buffer.write((message + "\n").encode('utf-8'))
+    except Exception:
+        # Fallback
+        print(message.encode('utf-8', errors='replace').decode('utf-8', errors='replace'))
