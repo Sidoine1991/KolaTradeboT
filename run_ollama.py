@@ -64,25 +64,15 @@ except subprocess.CalledProcessError as e:
 try:
     try:
         data = json.loads(out)
-    except json.JSONDecodeError:
-        # attempt to recover JSON by locating the JSON object near the "message" or "response" key
+        message = data.get('message', data.get('response', ''))
+    except Exception:
         import re
-        m = re.search(r'(\{[^}]*"(?:message|response)"[^}]*\})', out, re.DOTALL)
+        m = re.search(r'"(?:message|response)"\s*:\s*"([^\"]*)"', out)
         if m:
-            candidate = m.group(1)
-            data = json.loads(candidate)
+            message = m.group(1)
         else:
-            # fallback: take last '{' and try to parse
-            idx = out.rfind('{')
-            if idx != -1:
-                candidate = out[idx:]
-                data = json.loads(candidate)
-            else:
-                raise
-    message = data.get('message', data.get('response', ''))
-except Exception:
-    print('Failed to parse ollama JSON output:', out, file=sys.stderr)
-    sys.exit(1)
+            print('Failed to parse ollama JSON output:', out, file=sys.stderr)
+            sys.exit(1)
 
 if args.out_file:
     p = Path(args.out_file)
