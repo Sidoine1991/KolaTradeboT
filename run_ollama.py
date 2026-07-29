@@ -65,17 +65,14 @@ try:
     try:
         data = json.loads(out)
     except json.JSONDecodeError:
-        # attempt to recover JSON by locating the JSON object near the "message" key
-        if '"message"' in out:
-            midx = out.find('"message"')
-            brace_idx = out.rfind('{', 0, midx)
-            if brace_idx != -1:
-                candidate = out[brace_idx:]
-                data = json.loads(candidate)
-            else:
-                raise
+        # attempt to recover JSON by locating the JSON object near the "message" or "response" key
+        import re
+        m = re.search(r'(\{[^}]*"(?:message|response)"[^}]*\})', out, re.DOTALL)
+        if m:
+            candidate = m.group(1)
+            data = json.loads(candidate)
         else:
-            # fallback: take last '{'
+            # fallback: take last '{' and try to parse
             idx = out.rfind('{')
             if idx != -1:
                 candidate = out[idx:]
