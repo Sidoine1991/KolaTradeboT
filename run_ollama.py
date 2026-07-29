@@ -5,8 +5,21 @@ import subprocess
 from pathlib import Path
 import sys
 
+def load_models(repo_root: Path):
+    path = repo_root / 'models.json'
+    if not path.exists():
+        return []
+    try:
+        return json.loads(path.read_text(encoding='utf-8'))
+    except Exception:
+        return []
+
+repo_root = Path(__file__).parent
+models = load_models(repo_root)
+
 parser = argparse.ArgumentParser(description='Call local ollama model and optionally write+commit output')
-parser.add_argument('--model', default='qwen2.5-coder-fast:7b')
+parser.add_argument('--model', default=None, help='Model id (defaults to first entry in models.json)')
+parser.add_argument('--list-models', action='store_true', help='List available models from models.json')
 parser.add_argument('--prompt', required=True)
 parser.add_argument('--out', dest='out_file', default='')
 parser.add_argument('--keepalive', type=int, default=5, help='minutes to keep model loaded')
@@ -15,7 +28,23 @@ parser.add_argument('--apply-git', action='store_true')
 parser.add_argument('--commit-message', default='Model-generated update')
 args = parser.parse_args()
 
-cmd = ['ollama', 'run', args.model, '--format', 'json', '--keepalive', f'{args.keepalive}m']
+if args.list_models:
+    if not models:
+        print('No models.json found or it is empty')
+        sys.exit(1)
+    for m in models:
+        print(f"{m.get('id')} - {m.get('display_name','')}")
+    sys.exit(0)
+
+# Determine model to use
+model = args.model
+if not model:
+    if models:
+        model = models[0].get('id')
+    else:
+        model = 'qwen2.5-coder-fast:7b'
+
+cmd = ['ollama', 'run', model, '--format', 'json', '--keepalive', f'{args.keepalive}m']
 if args.verbose:
     cmd.append('--verbose')
 cmd += ['--', args.prompt]
