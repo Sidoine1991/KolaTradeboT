@@ -3219,7 +3219,7 @@ void ExecuteFVGKillBuy()
       ReleaseOpenLock(); return;
    }
    if(!CanTradeOnSymbol(_Symbol)) { Print("🚫 FVG_Kill BUY BLOQUÉ — Terminal plein ou ordre existant sur ", _Symbol); ReleaseOpenLock(); return; }
-   if(trade.Buy(lot, _Symbol, 0, sl, tp, "FVG_Kill BUY"))
+   if(SafeTradeBuy(lot, _Symbol, 0, sl, tp, "FVG_Kill BUY"))
    {
       RegisterOrderPlaced();
       ulong ticket = trade.ResultOrder();
@@ -3303,7 +3303,7 @@ void ExecuteFVGKillSell()
       ReleaseOpenLock(); return;
    }
    if(!CanTradeOnSymbol(_Symbol)) { Print("🚫 FVG_Kill SELL BLOQUÉ — Terminal plein ou ordre existant sur ", _Symbol); ReleaseOpenLock(); return; }
-   if(trade.Sell(lot, _Symbol, 0, sl, tp, "FVG_Kill SELL"))
+   if(SafeTradeSell(lot, _Symbol, 0, sl, tp, "FVG_Kill SELL"))
    {
       RegisterOrderPlaced();
       ulong ticket = trade.ResultOrder();
@@ -8050,9 +8050,9 @@ void ExecuteSignal(SMC_Signal &sig)
    {
       if(!CanTradeOnSymbol(_Symbol)) { Print("🚫 SMC BUY BLOQUÉ — Terminal plein ou ordre existant sur ", _Symbol); return; }
       if(NoSLTP_BoomCrash && SMC_GetSymbolCategory(_Symbol) == SYM_BOOM_CRASH)
-         trade.Buy(lotSize, _Symbol, 0, 0, 0, "SMC " + sig.concept);
+         SafeTradeBuy(lotSize, _Symbol, 0, 0, 0, "SMC " + sig.concept);
       else
-         trade.Buy(lotSize, _Symbol, 0, sig.stopLoss, sig.takeProfit, "SMC " + sig.concept);
+         SafeTradeBuy(lotSize, _Symbol, 0, sig.stopLoss, sig.takeProfit, "SMC " + sig.concept);
       if(trade.ResultRetcode() == TRADE_RETCODE_DONE)
       {
          RegisterOrderPlaced();
@@ -8064,9 +8064,9 @@ void ExecuteSignal(SMC_Signal &sig)
    {
       if(!CanTradeOnSymbol(_Symbol)) { Print("🚫 SMC SELL BLOQUÉ — Terminal plein ou ordre existant sur ", _Symbol); return; }
       if(NoSLTP_BoomCrash && SMC_GetSymbolCategory(_Symbol) == SYM_BOOM_CRASH)
-         trade.Sell(lotSize, _Symbol, 0, 0, 0, "SMC " + sig.concept);
+         SafeTradeSell(lotSize, _Symbol, 0, 0, 0, "SMC " + sig.concept);
       else
-         trade.Sell(lotSize, _Symbol, 0, sig.stopLoss, sig.takeProfit, "SMC " + sig.concept);
+         SafeTradeSell(lotSize, _Symbol, 0, sig.stopLoss, sig.takeProfit, "SMC " + sig.concept);
       if(trade.ResultRetcode() == TRADE_RETCODE_DONE)
       {
          RegisterOrderPlaced();
@@ -9319,7 +9319,7 @@ void TP1_CloseAndReEntry()
                 if(!CanTradeOnSymbol(symbol)) { Print("🚫 TP1-REENTRY BUY BLOQUÉ — Terminal plein ou ordre existant sur ", symbol); ReleaseOpenLock(); continue; }
                 double sl = NormalizeDouble(ask - atrVal * GOMAlignSL_ATRMult, dg);
                 double tp = NormalizeDouble(ask + atrVal * GOMAlignTP_ATRMult, dg);
-                if(trade.Buy(lot, symbol, ask, sl, tp, "TP1-REENTRY BUY"))
+                if(SafeTradeBuy(lot, symbol, ask, sl, tp, "TP1-REENTRY BUY"))
                {
                   RegisterOrderPlaced();
                   orderOK = true;
@@ -9338,7 +9338,7 @@ void TP1_CloseAndReEntry()
                 if(!CanTradeOnSymbol(symbol)) { Print("🚫 TP1-REENTRY SELL BLOQUÉ — Terminal plein ou ordre existant sur ", symbol); ReleaseOpenLock(); continue; }
                 double sl = NormalizeDouble(bid + atrVal * GOMAlignSL_ATRMult, dg);
                 double tp = NormalizeDouble(bid - atrVal * GOMAlignTP_ATRMult, dg);
-                if(trade.Sell(lot, symbol, bid, sl, tp, "TP1-REENTRY SELL"))
+                if(SafeTradeSell(lot, symbol, bid, sl, tp, "TP1-REENTRY SELL"))
                {
                   RegisterOrderPlaced();
                   orderOK = true;
@@ -13320,7 +13320,7 @@ void ExecuteGOMAlignmentMarketOrder()
       double sl = NormalizeDouble(ask - atrValue * GOMAlignSL_ATRMult, dg);
       double tp = NormalizeDouble(ask + atrValue * GOMAlignTP_ATRMult, dg);
 
-if(trade.Buy(lot, _Symbol, ask, sl, tp, "GOM-ALIGN BUY"))
+if(SafeTradeBuy(lot, _Symbol, ask, sl, tp, "GOM-ALIGN BUY"))
        {
           RegisterOrderPlaced();
           orderExecuted = true;
@@ -13357,7 +13357,7 @@ if(trade.Buy(lot, _Symbol, ask, sl, tp, "GOM-ALIGN BUY"))
       double sl = NormalizeDouble(bid + atrValue * GOMAlignSL_ATRMult, dg);
       double tp = NormalizeDouble(bid - atrValue * GOMAlignTP_ATRMult, dg);
 
-if(trade.Sell(lot, _Symbol, bid, sl, tp, "GOM-ALIGN SELL"))
+if(SafeTradeSell(lot, _Symbol, bid, sl, tp, "GOM-ALIGN SELL"))
        {
           RegisterOrderPlaced();
           orderExecuted = true;
@@ -13648,7 +13648,7 @@ void ExecuteAIDecisionMarketOrder()
        }
        if(!CanTradeOnSymbol(_Symbol)) { Print("🚫 IA SMC-EMA BUY BLOQUÉ — Terminal plein ou ordre existant sur ", _Symbol); ReleaseOpenLock(); return; }
 // Utiliser l'entrée précise calculée au lieu du prix actuel
-       if(trade.Buy(lot, _Symbol, preciseEntry, preciseSL, preciseTP, "IA SMC-EMA BUY PRÉCIS"))
+       if(SafeTradeBuy(lot, _Symbol, preciseEntry, preciseSL, preciseTP, "IA SMC-EMA BUY PRÉCIS"))
        {
           RegisterOrderPlaced();
           orderExecuted = true;
@@ -13681,7 +13681,7 @@ void ExecuteAIDecisionMarketOrder()
        }
        if(!CanTradeOnSymbol(_Symbol)) { Print("🚫 IA SMC-EMA SELL BLOQUÉ — Terminal plein ou ordre existant sur ", _Symbol); ReleaseOpenLock(); return; }
 // Utiliser l'entrée précise calculée au lieu du prix actuel
-       if(trade.Sell(lot, _Symbol, preciseEntry, preciseSL, preciseTP, "IA SMC-EMA SELL PRÉCIS"))
+       if(SafeTradeSell(lot, _Symbol, preciseEntry, preciseSL, preciseTP, "IA SMC-EMA SELL PRÉCIS"))
        {
           RegisterOrderPlaced();
           orderExecuted = true;
@@ -15337,7 +15337,7 @@ void CheckRSISqueezeAndTrade()
          double sl = NormalizeDouble(ask - atrVal * 2.0, dg);
          double tp = NormalizeDouble(ask + atrVal * 5.0, dg);
          if(!CanTradeOnSymbol(_Symbol)) { Print("🚫 RSI-SQUEEZE BUY BLOQUÉ — Terminal plein ou ordre existant sur ", _Symbol); ReleaseOpenLock(); return; }
-         if(trade.Buy(lot, _Symbol, ask, sl, tp, "RSI-SQUEEZE BUY"))
+         if(SafeTradeBuy(lot, _Symbol, ask, sl, tp, "RSI-SQUEEZE BUY"))
        {
           RegisterOrderPlaced();
           orderOK = true;
@@ -15358,7 +15358,7 @@ void CheckRSISqueezeAndTrade()
          double sl = NormalizeDouble(bid + atrVal * 2.0, dg);
          double tp = NormalizeDouble(bid - atrVal * 5.0, dg);
          if(!CanTradeOnSymbol(_Symbol)) { Print("🚫 RSI-SQUEEZE SELL BLOQUÉ — Terminal plein ou ordre existant sur ", _Symbol); ReleaseOpenLock(); return; }
-         if(trade.Sell(lot, _Symbol, bid, sl, tp, "RSI-SQUEEZE SELL"))
+         if(SafeTradeSell(lot, _Symbol, bid, sl, tp, "RSI-SQUEEZE SELL"))
        {
           RegisterOrderPlaced();
           orderOK = true;
@@ -17125,7 +17125,7 @@ if(impulseBuy)
         double sl = NormalizeDouble(entry - atrVal * ImpulseZoneSL_ATRMult, dg);
         double tp = NormalizeDouble(entry + atrVal * ImpulseZoneTP_ATRMult, dg);
 
-        if(trade.Buy(lot, _Symbol, entry, sl, tp, "IMPULSE BUY"))
+        if(SafeTradeBuy(lot, _Symbol, entry, sl, tp, "IMPULSE BUY"))
        {
           RegisterOrderPlaced();
           orderOK = true;
@@ -17145,7 +17145,7 @@ if(impulseBuy)
         double sl = NormalizeDouble(entry + atrVal * ImpulseZoneSL_ATRMult, dg);
         double tp = NormalizeDouble(entry - atrVal * ImpulseZoneTP_ATRMult, dg);
 
-        if(trade.Sell(lot, _Symbol, entry, sl, tp, "IMPULSE SELL"))
+        if(SafeTradeSell(lot, _Symbol, entry, sl, tp, "IMPULSE SELL"))
        {
           RegisterOrderPlaced();
           orderOK = true;
@@ -17176,3 +17176,4 @@ a
 //| END OF PROGRAM                                                  |
 
 // force recompile
+

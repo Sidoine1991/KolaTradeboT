@@ -2192,7 +2192,7 @@ g_dowState.active = true;
                           slDist = NormalizeDouble(MathMax(slDist, tickSz * 5), dg);
                           double sl = NormalizeDouble(reentryPrice - slDist, dg);
                           double tp = NormalizeDouble(reentryPrice + slDist * 3.0, dg);
-                          okRe = trade.Buy(lot, _Symbol, SymbolInfoDouble(_Symbol, SYMBOL_ASK), sl, tp, "DOW REENTRY BUY");
+                          okRe = SafeTradeBuy(lot, _Symbol, SymbolInfoDouble(_Symbol, SYMBOL_ASK), sl, tp, "DOW REENTRY BUY");
                        }
                        else
                        {
@@ -2203,7 +2203,7 @@ g_dowState.active = true;
                           slDist = NormalizeDouble(MathMax(slDist, tickSz * 5), dg);
                           double sl = NormalizeDouble(reentryPrice + slDist, dg);
                           double tp = NormalizeDouble(reentryPrice - slDist * 3.0, dg);
-                          okRe = trade.Sell(lot, _Symbol, SymbolInfoDouble(_Symbol, SYMBOL_BID), sl, tp, "DOW REENTRY SELL");
+                          okRe = SafeTradeSell(lot, _Symbol, SymbolInfoDouble(_Symbol, SYMBOL_BID), sl, tp, "DOW REENTRY SELL");
                        }
                        if(okRe)
                        {
@@ -2251,7 +2251,7 @@ g_dowState.active = true;
                           slDist = NormalizeDouble(MathMax(slDist, tickSz * 5), dg);
                           double sl = NormalizeDouble(emaReentryPrice - slDist, dg);
                           double tp = NormalizeDouble(emaReentryPrice + slDist * 3.0, dg);
-                          okRe = trade.Buy(lot, _Symbol, SymbolInfoDouble(_Symbol, SYMBOL_ASK), sl, tp, "EMA REENTRY BUY");
+                          okRe = SafeTradeBuy(lot, _Symbol, SymbolInfoDouble(_Symbol, SYMBOL_ASK), sl, tp, "EMA REENTRY BUY");
                        }
                        else
                        {
@@ -2262,7 +2262,7 @@ g_dowState.active = true;
                           slDist = NormalizeDouble(MathMax(slDist, tickSz * 5), dg);
                           double sl = NormalizeDouble(emaReentryPrice + slDist, dg);
                           double tp = NormalizeDouble(emaReentryPrice - slDist * 3.0, dg);
-                          okRe = trade.Sell(lot, _Symbol, SymbolInfoDouble(_Symbol, SYMBOL_BID), sl, tp, "EMA REENTRY SELL");
+                          okRe = SafeTradeSell(lot, _Symbol, SymbolInfoDouble(_Symbol, SYMBOL_BID), sl, tp, "EMA REENTRY SELL");
                        }
                        if(okRe)
                        {
@@ -2693,6 +2693,7 @@ void DowTrendline_Cleanup()
 #endif // SMC_DOWTRENDLINE_MQH
 
 // force recompile
+
 
 
 
