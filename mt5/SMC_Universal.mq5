@@ -531,7 +531,7 @@ double SMC_WeltradeFxEqLot();
 double SMC_WeltradeFxSwissLot();
 bool   SMCPS_PatternGateOK(const string symbol, const int dirSign = 0, const bool logBlock = true);
 bool   SMCPS_BreakoutConfirmed(const string symbol, const int dirSign);
-bool   SafeOrderSend(MqlTradeRequest &req, MqlTradeResult &result, const string debugLabel = "");
+bool   SafeSafeOrderSend(MqlTradeRequest &req, MqlTradeResult &result, const string debugLabel = "");
 bool   SafeOrderSendAndAlert(MqlTradeRequest &req, MqlTradeResult &result, const string debugLabel = "");
 double SMC_EffectiveSymbolATR(const string symbol);
 
@@ -3549,7 +3549,7 @@ bool ClosePositionByDeal(ulong ticket)
    request.type     = orderType;
    request.price    = (orderType == ORDER_TYPE_SELL) ? SymbolInfoDouble(symbol, SYMBOL_BID) : SymbolInfoDouble(symbol, SYMBOL_ASK);
    request.deviation = 50;
-   return OrderSend(request, result);
+   return SafeOrderSend(request, result);
 }
 
 bool CloseBoomCrashPosition(ulong ticket, const string symbol)
@@ -5484,7 +5484,7 @@ void PlaceHistoricalBasedScalpingOrders(MqlRates &rates[], int futureBars, doubl
                  if(!CanPlaceLimitOrder(_Symbol, ORDER_TYPE_BUY_LIMIT)) return;
                  if(IsTerminalFull()) return;
                  CleanupExcessLimits(_Symbol, 2);
-                 if(bestLevel > 0 && ValidateAndAdjustLimitPrice(req.price, req.sl, req.tp, ORDER_TYPE_BUY_LIMIT) && OrderSend(req, res))
+                 if(bestLevel > 0 && ValidateAndAdjustLimitPrice(req.price, req.sl, req.tp, ORDER_TYPE_BUY_LIMIT) && SafeOrderSend(req, res))
                {
                   Print("📈 EMA SMC BUY LIMIT @ ", req.price, levelSource, " | SL=", req.sl, " | TP=", req.tp);
                   ordersToPlace--;
@@ -5538,7 +5538,7 @@ void PlaceHistoricalBasedScalpingOrders(MqlRates &rates[], int futureBars, doubl
                  if(!CanPlaceLimitOrder(_Symbol, ORDER_TYPE_SELL_LIMIT)) return;
                  if(IsTerminalFull()) return;
                  CleanupExcessLimits(_Symbol, 2);
-                 if(bestLevel > 0 && ValidateAndAdjustLimitPrice(req.price, req.sl, req.tp, ORDER_TYPE_SELL_LIMIT) && OrderSend(req, res))
+                 if(bestLevel > 0 && ValidateAndAdjustLimitPrice(req.price, req.sl, req.tp, ORDER_TYPE_SELL_LIMIT) && SafeOrderSend(req, res))
                {
                   Print("📉 EMA SMC SELL LIMIT @ ", req.price, levelSource, " | SL=", req.sl, " | TP=", req.tp);
                   ordersToPlace--;
@@ -5637,7 +5637,7 @@ request.sl = buyLimitPrice - (currentATR * 1.2); // SL élargi pour petits mouve
           
           if(!CanPlaceLimitOrder(_Symbol, ORDER_TYPE_BUY_LIMIT)) return;
           CleanupExcessLimits(_Symbol, 2);
-          if(OrderSend(request, result))
+          if(SafeOrderSend(request, result))
          {
             RegisterOrderPlaced();
             Print("📈 ORDRE BUY PETITS MOUVEMENTS - Prix: ", request.price, " | TP: ", request.tp, " | SL: ", request.sl, " | Distance: ", MathAbs(request.price - currentPrice), " points");
@@ -5689,7 +5689,7 @@ request.sl = sellLimitPrice + (currentATR * 1.2); // SL élargi pour petits mouv
           
           if(!CanPlaceLimitOrder(_Symbol, ORDER_TYPE_SELL_LIMIT)) return;
           CleanupExcessLimits(_Symbol, 2);
-          if(OrderSend(request, result))
+          if(SafeOrderSend(request, result))
          {
             RegisterOrderPlaced();
             Print("📉 ORDRE SELL PETITS MOUVEMENTS - Prix: ", request.price, " | TP: ", request.tp, " | SL: ", request.sl, " | Distance: ", MathAbs(request.price - currentPrice), " points");
@@ -5879,7 +5879,7 @@ void DetectAndPlaceBoomCrashSpikeOrders(MqlRates &rates[], double currentPrice, 
           
           if(!CanPlaceLimitOrder(_Symbol, orderType)) continue;
           CleanupExcessLimits(_Symbol, 2);
-          if(OrderSend(request, result))
+          if(SafeOrderSend(request, result))
          {
             RegisterOrderPlaced();
             Print("🚀 ", spikeType, " PLACÉ - Entrée: ", request.price, " | TP: ", request.tp, " | SL: ", request.sl);
@@ -5986,7 +5986,7 @@ void PlaceNormalScalpingOrders(MqlRates &rates[], int futureBars, double current
        
        if(!CanPlaceLimitOrder(_Symbol, ORDER_TYPE_BUY_LIMIT)) return;
        CleanupExcessLimits(_Symbol, 2);
-       if(OrderSend(request, result))
+       if(SafeOrderSend(request, result))
       {
          RegisterOrderPlaced();
          Print("📈 SEUL ORDRE LIMIT BUY PLACÉ - Prix: ", request.price, " | TP: ", request.tp, " | SL: ", request.sl, " | Distance: ", distanceToSL, " points");
@@ -6020,7 +6020,7 @@ void PlaceNormalScalpingOrders(MqlRates &rates[], int futureBars, double current
        
        if(!CanPlaceLimitOrder(_Symbol, ORDER_TYPE_SELL_LIMIT)) return;
        CleanupExcessLimits(_Symbol, 2);
-       if(OrderSend(request, result))
+       if(SafeOrderSend(request, result))
       {
          RegisterOrderPlaced();
          Print("📉 SEUL ORDRE LIMIT SELL PLACÉ - Prix: ", request.price, " | TP: ", request.tp, " | SL: ", request.sl, " | Distance: ", distanceToSH, " points");
@@ -6910,7 +6910,7 @@ void PlaceSMCChannelLimitOrder()
    
    if(!CanPlaceLimitOrder(_Symbol, req.type)) { ReleaseOpenLock(); return; }
    CleanupExcessLimits(_Symbol, 2);
-   if(!OrderSend(req, res))
+   if(!SafeOrderSend(req, res))
       Print("❌ Echec envoi ordre limite SMC_CH sur ", _Symbol, " | code=", res.retcode);
    
    ReleaseOpenLock();
@@ -7573,7 +7573,7 @@ void AdjustEMAScalpingLimitOrder()
    if(!ValidateAndAdjustLimitPrice(req.price, req.sl, req.tp, ordType))
       return;
    
-   if(OrderSend(req, res))
+   if(SafeOrderSend(req, res))
    {
       Print("🔧 EMA SMC LIMIT ajusté @ ", DoubleToString(req.price, _Digits),
             " (ancien: ", DoubleToString(oldPrice, _Digits), ") src=", src);
@@ -12580,7 +12580,7 @@ void PlacePostHoldLimitOrder(string closedSymbol, ENUM_POSITION_TYPE closedType,
    
    if(!CanPlaceLimitOrder(closedSymbol, limitType)) return;
    CleanupExcessLimits(closedSymbol, 2);
-   if(OrderSend(request, result))
+   if(SafeOrderSend(request, result))
    {
       RegisterOrderPlaced();
       g_postHoldLimitOrderPending = true;
@@ -12702,7 +12702,7 @@ void MonitorAndClosePositionsOnHold()
                   request.magic = InpMagicNumber;
                   request.comment = "IA HOLD Auto-Close (Loss ≥ 2.0$)";
                   
-                  if(OrderSend(request, result))
+                  if(SafeOrderSend(request, result))
                   {
                      Print("✅ POSITION FERMÉE - ", posSymbol, " | Ticket: ", posTicket, " | Profit: ", DoubleToString(posProfit, 2), "$");
                      
@@ -13194,7 +13194,7 @@ void ExecuteDerivArrowTrade(string direction)
       return;
    }
 
-   if(OrderSend(request, result))
+   if(SafeOrderSend(request, result))
    {
       RegisterOrderPlaced();
       Print("✅ ORDRE DERIV ARROW EXÉCUTÉ - ", direction, " sur ", _Symbol,
@@ -13540,7 +13540,7 @@ void ExecuteBoomCrashSpikeMarketOrder()
        return;
     }
 
-    if(SafeOrderSend(req, res, req.comment) && res.retcode == TRADE_RETCODE_DONE)
+    if(SafeSafeOrderSend(req, res, req.comment) && res.retcode == TRADE_RETCODE_DONE)
     {
        Print("🚀 BOOM/CRASH SPIKE MARKET ", action, " @ ", req.price,
              " | SL=", DoubleToString(sl, _Digits), " TP=", DoubleToString(tp, _Digits),
@@ -15688,7 +15688,7 @@ void PlaceReturnMovementLimitOrder(string direction, double currentPrice, double
       
       if(!CanPlaceLimitOrder(_Symbol, ORDER_TYPE_BUY_LIMIT)) { ReleaseOpenLock(); return; }
       CleanupExcessLimits(_Symbol, 2);
-      if(OrderSend(req, res))
+      if(SafeOrderSend(req, res))
       {
          Print("✅ ORDRE RETOUR BUY PLACÉ - Entry: ", DoubleToString(entryPrice, _Digits), 
                " | Force: ", DoubleToString(strength, 1), " ATR");
@@ -15743,7 +15743,7 @@ void PlaceReturnMovementLimitOrder(string direction, double currentPrice, double
       
       if(!CanPlaceLimitOrder(_Symbol, ORDER_TYPE_SELL_LIMIT)) { ReleaseOpenLock(); return; }
       CleanupExcessLimits(_Symbol, 2);
-      if(OrderSend(req, res))
+      if(SafeOrderSend(req, res))
       {
          Print("✅ ORDRE RETOUR SELL PLACÉ - Entry: ", DoubleToString(entryPrice, _Digits), 
                " | Force: ", DoubleToString(strength, 1), " ATR");
@@ -16197,7 +16197,7 @@ void ExecuteSpikeTrade(string direction)
       
       if(!CanPlaceLimitOrder(_Symbol, ORDER_TYPE_BUY_LIMIT)) return;
       CleanupExcessLimits(_Symbol, 2);
-       if(ValidateAndAdjustLimitPrice(req.price, req.sl, req.tp, ORDER_TYPE_BUY_LIMIT) && OrderSend(req, res))
+       if(ValidateAndAdjustLimitPrice(req.price, req.sl, req.tp, ORDER_TYPE_BUY_LIMIT) && SafeOrderSend(req, res))
        {
           orderExecuted = true;
           Print("✅ SPIKE TRADE BUY LIMIT placé @ ", DoubleToString(req.price, _Digits), " | Lot: ", DoubleToString(lot, 2), " | Ticket: ", res.order);
@@ -16272,7 +16272,7 @@ void ExecuteSpikeTrade(string direction)
       
       if(!CanPlaceLimitOrder(_Symbol, ORDER_TYPE_SELL_LIMIT)) return;
       CleanupExcessLimits(_Symbol, 2);
-       if(ValidateAndAdjustLimitPrice(req.price, req.sl, req.tp, ORDER_TYPE_SELL_LIMIT) && OrderSend(req, res))
+       if(ValidateAndAdjustLimitPrice(req.price, req.sl, req.tp, ORDER_TYPE_SELL_LIMIT) && SafeOrderSend(req, res))
        {
           orderExecuted = true;
           Print("✅ SPIKE TRADE SELL LIMIT placé @ ", DoubleToString(req.price, _Digits), " | Lot: ", DoubleToString(lot, 2), " | Ticket: ", res.order);
@@ -16431,7 +16431,7 @@ void ExecuteVolatilityTrade(string direction)
        return;
     }
 
-    if(OrderSend(req, res))
+    if(SafeOrderSend(req, res))
     {
        ulong ticket = res.order;
        if(ticket > 0) SMC_ApplyPostEntrySLBuffer(_Symbol, ticket, 1.0);
@@ -16985,7 +16985,7 @@ void PlaceSRLimitOrders20Bars()
         CleanupExcessLimits(_Symbol, 2);
         if(ValidateAndAdjustLimitPrice(req.price, req.sl, req.tp, ORDER_TYPE_BUY_LIMIT))
         {
-           if(trade.OrderSend(req, res))
+           if(trade.SafeOrderSend(req, res))
           {
              Print("📊 SR20 BUY_LIMIT @ ", req.price, " (support ", bestSupport,
                    ") | SL=", req.sl, " | TP=", req.tp, " | ATR=", DoubleToString(atrVal, dg));
@@ -17028,7 +17028,7 @@ void PlaceSRLimitOrders20Bars()
         CleanupExcessLimits(_Symbol, 2);
         if(ValidateAndAdjustLimitPrice(req.price, req.sl, req.tp, ORDER_TYPE_SELL_LIMIT))
         {
-           if(trade.OrderSend(req, res))
+           if(trade.SafeOrderSend(req, res))
           {
              Print("📊 SR20 SELL_LIMIT @ ", req.price, " (résistance ", bestResistance,
                    ") | SL=", req.sl, " | TP=", req.tp, " | ATR=", DoubleToString(atrVal, dg));
@@ -17282,3 +17282,4 @@ if(impulseBuy)
 //| END OF PROGRAM                                                  |
 
 // force recompile
+

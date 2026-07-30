@@ -184,7 +184,7 @@ bool LimitSafeOrderDelete(const ulong ticket, const bool forceCounterTrend = fal
    req.action = TRADE_ACTION_REMOVE;
    req.order  = ticket;
    req.symbol = sym;
-   if(!OrderSend(req, res))
+   if(!SafeOrderSend(req, res))
    {
       Print("[LIMIT-DISC] Échec annulation #", ticket, " err=", res.retcode, " | ", reason);
       return false;
@@ -195,3 +195,4 @@ bool LimitSafeOrderDelete(const ulong ticket, const bool forceCounterTrend = fal
 }
 
 #endif // SMC_LIMIT_DISCIPLINE_MQH
+

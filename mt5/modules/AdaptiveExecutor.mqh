@@ -163,6 +163,10 @@ void ADAPTIVE_CalcSLTP(const string symbol, int direction, double entry,
 
 bool ADAPTIVE_CanExecute(const TMScannerOpportunity &opp)
 {
+   // 0. GOM PERFECT obligatoire (|vn|>=3)
+   int vn = g_smcGomConnected ? g_smcGomVerdictNum : 0;
+   if(MathAbs(vn) < 3)
+      return false;
    // 1. Max open positions check
    int openCount = PositionsTotal();
    if(openCount >= g_state.config.maxOpenPositions)
@@ -223,6 +227,30 @@ bool ADAPTIVE_ExecuteLimit(const TMScannerOpportunity &opp)
 {
    //--- Blink gate
    if(!IsSignalConfirmed()) return false;
+
+   //--- GOM WAIT absolu
+   int vnChart = g_smcGomConnected ? g_smcGomVerdictNum : 0;
+   int vnSym = SMCGP_GetCachedVerdictNum(opp.symbol);
+   int vn = (vnSym != -999) ? vnSym : vnChart;
+   if(vn == 0)
+   {
+      Print("🚫 ADAPTIVE LIMIT BLOQUÉ — ", opp.symbol, " — GOM=WAIT");
+      return false;
+   }
+
+   //--- GOM PERFECT obligatoire (|vn|>=3)
+   if(MathAbs(vn) < 3)
+   {
+      Print("🚫 ADAPTIVE LIMIT BLOQUÉ — ", opp.symbol, " — GOM non PERFECT vn=", vn, " (exige |vn|>=3)");
+      return false;
+   }
+   //--- Direction GOM alignée avec direction scanner
+   bool gomAligned = (opp.direction > 0 && vn >= 3) || (opp.direction < 0 && vn <= -3);
+   if(!gomAligned)
+   {
+      Print("🚫 ADAPTIVE LIMIT BLOQUÉ — ", opp.symbol, " — GOM PERFECT mais ≠ direction scanner (vn=", vn, ")");
+      return false;
+   }
 
    //--- Direction gate Boom/Crash
    string dirStr = (opp.direction > 0) ? "BUY" : "SELL";
@@ -315,7 +343,13 @@ bool ADAPTIVE_ExecuteLimit(const TMScannerOpportunity &opp)
    req.deviation = 50;
    req.comment = "DOW SCALP";
 
-   if(!OrderSend(req, res))
+   if(!SafeSafeOrderSend(req, res, req.comment))
+   {
+      DebugWarn("AdaptiveExecutor", "LIMIT order failed",
+                StringFormat("sym=%s rc=%d err=%s", opp.symbol, res.retcode, res.comment));
+      return false;
+   }
+   if(res.retcode != TRADE_RETCODE_DONE)
    {
       DebugWarn("AdaptiveExecutor", "LIMIT order failed",
                 StringFormat("sym=%s rc=%d err=%s", opp.symbol, res.retcode, res.comment));
@@ -363,6 +397,30 @@ bool ADAPTIVE_ExecuteMarket(const TMScannerOpportunity &opp)
 {
    //--- Blink gate
    if(!IsSignalConfirmed()) return false;
+
+   //--- GOM WAIT absolu
+   int vnChart = g_smcGomConnected ? g_smcGomVerdictNum : 0;
+   int vnSym = SMCGP_GetCachedVerdictNum(opp.symbol);
+   int vn = (vnSym != -999) ? vnSym : vnChart;
+   if(vn == 0)
+   {
+      Print("🚫 ADAPTIVE MARKET BLOQUÉ — ", opp.symbol, " — GOM=WAIT");
+      return false;
+   }
+
+   //--- GOM PERFECT obligatoire (|vn|>=3)
+   if(MathAbs(vn) < 3)
+   {
+      Print("🚫 ADAPTIVE MARKET BLOQUÉ — ", opp.symbol, " — GOM non PERFECT vn=", vn, " (exige |vn|>=3)");
+      return false;
+   }
+   //--- Direction GOM alignée avec direction scanner
+   bool gomAligned = (opp.direction > 0 && vn >= 3) || (opp.direction < 0 && vn <= -3);
+   if(!gomAligned)
+   {
+      Print("🚫 ADAPTIVE MARKET BLOQUÉ — ", opp.symbol, " — GOM PERFECT mais ≠ direction scanner (vn=", vn, ")");
+      return false;
+   }
 
    //--- Direction gate Boom/Crash
    string dirStr = (opp.direction > 0) ? "BUY" : "SELL";
@@ -429,7 +487,7 @@ bool ADAPTIVE_ExecuteMarket(const TMScannerOpportunity &opp)
    req.deviation = 50;
    req.comment = "DOW SCALP";
 
-   if(!OrderSend(req, res))
+   if(!SafeSafeOrderSend(req, res, req.comment) || res.retcode != TRADE_RETCODE_DONE)
    {
       DebugWarn("AdaptiveExecutor", "MARKET order failed",
                 StringFormat("sym=%s rc=%d err=%s", opp.symbol, res.retcode, res.comment));
@@ -474,6 +532,10 @@ bool ADAPTIVE_ExecuteMarket(const TMScannerOpportunity &opp)
 
 void ADAPTIVE_ManagePendingOrders()
 {
+   // Check GOM: si pas PERFECT, annuler TOUS les DOW SCALP en attente
+   int vn = g_smcGomConnected ? g_smcGomVerdictNum : 0;
+   bool cancelAll = (MathAbs(vn) < 3);
+
    // Iterate through orders in queue
    for(int i = OrdersTotal() - 1; i >= 0; i--)
    {
@@ -483,26 +545,31 @@ void ADAPTIVE_ManagePendingOrders()
       string comment = OrderGetString(ORDER_COMMENT);
       if(StringFind(comment, "DOW SCALP") < 0) continue;
 
-      double orderPrice = OrderGetDouble(ORDER_PRICE_OPEN);
-      double orderSL = OrderGetDouble(ORDER_SL);
-      double orderTP = OrderGetDouble(ORDER_TP);
-      ENUM_ORDER_TYPE orderType = (ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE);
       string symbol = OrderGetString(ORDER_SYMBOL);
 
-      double bid = SymbolInfoDouble(symbol, SYMBOL_BID);
-      double ask = SymbolInfoDouble(symbol, SYMBOL_ASK);
-
-      // Check if order is stale (older than 60 seconds without fill)
-      datetime placed = (datetime)OrderGetInteger(ORDER_TIME_SETUP);
-      if(TimeCurrent() - placed > 60)
+      if(cancelAll)
       {
-         // Cancel stale order
          MqlTradeRequest req = {};
          MqlTradeResult res = {};
          req.action = TRADE_ACTION_REMOVE;
          req.order = ticket;
 
-         if(OrderSend(req, res))
+         if(SafeOrderSend(req, res))
+         {
+            Print("[DOW-SCANNER] LIMIT annulé (GOM non PERFECT vn=", vn, ") — ", symbol);
+         }
+         continue;
+      }
+
+      datetime placed = (datetime)OrderGetInteger(ORDER_TIME_SETUP);
+      if(TimeCurrent() - placed > 60)
+      {
+         MqlTradeRequest req = {};
+         MqlTradeResult res = {};
+         req.action = TRADE_ACTION_REMOVE;
+         req.order = ticket;
+
+         if(SafeOrderSend(req, res))
          {
             DebugInfo("AdaptiveExecutor", "Stale LIMIT cancelled",
                       StringFormat("sym=%s ticket=#%llu age=%ds",
@@ -539,3 +606,4 @@ void ADAPTIVE_Cleanup()
 }
 
 #endif // TM_ADAPTIVE_EXECUTOR_MQH
+

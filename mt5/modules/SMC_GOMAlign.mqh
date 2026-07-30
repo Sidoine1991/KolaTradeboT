@@ -156,8 +156,8 @@ bool SMC_AlignExecStrictGateOK(const int dirSign, string &reasonOut)
 
    if(!g_smcGomConnected)
    { reasonOut = "GOM non connecté"; return false; }
-   if(g_smcLastGOMPoll > 0 && (int)(TimeCurrent() - g_smcLastGOMPoll) > 90)
-   { reasonOut = StringFormat("GOM stale (%ds)", (int)(TimeCurrent() - g_smcLastGOMPoll)); return false; }
+if(g_smcLastGOMPoll > 0 && (int)(TimeCurrent() - g_smcLastGOMPoll) > 15)
+    { reasonOut = StringFormat("GOM stale (%ds)", (int)(TimeCurrent() - g_smcLastGOMPoll)); return false; }
 
    if(g_smcGomVerdictNum == 0 || StringFind(g_smcGomVerdict, "WAIT") >= 0)
    {
@@ -361,7 +361,7 @@ bool PlaceGOMMarketOrder(const string direction, const string tag, const string 
                       ((fillFlags & SYMBOL_FILLING_FOK) != 0) ? ORDER_FILLING_FOK :
                       ORDER_FILLING_RETURN;
 
-   bool ok = SafeOrderSend(req, res);
+   bool ok = SafeSafeOrderSend(req, res);
    ReleaseOpenLock();
    if(ok)
    {
@@ -469,7 +469,7 @@ bool PlaceGOMLimitAtLevel(const string direction, const string tag, const double
       return false;
    }
 
-   bool ok = SafeOrderSend(req, res);
+   bool ok = SafeSafeOrderSend(req, res);
    ReleaseOpenLock();
    if(ok)
       Print("[GOM-LIMIT] ", tag, " ", direction, " @ ", levelSource, " prix=", DoubleToString(limitPrice, _Digits));
@@ -732,3 +732,4 @@ bool ConvertPendingToMarketOrder(const string symbol, const string direction,
 }
 
 #endif
+

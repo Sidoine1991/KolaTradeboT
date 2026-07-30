@@ -7,7 +7,6 @@
 
 #include "SMC_SignalGates.mqh"
 #include "MT5_Candles_Uploader.mqh"
-#include "GOM_Graphics.mqh"
 
 // inputs du .mq5 parent — déclarés extern pour compilation indépendante du .mqh
 bool DisciplineAllowsPipelineAction(const string action);
@@ -21,10 +20,8 @@ extern double g_lastEntryProbability;
 extern string g_lastAIAction;
 extern double g_lastAIConfidence;
 
-// GOM source enum (defined in SMC_Universal.mq5)
-#define GOM_SRC_PREDICTIVE 3
-
 // RSI Squeeze / Impulse / TP1 dashboard variables (defined in SMC_Universal.mq5)
+#define GOM_SIGNAL_BLINK_DURATION 2
 // input variables (UseRSISqueezePredictor, TakeProfitAt1Dollar, UseCloseOnVerdictWait) are globally visible in MQL5
 extern double g_dashSqueezeRSI;
 extern bool   g_dashSqueezeActive;
@@ -152,6 +149,7 @@ int      g_smcGomVerdictReactiveNum = 0;
 int      g_smcGomVerdictForecastNum = 0;
 int      g_smcGomVerdictNumPrev = 999;  // 999 = pas encore armé
 bool     g_smcGomForceExhausted = false; // PERFECT→GOOD : fin cycle spike Boom/Crash
+datetime g_smcGomLastPerfectTime = 0;     // timestamp du dernier verdict PERFECT
 string   g_smcGomVerdictPrev  = "";
 string   g_smcGomVerdictServer   = "WAIT";  // verdict serveur avant overlay correction
 int      g_smcGomVerdictNumServer = 0;
@@ -576,6 +574,7 @@ bool SMCGP_LiveMicroCorrectionAgainstVerdict(const string symbol, const int verd
    double c0 = iClose(symbol, PERIOD_M1, 0);
    double c1 = iClose(symbol, PERIOD_M1, 1);
    double c4 = iClose(symbol, PERIOD_M1, 4);
+   double o0 = iOpen(symbol, PERIOD_M1, 0);
    double netMove = (c0 > 0 && c4 > 0) ? (c0 - c4) : 0.0;
    double pt = SymbolInfoDouble(symbol, SYMBOL_POINT);
    double atr = 0.0;
@@ -588,8 +587,15 @@ bool SMCGP_LiveMicroCorrectionAgainstVerdict(const string symbol, const int verd
          atr = atrBuf[0];
       IndicatorRelease(m1AtrH);
    }
-   double minMove = (atr > 0) ? atr * 0.12 : ((pt > 0) ? pt * 8 : 0.0);
-   if(minMove <= 0 && pt > 0) minMove = pt * 8;
+   double minMove = (atr > 0) ? atr * 0.08 : ((pt > 0) ? pt * 6 : 0.0);
+   if(minMove <= 0 && pt > 0) minMove = pt * 6;
+
+   // Bougie courante déjà contre le verdict → correction immédiate
+   if(o0 > 0 && c0 > 0)
+   {
+      if(tradeDir > 0 && c0 < o0) return true;
+      if(tradeDir < 0 && c0 > o0) return true;
+   }
 
    // Séquence de closes montants/descendants = correction visible
    if(tradeDir < 0 && c0 > 0 && c1 > 0 && c4 > 0 && c0 > c1 && c1 > c4)
@@ -597,17 +603,19 @@ bool SMCGP_LiveMicroCorrectionAgainstVerdict(const string symbol, const int verd
    if(tradeDir > 0 && c0 > 0 && c1 > 0 && c4 > 0 && c0 < c1 && c1 < c4)
       return true;
 
+   // PERFECT (|vn|≥3) : 1 bougie opposée suffit pour lever le doute
+   bool isPerfect = (MathAbs(verdictNum) >= 3);
    if(tradeDir < 0)
    {
-      int needOpp = strongVerdict ? 2 : 3;
+      int needOpp = isPerfect ? 1 : (strongVerdict ? 2 : 3);
       if(oppBars >= needOpp && netMove > minMove) return true;
-      if(oppBars >= 3 && netMove > minMove * 0.5) return true;
+      if(oppBars >= 2 && netMove > minMove * 0.5) return true;
    }
    else
    {
-      int needOpp = strongVerdict ? 2 : 3;
+      int needOpp = isPerfect ? 1 : (strongVerdict ? 2 : 3);
       if(oppBars >= needOpp && netMove < -minMove) return true;
-      if(oppBars >= 3 && netMove < -minMove * 0.5) return true;
+      if(oppBars >= 2 && netMove < -minMove * 0.5) return true;
    }
 
    int m1s = SMCGP_TfDirToSign(g_smcTfM1Dir);
@@ -967,6 +975,30 @@ bool SMCGP_HttpPost(const string path, const string &jsonBody, int timeoutMs = 3
    return ok;
 }
 
+//+------------------------------------------------------------------+
+//| HTTP POST avec retour du corps de réponse                         |
+//+------------------------------------------------------------------+
+bool SMCGP_HttpPostWithResponse(const string path, const string &jsonBody, string &bodyOut, int timeoutMs = 5000)
+{
+   bodyOut = "";
+   string url = SMCGP_ActiveServerURL() + path;
+   char post[], result[];
+   StringToCharArray(jsonBody, post, 0, WHOLE_ARRAY, CP_UTF8);
+   string headers = "Content-Type: application/json\r\n";
+   string respH;
+   g_smcLastHttpCode = 0;
+   int code = WebRequest("POST", url, headers, timeoutMs, post, result, respH);
+   g_smcLastHttpCode = code;
+   if(code != 200)
+   {
+      SMCGP_MarkResult(false);
+      return false;
+   }
+   bodyOut = CharArrayToString(result, 0, WHOLE_ARRAY, CP_UTF8);
+   SMCGP_MarkResult(true);
+   return true;
+}
+
 void SMCGP_SendHeartbeat()
 {
    if(!GOMSyncSymbolToTV) return;
@@ -1194,8 +1226,8 @@ int SMCGP_GOMTradeDirection()
 
 int SMCGP_GOMPerfectDirection()
 {
-   if(g_smcGomVerdictNum == 3) return 1;
-   if(g_smcGomVerdictNum == -3) return -1;
+   if(g_smcGomVerdictNum >= 3) return 1;
+   if(g_smcGomVerdictNum <= -3) return -1;
    return 0;
 }
 
@@ -1215,7 +1247,7 @@ int SMCGP_GOMSimpleDirection()
 
 bool SMCGP_IsPerfectVerdict(const int vnum)
 {
-   return (vnum == 3 || vnum == -3);
+   return (vnum >= 3 || vnum <= -3);
 }
 
 bool SMCGP_IsGoodVerdict(const int vnum)
@@ -1245,7 +1277,10 @@ bool SMCGP_IsGOMForceExhausted(const int prevVn, const int curVn)
 bool SMCGP_GOMSpikeReentryAllowed()
 {
    if(!g_smcGomForceExhausted) return true;
-   return SMCGP_IsPerfectVerdict(g_smcGomVerdictNum);
+   if(SMCGP_IsPerfectVerdict(g_smcGomVerdictNum)) return true;
+   // Allow re-entry if PERFECT was seen within last 30s (catches brief PERFECT windows)
+   if(g_smcGomLastPerfectTime > 0 && (int)(TimeCurrent() - g_smcGomLastPerfectTime) < 30) return true;
+   return false;
 }
 
 double SMCGP_GetGOMOBLimitPrice(const int dir)
@@ -1912,6 +1947,9 @@ void SMCGP_PollGOM()
    bool prevSpikeTrad = g_smcGomSpikeTradable;
    SMCGP_ParseGOMBody(body);
 
+   // ── Correction locale immédiate : vérifier M1/M5 dès le poll ──────────
+   SMCGP_RefreshCorrectionWaitOverlay(symLabel);
+
    // ── Poll réussi : mettre à jour le timestamp de succès ──────────────────
    g_smcLastGOMPoll = TimeCurrent();
 
@@ -1965,8 +2003,10 @@ void SMCGP_NotifyGOMVerdictChange(const string symLabel,
       g_smcGomForceExhausted = true;
       Print("[GOM] Force mouvement épuisée ", symLabel, " ", prevVerdict, " -> ", newVerdict);
    }
-   if(SMCGP_IsPerfectVerdict(newVnum) || newVnum == 0)
-      g_smcGomForceExhausted = false;
+if(SMCGP_IsPerfectVerdict(newVnum) || newVnum == 0)
+       g_smcGomForceExhausted = false;
+    if(SMCGP_IsPerfectVerdict(newVnum))
+       g_smcGomLastPerfectTime = TimeCurrent();
 
    const bool wasGP = SMCGP_IsGoodPerfect(prevVnum);
    const bool isGP  = SMCGP_IsGoodPerfect(newVnum);
@@ -2201,11 +2241,11 @@ bool SMCGP_GOMAllowsDirectionEx(const int dir, const bool requireOBTouch)
    if(!g_smcGomConnected) { Print("[GOM-ALLOW] Rejeté: NOT_CONNECTED"); return false; }
    if(g_smcGomVerdictNum == 0) { Print("[GOM-ALLOW] Rejeté: VERDICT_ZERO"); return false; }
 
-   // PERFECT : gates allégés — le verdict vn=±3 prime sur BB/MTF
-   if(SMCGP_IsPerfectVerdict(g_smcGomVerdictNum))
+   // PERFECT : gates allégés — le verdict |vn|>=3 prime sur BB/MTF
+   if(SMCGP_IsPerfectVerdict(g_smcGomVerdictNum) || MathAbs(g_smcGomVerdictNum) >= 3)
    {
-      if(dir == 1 && g_smcGomVerdictNum != 3) return false;
-      if(dir == -1 && g_smcGomVerdictNum != -3) return false;
+      if(dir == 1 && g_smcGomVerdictNum < 3) return false;
+      if(dir == -1 && g_smcGomVerdictNum > -3) return false;
       if(!SMCGP_GOMCoherenceOK())
       { Print("[GOM-ALLOW] Rejeté PERFECT: LOW_COHERENCE ", g_smcGomCoherence, "%"); return false; }
       Print("[GOM-ALLOW] ✅ PERFECT autorisé dir=", dir, " vn=", g_smcGomVerdictNum);
@@ -2991,7 +3031,7 @@ bool SMC_MarketDealSend(const string sym, const int dirSign, const double lot,
       else
          req.type_filling = ORDER_FILLING_RETURN;
    }
-   return SafeOrderSend(req, result);
+   return SafeSafeOrderSend(req, result);
 }
 
 bool SMCGP_ExecutePipelineOrder(const string sym, const string action,
@@ -3457,15 +3497,15 @@ void SMCGP_PollAndExecutePipeline()
       }
       return;
    }
-   // Gate stale — verdict trop vieux = traiter comme WAIT
-   if(UseGOMVerdictFilter && g_smcGomConnected && g_smcLastGOMPoll > 0
-      && (int)(TimeCurrent() - g_smcLastGOMPoll) > 90)
-   {
-      static datetime s_pipeStalLog = 0;
-      if(TimeCurrent() - s_pipeStalLog >= 60)
-      {
-         s_pipeStalLog = TimeCurrent();
-         Print("[PIPELINE] BLOQUE — GOM stale (", (int)(TimeCurrent() - g_smcLastGOMPoll),
+// Gate stale — verdict trop vieux = traiter comme WAIT
+    if(UseGOMVerdictFilter && g_smcGomConnected && g_smcLastGOMPoll > 0
+       && (int)(TimeCurrent() - g_smcLastGOMPoll) > 15)
+    {
+       static datetime s_pipeStalLog = 0;
+       if(TimeCurrent() - s_pipeStalLog >= 30)
+       {
+          s_pipeStalLog = TimeCurrent();
+          Print("[PIPELINE] BLOQUE — GOM stale (", (int)(TimeCurrent() - g_smcLastGOMPoll),
                "s sans poll) | ", _Symbol, " action=", action);
       }
       return;
@@ -4264,7 +4304,7 @@ void SMCGP_OnTimer()
 
     // Timer pour le clignotement du signal central GOM (version blinking)
     static datetime s_lastSignalDraw = 0;
-    if(TimeCurrent() - s_lastSignalDraw >= GOM_SIGNAL_BLINK_DURATION)
+    if(TimeCurrent() - s_lastSignalDraw >= 2)
     {
         SMCGP_DrawGOMSignal();
         s_lastSignalDraw = TimeCurrent();
@@ -4691,3 +4731,4 @@ void SMCGP_DrawGOMSignal()
 #include "SMC_FuturePath.mqh"
 
 #endif
+

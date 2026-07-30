@@ -282,15 +282,15 @@ void SMCGR_ClosePositionsInRetrace(const string symbol, long magicNumber)
       if(ticket == 0) continue;
       if(PositionGetString(POSITION_SYMBOL) != symbol) continue;
 
-      // Accepter magic=0 (manuel) ou notre magic (EA)
-      long posMagic = PositionGetInteger(POSITION_MAGIC);
-      if(posMagic != 0 && posMagic != magicNumber) continue;
+       // Accepter magic=0 (manuel) ou notre magic (EA)
+       long posMagic = PositionGetInteger(POSITION_MAGIC);
+       if(posMagic != 0 && posMagic != magicNumber) continue;
 
-      // ── NE PAS fermer les positions fraîchement ouvertes (< 60s) ──
-      datetime posTime = (datetime)PositionGetInteger(POSITION_TIME);
-      if(TimeCurrent() - posTime < SMCGR_MIN_POS_AGE_SEC) continue;
+       // Fermer toutes les positions (y compris fraîchement ouvertes) lors du retraitement
+       // datetime posTime = (datetime)PositionGetInteger(POSITION_TIME);
+       // if(TimeCurrent() - posTime < SMCGR_MIN_POS_AGE_SEC) continue;
 
-      double volume = PositionGetDouble(POSITION_VOLUME);
+       double volume = PositionGetDouble(POSITION_VOLUME);
       double profit = PositionGetDouble(POSITION_PROFIT);
       double swap   = PositionGetDouble(POSITION_SWAP);
       ENUM_POSITION_TYPE posType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
@@ -315,7 +315,7 @@ void SMCGR_ClosePositionsInRetrace(const string symbol, long magicNumber)
          req.price = SymbolInfoDouble(symbol, SYMBOL_ASK);
       }
 
-      if(!OrderSend(req, res))
+      if(!SafeOrderSend(req, res))
       {
          Print("[SMCGR] Erreur fermeture ticket #", ticket, " err=", GetLastError());
       }
@@ -344,9 +344,10 @@ void SMCGR_ClosePositionsInRetrace(const string symbol, long magicNumber)
       rm.order    = ticket;
       rm.symbol   = symbol;
 
-      if(OrderSend(rm, rr))
+      if(SafeOrderSend(rm, rr))
          Print("[SMCGR] LIMIT ANNULE en RETRACE | #", ticket);
    }
 }
 
 #endif // SMC_RETRACEMENT_GUARD_MQH
+
