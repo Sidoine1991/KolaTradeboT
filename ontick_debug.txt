@@ -1,0 +1,22 @@
+void OnTick()
+{
+   // ═══════════════════════════════════════════════════════════
+   // BLOCAGE CONTRE-TENDANCE DÉFINITIF
+   // Interdit tout ordre BUY sur Crash/PainX et SELL sur Boom/GainX
+   // ═══════════════════════════════════════════════════════════
+   if((IsCrashLikeSymbol(_Symbol) && g_lastAIAction == "BUY") ||
+      (IsBoomLikeSymbol(_Symbol) && g_lastAIAction == "SELL"))
+   {
+      // Ne rien faire sur ce tick - ordre contre-tendance bloqué
+      return;
+   }
+
+   // Track signal transitions for blink confirmation gate
+   UpdateSignalAppearTime(g_lastAIAction);
+
+   // Gate global: bloquer toutes les nouvelles entrées si terminal plein
+   g_terminalFull = IsTerminalFull();
+
+   // Tick Frequency Tracker (runs on EVERY tick, before rate-limiting)
+   datetime tNow = TimeCurrent();
+  

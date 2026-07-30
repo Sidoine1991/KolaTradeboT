@@ -21,29 +21,44 @@
 //+------------------------------------------------------------------+
 ENUM_SYMBOL_CATEGORY SMC_GetSymbolCategory(const string symbol)
 {
-   if(StringFind(symbol, "BOOM") >= 0 || StringFind(symbol, "Boom") >= 0 ||
-      StringFind(symbol, "CRASH") >= 0 || StringFind(symbol, "Crash") >= 0)
+   string s = symbol;
+   StringToUpper(s);
+
+   // Deriv: indices de spike (Boom/Crash)
+   if(StringFind(s, "BOOM") >= 0 || StringFind(s, "CRASH") >= 0)
       return SYM_BOOM_CRASH;
 
-   string symUpper = symbol;
-   StringToUpper(symUpper);
-   if(StringFind(symUpper, "PAINX") >= 0 || StringFind(symUpper, "GAINX") >= 0
-      || StringFind(symUpper, "TRENDX") >= 0 || StringFind(symUpper, "BREAKX") >= 0)
+   // Weltrade / synthétiques spike (PainX, GainX, TrendX, BreakX)
+   if(StringFind(s, "PAINX") >= 0 || StringFind(s, "GAINX") >= 0
+      || StringFind(s, "TRENDX") >= 0 || StringFind(s, "BREAKX") >= 0)
       return SYM_BOOM_CRASH;
 
-   if(StringFind(symbol, "VOL") >= 0 || StringFind(symbol, "Vol") >= 0 ||
-      StringFind(symbol, "FXVOL") >= 0 || StringFind(symbol, "SFVVOL") >= 0 ||
-      StringFind(symbol, "SFXVOL") >= 0)
+   // Deriv: Volatility, Jump, Step, Range Break
+   if(StringFind(s, "VOLATILITY") >= 0 || StringFind(s, "RANGE BREAK") >= 0
+      || StringFind(s, "JUMP") >= 0 || StringFind(s, "STEP") >= 0
+      || StringFind(s, "VOL") >= 0 || StringFind(s, "FXVOL") >= 0
+      || StringFind(s, "SFVVOL") >= 0 || StringFind(s, "SFXVOL") >= 0)
       return SYM_VOLATILITY;
 
-   if(StringFind(symbol, "XAU") >= 0 || StringFind(symbol, "GOLD") >= 0 ||
-      StringFind(symbol, "Gold") >= 0 ||
-      StringFind(symbol, "XAG") >= 0 || StringFind(symbol, "SILVER") >= 0 ||
-      StringFind(symbol, "Silver") >= 0)
+   // Métaux (XAUUSD, XAUUSDm, GOLD#, etc.)
+   if(StringFind(s, "XAU") >= 0 || StringFind(s, "GOLD") >= 0
+      || StringFind(s, "XAG") >= 0 || StringFind(s, "SILVER") >= 0)
       return SYM_METAL;
 
-   if(StringFind(symbol, "BTC") >= 0 || StringFind(symbol, "ETH") >= 0)
+   // Commodities
+   if(StringFind(s, "OIL") >= 0 || StringFind(s, "COPPER") >= 0)
+      return SYM_COMMODITY;
+
+   // Crypto
+   if(StringFind(s, "BTC") >= 0 || StringFind(s, "ETH") >= 0 || StringFind(s, "SOL") >= 0
+      || StringFind(s, "CRYPTO") >= 0 || StringFind(s, "BITCOIN") >= 0
+      || StringFind(s, "ETHEREUM") >= 0)
       return SYM_CRYPTO;
+
+   // Forex majeurs
+   if(StringFind(s, "USD") >= 0 || StringFind(s, "EUR") >= 0
+      || StringFind(s, "GBP") >= 0 || StringFind(s, "JPY") >= 0)
+      return SYM_FOREX;
 
    if(StringLen(symbol) <= 7)
       return SYM_FOREX;

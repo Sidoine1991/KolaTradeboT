@@ -149,20 +149,26 @@ bool SMC_HighProbabilityAllowsEntry(const int dirSign = 0)
          return false;
       }
    }
-   else if(SMCGP_IsBoomCrashSym(_Symbol) && g_smcBcHourUtc >= 0)
-   {
-      if(!g_smcBcTradeable || g_smcBcConfidence < HighProbBcMinConfidence)
-      {
-         static datetime s_bcLog = 0;
-         if(TimeCurrent() - s_bcLog >= 60)
-         {
-            s_bcLog = TimeCurrent();
-            Print("[PROB-GATE] BLOQUE BC � conf=", DoubleToString(g_smcBcConfidence, 1),
-                  "% min ", DoubleToString(HighProbBcMinConfidence, 0), "%");
-         }
-         return false;
-      }
-   }
+else if(SMCGP_IsBoomCrashSym(_Symbol) && g_smcBcHourUtc >= 0)
+    {
+       // GOE verdict (|vn|=2) sur Boom/Crash/PainX/GainX : bypass prob-gate assoupli
+       if(MathAbs(g_smcGomVerdictNum) == 2)
+       {
+          return true;
+       }
+       
+       if(!g_smcBcTradeable || g_smcBcConfidence < HighProbBcMinConfidence)
+       {
+          static datetime s_bcLog = 0;
+          if(TimeCurrent() - s_bcLog >= 60)
+          {
+             s_bcLog = TimeCurrent();
+             Print("[PROB-GATE] BLOQUE BC � conf=", DoubleToString(g_smcBcConfidence, 1),
+                   "% min ", DoubleToString(HighProbBcMinConfidence, 0), "%");
+          }
+          return false;
+       }
+    }
 
    if(g_cogStrength < CognitionMinStrength || g_cogConfidence < CognitionMinConfidence)
    {

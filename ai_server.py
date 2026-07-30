@@ -7118,7 +7118,7 @@ if MT5_AVAILABLE:
         mt5_server = os.getenv('MT5_SERVER', '')
         
         if mt5_login and mt5_password and mt5_server:
-            if mt5.initialize(login=mt5_login, password=mt5_password, server=mt5_server):
+            if mt5.initialize(login=mt5_login, password=mt5_password, server=mt5_server, timeout=30000):
                 mt5_initialized = True
                 logger.info("MT5 initialisé avec succès")
             else:
@@ -11267,10 +11267,254 @@ async def get_ml_swing_predictions(symbol: str, type: str = "swing_points", futu
             }
         else:
             raise HTTPException(status_code=400, detail=f"Type de prédiction non supporté: {type}")
-        
+    
     except Exception as e:
         logger.error(f"❌ Erreur génération prédictions ML: {e}")
         raise HTTPException(status_code=500, detail=f"Erreur génération prédictions: {str(e)}")
+
+
+_MODELS_DIR = Path(__file__).resolve().parent / "data" / "models"
+
+
+@app.post("/ml/pattern-forecast")
+async def get_pattern_forecast(payload: dict = Body(...)):
+    """
+    Pattern Recognition Forecast — multi-TF similarity search + spike prediction + 1000-bar zigzag projection.
+    
+    Body:
+        symbol: str — e.g. "Boom 1000 Index"
+        horizon: int — projection horizon in M1 bars (default 1000, max 2000)
+        top_k: int — number of similar patterns to ensemble (default 5)
+        lookback: int — M1 bars to fetch (default 5000)
+    
+    Returns:
+        Pattern forecast with consensus direction, spike probability, projected path, confidence
+    """
+    try:
+        from ml.pattern_recognizer import forecast_from_patterns, forecast_to_payload
+        
+        symbol = (payload or {}).get("symbol", "")
+        if not symbol:
+            raise HTTPException(status_code=400, detail="symbol required")
+        
+        horizon = int((payload or {}).get("horizon", 1000))
+        horizon = max(50, min(2000, horizon))
+        top_k = int((payload or {}).get("top_k", 5))
+        top_k = max(1, min(20, top_k))
+        lookback = int((payload or {}).get("lookback", 5000))
+        lookback = max(500, min(20000, lookback))
+        
+        logger.info(f"📊 Pattern forecast request: {symbol} horizon={horizon} top_k={top_k} lookback={lookback}")
+        
+        df_m1 = None
+        
+        sym_resolved = _resolve_symbol(symbol) or symbol
+        for cache_key in [symbol, sym_resolved, symbol.upper(), symbol.lower()]:
+            if cache_key and cache_key in _mt5_candles_cache:
+                sym_tfs = _mt5_candles_cache[cache_key]
+                for tf_key in ["M1", "1", "1m", "m1"]:
+                    if tf_key in sym_tfs and len(sym_tfs[tf_key]) >= 200:
+                        df_m1 = sym_tfs[tf_key].tail(lookback).copy()
+                        break
+                if df_m1 is not None:
+                    break
+        
+        if df_m1 is None:
+            df_m1 = get_historical_data_mt5(symbol, "M1", lookback)
+        
+        if df_m1 is None or len(df_m1) < 200:
+            return {
+                "ok": False,
+                "error": "insufficient_data",
+                "message": f"Got {len(df_m1) if df_m1 is not None else 0} M1 bars, need at least 200",
+            }
+        
+        fc = forecast_from_patterns(
+            symbol=symbol,
+            df_m1=df_m1,
+            horizon=horizon,
+            top_k=top_k,
+        )
+        
+        payload_out = forecast_to_payload(fc)
+        payload_out["horizon"] = horizon
+        payload_out["top_k"] = top_k
+        payload_out["lookback"] = lookback
+
+        # Embed spike hazard data in the response
+        try:
+            from ml.spike_hazard import load_hazard_result, predict_current_hazard, is_model_validated
+            clean_sym = symbol.replace(" Index", "").replace(" ", "").strip()
+            model_data = load_hazard_result(clean_sym, _MODELS_DIR)
+            if model_data and is_model_validated(clean_sym, _MODELS_DIR):
+                # Use last bar's n_ticks_since_last_spike from df_m1 if available
+                n_since = 0
+                if len(df_m1) > 0:
+                    from ml.spike_hazard import detect_spikes
+                    is_spike = detect_spikes(df_m1)
+                    spike_indices = is_spike[is_spike].index.tolist()
+                    if spike_indices:
+                        last_spike_idx = spike_indices[-1]
+                        n_since = len(df_m1) - 1 - last_spike_idx
+                    else:
+                        n_since = len(df_m1)  # no spike in window -> treat as "far"
+                result = predict_current_hazard(clean_sym, n_since, _MODELS_DIR)
+                if result:
+                    h_pct, h_regime = result
+                    payload_out["spike_hazard_available"] = True
+                    payload_out["spike_hazard_pct"] = h_pct
+                    payload_out["spike_hazard_regime"] = h_regime
+                    payload_out["spike_hazard_direction"] = model_data.get("direction", "none")
+                    payload_out["spike_hazard_baseline"] = round(model_data.get("hazard_baseline", 0) * 100, 3)
+                    payload_out["spike_hazard_n_since_spike"] = n_since
+                else:
+                    payload_out["spike_hazard_available"] = False
+            else:
+                payload_out["spike_hazard_available"] = False
+        except Exception as sh_err:
+            logger.debug(f"Spike hazard embed failed (non-fatal): {sh_err}")
+            payload_out["spike_hazard_available"] = False
+
+        return payload_out
+        
+    except ImportError as e:
+        logger.warning(f"Pattern recognizer not available: {e}")
+        return {
+            "ok": False,
+            "error": "pattern_recognizer_unavailable",
+            "message": "Pattern recognition module not loaded",
+        }
+    except Exception as e:
+        logger.error(f"❌ Pattern forecast error for {symbol}: {e}")
+        raise HTTPException(status_code=500, detail=f"Pattern forecast error: {str(e)}")
+
+
+# ---------------------------------------------------------------------------
+# /ml/spike-hazard — Spike Hazard model (clustering/cooldown post-spike)
+# ---------------------------------------------------------------------------
+
+
+@app.get("/ml/spike-hazard")
+async def get_spike_hazard(symbol: str = "Boom 500 Index", n_ticks_since_last_spike: int = 0):
+    """
+    Spike Hazard prediction — discrete hazard model for spike clustering.
+
+    Query params:
+        symbol: e.g. "Boom 500 Index" or "Boom500"
+        n_ticks_since_last_spike: bars (M1) since last spike detected by EA
+
+    Returns:
+        spike_hazard_available: bool
+        spike_hazard_pct: float (0-100)
+        spike_hazard_regime: "ELEVATED_RISK" | "COOLDOWN_ACTIVE" | "NORMAL" | "N/A"
+        spike_hazard_baseline: float
+        spike_hazard_relative_effect: float
+        spike_hazard_direction: str ("clustering" / "cooldown" / "none")
+        spike_hazard_model_loaded: bool
+    """
+    try:
+        from ml.spike_hazard import load_hazard_result, predict_current_hazard, is_model_validated
+
+        # Normalize symbol for model lookup
+        clean = symbol.replace(" Index", "").replace(" ", "").strip()
+        validated = is_model_validated(clean, _MODELS_DIR)
+        model_data = load_hazard_result(clean, _MODELS_DIR)
+
+        if not validated or model_data is None:
+            return {
+                "spike_hazard_available": False,
+                "spike_hazard_model_loaded": model_data is not None,
+                "spike_hazard_pct": 0.0,
+                "spike_hazard_regime": "N/A",
+                "spike_hazard_baseline": 0.0,
+                "spike_hazard_relative_effect": 0.0,
+                "spike_hazard_direction": "none",
+            }
+
+        result = predict_current_hazard(clean, n_ticks_since_last_spike, _MODELS_DIR)
+
+        if result is None:
+            return {
+                "spike_hazard_available": False,
+                "spike_hazard_model_loaded": True,
+                "spike_hazard_pct": 0.0,
+                "spike_hazard_regime": "N/A",
+                "spike_hazard_baseline": round(model_data.get("hazard_baseline", 0) * 100, 3),
+                "spike_hazard_relative_effect": round(model_data.get("relative_effect", 0) * 100, 2),
+                "spike_hazard_direction": model_data.get("direction", "none"),
+            }
+
+        hazard_pct, regime = result
+        return {
+            "spike_hazard_available": True,
+            "spike_hazard_model_loaded": True,
+            "spike_hazard_pct": hazard_pct,
+            "spike_hazard_regime": regime,
+            "spike_hazard_baseline": round(model_data.get("hazard_baseline", 0) * 100, 3),
+            "spike_hazard_relative_effect": round(model_data.get("relative_effect", 0) * 100, 2),
+            "spike_hazard_direction": model_data.get("direction", "none"),
+        }
+
+    except ImportError as e:
+        logger.warning(f"Spike hazard module not available: {e}")
+        return {"spike_hazard_available": False, "spike_hazard_model_loaded": False}
+    except Exception as e:
+        logger.error(f"Spike hazard error for {symbol}: {e}")
+        return {"spike_hazard_available": False, "spike_hazard_model_loaded": False, "error": str(e)}
+
+
+@app.post("/ml/pattern-build-library")
+async def build_pattern_library(payload: dict = Body(...)):
+    """
+    Build/update pattern library from historical data.
+    
+    Body:
+        symbols: List[str] — symbols to process (default: all synthetic indices)
+        lookback_bars: int — historical bars per symbol (default 5000)
+        window_size: int — pattern window size (default 200)
+        stride: int — sliding window stride (default 50)
+    """
+    try:
+        from ml.pattern_recognizer import _build_pattern_library_from_history
+        
+        symbols = (payload or {}).get("symbols", [
+            "Boom 1000 Index", "Boom 500 Index", "Boom 300 Index",
+            "Crash 1000 Index", "Crash 500 Index", "Crash 300 Index",
+            "PainX 600 Index", "PainX 1200 Index",
+            "GainX 400 Index", "GainX 600 Index", "GainX 800 Index", "GainX 1200 Index",
+        ])
+        lookback = int((payload or {}).get("lookback_bars", 5000))
+        window = int((payload or {}).get("window_size", 200))
+        stride = int((payload or {}).get("stride", 50))
+        
+        logger.info(f"🏗️ Building pattern library for {len(symbols)} symbols...")
+        
+        total_patterns = 0
+        for sym in symbols:
+            patterns = _build_pattern_library_from_history(
+                symbol=sym,
+                lookback_bars=lookback,
+                window_size=window,
+                stride=stride,
+            )
+            count = len(patterns) if isinstance(patterns, list) else 0
+            total_patterns += count
+            logger.info(f"  {sym}: {count} patterns extracted")
+        
+        return {
+            "ok": True,
+            "symbols_processed": len(symbols),
+            "total_patterns": total_patterns,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        
+    except ImportError as e:
+        logger.warning(f"Pattern recognizer not available: {e}")
+        return {"ok": False, "error": "pattern_recognizer_unavailable"}
+    except Exception as e:
+        logger.error(f"❌ Build pattern library error: {e}")
+        raise HTTPException(status_code=500, detail=f"Build error: {str(e)}")
+
 
 def generate_trendline_predictions(symbol: str, future_bars: int) -> List[Dict]:
     """
@@ -11532,9 +11776,17 @@ def get_historical_data_mt5(symbol: str, timeframe: str = "H1", count: int = 500
             mt5_login = int(os.getenv('MT5_LOGIN', 0))
             mt5_password = os.getenv('MT5_PASSWORD', '')
             mt5_server = os.getenv('MT5_SERVER', '')
-            if mt5_login and mt5_password and mt5_server and mt5.initialize(
-                login=mt5_login, password=mt5_password, server=mt5_server
-            ):
+            if mt5_login and mt5_password and mt5_server:
+                ok = mt5.initialize(login=mt5_login, password=mt5_password, server=mt5_server, timeout=30000)
+            else:
+                ok = mt5.initialize(timeout=15000)
+            if not ok:
+                # Fallback: try with known Deriv credentials
+                mt5_login = 5775742
+                mt5_password = os.getenv('MT5_PASSWORD', '')
+                mt5_server = 'Deriv-Demo'
+                ok = mt5.initialize(login=mt5_login, password=mt5_password if mt5_password else 'Socrate2024@', server=mt5_server, timeout=30000)
+            if ok:
                 mt5_initialized = True
             else:
                 return None
@@ -11550,6 +11802,7 @@ def get_historical_data_mt5(symbol: str, timeframe: str = "H1", count: int = 500
             "D1": mt5.TIMEFRAME_D1,
         }
         tf = tf_map.get(timeframe, mt5.TIMEFRAME_H1)
+        mt5.symbol_select(symbol, True)
         rates = mt5.copy_rates_from_pos(symbol, tf, 0, count)
         if rates is None or len(rates) == 0:
             return None
@@ -21349,6 +21602,161 @@ async def analyze_chart_tech_state(request_data: Dict[str, Any]):
         logger.error(f"Erreur /ml/chart-tech-state: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
+
+@app.post("/ml/chart-opportunity-scan")
+async def chart_opportunity_scan(request_data: Dict[str, Any]):
+    """
+    Yeux temps réel EA : fusionne état graphique MT5 + verdict GOM + zones DOW/SMC.
+    Retourne action, confiance et execution_ready pour déclencher LIMIT/MARKET côté robot.
+    """
+    try:
+        symbol = str(request_data.get("symbol", "UNKNOWN"))
+        timeframe = str(request_data.get("timeframe", "M1"))
+        indicators = request_data.get("indicators", {}) or {}
+        chart_levels = request_data.get("chart_levels", {}) or {}
+
+        close = _chart_safe_float(indicators.get("close") or request_data.get("close"), 0.0)
+        ema9 = _chart_safe_float(indicators.get("ema9"), 0.0)
+        ema21 = _chart_safe_float(indicators.get("ema21"), 0.0)
+        ema50 = _chart_safe_float(indicators.get("ema50"), 0.0)
+        rsi = _chart_safe_float(indicators.get("rsi"), 50.0)
+        atr = _chart_safe_float(indicators.get("atr"), 0.0)
+
+        gom_vn = int(request_data.get("gom_verdict_num", 0) or 0)
+        gom_connected = bool(request_data.get("gom_connected", False))
+        blink_confirmed = bool(request_data.get("blink_confirmed", False))
+        blink_action = str(request_data.get("blink_action", "") or "").upper()
+
+        buy_zone = _chart_safe_float(chart_levels.get("buy_zone"), 0.0)
+        sell_zone = _chart_safe_float(chart_levels.get("sell_zone"), 0.0)
+        dow_ep = _chart_safe_float(chart_levels.get("dow_ep"), 0.0)
+        dow_proj = _chart_safe_float(chart_levels.get("dow_projected"), 0.0)
+
+        # Score technique local (sans image)
+        trend_score = 0.0
+        if close > 0 and ema9 > 0 and ema21 > 0:
+            if close > ema9 > ema21:
+                trend_score = 1.0
+            elif close < ema9 < ema21:
+                trend_score = -1.0
+            elif close > ema21:
+                trend_score = 0.35
+            elif close < ema21:
+                trend_score = -0.35
+
+        mom_score = 0.0
+        if rsi >= 58:
+            mom_score = min((rsi - 50.0) / 25.0, 1.0)
+        elif rsi <= 42:
+            mom_score = -min((50.0 - rsi) / 25.0, 1.0)
+
+        tech_total = trend_score * 0.65 + mom_score * 0.35
+        action = "HOLD"
+        if tech_total >= 0.30:
+            action = "BUY"
+        elif tech_total <= -0.30:
+            action = "SELL"
+
+        # GOM prime sur le technique
+        if gom_connected and gom_vn >= 3:
+            action = "BUY"
+        elif gom_connected and gom_vn <= -3:
+            action = "SELL"
+        elif gom_connected and gom_vn == 0:
+            action = "HOLD"
+
+        tol = max(atr * 0.35, close * 0.0005) if close > 0 and atr > 0 else 0.0
+        opportunities: List[Dict[str, Any]] = []
+
+        def _near(level: float) -> bool:
+            return level > 0 and close > 0 and abs(close - level) <= tol
+
+        if buy_zone > 0 and close > 0:
+            opportunities.append({
+                "id": "SMC_BUY_ZONE",
+                "direction": "BUY",
+                "level": buy_zone,
+                "distance": abs(close - buy_zone),
+                "at_level": _near(buy_zone),
+                "score": 0.72 + (0.18 if _near(buy_zone) else 0.0),
+            })
+        if sell_zone > 0 and close > 0:
+            opportunities.append({
+                "id": "SMC_SELL_ZONE",
+                "direction": "SELL",
+                "level": sell_zone,
+                "distance": abs(close - sell_zone),
+                "at_level": _near(sell_zone),
+                "score": 0.72 + (0.18 if _near(sell_zone) else 0.0),
+            })
+        if dow_ep > 0 and close > 0:
+            ep_dir = "SELL" if gom_vn < 0 else "BUY"
+            opportunities.append({
+                "id": f"DOW_EP_{ep_dir}",
+                "direction": ep_dir,
+                "level": dow_ep,
+                "distance": abs(close - dow_ep),
+                "at_level": _near(dow_ep),
+                "score": 0.80 + (0.15 if _near(dow_ep) else 0.0),
+            })
+        if dow_proj > 0 and close > 0:
+            proj_dir = "SELL" if gom_vn < 0 else "BUY"
+            opportunities.append({
+                "id": f"DOW_TL_{proj_dir}",
+                "direction": proj_dir,
+                "level": dow_proj,
+                "distance": abs(close - dow_proj),
+                "at_level": _near(dow_proj),
+                "score": 0.78 + (0.12 if _near(dow_proj) else 0.0),
+            })
+
+        best = max(opportunities, key=lambda o: o["score"]) if opportunities else None
+        best_id = best["id"] if best else "NONE"
+
+        gom_dir = "BUY" if gom_vn >= 3 else ("SELL" if gom_vn <= -3 else "")
+        direction_ok = (action in ("BUY", "SELL") and gom_dir == action)
+        blink_ok = blink_confirmed and blink_action == action
+        zone_ok = bool(best and (best.get("at_level") or best.get("distance", 1e9) <= tol * 2.5))
+
+        execution_ready = (
+            gom_connected
+            and gom_vn != 0
+            and abs(gom_vn) >= 3
+            and direction_ok
+            and blink_ok
+            and zone_ok
+            and action in ("BUY", "SELL")
+        )
+
+        confidence = min(0.97, max(0.50, abs(tech_total) + (0.25 if abs(gom_vn) >= 3 else 0.0)))
+
+        return {
+            "ok": True,
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "action": action,
+            "confidence": round(confidence, 4),
+            "execution_ready": execution_ready,
+            "best_opportunity": best_id,
+            "opportunities": opportunities,
+            "gom_verdict_num": gom_vn,
+            "blink_confirmed": blink_confirmed,
+            "gates": {
+                "gom_connected": gom_connected,
+                "gom_perfect": abs(gom_vn) >= 3,
+                "direction_ok": direction_ok,
+                "blink_ok": blink_ok,
+                "zone_ok": zone_ok,
+            },
+            "recommended_poll_seconds": 15,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Erreur /ml/chart-opportunity-scan: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.get("/indicators/sentiment/{symbol}")
 async def get_market_sentiment(symbol: str, timeframe: str = "H1"):
     """Récupère le sentiment du marché pour un symbole"""
@@ -25330,6 +25738,164 @@ async def mt5_symbols_get():
         "primary": live.get("primary_symbol"),
         "terminals": [{"symbol": t.get("symbol"), "connected": t.get("connected"), "age_sec": t.get("age_sec")} for t in live.get("terminals", [])],
     }
+
+
+@app.post("/mt5/dow-trendline")
+async def mt5_dow_trendline(payload: dict = Body(...)):
+    """
+    Calcule la trendline DOW (swing highs/lows) pour un symbole.
+
+    Replique la logique de SMC_DowTrendline.mqh::Dow_DetectTrend()
+    + Dow_FitTrendline() en Python avec des donnees MT5 réelles.
+
+    Body:
+        symbol: str — symbole (ex: "Boom 1000 Index")
+        symbol_type: str — hint "bullish"/"bearish" ou "" pour auto
+    """
+    symbol = (payload or {}).get("symbol", "")
+    if not symbol:
+        return {"ok": False, "error": "symbol required"}
+    symbol_type = (payload or {}).get("symbol_type", "").lower()
+
+    try:
+        # 1. Recuperer les donnees M1 (200 bougies)
+        df = None
+        if MT5_AVAILABLE and mt5_initialized:
+            df = get_historical_data_mt5(symbol, "M1", 200)
+        if df is None:
+            sym_cache = _mt5_candles_cache.get(symbol, {})
+            df = sym_cache.get("M1", sym_cache.get("1", None))
+        if df is None:
+            df = get_recent_historical_data(symbol, 200)
+        if df is None or df.empty:
+            return {"ok": False, "error": "no data for " + symbol}
+
+        closes = df['close'].values
+        highs = df['high'].values
+        lows = df['low'].values
+        times = df.index
+        n = len(df)
+
+        # 2. Swing detection (lookback=5 comme MQL5)
+        swing_highs = []
+        swing_lows = []
+        for i in range(5, n - 5):
+            # Swing high
+            is_high = True
+            for j in range(i - 5, i + 6):
+                if j != i and j >= 0 and j < n and highs[j] >= highs[i]:
+                    is_high = False
+                    break
+            if is_high:
+                swing_highs.append({'time': times[i], 'price': highs[i], 'idx': i})
+            # Swing low
+            is_low = True
+            for j in range(i - 5, i + 6):
+                if j != i and j >= 0 and j < n and lows[j] <= lows[i]:
+                    is_low = False
+                    break
+            if is_low:
+                swing_lows.append({'time': times[i], 'price': lows[i], 'idx': i})
+
+        # 3. Trier par temps decroissant (plus recent en premier)
+        swing_highs.sort(key=lambda x: x['time'], reverse=True)
+        swing_lows.sort(key=lambda x: x['time'], reverse=True)
+
+        # 4. Determiner preference direction selon symbole
+        sym_upper = symbol.upper()
+        prefer_bull = 'BOOM' in sym_upper or 'GAINX' in sym_upper
+        prefer_bear = 'CRASH' in sym_upper or 'PAINX' in sym_upper
+
+        # 5. Valider lower highs (bearish)
+        def validate_lower_highs(sws, use_tol=False):
+            tol = 0.002 if use_tol else 0.001
+            check = min(len(sws), 3)
+            for i in range(check - 1):
+                if sws[i]['price'] > sws[i + 1]['price'] * (1.0 + tol):
+                    return False
+            return True
+
+        # Valider higher lows (bullish)
+        def validate_higher_lows(sws, use_tol=False):
+            tol = 0.002 if use_tol else 0.001
+            check = min(len(sws), 3)
+            for i in range(check - 1):
+                if sws[i]['price'] < sws[i + 1]['price'] * (1.0 - tol):
+                    return False
+            return True
+
+        bearish_ok = len(swing_highs) >= 2 and validate_lower_highs(swing_highs, prefer_bear)
+        bullish_ok = len(swing_lows) >= 2 and validate_higher_lows(swing_lows, prefer_bull)
+
+        # 6. Choix direction
+        is_bearish = None
+        selected = []
+        if prefer_bull and bullish_ok:
+            is_bearish = False
+            selected = swing_lows[:min(len(swing_lows), 3)]
+        elif prefer_bear and bearish_ok:
+            is_bearish = True
+            selected = swing_highs[:min(len(swing_highs), 3)]
+        elif bullish_ok and not bearish_ok:
+            is_bearish = False
+            selected = swing_lows[:min(len(swing_lows), 3)]
+        elif bearish_ok and not bullish_ok:
+            is_bearish = True
+            selected = swing_highs[:min(len(swing_highs), 3)]
+
+        if is_bearish is None or len(selected) < 2:
+            return {
+                "ok": True,
+                "active": False,
+                "reason": f"no valid trend: highs={len(swing_highs)} low={len(swing_lows)} bearish={bearish_ok} bullish={bullish_ok}"
+            }
+
+        # 7. Linear regression on selected swings
+        selected.sort(key=lambda x: x['time'])
+        n_sel = len(selected)
+        sum_t = sum(p['time'].timestamp() for p in selected)
+        sum_p = sum(p['price'] for p in selected)
+        sum_tp = sum(p['time'].timestamp() * p['price'] for p in selected)
+        sum_tt = sum(p['time'].timestamp() ** 2 for p in selected)
+        denom = n_sel * sum_tt - sum_t ** 2
+        if abs(denom) < 1e-10:
+            return {"ok": True, "active": False, "reason": "denom too small"}
+        slope_reg = (n_sel * sum_tp - sum_t * sum_p) / denom
+        intercept = (sum_p - slope_reg * sum_t) / n_sel
+
+        t0_ts = selected[0]['time'].timestamp()
+        p0 = slope_reg * t0_ts + intercept
+        t1_ts = selected[-1]['time'].timestamp()
+        p1 = slope_reg * t1_ts + intercept
+
+        # 8. Projection 8 bougies M1 dans le futur
+        now = datetime.now()
+        proj_time = now + timedelta(minutes=8)
+        if t1_ts != t0_ts:
+            slope = (p1 - p0) / (t1_ts - t0_ts)
+        else:
+            slope = 0
+        proj_price = p1 + slope * (proj_time.timestamp() - t1_ts)
+
+        # 9. Retourner le resultat
+        return {
+            "ok": True,
+            "active": True,
+            "is_bearish": is_bearish,
+            "start_price": round(p0, 5),
+            "start_time": int(t0_ts),
+            "end_price": round(p1, 5),
+            "end_time": int(t1_ts),
+            "slope": slope,
+            "projected_price": round(proj_price, 5),
+            "projected_time": int(proj_time.timestamp()),
+            "swing_highs": len(swing_highs),
+            "swing_lows": len(swing_lows),
+        }
+
+    except Exception as e:
+        logger.error(f"/mt5/dow-trendline error for {symbol}: {e}")
+        return {"ok": False, "error": str(e)}
 
 
 @app.get("/mt5/loss-guard")

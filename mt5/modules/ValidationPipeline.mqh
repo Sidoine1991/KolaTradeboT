@@ -166,8 +166,9 @@ FilterResult FilterBoomCrashDirection(const FilterContext &ctx)
 
    string u = ctx.symbol;
    StringToUpper(u);
-   bool isBoom  = (StringFind(u, "BOOM") >= 0);
-   bool isCrash = (StringFind(u, "CRASH") >= 0);
+   // Deriv (Boom/Crash) + Weltrade (Painx/Gainx) = même règle unidirectionnelle
+   bool isBoom  = (StringFind(u, "BOOM") >= 0 || StringFind(u, "GAINX") >= 0);
+   bool isCrash = (StringFind(u, "CRASH") >= 0 || StringFind(u, "PAINX") >= 0);
 
    if(isBoom && ctx.direction == -1)
    {

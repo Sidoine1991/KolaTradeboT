@@ -14,7 +14,7 @@ struct SPD_State
    int    dir; // +1 buy spike, -1 sell spike
    int    count; // number of consecutive spike bars
    datetime startTime;
-   int    lastBarIndex;
+   datetime lastBarIndex;
    double score;
    bool   active;
 };
@@ -38,7 +38,7 @@ int SPD_FindIndex(const string symbol)
       g_spdStates[idx].dir = 0;
       g_spdStates[idx].count = 0;
       g_spdStates[idx].startTime = 0;
-      g_spdStates[idx].lastBarIndex = -1;
+      g_spdStates[idx].lastBarIndex = 0;
       g_spdStates[idx].score = 0.0;
       g_spdStates[idx].active = false;
       return idx;

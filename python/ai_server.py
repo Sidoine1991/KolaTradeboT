@@ -3585,6 +3585,14 @@ async def process_analysis_360(data: dict) -> dict:
             logger.info(f"360° SWING HOLD {symbol}: {'; '.join(sw_rej[:2])}")
 
     if results:
+        # ENFORCE FINAL: filtrer les signaux BUY/SELL interdits sur Boom/Crash/PainX/GainX
+        for sig in results:
+            sig_action = str(sig.get("action", "HOLD") or "HOLD").upper()
+            if sig_action in ("BUY", "SELL"):
+                enforced, conf_e, _ = enforce_ea_boom_crash_direction(
+                    symbol, sig_action.lower(), float(sig.get("confidence", 0.5) or 0.5), ""
+                )
+                sig["action"] = enforced.upper()
         return {"status": "SIGNALS", "count": len(results), "signals": results}
     return {"status": "HOLD", "symbol": symbol, "score": score}
 
@@ -6953,7 +6961,12 @@ async def decision_simplified(request: DecisionRequest):
             }
             asyncio.create_task(_insert_stair_detection_supabase(payload_st))
     
-    # 13. Créer la réponse enrichie
+    # 13. ENFORCE FINAL: revérifier direction interdite APRÈS tous les overrides (funnel, confluence, stair)
+    action, confidence, reason = enforce_ea_boom_crash_direction(
+        request.symbol, action, confidence, reason
+    )
+
+    # 14. Créer la réponse enrichie
     meta_out = {
         "original_decision": ml_result["original_decision"],
         "original_confidence": ml_result["original_confidence"],
@@ -9229,6 +9242,11 @@ async def decision_gemma(request: DecisionRequest):
                 spike_zone_price = request.ask if "Boom" in request.symbol else request.bid
                 confidence += 0.1
         
+        # ENFORCE FINAL: filtrer direction interdite Boom/Crash/PainX/GainX (AVANT construction réponse)
+        action, confidence, reason = enforce_ea_boom_crash_direction(
+            request.symbol, action, confidence, reason
+        )
+        
         # Construire la réponse finale
         response = DecisionResponse(
             action=action,
@@ -9249,7 +9267,7 @@ async def decision_gemma(request: DecisionRequest):
             },
             gemma_analysis=gemma_analysis[:500] if gemma_analysis else f"Modèle Gemini utilisé - Confiance: {confidence:.2f}, Action: {action}"
         )
-        
+
         logger.info(f"Décision finale pour {request.symbol}: {action} (conf: {confidence:.2f})")
         return response
         
@@ -9590,6 +9608,11 @@ async def decision(req: Request):
         action, confidence = _apply_chart_pattern_bias(action, confidence, pattern_ctx)
         if str(pattern_ctx.get("pattern_name")) != "NONE":
             reason += f" [Pattern {pattern_ctx.get('pattern_name')} {pattern_ctx.get('direction')}]"
+
+        # ENFORCE FINAL: revérifier direction interdite APRÈS tous les overrides
+        action, confidence, reason = enforce_ea_boom_crash_direction(
+            request.symbol, action, confidence, reason
+        )
 
         # Créer la réponse
         ta = {
@@ -17414,6 +17437,129 @@ async def analyze_chart_tech_state(request_data: Dict[str, Any]):
         raise
     except Exception as e:
         logger.error(f"Erreur /ml/chart-tech-state: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/ml/chart-opportunity-scan")
+async def chart_opportunity_scan(request_data: Dict[str, Any]):
+    """
+    Yeux temps réel EA : fusionne état graphique MT5 + verdict GOM + zones DOW/SMC.
+    """
+    try:
+        symbol = str(request_data.get("symbol", "UNKNOWN"))
+        timeframe = str(request_data.get("timeframe", "M1"))
+        indicators = request_data.get("indicators", {}) or {}
+        chart_levels = request_data.get("chart_levels", {}) or {}
+
+        close = _chart_safe_float(indicators.get("close") or request_data.get("close"), 0.0)
+        ema9 = _chart_safe_float(indicators.get("ema9"), 0.0)
+        ema21 = _chart_safe_float(indicators.get("ema21"), 0.0)
+        rsi = _chart_safe_float(indicators.get("rsi"), 50.0)
+        atr = _chart_safe_float(indicators.get("atr"), 0.0)
+
+        gom_vn = int(request_data.get("gom_verdict_num", 0) or 0)
+        gom_connected = bool(request_data.get("gom_connected", False))
+        blink_confirmed = bool(request_data.get("blink_confirmed", False))
+        blink_action = str(request_data.get("blink_action", "") or "").upper()
+
+        buy_zone = _chart_safe_float(chart_levels.get("buy_zone"), 0.0)
+        sell_zone = _chart_safe_float(chart_levels.get("sell_zone"), 0.0)
+        dow_ep = _chart_safe_float(chart_levels.get("dow_ep"), 0.0)
+        dow_proj = _chart_safe_float(chart_levels.get("dow_projected"), 0.0)
+
+        trend_score = 0.0
+        if close > 0 and ema9 > 0 and ema21 > 0:
+            if close > ema9 > ema21:
+                trend_score = 1.0
+            elif close < ema9 < ema21:
+                trend_score = -1.0
+            elif close > ema21:
+                trend_score = 0.35
+            elif close < ema21:
+                trend_score = -0.35
+
+        mom_score = 0.0
+        if rsi >= 58:
+            mom_score = min((rsi - 50.0) / 25.0, 1.0)
+        elif rsi <= 42:
+            mom_score = -min((50.0 - rsi) / 25.0, 1.0)
+
+        tech_total = trend_score * 0.65 + mom_score * 0.35
+        action = "HOLD"
+        if tech_total >= 0.30:
+            action = "BUY"
+        elif tech_total <= -0.30:
+            action = "SELL"
+
+        if gom_connected and gom_vn >= 3:
+            action = "BUY"
+        elif gom_connected and gom_vn <= -3:
+            action = "SELL"
+        elif gom_connected and gom_vn == 0:
+            action = "HOLD"
+
+        tol = max(atr * 0.35, close * 0.0005) if close > 0 and atr > 0 else 0.0
+        opportunities: List[Dict[str, Any]] = []
+
+        def _near(level: float) -> bool:
+            return level > 0 and close > 0 and abs(close - level) <= tol
+
+        if buy_zone > 0 and close > 0:
+            opportunities.append({
+                "id": "SMC_BUY_ZONE", "direction": "BUY", "level": buy_zone,
+                "distance": abs(close - buy_zone), "at_level": _near(buy_zone),
+                "score": 0.72 + (0.18 if _near(buy_zone) else 0.0),
+            })
+        if sell_zone > 0 and close > 0:
+            opportunities.append({
+                "id": "SMC_SELL_ZONE", "direction": "SELL", "level": sell_zone,
+                "distance": abs(close - sell_zone), "at_level": _near(sell_zone),
+                "score": 0.72 + (0.18 if _near(sell_zone) else 0.0),
+            })
+        if dow_ep > 0 and close > 0:
+            ep_dir = "SELL" if gom_vn < 0 else "BUY"
+            opportunities.append({
+                "id": f"DOW_EP_{ep_dir}", "direction": ep_dir, "level": dow_ep,
+                "distance": abs(close - dow_ep), "at_level": _near(dow_ep),
+                "score": 0.80 + (0.15 if _near(dow_ep) else 0.0),
+            })
+        if dow_proj > 0 and close > 0:
+            proj_dir = "SELL" if gom_vn < 0 else "BUY"
+            opportunities.append({
+                "id": f"DOW_TL_{proj_dir}", "direction": proj_dir, "level": dow_proj,
+                "distance": abs(close - dow_proj), "at_level": _near(dow_proj),
+                "score": 0.78 + (0.12 if _near(dow_proj) else 0.0),
+            })
+
+        best = max(opportunities, key=lambda o: o["score"]) if opportunities else None
+        best_id = best["id"] if best else "NONE"
+        gom_dir = "BUY" if gom_vn >= 3 else ("SELL" if gom_vn <= -3 else "")
+        direction_ok = action in ("BUY", "SELL") and gom_dir == action
+        blink_ok = blink_confirmed and blink_action == action
+        zone_ok = bool(best and (best.get("at_level") or best.get("distance", 1e9) <= tol * 2.5))
+        execution_ready = (
+            gom_connected and gom_vn != 0 and abs(gom_vn) >= 3
+            and direction_ok and blink_ok and zone_ok and action in ("BUY", "SELL")
+        )
+        confidence = min(0.97, max(0.50, abs(tech_total) + (0.25 if abs(gom_vn) >= 3 else 0.0)))
+
+        return {
+            "ok": True, "symbol": symbol, "timeframe": timeframe,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "action": action, "confidence": round(confidence, 4),
+            "execution_ready": execution_ready, "best_opportunity": best_id,
+            "opportunities": opportunities, "gom_verdict_num": gom_vn,
+            "blink_confirmed": blink_confirmed,
+            "gates": {
+                "gom_connected": gom_connected, "gom_perfect": abs(gom_vn) >= 3,
+                "direction_ok": direction_ok, "blink_ok": blink_ok, "zone_ok": zone_ok,
+            },
+            "recommended_poll_seconds": 15,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Erreur /ml/chart-opportunity-scan: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/indicators/sentiment/{symbol}")

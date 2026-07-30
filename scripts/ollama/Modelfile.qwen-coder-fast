@@ -1,0 +1,7 @@
+FROM qwen2.5-coder:7b
+
+PARAMETER num_ctx 8192
+PARAMETER num_predict 4096
+PARAMETER temperature 0.15
+PARAMETER top_p 0.9
+PARAMETER num_batch 512

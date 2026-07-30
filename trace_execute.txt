@@ -1,0 +1,22 @@
+Tracing ExecuteSpikeTrade calls in SMC_Universal.mq5
+OnTick at character position: 177704
+1: void OnTick()
+2: {
+3:    // Track signal transitions for blink confirmation gate
+4:    UpdateSignalAppearTime(g_lastAIAction);
+5: 
+6:    // Gate global: bloquer toutes les nouvelles entrées si terminal plein
+7:    g_terminalFull = IsTerminalFull();
+8: 
+9:    // Tick Frequency Tracker (runs on EVERY tick, before rate-limiting)
+10:    datetime tNow = TimeCurrent();
+11:    if(tNow == g_tickFreqLastSec)
+12:    {
+13:       g_tickFreqCurrent++;
+14:    }
+15:    else
+16:    {
+17:       // Stocker le compte de la seconde précédente
+18:       if(g_tickFreqLastSec > 0)
+19:       {
+20:          g_tickFreqBuf[g_tickFreqIdx] = g_tickFreqCurrent;

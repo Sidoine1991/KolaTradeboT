@@ -16,7 +16,7 @@ struct ScanResult {
 // Compute simple spike score on M1: last bar range / ATR
 double ComputeSpikeScore(const string symbol)
 {
-   int tf = PERIOD_M1;
+   ENUM_TIMEFRAMES tf = PERIOD_M1;
    MqlRates rates[];
    ArraySetAsSeries(rates, true);
    if(CopyRates(symbol, tf, 0, SCAN_LOOKBACK_BARS, rates) < 2) return 0.0;

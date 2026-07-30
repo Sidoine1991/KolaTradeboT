@@ -4,6 +4,27 @@
 #ifndef GOM_GRAPHICS_MQH
 #define GOM_GRAPHICS_MQH
 
+#include "SMC_SymbolCategory.mqh"
+
+#ifndef SMC_GOM_PIPELINE_MQH
+extern string   g_cogDirection;
+extern string   g_smcGomGlobalDir;
+extern int      g_smcGomRsi;
+extern double   g_smcCogClose[];
+extern double   g_smcCogHigh[];
+extern double   g_smcCogLow[];
+extern double   g_smcPredPathMid[];
+extern double   g_smcPredPathUp[];
+extern double   g_smcPredPathDn[];
+extern double   g_smcPredBbMid[];
+extern double   g_smcPredBbUp[];
+extern double   g_smcPredBbDn[];
+#endif
+
+extern bool     g_SH_available;
+extern double   g_SH_hazardPct;
+extern string   g_SH_regime;
+
 //+------------------------------------------------------------------+
 // Enum�ration des signaux de trading GOM                                     |
 //+------------------------------------------------------------------+
@@ -348,8 +369,15 @@ void GOMG_DrawFutureZone(double zone_high, double zone_low, string label = "GOM_
    ObjectsDeleteAll(0, label + "_ARROW");
    ObjectsDeleteAll(0, label + "_LBL");
    ObjectsDeleteAll(0, label + "_INFO");
+   ObjectsDeleteAll(0, label + "_SPIKE");
+   ObjectsDeleteAll(0, label + "_HAZ");
 
-   // === 1. SYNTHÉSE DIRECTION ===
+   // === 0. DETECTER SYMBOLE SPIKE (Boom/Crash/PainX/GainX) ===
+   bool isSpikeSymbol = (SMC_GetSymbolCategory(_Symbol) == SYM_BOOM_CRASH);
+   bool isBoom = isSpikeSymbol && (StringFind(_Symbol, "Boom") >= 0 || StringFind(_Symbol, "Gain") >= 0);
+   bool isCrash = isSpikeSymbol && (StringFind(_Symbol, "Crash") >= 0 || StringFind(_Symbol, "Pain") >= 0);
+
+   // === 1. SYNTHÈSE DIRECTION ===
    // Sources: g_cogDirection, g_smcGomVerdictNum, g_smcGomGlobalDir
    int score = 0;  // +N = BUY, -N = SELL
    int sources = 0;
@@ -374,6 +402,18 @@ void GOMG_DrawFutureZone(double zone_high, double zone_low, string label = "GOM_
    if(g_smcGomRsi > 70)      { score -= 1; sources++; }
    else if(g_smcGomRsi < 30) { score += 1; sources++; }
 
+   // === SPIKE HAZARD: ajouter le hazard comme source additionnelle ===
+   bool spikeHazardActive = false;
+   if(isSpikeSymbol && g_SH_available && g_SH_hazardPct > 50.0)
+   {
+      spikeHazardActive = true;
+      // Le hazard elevé confirme la direction: spike vient de se produire
+      // Sur Boom = le spike est haussier, sur Crash = le spike est baissier
+      if(isBoom)  score += 2;  // Boom spike = prix monte
+      if(isCrash) score -= 2;  // Crash spike = prix descend
+      sources += 2;
+   }
+
    bool bull = (score > 0);
    bool bear = (score < 0);
    bool valid = (sources >= 2 && score != 0);
@@ -386,6 +426,7 @@ void GOMG_DrawFutureZone(double zone_high, double zone_low, string label = "GOM_
 
    color clr      = bull ? clrLime : (bear ? clrRed : clrDimGray);
    color clrLight = bull ? clrGreen : (bear ? clrOrangeRed : clrGray);
+   color clrSpike = spikeHazardActive ? (isBoom ? clrGold : clrMagenta) : clr;
 
    // === 2. SÉLECTION DONNÉES PRÉDICTION ===
    // Priorité: cogClose > predPathMid > predBbMid (plusieurs sources = plus fiable)
@@ -468,7 +509,8 @@ void GOMG_DrawFutureZone(double zone_high, double zone_low, string label = "GOM_
    }
 
    // === 5. DESSINER LES 5 SEGMENTS ===
-   int segDuration = tfSec * 2;  // 2 périodes par segment
+   // Si spike hazard actif, accélérer le timing (segments plus courts = plus réactif)
+   int segDuration = spikeHazardActive ? (tfSec / 2) : (tfSec * 2);  // Hazard: 0.5 periodes, Normal: 2 periodes
 
    for(int s = 0; s < maxSeg; s++)
    {
@@ -478,9 +520,12 @@ void GOMG_DrawFutureZone(double zone_high, double zone_low, string label = "GOM_
       string segName = label + "_SEG" + IntegerToString(s);
       ObjectDelete(0, segName);
       ObjectCreate(0, segName, OBJ_TREND, 0, t1, segPrice[s], t2, segPrice[s + 1]);
-      ObjectSetInteger(0, segName, OBJPROP_COLOR, clr);
-      ObjectSetInteger(0, segName, OBJPROP_WIDTH, 3);
-      ObjectSetInteger(0, segName, OBJPROP_STYLE, STYLE_SOLID);
+
+      // Couleur: spike hazard = couleur spike, sinon normale
+      color segClr = spikeHazardActive ? clrSpike : clr;
+      ObjectSetInteger(0, segName, OBJPROP_COLOR, segClr);
+      ObjectSetInteger(0, segName, OBJPROP_WIDTH, spikeHazardActive ? 4 : 3);
+      ObjectSetInteger(0, segName, OBJPROP_STYLE, spikeHazardActive ? STYLE_SOLID : STYLE_SOLID);
       ObjectSetInteger(0, segName, OBJPROP_RAY_RIGHT, false);
       ObjectSetInteger(0, segName, OBJPROP_BACK, false);
       ObjectSetInteger(0, segName, OBJPROP_SELECTABLE, false);
@@ -500,6 +545,36 @@ void GOMG_DrawFutureZone(double zone_high, double zone_low, string label = "GOM_
       }
    }
 
+   // === 5b. LABEL SPIKE HAZARD (si actif) ===
+   if(spikeHazardActive && isSpikeSymbol)
+   {
+      string spikeLbl = label + "_SPIKE";
+      ObjectDelete(0, spikeLbl);
+      datetime spikeTime = now + (datetime)(segDuration);
+      double spikePrice = bull ? zone_high : zone_low;
+
+      ObjectCreate(0, spikeLbl, OBJ_TEXT, 0, spikeTime, spikePrice);
+      string spikeDir = isBoom ? "BOOM" : "CRASH";
+      ObjectSetString(0, spikeLbl, OBJPROP_TEXT, "  >> " + spikeDir + " SPIKE <<" );
+      ObjectSetString(0, spikeLbl, OBJPROP_FONT, "Arial Bold");
+      ObjectSetInteger(0, spikeLbl, OBJPROP_FONTSIZE, 11);
+      ObjectSetInteger(0, spikeLbl, OBJPROP_COLOR, clrSpike);
+      ObjectSetInteger(0, spikeLbl, OBJPROP_BACK, false);
+      ObjectSetInteger(0, spikeLbl, OBJPROP_SELECTABLE, false);
+
+      // Label hazard percentage
+      string hazLbl = label + "_HAZ";
+      ObjectDelete(0, hazLbl);
+      ObjectCreate(0, hazLbl, OBJ_TEXT, 0, spikeTime, spikePrice);
+      ObjectSetString(0, hazLbl, OBJPROP_TEXT, "  HAZ " + DoubleToString(g_SH_hazardPct, 1) + "% [" + g_SH_regime + "]");
+      ObjectSetString(0, hazLbl, OBJPROP_FONT, "Arial");
+      ObjectSetInteger(0, hazLbl, OBJPROP_FONTSIZE, 8);
+      ObjectSetInteger(0, hazLbl, OBJPROP_COLOR, clrGray);
+      ObjectSetInteger(0, hazLbl, OBJPROP_ANCHOR, ANCHOR_LEFT_LOWER);
+      ObjectSetInteger(0, hazLbl, OBJPROP_BACK, false);
+      ObjectSetInteger(0, hazLbl, OBJPROP_SELECTABLE, false);
+   }
+
    // === 6. FLÈCHE FINALE ===
    datetime tEnd = now + (datetime)(maxSeg * segDuration);
    double pEnd = segPrice[maxSeg];
@@ -515,7 +590,19 @@ void GOMG_DrawFutureZone(double zone_high, double zone_low, string label = "GOM_
    ObjectSetInteger(0, arrowName, OBJPROP_SELECTABLE, false);
 
    // === 7. LABEL DIRECTION + LABEL INFO ===
-   string dirTxt = bull ? "BUY" : (bear ? "SELL" : "WAIT");
+   string dirTxt;
+   if(isSpikeSymbol)
+   {
+      // Pour Boom/Crash: afficher BOOM/CRASH au lieu de BUY/SELL
+      if(bull)      dirTxt = isBoom ? "BOOM" : "REVERSAL";
+      else if(bear) dirTxt = isCrash ? "CRASH" : "REVERSAL";
+      else          dirTxt = "WAIT";
+      if(spikeHazardActive) dirTxt += " !";
+   }
+   else
+   {
+      dirTxt = bull ? "BUY" : (bear ? "SELL" : "WAIT");
+   }
    string lblName = label + "_LBL";
    ObjectDelete(0, lblName);
    ObjectCreate(0, lblName, OBJ_TEXT, 0, tEnd, pEnd);
@@ -532,6 +619,7 @@ void GOMG_DrawFutureZone(double zone_high, double zone_low, string label = "GOM_
                   + " gom=" + IntegerToString(gomDir);
    if(g_smcGomRsi > 0) infoTxt += " rsi=" + IntegerToString(g_smcGomRsi);
    if(nPred > 0)       infoTxt += " pred=" + IntegerToString(nPred);
+   if(spikeHazardActive) infoTxt += " SH=" + DoubleToString(g_SH_hazardPct, 0) + "%";
    string infoName = label + "_INFO";
    ObjectDelete(0, infoName);
    ObjectCreate(0, infoName, OBJ_TEXT, 0, tEnd, pEnd);

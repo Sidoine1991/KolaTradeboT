@@ -1,6 +1,7 @@
 param(
     [switch]$UseClaude,
-    [switch]$Native
+    [switch]$Native,
+    [switch]$LocalQwen
 )
 
 $ErrorActionPreference = "Stop"
@@ -45,6 +46,8 @@ if ($env:CEREBRAS_API_KEY -and -not $env:OPENAI_API_KEY) {
     $env:OPENAI_API_KEY = $env:CEREBRAS_API_KEY
 }
 
+& (Join-Path $targetDir "scripts\Warm-Ollama-Qwen.ps1")
+
 if ($UseClaude) {
     if (-not $Native) {
         Ensure-ProxyRunning $fccRoot | Out-Null
@@ -55,21 +58,21 @@ if ($UseClaude) {
         Remove-Item Env:ANTHROPIC_BASE_URL -ErrorAction SilentlyContinue
     }
     Set-Location $targetDir
+    if ($LocalQwen) {
+        Write-Host "[Start-OpenCode] Claude Code -> Ollama qwen2.5-coder-fast:7b (proxy local)" -ForegroundColor Green
+    } else {
+        Write-Host "[Start-OpenCode] Claude Code -> proxy 8082 (MODEL dans free-claude-code\.env)" -ForegroundColor Cyan
+    }
     & claude
     exit $LASTEXITCODE
 }
 
-# OpenCode — proxy anthropic optionnel pour mode anthropic/kimi-k2.6-nim
-Ensure-ProxyRunning $fccRoot | Out-Null
-$env:ANTHROPIC_BASE_URL = "http://127.0.0.1:8082"
-$env:CLAUDE_CODE_USE_VERTEX = "0"
-
 Set-Location $targetDir
-Write-Host "[Start-OpenCode] TradBOT | /models pour la liste complete" -ForegroundColor Cyan
-Write-Host "  Cerebras (defaut) : cerebras/qwen-3-coder-480b  (1M tok/jour)" -ForegroundColor Green
-Write-Host "  Cloudflare        : cloudflare-workers-ai/@cf/openai/gpt-oss-120b" -ForegroundColor DarkGray
-Write-Host "  GitHub Models     : github-models/meta/llama-3.3-70b-instruct" -ForegroundColor DarkGray
-Write-Host "  Ollama local      : ollama/gpt-oss:20b" -ForegroundColor DarkGray
-Write-Host "  Groq backup       : groq/llama-3.3-70b-versatile" -ForegroundColor DarkGray
-Write-Host "  OR free backup    : openrouter/qwen/qwen3-coder:free" -ForegroundColor DarkGray
+if (-not $LocalQwen) {
+    # OpenCode parle directement a Ollama (.opencode/opencode.json) — pas besoin du proxy 8082
+    Remove-Item Env:ANTHROPIC_BASE_URL -ErrorAction SilentlyContinue
+}
+Write-Host "[Start-OpenCode] OpenCode -> Ollama direct (qwen2.5-coder-fast:7b)" -ForegroundColor Green
+Write-Host "  build : ollama/qwen2.5-coder-fast:7b | explore : ollama/qwen2.5-coder:1.5b" -ForegroundColor Cyan
+Write-Host "  Claude Code : scripts\Start-OpenCode.ps1 -UseClaude" -ForegroundColor DarkGray
 & opencode

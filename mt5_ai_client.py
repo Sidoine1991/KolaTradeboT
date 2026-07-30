@@ -2683,40 +2683,13 @@ class MT5AIClient:
             return None, None
     
     def update_trailing_stop(self, position):
-        """Met à jour le stop suiveur pour une position"""
-        try:
-            symbol = position.symbol
-            ticket = position.ticket
-            position_type = position.type
-            current_price = position.price_current
-            open_price = position.price_open
-            current_sl = position.sl
-            current_tp = position.tp
-            
-            # Récupérer les informations du symbole
-            symbol_info = mt5.symbol_info(symbol)
-            if not symbol_info:
-                logger.error(f"Impossible de récupérer les infos pour {symbol}")
-                return False
-                
-            point = symbol_info.point
-            digits = symbol_info.digits
-            
-            # Paramètres du trailing stop (en pourcentage)
-            activation_profit = 0.005  # 0.5% de profit pour activer le trailing
-            trailing_distance = 0.003  # 0.3% de distance de suivi
-            
-            # Calculer le profit actuel
-            if position_type == mt5.ORDER_TYPE_BUY:
-                profit_pct = (current_price - open_price) / open_price
-                new_sl = current_price * (1 - trailing_distance)
-                
-                # Vérifier si le profit est suffisant pour activer le trailing
-                def update_trailing_stop(self, symbol, activation_profit=0.5, trailing_distance=0.02):
-        """
-        Trailing stop is now handled by EA (ManageTrailingStop + SMC_ManageGainProtectionTrail).
+        """Trailing stop is now handled by EA (ManageTrailingStop + SMC_ManageGainProtectionTrail).
         Python side no longer manages SL/TP directly.
         """
+        try:
+            symbol = position.symbol if hasattr(position, 'symbol') else str(position)
+        except Exception:
+            symbol = str(position)
         logger.debug(f"Trailing stop for {symbol} managed by EA - skipping Python-side update")
         return False
         
@@ -4250,7 +4223,9 @@ class MT5AIClient:
         priority_symbols = [
             'EURUSD', 'GBPUSD', 'USDJPY', 'AUDUSD', 'USDCAD',
             'EURGBP', 'EURJPY', 'GBPJPY', 'XAUUSD', 'XAGUSD',
-            'BTCUSD', 'ETHUSD', 'Boom 500 Index', 'Crash 500 Index'
+            'BTCUSD', 'ETHUSD', 'Boom 500 Index', 'Crash 500 Index',
+            'PainX 600', 'PainX 1200', 'GainX 400', 'GainX 600',
+            'GainX 800', 'GainX 1200',
         ]
         
         self.symbols = []

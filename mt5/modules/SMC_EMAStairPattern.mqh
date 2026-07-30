@@ -311,7 +311,8 @@ void ManageEMAStairPattern()
 {
    if(!UseEMAStairPattern || BlockAllTrades) return;
 
-   int emaHandle = emaFastM5;
+   int emaHandle = emaStairM5;
+   if(emaHandle == INVALID_HANDLE) emaHandle = emaFastM5;
    if(emaHandle == INVALID_HANDLE) emaHandle = emaSlowM5;
    if(emaHandle == INVALID_HANDLE) return;
 

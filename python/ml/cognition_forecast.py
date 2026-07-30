@@ -6,6 +6,9 @@ Intégré à ai_server + EA MT5 (SMC_FuturePath).
 from __future__ import annotations
 
 import math
+import os
+import urllib.request
+import urllib.parse
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -547,3 +550,24 @@ def timeframe_bar_seconds(timeframe: str) -> int:
         "H1": 3600, "H4": 14400, "D1": 86400,
     }
     return mapping.get(tf, 60)
+
+
+def get_historical_data_mt5(symbol: str, timeframe: str = "H1", count: int = 500):
+    """Récupère les données historiques depuis MT5 via l'API HTTP."""
+    import json
+    try:
+        port = os.environ.get("MT5_API_PORT", "5000")
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{port}/api/rates?symbol={urllib.parse.quote(symbol)}&timeframe={timeframe}&count={count}",
+            method="GET",
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        if not data.get("ok") or "rates" not in data:
+            return None
+        df = pd.DataFrame(data["rates"])
+        if "time" in df.columns:
+            df["time"] = pd.to_datetime(df["time"])
+        return df
+    except Exception:
+        return None

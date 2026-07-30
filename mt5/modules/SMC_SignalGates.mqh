@@ -13,16 +13,28 @@ string   g_signalActiveAction = "";  // "BUY" / "SELL" / ""
 
 //+------------------------------------------------------------------+
 //| Met à jour le timer d'apparition du signal                       |
-//| newAction = décision finale à confirmer (BUY/SELL), typiquement  |
-//| la décision GOM clignotante. Chaîne vide = pas de signal.        |
+//| Accepte 2 sources : AI server (BUY/SELL) OU GOM PERFECT (|vn|>=3)|
+//| Si les 2 disent BUY/SELL → merge; si GOM seul → suffit.          |
 //+------------------------------------------------------------------+
-void UpdateSignalAppearTime(const string newAction)
+void UpdateSignalAppearTime(const string newAction, int gomVerdictNum = 0)
 {
-   string decision = newAction;
-   StringToUpper(decision);
-   if(decision != "BUY" && decision != "SELL")
-      decision = "";
+   // ── Étape 1 : résoudre la décision ──
+   string aiDecision = newAction;
+   StringToUpper(aiDecision);
+   bool aiIsValid = (aiDecision == "BUY" || aiDecision == "SELL");
 
+   string gomDecision = "";
+   if(MathAbs(gomVerdictNum) >= 3)
+      gomDecision = (gomVerdictNum > 0) ? "BUY" : "SELL";
+
+   // Priorité : AI server si valide, sinon GOM, sinon rien
+   string decision = "";
+   if(aiIsValid)
+      decision = aiDecision;
+   else if(gomDecision != "")
+      decision = gomDecision;
+
+   // ── Étape 2 : gérer le timer ──
    static string s_prevDecision = "";
    bool wasEntry = (s_prevDecision == "BUY" || s_prevDecision == "SELL");
    bool isEntry  = (decision == "BUY" || decision == "SELL");

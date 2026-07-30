@@ -343,7 +343,7 @@ bool ADAPTIVE_ExecuteLimit(const TMScannerOpportunity &opp)
    req.deviation = 50;
    req.comment = "DOW SCALP";
 
-   if(!SafeSafeSafeOrderSend(req, res, req.comment))
+   if(!SafeOrderSend(req, res, req.comment))
    {
       DebugWarn("AdaptiveExecutor", "LIMIT order failed",
                 StringFormat("sym=%s rc=%d err=%s", opp.symbol, res.retcode, res.comment));
@@ -487,7 +487,7 @@ bool ADAPTIVE_ExecuteMarket(const TMScannerOpportunity &opp)
    req.deviation = 50;
    req.comment = "DOW SCALP";
 
-   if(!SafeSafeSafeOrderSend(req, res, req.comment) || res.retcode != TRADE_RETCODE_DONE)
+   if(!SafeOrderSend(req, res, req.comment) || res.retcode != TRADE_RETCODE_DONE)
    {
       DebugWarn("AdaptiveExecutor", "MARKET order failed",
                 StringFormat("sym=%s rc=%d err=%s", opp.symbol, res.retcode, res.comment));
@@ -554,7 +554,7 @@ void ADAPTIVE_ManagePendingOrders()
          req.action = TRADE_ACTION_REMOVE;
          req.order = ticket;
 
-         if(SafeSafeOrderSend(req, res))
+         if(SafeOrderSend(req, res))
          {
             Print("[DOW-SCANNER] LIMIT annulé (GOM non PERFECT vn=", vn, ") — ", symbol);
          }
@@ -569,7 +569,7 @@ void ADAPTIVE_ManagePendingOrders()
          req.action = TRADE_ACTION_REMOVE;
          req.order = ticket;
 
-         if(SafeSafeOrderSend(req, res))
+         if(SafeOrderSend(req, res))
          {
             DebugInfo("AdaptiveExecutor", "Stale LIMIT cancelled",
                       StringFormat("sym=%s ticket=#%llu age=%ds",
@@ -606,5 +606,7 @@ void ADAPTIVE_Cleanup()
 }
 
 #endif // TM_ADAPTIVE_EXECUTOR_MQH
+
+
 
 

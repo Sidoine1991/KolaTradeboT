@@ -3031,7 +3031,7 @@ bool SMC_MarketDealSend(const string sym, const int dirSign, const double lot,
       else
          req.type_filling = ORDER_FILLING_RETURN;
    }
-   return SafeSafeSafeOrderSend(req, result);
+   return SafeOrderSend(req, result);
 }
 
 bool SMCGP_ExecutePipelineOrder(const string sym, const string action,
@@ -4731,5 +4731,6 @@ void SMCGP_DrawGOMSignal()
 #include "SMC_FuturePath.mqh"
 
 #endif
+
 
 
