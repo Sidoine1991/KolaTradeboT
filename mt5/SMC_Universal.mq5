@@ -44,8 +44,7 @@
 #include <Trade/DealInfo.mqh>
 #include <Trade/HistoryOrderInfo.mqh>
 #include "modules/SMC_SymbolCategory.mqh"
-#include "modules/SymbolScanner.mqh"
-#include "modules/SpikeChainDetector.mqh"
+#include "Modele_spike/SpikeChainPredictor.mqh"
 #include "modules/SMC_CrossCorrelation.mqh"
 string g_sch1PanelText = "";
 #include "modules/SMC_ChainPredictor.mqh"
@@ -55,6 +54,16 @@ string g_sch1PanelText = "";
 // #include "modules/EA_PivotEntry.mqh"        // TODO: Refactor pour MQL5
 // #include "modules/EA_IndependentTrader.mqh"  // TODO: Refactor pour MQL5
 // #include "modules/AutoTrading.mqh"  // TODO: Fix MQL5 OrderSend compatibility
+
+// Spike Chain ONNX Predictor (Modele_spike/SpikeChainPredictor.mqh)
+CSpikeChainPredictor   g_spikePredictor;
+bool                   g_spikePredictorReady     = false;
+double   g_lastSpikeAmplitudePips   = 0.0;
+double   g_lastSpikeAmplitudeAtr    = 0.0;
+double   g_lastSpikeVelocityProxy   = 0.0;
+datetime g_lastSpikeDetectTime      = 0;
+datetime g_prevSpikeDetectTime      = 0;
+bool     g_lastSpikeWasUp           = false;
 
 //--- Constants (hardcoded visual params to save input slots) ---
 #define ShowPredictedSwing          true    // SL/SH prédits sur le canal
@@ -76,9 +85,15 @@ string g_sch1PanelText = "";
 #define ShowSignalArrow             true    // Flèche dynamique BUY/SELL
 #define ShowSpikeZones              true    // Zones spike H1+M5
 
-// Include GOM pipeline + graphics after defines
+// Include GOM pipeline after feature defines (graphics included later with SpikeHazard)
+enum GOMVerdictSourceEnum
+{
+   GOM_SRC_TRADINGVIEW = 0,
+   GOM_SRC_LOCAL       = 1,
+   GOM_SRC_AUTO        = 2,
+   GOM_SRC_PREDICTIVE  = 3,
+};
 #include "modules/SMC_GOM_Pipeline.mqh"
-#include "modules/GOM_Graphics.mqh"
 
 //+------------------------------------------------------------------+
 //| ENUMS, STRUCTS & DEFINES                                        |
@@ -717,35 +732,7 @@ struct SMC_Signal {
    double stopLoss;
    double takeProfit;
 };
-enum ENUM_SYMBOL_CATEGORY {
-   SYM_BOOM_CRASH,
-   SYM_VOLATILITY,
-   SYM_FOREX,
-   SYM_COMMODITY,
-   SYM_METAL,
-   SYM_CRYPTO,
-   SYM_UNKNOWN
-};
-ENUM_SYMBOL_CATEGORY SMC_GetSymbolCategory(string symbol)
-{
-   string s = symbol;
-   StringToUpper(s);
-   // Deriv: indices de spike (comportement identique à Boom/Crash: mouvements brusques 1 sens)
-   if(StringFind(s, "BOOM") >= 0 || StringFind(s, "CRASH") >= 0) return SYM_BOOM_CRASH;
-   // Weltrade: indices synthétiques équivalents Boom/Crash (spikes brusques)
-   if(StringFind(s, "PAINX") >= 0 || StringFind(s, "GAINX") >= 0) return SYM_BOOM_CRASH;
-   // Deriv: Volatility, Jump, Step, Range Break (mouvements continus, pas de spike directionnel unique)
-   if(StringFind(s, "VOLATILITY") >= 0 || StringFind(s, "RANGE BREAK") >= 0 ||
-      StringFind(s, "JUMP") >= 0 || StringFind(s, "STEP") >= 0) return SYM_VOLATILITY;
-   // Métaux: couvre XAUUSD, XAUUSDm, XAUUSD.m, GOLD#, GOLDm (XM Global, Weltrade, etc. - suffixes broker ignorés)
-   if(StringFind(s, "XAU") >= 0 || StringFind(s, "GOLD") >= 0) return SYM_METAL;
-   if(StringFind(s, "XAG") >= 0 || StringFind(s, "SILVER") >= 0) return SYM_METAL;
-   if(StringFind(s, "OIL") >= 0 || StringFind(s, "COPPER") >= 0) return SYM_COMMODITY;
-   if(StringFind(s, "BTC") >= 0 || StringFind(s, "ETH") >= 0 || StringFind(s, "SOL") >= 0 ||
-      StringFind(s, "CRYPTO") >= 0 || StringFind(s, "BITCOIN") >= 0 || StringFind(s, "ETHEREUM") >= 0) return SYM_CRYPTO;
-   if(StringFind(s, "USD") >= 0 || StringFind(s, "EUR") >= 0 || StringFind(s, "GBP") >= 0 || StringFind(s, "JPY") >= 0) return SYM_FOREX;
-   return SYM_UNKNOWN;
-}
+// SMC_GetSymbolCategory — voir modules/SMC_SymbolCategory.mqh (include ligne 46)
 
 // Un symbole se comporte-t-il comme un indice "spike" (Boom/Crash Deriv, Painx/Gainx Weltrade)?
 bool SMC_IsSpikeStyleSymbol(const string symbol)
@@ -1446,14 +1433,14 @@ input int    MaxPositionsTerminal = 2;   // Nombre max de positions (tout le ter
 input bool   OnePositionPerSymbol = true; // Une seule position par symbole
 input int    InpMagicNumber       = 202502; // Magic Number
 input double MaxTotalLossDollars  = 10.0; // Perte totale max ($)
-input double MaxLossPerSpikeTradeDollars = 2.0;  // Perte max par trade Spike Boom/Crash/Painx/Gainx ($)
+input double MaxLossPerSpikeTradeDollars = 3.0;  // Perte max par trade Spike Boom/Crash/Painx/Gainx ($)
 input double MaxRiskPerTradePercent   = 1.5;  // Risque normal par trade (% equity)
 input double MaxDailyDrawdownPercent  = 10.0; // Drawdown max journalier (%)
 input double MinSetupScoreEntry      = 75.0;  // Score minimum (0-100) pour entrée
 input double MinAIConfidencePercent   = 65.0;  // Confiance IA min (%)
 input group "=== SNIPER SCALPER MODE (cap $ + RR + confluence) ==="
 input bool   UseSniperScalperMode    = true;   // Active le cap $ universel + RR mini sur tous les trades
-input double MaxLossPerTradeDollars  = 2.0;   // Perte MAX absolue par trade, tous symboles ($)
+input double MaxLossPerTradeDollars  = 3.0;   // Perte MAX absolue par trade, tous symboles ($)
 input int    MinPositionLifetimeSec = 120;   // Délai minimum avant fermeture discrétionnaire (secondes) - NOUVEAU
 input double MinRewardRiskRatio      = 3.0;    // RR minimum exigé (TP = SL_dist x ce ratio)
 input int    MinSniperConfluenceGates = 4;     // Nb mini de confluences SMC simultanées (OB,FVG,BOS,Sweep,OTE,EMA/SR,GOM,IA)
@@ -1650,13 +1637,6 @@ input double ImpulseZoneTP_ATRMult  = 5.0;   // TP impulse trade (x ATR)
 input group "=== GOM PIPELINE (verdict + dashboard) ==="
 input bool   UseGOMVerdictFilter    = true;  // Filtrer entrées par verdict GOOD/PERFECT
 input bool   UseGOMPipeline         = true;  // Pipeline Python → MT5
-enum GOMVerdictSourceEnum
-{
-   GOM_SRC_TRADINGVIEW = 0,
-   GOM_SRC_LOCAL       = 1,
-   GOM_SRC_AUTO        = 2,
-   GOM_SRC_PREDICTIVE  = 3,
-};
 input GOMVerdictSourceEnum GOMVerdictSource = GOM_SRC_PREDICTIVE;
 input bool   PipelineOnlyMode       = false;
 input bool   ShowGOMDashboard       = true;  // Tableau de bord verdict GOM
@@ -1667,8 +1647,8 @@ input bool   PredictivePanelAlert   = true;  // Alerte MT5/WhatsApp setup
 input bool   ShowTVSyncedLevels     = true;  // Dessins TV sync
 input bool   UseGOMWaitAutoClose    = true;  // Fermer si GOM=WAIT (après seuil $ + âge)
 input double GOMWaitCloseMinLossUSD = 2.0;   // Seuil perte min fermeture WAIT ($)
-input double GOMHoldMaxLossUSD      = 2.0;   // Perte max GOM valide ($) - LOSS-GUARD
-input double UniversalMaxLossUSD    = 2.0;   // Perte max toutes positions EA ($)
+input double GOMHoldMaxLossUSD      = 3.0;   // Perte max GOM valide ($) - LOSS-GUARD
+input double UniversalMaxLossUSD    = 3.0;   // Perte max toutes positions EA ($)
 input bool   GOMRequireOBTouch      = true;  // Entrée sur OB entry
 input bool   GOMRequireOTE          = true;  // Entrée si OTE
 input int    GOMPollIntervalSec     = 0;     // Poll GOM (0=chaque tick, sinonz secondes)
@@ -1898,7 +1878,7 @@ input bool   NoSLTP_BoomCrash  = false;
 input double BoomCrashSpikeTP  = 2.0;   // Profit min pour fermer spike ($) - augmenté à $2 pour laisser respirer
 input double BoomCrashSpikePct = 0.50;
 input double TargetProfitBoomCrashUSD = 2.0;
-input double MaxLossDollars         = 2.0;    // Perte min $ avant sortie auto (évite sorties rapides)
+input double MaxLossDollars         = 3.0;    // Perte min $ avant sortie auto (évite sorties rapides)
 input double TakeProfitDollars = 2.0;
 input bool   UseSpikeMLFilter        = true;
 input double SpikeML_MinProbability  = 0.75;
@@ -2018,7 +1998,6 @@ bool AreAllTimeframesAligned(string &direction);
 #include "modules/SMC_ProbabilityGate.mqh"
 #include "modules/SMC_DowTrendline.mqh"
 #include "modules/SMC_GOMAlign.mqh"
-#include "modules/SMC_GOM_Pipeline.mqh"
 #include "modules/SMC_ChartTools.mqh"
 #include "modules/SMC_SpikeChainSignal.mqh"
 #include "modules/SMC_AutoScalp.mqh"
@@ -2029,6 +2008,7 @@ bool AreAllTimeframesAligned(string &direction);
 #include "modules/AdaptiveExecutor.mqh"
 #include "modules/AtrTrailingStop.mqh"
 #include "modules/SpikeHazard_Integration_Block.mqh"
+#include "modules/GOM_Graphics.mqh"
 
 // ==========================================================================
 // === PROFIL OR / FOREX / CRYPTO — IMPLÉMENTATIONS                       ===
@@ -2451,6 +2431,13 @@ void SMC_ManageGoldScalp()
    }
 
    g_goldScalpLastEntry = TimeCurrent();
+
+   // Radical block: vérifier si le trade est autorisé (GOM WAIT / verdict faible bloquent via CanTradeOnSymbol)
+   if(!CanTradeOnSymbol(_Symbol))
+   {
+      Print("[GOLD-SCALP] BUY BLOQUÉ — CanTradeOnSymbol false (GOM/terminal)");
+      return;
+   }
 
    if(SafeOrderSendAndAlert(req, res) && res.retcode == TRADE_RETCODE_DONE)
    {
@@ -3442,6 +3429,24 @@ bool SymbolHasActiveOrder(const string symbol)
 //+------------------------------------------------------------------+
 bool CanTradeOnSymbol(const string symbol)
 {
+   // Blocage radical si GOM indique WAIT (vn==0) ou verdict insuffisant quand le filtre GOM est activé.
+   // Cela empêche la plupart des chemins d'exécution d'envoyer des ordres marché par inadvertance.
+   if(UseGOMVerdictFilter)
+   {
+      // Si GOM connecté et verdict = WAIT -> bloquer tout
+      if(g_smcGomConnected && g_smcGomVerdictNum == 0)
+         return false;
+      // Si verdict SIMPLE (|vn| < MinGOMVerdictNumAbs) -> bloquer
+      if(g_smcGomConnected && MathAbs(g_smcGomVerdictNum) < MinGOMVerdictNumAbs)
+         return false;
+   }
+   else
+   {
+      // Si l'utilisateur n'utilise pas le filtre GOM mais que le pipeline GOM est déconnecté,
+      // considérer comme blocage par sécurité (optionnel mais plus sûr en prod)
+      if(!g_smcGomConnected) return false;
+   }
+
    if(IsTerminalFull()) return false;
    if(SymbolHasActiveOrder(symbol)) return false;
    return true;
@@ -8068,7 +8073,13 @@ void ExecuteSignal(SMC_Signal &sig)
 
    if(sig.action == "BUY")
    {
-      if(!CanTradeOnSymbol(_Symbol)) { Print("🚫 SMC BUY BLOQUÉ — Terminal plein ou ordre existant sur ", _Symbol); return; }
+      if(!CanTradeOnSymbol(_Symbol)) { Print("🚫 SMC BUY BLOQUÉ — Terminal plein ou ordre existant sur ", _Symbol); ReleaseOpenLock(); return; }
+      // Gate GOM centralisée: interdire ordres marché si GOM=WAIT / contre-verdict
+      if(!CanPlaceMarketOrder(_Symbol, 1)) { Print("🚫 SMC BUY BLOQUÉ — GOM/filtre non satisfait (CanPlaceMarketOrder)"); ReleaseOpenLock(); return; }
+      // Exiger clignotement/deriv arrow récent (levran) avant marché
+      if(!HasRecentSMCDerivArrowForDirection("BUY")) { Print("🚫 SMC BUY BLOQUÉ — pas de flèche Deriv/Levran récente"); ReleaseOpenLock(); return; }
+      // Exiger proximité d'une trendline / SR / DOW EP (x ATR)
+      if(!SMC_IsPriceNearLevel(1, _Symbol, ScannerLimitATRThresh)) { Print("🚫 SMC BUY BLOQUÉ — pas proche Trendline/SR/EP (proximité ATR<", DoubleToString(ScannerLimitATRThresh,2), ")"); ReleaseOpenLock(); return; }
       if(NoSLTP_BoomCrash && SMC_GetSymbolCategory(_Symbol) == SYM_BOOM_CRASH)
          trade.Buy(lotSize, _Symbol, 0, 0, 0, "SMC " + sig.concept);
       else
@@ -8082,7 +8093,13 @@ void ExecuteSignal(SMC_Signal &sig)
    }
    else if(sig.action == "SELL")
    {
-      if(!CanTradeOnSymbol(_Symbol)) { Print("🚫 SMC SELL BLOQUÉ — Terminal plein ou ordre existant sur ", _Symbol); return; }
+      if(!CanTradeOnSymbol(_Symbol)) { Print("🚫 SMC SELL BLOQUÉ — Terminal plein ou ordre existant sur ", _Symbol); ReleaseOpenLock(); return; }
+      // Gate GOM centralisée: interdire ordres marché si GOM=WAIT / contre-verdict
+      if(!CanPlaceMarketOrder(_Symbol, -1)) { Print("🚫 SMC SELL BLOQUÉ — GOM/filtre non satisfait (CanPlaceMarketOrder)"); ReleaseOpenLock(); return; }
+      // Exiger clignotement/deriv arrow récent (levran) avant marché
+      if(!HasRecentSMCDerivArrowForDirection("SELL")) { Print("🚫 SMC SELL BLOQUÉ — pas de flèche Deriv/Levran récente"); ReleaseOpenLock(); return; }
+      // Exiger proximité d'une trendline / SR / DOW EP (x ATR)
+      if(!SMC_IsPriceNearLevel(-1, _Symbol, ScannerLimitATRThresh)) { Print("🚫 SMC SELL BLOQUÉ — pas proche Trendline/SR/EP (proximité ATR<", DoubleToString(ScannerLimitATRThresh,2), ")"); ReleaseOpenLock(); return; }
       if(NoSLTP_BoomCrash && SMC_GetSymbolCategory(_Symbol) == SYM_BOOM_CRASH)
          trade.Sell(lotSize, _Symbol, 0, 0, 0, "SMC " + sig.concept);
       else
@@ -8231,17 +8248,6 @@ datetime               g_spikeChainLastBarTime  = 0;   // dernière bougie LTF t
 int                    g_lastStrongBarDir       = 0;   // direction de la dernière bougie forte vue (mémoire courte)
 datetime               g_lastStrongBarTime      = 0;
 bool                   g_lastSpikeEntryWasEarly = false; // dernière entrée spike déclenchée en mode précoce ?
-
-// Spike Chain ONNX Predictor
-CSpikeChainPredictor   g_spikePredictor;
-bool                   g_spikePredictorReady     = false;
-// Dernier spike détecté (pour features ONNX)
-double   g_lastSpikeAmplitudePips   = 0.0;
-double   g_lastSpikeAmplitudeAtr    = 0.0;
-double   g_lastSpikeVelocityProxy   = 0.0;
-datetime g_lastSpikeDetectTime      = 0;
-datetime g_prevSpikeDetectTime      = 0;
-bool     g_lastSpikeWasUp           = false;
 
 //+------------------------------------------------------------------+
 //| Calcule le z-score de l'ATR courant vs sa moyenne/écart-type      |
@@ -9348,6 +9354,10 @@ void TP1_CloseAndReEntry()
                    ReleaseOpenLock(); continue;
                 }
                 if(!CanTradeOnSymbol(symbol)) { Print("🚫 TP1-REENTRY BUY BLOQUÉ — Terminal plein ou ordre existant sur ", symbol); ReleaseOpenLock(); continue; }
+                // Gate centralisées
+                if(!CanPlaceMarketOrder(symbol, 1)) { Print("🚫 TP1-REENTRY BUY BLOQUÉ — GOM/filtre non satisfait (CanPlaceMarketOrder)"); ReleaseOpenLock(); continue; }
+                if(!HasRecentSMCDerivArrowForDirection("BUY")) { Print("🚫 TP1-REENTRY BUY BLOQUÉ — pas de flèche Deriv/Levran récente"); ReleaseOpenLock(); continue; }
+                if(!SMC_IsPriceNearLevel(1, symbol, ScannerLimitATRThresh)) { Print("🚫 TP1-REENTRY BUY BLOQUÉ — pas proche Trendline/SR/EP (proximité ATR<", DoubleToString(ScannerLimitATRThresh,2), ")"); ReleaseOpenLock(); continue; }
                 double sl = NormalizeDouble(ask - atrVal * GOMAlignSL_ATRMult, dg);
                 double tp = NormalizeDouble(ask + atrVal * GOMAlignTP_ATRMult, dg);
                 if(trade.Buy(lot, symbol, ask, sl, tp, "TP1-REENTRY BUY"))
@@ -9367,6 +9377,10 @@ void TP1_CloseAndReEntry()
                    ReleaseOpenLock(); continue;
                 }
                 if(!CanTradeOnSymbol(symbol)) { Print("🚫 TP1-REENTRY SELL BLOQUÉ — Terminal plein ou ordre existant sur ", symbol); ReleaseOpenLock(); continue; }
+                // Gate centralisées
+                if(!CanPlaceMarketOrder(symbol, -1)) { Print("🚫 TP1-REENTRY SELL BLOQUÉ — GOM/filtre non satisfait (CanPlaceMarketOrder)"); ReleaseOpenLock(); continue; }
+                if(!HasRecentSMCDerivArrowForDirection("SELL")) { Print("🚫 TP1-REENTRY SELL BLOQUÉ — pas de flèche Deriv/Levran récente"); ReleaseOpenLock(); continue; }
+                if(!SMC_IsPriceNearLevel(-1, symbol, ScannerLimitATRThresh)) { Print("🚫 TP1-REENTRY SELL BLOQUÉ — pas proche Trendline/SR/EP (proximité ATR<", DoubleToString(ScannerLimitATRThresh,2), ")"); ReleaseOpenLock(); continue; }
                 double sl = NormalizeDouble(bid + atrVal * GOMAlignSL_ATRMult, dg);
                 double tp = NormalizeDouble(bid - atrVal * GOMAlignTP_ATRMult, dg);
                 if(trade.Sell(lot, symbol, bid, sl, tp, "TP1-REENTRY SELL"))
@@ -13172,6 +13186,14 @@ void ExecuteDerivArrowTrade(string direction)
    request.magic = InpMagicNumber;
    request.comment = "DERIV ARROW " + direction;
    
+   // Radical block: vérifier si l'ordre dérivé est autorisé (GOM WAIT / verdict faible bloquent)
+   int dirSign = (direction == "BUY") ? 1 : -1;
+   if(!CanTradeOnSymbol(_Symbol) || !CanPlaceMarketOrder(_Symbol, dirSign))
+   {
+      Print("🚫 ORDRE DERIV ARROW BLOQUÉ — CanTradeOnSymbol/CanPlaceMarketOrder false (GOM/terminal)");
+      return;
+   }
+
    if(OrderSend(request, result))
    {
       RegisterOrderPlaced();
@@ -13347,7 +13369,11 @@ void ExecuteGOMAlignmentMarketOrder()
 
    if(gomBuy)
    {
-      if(!CanTradeOnSymbol(_Symbol)) { Print("🚫 GOM-ALIGN BUY BLOQUÉ — Terminal plein ou ordre existant sur ", _Symbol); return; }
+      if(!CanTradeOnSymbol(_Symbol)) { Print("🚫 GOM-ALIGN BUY BLOQUÉ — Terminal plein ou ordre existant sur ", _Symbol); ReleaseOpenLock(); return; }
+      // Exiger clignotement/deriv arrow et proximité niveau
+      if(!HasRecentSMCDerivArrowForDirection("BUY")) { Print("🚫 GOM-ALIGN BUY BLOQUÉ — pas de flèche Deriv/Levran récente"); ReleaseOpenLock(); return; }
+      if(!SMC_IsPriceNearLevel(1, _Symbol, ScannerLimitATRThresh)) { Print("🚫 GOM-ALIGN BUY BLOQUÉ — pas proche Trendline/SR/EP (proximité ATR<", DoubleToString(ScannerLimitATRThresh,2), ")"); ReleaseOpenLock(); return; }
+
       double sl = NormalizeDouble(ask - atrValue * GOMAlignSL_ATRMult, dg);
       double tp = NormalizeDouble(ask + atrValue * GOMAlignTP_ATRMult, dg);
 
@@ -13388,7 +13414,11 @@ if(trade.Buy(lot, _Symbol, ask, sl, tp, "GOM-ALIGN BUY"))
       double sl = NormalizeDouble(bid + atrValue * GOMAlignSL_ATRMult, dg);
       double tp = NormalizeDouble(bid - atrValue * GOMAlignTP_ATRMult, dg);
 
-if(trade.Sell(lot, _Symbol, bid, sl, tp, "GOM-ALIGN SELL"))
+       // Exiger clignotement/deriv arrow et proximité niveau pour SELL
+       if(!HasRecentSMCDerivArrowForDirection("SELL")) { Print("🚫 GOM-ALIGN SELL BLOQUÉ — pas de flèche Deriv/Levran récente"); ReleaseOpenLock(); return; }
+       if(!SMC_IsPriceNearLevel(-1, _Symbol, ScannerLimitATRThresh)) { Print("🚫 GOM-ALIGN SELL BLOQUÉ — pas proche Trendline/SR/EP (proximité ATR<", DoubleToString(ScannerLimitATRThresh,2), ")"); ReleaseOpenLock(); return; }
+
+       if(trade.Sell(lot, _Symbol, bid, sl, tp, "GOM-ALIGN SELL"))
        {
           RegisterOrderPlaced();
           orderExecuted = true;
@@ -13401,18 +13431,18 @@ if(trade.Sell(lot, _Symbol, bid, sl, tp, "GOM-ALIGN SELL"))
                 " | vn=", g_smcGomVerdictNum, " TFs: M1=", g_smcTfM1Dir,
                 " M5=", g_smcTfM5Dir, " M15=", g_smcTfM15Dir,
                 " H1=", g_smcTfH1Dir, " H4=", g_smcTfH4Dir, " D1=", g_smcTfD1Dir);
-         if(UseNotifications)
-         {
-            Alert("🚀 GOM-ALIGN SELL ", _Symbol, " @", DoubleToString(bid, dg),
-                  " vn=", g_smcGomVerdictNum, " 6TF aligned");
-            SendNotification("🚀 GOM-ALIGN SELL " + _Symbol + " vn=" + IntegerToString(g_smcGomVerdictNum) + " 6TF aligned");
-             // WhatsApp SR20 signal
-             string gomSellMsg = "6 TFs alignes vn=" + IntegerToString(g_smcGomVerdictNum);
-             SendSR20WhatsAppSignal("SR20_ENTRY", _Symbol, "SELL",
-                                    bid, bid + atrValue * SL_ATRMult, bid - atrValue * TP_ATRMult,
-                                    bid, 0, "GOM-ALIGN", atrValue,
-                                    0, 0, gomSellMsg);
-         }
+          if(UseNotifications)
+          {
+             Alert("🚀 GOM-ALIGN SELL ", _Symbol, " @", DoubleToString(bid, dg),
+                   " vn=", g_smcGomVerdictNum, " 6TF aligned");
+             SendNotification("🚀 GOM-ALIGN SELL " + _Symbol + " vn=" + IntegerToString(g_smcGomVerdictNum) + " 6TF aligned");
+              // WhatsApp SR20 signal
+              string gomSellMsg = "6 TFs alignes vn=" + IntegerToString(g_smcGomVerdictNum);
+              SendSR20WhatsAppSignal("SR20_ENTRY", _Symbol, "SELL",
+                                     bid, bid + atrValue * SL_ATRMult, bid - atrValue * TP_ATRMult,
+                                     bid, 0, "GOM-ALIGN", atrValue,
+                                     0, 0, gomSellMsg);
+          }
       }
       else
       {
@@ -13500,6 +13530,14 @@ void ExecuteBoomCrashSpikeMarketOrder()
        req.sl     = sl;
        req.tp     = tp;
        req.comment = "SPIKE MARKET Crash";
+    }
+
+    // Radical block: vérifier si le trade est autorisé (GOM WAIT / verdict faible bloquent via CanTradeOnSymbol)
+    if(!CanTradeOnSymbol(_Symbol))
+    {
+       Print("🚫 SPIKE MARKET BLOQUÉ — CanTradeOnSymbol false (GOM/terminal)");
+       ReleaseOpenLock();
+       return;
     }
 
     if(SafeOrderSend(req, res, req.comment) && res.retcode == TRADE_RETCODE_DONE)
@@ -13679,6 +13717,11 @@ void ExecuteAIDecisionMarketOrder()
        }
        if(!CanTradeOnSymbol(_Symbol)) { Print("🚫 IA SMC-EMA BUY BLOQUÉ — Terminal plein ou ordre existant sur ", _Symbol); ReleaseOpenLock(); return; }
 // Utiliser l'entrée précise calculée au lieu du prix actuel
+       // Gate centralisées: GOM checked earlier, exiger CanPlaceMarketOrder + blink + proximité
+       if(!CanPlaceMarketOrder(_Symbol, 1)) { Print("🚫 IA BUY PRÉCIS BLOQUÉ — GOM/filtre non satisfait (CanPlaceMarketOrder)"); ReleaseOpenLock(); return; }
+       if(!HasRecentSMCDerivArrowForDirection("BUY")) { Print("🚫 IA BUY PRÉCIS BLOQUÉ — pas de flèche Deriv/Levran récente"); ReleaseOpenLock(); return; }
+       if(!SMC_IsPriceNearLevel(1, _Symbol, ScannerLimitATRThresh)) { Print("🚫 IA BUY PRÉCIS BLOQUÉ — pas proche Trendline/SR/EP (proximité ATR<", DoubleToString(ScannerLimitATRThresh,2), ")"); ReleaseOpenLock(); return; }
+
        if(trade.Buy(lot, _Symbol, preciseEntry, preciseSL, preciseTP, "IA SMC-EMA BUY PRÉCIS"))
        {
           RegisterOrderPlaced();
@@ -13710,6 +13753,10 @@ void ExecuteAIDecisionMarketOrder()
           ReleaseOpenLock();
           return;
        }
+       // Gate centralisées: GOM checked earlier, exiger CanPlaceMarketOrder + blink + proximité
+       if(!CanPlaceMarketOrder(_Symbol, -1)) { Print("🚫 IA SELL PRÉCIS BLOQUÉ — GOM/filtre non satisfait (CanPlaceMarketOrder)"); ReleaseOpenLock(); return; }
+       if(!HasRecentSMCDerivArrowForDirection("SELL")) { Print("🚫 IA SELL PRÉCIS BLOQUÉ — pas de flèche Deriv/Levran récente"); ReleaseOpenLock(); return; }
+       if(!SMC_IsPriceNearLevel(-1, _Symbol, ScannerLimitATRThresh)) { Print("🚫 IA SELL PRÉCIS BLOQUÉ — pas proche Trendline/SR/EP (proximité ATR<", DoubleToString(ScannerLimitATRThresh,2), ")"); ReleaseOpenLock(); return; }
        if(!CanTradeOnSymbol(_Symbol)) { Print("🚫 IA SMC-EMA SELL BLOQUÉ — Terminal plein ou ordre existant sur ", _Symbol); ReleaseOpenLock(); return; }
 // Utiliser l'entrée précise calculée au lieu du prix actuel
        if(trade.Sell(lot, _Symbol, preciseEntry, preciseSL, preciseTP, "IA SMC-EMA SELL PRÉCIS"))
@@ -15358,13 +15405,18 @@ void CheckRSISqueezeAndTrade()
 
    bool orderOK = false;
 
-    if(isBoom)
+     if(isBoom)
     {
-       if(g_smcGomConnected && g_smcGomVerdictNum < 0)
-{
-           Print("🚫 RSI-SQUEEZE BUY BLOQUÉ — GOM verdict=", g_smcGomVerdict, " (vn=", g_smcGomVerdictNum, ")");
-           ReleaseOpenLock(); return;
-        }
+       if(!g_smcGomConnected || g_smcGomVerdictNum == 0)
+       {
+          Print("🚫 RSI-SQUEEZE BLOQUÉ — GOM verdict=", g_smcGomVerdict, " (vn=", g_smcGomVerdictNum, ") — WAIT ou déconnecté");
+          ReleaseOpenLock(); return;
+       }
+       if(g_smcGomVerdictNum < 0)
+       {
+          Print("🚫 RSI-SQUEEZE BUY BLOQUÉ — GOM verdict=", g_smcGomVerdict, " (vn=", g_smcGomVerdictNum, ")");
+          ReleaseOpenLock(); return;
+       }
          double sl = NormalizeDouble(ask - atrVal * 2.0, dg);
          double tp = NormalizeDouble(ask + atrVal * 5.0, dg);
          if(!CanTradeOnSymbol(_Symbol)) { Print("🚫 RSI-SQUEEZE BUY BLOQUÉ — Terminal plein ou ordre existant sur ", _Symbol); ReleaseOpenLock(); return; }
@@ -15380,12 +15432,17 @@ void CheckRSISqueezeAndTrade()
        }
     }
      else
-     {
-        if(g_smcGomConnected && g_smcGomVerdictNum > 0)
-        {
-           Print("🚫 RSI-SQUEEZE SELL BLOQUÉ — GOM verdict=", g_smcGomVerdict, " (vn=", g_smcGomVerdictNum, ")");
-            ReleaseOpenLock(); return;
-         }
+    {
+       if(!g_smcGomConnected || g_smcGomVerdictNum == 0)
+       {
+          Print("🚫 RSI-SQUEEZE BLOQUÉ — GOM verdict=", g_smcGomVerdict, " (vn=", g_smcGomVerdictNum, ") — WAIT ou déconnecté");
+          ReleaseOpenLock(); return;
+       }
+       if(g_smcGomVerdictNum > 0)
+       {
+          Print("🚫 RSI-SQUEEZE SELL BLOQUÉ — GOM verdict=", g_smcGomVerdict, " (vn=", g_smcGomVerdictNum, ")");
+          ReleaseOpenLock(); return;
+       }
          double sl = NormalizeDouble(bid + atrVal * 2.0, dg);
          double tp = NormalizeDouble(bid - atrVal * 5.0, dg);
          if(!CanTradeOnSymbol(_Symbol)) { Print("🚫 RSI-SQUEEZE SELL BLOQUÉ — Terminal plein ou ordre existant sur ", _Symbol); ReleaseOpenLock(); return; }
@@ -16366,6 +16423,14 @@ void ExecuteVolatilityTrade(string direction)
     req.deviation = 50;
     req.comment   = "VOLATILITY " + direction;
     
+    // Radical block: vérifier si le trade Volatility est autorisé (GOM WAIT / verdict faible bloquent)
+    int dirSign = (direction == "BUY") ? 1 : -1;
+    if(!CanTradeOnSymbol(_Symbol) || !CanPlaceMarketOrder(_Symbol, dirSign))
+    {
+       Print("🚫 VOLATILITY TRADE BLOQUÉ — CanTradeOnSymbol/CanPlaceMarketOrder false (GOM/terminal)");
+       return;
+    }
+
     if(OrderSend(req, res))
     {
        ulong ticket = res.order;
@@ -17152,6 +17217,11 @@ void PlaceSRLimitOrders20Bars()
 if(impulseBuy)
      {
         if(!CanTradeOnSymbol(_Symbol)) { Print("🚫 IMPULSE BUY BLOQUÉ — Terminal plein ou ordre existant sur ", _Symbol); ReleaseOpenLock(); return; }
+        // Gate centralisées: GOM déjà vérifié plus haut, ajouter contrôles supplémentaires
+        if(!CanPlaceMarketOrder(_Symbol, 1)) { Print("🚫 IMPULSE BUY BLOQUÉ — GOM/filtre non satisfait (CanPlaceMarketOrder)"); ReleaseOpenLock(); return; }
+        if(!HasRecentSMCDerivArrowForDirection("BUY")) { Print("🚫 IMPULSE BUY BLOQUÉ — pas de flèche Deriv/Levran récente"); ReleaseOpenLock(); return; }
+        if(!SMC_IsPriceNearLevel(1, _Symbol, ScannerLimitATRThresh)) { Print("🚫 IMPULSE BUY BLOQUÉ — pas proche Trendline/SR/EP (proximité ATR<", DoubleToString(ScannerLimitATRThresh,2), ")"); ReleaseOpenLock(); return; }
+
         double entry = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
         double sl = NormalizeDouble(entry - atrVal * ImpulseZoneSL_ATRMult, dg);
         double tp = NormalizeDouble(entry + atrVal * ImpulseZoneTP_ATRMult, dg);
@@ -17172,6 +17242,11 @@ if(impulseBuy)
      else if(impulseSell)
      {
         if(!CanTradeOnSymbol(_Symbol)) { Print("🚫 IMPULSE SELL BLOQUÉ — Terminal plein ou ordre existant sur ", _Symbol); ReleaseOpenLock(); return; }
+        // Gate centralisées
+        if(!CanPlaceMarketOrder(_Symbol, -1)) { Print("🚫 IMPULSE SELL BLOQUÉ — GOM/filtre non satisfait (CanPlaceMarketOrder)"); ReleaseOpenLock(); return; }
+        if(!HasRecentSMCDerivArrowForDirection("SELL")) { Print("🚫 IMPULSE SELL BLOQUÉ — pas de flèche Deriv/Levran récente"); ReleaseOpenLock(); return; }
+        if(!SMC_IsPriceNearLevel(-1, _Symbol, ScannerLimitATRThresh)) { Print("🚫 IMPULSE SELL BLOQUÉ — pas proche Trendline/SR/EP (proximité ATR<", DoubleToString(ScannerLimitATRThresh,2), ")"); ReleaseOpenLock(); return; }
+
         double entry = SymbolInfoDouble(_Symbol, SYMBOL_BID);
         double sl = NormalizeDouble(entry + atrVal * ImpulseZoneSL_ATRMult, dg);
         double tp = NormalizeDouble(entry - atrVal * ImpulseZoneTP_ATRMult, dg);
