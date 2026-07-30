@@ -258,13 +258,13 @@ bool PivotLimit_ExecuteMarketAtLevel(const string symbol, const string direction
    {
       sl = NormalizeDouble(ask - slDist, dg);
       tp = NormalizeDouble(ask + tpDist, dg);
-      ok = trade.Buy(lot, symbol, ask, sl, tp, "PIVOT GREEN MARKET");
+      ok = SafeTradeBuy(lot, symbol, ask, sl, tp, "PIVOT GREEN MARKET");
    }
    else
    {
       sl = NormalizeDouble(bid + slDist, dg);
       tp = NormalizeDouble(bid - tpDist, dg);
-      ok = trade.Sell(lot, symbol, bid, sl, tp, "PIVOT RED MARKET");
+      ok = SafeTradeSell(lot, symbol, bid, sl, tp, "PIVOT RED MARKET");
    }
 
    if(ok)
@@ -441,4 +441,5 @@ string PivotLimitTracker_StatusLine()
 }
 
 #endif // SMC_PIVOT_LIMIT_TRACKER_MQH
+
 

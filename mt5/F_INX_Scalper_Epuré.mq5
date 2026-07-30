@@ -351,11 +351,11 @@ void OpenPosition(ENUM_POSITION_TYPE type)
    bool result = false;
    if(type == POSITION_TYPE_BUY)
    {
-      result = trade.Buy(lotSize, _Symbol, price, sl, tp, "Scalper Epuré BUY");
+      result = SafeTradeBuy(lotSize, _Symbol, price, sl, tp, "Scalper Epuré BUY");
    }
    else
    {
-      result = trade.Sell(lotSize, _Symbol, price, sl, tp, "Scalper Epuré SELL");
+      result = SafeTradeSell(lotSize, _Symbol, price, sl, tp, "Scalper Epuré SELL");
    }
    
    if(result)
@@ -398,3 +398,4 @@ double CalculateLotSize(double sl, double entry, ENUM_POSITION_TYPE type)
    
    return lotSize;
 }
+

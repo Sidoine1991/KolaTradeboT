@@ -219,9 +219,9 @@ bool OTE_PlaceTrade(string direction, double ask, double bid, double sl, double 
    bool ok = false;
    int dg = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
    if(direction == "BUY")
-      ok = trade.Buy(lots, _Symbol, ask, NormalizeDouble(sl, dg), NormalizeDouble(tp, dg), "OTE ZONE BUY");
+      ok = SafeTradeBuy(lots, _Symbol, ask, NormalizeDouble(sl, dg), NormalizeDouble(tp, dg), "OTE ZONE BUY");
    else
-      ok = trade.Sell(lots, _Symbol, bid, NormalizeDouble(sl, dg), NormalizeDouble(tp, dg), "OTE ZONE SELL");
+      ok = SafeTradeSell(lots, _Symbol, bid, NormalizeDouble(sl, dg), NormalizeDouble(tp, dg), "OTE ZONE SELL");
 
    if(ok)
    {
@@ -324,3 +324,4 @@ void OTE_DrawZone()
 }
 
 #endif // SMC_OTE_ZONE_MQH
+

@@ -1,5 +1,5 @@
 //+------------------------------------------------------------------+
-//| MCPSignalManager.mqh — Poll /pending-order, ingest, validate, exec|
+//| MCPSignalManager.mqh ï¿½ Poll /pending-order, ingest, validate, exec|
 //| "MCP" = Multi-modal Channel Pipeline (TradingView + WhatsApp)     |
 //+------------------------------------------------------------------+
 #ifndef TM_MCP_MANAGER_MQH
@@ -145,7 +145,7 @@ bool MCP_TryExecuteSignal(int sigIdx)
    }
    else if(sig.marketExec == false)
    {
-      // Limit execution: check if price touched entry ±tolerance
+      // Limit execution: check if price touched entry ï¿½tolerance
       double bid = SymbolInfoDouble(symbol, SYMBOL_BID);
       double ask = SymbolInfoDouble(symbol, SYMBOL_ASK);
       double tolerance = entry * g_state.config.mcpEntryTolerancePct;
@@ -183,9 +183,9 @@ bool MCP_TryExecuteSignal(int sigIdx)
    bool success = false;
 
    if(direction == 1)
-      success = trade.Buy(lot, symbol, adjustedEntry, sl, tp);
+      success = SafeTradeBuy(lot, symbol, adjustedEntry, sl, tp);
    else
-      success = trade.Sell(lot, symbol, adjustedEntry, sl, tp);
+      success = SafeTradeSell(lot, symbol, adjustedEntry, sl, tp);
 
    if(!success)
    {
@@ -201,7 +201,7 @@ bool MCP_TryExecuteSignal(int sigIdx)
    }
 
    // ???????????????????????????????????????????????????????????????
-   // STEP 4: Success — Update state & send notification
+   // STEP 4: Success ï¿½ Update state & send notification
    // ???????????????????????????????????????????????????????????????
 
    sig.executed = true;
@@ -273,7 +273,7 @@ void MCP_CheckDuplication()
 
       // Check duplication criteria
       if(g_state.config.duplicateRequireGoodPerfect && MathAbs(g_state.gom.verdictNum) < 2)
-         continue;  // Need at least GOOD (±2)
+         continue;  // Need at least GOOD (ï¿½2)
 
       if(g_state.gom.globalStrength < g_state.config.duplicateMinGlobalStrength)
          continue;
@@ -297,9 +297,9 @@ void MCP_CheckDuplication()
 
       bool dupSuccess = false;
       if(sig.direction == 1)
-         dupSuccess = trade.Buy(dupLot, sig.symbol, ask, sig.stopLoss, sig.takeProfit1);
+         dupSuccess = SafeTradeBuy(dupLot, sig.symbol, ask, sig.stopLoss, sig.takeProfit1);
       else
-         dupSuccess = trade.Sell(dupLot, sig.symbol, bid, sig.stopLoss, sig.takeProfit1);
+         dupSuccess = SafeTradeSell(dupLot, sig.symbol, bid, sig.stopLoss, sig.takeProfit1);
 
       if(dupSuccess)
       {
@@ -350,3 +350,4 @@ void MCP_Deinit()
 }
 
 #endif // TM_MCP_MANAGER_MQH
+

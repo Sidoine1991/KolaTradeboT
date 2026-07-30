@@ -1,5 +1,5 @@
 //+------------------------------------------------------------------+
-//| TVSetupManager.mqh — Manage TV setup limit orders (OB/KOLA)      |
+//| TVSetupManager.mqh ï¿½ Manage TV setup limit orders (OB/KOLA)      |
 //+------------------------------------------------------------------+
 #ifndef TM_TV_SETUP_MQH
 #define TM_TV_SETUP_MQH
@@ -251,9 +251,9 @@ void TV_ManageLimitOrder()
 
          bool success = false;
          if(g_state.setup.direction == 1)
-            success = trade.Buy(0.01, _Symbol, ask, g_state.setup.sl, g_state.setup.tp1);
+            success = SafeTradeBuy(0.01, _Symbol, ask, g_state.setup.sl, g_state.setup.tp1);
          else
-            success = trade.Sell(0.01, _Symbol, bid, g_state.setup.sl, g_state.setup.tp1);
+            success = SafeTradeSell(0.01, _Symbol, bid, g_state.setup.sl, g_state.setup.tp1);
 
          if(success)
          {
@@ -315,3 +315,4 @@ void TV_Deinit()
 }
 
 #endif // TM_TV_SETUP_MQH
+

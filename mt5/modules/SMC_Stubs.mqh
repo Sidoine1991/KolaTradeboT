@@ -273,6 +273,31 @@ bool SafeOrderSendAndAlert(MqlTradeRequest &req, MqlTradeResult &result, const s
    return ok;
 }
 
+// --- Safe trade wrappers for CTrade::Buy/Sell to enforce GOM gates
+bool SafeTradeBuy(double lot, const string symbol, double price, double sl, double tp, const string comment = "")
+{
+   int dirSign = 1;
+   if(!CanPlaceMarketOrder(symbol, dirSign))
+   {
+      Print("[SAFE-TRADE] BUY blocked by GOM/CAN'T trade on symbol: ", symbol);
+      return false;
+   }
+   CTrade t;
+   return t.Buy(lot, symbol, price, sl, tp, comment);
+}
+
+bool SafeTradeSell(double lot, const string symbol, double price, double sl, double tp, const string comment = "")
+{
+   int dirSign = -1;
+   if(!CanPlaceMarketOrder(symbol, dirSign))
+   {
+      Print("[SAFE-TRADE] SELL blocked by GOM/CAN'T trade on symbol: ", symbol);
+      return false;
+   }
+   CTrade t;
+   return t.Sell(lot, symbol, price, sl, tp, comment);
+}
+
 //--- OTE stubs
 // OTE_* : voir SMC_OTE_Zone.mqh (vraie implémentation, plus de stub ici)
 
