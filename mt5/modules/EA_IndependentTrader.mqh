@@ -75,7 +75,7 @@ TradeResult EAIT_ExecuteBUY(const double lotSize = 0.01)
     }
 
     // 5. Envoyer l'ordre
-    if(!OrderSend(request, tradeResult))
+    if(!SafeOrderSend(request, tradeResult))
    {
       result.reason = "ORDER_SEND_FAILED: " + IntegerToString(tradeResult.retcode);
       Print("[EAIT-BUY] ? OrderSend failed: ", result.reason);
@@ -160,7 +160,7 @@ TradeResult EAIT_ExecuteSELL(const double lotSize = 0.01)
     }
 
     // 5. Envoyer l'ordre
-    if(!OrderSend(request, tradeResult))
+    if(!SafeOrderSend(request, tradeResult))
    {
       result.reason = "ORDER_SEND_FAILED: " + IntegerToString(tradeResult.retcode);
       Print("[EAIT-SELL] ? OrderSend failed: ", result.reason);
@@ -187,3 +187,4 @@ TradeResult EAIT_ExecuteSELL(const double lotSize = 0.01)
 }
 
 #endif
+

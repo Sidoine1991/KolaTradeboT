@@ -361,7 +361,7 @@ bool PlaceGOMMarketOrder(const string direction, const string tag, const string 
                       ((fillFlags & SYMBOL_FILLING_FOK) != 0) ? ORDER_FILLING_FOK :
                       ORDER_FILLING_RETURN;
 
-   bool ok = SafeSafeOrderSend(req, res);
+   bool ok = SafeSafeSafeOrderSend(req, res);
    ReleaseOpenLock();
    if(ok)
    {
@@ -469,7 +469,7 @@ bool PlaceGOMLimitAtLevel(const string direction, const string tag, const double
       return false;
    }
 
-   bool ok = SafeSafeOrderSend(req, res);
+   bool ok = SafeSafeSafeOrderSend(req, res);
    ReleaseOpenLock();
    if(ok)
       Print("[GOM-LIMIT] ", tag, " ", direction, " @ ", levelSource, " prix=", DoubleToString(limitPrice, _Digits));
@@ -732,4 +732,5 @@ bool ConvertPendingToMarketOrder(const string symbol, const string direction,
 }
 
 #endif
+
 

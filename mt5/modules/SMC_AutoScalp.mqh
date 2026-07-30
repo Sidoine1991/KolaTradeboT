@@ -169,7 +169,7 @@ void SMCASC_TryScalpSynthetic(const string symbol, int dirSign)
    if(!CanPlaceLimitOrder(symbol, req.type)) return;
    if(!ValidateAndAdjustLimitPrice(req.price, req.sl, req.tp, req.type)) return;
 
-   if(SafeSafeOrderSend(req, res, req.comment) && res.retcode == TRADE_RETCODE_DONE)
+   if(SafeSafeSafeOrderSend(req, res, req.comment) && res.retcode == TRADE_RETCODE_DONE)
    {
       g_smcasc.active = true;
       g_smcasc.lastLot = lot;
@@ -384,7 +384,7 @@ void SMCASC_TryDowScalp(const string symbol, int dirSign)
       req.tp = NormalizeDouble(tp, digits);
    }
 
-   if(SafeSafeOrderSend(req, res, req.comment) && res.retcode == TRADE_RETCODE_DONE)
+   if(SafeSafeSafeOrderSend(req, res, req.comment) && res.retcode == TRADE_RETCODE_DONE)
    {
       s_lastDowTrade = TimeCurrent();
       g_smcascDowCount++;
@@ -560,7 +560,7 @@ void SMCASC_TryDowSR20Scalp(const string symbol, int dirSign)
    req.deviation = 50;
    req.comment = "DOW SR20";
 
-   if(SafeSafeOrderSend(req, res, req.comment) && res.retcode == TRADE_RETCODE_DONE)
+   if(SafeSafeSafeOrderSend(req, res, req.comment) && res.retcode == TRADE_RETCODE_DONE)
    {
       s_lastDowSR20Trade = TimeCurrent();
       g_smcascDowSR20Count++;
@@ -716,7 +716,7 @@ void SMCASC_TryVolMomentumScalp(const string symbol)
    req.deviation = 50;
    req.comment   = "VOL MOM";
 
-   if(SafeSafeOrderSend(req, res, req.comment) && res.retcode == TRADE_RETCODE_DONE)
+   if(SafeSafeSafeOrderSend(req, res, req.comment) && res.retcode == TRADE_RETCODE_DONE)
    {
       s_lastVolMomTrade = TimeCurrent();
       g_smcascVolMomCount++;
@@ -744,4 +744,5 @@ void SMCASC_TryVolMomentumScalp(const string symbol)
 }
 
 #endif // SMC_AUTO_SCALP_MQH
+
 

@@ -89,7 +89,7 @@ bool AutoPlaceOrder(string symbol, string direction, double entry, double sl, do
        }
     }
 
-    OrderSend(&request, &result);
+    SafeOrderSend(&request, &result);
 
    if(result.retcode == TRADE_RETCODE_DONE)
    {
@@ -183,7 +183,7 @@ void AutoManageTrailingStop()
             close_req.deviation = 100;
             close_req.comment = "PROTECTIVE-STOP";
 
-            OrderSend(&close_req, &close_res);
+            SafeOrderSend(&close_req, &close_res);
 
             Print("PROTECTIVE STOP: ", symbol, " | Peak: ", DoubleToString(peakProfit, 2), "$ | Loss: ", DoubleToString(profit, 2), "$");
 
@@ -226,7 +226,7 @@ void AutoManageTrailingStop()
             modify_req.sl = NormalizeDouble(newSL, _Digits);
             modify_req.tp = NormalizeDouble(tp, _Digits);
 
-            if(OrderSend(&modify_req, &modify_res))
+            if(SafeOrderSend(&modify_req, &modify_res))
             {
                Print("TRAILING: ", symbol, " | SL: ", DoubleToString(newSL, _Digits), " | Peak: ", DoubleToString(peakProfit, 2), "$");
             }
@@ -258,3 +258,4 @@ void AutoTradingTick()
 }
 
 #endif
+

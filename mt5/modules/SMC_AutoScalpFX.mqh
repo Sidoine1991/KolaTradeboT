@@ -126,7 +126,7 @@ void SMCFX_TryScalpSweep(const string symbol)
    if(!CanPlaceLimitOrder(symbol, req.type)) return;
    if(!ValidateAndAdjustLimitPrice(req.price, req.sl, req.tp, req.type)) return;
 
-   if(SafeOrderSend(req, res) && res.retcode == TRADE_RETCODE_DONE)
+   if(SafeSafeOrderSend(req, res) && res.retcode == TRADE_RETCODE_DONE)
    {
       g_smcfx.active = true;
       g_smcfx.lastTradeTime = TimeCurrent();
@@ -180,4 +180,5 @@ void SMCFX_OnTickGuard()
 }
 
 #endif // SMC_AUTO_SCALP_FX_MQH
+
 

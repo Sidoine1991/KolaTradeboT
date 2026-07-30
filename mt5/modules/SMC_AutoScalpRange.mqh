@@ -147,7 +147,7 @@ void SMCR_TryScalpRange(const string symbol)
    if(!CanPlaceLimitOrder(symbol, req.type)) return;
    if(!ValidateAndAdjustLimitPrice(req.price, req.sl, req.tp, req.type)) return;
 
-   if(SafeOrderSend(req, res) && res.retcode == TRADE_RETCODE_DONE)
+   if(SafeSafeOrderSend(req, res) && res.retcode == TRADE_RETCODE_DONE)
    {
       g_smcr.active = true;
       g_smcr.lastTradeTime = TimeCurrent();
@@ -202,4 +202,5 @@ void SMCR_OnTickGuard()
 }
 
 #endif // SMC_AUTO_SCALP_RANGE_MQH
+
 

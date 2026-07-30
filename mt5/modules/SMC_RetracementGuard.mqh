@@ -315,7 +315,7 @@ void SMCGR_ClosePositionsInRetrace(const string symbol, long magicNumber)
          req.price = SymbolInfoDouble(symbol, SYMBOL_ASK);
       }
 
-      if(!SafeOrderSend(req, res))
+      if(!SafeSafeOrderSend(req, res))
       {
          Print("[SMCGR] Erreur fermeture ticket #", ticket, " err=", GetLastError());
       }
@@ -344,10 +344,11 @@ void SMCGR_ClosePositionsInRetrace(const string symbol, long magicNumber)
       rm.order    = ticket;
       rm.symbol   = symbol;
 
-      if(SafeOrderSend(rm, rr))
+      if(SafeSafeOrderSend(rm, rr))
          Print("[SMCGR] LIMIT ANNULE en RETRACE | #", ticket);
    }
 }
 
 #endif // SMC_RETRACEMENT_GUARD_MQH
+
 

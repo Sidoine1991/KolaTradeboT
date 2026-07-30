@@ -16,6 +16,7 @@ input double PivotLimitSL_ATR       = 10.0;  // SL du LIMIT (x ATR M1 = ~10 boug
 input double PivotLimitTP_ATR       = 2.0;   // TP du LIMIT (x ATR)
 input int    PivotLimitMaxAge_sec   = 300;    // Max âge LIMIT avant suppression (sec)
 input int    PivotLimitMagicOffset  = 100;    // Magic number offset pour identifier ces LIMITs
+input int    PivotTouchGraceSec     = 3;      // Fenêtre de grâce (sec) après un passage proche de la ligne
 
 //--- État
 static ulong  g_pivotBuyTicket   = 0;
@@ -82,6 +83,8 @@ bool PivotLimit_PlaceOrder(const string symbol, const string direction,
    if(!IsSignalConfirmed()) return false;
    if(!GOM_CanOpenNewTrade(direction == "BUY" ? 1 : -1)) return false;
    if(!IsDirectionAllowedForBoomCrash(symbol, direction)) return false;
+   ENUM_ORDER_TYPE otGate = (direction == "BUY") ? ORDER_TYPE_BUY_LIMIT : ORDER_TYPE_SELL_LIMIT;
+   if(!CanPlaceLimitOrder(symbol, otGate)) return false; // règle absolue + plafond MaxLimitOrdersTerminal
 
    //--- Calcul SL/TP
    int dg = (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS);
@@ -124,7 +127,7 @@ bool PivotLimit_PlaceOrder(const string symbol, const string direction,
 
    if(req.volume <= 0) return false;
 
-   if(g_pivotTrade.OrderSend(req, res))
+   if(g_pivotTrade.SafeOrderSend(req, res))
    {
       Print("🎯 PIVOT ", direction, " LIMIT @ ", req.price,
             " | SL=", req.sl, " | TP=", req.tp,
@@ -225,8 +228,18 @@ bool PivotLimit_ExecuteMarketAtLevel(const string symbol, const string direction
 
    double nearTol = atrVal * 0.40;
    double refPx = (dirSign > 0) ? ask : bid;
-   if(MathAbs(refPx - levelPrice) > nearTol)
-      return false; // attendre le touché de la ligne
+   bool isNearNow = (MathAbs(refPx - levelPrice) <= nearTol);
+
+   static datetime s_lastNearBuy = 0, s_lastNearSell = 0;
+   if(isNearNow)
+   {
+      if(dirSign > 0) s_lastNearBuy  = TimeCurrent();
+      else            s_lastNearSell = TimeCurrent();
+   }
+   datetime lastNear = (dirSign > 0) ? s_lastNearBuy : s_lastNearSell;
+   bool withinGrace = (lastNear > 0 && TimeCurrent() - lastNear <= PivotTouchGraceSec);
+   if(!isNearNow && !withinGrace)
+      return false; // attendre le touché de la ligne (ou fenêtre de grâce dépassée)
 
    if(!TryAcquireOpenLock()) return false;
 
@@ -346,15 +359,55 @@ void PivotLimitTracker_OnTick()
    static datetime s_lastPivotMarket = 0;
    if(TimeCurrent() - s_lastPivotMarket < 30) return;
 
+   double nearTol = atrVal * 0.40;
+   double bidNow = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double askNow = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+
    if(blinkDir > 0 && buyLevel > 0)
    {
-      if(PivotLimit_ExecuteMarketAtLevel(_Symbol, "BUY", buyLevel, atrVal, "PivotLow/Green"))
-         s_lastPivotMarket = TimeCurrent();
+      bool atLevel = (askNow > 0 && MathAbs(askNow - buyLevel) <= nearTol);
+      if(atLevel)
+      {
+         if(PivotLimit_ExecuteMarketAtLevel(_Symbol, "BUY", buyLevel, atrVal, "PivotLow/Green"))
+            s_lastPivotMarket = TimeCurrent();
+      }
+      else if(g_pivotBuyTicket == 0)
+      {
+         // Prix pas encore sur la ligne verte → LIMIT posé à l'avance (méthode 3)
+         if(PivotLimit_PlaceOrder(_Symbol, "BUY", buyLevel, atrVal, "PivotLow/Green"))
+         {
+            g_pivotBuyTicket = PivotLimit_FindOrder(_Symbol, true);
+            g_pivotBuyPrice  = buyLevel;
+            g_pivotBuyTime   = TimeCurrent();
+         }
+      }
+      else
+      {
+         PivotLimit_CheckLineMovement_Buy(_Symbol, buyLevel, atrVal);
+      }
    }
    else if(blinkDir < 0 && sellLevel > 0)
    {
-      if(PivotLimit_ExecuteMarketAtLevel(_Symbol, "SELL", sellLevel, atrVal, "PivotHigh/Red"))
-         s_lastPivotMarket = TimeCurrent();
+      bool atLevel = (bidNow > 0 && MathAbs(bidNow - sellLevel) <= nearTol);
+      if(atLevel)
+      {
+         if(PivotLimit_ExecuteMarketAtLevel(_Symbol, "SELL", sellLevel, atrVal, "PivotHigh/Red"))
+            s_lastPivotMarket = TimeCurrent();
+      }
+      else if(g_pivotSellTicket == 0)
+      {
+         // Prix pas encore sur la ligne rouge → LIMIT posé à l'avance (méthode 3)
+         if(PivotLimit_PlaceOrder(_Symbol, "SELL", sellLevel, atrVal, "PivotHigh/Red"))
+         {
+            g_pivotSellTicket = PivotLimit_FindOrder(_Symbol, false);
+            g_pivotSellPrice  = sellLevel;
+            g_pivotSellTime   = TimeCurrent();
+         }
+      }
+      else
+      {
+         PivotLimit_CheckLineMovement_Sell(_Symbol, sellLevel, atrVal);
+      }
    }
 }
 
@@ -388,3 +441,4 @@ string PivotLimitTracker_StatusLine()
 }
 
 #endif // SMC_PIVOT_LIMIT_TRACKER_MQH
+

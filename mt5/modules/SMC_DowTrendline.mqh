@@ -1531,7 +1531,7 @@ bool Dow_ChaseLimitToEma(const ulong ticket, const bool isBearish, const double 
    req.sl     = sl;
    req.tp     = tp;
 
-if(SafeOrderSend(req, res))
+if(SafeSafeOrderSend(req, res))
     {
        g_dowState.chasingEma = true;
        g_dowState.lastChaseAt = TimeCurrent();
@@ -1880,7 +1880,7 @@ void Dow_ExecutePredictiveMarketOrder(bool isBearish, double atrVal, int selecte
        req.magic     = InpMagicNumber;
        req.deviation = 30;
         req.comment   = "DOW EP BUY";
-        ok = SafeSafeOrderSend(req, res, "DOW MARKET BUY") && res.retcode == TRADE_RETCODE_DONE;
+        ok = SafeSafeSafeOrderSend(req, res, "DOW MARKET BUY") && res.retcode == TRADE_RETCODE_DONE;
         if(ok)
         {
            g_dowLastPerfectMarketEntry = TimeCurrent();
@@ -1929,7 +1929,7 @@ void Dow_ExecutePredictiveMarketOrder(bool isBearish, double atrVal, int selecte
        req.magic     = InpMagicNumber;
        req.deviation = 30;
         req.comment   = "DOW EP SELL";
-        ok = SafeSafeOrderSend(req, res, "DOW MARKET SELL") && res.retcode == TRADE_RETCODE_DONE;
+        ok = SafeSafeSafeOrderSend(req, res, "DOW MARKET SELL") && res.retcode == TRADE_RETCODE_DONE;
         if(ok)
         {
            g_dowLastPerfectMarketEntry = TimeCurrent();
@@ -2466,7 +2466,7 @@ g_dowState.active = true;
        req.comment = "DOW BUY MARKET";
     }
 
-   if(SafeSafeOrderSend(req, res, req.comment) && res.retcode == TRADE_RETCODE_DONE)
+   if(SafeSafeSafeOrderSend(req, res, req.comment) && res.retcode == TRADE_RETCODE_DONE)
    {
        string tsLim = TimeToString(TimeCurrent(), TIME_DATE|TIME_SECONDS);
        Print("📈 DOW ", (isBearish ? "SELL" : "BUY"), " MARKET @ ", req.price,
@@ -2535,7 +2535,7 @@ g_dowState.active = true;
             epReq.comment = "DOW EP BUY MARKET";
          }
 
-         if(SafeSafeOrderSend(epReq, epRes, epReq.comment) && epRes.retcode == TRADE_RETCODE_DONE)
+         if(SafeSafeSafeOrderSend(epReq, epRes, epReq.comment) && epRes.retcode == TRADE_RETCODE_DONE)
          {
              g_dowState.epLimitTicket = epRes.order;
               string tsEp = TimeToString(TimeCurrent(), TIME_DATE|TIME_SECONDS);
@@ -2644,7 +2644,7 @@ void Dow_ZoneReentryLimit()
       req.comment = comment;
    }
 
-   if(SafeSafeOrderSend(req, res, comment) && res.retcode == TRADE_RETCODE_DONE)
+   if(SafeSafeSafeOrderSend(req, res, comment) && res.retcode == TRADE_RETCODE_DONE)
    {
       string ts = TimeToString(TimeCurrent(), TIME_DATE|TIME_SECONDS);
       Print("📈 DOW ZONE ", (isBearish ? "SELL" : "BUY"), " MARKET @ ", req.price,
@@ -2693,4 +2693,5 @@ void DowTrendline_Cleanup()
 #endif // SMC_DOWTRENDLINE_MQH
 
 // force recompile
+
 

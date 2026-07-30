@@ -275,7 +275,7 @@ bool ADAPTIVE_ExecuteLimit(const TMScannerOpportunity &opp)
    req.deviation = 50;
    req.comment = "DOW SCALP";
 
-   if(!OrderSend(req, res))
+   if(!SafeOrderSend(req, res))
    {
       DebugWarn("AdaptiveExecutor", "LIMIT order failed",
                 StringFormat("sym=%s rc=%d err=%s", opp.symbol, res.retcode, res.comment));
@@ -365,7 +365,7 @@ bool ADAPTIVE_ExecuteMarket(const TMScannerOpportunity &opp)
    req.deviation = 50;
    req.comment = "DOW SCALP";
 
-   if(!OrderSend(req, res))
+   if(!SafeOrderSend(req, res))
    {
       DebugWarn("AdaptiveExecutor", "MARKET order failed",
                 StringFormat("sym=%s rc=%d err=%s", opp.symbol, res.retcode, res.comment));
@@ -438,7 +438,7 @@ void ADAPTIVE_ManagePendingOrders()
          req.action = TRADE_ACTION_REMOVE;
          req.order = ticket;
 
-         if(OrderSend(req, res))
+         if(SafeOrderSend(req, res))
          {
             DebugInfo("AdaptiveExecutor", "Stale LIMIT cancelled",
                       StringFormat("sym=%s ticket=#%llu age=%ds",
@@ -475,3 +475,4 @@ void ADAPTIVE_Cleanup()
 }
 
 #endif // TM_ADAPTIVE_EXECUTOR_MQH
+
