@@ -17172,7 +17172,7 @@ if(impulseBuy)
       }
    }
 }
-a
+
 //| END OF PROGRAM                                                  |
 
 // force recompile
