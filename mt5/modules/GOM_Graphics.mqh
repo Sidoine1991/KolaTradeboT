@@ -48,7 +48,9 @@ enum TradingSignal
 #define GOM_CENTER_SIGNAL_SIZE_X 60  // Largeur X du signal central
 #define GOM_CENTER_SIGNAL_SIZE_Y 40  // Hauteur Y du signal central
 #define GOM_CENTER_ZOOM     1.5     // Taille du zoom pour les ic�nes centraux
+#ifndef GOM_SIGNAL_BLINK_DURATION
 #define GOM_SIGNAL_BLINK_DURATION 2
+#endif
 //--- No-repaint signal confirm
 #define GOM_CONFIRM_COUNT      2     // polls consecutifs pour confirmer le signal
 #define GOM_COMMIT_TIMEOUT_SEC 300   // timeout d'un signal commit\ (secondes)
