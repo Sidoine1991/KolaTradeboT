@@ -22,9 +22,6 @@ extern double g_lastAIConfidence;
 
 // RSI Squeeze / Impulse / TP1 dashboard variables (defined in SMC_Universal.mq5)
 // GOM_SIGNAL_BLINK_DURATION defined in GOM_Graphics.mqh (guarded there)
-// #ifndef GOM_SIGNAL_BLINK_DURATION
-// #define GOM_SIGNAL_BLINK_DURATION 2
-// #endif
 // input variables (UseRSISqueezePredictor, TakeProfitAt1Dollar, UseCloseOnVerdictWait) are globally visible in MQL5
 extern double g_dashSqueezeRSI;
 extern bool   g_dashSqueezeActive;
@@ -4734,6 +4731,8 @@ void SMCGP_DrawGOMSignal()
 #include "SMC_FuturePath.mqh"
 
 #endif
+
+
 
 
 

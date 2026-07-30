@@ -276,6 +276,11 @@ bool SafeOrderSendAndAlert(MqlTradeRequest &req, MqlTradeResult &result, const s
 // --- Safe trade wrappers for CTrade::Buy/Sell to enforce GOM gates
 bool SafeTradeBuy(double lot, const string symbol, double price, double sl, double tp, const string comment = "")
 {
+   if(g_smcGomVerdictNum == 0)
+   {
+      Print("[SAFE-TRADE] BUY blocked — GOM=WAIT (vn=0): ", symbol);
+      return false;
+   }
    int dirSign = 1;
    if(!CanPlaceMarketOrder(symbol, dirSign))
    {
@@ -288,6 +293,11 @@ bool SafeTradeBuy(double lot, const string symbol, double price, double sl, doub
 
 bool SafeTradeSell(double lot, const string symbol, double price, double sl, double tp, const string comment = "")
 {
+   if(g_smcGomVerdictNum == 0)
+   {
+      Print("[SAFE-TRADE] SELL blocked — GOM=WAIT (vn=0): ", symbol);
+      return false;
+   }
    int dirSign = -1;
    if(!CanPlaceMarketOrder(symbol, dirSign))
    {
