@@ -241,7 +241,7 @@ class GOMLPineCalculator:
         return round(score_buy, 2), round(score_sell, 2)
 
     def calculate_verdict_num(
-        self, score_buy: float, score_sell: float, filter_ratio: float = 0.5
+        self, score_buy: float, score_sell: float, filter_ratio: float = 0.5, record: Dict[str, Any] = None
     ) -> int:
         """Pine lines 958-966 — hiérarchie PERFECT > GOOD > BUY/SELL."""
         verdict_gap = abs(score_buy - score_sell)
@@ -253,7 +253,20 @@ class GOMLPineCalculator:
         if not coherence_ok:
             return 0
 
+        # ── VÉRIFICATION COHÉRENCE AVEC DIRECTION RÉELLE DU PRIX ──
+        price_strong_up = False
+        price_strong_down = False
+        if record is not None:
+            close = float(record.get("close", record.get("entry", 0)) or 0)
+            vwap_val = float(record.get("vwap", close) or close)
+            vwap_dist_pct = (close - vwap_val) / vwap_val if vwap_val > 0 else 0.0
+            price_strong_up = vwap_dist_pct > 0.001  # Prix monte fortement
+            price_strong_down = vwap_dist_pct < -0.001  # Prix descend fortement
+
         if score_sell > score_buy:
+            # Rejeter SELL si prix en forte montée
+            if price_strong_up:
+                return 0
             is_perfect = verdict_gap >= self.gap_perfect
             is_good = verdict_gap >= self.gap_good and not is_perfect
             is_sell = verdict_gap >= self.gap_min and not is_good and not is_perfect
@@ -266,6 +279,9 @@ class GOMLPineCalculator:
             return 0
 
         if score_buy > score_sell:
+            # Rejeter BUY si prix en forte descente
+            if price_strong_down:
+                return 0
             is_perfect = verdict_gap >= self.gap_perfect
             is_good = verdict_gap >= self.gap_good and not is_perfect
             is_buy = verdict_gap >= self.gap_min and not is_good and not is_perfect
@@ -646,7 +662,7 @@ class GOMLPineCalculator:
         )
         record["score_buy"] = score_buy
         record["score_sell"] = score_sell
-        verdict_num = self.calculate_verdict_num(score_buy, score_sell, filter_ratio)
+        verdict_num = self.calculate_verdict_num(score_buy, score_sell, filter_ratio, record)
         if verdict_num == 0:
             verdict_num = self.apply_mtf_verdict_uplift(record, score_buy, score_sell)
         verdict_num = self.apply_mtf_verdict_gate(record, verdict_num)

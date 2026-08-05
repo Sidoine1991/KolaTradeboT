@@ -30,6 +30,7 @@ from typing import Optional, List, Dict, Any, Tuple, Set, Union
 
 import socket
 import sys
+import threading
 if sys.platform.startswith("win"):
     # Patch socket.shutdown to ignore OSError on Windows (avoid ConnectionResetError in proactor cleanup)
     original_shutdown = socket.socket.shutdown
@@ -56,6 +57,7 @@ from symbol_mapper import (
     normalize_for_api,
     is_boom,
     is_crash,
+    is_synthetic_symbol,
     normalize_report_symbol,
 )
 from fastapi.exceptions import RequestValidationError
@@ -10173,7 +10175,13 @@ GOM_FORCE_PINE_RECALC = _env_bool("GOM_FORCE_PINE_RECALC", True)
 # Blend cognition 5 bougies — désactivé par défaut (évite WAIT/retards en fin de move)
 GOM_USE_PREDICTIVE_BLEND = _env_bool("GOM_USE_PREDICTIVE_BLEND", True)
 # Overlay correction WAIT côté serveur — désactivé (EA gère via UseGOMCorrectionOverlay)
-GOM_USE_CORRECTION_WAIT_OVERLAY = _env_bool("GOM_USE_CORRECTION_WAIT_OVERLAY", False)
+GOM_USE_CORRECTION_WAIT_OVERLAY = _env_bool("GOM_USE_CORRECTION_WAIT_OVERLAY", True)
+# Climatisation direction Weltrade (GainX/TrendX/Boom→BUY only, PainX/Crash→SELL only).
+# DÉSACTIVÉE par défaut : elle forçait un verdict BUY sur GainX alors que les scores et
+# verdict_num_raw restaient SELL → le payload contenait deux directions opposées sur le
+# même symbole → l'EA ouvrait un hedge BUY+SELL simultané → hémorragie de pertes.
+# Le signe exécutable suit désormais le verdict brut (modèle + scores).
+GOM_WELTRADE_INVERT_ENABLED = _env_bool("GOM_WELTRADE_INVERT_ENABLED", False)
 _gom_calc_inflight: Dict[str, asyncio.Task] = {}
 _gom_calc_locks: Dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 _gom_executor = concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="gom_dash")
@@ -10308,6 +10316,42 @@ def _gom_live_m1_pullback_reason(out: dict, symbol: str, trade_dir: int) -> Opti
     except Exception as exc:
         logger.debug(f"[GOM-CORR-WAIT] live M1 check failed: {exc}")
     return None
+ 
+
+def _gom_m1_price_pullback_reason(out: dict, symbol: str, trade_dir: int) -> Optional[str]:
+    """Check M1 price correction exceeding threshold — override PERFECT/GOOD → WAIT.
+
+    When M1 candles show a price range or adverse excursion > GOM_M1_WAIT_DOLLARS
+    (default 2.0) against the trade direction AND the spike hasn't fired, the
+    verdict should switch to WAIT to allow the EA to exit/reassess.
+    """
+    threshold = float(os.getenv("GOM_M1_WAIT_DOLLARS", "2.0"))
+    if threshold <= 0:
+        return None
+    try:
+        sym = _resolve_symbol(str(symbol or out.get("symbol", "")))
+        sym_cache = _mt5_candles_cache.get(sym) or {}
+        df_m1 = sym_cache.get("M1")
+        if df_m1 is None or len(df_m1) < 6:
+            return None
+        tail = df_m1.tail(10)
+        highs = tail["high"].astype(float)
+        lows = tail["low"].astype(float)
+        close = float(tail.iloc[-1]["close"])
+        recent_high = float(highs.max())
+        recent_low = float(lows.min())
+        price_range = recent_high - recent_low
+        if trade_dir > 0:
+            adverse = recent_high - close
+        else:
+            adverse = close - recent_low
+        if price_range > threshold:
+            return f"M1 range {price_range:.1f}$ > {threshold}$ (correction M1)"
+        if adverse > threshold:
+            return f"M1 adverse {adverse:.1f}$ > {threshold}$ (correction M1)"
+    except Exception as exc:
+        logger.debug(f"[GOM-CORR-WAIT] M1 price pullback check failed: {exc}")
+    return None
 
 
 def _gom_apply_correction_verdict_wait(out: dict, symbol: str) -> None:
@@ -10315,7 +10359,7 @@ def _gom_apply_correction_verdict_wait(out: dict, symbol: str) -> None:
     vn = int(out.get("effective_verdict_num", out.get("verdict_num", 0)) or 0)
     if vn == 0:
         return
-    if _is_weltrade_synthetic(symbol or out):
+    if is_synthetic_symbol(str(symbol or out.get("symbol", ""))):
         return
 
     def _tf_sign(key: str) -> int:
@@ -10361,7 +10405,7 @@ def _gom_apply_correction_verdict_wait(out: dict, symbol: str) -> None:
     elif trade_dir > 0 and rsi_slope < -2.0 and m1 < 0:
         reason = "M1 RSI descend vs BUY"
     else:
-        reason = _gom_live_m1_pullback_reason(out, symbol, trade_dir)
+        reason = _gom_m1_price_pullback_reason(out, symbol, trade_dir)
 
     if not reason:
         return
@@ -10442,6 +10486,8 @@ def _gom_cache_age(symbol: str, chart_tf: str) -> Optional[float]:
 
 def _gom_apply_weltrade_verdict_invert(out: dict, symbol: str) -> None:
     """GainX/TrendX/Boom → BUY only ; PainX/Crash → SELL only (signe vn climatisé)."""
+    if not GOM_WELTRADE_INVERT_ENABLED:
+        return
     if out.get("weltrade_verdict_inverted"):
         return
     sym = str(symbol or out.get("symbol", "") or "").upper()
@@ -10854,7 +10900,7 @@ async def gom_kola_dashboard(
             cached_data = _get_cached_gom_data(sym, chart_tf)
             if cached_data:
                 _gom_maybe_enrich_payload(cached_data, sym, chart_tf)
-                return cached_data
+                return _gom_family_guard_response(sym, cached_data)
             stale_data = _get_stale_gom_data(sym, chart_tf)
 
         inflight = _gom_calc_inflight.get(cache_key)
@@ -10881,8 +10927,24 @@ async def gom_kola_dashboard(
                 logger.debug(
                     f"[GOM-DASH] {sym} stale serve (wait>{wait_sec}s, age={stale_data.get('cache_age_sec')}s)"
                 )
-                return stale_data
-            response = await inflight
+                return _gom_family_guard_response(sym, stale_data)
+            # No stale data + timeout: return WAIT immediately instead of
+            # blocking the request thread until the background computation
+            # finishes (can take 30-46s on a cold/slow server, causing the EA
+            # to time out and NOT failover to Render).
+            logger.warning(
+                f"[GOM-DASH] {sym} timeout {wait_sec}s + no stale data → WAIT (computation continues in background)"
+            )
+            return {
+                "ok": True,
+                "symbol": sym,
+                "verdict": "WAIT",
+                "verdict_num": 0,
+                "action": "WAIT",
+                "gate": "compute_timeout",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "source": "local_timeout",
+            }
 
         if response.get("ok"):
             ds = response.get("data_source", "?")
@@ -10890,7 +10952,7 @@ async def gom_kola_dashboard(
                 f"[GOM-DASH] {sym}: {response.get('verdict')} "
                 f"(vn={response.get('verdict_num')}) src={ds} mode={src_norm}"
             )
-        return response
+        return _gom_family_guard_response(sym, response)
 
     except Exception as e:
         logger.error(f"Erreur /gom-kola-dashboard LIVE: {e}", exc_info=True)
@@ -11277,7 +11339,7 @@ _MODELS_DIR = Path(__file__).resolve().parent / "data" / "models"
 
 
 @app.post("/ml/pattern-forecast")
-async def get_pattern_forecast(payload: dict = Body(...)):
+async def get_pattern_forecast(payload: Optional[dict] = Body(default=None)):
     """
     Pattern Recognition Forecast — multi-TF similarity search + spike prediction + 1000-bar zigzag projection.
     
@@ -25277,6 +25339,110 @@ def _symbol_painx_like(sym: str) -> bool:
     return "CRASH" in s or s.startswith("PAINX")
 
 
+# ═══════════════════════════════════════════════════════════════════════
+# Verrou famille auto-trade — un seul trade auto sur les synthétiques
+# Tous les indices synthétiques (GainX/Boom/TrendX/PainX/Crash) partagent
+# UN SEUL slot : jamais 2 trades auto simultanés sur cette famille.
+# ═══════════════════════════════════════════════════════════════════════
+_GOM_FAMILY_CLAIM: Dict[str, Dict[str, Any]] = {}
+_GOM_FAMILY_CLAIM_LOCK = threading.Lock()
+_GOM_FAMILY_CLAIM_SEC = float(os.getenv("GOM_FAMILY_CLAIM_SEC", "30"))
+
+
+def _gom_family_key(sym: str) -> Optional[str]:
+    """Famille synthétique : tous les indices synthétiques (GainX/Boom/TrendX/PainX/Crash)
+    partagent UN SEUL slot de trade auto ('synthetics'). None pour les autres symboles."""
+    s = str(sym or "").upper().replace(" ", "")
+    if _symbol_gainx_like(s) or _symbol_painx_like(s):
+        return "synthetics"
+    return None
+
+
+def _gom_family_open_positions(family: str) -> Optional[str]:
+    """Premier symbole de la famille avec une position MT5 ouverte (snapshots EA + pont Python)."""
+    for snap in _MT5_LIVE_SNAPSHOTS.values():
+        for p in snap.get("positions") or []:
+            psym = str(p.get("symbol") or "")
+            if _gom_family_key(psym) == family:
+                return psym
+    bridge = _MT5_PYTHON_BRIDGE_CACHE.get("data") or {}
+    for p in bridge.get("positions") or []:
+        psym = str(p.get("symbol") or "")
+        if _gom_family_key(psym) == family:
+            return psym
+    return None
+
+
+def _gom_family_blocked_by(sym: str) -> Optional[str]:
+    """Symbole qui bloque déjà un trade auto sur la même famille
+    (ordre pending actif ou position MT5 ouverte). None si famille libre."""
+    family = _gom_family_key(sym)
+    if not family:
+        return None
+    _sym_norm = str(sym).upper().replace(" ", "")
+    for other_sym, od in _PENDING_ORDER_STORE.items():
+        if str(other_sym).upper().replace(" ", "") == _sym_norm:
+            continue
+        if _gom_family_key(other_sym) != family:
+            continue
+        st = str(od.get("status") or "ready").lower()
+        if st in ("ready", "executing", "pending", "conflict_pending"):
+            return other_sym
+    return _gom_family_open_positions(family)
+
+
+def _gom_family_check(sym: str, need_claim: bool) -> Optional[Dict[str, Any]]:
+    """Vérifie le verrou famille. Retourne None si libre (claim posé si need_claim),
+    sinon un payload WAIT avec gate='family_lock'."""
+    family = _gom_family_key(sym)
+    if not family:
+        return None
+    now = time.time()
+    with _GOM_FAMILY_CLAIM_LOCK:
+        blocker = _gom_family_blocked_by(sym)
+        claim = _GOM_FAMILY_CLAIM.get(family)
+        claim_other = (
+            claim
+            and claim.get("symbol") != sym
+            and now - float(claim.get("ts") or 0) < _GOM_FAMILY_CLAIM_SEC
+        )
+        if blocker:
+            _why = f"Trade auto déjà actif sur {blocker}"
+            _who = blocker
+        elif claim_other:
+            _why = f"Trade auto déjà actif sur {claim.get('symbol')}"
+            _who = claim.get("symbol")
+        else:
+            if need_claim:
+                _GOM_FAMILY_CLAIM[family] = {"symbol": sym, "ts": now}
+            return None
+    return {
+        "ok": True,
+        "symbol": sym,
+        "verdict": "WAIT",
+        "verdict_num": 0,
+        "action": "WAIT",
+        "gate": "family_lock",
+        "family": family,
+        "blocked_by": _who,
+        "message": _why,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def _gom_family_guard_response(sym: str, response: dict) -> dict:
+    """Applique le verrou famille sur une réponse verdict :
+    - WAIT si un trade auto de la même famille est déjà actif (position/ordre/claim) ;
+    - sinon retourne la réponse telle quelle, avec claim posé si verdict fort (|num|>=2)."""
+    family = _gom_family_key(sym)
+    if not family or not response or not response.get("ok"):
+        return response
+    vnum = int(response.get("verdict_num") or 0)
+    if vnum == 0:
+        return response
+    return _gom_family_check(sym, need_claim=abs(vnum) >= 2) or response
+
+
 def _loss_guard_key(terminal_key: str, ticket: str) -> str:
     return f"{terminal_key}:{ticket}"
 
@@ -25741,7 +25907,7 @@ async def mt5_symbols_get():
 
 
 @app.post("/mt5/dow-trendline")
-async def mt5_dow_trendline(payload: dict = Body(...)):
+async def mt5_dow_trendline(payload: Optional[dict] = Body(default=None)):
     """
     Calcule la trendline DOW (swing highs/lows) pour un symbole.
 
@@ -26995,6 +27161,20 @@ def _build_gom_mt5_payload(record: dict) -> dict:
 
     _gom_mtf_uplift_verdict(out)
 
+    # Garde anti-hedge : ne JAMAIS émettre une direction exécutable si une direction
+    # opposée coexiste dans le payload (verdict_num vs verdict_num_raw). Sinon l'EA peut
+    # ouvrir un BUY et un SELL sur le même symbole → hedge → hémorragie de pertes.
+    _vn_final = int(out.get("verdict_num") or 0)
+    _vn_raw = int(out.get("verdict_num_raw") or 0)
+    if _vn_final != 0 and _vn_raw != 0 and (_vn_final > 0) != (_vn_raw > 0):
+        logger.warning(
+            f"[GOM-ANTI-HEDGE] {sym}: verdict {_vn_final} vs raw {_vn_raw} → WAIT "
+            f"(bloque BUY+SELL simultanés sur le même symbole)"
+        )
+        out["verdict_num"] = 0
+        out["verdict"] = "WAIT"
+        out["verdict_blocked_hedge"] = True
+
     # Dériver spike_tradable / imminence_pct depuis spike_pct si manquants
     # (le store gom_signal.json fournit spike_pct mais pas toujours ces champs)
     _sp = float(out.get("spike_pct") or 0.0)
@@ -27301,6 +27481,14 @@ def _maybe_promote_gom_to_pending_order(sym: str, record: dict) -> None:
     sell = float(record.get("score_sell") or 0)
     gap_thr = float(os.getenv("GOM_STRONG_SCORE_GAP", "1.0"))
 
+    # 🔒 WAIT gate — verdict WAIT (vn=0) interdit STRICTEMENT toute promotion auto.
+    # Sans ce check, la logique score-gap ci-dessous peut réattribuer vn=0 → vn=±2
+    # en se basant sur les écarts buy/sell, créant un ordre alors que GOM dit WAIT.
+    _verdict_str = str(record.get("verdict", "")).upper()
+    if vnum == 0 or _verdict_str == "WAIT":
+        logger.info(f"[GomAutoTrade] {sym} — verdict WAIT (vn=0) → skip (aucune promotion auto)")
+        return
+
     # Exception for Boom/Crash: respect their native direction bias
     sym_lower = str(sym).lower().replace(" ", "")
     is_boom = "boom" in sym_lower
@@ -27374,6 +27562,15 @@ def _maybe_promote_gom_to_pending_order(sym: str, record: dict) -> None:
             return
 
     direction = "BUY" if vnum > 0 else "SELL"
+
+    # 🔒 VERROU FAMILLE : un seul trade auto sur les synthétiques
+    # (GainX/Boom/TrendX/PainX/Crash partagent UN slot).
+    # Bloque la promotion si un autre synthétique a déjà un ordre/position actif.
+    _fam_blocker = _gom_family_blocked_by(sym)
+    if _fam_blocker:
+        logger.info(f"[GomAutoTrade] {sym} — verrou famille: {_fam_blocker} déjà actif → skip")
+        return
+
     existing = _PENDING_ORDER_STORE.get(sym)
 
     # Ne pas écraser un ordre venant du pipeline (source != gom_tv_sync)
@@ -27709,7 +27906,7 @@ async def get_gom_verdict(
                 flat = dash
             flat["data_source"] = dash.get("data_source", "live_calculation")
             flat["timestamp"] = dash.get("timestamp")
-            return {"ok": True, "symbol": sym, **flat}
+            return _gom_family_guard_response(sym, {"ok": True, "symbol": sym, **flat})
     except Exception as e:
         logger.warning(f"[GOM-Verdict] resolve failed for {sym}: {e}")
 
@@ -27759,7 +27956,7 @@ async def get_gom_verdict(
     # except Exception:
     #     pass
     flat = _build_gom_mt5_payload(verdict)
-    return {"ok": True, "symbol": sym, **flat}
+    return _gom_family_guard_response(sym, {"ok": True, "symbol": sym, **flat})
 
 def _calculate_gom_verdict(score_buy: float, score_sell: float, coherence: float = 0, filter_ratio: float = 0) -> tuple:
     """
@@ -28029,6 +28226,42 @@ async def get_pending_order(symbol: str = "XAUUSD", peek: bool = False):
         return {"ok": False, "symbol": sym, "order": None, "message": "Aucun ordre pending"}
     if order.get("status", "ready") == "conflict_pending":
         return {"ok": False, "symbol": sym, "order": None, "message": "Ordre en attente résolution conflit TA/TV"}
+
+    # 🔒 VERROU FAMILLE : un seul trade auto sur les synthétiques
+    # (GainX/Boom/TrendX/PainX/Crash partagent UN slot).
+    # Résout les ordres pré-existants de la famille au moment de l'exécution :
+    # l'ordre déjà 'executing' (ou le plus ancien) gagne, les autres sont bloqués.
+    if not peek and (order.get("status") or "ready") == "ready":
+        _family = _gom_family_key(sym)
+        if _family:
+            _fam_ts = str(order.get("timestamp") or "")
+            _blocker = None
+            for _osym, _od in _PENDING_ORDER_STORE.items():
+                if str(_osym).upper().replace(" ", "") == str(sym).upper().replace(" ", ""):
+                    continue
+                if _gom_family_key(_osym) != _family:
+                    continue
+                _ost = str(_od.get("status") or "ready").lower()
+                if _ost == "executing":
+                    _blocker = _osym
+                    break
+                if _ost == "ready" and _fam_ts and _od.get("timestamp") and _od["timestamp"] < _fam_ts:
+                    _blocker = _osym
+                    break
+            if not _blocker:
+                _blocker = _gom_family_open_positions(_family)
+            if _blocker:
+                logger.info(
+                    f"[PendingOrder] {sym} — verrou famille {_family}: {_blocker} déjà actif → exécution bloquée"
+                )
+                return {
+                    "ok": False,
+                    "symbol": sym,
+                    "order": None,
+                    "blocked_family": True,
+                    "blocked_by": _blocker,
+                    "message": f"Trade auto déjà actif sur {_blocker} (famille {_family})",
+                }
 
     if peek:
         return {"ok": True, "symbol": sym, "order": _enrich_order_with_tv_smc(order, sym)}
@@ -29226,7 +29459,7 @@ async def get_gom_tableau_complete(symbol: str = "XAUUSD"):
                     tableau_data, "timeframes", "GLOBAL", "strength", default=0
                 )
 
-        return complete_data
+        return _gom_family_guard_response(sym, complete_data)
 
     except Exception as e:
         logger.error(f"Error in /gom-tableau-complete: {e}", exc_info=True)

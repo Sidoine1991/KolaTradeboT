@@ -77,6 +77,9 @@ class GOMSignalsLiveCalculator:
         self._candles_mem_cache_ts: Dict[str, float] = {}
         self._candles_mem_source: Dict[str, str] = {}
         self.pine = _PINE_CALC or GOMLPineCalculator()
+        # Tracking bougies sans spike confirmé par symbole
+        self._bars_without_spike: Dict[str, int] = {}
+        self._last_spike_time: Dict[str, float] = {}
 
     def _cache_lookup(self, symbol: str, tf: str) -> Optional[pd.DataFrame]:
         for sym_key in self._symbol_lookup_keys(symbol):
@@ -736,6 +739,54 @@ class GOMSignalsLiveCalculator:
         record["ok"] = True
         return record
 
+    def _apply_correction_detection(self, symbol: str, verdict_num: int, record: Dict[str, Any]) -> int:
+        """Détecte absence de spike confirmé et ajuste verdict automatiquement."""
+        # ── DÉTECTION DE SPIKE CONFIRMÉ ──
+        spike_prob = float(record.get("spike_prob", 0) or 0)
+        spike_tradable = bool(record.get("spike_tradable", False))
+        spike_confirmed = spike_tradable and spike_prob >= 0.55
+        
+        sym_key = str(symbol).upper()
+        
+        # ── GESTION COMPTEUR BOUGIES SANS SPIKE ──
+        if spike_confirmed:
+            # Nouveau spike confirmé → reset compteur
+            if sym_key in self._bars_without_spike and self._bars_without_spike[sym_key] > 0:
+                print(f"[GOM-SPIKE-CONFIRMED] {symbol}: Nouveau spike confirmé | Bougies sans spike={self._bars_without_spike[sym_key]}")
+            self._bars_without_spike[sym_key] = 0
+            self._last_spike_time[sym_key] = time.time()
+        else:
+            # Pas de spike → incrémenter compteur
+            self._bars_without_spike[sym_key] = self._bars_without_spike.get(sym_key, 0) + 1
+        
+        bars_no_spike = self._bars_without_spike.get(sym_key, 0)
+        
+        # ── RÉTROGRADATION AUTOMATIQUE SANS SPIKE ──
+        # Si >10 bougies sans spike et verdict >= GOOD, rétrograder
+        if bars_no_spike > 10 and abs(verdict_num) >= 2:
+            prev_vn = verdict_num
+            
+            # PERFECT → GOOD
+            if abs(verdict_num) >= 3:
+                verdict_num = 2 if verdict_num > 0 else -2
+                print(f"[GOM-RETROGRADE] {symbol}: PERFECT → GOOD (plus de {bars_no_spike} bougies sans spike) | vn={prev_vn} → {verdict_num}")
+            # GOOD → SIMPLE après >12 bougies
+            elif bars_no_spike > 12:
+                verdict_num = 1 if verdict_num > 0 else -1
+                print(f"[GOM-RETROGRADE] {symbol}: GOOD → SIMPLE (plus de {bars_no_spike} bougies sans spike) | vn={prev_vn} → {verdict_num}")
+        
+        # ── FORÇAGE WAIT APRÈS 15 BOUGIES SANS SPIKE ──
+        if bars_no_spike > 15:
+            prev_vn = verdict_num
+            prev_verd = self.pine.verdict_text(verdict_num)
+            verdict_num = 0
+            print(f"[GOM-FORCE-WAIT] {symbol}: Verdict forcé WAIT après {bars_no_spike} bougies sans spike | {prev_verd} → WAIT")
+            
+            # Reset compteur pour éviter logs répétitifs
+            self._bars_without_spike[sym_key] = 0
+        
+        return verdict_num
+
     def build_api_response(self, symbol: str, chart_tf: str = "15", broker: Optional[str] = None) -> Dict[str, Any]:
         """Payload compatible SMC_GOM_Pipeline.mqh / gom-kola-dashboard."""
         record = self.calculate_record_live(symbol, chart_tf, broker=broker)
@@ -747,6 +798,13 @@ class GOMSignalsLiveCalculator:
                 "error": record.get("error"),
                 "source": record.get("source"),
             }
+
+        # ── DÉTECTION CORRECTION ET AJUSTEMENT VERDICT AUTOMATIQUE ──
+        verdict_num = int(record.get("verdict_num", 0) or 0)
+        if verdict_num != 0:
+            verdict_num = self._apply_correction_detection(symbol, verdict_num, record)
+            record["verdict_num"] = verdict_num
+            record["verdict"] = self.pine.verdict_text(verdict_num)
 
         price = record.get("entry", record.get("close", 0.0))
         return {
@@ -864,6 +922,40 @@ def _attach_correction_cycle(payload: Dict[str, Any], symbol: str, calc: "GOMSig
         if result.get("price_action_zone_resistance"):
             payload["pa_zone_resistance"] = result["price_action_zone_resistance"]
         payload["pa_corr_depth_pct"] = result.get("price_action_correction_depth_pct", 0)
+
+        # ── M1 price-pullback gate: override GOOD/PERFECT → WAIT ─────────────
+        # Quand la correction M1 en dollars dépasse le seuil, le verdict reste
+        # PERFECT alors que le spike n'a pas encore tombé. L'EA doit pouvoir
+        # sortir / ne pas accumuler → forcer WAIT.
+        _GOM_M1_WAIT_DOLLARS = float(os.getenv("GOM_M1_WAIT_DOLLARS", "2.0"))
+        _vn_before = int(payload.get("verdict_num", 0) or 0)
+        if _vn_before != 0 and abs(_vn_before) >= 2 and df_m1 is not None and len(df_m1) >= 5:
+            close_prices = df_m1["close"].astype(float)
+            highs = df_m1["high"].astype(float)
+            lows = df_m1["low"].astype(float)
+            current_price = float(close_prices.iloc[-1])
+            lookback = min(20, len(df_m1))
+            recent_high = float(highs.iloc[-lookback:].max())
+            recent_low = float(lows.iloc[-lookback:].min())
+            if _vn_before > 0:
+                pullback_dollars = recent_high - recent_low
+                pullback_adverse = recent_high - current_price
+            else:
+                pullback_dollars = recent_high - recent_low
+                pullback_adverse = current_price - recent_low
+            payload["m1_max_range_dollars"] = round(pullback_dollars, 5)
+            payload["m1_adverse_excursion"] = round(pullback_adverse, 5)
+            if pullback_dollars > _GOM_M1_WAIT_DOLLARS or pullback_adverse > _GOM_M1_WAIT_DOLLARS:
+                old_verdict = payload.get("verdict", "")
+                payload["verdict_num"] = 0
+                payload["verdict"] = "WAIT"
+                payload["action"] = "WAIT"
+                payload["gate"] = "m1_correction"
+                print(
+                    f"[GOM-M1GATE] {symbol}: vn={_vn_before}→0 WAIT | "
+                    f"range={pullback_dollars:.2f} adverse={pullback_adverse:.2f} "
+                    f"threshold={_GOM_M1_WAIT_DOLLARS} | was '{old_verdict}'"
+                )
     except Exception:
         payload.setdefault("correction_stage", "unknown")
         payload.setdefault("correction_entry_safe", True)

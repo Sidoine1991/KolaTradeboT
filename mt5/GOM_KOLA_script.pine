@@ -955,13 +955,23 @@ pass_count = pc1 + pc2 + pc3 + pc4 + pc5 + pc6
 filter_ratio = pass_count / filter_count
 coherence_ok = not verdict_coherence or filter_ratio >= 0.40 or verdict_gap >= (verdict_gap_th + 0.24)
 
-// Niveaux de conviction
-is_perfect_sell = score_sell > score_buy and verdict_gap >= 4.0 and coherence_ok
-is_good_sell    = score_sell > score_buy and verdict_gap >= 2.5 and not is_perfect_sell and coherence_ok
-is_sell         = score_sell > score_buy and verdict_gap >= 1.2 and not is_good_sell and not is_perfect_sell and coherence_ok
-is_perfect_buy  = score_buy > score_sell and verdict_gap >= 4.0 and coherence_ok
-is_good_buy     = score_buy > score_sell and verdict_gap >= 2.5 and not is_perfect_buy and coherence_ok
-is_buy          = score_buy > score_sell and verdict_gap >= 1.2 and not is_good_buy and not is_perfect_buy and coherence_ok
+// ── VÉRIFICATION COHÉRENCE AVEC DIRECTION RÉELLE DU PRIX ──
+// Calculer direction réelle du prix sur 5 bougies
+price_change_5b = close - close[4]
+avg_price_5b = (close + close[4]) / 2.0
+price_direction = avg_price_5b > 0 ? price_change_5b / avg_price_5b : 0.0
+
+// Seuil de rejet: 0.001 (0.1%) de mouvement
+price_strong_up = price_direction > 0.001
+price_strong_down = price_direction < -0.001
+
+// Niveaux de conviction (avec vérification cohérence prix)
+is_perfect_sell = score_sell > score_buy and verdict_gap >= 4.0 and coherence_ok and not price_strong_up
+is_good_sell    = score_sell > score_buy and verdict_gap >= 2.5 and not is_perfect_sell and coherence_ok and not price_strong_up
+is_sell         = score_sell > score_buy and verdict_gap >= 1.2 and not is_good_sell and not is_perfect_sell and coherence_ok and not price_strong_up
+is_perfect_buy  = score_buy > score_sell and verdict_gap >= 4.0 and coherence_ok and not price_strong_down
+is_good_buy     = score_buy > score_sell and verdict_gap >= 2.5 and not is_perfect_buy and coherence_ok and not price_strong_down
+is_buy          = score_buy > score_sell and verdict_gap >= 1.2 and not is_good_buy and not is_perfect_buy and coherence_ok and not price_strong_down
 
 verdict_num     = is_perfect_sell ? -3 : is_good_sell ? -2 : is_sell ? -1 : is_perfect_buy ? 3 : is_good_buy ? 2 : is_buy ? 1 : 0
 
