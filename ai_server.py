@@ -10216,6 +10216,29 @@ def _gom_finalize_verdict_pipeline(out: dict, sym: str, chart_tf: str = "M15") -
     if GOM_USE_CORRECTION_WAIT_OVERLAY:
         _gom_apply_correction_verdict_wait(out, sym)
 
+    _gom_apply_price_reality_final(out, sym)
+
+
+def _gom_apply_price_reality_final(out: dict, symbol: str) -> None:
+    """Dernière passe : verdict effectif aligné sur M1 / post-spike."""
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent / "python"))
+        from gom_pine_calculator import apply_price_reality_gate, verdict_text_from_num
+
+        vn = int(out.get("effective_verdict_num", out.get("verdict_num", 0)) or 0)
+        if vn == 0:
+            return
+        new_vn, reason = apply_price_reality_gate(out, vn)
+        if new_vn == vn and not reason:
+            return
+        out["price_reality_reason"] = reason
+        out["verdict_num"] = new_vn
+        out["verdict"] = verdict_text_from_num(new_vn)
+        out["effective_verdict_num"] = new_vn
+        out["effective_verdict"] = verdict_text_from_num(new_vn)
+    except Exception as exc:
+        logger.debug(f"[GOM-PRICE-REALITY] {symbol}: {exc}")
+
 
 def _gom_apply_predictive_verdict_blend(out: dict, symbol: str) -> None:
   """
@@ -10359,8 +10382,7 @@ def _gom_apply_correction_verdict_wait(out: dict, symbol: str) -> None:
     vn = int(out.get("effective_verdict_num", out.get("verdict_num", 0)) or 0)
     if vn == 0:
         return
-    if is_synthetic_symbol(str(symbol or out.get("symbol", ""))):
-        return
+    is_synth = is_synthetic_symbol(str(symbol or out.get("symbol", "")))
 
     def _tf_sign(key: str) -> int:
         d = str(out.get(key, "") or "").upper()
@@ -10406,6 +10428,20 @@ def _gom_apply_correction_verdict_wait(out: dict, symbol: str) -> None:
         reason = "M1 RSI descend vs BUY"
     else:
         reason = _gom_m1_price_pullback_reason(out, symbol, trade_dir)
+
+    if is_synth and not reason:
+        bars = int(out.get("bars_since_spike", out.get("m1_bars_since_spike", 0)) or 0)
+        opp = int(out.get("m1_opp_bars", 0) or 0)
+        if abs(vn) >= 3 and bars > 10:
+            reason = f"stale spike {bars} M1"
+        elif abs(vn) >= 3 and opp >= 3:
+            reason = f"micro-stairs opp={opp}"
+        elif abs(vn) >= 2 and opp >= 5:
+            reason = f"micro-corr opp={opp}"
+        elif trade_dir < 0 and m1 > 0 and m5 > 0:
+            reason = "M5 pullback vs SELL"
+        elif trade_dir > 0 and m1 < 0 and m5 < 0:
+            reason = "M5 pullback vs BUY"
 
     if not reason:
         return
@@ -11844,9 +11880,9 @@ def get_historical_data_mt5(symbol: str, timeframe: str = "H1", count: int = 500
                 ok = mt5.initialize(timeout=15000)
             if not ok:
                 # Fallback: try with known Deriv credentials
-                mt5_login = 5775742
+                mt5_login = 140398483
                 mt5_password = os.getenv('MT5_PASSWORD', '')
-                mt5_server = 'Deriv-Demo'
+                mt5_server = 'DerivSVG-Server-03'
                 ok = mt5.initialize(login=mt5_login, password=mt5_password if mt5_password else 'Socrate2024@', server=mt5_server, timeout=30000)
             if ok:
                 mt5_initialized = True
@@ -25216,6 +25252,10 @@ _SYMBOL_ALIASES: dict = {
     # Métaux & FX
     "XAUUSD":  "XAUUSD",  "GOLD":    "XAUUSD",  "GC=F":    "XAUUSD",
     "XAGUSD":  "ARGENT",  "SI=F":    "ARGENT",
+    # Indices — Startrader expose US30Cash, l'EA interroge par nom de graphique (US30/Dow)
+    "US30":       "US30Cash",  "US30_X10": "US30Cash",
+    "DOW":        "US30Cash",  "DOWJONES":  "US30Cash",
+    "DOWJONES30": "US30Cash",  "DJ30":      "US30Cash",
     "SOLUSD":  "SOLANA",  "SOL-USD": "SOLANA",
     "BNBUSD":  "BNB",     "BNB-USD": "BNB",
     "EURUSD":  "EURUSD",  "GBPUSD":  "GBPUSD",

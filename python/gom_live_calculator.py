@@ -77,9 +77,10 @@ class GOMSignalsLiveCalculator:
         self._candles_mem_cache_ts: Dict[str, float] = {}
         self._candles_mem_source: Dict[str, str] = {}
         self.pine = _PINE_CALC or GOMLPineCalculator()
-        # Tracking bougies sans spike confirmé par symbole
+        # Tracking bougies sans spike confirmé par symbole (incrément par nouvelle bougie M1)
         self._bars_without_spike: Dict[str, int] = {}
         self._last_spike_time: Dict[str, float] = {}
+        self._last_m1_bar_time: Dict[str, int] = {}
 
     def _cache_lookup(self, symbol: str, tf: str) -> Optional[pd.DataFrame]:
         for sym_key in self._symbol_lookup_keys(symbol):
@@ -736,30 +737,92 @@ class GOMSignalsLiveCalculator:
         if self.pine:
             record = self.pine.enrich_record(record)
 
+        self._enrich_m1_price_context(symbol, record, broker=broker)
         record["ok"] = True
         return record
 
+    def _enrich_m1_price_context(
+        self, symbol: str, record: Dict[str, Any], broker: Optional[str] = None
+    ) -> None:
+        """Métriques M1 pour cohérence verdict / prix réel."""
+        allow_deriv = self._is_deriv_synthetic(symbol)
+        df = self.get_candles(symbol, "1", 80, allow_deriv=allow_deriv, broker=broker)
+        if df is None or len(df) < 6:
+            return
+
+        close = df["close"].astype(float)
+        open_ = df["open"].astype(float)
+        high = df["high"].astype(float)
+        low = df["low"].astype(float)
+
+        c0 = float(close.iloc[-1])
+        c4 = float(close.iloc[-5])
+        avg = (c0 + c4) / 2.0 if (c0 + c4) > 0 else 1.0
+        record["m1_close"] = round(c0, 5)
+        record["m1_close_5"] = round(c4, 5)
+        record["price_direction_5b"] = round((c0 - c4) / avg, 6)
+
+        vn = int(record.get("verdict_num", 0) or 0)
+        trade_sign = 1 if vn > 0 else (-1 if vn < 0 else 0)
+        if trade_sign == 0:
+            sb = float(record.get("score_buy", 0) or 0)
+            ss = float(record.get("score_sell", 0) or 0)
+            trade_sign = 1 if sb >= ss else -1
+
+        opp = 0
+        for o, c in zip(open_.tail(6), close.tail(6)):
+            o_f, c_f = float(o), float(c)
+            if trade_sign > 0 and c_f < o_f:
+                opp += 1
+            elif trade_sign < 0 and c_f > o_f:
+                opp += 1
+        record["m1_opp_bars"] = opp
+
+        body_pct = (close - open_).abs() / close.replace(0, np.nan)
+        range_pct = (high - low) / close.replace(0, np.nan)
+        spike_bar = (body_pct > 0.0006) | (range_pct > 0.0012)
+        bars_since = 0
+        if spike_bar.any():
+            last_idx = int(np.where(spike_bar.values)[0][-1])
+            bars_since = max(0, len(df) - 1 - last_idx)
+        record["bars_since_spike"] = bars_since
+        record["m1_bars_since_spike"] = bars_since
+
+        try:
+            if isinstance(df.index, pd.DatetimeIndex) and len(df.index) > 0:
+                record["m1_last_bar_time"] = int(df.index[-1].timestamp())
+            elif "time" in df.columns:
+                t = df["time"].iloc[-1]
+                if hasattr(t, "timestamp"):
+                    record["m1_last_bar_time"] = int(t.timestamp())
+        except Exception:
+            pass
+
     def _apply_correction_detection(self, symbol: str, verdict_num: int, record: Dict[str, Any]) -> int:
-        """Détecte absence de spike confirmé et ajuste verdict automatiquement."""
-        # ── DÉTECTION DE SPIKE CONFIRMÉ ──
+        """Rétrograde si trop de bougies M1 sans spike (compteur bougie, pas poll)."""
         spike_prob = float(record.get("spike_prob", 0) or 0)
         spike_tradable = bool(record.get("spike_tradable", False))
         spike_confirmed = spike_tradable and spike_prob >= 0.55
-        
+
         sym_key = str(symbol).upper()
-        
-        # ── GESTION COMPTEUR BOUGIES SANS SPIKE ──
-        if spike_confirmed:
-            # Nouveau spike confirmé → reset compteur
-            if sym_key in self._bars_without_spike and self._bars_without_spike[sym_key] > 0:
-                print(f"[GOM-SPIKE-CONFIRMED] {symbol}: Nouveau spike confirmé | Bougies sans spike={self._bars_without_spike[sym_key]}")
-            self._bars_without_spike[sym_key] = 0
-            self._last_spike_time[sym_key] = time.time()
+        bar_t = int(record.get("m1_last_bar_time", 0) or 0)
+
+        if record.get("bars_since_spike") is not None:
+            bars_no_spike = int(record.get("bars_since_spike", 0) or 0)
         else:
-            # Pas de spike → incrémenter compteur
-            self._bars_without_spike[sym_key] = self._bars_without_spike.get(sym_key, 0) + 1
-        
-        bars_no_spike = self._bars_without_spike.get(sym_key, 0)
+            if bar_t > 0 and bar_t != self._last_m1_bar_time.get(sym_key, 0):
+                self._last_m1_bar_time[sym_key] = bar_t
+                if spike_confirmed:
+                    if self._bars_without_spike.get(sym_key, 0) > 0:
+                        print(
+                            f"[GOM-SPIKE-CONFIRMED] {symbol}: spike confirmé | "
+                            f"bougies sans spike={self._bars_without_spike.get(sym_key, 0)}"
+                        )
+                    self._bars_without_spike[sym_key] = 0
+                    self._last_spike_time[sym_key] = time.time()
+                else:
+                    self._bars_without_spike[sym_key] = self._bars_without_spike.get(sym_key, 0) + 1
+            bars_no_spike = self._bars_without_spike.get(sym_key, 0)
         
         # ── RÉTROGRADATION AUTOMATIQUE SANS SPIKE ──
         # Si >10 bougies sans spike et verdict >= GOOD, rétrograder
@@ -777,14 +840,13 @@ class GOMSignalsLiveCalculator:
         
         # ── FORÇAGE WAIT APRÈS 15 BOUGIES SANS SPIKE ──
         if bars_no_spike > 15:
-            prev_vn = verdict_num
             prev_verd = self.pine.verdict_text(verdict_num)
             verdict_num = 0
-            print(f"[GOM-FORCE-WAIT] {symbol}: Verdict forcé WAIT après {bars_no_spike} bougies sans spike | {prev_verd} → WAIT")
-            
-            # Reset compteur pour éviter logs répétitifs
-            self._bars_without_spike[sym_key] = 0
-        
+            print(
+                f"[GOM-FORCE-WAIT] {symbol}: WAIT après {bars_no_spike} bougies M1 sans spike | "
+                f"{prev_verd} → WAIT"
+            )
+
         return verdict_num
 
     def build_api_response(self, symbol: str, chart_tf: str = "15", broker: Optional[str] = None) -> Dict[str, Any]:
@@ -803,11 +865,17 @@ class GOMSignalsLiveCalculator:
         verdict_num = int(record.get("verdict_num", 0) or 0)
         if verdict_num != 0:
             verdict_num = self._apply_correction_detection(symbol, verdict_num, record)
-            record["verdict_num"] = verdict_num
-            record["verdict"] = self.pine.verdict_text(verdict_num)
+
+        from gom_pine_calculator import apply_price_reality_gate
+
+        verdict_num, reality_reason = apply_price_reality_gate(record, verdict_num)
+        if reality_reason:
+            record["price_reality_reason"] = reality_reason
+        record["verdict_num"] = verdict_num
+        record["verdict"] = self.pine.verdict_text(verdict_num)
 
         price = record.get("entry", record.get("close", 0.0))
-        return {
+        resp: Dict[str, Any] = {
             "ok": True,
             "symbol": symbol,
             "timestamp": record.get("timestamp"),
@@ -857,6 +925,11 @@ class GOMSignalsLiveCalculator:
             "spike_level": int(record.get("spike_level_num", record.get("spike_level", 0))),
             "imminence_pct": round(float(record.get("spike_imminence", record.get("imminence_pct", 0))), 1),
             "spike_tradable": bool(record.get("spike_tradable", False)),
+            "bars_since_spike": int(record.get("bars_since_spike", 0) or 0),
+            "m1_opp_bars": int(record.get("m1_opp_bars", 0) or 0),
+            "price_direction_5b": float(record.get("price_direction_5b", 0) or 0),
+            "price_reality_reason": record.get("price_reality_reason", ""),
+            "m1_last_bar_time": int(record.get("m1_last_bar_time", 0) or 0),
             "spike_progress_pct": round(float(record.get("spike_progress_pct", 0)), 1),
             "atr": round(float(record.get("atr14", 0)), 5),
             "atr14": round(float(record.get("atr14", 0)), 5),

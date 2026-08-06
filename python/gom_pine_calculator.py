@@ -253,18 +253,15 @@ class GOMLPineCalculator:
         if not coherence_ok:
             return 0
 
-        # ── VÉRIFICATION COHÉRENCE AVEC DIRECTION RÉELLE DU PRIX ──
+        # Cohérence prix = move 5 bougies (aligné Pine), pas distance VWAP
         price_strong_up = False
         price_strong_down = False
         if record is not None:
-            close = float(record.get("close", record.get("entry", 0)) or 0)
-            vwap_val = float(record.get("vwap", close) or close)
-            vwap_dist_pct = (close - vwap_val) / vwap_val if vwap_val > 0 else 0.0
-            price_strong_up = vwap_dist_pct > 0.001  # Prix monte fortement
-            price_strong_down = vwap_dist_pct < -0.001  # Prix descend fortement
+            price_dir = _price_direction_5b(record)
+            price_strong_up = price_dir > 0.001
+            price_strong_down = price_dir < -0.001
 
         if score_sell > score_buy:
-            # Rejeter SELL si prix en forte montée
             if price_strong_up:
                 return 0
             is_perfect = verdict_gap >= self.gap_perfect
@@ -279,7 +276,6 @@ class GOMLPineCalculator:
             return 0
 
         if score_buy > score_sell:
-            # Rejeter BUY si prix en forte descente
             if price_strong_down:
                 return 0
             is_perfect = verdict_gap >= self.gap_perfect
@@ -672,6 +668,9 @@ class GOMLPineCalculator:
         )
         verdict_num = self.apply_entry_quality_gate(record, verdict_num)
         verdict_num = self.apply_smc_structure_gate(record, verdict_num)
+        verdict_num, reality_reason = apply_price_reality_gate(record, verdict_num)
+        if reality_reason:
+            record["price_reality_reason"] = reality_reason
 
         record["verdict_gap"] = round(verdict_gap, 2)
         record["verdict_num"] = verdict_num
@@ -680,6 +679,96 @@ class GOMLPineCalculator:
         record["coherence_ok"] = coherence_ok
         record["coherence_pct"] = round(filter_ratio * 100.0, 1)
         return record
+
+
+def _price_direction_5b(record: Dict[str, Any]) -> float:
+    """Variation relative close vs close[4] (Pine price_direction)."""
+    explicit = record.get("price_direction_5b", record.get("price_change_5b_pct"))
+    if explicit is not None:
+        try:
+            return float(explicit)
+        except (TypeError, ValueError):
+            pass
+    c0 = float(record.get("m1_close", record.get("close", record.get("entry", 0))) or 0)
+    c4 = float(record.get("m1_close_5", record.get("close_m1_5", 0)) or 0)
+    if c0 > 0 and c4 > 0:
+        avg = (c0 + c4) / 2.0
+        return (c0 - c4) / avg if avg > 0 else 0.0
+    # Fallback faible : distance VWAP (legacy)
+    vwap = float(record.get("vwap", c0) or c0)
+    if c0 > 0 and vwap > 0:
+        return (c0 - vwap) / vwap
+    return 0.0
+
+
+def apply_price_reality_gate(record: Dict[str, Any], verdict_num: int) -> Tuple[int, str]:
+    """Empêche PERFECT/GOOD figés contre l'évolution réelle M1.
+
+    Règles (ordre) :
+    1. bars_since_spike > 15 → WAIT
+    2. bars_since_spike > 12 → max SIMPLE (|vn|≤1)
+    3. bars_since_spike > 10 → max GOOD (|vn|≤2) — jamais PERFECT stale
+    4. M1 label contre + PERFECT → GOOD
+    5. Move 5b fort contre → WAIT
+    6. Micro-stairs (bougies M1 adverses) → WAIT / rétrograde
+    """
+    vn = int(verdict_num or 0)
+    if vn == 0:
+        return 0, ""
+
+    trade_dir = 1 if vn > 0 else -1
+    reasons: list = []
+
+    bars = -1
+    for key in ("bars_since_spike", "m1_bars_since_spike"):
+        raw = record.get(key)
+        if raw is None:
+            continue
+        try:
+            bars = int(raw)
+            break
+        except (TypeError, ValueError):
+            continue
+
+    if bars > 15:
+        return 0, f"bars_since_spike={bars}>15"
+    if bars > 12 and abs(vn) >= 2:
+        vn = trade_dir * 1
+        reasons.append(f"stale_spike>{bars}->SIMPLE")
+    elif bars > 10 and abs(vn) >= 3:
+        vn = trade_dir * 2
+        reasons.append(f"stale_spike>{bars}->GOOD")
+
+    m1 = str(record.get("tf_m1_dir", "") or "").upper()
+    m1_against = (trade_dir > 0 and m1 == "BEAR") or (trade_dir < 0 and m1 == "BULL")
+
+    price_dir = _price_direction_5b(record)
+    if trade_dir > 0 and price_dir < -0.001:
+        return 0, "price_strong_down_vs_buy"
+    if trade_dir < 0 and price_dir > 0.001:
+        return 0, "price_strong_up_vs_sell"
+
+    try:
+        opp = int(record.get("m1_opp_bars", record.get("m1_adverse_bars", 0)) or 0)
+    except (TypeError, ValueError):
+        opp = 0
+
+    # PERFECT + ≥3 bougies adverses /6 → WAIT (micro-correction / stairs)
+    if abs(vn) >= 3 and opp >= 3:
+        return 0, f"micro_stairs_opp={opp}"
+    # GOOD + ≥5 adverses → WAIT
+    if abs(vn) >= 2 and opp >= 5:
+        return 0, f"micro_stairs_opp={opp}"
+
+    if m1_against and abs(vn) >= 3:
+        vn = trade_dir * 2
+        reasons.append("m1_against_perfect")
+    # GOOD + ≥4 adverses + M1 contre → SIMPLE
+    if abs(vn) >= 2 and opp >= 4 and m1_against:
+        vn = trade_dir * 1
+        reasons.append(f"micro_corr_opp={opp}")
+
+    return vn, ";".join(reasons)
 
 
 def verdict_text_from_num(verdict_num: int) -> str:
@@ -755,7 +844,13 @@ def blend_reactive_forecast_verdict(
     f_sign = 1 if forecast_vn > 0 else (-1 if forecast_vn < 0 else 0)
 
     if r_sign != 0 and f_sign != 0 and r_sign == f_sign:
-        mag = min(3, max(abs(reactive_vn), abs(forecast_vn)) + 1)
+        # Ne jamais inventer PERFECT par simple accord — max(GOOD) +1 seulement
+        # si le réactif est déjà GOOD (|vn|>=2). Sinon plafonner à GOOD.
+        base = max(abs(reactive_vn), abs(forecast_vn))
+        if base >= 2 and abs(reactive_vn) >= 2 and abs(forecast_vn) >= 2:
+            mag = min(3, base + 1)
+        else:
+            mag = min(2, base + 1)
         vn = r_sign * mag
         return vn, verdict_text_from_num(vn)
 

@@ -11784,8 +11784,24 @@ async def gom_kola_dashboard(
         gom_data = json.loads(gom_file.read_text(encoding="utf-8"))
         result = None
 
+        # Alias de résolution — le poller pousse les symboles du terminal MT5
+        # (ex: US30Cash) alors que l'EA interroge par son nom de graphique (ex: US30).
+        resolved_symbol = symbol
+        alias_map = {
+            "US30": "US30Cash",
+            "Dow": "US30Cash",
+            "DowJones30": "US30Cash",
+            "DOW": "US30Cash",
+            "US30_X10": "US30Cash",
+            "US30_x10": "US30Cash",
+        }
+        lookup_key = alias_map.get(symbol, symbol)
+
         # Format 1: Dict par symbole {"XAUUSD": {...}}
-        if isinstance(gom_data, dict) and symbol in gom_data:
+        if isinstance(gom_data, dict) and lookup_key in gom_data:
+            result = gom_data[lookup_key]
+        # Format 1bis: clé exacte fournie par l'EA
+        elif isinstance(gom_data, dict) and symbol in gom_data:
             result = gom_data[symbol]
         # Format 2: Single object {"symbol": "XAUUSD", ...}
         elif isinstance(gom_data, dict) and gom_data.get("symbol") == symbol:
