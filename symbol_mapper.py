@@ -532,7 +532,9 @@ def is_weltrade_symbol(symbol: str) -> bool:
     s = symbol.upper().replace(" ", "")
     if "PAINX" in s or "GAINX" in s:
         return True
-    if re.search(r"(FX|SFV|SFX)?VOL", symbol, re.I):
+    # FXVOL/SFVVOL/SFXVOL (ex: FX Vol 20, SFX Vol) — SANS matcher "Volatility 250 Index"
+    # (regex VOL seul matchait "VOL" dans "VOLATILITY", routant les synthétiques Deriv vers Weltrade)
+    if re.fullmatch(r"(?:FX|SFV|SFX)?VOL(?:\d+)?", s):
         return True
     return s in ("PAINX", "GAINX", "FXVOL", "SFVVOL", "SFXVOL")
 
@@ -554,8 +556,8 @@ def is_startrader_symbol(symbol: str) -> bool:
     if mapping and mapping.get("category") in ("forex", "forex_metal"):
         return True
     return s in (
-        "BTCUSD", "ETHUSD", "US30_X10", "NAS100+", "NAS100FT+",
-        "EURNOK", "USDZAR",
+        "BTCUSD", "ETHUSD", "US30", "US30_X10", "US30CASH", "DOW", "DJ30",
+        "DOWJONES30", "NAS100+", "NAS100FT+", "EURNOK", "USDZAR",
     )
 
 
@@ -588,6 +590,33 @@ def is_volatility(symbol: str) -> bool:
         or s in ("FXVOL", "SFVVOL", "SFXVOL")
         or bool(re.search(r"(FX|SFV|SFX)?VOL\d+", s))
     )
+
+
+def is_synthetic_symbol(symbol: str) -> bool:
+    """
+    Vrai pour tout instrument synthétique (Deriv + Weltrade) :
+    catégories SYM_BOOM_CRASH et SYM_VOLATILITY (miroir SMC_GetSymbolCategory EA).
+
+    Correspondances dérivées de modules/SMC_SymbolCategory.mqh:
+      • SYM_BOOM_CRASH   → Boom/Crash/PainX/GainX/TrendX/BreakX
+      • SYM_VOLATILITY   → Volatility/VOL/Jump/Step/Range Break/FX Vol/SFVVOL/SFXVOL
+    """
+    if not symbol:
+        return False
+    s = symbol.upper().replace(" ", "")
+    if not s:
+        return False
+    if re.search(r"(FX|SFV|SFX)?VOL\d+", s):
+        return True
+    if s.startswith("PAINX") or s.startswith("GAINX"):
+        return True
+    for token in ("FXVOL", "SFVVOL", "SFXVOL", "VOLATILITY", "TRENDX", "BREAKX"):
+        if token in s:
+            return True
+    for token in ("BOOM", "CRASH", "JUMP", "STEP", "RANGEBREAK"):
+        if token in s:
+            return True
+    return False
 
 
 def get_symbol_category(symbol: str) -> Optional[str]:
@@ -852,6 +881,10 @@ def resolve_mt5_symbol(raw: str) -> str:
     
     if s.upper() in ("XAUEUR", "GOLD", "OR"):
         return "XAUUSD"
+
+    up0 = s.upper().replace(" ", "")
+    if up0 in ("US30", "US30CASH", "US30_X10", "DOW", "DJ30", "DOWJONES30", "DOWJONES"):
+        return "US30Cash"
 
     mapping = get_symbol_mapping(s)
     if mapping:
