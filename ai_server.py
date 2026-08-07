@@ -10172,10 +10172,25 @@ _gom_stale_ttl = int(os.getenv("GOM_DASHBOARD_STALE_SEC", "180"))
 _gom_enrich_ttl = int(os.getenv("GOM_DASHBOARD_ENRICH_CACHE_SEC", "30"))
 # Recalcul Pine systématique (tous symboles Deriv/Weltrade/Forex/Metal/Crypto)
 GOM_FORCE_PINE_RECALC = _env_bool("GOM_FORCE_PINE_RECALC", True)
-# Blend cognition 5 bougies — désactivé par défaut (évite WAIT/retards en fin de move)
-GOM_USE_PREDICTIVE_BLEND = _env_bool("GOM_USE_PREDICTIVE_BLEND", True)
-# Overlay correction WAIT côté serveur — désactivé (EA gère via UseGOMCorrectionOverlay)
-GOM_USE_CORRECTION_WAIT_OVERLAY = _env_bool("GOM_USE_CORRECTION_WAIT_OVERLAY", True)
+# FIX-DISCORDANCE-03 : blend cognition 5 bougies — DÉSACTIVÉ par défaut.
+# Le commentaire disait déjà "désactivé par défaut" mais le code valait True :
+# blend_reactive_forecast_verdict() peut fabriquer un PERFECT (mag=min(3,base+1))
+# à partir d'un GOOD réactif + une prévision d'accord — sans confirmation prix
+# réelle. C'est ce qui produit un verdict PERFECT figé alors que la bougie M1
+# vient de repartir dans l'autre sens (le gate de réalité prix ne rattrape que
+# les signaux STALE, pas un renversement tout juste survenu). GOMLPineCalculator
+# .enrich_record() reste l'unique source de vérité ; le forecast est calculé et
+# exposé (forecast_verdict_num / forecast_verdict) mais n'écrase plus le verdict
+# exécutable. Réactivable via env var pour tests A/B, jamais par défaut.
+GOM_USE_PREDICTIVE_BLEND = _env_bool("GOM_USE_PREDICTIVE_BLEND", False)
+# FIX-DISCORDANCE-03 : overlay correction WAIT côté serveur — DÉSACTIVÉ par défaut.
+# Même problème que ci-dessus : ~10 branches heuristiques avec seuils indépendants
+# non coordonnés avec apply_price_reality_gate() (déjà exécuté dans enrich_record
+# ET en fin de pipeline). Le gate canonique dégrade déjà PERFECT→GOOD→SIMPLE→WAIT
+# de façon cohérente ; cet overlay produisait le flicker PERFECT→WAIT→PERFECT sur
+# une même bougie selon l'ordre/timing des polls. L'EA gère sa propre détection de
+# correction via UseGOMCorrectionOverlay côté MQL5.
+GOM_USE_CORRECTION_WAIT_OVERLAY = _env_bool("GOM_USE_CORRECTION_WAIT_OVERLAY", False)
 # Climatisation direction Weltrade (GainX/TrendX/Boom→BUY only, PainX/Crash→SELL only).
 # DÉSACTIVÉE par défaut : elle forçait un verdict BUY sur GainX alors que les scores et
 # verdict_num_raw restaient SELL → le payload contenait deux directions opposées sur le
@@ -10189,7 +10204,25 @@ _gom_bridge_singleton = None
 
 
 def _gom_finalize_verdict_pipeline(out: dict, sym: str, chart_tf: str = "M15") -> None:
-    """Pipeline unique : Pine recalc → Weltrade → uplift MTF → blend optionnel → correction."""
+    """Pipeline verdict GOM — source unique de vérité.
+
+    1) GOMLPineCalculator.enrich_record() (via _gom_apply_pine_verdict) calcule
+       scores + verdict_num en une passe déterministe : scoring pondéré → gap/
+       coherence → verdict brut → uplift MTF (seulement si WAIT) → gate MTF
+       pondéré H4/H1/D1 → garde Boom/Crash → gate qualité d'entrée → gate
+       structure SMC → gate réalité prix M1. Tous les seuils par classe d'actif
+       (ASSET_VERDICT_PROFILES) sont appliqués ici, une seule fois.
+    2) _gom_apply_weltrade_verdict_invert() : climatisation de signe optionnelle
+       pour GainX/PainX (désactivée par défaut, GOM_WELTRADE_INVERT_ENABLED).
+    3) Blend cognition (GOM_USE_PREDICTIVE_BLEND) et overlay correction WAIT
+       (GOM_USE_CORRECTION_WAIT_OVERLAY) : désactivés par défaut (FIX-DISCORDANCE-03).
+       Laissés togglables par env var pour expérimentation, jamais actifs par défaut
+       — ce sont eux qui produisaient un verdict PERFECT fabriqué par accord
+       réactif+prévision, en désaccord avec le prix réel.
+    4) _gom_apply_price_reality_final() : ré-application du même gate canonique
+       (dégrade uniquement, jamais d'upgrade) si des données M1 plus fraîches
+       sont arrivées entre-temps.
+    """
     if GOM_FORCE_PINE_RECALC and GOM_LIVE_CALCULATOR_AVAILABLE and _gom_live_calc:
         try:
             _gom_apply_pine_verdict(out)
