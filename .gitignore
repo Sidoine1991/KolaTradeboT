@@ -87,7 +87,7 @@ models/
 
 # MQL5 EA — ne pas exposer sur le dépôt distant (exceptions dispositif bridge/TV)
 SMC_Universal.ex5
-*.mq5
+# *.mq5  # TEMPORAIREMENT DÉSACTIVÉ pour modifications
 *.ex5
 !TradeManager.mq5
 !SpikeRiderEA.mq5
