@@ -10197,7 +10197,14 @@ def _gom_finalize_verdict_pipeline(out: dict, sym: str, chart_tf: str = "M15") -
             logger.debug(f"[GOM-FINALIZE] pine recalc {sym}: {exc}")
 
     _gom_apply_weltrade_verdict_invert(out, sym)
-    _gom_mtf_uplift_verdict(out)
+    # FIX-DISCORDANCE-02 : _gom_mtf_uplift_verdict() retiré du pipeline.
+    # C'était un doublon simplifié (seuil gap fixe 0.25, aucune pondération
+    # H4/H1/D1, aucune notion de classe d'actif) de apply_mtf_verdict_gate()
+    # déjà exécuté avec la pondération complète à l'intérieur de
+    # GOMLPineCalculator.enrich_record() (appelé juste au-dessus via
+    # _gom_apply_pine_verdict). Le laisser tourner ici pouvait réintroduire
+    # un BUY/SELL que le gate pondéré avait légitimement ramené à WAIT.
+    # Fonction conservée plus bas pour compat mais non appelée.
 
     reactive_vn = int(out.get("verdict_num", 0) or 0)
     reactive_txt = str(out.get("verdict", "WAIT") or "WAIT")
@@ -10475,7 +10482,12 @@ def _is_weltrade_synthetic(symbol_or_out) -> bool:
 
 
 def _gom_mtf_uplift_verdict(out: dict) -> None:
-    """Aligne verdict sur MTF court terme si WAIT incohérent (FX Vol, etc.)."""
+    """DEPRECATED (FIX-DISCORDANCE-02) : ne plus appeler.
+
+    Doublon simplifié de GOMLPineCalculator.apply_mtf_verdict_uplift(),
+    sans pondération par TF (H4/H1/D1) ni classe d'actif. Conservé pour
+    référence/rollback uniquement — retiré des 3 pipelines qui l'appelaient.
+    Aligne verdict sur MTF court terme si WAIT incohérent (FX Vol, etc.)."""
     if out.get("gate"):
         return
     vn = int(out.get("verdict_num") or 0)
@@ -27199,7 +27211,9 @@ def _build_gom_mt5_payload(record: dict) -> dict:
             if is_gainx or is_painx:
                 _gom_apply_weltrade_verdict_invert(out, str(sym))
 
-    _gom_mtf_uplift_verdict(out)
+    # FIX-DISCORDANCE-02 : voir note dans _gom_finalize_verdict_pipeline —
+    # _gom_mtf_uplift_verdict() retiré, doublon du gate pondéré déjà appliqué
+    # dans enrich_record().
 
     # Garde anti-hedge : ne JAMAIS émettre une direction exécutable si une direction
     # opposée coexiste dans le payload (verdict_num vs verdict_num_raw). Sinon l'EA peut
@@ -27420,7 +27434,8 @@ def _gom_verdict_record_from_payload(payload: GomVerdictPayload, enrich_mt5: boo
         # Recalcul Pine final après enrichissement MTF (hors poller mt5_live)
         _gom_apply_pine_verdict(record)
         _gom_apply_weltrade_verdict_invert(record, sym)
-        _gom_mtf_uplift_verdict(record)
+        # FIX-DISCORDANCE-02 : _gom_mtf_uplift_verdict() retiré, doublon du
+        # gate pondéré H4/H1/D1 déjà appliqué dans enrich_record() ci-dessus.
     record["data_source"] = str(extra.get("source") or record.get("data_source") or "live_calculation")
 
     # DEBUG: Verify predictions are in record
