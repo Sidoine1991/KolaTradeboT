@@ -595,11 +595,15 @@ void Dow_DrawPatternForecast()
    else
       spikeColor = clrLime;
 
+   // Calculer le centre du graphique
+   int chartWidth = (int)ChartGetInteger(0, CHART_WIDTH_IN_PIXELS);
+   int centerX = chartWidth / 2;
+
    // Ligne 1: Direction + Confidence
    string line1 = "PAT: " + dirText + "  conf=" + DoubleToString(g_patternForecast.confidencePct, 0) + "%";
    ObjectCreate(0, prefix + "L1", OBJ_LABEL, 0, 0, 0);
-   ObjectSetInteger(0, prefix + "L1", OBJPROP_CORNER, CORNER_RIGHT_UPPER);
-   ObjectSetInteger(0, prefix + "L1", OBJPROP_XDISTANCE, 20);
+   ObjectSetInteger(0, prefix + "L1", OBJPROP_CORNER, CORNER_LEFT_UPPER);
+   ObjectSetInteger(0, prefix + "L1", OBJPROP_XDISTANCE, centerX - 100);
    ObjectSetInteger(0, prefix + "L1", OBJPROP_YDISTANCE, 20);
    ObjectSetString(0, prefix + "L1", OBJPROP_TEXT, line1);
    ObjectSetString(0, prefix + "L1", OBJPROP_FONT, "Consolas Bold");
@@ -614,8 +618,8 @@ void Dow_DrawPatternForecast()
       spikeStr += " (" + DoubleToString(g_patternForecast.spikeMagnitudeAtr, 1) + "xATR)";
    string line2 = "SPIKE: " + spikeStr;
    ObjectCreate(0, prefix + "L2", OBJ_LABEL, 0, 0, 0);
-   ObjectSetInteger(0, prefix + "L2", OBJPROP_CORNER, CORNER_RIGHT_UPPER);
-   ObjectSetInteger(0, prefix + "L2", OBJPROP_XDISTANCE, 20);
+   ObjectSetInteger(0, prefix + "L2", OBJPROP_CORNER, CORNER_LEFT_UPPER);
+   ObjectSetInteger(0, prefix + "L2", OBJPROP_XDISTANCE, centerX - 100);
    ObjectSetInteger(0, prefix + "L2", OBJPROP_YDISTANCE, 38);
    ObjectSetString(0, prefix + "L2", OBJPROP_TEXT, line2);
    ObjectSetString(0, prefix + "L2", OBJPROP_FONT, "Consolas");
@@ -644,8 +648,8 @@ void Dow_DrawPatternForecast()
       line3 += " (" + blockReason + ")";
 
    ObjectCreate(0, prefix + "L3", OBJ_LABEL, 0, 0, 0);
-   ObjectSetInteger(0, prefix + "L3", OBJPROP_CORNER, CORNER_RIGHT_UPPER);
-   ObjectSetInteger(0, prefix + "L3", OBJPROP_XDISTANCE, 20);
+   ObjectSetInteger(0, prefix + "L3", OBJPROP_CORNER, CORNER_LEFT_UPPER);
+   ObjectSetInteger(0, prefix + "L3", OBJPROP_XDISTANCE, centerX - 100);
    ObjectSetInteger(0, prefix + "L3", OBJPROP_YDISTANCE, 54);
     ObjectSetString(0, prefix + "L3", OBJPROP_TEXT, line3);
     ObjectSetString(0, prefix + "L3", OBJPROP_FONT, "Consolas");
@@ -1774,27 +1778,27 @@ void Dow_ExecutePredictiveMarketOrder(bool isBearish, double atrVal, int selecte
    if(!UseDowTrendline) return;
    if(selectedCount < 2) return;
 
-   // ── GOM PERFECT obligatoire (|vn|>=3, pas GOOD) ──
+   // ── GOM GOOD/PERFECT obligatoire (|vn|>=2) — WAIT (vn=0) bloqué ──
    int vn = g_smcGomConnected ? g_smcGomVerdictNum : 0;
-   if(MathAbs(vn) < 3)
+   if(!SMCGP_IsGoodPerfect(vn))
    {
       static datetime s_lastAlignLog = 0;
       if(TimeCurrent() - s_lastAlignLog >= 30)
       {
          s_lastAlignLog = TimeCurrent();
-         Print("[DOW→MARKET] GOM non PERFECT vn=", vn, " (exige |vn|>=3) → skip MARKET");
+         Print("[DOW→MARKET] GOM=", vn, " (WAIT) (exige GOOD/PERFECT |vn|>=2) → skip MARKET");
       }
       return;
    }
    // ── Direction GOM alignée avec DOW ──
-   bool gomAligned = (!isBearish && vn >= 3) || (isBearish && vn <= -3);
+   bool gomAligned = (!isBearish && vn >= 2) || (isBearish && vn <= -2);
    if(!gomAligned)
    {
       static datetime s_lastAlignLog2 = 0;
       if(TimeCurrent() - s_lastAlignLog2 >= 30)
       {
          s_lastAlignLog2 = TimeCurrent();
-         Print("[DOW→MARKET] GOM PERFECT mais direction ≠ DOW=", (isBearish ? "SELL" : "BUY"),
+         Print("[DOW→MARKET] GOM GOOD/PERFECT mais direction ≠ DOW=", (isBearish ? "SELL" : "BUY"),
                " vn=", vn);
       }
       return;
@@ -2315,7 +2319,7 @@ g_dowState.active = true;
     }
 
       // ── PRIORITÉ 2: MARKET classique au prix actuel (remplace LIMIT trendline) ──
-      // GOM PERFECT obligatoire aussi (|vn|>=3)
+      // GOM GOOD/PERFECT obligatoire aussi (|vn|>=2, WAIT bloqué)
       if(CountPositionsForSymbol(_Symbol) > 0) return; // déjà une position → skip
 
       // ⛔ Pattern Forecast hard block
@@ -2324,8 +2328,8 @@ g_dowState.active = true;
 
       int vnLim = g_smcGomConnected ? g_smcGomVerdictNum : 0;
 
-       // Si GOM n'est plus PERFECT → vérifier la discipline LIMIT avant suppression
-       if(MathAbs(vnLim) < 3)
+       // Si GOM n'est plus GOOD/PERFECT (WAIT) → vérifier la discipline LIMIT avant suppression
+       if(!SMCGP_IsGoodPerfect(vnLim))
        {
           // ── VÉRIFICATION DISCIPLINE LIMIT (via SMC_LimitDiscipline) ──
           if(g_dowState.limitTicket > 0)
@@ -2381,7 +2385,7 @@ g_dowState.active = true;
        }
 
        // Direction GOM alignée avec DOW pour MARKET
-       bool limGomAligned = (!isBearish && vnLim >= 3) || (isBearish && vnLim <= -3);
+       bool limGomAligned = (!isBearish && vnLim >= 2) || (isBearish && vnLim <= -2);
        if(!limGomAligned)
        {
           // ── VÉRIFICATION DISCIPLINE LIMIT avant suppression ──
@@ -2483,7 +2487,7 @@ g_dowState.active = true;
 
    // ── PRIORITÉ 3: EP MARKET (retracement au niveau DOW BULL/BEAR EP) ──
    // Exécute un MARKET au niveau mid quand le prix touche l'EP
-   // et retrace 1 bougie. GOM PERFECT déjà checké ci-dessus (|vn|>=3).
+   // et retrace 1 bougie. GOM GOOD/PERFECT déjà checké ci-dessus (|vn|>=2).
    double epPrice = (SymbolInfoDouble(_Symbol, SYMBOL_BID) + SymbolInfoDouble(_Symbol, SYMBOL_ASK)) / 2.0;
    g_dowState.currentEpPrice = epPrice;
 

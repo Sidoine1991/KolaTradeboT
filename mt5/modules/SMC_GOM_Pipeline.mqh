@@ -476,6 +476,13 @@ int      g_smcGomVerdictNumServer = 0;
 bool     g_smcGomCorrectionWait  = false;    // true = affichage/trading en WAIT (correction)
 string   g_smcGomCorrectionReason = "";
 bool     g_smcGomHardDollarCorrection = false;  // true = correction M1 > seuil $ (ne doit JAMAIS être écrasée)
+bool     g_smcGomHarmonizedM1 = false; // verdict harmonisé serveur (M1 + gate réalité prix)
+double   g_smcM1Momentum = 0.0;
+double   g_smcPriceDir1b = 0.0;
+double   g_smcPriceDir3b = 0.0;
+double   g_smcPriceDir5b = 0.0;
+string   g_smcTfM1DirLive = "";
+int      g_smcM1OppBars = 0;
 
 // ── Tracking spikes successifs pour promotion PERFECT ──
 int      g_smcConsecutiveSpikes = 0;        // Nombre de spikes successifs dans la même direction
@@ -483,10 +490,75 @@ datetime g_smcFirstSpikeTime = 0;          // Timestamp du premier spike de la s
 int      g_smcSpikeSeriesDir = 0;          // Direction de la série de spikes (1=BUY, -1=SELL)
 
 //+------------------------------------------------------------------+
+//| Compte les petites bougies M1 consécutives depuis bar 0            |
+//+------------------------------------------------------------------+
+// Seuil move M1 fort — aligné python/gom_pine_calculator._strong_move_threshold
+double SMCGP_StrongMoveThreshold(const string symbol)
+{
+   string s = symbol;
+   StringToUpper(s);
+   if(StringFind(s, "BOOM") >= 0 || StringFind(s, "CRASH") >= 0 ||
+      StringFind(s, "PAINX") >= 0 || StringFind(s, "GAINX") >= 0 ||
+      StringFind(s, "VOL") >= 0 || StringFind(s, "FXVOL") >= 0)
+      return 0.00035;
+   if(StringFind(s, "XAU") >= 0 || StringFind(s, "GOLD") >= 0 ||
+      StringFind(s, "BTC") >= 0 || StringFind(s, "ETH") >= 0)
+      return 0.0005;
+   return 0.001;
+}
+
+void SMCGP_ParseHarmonizedM1Fields(const string &body)
+{
+   g_smcGomHarmonizedM1 = SMCGP_JsonBool(body, "harmonized_m1");
+   string vmode = SMCGP_JsonString(body, "verdict_mode");
+   if(!g_smcGomHarmonizedM1 && vmode == "reactive_pine")
+      g_smcGomHarmonizedM1 = true;
+
+   g_smcM1Momentum  = SMCGP_JsonDouble(body, "m1_momentum", 0.0);
+   g_smcPriceDir1b  = SMCGP_JsonDouble(body, "price_direction_1b", 0.0);
+   g_smcPriceDir3b  = SMCGP_JsonDouble(body, "price_direction_3b", 0.0);
+   g_smcPriceDir5b  = SMCGP_JsonDouble(body, "price_direction_5b", 0.0);
+   g_smcM1OppBars   = (int)SMCGP_JsonDouble(body, "m1_opp_bars", 0.0);
+   string m1Live    = SMCGP_JsonString(body, "tf_m1_dir_live");
+   if(StringLen(m1Live) > 0)
+      g_smcTfM1DirLive = m1Live;
+}
+
+int SMCGP_CountLocalSmallM1Bars(const string symbol, const double bodyRatio = 0.55)
+{
+   MqlRates m1[];
+   ArraySetAsSeries(m1, true);
+   if(CopyRates(symbol, PERIOD_M1, 0, 25, m1) < 5) return 0;
+
+   double avgBody = 0;
+   int avgN = MathMin(20, ArraySize(m1) - 1);
+   for(int j = 1; j <= avgN; j++)
+      avgBody += MathAbs(m1[j].close - m1[j].open);
+   if(avgN > 0) avgBody /= avgN;
+
+   double smallMax = avgBody * bodyRatio;
+   double pt = SymbolInfoDouble(symbol, SYMBOL_POINT);
+   if(smallMax < pt * 3) smallMax = pt * 3;
+
+   int smallCount = 0;
+   for(int i = 0; i < MathMin(20, ArraySize(m1)); i++)
+   {
+      if(MathAbs(m1[i].close - m1[i].open) <= smallMax)
+         smallCount++;
+      else
+         break;
+   }
+   return smallCount;
+}
+
+//+------------------------------------------------------------------+
 //| Mettre à jour le tracking de spikes successifs et promouvoir PERFECT|
 //+------------------------------------------------------------------+
 void SMCGP_UpdateSpikeSeriesTracking()
 {
+   // Verdict harmonisé serveur : pas de promotion client PERFECT
+   if(g_smcGomHarmonizedM1) return;
+
    // Détection d'un nouveau spike confirmé
    bool newSpikeDetected = (g_smcGomSpikeLevel >= 2 && g_smcGomBarsSinceSpike == 0);
    
@@ -514,15 +586,38 @@ void SMCGP_UpdateSpikeSeriesTracking()
          }
          
          // ── PROMOTION À PERFECT après 2 spikes successifs ──
-         if(g_smcConsecutiveSpikes >= 2 && MathAbs(g_smcGomVerdictNum) == 2)
+         if(g_smcConsecutiveSpikes >= 2 && MathAbs(g_smcGomVerdictNum) == 2
+            && g_smcGomBarsSinceSpike <= 10)
          {
-            // Promouvoir GOOD → PERFECT
-            g_smcGomVerdictNum = (spikeDir == 1) ? 3 : -3;
-            g_smcGomVerdict = (spikeDir == 1) ? "PERFECT BUY" : "PERFECT SELL";
-            g_smcGomLastPerfectTime = TimeCurrent();
-            
-            Print("[GOM-PERFECT-PROMOTION] ", _Symbol, " | GOOD promu à PERFECT après ", 
-                  g_smcConsecutiveSpikes, " spikes successifs | ", g_smcGomVerdict);
+            int localSmall = SMCGP_CountLocalSmallM1Bars(_Symbol);
+            int m1s = SMCGP_TfDirToSign(g_smcTfM1Dir);
+            bool m1Against = ((spikeDir > 0 && m1s < 0) || (spikeDir < 0 && m1s > 0));
+
+            MqlRates r[];
+            ArraySetAsSeries(r, true);
+            double priceDir = 0;
+            if(CopyRates(_Symbol, PERIOD_M1, 0, 6, r) >= 5)
+            {
+               double avgP = (r[0].close + r[4].close) / 2.0;
+               if(avgP > 0) priceDir = (r[0].close - r[4].close) / avgP;
+            }
+            bool priceAgainst = ((spikeDir > 0 && priceDir < -0.0008) ||
+                                 (spikeDir < 0 && priceDir > 0.0008));
+
+            if(localSmall >= 8 || m1Against || priceAgainst)
+            {
+               Print("[GOM-PERFECT-BLOCK] ", _Symbol, " | promotion refusée | small=", localSmall,
+                     " m1Against=", m1Against, " priceAgainst=", priceAgainst);
+            }
+            else
+            {
+               g_smcGomVerdictNum = (spikeDir == 1) ? 3 : -3;
+               g_smcGomVerdict = (spikeDir == 1) ? "PERFECT BUY" : "PERFECT SELL";
+               g_smcGomLastPerfectTime = TimeCurrent();
+
+               Print("[GOM-PERFECT-PROMOTION] ", _Symbol, " | GOOD promu à PERFECT après ",
+                     g_smcConsecutiveSpikes, " spikes successifs | ", g_smcGomVerdict);
+            }
          }
       }
    }
@@ -954,108 +1049,206 @@ int SMCGP_TfDirToSign(const string tfDir)
 //+------------------------------------------------------------------+
 void SMCGP_CheckCorrectionAndAdjustVerdict()
 {
-   // Pas de verdict actif → rien à faire
    if(g_smcGomVerdictNum == 0) return;
-   
-   int tradeDir = (g_smcGomVerdictNum > 0) ? 1 : -1;
-   
-   // ── DÉTECTION DE SPIKE CONFIRMÉ ──
-   // Un spike est confirmé si: spike_tradable=true ET spike_pct>=55%
-   bool spikeConfirmed = false;
-   double spikeProb = 0.0;
-   bool spikeTradable = false;
-   
-   // Récupérer données spike depuis ai_server
-   if(g_smcGomConnected)
+
+   int barsNoSpike = g_smcGomBarsSinceSpike;
+   if(barsNoSpike < 0)
+      barsNoSpike = g_smcBarsSinceLastSpike;
+
+   // Fallback local : incrémenter une fois par nouvelle bougie M1 (pas par poll)
+   if(g_smcGomBarsSinceSpike <= 0)
    {
-      spikeProb = g_smcGomSpikePct / 100.0; // Convertir % en probabilité (0-1)
-      spikeTradable = g_smcGomSpikeTradable; // Spike tradable (bool)
-      
-      if(spikeTradable && spikeProb >= 0.55)
-         spikeConfirmed = true;
-   }
-   
-   // ── GESTION COMPTEUR BOUGIES SANS SPIKE ──
-   if(spikeConfirmed)
-   {
-      // Nouveau spike confirmé → reset compteur
-      if(g_smcBarsSinceLastSpike > 0)
+      static datetime s_lastM1BarCount = 0;
+      datetime m1Bar = iTime(_Symbol, PERIOD_M1, 0);
+      bool spikeConfirmed = (g_smcGomSpikeTradable && g_smcGomSpikePct >= 55.0);
+
+      if(m1Bar > 0 && m1Bar != s_lastM1BarCount)
       {
-         static datetime s_spikeLog = 0;
-         if(TimeCurrent() - s_spikeLog >= 30)
+         s_lastM1BarCount = m1Bar;
+         if(spikeConfirmed)
          {
-            s_spikeLog = TimeCurrent();
-            Print("[GOM-SPIKE-CONFIRMED] ", _Symbol, " | Nouveau spike confirmé | Bougies sans spike=", g_smcBarsSinceLastSpike);
+            g_smcBarsSinceLastSpike = 0;
+            g_smcLastSpikeTime = TimeCurrent();
          }
+         else
+            g_smcBarsSinceLastSpike++;
       }
-      g_smcBarsSinceLastSpike = 0;
-      g_smcLastSpikeTime = TimeCurrent();
-      g_smcGomCorrectionWait = false; // Reset flag WAIT
-      g_smcGomCorrectionReason = "";
+      barsNoSpike = g_smcBarsSinceLastSpike;
    }
    else
+      g_smcBarsSinceLastSpike = barsNoSpike;
+
+   if(barsNoSpike > 20 && MathAbs(g_smcGomVerdictNum) >= 2)
    {
-      // Pas de spike → incrémenter compteur
-      g_smcBarsSinceLastSpike++;
+      g_smcGomVerdictNum = 0;
+      g_smcGomVerdict = "WAIT";
+      g_smcGomCorrectionWait = true;
+      g_smcGomCorrectionReason = "plus de " + IntegerToString(barsNoSpike) + " bougies M1 sans spike";
+      return;
    }
-   
-   // ── RÉTROGRADATION AUTOMATIQUE SANS SPIKE ──
-   // Si >10 bougies sans spike et verdict >= GOOD, rétrograder
-   if(g_smcBarsSinceLastSpike > 10 && MathAbs(g_smcGomVerdictNum) >= 2)
+
+   if(barsNoSpike > 10 && MathAbs(g_smcGomVerdictNum) >= 2)
    {
       int prevVn = g_smcGomVerdictNum;
-      
-      // PERFECT → GOOD
       if(MathAbs(g_smcGomVerdictNum) >= 3)
       {
          g_smcGomVerdictNum = (g_smcGomVerdictNum > 0) ? 2 : -2;
          g_smcGomVerdict = (g_smcGomVerdictNum > 0) ? "GOOD BUY" : "GOOD SELL";
-         
          static datetime s_retroPerfectLog = 0;
          if(TimeCurrent() - s_retroPerfectLog >= 30)
          {
             s_retroPerfectLog = TimeCurrent();
-            Print("[GOM-RETROGRADE] ", _Symbol, " | PERFECT → GOOD (plus de ", g_smcBarsSinceLastSpike, 
-                  " bougies sans spike) | vn=", prevVn, " → ", g_smcGomVerdictNum);
+            Print("[GOM-RETROGRADE] ", _Symbol, " | PERFECT → GOOD (", barsNoSpike,
+                  " M1 sans spike) | vn=", prevVn, " → ", g_smcGomVerdictNum);
          }
       }
-      // GOOD → SIMPLE
-      else if(g_smcBarsSinceLastSpike > 12)
+      else if(barsNoSpike > 12)
       {
          g_smcGomVerdictNum = (g_smcGomVerdictNum > 0) ? 1 : -1;
          g_smcGomVerdict = (g_smcGomVerdictNum > 0) ? "BUY" : "SELL";
-         
-         static datetime s_retroGoodLog = 0;
-         if(TimeCurrent() - s_retroGoodLog >= 30)
-         {
-            s_retroGoodLog = TimeCurrent();
-            Print("[GOM-RETROGRADE] ", _Symbol, " | GOOD → SIMPLE (plus de ", g_smcBarsSinceLastSpike, 
-                  " bougies sans spike) | vn=", prevVn, " → ", g_smcGomVerdictNum);
-         }
       }
    }
-   
-   // ── FORÇAGE WAIT APRÈS 15 BOUGIES SANS SPIKE ──
-   if(g_smcBarsSinceLastSpike > 15)
+
+   if(barsNoSpike > 15)
    {
-      int prevVn = g_smcGomVerdictNum;
-      string prevVerd = g_smcGomVerdict;
-      
+      if(MathAbs(g_smcGomVerdictNum) >= 3)
+      {
+         g_smcGomVerdictNum = (g_smcGomVerdictNum > 0) ? 2 : -2;
+         g_smcGomVerdict = (g_smcGomVerdictNum > 0) ? "GOOD BUY" : "GOOD SELL";
+      }
+      return;
+   }
+}
+
+void SMCGP_ApplyPriceRealityGate(const string symbol)
+{
+   int vn = g_smcGomVerdictNum;
+   if(vn == 0) return;
+
+   int tradeDir = (vn > 0) ? 1 : -1;
+   int barsNoSpike = (g_smcGomBarsSinceSpike >= 0) ? g_smcGomBarsSinceSpike : g_smcBarsSinceLastSpike;
+   int localSmall  = SMCGP_CountLocalSmallM1Bars(symbol);
+
+   if(barsNoSpike >= 0 && barsNoSpike > 20 && MathAbs(vn) >= 2)
+   {
       g_smcGomVerdictNum = 0;
       g_smcGomVerdict = "WAIT";
       g_smcGomCorrectionWait = true;
-      g_smcGomCorrectionReason = "plus de " + IntegerToString(g_smcBarsSinceLastSpike) + " bougies M1 sans spike confirmé";
-      
-      static datetime s_forceWaitLog = 0;
-      if(TimeCurrent() - s_forceWaitLog >= 30)
+      g_smcGomCorrectionReason = "price_reality stale_spike";
+      return;
+   }
+   if(barsNoSpike > 12 && MathAbs(vn) >= 2)
+   {
+      vn = tradeDir;
+      g_smcGomVerdictNum = vn;
+      g_smcGomVerdict = (vn > 0) ? "BUY" : "SELL";
+   }
+   else if(barsNoSpike > 10 && MathAbs(vn) >= 3)
+   {
+      vn = tradeDir * 2;
+      g_smcGomVerdictNum = vn;
+      g_smcGomVerdict = (vn > 0) ? "GOOD BUY" : "GOOD SELL";
+   }
+
+   int m1s = SMCGP_TfDirToSign(StringLen(g_smcTfM1DirLive) > 0 ? g_smcTfM1DirLive : g_smcTfM1Dir);
+   if(MathAbs(vn) >= 3 && ((tradeDir > 0 && m1s < 0) || (tradeDir < 0 && m1s > 0)))
+   {
+      vn = tradeDir * 2;
+      g_smcGomVerdictNum = vn;
+      g_smcGomVerdict = (vn > 0) ? "GOOD BUY" : "GOOD SELL";
+   }
+
+   double strongThr = SMCGP_StrongMoveThreshold(symbol);
+   double priceDirection = g_smcPriceDir5b;
+   double priceDir3b = g_smcPriceDir3b;
+   double priceDir1b = g_smcPriceDir1b;
+   double mom = g_smcM1Momentum;
+   MqlRates r[];
+   ArraySetAsSeries(r, true);
+   if(priceDirection == 0.0 && CopyRates(symbol, PERIOD_M1, 0, 6, r) >= 5)
+   {
+      double avgPrice = (r[0].close + r[4].close) / 2.0;
+      if(avgPrice > 0)
+         priceDirection = (r[0].close - r[4].close) / avgPrice;
+   }
+   if(priceDir3b == 0.0 && CopyRates(symbol, PERIOD_M1, 0, 5, r) >= 4)
+   {
+      double avg3 = (r[0].close + r[3].close) / 2.0;
+      if(avg3 > 0) priceDir3b = (r[0].close - r[3].close) / avg3;
+   }
+   if(priceDir1b == 0.0 && CopyRates(symbol, PERIOD_M1, 0, 2, r) >= 2)
+   {
+      double avg1 = (r[0].close + r[1].close) / 2.0;
+      if(avg1 > 0) priceDir1b = (r[0].close - r[1].close) / avg1;
+   }
+   if(mom == 0.0) mom = priceDirection;
+
+   if(tradeDir > 0 && (priceDirection < -strongThr || priceDir3b < -strongThr * 0.85))
+   {
+      g_smcGomVerdictNum = 0;
+      g_smcGomVerdict = "WAIT";
+      g_smcGomCorrectionWait = true;
+      g_smcGomCorrectionReason = "price_strong_down vs BUY";
+      return;
+   }
+   if(tradeDir < 0 && (priceDirection > strongThr || priceDir3b > strongThr * 0.85))
+   {
+      g_smcGomVerdictNum = 0;
+      g_smcGomVerdict = "WAIT";
+      g_smcGomCorrectionWait = true;
+      g_smcGomCorrectionReason = "price_strong_up vs SELL";
+      return;
+   }
+
+   if(MathAbs(vn) >= 3 && ((tradeDir > 0 && mom < -strongThr * 0.5) || (tradeDir < 0 && mom > strongThr * 0.5)))
+   {
+      vn = tradeDir * 2;
+      g_smcGomVerdictNum = vn;
+      g_smcGomVerdict = (vn > 0) ? "GOOD BUY" : "GOOD SELL";
+   }
+   if(MathAbs(vn) >= 2 && ((tradeDir > 0 && priceDir1b < -strongThr * 0.55) || (tradeDir < 0 && priceDir1b > strongThr * 0.55)))
+   {
+      vn = tradeDir;
+      g_smcGomVerdictNum = vn;
+      g_smcGomVerdict = (vn > 0) ? "BUY" : "SELL";
+   }
+
+   int oppBars = g_smcM1OppBars;
+   if(oppBars <= 0)
+   {
+      for(int i = 0; i < 6; i++)
       {
-         s_forceWaitLog = TimeCurrent();
-         Print("[GOM-FORCE-WAIT] ", _Symbol, " | Verdict forcé WAIT après ", g_smcBarsSinceLastSpike, 
-               " bougies sans spike | ", prevVerd, " → WAIT");
+         if(CopyRates(symbol, PERIOD_M1, i, 1, r) < 1) continue;
+         if(tradeDir > 0 && r[0].close < r[0].open) oppBars++;
+         if(tradeDir < 0 && r[0].close > r[0].open) oppBars++;
       }
-      
-      // Reset compteur pour éviter logs répétitifs
-      g_smcBarsSinceLastSpike = 0;
+   }
+   if(MathAbs(vn) >= 3 && oppBars >= 3)
+   {
+      g_smcGomVerdictNum = 0;
+      g_smcGomVerdict = "WAIT";
+      g_smcGomCorrectionWait = true;
+      g_smcGomCorrectionReason = StringFormat("micro_stairs opp=%d", oppBars);
+   }
+   else if(MathAbs(vn) >= 2 && oppBars >= 5)
+   {
+      g_smcGomVerdictNum = 0;
+      g_smcGomVerdict = "WAIT";
+      g_smcGomCorrectionWait = true;
+      g_smcGomCorrectionReason = StringFormat("micro_corr opp=%d", oppBars);
+   }
+
+   if(localSmall >= 10 && MathAbs(g_smcGomVerdictNum) >= 3)
+   {
+      g_smcGomVerdictNum = (g_smcGomVerdictNum > 0) ? 2 : -2;
+      g_smcGomVerdict = (g_smcGomVerdictNum > 0) ? "GOOD BUY" : "GOOD SELL";
+      g_smcGomCorrectionReason = StringFormat("local_small_bars=%d", localSmall);
+   }
+   else if(localSmall >= 18 && MathAbs(g_smcGomVerdictNum) >= 2)
+   {
+      g_smcGomVerdictNum = (g_smcGomVerdictNum > 0) ? 1 : -1;
+      g_smcGomVerdict = (g_smcGomVerdictNum > 0) ? "BUY" : "SELL";
+      g_smcGomCorrectionReason = StringFormat("local_small_bars=%d", localSmall);
    }
 }
 
@@ -1087,9 +1280,8 @@ void SMCGP_CheckCorrectionAndAdjustVerdict()
        }
     }
 
-    // Spike Boom/Crash/Painx/Gainx GOOD/PERFECT : pas de blocage sur le bruit M1
-    // résiduel (en dessous du seuil $ ci-dessus, déjà vérifié).
-    if(SMC_IsSpikeStyleSymbol(symbol) && strongVerdict)
+    // Spike Boom/Crash : ignorer le bruit M1 résiduel seulement pour GOOD (|vn|=2), pas PERFECT
+    if(SMC_IsSpikeStyleSymbol(symbol) && MathAbs(verdictNum) == 2)
        return false;
 
     // ── EARLY EXIT: Si M1+M5 sont d'accord avec la direction du trade, ignorer les micro-pullbacks ──
@@ -1233,8 +1425,8 @@ bool SMCGP_ShouldForceWaitOnCorrection(const string symbol)
    int vn = g_smcGomVerdictNumServer;
    if(vn == 0) return false;
 
-   // FX Vol : le verdict GOM GOOD/PERFECT prime — ne pas forcer WAIT sur micro-correction M1
-   if(SMC_IsWeltradeVolSymbol(symbol) && MathAbs(vn) >= 2)
+   // FX Vol GOOD seulement : PERFECT reste soumis aux gardes M1
+   if(SMC_IsWeltradeVolSymbol(symbol) && MathAbs(vn) == 2)
       return false;
 
    if(g_smcPaInCorrection && !g_smcCorrEntrySafe)
@@ -1269,13 +1461,19 @@ void SMCGP_RefreshCorrectionWaitOverlay(const string symbol)
 {
    if(g_smcGomVerdictNumServer == 0 && !g_smcGomServerCorrWait) return;
 
-   bool clientWait = SMCGP_ShouldForceWaitOnCorrection(symbol);
+   // harmonized_m1=true : verdict déjà calculé par gom_mt5_poller + Python.
+   // Ne pas ré-appliquer les heuristiques M1/M5/PA côté EA → évite WAIT partout
+   // alors que le serveur envoie PERFECT/GOOD (double gate).
+   bool clientWait = false;
+   if(!g_smcGomHarmonizedM1)
+      clientWait = SMCGP_ShouldForceWaitOnCorrection(symbol);
+
    bool shouldWait = g_smcGomServerCorrWait || clientWait;
 
-    // FX Vol + Boom/Crash/Spike GOOD/PERFECT : ne jamais écraser le verdict serveur par WAIT correction
-    // EXCEPTION : une correction M1 réelle > seuil $ (g_smcGomHardDollarCorrection) doit toujours
-    // pouvoir forcer WAIT, même sur spike GOOD/PERFECT — c'est justement le cas qu'on veut détecter.
-    if((SMC_IsWeltradeVolSymbol(symbol) || SMC_IsSpikeStyleSymbol(symbol)) && MathAbs(g_smcGomVerdictNumServer) >= 2
+    // Spike GOOD seulement (legacy non-harmonisé) : ne pas écraser par WAIT correction
+    if(!g_smcGomHarmonizedM1
+       && (SMC_IsWeltradeVolSymbol(symbol) || SMC_IsSpikeStyleSymbol(symbol))
+       && MathAbs(g_smcGomVerdictNumServer) == 2
        && !g_smcGomHardDollarCorrection)
        shouldWait = false;
 
@@ -2074,15 +2272,16 @@ void SMCGP_ParseGOMBody(const string &body)
    string vmode = SMCGP_JsonString(body, "verdict_mode");
    bool predictiveBlend = (vmode == "predictive_blend");
 
+   SMCGP_ParseHarmonizedM1Fields(body);
+
    g_smcGomVerdict      = SMCGP_JsonString(body, "verdict");
    g_smcGomVerdictNum   = (int)SMCGP_JsonDouble(body, "verdict_num");
 
-   // ── VÉRIFICATION COHÉRENCE AVEC DIRECTION RÉELLE DU PRIX (SERVEUR) ──
-   // Calculer direction réelle du prix avant d'accepter le verdict serveur
-   double priceDirection = 0;
+   double strongThr = SMCGP_StrongMoveThreshold(_Symbol);
+   double priceDirection = g_smcPriceDir5b;
    MqlRates r[];
    ArraySetAsSeries(r, true);
-   if(CopyRates(_Symbol, PERIOD_M1, 0, 10, r) >= 5)
+   if(priceDirection == 0.0 && CopyRates(_Symbol, PERIOD_M1, 0, 10, r) >= 5)
    {
       double priceChange = r[0].close - r[4].close;
       double avgPrice = (r[0].close + r[4].close) / 2.0;
@@ -2090,46 +2289,42 @@ void SMCGP_ParseGOMBody(const string &body)
          priceDirection = priceChange / avgPrice;
    }
    
-   // Rejeter verdict serveur incohérent
-   if(MathAbs(g_smcGomVerdictNum) >= 1)
+   // Rejeter verdict incohérent (sauf si déjà harmonisé côté serveur)
+   if(!g_smcGomHarmonizedM1 && MathAbs(g_smcGomVerdictNum) >= 1)
    {
       bool isIncoherent = false;
-      if(g_smcGomVerdictNum > 0 && priceDirection < -0.001) // BUY mais prix descend fortement
+      if(g_smcGomVerdictNum > 0 && priceDirection < -strongThr)
       {
          isIncoherent = true;
          static datetime s_srvIncoBuyLog = 0;
          if(TimeCurrent() - s_srvIncoBuyLog >= 30)
          {
             s_srvIncoBuyLog = TimeCurrent();
-            Print("[GOM-SERVER] ", _Symbol, " | REJET: verdict serveur BUY mais prix en forte descente (dir=", 
+            Print("[GOM-SERVER] ", _Symbol, " | REJET: verdict BUY mais prix M1 descend (dir=", 
                   DoubleToString(priceDirection, 5), ") | vn=", g_smcGomVerdictNum);
          }
       }
-      else if(g_smcGomVerdictNum < 0 && priceDirection > 0.001) // SELL mais prix monte fortement
+      else if(g_smcGomVerdictNum < 0 && priceDirection > strongThr)
       {
          isIncoherent = true;
          static datetime s_srvIncoSellLog = 0;
          if(TimeCurrent() - s_srvIncoSellLog >= 30)
          {
             s_srvIncoSellLog = TimeCurrent();
-            Print("[GOM-SERVER] ", _Symbol, " | REJET: verdict serveur SELL mais prix en forte montée (dir=", 
+            Print("[GOM-SERVER] ", _Symbol, " | REJET: verdict SELL mais prix M1 monte (dir=", 
                   DoubleToString(priceDirection, 5), ") | vn=", g_smcGomVerdictNum);
          }
       }
       
       if(isIncoherent)
       {
-         // Remplacer par WAIT
          g_smcGomVerdictNum = 0;
          g_smcGomVerdict = "WAIT";
       }
    }
 
-   // ── RÈGLE CRITIQUE: PERFECT serveur nécessite confirmation de 2 spikes ──
-   // Le serveur Pine Script peut envoyer PERFECT basé sur verdict_gap >= 4.0 (statistique),
-   // mais côté MT5 on doit plafonner à GOOD tant qu'il n'y a pas eu 2 spikes successifs confirmés.
-   // PERFECT sera déclenché uniquement par la logique de confirmation de spikes (gérée ailleurs).
-   if(MathAbs(g_smcGomVerdictNum) >= 3)
+   // Plafond PERFECT client seulement si verdict NON harmonisé
+   if(!g_smcGomHarmonizedM1 && MathAbs(g_smcGomVerdictNum) >= 3)
    {
       // Vérifier si on a eu 2 spikes successifs confirmés récemment
       // g_smcGomSpikeLevel et g_smcGomBarsSinceSpike sont parsés plus bas
@@ -2207,7 +2402,7 @@ void SMCGP_ParseGOMBody(const string &body)
       g_smcGomSpikeTradable = true;
    
    // ── Mettre à jour le tracking des spikes successifs pour promotion PERFECT ──
-   SMCGP_UpdateSpikeSeriesTracking();
+   // (déplacé après les gates prix — voir fin du parse HTTP)
    g_smcBbUp            = SMCGP_JsonDouble(body, "bb_up");
    g_smcBbMid           = SMCGP_JsonDouble(body, "bb_mid");
    g_smcBbDn            = SMCGP_JsonDouble(body, "bb_dn");
@@ -2396,6 +2591,20 @@ void SMCGP_ParseGOMBody(const string &body)
       g_smcGomVerdictNumServer = g_smcGomVerdictNum;
       g_smcGomVerdictServer = g_smcGomVerdict;
    }
+
+   if(g_smcGomHarmonizedM1)
+   {
+      g_smcGomCorrectionWait = false;
+      SMCGP_ApplyCorrectionVerdictWait(_Symbol, serverCorrWait);
+      return;
+   }
+
+   SMCGP_CheckCorrectionAndAdjustVerdict();
+   SMCGP_ApplyPriceRealityGate(_Symbol);
+
+   // Promotion PERFECT uniquement après calibration prix/correction
+   SMCGP_UpdateSpikeSeriesTracking();
+   SMCGP_ApplyPriceRealityGate(_Symbol);
 
    SMCGP_ApplyCorrectionVerdictWait(_Symbol, serverCorrWait);
 }
@@ -2708,8 +2917,9 @@ void SMCGP_PollGOM()
    bool prevSpikeTrad = g_smcGomSpikeTradable;
    SMCGP_ParseGOMBody(body);
 
-   // ── Correction locale immédiate : vérifier M1/M5 dès le poll ──────────
-   SMCGP_RefreshCorrectionWaitOverlay(symLabel);
+   // Verdict harmonisé : afficher tel quel (overlay client désactivé dans RefreshCorrectionWaitOverlay)
+   if(!g_smcGomHarmonizedM1)
+      SMCGP_RefreshCorrectionWaitOverlay(symLabel);
 
    // ── Poll réussi : mettre à jour le timestamp de succès ──────────────────
    g_smcLastGOMPoll = TimeCurrent();
@@ -4609,6 +4819,10 @@ void SMCGP_DrawGOMDashboard()
    else if(g_smcGomVerdictNum >= 2 || g_smcGomVerdictNum <= -2) verdLabel += " *";
    if(g_smcGomVerdictReactiveNum != 0 || g_smcGomVerdictForecastNum != 0)
       verdLabel += StringFormat(" [R:%d F:%d]", g_smcGomVerdictReactiveNum, g_smcGomVerdictForecastNum);
+   if(StringLen(g_smcGomCorrectionReason) > 0)
+      verdLabel += " |" + (StringLen(g_smcGomCorrectionReason) > 28
+                           ? StringSubstr(g_smcGomCorrectionReason, 0, 28)
+                           : g_smcGomCorrectionReason);
 
     int xCur = marginLR;
    int vn = g_smcGomVerdictNum;

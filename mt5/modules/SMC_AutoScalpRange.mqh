@@ -97,9 +97,20 @@ void SMCR_TryScalpRange(const string symbol)
    if(dirSign == 0) return;
 
    // GOM: GOOD/PERFECT dans le bon sens
+   // PRIORITÉ: verdict global actuel sur le cache
    int vn = -999;
-   if(g_smcGomConnected) vn = SMCGP_GetCachedVerdictNum(symbol);
-   if(vn == -999 && symbol == _Symbol) vn = g_smcGomVerdictNum;
+   // D'abord vérifier le verdict global actuel
+   if(g_smcGomConnected && g_smcGomVerdictNum != 0)
+   {
+      // Si le verdict global n'est pas WAIT, utiliser le cache pour le symbole spécifique
+      vn = SMCGP_GetCachedVerdictNum(symbol);
+      if(vn == -999 && symbol == _Symbol) vn = g_smcGomVerdictNum;
+   }
+   else if(g_smcGomConnected)
+   {
+      // Verdict global est WAIT (vn=0) - bloquer immédiatement
+      vn = 0;
+   }
    if(vn == -999) return;
    if(vn == 0) return;
    if(MathAbs(vn) < MinGOMVerdictNumAbs) return;

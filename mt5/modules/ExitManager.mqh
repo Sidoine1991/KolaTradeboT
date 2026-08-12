@@ -7,6 +7,7 @@
 
 #include <Trade/Trade.mqh>
 #include <Trade/PositionInfo.mqh>
+#include "SMC_BoomCrashStrategy.mqh"  // Pour second spike prediction
 
 //--- Forward declarations from main EA (inputs/globals are accessible via include order)
 extern bool     SMC_IsGoldProfileActive();
@@ -559,8 +560,72 @@ void ExitMgr_ManageDollarExits()
       // Boom/Crash spike TP
       if(cat == SYM_BOOM_CRASH && profit >= BoomCrashSpikeTP && profit < 2.0)
       {
+         // NOUVEAU: Vérifier si on doit attendre le second spike
+         if(SMC_BC_ShouldWaitSecondSpike())
+         {
+            // Enregistrer le premier spike capturé
+            double entryPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+            int direction = (posDir == 1) ? 1 : -1;
+            SMC_SSP_RegisterFirstSpike(entryPrice, PositionGetDouble(POSITION_PRICE_CURRENT), direction);
+            
+            Print("[EXIT] Premier spike capturé - attente second spike | profit=", 
+                  DoubleToString(profit, 2), "$ | prob second spike=", 
+                  DoubleToString(SMC_SSP_GetSecondSpikeProb(), 1), "%");
+            
+            // Ne pas fermer la position - continuer à attendre
+            continue;
+         }
+         
+         // Si on n'attend pas le second spike, fermer normalement
          ExitMgr_Close(ticket, "BC Spike TP " + DoubleToString(profit, 2) + "$");
+         
+         // Réinitialiser le système de second spike après fermeture
+         SMC_BC_ResetSecondSpike();
          continue;
+      }
+      
+      // NOUVEAU: Vérifier si on attend le second spike et si le second spike est détecté
+      if(cat == SYM_BOOM_CRASH && SMC_BC_ShouldWaitSecondSpike())
+      {
+         // Détecter un mouvement significatif qui pourrait être un second spike
+         // Un second spike est caractérisé par un mouvement rapide dans la même direction
+         double currentPrice = PositionGetDouble(POSITION_PRICE_CURRENT);
+         double entryPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+         int direction = (posDir == 1) ? 1 : -1;
+         
+         // Calculer le profit total depuis l'entrée
+         double totalProfit = (direction > 0) ? (currentPrice - entryPrice) : (entryPrice - currentPrice);
+         
+         // Si le profit a augmenté significativement depuis le premier spike (ex: +50%)
+         // on considère que c'est un second spike
+         double firstSpikeProfit = SMC_SSP_GetCurrentProfit();
+         if(totalProfit > firstSpikeProfit * 1.5 && totalProfit > 1.0)
+         {
+            SMC_BC_RegisterSecondSpike(currentPrice);
+            
+            Print("[EXIT] Second spike détecté - fermeture position | profit total=", 
+                  DoubleToString(totalProfit, 2), "$");
+            
+            ExitMgr_Close(ticket, "BC Second Spike TP " + DoubleToString(totalProfit, 2) + "$");
+            
+            // Réinitialiser le système de second spike après fermeture
+            SMC_BC_ResetSecondSpike();
+            continue;
+         }
+         
+         // Timeout: si trop de bougies depuis le premier spike, fermer quand même
+         int barsSinceFirst = SMC_SSP_GetBarsSinceFirstSpike();
+         if(barsSinceFirst > 15)  // 15 bougies max d'attente
+         {
+            Print("[EXIT] Timeout second spike - fermeture | bars=", barsSinceFirst,
+                  " | profit=", DoubleToString(profit, 2), "$");
+            
+            ExitMgr_Close(ticket, "BC Second Spike Timeout " + DoubleToString(profit, 2) + "$");
+            
+            // Réinitialiser le système de second spike après fermeture
+            SMC_BC_ResetSecondSpike();
+            continue;
+         }
       }
 
       // Max hold time

@@ -38,13 +38,15 @@ TP_PERCENTAGE_FOREX = 0.016   # 1.6% (ratio 1:2)
 
 # Tailles de position par type de symbole (réduites pour meilleur money management)
 POSITION_SIZES = {
-    "Boom 300 Index": 0.01,    # Réduit de 0.2 à 0.01
-    "Boom 600 Index": 0.01,    # Réduit de 0.2 à 0.01
-    "Boom 900 Index": 0.01,    # Réduit de 0.2 à 0.01
-    "Crash 1000 Index": 0.01,  # Réduit de 0.2 à 0.01
+    "Boom 300 Index": 0.01,
+    "Boom 600 Index": 0.01,
+    "Boom 900 Index": 0.01,
+    "Crash 1000 Index": 0.01,
     "EURUSD": 0.01,
     "GBPUSD": 0.01,
-    "USDJPY": 0.01
+    "USDJPY": 0.01,
+    "XAUUSD": 0.05,
+    "XAGUSD": 0.05,
 }
 
 # Configuration logging améliorée avec rotation et niveaux détaillés
@@ -3903,73 +3905,201 @@ class MT5AIClient:
                     logger.error(f"  ✗ {format_name}: {str(e)}")
         return None
 
+    def _fetch_mt5_indicators(self, symbol):
+        """Récupère les indicateurs techniques réels depuis MT5 pour un symbole."""
+        try:
+            # S'assurer que le symbole est dans le Market Watch
+            try:
+                mt5.symbol_select(symbol, True)
+            except Exception:
+                pass
+
+            # Réessayer symbol_info (le terminal charge parfois les symboles avec du retard)
+            symbol_info = None
+            for _ in range(3):
+                symbol_info = mt5.symbol_info(symbol)
+                if symbol_info:
+                    break
+                time.sleep(1)
+            if not symbol_info:
+                return None
+
+            point = symbol_info.point
+            digits = symbol_info.digits
+
+            # --- RSI (14) sur M5 ---
+            rsi = 50.0
+            try:
+                rates_m5 = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M5, 0, 100)
+                if rates_m5 is not None and len(rates_m5) >= 14:
+                    closes = np.array([r['close'] for r in rates_m5], dtype=float)
+                    deltas = np.diff(closes)
+                    gains = np.where(deltas > 0, deltas, 0.0)
+                    losses = np.where(deltas < 0, -deltas, 0.0)
+                    avg_gain = np.mean(gains[-14:])
+                    avg_loss = np.mean(losses[-14:])
+                    if avg_loss > 0:
+                        rs = avg_gain / avg_loss
+                        rsi = 100.0 - (100.0 / (1.0 + rs))
+            except Exception:
+                pass
+
+            # --- ATR (14) sur M5 ---
+            atr = 0.001
+            try:
+                rates_m5 = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M5, 0, 100)
+                if rates_m5 is not None and len(rates_m5) >= 15:
+                    highs = np.array([r['high'] for r in rates_m5[-15:]], dtype=float)
+                    lows = np.array([r['low'] for r in rates_m5[-15:]], dtype=float)
+                    prev_closes = np.array([r['close'] for r in rates_m5[-16:-1]], dtype=float)
+                    tr = np.maximum(highs - lows, np.maximum(np.abs(highs - prev_closes), np.abs(lows - prev_closes)))
+                    atr = float(np.mean(tr))
+            except Exception:
+                pass
+
+            # --- EMA rapide (9) et lente (21) sur H1 ---
+            ema_fast_h1 = None
+            ema_slow_h1 = None
+            try:
+                rates_h1 = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_H1, 0, 50)
+                if rates_h1 is not None and len(rates_h1) >= 21:
+                    closes_h1 = [r['close'] for r in rates_h1]
+                    ema_fast_h1 = self.technical_analyzer.calculate_ema(closes_h1, 9)
+                    ema_slow_h1 = self.technical_analyzer.calculate_ema(closes_h1, 21)
+            except Exception:
+                pass
+
+            # --- EMA rapide (9) et lente (21) sur M1 ---
+            ema_fast_m1 = None
+            ema_slow_m1 = None
+            try:
+                rates_m1 = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M1, 0, 50)
+                if rates_m1 is not None and len(rates_m1) >= 21:
+                    closes_m1 = [r['close'] for r in rates_m1]
+                    ema_fast_m1 = self.technical_analyzer.calculate_ema(closes_m1, 9)
+                    ema_slow_m1 = self.technical_analyzer.calculate_ema(closes_m1, 21)
+            except Exception:
+                pass
+
+            # --- EMA rapide (9) et lente (21) sur M5 ---
+            ema_fast_m5 = None
+            ema_slow_m5 = None
+            try:
+                rates_m5 = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M5, 0, 50)
+                if rates_m5 is not None and len(rates_m5) >= 21:
+                    closes_m5 = [r['close'] for r in rates_m5]
+                    ema_fast_m5 = self.technical_analyzer.calculate_ema(closes_m5, 9)
+                    ema_slow_m5 = self.technical_analyzer.calculate_ema(closes_m5, 21)
+            except Exception:
+                pass
+
+            # --- Supertrend (simplifié: ATR-based trend) ---
+            supertrend_trend = 0
+            try:
+                if ema_fast_h1 is not None and ema_slow_h1 is not None:
+                    if ema_fast_h1 > ema_slow_h1:
+                        supertrend_trend = 1
+                    elif ema_fast_h1 < ema_slow_h1:
+                        supertrend_trend = -1
+            except Exception:
+                pass
+
+            # --- Volatilité (ratio ATR/prix) ---
+            bid = symbol_info.bid
+            volatility_ratio = atr / bid if bid > 0 and atr > 0 else 1.0
+            volatility_regime = 1 if volatility_ratio > 0.001 else 0
+
+            return {
+                "rsi": float(round(rsi, 2)),
+                "atr": round(atr, 6),
+                "ema_fast_h1": float(round(ema_fast_h1, digits)) if ema_fast_h1 else float(bid),
+                "ema_slow_h1": float(round(ema_slow_h1, digits)) if ema_slow_h1 else float(bid),
+                "ema_fast_m1": float(round(ema_fast_m1, digits)) if ema_fast_m1 else float(bid),
+                "ema_slow_m1": float(round(ema_slow_m1, digits)) if ema_slow_m1 else float(bid),
+                "ema_fast_m5": float(round(ema_fast_m5, digits)) if ema_fast_m5 else float(bid),
+                "ema_slow_m5": float(round(ema_slow_m5, digits)) if ema_slow_m5 else float(bid),
+                "supertrend_trend": supertrend_trend,
+                "volatility_regime": volatility_regime,
+                "volatility_ratio": float(round(volatility_ratio, 6)),
+            }
+        except Exception as e:
+            logger.error(f"Erreur récupération indicateurs pour {symbol}: {e}")
+            return None
+
     def get_latest_signal(self, symbol):
         """Récupère le dernier signal pour un symbole depuis l'API
-        
+
         Args:
             symbol (str): Le symbole pour lequel récupérer le signal
-            
+
         Returns:
             dict or None: Les données du signal ou None en cas d'erreur
         """
         if not symbol:
             logger.warning("⚠️ Aucun symbole fourni pour la récupération du signal")
             return None
-            
+
         try:
             # Vérifier d'abord si le symbole est disponible
             symbol_info = mt5.symbol_info(symbol)
             if not symbol_info:
                 logger.warning(f"⚠️ Symbole non trouvé: {symbol}")
                 return None
-                
+
             # Vérifier si le marché est ouvert pour ce symbole
             if not self.is_market_open(symbol):
                 logger.info(f"🔒 Marché fermé pour {symbol}, pas de signal récupéré")
                 return None
-                
+
             # Liste des URLs à essayer (local puis distant)
             api_urls = [LOCAL_API_URL, RENDER_API_URL]
-            
+
             for api_url in api_urls:
                 try:
                     url = f"{api_url}/decision"
-                    
+
                     # Obtenir les prix actuels pour le symbole
                     symbol_info = mt5.symbol_info(symbol)
                     if symbol_info is None:
                         logger.warning(f"⚠️ Impossible d'obtenir les infos pour {symbol}")
                         continue
-                    
+
                     bid = symbol_info.bid
                     ask = symbol_info.ask
-                    
+
                     if bid <= 0 or ask <= 0:
                         logger.warning(f"⚠️ Prix invalides pour {symbol}: bid={bid}, ask={ask}")
                         continue
-                    
+
+                    # Récupérer les indicateurs techniques réels depuis MT5
+                    indicators = self._fetch_mt5_indicators(symbol)
+                    if indicators is None:
+                        indicators = {}
+
                     # Préparer les données complètes comme attendu par le serveur
                     decision_data = {
                         "symbol": symbol,
                         "bid": float(bid),
                         "ask": float(ask),
-                        "rsi": 50.0,  # Valeur neutre par défaut
-                        "atr": 0.001,  # Valeur par défaut
-                        "ema_fast_h1": float(bid),  # Corrigé: ema_fast -> ema_fast_h1
-                        "ema_slow_h1": float(ask),  # Corrigé: ema_slow -> ema_slow_h1
-                        "ema_fast_m1": float(bid),  # Ajouté: ema_fast_m1
-                        "ema_slow_m1": float(ask),  # Ajouté: ema_slow_m1
+                        "rsi": indicators.get("rsi", 50.0),
+                        "atr": indicators.get("atr", 0.001),
+                        "ema_fast_h1": indicators.get("ema_fast_h1", float(bid)),
+                        "ema_slow_h1": indicators.get("ema_slow_h1", float(ask)),
+                        "ema_fast_m1": indicators.get("ema_fast_m1", float(bid)),
+                        "ema_slow_m1": indicators.get("ema_slow_m1", float(ask)),
+                        "ema_fast_m5": indicators.get("ema_fast_m5", float(bid)),
+                        "ema_slow_m5": indicators.get("ema_slow_m5", float(ask)),
                         "is_spike_mode": False,
                         "dir_rule": 0,
-                        "supertrend_trend": 0,
-                        "volatility_regime": 0,
-                        "volatility_ratio": 1.0,
-                        "timestamp": datetime.now().isoformat()  # Ajouté: timestamp requis
+                        "supertrend_trend": indicators.get("supertrend_trend", 0),
+                        "volatility_regime": indicators.get("volatility_regime", 0),
+                        "volatility_ratio": indicators.get("volatility_ratio", 1.0),
+                        "timestamp": datetime.now().isoformat(),
                     }
-                    
+
                     # Envoyer les données complètes
                     response = requests.post(url, json=decision_data, timeout=5)
-                    
+
                     if response.status_code == 200:
                         data = response.json()
                         if data and isinstance(data, dict):
@@ -3981,23 +4111,23 @@ class MT5AIClient:
                         logger.error(f"❌ Erreur 422 détail: {response.text}")
                     else:
                         logger.warning(f"⚠️ Erreur API {api_url} pour {symbol}: HTTP {response.status_code}")
-                        
+
                 except requests.exceptions.Timeout:
                     logger.warning(f"⌛ Timeout de la requête pour {symbol} sur {api_url}")
                     continue
-                    
+
                 except requests.exceptions.RequestException as e:
                     logger.warning(f"⚠️ Erreur de connexion à {api_url}: {str(e)}")
                     continue
-                    
+
                 except Exception as e:
                     logger.error(f"❌ Erreur inattendue avec {api_url} pour {symbol}: {str(e)}")
                     continue
-            
+
             # Si on arrive ici, toutes les tentatives ont échoué
             logger.error(f"❌ Impossible de récupérer le signal pour {symbol} après plusieurs tentatives")
             return None
-            
+
         except Exception as e:
             logger.error(f"❌ Erreur critique dans get_latest_signal pour {symbol}: {str(e)}")
             return None

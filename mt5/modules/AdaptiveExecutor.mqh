@@ -229,9 +229,26 @@ bool ADAPTIVE_ExecuteLimit(const TMScannerOpportunity &opp)
    if(!IsSignalConfirmed()) return false;
 
    //--- GOM WAIT absolu
-   int vnChart = g_smcGomConnected ? g_smcGomVerdictNum : 0;
-   int vnSym = SMCGP_GetCachedVerdictNum(opp.symbol);
-   int vn = (vnSym != -999) ? vnSym : vnChart;
+   // PRIORITÉ: verdict global actuel sur le cache
+   int vn = 0;
+   if(g_smcGomConnected)
+   {
+      // D'abord vérifier le verdict global actuel
+      if(g_smcGomVerdictNum == 0)
+      {
+         vn = 0; // Verdict global est WAIT - bloquer immédiatement
+      }
+      else
+      {
+         // Si le verdict global n'est pas WAIT, utiliser le cache pour le symbole spécifique
+         int vnSym = SMCGP_GetCachedVerdictNum(opp.symbol);
+         vn = (vnSym != -999) ? vnSym : g_smcGomVerdictNum;
+      }
+   }
+   else
+   {
+      vn = 0; // Pas connecté = WAIT par défaut
+   }
    if(vn == 0)
    {
       Print("🚫 ADAPTIVE LIMIT BLOQUÉ — ", opp.symbol, " — GOM=WAIT");
@@ -399,9 +416,26 @@ bool ADAPTIVE_ExecuteMarket(const TMScannerOpportunity &opp)
    if(!IsSignalConfirmed()) return false;
 
    //--- GOM WAIT absolu
-   int vnChart = g_smcGomConnected ? g_smcGomVerdictNum : 0;
-   int vnSym = SMCGP_GetCachedVerdictNum(opp.symbol);
-   int vn = (vnSym != -999) ? vnSym : vnChart;
+   // PRIORITÉ: verdict global actuel sur le cache
+   int vn = 0;
+   if(g_smcGomConnected)
+   {
+      // D'abord vérifier le verdict global actuel
+      if(g_smcGomVerdictNum == 0)
+      {
+         vn = 0; // Verdict global est WAIT - bloquer immédiatement
+      }
+      else
+      {
+         // Si le verdict global n'est pas WAIT, utiliser le cache pour le symbole spécifique
+         int vnSym = SMCGP_GetCachedVerdictNum(opp.symbol);
+         vn = (vnSym != -999) ? vnSym : g_smcGomVerdictNum;
+      }
+   }
+   else
+   {
+      vn = 0; // Pas connecté = WAIT par défaut
+   }
    if(vn == 0)
    {
       Print("🚫 ADAPTIVE MARKET BLOQUÉ — ", opp.symbol, " — GOM=WAIT");

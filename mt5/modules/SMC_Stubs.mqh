@@ -20,6 +20,10 @@ bool IsTerminalFull();
 bool SymbolHasActiveOrder(const string symbol);
 int  CountTerminalAllOrders();
 void RegisterOrderPlaced();
+bool CanTradeOnSymbol(const string symbol, const string direction = "");
+bool SMC_IsWeltradeSynthSymbol(const string symbol);
+bool SMC_IsWeltradeBoomCrash(const string symbol);
+bool SMC_IsWeltradeSymbol(const string symbol);
 
 // --- Globals needed by multiple modules ---
 bool g_smcAlignExecBypass = false;
@@ -47,8 +51,7 @@ void SMC_ResetDailyReadiness() {}
 bool SMC_BCHourAllowsTrade(const string symbol = "") { return true; }
 bool SMC_DailyDisciplineAllowsEntry() { return true; }
 bool SMC_IsCrash150Symbol(const string symbol) { return false; }
-bool SMC_IsWeltradeSymbol(const string symbol) { return false; }
-bool SMC_IsWeltradeBoomCrash(const string symbol) { return false; }
+// SMC_IsWeltradeSymbol / SMC_IsWeltradeBoomCrash → définis dans SMC_Universal.mq5
 bool SMC_IsWeltradeVolSymbol(const string symbol) { return false; }
 bool SMC_IsSyntheticAutonomousSym(const string symbol) { return true; }
 bool SMC_GOMAutonomousAllowed(const string symbol) { return true; }
@@ -158,8 +161,8 @@ double SMC_GetDailyProfitTargetUSD() { return 0; }
 double SMC_GetPositionMaxLossUSD(const int posDir, const bool isGomWait) { return 0; }
 /* double SMC_ComputeEntryProbability(const int dirSign) - defined in SMC_ProbabilityGate.mqh */
 bool GOM_EntrySupportsOpenPosition(const int posDir) { return false; }
-void SMC_MarkSpikeCaptured(const string sym) {}
-int SMC_CountSmallM1BarsAfterTime(const string sym, const datetime after) { return 0; }
+// SMC_MarkSpikeCaptured — implémenté dans SMC_Universal.mq5
+// SMC_CountSmallM1BarsAfterTime — implémenté dans SMC_Universal.mq5
 bool EvaluateEntryWithMultipleSignals() { return false; }
 
 //--- SafeOrder wrappers — gate GOM WAIT / contre-verdict avant tout envoi
@@ -186,7 +189,7 @@ bool SafeOrderSend(MqlTradeRequest &req, MqlTradeResult &result, const string la
       }
    }
 
-   // WAIT absolu (vn=0) — incontournable
+   // WAIT absolu (vn=0) — incontournable (global ET par symbole)
    if(req.action == TRADE_ACTION_DEAL || req.action == TRADE_ACTION_PENDING)
    {
       if(g_smcGomVerdictNum == 0)
@@ -194,6 +197,16 @@ bool SafeOrderSend(MqlTradeRequest &req, MqlTradeResult &result, const string la
          result.retcode = TRADE_RETCODE_REJECT;
          Print("[SAFE] ORDRE BLOQUÉ — GOM=WAIT (vn=0) | ", label, " | ",
                (isMarket ? "MARKET" : (isLimit ? "LIMIT" : EnumToString(t))), " | ", req.symbol);
+         return false;
+      }
+      // Un symbole en WAIT (cache GOM) bloque même si le verdict global est GOOD
+      string wSym = (StringLen(req.symbol) > 0) ? req.symbol : _Symbol;
+      int wVn = SMCGP_GetCachedVerdictNum(wSym);
+      if(wVn == 0)
+      {
+         result.retcode = TRADE_RETCODE_REJECT;
+         Print("[SAFE] ORDRE BLOQUÉ — GOM WAIT par symbole ", wSym, " (vn=0) | ", label, " | ",
+               (isMarket ? "MARKET" : (isLimit ? "LIMIT" : EnumToString(t))));
          return false;
       }
    }
@@ -225,25 +238,59 @@ bool SafeOrderSend(MqlTradeRequest &req, MqlTradeResult &result, const string la
       }
    }
 
-   if(req.action == TRADE_ACTION_DEAL || req.action == TRADE_ACTION_PENDING)
-   {
-      int dirSign = 0;
-      if(t == ORDER_TYPE_BUY || t == ORDER_TYPE_BUY_LIMIT) dirSign = 1;
-      else if(t == ORDER_TYPE_SELL || t == ORDER_TYPE_SELL_LIMIT) dirSign = -1;
-      string sym = (StringLen(req.symbol) > 0) ? req.symbol : _Symbol;
-      if(isMarket && !g_smcAlignExecBypass && !CanPlaceMarketOrder(sym, dirSign))
-      {
-         result.retcode = TRADE_RETCODE_REJECT;
-         Print("[SAFE] MARKET rejeté GOM | ", label, " | ", sym);
-         return false;
-      }
-      if(isLimit && !g_smcAlignExecBypass && !CanPlaceLimitOrder(sym, t))
-      {
-         result.retcode = TRADE_RETCODE_REJECT;
-         Print("[SAFE] LIMIT rejeté GOM | ", label, " | ", sym);
-         return false;
-      }
-   }
+    if(req.action == TRADE_ACTION_DEAL || req.action == TRADE_ACTION_PENDING)
+    {
+       int dirSign = 0;
+       if(t == ORDER_TYPE_BUY || t == ORDER_TYPE_BUY_LIMIT) dirSign = 1;
+       else if(t == ORDER_TYPE_SELL || t == ORDER_TYPE_SELL_LIMIT) dirSign = -1;
+       string sym = (StringLen(req.symbol) > 0) ? req.symbol : _Symbol;
+       string dirCheck = "";
+       if(t == ORDER_TYPE_BUY || t == ORDER_TYPE_BUY_LIMIT) dirCheck = "BUY";
+       else if(t == ORDER_TYPE_SELL || t == ORDER_TYPE_SELL_LIMIT) dirCheck = "SELL";
+
+       // Gate anti-hedge universel (positions + pending opposés + direction PainX/GainX)
+       // Toujours actif — jamais contourné par g_smcAlignExecBypass
+       if(dirCheck != "" && !CanTradeOnSymbol(sym, dirCheck))
+       {
+          result.retcode = TRADE_RETCODE_REJECT;
+          Print("[SAFE] ORDRE BLOQUÉ — gate CanTradeOnSymbol | ", sym, " ", dirCheck, " | ", label);
+          return false;
+       }
+
+       // ── GARDE DIRECTION OPPOSÉE sur même symbole (inconditionnel, bypass-proof) ──
+       {
+          int opPosType = 0; string opDir = "";
+          if(dirSign > 0) { opPosType = (int)POSITION_TYPE_SELL; opDir = "SELL"; }
+          else if(dirSign < 0) { opPosType = (int)POSITION_TYPE_BUY; opDir = "BUY"; }
+          if(opPosType != 0)
+          {
+             for(int i = PositionsTotal() - 1; i >= 0; i--)
+             {
+                ulong tick = PositionGetTicket(i);
+                if(tick == 0 || !PositionSelectByTicket(tick)) continue;
+                if(PositionGetString(POSITION_SYMBOL) != sym) continue;
+                if((int)PositionGetInteger(POSITION_TYPE) == opPosType)
+                {
+                   result.retcode = TRADE_RETCODE_REJECT;
+                   Print("[SAFE] ORDRE BLOQUÉ — ", sym, " — position ", opDir, " déjà ouverte | ", label);
+                   return false;
+                }
+             }
+          }
+       }
+       if(isMarket && !g_smcAlignExecBypass && !CanPlaceMarketOrder(sym, dirSign))
+       {
+          result.retcode = TRADE_RETCODE_REJECT;
+          Print("[SAFE] MARKET rejeté GOM | ", label, " | ", sym);
+          return false;
+       }
+       if(isLimit && !g_smcAlignExecBypass && !CanPlaceLimitOrder(sym, t))
+       {
+          result.retcode = TRADE_RETCODE_REJECT;
+          Print("[SAFE] LIMIT rejeté GOM | ", label, " | ", sym);
+          return false;
+       }
+    }
     bool sent = OrderSend(req, result);
      if(sent && result.retcode == TRADE_RETCODE_DONE)
     {
@@ -281,6 +328,58 @@ bool SafeTradeBuy(double lot, const string symbol, double price, double sl, doub
       Print("[SAFE-TRADE] BUY blocked — GOM=WAIT (vn=0): ", symbol);
       return false;
    }
+   if(UseGOMVerdictFilter && MathAbs(g_smcGomVerdictNum) < MinGOMVerdictNumAbs)
+   {
+      Print("[SAFE-TRADE] BUY blocked — GOM pas GOOD/PERFECT (vn=", g_smcGomVerdictNum, "): ", symbol);
+      return false;
+   }
+   if(!CanTradeOnSymbol(symbol, "BUY"))
+   {
+      Print("[SAFE-TRADE] BUY blocked — gate symbole/anti-hedge: ", symbol);
+      return false;
+   }
+   // Pas de BUY si BUY déjà ouverte sur ce symbole
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong t = PositionGetTicket(i);
+      if(t == 0 || !PositionSelectByTicket(t)) continue;
+      if((ulong)PositionGetInteger(POSITION_MAGIC) != InpMagicNumber) continue;
+      if(PositionGetString(POSITION_SYMBOL) == symbol && (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY)
+      {
+         Print("[SAFE-TRADE] BUY sur ", symbol, " bloqué — BUY déjà ouverte");
+         return false;
+      }
+    }
+   // Pas de BUY si SELL déjà ouverte sur ce même symbole
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong t = PositionGetTicket(i);
+      if(t == 0 || !PositionSelectByTicket(t)) continue;
+      if((ulong)PositionGetInteger(POSITION_MAGIC) != InpMagicNumber) continue;
+      if(PositionGetString(POSITION_SYMBOL) == symbol && (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_SELL)
+      {
+         Print("[SAFE-TRADE] BUY sur ", symbol, " bloqué — SELL déjà ouverte sur le même symbole");
+         return false;
+      }
+   }
+   // Bloquer BUY sur Crash/PainX si une SELL sur Boom/GainX existe déjà
+   if(IsCrashLikeSymbol(symbol))
+   {
+      for(int i = PositionsTotal() - 1; i >= 0; i--)
+      {
+         ulong t = PositionGetTicket(i);
+         if(t == 0) continue;
+         if(!PositionSelectByTicket(t)) continue;
+         if((ulong)PositionGetInteger(POSITION_MAGIC) != InpMagicNumber) continue;
+         string s = PositionGetString(POSITION_SYMBOL);
+         ENUM_POSITION_TYPE pt = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+         if(IsBoomLikeSymbol(s) && pt == POSITION_TYPE_SELL)
+         {
+            Print("[SAFE-TRADE] BUY sur Crash/PainX bloqué — SELL sur Boom/GainX déjà ouverte: ", s);
+            return false;
+         }
+      }
+   }
    int dirSign = 1;
    if(!CanPlaceMarketOrder(symbol, dirSign))
    {
@@ -297,6 +396,58 @@ bool SafeTradeSell(double lot, const string symbol, double price, double sl, dou
    {
       Print("[SAFE-TRADE] SELL blocked — GOM=WAIT (vn=0): ", symbol);
       return false;
+   }
+   if(UseGOMVerdictFilter && MathAbs(g_smcGomVerdictNum) < MinGOMVerdictNumAbs)
+   {
+      Print("[SAFE-TRADE] SELL blocked — GOM pas GOOD/PERFECT (vn=", g_smcGomVerdictNum, "): ", symbol);
+      return false;
+   }
+   if(!CanTradeOnSymbol(symbol, "SELL"))
+   {
+      Print("[SAFE-TRADE] SELL blocked — gate symbole/anti-hedge: ", symbol);
+      return false;
+   }
+   // Pas de SELL si SELL déjà ouverte sur ce symbole
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong t = PositionGetTicket(i);
+      if(t == 0 || !PositionSelectByTicket(t)) continue;
+      if((ulong)PositionGetInteger(POSITION_MAGIC) != InpMagicNumber) continue;
+      if(PositionGetString(POSITION_SYMBOL) == symbol && (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_SELL)
+      {
+         Print("[SAFE-TRADE] SELL sur ", symbol, " bloqué — SELL déjà ouverte");
+         return false;
+      }
+    }
+   // Pas de SELL si BUY déjà ouverte sur ce même symbole
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong t = PositionGetTicket(i);
+      if(t == 0 || !PositionSelectByTicket(t)) continue;
+      if((ulong)PositionGetInteger(POSITION_MAGIC) != InpMagicNumber) continue;
+      if(PositionGetString(POSITION_SYMBOL) == symbol && (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY)
+      {
+         Print("[SAFE-TRADE] SELL sur ", symbol, " bloqué — BUY déjà ouverte sur le même symbole");
+         return false;
+      }
+   }
+   // Bloquer SELL sur Boom/GainX si une BUY sur Crash/PainX existe déjà
+   if(IsBoomLikeSymbol(symbol))
+   {
+      for(int i = PositionsTotal() - 1; i >= 0; i--)
+      {
+         ulong t = PositionGetTicket(i);
+         if(t == 0) continue;
+         if(!PositionSelectByTicket(t)) continue;
+         if((ulong)PositionGetInteger(POSITION_MAGIC) != InpMagicNumber) continue;
+         string s = PositionGetString(POSITION_SYMBOL);
+         ENUM_POSITION_TYPE pt = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+         if(IsCrashLikeSymbol(s) && pt == POSITION_TYPE_BUY)
+         {
+            Print("[SAFE-TRADE] SELL sur Boom/GainX bloqué — BUY sur Crash/PainX déjà ouverte: ", s);
+            return false;
+         }
+      }
    }
    int dirSign = -1;
    if(!CanPlaceMarketOrder(symbol, dirSign))

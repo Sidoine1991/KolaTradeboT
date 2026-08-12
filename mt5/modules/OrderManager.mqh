@@ -100,6 +100,20 @@ bool OrderMgr_SendOrder(string symbol, ENUM_ORDER_TYPE type, double volume,
    sl = NormalizeDouble(sl, digits);
    tp = NormalizeDouble(tp, digits);
 
+   // Vérifier GOM=WAIT avant d'envoyer l'ordre
+   if(g_smcGomVerdictNum == 0)
+   {
+      Print("[ORDER] ORDRE BLOQUÉ — GOM=WAIT (vn=0) | ", symbol, " ", (type == ORDER_TYPE_BUY ? "BUY" : "SELL"));
+      return false;
+   }
+
+   // Vérifier que le verdict est GOOD/PERFECT (|vn|>=2)
+   if(MathAbs(g_smcGomVerdictNum) < 2)
+   {
+      Print("[ORDER] ORDRE BLOQUÉ — GOM=", g_smcGomVerdict, " (vn=", g_smcGomVerdictNum, ") — seul GOOD/PERFECT autorisé | ", symbol);
+      return false;
+   }
+
    bool result = g_orderTrade.PositionOpen(symbol, type, volume, price, sl, tp, comment);
 
    if(result)

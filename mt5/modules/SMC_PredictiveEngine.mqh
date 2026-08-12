@@ -360,6 +360,51 @@ double SMC_PE_CalcSpikeProbability(const string symbol)
 }
 
 //+------------------------------------------------------------------+
+//| Seuils adaptatifs selon la volatilité                             |
+//+------------------------------------------------------------------+
+double SMC_PE_GetAdaptiveExhaustionThreshold(const string symbol)
+{
+   double baseThresh = PredExhaustionThreshold;
+   double volRatio = SMC_PE_CalcVolatilityRatio(symbol);
+   
+   // En haute volatilité, abaisser le seuil (plus réactif)
+   if(volRatio > 1.3)
+      return baseThresh * 0.85;
+   // En très haute volatilité, abaisser davantage
+   else if(volRatio > 2.0)
+      return baseThresh * 0.70;
+   // En basse volatilité, élever le seuil (plus sélectif)
+   else if(volRatio < 0.7)
+      return baseThresh * 1.15;
+   // En très basse volatilité, élever davantage
+   else if(volRatio < 0.4)
+      return baseThresh * 1.30;
+   
+   return baseThresh;
+}
+
+double SMC_PE_GetAdaptiveFireThreshold(const string symbol)
+{
+   double baseThresh = PredFireThreshold;
+   double volRatio = SMC_PE_CalcVolatilityRatio(symbol);
+   
+   // En haute volatilité, abaisser le seuil (plus réactif)
+   if(volRatio > 1.3)
+      return baseThresh * 0.85;
+   // En très haute volatilité, abaisser davantage
+   else if(volRatio > 2.0)
+      return baseThresh * 0.70;
+   // En basse volatilité, élever le seuil (plus sélectif)
+   else if(volRatio < 0.7)
+      return baseThresh * 1.15;
+   // En très basse volatilité, élever davantage
+   else if(volRatio < 0.4)
+      return baseThresh * 1.30;
+   
+   return baseThresh;
+}
+
+//+------------------------------------------------------------------+
 //| Évaluation principale — met à jour l'état prédictif             |
 //+------------------------------------------------------------------+
 void SMC_PE_Evaluate(const string symbol, const int dirSign)
@@ -381,13 +426,17 @@ void SMC_PE_Evaluate(const string symbol, const int dirSign)
    // de la correction CONTRE la direction visée.
    double exh = g_predState[idx].exhaustionScore;
    double align = MathAbs(g_predState[idx].trendAlignment);
+   
+   // Utiliser les seuils adaptatifs selon la volatilité
+   double adaptiveExhThresh = SMC_PE_GetAdaptiveExhaustionThreshold(symbol);
+   double adaptiveFireThresh = SMC_PE_GetAdaptiveFireThreshold(symbol);
 
-   if(exh >= PredFireThreshold && align > 40)
+   if(exh >= adaptiveFireThresh && align > 40)
    {
       g_predState[idx].corrState = PRED_FIRE;
       g_predState[idx].confidence = (exh + align) / 2.0;
    }
-   else if(exh >= PredExhaustionThreshold && align > 30)
+   else if(exh >= adaptiveExhThresh && align > 30)
    {
       g_predState[idx].corrState = PRED_RIPE;
       g_predState[idx].confidence = (exh + align) / 2.0;
@@ -576,13 +625,17 @@ void SMC_PE_DrawOverlay(const string symbol, const int dirSign)
 
    string prefix = g_predOverlayPrefix + symbol + "_";
 
+   // Calculer le centre du graphique
+   int chartWidth = (int)ChartGetInteger(0, CHART_WIDTH_IN_PIXELS);
+   int centerX = chartWidth / 2;
+
    // ── Label état prédictif ──────────────────────────────────────
    string lblName = prefix + "STATE";
    if(ObjectFind(0, lblName) < 0)
    {
       ObjectCreate(0, lblName, OBJ_LABEL, 0, 0, 0);
-      ObjectSetInteger(0, lblName, OBJPROP_CORNER, CORNER_RIGHT_UPPER);
-      ObjectSetInteger(0, lblName, OBJPROP_XDISTANCE, 15);
+      ObjectSetInteger(0, lblName, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+      ObjectSetInteger(0, lblName, OBJPROP_XDISTANCE, centerX - 150);
       ObjectSetInteger(0, lblName, OBJPROP_YDISTANCE, 180);
       ObjectSetInteger(0, lblName, OBJPROP_FONTSIZE, 11);
       ObjectSetString(0, lblName, OBJPROP_FONT, "Consolas");
@@ -606,13 +659,13 @@ void SMC_PE_DrawOverlay(const string symbol, const int dirSign)
    ObjectSetString(0, lblName, OBJPROP_TEXT, txt);
    ObjectSetInteger(0, lblName, OBJPROP_COLOR, stateClr);
 
-   // ── Spike probability ─────────────────────────────────────────
+   // ── Label spike probability ─────────────────────────────────────
    string spkName = prefix + "SPIKE";
    if(ObjectFind(0, spkName) < 0)
    {
       ObjectCreate(0, spkName, OBJ_LABEL, 0, 0, 0);
-      ObjectSetInteger(0, spkName, OBJPROP_CORNER, CORNER_RIGHT_UPPER);
-      ObjectSetInteger(0, spkName, OBJPROP_XDISTANCE, 15);
+      ObjectSetInteger(0, spkName, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+      ObjectSetInteger(0, spkName, OBJPROP_XDISTANCE, centerX - 150);
       ObjectSetInteger(0, spkName, OBJPROP_YDISTANCE, 200);
       ObjectSetInteger(0, spkName, OBJPROP_FONTSIZE, 10);
       ObjectSetString(0, spkName, OBJPROP_FONT, "Consolas");
@@ -632,10 +685,10 @@ void SMC_PE_DrawOverlay(const string symbol, const int dirSign)
       if(ObjectFind(0, zoneName) < 0)
       {
          ObjectCreate(0, zoneName, OBJ_RECTANGLE_LABEL, 0, 0, 0);
-         ObjectSetInteger(0, zoneName, OBJPROP_CORNER, CORNER_RIGHT_UPPER);
-         ObjectSetInteger(0, zoneName, OBJPROP_XDISTANCE, 10);
-         ObjectSetInteger(0, zoneName, OBJPROP_YDISTANCE, 170);
-         ObjectSetInteger(0, zoneName, OBJPROP_XSIZE, 300);
+         ObjectSetInteger(0, zoneName, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+         ObjectSetInteger(0, zoneName, OBJPROP_XDISTANCE, centerX - 160);
+         ObjectSetInteger(0, zoneName, OBJPROP_YDISTANCE, 175);
+         ObjectSetInteger(0, zoneName, OBJPROP_XSIZE, 320);
          ObjectSetInteger(0, zoneName, OBJPROP_YSIZE, 45);
          ObjectSetInteger(0, zoneName, OBJPROP_BGCOLOR, clrBlack);
          ObjectSetInteger(0, zoneName, OBJPROP_BORDER_TYPE, BORDER_FLAT);

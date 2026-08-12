@@ -734,59 +734,59 @@ class GOMSignalsLiveCalculator:
         record["source"] = "live_calculation"
         record["data_source"] = self._candle_source_for(symbol, used_tf)
 
+        # FIX-DISCORDANCE-01 : renseigne le contexte M1 (price_direction_5b,
+        # bars_since_spike, m1_last_bar_time — indépendants de la direction du
+        # trade) AVANT le calcul du verdict. Sans ça, apply_price_reality_gate()
+        # exécuté à l'intérieur de enrich_record() tournait sur des valeurs par
+        # défaut (bars=-1, direction=0) et ne pouvait jamais rien corriger sur
+        # cette première passe — le garde-fou anti-"PERFECT figé contre la
+        # réalité M1" était inopérant précisément quand il servait le plus.
+        self._enrich_m1_price_context(symbol, record, broker=broker)
+
         if self.pine:
             record = self.pine.enrich_record(record)
+            # m1_opp_bars (bougies M1 adverses) dépend du SENS du trade, connu
+            # seulement maintenant que verdict_num existe. On rafraîchit le
+            # contexte M1 (recalcule m1_opp_bars avec la bonne direction) puis
+            # on ré-applique le même gate canonique — dégrade uniquement,
+            # jamais d'upgrade — pour attraper les cas micro_stairs/m1_against
+            # qui nécessitent cette donnée.
+            self._enrich_m1_price_context(symbol, record, broker=broker)
+            try:
+                from gom_pine_calculator import apply_price_reality_gate, verdict_text_from_num
+                vn = int(record.get("verdict_num", 0) or 0)
+                if vn != 0:
+                    new_vn, reason = apply_price_reality_gate(record, vn)
+                    if new_vn != vn:
+                        record["verdict_num"] = new_vn
+                        record["verdict"] = verdict_text_from_num(new_vn)
+                    if reason:
+                        record["price_reality_reason"] = reason
+            except Exception as exc:
+                print(f"[GOM-M1-REGATE] {symbol}: {exc}")
+        else:
+            self._enrich_m1_price_context(symbol, record, broker=broker)
 
-        self._enrich_m1_price_context(symbol, record, broker=broker)
         record["ok"] = True
         return record
 
     def _enrich_m1_price_context(
         self, symbol: str, record: Dict[str, Any], broker: Optional[str] = None
     ) -> None:
-        """Métriques M1 pour cohérence verdict / prix réel."""
+        """Métriques M1 canoniques (gom_pine_calculator.enrich_m1_metrics)."""
+        from gom_pine_calculator import enrich_m1_metrics
+
         allow_deriv = self._is_deriv_synthetic(symbol)
         df = self.get_candles(symbol, "1", 80, allow_deriv=allow_deriv, broker=broker)
         if df is None or len(df) < 6:
             return
 
-        close = df["close"].astype(float)
-        open_ = df["open"].astype(float)
-        high = df["high"].astype(float)
-        low = df["low"].astype(float)
-
-        c0 = float(close.iloc[-1])
-        c4 = float(close.iloc[-5])
-        avg = (c0 + c4) / 2.0 if (c0 + c4) > 0 else 1.0
-        record["m1_close"] = round(c0, 5)
-        record["m1_close_5"] = round(c4, 5)
-        record["price_direction_5b"] = round((c0 - c4) / avg, 6)
-
-        vn = int(record.get("verdict_num", 0) or 0)
-        trade_sign = 1 if vn > 0 else (-1 if vn < 0 else 0)
-        if trade_sign == 0:
-            sb = float(record.get("score_buy", 0) or 0)
-            ss = float(record.get("score_sell", 0) or 0)
-            trade_sign = 1 if sb >= ss else -1
-
-        opp = 0
-        for o, c in zip(open_.tail(6), close.tail(6)):
-            o_f, c_f = float(o), float(c)
-            if trade_sign > 0 and c_f < o_f:
-                opp += 1
-            elif trade_sign < 0 and c_f > o_f:
-                opp += 1
-        record["m1_opp_bars"] = opp
-
-        body_pct = (close - open_).abs() / close.replace(0, np.nan)
-        range_pct = (high - low) / close.replace(0, np.nan)
-        spike_bar = (body_pct > 0.0006) | (range_pct > 0.0012)
-        bars_since = 0
-        if spike_bar.any():
-            last_idx = int(np.where(spike_bar.values)[0][-1])
-            bars_since = max(0, len(df) - 1 - last_idx)
-        record["bars_since_spike"] = bars_since
-        record["m1_bars_since_spike"] = bars_since
+        closes = df["close"].astype(float).tolist()
+        opens = df["open"].astype(float).tolist()
+        highs = df["high"].astype(float).tolist()
+        lows = df["low"].astype(float).tolist()
+        record["symbol"] = record.get("symbol") or symbol
+        enrich_m1_metrics(record, closes, opens, highs, lows)
 
         try:
             if isinstance(df.index, pd.DatetimeIndex) and len(df.index) > 0:
@@ -824,22 +824,27 @@ class GOMSignalsLiveCalculator:
                     self._bars_without_spike[sym_key] = self._bars_without_spike.get(sym_key, 0) + 1
             bars_no_spike = self._bars_without_spike.get(sym_key, 0)
         
-        # ── RÉTROGRADATION AUTOMATIQUE SANS SPIKE ──
-        # Si >10 bougies sans spike et verdict >= GOOD, rétrograder
-        if bars_no_spike > 10 and abs(verdict_num) >= 2:
+        # ── RÉTROGRADATION AUTOMATIQUE SANS SPIKE (assouplie FIX 2026-08-09) ──
+        # Seuils relevés pour éviter un WAIT permanent hors micro-spikes.
+        # Forçage WAIT désactivé par défaut (GOM_FORCE_WAIT_NO_SPIKE=1 pour réactiver).
+        _retro_after = int(os.getenv("GOM_RETROGRADE_BARS", "25"))
+        _simple_after = int(os.getenv("GOM_SIMPLE_BARS", "35"))
+        _force_wait_after = int(os.getenv("GOM_FORCE_WAIT_BARS", "60"))
+        _force_wait_enabled = os.getenv("GOM_FORCE_WAIT_NO_SPIKE", "").lower() in ("1", "true", "yes", "on")
+
+        if bars_no_spike > _retro_after and abs(verdict_num) >= 2:
             prev_vn = verdict_num
-            
             # PERFECT → GOOD
             if abs(verdict_num) >= 3:
                 verdict_num = 2 if verdict_num > 0 else -2
                 print(f"[GOM-RETROGRADE] {symbol}: PERFECT → GOOD (plus de {bars_no_spike} bougies sans spike) | vn={prev_vn} → {verdict_num}")
-            # GOOD → SIMPLE après >12 bougies
-            elif bars_no_spike > 12:
+            # GOOD → SIMPLE
+            elif bars_no_spike > _simple_after:
                 verdict_num = 1 if verdict_num > 0 else -1
                 print(f"[GOM-RETROGRADE] {symbol}: GOOD → SIMPLE (plus de {bars_no_spike} bougies sans spike) | vn={prev_vn} → {verdict_num}")
-        
-        # ── FORÇAGE WAIT APRÈS 15 BOUGIES SANS SPIKE ──
-        if bars_no_spike > 15:
+
+        # ── FORÇAGE WAIT (opt-in uniquement) ──
+        if _force_wait_enabled and bars_no_spike > _force_wait_after and verdict_num != 0:
             prev_verd = self.pine.verdict_text(verdict_num)
             verdict_num = 0
             print(
@@ -861,20 +866,14 @@ class GOMSignalsLiveCalculator:
                 "source": record.get("source"),
             }
 
-        # ── DÉTECTION CORRECTION ET AJUSTEMENT VERDICT AUTOMATIQUE ──
+        # Gate réalité prix déjà appliqué dans calculate_record_live / enrich_record
         verdict_num = int(record.get("verdict_num", 0) or 0)
-        if verdict_num != 0:
-            verdict_num = self._apply_correction_detection(symbol, verdict_num, record)
-
-        from gom_pine_calculator import apply_price_reality_gate
-
-        verdict_num, reality_reason = apply_price_reality_gate(record, verdict_num)
-        if reality_reason:
-            record["price_reality_reason"] = reality_reason
         record["verdict_num"] = verdict_num
         record["verdict"] = self.pine.verdict_text(verdict_num)
 
         price = record.get("entry", record.get("close", 0.0))
+        bars_raw = record.get("bars_since_spike")
+        bars_out = int(bars_raw) if bars_raw is not None and int(bars_raw) >= 0 else 0
         resp: Dict[str, Any] = {
             "ok": True,
             "symbol": symbol,
@@ -925,10 +924,17 @@ class GOMSignalsLiveCalculator:
             "spike_level": int(record.get("spike_level_num", record.get("spike_level", 0))),
             "imminence_pct": round(float(record.get("spike_imminence", record.get("imminence_pct", 0))), 1),
             "spike_tradable": bool(record.get("spike_tradable", False)),
-            "bars_since_spike": int(record.get("bars_since_spike", 0) or 0),
+            "bars_since_spike": bars_out,
             "m1_opp_bars": int(record.get("m1_opp_bars", 0) or 0),
+            "price_direction_1b": float(record.get("price_direction_1b", 0) or 0),
+            "price_direction_3b": float(record.get("price_direction_3b", 0) or 0),
             "price_direction_5b": float(record.get("price_direction_5b", 0) or 0),
+            "m1_momentum": float(record.get("m1_momentum", 0) or 0),
+            "tf_m1_dir_live": record.get("tf_m1_dir_live", record.get("tf_m1_dir", "NEUT")),
             "price_reality_reason": record.get("price_reality_reason", ""),
+            "verdict_zero_hint": record.get("verdict_zero_hint", ""),
+            "harmonized_m1": True,
+            "verdict_mode": "reactive_pine",
             "m1_last_bar_time": int(record.get("m1_last_bar_time", 0) or 0),
             "spike_progress_pct": round(float(record.get("spike_progress_pct", 0)), 1),
             "atr": round(float(record.get("atr14", 0)), 5),
@@ -997,12 +1003,39 @@ def _attach_correction_cycle(payload: Dict[str, Any], symbol: str, calc: "GOMSig
         payload["pa_corr_depth_pct"] = result.get("price_action_correction_depth_pct", 0)
 
         # ── M1 price-pullback gate: override GOOD/PERFECT → WAIT ─────────────
-        # Quand la correction M1 en dollars dépasse le seuil, le verdict reste
-        # PERFECT alors que le spike n'a pas encore tombé. L'EA doit pouvoir
-        # sortir / ne pas accumuler → forcer WAIT.
-        _GOM_M1_WAIT_DOLLARS = float(os.getenv("GOM_M1_WAIT_DOLLARS", "2.0"))
+        # Seuil ADAPTATIF par classe d'actif (FIX 2026-08-09) :
+        # - Synthétiques Boom/Crash/PainX/GainX/Vol : OFF par défaut (points ≠ $)
+        #   → ancien seuil fixe 2.0 forçait WAIT partout (bug PainX 1200).
+        # - Métaux (XAU/XAG) : 5.0 $
+        # - Forex : OFF (échelle prix trop différente)
+        # Override global possible via GOM_M1_WAIT_DOLLARS (>0 force partout, 0=off).
+        def _m1_wait_threshold(sym: str) -> float:
+            env = os.getenv("GOM_M1_WAIT_DOLLARS")
+            if env is not None and str(env).strip() != "":
+                try:
+                    return float(env)
+                except (TypeError, ValueError):
+                    pass
+            s = str(sym or "").upper().replace(" ", "")
+            if any(x in s for x in (
+                "BOOM", "CRASH", "PAINX", "GAINX", "TRENDX", "BREAKX",
+                "VOL", "STEP", "JUMP", "FXVOL", "SFVVOL", "SFXVOL",
+            )):
+                return float(os.getenv("GOM_M1_WAIT_SYNTH", "0"))
+            if any(x in s for x in ("XAU", "GOLD", "XAG", "SILVER")):
+                return float(os.getenv("GOM_M1_WAIT_METALS", "5.0"))
+            # Forex / autres : désactivé par défaut (2.0 était absurde en pips)
+            return float(os.getenv("GOM_M1_WAIT_FOREX", "0"))
+
+        _GOM_M1_WAIT_DOLLARS = _m1_wait_threshold(symbol)
         _vn_before = int(payload.get("verdict_num", 0) or 0)
-        if _vn_before != 0 and abs(_vn_before) >= 2 and df_m1 is not None and len(df_m1) >= 5:
+        if (
+            _GOM_M1_WAIT_DOLLARS > 0
+            and _vn_before != 0
+            and abs(_vn_before) >= 2
+            and df_m1 is not None
+            and len(df_m1) >= 5
+        ):
             close_prices = df_m1["close"].astype(float)
             highs = df_m1["high"].astype(float)
             lows = df_m1["low"].astype(float)
@@ -1010,15 +1043,15 @@ def _attach_correction_cycle(payload: Dict[str, Any], symbol: str, calc: "GOMSig
             lookback = min(20, len(df_m1))
             recent_high = float(highs.iloc[-lookback:].max())
             recent_low = float(lows.iloc[-lookback:].min())
+            range_dollars = recent_high - recent_low
             if _vn_before > 0:
-                pullback_dollars = recent_high - recent_low
                 pullback_adverse = recent_high - current_price
             else:
-                pullback_dollars = recent_high - recent_low
                 pullback_adverse = current_price - recent_low
-            payload["m1_max_range_dollars"] = round(pullback_dollars, 5)
+            payload["m1_max_range_dollars"] = round(range_dollars, 5)
             payload["m1_adverse_excursion"] = round(pullback_adverse, 5)
-            if pullback_dollars > _GOM_M1_WAIT_DOLLARS or pullback_adverse > _GOM_M1_WAIT_DOLLARS:
+            payload["m1_wait_threshold"] = _GOM_M1_WAIT_DOLLARS
+            if pullback_adverse > _GOM_M1_WAIT_DOLLARS:
                 old_verdict = payload.get("verdict", "")
                 payload["verdict_num"] = 0
                 payload["verdict"] = "WAIT"
@@ -1026,9 +1059,28 @@ def _attach_correction_cycle(payload: Dict[str, Any], symbol: str, calc: "GOMSig
                 payload["gate"] = "m1_correction"
                 print(
                     f"[GOM-M1GATE] {symbol}: vn={_vn_before}→0 WAIT | "
-                    f"range={pullback_dollars:.2f} adverse={pullback_adverse:.2f} "
+                    f"adverse={pullback_adverse:.2f} range={range_dollars:.2f} "
                     f"threshold={_GOM_M1_WAIT_DOLLARS} | was '{old_verdict}'"
                 )
+        elif _vn_before != 0 and df_m1 is not None and len(df_m1) >= 5:
+            # Diagnostic only (gate disabled for this symbol class)
+            try:
+                highs = df_m1["high"].astype(float)
+                lows = df_m1["low"].astype(float)
+                close_prices = df_m1["close"].astype(float)
+                lookback = min(20, len(df_m1))
+                recent_high = float(highs.iloc[-lookback:].max())
+                recent_low = float(lows.iloc[-lookback:].min())
+                current_price = float(close_prices.iloc[-1])
+                if _vn_before > 0:
+                    pullback_adverse = recent_high - current_price
+                else:
+                    pullback_adverse = current_price - recent_low
+                payload["m1_max_range_dollars"] = round(recent_high - recent_low, 5)
+                payload["m1_adverse_excursion"] = round(pullback_adverse, 5)
+                payload["m1_wait_threshold"] = 0.0
+            except Exception:
+                pass
     except Exception:
         payload.setdefault("correction_stage", "unknown")
         payload.setdefault("correction_entry_safe", True)

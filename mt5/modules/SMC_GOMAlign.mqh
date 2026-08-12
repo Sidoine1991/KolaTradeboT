@@ -321,6 +321,7 @@ bool PlaceGOMMarketOrder(const string direction, const string tag, const string 
    }
    if(!GOM_CanOpenNewTrade(dir)) return false;
    if(!IsDirectionAllowedForBoomCrash(_Symbol, direction)) return false;
+   if(!CanTradeOnSymbol(_Symbol, direction)) return false;
    if(!TryAcquireOpenLock()) return false;
 
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
@@ -677,6 +678,9 @@ bool ConvertPendingToMarketOrder(const string symbol, const string direction,
                                  const string tag, const double limitPrice,
                                  const string levelSource)
 {
+   if(!IsDirectionAllowedForBoomCrash(symbol, direction)) return false;
+   if(!CanTradeOnSymbol(symbol, direction)) return false;
+
    // Vérifier âge min runtime si configuré
    if(g_state.config.gomAutoConvertMinRuntimeSec > 0)
    {

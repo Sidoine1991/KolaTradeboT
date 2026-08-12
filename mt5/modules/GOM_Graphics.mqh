@@ -326,9 +326,14 @@ void GOMG_DrawBuySignal(double price)
 {
     string name = "GOM_CENTER_BUY";
     ObjectDelete(0, name);
+    
+    // Calculer le centre du graphique
+    int chartWidth = (int)ChartGetInteger(0, CHART_WIDTH_IN_PIXELS);
+    int centerX = chartWidth / 2;
+    
     ObjectCreate(0, name, OBJ_LABEL, 0, 0, 0);
-    ObjectSetInteger(0, name, OBJPROP_CORNER, CORNER_RIGHT_UPPER);
-    ObjectSetInteger(0, name, OBJPROP_XDISTANCE, 10);
+    ObjectSetInteger(0, name, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+    ObjectSetInteger(0, name, OBJPROP_XDISTANCE, centerX - 30);
     ObjectSetInteger(0, name, OBJPROP_YDISTANCE, 60);
     ObjectSetString(0, name, OBJPROP_TEXT, "BUY");
     ObjectSetInteger(0, name, OBJPROP_COLOR, clrLime);
@@ -344,9 +349,14 @@ void GOMG_DrawSellSignal(double price)
 {
     string name = "GOM_CENTER_SELL";
     ObjectDelete(0, name);
+    
+    // Calculer le centre du graphique
+    int chartWidth = (int)ChartGetInteger(0, CHART_WIDTH_IN_PIXELS);
+    int centerX = chartWidth / 2;
+    
     ObjectCreate(0, name, OBJ_LABEL, 0, 0, 0);
-    ObjectSetInteger(0, name, OBJPROP_CORNER, CORNER_RIGHT_UPPER);
-    ObjectSetInteger(0, name, OBJPROP_XDISTANCE, 10);
+    ObjectSetInteger(0, name, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+    ObjectSetInteger(0, name, OBJPROP_XDISTANCE, centerX - 30);
     ObjectSetInteger(0, name, OBJPROP_YDISTANCE, 60);
     ObjectSetString(0, name, OBJPROP_TEXT, "SELL");
     ObjectSetInteger(0, name, OBJPROP_COLOR, clrRed);

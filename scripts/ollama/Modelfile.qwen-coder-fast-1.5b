@@ -1,0 +1,9 @@
+FROM qwen2.5-coder:1.5b
+
+# OpenCode / KiloCode utilisent /v1/chat/completions qui ignore num_ctx dynamique.
+# Le contexte DOIT etre fixe dans le Modelfile (sinon Ollama charge 32768 tokens).
+PARAMETER num_ctx 2048
+PARAMETER num_predict 512
+PARAMETER num_batch 128
+PARAMETER temperature 0.15
+PARAMETER top_p 0.9

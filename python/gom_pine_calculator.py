@@ -238,6 +238,8 @@ class GOMLPineCalculator:
         score_buy -= 0.58 if bos_bear else 0.0
         score_sell -= 0.58 if bos_bull else 0.0
 
+        score_buy, score_sell = apply_m1_momentum_to_scores(record, score_buy, score_sell)
+
         return round(score_buy, 2), round(score_sell, 2)
 
     def calculate_verdict_num(
@@ -258,11 +260,23 @@ class GOMLPineCalculator:
         price_strong_down = False
         if record is not None:
             price_dir = _price_direction_5b(record)
-            price_strong_up = price_dir > 0.001
-            price_strong_down = price_dir < -0.001
+            strong = _strong_move_threshold(record)
+            price_strong_up = price_dir > strong
+            price_strong_down = price_dir < -strong
+            d3 = float(record.get("price_direction_3b", 0) or 0)
+            if d3 > strong * 0.7:
+                price_strong_up = True
+            if d3 < -strong * 0.7:
+                price_strong_down = True
 
         if score_sell > score_buy:
-            if price_strong_up:
+            cat = (
+                GOMLPineCalculator.symbol_asset_category(str(record.get("symbol", "")))
+                if record is not None
+                else "other"
+            )
+            is_synth = cat in ("boom_crash", "volatility")
+            if price_strong_up and not is_synth:
                 return 0
             is_perfect = verdict_gap >= self.gap_perfect
             is_good = verdict_gap >= self.gap_good and not is_perfect
@@ -276,7 +290,15 @@ class GOMLPineCalculator:
             return 0
 
         if score_buy > score_sell:
-            if price_strong_down:
+            cat = (
+                GOMLPineCalculator.symbol_asset_category(str(record.get("symbol", "")))
+                if record is not None
+                else "other"
+            )
+            is_synth = cat in ("boom_crash", "volatility")
+            # GainX/Boom/PainX : micro-pullback M1 normal — ne pas zero le verdict ici ;
+            # apply_price_reality_gate dégrade PERFECT→GOOD→BUY si besoin.
+            if price_strong_down and not is_synth:
                 return 0
             is_perfect = verdict_gap >= self.gap_perfect
             is_good = verdict_gap >= self.gap_good and not is_perfect
@@ -678,7 +700,161 @@ class GOMLPineCalculator:
         record["filter_ratio"] = round(filter_ratio, 2)
         record["coherence_ok"] = coherence_ok
         record["coherence_pct"] = round(filter_ratio * 100.0, 1)
+        if verdict_num == 0 and max(score_buy, score_sell) >= self.gap_min + 1.0:
+            hints = []
+            if not coherence_ok:
+                hints.append("coherence_blocked")
+            if reality_reason:
+                hints.append(reality_reason)
+            elif score_buy > score_sell:
+                hints.append("scores_buy_but_vn0")
+            record["verdict_zero_hint"] = ";".join(hints) if hints else "scores_insufficient_gap"
+        record["harmonized_m1"] = bool(record.get("m1_close")) or bool(record.get("price_direction_5b"))
+        record["verdict_mode"] = "reactive_pine"
         return record
+
+
+def _strong_move_threshold(record: Dict[str, Any]) -> float:
+    """Seuil move M1 fort — plus sensible sur synthetics (intervalle 5 min)."""
+    cat = GOMLPineCalculator.symbol_asset_category(str(record.get("symbol", "")))
+    if cat in ("boom_crash", "volatility"):
+        return 0.00035
+    if cat in ("metal", "crypto"):
+        return 0.0005
+    return 0.001
+
+
+def enrich_m1_metrics(
+    record: Dict[str, Any],
+    closes: list,
+    opens: list,
+    highs: list,
+    lows: list,
+) -> None:
+    """Métriques M1 canoniques — source unique Python + MT5 payload."""
+    if len(closes) < 6:
+        return
+
+    c0 = float(closes[-1])
+    c1 = float(closes[-2])
+    c3 = float(closes[-4])
+    c4 = float(closes[-5])
+
+    def _rel(a: float, b: float) -> float:
+        avg = (a + b) / 2.0
+        return (a - b) / avg if avg > 0 else 0.0
+
+    d1 = _rel(c0, c1)
+    d3 = _rel(c0, c3)
+    d5 = _rel(c0, c4)
+    record["m1_close"] = round(c0, 5)
+    record["m1_close_5"] = round(c4, 5)
+    record["price_direction_1b"] = round(d1, 6)
+    record["price_direction_3b"] = round(d3, 6)
+    record["price_direction_5b"] = round(d5, 6)
+    record["m1_momentum"] = round(0.15 * d1 + 0.35 * d3 + 0.50 * d5, 6)
+
+    thr = _strong_move_threshold(record) * 0.45
+    if record["m1_momentum"] > thr:
+        record["tf_m1_dir_live"] = "BULL"
+    elif record["m1_momentum"] < -thr:
+        record["tf_m1_dir_live"] = "BEAR"
+    else:
+        record["tf_m1_dir_live"] = "NEUT"
+
+    vn = int(record.get("verdict_num", 0) or 0)
+    trade_sign = 1 if vn > 0 else (-1 if vn < 0 else 0)
+    if trade_sign == 0:
+        sb = float(record.get("score_buy", 0) or 0)
+        ss = float(record.get("score_sell", 0) or 0)
+        trade_sign = 1 if sb >= ss else -1
+
+    opp = 0
+    for o, c in zip(opens[-6:], closes[-6:]):
+        o_f, c_f = float(o), float(c)
+        if trade_sign > 0 and c_f < o_f:
+            opp += 1
+        elif trade_sign < 0 and c_f > o_f:
+            opp += 1
+    record["m1_opp_bars"] = opp
+
+    body_pct = []
+    range_pct = []
+    for i in range(-min(60, len(closes)), 0):
+        cl = float(closes[i])
+        if cl <= 0:
+            continue
+        body_pct.append(abs(float(closes[i]) - float(opens[i])) / cl)
+        range_pct.append((float(highs[i]) - float(lows[i])) / cl)
+
+    spike_prob = float(record.get("spike_prob", 0) or 0)
+    if record.get("spike_pct") is not None:
+        spike_prob = max(spike_prob, float(record.get("spike_pct", 0) or 0) / 100.0)
+    if bool(record.get("spike_tradable")) and spike_prob >= 0.55:
+        record["bars_since_spike"] = 0
+        record["m1_bars_since_spike"] = 0
+        return
+
+    bars_since = -1
+    if body_pct:
+        avg_body = sum(body_pct) / len(body_pct)
+        avg_range = sum(range_pct) / len(range_pct)
+        cat = GOMLPineCalculator.symbol_asset_category(str(record.get("symbol", "")))
+        if cat in ("boom_crash", "volatility"):
+            body_thr = max(0.00035, avg_body * 1.75)
+            range_thr = max(0.00075, avg_range * 1.75)
+        else:
+            body_thr = max(0.00055, avg_body * 2.0)
+            range_thr = max(0.0010, avg_range * 2.0)
+
+        for i in range(len(body_pct) - 1, -1, -1):
+            if body_pct[i] >= body_thr or range_pct[i] >= range_thr:
+                bars_since = len(body_pct) - 1 - i
+                break
+
+    record["bars_since_spike"] = bars_since
+    record["m1_bars_since_spike"] = bars_since
+
+
+def apply_m1_momentum_to_scores(
+    record: Dict[str, Any], score_buy: float, score_sell: float
+) -> Tuple[float, float]:
+    """Ajuste les scores selon momentum M1 réel (sensible aux variations intra-5min)."""
+    mom = record.get("m1_momentum")
+    if mom is None:
+        mom = record.get("price_direction_5b")
+    if mom is None:
+        return score_buy, score_sell
+    try:
+        mom = float(mom)
+    except (TypeError, ValueError):
+        return score_buy, score_sell
+
+    cat = GOMLPineCalculator.symbol_asset_category(str(record.get("symbol", "")))
+    weight = 2.2 if cat in ("boom_crash", "volatility") else 1.6
+    scale = 0.0015 if cat in ("boom_crash", "volatility") else 0.0025
+    mag = min(1.0, abs(mom) / scale)
+
+    if mom > 0.00012:
+        score_buy += weight * mag
+        score_sell -= weight * 0.45 * mag
+    elif mom < -0.00012:
+        score_sell += weight * mag
+        score_buy -= weight * 0.45 * mag
+
+    strong = _strong_move_threshold(record)
+    if mom < -strong:
+        score_buy -= 1.8
+    if mom > strong:
+        score_sell -= 1.8
+
+    d1 = float(record.get("price_direction_1b", 0) or 0)
+    if d1 < -strong * 0.6 and mom < 0:
+        score_buy -= 0.8
+    if d1 > strong * 0.6 and mom > 0:
+        score_sell -= 0.8
+
+    return round(score_buy, 2), round(score_sell, 2)
 
 
 def _price_direction_5b(record: Dict[str, Any]) -> float:
@@ -730,23 +906,71 @@ def apply_price_reality_gate(record: Dict[str, Any], verdict_num: int) -> Tuple[
         except (TypeError, ValueError):
             continue
 
-    if bars > 15:
-        return 0, f"bars_since_spike={bars}>15"
-    if bars > 12 and abs(vn) >= 2:
-        vn = trade_dir * 1
-        reasons.append(f"stale_spike>{bars}->SIMPLE")
-    elif bars > 10 and abs(vn) >= 3:
-        vn = trade_dir * 2
-        reasons.append(f"stale_spike>{bars}->GOOD")
+    cat = GOMLPineCalculator.symbol_asset_category(str(record.get("symbol", "")))
+    is_synth = cat in ("boom_crash", "volatility")
 
-    m1 = str(record.get("tf_m1_dir", "") or "").upper()
+    if bars >= 0:
+        # GainX/PainX/Boom/Crash : tendance sans grosse bougie « spike » fréquente —
+        # ne pas forcer WAIT pur (observé GainX 800 : scores BUY forts mais vn=0).
+        if bars > 20 and abs(vn) >= 2:
+            if is_synth:
+                vn = trade_dir * 1
+                reasons.append(f"stale_spike>{bars}->SIMPLE_synth")
+            else:
+                return 0, f"bars_since_spike={bars}>20"
+        if bars > 15 and abs(vn) >= 3:
+            vn = trade_dir * 2
+            reasons.append(f"stale_spike>{bars}->GOOD")
+        elif bars > 12 and abs(vn) >= 2:
+            vn = trade_dir * 1
+            reasons.append(f"stale_spike>{bars}->SIMPLE")
+        elif bars > 10 and abs(vn) >= 3:
+            vn = trade_dir * 2
+            reasons.append(f"stale_spike>{bars}->GOOD")
+
+    m1 = str(record.get("tf_m1_dir_live") or record.get("tf_m1_dir") or "").upper()
     m1_against = (trade_dir > 0 and m1 == "BEAR") or (trade_dir < 0 and m1 == "BULL")
 
+    strong = _strong_move_threshold(record)
     price_dir = _price_direction_5b(record)
-    if trade_dir > 0 and price_dir < -0.001:
-        return 0, "price_strong_down_vs_buy"
-    if trade_dir < 0 and price_dir > 0.001:
-        return 0, "price_strong_up_vs_sell"
+    d3 = float(record.get("price_direction_3b", 0) or 0)
+    d1 = float(record.get("price_direction_1b", 0) or 0)
+
+    if trade_dir > 0 and (price_dir < -strong or d3 < -strong * 0.85):
+        if is_synth:
+            if abs(vn) >= 3:
+                vn = trade_dir * 2
+                reasons.append("price_down_synth->GOOD")
+            elif abs(vn) >= 2:
+                vn = trade_dir * 1
+                reasons.append("price_down_synth->BUY")
+        else:
+            return 0, "price_strong_down_vs_buy"
+    if trade_dir < 0 and (price_dir > strong or d3 > strong * 0.85):
+        if is_synth:
+            if abs(vn) >= 3:
+                vn = trade_dir * 2
+                reasons.append("price_up_synth->GOOD")
+            elif abs(vn) >= 2:
+                vn = trade_dir * 1
+                reasons.append("price_up_synth->SELL")
+        else:
+            return 0, "price_strong_up_vs_sell"
+
+    mom = float(record.get("m1_momentum", price_dir) or 0)
+    if abs(vn) >= 3 and ((trade_dir > 0 and mom < -strong * 0.5) or (trade_dir < 0 and mom > strong * 0.5)):
+        vn = trade_dir * 2
+        reasons.append("m1_momentum_vs_perfect")
+
+    if abs(vn) >= 2 and ((trade_dir > 0 and d1 < -strong * 0.55) or (trade_dir < 0 and d1 > strong * 0.55)):
+        # Synth GainX/Boom : 1 bougie M1 contre ne doit pas effacer GOOD si M1 live reste aligné
+        skip_1b = is_synth and (
+            (trade_dir > 0 and m1 in ("BULL", "BUY"))
+            or (trade_dir < 0 and m1 in ("BEAR", "SELL"))
+        )
+        if not skip_1b:
+            vn = trade_dir * 1
+            reasons.append("m1_1b_against_good")
 
     try:
         opp = int(record.get("m1_opp_bars", record.get("m1_adverse_bars", 0)) or 0)

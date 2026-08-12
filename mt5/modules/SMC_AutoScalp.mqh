@@ -7,10 +7,14 @@
 //|   à chaque creux/sommet prédit (théorie de Dow).                  |
 //| + SETUP 1C - Dow M5 + SR20 + Patterns: structure Dow M5          |
 //|   confirme → prix au SR20 + pattern bougie → scalp.              |
+//| + NOUVEAUX STRATÉGIES BOOM/CRASH: Post-Spike Recovery, Tightening|
+//|   Range, Acceleration Pattern, RSI Divergence, Spike Zones        |
 //| Contrainte INVIOLABLE: perte max par trade = SMCASC_MaxLossUSD.   |
 //+------------------------------------------------------------------+
 #ifndef SMC_AUTO_SCALP_MQH
 #define SMC_AUTO_SCALP_MQH
+
+#include "SMC_BoomCrashStrategy.mqh"
 
 //--- Inputs SETUP 1 (Z-score)
 input bool   SMCASC_Enable          = true;   // Activer le scalping autonome SETUP 1
@@ -106,13 +110,53 @@ void SMCASC_TryScalpSynthetic(const string symbol, int dirSign)
 {
    if(!SMCASC_Enable) return;
    if(!SMC_IsSpikeStyleSymbol(symbol)) return;
+   
+   // ── NOUVEAU: Vérifier les stratégies Boom/Crash unifiées ──
+   SMC_BC_TradeSetup bcSetup = SMC_BC_GenerateSetup(symbol, dirSign);
+   
+   // Si blocage demandé par le système de stratégies
+   if(bcSetup.shouldBlock)
+   {
+      Print("[BC] Entrée bloquée: ", bcSetup.reason);
+      return;
+   }
+   
+   // Si une stratégie spécifique est identifiée avec haute confiance
+   if(bcSetup.strategy != BC_STRATEGY_NONE && bcSetup.confidence >= 70)
+   {
+      // Utiliser la direction de la stratégie si pas de direction demandée
+      int effectiveDir = (dirSign == 0) ? bcSetup.dirSign : dirSign;
+      
+      // Vérifier que la direction correspond
+      if(effectiveDir == bcSetup.dirSign)
+      {
+         Print("[BC] Setup prioritaire: ", bcSetup.reason, " | conf=", 
+               DoubleToString(bcSetup.confidence, 1), "%");
+         
+         // Continuer avec la logique normale mais avec ajustements
+         // (la taille de position sera ajustée plus bas)
+      }
+   }
+   
+   // ── LOGIQUE EXISTANTE ──
    if(g_smcasc.active) return;
    if(g_inRetrace) return; // bloqué par retracement
 
    // GOM: exiger GOOD/PERFECT dans le bon sens
+   // PRIORITÉ: verdict global actuel sur le cache
    int vn = -999;
-   if(g_smcGomConnected) vn = SMCGP_GetCachedVerdictNum(symbol);
-   if(vn == -999 && symbol == _Symbol) vn = g_smcGomVerdictNum;
+   // D'abord vérifier le verdict global actuel
+   if(g_smcGomConnected && g_smcGomVerdictNum != 0)
+   {
+      // Si le verdict global n'est pas WAIT, utiliser le cache pour le symbole spécifique
+      vn = SMCGP_GetCachedVerdictNum(symbol);
+      if(vn == -999 && symbol == _Symbol) vn = g_smcGomVerdictNum;
+   }
+   else if(g_smcGomConnected)
+   {
+      // Verdict global est WAIT (vn=0) - bloquer immédiatement
+      vn = 0;
+   }
    if(vn == -999) return;                       // pas de verdict -> pas de trade
    if(vn == 0) return;                          // WAIT -> bloqué
    if(MathAbs(vn) < MinGOMVerdictNumAbs) return; // SIMPLE -> bloqué
@@ -139,6 +183,18 @@ void SMCASC_TryScalpSynthetic(const string symbol, int dirSign)
    double balance = AccountInfoDouble(ACCOUNT_BALANCE);
    lot = MathMin(lot, balance / 10.0);
    lot = MathMax(lot, SymbolInfoDouble(symbol, SYMBOL_VOLUME_MIN));
+   
+   // ── NOUVEAU: Appliquer le multiplicateur de position Boom/Crash ──
+   double bcPositionMult = SMC_BC_GetCombinedPositionSizeMult(symbol);
+   lot = lot * bcPositionMult;
+   lot = MathMax(lot, SymbolInfoDouble(symbol, SYMBOL_VOLUME_MIN));
+   lot = MathMin(lot, SymbolInfoDouble(symbol, SYMBOL_VOLUME_MAX));
+   
+   if(bcPositionMult != 1.0)
+   {
+      Print("[BC] Taille position ajustée: mult=", DoubleToString(bcPositionMult, 2), 
+            " | lot final=", DoubleToString(lot, 2));
+   }
 
    double ask = SymbolInfoDouble(symbol, SYMBOL_ASK);
    double bid = SymbolInfoDouble(symbol, SYMBOL_BID);
@@ -202,6 +258,25 @@ void SMCASC_TryScalpSynthetic(const string symbol, int dirSign)
    else
    {
       Print("❌ AUTOSCALP S1 échec ", symbol, " rc=", res.retcode, " ", res.comment);
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Initialisation du système de stratégies Boom/Crash                   |
+//+------------------------------------------------------------------+
+void SMCASC_InitBoomCrashStrategies()
+{
+   SMC_BC_Init();
+}
+
+//+------------------------------------------------------------------+
+//| Mise à jour des états Boom/Crash (à appeler chaque tick)            |
+//+------------------------------------------------------------------+
+void SMCASC_UpdateBoomCrashState(const string symbol)
+{
+   if(SMC_IsSpikeStyleSymbol(symbol))
+   {
+      SMC_BC_Update(symbol);
    }
 }
 
@@ -280,9 +355,20 @@ void SMCASC_TryDowScalp(const string symbol, int dirSign)
    if(interval <= 0 || interval > SMCSCS_LooseMaxBars) return;
 
    // ── 2. GOM: juste pas WAIT (vn != 0) ──
+   // PRIORITÉ: verdict global actuel sur le cache
    int vn = -999;
-   if(g_smcGomConnected) vn = SMCGP_GetCachedVerdictNum(symbol);
-   if(vn == -999 && symbol == _Symbol) vn = g_smcGomVerdictNum;
+   // D'abord vérifier le verdict global actuel
+   if(g_smcGomConnected && g_smcGomVerdictNum != 0)
+   {
+      // Si le verdict global n'est pas WAIT, utiliser le cache pour le symbole spécifique
+      vn = SMCGP_GetCachedVerdictNum(symbol);
+      if(vn == -999 && symbol == _Symbol) vn = g_smcGomVerdictNum;
+   }
+   else if(g_smcGomConnected)
+   {
+      // Verdict global est WAIT (vn=0) - bloquer immédiatement
+      vn = 0;
+   }
    if(vn == -999) return; // pas de verdict dispo
    if(vn == 0) return;    // WAIT = on attend
 
@@ -488,9 +574,20 @@ void SMCASC_TryDowSR20Scalp(const string symbol, int dirSign)
    if(TimeCurrent() - s_lastDowSR20Trade < SMCASC_DowSR20Cooldown) return;
 
    //--- 1) GOM verdict GOOD/PERFECT dans la bonne direction
+   // PRIORITÉ: verdict global actuel sur le cache
    int vn = -999;
-   if(g_smcGomConnected) vn = SMCGP_GetCachedVerdictNum(symbol);
-   if(vn == -999 && symbol == _Symbol) vn = g_smcGomVerdictNum;
+   // D'abord vérifier le verdict global actuel
+   if(g_smcGomConnected && g_smcGomVerdictNum != 0)
+   {
+      // Si le verdict global n'est pas WAIT, utiliser le cache pour le symbole spécifique
+      vn = SMCGP_GetCachedVerdictNum(symbol);
+      if(vn == -999 && symbol == _Symbol) vn = g_smcGomVerdictNum;
+   }
+   else if(g_smcGomConnected)
+   {
+      // Verdict global est WAIT (vn=0) - bloquer immédiatement
+      vn = 0;
+   }
    if(vn == 0) return;
    if(MathAbs(vn) < SMCASC_DowSR20MinVerdict) { Print("[DOW-SR20] blocked: |vn|=", MathAbs(vn), " < min=", SMCASC_DowSR20MinVerdict); return; }
    if(dirSign > 0 && vn < 0) { Print("[DOW-SR20] blocked: vn=", vn, " ≠ BUY dir"); return; }
@@ -643,9 +740,20 @@ void SMCASC_TryVolMomentumScalp(const string symbol)
    int dirSign = (int)momDir;
 
    // ── 3. GOM: juste pas WAIT (vn != 0) ──
+   // PRIORITÉ: verdict global actuel sur le cache
    int vn = -999;
-   if(g_smcGomConnected) vn = SMCGP_GetCachedVerdictNum(symbol);
-   if(vn == -999 && symbol == _Symbol) vn = g_smcGomVerdictNum;
+   // D'abord vérifier le verdict global actuel
+   if(g_smcGomConnected && g_smcGomVerdictNum != 0)
+   {
+      // Si le verdict global n'est pas WAIT, utiliser le cache pour le symbole spécifique
+      vn = SMCGP_GetCachedVerdictNum(symbol);
+      if(vn == -999 && symbol == _Symbol) vn = g_smcGomVerdictNum;
+   }
+   else if(g_smcGomConnected)
+   {
+      // Verdict global est WAIT (vn=0) - bloquer immédiatement
+      vn = 0;
+   }
    if(vn == -999) return;
    if(vn == 0) return;
 

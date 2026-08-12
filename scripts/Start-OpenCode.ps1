@@ -73,6 +73,6 @@ if (-not $LocalQwen) {
     Remove-Item Env:ANTHROPIC_BASE_URL -ErrorAction SilentlyContinue
 }
 Write-Host "[Start-OpenCode] OpenCode -> Ollama direct (qwen2.5-coder-fast:7b)" -ForegroundColor Green
-Write-Host "  build : ollama/qwen2.5-coder-fast:7b | explore : ollama/qwen2.5-coder:1.5b" -ForegroundColor Cyan
+Write-Host "  build : ollama/qwen2.5-coder-fast:7b | chat : ollama/qwen2.5-coder-fast:1.5b" -ForegroundColor Cyan
 Write-Host "  Claude Code : scripts\Start-OpenCode.ps1 -UseClaude" -ForegroundColor DarkGray
 & opencode

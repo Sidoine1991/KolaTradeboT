@@ -101,7 +101,7 @@ DEFAULT_SYMBOLS: List[str] = [
     # Metals
     "XAUUSD", "XAUEUR", "XAGUSD",
     # Indices / Crypto
-    "US30_x10", "BTCUSD", "ETHUSD",
+    "US30Cash", "BTCUSD", "ETHUSD",
 ]
 
 POLL_INTERVAL = 30  # secondes

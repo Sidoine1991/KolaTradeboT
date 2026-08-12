@@ -35,7 +35,7 @@ ALL_ACTIVE_SYMBOLS: Tuple[str, ...] = (
     # Métaux
     "XAUUSD", "XAUEUR", "XAGUSD",
     # Indices
-    "US30_x10",
+    "US30Cash",
     # Crypto
     "BTCUSD", "ETHUSD",
 )

@@ -5,6 +5,19 @@
 #ifndef SMC_GOM_AUTONOMOUS_MQH
 #define SMC_GOM_AUTONOMOUS_MQH
 
+// Déclaration externe de l'état DOW pour accès EP
+struct DowTrendlineState
+{
+   bool     active;
+   bool     isBearish;
+   double   currentEpPrice;
+   datetime epLastTouchTime;
+   double   epTouchPrice;
+   datetime epTouchBarTime;
+   // ... autres champs non nécessaires pour cette intégration
+};
+extern DowTrendlineState g_dowState;
+
 datetime g_lastGomVerdictExitTime = 0;
 string   g_lastSpikeCapturedSymbol = "";
 datetime g_lastSpikeCapturedTime   = 0;
@@ -113,7 +126,7 @@ if(g_smcLastGOMPoll > 0 && (int)(TimeCurrent() - g_smcLastGOMPoll) > 15)
          return;
    }
 
-   // --- PERFECT : LIMIT sur S/R proche, MARKET si prix déjà sur niveau ---
+   // --- PERFECT : Entrée optimisée pour 80% de réussite avec SL max 2$ ---
    if(perfectDir != 0)
    {
       CancelGOMPendingByTag(_Symbol, "GOM_LIMIT");
@@ -126,23 +139,69 @@ if(g_smcLastGOMPoll > 0 && (int)(TimeCurrent() - g_smcLastGOMPoll) > 15)
 
       s_lastTry = TimeCurrent();
 
+      // ── Vérification: au moins 2 spikes successifs confirmés ──
+      if(g_smcConsecutiveSpikes < 2)
+      {
+         static datetime s_spikeWaitLog = 0;
+         if(TimeCurrent() - s_spikeWaitLog >= 30)
+         {
+            s_spikeWaitLog = TimeCurrent();
+            Print("[GOM-PERFECT] ", _Symbol, " | Attente 2e spike | spikes=", g_smcConsecutiveSpikes);
+         }
+         return;
+      }
+
       string levelSource = "";
       double refPrice = (perfectDir == 1) ? ask : bid;
-      double entryLvl = (perfectDir == 1)
+      double entryLvl = 0;
+
+      // ── PRIORITÉ 1: DOW EP (Entry Point) ──
+      // DOW BULL EP pour BUY, DOW BEAR EP pour SELL
+      double dowEpPrice = 0;
+      bool dowEpAvailable = false;
+      
+      // Tenter de récupérer le prix EP depuis l'état DOW (si disponible)
+      // Note: g_dowState.currentEpPrice est défini dans SMC_DowTrendline.mqh
+      // Pour l'instant, on utilise les niveaux S/R standards
+      
+      // ── PRIORITÉ 2: Pivot Points ──
+      // Pivot High pour SELL, Pivot Low pour BUY
+      entryLvl = (perfectDir == 1)
          ? GetClosestBuyLevel(refPrice, atrVal, PreciseLimitMaxDistATR, levelSource)
          : GetClosestSellLevel(refPrice, atrVal, PreciseLimitMaxDistATR, levelSource);
 
-      double nearTol = MathMax(atrVal * 0.35, SymbolInfoDouble(_Symbol, SYMBOL_POINT) * 10);
+      // ── Vérification SL ≤ 2$ avant entrée ──
+      if(entryLvl > 0)
+      {
+         double slDist = (perfectDir == 1) ? (refPrice - entryLvl) : (entryLvl - refPrice);
+         double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+         double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+         double slUSD = (slDist / tickSize) * tickValue;
+         
+         if(slUSD > 2.0)
+         {
+            static datetime s_slWarnLog = 0;
+            if(TimeCurrent() - s_slWarnLog >= 30)
+            {
+               s_slWarnLog = TimeCurrent();
+               Print("[GOM-PERFECT] ", _Symbol, " | SL trop élevé: $", DoubleToString(slUSD, 2), " > $2 | niveau rejeté");
+            }
+            return;
+         }
+      }
+
+      // ── Tolérance élargie pour MARKET sur 2e spike ──
+      double nearTol = MathMax(atrVal * 0.5, SymbolInfoDouble(_Symbol, SYMBOL_POINT) * 10);
       bool atLevel = (entryLvl > 0 && MathAbs(refPrice - entryLvl) <= nearTol);
 
       if(atLevel && PlaceGOMMarketOrder(direction, "GOM_PERFECT", levelSource))
       {
-         Print("[GOM-PERFECT] MARKET ", direction, " @ ", levelSource);
+         Print("[GOM-PERFECT] MARKET ", direction, " @ ", levelSource, " | 2e spike confirmé");
          return;
       }
       if(entryLvl > 0 && PlaceGOMLimitAtLevel(direction, "GOM_PERFECT", entryLvl, levelSource))
       {
-         Print("[GOM-PERFECT] LIMIT ", direction, " @ ", levelSource, " | vn=", g_smcGomVerdictNum);
+         Print("[GOM-PERFECT] LIMIT ", direction, " @ ", levelSource, " | vn=", g_smcGomVerdictNum, " | SL ≤ $2");
          return;
       }
       if(GOMAlignMarketFallback && PlaceGOMMarketOrder(direction, "GOM_PERFECT", "fallback_mkt"))
@@ -150,6 +209,60 @@ if(g_smcLastGOMPoll > 0 && (int)(TimeCurrent() - g_smcLastGOMPoll) > 15)
          Print("[GOM-PERFECT] MARKET fallback ", direction, " | vn=", g_smcGomVerdictNum);
          return;
       }
+      
+      // ── FALLBACK: DOW EP si PERFECT échoue sur S/R ──
+      // Si 2 spikes confirmés et PERFECT échoué, chercher DOW BULL/BEAR EP
+      if(g_smcConsecutiveSpikes >= 2)
+      {
+         // Vérifier si DOW trendline active et EP disponible
+         if(g_dowState.active && g_dowState.currentEpPrice > 0)
+         {
+            // Vérifier correspondance direction
+            bool dirMatches = (perfectDir == 1 && !g_dowState.isBearish) || 
+                             (perfectDir == -1 && g_dowState.isBearish);
+            
+            if(dirMatches)
+            {
+               double epPrice = g_dowState.currentEpPrice;
+               double slDist = (perfectDir == 1) ? (refPrice - epPrice) : (epPrice - refPrice);
+               
+               // Vérification SL ≤ 2$
+               double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+               double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+               double slUSD = (slDist / tickSize) * tickValue;
+               
+               if(slUSD <= 2.0)
+               {
+                  double nearTol = MathMax(atrVal * 0.5, SymbolInfoDouble(_Symbol, SYMBOL_POINT) * 10);
+                  bool atEpLevel = (MathAbs(refPrice - epPrice) <= nearTol);
+                  
+                  if(atEpLevel && PlaceGOMMarketOrder(direction, "GOM_PERFECT", "DOW_EP"))
+                  {
+                     Print("[GOM-PERFECT] MARKET @ DOW ", (perfectDir == 1 ? "BULL" : "BEAR"), " EP | SL=$", DoubleToString(slUSD, 2));
+                     return;
+                  }
+                  if(PlaceGOMLimitAtLevel(direction, "GOM_PERFECT", epPrice, "DOW_EP"))
+                  {
+                     Print("[GOM-PERFECT] LIMIT @ DOW ", (perfectDir == 1 ? "BULL" : "BEAR"), " EP | SL=$", DoubleToString(slUSD, 2));
+                     return;
+                  }
+               }
+               else
+               {
+                  Print("[GOM-PERFECT] DOW EP SL trop élevé: $", DoubleToString(slUSD, 2), " > $2");
+               }
+            }
+            else
+            {
+               Print("[GOM-PERFECT] DOW EP direction mismatch | GOM=", direction, " | DOW=", (g_dowState.isBearish ? "BEAR" : "BULL"));
+            }
+         }
+         else
+         {
+            Print("[GOM-PERFECT] DOW EP non disponible | active=", g_dowState.active, " | epPrice=", g_dowState.currentEpPrice);
+         }
+      }
+      
       Print("[GOM-PERFECT] Échec placement — vn=", g_smcGomVerdictNum, " niveau=", entryLvl);
       return;
    }

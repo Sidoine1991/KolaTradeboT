@@ -3,6 +3,10 @@ name = "tradbot-ai"
 version = "1.0.0"
 description = "KolaTradebot AI server"
 requires-python = ">=3.12"
+dependencies = [
+    "numpy>=2.5.1",
+    "pandas>=3.0.5",
+]
 
 [tool.setuptools]
 packages = ["."]

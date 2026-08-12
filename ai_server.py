@@ -10244,7 +10244,8 @@ def _gom_finalize_verdict_pipeline(out: dict, sym: str, chart_tf: str = "M15") -
     out["verdict_reactive_num"] = reactive_vn
     out["verdict_reactive"] = reactive_txt
 
-    if GOM_USE_PREDICTIVE_BLEND:
+    use_predictive_blend = GOM_USE_PREDICTIVE_BLEND or bool(out.get("gom_source_predictive"))
+    if use_predictive_blend:
         _gom_apply_predictive_verdict_blend(out, sym)
     else:
         out["effective_verdict_num"] = reactive_vn
@@ -10257,6 +10258,8 @@ def _gom_finalize_verdict_pipeline(out: dict, sym: str, chart_tf: str = "M15") -
         _gom_apply_correction_verdict_wait(out, sym)
 
     _gom_apply_price_reality_final(out, sym)
+    out["harmonized_m1"] = True
+    out["verdict_mode"] = "reactive_pine"
 
 
 def _gom_apply_price_reality_final(out: dict, symbol: str) -> None:
@@ -10276,6 +10279,8 @@ def _gom_apply_price_reality_final(out: dict, symbol: str) -> None:
         out["verdict"] = verdict_text_from_num(new_vn)
         out["effective_verdict_num"] = new_vn
         out["effective_verdict"] = verdict_text_from_num(new_vn)
+        out["harmonized_m1"] = True
+        out["verdict_mode"] = "reactive_pine"
     except Exception as exc:
         logger.debug(f"[GOM-PRICE-REALITY] {symbol}: {exc}")
 
@@ -10381,14 +10386,38 @@ def _gom_live_m1_pullback_reason(out: dict, symbol: str, trade_dir: int) -> Opti
     return None
  
 
-def _gom_m1_price_pullback_reason(out: dict, symbol: str, trade_dir: int) -> Optional[str]:
-    """Check M1 price correction exceeding threshold — override PERFECT/GOOD → WAIT.
+def _gom_m1_wait_threshold_for_symbol(symbol: str) -> float:
+    """Seuil M1 adaptatif (FIX 2026-08-09) — évite WAIT permanent sur synthétiques.
 
-    When M1 candles show a price range or adverse excursion > GOM_M1_WAIT_DOLLARS
-    (default 2.0) against the trade direction AND the spike hasn't fired, the
-    verdict should switch to WAIT to allow the EA to exit/reassess.
+    - GOM_M1_WAIT_DOLLARS défini → override global (0 = off partout)
+    - Boom/Crash/PainX/GainX/Vol : GOM_M1_WAIT_SYNTH (défaut 0 = off)
+    - XAU/XAG : GOM_M1_WAIT_METALS (défaut 5.0)
+    - Forex / autres : GOM_M1_WAIT_FOREX (défaut 0 = off)
     """
-    threshold = float(os.getenv("GOM_M1_WAIT_DOLLARS", "2.0"))
+    env = os.getenv("GOM_M1_WAIT_DOLLARS")
+    if env is not None and str(env).strip() != "":
+        try:
+            return float(env)
+        except (TypeError, ValueError):
+            pass
+    s = str(symbol or "").upper().replace(" ", "")
+    if any(x in s for x in (
+        "BOOM", "CRASH", "PAINX", "GAINX", "TRENDX", "BREAKX",
+        "VOL", "STEP", "JUMP", "FXVOL", "SFVVOL", "SFXVOL",
+    )):
+        return float(os.getenv("GOM_M1_WAIT_SYNTH", "0"))
+    if any(x in s for x in ("XAU", "GOLD", "XAG", "SILVER")):
+        return float(os.getenv("GOM_M1_WAIT_METALS", "5.0"))
+    return float(os.getenv("GOM_M1_WAIT_FOREX", "0"))
+
+
+def _gom_m1_price_pullback_reason(out: dict, symbol: str, trade_dir: int) -> Optional[str]:
+    """Check M1 price correction exceeding adaptive threshold — override PERFECT/GOOD → WAIT.
+
+    Seuil adaptatif par classe d'actif (voir _gom_m1_wait_threshold_for_symbol).
+    Sur indices synthétiques le seuil 2.0 forçait WAIT partout (points ≠ dollars).
+    """
+    threshold = _gom_m1_wait_threshold_for_symbol(str(symbol or out.get("symbol", "")))
     if threshold <= 0:
         return None
     try:
@@ -10403,15 +10432,12 @@ def _gom_m1_price_pullback_reason(out: dict, symbol: str, trade_dir: int) -> Opt
         close = float(tail.iloc[-1]["close"])
         recent_high = float(highs.max())
         recent_low = float(lows.min())
-        price_range = recent_high - recent_low
         if trade_dir > 0:
             adverse = recent_high - close
         else:
             adverse = close - recent_low
-        if price_range > threshold:
-            return f"M1 range {price_range:.1f}$ > {threshold}$ (correction M1)"
         if adverse > threshold:
-            return f"M1 adverse {adverse:.1f}$ > {threshold}$ (correction M1)"
+            return f"M1 adverse {adverse:.1f} > {threshold} (correction M1)"
     except Exception as exc:
         logger.debug(f"[GOM-CORR-WAIT] M1 price pullback check failed: {exc}")
     return None
@@ -10779,8 +10805,9 @@ def _resolve_gom_dashboard(sym: str, chart_tf: str, source: str) -> Dict[str, An
             "hint": "Lancez: python python/gom_verdict_poller.py (TradingView CDP port 9222)",
         }
 
-    # auto = calcul MT5 local (candles uploadées ou terminal MT5 ouvert)
-    if src == "auto":
+    # auto / predictive = calcul MT5 local (candles uploadées ou terminal MT5 ouvert)
+    use_predictive_blend = src == "predictive"
+    if src in ("auto", "predictive"):
         src = "local"
 
     if src in ("local", "mt5"):
@@ -10793,7 +10820,10 @@ def _resolve_gom_dashboard(sym: str, chart_tf: str, source: str) -> Dict[str, An
                 "source": "live_calculation_error",
             }
         _gom_live_calc.mt5_candles_cache = _mt5_candles_cache
-        return _gom_live_calc.build_api_response(sym, chart_tf)
+        resp = _gom_live_calc.build_api_response(sym, chart_tf)
+        if use_predictive_blend:
+            resp["gom_source_predictive"] = True
+        return resp
 
     return {
         "ok": False,
@@ -10971,7 +11001,7 @@ async def gom_kola_dashboard(
             }
 
         src_norm = (source or "local").lower().strip()
-        if src_norm == "auto":
+        if src_norm in ("auto", "predictive"):
             src_norm = "local"
 
         cache_key = _gom_cache_key(sym, chart_tf)
@@ -11013,6 +11043,15 @@ async def gom_kola_dashboard(
             # blocking the request thread until the background computation
             # finishes (can take 30-46s on a cold/slow server, causing the EA
             # to time out and NOT failover to Render).
+            store_fallback = _gom_verdict_store_payload(sym, chart_tf, _gom_stale_ttl)
+            if store_fallback:
+                _gom_maybe_enrich_payload(store_fallback, sym, chart_tf)
+                store_fallback["gate"] = "compute_timeout_store"
+                store_fallback["stale"] = True
+                logger.warning(
+                    f"[GOM-DASH] {sym} timeout {wait_sec}s → verdict store (poller/EA cache)"
+                )
+                return _gom_family_guard_response(sym, store_fallback)
             logger.warning(
                 f"[GOM-DASH] {sym} timeout {wait_sec}s + no stale data → WAIT (computation continues in background)"
             )
@@ -26795,23 +26834,58 @@ def _gom_trust_precalculated_verdict(payload_source: str, payload: "GomVerdictPa
 
 
 def _gom_apply_pine_verdict(record: dict) -> dict:
-    """Recalcule verdict via GOMLPineCalculator (même logique que /gom-kola-dashboard)."""
-    if GOM_LIVE_CALCULATOR_AVAILABLE and _gom_live_calc and getattr(_gom_live_calc, "pine", None):
-        enriched = _gom_live_calc.pine.enrich_record(dict(record))
-        record.update({
-            "score_buy": enriched["score_buy"],
-            "score_sell": enriched["score_sell"],
-            "verdict_num": enriched["verdict_num"],
-            "verdict": enriched["verdict"],
-            "verdict_gap": enriched["verdict_gap"],
-            "filter_ratio": enriched["filter_ratio"],
-            "coherence_pct": enriched["coherence_pct"],
-            "coherence_ok": enriched.get("coherence_ok", False),
-            "entry_quality": round(float(enriched.get("entry_quality", 0)) * 100.0, 1),
-            "asset_category": enriched.get("asset_category", "other"),
-            "data_source": record.get("data_source") or "live_calculation",
-        })
+    """Recalcule verdict via pipeline M1 harmonisé (même logique que live calculator)."""
+    sym = str(record.get("symbol", "") or "")
+    if not (GOM_LIVE_CALCULATOR_AVAILABLE and _gom_live_calc and getattr(_gom_live_calc, "pine", None)):
         return record
+
+    rec = dict(record)
+    try:
+        _gom_live_calc._enrich_m1_price_context(sym, rec)
+    except Exception as exc:
+        logger.debug(f"[GOM-PINE] M1 enrich {sym}: {exc}")
+
+    enriched = _gom_live_calc.pine.enrich_record(rec)
+
+    try:
+        _gom_live_calc._enrich_m1_price_context(sym, enriched)
+        from gom_pine_calculator import apply_price_reality_gate, verdict_text_from_num
+
+        vn = int(enriched.get("verdict_num", 0) or 0)
+        if vn != 0:
+            new_vn, reason = apply_price_reality_gate(enriched, vn)
+            if new_vn != vn:
+                enriched["verdict_num"] = new_vn
+                enriched["verdict"] = verdict_text_from_num(new_vn)
+            if reason:
+                enriched["price_reality_reason"] = reason
+    except Exception as exc:
+        logger.debug(f"[GOM-PINE] M1 regate {sym}: {exc}")
+
+    record.update({
+        "score_buy": enriched["score_buy"],
+        "score_sell": enriched["score_sell"],
+        "verdict_num": enriched["verdict_num"],
+        "verdict": enriched["verdict"],
+        "verdict_gap": enriched["verdict_gap"],
+        "filter_ratio": enriched["filter_ratio"],
+        "coherence_pct": enriched["coherence_pct"],
+        "coherence_ok": enriched.get("coherence_ok", False),
+        "entry_quality": round(float(enriched.get("entry_quality", 0)) * 100.0, 1),
+        "asset_category": enriched.get("asset_category", "other"),
+        "data_source": record.get("data_source") or "live_calculation",
+        "harmonized_m1": True,
+        "verdict_mode": "reactive_pine",
+        "price_direction_1b": enriched.get("price_direction_1b"),
+        "price_direction_3b": enriched.get("price_direction_3b"),
+        "price_direction_5b": enriched.get("price_direction_5b"),
+        "m1_momentum": enriched.get("m1_momentum"),
+        "tf_m1_dir_live": enriched.get("tf_m1_dir_live"),
+        "m1_opp_bars": enriched.get("m1_opp_bars"),
+        "bars_since_spike": enriched.get("bars_since_spike"),
+        "price_reality_reason": enriched.get("price_reality_reason", ""),
+        "m1_last_bar_time": enriched.get("m1_last_bar_time"),
+    })
     return record
 
 
@@ -27213,6 +27287,9 @@ def _build_gom_mt5_payload(record: dict) -> dict:
         "pred_bb_mid", "pred_bb_up", "pred_bb_dn",
         "spike_level", "imminence_pct", "spike_tradable", "pre_spike_pct",
         "spike_progress_pct", "bars_since_spike", "spike_freq_bars",
+        "harmonized_m1", "verdict_mode", "price_reality_reason",
+        "price_direction_1b", "price_direction_3b", "price_direction_5b",
+        "m1_momentum", "tf_m1_dir_live", "m1_opp_bars", "m1_last_bar_time",
         "path_concordance_pct", "path_concordance",
         "cog_confidence_pct", "cog_strength_pct", "cog_direction", "cog_direction_5m", "cog_direction_15m",
     ):
@@ -27272,6 +27349,34 @@ def _build_gom_mt5_payload(record: dict) -> dict:
         out["imminence_pct"] = round(min(_sp * 1.6, 99.0), 1)
 
     return out
+
+
+def _gom_merge_poller_metadata(record: dict, extra: dict) -> None:
+    """Conserve les champs M1/gate du poller MT5 (gom_mt5_poller → POST /gom-verdict).
+
+    Le fast-path mt5_live fait confiance au verdict pré-calculé mais doit quand même
+    propager price_reality_reason, gate, bars_since_spike, etc. — sinon le dashboard
+    EA (_gom_maybe_enrich_payload → apply_price_reality_final) ne peut pas ré-appliquer
+    le même gate et le store perd la traçabilité WAIT (ex. gate=m1_correction).
+    """
+    passthrough_keys = {
+        "harmonized_m1", "verdict_mode", "price_reality_reason", "gate", "action",
+        "bars_since_spike", "spike_tradable", "spike_level", "imminence_pct",
+        "spike_progress_pct", "m1_max_range_dollars", "m1_adverse_excursion",
+        "m1_last_bar_time", "m1_momentum", "tf_m1_dir_live", "m1_opp_bars",
+        "price_direction_1b", "price_direction_3b", "price_direction_5b",
+        "coherence_ok", "asset_category", "chart_tf", "candle_source",
+        "correction_stage", "correction_entry_safe", "correction_phase",
+        "correction_type", "correction_exhaustion_pct", "correction_wait",
+        "correction_wait_reason", "pa_in_correction", "pa_trend",
+    }
+    passthrough_prefixes = ("correction_", "pa_", "ote_")
+    skip_overwrite = {"symbol", "verdict", "verdict_num", "score_buy", "score_sell"}
+    for k, v in extra.items():
+        if k in skip_overwrite:
+            continue
+        if k in passthrough_keys or k.startswith(passthrough_prefixes):
+            record[k] = v
 
 
 def _gom_verdict_record_from_payload(payload: GomVerdictPayload, enrich_mt5: bool = True) -> tuple:
@@ -27369,8 +27474,17 @@ def _gom_verdict_record_from_payload(payload: GomVerdictPayload, enrich_mt5: boo
         record["filter_ratio"] = filter_ratio
         record["coherence_pct"] = coherence_pct
         record["data_source"] = payload_source or "mt5_live"
+        _gom_merge_poller_metadata(record, extra)
         _normalize_gom_record_dirs(record)
-        logger.info(f"  → trust vn={vnum} {record['verdict']} (fast path)")
+        gate = record.get("gate") or ""
+        reason = record.get("price_reality_reason") or ""
+        if gate or reason:
+            logger.info(
+                f"  → trust vn={vnum} {record['verdict']} (fast path)"
+                f" gate={gate or '-'} reason={reason or '-'}"
+            )
+        else:
+            logger.info(f"  → trust vn={vnum} {record['verdict']} (fast path)")
         return sym, record
     else:
         _gom_apply_pine_verdict(record)
