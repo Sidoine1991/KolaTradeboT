@@ -44,6 +44,77 @@ if sys.platform.startswith("win"):
 
     import asyncio
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+    # ── PATCH IOCP Proactor: catch WinError 64 in accept loop ──
+    # OSError(64, 'Le nom réseau spécifié n'est plus disponible') happens when
+    # a client disconnects mid-accept on Windows IOCP. The error originates in
+    # finish_accept() → ov.getresult() inside IocpProactor._poll() (windows_events.py).
+    # We patch finish_accept + _poll at BOTH proactor_events AND windows_events.
+    _WIN_OSAFE_ERRORS = (64, 10053, 10054)  # NET_NAME_DELETED, CONNECTION_ABORTED, CONNECTION_RESET
+    try:
+        import asyncio.proactor_events as _pe
+        import asyncio.windows_events as _we
+
+        # ── Patch finish_accept wherever it's defined ──
+        for _mod in (_pe, _we):
+            if not hasattr(_mod, 'IocpProactor'):
+                continue
+            _cls = _mod.IocpProactor
+            if not hasattr(_cls, 'finish_accept'):
+                continue
+            _orig_fa = _cls.finish_accept
+            def _safe_finish_accept(_self, _ov, _key, _xferred, _orig=_orig_fa):
+                try:
+                    return _orig(_self, _ov, _key, _xferred)
+                except OSError as _e:
+                    if hasattr(_e, 'winerror') and _e.winerror in _WIN_OSAFE_ERRORS:
+                        return None
+                    raise
+            _cls.finish_accept = _safe_finish_accept
+
+        # ── Patch _poll in windows_events.IocpProactor (the actual crash site) ──
+        # IocpProactor._poll is SYNCHRONOUS (called as self._poll(timeout) in
+        # windows_events.py). Wrapping it as async def caused:
+        #   RuntimeWarning: coroutine '_safe_iocp_poll' was never awaited
+        # and left the IOCP loop half-dead on shutdown after bind failure.
+        if hasattr(_we, 'IocpProactor') and hasattr(_we.IocpProactor, '_poll'):
+            _orig_iocp_poll = _we.IocpProactor._poll
+
+            def _safe_iocp_poll(_self, _timeout=None, _orig=_orig_iocp_poll):
+                try:
+                    return _orig(_self, _timeout)
+                except OSError as _e:
+                    if hasattr(_e, 'winerror') and _e.winerror in _WIN_OSAFE_ERRORS:
+                        _safe_iocp_poll._cnt = getattr(_safe_iocp_poll, '_cnt', 0) + 1
+                        if _safe_iocp_poll._cnt <= 5:
+                            import logging as _lg
+                            _lg.getLogger("tradbot_ai").warning(
+                                "Suppressed WinError %d in IocpProactor._poll (count=%d)",
+                                _e.winerror, _safe_iocp_poll._cnt)
+                        return None
+                    raise
+
+            _we.IocpProactor._poll = _safe_iocp_poll
+
+        # ── Also patch BaseProactorEventLoop._poll (fallback, also sync) ──
+        if hasattr(_pe, 'BaseProactorEventLoop') and hasattr(_pe.BaseProactorEventLoop, '_poll'):
+            _orig_base_poll = _pe.BaseProactorEventLoop._poll
+
+            def _safe_base_poll(_self, _timeout=None, _orig=_orig_base_poll):
+                try:
+                    return _orig(_self, _timeout)
+                except OSError as _e:
+                    if hasattr(_e, 'winerror') and _e.winerror in _WIN_OSAFE_ERRORS:
+                        return None
+                    raise
+
+            _pe.BaseProactorEventLoop._poll = _safe_base_poll
+
+    except (ImportError, AttributeError) as _patch_err:
+        import logging as _pl
+        _pl.getLogger("tradbot_ai").warning(
+            "Could not patch IOCP proactor for WinError 64: %s (Selector policy active)", _patch_err
+        )
 from dotenv import load_dotenv
 
 from uuid import uuid4
@@ -1100,13 +1171,18 @@ _WELTRADE_TRADING_WINDOWS: Dict[str, List[Tuple[int, int]]] = {
     "PAINX": [(4, 23)],
     "GAINX": [(4, 23)],
     "FXVOL": [(4, 23)],
+    "SFVVOL": [(4, 23)],
+    "SFXVOL": [(4, 23)],
 }
 
 
 def is_weltrade_synthetic_symbol(symbol: str) -> bool:
     """Retourne True si le symbole est un synthétique Weltrade (PainX, GainX, FX Vol)."""
     s = str(symbol).upper().replace(" ", "").replace("_", "")
-    return s.startswith("PAINX") or s.startswith("GAINX") or s.startswith("FXVOL")
+    return (
+        s.startswith("PAINX") or s.startswith("GAINX") or s.startswith("FXVOL")
+        or s.startswith("SFVVOL") or s.startswith("SFXVOL")
+    )
 
 
 def _check_weltrade_hour_gate(symbol: str) -> Tuple[bool, Optional[str]]:
@@ -1118,10 +1194,10 @@ def _check_weltrade_hour_gate(symbol: str) -> Tuple[bool, Optional[str]]:
         return True, None
     if not is_weltrade_synthetic_symbol(symbol):
         return True, None
-    s = str(symbol).upper().replace(" ", "")
+    s = str(symbol).upper().replace(" ", "").replace("_", "")
     utc_hour = datetime.now(timezone.utc).hour
     for prefix, windows in _WELTRADE_TRADING_WINDOWS.items():
-        if s.startswith(prefix):
+        if s.startswith(prefix) or prefix in s:
             in_window = any(start <= utc_hour < end for start, end in windows)
             if not in_window:
                 msg = (
@@ -3492,9 +3568,16 @@ def get_mt5_indicators(symbol: str, timeframe: str, count: int = 100) -> Optiona
     Returns:
         Dictionnaire des indicateurs techniques ou None en cas d'erreur
     """
-    if not mt5.initialize():
-        logger.error("Échec de l'initialisation MT5")
-        return None
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent / "python"))
+        from mt5_candles_fetcher import ensure_mt5_connected
+        if not ensure_mt5_connected(symbol):
+            logger.error("Échec de l'initialisation MT5 (%s)", symbol)
+            return None
+    except ImportError:
+        if not mt5.initialize():
+            logger.error("Échec de l'initialisation MT5")
+            return None
     
     try:
         # Conversion du timeframe MT5
@@ -3602,13 +3685,6 @@ def get_mt5_indicators(symbol: str, timeframe: str, count: int = 100) -> Optiona
     except Exception as e:
         logger.error(f"Erreur dans get_mt5_indicators pour {symbol} {timeframe}: {e}")
         return None
-        
-    finally:
-        # Toujours essayer de fermer la connexion MT5
-        try:
-            mt5.shutdown()
-        except:
-            pass
 
 # Nouveaux imports pour Gemma (optionnel)
 GEMMA_AVAILABLE = False
@@ -4194,9 +4270,12 @@ except Exception as e:
 try:
     import torch
     from transformers import AutoProcessor, AutoModelForImageTextToText, AutoModelForCausalLM
-    print(f"Chargement du modèle Gemma depuis {GEMMA_MODEL_PATH}...")
-    # Chargement conditionnel pour ne pas bloquer si les libs manquent ou le chemin est faux
-    if os.path.exists(GEMMA_MODEL_PATH):
+    _skip_gemma = os.getenv("SKIP_GEMMA", "").lower() in ("1", "true", "yes")
+    if _skip_gemma:
+        print("Chargement Gemma ignoré (SKIP_GEMMA=1)")
+        GEMMA_AVAILABLE = False
+    elif os.path.exists(GEMMA_MODEL_PATH):
+        print(f"Chargement du modèle Gemma depuis {GEMMA_MODEL_PATH}...")
         try:
             # Chargement du processeur et du modèle en mode texte uniquement
             gemma_processor = AutoProcessor.from_pretrained(GEMMA_MODEL_PATH)
@@ -4214,6 +4293,7 @@ try:
              GEMMA_AVAILABLE = False
     else:
         print(f"Chemin du modèle introuvable: {GEMMA_MODEL_PATH}")
+        GEMMA_AVAILABLE = False
 except Exception as e:
     print(f"Impossible de charger le modèle Gemma: {e}")
     GEMMA_AVAILABLE = False
@@ -6031,6 +6111,81 @@ args = parser.parse_args()
 API_PORT = int(os.getenv('API_PORT', args.port))
 HOST = os.getenv('HOST', args.host)
 CACHE_DURATION = 30  # secondes
+
+
+def _listening_pids_on_port(port: int) -> List[int]:
+    """PIDs Windows qui écoutent déjà sur `port` (hors processus courant)."""
+    pids: List[int] = []
+    try:
+        import subprocess as _sp
+        out = _sp.run(
+            ["netstat", "-ano", "-p", "TCP"],
+            capture_output=True, timeout=8,
+        ).stdout
+        text = out.decode("latin-1", errors="replace") if isinstance(out, (bytes, bytearray)) else str(out)
+        me = os.getpid()
+        for raw in text.splitlines():
+            if f":{port}" not in raw or "LISTENING" not in raw:
+                continue
+            parts = raw.split()
+            if not parts:
+                continue
+            pid_s = parts[-1].strip()
+            if pid_s.isdigit():
+                pid = int(pid_s)
+                if pid != me and pid not in pids:
+                    pids.append(pid)
+    except Exception:
+        pass
+    return pids
+
+
+def _local_health_ok(port: int) -> bool:
+    try:
+        import urllib.request
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=2) as resp:
+            return 200 <= int(resp.status) < 300
+    except Exception:
+        return False
+
+
+def _abort_if_port_busy(host: str, port: int) -> None:
+    """Quitte proprement si une autre instance occupe déjà le port (WinError 10048)."""
+    if os.getenv("AI_SKIP_PORT_CHECK", "").lower() in ("1", "true", "yes"):
+        return
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    probe.settimeout(1)
+    try:
+        busy = probe.connect_ex(("127.0.0.1", port)) == 0
+    finally:
+        probe.close()
+    if not busy:
+        return
+    pids = _listening_pids_on_port(port)
+    pid_txt = ", ".join(str(p) for p in pids) if pids else "?"
+    healthy = _local_health_ok(port)
+    print(
+        f"\n[PORT {port}] Déjà occupé par PID {pid_txt} — bind {host}:{port} impossible (WinError 10048).",
+        flush=True,
+    )
+    if healthy:
+        print(
+            f"[PORT {port}] L'instance existante répond /health. "
+            "Gardez-la. Ne relancez pas python ai_server.py.",
+            flush=True,
+        )
+        sys.exit(0)
+    print(
+        f"[PORT {port}] /health ne répond pas — processus zombie probable.\n"
+        f"  taskkill /F /PID {pids[0] if pids else '<pid>'}\n"
+        "  puis relancez: python -B ai_server.py",
+        flush=True,
+    )
+    sys.exit(1)
+
+
+if __name__ == "__main__":
+    _abort_if_port_busy(HOST, API_PORT)
 # Dossiers de prédictions / métriques MT5
 RUNNING_ON_RENDER = bool(os.getenv("RENDER") or os.getenv("RENDER_SERVICE_ID"))
 
@@ -8274,7 +8429,6 @@ def resolve_chart_pattern_signal(request: "DecisionRequest") -> Dict[str, Any]:
     if not candidates:
         return neutral
     best = max(candidates, key=lambda c: float(c.get("score", 0.0) or 0.0))
-    best["all_candidates"] = candidates
     return best
 
 
@@ -10199,7 +10353,10 @@ GOM_USE_CORRECTION_WAIT_OVERLAY = _env_bool("GOM_USE_CORRECTION_WAIT_OVERLAY", F
 GOM_WELTRADE_INVERT_ENABLED = _env_bool("GOM_WELTRADE_INVERT_ENABLED", False)
 _gom_calc_inflight: Dict[str, asyncio.Task] = {}
 _gom_calc_locks: Dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
-_gom_executor = concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="gom_dash")
+_gom_executor = concurrent.futures.ThreadPoolExecutor(
+    max_workers=int(os.getenv("GOM_DASHBOARD_WORKERS", "4")),
+    thread_name_prefix="gom_dash",
+)
 _gom_bridge_singleton = None
 
 
@@ -10643,9 +10800,27 @@ def _gom_apply_weltrade_verdict_invert(out: dict, symbol: str) -> None:
     logger.debug("[GOM-INVERT] %s: vn %s→%s (%s)", sym, vn, inv, out.get("verdict"))
 
 
+def _gom_light_dashboard_refresh(out: dict, sym: str, chart_tf: str) -> None:
+    """Refresh léger sans recalcul verdict (poll EA harmonisé, <3s)."""
+    _enrich_bc_volatility(out, sym)
+    if not out.get("cog_direction_5m"):
+        _enrich_cognition_forecast_short(out, sym)
+    out["entry_probability"] = round(_compute_entry_probability(out), 1)
+    _enrich_ia_status(out)
+
+
 def _gom_maybe_enrich_payload(out: dict, sym: str, chart_tf: str) -> None:
     """Évite de ré-enrichir chaque poll EA (2s) — cognition courte refresh 5s."""
     now = time.time()
+    harmonized = bool(out.get("harmonized_m1"))
+    mode = str(out.get("verdict_mode") or "")
+    last_finalize = float(out.get("_finalize_at", 0) or 0)
+
+    # Fast path : verdict déjà harmonisé (live calc) — pas de double finalize
+    if harmonized and mode == "reactive_pine" and last_finalize and (now - last_finalize) < 3.0:
+        _gom_light_dashboard_refresh(out, sym, chart_tf)
+        return
+
     last_short = float(out.get("_enrich_short_at", 0) or 0)
     if not last_short or (now - last_short) >= 5.0:
         _enrich_gom_dashboard_payload(out, sym, chart_tf, short_only=True)
@@ -10653,23 +10828,23 @@ def _gom_maybe_enrich_payload(out: dict, sym: str, chart_tf: str) -> None:
     elif not out.get("cog_direction_5m"):
         _enrich_cognition_forecast_short(out, sym)
 
-    try:
-        _enrich_correction_cycle(out, sym)
-    except Exception as exc:
-        logger.debug(f"[GOM-CORR-WAIT] enrich correction before WAIT: {exc}")
-
-    _gom_finalize_verdict_pipeline(out, sym, chart_tf)
+    if not (harmonized and mode == "reactive_pine"):
+        try:
+            _enrich_correction_cycle(out, sym)
+        except Exception as exc:
+            logger.debug(f"[GOM-CORR-WAIT] enrich correction before WAIT: {exc}")
 
     # Concordance path M1 — TTL interne 45s, indépendant du mode heavy/skip
     _enrich_cognition_path_slow(out, sym, chart_tf)
 
     stamp_key = "_enrich_min_at" if AI_DASHBOARD_SKIP_HEAVY_ENRICH else "_enriched_at"
     last = float(out.get(stamp_key, 0) or 0)
-    if last and (now - last) < _gom_enrich_ttl:
-        return
-    _enrich_gom_dashboard_payload(out, sym, chart_tf, short_only=False)
-    out[stamp_key] = now
+    if not last or (now - last) >= _gom_enrich_ttl:
+        _enrich_gom_dashboard_payload(out, sym, chart_tf, short_only=False)
+        out[stamp_key] = now
+
     _gom_finalize_verdict_pipeline(out, sym, chart_tf)
+    out["_finalize_at"] = now
 
 
 def _gom_verdict_store_payload(symbol: str, chart_tf: str, max_age_sec: float) -> Optional[Dict[str, Any]]:
@@ -10684,6 +10859,9 @@ def _gom_verdict_store_payload(symbol: str, chart_tf: str, max_age_sec: float) -
             flat["chart_tf"] = chart_tf
             if age is not None:
                 flat["cache_age_sec"] = int(age)
+            if not flat.get("harmonized_m1"):
+                _gom_finalize_verdict_pipeline(flat, symbol, chart_tf)
+                flat["_finalize_at"] = time.time()
             return flat
     return None
 
@@ -10743,7 +10921,11 @@ async def _compute_gom_dashboard(sym: str, chart_tf: str, source: str, src_norm:
         lambda: _resolve_gom_dashboard(sym, chart_tf, source),
     )
     if response.get("ok") and src_norm in ("local", "mt5"):
-        _gom_maybe_enrich_payload(response, sym, chart_tf)
+        if response.get("harmonized_m1") and str(response.get("verdict_mode") or "") == "reactive_pine":
+            _gom_light_dashboard_refresh(response, sym, chart_tf)
+            response["_finalize_at"] = time.time()
+        else:
+            _gom_maybe_enrich_payload(response, sym, chart_tf)
         _cache_gom_data(sym, response, chart_tf)
     return response
 
@@ -25554,17 +25736,35 @@ def _gom_family_check(sym: str, need_claim: bool) -> Optional[Dict[str, Any]]:
     }
 
 
-def _gom_family_guard_response(sym: str, response: dict) -> dict:
-    """Applique le verrou famille sur une réponse verdict :
-    - WAIT si un trade auto de la même famille est déjà actif (position/ordre/claim) ;
-    - sinon retourne la réponse telle quelle, avec claim posé si verdict fort (|num|>=2)."""
-    family = _gom_family_key(sym)
-    if not family or not response or not response.get("ok"):
-        return response
-    vnum = int(response.get("verdict_num") or 0)
-    if vnum == 0:
-        return response
-    return _gom_family_check(sym, need_claim=abs(vnum) >= 2) or response
+def _gom_family_guard_response(sym: str, response: dict, *, for_execution: bool = False) -> dict:
+    """Ex-verrou famille sur le verdict GOM — DÉSACTIVÉ (2026-08).
+
+    Historique du bug : _gom_family_key() regroupait TOUS les synthétiques
+    (Boom/GainX/Crash/PainX confondus) dans une seule famille "synthetics".
+    Dès qu'une seule paire avait une position ouverte (ou juste un claim de
+    30s), ce gate forçait vn=0 (WAIT) sur TOUTES les autres paires
+    synthétiques via /gom-verdict (for_execution=True) — y compris celles
+    utilisées comme fallback par le MT5 quand /gom-kola-dashboard timeout.
+    Conséquence en cascade : Dow_ExecutePredictiveMarketOrder(),
+    DOW_EntryGatesOK() et ExecuteSR20TouchMarketOrder() exigent tous
+    |vn|>=2 (GOM GOOD/PERFECT) côté EA — donc aucun de ces trois systèmes
+    ne pouvait plus jamais se déclencher sur une 2e/3e paire tant qu'une
+    autre paire synthétique avait une position ou un claim actif, même si
+    le prix touchait parfaitement un niveau S/R20, une trendline DOW ou un
+    EP DOW.
+
+    Le contrôle du nombre de positions simultanées est déjà géré côté EA
+    (MaxPositionsTerminal + CountPositionsForSymbol dans SMC_Universal.mq5)
+    qui est l'endroit correct pour ce genre de cap — pas le serveur, qui ne
+    doit renvoyer que le verdict RÉEL de chaque paire, indépendamment des
+    positions ouvertes sur les autres paires.
+
+    On garde _gom_family_key()/_gom_family_check()/_gom_family_open_positions()
+    intacts car ils sont aussi utilisés pour la dé-duplication de la file
+    d'ordres pending TradingView (résolution de conflits), un usage distinct
+    et toujours légitime.
+    """
+    return response
 
 
 def _loss_guard_key(terminal_key: str, ticket: str) -> str:
@@ -27348,6 +27548,11 @@ def _build_gom_mt5_payload(record: dict) -> dict:
         # heuristique : imminence ≈ certitude du spike (borne 99%)
         out["imminence_pct"] = round(min(_sp * 1.6, 99.0), 1)
 
+    if not out.get("harmonized_m1"):
+        out["harmonized_m1"] = True
+    if not out.get("verdict_mode"):
+        out["verdict_mode"] = "reactive_pine"
+
     return out
 
 
@@ -28108,7 +28313,7 @@ async def get_gom_verdict(
                 flat = dash
             flat["data_source"] = dash.get("data_source", "live_calculation")
             flat["timestamp"] = dash.get("timestamp")
-            return _gom_family_guard_response(sym, {"ok": True, "symbol": sym, **flat})
+            return _gom_family_guard_response(sym, {"ok": True, "symbol": sym, **flat}, for_execution=True)
     except Exception as e:
         logger.warning(f"[GOM-Verdict] resolve failed for {sym}: {e}")
 
@@ -28158,7 +28363,7 @@ async def get_gom_verdict(
     # except Exception:
     #     pass
     flat = _build_gom_mt5_payload(verdict)
-    return _gom_family_guard_response(sym, {"ok": True, "symbol": sym, **flat})
+    return _gom_family_guard_response(sym, {"ok": True, "symbol": sym, **flat}, for_execution=True)
 
 def _calculate_gom_verdict(score_buy: float, score_sell: float, coherence: float = 0, filter_ratio: float = 0) -> tuple:
     """
@@ -30639,13 +30844,41 @@ if __name__ == "__main__":
     signal.signal(signal.SIGTERM, _signal_handler)
     signal.signal(signal.SIGINT, _signal_handler)
 
+    # ── Global exception handler: catch unhandled task exceptions (WinError 64 etc.) ──
+    # Prevents "Task exception was never retrieved" from crashing the server
+    def _global_exception_handler(loop, context):
+        exc = context.get('exception')
+        msg = context.get('message', '')
+        if exc and isinstance(exc, OSError):
+            if hasattr(exc, 'winerror') and exc.winerror in (64, 10053, 10054):
+                logger.debug("Suppressed WinError %d in event loop: %s", exc.winerror, msg)
+                return
+        logger.warning("Event loop exception handler: %s | exc=%s", msg, exc)
+
     logger.info("Lancement du serveur IA TradBOT avec systeme ML integre")
 
-    uvicorn.run(
-        app,
-        host=HOST,
-        port=API_PORT,
-        reload=False,
-        log_level="info",
-        timeout_keep_alive=5,  # libérer les connexions idle plus vite
-    )
+    @app.on_event("startup")
+    async def _install_exception_handler():
+        loop = asyncio.get_running_loop()
+        loop.set_exception_handler(_global_exception_handler)
+        logger.info("✅ Global exception handler installed (WinError 64/10053/10054 suppression)")
+
+    _abort_if_port_busy(HOST, API_PORT)
+    try:
+        uvicorn.run(
+            app,
+            host=HOST,
+            port=API_PORT,
+            reload=False,
+            log_level="info",
+            timeout_keep_alive=5,  # libérer les connexions idle plus vite
+        )
+    except OSError as bind_err:
+        win = getattr(bind_err, "winerror", None) or getattr(bind_err, "errno", None)
+        if win in (10048, 98):
+            logger.error(
+                "Port %s:%s déjà utilisé (WinError %s). Une autre instance ai_server tourne déjà.",
+                HOST, API_PORT, win,
+            )
+            sys.exit(1)
+        raise
