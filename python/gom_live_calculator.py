@@ -49,8 +49,64 @@ except ImportError:
     fetch_mt5_candles = None  # type: ignore
 
 MTF_TFS = ["1", "5", "15", "60", "240", "D", "W"]
-GOM_CANDLE_CACHE_TTL_SEC = float(os.getenv("GOM_CANDLE_CACHE_TTL_SEC", "8"))
+# FIX 2026-08-24 : TTL cache 8s -> 2s pour verdicts quasi temps reel
+GOM_CANDLE_CACHE_TTL_SEC = float(os.getenv("GOM_CANDLE_CACHE_TTL_SEC", "2"))
 GOM_ALLOW_CSV_FALLBACK = os.getenv("GOM_ALLOW_CSV_FALLBACK", "").lower() in ("1", "true", "yes")
+# Fraîcheur minimale exigée d'une bougie cache/upload/CSV : au-delà, la source est
+# ignorée au profit d'un fetch MT5 direct. Sinon une DataFrame uploadée une seule
+# fois fige le verdict pour toujours (priorité 2 dans get_candles).
+# FIX 2026-08-24 : 900s -> 120s
+GOM_CANDLE_STALE_MIN_SEC = float(os.getenv("GOM_CANDLE_STALE_MIN_SEC", "120"))
+
+_TF_SECONDS = {
+    "1": 60, "3": 180, "5": 300, "15": 900, "30": 1800,
+    "60": 3600, "120": 7200, "240": 14400,
+}
+
+
+def tf_staleness_sec(tf: str) -> float:
+    """Âge max acceptable de la dernière bougie pour ce TF."""
+    key = normalize_tf_key(tf)
+    tf_sec = _TF_SECONDS.get(key)
+    if tf_sec is None:
+        tf_sec = {"D": 86400, "W": 604800, "M": 2592000}.get(key, 900)
+    return max(4 * tf_sec, GOM_CANDLE_STALE_MIN_SEC)
+
+
+def df_last_bar_age_sec(df: "pd.DataFrame") -> Optional[float]:
+    """Âge (secondes) de la dernière bougie du DF, ou None si indéterminable."""
+    try:
+        series = None
+        for c in ("time", "timestamp", "datetime", "date"):
+            if c in df.columns:
+                series = df[c]
+                break
+        if series is None:
+            idx_name = str(getattr(df.index, "name", "") or "").lower()
+            if idx_name in ("time", "timestamp", "datetime", "date"):
+                series = pd.Series(df.index)
+        if series is None or len(series) == 0:
+            return None
+        last = series.iloc[-1]
+        if isinstance(last, (int, float)) and not pd.isna(last):
+            v = float(last)
+            if v > 1e14:
+                v /= 1e6
+            elif v > 1e11:
+                v /= 1e3
+            return max(0.0, time.time() - v)
+        return max(0.0, time.time() - float(pd.Timestamp(last).timestamp()))
+    except Exception:
+        return None
+
+
+def df_is_fresh(df: "pd.DataFrame", timeframe: str) -> bool:
+    """True si la dernière bougie respecte la fenêtre de fraîcheur du TF.
+    Retourne True par défaut quand l'âge est indéterminable (source exotique)."""
+    age = df_last_bar_age_sec(df)
+    if age is None:
+        return True
+    return age <= tf_staleness_sec(timeframe)
 
 
 def normalize_tf_key(tf: str) -> str:
@@ -88,6 +144,8 @@ class GOMSignalsLiveCalculator:
             for alias in tf_aliases(tf):
                 df = sym_cache.get(alias)
                 if df is not None and len(df) > 0:
+                    if not df_is_fresh(df, tf):
+                        continue  # bougies périmées — ne pas masquer un fetch MT5 direct
                     return df
         return None
 
@@ -159,9 +217,12 @@ class GOMSignalsLiveCalculator:
         if cache_key in self._candles_mem_cache:
             age = now - self._candles_mem_cache_ts.get(cache_key, 0)
             src = self._candles_mem_source.get(cache_key, "mem")
-            ttl = GOM_CANDLE_CACHE_TTL_SEC if src in ("mt5_direct", "mt5_upload") else 3600.0
-            if age < ttl:
+            # FIX 2026-08-24 : sources non-MT5 plafonnees a 60s
+            ttl = GOM_CANDLE_CACHE_TTL_SEC if src in ("mt5_direct", "mt5_upload") else 60.0
+            if age < ttl and df_is_fresh(self._candles_mem_cache[cache_key], timeframe):
                 return self._candles_mem_cache[cache_key].tail(bars).copy()
+            if age >= ttl or not df_is_fresh(self._candles_mem_cache[cache_key], timeframe):
+                del self._candles_mem_cache[cache_key]
 
         df = self._cache_lookup(symbol, timeframe)
         if df is not None:
@@ -181,7 +242,7 @@ class GOMSignalsLiveCalculator:
 
         if GOM_ALLOW_CSV_FALLBACK:
             df = self.get_candles_from_csv(symbol, timeframe, bars)
-            if df is not None and len(df) > 0:
+            if df is not None and len(df) > 0 and df_is_fresh(df, timeframe):
                 self._store_mem_cache(cache_key, df, "csv_local")
                 return df
 
@@ -355,7 +416,22 @@ class GOMSignalsLiveCalculator:
         return sum(1 for e in emas if close > e)
 
     def mtf_direction(self, df: pd.DataFrame) -> Tuple[int, int]:
-        """Pine get_dir() — BULL=1 BEAR=-1 NEUT=0 + RSI."""
+        """Pine get_dir() — BULL=1 BEAR=-1 NEUT=0 + RSI.
+
+        FIX (2026-08) : l'ancien calcul comparait le close à hl2 + 3*ATR
+        de la SEULE bougie courante ("st_bull") — ça exige un mouvement de
+        3x l'ATR en une seule bougie pour être vrai, ce qui n'arrive
+        quasiment jamais. Résultat : st_bull était presque toujours False,
+        biaisant bull/bear vers BEAR/NEUT en permanence (bear recevait ce
+        point "gratuitement" la plupart du temps, bull ne l'obtenait
+        presque jamais) — alors qu'un vrai Supertrend à bandes qui suivent
+        le prix (self.supertrend(), déjà implémenté correctement plus haut
+        et utilisé pour st_dir) existait déjà dans ce fichier mais n'était
+        pas réutilisé ici. Cette incohérence faisait échouer la plupart des
+        checks d'alignement multi-TF (tf_m1_dir/tf_m5_dir/tf_h1_dir/
+        tf_global_dir) → trop de WAIT, y compris quand le prix suivait
+        clairement une tendance en M1.
+        """
         if len(df) < 55:
             return 0, int(self.rsi_wilder(df))
         ef = float(self.ema_series(df["close"], 9).iloc[-1])
@@ -363,9 +439,8 @@ class GOMSignalsLiveCalculator:
         eh = float(self.ema_series(df["close"], 50).iloc[-1])
         c = float(df["close"].iloc[-1])
         rsi = self.rsi_wilder(df, 14)
-        atr = float(self.atr_series(df, 10).iloc[-1])
-        hl2 = float((df["high"].iloc[-1] + df["low"].iloc[-1]) / 2.0)
-        st_bull = c > (hl2 + 3.0 * atr)
+        st_direction, _st_level = self.supertrend(df)
+        st_bull = (st_direction == 1)
         bull = int(ef > es) + int(c > eh) + int(rsi > 52) + int(st_bull)
         bear = int(ef < es) + int(c < eh) + int(rsi < 48) + int(not st_bull)
         direction = 1 if bull >= 3 else (-1 if bear >= 3 else 0)
@@ -827,9 +902,9 @@ class GOMSignalsLiveCalculator:
         # ── RÉTROGRADATION AUTOMATIQUE SANS SPIKE (assouplie FIX 2026-08-09) ──
         # Seuils relevés pour éviter un WAIT permanent hors micro-spikes.
         # Forçage WAIT désactivé par défaut (GOM_FORCE_WAIT_NO_SPIKE=1 pour réactiver).
-        _retro_after = int(os.getenv("GOM_RETROGRADE_BARS", "25"))
-        _simple_after = int(os.getenv("GOM_SIMPLE_BARS", "35"))
-        _force_wait_after = int(os.getenv("GOM_FORCE_WAIT_BARS", "60"))
+        _retro_after = int(os.getenv("GOM_RETROGRADE_BARS", "70"))  # Augmenté de 40 à 70
+        _simple_after = int(os.getenv("GOM_SIMPLE_BARS", "105"))  # Augmenté de 55 à 105
+        _force_wait_after = int(os.getenv("GOM_FORCE_WAIT_BARS", "90"))
         _force_wait_enabled = os.getenv("GOM_FORCE_WAIT_NO_SPIKE", "").lower() in ("1", "true", "yes", "on")
 
         if bars_no_spike > _retro_after and abs(verdict_num) >= 2:
@@ -926,6 +1001,8 @@ class GOMSignalsLiveCalculator:
             "spike_tradable": bool(record.get("spike_tradable", False)),
             "bars_since_spike": bars_out,
             "m1_opp_bars": int(record.get("m1_opp_bars", 0) or 0),
+            "m1_consec_sell_spikes": int(record.get("m1_consec_sell_spikes", 0) or 0),
+            "m1_consec_buy_spikes": int(record.get("m1_consec_buy_spikes", 0) or 0),
             "price_direction_1b": float(record.get("price_direction_1b", 0) or 0),
             "price_direction_3b": float(record.get("price_direction_3b", 0) or 0),
             "price_direction_5b": float(record.get("price_direction_5b", 0) or 0),
@@ -958,6 +1035,29 @@ class GOMSignalsLiveCalculator:
             "asset_category": record.get("asset_category", "other"),
         }
         _attach_correction_cycle(resp, symbol, self)
+        try:
+            vn0 = int(resp.get("verdict_num", 0) or 0)
+            vn1 = self.pine.apply_spike_chain_uplift(resp, vn0)
+            if vn1 != vn0:
+                resp["verdict_num"] = vn1
+                resp["verdict"] = self.pine.verdict_text(vn1)
+            if int(resp.get("verdict_num", 0) or 0) == 0:
+                maj = self.pine.apply_mtf_verdict_uplift(
+                    resp,
+                    float(resp.get("score_buy", 0) or 0),
+                    float(resp.get("score_sell", 0) or 0),
+                )
+                if maj != 0:
+                    if self.pine.is_boom_like_symbol(symbol) and maj < 0:
+                        maj = 0
+                    if self.pine.is_crash_like_symbol(symbol) and maj > 0:
+                        maj = 0
+                if maj != 0:
+                    resp["verdict_num"] = maj
+                    resp["verdict"] = self.pine.verdict_text(maj)
+                    print(f"[GOM-MTF-MAJ-POST] {symbol}: WAIT→{maj}")
+        except Exception as _e:
+            print(f"[GOM-POST] skip: {_e}")
         return resp
 
 
