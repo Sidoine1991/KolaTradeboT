@@ -5716,6 +5716,16 @@ def _load_gom_cache_from_disk():
             if isinstance(data, dict):
                 _GOM_VERDICT_STORE.update(data)
                 logger.info(f"[GOM-Cache] Charge COMPLETE: {len(_GOM_VERDICT_STORE)} symboles dans store")
+                stale_n = sum(
+                    1 for v in _GOM_VERDICT_STORE.values()
+                    if isinstance(v, dict) and _gom_record_is_stale(v)
+                )
+                if stale_n:
+                    logger.warning(
+                        f"[GOM-Cache] {stale_n}/{len(_GOM_VERDICT_STORE)} verdicts chargés sont PÉRIMÉS "
+                        f"(> {_gom_verdict_max_age_sec():.0f}s ou sans timestamp) — "
+                        f"exclus des endpoints jusqu'à rafraîchissement par le poller"
+                    )
                 for k in list(_GOM_VERDICT_STORE.keys())[:3]:
                     v = _GOM_VERDICT_STORE[k]
                     verdict = v.get('verdict') if isinstance(v, dict) else str(v)[:60]
@@ -5856,7 +5866,12 @@ async def startup_event():
         try:
             import asyncio as _asyncio
             _wa_opp_scan_task = _asyncio.create_task(_scan_opportunities_whatsapp_loop())
-            logger.info("✅ Scan opportunités WhatsApp démarré (toutes les 60s)")
+            logger.info("✅ Scan GOM WhatsApp démarré (GOOD/PERFECT + transitions WAIT)")
+            try:
+                _asyncio.create_task(_dual_reports_whatsapp_loop())
+                logger.info("✅ Rapports WhatsApp dual (compte + verdicts) toutes les 30 min")
+            except Exception as _rep_err:
+                logger.warning("Rapports dual non démarrés: %s", _rep_err)
         except Exception as _wa_err:
             logger.warning("Scan opportunités WhatsApp non démarré: %s", _wa_err)
     else:
@@ -6141,12 +6156,27 @@ def _listening_pids_on_port(port: int) -> List[int]:
 
 
 def _local_health_ok(port: int) -> bool:
+    """Sonde /health avec patience — le warmup (ML, caches) peut prendre >20s.
+
+    Sans retries, une instance saine en cours de démarrage est déclarée
+    'zombie' à tort et risque d'être tuée par le garde-port.
+    """
     try:
         import urllib.request
-        with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=2) as resp:
-            return 200 <= int(resp.status) < 300
+
+        for attempt in range(4):
+            try:
+                with urllib.request.urlopen(
+                    f"http://127.0.0.1:{port}/health", timeout=8
+                ) as resp:
+                    return 200 <= int(resp.status) < 300
+            except Exception:
+                pass
+            if attempt < 3:
+                time.sleep(2)
     except Exception:
-        return False
+        pass
+    return False
 
 
 def _abort_if_port_busy(host: str, port: int) -> None:
@@ -8660,7 +8690,31 @@ async def decision_simplified(request: DecisionRequest):
         "chart_pattern_score": chart_pattern_signal.get("score"),
     }
     
-    ml_result = enhance_decision_with_ml(request.symbol, base_action, base_confidence, market_data)
+    # ML enhancement — hors boucle asyncio (joblib.load peut geler la boucle plusieurs secondes)
+    try:
+        ml_result = await asyncio.wait_for(
+            asyncio.get_running_loop().run_in_executor(
+                _gom_executor,
+                lambda: enhance_decision_with_ml(request.symbol, base_action, base_confidence, market_data),
+            ),
+            timeout=8.0,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(f"[DECISION] {request.symbol} ML enhance timeout (>8s) — décision technique seule")
+        ml_result = {
+            "enhanced_decision": base_action,
+            "enhanced_confidence": base_confidence,
+            "ml_applied": False,
+            "ml_reason": "ml_timeout",
+        }
+    except Exception as ml_err:
+        logger.warning(f"[DECISION] {request.symbol} ML enhance error: {ml_err}")
+        ml_result = {
+            "enhanced_decision": base_action,
+            "enhanced_confidence": base_confidence,
+            "ml_applied": False,
+            "ml_reason": "ml_error",
+        }
     
     # Utiliser la décision améliorée par ML
     action = ml_result["enhanced_decision"]
@@ -9251,10 +9305,10 @@ async def decision_simplified(request: DecisionRequest):
         )
 
     meta_out = {
-        "original_decision": ml_result["original_decision"],
-        "original_confidence": ml_result["original_confidence"],
-        "ml_enhanced": ml_result["ml_applied"],
-        "ml_reason": ml_result["ml_reason"],
+        "original_decision": ml_result.get("original_decision", action),
+        "original_confidence": ml_result.get("original_confidence", confidence),
+        "ml_enhanced": ml_result.get("ml_applied", False),
+        "ml_reason": ml_result.get("ml_reason", ""),
         "base_scores": {"buy": buy_score, "sell": sell_score},
         "market_data": market_data,
         "confidence_decimal": confidence,
@@ -10847,11 +10901,30 @@ def _gom_maybe_enrich_payload(out: dict, sym: str, chart_tf: str) -> None:
     out["_finalize_at"] = now
 
 
+async def _gom_enrich_async(payload: dict, sym: str, chart_tf: str) -> None:
+    """Enrichissement dashboard HORS boucle asyncio (peut fetch MT5 = secondes de blocage).
+        Timeout court : en cas de dépassement on sert le payload sans refresh cognition."""
+    loop = asyncio.get_running_loop()
+    try:
+        await asyncio.wait_for(
+            loop.run_in_executor(
+                _gom_executor,
+                lambda: _gom_maybe_enrich_payload(payload, sym, chart_tf),
+            ),
+            timeout=float(os.getenv("GOM_ENRICH_WAIT_SEC", "2")),
+        )
+    except asyncio.TimeoutError:
+        logger.debug(f"[GOM-DASH] {sym} enrich timeout — payload servi sans refresh")
+    except Exception as exc:
+        logger.debug(f"[GOM-DASH] {sym} enrich error: {exc}")
+
+
 def _gom_verdict_store_payload(symbol: str, chart_tf: str, max_age_sec: float) -> Optional[Dict[str, Any]]:
     verdict = _lookup_gom_store(symbol.upper(), _GOM_VERDICT_STORE)
     if verdict and verdict.get("verdict"):
         age = _gom_record_age_sec(verdict)
-        if age is None or age < max_age_sec:
+        # Undaté = rejeté (jamais de trade sur un verdict sans horodatage fiable)
+        if age is not None and age < max_age_sec:
             flat = _build_gom_mt5_payload(verdict)
             flat["ok"] = True
             flat["symbol"] = symbol
@@ -10921,11 +10994,23 @@ async def _compute_gom_dashboard(sym: str, chart_tf: str, source: str, src_norm:
         lambda: _resolve_gom_dashboard(sym, chart_tf, source),
     )
     if response.get("ok") and src_norm in ("local", "mt5"):
-        if response.get("harmonized_m1") and str(response.get("verdict_mode") or "") == "reactive_pine":
-            _gom_light_dashboard_refresh(response, sym, chart_tf)
-            response["_finalize_at"] = time.time()
-        else:
-            _gom_maybe_enrich_payload(response, sym, chart_tf)
+        # Enrichissement potentiellement bloquant (fetch MT5) — jamais sur la boucle.
+        is_reactive = (
+            response.get("harmonized_m1")
+            and str(response.get("verdict_mode") or "") == "reactive_pine"
+        )
+        enrich_fn = (
+            (lambda: _gom_light_dashboard_refresh(response, sym, chart_tf))
+            if is_reactive
+            else (lambda: _gom_maybe_enrich_payload(response, sym, chart_tf))
+        )
+        try:
+            await asyncio.wait_for(
+                loop.run_in_executor(_gom_executor, enrich_fn), timeout=2.0
+            )
+        except asyncio.TimeoutError:
+            logger.debug(f"[GOM-DASH] {sym} post-compute enrich timeout")
+        response["_finalize_at"] = time.time()
         _cache_gom_data(sym, response, chart_tf)
     return response
 
@@ -11192,7 +11277,7 @@ async def gom_kola_dashboard(
         if src_norm in ("local", "mt5"):
             cached_data = _get_cached_gom_data(sym, chart_tf)
             if cached_data:
-                _gom_maybe_enrich_payload(cached_data, sym, chart_tf)
+                await _gom_enrich_async(cached_data, sym, chart_tf)
                 return _gom_family_guard_response(sym, cached_data)
             stale_data = _get_stale_gom_data(sym, chart_tf)
 
@@ -11216,7 +11301,7 @@ async def gom_kola_dashboard(
             response = await asyncio.wait_for(asyncio.shield(inflight), timeout=wait_sec)
         except asyncio.TimeoutError:
             if stale_data:
-                _gom_maybe_enrich_payload(stale_data, sym, chart_tf)
+                await _gom_enrich_async(stale_data, sym, chart_tf)
                 logger.debug(
                     f"[GOM-DASH] {sym} stale serve (wait>{wait_sec}s, age={stale_data.get('cache_age_sec')}s)"
                 )
@@ -11227,7 +11312,7 @@ async def gom_kola_dashboard(
             # to time out and NOT failover to Render).
             store_fallback = _gom_verdict_store_payload(sym, chart_tf, _gom_stale_ttl)
             if store_fallback:
-                _gom_maybe_enrich_payload(store_fallback, sym, chart_tf)
+                await _gom_enrich_async(store_fallback, sym, chart_tf)
                 store_fallback["gate"] = "compute_timeout_store"
                 store_fallback["stale"] = True
                 logger.warning(
@@ -11345,7 +11430,16 @@ async def gom_live_status(
     if GOM_LIVE_CALCULATOR_AVAILABLE and _gom_live_calc:
         try:
             _gom_live_calc.mt5_candles_cache = _mt5_candles_cache
-            live = _resolve_gom_dashboard(sym, chart_tf, source)
+            loop = asyncio.get_running_loop()
+            live = await asyncio.wait_for(
+                loop.run_in_executor(
+                    _gom_executor,
+                    lambda: _resolve_gom_dashboard(sym, chart_tf, source),
+                ),
+                timeout=8.0,
+            )
+        except asyncio.TimeoutError:
+            live = {"ok": False, "error": "live calc timeout (>8s)"}
         except Exception as e:
             live = {"ok": False, "error": str(e)}
     rsi_values = list(tf_rsi.values())
@@ -11640,8 +11734,51 @@ async def get_ml_swing_predictions(symbol: str, type: str = "swing_points", futu
 _MODELS_DIR = Path(__file__).resolve().parent / "data" / "models"
 
 
+
+async def _parse_mt5_json_body(request: Request) -> dict:
+    """Parse JSON tolérant (MT5 WebRequest: corps vide, NUL, NaN)."""
+    try:
+        raw = await request.body()
+    except Exception:
+        raw = b""
+    if not raw:
+        try:
+            return dict(request.query_params) if request.query_params else {}
+        except Exception:
+            return {}
+    try:
+        raw_text = raw.decode("utf-8", errors="replace") if isinstance(raw, (bytes, bytearray)) else str(raw)
+    except Exception:
+        raw_text = ""
+    cleaned = "".join(ch for ch in raw_text if ord(ch) != 0).strip()
+    lb, rb = cleaned.find("{"), cleaned.rfind("}")
+    if lb >= 0 and rb > lb:
+        cleaned = cleaned[lb : rb + 1]
+    cleaned = re.sub(
+        r"(?<![A-Za-z0-9_])(?:nan|NaN|NAN|inf|Inf|INF|-inf|-Inf|-INF)(?![A-Za-z0-9_])",
+        "null",
+        cleaned,
+    )
+    try:
+        body = json.loads(cleaned) if cleaned else {}
+    except Exception:
+        body = {}
+        m = re.search(r'"symbol"\s*:\s*"([^"]+)"', cleaned)
+        if m:
+            body["symbol"] = m.group(1)
+    if not isinstance(body, dict):
+        body = {}
+    try:
+        for k, v in request.query_params.items():
+            if k not in body or body.get(k) in (None, ""):
+                body[k] = v
+    except Exception:
+        pass
+    return body
+
+
 @app.post("/ml/pattern-forecast")
-async def get_pattern_forecast(payload: Optional[dict] = Body(default=None)):
+async def get_pattern_forecast(request: Request):
     """
     Pattern Recognition Forecast — multi-TF similarity search + spike prediction + 1000-bar zigzag projection.
     
@@ -11657,9 +11794,10 @@ async def get_pattern_forecast(payload: Optional[dict] = Body(default=None)):
     try:
         from ml.pattern_recognizer import forecast_from_patterns, forecast_to_payload
         
-        symbol = (payload or {}).get("symbol", "")
+        payload = await _parse_mt5_json_body(request)
+        symbol = str((payload or {}).get("symbol", "") or "").strip()
         if not symbol:
-            raise HTTPException(status_code=400, detail="symbol required")
+            return {"ok": False, "error": "symbol required", "verdict": "WAIT"}
         
         horizon = int((payload or {}).get("horizon", 1000))
         horizon = max(50, min(2000, horizon))
@@ -11693,11 +11831,18 @@ async def get_pattern_forecast(payload: Optional[dict] = Body(default=None)):
                 "message": f"Got {len(df_m1) if df_m1 is not None else 0} M1 bars, need at least 200",
             }
         
-        fc = forecast_from_patterns(
-            symbol=symbol,
-            df_m1=df_m1,
-            horizon=horizon,
-            top_k=top_k,
+        # forecast_from_patterns charge la library (362MB) — hors boucle asyncio
+        fc = await asyncio.wait_for(
+            asyncio.get_running_loop().run_in_executor(
+                _gom_executor,
+                lambda: forecast_from_patterns(
+                    symbol=symbol,
+                    df_m1=df_m1,
+                    horizon=horizon,
+                    top_k=top_k,
+                ),
+            ),
+            timeout=45.0,
         )
         
         payload_out = forecast_to_payload(fc)
@@ -26231,7 +26376,7 @@ async def mt5_symbols_get():
 
 
 @app.post("/mt5/dow-trendline")
-async def mt5_dow_trendline(payload: Optional[dict] = Body(default=None)):
+async def mt5_dow_trendline(request: Request):
     """
     Calcule la trendline DOW (swing highs/lows) pour un symbole.
 
@@ -26242,10 +26387,11 @@ async def mt5_dow_trendline(payload: Optional[dict] = Body(default=None)):
         symbol: str — symbole (ex: "Boom 1000 Index")
         symbol_type: str — hint "bullish"/"bearish" ou "" pour auto
     """
-    symbol = (payload or {}).get("symbol", "")
+    payload = await _parse_mt5_json_body(request)
+    symbol = str((payload or {}).get("symbol", "") or "").strip()
     if not symbol:
-        return {"ok": False, "error": "symbol required"}
-    symbol_type = (payload or {}).get("symbol_type", "").lower()
+        return {"ok": False, "active": False, "error": "symbol required"}
+    symbol_type = str((payload or {}).get("symbol_type", "") or "").lower()
 
     try:
         # 1. Recuperer les donnees M1 (200 bougies)
@@ -26343,19 +26489,29 @@ async def mt5_dow_trendline(payload: Optional[dict] = Body(default=None)):
         # 7. Linear regression on selected swings
         selected.sort(key=lambda x: x['time'])
         n_sel = len(selected)
-        sum_t = sum(p['time'].timestamp() for p in selected)
+        
+        # Helper function to get timestamp from time (handles both datetime and int)
+        def get_timestamp(t):
+            if isinstance(t, (int, float)):
+                return float(t)
+            elif hasattr(t, 'timestamp'):
+                return t.timestamp()
+            else:
+                return float(t)
+        
+        sum_t = sum(get_timestamp(p['time']) for p in selected)
         sum_p = sum(p['price'] for p in selected)
-        sum_tp = sum(p['time'].timestamp() * p['price'] for p in selected)
-        sum_tt = sum(p['time'].timestamp() ** 2 for p in selected)
+        sum_tp = sum(get_timestamp(p['time']) * p['price'] for p in selected)
+        sum_tt = sum(get_timestamp(p['time']) ** 2 for p in selected)
         denom = n_sel * sum_tt - sum_t ** 2
         if abs(denom) < 1e-10:
             return {"ok": True, "active": False, "reason": "denom too small"}
         slope_reg = (n_sel * sum_tp - sum_t * sum_p) / denom
         intercept = (sum_p - slope_reg * sum_t) / n_sel
 
-        t0_ts = selected[0]['time'].timestamp()
+        t0_ts = get_timestamp(selected[0]['time'])
         p0 = slope_reg * t0_ts + intercept
-        t1_ts = selected[-1]['time'].timestamp()
+        t1_ts = get_timestamp(selected[-1]['time'])
         p1 = slope_reg * t1_ts + intercept
 
         # 8. Projection 8 bougies M1 dans le futur
@@ -27305,6 +27461,36 @@ def _normalize_gom_record_dirs(record: dict) -> None:
             record[dk] = _normalize_tf_dir_label(record.get(dk))
 
 
+def _gom_verdict_max_age_sec() -> float:
+    """Âge max d'un verdict considéré exploitable (défaut 15 min, surcharge via env)."""
+    try:
+        return float(os.getenv("GOM_VERDICT_MAX_AGE_SEC", "900"))
+    except Exception:
+        return 900.0
+
+
+def _gom_record_age_sec(record: dict) -> Optional[float]:
+    """Âge (secondes) du verdict, ou None si timestamp absent/inexploitable."""
+    try:
+        ts_raw = str(record.get("timestamp") or record.get("ts") or "").strip()
+        if not ts_raw:
+            return None
+        ts = datetime.fromisoformat(ts_raw)
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - ts).total_seconds()
+    except Exception:
+        return None
+
+
+def _gom_record_is_stale(record: dict, max_age: Optional[float] = None) -> bool:
+    """True si le verdict est trop vieux OU sans timestamp fiable.
+    Un verdict sans date ne doit jamais piloter un trade."""
+    limit = _gom_verdict_max_age_sec() if max_age is None else max_age
+    age = _gom_record_age_sec(record)
+    return age is None or age > limit
+
+
 def _gom_mtf_cache_key(mt5_symbol: str) -> str:
     return str(mt5_symbol or "").upper().replace(" ", "").replace("INDEX", "")
 
@@ -27864,26 +28050,32 @@ def _maybe_promote_gom_to_pending_order(sym: str, record: dict) -> None:
     if os.getenv("GOM_AUTO_PENDING_ORDER", "true").lower() not in ("1", "true", "yes"):
         return
 
-    # Gate Weltrade — hors fenêtre 04h-16h UTC : aucune promotion possible
-    wt_ok, wt_reason = _check_weltrade_hour_gate(sym)
-    if not wt_ok:
-        logger.info(f"[GomAutoTrade] {sym} — hors fenêtre Weltrade → promotion pending-order annulée")
-        return
-
-    # Gate correction cycle M1 — bloque auto-promotion pendant micro-corrections Boom/Crash
-    if is_boom_crash_symbol(sym):
-        _corr_store_auto = _GOM_VERDICT_STORE.get(sym, {})
-        _m1_blocked_auto = bool(_corr_store_auto.get("m1_entry_blocked", False))
-        _corr_entry_safe_auto = bool(_corr_store_auto.get("correction_entry_safe", True))
-        if _m1_blocked_auto:
-            _m1_reason_auto = _corr_store_auto.get("m1_entry_reason", "micro-correction active")
-            logger.info(f"[GomAutoTrade] {sym} — M1 correction bloquée: {_m1_reason_auto} → skip")
-            return
-        if not _corr_entry_safe_auto:
-            logger.info(f"[GomAutoTrade] {sym} — correction_entry_safe=False → skip")
-            return
-
     vnum = int(record.get("verdict_num") or 0)
+    _is_good_perfect = abs(vnum) >= 2
+    _skip_gates = os.getenv("GOM_AUTO_SKIP_GATES_FOR_GOOD_PERFECT", "false").lower() in ("1", "true", "yes")
+
+    if not _skip_gates or not _is_good_perfect:
+        # Gate Weltrade — hors fenêtre 04h-16h UTC : aucune promotion possible
+        wt_ok, wt_reason = _check_weltrade_hour_gate(sym)
+        if not wt_ok:
+            logger.info(f"[GomAutoTrade] {sym} — hors fenêtre Weltrade → promotion pending-order annulée")
+            return
+
+        # Gate correction cycle M1 — bloque auto-promotion pendant micro-corrections Boom/Crash
+        if is_boom_crash_symbol(sym):
+            _corr_store_auto = _GOM_VERDICT_STORE.get(sym, {})
+            _m1_blocked_auto = bool(_corr_store_auto.get("m1_entry_blocked", False))
+            _corr_entry_safe_auto = bool(_corr_store_auto.get("correction_entry_safe", True))
+            if _m1_blocked_auto:
+                _m1_reason_auto = _corr_store_auto.get("m1_entry_reason", "micro-correction active")
+                logger.info(f"[GomAutoTrade] {sym} — M1 correction bloquée: {_m1_reason_auto} → skip")
+                return
+            if not _corr_entry_safe_auto:
+                logger.info(f"[GomAutoTrade] {sym} — correction_entry_safe=False → skip")
+                return
+    else:
+        logger.info(f"[GomAutoTrade] {sym} — GOOD/PERFECT ({vnum}) → gates skipped (GOM_AUTO_SKIP_GATES_FOR_GOOD_PERFECT=true)")
+
     buy = float(record.get("score_buy") or 0)
     sell = float(record.get("score_sell") or 0)
     gap_thr = float(os.getenv("GOM_STRONG_SCORE_GAP", "1.0"))
@@ -27924,9 +28116,12 @@ def _maybe_promote_gom_to_pending_order(sym: str, record: dict) -> None:
     min_q = float(os.getenv("GOM_AUTO_MIN_QUALITY", "35"))
     # IA status gate : coherence_pct doit être >= 70% pour tout trade auto-promu
     min_c = float(os.getenv("GOM_AUTO_MIN_COHERENCE", "70"))
-    if quality < min_q or (coherence > 0 and coherence < min_c):
-        logger.info(f"[GomAutoTrade] {sym} — IA status gate: coherence={coherence:.0f}% < {min_c:.0f}% → skip")
-        return
+    if not _skip_gates or not _is_good_perfect:
+        if quality < min_q or (coherence > 0 and coherence < min_c):
+            logger.info(f"[GomAutoTrade] {sym} — IA status gate: coherence={coherence:.0f}% < {min_c:.0f}% → skip")
+            return
+    else:
+        logger.info(f"[GomAutoTrade] {sym} — GOOD/PERFECT ({vnum}) → quality/coherence gate skipped")
 
     # Gate MTF : H4+H1+M15 doivent confirmer la direction avant auto-promotion
     _direction = "BUY" if vnum > 0 else "SELL"
@@ -27936,67 +28131,79 @@ def _maybe_promote_gom_to_pending_order(sym: str, record: dict) -> None:
     _h1  = str(record.get("tf_h1_dir") or "NEUT")
     _m15 = str(record.get("tf_m15_dir") or "NEUT")
 
-    if not _weltrade_synth:
-        _tfs_all = [
-            str(record.get("tf_m1_dir")  or "NEUT"),
-            str(record.get("tf_m5_dir")  or "NEUT"),
-            _m15, _h1, _h4,
-            str(record.get("tf_d1_dir")  or "NEUT"),
-        ]
-        _all_neut = all(d == "NEUT" for d in _tfs_all)
-        if not _all_neut:
-            # Rejet absolu : H4 ET H1 opposés
-            if _h4 == _opposite and _h1 == _opposite:
-                logger.info(f"[GomAutoTrade] {sym} — MTF rejet absolu H4={_h4} H1={_h1} contre {_direction} → skip")
-                return
-            # Structure : H4 confirme OU (H1 + M15 confirment)
-            _struct_ok = (_h4 == _side) or (_h1 == _side and _m15 == _side)
-            if not _struct_ok:
-                logger.info(f"[GomAutoTrade] {sym} — MTF structure insuffisante H4={_h4} H1={_h1} M15={_m15} pour {_direction} → skip")
-                return
-            # Cohérence >= 4/6
-            _count = sum(1 for d in _tfs_all if d == _side)
-            if _count < 4:
-                logger.info(f"[GomAutoTrade] {sym} — MTF cohérence {_count}/6 < 4 pour {_direction} → skip")
-                return
+    if not _skip_gates or not _is_good_perfect:
+        if not _weltrade_synth:
+            _tfs_all = [
+                str(record.get("tf_m1_dir")  or "NEUT"),
+                str(record.get("tf_m5_dir")  or "NEUT"),
+                _m15, _h1, _h4,
+                str(record.get("tf_d1_dir")  or "NEUT"),
+            ]
+            _all_neut = all(d == "NEUT" for d in _tfs_all)
+            if not _all_neut:
+                # Rejet absolu : H4 ET H1 opposés
+                if _h4 == _opposite and _h1 == _opposite:
+                    logger.info(f"[GomAutoTrade] {sym} — MTF rejet absolu H4={_h4} H1={_h1} contre {_direction} → skip")
+                    return
+                # Structure : H4 confirme OU (H1 + M15 confirment)
+                _struct_ok = (_h4 == _side) or (_h1 == _side and _m15 == _side)
+                if not _struct_ok:
+                    logger.info(f"[GomAutoTrade] {sym} — MTF structure insuffisante H4={_h4} H1={_h1} M15={_m15} pour {_direction} → skip")
+                    return
+                # Cohérence >= 4/6
+                _count = sum(1 for d in _tfs_all if d == _side)
+                if _count < 4:
+                    logger.info(f"[GomAutoTrade] {sym} — MTF cohérence {_count}/6 < 4 pour {_direction} → skip")
+                    return
+    else:
+        logger.info(f"[GomAutoTrade] {sym} — GOOD/PERFECT ({vnum}) → MTF gate skipped")
 
     kola = (record.get("kola_state") or "---").upper()
     strong_gap = abs(sell - buy) >= gap_thr
-    if not strong_gap:
-        if vnum > 0 and "NEAR SELL" in kola:
-            return
-        if vnum < 0 and "NEAR BUY" in kola:
-            return
+    if not _skip_gates or not _is_good_perfect:
+        if not strong_gap:
+            if vnum > 0 and "NEAR SELL" in kola:
+                return
+            if vnum < 0 and "NEAR BUY" in kola:
+                return
+    else:
+        logger.info(f"[GomAutoTrade] {sym} — GOOD/PERFECT ({vnum}) → KOLA gate skipped")
 
     direction = "BUY" if vnum > 0 else "SELL"
 
     # 🔒 VERROU FAMILLE : un seul trade auto sur les synthétiques
     # (GainX/Boom/TrendX/PainX/Crash partagent UN slot).
     # Bloque la promotion si un autre synthétique a déjà un ordre/position actif.
-    _fam_blocker = _gom_family_blocked_by(sym)
-    if _fam_blocker:
-        logger.info(f"[GomAutoTrade] {sym} — verrou famille: {_fam_blocker} déjà actif → skip")
-        return
+    if not _skip_gates or not _is_good_perfect:
+        _fam_blocker = _gom_family_blocked_by(sym)
+        if _fam_blocker:
+            logger.info(f"[GomAutoTrade] {sym} — verrou famille: {_fam_blocker} déjà actif → skip")
+            return
+    else:
+        logger.info(f"[GomAutoTrade] {sym} — GOOD/PERFECT ({vnum}) → family blocker skipped")
 
     existing = _PENDING_ORDER_STORE.get(sym)
 
     # Ne pas écraser un ordre venant du pipeline (source != gom_tv_sync)
     # Le pipeline a la priorité : SL/TP calculés, execution_type correct
-    if existing and existing.get("source") not in ("gom_tv_sync", "mt5_live", None, ""):
-        logger.info(f"[GomAutoTrade] {sym} — ordre pipeline existant (source={existing.get('source')}) → GOM skip")
-        return
+    if not _skip_gates or not _is_good_perfect:
+        if existing and existing.get("source") not in ("gom_tv_sync", "mt5_live", None, ""):
+            logger.info(f"[GomAutoTrade] {sym} — ordre pipeline existant (source={existing.get('source')}) → GOM skip")
+            return
 
-    # Ne pas écraser un ordre executing — il est en cours d'exécution MT5, ne pas l'interrompre
-    if existing and (existing.get("status") or "ready") == "executing":
-        logger.info(f"[GomAutoTrade] {sym} — ordre en cours d'exécution (executing) → GOM skip")
-        return
+        # Ne pas écraser un ordre executing — il est en cours d'exécution MT5, ne pas l'interrompre
+        if existing and (existing.get("status") or "ready") == "executing":
+            logger.info(f"[GomAutoTrade] {sym} — ordre en cours d'exécution (executing) → GOM skip")
+            return
 
-    # Cooldown post-pipeline : bloquer GOM auto-trade 2 min après exécution pipeline
-    import time as _time
-    last_pipe = _PIPELINE_LAST_EXEC.get(sym, 0)
-    if _time.time() - last_pipe < PIPELINE_GOM_COOLDOWN_SEC:
-        logger.info(f"[GomAutoTrade] {sym} — cooldown pipeline actif ({PIPELINE_GOM_COOLDOWN_SEC}s) → GOM skip")
-        return
+        # Cooldown post-pipeline : bloquer GOM auto-trade 2 min après exécution pipeline
+        import time as _time
+        last_pipe = _PIPELINE_LAST_EXEC.get(sym, 0)
+        if _time.time() - last_pipe < PIPELINE_GOM_COOLDOWN_SEC:
+            logger.info(f"[GomAutoTrade] {sym} — cooldown pipeline actif ({PIPELINE_GOM_COOLDOWN_SEC}s) → GOM skip")
+            return
+    else:
+        logger.info(f"[GomAutoTrade] {sym} — GOOD/PERFECT ({vnum}) → pipeline/cooldown gates skipped")
 
     if existing and (existing.get("status") or "ready") == "ready":
         ex_dir = (existing.get("action") or existing.get("recommendation") or "").upper()
@@ -28304,7 +28511,18 @@ async def get_gom_verdict(
         }
 
     try:
-        dash = _resolve_gom_dashboard(sym, chart_tf, source)
+        # CRITIQUE : ne JAMAIS exécuter _resolve_gom_dashboard (fetch MT5 multi-TF,
+        # switches de terminaux = dizaines de secondes) sur la boucle asyncio —
+        # ça gelait tout le serveur (CLOSE_WAIT, timeouts /health).
+        loop = asyncio.get_running_loop()
+        compute_wait = float(os.getenv("GOM_VERDICT_COMPUTE_WAIT_SEC", "4"))
+        dash = await asyncio.wait_for(
+            loop.run_in_executor(
+                _gom_executor,
+                lambda: _resolve_gom_dashboard(sym, chart_tf, source),
+            ),
+            timeout=compute_wait,
+        )
         if dash.get("ok"):
             try:
                 flat = _build_gom_mt5_payload(dash)
@@ -28314,25 +28532,57 @@ async def get_gom_verdict(
             flat["data_source"] = dash.get("data_source", "live_calculation")
             flat["timestamp"] = dash.get("timestamp")
             return _gom_family_guard_response(sym, {"ok": True, "symbol": sym, **flat}, for_execution=True)
+    except asyncio.TimeoutError:
+        logger.info(f"[GOM-Verdict] {sym} calcul live >{compute_wait:.0f}s — bascule store/fichier")
     except Exception as e:
         logger.warning(f"[GOM-Verdict] resolve failed for {sym}: {e}")
 
-    # FALLBACK: gom_signal.json (legacy)
+    # FALLBACK 1 : _GOM_VERDICT_STORE (pousses fraîches des pollers MT5)
+    # FALLBACK 2 : gom_signal.json (legacy — souvent périmé)
+    # Garde-fou d'âge OBLIGATOIRE dans les deux cas : un verdict périmé ou sans
+    # timestamp ne doit jamais partir en exécution sur l'EA.
+    max_age = _gom_verdict_max_age_sec()
     verdict = None
+    candidates: list = []
+    stored = _lookup_gom_store(sym, _GOM_VERDICT_STORE)
+    if stored:
+        candidates.append(stored)
     try:
         gom_file = Path(__file__).resolve().parent / "data" / "gom_signal.json"
         if gom_file.is_file():
             data = json.loads(gom_file.read_text(encoding="utf-8"))
-            if isinstance(data, dict) and sym in data:
-                verdict = data[sym]
+            if isinstance(data, dict):
+                if sym in data:
+                    candidates.append(data[sym])
+                else:
+                    sym_clean = sym.upper().replace(" ", "").replace("INDEX", "")
+                    for key, val in data.items():
+                        k_clean = str(key).upper().replace(" ", "").replace("INDEX", "")
+                        if k_clean == sym_clean:
+                            candidates.append(val)
+                            break
     except Exception:
-        verdict = None
+        pass
+
+    for candidate in candidates:
+        if not candidate:
+            continue
+        age = _gom_record_age_sec(candidate)
+        if age is not None and age <= max_age:
+            verdict = candidate
+            break
+        logger.info(
+            f"[GET-Verdict] {sym} fallback ignoré — verdict périmé/undaté "
+            f"(age={age}, max={max_age:.0f}s)"
+        )
 
     if not verdict:
-        verdict = _lookup_gom_store(sym, _GOM_VERDICT_STORE)
-
-    if not verdict:
-        return {"ok": False, "symbol": sym, "verdict": None, "message": "Aucun verdict GOM — uploader candles MT5"}
+        return {
+            "ok": False,
+            "symbol": sym,
+            "verdict": None,
+            "message": f"Aucun verdict GOM frais (<{max_age:.0f}s) — vérifier poller MT5 / upload candles",
+        }
 
     # ✅ MAP entry→setup_entry, sl→setup_sl, tp→setup_tp1 (from gom_signal.json)
     # Force le mapping même si setup_* existent déjà
@@ -28354,14 +28604,8 @@ async def get_gom_verdict(
             and float(verdict.get("score_sell") or 0) == 0):
         return {"ok": False, "symbol": sym, "verdict": "WAIT",
                 "message": "GOM stale — is gom_verdict_poller running?"}
-    # DISABLED: staleness check was too strict, MT5 needs to accept old but valid verdicts
-    # try:
-    #     age = (datetime.now(timezone.utc) - datetime.fromisoformat(verdict["timestamp"])).total_seconds()
-    #     if age > 900:
-    #         return {"ok": False, "symbol": sym, "verdict": verdict.get("verdict"),
-    #                 "message": f"GOM stale ({int(age)}s) — relancer gom_verdict_poller.py"}
-    # except Exception:
-    #     pass
+    # Fraîcheur déjà garantie par la sélection des fallbacks ci-dessus
+    # (GOM_VERDICT_MAX_AGE_SEC, défaut 900s) — pas de verdict undaté ici.
     flat = _build_gom_mt5_payload(verdict)
     return _gom_family_guard_response(sym, {"ok": True, "symbol": sym, **flat}, for_execution=True)
 
@@ -28486,10 +28730,17 @@ async def get_all_gom_verdicts():
 
         verdicts = []
         seen_symbols: set = set()
+        stale_skipped = 0
 
         # 1. Priorité : store mémoire (données MT5 live du poller gom_mt5_poller.py)
+        # Verdicts périmés/undatés exclus (sinon le classement -abs(verdict_num)
+        # remonte en tête des signaux figés d'un mois d'âge).
+        max_age_bulk = _gom_verdict_max_age_sec()
         for sym, record in list(_GOM_VERDICT_STORE.items()):
             try:
+                if not isinstance(record, dict) or _gom_record_is_stale(record, max_age_bulk):
+                    stale_skipped += 1
+                    continue
                 obj = _build_verdict_obj(sym, record)
                 verdicts.append(obj)
                 seen_symbols.add(sym.upper())
@@ -28515,6 +28766,9 @@ async def get_all_gom_verdicts():
                 for symbol, record in file_records.items():
                     if symbol.upper() in seen_symbols:
                         continue  # Déjà couvert par le store live
+                    if not isinstance(record, dict) or _gom_record_is_stale(record, max_age_bulk):
+                        stale_skipped += 1
+                        continue  # Verdict périmé — jamais servi comme signal
                     try:
                         obj = _build_verdict_obj(symbol, record)
                         obj["source"] = "file_fallback"
@@ -28527,11 +28781,15 @@ async def get_all_gom_verdicts():
         verdicts.sort(key=lambda x: (-abs(x["verdict_num"]), -x["verdict_gap"]))
 
         live_count = sum(1 for v in verdicts if v.get("source", "") not in ("file", "file_fallback"))
-        logger.info(f"[GOM-Verdicts] {len(verdicts)} verdicts ({live_count} live MT5, {len(verdicts)-live_count} fichier)")
+        logger.info(
+            f"[GOM-Verdicts] {len(verdicts)} verdicts ({live_count} live MT5, "
+            f"{len(verdicts)-live_count} fichier, {stale_skipped} périmés exclus)"
+        )
         return {
             "ok": True,
             "count": len(verdicts),
             "live_count": live_count,
+            "stale_skipped": stale_skipped,
             "verdicts": verdicts,
             "timestamp": datetime.now(timezone.utc).isoformat()
         }
@@ -29142,9 +29400,72 @@ class WaNotifyRequest(BaseModel):
     message: Optional[str] = None
 
 
-# ── SCAN OPPORTUNITÉS WHATSAPP (tous terminaux: Deriv + Weltrade + Forex...) ──
+# ── SCAN GOM + RAPPORTS PSYCHOBOT (Deriv / Weltrade) ─────────────────────────
+# - Alertes temps réel GOOD/PERFECT → entrée rapide
+# - Transition GOOD/PERFECT → WAIT → sortie
+# - Message 1 : stats compte (solde/equity/P/L/positions) par terminal
+# - Message 2 : état indicateurs / verdict GOM par symbole
+
+# _LAST_WA_OPP_ALERT déjà défini plus haut
+_PREV_GOM_VN: dict = {}           # sym -> last seen verdict_num
+_LAST_ACCOUNT_REPORT_TS: float = 0.0
+_LAST_VERDICT_REPORT_TS: float = 0.0
+WA_REPORT_INTERVAL_SEC = int(os.getenv("WA_REPORT_INTERVAL_SEC", "1800"))  # 30 min
+WA_OPP_SCAN_INTERVAL_SEC = int(os.getenv("WA_OPP_SCAN_INTERVAL_SEC", "20"))  # 20s real-time
+
+
+def _psychobot_send(message: str, phone: Optional[str] = None) -> bool:
+    """Envoi WhatsApp via PsychoBot. Retourne True si OK."""
+    phone = phone or WHATSAPP_PHONE
+    if not phone:
+        return False
+    if not message or not str(message).strip():
+        return False
+    try:
+        resp = requests.post(
+            f"{PSYCHOBOT_URL}/send-message",
+            json={"phone": phone, "message": message},
+            timeout=20,
+        )
+        ok = resp.status_code == 200 and bool((resp.json() or {}).get("success", False))
+        if not ok:
+            logger.warning("[PsychoBot] send fail status=%s body=%s", resp.status_code, (resp.text or "")[:120])
+        return ok
+    except Exception as e:
+        logger.warning("[PsychoBot] send error: %s", e)
+        return False
+
+
+def _broker_label_for_symbol(sym: str) -> str:
+    su = (sym or "").upper().replace(" ", "")
+    if any(p in su for p in ("PAINX", "GAINX", "FLIPX", "SWITCHX", "FXVOL", "SFVVOL", "SFXVOL")):
+        return "Weltrade"
+    if any(p in su for p in ("BOOM", "CRASH", "VOLATILITY", "JUMP", "STEP", "RANGE")):
+        return "Deriv"
+    if any(p in su for p in ("XAU", "GOLD", "XAG", "SILVER", "EUR", "GBP", "USD", "BTC")):
+        return "Forex/Metal"
+    return "MT5"
+
+
+def _broker_label_for_account(acc: dict, terminal_key: str = "") -> str:
+    server = str((acc or {}).get("server") or "").upper()
+    company = str((acc or {}).get("company") or "").upper()
+    name = str((acc or {}).get("name") or "").upper()
+    tk = str(terminal_key or "").upper()
+    blob = " ".join([server, company, name, tk])
+    if "WELTRADE" in blob or "WT" in blob:
+        return "Weltrade"
+    if "DERIV" in blob or "BINARY" in blob:
+        return "Deriv"
+    if "XM" in blob:
+        return "XM"
+    if "STARTRADER" in blob:
+        return "StarTrader"
+    return (acc or {}).get("server") or (acc or {}).get("company") or "Compte"
+
+
 def _build_opportunity_message(sym: str, v: dict) -> str:
-    """Construit un message WhatsApp ACTIONNABLE pour une forte opportunité GOM."""
+    """Message WhatsApp ACTIONNABLE pour GOOD/PERFECT."""
     ts = datetime.now(timezone.utc).strftime("%H:%M UTC")
     verdict = str(v.get("verdict", "WAIT")).upper()
     vn = int(v.get("verdict_num", 0) or 0)
@@ -29153,93 +29474,315 @@ def _build_opportunity_message(sym: str, v: dict) -> str:
     tp = float(v.get("tp") or v.get("tp1") or 0)
     m5 = str(v.get("tf_m5_dir", "?")).upper()
     m15 = str(v.get("tf_m15_dir", "?")).upper()
+    h1 = str(v.get("tf_h1_dir", "?")).upper()
     coh = float(v.get("coherence_pct", 0) or 0)
-
-    direction = "BUY" if vn > 0 else "SELL"
+    broker = _broker_label_for_symbol(sym)
     icon = "🟢" if vn > 0 else "🔴"
-    broker = ""
-    su = sym.upper().replace(" ", "")
-    if any(p in su for p in ("PAINX", "GAINX", "FXVOL", "SFVVOL", "SFXVOL")):
-        broker = " (Weltrade)"
-    elif "INDEX" in su:
-        broker = " (Deriv)"
-    elif sym.upper() in ("EURUSD", "GBPUSD", "XAUUSD", "BTCUSD"):
-        broker = " (Forex/Metal/Crypto)"
-
-    # Alignement M5/M15 → prédiction "dans ~5 min"
-    aligned = (m5 == "BULL" and vn > 0) or (m5 == "BEAR" and vn < 0)
-    pred = f"M5 {m5} / M15 {m15} alignés → mouvement attendu ~5 min" if aligned else f"M5 {m5} / M15 {m15}"
-
-    # Risk/Reward
+    direction = "BUY" if vn > 0 else "SELL"
     rr = ""
     if entry > 0 and sl > 0 and tp > 0:
         risk = abs(entry - sl)
         rew = abs(tp - entry)
         if risk > 0:
             rr = f"RR 1:{rew/risk:.1f}"
-
     lines = [
-        f"🎯 OPPORTUNITÉ FORTE [{ts}]",
-        f"Symbole: {sym}{broker}",
-        f"{icon} {verdict} (vn={vn:+d})",
-        f"Prévu: {pred}",
-        "",
-        f"Entrée: {entry:,.5f}" if entry < 1000 else f"Entrée: {entry:,.2f}",
-        f"SL: {sl:,.5f} | TP1: {tp:,.5f}" if sl < 1000 else f"SL: {sl:,.2f} | TP1: {tp:,.2f}",
-        f"{rr} | Cohérence: {coh:.0f}%" if rr else f"Cohérence: {coh:.0f}%",
-        "",
-        f"👉 Prépare-toi: place {'BUY' if vn > 0 else 'SELL'} LIMIT " +
-        (f"sous {entry:,.5f}" if vn > 0 else f"au-dessus {entry:,.5f}") if entry > 0 else "👉 Prépare-toi: signal en formation",
+        f"🎯 OPPORTUNITÉ GOM [{ts}]",
+        f"📌 {sym} ({broker})",
+        f"{icon} {verdict}  vn={vn:+d}  coh={coh:.0f}%",
+        f"Direction: {direction}",
+        f"TF: M5={m5}  M15={m15}  H1={h1}",
     ]
+    if entry > 0:
+        lines.append(f"Entrée ≈ {entry:,.5g}")
+    if sl > 0:
+        lines.append(f"SL ≈ {sl:,.5g}")
+    if tp > 0:
+        lines.append(f"TP ≈ {tp:,.5g}" + (f"  {rr}" if rr else ""))
+    lines.append("👉 Ouvre le graphique et place l'ordre rapidement")
     return "\n".join(lines)
 
 
+def _build_exit_wait_message(sym: str, prev_vn: int, v: dict) -> str:
+    """Transition GOOD/PERFECT → WAIT : sortir du trade."""
+    ts = datetime.now(timezone.utc).strftime("%H:%M UTC")
+    prev = "PERFECT" if abs(prev_vn) >= 3 else "GOOD"
+    side = "BUY" if prev_vn > 0 else "SELL"
+    coh = float(v.get("coherence_pct", 0) or 0)
+    return (
+        f"⚠️ SORTIE GOM [{ts}]\n"
+        f"📌 {sym} ({_broker_label_for_symbol(sym)})\n"
+        f"{prev} {side} (vn={prev_vn:+d}) → WAIT\n"
+        f"Cohérence: {coh:.0f}%\n"
+        f"👉 Ferme ou sécurise le trade (BE / partial)"
+    )
+
+
+def _collect_terminals_account_rows() -> list:
+    """Agrège comptes depuis snapshots EA (Deriv, Weltrade, …)."""
+    rows = []
+    seen_logins = set()
+    try:
+        snaps = dict(_MT5_LIVE_SNAPSHOTS) if isinstance(_MT5_LIVE_SNAPSHOTS, dict) else {}
+    except Exception:
+        snaps = {}
+    for tkey, snap in snaps.items():
+        acc = (snap or {}).get("account") or {}
+        login = acc.get("login")
+        if login is not None:
+            if login in seen_logins:
+                continue
+            seen_logins.add(login)
+        positions = (snap or {}).get("positions") or []
+        bal = float(acc.get("balance") or 0)
+        eq = float(acc.get("equity") or 0)
+        profit = float(acc.get("profit") or 0)
+        # somme P/L positions si account.profit vide
+        if abs(profit) < 1e-9 and positions:
+            try:
+                profit = sum(float(p.get("profit") or 0) for p in positions)
+            except Exception:
+                pass
+        broker = _broker_label_for_account(acc, tkey)
+        rows.append({
+            "terminal_key": tkey,
+            "broker": broker,
+            "login": login,
+            "server": acc.get("server") or "",
+            "balance": bal,
+            "equity": eq,
+            "profit": profit,
+            "positions": positions,
+            "symbol": (snap or {}).get("symbol") or "",
+            "age": (snap or {}).get("age_sec"),
+        })
+    # Bridge Python fallback
+    try:
+        bridge = (_MT5_PYTHON_BRIDGE_CACHE or {}).get("data") or {}
+        if bridge.get("connected"):
+            acc = bridge.get("account") or {}
+            login = acc.get("login")
+            if login and login not in seen_logins:
+                pos = bridge.get("positions") or []
+                rows.append({
+                    "terminal_key": bridge.get("terminal_key") or "python:mt5",
+                    "broker": _broker_label_for_account(acc, "python"),
+                    "login": login,
+                    "server": acc.get("server") or "",
+                    "balance": float(acc.get("balance") or 0),
+                    "equity": float(acc.get("equity") or 0),
+                    "profit": float(acc.get("profit") or 0),
+                    "positions": pos,
+                    "symbol": "",
+                    "age": 0,
+                })
+    except Exception:
+        pass
+    return rows
+
+
+def _build_account_stats_message() -> str:
+    """Message 1 — statistiques par compte (plus de $0.00 fantômes)."""
+    ts = datetime.now().strftime("%H:%M")
+    rows = _collect_terminals_account_rows()
+    lines = [f"📊 RAPPORT COMPTE — {ts}", ""]
+    if not rows:
+        lines += [
+            "⚠️ Aucun snapshot MT5 reçu.",
+            "Vérifie que l'EA poste /mt5/live-snapshot",
+            "sur chaque terminal (Deriv + Weltrade).",
+        ]
+        return "\n".join(lines)
+
+    for r in rows:
+        bal, eq, pf = r["balance"], r["equity"], r["profit"]
+        pos = r["positions"] or []
+        npos = len(pos)
+        pf_icon = "🟢" if pf >= 0 else "🔴"
+        lines.append(f"🏦 {r['broker']}  login={r['login'] or '?'}")
+        if r.get("server"):
+            lines.append(f"   Serveur: {r['server']}")
+        if abs(bal) < 1e-9 and abs(eq) < 1e-9:
+            lines.append("   ⚠️ Solde/Equity non transmis par l'EA")
+        else:
+            lines.append(f"   💰 SOLDE : ${bal:,.2f}")
+            lines.append(f"   📈 EQUITY: ${eq:,.2f}")
+            lines.append(f"   💵 P/L flot: {pf_icon} ${pf:+,.2f}")
+        lines.append(f"   🔓 POSITIONS ({npos})")
+        for p in pos[:8]:
+            try:
+                typ = str(p.get("type") or "?")
+                sym = str(p.get("symbol") or "?")
+                vol = float(p.get("volume") or 0)
+                pr = float(p.get("profit") or 0)
+                lines.append(f"      • {sym} {typ} {vol:.2f}  ${pr:+.2f}")
+            except Exception:
+                continue
+        if npos > 8:
+            lines.append(f"      … +{npos-8} autres")
+        lines.append("")
+    return "\n".join(lines).rstrip()
+
+
+def _build_verdicts_status_message() -> str:
+    """Message 2 — état GOM / indicateurs par symbole."""
+    ts = datetime.now().strftime("%H:%M")
+    lines = [f"📡 ÉTAT GOM / INDICATEURS — {ts}", ""]
+    try:
+        store = dict(_GOM_VERDICT_STORE) if isinstance(_GOM_VERDICT_STORE, dict) else {}
+    except Exception:
+        store = {}
+    if not store:
+        lines.append("Aucun verdict en cache. Lance le poller GOM.")
+        return "\n".join(lines)
+
+    # Grouper par broker
+    groups = {"Weltrade": [], "Deriv": [], "Forex/Metal": [], "MT5": []}
+    for sym, v in store.items():
+        br = _broker_label_for_symbol(sym)
+        groups.setdefault(br, []).append((sym, v))
+
+    for br, items in groups.items():
+        if not items:
+            continue
+        lines.append(f"—— {br} ——")
+        # Trier: |vn| desc puis symbole
+        items.sort(key=lambda x: (-abs(int((x[1] or {}).get("verdict_num", 0) or 0)), str(x[0])))
+        for sym, v in items:
+            vn = int(v.get("verdict_num", 0) or 0)
+            verd = str(v.get("verdict") or "WAIT").upper()
+            coh = float(v.get("coherence_pct", 0) or 0)
+            m5 = str(v.get("tf_m5_dir") or "?")[:4]
+            h1 = str(v.get("tf_h1_dir") or "?")[:4]
+            if vn >= 2:
+                ic = "🟢"
+            elif vn <= -2:
+                ic = "🔴"
+            elif vn != 0:
+                ic = "🟡"
+            else:
+                ic = "⚪"
+            lines.append(f"{ic} {sym}: {verd} (vn={vn:+d}) coh={coh:.0f}%  M5={m5} H1={h1}")
+        lines.append("")
+    return "\n".join(lines).rstrip()
+
+
 async def _scan_opportunities_whatsapp_loop():
-    """Boucle arrière-plan: alerte les fortes opportunités GOM pour TOUS les symbols."""
+    """Scan temps réel: GOOD/PERFECT → alerte entrée; transition → WAIT → alerte sortie."""
     import asyncio as _asyncio
-    await _asyncio.sleep(15)  # laisser le cache se remplir au démarrage
+    await _asyncio.sleep(12)
+    global _PREV_GOM_VN
     while True:
         try:
             phone = WHATSAPP_PHONE
             if phone and _api_gates_enabled():
                 now_epoch = time.time()
-                for sym, v in list(_GOM_VERDICT_STORE.items()):
-                    vn = int(v.get("verdict_num", 0) or 0)
-                    if abs(vn) < WA_OPP_ALERT_MIN_VN:
-                        continue  # seulement PERFECT/GOOD
-                    ts_raw = v.get("timestamp")
-                    # fraîcheur max 3 min
-                    age_sec = 999
+                try:
+                    items = list(_GOM_VERDICT_STORE.items())
+                except Exception:
+                    items = []
+                for sym, v in items:
                     try:
-                        if isinstance(ts_raw, str):
-                            tso = datetime.fromisoformat(ts_raw.replace("Z", "+00:00"))
-                            age_sec = (datetime.now(timezone.utc) - tso).total_seconds()
+                        vn = int(v.get("verdict_num", 0) or 0)
                     except Exception:
-                        pass
-                    if age_sec > 180:
+                        vn = 0
+                    prev = _PREV_GOM_VN.get(sym)
+
+                    # Transition GOOD/PERFECT → WAIT (sortie)
+                    if prev is not None and abs(prev) >= WA_OPP_ALERT_MIN_VN and vn == 0:
+                        msg = _build_exit_wait_message(sym, prev, v or {})
+                        if _psychobot_send(msg, phone):
+                            logger.info("[WA GOM] EXIT %s %s→WAIT", sym, prev)
+                        _PREV_GOM_VN[sym] = vn
                         continue
-                    last = _LAST_WA_OPP_ALERT.get(sym)
-                    if last and (last[0] == vn) and (now_epoch - last[1] < WA_OPP_ALERT_COOLDOWN_SEC):
-                        continue
-                    msg = _build_opportunity_message(sym, v)
-                    try:
-                        resp = requests.post(
-                            f"{PSYCHOBOT_URL}/send-message",
-                            json={"phone": phone, "message": msg},
-                            timeout=20,
-                        )
-                        if resp.status_code == 200 and resp.json().get("success", False):
+
+                    # Opportunité GOOD/PERFECT
+                    if abs(vn) >= WA_OPP_ALERT_MIN_VN:
+                        ts_raw = v.get("timestamp")
+                        age_sec = 0
+                        try:
+                            if isinstance(ts_raw, str):
+                                tso = datetime.fromisoformat(ts_raw.replace("Z", "+00:00"))
+                                age_sec = (datetime.now(timezone.utc) - tso).total_seconds()
+                        except Exception:
+                            age_sec = 0
+                        # local/cache peuvent ne pas avoir timestamp frais
+                        if age_sec > 300 and age_sec != 0:
+                            _PREV_GOM_VN[sym] = vn
+                            continue
+                        last = _LAST_WA_OPP_ALERT.get(sym)
+                        # Nouvelle alerte si vn changé ou cooldown expiré
+                        if last and last[0] == vn and (now_epoch - last[1] < WA_OPP_ALERT_COOLDOWN_SEC):
+                            _PREV_GOM_VN[sym] = vn
+                            continue
+                        # Aussi alerter si transition depuis WAIT/SIMPLE vers GOOD
+                        msg = _build_opportunity_message(sym, v or {})
+                        if _psychobot_send(msg, phone):
                             _LAST_WA_OPP_ALERT[sym] = (vn, now_epoch)
-                            logger.info("[WA Opp] alerte %s %s envoyée", sym, v.get("verdict"))
-                    except Exception as _e:
-                        logger.warning("[WA Opp] envoi %s échoué: %s", sym, _e)
-            await _asyncio.sleep(60)  # scan toutes les 60s
+                            logger.info("[WA GOM] ENTRY opp %s %s", sym, v.get("verdict"))
+                    _PREV_GOM_VN[sym] = vn
+            await _asyncio.sleep(WA_OPP_SCAN_INTERVAL_SEC)
         except Exception as _loop_err:
-            logger.error("[WA Opp] erreur boucle: %s", _loop_err)
+            logger.error("[WA GOM] scan loop: %s", _loop_err)
+            await _asyncio.sleep(30)
+
+
+async def _dual_reports_whatsapp_loop():
+    """Deux messages séparés toutes les 30 min: (1) stats comptes (2) verdicts GOM."""
+    import asyncio as _asyncio
+    global _LAST_ACCOUNT_REPORT_TS, _LAST_VERDICT_REPORT_TS
+    await _asyncio.sleep(45)
+    while True:
+        try:
+            phone = WHATSAPP_PHONE
+            if phone and _api_gates_enabled():
+                now = time.time()
+                if now - _LAST_ACCOUNT_REPORT_TS >= WA_REPORT_INTERVAL_SEC:
+                    msg1 = _build_account_stats_message()
+                    if _psychobot_send(msg1, phone):
+                        _LAST_ACCOUNT_REPORT_TS = now
+                        logger.info("[WA Report] message COMPTE envoyé")
+                    await _asyncio.sleep(2)
+                if now - _LAST_VERDICT_REPORT_TS >= WA_REPORT_INTERVAL_SEC:
+                    msg2 = _build_verdicts_status_message()
+                    if _psychobot_send(msg2, phone):
+                        _LAST_VERDICT_REPORT_TS = now
+                        logger.info("[WA Report] message VERDICTS envoyé")
+            await _asyncio.sleep(60)
+        except Exception as e:
+            logger.error("[WA Report] loop: %s", e)
             await _asyncio.sleep(60)
 
 
+@app.get("/wa/reports/preview")
+async def wa_reports_preview():
+    """Prévisualise les 2 messages (compte + verdicts) sans envoyer."""
+    return {
+        "ok": True,
+        "account_message": _build_account_stats_message(),
+        "verdicts_message": _build_verdicts_status_message(),
+        "terminals": _collect_terminals_account_rows(),
+        "psychobot": PSYCHOBOT_URL,
+        "phone_configured": bool(WHATSAPP_PHONE),
+    }
+
+
+@app.post("/wa/reports/send-now")
+async def wa_reports_send_now():
+    """Force l'envoi immédiat des 2 messages séparés."""
+    phone = WHATSAPP_PHONE
+    if not phone:
+        return {"ok": False, "error": "WHATSAPP_PHONE non configuré"}
+    m1 = _build_account_stats_message()
+    m2 = _build_verdicts_status_message()
+    ok1 = _psychobot_send(m1, phone)
+    ok2 = _psychobot_send(m2, phone)
+    return {"ok": ok1 or ok2, "account_sent": ok1, "verdicts_sent": ok2}
+
+
+@app.post("/notify/whatsapp")
+async def notify_whatsapp(req: WaNotifyRequest):
     """MT5 envoie ici les événements trading spéciaux → PsychoBot WhatsApp."""
+
     phone = WHATSAPP_PHONE
     if not phone:
         return {"ok": False, "error": "WHATSAPP_PHONE non configuré"}
@@ -30869,6 +31412,7 @@ if __name__ == "__main__":
             app,
             host=HOST,
             port=API_PORT,
+            loop="selector_loop:selector_loop_factory",  # Selector au lieu du Proactor uvicorn 0.46 (fix listener mort WinError 64)
             reload=False,
             log_level="info",
             timeout_keep_alive=5,  # libérer les connexions idle plus vite
