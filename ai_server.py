@@ -3304,9 +3304,11 @@ def get_market_data_cloud(symbol: str, period: str = "5d", interval: str = "1m")
     """Récupère les données via yfinance (compatible cloud)"""
     try:
         if not YFINANCE_AVAILABLE:
-            return generate_simulated_data(symbol, 100)
+            logger.warning(f"YFinance not available for {symbol}, returning empty DataFrame")
+            return pd.DataFrame()
         if not symbol or symbol.strip().upper() in ("UNKNOWN", ""):
-            return generate_simulated_data(symbol or "UNKNOWN", 100)
+            logger.warning(f"Invalid symbol for {symbol}, returning empty DataFrame")
+            return pd.DataFrame()
         
         # Mapping des symboles pour yfinance
         symbol_map = {
@@ -3365,88 +3367,9 @@ def get_market_data_cloud(symbol: str, period: str = "5d", interval: str = "1m")
         return generate_simulated_data(symbol, 100)
 
 def generate_simulated_data(symbol: str, periods: int = 100) -> pd.DataFrame:
-    """Génère des données de marché simulées avec spikes réalistes pour Boom/Crash"""
-    try:
-        np.random.seed(hash(symbol) % 2**32)
-        
-        base_prices = {
-            "EURUSD": 1.0850,
-            "GBPUSD": 1.2750,
-            "USDJPY": 148.50,
-            "Boom 300 Index": 300,
-            "Boom 500 Index": 5000,
-            "Boom 600 Index": 600,
-            "Boom 900 Index": 900,
-            "Boom 1000 Index": 1000,
-            "Crash 300 Index": 300,
-            "Crash 500 Index": 500,
-            "Crash 900 Index": 900,
-            "Crash 1000 Index": 1000,
-            "Volatility 25 Index": 25,
-            "Volatility 75 Index": 75,
-            "Volatility 100 Index": 100,
-            "Step Index": 1000,
-        }
-        
-        base_price = base_prices.get(symbol, 100)
-        
-        # Vérifier si c'est un symbole Boom/Crash pour générer des spikes
-        is_boom_crash = is_boom_crash_symbol(symbol)
-        
-        if is_boom_crash:
-            # Générer des données avec spikes pour Boom/Crash
-            returns = np.random.normal(0, 0.001, periods)  # Volatilité de base plus faible
-            
-            # Ajouter quelques spikes aléatoires (10-15% de chance par bougie)
-            spike_probability = 0.12
-            for i in range(periods):
-                if np.random.random() < spike_probability:
-                    # Générer un spike
-                    spike_direction = 1 if "Boom" in symbol else -1  # Boom monte, Crash descend
-                    spike_magnitude = np.random.uniform(0.008, 0.025)  # 0.8% à 2.5% de spike
-                    returns[i] = spike_direction * spike_magnitude
-            
-            # Ajouter de la volatilité autour des spikes
-            volatility_boost = np.random.normal(0, 0.002, periods)
-            returns += volatility_boost
-        else:
-            # Données normales pour les autres symboles
-            returns = np.random.normal(0, 0.002, periods)
-        
-        prices = [base_price]
-        
-        for ret in returns:
-            new_price = prices[-1] * (1 + ret)
-            prices.append(new_price)
-        
-        prices = prices[1:]
-        
-        timestamps = pd.date_range(end=datetime.now(), periods=periods, freq='1min')
-        
-        # Générer les OHLC avec des spreads réalistes
-        if is_boom_crash:
-            # Spread plus large pour Boom/Crash pendant les spikes
-            spreads = [abs(np.random.normal(0.002, 0.001)) for _ in range(periods)]
-        else:
-            spreads = [abs(np.random.normal(0.0005, 0.0002)) for _ in range(periods)]
-        
-        df = pd.DataFrame({
-            'time': timestamps.astype(np.int64) // 10**9,
-            'open': prices,
-            'high': [p * (1 + spreads[i]) for i, p in enumerate(prices)],
-            'low': [p * (1 - spreads[i]) for i, p in enumerate(prices)],
-            'close': prices,
-            'tick_volume': np.random.randint(5000, 50000, periods) if is_boom_crash else np.random.randint(1000, 10000, periods)
-        })
-        
-        # Ajouter le volume column pour compatibilité
-        df['volume'] = df['tick_volume']
-        
-        return df
-        
-    except Exception as e:
-        logger.error(f"Erreur génération données simulées: {e}")
-        return pd.DataFrame()
+    """Returns empty DataFrame when real data is unavailable - prevents trading on fake data"""
+    logger.warning(f"Real market data unavailable for {symbol}, returning empty DataFrame to prevent fake data trading")
+    return pd.DataFrame()
 
 def get_market_data(symbol: str, timeframe: str = "M1", count: int = 1000) -> pd.DataFrame:
     """Récupère les données en utilisant la meilleure source disponible"""
