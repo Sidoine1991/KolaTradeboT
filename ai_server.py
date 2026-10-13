@@ -2583,7 +2583,7 @@ async def _stair_fetch_quality_rows(symbol: str, direction: str) -> List[Dict[st
         "Authorization": f"Bearer {supabase_key}",
     }
     try:
-        async with httpx.AsyncClient(timeout=6.0\) as client:
+        async with httpx.AsyncClient(timeout=6.0) as client:
             r = await client.get(
                 f"{supabase_url.rstrip('/')}/rest/v1/stair_quality_summary",
                 params=params,
@@ -18337,7 +18337,7 @@ async def _fetch_symbol_behavior_profile(symbol: str, timeframe: str = "M1") -> 
         supabase_url, supabase_key = _get_supabase_config(strict=True)
         import httpx
         headers = {"apikey": supabase_key, "Authorization": f"Bearer {supabase_key}"}
-        async with httpx.AsyncClient(timeout=6.0\) as client:
+        async with httpx.AsyncClient(timeout=6.0) as client:
             r_pat = await client.get(
                 f"{supabase_url}/rest/v1/symbol_correction_patterns",
                 headers=headers,
@@ -18429,7 +18429,7 @@ async def _store_prediction_run_to_supabase(
                 "level_ref": float(cdl.get("level_ref", 0.0)),
             })
 
-        async with httpx.AsyncClient(timeout=6.0\) as client:
+        async with httpx.AsyncClient(timeout=6.0) as client:
             r1 = await client.post(f"{supabase_url}/rest/v1/prediction_runs", headers=headers, json=run_payload)
             if r1.status_code >= 300:
                 logger.warning(f"prediction_runs insert skipped: {r1.status_code} {r1.text[:200]}")
@@ -18923,7 +18923,7 @@ async def get_symbol_prediction_score(symbol: str, timeframe: str = "M1", days: 
             "limit": str(d),
             "select": "day,direction_hit_rate,avg_mae,score,samples",
         }
-        async with httpx.AsyncClient(timeout=6.0\) as client:
+        async with httpx.AsyncClient(timeout=6.0) as client:
             r = await client.get(f"{supabase_url}/rest/v1/symbol_prediction_score_daily", headers=headers, params=params)
         if r.status_code >= 300:
             raise HTTPException(status_code=502, detail=f"Supabase error: {r.status_code}")
