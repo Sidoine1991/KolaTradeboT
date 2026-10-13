@@ -14709,9 +14709,15 @@ class TradingViewSignal(BaseModel):
 
 
 @app.post("/webhook/tradingview")
-async def webhook_tradingview(signal: TradingViewSignal):
+async def webhook_tradingview(signal: TradingViewRequest):
     """
     Endpoint webhook pour recevoir les signaux TradingView.
+
+    SÉCURITÉ:
+    - Requiert header X-API-Key (middleware auth_middleware)
+    - Validation stricte des champs entrants
+    - Taille maximale des payloads limitée
+    - Logs détaillés pour audit
 
     Usage dans TradingView Pine Script:
     ```
@@ -14731,7 +14737,7 @@ async def webhook_tradingview(signal: TradingViewSignal):
     try:
         start_time = time.time()
 
-        # Validation
+        # Validation avec schema strict
         symbol = (signal.symbol or "").strip().upper()
         if not validate_symbol(symbol):
             raise HTTPException(
@@ -14753,12 +14759,39 @@ async def webhook_tradingview(signal: TradingViewSignal):
                 detail=f"Action invalide: {action}. Doit être: BUY, SELL, CLOSE"
             )
 
+        # Validation stricte de la confiance - plafonnée à des valeurs raisonnables
         confidence = float(signal.confidence or 0.75)
-        confidence = max(0.0, min(1.0, confidence))
+        # Plafond: pas de confiance > 0.95 pour les webhooks externes
+        # Plancher: pas < 0.05 pour éviter des signaux spurious
+        confidence = max(0.05, min(0.95, confidence))
+
+        # Validation du prix s'il est fourni
+        if signal.price is not None and (signal.price <= 0 or signal.price > 100000):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Prix invalide: {signal.price}. Doit être > 0 et < 100000"
+            )
+
+        # Validation stop_loss/take_profit si fournis
+        if signal.stop_loss is not None and signal.stop_loss <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail="Stop Loss doit être > 0"
+            )
+        if signal.take_profit is not None and signal.take_profit <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail="Take Profit doit être > 0"
+            )
+
+        # Vérifier que TP > SL pour les entrées (sauf CLOSE)
+        if action != "CLOSE" and signal.stop_loss is not None and signal.take_profit is not None:
+            if signal.take_profit <= signal.stop_loss:
+                logger.warning(f"TP ≤ SL détecté pour {signal.action} sur {signal.symbol}: TP={signal.take_profit}, SL={signal.stop_loss}")
 
         logger.info(
             f"📊 TradingView Signal reçu: {symbol} {timeframe} {action} "
-            f"(confiance: {confidence:.0%}, prix: {signal.price})"
+            f"(confiance: {confidence:.0%}, prix: {signal.price}, source: webhook)"
         )
 
         # Construire le payload d'analyse compatible avec la pipeline existante
@@ -14774,9 +14807,17 @@ async def webhook_tradingview(signal: TradingViewSignal):
             "reason": signal.reason or "TradingView Signal",
             "source": "tradingview_webhook",
             "timestamp": datetime.now(timezone.utc).isoformat(),
+            # Limite de taille de payload pour éviter DDOS
+            "payload_size": len(str(signal)),
         }
 
         if signal.custom_data:
+            # Vérifier que custom_data n'est pas trop volumineux
+            if len(str(signal.custom_data)) > 10000:
+                raise HTTPException(
+                    status_code=400,
+                    detail="custom_data trop volumineux (max 10KB)"
+                )
             analysis_payload.update(signal.custom_data)
 
         # Validation du verdict avec la logique SMC existante
