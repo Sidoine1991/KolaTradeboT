@@ -313,6 +313,7 @@ datetime g_smcServerVerdictLastUpdate = 0;
 
 #include "modules/SMC_TFGate.mqh"  // TF Gate - uses variables from SMC_GOM_Pipeline
 #include "modules/SMC_Stubs.mqh"   // Forward declarations for cross-module functions
+#include "modules/SMC_LearnJournal.mqh"  // Journal d'apprentissage
 // GOM and graphics included after feature defines to ensure macros are visible
 
 // #include "modules/EA_PivotEntry.mqh"        // TODO: Refactor pour MQL5
@@ -7109,7 +7110,10 @@ int OnInit()
    // FIX 2026-10-07: Initialiser le tableau FVG
    ArrayResize(fvgDataArray, 0);
    ArraySetAsSeries(fvgDataArray, false);
-   
+
+   // Initialize Learning Journal
+   LJ_Init();
+
    Print("ðŸ“Š SMC Universal + FVG_Kill PRO | 1 pos/symbole | StratÃ©gie visible");
    SH_Init();
    if(UseOTEStrategy) OTE_InitHandles();
@@ -12702,6 +12706,9 @@ void OnTick()
    // FIX 2026-09-20 (Performance) : OpÃ©rations NON-CRITIQUES aprÃ¨s rate-limiting
    // Mettre Ã  jour le cache de performance (rÃ©duit les appels CopyBuffer)
    SMC_PC_UpdateCache(_Symbol);
+
+   // Learning Journal tick update (MAE/MFE + phantom trades)
+   LJ_OnTick();
 
    // FIX 2026-09-20 (Opportunity Filter) : Mettre Ã  jour le filtre d'opportunitÃ©
    // Bloque les entrÃ©es pendant moments dÃ©favorables
@@ -21471,6 +21478,9 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
    if(trans.type != TRADE_TRANSACTION_POSITION)
       return;
 
+   // Learning Journal: log open/close/trades
+   LJ_OnTransaction(trans);
+
    // Pour les transactions de position, vÃ©rifier si c'est une clÃ´ture
    // En MQL5, on vÃ©rifie si la position existe encore
    CPositionInfo pos;
@@ -21964,23 +21974,29 @@ void GenerateFallbackAIDecision()
       else if(ema8Cross21Up && momentum > 0.001)
       {
          action = "BUY";
-         confidence = 0.75 + (MathRand() % 15) / 100.0; // 75-90%
-         alignment = 70.0 + (MathRand() % 20); // 70-90%
-         coherence = 65.0 + (MathRand() % 25); // 65-90%
+         // FIX: confiance fixe faible pour éviter passages non déterministes sous le seuil 75%
+         // cohérence dérivée de la structure EMA (non aléatoire)
+         confidence = 0.50;  // FIXED: low fixed confidence
+         alignment = 70.0;    // FIXED: fixed alignment
+         coherence = 65.0;    // FIXED: fixed coherence from EMA structure
       }
       else if(ema8Cross21Down && momentum < -0.001)
       {
          action = "SELL";
-         confidence = 0.75 + (MathRand() % 15) / 100.0; // 75-90%
-         alignment = 70.0 + (MathRand() % 20); // 70-90%
-         coherence = 65.0 + (MathRand() % 25); // 65-90%
+         // FIX: confiance fixe faible pour éviter passages non déterministes sous le seuil 75%
+         // cohérence dérivée de la structure EMA (non aléatoire)
+         confidence = 0.50;  // FIXED: low fixed confidence
+         alignment = 70.0;    // FIXED: fixed alignment
+         coherence = 65.0;    // FIXED: fixed coherence from EMA structure
       }
       else if(MathAbs(momentum) < 0.0005)
       {
          action = "HOLD";
-         confidence = 0.40 + (MathRand() % 25) / 100.0; // 40-65%
-         alignment = 35.0 + (MathRand() % 30); // 35-65%
-         coherence = 30.0 + (MathRand() % 35); // 30-65%
+         // FIX: confiance fixe faible, pas de trading sur HOLD
+         // cohérence fixée bas car pas de verdict significatif
+         confidence = 0.20;  // FIXED: very low confidence for HOLD
+         alignment = 35.0;    // FIXED: low alignment for HOLD
+         coherence = 20.0;    // FIXED: very low coherence for HOLD
       }
       else
       {
