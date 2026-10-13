@@ -14709,7 +14709,7 @@ class TradingViewSignal(BaseModel):
 
 
 @app.post("/webhook/tradingview")
-async def webhook_tradingview(signal: TradingViewRequest):
+async def webhook_tradingview(signal: TradingViewSignal):
     """
     Endpoint webhook pour recevoir les signaux TradingView.
 
