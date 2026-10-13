@@ -143,6 +143,8 @@ import uvicorn
 import pandas as pd
 import numpy as np
 import requests
+from scipy import stats
+from scipy.signal import find_peaks
 import re
 import joblib
 from collections import deque, defaultdict
@@ -608,7 +610,7 @@ _OLLAMA_TAGS_PROBE_OK: bool = False
 
 
 def decision_simplified_cache_key(request: "DecisionRequest") -> str:
-    """Clé stabilisée PERIOD_* → timeframe court (ex: M5) pour TTL partagés entre robots."""
+    """Clé stabilisée incluant le snapshot GOM pour éviter les décisions périmées."""
     sym = str(getattr(request, "symbol", "") or "UNKNOWN").strip().upper()
     tf_raw = getattr(request, "timeframe", None) or ""
     tf = str(tf_raw).strip()
@@ -616,7 +618,11 @@ def decision_simplified_cache_key(request: "DecisionRequest") -> str:
         tf = tf.split("PERIOD_", 1)[-1].strip()
     if not tf:
         tf = "_"
-    return f"{sym}|{tf}"
+    gom_store = globals().get("_GOM_VERDICT_STORE", {}) or {}
+    gom = gom_store.get(sym, {}) or {}
+    gom_vn = int(gom.get("effective_verdict_num", gom.get("verdict_num", 0)) or 0)
+    gom_bar = gom.get("m1_last_bar_time", gom.get("timestamp", ""))
+    return f"{sym}|{tf}|gom={gom_vn}|bar={gom_bar}"
 
 
 def get_simplified_tf_cached_decision(request: "DecisionRequest") -> Optional["DecisionResponse"]:
@@ -1173,6 +1179,12 @@ _WELTRADE_TRADING_WINDOWS: Dict[str, List[Tuple[int, int]]] = {
     "FXVOL": [(4, 23)],
     "SFVVOL": [(4, 23)],
     "SFXVOL": [(4, 23)],
+    "FLIPX": [(4, 23)],
+    "SWITCHX": [(4, 23)],
+    "PLUSX": [(4, 23)],
+    "FIBOX": [(4, 23)],
+    "QUADX": [(4, 23)],
+    "RANGEX": [(4, 23)],
 }
 
 
@@ -1182,6 +1194,7 @@ def is_weltrade_synthetic_symbol(symbol: str) -> bool:
     return (
         s.startswith("PAINX") or s.startswith("GAINX") or s.startswith("FXVOL")
         or s.startswith("SFVVOL") or s.startswith("SFXVOL")
+        or any(s.startswith(p) for p in ("FLIPX", "SWITCHX", "PLUSX", "FIBOX", "QUADX", "RANGEX"))
     )
 
 
@@ -1365,6 +1378,46 @@ def _dir_str_to_int(s: str) -> int:
     return 0
 
 
+def _apply_native_synthetic_ia_bias(
+    symbol: str, tf_dirs: Dict[str, int], result: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Corrige le biais IA des Boom/Crash sans contourner le gate GOM.
+
+    Sur un Boom, H1/H4 peuvent rester baissiers pendant un pullback alors que
+    le signal d'exécution est déjà haussier sur M1/M5/M15. La pondération
+    générale faisait alors ``gap < 0.15`` et retournait HOLD, malgré trois TF
+    d'exécution alignés. Pour les synthétiques, la loi native et le momentum
+    court terme doivent déterminer la direction ; le verdict GOM GOOD/PERFECT
+    reste, lui, obligatoire avant toute exécution par l'EA.
+    """
+    s = str(symbol or "").lower().replace(" ", "")
+    is_native_bull = is_boom_crash_symbol(symbol) and ("boom" in s or "gainx" in s)
+    is_native_bear = is_boom_crash_symbol(symbol) and ("crash" in s or "painx" in s)
+    micro = [tf_dirs.get("M1", 0), tf_dirs.get("M5", 0), tf_dirs.get("M15", 0)]
+
+    if is_native_bull and all(v > 0 for v in micro):
+        result = dict(result)
+        result["action"] = "buy"
+        result["native_bias_override"] = "BOOM_BUY_M1_M5_M15_ALIGNED"
+        result["native_bias_timeframes"] = "M1/M5/M15"
+        result["confidence"] = max(float(result.get("confidence", 0) or 0), 0.70)
+        result["confidence_percent"] = round(float(result["confidence"]) * 100.0, 1)
+        result["alignment_score"] = round(
+            100.0 * sum(1 for v in tf_dirs.values() if v > 0) / max(len(tf_dirs), 1), 1
+        )
+    elif is_native_bear and all(v < 0 for v in micro):
+        result = dict(result)
+        result["action"] = "sell"
+        result["native_bias_override"] = "CRASH_SELL_M1_M5_M15_ALIGNED"
+        result["native_bias_timeframes"] = "M1/M5/M15"
+        result["confidence"] = max(float(result.get("confidence", 0) or 0), 0.70)
+        result["confidence_percent"] = round(float(result["confidence"]) * 100.0, 1)
+        result["alignment_score"] = round(
+            100.0 * sum(1 for v in tf_dirs.values() if v < 0) / max(len(tf_dirs), 1), 1
+        )
+    return result
+
+
 def _enrich_ia_status(out: dict) -> None:
     """
     Calcule ia_status_action (BUY/SELL/HOLD) et ia_status_confidence_pct depuis
@@ -1382,8 +1435,11 @@ def _enrich_ia_status(out: dict) -> None:
             "M30": _dir_str_to_int(out.get("tf_m30_dir", "")),
         }
         result = _ia_status_decide(tf_dirs, _IA_STATUS_TF_WEIGHTS)
+        result = _apply_native_synthetic_ia_bias(out.get("symbol", ""), tf_dirs, result)
         out["ia_status_action"] = result["action"].upper()
         out["ia_status_confidence_pct"] = result["confidence_percent"]
+        if result.get("native_bias_override"):
+            out["native_bias_override"] = result["native_bias_override"]
     except Exception as exc:
         logger.debug(f"[IA-STATUS-ENRICH] {exc}")
         out["ia_status_action"] = "HOLD"
@@ -1548,6 +1604,7 @@ def _enrich_gom_dashboard_payload(
 ) -> None:
     """Enrichissements dashboard — cognition courte toujours active pour le tableau EA."""
     _enrich_bc_volatility(out, sym)
+    _enrich_next_m1_forecast(out, sym)
     _enrich_cognition_forecast_short(out, sym)
     out["entry_probability"] = round(_compute_entry_probability(out), 1)
     _enrich_ia_status(out)
@@ -1688,6 +1745,65 @@ def _enrich_cognition_forecast_short(out: dict, symbol: str) -> None:
         logger.debug(f"[COGNITION-SHORT] enrich failed for {symbol}: {exc}")
 
 
+def _enrich_next_m1_forecast(out: dict, symbol: str) -> None:
+    """Prévision opérationnelle de la prochaine bougie M1 uniquement.
+
+    Cette prévision ne prétend pas remplacer un modèle entraîné : elle expose
+    un signal court, frais et mesurable à partir des dernières bougies. Elle
+    est volontairement indépendante des horizons 5/15/200 bougies et devient
+    invalide si les données M1 ne sont pas disponibles.
+    """
+    try:
+        sym = _resolve_symbol(str(symbol))
+        df = _fetch_cognition_candles(sym, "M1", 40)
+        if df is None or len(df) < 12:
+            out["m1_forecast_ready"] = False
+            out["m1_forecast_direction"] = "NEUTRAL"
+            out["m1_forecast_probability"] = 0.0
+            return
+        close = pd.to_numeric(df["close"], errors="coerce").dropna()
+        if len(close) < 12:
+            out["m1_forecast_ready"] = False
+            out["m1_forecast_direction"] = "NEUTRAL"
+            out["m1_forecast_probability"] = 0.0
+            return
+
+        # Vote court : pente 3/6/12 bougies + majorité des derniers retours.
+        rets = close.pct_change().dropna()
+        last = float(close.iloc[-1])
+        def _slope(n: int) -> float:
+            return (float(close.iloc[-1]) - float(close.iloc[-n])) / max(last, 1e-12)
+        s3, s6, s12 = _slope(3), _slope(6), _slope(12)
+        recent = rets.tail(6)
+        pos = int((recent > 0).sum())
+        neg = int((recent < 0).sum())
+        score = (0.45 * s3 + 0.35 * s6 + 0.20 * s12)
+        vote = (pos - neg) / max(len(recent), 1)
+        composite = score * 12000.0 + vote * 0.45
+        direction = "BUY" if composite > 0.08 else ("SELL" if composite < -0.08 else "NEUTRAL")
+        strength = min(1.0, abs(composite))
+        probability = 50.0 + 45.0 * strength
+        if direction == "NEUTRAL":
+            probability = 50.0
+        bar_time = None
+        if "time" in df.columns:
+            try:
+                bar_time = int(pd.Timestamp(df["time"].iloc[-1]).timestamp())
+            except Exception:
+                pass
+        out["m1_forecast_ready"] = direction != "NEUTRAL"
+        out["m1_forecast_direction"] = direction
+        out["m1_forecast_probability"] = round(probability, 1)
+        out["m1_forecast_horizon_sec"] = 60
+        out["m1_forecast_bar_time"] = bar_time
+        out["m1_forecast_reason"] = f"s3={s3:.6g};s6={s6:.6g};s12={s12:.6g};votes={pos}/{neg}"
+    except Exception as exc:
+        logger.debug(f"[M1-FORECAST] enrich failed for {symbol}: {exc}")
+        out["m1_forecast_ready"] = False
+        out["m1_forecast_direction"] = "NEUTRAL"
+        out["m1_forecast_probability"] = 0.0
+
+
 def _enrich_cognition_forecast(
     out: dict, symbol: str, chart_tf: str = "M1", include_short: bool = True
 ) -> None:
@@ -1810,7 +1926,38 @@ def _compute_entry_probability(out: dict, direction: str = "") -> float:
         if (d in ("BUY", "LONG") and global_dir == "BEAR") or (d in ("SELL", "SHORT") and global_dir == "BULL"):
             score -= 8.0
 
-    return float(max(0.0, min(100.0, score)))
+    score = float(max(0.0, min(100.0, score)))
+
+    # Les indices Boom/GainX ont un biais BUY natif. Leur score composite
+    # générique peut rester artificiellement bas (ex. P=35 %) parce qu'il
+    # attend des facteurs cognition/BC qui ne sont pas nécessaires au verdict
+    # GOM. Si GOM est déjà GOOD/PERFECT et que le momentum M1/M5/M15 confirme,
+    # le probability gate ne doit pas retransformer ce signal en WAIT.
+    sym = str(out.get("symbol", "") or "").lower().replace(" ", "")
+    is_native_bull = is_boom_crash_symbol(sym) and ("boom" in sym or "gainx" in sym)
+    is_native_bear = is_boom_crash_symbol(sym) and ("crash" in sym or "painx" in sym)
+    vn_ok = abs(vn) >= 2
+    native_dir_ok = (
+        (is_native_bull and d in ("BUY", "LONG") and vn > 0)
+        or (is_native_bear and d in ("SELL", "SHORT") and vn < 0)
+    )
+    micro_ok = (
+        is_native_bull
+        and all(str(out.get(f"tf_{tf}_dir", "")).upper() in ("BULL", "BUY") for tf in ("m1", "m5", "m15"))
+    ) or (
+        is_native_bear
+        and all(str(out.get(f"tf_{tf}_dir", "")).upper() in ("BEAR", "SELL") for tf in ("m1", "m5", "m15"))
+    )
+    try:
+        native_coherence_ok = float(out.get("coherence_pct", 0) or 0) >= 65.0
+    except (TypeError, ValueError):
+        native_coherence_ok = False
+    if vn_ok and native_dir_ok and micro_ok and native_coherence_ok:
+        out["entry_probability_raw"] = round(score, 1)
+        out["entry_probability_override"] = "native_synthetic_gom_m1_m5_m15"
+        score = max(score, MIN_ENTRY_PROBABILITY_PCT)
+
+    return score
 
 
 def _check_probability_gate(symbol: str, direction: str, chart_tf: str = "M1") -> Tuple[bool, str]:
@@ -1824,13 +1971,13 @@ def _check_probability_gate(symbol: str, direction: str, chart_tf: str = "M1") -
         if store:
             out.update(store)
         _enrich_bc_volatility(out, sym)
-        _enrich_cognition_forecast(out, sym, chart_tf)
+        _enrich_next_m1_forecast(out, sym)
 
         vn = int(out.get("verdict_num", 0) or 0)
         if vn == 0:
             return False, "GOM WAIT — pas d'entrée hazard"
         if abs(vn) < MIN_GOM_VERDICT_NUM_ABS:
-            return False, f"Verdict vn={vn} — WAIT interdit, exige BUY/SELL+ (|vn|>={MIN_GOM_VERDICT_NUM_ABS})"
+            return False, f"Verdict vn={vn} — SIMPLE interdit, exige GOOD/PERFECT (|vn|>={MIN_GOM_VERDICT_NUM_ABS})"
 
         d = (direction or "").upper()
         if d in ("BUY", "LONG") and vn < MIN_GOM_VERDICT_NUM_ABS:
@@ -1843,24 +1990,23 @@ def _check_probability_gate(symbol: str, direction: str, chart_tf: str = "M1") -
             if not out.get("bc_tradeable") or bc_conf < HIGH_PROB_BC_MIN_CONF:
                 return False, f"BC heure conf {bc_conf:.0f}% < {HIGH_PROB_BC_MIN_CONF:.0f}%"
 
-        strength = float(out.get("cog_strength", 0) or 0)
-        conf = float(out.get("cog_confidence", 0) or 0)
-        cog_dir = str(out.get("cog_direction", "NEUTRAL")).upper()
-        if strength < MIN_COG_STRENGTH or conf < MIN_COG_CONFIDENCE:
-            return False, f"Cognition faible str={strength:.2f} conf={conf:.2f}"
-        if d in ("BUY", "LONG") and cog_dir == "SELL":
-            return False, "Cognition oppose BUY"
-        if d in ("SELL", "SHORT") and cog_dir == "BUY":
-            return False, "Cognition oppose SELL"
+        m1_dir = str(out.get("m1_forecast_direction", "NEUTRAL")).upper()
+        m1_prob = float(out.get("m1_forecast_probability", 0) or 0)
+        if not out.get("m1_forecast_ready") or m1_prob < 70.0:
+            return False, f"Prévision M1 insuffisante ({m1_dir} {m1_prob:.1f}% à 60s)"
+        if d in ("BUY", "LONG") and m1_dir != "BUY":
+            return False, f"Prévision M1 {m1_dir} oppose BUY"
+        if d in ("SELL", "SHORT") and m1_dir != "SELL":
+            return False, f"Prévision M1 {m1_dir} oppose SELL"
 
-        prob = _compute_entry_probability(out, direction)
+        prob = max(_compute_entry_probability(out, direction), m1_prob)
         out["entry_probability"] = round(prob, 1)
         if prob < MIN_ENTRY_PROBABILITY_PCT:
             return False, f"Probabilité {prob:.1f}% < {MIN_ENTRY_PROBABILITY_PCT:.0f}% (setup hazard)"
         return True, ""
     except Exception as exc:
-        logger.debug(f"[PROB-GATE] skip fail-open: {exc}")
-        return True, ""
+        logger.warning(f"[PROB-GATE] prévision M1 indisponible — ordre bloqué: {exc}")
+        return False, "Prévision M1 indisponible — ordre bloqué"
 
 
 def _check_cognition_gate(symbol: str, direction: str, chart_tf: str = "M1") -> Tuple[bool, str]:
@@ -1874,35 +2020,22 @@ def _check_cognition_gate(symbol: str, direction: str, chart_tf: str = "M1") -> 
         if store:
             out.update(store)
         _enrich_bc_volatility(out, sym)
-        _enrich_cognition_forecast(out, sym, chart_tf)
+        _enrich_next_m1_forecast(out, sym)
 
-        strength = float(out.get("cog_strength", 0) or 0)
-        confidence = float(out.get("cog_confidence", 0) or 0)
-        cog_dir = str(out.get("cog_direction", "NEUTRAL")).upper()
-        cog5 = str(out.get("cog_direction_5m", cog_dir)).upper()
-        cog15 = str(out.get("cog_direction_15m", cog_dir)).upper()
-        min_str = MIN_COG_STRENGTH
-        min_conf = MIN_COG_CONFIDENCE
-
-        if strength < min_str or confidence < min_conf:
-            return False, (
-                f"Cognition faible (str={strength:.2f} conf={confidence:.2f}, "
-                f"min {min_str}/{min_conf})"
-            )
-        if cog_dir == "NEUTRAL":
-            return False, "Cognition direction NEUTRAL"
-        if cog5 != "NEUTRAL" and cog15 != "NEUTRAL" and cog5 != cog15:
-            return False, f"Cognition 5m/15m divergent ({cog5} vs {cog15})"
+        m1_dir = str(out.get("m1_forecast_direction", "NEUTRAL")).upper()
+        m1_prob = float(out.get("m1_forecast_probability", 0) or 0)
         d = (direction or "").upper()
-        gate_dir = cog5 if cog5 != "NEUTRAL" else cog_dir
+        if not out.get("m1_forecast_ready") or m1_prob < 70.0:
+            return False, f"Prévision M1 insuffisante ({m1_dir} {m1_prob:.1f}% à 60s)"
+        gate_dir = m1_dir
         if d in ("BUY", "LONG") and gate_dir == "SELL":
-            return False, f"Cognition {gate_dir} oppose BUY (5m={cog5} 15m={cog15})"
+            return False, f"Prévision M1 {gate_dir} oppose BUY"
         if d in ("SELL", "SHORT") and gate_dir == "BUY":
-            return False, f"Cognition {gate_dir} oppose SELL (5m={cog5} 15m={cog15})"
+            return False, f"Prévision M1 {gate_dir} oppose SELL"
         return True, ""
     except Exception as exc:
-        logger.debug(f"[COGNITION] gate skip (fail-open): {exc}")
-        return True, ""
+        logger.warning(f"[COGNITION] prévision M1 indisponible — ordre bloqué: {exc}")
+        return False, "Prévision M1 indisponible — ordre bloqué"
 
 
 def _resolve_trade_direction(out: dict, panel_direction: str = "") -> str:
@@ -1913,18 +2046,15 @@ def _resolve_trade_direction(out: dict, panel_direction: str = "") -> str:
     elif d in ("SHORT",):
         d = "SELL"
     if d not in ("BUY", "SELL"):
-        ia = str(out.get("ia_status_action", "") or "").upper()
-        if ia in ("BUY", "SELL"):
-            d = ia
+        # v1.29: direction = verdict GOM uniquement (IA ignorée)
+        vn = int(out.get("verdict_num", 0) or 0)
+        if vn > 0:
+            d = "BUY"
+        elif vn < 0:
+            d = "SELL"
         else:
-            vn = int(out.get("verdict_num", 0) or 0)
-            if vn > 0:
-                d = "BUY"
-            elif vn < 0:
-                d = "SELL"
-            else:
-                verdict = str(out.get("verdict", "WAIT") or "WAIT").upper()
-                d = verdict if verdict in ("BUY", "SELL") else "HOLD"
+            verdict = str(out.get("verdict", "WAIT") or "WAIT").upper()
+            d = verdict if verdict in ("BUY", "SELL") else "HOLD"
     return d
 
 
@@ -2006,7 +2136,7 @@ def _evaluate_signal_alignment(
         "id": "gom_verdict",
         "label": "Verdict GOM",
         "ok": gom_ok,
-        "reason": f"{verdict} (vn={vn})" if gom_ok else f"{verdict} vn={vn} — WAIT interdit, exige BUY/SELL+",
+        "reason": f"{verdict} (vn={vn})" if gom_ok else f"{verdict} vn={vn} — SIMPLE/WAIT interdits, GOOD/PERFECT requis",
     })
 
     gom_conf = _validate_gom_confluence(sym, d, verdict, None, None)
@@ -2066,14 +2196,16 @@ def _evaluate_signal_alignment(
         "reason": prob_reason or f"Score {entry_prob:.1f}% ≥ {MIN_ENTRY_PROBABILITY_PCT:.0f}%",
     })
 
+    # v1.29: IA Status n'influence PLUS le verdict ni les gates d'entrée
+    # (affichage informatif seulement — toujours OK)
     ia_action = str(out.get("ia_status_action", "HOLD") or "HOLD").upper()
     ia_conf = float(out.get("ia_status_confidence_pct", 0) or 0)
-    ia_ok = d == "HOLD" or ia_action == d or ia_action == "HOLD"
+    ia_ok = True
     gates.append({
         "id": "ia_status",
-        "label": "IA Status multi-TF",
-        "ok": ia_ok,
-        "reason": f"{ia_action} conf {ia_conf:.0f}%" + ("" if ia_ok else f" — oppose {d}"),
+        "label": "IA Status (info only, non-blocking)",
+        "ok": True,
+        "reason": f"{ia_action} conf {ia_conf:.0f}% [hors verdict GOM]",
     })
 
     setup_ok = bool(out.get("setup_valid")) or bool(
@@ -2451,7 +2583,7 @@ async def _stair_fetch_quality_rows(symbol: str, direction: str) -> List[Dict[st
         "Authorization": f"Bearer {supabase_key}",
     }
     try:
-        async with httpx.AsyncClient(timeout=8.0) as client:
+        async with httpx.AsyncClient(timeout=6.0\) as client:
             r = await client.get(
                 f"{supabase_url.rstrip('/')}/rest/v1/stair_quality_summary",
                 params=params,
@@ -3048,15 +3180,38 @@ def get_prediction_channel_5000(symbol: str, timeframe: str = "M1", future_bars:
     """
     Canal de prédiction ML sur N prochaines bougies (jusqu'à 5000).
     Analyse les prix historiques, régression linéaire, projection future.
-    Utilise les métriques Supabase (feedback) pour ajuster la largeur du canal.
+    Ajuste la largeur du canal selon la précision locale du modèle (aucun appel réseau).
     """
     lookback = 500
+    need = 100
     period_seconds = 60 if timeframe == "M1" else (300 if timeframe == "M5" else 900 if timeframe == "M15" else 3600)
+
+    def _usable(df) -> bool:
+        try:
+            if df is None or len(df) < need:
+                return False
+            if "high" not in df.columns or "low" not in df.columns or "close" not in df.columns:
+                return False
+            if df["high"].isna().all() or df["low"].isna().all() or df["close"].isna().all():
+                return False
+            return True
+        except Exception:
+            return False
+
     try:
         df = get_historical_data_mt5(symbol, timeframe, lookback)
-        if df is None or len(df) < 100:
+        if not _usable(df):
+            # Fallback cloud (yfinance) avant les données simulées → garde le canal réaliste
+            try:
+                df = get_market_data_cloud(symbol, period="5d", interval="1m")
+                if _usable(df) and timeframe != "M1":
+                    df = df.copy()
+                    df = df.tail(lookback)
+            except Exception:
+                df = None
+        if not _usable(df):
             df = get_recent_historical_data(symbol, lookback)
-        if df is None or len(df) < 100:
+        if not _usable(df):
             return {"ok": False, "reason": "données insuffisantes"}
 
         if "time" in df.columns:
@@ -3073,33 +3228,14 @@ def get_prediction_channel_5000(symbol: str, timeframe: str = "M1", future_bars:
         coeffs_low = np.polyfit(x, lows, 1)
         channel_width = np.mean(highs - lows)
 
-        # Feedback Supabase: ajuster la largeur selon la précision du modèle (métriques)
+        # Ajustement local de la largeur selon la précision du modèle (aucun appel réseau).
         width_mult = 1.0
         try:
-            import os
-            import httpx
-            supabase_url = os.getenv("SUPABASE_URL", "https://bpzqnooiisgadzicwupi.supabase.co")
-            # Utiliser la clé de service si disponible (permissions complètes), sinon anon
-            # Seulement si USE_SUPABASE=true
-            if _env_bool("USE_SUPABASE", False):
-                supabase_key = os.getenv("SUPABASE_SERVICE_KEY") or os.getenv("SUPABASE_ANON_KEY")
-                if supabase_key:
-                    r = httpx.get(
-                        f"{supabase_url}/rest/v1/model_metrics?symbol=eq.{symbol}&order=training_date.desc&limit=1",
-                        headers={"apikey": supabase_key, "Authorization": f"Bearer {supabase_key}"},
-                        timeout=5,
-                    )
-                    if r.status_code == 200 and r.json():
-                        row = r.json()[0]
-                        acc = row.get("accuracy") or row.get("accuracy_score")
-                        if acc is not None:
-                            if acc < 0.6:
-                                width_mult = 1.4
-                            elif acc < 0.75:
-                                width_mult = 1.2
-                pred_acc = get_prediction_accuracy_score(symbol) if symbol else 0.5
-                if pred_acc < 0.6:
-                    width_mult = max(width_mult, 1.3)
+            pred_acc = get_prediction_accuracy_score(symbol) if symbol else 0.5
+            if pred_acc < 0.6:
+                width_mult = 1.3
+            elif pred_acc < 0.75:
+                width_mult = 1.1
         except Exception:
             pass
 
@@ -3141,46 +3277,6 @@ def get_prediction_channel_5000(symbol: str, timeframe: str = "M1", future_bars:
             time_start = int(last_ts.timestamp())
         else:
             time_start = int(pd.Timestamp(last_ts).timestamp())
-
-        # Sauvegarde facultative du canal et des points prédits (désactivée si USE_SUPABASE=false)
-        try:
-            import os
-            import httpx
-
-            if not _env_bool("USE_SUPABASE", False):
-                # Supabase désactivé, ne pas sauvegarder
-                pass
-            else:
-                supabase_url = os.getenv("SUPABASE_URL", "https://bpzqnooiisgadzicwupi.supabase.co")
-                supabase_key = os.getenv("SUPABASE_SERVICE_KEY") or os.getenv("SUPABASE_ANON_KEY")
-                if supabase_key:
-                    payload = {
-                        "symbol": symbol,
-                        "timeframe": timeframe,
-                        "time_start": time_start,
-                        "period_seconds": period_seconds,
-                        "future_bars": future_bars,
-                        "upper_start": round(upper_start, 8),
-                        "upper_end": round(upper_end, 8),
-                        "lower_start": round(lower_start, 8),
-                        "lower_end": round(lower_end, 8),
-                        "width_mult": float(width_mult),
-                        "predicted_points": convert_numpy_to_python(predicted_points),
-                    }
-                    httpx.post(
-                        f"{supabase_url}/rest/v1/prediction_channels",
-                        json=payload,
-                        headers={
-                            "apikey": supabase_key,
-                            "Authorization": f"Bearer {supabase_key}",
-                            "Content-Type": "application/json",
-                            "Prefer": "resolution=merge-duplicates,return=minimal",
-                        },
-                        timeout=5.0,
-                    )
-        except Exception:
-            # En cas d'échec de Supabase, on continue simplement sans bloquer l'API
-            pass
 
         return {
             "ok": True,
@@ -3570,45 +3666,22 @@ def get_mt5_indicators(symbol: str, timeframe: str, count: int = 100) -> Optiona
     """
     try:
         sys.path.insert(0, str(Path(__file__).resolve().parent / "python"))
-        from mt5_candles_fetcher import ensure_mt5_connected
-        if not ensure_mt5_connected(symbol):
-            logger.error("Échec de l'initialisation MT5 (%s)", symbol)
-            return None
+        from mt5_candles_fetcher import fetch_mt5_candles
     except ImportError:
-        if not mt5.initialize():
-            logger.error("Échec de l'initialisation MT5")
-            return None
-    
+        logger.error("mt5_candles_fetcher indisponible — impossible de récupérer %s", symbol)
+        return None
+
     try:
-        # Conversion du timeframe MT5
-        tf_map = {
-            'M1': mt5.TIMEFRAME_M1,
-            'M5': mt5.TIMEFRAME_M5,
-            'M15': mt5.TIMEFRAME_M15,
-            'M30': mt5.TIMEFRAME_M30,
-            'H1': mt5.TIMEFRAME_H1,
-            'H4': mt5.TIMEFRAME_H4,
-            'D1': mt5.TIMEFRAME_D1,
-            'W1': mt5.TIMEFRAME_W1
-        }
-        
-        mt5_timeframe = tf_map.get(timeframe, mt5.TIMEFRAME_M1)
-        
-        # Récupération des données OHLC
-        rates = mt5.copy_rates_from_pos(symbol, mt5_timeframe, 0, count)
-        if rates is None or len(rates) == 0:
+        # FIX 2026-08-28 : passe désormais par fetch_mt5_candles (routé vers le
+        # worker du bon broker) au lieu d'un mt5.copy_rates_from_pos direct sur
+        # le module-level `mt5`, qui dépendait du terminal alors actif dans ce
+        # process — pas forcément celui du symbole demandé.
+        df = fetch_mt5_candles(symbol, timeframe, count)
+        if df is None or df.empty:
             logger.error(f"Impossible de récupérer les données pour {symbol} {timeframe}")
             return None
-            
-        # Conversion en DataFrame
-        df = pd.DataFrame(rates)
-        if df.empty:
-            logger.error(f"Aucune donnée reçue pour {symbol} {timeframe}")
-            return None
-            
-        df['time'] = pd.to_datetime(df['time'], unit='s')
-        df.set_index('time', inplace=True)
-        
+        df = df.rename(columns={"volume": "tick_volume"})
+
         # Vérification des données manquantes
         if df.isnull().values.any():
             logger.warning(
@@ -4704,6 +4777,16 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# === Journal Advisor (v1.36/v1.37) : /journal/decision, /journal/manage, /journal/report ===
+# journal_advisor.py est dans le même dossier que gom_live_calculator.py (python/, déjà dans sys.path).
+try:
+    from journal_advisor import register_journal_routes
+    register_journal_routes(app, logger)
+except ImportError as _jrn_err:
+    logger.warning(f"⚠️ Journal Advisor non disponible (journal_advisor.py introuvable ?): {_jrn_err}")
+except Exception as _jrn_reg_err:
+    logger.warning(f"⚠️ Journal Advisor: enregistrement des routes échoué: {_jrn_reg_err}")
 
 # === Core Engine Routes ===
 try:
@@ -7729,6 +7812,13 @@ class DecisionResponse(BaseModel):
     recommended_lot: Optional[float] = None   # Lot recommandé pour capital $50 / 2% risque
     max_loss_usd: Optional[float] = None      # Perte max en $ pour ce trade
     risk_info: Optional[Dict[str, Any]] = None  # Détail calcul risque pour rapport
+    # FIX 2026-09-11 (Claude): traçabilité de la réconciliation IA ↔ verdict GOM —
+    # voir _gom_reconcile_decision. Permet à l'EA (et au dashboard) de vérifier
+    # explicitement que l'action IA ci-dessus ne contredit pas le verdict GOM.
+    gom_verdict_num: Optional[int] = None     # verdict_num GOM au moment de la décision (None si absent)
+    gom_verdict: Optional[str] = None         # label GOM ("PERFECT BUY", "WAIT", ...)
+    gom_aligned: Optional[bool] = None        # True=accord, False=conflit corrigé, None=rien à comparer (WAIT/hold)
+    gom_conflict_resolved: bool = False       # True si l'action a dû être réalignée sur GOM
 
 
 # === MODÈLES OLLAMA LOCAL (Analyse approfondie par LLM local) ===
@@ -8171,6 +8261,7 @@ def compute_ia_status_v2(request: "DecisionRequest") -> Dict[str, Any]:
     }
 
     result = _ia_status_decide(tf_dirs, _IA_STATUS_TF_WEIGHTS)
+    result = _apply_native_synthetic_ia_bias(symbol, tf_dirs, result)
     result["timeframe_dirs"] = tf_dirs
     result["weights"] = _IA_STATUS_TF_WEIGHTS
     return result
@@ -8559,9 +8650,10 @@ async def decision_simplified(request: DecisionRequest):
             buy_score = max(0.0, buy_score - cp_bonus * 0.30)
             reason += f"Pattern {cp_name} bearish (+{cp_bonus:.2f}). "
     
-    # 4b. Boom : bonus si M1+M5 haussiers (contrepoids au H1 baissier — stair M1 / scalp)
+    # 4b. Boom/GainX : bonus si M1+M5 haussiers (contrepoids au H1 baissier — stair M1 / scalp)
     try:
-        if is_boom_crash_symbol(str(request.symbol)) and "boom" in str(request.symbol).lower():
+        _sym_l_bonus = str(request.symbol or "").lower()
+        if is_boom_crash_symbol(str(request.symbol)) and ("boom" in _sym_l_bonus or "gainx" in _sym_l_bonus):
             e1f = float(request.ema_fast_m1 or 0.0)
             e1s = float(request.ema_slow_m1 or 0.0)
             e5f = float(request.ema_fast_m5 or 0.0)
@@ -8604,8 +8696,12 @@ async def decision_simplified(request: DecisionRequest):
     # Sur Boom/Crash, l'EA ne trade qu'un seul sens. Si on élit "buy" sur Crash (ex. H1 haussier qui pèse 35 %),
     # enforce_ea_boom_crash_direction ramène tout en HOLD : l'utilisateur voit des spikes baissiers mais IA=HOLD.
     sym_l = str(request.symbol or "").lower()
-    is_crash_sc = is_boom_crash_symbol(str(request.symbol)) and "crash" in sym_l
-    is_boom_sc = is_boom_crash_symbol(str(request.symbol)) and "boom" in sym_l
+    # PainX = équivalent Weltrade natif de Crash ; GainX = équivalent Weltrade natif de Boom.
+    # Sans ce fallback, tous les symboles GainX/PainX retombaient dans la branche générique
+    # buy_score>sell_score (ligne ~8684), qui ignore le bonus M1+M5 et le garde-fou HOLD
+    # spécifique Boom/Crash ci-dessous → HOLD erroné quand H1 (poids 35%) est isolé à contre-tendance.
+    is_crash_sc = is_boom_crash_symbol(str(request.symbol)) and ("crash" in sym_l or "painx" in sym_l)
+    is_boom_sc = is_boom_crash_symbol(str(request.symbol)) and ("boom" in sym_l or "gainx" in sym_l)
 
     if is_crash_sc:
         if sell_score >= buy_score:
@@ -8697,7 +8793,7 @@ async def decision_simplified(request: DecisionRequest):
                 _gom_executor,
                 lambda: enhance_decision_with_ml(request.symbol, base_action, base_confidence, market_data),
             ),
-            timeout=8.0,
+            timeout=6.0,
         )
     except asyncio.TimeoutError:
         logger.warning(f"[DECISION] {request.symbol} ML enhance timeout (>8s) — décision technique seule")
@@ -8738,7 +8834,7 @@ async def decision_simplified(request: DecisionRequest):
         if is_boom_crash_symbol(str(request.symbol)):
             from correction_cycle_detector import is_m1_correction_active
             _sym_upper = str(request.symbol).upper()
-            _regime = 1 if "BOOM" in _sym_upper else (-1 if "CRASH" in _sym_upper else 0)
+            _regime = 1 if ("BOOM" in _sym_upper or "GAINX" in _sym_upper) else (-1 if ("CRASH" in _sym_upper or "PAINX" in _sym_upper) else 0)
             # Calculer slope M1 depuis les données request
             _slope_m1 = 0.0
             if request.ema_fast_m1 and request.ema_slow_m1:
@@ -8784,8 +8880,9 @@ async def decision_simplified(request: DecisionRequest):
             _m1_correction_reason = str(_m1_gate.get("reason", ""))
 
             symbol_lower = str(request.symbol).lower()
-            is_boom = "boom" in symbol_lower
-            is_crash = "crash" in symbol_lower
+            # GainX ≡ Boom (BUY only), PainX ≡ Crash (SELL only).
+            is_boom = "boom" in symbol_lower or "gainx" in symbol_lower
+            is_crash = "crash" in symbol_lower or "painx" in symbol_lower
             
             ema_fast_m1 = request.ema_fast_m1 or 0.0
             ema_slow_m1 = request.ema_slow_m1 or 0.0
@@ -8880,9 +8977,44 @@ async def decision_simplified(request: DecisionRequest):
     # Skippé si TradingAgents override actif
     if _ta_manual_override is not None:
         reason += f" [Funnel MTF ignoré: TradingAgents OVERRIDE {action.upper()}]"
-    funnel = compute_mtf_funnel_decision(request)
+    funnel = await asyncio.to_thread(compute_mtf_funnel_decision, request)
     funnel_action = funnel.get("action", "hold") if _ta_manual_override is None else action
     funnel_conf = float(funnel.get("confidence", 0.5))
+    def _boom_crash_bypass_ok() -> bool:
+        """True si Boom/Crash montre une direction technique M1/M5 confirmée
+        qui justifie d'ignorer un funnel MTF en désaccord (hold OU sens
+        opposé) — même condition, appliquée aux deux cas de désaccord pour
+        que le SELL Crash / BUY Boom technique ne soit plus écrasé quel que
+        soit le funnel_action renvoyé (hold ou sens opposé)."""
+        sym_l_fc = str(request.symbol or "").lower()
+        if not is_boom_crash_symbol(str(request.symbol)):
+            return False
+        if ("boom" in sym_l_fc or "gainx" in sym_l_fc) and action == "buy":
+            m1u = (
+                request.ema_fast_m1 is not None
+                and request.ema_slow_m1 is not None
+                and float(request.ema_fast_m1) > float(request.ema_slow_m1)
+            )
+            m5u = (
+                request.ema_fast_m5 is not None
+                and request.ema_slow_m5 is not None
+                and float(request.ema_fast_m5) > float(request.ema_slow_m5)
+            )
+            return bool(m1u or m5u)
+        if ("crash" in sym_l_fc or "painx" in sym_l_fc) and action == "sell":
+            m1d = (
+                request.ema_fast_m1 is not None
+                and request.ema_slow_m1 is not None
+                and float(request.ema_fast_m1) < float(request.ema_slow_m1)
+            )
+            m5d = (
+                request.ema_fast_m5 is not None
+                and request.ema_slow_m5 is not None
+                and float(request.ema_fast_m5) < float(request.ema_slow_m5)
+            )
+            return bool(m1d or m5d)
+        return False
+
     if funnel_action == action:
         confidence = max(confidence, funnel_conf)
         reason += f" [Funnel MTF aligné: {funnel_action.upper()}]"
@@ -8891,45 +9023,21 @@ async def decision_simplified(request: DecisionRequest):
         confidence = max(confidence, funnel_conf * 0.95)
         reason += f" [Funnel MTF a déclenché {funnel_action.upper()}]"
     elif action in ("buy", "sell") and funnel_action == "hold":
-        sym_l_fc = str(request.symbol or "").lower()
-        skip_funnel_hold = False
-        if is_boom_crash_symbol(str(request.symbol)):
-            if "boom" in sym_l_fc and action == "buy":
-                m1u = (
-                    request.ema_fast_m1 is not None
-                    and request.ema_slow_m1 is not None
-                    and float(request.ema_fast_m1) > float(request.ema_slow_m1)
-                )
-                m5u = (
-                    request.ema_fast_m5 is not None
-                    and request.ema_slow_m5 is not None
-                    and float(request.ema_fast_m5) > float(request.ema_slow_m5)
-                )
-                if m1u or m5u:
-                    skip_funnel_hold = True
-                    reason += " [Funnel MTF ignoré: Boom M1/M5 haussiers]"
-            elif "crash" in sym_l_fc and action == "sell":
-                m1d = (
-                    request.ema_fast_m1 is not None
-                    and request.ema_slow_m1 is not None
-                    and float(request.ema_fast_m1) < float(request.ema_slow_m1)
-                )
-                m5d = (
-                    request.ema_fast_m5 is not None
-                    and request.ema_slow_m5 is not None
-                    and float(request.ema_fast_m5) < float(request.ema_slow_m5)
-                )
-                if m1d or m5d:
-                    skip_funnel_hold = True
-                    reason += " [Funnel MTF ignoré: Crash M1/M5 baissiers]"
-        if not skip_funnel_hold:
+        skip_funnel_override = _boom_crash_bypass_ok()
+        if skip_funnel_override:
+            reason += " [Funnel MTF ignoré: Boom/Crash M1/M5 confirmés]"
+        else:
             action = "hold"
             confidence = max(0.45, min(confidence, funnel_conf))
             reason += " [Funnel MTF: conflit inter-TF -> HOLD]"
     elif action != funnel_action and funnel_action in ("buy", "sell"):
-        action = "hold"
-        confidence = max(0.45, min(confidence, funnel_conf))
-        reason += " [Funnel MTF: désaccord final -> HOLD]"
+        skip_funnel_override = _boom_crash_bypass_ok()
+        if skip_funnel_override:
+            reason += " [Funnel MTF ignoré: Boom/Crash M1/M5 confirmés malgré désaccord funnel]"
+        else:
+            action = "hold"
+            confidence = max(0.45, min(confidence, funnel_conf))
+            reason += " [Funnel MTF: désaccord final -> HOLD]"
     
     # 8c. Fusion décision technique + Qwen local (Ollama).
     # Objectif: associer la décision du script (entry points / niveaux) avec l'analyse Qwen.
@@ -9392,6 +9500,22 @@ async def decision_simplified(request: DecisionRequest):
     if pure_momentum_meta:
         meta_out["pure_momentum"] = pure_momentum_meta
 
+    # FIX 2026-09-11 (Claude): dernière étape avant réponse — l'action/confiance IA
+    # ne doit jamais contredire un verdict GOM actif pour ce symbole (voir
+    # _gom_reconcile_decision). En cas de conflit résolu (action réalignée sur GOM),
+    # SL/TP/entry_price calculés pour l'ancienne direction ne sont plus valides :
+    # on les efface pour que l'EA calcule ses propres niveaux (ce qu'il fait déjà
+    # pour DOW/OTE/GOM_TF_TL) plutôt que d'hériter de niveaux incohérents.
+    action, confidence_percentage, reason, _gom_reconcile_meta = _gom_reconcile_decision(
+        request.symbol, action, confidence_percentage, reason
+    )
+    meta_out["gom_reconcile"] = _gom_reconcile_meta
+    if _gom_reconcile_meta.get("gom_conflict_resolved"):
+        stop_loss = None
+        take_profit = None
+        entry_price_out = None
+        exec_type_final = None
+
     response = DecisionResponse(
         action=action,
         confidence=confidence_percentage,  # Décimale 0-1 (MT5 affiche *100)
@@ -9413,6 +9537,10 @@ async def decision_simplified(request: DecisionRequest):
         recommended_lot=_risk.get("recommended_lot"),
         max_loss_usd=_risk.get("max_loss_usd"),
         risk_info=_risk,
+        gom_verdict_num=_gom_reconcile_meta.get("gom_verdict_num"),
+        gom_verdict=_gom_reconcile_meta.get("gom_verdict"),
+        gom_aligned=_gom_reconcile_meta.get("gom_aligned"),
+        gom_conflict_resolved=_gom_reconcile_meta.get("gom_conflict_resolved", False),
     )
 
     set_simplified_tf_cached_decision(request, response)
@@ -9499,8 +9627,17 @@ async def _push_prediction_to_supabase(
     try:
         import httpx
         decision_data["confidence"] = response.confidence  # Garder en pourcentage pour Supabase
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(
+        # Client HTTPS global lazy : ne pas recréer httpx.AsyncClient() à chaque
+        # decision (sa création charge le contexte SSL = blocage synchrone de
+        # l'event loop). Créé une seule fois, partagé.
+        global _SUPABASE_HTTP_CLIENT
+        if _SUPABASE_HTTP_CLIENT is None:
+            _SUPABASE_HTTP_CLIENT = httpx.AsyncClient(
+                timeout=httpx.Timeout(5.0, connect=3.0),
+                limits=httpx.Limits(max_connections=2, max_keepalive_connections=1),
+            )
+        resp = await asyncio.wait_for(
+            _SUPABASE_HTTP_CLIENT.post(
                 f"{supabase_url}/rest/v1/predictions",
                 json=decision_data,
                 headers={
@@ -9509,10 +9646,13 @@ async def _push_prediction_to_supabase(
                     "Content-Type": "application/json",
                     "Prefer": "return=minimal",
                 },
-                timeout=10.0,
-            )
-            if resp.status_code != 201:
-                logger.warning(f"Predictions table HTTP {resp.status_code}: {resp.text[:200]}")
+            ),
+            timeout=5.0,
+        )
+        if resp.status_code != 201:
+            logger.warning(f"Predictions table HTTP {resp.status_code}: {resp.text[:200]}")
+    except asyncio.TimeoutError:
+        logger.debug("predictions persist: timeout (Supabase lent)")
     except Exception as e:
         logger.debug("predictions persist: %s", e)
 
@@ -10378,8 +10518,11 @@ _gom_cache_ttl = int(os.getenv("GOM_DASHBOARD_CACHE_SEC", "45"))
 _gom_verdict_latch: Dict[str, Dict[str, Any]] = {}
 _gom_stale_ttl = int(os.getenv("GOM_DASHBOARD_STALE_SEC", "180"))
 _gom_enrich_ttl = int(os.getenv("GOM_DASHBOARD_ENRICH_CACHE_SEC", "30"))
-# Recalcul Pine systématique (tous symboles Deriv/Weltrade/Forex/Metal/Crypto)
-GOM_FORCE_PINE_RECALC = _env_bool("GOM_FORCE_PINE_RECALC", True)
+# Recalcul Pine systématique — DÉSACTIVÉ par défaut (FIX 2026-08-28).
+# Le poller MT5 (gom_mt5_poller → POST /gom-verdict) est la source de vérité.
+# Un recalcul dans /gom-kola-dashboard sans workers MT5 joignables produisait
+# WAIT partout. Réactivable via GOM_FORCE_PINE_RECALC=1 pour debug.
+GOM_FORCE_PINE_RECALC = _env_bool("GOM_FORCE_PINE_RECALC", False)
 # FIX-DISCORDANCE-03 : blend cognition 5 bougies — DÉSACTIVÉ par défaut.
 # Le commentaire disait déjà "désactivé par défaut" mais le code valait True :
 # blend_reactive_forecast_verdict() peut fabriquer un PERFECT (mag=min(3,base+1))
@@ -10408,10 +10551,11 @@ GOM_WELTRADE_INVERT_ENABLED = _env_bool("GOM_WELTRADE_INVERT_ENABLED", False)
 _gom_calc_inflight: Dict[str, asyncio.Task] = {}
 _gom_calc_locks: Dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 _gom_executor = concurrent.futures.ThreadPoolExecutor(
-    max_workers=int(os.getenv("GOM_DASHBOARD_WORKERS", "4")),
+    max_workers=int(os.getenv("GOM_DASHBOARD_WORKERS", "12")),
     thread_name_prefix="gom_dash",
 )
 _gom_bridge_singleton = None
+_SUPABASE_HTTP_CLIENT: Optional[Any] = None
 
 
 def _gom_finalize_verdict_pipeline(out: dict, sym: str, chart_tf: str = "M15") -> None:
@@ -10441,6 +10585,57 @@ def _gom_finalize_verdict_pipeline(out: dict, sym: str, chart_tf: str = "M15") -
             logger.debug(f"[GOM-FINALIZE] pine recalc {sym}: {exc}")
 
     _gom_apply_weltrade_verdict_invert(out, sym)
+    try:
+        from gom_pine_calculator import apply_m1_execution_gate, verdict_text_from_num
+        inverted_vn = int(out.get("verdict_num", 0) or 0)
+        gated_vn = apply_m1_execution_gate(out, inverted_vn)
+        # Toujours conserver le verdict analytique pour transmission EA
+        if inverted_vn != 0:
+            out.setdefault("verdict_server_num", inverted_vn)
+            out.setdefault("verdict_server", verdict_text_from_num(inverted_vn))
+        if gated_vn != inverted_vn:
+            # FIX 2026-09-06: ne JAMAIS écraser le vrai verdict calculé en WAIT.
+            # Bloquer uniquement l'exécution (effective / entry_allowed).
+            # L'EA reçoit verdict_num = calculé + effective_verdict_num pour le trade.
+            sym_u = str(out.get("symbol", "") or "").upper().replace(" ", "")
+            is_bc = any(x in sym_u for x in ("BOOM", "CRASH", "PAINX", "GAINX"))
+            sb = float(out.get("score_buy", 0) or 0)
+            ss = float(out.get("score_sell", 0) or 0)
+            native_ok = (
+                (inverted_vn > 0 and sb >= ss - 0.2) or
+                (inverted_vn < 0 and ss >= sb - 0.2)
+            )
+            out["m1_execution_blocked"] = True
+            out["m1_execution_block_reason"] = (
+                "M1 gate soft-block (synth, structure alive)"
+                if (is_bc and inverted_vn != 0 and gated_vn == 0 and native_ok)
+                else f"M1 execution gate vn={inverted_vn}->{gated_vn}"
+            )
+            out["entry_allowed"] = False
+            out["verdict_server_num"] = inverted_vn if inverted_vn != 0 else out.get("verdict_server_num", 0)
+            out["verdict_server"] = (
+                verdict_text_from_num(inverted_vn) if inverted_vn != 0
+                else out.get("verdict_server", "WAIT")
+            )
+            # effective seulement pour le trade ; verdict principal reste analytique
+            out["effective_verdict_num"] = gated_vn
+            out["effective_verdict"] = verdict_text_from_num(gated_vn)
+            if inverted_vn != 0:
+                # Conserver le vrai verdict pour l'EA (affichage + direction)
+                out["verdict_num"] = inverted_vn
+                out["verdict"] = verdict_text_from_num(inverted_vn)
+            else:
+                out["verdict_num"] = gated_vn
+                out["verdict"] = verdict_text_from_num(gated_vn)
+            if gated_vn == 0 and inverted_vn != 0:
+                out["correction_wait"] = True
+                out.setdefault(
+                    "correction_wait_reason",
+                    out.get("m1_execution_block_reason") or "M1 execution gate",
+                )
+    except Exception as exc:
+        # FIX 2026-09-04: ne JAMAIS forcer WAIT sur exception — conserver vn
+        logger.warning(f"[GOM-M1-GATE] inversion non validée (vn conservé): {exc}")
     # FIX-DISCORDANCE-02 : _gom_mtf_uplift_verdict() retiré du pipeline.
     # C'était un doublon simplifié (seuil gap fixe 0.25, aucune pondération
     # H4/H1/D1, aucune notion de classe d'actif) de apply_mtf_verdict_gate()
@@ -10469,8 +10664,183 @@ def _gom_finalize_verdict_pipeline(out: dict, sym: str, chart_tf: str = "M15") -
         _gom_apply_correction_verdict_wait(out, sym)
 
     _gom_apply_price_reality_final(out, sym)
+    _gom_apply_strict_spike_trend_guard(out, sym)
     out["harmonized_m1"] = True
     out["verdict_mode"] = "reactive_pine"
+
+
+def _gom_apply_strict_spike_trend_guard(out: dict, symbol: str) -> None:
+    """Garde finale : une microcorrection ne peut pas inverser la chaîne.
+
+    Règle métier : si M1 et M5 restent BEAR, un rebond M1 temporaire ne doit
+    jamais fabriquer un GOOD BUY. Le serveur publie WAIT jusqu'à l'approche
+    d'une zone sensible; avec une chaîne active et une zone confirmée, il
+    publie alors le sens prédit de la chaîne (GOOD SELL ici).
+    """
+    try:
+        vn = int(out.get("effective_verdict_num", out.get("verdict_num", 0)) or 0)
+
+        def _sign(value: Any) -> int:
+            text = str(value or "").upper()
+            if text in {"BUY", "BULL", "UP", "LONG"}:
+                return 1
+            if text in {"SELL", "BEAR", "DOWN", "SHORT"}:
+                return -1
+            return 0
+
+        m1 = _sign(out.get("tf_m1_dir_live") or out.get("tf_m1_dir"))
+        m5 = _sign(out.get("tf_m5_dir"))
+        chain = _sign(out.get("spike_chain_direction") or out.get("chain_direction"))
+
+        # FIX 2026-09-27 : le contrat de cette garde ("avec une chaîne active
+        # et une zone confirmée, il publie alors le sens prédit de la chaîne")
+        # ne s'appliquait en pratique JAMAIS à un WAIT d'origine (vn=0) — la
+        # fonction s'arrêtait ici avant même de regarder chain/M1/M5. Résultat
+        # : une chaîne de spike baissier confirmée (M1=M5=chain=SELL, zone
+        # atteinte) pouvait rester WAIT indéfiniment si le pipeline de score
+        # amont (quality/coherence, GOMVerdictCalculatorV2) n'avait produit
+        # aucun verdict directionnel à corriger. On ajoute ici le chemin
+        # d'ESCALADE symétrique au chemin de correction déjà existant plus
+        # bas (wrong_side) : WAIT -> GOOD BUY/SELL si la chaîne est active,
+        # proche d'une zone, et M1/M5 confirment tous les deux son sens.
+        if vn == 0:
+            dominant0 = chain if chain and bool(out.get("spike_chain_active", out.get("chain_active", False))) else 0
+            if dominant0 == 0:
+                return
+            aligned0 = m1 == dominant0 and m5 == dominant0
+            near_zone0 = bool(
+                out.get("near_spike_zone")
+                or out.get("near_spike_trigger")
+                or out.get("near_gom_level")
+                or out.get("spike_tradable")
+                or out.get("spike_imminent")
+            )
+            chain_active0 = bool(
+                out.get("spike_chain_active")
+                or out.get("chain_active")
+                or int(out.get("spike_chain_strong_bars", 0) or 0) >= 2
+            )
+            if not (chain_active0 and near_zone0 and aligned0):
+                return
+            new_vn0 = dominant0 * 2
+            try:
+                from gom_pine_calculator import verdict_text_from_num
+                new_txt0 = verdict_text_from_num(new_vn0)
+            except Exception:
+                new_txt0 = "GOOD BUY" if new_vn0 > 0 else "GOOD SELL"
+            out["trend_guard_original_verdict_num"] = 0
+            out["trend_guard"] = "PREDICTED_GOOD_BUY" if dominant0 > 0 else "PREDICTED_GOOD_SELL"
+            out["trend_guard_reason"] = "wait_escalated_chain_active+near_spike_zone+M1_M5_aligned"
+            out["verdict_num"] = new_vn0
+            out["verdict"] = new_txt0
+            out["effective_verdict_num"] = new_vn0
+            out["effective_verdict"] = new_txt0
+            out["entry_allowed"] = True
+            logger.info(
+                "[GOM-TREND-GUARD] %s: WAIT -> %s (%s)",
+                symbol, new_txt0, out["trend_guard_reason"],
+            )
+            return
+
+        # Contrat final : SIMPLE n'est jamais une autorisation et un verdict
+        # directionnel n'est publiable que si M1 et M5 confirment ce sens.
+        if abs(vn) < MIN_GOM_VERDICT_NUM_ABS:
+            out["verdict_num"] = 0
+            out["verdict"] = "WAIT"
+            out["effective_verdict_num"] = 0
+            out["effective_verdict"] = "WAIT"
+            out["entry_allowed"] = False
+            out["trend_guard"] = "WAIT"
+            out["trend_guard_reason"] = "simple_verdict_forbidden"
+            out["entry_block_reason"] = "GOOD/PERFECT requis; SIMPLE interdit"
+            return
+
+        verdict_dir = 1 if vn > 0 else -1
+        if m1 == 0 or m5 == 0 or m1 != verdict_dir or m5 != verdict_dir:
+            out["verdict_num"] = 0
+            out["verdict"] = "WAIT"
+            out["effective_verdict_num"] = 0
+            out["effective_verdict"] = "WAIT"
+            out["entry_allowed"] = False
+            out["correction_wait"] = True
+            out["trend_guard"] = "WAIT"
+            out["trend_guard_reason"] = "M1_M5_not_aligned_with_verdict"
+            out["correction_wait_reason"] = "M1/M5 doivent confirmer le sens GOM"
+            out["entry_block_reason"] = out["correction_wait_reason"]
+            return
+
+        dominant = chain if chain and bool(out.get("spike_chain_active", out.get("chain_active", False))) else 0
+        # M5 est la tendance de référence; M1 peut temporairement imprimer
+        # une bougie opposée pendant le pullback.
+        if dominant == 0 and m5:
+            dominant = m5
+        if dominant == 0 and m1:
+            dominant = m1
+        if dominant == 0:
+            return
+
+        wrong_side = (vn > 0 and dominant < 0) or (vn < 0 and dominant > 0)
+        if not wrong_side:
+            return
+
+        correction = bool(
+            out.get("active_correction")
+            or out.get("micro_correction")
+            or out.get("is_micro_correction")
+            or out.get("correction_wait")
+            or int(out.get("m1_opp_bars", 0) or 0) >= 2
+        )
+        # Un conflit M1/M5 est toujours bloquant, même si le fournisseur n'a
+        # pas encore marqué explicitement active_correction.
+        if m1 == -dominant or m5 == -dominant:
+            correction = True
+        if not correction:
+            return
+
+        near_zone = bool(
+            out.get("near_spike_zone")
+            or out.get("near_spike_trigger")
+            or out.get("near_gom_level")
+            or out.get("spike_tradable")
+            or out.get("spike_imminent")
+        )
+        chain_active = bool(
+            out.get("spike_chain_active")
+            or out.get("chain_active")
+            or int(out.get("spike_chain_strong_bars", 0) or 0) >= 2
+        )
+        aligned = m1 == dominant and m5 == dominant
+        old_vn = vn
+        out["trend_guard_original_verdict_num"] = old_vn
+        if chain_active and near_zone and aligned:
+            new_vn = dominant * 2
+            out["trend_guard"] = "PREDICTED_GOOD_BUY" if dominant > 0 else "PREDICTED_GOOD_SELL"
+            out["trend_guard_reason"] = "chain_active+near_spike_zone+M1_M5_aligned"
+        else:
+            new_vn = 0
+            out["trend_guard"] = "WAIT"
+            out["trend_guard_reason"] = "opposite_verdict_during_microcorrection"
+
+        try:
+            from gom_pine_calculator import verdict_text_from_num
+            new_txt = verdict_text_from_num(new_vn)
+        except Exception:
+            new_txt = "WAIT" if new_vn == 0 else ("GOOD BUY" if new_vn > 0 else "GOOD SELL")
+        out["verdict_num"] = new_vn
+        out["verdict"] = new_txt
+        out["effective_verdict_num"] = new_vn
+        out["effective_verdict"] = new_txt
+        out["entry_allowed"] = new_vn != 0
+        if new_vn == 0:
+            out["correction_wait"] = True
+            out["correction_wait_reason"] = out["trend_guard_reason"]
+            out["entry_block_reason"] = out["trend_guard_reason"]
+        logger.info(
+            "[GOM-TREND-GUARD] %s: vn=%s -> %s (%s)",
+            symbol, old_vn, new_txt, out["trend_guard_reason"],
+        )
+    except Exception as exc:
+        logger.debug("[GOM-TREND-GUARD] %s failed: %s", symbol, exc)
 
 
 def _gom_apply_price_reality_final(out: dict, symbol: str) -> None:
@@ -10486,10 +10856,24 @@ def _gom_apply_price_reality_final(out: dict, symbol: str) -> None:
         if new_vn == vn and not reason:
             return
         out["price_reality_reason"] = reason
-        out["verdict_num"] = new_vn
-        out["verdict"] = verdict_text_from_num(new_vn)
+        # FIX 2026-09-06: ne pas écraser le vrai verdict calculé.
+        # Dégrade uniquement effective_* ; conserve verdict_num analytique si non-nul.
+        orig_vn = int(out.get("verdict_server_num", out.get("verdict_reactive_num", vn)) or 0)
+        if orig_vn == 0:
+            orig_vn = vn
         out["effective_verdict_num"] = new_vn
         out["effective_verdict"] = verdict_text_from_num(new_vn)
+        if new_vn == 0 and orig_vn != 0:
+            out["verdict_num"] = orig_vn
+            out["verdict"] = verdict_text_from_num(orig_vn)
+            out["verdict_server_num"] = orig_vn
+            out["verdict_server"] = verdict_text_from_num(orig_vn)
+            out["correction_wait"] = True
+            out.setdefault("correction_wait_reason", reason or "price reality gate")
+            out["entry_allowed"] = False
+        else:
+            out["verdict_num"] = new_vn
+            out["verdict"] = verdict_text_from_num(new_vn)
         out["harmonized_m1"] = True
         out["verdict_mode"] = "reactive_pine"
     except Exception as exc:
@@ -10615,6 +10999,7 @@ def _gom_m1_wait_threshold_for_symbol(symbol: str) -> float:
     if any(x in s for x in (
         "BOOM", "CRASH", "PAINX", "GAINX", "TRENDX", "BREAKX",
         "VOL", "STEP", "JUMP", "FXVOL", "SFVVOL", "SFXVOL",
+        "FLIPX", "SWITCHX", "PLUSX", "FIBOX", "QUADX", "RANGEX",
     )):
         return float(os.getenv("GOM_M1_WAIT_SYNTH", "0"))
     if any(x in s for x in ("XAU", "GOLD", "XAG", "SILVER")):
@@ -10726,12 +11111,123 @@ def _gom_apply_correction_verdict_wait(out: dict, symbol: str) -> None:
     server_txt = str(out.get("verdict", "WAIT") or "WAIT")
     out["verdict_server_num"] = vn
     out["verdict_server"] = server_txt
-    out["correction_wait"] = True
     out["correction_wait_reason"] = reason
-    out["verdict_num"] = 0
-    out["verdict"] = "WAIT"
+
+    # FIX 2026-09-05: sur synthétiques, NE PAS écraser PERFECT/GOOD en WAIT
+    # pendant un PRE-SPIKE (PainX monte avant dump, GainX baisse avant boom).
+    # structure_alive ne doit PAS exiger M1 aligné sur le sens natif pendant
+    # la phase pré-spike — sinon PERFECT SELL → WAIT dès la bougie verte.
+    sym_u = str(symbol or out.get("symbol", "")).upper().replace(" ", "")
+    is_pain = any(x in sym_u for x in ("PAINX", "CRASH"))
+    is_gain = any(x in sym_u for x in ("GAINX", "BOOM"))
+    is_bc = is_pain or is_gain
+    sb = float(out.get("score_buy", 0) or 0)
+    ss = float(out.get("score_sell", 0) or 0)
+    spike_pct = float(out.get("spike_pct", out.get("imminence_pct", 0)) or 0)
+    pre_spike = (
+        spike_pct >= 12.0
+        or bool(out.get("spike_tradable"))
+        or "PRE" in str(reason or "").upper()
+        or "SPIKE" in str(reason or "").upper()
+    )
+    # Scores dans le sens natif = structure vivante
+    score_native = (
+        (vn > 0 and sb >= ss - 0.3) or
+        (vn < 0 and ss >= sb - 0.3)
+    )
+    # MTF: pour synth, M5+ suffit; M1 peut être contre pendant pre-spike
+    mtf_ok = (
+        (vn > 0 and m5 >= 0) or
+        (vn < 0 and m5 <= 0) or
+        pre_spike  # pre-spike: on tolère M1/M5 temporairement contre
+    )
+    structure_alive = score_native and (mtf_ok or abs(vn) >= 2)
+
+    if is_bc and structure_alive and abs(vn) >= 1:
+        # Sur PRE-SPIKE natif: conserver au moins GOOD (ne pas descendre sous 2)
+        if pre_spike and abs(vn) >= 2:
+            new_vn = vn  # garder PERFECT/GOOD intact
+            try:
+                from gom_pine_calculator import verdict_text_from_num
+                new_txt = verdict_text_from_num(new_vn)
+            except Exception:
+                new_txt = "BUY" if new_vn > 0 else "SELL"
+            out["correction_wait"] = False
+            out["correction_step_down"] = False
+            out["verdict_num"] = new_vn
+            out["verdict"] = new_txt
+            out["effective_verdict_num"] = new_vn
+            out["effective_verdict"] = new_txt
+            out["entry_allowed"] = True
+            out.pop("entry_block_reason", None)
+            logger.info(
+                f"[GOM-CORR-KEEP] {symbol}: vn={vn} conservé (pre-spike/native) reason={reason}"
+            )
+            return
+        step = max(1, abs(vn) - 1)  # floor SIMPLE
+        # Ne jamais descendre sous GOOD si score natif encore fort
+        if score_native and abs(vn) >= 2:
+            step = max(2, step)
+        new_vn = (1 if vn > 0 else -1) * step
+        try:
+            from gom_pine_calculator import verdict_text_from_num
+            new_txt = verdict_text_from_num(new_vn)
+        except Exception:
+            new_txt = "BUY" if new_vn > 0 else "SELL"
+        out["correction_wait"] = False
+        out["correction_step_down"] = True
+        out["verdict_num"] = new_vn
+        out["verdict"] = new_txt
+        out["effective_verdict_num"] = new_vn
+        out["effective_verdict"] = new_txt
+        if abs(new_vn) < 2:
+            out["entry_allowed"] = False
+            out["entry_block_reason"] = f"correction step-down ({reason})"
+        else:
+            out["entry_allowed"] = True
+            out.pop("entry_block_reason", None)
+        logger.info(
+            f"[GOM-CORR-STEP] {symbol}: vn={vn}→{new_vn} ({reason}) structure_alive"
+        )
+        return
+
+    # Synth + score natif encore valide: STEP down max, JAMAIS WAIT brutal
+    if is_bc and score_native and abs(vn) >= 2:
+        new_vn = (1 if vn > 0 else -1) * 2  # floor GOOD
+        try:
+            from gom_pine_calculator import verdict_text_from_num
+            new_txt = verdict_text_from_num(new_vn)
+        except Exception:
+            new_txt = "BUY" if new_vn > 0 else "SELL"
+        out["correction_wait"] = False
+        out["correction_step_down"] = True
+        out["verdict_num"] = new_vn
+        out["verdict"] = new_txt
+        out["effective_verdict_num"] = new_vn
+        out["effective_verdict"] = new_txt
+        out["entry_allowed"] = True
+        logger.info(
+            f"[GOM-CORR-FLOOR-GOOD] {symbol}: vn={vn}→{new_vn} (évite WAIT) reason={reason}"
+        )
+        return
+
+    # Forex / désaccord structurel fort : bloquer l'entrée, PAS effacer le vrai verdict
+    # FIX 2026-09-06: transmettre fidèlement le verdict calculé à l'EA.
+    out["correction_wait"] = True
     out["effective_verdict_num"] = 0
     out["effective_verdict"] = "WAIT"
+    out["entry_allowed"] = False
+    # verdict_num / verdict restent = calcul analytique (déjà dans verdict_server_*)
+    # Si pour une raison quelconque verdict_server n'a pas été posé, le faire maintenant
+    if int(out.get("verdict_server_num", 0) or 0) == 0 and vn != 0:
+        out["verdict_server_num"] = vn
+        out["verdict_server"] = server_txt
+    if vn != 0:
+        out["verdict_num"] = vn
+        out["verdict"] = server_txt
+    else:
+        out["verdict_num"] = 0
+        out["verdict"] = "WAIT"
 
     sym_key = str(symbol or out.get("symbol", "")).upper()
     bar_t = int(out.get("m1_last_bar_time", 0) or 0)
@@ -10748,6 +11244,7 @@ def _is_weltrade_synthetic(symbol_or_out) -> bool:
         "FXVOL" in sym or "SFVVOL" in sym or "SFXVOL" in sym
         or sym.startswith("PAINX") or sym.startswith("GAINX")
         or "TRENDX" in sym or "BREAKX" in sym
+        or any(x in sym for x in ("FLIPX", "SWITCHX", "PLUSX", "FIBOX", "QUADX", "RANGEX"))
     )
 
 
@@ -10956,15 +11453,24 @@ def _cache_gom_data(symbol: str, data: Dict[str, Any], chart_tf: str = "M15"):
 
 
 def _get_cached_gom_data(symbol: str, chart_tf: str = "M15") -> Optional[Dict[str, Any]]:
-    """Retourne les données GOM fraîches (TTL court), sinon verdict store poller."""
+    """Priorité store poller (POST /gom-verdict), puis cache dashboard court.
+
+    FIX 2026-08-28 : le store était consulté en second et avec un TTL trop
+    court (120s). Résultat : dès qu'un cycle dashboard déclenchait un recalcul
+    live sans candles MT5, le tableau affichait WAIT partout alors que le
+    poller avait déjà poussé les vrais verdicts.
+    """
+    # 1) Store poller d'abord (jusqu'à 5 min — intervalle poller typique 5s)
+    store_ttl = float(os.getenv("GOM_POLLER_STORE_CACHE_SEC", "300"))
+    store = _gom_verdict_store_payload(symbol, chart_tf, store_ttl)
+    if store:
+        return store
+
+    # 2) Cache mémoire dashboard (réponse déjà finalisée)
     age = _gom_cache_age(symbol, chart_tf)
     if age is not None and age <= _gom_cache_ttl:
         cached = _gom_cache[_gom_cache_key(symbol, chart_tf)]
         return dict(cached.get("data") or {})
-
-    store = _gom_verdict_store_payload(symbol, chart_tf, 120.0)
-    if store:
-        return store
 
     return None
 
@@ -11297,32 +11803,58 @@ async def gom_kola_dashboard(
                     inflight.add_done_callback(_clear_inflight)
 
         wait_sec = float(os.getenv("GOM_DASHBOARD_WAIT_SEC", "4"))
+        # FIX 2026-08-28: store poller = vérité absolue. Ne jamais écraser un
+        # GOOD/PERFECT récent par un WAIT (timeout ou recalcul live sans candles).
+        store_ttl_prefer = float(os.getenv("GOM_POLLER_STORE_CACHE_SEC", "300"))
         try:
             response = await asyncio.wait_for(asyncio.shield(inflight), timeout=wait_sec)
         except asyncio.TimeoutError:
-            if stale_data:
+            if stale_data and int(stale_data.get("verdict_num", 0) or 0) != 0:
                 await _gom_enrich_async(stale_data, sym, chart_tf)
                 logger.debug(
                     f"[GOM-DASH] {sym} stale serve (wait>{wait_sec}s, age={stale_data.get('cache_age_sec')}s)"
                 )
                 return _gom_family_guard_response(sym, stale_data)
-            # No stale data + timeout: return WAIT immediately instead of
-            # blocking the request thread until the background computation
-            # finishes (can take 30-46s on a cold/slow server, causing the EA
-            # to time out and NOT failover to Render).
-            store_fallback = _gom_verdict_store_payload(sym, chart_tf, _gom_stale_ttl)
-            if store_fallback:
+            # Timeout → store d'abord (TTL long), jamais WAIT si poller a un vrai signal
+            store_fallback = _gom_verdict_store_payload(sym, chart_tf, store_ttl_prefer)
+            if not store_fallback:
+                store_fallback = _gom_verdict_store_payload(sym, chart_tf, _gom_stale_ttl)
+            if store_fallback and int(store_fallback.get("verdict_num", 0) or 0) != 0:
                 await _gom_enrich_async(store_fallback, sym, chart_tf)
                 store_fallback["gate"] = "compute_timeout_store"
                 store_fallback["stale"] = True
                 logger.warning(
-                    f"[GOM-DASH] {sym} timeout {wait_sec}s → verdict store (poller/EA cache)"
+                    f"[GOM-DASH] {sym} timeout {wait_sec}s → store poller "
+                    f"vn={store_fallback.get('verdict_num')} (pas WAIT)"
                 )
                 return _gom_family_guard_response(sym, store_fallback)
+            if stale_data:
+                await _gom_enrich_async(stale_data, sym, chart_tf)
+                return _gom_family_guard_response(sym, stale_data)
+            # FIX 2026-09-10 (Claude, demande Sidoine): dernier recours AVANT le
+            # squelette à 7 champs — tenter le store poller SANS limite d'âge
+            # normale (ignore les 300s/180s ci-dessus) et SANS exiger vn!=0,
+            # uniquement pour remplir le tableau (RSI, coherence, S/R, scores
+            # Q/C, buy/sell...) avec la dernière vraie donnée connue plutôt que
+            # rien. Ne change PAS la sécurité de trading : verdict_num reste
+            # celui réellement stocké (souvent 0/WAIT dans ce cas), donc les
+            # gates d'entrée EA (|vn|>=2 etc.) ne sont pas affectés — seul
+            # l'affichage dashboard cesse d'être vide.
+            any_age_fallback = _gom_verdict_store_payload(sym, chart_tf, float(os.getenv("GOM_DASHBOARD_ANYAGE_MAX_SEC", "86400")))
+            if any_age_fallback:
+                await _gom_enrich_async(any_age_fallback, sym, chart_tf)
+                any_age_fallback["gate"] = "compute_timeout_anyage_store"
+                any_age_fallback["stale"] = True
+                any_age_fallback["stale_very_old"] = True
+                logger.warning(
+                    f"[GOM-DASH] {sym} timeout {wait_sec}s + no fresh/stale store → "
+                    f"store très ancien (age={any_age_fallback.get('cache_age_sec')}s) servi pour affichage"
+                )
+                return _gom_family_guard_response(sym, any_age_fallback)
             logger.warning(
-                f"[GOM-DASH] {sym} timeout {wait_sec}s + no stale data → WAIT (computation continues in background)"
+                f"[GOM-DASH] {sym} timeout {wait_sec}s + no store → WAIT (computation continues in background)"
             )
-            return {
+            wait_skel = {
                 "ok": True,
                 "symbol": sym,
                 "verdict": "WAIT",
@@ -11332,6 +11864,25 @@ async def gom_kola_dashboard(
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "source": "local_timeout",
             }
+            su = (sym or "").upper().replace(" ", "")
+            if "GAINX" in su or "BOOM" in su:
+                wait_skel["family_hint"] = "native_BUY_use_M1_chart"
+            elif "PAINX" in su or "CRASH" in su:
+                wait_skel["family_hint"] = "native_SELL_use_M1_chart"
+            return wait_skel
+
+        # Live a renvoyé WAIT mais le poller a un vrai verdict → préférer le store
+        live_vn = int(response.get("verdict_num", 0) or 0) if response else 0
+        if live_vn == 0:
+            store_prefer = _gom_verdict_store_payload(sym, chart_tf, store_ttl_prefer)
+            if store_prefer and int(store_prefer.get("verdict_num", 0) or 0) != 0:
+                await _gom_enrich_async(store_prefer, sym, chart_tf)
+                store_prefer["gate"] = "prefer_store_over_live_wait"
+                logger.info(
+                    f"[GOM-DASH] {sym}: live WAIT ignoré → store "
+                    f"{store_prefer.get('verdict')} vn={store_prefer.get('verdict_num')}"
+                )
+                return _gom_family_guard_response(sym, store_prefer)
 
         if response.get("ok"):
             ds = response.get("data_source", "?")
@@ -11436,7 +11987,7 @@ async def gom_live_status(
                     _gom_executor,
                     lambda: _resolve_gom_dashboard(sym, chart_tf, source),
                 ),
-                timeout=8.0,
+                timeout=6.0,
             )
         except asyncio.TimeoutError:
             live = {"ok": False, "error": "live calc timeout (>8s)"}
@@ -11467,123 +12018,127 @@ async def mt5_upload_candles(request: MT5CandlesRequest):
     """
     Endpoint pour que MT5 envoie les candles FRAÎCHES à l'API.
 
-    Ces candles seront utilisées par GOMSignalsLiveCalculator à la place du CSV/Deriv.
+    Le traitement lourd (DataFrame, purge cache, spike scan) est déplacé
+    dans l'executor pour ne pas bloquer l'event loop asyncio.
 
-    Format:
-    POST /mt5/upload-candles
-    {
-        "symbol": "XAUUSD",
-        "timeframe": "M15",
-        "candles": [
-            {"time": 1718049000, "open": 2345.50, "high": 2346.80, "low": 2345.10, "close": 2346.20, "volume": 1000},
-            ...
-        ]
-    }
+    FIX 2026-09-06 : handler sync pur était le goulot d'étranglement — les
+    EAs uploadaient des centaines de candles toutes les 2-5s × 15 charts,
+    affamant l'event loop et tuant /health + poller + GET dashboard.
     """
     try:
-        symbol = _resolve_symbol(request.symbol) or request.symbol
+        raw_symbol = request.symbol or ""
+        symbol = _resolve_symbol(raw_symbol) or raw_symbol
         timeframe = request.timeframe
 
-        # Convertir les candles en DataFrame
-        candles_data = []
-        for candle in request.candles:
-            candles_data.append({
-                'time': pd.to_datetime(candle.time, unit='s'),
-                'open': candle.open,
-                'high': candle.high,
-                'low': candle.low,
-                'close': candle.close,
-                'volume': candle.volume
-            })
+        candles_data = [
+            {
+                'time': pd.to_datetime(c.time, unit='s'),
+                'open': c.open,
+                'high': c.high,
+                'low': c.low,
+                'close': c.close,
+                'volume': c.volume,
+            }
+            for c in request.candles
+        ]
 
-        df = pd.DataFrame(candles_data)
-        df.set_index('time', inplace=True)
-
-        # Stocker en cache
-        if symbol not in _mt5_candles_cache:
-            _mt5_candles_cache[symbol] = {}
-
-        try:
-            from gom_live_calculator import normalize_tf_key as _gom_norm_tf
-            canon = _gom_norm_tf(timeframe)
-        except ImportError:
-            _alias = {"M1": "1", "M5": "5", "M15": "15", "H1": "60", "H4": "240", "D1": "D", "W1": "W"}
-            canon = _alias.get(str(timeframe).upper(), timeframe)
-
-        _mt5_candles_cache[symbol][timeframe] = df
-        _mt5_candles_cache[symbol][canon] = df
-
-        raw_sym = (request.symbol or "").strip()
-        if raw_sym and raw_sym != symbol:
-            if raw_sym not in _mt5_candles_cache:
-                _mt5_candles_cache[raw_sym] = {}
-            _mt5_candles_cache[raw_sym][timeframe] = df
-            _mt5_candles_cache[raw_sym][canon] = df
-
-        if GOM_LIVE_CALCULATOR_AVAILABLE and _gom_live_calc:
-            _gom_live_calc.clear_symbol_cache(symbol)
-            if raw_sym and raw_sym != symbol:
-                _gom_live_calc.clear_symbol_cache(raw_sym)
-        sym_upper = str(symbol).upper()
-        for cache_key in list(_gom_cache.keys()):
-            if cache_key.split(":")[0].upper() == sym_upper:
-                del _gom_cache[cache_key]
-
-        logger.info(f"✅ MT5 candles received: {symbol} {timeframe}→{canon} ({len(df)} candles)")
-        logger.debug(f"   Last candle: {df['close'].iloc[-1]:.2f} @ {df.index[-1]}")
-
-        # ── Spike Chain Scanner : analyser M1 pour chaînes de spikes ──
-        spike_chain_alerts = []
-        if SPIKE_CHAIN_AVAILABLE and _spike_chain_scanner and str(timeframe).upper() == "M1":
+        def _process_upload():
             try:
-                candles_list = []
-                for idx, row in df.iterrows():
-                    ts_val = int(idx.timestamp()) if hasattr(idx, 'timestamp') else 0
-                    candles_list.append({
-                        "time": ts_val,
-                        "open": float(row["open"]),
-                        "high": float(row["high"]),
-                        "low": float(row["low"]),
-                        "close": float(row["close"]),
-                        "volume": float(row.get("volume", 0)),
-                    })
-                spike_chain_alerts = _spike_chain_scanner.process_candles(symbol, candles_list)
-                if spike_chain_alerts:
-                    logger.info(f"[SPIKE-CHAIN] {len(spike_chain_alerts)} alerte(s) sur {symbol}")
-                    for alert in spike_chain_alerts:
-                        alert_dict = {
-                            "alert_id": alert.alert_id,
-                            "symbol": alert.symbol,
-                            "direction": alert.direction,
-                            "chain_length": alert.chain_length,
-                            "gom_verdict": alert.gom_verdict,
-                            "gom_verdict_num": alert.gom_verdict_num,
-                            "gom_ok": alert.gom_ok,
-                            "last_price": alert.last_price,
-                            "price_pullback_pct": alert.price_pullback_pct,
-                            "correction_state": alert.correction_state,
-                            "avg_body_atr": alert.avg_body_atr,
-                            "timestamp": alert.timestamp,
-                        }
-                        # Push WebSocket (non-blocking)
-                        try:
-                            import asyncio as _asyncio_check
-                            if _asyncio_check.get_event_loop().is_running():
-                                _asyncio_check.ensure_future(_spike_chain_push_alert(alert_dict))
-                        except Exception:
-                            pass
-            except Exception as _sc_err:
-                logger.warning(f"[SPIKE-CHAIN] Erreur scan {symbol}: {_sc_err}")
+                df = pd.DataFrame(candles_data)
+                df.set_index('time', inplace=True)
 
-        return {
-            "ok": True,
-            "symbol": symbol,
-            "timeframe": timeframe,
-            "candles_count": len(df),
-            "last_price": float(df['close'].iloc[-1]),
-            "spike_chain_alerts": len(spike_chain_alerts),
-            "timestamp": datetime.now(timezone.utc).isoformat()
-        }
+                if symbol not in _mt5_candles_cache:
+                    _mt5_candles_cache[symbol] = {}
+
+                try:
+                    from gom_live_calculator import normalize_tf_key as _gom_norm_tf
+                    canon = _gom_norm_tf(timeframe)
+                except ImportError:
+                    _alias = {"M1": "1", "M5": "5", "M15": "15", "H1": "60", "H4": "240", "D1": "D", "W1": "W"}
+                    canon = _alias.get(str(timeframe).upper(), timeframe)
+
+                _mt5_candles_cache[symbol][timeframe] = df
+                _mt5_candles_cache[symbol][canon] = df
+
+                if raw_symbol and raw_symbol != symbol:
+                    if raw_symbol not in _mt5_candles_cache:
+                        _mt5_candles_cache[raw_symbol] = {}
+                    _mt5_candles_cache[raw_symbol][timeframe] = df
+                    _mt5_candles_cache[raw_symbol][canon] = df
+
+                if GOM_LIVE_CALCULATOR_AVAILABLE and _gom_live_calc:
+                    _gom_live_calc.clear_symbol_cache(symbol)
+                    if raw_symbol and raw_symbol != symbol:
+                        _gom_live_calc.clear_symbol_cache(raw_symbol)
+
+                sym_upper = str(symbol).upper()
+                for cache_key in list(_gom_cache.keys()):
+                    if cache_key.split(":")[0].upper() == sym_upper:
+                        del _gom_cache[cache_key]
+
+                logger.info(f"✅ MT5 candles received: {symbol} {timeframe}→{canon} ({len(df)} candles)")
+                logger.debug(f"   Last candle: {df['close'].iloc[-1]:.2f} @ {df.index[-1]}")
+
+                spike_chain_alerts = []
+                if SPIKE_CHAIN_AVAILABLE and _spike_chain_scanner and str(timeframe).upper() == "M1":
+                    try:
+                        candles_list = [
+                            {
+                                "time": int(idx.timestamp()) if hasattr(idx, 'timestamp') else 0,
+                                "open": float(row["open"]),
+                                "high": float(row["high"]),
+                                "low": float(row["low"]),
+                                "close": float(row["close"]),
+                                "volume": float(row.get("volume", 0)),
+                            }
+                            for idx, row in df.iterrows()
+                        ]
+                        spike_chain_alerts = _spike_chain_scanner.process_candles(symbol, candles_list)
+                        if spike_chain_alerts:
+                            logger.info(f"[SPIKE-CHAIN] {len(spike_chain_alerts)} alerte(s) sur {symbol}")
+                            for alert in spike_chain_alerts:
+                                alert_dict = {
+                                    "alert_id": alert.alert_id,
+                                    "symbol": alert.symbol,
+                                    "direction": alert.direction,
+                                    "chain_length": alert.chain_length,
+                                    "gom_verdict": alert.gom_verdict,
+                                    "gom_verdict_num": alert.gom_verdict_num,
+                                    "gom_ok": alert.gom_ok,
+                                    "last_price": alert.last_price,
+                                    "price_pullback_pct": alert.price_pullback_pct,
+                                    "correction_state": alert.correction_state,
+                                    "avg_body_atr": alert.avg_body_atr,
+                                    "timestamp": alert.timestamp,
+                                }
+                                try:
+                                    import asyncio as _asyncio_check
+                                    if _asyncio_check.get_event_loop().is_running():
+                                        _asyncio_check.ensure_future(_spike_chain_push_alert(alert_dict))
+                                except Exception:
+                                    pass
+                    except Exception as _sc_err:
+                        logger.warning(f"[SPIKE-CHAIN] Erreur scan {symbol}: {_sc_err}")
+
+                return {
+                    "ok": True,
+                    "symbol": symbol,
+                    "timeframe": timeframe,
+                    "candles_count": len(df),
+                    "last_price": float(df['close'].iloc[-1]),
+                    "spike_chain_alerts": len(spike_chain_alerts),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+            except Exception as inner_e:
+                logger.error(f"❌ Error in /mt5/upload-candles: {inner_e}", exc_info=True)
+                return {
+                    "ok": False,
+                    "error": str(inner_e),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(_gom_executor, _process_upload)
 
     except Exception as e:
         logger.error(f"❌ Error in /mt5/upload-candles: {e}", exc_info=True)
@@ -12394,12 +12949,22 @@ async def _fetch_ml_metrics_from_supabase() -> Dict[str, Any]:
     try:
         import httpx
         headers = {"apikey": supabase_key, "Authorization": f"Bearer {supabase_key}"}
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            r = await client.get(
+        # Client HTTPS global lazy : ne pas recréer httpx.AsyncClient() à chaque
+        # appel (sa création charge le contexte SSL = blocage de l'event loop).
+        global _SUPABASE_HTTP_CLIENT
+        if _SUPABASE_HTTP_CLIENT is None:
+            _SUPABASE_HTTP_CLIENT = httpx.AsyncClient(
+                timeout=httpx.Timeout(5.0, connect=3.0),
+                limits=httpx.Limits(max_connections=2, max_keepalive_connections=1),
+            )
+        r = await asyncio.wait_for(
+            _SUPABASE_HTTP_CLIENT.get(
                 f"{supabase_url}/rest/v1/model_metrics",
                 params={"order": "training_date.desc", "limit": "500"},
                 headers=headers,
-            )
+            ),
+            timeout=5.0,
+        )
         if r.status_code != 200 or not r.json():
             return {}
         rows = r.json()
@@ -12456,12 +13021,22 @@ async def _fetch_ml_metrics_for_symbol_from_supabase(symbol: str, timeframe: str
     try:
         import httpx
         headers = {"apikey": supabase_key, "Authorization": f"Bearer {supabase_key}"}
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            r = await client.get(
+        # Client HTTPS global lazy : ne pas recréer httpx.AsyncClient() à chaque
+        # /ml/metrics (sa création charge le contexte SSL = blocage de l'event loop).
+        global _SUPABASE_HTTP_CLIENT
+        if _SUPABASE_HTTP_CLIENT is None:
+            _SUPABASE_HTTP_CLIENT = httpx.AsyncClient(
+                timeout=httpx.Timeout(5.0, connect=3.0),
+                limits=httpx.Limits(max_connections=2, max_keepalive_connections=1),
+            )
+        r = await asyncio.wait_for(
+            _SUPABASE_HTTP_CLIENT.get(
                 f"{supabase_url}/rest/v1/model_metrics",
                 params={"symbol": f"eq.{symbol}", "timeframe": f"eq.{timeframe}", "order": "training_date.desc", "limit": "1"},
                 headers=headers,
-            )
+            ),
+            timeout=5.0,
+        )
         if r.status_code != 200 or not r.json():
             return None
         row = r.json()[0]
@@ -13235,44 +13810,56 @@ async def divergence_stats(symbol: str = Query(..., description="Symbol to analy
         logger.error(f"divergence/stats error: {e}")
         return {"ok": False, "reason": str(e)}
 
+# Cache local (mémoire) + timeout pour /prediction-channel — aucun appel réseau.
+_PREDICTION_CHANNEL_TIMEOUT = 8.0
+_PREDICTION_CHANNEL_TTL = 15.0
+_prediction_channel_cache: Dict[str, Any] = {}
+
 @app.get("/prediction-channel")
 async def prediction_channel(symbol: Optional[str] = None, timeframe: str = "M1", future_bars: int = 5000):
     """
     Canal de prédiction du prix sur les N prochaines bougies (jusqu'à 5000).
-    Analyse historique + régression linéaire + métriques Supabase pour feedback / amélioration.
+    Analyse historique + régression linéaire. Calcul local (aucun appel réseau
+    bloquant) exécuté en thread avec timeout, puis fallback rapide via cache.
     """
     if not symbol or not symbol.strip():
         return {"ok": False, "reason": "symbol required"}
     symbol = symbol.strip()
-
-    # 1) Essayer de renvoyer un canal persistant depuis Supabase (si disponible)
     try:
-        supabase_url = os.getenv("SUPABASE_URL", "").strip()
-        supabase_key = (os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_SERVICE_KEY") or os.getenv("SUPABASE_ANON_KEY") or "").strip()
-        if supabase_url and supabase_key:
-            import httpx
-            headers = {"apikey": supabase_key, "Authorization": f"Bearer {supabase_key}"}
-            params = {
-                "symbol": f"eq.{symbol}",
-                "timeframe": f"eq.{timeframe}",
-                "order": "time_start.desc",
-                "limit": "1",
-            }
-            async with httpx.AsyncClient(timeout=5.0) as client:
-                r = await client.get(f"{supabase_url}/rest/v1/prediction_channels", params=params, headers=headers)
-            if r.status_code == 200 and r.json():
-                row = r.json()[0]
-                row["ok"] = True
-                row["source"] = "supabase"
-                return row
-    except Exception as e:
-        logger.debug("prediction-channel persist fetch: %s", e)
+        future_bars = min(max(1, int(future_bars)), 5000)
+    except (TypeError, ValueError):
+        future_bars = 5000
 
-    # 2) Sinon calculer (et la fonction tente déjà une sauvegarde Supabase)
-    result = get_prediction_channel_5000(symbol, timeframe, future_bars)
-    if isinstance(result, dict):
+    cache_key = f"{symbol}|{timeframe}|{future_bars}"
+    _now = time.time()
+    cached = _prediction_channel_cache.get(cache_key)
+    if cached and _now - cached.get("_ts", 0) < _PREDICTION_CHANNEL_TTL:
+        out = dict(cached)
+        out["source"] = "cache"
+        return out
+
+    try:
+        result = await asyncio.wait_for(
+            asyncio.to_thread(get_prediction_channel_5000, symbol, timeframe, future_bars),
+            timeout=_PREDICTION_CHANNEL_TIMEOUT,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(f"prediction-channel timed out ({_PREDICTION_CHANNEL_TIMEOUT}s) for {symbol}")
+        return {"ok": False, "reason": "timeout", "symbol": symbol, "timeframe": timeframe, "source": "error"}
+    except Exception as e:
+        logger.error(f"prediction-channel error for {symbol}: {e}")
+        return {"ok": False, "reason": str(e)[:200], "symbol": symbol, "timeframe": timeframe, "source": "error"}
+
+    if not isinstance(result, dict):
+        return {"ok": False, "reason": "invalid result", "symbol": symbol, "timeframe": timeframe, "source": "error"}
+
+    if result.get("ok"):
         result.setdefault("source", "computed")
-    return result
+        _prediction_channel_cache[cache_key] = {**result, "_ts": _now}
+        return result
+
+    return {"ok": False, "reason": result.get("reason", "computation failed"),
+            "symbol": symbol, "timeframe": timeframe, "source": "error"}
 
 
 def _get_trend_data(symbol: str, timeframe: str, count: int):
@@ -14880,7 +15467,7 @@ async def decision(req: Request):
             reason += f" [IA v2 {v2_action.upper()} {v2_conf*100:.0f}%]"
 
         # Funnel comme validation secondaire (moins forçant)
-        funnel = compute_mtf_funnel_decision(request)
+        funnel = await asyncio.to_thread(compute_mtf_funnel_decision, request)
         f_action = funnel.get("action", "hold")
         f_conf = float(funnel.get("confidence", 0.5))
         if f_action == action and f_action != "hold":
@@ -17750,7 +18337,7 @@ async def _fetch_symbol_behavior_profile(symbol: str, timeframe: str = "M1") -> 
         supabase_url, supabase_key = _get_supabase_config(strict=True)
         import httpx
         headers = {"apikey": supabase_key, "Authorization": f"Bearer {supabase_key}"}
-        async with httpx.AsyncClient(timeout=8.0) as client:
+        async with httpx.AsyncClient(timeout=6.0\) as client:
             r_pat = await client.get(
                 f"{supabase_url}/rest/v1/symbol_correction_patterns",
                 headers=headers,
@@ -17842,7 +18429,7 @@ async def _store_prediction_run_to_supabase(
                 "level_ref": float(cdl.get("level_ref", 0.0)),
             })
 
-        async with httpx.AsyncClient(timeout=8.0) as client:
+        async with httpx.AsyncClient(timeout=6.0\) as client:
             r1 = await client.post(f"{supabase_url}/rest/v1/prediction_runs", headers=headers, json=run_payload)
             if r1.status_code >= 300:
                 logger.warning(f"prediction_runs insert skipped: {r1.status_code} {r1.text[:200]}")
@@ -18336,7 +18923,7 @@ async def get_symbol_prediction_score(symbol: str, timeframe: str = "M1", days: 
             "limit": str(d),
             "select": "day,direction_hit_rate,avg_mae,score,samples",
         }
-        async with httpx.AsyncClient(timeout=8.0) as client:
+        async with httpx.AsyncClient(timeout=6.0\) as client:
             r = await client.get(f"{supabase_url}/rest/v1/symbol_prediction_score_daily", headers=headers, params=params)
         if r.status_code >= 300:
             raise HTTPException(status_code=502, detail=f"Supabase error: {r.status_code}")
@@ -20751,15 +21338,20 @@ async def api_ml_metrics(symbol: str, timeframe: str = "M1"):
     }
 
 def _detect_chart_patterns_from_df(df: pd.DataFrame) -> Dict[str, Any]:
-    """Détection légère de figures chartistes + chandeliers pour décision/signal."""
+    """Détection complète de figures chartistiques classiques + chandeliers pour décision/signal."""
     out: Dict[str, Any] = {
         "pattern_name": "NONE",
         "direction": "NEUTRAL",
         "score": 0.0,
         "zone_low": None,
         "zone_high": None,
+        "channel_upper": None,
+        "channel_lower": None,
+        "channel_slope": 0.0,
+        "channel_type": "NONE",
+        "breakout_direction": None,
     }
-    if df is None or len(df) < 30:
+    if df is None or len(df) < 50:
         return out
 
     d = df.copy()
@@ -20767,6 +21359,7 @@ def _detect_chart_patterns_from_df(df: pd.DataFrame) -> Dict[str, Any]:
         if col not in d.columns:
             return out
 
+    # === PATTERNS CHANDELIERS (court terme) ===
     c0 = d.iloc[-1]
     c1 = d.iloc[-2]
     body0 = abs(float(c0["close"]) - float(c0["open"]))
@@ -20802,9 +21395,149 @@ def _detect_chart_patterns_from_df(df: pd.DataFrame) -> Dict[str, Any]:
     elif shooting and float(c0["close"]) < float(c0["open"]):
         out.update({"pattern_name": "Shooting Star", "direction": "SELL", "score": 0.54})
 
+    # === PATTERNS CHARTISTIQUES CLASSIQUES ===
+    recent = d.tail(50)
+    highs = recent["high"].values
+    lows = recent["low"].values
+    closes = recent["close"].values
+    
+    # Détection des pics (peaks) et creux (troughs)
+    peaks, _ = find_peaks(highs, distance=5)
+    troughs, _ = find_peaks([-x for x in lows], distance=5)
+    
+    # DOUBLE TOP / DOUBLE BOTTOM
+    if len(peaks) >= 2:
+        peak_vals = [highs[p] for p in peaks[-2:]]
+        if abs(peak_vals[0] - peak_vals[1]) / peak_vals[0] < 0.01:  # 1% tolerance
+            valley_between = lows[peaks[-2]:peaks[-1]].min()
+            if valley_between < min(peak_vals) * 0.98:
+                out.update({"pattern_name": "Double Top", "direction": "SELL", "score": 0.70})
+    
+    if len(troughs) >= 2:
+        trough_vals = [lows[t] for t in troughs[-2:]]
+        if abs(trough_vals[0] - trough_vals[1]) / trough_vals[0] < 0.01:
+            peak_between = highs[troughs[-2]:troughs[-1]].max()
+            if peak_between > max(trough_vals) * 1.02:
+                out.update({"pattern_name": "Double Bottom", "direction": "BUY", "score": 0.70})
+    
+    # HEAD & SHOULDERS (inversé aussi)
+    if len(peaks) >= 3:
+        h1, h2, h3 = [highs[peaks[i]] for i in [-3, -2, -1]]
+        if h2 > h1 and h2 > h3 and abs(h1 - h3) / h1 < 0.02:
+            neck = min(lows[peaks[-3]:peaks[-1]])
+            if float(c0["close"]) < neck:
+                out.update({"pattern_name": "Head & Shoulders", "direction": "SELL", "score": 0.75})
+    
+    if len(troughs) >= 3:
+        l1, l2, l3 = [lows[troughs[i]] for i in [-3, -2, -1]]
+        if l2 < l1 and l2 < l3 and abs(l1 - l3) / l1 < 0.02:
+            neck = max(highs[troughs[-3]:troughs[-1]])
+            if float(c0["close"]) > neck:
+                out.update({"pattern_name": "Inverse Head & Shoulders", "direction": "BUY", "score": 0.75})
+    
+    # === CANAUX / CHANNELS ===
+    # Détection de canal par régression linéaire sur highs et lows
+    x = np.arange(len(recent))
+    
+    # Canal supérieur (régression sur highs)
+    slope_upper, intercept_upper, _, _, _ = stats.linregress(x, highs)
+    upper_line = slope_upper * x + intercept_upper
+    
+    # Canal inférieur (régression sur lows)
+    slope_lower, intercept_lower, _, _, _ = stats.linregress(x, lows)
+    lower_line = slope_lower * x + lower_line
+    
+    # Déterminer le type de canal
+    avg_slope = (slope_upper + slope_lower) / 2
+    channel_width = np.mean(upper_line - lower_line)
+    avg_price = np.mean(closes)
+    width_pct = channel_width / avg_price
+    
+    if width_pct > 0.005:  # Canal significatif (>0.5%)
+        if abs(avg_slope) < 0.001:
+            channel_type = "HORIZONTAL"
+        elif avg_slope > 0:
+            channel_type = "RISING"
+        else:
+            channel_type = "FALLING"
+        
+        out.update({
+            "channel_upper": float(upper_line[-1]),
+            "channel_lower": float(lower_line[-1]),
+            "channel_slope": float(avg_slope),
+            "channel_type": channel_type,
+        })
+        
+        # Détection de breakout
+        current_close = float(c0["close"])
+        if current_close > upper_line[-1] * 1.002:  # 0.2% au-dessus
+            out.update({
+                "pattern_name": f"{channel_type} Channel Breakout",
+                "direction": "BUY",
+                "score": 0.68,
+                "breakout_direction": "UP",
+            })
+        elif current_close < lower_line[-1] * 0.998:  # 0.2% en-dessous
+            out.update({
+                "pattern_name": f"{channel_type} Channel Breakout",
+                "direction": "SELL",
+                "score": 0.68,
+                "breakout_direction": "DOWN",
+            })
+    
+    # === TRIANGLES ===
+    # Triangle ascendant: lows qui montent, highs stables
+    if len(peaks) >= 2 and len(troughs) >= 2:
+        recent_highs = [highs[p] for p in peaks[-3:]]
+        recent_lows = [lows[t] for t in troughs[-3:]]
+        
+        # Triangle ascendant
+        if np.std(recent_highs) / np.mean(recent_highs) < 0.005 and np.polyfit(range(len(recent_lows)), recent_lows, 1)[0] > 0:
+            out.update({"pattern_name": "Ascending Triangle", "direction": "BUY", "score": 0.65})
+        
+        # Triangle descendant
+        elif np.std(recent_lows) / np.mean(recent_lows) < 0.005 and np.polyfit(range(len(recent_highs)), recent_highs, 1)[0] < 0:
+            out.update({"pattern_name": "Descending Triangle", "direction": "SELL", "score": 0.65})
+        
+        # Triangle symétrique
+        elif np.polyfit(range(len(recent_highs)), recent_highs, 1)[0] < 0 and np.polyfit(range(len(recent_lows)), recent_lows, 1)[0] > 0:
+            out.update({"pattern_name": "Symmetrical Triangle", "direction": "NEUTRAL", "score": 0.55})
+    
+    # === FLAGS & PENNANTS ===
+    # Flag: mouvement fort suivi de consolidation parallèle
+    if len(recent) >= 20:
+        # Détecter le "pole" (mouvement fort)
+        pole = recent.iloc[:10]
+        flag = recent.iloc[10:]
+        
+        pole_move = (pole["close"].iloc[-1] - pole["close"].iloc[0]) / pole["close"].iloc[0]
+        flag_width = (flag["high"].max() - flag["low"].min()) / flag["close"].mean()
+        
+        if abs(pole_move) > 0.02 and flag_width < 0.008:  # Mouvement >2% et consolidation étroite
+            if pole_move > 0:
+                out.update({"pattern_name": "Bullish Flag", "direction": "BUY", "score": 0.64})
+            else:
+                out.update({"pattern_name": "Bearish Flag", "direction": "SELL", "score": 0.64})
+    
+    # === WEDGES ===
+    # Rising Wedge: highs et lows qui montent mais convergent
+    if len(peaks) >= 3 and len(troughs) >= 3:
+        recent_highs = [highs[p] for p in peaks[-3:]]
+        recent_lows = [lows[t] for t in troughs[-3:]]
+        
+        slope_highs = np.polyfit(range(len(recent_highs)), recent_highs, 1)[0]
+        slope_lows = np.polyfit(range(len(recent_lows)), recent_lows, 1)[0]
+        
+        if slope_highs > 0 and slope_lows > 0 and slope_highs < slope_lows:
+            out.update({"pattern_name": "Rising Wedge", "direction": "SELL", "score": 0.66})
+        elif slope_highs < 0 and slope_lows < 0 and slope_highs > slope_lows:
+            out.update({"pattern_name": "Falling Wedge", "direction": "BUY", "score": 0.66})
+    
+    # Zones de support/résistance (25 dernières bougies)
     w = d.tail(25)
     out["zone_low"] = float(w["low"].min())
     out["zone_high"] = float(w["high"].max())
+    
     return out
 
 
@@ -22167,9 +22900,9 @@ async def chart_opportunity_scan(request_data: Dict[str, Any]):
             action = "SELL"
 
         # GOM prime sur le technique
-        if gom_connected and gom_vn >= 3:
+        if gom_connected and gom_vn >= 2:
             action = "BUY"
-        elif gom_connected and gom_vn <= -3:
+        elif gom_connected and gom_vn <= -2:
             action = "SELL"
         elif gom_connected and gom_vn == 0:
             action = "HOLD"
@@ -22222,7 +22955,7 @@ async def chart_opportunity_scan(request_data: Dict[str, Any]):
         best = max(opportunities, key=lambda o: o["score"]) if opportunities else None
         best_id = best["id"] if best else "NONE"
 
-        gom_dir = "BUY" if gom_vn >= 3 else ("SELL" if gom_vn <= -3 else "")
+        gom_dir = "BUY" if gom_vn >= 2 else ("SELL" if gom_vn <= -2 else "")
         direction_ok = (action in ("BUY", "SELL") and gom_dir == action)
         blink_ok = blink_confirmed and blink_action == action
         zone_ok = bool(best and (best.get("at_level") or best.get("distance", 1e9) <= tol * 2.5))
@@ -22438,14 +23171,17 @@ async def validate_order(order_data: Dict[str, Any]):
             # BUY/SELL, GOOD BUY/SELL ou PERFECT BUY/SELL. Jamais WAIT.
             gom_store = _GOM_VERDICT_STORE.get(str(symbol).upper(), {})
             gom_vn = int(gom_store.get("verdict_num", 0) or 0)
+            # Règle stricte commune avec l'EA : SIMPLE est toujours bloqué,
+            # y compris sur Boom/Crash/GainX/PainX.
+            _min_vn = MIN_GOM_VERDICT_NUM_ABS
             if gom_vn == 0:
-                return {"valid": False, "reason": "GOM WAIT (vn=0) — AUCUN ORDRE autorisé"}
-            if abs(gom_vn) < MIN_GOM_VERDICT_NUM_ABS:
-                return {"valid": False, "reason": f"GOM vn={gom_vn} — exige BUY/SELL+ (|vn|>={MIN_GOM_VERDICT_NUM_ABS})"}
+               return {"valid": False, "reason": "GOM WAIT (vn=0) — AUCUN ORDRE autorisé"}
+            if abs(gom_vn) < _min_vn:
+                return {"valid": False, "reason": f"GOM vn={gom_vn} — exige BUY/SELL+ (|vn|>={_min_vn})"}
             d = (order_type or "").upper()
-            if d in ("BUY", "LONG") and gom_vn < MIN_GOM_VERDICT_NUM_ABS:
+            if d in ("BUY", "LONG") and gom_vn < _min_vn:
                 return {"valid": False, "reason": f"GOM vn={gom_vn} oppose BUY"}
-            if d in ("SELL", "SHORT") and gom_vn > -MIN_GOM_VERDICT_NUM_ABS:
+            if d in ("SELL", "SHORT") and gom_vn > -_min_vn:
                 return {"valid": False, "reason": f"GOM vn={gom_vn} oppose SELL"}
             
             # Vérifier les stops
@@ -24980,19 +25716,26 @@ async def gold_lstm_train(force: bool = False):
 async def get_symbols():
     """Retourne la liste des symboles du Market Watch MT5 (priorité) + Deriv"""
     try:
-        import MetaTrader5 as mt5
-
+        # FIX 2026-08-28 : cet endpoint faisait mt5.initialize()+shutdown()
+        # bruts à chaque appel, sans path ni broker — cela pouvait couper la
+        # connexion active d'un AUTRE terminal dans ce même process pile
+        # pendant un calcul de verdict GOM. Route désormais vers chaque
+        # worker (déjà connecté en permanence, aucun shutdown déclenché ici).
         mt5_symbols = []
         mt5_available = False
-
-        # Essayer de récupérer les symboles MT5 du Market Watch
         try:
-            if mt5.initialize():
-                mt5_available = True
-                symbols = mt5.symbols_get()
-                if symbols:
-                    mt5_symbols = [s.name for s in symbols if s.visible]
-                mt5.shutdown()
+            from mt5_candles_fetcher import discover_symbols_via_api
+            seen: set[str] = set()
+            per_broker = await asyncio.gather(*[
+                asyncio.to_thread(discover_symbols_via_api, broker, True, False)
+                for broker in ("deriv", "weltrade", "startrader", "xmglobal")
+            ])
+            for names in per_broker:
+                for name in names:
+                    if name.upper() not in seen:
+                        seen.add(name.upper())
+                        mt5_symbols.append(name)
+            mt5_available = bool(mt5_symbols)
         except Exception as e:
             logger.debug(f"MT5 non disponible: {e}")
 
@@ -25028,45 +25771,18 @@ async def get_symbols():
 def get_mt5_ohlc(symbol: str, timeframe: str = "D1", count: int = 30) -> Optional[pd.DataFrame]:
     """
     Récupère les données OHLCV depuis MT5 pour un symbole et timeframe donnés.
-    Returns pd.DataFrame avec colonnes: time, open, high, low, close, tick_volume, real_volume, spread
+    Returns pd.DataFrame avec colonnes: open, high, low, close, volume
+
+    FIX 2026-08-28 : faisait auparavant mt5.initialize()+shutdown() bruts à
+    chaque appel (et cette fonction est appelée en boucle, une fois par
+    symbole, dans /symbols/daily-candidates) — route désormais via
+    fetch_mt5_candles (worker permanent du bon broker, aucun coût de
+    connexion par appel).
     """
     try:
-        import MetaTrader5 as mt5
-
-        if not mt5.initialize():
-            logger.debug(f"MT5 init failed for {symbol}")
-            return None
-
-        # Map timeframe string to MT5 constant
-        tf_map = {
-            "M1": mt5.TIMEFRAME_M1,
-            "M5": mt5.TIMEFRAME_M5,
-            "M15": mt5.TIMEFRAME_M15,
-            "M30": mt5.TIMEFRAME_M30,
-            "H1": mt5.TIMEFRAME_H1,
-            "H4": mt5.TIMEFRAME_H4,
-            "D1": mt5.TIMEFRAME_D1,
-            "W1": mt5.TIMEFRAME_W1,
-            "MN": mt5.TIMEFRAME_MN1,
-        }
-
-        mt5_tf = tf_map.get(timeframe.upper(), mt5.TIMEFRAME_D1)
-
-        # Fetch OHLC bars
-        rates = mt5.copy_rates_from_pos(symbol, mt5_tf, 0, count)
-        mt5.shutdown()
-
-        if rates is None or len(rates) == 0:
-            logger.debug(f"No rates returned for {symbol} {timeframe}")
-            return None
-
-        # Convert to DataFrame
-        df = pd.DataFrame(rates)
-        df['time'] = pd.to_datetime(df['time'], unit='s')
-        df.set_index('time', inplace=True)
-
+        from mt5_candles_fetcher import fetch_mt5_candles
+        df = fetch_mt5_candles(symbol, timeframe.upper(), count)
         return df
-
     except Exception as e:
         logger.debug(f"get_mt5_ohlc error for {symbol} {timeframe}: {e}")
         return None
@@ -26685,10 +27401,114 @@ _WIN_STREAK_PAUSE_UNTIL: float = 0.0
 
 # Gate probabilité élevée (anti-hazard)
 MIN_ENTRY_PROBABILITY_PCT = 72.0
-MIN_GOM_VERDICT_NUM_ABS = 1   # 1 = BUY/SELL+ autorisés (WAIT=vn0 interdit), 2 = GOOD/PERFECT only
+MIN_GOM_VERDICT_NUM_ABS = 2   # GOOD/PERFECT uniquement ; SIMPLE et WAIT bloqués
 HIGH_PROB_BC_MIN_CONF = 70.0
 MIN_COG_STRENGTH = 0.50
 MIN_COG_CONFIDENCE = 0.55
+
+
+def _annotate_gom_entry_contract(record: dict) -> dict:
+    """Expose clairement si le verdict peut être exécuté par l'EA."""
+    try:
+        vn = int(record.get("verdict_num") or 0)
+    except (TypeError, ValueError):
+        vn = 0
+    # Règle stricte commune avec l'EA : aucun SIMPLE, quel que soit le symbole.
+    min_vn = MIN_GOM_VERDICT_NUM_ABS
+    allowed = abs(vn) >= min_vn
+    record["entry_allowed"] = allowed
+    if not allowed:
+        record["entry_block_reason"] = (
+            f"SIMPLE/WAIT : GOOD/PERFECT requis (|verdict_num|={abs(vn)} "
+            f"< {min_vn})"
+        )
+    else:
+        record.pop("entry_block_reason", None)
+    return record
+
+
+# FIX 2026-09-11 (Claude) : réconciliation IA locale (/decision) ↔ verdict GOM.
+# ─────────────────────────────────────────────────────────────────────────
+# /decision calcule sa propre action (RSI/EMA/patterns/ML) totalement indépendamment
+# du pipeline GOM (_calculate_gom_verdict, alimenté par TradingView/MT5 candles).
+# Les deux peuvent donc légitimement diverger (ex: IA=BUY 57% alors que GOM=SELL),
+# ce qui est visible tel quel dans le dashboard MT5 et peut induire l'EA en erreur
+# quand g_lastAIAction est utilisé comme vote de confluence indépendant.
+#
+# Règle : le verdict GOM reste l'autorité qui décide si l'EA peut trader (voir
+# CanPlaceOrderByGOM côté MQL5). Cette fonction force donc l'action IA renvoyée par
+# /decision à ne JAMAIS contredire un verdict GOM actif (vn != 0) pour le même
+# symbole : en cas de conflit, l'action est réalignée sur la direction GOM et la
+# confiance est réduite (le "vote" IA d'origine était faux) ; en cas d'accord,
+# la confiance est légèrement renforcée (double confirmation) ; si GOM=WAIT ou
+# absent, l'IA garde sa lecture propre (rien à réconcilier).
+def _gom_reconcile_decision(symbol: str, action: str, confidence: float, reason: str) -> tuple:
+    """Retourne (action, confidence, reason, meta) avec meta = dict pour la réponse JSON."""
+    meta = {
+        "gom_verdict_num": None,
+        "gom_verdict": None,
+        "gom_aligned": None,
+        "gom_conflict_resolved": False,
+    }
+    try:
+        sym_u = str(symbol or "").upper()
+        store = _GOM_VERDICT_STORE.get(sym_u, {})
+        if not store:
+            return action, confidence, reason, meta
+
+        vn = int(store.get("verdict_num", 0) or 0)
+        gom_label = str(store.get("verdict") or "WAIT").upper()
+        meta["gom_verdict_num"] = vn
+        meta["gom_verdict"] = gom_label
+
+        if vn == 0:
+            # Le verdict GOM est la porte d'entrée : WAIT interdit toute
+            # direction IA tradable, même si le modèle local voit un BUY/SELL.
+            meta["gom_aligned"] = False
+            return "hold", min(float(confidence), 0.0), f"{reason} [GOM=WAIT → HOLD]", meta
+
+        if abs(vn) < MIN_GOM_VERDICT_NUM_ABS:
+            # SIMPLE reste un signal analytique, jamais une autorisation.
+            meta["gom_aligned"] = False
+            return "hold", min(float(confidence), 0.0), f"{reason} [GOM=SIMPLE → HOLD]", meta
+
+        gom_dir = "buy" if vn > 0 else "sell"
+        a = str(action or "hold").lower()
+
+        if a == "hold":
+            # L'IA s'abstient : pas de contradiction directionnelle à corriger,
+            # mais on l'expose pour transparence dashboard/logs.
+            meta["gom_aligned"] = None
+            return action, confidence, reason, meta
+
+        if a == gom_dir:
+            meta["gom_aligned"] = True
+            # Double confirmation IA+GOM : petit bonus de confiance, plafonné.
+            boost = min(0.15, 0.05 * abs(vn))
+            confidence = max(0.0, min(1.0, float(confidence) + boost))
+            reason = f"{reason} [GOM confirmé: {gom_label} vn={vn}]"
+            return action, confidence, reason, meta
+
+        # Contradiction réelle : GOM prime (c'est lui qui gate l'exécution côté EA).
+        old_action = a
+        old_conf = float(confidence)
+        action = gom_dir
+        confidence = min(old_conf, 0.55)  # dégrader : l'analyse locale s'est trompée de sens
+        reason = (
+            f"{reason} [GOM realign: IA voulait {old_action.upper()} "
+            f"({old_conf*100:.0f}%) mais GOM={gom_label} vn={vn} → aligné sur {gom_dir.upper()}]"
+        )
+        meta["gom_aligned"] = False
+        meta["gom_conflict_resolved"] = True
+        logger.warning(
+            f"[GOM-RECONCILE] {sym_u}: IA voulait {old_action.upper()} ({old_conf*100:.0f}%) "
+            f"vs GOM={gom_label} (vn={vn}) → réaligné sur {gom_dir.upper()}"
+        )
+        return action, confidence, reason, meta
+    except Exception as e:
+        logger.error(f"[GOM-RECONCILE] exception: {e}")
+        return action, confidence, reason, meta
+
 
 def _record_win_streak_from_profit(profit: float, symbol: str = "") -> None:
     """Met à jour la série de gains et déclenche la pause performance si seuil atteint."""
@@ -27215,6 +28035,8 @@ def _gom_apply_pine_verdict(record: dict) -> dict:
                 enriched["verdict"] = verdict_text_from_num(new_vn)
             if reason:
                 enriched["price_reality_reason"] = reason
+        from gom_pine_calculator import apply_regime_forecast_to_record
+        apply_regime_forecast_to_record(enriched)
     except Exception as exc:
         logger.debug(f"[GOM-PINE] M1 regate {sym}: {exc}")
 
@@ -27241,6 +28063,21 @@ def _gom_apply_pine_verdict(record: dict) -> dict:
         "bars_since_spike": enriched.get("bars_since_spike"),
         "price_reality_reason": enriched.get("price_reality_reason", ""),
         "m1_last_bar_time": enriched.get("m1_last_bar_time"),
+        "spike_prediction_direction": enriched.get("spike_prediction_direction", "NEUTRAL"),
+        "spike_prediction_confidence": enriched.get("spike_prediction_confidence", 0.0),
+        "spike_prediction_pct": enriched.get("spike_prediction_pct", 0.0),
+        "spike_prediction_ready": enriched.get("spike_prediction_ready", False),
+        "spike_prediction_horizon_bars": enriched.get("spike_prediction_horizon_bars", 0),
+        "spike_prediction_reasons": enriched.get("spike_prediction_reasons", ""),
+        "gom_regime": enriched.get("gom_regime", ""),
+        "gom_forecast_5m": enriched.get("gom_forecast_5m", "NEUT"),
+        "gom_forecast_100": enriched.get("gom_forecast_100", "NEUT"),
+        "gom_forecast_conf": enriched.get("gom_forecast_conf", 0),
+        "gom_regime_reason": enriched.get("gom_regime_reason", ""),
+        "cog_regime": enriched.get("cog_regime", enriched.get("gom_regime", "")),
+        "cog_direction_5m": enriched.get("cog_direction_5m", ""),
+        "cog_direction": enriched.get("cog_direction", enriched.get("cog_direction_5m", "")),
+        "cog_short_confidence": enriched.get("cog_short_confidence", 0),
     })
     return record
 
@@ -27367,12 +28204,11 @@ def _parse_gom_tv_csv(text: str) -> Optional[dict]:
         if spike_trad:
             if bc_dir == 1 or out.get("setup_dir") == 1:
                 out["setup_type"] = "SPIKE_BOOM"
-                out["verdict"] = "GOOD BUY"
-                out["verdict_num"] = 2
             elif bc_dir == -1 or out.get("setup_dir") == -1:
                 out["setup_type"] = "SPIKE_CRASH"
-                out["verdict"] = "GOOD SELL"
-                out["verdict_num"] = -2
+            # spike_tradable décrit un déclencheur, pas un verdict GOM.
+            # Le verdict calculé par les scores/cohérences reste l'autorité.
+            out["spike_trigger_only"] = True
 
     return out
 
@@ -27462,11 +28298,15 @@ def _normalize_gom_record_dirs(record: dict) -> None:
 
 
 def _gom_verdict_max_age_sec() -> float:
-    """Âge max d'un verdict considéré exploitable (défaut 15 min, surcharge via env)."""
+    """Âge max d'un verdict exploitable pour une décision à horizon 60s.
+
+    La valeur reste surchargeable par environnement, mais le défaut court de
+    15 secondes évite qu'un verdict M1 ancien pilote un nouvel ordre.
+    """
     try:
-        return float(os.getenv("GOM_VERDICT_MAX_AGE_SEC", "900"))
+        return float(os.getenv("GOM_VERDICT_MAX_AGE_SEC", "90"))
     except Exception:
-        return 900.0
+        return 90.0
 
 
 def _gom_record_age_sec(record: dict) -> Optional[float]:
@@ -27503,61 +28343,37 @@ def _tf_dir_value_missing(val: Any) -> bool:
 
 
 def _fetch_gom_mtf_snapshot(mt5_symbol: str) -> dict:
-    """Snapshot M1..D1 via copy_rates léger (évite get_mt5_indicators complet)."""
+    """Snapshot M1..D1 — route via mt5_candles_fetcher (broker-aware).
+
+    FIX 2026-08-28 : cette fonction faisait auparavant un mt5.initialize()
+    brut, sans path ni broker. Elle s'attachait donc au terminal actuellement
+    actif dans CE process (potentiellement un tout autre broker que celui du
+    symbole demandé), et pouvait renvoyer les données d'un instrument
+    homonyme sur le mauvais terminal (ex: EURUSD existe à la fois sur
+    StarTrader et XMGlobal). Ces directions par TF contaminées faisaient
+    chuter artificiellement coherence_pct / tf_bull_count, dégradant un
+    verdict PERFECT BUY réel en WAIT. En passant par fetch_mt5_candles
+    (broker résolu via _broker_for_symbol), chaque TF est lu sur le bon
+    terminal, systématiquement.
+    """
     out: dict = {}
     if not mt5_symbol:
         return out
     try:
-        import MetaTrader5 as mt5
+        from mt5_candles_fetcher import fetch_mt5_candles, _broker_for_symbol
     except ImportError:
         return out
-    if not mt5.initialize():
-        return out
 
-    sym = mt5_symbol
-    if mt5.symbol_info(sym) is None:
-        try:
-            from symbol_mapper import resolve_mt5_symbol
-            sym = resolve_mt5_symbol(mt5_symbol) or mt5_symbol
-        except Exception:
-            sym = mt5_symbol
+    broker = _broker_for_symbol(mt5_symbol)
+    tf_map = {"m1": "1", "m5": "5", "m15": "15", "h1": "60", "h4": "240", "d1": "D"}
 
-    tf_map = {
-        "m1": mt5.TIMEFRAME_M1, "m5": mt5.TIMEFRAME_M5, "m15": mt5.TIMEFRAME_M15,
-        "h1": mt5.TIMEFRAME_H1, "h4": mt5.TIMEFRAME_H4, "d1": mt5.TIMEFRAME_D1,
-    }
-
-    def _ema_last(closes: list, period: int):
-        if len(closes) < period:
-            return None
-        mult = 2.0 / (period + 1)
-        ema = sum(closes[:period]) / period
-        for price in closes[period:]:
-            ema = (price - ema) * mult + ema
-        return ema
-
-    def _rsi_last(closes: list, period: int = 14):
-        if len(closes) < period + 1:
-            return None
-        gains, losses = [], []
-        for i in range(1, len(closes)):
-            delta = closes[i] - closes[i - 1]
-            gains.append(max(delta, 0.0))
-            losses.append(max(-delta, 0.0))
-        avg_g = sum(gains[-period:]) / period
-        avg_l = sum(losses[-period:]) / period
-        if avg_l == 0:
-            return 100
-        rs = avg_g / avg_l
-        return int(round(100 - 100 / (1 + rs)))
-
-    for lk, mt5_tf in tf_map.items():
-        rates = mt5.copy_rates_from_pos(sym, mt5_tf, 0, 80)
-        if rates is None or len(rates) == 0:
+    for lk, tf in tf_map.items():
+        df = fetch_mt5_candles(mt5_symbol, tf, 80, broker=broker)
+        if df is None or len(df) == 0:
             continue
-        closes = [float(r[4]) for r in rates]
-        e20 = _ema_last(closes, 20)
-        e50 = _ema_last(closes, 50)
+        closes = df["close"]
+        e20 = closes.ewm(span=20, adjust=False).mean().iloc[-1] if len(closes) >= 20 else None
+        e50 = closes.ewm(span=50, adjust=False).mean().iloc[-1] if len(closes) >= 50 else None
         direction = 0
         if e20 is not None and e50 is not None:
             if e20 > e50 * 1.00005:
@@ -27565,9 +28381,12 @@ def _fetch_gom_mtf_snapshot(mt5_symbol: str) -> dict:
             elif e20 < e50 * 0.99995:
                 direction = -1
         out[f"tf_{lk}_dir"] = _dir_num_to_label(direction)
-        rsi = _rsi_last(closes)
-        if rsi is not None:
-            out[f"tf_{lk}_rsi"] = rsi
+        if len(closes) >= 15:
+            rsi_series = calculate_rsi(closes, 14)
+            if rsi_series is not None and len(rsi_series):
+                rsi_val = rsi_series.iloc[-1]
+                if pd.notna(rsi_val):
+                    out[f"tf_{lk}_rsi"] = int(round(float(rsi_val)))
     return out
 
 
@@ -27618,28 +28437,56 @@ def _enrich_gom_mtf_from_mt5(record: dict, mt5_symbol: str, fetch: bool = True) 
 def _build_gom_mt5_payload(record: dict) -> dict:
     """Payload plat pour SMC_Universal / TradeManager (dashboard GOM)."""
     out = dict(record)
+    sym = record.get("symbol") or out.get("symbol")
 
     # Calculer les tendances multi-TF si pas présentes
-    def infer_tf_dir(bb_mid: float, current_price: float, rsi: int) -> str:
-        """Infère la tendance depuis Bollinger Mid + RSI."""
-        if bb_mid <= 0:
+    def infer_tf_dir(bb_mid: float, price: float, rsi: int) -> str:
+        """Fallback (si MT5/EMA indisponibles) : Bollinger Mid + RSI, sur le PRIX
+        DE MARCHÉ COURANT — jamais le prix d'entrée d'un setup."""
+        if bb_mid <= 0 or price <= 0:
             return "NEUT"
-        if current_price > bb_mid and rsi > 50:
+        if price > bb_mid and rsi > 50:
             return "BULL"
-        if current_price < bb_mid and rsi < 50:
+        if price < bb_mid and rsi < 50:
             return "BEAR"
         return "NEUT"
 
-    # M1, M5, M15, H1, H4, D1 (utiliser RSI + BB disponibles)
-    current_price = record.get("entry", record.get("bb_mid", 0))
+    # BUG CORRIGÉ (2026-09-27, demande Sidoine) : deux défauts faisaient afficher
+    # "down" sur TOUS les TF alors que le verdict était PERFECT BUY :
+    #  1) current_price valait record["entry"] — le prix d'ENTRÉE du setup, qui pour
+    #     un BUY en retracement (OTE/discount) est volontairement SOUS le Bollinger
+    #     mid : ça faisait lire "prix sous le mid" comme baissier alors que c'est un
+    #     signal d'ACHAT normal en zone de discount.
+    #  2) bb_mid était UNE SEULE valeur réutilisée pour les 6 timeframes → seule la
+    #     comparaison prix/mid changeait (jamais par vrai TF), donc les 6 lignes
+    #     tombaient quasi toujours du même côté (ici : toutes BEAR).
+    # Prix de marché réel (jamais le prix d'entrée d'un setup) :
+    current_price = (
+        record.get("current_price")
+        or record.get("price")
+        or record.get("bid")
+        or record.get("close")
+        or record.get("bb_mid", 0)
+    )
+
+    # M1, M5, M15, H1, H4, D1
     for lk, tf_name in [("m1", "M1"), ("m5", "M5"), ("m15", "M15"), ("h1", "H1"), ("h4", "H4"), ("d1", "D1")]:
         dk = f"tf_{lk}_dir"
         if dk not in out or out[dk] == "NEUT" or out[dk] == 0 or out[dk] == "":
-            # Infère depuis RSI + BB Mid
-            rsi_val = record.get(f"tf_{lk}_rsi", 50)
-            bb_mid = record.get("bb_mid", 0)
-            inferred = infer_tf_dir(bb_mid, current_price, int(rsi_val) if rsi_val else 50)
-            out[dk] = inferred if inferred else "NEUT"
+            inferred = "NEUT"
+            # 1) Priorité à une vraie mesure PAR timeframe (EMA20/50 MT5, comme
+            #    dans compute_ia_status_v2) — la seule façon fiable d'avoir 6
+            #    directions réellement indépendantes au lieu d'une seule recopiée.
+            if sym:
+                d = _mtf_dir_from_mt5(str(sym), tf_name)
+                inferred = "BULL" if d > 0 else "BEAR" if d < 0 else "NEUT"
+            # 2) Fallback : BB mid + RSI spécifiques à CE timeframe, sur le prix
+            #    de marché courant (jamais l'entry d'un setup).
+            if inferred == "NEUT":
+                rsi_val = record.get(f"tf_{lk}_rsi", 50)
+                bb_mid_tf = record.get(f"tf_{lk}_bb_mid", record.get("bb_mid", 0))
+                inferred = infer_tf_dir(bb_mid_tf, current_price, int(rsi_val) if rsi_val else 50)
+            out[dk] = inferred
 
         if lk != "global":
             rk = f"tf_{lk}_rsi"
@@ -27675,7 +28522,12 @@ def _build_gom_mt5_payload(record: dict) -> dict:
         "spike_progress_pct", "bars_since_spike", "spike_freq_bars",
         "harmonized_m1", "verdict_mode", "price_reality_reason",
         "price_direction_1b", "price_direction_3b", "price_direction_5b",
+        "m1_forecast_ready", "m1_forecast_direction", "m1_forecast_probability",
+        "m1_forecast_horizon_sec", "m1_forecast_bar_time", "m1_forecast_reason",
         "m1_momentum", "tf_m1_dir_live", "m1_opp_bars", "m1_last_bar_time",
+        "spike_prediction_direction", "spike_prediction_confidence",
+        "spike_prediction_pct", "spike_prediction_ready",
+        "spike_prediction_horizon_bars", "spike_prediction_reasons",
         "path_concordance_pct", "path_concordance",
         "cog_confidence_pct", "cog_strength_pct", "cog_direction", "cog_direction_5m", "cog_direction_15m",
     ):
@@ -27756,6 +28608,11 @@ def _gom_merge_poller_metadata(record: dict, extra: dict) -> None:
         "spike_progress_pct", "m1_max_range_dollars", "m1_adverse_excursion",
         "m1_last_bar_time", "m1_momentum", "tf_m1_dir_live", "m1_opp_bars",
         "price_direction_1b", "price_direction_3b", "price_direction_5b",
+        "m1_forecast_ready", "m1_forecast_direction", "m1_forecast_probability",
+        "m1_forecast_horizon_sec", "m1_forecast_bar_time", "m1_forecast_reason",
+        "spike_prediction_direction", "spike_prediction_confidence",
+        "spike_prediction_pct", "spike_prediction_ready",
+        "spike_prediction_horizon_bars", "spike_prediction_reasons",
         "coherence_ok", "asset_category", "chart_tf", "candle_source",
         "correction_stage", "correction_entry_safe", "correction_phase",
         "correction_type", "correction_exhaustion_pct", "correction_wait",
@@ -27876,6 +28733,25 @@ def _gom_verdict_record_from_payload(payload: GomVerdictPayload, enrich_mt5: boo
             )
         else:
             logger.info(f"  → trust vn={vnum} {record['verdict']} (fast path)")
+        _gom_apply_direction_conflict_veto(record)
+        # Le verdict pré-calculé reste soumis au même contrat d'exécution:
+        # le M1 doit confirmer la direction avant toute autorisation.
+        try:
+            from gom_pine_calculator import apply_m1_execution_gate, verdict_text_from_num
+
+            gated_vnum = apply_m1_execution_gate(record, int(record.get("verdict_num", 0) or 0))
+            if gated_vnum != int(record.get("verdict_num", 0) or 0):
+                record["verdict_num"] = gated_vnum
+                record["verdict"] = verdict_text_from_num(gated_vnum)
+                record["m1_execution_blocked"] = True
+                record["m1_execution_block_reason"] = "M1 absent, neutre ou opposé au verdict pré-calculé"
+        except Exception as exc:
+            logger.warning(f"[GOM-M1-GATE] échec de validation du verdict pré-calculé: {exc}")
+            record["verdict_num"] = 0
+            record["verdict"] = "WAIT"
+            record["m1_execution_blocked"] = True
+            record["m1_execution_block_reason"] = "Validation M1 indisponible"
+        _annotate_gom_entry_contract(record)
         return sym, record
     else:
         _gom_apply_pine_verdict(record)
@@ -27972,15 +28848,91 @@ def _gom_verdict_record_from_payload(payload: GomVerdictPayload, enrich_mt5: boo
         # Recalcul Pine final après enrichissement MTF (hors poller mt5_live)
         _gom_apply_pine_verdict(record)
         _gom_apply_weltrade_verdict_invert(record, sym)
+        from gom_pine_calculator import apply_m1_execution_gate, verdict_text_from_num
+        recalculated_vn = int(record.get("verdict_num", 0) or 0)
+        gated_vn = apply_m1_execution_gate(record, recalculated_vn)
+        if gated_vn != recalculated_vn:
+            record["verdict_num"] = gated_vn
+            record["verdict"] = verdict_text_from_num(gated_vn)
+            record["m1_execution_blocked"] = True
         # FIX-DISCORDANCE-02 : _gom_mtf_uplift_verdict() retiré, doublon du
         # gate pondéré H4/H1/D1 déjà appliqué dans enrich_record() ci-dessus.
+        # FIX-02 : veto final — prédiction vs sentiment contradictoire → WAIT
+        _gom_apply_direction_conflict_veto(record)
     record["data_source"] = str(extra.get("source") or record.get("data_source") or "live_calculation")
+    _annotate_gom_entry_contract(record)
 
     # DEBUG: Verify predictions are in record
     if record.get("pred_bb_mid"):
         logger.info(f"[GOM-Pred-Store] {sym}: storing {len(record.get('pred_bb_mid', []))} pred_bb_mid points")
 
     return sym, record
+
+
+GOM_SENTIMENT_CONFLICT_MIN_GLOBAL_STRENGTH = 38
+
+
+def _gom_prediction_sign(record: dict) -> int:
+    """Signe de la direction prédictive (pred_net, sinon setup_dir). 0 = inconnu."""
+    try:
+        v = int(record.get("pred_net") or 0)
+    except (TypeError, ValueError):
+        v = 0
+    if v == 0:
+        try:
+            v = int(record.get("setup_dir") or 0)
+        except (TypeError, ValueError):
+            v = 0
+    return 0 if v == 0 else (1 if v > 0 else -1)
+
+
+def _gom_market_dir_sign(record: dict) -> int:
+    """Signe de l'état global du marché (tf_global_dir) quand la force est suffisante."""
+    try:
+        strength = int(record.get("tf_global_strength") or 0)
+    except (TypeError, ValueError):
+        strength = 0
+    if strength < GOM_SENTIMENT_CONFLICT_MIN_GLOBAL_STRENGTH:
+        return 0
+    d = str(record.get("tf_global_dir") or "NEUT").upper()
+    if d in ("BUY", "BULL", "LONG"):
+        return 1
+    if d in ("SELL", "BEAR", "SHORT"):
+        return -1
+    return 0
+
+
+def _gom_apply_direction_conflict_veto(record: dict) -> None:
+    """FIX-02 : si la prédiction et l'état global du marché s'opposent clairement
+    (contradiction prédiction/sentiment), on met le verdict à WAIT et on abaisse
+    la cohérence — l'EA bloque alors toute entrée via son gate de cohérence."""
+    try:
+        vn = int(record.get("verdict_num") or 0)
+        if vn == 0:
+            return
+        p_sign = _gom_prediction_sign(record)
+        m_sign = _gom_market_dir_sign(record)
+        if p_sign == 0 or m_sign == 0 or p_sign == m_sign:
+            return
+        prev_vn = vn
+        record["verdict_num"] = 0
+        record["verdict"] = "WAIT"
+        record["direction_conflict"] = True
+        record["verdict_zero_hint"] = "sentiment_conflict_prediction"
+        try:
+            coh = float(record.get("coherence_pct") or 0)
+            record["coherence_pct"] = min(coh, 32.0)
+        except (TypeError, ValueError):
+            record["coherence_pct"] = 32.0
+        sym = record.get("symbol") or record.get("_symbol") or "?"
+        logger.warning(
+            f"[GOM-VETO] {sym}: prédiction (pred_net={p_sign:+d}) vs sentiment/global "
+            f"(tf_global_dir={record.get('tf_global_dir')} "
+            f"str={record.get('tf_global_strength')}) contradictoires → "
+            f"vn {prev_vn} → WAIT, coherence ↓ {record.get('coherence_pct')}%"
+        )
+    except Exception as e:
+        logger.error(f"[GOM-VETO] exception: {e}")
 
 
 def _enrich_gom_record_reliability(sym: str, record: dict) -> None:
@@ -28052,7 +29004,38 @@ def _maybe_promote_gom_to_pending_order(sym: str, record: dict) -> None:
 
     vnum = int(record.get("verdict_num") or 0)
     _is_good_perfect = abs(vnum) >= 2
-    _skip_gates = os.getenv("GOM_AUTO_SKIP_GATES_FOR_GOOD_PERFECT", "false").lower() in ("1", "true", "yes")
+
+    # Trading automatique autorisé quand verdict GOOD/PERFECT ET tendances
+    # M1 + M5 alignées sur la même direction (l'IA status/coherence n'entre
+    # plus dans cette décision — voir gate coherence retiré plus bas).
+    _direction_probe = "BUY" if vnum > 0 else ("SELL" if vnum < 0 else "")
+    _m1_dir_probe = str(record.get("tf_m1_dir") or "").upper()
+    _m5_dir_probe = str(record.get("tf_m5_dir") or "").upper()
+    _m1m5_aligned = (
+        _direction_probe == "BUY"
+        and _m1_dir_probe in ("BULL", "BUY")
+        and _m5_dir_probe in ("BULL", "BUY")
+    ) or (
+        _direction_probe == "SELL"
+        and _m1_dir_probe in ("BEAR", "SELL")
+        and _m5_dir_probe in ("BEAR", "SELL")
+    )
+    _auto_trading_authorized = os.getenv("GOM_AUTO_TRADING_ENABLED", "true").lower() in ("1", "true", "yes")
+    _skip_gates = _auto_trading_authorized and _is_good_perfect and _m1m5_aligned
+    if _is_good_perfect and not _m1m5_aligned:
+        logger.info(
+            f"[GomAutoTrade] {sym} — GOOD/PERFECT ({vnum}) mais M1={_m1_dir_probe}/M5={_m5_dir_probe} "
+            f"non alignés sur {_direction_probe} → gates normaux appliqués (pas d'auto-trade prioritaire)"
+        )
+
+    # Contrat d'exécution : un verdict SIMPLE ne doit jamais être promu en
+    # GOOD via l'écart de scores ci-dessous. Seul le verdict calculé comme
+    # GOOD/PERFECT peut créer un pending-order automatique.
+    if abs(vnum) < MIN_GOM_VERDICT_NUM_ABS:
+        logger.info(
+            f"[GomAutoTrade] {sym} — vn={vnum} SIMPLE/WAIT → aucune promotion automatique"
+        )
+        return
 
     if not _skip_gates or not _is_good_perfect:
         # Gate Weltrade — hors fenêtre 04h-16h UTC : aucune promotion possible
@@ -28074,7 +29057,7 @@ def _maybe_promote_gom_to_pending_order(sym: str, record: dict) -> None:
                 logger.info(f"[GomAutoTrade] {sym} — correction_entry_safe=False → skip")
                 return
     else:
-        logger.info(f"[GomAutoTrade] {sym} — GOOD/PERFECT ({vnum}) → gates skipped (GOM_AUTO_SKIP_GATES_FOR_GOOD_PERFECT=true)")
+        logger.info(f"[GomAutoTrade] {sym} — GOOD/PERFECT ({vnum}) + M1/M5 alignés ({_direction_probe}) → auto-trading autorisé, gates secondaires ignorés")
 
     buy = float(record.get("score_buy") or 0)
     sell = float(record.get("score_sell") or 0)
@@ -28113,15 +29096,10 @@ def _maybe_promote_gom_to_pending_order(sym: str, record: dict) -> None:
 
     quality = float(record.get("entry_quality") or 0)
     coherence = float(record.get("coherence_pct") or 0)
-    min_q = float(os.getenv("GOM_AUTO_MIN_QUALITY", "35"))
-    # IA status gate : coherence_pct doit être >= 70% pour tout trade auto-promu
-    min_c = float(os.getenv("GOM_AUTO_MIN_COHERENCE", "70"))
-    if not _skip_gates or not _is_good_perfect:
-        if quality < min_q or (coherence > 0 and coherence < min_c):
-            logger.info(f"[GomAutoTrade] {sym} — IA status gate: coherence={coherence:.0f}% < {min_c:.0f}% → skip")
-            return
-    else:
-        logger.info(f"[GomAutoTrade] {sym} — GOOD/PERFECT ({vnum}) → quality/coherence gate skipped")
+    # IA status retiré du calcul du verdict GOM (2026-09-27) : coherence_pct
+    # n'est plus utilisé pour bloquer la promotion auto-trade. Seules les
+    # variables ci-dessus (quality/coherence) restent conservées pour le log
+    # informatif plus bas — elles ne conditionnent plus aucun "return".
 
     # Gate MTF : H4+H1+M15 doivent confirmer la direction avant auto-promotion
     _direction = "BUY" if vnum > 0 else "SELL"
@@ -28495,6 +29473,28 @@ async def get_gom_verdict(
     """Retourne le verdict GOM — connecteur TV en priorité (source=tv|auto)."""
     sym = _resolve_symbol(symbol)
 
+    # Fast path EA: store poller uniquement (évite le recalcul live 4s+ / timeouts WebRequest).
+    src_l = (source or "").lower()
+    if src_l in ("poller", "store", "cache", "mt5"):
+        stored = _lookup_gom_store(sym, _GOM_VERDICT_STORE)
+        if stored:
+            age = _gom_record_age_sec(stored)
+            max_age = _gom_verdict_max_age_sec()
+            if age is None or age <= max_age:
+                payload = dict(stored)
+                payload["ok"] = True
+                payload["symbol"] = sym
+                payload["data_source"] = "poller_store"
+                return _gom_family_guard_response(sym, payload, for_execution=True)
+        return {
+            "ok": False,
+            "symbol": sym,
+            "verdict": "WAIT",
+            "verdict_num": 0,
+            "message": "poller_store_empty",
+            "data_source": "poller_store",
+        }
+
     # Gate Weltrade — hors fenêtre 00h-16h UTC → retourner WAIT pour bloquer l'EA
     wt_ok, wt_reason = _check_weltrade_hour_gate(sym)
     if not wt_ok:
@@ -28605,11 +29605,11 @@ async def get_gom_verdict(
         return {"ok": False, "symbol": sym, "verdict": "WAIT",
                 "message": "GOM stale — is gom_verdict_poller running?"}
     # Fraîcheur déjà garantie par la sélection des fallbacks ci-dessus
-    # (GOM_VERDICT_MAX_AGE_SEC, défaut 900s) — pas de verdict undaté ici.
+    # (GOM_VERDICT_MAX_AGE_SEC, défaut 15s) — pas de verdict undaté ici.
     flat = _build_gom_mt5_payload(verdict)
     return _gom_family_guard_response(sym, {"ok": True, "symbol": sym, **flat}, for_execution=True)
 
-def _calculate_gom_verdict(score_buy: float, score_sell: float, coherence: float = 0, filter_ratio: float = 0) -> tuple:
+def _calculate_gom_verdict(score_buy: float, score_sell: float, coherence: float = 0, filter_ratio: float = 0, record: dict = None) -> tuple:
     """
     Calcule le verdict GOM basé sur les scores.
     Retourne: (verdict_num, verdict_string)
@@ -28623,11 +29623,26 @@ def _calculate_gom_verdict(score_buy: float, score_sell: float, coherence: float
      -2 = GOOD SELL
      -3 = PERFECT SELL
     """
-    gap = abs(score_buy - score_sell)
+    # FIX 2026-09-25 : plus de veto absolu sur la coherence.
+    # Ce fallback dupliquait l'ancien gate "coherence<0.40 ET filter_ratio<0.40
+    # -> WAIT" qui annulait meme un gap de 20 points. On delegue a la meme
+    # autorite que le calculateur principal (GOMVerdictCalculatorV2) pour que
+    # les deux chemins ne puissent plus diverger.
+    if _gom_verdict_calc is not None:
+        # record reel si fourni (indicateurs disponibles) sinon enveloppe minimale
+        _rec = record if isinstance(record, dict) else {}
+        _rec.setdefault("coherence_pct", (coherence or 0) * 100.0)
+        _rec.setdefault("filter_ratio", filter_ratio or 0)
+        # Meme plancher de stabilite que gom_pine_calculator.enrich_record, pour
+        # que le fallback ne diverge pas sur les familles Boom/Crash.
+        _min_gap = float(_rec.get("bc_stability_applied") or 0.0)
+        vn = _gom_verdict_calc.calculate_verdict_num(
+            score_buy, score_sell, bool(coherence or 0),
+            abs(score_buy - score_sell), _rec, _min_gap
+        )
+        return (int(vn), _gom_verdict_calc.calculate_verdict_text(int(vn)))
 
-    # Gating: coherence et filter_ratio doivent être >= 0.40 pour un signal
-    if coherence is None or filter_ratio is None or (coherence < 0.40 and filter_ratio < 0.40):
-        return (0, "WAIT")
+    gap = abs(score_buy - score_sell)
 
     # Classification par gap
     if gap < 1.2:
@@ -28670,7 +29685,7 @@ async def get_all_gom_verdicts():
                 verdict_str = record.get("verdict", "WAIT")
             else:
                 coherence = coherence_raw / 100.0 if coherence_raw > 1.0 else coherence_raw
-                vn, verdict_str = _calculate_gom_verdict(score_buy, score_sell, coherence, filter_ratio)
+                vn, verdict_str = _calculate_gom_verdict(score_buy, score_sell, coherence, filter_ratio, record)
                 # Si le record a un verdict texte explicite mais vn=0 (ex: données file sans scores)
                 # faire confiance au texte stocké et reconstruire le vn
                 stored_verdict = (record.get("verdict") or "WAIT").upper()
@@ -28683,6 +29698,7 @@ async def get_all_gom_verdicts():
                     elif "GOOD SELL" in stored_verdict: vn = -2
                     elif stored_verdict == "SELL": vn = -1
 
+            entry_allowed = abs(vn) >= MIN_GOM_VERDICT_NUM_ABS
             entry = float(record.get("entry") or record.get("close") or record.get("price") or 0)
             sl = float(record.get("sl") or record.get("setup_sl") or 0)
             tp = float(record.get("tp") or record.get("setup_tp1") or 0)
@@ -28695,6 +29711,11 @@ async def get_all_gom_verdicts():
                 "symbol": symbol,
                 "verdict_num": vn,
                 "verdict": verdict_str,
+                "entry_allowed": entry_allowed,
+                "entry_block_reason": (
+                    "SIMPLE/WAIT : GOOD/PERFECT requis"
+                    if not entry_allowed else ""
+                ),
                 "score_buy": score_buy,
                 "score_sell": score_sell,
                 "verdict_gap": abs(score_buy - score_sell),
@@ -29438,7 +30459,10 @@ def _psychobot_send(message: str, phone: Optional[str] = None) -> bool:
 
 def _broker_label_for_symbol(sym: str) -> str:
     su = (sym or "").upper().replace(" ", "")
-    if any(p in su for p in ("PAINX", "GAINX", "FLIPX", "SWITCHX", "FXVOL", "SFVVOL", "SFXVOL")):
+    if any(p in su for p in (
+        "PAINX", "GAINX", "FLIPX", "SWITCHX", "PLUSX", "FIBOX", "QUADX",
+        "RANGEX", "FXVOL", "SFVVOL", "SFXVOL",
+    )):
         return "Weltrade"
     if any(p in su for p in ("BOOM", "CRASH", "VOLATILITY", "JUMP", "STEP", "RANGE")):
         return "Deriv"
@@ -29779,6 +30803,7 @@ async def wa_reports_send_now():
     return {"ok": ok1 or ok2, "account_sent": ok1, "verdicts_sent": ok2}
 
 
+@app.post("/notify-whatsapp")
 @app.post("/notify/whatsapp")
 async def notify_whatsapp(req: WaNotifyRequest):
     """MT5 envoie ici les événements trading spéciaux → PsychoBot WhatsApp."""
@@ -30946,6 +31971,79 @@ async def post_circuit_breaker_reset(symbol: str = Query('')):
 
 
 # ──────────────────────────────────────────────────────────────────────
+
+# ──────────────────────────────────────────────────────────────────────
+# CHARTIST PATTERNS — figures Marker Maker (Triangle, Fib50, SMC, RSI…)
+# ──────────────────────────────────────────────────────────────────────
+try:
+    from chartist_patterns import (
+        analyze_symbol_candles,
+        detect_all_patterns,
+        df_from_candles,
+        native_direction_for_symbol,
+        ChartistOrder,
+    )
+    CHARTIST_AVAILABLE = True
+    logger.info("✅ Chartist Patterns module chargé")
+except ImportError as _ch_err:
+    try:
+        import sys as _sys
+        from pathlib import Path as _P
+        _sys.path.insert(0, str(_P(__file__).resolve().parent))
+        _sys.path.insert(0, "/home/workdir/artifacts")
+        from chartist_patterns import (
+            analyze_symbol_candles,
+            detect_all_patterns,
+            df_from_candles,
+            native_direction_for_symbol,
+            ChartistOrder,
+        )
+        CHARTIST_AVAILABLE = True
+        logger.info("✅ Chartist Patterns module chargé (artifacts path)")
+    except Exception as _ch_err2:
+        CHARTIST_AVAILABLE = False
+        analyze_symbol_candles = None  # type: ignore
+        logger.warning(f"⚠️ Chartist Patterns non disponible: {_ch_err} | {_ch_err2}")
+
+_CHARTIST_ORDERS: Dict[str, Dict[str, Any]] = {}
+_CHARTIST_LOCK = asyncio.Lock()
+
+# ── CONTRE-TENDANCE (recouvrement de perte exceptionnel) ──────────────────
+# Séparé de _CHARTIST_ORDERS pour ne jamais se mélanger aux ordres normaux.
+# Garde-fous CÔTÉ SERVEUR en plus de ceux côté EA : ce n'est pas systématique,
+# donc on impose ici aussi un cooldown + un quota journalier par symbole.
+_CHARTIST_CT_ORDERS: Dict[str, Dict[str, Any]] = {}
+_CHARTIST_CT_LAST_OFFERED: Dict[str, datetime] = {}   # dernier moment où on a "armé" un ordre CT pour ce symbole
+_CHARTIST_CT_COUNT_TODAY: Dict[str, Any] = {}         # sym -> {"date": date, "count": int}
+_CHARTIST_CT_COOLDOWN_SEC = 4 * 3600     # min 4h entre deux offres CT sur le même symbole
+_CHARTIST_CT_MAX_PER_DAY = 1             # au plus 1 offre CT / symbole / jour (exceptionnel, pas systématique)
+
+
+def _chartist_ct_allowed(sym_key: str) -> bool:
+    """Garde-fou serveur : cooldown + quota journalier par symbole avant
+    d'accepter d'armer un NOUVEL ordre contre-tendance. Ne bloque pas la
+    détection elle-même, seulement l'exposition à l'EA via l'endpoint dédié."""
+    now = datetime.now(timezone.utc)
+    last = _CHARTIST_CT_LAST_OFFERED.get(sym_key)
+    if last is not None and (now - last).total_seconds() < _CHARTIST_CT_COOLDOWN_SEC:
+        return False
+    today = now.date()
+    rec = _CHARTIST_CT_COUNT_TODAY.get(sym_key)
+    if rec and rec.get("date") == today and rec.get("count", 0) >= _CHARTIST_CT_MAX_PER_DAY:
+        return False
+    return True
+
+
+def _chartist_ct_mark_offered(sym_key: str) -> None:
+    now = datetime.now(timezone.utc)
+    _CHARTIST_CT_LAST_OFFERED[sym_key] = now
+    today = now.date()
+    rec = _CHARTIST_CT_COUNT_TODAY.get(sym_key)
+    if rec and rec.get("date") == today:
+        rec["count"] = rec.get("count", 0) + 1
+    else:
+        _CHARTIST_CT_COUNT_TODAY[sym_key] = {"date": today, "count": 1}
+
 # FVG SPIKE DETECTOR — Confluence M5+M1 pour Boom/Crash/GAINX/PAINX
 # ──────────────────────────────────────────────────────────────────────
 try:
@@ -31370,6 +32468,167 @@ async def _spike_chain_push_alert(alert_dict: dict):
             dead.append(ws)
     for ws in dead:
         _SPIKE_CHAIN_WS_CLIENTS.remove(ws)
+
+
+
+
+# ──────────────────────────────────────────────────────────────────────
+# CHARTIST — Endpoints EA (detect + order ready)
+# ──────────────────────────────────────────────────────────────────────
+
+@app.post("/chartist/detect/{symbol}")
+async def chartist_detect(symbol: str, payload: dict = Body(default={})):
+    """
+    Détecte les figures chartistes à partir des bougies envoyées par l'EA.
+    Payload: { candles: [{open,high,low,close,volume}, ...] }  (M1 ou M5, >=40)
+    """
+    sym = symbol.strip()
+    if not CHARTIST_AVAILABLE or analyze_symbol_candles is None:
+        raise HTTPException(503, "Chartist module non disponible")
+    candles = payload.get("candles") or payload.get("rates") or []
+    if not candles and payload.get("m1"):
+        candles = payload.get("m1")
+    result = analyze_symbol_candles(sym, candles)
+    # Store best confirmed order for EA poll
+    best = result.get("best")
+    if best and best.get("confirmed", True):
+        async with _CHARTIST_LOCK:
+            key = sym.upper().replace(" ", "%20") if False else sym
+            _CHARTIST_ORDERS[sym] = {
+                **best,
+                "status": "ready",
+                "symbol": sym,
+            }
+            # also store normalized key
+            _CHARTIST_ORDERS[sym.upper()] = _CHARTIST_ORDERS[sym]
+        result["order_stored"] = True
+    else:
+        result["order_stored"] = False
+
+    # ── CONTRE-TENDANCE (recouvrement de perte exceptionnel) ──────────────
+    # Séparé de _CHARTIST_ORDERS. Armé UNIQUEMENT si le garde-fou serveur
+    # (cooldown + quota journalier) l'autorise — "pas systématique".
+    ct_best = result.get("best_counter_trend")
+    result["counter_trend_stored"] = False
+    if ct_best:
+        sym_key = sym.upper()
+        if _chartist_ct_allowed(sym_key):
+            async with _CHARTIST_LOCK:
+                _CHARTIST_CT_ORDERS[sym] = {**ct_best, "status": "ready", "symbol": sym}
+                _CHARTIST_CT_ORDERS[sym_key] = _CHARTIST_CT_ORDERS[sym]
+            _chartist_ct_mark_offered(sym_key)
+            result["counter_trend_stored"] = True
+            logger.info(
+                f"[CHARTIST-CT] Ordre contre-tendance armé pour {sym} | "
+                f"pattern={ct_best.get('pattern')} dir={ct_best.get('direction')} "
+                f"score={ct_best.get('score')}"
+            )
+        else:
+            logger.debug(f"[CHARTIST-CT] Figure contre-tendance détectée pour {sym} mais cooldown/quota actif — ignorée")
+
+    return result
+
+
+@app.get("/chartist/order/{symbol}")
+async def chartist_get_order(symbol: str):
+    """EA poll: récupère l'ordre chartiste prêt."""
+    sym = symbol.strip()
+    order = _CHARTIST_ORDERS.get(sym) or _CHARTIST_ORDERS.get(sym.upper())
+    if not order or order.get("status") != "ready":
+        return {"ok": False, "symbol": sym, "order": None, "message": "Aucun ordre chartiste prêt"}
+    return {"ok": True, "symbol": sym, "order": order}
+
+
+@app.post("/chartist/order/{symbol}/executed")
+async def chartist_order_executed(symbol: str, payload: dict = Body(default={})):
+    """EA marque l'ordre comme exécuté."""
+    sym = symbol.strip()
+    async with _CHARTIST_LOCK:
+        _CHARTIST_ORDERS.pop(sym, None)
+        _CHARTIST_ORDERS.pop(sym.upper(), None)
+    logger.info(f"[CHARTIST] Ordre {sym} exécuté ticket={payload.get('mt5_ticket', 'N/A')}")
+    return {"ok": True, "symbol": sym}
+
+
+@app.get("/chartist/counter_trend/{symbol}")
+async def chartist_get_counter_trend_order(symbol: str):
+    """EA poll: récupère l'ordre CONTRE-TENDANCE prêt (recouvrement de perte
+    exceptionnel), s'il y en a un actuellement armé pour ce symbole.
+    Distinct de /chartist/order — ne jamais mélanger les deux côté EA."""
+    sym = symbol.strip()
+    order = _CHARTIST_CT_ORDERS.get(sym) or _CHARTIST_CT_ORDERS.get(sym.upper())
+    if not order or order.get("status") != "ready":
+        return {"ok": False, "symbol": sym, "order": None, "message": "Aucun ordre contre-tendance armé"}
+    return {"ok": True, "symbol": sym, "order": order}
+
+
+@app.post("/chartist/counter_trend/{symbol}/executed")
+async def chartist_counter_trend_executed(symbol: str, payload: dict = Body(default={})):
+    """EA marque l'ordre contre-tendance comme exécuté (ou écarté) — le retire
+    du store pour qu'il ne soit pas repris deux fois. Le cooldown/quota
+    journalier reste actif indépendamment de ce retrait."""
+    sym = symbol.strip()
+    async with _CHARTIST_LOCK:
+        _CHARTIST_CT_ORDERS.pop(sym, None)
+        _CHARTIST_CT_ORDERS.pop(sym.upper(), None)
+    logger.info(f"[CHARTIST-CT] Ordre contre-tendance {sym} exécuté ticket={payload.get('mt5_ticket', 'N/A')}")
+    return {"ok": True, "symbol": sym}
+
+
+@app.get("/chartist/status")
+async def chartist_status(symbol: str = Query("")):
+    return {
+        "ok": True,
+        "available": CHARTIST_AVAILABLE,
+        "ready_count": sum(1 for v in _CHARTIST_ORDERS.values() if v.get("status") == "ready"),
+        "symbols": list({k for k, v in _CHARTIST_ORDERS.items() if v.get("status") == "ready"}),
+        "symbol_order": (_CHARTIST_ORDERS.get(symbol) or _CHARTIST_ORDERS.get(symbol.upper())) if symbol else None,
+        "counter_trend_ready_count": sum(1 for v in _CHARTIST_CT_ORDERS.values() if v.get("status") == "ready"),
+        "counter_trend_symbols": list({k for k, v in _CHARTIST_CT_ORDERS.items() if v.get("status") == "ready"}),
+    }
+
+
+@app.post("/chartist/scan")
+async def chartist_scan_from_store(symbol: str = Query(...)):
+    """
+    Scan via bougies déjà uploadées / MT5 si dispo (sans payload EA).
+    """
+    if not CHARTIST_AVAILABLE:
+        raise HTTPException(503, "Chartist non disponible")
+    sym = symbol.strip()
+    candles = []
+    # try MT5
+    try:
+        if MT5_AVAILABLE and mt5_initialized:
+            rates = mt5.copy_rates_from_pos(sym, mt5.TIMEFRAME_M5, 0, 120)
+            if rates is not None and len(rates) > 40:
+                candles = [
+                    {"open": float(r["open"]), "high": float(r["high"]),
+                     "low": float(r["low"]), "close": float(r["close"]),
+                     "volume": float(r["tick_volume"])}
+                    for r in rates
+                ]
+    except Exception as e:
+        logger.debug(f"chartist MT5 fetch fail {sym}: {e}")
+    if not candles:
+        return {"ok": False, "symbol": sym, "message": "Pas de bougies — envoyer POST /chartist/detect/{symbol}"}
+    result = analyze_symbol_candles(sym, candles)
+    best = result.get("best")
+    if best:
+        async with _CHARTIST_LOCK:
+            _CHARTIST_ORDERS[sym] = {**best, "status": "ready", "symbol": sym}
+            _CHARTIST_ORDERS[sym.upper()] = _CHARTIST_ORDERS[sym]
+    ct_best = result.get("best_counter_trend")
+    result["counter_trend_stored"] = False
+    if ct_best:
+        sym_key = sym.upper()
+        if _chartist_ct_allowed(sym_key):
+            async with _CHARTIST_LOCK:
+                _CHARTIST_CT_ORDERS[sym] = {**ct_best, "status": "ready", "symbol": sym}
+                _CHARTIST_CT_ORDERS[sym_key] = _CHARTIST_CT_ORDERS[sym]
+            _chartist_ct_mark_offered(sym_key)
+            result["counter_trend_stored"] = True
+    return result
 
 
 if __name__ == "__main__":
