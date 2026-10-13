@@ -32671,7 +32671,6 @@ if __name__ == "__main__":
             app,
             host=HOST,
             port=API_PORT,
-            loop="selector_loop:selector_loop_factory",  # Selector au lieu du Proactor uvicorn 0.46 (fix listener mort WinError 64)
             reload=False,
             log_level="info",
             timeout_keep_alive=5,  # libérer les connexions idle plus vite
