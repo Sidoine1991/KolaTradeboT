@@ -4347,13 +4347,13 @@ mistral_client = None
 GEMINI_AVAILABLE = False
 gemini_model = None
 
-# Alpha Vantage API pour analyse fondamentale
-ALPHAVANTAGE_API_KEY = os.getenv("ALPHAVANTAGE_API_KEY", "IU9I5J595Q5LO61B")
+# Alpha Vantage API pour analyse fondamentale - REQUIRED from env, no hardcoded default
+ALPHAVANTAGE_API_KEY = os.getenv("ALPHAVANTAGE_API_KEY")
 ALPHAVANTAGE_AVAILABLE = bool(ALPHAVANTAGE_API_KEY)
 if ALPHAVANTAGE_AVAILABLE:
     logger.info("Alpha Vantage API disponible pour analyse fondamentale")
 else:
-    logger.info("Alpha Vantage API: Non configuré (ALPHAVANTAGE_API_KEY manquant)")
+    logger.warning("Alpha Vantage API: Non configuré - définir ALPHAVANTAGE_API_KEY dans l'environnement")
 
 # Deriv API WebSocket pour données de marché (fallback)
 DERIV_APP_ID = os.getenv("DERIV_APP_ID", "1089")  # 1089 = test app_id
@@ -4692,13 +4692,44 @@ app.add_exception_handler(RateLimitExceeded, lambda req, exc: JSONResponse(
     content={"detail": "Too many requests - rate limit exceeded (10/minute)"}
 ))
 
-# Configuration CORS pour permettre les requêtes depuis MT5
+# Authentication middleware for trading endpoints
+@app.middleware("http")
+async def auth_middleware(request: Request, call_next):
+    # Skip auth for health check and documentation endpoints
+    if request.url.path in ["/health", "/docs", "/redoc", "/openapi.json"]:
+        return await call_next(request)
+
+    # Require API key for trading-critical endpoints
+    trading_endpoints = ["/decision", "/gom-verdict", "/webhook", "/mt5/", "/trades/"]
+    is_trading_endpoint = any(request.url.path.startswith(endpoint) for endpoint in trading_endpoints)
+
+    if is_trading_endpoint:
+        api_key = request.headers.get("X-API-Key")
+        expected_api_key = os.getenv("AI_SERVER_API_KEY")
+
+        if not expected_api_key:
+            logger.warning("AI_SERVER_API_KEY not set in environment - allowing requests without auth (development mode)")
+        elif not api_key or api_key != expected_api_key:
+            logger.warning(f"Invalid or missing API key for {request.url.path} from {request.client.host}")
+            return JSONResponse(
+                status_code=401,
+                content={"detail": "Invalid or missing API key"}
+            )
+
+    return await call_next(request)
+
+# Configuration CORS pour permettre les requêtes depuis MT5 - restrict to known origins
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "http://localhost:8765",  # Local poller
+        "http://127.0.0.1:8765",  # Local poller alternative
+        "https://kolatradebot-7ofl.onrender.com",  # Render frontend
+        "https://tradbot-kolatradebot.vercel.app",  # Vercel frontend if used
+    ],
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization", "X-API-Key"],
 )
 
 # === Journal Advisor (v1.36/v1.37) : /journal/decision, /journal/manage, /journal/report ===
@@ -31637,7 +31668,7 @@ async def receive_pullback_alert(body: dict = Body(...)):
                     "message": message,
                     "source": "tradbot-pullback"
                 }
-                response = requests.post(psychobot_url, json=payload, timeout=10, verify=False)
+                response = requests.post(psychobot_url, json=payload, timeout=10)
                 return response.status_code == 200
 
             except Exception as e:
