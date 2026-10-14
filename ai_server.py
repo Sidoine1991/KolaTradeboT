@@ -43,7 +43,12 @@ if sys.platform.startswith("win"):
     socket.socket.shutdown = safe_shutdown
 
     import asyncio
-    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    import warnings
+    # Python 3.14+: set_event_loop_policy est déprécié — on garde Selector
+    # (évite les crashs IOCP WinError 64) sans polluer la console.
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
     # ── PATCH IOCP Proactor: catch WinError 64 in accept loop ──
     # OSError(64, 'Le nom réseau spécifié n'est plus disponible') happens when
@@ -115,6 +120,8 @@ if sys.platform.startswith("win"):
         _pl.getLogger("tradbot_ai").warning(
             "Could not patch IOCP proactor for WinError 64: %s (Selector policy active)", _patch_err
         )
+print("[ai_server] boot: imports…", flush=True)
+
 from dotenv import load_dotenv
 
 from uuid import uuid4
@@ -4263,36 +4270,37 @@ except Exception as e:
     logger.error(f"Erreur lors de la configuration des répertoires: {e}")
     raise
 
-try:
-    import torch
-    from transformers import AutoProcessor, AutoModelForImageTextToText, AutoModelForCausalLM
-    _skip_gemma = os.getenv("SKIP_GEMMA", "").lower() in ("1", "true", "yes")
-    if _skip_gemma:
-        print("Chargement Gemma ignoré (SKIP_GEMMA=1)")
-        GEMMA_AVAILABLE = False
-    elif os.path.exists(GEMMA_MODEL_PATH):
-        print(f"Chargement du modèle Gemma depuis {GEMMA_MODEL_PATH}...")
-        try:
-            # Chargement du processeur et du modèle en mode texte uniquement
-            gemma_processor = AutoProcessor.from_pretrained(GEMMA_MODEL_PATH)
-            gemma_model = AutoModelForCausalLM.from_pretrained(
-                GEMMA_MODEL_PATH,
-                torch_dtype=torch.float16,
-                load_in_8bit=True,
-                device_map="auto"
-            )
-            print("Modèle Gemma (Texte seul) chargé avec succès !")
-
-            GEMMA_AVAILABLE = True
-        except Exception as load_err:
-             print(f"Erreur interne chargement Gemma: {load_err}")
-             GEMMA_AVAILABLE = False
-    else:
-        print(f"Chemin du modèle introuvable: {GEMMA_MODEL_PATH}")
-        GEMMA_AVAILABLE = False
-except Exception as e:
-    print(f"Impossible de charger le modèle Gemma: {e}")
+# Gemma/torch: DÉSACTIVÉ par défaut.
+# Avant: import torch + transformers AVANT le check SKIP_GEMMA, et
+# exists(GEMMA_MODEL_PATH) était True car le dossier vide était créé par
+# safe_makedirs → hang silencieux de plusieurs minutes au boot.
+# Activer explicitement: SKIP_GEMMA=0 (+ vrai modèle dans GEMMA_MODEL_PATH).
+_skip_gemma = os.getenv("SKIP_GEMMA", "1").lower() in ("1", "true", "yes")
+_gemma_cfg = os.path.join(GEMMA_MODEL_PATH, "config.json") if GEMMA_MODEL_PATH else ""
+if _skip_gemma:
+    print("Chargement Gemma ignoré (SKIP_GEMMA=1, défaut)", flush=True)
     GEMMA_AVAILABLE = False
+elif not _gemma_cfg or not os.path.isfile(_gemma_cfg):
+    print(f"Gemma skip: pas de config.json dans {GEMMA_MODEL_PATH}", flush=True)
+    GEMMA_AVAILABLE = False
+else:
+    try:
+        print(f"Import torch/transformers pour Gemma…", flush=True)
+        import torch
+        from transformers import AutoProcessor, AutoModelForCausalLM
+        print(f"Chargement du modèle Gemma depuis {GEMMA_MODEL_PATH}...", flush=True)
+        gemma_processor = AutoProcessor.from_pretrained(GEMMA_MODEL_PATH)
+        gemma_model = AutoModelForCausalLM.from_pretrained(
+            GEMMA_MODEL_PATH,
+            torch_dtype=torch.float16,
+            load_in_8bit=True,
+            device_map="auto",
+        )
+        print("Modèle Gemma (Texte seul) chargé avec succès !", flush=True)
+        GEMMA_AVAILABLE = True
+    except Exception as e:
+        print(f"Impossible de charger le modèle Gemma: {e}", flush=True)
+        GEMMA_AVAILABLE = False
 
 
 # Configuration du logging avec rotation (max 50MB par fichier, 5 fichiers max)
@@ -7333,24 +7341,40 @@ def validate_prediction_with_realtime_data(
 # Charger l'historique au démarrage
 load_prediction_history()
 
-# Initialisation MT5 si disponible
+# Initialisation MT5 au boot — DÉSACTIVÉE par défaut.
+# mt5.initialize() bloque souvent 30s–∞ quand le terminal est déjà pris
+# (poller / charts), et le serveur paraît "coincé" après les warnings asyncio.
+# Les bougies arrivent via POST /mt5/upload-candles. Pour forcer l'init:
+#   set AI_ENABLE_MT5_INIT=1
 mt5_initialized = False
-if MT5_AVAILABLE:
+_enable_mt5_init = os.getenv("AI_ENABLE_MT5_INIT", "").lower() in ("1", "true", "yes")
+if MT5_AVAILABLE and _enable_mt5_init:
     try:
-        mt5_login = int(os.getenv('MT5_LOGIN', 0))
+        mt5_login = int(os.getenv('MT5_LOGIN', 0) or 0)
         mt5_password = os.getenv('MT5_PASSWORD', '')
         mt5_server = os.getenv('MT5_SERVER', '')
-        
+        _mt5_timeout = int(os.getenv("AI_MT5_INIT_TIMEOUT_MS", "8000"))
+
         if mt5_login and mt5_password and mt5_server:
-            if mt5.initialize(login=mt5_login, password=mt5_password, server=mt5_server, timeout=30000):
+            logger.info("MT5 init boot (timeout=%sms)…", _mt5_timeout)
+            if mt5.initialize(
+                login=mt5_login,
+                password=mt5_password,
+                server=mt5_server,
+                timeout=_mt5_timeout,
+            ):
                 mt5_initialized = True
                 logger.info("MT5 initialisé avec succès")
             else:
-                logger.warning("Échec de l'initialisation MT5")
+                logger.warning("Échec de l'initialisation MT5 (continue sans MT5 local)")
         else:
             logger.info("MT5: Non configuré (variables d'environnement manquantes)")
     except Exception as e:
         logger.error(f"Erreur lors de l'initialisation MT5: {e}")
+elif MT5_AVAILABLE:
+    logger.info(
+        "MT5 init boot ignoré (AI_ENABLE_MT5_INIT!=1) — candles via upload API"
+    )
 
 # Initialisation des prédicteurs ML si disponibles (classes peuvent être None sur Render/Linux)
 ml_predictor = None
