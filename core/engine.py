@@ -35,7 +35,7 @@ from .risk_manager import RiskManager, RiskLevel
 from .notification import NotificationManager, Notification, EventType
 from .exceptions import OrderError, InvalidStopsError, PositionLimitError
 
-logger = logging.getLogger("tradbot.engine")
+logger = logging.getLogger("tradbot-engine")
 
 
 @dataclass
@@ -76,6 +76,11 @@ class EngineConfig:
     trailing_activation_pips: float = 5.0   # Profit mini (pips) pour activer le trailing
     trailing_distance_pips: float = 3.0     # Distance SL sous le prix courant (pips)
     trailing_step_pips: float = 1.0         # Pas min de déplacement du SL (pips)
+    # Dow block management
+    dow_blocking_enabled: bool = True      # Activer le bloc Dow (GOOD/PERFECT only)
+    dow_blocking_threshold_pips: float = 80.0  # Maximum 80 pips of DOW offset allowed
+    dow_blocking_threshold_coherence: float = 70.0  # Coherence min for DOW block bypass (%
+    dow_blocking_strict_entry: bool = True  # Only allow GOOD/PERFECT when DOW block active
 
 
 class TradingEngine:
@@ -123,7 +128,6 @@ class TradingEngine:
         self._stop_event.clear()
         self._thread = threading.Thread(target=self._loop, daemon=True,
                                         name="tradbot-engine")
-        self._thread.start()
         self._running = True
         logger.info(f"🚀 TradBOT Engine started (interval={self.config.scan_interval}s)")
 
@@ -131,7 +135,7 @@ class TradingEngine:
         """Arrête le moteur."""
         self._stop_event.set()
         self._running = False
-        logger.info("🛑 TradBOT Engine stopped")
+        logger.info("[STOP] TradBOT Engine stopped")
 
     def run_once(self) -> Dict:
         """Exécute un cycle complet de trading. Retourne le rapport."""
@@ -204,6 +208,12 @@ class TradingEngine:
                     "activation_pips": self.config.trailing_activation_pips,
                     "distance_pips": self.config.trailing_distance_pips,
                     "step_pips": self.config.trailing_step_pips,
+                },
+                "dow_blocking": {
+                    "enabled": self.config.dow_blocking_enabled,
+                    "threshold_pips": self.config.dow_blocking_threshold_pips,
+                    "threshold_coherence": self.config.dow_blocking_threshold_coherence,
+                    "strict_entry": self.config.dow_blocking_strict_entry,
                 },
             },
             "risk": self.risk_manager.get_status(),
@@ -291,7 +301,7 @@ class TradingEngine:
                 self.notifier.send_whatsapp(
                     f"⛔ Trade bloqué {sig.symbol}",
                     reason,
-                    EventType.RISK_WARNING, sig.symbol, priority=1
+                    EventType.RISK_[WARNING], sig.symbol, priority=1
                 )
                 continue
 
