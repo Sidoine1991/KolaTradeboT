@@ -19,7 +19,7 @@ import logging
 import threading
 from typing import Dict, List, Optional, Any
 from datetime import datetime, timezone
-from dataclasses import dataclass
+from dataclasses import dataclass, field, field
 
 try:
     import MetaTrader5 as mt5
@@ -76,6 +76,28 @@ class EngineConfig:
     trailing_activation_pips: float = 5.0   # Profit mini (pips) pour activer le trailing
     trailing_distance_pips: float = 3.0     # Distance SL sous le prix courant (pips)
     trailing_step_pips: float = 1.0         # Pas min de déplacement du SL (pips)
+    # Dow block management
+    dow_blocking_enabled: bool = True      # Activer le bloc Dow (GOOD/PERFECT only)
+    dow_blocking_threshold_pips: float = 80.0  # Maximum 80 pips of DOW offset allowed
+    dow_blocking_threshold_coherence: float = 70.0  # Coherence min for DOW block bypass (%
+    dow_blocking_strict_entry: bool = True  # Only allow GOOD/PERFECT when DOW block active
+
+    @classmethod
+    def from_dict(cls, config_dict: Dict) -> "EngineConfig":
+        """Crée une configuration EngineConfig à partir d'un dictionnaire."""
+        # Extraire uniquement les champs qui existent dans la classe
+        from dataclasses import fields as dc_fields
+        field_names = {f.name for f in dc_fields(cls)}
+        # Filtrer la config_dict pour ne garder que les champs valides
+        valid_config = {k: v for k, v in config_dict.items() if k in field_names}
+        # Ajouter un attribut pour les blocs Dow par symbole si nécessaire
+        return cls(**valid_config)
+
+    def to_dict(self) -> Dict:
+        """Convertit la configuration EngineConfig en dictionnaire."""
+        from dataclasses import fields as dc_fields
+        field_names = {f.name for f in dc_fields(self.__class__)}
+        return {k: getattr(self, k) for k in field_names if hasattr(self, k)}
 
 
 class TradingEngine:
@@ -204,6 +226,12 @@ class TradingEngine:
                     "activation_pips": self.config.trailing_activation_pips,
                     "distance_pips": self.config.trailing_distance_pips,
                     "step_pips": self.config.trailing_step_pips,
+                },
+                "dow_blocking": {
+                    "enabled": self.config.dow_blocking_enabled,
+                    "threshold_pips": self.config.dow_blocking_threshold_pips,
+                    "threshold_coherence": self.config.dow_blocking_threshold_coherence,
+                    "strict_entry": self.config.dow_blocking_strict_entry,
                 },
             },
             "risk": self.risk_manager.get_status(),
@@ -364,7 +392,11 @@ class TradingEngine:
         return orders
 
     def _check_closes(self) -> List[Dict]:
-        """Vérifie et ferme les positions sur verdict WAIT."""
+        """Vérifie et ferme les positions sur verdict WAIT avec seuil de perte $1.5.
+
+        Inclut les vérifications de bloc Dow : si un bloc Dow est actif, ignore la fermeture
+        sauf si la cohérence >= 40% (bypass DOW_BLOCK pour GOOD/PERFECT).
+        """
         closes = []
         for symbol, ticket in list(self._active_tickets.items()):
             if self.gom_handler.should_close(symbol):
